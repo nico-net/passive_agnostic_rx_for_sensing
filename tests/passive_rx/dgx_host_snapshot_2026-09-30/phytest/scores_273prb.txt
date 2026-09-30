@@ -1,0 +1,2 @@
+p273_r* sync@s first_acc@s conv@s ttc=NAs nconv=0 [] bank: LDPC: PDSCHQ:  cpu= rssKB=
+r4_r* sync@s first_acc@s conv@s ttc=NAs nconv=0 [] bank: LDPC: PDSCHQ:  cpu= rssKB=

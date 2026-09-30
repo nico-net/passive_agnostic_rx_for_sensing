@@ -1,0 +1,293 @@
+# DGX Spark environment dump, Wed Sep 30 09:07:38 PM UTC 2026
+
+$ uname -a
+Linux spark-74c3 7.0.0-1019-nvidia #19~24.04.2-Ubuntu SMP PREEMPT_DYNAMIC Sun Sep  6 18:35:11 UTC 2 aarch64 aarch64 aarch64 GNU/Linux
+
+$ cat /etc/os-release
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.5 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+$ cat /sys/class/dmi/id/product_name
+NVIDIA_DGX_Spark
+
+$ lscpu
+Architecture:                            aarch64
+CPU op-mode(s):                          64-bit
+Byte Order:                              Little Endian
+CPU(s):                                  20
+On-line CPU(s) list:                     0-19
+Vendor ID:                               ARM
+Model name:                              Cortex-X925
+Model:                                   1
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+Stepping:                                r0p1
+Frequency boost:                         disabled
+CPU(s) scaling MHz:                      100%
+CPU max MHz:                             3900.0000
+CPU min MHz:                             1378.0000
+BogoMIPS:                                2000.00
+Flags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svesha3 svesm4 flagm2 frint svei8mm svebf16 i8mm bf16 dgh bti ecv afp wfxt
+Model name:                              Cortex-A725
+Model:                                   1
+Thread(s) per core:                      1
+Core(s) per socket:                      10
+Socket(s):                               1
+Stepping:                                r0p1
+CPU(s) scaling MHz:                      100%
+CPU max MHz:                             2808.0000
+CPU min MHz:                             338.0000
+BogoMIPS:                                2000.00
+Flags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svesha3 svesm4 flagm2 frint svei8mm svebf16 i8mm bf16 dgh bti ecv afp wfxt
+L1d cache:                               1.3 MiB (20 instances)
+L1i cache:                               1.3 MiB (20 instances)
+L2 cache:                                25 MiB (20 instances)
+L3 cache:                                24 MiB (2 instances)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-19
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; CSV2, BHB
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+
+$ lscpu -e
+CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ    MINMHZ       MHZ
+  0    0      0    0 0:0:0:0          yes 2808.0000  338.0000 2808.0000
+  1    0      0    1 1:1:1:0          yes 2808.0000  338.0000 2808.0000
+  2    0      0    2 2:2:2:0          yes 2808.0000  338.0000 2808.0000
+  3    0      0    3 3:3:3:0          yes 2808.0000  338.0000 2808.0000
+  4    0      0    4 4:4:4:0          yes 2808.0000  338.0000 2808.0000
+  5    0      0    0 5:5:5:0          yes 3900.0000 1378.0000 3900.0000
+  6    0      0    1 6:6:6:0          yes 3900.0000 1378.0000 3900.0000
+  7    0      0    2 7:7:7:0          yes 3900.0000 1378.0000 3900.0000
+  8    0      0    3 8:8:8:0          yes 3900.0000 1378.0000 3900.0000
+  9    0      0    4 9:9:9:0          yes 3900.0000 1378.0000 3900.0000
+ 10    0      0    5 10:10:10:1       yes 2808.0000  338.0000 2808.0000
+ 11    0      0    6 11:11:11:1       yes 2808.0000  338.0000 2808.0000
+ 12    0      0    7 12:12:12:1       yes 2808.0000  338.0000 2808.0000
+ 13    0      0    8 13:13:13:1       yes 2808.0000  338.0000 2808.0000
+ 14    0      0    9 14:14:14:1       yes 2808.0000  338.0000 2808.0000
+ 15    0      0    5 15:15:15:1       yes 3900.0000 1378.0000 3900.0000
+ 16    0      0    6 16:16:16:1       yes 3900.0000 1378.0000 3900.0000
+ 17    0      0    7 17:17:17:1       yes 3900.0000 1378.0000 3900.0000
+ 18    0      0    8 18:18:18:1       yes 3900.0000 1378.0000 3900.0000
+ 19    0      0    9 19:19:19:1       yes 3900.0000 1378.0000 3900.0000
+
+$ free -h
+               total        used        free      shared  buff/cache   available
+Mem:           121Gi       4.8Gi        72Gi        24Mi        45Gi       116Gi
+Swap:           15Gi          0B        15Gi
+
+$ nproc
+20
+
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-7.0.0-1019-nvidia root=UUID=2690e490-026c-4e3f-bd06-e55488aac735 ro init_on_alloc=0 iommu.passthrough=0 console=tty0 plymouth.ignore-serial-consoles plymouth.use-simpledrm earlycon=uart,mmio32,0x16A00000 console=tty0 console=ttyS0,921600 crashkernel=1G-:0M quiet splash initcall_blacklist=tegra234_cbb_init kho=off pci=pcie_bus_safe vt.handoff=7
+
+$ ulimit -l
+unlimited
+
+$ ulimit -r
+0
+
+$ nvidia-smi
+Wed Sep 30 23:07:38 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0 Off |                  N/A |
+| N/A   49C    P8              3W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A          572067      G   /usr/lib/xorg/Xorg                       43MiB |
+|    0   N/A  N/A          572155      G   /usr/bin/gnome-shell                     17MiB |
++-----------------------------------------------------------------------------------------+
+
+$ nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA GB10, 580.178.04, [N/A], 12.1
+
+$ /usr/local/cuda/bin/nvcc --version
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+
+$ gcc --version
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+$ cmake --version
+cmake version 3.28.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+$ ninja --version
+1.11.1
+
+$ python3 --version
+Python 3.12.3
+
+$ git --version
+git version 2.43.0
+
+$ ccache --version
+ccache version 4.9.1
+Features: file-storage http-storage redis+unix-storage redis-storage
+
+Copyright (C) 2002-2007 Andrew Tridgell
+Copyright (C) 2009-2024 Joel Rosdahl and other contributors
+
+See <https://ccache.dev/credits.html> for a complete list of contributors.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; either version 3 of the License, or (at your option) any later
+version.
+
+$ ip -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+enP7s7           UP             10.79.1.144/23 fe80::627e:4b57:fdba:a4a9/64 
+enxfc1928615bb7  DOWN           
+wlP9s9           UP             10.169.147.130/20 fe80::e10f:84f6:9819:691d/64 
+tailscale0       UNKNOWN        100.127.193.86/32 fd7a:115c:a1e0::942e:c157/128 fe80::e436:3bbb:871c:f8f6/64 
+docker0          DOWN           172.17.0.1/16 fe80::c449:5cff:fef5:2625/64 
+e2               UP             192.168.73.1/24 fe80::f02e:aeff:feb6:ee83/64 
+oai-traffic      UP             192.168.72.129/26 fe80::3807:87ff:febb:b65f/64 
+oai-public       UP             192.168.71.129/26 fe80::acb3:8dff:fee3:859/64 
+veth3c889a1@if2  UP             fe80::e440:2dff:fef5:940c/64 
+vethfc0e02e@if2  UP             fe80::a428:abff:fecd:6d2d/64 
+veth43b8431@if2  UP             fe80::7c9a:8cff:fe21:7c18/64 
+veth986dcef@if2  UP             fe80::e009:55ff:fe69:53c6/64 
+veth3529846@if2  UP             fe80::50f2:f9ff:fefa:cc48/64 
+veth84d51a0@if3  UP             fe80::823:bfff:fea2:fb3c/64 
+veth1835e9e@if2  UP             fe80::2ca6:94ff:fea4:9da8/64 
+
+$ ip route
+default via 10.79.1.254 dev enP7s7 proto dhcp src 10.79.1.144 metric 100 
+default via 10.169.159.254 dev wlP9s9 proto dhcp src 10.169.147.130 metric 600 
+10.79.0.0/23 dev enP7s7 proto kernel scope link src 10.79.1.144 metric 100 
+10.169.144.0/20 dev wlP9s9 proto kernel scope link src 10.169.147.130 metric 600 
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown 
+192.168.71.128/26 dev oai-public proto kernel scope link src 192.168.71.129 
+192.168.72.128/26 dev oai-traffic proto kernel scope link src 192.168.72.129 
+192.168.73.0/24 dev e2 proto kernel scope link src 192.168.73.1 
+
+$ lspci
+0000:00:00.0 PCI bridge: NVIDIA Corporation Device 22ce (rev 01)
+0002:00:00.0 PCI bridge: NVIDIA Corporation Device 22ce (rev 01)
+0004:00:00.0 PCI bridge: NVIDIA Corporation Device 22ce (rev 01)
+0004:01:00.0 Non-Volatile memory controller: Samsung Electronics Co Ltd Device a810
+0007:00:00.0 PCI bridge: NVIDIA Corporation Device 22d0 (rev 01)
+0007:01:00.0 Ethernet controller: Realtek Semiconductor Co., Ltd. Device 8127 (rev 05)
+0009:00:00.0 PCI bridge: NVIDIA Corporation Device 22d0 (rev 01)
+0009:01:00.0 Network controller: MEDIATEK Corp. Device 7925
+000f:00:00.0 PCI bridge: NVIDIA Corporation Device 22d1
+000f:01:00.0 VGA compatible controller: NVIDIA Corporation Device 2e12 (rev a1)
+
+$ lsusb
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 003 Device 002: ID 05e3:0610 Genesys Logic, Inc. Hub
+Bus 003 Device 003: ID 05e3:0608 Genesys Logic, Inc. Hub
+Bus 003 Device 006: ID 0461:4d15 Primax Electronics, Ltd Dell Optical Mouse
+Bus 003 Device 009: ID 046d:c31d Logitech, Inc. Media Keyboard K200
+Bus 004 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 004 Device 002: ID 05e3:0626 Genesys Logic, Inc. Hub
+Bus 004 Device 003: ID 0bda:8153 Realtek Semiconductor Corp. RTL8153 Gigabit Ethernet Adapter
+Bus 005 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 006 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 007 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 008 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 009 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 010 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 011 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 011 Device 002: ID 13d3:3630 IMC Networks Wireless_Device
+Bus 012 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+
+$ uhd_config_info --version
+UHD 4.11.0.HEAD-0-g0d7ed3b1
+
+$ which -a uhd_find_devices uhd_usrp_probe
+/usr/local/bin/uhd_find_devices
+/usr/local/bin/uhd_usrp_probe
+
+$ uhd_find_devices
+[INFO] [UHD] linux; GNU C++ version 13.3.0; Boost_108300; UHD_4.11.0.HEAD-0-g0d7ed3b1
+No UHD Devices Found
+
+$ journalctl -k -b | grep mlx5 (ConnectX-7 probe/teardown)
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0000:01:00.0: firmware version: 28.45.4028
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0000:01:00.0: 126.028 Gb/s available PCIe bandwidth (32.0 GT/s PCIe x4 link)
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0000:01:00.1: firmware version: 28.45.4028
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0000:01:00.1: 126.028 Gb/s available PCIe bandwidth (32.0 GT/s PCIe x4 link)
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0002:01:00.0: firmware version: 28.45.4028
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0002:01:00.0: 126.028 Gb/s available PCIe bandwidth (32.0 GT/s PCIe x4 link)
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0002:01:00.1: firmware version: 28.45.4028
+Sep 30 15:19:18 spark-74c3 kernel: mlx5_core 0002:01:00.1: 126.028 Gb/s available PCIe bandwidth (32.0 GT/s PCIe x4 link)
+Sep 30 15:19:20 spark-74c3 kernel: mlx5_core 0002:01:00.0 enP2p1s0f0np0: Link down
+Sep 30 15:19:20 spark-74c3 kernel: mlx5_core 0002:01:00.1 enP2p1s0f1np1: Link down
+Sep 30 15:19:22 spark-74c3 kernel: mlx5_core 0000:01:00.0: E-Switch: cleanup
+Sep 30 15:19:22 spark-74c3 kernel: mlx5_core 0000:01:00.1 enp1s0f1np1: Link down
+Sep 30 15:19:25 spark-74c3 kernel: mlx5_core 0000:01:00.1: E-Switch: cleanup
+Sep 30 15:19:28 spark-74c3 kernel: mlx5_core 0002:01:00.0: E-Switch: cleanup
+Sep 30 15:19:32 spark-74c3 kernel: mlx5_core 0002:01:00.1: E-Switch: cleanup
+
+$ CMakeCache key entries
+AVX2:BOOL=OFF
+AVX512:BOOL=OFF
+CMAKE_BUILD_TYPE:STRING=RelWithDebInfo
+ENABLE_ISAC_SENSING:BOOL=ON
+ENABLE_LDPC_CUDA:BOOL=OFF
+ENABLE_TESTS:BOOL=ON
+GFNI:BOOL=OFF
+NB_ANTENNAS_RX:STRING=4
+NB_ANTENNAS_TX:STRING=4
+OAI_SIMU:BOOL=ON
+OAI_USRP:BOOL=ON
+OAI_ZMQ:BOOL=OFF
+UHD_INCLUDE_DIRS:PATH=/usr/local/include
+UHD_LIBRARIES:FILEPATH=/usr/local/lib/libuhd.so
+CMAKE_GENERATOR:INTERNAL=Ninja

@@ -6,6 +6,12 @@ Every other project-authored Markdown file was retired in the commit that follow
 (see §0.4 for how to recover any of them from git history). Do **not** assume access to any earlier chat,
 agent, terminal or human conversation: everything needed is here or in the repository.
 
+> **Update 2026-09-30 (first session on the DGX Spark `spark-74c3`, Milan).** Environment recorded (§4.2), fresh
+> aarch64 build done, offline suite and the phy-test rfsim bed re-run on ARM (§13.1, §14.1). New known issues K21–K26
+> (§24). **Site change:** the old lab testbed (sens4 gNB, PCI 2, PLMN 001/06) and the Swiss commercial cells are no
+> longer reachable; **all next OTA tests are on a new, unknown cell seen from the DEIB building, Politecnico di Milano**
+> (§15.0). No X410 is connected yet, so nothing OTA has run on the DGX.
+
 ---
 
 ## 0. How to read this document
@@ -55,6 +61,7 @@ Rules that produced this document (and that you must keep following):
 | `sensnuc3` | Operator's local machine. open5gs 5G core (AMF 127.0.0.1:38412, PLMN 001/06, MongoDB), OCUDU gNB + srsUE (`/home/sens/NICOLA/repos/`), OAI SA rfsim trees (`rfsim-local` = test gNB, `rfsim-val`, `rfsim-integ` = receiver under test). Holds the agent lock file `/home/sens/NICOLA/AGENT_OWNER` and non-repo design docs under `/home/sens/NICOLA/docs/` (their content is folded into §17–§20 here). **Its `/home/sens/NICOLA/adaptive-rx-UL-DL` is a stale copy — never use it.** |
 | `sens4` | Lab gNB host (srsRAN/OCUDU-family `gnb -c /home/sens/gnb.yaml`, driving a radio at 3450 MHz). Live log `/home/sens/NICOLA/gnbLogs/gnb.log` (the old `/home/sens/gnb.log` is stale). **Ground truth for validation only; never an input to the receiver.** |
 | `sens3` | Older OTA host (Aug 2026), different X410/NIC addresses. HISTORICAL. |
+| **`spark-74c3`** | **NEW (2026-09-30): NVIDIA DGX Spark (GB10, aarch64), DEIB / Politecnico di Milano.** Development + future OTA host. §4.2. The Swiss hosts above (and the sens4 lab gNB) are **not reachable** from here. |
 
 Clock note: `sens6` runs in UTC; sensnuc3 in CEST (UTC+2); sens4 vs sens6 were measured ~26–31 min apart at
 one point. Cross-host timestamps are unreliable unless re-measured.
@@ -326,8 +333,8 @@ through sensing metrics.
 | **`adaptive-rx-UL-DL`** | **Current integration branch. HEAD `457c24fac5`.** Pushed to `github`. | Contains: plan Tasks 1–16+18 ("full-running agnosticity", merged at `25a8699a64`), `sdd/validation` (SA discovery-stall fix + Technique D fix), `sdd/integration` (lanes perf, misc, pusch, harq, dmrs2), `cloud/ue-localization` @ `621bdc32a2` (lanes ssb, nsa-mib, csirs + ocudu-dl, bwp harness, cbg test, OCUDU ZMQ harness). |
 | `cloud/ue-localization` | Merged into HEAD. | Tip `621bdc32a2` = HEAD code. |
 | `sdd/integration`, `sdd/validation`, `sdd/gap-*`, `sdd/agn-*`, `sdd/t*` (receiver lanes) | Merged (ancestors of HEAD), except the ones listed below. | Lane worktrees on sens6 `/home/sens/NICOLA/agn-wt/<lane>`. |
-| `sdd/rfsim-gnb-test` (`67bb0eaa11`) | **Unmerged by design.** | Test-only gNB injection knobs `ISAC_GNB_TEST_*` for the phy-test bed. Never merge. |
-| **`feature/multirx-clean-adaptive`** | **Unmerged, 238 commits ahead, diverged from HEAD at `51f7d3deac` (2026-09-23).** | Sensing (coherent fuser, CUDA RD, long dwell, trackers, monitor UI) **plus receiver fixes that are NOT in HEAD**: P39 single-branch PDSCH/PDCCH estimation, per-antenna work off the scan thread, BRANCHFO fixes (CRC-OK-only integration, reset at decode entry), learned LLR confidence / SNR gate, dedicated-SS AL1-only fix, `run_sensing.sh` launcher. The 2026-09-26 OTA runs (`sense_*`) used this branch (`173db3bf68`). **Merge debt: triage before resuming receiver work.** |
+| `sdd/rfsim-gnb-test` (`67bb0eaa11`) | **Unmerged by design. NOT on the `github` remote (checked 2026-09-30).** | Test-only gNB injection knobs `ISAC_GNB_TEST_*` for the phy-test bed. Never merge. Only on sens6 (`agn-wt/gnbtest`) — without it the DGX phy-test bed runs with a plain HEAD `nr-softmodem` (no knobs; the baseline arm needs none). |
+| **`feature/multirx-clean-adaptive`** | **Unmerged, 238 commits ahead, diverged from HEAD at `51f7d3deac` (2026-09-23).** | Sensing (coherent fuser, CUDA RD, long dwell, trackers, monitor UI) **plus receiver fixes that are NOT in HEAD**: P39 single-branch PDSCH/PDCCH estimation, per-antenna work off the scan thread, BRANCHFO fixes (CRC-OK-only integration, reset at decode entry), learned LLR confidence / SNR gate, dedicated-SS AL1-only fix, `run_sensing.sh` launcher. The 2026-09-26 OTA runs (`sense_*`) used this branch (`173db3bf68`). **Merge debt: triage before resuming receiver work.** **NOT on the `github` remote (2026-09-30: `git ls-remote --heads origin` lists only `adaptive-rx-UL-DL`, `cloud/ue-localization`, `sdd/integration`, `sdd/validation`) → unreachable from the DGX until pushed from sens6 (K23).** |
 | `sdd/coh-*`, `sdd/t5..t16`, `sdd/serial`, `sdd/rt` | Unmerged (sensing lanes of the branch above). | |
 | `wip/2026-09-28/gap-cbg` | CBG contract test (out of scope). Also in HEAD via merge `867cfa1676`. | |
 | `total-passive-ue`, `passive-rx-only`, `total-passive-rx-UL-DL*`, `total-passive-UL-DL-adaptive` | STALE predecessors. | `total-passive-UL-DL-adaptive` has 1 unmerged commit "Re-decode paths never descrambled" (check if superseded). |
@@ -423,7 +430,24 @@ arXiv:2609.07367 — citation not independently verified). Everything else is pr
 
 ---
 
-## 4. Build and software environment of the current machine (sens6)
+## 4. Build and software environment (§4.1 old machine sens6, §4.2 new DGX Spark)
+
+### 4.0 Two host profiles — sens6 is FROZEN, not retired (operator rule, 2026-09-30)
+
+sens6 **will be used again**. Its configuration and commands are frozen and must stay runnable as-is:
+
+- Frozen reference: git tag **`sens6-frozen-2026-09-30`** (= commit `3b67eeee39`, code `621bdc32a2`) + this file's sens6
+  sections: §4.1 (environment), §6.3 (X410 `327C1F2` channel map), §8, §10.3 (exact OTA commands and `run_arm.sh`
+  variables), §10.4 (beds), §15.4 sens6 procedure, and `tests/passive_rx/sens6_host_snapshot_2026-09-30/`
+  (`ota_confs/`, `launchers/`, `host_network/`).
+- **Never edit the sens6 files in place for the DGX.** The in-tree `tests/passive_rx/captures/run_arm.sh`, the
+  `tests/passive_rx/*.conf` files, the snapshot `ota_confs/`, `launchers/` and `host_network/` stay byte-identical to
+  the tag. DGX-specific settings go into **new** files/directories (e.g. `tests/passive_rx/dgx_host_snapshot_2026-09-30/`,
+  a future `run_arm_dgx.sh` or a host-profile env file selected by `HOST=dgx|sens6`), with sens6 as the default where
+  a shared script must change. Check with `git diff sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30` (must be empty).
+- Results stay separated by host (§0.1 rule 5, §27).
+
+### 4.1 The sens6 machine (FROZEN profile; host of all results before 2026-09-30)
 
 Measured 2026-09-30 (full dump: `tests/passive_rx/sens6_host_snapshot_2026-09-30/evidence_2026-09-30/env_sens6.txt`).
 This is the environment in which the current validated results were obtained. **Do not try to replicate it on
@@ -458,6 +482,35 @@ The OAI commit is this repository (upstream base `fb944fbad6`, `integration_2026
 
 The X410 itself (measured 2026-09-25 by probe/log): product `x410`, serial **`327C1F2`**, FPGA image **`UC_200`**,
 MPM **6.1**, FPGA **11.0**, UHD 4.10.0 on both sides, clock/time source internal.
+
+### 4.2 The NEW machine: DGX Spark `spark-74c3` (measured 2026-09-30, the §5.2 commands)
+
+Full dump: `tests/passive_rx/dgx_host_snapshot_2026-09-30/env_dgx.txt`. **This is now the development host.** Location:
+DEIB building, Politecnico di Milano campus (Milan, Italy).
+
+| Item | DGX value | Difference vs sens6 that matters |
+|---|---|---|
+| Product | `NVIDIA_DGX_Spark` (DMI), board P4242, hostname `spark-74c3`, user `nicola`, repo at `/home/nicola/NICOLA/passive_agnostic_rx_for_sensing` | new paths/user (every `/home/sens/...` default in scripts is wrong here) |
+| OS / kernel | Ubuntu 24.04.5 LTS, `7.0.0-1019-nvidia` **PREEMPT_DYNAMIC (not RT)**; cmdline has no `isolcpus`/`nohz_full`/`rcu_nocbs`/hugepages | no RT kernel, no isolated cores: the `run_arm.sh` core map (reader on isolated core 2, IRQs 8–13, `taskset 0-7`) does not apply |
+| Arch / CPU | **aarch64**, 20 cores, 1 thread/core, 1 NUMA node: **10× Cortex-X925 (big, 3.9 GHz, cpus 5–9 and 15–19) + 10× Cortex-A725 (little, 2.8 GHz, cpus 0–4 and 10–14)**; NEON/ASIMD + SVE/SVE2, no x86 SIMD | real-time threads (RF reader, scan thread, decode consumers) must be pinned to **X925 cores**; default CPU numbering puts little cores first |
+| RAM | 121 GiB unified (CPU+GPU share it), 15 GiB swap | 8.6× sens6 |
+| GPU | NVIDIA **GB10**, compute capability **12.1** (`sm_121`), driver 580.178.04, CUDA runtime 13.0; memory reported N/A (unified) | CC 8.9 → 12.1 |
+| CUDA toolkit | nvcc **13.0** (V13.0.88) at `/usr/local/cuda` (= `cuda-13.0`) | 12.4 → 13.0 |
+| Compilers / tools | gcc/g++ **13.3.0**, cmake **3.28.3**, ninja 1.11.1, Python 3.12.3, git 2.43.0, ccache 4.9.1 | older gcc/cmake than sens6 (15.2 / 4.2.3) — the tree configures and builds fine with them |
+| UHD | **4.11.0** (`UHD_4.11.0.HEAD-0-g0d7ed3b1`) source-built in `/usr/local` (`/usr/local/lib/libuhd.so.4.11.0`, tools in `/usr/local/bin`); **no distro UHD** (no shadowing trap) | 4.10 → 4.11: **the X410 MPM must be compat-checked (§7 step 5) before the first stream** |
+| High-speed NICs | **2× ConnectX-7 dual-port** (`15b3:1021`, fw 28.45.4028, PCIe Gen5 x4 each = ~126 Gb/s per device): netdevs `enp1s0f0np0`/`enp1s0f1np1` (0000:01:00.x) and `enP2p1s0f0np0`/`enP2p1s0f1np1` (0002:01:00.x). At boot they probe and then **go "Link down" and are torn down ~10 s later (no cables); on 2026-09-30 they were absent from `lspci`/`ip link`** | the X410 data link will land on a CX-7 port: re-check `lspci`/`ip link` after cabling (power-managed when uncabled — `[HYPOTHESIS]`), then MTU 9000, rings, IRQ affinity to X925 cores. NB each CX-7 has only a Gen5 x4 host link (~126 Gb/s) — enough for 4 × 122.88 MS/s sc16 (15.7 Gb/s) |
+| Other NICs | Realtek r8127 `enP7s7` 1 GbE (campus LAN, DHCP 10.79.1.144/23, default route), USB RTL8153 `enxfc1928615bb7` 1 GbE (down — candidate X410 **management** port), WiFi `wlP9s9`, `tailscale0`, docker bridges `oai-public` 192.168.71.129/26, `oai-traffic` 192.168.72.129/26, `e2` 192.168.73.1/24 | the `oai-*` bridges suggest an OAI-CN5G docker core exists on this host (not verified: docker needs sudo/group) — would enable the OAI **SA** rfsim bed here |
+| Limits | `ulimit -l` unlimited, `ulimit -r` **0** (no SCHED_FIFO for the user); **no passwordless sudo** for the agent | rfsim beds run fine as the user (§13.1); OTA with the X410 will need root (or rtprio limits) for RT priority/`mlockall` |
+| X410 | `uhd_find_devices` → *No UHD Devices Found* (2026-09-30): no X410 connected | — |
+| Python deps | numpy 1.26.4 present; pyzmq/`libzmq` 4.3.5 present | — |
+
+OAI build on this host (2026-09-30, fresh configure from a clean clone, **no build dir copied**):
+`cmake_targets/ran_build/build`, generator **Ninja**, `CMAKE_BUILD_TYPE=RelWithDebInfo`, `ENABLE_TESTS=ON`, `OAI_USRP=ON`,
+`OAI_SIMU=ON`, `ENABLE_ISAC_SENSING=ON` (kept ON to be comparable with the sens6 ctest baseline), `ENABLE_LDPC_CUDA=OFF`,
+`OAI_ZMQ=OFF`, `NB_ANTENNAS_RX=4`, `UHD_LIBRARIES=/usr/local/lib/libuhd.so`. CMake detected `CPU architecture is aarch64`
+and uses `-mcpu=native -march=native`; `AVX2/AVX512/GFNI=OFF`. gtest/benchmark are auto-downloaded (CPM cache
+`~/.cache/cpm`), `asn1c` is installed. Targets `nr-uesoftmodem oai_usrpdevif rfsimulator params_libconfig nr-softmodem`
+built with **0 errors in 1 m 30 s** (`ninja -j16`); `ninja tests` built with 0 errors in 27 s (ccache-warm).
 
 ---
 
@@ -525,6 +578,10 @@ which -a uhd_config_info uhd_find_devices uhd_usrp_probe; uhd_config_info --vers
    increase means the ARM CPU cannot carry the decode chain as it stands.
 4. Characterize the new X410 and the link (§7) with `benchmark_rate` — 0 drops at 4 × 122.88 MS/s for 300 s.
 5. Reproduce the latest known lab OTA milestones (§15.4) before any development.
+
+**Status 2026-09-30:** 1 ✔ (fresh Ninja build, §4.2); 2 ✔ with 3 ARM failures triaged (§13.1, K21/K22); 3 ✔ at 106
+and 273 PRB 1 RX (§14.1 — the ARM CPU keeps up; limits are serial threads, K27), 4-RX bed not synced (§14.2);
+4 ✗ no X410 yet; 5 **replaced**: the lab is unavailable → Milan-cell survey (§15.4).
 
 ---
 
@@ -1090,7 +1147,24 @@ alternated A/B/A/B, VOID runs reported not discarded silently, never build durin
 
 ## 13. Current offline validation
 
-**Fresh result 2026-09-30** (this consolidation): `ctest -j4 --output-on-failure` in
+### 13.1 DGX Spark (aarch64) — CURRENT (2026-09-30, commit `3b67eeee39`, code = `621bdc32a2`)
+
+Host `spark-74c3` (§4.2), fresh Ninja build, `ENABLE_ISAC_SENSING=ON`. Evidence:
+`tests/passive_rx/dgx_host_snapshot_2026-09-30/`.
+
+| Validation | Command | Result on DGX | Status |
+|---|---|---|---|
+| Full ctest suite | `ctest -j4 --output-on-failure` (31 s) | **123/126**. Failures: `test_nr_pusch_ra0_qam256` (K22), `dft_test` (K21, upstream NEON), `test_nr_modulation` `NrLayerPrecoderTest.SIMD` (upstream, imag ±2 LSB). `test_vrtsim_cirdb` **passed** here. `test_nr_pusch_ra0_qam64` passed in this run but **fails intermittently** on re-runs (K22) | **PASS with 3 ARM failures, all triaged** |
+| Blind-monitor shuffle | `./test_nr_pdcch_blind_monitor --gtest_shuffle --gtest_random_seed={1,3,5}` | 195 pass + 2 skips on each seed | PASS |
+| Receiver suites by gate (§14) | covered by the full run | all receiver gtests (blind monitor, CORESET map/bank, AL1, RNTI bootstrap, GF(2)/joint, DCI length/layout/pin, hyp sweep, Technique D config sweep, Qm/xOverhead/PT-RS/PRB set, SSB rate match, CSI-RS 131+synth, DM-RS ID, HARQ init-TX, acq state, BWP, TDD, MAC TA, MIB hand-off) pass; of the 9 PUSCH RA0 tests, qpsk/qam16/multidmrs/short_segments/late_typeb/type2/fdra_collision pass, qam64/qam256 do not (K22) | PASS except K22 |
+| Raw-baseline python | `python3 -m unittest test_ssb_reference test_ssb_normalization test_validate_raw` | 9/9 OK | PASS |
+| idsweep selftest (CPU) | `gcc -O3 -march=native -fopenmp …idsweep_offline.c` then `--selftest` | css0 id=2/sym0 PASS, rest id=12345/sym3 PASS; 9.9 s wall | PASS |
+| idsweep selftest (GPU, **sm_121**) | `nvcc -O3 -arch=sm_121 -c idsweep_gpu.cu` + `g++ … -DUSE_GPU … -lcudart` then `--selftest` | both PASS; **0.9 s** wall (11× CPU) | PASS |
+| Offline sync contract | aarch64 port `tools/offline_sync_arm.sh` (K26) | OfflineSync.* **5/5** | PASS |
+| NEON DFT/IDFT accuracy (receiver mode `scale_flag=1`) | `tools/dftcheck.c` vs double-precision DFT | 128…4096 incl. 1536/2048/3072/4096: SQNR 49–56 dB, scale 1/√N | PASS (K21 is test/convention-only for OFDM) |
+| SSB checker on recorded IQ / decoder replay | datasets not on the DGX | — | NOT RUN (K18) |
+
+**Fresh result 2026-09-30 on sens6** (HISTORICAL host; this consolidation): `ctest -j4 --output-on-failure` in
 `sens6:/home/sens/NICOLA/agn-wt/cloud/cmake_targets/ran_build/build` (code `621bdc32a2` = HEAD code, built 2026-09-28,
 ENABLE_ISAC_SENSING=ON): **125/126 passed in 42.3 s; only failure `test_vrtsim_cirdb`** (upstream vrtsim shared-memory
 race, `shm_open() failed: errno 2`, unrelated to the receiver). Log:
@@ -1155,6 +1229,93 @@ rank 1, 150 s, fully agnostic receiver config. Baseline on sens6 (2026-09-27, `s
 **Technique D CONVERGED 5/5 runs, time-to-converge 1.31 ± 0.04 s, crc_ok ≈ 67 000/67 800 (98.9 %), scanq drop_full
 0.33 %**, converged on the gNB's own TDRA entries (S1 L13, S1 L5).
 
+### 14.1 DGX Spark phy-test results — CURRENT (2026-09-30, `[SIM VERIFIED]`, aarch64)
+
+Receiver = HEAD (`3b67eeee39`, code `621bdc32a2`), gNB = **plain HEAD `nr-softmodem --phy-test`** (the test-gNB
+branch is not on GitHub, K23; the baseline arm needs no knobs), both on the DGX, **run as the normal user (no sudo,
+no RT priority, no pinning)**. Receiver conf = in-tree **fully agnostic** `tests/passive_rx/ue.passive.bwp.agn.conf`
+(106 PRB; no manual CORESET/SS/BWP/TDA/DCI/DM-RS keys; sensing engine disabled) — *not* the sens6 scratch conf
+`phyA2/ue.passive.q.agn.conf` (not in git), so the comparison with the sens6 baseline is close but not identical.
+Launch: `tools/run.sh` / `tools/run2.sh` (gNB `-D 0xff -O gnb.sa.rfsim.conf --rfsim`; receiver `-C 3319680000 -r 106
+--numerology 1 --band 78 --ssb 516`), scored by `tools/score.sh`; scores in `phytest/scores_*.txt`. ttc = time from
+the first `rnti=0x1234` line to the first `Technique D CONVERGED`.
+
+| Arm (150 s each) | Runs | CONVERGED | ttc (s) | TB CRC (LDPC ok / PDSCHQ decoded) | scanq drop_full | Receiver CPU | Notes |
+|---|---|---|---|---|---|---|---|
+| 106 PRB rank 1, MCS 9 table 0 (baseline) | 5 | **5/5**, both gNB TDRA entries (S1 L13, S1 L5) every run | 0.74 / 1.61 / 0.80 / 0.81 / 1.56 (mean 1.10) | **98.6–99.1 %** (56–58 k TBs/run) | **0.03–0.08 %** | ~3.0 cores, RSS 0.69 GB | CORESET banked `len=46`, dmrs_id CONFIRMED, 0 PDSCHQ drops |
+| 106 PRB rank 1, **MCS 25 table 1 (256QAM DL)** | 2 | 2/2, **mcs_table=1 found blind** (Qm oracle qm=8) | 0.80 / 0.67 | **99.5 / 99.6 %** | 0.05 % | ~3.3 cores | DL 256QAM is fine on ARM (contrast K22 = UL) |
+| **273 PRB** rank 1, MCS 9 table 0 (`gnb.sa.rfsim.100mhz.conf` + `ue.passive.auto.100mhz.conf`, `-C 3750000000 -r 273 --ssb 1478`) | 2 | 2/2 (S1 L13, S1 L5) | 3.71 / 3.92 | **95.3 / 95.9 %** (23.9 k / 27.6 k decoded) | 0.04–0.05 % | ~2.7 cores, RSS 1.08 GB | CORESET banked `len=49`; first C-RNTI accept at 24–29 s (vs 14 s at 106 PRB) |
+| 273 PRB **rank 4, 4 RX** (`gnb.sa.rfsim.100mhz.rank4.conf -m 25 -n 1 -M 273 -l 4` + `ue.passive.autor4.100mhz.conf --ue-nb-ant-rx 4`) | 2 | **0/2 — never synced** | — | — | — | — | see §14.2 |
+
+Comparison with the sens6 baseline (2026-09-27, HISTORICAL: CONVERGED 5/5, ttc 1.31 ± 0.04 s, 98.9 %, drop_full 0.33 %):
+**the DGX matches or beats it** at 106 PRB (same convergence, ~same CRC, 4–10× lower scan-queue drops) with only
+~3 of 20 cores busy. The ARM CPU is **not** the bottleneck for one 106/273-PRB 1-RX receiver in rfsim.
+
+**Thread profile (per-thread CPU over 20 s, `tools/thrprof.sh`), 273 PRB 1 RX, tracking:** `UEthread_0` (PHY receive
+thread) **100 %**, `pdcchUssHash` (USS hash/AL tracker, `nr_pdcch_uss_tracker.c`) **90 %**, `passivePdcch0` (blind
+PDCCH scan consumer) **79 %**, `UL__actor` ×2 9 %, `passivePdsch0..2` 6 % each, `Tpool*` 2–3 % each; total 331 %. →
+The receiver is limited by **three serial threads**, not by core count (§14.3).
+
+### 14.2 Rank-4 / 4-RX bed on the DGX (2026-09-30) — FAILED to sync, cause not ARM-specific (probably)
+
+Both 150 s runs: the first initial-sync attempt ran **~90 s** (t = 4 → 94 s) with `UEthread_0` at 100 % and only
+`Tpool0..2` busy (30 %, 30 %, 14 %), then `Initial sync: pbch not decoded on any branch, ssb index 0` → `synch Failed`;
+no second attempt completed. `[HYPOTHESIS]` the PBCH failure is the **known bed issue** recorded on sens6 (2026-09-27:
+the agnostic `.q`-geometry scene in `sensing_channel.c` with nb_tx/nb_rx = 4 does not PBCH-sync; the working rank-4
+bed used the *pinned* `ue.passive.pin49r4.100mhz.conf` → 100 % CRC) — **not re-tested here with `pin49r4`**. The
+**90 s single-threaded initial sync at 273 PRB × 4 RX** is itself a finding: the GSCN/PSS scan is effectively serial
+on this CPU (cf. §8 X20) — a parallelization target (§14.3) and a reason to keep pinning `--ssb` at 273 PRB × 4 RX.
+
+### 14.3 CPU core allocation on the DGX and parallelization plan (design, 2026-09-30)
+
+**Topology** (`lscpu -e`): 2 clusters with separate L3 — cluster 0 = cpus 0–9, cluster 1 = cpus 10–19; each cluster =
+5 × Cortex-A725 (little, 2.8 GHz: 0–4 / 10–14) + 5 × Cortex-X925 (big, 3.9 GHz: 5–9 / 15–19). No isolcpus, no RT
+kernel (K25). Keep one receiver instance inside **one cluster** (shared L3) and put every thread that is on the
+per-slot critical path on an **X925** core.
+
+**Where the time goes** (§14.1 profile, 273 PRB 1 RX): 3 serial threads ≈ 1 core each — `UEthread_0` (RF read +
+per-slot RT path incl. FEP, PBCH, blind-monitor RT tap), `pdcchUssHash`, `passivePdcch0`; everything else < 10 %.
+At 4 RX the initial sync is serial for ~90 s (§14.2). So adding cores does nothing until those threads are split.
+
+**Pinning knobs that exist today (no code change):**
+
+| Thread | Knob | Proposed core (instance A = cluster 0) | Instance B (cluster 1) |
+|---|---|---|---|
+| `UEthread_0` (PHY receive / RF reader) | `ISAC_UE_RT_CORE=<cpu>` | **5** (X925), alone | 15 |
+| `passivePdcch0` (blind PDCCH scan, must stay 1 consumer — K27) | `pdcch_blind_monitor_scan_thread = "1:8:<cpu>"` | **6** (X925) | 16 |
+| `pdcchUssHash` (USS AL/hash tracker) | `ISAC_PDCCH_USS_CORE=<cpu>` | **7** (X925) | 17 |
+| `Tpool*` (per-antenna FEP/chest, LDPC segments pushed by the RT path) | `--thread-pool 8,9,0,1` | **8, 9** (X925) + 0, 1 (A725) | 18,19,10,11 |
+| `passivePdsch*` decode consumers (queue, latency-tolerant) | `pdcch_blind_monitor_pdsch = "…:<n>:<depth>:<first_cpu>"` (consecutive cores) | 2, 3, 4 (A725) | 12,13,14 |
+| `passivePusch*` UL consumers | `pdcch_blind_monitor_ul_thread = "<n>:<depth>:<first_cpu>"` | 0–1 shared (A725) | 10–11 |
+| SYNC/DL/UL actors (near idle in passive mode) | `--sync-actor-core`, `--dl-actor-core-start`, `--ul-actor-core-start` | A725 0–4 | A725 10–14 |
+| GPU FEP worker (only with GPU FEP) | `ISAC_GPU_WORKER_CORE` | A725 | A725 |
+| X410 NIC IRQs (CX-7 port) | `/proc/irq/*/smp_affinity_list` from `/sys/class/net/<nic>/device/msi_irqs` | **not** on 5–7; start with A725 3–4 and measure `rx_missed_errors` | — |
+
+Warnings: the in-tree `run_arm.sh` defaults (`RTCORE=2`, `--thread-pool 0,1,4,5,6,7`, IRQs 8–13, `taskset 0-7`) and the
+conf files' pinned cores (`scan_thread "1:8:5"`, `ul_thread "2:32:2"`, `pdsch …:2`) were chosen for sens6; on the DGX,
+core 2 is a little core. Without RT priority (`ulimit -r 0`, no sudo) pinning is only affinity; for OTA run as root or
+grant `rtprio`. **This map is a starting point to be measured** (RFSTALL, `scanq drop_full`, `over_slot`, NIC missed),
+not a validated setting.
+
+**Parallelization opportunities, ordered by measured benefit** (all implementable and testable offline/rfsim):
+
+1. **Split `UEthread_0`**: a thin RF reader (recv → IQ ring, nothing else) + per-slot work dispatched to the existing
+   `DL__actor` threads (4 of them sit at < 1 % in passive mode). Removes the single-thread ceiling on the RT path and
+   protects RF draining (RFSTALL risk, K3).
+2. **Parallel initial sync**: GSCN candidates × PSS hypotheses × antennas × CFO hypotheses are independent → fan out on
+   the thread pool (or GPU). Today ~90 s at 273 PRB × 4 RX (§14.2).
+3. **`pdcchUssHash` → data-parallel**: the hash/AL search is independent per RNTI hypothesis and per occasion → shard
+   the RNTI range over K threads or move it to the GPU (same pattern as idsweep, 11× on GB10).
+4. **Blind-PDCCH scan with N consumers**: blocked by unsynchronised per-run state (energy floor, RNTI-persistence
+   table, counters — `nr_pdcch_passive_queue.c` warns). Make those thread-safe (atomics, locked/sharded table), then
+   N consumers by occasion; or parallelize inside an occasion (per-candidate/per-AL decode).
+5. **GPU on unified memory**: the old "GPU LDPC 20× slower" result (K17) was PCIe-transfer-dominated on a discrete
+   4060 Ti; GB10 shares memory with the CPU, so batched PDCCH candidate decode, USS hash, PDSCH FEP/LLR and LDPC
+   across grants/antennas/cells must be **re-measured**, not assumed slow.
+6. **Multi-cell/-carrier (§17–§20)**: today one process = one cell (global state). First step = one process per cell,
+   each pinned to its own core set (≈ 3 hot X925 cores per instance → ~3 instances on 10 X925 cores as the code
+   stands); then shared RF ring + per-cell `CellContext`; then shared GPU batches across cells.
+
 **If the ctest suite passes (except the known failure), the shuffle seeds pass, and the phy-test smoke converges with
 drop_full ≤ ~1 %, the software build is known-good enough to begin X410/OTA validation.** If drop_full or
 `over_slot` is much worse than on sens6, the ARM CPU budget is the first problem to solve (§5.1).
@@ -1162,6 +1323,25 @@ drop_full ≤ ~1 %, the software build is known-good enough to begin X410/OTA va
 ---
 
 ## 15. Current OTA status (latest campaign only)
+
+### 15.0 Site change (2026-09-30) — read first
+
+- **No OTA has run on the DGX yet** (no X410 connected on 2026-09-30). The newest OTA evidence is still the
+  2026-09-25 sens6 campaign below (`aa872eba3b`, Swiss site) — `HISTORICAL / NOT CURRENT` for the new site.
+- **The lab testbed is not available** (operator, 2026-09-30): the sens4 lab gNB (PCI 2, PLMN 001/06, 273 PRB @
+  3450 MHz) cannot be used, so §15.2 cannot be reproduced and there is **no gNB ground truth** (no gNB log, no C-RNTI
+  list, no scheduler census) for the next OTA work unless a controllable gNB is found at the new site.
+- **All next OTA tests are on a new cell observed from the DEIB building, Politecnico di Milano campus (Milan).**
+  Nothing about that cell is known: operator, PCI, band (n78 is the likely FR1 TDD band in Italy but is **not**
+  established), carrier centre, bandwidth, SSB position, SA vs NSA, TDD pattern. Treat it like any new cell:
+  discover everything from the signal (§10.5 still requires `-C`/`-r`/`--ssb` or `--ue-scan-carrier` at startup).
+  PLMN/operator only from a decoded SIB1 (`SIB1 CELL mcc=… mnc=…`; MCC 222 = Italy — the MNC→operator mapping is an
+  external registry, not a decode).
+- The Salt (PCI 64) and Swisscom (PCI 382) results are from Switzerland and **must never be combined** with Milan
+  results (§27).
+- Consequence for validation: on the Milan cell the gates can be scored only on **self-consistency** evidence
+  (PBCH CRC, SIB1 CRC, DCI CRC + persistence, TB CRC). G7's "C-RNTI confirmed against truth" and G8's "grant census
+  vs gNB log" cannot be done there; use the rfsim/OCUDU beds for truth-matched checks.
 
 ### 15.1 Identification of the latest campaign
 
@@ -1241,11 +1421,23 @@ reaching SIB1.**
 
 ### 15.4 What the DGX must reproduce first
 
-1. G0 on the new X410 (benchmark_rate + a 600 s receiver capture without RFSTALL).
+**sens6 / Swiss-site procedure — FROZEN, still valid whenever sens6 and the lab gNB are used again:**
+
+1. G0 on the X410 (benchmark_rate + a 600 s receiver capture without RFSTALL).
 2. The lab milestones of `agnostic_lab_114917` with the current HEAD: PCI → SIB1 (PLMN 001/06) → CELL_CONFIGURED →
    `PDCCH_SCRAMBLING_ID CONFIRMED` → `multi-CORESET bank add … len=47` → C-RNTI contexts → DCI 0_1 accepts, n ≥ 5 runs.
    (Only if the lab gNB still has the same configuration — re-read it from the running gNB process on its host.)
 3. Then Salt: PCI 64 → SIB1 228-03 repeatedly at 1 RX, then 4 RX, before any dedicated-path claim.
+
+**DGX / Milan procedure (added 2026-09-30)** — the lab testbed and Swiss cells are unavailable from the DGX (§15.0):
+
+1. G0 on the new X410 + DGX CX-7 link (benchmark_rate 300 s all channels + a 600 s receiver capture without RFSTALL).
+2. **Survey the Milan cell (G1–G4)** at 1 RX: `--ue-scan-carrier` over the candidate window(s) (start with n78),
+   record GSCN/SSB offset, PCI(s), CFO, PBCH `RFCENSUS pbch_ok=50 pbch_fail=0`, MIB k_SSB (≥ 24 ⇒ no CORESET#0 ⇒
+   NSA/SIB1-less path, G5B). Note every co-channel PCI seen.
+3. **G5A on the Milan cell** (if k_SSB < 24): SIB1 decoded repeatedly, PLMN, carrier geometry `ACQ carrier CONFIRMED`
+   (relaunch once on `ISAC_ACQ_RETUNE` if the started `-C`/`-r` were wrong), TDD. `rm -rf /tmp/passive_rx` first (K11).
+4. Only then the dedicated path (G6 → G8) on self-consistency evidence, n ≥ 5 runs per arm, 1 RX then 4 RX.
 
 ### 15.5 Other recent OTA context (HISTORICAL / NOT CURRENT — do not merge with the above)
 
@@ -1266,20 +1458,20 @@ reaching SIB1.**
 
 | Pipeline block | Implementation | Offline | Simulated bed | OTA (latest evidence) | Main blocker | Next action |
 |---|---|---|---|---|---|---|
-| RF / X410 streaming (G0) | Done (X410 support, stall detection) | n/a | n/a | 2026-09-25: RFSTALL / NIC loss / claim collisions ended most runs; benchmark clean the same evening | Host drain (IRQ pinning via stale launcher), NIC temperature, claim hygiene | Characterize new X410 + DGX NIC (§7); 600 s capture without RFSTALL |
-| PSS/SSS/PCI (G1–G2) | Upstream + fixes | PASS | PASS | PASS (lab PCI 2, Salt PCI 64) | Scan at 273 PRB × 4 RX risky | Pin `--ssb`; validate scan separately |
+| RF / X410 streaming (G0) | Done (X410 support, stall detection) | n/a | n/a | 2026-09-25 (sens6, HISTORICAL): RFSTALL / NIC loss / claim collisions ended most runs. **DGX: no X410 connected yet; CX-7 ports power down when uncabled (K24); UHD 4.11 vs X410 MPM compat unchecked** | Host drain, core map on big.LITTLE without RT (K25), claim hygiene | Cable X410 to a CX-7 port, §7 characterization, benchmark 300 s, 600 s capture without RFSTALL |
+| PSS/SSS/PCI (G1–G2) | Upstream + fixes | PASS (DGX too) | PASS on DGX at 106/273 PRB 1 RX; **4-RX 273-PRB bed never synced on DGX** (§14.2) | PASS on Swiss cells (HISTORICAL); **Milan cell unknown** | Scan at 273 PRB × 4 RX: ~90 s serial on DGX | Survey the Milan cell at 1 RX (§15.4); parallel initial sync (§14.3) |
 | PBCH/MIB (G3–G4) | Upstream + passive fixes | PASS | PASS | PASS | PBCH tracking failures on loaded cells (worked around) | Re-verify on new X410 |
 | Tracking (timing/CFO) | Done + rebase guards + CFO trim | partial | PASS | PASS on lab; window mis-landing on 4-RX/macro (fixed by gated rebase) | Timing runaway class | Soak test (G10) |
 | SIB1 (G5A) | Done (+ per-PCI cache) | PASS | PASS | PASS (lab; Salt 1/7 runs) | RF stability | Repeat on DGX |
 | SIB1-less / NSA (G5B) | PARTIAL (MIB DM-RS hand-off, CSS0-free discovery, RAR anchor) | PASS (6 tests) | **no bed** | not tested with this code | No NSA bed; carrier/TDD without SIB1 not estimated | Build a synthetic no-SIB1 fixture; OTA on Swisscom |
 | Dedicated CORESET discovery (G6) | Done for contiguous, duration-1, non-interleaved family + AL1 cover + offline/GPU nID sweep | PASS | PASS (OAI SA, OCUDU truth match) | PASS on lab (bank add len 47) | Duration 2/3, holed bitmaps, multi-CORESET, AL1-dominated cells | Validate on Salt; implement multi-symbol ranking |
 | RNTI / DCI recovery (G7) | Done (bootstrap, length sweep, layout sweeps, joint solver opt-in) | PASS | PASS (DCI 42/38 = F1AP truth) | PASS on lab (C-RNTI confirmed 2026-09-17) | False-accept calibration; multi-UE fairness | Grant census vs gNB log on DGX |
-| DL reconstruction + decode (G8) | Done: Technique D, rank ≤ 4, SSB/CSI-RS rate matching, HARQ reserved-MCS | PASS | PASS (phy-test 98.9 %, OCUDU 76 %) | **FAIL/low** (lab 2026-09-25: TB rate ~1 %; best historical 73 % on 2026-09-14 older binary) | Link margin/precoder nulling, rank vs 1 RX, CPU at 4 RX | Reproduce 1-RX lab baseline, then 4-RX |
-| UL decode (G8) | Done: one-layer CP-OFDM, RA0 segmented, UCI footprint, TP limited | PASS (9 RA0 tests) | PASS (OCUDU 50–54 % at times) | historical lab 78.6 % at 272–273 PRB (older binary) | Width search time, 64QAM ceiling, TP unvalidated live | Measure on DGX |
+| DL reconstruction + decode (G8) | Done: Technique D, rank ≤ 4, SSB/CSI-RS rate matching, HARQ reserved-MCS | PASS (DGX too) | **DGX phy-test: 5/5 CONVERGED, 98.6–99.1 %; 256QAM 99.5 %; 273 PRB 95–96 %** (§14.1); sens6: 98.9 %, OCUDU 76 % | **FAIL/low** (lab 2026-09-25: TB rate ~1 %; best historical 73 % on 2026-09-14 older binary) | Link margin/precoder nulling, rank vs 1 RX, CPU at 4 RX | Reproduce 1-RX lab baseline, then 4-RX |
+| UL decode (G8) | Done: one-layer CP-OFDM, RA0 segmented, UCI footprint, TP limited | PASS on sens6 (9 RA0); **DGX: 7/9, 64/256QAM bit errors (K22)** | PASS (OCUDU 50–54 % at times) | historical lab 78.6 % at 272–273 PRB (older binary) | Width search time, 64QAM ceiling, TP unvalidated live | Measure on DGX |
 | CSI-RS / ZP-CSI-RS | Done (rows 1–5, opt-in wide), ZP probation/revocation | PASS (131 + synth) | FAIL then fixed (G4 pending) | IDSWEEP solved on lab, confirmation not reached | G4 of the fixes | OCUDU CSI-RS arm n=3 |
 | RS / CFR extraction (G9) | Done (SSB, DM-RS, data-aided DL/UL, CSI-RS) | PASS | PASS | partial (sensing CPIs formed on lab) | depends on G8 | — |
 | Acquisition state / reacquisition (G10–G11) | Evidence tracker + local DL relearning + stream-gap LOST | PASS | partial | observed LOST→reacquire (2026-09-13) | No unified epoch, no change detector | Implement §19 on top of existing tracker |
-| Multi-cell / carrier / operator (G12–G14) | **None** (one process = one cell) | — | — | — | Architecture | §17–§20 |
+| Multi-cell / carrier / operator (G12–G14) | **None** (one process = one cell) | — | — | — | Architecture; 3 serial hot threads per instance (K27) | §14.3, §17–§20 |
 | Sensing consumer | Separate subsystem; newest work on unmerged branch | PASS (with sensing ON) | — | CPIs produced | Merge debt | Decide merge policy for `feature/multirx-clean-adaptive` |
 
 ---
@@ -1587,7 +1779,7 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 | ID | Component | Problem | Evidence | Severity | Workaround | Required investigation |
 |---|---|---|---|---|---|---|
 | K1 | Whole receiver | **HEAD has never run OTA**; 136 commits since the last OTA binary `aa872eba3b` | git + capture `CMDLINE`/hash lines | High | none | §25 steps 6–10 |
-| K2 | Branches | Receiver fixes exist only on unmerged `feature/multirx-clean-adaptive` (P39 single-branch estimation, BRANCHFO fixes, per-antenna work off the scan thread, LLR confidence/SNR gate, dedicated-SS AL1 fix) | `git log 51f7d3deac..feature/multirx-clean-adaptive` | High | none | Triage each commit: cherry-pick receiver fixes with tests, leave sensing |
+| K2 | Branches | Receiver fixes on unmerged `feature/multirx-clean-adaptive` (238 commits ahead of base `51f7d3deac`). **Triaged 2026-10-01 on the DGX:** 25 non-merge commits touch receiver paths, none patch-equivalent in HEAD. PORT: scan-confirm CFO fix `5c568b184d`+`43a2227e7c`+`890e6a999a` (scan-confirm is ON by default in HEAD → with `--ue-scan-carrier` the confirm pass re-applies only the residual CFO as the total, radio ends ~14.6 kHz off, all PDSCH incl. SIB1 NACK); BRANCHFO thread-safety/CRC-gating `092a0d3d78`(serialisation only, not default-on)+`0229944db9`+`2d0f65b1b5`; P39 single-branch PDSCH chest `46032db06f`; help-text fix `81964f1ea5`. SKIP: 11 LLR-confidence / decision-directed CFR commits (sensing-only), 3 multi-RX ISAC-ABI commits, `74c8d80852` (sensing CFR off scan thread), launchers `17001b8581` (edits the frozen sens6 `run_arm.sh`) and `0e62938991` | `git log --cherry-mark HEAD...origin/feature/multirx-clean-adaptive` | High | — | Ported on branch `port/multirx-rx-fixes` (§3.1) |
 | K3 | RF/host | RFSTALL (overflow/timeout), NIC loss (nic_miss 22–52 k), claim collisions in 2026-09-25 runs | `latest_ota_2026-09-25/*/verdict.txt`, milestones | High | 60 s waits, SIGINT, IRQ pinning | Re-characterize on DGX (§7); [HYPOTHESIS] stale launcher IRQ list and NIC at 99–108 °C contributed |
 | K4 | DL decode OTA | TB rate ~0–1 % on lab 2026-09-25 (fully agnostic conf, 1 RX) vs 73 % on 2026-09-14 (different binary/conf) | verdicts `VOID_DL_RATE`, LDPCDIAG | High | — | Re-run on DGX; separate Technique D trial starvation (72 CRC-OK TBs < 300 floor) from link/precoder effects; MCS/rank census vs gNB log |
 | K5 | Multi-antenna | Branch imbalance (ch1/ch3 −8…−15 dB) on the old unit; MRC gains ≤ ~1 dB; 4-RX CPU overload | ANTPOW, investigation report | Medium | `ISAC_RX_MRC_MODE=0` (branch 0) | Measure new unit; retest MRC modes 1–3 once balanced |
@@ -1601,15 +1793,29 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 | K13 | Passivity | TX streamer is still created by the UHD backend (writes suppressed in software) | `usrp_lib.cpp`, `nr-ue.c` | Medium (legal/ethics) | tx gain 0, RU_write suppressed | Audit every TX entry point; verify no emission with a spectrum analyzer |
 | K14 | UL | Transform-precoding live validation impossible on current beds (srsUE lacks TP); UL HARQ soft combining not built; UL TDRA type B only two curated rows (plus energy pin) | lane reports | Low–Medium | — | OAI SA bed with TP |
 | K15 | Build | Physim targets fail to link; 12 sensing tests fail to link with `ENABLE_ISAC_SENSING=OFF` | ctest/cloud report | Low | build explicit targets | — |
-| K16 | Tests | `test_vrtsim_cirdb` shm race | ctest 2026-09-30 | Low (upstream) | ignore | — |
+| K16 | Tests | `test_vrtsim_cirdb` shm race | ctest 2026-09-30 (sens6); **passed on the DGX 2026-09-30** (race, not deterministic) | Low (upstream) | ignore | — |
 | K17 | GPU | CUDA LDPC plugin 20× slower than CPU for single TBs; `CMAKE_CUDA_ARCHITECTURES=52` in cache | measurement (2026-09-2x), cache | Low | CPU LDPC | Batched GPU design (§20) |
 | K18 | Datasets | Raw OTA IQ recordings and the decoder-oracle replay directory referenced by earlier validations are missing from sens6's mounted disks | `ls`/`find` 2026-09-30 | Medium | — | Check unmounted `sda1`; re-record on the DGX |
 | K19 | Timing loop | Timing runaway (max_pos_acc wind-up when no SSB decodes); two RFSTALL modes (deaf stream vs signal present) | RFSTALL census (Sept) | Medium | watchdog on PBCH count | [HYPOTHESIS] estimator issue under load |
 | K20 | DL precoding | PDSCH decodability depends on the served UE's precoder (beam nulls the passive receiver) | 2026-09-13 lab | Inherent | multiple UEs / positions | Report per-UE PMI with results |
+| K21 | ARM / DFT (upstream) | `dft_test` fails on aarch64: DFT-12 EVM ~190 %, size 16 "unsupported" → abort; with a size filter **every** size fails the test (EVM 29–50 %). Cause: on aarch64 `tools_defs.h` keeps the **legacy NEON DFT table** (`oai_dfts_neon.c`, "some newly generated DFT functions are not implemented for this architecture", upstream w31 `enhancedDFT` merge) and the upstream test assumes the new x86 conventions. **Independent check with `scale_flag=1` (the mode used by every receiver OFDM path: `slot_fep_nr.c`, `nr_pbch.c`, `pss_nr.c`, `ofdm_mod.c`, `nr_phy_common.c` freq2time): correct at 128…4096 incl. 1536/2048/3072/4096, SQNR 49–56 dB, scale = 1/√N.** Not a compiler issue (same at -O0 / armv8.2-a). | `dgx_host_snapshot_2026-09-30/ctest_dgx_3b67eeee39.txt`, `dft_neon_scale1_check.txt`, `tools/dftcheck.c` | Low for OFDM receive; **unknown for UL transform precoding** (aarch64 `nr_idft()` in `nr_ulsch_demodulation.c` uses DFT-12 with `scale_flag=0` and its own layout) | none needed for CP-OFDM | TP on ARM: validate with a TP fixture before trusting (see K14); report upstream |
+| K22 | ARM / UL high-order QAM | `test_nr_pusch_ra0_qam256` fails on aarch64 (and `_qam64` **intermittently**: failed on a re-run, passed in the full ctest run): at 60 dB SNR `sign_errors` 2–15 of 17 664 LLRs per trial, channel BER ~4e-3, TB CRC still OK in most trials (BLER 0–50 % over 10 trials). QPSK/16QAM and all other RA0 tests pass. Passed on sens6/x86. The fixture's TX side (nr_ulsim encoder path) **and** RX side (gNB PUSCH chain reused by the passive UL) both run ARM code, so the fault is not yet localized. Related upstream failure: `test_nr_modulation` `NrLayerPrecoderTest.SIMD` (imag part off by 2 LSB on ARM). The 1-layer 64/256QAM LLR SIMD loops in `nr_phy_common.c` look correct; the scalar tail of `nr_64qam_llr` omits the abs() (both archs, ≤ 3 REs). | `pusch_ra0_highqam_arm.txt`, ctest log | **Medium** — passive UL at 64/256QAM on the DGX may be degraded. **DL is NOT affected:** phy-test DL 256QAM (`-m 25 -n 1`) on ARM decoded 99.5 % of TBs with MCS table 1 blind-found (§14.1) | none | Localize: run the fixture with TX-side and RX-side SIMD swapped for scalar references; check simde `mulhi/mulhrs/sign/packs` on NEON in the gNB-side PUSCH chain (`nr_ulsch_demodulation.c`, `nr_ulsch_llr_computation`) |
+| K23 | Branches | **Resolved 2026-10-01:** `feature/multirx-clean-adaptive` pushed to `github` by the operator (tip `750338ed9e`). `sdd/rfsim-gnb-test` still only on sens6 | `git ls-remote` | Low | — | Push `sdd/rfsim-gnb-test` when sens6 is back |
+| K24 | DGX NIC | Both ConnectX-7 devices enumerate at boot then are torn down ("Link down", E-Switch cleanup) and vanish from `lspci`/`ip link` when uncabled | kernel log 2026-09-30 15:19 | Medium (blocks G0 until checked) | — | After cabling the X410: confirm the CX-7 port stays up; set MTU 9000/rings; persistent NM profile; pin IRQs to X925 cores |
+| K25 | DGX real-time | No PREEMPT_RT kernel, no isolated cores, `ulimit -r 0`, no passwordless sudo; big.LITTLE CPU (X925 = cpus 5–9,15–19; A725 = 0–4,10–14). `run_arm.sh` core map (reader core 2, `--thread-pool 0,1,4,5,6,7`, IRQs 8–13, `taskset 0-7`) would put the RF reader on a **little core** | §4.2 | Medium | rfsim beds run fine as the user | Define a DGX core map (reader + NIC IRQs on X925 cores) and measure drops without RT first (§5.3) |
+| K27 | Parallelism | Three serial hot threads cap one instance (`UEthread_0` 100 %, `pdcchUssHash` 90 %, `passivePdcch0` 79 % at 273 PRB 1 RX); the blind-PDCCH scan cannot use > 1 consumer (energy floor, RNTI-persistence table, counters not thread-safe); initial sync at 273 PRB × 4 RX takes ~90 s mostly on one thread | §14.1–§14.3 profiles | Medium now, **High for multi-cell** | pin the three threads to X925 cores | §14.3 items 1–5 |
+| K26 | Scripts | `tests/passive_rx/offline_sync_contract/build_and_run.sh` hard-codes x86 flags and `/usr/lib/x86_64-linux-gnu/libgtest.a`; an aarch64 port (flags stripped, CPM gtest) passes 5/5 | `dgx_host_snapshot_2026-09-30/tools/offline_sync_arm.sh` | Low | use the port | Make the in-tree script arch-aware |
 
 ---
 
 ## 25. Next steps on the DGX Spark (strict order)
+
+**Progress 2026-09-30:** steps 1–4 **done** (§4.2). Step 5: OAI build done (UHD 4.11 installed; X410 compat still to
+check at step 8). Step 6: done — 123/126, the 3 failures triaged (K21, K22 open, upstream modulation test), shuffle /
+python / idsweep CPU+GPU / sync contract all pass (§13.1). Step 7: done at 106 and 273 PRB 1 RX — matches or beats
+sens6 (§14.1); 4-RX rank-4 bed did not sync (§14.2, re-test with `pin49r4`). Steps 8–10: **blocked, no X410
+connected**; step 10 changes to the Milan-cell survey (§15.0, §15.4) because the lab testbed is gone. Step 12
+**blocked by K23** (branch not on GitHub). New before step 8: define the DGX core map (§14.3) in the launcher.
 
 1. Clone the repository (`adaptive-rx-UL-DL`), `git log -3`, confirm this file is present.
 2. Read `PROJECT_MEMORY.md` completely.

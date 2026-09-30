@@ -1,0 +1,16 @@
+DFT  n=  128 scale=0.08837 (1/sqrt(n)=0.08839) SQNR=54.4 dB bins_off=0/128
+IDFT n=  128 scale=0.08836 (1/sqrt(n)=0.08839) SQNR=53.0 dB bins_off=0/128
+DFT  n=  256 scale=0.06250 (1/sqrt(n)=0.06250) SQNR=55.3 dB bins_off=0/256
+IDFT n=  256 scale=0.06249 (1/sqrt(n)=0.06250) SQNR=55.9 dB bins_off=0/256
+DFT  n=  512 scale=0.04418 (1/sqrt(n)=0.04419) SQNR=52.6 dB bins_off=0/512
+IDFT n=  512 scale=0.04418 (1/sqrt(n)=0.04419) SQNR=51.3 dB bins_off=0/512
+DFT  n= 1024 scale=0.03125 (1/sqrt(n)=0.03125) SQNR=53.4 dB bins_off=0/1024
+IDFT n= 1024 scale=0.03124 (1/sqrt(n)=0.03125) SQNR=53.4 dB bins_off=1/1024
+DFT  n= 1536 scale=0.02551 (1/sqrt(n)=0.02552) SQNR=49.8 dB bins_off=1/1536
+IDFT n= 1536 scale=0.02551 (1/sqrt(n)=0.02552) SQNR=48.8 dB bins_off=3/1536
+DFT  n= 2048 scale=0.02209 (1/sqrt(n)=0.02210) SQNR=50.2 dB bins_off=1/2048
+IDFT n= 2048 scale=0.02209 (1/sqrt(n)=0.02210) SQNR=49.9 dB bins_off=3/2048
+DFT  n= 3072 scale=0.01804 (1/sqrt(n)=0.01804) SQNR=50.6 dB bins_off=1/3072
+IDFT n= 3072 scale=0.01804 (1/sqrt(n)=0.01804) SQNR=50.4 dB bins_off=1/3072
+DFT  n= 4096 scale=0.01562 (1/sqrt(n)=0.01562) SQNR=51.7 dB bins_off=1/4096
+IDFT n= 4096 scale=0.01562 (1/sqrt(n)=0.01562) SQNR=51.5 dB bins_off=0/4096

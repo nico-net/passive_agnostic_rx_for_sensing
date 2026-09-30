@@ -1,0 +1,30 @@
+RA0_GRID trial=1 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=12/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=2 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=12/17664 crc=0 payload=0 FAIL
+RA0_GRID trial=3 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=0/17664 crc=1 payload=1 PASS
+RA0_GRID trial=4 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=21/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=5 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=11/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=6 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=10/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=7 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=3/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=8 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=13/17664 crc=0 payload=0 FAIL
+RA0_GRID trial=9 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=4/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=10 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=14/17664 crc=1 payload=1 FAIL
+SNR 60.000000: Channel BLER (2.000000e-01 Channel BER (3.776042e-03) Avg round 1.00, Eff Rate 12294.4000 bits/slot, Eff Throughput 80.00, TBS 15368 bits/slot
+RA0_GRID trials=10 failures=9
+RA0_GRID trial=1 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=13/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=2 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=11/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=3 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=16/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=4 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=6/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=5 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=10/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=6 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=11/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=7 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=4/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=8 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=14/17664 crc=1 payload=1 FAIL
+RA0_GRID trial=9 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=0/17664 crc=1 payload=1 PASS
+RA0_GRID trial=10 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=8/17664 crc=1 payload=1 FAIL
+SNR 60.000000: Channel BLER (0.000000e+00 Channel BER (4.228940e-03) Avg round 1.00, Eff Rate 15368.0000 bits/slot, Eff Throughput 100.00, TBS 15368 bits/slot
+RA0_GRID trials=10 failures=9
+--- qam64 (ctest args)
+3: CMDLINE: "/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/cmake_targets/ran_build/build/nr_pusch_ra0sim" "-n" "2" "-s" "60" "-S" "60.1" "-r" "16" "-w" "46" "-R" "106" "-m" "24" "-v" "1" 
+3: RA0_GRID trial=1 bwp_shift=0 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=1/13248 crc=1 payload=1 FAIL
+3: RA0_GRID trial=2 bwp_shift=3 contiguous_equal=1 invalid_accepted=0 rejected_unchanged=1 sign_errors=0/13248 crc=1 payload=1 PASS
+3: SNR 60.000000: Channel BLER (0.000000e+00 Channel BER (9.057971e-04) Avg round 1.00, Eff Rate 9992.0000 bits/slot, Eff Throughput 100.00, TBS 9992 bits/slot
+3: RA0_GRID trials=2 failures=1

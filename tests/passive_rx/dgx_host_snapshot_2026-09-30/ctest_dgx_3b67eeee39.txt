@@ -1,0 +1,677 @@
+Test project /home/nicola/NICOLA/passive_agnostic_rx_for_sensing/cmake_targets/ran_build/build
+        Start   1: test_nr_pusch_ra0_qpsk
+        Start   2: test_nr_pusch_ra0_qam16
+        Start   3: test_nr_pusch_ra0_qam64
+        Start   4: test_nr_pusch_ra0_qam256
+  1/126 Test   #2: test_nr_pusch_ra0_qam16 ......................   Passed    1.21 sec
+        Start   5: test_nr_pusch_ra0_multidmrs
+  2/126 Test   #4: test_nr_pusch_ra0_qam256 .....................***Failed    1.21 sec
+CMDLINE: "/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/cmake_targets/ran_build/build/nr_pusch_ra0sim" "-n" "2" "-s" "60" "-S" "60.1" "-r" "16" "-w" "46" "-R" "106" "-m" "25" "-q" "1" "-v" "1" 
+
+Assertion (base_rc == 0 && ulsch->harq_process->C > 0 && ulsch->harq_process->processedSegments == ulsch->harq_process->C) failed!
+In ra0_test_rx() /home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/SIMULATION/NR_PHY/pusch_ra0sim.c:108
+VOID: contiguous reference TB failed CRC
+
+Exiting execution
+Initializing random number generator, seed 17000410747759334836
+handling optarg n
+handling optarg s
+Setting SNR0 to 60.000000
+handling optarg S
+Setting SNR1 to 60.100000
+handling optarg r
+handling optarg w
+handling optarg R
+handling optarg m
+handling optarg q
+handling optarg v
+AWGN: ricean_factor 0.000000
+Pre-allocating padded host memory for the CPU channel pipeline...
+[ULSIM]: length_dmrs: 1, l_prime_mask: 1	number_dmrs_symbols: 1, mapping_type: 1 add_pos: 0 
+[ULSIM]: CDM groups: 1, dmrs_config_type: 0, num_rbs: 16, nb_symb_sch: 12, start_symbol 0
+[ULSIM]: MCS: 25, mod order: 8, code_rate: 8850
+
+[ULSIM]: VALUE OF G: 17664, TBS: 15368
+Exiting at: /home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/SIMULATION/NR_PHY/pusch_ra0sim.c:108 ra0_test_rx(), _Assert_Exit_
+
+        Start   6: test_nr_pusch_ra0_short_segments
+  3/126 Test   #1: test_nr_pusch_ra0_qpsk .......................   Passed    1.21 sec
+        Start   7: test_nr_pusch_ra0_late_typeb
+  4/126 Test   #3: test_nr_pusch_ra0_qam64 ......................   Passed    1.23 sec
+        Start   8: test_nr_pusch_ra0_type2
+  5/126 Test   #6: test_nr_pusch_ra0_short_segments .............   Passed    1.19 sec
+        Start   9: test_nr_pusch_ra0_fdra_collision
+  6/126 Test   #8: test_nr_pusch_ra0_type2 ......................   Passed    1.18 sec
+        Start  10: test_isac_sync
+  7/126 Test   #5: test_nr_pusch_ra0_multidmrs ..................   Passed    1.21 sec
+        Start  11: test_dlsch_fixed_point
+  8/126 Test  #11: test_dlsch_fixed_point .......................   Passed    0.01 sec
+        Start  12: test_target_tracker
+  9/126 Test  #12: test_target_tracker ..........................   Passed    0.00 sec
+        Start  13: test_eca_clutter
+ 10/126 Test   #7: test_nr_pusch_ra0_late_typeb .................   Passed    1.22 sec
+        Start  14: test_multi_target_tracker
+ 11/126 Test  #14: test_multi_target_tracker ....................   Passed    0.00 sec
+        Start  15: test_matrix_complete
+ 12/126 Test  #15: test_matrix_complete .........................   Passed    0.02 sec
+        Start  16: test_det_quality
+ 13/126 Test  #16: test_det_quality .............................   Passed    0.00 sec
+        Start  17: test_isac_aoa
+ 14/126 Test  #13: test_eca_clutter .............................   Passed    0.07 sec
+        Start  18: test_nr_isac_ssb_source
+ 15/126 Test  #17: test_isac_aoa ................................   Passed    0.04 sec
+        Start  19: test_nr_dl_adaptive
+ 16/126 Test  #18: test_nr_isac_ssb_source ......................   Passed    0.00 sec
+        Start  20: test_nr_pdcch_ul_field_sweep
+ 17/126 Test  #20: test_nr_pdcch_ul_field_sweep .................   Passed    0.02 sec
+        Start  21: test_nr_pdcch_ul_interp_sweep
+ 18/126 Test  #21: test_nr_pdcch_ul_interp_sweep ................   Passed    0.00 sec
+        Start  22: test_nr_dci11_pin
+ 19/126 Test  #22: test_nr_dci11_pin ............................   Passed    0.00 sec
+        Start  23: test_nr_pdcch_blind_monitor
+ 20/126 Test  #19: test_nr_dl_adaptive ..........................   Passed    0.06 sec
+        Start  24: test_sparse_doppler
+ 21/126 Test  #24: test_sparse_doppler ..........................   Passed    0.00 sec
+        Start  25: test_clean_deconv
+ 22/126 Test  #25: test_clean_deconv ............................   Passed    0.00 sec
+        Start  26: test_nr_pdcch_blind_rnti_bootstrap
+ 23/126 Test  #26: test_nr_pdcch_blind_rnti_bootstrap ...........   Passed    0.00 sec
+        Start  27: test_occ_clean
+ 24/126 Test  #27: test_occ_clean ...............................   Passed    0.01 sec
+        Start  28: test_nr_pdcch_coreset_map
+ 25/126 Test  #28: test_nr_pdcch_coreset_map ....................   Passed    0.00 sec
+        Start  29: test_nr_pdcch_dci_length_sweep
+ 26/126 Test  #29: test_nr_pdcch_dci_length_sweep ...............   Passed    0.01 sec
+        Start  30: test_nr_hyp_sweep
+ 27/126 Test  #30: test_nr_hyp_sweep ............................   Passed    0.00 sec
+        Start  31: test_nr_passive_acq_state
+ 28/126 Test  #31: test_nr_passive_acq_state ....................   Passed    0.00 sec
+        Start  32: test_nr_dmrs_id_estimate
+ 29/126 Test   #9: test_nr_pusch_ra0_fdra_collision .............   Passed    1.20 sec
+        Start  33: test_nr_scrambling_id_sweep
+ 30/126 Test  #33: test_nr_scrambling_id_sweep ..................   Passed    0.00 sec
+        Start  34: test_nr_pdsch_xoverhead
+ 31/126 Test  #34: test_nr_pdsch_xoverhead ......................   Passed    0.01 sec
+        Start  35: test_nr_pdsch_config_sweep
+ 32/126 Test  #32: test_nr_dmrs_id_estimate .....................   Passed    2.47 sec
+        Start  36: test_nr_pdsch_qm_oracle
+ 33/126 Test  #36: test_nr_pdsch_qm_oracle ......................   Passed    0.00 sec
+        Start  37: test_nr_csirs_blind_search
+ 34/126 Test  #37: test_nr_csirs_blind_search ...................   Passed    0.72 sec
+        Start  38: test_nr_csirs_blind_synth
+ 35/126 Test  #38: test_nr_csirs_blind_synth ....................   Passed    0.07 sec
+        Start  39: test_nr_passive_mac_ta
+ 36/126 Test  #39: test_nr_passive_mac_ta .......................   Passed    0.00 sec
+        Start  40: test_nr_pdcch_dci11_layout_sweep
+ 37/126 Test  #40: test_nr_pdcch_dci11_layout_sweep .............   Passed    1.94 sec
+        Start  41: test_nr_passive_bwp
+ 38/126 Test  #41: test_nr_passive_bwp ..........................   Passed    0.01 sec
+        Start  42: test_nr_pdcch_joint_solve
+ 39/126 Test  #10: test_isac_sync ...............................   Passed    7.31 sec
+        Start  43: test_nr_pdcch_joint_live
+ 40/126 Test  #43: test_nr_pdcch_joint_live .....................   Passed    0.04 sec
+        Start  44: test_nr_pdsch_prb_set
+ 41/126 Test  #44: test_nr_pdsch_prb_set ........................   Passed    0.00 sec
+        Start  45: test_nr_ssb_rate_match
+ 42/126 Test  #45: test_nr_ssb_rate_match .......................   Passed    0.63 sec
+        Start  46: test_nr_ssb_rate_match_prod
+ 43/126 Test  #46: test_nr_ssb_rate_match_prod ..................   Passed    0.13 sec
+        Start  47: test_nr_pdcch_al1_map
+ 44/126 Test  #47: test_nr_pdcch_al1_map ........................   Passed    0.49 sec
+        Start  48: test_nr_pdcch_gf2_rnti
+ 45/126 Test  #48: test_nr_pdcch_gf2_rnti .......................   Passed    0.00 sec
+        Start  49: test_nr_mrc_weights
+ 46/126 Test  #49: test_nr_mrc_weights ..........................   Passed    0.00 sec
+        Start  50: test_nr_arm_sweep
+ 47/126 Test  #50: test_nr_arm_sweep ............................   Passed    0.00 sec
+        Start  51: test_nr_harq_init_tx
+ 48/126 Test  #51: test_nr_harq_init_tx .........................   Passed    0.00 sec
+        Start  52: test_nr_pdsch_ptrs_unav
+ 49/126 Test  #52: test_nr_pdsch_ptrs_unav ......................   Passed    0.00 sec
+        Start  53: test_nr_tdd_pattern
+ 50/126 Test  #53: test_nr_tdd_pattern ..........................   Passed    0.00 sec
+        Start  54: test_nr_pdcch_dci01_layout_sweep
+ 51/126 Test  #54: test_nr_pdcch_dci01_layout_sweep .............   Passed    0.37 sec
+        Start  55: test_nr_pdcch_ss_registry
+ 52/126 Test  #55: test_nr_pdcch_ss_registry ....................   Passed    0.00 sec
+        Start  56: test_seq_arr
+ 53/126 Test  #56: test_seq_arr .................................   Passed    0.00 sec
+        Start  57: test_hashtable
+ 54/126 Test  #57: test_hashtable ...............................   Passed    0.00 sec
+        Start  58: test_spsc_q
+ 55/126 Test  #58: test_spsc_q ..................................   Passed    0.00 sec
+        Start  59: test_nr_common
+ 56/126 Test  #59: test_nr_common ...............................   Passed    0.00 sec
+        Start  60: test_thread-pool
+ 57/126 Test  #42: test_nr_pdcch_joint_solve ....................   Passed    3.98 sec
+        Start  61: time_management_tests
+ 58/126 Test  #60: test_thread-pool .............................   Passed    1.07 sec
+        Start  62: test_symbol_reorder
+ 59/126 Test  #62: test_symbol_reorder ..........................   Passed    0.10 sec
+        Start  63: test_barrier
+ 60/126 Test  #63: test_barrier .................................   Passed    0.03 sec
+        Start  64: test_actor
+ 61/126 Test  #64: test_actor ...................................   Passed    0.02 sec
+        Start  65: test_tpool_vs_actors
+ 62/126 Test  #65: test_tpool_vs_actors .........................   Passed    0.64 sec
+        Start  66: test_fsn
+ 63/126 Test  #66: test_fsn .....................................   Passed    0.00 sec
+        Start  67: test_bits
+ 64/126 Test  #67: test_bits ....................................   Passed    0.00 sec
+        Start  68: test_yaml_config
+ 65/126 Test  #68: test_yaml_config .............................   Passed    0.00 sec
+        Start  69: test_config_cmdline
+ 66/126 Test  #69: test_config_cmdline ..........................   Passed    0.00 sec
+        Start  70: nr_fapi_param_request_test
+ 67/126 Test  #70: nr_fapi_param_request_test ...................   Passed    0.00 sec
+        Start  71: nr_fapi_param_response_test
+ 68/126 Test  #71: nr_fapi_param_response_test ..................   Passed    0.00 sec
+        Start  72: nr_fapi_config_request_test
+ 69/126 Test  #72: nr_fapi_config_request_test ..................   Passed    0.00 sec
+        Start  73: nr_fapi_config_response_test
+ 70/126 Test  #73: nr_fapi_config_response_test .................   Passed    0.00 sec
+        Start  74: nr_fapi_start_request_test
+ 71/126 Test  #74: nr_fapi_start_request_test ...................   Passed    0.00 sec
+        Start  75: nr_fapi_start_response_test
+ 72/126 Test  #75: nr_fapi_start_response_test ..................   Passed    0.00 sec
+        Start  76: nr_fapi_stop_request_test
+ 73/126 Test  #76: nr_fapi_stop_request_test ....................   Passed    0.00 sec
+        Start  77: nr_fapi_stop_indication_test
+ 74/126 Test  #77: nr_fapi_stop_indication_test .................   Passed    0.00 sec
+        Start  78: nr_fapi_error_indication_test
+ 75/126 Test  #78: nr_fapi_error_indication_test ................   Passed    0.00 sec
+        Start  79: nr_fapi_dci_inversion_test
+ 76/126 Test  #79: nr_fapi_dci_inversion_test ...................   Passed    0.00 sec
+        Start  80: nr_fapi_dl_tti_request_test
+ 77/126 Test  #80: nr_fapi_dl_tti_request_test ..................   Passed    0.00 sec
+        Start  81: nr_fapi_ul_tti_request_test
+ 78/126 Test  #81: nr_fapi_ul_tti_request_test ..................   Passed    0.00 sec
+        Start  82: nr_fapi_slot_indication_test
+ 79/126 Test  #82: nr_fapi_slot_indication_test .................   Passed    0.00 sec
+        Start  83: nr_fapi_ul_dci_request_test
+ 80/126 Test  #83: nr_fapi_ul_dci_request_test ..................   Passed    0.00 sec
+        Start  84: nr_fapi_tx_data_request_test
+ 81/126 Test  #84: nr_fapi_tx_data_request_test .................   Passed    0.02 sec
+        Start  85: nr_fapi_rx_data_indication_test
+ 82/126 Test  #85: nr_fapi_rx_data_indication_test ..............   Passed    0.91 sec
+        Start  86: nr_fapi_crc_indication_test
+ 83/126 Test  #86: nr_fapi_crc_indication_test ..................   Passed    0.00 sec
+        Start  87: nr_fapi_uci_indication_test
+ 84/126 Test  #87: nr_fapi_uci_indication_test ..................   Passed    0.00 sec
+        Start  88: nr_fapi_srs_indication_test
+ 85/126 Test  #88: nr_fapi_srs_indication_test ..................   Passed    0.02 sec
+        Start  89: nr_fapi_rach_indication_test
+ 86/126 Test  #89: nr_fapi_rach_indication_test .................   Passed    0.00 sec
+        Start  90: nr_fapi_srs_toa_vendor_ext_indication_test
+ 87/126 Test  #90: nr_fapi_srs_toa_vendor_ext_indication_test ...   Passed    0.00 sec
+        Start  91: test_signal_energy
+ 88/126 Test  #91: test_signal_energy ...........................   Passed    0.00 sec
+        Start  92: benchmark_rotate_vector
+ 89/126 Test  #61: time_management_tests ........................   Passed    3.14 sec
+        Start  93: benchmark_dot_product
+ 90/126 Test  #23: test_nr_pdcch_blind_monitor ..................   Passed   14.54 sec
+        Start  94: test_log2_approx
+ 91/126 Test  #94: test_log2_approx .............................   Passed    0.00 sec
+        Start  95: dft_test
+ 92/126 Test  #95: dft_test .....................................Subprocess aborted***Exception:   1.07 sec
+Initializing random number generator, seed 17745728795209542887
+CMDLINE: "phytest" "-O" "cmdlineonly::dbgl0" 
+Testing size 12
+[1;31m[UTIL]   function get_dft : unsupported DFT size 16
+[0m
+Assertion ((sizeidx >= 0 && sizeidx<DFT_SIZE_IDXTABLESIZE)) failed!
+In dft_implementation() /home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/TOOLS/oai_dfts_neon.c:7079
+Invalid dft size index 68
+
+Exiting execution
+done DFT size 12 (evm (%), SQNRdB, avg in samples amplitude, avg out samples amplitude) = 
+input_lev 30.000000 (255.18, -8.136898, 28.7, 28.7)
+input_lev 40.000000 (254.42, -8.111001, 38.8, 38.8)
+input_lev 50.000000 (254.48, -8.112989, 48.8, 48.8)
+input_lev 60.000000 (254.55, -8.115499, 58.8, 58.8)
+input_lev 70.000000 (254.55, -8.115557, 68.8, 68.8)
+
+DFT size: 12, minimum error is more than 1%, setting the test as failed
+Testing size 16
+
+        Start  96: test_vector_op
+ 93/126 Test  #96: test_vector_op ...............................   Passed    0.00 sec
+        Start  97: test_oai_arith_operations
+ 94/126 Test  #97: test_oai_arith_operations ....................   Passed    0.00 sec
+        Start  98: test_sse_intrinsics
+ 95/126 Test  #98: test_sse_intrinsics ..........................   Passed    0.00 sec
+        Start  99: test_llr
+ 96/126 Test  #99: test_llr .....................................   Passed    0.12 sec
+        Start 100: test_llr_no_avx_256
+ 97/126 Test #100: test_llr_no_avx_256 ..........................   Passed    0.12 sec
+        Start 101: test_nr_modulation
+ 98/126 Test #101: test_nr_modulation ...........................***Failed    0.00 sec
+[==========] Running 3 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 3 tests from NrLayerPrecoderTest
+[ RUN      ] NrLayerPrecoderTest.Basic
+[       OK ] NrLayerPrecoderTest.Basic (0 ms)
+[ RUN      ] NrLayerPrecoderTest.SIMD
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 26
+  -result_imag
+    Which is: 24
+ at [1][0] got imag part: 26
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 28
+  -result_imag
+    Which is: 26
+ at [1][1] got imag part: 28
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 30
+  -result_imag
+    Which is: 28
+ at [1][2] got imag part: 30
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 32
+  -result_imag
+    Which is: 30
+ at [1][3] got imag part: 32
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 34
+  -result_imag
+    Which is: 32
+ at [1][4] got imag part: 34
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 36
+  -result_imag
+    Which is: 34
+ at [1][5] got imag part: 36
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 38
+  -result_imag
+    Which is: 36
+ at [1][6] got imag part: 38
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 40
+  -result_imag
+    Which is: 38
+ at [1][7] got imag part: 40
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 42
+  -result_imag
+    Which is: 40
+ at [1][8] got imag part: 42
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 44
+  -result_imag
+    Which is: 42
+ at [1][9] got imag part: 44
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 46
+  -result_imag
+    Which is: 44
+ at [1][10] got imag part: 46
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 48
+  -result_imag
+    Which is: 46
+ at [1][11] got imag part: 48
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 50
+  -result_imag
+    Which is: 48
+ at [1][12] got imag part: 50
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 52
+  -result_imag
+    Which is: 50
+ at [1][13] got imag part: 52
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 54
+  -result_imag
+    Which is: 52
+ at [1][14] got imag part: 54
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 56
+  -result_imag
+    Which is: 54
+ at [1][15] got imag part: 56
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 58
+  -result_imag
+    Which is: 56
+ at [1][16] got imag part: 58
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 60
+  -result_imag
+    Which is: 58
+ at [1][17] got imag part: 60
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 62
+  -result_imag
+    Which is: 60
+ at [1][18] got imag part: 62
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 64
+  -result_imag
+    Which is: 62
+ at [1][19] got imag part: 64
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 66
+  -result_imag
+    Which is: 64
+ at [1][20] got imag part: 66
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 68
+  -result_imag
+    Which is: 66
+ at [1][21] got imag part: 68
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 70
+  -result_imag
+    Which is: 68
+ at [1][22] got imag part: 70
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:128: Failure
+Expected equality of these values:
+  dataF_out[ant][symbol].i
+    Which is: 72
+  -result_imag
+    Which is: 70
+ at [1][23] got imag part: 72
+[  FAILED  ] NrLayerPrecoderTest.SIMD (0 ms)
+[ RUN      ] NrLayerPrecoderTest.Compare_CM_SIMD
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: -18144
+  dataF_out_simd[ant][symbol].i
+    Which is: -18143
+ at [0][4] got imag part: -18144 result -18143
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: 4409
+  dataF_out_simd[ant][symbol].i
+    Which is: 4410
+ at [0][5] got imag part: 4409 result 4410
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: 7363
+  dataF_out_simd[ant][symbol].i
+    Which is: 7364
+ at [0][7] got imag part: 7363 result 7364
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: 6228
+  dataF_out_simd[ant][symbol].i
+    Which is: 6229
+ at [0][8] got imag part: 6228 result 6229
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: 5930
+  dataF_out_simd[ant][symbol].i
+    Which is: 5931
+ at [0][11] got imag part: 5930 result 5931
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: -32082
+  dataF_out_simd[ant][symbol].i
+    Which is: -32081
+ at [0][15] got imag part: -32082 result -32081
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: -18841
+  dataF_out_simd[ant][symbol].i
+    Which is: -18840
+ at [0][17] got imag part: -18841 result -18840
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: -22518
+  dataF_out_simd[ant][symbol].i
+    Which is: -22517
+ at [0][18] got imag part: -22518 result -22517
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:182: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].i
+    Which is: -24867
+  dataF_out_simd[ant][symbol].i
+    Which is: -24866
+ at [0][20] got imag part: -24867 result -24866
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -30749
+  dataF_out_simd[ant][symbol].r
+    Which is: -30748
+ at [1][0] got real part: -30749 result -30748
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: 15342
+  dataF_out_simd[ant][symbol].r
+    Which is: 15343
+ at [1][1] got real part: 15342 result 15343
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: 8629
+  dataF_out_simd[ant][symbol].r
+    Which is: 8630
+ at [1][2] got real part: 8629 result 8630
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -24957
+  dataF_out_simd[ant][symbol].r
+    Which is: -24956
+ at [1][3] got real part: -24957 result -24956
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -32128
+  dataF_out_simd[ant][symbol].r
+    Which is: -32127
+ at [1][6] got real part: -32128 result -32127
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -21134
+  dataF_out_simd[ant][symbol].r
+    Which is: -21133
+ at [1][9] got real part: -21134 result -21133
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -26655
+  dataF_out_simd[ant][symbol].r
+    Which is: -26654
+ at [1][10] got real part: -26655 result -26654
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: 7348
+  dataF_out_simd[ant][symbol].r
+    Which is: 7349
+ at [1][12] got real part: 7348 result 7349
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -19327
+  dataF_out_simd[ant][symbol].r
+    Which is: -19326
+ at [1][13] got real part: -19327 result -19326
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -31568
+  dataF_out_simd[ant][symbol].r
+    Which is: -31567
+ at [1][14] got real part: -31568 result -31567
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: 6773
+  dataF_out_simd[ant][symbol].r
+    Which is: 6774
+ at [1][16] got real part: 6773 result 6774
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -29458
+  dataF_out_simd[ant][symbol].r
+    Which is: -29457
+ at [1][19] got real part: -29458 result -29457
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: 11209
+  dataF_out_simd[ant][symbol].r
+    Which is: 11210
+ at [1][21] got real part: 11209 result 11210
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: -31086
+  dataF_out_simd[ant][symbol].r
+    Which is: -31085
+ at [1][22] got real part: -31086 result -31085
+/home/nicola/NICOLA/passive_agnostic_rx_for_sensing/openair1/PHY/MODULATION/tests/test_nr_modulation.cpp:180: Failure
+Expected equality of these values:
+  dataF_out_cm[ant][symbol].r
+    Which is: 13247
+  dataF_out_simd[ant][symbol].r
+    Which is: 13248
+ at [1][23] got real part: 13247 result 13248
+[  FAILED  ] NrLayerPrecoderTest.Compare_CM_SIMD (0 ms)
+[----------] 3 tests from NrLayerPrecoderTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 3 tests from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] NrLayerPrecoderTest.SIMD
+[  FAILED  ] NrLayerPrecoderTest.Compare_CM_SIMD
+
+ 2 FAILED TESTS
+
+        Start 102: test_nr_frame_params
+ 99/126 Test #102: test_nr_frame_params .........................   Passed    0.00 sec
+        Start 103: test_sensing_channel
+100/126 Test #103: test_sensing_channel .........................   Passed    0.00 sec
+        Start 104: e1ap_lib_test
+101/126 Test #104: e1ap_lib_test ................................   Passed    0.00 sec
+        Start 105: F1AP_ID_test
+102/126 Test #105: F1AP_ID_test .................................   Passed    0.00 sec
+        Start 106: f1ap_lib_test
+103/126 Test #106: f1ap_lib_test ................................   Passed    0.00 sec
+        Start 107: nr_rlc_tests
+104/126 Test  #92: benchmark_rotate_vector ......................   Passed    6.01 sec
+        Start 108: test_nr_rlc_am_entity
+105/126 Test #108: test_nr_rlc_am_entity ........................   Passed    0.00 sec
+        Start 109: benchmark_nr_rlc_am_entity
+106/126 Test #107: nr_rlc_tests .................................   Passed    2.21 sec
+        Start 110: snow3g_tests
+107/126 Test #110: snow3g_tests .................................   Passed    0.00 sec
+        Start 111: test_lut_dmrs
+108/126 Test #111: test_lut_dmrs ................................   Passed    0.00 sec
+        Start 112: test_nr_ue_power_procedures
+109/126 Test  #93: benchmark_dot_product ........................   Passed    6.69 sec
+        Start 113: test_nr_ue_ra_procedures
+110/126 Test #113: test_nr_ue_ra_procedures .....................   Passed    0.00 sec
+        Start 114: test_nr_ue_mib_blind_handoff
+111/126 Test #114: test_nr_ue_mib_blind_handoff .................   Passed    0.03 sec
+        Start 115: test_asn1_msg
+112/126 Test #115: test_asn1_msg ................................   Passed    0.00 sec
+        Start 116: rrc_bearers_test
+113/126 Test #116: rrc_bearers_test .............................   Passed    0.00 sec
+        Start 117: rrc_cell_management_test
+114/126 Test #117: rrc_cell_management_test .....................   Passed    0.00 sec
+        Start 118: xnap_lib_test
+115/126 Test #118: xnap_lib_test ................................   Passed    0.00 sec
+        Start 119: test_gtp
+116/126 Test #119: test_gtp .....................................   Passed    0.31 sec
+        Start 120: nas_lib_test
+117/126 Test #120: nas_lib_test .................................   Passed    0.00 sec
+        Start 121: ngap_lib_test
+118/126 Test #121: ngap_lib_test ................................   Passed    0.00 sec
+        Start 122: test_vrtsim
+119/126 Test #112: test_nr_ue_power_procedures ..................   Passed    2.15 sec
+        Start 123: test_vrtsim_cirdb
+120/126 Test #122: test_vrtsim ..................................   Passed    1.25 sec
+        Start 124: nr_cuup_functional_test
+121/126 Test #123: test_vrtsim_cirdb ............................   Passed    2.49 sec
+        Start 125: nr_dlbench_um_functional_test
+122/126 Test #109: benchmark_nr_rlc_am_entity ...................   Passed    5.35 sec
+        Start 126: nr_dlbench_am_functional_test
+123/126 Test #125: nr_dlbench_um_functional_test ................   Passed    1.15 sec
+124/126 Test #126: nr_dlbench_am_functional_test ................   Passed    1.14 sec
+125/126 Test #124: nr_cuup_functional_test ......................   Passed    4.02 sec
+126/126 Test  #35: test_nr_pdsch_config_sweep ...................   Passed   27.45 sec
+
+98% tests passed, 3 tests failed out of 126
+
+Label Time Summary:
+dci fapi    =   0.00 sec*proc (1 test)
+fapi        =   0.97 sec*proc (20 tests)
+p5          =   0.01 sec*proc (9 tests)
+p7          =   0.96 sec*proc (12 tests)
+
+Total Test time (real) =  31.07 sec
+
+The following tests FAILED:
+	  4 - test_nr_pusch_ra0_qam256 (Failed)
+	 95 - dft_test (Subprocess aborted)
+	101 - test_nr_modulation (Failed)
+Errors while running CTest
+
+real	0m31.120s
+user	1m21.227s
+sys	0m3.460s
