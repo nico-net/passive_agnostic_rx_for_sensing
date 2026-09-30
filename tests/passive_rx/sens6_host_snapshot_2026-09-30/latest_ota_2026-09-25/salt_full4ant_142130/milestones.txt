@@ -1,0 +1,19 @@
+CMDLINE: "/home/sens/NICOLA/adaptive-rx-UL-DL/cmake_targets/ran_build/build/nr-uesoftmodem" "--usrp-args" "type=x4xx,addr=192.168.20.2,mgmt_addr=192.168.1.140" "-O" "/home/sens/NICOLA/captures/salt_ota_noprior.conf" "-r" "273" "--numerology" "1" "--band" "78" "-C" "3540000000" "--ue-scan-carrier" "--ue-rxgain" "50" "--ue-nb-ant-rx" "4" "--ue-nb-ant-tx" "4" "--passive-rx" "--ue-fo-compensation" "--initial-fo" "-15000" "--thread-pool" "0,1,4,5,6,7" "--time-sync-I" "0.01" "--ntn-initial-time-drift" "-4.25" "-A" "90" 
+[PHY]    SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI-1_1 width reconciliation not applicable (autoconf scans DCI format 1_0 only)
+[HW]     Version: Branch: adaptive-rx-UL-DL Abrev. Hash: aa872eba3b Date: Thu Sep 24 15:18:12 2026 +0000
+[HW]     UHD version 4.10.0.HEAD-0-g2af4ddb9 (4.10.0)
+[INFO] [MPMD] Initializing 1 device(s) in parallel with args: mgmt_addr=192.168.1.140,type=x4xx,product=x410,serial=327C1F2,name=ni-x4xx-327C1F2,fpga=UC_200,rpc_version=1,claimed=False,addr=192.168.20.2,master_clock_rate=245760000.000000
+[HW]     RFCHAN ch0 subdev=0 port=RX1 gain=50.00 range=[0.0..60.0] freq=3540.000000 MHz rate=122.880000 Msps bw=400.000000 MHz
+[HW]     RFCHAN ch1 subdev=1 port=RX1 gain=50.00 range=[0.0..60.0] freq=3540.000000 MHz rate=122.880000 Msps bw=400.000000 MHz
+[HW]     RFCHAN ch2 subdev=0 port=RX1 gain=50.00 range=[0.0..60.0] freq=3540.000000 MHz rate=122.880000 Msps bw=400.000000 MHz
+[HW]     RFCHAN ch3 subdev=1 port=RX1 gain=50.00 range=[0.0..60.0] freq=3540.000000 MHz rate=122.880000 Msps bw=400.000000 MHz
+[HW]     Actual master clock: 245.760000MHz...
+[HW]     SENSING: RFSTALL USRP_RX_READ reason=UHD metadata error received=45568 requested=61440 metadata=ERROR_CODE_TIMEOUT
+[HW]     SENSING: RFSTALL radio read failed; refusing invalid IQ
+[NR_PHY] UE main thread is ending
+[PHY]    Initial sync: pbch not decoded on any branch, ssb index 0
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 5
+[PHY]    pbch rx ok. rsrp:62 dB/RE, adjust_rxgain:-12 dB
+[NR_PHY] Cell Detected with GSCN: 7874, SSB SC offset: 1518, SSB Ref: 3540000000.000000, PSS Corr peak: 104 dB, PSS Corr Average: 77
+[PHY]    [UE 0] Measured Carrier Frequency offset 274 Hz
+[PHY]    Initial sync successful, PCI: 64

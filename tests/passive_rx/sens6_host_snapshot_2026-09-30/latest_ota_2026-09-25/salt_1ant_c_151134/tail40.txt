@@ -1,0 +1,39 @@
+[PHY]    Set UE nb_rx_antenna 1, nb_tx_antenna 1, threequarter_fs 0, ofdm_offset_divisor 8
+[PHY]    SA init parameters. DL freq 3540000000 UL offset 0 SSB numerology 1 N_RB_DL 217
+[PHY]    Init: N_RB_DL 217, first_carrier_offset 2794, nb_prefix_samples 288,nb_prefix_samples0 352, ofdm_symbol_size 4096
+[PHY]    samples_per_subframe 122880/per second 122880000, wCP 114688
+[PHY]    Set UE_fo_compensation 1, UE_scan_carrier 0, UE_no_timing_correction 0 
+, chest-freq 0, chest-time 0
+[UTIL]   threadCreate() for SYNC__actor: creating thread with affinity ffffffff, priority 97
+[UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+[UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+[UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+[UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+[UTIL]   threadCreate() for UL__actor: creating thread with affinity ffffffff, priority 97
+[UTIL]   threadCreate() for UL__actor: creating thread with affinity ffffffff, priority 97
+[PHY]    Initializing UE vars for gNB TXant 1, UE RXant 1
+[PHY]    prs_config configuration NOT found..!! Skipped configuring UE for the PRS reception
+[PHY]    HW: Configuring ru_id 0, sample_rate 122880000.000000, tx/rx num_channels 1/1, duplex_mode TDD
+[PHY]    HW: Configuring channel 0 (rf_chain 0): setting tx_freq 3540000000 Hz, rx_freq 3540000000 Hz, tune_offset 0
+[PHY]    HW: Configuring channel 0 (rf_chain 0): setting tx_gain 0, rx_gain 43
+[UTIL]   threadCreate() for ru_start_thread: creating thread with affinity ffffffff, priority 97
+[HW]     openair0_cfg[0].sdr_addrs == 'type=x4xx,addr=192.168.20.2,mgmt_addr=192.168.1.140'
+[HW]     openair0_cfg[0].clock_source == '0' (internal = 0, external = 1)
+[HW]     UHD version 4.10.0.HEAD-0-g2af4ddb9 (4.10.0)
+[HW]     Checking for USRP with args type=x4xx,addr=192.168.20.2,mgmt_addr=192.168.1.140
+[INFO] [UHD] linux; GNU C++ version 15.2.0; Boost_109000; DPDK_25.11; UHD_4.10.0.HEAD-0-g2af4ddb9
+[HW]     Found USRP x4xx
+net.core.rmem_max = 250000000
+net.core.wmem_max = 250000000
+[INFO] [MPMD] Initializing 1 device(s) in parallel with args: mgmt_addr=192.168.1.140,type=x4xx,product=x410,serial=327C1F2,name=ni-x4xx-327C1F2,fpga=UC_200,rpc_version=1,claimed=True,addr=192.168.20.2,master_clock_rate=245760000.000000
+[ERROR] [RPC] Someone tried to claim this device again (From: 192.168.1.1)
+[HW]     device_init failed: RuntimeError: Error during RPC call to `claim'. Error message: Someone tried to claim this device again (From: 192.168.1.1)
+
+Assertion (0) failed!
+In openair0_device_load() /home/sens/NICOLA/adaptive-rx-UL-DL/radio/COMMON/common_lib.c:125
+can't open the radio device: USRP X400
+
+Exiting execution
+[CONFIG] function config_libconfig_init returned 0
+Found USRP x400
+[NR_PHY] called by: /home/sens/NICOLA/adaptive-rx-UL-DL/radio/COMMON/common_lib.c:125 openair0_device_load() Exiting OAI softmodem: _Assert_Exit_

@@ -1,0 +1,233 @@
+CMDLINE: "/home/sens/NICOLA/adaptive-rx-UL-DL/cmake_targets/ran_build/build/nr-uesoftmodem" "--usrp-args" "type=x4xx,addr=192.168.20.2,mgmt_addr=192.168.1.140" "-O" "/home/sens/NICOLA/captures/agnostic_ota_noprior.conf" "-r" "273" "--numerology" "1" "--band" "78" "-C" "3450000000" "--ssb" "150" "--ue-rxgain" "49" "--ue-nb-ant-rx" "1" "--ue-nb-ant-tx" "1" "--passive-rx" "--ue-fo-compensation" "--thread-pool" "0,1,4,5,6,7" "--time-sync-I" "0.01" "--ntn-initial-time-drift" "-4.25" "-A" "90" 
+[PHY]    SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI-1_1 width reconciliation not applicable (autoconf scans DCI format 1_0 only)
+[HW]     Version: Branch: adaptive-rx-UL-DL Abrev. Hash: aa872eba3b Date: Thu Sep 24 15:18:12 2026 +0000
+[HW]     UHD version 4.10.0.HEAD-0-g2af4ddb9 (4.10.0)
+[INFO] [MPMD] Initializing 1 device(s) in parallel with args: mgmt_addr=192.168.1.140,type=x4xx,product=x410,serial=327C1F2,name=ni-x4xx-327C1F2,fpga=UC_200,rpc_version=1,claimed=False,addr=192.168.20.2,master_clock_rate=245760000.000000
+[HW]     RFCHAN ch0 subdev=0 port=RX1 gain=49.00 range=[0.0..60.0] freq=3450.000000 MHz rate=122.880000 Msps bw=400.000000 MHz
+[HW]     Actual master clock: 245.760000MHz...
+[PHY]    Initial sync: pbch not decoded on any branch, ssb index 0
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 0
+[PHY]    pbch rx ok. rsrp:50 dB/RE, adjust_rxgain:0 dB
+[NR_PHY] Cell Detected with GSCN: 0, SSB SC offset: 150, SSB Ref: 0.000000, PSS Corr peak: 88 dB, PSS Corr Average: 68
+[PHY]    [UE 0] Measured Carrier Frequency offset -13495 Hz
+[PHY]    Initial sync successful, PCI: 2
+[PHY]    SENSING: ACQ_EVENT pbch_locked (n=1, state=SEARCHING)
+[PHY]    SENSING: ACQ_STATE SEARCHING -> PBCH_LOCKED (updates=1 time_in_prev=0 regressions=0) evidence[len_found=0 coreset_ok=0 ul_bwp=0 dl_win=0 ul_width_win=0 ul_interp_win=0]
+[PHY]    SENSING: CSS0 autoconf from MIB/SIB1 -- coreset(groups=8 dur=1 bundle=6 interleaver=2 shift=2 scramb=2) bwp=[0..48) (cset_start_rb = ssb_offset_point_a 12 - rb_offset 12) ss(period=40 offset=0 dur=2 symb=0) dci10(mux=1 sib1=1)
+[NR_RRC] SENSING: SIB1 CELL mcc=001 mnc=06 cell_identity=0x00066c001 tac=1 n_plmn=1
+[NR_MAC] PASSIVE: cell config extracted from SIB1 -- PCI=2 DL: 273 PRB @ SCS=1 offsetToPointA=24 UL: 273 PRB @ SCS=1 absoluteFrequencyPointA=626724
+[NR_MAC] SENSING: SIB1_SS seq=1 index=0 id=1 coreset=0 type=common period=1 offset=0 duration=1 symbols=0x2000 cand[1,2,4,8,16]=0,0,2,0,0 formats[00_10=1 20=0 21=0 22=0 23=0 ue=-1] roles[sib1=0 otherSI=0 paging=1 ra=1]
+[PHY]    SENSING: SIB1 PRIOR: bwp=0+273 coreset(none)[id=0 dur=0 non-interleaved bundle=0 interleaver=0 shift=0 dmrs_id=0 win=-1..-1] ss[AL1=0 AL2=0 AL4=2 AL8=0 AL16=0 period=0 offset=0 dur=0] ra_ss=1[period=1 offset=0 dur=1 symbols=0x2000] sib1_ss=0 paging_ss=1 rach[prach_idx=159 msg1_fdm=1 msg1_fstart=20 sul=0]
+[PHY]    SENSING: TDA-COMMON from SIB1: 2 entries: [0]S=1,L=13,m=0 [1]S=1,L=7,m=0 -- RA/TC/C-in-CSS now use the CELL's own list instead of the spec default table
+[PHY]    SENSING: ACQ_EVENT sib1_decoded (n=1, state=PBCH_LOCKED)
+[PHY]    SENSING: ACQ_STATE PBCH_LOCKED -> SIB1_DECODED (updates=2 time_in_prev=0 regressions=0) evidence[len_found=0 coreset_ok=0 ul_bwp=0 dl_win=0 ul_width_win=0 ul_interp_win=0]
+[PHY]    SENSING: TDD from SIB1 DERIVED: p1 period=10 slots dl=7+8sym ul=2+0sym | p2 period=0 dl=0+0sym ul=0+0sym
+[PHY]    SENSING: ACQ carrier CONFIRMED from SIB1: 273 PRB mu=1, Point A at grid subcarrier 0, carrier ends at 3276 = grid end (started with 273 PRB mu=1, SSB found at subcarrier 150); derived carrier centre 3450.000000 MHz (started 3450.000000 MHz)
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=197.39 ref=197.39 bad=0 shiftForNextFrame=-5 max_pos_acc=462 frame=279
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=200.34 ref=200.34 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=379
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=197.55 ref=200.14 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=479
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=237.02 ref=237.02 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=579
+[PHY]    SENSING: Phase 3 autodiscover -- CORESET duration 1 (symbol-0 hits 62, symbol-1 hits 0 over the footprint)
+[PHY]    SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=156 span_rb=6 bootstrap_rnti=0x0
+[PHY]    UL discovery seeded from SIB1: UL-BWP=0+273 TDAs=6 ul_bwp="0:273" ul_tda="0:14:4:0,0:14:5:0,0:14:6:0,0:14:7:0,0:14:8:0,0:14:11:0" -- HYPOTHESIS for the dedicated config, not a claim about it; TB CRC decides
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: pusch_book[parked=0 claimed=0 expired=0 overwritten=0]
+[PHY]    SENSING: ACQ_STATE SIB1_DECODED -> CELL_CONFIGURED (updates=3 time_in_prev=0 regressions=0) evidence[len_found=0 coreset_ok=1 ul_bwp=1 dl_win=0 ul_width_win=0 ul_interp_win=0]
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=204.80 ref=236.78 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=679
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=215.04 ref=236.54 bad=0 shiftForNextFrame=-5 max_pos_acc=456 frame=779
+[PHY]    SENSING: PDCCH_SCRAMBLING_ID CONFIRMED [USS(dedicated)] n_id=2 (assumed = PCI 2) by CRC-recovered RNTI 0xa10b -- a wrong identity yields zero accepts, so this is proof of the value in use, not a search of the identity domain
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=203.12 ref=236.31 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=879
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=222.33 ref=236.07 bad=0 shiftForNextFrame=-5 max_pos_acc=454 frame=979
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=218.30 ref=235.83 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=55
+[PHY]    SENSING: PDCCH_SCRAMBLING_ID CONFIRMED [CSS0(common)] n_id=2 (assumed = PCI 2) by CRC-recovered RNTI 0xc281 -- a wrong identity yields zero accepts, so this is proof of the value in use, not a search of the identity domain
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=190.47 ref=235.60 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=155
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=161.89 ref=235.36 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=255
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=159.26 ref=235.13 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=355
+[PHY]    SENSING: CSIRS_BLIND IDSWEEP pinned to row1 fd4 l8 (mean epr=19.08 over 37) -- sweeping 1024 scramblingIDs on THAT candidate only
+[PHY]    SENSING: CSIRS_BLIND IDSWEEP SOLVED row1 fd4 l8 scramb_id=2 z=5.7 (PCI=2, epr=669.60) -- csirs_monitor scramblingID is NOT the PCI; candidate corrected, confirmation resumes on next visit
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=158.85 ref=234.89 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=455
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=154.27 ref=234.66 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=555
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=136.65 ref=234.42 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=655
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.92 ref=234.19 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=755
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=144.33 ref=233.95 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=855
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.76 ref=233.72 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=955
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=141.88 ref=233.49 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=31
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 32 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.596 from 8 rows, 0 rejected, first pk=2 frac=-0.227); nominal was 0 from 0.0 m; snr=16.9 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.52 ref=233.25 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=131
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 33 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.549 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.23 ref=233.02 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=231
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 34 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.554 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.6 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 35 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.505 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.4 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=139.37 ref=232.79 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=331
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 36 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.513 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=16.7 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 37 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.531 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.7 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=143.76 ref=232.55 bad=0 shiftForNextFrame=-5 max_pos_acc=454 frame=431
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 38 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.587 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=18.3 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.14 ref=232.32 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=531
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.024 -> 3.12 m (MEASURED; CONVERGED over 39 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=1.502 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=18.1 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.297 -> 3.96 m (MEASURED; CONVERGED over 40 CPIs mode_support=31, 0 CPIs rejected; this CPI raw=1.539 from 8 rows, 0 rejected, first pk=2 frac=-0.448); nominal was 0 from 0.0 m; snr=18.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=144.14 ref=232.09 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=631
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.303 -> 3.97 m (MEASURED; CONVERGED over 41 CPIs mode_support=32, 0 CPIs rejected; this CPI raw=1.504 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=18.0 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=152.02 ref=231.86 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=731
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.309 -> 3.99 m (MEASURED; CONVERGED over 42 CPIs mode_support=33, 0 CPIs rejected; this CPI raw=1.500 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.8 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.315 -> 4.01 m (MEASURED; CONVERGED over 43 CPIs mode_support=34, 0 CPIs rejected; this CPI raw=1.508 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=18.7 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=156.25 ref=231.63 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=831
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.321 -> 4.03 m (MEASURED; CONVERGED over 44 CPIs mode_support=35, 0 CPIs rejected; this CPI raw=1.528 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=18.1 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.326 -> 4.05 m (MEASURED; CONVERGED over 45 CPIs mode_support=36, 0 CPIs rejected; this CPI raw=1.510 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.8 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=176.40 ref=231.39 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=931
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.331 -> 4.06 m (MEASURED; CONVERGED over 46 CPIs mode_support=37, 0 CPIs rejected; this CPI raw=1.520 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.4 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=176.61 ref=231.16 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=7
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.337 -> 4.08 m (MEASURED; CONVERGED over 47 CPIs mode_support=38, 0 CPIs rejected; this CPI raw=1.559 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.8 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.343 -> 4.10 m (MEASURED; CONVERGED over 48 CPIs mode_support=39, 0 CPIs rejected; this CPI raw=1.541 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.6 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=179.71 ref=230.93 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=107
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.348 -> 4.11 m (MEASURED; CONVERGED over 49 CPIs mode_support=40, 0 CPIs rejected; this CPI raw=1.547 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.9 dB
+[PHY]    SENSING: multi-CORESET bank add index=0 offset=0 span=270 symbol=0 mapping=0/0/0 len=47
+[PHY]    SWEEP: new per-RNTI context rnti=0x4768
+[PHY]    SWEEP: new per-RNTI context rnti=0x47f7
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=173.87 ref=230.70 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=207
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.353 -> 4.13 m (MEASURED; CONVERGED over 50 CPIs mode_support=41, 0 CPIs rejected; this CPI raw=1.571 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.4 dB
+[PHY]    SENSING: Phase 3 autodiscover -- CORESET duration 1 (symbol-0 hits 58, symbol-1 hits 0 over the footprint)
+[PHY]    SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=156 span_rb=6 bootstrap_rnti=0x4768
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.358 -> 4.14 m (MEASURED; CONVERGED over 51 CPIs mode_support=42, 0 CPIs rejected; this CPI raw=1.558 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.3 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=181.84 ref=230.47 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=307
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.365 -> 4.16 m (MEASURED; CONVERGED over 52 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=1.656 from 8 rows, 1 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=18.3 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.371 -> 4.18 m (MEASURED; CONVERGED over 53 CPIs mode_support=44, 0 CPIs rejected; this CPI raw=1.642 from 8 rows, 0 rejected, first pk=2 frac=-0.282); nominal was 0 from 0.0 m; snr=18.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=177.47 ref=230.24 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=407
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.369 -> 4.18 m (MEASURED; CONVERGED over 54 CPIs mode_support=45, 0 CPIs rejected; this CPI raw=1.264 from 8 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=18.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=172.47 ref=230.01 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=507
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.375 -> 4.20 m (MEASURED; CONVERGED over 55 CPIs mode_support=46, 0 CPIs rejected; this CPI raw=1.671 from 8 rows, 0 rejected, first pk=2 frac=-0.467); nominal was 0 from 0.0 m; snr=16.7 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.375 -> 4.20 m (fallback: nothing cleared the gate; CONVERGED over 55 CPIs mode_support=46, 0 CPIs rejected; this CPI raw=-1.000 from 0 rows, 0 rejected, first pk=-1 frac=+0.000); nominal was 0 from 0.0 m; snr=-99.0 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=170.02 ref=229.78 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=607
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.379 -> 4.21 m (MEASURED; CONVERGED over 56 CPIs mode_support=47, 0 CPIs rejected; this CPI raw=1.542 from 1 rows, 0 rejected, first pk=2 frac=-0.458); nominal was 0 from 0.0 m; snr=19.9 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=173.14 ref=229.55 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=707
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.382 -> 4.22 m (MEASURED; CONVERGED over 57 CPIs mode_support=48, 0 CPIs rejected; this CPI raw=1.513 from 5 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=19.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=172.50 ref=229.32 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=807
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.384 -> 4.22 m (MEASURED; CONVERGED over 58 CPIs mode_support=49, 0 CPIs rejected; this CPI raw=1.500 from 1 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=20.0 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=168.24 ref=229.09 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=907
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.389 -> 4.24 m (MEASURED; CONVERGED over 59 CPIs mode_support=50, 0 CPIs rejected; this CPI raw=1.603 from 2 rows, 0 rejected, first pk=2 frac=-0.324); nominal was 0 from 0.0 m; snr=16.9 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.389 -> 4.24 m (MEASURED; CONVERGED over 60 CPIs mode_support=50, 0 CPIs rejected; this CPI raw=1.780 from 4 rows, 0 rejected, first pk=2 frac=-0.117); nominal was 0 from 0.0 m; snr=18.4 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=159.46 ref=228.86 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=1007
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.396 -> 4.26 m (MEASURED; CONVERGED over 61 CPIs mode_support=51, 0 CPIs rejected; this CPI raw=1.763 from 1 rows, 0 rejected, first pk=2 frac=-0.237); nominal was 0 from 0.0 m; snr=17.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.86 ref=228.63 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=83
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.401 -> 4.27 m (MEASURED; CONVERGED over 62 CPIs mode_support=52, 0 CPIs rejected; this CPI raw=1.659 from 4 rows, 0 rejected, first pk=2 frac=-0.332); nominal was 0 from 0.0 m; snr=19.6 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=148.35 ref=228.40 bad=0 shiftForNextFrame=-5 max_pos_acc=515 frame=183
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.406 -> 4.29 m (MEASURED; CONVERGED over 63 CPIs mode_support=53, 0 CPIs rejected; this CPI raw=1.652 from 2 rows, 0 rejected, first pk=2 frac=-0.296); nominal was 0 from 0.0 m; snr=21.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=145.44 ref=228.18 bad=0 shiftForNextFrame=-5 max_pos_acc=517 frame=283
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.407 -> 4.29 m (MEASURED; CONVERGED over 64 CPIs mode_support=54, 0 CPIs rejected; this CPI raw=1.500 from 1 rows, 0 rejected, first pk=1 frac=+0.500); nominal was 0 from 0.0 m; snr=20.8 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.35 ref=227.95 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=383
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.400 -> 4.27 m (MEASURED; CONVERGED over 64 CPIs mode_support=55, 0 CPIs rejected; this CPI raw=1.000 from 3 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=20.5 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.407 -> 4.29 m (MEASURED; CONVERGED over 64 CPIs mode_support=54, 0 CPIs rejected; this CPI raw=1.771 from 1 rows, 0 rejected, first pk=2 frac=-0.229); nominal was 0 from 0.0 m; snr=21.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.45 ref=227.72 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=483
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.419 -> 4.33 m (MEASURED; CONVERGED over 64 CPIs mode_support=54, 0 CPIs rejected; this CPI raw=1.644 from 3 rows, 0 rejected, first pk=2 frac=-0.328); nominal was 0 from 0.0 m; snr=22.0 dB
+[PHY]    SENSING: pusch_book[parked=409 claimed=408 expired=1 overwritten=0]
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=144.65 ref=227.49 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=583
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.432 -> 4.37 m (MEASURED; CONVERGED over 64 CPIs mode_support=54, 0 CPIs rejected; this CPI raw=1.694 from 1 rows, 0 rejected, first pk=2 frac=-0.306); nominal was 0 from 0.0 m; snr=19.0 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=135.14 ref=227.26 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=683
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.440 -> 4.39 m (MEASURED; CONVERGED over 64 CPIs mode_support=53, 0 CPIs rejected; this CPI raw=1.977 from 2 rows, 0 rejected, first pk=2 frac=+0.005); nominal was 0 from 0.0 m; snr=19.8 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=132.06 ref=227.04 bad=0 shiftForNextFrame=-5 max_pos_acc=514 frame=783
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=136.22 ref=226.81 bad=0 shiftForNextFrame=-5 max_pos_acc=456 frame=883
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.446 -> 4.41 m (MEASURED; CONVERGED over 64 CPIs mode_support=53, 0 CPIs rejected; this CPI raw=1.289 from 3 rows, 0 rejected, first pk=1 frac=+0.500); nominal was 0 from 0.0 m; snr=23.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=136.07 ref=226.58 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=983
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.454 -> 4.44 m (MEASURED; CONVERGED over 64 CPIs mode_support=52, 0 CPIs rejected; this CPI raw=1.766 from 4 rows, 0 rejected, first pk=2 frac=-0.287); nominal was 0 from 0.0 m; snr=21.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.91 ref=226.36 bad=0 shiftForNextFrame=-5 max_pos_acc=454 frame=59
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.463 -> 4.46 m (MEASURED; CONVERGED over 64 CPIs mode_support=51, 0 CPIs rejected; this CPI raw=1.848 from 1 rows, 0 rejected, first pk=2 frac=-0.152); nominal was 0 from 0.0 m; snr=21.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=148.20 ref=226.13 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=159
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.473 -> 4.49 m (MEASURED; CONVERGED over 64 CPIs mode_support=50, 0 CPIs rejected; this CPI raw=1.790 from 1 rows, 0 rejected, first pk=2 frac=-0.210); nominal was 0 from 0.0 m; snr=21.2 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=145.44 ref=225.90 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=259
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.482 -> 4.52 m (MEASURED; CONVERGED over 64 CPIs mode_support=49, 0 CPIs rejected; this CPI raw=1.820 from 2 rows, 0 rejected, first pk=2 frac=-0.160); nominal was 0 from 0.0 m; snr=21.4 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=149.01 ref=225.68 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=359
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.492 -> 4.55 m (MEASURED; CONVERGED over 64 CPIs mode_support=48, 0 CPIs rejected; this CPI raw=1.993 from 1 rows, 0 rejected, first pk=2 frac=-0.007); nominal was 0 from 0.0 m; snr=20.5 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.503 -> 4.58 m (MEASURED; CONVERGED over 64 CPIs mode_support=47, 0 CPIs rejected; this CPI raw=2.036 from 1 rows, 0 rejected, first pk=2 frac=+0.036); nominal was 0 from 0.0 m; snr=21.0 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=144.74 ref=225.45 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=459
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.514 -> 4.62 m (MEASURED; CONVERGED over 64 CPIs mode_support=46, 0 CPIs rejected; this CPI raw=2.204 from 3 rows, 0 rejected, first pk=2 frac=+0.219); nominal was 0 from 0.0 m; snr=19.6 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=144.74 ref=225.23 bad=0 shiftForNextFrame=-5 max_pos_acc=454 frame=559
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.525 -> 4.65 m (MEASURED; CONVERGED over 64 CPIs mode_support=45, 0 CPIs rejected; this CPI raw=2.177 from 3 rows, 0 rejected, first pk=2 frac=+0.229); nominal was 0 from 0.0 m; snr=20.4 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=145.79 ref=225.00 bad=0 shiftForNextFrame=-4 max_pos_acc=450 frame=659
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.537 -> 4.69 m (MEASURED; CONVERGED over 64 CPIs mode_support=44, 0 CPIs rejected; this CPI raw=2.494 from 3 rows, 0 rejected, first pk=2 frac=+0.500); nominal was 0 from 0.0 m; snr=18.6 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.05 ref=224.78 bad=0 shiftForNextFrame=-5 max_pos_acc=459 frame=759
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.480 from 3 rows, 0 rejected, first pk=2 frac=+0.500); nominal was 0 from 0.0 m; snr=15.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.49 ref=224.55 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=859
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (fallback: nothing cleared the gate; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=-1.000 from 0 rows, 0 rejected, first pk=-1 frac=+0.000); nominal was 0 from 0.0 m; snr=-99.0 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.104 from 1 rows, 0 rejected, first pk=2 frac=+0.104); nominal was 0 from 0.0 m; snr=20.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=149.53 ref=224.33 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=959
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=141.30 ref=224.10 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=35
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.049 from 1 rows, 0 rejected, first pk=2 frac=+0.049); nominal was 0 from 0.0 m; snr=20.7 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.441 from 1 rows, 0 rejected, first pk=2 frac=+0.441); nominal was 0 from 0.0 m; snr=18.4 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=145.63 ref=223.88 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=135
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.500 from 1 rows, 0 rejected, first pk=2 frac=+0.500); nominal was 0 from 0.0 m; snr=18.3 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.078 -> 3.29 m (MEASURED; CONVERGED over 32 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=3.414 from 4 rows, 0 rejected, first pk=1 frac=+0.153); nominal was 0 from 0.0 m; snr=18.3 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.65 ref=223.65 bad=0 shiftForNextFrame=-5 max_pos_acc=454 frame=235
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.078 -> 3.29 m (MEASURED; CONVERGED over 33 CPIs mode_support=15, 0 CPIs rejected; this CPI raw=2.091 from 5 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=18.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.33 ref=223.43 bad=0 shiftForNextFrame=-5 max_pos_acc=459 frame=335
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.450 from 1 rows, 0 rejected, first pk=2 frac=+0.450); nominal was 0 from 0.0 m; snr=19.4 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.073 -> 3.27 m (MEASURED; CONVERGED over 34 CPIs mode_support=16, 0 CPIs rejected; this CPI raw=1.000 from 8 rows, 3 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=17.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.67 ref=223.21 bad=0 shiftForNextFrame=-5 max_pos_acc=456 frame=435
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.280 from 2 rows, 0 rejected, first pk=2 frac=+0.277); nominal was 0 from 0.0 m; snr=19.7 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.073 -> 3.27 m (MEASURED; CONVERGED over 35 CPIs mode_support=16, 0 CPIs rejected; this CPI raw=1.757 from 8 rows, 1 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=18.8 dB
+[PHY]    SENSING: pusch_book[parked=1063 claimed=1062 expired=1 overwritten=0]
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.85 ref=222.98 bad=0 shiftForNextFrame=-5 max_pos_acc=459 frame=535
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.500 from 2 rows, 0 rejected, first pk=2 frac=+0.500); nominal was 0 from 0.0 m; snr=18.4 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.073 -> 3.27 m (MEASURED; CONVERGED over 36 CPIs mode_support=16, 0 CPIs rejected; this CPI raw=2.061 from 5 rows, 0 rejected, first pk=3 frac=-0.084); nominal was 0 from 0.0 m; snr=17.3 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.541 -> 4.70 m (MEASURED; CONVERGED over 64 CPIs mode_support=43, 0 CPIs rejected; this CPI raw=2.186 from 2 rows, 0 rejected, first pk=2 frac=+0.143); nominal was 0 from 0.0 m; snr=20.1 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.069 -> 3.26 m (MEASURED; CONVERGED over 37 CPIs mode_support=17, 0 CPIs rejected; this CPI raw=1.000 from 5 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=15.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=147.17 ref=222.76 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=635
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.538 -> 4.69 m (MEASURED; CONVERGED over 64 CPIs mode_support=42, 0 CPIs rejected; this CPI raw=1.914 from 1 rows, 0 rejected, first pk=2 frac=-0.086); nominal was 0 from 0.0 m; snr=18.9 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.085 -> 3.31 m (MEASURED; CONVERGED over 38 CPIs mode_support=18, 0 CPIs rejected; this CPI raw=1.365 from 4 rows, 1 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=18.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=150.23 ref=222.54 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=735
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.538 -> 4.69 m (fallback: nothing cleared the gate; CONVERGED over 64 CPIs mode_support=42, 0 CPIs rejected; this CPI raw=-1.000 from 0 rows, 0 rejected, first pk=-1 frac=+0.000); nominal was 0 from 0.0 m; snr=-99.0 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.085 -> 3.31 m (MEASURED; CONVERGED over 39 CPIs mode_support=18, 0 CPIs rejected; this CPI raw=2.202 from 5 rows, 0 rejected, first pk=2 frac=-0.091); nominal was 0 from 0.0 m; snr=18.3 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=152.95 ref=222.32 bad=0 shiftForNextFrame=-5 max_pos_acc=454 frame=835
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.085 -> 3.31 m (MEASURED; CONVERGED over 40 CPIs mode_support=18, 0 CPIs rejected; this CPI raw=3.013 from 7 rows, 0 rejected, first pk=5 frac=-0.045); nominal was 0 from 0.0 m; snr=17.0 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=148.31 ref=222.09 bad=0 shiftForNextFrame=-5 max_pos_acc=459 frame=935
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.538 -> 4.69 m (MEASURED; CONVERGED over 64 CPIs mode_support=41, 0 CPIs rejected; this CPI raw=1.901 from 2 rows, 0 rejected, first pk=2 frac=-0.092); nominal was 0 from 0.0 m; snr=18.4 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.085 -> 3.31 m (MEASURED; CONVERGED over 41 CPIs mode_support=18, 0 CPIs rejected; this CPI raw=3.348 from 4 rows, 1 rejected, first pk=8 frac=+0.043); nominal was 0 from 0.0 m; snr=19.6 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=145.25 ref=221.87 bad=0 shiftForNextFrame=-5 max_pos_acc=454 frame=11
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.525 -> 4.65 m (MEASURED; CONVERGED over 64 CPIs mode_support=41, 0 CPIs rejected; this CPI raw=1.000 from 3 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=18.3 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.085 -> 3.31 m (MEASURED; CONVERGED over 42 CPIs mode_support=18, 0 CPIs rejected; this CPI raw=2.183 from 3 rows, 0 rejected, first pk=1 frac=+0.112); nominal was 0 from 0.0 m; snr=20.4 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=149.94 ref=221.65 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=111
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.525 -> 4.65 m (fallback: nothing cleared the gate; CONVERGED over 64 CPIs mode_support=41, 0 CPIs rejected; this CPI raw=-1.000 from 0 rows, 0 rejected, first pk=-1 frac=+0.000); nominal was 0 from 0.0 m; snr=-99.0 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.081 -> 3.30 m (MEASURED; CONVERGED over 43 CPIs mode_support=19, 0 CPIs rejected; this CPI raw=1.000 from 5 rows, 2 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=16.2 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=146.65 ref=221.43 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=211
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.525 -> 4.65 m (MEASURED; CONVERGED over 64 CPIs mode_support=40, 0 CPIs rejected; this CPI raw=2.121 from 2 rows, 0 rejected, first pk=2 frac=+0.169); nominal was 0 from 0.0 m; snr=19.6 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.081 -> 3.30 m (MEASURED; CONVERGED over 44 CPIs mode_support=19, 0 CPIs rejected; this CPI raw=2.408 from 6 rows, 1 rejected, first pk=2 frac=+0.212); nominal was 0 from 0.0 m; snr=18.3 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.525 -> 4.65 m (MEASURED; CONVERGED over 64 CPIs mode_support=39, 0 CPIs rejected; this CPI raw=1.987 from 1 rows, 0 rejected, first pk=2 frac=-0.013); nominal was 0 from 0.0 m; snr=18.8 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=152.32 ref=221.21 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=311
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.081 -> 3.30 m (MEASURED; CONVERGED over 45 CPIs mode_support=19, 0 CPIs rejected; this CPI raw=2.049 from 4 rows, 1 rejected, first pk=3 frac=+0.021); nominal was 0 from 0.0 m; snr=21.0 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.523 -> 4.65 m (MEASURED; CONVERGED over 64 CPIs mode_support=38, 0 CPIs rejected; this CPI raw=2.333 from 1 rows, 0 rejected, first pk=2 frac=+0.333); nominal was 0 from 0.0 m; snr=18.9 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=152.81 ref=220.99 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=411
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.081 -> 3.30 m (MEASURED; CONVERGED over 46 CPIs mode_support=19, 0 CPIs rejected; this CPI raw=2.743 from 4 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=17.8 dB
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.508 -> 4.60 m (MEASURED; CONVERGED over 64 CPIs mode_support=38, 0 CPIs rejected; this CPI raw=1.000 from 1 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=19.5 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.081 -> 3.30 m (MEASURED; CONVERGED over 47 CPIs mode_support=19, 0 CPIs rejected; this CPI raw=2.221 from 5 rows, 1 rejected, first pk=3 frac=+0.079); nominal was 0 from 0.0 m; snr=17.9 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=150.47 ref=220.76 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=511
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.493 -> 4.55 m (MEASURED; CONVERGED over 64 CPIs mode_support=38, 0 CPIs rejected; this CPI raw=1.000 from 2 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=19.7 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.081 -> 3.30 m (MEASURED; CONVERGED over 48 CPIs mode_support=19, 0 CPIs rejected; this CPI raw=1.955 from 5 rows, 2 rejected, first pk=2 frac=-0.152); nominal was 0 from 0.0 m; snr=16.6 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=151.80 ref=220.54 bad=0 shiftForNextFrame=-5 max_pos_acc=452 frame=611
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.478 -> 4.51 m (MEASURED; CONVERGED over 64 CPIs mode_support=38, 0 CPIs rejected; this CPI raw=1.000 from 3 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=19.3 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.079 -> 3.29 m (MEASURED; CONVERGED over 49 CPIs mode_support=20, 0 CPIs rejected; this CPI raw=1.048 from 6 rows, 2 rejected, first pk=2 frac=-0.034); nominal was 0 from 0.0 m; snr=15.8 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=152.66 ref=220.32 bad=0 shiftForNextFrame=-5 max_pos_acc=453 frame=711
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.464 -> 4.46 m (MEASURED; CONVERGED over 64 CPIs mode_support=38, 0 CPIs rejected; this CPI raw=1.000 from 1 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=20.8 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.079 -> 3.29 m (MEASURED; CONVERGED over 50 CPIs mode_support=20, 0 CPIs rejected; this CPI raw=2.296 from 4 rows, 0 rejected, first pk=3 frac=-0.156); nominal was 0 from 0.0 m; snr=20.2 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=152.94 ref=220.10 bad=0 shiftForNextFrame=-5 max_pos_acc=457 frame=811
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.462 -> 4.46 m (MEASURED; CONVERGED over 64 CPIs mode_support=37, 0 CPIs rejected; this CPI raw=2.500 from 1 rows, 0 rejected, first pk=2 frac=+0.500); nominal was 0 from 0.0 m; snr=19.1 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.079 -> 3.29 m (MEASURED; CONVERGED over 51 CPIs mode_support=20, 0 CPIs rejected; this CPI raw=1.659 from 6 rows, 1 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=17.3 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=150.89 ref=219.88 bad=0 shiftForNextFrame=-5 max_pos_acc=460 frame=911
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.461 -> 4.46 m (MEASURED; CONVERGED over 64 CPIs mode_support=36, 0 CPIs rejected; this CPI raw=2.170 from 1 rows, 0 rejected, first pk=2 frac=+0.170); nominal was 0 from 0.0 m; snr=19.1 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.079 -> 3.29 m (MEASURED; CONVERGED over 52 CPIs mode_support=20, 0 CPIs rejected; this CPI raw=3.114 from 6 rows, 0 rejected, first pk=3 frac=-0.012); nominal was 0 from 0.0 m; snr=18.2 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=138.35 ref=219.66 bad=0 shiftForNextFrame=-5 max_pos_acc=457 frame=1011
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.446 -> 4.41 m (MEASURED; CONVERGED over 64 CPIs mode_support=36, 0 CPIs rejected; this CPI raw=1.000 from 1 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=20.9 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.079 -> 3.29 m (MEASURED; CONVERGED over 53 CPIs mode_support=20, 0 CPIs rejected; this CPI raw=3.306 from 5 rows, 0 rejected, first pk=6 frac=-0.301); nominal was 0 from 0.0 m; snr=18.0 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=136.05 ref=219.44 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=87
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.430 -> 4.36 m (MEASURED; CONVERGED over 64 CPIs mode_support=36, 0 CPIs rejected; this CPI raw=1.000 from 3 rows, 1 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=20.3 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.078 -> 3.29 m (MEASURED; CONVERGED over 54 CPIs mode_support=21, 0 CPIs rejected; this CPI raw=1.056 from 2 rows, 0 rejected, first pk=1 frac=+0.112); nominal was 0 from 0.0 m; snr=15.1 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=135.82 ref=219.22 bad=0 shiftForNextFrame=-5 max_pos_acc=456 frame=187
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=134.41 ref=219.00 bad=0 shiftForNextFrame=-5 max_pos_acc=459 frame=287
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.416 -> 4.32 m (MEASURED; CONVERGED over 64 CPIs mode_support=36, 0 CPIs rejected; this CPI raw=1.000 from 2 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=18.9 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.074 -> 3.28 m (MEASURED; CONVERGED over 55 CPIs mode_support=22, 0 CPIs rejected; this CPI raw=1.000 from 3 rows, 1 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=15.5 dB
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=135.29 ref=218.79 bad=0 shiftForNextFrame=-5 max_pos_acc=451 frame=387
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.401 -> 4.27 m (MEASURED; CONVERGED over 64 CPIs mode_support=36, 0 CPIs rejected; this CPI raw=1.000 from 2 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=20.9 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.074 -> 3.28 m (MEASURED; CONVERGED over 56 CPIs mode_support=22, 0 CPIs rejected; this CPI raw=3.138 from 3 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=16.0 dB
+[PHY]    SENSING: pusch_book[parked=1692 claimed=1691 expired=1 overwritten=0]
+[PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=140.85 ref=218.57 bad=0 shiftForNextFrame=-5 max_pos_acc=455 frame=487
+[PHY]    SENSING: sync(STO) LOS[DL/gNB] bin=1.387 -> 4.23 m (MEASURED; CONVERGED over 64 CPIs mode_support=36, 0 CPIs rejected; this CPI raw=1.000 from 3 rows, 0 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=19.8 dB
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.074 -> 3.28 m (MEASURED; CONVERGED over 57 CPIs mode_support=22, 0 CPIs rejected; this CPI raw=2.324 from 4 rows, 0 rejected, first pk=2 frac=-0.500); nominal was 0 from 0.0 m; snr=17.7 dB
+[NR_PHY] UE main thread is ending

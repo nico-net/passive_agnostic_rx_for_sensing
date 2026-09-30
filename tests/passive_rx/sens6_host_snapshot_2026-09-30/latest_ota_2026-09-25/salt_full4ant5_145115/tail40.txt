@@ -1,0 +1,39 @@
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=3 rx_offset=998252 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=152.09 s1_rms=171.04 s2_mean=151.30 s2_rms=170.43 s3_mean=96.86 s3_rms=170.36
+[PHY]    synch Failed: 
+[PHY]    SSB position provided
+[NR_PHY] Starting sync detection
+[PHY]    [UE thread Synch] Running Initial Synch 
+[NR_PHY] Starting cell search with center freq: 3540000000, bandwidth: 217. Scanning for 1 number of GSCN.
+[NR_PHY] Scan branch by energy: antenna 2 (0.6 dB above antenna 0); order [2 0 3 1]
+[NR_PHY] Scanning GSCN: 0, with SSB offset: 1182, SSB Freq: 0.000000
+[HW]     SENSING: RFSTALL USRP_RX_READ reason=UHD metadata error received=4896 requested=61440 metadata=ERROR_CODE_TIMEOUT
+
+[HW]     SENSING: RFSTALL radio read failed; refusing invalid IQ
+[NR_PHY] UE main thread is ending
+OOOO[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=0 rx_offset=1099892 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=221.05 s1_rms=246.79 s2_mean=222.35 s2_rms=248.48 s3_mean=116.93 s3_rms=248.37
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=1 rx_offset=1104276 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=230.91 s1_rms=263.25 s2_mean=230.13 s2_rms=262.77 s3_mean=126.38 s3_rms=262.71
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=2 rx_offset=1108660 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=229.53 s1_rms=259.68 s2_mean=229.19 s2_rms=259.52 s3_mean=116.10 s3_rms=259.46
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=3 rx_offset=1113044 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=233.78 s1_rms=261.12 s2_mean=233.87 s2_rms=261.04 s3_mean=118.78 s3_rms=260.94
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 5
+[PHY]    pbch rx ok. rsrp:51 dB/RE, adjust_rxgain:-1 dB
+[NR_PHY] Cell Detected with GSCN: 0, SSB SC offset: 1182, SSB Ref: 0.000000, PSS Corr peak: 90 dB, PSS Corr Average: 72
+[PHY]    SYNCDIAG symbolOffset=36 mu=1 n_symb_prefix0=3 sync_pos_frame=158016 ssbOffset=1099640 rx_offset=941624 wrapped=0 samples_per_frame=1228800 fft=4096 cp=288 cp0=352 symdur=4384 frame_id=0 init_sync_frame=1 ssbIndex=5 halfFrameBit=0
+[PHY]    [UE0] In synch, rx_offset 941624 samples
+[PHY]    [UE 0] Measured Carrier Frequency offset 35 Hz
+[PHY]    Initial sync successful, PCI: 64
+[PHY]    HW: Configuring channel 0 (rf_chain 0): setting tx_freq 3540000035 Hz, rx_freq 3540000035 Hz, tune_offset 0
+[PHY]    HW: Configuring channel 1 (rf_chain 0): setting tx_freq 3540000035 Hz, rx_freq 3540000035 Hz, tune_offset 0
+[PHY]    HW: Configuring channel 2 (rf_chain 0): setting tx_freq 3540000035 Hz, rx_freq 3540000035 Hz, tune_offset 0
+[PHY]    HW: Configuring channel 3 (rf_chain 0): setting tx_freq 3540000035 Hz, rx_freq 3540000035 Hz, tune_offset 0
+[PHY]    Got synch: hw_slot_offset 31, carrier off 35 Hz
+[NAS]    [UE 0] Received NAS_DEREGISTRATION_REQ
+[NAS]    No GUTI, cannot trigger deregistration request.
+Press ^C again to trigger immediate shutdown
+[NR_RRC] RRC moved into IDLE state
+[NAS]    [UE 0] Received NR_NAS_CONN_RELEASE_IND: cause OTHER

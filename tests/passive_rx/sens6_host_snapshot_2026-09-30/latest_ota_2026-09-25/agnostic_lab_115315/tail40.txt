@@ -1,0 +1,40 @@
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    Initial sync: pbch not decoded on any branch, ssb index 0
+[PHY]    synch Failed: 
+[PHY]    SSB position provided
+[NR_PHY] Starting sync detection
+[PHY]    [UE thread Synch] Running Initial Synch 
+[NR_PHY] Starting cell search with center freq: 3450000000, bandwidth: 273. Scanning for 1 number of GSCN.
+[NR_PHY] Scanning GSCN: 0, with SSB offset: 150, SSB Freq: 0.000000
+[HW]     SENSING: RFSTALL USRP_RX_READ reason=UHD metadata error received=3436 requested=61440 metadata=ERROR_CODE_TIMEOUT
+
+[HW]     SENSING: RFSTALL radio read failed; refusing invalid IQ
+[NR_PHY] UE main thread is ending
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=0 rx_offset=36692 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=724.16 s1_rms=818.10 s2_mean=724.83 s2_rms=819.29 s3_mean=615.81 s3_rms=819.04
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=1 rx_offset=41076 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=720.11 s1_rms=812.31 s2_mean=720.71 s2_rms=813.22 s3_mean=605.25 s3_rms=813.00
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=2 rx_offset=45460 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=728.55 s1_rms=824.03 s2_mean=728.63 s2_rms=824.49 s3_mean=616.55 s3_rms=824.23
+[PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=3 rx_offset=49844 nb_prefix=288 nb_prefix0=0 is_sync=0 s1_mean=728.02 s1_rms=821.18 s2_mean=726.22 s2_rms=817.24 s3_mean=611.27 s3_rms=816.98
+TYPE <CTRL-C> TO TERMINATE
+Entering ITTI signals handler
+TYPE <CTRL-C> TO TERMINATE
+O[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    Initial sync: pbch not decoded on any branch, ssb index 0
+[PHY]    synch Failed: 
+Press ^C again to trigger immediate shutdown
+[NR_PHY] Returned from ITTI signal handler
+[NAS]    [UE 0] Received NAS_DEREGISTRATION_REQ
+[NAS]    No GUTI, cannot trigger deregistration request.
+[NR_RRC] RRC moved into IDLE state
+[PHY]    SENSING: engine thread stopped (processed=0 dropped=0)
+[NAS]    [UE 0] Received NR_NAS_CONN_RELEASE_IND: cause OTHER
+[HW]     releasing USRP
+[HW]     USRP_RX_STOP drained=16243448 dry=1
+DBye.

@@ -1,0 +1,1 @@
+arm=salt_full4ant5 try=1/1 verdict=VOID_NO_SIB1 sib1=0 nack=0 dl_ldpc_ok=0 dl_tb=0% cpis=12  cfotrk=0 nic_miss=22838

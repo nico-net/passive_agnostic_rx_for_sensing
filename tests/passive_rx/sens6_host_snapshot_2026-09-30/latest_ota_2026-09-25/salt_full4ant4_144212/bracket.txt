@@ -1,0 +1,1 @@
+gnb_log_bracket  

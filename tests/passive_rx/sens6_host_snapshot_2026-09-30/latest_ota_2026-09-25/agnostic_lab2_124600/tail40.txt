@@ -1,0 +1,40 @@
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340580080350512 rnti=0x4768 sfn=141 slot=12 fmt=1_1 cce=12 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340580080965087 rnti=0x4768 sfn=141 slot=13 fmt=1_1 cce=0 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340580081561299 rnti=0x4768 sfn=141 slot=14 fmt=1_1 cce=6 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340580082151966 rnti=0x47f7 sfn=141 slot=15 fmt=1_1 cce=0 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH ul_seen utc_ns=1790340580085995275 rnti=0x4768 sfn=142 slot=4 fmt=0_1 cce=40 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340580087228827 rnti=0x47f7 sfn=142 slot=6 fmt=1_1 cce=32 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340580087832264 rnti=0x47f7 sfn=142 slot=7 fmt=1_1 cce=6 al=2
+[PHY]    SENSING: ULSIG rho=1.000 e_chest=6.776e+09 llr_n=27192 llr_mean=59.5 llr_active=0.43
+[PHY]    SENSING: PUSCHDIAG 142.8 rnti=0x4768 k2=4 prb=16+103 sym=0+14 mcs=9/tbl0 rv=0 ta=1600 tbs=2241 G=27192 Qm=2 snr=67.4 delay=0 seg=0/3 status=1 segment or final transport-block CRC failed
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[NR_PHY] Returned from ITTI signal handler
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[NR_PHY] UE main thread is ending
+[PHY]    SENSING: sync(STO) LOS[UL/UE] bin=1.019 -> 3.11 m (MEASURED; CONVERGED over 64 CPIs mode_support=51, 0 CPIs rejected; this CPI raw=1.000 from 8 rows, 2 rejected, first pk=1 frac=+0.000); nominal was 0 from 0.0 m; snr=22.5 dB
+[PHY]    SENSING: sync(STO) n_valid=16 n_flywheel=0 peak_bin=[1..3] mean_frac=0.045 bins drift=0.049 bins/CPI (<0.25) total_walk=1.24 bins -> corrected fine STO
+[PHY]    SENSING: sync(CFO) n_valid=16 cfo=0.01 Hz (filtered=-0.94 Hz, rate=-0.061 Hz/CPI) resid_phase_rms=4.982 rad -> CPE-corrected 16 rows
+[PHY]    SENSING: sync(SFO) fit_rows=16/candidates=16 (excl_isi=0 excl_fade=0) r2=0.023 < 0.90 t=0.6 < 10.0 (resid=4.09 bins) -- slope 0.0002 ppm is not a linear clock drift; correction WITHHELD
+[PHY]    SENSING: sync(LOS residual) range=3 (9.15 m, resid=-1.220 m) doppler=20 (resid=0.7353 m/s) -> bias(delay=3.774e-09 s, cfo=27.505 Hz)
+[PHY]    SENSING: sync CPI #166 STO[n=16 fly=0 frac_bin=+0.045 drift=+0.049 corrected=yes walk=+1.24] CFO[hz=+0.01 filt=-0.94 rms_rad=4.982] SFO[raw=+0.0002 filt=+0.0000 hz=+0.004 n_fit=16/16 corrected=no] LOS[baseline=yes det=yes range_res_m=-1.22 vel_res_mps=+0.7353 bias_delay_ns=+3.8 bias_cfo_hz=+27.51]
+[PHY]    SENSING: CPI #166 fc=3450.0 MHz subc=3276 T_slot=10590.613 occ[csi=0 dmrs=0 data=0 blind=0 pusch=31 uldata=1] range[res=3.05 max=9993]m vel[res=0.001 max=0.0]m/s detections=32 top: range=9.2 m vel=0.00 m/s snr=17.8 dB
+[PHY]    SENSING: engine thread stopped (processed=28936 dropped=129)
+[HW]     releasing USRP
+[HW]     USRP_RX_STOP drained=28656083 dry=1
+TYPE <CTRL-C> TO TERMINATE
+Entering ITTI signals handler
+TYPE <CTRL-C> TO TERMINATE
+Setting USRP TX Freq 3449986584.000000, RX Freq 3449986584.000000, tune_offset: 0.000000
+Bye.

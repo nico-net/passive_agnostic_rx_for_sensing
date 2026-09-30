@@ -1,0 +1,40 @@
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901785863788 rnti=0x4768 sfn=566 slot=16 fmt=1_1 cce=6 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH ul_seen utc_ns=1790340901789578622 rnti=0x47f7 sfn=567 slot=4 fmt=0_1 cce=26 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901790810631 rnti=0x47f7 sfn=567 slot=10 fmt=1_1 cce=0 al=2
+[PHY]    SENSING: ULSIG rho=0.952 e_chest=4.363e+03 llr_n=10296 llr_mean=4.3 llr_active=0.34
+[PHY]    SENSING: PUSCHDIAG 567.9 rnti=0x47f7 k2=5 prb=6+13 sym=0+14 mcs=18/tbl0 rv=0 ta=1600 tbs=576 G=10296 Qm=6 snr=14.5 delay=16 seg=0/1 status=1 segment or final transport-block CRC failed
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901792196234 rnti=0x47f7 sfn=567 slot=11 fmt=1_1 cce=24 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901793574670 rnti=0x4768 sfn=567 slot=13 fmt=1_1 cce=0 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[NR_PHY] Returned from ITTI signal handler
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901794981663 rnti=0x4768 sfn=567 slot=15 fmt=1_1 cce=10 al=2
+[NR_PHY] UE main thread is ending
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901795137983 rnti=0x47f7 sfn=567 slot=15 fmt=1_1 cce=0 al=2
+[PHY]    SENSING: engine thread stopped (processed=14656 dropped=0)
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901796530624 rnti=0x4768 sfn=567 slot=16 fmt=1_1 cce=6 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901797918369 rnti=0x4768 sfn=567 slot=17 fmt=1_1 cce=38 al=2
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790340901804041517 rnti=0x47f7 sfn=568 slot=4 fmt=1_1 cce=26 al=2
+[PHY]    SENSING: blind PDCCH ul_seen utc_ns=1790340901804178772 rnti=0x4768 sfn=568 slot=4 fmt=0_1 cce=40 al=2
+[PHY]    SENSING: USS_TRACK geometry=rb0+48 dur1 map=6/2/2 id=2 obs=64 top=0x3c25 score=15.682 hits=26 hash=0 M=1 gap=0.037 stable=0
+[HW]     releasing USRP
+[HW]     USRP_RX_STOP drained=31304731 dry=1
+[PHY]    SENSING: USS_TRACK geometry=rb0+48 dur1 map=6/2/2 id=2 obs=64 top=0xc5f4 score=13.870 hits=20 hash=2 M=1 gap=0.202 stable=0
+[PHY]    SENSING: USS_TRACK geometry=rb0+48 dur1 map=6/2/2 id=2 obs=64 top=0xc5f4 score=13.870 hits=20 hash=2 M=1 gap=0.202 stable=0
+[PHY]    SENSING: USS_TRACK geometry=rb0+48 dur1 map=6/2/2 id=2 obs=64 top=0xc5f4 score=13.870 hits=20 hash=2 M=1 gap=0.202 stable=4
+[PHY]    SENSING: USS_TRACK geometry=rb0+48 dur1 map=6/2/2 id=2 obs=64 top=0xc5f4 score=13.870 hits=20 hash=2 M=1 gap=0.202 stable=4
+TYPE <CTRL-C> TO TERMINATE
+Entering ITTI signals handler
+TYPE <CTRL-C> TO TERMINATE
+Setting USRP TX Freq 3449986505.000000, RX Freq 3449986505.000000, tune_offset: 0.000000
+Bye.

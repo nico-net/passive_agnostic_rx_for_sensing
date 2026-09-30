@@ -1,0 +1,45 @@
+#!/bin/bash
+# Toggle enp128s31f6 between DHCP-server mode (dnsmasq, static 192.168.1.1/24)
+# and normal DHCP-client mode (netplan default, dhcp4: true).
+set -euo pipefail
+
+IFACE=enp128s31f6
+MAC="f4:f1:9e:42:76:46"
+OVERRIDE=/etc/netplan/99-${IFACE}-server.yaml
+
+usage() { echo "Usage: $0 {server|client|status}" >&2; exit 1; }
+[ $EUID -eq 0 ] || { echo "must run as root (sudo)" >&2; exit 1; }
+
+case "${1:-}" in
+  server)
+    cat > "$OVERRIDE" <<EOF
+network:
+  version: 2
+  ethernets:
+    ${IFACE}:
+      match:
+        macaddress: "${MAC}"
+      set-name: "${IFACE}"
+      dhcp4: false
+      addresses: [192.168.1.1/24]
+EOF
+    chmod 600 "$OVERRIDE"
+    netplan apply
+    systemctl restart dnsmasq
+    echo "server mode: dnsmasq serving 192.168.1.50-150 on ${IFACE} (gateway/self 192.168.1.1)"
+    ;;
+  client)
+    systemctl stop dnsmasq
+    rm -f "$OVERRIDE"
+    netplan apply
+    echo "client mode: ${IFACE} back to normal DHCP client"
+    ;;
+  status)
+    if [ -f "$OVERRIDE" ]; then echo "mode: server"; else echo "mode: client"; fi
+    systemctl is-active dnsmasq || true
+    ip -br addr show "$IFACE"
+    ;;
+  *)
+    usage
+    ;;
+esac

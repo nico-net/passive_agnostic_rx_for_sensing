@@ -1,0 +1,1 @@
+arm=agnostic_lab2 try=2/2 verdict=VOID_DL_RATE sib1=1 nack=0 dl_ldpc_ok=1 dl_tb=0% cpis=111 claimed=1691 cfotrk=0 nic_miss=0

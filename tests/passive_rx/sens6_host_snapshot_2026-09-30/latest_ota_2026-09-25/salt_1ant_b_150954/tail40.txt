@@ -1,0 +1,39 @@
+[PHY]    SENSING: sync(STO) row=17 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: TSYNC_OBS frame=60 slot=2 corr_pos=32 prev_pos=35 d_frames=2 d_per_frame=-1.500 drift_ema=+7.707 n_obs=16 e_win_frac=0.990 peak_oow=0 reliable=1 max_val=107481690 measure_only=0
+[PHY]    SENSING: TRACKLOCK frame=572 slot=2 ssb=5 pbch_crc_ok=1 max_pos_acc -462 -> -430 (delta +32) sampleShift=-6
+[PHY]    SENSING: sync(STO) row=18 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 5 -> -6 (delta -11) at /home/sens/NICOLA/adaptive-rx-UL-DL/executables/nr-ue.c:1760 ts=204244255 consumed=39505700
+[PHY]    SENSING: sync(STO) row=19 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=20 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=21 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=22 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=23 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=24 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=25 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=26 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=27 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=28 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=29 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=30 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) row=31 flywheeling (signal fade) -- projected center_bin=238
+[PHY]    SENSING: sync(STO) CPI has only 5 valid LOS rows (need >=8, n_flywheel=27) -- skipping fit/correction
+[PHY]    SENSING: sync(CFO) n_valid=5 cfo=-5.17 Hz (filtered=-5.17 Hz, rate=0.000 Hz/CPI) resid_phase_rms=1.238 rad -> CPE-corrected 5 rows
+[PHY]    SENSING: sync(SFO) fit_rows=25/candidates=32 (excl_isi=1 excl_fade=6) r2=0.591 < 0.90 t=5.8 < 10.0 (resid=0.40 bins) -- slope 0.1286 ppm is not a linear clock drift; correction WITHHELD
+[PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -6 -> 4 (delta +10) at /home/sens/NICOLA/adaptive-rx-UL-DL/executables/nr-ue.c:1507 ts=205227295 consumed=40488740
+[PHY]    SENSING: sync CPI #1 STO[n=5 fly=27 frac_bin=+0.000 drift=+0.000 corrected=no walk=+5.50] CFO[hz=-5.17 filt=-5.17 rms_rad=1.238] SFO[raw=+0.1286 filt=+0.0000 hz=+2.964 n_fit=25/32 corrected=no] LOS[baseline=no det=no range_res_m=+0.00 vel_res_mps=+0.0000 bias_delay_ns=+0.0 bias_cfo_hz=+0.00]
+[PHY]    SENSING: CPI #1 fc=3540.0 MHz subc=2604 T_slot=11.926 occ[csi=0 dmrs=0 data=1 blind=0 pusch=0 uldata=0] range[res=3.84 max=9993]m vel[res=0.444 max=7.1]m/s detections=32 top: range=11.5 m vel=1.78 m/s snr=16.8 dB
+[PHY]    SENSING: reference occurrence #151 slot_idx=11361 nof_re=240 comb=1 period_slots=1 dropped=0
+[HW]     SENSING: RFSTALL USRP_RX_READ reason=UHD metadata error received=13837 requested=56998 metadata=ERROR_CODE_TIMEOUT
+
+[HW]     SENSING: RFSTALL radio read failed; refusing invalid IQ
+[NR_PHY] UE main thread is ending
+TYPE <CTRL-C> TO TERMINATE
+Entering ITTI signals handler
+TYPE <CTRL-C> TO TERMINATE
+Setting USRP TX Freq 3540000308.000000, RX Freq 3540000308.000000, tune_offset: 0.000000
+O[WARNING] [MPM.RPCServer] Someone tried to claim this device again (From: 192.168.1.1)
+Press ^C again to trigger immediate shutdown
+[NAS]    [UE 0] Received NAS_DEREGISTRATION_REQ
+[NAS]    No GUTI, cannot trigger deregistration request.
+[NR_RRC] RRC moved into IDLE state
+[NAS]    [UE 0] Received NR_NAS_CONN_RELEASE_IND: cause OTHER

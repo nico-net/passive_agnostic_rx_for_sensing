@@ -1,0 +1,29 @@
+CMDLINE: "/home/sens/NICOLA/adaptive-rx-UL-DL/cmake_targets/ran_build/build/nr-uesoftmodem" "--usrp-args" "type=x4xx,addr=192.168.20.2,mgmt_addr=192.168.1.140" "-O" "/home/sens/NICOLA/captures/salt_ota_noprior.conf" "-r" "217" "--numerology" "1" "--band" "78" "-C" "3540000000" "--ssb" "1182" "--ue-rxgain" "43" "--ue-nb-ant-rx" "1" "--ue-nb-ant-tx" "1" "--passive-rx" "--ue-fo-compensation" "--initial-fo" "-15000" "--thread-pool" "0,1,4,5,6,7" "--time-sync-I" "0.01" "--ntn-initial-time-drift" "-4.25" "-A" "90" 
+[PHY]    SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI-1_1 width reconciliation not applicable (autoconf scans DCI format 1_0 only)
+[HW]     Version: Branch: adaptive-rx-UL-DL Abrev. Hash: aa872eba3b Date: Thu Sep 24 15:18:12 2026 +0000
+[HW]     UHD version 4.10.0.HEAD-0-g2af4ddb9 (4.10.0)
+[INFO] [MPMD] Initializing 1 device(s) in parallel with args: mgmt_addr=192.168.1.140,type=x4xx,product=x410,serial=327C1F2,name=ni-x4xx-327C1F2,fpga=UC_200,rpc_version=1,claimed=False,addr=192.168.20.2,master_clock_rate=245760000.000000
+[HW]     RFCHAN ch0 subdev=0 port=RX1 gain=43.00 range=[0.0..60.0] freq=3540.000000 MHz rate=122.880000 Msps bw=400.000000 MHz
+[HW]     Actual master clock: 245.760000MHz...
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 5
+[PHY]    pbch rx ok. rsrp:55 dB/RE, adjust_rxgain:-5 dB
+[NR_PHY] Cell Detected with GSCN: 0, SSB SC offset: 1182, SSB Ref: 0.000000, PSS Corr peak: 90 dB, PSS Corr Average: 69
+[PHY]    [UE 0] Measured Carrier Frequency offset 308 Hz
+[PHY]    Initial sync successful, PCI: 64
+[PHY]    SENSING: ACQ_EVENT pbch_locked (n=1, state=SEARCHING)
+[PHY]    SENSING: ACQ_STATE SEARCHING -> PBCH_LOCKED (updates=1 time_in_prev=0 regressions=0) evidence[len_found=0 coreset_ok=0 ul_bwp=0 dl_win=0 ul_width_win=0 ul_interp_win=0]
+[PHY]    SENSING: CSS0 autoconf from MIB/SIB1 -- coreset(groups=8 dur=1 bundle=6 interleaver=2 shift=64 scramb=64) bwp=[86..134) (cset_start_rb = ssb_offset_point_a 98 - rb_offset 12) ss(period=40 offset=15 dur=2 symb=0) dci10(mux=1 sib1=1)
+[NR_RRC] SENSING: SIB1 CELL mcc=228 mnc=03 cell_identity=0x25aa70dae tac=546003 n_plmn=1
+[NR_MAC] PASSIVE: cell config extracted from SIB1 -- PCI=64 DL: 217 PRB @ SCS=1 offsetToPointA=196 UL: 217 PRB @ SCS=1 absoluteFrequencyPointA=-1
+[NR_MAC] SENSING: SIB1_SS seq=1 index=0 id=1 coreset=0 type=common period=1 offset=0 duration=1 symbols=0x2000 cand[1,2,4,8,16]=0,0,4,2,1 formats[00_10=1 20=0 21=0 22=0 23=0 ue=-1] roles[sib1=0 otherSI=0 paging=1 ra=1]
+[NR_MAC] SENSING: SIB1_SS seq=1 index=1 id=8 coreset=0 type=common period=40 offset=21 duration=2 symbols=0x2000 cand[1,2,4,8,16]=0,0,4,2,1 formats[00_10=1 20=0 21=0 22=0 23=0 ue=-1] roles[sib1=0 otherSI=1 paging=0 ra=0]
+[PHY]    SENSING: SIB1 PRIOR: bwp=0+217 coreset(none)[id=0 dur=0 non-interleaved bundle=0 interleaver=0 shift=0 dmrs_id=0 win=-1..-1] ss[AL1=0 AL2=0 AL4=4 AL8=2 AL16=1 period=0 offset=0 dur=0] ra_ss=1[period=1 offset=0 dur=1 symbols=0x2000] sib1_ss=0 paging_ss=1 rach[prach_idx=210 msg1_fdm=1 msg1_fstart=11 sul=0]
+[PHY]    SENSING: TDA-COMMON from SIB1: 11 entries: [0]S=1,L=13,m=0 [1]S=1,L=12,m=0 [2]S=1,L=11,m=0 [3]S=1,L=10,m=0 [4]S=1,L=9,m=0 [5]S=1,L=8,m=0 [6]S=1,L=7,m=0 [7]S=1,L=6,m=0 [8]S=1,L=5,m=0 [9]S=1,L=4,m=0 [10]S=1,L=3,m=0 -- RA/TC/C-in-CSS now use the CELL's own list instead of the spec default table
+[PHY]    SENSING: ACQ_EVENT sib1_decoded (n=1, state=PBCH_LOCKED)
+[PHY]    SENSING: ACQ_STATE PBCH_LOCKED -> SIB1_DECODED (updates=2 time_in_prev=0 regressions=0) evidence[len_found=0 coreset_ok=0 ul_bwp=0 dl_win=0 ul_width_win=0 ul_interp_win=0]
+[PHY]    SENSING: TDD from SIB1 DERIVED: p1 period=5 slots dl=3+10sym ul=1+2sym | p2 period=0 dl=0+0sym ul=0+0sym
+[PHY]    SENSING: ACQ carrier CONFIRMED from SIB1: 217 PRB mu=1, Point A at grid subcarrier 0, carrier ends at 2604 = grid end (started with 217 PRB mu=1, SSB found at subcarrier 1182); derived carrier centre 3540.000000 MHz (started 3540.000000 MHz)
+[HW]     SENSING: RFSTALL USRP_RX_READ reason=UHD metadata error received=13837 requested=56998 metadata=ERROR_CODE_TIMEOUT
+[HW]     SENSING: RFSTALL radio read failed; refusing invalid IQ
+[NR_PHY] UE main thread is ending
+O[WARNING] [MPM.RPCServer] Someone tried to claim this device again (From: 192.168.1.1)

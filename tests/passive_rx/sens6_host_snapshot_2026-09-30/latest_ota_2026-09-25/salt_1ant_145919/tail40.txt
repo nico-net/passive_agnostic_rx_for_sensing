@@ -1,0 +1,39 @@
+    RX DSP: 3
+    RX Dboard: B
+    RX Subdev: 1
+  TX Channel: 0
+    TX DSP: 0
+    TX Dboard: A
+    TX Subdev: 0
+  TX Channel: 1
+    TX DSP: 1
+    TX Dboard: A
+    TX Subdev: 1
+  TX Channel: 2
+    TX DSP: 2
+    TX Dboard: B
+    TX Subdev: 0
+  TX Channel: 3
+    TX DSP: 3
+    TX Dboard: B
+    TX Subdev: 1
+
+[HW]     Device timestamp: 0.726543...
+[HW]     [RAU] has loaded USRP X400 device.
+[HW]     current pps at 1.000000, starting streaming at 2.000000
+[HW]     USRP_RX_START scheduled=2.000000000
+[PHY]    Intializing UE Threads for instance 0 ...
+[UTIL]   threadCreate() for UEthread_0: creating thread with affinity ffffffff, priority 97
+[PHY]    SENSING: engine thread started (cpi_slots=32 sources_mask=0x7c primary=2)
+[UTIL]   threadCreate() for L1_UE_stats_0: creating thread with affinity ffffffff, priority 1
+[PHY]    SENSING: DetectionReport ZeroMQ PUB bound to tcp://*:5557
+[HW]     SENSING: RFSTALL USRP_RX_START reason=UHD metadata error received=0 requested=61440 metadata=ERROR_CODE_OVERFLOW (Out of sequence error)
+
+TYPE <CTRL-C> TO TERMINATE
+[HW]     SENSING: RFSTALL radio read failed; refusing invalid IQ
+D[NR_PHY] UE main thread is ending
+O[NAS]    [UE 0] Received NAS_DEREGISTRATION_REQ
+[NAS]    No GUTI, cannot trigger deregistration request.
+Press ^C again to trigger immediate shutdown
+[NR_RRC] RRC moved into IDLE state
+[NAS]    [UE 0] Received NR_NAS_CONN_RELEASE_IND: cause OTHER

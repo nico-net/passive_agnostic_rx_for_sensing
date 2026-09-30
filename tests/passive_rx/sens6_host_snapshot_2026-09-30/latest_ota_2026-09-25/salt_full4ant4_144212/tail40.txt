@@ -1,0 +1,40 @@
+[NR_PHY] Scanning GSCN: 7869, with SSB offset: 942, SSB Freq: 3532800000.000000
+[NR_PHY] Scanning GSCN: 7870, with SSB offset: 990, SSB Freq: 3534240000.000000
+[NR_PHY] Scanning GSCN: 7871, with SSB offset: 1038, SSB Freq: 3535680000.000000
+[NR_PHY] Scanning GSCN: 7872, with SSB offset: 1086, SSB Freq: 3537120000.000000
+[NR_PHY] Scanning GSCN: 7873, with SSB offset: 1134, SSB Freq: 3538560000.000000
+[NR_PHY] Scanning GSCN: 7874, with SSB offset: 1182, SSB Freq: 3540000000.000000
+[NR_PHY] Scanning GSCN: 7875, with SSB offset: 1230, SSB Freq: 3541440000.000000
+[NR_PHY] Scanning GSCN: 7876, with SSB offset: 1278, SSB Freq: 3542880000.000000
+[NR_PHY] Scanning GSCN: 7877, with SSB offset: 1326, SSB Freq: 3544320000.000000
+[NR_PHY] Scanning GSCN: 7878, with SSB offset: 1374, SSB Freq: 3545760000.000000
+[NR_PHY] Scanning GSCN: 7879, with SSB offset: 1422, SSB Freq: 3547200000.000000
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    ERROR NR_PBCH_DECODE => polar decoding wrong
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 5
+[PHY]    pbch rx ok. rsrp:60 dB/RE, adjust_rxgain:-10 dB
+[NR_PHY] Cell Detected with GSCN: 7874, SSB SC offset: 1182, SSB Ref: 3540000000.000000, PSS Corr peak: 96 dB, PSS Corr Average: 75
+[PHY]    SYNCDIAG symbolOffset=36 mu=1 n_symb_prefix0=3 sync_pos_frame=158016 ssbOffset=1105600 rx_offset=947584 wrapped=0 samples_per_frame=1228800 fft=4096 cp=288 cp0=352 symdur=4384 frame_id=0 init_sync_frame=1 ssbIndex=5 halfFrameBit=0
+[PHY]    [UE0] In synch, rx_offset 947584 samples
+[PHY]    [UE 0] Measured Carrier Frequency offset 324 Hz
+[PHY]    Initial sync successful, PCI: 64
+[PHY]    HW: Configuring channel 0 (rf_chain 0): setting tx_freq 3540000324 Hz, rx_freq 3540000324 Hz, tune_offset 0
+[PHY]    HW: Configuring channel 1 (rf_chain 0): setting tx_freq 3540000324 Hz, rx_freq 3540000324 Hz, tune_offset 0
+[PHY]    HW: Configuring channel 2 (rf_chain 0): setting tx_freq 3540000324 Hz, rx_freq 3540000324 Hz, tune_offset 0
+[PHY]    HW: Configuring channel 3 (rf_chain 0): setting tx_freq 3540000324 Hz, rx_freq 3540000324 Hz, tune_offset 0
+[NR_RRC] [UE 0] BCCH update: phyCellID 0->64, arfcn_ssb 0->636000
+[PHY]    Got synch: hw_slot_offset 31, carrier off 324 Hz
+Press ^C again to trigger immediate shutdown
+[NR_PHY] Returned from ITTI signal handler
+[NAS]    [UE 0] Received NAS_DEREGISTRATION_REQ
+[NAS]    No GUTI, cannot trigger deregistration request.
+[NR_RRC] RRC moved into IDLE state
+[NAS]    [UE 0] Received NR_NAS_CONN_RELEASE_IND: cause OTHER
+[PHY]    SENSING: engine thread stopped (processed=0 dropped=0)
+[HW]     releasing USRP
+[HW]     USRP_RX_STOP drained=6923 dry=1
+Setting USRP TX Freq 3540000324.000000, RX Freq 3540000324.000000, tune_offset: 0.000000
+Bye.

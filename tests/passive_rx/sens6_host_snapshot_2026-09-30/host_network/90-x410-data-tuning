@@ -1,0 +1,8 @@
+#!/bin/sh
+# Re-applies ethtool ring-buffer sizing whenever the X410 data NIC comes up. ethtool settings do NOT
+# persist across interface resets/reboots the way NetworkManager connection profiles do (MTU is pinned
+# via the x410-data profile itself; ring buffers need this dispatcher hook instead).
+IFACE="$1"; STATUS="$2"
+if [ "$IFACE" = "enp2s0f1np1" ] && { [ "$STATUS" = "up" ] || [ "$STATUS" = "connectivity-change" ]; }; then
+  ethtool -G enp2s0f1np1 rx 8192 tx 8192 2>/dev/null || true
+fi
