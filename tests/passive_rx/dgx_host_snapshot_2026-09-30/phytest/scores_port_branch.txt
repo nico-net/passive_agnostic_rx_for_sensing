@@ -1,0 +1,4 @@
+port_base_r1 sync@5.405s first_acc@14.681s conv@16.090s ttc=1.41s nconv=2 [S=1 L=13,S=1 L=5,] bank:len=46 LDPC:ok=54651 seg_fail=728 PDSCHQ:queued=55437 decoded=55437 crc_ok=54651 (98.6%) dropped[full=0 stale=0] scanq[queued=384438 done=384299 drop_full=133 drop_stale=0 maxlag=7] cpu=292% rssKB=685892
+port_base_r2 sync@5.300s first_acc@14.739s conv@16.318s ttc=1.58s nconv=2 [S=1 L=13,S=1 L=5,] bank:len=46 LDPC:ok=54617 seg_fail=704 PDSCHQ:queued=55384 decoded=55384 crc_ok=54617 (98.6%) dropped[full=0 stale=0] scanq[queued=384270 done=384080 drop_full=187 drop_stale=0 maxlag=8] cpu=308% rssKB=701292
+port_r4pin_r1 sync@17.712s first_acc@17.876s conv@s ttc=NAs nconv=0 [] bank: LDPC:ok=478 seg_fail=7953 PDSCHQ:queued=3132 decoded=3129 crc_ok=478 (15.3%) dropped[full=0 stale=0] scanq[queued=0 done=0 drop_full=0 drop_stale=0 maxlag=0] cpu=262% rssKB=2144220
+port_r4pin_default sync@s first_acc@s conv@s ttc=NAs nconv=0 [] bank: LDPC: PDSCHQ:  cpu= rssKB=

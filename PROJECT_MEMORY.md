@@ -1266,6 +1266,23 @@ bed used the *pinned* `ue.passive.pin49r4.100mhz.conf` → 100 % CRC) — **not 
 **90 s single-threaded initial sync at 273 PRB × 4 RX** is itself a finding: the GSCN/PSS scan is effectively serial
 on this CPU (cf. §8 X20) — a parallelization target (§14.3) and a reason to keep pinning `--ssb` at 273 PRB × 4 RX.
 
+### 14.4 Branch `port/multirx-rx-fixes` — validation of the ported receiver fixes (2026-10-01, DGX, `[SIM VERIFIED]` except the scan-confirm fix)
+
+Ported from `feature/multirx-clean-adaptive` (triage in K2): scan-confirm CFO fix (3 commits), BRANCHFO
+serialisation + CRC-gating + decode-entry reset (default **OFF**), P39 single-branch PDSCH chest, `_ss` help text.
+Build clean; ctest = same 4 ARM failures as HEAD (K21, K22 incl. intermittent qam64), nothing new; sens6 files unchanged.
+
+| Arm (150 s) | Result |
+|---|---|
+| 106 PRB rank 1 baseline ×2 | CONVERGED 2/2 (S1 L13, S1 L5), ttc 1.41 / 1.58 s, 98.6 % / 98.6 %, drop_full 0.03–0.05 % — same as HEAD (§14.1) |
+| 273 PRB **rank 4, 4 RX, pinned `ue.passive.pin49r4.100mhz.conf`**, default env | **100.0 % (3106/3106)**, Nl=4 Qm=8 — matches the sens6 rank-4 bed (3266/3270). The pinned conf syncs where the agnostic `autor4` did not (§14.2) |
+| same, `ISAC_RX_MRC_MODE=0 ISAC_RX_BRANCH_FO=1` | **15.3 %** (478/3129); BRANCHFO integrates a spurious +55.7 Hz on branch 3 in an ideal channel → **do not enable BRANCHFO at rank > 1** (it measures the per-branch slope on layer-0 estimates); default OFF kept |
+
+Not validated (needs OTA): the scan-confirm CFO fix (rfsim has no LO/CFO) — pass = with `--ue-scan-carrier` the
+confirm pass measures the full CFO (≈ scan pass), no LOG_W "confirm-pass offset < 0.1x", and SIB1 decodes. P39 engages
+only at rank 1 / 4 RX with a planned branch (not exercised by these beds).
+Evidence: `tests/passive_rx/dgx_host_snapshot_2026-09-30/phytest/scores_port_branch.txt`.
+
 ### 14.3 CPU core allocation on the DGX and parallelization plan (design, 2026-09-30)
 
 **Topology** (`lscpu -e`): 2 clusters with separate L3 — cluster 0 = cpus 0–9, cluster 1 = cpus 10–19; each cluster =
