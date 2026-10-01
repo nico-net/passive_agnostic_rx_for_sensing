@@ -1,0 +1,38 @@
+# Task 4b evidence (DGX, rfsim, throwaway LOG_I at the real decoder, reverted): geometries seen by nr_rate_matching_ldpc_rx
+# 0 RX rejects in 106-PRB (56754 accepts) and 273-PRB (28982 accepts) rfsim runs, 150 s each (ISAC_DISCOVER_DIAG=1).
+# RX rejects need Foffset > Ncb, i.e. C >~ 79 at the observed Tbslbrm (368872..1277992); rfsim never reaches it.
+# 106 PRB, distinct accepted geometries (tbs in bits):
+[0m[PHY]    TD4B ACCEPT G 11232 tbs 2792 Qm 2 Nl 1 C 1 K 2880 F 72 Zc 288 BG 2 Ncb 14400 rv 0 tbslbrm 368872 Foffset 2232
+[0m[PHY]    TD4B ACCEPT G 11232 tbs 7424 Qm 2 Nl 1 C 1 K 7744 F 296 Zc 352 BG 1 Ncb 23232 rv 0 tbslbrm 368872 Foffset 6744
+[0m[PHY]    TD4B ACCEPT G 11448 tbs 2792 Qm 2 Nl 1 C 1 K 2880 F 72 Zc 288 BG 2 Ncb 14400 rv 0 tbslbrm 368872 Foffset 2232
+[0m[PHY]    TD4B ACCEPT G 11448 tbs 7552 Qm 2 Nl 1 C 1 K 7744 F 168 Zc 352 BG 1 Ncb 23232 rv 0 tbslbrm 368872 Foffset 6872
+[0m[PHY]    TD4B ACCEPT G 13056 tbs 3240 Qm 2 Nl 1 C 1 K 3520 F 264 Zc 352 BG 2 Ncb 17600 rv 0 tbslbrm 368872 Foffset 2552
+[0m[PHY]    TD4B ACCEPT G 13728 tbs 3368 Qm 2 Nl 1 C 1 K 3520 F 136 Zc 352 BG 2 Ncb 17600 rv 0 tbslbrm 368872 Foffset 2680
+[0m[PHY]    TD4B ACCEPT G 13728 tbs 8968 Qm 2 Nl 1 C 2 K 4576 F 56 Zc 208 BG 1 Ncb 13728 rv 0 tbslbrm 368872 Foffset 4104
+[0m[PHY]    TD4B ACCEPT G 17952 tbs 11784 Qm 2 Nl 1 C 2 K 6336 F 408 Zc 288 BG 1 Ncb 19008 rv 0 tbslbrm 368872 Foffset 5352
+[0m[PHY]    TD4B ACCEPT G 17952 tbs 4360 Qm 2 Nl 1 C 2 K 2240 F 24 Zc 224 BG 2 Ncb 11200 rv 0 tbslbrm 368872 Foffset 1768
+[0m[PHY]    TD4B ACCEPT G 19584 tbs 11784 Qm 4 Nl 1 C 2 K 6336 F 408 Zc 288 BG 1 Ncb 19008 rv 0 tbslbrm 491800 Foffset 5352
+[0m[PHY]    TD4B ACCEPT G 19584 tbs 13064 Qm 2 Nl 1 C 2 K 7040 F 472 Zc 320 BG 1 Ncb 21120 rv 0 tbslbrm 368872 Foffset 5928
+[0m[PHY]    TD4B ACCEPT G 21216 tbs 14088 Qm 2 Nl 1 C 2 K 7744 F 664 Zc 352 BG 1 Ncb 23232 rv 0 tbslbrm 368872 Foffset 6376
+[0m[PHY]    TD4B ACCEPT G 21216 tbs 5128 Qm 2 Nl 1 C 2 K 2880 F 280 Zc 288 BG 2 Ncb 14400 rv 0 tbslbrm 368872 Foffset 2024
+[0m[PHY]    TD4B ACCEPT G 27456 tbs 6664 Qm 2 Nl 1 C 2 K 3520 F 152 Zc 352 BG 2 Ncb 17600 rv 0 tbslbrm 368872 Foffset 2664
+[0m[PHY]    TD4B ACCEPT G 27984 tbs 18432 Qm 2 Nl 1 C 3 K 6336 F 160 Zc 288 BG 1 Ncb 19008 rv 0 tbslbrm 368872 Foffset 5600
+[0m[PHY]    TD4B ACCEPT G 27984 tbs 6792 Qm 2 Nl 1 C 2 K 3520 F 88 Zc 352 BG 2 Ncb 17600 rv 0 tbslbrm 368872 Foffset 2728
+[0m[PHY]    TD4B ACCEPT G 29952 tbs 7304 Qm 2 Nl 1 C 2 K 3840 F 152 Zc 384 BG 2 Ncb 19200 rv 0 tbslbrm 368872 Foffset 2920
+[0m[PHY]    TD4B ACCEPT G 30528 tbs 19968 Qm 2 Nl 1 C 3 K 7040 F 352 Zc 320 BG 1 Ncb 21120 rv 0 tbslbrm 368872 Foffset 6048
+[0m[PHY]    TD4B ACCEPT G 30528 tbs 7432 Qm 2 Nl 1 C 2 K 3840 F 88 Zc 384 BG 2 Ncb 19200 rv 0 tbslbrm 368872 Foffset 2984
+[0m[PHY]    TD4B ACCEPT G 32448 tbs 21504 Qm 2 Nl 1 C 3 K 7744 F 544 Zc 352 BG 1 Ncb 23232 rv 0 tbslbrm 368872 Foffset 6496
+[0m[PHY]    TD4B ACCEPT G 32448 tbs 7944 Qm 2 Nl 1 C 3 K 2880 F 200 Zc 288 BG 2 Ncb 14400 rv 0 tbslbrm 368872 Foffset 2104
+[0m[PHY]    TD4B ACCEPT G 33072 tbs 8064 Qm 2 Nl 1 C 3 K 2880 F 160 Zc 288 BG 2 Ncb 14400 rv 0 tbslbrm 368872 Foffset 2144
+[0m[PHY]    TD4B ACCEPT G 39168 tbs 23568 Qm 4 Nl 1 C 3 K 8448 F 560 Zc 384 BG 1 Ncb 25344 rv 0 tbslbrm 491800 Foffset 7120
+[0m[PHY]    TD4B ACCEPT G 5712 tbs 1416 Qm 2 Nl 1 C 1 K 1440 F 8 Zc 144 BG 2 Ncb 7200 rv 0 tbslbrm 368872 Foffset 1144
+[PHY]    TD4B ACCEPT G 13992 tbs 3496 Qm 2 Nl 1 C 1 K 3520 F 8 Zc 352 BG 2 Ncb 17600 rv 0 tbslbrm 368872 Foffset 2808
+# 273 PRB, most frequent accepted geometries:
+[0m[PHY]    TD4B ACCEPT G 78624 tbs 52224 Qm 2 Nl 1 C 7 K 7744 F 256 Zc 352 BG 1 Ncb 23232 rv 0 tbslbrm 950984 Foffset 6784
+[0m[PHY]    TD4B ACCEPT G 29484 tbs 19464 Qm 2 Nl 1 C 3 K 7040 F 520 Zc 320 BG 1 Ncb 21120 rv 0 tbslbrm 950984 Foffset 5880
+[PHY]    TD4B ACCEPT G 78624 tbs 52224 Qm 2 Nl 1 C 7 K 7744 F 256 Zc 352 BG 1 Ncb 23232 rv 0 tbslbrm 950984 Foffset 6784
+[0m[PHY]    TD4B ACCEPT G 36036 tbs 24072 Qm 2 Nl 1 C 3 K 8448 F 392 Zc 384 BG 1 Ncb 25344 rv 0 tbslbrm 950984 Foffset 7288
+[0m[PHY]    TD4B ACCEPT G 144144 tbs 86040 Qm 4 Nl 1 C 11 K 8448 F 600 Zc 384 BG 1 Ncb 25344 rv 0 tbslbrm 1277992 Foffset 7080
+[0m[PHY]    TD4B ACCEPT G 78624 tbs 19464 Qm 2 Nl 1 C 6 K 3520 F 248 Zc 352 BG 2 Ncb 17600 rv 0 tbslbrm 950984 Foffset 2568
+[0m[PHY]    TD4B ACCEPT G 72072 tbs 43032 Qm 4 Nl 1 C 6 K 7744 F 544 Zc 352 BG 1 Ncb 23232 rv 0 tbslbrm 1277992 Foffset 6496
+[0m[PHY]    TD4B ACCEPT G 36036 tbs 8712 Qm 2 Nl 1 C 3 K 3200 F 264 Zc 320 BG 2 Ncb 16000 rv 0 tbslbrm 950984 Foffset 2296
