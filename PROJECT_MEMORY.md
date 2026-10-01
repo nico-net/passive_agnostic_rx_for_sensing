@@ -12,6 +12,15 @@ agent, terminal or human conversation: everything needed is here or in the repos
 > longer reachable; **all next OTA tests are on a new, unknown cell seen from the DEIB building, Politecnico di Milano**
 > (§15.0). No X410 is connected yet, so nothing OTA has run on the DGX.
 
+> **Update 2026-10-01 (cloud Track-A session, branch `cloud/dgx-next-steps`, x86 cloud container — NOT the DGX).**
+> Tasks A0–A7, A11 (code), A13 (x86 path) done in a cloud container (Intel Xeon @2.80 GHz, 4 cores, 15 GB, Ubuntu
+> 24.04, gcc 13.3, no IPv6/SCTP, affinity EINVAL). New: `ISAC_METRICS` JSON line + file (§11.13), per-grant
+> observation API (§21), rfsim regression gate/scorer, campaign runner, Receiver-health dashboard tab, thread-safe
+> N-consumer blind-PDCCH scan, scan-scratch budget knob, DGX core-map launcher (dry-run only), arch-aware offline
+> sync script. **Every cloud number is labelled `cloud x86` and is never merged with DGX numbers** (§14.5). Gate
+> thresholds re-baselined on cloud (crc >= 93.0 %, drop_full <= 2.5 %) vs DGX (98 / 1). New known issues K28–K31 (§24);
+> DGX follow-ups in §25. Final review fix commit: `<FINALFIX>`.
+
 ---
 
 ## 0. How to read this document
@@ -404,6 +413,10 @@ through sensing metrics.
 | `openair2/LAYER2/NR_MAC_UE/nr_passive_rrc_harvest.c` | Harvest dedicated config from an **unciphered** RRCSetup (Msg4) | Rarely useful (dedicated config usually arrives ciphered; never on NSA) |
 | `openair1/PHY/CODING/nrLDPC_cuda/*`, `nrPolar_tools/cuda/*`, `nr_pdsch_gpu_fep.cu`, `nr_polar_gpu*` | CUDA LDPC decoder plugin (`--loader.ldpc.shlibversion _cuda`), CUDA polar SC, GPU FEP | Measured **20× slower wall-clock** than CPU for single TBs on the RTX 4060 Ti — not used by default |
 | `openair1/SIMULATION/TOOLS/sensing_channel.c`, `SIMULATION/NR_PHY/pusch_ra0sim.c`, `hidden_waveform.h` | Sim channel for sensing scenes; RA0 regression fixture; hidden-DCI transmitter fixture | gtests |
+| `nr_passive_metrics.c/.h`, `nr_passive_metrics_json.c` | `ISAC_METRICS` JSON snapshot (schema 1) emitted with the blind-monitor summary (§11.13); optional file `ISAC_METRICS_PATH`; pure serializer in `_json.c` (testable without the receiver). `pci` is `_Atomic`. (A2, `4cdb890759`/`6e9a96c476`) | `test_nr_passive_metrics` (5) `[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 6e9a96c476]` + rfsim `[SIM VERIFIED]` (§14.5) |
+| `nr_passive_obs.c/.h` | **Per-grant observation API**: one JSONL record per decoded DL/UL grant to `ISAC_OBS_PATH`, non-blocking ring (16384 slots, drop-on-full), writer thread; header comment = schema v1 (§21). (A3, `10cc6f0058`, fixes `385e02b9cf`) | `test_nr_passive_obs` (8) `[OFFLINE VERIFIED, cloud x86 …, 385e02b9cf]`, also under TSAN 0 warnings (A7); rfsim `[SIM VERIFIED]` (§14.5). UL hook compiled, **not exercised** (K28) |
+| `nr_pdcch_blind_phase2.c/.h` | **Phase-2 lock** (`g_phase2_mu`) for the blind-PDCCH occasion tail (accepts, dci_thres EMA, RNTI persistence ring, census, CFR/PDSCH submit); energy floor with its own leaf lock; production accept gate `nr_pdcch_blind_dl_accept_gate()`. Enables N scan consumers (K27). (A7, `b6e5fb27ac`, `1d6cbdf5c3`) | `Phase2Concurrent*` (2) in `test_nr_pdcch_blind_monitor` (197+2 skips) `[OFFLINE VERIFIED, cloud x86 …, 1d6cbdf5c3]`; TSAN 0 warnings; rfsim A/B §14.5 |
+| `nr_initial_sync_budget.c/.h` | Pure parser/batcher for `ISAC_SCAN_SCRATCH_MB` (default 512, clamp 64..16384) used by `nr_initial_sync.c` (A11, `843e5cff49`) | `test_nr_initial_sync_budget` (5) `[OFFLINE VERIFIED, cloud x86 …, 843e5cff49]`; timing effect DGX-only |
 
 **Algorithm origins:** blind PDCCH mismatched-bit gate and parts of candidate handling migrated from **NRSniffer**
 (`/home/sens/NICOLA/NRSniffer` on sens6, an OAI-based sniffer); DM-RS coherence gate modelled on **5GSniffer**
@@ -422,11 +435,18 @@ arXiv:2609.07367 — citation not independently verified). Everything else is pr
 | `tests/passive_rx/gnb.sa.rfsim*.conf`, `ue.passive*.conf`, `ue.active*.conf` | rfsim bed configs (rank-4 bed: `gnb.sa.rfsim.100mhz.rank4.conf` + `ue.passive.pin49r4.100mhz.conf --ue-nb-ant-rx 4`) |
 | `tests/passive_rx/auto_acquire.py` | Autonomous band/window launcher (probe → derive → reopen → revalidate). `[IMPLEMENTED, NOT VALIDATED]` |
 | `tests/passive_rx/raw_baseline/*` | Raw 4-channel IQ recorder, validators, SSB reference checker (python unittest) |
-| `tests/passive_rx/offline_sync_contract/*` | Offline sync contract gtest (build script hard-codes x86 flags) |
+| `tests/passive_rx/offline_sync_contract/*` | Offline sync contract gtest. `build_and_run.sh` is now **arch-aware** (x86 lines verbatim, aarch64 branch = the DGX port; A13, `a1a06e1f88`/`3b6119853f`/`2547ff90aa`); aarch64 branch verified only by an echo-diff (§13.2) |
 | `tests/passive_rx/agnostic/run_dci_regression.sh` | CPU-only DCI regression wrapper around `test_nr_pdcch_blind_monitor` |
 | `tests/passive_rx/ota/*` | Older OTA configs/scripts (catch-rate, repeatability) — STALE addresses |
 | `tests/passive_rx/monitor/*` | Live web monitor (sensing oriented) |
 | `tests/sensing_sim/*`, `tests/ota_sync_bench/*` | Sensing simulation scenes/scorers (sensing scope) |
+| `tests/passive_rx/dgx/rfsim_arm.sh`, `rfsim_regress.sh`, `score_rx.py` (+`test_score_rx.py`, `fixtures/`) | **In-tree rfsim regression gate** (A1): one agnostic 106-PRB arm, JSON score (sync/ttc/CONVERGED/crc %/drop_full %/CPU/RSS); gate `GATE_CRC_MIN`/`GATE_DROP_MAX` + CONVERGED>=1. Knobs `V4SHIM`, `SCANTHREAD`, `COREMAP` (§10.2). Cloud thresholds 93.0/2.5, DGX 98/1 |
+| `tests/passive_rx/dgx/v4only_shim.c` | LD_PRELOAD shim: rfsimulator `AF_INET6` server socket → `AF_INET` (container without IPv6) — host-specific (K31) |
+| `tests/passive_rx/dgx/run_rx_dgx.sh`, `coremap_dgx.env`, `ue.passive.auto.100mhz.dgx.cfg` (+`test_run_rx_dgx.py`) | **DGX X925 core-map launcher** (A6): `ISAC_UE_RT_CORE`, `ISAC_PDCCH_USS_CORE`, thread-pool, scan/pdsch cores per §14.3, online-CPU checks. Dry-run tests only; **not run on the DGX** |
+| `tests/passive_rx/dgx/thrprof.sh` | Per-thread CPU profile (20 s) used by the A7 A/B (same method as the §14.1 DGX profile) |
+| `tests/passive_rx/campaign/{campaign.py,verdict.py}` (+`test_campaign.py`) | **Campaign runner** (A4): manifest (commit/branch/dirty/sens6-frozen check), per-run logs/metrics/obs/NIC counters, atomic `run.json`, machine verdicts (VALID / INTERRUPTED incl. stale `running` / …), `summarize`; SIGINT→SIGTERM→SIGKILL escalation |
+| `tests/passive_rx/monitor/` `/health` + **Receiver health** tab, `test_health.py` | A5: tails `ISAC_METRICS_PATH`/`ISAC_OBS_PATH` (rotation/reset safe, finite-only rates): acq_state, grants/s, CRC % window, drop_full %, top RNTIs, PRB histogram |
+| `CLAUDE.md`, `tests/passive_rx/requirements-dgx.txt`, `tests/passive_rx/.venv` (git-ignored) | A0: agent onboarding (hard rules, build, evidence labels) and the `pyzmq` venv for the monitor |
 
 ---
 
@@ -820,6 +840,20 @@ CFR; `mcs_table=0` = unknown → Technique D), `pdcch_blind_monitor_rnti_range`,
 — **manual keys make a run an oracle arm, not agnostic**. Plus sensing keys (`sources`, `cpi_slots`,
 `report_path`, `out_path`, `report_endpoint`, `rx_id`, …) that only matter with sensing enabled.
 
+**Environment variables added 2026-10-01 (cloud Track-A session):**
+
+| Variable | Meaning | Default / notes |
+|---|---|---|
+| `ISAC_METRICS_PATH` | Also append every `ISAC_METRICS` JSON line to this file (§11.13) | unset = log line only; unopenable path → one LOG_W |
+| `ISAC_OBS_PATH` | Enable the per-grant observation writer, JSONL appended to this file (§21) | unset = off (hooks cost one relaxed load) |
+| `ISAC_SCAN_SCRATCH_MB` | Initial-sync scan scratch budget (decides how many GSCNs are scanned per batch) | 512; clamped to 64..16384; non-numeric → default + LOG_W once |
+| `ISAC_OBS_TEST_WRITER_PAUSE_MS` | **Test hook**: stall the observation writer (overload test) | unset = inert |
+| `ISAC_OBS_TEST_RING_SLOTS` | **Test hook**: ring slots, 1..2^20 (default 16384) | unset = inert |
+| `V4SHIM`, `SCANTHREAD`, `COREMAP`, `GATE_CRC_MIN`, `GATE_DROP_MAX` | `rfsim_arm.sh`/`rfsim_regress.sh` knobs: IPv4 shim (auto if no IPv6), scan-thread override (auto `1:8:-1` when `nproc<=5`), DGX core-map mode (needs the online cores of `coremap_dgx.env`; rc=3 otherwise), gate thresholds (script defaults = DGX 98/1; cloud uses 93.0/2.5) | host-specific, §14.5, K31 |
+
+`pdcch_blind_monitor_scan_thread "N:depth:core"` now accepts N <= 4 consumers safely (K27); `core = -1` leaves every
+consumer unpinned, `core >= 0` pins consumer i to core+i.
+
 The fully agnostic OTA config used last: `tests/passive_rx/sens6_host_snapshot_2026-09-30/ota_confs/agnostic_ota_noprior.conf`.
 
 ### 10.3 OTA runs (X410)
@@ -1115,6 +1149,30 @@ LDPC OK) → `VOID_NO_CPI` (no sensing CPI; only meaningful with sensing) → `V
 These verdicts were designed for **sensing captures**; for receiver work read the milestone lines directly. A
 forced intentional CFO retune can be falsely stamped `VOID_CFO_MISLOCK` (known harness defect).
 
+### 11.13 `ISAC_METRICS` and observation/scan-budget lines (added 2026-10-01)
+
+`SENSING: ISAC_METRICS {json}` — one line per blind-monitor summary period (**every 20 s**), schema 1, also appended
+to `ISAC_METRICS_PATH`. Flat object, cumulative counters unless noted; unknown = absent/`null`; consumers ignore unknown keys.
+
+| Group | Keys |
+|---|---|
+| header | `schema` (1), `t_mono_ns`, `abs_slot`, `pci` (Nid_cell set at PBCH lock; 0 before) |
+| acquisition | `acq_state` (name, §11.11), `acq_transitions`, `acq_sync_losses`, `acq_pbch_locks`, `acq_sib1_decodes` |
+| PDCCH | `pdcch_occasions`, `pdcch_candidates`, `pdcch_accepts`, `pdcch_accepts_c` |
+| scan queue | `scanq_queued`, `scanq_processed`, `scanq_drop_full`, `scanq_drop_stale`, `scanq_max_lag` |
+| PDSCH queue | `pdschq_queued`, `pdschq_decoded`, `pdschq_crc_ok`, `pdschq_drop_full`, `pdschq_drop_stale`, `pdschq_max_lag` |
+| LDPC | `ldpc_ok`, `ldpc_seg_fail`, `ldpc_tb_fail`, `ldpc_zero_tb` |
+| PUSCH | `pusch_try`, `pusch_crc_ok` |
+| observations | `obs_pushed`, `obs_written`, `obs_dropped` |
+
+Cross-check (rfsim): last JSON `pdschq_crc_ok` equals the text `PDSCHQ … crc_ok` (§14.5). The four queue counters are
+loaded separately (not one atomic snapshot). Other lines:
+`SENSING: per-grant observations -> <path> (ring N, drop-on-full)` (writer open) and
+`SENSING: ISAC_OBS_PATH=… could not be opened` / `ISAC_OBS_TEST_RING_SLOTS=… invalid` / `ISAC_METRICS_PATH=… cannot be opened` (LOG_W);
+`Scan scratch budget <N> MB (ISAC_SCAN_SCRATCH_MB), <x> MB per GSCN, <t> worker threads: scanning <n> GSCN in batches of <b>`
+(every initial scan; LOG_W once on a bad env value); with N>1 scan consumers, pdsch decode on and no PDSCH queue, a
+LOG_W warns that Phase 2 holds its lock across each in-line decode (A7).
+
 ---
 
 ## 12. Validation gates (the standard for all work on the DGX)
@@ -1196,6 +1254,26 @@ race, `shm_open() failed: errno 2`, unrelated to the receiver). Log:
 | DCI regression wrapper | = blind_monitor gtest | `tests/passive_rx/agnostic/run_dci_regression.sh` | focused+regression exit 0 | covered by ctest | PASS (via ctest) |
 | idsweep stage-1/2 self-test | synthetic | `./idsweep_offline --selftest` (snapshot `discovery_tool/`) | selftest pass | not run today | NOT RUN |
 | Physim link (`nr_psbchsim`, `nr_ulsim`, `nr_srssim`, `nr_ulsim_mu_mimo`) | — | build | link | pre-existing link failures | FAIL (known, out of scope) |
+
+### 13.2 Cloud x86 (Xeon 2.8 GHz, 4 cores) — 2026-10-01 — NOT the DGX, NOT merged with §13.1
+
+Host: Intel Xeon @2.80 GHz (avx512f, no GFNI), 4 cores, 15 GB, container, Ubuntu 24.04, gcc 13.3, root; no IPv6, no SCTP,
+`pthread_getaffinity_np` EINVAL; build `-DOAI_USRP=OFF`, `-j4` 11 min.
+
+| Validation | Result | Label |
+|---|---|---|
+| ctest on HEAD `be2e7fa4b6` (before this session's code) | **123/126**; failures env-only: `test_thread-pool` (affinity EINVAL), `nr_cuup_functional_test` (SCTP unsupported), `time_management_tests` (intermittent timing, passes alone). `test_vrtsim_cirdb` passed | `[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, be2e7fa4b6]` |
+| ctest after A2/A3 | 124/127, same env-only set | `[OFFLINE VERIFIED, cloud x86 …, 385e02b9cf]` |
+| ctest after A7 (last full run) | **126/128**; only `test_thread-pool`, `nr_cuup_functional_test` fail | `[OFFLINE VERIFIED, cloud x86 …, b6e5fb27ac]` |
+| Blind-monitor gtest, shuffle seeds 1/3/5 | 197 pass + 2 skips each (195 + 2 `Phase2Concurrent*`) | `[OFFLINE VERIFIED, cloud x86 …, 1d6cbdf5c3]` |
+| New gtests | `test_nr_passive_metrics` 5, `test_nr_passive_obs` 8 (also TSAN, 0 warnings), `test_nr_initial_sync_budget` 5, `Phase2Concurrent*` 2 (red/green shown; TSAN 13 races → 0) | `[OFFLINE VERIFIED, cloud x86 …, 1d6cbdf5c3 / 843e5cff49]` |
+| New python tests | `test_score_rx.py` 4 (1 skip without fixture), `test_campaign.py` 15, `test_health.py` 16 (+`test_monitor.py`), `test_run_rx_dgx.py` 12 (dry-run, `ONLINE_CPUS_OVERRIDE=0-19` for the DGX map) | `[OFFLINE VERIFIED, cloud x86 …, cf8e2e79d7 / 876c8ce5b9]` |
+| `ENABLE_ISAC_SENSING=OFF` | `nr-uesoftmodem` links after A2+A3 and after A7 (gtest 197+2) | `[OFFLINE VERIFIED, cloud x86 …, 2547ff90aa / b6e5fb27ac]` |
+| Offline sync contract (A13) | x86 fallback path (no system libgtest; CPM gtest) **OfflineSync.* 5/5**; x86 old vs new command lines identical (echo-diff, system-gtest case); aarch64 branch == `offline_sync_arm.sh` by echo-diff only | `[OFFLINE VERIFIED, cloud x86 …, 03fb79aae3]`; aarch64 run = DGX follow-up |
+| Full `ninja` | `nr_psbchsim`, `nr_srssim`, `nr_ulsim`, `nr_ulsim_mu_mimo` fail to link (undefined `nr_isac_*`, `nr_ue_diag_*`, …) — pre-existing (K15), not in ctest | `[KNOWN ISSUE]` |
+
+Frozen sens6 paths (`captures`, `*.conf`, `sens6_host_snapshot_2026-09-30`) unchanged against `sens6-frozen-2026-09-30` at every commit.
+Evidence: `tests/passive_rx/cloud_run_2026-10-01/{a1_baseline,a2_metrics,a3_obs,a4_campaign_smoke,a5_dashboard,a7_concurrency,a11_scan_scratch,a13_sync_contract}/`.
 
 ---
 
@@ -1314,6 +1392,13 @@ core 2 is a little core. Without RT priority (`ulimit -r 0`, no sudo) pinning is
 grant `rtprio`. **This map is a starting point to be measured** (RFSTALL, `scanq drop_full`, `over_slot`, NIC missed),
 not a validated setting.
 
+**Status 2026-10-01 (cloud session):** the core-map launcher exists — `tests/passive_rx/dgx/run_rx_dgx.sh` +
+`coremap_dgx.env` + `ue.passive.auto.100mhz.dgx.cfg` (+ `COREMAP=1` in `rfsim_arm.sh`), commit `876c8ce5b9`;
+`[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 876c8ce5b9]` as **dry-run only** (12 tests; on the 4-core host
+`COREMAP=1` stops with rc=3 "core 5 is not online"). **No measured A/B of the map exists — still DGX-only (§25).** Note:
+with `COREMAP=1` and the default frozen RXCONF the scan thread (core 5) collides with the RT core; use the `.dgx.cfg`.
+Item 4 below (N scan consumers) is now implemented (K27, §14.5); the 273-PRB pinned A/B is still open.
+
 **Parallelization opportunities, ordered by measured benefit** (all implementable and testable offline/rfsim):
 
 1. **Split `UEthread_0`**: a thin RF reader (recv → IQ ring, nothing else) + per-slot work dispatched to the existing
@@ -1336,6 +1421,46 @@ not a validated setting.
 **If the ctest suite passes (except the known failure), the shuffle seeds pass, and the phy-test smoke converges with
 drop_full ≤ ~1 %, the software build is known-good enough to begin X410/OTA validation.** If drop_full or
 `over_slot` is much worse than on sens6, the ARM CPU budget is the first problem to solve (§5.1).
+
+### 14.5 Cloud x86 rfsim results (2026-10-01) — NOT the DGX
+
+**Do not compare these numbers with §14.1.** Host: cloud container, Intel Xeon @2.80 GHz, 4 cores, no GPU, no IPv6 (rfsim
+via `V4SHIM`), scan thread **unpinned** (`1:8:-1`, the frozen conf pins core 5 which does not exist), 106 PRB fully
+agnostic bed (`rfsim_regress.sh`), 150 s per arm, binaries built with the code of the commit given. Every run has
+CONVERGED 2/2. Cloud gate (re-baselined, §24 K31): `GATE_CRC_MIN=93.0 GATE_DROP_MAX=2.5` (DGX gate 98 / 1 — HEAD misses it
+on 4 cores; the 4-core budget and the unpinned scan thread are confounded, `[HYPOTHESIS]`).
+
+| Item | Commit | crc % | drop_full % | ttc s | Other | Label / evidence |
+|---|---|---|---|---|---|---|
+| **HEAD baseline** r1 / r2 / r3 (unmodified code) | `be2e7fa4b6` | 94.93 / 96.89 / 95.19 | 1.17 / 1.55 / 0.77 | 4.2 / 2.9 / 4.5 | sync 8.0–8.7 s, CPU ~200 %, RSS 0.89 GB, bank len 46 | `[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, be2e7fa4b6]` `a1_baseline/` |
+| A2 ISAC_METRICS on | `4cdb890759` | 96.75 | 1.10 | — | 7 `ISAC_METRICS` lines = 7 JSONL lines; JSON `pdschq_crc_ok` == text `crc_ok` (15526) | `[SIM VERIFIED, cloud x86 …, 4cdb890759]` `a2_metrics/` |
+| A3 obs ON (`ISAC_OBS_PATH`) | `10cc6f0058` | 94.81 | 1.79 | — | n_dl 14852 <= pdschq_decoded 14913 (layout-probe share 0.41 %); DL crc_ok 14139 == `pdschq_crc_ok`; obs_dropped 0 | `[SIM VERIFIED, cloud x86 …, 10cc6f0058]` `a3_obs/` |
+| A3 obs OFF (control) | `10cc6f0058` | 94.87 | 1.29 | — | CRC with/without obs differs 0.06 pt | same |
+| A3 **throttled writer** (`ISAC_OBS_TEST_WRITER_PAUSE_MS=60000`, ring 256) | `10cc6f0058` | 95.38 | 1.64 | — | obs_pushed 13129, **obs_dropped 3591**; decode CRC unaffected → writer never blocks decode | same |
+| A3 fix round (obs on) | `385e02b9cf` | 95.94 | 1.17 | — | check_obs PASS | `a3_obs/score_fix.txt` |
+| A4 campaign smoke (`campaign.py`, run 002_base) | `2547ff90aa` | 95.45 | 1.39 | 4.2 | verdict VALID; metrics 7 lines (DL_CONVERGED), obs 19119 lines, CPU 202 %, RSS 0.90 GB; run 001 killed externally → classified INTERRUPTED (stale `running`) | `[SIM VERIFIED, cloud x86 …, 2547ff90aa]` `a4_campaign_smoke/` |
+| A5 `/health` on 002_base | `0d04761969` | window 100 | 0.75 | — | acq DL_CONVERGED, grants/s **161** (cloud rfsim rate; not the DGX figure), top RNTI 4660, screenshot | `[SIM VERIFIED, cloud x86 …, 0d04761969]` `a5_dashboard/` |
+| A7 gate, default config | `b6e5fb27ac` | 96.65 | 0.75 | 2.2 | PASS | `[SIM VERIFIED, cloud x86 …, b6e5fb27ac]` |
+| A11 `ISAC_SCAN_SCRATCH_MB` unset | `843e5cff49` | 95.4 | 0.71 | 3.8 | PASS; log "Scan scratch budget 512 MB … batches of 1" | `[SIM VERIFIED, cloud x86 …, 843e5cff49]` `a11_scan_scratch/` |
+| A11 `ISAC_SCAN_SCRATCH_MB=2048` | `843e5cff49` | 96.33 | 1.10 | 4.6 | PASS; "budget 2048 MB"; rfsim scans 1 GSCN so batch = 1 in both arms (behaviour identical; timing effect DGX-only) | same |
+
+**A7 A/B — blind-PDCCH scan consumers, 106 PRB, alternating S/M x3, unpinned** `[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, b6e5fb27ac]` (`a7_concurrency/`).
+S = `scan_thread "1:8:-1"`, M = `"2:16:-1"`. acc/occ = `pdcch_accepts/pdcch_occasions` in tracking. CPU = `thrprof.sh`, 20 s at t+75 s, 100 % = 1 core.
+
+| Arm | crc % | drop_full % | ttc s | acc/occ | scanq max_lag | passivePdcch CPU % | UEthread_0 % |
+|---|---|---|---|---|---|---|---|
+| S x3 | 95.04 / 95.38 / 96.37 (mean 95.60) | 1.63 / 1.17 / 1.57 (1.46) | 4.8 / 4.3 / 2.5 | .475 / .458 / .449 | 8 | 71.6 / 71.0 / 72.5 (one thread) | 103.8 |
+| M x3 | 97.78 / 94.76 / 96.65 (96.40) | 0.64 / 0.56 / 0.47 (0.55) | 2.6 / 4.3 / 2.6 | .470 / .443 / .446 | 16 | 80.6 / 73.0 / 84.2 (~40 + 40) | 105.1 |
+| control `2:8:-1` | 94.89 | 1.02 | 4.8 | .462 | 8 | 82.5 | — |
+| control `1:16:-1` | 96.71 | 0.72 | 3.1 | .480 | 16 | 72.3 | — |
+
+Reading: acc/occ and CRC within run-to-run spread, drop_full lower with M; total scan CPU +10 % (79 vs 72 %); `max_lag`
+follows the queue **depth** (controls), not the consumer count. **No speed-up is claimed** (on 4 cores one consumer already
+keeps up). TSAN oracle on the real occasion path (receiver instrumented, 300 s): consumer<->consumer races 37 -> 0 (full
+build, discovery stage) and 26 -> 0 (blind-PDCCH sources, TRACKING stage); remaining reports are K30.
+
+**Not measured here (DGX-only):** 273 PRB A/B `"1:8:6"` vs `"2:16:6"`, core-map effect, scan-scratch timing, aarch64 anything.
+UL decode is not exercised by phy-test (K28).
 
 ---
 
@@ -1487,8 +1612,9 @@ reaching SIB1.**
 | UL decode (G8) | Done: one-layer CP-OFDM, RA0 segmented, UCI footprint, TP limited | PASS on sens6 (9 RA0); **DGX: 7/9, 64/256QAM bit errors (K22)** | PASS (OCUDU 50–54 % at times) | historical lab 78.6 % at 272–273 PRB (older binary) | Width search time, 64QAM ceiling, TP unvalidated live | Measure on DGX |
 | CSI-RS / ZP-CSI-RS | Done (rows 1–5, opt-in wide), ZP probation/revocation | PASS (131 + synth) | FAIL then fixed (G4 pending) | IDSWEEP solved on lab, confirmation not reached | G4 of the fixes | OCUDU CSI-RS arm n=3 |
 | RS / CFR extraction (G9) | Done (SSB, DM-RS, data-aided DL/UL, CSI-RS) | PASS | PASS | partial (sensing CPIs formed on lab) | depends on G8 | — |
+| **Receiver metrics / observations / campaign / dashboard** (new 2026-10-01) | `ISAC_METRICS` JSON (A2), per-grant obs JSONL (A3, schema v1 §21), campaign runner (A4), Receiver-health tab (A5), regression gate (A1) | PASS: 5 + 8 + 5 gtests, 4 + 15 + 16 python tests (cloud x86, §13.2) | **PASS cloud x86 only** (§14.5); not run on the DGX | n/a | UL obs hook not exercised (K28); in-line DL decode not recorded (K29); DGX gate thresholds not yet reproduced | Run gate + campaign on the DGX (§25) |
 | Acquisition state / reacquisition (G10–G11) | Evidence tracker + local DL relearning + stream-gap LOST | PASS | partial | observed LOST→reacquire (2026-09-13) | No unified epoch, no change detector | Implement §19 on top of existing tracker |
-| Multi-cell / carrier / operator (G12–G14) | **None** (one process = one cell) | — | — | — | Architecture; 3 serial hot threads per instance (K27) | §14.3, §17–§20 |
+| Multi-cell / carrier / operator (G12–G14) | **None** (one process = one cell). Parallelism: N<=4 blind-PDCCH scan consumers implemented (A7); core-map launcher + scan-scratch knob implemented (A6, A11) | PASS (gtest, TSAN consumer<->consumer 0, cloud x86) | cloud x86 A/B only (§14.5); core map and 273-PRB A/B **not measured** | — | Architecture; `UEthread_0` and `pdcchUssHash` still serial; K27, K30 | §14.3, §25 (A8–A10, A12), §17–§20 |
 | Sensing consumer | Separate subsystem; newest work on unmerged branch | PASS (with sensing ON) | — | CPIs produced | Merge debt | Decide merge policy for `feature/multirx-clean-adaptive` |
 
 ---
@@ -1682,6 +1808,24 @@ Per observation (one record per decoded/observed grant or reference-signal occas
 | operator identity | optional (PLMN from SIB1 when present) | `SIB1 CELL` log only |
 | gNB position | **not required** (never an input) | — |
 
+**Implemented 2026-10-01 (Task A3): per-grant observation records, schema v1.** The authoritative schema is the header
+comment of `openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h` (JSON Lines, one record per decoded PDSCH/PUSCH grant, enabled by
+`ISAC_OBS_PATH`, non-blocking ring, unknown = JSON `null`, consumers must ignore unknown keys; a meaning change needs schema 2).
+`[IMPLEMENTED]` code; DL `[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 385e02b9cf]` (§14.5); UL **not exercised** (K28);
+**no OTA**. Coverage v1: DL = deferred PDSCH queue only (K29); UL = every `nr_pusch_passive_decode()` with OK/CRC_FAIL/ZERO_TB.
+
+| Field above → obs key | Available (v1)? | Source (DL / UL) |
+|---|---|---|
+| timestamp | yes: `abs_slot` (receiver slot of the samples), `t_mono_ns` (decode completion, not air time) | `job.absolute_slot` / arg; `clock_gettime` |
+| PCI; SFN, slot | yes: `pci`, `frame`, `slot` | `frame_parms.Nid_cell`; `job.frame_rx/nr_slot_rx` / args (UL slot = DCI slot + k2) |
+| frequency, bandwidth | yes: `carrier_hz`, `scs_khz`, `fs_hz`, `start_rb`, `nb_rb` (grant BW = nb_rb·12·scs) | `frame_parms` DL/UL carrier, SCS, sample rate |
+| scheduled-resource info | yes: `rnti`, `rnti_class` (DL only), `start_sym`, `nb_sym`, `mcs`, `mcs_table`, `qm`, `nl`, `dmrs_symb_pos`, `dmrs_scrambling_id`, `tbs` (bits), `harq_pid`, `rv`, `ndi` | `job.grant`, `dec.cw`, `freq_alloc`, `dlsch_pdu` / `nr_passive_ul_grant` `g->…`, `out->…` |
+| signal type | partial: `dir` DL (PDSCH data) / UL (PUSCH data) only; SSB, CSI-RS, PDCCH, DM-RS-only records **not** in v1 | — |
+| signal quality | partial: `crc` (null for UL ZERO_TB), `nvar` (DL, receiver-internal scale), `snr_db` (UL; holds CFR mean power when noise est. = 0, known issue) | `dec.nvar`; `out->snr_db` |
+| timing / CFO | partial: `delay_samples` (UL DM-RS CIR peak, 0 also = no clear peak), `fo_comp_hz` (FO the receiver removed, not a per-grant measurement) | `out->est_delay`; `job.fo_hz` / arg |
+| channel estimate | no (CFR path unchanged, `nr_isac_submit_cfr_multi`) | — |
+| carrier_id, cell_track_id, confidence, operator identity | no | — |
+
 ---
 
 ## 22. References and algorithm origins
@@ -1820,8 +1964,12 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 | K23 | Branches | **Resolved 2026-10-01:** `feature/multirx-clean-adaptive` pushed to `github` by the operator (tip `750338ed9e`). `sdd/rfsim-gnb-test` still only on sens6 | `git ls-remote` | Low | — | Push `sdd/rfsim-gnb-test` when sens6 is back |
 | K24 | DGX NIC | Both ConnectX-7 devices enumerate at boot then are torn down ("Link down", E-Switch cleanup) and vanish from `lspci`/`ip link` when uncabled | kernel log 2026-09-30 15:19 | Medium (blocks G0 until checked) | — | After cabling the X410: confirm the CX-7 port stays up; set MTU 9000/rings; persistent NM profile; pin IRQs to X925 cores |
 | K25 | DGX real-time | No PREEMPT_RT kernel, no isolated cores, `ulimit -r 0`, no passwordless sudo; big.LITTLE CPU (X925 = cpus 5–9,15–19; A725 = 0–4,10–14). `run_arm.sh` core map (reader core 2, `--thread-pool 0,1,4,5,6,7`, IRQs 8–13, `taskset 0-7`) would put the RF reader on a **little core** | §4.2 | Medium | rfsim beds run fine as the user | Define a DGX core map (reader + NIC IRQs on X925 cores) and measure drops without RT first (§5.3) |
-| K27 | Parallelism | Three serial hot threads cap one instance (`UEthread_0` 100 %, `pdcchUssHash` 90 %, `passivePdcch0` 79 % at 273 PRB 1 RX); the blind-PDCCH scan cannot use > 1 consumer (energy floor, RNTI-persistence table, counters not thread-safe); initial sync at 273 PRB × 4 RX takes ~90 s mostly on one thread | §14.1–§14.3 profiles | Medium now, **High for multi-cell** | pin the three threads to X925 cores | §14.3 items 1–5 |
-| K26 | Scripts | `tests/passive_rx/offline_sync_contract/build_and_run.sh` hard-codes x86 flags and `/usr/lib/x86_64-linux-gnu/libgtest.a`; an aarch64 port (flags stripped, CPM gtest) passes 5/5 | `dgx_host_snapshot_2026-09-30/tools/offline_sync_arm.sh` | Low | use the port | Make the in-tree script arch-aware |
+| K26 | Scripts | **Resolved for the x86 path (A13, 2026-10-01).** `tests/passive_rx/offline_sync_contract/build_and_run.sh` is arch-aware: x86 command lines unchanged (echo-diff empty with a system libgtest; without one it links `lib/libgtest.a` + CPM include), aarch64 branch = `offline_sync_arm.sh` (echo-diff empty). x86 run OfflineSync.* 5/5 `[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 03fb79aae3]`. **aarch64 run pending on the DGX.** Pre-existing: x86 flags include `-mgfni` (this cloud CPU lacks GFNI; no effect on the test) | `cloud_run_2026-10-01/a13_sync_contract/README.txt` | Low | — | Run the script on the DGX and compare with `offline_sync_arm.sh` (§25) |
+| K27 | Parallelism | **Updated 2026-10-01 (A7, `b6e5fb27ac`, `1d6cbdf5c3`): the blind-PDCCH scan consumer is no longer single-threaded.** `pdcch_blind_monitor_scan_thread "N:depth:core"` with N <= 4 is safe: counters are relaxed atomics; Phase 2 of an occasion (decode join -> end: accepts, dci_thres EMA, RNTI persistence, census, CFR/PDSCH submission, summary) runs under one lock `g_phase2_mu` (`nr_pdcch_blind_phase2.c`); Phase 1 (FEP/LLR/demap/pre-pass/candidate decode) runs in parallel for bank / CORESET#0-USS / CSS0 passes; the autodiscover (root cfg) pass stays serial for the whole occasion (no parallelism during acquisition before a bank exists); `core = -1` leaves every consumer unpinned, `core >= 0` pins consumer i to core+i. `[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, b6e5fb27ac]`, 106 PRB, `1:8:-1` vs `2:16:-1`, 3 runs each: acc/occ .449-.475 vs .443-.470, CRC 95.0-96.4 vs 94.8-97.8 %, drop_full 1.2-1.6 vs 0.5-0.6 %, scan CPU 72 % on 1 thread vs 79 % on 2 (~40 % each), `scanq max_lag` follows queue depth; TSAN consumer<->consumer 0. **Still open:** `UEthread_0` (100 %) and `pdcchUssHash` (90 %) remain serial; with N>1 and in-line PDSCH decode Phase 2 holds its lock across each decode (LOG_W); the 273-PRB DGX A/B (`1:8:6` vs `2:16:6`) is not run; initial sync at 273 PRB x 4 RX ~90 s mostly one thread (A11 adds the scratch-budget knob, timing DGX-only) | §14.1–§14.3, §14.5 | Medium now, **High for multi-cell** | pin the serial threads to X925 cores | §14.3 items 1-3, 5; §25 |
+| K28 | Observations / UL | The UL hook of `nr_passive_obs` is compiled and reviewed but **never exercised at runtime**: phy-test rfsim has no PUSCH (`pusch_try = 0`); all 19 k observed records are DL | `a3_obs/README.txt`, `a4_campaign_smoke/` metrics `pusch_try 0` | Medium for UL observation consumers | — | Run an UL-bearing bed (OAI SA with UE traffic, OCUDU) and check `dir:"UL"` records |
+| K29 | Observations / DL | In-line DL decode (used when the deferred PDSCH queue is not running, `nr_pdcch_blind_monitor_rt.c` ~6616) is **not recorded** by obs v1; configs without the deferred queue produce no DL records (documented in the header) | `nr_passive_obs.h` | Low–Medium | keep the PDSCH queue on | Hook the in-line path or require the queue |
+| K30 | Thread safety (pre-existing) | Remaining TSAN races: `UEthread_0` <-> `passivePdcchN` in `nr_pdcch_blind_monitor.c` (13 reports: `autodiscover_step` on the receive thread vs `note_rnti_for_windows` / extent advance on a consumer) and inside the PDSCH decode pool (`passivePdsch1/2`, `nr_pdsch_passive_queue_thread`, 4 reports). All exist with **one** consumer too; none is consumer<->consumer. A7 changed diagnostics semantics: DMRSPROBE/PERRB/ENERGYPROBE populations are per consumer thread | `a7_concurrency/tsan_rfsim_partial_round2.txt` | Medium | none | Follow-up task (suggested, not started): TSAN run incl. PDSCH sweep/queue sources, fix UEthread_0 <-> consumer races |
+| K31 | Cloud/container host quirks (host-specific) | The cloud container has **no IPv6** (rfsimulator server socket is `AF_INET6` -> `V4SHIM` LD_PRELOAD), **no SCTP** (`nr_cuup_functional_test` fails), **`pthread_getaffinity_np` EINVAL** (`test_thread-pool` fails), 4 cores (frozen conf scan core 5 -> EINVAL assert, so `SCANTHREAD=1:8:-1` auto), timing test `time_management_tests` intermittent. Gate thresholds therefore **re-baselined on cloud: crc >= 93.0 %, drop_full <= 2.5 %** (HEAD min 94.93 / max 1.55) vs **DGX 98 % / 1 %**; a < 2-point CRC regression would be invisible at the cloud gate (mitigated by comparing means vs baseline in each report). Do not apply these workarounds or thresholds on the DGX | `a1_baseline/README.txt` | Low | scripts auto-detect | none on the DGX |
 
 ---
 
@@ -1853,6 +2001,20 @@ connected**; step 10 changes to the Milan-cell survey (§15.0, §15.4) because t
 14. Implement persistent tracking and the state machine (§19; G10–G11), starting with the unified epoch (K10).
 15. Implement multi-cell (G12), then multi-carrier (G13), then multi-operator (G14) per §17–§20 — only after the
     operator approves those designs.
+
+**Progress 2026-10-01 (cloud Track-A session, x86 container, final fix `<FINALFIX>`):** done in the cloud scope — **A0**
+(CLAUDE.md, venv; `24f1a18b43`), **A1** (rfsim gate + scorer, HEAD baseline x3; `a5140ce43c`, `456be54aa7`, `2d1bb6c18e`),
+**A2** (`ISAC_METRICS`; `4cdb890759`..`6e9a96c476`), **A3** (obs API; `10cc6f0058`..`385e02b9cf`), **A4** (campaign; `76e733251d`,
+`dac7052c2e`, smoke `8be4711650`), **A5** (health tab; `0d04761969`, `cf8e2e79d7`), **A6 code + dry-run** (`876c8ce5b9`),
+**A7 TSAN + rfsim A/B** (`b6e5fb27ac`, `1d6cbdf5c3`), **A11 code + default regression** (`843e5cff49`), **A13 x86 path**
+(`a1a06e1f88`, `3b6119853f`, `2547ff90aa`). All cloud x86 evidence, §13.2/§14.5. **DGX follow-ups, in this order:**
+1. **A6 Step 5** — run `run_rx_dgx.sh` / `COREMAP=1` for real on the DGX, measure the X925 core map (§14.3) vs unpinned.
+2. **A8, A9, A10** — as specified in `docs/superpowers/plans/2026-10-01-dgx-next-steps.md` (skipped, DGX-only).
+3. **A11 timing** — measure initial sync at 273 PRB x 4 RX with `ISAC_SCAN_SCRATCH_MB` 512 vs larger.
+4. **A12** (DGX-only).
+5. **A13 aarch64 check** — run `offline_sync_contract/build_and_run.sh` on the DGX (expect OfflineSync.* 5/5).
+6. **A7 273-PRB pinned A/B** — `"1:8:6"` vs `"2:16:6"` (cloud had only 106 PRB, unpinned, 4 cores).
+7. Re-run the gate with the DGX thresholds (98 / 1) and a campaign on the DGX; then **Track B** (§25 steps 8 onward, X410/OTA).
 
 **Rule: do not begin new receiver development on the DGX Spark until the current known-good offline baseline (§14)
 has been reproduced and the OTA baseline (§15.4) has been reproduced or its failure understood.**
