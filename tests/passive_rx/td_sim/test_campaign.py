@@ -11,7 +11,7 @@ acq = int(d["--acq"]); sib = int(d.get("--sib1", 0)); rx = int(d["--n-rx"])
 for i in range(acq):
     for k in range(4):
         print(json.dumps({"acq": i, "rnti_rank": k, "grants": 100, "seconds": 10.0 * (1 + sib) + (0 if k < 2 else -5),
-                          "winner_ok": True, "wrong": int(rx == 1 and i == 0 and k == 0), "undecidable": 0,
+                          "truth_table": k % 3, "winner_ok": True, "wrong": int(rx == 1 and i == 0 and k == 0), "undecidable": int(i == 1 and k == 3),
                           "n_full": 100, "n_probe": 200, "gated_phys": 1, "gated_chan": 2, "promotions": 0, "withdrawals": 0}))
 print(json.dumps({"summary": {"acq": acq}}))
 """
@@ -37,10 +37,17 @@ class Campaign(unittest.TestCase):
         md = open(os.path.join(out, "summary.md")).read()
         self.assertIn("SIMULATED", md)
         sa = [l for l in md.splitlines() if l.startswith("| base | SA | 1 ")][0]
-        # cold median 20.0 (sib1=1), steady 15.0, wrong 1 (acq 0 rank 0 at rx 1), gated 3 per RNTI x 12
-        self.assertIn("| 20.0 | 20.0 | 15.0 | 1 | 0 | 1200 | 2400 | 36 |", sa)
+        # SA: sib1=1 -> 20 s cold, 15 s steady; the censored RNTI (acq 1, rank 3) is excluded from the quantiles/means;
+        # wrong 1 (acq 0 rank 0 at rx 1); undecidable 1 (one per cell/arm/rx); gated 3 per RNTI x 12 = 36 on 12 RNTIs.
+        self.assertIn("| 20.0 | 20.0 | 15.0 |", sa)
+        self.assertIn("| 1 | 1 | 1200 | 2400 | 36 |", sa)
+        # mean over 11 decided RNTIs: (4*20 + ... ) computed by hand: ranks 0,1 -> 20 s (6 RNTIs), ranks 2,3 -> 15 s (5 decided)
+        self.assertIn("| %.2f |" % ((6 * 20.0 + 5 * 15.0) / 11), sa)
         nsa = [l for l in md.splitlines() if l.startswith("| k2 | NSA-like | 4 ")][0]
-        self.assertIn("| 10.0 | 10.0 | 5.0 | 0 |", nsa)
+        self.assertIn("| 10.0 | 10.0 | 5.0 |", nsa)
+        self.assertIn("| 0 | 1 |", nsa)  # wrong 0, undecidable 1
+        self.assertIn("5/10.0/8.0/0", nsa)  # truth table 0: 5 decided (censored one excluded), median 10, mean (3*10+2*5)/5 = 8
+        self.assertIn("tbl 0", md)
 
 
 if __name__ == "__main__":

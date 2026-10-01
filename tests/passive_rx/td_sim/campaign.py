@@ -15,6 +15,10 @@ def pct(v, p):
     return v[min(len(v) - 1, max(0, -(-len(v) * p // 100) - 1))] if v else float("nan")
 
 
+def mean(v):
+    return sum(v) / len(v) if v else float("nan")
+
+
 def med(v):
     return statistics.median(v) if v else float("nan")
 
@@ -44,17 +48,29 @@ def main(argv=None):
                     recs = [r for r in run_one(a.sim, flags, m.get("acq", 2000), m.get("seed", 1), rx) if "summary" not in r]
                     for r in recs:
                         rf.write(json.dumps(dict(r, arm=arm, cell=cell, rx=rx)) + "\n")
-                    cold = [r["seconds"] for r in recs if r["rnti_rank"] < 2]
-                    steady = [r["seconds"] for r in recs if r["rnti_rank"] >= 2]
-                    rows.append((arm, cell, rx, med(cold), pct(cold, 95), med(steady), sum(r["wrong"] for r in recs),
+                    # Undecidable (capped) RNTIs are CENSORED: excluded from quantiles/means, counted separately.
+                    ok = [r for r in recs if not r["undecidable"]]
+                    cold = [r["seconds"] for r in ok if r["rnti_rank"] < 2]
+                    steady = [r["seconds"] for r in ok if r["rnti_rank"] >= 2]
+                    allsec = [r["seconds"] for r in ok]
+                    tab = {}
+                    for t in (0, 1, 2):
+                        v = [r["seconds"] for r in ok if r.get("truth_table") == t]
+                        tab[t] = "%d/%.1f/%.1f/%d" % (len(v), med(v), mean(v), sum(r["wrong"] for r in ok if r.get("truth_table") == t))
+                    rows.append((arm, cell, rx, med(cold), pct(cold, 95), med(steady), mean(allsec),
+                                 mean([r["grants"] for r in ok]), sum(r["wrong"] for r in recs),
                                  sum(r["undecidable"] for r in recs), sum(r["n_full"] for r in recs),
-                                 sum(r["n_probe"] for r in recs), sum(r["gated_phys"] + r["gated_chan"] for r in recs)))
+                                 sum(r["n_probe"] for r in recs), sum(r["gated_phys"] + r["gated_chan"] for r in recs),
+                                 tab[0], tab[1], tab[2]))
     with open(os.path.join(a.out, "summary.md"), "w") as sf:
-        sf.write("[SIMULATED, nr_td_sim] cold = first two RNTIs per acquisition; steady = later RNTIs; seconds = grants / grants-per-s\n\n")
-        sf.write("| arm | cell | rx | cold median s | cold p95 s | steady median s | wrong | undecidable | n_full | n_probe | gated |\n")
-        sf.write("|---|---|---|---|---|---|---|---|---|---|---|\n")
+        sf.write("[SIMULATED, nr_td_sim] cold = first two RNTIs per acquisition; steady = later RNTIs; seconds = grants / grants-per-s.\n"
+                 "Undecidable (capped) RNTIs are censored: excluded from medians/means/p95, counted in the undecidable column.\n"
+                 "Medians are quantised (separation is checked every 16 trials): prefer the mean columns.\n"
+                 "tbl N = truth mcs_table N as count/median s/mean s/wrong.\n\n")
+        sf.write("| arm | cell | rx | cold median s | cold p95 s | steady median s | mean s | mean grants | wrong | undecidable | n_full | n_probe | gated | tbl 0 | tbl 1 | tbl 2 |\n")
+        sf.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for r in rows:
-            sf.write("| %s | %s | %d | %.1f | %.1f | %.1f | %d | %d | %d | %d | %d |\n" % r)
+            sf.write("| %s | %s | %d | %.1f | %.1f | %.1f | %.2f | %.0f | %d | %d | %d | %d | %d | %s | %s | %s |\n" % r)
     return 0
 
 
