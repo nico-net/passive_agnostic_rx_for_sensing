@@ -1,5 +1,5 @@
 Task A3: per-grant observation API (nr_passive_obs) -- rfsim validation, Step 9.
-Evidence label: [SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, base 6e9a96c476 + the A3 commit that adds this dir]
+Evidence label: [SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 10cc6f0058]
 (unit test: [OFFLINE VERIFIED, same host].) Not a DGX number; no OTA.
 
 Setup: tests/passive_rx/dgx/rfsim_regress.sh 1, GATE_CRC_MIN=93.0 GATE_DROP_MAX=2.5, 150 s, 106 PRB, fully agnostic.
