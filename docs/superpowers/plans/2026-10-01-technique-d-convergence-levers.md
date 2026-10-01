@@ -881,13 +881,42 @@ Additions vs the former Task 8: the gate and legality masks come from GrantWork;
 - [ ] **Step 3:** Score per RNTI time-to-CONVERGED, wrong winners vs gNB truth (validation only), compute row incl. GPU utilisation reported separately.
 - [ ] **Step 4:** Commit campaign summaries; PROJECT_MEMORY §14 subsection; K-entries for failures. Follow-up: simulator replay mode (spec §6.1) fed with this bed's A3 observation records.
 
-### Task R4: Defaults, documentation, review (Opus) — was Task 10
+### Task R4: Defaults, comprehensive PROJECT_MEMORY.md update, review (Opus; last task) — was Task 10
 
-- [ ] **Step 1:** If targets met with 0 wrong: set chosen defaults (K, weights, gate, fieldbook, P2, GPU paths) in code; else keep neutral defaults and record the gap.
-- [ ] **Step 2:** PROJECT_MEMORY: §23.9, §10.2 env table, §11.8 new log lines, §16, §24 (K32–K36 status), §25.
-- [ ] **Step 3:** `/code-review` on `adaptive-rx-UL-DL..td/convergence-levers`; superpowers:finishing-a-development-branch; push.
+The plan is not complete until `PROJECT_MEMORY.md` reflects everything this branch changed, so that a fresh agent with no
+conversation history can operate and extend the receiver from the file alone. Every statement carries an evidence label
+(§0.1) naming host and commit; DGX, cloud x86 and OTA results stay in separate tables.
+
+- [ ] **Step 1 — defaults:** if the §1 targets are met with 0 wrong winners, set the chosen defaults in code (K, ordering
+  weights, gate, field book, P2, GPU paths); otherwise keep neutral defaults and record the gap with numbers.
+- [ ] **Step 2 — header:** a dated update block summarising what the branch delivered, the merge commit, and what is still open.
+- [ ] **Step 3 — architecture and modules:** §2.1 pipeline diagram (grant gate, `select_k`/top-K probes, ordering score,
+  CellFieldBook, GrantWork, compute modes, GPU batch path); §2.2 block reference updated for B8 (PDSCH/PUSCH + Technique D)
+  and B9; §3.3 new modules (`nr_td_gate`, `nr_td_order`, `nr_td_fieldbook`, `nr_td_legal`, `nr_pdsch_chest_key.h`,
+  `nr_td_grantwork`, GPU batch modules, the engine API `next_k`/`feed_k`/`select_k`/`feedback_k`/`rebuild`) with their
+  tests; §3.4 new tools (`nr_td_sim`, `tests/passive_rx/td_sim/campaign.py`, `profile_report.py`, `gpu_bench.sh`).
+- [ ] **Step 4 — operation:** §10.2 every new env var / config key with default and agnostic status (`ISAC_TD_K`,
+  `ISAC_TD_GATE`, `ISAC_TD_GATE_SNR_MARGIN_DB`, `ISAC_TD_W_SIB1/DEFAULT/OBS/FIELD/PROBE`, `ISAC_TD_FIELDBOOK`, `ISAC_TD_P2`,
+  `ISAC_TD_IGNORE_SIB1`, `ISAC_TD_PROBE_BUDGET_US`, `ISAC_TD_PROBE_EQUIV_CHECK`, `ISAC_TD_MODE_*`, GPU flags); §10.4 the beds
+  used (phy-test, SA bed, NSA-like arm flags, 5G core / OCUDU fallback actually used) and the simulator.
+- [ ] **Step 5 — logging:** §11 (§11.8 especially) every new log line with meaning and normal/abnormal values (gate counts,
+  `UNDECIDABLE`, field promotions/withdrawals, probe outcomes, `PROBE_EQUIV`, `stale_after_decode`, compute-mode changes,
+  GPU fallbacks) and the new `ISAC_METRICS` `td_*` fields.
+- [ ] **Step 6 — validation:** §12 gates touched (G7, G8, G9) with the new PASS conditions; §13 offline results (new gtests,
+  simulator campaigns: P1 ablation and the P2 Monte-Carlo gate with their decisions); §14 rfsim/SA-bed results with numbers
+  (cold and steady T_winner at 4 RX / 1 RX, SA vs NSA-like, wrong winners, N_TB, N_probe, CPU avg/peak, GPU utilisation,
+  queue latency, F3 profile, compute ablation of spec §9.5); §15 any OTA observation.
+- [ ] **Step 7 — status and issues:** §16 status table rows (DL reconstruction + decode G8, RS/CFR G9, compute); §20 compute
+  strategy updated with what is implemented; §23.9 Technique D block reference (levers, defaults, P1/P2 status); §24 K4, K17,
+  K27, K32–K36 marked resolved or updated with evidence, new K-entries for anything found; §25 next steps re-ordered; §0.6
+  document index (levers spec/plan → done).
+- [ ] **Step 8 — consistency check:** grep the file for statements this branch made stale (e.g. "single hypothesis per
+  grant", "all-or-nothing cell-wide prior", "chest cache", "GPU LDPC 20× slower", "probes for ordering only" if P2 shipped)
+  and correct or mark them `HISTORICAL`; verify every commit hash cited exists (`git cat-file -e <hash>`); sens6-frozen gate.
+- [ ] **Step 9 — review and finish:** `/code-review` on `adaptive-rx-UL-DL..td/convergence-levers`; superpowers:finishing-a-development-branch;
+  commit `docs: PROJECT_MEMORY - Technique D convergence levers delivered (…)` and push the branch.
 
 ## Self-review record (revision 2, 2026-10-01)
 
-- Spec coverage: §1 targets → Tasks 6, 7, R3, R4; §2 principles → Global Constraints + Task 4 tests; §4.1 gate → Task 1 + R2; §4.2 exclusions → Task 4b (+ R2 masks); §4.3 → Tasks 4, R2; §4.4 probe decoder → F1 (correct chest), F2, R1, G4; §4.5 → Tasks 2, 4; §4.6 → Tasks 3, R2; §5 P1/P2 (+ §9.3 same decoder) → Tasks 4, 6, 7, R2; §6.1 simulator (shared-IQ, SNR error) → Task 5, replay mode → R3 follow-up; §6.2 → R3; §6.3/§9.5 ablation → Tasks 6, 7, R3; §6.4 → Tasks 4, R2; §9.1 GrantWork → R1, legality bitsets → 4b, signatures → 4c, information-aware ordering → optional term, not scheduled (add to Task 2 only if Task 6 shows ordering is the bottleneck), modes → R1; §9.2 GPU → G1–G4; §9.4 V1–V9 → F1 (V1), F1/R1 (V2), F2 (V3), G1 (V4, V6), G3 (V5), G2 (V7), V8 out of scope (PDCCH GPU), V9 → K36 x86 comparison in R4 notes.
+- Spec coverage: §1 targets → Tasks 6, 7, R3, R4; documentation → R4 (comprehensive PROJECT_MEMORY update, same checklist as robustness R16); §2 principles → Global Constraints + Task 4 tests; §4.1 gate → Task 1 + R2; §4.2 exclusions → Task 4b (+ R2 masks); §4.3 → Tasks 4, R2; §4.4 probe decoder → F1 (correct chest), F2, R1, G4; §4.5 → Tasks 2, 4; §4.6 → Tasks 3, R2; §5 P1/P2 (+ §9.3 same decoder) → Tasks 4, 6, 7, R2; §6.1 simulator (shared-IQ, SNR error) → Task 5, replay mode → R3 follow-up; §6.2 → R3; §6.3/§9.5 ablation → Tasks 6, 7, R3; §6.4 → Tasks 4, R2; §9.1 GrantWork → R1, legality bitsets → 4b, signatures → 4c, information-aware ordering → optional term, not scheduled (add to Task 2 only if Task 6 shows ordering is the bottleneck), modes → R1; §9.2 GPU → G1–G4; §9.4 V1–V9 → F1 (V1), F1/R1 (V2), F2 (V3), G1 (V4, V6), G3 (V5), G2 (V7), V8 out of scope (PDCCH GPU), V9 → K36 x86 comparison in R4 notes.
 - Known limitation: Task 4b's real reject vectors must be captured from a live log (Step 2 explains how); an empty vector table fails review.
