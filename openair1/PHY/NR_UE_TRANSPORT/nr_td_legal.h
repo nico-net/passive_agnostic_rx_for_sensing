@@ -49,6 +49,15 @@ uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm);
  * hypothesis (may vary per hypothesis). Returns the number of distinct signature values (0 for an
  * empty catalog), or -1 on error (n < 0, NULL hyp/qm_per_hyp with n > 0, or allocation failure). */
 int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp);
+
+/* Exact grant-equivalence key: equal keys <=> identical receiver computation on a grant (same geometry, DM-RS,
+ * layers, Qm, target code rate of the grant's MCS under the hypothesis's table, and LBRM class: the decoder sets
+ * tbl_lbrm = mcs_table and nr_compute_tbslbrm() uses Qm_max 8 for table 1 (256QAM), 6 otherwise, so Ncb can differ).
+ * Never merges distinct computations, given the caller passes the grant's true Qm and code rate per hypothesis table
+ * (may over-split via add_pos/max_len).
+ * UNIT: code_rate_x10240 is nr_get_code_rate_dl() exactly as returned, i.e. R x 1024 x 10 (max 9480, the x10
+ * convention of nr_mac_common.c's tables). Masked to 18 bits (bits 42..59); the LBRM class is bit 60. */
+uint64_t nr_td_equiv_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm, uint32_t code_rate_x10240);
 #ifdef __cplusplus
 }
 #endif

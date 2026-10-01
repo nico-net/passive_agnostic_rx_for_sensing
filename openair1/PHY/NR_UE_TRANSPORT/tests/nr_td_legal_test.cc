@@ -217,6 +217,42 @@ TEST(TdLegal, CAbove255IsInfeasible)
   nr_td_rm_geom_t g = {50000, 25000, 4, 1, 256, 8448, 0, 384, 1, 25344, 0}; /* real C is uint8_t: 256 wraps to 0 */
   EXPECT_FALSE(nr_td_rm_feasible(&g));
 }
+/* Rates are nr_get_code_rate_dl() units: R x 1024 x 10 (4900 = 490/1024). */
+TEST(TdEquiv, SameComputationSameKey) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 2; a.tda_length = 12; a.dmrs_mask = 0x884; a.dmrs_max_len = 1;
+  nr_pdsch_cfg_hypothesis_t b = a; b.mcs_table = 2; /* 64QAM vs 64QAM-LowSE: same LBRM class (Qm_max 6) */
+  /* Same Qm and R (in real OAI tables only at MCS 29-31; the unit test passes equal values directly). */
+  EXPECT_EQ(nr_td_equiv_key(&a, 1, 4, 4900), nr_td_equiv_key(&b, 1, 4, 4900));
+}
+TEST(TdEquiv, LbrmClassSplitsTable1) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 2; a.tda_length = 12; a.dmrs_mask = 0x884; a.dmrs_max_len = 1;
+  nr_pdsch_cfg_hypothesis_t b = a; b.mcs_table = 1; /* 256QAM: tbl_lbrm Qm_max 8 -> different Ncb when LBRM binds */
+  EXPECT_NE(nr_td_equiv_key(&a, 1, 4, 4900), nr_td_equiv_key(&b, 1, 4, 4900));
+}
+TEST(TdEquiv, DifferentRateOrGeometryDifferentKey) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 2; a.tda_length = 12; a.dmrs_mask = 0x884; a.dmrs_max_len = 1;
+  nr_pdsch_cfg_hypothesis_t b = a;
+  EXPECT_NE(nr_td_equiv_key(&a, 1, 4, 4900), nr_td_equiv_key(&b, 1, 4, 5530));
+  b.k0 = 1;
+  EXPECT_NE(nr_td_equiv_key(&a, 1, 4, 4900), nr_td_equiv_key(&b, 1, 4, 4900));
+}
+/* The signature never reaches bit 42 even with every field at the maximum its bit slot holds, and the rate field
+ * (bits 42..59) neither spills into the LBRM bit nor is truncated at the largest real rate 9480. */
+TEST(TdEquiv, RateFieldDoesNotOverlapSignature) {
+  nr_pdsch_cfg_hypothesis_t h_max = {};
+  h_max.tda_start = 15; h_max.tda_length = 15; h_max.k0 = 63; h_max.mapping_type = 3;
+  h_max.dmrs_mask = 0xFFFF; h_max.dmrs_max_len = 3; h_max.dmrs_add_pos = 3;
+  EXPECT_EQ(nr_td_signature(&h_max, 15, 15) >> 42, 0u);
+  const uint64_t k_max = nr_td_equiv_key(&h_max, 15, 15, 0x3FFFF);
+  EXPECT_EQ(k_max >> 42, 0x3FFFFu); /* rate fills 42..59 exactly, bit 60 clear for table 0 */
+  EXPECT_EQ(k_max & ((1ull << 42) - 1), nr_td_signature(&h_max, 15, 15));
+  h_max.mcs_table = 1;
+  EXPECT_EQ(nr_td_equiv_key(&h_max, 15, 15, 0x3FFFF) >> 42, 0x3FFFFu | (1u << 18)); /* LBRM bit 60 distinct */
+  h_max.mcs_table = 0;
+  EXPECT_EQ((nr_td_equiv_key(&h_max, 15, 15, 9480) >> 42), 9480u);
+  EXPECT_NE(nr_td_equiv_key(&h_max, 15, 15, 9480), nr_td_equiv_key(&h_max, 15, 15, 9479));
+  EXPECT_NE(nr_td_equiv_key(&h_max, 15, 15, 9480), nr_td_equiv_key(&h_max, 15, 15, 0x3FFFF));
+}
 int main(int argc, char **argv)
 {
   logInit(); /* the real rate matching reports rejects through LOG_E */

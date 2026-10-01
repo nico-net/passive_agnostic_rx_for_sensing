@@ -145,6 +145,16 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
  * Returns the winning index once one is established, else -1. */
 int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok);
 
+/* Credit one full-TB outcome to idx[0] (the decoded hypothesis) and to its grant-equivalent alive hypotheses
+ * idx[1..n-1]. Duplicates and out-of-range members are ignored; an invalid idx[0] (or n < 1) credits nothing and
+ * returns the current winner, as _feed does. n == 1 is bit-identical to
+ * nr_pdsch_config_sweep_feed(st, idx[0], tb_crc_ok). The acceptance check runs once, after crediting, whenever any
+ * credited hypothesis reached a multiple of 16 trials. Returns the winner or -1.
+ * Equivalence (blind-convergence spec 2026-10-01 section 2) is the caller's job: equal nr_td_equiv_key() on this
+ * grant. new_data is accepted but currently IGNORED; lever C (task BC2) will use it. */
+int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
+                                     bool new_data /* new transmission (NDI toggled); used only by lever C (BC2) */);
+
 /** K = 1 is exactly nr_pdsch_config_sweep_next(). Returns n filled (1..K, K clamped to NR_TD_MAX_K;
  *  0 when nothing can be selected); idx[0]/out[0] = the main hypothesis (unchanged path and RNG use),
  *  idx[1..n-1] = distinct probe hypotheses that are not yet cleared (>= SWEEP_MIN_TRIALS trials, no pass),

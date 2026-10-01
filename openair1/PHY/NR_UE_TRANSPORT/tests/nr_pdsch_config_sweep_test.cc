@@ -4,6 +4,7 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <vector>
 #include <gtest/gtest.h>
@@ -1212,4 +1213,82 @@ TEST(PdschSweepK, NonFiniteKeysKeepShuffleOrder) {
     nr_pdsch_cfg_hypothesis_t h; ASSERT_EQ(nr_pdsch_config_sweep_next(&a, &h), nr_pdsch_config_sweep_next(&b, &h)) << i;
   }
   b.side = nullptr;
+}
+TEST(PdschSweepEquiv, SingleIsBitIdenticalToFeed) {
+  auto a = std::make_unique<nr_pdsch_config_sweep_state_t>(), b = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(a.get(), 4); memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
+  for (int t = 0; t < 20000; t++) {
+    nr_pdsch_cfg_hypothesis_t h; const int i = nr_pdsch_config_sweep_next(a.get(), &h);
+    const int j = nr_pdsch_config_sweep_next(b.get(), &h); ASSERT_EQ(i, j);
+    const bool ok = (i == 7) && (t % 3 == 0);
+    const int wa = nr_pdsch_config_sweep_feed(a.get(), i, ok), wb = nr_pdsch_config_sweep_feed_equiv(b.get(), &i, 1, ok, true);
+    ASSERT_EQ(wa, wb); if (wa >= 0) break;
+  }
+  EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
+  EXPECT_EQ(0, memcmp(a->ok, b->ok, sizeof(a->ok)));
+}
+TEST(PdschSweepEquiv, CreditsEveryMemberOnceIgnoringDuplicates) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  const int idx[] = {3, 5, 5, 9, -1, 1 << 20};
+  nr_pdsch_config_sweep_feed_equiv(s.get(), idx, 6, true, true);
+  EXPECT_EQ(s->trials[3], 1u); EXPECT_EQ(s->trials[5], 1u); EXPECT_EQ(s->trials[9], 1u);
+  EXPECT_EQ(s->ok[3], 1u); EXPECT_EQ(s->ok[5], 1u); EXPECT_EQ(s->ok[9], 1u);
+}
+/* Same as SingleIsBitIdenticalToFeed on a pruned catalog that converges, so the KL separation and the
+ * decision path (refactored into sweep_decide) are compared up to the winner. */
+TEST(PdschSweepEquiv, SingleIsBitIdenticalToFeedUntilConvergence) {
+  auto a = std::make_unique<nr_pdsch_config_sweep_state_t>(), b = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(a.get(), 4);
+  ASSERT_GT(nr_pdsch_config_sweep_prune_to(a.get(), a->hyp[0].mcs_table, a->hyp[0].dmrs_add_pos, a->hyp[0].dmrs_max_len), 0);
+  memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
+  unsigned seed = 7;
+  int t = 0;
+  for (; t < 200000 && a->winner < 0; t++) {
+    nr_pdsch_cfg_hypothesis_t h; const int i = nr_pdsch_config_sweep_next(a.get(), &h);
+    ASSERT_EQ(i, nr_pdsch_config_sweep_next(b.get(), &h));
+    const bool ok = (i == 3) && (rand_r(&seed) % 100 < 60);
+    ASSERT_EQ(nr_pdsch_config_sweep_feed(a.get(), i, ok), nr_pdsch_config_sweep_feed_equiv(b.get(), &i, 1, ok, true)) << t;
+  }
+  EXPECT_EQ(a->winner, 3);
+  EXPECT_EQ(b->winner, 3);
+  EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
+  EXPECT_EQ(0, memcmp(a->ok, b->ok, sizeof(a->ok)));
+  /* After the winner, both keep returning it without crediting. */
+  const int k = 5;
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(b.get(), &k, 1, true, true), 3);
+  EXPECT_EQ(b->trials[5], a->trials[5]);
+}
+/* Degenerate inputs mirror _feed: NULL state -> -1; n < 1 or no valid index -> current winner, nothing credited. */
+TEST(PdschSweepEquiv, DegenerateInputsMirrorFeed) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  const int bad[] = {-1, 1 << 20};
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(nullptr, bad, 2, true, true), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), bad, 0, true, true), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), nullptr, 1, true, true), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), bad, 2, true, true), -1);
+  for (int i = 0; i < s->n_hyp; i++)
+    ASSERT_EQ(s->trials[i], 0u) << i;
+}
+/* The separation check fires when ANY credited member (not only idx[0]) reaches a multiple of 16 trials. */
+TEST(PdschSweepEquiv, CheckFiresOnNonFirstMember) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  ASSERT_GT(nr_pdsch_config_sweep_prune_to(s.get(), s->hyp[0].mcs_table, s->hyp[0].dmrs_add_pos, s->hyp[0].dmrs_max_len), 0);
+  for (int i = 0; i < s->n_hyp; i++) { s->trials[i] = 100; s->ok[i] = 0; }
+  s->trials[3] = 79; s->ok[3] = 78; /* reaches 80 = 5 x 16 on this grant */
+  s->trials[4] = 200; s->ok[4] = 0; /* reaches 201: alone it would not trigger the check */
+  auto t = std::make_unique<nr_pdsch_config_sweep_state_t>(); memcpy((void *)t.get(), (void *)s.get(), sizeof(*s));
+  EXPECT_EQ(nr_pdsch_config_sweep_feed(t.get(), 4, true), -1); /* control: no check on 201 trials */
+  const int idx[] = {4, 3};
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), idx, 2, true, true), 3);
+}
+/* An invalid decoded index credits NO member, even valid ones: the class is defined relative to idx[0]. */
+TEST(PdschSweepEquiv, InvalidDecodedIndexCreditsNothing) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  const int idx_neg[] = {-1, 3, 5}, idx_big[] = {1 << 20, 3, 5};
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), idx_neg, 3, true, true), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), idx_big, 3, false, true), -1);
+  for (int i = 0; i < s->n_hyp; i++) {
+    ASSERT_EQ(s->trials[i], 0u) << i;
+    ASSERT_EQ(s->ok[i], 0u) << i;
+  }
 }
