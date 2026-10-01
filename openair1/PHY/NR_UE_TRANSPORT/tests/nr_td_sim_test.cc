@@ -59,6 +59,43 @@ TEST(TdSim, WObsOrderingChangesTheBlindSearch)
   c.w_obs = 1.0f;
   EXPECT_NE(run_sim(c).total_grants, base);
 }
+/* Pins the copied production DM-RS legality (nr_pdcch_blind_dmrs_mask in nr_pdcch_blind_monitor.c). typeA pos is the ASN.1
+ * enum (pos2 = 0). 0x884 is the value the runtime's own test asserts (nr_pdcch_blind_monitor_test.cc
+ * TechniqueD.TruthHypothesisRealisesTheGnbsOwnDmrsMask); the rest are evaluated from TS 38.211 Tables 7.4.1.1.2-3/-4. */
+TEST(TdSim, DmrsLegalityPinned)
+{
+  /* (typeA pos, L, S, is_b, add_pos, len) -> mask */
+  EXPECT_EQ(sim_legality(0, 13, 1, 0, 2, 1), 0x884);
+  EXPECT_EQ(sim_legality(0, 14, 0, 0, 0, 1), 0x4);
+  EXPECT_EQ(sim_legality(0, 13, 1, 0, 1, 1), 0x804);
+  EXPECT_EQ(sim_legality(0, 7, 0, 0, 0, 1), 0x4);
+  EXPECT_EQ(sim_legality(0, 14, 0, 0, 3, 1), 2336 | 4);
+  EXPECT_EQ(sim_legality(1, 14, 0, 0, 1, 1), 2048 | 8);
+  EXPECT_EQ(sim_legality(1, 14, 0, 0, 3, 1), -1);   /* pos3 forbids add_pos 3 */
+  EXPECT_EQ(sim_legality(1, 3, 0, 0, 0, 1), -1);    /* pos3, ld 3 */
+  EXPECT_EQ(sim_legality(0, 14, 0, 0, 1, 2), 3072 | 12);
+  EXPECT_EQ(sim_legality(0, 7, 4, 0, 0, 1), -1);    /* type A: S > l0 */
+  EXPECT_EQ(sim_legality(0, 4, 2, 1, 0, 1), 1 << 2); /* type B, DM-RS on the first PDSCH symbol */
+  EXPECT_EQ(sim_legality(0, 7, 0, 1, 1, 1), 17);
+  EXPECT_EQ(sim_legality(0, 5, 1, 1, 0, 2), 3 << 1);
+  EXPECT_EQ(sim_legality(0, 4, 2, 1, 0, 2), -1);
+  EXPECT_EQ(sim_legality(0, 13, 1, 0, 4, 1), -1);
+  EXPECT_EQ(sim_legality(0, 13, 1, 0, 2, 3), -1);
+}
+TEST(TdSim, PriorOnlyWhenFieldbookOffAndSpeedsLaterRntis)
+{
+  SimCfg c = SimCfg::defaults();
+  c.acq = 8;
+  c.oracle = 0;
+  c.rntis_per_acq = 4;
+  const SimResult on = run_sim(c);
+  c.prior = 0;
+  const SimResult off = run_sim(c);
+  EXPECT_LT(on.mean_s, off.mean_s);
+  c.prior = 1;
+  c.fieldbook = 1; /* prior pruning forced off: identical engine inputs to prior=0 plus field-book ordering with weights 0 */
+  EXPECT_EQ(run_sim(c).total_grants, off.total_grants);
+}
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);

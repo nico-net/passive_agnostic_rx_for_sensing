@@ -33,6 +33,7 @@ void exit_function(const char *file, const char *fn, int line, const char *messa
 
 struct SimCfg {
   int acq, seed, catalog_tda, n_rx, K, sib1, fieldbook, gate, p2, twins, rntis_per_acq;
+  int prior;            /* 1 (default) = today's cell-wide/RNTI prior pruning; forced OFF when fieldbook=1 (plan R2 rule) */
   int oracle;           /* 1 = today's runtime (DM-RS/last-symbol/k0 + Qm oracles prune the catalogue), 0 = blind arm */
   int dmrs_typea_pos;   /* ASN.1 enum: 0 = pos2 (rfsim gNB default, 106 PRB cell), 1 = pos3 */
   double mu, fade, snr_est_sigma, rank2_frac, grants_per_s, probe_inconclusive, table_exercise, cap_s;
@@ -42,7 +43,7 @@ struct SimCfg {
   {
     SimCfg c;
     c.acq = 100; c.seed = 1; c.catalog_tda = 4; c.n_rx = 4; c.K = 1; c.sib1 = 0; c.fieldbook = 0; c.gate = 0; c.p2 = 0;
-    c.twins = 0; c.rntis_per_acq = 4; c.oracle = 1; c.dmrs_typea_pos = 0;
+    c.twins = 0; c.rntis_per_acq = 4; c.oracle = 1; c.prior = 1; c.dmrs_typea_pos = 0;
     c.mu = 15; c.fade = 6; c.snr_est_sigma = 2; c.rank2_frac = 0.3; c.grants_per_s = 200;
     c.probe_inconclusive = 0.1; c.table_exercise = 0.9; c.cap_s = 3600;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
@@ -87,6 +88,8 @@ static const int32_t g_table_7_4_1_1_2_4[12][8] = {
     {0, 0, -1, -1, 3, 3, -1, -1}, {0, 0, -1, -1, 3, 99, -1, -1}, {0, 0, -1, -1, 3, 99, -1, -1}, {0, 768, -1, -1, 3, 387, -1, -1},
     {0, 768, -1, -1, 3, 387, -1, -1}, {0, 768, -1, -1, 3, 771, -1, -1}, {0, 3072, -1, -1, 3, 771, -1, -1}, {0, 3072, -1, -1, -1, -1, -1, -1},
 };
+/* Mirrors nr_pdcch_blind_dmrs_mask() -> blind_fill_dmrs_mask() in openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c
+ * (pinned by TdSim.DmrsLegalityPinned in nr_td_sim_test.cc). */
 static int32_t sim_legality(int typeA_pos, int NrOfSymbols, int startSymbol, int is_b, int add_pos, int length)
 {
   if (add_pos < 0 || add_pos > 3 || (length != 1 && length != 2)) return -1;
@@ -174,6 +177,18 @@ static SimResult run_sim(const SimCfg &cfg)
     }
     R.twins_sum += ntw;
     R.twins_min = R.twins_min < 0 ? ntw : std::min<long>(R.twins_min, ntw);
+    /* Runtime prior (nr_pdsch_config_sweep.c): an RNTI's FIRST converged context records a private prior
+     * {mcs_table, dmrs_add_pos, dmrs_max_len, mapping_type} (:1392); prior_promote_locked (:962) publishes it cell-wide
+     * (g_prior) once a SECOND distinct RNTI converged on identical fields; select() (:1069-1078) then prunes only
+     * contexts CREATED AFTERWARDS with prune_prior (:471: keep table == prior and (other mapping type or same add_pos
+     * and max_len)) before the observed-mask prune (:1081). One TDA per simulated RNTI, so the per-RNTI own-prior path
+     * (sibling TDA contexts) never applies. Off when ISAC_TD_FIELDBOOK=1 (plan R2). Not modelled: g_prior invalidation
+     * on a failed probation (:1326). */
+    const bool use_prior = cfg.prior && !cfg.fieldbook;
+    struct Prior { uint8_t tbl, add, len, map; };
+    std::vector<Prior> rnti_priors;
+    bool gprior_valid = false;
+    Prior gprior{};
     nr_td_fieldbook_t fb;
     nr_td_fieldbook_init(&fb, 2, 2);
     for (int k = 0; k < cfg.rntis_per_acq; k++) {
@@ -224,6 +239,10 @@ static SimResult run_sim(const SimCfg &cfg)
           return h.dmrs_mask == T.dmrs_mask && h.tda_start + h.tda_length == T.tda_start + T.tda_length && h.k0 == T.k0;
         });
       };
+      if (use_prior && gprior_valid)
+        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
+          return h.mcs_table == gprior.tbl && (h.mapping_type != gprior.map || (h.dmrs_add_pos == gprior.add && h.dmrs_max_len == gprior.len));
+        });
       if (cfg.oracle && k >= 2) do_observe();
       bool distinguished = false;
       int winner = -1;
@@ -310,6 +329,14 @@ static SimResult run_sim(const SimCfg &cfg)
       } else {
         rec.wrong = !is_truth(st->hyp[winner]) && !(is_twin_h(st->hyp[winner]) && !distinguished);
         rec.winner_ok = !rec.wrong;
+        if (use_prior) {
+          const nr_pdsch_cfg_hypothesis_t &w = st->hyp[winner];
+          const Prior p{w.mcs_table, w.dmrs_add_pos, w.dmrs_max_len, w.mapping_type};
+          if (!gprior_valid)
+            for (const Prior &q : rnti_priors)
+              if (q.tbl == p.tbl && q.add == p.add && q.len == p.len && q.map == p.map) { gprior = p; gprior_valid = true; break; }
+          rnti_priors.push_back(p);
+        }
         if (cfg.fieldbook) {
           int32_t before[NR_TD_F_COUNT];
           for (int f = 0; f < NR_TD_F_COUNT; f++) before[f] = fb.f[f].value;
@@ -379,6 +406,7 @@ int main(int argc, char **argv)
     else if (f == "--table-exercise") c.table_exercise = atof(v);
     else if (f == "--cap-s") c.cap_s = atof(v);
     else if (f == "--oracle") c.oracle = atoi(v);
+    else if (f == "--prior") c.prior = atoi(v);
     else if (f == "--dmrs-typea-pos") c.dmrs_typea_pos = atoi(v);
     else { fprintf(stderr, "unknown flag %s\n", f.c_str()); return 2; }
   }
@@ -393,10 +421,10 @@ int main(int argc, char **argv)
   printf("{\"summary\":{\"acq\":%d,\"rntis\":%ld,\"decided\":%ld,\"median_s\":%.3f,\"p95_s\":%.3f,\"mean_s\":%.3f,"
          "\"mean_grants\":%.1f,\"wrong\":%ld,\"undecidable\":%ld,"
          "\"n_full\":%ld,\"n_probe\":%ld,\"gated_phys\":%ld,\"gated_chan\":%ld,\"promotions\":%ld,\"withdrawals\":%ld,"
-         "\"twins_requested\":%d,\"twins_min\":%ld,\"cap_s\":%.0f,\"seed\":%d,\"n_rx\":%d,\"K\":%d,\"oracle\":%d,\"by_table\":{",
+         "\"twins_requested\":%d,\"twins_min\":%ld,\"cap_s\":%.0f,\"seed\":%d,\"n_rx\":%d,\"K\":%d,\"oracle\":%d,\"prior\":%d,\"by_table\":{",
          c.acq, r.acquisitions_rntis, r.n_decided, r.median_s, r.p95_s, r.mean_s, r.mean_grants, r.wrong, r.undecidable,
          r.n_full, r.n_probe, r.gated_phys, r.gated_chan, r.promotions, r.withdrawals, c.twins, r.twins_min, c.cap_s,
-         c.seed, c.n_rx, c.K, c.oracle);
+         c.seed, c.n_rx, c.K, c.oracle, c.prior && !c.fieldbook);
   for (int t = 0; t < 3; t++) {
     const SimResult::TableStat &ts = r.by_table[t];
     printf("%s\"%d\":{\"n\":%ld,\"median_s\":%.3f,\"mean_s\":%.3f,\"wrong\":%ld}", t ? "," : "", t, ts.n,
