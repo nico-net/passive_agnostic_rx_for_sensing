@@ -6810,9 +6810,6 @@ constdiag_done:;
          (unsigned long)scanq.dropped_stale, (unsigned long)scanq.max_lag_slots,
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
-    /* Runs under the Phase-2 lock (Task A7): a 20 s-period line write that other consumers' Phase 2 waits on;
-     * acceptable per the plan (A2 file sink, once per 20 s). */
-    nr_passive_metrics_emit(); /* machine-readable twin of the text summaries above (Task A2) */
   }
 
     /* Distinct decode-parameter census. Printed with the periodic summary rather than only at
@@ -6941,4 +6938,14 @@ constdiag_done:;
             (unsigned long)(slot_ns / 1000), (unsigned long)g_btim_over_slot,
             (unsigned long)g_btim_n[BTIM_TOTAL]);
     }
+  /* Metrics file write (Task A2) is deliberately OUTSIDE the Phase-2 lock: it is a file write that must not stall
+   * other consumers' Phase 2 or the discovery pass (final review I2). There is no return after the sum_due block,
+   * so releasing here is the same as the cleanup guard releasing at scope exit, just earlier. sum_due has exactly
+   * one winner per period (summary_due_now CAS), so exactly one emit per period. */
+  if (phase2.held) {
+    nr_pdcch_blind_phase2_unlock();
+    phase2.held = false;
+  }
+  if (sum_due)
+    nr_passive_metrics_emit(); /* machine-readable twin of the text summaries (Task A2) */
 }
