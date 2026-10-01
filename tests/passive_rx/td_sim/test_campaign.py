@@ -44,10 +44,16 @@ class Campaign(unittest.TestCase):
         # mean over 11 decided RNTIs: (4*20 + ... ) computed by hand: ranks 0,1 -> 20 s (6 RNTIs), ranks 2,3 -> 15 s (5 decided)
         self.assertIn("| %.2f |" % ((6 * 20.0 + 5 * 15.0) / 11), sa)
         nsa = [l for l in md.splitlines() if l.startswith("| k2 | NSA-like | 4 ")][0]
-        self.assertIn("| 10.0 | 10.0 | 5.0 |", nsa)
-        self.assertIn("| 0 | 1 |", nsa)  # wrong 0, undecidable 1
-        self.assertIn("5/10.0/8.0/0", nsa)  # truth table 0: 5 decided (censored one excluded), median 10, mean (3*10+2*5)/5 = 8
-        self.assertIn("tbl 0", md)
+        hdr = [c.strip() for c in [l for l in md.splitlines() if l.startswith("| arm ")][0].strip("|").split("|")]
+        row = dict(zip(hdr, [c.strip() for c in nsa.strip("|").split("|")]))
+        self.assertEqual(row["cold median s"], "10.0")
+        self.assertEqual(row["cold p95 s"], "10.0")
+        self.assertEqual(row["steady median s"], "5.0")
+        self.assertEqual(row["wrong"], "0")
+        self.assertEqual(row["undecidable"], "1")
+        self.assertEqual(row["gated"], "36")
+        # truth table 0: 5 decided (censored one excluded), median 10, mean (3*10+2*5)/5 = 8
+        self.assertEqual(row["tbl 0"], "5/10.0/8.0/0")
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ struct SimCfg {
   {
     SimCfg c;
     c.acq = 100; c.seed = 1; c.catalog_tda = 4; c.n_rx = 4; c.K = 1; c.sib1 = 0; c.fieldbook = 0; c.gate = 0; c.p2 = 0;
-    c.twins = 0; c.rntis_per_acq = 4; c.oracle = 1; c.prior = 1; c.dmrs_typea_pos = 0;
+    c.twins = 2; c.rntis_per_acq = 4; c.oracle = 1; c.prior = 1; c.dmrs_typea_pos = 0;
     c.mu = 15; c.fade = 6; c.snr_est_sigma = 2; c.rank2_frac = 0.3; c.grants_per_s = 200;
     c.probe_inconclusive = 0.1; c.table_exercise = 0.9; c.cap_s = 3600;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
@@ -164,14 +164,18 @@ static SimResult run_sim(const SimCfg &cfg)
     std::mt19937_64 arng(mix(cfg.seed, a, 0xACC));
     const int truth = (int)(arng() % (uint64_t)n_hyp);
     const nr_pdsch_cfg_hypothesis_t &T = tmpl->hyp[truth];
-    std::vector<char> is_twin(n_hyp, 0);
+    /* TWINS. Every entry that differs from the truth ONLY in mcs_table is a physical twin: it decodes exactly when the
+     * truth does unless the grant exercises the table. --twins n >= 2 (default 2 = all physical twins in this catalogue)
+     * keeps them all. --twins n < 2 is an UNPHYSICAL stress arm: only the first n twins behave as twins, the other
+     * other-table entries always fail (as if the table were always distinguishable). */
+    bool twin_tbl[3] = {false, false, false};
     int ntw = 0;
     for (int i = 0; i < n_hyp && ntw < cfg.twins; i++) {
       const nr_pdsch_cfg_hypothesis_t &h = tmpl->hyp[i];
-      if (i != truth && h.mcs_table != T.mcs_table && h.tda_start == T.tda_start && h.tda_length == T.tda_length && h.k0 == T.k0
+      if (i != truth && h.mcs_table != T.mcs_table && !twin_tbl[h.mcs_table] && h.tda_start == T.tda_start && h.tda_length == T.tda_length && h.k0 == T.k0
           && h.dmrs_add_pos == T.dmrs_add_pos && h.dmrs_max_len == T.dmrs_max_len && h.dmrs_mask == T.dmrs_mask
           && h.mapping_type == T.mapping_type) {
-        is_twin[i] = 1;
+        twin_tbl[h.mcs_table] = true;
         ntw++;
       }
     }
@@ -229,10 +233,9 @@ static SimResult run_sim(const SimCfg &cfg)
       RntiRec rec{};
       rec.acq = a; rec.rnti_rank = k; rec.truth_table = T.mcs_table;
       /* Oracles (today's runtime): the DM-RS mask / last symbol / k0 observation (nr_pdsch_config_sweep_observe ->
-       * prune_to_observed) fires on the first decoded grant of an RNTI; the cell-wide observation set is published
+       * prune_to_observed) runs on EVERY decoded grant (a no-op once nothing more can be removed), as at runtime; the cell-wide observation set is published
        * once a second RNTI has seen the same mask, so RNTIs k >= 2 start already pruned. k0 = the truth's (the oracle
        * measures on the slot of the job that carried the DM-RS). Qm oracle: two-sighting rule, below. */
-      bool obs_done = false;
       uint8_t qm_tables = 0; int qm_obs = 0;
       auto do_observe = [&]() {
         sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
@@ -253,7 +256,8 @@ static SimResult run_sim(const SimCfg &cfg)
                && h.dmrs_max_len == T.dmrs_max_len && h.dmrs_mask == T.dmrs_mask && h.mapping_type == T.mapping_type;
       };
       auto is_truth = [&](const nr_pdsch_cfg_hypothesis_t &h) { return same_but_table(h) && h.mcs_table == T.mcs_table; };
-      auto is_twin_h = [&](const nr_pdsch_cfg_hypothesis_t &h) { return same_but_table(h) && h.mcs_table != T.mcs_table; };
+      /* honours --twins: only the SELECTED twins behave as twins (see above) */
+      auto is_twin_h = [&](const nr_pdsch_cfg_hypothesis_t &h) { return same_but_table(h) && h.mcs_table != T.mcs_table && twin_tbl[h.mcs_table]; };
       auto full_pass = [&](int h, const Grant &gr, bool truth_pass) {
         if (is_truth(st->hyp[h])) return truth_pass;
         if (is_twin_h(st->hyp[h])) return gr.exercised ? false : truth_pass;
@@ -305,9 +309,14 @@ static SimResult run_sim(const SimCfg &cfg)
           distinguished = true;
         winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
         if (cfg.oracle || cfg.w_obs > 0) {
-          const bool decoded = gr.rank <= cfg.n_rx; /* the layout is decodable at all -> the oracles can measure */
-          if (cfg.oracle && decoded && !obs_done && winner < 0) do_observe();
-          if (decoded && truth_pass) { /* constellation measurable only at a decodable SNR */
+          /* [ASSUMPTION] The DM-RS oracle needs the layout to be decodable at all (rank <= n_rx); conservative: the runtime
+           * measures per-symbol coherence on whatever RX it has. A GATED grant (`continue` above) contributes no
+           * observation: gated + unsettled -> no trial -> no job (plan R2). */
+          const bool decoded = gr.rank <= cfg.n_rx;
+          if (cfg.oracle && decoded && winner < 0) do_observe();
+          /* [ASSUMPTION] Qm abstention gate: nr_pdsch_qm_classify abstains at low SNR, but no code gives the threshold;
+           * modelled as "the truth would pass at this SNR/MCS". Runtime-backed part: called after feedback, two sightings. */
+          if (decoded && truth_pass) {
             const int qm = nr_pdsch_qm_of_mcs((uint8_t)gr.mcs, T.mcs_table);
             const uint8_t mask = sim_qm_table_mask(gr.mcs, qm);
             if (cfg.w_obs > 0 && si.obs_qm < 0 && mask != 0 && mask != 0x7) { si.obs_qm = qm; si.obs_mcs = gr.mcs; }
@@ -379,6 +388,14 @@ int main(int argc, char **argv)
   SimCfg c = SimCfg::defaults();
   for (int i = 1; i < argc; i++) {
     const std::string f = argv[i];
+    if (f == "--help") {
+      puts("nr_td_sim: Technique D Monte-Carlo (SIMULATED results). Flags (value follows): --acq --seed --catalog-tda --p-true-snr-mu --fade-db\n"
+           "  --snr-est-sigma --n-rx --rank2-frac --grants-per-s --sib1 --K --w-sib1 --w-default --w-obs --w-field --w-probe --fieldbook\n"
+           "  --gate --p2 --rntis-per-acq --probe-inconclusive --table-exercise --cap-s --oracle --prior --dmrs-typea-pos\n"
+           "  --twins N (default 2 = all physical twins, i.e. every other-table entry). N < 2 is an UNPHYSICAL stress arm: only N\n"
+           "  twins behave as twins, the other other-table entries always fail.");
+      return 0;
+    }
     if (i + 1 >= argc) { fprintf(stderr, "missing value for %s\n", f.c_str()); return 2; }
     const char *v = argv[++i];
     if (f == "--acq") c.acq = atoi(v);

@@ -96,6 +96,21 @@ TEST(TdSim, PriorOnlyWhenFieldbookOffAndSpeedsLaterRntis)
   c.fieldbook = 1; /* prior pruning forced off: identical engine inputs to prior=0 plus field-book ordering with weights 0 */
   EXPECT_EQ(run_sim(c).total_grants, off.total_grants);
 }
+TEST(TdSim, TwinsFlagIsHonoured)
+{
+  SimCfg c = SimCfg::defaults();
+  c.acq = 30;
+  c.seed = 3;
+  c.oracle = 0;
+  c.rntis_per_acq = 1;
+  c.twins = 2;
+  const SimResult all = run_sim(c);
+  c.twins = 0;
+  const SimResult none = run_sim(c);
+  EXPECT_EQ(all.twins_min, 2);
+  EXPECT_EQ(none.twins_min, 0);
+  EXPECT_NE(all.total_grants, none.total_grants); /* physical twins slow the search / change the engine's evidence */
+}
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
