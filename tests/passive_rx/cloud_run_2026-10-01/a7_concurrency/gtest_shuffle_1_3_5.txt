@@ -1,0 +1,23 @@
+== ./test_nr_pdcch_blind_monitor --gtest_shuffle --gtest_random_seed=1
+[==========] Running 199 tests from 27 test suites.
+[  PASSED  ] 197 tests.
+[  SKIPPED ] 2 tests, listed below:
+== ./test_nr_pdcch_blind_monitor --gtest_shuffle --gtest_random_seed=3
+[==========] Running 199 tests from 27 test suites.
+[  PASSED  ] 197 tests.
+[  SKIPPED ] 2 tests, listed below:
+== ./test_nr_pdcch_blind_monitor --gtest_shuffle --gtest_random_seed=5
+[==========] Running 199 tests from 27 test suites.
+[  PASSED  ] 197 tests.
+[  SKIPPED ] 2 tests, listed below:
+== ./test_nr_pdcch_blind_monitor (unshuffled)
+[==========] Running 199 tests from 27 test suites.
+[----------] 2 tests from Phase2Concurrent
+[ RUN      ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting
+[       OK ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting (3 ms)
+[ RUN      ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads
+[       OK ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads (5 ms)
+[----------] 2 tests from Phase2Concurrent (12 ms total)
+[  PASSED  ] 197 tests.
+[  SKIPPED ] 2 tests, listed below:
+== ISAC_SENSING=OFF tree: ninja nr-uesoftmodem test_nr_pdcch_blind_monitor -> rc=0; gtest 197 passed + 2 skipped

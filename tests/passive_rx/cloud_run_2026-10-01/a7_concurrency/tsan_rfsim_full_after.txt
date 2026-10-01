@@ -1,0 +1,169 @@
+TSAN (fully instrumented Debug) nr-uesoftmodem with the fix (round 1), same bed, 300 s (reaches discovery only)
+source: tsan_rx_after/tsan.18107
+reports: 7
+
+by location:
+    1  data race executables/nr-ue-ru.c:519 in nrue_ru_set_freq
+    1  signal-unsafe call inside of a signal common/utils/utils.h:87 in calloc_or_fail
+    1  signal-unsafe call inside of a signal ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 in operator new(unsigned long)
+    1  signal handler spoils errno executables/nr-uesoftmodem.c:203 in trigger_deregistration
+    1  data race executables/nr-uesoftmodem.c:119 in exit_function
+    1  data race ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 in operator delete(void*, unsigned long)
+    1  data race radio/rfsimulator/simulator.cpp:1593 in rfsimulator_end
+
+by accessing thread pair:
+    3  
+    2  main thread <-> UEthread_0
+    1  SYNC__actor <-> UEthread_0
+    1  main thread <-> L1_UE_stats_0
+
+full reports (paths made repo-relative, BuildIds stripped; trimmed to <= 200 KB):
+
+==================
+WARNING: ThreadSanitizer: data race (pid=18107)
+  Write of size 4 at 0x720c00000234 by thread T15:
+    #0 nrue_ru_set_freq executables/nr-ue-ru.c:519 (nr-uesoftmodem.fix+0x419576)
+    #1 UE_synch executables/nr-ue.c:273 (nr-uesoftmodem.fix+0x3f2e37)
+    #2 actor_thread common/utils/actor/actor.c:37 (nr-uesoftmodem.fix+0xc96cb0)
+
+  Previous read of size 4 at 0x720c00000234 by thread T23:
+    #0 nrue_ru_write executables/nr-ue-ru.c:655 (nr-uesoftmodem.fix+0x41bc4c)
+    #1 dummyWrite executables/nr-ue.c:726 (nr-uesoftmodem.fix+0x3f8fda)
+    #2 readFrame executables/nr-ue.c:772 (nr-uesoftmodem.fix+0x3f9c43)
+    #3 UE_thread executables/nr-ue.c:1193 (nr-uesoftmodem.fix+0x3fef9c)
+
+  Location is heap block of size 40 at 0x720c00000210 allocated by main thread:
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:685
+    #1 calloc_or_fail common/utils/utils.h:87 (nr-uesoftmodem.fix+0x40fb52)
+    #2 nrue_set_cell_params executables/nr-ue-ru.c:138 (nr-uesoftmodem.fix+0x41087c)
+    #3 main executables/nr-uesoftmodem.c:320 (nr-uesoftmodem.fix+0x3ec857)
+
+  Thread T15 'SYNC__actor' (tid=18125, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266 (nr-uesoftmodem.fix+0xc8417f)
+    #2 init_actor common/utils/actor/actor.c:18 (nr-uesoftmodem.fix+0xc96a6f)
+    #3 main executables/nr-uesoftmodem.c:415 (nr-uesoftmodem.fix+0x3ed64e)
+
+  Thread T23 'UEthread_0' (tid=18133, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266 (nr-uesoftmodem.fix+0xc8417f)
+    #2 init_NR_UE_threads executables/nr-ue.c:2297 (nr-uesoftmodem.fix+0x40fa58)
+    #3 main executables/nr-uesoftmodem.c:489 (nr-uesoftmodem.fix+0x3ee576)
+
+SUMMARY: ThreadSanitizer: data race executables/nr-ue-ru.c:519 in nrue_ru_set_freq
+==================
+==================
+WARNING: ThreadSanitizer: signal-unsafe call inside of a signal (pid=18107)
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:685
+    #1 calloc_or_fail common/utils/utils.h:87 (nr-uesoftmodem.fix+0x9836d3)
+    #2 itti_malloc common/utils/ocp_itti/intertask_interface.cpp:48 (nr-uesoftmodem.fix+0x983777)
+    #3 itti_alloc_new_message common/utils/ocp_itti/intertask_interface.cpp:75 (nr-uesoftmodem.fix+0x983aae)
+    #4 trigger_deregistration executables/nr-uesoftmodem.c:206 (nr-uesoftmodem.fix+0x3ebc14)
+    #5 CallUserSignalHandler ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:2096
+    #6 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456 (nr-uesoftmodem.fix+0x98beaa)
+    #7 main executables/nr-uesoftmodem.c:503 (nr-uesoftmodem.fix+0x3ee611)
+
+SUMMARY: ThreadSanitizer: signal-unsafe call inside of a signal common/utils/utils.h:87 in calloc_or_fail
+==================
+==================
+WARNING: ThreadSanitizer: signal-unsafe call inside of a signal (pid=18107)
+    #0 operator new(unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64
+    #1 std::__new_allocator<MessageDef_s*>::allocate(unsigned long, void const*) <null> (nr-uesoftmodem.fix+0x9908a4)
+    #2 std::allocator_traits<std::allocator<MessageDef_s*> >::allocate(std::allocator<MessageDef_s*>&, unsigned long) /usr/include/c++/13/bits/alloc_traits.h:482 (nr-uesoftmodem.fix+0x98e913)
+    #3 std::_Vector_base<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_allocate(unsigned long) /usr/include/c++/13/bits/stl_vector.h:381 (nr-uesoftmodem.fix+0x98e913)
+    #4 void std::vector<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_realloc_insert<MessageDef_s* const&>(__gnu_cxx::__normal_iterator<MessageDef_s**, std::vector<MessageDef_s*, std::allocator<MessageDef_s*> > >, MessageDef_s* const&) /usr/include/c++/13/bits/vector.tcc:459 (nr-uesoftmodem.fix+0x98d6fe)
+    #5 std::vector<MessageDef_s*, std::allocator<MessageDef_s*> >::insert(__gnu_cxx::__normal_iterator<MessageDef_s* const*, std::vector<MessageDef_s*, std::allocator<MessageDef_s*> > >, MessageDef_s* const&) /usr/include/c++/13/bits/vector.tcc:170 (nr-uesoftmodem.fix+0x98c7da)
+    #6 itti_send_msg_to_task_locked common/utils/ocp_itti/intertask_interface.cpp:114 (nr-uesoftmodem.fix+0x984db3)
+    #7 itti_send_msg_to_task common/utils/ocp_itti/intertask_interface.cpp:125 (nr-uesoftmodem.fix+0x98556c)
+    #8 trigger_deregistration executables/nr-uesoftmodem.c:208 (nr-uesoftmodem.fix+0x3ebc49)
+    #9 CallUserSignalHandler ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:2096
+    #10 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456 (nr-uesoftmodem.fix+0x98beaa)
+    #11 main executables/nr-uesoftmodem.c:503 (nr-uesoftmodem.fix+0x3ee611)
+
+SUMMARY: ThreadSanitizer: signal-unsafe call inside of a signal ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 in operator new(unsigned long)
+==================
+==================
+WARNING: ThreadSanitizer: signal handler spoils errno (pid=18107)
+  Signal 2 handler invoked at:
+    #0 trigger_deregistration executables/nr-uesoftmodem.c:203 (nr-uesoftmodem.fix+0x3ebb5b)
+    #1 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456 (nr-uesoftmodem.fix+0x98beaa)
+    #2 main executables/nr-uesoftmodem.c:503 (nr-uesoftmodem.fix+0x3ee611)
+
+SUMMARY: ThreadSanitizer: signal handler spoils errno executables/nr-uesoftmodem.c:203 in trigger_deregistration
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=18107)
+  Write of size 4 at 0x558c0c84a148 by main thread:
+    #0 exit_function executables/nr-uesoftmodem.c:119 (nr-uesoftmodem.fix+0x3e94a2)
+    #1 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:457 (nr-uesoftmodem.fix+0x98c035)
+    #2 main executables/nr-uesoftmodem.c:503 (nr-uesoftmodem.fix+0x3ee611)
+
+  Previous read of size 4 at 0x558c0c84a148 by thread T24:
+    #0 nrL1_UE_stats_thread executables/nr-ue.c:150 (nr-uesoftmodem.fix+0x3f1475)
+
+  As if synchronized via sleep:
+    #0 sleep ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:383
+    #1 main executables/nr-uesoftmodem.c:497 (nr-uesoftmodem.fix+0x3ee5b9)
+
+  Location is global 'oai_exit' of size 4 at 0x558c0c84a148 (nr-uesoftmodem.fix+0x1680148)
+
+  Thread T24 'L1_UE_stats_0' (tid=18134, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266 (nr-uesoftmodem.fix+0xc8417f)
+    #2 init_NR_UE_threads executables/nr-ue.c:2300 (nr-uesoftmodem.fix+0x40faee)
+    #3 main executables/nr-uesoftmodem.c:489 (nr-uesoftmodem.fix+0x3ee576)
+
+SUMMARY: ThreadSanitizer: data race executables/nr-uesoftmodem.c:119 in exit_function
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=18107)
+  Write of size 8 at 0x72440001a2c0 by main thread:
+    #0 operator delete(void*, unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150
+    #1 rfsimulator_end radio/rfsimulator/simulator.cpp:1591
+    #2 nrue_ru_end executables/nr-ue-ru.c:459 (nr-uesoftmodem.fix+0x41861c)
+    #3 exit_function executables/nr-uesoftmodem.c:122 (nr-uesoftmodem.fix+0x3e94b9)
+    #4 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:457 (nr-uesoftmodem.fix+0x98c035)
+    #5 main executables/nr-uesoftmodem.c:503 (nr-uesoftmodem.fix+0x3ee611)
+
+  Previous read of size 4 at 0x72440001a2c0 by thread T23:
+    #0 get_rx_gain_db radio/rfsimulator/simulator.cpp:471
+    #1 combine_received_beams radio/rfsimulator/simulator.cpp:1205
+    #2 rfsimulator_read_internal radio/rfsimulator/simulator.cpp:1352
+    #3 rfsimulator_read_beams radio/rfsimulator/simulator.cpp:1518
+    #4 rfsimulator_read radio/rfsimulator/simulator.cpp:1568
+    #5 nrue_ru_read executables/nr-ue-ru.c:556 (nr-uesoftmodem.fix+0x419e63)
+    #6 UE_thread executables/nr-ue.c:1562 (nr-uesoftmodem.fix+0x40440c)
+
+  Thread T23 'UEthread_0' (tid=18133, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266 (nr-uesoftmodem.fix+0xc8417f)
+    #2 init_NR_UE_threads executables/nr-ue.c:2297 (nr-uesoftmodem.fix+0x40fa58)
+    #3 main executables/nr-uesoftmodem.c:489 (nr-uesoftmodem.fix+0x3ee576)
+
+SUMMARY: ThreadSanitizer: data race ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 in operator delete(void*, unsigned long)
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=18107)
+  Write of size 8 at 0x72b800000038 by main thread:
+    #0 free ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:724
+    #1 rfsimulator_end radio/rfsimulator/simulator.cpp:1593
+    #2 nrue_ru_end executables/nr-ue-ru.c:459 (nr-uesoftmodem.fix+0x41861c)
+    #3 exit_function executables/nr-uesoftmodem.c:122 (nr-uesoftmodem.fix+0x3e94b9)
+    #4 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:457 (nr-uesoftmodem.fix+0x98c035)
+    #5 main executables/nr-uesoftmodem.c:503 (nr-uesoftmodem.fix+0x3ee611)
+
+  Previous write of size 8 at 0x72b800000038 by thread T23:
+    #0 rfsimulator_read_beams radio/rfsimulator/simulator.cpp:1536
+    #1 rfsimulator_read radio/rfsimulator/simulator.cpp:1568
+    #2 nrue_ru_read executables/nr-ue-ru.c:556 (nr-uesoftmodem.fix+0x419e63)
+    #3 UE_thread executables/nr-ue.c:1562 (nr-uesoftmodem.fix+0x40440c)
+
+  Thread T23 'UEthread_0' (tid=18133, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266 (nr-uesoftmodem.fix+0xc8417f)
+    #2 init_NR_UE_threads executables/nr-ue.c:2297 (nr-uesoftmodem.fix+0x40fa58)
+    #3 main executables/nr-uesoftmodem.c:489 (nr-uesoftmodem.fix+0x3ee576)
+
+SUMMARY: ThreadSanitizer: data race radio/rfsimulator/simulator.cpp:1593 in rfsimulator_end
+==================
+

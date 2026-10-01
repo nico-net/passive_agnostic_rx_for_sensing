@@ -1,0 +1,1 @@
+{"arm": "M8", "bank_len": 46, "conv_s": 41.406, "cpu_pct": 206, "crc_pct": 94.89, "drop_full_pct": 1.0179, "first_crnti_s": 36.631, "ldpc_ok": 14504, "ldpc_seg_fail": 724, "max_rss_kb": 901288, "n_converged": 2, "pdsch_crc_ok": 14504, "pdsch_decoded": 15285, "scanq_drop_full": 1231, "scanq_queued": 120940, "sync_s": 7.053, "ttc_s": 4.775}

@@ -250,4 +250,7 @@ double nr_pdsch_passive_zp_grant_score(const NR_DL_FRAME_PARMS *fp, const fapi_n
                                        const freq_alloc_bitmap_t *fa, const c16_t *rxdataF_flat, uint32_t stride,
                                        int slot_rx, int fep_s0, int fep_n, uint16_t skip_symbols, bool dedicated, int i);
 
+/* Metrics getter (nr_passive_metrics.c): LDPC census counters. */
+void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *tb_fail, uint64_t *zero_tb);
+
 #endif // NR_PDSCH_PASSIVE_DECODE_H

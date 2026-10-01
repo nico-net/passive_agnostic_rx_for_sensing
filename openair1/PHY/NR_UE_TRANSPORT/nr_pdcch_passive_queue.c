@@ -111,9 +111,12 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
      * an error. Dropped and counted, never run late. */
     const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     const long lag  = prod - job.absolute_slot;
-    if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
-      atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
-    }
+    /* CAS max: with N consumers a plain load/store pair can lose the larger lag (Task A7). */
+    uint64_t cur_max = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
+    while (lag > (long)cur_max
+           && !atomic_compare_exchange_weak_explicit(&g_max_lag, &cur_max, (uint64_t)lag, memory_order_relaxed,
+                                                     memory_order_relaxed))
+      ;
     if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       continue;
@@ -153,18 +156,11 @@ bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 
   if (n_consumers < 1) n_consumers = 1;
   if (n_consumers > NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS) n_consumers = NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS;
-  if (n_consumers > 1) {
-    /* Not a hard cap, but say so loudly. The occasion body keeps unsynchronised per-run state (the
-     * adaptive energy floor, the RNTI persistence table, the occasion/accept counters); with one
-     * consumer those are single-threaded exactly as they were on the receive thread. One consumer
-     * also already sustains a full slot-rate occasion stream at 69-102 us per 500 us slot, so extra
-     * threads buy nothing measured. */
-    LOG_W(PHY,
-          "SENSING: blind PDCCH scan configured with %d consumers. The occasion body's energy floor, "
-          "RNTI-persistence table and counters are NOT yet thread-safe, and one consumer already "
-          "keeps up with a slot-rate occasion stream -- prefer 1 unless you have made them safe.\n",
-          n_consumers);
-  }
+  /* n_consumers > 1 is supported since Task A7: the occasion body's cross-occasion state is either a
+   * relaxed atomic counter, under its own leaf lock (energy floor, length sweep, bank, dedupe), or in
+   * Phase 2, which runs under one lock (nr_pdcch_blind_phase2.c) -- so Phase 1 (FEP/LLR/demap/decode)
+   * is what N consumers parallelise. affinity >= 0 pins consumer i to core affinity + i; -1 leaves every
+   * consumer unpinned. */
   if (depth < 2) depth = 2;
   if (depth > NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH) depth = NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH;
 

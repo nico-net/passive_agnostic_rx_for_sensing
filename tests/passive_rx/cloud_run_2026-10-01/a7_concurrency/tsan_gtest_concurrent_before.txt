@@ -1,0 +1,926 @@
+TSAN gtest Phase2Concurrent* BEFORE the fix (RED: phase2 module moved verbatim, unsynchronised)
+source: tsan_gtest_before.txt
+reports: 13
+
+by location:
+    2  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:79 in nr_pdcch_blind_phase2_for_test
+    2  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:81 in nr_pdcch_blind_phase2_for_test
+    2  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:45 in nr_pdcch_blind_energy_floor_update
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:24 in nr_pdcch_blind_rnti_persistence_check
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:25 in nr_pdcch_blind_rnti_persistence_check
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:29 in nr_pdcch_blind_rnti_persistence_check
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:30 in nr_pdcch_blind_rnti_persistence_check
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:31 in nr_pdcch_blind_rnti_persistence_check
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:46 in nr_pdcch_blind_energy_floor_update
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:50 in nr_pdcch_blind_energy_floor_update
+
+by accessing thread pair:
+    5  thread T2 <-> thread T1
+    3  thread T3 <-> thread T2
+    3  thread T6 <-> thread T5
+    1  thread T4 <-> thread T2
+    1  thread T7 <-> thread T6
+
+full reports (paths made repo-relative, BuildIds stripped; trimmed to <= 200 KB):
+
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Read of size 8 at 0x558045cee118 by thread T2:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:79
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 8 at 0x558045cee118 by thread T1:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:79
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_test_accepts' of size 8 at 0x558045cee118
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T1 (tid=15080, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:79 in nr_pdcch_blind_phase2_for_test
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Write of size 8 at 0x558045cee118 by thread T2:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:79
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 8 at 0x558045cee118 by thread T1:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:79
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_test_accepts' of size 8 at 0x558045cee118
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T1 (tid=15080, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:79 in nr_pdcch_blind_phase2_for_test
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Read of size 4 at 0x7ffc903b8740 by thread T2:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:81
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 4 at 0x7ffc903b8740 by thread T1:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:81
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is stack of main thread.
+
+  Location is global '<null>' at 0x000000000000 ([stack]+0x1f740)
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T1 (tid=15080, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:81 in nr_pdcch_blind_phase2_for_test
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Read of size 4 at 0x558045cee104 by thread T2:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:24
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 4 at 0x558045cee104 by thread T1:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:33
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_recent_count' of size 4 at 0x558045cee104
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T1 (tid=15080, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:24 in nr_pdcch_blind_rnti_persistence_check
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Read of size 2 at 0x558045cedf00 by thread T2:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:25
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 2 at 0x558045cedf00 by thread T1:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:29
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_recent' of size 512 at 0x558045cedf00
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T1 (tid=15080, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:25 in nr_pdcch_blind_rnti_persistence_check
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Write of size 4 at 0x7ffc903b8740 by thread T4:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:81
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 4 at 0x7ffc903b8740 by thread T2:
+    #0 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:81
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #2 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is stack of main thread.
+
+  Location is global '<null>' at 0x000000000000 ([stack]+0x1f740)
+
+  Thread T4 (tid=15083, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:117
+    #5 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #6 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #7 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #8 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #9 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #10 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #11 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #12 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #13 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #14 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #15 RUN_ALL_TESTS() <null>
+    #16 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:81 in nr_pdcch_blind_phase2_for_test
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Write of size 2 at 0x558045cedfd8 by thread T3:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:29
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 2 at 0x558045cedfd8 by thread T2:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:29
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_recent' of size 512 at 0x558045cedf00
+
+  Thread T3 (tid=15082, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:29 in nr_pdcch_blind_rnti_persistence_check
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Write of size 4 at 0x558045cedf04 by thread T3:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:30
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 4 at 0x558045cedf04 by thread T2:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:30
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_recent' of size 512 at 0x558045cedf00
+
+  Thread T3 (tid=15082, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:30 in nr_pdcch_blind_rnti_persistence_check
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Write of size 4 at 0x558045cee100 by thread T3:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:31
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 4 at 0x558045cee100 by thread T2:
+    #0 nr_pdcch_blind_rnti_persistence_check openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:31
+    #1 nr_pdcch_blind_phase2_for_test openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:83
+    #2 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4519
+    #3 __invoke_impl<void, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #4 __invoke<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #5 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #6 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #7 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #8 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_recent_head' of size 4 at 0x558045cee100
+
+  Thread T3 (tid=15082, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T2 (tid=15081, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_FourThreadsSameRntiLoseNoAcceptAndNoSighting_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4517
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:31 in nr_pdcch_blind_rnti_persistence_check
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Read of size 8 at 0x558045cee110 by thread T6:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:45
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 8 at 0x558045cee110 by thread T5:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:45
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_energy_nseen' of size 8 at 0x558045cee110
+
+  Thread T6 (tid=15085, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T5 (tid=15084, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:45 in nr_pdcch_blind_energy_floor_update
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Write of size 8 at 0x558045cee110 by thread T6:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:45
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 8 at 0x558045cee110 by thread T5:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:45
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_energy_nseen' of size 8 at 0x558045cee110
+
+  Thread T6 (tid=15085, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T5 (tid=15084, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:45 in nr_pdcch_blind_energy_floor_update
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Read of size 4 at 0x558045cee108 by thread T6:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:46
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 4 at 0x558045cee108 by thread T5:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:47
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_energy_floor' of size 4 at 0x558045cee108
+
+  Thread T6 (tid=15085, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T5 (tid=15084, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:46 in nr_pdcch_blind_energy_floor_update
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=15078)
+  Write of size 4 at 0x558045cee108 by thread T7:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:50
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Previous write of size 4 at 0x558045cee108 by thread T6:
+    #0 nr_pdcch_blind_energy_floor_update openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:50
+    #1 operator() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4544
+    #2 __invoke_impl<void, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:61
+    #3 __invoke<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/invoke.h:96
+    #4 _M_invoke<0> /usr/include/c++/13/bits/std_thread.h:292
+    #5 operator() /usr/include/c++/13/bits/std_thread.h:299
+    #6 _M_run /usr/include/c++/13/bits/std_thread.h:244
+    #7 <null> <null> (libstdc++.so.6+0xecdb3)
+
+  Location is global 'g_energy_floor' of size 4 at 0x558045cee108
+
+  Thread T7 (tid=15086, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+  Thread T6 (tid=15085, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State> >, void (*)()) <null> (libstdc++.so.6+0xeceb0)
+    #2 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/new_allocator.h:191
+    #3 construct<std::thread, Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/alloc_traits.h:538
+    #4 _M_realloc_insert<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:468
+    #5 emplace_back<Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody()::<lambda()> > /usr/include/c++/13/bits/vector.tcc:123
+    #6 Phase2Concurrent_EnergyFloorCountsEverySampleFromFourThreads_Test::TestBody() openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4542
+    #7 void testing::internal::HandleSehExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #8 void testing::internal::HandleExceptionsInMethodIfSupported<testing::Test, void>(testing::Test*, void (testing::Test::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #9 testing::Test::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2674
+    #10 testing::TestInfo::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2853
+    #11 testing::TestSuite::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:3012
+    #12 testing::internal::UnitTestImpl::RunAllTests() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5870
+    #13 bool testing::internal::HandleSehExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2599
+    #14 bool testing::internal::HandleExceptionsInMethodIfSupported<testing::internal::UnitTestImpl, bool>(testing::internal::UnitTestImpl*, bool (testing::internal::UnitTestImpl::*)(), char const*) /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:2635
+    #15 testing::UnitTest::Run() /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest.cc:5444
+    #16 RUN_ALL_TESTS() <null>
+    #17 main openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:2685
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:50 in nr_pdcch_blind_energy_floor_update
+==================
+ThreadSanitizer: reported 13 warnings
+
+gtest result lines:
+[LOG] init aborted, configuration couldn't be performed
+[==========] Running 2 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 2 tests from Phase2Concurrent
+[ RUN      ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting
+openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4524: Failure
+Expected equality of these values:
+  nr_pdcch_blind_phase2_accepts_for_test()
+    Which is: 26635
+    Which is: 40000
+[  FAILED  ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting (441 ms)
+[ RUN      ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads
+  Location is global 'g_energy_nseen' of size 8 at 0x558045cee110 (test_nr_pdcch_blind_monitor+0x2a32110)
+  Location is global 'g_energy_nseen' of size 8 at 0x558045cee110 (test_nr_pdcch_blind_monitor+0x2a32110)
+openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4550: Failure
+Expected equality of these values:
+  nseen
+    Which is: 34316
+    Which is: 40000
+[  FAILED  ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads (11 ms)
+[----------] 2 tests from Phase2Concurrent (453 ms total)
+[----------] Global test environment tear-down
+[==========] 2 tests from 1 test suite ran. (453 ms total)
+[  PASSED  ] 0 tests.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting
+[  FAILED  ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads
