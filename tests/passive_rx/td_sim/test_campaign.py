@@ -36,14 +36,14 @@ class Campaign(unittest.TestCase):
         self.assertEqual({(r["arm"], r["cell"], r["rx"]) for r in res}.__len__(), 8)
         md = open(os.path.join(out, "summary.md")).read()
         self.assertIn("SIMULATED", md)
-        sa = [l for l in md.splitlines() if l.startswith("| base | SA | 1 ")][0]
+        sa = [l for l in md.splitlines() if l.startswith("| base | SA | 1 | - ")][0]
         # SA: sib1=1 -> 20 s cold, 15 s steady; the censored RNTI (acq 1, rank 3) is excluded from the quantiles/means;
         # wrong 1 (acq 0 rank 0 at rx 1); undecidable 1 (one per cell/arm/rx); gated 3 per RNTI x 12 = 36 on 12 RNTIs.
         self.assertIn("| 20.0 | 20.0 | 15.0 |", sa)
         self.assertIn("| 1 | 1 | 1200 | 2400 | 36 |", sa)
         # mean over 11 decided RNTIs: (4*20 + ... ) computed by hand: ranks 0,1 -> 20 s (6 RNTIs), ranks 2,3 -> 15 s (5 decided)
         self.assertIn("| %.2f |" % ((6 * 20.0 + 5 * 15.0) / 11), sa)
-        nsa = [l for l in md.splitlines() if l.startswith("| k2 | NSA-like | 4 ")][0]
+        nsa = [l for l in md.splitlines() if l.startswith("| k2 | NSA-like | 4 | - ")][0]
         hdr = [c.strip() for c in [l for l in md.splitlines() if l.startswith("| arm ")][0].strip("|").split("|")]
         row = dict(zip(hdr, [c.strip() for c in nsa.strip("|").split("|")]))
         self.assertEqual(row["cold median s"], "10.0")

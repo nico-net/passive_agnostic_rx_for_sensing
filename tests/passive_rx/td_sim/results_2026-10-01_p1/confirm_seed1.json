@@ -1,0 +1,1 @@
+{"arms": {"gate_K3_order": {"gate": 1, "K": 3, "w_probe": 1, "p2": 0, "w_sib1": 1, "w_default": 1, "w_obs": 1}}, "cells": {"SA": {"sib1": 1}, "NSA-like": {"sib1": 0}}, "rx": [4, 1], "oracle": [1, 0], "acq": 2000, "seed": 1, "common": {"twins": 2}}
