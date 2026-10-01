@@ -202,11 +202,18 @@ void nr_pdsch_passive_ldpc_stats_dump(void);
  *  nr_pdsch_passive_probe_outcome() and the TB is never reported decoded. */
 void nr_pdsch_passive_probe_mode(bool on);
 bool nr_pdsch_passive_probe_outcome(void);
-/** ISAC_TD_PROBE_EQUIV_CHECK=1 (debug, default off; K32 / spec V2): call right after a layout-probe
+/** ISAC_TD_PROBE_EQUIV_CHECK=1|2 (debug, default off; K32 / spec V2): call right after a layout-probe
  *  decode on this thread. On 1 probed grant in 50 it re-runs the SAME hypothesis with the whole slot
  *  processed (no probe horizon) and the chest cache bypassed, compares code block 0's LLRs element-wise
  *  against the probe's and logs "PROBE_EQUIV mismatches=n/total" (grants with any differing LLR / grants
- *  compared). The probe's outcome (nr_pdsch_passive_probe_outcome()) is preserved. */
+ *  compared; a sample whose FEP frequency offset moved between the two runs is logged as fo_moved and
+ *  not compared). =2 adds a forced cache-hit arm (PROBE_EQUIV_HIT over all G LLRs, PROBE_EQUIV_CHEST over
+ *  every chest row at every DM-RS symbol); ISAC_TD_PROBE_EQUIV_BRANCH=k pins the rank-1 four-RX branch
+ *  for that arm. The probe's outcome (nr_pdsch_passive_probe_outcome()) is preserved, and the reruns stay
+ *  CB0-only (no HARQ, no TB, no Technique D feedback), BUT they are real decodes and perturb diagnostics
+ *  and global state: the LBRM n_L latch, the DMRSFO / BRANCHFO / SFO EMAs, PDTIM / LLR / segment counters
+ *  and the chest hit/miss counters; =2 also invalidates t_fep_cache / t_chest_cache for the next grant
+ *  and drives nr_dlsch_force_branch() / nr_dlsch_force_mask() during its runs. Debug only. */
 void nr_pdsch_passive_probe_equiv_check(PHY_VARS_NR_UE *ue,
                                         const UE_nr_rxtx_proc_t *proc,
                                         const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
