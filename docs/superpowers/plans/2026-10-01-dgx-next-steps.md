@@ -650,6 +650,73 @@ Implements the §21 record for DL and UL grants, independent of `ENABLE_ISAC_SEN
 
 ```c
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+/*
+ * nr_passive_obs.h -- per-grant observation records (PROJECT_MEMORY §21), JSON Lines, schema 1.
+ * THIS COMMENT IS THE SINGLE SOURCE OF THE SCHEMA. PROJECT_MEMORY §21 only points here.
+ *
+ * One JSON object per line, one line per PDSCH/PUSCH grant whose transport block was decoded
+ * (TB CRC pass or fail). Written by nr-uesoftmodem when ISAC_OBS_PATH is set (file opened in append
+ * mode). Keys are emitted in the order below. Every v1 record is a scheduled-DATA grant: dir=DL is
+ * PDSCH data, dir=UL is PUSCH data.
+ *
+ * Unknown values: EVERY unknown is JSON null. In C a signed integer field holds -1 and a float field
+ * holds NAN (non-finite floats are also emitted as null). No integer field has a valid negative value.
+ * Unsigned fields (dir, rnti, dmrs_symb_pos, t_mono_ns) are always known.
+ *
+ * Versioning: adding a key keeps schema 1 (consumers MUST ignore unknown keys). Changing a key's
+ * meaning/unit, removing a key, or emitting records that are not scheduled-data grants (SSB, CSI-RS,
+ * PDCCH ...) requires NR_PASSIVE_OBS_SCHEMA 2.
+ *
+ * Coverage (v1): DL = deferred PDSCH queue consumer only (nr_pdsch_passive_queue.c), layout probes
+ * excluded; the in-line DL decode used when the queue is not running is NOT recorded. UL = every
+ * nr_pusch_passive_decode() call (both callers) with status OK / CRC_FAIL / ZERO_TB; UNSUPPORTED,
+ * ERROR and cfr_only calls are not recorded.
+ *
+ * key                 C type    unit / meaning                                         unknown  DL source                          UL source
+ * schema              (const)   NR_PASSIVE_OBS_SCHEMA                                  never    -                                  -
+ * abs_slot            int64     receiver monotonic slot of the grant's samples (time   null     job.absolute_slot                  abs_slot arg (0 -> null)
+ *                               axis for sensing)
+ * t_mono_ns           uint64    CLOCK_MONOTONIC ns when the record was built = decode  never    clock_gettime                      clock_gettime
+ *                               COMPLETION (includes queue latency; not air time)
+ * frame               int16     SFN 0..1023 of the grant's slot                        null     job.frame_rx                       frame arg (PUSCH slot)
+ * slot                int16     slot in frame of the grant (UL: DCI slot + k2)         null     job.nr_slot_rx                     slot arg
+ * pci                 int16     physical cell id 0..1007                               null     frame_parms.Nid_cell               frame_parms.Nid_cell
+ * dir                 uint8     "DL" | "UL" (JSON string)                              never    NR_OBS_DIR_DL                      NR_OBS_DIR_UL
+ * rnti                uint16    CRC-recovered RNTI (decimal)                           never    job.rnti                           g->rnti
+ * rnti_class          int8      nr_blind_rnti_class_t: 0 C,1 TC,2 SI,3 RA,4 P          null     job.rnti_class                     -1 (no class on UL)
+ * start_rb            int16     lowest allocated PRB, CRB-indexed (BWP start + offset) null     BWPStart+freq_alloc.first_rb       g->bwp_start+g->start_rb
+ * nb_rb               int16     allocated PRB COUNT (allocation may be non-contiguous) null     freq_alloc.num_rbs                 g->num_rb
+ * start_sym           int8      first OFDM symbol S                                    null     dlsch_pdu.start_symbol             g->start_symbol
+ * nb_sym              int8      symbol count L                                         null     dlsch_pdu.number_symbols           g->num_symbols
+ * mcs                 int8      MCS index                                              null     job.grant.mcs                      g->mcs
+ * mcs_table           int8      0 qam64, 1 qam256, 2 qam64LowSE                        null     job.grant.mcs_table                g->mcs_table
+ * qm                  int8      modulation order (bits/symbol)                         null     dec.cw.qamModOrder                 out->qam_mod_order
+ * nl                  int8      layers (rank)                                          null     dec.cw.Nl (DM-RS port count)       g->nrOfLayers
+ * dmrs_symb_pos       uint16    DM-RS symbol bitmap, bit l = symbol l (decimal)        never    dlsch_pdu.dlDmrsSymbPos            g->ul_dmrs_symb_pos
+ * dmrs_scrambling_id  int32     DM-RS scrambling identity 0..65535                     null     dlsch_pdu.dlDmrsScramblingId       g->ul_dmrs_scrambling_id
+ * tbs                 int32     transport block size, BITS                             null     dec.cw.TBS                         out->tbs_bytes*8
+ * harq_pid            int8      HARQ process                                           null(*)  job.grant.harq_pid                 g->harq_pid
+ * rv                  int8      redundancy version as signalled                        null     job.grant.rv                       g->rv
+ * ndi                 int8      new-data indicator as signalled                        null(*)  job.grant.ndi                      g->ndi
+ * crc                 int8      1 TB CRC pass, 0 fail (nr_obs_crc_t)                   null(**) decode status                      out->status
+ * nvar                float     DL noise variance, linear, receiver-internal int16^2   null     dec.nvar                           NAN
+ *                               scale: compare only within one run / gain / config
+ * snr_db              float     UL post-estimation SNR, dB, receiver-internal          null     NAN                                out->snr_db
+ * fo_comp_hz          float     FO the receiver digitally removed from these samples   null     job.fo_hz                          fo_hz arg
+ *                               before the FFT, Hz; + = received carrier above LO.
+ *                               NOT a per-grant measurement; 0 = no digital comp.
+ * delay_samples       float     UL DM-RS CIR peak offset vs the FFT window, samples at null     NAN                                out->est_delay
+ *                               fs_hz; + = later. 0 also means "no clear peak"
+ * carrier_hz          int64     carrier centre frequency of this direction, Hz         null     frame_parms.dl_CarrierFreq         frame_parms.ul_CarrierFreq
+ * scs_khz             int16     subcarrier spacing, kHz (grant BW = nb_rb*12*scs_khz)  null     frame_parms.subcarrier_spacing/1e3 same
+ * fs_hz               int64     receiver sample rate = N_fft * SCS, Hz                 null     frame_parms.samples_per_subframe*1e3 same
+ *
+ * (*)  null for DL grants with rnti_class SI/RA/P (DCI 1_0: field reserved/absent, TS 38.212 7.3.1.2.1).
+ * (**) null for UL ZERO_TB: all-zero TB, the CRC passes by construction, so it is not a verified decode.
+ * [KNOWN ISSUE] UL snr_db holds the CFR mean power in dB (not an SNR) when the noise estimate is 0
+ *              (nr_pusch_passive_decode.c:1120 vs :1381).
+ * Evidence: schema [IMPLEMENTED, NOT VALIDATED] until A3 Step 9 (rfsim) passes ([SIM VERIFIED]); no OTA.
+ */
 #ifndef NR_PASSIVE_OBS_H
 #define NR_PASSIVE_OBS_H
 #include <stdbool.h>
@@ -661,35 +728,51 @@ extern "C" {
 #define NR_PASSIVE_OBS_SCHEMA 1
 typedef enum { NR_OBS_DIR_DL = 0, NR_OBS_DIR_UL = 1 } nr_obs_dir_t;
 typedef enum { NR_OBS_CRC_NA = -1, NR_OBS_CRC_FAIL = 0, NR_OBS_CRC_OK = 1 } nr_obs_crc_t;
-/* One observed grant. JSON keys = field names. Unknown numeric values: -1 (ints) or NAN (floats, emitted as null). */
+/* One observed grant; JSON key = field name except `dir` (string). See the table above. */
 typedef struct {
-  int64_t abs_slot;      // monotonic receiver slot (job.absolute_slot)
-  uint64_t t_mono_ns;    // CLOCK_MONOTONIC when the record was built (decode completion time)
-  int16_t frame, slot;   // SFN and slot of the grant
+  int64_t abs_slot;
+  uint64_t t_mono_ns;
+  int16_t frame, slot;
   int16_t pci;
-  uint8_t dir;           // nr_obs_dir_t
+  uint8_t dir;                   // nr_obs_dir_t
   uint16_t rnti;
-  int8_t rnti_class;     // nr_blind_rnti_class_t value, -1 unknown
-  int16_t start_rb, nb_rb;
+  int8_t rnti_class;             // nr_blind_rnti_class_t, -1 unknown
+  int16_t start_rb, nb_rb;       // CRB-indexed lowest PRB; PRB count
   int8_t start_sym, nb_sym;
   int8_t mcs, mcs_table, qm, nl; // nl = layers (rank)
   uint16_t dmrs_symb_pos;        // bitmap
   int32_t dmrs_scrambling_id;    // -1 unknown
-  int32_t tbs;                   // bits, -1 unknown
-  int8_t harq_pid, rv, ndi;
+  int32_t tbs;                   // BITS, -1 unknown
+  int8_t harq_pid, rv, ndi;      // -1 unknown/absent
   int8_t crc;                    // nr_obs_crc_t
-  float nvar;                    // DL noise variance (dec.nvar), NAN if n/a
-  float snr_db;                  // UL out->snr_db, NAN on DL (not measured)
-  float cfo_hz;                  // job.fo_hz
-  float delay_samples;           // UL out->est_delay, NAN on DL
+  float nvar;                    // DL only, NAN on UL
+  float snr_db;                  // UL only, NAN on DL
+  float fo_comp_hz;              // applied FO compensation, NAN unknown
+  float delay_samples;           // UL only, NAN on DL
+  int64_t carrier_hz;            // -1 unknown
+  int16_t scs_khz;               // -1 unknown
+  int64_t fs_hz;                 // -1 unknown
 } nr_passive_obs_t;
-int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n); // bytes or -1
-/* Writer lifecycle. capacity = ring slots (power of two recommended, e.g. 4096). Returns false if the file cannot
- * be opened. Safe to call push() when not open (it is then a no-op that returns false and counts nothing). */
+/* Serialises one record as a single JSON object, no newline, NUL-terminated.
+ * Returns the byte count (excluding NUL), or -1 if it does not fit in n. 1024 bytes always suffice. */
+int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n);
+/* Lifecycle. open/close are called from one controlling thread (any thread), never concurrently with
+ * each other; push and stats may be called from any thread at any time, including before open and
+ * after close.
+ * open: appends to `path`, starts the writer thread, resets the counters. capacity = ring slots
+ *       (whole records, any value >= 1). Returns false (and changes nothing) if already open,
+ *       capacity == 0, or the file/ring cannot be created. Re-open after close is allowed. */
 bool nr_passive_obs_open(const char *path, uint32_t capacity);
-void nr_passive_obs_close(void); // drains the ring, joins the writer
-/* Non-blocking: copies the record into the ring; returns false and increments `dropped` when full. MT-safe. */
+/* close: stops accepting pushes, writes every record already accepted, flushes, joins the writer,
+ *        closes the file. A no-op when not open. */
+void nr_passive_obs_close(void);
+/* push: never blocks on I/O (a short mutex only). Copies *o into the ring. Returns true if accepted.
+ *       When not open: returns false and counts nothing. When the ring is full: returns false and
+ *       increments `dropped`. MT-safe, also against a concurrent close. */
 bool nr_passive_obs_push(const nr_passive_obs_t *o);
+/* stats: pushed = accepted, written = lines fully written to the file, dropped = ring-full rejects,
+ *        since the last successful open (still readable after close). After close,
+ *        pushed - written = records lost to I/O errors. Any pointer may be NULL. MT-safe. */
 void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped);
 #ifdef __cplusplus
 }
@@ -699,9 +782,9 @@ void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped
 
 - Consumes: nothing from other tasks. A2's `nr_passive_obs_stats` weak default is overridden automatically when this file links.
 
-- [ ] **Step 1: Opus review gate** — dispatch an Opus reviewer (superpowers:requesting-code-review) on the header above **before** implementing: check field coverage vs PROJECT_MEMORY §21, units, unknown-value conventions, MT-safety contract. Apply its fixes to the header in this plan section and in the file.
+- [x] **Step 1: Opus review gate** — dispatch an Opus reviewer (superpowers:requesting-code-review) on the header above **before** implementing: check field coverage vs PROJECT_MEMORY §21, units, unknown-value conventions, MT-safety contract. Apply its fixes to the header in this plan section and in the file.
 
-- [ ] **Step 2: Write the failing test `nr_passive_obs_test.cc`**
+- [x] **Step 2: Write the failing test `nr_passive_obs_test.cc`**
 
 ```cpp
 #include <gtest/gtest.h>
@@ -720,7 +803,8 @@ static nr_passive_obs_t sample() {
   o.abs_slot = 1000; o.frame = 12; o.slot = 3; o.pci = 64; o.dir = NR_OBS_DIR_DL; o.rnti = 0x4768; o.rnti_class = 0;
   o.start_rb = 0; o.nb_rb = 106; o.start_sym = 1; o.nb_sym = 13; o.mcs = 9; o.mcs_table = 0; o.qm = 2; o.nl = 1;
   o.dmrs_symb_pos = 0x804; o.dmrs_scrambling_id = 64; o.tbs = 25104; o.harq_pid = 3; o.rv = 0; o.ndi = 1;
-  o.crc = NR_OBS_CRC_OK; o.nvar = 12.5f; o.snr_db = NAN; o.cfo_hz = -13.4f; o.delay_samples = NAN;
+  o.crc = NR_OBS_CRC_OK; o.nvar = 12.5f; o.snr_db = NAN; o.fo_comp_hz = -13.4f; o.delay_samples = NAN;
+  o.carrier_hz = 3619200000LL; o.scs_khz = 30; o.fs_hz = 61440000;
   return o;
 }
 
@@ -738,6 +822,20 @@ TEST(PassiveObs, JsonHasSchemaAndNullsForNan) {
   EXPECT_EQ(s.find('\n'), std::string::npos);
 }
 
+TEST(PassiveObs, UnknownsAreNullAndFloatsKeepPrecision) {
+  char buf[1024];
+  nr_passive_obs_t o = sample();
+  o.harq_pid = -1; o.crc = NR_OBS_CRC_NA; o.carrier_hz = -1; o.abs_slot = -1; o.nvar = INFINITY;
+  const int n = nr_passive_obs_to_json(&o, buf, sizeof(buf));
+  ASSERT_GT(n, 0);
+  const std::string s(buf, n);
+  for (const char *k : {"\"harq_pid\":null", "\"crc\":null", "\"carrier_hz\":null", "\"abs_slot\":null",
+                        "\"nvar\":null", "\"fo_comp_hz\":-13.4", "\"fs_hz\":61440000", "\"scs_khz\":30"})
+    EXPECT_NE(s.find(k), std::string::npos) << k;
+  EXPECT_EQ(s.find("-1,"), std::string::npos);   // no integer sentinel leaks into JSON
+  EXPECT_EQ(nr_passive_obs_to_json(&o, buf, 16), -1);
+}
+
 TEST(PassiveObs, PushWithoutOpenIsNoop) {
   const nr_passive_obs_t o = sample();
   EXPECT_FALSE(nr_passive_obs_push(&o));
@@ -746,10 +844,12 @@ TEST(PassiveObs, PushWithoutOpenIsNoop) {
 TEST(PassiveObs, WritesEveryRecordFromManyThreads) {
   char path[] = "/tmp/obs_test_XXXXXX"; const int fd = mkstemp(path); close(fd);
   ASSERT_TRUE(nr_passive_obs_open(path, 1 << 16));
+  EXPECT_FALSE(nr_passive_obs_open(path, 16)); // open twice is rejected
   std::vector<std::thread> th;
   for (int t = 0; t < 4; t++) th.emplace_back([] { nr_passive_obs_t o = sample(); for (int i = 0; i < 5000; i++) nr_passive_obs_push(&o); });
   for (auto &x : th) x.join();
   nr_passive_obs_close();
+  { nr_passive_obs_t o = sample(); EXPECT_FALSE(nr_passive_obs_push(&o)); } // push after close is a no-op
   uint64_t p, w, d; nr_passive_obs_stats(&p, &w, &d);
   EXPECT_EQ(p, 20000u); EXPECT_EQ(d, 0u); EXPECT_EQ(w, 20000u);
   std::ifstream f(path); int lines = 0; std::string l; while (std::getline(f, l)) lines++;
@@ -779,12 +879,12 @@ CMake block (next to A2's):
 ```
 `nr_passive_obs.c` must therefore not include OAI logging (use `fprintf(stderr, ...)` only in the open-failure path) so the test links standalone.
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cmake . >/dev/null && ninja test_nr_passive_obs`
 Expected: FAIL (missing source).
 
-- [ ] **Step 4: Write `nr_passive_obs.c`** (mutex-protected ring — simplest correct MT-safe design; pushes are ~200/s so a mutex is not a bottleneck; the writer does I/O outside the lock):
+- [x] **Step 4: Write `nr_passive_obs.c`** (mutex-protected ring — simplest correct MT-safe design; pushes are ~200/s so a mutex is not a bottleneck; the writer does I/O outside the lock):
 
 ```c
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
@@ -792,6 +892,7 @@ Expected: FAIL (missing source).
 #include <inttypes.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -807,36 +908,99 @@ static FILE *g_f = NULL;
 static pthread_t g_thr;
 static _Atomic uint64_t g_pushed, g_written, g_dropped;
 
-static int fnum(char *b, size_t n, float v)
+typedef struct {
+  char *p;
+  size_t n, w;
+  bool ovf;
+} jb_t;
+
+static void jb_put(jb_t *j, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void jb_put(jb_t *j, const char *fmt, ...)
 {
-  return isnan(v) ? snprintf(b, n, "null") : snprintf(b, n, "%.4g", (double)v);
+  if (j->ovf)
+    return;
+  va_list ap;
+  va_start(ap, fmt);
+  const int k = vsnprintf(j->p + j->w, j->n - j->w, fmt, ap);
+  va_end(ap);
+  if (k < 0 || (size_t)k >= j->n - j->w) {
+    j->ovf = true;
+    return;
+  }
+  j->w += (size_t)k;
+}
+
+static void jb_int(jb_t *j, const char *key, int64_t v)
+{
+  if (v < 0)
+    jb_put(j, ",\"%s\":null", key);
+  else
+    jb_put(j, ",\"%s\":%" PRId64, key, v);
+}
+
+static void jb_flt(jb_t *j, const char *key, float v)
+{
+  if (!isfinite(v))
+    jb_put(j, ",\"%s\":null", key);
+  else
+    jb_put(j, ",\"%s\":%.7g", key, (double)v);
 }
 
 int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n)
 {
-  char nv[24], snr[24], cfo[24], dly[24];
-  fnum(nv, sizeof nv, o->nvar); fnum(snr, sizeof snr, o->snr_db); fnum(cfo, sizeof cfo, o->cfo_hz);
-  fnum(dly, sizeof dly, o->delay_samples);
-  const int w = snprintf(buf, n,
-      "{\"schema\":%d,\"abs_slot\":%" PRId64 ",\"t_mono_ns\":%" PRIu64 ",\"frame\":%d,\"slot\":%d,\"pci\":%d,"
-      "\"dir\":\"%s\",\"rnti\":%u,\"rnti_class\":%d,\"start_rb\":%d,\"nb_rb\":%d,\"start_sym\":%d,\"nb_sym\":%d,"
-      "\"mcs\":%d,\"mcs_table\":%d,\"qm\":%d,\"nl\":%d,\"dmrs_symb_pos\":%u,\"dmrs_scrambling_id\":%d,\"tbs\":%d,"
-      "\"harq_pid\":%d,\"rv\":%d,\"ndi\":%d,\"crc\":%d,\"nvar\":%s,\"snr_db\":%s,\"cfo_hz\":%s,\"delay_samples\":%s}",
-      NR_PASSIVE_OBS_SCHEMA, o->abs_slot, o->t_mono_ns, o->frame, o->slot, o->pci, o->dir == NR_OBS_DIR_UL ? "UL" : "DL",
-      o->rnti, o->rnti_class, o->start_rb, o->nb_rb, o->start_sym, o->nb_sym, o->mcs, o->mcs_table, o->qm, o->nl,
-      o->dmrs_symb_pos, o->dmrs_scrambling_id, o->tbs, o->harq_pid, o->rv, o->ndi, o->crc, nv, snr, cfo, dly);
-  return (w < 0 || (size_t)w >= n) ? -1 : w;
+  if (!o || !buf || n == 0)
+    return -1;
+  jb_t j = {buf, n, 0, false};
+  jb_put(&j, "{\"schema\":%d", NR_PASSIVE_OBS_SCHEMA);
+  jb_int(&j, "abs_slot", o->abs_slot);
+  jb_put(&j, ",\"t_mono_ns\":%" PRIu64, o->t_mono_ns);
+  jb_int(&j, "frame", o->frame);
+  jb_int(&j, "slot", o->slot);
+  jb_int(&j, "pci", o->pci);
+  jb_put(&j, ",\"dir\":\"%s\",\"rnti\":%u", o->dir == NR_OBS_DIR_UL ? "UL" : "DL", (unsigned)o->rnti);
+  jb_int(&j, "rnti_class", o->rnti_class);
+  jb_int(&j, "start_rb", o->start_rb);
+  jb_int(&j, "nb_rb", o->nb_rb);
+  jb_int(&j, "start_sym", o->start_sym);
+  jb_int(&j, "nb_sym", o->nb_sym);
+  jb_int(&j, "mcs", o->mcs);
+  jb_int(&j, "mcs_table", o->mcs_table);
+  jb_int(&j, "qm", o->qm);
+  jb_int(&j, "nl", o->nl);
+  jb_put(&j, ",\"dmrs_symb_pos\":%u", (unsigned)o->dmrs_symb_pos);
+  jb_int(&j, "dmrs_scrambling_id", o->dmrs_scrambling_id);
+  jb_int(&j, "tbs", o->tbs);
+  jb_int(&j, "harq_pid", o->harq_pid);
+  jb_int(&j, "rv", o->rv);
+  jb_int(&j, "ndi", o->ndi);
+  jb_int(&j, "crc", o->crc);
+  jb_flt(&j, "nvar", o->nvar);
+  jb_flt(&j, "snr_db", o->snr_db);
+  jb_flt(&j, "fo_comp_hz", o->fo_comp_hz);
+  jb_flt(&j, "delay_samples", o->delay_samples);
+  jb_int(&j, "carrier_hz", o->carrier_hz);
+  jb_int(&j, "scs_khz", o->scs_khz);
+  jb_int(&j, "fs_hz", o->fs_hz);
+  jb_put(&j, "}");
+  return j.ovf ? -1 : (int)j.w;
 }
 
 static void *writer(void *arg)
 {
   (void)arg;
-  const char *pause = getenv("ISAC_OBS_TEST_WRITER_PAUSE_MS"); // test hook only
-  if (pause)
+  /* Test hook only: a no-op unless the variable is set. Makes the ring fill so overflow can be tested. */
+  const char *pause = getenv("ISAC_OBS_TEST_WRITER_PAUSE_MS");
+  if (pause && atoi(pause) > 0)
     usleep((useconds_t)atoi(pause) * 1000);
   char line[1024];
   for (;;) {
     pthread_mutex_lock(&g_mu);
+    if (g_count == 0 && !g_stop) {
+      /* ring drained: flush so a live tail sees the lines (I/O outside the lock) */
+      pthread_mutex_unlock(&g_mu);
+      fflush(g_f);
+      pthread_mutex_lock(&g_mu);
+    }
     while (g_count == 0 && !g_stop)
       pthread_cond_wait(&g_cv, &g_mu);
     if (g_count == 0 && g_stop) {
@@ -848,11 +1012,8 @@ static void *writer(void *arg)
     g_count--;
     pthread_mutex_unlock(&g_mu);
     const int k = nr_passive_obs_to_json(&o, line, sizeof line);
-    if (k > 0) {
-      fwrite(line, 1, (size_t)k, g_f);
-      fputc('\n', g_f);
+    if (k > 0 && fwrite(line, 1, (size_t)k, g_f) == (size_t)k && fputc('\n', g_f) != EOF)
       atomic_fetch_add(&g_written, 1);
-    }
   }
   fflush(g_f);
   return NULL;
@@ -860,7 +1021,10 @@ static void *writer(void *arg)
 
 bool nr_passive_obs_open(const char *path, uint32_t capacity)
 {
-  if (g_open || capacity == 0)
+  pthread_mutex_lock(&g_mu);
+  const bool already = g_open;
+  pthread_mutex_unlock(&g_mu);
+  if (already || capacity == 0 || !path)
     return false;
   g_f = fopen(path, "a");
   if (!g_f) {
@@ -870,20 +1034,38 @@ bool nr_passive_obs_open(const char *path, uint32_t capacity)
   g_ring = calloc(capacity, sizeof(*g_ring));
   if (!g_ring) {
     fclose(g_f);
+    g_f = NULL;
     return false;
   }
-  g_cap = capacity; g_head = g_count = 0; g_stop = false;
-  atomic_store(&g_pushed, 0); atomic_store(&g_written, 0); atomic_store(&g_dropped, 0);
+  g_cap = capacity;
+  g_head = g_count = 0;
+  g_stop = false;
+  atomic_store(&g_pushed, 0);
+  atomic_store(&g_written, 0);
+  atomic_store(&g_dropped, 0);
+  pthread_mutex_lock(&g_mu);
   g_open = true;
-  pthread_create(&g_thr, NULL, writer, NULL);
+  pthread_mutex_unlock(&g_mu);
+  if (pthread_create(&g_thr, NULL, writer, NULL) != 0) {
+    pthread_mutex_lock(&g_mu);
+    g_open = false;
+    pthread_mutex_unlock(&g_mu);
+    fclose(g_f);
+    free(g_ring);
+    g_f = NULL;
+    g_ring = NULL;
+    return false;
+  }
   return true;
 }
 
 bool nr_passive_obs_push(const nr_passive_obs_t *o)
 {
-  if (!g_open)
-    return false;
   pthread_mutex_lock(&g_mu);
+  if (!g_open) {
+    pthread_mutex_unlock(&g_mu);
+    return false;
+  }
   if (g_count == g_cap) {
     pthread_mutex_unlock(&g_mu);
     atomic_fetch_add(&g_dropped, 1);
@@ -891,67 +1073,112 @@ bool nr_passive_obs_push(const nr_passive_obs_t *o)
   }
   g_ring[(g_head + g_count) % g_cap] = *o;
   g_count++;
+  atomic_fetch_add(&g_pushed, 1); /* inside the lock: written <= pushed at every instant */
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_mu);
-  atomic_fetch_add(&g_pushed, 1);
   return true;
 }
 
 void nr_passive_obs_close(void)
 {
-  if (!g_open)
-    return;
   pthread_mutex_lock(&g_mu);
-  g_stop = true;
+  if (!g_open) {
+    pthread_mutex_unlock(&g_mu);
+    return;
+  }
+  g_open = false;
+  g_stop = true; /* no push is accepted after this; the writer drains every accepted record */
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_mu);
   pthread_join(g_thr, NULL);
   fclose(g_f);
   free(g_ring);
-  g_ring = NULL; g_f = NULL; g_open = false;
+  g_ring = NULL;
+  g_f = NULL;
 }
 
 void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped)
 {
-  *pushed = atomic_load(&g_pushed);
-  *written = atomic_load(&g_written);
-  *dropped = atomic_load(&g_dropped);
+  if (pushed)
+    *pushed = atomic_load(&g_pushed);
+  if (written)
+    *written = atomic_load(&g_written);
+  if (dropped)
+    *dropped = atomic_load(&g_dropped);
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `ninja test_nr_passive_obs && ./test_nr_passive_obs`
-Expected: 4 tests PASS. If `FullRingDropsAndCountsInsteadOfBlocking` is flaky, raise the pause, never weaken the assertion.
+Expected: 5 tests PASS. If `FullRingDropsAndCountsInsteadOfBlocking` is flaky, raise the pause, never weaken the assertion.
 
-- [ ] **Step 6: DL hook** — in `nr_pdsch_passive_queue.c`, directly after the `Technique D Qm oracle` block (before `if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe)`), add:
+- [x] **Step 6: DL hook** — in `nr_pdsch_passive_queue.c`, directly after the `Technique D Qm oracle` block (before `if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe)`), add:
 
 ```c
       if (!job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
-        /* Per-grant observation record (Task A3). Non-blocking: a full ring drops and counts. */
+        /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). Non-blocking. */
         struct timespec ts_;
         clock_gettime(CLOCK_MONOTONIC, &ts_);
-        const fapi_nr_dl_config_dlsch_pdu_rel15_t *d_ = &job.dlsch_pdu;
+        const NR_DL_FRAME_PARMS *ofp_ = &ue->frame_parms;
+        /* DCI 1_0 with SI/RA/P-RNTI: HARQ process / NDI are reserved or absent (TS 38.212 7.3.1.2.1) */
+        const bool no_harq_ = job.rnti_class >= NR_BLIND_RNTI_CLASS_SI;
         const nr_passive_obs_t o_ = {
-            .abs_slot = job.absolute_slot, .t_mono_ns = (uint64_t)ts_.tv_sec * 1000000000ull + (uint64_t)ts_.tv_nsec,
-            .frame = (int16_t)job.frame_rx, .slot = (int16_t)job.nr_slot_rx, .pci = (int16_t)ue->frame_parms.Nid_cell,
+            .abs_slot = job.absolute_slot,
+            .t_mono_ns = (uint64_t)ts_.tv_sec * 1000000000ull + (uint64_t)ts_.tv_nsec,
+            .frame = (int16_t)job.frame_rx, .slot = (int16_t)job.nr_slot_rx, .pci = (int16_t)ofp_->Nid_cell,
             .dir = NR_OBS_DIR_DL, .rnti = job.rnti, .rnti_class = (int8_t)job.rnti_class,
-            .start_rb = (int16_t)d_->start_rb, .nb_rb = (int16_t)d_->number_rbs,
-            .start_sym = (int8_t)d_->start_symbol, .nb_sym = (int8_t)d_->number_symbols,
-            .mcs = (int8_t)d_->cw_info[0].mcs, .mcs_table = (int8_t)d_->mcs_table, .qm = (int8_t)d_->cw_info[0].qamModOrder,
-            .nl = (int8_t)d_->cw_info[0].Nl, .dmrs_symb_pos = d_->dlDmrsSymbPos, .dmrs_scrambling_id = d_->dlDmrsScramblingId,
-            .tbs = (int32_t)d_->cw_info[0].TBS, .harq_pid = (int8_t)d_->harq_process_nbr, .rv = (int8_t)d_->cw_info[0].rv,
-            .ndi = (int8_t)d_->cw_info[0].new_data_indicator,
+            .start_rb = (int16_t)(job.dlsch_pdu.BWPStart + job.freq_alloc.first_rb),
+            .nb_rb = (int16_t)job.freq_alloc.num_rbs,
+            .start_sym = (int8_t)job.dlsch_pdu.start_symbol, .nb_sym = (int8_t)job.dlsch_pdu.number_symbols,
+            .mcs = (int8_t)job.grant.mcs, .mcs_table = (int8_t)job.grant.mcs_table,
+            .qm = (int8_t)dec.cw.qamModOrder, .nl = (int8_t)dec.cw.Nl,
+            .dmrs_symb_pos = job.dlsch_pdu.dlDmrsSymbPos, .dmrs_scrambling_id = job.dlsch_pdu.dlDmrsScramblingId,
+            .tbs = (int32_t)dec.cw.TBS,                                  /* bits */
+            .harq_pid = no_harq_ ? -1 : (int8_t)job.grant.harq_pid, .rv = (int8_t)job.grant.rv,
+            .ndi = no_harq_ ? -1 : (int8_t)job.grant.ndi,               /* NOT cw.new_data_indicator (forced 1) */
             .crc = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? NR_OBS_CRC_OK : NR_OBS_CRC_FAIL,
-            .nvar = (float)dec.nvar, .snr_db = NAN, .cfo_hz = (float)job.fo_hz, .delay_samples = NAN};
+            .nvar = (float)dec.nvar, .snr_db = NAN, .fo_comp_hz = (float)job.fo_hz, .delay_samples = NAN,
+            .carrier_hz = ofp_->dl_CarrierFreq ? (int64_t)ofp_->dl_CarrierFreq : -1,
+            .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
+            .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
         nr_passive_obs_push(&o_);
       }
 ```
 (+ `#include "nr_passive_obs.h"`, `<math.h>`, `<time.h>`). If any field name differs in this tree, fix it from `nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h:464-527` — do not guess.
 
-- [ ] **Step 7: UL hook** — at the end of `nr_pusch_passive_decode()` (the function at ~1512; add before its final `return`), build the record from the grant `g` (`nr_pdcch_blind_ul_result_t`: `rnti, start_rb, num_rb, start_symbol, num_symbols, mcs, mcs_table, nrOfLayers, ul_dmrs_symb_pos, ul_dmrs_scrambling_id, harq_pid, rv, ndi`) and `out` (`status, qam_mod_order, tbs_bytes, snr_db, est_delay`): `.dir = NR_OBS_DIR_UL`, `.crc` = OK for `status==OK`, FAIL for `CRC_FAIL`, skip the record for `UNSUPPORTED/ERROR`, `.tbs = out->tbs_bytes*8`, `.nvar = NAN`, `.snr_db = out->snr_db`, `.delay_samples = out->est_delay`, `.cfo_hz` from the job's `fo_hz` if in scope else `NAN`. Read the function once and use the exact local variable names; the implementer must quote the final code in the commit message body.
+- [x] **Step 7: UL hook** — at the end of `nr_pusch_passive_decode()` (the function at ~1512; add before its final `return`), build the record from the grant `g` (`nr_pdcch_blind_ul_result_t`: `rnti, start_rb, num_rb, start_symbol, num_symbols, mcs, mcs_table, nrOfLayers, ul_dmrs_symb_pos, ul_dmrs_scrambling_id, harq_pid, rv, ndi`) and `out` (`status, qam_mod_order, tbs_bytes, snr_db, est_delay`): `.dir = NR_OBS_DIR_UL`, `.crc` = OK for `status==OK`, FAIL for `CRC_FAIL`, skip the record for `UNSUPPORTED/ERROR`, `.tbs = out->tbs_bytes*8`, `.nvar = NAN`, `.snr_db = out->snr_db`, `.delay_samples = out->est_delay`, `.fo_comp_hz = fo_hz`. Read the function once and use the exact local variable names; the implementer must quote the final code in the commit message body.
 
-- [ ] **Step 8: Open/close** — in `executables/nr-uesoftmodem.c`, after `nr_pdcch_blind_monitor_init();` (~253):
+Final code (inserted after the PUSCHDIAG block, before `return ok;`; `g` is the FDRA-resolved grant, may be NULL):
+```c
+  if (g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
+                    out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {
+    /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). cfr_only calls end UNSUPPORTED. */
+    struct timespec ts_;
+    clock_gettime(CLOCK_MONOTONIC, &ts_);
+    const NR_DL_FRAME_PARMS *ofp_ = &ue->frame_parms;
+    const nr_passive_obs_t o_ = {
+        .abs_slot = abs_slot ? (int64_t)abs_slot : -1,                  /* 0 = "derive" -> unknown */
+        .t_mono_ns = (uint64_t)ts_.tv_sec * 1000000000ull + (uint64_t)ts_.tv_nsec,
+        .frame = (int16_t)frame, .slot = (int16_t)slot, .pci = (int16_t)ofp_->Nid_cell,
+        .dir = NR_OBS_DIR_UL, .rnti = g->rnti, .rnti_class = -1,
+        .start_rb = (int16_t)(g->bwp_start + g->start_rb), .nb_rb = (int16_t)g->num_rb,
+        .start_sym = (int8_t)g->start_symbol, .nb_sym = (int8_t)g->num_symbols,
+        .mcs = (int8_t)g->mcs, .mcs_table = (int8_t)g->mcs_table, .qm = (int8_t)out->qam_mod_order,
+        .nl = (int8_t)g->nrOfLayers, .dmrs_symb_pos = g->ul_dmrs_symb_pos,
+        .dmrs_scrambling_id = g->ul_dmrs_scrambling_id, .tbs = (int32_t)out->tbs_bytes * 8,
+        .harq_pid = (int8_t)g->harq_pid, .rv = (int8_t)g->rv, .ndi = (int8_t)g->ndi,
+        .crc = out->status == NR_PUSCH_PASSIVE_OK ? NR_OBS_CRC_OK
+             : out->status == NR_PUSCH_PASSIVE_CRC_FAIL ? NR_OBS_CRC_FAIL : NR_OBS_CRC_NA,
+        .nvar = NAN, .snr_db = out->snr_db, .fo_comp_hz = (float)fo_hz, .delay_samples = (float)out->est_delay,
+        .carrier_hz = ofp_->ul_CarrierFreq ? (int64_t)ofp_->ul_CarrierFreq : -1,
+        .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
+        .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
+    nr_passive_obs_push(&o_);
+  }
+```
+
+- [x] **Step 8: Open/close** — in `executables/nr-uesoftmodem.c`, after `nr_pdcch_blind_monitor_init();` (~253):
 ```c
   {
     const char *obs_path = getenv("ISAC_OBS_PATH");
@@ -961,7 +1188,7 @@ Expected: 4 tests PASS. If `FullRingDropsAndCountsInsteadOfBlocking` is flaky, r
 ```
 and `nr_passive_obs_close();` in the exit path (next to the existing blind-monitor/queue stop calls; grep `nr_pdsch_passive_queue_stop` for the place).
 
-- [ ] **Step 9: rfsim validation** (Review Focus 1 and 2)
+- [x] **Step 9: rfsim validation** (Review Focus 1 and 2)
 
 Run:
 ```bash
@@ -974,9 +1201,9 @@ print(len(dl), m['pdschq_decoded'], m['obs_dropped'], sum(o['crc']==1 for o in d
 EOF
 OUT=/tmp/a3_off tests/passive_rx/dgx/rfsim_regress.sh 1
 ```
-Expected: gate PASS both with and without the env vars; `obs_dropped == 0`; DL record count within 1 % of `pdschq_decoded` (layout probes are excluded, so ≤); CRC-OK count equals `pdschq_crc_ok` within 1 %; CRC % of the two runs within 1 point.
+Expected: gate PASS both with and without the env vars; `obs_dropped == 0`; `n_dl <= pdschq_decoded` (layout probes are excluded); `|n_dl_crc_ok - pdschq_crc_ok| <= 1 %` of `pdschq_crc_ok`; layout-probe share reported; CRC % with and without obs within run-to-run spread (ruling replaces "within 1 % of pdschq_decoded").
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c \

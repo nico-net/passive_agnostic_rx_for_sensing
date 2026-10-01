@@ -1,0 +1,15 @@
+{
+ "n_dl": 14852,
+ "pdschq_decoded": 14913,
+ "layout_probe_share_pct": 0.409,
+ "n_dl_crc_ok": 14139,
+ "pdschq_crc_ok": 14139,
+ "obs_pushed": 14852,
+ "obs_written": 14852,
+ "obs_dropped": 0,
+ "n_ul": 0,
+ "schema_all_1": true,
+ "PASS_n_dl_le_decoded": true,
+ "PASS_crc_ok_within_1pct": true,
+ "PASS_dropped_zero": true
+}

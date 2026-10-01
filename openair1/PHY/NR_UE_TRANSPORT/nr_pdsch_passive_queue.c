@@ -58,6 +58,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
+#include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
 
 #include <limits.h>
 #include <math.h>
@@ -1142,6 +1143,34 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         if (kept > 0)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
                 job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
+      }
+      if (!job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+        /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). Non-blocking. */
+        struct timespec ts_;
+        clock_gettime(CLOCK_MONOTONIC, &ts_);
+        const NR_DL_FRAME_PARMS *ofp_ = &ue->frame_parms;
+        /* DCI 1_0 with SI/RA/P-RNTI: HARQ process / NDI are reserved or absent (TS 38.212 7.3.1.2.1) */
+        const bool no_harq_ = job.rnti_class >= NR_BLIND_RNTI_CLASS_SI;
+        const nr_passive_obs_t o_ = {
+            .abs_slot = job.absolute_slot,
+            .t_mono_ns = (uint64_t)ts_.tv_sec * 1000000000ull + (uint64_t)ts_.tv_nsec,
+            .frame = (int16_t)job.frame_rx, .slot = (int16_t)job.nr_slot_rx, .pci = (int16_t)ofp_->Nid_cell,
+            .dir = NR_OBS_DIR_DL, .rnti = job.rnti, .rnti_class = (int8_t)job.rnti_class,
+            .start_rb = (int16_t)(job.dlsch_pdu.BWPStart + job.freq_alloc.first_rb),
+            .nb_rb = (int16_t)job.freq_alloc.num_rbs,
+            .start_sym = (int8_t)job.dlsch_pdu.start_symbol, .nb_sym = (int8_t)job.dlsch_pdu.number_symbols,
+            .mcs = (int8_t)job.grant.mcs, .mcs_table = (int8_t)job.grant.mcs_table,
+            .qm = (int8_t)dec.cw.qamModOrder, .nl = (int8_t)dec.cw.Nl,
+            .dmrs_symb_pos = job.dlsch_pdu.dlDmrsSymbPos, .dmrs_scrambling_id = job.dlsch_pdu.dlDmrsScramblingId,
+            .tbs = (int32_t)dec.cw.TBS,                                  /* bits */
+            .harq_pid = no_harq_ ? -1 : (int8_t)job.grant.harq_pid, .rv = (int8_t)job.grant.rv,
+            .ndi = no_harq_ ? -1 : (int8_t)job.grant.ndi,               /* NOT cw.new_data_indicator (forced 1) */
+            .crc = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? NR_OBS_CRC_OK : NR_OBS_CRC_FAIL,
+            .nvar = (float)dec.nvar, .snr_db = NAN, .fo_comp_hz = (float)job.fo_hz, .delay_samples = NAN,
+            .carrier_hz = ofp_->dl_CarrierFreq ? (int64_t)ofp_->dl_CarrierFreq : -1,
+            .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
+            .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
+        nr_passive_obs_push(&o_);
       }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
