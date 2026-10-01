@@ -22,6 +22,15 @@ void nr_pdcch_blind_phase2_unlock(void);
  * last `window_slots` slots; always records the sighting. CALLER HOLDS the Phase-2 lock. */
 bool nr_pdcch_blind_rnti_persistence_check(uint16_t rnti, uint32_t abs_slot, uint32_t window_slots, int min_k);
 
+/* The DCI 1_1 dl_auto accept gate of Phase 2, used by nr_pdcch_blind_monitor_rt.c: dci_thres EMA update, then
+ * reject if mismatched_bits > dci_thres + 30 (short-circuit: no sighting recorded then), else the persistence
+ * check. Returns true when the candidate passes. CALLER HOLDS the Phase-2 lock. */
+bool nr_pdcch_blind_dl_accept_gate(int *dci_thres, int mismatched_bits, uint16_t rnti, uint32_t abs_slot,
+                                   uint32_t window_slots, int min_k);
+
+/* Sightings recorded by the persistence check since start (guarded by the Phase-2 lock; takes it). */
+uint64_t nr_pdcch_blind_persistence_sightings(void);
+
 /* Adaptive noise-floor energy estimator (frugal streaming median). update() feeds one candidate's
  * mean |LLR| and returns the floor after the update; both write the sample count to *nseen_out when
  * non-NULL. Internally locked: called from Phase 1, which runs concurrently across consumers. */
@@ -30,12 +39,6 @@ float nr_pdcch_blind_energy_floor_get(uint64_t *nseen_out);
 
 /* ---- Test hooks (offline gtest only; harmless in production, never called there). ---- */
 void nr_pdcch_blind_phase2_reset_for_test(void);
-/* One synthetic Phase-2 accept, the same sequence as the DCI 1_1 accept path in
- * nr_pdcch_blind_monitor_rt.c: raw-accept counter, dci_thres EMA, mismatch gate, persistence gate.
- * Returns the gate verdict. */
-bool nr_pdcch_blind_phase2_for_test(int *dci_thres, uint32_t mismatched_bits, uint16_t rnti, uint32_t abs_slot,
-                                    uint32_t window_slots, int min_k);
-uint64_t nr_pdcch_blind_phase2_accepts_for_test(void);
 /* Sightings of `rnti` currently in the persistence ring; *total = ring occupancy. */
 int nr_pdcch_blind_persistence_count_for_test(uint16_t rnti, int *total);
 

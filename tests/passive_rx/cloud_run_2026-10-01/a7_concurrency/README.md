@@ -12,6 +12,11 @@ nr_pdcch_blind_phase2.c (Phase-2 lock, RNTI-persistence ring, energy floor) from
 - RED (module moved verbatim, unsynchronised), plain build: accepts 25279/40000, energy nseen 27423/40000.
   TSAN: 13 data races (g_recent*, accept counter, energy floor) -> tsan_gtest_concurrent_before.txt
 - GREEN: both pass, TSAN 0 warnings -> tsan_gtest_concurrent_after.txt
+- Fix round 1 (review minor): the test now drives the PRODUCTION accept gate nr_pdcch_blind_dl_accept_gate() (the
+  function rt.c's DCI 1_1 path calls; the duplicated EMA line is gone) and asserts the production sightings counter
+  (guarded by g_phase2_mu). RED re-check with g_phase2_mu lock/unlock compiled out: sightings 14802/40000 -> FAIL;
+  restored: pass, TSAN 0 warnings (file above now holds this run). Full gtest + seeds 1/3/5: 197 + 2 skips;
+  ctest -R pdcch 13/13.
 - Full gtest + shuffle seeds 1/3/5: 197 passed + 2 skipped each (195 + 2 new) -> gtest_shuffle_1_3_5.txt
 - test_nr_passive_obs under TSAN (A3 reviewer request): 8/8 passed, 0 warnings -> tsan_test_nr_passive_obs.txt
 - ctest: 126/128; failures = env-only baseline set {test_thread-pool, nr_cuup_functional_test} -> ctest_summary.txt

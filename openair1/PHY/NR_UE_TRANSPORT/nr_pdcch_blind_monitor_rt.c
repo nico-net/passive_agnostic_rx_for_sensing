@@ -2937,6 +2937,12 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
       const int n_cons = cfg->scan_thread;
       const int depth  = (cfg->scan_queue_depth > 0) ? cfg->scan_queue_depth : 8;
       nr_pdcch_passive_queue_start(ue, depth, n_cons, cfg->scan_thread_core);
+      /* Phase 2 holds the Phase-2 lock (nr_pdcch_blind_phase2.c) across an IN-LINE PDSCH decode, so with
+       * the PDSCH deferral off N > 1 scan consumers serialise on it (Task A7). */
+      if (n_cons > 1 && cfg->pdsch_decode >= 1 && !nr_pdsch_passive_queue_running())
+        LOG_W(PHY, "SENSING: blind PDCCH scan has %d consumers but PDSCH decode is in-line (no PDSCH queue): "
+                   "the N>1 scan speed-up assumes deferred PDSCH (pdcch_blind_monitor_pdsch field 6, thread); Phase 2 "
+                   "holds its lock across each in-line decode\n", n_cons);
     }
   }
 
@@ -5607,9 +5613,9 @@ constdiag_done:;
         for (int ri = 0; ri < n_dl_ready && !known; ++ri) known = dl_ready_rnti[ri] == raw->rnti;
         if (known) continue;
       }
-      ue->dci_thres = (ue->dci_thres + raw->mismatched_bits) / 2;
-      if (raw->mismatched_bits > ue->dci_thres + 30
-          || !nr_pdcch_blind_rnti_persistence_check(raw->rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k))
+      /* dci_thres EMA + mismatch gate + RNTI persistence: one Phase-2 function, the one the gtest drives. */
+      if (!nr_pdcch_blind_dl_accept_gate(&ue->dci_thres, raw->mismatched_bits, raw->rnti, abs_slot,
+                                         persist_window_slots, cfg->rnti_persist_k))
         continue;
       nr_pdcch_blind_rnti_bootstrap_record(raw->rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
       /* rnti_persistence_check() establishes a repeated raw candidate; the bootstrap table then
@@ -6804,6 +6810,8 @@ constdiag_done:;
          (unsigned long)scanq.dropped_stale, (unsigned long)scanq.max_lag_slots,
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
+    /* Runs under the Phase-2 lock (Task A7): a 20 s-period line write that other consumers' Phase 2 waits on;
+     * acceptable per the plan (A2 file sink, once per 20 s). */
     nr_passive_metrics_emit(); /* machine-readable twin of the text summaries above (Task A2) */
   }
 

@@ -4502,10 +4502,11 @@ TEST(LookaheadLanes, Al16IsAcceptedAndFitsTheLaneBudget) {
   EXPECT_GE(nr_pdcch_blind_lane_re_budget(), 16 * 6 * 9);
 }
 
-// Task A7: the blind-PDCCH scan may now run on N consumers. Phase 2 of an occasion (accept counting,
-// dci_thres EMA, RNTI persistence) is the sequential part; four threads x 10000 synthetic accepts of
-// one RNTI through the Phase-2 entry must lose no count and corrupt no sighting. Run under TSAN as
-// well (see tests/passive_rx/cloud_run_2026-10-01/a7_concurrency/): there a data race fails the run.
+// Task A7: the blind-PDCCH scan may now run on N consumers. Phase 2 of an occasion (dci_thres EMA, mismatch
+// gate, RNTI persistence) is the sequential part. Four threads x 10000 synthetic DCI 1_1 accepts of one RNTI go
+// through the production accept gate (nr_pdcch_blind_dl_accept_gate, the function rt.c calls) under the
+// Phase-2 lock, as rt.c does; no sighting may be lost or corrupted. Run under TSAN as well (see
+// tests/passive_rx/cloud_run_2026-10-01/a7_concurrency/): there a data race fails the run.
 TEST(Phase2Concurrent, FourThreadsSameRntiLoseNoAcceptAndNoSighting) {
   nr_pdcch_blind_phase2_reset_for_test();
   constexpr int kThreads = 4, kPerThread = 10000;
@@ -4515,13 +4516,18 @@ TEST(Phase2Concurrent, FourThreadsSameRntiLoseNoAcceptAndNoSighting) {
   std::vector<std::thread> th;
   for (int t = 0; t < kThreads; t++)
     th.emplace_back([&, t] {
-      for (int i = 0; i < kPerThread; i++)
-        if (!nr_pdcch_blind_phase2_for_test(&dci_thres, 0, kRnti, 1000, 100, 2))
+      for (int i = 0; i < kPerThread; i++) {
+        nr_pdcch_blind_phase2_lock();
+        const bool pass = nr_pdcch_blind_dl_accept_gate(&dci_thres, 0, kRnti, 1000, 100, 2);
+        nr_pdcch_blind_phase2_unlock();
+        if (!pass)
           held[t]++;
+      }
     });
   for (auto &x : th)
     x.join();
-  EXPECT_EQ(nr_pdcch_blind_phase2_accepts_for_test(), (uint64_t)kThreads * kPerThread);
+  // Production counter, guarded by the Phase-2 lock: every accept reached the persistence gate exactly once.
+  EXPECT_EQ(nr_pdcch_blind_persistence_sightings(), (uint64_t)kThreads * kPerThread);
   // Persistence k=2: only the globally first sighting has no earlier one, so exactly one is held.
   EXPECT_EQ(held[0] + held[1] + held[2] + held[3], 1);
   // The ring keeps one entry per SIGHTING (by design), so after 40000 sightings it is full and every

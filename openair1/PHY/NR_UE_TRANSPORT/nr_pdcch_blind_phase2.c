@@ -25,6 +25,9 @@
  *     repays. Consumers race by at most the queue depth (8-16 slots) against windows of hundreds.
  *   - The dci_thres EMA and the energy-floor estimator are order-insensitive at the 1e-2 level (both
  *     are averages over many samples, not functions of their order).
+ * IN-LINE PDSCH: with the PDSCH decode deferral off (no nr_pdsch_passive_queue), Phase 2 decodes PDSCH in
+ * line and so holds this lock across the LDPC decode; N > 1 scan consumers then serialise on it. The N > 1
+ * speed-up assumes deferred PDSCH (nr_pdcch_blind_monitor_rt.c warns at scan-pool start).
  * Lock order: this lock is taken by the occasion body only, never while holding another blind-PDCCH
  * lock, and the body takes its leaf locks (dedupe, length sweep, bank, ...) inside it. */
 static pthread_mutex_t g_phase2_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -51,6 +54,7 @@ static struct {
 } g_recent[NR_PDCCH_BLIND_PERSIST_MAX];
 static int g_recent_head = 0;
 static int g_recent_count = 0;
+static uint64_t g_recent_sightings = 0; /* sightings ever recorded; same lock */
 
 // Always records the current sighting regardless of the outcome, so a candidate that fails today can
 // contribute toward tomorrow's threshold.
@@ -65,6 +69,7 @@ bool nr_pdcch_blind_rnti_persistence_check(uint16_t rnti, uint32_t abs_slot, uin
       seen++;
     }
   }
+  g_recent_sightings++;
   g_recent[g_recent_head].rnti = rnti;
   g_recent[g_recent_head].abs_slot = abs_slot;
   g_recent_head = (g_recent_head + 1) % NR_PDCCH_BLIND_PERSIST_MAX;
@@ -72,6 +77,22 @@ bool nr_pdcch_blind_rnti_persistence_check(uint16_t rnti, uint32_t abs_slot, uin
     g_recent_count++;
   }
   return (seen + 1) >= min_k; // +1 counts the sighting just recorded
+}
+
+bool nr_pdcch_blind_dl_accept_gate(int *dci_thres, int mismatched_bits, uint16_t rnti, uint32_t abs_slot,
+                                   uint32_t window_slots, int min_k)
+{
+  *dci_thres = (*dci_thres + mismatched_bits) / 2;
+  return !(mismatched_bits > *dci_thres + 30)
+         && nr_pdcch_blind_rnti_persistence_check(rnti, abs_slot, window_slots, min_k);
+}
+
+uint64_t nr_pdcch_blind_persistence_sightings(void)
+{
+  nr_pdcch_blind_phase2_lock();
+  const uint64_t n = g_recent_sightings;
+  nr_pdcch_blind_phase2_unlock();
+  return n;
 }
 
 // ---- Adaptive energy floor (cfg->energy_adapt_factor). See the long rationale at its use in
@@ -115,36 +136,16 @@ float nr_pdcch_blind_energy_floor_get(uint64_t *nseen_out)
 }
 
 /* ---- Test hooks ---- */
-static _Atomic uint64_t g_test_accepts = 0;
-
 void nr_pdcch_blind_phase2_reset_for_test(void)
 {
   nr_pdcch_blind_phase2_lock();
   g_recent_head = g_recent_count = 0;
+  g_recent_sightings = 0;
   nr_pdcch_blind_phase2_unlock();
   pthread_mutex_lock(&g_energy_mu);
   g_energy_floor = 0.0f;
   g_energy_nseen = 0;
   pthread_mutex_unlock(&g_energy_mu);
-  atomic_store_explicit(&g_test_accepts, 0, memory_order_relaxed);
-}
-
-bool nr_pdcch_blind_phase2_for_test(int *dci_thres, uint32_t mismatched_bits, uint16_t rnti, uint32_t abs_slot,
-                                    uint32_t window_slots, int min_k)
-{
-  /* Counters are relaxed atomics (design point 1): incremented OUTSIDE the lock, as Phase 1 does. */
-  atomic_fetch_add_explicit(&g_test_accepts, 1, memory_order_relaxed);
-  nr_pdcch_blind_phase2_lock();
-  *dci_thres = (*dci_thres + (int)mismatched_bits) / 2;
-  const bool pass = !((int)mismatched_bits > *dci_thres + 30)
-                    && nr_pdcch_blind_rnti_persistence_check(rnti, abs_slot, window_slots, min_k);
-  nr_pdcch_blind_phase2_unlock();
-  return pass;
-}
-
-uint64_t nr_pdcch_blind_phase2_accepts_for_test(void)
-{
-  return atomic_load_explicit(&g_test_accepts, memory_order_relaxed);
 }
 
 int nr_pdcch_blind_persistence_count_for_test(uint16_t rnti, int *total)

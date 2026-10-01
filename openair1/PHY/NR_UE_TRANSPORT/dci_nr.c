@@ -864,10 +864,11 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   }
   if (nr_pdcch_blind_capture && g_cap_left > 0 && cap_occupied) {
     pthread_mutex_lock(&g_cap_mu);
-    if (g_cap_fp == NULL) {
+    /* g_cap_left re-checked under the lock: another scan consumer may have spent the last record (Task A7). */
+    if (g_cap_left > 0 && g_cap_fp == NULL) {
       g_cap_fp = fopen("/tmp/pdcch_fixture.bin", "wb");
     }
-    if (g_cap_fp != NULL) {
+    if (g_cap_left > 0 && g_cap_fp != NULL) {
       const int32_t hdr[14] = {0x48434450, 1, (int32_t)proc->frame_rx, (int32_t)proc->nr_slot_rx,
                                (int32_t)symbol, n_rb, rb_offset, dmrs_ref, (int32_t)cs_sc_cap,
                                (int32_t)fp->ofdm_symbol_size, llr_size_symbol, pdcch_est_size,
