@@ -1006,7 +1006,7 @@ A campaign = a directory holding a manifest (who/what/where/when/which build/whi
 - Produces files: `manifest.json`, `runs/<NNN>_<arm>/{cmd.txt,env.txt,run.json,rx.log,metrics.jsonl,obs.jsonl,nic.csv,thrprof.txt,verdict.json}`, `index.jsonl` (one line per run).
 - `verdict.py: verdict(run_dir) -> dict` with keys `{"verdict": "VALID"|"VOID_NO_SYNC"|"VOID_RFSTALL"|"VOID_NIC_LOSS"|"VOID_NO_SIB1"|"INTERRUPTED", "reasons": [..], "score": <score_rx dict>, "last_metrics": <dict or null>}`.
 
-- [ ] **Step 1: Write the failing test `test_campaign.py`**
+- [x] **Step 1: Write the failing test `test_campaign.py`**
 
 ```python
 import json, os, signal, subprocess, sys, tempfile, time, unittest
@@ -1058,12 +1058,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `python3 tests/passive_rx/campaign/test_campaign.py -v`
 Expected: FAIL (campaign.py missing).
 
-- [ ] **Step 3: Write `verdict.py`**
+- [x] **Step 3: Write `verdict.py`**
 
 ```python
 #!/usr/bin/env python3
@@ -1120,7 +1120,7 @@ if __name__ == "__main__":
         print(json.dumps(verdict(d), sort_keys=True))
 ```
 
-- [ ] **Step 4: Write `campaign.py`**
+- [x] **Step 4: Write `campaign.py`**
 
 ```python
 #!/usr/bin/env python3
@@ -1235,7 +1235,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `python3 tests/passive_rx/campaign/test_campaign.py -v`
 Expected: 4 tests OK.
@@ -1250,7 +1250,9 @@ python3 tests/passive_rx/campaign/campaign.py summarize $C && cat $C/summary.md
 ```
 Expected: one `VALID` run. NOTE: `rfsim_arm.sh` writes its own `arm/rx/rx.log`; `verdict()` scores `run_dir` — so make `rfsim_arm.sh` accept `OUT=.` or teach `score()` to look into `arm/rx` (pick one; the implementer adds a unit test for the chosen layout).
 
-- [ ] **Step 7: Commit**
+> Layout decision (A4, cloud): `rfsim_arm.sh` and `score_rx.py` are unchanged. `verdict.arm_dir()` prefers an arm sub-dir (`<run>/*/rx/rx.log` or `<run>/*/rx.log`) over the runner-captured wrapper stdout `<run>/rx.log`, so the command above works as written. Unit-tested in `VerdictLayout`. Runner notes: `--` splits the child command before argparse (REMAINDER swallowed options); the deadline is polled (works for silent children); escalation SIGINT -> SIGTERM -> (last resort) SIGKILL, grace via `CAMPAIGN_GRACE_S` / `CAMPAIGN_TERM_GRACE_S` (default 30 s). Step 6 run is still pending (orchestrator).
+
+- [x] **Step 7: Commit**
 
 ```bash
 git add tests/passive_rx/campaign/campaign.py tests/passive_rx/campaign/verdict.py tests/passive_rx/campaign/test_campaign.py
