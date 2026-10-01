@@ -1,0 +1,53 @@
+[SIMULATED, DGX host, nr_td_sim @d21f10e471 + BC0 working tree (commit that adds this file)] --acq 2000 --seed 1, 8000 RNTIs per run (4 per acquisition)
+cold = RNTI rank 0-1, steady = rank >= 2; mean/median/p95 over DECIDED RNTIs (undecidable censored at cap 3600 s); seconds = grants / 200
+Wall: oracle 1 ~0.3-0.4 s; oracle 0 3m46 (4 RX) / 6m54 (1 RX); miss 0.3 2m05 / 1m08; wrong 0.05 ~12 s; trap arm 3m50 / 7m04.
+
+## o1 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1
+cold: n=4000 decided=4000 mean_s=1.08 median_s=1.01 p95_s=1.83 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=1.06 median_s=0.99 p95_s=1.82 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.0, "p95_s": 1.825, "mean_s": 1.074, "mean_grants": 214.7, "wrong": 0, "undecidable": 0, "n_full": 1717916, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.0, "mean_s": 0.987, "wrong": 0}, "1": {"n": 2584, "median_s": 1.61, "mean_s": 1.607, "wrong": 0}, "2": {"n": 2760, "median_s": 0.635, "mean_s": 0.657, "wrong": 0}}}}
+
+## o1 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1
+cold: n=4000 decided=4000 mean_s=1.77 median_s=1.60 p95_s=2.86 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=1.72 median_s=1.58 p95_s=2.81 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.59, "p95_s": 2.845, "mean_s": 1.745, "mean_grants": 349.0, "wrong": 0, "undecidable": 0, "n_full": 2791634, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.6, "mean_s": 1.598, "wrong": 0}, "1": {"n": 2584, "median_s": 2.55, "mean_s": 2.507, "wrong": 0}, "2": {"n": 2760, "median_s": 1.23, "mean_s": 1.172, "wrong": 0}}}}
+
+## o0 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0
+cold: n=4000 decided=4000 mean_s=422.38 median_s=356.57 p95_s=836.57 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=15.58 median_s=10.55 p95_s=35.84 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 116.57, "p95_s": 776.57, "mean_s": 218.982, "mean_grants": 43796.3, "wrong": 0, "undecidable": 0, "n_full": 350370521, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 177.57, "mean_s": 190.985, "wrong": 0}, "1": {"n": 2584, "median_s": 356.87, "mean_s": 377.964, "wrong": 0}, "2": {"n": 2760, "median_s": 116.57, "mean_s": 97.079, "wrong": 0}}}}
+
+## o0 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0
+cold: n=4000 decided=4000 mean_s=756.84 median_s=716.57 p95_s=1125.32 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=28.05 median_s=25.59 p95_s=58.07 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 268.635, "p95_s": 1125.315, "mean_s": 392.445, "mean_grants": 78489.0, "wrong": 0, "undecidable": 0, "n_full": 627912024, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 356.57, "mean_s": 369.188, "wrong": 0}, "1": {"n": 2584, "median_s": 716.57, "mean_s": 568.208, "wrong": 0}, "2": {"n": 2760, "median_s": 268.635, "mean_s": 250.271, "wrong": 0}}}}
+
+## miss03 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --oracle-miss 0.3
+cold: n=4000 decided=4000 mean_s=128.73 median_s=1.39 p95_s=716.57 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=2.63 median_s=1.00 p95_s=14.56 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.065, "p95_s": 536.555, "mean_s": 65.682, "mean_grants": 13136.4, "wrong": 0, "undecidable": 0, "n_full": 105091312, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 2388, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.01, "mean_s": 56.349, "wrong": 0}, "1": {"n": 2584, "median_s": 1.71, "mean_s": 115.593, "wrong": 0}, "2": {"n": 2760, "median_s": 0.64, "mean_s": 27.935, "wrong": 0}}}}
+
+## miss03 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --oracle-miss 0.3
+cold: n=4000 decided=4000 mean_s=231.30 median_s=2.21 p95_s=1125.31 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=4.58 median_s=1.62 p95_s=26.39 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.745, "p95_s": 903.25, "mean_s": 117.942, "mean_grants": 23588.4, "wrong": 0, "undecidable": 0, "n_full": 188706902, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 2388, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.655, "mean_s": 109.121, "wrong": 0}, "1": {"n": 2584, "median_s": 2.65, "mean_s": 175.294, "wrong": 0}, "2": {"n": 2760, "median_s": 1.24, "mean_s": 72.735, "wrong": 0}}}}
+
+## wrong005 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --oracle-wrong 0.05
+cold: n=4000 decided=3779 mean_s=1.08 median_s=1.01 p95_s=1.83 wrong=0 undecidable=221
+steady: n=4000 decided=3987 mean_s=1.06 median_s=0.99 p95_s=1.82 wrong=0 undecidable=13
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 7766, "median_s": 1.0, "p95_s": 1.83, "mean_s": 1.073, "mean_grants": 214.7, "wrong": 0, "undecidable": 234, "n_full": 170147095, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 425, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2570, "median_s": 1.0, "mean_s": 0.988, "wrong": 0}, "1": {"n": 2499, "median_s": 1.61, "mean_s": 1.61, "wrong": 0}, "2": {"n": 2697, "median_s": 0.635, "mean_s": 0.658, "wrong": 0}}}}
+
+## wrong005 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --oracle-wrong 0.05
+cold: n=4000 decided=3779 mean_s=1.76 median_s=1.60 p95_s=2.86 wrong=0 undecidable=221
+steady: n=4000 decided=3987 mean_s=1.73 median_s=1.58 p95_s=2.82 wrong=0 undecidable=13
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 7766, "median_s": 1.59, "p95_s": 2.85, "mean_s": 1.745, "mean_grants": 348.9, "wrong": 0, "undecidable": 234, "n_full": 171189569, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 425, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2570, "median_s": 1.6, "mean_s": 1.598, "wrong": 0}, "1": {"n": 2499, "median_s": 2.55, "mean_s": 2.512, "wrong": 0}, "2": {"n": 2697, "median_s": 1.225, "mean_s": 1.172, "wrong": 0}}}}
+
+## trap rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0 --harq-trap 0.01 --crc-false 5.96e-8
+cold: n=4000 decided=4000 mean_s=422.49 median_s=356.57 p95_s=836.57 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=16.87 median_s=13.54 p95_s=40.96 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 116.57, "p95_s": 776.57, "mean_s": 219.677, "mean_grants": 43935.5, "wrong": 0, "undecidable": 0, "n_full": 351483958, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 7265, "false_passes": 21, "by_table": {"0": {"n": 2656, "median_s": 177.57, "mean_s": 191.564, "wrong": 0}, "1": {"n": 2584, "median_s": 356.87, "mean_s": 379.418, "wrong": 0}, "2": {"n": 2760, "median_s": 116.57, "mean_s": 97.177, "wrong": 0}}}}
+
+## trap rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0 --harq-trap 0.01 --crc-false 5.96e-8
+cold: n=4000 decided=4000 mean_s=756.90 median_s=716.57 p95_s=1125.32 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=31.90 median_s=26.39 p95_s=71.67 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 268.635, "p95_s": 1125.315, "mean_s": 394.399, "mean_grants": 78879.9, "wrong": 0, "undecidable": 0, "n_full": 631039181, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 13217, "false_passes": 36, "by_table": {"0": {"n": 2656, "median_s": 356.57, "mean_s": 370.958, "wrong": 0}, "1": {"n": 2584, "median_s": 716.57, "mean_s": 571.979, "wrong": 0}, "2": {"n": 2760, "median_s": 268.635, "mean_s": 250.702, "wrong": 0}}}}

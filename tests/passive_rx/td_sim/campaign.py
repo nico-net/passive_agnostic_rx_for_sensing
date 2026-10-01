@@ -59,6 +59,7 @@ def main(argv=None):
         for (arm, af, cell, cf, rx, orc), recs in zip(combos, results):
             if True:
                 if True:
+                    summ = next((r["summary"] for r in recs if "summary" in r), {})
                     recs = [r for r in recs if "summary" not in r]
                     for r in recs:
                         rf.write(json.dumps(dict(r, arm=arm, cell=cell, rx=rx, oracle=orc)) + "\n")
@@ -75,16 +76,18 @@ def main(argv=None):
                                  mean([r["grants"] for r in ok]), sum(r["wrong"] for r in recs),
                                  sum(r["undecidable"] for r in recs), sum(r["n_full"] for r in recs),
                                  sum(r["n_probe"] for r in recs), sum(r["gated_phys"] + r["gated_chan"] for r in recs),
-                                 tab[0], tab[1], tab[2]))
+                                 tab[0], tab[1], tab[2], sum(r.get("oracle_state") == "miss" for r in recs),
+                                 sum(r.get("oracle_state") == "wrong" for r in recs), summ.get("harq_trap_passes", 0),
+                                 summ.get("false_passes", 0)))
     with open(os.path.join(a.out, "summary.md"), "w") as sf:
         sf.write("[SIMULATED, nr_td_sim] cold = first two RNTIs per acquisition; steady = later RNTIs; seconds = grants / grants-per-s.\n"
                  "Undecidable (capped) RNTIs are censored: excluded from medians/means/p95, counted in the undecidable column.\n"
                  "Medians are quantised (separation is checked every 16 trials): prefer the mean columns.\n"
                  "tbl N = truth mcs_table N as count/median s/mean s/wrong.\n\n")
-        sf.write("| arm | cell | rx | oracle | cold median s | cold p95 s | steady median s | cold mean s | steady p95 s | steady mean s | mean s | mean grants | wrong | undecidable | n_full | n_probe | gated | tbl 0 | tbl 1 | tbl 2 |\n")
-        sf.write("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+        sf.write("| arm | cell | rx | oracle | cold median s | cold p95 s | steady median s | cold mean s | steady p95 s | steady mean s | mean s | mean grants | wrong | undecidable | n_full | n_probe | gated | tbl 0 | tbl 1 | tbl 2 | oracle_miss_rntis | oracle_wrong_rntis | harq_trap_passes | false_passes |\n")
+        sf.write("|---" * 24 + "|\n")
         for r in rows:
-            sf.write("| %s | %s | %d | %s | %.1f | %.1f | %.1f | %.2f | %.1f | %.2f | %.2f | %.0f | %d | %d | %d | %d | %d | %s | %s | %s |\n" % r)
+            sf.write("| %s | %s | %d | %s | %.1f | %.1f | %.1f | %.2f | %.1f | %.2f | %.2f | %.0f | %d | %d | %d | %d | %d | %s | %s | %s | %d | %d | %d | %d |\n" % r)
     return 0
 
 

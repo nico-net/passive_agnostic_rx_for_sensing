@@ -37,6 +37,10 @@ struct SimCfg {
   int oracle;           /* 1 = today's runtime (DM-RS/last-symbol/k0 + Qm oracles prune the catalogue), 0 = blind arm */
   int dmrs_typea_pos;   /* ASN.1 enum: 0 = pos2 (rfsim gNB default, 106 PRB cell), 1 = pos3 */
   double mu, fade, snr_est_sigma, rank2_frac, grants_per_s, probe_inconclusive, table_exercise, cap_s;
+  /* Realism (spec 2026-10-01 blind convergence section 7), all default 0 = today's perfect oracles / no traps.
+   * oracle_miss/oracle_wrong: per RNTI probabilities that the DM-RS+Qm oracles produce nothing / a destructive wrong decision.
+   * harq_trap: per grant, the k0+-1 neighbour of the truth passes. crc_false: per FAILING decode false-pass probability. */
+  double oracle_miss, oracle_wrong, harq_trap, crc_false;
   float w_sib1, w_default, w_obs, w_field, w_probe;
   bool check_correlation;
   static SimCfg defaults()
@@ -46,6 +50,7 @@ struct SimCfg {
     c.twins = 2; c.rntis_per_acq = 4; c.oracle = 1; c.prior = 1; c.dmrs_typea_pos = 0;
     c.mu = 15; c.fade = 6; c.snr_est_sigma = 2; c.rank2_frac = 0.3; c.grants_per_s = 200;
     c.probe_inconclusive = 0.1; c.table_exercise = 0.9; c.cap_s = 3600;
+    c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
      * `undecidable` ones and biases every quantile downwards. Capped RNTIs are reported separately and excluded
@@ -60,6 +65,8 @@ struct RntiRec {
   long grants;
   double seconds;
   bool winner_ok, wrong, undecidable;
+  int oracle_state;       /* 0 ok, 1 miss, 2 wrong */
+  long harq_trap_passes, false_passes;
   long n_full, n_probe, gated_phys, gated_chan, promotions, withdrawals;
   long p2_admitted_fail;  /* probe FAILs admitted as KL failures (st->p2 && p2_admissible && FAIL) */
   long truth_full;        /* full-TB decodes of the true hypothesis until the decision */
@@ -76,6 +83,7 @@ struct SimResult {
   long truth_eliminated_by_probe = 0, p2_admitted_fail = 0;
   double median_s = 0, p95_s = 0, mean_s = 0, mean_grants = 0;
   long n_decided = 0;
+  long oracle_miss_rntis = 0, oracle_wrong_rntis = 0, harq_trap_passes = 0, false_passes = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
   std::vector<RntiRec> recs;
 };
@@ -203,9 +211,12 @@ static SimResult run_sim(const SimCfg &cfg)
     Prior gprior{};
     nr_td_fieldbook_t fb;
     nr_td_fieldbook_init(&fb, 2, 2);
+    int n_ok_prev = 0; /* earlier RNTIs of this acquisition whose oracle state was ok */
     for (int k = 0; k < cfg.rntis_per_acq; k++) {
       std::mt19937_64 crng(mix(cfg.seed, a, 0x100 + k)); /* channel: fixed draws per grant, so arms are paired */
       std::mt19937_64 prng(mix(cfg.seed, a, 0x200 + k)); /* probe inconclusive draws */
+      std::mt19937_64 orng(mix(cfg.seed, a, 0x400 + k)); /* oracle state/decoy draws (own stream: crng stays unchanged) */
+      std::mt19937_64 frng(mix(cfg.seed, a, 0x500 + k)); /* HARQ-trap / CRC false-pass draws */
       std::normal_distribution<double> nd(0, 1);
       std::uniform_real_distribution<double> ud(0, 1);
       memcpy((void *)st.get(), (const void *)tmpl.get(), sizeof(*st));
@@ -228,9 +239,31 @@ static SimResult run_sim(const SimCfg &cfg)
           si.sib1[j] = {S, L, 0, (uint8_t)(arng() % 2)};
         }
       }
-      if (cfg.w_obs > 0) { /* ordering inputs (I2): the DM-RS oracle is reliable in rfsim; qm/mcs filled from the first measurable grant */
-        si.obs_dmrs_mask = T.dmrs_mask;
-        si.obs_last_symbol = T.tda_start + T.tda_length - 1;
+      /* Oracle state, drawn ONCE per RNTI from orng (u < miss: no observation at all; u < miss+wrong: decoy DM-RS + wrong Qm table). */
+      int ostate = 0;
+      if (cfg.oracle_miss > 0 || cfg.oracle_wrong > 0) {
+        const double u = std::uniform_real_distribution<double>(0, 1)(orng);
+        ostate = u < cfg.oracle_miss ? 1 : (u < cfg.oracle_miss + cfg.oracle_wrong ? 2 : 0);
+      }
+      /* Decoy for `wrong`: first catalogue entry (template order from orng() % n_hyp, wrapping) whose (dmrs_mask, S+L) differs
+       * from the truth's. None (theoretically impossible) => the RNTI is treated as ok and counted. */
+      uint32_t decoy_mask = T.dmrs_mask; int decoy_end = T.tda_start + T.tda_length;
+      if (ostate == 2) {
+        const int start = (int)(orng() % (uint64_t)n_hyp);
+        bool found = false;
+        for (int j = 0; j < n_hyp && !found; j++) {
+          const nr_pdsch_cfg_hypothesis_t &h = tmpl->hyp[(start + j) % n_hyp];
+          if (h.dmrs_mask != T.dmrs_mask || h.tda_start + h.tda_length != T.tda_start + T.tda_length) {
+            decoy_mask = h.dmrs_mask; decoy_end = h.tda_start + h.tda_length; found = true;
+          }
+        }
+        if (!found) ostate = 0;
+      }
+      const int wrong_table = (T.mcs_table + 1) % 3;
+      const bool obs_on = ostate != 1; /* miss: neither DM-RS observation nor Qm sighting */
+      if (cfg.w_obs > 0 && obs_on) { /* ordering inputs (I2): the DM-RS oracle is reliable in rfsim; qm/mcs filled from the first measurable grant */
+        si.obs_dmrs_mask = decoy_mask;
+        si.obs_last_symbol = decoy_end - 1;
       }
       if (cfg.fieldbook)
         nr_td_fieldbook_fill_side_info(&fb, &si);
@@ -239,6 +272,7 @@ static SimResult run_sim(const SimCfg &cfg)
       const uint16_t rnti = (uint16_t)(0x4000 + k);
 
       RntiRec rec{};
+      rec.oracle_state = ostate;
       rec.acq = a; rec.rnti_rank = k; rec.truth_table = T.mcs_table;
       /* Oracles (today's runtime): the DM-RS mask / last symbol / k0 observation (nr_pdsch_config_sweep_observe ->
        * prune_to_observed) runs on EVERY decoded grant (a no-op once nothing more can be removed), as at runtime; the cell-wide observation set is published
@@ -246,6 +280,12 @@ static SimResult run_sim(const SimCfg &cfg)
        * measures on the slot of the job that carried the DM-RS). Qm oracle: two-sighting rule, below. */
       uint8_t qm_tables = 0; int qm_obs = 0;
       auto do_observe = [&]() {
+        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
+          return h.dmrs_mask == decoy_mask && h.tda_start + h.tda_length == decoy_end && h.k0 == T.k0;
+        });
+      };
+      /* cell-wide pre-pruning is the consensus of >= 2 earlier RNTIs whose oracles were ok: always the TRUTH's observation */
+      auto do_observe_cellwide = [&]() {
         sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
           return h.dmrs_mask == T.dmrs_mask && h.tda_start + h.tda_length == T.tda_start + T.tda_length && h.k0 == T.k0;
         });
@@ -268,15 +308,28 @@ static SimResult run_sim(const SimCfg &cfg)
         sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
           return h.mcs_table == gprior.tbl && (h.mapping_type != gprior.map || (h.dmrs_add_pos == gprior.add && h.dmrs_max_len == gprior.len));
         });
-      if (cfg.oracle && k >= 2) do_observe();
+      if (cfg.oracle && k >= 2 && n_ok_prev >= 2) do_observe_cellwide();
       find_truth();
       bool distinguished = false;
       int winner = -1;
       long g = 0;
-      auto full_pass = [&](int h, const Grant &gr, bool truth_pass) {
+      std::uniform_real_distribution<double> uf(0, 1);
+      bool trap_active = false; /* per-grant HARQ-trap draw (frng) */
+      auto is_k0_neighbour = [&](const nr_pdsch_cfg_hypothesis_t &h) {
+        return (h.k0 == T.k0 + 1 || h.k0 == T.k0 - 1) && h.mcs_table == T.mcs_table && h.tda_start == T.tda_start
+               && h.tda_length == T.tda_length && h.dmrs_add_pos == T.dmrs_add_pos && h.dmrs_max_len == T.dmrs_max_len
+               && h.dmrs_mask == T.dmrs_mask && h.mapping_type == T.mapping_type;
+      };
+      auto base_pass = [&](int h, const Grant &gr, bool truth_pass) {
         if (is_truth(st->hyp[h])) return truth_pass;
         if (is_twin_h(st->hyp[h])) return gr.exercised ? false : truth_pass;
         return false;
+      };
+      auto full_pass = [&](int h, const Grant &gr, bool truth_pass) {
+        const bool p = base_pass(h, gr, truth_pass);
+        if (trap_active && is_k0_neighbour(st->hyp[h])) { rec.harq_trap_passes++; return true; }
+        if (!p && cfg.crc_false > 0 && uf(frng) < cfg.crc_false) { rec.false_passes++; return true; }
+        return p;
       };
       for (; g < cap && winner < 0;) {
         g++;
@@ -295,6 +348,7 @@ static SimResult run_sim(const SimCfg &cfg)
           if (gt == NR_TD_GATED_PHYSICAL) { rec.gated_phys++; continue; }
           if (gt == NR_TD_GATED_CHANNEL_QUALITY) { rec.gated_chan++; continue; }
         }
+        trap_active = cfg.harq_trap > 0 && uf(frng) < cfg.harq_trap;
         int idx[NR_TD_MAX_K];
         nr_pdsch_cfg_hypothesis_t hy[NR_TD_MAX_K];
         const int n = nr_pdsch_config_sweep_next_k(st.get(), cfg.K, idx, hy); /* K=1 == next() (Task 4 bit-identity) */
@@ -327,7 +381,7 @@ static SimResult run_sim(const SimCfg &cfg)
         const long t0 = ti >= 0 ? (long)st->trials[ti] - (long)st->ok[ti] : 0;
         winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
         if (ti >= 0 && truth_pass && (long)st->trials[ti] - (long)st->ok[ti] > t0) rec.truth_elim++;
-        if (cfg.oracle || cfg.w_obs > 0) {
+        if ((cfg.oracle || cfg.w_obs > 0) && obs_on) {
           /* [ASSUMPTION] The DM-RS oracle needs the layout to be decodable at all (rank <= n_rx); conservative: the runtime
            * measures per-symbol coherence on whatever RX it has. A GATED grant (`continue` above) contributes no
            * observation: gated + unsettled -> no trial -> no job (plan R2). */
@@ -336,7 +390,7 @@ static SimResult run_sim(const SimCfg &cfg)
           /* [ASSUMPTION] Qm abstention gate: nr_pdsch_qm_classify abstains at low SNR, but no code gives the threshold;
            * modelled as "the truth would pass at this SNR/MCS". Runtime-backed part: called after feedback, two sightings. */
           if (decoded && truth_pass) {
-            const int qm = nr_pdsch_qm_of_mcs((uint8_t)gr.mcs, T.mcs_table);
+            const int qm = nr_pdsch_qm_of_mcs((uint8_t)gr.mcs, ostate == 2 ? (uint8_t)wrong_table : T.mcs_table);
             const uint8_t mask = sim_qm_table_mask(gr.mcs, qm);
             if (cfg.w_obs > 0 && si.obs_qm < 0 && mask != 0 && mask != 0x7) { si.obs_qm = qm; si.obs_mcs = gr.mcs; }
             if (cfg.oracle && winner < 0 && mask != 0 && mask != 0x7) {
@@ -383,6 +437,9 @@ static SimResult run_sim(const SimCfg &cfg)
       R.total_grants += g; R.wrong += rec.wrong; R.undecidable += rec.undecidable; R.acquisitions_rntis++;
       R.n_full += rec.n_full; R.n_probe += rec.n_probe; R.gated_phys += rec.gated_phys; R.gated_chan += rec.gated_chan;
       R.promotions += rec.promotions; R.withdrawals += rec.withdrawals;
+      n_ok_prev += ostate == 0;
+      R.oracle_miss_rntis += ostate == 1; R.oracle_wrong_rntis += ostate == 2;
+      R.harq_trap_passes += rec.harq_trap_passes; R.false_passes += rec.false_passes;
       R.truth_eliminated_by_probe += rec.truth_elim; R.p2_admitted_fail += rec.p2_admitted_fail;
       if (!rec.undecidable) {
         secs.push_back(rec.seconds);
@@ -416,6 +473,7 @@ int main(int argc, char **argv)
     if (f == "--help") {
       puts("nr_td_sim: Technique D Monte-Carlo (SIMULATED results). Flags (value follows): --acq --seed --catalog-tda --p-true-snr-mu --fade-db\n"
            "  --snr-est-sigma --n-rx --rank2-frac --grants-per-s --sib1 --K --w-sib1 --w-default --w-obs --w-field --w-probe --fieldbook\n"
+           "  --oracle-miss P --oracle-wrong P --harq-trap P --crc-false P (realism, default 0)\n"
            "  --gate --p2 --rntis-per-acq --probe-inconclusive --table-exercise --cap-s --oracle --prior --dmrs-typea-pos\n"
            "  --twins N (default 2 = all physical twins, i.e. every other-table entry). N < 2 is an UNPHYSICAL stress arm: only N\n"
            "  twins behave as twins, the other other-table entries always fail.");
@@ -448,6 +506,10 @@ int main(int argc, char **argv)
     else if (f == "--table-exercise") c.table_exercise = atof(v);
     else if (f == "--cap-s") c.cap_s = atof(v);
     else if (f == "--oracle") c.oracle = atoi(v);
+    else if (f == "--oracle-miss") c.oracle_miss = atof(v);
+    else if (f == "--oracle-wrong") c.oracle_wrong = atof(v);
+    else if (f == "--harq-trap") c.harq_trap = atof(v);
+    else if (f == "--crc-false") c.crc_false = atof(v);
     else if (f == "--prior") c.prior = atoi(v);
     else if (f == "--dmrs-typea-pos") c.dmrs_typea_pos = atoi(v);
     else { fprintf(stderr, "unknown flag %s\n", f.c_str()); return 2; }
@@ -456,21 +518,22 @@ int main(int argc, char **argv)
   for (const RntiRec &x : r.recs)
     printf("{\"acq\":%d,\"rnti_rank\":%d,\"truth_table\":%d,\"grants\":%ld,\"seconds\":%.4f,\"winner_ok\":%s,\"wrong\":%d,\"undecidable\":%d,"
            "\"n_full\":%ld,\"n_probe\":%ld,\"gated_phys\":%ld,\"gated_chan\":%ld,\"promotions\":%ld,\"withdrawals\":%ld,"
-           "\"p2_admitted_fail\":%ld,\"truth_full\":%ld,\"truth_kl_trials\":%ld,\"truth_elim\":%ld,\"winner\":\"%s\"}\n",
+           "\"p2_admitted_fail\":%ld,\"truth_full\":%ld,\"truth_kl_trials\":%ld,\"truth_elim\":%ld,\"winner\":\"%s\",\"oracle_state\":\"%s\"}\n",
            x.acq, x.rnti_rank, x.truth_table, x.grants, x.seconds, x.winner_ok ? "true" : "false", (int)x.wrong, (int)x.undecidable, x.n_full,
            x.n_probe, x.gated_phys, x.gated_chan, x.promotions, x.withdrawals, x.p2_admitted_fail, x.truth_full, x.truth_kl_trials,
-           x.truth_elim, x.winner_key);
+           x.truth_elim, x.winner_key, x.oracle_state == 1 ? "miss" : x.oracle_state == 2 ? "wrong" : "ok");
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
    * NB: separation is checked every 16 trials, so seconds move in steps of 16 x n_hyp / grants_per_s: prefer the means. */
   printf("{\"summary\":{\"acq\":%d,\"rntis\":%ld,\"decided\":%ld,\"median_s\":%.3f,\"p95_s\":%.3f,\"mean_s\":%.3f,"
          "\"mean_grants\":%.1f,\"wrong\":%ld,\"undecidable\":%ld,"
          "\"n_full\":%ld,\"n_probe\":%ld,\"gated_phys\":%ld,\"gated_chan\":%ld,\"promotions\":%ld,\"withdrawals\":%ld,"
          "\"p2\":%d,\"p2_admitted_fail\":%ld,\"truth_eliminated_by_probe\":%ld,"
-         "\"twins_requested\":%d,\"twins_min\":%ld,\"cap_s\":%.0f,\"seed\":%d,\"n_rx\":%d,\"K\":%d,\"oracle\":%d,\"prior\":%d,\"by_table\":{",
+         "\"twins_requested\":%d,\"twins_min\":%ld,\"cap_s\":%.0f,\"seed\":%d,\"n_rx\":%d,\"K\":%d,\"oracle\":%d,\"prior\":%d,"
+         "\"oracle_miss_rntis\":%ld,\"oracle_wrong_rntis\":%ld,\"harq_trap_passes\":%ld,\"false_passes\":%ld,\"by_table\":{",
          c.acq, r.acquisitions_rntis, r.n_decided, r.median_s, r.p95_s, r.mean_s, r.mean_grants, r.wrong, r.undecidable,
          r.n_full, r.n_probe, r.gated_phys, r.gated_chan, r.promotions, r.withdrawals, c.p2, r.p2_admitted_fail,
          r.truth_eliminated_by_probe, c.twins, r.twins_min, c.cap_s,
-         c.seed, c.n_rx, c.K, c.oracle, c.prior && !c.fieldbook);
+         c.seed, c.n_rx, c.K, c.oracle, c.prior && !c.fieldbook, r.oracle_miss_rntis, r.oracle_wrong_rntis, r.harq_trap_passes, r.false_passes);
   for (int t = 0; t < 3; t++) {
     const SimResult::TableStat &ts = r.by_table[t];
     printf("%s\"%d\":{\"n\":%ld,\"median_s\":%.3f,\"mean_s\":%.3f,\"wrong\":%ld}", t ? "," : "", t, ts.n,

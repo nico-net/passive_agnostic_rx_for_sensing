@@ -121,6 +121,26 @@ TEST(TdSim, NearTwinNeverEliminatesTruthUnderP2)
   EXPECT_EQ(r.wrong, 0);
   EXPECT_EQ(r.truth_eliminated_by_probe, 0); /* a probe FAIL was never admitted on a grant where the truth's full decode passes */
 }
+TEST(TdSim, DefaultsUnchangedByRealismFlags) {
+  SimCfg a = SimCfg::defaults(); a.acq = 20; a.seed = 11;
+  SimCfg b = a; b.oracle_miss = 0; b.oracle_wrong = 0; b.harq_trap = 0; b.crc_false = 0;
+  EXPECT_EQ(run_sim(a).total_grants, run_sim(b).total_grants);
+}
+TEST(TdSim, OracleMissAllIsBlind) {
+  SimCfg a = SimCfg::defaults(); a.acq = 10; a.seed = 5; a.oracle = 1; a.oracle_miss = 1.0;
+  SimCfg b = a; b.oracle = 0; b.oracle_miss = 0;
+  EXPECT_EQ(run_sim(a).total_grants, run_sim(b).total_grants);
+}
+TEST(TdSim, OracleWrongPrunesTheTruthAndNeverMakesAWrongWinner) {
+  SimCfg c = SimCfg::defaults(); c.acq = 10; c.seed = 3; c.oracle_wrong = 1.0; c.cap_s = 60;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_GT(r.undecidable, 0); /* today's runtime has no recovery from a destructive wrong oracle */
+}
+TEST(TdSim, HarqTrapPassesAreCounted) {
+  SimCfg c = SimCfg::defaults(); c.acq = 5; c.oracle = 0; c.harq_trap = 0.05; c.rntis_per_acq = 1;
+  EXPECT_GT(run_sim(c).harq_trap_passes, 0);
+}
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);

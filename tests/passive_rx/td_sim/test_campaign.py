@@ -12,8 +12,9 @@ for i in range(acq):
     for k in range(4):
         print(json.dumps({"acq": i, "rnti_rank": k, "grants": 100, "seconds": 10.0 * (1 + sib) + (0 if k < 2 else -5),
                           "truth_table": k % 3, "winner_ok": True, "wrong": int(rx == 1 and i == 0 and k == 0), "undecidable": int(i == 1 and k == 3),
-                          "n_full": 100, "n_probe": 200, "gated_phys": 1, "gated_chan": 2, "promotions": 0, "withdrawals": 0}))
-print(json.dumps({"summary": {"acq": acq}}))
+                          "n_full": 100, "n_probe": 200, "gated_phys": 1, "gated_chan": 2, "promotions": 0, "withdrawals": 0,
+                          "oracle_state": "miss" if (k == 0 and i == 0) else ("wrong" if (k == 1 and i == 0) else "ok")}))
+print(json.dumps({"summary": {"acq": acq, "harq_trap_passes": 7, "false_passes": 2}}))
 """
 
 
@@ -54,6 +55,11 @@ class Campaign(unittest.TestCase):
         self.assertEqual(row["gated"], "36")
         # truth table 0: 5 decided (censored one excluded), median 10, mean (3*10+2*5)/5 = 8
         self.assertEqual(row["tbl 0"], "5/10.0/8.0/0")
+        # new realism columns: one miss and one wrong RNTI (acq 0, ranks 0/1); summary counters 7 and 2
+        self.assertEqual(row["oracle_miss_rntis"], "1")
+        self.assertEqual(row["oracle_wrong_rntis"], "1")
+        self.assertEqual(row["harq_trap_passes"], "7")
+        self.assertEqual(row["false_passes"], "2")
 
 
 if __name__ == "__main__":
