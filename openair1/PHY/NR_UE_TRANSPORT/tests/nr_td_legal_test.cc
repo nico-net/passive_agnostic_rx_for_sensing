@@ -13,6 +13,12 @@ extern "C" {
 configmodule_interface_t *uniqCfg = nullptr;
 extern "C" void exit_function(const char *, const char *, const int, const char *, const int) { abort(); }
 
+/* Legality function from nr_pdsch_config_sweep_test.cc: models a cell admitting mapping type A only. */
+static int32_t test_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  return mapping_b ? 0 : 1 + start * 1000 + length * 40 + add * 3 + maxlen;
+}
+
 TEST(TdLegal, MaskAndCount)
 {
   nr_td_mask_t a = {}, b = {}, d = {};
@@ -90,15 +96,55 @@ TEST(TdSignature, DmrsMaskOrTdraChangesSignature)
   b.tda_length = 12;
   EXPECT_NE(nr_td_signature(&a, 1, 2), nr_td_signature(&b, 1, 2));
 }
+TEST(TdSignature, AddPosDistinguishesWhenMaskZero)
+{
+  /* In legacy/pure catalogs, dmrs_mask == 0 for all hypotheses, so dmrs_add_pos differences
+   * must be captured in the signature. */
+  nr_pdsch_cfg_hypothesis_t a = {}, b = {};
+  a.tda_start = b.tda_start = 1;
+  a.tda_length = b.tda_length = 13;
+  a.dmrs_mask = b.dmrs_mask = 0; /* legacy: mask is always 0 */
+  a.dmrs_add_pos = 0;
+  b.dmrs_add_pos = 1;
+  EXPECT_NE(nr_td_signature(&a, 1, 2), nr_td_signature(&b, 1, 2));
+}
+TEST(TdSignature, CountEdgeCases)
+{
+  nr_pdsch_cfg_hypothesis_t h = {};
+  /* n=0 returns -1 */
+  EXPECT_EQ(nr_td_count_signatures(nullptr, 0, 1, nullptr), -1);
+  /* n=1 returns 1 */
+  h.tda_start = 1;
+  h.tda_length = 13;
+  std::vector<int> qm1(1, 2);
+  EXPECT_EQ(nr_td_count_signatures(&h, 1, 1, qm1.data()), 1);
+  /* duplicates: two identical hypotheses with same qm */
+  std::vector<nr_pdsch_cfg_hypothesis_t> hyps(2, h);
+  std::vector<int> qm2(2, 2);
+  EXPECT_EQ(nr_td_count_signatures(hyps.data(), 2, 1, qm2.data()), 1);
+  /* NULL pointers */
+  EXPECT_EQ(nr_td_count_signatures(nullptr, 1, 1, qm1.data()), -1);
+  EXPECT_EQ(nr_td_count_signatures(hyps.data(), 1, 1, nullptr), -1);
+}
 TEST(TdSignature, CountOnFullCatalog)
 {
-  static nr_pdsch_config_sweep_state_t st;
-  nr_pdsch_config_sweep_init(&st, 4);
-  std::vector<int> qm(st.n_hyp, 2);
-  const int n = nr_td_count_signatures(st.hyp, st.n_hyp, 1, qm.data());
-  EXPECT_GT(n, 0);
-  EXPECT_LT(n, st.n_hyp); /* report n in the test output: */
-  std::cout << "catalog " << st.n_hyp << " hypotheses -> " << n << " signatures (Qm fixed)" << std::endl;
+  static nr_pdsch_config_sweep_state_t st_legacy, st_real;
+
+  /* Legacy (mask-0) catalog */
+  nr_pdsch_config_sweep_init(&st_legacy, 4);
+  std::vector<int> qm_legacy(st_legacy.n_hyp, 2);
+  const int n_legacy = nr_td_count_signatures(st_legacy.hyp, st_legacy.n_hyp, 1, qm_legacy.data());
+  EXPECT_GT(n_legacy, 0);
+  EXPECT_LT(n_legacy, st_legacy.n_hyp);
+  std::cout << "catalog " << st_legacy.n_hyp << " hypotheses -> " << n_legacy << " signatures (legacy mask-0 catalog)" << std::endl;
+
+  /* Real legality (type-A only) catalog */
+  nr_pdsch_config_sweep_init_legal(&st_real, 4, 1 /*typeA only*/, test_legal);
+  std::vector<int> qm_real(st_real.n_hyp, 2);
+  const int n_real = nr_td_count_signatures(st_real.hyp, st_real.n_hyp, 1, qm_real.data());
+  EXPECT_GT(n_real, 0);
+  EXPECT_LT(n_real, st_real.n_hyp);
+  std::cout << "catalog " << st_real.n_hyp << " hypotheses -> " << n_real << " signatures (real legality)" << std::endl;
 }
 /* Differential test against the REAL nr_rate_matching_ldpc_rx (linked from nr_rate_matching.c). E = 0 keeps every
  * data loop empty (they are bounded by k < E), so only the reject checks run; the function returns -1 exactly when it

@@ -47,17 +47,20 @@ bool nr_td_rm_feasible(const nr_td_rm_geom_t *g)
 
 /* Computational signature: encodes the PHY properties that hypotheses must share to share the FEP,
  * channel estimate, equalization, and LLR work. mcs_table enters only through qm (the modulation
- * order the hypothesis implies for the grant's MCS table entry). */
+ * order the hypothesis implies for the grant's MCS table entry). dmrs_add_pos is always included
+ * because in pure/legacy catalogs dmrs_mask == 0 for every hypothesis, so distinct dmrs_add_pos
+ * values would otherwise collapse. dmrs_mask is masked to 14 bits. */
 uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm)
 {
   uint64_t sig = h->tda_start
                  | ((uint64_t)h->tda_length << 4)
                  | ((uint64_t)h->k0 << 8)
                  | ((uint64_t)h->mapping_type << 14)
-                 | ((uint64_t)h->dmrs_mask << 16)
+                 | ((uint64_t)(h->dmrs_mask & 0x3FFF) << 16)
                  | ((uint64_t)h->dmrs_max_len << 30)
                  | ((uint64_t)nl << 32)
-                 | ((uint64_t)qm << 36);
+                 | ((uint64_t)qm << 36)
+                 | ((uint64_t)(h->dmrs_add_pos & 0x3) << 40);
   return sig;
 }
 
@@ -69,16 +72,17 @@ static int nr_td_sig_cmp(const void *a, const void *b)
   return (va < vb) ? -1 : (va > vb) ? 1 : 0;
 }
 
-/* Count the distinct signatures in a catalog. */
+/* Count the distinct signatures in a catalog. Returns the number of distinct signatures,
+ * or -1 on error (n <= 0, NULL hyp, NULL qm_per_hyp, or malloc failure). */
 int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp)
 {
-  if (n <= 0)
-    return 0;
+  if (n <= 0 || !hyp || !qm_per_hyp)
+    return -1;
 
   /* Allocate array of signatures and compute them */
-  uint64_t *sigs = malloc(n * sizeof(uint64_t));
+  uint64_t *sigs = malloc((size_t)n * sizeof(uint64_t));
   if (!sigs)
-    return 0;
+    return -1;
 
   for (int i = 0; i < n; i++)
     sigs[i] = nr_td_signature(&hyp[i], nl, qm_per_hyp[i]);

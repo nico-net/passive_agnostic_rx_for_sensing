@@ -45,8 +45,9 @@ bool nr_td_rm_feasible(const nr_td_rm_geom_t *g);
  * implies for the grant's MCS table entry; mcs_table enters only through qm. */
 uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm);
 
-/* Count the distinct signatures in a catalog where every hypothesis has the same modulation order.
- * Returns the number of distinct signature values. */
+/* Count the distinct signatures in a catalog. qm_per_hyp provides the modulation order for each
+ * hypothesis (may vary per hypothesis). Returns the number of distinct signature values, or -1 on
+ * error (n <= 0, NULL hyp/qm_per_hyp, or allocation failure). */
 int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp);
 #ifdef __cplusplus
 }
