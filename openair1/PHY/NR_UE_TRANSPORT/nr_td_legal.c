@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_td_legal.h"
+#include <string.h>
+#include <stdlib.h>
 
 void nr_td_mask_and(nr_td_mask_t *dst, const nr_td_mask_t *a, int n_hyp)
 {
@@ -41,4 +43,55 @@ bool nr_td_rm_feasible(const nr_td_rm_geom_t *g)
     return false;
   const uint32_t Foffset = (uint32_t)(g->K - g->F - 2 * g->Zc);
   return Foffset <= g->Ncb;
+}
+
+/* Computational signature: encodes the PHY properties that hypotheses must share to share the FEP,
+ * channel estimate, equalization, and LLR work. mcs_table enters only through qm (the modulation
+ * order the hypothesis implies for the grant's MCS table entry). */
+uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm)
+{
+  uint64_t sig = h->tda_start
+                 | ((uint64_t)h->tda_length << 4)
+                 | ((uint64_t)h->k0 << 8)
+                 | ((uint64_t)h->mapping_type << 14)
+                 | ((uint64_t)h->dmrs_mask << 16)
+                 | ((uint64_t)h->dmrs_max_len << 30)
+                 | ((uint64_t)nl << 32)
+                 | ((uint64_t)qm << 36);
+  return sig;
+}
+
+/* Comparator for qsort of uint64_t values */
+static int nr_td_sig_cmp(const void *a, const void *b)
+{
+  uint64_t va = *(const uint64_t *)a;
+  uint64_t vb = *(const uint64_t *)b;
+  return (va < vb) ? -1 : (va > vb) ? 1 : 0;
+}
+
+/* Count the distinct signatures in a catalog. */
+int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp)
+{
+  if (n <= 0)
+    return 0;
+
+  /* Allocate array of signatures and compute them */
+  uint64_t *sigs = malloc(n * sizeof(uint64_t));
+  if (!sigs)
+    return 0;
+
+  for (int i = 0; i < n; i++)
+    sigs[i] = nr_td_signature(&hyp[i], nl, qm_per_hyp[i]);
+
+  /* Sort and count distinct values */
+  qsort(sigs, n, sizeof(uint64_t), nr_td_sig_cmp);
+
+  int count = 1;
+  for (int i = 1; i < n; i++) {
+    if (sigs[i] != sigs[i - 1])
+      count++;
+  }
+
+  free(sigs);
+  return count;
 }

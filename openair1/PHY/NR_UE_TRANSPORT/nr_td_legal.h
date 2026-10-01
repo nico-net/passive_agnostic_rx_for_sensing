@@ -38,6 +38,16 @@ typedef struct {
  * plus G > 0 && tbs > 0. "Foffset > E" is a TX-only check (nr_rate_matching_ldpc) and is deliberately NOT applied:
  * the RX side tolerates it (every loop is bounded by k < E). Mathematically guaranteed exclusion only. */
 bool nr_td_rm_feasible(const nr_td_rm_geom_t *g);
+
+/* Computational signature: encodes the PHY properties that hypotheses must share to share the FEP,
+ * channel estimate, equalization, and LLR work. Hypotheses with equal signature differ only in TBS,
+ * rate-matching, and LDPC decoding (MCS-table dependent). qm is the modulation order the hypothesis
+ * implies for the grant's MCS table entry; mcs_table enters only through qm. */
+uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm);
+
+/* Count the distinct signatures in a catalog where every hypothesis has the same modulation order.
+ * Returns the number of distinct signature values. */
+int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp);
 #ifdef __cplusplus
 }
 #endif

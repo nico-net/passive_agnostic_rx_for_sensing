@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <stdlib.h>
 #include <vector>
+#include <iostream>
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 extern "C" {
@@ -65,6 +66,39 @@ TEST(TdLegal, RealRfsimGeometriesAreFeasible)
   };
   for (const nr_td_rm_geom_t &g : v)
     EXPECT_TRUE(nr_td_rm_feasible(&g));
+}
+TEST(TdSignature, McsTableOnlyDifferenceSharesSignatureWhenQmEqual)
+{
+  nr_pdsch_cfg_hypothesis_t a = {}, b = {};
+  a.tda_start = b.tda_start = 1;
+  a.tda_length = b.tda_length = 13;
+  a.dmrs_mask = b.dmrs_mask = 0x804;
+  a.mcs_table = 0;
+  b.mcs_table = 1;
+  EXPECT_EQ(nr_td_signature(&a, 1, 4), nr_td_signature(&b, 1, 4));
+  EXPECT_NE(nr_td_signature(&a, 1, 4), nr_td_signature(&b, 1, 6)); /* different Qm => different LLRs */
+}
+TEST(TdSignature, DmrsMaskOrTdraChangesSignature)
+{
+  nr_pdsch_cfg_hypothesis_t a = {}, b = {};
+  a.tda_start = b.tda_start = 1;
+  a.tda_length = b.tda_length = 13;
+  a.dmrs_mask = 0x804;
+  b.dmrs_mask = 0x4;
+  EXPECT_NE(nr_td_signature(&a, 1, 2), nr_td_signature(&b, 1, 2));
+  b.dmrs_mask = 0x804;
+  b.tda_length = 12;
+  EXPECT_NE(nr_td_signature(&a, 1, 2), nr_td_signature(&b, 1, 2));
+}
+TEST(TdSignature, CountOnFullCatalog)
+{
+  static nr_pdsch_config_sweep_state_t st;
+  nr_pdsch_config_sweep_init(&st, 4);
+  std::vector<int> qm(st.n_hyp, 2);
+  const int n = nr_td_count_signatures(st.hyp, st.n_hyp, 1, qm.data());
+  EXPECT_GT(n, 0);
+  EXPECT_LT(n, st.n_hyp); /* report n in the test output: */
+  std::cout << "catalog " << st.n_hyp << " hypotheses -> " << n << " signatures (Qm fixed)" << std::endl;
 }
 /* Differential test against the REAL nr_rate_matching_ldpc_rx (linked from nr_rate_matching.c). E = 0 keeps every
  * data loop empty (they are bounded by k < E), so only the reject checks run; the function returns -1 exactly when it

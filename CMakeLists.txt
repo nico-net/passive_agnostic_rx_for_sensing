@@ -2599,6 +2599,9 @@ if(ENABLE_TESTS)
 
   add_executable(test_nr_td_legal ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_legal_test.cc
                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
                                   ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
   target_include_directories(test_nr_td_legal PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
                              ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment)
