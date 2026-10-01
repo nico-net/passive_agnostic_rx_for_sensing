@@ -171,3 +171,40 @@ TEST(TdSim, EquivNeverWrongAndIdenticalWhenTableAlwaysExercised)
   EXPECT_EQ(r1e.total_grants, r1c.total_grants);
   EXPECT_EQ(r1e.n_full, r1c.n_full);
 }
+TEST(TdSim, ReversibleFieldBookNeverWrong)
+{
+  SimCfg c = SimCfg::defaults();
+  c.acq = 50;
+  c.seed = 4;
+  c.oracle = 0;
+  c.fieldbook = 2;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.undecidable, 0);
+}
+TEST(TdSim, WrongPromotionRecovers)
+{
+  SimCfg c = SimCfg::defaults();
+  c.acq = 20;
+  c.seed = 6;
+  c.oracle = 0;
+  c.fieldbook = 2;
+  c.inject_wrong_field = 0;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.undecidable, 0);
+  EXPECT_GT(r.fail_opens, 0);
+  EXPECT_GT(r.withdrawals, 0);
+  EXPECT_EQ(r.injected, 20);
+  EXPECT_EQ(r.recovery_never, 0); /* the wrong value is withdrawn (and the true one re-learned) in every acquisition */
+}
+TEST(TdSim, FieldBookTwoNotSlowerThanPriorSteady)
+{
+  SimCfg p = SimCfg::defaults();
+  p.acq = 30;
+  p.seed = 8;
+  p.oracle = 0;
+  SimCfg f = p;
+  f.fieldbook = 2;
+  EXPECT_LE(run_sim(f).mean_s_steady, 1.10 * run_sim(p).mean_s_steady);
+}

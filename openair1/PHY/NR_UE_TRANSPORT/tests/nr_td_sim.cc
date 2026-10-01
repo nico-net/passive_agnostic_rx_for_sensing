@@ -33,6 +33,8 @@ void exit_function(const char *file, const char *fn, int line, const char *messa
 
 struct SimCfg {
   int acq, seed, catalog_tda, n_rx, K, sib1, fieldbook, gate, p2, twins, rntis_per_acq;
+  int inject_wrong_field; /* --fieldbook 2 only: -1 none; 0 TDRA, 1 add_pos, 2 max_len: force_promote a WRONG value at acquisition start */
+  double fo_alpha, fo_pmin; /* fail-open thresholds (nr_pdsch_config_sweep_fail_open_due) */
   int equiv;            /* 1 = lever E: the main full decode credits every grant-equivalent hypothesis (needs twins >= 2) */
   int prior;            /* 1 (default) = today's cell-wide/RNTI prior pruning; forced OFF when fieldbook=1 (plan R2 rule) */
   int oracle;           /* 1 = today's runtime (DM-RS/last-symbol/k0 + Qm oracles prune the catalogue), 0 = blind arm */
@@ -48,6 +50,7 @@ struct SimCfg {
   {
     SimCfg c;
     c.acq = 100; c.seed = 1; c.catalog_tda = 4; c.n_rx = 4; c.K = 1; c.sib1 = 0; c.fieldbook = 0; c.gate = 0; c.p2 = 0;
+    c.inject_wrong_field = -1; c.fo_alpha = 1e-3; c.fo_pmin = 0.05;
     c.equiv = 0; c.twins = 2; c.rntis_per_acq = 4; c.oracle = 1; c.prior = 1; c.dmrs_typea_pos = 0;
     c.mu = 15; c.fade = 6; c.snr_est_sigma = 2; c.rank2_frac = 0.3; c.grants_per_s = 200;
     c.probe_inconclusive = 0.1; c.table_exercise = 0.9; c.cap_s = 3600;
@@ -70,6 +73,9 @@ struct RntiRec {
   long harq_trap_passes, false_passes;
   long n_full, n_probe, gated_phys, gated_chan, promotions, withdrawals;
   long p2_admitted_fail;  /* probe FAILs admitted as KL failures (st->p2 && p2_admissible && FAIL) */
+  int active_start = -1;     /* --fieldbook 2: active hypotheses after the start masks */
+  bool fail_open = false;    /* --fieldbook 2: fail-open fired for this RNTI */
+  uint32_t pruned_fields = 0; /* --fieldbook 2: bit f = field f pruned (dormant) in this context, cleared on fail-open */
   long truth_full;        /* full-TB decodes of the true hypothesis until the decision */
   long truth_kl_trials;   /* engine KL trials of the true hypothesis at the decision (since the last prune), -1 if pruned */
   long truth_elim;        /* KL failures the engine added to the truth on grants where its full decode passes */
@@ -82,7 +88,11 @@ struct SimResult {
   /* Review Focus 4: KL failures that feed_k added to the TRUE hypothesis on grants where its full decode passes,
    * measured on the engine's own counters (delta trials - delta ok around feed_k). Must be 0. */
   long truth_eliminated_by_probe = 0, p2_admitted_fail = 0;
-  double median_s = 0, p95_s = 0, mean_s = 0, mean_grants = 0;
+  double median_s = 0, p95_s = 0, mean_s = 0, mean_grants = 0, mean_s_steady = 0; /* steady = RNTIs k >= 2, decided only */
+  /* --fieldbook 2 */
+  long fail_opens = 0, untrusted_after = 0, injected = 0, inject_skipped = 0, recovery_never = 0;
+  double active_start_sum = 0;
+  std::vector<long> recovery_grants, recovery_rntis; /* per injected acquisition that recovered */
   long n_decided = 0;
   long oracle_miss_rntis = 0, oracle_wrong_rntis = 0, harq_trap_passes = 0, false_passes = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
@@ -131,20 +141,18 @@ static int32_t sim_legality(int typeA_pos, int NrOfSymbols, int startSymbol, int
   return !is_b ? (lp | sh) : (lp << startSymbol);
 }
 
-/* Oracle pruning, local re-implementation of the runtime's commit: keep entries admitted by `keep`, then (only if
- * something was removed) discard evidence exactly as prune_commit() does. Config fields side/p2 are untouched. */
-template <class F> static void sim_prune(nr_pdsch_config_sweep_state_t *st, F keep)
+/* Destructive pruning by predicate = the engine's own prune_keep (prune_commit semantics, dormant masks compacted). Thin
+ * trampoline only: no prune semantics are copied here. */
+template <class F> static int sim_prune(nr_pdsch_config_sweep_state_t *st, F keep)
 {
-  int n = 0;
-  for (int i = 0; i < st->n_hyp; i++)
-    if (keep(st->hyp[i])) st->hyp[n++] = st->hyp[i];
-  if (n <= 0 || n == st->n_hyp) return; /* nothing matched / nothing removed: state untouched (same as the runtime) */
-  st->n_hyp = n;
-  memset(st->trials, 0, sizeof(st->trials)); memset(st->ok, 0, sizeof(st->ok));
-  memset(st->probe_pass, 0, sizeof(st->probe_pass)); memset(st->probe_fail, 0, sizeof(st->probe_fail));
-  memset(st->probe_inconclusive, 0, sizeof(st->probe_inconclusive));
-  for (int i = 0; i < n; i++) st->order[i] = i;
-  st->cursor = 0; st->winner = -1;
+  return nr_pdsch_config_sweep_prune_keep(
+      st, [](const nr_pdsch_cfg_hypothesis_t *h, const void *arg) -> bool { return (*(const F *)arg)(*h); }, &keep);
+}
+/* Dormant (reversible) mask for `cause` by predicate (nr_pdsch_config_sweep_set_dormant). Returns its result (-1 = refused). */
+template <class F> static int sim_dormant(nr_pdsch_config_sweep_state_t *st, int cause, F keep)
+{
+  return nr_pdsch_config_sweep_set_dormant(
+      st, cause, [](const nr_pdsch_cfg_hypothesis_t *h, const void *arg) -> bool { return (*(const F *)arg)(*h); }, &keep);
 }
 static uint8_t sim_qm_table_mask(int mcs, int qm)
 {
@@ -181,6 +189,7 @@ static SimResult run_sim(const SimCfg &cfg)
   const int n_hyp = tmpl->n_hyp;
   const long cap = (long)(cfg.cap_s * cfg.grants_per_s);
   std::vector<double> secs;
+  double steady_sum = 0; long steady_n = 0;
   for (int a = 0; a < cfg.acq; a++) {
     std::mt19937_64 arng(mix(cfg.seed, a, 0xACC));
     const int truth = (int)(arng() % (uint64_t)n_hyp);
@@ -209,13 +218,38 @@ static SimResult run_sim(const SimCfg &cfg)
      * and max_len)) before the observed-mask prune (:1081). One TDA per simulated RNTI, so the per-RNTI own-prior path
      * (sibling TDA contexts) never applies. Off when ISAC_TD_FIELDBOOK=1 (plan R2). Not modelled: g_prior invalidation
      * on a failed probation (:1326). */
-    const bool use_prior = cfg.prior && !cfg.fieldbook;
+    const bool use_prior = cfg.prior && cfg.fieldbook != 1;
+    const bool fb2 = cfg.fieldbook == 2;
     struct Prior { uint8_t tbl, add, len, map; };
     std::vector<Prior> rnti_priors;
     bool gprior_valid = false;
     Prior gprior{};
     nr_td_fieldbook_t fb;
     nr_td_fieldbook_init(&fb, 2, 2);
+    /* --fieldbook 2: stale-field injection. Wrong values come from the template; no wrong value => skip and count. */
+    int inj_field = -1;
+    int32_t inj_value = -1;
+    if (fb2 && cfg.inject_wrong_field >= 0 && cfg.inject_wrong_field < NR_TD_F_COUNT) {
+      int32_t wv = -1;
+      const int f = cfg.inject_wrong_field;
+      if (f == NR_TD_F_TDRA) {
+        for (int i = 0; i < n_hyp && wv < 0; i++) {
+          const nr_pdsch_cfg_hypothesis_t &h = tmpl->hyp[i];
+          if (h.mapping_type == T.mapping_type && (h.tda_start != T.tda_start || h.tda_length != T.tda_length))
+            wv = nr_td_pack_tdra(h.tda_start, h.tda_length, h.mapping_type, h.k0);
+        }
+      } else {
+        const int cand = f == NR_TD_F_DMRS_ADD_POS ? (T.dmrs_add_pos + 1) % 4 : 3 - T.dmrs_max_len;
+        for (int i = 0; i < n_hyp && wv < 0; i++)
+          if ((f == NR_TD_F_DMRS_ADD_POS ? tmpl->hyp[i].dmrs_add_pos : tmpl->hyp[i].dmrs_max_len) == cand) wv = cand;
+      }
+      if (wv < 0) R.inject_skipped++;
+      else { nr_td_fieldbook_force_promote(&fb, (nr_td_field_t)f, wv); inj_field = f; inj_value = wv; R.injected++; }
+    }
+    long acq_grants = 0; /* grants since the acquisition start (recovery metric) */
+    long rec_grants = -1, rec_rntis = -1;
+    struct Relied { bool conv = false, counted = false; uint32_t bits = 0; int32_t val[NR_TD_F_COUNT]; };
+    std::vector<Relied> relied(cfg.rntis_per_acq);
     int n_ok_prev = 0; /* earlier RNTIs of this acquisition whose oracle state was ok */
     for (int k = 0; k < cfg.rntis_per_acq; k++) {
       std::mt19937_64 crng(mix(cfg.seed, a, 0x100 + k)); /* channel: fixed draws per grant, so arms are paired */
@@ -309,11 +343,26 @@ static SimResult run_sim(const SimCfg &cfg)
         for (int i = 0; i < st->n_hyp && ti < 0; i++)
           if (is_truth(st->hyp[i])) ti = i;
       };
-      if (use_prior && gprior_valid)
-        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
-          return h.mcs_table == gprior.tbl && (h.mapping_type != gprior.map || (h.dmrs_add_pos == gprior.add && h.dmrs_max_len == gprior.len));
-        });
-      if (cfg.oracle && k >= 2 && n_ok_prev >= 2) do_observe_cellwide();
+      auto prior_keep = [&](const nr_pdsch_cfg_hypothesis_t &h) {
+        return h.mcs_table == gprior.tbl && (h.mapping_type != gprior.map || (h.dmrs_add_pos == gprior.add && h.dmrs_max_len == gprior.len));
+      };
+      if (!fb2) {
+        if (use_prior && gprior_valid) sim_prune(st.get(), prior_keep);
+        if (cfg.oracle && k >= 2 && n_ok_prev >= 2) do_observe_cellwide();
+      } else {
+        /* Reversible pruning: the DESTRUCTIVE oracle pre-prune first (it compacts any mask), then the masks (index-based, applied
+         * to the final catalogue; the sim never extends the catalogue, so no new entries appear after this point). */
+        if (cfg.oracle && k >= 2 && n_ok_prev >= 2) do_observe_cellwide();
+        if (use_prior && gprior_valid) sim_dormant(st.get(), NR_TD_DORMANT_PRIOR, prior_keep);
+        for (int f = 0; f < NR_TD_F_COUNT; f++) {
+          int32_t v;
+          if (!nr_td_fieldbook_prunes(&fb, (nr_td_field_t)f, &v)) continue;
+          const int rc = sim_dormant(st.get(), NR_TD_DORMANT_FIELD_BASE + f,
+                                     [&](const nr_pdsch_cfg_hypothesis_t &h) { return nr_td_fieldbook_hyp_matches((nr_td_field_t)f, v, &h); });
+          if (rc >= 0) { rec.pruned_fields |= 1u << f; relied[k].val[f] = v; }
+        }
+        rec.active_start = nr_pdsch_config_sweep_n_active(st.get());
+      }
       find_truth();
       bool distinguished = false;
       int winner = -1;
@@ -415,6 +464,12 @@ static SimResult run_sim(const SimCfg &cfg)
         } else {
           winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
         }
+        if (fb2 && winner < 0 && !st->fail_open && nr_pdsch_config_sweep_n_active(st.get()) < st->n_hyp
+            && nr_pdsch_config_sweep_fail_open_due(st.get(), cfg.fo_alpha, cfg.fo_pmin)) {
+          nr_pdsch_config_sweep_set_fail_open(st.get(), true);
+          rec.pruned_fields = 0; /* fail-open: the RNTI is independent of every field */
+          rec.fail_open = true;
+        }
         if (ti >= 0 && truth_pass && (long)st->trials[ti] - (long)st->ok[ti] > t0) rec.truth_elim++;
         if ((cfg.oracle || cfg.w_obs > 0) && obs_on) {
           /* [ASSUMPTION] The DM-RS oracle needs the layout to be decodable at all (rank <= n_rx); conservative: the runtime
@@ -440,6 +495,7 @@ static SimResult run_sim(const SimCfg &cfg)
         }
       }
       rec.grants = g;
+      acq_grants += g;
       rec.seconds = (double)g / cfg.grants_per_s;
       rec.truth_kl_trials = ti >= 0 ? (long)st->trials[ti] : -1;
       snprintf(rec.winner_key, sizeof(rec.winner_key), "-");
@@ -462,12 +518,29 @@ static SimResult run_sim(const SimCfg &cfg)
         if (cfg.fieldbook) {
           int32_t before[NR_TD_F_COUNT];
           for (int f = 0; f < NR_TD_F_COUNT; f++) before[f] = fb.f[f].value;
-          nr_td_fieldbook_converged(&fb, rnti, &st->hyp[winner], (uint64_t)g, 0);
+          nr_td_fieldbook_converged(&fb, rnti, &st->hyp[winner], (uint64_t)g, fb2 ? rec.pruned_fields : 0);
           for (int f = 0; f < NR_TD_F_COUNT; f++) {
             if (before[f] != -1 && fb.f[f].value != before[f]) rec.withdrawals++;
             if (fb.f[f].value != -1 && fb.f[f].value != before[f]) rec.promotions++;
           }
+          if (fb2) { relied[k].conv = true; relied[k].bits = rec.pruned_fields; }
         }
+      }
+      if (fb2) {
+        /* converged RNTIs whose winner relied on a field (pruned on it) that is no longer PROMOTED at that value */
+        for (int j = 0; j < cfg.rntis_per_acq; j++) {
+          if (!relied[j].conv || relied[j].counted) continue;
+          for (int f = 0; f < NR_TD_F_COUNT; f++)
+            if ((relied[j].bits >> f & 1) && (nr_td_fieldbook_state(&fb, (nr_td_field_t)f) != NR_TD_FS_PROMOTED || fb.f[f].value != relied[j].val[f])) {
+              relied[j].counted = true; R.untrusted_after++; break;
+            }
+        }
+        if (inj_field >= 0 && rec_grants < 0) {
+          const nr_td_field_state_t fs = nr_td_fieldbook_state(&fb, (nr_td_field_t)inj_field);
+          /* the injected WRONG value is gone: field no longer PROMOTED/SUSPECT, or promoted/suspect at a different (re-learned true) value */
+          if ((fs != NR_TD_FS_PROMOTED && fs != NR_TD_FS_SUSPECT) || fb.f[inj_field].value != inj_value) { rec_grants = acq_grants; rec_rntis = k + 1; }
+        }
+        R.fail_opens += rec.fail_open; R.active_start_sum += rec.active_start;
       }
       R.total_grants += g; R.wrong += rec.wrong; R.undecidable += rec.undecidable; R.acquisitions_rntis++;
       R.n_full += rec.n_full; R.n_probe += rec.n_probe; R.gated_phys += rec.gated_phys; R.gated_chan += rec.gated_chan;
@@ -478,11 +551,16 @@ static SimResult run_sim(const SimCfg &cfg)
       R.truth_eliminated_by_probe += rec.truth_elim; R.p2_admitted_fail += rec.p2_admitted_fail;
       if (!rec.undecidable) {
         secs.push_back(rec.seconds);
+        if (k >= 2) { steady_sum += rec.seconds; steady_n++; }
         R.mean_grants += (double)g; R.n_decided++;
         SimResult::TableStat &ts = R.by_table[rec.truth_table];
         ts.n++; ts.wrong += rec.wrong; ts.sum_s += rec.seconds; ts.v.push_back(rec.seconds);
       }
       R.recs.push_back(rec);
+    }
+    if (inj_field >= 0) {
+      if (rec_grants < 0) R.recovery_never++;
+      else { R.recovery_grants.push_back(rec_grants); R.recovery_rntis.push_back(rec_rntis); }
     }
   }
   if (!secs.empty()) {
@@ -494,6 +572,7 @@ static SimResult run_sim(const SimCfg &cfg)
     R.mean_s = sum / (double)secs.size();
     R.mean_grants /= (double)R.n_decided;
   }
+  if (steady_n) R.mean_s_steady = steady_sum / (double)steady_n;
   for (auto &ts : R.by_table) std::sort(ts.v.begin(), ts.v.end());
   return R;
 }
@@ -509,6 +588,8 @@ int main(int argc, char **argv)
       puts("nr_td_sim: Technique D Monte-Carlo (SIMULATED results). Flags (value follows): --acq --seed --catalog-tda --p-true-snr-mu --fade-db\n"
            "  --snr-est-sigma --n-rx --rank2-frac --grants-per-s --sib1 --K --w-sib1 --w-default --w-obs --w-field --w-probe --fieldbook\n"
            "  --oracle-miss P --oracle-wrong P --harq-trap P --crc-false P (realism, default 0)\n"
+           "  --fieldbook 0|1|2 (0 prior pruning, 1 ordering-only field book, 2 reversible pruning: prior + promoted fields as dormant masks, fail-open)\n"
+           "  --inject-wrong-field F (fieldbook 2: 0 TDRA, 1 add_pos, 2 max_len; force-promote a wrong value) --fo-alpha 1e-3 --fo-pmin 0.05\n"
            "  --gate --p2 --rntis-per-acq --probe-inconclusive --table-exercise --cap-s --oracle --prior --dmrs-typea-pos\n"
            "  --equiv 0|1 (lever E: grant-equivalence crediting of the main decode; requires --twins >= 2)\n  --twins N (default 2 = all physical twins, i.e. every other-table entry). N < 2 is an UNPHYSICAL stress arm: only N\n"
            "  twins behave as twins, the other other-table entries always fail.");
@@ -546,18 +627,25 @@ int main(int argc, char **argv)
     else if (f == "--oracle-wrong") c.oracle_wrong = atof(v);
     else if (f == "--harq-trap") c.harq_trap = atof(v);
     else if (f == "--crc-false") c.crc_false = atof(v);
+    else if (f == "--inject-wrong-field") c.inject_wrong_field = atoi(v);
+    else if (f == "--fo-alpha") c.fo_alpha = atof(v);
+    else if (f == "--fo-pmin") c.fo_pmin = atof(v);
     else if (f == "--prior") c.prior = atoi(v);
     else if (f == "--dmrs-typea-pos") c.dmrs_typea_pos = atoi(v);
     else { fprintf(stderr, "unknown flag %s\n", f.c_str()); return 2; }
   }
   const SimResult r = run_sim(c);
-  for (const RntiRec &x : r.recs)
+  for (const RntiRec &x : r.recs) {
     printf("{\"acq\":%d,\"rnti_rank\":%d,\"truth_table\":%d,\"grants\":%ld,\"seconds\":%.4f,\"winner_ok\":%s,\"wrong\":%d,\"undecidable\":%d,"
            "\"n_full\":%ld,\"n_probe\":%ld,\"gated_phys\":%ld,\"gated_chan\":%ld,\"promotions\":%ld,\"withdrawals\":%ld,"
-           "\"p2_admitted_fail\":%ld,\"truth_full\":%ld,\"truth_kl_trials\":%ld,\"truth_elim\":%ld,\"winner\":\"%s\",\"oracle_state\":\"%s\"}\n",
+           "\"p2_admitted_fail\":%ld,\"truth_full\":%ld,\"truth_kl_trials\":%ld,\"truth_elim\":%ld,\"winner\":\"%s\",\"oracle_state\":\"%s\"",
            x.acq, x.rnti_rank, x.truth_table, x.grants, x.seconds, x.winner_ok ? "true" : "false", (int)x.wrong, (int)x.undecidable, x.n_full,
            x.n_probe, x.gated_phys, x.gated_chan, x.promotions, x.withdrawals, x.p2_admitted_fail, x.truth_full, x.truth_kl_trials,
            x.truth_elim, x.winner_key, x.oracle_state == 1 ? "miss" : x.oracle_state == 2 ? "wrong" : "ok");
+    /* fieldbook-2 keys are emitted only for --fieldbook 2: --fieldbook 0/1 output stays byte-identical to the pre-BC5 simulator. */
+    if (c.fieldbook == 2) printf(",\"active_start\":%d,\"fail_open\":%s,\"pruned_fields\":%u", x.active_start, x.fail_open ? "true" : "false", x.pruned_fields);
+    puts("}");
+  }
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
    * NB: separation is checked every 16 trials, so seconds move in steps of 16 x n_hyp / grants_per_s: prefer the means. */
   printf("{\"summary\":{\"acq\":%d,\"rntis\":%ld,\"decided\":%ld,\"median_s\":%.3f,\"p95_s\":%.3f,\"mean_s\":%.3f,"
@@ -569,13 +657,21 @@ int main(int argc, char **argv)
          c.acq, r.acquisitions_rntis, r.n_decided, r.median_s, r.p95_s, r.mean_s, r.mean_grants, r.wrong, r.undecidable,
          r.n_full, r.n_probe, r.gated_phys, r.gated_chan, r.promotions, r.withdrawals, c.p2, r.p2_admitted_fail,
          r.truth_eliminated_by_probe, c.twins, r.twins_min, c.cap_s,
-         c.seed, c.n_rx, c.K, c.oracle, c.prior && !c.fieldbook, r.oracle_miss_rntis, r.oracle_wrong_rntis, r.harq_trap_passes, r.false_passes);
+         c.seed, c.n_rx, c.K, c.oracle, c.prior && c.fieldbook != 1, r.oracle_miss_rntis, r.oracle_wrong_rntis, r.harq_trap_passes, r.false_passes);
   for (int t = 0; t < 3; t++) {
     const SimResult::TableStat &ts = r.by_table[t];
     printf("%s\"%d\":{\"n\":%ld,\"median_s\":%.3f,\"mean_s\":%.3f,\"wrong\":%ld}", t ? "," : "", t, ts.n,
            ts.v.empty() ? 0.0 : ts.v[ts.v.size() / 2], ts.n ? ts.sum_s / (double)ts.n : 0.0, ts.wrong);
   }
-  printf("}}}\n");
+  printf("}");
+  if (c.fieldbook == 2) {
+    auto mean_l = [](const std::vector<long> &v) { double t = 0; for (long x : v) t += (double)x; return v.empty() ? -1.0 : t / (double)v.size(); };
+    printf(",\"fail_opens\":%ld,\"active_start_mean\":%.1f,\"mean_s_steady\":%.3f,\"untrusted_after\":%ld,\"injected\":%ld,\"inject_skipped\":%ld,"
+           "\"recovery_grants\":%.1f,\"recovery_rntis\":%.2f,\"recovery_never\":%ld",
+           r.fail_opens, r.acquisitions_rntis ? r.active_start_sum / (double)r.acquisitions_rntis : 0.0, r.mean_s_steady, r.untrusted_after,
+           r.injected, r.inject_skipped, mean_l(r.recovery_grants), mean_l(r.recovery_rntis), r.recovery_never);
+  }
+  printf("}}\n");
   return 0;
 }
 #endif

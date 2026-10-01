@@ -12,9 +12,10 @@ for i in range(acq):
     for k in range(4):
         print(json.dumps({"acq": i, "rnti_rank": k, "grants": 100, "seconds": 10.0 * (1 + sib) + (0 if k < 2 else -5),
                           "truth_table": k % 3, "winner_ok": True, "wrong": int(rx == 1 and i == 0 and k == 0), "undecidable": int(i == 1 and k == 3),
-                          "n_full": 100, "n_probe": 200, "gated_phys": 1, "gated_chan": 2, "promotions": 0, "withdrawals": 0,
+                          "n_full": 100, "n_probe": 200, "gated_phys": 1, "gated_chan": 2, "promotions": 0, "withdrawals": int(k == 1),
                           "oracle_state": "miss" if (k == 0 and i == 0) else ("wrong" if (k == 1 and i == 0) else "ok")}))
-print(json.dumps({"summary": {"acq": acq, "harq_trap_passes": 7, "false_passes": 2}}))
+print(json.dumps({"summary": {"acq": acq, "harq_trap_passes": 7, "false_passes": 2,
+                                  "fail_opens": 5, "active_start_mean": 12.5, "recovery_grants": 321.0, "recovery_rntis": 2.5, "untrusted_after": 3}}))
 """
 
 
@@ -60,6 +61,13 @@ class Campaign(unittest.TestCase):
         self.assertEqual(row["oracle_wrong_rntis"], "1")
         self.assertEqual(row["harq_trap_passes"], "7")
         self.assertEqual(row["false_passes"], "2")
+        # field-book-2 columns: summary values pass through, withdrawals are summed over RNTI records (one per acquisition: 3)
+        self.assertEqual(row["fail_opens"], "5")
+        self.assertEqual(row["active_start_mean"], "12.5")
+        self.assertEqual(row["recovery_grants"], "321.0")
+        self.assertEqual(row["recovery_rntis"], "2.50")
+        self.assertEqual(row["withdrawals"], "3")
+        self.assertEqual(row["untrusted_after"], "3")
 
 
 if __name__ == "__main__":
