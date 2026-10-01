@@ -15,6 +15,7 @@
 extern "C" {
 #include "nr_pdsch_config_sweep.h"
 #include "nr_td_fieldbook.h"
+#include "nr_td_legal.h"
 #include "nr_td_gate.h"
 #include "nr_td_order.h"
 #include "nr_pdsch_qm_oracle.h"
@@ -44,6 +45,14 @@ struct SimCfg {
    * oracle_miss/oracle_wrong: per RNTI probabilities that the DM-RS+Qm oracles produce nothing / a destructive wrong decision.
    * harq_trap: per grant, the k0+-1 neighbour of the truth passes. crc_false: per FAILING decode false-pass probability. */
   double oracle_miss, oracle_wrong, harq_trap, crc_false;
+  /* Experimental acceptance levers (spec 2026-10-01 sections 3/3b), default 0 = today's engine, output byte-identical.
+   * crc_accept: lever C (CRC-pass acceptance); geom_pin: lever P (geometry pinning). Both receive the FULL grant-equivalence class
+   * of the main decode (dormant members included); with --equiv 0 only attribution uses it (feed_attr: credits idx[0] alone). */
+  int crc_accept, geom_pin;
+  /* 1 = the HARQ trap fires only on RETRANSMISSION grants (new_tx false), the physical mechanism (spec section 3 (c): a wrong k0 points at
+   * the slot of a retransmitted TB, whose HARQ buffer combining makes it pass). 0 (default, the BC0 model) = it fires on any grant.
+   * The frng draw is made either way, so the random streams are unchanged. */
+  int harq_trap_retx;
   float w_sib1, w_default, w_obs, w_field, w_probe;
   bool check_correlation;
   static SimCfg defaults()
@@ -55,6 +64,7 @@ struct SimCfg {
     c.mu = 15; c.fade = 6; c.snr_est_sigma = 2; c.rank2_frac = 0.3; c.grants_per_s = 200;
     c.probe_inconclusive = 0.1; c.table_exercise = 0.9; c.cap_s = 3600;
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
+    c.crc_accept = c.geom_pin = c.harq_trap_retx = 0;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
      * `undecidable` ones and biases every quantile downwards. Capped RNTIs are reported separately and excluded
@@ -71,6 +81,11 @@ struct RntiRec {
   bool winner_ok, wrong, undecidable;
   int oracle_state;       /* 0 ok, 1 miss, 2 wrong */
   long harq_trap_passes, false_passes;
+  long geom_pins, geom_blocks, crc_accepts; /* lever events in this RNTI (see SimCfg::crc_accept/geom_pin) */
+  /* Analytical-bound bookkeeping (spec section 3 evidence standard): wrong_pins = pins that kept a geometry other than the truth's;
+   * *_bound = union bound of that event on the run's own trial counts at the event, with p_f = --crc-false (see run_sim). */
+  long geom_wrong_pins, crc_wrong;
+  double geom_bound, crc_bound;
   long n_full, n_probe, gated_phys, gated_chan, promotions, withdrawals;
   long p2_admitted_fail;  /* probe FAILs admitted as KL failures (st->p2 && p2_admissible && FAIL) */
   int active_start = -1;     /* --fieldbook 2: active hypotheses after the start masks */
@@ -95,6 +110,8 @@ struct SimResult {
   std::vector<long> recovery_grants, recovery_rntis; /* per injected acquisition that recovered */
   long n_decided = 0;
   long oracle_miss_rntis = 0, oracle_wrong_rntis = 0, harq_trap_passes = 0, false_passes = 0;
+  long geom_pins = 0, geom_blocks = 0, crc_accepts = 0, geom_wrong_pins = 0, crc_wrong = 0;
+  double geom_bound = 0, crc_bound = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
   std::vector<RntiRec> recs;
 };
@@ -174,6 +191,14 @@ struct Grant {
   bool exercised, new_tx;
   float snr_est_noise;
 };
+
+/* min(1, C(t, m) * pf^m) in the log domain (0 when t < m or pf <= 0). */
+static double sim_binom_pf(double t, int m, double pf)
+{
+  if (pf <= 0 || t < m) return 0;
+  const double l = lgamma(t + 1.0) - lgamma(m + 1.0) - lgamma(t - m + 1.0) + m * std::log(pf);
+  return std::min(1.0, std::exp(l));
+}
 
 static SimResult run_sim(const SimCfg &cfg)
 {
@@ -308,6 +333,8 @@ static SimResult run_sim(const SimCfg &cfg)
         nr_td_fieldbook_fill_side_info(&fb, &si);
       st->side = &si;
       st->p2 = cfg.p2 != 0;
+      st->crc_accept = cfg.crc_accept != 0;
+      st->geom_pin = cfg.geom_pin != 0;
       const uint16_t rnti = (uint16_t)(0x4000 + k);
 
       RntiRec rec{};
@@ -386,11 +413,10 @@ static SimResult run_sim(const SimCfg &cfg)
         return p;
       };
       int out_main_idx = -1;
-      /* Class of the decoded hypothesis d on this grant: alive j with identical geometry/DM-RS/mapping and either the same
-       * MCS table or a grant that does not exercise the table (then the computation is identical). */
-      auto feed_equiv_main = [&](bool pass, const Grant &gr) {
-        const int d = out_main_idx;
-        int cls[NR_PDSCH_SWEEP_MAX_HYP];
+      /* Engine-free class builder: class of the decoded hypothesis d on this grant = alive-or-dormant j (the FULL class, dormant
+       * members included) with identical geometry/DM-RS/mapping and either the same MCS table or a grant that does not exercise
+       * the table (then the computation is identical). cls[0] = d. Returns the member count. */
+      auto build_class = [&](int d, const Grant &gr, int *cls) {
         int nc = 0;
         cls[nc++] = d;
         const nr_pdsch_cfg_hypothesis_t &hd = st->hyp[d];
@@ -401,7 +427,15 @@ static SimResult run_sim(const SimCfg &cfg)
               && hj.mapping_type == hd.mapping_type && (hj.mcs_table == hd.mcs_table || !gr.exercised))
             cls[nc++] = j;
         }
-        return nr_pdsch_config_sweep_feed_equiv(st.get(), cls, nc, pass, gr.new_tx);
+        return nc;
+      };
+      /* --equiv 1 (lever E): credit the whole class. --equiv 0 with a lever on: credit idx[0] alone, attribute with the class. */
+      auto feed_main = [&](bool pass, const Grant &gr) {
+        int cls[NR_PDSCH_SWEEP_MAX_HYP];
+        const int nc = build_class(out_main_idx, gr, cls);
+        if (cfg.equiv)
+          return nr_pdsch_config_sweep_feed_equiv(st.get(), cls, nc, pass, gr.new_tx);
+        return nr_pdsch_config_sweep_feed_attr(st.get(), out_main_idx, cls, nc, pass, gr.new_tx);
       };
       for (; g < cap && winner < 0;) {
         g++;
@@ -420,7 +454,7 @@ static SimResult run_sim(const SimCfg &cfg)
           if (gt == NR_TD_GATED_PHYSICAL) { rec.gated_phys++; continue; }
           if (gt == NR_TD_GATED_CHANNEL_QUALITY) { rec.gated_chan++; continue; }
         }
-        trap_active = cfg.harq_trap > 0 && uf(frng) < cfg.harq_trap;
+        trap_active = cfg.harq_trap > 0 && uf(frng) < cfg.harq_trap && !(cfg.harq_trap_retx && gr.new_tx);
         int idx[NR_TD_MAX_K];
         nr_pdsch_cfg_hypothesis_t hy[NR_TD_MAX_K];
         const int n = nr_pdsch_config_sweep_next_k(st.get(), cfg.K, idx, hy); /* K=1 == next() (Task 4 bit-identity) */
@@ -452,17 +486,72 @@ static SimResult run_sim(const SimCfg &cfg)
         if (gr.exercised && truth_pass)
           distinguished = true;
         const long t0 = ti >= 0 ? (long)st->trials[ti] - (long)st->ok[ti] : 0;
+        const bool lever_on = cfg.crc_accept || cfg.geom_pin;
+        const bool pre_blocked = st->geom_blocked;
+        uint64_t pre_gdorm[NR_TD_DWORDS];
+        if (cfg.geom_pin) memcpy(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm));
         if (cfg.equiv && cfg.K > 1) {
           /* Lever E: the main decode credits its grant-equivalence class; probe outcomes keep feed_k (probes unchanged). */
-          winner = feed_equiv_main(out[0].result == NR_TD_PASS, gr);
+          winner = feed_main(out[0].result == NR_TD_PASS, gr);
           if (n > 1) {
             const int w = nr_pdsch_config_sweep_feed_k(st.get(), out + 1, n - 1);
             if (w >= 0) winner = w;
           }
         } else if (cfg.equiv) {
-          winner = feed_equiv_main(out[0].result == NR_TD_PASS, gr);
+          winner = feed_main(out[0].result == NR_TD_PASS, gr);
+        } else if (lever_on) {
+          /* Levers without lever E: the main decode goes through feed_attr (singleton crediting, full-class attribution); the
+           * probes go through feed_k with the main outcome INCONCLUSIVE (not fed again), so every probe is fed. */
+          winner = feed_main(out[0].result == NR_TD_PASS, gr);
+          if (n > 1) {
+            nr_td_outcome_t pr[NR_TD_MAX_K];
+            memcpy(pr, out, sizeof(nr_td_outcome_t) * (size_t)n);
+            pr[0].result = NR_TD_INCONCLUSIVE;
+            const int w = nr_pdsch_config_sweep_feed_k(st.get(), pr, n);
+            if (w >= 0) winner = w;
+          }
         } else {
           winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
+        }
+        if (cfg.geom_pin) {
+          rec.geom_blocks += !pre_blocked && st->geom_blocked;
+          rec.geom_pins += memcmp(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm)) != 0;
+        }
+        if (winner >= 0 && st->winner_by_crc) {
+          rec.crc_accepts++;
+          /* Lever C bound: P(some wrong active h collects m unique false passes in its T_h trials) <= sum_h C(T_h, m) pf^m. */
+          uint32_t tmx = 0;
+          for (int i = 0; i < st->n_hyp; i++) if (nr_pdsch_config_sweep_is_active(st.get(), i)) tmx = std::max(tmx, st->trials[i]);
+          const int m = nr_pdsch_config_sweep_crc_accept_m(nr_pdsch_config_sweep_n_active(st.get()), tmx);
+          double b = 0;
+          for (int i = 0; i < st->n_hyp; i++)
+            if (nr_pdsch_config_sweep_is_active(st.get(), i) && !is_truth(st->hyp[i])) b += sim_binom_pf((double)st->trials[i], m, cfg.crc_false);
+          rec.crc_bound += std::min(1.0, b);
+        }
+        if (cfg.geom_pin && memcmp(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm)) != 0) {
+          /* Lever P bound at the pin: n_groups/T_max over the hypotheses active just BEFORE it (every cause but GEOM), then
+           * sum over WRONG groups g of C(T_g, m) pf^m, T_g = trials of all members of g. A pin to a group other than the truth's is a wrong pin. */
+          auto pre_active = [&](int i) {
+            for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+              if (c != NR_TD_DORMANT_GEOM && ((st->dormant[c][i >> 6] >> (i & 63)) & 1u)) return false;
+            return true;
+          };
+          const uint64_t tkey = nr_td_geom_key(&T);
+          std::vector<std::pair<uint64_t, double>> grp; /* key -> T_g */
+          uint32_t tmx = 0;
+          for (int i = 0; i < st->n_hyp; i++) {
+            if (!pre_active(i)) continue;
+            tmx = std::max(tmx, st->trials[i]);
+            const uint64_t k = nr_td_geom_key(&st->hyp[i]);
+            bool f = false;
+            for (auto &e : grp) if (e.first == k) { e.second += st->trials[i]; f = true; break; }
+            if (!f) grp.push_back({k, (double)st->trials[i]});
+          }
+          const int m = nr_pdsch_config_sweep_crc_accept_m((int)grp.size(), tmx);
+          double b = 0;
+          for (auto &e : grp) if (e.first != tkey) b += sim_binom_pf(e.second, m, cfg.crc_false);
+          rec.geom_bound += std::min(1.0, b);
+          rec.geom_wrong_pins += nr_td_geom_key(&st->hyp[out_main_idx]) != tkey;
         }
         if (fb2 && winner < 0 && !st->fail_open && nr_pdsch_config_sweep_n_active(st.get()) < st->n_hyp
             && nr_pdsch_config_sweep_fail_open_due(st.get(), cfg.fo_alpha, cfg.fo_pmin)) {
@@ -548,6 +637,9 @@ static SimResult run_sim(const SimCfg &cfg)
       n_ok_prev += ostate == 0;
       R.oracle_miss_rntis += ostate == 1; R.oracle_wrong_rntis += ostate == 2;
       R.harq_trap_passes += rec.harq_trap_passes; R.false_passes += rec.false_passes;
+      R.geom_pins += rec.geom_pins; R.geom_blocks += rec.geom_blocks; R.crc_accepts += rec.crc_accepts;
+      R.geom_wrong_pins += rec.geom_wrong_pins; R.geom_bound += rec.geom_bound; R.crc_bound += rec.crc_bound;
+      R.crc_wrong += rec.wrong && rec.crc_accepts > 0;
       R.truth_eliminated_by_probe += rec.truth_elim; R.p2_admitted_fail += rec.p2_admitted_fail;
       if (!rec.undecidable) {
         secs.push_back(rec.seconds);
@@ -591,6 +683,9 @@ int main(int argc, char **argv)
            "  --fieldbook 0|1|2 (0 prior pruning, 1 ordering-only field book, 2 reversible pruning: prior + promoted fields as dormant masks, fail-open)\n"
            "  --inject-wrong-field F (fieldbook 2: 0 TDRA, 1 add_pos, 2 max_len; force-promote a wrong value) --fo-alpha 1e-3 --fo-pmin 0.05\n"
            "  --gate --p2 --rntis-per-acq --probe-inconclusive --table-exercise --cap-s --oracle --prior --dmrs-typea-pos\n"
+           "  --crc-accept 0|1 (lever C: CRC-pass acceptance) --geom-pin 0|1 (lever P: geometry pinning); both experimental, default 0;\n"
+           "  --harq-trap-retx 0|1 (1: the HARQ trap fires only on retransmission grants, the physical model; 0 = BC0 model, any grant)\n"
+           "  with --equiv 0 the main decode is fed through feed_attr (singleton crediting, full-class attribution)\n"
            "  --equiv 0|1 (lever E: grant-equivalence crediting of the main decode; requires --twins >= 2)\n  --twins N (default 2 = all physical twins, i.e. every other-table entry). N < 2 is an UNPHYSICAL stress arm: only N\n"
            "  twins behave as twins, the other other-table entries always fail.");
       return 0;
@@ -627,6 +722,9 @@ int main(int argc, char **argv)
     else if (f == "--oracle-wrong") c.oracle_wrong = atof(v);
     else if (f == "--harq-trap") c.harq_trap = atof(v);
     else if (f == "--crc-false") c.crc_false = atof(v);
+    else if (f == "--crc-accept") c.crc_accept = atoi(v);
+    else if (f == "--harq-trap-retx") c.harq_trap_retx = atoi(v);
+    else if (f == "--geom-pin") c.geom_pin = atoi(v);
     else if (f == "--inject-wrong-field") c.inject_wrong_field = atoi(v);
     else if (f == "--fo-alpha") c.fo_alpha = atof(v);
     else if (f == "--fo-pmin") c.fo_pmin = atof(v);
@@ -644,6 +742,8 @@ int main(int argc, char **argv)
            x.truth_elim, x.winner_key, x.oracle_state == 1 ? "miss" : x.oracle_state == 2 ? "wrong" : "ok");
     /* fieldbook-2 keys are emitted only for --fieldbook 2: --fieldbook 0/1 output stays byte-identical to the pre-BC5 simulator. */
     if (c.fieldbook == 2) printf(",\"active_start\":%d,\"fail_open\":%s,\"pruned_fields\":%u", x.active_start, x.fail_open ? "true" : "false", x.pruned_fields);
+    /* lever keys only when a lever is on: with both 0 the output stays byte-identical to 25c4d5ac7e. */
+    if (c.geom_pin || c.crc_accept) printf(",\"geom_pins\":%ld,\"geom_blocks\":%ld,\"crc_accepts\":%ld", x.geom_pins, x.geom_blocks, x.crc_accepts);
     puts("}");
   }
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
@@ -671,6 +771,11 @@ int main(int argc, char **argv)
            r.fail_opens, r.acquisitions_rntis ? r.active_start_sum / (double)r.acquisitions_rntis : 0.0, r.mean_s_steady, r.untrusted_after,
            r.injected, r.inject_skipped, mean_l(r.recovery_grants), mean_l(r.recovery_rntis), r.recovery_never);
   }
+  if (c.geom_pin || c.crc_accept)
+    printf(",\"geom_pin\":%d,\"crc_accept\":%d,\"geom_pins\":%ld,\"geom_blocks\":%ld,\"crc_accepts\":%ld,\"crc_wrong\":%ld,"
+           "\"crc_bound\":%.6g,\"geom_wrong_pins\":%ld,\"geom_bound\":%.6g,\"crc_false\":%g",
+           c.geom_pin, c.crc_accept, r.geom_pins, r.geom_blocks, r.crc_accepts, r.crc_wrong, r.crc_bound, r.geom_wrong_pins, r.geom_bound,
+           c.crc_false);
   printf("}}\n");
   return 0;
 }

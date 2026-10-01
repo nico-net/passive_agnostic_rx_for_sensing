@@ -15,7 +15,8 @@ for i in range(acq):
                           "n_full": 100, "n_probe": 200, "gated_phys": 1, "gated_chan": 2, "promotions": 0, "withdrawals": int(k == 1),
                           "oracle_state": "miss" if (k == 0 and i == 0) else ("wrong" if (k == 1 and i == 0) else "ok")}))
 print(json.dumps({"summary": {"acq": acq, "harq_trap_passes": 7, "false_passes": 2,
-                                  "fail_opens": 5, "active_start_mean": 12.5, "recovery_grants": 321.0, "recovery_rntis": 2.5, "untrusted_after": 3}}))
+                                  "fail_opens": 5, "active_start_mean": 12.5, "recovery_grants": 321.0, "recovery_rntis": 2.5, "untrusted_after": 3,
+                                  "geom_pins": 11, "geom_blocks": 4, "crc_accepts": 9}}))
 """
 
 
@@ -68,6 +69,10 @@ class Campaign(unittest.TestCase):
         self.assertEqual(row["recovery_rntis"], "2.50")
         self.assertEqual(row["withdrawals"], "3")
         self.assertEqual(row["untrusted_after"], "3")
+        # lever columns (BC2b): summary values pass through
+        self.assertEqual(row["geom_pins"], "11")
+        self.assertEqual(row["geom_blocks"], "4")
+        self.assertEqual(row["crc_accepts"], "9")
 
 
 if __name__ == "__main__":

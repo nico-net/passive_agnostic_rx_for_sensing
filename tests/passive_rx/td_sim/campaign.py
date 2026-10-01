@@ -7,6 +7,7 @@ Matrix JSON: {"arms": {name: {flag: value}}, "cells": {"SA": {"sib1": 1}, "NSA-l
 Flags are nr_td_sim flags without the leading "--" and with "_" or "-" (e.g. "w-sib1", "K").
 Writes <out>/results.jsonl (one line per RNTI, tagged arm/cell/rx) and <out>/summary.md.
 All numbers are SIMULATED (nr_td_sim), never MEASURED. Cold = first two RNTIs of an acquisition, steady = later ones.
+Lever columns (geom_pins, geom_blocks, crc_accepts: lever P / lever C events) come from the simulator summary and are 0 when the levers are off.
 Field-book-2 columns (fail_opens, active_start_mean, recovery_*, untrusted_after) come from the simulator summary and are 0 / -1 (recovery, no injection) when absent.
 """
 import argparse, itertools, json, os, statistics, subprocess, sys
@@ -81,16 +82,17 @@ def main(argv=None):
                                  sum(r.get("oracle_state") == "wrong" for r in recs), summ.get("harq_trap_passes", 0),
                                  summ.get("false_passes", 0), summ.get("fail_opens", 0), summ.get("active_start_mean", 0),
                                  summ.get("recovery_grants", 0), summ.get("recovery_rntis", 0), sum(r.get("withdrawals", 0) for r in recs),
-                                 summ.get("untrusted_after", 0)))
+                                 summ.get("untrusted_after", 0), summ.get("geom_pins", 0), summ.get("geom_blocks", 0),
+                                 summ.get("crc_accepts", 0)))
     with open(os.path.join(a.out, "summary.md"), "w") as sf:
         sf.write("[SIMULATED, nr_td_sim] cold = first two RNTIs per acquisition; steady = later RNTIs; seconds = grants / grants-per-s.\n"
                  "Undecidable (capped) RNTIs are censored: excluded from medians/means/p95, counted in the undecidable column.\n"
                  "Medians are quantised (separation is checked every 16 trials): prefer the mean columns.\n"
                  "tbl N = truth mcs_table N as count/median s/mean s/wrong.\n\n")
-        sf.write("| arm | cell | rx | oracle | cold median s | cold p95 s | steady median s | cold mean s | steady p95 s | steady mean s | mean s | mean grants | wrong | undecidable | n_full | n_probe | gated | tbl 0 | tbl 1 | tbl 2 | oracle_miss_rntis | oracle_wrong_rntis | harq_trap_passes | false_passes | fail_opens | active_start_mean | recovery_grants | recovery_rntis | withdrawals | untrusted_after |\n")
-        sf.write("|---" * 30 + "|\n")
+        sf.write("| arm | cell | rx | oracle | cold median s | cold p95 s | steady median s | cold mean s | steady p95 s | steady mean s | mean s | mean grants | wrong | undecidable | n_full | n_probe | gated | tbl 0 | tbl 1 | tbl 2 | oracle_miss_rntis | oracle_wrong_rntis | harq_trap_passes | false_passes | fail_opens | active_start_mean | recovery_grants | recovery_rntis | withdrawals | untrusted_after | geom_pins | geom_blocks | crc_accepts |\n")
+        sf.write("|---" * 33 + "|\n")
         for r in rows:
-            sf.write("| %s | %s | %d | %s | %.1f | %.1f | %.1f | %.2f | %.1f | %.2f | %.2f | %.0f | %d | %d | %d | %d | %d | %s | %s | %s | %d | %d | %d | %d | %d | %.1f | %.1f | %.2f | %d | %d |\n" % r)
+            sf.write("| %s | %s | %d | %s | %.1f | %.1f | %.1f | %.2f | %.1f | %.2f | %.2f | %.0f | %d | %d | %d | %d | %d | %s | %s | %s | %d | %d | %d | %d | %d | %.1f | %.1f | %.2f | %d | %d | %d | %d | %d |\n" % r)
     return 0
 
 

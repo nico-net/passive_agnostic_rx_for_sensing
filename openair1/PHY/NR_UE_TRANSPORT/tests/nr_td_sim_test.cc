@@ -208,3 +208,50 @@ TEST(TdSim, FieldBookTwoNotSlowerThanPriorSteady)
   f.fieldbook = 2;
   EXPECT_LE(run_sim(f).mean_s_steady, 1.10 * run_sim(p).mean_s_steady);
 }
+
+TEST(TdSim, HarqTrapNeverAcceptedByCrcRule)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 200; c.seed = 21; c.oracle = 0; c.equiv = 1; c.crc_accept = 1;
+  c.harq_trap = 0.02; c.harq_trap_retx = 1; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_GT(r.crc_accepts, 0);
+}
+TEST(TdSim, CrcAcceptWithEquivZeroUsesFeedAttrAndNeverWrong)
+{
+  /* --equiv 0: crediting is the singleton (lever E stays off) but uniqueness must still see the FULL class. */
+  SimCfg c = SimCfg::defaults(); c.acq = 200; c.seed = 22; c.oracle = 0; c.equiv = 0; c.crc_accept = 1;
+  c.harq_trap = 0.02; c.harq_trap_retx = 1; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_GT(r.crc_accepts, 0);
+}
+TEST(TdSim, GeomPinNeverWrongUnderHarqTrapAndFalsePasses)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 200; c.seed = 31; c.oracle = 0; c.geom_pin = 1;
+  c.harq_trap = 0.02; c.harq_trap_retx = 1; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_GT(r.geom_pins, 0);
+}
+TEST(TdSim, GeomPinRecoversFromWrongPriorViaFailOpen)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 33; c.oracle = 0; c.fieldbook = 2; c.inject_wrong_field = 0; c.geom_pin = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.undecidable, 0);
+}
+TEST(TdSim, GeomPinFasterBlind)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 35; c.oracle = 0; c.rntis_per_acq = 1;
+  SimCfg p = c; p.geom_pin = 1;
+  EXPECT_LT(run_sim(p).mean_grants, 0.5 * run_sim(c).mean_grants);
+}
+TEST(TdSim, NewLeverFlagsOffChangeNothing)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 20; c.seed = 1; c.oracle = 0;
+  SimCfg d = c; d.geom_pin = 0; d.crc_accept = 0;
+  const SimResult a = run_sim(c), b = run_sim(d);
+  EXPECT_EQ(a.total_grants, b.total_grants);
+  EXPECT_EQ(b.geom_pins + b.geom_blocks + b.crc_accepts, 0);
+}
