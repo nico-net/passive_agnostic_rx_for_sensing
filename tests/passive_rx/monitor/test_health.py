@@ -81,6 +81,54 @@ class Health(unittest.TestCase):
         self.assertLessEqual(len(new) * 30, JsonlTail.MAX_CATCHUP_BYTES + 1000)
         self.assertEqual(len(t.history), 100)
 
+    # --- fix round 1 ---
+    def _snap(self, a, b):
+        m = JsonlTail(None); m.history = [a, b]; m.last = b
+        return health_snapshot(m, JsonlTail(None))
+
+    def test_negative_delta_is_counter_reset(self):
+        base = {"t_mono_ns": 0, "pdschq_decoded": 300, "pdschq_crc_ok": 285, "scanq_queued": 3000, "scanq_drop_full": 10}
+        for k, v in (("pdschq_decoded", 5), ("pdschq_crc_ok", 5), ("scanq_queued", 5), ("scanq_drop_full", 0)):
+            b = dict(base, t_mono_ns=10**9, pdschq_decoded=400, pdschq_crc_ok=380, scanq_queued=4000, scanq_drop_full=20)
+            b[k] = v
+            r = self._snap(base, b)["rates"]
+            if k in ("pdschq_decoded", "pdschq_crc_ok"):
+                self.assertIsNone(r["crc_pct_window"], k)
+            if k == "pdschq_decoded":
+                self.assertIsNone(r["grants_per_s"])
+            if k in ("scanq_queued", "scanq_drop_full"):
+                self.assertIsNone(r["drop_full_pct"], k)
+
+    def test_truncation_clears_history(self):
+        p = tempfile.mktemp(); open(p, "w").write('{"a":1}\n{"a":2}\n'); t = JsonlTail(p); t.poll()
+        open(p, "w").write('{"a":3}\n'); t.poll()
+        self.assertEqual(t.history, [{"a": 3}])
+
+    def test_inode_change_same_or_larger_size_resets(self):
+        p = tempfile.mktemp(); open(p, "w").write('{"a":1}\n'); t = JsonlTail(p); t.poll()
+        for body in ('{"a":2}\n', '{"a":3}\n{"a":4}\n'):
+            q = tempfile.mktemp(); open(q, "w").write(body); os.replace(q, p)
+            t.poll()
+            self.assertEqual(t.history, [json.loads(l) for l in body.split()])
+
+    def test_nonfinite_values_never_emit_nan(self):
+        a = {"t_mono_ns": 0, "pdschq_decoded": 1, "pdschq_crc_ok": 1, "scanq_queued": 1, "scanq_drop_full": 0}
+        b = {"t_mono_ns": 10**9, "pdschq_decoded": float("inf"), "pdschq_crc_ok": float("nan"),
+             "scanq_queued": float("inf"), "scanq_drop_full": float("nan")}
+        h = self._snap(a, b)
+        self.assertNotIn("NaN", json.dumps(h["rates"], allow_nan=True))
+        self.assertTrue(all(v is None for v in h["rates"].values()))
+
+    def test_old_schema_missing_keys_no_exception(self):
+        m = JsonlTail(None); m.history = [{"schema": 0}, {"schema": 0, "x": 1}]; m.last = m.history[-1]
+        o = JsonlTail(None); o.history = [{"t_mono_ns": 0}, {"t_mono_ns": 10**9}]; o.last = o.history[-1]
+        h = health_snapshot(m, o); json.dumps(h)
+
+    def test_non_dict_json_line_counts_bad(self):
+        p = tempfile.mktemp(); open(p, "w").write('[1,2]\n42\n"s"\n{"a":1}\n')
+        t = JsonlTail(p); t.poll()
+        self.assertEqual(t.bad_lines, 3); self.assertEqual(t.last, {"a": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

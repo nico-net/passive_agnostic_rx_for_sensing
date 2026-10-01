@@ -14,6 +14,7 @@ endpoints are shown side by side, never fused.
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -602,10 +603,12 @@ class JsonlTail:
             st = os.stat(self.path)
         except OSError:
             self.pos, self.pending, self.ino = 0, b"", None  # gone (rotated): re-read from 0 when it returns
+            self.history, self.last = [], None
             return []
         self.mtime = st.st_mtime
         if st.st_size < self.pos or (self.ino is not None and st.st_ino != self.ino):
-            self.pos, self.pending = 0, b""  # truncated or rotated
+            self.pos, self.pending = 0, b""  # truncated or rotated: drop samples of the old file
+            self.history, self.last = [], None
         self.ino = st.st_ino
         skip_first = False
         if st.st_size - self.pos > self.MAX_CATCHUP_BYTES:
@@ -644,7 +647,7 @@ class JsonlTail:
 
 def _num(d, k):
     v = d.get(k)
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
 def health_snapshot(metrics, obs):
@@ -658,6 +661,10 @@ def health_snapshot(metrics, obs):
         g = lambda k: (_num(a, k), _num(b, k))
         (t0, t1), (d0, d1), (c0, c1), (q0, q1), (f0, f1) = (
             g("t_mono_ns"), g("pdschq_decoded"), g("pdschq_crc_ok"), g("scanq_queued"), g("scanq_drop_full"))
+        # A negative delta means a counter reset (receiver restart): no rate for that window.
+        if any(x is not None and y is not None and y < x for x, y in ((d0, d1), (c0, c1), (q0, q1), (f0, f1))):
+            d0 = None  # nulls the pdsch rates
+            q0 = None  # nulls the drop rate
         if None not in (d0, d1, c0, c1) and d1 - d0 > 0:
             h["rates"]["crc_pct_window"] = 100.0 * (c1 - c0) / (d1 - d0)
         if None not in (t0, t1, d0, d1) and t1 > t0:

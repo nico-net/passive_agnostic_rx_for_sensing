@@ -893,7 +893,8 @@ async function healthPoll() {
   try {
     health = await (await fetch("/health", {cache: "no-store"})).json(); healthErr = false;
     const r = health.rates || {};
-    if (health.metrics) {
+    const last = healthHist[healthHist.length - 1];
+    if (health.metrics && (!last || last.t !== health.metrics.t_mono_ns)) {   // one sample per metrics line, not per poll
       healthHist.push({crc: r.crc_pct_window, gps: r.grants_per_s, t: health.metrics.t_mono_ns});
       if (healthHist.length > 30) healthHist.shift();
     }
