@@ -53,6 +53,12 @@ struct SimCfg {
    * the slot of a retransmitted TB, whose HARQ buffer combining makes it pass). 0 (default, the BC0 model) = it fires on any grant.
    * The frng draw is made either way, so the random streams are unchanged. */
   int harq_trap_retx;
+  /* Trap model, three SEPARATE categories (fix round 1): --crc-false (ordinary CRC false pass), --retx-trap P (on grants with new_tx false the k0+-1
+   * sibling passes with probability P) and --k0-trap-adj A (NEW-TB consecutive-slot k0 trap: per grant, with probability A the adjacent slot carries an
+   * identical allocation and MCS for the same RNTI, and then every k0+-1 sibling decode passes iff the truth's decode would pass). --harq-trap /
+   * --harq-trap-retx are LEGACY (kept for byte identity of old runs). All trap draws use dedicated streams, never crng. */
+  double retx_trap, k0_trap_adj;
+  float sib_pmin, sib_eps; /* sibling guard (engine st->sib_pmin / sib_eps); --sib-pmin 0 disables the guard (fix A only) */
   float w_sib1, w_default, w_obs, w_field, w_probe;
   bool check_correlation;
   static SimCfg defaults()
@@ -65,6 +71,7 @@ struct SimCfg {
     c.probe_inconclusive = 0.1; c.table_exercise = 0.9; c.cap_s = 3600;
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
     c.crc_accept = c.geom_pin = c.harq_trap_retx = 0;
+    c.retx_trap = c.k0_trap_adj = 0; c.sib_pmin = 0.05f; c.sib_eps = 1e-6f;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
      * `undecidable` ones and biases every quantile downwards. Capped RNTIs are reported separately and excluded
@@ -81,10 +88,11 @@ struct RntiRec {
   bool winner_ok, wrong, undecidable;
   int oracle_state;       /* 0 ok, 1 miss, 2 wrong */
   long harq_trap_passes, false_passes;
+  long sib_trials, retx_trap_passes, k0_trap_passes;
   long geom_pins, geom_blocks, crc_accepts; /* lever events in this RNTI (see SimCfg::crc_accept/geom_pin) */
   /* Analytical-bound bookkeeping (spec section 3 evidence standard): wrong_pins = pins that kept a geometry other than the truth's;
    * *_bound = union bound of that event on the run's own trial counts at the event, with p_f = --crc-false (see run_sim). */
-  long geom_wrong_pins, crc_wrong;
+  long wrong_pins, crc_wrong;
   double geom_bound, crc_bound;
   long n_full, n_probe, gated_phys, gated_chan, promotions, withdrawals;
   long p2_admitted_fail;  /* probe FAILs admitted as KL failures (st->p2 && p2_admissible && FAIL) */
@@ -110,7 +118,7 @@ struct SimResult {
   std::vector<long> recovery_grants, recovery_rntis; /* per injected acquisition that recovered */
   long n_decided = 0;
   long oracle_miss_rntis = 0, oracle_wrong_rntis = 0, harq_trap_passes = 0, false_passes = 0;
-  long geom_pins = 0, geom_blocks = 0, crc_accepts = 0, geom_wrong_pins = 0, crc_wrong = 0;
+  long geom_pins = 0, geom_blocks = 0, crc_accepts = 0, wrong_pins = 0, crc_wrong = 0, sib_trials = 0, retx_trap_passes = 0, k0_trap_passes = 0;
   double geom_bound = 0, crc_bound = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
   std::vector<RntiRec> recs;
@@ -188,7 +196,7 @@ static uint64_t mix(uint64_t a, uint64_t b, uint64_t c)
 struct Grant {
   double snr;
   int rank, mcs;
-  bool exercised, new_tx;
+  bool exercised, new_tx, adj_same;
   float snr_est_noise;
 };
 
@@ -281,6 +289,8 @@ static SimResult run_sim(const SimCfg &cfg)
       std::mt19937_64 prng(mix(cfg.seed, a, 0x200 + k)); /* probe inconclusive draws */
       std::mt19937_64 orng(mix(cfg.seed, a, 0x400 + k)); /* oracle state/decoy draws (own stream: crng stays unchanged) */
       std::mt19937_64 frng(mix(cfg.seed, a, 0x500 + k)); /* HARQ-trap / CRC false-pass draws */
+      std::mt19937_64 trng(mix(cfg.seed, a, 0x700 + k)); /* --retx-trap draws (own stream) */
+      std::mt19937_64 krng(mix(cfg.seed, a, 0x600 + k)); /* --k0-trap-adj draws (own stream) */
       std::normal_distribution<double> nd(0, 1);
       std::uniform_real_distribution<double> ud(0, 1);
       memcpy((void *)st.get(), (const void *)tmpl.get(), sizeof(*st));
@@ -335,6 +345,8 @@ static SimResult run_sim(const SimCfg &cfg)
       st->p2 = cfg.p2 != 0;
       st->crc_accept = cfg.crc_accept != 0;
       st->geom_pin = cfg.geom_pin != 0;
+      st->sib_pmin = cfg.sib_pmin;
+      st->sib_eps = cfg.sib_eps;
       const uint16_t rnti = (uint16_t)(0x4000 + k);
 
       RntiRec rec{};
@@ -396,6 +408,14 @@ static SimResult run_sim(const SimCfg &cfg)
       long g = 0;
       std::uniform_real_distribution<double> uf(0, 1);
       bool trap_active = false; /* per-grant HARQ-trap draw (frng) */
+      bool retx_trap_active = false; /* per-grant --retx-trap draw (trng) */
+      nr_td_pick_t pick_kind = NR_TD_PICK_EXPLORE;
+      /* k0+-1 sibling of the truth (identical but for k0, any MCS table): the hypotheses the k0 trap can make pass */
+      auto is_k0_sibling = [&](const nr_pdsch_cfg_hypothesis_t &h) {
+        return (h.k0 == T.k0 + 1 || h.k0 == T.k0 - 1) && h.tda_start == T.tda_start && h.tda_length == T.tda_length
+               && h.dmrs_add_pos == T.dmrs_add_pos && h.dmrs_max_len == T.dmrs_max_len && h.dmrs_mask == T.dmrs_mask
+               && h.mapping_type == T.mapping_type;
+      };
       auto is_k0_neighbour = [&](const nr_pdsch_cfg_hypothesis_t &h) {
         return (h.k0 == T.k0 + 1 || h.k0 == T.k0 - 1) && h.mcs_table == T.mcs_table && h.tda_start == T.tda_start
                && h.tda_length == T.tda_length && h.dmrs_add_pos == T.dmrs_add_pos && h.dmrs_max_len == T.dmrs_max_len
@@ -409,6 +429,14 @@ static SimResult run_sim(const SimCfg &cfg)
       auto full_pass = [&](int h, const Grant &gr, bool truth_pass) {
         const bool p = base_pass(h, gr, truth_pass);
         if (trap_active && is_k0_neighbour(st->hyp[h])) { rec.harq_trap_passes++; return true; }
+        if (retx_trap_active && is_k0_neighbour(st->hyp[h])) { rec.retx_trap_passes++; return true; }
+        if (gr.adj_same && is_k0_sibling(st->hyp[h])) {
+          /* the sibling decodes the adjacent slot's identical-allocation TB: same computation as the truth's, so it passes iff the truth
+           * would (same table, or a twin table on a grant that does not exercise the table) */
+          const nr_pdsch_cfg_hypothesis_t &hs = st->hyp[h];
+          const bool q = hs.mcs_table == T.mcs_table ? truth_pass : (twin_tbl[hs.mcs_table] && !gr.exercised ? truth_pass : false);
+          if (q) { rec.k0_trap_passes++; return true; }
+        }
         if (!p && cfg.crc_false > 0 && uf(frng) < cfg.crc_false) { rec.false_passes++; return true; }
         return p;
       };
@@ -434,8 +462,8 @@ static SimResult run_sim(const SimCfg &cfg)
         int cls[NR_PDSCH_SWEEP_MAX_HYP];
         const int nc = build_class(out_main_idx, gr, cls);
         if (cfg.equiv)
-          return nr_pdsch_config_sweep_feed_equiv(st.get(), cls, nc, pass, gr.new_tx);
-        return nr_pdsch_config_sweep_feed_attr(st.get(), out_main_idx, cls, nc, pass, gr.new_tx);
+          return nr_pdsch_config_sweep_feed_equiv_ex(st.get(), cls, nc, pass, gr.new_tx, pick_kind);
+        return nr_pdsch_config_sweep_feed_attr_ex(st.get(), out_main_idx, cls, nc, pass, gr.new_tx, pick_kind);
       };
       for (; g < cap && winner < 0;) {
         g++;
@@ -446,6 +474,7 @@ static SimResult run_sim(const SimCfg &cfg)
         gr.exercised = ud(crng) < cfg.table_exercise;
         gr.new_tx = ud(crng) < 0.75;
         gr.snr_est_noise = (float)(cfg.snr_est_sigma * nd(crng));
+        gr.adj_same = cfg.k0_trap_adj > 0 && std::uniform_real_distribution<double>(0, 1)(krng) < cfg.k0_trap_adj;
         const bool truth_pass = gr.rank <= cfg.n_rx && gr.snr >= nr_td_required_snr_db(gr.mcs, T.mcs_table);
         if (cfg.gate) {
           nr_td_grant_view_t v = {gr.rank, gr.mcs, 2}; /* table 2 = lowest requirement = most permissive */
@@ -454,11 +483,13 @@ static SimResult run_sim(const SimCfg &cfg)
           if (gt == NR_TD_GATED_PHYSICAL) { rec.gated_phys++; continue; }
           if (gt == NR_TD_GATED_CHANNEL_QUALITY) { rec.gated_chan++; continue; }
         }
+        retx_trap_active = cfg.retx_trap > 0 && std::uniform_real_distribution<double>(0, 1)(trng) < cfg.retx_trap && !gr.new_tx;
         trap_active = cfg.harq_trap > 0 && uf(frng) < cfg.harq_trap && !(cfg.harq_trap_retx && gr.new_tx);
         int idx[NR_TD_MAX_K];
         nr_pdsch_cfg_hypothesis_t hy[NR_TD_MAX_K];
-        const int n = nr_pdsch_config_sweep_next_k(st.get(), cfg.K, idx, hy); /* K=1 == next() (Task 4 bit-identity) */
+        const int n = nr_pdsch_config_sweep_next_k_ex(st.get(), cfg.K, idx, hy, &pick_kind); /* K=1 == next() (Task 4 bit-identity) */
         if (n < 1) break;
+        rec.sib_trials += pick_kind == NR_TD_PICK_SIBLING;
         nr_td_outcome_t out[NR_TD_MAX_K];
         out_main_idx = idx[0];
         for (int i = 0; i < n; i++) {
@@ -489,7 +520,12 @@ static SimResult run_sim(const SimCfg &cfg)
         const bool lever_on = cfg.crc_accept || cfg.geom_pin;
         const bool pre_blocked = st->geom_blocked;
         uint64_t pre_gdorm[NR_TD_DWORDS];
-        if (cfg.geom_pin) memcpy(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm));
+        uint64_t pre_gkey = 0; /* geometry of the single pass slot = the group a pin in this call keeps */
+        std::vector<uint16_t> pre_fp; /* the pin restarts the engine evidence (fp_trials cleared): keep the explore-trial counts it was decided on */
+        if (cfg.geom_pin) {
+          memcpy(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm));
+          if (st->n_geom == 1) { pre_gkey = st->geom_key[0]; pre_fp.assign(st->fp_trials, st->fp_trials + st->n_hyp); if (pick_kind == NR_TD_PICK_EXPLORE) pre_fp[out_main_idx]++; }
+        }
         if (cfg.equiv && cfg.K > 1) {
           /* Lever E: the main decode credits its grant-equivalence class; probe outcomes keep feed_k (probes unchanged). */
           winner = feed_main(out[0].result == NR_TD_PASS, gr);
@@ -519,18 +555,18 @@ static SimResult run_sim(const SimCfg &cfg)
         }
         if (winner >= 0 && st->winner_by_crc) {
           rec.crc_accepts++;
-          /* Lever C bound: P(some wrong active h collects m unique false passes in its T_h trials) <= sum_h C(T_h, m) pf^m. */
+          /* Lever C bound: P(some wrong active h collects m unique false passes in its T_h EXPLORE trials) <= sum_h C(T_h, m) pf^m. */
           uint32_t tmx = 0;
-          for (int i = 0; i < st->n_hyp; i++) if (nr_pdsch_config_sweep_is_active(st.get(), i)) tmx = std::max(tmx, st->trials[i]);
+          for (int i = 0; i < st->n_hyp; i++) if (nr_pdsch_config_sweep_is_active(st.get(), i)) tmx = std::max<uint32_t>(tmx, st->fp_trials[i]);
           const int m = nr_pdsch_config_sweep_crc_accept_m(nr_pdsch_config_sweep_n_active(st.get()), tmx);
           double b = 0;
           for (int i = 0; i < st->n_hyp; i++)
-            if (nr_pdsch_config_sweep_is_active(st.get(), i) && !is_truth(st->hyp[i])) b += sim_binom_pf((double)st->trials[i], m, cfg.crc_false);
+            if (nr_pdsch_config_sweep_is_active(st.get(), i) && !is_truth(st->hyp[i])) b += sim_binom_pf((double)st->fp_trials[i], m, cfg.crc_false);
           rec.crc_bound += std::min(1.0, b);
         }
         if (cfg.geom_pin && memcmp(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm)) != 0) {
           /* Lever P bound at the pin: n_groups/T_max over the hypotheses active just BEFORE it (every cause but GEOM), then
-           * sum over WRONG groups g of C(T_g, m) pf^m, T_g = trials of all members of g. A pin to a group other than the truth's is a wrong pin. */
+           * sum over WRONG groups g of C(T_g, m) pf^m, T_g = EXPLORE trials of all members of g. A pin to a group other than the truth's is a wrong pin. */
           auto pre_active = [&](int i) {
             for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
               if (c != NR_TD_DORMANT_GEOM && ((st->dormant[c][i >> 6] >> (i & 63)) & 1u)) return false;
@@ -541,17 +577,18 @@ static SimResult run_sim(const SimCfg &cfg)
           uint32_t tmx = 0;
           for (int i = 0; i < st->n_hyp; i++) {
             if (!pre_active(i)) continue;
-            tmx = std::max(tmx, st->trials[i]);
+            const uint32_t fpi = i < (int)pre_fp.size() ? pre_fp[i] : 0;
+            tmx = std::max(tmx, fpi);
             const uint64_t k = nr_td_geom_key(&st->hyp[i]);
             bool f = false;
-            for (auto &e : grp) if (e.first == k) { e.second += st->trials[i]; f = true; break; }
-            if (!f) grp.push_back({k, (double)st->trials[i]});
+            for (auto &e : grp) if (e.first == k) { e.second += fpi; f = true; break; }
+            if (!f) grp.push_back({k, (double)fpi});
           }
           const int m = nr_pdsch_config_sweep_crc_accept_m((int)grp.size(), tmx);
           double b = 0;
           for (auto &e : grp) if (e.first != tkey) b += sim_binom_pf(e.second, m, cfg.crc_false);
           rec.geom_bound += std::min(1.0, b);
-          rec.geom_wrong_pins += nr_td_geom_key(&st->hyp[out_main_idx]) != tkey;
+          rec.wrong_pins += pre_gkey != tkey;
         }
         if (fb2 && winner < 0 && !st->fail_open && nr_pdsch_config_sweep_n_active(st.get()) < st->n_hyp
             && nr_pdsch_config_sweep_fail_open_due(st.get(), cfg.fo_alpha, cfg.fo_pmin)) {
@@ -638,7 +675,8 @@ static SimResult run_sim(const SimCfg &cfg)
       R.oracle_miss_rntis += ostate == 1; R.oracle_wrong_rntis += ostate == 2;
       R.harq_trap_passes += rec.harq_trap_passes; R.false_passes += rec.false_passes;
       R.geom_pins += rec.geom_pins; R.geom_blocks += rec.geom_blocks; R.crc_accepts += rec.crc_accepts;
-      R.geom_wrong_pins += rec.geom_wrong_pins; R.geom_bound += rec.geom_bound; R.crc_bound += rec.crc_bound;
+      R.sib_trials += rec.sib_trials; R.retx_trap_passes += rec.retx_trap_passes; R.k0_trap_passes += rec.k0_trap_passes;
+      R.wrong_pins += rec.wrong_pins; R.geom_bound += rec.geom_bound; R.crc_bound += rec.crc_bound;
       R.crc_wrong += rec.wrong && rec.crc_accepts > 0;
       R.truth_eliminated_by_probe += rec.truth_elim; R.p2_admitted_fail += rec.p2_admitted_fail;
       if (!rec.undecidable) {
@@ -684,7 +722,11 @@ int main(int argc, char **argv)
            "  --inject-wrong-field F (fieldbook 2: 0 TDRA, 1 add_pos, 2 max_len; force-promote a wrong value) --fo-alpha 1e-3 --fo-pmin 0.05\n"
            "  --gate --p2 --rntis-per-acq --probe-inconclusive --table-exercise --cap-s --oracle --prior --dmrs-typea-pos\n"
            "  --crc-accept 0|1 (lever C: CRC-pass acceptance) --geom-pin 0|1 (lever P: geometry pinning); both experimental, default 0;\n"
-           "  --harq-trap-retx 0|1 (1: the HARQ trap fires only on retransmission grants, the physical model; 0 = BC0 model, any grant)\n"
+           "  --harq-trap P / --harq-trap-retx 0|1: LEGACY trap models (BC0, any grant / retransmission only); kept for byte identity\n"
+           "  --retx-trap P (on new_tx==false grants the k0+-1 sibling passes with probability P)\n"
+           "  --k0-trap-adj A (new-TB k0 trap: with probability A per grant the adjacent slot has an identical allocation/MCS; then every k0+-1 sibling\n"
+           "    passes iff the truth's decode would). Own random streams. Counters retx_trap_passes, k0_trap_passes (separate from false_passes)\n"
+           "  --sib-pmin P (k0-sibling guard p_min, default 0.05; 0 = guard DISABLED, i.e. fast-path fix A only) --sib-eps E (default 1e-6)\n"
            "  with --equiv 0 the main decode is fed through feed_attr (singleton crediting, full-class attribution)\n"
            "  --equiv 0|1 (lever E: grant-equivalence crediting of the main decode; requires --twins >= 2)\n  --twins N (default 2 = all physical twins, i.e. every other-table entry). N < 2 is an UNPHYSICAL stress arm: only N\n"
            "  twins behave as twins, the other other-table entries always fail.");
@@ -724,6 +766,10 @@ int main(int argc, char **argv)
     else if (f == "--crc-false") c.crc_false = atof(v);
     else if (f == "--crc-accept") c.crc_accept = atoi(v);
     else if (f == "--harq-trap-retx") c.harq_trap_retx = atoi(v);
+    else if (f == "--retx-trap") c.retx_trap = atof(v);
+    else if (f == "--k0-trap-adj") c.k0_trap_adj = atof(v);
+    else if (f == "--sib-pmin") c.sib_pmin = (float)atof(v);
+    else if (f == "--sib-eps") c.sib_eps = (float)atof(v);
     else if (f == "--geom-pin") c.geom_pin = atoi(v);
     else if (f == "--inject-wrong-field") c.inject_wrong_field = atoi(v);
     else if (f == "--fo-alpha") c.fo_alpha = atof(v);
@@ -743,7 +789,8 @@ int main(int argc, char **argv)
     /* fieldbook-2 keys are emitted only for --fieldbook 2: --fieldbook 0/1 output stays byte-identical to the pre-BC5 simulator. */
     if (c.fieldbook == 2) printf(",\"active_start\":%d,\"fail_open\":%s,\"pruned_fields\":%u", x.active_start, x.fail_open ? "true" : "false", x.pruned_fields);
     /* lever keys only when a lever is on: with both 0 the output stays byte-identical to 25c4d5ac7e. */
-    if (c.geom_pin || c.crc_accept) printf(",\"geom_pins\":%ld,\"geom_blocks\":%ld,\"crc_accepts\":%ld", x.geom_pins, x.geom_blocks, x.crc_accepts);
+    if (c.geom_pin || c.crc_accept) printf(",\"geom_pins\":%ld,\"geom_blocks\":%ld,\"crc_accepts\":%ld,\"sib_trials\":%ld", x.geom_pins, x.geom_blocks, x.crc_accepts, x.sib_trials);
+    if (c.retx_trap > 0 || c.k0_trap_adj > 0) printf(",\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", x.retx_trap_passes, x.k0_trap_passes);
     puts("}");
   }
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
@@ -772,9 +819,14 @@ int main(int argc, char **argv)
            r.injected, r.inject_skipped, mean_l(r.recovery_grants), mean_l(r.recovery_rntis), r.recovery_never);
   }
   if (c.geom_pin || c.crc_accept)
+    printf(",\"sib_trials\":%ld,\"sib_pmin\":%g,\"sib_eps\":%g", r.sib_trials, (double)c.sib_pmin, (double)c.sib_eps);
+  if (c.retx_trap > 0 || c.k0_trap_adj > 0)
+    printf(",\"retx_trap\":%g,\"k0_trap_adj\":%g,\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", c.retx_trap, c.k0_trap_adj, r.retx_trap_passes,
+           r.k0_trap_passes);
+  if (c.geom_pin || c.crc_accept)
     printf(",\"geom_pin\":%d,\"crc_accept\":%d,\"geom_pins\":%ld,\"geom_blocks\":%ld,\"crc_accepts\":%ld,\"crc_wrong\":%ld,"
-           "\"crc_bound\":%.6g,\"geom_wrong_pins\":%ld,\"geom_bound\":%.6g,\"crc_false\":%g",
-           c.geom_pin, c.crc_accept, r.geom_pins, r.geom_blocks, r.crc_accepts, r.crc_wrong, r.crc_bound, r.geom_wrong_pins, r.geom_bound,
+           "\"crc_bound\":%.6g,\"wrong_pins\":%ld,\"geom_bound\":%.6g,\"crc_false\":%g",
+           c.geom_pin, c.crc_accept, r.geom_pins, r.geom_blocks, r.crc_accepts, r.crc_wrong, r.crc_bound, r.wrong_pins, r.geom_bound,
            c.crc_false);
   printf("}}\n");
   return 0;

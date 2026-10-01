@@ -209,29 +209,47 @@ TEST(TdSim, FieldBookTwoNotSlowerThanPriorSteady)
   EXPECT_LE(run_sim(f).mean_s_steady, 1.10 * run_sim(p).mean_s_steady);
 }
 
+/* Fix round 1: three separate trap categories (--crc-false, --retx-trap, --k0-trap-adj); the legacy --harq-trap flags stay for byte identity. */
 TEST(TdSim, HarqTrapNeverAcceptedByCrcRule)
 {
-  SimCfg c = SimCfg::defaults(); c.acq = 200; c.seed = 21; c.oracle = 0; c.equiv = 1; c.crc_accept = 1;
-  c.harq_trap = 0.02; c.harq_trap_retx = 1; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  SimCfg c = SimCfg::defaults(); c.acq = 15; c.seed = 21; c.oracle = 0; c.equiv = 1; c.crc_accept = 1; /* the k0 trap slows even the KL rule: ~25k grants per RNTI */
+  c.retx_trap = 0.02; c.k0_trap_adj = 0.5; c.crc_false = 1e-4; c.rntis_per_acq = 1;
   const SimResult r = run_sim(c);
   EXPECT_EQ(r.wrong, 0);
-  EXPECT_GT(r.crc_accepts, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_GT(r.k0_trap_passes, 0); /* the trap really fires */
 }
 TEST(TdSim, CrcAcceptWithEquivZeroUsesFeedAttrAndNeverWrong)
 {
   /* --equiv 0: crediting is the singleton (lever E stays off) but uniqueness must still see the FULL class. */
-  SimCfg c = SimCfg::defaults(); c.acq = 200; c.seed = 22; c.oracle = 0; c.equiv = 0; c.crc_accept = 1;
-  c.harq_trap = 0.02; c.harq_trap_retx = 1; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  SimCfg c = SimCfg::defaults(); c.acq = 15; c.seed = 22; c.oracle = 0; c.equiv = 0; c.crc_accept = 1;
+  c.retx_trap = 0.02; c.k0_trap_adj = 0.5; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+}
+TEST(TdSim, CrcAcceptDecidesWithoutTraps)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 100; c.seed = 23; c.oracle = 0; c.crc_accept = 1; c.rntis_per_acq = 1;
   const SimResult r = run_sim(c);
   EXPECT_EQ(r.wrong, 0);
   EXPECT_GT(r.crc_accepts, 0);
+  EXPECT_GT(r.sib_trials, 0); /* the sibling guard actually scheduled tests */
 }
-TEST(TdSim, GeomPinNeverWrongUnderHarqTrapAndFalsePasses)
+TEST(TdSim, GeomPinNeverWrongUnderTrapsAndFalsePasses)
 {
-  SimCfg c = SimCfg::defaults(); c.acq = 200; c.seed = 31; c.oracle = 0; c.geom_pin = 1;
-  c.harq_trap = 0.02; c.harq_trap_retx = 1; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  SimCfg c = SimCfg::defaults(); c.acq = 15; c.seed = 31; c.oracle = 0; c.geom_pin = 1;
+  c.retx_trap = 0.02; c.k0_trap_adj = 0.5; c.crc_false = 1e-4; c.rntis_per_acq = 1;
   const SimResult r = run_sim(c);
   EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+}
+TEST(TdSim, GeomPinPinsWithoutTraps)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 100; c.seed = 32; c.oracle = 0; c.geom_pin = 1; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
   EXPECT_GT(r.geom_pins, 0);
 }
 TEST(TdSim, GeomPinRecoversFromWrongPriorViaFailOpen)
@@ -243,15 +261,31 @@ TEST(TdSim, GeomPinRecoversFromWrongPriorViaFailOpen)
 }
 TEST(TdSim, GeomPinFasterBlind)
 {
+  /* sibling guard on (default p_min 0.05) and no traps: still clearly faster than the KL rule alone */
   SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 35; c.oracle = 0; c.rntis_per_acq = 1;
   SimCfg p = c; p.geom_pin = 1;
   EXPECT_LT(run_sim(p).mean_grants, 0.5 * run_sim(c).mean_grants);
 }
+TEST(TdSim, ExploitHotPassesDoNotBuildFastPathEvidence)
+{
+  /* Stress: p_f 1e-3. Under the old (hot-inclusive) evidence the stress arm produced 47/8000 wrong; the explore-only stream must stay
+   * within a small multiple of its bound (the strict check is the Step 4b campaign, this is the cheap regression guard). */
+  SimCfg c = SimCfg::defaults(); c.acq = 300; c.seed = 5; c.oracle = 0; c.crc_accept = 1; c.crc_false = 1e-3; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_LE(r.wrong, 3 + 3 * r.crc_bound);
+}
 TEST(TdSim, NewLeverFlagsOffChangeNothing)
 {
   SimCfg c = SimCfg::defaults(); c.acq = 20; c.seed = 1; c.oracle = 0;
-  SimCfg d = c; d.geom_pin = 0; d.crc_accept = 0;
+  SimCfg d = c; d.geom_pin = 0; d.crc_accept = 0; d.retx_trap = 0; d.k0_trap_adj = 0;
   const SimResult a = run_sim(c), b = run_sim(d);
   EXPECT_EQ(a.total_grants, b.total_grants);
-  EXPECT_EQ(b.geom_pins + b.geom_blocks + b.crc_accepts, 0);
+  EXPECT_EQ(b.geom_pins + b.geom_blocks + b.crc_accepts + b.sib_trials + b.k0_trap_passes + b.retx_trap_passes, 0);
+}
+TEST(TdSim, K0TrapAdjIsCountedSeparately)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 10; c.seed = 7; c.oracle = 0; c.k0_trap_adj = 0.5; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.k0_trap_passes, 0);
+  EXPECT_EQ(r.retx_trap_passes, 0);
 }
