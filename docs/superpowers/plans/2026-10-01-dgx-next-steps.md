@@ -58,7 +58,7 @@ Parallelism: tasks with no shared files may run in parallel under superpowers:di
 **Interfaces:**
 - Produces: `tests/passive_rx/.venv/bin/python` with `pyzmq` (used by A5), and the rule set every later agent reads.
 
-- [ ] **Step 1: Write `CLAUDE.md`** (use the claude-md-management `claude-md-improver` skill to check it):
+- [x] **Step 1: Write `CLAUDE.md`** (use the claude-md-management `claude-md-improver` skill to check it):
 
 ```markdown
 # CLAUDE.md — passive agnostic 5G NR receiver (OAI UE based)
@@ -82,13 +82,13 @@ Regression: tests/passive_rx/dgx/rfsim_regress.sh (106 PRB baseline: CONVERGED, 
 Plan in progress: docs/superpowers/plans/2026-10-01-dgx-next-steps.md
 ```
 
-- [ ] **Step 2: Write `tests/passive_rx/requirements-dgx.txt`**
+- [x] **Step 2: Write `tests/passive_rx/requirements-dgx.txt`**
 
 ```text
 pyzmq>=25
 ```
 
-- [ ] **Step 3: Create the venv and verify**
+- [x] **Step 3: Create the venv and verify**
 
 Run:
 ```bash
@@ -99,7 +99,7 @@ grep -qx '.venv/' .gitignore 2>/dev/null || echo '.venv/' >> .gitignore
 ```
 Expected: prints a libzmq version (e.g. `4.3.5`).
 
-- [ ] **Step 4: Write `tests/passive_rx/dgx/README.txt`**
+- [x] **Step 4: Write `tests/passive_rx/dgx/README.txt`**
 
 ```text
 DGX Spark (spark-74c3, aarch64) tools. NEW files only; the sens6 launchers under ../captures are frozen.
@@ -109,7 +109,7 @@ coremap_dgx.env   - core map definition (Task A6)
 Evidence of 2026-09-30/10-01 lives in ../dgx_host_snapshot_2026-09-30/.
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add CLAUDE.md tests/passive_rx/requirements-dgx.txt tests/passive_rx/dgx/README.txt tests/passive_rx/.gitignore
