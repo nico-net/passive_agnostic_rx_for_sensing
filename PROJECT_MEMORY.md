@@ -21,6 +21,14 @@ agent, terminal or human conversation: everything needed is here or in the repos
 > thresholds re-baselined on cloud (crc >= 93.0 %, drop_full <= 2.5 %) vs DGX (98 / 1). New known issues K28–K31 (§24);
 > DGX follow-ups in §25. Final review fix commit: `6528bd0cfc`..`343d1f062a` (merged with the base in `d6cb580ce5`).
 
+> **Update 2026-10-01 (DGX, operator session).** Merged into `adaptive-rx-UL-DL`: `port/multirx-rx-fixes` (scan-confirm
+> CFO fix, BRANCHFO thread safety, P39; §14.4), `cloud/dgx-next-steps` (`54bbf03b91`) and the A7 race follow-up
+> `claude/elegant-davinci-jlrfol` (`7f2fb28acf`). Merged tree verified **on the DGX** (§13.3, §14.7): ctest 126/129 (known
+> ARM set only), DGX rfsim gate PASS, 2 scan consumers OK, obs ≡ metrics exactly, A13 aarch64 5/5. GPU modules built
+> for `sm_121` and tested (K17). New designs (§0.6): Technique D convergence levers + compute acceleration, and
+> reconfiguration robustness. New known issues K32–K37 (verified bugs: chest cache, stale credit, GPU LDPC false pass,
+> GPU FEP staleness, CPU-vs-CUDA LDPC sensitivity, DCI/CORESET adaptiveness).
+
 ---
 
 ## 0. How to read this document
@@ -107,6 +115,17 @@ would otherwise be lost in the migration:
 | `evidence_2026-09-30/` | Fresh ctest result (§13) and full `sens6` environment dump (§4). |
 
 ---
+
+### 0.6 Design documents, plans and evidence created on the DGX (2026-09-30 → 2026-10-01)
+
+| Kind | Path | Status |
+|---|---|---|
+| Plan | `docs/superpowers/plans/2026-10-01-dgx-next-steps.md` | Track A done in cloud (A0–A7, A11, A13) + DGX checks (§25); DGX-only items and Track B (X410) open |
+| Spec | `docs/superpowers/specs/2026-10-01-technique-d-convergence-levers-design.md` | approved (incl. §9 compute acceleration, §9.4 verified prerequisites) |
+| Plan | `docs/superpowers/plans/2026-10-01-technique-d-convergence-levers.md` | revision 2 written, not started; branch to use: `td/convergence-levers` |
+| Spec | `docs/superpowers/specs/2026-10-01-reconfiguration-robustness-design.md` | written, awaiting operator review; plan not yet written |
+| Onboarding | `CLAUDE.md` | rules for agents (sens6 frozen, evidence labels, build/test commands) |
+| Evidence | `tests/passive_rx/dgx_host_snapshot_2026-09-30/` (env, ctest, phytest, port branch, `merge_2026-10-01/`), `tests/passive_rx/cloud_run_2026-10-01/` (cloud x86) | — |
 
 ## 1. Project purpose and system overview
 
@@ -341,6 +360,10 @@ through sensing metrics.
 |---|---|---|
 | **`adaptive-rx-UL-DL`** | **Current integration branch. HEAD `457c24fac5`.** Pushed to `github`. | Contains: plan Tasks 1–16+18 ("full-running agnosticity", merged at `25a8699a64`), `sdd/validation` (SA discovery-stall fix + Technique D fix), `sdd/integration` (lanes perf, misc, pusch, harq, dmrs2), `cloud/ue-localization` @ `621bdc32a2` (lanes ssb, nsa-mib, csirs + ocudu-dl, bwp harness, cbg test, OCUDU ZMQ harness). |
 | `cloud/ue-localization` | Merged into HEAD. | Tip `621bdc32a2` = HEAD code. |
+| `port/multirx-rx-fixes` | **Merged 2026-10-01** (`e5007ed501`). | 8 receiver fixes ported from `feature/multirx-clean-adaptive` after triage (K2), §14.4. |
+| `cloud/dgx-next-steps` | **Merged 2026-10-01** (`54bbf03b91`). | Track A of the DGX next-steps plan, cloud x86 session (§13.2, §14.5/§14.6). |
+| `claude/elegant-davinci-jlrfol` | **Merged 2026-10-01** (`7f2fb28acf`). | A7 follow-up race fixes incl. upstream `task_ans.c` acq_rel (K30). |
+| `td/convergence-levers` | Planned, not created. | Execution branch for the levers plan (§0.6). |
 | `sdd/integration`, `sdd/validation`, `sdd/gap-*`, `sdd/agn-*`, `sdd/t*` (receiver lanes) | Merged (ancestors of HEAD), except the ones listed below. | Lane worktrees on sens6 `/home/sens/NICOLA/agn-wt/<lane>`. |
 | `sdd/rfsim-gnb-test` (`67bb0eaa11`) | **Unmerged by design. NOT on the `github` remote (checked 2026-09-30).** | Test-only gNB injection knobs `ISAC_GNB_TEST_*` for the phy-test bed. Never merge. Only on sens6 (`agn-wt/gnbtest`) — without it the DGX phy-test bed runs with a plain HEAD `nr-softmodem` (no knobs; the baseline arm needs none). |
 | **`feature/multirx-clean-adaptive`** | **Unmerged, 238 commits ahead, diverged from HEAD at `51f7d3deac` (2026-09-23).** | Sensing (coherent fuser, CUDA RD, long dwell, trackers, monitor UI) **plus receiver fixes that are NOT in HEAD**: P39 single-branch PDSCH/PDCCH estimation, per-antenna work off the scan thread, BRANCHFO fixes (CRC-OK-only integration, reset at decode entry), learned LLR confidence / SNR gate, dedicated-SS AL1-only fix, `run_sensing.sh` launcher. The 2026-09-26 OTA runs (`sense_*`) used this branch (`173db3bf68`). **Merge debt: triage before resuming receiver work.** **NOT on the `github` remote (2026-09-30: `git ls-remote --heads origin` lists only `adaptive-rx-UL-DL`, `cloud/ue-localization`, `sdd/integration`, `sdd/validation`) → unreachable from the DGX until pushed from sens6 (K23).** |
@@ -1280,6 +1303,19 @@ Evidence: `tests/passive_rx/cloud_run_2026-10-01/{a1_baseline,a2_metrics,a3_obs,
 
 ---
 
+### 13.3 DGX verification of the merged tree (2026-10-01, `7f2fb28acf`, aarch64) — CURRENT
+
+| Check | Result |
+|---|---|
+| Build (Ninja, `ENABLE_ISAC_SENSING=ON`) | 0 errors |
+| ctest | **126/129**; failures = known ARM set only: `dft_test` (K21), `test_nr_modulation`, `test_nr_pusch_ra0_qam256` (K22); the new tests (metrics, observations, …) pass |
+| Blind-monitor shuffle seeds 1/3/5 | 198 pass + 2 skips each (A7 + follow-up tests included) |
+| Python: `dgx/test_score_rx.py`, `dgx/test_run_rx_dgx.py`, `campaign/test_campaign.py`, `monitor/test_health.py`, `monitor/test_monitor.py` | 4 / 21 (2 skipped) / 15 / 16 OK, monitor self-test OK |
+| A13 aarch64: `offline_sync_contract/build_and_run.sh` | OfflineSync.* **5/5** (aarch64 branch verified) |
+| GPU (`build_gpu`, `-DLDPC_CUDA_ARCH=121`) | builds; `nr_pdsch_gpu_fep_test` OK, `nr_polar_sc_cuda_test` bit-exact, `nr_pdcch_gpu_fep_test` internal-consistency only (K17, K34–K36) |
+
+Evidence: `tests/passive_rx/dgx_host_snapshot_2026-09-30/merge_2026-10-01/`. `[OFFLINE VERIFIED, DGX aarch64, 2026-10-01, 7f2fb28acf]`.
+
 ## 14. Exact offline validation procedure (run on the DGX after the build)
 
 ```text
@@ -1459,7 +1495,7 @@ Results are from that host only (§0.1 rule 5); nothing here has run on the DGX 
 drop_full ≤ ~1 %, the software build is known-good enough to begin X410/OTA validation.** If drop_full or
 `over_slot` is much worse than on sens6, the ARM CPU budget is the first problem to solve (§5.1).
 
-### 14.5 Cloud x86 rfsim results (2026-10-01) — NOT the DGX
+### 14.6 Cloud x86 rfsim results (2026-10-01) — NOT the DGX
 
 **Do not compare these numbers with §14.1.** Host: cloud container, Intel Xeon @2.80 GHz, 4 cores, no GPU, no IPv6 (rfsim
 via `V4SHIM`), scan thread **unpinned** (`1:8:-1`, the frozen conf pins core 5 which does not exist), 106 PRB fully
@@ -1502,6 +1538,21 @@ build, discovery stage) and 26 -> 0 (blind-PDCCH sources, TRACKING stage); remai
 UL decode is not exercised by phy-test (K28).
 
 ---
+
+### 14.7 DGX rfsim on the merged tree (2026-10-01, `7f2fb28acf`) — `[SIM VERIFIED, DGX aarch64]`
+
+| Arm (150 s, 106 PRB, fully agnostic, DGX gate 98 % / 1 %) | CONVERGED | ttc (s) | TB CRC | scanq drop_full | CPU |
+|---|---|---|---|---|---|
+| base_r1 (`rfsim_regress.sh`, with `ISAC_METRICS_PATH` + `ISAC_OBS_PATH`) | 2 | 0.81 | 99.05 % | 0.054 % | 298 % |
+| base_r2 | 2 | 1.61 | 98.59 % | 0.036 % | 300 % |
+| scan2 (`SCANTHREAD="2:16:-1"`, two blind-PDCCH consumers, unpinned) | 2 | 0.93 | 99.09 % | 0.195 % | 288 % |
+
+Gate PASS. Same regime as §14.1 (HEAD before the merge: 98.6–99.1 %) — no regression from Track A + follow-up on ARM.
+Two consumers work on ARM (first DGX run of A7); 273-PRB pinned A/B still open (§25).
+**Observation ≡ metrics:** cutting each run's obs records at the time of its last `ISAC_METRICS` snapshot, DL records =
+`obs_written` (55 025 / 55 022) and CRC-OK records = `pdschq_crc_ok` (54 556 / 54 330) exactly; obs ≤ decoded (layout
+probes excluded); `obs_dropped` 0. (`check_obs.py` reported FAIL only because both runs appended to one file and the
+final records come after the last 20 s snapshot — not a defect.)
 
 ## 15. Current OTA status (latest campaign only)
 
@@ -2061,6 +2112,18 @@ connected**; step 10 changes to the Milan-cell survey (§15.0, §15.4) because t
 6. **A7 273-PRB pinned A/B** — `"1:8:6"` vs `"2:16:6"` (cloud had only 106 PRB, unpinned, 4 cores).
 7. **Concurrency follow-ups (K30):** fix the remaining TSAN races UEthread_0 ↔ scan consumers in `nr_pdcch_blind_monitor.c` (discovery state written by `autodiscover_step` without the Phase-2 lock) and inside the PDSCH decode pool; one TSAN run that also instruments the PDSCH sweep/queue sources; launcher check for INSTANCE=A with cluster-1 pins.
 8. Re-run the gate with the DGX thresholds (98 / 1) and a campaign on the DGX; then **Track B** (§25 steps 8 onward, X410/OTA).
+
+**Progress 2026-10-01 (DGX, after merging the cloud work):** done on the DGX — follow-up 5 (**A13 aarch64** 5/5),
+follow-up 7 (**K30 races**: merged `71dbfd582a`; re-run TSAN on aarch64 still advisable), follow-up 8 first half
+(**DGX gate** PASS, §14.7), A7 two consumers at 106 PRB unpinned (§14.7), A9 Step 1–2 (GPU build + tests, K17).
+**Next, in this order:**
+1. Levers plan (§0.6) **pure tasks 1–7, 4b, 4c** (any time) and **F1 (K32) + F2 (K33)** — correctness first.
+2. Operator review of the reconfiguration-robustness spec → write its plan (K37: the 63-bit DCI cap must be lifted
+   before the Milan dedicated path, Track B4).
+3. K36: run `ldpctest` identically on x86 to decide whether the CPU-vs-CUDA LDPC gap is ARM-specific.
+4. Remaining DGX-only follow-ups: A6 Step 5 (core map measured), A7 273-PRB pinned A/B, A8 (USS GPU, after G1 K34),
+   A10, A11 timing, A12 (K22), TSAN on aarch64.
+5. X410 / Track B as soon as the radio is on site (§15.4 DGX/Milan procedure).
 
 **Rule: do not begin new receiver development on the DGX Spark until the current known-good offline baseline (§14)
 has been reproduced and the OTA baseline (§15.4) has been reproduced or its failure understood.**

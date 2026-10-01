@@ -1,0 +1,18 @@
+== regress (DGX gate 98/1) with metrics+obs
+{"arm": "base_r1", "bank_len": 46, "conv_s": 16.021, "cpu_pct": 298, "crc_pct": 99.05, "drop_full_pct": 0.0542, "first_crnti_s": 15.212, "ldpc_ok": 54556, "ldpc_seg_fail": 470, "max_rss_kb": 702044, "n_converged": 2, "pdsch_crc_ok": 54556, "pdsch_decoded": 55081, "scanq_drop_full": 207, "scanq_queued": 382189, "sync_s": 5.582, "ttc_s": 0.809}
+PASS base_r1
+{"arm": "base_r2", "bank_len": 46, "conv_s": 16.816, "cpu_pct": 300, "crc_pct": 98.59, "drop_full_pct": 0.0364, "first_crnti_s": 15.208, "ldpc_ok": 54330, "ldpc_seg_fail": 708, "max_rss_kb": 701844, "n_converged": 2, "pdsch_crc_ok": 54330, "pdsch_decoded": 55108, "scanq_drop_full": 139, "scanq_queued": 382352, "sync_s": 5.467, "ttc_s": 1.608}
+PASS base_r2
+evidence: /tmp/claude-1001/-home-nicola-NICOLA-passive-agnostic-rx-for-sensing/2b9ab125-f1be-4d95-97c3-976da8273820/scratchpad/merge_rfsim/regress
+regress_rc=0
+== 2 scan consumers
+{"arm": "scan2", "bank_len": 46, "conv_s": 16.13, "cpu_pct": 288, "crc_pct": 99.09, "drop_full_pct": 0.1947, "first_crnti_s": 15.201, "ldpc_ok": 54827, "ldpc_seg_fail": 463, "max_rss_kb": 689804, "n_converged": 2, "pdsch_crc_ok": 54827, "pdsch_decoded": 55331, "scanq_drop_full": 749, "scanq_queued": 384763, "sync_s": 5.374, "ttc_s": 0.929}
+== obs check
+ "obs_written": 55022,
+ "obs_dropped": 0,
+ "n_ul": 0,
+ "schema_all_1": true,
+ "PASS_n_dl_le_decoded": false,
+ "PASS_crc_ok_within_1pct": false,
+ "PASS_dropped_zero": true
+}
