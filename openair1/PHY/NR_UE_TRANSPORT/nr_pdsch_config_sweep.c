@@ -20,6 +20,7 @@
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_td_order.h"
 #include <string.h>
+#include <math.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include "common/utils/LOG/log.h"
@@ -500,7 +501,9 @@ int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mc
  * so equal keys keep the shuffle's order: with every key 0 the round is exactly the shuffle (neutral side
  * information is bit-identical to no side information). The shuffle itself still runs, so RNG use is
  * unchanged. Bottom-up merge sort on a heap scratch (2 x 32 KB at the cap: too much for a consumer
- * thread's stack); an all-equal round (the neutral case) returns before allocating. If the scratch
+ * thread's stack); the key array is always allocated, but an all-equal round (the neutral case) skips the
+ * merge buffer and the sort. A non-finite key (NaN/Inf from a bad weight) counts as 0, so the comparison
+ * stays a strict weak order and the round deterministic. If the scratch
  * cannot be allocated the round keeps the shuffle order -- ordering is a priority, never a correctness
  * input. */
 static void score_order_round(nr_pdsch_config_sweep_state_t *st)
@@ -514,6 +517,8 @@ static void score_order_round(nr_pdsch_config_sweep_state_t *st)
   bool varied = false;
   for (int i = 0; i < n; i++) {
     key[i] = nr_td_ordering_score(&st->hyp[i], st->side) + (st->probe_pass[i] > 0 ? st->side->w_probe : 0.0f);
+    if (!isfinite(key[i]))
+      key[i] = 0.0f;
     varied |= key[i] != key[0];
   }
   int *tmp = varied ? malloc(sizeof(*tmp) * (size_t)n) : NULL;
@@ -825,13 +830,27 @@ static const nr_pdsch_config_sweep_state_t *catalog_template(int typeA, nr_pdsch
   pthread_mutex_unlock(&g_tmpl_lock);
   return t; /* NULL only when every template slot holds another key (or malloc failed): caller enumerates */
 }
-static void catalog_fill(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA, nr_pdsch_legality_fn_t legality)
+/* Rebuilds the catalog and discards evidence; side/p2 are CONFIGURATION, not catalog: the whole-state
+ * memcpy/memset below would revert them to the template's neutral values, so they are carried over. */
+int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA,
+                                  nr_pdsch_legality_fn_t legality)
 {
+  if (st == NULL)
+    return 0;
+  const struct nr_td_side_info_s *side = st->side;
+  const bool p2 = st->p2;
   const nr_pdsch_config_sweep_state_t *t = legality ? catalog_template(typeA, legality) : NULL;
   if (t)
     memcpy(st, t, sizeof(*st));
   else
     nr_pdsch_config_sweep_init_legal(st, tda_count, typeA, legality);
+  st->side = side;
+  st->p2 = p2;
+  return st->n_hyp;
+}
+static void catalog_fill(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA, nr_pdsch_legality_fn_t legality)
+{
+  nr_pdsch_config_sweep_rebuild(st, tda_count, typeA, legality);
 }
 /* One recycled context state (under g_lock): an evicted or race-lost state is kept for the next new
  * context instead of being freed, so a burst of new contexts does not mmap/munmap (and, under
@@ -1012,6 +1031,10 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
       LOG_E(PHY, "SWEEP: cannot allocate a %zu-byte context state\n", sizeof(*fresh));
       return false;
     }
+    /* A new context starts neutral: a malloc'd or recycled buffer holds garbage or a previous context's
+     * configuration, which catalog_fill() would otherwise carry over. */
+    fresh->side = NULL;
+    fresh->p2 = false;
     catalog_fill(fresh, tda_count, typeA, legality);
     pthread_mutex_lock(&g_lock);
   }

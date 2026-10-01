@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <chrono>
 #include <algorithm>
@@ -1168,4 +1169,47 @@ TEST(PdschSweepK, P2ProbeEqualToMainIsNotScoredTwice) {
   nr_pdsch_config_sweep_feed_k(&st, o, 3);
   EXPECT_EQ(st.trials[2], 1u);
   EXPECT_EQ(st.trials[5], 1u);
+}
+
+/* Fix round 1: side/p2 are configuration and survive the catalog rebuild the runtime uses on reopen /
+ * prior restore (template memcpy and the init_legal fallback), while the evidence is discarded. */
+TEST(PdschSweepK, RebuildPreservesSideAndP2) {
+  static nr_pdsch_config_sweep_state_t st;
+  static nr_td_side_info_t s = {};
+  ASSERT_GT(nr_pdsch_config_sweep_init_legal(&st, 2, 0, test_legal), 0);
+  for (int round = 0; round < 2; round++) { /* round 0 builds the shared template, round 1 copies it */
+    st.side = &s; st.p2 = true; st.trials[1] = 9; st.probe_pass[1] = 4;
+    ASSERT_GT(nr_pdsch_config_sweep_rebuild(&st, 2, 0, test_legal), 0);
+    EXPECT_EQ(st.side, &s); EXPECT_TRUE(st.p2);
+    EXPECT_EQ(st.trials[1], 0u); EXPECT_EQ(st.probe_pass[1], 0);
+  }
+  st.side = &s; st.p2 = true; /* no legality: init_legal fallback path */
+  nr_pdsch_config_sweep_rebuild(&st, 2, 0, nullptr);
+  EXPECT_EQ(st.side, &s); EXPECT_TRUE(st.p2);
+  st.side = nullptr;
+}
+/* A brand-new runtime context is neutral even when its buffer is recycled. */
+TEST(PdschSweepK, FreshRuntimeContextIsNeutral) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_sweep_ticket_t t{}; nr_pdsch_cfg_hypothesis_t h;
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x77, 0x4711, 0, 2, 0, test_legal, &t, &h));
+  static nr_pdsch_config_sweep_state_t snap;
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &snap));
+  EXPECT_EQ(snap.side, nullptr); EXPECT_FALSE(snap.p2);
+  nr_pdsch_config_sweep_reset_all();
+}
+/* A weight that makes every key NaN keeps the round exactly the shuffle (non-finite key = 0). */
+TEST(PdschSweepK, NonFiniteKeysKeepShuffleOrder) {
+  static nr_pdsch_config_sweep_state_t a, b;
+  nr_pdsch_config_sweep_init(&a, 4); nr_pdsch_config_sweep_init(&b, 4);
+  nr_td_side_info_t s = {}; s.obs_dmrs_mask = -1; s.obs_qm = -1; s.obs_last_symbol = -1;
+  s.f_S = s.f_L = s.f_mapping = s.f_k0 = s.f_dmrs_add_pos = s.f_dmrs_max_len = -1;
+  s.w_probe = NAN; /* the score's own weights are guarded by "w > 0"; the probe bonus is not */
+  for (int i = 0; i < b.n_hyp; i++)
+    b.probe_pass[i] = 1; /* every key NaN */
+  b.side = &s;
+  for (int i = 0; i < 2 * a.n_hyp; i++) {
+    nr_pdsch_cfg_hypothesis_t h; ASSERT_EQ(nr_pdsch_config_sweep_next(&a, &h), nr_pdsch_config_sweep_next(&b, &h)) << i;
+  }
+  b.side = nullptr;
 }

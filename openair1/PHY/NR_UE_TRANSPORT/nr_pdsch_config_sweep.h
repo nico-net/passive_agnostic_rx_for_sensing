@@ -116,6 +116,8 @@ typedef struct {
   uint16_t probe_pass[NR_PDSCH_SWEEP_MAX_HYP];
   uint16_t probe_fail[NR_PDSCH_SWEEP_MAX_HYP];
   uint16_t probe_inconclusive[NR_PDSCH_SWEEP_MAX_HYP];
+  /* CONFIGURATION, not catalog/evidence: preserved across catalog rebuilds (nr_pdsch_config_sweep_rebuild(),
+   * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
   const struct nr_td_side_info_s *side; ///< ordering side information (nr_td_order.h); NULL = neutral (today's order)
   bool     p2;        ///< failure-only probe evidence enabled
 } nr_pdsch_config_sweep_state_t;
@@ -160,6 +162,11 @@ int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_
 int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st);
 
 typedef int32_t (*nr_pdsch_legality_fn_t)(int, int, int, int, int, int);
+/** Rebuild the full catalog in place exactly as a runtime context does (shared template copy, or
+ *  init_legal() when none is available), discarding all evidence but KEEPING the configuration fields
+ *  side and p2. st must already be a valid state (side/p2 are read). Returns the hypothesis count. */
+int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA,
+                                  nr_pdsch_legality_fn_t legality);
 /** Enumerates the complete catalog, excludes undefined masks, merges identical effective PDUs.
  * The caller-owned pure state is not internally synchronized. */
 int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_count,
