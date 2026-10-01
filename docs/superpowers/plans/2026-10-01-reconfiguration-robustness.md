@@ -21,6 +21,7 @@
 - Targets: soft recovery ≤ 10 s, hard ≤ 30 s at ≥ 100 grants/s; 0 stale winners; ≤ 1 false SOFT trigger per hour and 0 hard on a stable cell.
 - Repository rules (`CLAUDE.md`): sens6-frozen gate before every commit (`git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30`); new configs use `.cfg`; explicit `git add`; no stash; never build while `pgrep -x nr-uesoftmodem`; evidence labels naming the host; regression gate `tests/passive_rx/dgx/rfsim_regress.sh` (DGX thresholds 98 % / 1 %; cloud x86 93 % / 2.5 %).
 - Branch: `rr/reconfig-robustness` from `adaptive-rx-UL-DL`. Never push to `adaptive-rx-UL-DL`.
+- **Acceleration (levers spec §9, operator 2026-10-01):** reject useless work, share common work, test several hypotheses per grant, batch expensive PHY work on the GPU, avoid cold relearning. Control logic (epoch module, triggers, state machines, CORESET life cycle, length contexts, KL/selection) stays on the CPU. GPU use here: (a) **GPU polar batch** (`nr_polar_gpu_mod`, `NR_GPU_POLAR=1`, bit-exact on GB10) for every DCI-length sweep and re-lock sweep, CPU path as fallback; (b) **idsweep GPU** for the scrambling-ID stage of continuous discovery where applicable; (c) **PDSCH re-learning** after an epoch change uses the levers VERIFY mode + GrantWork + top-K CB0 probes + batched GPU LDPC once `td/convergence-levers` provides them. GPU LDPC/FEP results are not trusted before the levers G1 (K34) / G3 (K35) fixes; the PDCCH GPU front end stays unused (V8).
 
 ## Coordination with the levers plan (branch `td/convergence-levers`)
 
@@ -65,7 +66,8 @@ static inline uint32_t nr_dci_bits_hash(const nr_dci_bits_t *b, int len);
 - [ ] **Step 1: Failing tests** (extend existing gtests): `test_nr_pdcch_blind_monitor` — a synthetic DCI 1_1 of 80 and 140 bits is polar-encoded with the real encoder, decoded through the blind candidate path and its RNTI recovered; `test_nr_pdcch_dci_length_sweep` — the sweep locks length 100 on synthetic evidence; existing ≤ 63 tests unchanged.
 - [ ] **Step 2:** mechanical type migration (compile-driven), then raise guards to `NR_DCI_MAX_PAYLOAD`.
 - [ ] **Step 3: Search order** — order candidate lengths by distance to lengths already seen on this cell (any RNTI/geometry), then outward; 6-sigma gate unchanged. Test: with a seen length 47, the first 10 lengths tried are 47, 46, 48, … .
-- [ ] **Step 4:** full ctest; shuffle seeds 1/3/5; rfsim regression gate (cold-sweep time on the 106-PRB bed: `first_crnti_s` → `bank add` must not grow > 25 % vs before, 2 runs each).
+- [ ] **Step 3b: GPU polar for the wider sweep.** Route the length-sweep candidate decodes (the existing `sweep_gpu_prefill` / lane batch call sites in `nr_pdcch_blind_monitor_rt.c` ~2141, ~2239) through `nr_polar_gpu_mod` for lengths up to 140 bits; extend `nr_polar_sc_cuda` / its params if they assume A ≤ 64 or ≤ 128 (check), keep per-item CPU fallback on `ok=0`. Test: `nr_polar_sc_cuda_test` extended with A = 80, 128, 129, 140 — bit-exact vs CPU (GPU build dir only; skipped without `ENABLE_LDPC_CUDA`).
+- [ ] **Step 4:** full ctest; shuffle seeds 1/3/5; rfsim regression gate (cold-sweep time on the 106-PRB bed: `first_crnti_s` → `bank add` must not grow > 25 % vs before, 2 runs each), **measured on the DGX with and without `NR_GPU_POLAR=1`** (report both; the 25 % budget applies to the CPU path, the GPU path should be faster than before).
 - [ ] **Step 5:** commit `feat(rr): DCI lengths up to 140 bits end to end (K37 part 1)`.
 
 ### Task R3: Per-RNTI length state machine SEARCHING/LOCKED/SUSPECT (Sonnet)
@@ -82,7 +84,7 @@ int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t
 ```
 - "RNTI active elsewhere" (SA and NSA): persistence-table sighting with this RNTI's mask at any length, RAR anchor (`record_trusted`), accepts on another banked geometry; SA additionally CORESET#0 C-RNTI accepts. Never requires CORESET#0.
 - [ ] **Step 1: Failing tests:** `LockedToSuspectAfterNMisses` (N_suspect = 200 default, env `ISAC_RECONF_N_SUSPECT`), `InactiveRntiNeverSuspect` (misses without activity elsewhere keep LOCKED), `SuspectWithoutCoreset0Evidence` (activity only via persistence/RAR → SUSPECT), `RelockSameLengthReturnsLocked`, `RelockDifferentLengthReplaces` (logs `DCI length RELOCK rnti=… old=… new=…`), `RelockOrderOldFirst`.
-- [ ] **Step 2–4:** implement; on RELOCK reopen the Technique D contexts and the layout pin keyed on the old length (call existing reopen/invalidate entry points — read `nr_pdsch_config_sweep.h` and `nr_dci11_pin.h`); behind `ISAC_RECONF=1`.
+- [ ] **Step 2–4:** implement; SUSPECT re-lock sweeps use the same GPU polar batch path as R2 Step 3b (CPU fallback) and may run on any of the N blind-PDCCH scan consumers (A7: thread-safe since `b6e5fb27ac` + `71dbfd582a`; length contexts are accessed under the existing `g_dl_length_lock`); on RELOCK reopen the Technique D contexts and the layout pin keyed on the old length (call existing reopen/invalidate entry points — read `nr_pdsch_config_sweep.h` and `nr_dci11_pin.h`); behind `ISAC_RECONF=1`.
 - [ ] **Step 5:** commit `feat(rr): per-RNTI DCI length re-lock (SUSPECT) on SA and NSA evidence (K37 part 2)`.
 
 ### Task R4: Two concurrent lengths per (geometry, RNTI) (Sonnet)
@@ -100,7 +102,7 @@ int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t
 
 ### Task R6: Continuous low-duty discovery (Sonnet)
 
-- After the first bank entry, keep Technique A running 1 occasion in 20 (`ISAC_RECONF_DISCOVERY_DUTY`); new extents verified and banked as today. Test: unit test on the duty scheduler; rfsim gate with `ISAC_RECONF=1`: `scanq drop_full` not worse than baseline within spread. Commit.
+- After the first bank entry, keep Technique A running 1 occasion in 20 (`ISAC_RECONF_DISCOVERY_DUTY`); new extents verified and banked as today. The scrambling-ID stage of new-extent discovery uses the GPU idsweep path when the GPU build is present (stage-1/2 tool, 11× on GB10; CPU otherwise); the extra discovery work is spread over the N scan consumers. Test: unit test on the duty scheduler; rfsim gate with `ISAC_RECONF=1`: `scanq drop_full` not worse than baseline within spread, measured with 1 and 2 scan consumers. Commit.
 
 ---
 
@@ -150,6 +152,7 @@ void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn);
 ### Task R10: Consumers — length contexts, layout pins, CORESET bank, Technique D (Sonnet; Opus review)
 
 - Listener: on any bump, length contexts LOCKED → SUSPECT (old length first); layout pin config key includes the epoch; CORESET entries VERIFIED → STALE (hint, re-verified); Technique D settled contexts → VERIFY mode (previous winner tried first; levers spec §9.1) — **coordinate with levers R1/R2; if they are not merged, implement as "reopen with previous winner as first hypothesis" only.**
+- **Recovery-time dependency (explicit):** the §2 targets (soft ≤ 10 s, hard ≤ 30 s) for PDSCH re-learning assume the levers VERIFY mode + GrantWork + top-K CB0 probes + batched GPU LDPC (levers R1, R2, G1, G4). Without them, recovery runs at today's CPU Technique D speed (seconds at high decode rate, minutes at low p_true); R13 must report which compute path was active and score the targets against it.
 - HARD_RESET: drop dedicated state of the old identity (keep dormant keyed by identity_gen; never applied to the new one).
 - Tests: `SoftBumpMakesLockedSuspectKeepsOldFirst`, `HardResetNeverReusesOldIdentityState`, `HintConfirmedRestoresTrusted`. Commit.
 
@@ -175,4 +178,4 @@ void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn);
 
 ## Self-review record (2026-10-01)
 
-Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps.
+Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch).
