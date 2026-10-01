@@ -1501,7 +1501,7 @@ The monitor today is sensing-oriented plus regex log tailing; RFCENSUS, scanq an
 - Produces: `GET /health` → `{"metrics": <last metrics object or null>, "metrics_age_s": float|null, "bad_lines": int, "rates": {"crc_pct_window": float|null, "grants_per_s": float|null, "drop_full_pct": float|null}, "obs": {"dl_per_s": float, "ul_per_s": float, "top_rnti": [[rnti, n], ...], "prb_hist": [n0..n9]}}`.
 - Launch: `tests/passive_rx/.venv/bin/python tests/passive_rx/monitor/monitor.py --metrics <run>/metrics.jsonl --obs <run>/obs.jsonl --log <run>/rx.log --port 8080`.
 
-- [ ] **Step 1: Write the failing test `test_health.py`**
+- [x] **Step 1: Write the failing test `test_health.py`**
 
 ```python
 import json, os, sys, tempfile, time, unittest
@@ -1544,12 +1544,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `tests/passive_rx/.venv/bin/python tests/passive_rx/monitor/test_health.py -v`
 Expected: FAIL (`ImportError: cannot import name 'JsonlTail'`).
 
-- [ ] **Step 3: Add to `monitor.py`** (module level, above the HTTP handler):
+- [x] **Step 3: Add to `monitor.py`** (module level, above the HTTP handler):
 
 ```python
 class JsonlTail:
@@ -1620,24 +1620,24 @@ def health_snapshot(metrics, obs):
 
 Wire it: parse `--metrics` and `--obs` in the existing argparse block (~644-658); create `METRICS = JsonlTail(args.metrics)`, `OBS = JsonlTail(args.obs, keep=5000)`; poll both in the existing background loop that tails `--log` (or a new 1 s thread); add to the request handler (~601-635): `if self.path == "/health": return self._json(health_snapshot(METRICS, OBS))` (use the handler's existing JSON-reply helper name; read it first).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `tests/passive_rx/.venv/bin/python tests/passive_rx/monitor/test_health.py -v && tests/passive_rx/.venv/bin/python tests/passive_rx/monitor/test_monitor.py`
 Expected: 5 new tests OK; the existing `test_monitor.py` still passes.
 
-- [ ] **Step 5: Add the "Receiver health" tab** to `monitor.html` (invoke the **frontend-design** skill first; follow the page's existing vanilla-JS style, no new libraries). Required content, polling `/health` every 2 s:
-  - Tiles: acquisition state (colour: TRACKING green, LOST red, others amber), PCI, CRC % (window), grants/s, scanq drop_full % (red > 1 %), PDSCH queue drops, obs dropped (red > 0), metrics age (red > 45 s = receiver silent).
+- [x] **Step 5: Add the "Receiver health" tab** to `monitor.html` (invoke the **frontend-design** skill first; follow the page's existing vanilla-JS style, no new libraries). Required content, polling `/health` every 2 s:
+  - Tiles: acquisition state (colour by the REAL nr_passive_acq_state_name() names: DL_CONVERGED/UL_CONVERGED/TRACKING green, LOST/INVALID red, all other states amber), PCI, CRC % (window), grants/s, scanq drop_full % (red > 1 %), PDSCH queue drops, obs dropped (red > 0), metrics age (red > 45 s = receiver silent).
   - Sparkline of `crc_pct_window` and `grants_per_s` over the last 30 snapshots (canvas, same drawing helpers as the existing `dlMap`).
   - Table: top-5 RNTIs from observations; PRB-width histogram (10 bins).
   - An explicit "no data yet" state when `metrics` is null.
 
-- [ ] **Step 6: Manual check against a real run** (🔁 Haiku)
+- [x] **Step 6: Manual check against a real run** (🔁 Haiku)
 
 Run: start an rfsim arm with metrics+obs (A4 Step 6 campaign dir), then
 `tests/passive_rx/.venv/bin/python tests/passive_rx/monitor/monitor.py --metrics <run>/metrics.jsonl --obs <run>/obs.jsonl --log <run>/rx.log --port 8080 &` and `curl -s localhost:8080/health | python3 -m json.tool | head -30`.
 Expected: `acq_state` present, `grants_per_s` ≈ 380 at 106 PRB phy-test, `bad_lines` 0. Stop the monitor with `kill -INT`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tests/passive_rx/monitor/monitor.py tests/passive_rx/monitor/monitor.html tests/passive_rx/monitor/test_health.py
@@ -1645,6 +1645,8 @@ git commit -m "feat(monitor): receiver-health tab from ISAC_METRICS and per-gran
 ```
 
 ---
+
+> A5 implementation notes (2026-10-01): `JsonlTail` reads bytes, caps each poll at 4 MiB (seeks to the tail and drops the first partial line), resets on truncation, inode change or file disappearance; `metrics_age_s` is wall-clock now minus the metrics file mtime (the receiver's monotonic clock is not comparable); null `nb_rb`/`rnti` in obs are skipped; handler gets `metrics`/`obs` args; the tab skips the log panels so it sits at the top. Tests: 10 in `test_health.py`.
 
 ### Task A6: DGX core map and launcher (Sonnet; 🔁 Haiku for the A/B repeats)
 

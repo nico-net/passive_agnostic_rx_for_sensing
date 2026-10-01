@@ -99,7 +99,7 @@ body.nologs .logpane{display:none!important}
 <div id="liveWrap"></div>
 
 <script>
-const TABS = ["Live","Paper stats","PDCCH / DCI","Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
+const TABS = ["Live","Paper stats","PDCCH / DCI","Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene","Receiver health"];
 let tab = 0, state = null, rxId = null, pollError = null, paper = null;
 
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
@@ -880,7 +880,87 @@ function decoderPanel() {
   return row;
 }
 
-const RENDER = [null, tabPaper, tabDCI, tabHealth, tabDL, tabUL, tabTracking, tabConfig];  // index 0 = Live, handled before this table
+const RENDER = [null, tabPaper, tabDCI, tabHealth, tabDL, tabUL, tabTracking, tabConfig, tabRxHealth];  // index 0 = Live, handled before this table
+
+/* ---- Receiver health: /health = receiver metrics JSONL (last line + window rates) and the per-grant
+   observation JSONL. Independent of CPI reports, so it renders before any report exists. A missing
+   or silent file is shown as such, never as zeros. ---- */
+let health = null, healthErr = false; const healthHist = [];
+// Colour by the receiver's real acq_state names (nr_passive_acq_state_name): the settled states are
+// green, LOST/INVALID red, every state still on the way up amber.
+const ACQ_GOOD = ["DL_CONVERGED","UL_CONVERGED","TRACKING"], ACQ_BAD = ["LOST","INVALID"];
+async function healthPoll() {
+  try {
+    health = await (await fetch("/health", {cache: "no-store"})).json(); healthErr = false;
+    const r = health.rates || {};
+    if (health.metrics) {
+      healthHist.push({crc: r.crc_pct_window, gps: r.grants_per_s, t: health.metrics.t_mono_ns});
+      if (healthHist.length > 30) healthHist.shift();
+    }
+  } catch (e) { healthErr = true; }
+  if (TABS[tab] === "Receiver health") render();
+}
+function spark(cv, vals, color, lo, hi) {
+  const ctx = cv.getContext("2d"), W = cv.width, H = cv.height;
+  ctx.fillStyle = "#0d1017"; ctx.fillRect(0, 0, W, H);
+  const ok = vals.map((v, i) => [i, v]).filter(p => p[1] != null && isFinite(p[1]));
+  if (ok.length < 2) { ctx.fillStyle = "#4a5568"; ctx.font = "12px system-ui"; ctx.fillText("collecting samples", 8, H / 2 + 4); return; }
+  const mx = hi != null ? hi : Math.max(...ok.map(p => p[1]), 1), mn = lo != null ? lo : 0;
+  const X = i => 6 + i * (W - 12) / Math.max(vals.length - 1, 1), Y = v => H - 6 - (Math.min(Math.max(v, mn), mx) - mn) / (mx - mn || 1) * (H - 12);
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath();
+  ok.forEach((p, k) => k ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])));
+  ctx.stroke();
+}
+function tabRxHealth(v) {
+  const m = health && health.metrics;
+  if (!m) {
+    v.appendChild(el("div","empty", healthErr
+      ? "dashboard cannot reach /health"
+      : "no data yet — start the monitor with --metrics <run>/metrics.jsonl (and --obs); this page fills in when the receiver writes its first line"));
+    return;
+  }
+  const r = health.rates || {}, o = health.obs || {}, age = health.metrics_age_s;
+  const acq = m.acq_state || "?";
+  const acqCls = ACQ_GOOD.includes(acq) ? "good" : ACQ_BAD.includes(acq) ? "bad" : "warn";
+  const t1 = el("div","row");
+  t1.appendChild(card("Acquisition state", acq, acqCls, `${m.acq_transitions ?? "-"} transitions, ${m.acq_sync_losses ?? "-"} sync losses`));
+  t1.appendChild(card("PCI", m.pci == null ? "—" : m.pci, null, `abs slot ${m.abs_slot ?? "-"}`));
+  t1.appendChild(card("PDSCH CRC (window)", r.crc_pct_window == null ? "—" : fmt(r.crc_pct_window, 1) + "%", null,
+    `${m.pdschq_crc_ok ?? "-"} CRC-OK / ${m.pdschq_decoded ?? "-"} decoded`));
+  t1.appendChild(card("Grants / s", fmt(r.grants_per_s, 1), null, "decoded PDSCH TBs per second"));
+  v.appendChild(t1);
+  const t2 = el("div","row");
+  t2.appendChild(card("Scan queue drop_full", r.drop_full_pct == null ? "—" : fmt(r.drop_full_pct, 2) + "%",
+    r.drop_full_pct != null && r.drop_full_pct > 1 ? "bad" : "good", `${m.scanq_drop_full ?? "-"} dropped of ${m.scanq_queued ?? "-"} queued`));
+  const pd = (m.pdschq_drop_full || 0) + (m.pdschq_drop_stale || 0);
+  t2.appendChild(card("PDSCH queue drops", pd, pd > 0 ? "warn" : "good", `${m.pdschq_drop_full ?? "-"} full / ${m.pdschq_drop_stale ?? "-"} stale`));
+  t2.appendChild(card("Observations dropped", m.obs_dropped ?? "—", m.obs_dropped > 0 ? "bad" : "good", `${m.obs_written ?? "-"} written / ${m.obs_pushed ?? "-"} pushed`));
+  t2.appendChild(card("Metrics age", age == null ? "—" : fmt(age, 0) + " s", age != null && age > 45 ? "bad" : "good",
+    age != null && age > 45 ? "receiver silent" : "receiver writing"));
+  v.appendChild(t2);
+
+  const c1 = el("canvas"), c2 = el("canvas"); c1.width = c2.width = 540; c1.height = c2.height = 64;
+  const sp = el("div","row");
+  sp.appendChild(panel("PDSCH CRC %, last 30 samples", c1));
+  sp.appendChild(panel("Grants / s, last 30 samples", c2));
+  v.appendChild(sp);
+  spark(c1, healthHist.map(h => h.crc), "#4cc38a", 0, 100);
+  spark(c2, healthHist.map(h => h.gps), "#58b4d1");
+
+  const tr = (o.top_rnti || []).map(([rnti, n]) => [rnti, "0x" + rnti.toString(16), n]);
+  const hist = o.prb_hist || [], hmax = Math.max(1, ...hist);
+  const hb = el("div");
+  hist.forEach((n, i) => {
+    const r2 = el("div","kv"); r2.appendChild(el("span","k", `${Math.round(i * 27.5)}–${Math.round((i + 1) * 27.5)} PRB`));
+    const bar = el("div","bar"); bar.style.width = "55%"; const f = el("div"); f.style.width = (100 * n / hmax) + "%"; f.style.background = "var(--cyan)"; bar.appendChild(f);
+    r2.appendChild(bar); r2.appendChild(el("span","v", n)); hb.appendChild(r2);
+  });
+  const rates = el("div","csub", `observations: DL ${fmt(o.dl_per_s, 1)}/s, UL ${fmt(o.ul_per_s, 1)}/s` + (health.bad_lines ? ` | ${health.bad_lines} unreadable lines skipped` : ""));
+  const row = el("div","row");
+  row.appendChild(panel("Top RNTIs (recent grants)", tr.length ? table(["RNTI","hex","grants"], tr) : el("div","empty","no observations yet"), rates));
+  row.appendChild(panel("Grant width, PRBs (10 bins of 27.5)", hb));
+  v.appendChild(row);
+}
 
 function renderChrome() {
   const nav = document.getElementById("tabs"); nav.textContent = "";
@@ -927,6 +1007,7 @@ function render() {
   const prev = [...v.querySelectorAll(".log")].map(n => ({
     top: n.scrollTop, stick: n.scrollHeight - n.scrollTop - n.clientHeight < 24 }));
   v.textContent = "";
+  if (RENDER[tab] === tabRxHealth) { tabRxHealth(v); return; }   // own data source; skip the log panels so it sits at the top
   if (state && state.log) v.appendChild(discoveryPanel());
   if (state && state.log) v.appendChild(decoderPanel());
   // Paper stats and the DCI tab come from /paper, not from a receiver report, so they render even
@@ -961,6 +1042,7 @@ function livenessNote() {
   return {cls: "ok", txt: `live — last line ${age.toFixed(1)}s ago`};
 }
 
+setInterval(healthPoll, 2000); healthPoll();
 async function poll() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 4000);
