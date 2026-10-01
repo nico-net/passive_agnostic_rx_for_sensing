@@ -46,7 +46,7 @@ Parallelism: tasks with no shared files may run in parallel under superpowers:di
 
 ---
 
-## TRACK A — does NOT need the X410 (offline + rfsim, runnable in a cloud session with a GPU-less host except A8/A9-GPU)
+## TRACK A — does NOT need the X410 (offline + rfsim; runnable in a cloud session except A8 and A9, which need the DGX GPU)
 
 ### Task A0: Agent onboarding file and Python environment (🔁 Haiku)
 
@@ -1535,33 +1535,45 @@ Expected before the fix: TSAN reports data races on `g_recent*` / counters (FAIL
 
 ---
 
-### Task A8: Data-parallel USS hash tracker (CPU threads, then GPU) (Sonnet)
+### Task A8: USS hash tracker on the GPU (multi-cell ready), CPU serial path kept as reference (Sonnet; DGX only — needs a GPU)
 
-`pdcchUssHash` does ~88 M inner steps per job, independent per RNTI (loop `rnti` 1..65535 × 3 hash ids × ≤64 samples × 7 M), reduced to a top-4 (research 2026-10-01, `nr_pdcch_uss_tracker.c` `score_snapshot()` ~:120).
+`pdcchUssHash` does ~88 M inner steps per job, independent per RNTI (loop `rnti` 1..65535 × 3 hash ids × ≤64 samples × 7 M), reduced to a top-4 (research 2026-10-01, `nr_pdcch_uss_tracker.c` `score_snapshot()` ~:120). It is pure integer/float work on stored samples (no IQ), the same shape as idsweep (11× on GB10, 2026-09-30). Decision (operator, 2026-10-01): go **directly to the GPU** and design the kernel for **batches of (cell, geometry, job)** so the multi-cell work (§17–§20) reuses it; the existing serial CPU `score_snapshot()` stays as the bit-exact reference and as the fallback when the GPU module is not built (`ENABLE_LDPC_CUDA=OFF`, default) or fails to load. No multi-threaded CPU variant.
 
 **Files:**
-- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c`
-- Create: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_uss_tracker_test.cc`
-- Modify: `CMakeLists.txt` (test block)
-- (Phase 2, optional) Create: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_gpu.cu` behind `ENABLE_LDPC_CUDA`
+- Create: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_gpu.cu` (kernel + host wrapper)
+- Create: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_gpu.h` (C ABI, dlopen'd like `libpdcch_gpu.so`)
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c` (export the snapshot layout; try GPU, fall back to CPU)
+- Modify: `openair1/PHY/CODING/CMakeLists.txt` (new `uss_gpu` MODULE target next to `pdcch_gpu`, same `LDPC_CUDA_ARCH` property, built only with `ENABLE_LDPC_CUDA`)
+- Create: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_uss_gpu_test.cc` (+ CMake block inside the `ENABLE_LDPC_CUDA` section)
 
 **Interfaces:**
-- Produces: env `ISAC_PDCCH_USS_THREADS` (default 1 = today's behaviour; the DGX core map uses 3 → cores `ISAC_PDCCH_USS_CORE`, +1, +2 are NOT pinned individually; workers inherit the tracker thread's affinity mask widened to `ISAC_PDCCH_USS_CPUS`, e.g. `7,17,18`).
-- Test hook: `int nr_pdcch_uss_score_for_test(const void *snapshot, int nthreads, uint16_t top_rnti[4], float top_score[4]);` compiled under `NR_PDCCH_BLIND_TESTING`.
+- Produces (C ABI, `nr_pdcch_uss_gpu.h`):
 
-- [ ] **Step 1: Failing equivalence test** — build a synthetic snapshot (fixed seed, 64 samples, one planted RNTI 0x4768 whose hashed candidates match the observed CCEs); assert `nthreads=1` and `nthreads=4` give identical `top_rnti[]` and `top_score[]` (bit-exact: partition the RNTI range into contiguous chunks, each thread keeps a local top-4, merge in chunk order — ties broken by lower RNTI, exactly as the serial `insert_top`).
+```c
+/* One scoring job = one (cell, CORESET geometry) snapshot. A batch scores many jobs in one launch. */
+typedef struct {
+  const void *snapshot;   /* the tracker's own snapshot struct (layout exported from nr_pdcch_uss_tracker.c) */
+  uint32_t job_tag;       /* caller's id (cell_track_id << 16 | geometry index), echoed back */
+} nr_uss_gpu_job_t;
+typedef struct {
+  uint32_t job_tag;
+  uint16_t top_rnti[4];
+  float top_score[4];
+  uint8_t top_hash[4], top_m[4];
+} nr_uss_gpu_result_t;
+int nr_uss_gpu_init(void);                          /* 0 = ok; <0 = no device / load failure (caller falls back) */
+int nr_uss_gpu_score(const nr_uss_gpu_job_t *jobs, int n_jobs, nr_uss_gpu_result_t *out); /* 0 = ok */
+void nr_uss_gpu_shutdown(void);
+```
+- Produces (tracker side): `int nr_pdcch_uss_score_cpu_for_test(const void *snapshot, nr_uss_gpu_result_t *out);` under `NR_PDCCH_BLIND_TESTING`; env `ISAC_PDCCH_USS_GPU=0` forces the CPU path.
+- Kernel layout: one thread per (job, RNTI); per-thread loop over the 3 hash ids × samples × 7 M exactly as the CPU code; block-level top-4 reduction, then a per-job merge kernel; **ties broken by lower RNTI** (the CPU `insert_top` order) so results are bit-identical.
 
-- [ ] **Step 2: Run → FAIL** (hook missing).
-
-- [ ] **Step 3: Implement** the chunked pthread fan-out inside `score_snapshot()` (threads created once at tracker start, a barrier per job; do NOT create threads per job).
-
-- [ ] **Step 4: Test passes; measure** per-job wall time (existing `USS_TRACK` log line + add `score_us=` to it) at 1 vs 3 threads on the 273-PRB rfsim arm. Expected: ≥ 2× faster at 3 threads, identical `USS_TRACK top=`.
-
-- [ ] **Step 5: Commit**; PROJECT_MEMORY §14.3 item 3 updated with measured speed-up.
-
-- [ ] **Step 6 (optional, only if Step 4 leaves `pdcchUssHash` > 50 % of a core at 273 PRB):** GPU kernel one-thread-per-RNTI (pattern: `tests/passive_rx/sens6_host_snapshot_2026-09-30/discovery_tool/idsweep_gpu.cu`, verified on `sm_121` 2026-09-30), same equivalence test against the CPU path.
-
----
+- [ ] **Step 1: Failing equivalence test** — synthetic snapshots (fixed seeds): (a) one planted RNTI 0x4768 whose hashed candidates match the observed CCEs, (b) pure noise, (c) two planted RNTIs with equal scores (tie rule). Batch all 3 as one `nr_uss_gpu_score()` call with distinct `job_tag`s; assert each GPU result equals `nr_pdcch_uss_score_cpu_for_test()` field-for-field (scores compared exactly — use the same float accumulation order per thread as the CPU loop).
+- [ ] **Step 2: Run → FAIL** (module missing). Build in the GPU build dir from Task A9 Step 1 (`-DENABLE_LDPC_CUDA=ON -DLDPC_CUDA_ARCH=121`; run A9 Step 1 first if that dir does not exist).
+- [ ] **Step 3: Implement** kernel + host wrapper (unified memory on GB10: `cudaMallocManaged` for the snapshot batch is acceptable; keep one persistent stream; no per-job allocations).
+- [ ] **Step 4: Wire the tracker** — at tracker start call `nr_uss_gpu_init()` via dlopen (pattern: `nr_gpu_pdcch_fep_load()` in `nr_pdcch_gpu_fep.h:118`); on success score queued jobs in batches (drain up to 16 queued jobs per launch), on any GPU error log once and fall back to the CPU path permanently for the run. Log `USS_TRACK ... path=gpu|cpu score_us=`.
+- [ ] **Step 5: Verify** — the test passes; on the 273-PRB rfsim arm with the GPU build: `USS_TRACK top=` lines identical to a CPU run on the same bed (same seeds/config), `pdcchUssHash` thread CPU (thrprof) drops below 10 %, regression gate PASS. Also run the CPU build (`ENABLE_LDPC_CUDA=OFF`) gate to prove the fallback.
+- [ ] **Step 6: Commit**; PROJECT_MEMORY §14.3 item 3 and K27 updated with the measured GPU speed-up (`[SIM VERIFIED]`).
 
 ### Task A9: GPU build and re-measurement on GB10 (Sonnet)
 
@@ -1699,12 +1711,12 @@ Prerequisites: Track A tasks A1–A6 merged (campaign runner, metrics, observati
 - **Wave 1 (parallel, separate worktrees, no rfsim contention):** A0, A12 (starts with fixture only), A13.
 - **Wave 2:** A1 (needs the host's rfsim slot).
 - **Wave 3 (parallel code, serialized rfsim steps):** A2 → A3 (A3 after A2 because both touch CMake test blocks and the metrics getter) ‖ A4 ‖ A9 Steps 1–2.
-- **Wave 4:** A5 (needs A2+A3+A4), A6, A8.
+- **Wave 4:** A5 (needs A2+A3+A4), A6, A8 (after A9 Step 1 — GPU build dir; DGX only, not in a GPU-less cloud session).
 - **Wave 5 (critical, one at a time):** A7 ★, A10 ★ (measurement), A11.
 - **Wave 6:** A14 review + push. Track B starts when the X410 is on site (B1 can start as soon as A1–A4 are merged; B3 needs A5–A6).
 
 ## Self-review record (2026-10-01)
 
-- Spec coverage: dashboard → A5; sensing API → A3 (+§21 in A14); receiver performance metrics → A2 (+A1 scores, A4 verdicts); core allocation → A6, A7, A10, A11, B5; GPU → A8 Step 6, A9, B5; detailed per-campaign logs → A4 (+B-track usage); X410 split → Track A / Track B; model tiers + plugins → policy table and per-task tags.
+- Spec coverage: dashboard → A5; sensing API → A3 (+§21 in A14); receiver performance metrics → A2 (+A1 scores, A4 verdicts); core allocation → A6, A7, A10, A11, B5; GPU → A8 (GPU-first USS tracker, multi-cell batch ready), A9, B5; detailed per-campaign logs → A4 (+B-track usage); X410 split → Track A / Track B; model tiers + plugins → policy table and per-task tags.
 - Out of scope on purpose (separate plans later, per PROJECT_MEMORY §25): CellContext/multi-cell (G12–G14), NSA fixture (G5B), CSI-RS G4, state machine §19.
-- Known judgement calls to confirm with the operator: A10 ends at a plan (no code); A8 GPU step is conditional; A5 keeps the existing single-page vanilla-JS style.
+- Known judgement calls to confirm with the operator: A10 ends at a plan (no code); A8 is GPU-first (operator decision 2026-10-01); A5 keeps the existing single-page vanilla-JS style.
