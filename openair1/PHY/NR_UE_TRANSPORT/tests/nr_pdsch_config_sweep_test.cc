@@ -1599,3 +1599,128 @@ TEST(PdschSweepCrcAccept, RetransmissionPassIsNotUnique)
   EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, false), -1); /* HARQ retx of the same TB */
   EXPECT_EQ(s->ok_unique[7], 1);
 }
+
+/* ---- Lever C review fixes ---- */
+static bool keep_not_arg(const nr_pdsch_cfg_hypothesis_t *h, const void *arg) { return h != (const nr_pdsch_cfg_hypothesis_t *)arg; }
+static std::unique_ptr<nr_pdsch_config_sweep_state_t> crc_state()
+{
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(s.get(), 4);
+  s->crc_accept = true;
+  return s;
+}
+static void feed_new(nr_pdsch_config_sweep_state_t *s, const int *cls, int n, int times, int *last = nullptr)
+{
+  for (int i = 0; i < times; i++) {
+    const int w = nr_pdsch_config_sweep_feed_equiv(s, cls, n, true, true);
+    if (last)
+      *last = w;
+  }
+}
+TEST(PdschSweepCrcAccept, DormantTwinMakesPassNonUnique)
+{
+  auto s = crc_state();
+  ASSERT_GT(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_not_arg, &s->hyp[9]), 0);
+  ASSERT_FALSE(nr_pdsch_config_sweep_is_active(s.get(), 9));
+  const int cls[] = {7, 9};
+  int w = -1;
+  feed_new(s.get(), cls, 2, 2, &w);
+  EXPECT_EQ(w, -1);
+  EXPECT_EQ(s->ok_unique[7], 0);
+  EXPECT_EQ(s->trials[7], 2u); /* crediting itself is unchanged */
+  EXPECT_EQ(s->trials[9], 0u);
+}
+TEST(PdschSweepCrcAccept, ActiveSetChangeRestartsLeverC)
+{
+  const int a = 7;
+  {
+    auto s = crc_state();
+    feed_new(s.get(), &a, 1, 1);
+    EXPECT_EQ(s->ok_unique[7], 1);
+    ASSERT_GT(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_not_arg, &s->hyp[9]), 0);
+    EXPECT_EQ(s->ok_unique[7], 0);
+    int w = -1;
+    feed_new(s.get(), &a, 1, 1, &w);
+    EXPECT_EQ(w, -1);
+    EXPECT_EQ(s->ok_unique[7], 1);
+  }
+  { /* clear_dormant and a real fail_open toggle restart it too, and unblock */
+    auto s = crc_state();
+    ASSERT_GT(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_not_arg, &s->hyp[9]), 0);
+    const int b = 8;
+    feed_new(s.get(), &a, 1, 1);
+    feed_new(s.get(), &b, 1, 1);
+    EXPECT_TRUE(s->crc_accept_blocked);
+    nr_pdsch_config_sweep_clear_dormant(s.get(), NR_TD_DORMANT_PRIOR);
+    EXPECT_FALSE(s->crc_accept_blocked);
+    EXPECT_EQ(s->ok_unique[7], 0);
+    feed_new(s.get(), &a, 1, 1);
+    nr_pdsch_config_sweep_set_fail_open(s.get(), true);
+    EXPECT_EQ(s->ok_unique[7], 0);
+  }
+}
+TEST(PdschSweepCrcAccept, DormantNeverWinsNorBlocks)
+{
+  auto s = crc_state();
+  const int a = 7, d = 9;
+  feed_new(s.get(), &d, 1, 1); /* D earns a unique pass while active */
+  ASSERT_EQ(s->ok_unique[9], 1);
+  ASSERT_GT(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_not_arg, &s->hyp[9]), 0);
+  /* set_dormant restarted the evidence; plant a stale unique count on the now-dormant hypothesis directly */
+  s->ok_unique[9] = 5;
+  int w = -1;
+  feed_new(s.get(), &d, 1, 3, &w); /* dormant idx[0] credits nothing */
+  EXPECT_EQ(w, -1);
+  feed_new(s.get(), &a, 1, 1, &w);
+  EXPECT_EQ(w, -1);
+  EXPECT_FALSE(s->crc_accept_blocked); /* the dormant D with ok_unique>0 does not block */
+  feed_new(s.get(), &a, 1, 1, &w);
+  EXPECT_EQ(w, 7); /* and never wins over the active leader */
+}
+TEST(PdschSweepCrcAccept, BlockedStaysBlockedUntilPruneOrRebuild)
+{
+  auto s = crc_state();
+  const int a = 7, b = 8;
+  feed_new(s.get(), &a, 1, 1);
+  feed_new(s.get(), &b, 1, 1);
+  ASSERT_TRUE(s->crc_accept_blocked);
+  int w = -1;
+  feed_new(s.get(), &a, 1, 5, &w);
+  EXPECT_EQ(w, -1);
+  EXPECT_TRUE(s->crc_accept_blocked);
+  /* prune_keep clears evidence and the block (indices move) */
+  ASSERT_GT(nr_pdsch_config_sweep_prune_keep(s.get(), keep_even, nullptr), 0);
+  ASSERT_LT(s->n_hyp, NR_PDSCH_SWEEP_MAX_HYP);
+  EXPECT_FALSE(s->crc_accept_blocked);
+  for (int i = 0; i < s->n_hyp; i++)
+    ASSERT_EQ(s->ok_unique[i], 0);
+  EXPECT_TRUE(s->crc_accept);
+}
+TEST(PdschSweepCrcAccept, RebuildClearsEvidenceKeepsFlag)
+{
+  auto s = crc_state();
+  const int a = 7;
+  feed_new(s.get(), &a, 1, 1);
+  nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
+  EXPECT_TRUE(s->crc_accept);
+  EXPECT_FALSE(s->crc_accept_blocked);
+  for (int i = 0; i < s->n_hyp; i++)
+    ASSERT_EQ(s->ok_unique[i], 0);
+}
+TEST(PdschSweepCrcAccept, LargeTUsesTmaxAndNActive)
+{
+  auto s = crc_state();
+  ASSERT_GT(s->n_hyp, 100);
+  const int a = 7;
+  for (int i = 0; i < 1000; i++) /* T_max ~ 1000 on another hypothesis, as failures */
+    nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, false, true);
+  if (s->winner >= 0)
+    GTEST_SKIP() << "KL rule decided first";
+  EXPECT_GE(nr_pdsch_config_sweep_crc_accept_m(s->n_hyp, 1000), 2);
+  const int m = nr_pdsch_config_sweep_crc_accept_m(750, 1000);
+  ASSERT_EQ(m, 3);
+  feed_new(s.get(), &a, 1, 2);
+  const int m_now = nr_pdsch_config_sweep_crc_accept_m(nr_pdsch_config_sweep_n_active(s.get()), s->trials[7]);
+  std::cout << "n_active=" << nr_pdsch_config_sweep_n_active(s.get()) << " T=" << s->trials[7] << " m*=" << m_now << "\n";
+  EXPECT_EQ(s->ok_unique[7] >= m_now, s->winner == 7); /* accept iff the count reached m*(n_active, T_max) */
+}

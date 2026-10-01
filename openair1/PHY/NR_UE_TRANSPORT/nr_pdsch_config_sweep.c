@@ -128,6 +128,7 @@ static int catalog_add_mapping_type(nr_pdsch_config_sweep_state_t *st, int mt, i
         h->mcs_table    = kMcsTab[d];
         h->mapping_type = mt;
         st->order[st->n_hyp] = st->n_hyp;
+        st->ok_unique[st->n_hyp] = 0;
         st->n_hyp++;
         added++;
        }
@@ -231,6 +232,12 @@ static inline bool active(const nr_pdsch_config_sweep_state_t *st, int i)
     if (dorm_bit(st, c, i))
       return false;
   return true;
+}
+/* Lever C evidence is only valid for one active set: every active-set change restarts it (as since_pass). */
+static inline void lever_c_restart(nr_pdsch_config_sweep_state_t *st)
+{
+  memset(st->ok_unique, 0, sizeof(st->ok_unique));
+  st->crc_accept_blocked = false;
 }
 /* Bits of word w that belong to the live catalogue [0, n). */
 static inline uint64_t live_word(int n, int w)
@@ -526,6 +533,7 @@ int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_
         if (dorm_bit(st, c, i))
           st->dormant[c][st->n_hyp >> 6] |= UINT64_C(1) << (st->n_hyp & 63);
       st->order[st->n_hyp] = st->n_hyp;
+      st->ok_unique[st->n_hyp] = 0;
       st->n_hyp++;
     }
   return layer;
@@ -801,14 +809,18 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
   bool check = false;
   bool credited = false; /* >= 1 ACTIVE member credited; with no mask set idx[0] always is */
   int n_credited = 0;
+  int n_distinct = 0; /* distinct in-range members of the class, DORMANT ones included (lever C uniqueness) */
   for (int k = 0; k < n; k++) {
     const int h = idx[k];
-    if (h < 0 || h >= st->n_hyp || !active(st, h))
+    if (h < 0 || h >= st->n_hyp)
       continue;
     bool dup = false;
     for (int j = 0; j < k && !dup; j++)
       dup = idx[j] == h;
     if (dup)
+      continue;
+    n_distinct++;
+    if (!active(st, h))
       continue;
     st->trials[h]++;
     if (tb_crc_ok)
@@ -823,7 +835,7 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
   since_pass_update(st, true, tb_crc_ok);
   if (st->crc_accept && !st->crc_accept_blocked) {
     /* Lever C: a unique pass = new data, alone among the ACTIVE hypotheses credited by this grant. */
-    if (tb_crc_ok && new_data && n_credited == 1 && st->ok_unique[idx[0]] < UINT16_MAX)
+    if (tb_crc_ok && new_data && n_distinct == 1 && n_credited == 1 && st->ok_unique[idx[0]] < UINT16_MAX)
       st->ok_unique[idx[0]]++;
     int n_u = 0, lead = -1;
     uint32_t t_max = 0;
@@ -951,8 +963,10 @@ int nr_pdsch_config_sweep_set_dormant(nr_pdsch_config_sweep_state_t *st, int cau
   }
   if (!any_active)
     return -1;
-  if (memcmp(st->dormant[cause], cand, sizeof(cand)) != 0)
+  if (memcmp(st->dormant[cause], cand, sizeof(cand)) != 0) {
     st->since_pass = 0; /* the active set changed */
+    lever_c_restart(st);
+  }
   memcpy(st->dormant[cause], cand, sizeof(cand));
   return newly;
 }
@@ -968,8 +982,10 @@ int nr_pdsch_config_sweep_clear_dormant(nr_pdsch_config_sweep_state_t *st, int c
       if (c != cause)
         others |= st->dormant[c][w];
     reactivated += __builtin_popcountll(st->dormant[cause][w] & ~others);
-    if (st->dormant[cause][w])
+    if (st->dormant[cause][w]) {
       st->since_pass = 0; /* the active set changed */
+      lever_c_restart(st);
+    }
     st->dormant[cause][w] = 0;
   }
   return reactivated;
@@ -980,6 +996,7 @@ void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool
   if (st != NULL && st->fail_open != on) {
     st->fail_open = on;
     st->since_pass = 0; /* the active set changed */
+    lever_c_restart(st);
   }
 }
 

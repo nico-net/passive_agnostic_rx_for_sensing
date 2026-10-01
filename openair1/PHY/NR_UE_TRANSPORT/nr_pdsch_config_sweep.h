@@ -150,7 +150,7 @@ typedef struct {
    * hypothesis (feed_k: one call = main outcome + its probes, counted once; probe outcomes count only when they add KL
    * evidence, i.e. a P2-admissible FAIL); reset to 0 by a PASS credited to an active hypothesis (a feed_k probe PASS is not
    * evidence and never resets it). Also reset to 0 whenever the active set changes: set_fail_open toggling, and set_dormant / clear_dormant calls that
-   * change at least one mask bit. Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
+   * change at least one mask bit (these also clear ok_unique and crc_accept_blocked). Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
   uint32_t since_pass;
 } nr_pdsch_config_sweep_state_t;
 
@@ -185,8 +185,9 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
  * nr_pdsch_config_sweep_feed(st, idx[0], tb_crc_ok). The acceptance check runs once, after crediting, whenever any
  * credited hypothesis reached a multiple of 16 trials. Returns the winner or -1.
  * Equivalence (blind-convergence spec 2026-10-01 section 2) is the caller's job: equal nr_td_equiv_key() on this
- * grant. new_data matters only with st->crc_accept (lever C): a pass with tb_crc_ok && new_data that credited exactly one
- * active hypothesis counts in ok_unique[idx[0]] (saturating); before the KL decision, if exactly one active hypothesis has
+ * grant. The caller passes the FULL grant-equivalence class including dormant members (crediting skips dormant members,
+ * but a pass is UNIQUE only when the class has exactly one distinct in-range member, dormant ones counted: a dormant twin
+ * may be the truth). new_data matters only with st->crc_accept (lever C): a pass with tb_crc_ok && new_data on a one-member class counts in ok_unique[idx[0]] (saturating); before the KL decision, if exactly one active hypothesis has
  * ok_unique > 0 and it reaches nr_pdsch_config_sweep_crc_accept_m(n_active, max active trials), it wins; two or more such
  * hypotheses set crc_accept_blocked (sticky until the next prune/rebuild/reopen). With crc_accept false the behaviour is
  * bit-identical to the KL-only rule. */
