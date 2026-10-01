@@ -214,6 +214,67 @@ receiver's metrics/observation outputs (Track-A A2/A3) so live arms are scored t
 K = 1 + all levers off: bit-identical hypothesis sequence and winner vs current code on recorded sweep traces;
 existing `test_nr_pdsch_config_sweep` (44 + 1 skip) unchanged; rfsim regression gate (Track-A A1) unchanged.
 
+## 9. Compute acceleration (operator addition, 2026-10-01)
+
+Objective: cold acquisition must become limited by the arrival of informative grants and statistical evidence, not by
+compute. Order of levers: reject useless grants early (§4.1); remove impossible hypotheses cheaply (§4.2); reuse
+common PHY work; collect evidence against several wrong hypotheses per grant (§5); batch the remaining expensive PHY
+work on the GPU; avoid re-learning stable configuration (TRACKING / VERIFY modes, reconfiguration spec).
+**Profile first:** before any CUDA change, measure where time goes per grant and per hypothesis (stage timers
+`g_pdtim_*` with `ISAC_PDCCH_TIMING`, plus new per-hypothesis counters) and let that profile choose the kernels.
+
+### 9.1 CPU side (statistics and state stay on the CPU)
+- **GrantWork** — one per grant, hypothesis-invariant, computed once: IQ reference (refcounted), FEP, **channel
+  estimate over the full set of DM-RS symbols of the slot for each distinct (DM-RS mask, ports, Nl, type, nSCID,
+  scrambling id) signature**, noise/SNR, PRB geometry, `G` per signature, legality bitsets, rate-matching metadata,
+  `config_epoch`. Stored immutably: any post-processing (interpolation, branch zeroing, SFO rotation) works on a copy.
+- **Legality bitsets (§4.2)** — live catalogue ∧ TDRA ∧ TBS-fits-G ∧ LBRM/rate-matching-feasible (E ≥ K−F per CB,
+  Foffset ≤ Ncb) ∧ DM-RS-geometry masks, a few machine words per grant. Today impossible hypotheses are discovered
+  only inside the decoder ("Problem in rate_matching"); this moves them before decode.
+- **Computational signature** — hypotheses that share (TDRA (S,L,k0), DM-RS geometry, Nl, Qm, rate-matching
+  geometry) share all expensive work; only the tail (MCS-table-dependent TBS / rate matching / LDPC) differs. Measure
+  the number of distinct signatures in realistic catalogues (expected ≪ number of hypotheses).
+- **Information-aware ordering** — optional discrimination term in `ordering_score` preferring hypotheses/grants that
+  split many remaining candidates; ordering only.
+- **Compute modes** — COLD (broad catalogue, K up to the cap, GPU batches), VERIFY (after an epoch change: previous
+  configuration first, small neighbourhood, moderate K), TRACKING (K = 1, no sweep unless health degrades).
+
+### 9.2 GPU side (regular PHY work only)
+Never on the GPU: grant gate, legality decisions, `select_k`, ordering score, KL test, CellFieldBook, epochs, CORESET
+life cycle, state machines. GPU stages by priority (subject to the profile): (1) LDPC — CB0 probes and full-TB code
+blocks batched across hypotheses **and** grants; (2) rate de-matching; (3) equalisation + LLR (once per signature);
+(4) DM-RS channel estimation (once per signature, only if the profile says so); later: PDCCH (CCE extraction, DM-RS
+correlation, polar, re-encode checks). Execution: the RT path enqueues `GrantTrial{GrantWork ref, main, probes[],
+generation, config_epoch}` without waiting; a GPU worker collects a batch across grants, runs persistent/batched
+kernels (no launch per hypothesis), overlaps upload / pre-processing / LDPC with ≥ 2 CUDA streams, and returns compact
+outcomes; old-epoch results are discarded; IQ buffers live until every job referencing them completes (refcount).
+On GB10 use the unified memory directly (managed or mapped allocations) instead of the discrete-GPU copy flow.
+
+### 9.3 P2 condition added by the compute design
+"Same computation as the full decode" (§5.3 item 1) includes **the same LDPC decoder implementation and iteration
+policy**: the CUDA decoder (flooding int8 min-sum, 3/4 damping, 2× iterations) is not the CPU decoder (layered).
+A probe FAIL is admitted only if the probe used the same decoder as the hypothesis's full decode would.
+
+### 9.4 Verified state of existing code (2026-10-01, DGX, read-only reviews + GPU tests) — prerequisites
+| # | Finding | Severity | Required before |
+|---|---|---|---|
+| V1 | Chest cache (`t_chest_cache`, `nr_pdsch_passive_decode.c` ~2240-2536) key omits start/number of symbols and the probe horizon; a probe or another (S,L) hypothesis can cache a chest built on a truncated DM-RS set and a later hit reuses it; key truncates 12-bit `dmrs_ports` to 8 bits (type-2 ports 8–11 alias 0–3); cached estimate is mutated in place afterwards (interpolation, branch zeroing, SFO rotation) | **high** | P1 top-K probes, GrantWork |
+| V2 | Probe ≠ full decode: probes bypass HARQ combining; the probe horizon truncates FEP/chest/demod after CB0's symbols, changing the chest (interpolation, slope) | **high** for P2 | P2 (fixed by GrantWork full-slot chest + §5.3 conditions) |
+| V3 | No sample-lifetime re-check between decode end and Technique D feedback; a CRC_FAIL produced from overwritten IQ is credited (only UNSUPPORTED counts as stale) | medium-high | P1 |
+| V4 | CUDA LDPC pool: a silently skipped launch (> 512 CBs) or a CUDA error leaves old bits in a reused pinned slot that the CPU CRC can accept as the current TB (false pass) | **critical** | any GPU LDPC use |
+| V5 | PDSCH GPU FEP reads the IQ ring after waiting in its queue with no lifetime re-check (stale-sample decode) | high | GPU FEP use |
+| V6 | CUDA LDPC request queue has no bound check; partial slot reservations can deadlock; no error propagation/CPU fallback; workers wait without timeout | high | GPU LDPC use |
+| V7 | GPU modules built with discrete-GPU copies (pinned + cudaMalloc + memcpy) on unified-memory GB10; default `LDPC_CUDA_ARCH=89` (must pass 121) | medium (perf) | GPU work |
+| V8 | PDCCH GPU FEP module is dead code (never loaded) and its sign convention unverified | low | PDCCH GPU work |
+| V9 | CPU vs CUDA LDPC on GB10 (`ldpctest`, BG1 R1/3 K=8448, 8 iterations, 300 blocks): CPU BLER 1.00/0.58/0.00 at Eb/N0 1.5/2.0/3.0 dB, CUDA 0.00/0.00/0.00 (CUDA 0.33 at 1.0 dB); `libldpc_orig` same as CPU; BG2 R1/5 same pattern. CUDA uses 2× iterations; whether the remaining gap is ARM/SIMDE-specific is `[HYPOTHESIS]` — compare on x86 | medium (sensitivity) | decoder choice, P2 §9.3 |
+| — | Verified OK: probe and full share max 8 LDPC iterations, segmentation (real C, CRC24B on CB0; C = 1 runs a full CRC24A decode), LLR scaling; generation-tagged tickets ignore stale feedback; GPU tests on sm_121: PDSCH GPU FEP 9 cases OK, polar bit-exact (0 mismatches), batched CB0-size probe work 177 → 9.9 → 6.8 µs/probe at batch 1 → 32 → 256 | — | — |
+
+### 9.5 Additional metrics and ablation
+Add to §6.3: CPU utilisation (avg/peak), GPU utilisation and memory, CPU-core equivalents, queue depth and latency,
+dropped jobs, sample-buffer lifetime margin, processing latency. Compute ablation: baseline sequential · shared
+GrantWork · + signature grouping · + top-K CPU · + batched GPU LDPC · + GPU rate de-matching · full pipeline. GPU use
+is reported separately from the 4-extra-CPU-core cap. All §1 hard requirements are unchanged.
+
 ## 7. Out of scope
 Bayesian rewrite; per-field final decisions; GPU probe batching (A9 / multi-cell); UL (PUSCH) interpretation sweep
 (same ideas apply later); HARQ soft combining in the search.
