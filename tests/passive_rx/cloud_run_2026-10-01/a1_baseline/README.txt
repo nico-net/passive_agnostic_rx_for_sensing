@@ -12,5 +12,5 @@ Per-arm results (scores.jsonl; *.time.txt = /usr/bin/time -v output):
   base_r1  8.689   4.218  2       94.93    1.1655         201      890236
   base_r2  8.216   2.872  2       96.89    1.5491         199      885244
   base_r3  8.045   4.538  2       95.19    0.7742         202      892844
-Run-to-run spread: crc 94.93-96.89 %, drop_full 0.77-1.55 %. All miss the DGX gate (98.0 / 1.0) on CPU budget only.
+Run-to-run spread: crc 94.93-96.89 %, drop_full 0.77-1.55 %. All miss the DGX gate (98.0 / 1.0). [HYPOTHESIS] that this is due to the CPU budget: NOT established, since the 4-core host and the unpinned scan thread (SCANTHREAD override) are confounded.
 Proposed cloud gate: GATE_CRC_MIN=93.0 GATE_DROP_MAX=2.5 (spread minus/plus ~2 pts / ~1 pt margin).

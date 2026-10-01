@@ -402,6 +402,9 @@
 38.496 [PHY]    SENSING: multi-CORESET bank add index=0 offset=0 span=102 symbol=0 mapping=0/0/0 len=46
 42.557 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
 71.128 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+138.061 [PHY]    SENSING: blind PDCCH monitor summary: occasions=158578 candidates=298235 accepts=61460 dci10[accepts=140 C=140 TC=0 SI=0 RA=0 P=0] dci01[accepts=0 rejects=192708] dci00[accepts=0 rejects=0] ulscan[sched=192708 crc_hit=10088 disc=10088] held[energy=1329365 dmrs=0 persist=25 snr=0 mismatch=115 rnti_set=0] efloor=0.26 cfr_submits=0 pdsch_decode[try=0 crc_ok=0 (0.0%) skip_rv=0 unsup=0 over_cap=0 data_submits=0 k0_wait=0] scanq[queued=121066 done=119652 drop_full=1411 drop_stale=0 maxlag=8] last_reject="CRC-recovered value outside plausible RNTI range" last_reject_rnti=0x8779
+138.061 [PHY]    SENSING: LDPCDIAG ok=14503 seg_fail=714 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1347 (0.0%)
+138.061 [PHY]    SENSING: PDSCHQ queued=15289 decoded=15278 crc_ok=14503 (94.9%) dropped[full=0 stale=11] max_lag_slots=31/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
 154.421 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942584976719 rnti=0x1234 sfn=896 slot=11 fmt=1_1 cce=14 al=2
 154.424 [PHY]    SENSING: DL layout candidates n=3 fallback ids(ports/mcs/rv)= 3:1/9/0 7:1/9/0 11:1/9/0 
 154.425 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942588135977 rnti=0x1234 sfn=896 slot=14 fmt=1_1 cce=12 al=2

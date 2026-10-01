@@ -5,9 +5,9 @@
 set -u
 export GATE_CRC_MIN=${GATE_CRC_MIN:-98.0} GATE_DROP_MAX=${GATE_DROP_MAX:-1.0}
 H=$(cd "$(dirname "$0")" && pwd); N=${1:-2}; OUT=${OUT:-/tmp/rfsim_regress_$(date +%Y%m%d_%H%M%S)}
-rc=0
+rc=0; mkdir -p "$OUT"
 for i in $(seq 1 "$N"); do
-  "$H/rfsim_arm.sh" "$OUT/base_r$i" 150 >/dev/null 2>&1
+  "$H/rfsim_arm.sh" "$OUT/base_r$i" 150 >"$OUT/base_r$i.arm.log" 2>&1
   j=$(python3 "$H/score_rx.py" --json "$OUT/base_r$i"); echo "$j"
   python3 - "$j" <<'EOF' || rc=1
 import json, os, sys

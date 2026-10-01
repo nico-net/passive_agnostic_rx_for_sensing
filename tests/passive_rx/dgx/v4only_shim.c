@@ -1,6 +1,8 @@
 /* LD_PRELOAD shim for hosts whose kernel has no IPv6 (e.g. some cloud containers).
  * The OAI rfsimulator server socket is AF_INET6 (dual-stack ::). This maps it to AF_INET/0.0.0.0 so the
  * unmodified nr-softmodem can serve on such hosts. Test tooling only; never used on the DGX (IPv6 present).
+ * Known limits: bind() maps ANY v6 address to 0.0.0.0 (no per-address translation); connect() is NOT translated;
+ * only the gNB server role is supported (the receiver is a client over IPv4 and runs without the shim).
  * build: gcc -shared -fPIC -O2 -o v4only_shim.so v4only_shim.c -ldl */
 #define _GNU_SOURCE
 #include <dlfcn.h>

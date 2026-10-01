@@ -51,6 +51,8 @@ class ScoreRx(unittest.TestCase):
         s = self.score(d)
         self.assertIsNotNone(s["sync_s"])
         self.assertGreaterEqual(s["n_converged"], 1)
+        self.assertIsNotNone(s["crc_pct"]); self.assertTrue(80 <= s["crc_pct"] <= 100)
+        self.assertIsNotNone(s["drop_full_pct"]); self.assertIsNotNone(s["bank_len"])
 
 if __name__ == "__main__":
     unittest.main()

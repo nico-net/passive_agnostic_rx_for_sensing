@@ -17,13 +17,13 @@ if [ -z "${SCANTHREAD+x}" ] && [ "$(nproc)" -le 5 ]; then SCANTHREAD="1:8:-1"; f
 for _ in $(seq 1 30); do pgrep -x nr-uesoftmodem >/dev/null || pgrep -x nr-softmodem >/dev/null || break; sleep 1; done  # let a previous arm exit
 if pgrep -x nr-uesoftmodem >/dev/null || pgrep -x nr-softmodem >/dev/null; then echo "another softmodem is running" >&2; exit 2; fi
 rm -rf "$OUT"; mkdir -p "$OUT/gnb" "$OUT/rx"; rm -rf /tmp/passive_rx; mkdir -p /tmp/passive_rx
-GNBENV=""
+GNBENV=()
 if [ "$V4SHIM" = 1 ]; then
   gcc -shared -fPIC -O2 -o "$OUT/v4only_shim.so" "$(dirname "$0")/v4only_shim.c" -ldl || { echo "v4 shim build failed" >&2; exit 2; }
-  GNBENV="env LD_PRELOAD=$OUT/v4only_shim.so"
+  GNBENV=(env "LD_PRELOAD=$OUT/v4only_shim.so")
 fi
 ( cd "$OUT/gnb" && touch nrL1_stats.log nrMAC_stats.log nr_stats.log &&
-  exec timeout -s INT $((DUR+25)) $GNBENV "$B/nr-softmodem" --phy-test --noS1 -D 0xff -O "$GNBCONF" --rfsim $GNBARGS > gnb.log 2>&1 ) &
+  exec timeout -s INT $((DUR+25)) "${GNBENV[@]}" "$B/nr-softmodem" --phy-test --noS1 -D 0xff -O "$GNBCONF" --rfsim $GNBARGS > gnb.log 2>&1 ) &
 G=$!
 sleep 10
 cd "$OUT/rx" && touch nrL1_stats.log nr_stats.log
