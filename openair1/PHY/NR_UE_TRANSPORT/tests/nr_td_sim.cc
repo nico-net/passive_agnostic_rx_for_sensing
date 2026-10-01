@@ -427,7 +427,7 @@ static SimResult run_sim(const SimCfg &cfg)
         if (cfg.fieldbook) {
           int32_t before[NR_TD_F_COUNT];
           for (int f = 0; f < NR_TD_F_COUNT; f++) before[f] = fb.f[f].value;
-          nr_td_fieldbook_converged(&fb, rnti, &st->hyp[winner], (uint64_t)g);
+          nr_td_fieldbook_converged(&fb, rnti, &st->hyp[winner], (uint64_t)g, 0);
           for (int f = 0; f < NR_TD_F_COUNT; f++) {
             if (before[f] != -1 && fb.f[f].value != before[f]) rec.withdrawals++;
             if (fb.f[f].value != -1 && fb.f[f].value != before[f]) rec.promotions++;

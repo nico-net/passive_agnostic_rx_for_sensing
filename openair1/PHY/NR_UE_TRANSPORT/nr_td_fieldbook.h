@@ -18,8 +18,12 @@ typedef struct {
   int n_support;
   uint32_t born; /* creation tick, for oldest-first tie-break on eviction */
 } nr_td_field_cand_t;
+/* Field states: UNSEEN -> CANDIDATE -> PROMOTED -> SUSPECT -> PROMOTED | (withdrawn: back to CANDIDATE, counted). */
+typedef enum { NR_TD_FS_UNSEEN = 0, NR_TD_FS_CANDIDATE, NR_TD_FS_PROMOTED, NR_TD_FS_SUSPECT } nr_td_field_state_t;
 typedef struct {
-  int32_t value; /* promoted value, -1 = unknown */
+  nr_td_field_state_t state;
+  int32_t hint_value; /* value of the last PROMOTED/SUSPECT field at an epoch bump; ordering only, -1 = none */
+  int32_t value; /* promoted value (PROMOTED/SUSPECT only), -1 = none */
   nr_td_field_cand_t cand[NR_TD_FB_MAX_CAND]; /* per-value support, incl. the promoted value's own row */
   uint32_t tick;
   uint16_t contra[NR_TD_FB_MAX_RNTI];
@@ -32,15 +36,32 @@ typedef struct {
   uint32_t epoch;
   int promote_rntis; /* default 2 */
   int withdraw_rntis; /* default 2 */
+  uint32_t generation; /* bumped on every change that affects pruning or hints: promote, suspect, reconfirm, withdraw, force_promote, epoch bump.
+                       UNSEEN->CANDIDATE does not bump. */
+  uint32_t n_withdrawn;
 } nr_td_fieldbook_t;
 void nr_td_fieldbook_init(nr_td_fieldbook_t *fb, int promote_rntis, int withdraw_rntis);
 int32_t nr_td_pack_tdra(int S, int L, int mapping, int k0);
-/* A context for `rnti` converged on hypothesis `h` (call once per CONVERGED). */
-void nr_td_fieldbook_converged(nr_td_fieldbook_t *fb, uint16_t rnti, const nr_pdsch_cfg_hypothesis_t *h, uint64_t slot);
+/* A context for `rnti` converged on hypothesis `h` (call once per CONVERGED).
+ * pruned_fields: bit f set = field f was pruned in that context (not independent): it neither supports nor contradicts f. */
+void nr_td_fieldbook_converged(nr_td_fieldbook_t *fb, uint16_t rnti, const nr_pdsch_cfg_hypothesis_t *h, uint64_t slot,
+                               uint32_t pruned_fields);
 /* `rnti` produced contradiction evidence for field `f` (M-failures rule evaluated by the caller). */
 void nr_td_fieldbook_contradict(nr_td_fieldbook_t *fb, uint16_t rnti, nr_td_field_t f);
+/* Epoch bump: every PROMOTED/SUSPECT field becomes CANDIDATE with hint_value = value, value = -1; all support and
+ * contradiction sets are cleared (old-epoch evidence never maintains pruning). */
 void nr_td_fieldbook_bump_epoch(nr_td_fieldbook_t *fb);
-/* Copy the fields that are promoted AND current-epoch into side info (f_* and f_conf = 1.0). */
+nr_td_field_state_t nr_td_fieldbook_state(const nr_td_fieldbook_t *fb, nr_td_field_t f);
+/* True only for PROMOTED (and sets *value). CALLER CONTRACT on SUSPECT (operator 2026-10-01): on SUSPECT, new contexts do
+ * not prune on the field; existing UNSETTLED contexts immediately clear_dormant(FIELD_BASE + f) (only that field's cause);
+ * converged contexts keep their winner and set an untrusted_fields bit. A caller that re-evaluates prunes() whenever
+ * generation changes gets exactly this. The field book itself never touches sweep states. */
+bool nr_td_fieldbook_prunes(const nr_td_fieldbook_t *fb, nr_td_field_t f, int32_t *value);
+bool nr_td_fieldbook_hyp_matches(nr_td_field_t f, int32_t value, const nr_pdsch_cfg_hypothesis_t *h);
+uint32_t nr_td_fieldbook_generation(const nr_td_fieldbook_t *fb);
+/* simulator/test hook: PROMOTED, no supporters */
+void nr_td_fieldbook_force_promote(nr_td_fieldbook_t *fb, nr_td_field_t f, int32_t value);
+/* Copy each field's value (PROMOTED/SUSPECT) else its hint_value into side info (f_*, f_conf = 1.0). Ordering only. */
 void nr_td_fieldbook_fill_side_info(const nr_td_fieldbook_t *fb, nr_td_side_info_t *si);
 #ifdef __cplusplus
 }
