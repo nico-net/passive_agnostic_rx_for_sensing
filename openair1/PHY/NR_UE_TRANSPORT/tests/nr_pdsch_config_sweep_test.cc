@@ -1281,3 +1281,14 @@ TEST(PdschSweepEquiv, CheckFiresOnNonFirstMember) {
   const int idx[] = {4, 3};
   EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), idx, 2, true, true), 3);
 }
+/* An invalid decoded index credits NO member, even valid ones: the class is defined relative to idx[0]. */
+TEST(PdschSweepEquiv, InvalidDecodedIndexCreditsNothing) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  const int idx_neg[] = {-1, 3, 5}, idx_big[] = {1 << 20, 3, 5};
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), idx_neg, 3, true, true), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), idx_big, 3, false, true), -1);
+  for (int i = 0; i < s->n_hyp; i++) {
+    ASSERT_EQ(s->trials[i], 0u) << i;
+    ASSERT_EQ(s->ok[i], 0u) << i;
+  }
+}

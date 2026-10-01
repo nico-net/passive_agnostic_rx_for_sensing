@@ -661,14 +661,15 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
                                      bool new_data)
 {
   (void)new_data; /* lever C (BC2) */
-  if (st == NULL || idx == NULL || n < 1) {
+  /* An invalid decoded index idx[0] credits nothing (mirrors _feed): a class defined relative to it is untrustworthy. */
+  if (st == NULL || idx == NULL || n < 1 || idx[0] < 0 || idx[0] >= st->n_hyp) {
     return (st != NULL) ? st->winner : -1;
   }
   if (st->winner >= 0) {
     return st->winner;
   }
   /* One crediting loop: every distinct in-range member gets exactly this grant's one Bernoulli sample. */
-  bool credited = false, check = false;
+  bool check = false; /* idx[0] is valid, so at least it is credited */
   for (int k = 0; k < n; k++) {
     const int h = idx[k];
     if (h < 0 || h >= st->n_hyp)
@@ -681,13 +682,9 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
     st->trials[h]++;
     if (tb_crc_ok)
       st->ok[h]++;
-    credited = true;
     if ((st->trials[h] % 16) == 0)
       check = true;
   }
-  /* Nothing valid: same as _feed on an out-of-range index (no decision). */
-  if (!credited)
-    return st->winner;
   return sweep_decide(st, check);
 }
 

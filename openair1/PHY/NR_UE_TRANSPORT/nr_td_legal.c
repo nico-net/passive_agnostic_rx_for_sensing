@@ -65,11 +65,14 @@ uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm)
 }
 
 /* Exact grant-equivalence key (blind-convergence spec 2026-10-01 section 2): the signature plus the target code
- * rate R x1024 of the grant's MCS under the hypothesis's table, so TBS and rate matching are identical too. R sits
- * in bits 42..59, above every signature field (bits 0..41). */
-uint64_t nr_td_equiv_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm, uint32_t code_rate_x1024)
+ * rate of the grant's MCS under the hypothesis's table, so TBS and rate matching are identical too, plus the LBRM
+ * class (tbl_lbrm = mcs_table; nr_compute_tbslbrm() uses Qm_max 8 for table 1, 6 otherwise, so Ncb differs when
+ * LBRM binds). code_rate_x10240 = nr_get_code_rate_dl() as returned (R x 1024 x 10, max 9480). Layout: signature
+ * bits 0..41, rate bits 42..59, LBRM class bit 60. */
+uint64_t nr_td_equiv_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm, uint32_t code_rate_x10240)
 {
-  return nr_td_signature(h, nl, qm) ^ ((uint64_t)(code_rate_x1024 & 0x3FFFF) << 42);
+  return nr_td_signature(h, nl, qm) ^ ((uint64_t)(code_rate_x10240 & 0x3FFFF) << 42)
+         ^ ((uint64_t)(h->mcs_table == 1) << 60);
 }
 
 /* Comparator for qsort of uint64_t values */

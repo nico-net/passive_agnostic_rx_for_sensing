@@ -146,7 +146,8 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
 int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok);
 
 /* Credit one full-TB outcome to idx[0] (the decoded hypothesis) and to its grant-equivalent alive hypotheses
- * idx[1..n-1]. Duplicates and out-of-range indices are ignored. n == 1 is bit-identical to
+ * idx[1..n-1]. Duplicates and out-of-range members are ignored; an invalid idx[0] (or n < 1) credits nothing and
+ * returns the current winner, as _feed does. n == 1 is bit-identical to
  * nr_pdsch_config_sweep_feed(st, idx[0], tb_crc_ok). The acceptance check runs once, after crediting, whenever any
  * credited hypothesis reached a multiple of 16 trials. Returns the winner or -1.
  * Equivalence (blind-convergence spec 2026-10-01 section 2) is the caller's job: equal nr_td_equiv_key() on this
