@@ -1548,3 +1548,54 @@ TEST(PdschSweepDormant, K0LayerInheritsDormancy) {
   }
   EXPECT_GT(new_dormant, 0);
 }
+
+/* ---- Lever C (BC2): CRC-pass acceptance, default off ---- */
+TEST(PdschSweepCrcAccept, MValues)
+{
+  EXPECT_EQ(nr_pdsch_config_sweep_crc_accept_m(10, 100), 2);
+  EXPECT_EQ(nr_pdsch_config_sweep_crc_accept_m(750, 1000), 3);
+  EXPECT_EQ(nr_pdsch_config_sweep_crc_accept_m(1, 0), 2);
+}
+TEST(PdschSweepCrcAccept, TwoUniquePassesDecideWhenClean)
+{
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(s.get(), 4);
+  s->crc_accept = true;
+  const int a = 7;
+  int w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  EXPECT_EQ(w, -1);
+  w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  EXPECT_EQ(w, 7);
+}
+TEST(PdschSweepCrcAccept, SecondUniquePasserBlocksTheRule)
+{
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(s.get(), 4);
+  s->crc_accept = true;
+  const int a = 7, b = 8;
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true), -1);
+  EXPECT_TRUE(s->crc_accept_blocked);
+}
+TEST(PdschSweepCrcAccept, SharedPassIsNotUnique)
+{
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(s.get(), 4);
+  s->crc_accept = true;
+  const int cls[] = {7, 9};
+  nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true);
+  EXPECT_EQ(s->ok_unique[7], 0);
+  EXPECT_EQ(s->winner, -1);
+}
+TEST(PdschSweepCrcAccept, RetransmissionPassIsNotUnique)
+{
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(s.get(), 4);
+  s->crc_accept = true;
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, false), -1); /* HARQ retx of the same TB */
+  EXPECT_EQ(s->ok_unique[7], 1);
+}

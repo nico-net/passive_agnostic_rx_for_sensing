@@ -282,6 +282,8 @@ static void clear_probe_stats(nr_pdsch_config_sweep_state_t *st)
   memset(st->probe_pass, 0, sizeof(st->probe_pass));
   memset(st->probe_fail, 0, sizeof(st->probe_fail));
   memset(st->probe_inconclusive, 0, sizeof(st->probe_inconclusive));
+  memset(st->ok_unique, 0, sizeof(st->ok_unique)); /* lever C evidence follows the KL evidence */
+  st->crc_accept_blocked = false;
 }
 static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
 {
@@ -768,10 +770,25 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
   return w;
 }
 
+/* Smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6, in the log domain. */
+int nr_pdsch_config_sweep_crc_accept_m(int n_alive, uint32_t t_max)
+{
+  if (n_alive <= 1 || t_max == 0)
+    return 2;
+  const double budget = log(1e-6) - log((double)n_alive);
+  const double t = (double)t_max;
+  for (int m = 2;; m++) {
+    if ((double)m > t) /* C(t, m) = 0 */
+      return m;
+    const double log_c = lgamma(t + 1.0) - lgamma((double)m + 1.0) - lgamma(t - (double)m + 1.0);
+    if (log_c - 24.0 * (double)m * M_LN2 <= budget)
+      return m;
+  }
+}
+
 int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
                                      bool new_data)
 {
-  (void)new_data; /* lever C (BC2) */
   /* An invalid decoded index idx[0] credits nothing (mirrors _feed): a class defined relative to it is untrustworthy. */
   if (st == NULL || idx == NULL || n < 1 || idx[0] < 0 || idx[0] >= st->n_hyp
       || !active(st, idx[0])) { /* a dormant decoded hypothesis credits nothing (as _feed) */
@@ -783,6 +800,7 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
   /* One crediting loop: every distinct in-range member gets exactly this grant's one Bernoulli sample. */
   bool check = false;
   bool credited = false; /* >= 1 ACTIVE member credited; with no mask set idx[0] always is */
+  int n_credited = 0;
   for (int k = 0; k < n; k++) {
     const int h = idx[k];
     if (h < 0 || h >= st->n_hyp || !active(st, h))
@@ -796,12 +814,36 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
     if (tb_crc_ok)
       st->ok[h]++;
     credited = true;
+    n_credited++;
     if ((st->trials[h] % 16) == 0)
       check = true;
   }
   if (!credited) /* every member dormant: no new evidence, no decision */
     return st->winner;
   since_pass_update(st, true, tb_crc_ok);
+  if (st->crc_accept && !st->crc_accept_blocked) {
+    /* Lever C: a unique pass = new data, alone among the ACTIVE hypotheses credited by this grant. */
+    if (tb_crc_ok && new_data && n_credited == 1 && st->ok_unique[idx[0]] < UINT16_MAX)
+      st->ok_unique[idx[0]]++;
+    int n_u = 0, lead = -1;
+    uint32_t t_max = 0;
+    for (int i = 0; i < st->n_hyp; i++) {
+      if (!active(st, i))
+        continue;
+      if (st->trials[i] > t_max)
+        t_max = st->trials[i];
+      if (st->ok_unique[i] > 0) {
+        n_u++;
+        lead = i;
+      }
+    }
+    if (n_u >= 2)
+      st->crc_accept_blocked = true;
+    else if (n_u == 1 && st->ok_unique[lead] >= (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_active_of(st), t_max)) {
+      st->winner = lead;
+      return lead;
+    }
+  }
   return sweep_decide(st, check);
 }
 
@@ -1086,6 +1128,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
     return 0;
   const struct nr_td_side_info_s *side = st->side;
   const bool p2 = st->p2;
+  const bool crc_accept = st->crc_accept;
   const bool fail_open = st->fail_open;
   uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
   memcpy(dormant, st->dormant, sizeof(dormant));
@@ -1096,6 +1139,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
     nr_pdsch_config_sweep_init_legal(st, tda_count, typeA, legality);
   st->side = side;
   st->p2 = p2;
+  st->crc_accept = crc_accept;
   st->fail_open = fail_open;
   memcpy(st->dormant, dormant, sizeof(dormant));
   normalize_masks(st);
@@ -1289,6 +1333,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
      * configuration, which catalog_fill() would otherwise carry over. */
     fresh->side = NULL;
     fresh->p2 = false;
+    fresh->crc_accept = false;
     fresh->fail_open = false;
     memset(fresh->dormant, 0, sizeof(fresh->dormant));
     catalog_fill(fresh, tda_count, typeA, legality);
@@ -1404,6 +1449,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
     st->hyp[at] = h;
     st->trials[at] = st->ok[at] = 0;
     st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
+    st->ok_unique[at] = 0;
     st->order[at] = at;
   }
   free(scratch);
