@@ -1,9 +1,10 @@
 F2 fix round 1, DGX rfsim 106 PRB 1 RX, rfsim_regress.sh 2: PASS x2 (CRC 99.05 / 98.62 %, drop_full 0.051 / 0.076 %)
-base_r1 pdschq_stale_after_decode:
+base_r1 pdschq_stale_after_decode (cumulative; natural non-zero [MEASURED, DGX rfsim 106 PRB 1 RX]: 1 line at 0, then 7 lines at 2, i.e. 2 grants marked INCONCLUSIVE during the run; no per-grant log line exists, so which grants is not identified):
       1 pdschq_stale_after_decode":0
       7 pdschq_stale_after_decode":2
 base_r2 pdschq_stale_after_decode:
       8 pdschq_stale_after_decode":0
 sample ISAC_METRICS line (base_r1):
 8.517 [0m[32m[PHY]    SENSING: ISAC_METRICS {"schema":1,"t_mono_ns":94910240256926,"abs_slot":22391,"pci":0,"acq_state":"PBCH_LOCKED","acq_transitions":1,"acq_sync_losses":0,"acq_pbch_locks":1,"acq_sib1_decodes":0,"pdcch_occasions":1,"pdcch_candidates":1,"pdcch_accepts":0,"pdcch_accepts_c":0,"scanq_queued":13,"scanq_processed":0,"scanq_drop_full":4,"scanq_drop_stale":0,"scanq_max_lag":0,"pdschq_queued":0,"pdschq_decoded":0,"pdschq_crc_ok":0,"pdschq_drop_full":0,"pdschq_drop_stale":0,"pdschq_stale_after_decode":0,"pdschq_max_lag":0,"ldpc_ok":0,"ldpc_seg_fail":0,"ldpc_tb_fail":0,"ldpc_zero_tb":0,"pusch_try":0,"pusch_crc_ok":0,"obs_pushed":0,"obs_written":0,"obs_dropped":0}
-runtime stale branch not provoked; env knobs searched (DELAY/SLEEP/STALL/DEPTH/RING/QUEUE/CAP/CONSUMERS): none exists for the PDSCH queue
+runtime stale branch NOT deliberately provoked (env knobs searched (DELAY/SLEEP/STALL/DEPTH/RING/QUEUE/CAP/CONSUMERS): none exists for the PDSCH queue)
+rfsim_regress.sh re-run after the DM-RS gate (round 2), [MEASURED, DGX rfsim 106 PRB 1 RX]: PASS x2, CRC 99.06 / 99.08 %, drop_full 0.048 / 0.044 %, counter 0 in all lines of base_r1 and base_r2.

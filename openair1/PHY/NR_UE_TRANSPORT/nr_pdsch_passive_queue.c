@@ -990,7 +990,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_slot_fep_fo_override_hz = saved_fo;
     /* K33: the producer keeps overwriting the ring while we decode (and the GPU path decodes
      * asynchronously). Re-check lifetime NOW: a CRC computed from overwritten IQ is not evidence for or
-     * against any hypothesis, layout or scrambling id -> INCONCLUSIVE, no learning-state update of any kind (TD, layout, Qm, data-id, BWP CRC, crc_note/scrambling walk). The
+     * against any hypothesis, layout or scrambling id -> INCONCLUSIVE, no learning-state update of
+     * any kind (TD, layout, Qm, data-id, BWP CRC, crc_note/scrambling walk, DM-RS identity). The
      * decoded TB itself is still delivered downstream (CRC-OK is a property of the bits, not credit). */
     const bool credit_ok = nr_passive_credit_allowed(
         atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
@@ -1118,7 +1119,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
          * this comment for the full reasoning. */
         const int dl_ns = pdu->nscid & 1;
-        if (job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
+        if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
           nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[dl_ns];
           if (!g_dl_dmrs_id_init[dl_ns]) { nr_dmrs_id_2stage_init(dst, "PDSCH", ue->frame_parms.Nid_cell); g_dl_dmrs_id_init[dl_ns] = true; }
