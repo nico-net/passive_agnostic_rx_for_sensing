@@ -1889,9 +1889,11 @@ Initial sync took ~90 s on the rank-4 bed (§14.2). The scan batch is `min(512 M
 - Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c` (env `ISAC_SCAN_SCRATCH_MB`, default 512 = today)
 - Test: rfsim timing only (no unit test: the change is a budget constant) — plus an assertion test that the default path is unchanged: run `rfsim_regress.sh 1` with the env unset.
 
-- [ ] **Step 1:** Add `ISAC_SCAN_SCRATCH_MB` (clamped 64..16384) replacing the 512 MB constant; log the batch size chosen.
+- [x] **Step 1:** Add `ISAC_SCAN_SCRATCH_MB` (clamped 64..16384) replacing the 512 MB constant; log the batch size chosen.
 - [ ] **Step 2:** Measure `sync_s` on the pin49r4 rank-4 bed with `--ue-scan-carrier` (4 RX): default vs `ISAC_SCAN_SCRATCH_MB=8192` with `--thread-pool` of 8 X925/A725 cores; 2 runs each. Also pinned `--ssb` for reference.
+  *Timing measurement DGX-only; not run in cloud session 2026-10-01.*
 - [ ] **Step 3:** Pass: scan-mode `sync_s` improves ≥ 2× with no PCI/SSB-offset change; default unchanged. Commit + PROJECT_MEMORY §14.2.
+  *Timing measurement DGX-only; not run in cloud session 2026-10-01.* Cloud: the pure `nr_initial_sync_scan_batch()` lives in `nr_initial_sync_budget.{c,h}` (gtest `test_nr_initial_sync_budget`); default-unchanged evidence in `tests/passive_rx/cloud_run_2026-10-01/a11_scan_scratch/`.
 
 ---
 

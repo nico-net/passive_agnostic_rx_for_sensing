@@ -960,6 +960,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/sss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/cic_filter_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_sl.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ntn_l1.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ue_rf_helpers.c
@@ -2524,6 +2525,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_passive_acq_state PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_passive_acq_state)
   add_test(NAME test_nr_passive_acq_state COMMAND ./test_nr_passive_acq_state)
+
+  add_executable(test_nr_initial_sync_budget ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_initial_sync_budget_test.cc
+                                              ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c)
+  target_include_directories(test_nr_initial_sync_budget PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_initial_sync_budget PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_initial_sync_budget)
+  add_test(NAME test_nr_initial_sync_budget COMMAND ./test_nr_initial_sync_budget)
 
   add_executable(test_nr_dmrs_id_estimate ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dmrs_id_estimate_test.cc
                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
