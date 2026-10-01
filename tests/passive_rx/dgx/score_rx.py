@@ -16,7 +16,8 @@ def score(arm):
              n_converged=0, bank_len=None, ldpc_ok=None, ldpc_seg_fail=None, pdsch_decoded=None, pdsch_crc_ok=None,
              crc_pct=None, scanq_queued=None, scanq_drop_full=None, drop_full_pct=None, cpu_pct=None, max_rss_kb=None)
     try:
-        lines = [ANSI.sub("", l) for l in open(os.path.join(rxd, "rx.log"), errors="replace")]
+        with open(os.path.join(rxd, "rx.log"), errors="replace") as f:
+            lines = [ANSI.sub("", l) for l in f]
     except FileNotFoundError:
         lines = []
     for l in lines:
@@ -47,11 +48,12 @@ def score(arm):
     if s["scanq_queued"]:
         s["drop_full_pct"] = round(100.0 * s["scanq_drop_full"] / s["scanq_queued"], 4)
     try:
-        for l in open(os.path.join(rxd, "time.txt")):
-            if "Percent of CPU" in l:
-                s["cpu_pct"] = int(l.rsplit(":", 1)[1].strip().rstrip("%") or 0)
-            if "Maximum resident" in l:
-                s["max_rss_kb"] = int(l.rsplit(":", 1)[1])
+        with open(os.path.join(rxd, "time.txt")) as f:
+            for l in f:
+                if "Percent of CPU" in l:
+                    s["cpu_pct"] = int(l.rsplit(":", 1)[1].strip().rstrip("%") or 0)
+                if "Maximum resident" in l:
+                    s["max_rss_kb"] = int(l.rsplit(":", 1)[1])
     except FileNotFoundError:
         pass
     return s

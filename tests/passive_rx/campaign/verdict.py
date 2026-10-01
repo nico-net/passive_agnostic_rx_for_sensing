@@ -62,7 +62,10 @@ def verdict(run_dir):
     if os.path.exists(lp):
         with open(lp, errors="replace") as f:
             log = f.read()
-    if rj.get("status") == "interrupted":
+    if rj.get("status") == "running":
+        # the runner writes the final status before calling verdict(); "running" seen here means the runner died
+        v = "INTERRUPTED"; reasons.append("stale running (runner died)")
+    elif rj.get("status") == "interrupted":
         v = "INTERRUPTED"; reasons.append("runner interrupted")
     elif FAULT.search(log):
         v = "VOID_RFSTALL"; reasons.append(FAULT.search(log).group(0))

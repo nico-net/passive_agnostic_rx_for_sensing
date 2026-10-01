@@ -18,8 +18,9 @@ TIME = "\tPercent of CPU this job got: 299%\n\tMaximum resident set size (kbytes
 class ScoreRx(unittest.TestCase):
     def make_arm(self, log=LOG, time=TIME):
         d = tempfile.mkdtemp(); os.makedirs(os.path.join(d, "rx"))
-        open(os.path.join(d, "rx", "rx.log"), "w").write(log)
-        open(os.path.join(d, "rx", "time.txt"), "w").write(time)
+        for name, txt in (("rx.log", log), ("time.txt", time)):
+            with open(os.path.join(d, "rx", name), "w") as f:
+                f.write(txt)
         return d
 
     def score(self, d):

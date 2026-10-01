@@ -26,7 +26,8 @@ def cmd_new(a):
              git_commit=sh("git -C %s rev-parse HEAD" % REPO), git_branch=sh("git -C %s rev-parse --abbrev-ref HEAD" % REPO),
              git_dirty=bool(sh("git -C %s status --porcelain --untracked-files=no" % REPO)),
              sens6_frozen_ok=subprocess.run(["git", "-C", REPO, "diff", "--quiet", "sens6-frozen-2026-09-30", "--",
-                                             "tests/passive_rx/captures", "tests/passive_rx/sens6_host_snapshot_2026-09-30"]).returncode == 0,
+                                             "tests/passive_rx/captures", "tests/passive_rx/*.conf",
+                                             "tests/passive_rx/sens6_host_snapshot_2026-09-30"]).returncode == 0,
              uhd_version=sh("uhd_config_info --version 2>/dev/null | head -1"), lscpu=sh("lscpu -e"),
              nvidia=sh("nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader 2>/dev/null"),
              cmdline=sh("cat /proc/cmdline"), ulimit_r=sh("bash -c 'ulimit -r'"))
@@ -44,6 +45,12 @@ def _nic_sampler(nic, path, stop):
             except OSError:
                 pass
             stop.wait(1.0)
+
+def _write_json_atomic(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 def _killpg(p, sig):
     try:
@@ -63,13 +70,14 @@ def cmd_run(a):
     open(os.path.join(rd, "cmd.txt"), "w").write(" ".join(a.command) + "\n")
     open(os.path.join(rd, "env.txt"), "w").write("\n".join("%s=%s" % kv for kv in sorted(env.items()) if kv[0].startswith(("ISAC_", "NR_", "LDPC"))) + "\n")
     rj = dict(arm=a.arm, secs=a.secs, start_utc=utcnow(), status="running", expect_sib1=a.expect_sib1)
-    json.dump(rj, open(os.path.join(rd, "run.json"), "w"))
+    _write_json_atomic(os.path.join(rd, "run.json"), rj)
     stop = threading.Event()
     if a.nic:
         threading.Thread(target=_nic_sampler, args=(a.nic, os.path.join(rd, "nic.csv"), stop), daemon=True).start()
     interrupted = threading.Event()
     # handlers only set a flag; the main loop below does the signalling (no work in signal context)
-    signal.signal(signal.SIGTERM, lambda *_: interrupted.set()); signal.signal(signal.SIGINT, lambda *_: interrupted.set())
+    for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sg, lambda *_: interrupted.set())
     t0 = time.time(); timed_out = False
     with open(os.path.join(rd, "rx.log"), "w") as log:
         p = subprocess.Popen(a.command, cwd=rd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -89,14 +97,29 @@ def cmd_run(a):
     stop.set()
     rj.update(end_utc=utcnow(), rc=p.returncode, timed_out=timed_out, escalation_stage=stage,
               status="interrupted" if interrupted.is_set() else "done", wall_s=round(time.time() - t0, 1))
-    json.dump(rj, open(os.path.join(rd, "run.json"), "w"))
+    _write_json_atomic(os.path.join(rd, "run.json"), rj)
     v = verdict(rd); json.dump(v, open(os.path.join(rd, "verdict.json"), "w"), indent=2)
     with open(os.path.join(a.campaign, "index.jsonl"), "a") as f:
         f.write(json.dumps(dict(run=os.path.basename(rd), arm=a.arm, verdict=v["verdict"], score=v["score"])) + "\n")
     print(rd, v["verdict"])
 
 def cmd_summarize(a):
-    rows = [json.loads(l) for l in open(os.path.join(a.campaign, "index.jsonl"))]
+    ip = os.path.join(a.campaign, "index.jsonl")
+    runs = os.path.join(a.campaign, "runs")
+    has_runs = os.path.isdir(runs) and any(os.path.isdir(os.path.join(runs, n)) for n in os.listdir(runs))
+    if not os.path.exists(ip) and not has_runs:
+        sys.exit("summarize: %s not found and no run dirs (nothing to summarize)" % ip)
+    rows = []
+    if os.path.exists(ip):
+        with open(ip) as f:
+            rows = [json.loads(l) for l in f if l.strip()]
+    seen = {r["run"] for r in rows}
+    for name in sorted(os.listdir(runs)) if os.path.isdir(runs) else []:
+        if name in seen or not os.path.isdir(os.path.join(runs, name)):
+            continue
+        v = verdict(os.path.join(runs, name))   # run dir without an index line: runner died before finishing
+        v["verdict"] = "INTERRUPTED"
+        rows.append(dict(run=name, arm=name.split("_", 1)[-1], verdict="INTERRUPTED", score=v["score"]))
     by = {}
     for r in rows:
         by.setdefault(r["arm"], []).append(r)
