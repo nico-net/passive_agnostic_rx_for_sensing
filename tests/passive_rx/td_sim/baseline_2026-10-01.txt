@@ -1,0 +1,5 @@
+# [SIMULATED, DGX host, nr_td_sim seed 1] all levers off (K=1, weights 0, fieldbook 0, gate 0, p2 0), twins 0, grant cap 3600 s/RNTI
+# ./nr_td_sim --acq 2000 --seed 1
+{"summary":{"acq":2000,"rntis":8000,"median_s":635.360,"p95_s":1280.480,"wrong":0,"undecidable":0,"n_full":1142300174,"n_probe":0,"gated_phys":0,"gated_chan":0,"promotions":0,"withdrawals":0,"twins_requested":0,"twins_min":0,"cap_s":3600,"seed":1,"n_rx":4,"K":1}}
+# ./nr_td_sim --acq 2000 --seed 1 --n-rx 1
+{"summary":{"acq":2000,"rntis":8000,"median_s":1119.200,"p95_s":2164.410,"wrong":0,"undecidable":0,"n_full":2087793094,"n_probe":0,"gated_phys":0,"gated_chan":0,"promotions":0,"withdrawals":0,"twins_requested":0,"twins_min":0,"cap_s":3600,"seed":1,"n_rx":1,"K":1}}

@@ -2622,6 +2622,25 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_td_fieldbook)
   add_test(NAME test_nr_td_fieldbook COMMAND ./test_nr_td_fieldbook)
 
+  # Correlated Monte-Carlo simulator linking the REAL engine/gate/order/field book (spec 2026-10-01 section 6.1).
+  # nr_td_sim is a CLI (not run by ctest); nr_td_sim_test is the gtest (#includes nr_td_sim.cc).
+  set(NR_TD_SIM_LIB_SRCS ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_gate.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c)
+  add_executable(nr_td_sim ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_sim.cc ${NR_TD_SIM_LIB_SRCS})
+  target_include_directories(nr_td_sim PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(nr_td_sim PRIVATE UTIL m)
+  add_dependencies(tests nr_td_sim)
+
+  add_executable(nr_td_sim_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_sim_test.cc ${NR_TD_SIM_LIB_SRCS})
+  target_include_directories(nr_td_sim_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(nr_td_sim_test PRIVATE UTIL GTest::gtest m)
+  add_dependencies(tests nr_td_sim_test)
+  add_test(NAME nr_td_sim_test COMMAND ./nr_td_sim_test)
+
   add_executable(test_nr_pdsch_chest_key ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_chest_key_test.cc)
   target_include_directories(test_nr_pdsch_chest_key PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdsch_chest_key PRIVATE GTest::gtest GTest::gtest_main)
