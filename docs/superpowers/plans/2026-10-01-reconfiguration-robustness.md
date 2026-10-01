@@ -201,6 +201,37 @@ FEP/LLR ~3683-5076, candidate decode fan-out ~5309), `nr_polar_gpu_mod.c` (exist
 
 - 60-min stable-cell soak (SA and NSA-like): false SOFT ≤ 1/h, hard 0. PROJECT_MEMORY: §24 K10/K11/K37 status, §11 new log lines (`CONFIG_EPOCH`, `DCI length RELOCK`, CORESET state changes), §10.2 new env vars (`ISAC_RECONF`, `ISAC_RECONF_N_SUSPECT`, `ISAC_RECONF_DISCOVERY_DUTY`, thresholds), §16, §25. `/code-review` on the branch. Commit and push the branch (not `adaptive-rx-UL-DL`).
 
+## FINAL — mandatory
+
+### Task R16: Comprehensive PROJECT_MEMORY.md update (Opus; last task, after R14 and R15 if run)
+
+The plan is not complete until `PROJECT_MEMORY.md` reflects everything this branch changed, so that a fresh agent with no
+conversation history can operate and extend the receiver from the file alone. Every statement carries an evidence
+label (§0.1) naming host and commit; DGX, cloud x86 and OTA results stay in separate tables.
+
+- [ ] **Step 1 — header:** a dated update block summarising what the branch delivered, the merge commit, and what is still open.
+- [ ] **Step 2 — architecture and modules:** §2.1 pipeline diagram (epoch authority, CORESET life cycle, length re-lock,
+  140-bit DCI path); §2.2 block reference updated for B6/B7 (blind PDCCH, DCI recovery); §3.3 new modules
+  (`nr_dci_bits.h`, `nr_passive_cfg_epoch.{c,h}`, bank life cycle API, length state machine, optional PDCCH GPU path) with
+  their tests; §3.4 new tools/scripts (replay driver, campaign arms).
+- [ ] **Step 3 — operation:** §10.2 every new env var / config key with default and agnostic status (`ISAC_RECONF`,
+  `ISAC_RECONF_N_SUSPECT`, `ISAC_RECONF_DISCOVERY_DUTY`, thresholds, `ISAC_PDCCH_GPU_SELFCHECK` if R15 ran); §10.4 the beds used
+  (SA bed, NSA-like arm flags, 5G core / OCUDU fallback actually used).
+- [ ] **Step 4 — logging:** §11 every new log line with meaning and normal/abnormal values (`CONFIG_EPOCH … class= cause=`,
+  `DCI length RELOCK`, CORESET VERIFIED/STALE/REMOVED transitions, `dropped_epoch`, SIB1 semantic-hash change, SI-modification
+  pre-announcement and boundary decision) and the new `ISAC_METRICS` fields.
+- [ ] **Step 5 — validation:** §12 gates touched (G5A/G5B/G6/G7/G11) with the new PASS conditions; §13 offline results
+  (new gtests, replay fixture SA + NSA-like); §14 rfsim/SA-bed results with numbers (recovery times per change class,
+  stale-winner count, soak false-trigger rate, CPU vs GPU polar sweep times, R15 A/B if run); §15 any OTA observation.
+- [ ] **Step 6 — status and issues:** §16 status table rows (DCI recovery, CORESET discovery, reacquisition G11,
+  NSA/SIB1-less G5B); §19 state machine section updated with what is now implemented vs still design target; §23.5–§23.8
+  block references; §24 K8, K10, K11, K37 (and V8 if R15 ran) marked resolved or updated with evidence, new K-entries for
+  anything found; §25 next steps re-ordered; §0.6 document index (this spec/plan → done).
+- [ ] **Step 7 — consistency check:** grep the file for statements this branch made stale (e.g. "63-bit", "never cleared",
+  "bank not cleared on cell change", "no unified epoch") and correct or mark them `HISTORICAL`; verify every commit hash
+  cited exists (`git cat-file -e <hash>`); sens6-frozen gate; commit `docs: PROJECT_MEMORY - reconfiguration robustness
+  delivered (…)` and push the branch.
+
 ## Self-review record (2026-10-01)
 
-Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch); PDCCH GPU path as OPTIONAL R15 (profile-gated, verify-before-wire).
+Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Documentation: R16 (mandatory final PROJECT_MEMORY.md update). Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch); PDCCH GPU path as OPTIONAL R15 (profile-gated, verify-before-wire).
