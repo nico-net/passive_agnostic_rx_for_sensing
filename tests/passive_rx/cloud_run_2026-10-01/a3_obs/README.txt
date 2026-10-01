@@ -21,7 +21,7 @@ check_obs.py: the check script.
 Note: the on/off runs used the binary before the ISAC_OBS_TEST_RING_SLOTS hook was added to nr-uesoftmodem.c (env parse only).
 
 Fix round 1 (review minors: io_errors/after_close counters, g_open_fast + nr_passive_obs_enabled() hook gating,
-PRIO_INHERIT mutex, strtoul ring clamp, header notes): re-run at the fix commit with ISAC_OBS_PATH + ISAC_METRICS_PATH:
+PRIO_INHERIT mutex, strtoul ring clamp, header notes): re-run at the fix commit 385e02b9cf with ISAC_OBS_PATH + ISAC_METRICS_PATH:
   score_fix.txt / check_obs_fix.txt: gate PASS, crc 95.94 %, drop 1.17 %; checks as above (see check_obs_fix.txt).
   unit tests 8/8 x3; full ctest: only test_thread-pool and nr_cuup_functional_test fail (known env).
   (obs_written trails obs_pushed by 2 at the snapshot: written now advances after the flush, by design.)

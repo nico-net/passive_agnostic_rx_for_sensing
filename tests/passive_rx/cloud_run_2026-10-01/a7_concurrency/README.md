@@ -1,7 +1,7 @@
-[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, A7 commit (parent 0d04761969)] -- gtest, TSAN
-[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, A7 commit (parent 0d04761969)] -- rfsim TSAN oracle, A/B, gate
+[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, b6e5fb27ac (+fix 1d6cbdf5c3)] -- gtest, TSAN
+[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, b6e5fb27ac (+fix 1d6cbdf5c3)] -- rfsim TSAN oracle, A/B, gate
 
-Task A7: thread-safe blind-PDCCH scan -> N consumers. All binaries built from the working tree committed together
+Task A7: thread-safe blind-PDCCH scan -> N consumers. All binaries built from the tree committed as b6e5fb27ac (round-1 fix: 1d6cbdf5c3), together
 with this file. Host: 4 cores, so every consumer is UNPINNED (scan_thread core field -1: queue_start passes -1 to
 every consumer; affinity >= 0 would pin consumer i to core + i).
 

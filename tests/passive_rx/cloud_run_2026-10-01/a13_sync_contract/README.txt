@@ -1,4 +1,4 @@
-[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 03fb79aae3]
+[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 3b6119853f]
 
 A13: tests/passive_rx/offline_sync_contract/build_and_run.sh made arch-aware.
 Design: the 9 original x86 command lines are kept verbatim in the x86 branch; the aarch64
@@ -9,7 +9,7 @@ absent, lib/libgtest.a is linked and -I<cpm include> is added to the c++ test co
 
 Method: /usr/bin/cc, /usr/bin/c++, objcopy and the test binary replaced with echo in temp
 copies; whitespace normalized, mktemp path normalized; outputs diffed.
-(a) OLD (bfe4b67c60~1) vs NEW, with a temporary fake system libgtest.a symlink: diff EMPTY.
+(a) OLD (1490f10f30) vs NEW, with a temporary fake system libgtest.a symlink: diff EMPTY.
     (symlink removed afterwards)
 (b) OLD vs NEW without it: only differences are the added -I<cpm googletest include> on the
     c++ test compile and libgtest token /usr/lib/x86_64-linux-gnu/libgtest.a -> lib/libgtest.a.

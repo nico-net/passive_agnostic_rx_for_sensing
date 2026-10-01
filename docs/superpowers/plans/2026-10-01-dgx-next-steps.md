@@ -326,7 +326,7 @@ echo "evidence: $OUT"; exit $rc
 Run: `chmod +x tests/passive_rx/dgx/*.sh && tests/passive_rx/dgx/rfsim_regress.sh 2`
 Expected: two `PASS base_rN` lines (HEAD measured 98.6–99.1 % on 2026-09-30/10-01), exit 0. Cloud-host notes (2026-10-01): the arm auto-applies `V4SHIM` (kernel without IPv6; `v4only_shim.c` LD_PRELOAD for the gNB) and `SCANTHREAD` (nproc<=5: unpinned `--sensing.pdcch_blind_monitor_scan_thread 1:8:-1`; frozen conf pins core 5); HEAD measured crc 94.9-96.9 % / drop_full 0.8-1.5 % there, so use `GATE_CRC_MIN=93.0 GATE_DROP_MAX=2.5` on that host (evidence: `tests/passive_rx/cloud_run_2026-10-01/a1_baseline/`). The fixture additionally keeps the first rnti line plus all `bank add`/`CONVERGED` lines between head and tail (convergence falls in the middle of a 150 s log), ANSI stripped. Then create the fixture: `mkdir -p tests/passive_rx/dgx/fixtures && F=tests/passive_rx/dgx/fixtures/base_r1_rx.log && head -400 $OUT/base_r1/rx/rx.log > $F && tail -400 $OUT/base_r1/rx/rx.log >> $F`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add tests/passive_rx/dgx/rfsim_arm.sh tests/passive_rx/dgx/score_rx.py tests/passive_rx/dgx/rfsim_regress.sh tests/passive_rx/dgx/test_score_rx.py tests/passive_rx/dgx/fixtures/base_r1_rx.log
@@ -601,7 +601,7 @@ void nr_passive_metrics_emit(void)
 
 Also: in `executables/nr-ue.c`, right after the `nr_passive_acq_note_pbch_locked();` call (the ACQ_EVENT pbch_locked is logged inside that function, which has no frame_parms in scope), add `nr_passive_metrics_pci = UE->frame_parms.Nid_cell;` with `extern int nr_passive_metrics_pci;` next to the `nr_ue_diag_producer_absolute_slot` definition. `nr_passive_metrics.c` also needs `#include <stdatomic.h>` and uses an explicit relaxed atomic load of the slot counter. In CMake the two sources go on the `nr_pdcch_blind_monitor` library line (nr_dci11_pin.c is the last entry).
 
-- [x] **Step 8: Call the emitter** — in `nr_pdcch_blind_monitor_rt.c` inside `if (sum_due) {` (~6696), as the last statement of that block:
+- [x] **Step 8: Call the emitter** — in `nr_pdcch_blind_monitor_rt.c` inside `if (sum_due) {` (~6696), as the last statement of that block: [Final review I2: the call now sits after the Phase-2 guard is released, at function end under `if (sum_due)`, so the file write never runs under the Phase-2 lock.]
 ```c
     nr_passive_metrics_emit(); /* machine-readable twin of the text summaries above (Task A2) */
 ```
@@ -1910,7 +1910,7 @@ Initial sync took ~90 s on the rank-4 bed (§14.2). The scan batch is `min(512 M
 
 - **Files:** Modify: `tests/passive_rx/offline_sync_contract/build_and_run.sh` (**not a sens6-frozen path** — check with the §4.0 git diff anyway).
 - [x] **Step 1:** At the top: `ARCH=$(uname -m)`; if `aarch64`, apply exactly the transformations of `tests/passive_rx/dgx_host_snapshot_2026-09-30/tools/offline_sync_arm.sh` (strip `-DAVX2 -DGFNI -DSIMDE_X86_* -mno-avx512f -mgfni`, `-march=native`→`-mcpu=native`, gtest from `cmake_targets/ran_build/build/lib/libgtest.a` + CPM include dir found with `find ~/.cache/cpm -path '*googletest/include' | head -1`); x86 path byte-identical to today.
-  - Evidence: `tests/passive_rx/cloud_run_2026-10-01/a13_sync_contract/README.txt` [OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 03fb79aae3]
+  - Evidence: `tests/passive_rx/cloud_run_2026-10-01/a13_sync_contract/README.txt` [OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 3b6119853f]
   - X86 path: byte-identical cc commands confirmed via bash -x trace comparison
   - X86 fallback path: gtest integration tested, all OfflineSync.* 5/5 PASS
 - [ ] **Step 2:** Run on the DGX → `OfflineSync.*` 5/5 PASS.

@@ -5,6 +5,7 @@ Read `PROJECT_MEMORY.md` completely before doing anything; it is the single sour
 Hard rules:
 - sens6 is FROZEN: never edit tests/passive_rx/captures/*, tests/passive_rx/*.conf, tests/passive_rx/sens6_host_snapshot_2026-09-30/*.
   Check: git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30
+- New config files under tests/passive_rx/ use the .cfg extension (the frozen gate pathspec tests/passive_rx/*.conf matches across /).
 - gNB logs/configs are validation ground truth only, never receiver input.
 - Evidence labels (PROJECT_MEMORY §0.1) on every claim; never merge results across hosts/cells/bandwidths.
 - Never build while nr-uesoftmodem is running (pgrep -x nr-uesoftmodem).

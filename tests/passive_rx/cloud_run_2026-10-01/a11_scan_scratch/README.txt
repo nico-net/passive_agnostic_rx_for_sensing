@@ -1,5 +1,5 @@
 A11 ISAC_SCAN_SCRATCH_MB (code + default-unchanged regression). Timing measurement is DGX-only; not run in cloud session 2026-10-01.
-Label: [OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, base b6e5fb27ac + A11 working tree] gtest; [SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, base b6e5fb27ac + A11] rfsim arms
+Label: [OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 843e5cff49] gtest; [SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 843e5cff49 (base b6e5fb27ac)] rfsim arms
 
 gtest: test_nr_initial_sync_budget 5/5 PASS (default 512 == old formula; clamp 64/16384; len_thr cap; env parse). Seen failing first against a stub.
 ctest: 3 failures, all in the host baseline set: test_thread-pool, time_management_tests, nr_cuup_functional_test.
