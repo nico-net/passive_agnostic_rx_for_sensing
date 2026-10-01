@@ -1670,7 +1670,7 @@ A_PDSCH_FIRST=2    # conf: pdcch_blind_monitor_pdsch = "...:3:<depth>:2"  -> cor
 A_ACTORS=0         # sync/dl/ul actors start core (A725)
 ```
 
-- [ ] **Step 1: Write the failing dry-run tests** (`test_run_rx_dgx.py`):
+- [x] **Step 1: Write the failing dry-run tests** (`test_run_rx_dgx.py`):
 
 ```python
 import os, subprocess, unittest
@@ -1696,11 +1696,11 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `python3 tests/passive_rx/dgx/test_run_rx_dgx.py -v` → FAIL (launcher missing).
 
-- [ ] **Step 3: Write `run_rx_dgx.sh`**
+- [x] **Step 3: Write `run_rx_dgx.sh`**
 
 ```bash
 #!/bin/bash
@@ -1725,16 +1725,17 @@ exec env $ENVS "$B/nr-uesoftmodem" "$@" $ARGS
 ```
 Note: `--dl-actor-core-start` pins actor i to core start+i (4 DL actors → cores 0..3 on instance A: all A725, intended). If the conf's `scan_thread` core is on an A725 core, print a warning (grep the `-O` file for `scan_thread`).
 
-- [ ] **Step 4: Run tests to verify they pass** → `python3 tests/passive_rx/dgx/test_run_rx_dgx.py -v` → 3 OK.
+- [x] **Step 4: Run tests to verify they pass** → `python3 tests/passive_rx/dgx/test_run_rx_dgx.py -v` → OK (tests extended to 12: instance validation, scan_thread warning, "not online" refusal on this host, rfsim_arm COREMAP=1 refusal).
 
-- [ ] **Step 5: Measured A/B in rfsim** (🔁 Haiku runs, Sonnet analyses) — 273 PRB 1 RX (`gnb.sa.rfsim.100mhz.conf` + a copy of `ue.passive.auto.100mhz.conf` saved as **new** file `tests/passive_rx/dgx/ue.passive.auto.100mhz.dgx.conf` with `scan_thread "1:8:6"` and pdsch cores `...:3:20:2`), 3 runs unpinned vs 3 runs `COREMAP=1`, alternating, each via `campaign.py run` + `thrprof.sh` from the evidence tools. Record per arm: crc_pct, ttc_s, drop_full_pct, per-thread CPU, `pdschq_max_lag`.
+- [ ] **Step 5: Measured A/B in rfsim** (🔁 Haiku runs, Sonnet analyses) — 273 PRB 1 RX (`gnb.sa.rfsim.100mhz.conf` + a copy of `ue.passive.auto.100mhz.conf` saved as **new** file `tests/passive_rx/dgx/ue.passive.auto.100mhz.dgx.cfg` (extension `.cfg`, not `.conf`: the sens6-frozen gate pathspec `tests/passive_rx/*.conf` matches across `/`, so any new `.conf` under tests/passive_rx/ breaks it; libconfig ignores the extension; the original pdsch already ends `:3:20:2`, only scan_thread changes `1:8:5`->`1:8:6`) with `scan_thread "1:8:6"` and pdsch cores `...:3:20:2`), 3 runs unpinned vs 3 runs `COREMAP=1`, alternating, each via `campaign.py run` + `thrprof.sh` from the evidence tools. Record per arm: crc_pct, ttc_s, drop_full_pct, per-thread CPU, `pdschq_max_lag`.
+  - DGX-only; not run in the cloud session 2026-10-01
 Expected (pass): pinned is not worse on any metric by more than run-to-run spread; report the numbers either way.
 
-- [ ] **Step 6: Commit** (+ PROJECT_MEMORY §14.3 "measured" sub-table with the A/B numbers and `[SIM VERIFIED]`)
+- [x] **Step 6: Commit** (+ PROJECT_MEMORY §14.3 "measured" sub-table with the A/B numbers and `[SIM VERIFIED]`) -- cloud session: code + dry-run tests only (Steps 1-4, rfsim_arm COREMAP=1, dgx.cfg); the PROJECT_MEMORY "measured" sub-table awaits the DGX Step 5 run.
 
 ```bash
 git add tests/passive_rx/dgx/coremap_dgx.env tests/passive_rx/dgx/run_rx_dgx.sh tests/passive_rx/dgx/test_run_rx_dgx.py \
-  tests/passive_rx/dgx/rfsim_arm.sh tests/passive_rx/dgx/ue.passive.auto.100mhz.dgx.conf PROJECT_MEMORY.md
+  tests/passive_rx/dgx/rfsim_arm.sh tests/passive_rx/dgx/ue.passive.auto.100mhz.dgx.cfg PROJECT_MEMORY.md
 git commit -m "feat(dgx): X925 core-map launcher + rfsim A/B measurement"
 ```
 
