@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Technique D (per-RNTI PDSCH configuration search) converge within ≤ 30 s cold / ≤ 2 s steady state on SA and NSA-like cells with zero wrong winners, via a grant trial gate, top-K CB0 probes, ordering scores and a per-field CellFieldBook — P1 first, failure-only probe evidence (P2) behind a simulator gate.
+**Goal:** Make Technique D (per-RNTI PDSCH configuration search) converge within ≤ 30 s cold / ≤ 2 s steady state on SA and NSA-like cells with zero wrong winners, via a grant trial gate, top-K CB0 probes, ordering scores and a per-field CellFieldBook — P1 first, failure-only probe evidence (P2) behind a simulator gate — and make cold acquisition limited by informative grants, not compute (spec §9: correctness fixes, shared per-grant work, legality bitsets, signatures, batched GPU PHY work).
 
-**Architecture:** New pure units (`nr_td_gate`, `nr_td_order`, `nr_td_fieldbook`) and an engine extension (`next_k`/`feed_k` + score-ordered rounds) inside `nr_pdsch_config_sweep.c`, all default-off so the baseline is bit-identical; a correlated Monte-Carlo simulator (`nr_td_sim`) linking the real engine decides defaults and the P2 gate; runtime wiring into the RT select site and the PDSCH decode consumer comes last, after the Track-A cloud branch is merged.
+**Revision 2 (2026-10-01):** adds spec §9 (compute acceleration) and the verified prerequisites K28–K32: new Tasks 4b, 4c (pure), F1–F3 (correctness fixes + profile), G1–G4 (GPU), and R1–R4 (runtime, replacing old Tasks 8–10).
+
+**Architecture:** New pure units (`nr_td_gate`, `nr_td_order`, `nr_td_fieldbook`) and an engine extension (`next_k`/`feed_k` + score-ordered rounds) inside `nr_pdsch_config_sweep.c`, all default-off so the baseline is bit-identical; a correlated Monte-Carlo simulator (`nr_td_sim`) linking the real engine decides defaults and the P2 gate; runtime work comes after the Track-A cloud branch is merged: first the correctness fixes (F1 chest cache K28, F2 stale credit K29) and a per-grant/per-hypothesis profile (F3), then shared per-grant work (GrantWork, R1) and wiring (R2); the GPU track (G1–G4) fixes K30/K31 before any GPU decode is trusted and batches CB0 probes across grants × hypotheses.
 
 **Tech Stack:** C11 (OAI style), C++17 gtest, CMake/Ninja, Python 3 stdlib (campaign summaries), OAI rfsim beds.
 
@@ -20,18 +22,22 @@
 - Gate is pre-outcome: it may never use any result or by-product of decoding the grant it judges.
 - P2: a probe FAIL is one KL failure only if: same computation as the full decode on CB0 (segmentation, rate matching, LLR scaling, scrambling, max iterations, early termination), no HARQ soft combining (new transmission), same IQ within sample lifetime, gate ELIGIBLE. A probe PASS never adds a KL success.
 - Speed-up accepted only if the wrong-winner rate does not increase. Targets: cold ≤ 30 s median (≤ 60 s worst of 5), steady ≤ 2 s median at 4 RX; 1 RX ≤ 3× with `UNDECIDABLE` instead of hangs; compute ≤ 4 extra cores (avg and peak) at equal traffic without added sample loss or queue backlog.
+- **P2 same-decoder rule (spec §9.3):** a probe FAIL is admissible only if the probe ran the same LDPC implementation and iteration policy as the hypothesis's full decode (CPU layered ≠ CUDA flooding).
+- **No GPU LDPC result is trusted before G1 (K30 false-pass fix); no GPU FEP result before G3 (K31).** Statistics/state never run on the GPU.
+- **No top-K probing (K > 1) and no P2 at runtime before F1 (K28) and F2 (K29) are merged.**
 - Starting values: K = 3; ordering weights 0 (neutral); contradiction threshold 2 distinct RNTIs, M = 64; energy start/end observable off.
 - Repository rules (CLAUDE.md / PROJECT_MEMORY §4.0): sens6 files frozen (`git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30` before every commit); evidence labels; explicit `git add`; no `git stash`; SIGINT not SIGKILL.
 
 ## Merge gating (operator decision "A")
 
-- **Safe to start now** (do not touch `nr_pdsch_passive_queue.c`, `nr_pdcch_blind_monitor_rt.c`, `nr_pdsch_passive_decode.c`): Tasks 1–7.
-- **Gated on the merge of `cloud/dgx-next-steps`** (Track-A A2 metrics / A3 observations into `adaptive-rx-UL-DL`): Tasks 8–10. Before starting Task 8: `git log --oneline adaptive-rx-UL-DL | grep -i "observation API"` must show the A3 commit; rebase this work onto it.
+- **Pure (any time):** Tasks 1–7, 4b, 4c, and G1 (CUDA LDPC module only, DGX GPU required).
+- **After the merge of `cloud/dgx-next-steps` into `adaptive-rx-UL-DL`** (Track-A A2 metrics / A3 observations; the cloud session finished 2026-10-01 at `bcbe3549a2`): F1–F3, G2–G4, R1–R4. Check: `git log --oneline adaptive-rx-UL-DL | grep -i "observation API"` shows the A3 commit.
+- Order of the runtime chain: F1 → F2 → F3 → R1 → R2 → (G3, G4) → R3 → R4. G1 and G2 can run in parallel with F/R (separate files).
 - Work on branch `td/convergence-levers` (worktree `/home/nicola/NICOLA/wt/td-levers`, superpowers:using-git-worktrees). Push after each reviewed task.
 
 ## Agent / model / plugin policy
 
-Same table as `docs/superpowers/plans/2026-10-01-dgx-next-steps.md`: Haiku 🔁 for repeated simulator/rfsim runs and score collection; Sonnet for implementation/tests/debugging; **Opus for Task 4 (engine change, ★), Task 7 (P2, ★) and all reviews**. Implementers use superpowers:test-driven-development, superpowers:systematic-debugging, superpowers:verification-before-completion; reviews via superpowers:requesting-code-review; `/code-review` before the final push.
+Same table as `docs/superpowers/plans/2026-10-01-dgx-next-steps.md`: Haiku 🔁 for repeated simulator/rfsim runs and score collection; Sonnet for implementation/tests/debugging; **Opus for Task 4 (engine change, ★), Task 7 (P2, ★), F1 (★), R1 (★), G4 (★) and all reviews**. Implementers use superpowers:test-driven-development, superpowers:systematic-debugging, superpowers:verification-before-completion; reviews via superpowers:requesting-code-review; `/code-review` before the final push.
 
 ## Review Focus
 
@@ -43,7 +49,7 @@ Same table as `docs/superpowers/plans/2026-10-01-dgx-next-steps.md`: Haiku 🔁 
 
 ---
 
-## SAFE TO START NOW (Tasks 1–7)
+## PURE UNITS — any time (Tasks 1–7, 4b, 4c)
 
 ### Task 1: Grant trial gate (`nr_td_gate`) (Sonnet)
 
@@ -175,7 +181,7 @@ nr_td_gate_t nr_td_grant_gate(const nr_td_grant_view_t *g, const nr_td_rx_view_t
   return NR_TD_ELIGIBLE;
 }
 ```
-Note: `mcs_table_most_permissive` = the alive table with the **lowest** required SNR for this MCS (LowSE=2 < 64QAM=0 < 256QAM=1 at most indices); the caller computes it (Task 8).
+Note: `mcs_table_most_permissive` = the alive table with the **lowest** required SNR for this MCS (LowSE=2 < 64QAM=0 < 256QAM=1 at most indices); the caller computes it (Task R2).
 
 - [ ] **Step 4: Run tests** — `ninja test_nr_td_gate && ./test_nr_td_gate` → 5 PASS.
 - [ ] **Step 5: Commit** — `git add openair1/PHY/NR_UE_TRANSPORT/nr_td_gate.[ch] openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_gate_test.cc CMakeLists.txt && git commit -m "feat(td): grant trial gate (physical / channel-quality), pure and pre-outcome"`
@@ -536,6 +542,118 @@ TEST(PdschSweepK, P2AdmissibleProbeFailIsOneKlFailureAndPassIsNothing) {
 
 ---
 
+### Task 4b: Legality bitsets and rate-matching feasibility (spec §4.2, §9.1) (Sonnet)
+
+**Files:**
+- Create: `openair1/PHY/NR_UE_TRANSPORT/nr_td_legal.h`, `nr_td_legal.c`
+- Test: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_legal_test.cc`
+- Modify: `CMakeLists.txt`
+
+**Interfaces:**
+- Produces:
+```c
+#include <stdbool.h>
+#include <stdint.h>
+#include "nr_pdsch_config_sweep.h"
+#define NR_TD_WORDS ((NR_PDSCH_SWEEP_MAX_HYP + 63) / 64)
+typedef struct { uint64_t w[NR_TD_WORDS]; } nr_td_mask_t;
+static inline void nr_td_mask_set(nr_td_mask_t *m, int i) { m->w[i >> 6] |= 1ull << (i & 63); }
+static inline bool nr_td_mask_get(const nr_td_mask_t *m, int i) { return (m->w[i >> 6] >> (i & 63)) & 1; }
+void nr_td_mask_and(nr_td_mask_t *dst, const nr_td_mask_t *a, int n_hyp);
+int nr_td_mask_count(const nr_td_mask_t *m, int n_hyp);
+/* Rate-matching feasibility of one code-block geometry: the SAME predicates that make the LDPC rate recovery reject
+ * a geometry (nr_rate_matching.c ~540/551/638 and nrLDPC_coding_segment_decoder.c:192), evaluated before decoding. */
+typedef struct { uint32_t G; uint32_t tbs; int qm, nl, C, K, F, Zc, BG; uint32_t Ncb; int rv; } nr_td_rm_geom_t;
+bool nr_td_rm_feasible(const nr_td_rm_geom_t *g);
+```
+- Consumes: nothing; Task R2 builds the per-grant masks by computing each hypothesis's geometry with the existing OAI TBS/segmentation helpers and calling `nr_td_rm_feasible`.
+
+- [ ] **Step 1: Read the reject conditions** in `openair1/PHY/CODING/nr_rate_matching.c` (~540, ~551, ~638: "invalid parameters (Foffset … > Ncb …)") and `openair1/PHY/CODING/nrLDPC_coding/.../nrLDPC_coding_segment_decoder.c:192` ("Problem in rate_matching"). Copy each condition **verbatim** (same arithmetic, same k0/Foffset formula for rv, same E per CB rule: E = Nl·Qm·⌊G/(Nl·Qm·C)⌋ or ⌈⌉ for the last C − (G/(Nl·Qm)) mod C blocks) into a comment block in `nr_td_legal.c` with file:line references.
+- [ ] **Step 2: Failing test**
+```cpp
+#include <gtest/gtest.h>
+extern "C" {
+#include "nr_td_legal.h"
+}
+TEST(TdLegal, MaskAndCount) {
+  nr_td_mask_t a = {}, b = {}, d = {};
+  nr_td_mask_set(&a, 1); nr_td_mask_set(&a, 70); nr_td_mask_set(&a, 200);
+  nr_td_mask_set(&b, 70); nr_td_mask_set(&b, 200); nr_td_mask_set(&b, 201);
+  nr_td_mask_and(&d, &a, 233); nr_td_mask_and(&d, &b, 233);  /* d starts all-zero: AND keeps zero */
+  EXPECT_EQ(nr_td_mask_count(&d, 233), 0);
+  d = a; nr_td_mask_and(&d, &b, 233);
+  EXPECT_EQ(nr_td_mask_count(&d, 233), 2); EXPECT_TRUE(nr_td_mask_get(&d, 70)); EXPECT_FALSE(nr_td_mask_get(&d, 1));
+}
+TEST(TdLegal, TypicalGeometryIsFeasible) {
+  const nr_td_rm_geom_t g = {50000, 25000, 4, 1, 3, 8448, 0, 384, 1, 25344, 0};
+  EXPECT_TRUE(nr_td_rm_feasible(&g));
+}
+TEST(TdLegal, ZeroGOrTbsIsInfeasible) {
+  nr_td_rm_geom_t g = {0, 25000, 4, 1, 3, 8448, 0, 384, 1, 25344, 0};
+  EXPECT_FALSE(nr_td_rm_feasible(&g));
+  g.G = 50000; g.tbs = 0; EXPECT_FALSE(nr_td_rm_feasible(&g));
+}
+TEST(TdLegal, MatchesDecoderRejections) {
+  /* Each vector is a geometry the real decoder rejected with "Problem in rate_matching" / "invalid parameters",
+   * captured from an rfsim log during Step 1 (fill the table with >= 3 captured cases and >= 3 accepted ones). */
+  struct V { nr_td_rm_geom_t g; bool ok; };
+  const V v[] = {
+    /* captured cases go here — the implementer replaces this comment with the real tuples before Step 3 */
+  };
+  for (const V &x : v) EXPECT_EQ(nr_td_rm_feasible(&x.g), x.ok);
+}
+```
+To capture real vectors: run the 106-PRB rfsim baseline (Track-A `tests/passive_rx/dgx/rfsim_arm.sh`) with `ISAC_DISCOVER_DIAG=1` and grep `Problem in rate_matching|invalid parameters` together with the job geometry logged next to it (add a temporary `LOG_I` of G/tbs/Qm/Nl/C/K/F/Zc/BG/Ncb/rv at the reject site on a throwaway branch). The test must contain ≥ 3 rejected and ≥ 3 accepted real tuples; an empty table is a review failure.
+- [ ] **Step 3: Run → FAIL.**
+- [ ] **Step 4: Implement** `nr_td_mask_and`, `nr_td_mask_count` (`__builtin_popcountll`, last word masked to `n_hyp`), and `nr_td_rm_feasible` with exactly the copied predicates plus `G > 0 && tbs > 0 && C >= 1`.
+- [ ] **Step 5: Run → PASS; commit** `"feat(td): legality bitsets + rate-matching feasibility identical to the decoder's reject rules"`.
+
+---
+
+### Task 4c: Computational signature (spec §9.1) (Sonnet)
+
+**Files:**
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_td_legal.{h,c}` (same unit: per-hypothesis static properties)
+- Test: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_legal_test.cc` (append)
+
+**Interfaces:**
+- Produces:
+```c
+/* Hypotheses with equal signature share FEP, DM-RS channel estimate, equalisation and LLRs for a given grant;
+ * only TBS/rate-matching/LDPC (MCS-table dependent) differ. qm = modulation order the hypothesis implies for the grant's MCS. */
+uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm);
+int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp);
+```
+
+- [ ] **Step 1: Failing test**
+```cpp
+TEST(TdSignature, McsTableOnlyDifferenceSharesSignatureWhenQmEqual) {
+  nr_pdsch_cfg_hypothesis_t a = {}, b = {};
+  a.tda_start = b.tda_start = 1; a.tda_length = b.tda_length = 13; a.dmrs_mask = b.dmrs_mask = 0x804;
+  a.mcs_table = 0; b.mcs_table = 1;
+  EXPECT_EQ(nr_td_signature(&a, 1, 4), nr_td_signature(&b, 1, 4));
+  EXPECT_NE(nr_td_signature(&a, 1, 4), nr_td_signature(&b, 1, 6)); /* different Qm => different LLRs */
+}
+TEST(TdSignature, DmrsMaskOrTdraChangesSignature) {
+  nr_pdsch_cfg_hypothesis_t a = {}, b = {};
+  a.tda_start = b.tda_start = 1; a.tda_length = b.tda_length = 13; a.dmrs_mask = 0x804; b.dmrs_mask = 0x4;
+  EXPECT_NE(nr_td_signature(&a, 1, 2), nr_td_signature(&b, 1, 2));
+  b.dmrs_mask = 0x804; b.tda_length = 12;
+  EXPECT_NE(nr_td_signature(&a, 1, 2), nr_td_signature(&b, 1, 2));
+}
+TEST(TdSignature, CountOnFullCatalog) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4);
+  std::vector<int> qm(st.n_hyp, 2);
+  const int n = nr_td_count_signatures(st.hyp, st.n_hyp, 1, qm.data());
+  EXPECT_GT(n, 0); EXPECT_LT(n, st.n_hyp); /* report n in the test output: */
+  std::cout << "catalog " << st.n_hyp << " hypotheses -> " << n << " signatures (Qm fixed)" << std::endl;
+}
+```
+- [ ] **Step 2: Run → FAIL. Step 3: Implement**: `sig = tda_start | tda_length<<4 | k0<<8 | mapping_type<<14 | (uint64_t)dmrs_mask<<16 | (uint64_t)dmrs_max_len<<30 | (uint64_t)nl<<32 | (uint64_t)qm<<36` (dmrs_add_pos is implied by dmrs_mask; mcs_table enters only through qm); count = distinct values via sort of a copy.
+- [ ] **Step 4: Run → PASS; record the printed ratio in the commit message. Commit** `"feat(td): computational signature + count (signature groups << hypotheses)"`.
+
+---
+
 ### Task 5: Correlated Monte-Carlo simulator `nr_td_sim` (Sonnet; 🔁 Haiku for campaigns)
 
 **Files:**
@@ -598,7 +716,7 @@ TEST(TdSim, ProbesShareTheGrantState) {
 
 - [ ] **Step 1:** Ablation arms (P1): `baseline`; `+gate`; `+topK` (K=3, P1: probe outcomes go to `feed_k` with `p2=false`; ordering uses them through `w_probe=1`); `+order` (w_sib1=w_default=w_obs=1); `+fieldbook` (w_field=1, fieldbook=1); `all_P1`. Cells SA/NSA-like × rx 4/1 × 2000 acquisitions × 4 RNTIs.
 - [ ] **Step 2:** Run (🔁 Haiku) `campaign.py ablation_p1.json`.
-- [ ] **Step 3:** Analyse (Sonnet): table of median/p95 cold and steady seconds, wrong (must be 0 everywhere), N_full, N_probe, gated. Choose P1 defaults (weights, K) that minimise cold time with 0 wrong; write them into `nr_td_side_info` defaults documentation (spec §8) and the plan's Task 8 env defaults.
+- [ ] **Step 3:** Analyse (Sonnet): table of median/p95 cold and steady seconds, wrong (must be 0 everywhere), N_full, N_probe, gated. Choose P1 defaults (weights, K) that minimise cold time with 0 wrong; write them into `nr_td_side_info` defaults documentation (spec §8) and the plan's Task R2 env defaults.
 - [ ] **Step 4:** Commit summary + chosen defaults: `"evidence(td): P1 simulator ablation SA/NSA-like x 4/1 RX"`.
 
 ---
@@ -626,36 +744,150 @@ TEST(TdSim, NearTwinNeverEliminatesTruthUnderP2) {
 
 ---
 
-## GATED ON THE CLOUD MERGE (Tasks 8–10)
+## AFTER THE CLOUD MERGE — correctness fixes and profile (F1–F3)
 
-### Task 8: Runtime wiring (Sonnet; Opus review)
+### Task F1 ★: Chest cache correctness (K28) (Opus implements; Sonnet runs rfsim)
 
 **Files:**
-- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.{c,h}` — context-level `nr_pdsch_config_sweep_select_k(...)` (same arguments as `_select` + `int K`, `nr_pdsch_sweep_ticket_k_t *ticket`, `nr_pdsch_cfg_hypothesis_t out[]`) and `nr_pdsch_config_sweep_feedback_k(const nr_pdsch_sweep_ticket_k_t *, const nr_td_outcome_t *, int n, nr_pdsch_cfg_hypothesis_t *winner)`; `nr_pdsch_sweep_ticket_k_t` = `nr_pdsch_sweep_ticket_t` + `int n; int hyp[NR_TD_MAX_K];`. Field book is a module-level `nr_td_fieldbook_t` under the existing `g_lock`; when `ISAC_TD_FIELDBOOK=1`, contexts are **not** pruned by `g_prior` (ordering via field book instead); default 0 keeps today's pruning.
-- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c` (~6216, the `nr_pdsch_config_sweep_select` call): build `nr_td_grant_view_t` / `nr_td_rx_view_t` (layers from the pinned layout's antenna ports, else −1; per-RNTI SNR EMA from earlier decodes) → gate; settled contexts always decode; gated + unsettled → count, no trial; else `select_k` with `K = ISAC_TD_K` (default 1).
-- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.{c,h}` — job carries `nr_pdsch_sweep_ticket_k_t`; after the main decode, run each probe hypothesis with `nr_pdsch_passive_probe_mode(true)` and the **same** LDPC iteration settings as the full decode (assert in code: read the max-iteration value the full path uses and pass it unchanged), while `check_sample_lifetime` passes and the per-grant probe budget `ISAC_TD_PROBE_BUDGET_US` (default 400) is not exceeded; build outcomes (`p2_admissible` = new transmission (NDI toggled for this (RNTI, pid) or rv 0 without stored soft buffer) && completed probe); `feedback_k`.
-- Modify: side-info sources: SIB1 common TDRA (`nr_pdcch_blind_monitor_set_tda_common` already receives it — copy into a module-level `nr_td_side_info_t`, unless `ISAC_TD_IGNORE_SIB1=1`), MIB `dmrs-TypeA-Position` (`nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position`), observables from the existing oracles.
-- Modify: `nr_passive_metrics` (A2) — add `td_gated_physical`, `td_gated_channel`, `td_probes`, `td_probe_fail_admitted`, `td_field_promotions`, `td_field_withdrawals`, `td_undecidable`; obs records (A3) unchanged.
-- Env flags (all default = today): `ISAC_TD_K=1`, `ISAC_TD_GATE=0`, `ISAC_TD_GATE_SNR_MARGIN_DB=6`, `ISAC_TD_W_SIB1/DEFAULT/OBS/FIELD=0`, `ISAC_TD_FIELDBOOK=0`, `ISAC_TD_P2=0`, `ISAC_TD_IGNORE_SIB1=0`, `ISAC_TD_PROBE_BUDGET_US=400`.
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c` (`t_chest_cache` struct ~1486-1492, hit test ~2240-2253, chest loop ~2342, store ~2529-2536; in-place post-processing at ~2445-2447, ~3159, ~3270)
+- Create: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_chest_key.h` (pure key type + equality, unit-testable)
+- Test: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_chest_key_test.cc`
 
-- [ ] **Step 1: Failing context-level tests** in `nr_pdsch_config_sweep_test.cc`: `SelectK1EqualsSelect` (two keyed contexts, same seeds, 5000 grants: identical tickets/hypotheses/winner), `FieldBookOffKeepsPriorPruning`, `FieldBookOnOrdersInsteadOfPruning` (with fieldbook on, the catalogue size of a new RNTI's context equals the full catalogue).
-- [ ] **Step 2–4:** implement, tests green, full ctest, rfsim regression gate (Track-A A1 `rfsim_regress.sh 2`) with all flags default ⇒ PASS and identical CONVERGED lines vs pre-change.
-- [ ] **Step 5:** rfsim with levers on (106 PRB phy-test, K=3, gate=1, chosen weights, fieldbook=1): CONVERGED, CRC ≥ 98 %, compute row of spec §1 measured with `thrprof.sh` (avg + peak per thread, `pdschq_max_lag`, drops). Commit.
+**Interfaces:**
+- Produces:
+```c
+typedef struct {
+  long slot; uint16_t dmrs_pos /* FULL slot DM-RS symbol mask, not [S, S+L) */; uint8_t cfg_type, nscid, cdm, nl;
+  uint16_t dmrs_ports /* all 12 bits */; uint16_t scr; int rb_lo, rb_n; int bwp_start, bwp_size, ref_point;
+  int only_ant; int n_ant; double fo_hz; int seg; /* seg != 0 => never cached */
+} nr_pdsch_chest_key_t;
+static inline bool nr_pdsch_chest_key_eq(const nr_pdsch_chest_key_t *a, const nr_pdsch_chest_key_t *b)
+{
+  return !a->seg && !b->seg && a->slot == b->slot && a->dmrs_pos == b->dmrs_pos && a->cfg_type == b->cfg_type &&
+         a->nscid == b->nscid && a->cdm == b->cdm && a->nl == b->nl && a->dmrs_ports == b->dmrs_ports &&
+         a->scr == b->scr && a->rb_lo == b->rb_lo && a->rb_n == b->rb_n && a->bwp_start == b->bwp_start &&
+         a->bwp_size == b->bwp_size && a->ref_point == b->ref_point && a->only_ant == b->only_ant &&
+         a->n_ant == b->n_ant && a->fo_hz == b->fo_hz;
+}
+```
+Design (exact): (1) the cached estimate is always computed over **every DM-RS symbol of the slot** given by the grant's full `dlDmrsSymbPos` (never truncated by a probe horizon or by S/L); (2) the cache stores an **immutable** copy; the decode works on a per-call working copy, so interpolation / branch zeroing / SFO rotation never touch the cached data; (3) the hit test is `nr_pdsch_chest_key_eq` on the full key (12-bit ports, BWP/refPoint, fo, antenna count, single-branch).
 
-### Task 9: Live multi-UE acceptance bed (Sonnet; operator for Docker)
+- [ ] **Step 1: Failing key test**
+```cpp
+#include <gtest/gtest.h>
+extern "C" {
+#include "nr_pdsch_chest_key.h"
+}
+static nr_pdsch_chest_key_t K() { nr_pdsch_chest_key_t k = {}; k.slot = 5; k.dmrs_pos = 0x884; k.dmrs_ports = 1; k.n_ant = 4; k.only_ant = -1; return k; }
+TEST(ChestKey, PortsAboveEightDoNotAlias) { auto a = K(), b = K(); a.dmrs_ports = 0x001; b.dmrs_ports = 0x100; EXPECT_FALSE(nr_pdsch_chest_key_eq(&a, &b)); }
+TEST(ChestKey, SegmentedNeverHits) { auto a = K(), b = K(); a.seg = b.seg = 1; EXPECT_FALSE(nr_pdsch_chest_key_eq(&a, &b)); }
+TEST(ChestKey, FoOrAntennaCountChangeMisses) { auto a = K(), b = K(); b.fo_hz = 10; EXPECT_FALSE(nr_pdsch_chest_key_eq(&a, &b)); b = K(); b.n_ant = 1; EXPECT_FALSE(nr_pdsch_chest_key_eq(&a, &b)); }
+TEST(ChestKey, IdenticalHits) { auto a = K(), b = K(); EXPECT_TRUE(nr_pdsch_chest_key_eq(&a, &b)); }
+```
+- [ ] **Step 2: Run → FAIL. Step 3: Implement** design points (1)–(3) in `nr_pdsch_passive_decode.c`.
+- [ ] **Step 4: Probe ≡ full check (debug harness):** add env `ISAC_TD_PROBE_EQUIV_CHECK=1` (off by default): for a sample of 1-in-50 probed grants, also run the full decode of the same hypothesis and compare the CB0 LLR vectors element-wise; log `PROBE_EQUIV mismatches=n/total`. Run the 106-PRB rfsim arm with `ISAC_PROBE_ALL=1 ISAC_TD_PROBE_EQUIV_CHECK=1` → expected `mismatches=0`. (Before F1 this check is expected to show mismatches on multi-DM-RS grants — record the "before" number too.)
+- [ ] **Step 5:** ctest; rfsim regression gate (A1 `rfsim_regress.sh 2`) unchanged or better CRC; rank-4 pinned bed (`pin49r4`, default env) still 100 %. Commit `"fix(rx): chest cache keyed on full DM-RS signature, immutable cached estimate (K28)"`; PROJECT_MEMORY K28 → resolved.
+
+### Task F2: No stale credit (K29) (Sonnet)
+
+**Files:**
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c` (between decode end and `nr_pdsch_config_sweep_feedback`, ~984-1131), `nr_passive_sample_lifetime.h`
+- Test: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_sample_lifetime_test.cc` (create if absent)
+
+**Interfaces:**
+- Produces: `static inline bool nr_passive_credit_allowed(long producer_slot_now, long job_slot, int slots_per_frame)` in `nr_passive_sample_lifetime.h` — identical rule to `nr_passive_samples_valid` evaluated **after** decode; when false the job outcome is INCONCLUSIVE: no Technique D feedback, no layout feedback, counted `stale_after_decode`.
+
+- [ ] **Step 1: Failing test**
+```cpp
+#include <gtest/gtest.h>
+extern "C" {
+#include "nr_passive_sample_lifetime.h"
+}
+TEST(Lifetime, CreditAllowedOnlyWhileSamplesValid) {
+  EXPECT_TRUE(nr_passive_credit_allowed(100, 99, 20));
+  EXPECT_FALSE(nr_passive_credit_allowed(100, 99 - 18, 20)); /* spf - 2 = 18 slots: overwritten */
+  EXPECT_FALSE(nr_passive_credit_allowed(98, 99, 20));        /* producer behind job: invalid */
+}
+```
+- [ ] **Step 2: Run → FAIL. Step 3: Implement** (read `nr_passive_samples_valid` and reuse it; add the post-decode check before every feedback call; GPU path included).
+- [ ] **Step 4:** ctest + rfsim gate; metrics line (A2) gets `pdschq_stale_after_decode`. Commit `"fix(rx): no Technique D credit for decodes whose samples expired mid-decode (K29)"`.
+
+### Task F3: Per-grant / per-hypothesis profile (spec §9 "profile first") (Sonnet; 🔁 Haiku runs)
+
+**Files:**
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c` (`g_pdtim_*`, ~75-144: add stages `rm` (rate recovery) and `llr` split from `demod`; per-call hypothesis-count tag)
+- Create: `tests/passive_rx/dgx/profile_report.py` (parse the PDTIM lines → JSON + markdown table)
+
+- [ ] **Step 1:** Extend the existing PDTIM timers (enabled by `ISAC_PDCCH_TIMING=1`) with `rm_ns` and `llr_ns`; print µs/grant per stage: fep, chest, demod, llr, rm, ldpc, total; and probes vs full separately.
+- [ ] **Step 2:** `profile_report.py` parses lines `SENSING: PDTIM ...` → table. Unit test with a fixture line.
+- [ ] **Step 3:** Run (🔁 Haiku) on the DGX: 106 PRB rank 1; 273 PRB rank 1; 273 PRB rank 4 pinned bed; each with `ISAC_PROBE_ALL=0` and `=1`. Commit the report under `tests/passive_rx/dgx_host_snapshot_2026-09-30/profile_<date>.md` and quote the table in PROJECT_MEMORY §14.
+- [ ] **Step 4 (decision):** order GPU tasks G2–G4 and R1's shared stages by measured µs; record the decision in the spec §9.4 table.
+
+## GPU track (G1–G4) — DGX only
+
+### Task G1: CUDA LDPC pool safety (K30) (Sonnet; Opus review)
+
+**Files:**
+- Modify: `openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu` (~991-1088), `openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c` (~111-270)
+- Test: `openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cuda_pool_test.cc` (new; CMake inside the `ENABLE_LDPC_CUDA` block)
+
+Fix list (exact): (1) `ldpc_pool_decode` returns an error code; on any error or skipped launch every affected slot is **poisoned** (output bits filled with a pattern that cannot pass CRC, e.g. CRC of zero inverted) and the TB is reported failed — never a stale pass; (2) requests > 512 CBs are split into several launches instead of silently skipped; (3) bounded request queue (`g_queue`) with rejection → CPU fallback; (4) slot reservation all-or-nothing (no partial holds → no deadlock); (5) waits with timeout (default 50 ms) → CPU fallback + one-shot LOG_W; (6) `CHECK_CUDA` propagates errors; (7) `ldpc_decoder_shutdown` frees the real device pointers.
+
+- [ ] **Step 1: Failing tests** — (a) `SkippedLaunchNeverPasses`: inject a forced launch skip (test hook env `LDPC_CUDA_TEST_SKIP_LAUNCH=1`) after a successful decode of TB A, then decode TB B (different data) → B must FAIL CRC; (b) `OversizeRequestIsSplit`: 600 CBs decode correctly; (c) `QueueFullFallsBackToCpu`; (d) `TimeoutFallsBackToCpu` (hook `LDPC_CUDA_TEST_STALL_MS=200`).
+- [ ] **Step 2: Run → FAIL. Step 3: Implement. Step 4: Run → PASS**; `ldpctest -v _cuda` BLER table unchanged vs 2026-10-01 (K32 numbers).
+- [ ] **Step 5:** Commit `"fix(gpu): CUDA LDPC pool can no longer produce a stale CRC pass; split, bounded, timed fallback (K30)"`; PROJECT_MEMORY K30 → resolved.
+
+### Task G2: Unified-memory GPU paths on GB10 (Sonnet)
+
+- Modify: the four CUDA modules (`ldpc_decoder.cu`, `nr_pdsch_gpu_fep.cu`, `nr_polar_sc_cuda.cu`, `nr_pdcch_gpu_fep.cu`) behind a CMake option `GPU_UNIFIED_MEMORY` (ON for aarch64 + GB10): replace pinned-staging + `cudaMemcpy` with `cudaMallocManaged` (or mapped host memory + `cudaHostGetDevicePointer`); set `LDPC_CUDA_ARCH` default to `121` when `CMAKE_SYSTEM_PROCESSOR == aarch64` and the detected GPU is GB10 (keep 89 elsewhere).
+- [ ] Steps: failing benchmark assertion (copy bytes per launch = 0 with the option ON, measured by a counter) → implement → GPU tests (`nr_pdsch_gpu_fep_test`, `nr_polar_sc_cuda_test`, G1 tests) pass → benchmark table (probe batch 1/32/256 µs, LDPC µs/CB) before/after → commit.
+
+### Task G3: GPU FEP stale samples (K31) (Sonnet)
+
+- Modify: `nr_pdsch_passive_queue.c` (~654-962), `nr_pdsch_gpu_fep.cu` (~446-457): IQ buffers refcounted per slot (the ring slot cannot be reused while a GPU job references it; the producer skips/drops instead of overwriting and counts it) **or** a post-copy lifetime re-check that turns the job INCONCLUSIVE. Choose refcount if F3 shows the copy dominates; else re-check.
+- [ ] Steps: failing test with an artificially delayed worker (env hook) proving a stale job is now INCONCLUSIVE/never decoded → implement → `NR_GPU_FEP=1` rfsim A/B vs CPU (CRC equal within spread) → commit; K31 → resolved.
+
+### Task G4 ★: Batched CB0 probes across grants × hypotheses (Opus design review, Sonnet implements)
+
+- Depends on: R1 (GrantWork), G1, G2, F3 decision.
+- Design (exact): RT path enqueues `GrantTrial{GrantWork*, main, probes[K−1], generation, config_epoch}` (bounded ring, drop-and-count when full; never blocks); a GPU worker collects up to B trials (default: whatever is queued within 1 slot, max 64 grants), computes LLRs once per signature (Task 4c) per grant, rate-dematches each hypothesis, and runs one batched LDPC launch for all CB0 probes (CUDA decoder, so the P2 same-decoder rule requires the main decode of probed hypotheses to also run on the CUDA decoder or P2 stays off for them); ≥ 2 CUDA streams overlap pre-processing and LDPC; outcomes go back through `feedback_k`; old-epoch trials dropped; GrantWork released by refcount.
+- [ ] Steps: unit test of the batching queue (ordering, drop-on-full, epoch drop) → implement → rfsim 273-PRB with K=3: probes/s, GPU util, CPU-core equivalents vs CPU-probe baseline → compute row of spec §1 → commit.
+
+## AFTER THE CLOUD MERGE — runtime (R1–R4)
+
+### Task R1 ★: GrantWork and compute modes (Opus)
+
+- Create: `openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.{h,c}`: `nr_td_grantwork_t` = {refcount, IQ slot ref, FEP output, per-signature chest + LLRs (lazily computed, immutable), G per signature, legality masks (Task 4b), config_epoch, generation}; API `grantwork_get_llr(gw, signature)`; built once per grant by the decode consumer.
+- Compute modes per context: COLD / VERIFY / TRACKING (spec §9.1); VERIFY entered on an epoch change (reconfiguration spec) with the previous winner first and K ≤ 2; TRACKING forces K = 1.
+- [ ] Steps: unit tests (refcount lifetime, lazy per-signature compute exactly once, mode transitions) → wire into the consumer for main + probes (CPU) → `ISAC_TD_PROBE_EQUIV_CHECK` = 0 mismatches → F3 profile again (shared-work saving per extra hypothesis) → commit.
+
+### Task R2: Runtime wiring of the levers (Sonnet; Opus review) — was Task 8
+
+Additions vs the former Task 8: the gate and legality masks come from GrantWork; probes run on GrantWork LLRs (CPU) or via G4 (GPU); `ISAC_TD_MODE_*` thresholds; metrics fields `td_*` incl. `td_probe_equiv_mismatch`, `td_stale_after_decode`, `td_signatures_per_grant`.
+
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.{c,h}` — context-level `nr_pdsch_config_sweep_select_k(...)` (same arguments as `_select` + `int K`, `nr_pdsch_sweep_ticket_k_t *ticket`, `nr_pdsch_cfg_hypothesis_t out[]`) and `nr_pdsch_config_sweep_feedback_k(const nr_pdsch_sweep_ticket_k_t *, const nr_td_outcome_t *, int n, nr_pdsch_cfg_hypothesis_t *winner)`; `nr_pdsch_sweep_ticket_k_t` = `nr_pdsch_sweep_ticket_t` + `int n; int hyp[NR_TD_MAX_K]; uint32_t config_epoch;`. Field book is a module-level `nr_td_fieldbook_t` under the existing `g_lock`; when `ISAC_TD_FIELDBOOK=1`, contexts are **not** pruned by `g_prior` (ordering via field book instead); default 0 keeps today's pruning.
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c` (the `nr_pdsch_config_sweep_select` call, ~6216): build the gate views (layers from the pinned layout's antenna ports, else −1; per-RNTI SNR EMA from earlier decodes) → gate; settled contexts always decode; gated + unsettled → count, no trial; else `select_k` with `K = ISAC_TD_K` (default 1).
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.{c,h}` — job carries the ticket_k; main decode + probes on GrantWork; outcomes (`p2_admissible` = new transmission && completed probe && same decoder && samples valid after decode (F2)); `feedback_k`.
+- Side info: SIB1 common TDRA (`nr_pdcch_blind_monitor_set_tda_common` → module-level `nr_td_side_info_t` unless `ISAC_TD_IGNORE_SIB1=1`), MIB `dmrs-TypeA-Position`, observables from the existing oracles.
+- Env flags (all default = today): `ISAC_TD_K=1`, `ISAC_TD_GATE=0`, `ISAC_TD_GATE_SNR_MARGIN_DB=6`, `ISAC_TD_W_SIB1/DEFAULT/OBS/FIELD/PROBE=0`, `ISAC_TD_FIELDBOOK=0`, `ISAC_TD_P2=0`, `ISAC_TD_IGNORE_SIB1=0`, `ISAC_TD_PROBE_BUDGET_US=400`.
+- [ ] **Step 1:** failing context-level tests `SelectK1EqualsSelect`, `FieldBookOffKeepsPriorPruning`, `FieldBookOnOrdersInsteadOfPruning`.
+- [ ] **Step 2–4:** implement; tests green; full ctest; rfsim regression gate with all flags default ⇒ PASS and identical CONVERGED lines vs pre-change.
+- [ ] **Step 5:** rfsim with levers on (106 PRB, K=3, gate=1, chosen weights, fieldbook=1): CONVERGED, CRC ≥ 98 %, compute row of spec §1 (avg + peak per thread, `pdschq_max_lag`, drops). Commit.
+
+### Task R3: Live multi-UE acceptance bed — was Task 9
 
 - [ ] **Step 1:** Check the 5G core: `docker ps` (operator runs it if the agent lacks access), confirm an OAI CN5G (AMF/SMF/UPF) is up; else fall back to the OCUDU/OAI-over-ZMQ bed (`tests/passive_rx/run_ocudu_passive.sh`, needs `-DOAI_ZMQ=ON`). Record which bed in PROJECT_MEMORY §10.4.
-- [ ] **Step 2:** SA bed: OAI gNB (SA, rfsim, 2 TX for rank 2) + N = 4 OAI UEs with iperf, receiver 4 RX and 1 RX, via the Track-A campaign runner (`campaign.py`), arms: baseline / all_P1 (/ all_P2 if Task 7 passed); cells SA (SIB1 used) and NSA-like (`ISAC_TD_IGNORE_SIB1=1`); ≥ 5 runs per arm; UEs detach/re-attach every 60 s for churn (gNB/UE scripts, not the receiver).
-- [ ] **Step 3:** Score: per RNTI time from first C-RNTI accept to CONVERGED (obs/metrics + log), wrong winners vs gNB truth (validation only), compute row. Compare with targets (spec §1).
-- [ ] **Step 4:** Commit campaign summaries; PROJECT_MEMORY §14 new subsection (`[SIM VERIFIED]`, bed named), K-entries for any failure.
+- [ ] **Step 2:** SA bed: OAI gNB (SA, rfsim, 2 TX for rank 2) + N = 4 OAI UEs with iperf, receiver 4 RX and 1 RX, via the Track-A campaign runner, arms: baseline / all_P1 (/ all_P2 if Task 7 passed) / compute ablation arms of spec §9.5; cells SA and NSA-like (`ISAC_TD_IGNORE_SIB1=1`); ≥ 5 runs per arm; UE detach/re-attach every 60 s for churn.
+- [ ] **Step 3:** Score per RNTI time-to-CONVERGED, wrong winners vs gNB truth (validation only), compute row incl. GPU utilisation reported separately.
+- [ ] **Step 4:** Commit campaign summaries; PROJECT_MEMORY §14 subsection; K-entries for failures. Follow-up: simulator replay mode (spec §6.1) fed with this bed's A3 observation records.
 
-### Task 10: Defaults, documentation, review (Opus)
+### Task R4: Defaults, documentation, review (Opus) — was Task 10
 
-- [ ] **Step 1:** If targets met with 0 wrong: set chosen defaults (K, weights, gate, fieldbook, P2 per Task 7) in code; else keep neutral defaults and record the gap.
-- [ ] **Step 2:** PROJECT_MEMORY: §23.9 (levers, flags, defaults), §10.2 env table, §11.8 new log lines, §16, §24 (resolved/new), §25.
+- [ ] **Step 1:** If targets met with 0 wrong: set chosen defaults (K, weights, gate, fieldbook, P2, GPU paths) in code; else keep neutral defaults and record the gap.
+- [ ] **Step 2:** PROJECT_MEMORY: §23.9, §10.2 env table, §11.8 new log lines, §16, §24 (K28–K32 status), §25.
 - [ ] **Step 3:** `/code-review` on `adaptive-rx-UL-DL..td/convergence-levers`; superpowers:finishing-a-development-branch; push.
 
-## Self-review record (2026-10-01)
+## Self-review record (revision 2, 2026-10-01)
 
-- Spec coverage: §1 targets → Tasks 6, 7, 9, 10; §2 principles → Global Constraints + Task 4 tests; §4.1 gate → Task 1 (+ Task 8 wiring); §4.2 exclusions → reuse in Task 8 (existing legality/rate-matching; no new code needed beyond passing the grant view — if a deterministic check is missing, add it in Task 8 with a test); §4.3 select_k/feedback_k → Tasks 4, 8; §4.4 probe decoder → Task 8; §4.5 ordering score → Tasks 2, 4; §4.6 field book → Tasks 3, 8; §5 P1/P2 → Tasks 4, 6, 7; §6.1 simulator incl. shared-IQ correlation and SNR-estimation error → Task 5; replay mode → deferred to after Track-A A3 data exist (add as a Task 9 follow-up if live obs records are available); §6.2 live bed → Task 9; §6.3 ablation → Tasks 6, 7, 9; §6.4 regression → Tasks 4, 8.
-- Gap noted: spec §6.1 replay mode is not implemented in this plan's safe phase (needs recorded A3 observation data); listed as follow-up in Task 9.
+- Spec coverage: §1 targets → Tasks 6, 7, R3, R4; §2 principles → Global Constraints + Task 4 tests; §4.1 gate → Task 1 + R2; §4.2 exclusions → Task 4b (+ R2 masks); §4.3 → Tasks 4, R2; §4.4 probe decoder → F1 (correct chest), F2, R1, G4; §4.5 → Tasks 2, 4; §4.6 → Tasks 3, R2; §5 P1/P2 (+ §9.3 same decoder) → Tasks 4, 6, 7, R2; §6.1 simulator (shared-IQ, SNR error) → Task 5, replay mode → R3 follow-up; §6.2 → R3; §6.3/§9.5 ablation → Tasks 6, 7, R3; §6.4 → Tasks 4, R2; §9.1 GrantWork → R1, legality bitsets → 4b, signatures → 4c, information-aware ordering → optional term, not scheduled (add to Task 2 only if Task 6 shows ordering is the bottleneck), modes → R1; §9.2 GPU → G1–G4; §9.4 V1–V9 → F1 (V1), F1/R1 (V2), F2 (V3), G1 (V4, V6), G3 (V5), G2 (V7), V8 out of scope (PDCCH GPU), V9 → K32 x86 comparison in R4 notes.
+- Known limitation: Task 4b's real reject vectors must be captured from a live log (Step 2 explains how); an empty vector table fails review.
