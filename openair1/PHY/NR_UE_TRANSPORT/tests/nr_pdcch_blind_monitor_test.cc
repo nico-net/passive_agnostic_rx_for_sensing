@@ -34,6 +34,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -4257,6 +4258,47 @@ TEST(DiscoveryGates, Gate2ReconvergesAfterPriorDiscoveryInTheSameProcess) {
   EXPECT_EQ(nr_pdcch_blind_monitor_get_cfg()->coreset_rb_offset, second_window_rb_offset)
       << "discovered the FIRST run's window instead of this run's -- long-term dwell state leaked "
          "across the reset";
+}
+
+// Task A7 follow-up (TSAN, rfsim 2 consumers: 13 UEthread_0 <-> passivePdcchN races, present with ONE
+// consumer too). Technique A runs on the PHY receive thread while a scan consumer tags lit windows on
+// every C-RNTI accept and owns the discovery state machine. With the scan pool up
+// (defer_commit(true)) the receive thread must only POST its footprint decision; the consumer commits
+// it under the Phase-2 lock. Run under -fsanitize=thread this also exercises the Technique A leaf lock
+// against a concurrent note_rnti_for_windows() caller.
+TEST(DiscoveryGates, DeferredCommitIsAppliedByTheConsumerNotTheReceiveThread) {
+  ParkCss0OnWindow7();
+  nr_pdcch_blind_monitor_autodiscover_reset();
+  nr_pdcch_blind_monitor_autodiscover_defer_commit(true);
+  std::atomic<bool> stop{false};
+  std::thread consumer([&stop] {
+    while (!stop.load())
+      nr_pdcch_blind_monitor_note_rnti_for_windows(0x4601);
+  });
+  const int occupied_rb_offset = 18;
+  const int calls = RunSparseDiscoveryToConvergence(occupied_rb_offset, kGate2MaxCalls);
+  stop = true;
+  consumer.join();
+  ASSERT_GT(calls, 0) << "did not converge within " << kGate2MaxCalls << " calls";
+  EXPECT_TRUE(nr_pdcch_blind_monitor_autodiscover_commit_pending());
+  EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done()) << "committed on the receive thread";
+  EXPECT_EQ(RunSparseDiscoveryToConvergence(occupied_rb_offset, 50), -1) << "decided twice";
+
+  nr_pdcch_blind_phase2_lock();
+  EXPECT_TRUE(nr_pdcch_blind_monitor_autodiscover_apply_pending());
+  nr_pdcch_blind_phase2_unlock();
+  EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_commit_pending());
+  EXPECT_TRUE(nr_pdcch_blind_monitor_autodiscover_done());
+  EXPECT_EQ(nr_pdcch_blind_monitor_get_cfg()->coreset_rb_offset, occupied_rb_offset);
+  int period = -1, offset = -1, duration = -1; /* the receive thread's view of the committed SS gate */
+  nr_pdcch_blind_monitor_occasion_gate(&period, &offset, &duration);
+  EXPECT_EQ(period, 1);
+  EXPECT_EQ(offset, 0);
+  EXPECT_EQ(duration, 1);
+  EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_apply_pending());
+
+  nr_pdcch_blind_monitor_autodiscover_defer_commit(false);
+  nr_pdcch_blind_monitor_autodiscover_reset();
 }
 
 TEST(DmrsRankMapping, MatchesProductionDemapperAcrossLegalMappings) {

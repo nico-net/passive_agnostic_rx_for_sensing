@@ -311,6 +311,12 @@ extern "C" {
 /// this pointer -- owned by nr_pdcch_blind_monitor.c.
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void);
 
+/// The search-space occasion gate (ss_monitoring_slot_periodicity / _offset / ss_duration) of the
+/// config nr_pdcch_blind_monitor_get_cfg() would return on this thread, read as one consistent
+/// snapshot. The PHY receive thread gates every slot on these while the MAC (CSS0 autoconf) and a
+/// scan consumer (the deferred autodiscover commit) rewrite them (Task A7 follow-up).
+void nr_pdcch_blind_monitor_occasion_gate(int *period, int *offset, int *duration);
+
 /// The CSS0/CORESET#0 config last derived from MIB/SIB1, kept across autodiscover's overwrite of the
 /// live config. NULL until nr_pdcch_blind_monitor_autoconf_css0() has succeeded at least once (e.g.
 /// a hand-written dedicated config, where there is nothing to interleave with). Read-only.

@@ -67,6 +67,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <pthread.h>
 
 #include "common/config/config_userapi.h"
 #include <sys/stat.h>
@@ -120,6 +121,37 @@ static __thread const nr_pdcch_blind_monitor_cfg_t *t_cfg_override;
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void)
 {
   return (t_cfg_override != NULL) ? t_cfg_override : &g_cfg;
+}
+
+/* SEARCH-SPACE OCCASION GATE as the PHY receive thread reads it (Task A7 follow-up). The receive thread
+ * tests every slot against g_cfg.ss_monitoring_slot_* / ss_duration, while those fields are rewritten
+ * by the MAC (CSS0 autoconf) and by a scan consumer (the deferred autodiscover commit). Every writer
+ * publishes the triple here, packed in one atomic word, so the gate never reads a half-written config.
+ * Fields: offset (int32 bits) [0,32), period [32,51), duration [51,63); a period <= 0 is stored as 0
+ * (= no occasion, as the gate already treats it), a duration <= 0 as 0 (the gate reads it as 1). */
+static _Atomic uint64_t s_gate_word; /* 0 until the first publish: no occasion */
+static void gate_publish(void)
+{
+  const int p = g_cfg.ss_monitoring_slot_periodicity, d = g_cfg.ss_duration;
+  const uint64_t period = p > 0 && p < (1 << 19) ? (uint64_t)p : 0;
+  const uint64_t dur = d > 0 && d < (1 << 12) ? (uint64_t)d : 0;
+  atomic_store_explicit(&s_gate_word,
+                        (uint64_t)(uint32_t)g_cfg.ss_monitoring_slot_offset | (period << 32) | (dur << 51),
+                        memory_order_release);
+}
+void nr_pdcch_blind_monitor_occasion_gate(int *period, int *offset, int *duration)
+{
+  const nr_pdcch_blind_monitor_cfg_t *ov = t_cfg_override;
+  if (ov != NULL) { /* a thread-local override is this thread's own config */
+    *period = ov->ss_monitoring_slot_periodicity;
+    *offset = ov->ss_monitoring_slot_offset;
+    *duration = ov->ss_duration;
+    return;
+  }
+  const uint64_t w = atomic_load_explicit(&s_gate_word, memory_order_acquire);
+  *offset = (int)(int32_t)(uint32_t)w;
+  *period = (int)((w >> 32) & ((1u << 19) - 1));
+  *duration = (int)((w >> 51) & ((1u << 12) - 1));
 }
 
 static bool map_staging_enabled(void)
@@ -319,6 +351,7 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
   g_cfg.ss_monitoring_slot_offset      = ss_slot;
   g_cfg.ss_duration                    = (ss_duration > 0) ? ss_duration : 1;
   g_cfg.ss_first_symbol                = ss_first_symbol;
+  gate_publish();
 
   /* Align Technique A s 6-RB window grid to THIS cell s CORESET#0 start, derived just above from
    * the SSB offset. MEASURED: the grid was CRB-0 aligned while the CORESET starts at RB 1, so
@@ -531,15 +564,93 @@ static unsigned long s_lt_hits[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static unsigned      s_lt_dwells[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static uint16_t      s_lt_rnti[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static unsigned      s_lt_ndwell;
+static int s_obs_calls;
+/* TECHNIQUE A LEAF LOCK (Task A7 follow-up). The arrays above and s_obs_calls are written by the PHY
+ * receive thread (observe_symbol1()/autodiscover_step(), every DL slot before discovery) and touched by
+ * the scan consumers (note_rnti_for_windows() on every C/TC accept, autodiscover_next()/reset() when a
+ * discovery epoch ends). TSAN, rfsim 2 consumers: 13 races on exactly these, present with ONE consumer
+ * too. The receive thread must never wait on a consumer's occasion, so this is NOT g_phase2_mu: it is a
+ * leaf lock held only around the array touches (copy in/out, no I/O, no other lock taken inside). The
+ * receive thread evaluates its dwell on a snapshot taken under it. */
+static pthread_mutex_t s_techA_mu = PTHREAD_MUTEX_INITIALIZER;
 void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti)
 {
   /* Tag every currently-hot window with the RNTI just accepted. Cheap and approximate on purpose:
    * it answers "which UE was on air while this window was lit", not "which UE owns this CORESET". */
+  pthread_mutex_lock(&s_techA_mu);
   for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
     if (s_hit_count[w] > 0)
       s_lt_rnti[w] = rnti;
+  pthread_mutex_unlock(&s_techA_mu);
 }
-static int s_obs_calls;
+/* Start a new per-dwell histogram. Caller holds s_techA_mu. */
+static void techA_clear_dwell_locked(void)
+{
+  memset(s_hit_count, 0, sizeof(s_hit_count));
+  memset(s_hit_count1, 0, sizeof(s_hit_count1));
+  s_obs_calls = 0;
+}
+static void techA_clear_dwell(void)
+{
+  pthread_mutex_lock(&s_techA_mu);
+  techA_clear_dwell_locked();
+  pthread_mutex_unlock(&s_techA_mu);
+}
+
+/* DEFERRED FOOTPRINT COMMIT (Task A7 follow-up). autodiscover_step() decides on the receive thread, but
+ * committing the decision rewrites g_cfg's geometry and the extent/map/lane cursors that a scan consumer
+ * reads (and advances) inside its discovery occasion under g_phase2_mu. So once the scan pool runs
+ * (nr_pdcch_blind_monitor_autodiscover_defer_commit(true)), the receive thread only POSTS the decision
+ * here and the next consumer occasion applies it under g_phase2_mu
+ * (nr_pdcch_blind_monitor_autodiscover_apply_pending()). Without a pool (in-line scan, unit tests) there
+ * is no other thread and the decision is applied at once, exactly as before. */
+/* Complete bounded catalog of contiguous intervals over at most 45 six-RB windows.
+ * Exhaustion is inconclusive and starts a fresh occupancy epoch, never a verified fallback. */
+#define NR_PDCCH_EXTENT_MAX_CAND (45 * 46 / 2)
+typedef struct {
+  int ext_n;
+  nr_pdcch_extent_cand_t ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
+  int nseed;
+  unsigned ndwell, recurrence_floor;
+  uint32_t h0, h1; /* symbol-0 / symbol-1 hits over the first candidate: decides the duration */
+  int n_rb_carrier;
+  uint16_t pci;
+  int symbol;
+  uint32_t abs_slot;
+} techA_commit_t;
+static techA_commit_t s_commit_rx;     /* receive-thread scratch */
+static techA_commit_t s_commit;        /* the posted decision, under s_techA_mu */
+static _Atomic bool s_commit_pending;  /* written under s_techA_mu; read lock-free as a fast check */
+static _Atomic bool s_commit_defer;
+static void techA_commit_apply(const techA_commit_t *c);
+void nr_pdcch_blind_monitor_autodiscover_defer_commit(bool on)
+{
+  s_commit_defer = on;
+}
+bool nr_pdcch_blind_monitor_autodiscover_commit_pending(void)
+{
+  return s_commit_pending;
+}
+/* Caller holds g_phase2_mu (or is the only thread running occasions). Pending stays set until the
+ * commit is complete, so the receive thread does not start a new dwell on a half-applied geometry. */
+bool nr_pdcch_blind_monitor_autodiscover_apply_pending(void)
+{
+  static techA_commit_t s_commit_apply; /* consumer side, serialised by g_phase2_mu */
+  if (!s_commit_pending)
+    return false;
+  pthread_mutex_lock(&s_techA_mu);
+  const bool pending = s_commit_pending;
+  if (pending)
+    s_commit_apply = s_commit;
+  pthread_mutex_unlock(&s_techA_mu);
+  if (!pending)
+    return false;
+  techA_commit_apply(&s_commit_apply);
+  pthread_mutex_lock(&s_techA_mu);
+  s_commit_pending = false;
+  pthread_mutex_unlock(&s_techA_mu);
+  return true;
+}
 
 /* CONVERGENCE CRITERION (rewritten 2026-09-06 -- see the handover doc's reversal section for the
  * live measurement that forced this). The original design required the SAME rb_offset to win
@@ -557,9 +668,6 @@ static int s_obs_calls;
  * does not). */
 #define AUTODISCOVER_OBS_CALLS 1000  // ~4-5s of DL-slot dwell on this cell's occasion rate --
                                      // long enough to average over occasion-to-occasion CCE hopping
-/* Complete bounded catalog of contiguous intervals over at most 45 six-RB windows.
- * Exhaustion is inconclusive and starts a fresh occupancy epoch, never a verified fallback. */
-#define NR_PDCCH_EXTENT_MAX_CAND (45 * 46 / 2)
 /* Occasions each candidate is given to produce a Technique B confirmation before moving on. Sized
  * from this cell's own measured accept rate (~700 accepts/s at ~2000 occasions/s, and a
  * confirmation needs two sightings of the same RNTI), with a wide margin for a quieter cell. */
@@ -769,7 +877,8 @@ static bool extent_advance(void)
 typedef struct { int nid, sym, dur, rb, ng, L, R, sh; } disc_coreset_t;
 static disc_coreset_t s_disc[DISC_MAX];
 static int s_disc_n, s_disc_next, s_disc_failed;
-static bool s_disc_active, s_disc_pending, s_disc_paused;
+static bool s_disc_active, s_disc_pending;
+static _Atomic bool s_disc_paused; /* _Atomic: read by the PHY receive thread (discovery gate), written by a consumer */
 static int s_disc_saved[8];
 
 bool nr_pdcch_blind_monitor_discovery_paused(void)
@@ -1224,9 +1333,10 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
   s_map_n = s_map_idx = 0;
   s_lane_dispatch_ext = s_lane_dispatch_map = s_lane_dispatch_phase = 0;
   s_lane_dispatch_stage = s_lane_dispatch_map_max = 0;
-  memset(s_hit_count, 0, sizeof(s_hit_count));
-  memset(s_hit_count1, 0, sizeof(s_hit_count1));
-  s_obs_calls = 0;
+  pthread_mutex_lock(&s_techA_mu);
+  techA_clear_dwell_locked();
+  s_commit_pending = false; /* a full reset also drops a decision not yet applied */
+  pthread_mutex_unlock(&s_techA_mu);
   g_cfg.dci_length_override = 0;
   extent_clear_evidence();
   memset(s_lane, 0, sizeof(s_lane));
@@ -1242,10 +1352,12 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
    * production caller at all (grep confirms only test fixtures call it) -- so there is no runtime
    * behavior this could regress today. If a production re-discovery path starts calling this
    * function, "full reset means full reset" is exactly the semantics its own name promises. */
+  pthread_mutex_lock(&s_techA_mu);
   memset(s_lt_hits, 0, sizeof(s_lt_hits));
   memset(s_lt_dwells, 0, sizeof(s_lt_dwells));
   memset(s_lt_rnti, 0, sizeof(s_lt_rnti));
   s_lt_ndwell = 0;
+  pthread_mutex_unlock(&s_techA_mu);
 }
 
 int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out)
@@ -1565,8 +1677,11 @@ void nr_pdcch_blind_monitor_autodiscover_observe_symbol1(const void* rxdataF_sym
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
   for (int c = 0; c < n; c++) {
     const int w = candidates[c].rb_offset / 6;
-    if (w >= 0 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS)
+    if (w >= 0 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS) {
+      pthread_mutex_lock(&s_techA_mu);
       s_hit_count1[w]++;
+      pthread_mutex_unlock(&s_techA_mu);
+    }
   }
 }
 
@@ -1574,6 +1689,9 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
                                               int first_carrier_offset, uint16_t pci, int slot, int symbol,
                                               uint32_t abs_slot)
 {
+  /* A posted footprint decision is waiting for a scan consumer to apply it (deferred commit). */
+  if (s_commit_pending)
+    return false;
   nr_pdcch_coreset_candidate_t candidates[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
   const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
                                           first_carrier_offset, pci, slot, symbol, candidates,
@@ -1602,13 +1720,20 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   // Accumulate hits toward the observation window regardless of n==0 -- a genuinely idle call is
   // itself informative (real windows stay at 0 too on an idle call), and returning early here would
   // under-count elapsed dwell against AUTODISCOVER_OBS_CALLS.
+  /* The dwell is evaluated on a snapshot taken under the Technique A leaf lock (see s_techA_mu). */
+  uint16_t hc[NR_PDCCH_MAX_CANDIDATE_WINDOWS], hc1[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  int obs_calls;
+  pthread_mutex_lock(&s_techA_mu);
   for (int c = 0; c < n; c++) {
     const int w = candidates[c].rb_offset / 6;
     if (w >= 0 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS) {
       s_hit_count[w]++;
     }
   }
-  s_obs_calls++;
+  obs_calls = ++s_obs_calls;
+  memcpy(hc, s_hit_count, sizeof(hc));
+  memcpy(hc1, s_hit_count1, sizeof(hc1));
+  pthread_mutex_unlock(&s_techA_mu);
   /* TERMINATION IS HIT-DRIVEN, NOT CALL-DRIVEN (fixed 2026-09-07). A fixed observation length in
    * CALLS silently changes meaning with offered load: this function is invoked on every DL
    * occasion (~2000/s) but only accumulates a hit when a PDCCH is actually present, so at 38
@@ -1625,7 +1750,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * dead/absent CORESET cannot spin forever; reaching it resets and retries. */
   int obs_total_hits = 0;
   for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
-    obs_total_hits += s_hit_count[w];
+    obs_total_hits += hc[w];
   }
   /* Evidence needed = HITS_PER_WINDOW on the LIT windows, not on every window of the carrier: the
    * old n_windows x 30 (1380 on 273 PRB) was sized for a full-carrier CORESET lit every slot; a
@@ -1636,7 +1761,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * hits 153 -> 411, needed always ~2x ahead). */
   int obs_top = 0;
   for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
-    if (s_hit_count[w] > obs_top) obs_top = s_hit_count[w];
+    if (hc[w] > obs_top) obs_top = hc[w];
   /* LIT = SIGNIFICANT AGAINST THE BACKGROUND, not a fraction of the peak (2026-09-21).
    * top/8 is a RELATIVE rule: it cannot distinguish "everything lit" from "nothing lit", which is
    * exactly how an ungated, duty-cycle-diluted histogram saturated to 0..44 and triggered the
@@ -1651,7 +1776,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   {
     int v[NR_PDCCH_MAX_CANDIDATE_WINDOWS], m = 0;
     for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
-      v[m++] = s_hit_count[w];
+      v[m++] = hc[w];
     for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
     const double bg = (m > 0) ? (double)v[m / 2] : 0.0;   /* median = background, peak-immune */
     const double k = 5.0;
@@ -1666,22 +1791,20 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   }
   int obs_lit = 0;
   for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
-    obs_lit += (s_hit_count[w] >= lit_floor);
+    obs_lit += (hc[w] >= lit_floor);
   const int obs_nw = obs_lit > 0 ? obs_lit : 1;
   const int obs_hits_needed = obs_nw * AUTODISCOVER_HITS_PER_WINDOW;
   {
     static int s_gate_diag = -1;
     if (s_gate_diag < 0) s_gate_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
-    if (s_gate_diag && (s_obs_calls % 5000) == 0) {
-      printf("DISCOVERGATE calls=%d total_hits=%d top=%d floor=%d lit=%d needed=%d\n", s_obs_calls, obs_total_hits, obs_top, lit_floor, obs_lit, obs_hits_needed);
+    if (s_gate_diag && (obs_calls % 5000) == 0) {
+      printf("DISCOVERGATE calls=%d total_hits=%d top=%d floor=%d lit=%d needed=%d\n", obs_calls, obs_total_hits, obs_top, lit_floor, obs_lit, obs_hits_needed);
       fflush(stdout);
     }
   }
-  if (s_obs_calls >= AUTODISCOVER_MAX_OBS_CALLS && obs_total_hits < obs_hits_needed) {
+  if (obs_calls >= AUTODISCOVER_MAX_OBS_CALLS && obs_total_hits < obs_hits_needed) {
     /* Waited long enough and the evidence never arrived -- reset rather than decide on noise. */
-    memset(s_hit_count, 0, sizeof(s_hit_count));
-  memset(s_hit_count1, 0, sizeof(s_hit_count1));
-    s_obs_calls = 0;
+    techA_clear_dwell();
     return false;
   }
   /* BACKGROUND MUST BE ESTIMABLE BEFORE THE SIGNIFICANCE TEST CAN RUN -- see the note on
@@ -1700,10 +1823,10 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     if (s_min_bg > 0) {
       int v[NR_PDCCH_MAX_CANDIDATE_WINDOWS], m = 0;
       for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
-        v[m++] = s_hit_count[w];
+        v[m++] = hc[w];
       for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
       const int bg = (m > 0) ? v[m / 2] : 0;
-      if (bg < s_min_bg && s_obs_calls < AUTODISCOVER_MAX_OBS_CALLS) {
+      if (bg < s_min_bg && obs_calls < AUTODISCOVER_MAX_OBS_CALLS) {
         /* GATE 2 BYPASS (R31, sa-discovery-stall.md): sparse traffic can leave the whole-carrier
          * MEDIAN genuinely inestimable (most windows legitimately never see a hit) even though the
          * true window is already unmistakable -- live evidence: top window climbed 16->138 hits over
@@ -1754,13 +1877,13 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
         int top_w = -1, top_hits = 0;
         for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
           if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
-          if (s_hit_count[w] > top_hits) { top_hits = s_hit_count[w]; top_w = w; }
+          if (hc[w] > top_hits) { top_hits = hc[w]; top_w = w; }
         }
         int rival = 0;
         for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
           if (w == top_w) continue;
           if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
-          if (s_hit_count[w] > rival) rival = s_hit_count[w];
+          if (hc[w] > rival) rival = hc[w];
         }
         const bool dominant = top_w >= 0 && top_hits >= s_dom_n * AUTODISCOVER_HITS_PER_WINDOW
                             && top_hits >= s_dom_k * rival;
@@ -1783,7 +1906,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
       }
     }
   }
-  if (s_obs_calls < AUTODISCOVER_OBS_CALLS || obs_total_hits < obs_hits_needed) {
+  if (obs_calls < AUTODISCOVER_OBS_CALLS || obs_total_hits < obs_hits_needed) {
     return false;
   }
 
@@ -1803,13 +1926,13 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
       int p = 0, tot = 0;
       const int nw = n_rb_carrier / 6;
       for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
-        tot += s_hit_count[w];
+        tot += hc[w];
         if (p < (int)sizeof(h) - 12) {
-          p += snprintf(h + p, sizeof(h) - p, "%u ", (unsigned)s_hit_count[w]);
+          p += snprintf(h + p, sizeof(h) - p, "%u ", (unsigned)hc[w]);
         }
       }
       printf("DISCOVERHIST calls=%d nw=%d total_hits=%d min_hits=%d hits: %s\n",
-             s_obs_calls, nw, tot, AUTODISCOVER_MIN_HITS, h);
+             obs_calls, nw, tot, AUTODISCOVER_MIN_HITS, h);
       fflush(stdout);
     }
   }
@@ -1824,49 +1947,60 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     int t[3] = {-1, -1, -1};
     for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
       for (int i = 0; i < 3; i++)
-        if (t[i] < 0 || s_hit_count[w] > s_hit_count[t[i]]) {
+        if (t[i] < 0 || hc[w] > hc[t[i]]) {
           for (int j = 2; j > i; j--) t[j] = t[j - 1];
           t[i] = w;
           break;
         }
     int v[NR_PDCCH_MAX_CANDIDATE_WINDOWS], m = 0;
-    for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) v[m++] = s_hit_count[w];
+    for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) v[m++] = hc[w];
     for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
     const double bg = (m > 0) ? (double)v[m / 2] : 0.0;
     const double sd = sqrt(bg > 1.0 ? bg : 1.0);
     LOG_A(PHY,
           "SENSING: COREMAPTOP bg=%.1f excl_w=%d..%d top: w%d=%d(%.1fsig) w%d=%d(%.1fsig) w%d=%d(%.1fsig)\n",
           bg, s_css0_excl_first_w, s_css0_excl_last_w,
-          t[0], t[0] >= 0 ? s_hit_count[t[0]] : 0, t[0] >= 0 ? (s_hit_count[t[0]] - bg) / sd : 0.0,
-          t[1], t[1] >= 0 ? s_hit_count[t[1]] : 0, t[1] >= 0 ? (s_hit_count[t[1]] - bg) / sd : 0.0,
-          t[2], t[2] >= 0 ? s_hit_count[t[2]] : 0, t[2] >= 0 ? (s_hit_count[t[2]] - bg) / sd : 0.0);
+          t[0], t[0] >= 0 ? hc[t[0]] : 0, t[0] >= 0 ? (hc[t[0]] - bg) / sd : 0.0,
+          t[1], t[1] >= 0 ? hc[t[1]] : 0, t[1] >= 0 ? (hc[t[1]] - bg) / sd : 0.0,
+          t[2], t[2] >= 0 ? hc[t[2]] : 0, t[2] >= 0 ? (hc[t[2]] - bg) / sd : 0.0);
   }
   /* LONG-TERM ACCUMULATION + RECURRENCE REPORT. The per-dwell histogram is about to be consumed
    * and reset; fold it into evidence that survives, because recurrence across dwells -- not peak
    * height within one -- is what distinguishes a UE's CORESET from a burst. */
+  unsigned long lt_hits[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  unsigned lt_dwells[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  uint16_t lt_rnti[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  unsigned lt_ndwell;
   {
     const int nw = n_rb_carrier / 6;
     int t3[3] = {-1, -1, -1};
     for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
-      s_lt_hits[w] += (unsigned long)s_hit_count[w];
       if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
       for (int i = 0; i < 3; i++)
-        if (t3[i] < 0 || s_hit_count[w] > s_hit_count[t3[i]]) {
+        if (t3[i] < 0 || hc[w] > hc[t3[i]]) {
           for (int j = 2; j > i; j--) t3[j] = t3[j - 1];
           t3[i] = w;
           break;
         }
     }
+    pthread_mutex_lock(&s_techA_mu); /* fold, then snapshot for the report and the seed ranking */
+    for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+      s_lt_hits[w] += (unsigned long)hc[w];
     for (int i = 0; i < 3; i++)
-      if (t3[i] >= 0 && s_hit_count[t3[i]] > 0) s_lt_dwells[t3[i]]++;
+      if (t3[i] >= 0 && hc[t3[i]] > 0) s_lt_dwells[t3[i]]++;
     s_lt_ndwell++;
+    memcpy(lt_hits, s_lt_hits, sizeof(lt_hits));
+    memcpy(lt_dwells, s_lt_dwells, sizeof(lt_dwells));
+    memcpy(lt_rnti, s_lt_rnti, sizeof(lt_rnti));
+    lt_ndwell = s_lt_ndwell;
+    pthread_mutex_unlock(&s_techA_mu);
     int ord[NR_PDCCH_MAX_CANDIDATE_WINDOWS], n_ord = 0;
     for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
-      if (s_lt_dwells[w] > 0) ord[n_ord++] = w;
+      if (lt_dwells[w] > 0) ord[n_ord++] = w;
     for (int i = 1; i < n_ord; i++) {
       const int x = ord[i];
       int j = i - 1;
-      while (j >= 0 && s_lt_dwells[ord[j]] < s_lt_dwells[x]) { ord[j + 1] = ord[j]; j--; }
+      while (j >= 0 && lt_dwells[ord[j]] < lt_dwells[x]) { ord[j + 1] = ord[j]; j--; }
       ord[j + 1] = x;
     }
     char b[700];
@@ -1874,10 +2008,10 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     for (int i = 0; i < n_ord && i < 8 && u < (int)sizeof(b) - 40; i++) {
       const int w = ord[i];
       u += snprintf(b + u, sizeof(b) - u, "w%d:%u/%u dwells,%lu hits,rnti=0x%04x  ",
-                    w, s_lt_dwells[w], s_lt_ndwell, s_lt_hits[w], s_lt_rnti[w]);
+                    w, lt_dwells[w], lt_ndwell, lt_hits[w], lt_rnti[w]);
     }
     LOG_A(PHY, "SENSING: COREMAPLT dwell=%u (recurrence across dwells; excl w%d..%d) %s\n",
-          s_lt_ndwell, s_css0_excl_first_w, s_css0_excl_last_w, b);
+          lt_ndwell, s_css0_excl_first_w, s_css0_excl_last_w, b);
   }
   const int nw_total = n_rb_carrier / 6;
 
@@ -1886,16 +2020,14 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * then generated only the 322 intervals containing w13, making every CORESET elsewhere
    * impossible to discover. Eight independent dwells are cheap compared with the catalogue walk. */
   enum { MIN_ORACLE_DWELLS = 8, MAX_ORACLE_SEEDS = 8 };
-  if (s_lt_ndwell < MIN_ORACLE_DWELLS) {
-    memset(s_hit_count, 0, sizeof(s_hit_count));
-    memset(s_hit_count1, 0, sizeof(s_hit_count1));
-    s_obs_calls = 0;
+  if (lt_ndwell < MIN_ORACLE_DWELLS) {
+    techA_clear_dwell();
     return false;
   }
 
   int seeds[MAX_ORACLE_SEEDS];
   int nseed = 0;
-  const unsigned recurrence_floor = (s_lt_ndwell + 4) / 5; /* >=20% of independent dwells */
+  const unsigned recurrence_floor = (lt_ndwell + 4) / 5; /* >=20% of independent dwells */
   for (int rank = 0; rank < MAX_ORACLE_SEEDS; ++rank) {
     int best = -1;
     for (int w = 0; w < nw_total && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; ++w) {
@@ -1904,9 +2036,9 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
       bool used = false;
       for (int i = 0; i < nseed; ++i)
         used |= seeds[i] == w;
-      if (!used && s_lt_dwells[w] >= recurrence_floor
-          && (best < 0 || s_lt_dwells[w] > s_lt_dwells[best]
-              || (s_lt_dwells[w] == s_lt_dwells[best] && s_lt_hits[w] > s_lt_hits[best])))
+      if (!used && lt_dwells[w] >= recurrence_floor
+          && (best < 0 || lt_dwells[w] > lt_dwells[best]
+              || (lt_dwells[w] == lt_dwells[best] && lt_hits[w] > lt_hits[best])))
         best = w;
     }
     if (best < 0)
@@ -1916,10 +2048,51 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
 
   /* Geometry verification uses only fresh dedicated DCI evidence collected in this epoch. The
    * catalogue is complete even when nseed==0: oracle evidence changes order, never eligibility. */
-  s_ext_n = nr_pdcch_extent_candidates_multi(seeds, nseed, nw_total,
-                                             s_ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
-  if (s_ext_n <= 0)
+  techA_commit_t *c = &s_commit_rx;
+  c->ext_n = nr_pdcch_extent_candidates_multi(seeds, nseed, nw_total, c->ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
+  if (c->ext_n <= 0)
     return false;
+  c->nseed = nseed;
+  c->ndwell = lt_ndwell;
+  c->recurrence_floor = recurrence_floor;
+  c->n_rb_carrier = n_rb_carrier;
+  c->pci = pci;
+  c->symbol = symbol;
+  c->abs_slot = abs_slot;
+  /* Duration evidence over the first candidate (consumed by the duration block in techA_commit_apply()).
+   * It MUST be summed before the reset below: the reset used to sit right after first_w/last_w were
+   * picked, which zeroed s_hit_count[]/s_hit_count1[] before the duration readout -- every declared
+   * footprint logged "symbol-0 hits 0, symbol-1 hits 0" and coreset_duration was silently forced to 1
+   * regardless of the real evidence, live-measured 2026-09-17 (rb_offset=0 span_rb=48
+   * bootstrap_rnti=0x0, exhausting and rediscovering every ~50s on a real commercial cell). */
+  c->h0 = c->h1 = 0;
+  for (int w = c->ext_cand[0].first_w; w <= c->ext_cand[0].last_w && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+    c->h0 += hc[w];
+    c->h1 += hc1[w];
+  }
+  /* Start a new occupancy window for any later inconclusive retry. */
+  techA_clear_dwell();
+  if (!s_commit_defer) {
+    techA_commit_apply(c); /* no scan pool: this is the only thread running occasions */
+    return true;
+  }
+  pthread_mutex_lock(&s_techA_mu);
+  s_commit = *c;
+  s_commit_pending = true;
+  pthread_mutex_unlock(&s_techA_mu);
+  return true;
+}
+
+/* Commit a footprint decision of autodiscover_step(): catalogue, g_cfg geometry, mapping list, lanes.
+ * Runs on the thread that owns the discovery state machine (a scan consumer under g_phase2_mu, or the
+ * only occasion thread when there is no pool). */
+static void techA_commit_apply(const techA_commit_t *c)
+{
+  const int n_rb_carrier = c->n_rb_carrier;
+  const uint16_t pci = c->pci;
+  const int symbol = c->symbol;
+  memcpy(s_ext_cand, c->ext_cand, sizeof(s_ext_cand[0]) * c->ext_n);
+  s_ext_n = c->ext_n;
   s_ext_idx = 0;
   s_ext_phase_idx = 0;
   extent_clear_evidence();
@@ -1927,7 +2100,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   int first_w = s_ext_cand[0].first_w;
   int last_w  = s_ext_cand[0].last_w;
   LOG_A(PHY, "SENSING: recurrent oracle committed after %u dwells: seeds=%d floor=%u catalog=%d\n",
-        s_lt_ndwell, nseed, recurrence_floor, s_ext_n);
+        c->ndwell, c->nseed, c->recurrence_floor, s_ext_n);
   /* The oracle phase orders six physical RB-phase hypotheses; it is not dedicated-BWP truth. */
   const int rb_offset = first_w * 6 + extent_phase(0);
   const int span_rb   = (last_w - first_w + 1) * 6;
@@ -2038,21 +2211,11 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * real dedicated SS periodicity is sparser. Upgrade path: derive periodicity from the actual
    * inter-occupancy gap Technique A already measures, once that's shown to matter live. */
   {
-    uint32_t h0 = 0, h1 = 0;
-    for (int w = first_w; w <= last_w && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) { h0 += s_hit_count[w]; h1 += s_hit_count1[w]; }
+    const uint32_t h0 = c->h0, h1 = c->h1; /* summed by autodiscover_step() over [first_w, last_w] */
     g_cfg.coreset_duration = (h0 > 0 && h1 * 2 >= h0) ? 2 : 1; /* symbol 1 lit at >= half of symbol 0's rate */
     LOG_I(PHY, "SENSING: Phase 3 autodiscover -- CORESET duration %d (symbol-0 hits %u, symbol-1 hits %u over the footprint)\n",
           g_cfg.coreset_duration, h0, h1);
   }
-  /* Start a new occupancy window for any later inconclusive retry. MUST run after the duration
-   * readout above, not before: this used to sit right after first_w/last_w were picked, which
-   * zeroed s_hit_count[]/s_hit_count1[] before the duration block below could read them -- every
-   * declared footprint logged "symbol-0 hits 0, symbol-1 hits 0" and coreset_duration was silently
-   * forced to 1 regardless of the real evidence, live-measured 2026-09-17 (rb_offset=0 span_rb=48
-   * bootstrap_rnti=0x0, exhausting and rediscovering every ~50s on a real commercial cell). */
-  memset(s_hit_count, 0, sizeof(s_hit_count));
-  memset(s_hit_count1, 0, sizeof(s_hit_count1));
-  s_obs_calls = 0;
   /* CCE-to-REG mapping: hypothesis 0 is non-interleaved (bundle 0 -- the demapper's identity
    * path, this project's every captured dedicated CORESET); the interleaved (L, R, shift)
    * hypotheses follow, each with the same dwell, when the non-interleaved one collects no
@@ -2061,6 +2224,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   g_cfg.ss_monitoring_slot_periodicity   = 1;
   g_cfg.ss_monitoring_slot_offset        = 0;
   g_cfg.ss_duration                      = 1;
+  gate_publish();
   g_cfg.ss_first_symbol                  = symbol;
   /* dmrs_typeA_position is the ASN.1 ENUM (NR_MIB__dmrs_TypeA_Position_pos2 = 0, pos3 = 1), NOT a
    * symbol index. 0 IS the spec default (pos2), so it needs no fixing up -- and writing 2 here made
@@ -2073,7 +2237,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   uint16_t bootstrap_rnti = 0;
   uint8_t  bootstrap_class = 0xFF;
   uint32_t age = 0;
-  nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &bootstrap_rnti, &bootstrap_class, &age);
+  nr_pdcch_blind_monitor_confirmed_rnti(c->abs_slot, &bootstrap_rnti, &bootstrap_class, &age);
   // Only bootstrap_rnti is consumed below (the log line); the function unconditionally writes
   // through all three out-params (see nr_pdcch_blind_rnti_bootstrap.c), so these two can't be NULL.
   (void)bootstrap_class;
@@ -2085,7 +2249,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
 
   LOG_A(PHY, "SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=%d span_rb=%d "
             "bootstrap_rnti=0x%x\n", rb_offset, span_rb, bootstrap_rnti);
-  return true;  // g_cfg's CORESET fields are now populated; dci_length sweep is the caller's next step
+  // g_cfg's CORESET fields are now populated; dci_length sweep is the caller's next step
 }
 
 /* Technique C's result lands here rather than at a direct g_cfg write from the RT tap, since g_cfg
@@ -2107,9 +2271,7 @@ void nr_pdcch_blind_monitor_autodiscover_next(void)
   s_map_n = s_map_idx = 0;
   s_lane_dispatch_ext = s_lane_dispatch_map = s_lane_dispatch_phase = 0;
   s_lane_dispatch_stage = s_lane_dispatch_map_max = 0;
-  memset(s_hit_count, 0, sizeof(s_hit_count));
-  memset(s_hit_count1, 0, sizeof(s_hit_count1));
-  s_obs_calls = 0;
+  techA_clear_dwell(); /* the receive thread may resume its dwell as soon as s_dedicated_found drops */
   g_cfg.dci_length_override = 0;
   memset(s_lane, 0, sizeof(s_lane));
   extent_clear_evidence();
@@ -2158,7 +2320,7 @@ static int parse_coreset(const char* s)
 
 static int parse_ss(const char* s)
 {
-  return sscanf(s,
+  const int n = sscanf(s,
                "%d:%d:%d:%d:%d:%d:%d:%d",
                &g_cfg.ss_monitoring_slot_periodicity,
                &g_cfg.ss_monitoring_slot_offset,
@@ -2167,8 +2329,9 @@ static int parse_ss(const char* s)
                &g_cfg.ss_al_candidates[0],
                &g_cfg.ss_al_candidates[1],
                &g_cfg.ss_al_candidates[2],
-               &g_cfg.ss_al_candidates[3])
-         == 8;
+               &g_cfg.ss_al_candidates[3]);
+  gate_publish();
+  return n == 8;
 }
 
 static int parse_bwp(const char* s)

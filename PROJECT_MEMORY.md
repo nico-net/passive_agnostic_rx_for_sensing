@@ -375,6 +375,7 @@ through sensing metrics.
 | `openair1/PHY/CODING/nrLDPC_coding/...segment_decoder.c`, `nr_rate_matching.c` | LDPC | Diagnostics (`LDPCDIAG`), LBRM n_L handling | Rank-4 MCS-25 wall | Every TB | OTA (older) |
 | `openair2/LAYER2/NR_MAC_UE/config_ue.c` (+427), `nr_ue_procedures.c`, `nr_ue_scheduler.c`, `nr_ue_dci_configuration.c` | UE MAC | Passive SIB1 extraction into blind monitor; MIB DM-RS pos hand-off; maxMIMO-Layers fallback instead of AssertFatal; no RA in passive | Agnostic config | Broadcast | OTA |
 | `openair2/RRC/NR_UE/rrc_UE.c` | UE RRC | `SIB1 CELL` log (PLMN/cell id/TAC) | Cell identification | SIB1 | OTA |
+| `common/utils/threadPool/task_ans.c` | Thread-pool join counter | `completed_many_task_ans()` decrements with `memory_order_acq_rel` instead of relaxed (2026-10-01, A7 follow-up) | Only the last completer posts the semaphore; with relaxed the other workers' outputs (LDPC segments) were unordered w.r.t. the joiner — TSAN on the passive PDSCH pool, real hazard on aarch64 | Every pooled task | TSAN rfsim (`tests/passive_rx/cloud_run_2026-10-01/a7_followup_races/`) |
 | `radio/rfsimulator/apply_channelmod.c`, `simulator.cpp` | rfsim | Sparse-tap convolution; nb_tx from own TX count (layers>1 now reach receiver) | Simulation beds | Sim | SIM |
 | `openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c` | gNB config | Test hooks for beds | Sim | Sim | SIM |
 | `CMakeLists.txt` (+554), `openair1/PHY/CODING/CMakeLists.txt` | Build | New libraries/tests (below), `ENABLE_ISAC_SENSING`, `ENABLE_LDPC_CUDA`, GPU modules | | | |
@@ -1379,7 +1380,7 @@ At 4 RX the initial sync is serial for ~90 s (§14.2). So adding cores does noth
 | Thread | Knob | Proposed core (instance A = cluster 0) | Instance B (cluster 1) |
 |---|---|---|---|
 | `UEthread_0` (PHY receive / RF reader) | `ISAC_UE_RT_CORE=<cpu>` | **5** (X925), alone | 15 |
-| `passivePdcch0` (blind PDCCH scan; N ≤ 4 consumers thread-safe since A7 `b6e5fb27ac`, K27) | `pdcch_blind_monitor_scan_thread = "1:8:<cpu>"` | **6** (X925) | 16 |
+| `passivePdcch0..N-1` (blind PDCCH scan; N > 1 is thread-safe since A7 + follow-up, §14.5, but untested on the DGX) | `pdcch_blind_monitor_scan_thread = "1:8:<cpu>"` | **6** (X925) | 16 |
 | `pdcchUssHash` (USS AL/hash tracker) | `ISAC_PDCCH_USS_CORE=<cpu>` | **7** (X925) | 17 |
 | `Tpool*` (per-antenna FEP/chest, LDPC segments pushed by the RT path) | `--thread-pool 8,9,0,1` | **8, 9** (X925) + 0, 1 (A725) | 18,19,10,11 |
 | `passivePdsch*` decode consumers (queue, latency-tolerant) | `pdcch_blind_monitor_pdsch = "…:<n>:<depth>:<first_cpu>"` (consecutive cores) | 2, 3, 4 (A725) | 12,13,14 |
@@ -1410,15 +1411,49 @@ Item 4 below (N scan consumers) is now implemented (K27, §14.5); the 273-PRB pi
    the thread pool (or GPU). Today ~90 s at 273 PRB × 4 RX (§14.2).
 3. **`pdcchUssHash` → data-parallel**: the hash/AL search is independent per RNTI hypothesis and per occasion → shard
    the RNTI range over K threads or move it to the GPU (same pattern as idsweep, 11× on GB10).
-4. **Blind-PDCCH scan with N consumers**: blocked by unsynchronised per-run state (energy floor, RNTI-persistence
-   table, counters — `nr_pdcch_passive_queue.c` warns). Make those thread-safe (atomics, locked/sharded table), then
-   N consumers by occasion; or parallelize inside an occasion (per-candidate/per-AL decode).
+4. **Blind-PDCCH scan with N consumers**: **DONE in code, 2026-10-01 (A7 + follow-up, §14.5)** — N consumers by
+   occasion, TSAN-clean in the scan code on the cloud rfsim bed. Still open: measure on the DGX at 273 PRB whether N > 1
+   actually relieves `passivePdcch0` (the 4-core cloud A/B showed the work splitting, not a speed-up); parallelizing
+   inside an occasion (per-candidate/per-AL decode) is not started.
 5. **GPU on unified memory**: the old "GPU LDPC 20× slower" result (K17) was PCIe-transfer-dominated on a discrete
    4060 Ti; GB10 shares memory with the CPU, so batched PDCCH candidate decode, USS hash, PDSCH FEP/LLR and LDPC
    across grants/antennas/cells must be **re-measured**, not assumed slow.
 6. **Multi-cell/-carrier (§17–§20)**: today one process = one cell (global state). First step = one process per cell,
    each pinned to its own core set (≈ 3 hot X925 cores per instance → ~3 instances on 10 X925 cores as the code
    stands); then shared RF ring + per-cell `CellContext`; then shared GPU batches across cells.
+
+### 14.5 Blind-PDCCH scan with N consumers + race fixes (Task A7 + follow-up, 2026-10-01, cloud x86, NOT DGX)
+
+Host: cloud container, x86 Xeon 2.8 GHz, **4 cores**, no GPU, consumers unpinned (`scan_thread` core field -1).
+Results are from that host only (§0.1 rule 5); nothing here has run on the DGX or OTA.
+
+- **A7** (commit `b6e5fb27ac`, branch `cloud/dgx-next-steps`): Phase-2 lock (`nr_pdcch_blind_phase2.{c,h}`), atomic
+  occasion counters, RNTI-persistence ring + energy floor made safe; the >1-consumer warning removed.
+  `[OFFLINE VERIFIED]` gtest 197 + 2 skips; `[SIM VERIFIED]` partial-TSAN rfsim passivePdcch0↔1 races 26 → 0.
+  Evidence: `tests/passive_rx/cloud_run_2026-10-01/a7_concurrency/README.md` (incl. the S/M A/B: CRC and acc/occ
+  within run-to-run spread, total scan CPU +10 %, no speed-up claimed on 4 cores).
+- **Follow-up** (commit `71dbfd582a`, branch `claude/elegant-davinci-jlrfol` = `cloud/dgx-next-steps` + this fix):
+  the two groups A7 left, both present with ONE consumer too:
+  1. `UEthread_0` ↔ `passivePdcchN` in `nr_pdcch_blind_monitor.c` (Technique A histogram vs
+     `note_rnti_for_windows()`/`autodiscover_next()`; footprint commit rewriting `g_cfg` on the receive thread).
+     Fix: leaf mutex `s_techA_mu` around the shared arrays only (receive thread snapshots, never takes the Phase-2
+     lock); **deferred commit** — with the scan pool running, the receive thread posts its decision and
+     `run_occasion()` applies it on a consumer under the Phase-2 lock (no pool = applied at once, as before);
+     SS occasion gate read via `nr_pdcch_blind_monitor_occasion_gate()` (one atomic word).
+  2. passive PDSCH pool: lazily resolved `getenv` statics in `nr_pdsch_passive_queue.c` / `nr_pdsch_passive_decode.c`,
+     shared log budgets, `g_sfo_ppm_ema` → `_Atomic`; **`task_ans.c` join counter relaxed → acq_rel** (upstream file,
+     §3.2: other LDPC workers' segment writes were unordered w.r.t. the joiner — benign on x86, a real hazard on aarch64).
+  `[OFFLINE VERIFIED]` `test_nr_pdcch_blind_monitor` **198 pass + 2 skips** (A7's 197 + the new
+  `DiscoveryGates.DeferredCommitIsAppliedByTheConsumerNotTheReceiveThread`), shuffle seeds 1/3/5 same.
+  `[SIM VERIFIED]` partial TSAN (A7 method + `task_ans.c`), rfsim 106 PRB, `scan_thread "2:16:-1"`, 300 s, TRACKING
+  reached: 24 reports (A7 round 2) → **5, none in the scan code** (left: rfsim teardown + SIGINT handler); the
+  second footprint decision (~130 s) went through the deferred path with 2 consumers.
+  `[SIM VERIFIED]` gate `GATE_CRC_MIN=93.0 GATE_DROP_MAX=2.5 rfsim_regress.sh 1` (default cfg, auto `1:8:-1`): PASS,
+  crc 96.85 %, drop_full 1.26 %, CONVERGED 2. sens6 frozen-tag diff empty.
+  Evidence + exact TSAN build/run recipe: `tests/passive_rx/cloud_run_2026-10-01/a7_followup_races/README.md`.
+- **Not done / open**: no DGX or 273-PRB run with N > 1 (A8); gtest not re-run under full TSAN for the new test;
+  `ISAC_PDCCH_TIMING` diagnostic counters (`g_pdtim_*`, off by default) remain unsynchronised; other `g_cfg` writers
+  on the MAC thread (CSS0 autoconf geometry fields) were not in scope beyond the SS gate.
 
 **If the ctest suite passes (except the known failure), the shuffle seeds pass, and the phy-test smoke converges with
 drop_full ≤ ~1 %, the software build is known-good enough to begin X410/OTA validation.** If drop_full or
@@ -1969,10 +2004,10 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 | K24 | DGX NIC | Both ConnectX-7 devices enumerate at boot then are torn down ("Link down", E-Switch cleanup) and vanish from `lspci`/`ip link` when uncabled | kernel log 2026-09-30 15:19 | Medium (blocks G0 until checked) | — | After cabling the X410: confirm the CX-7 port stays up; set MTU 9000/rings; persistent NM profile; pin IRQs to X925 cores |
 | K25 | DGX real-time | No PREEMPT_RT kernel, no isolated cores, `ulimit -r 0`, no passwordless sudo; big.LITTLE CPU (X925 = cpus 5–9,15–19; A725 = 0–4,10–14). `run_arm.sh` core map (reader core 2, `--thread-pool 0,1,4,5,6,7`, IRQs 8–13, `taskset 0-7`) would put the RF reader on a **little core** | §4.2 | Medium | rfsim beds run fine as the user | Define a DGX core map (reader + NIC IRQs on X925 cores) and measure drops without RT first (§5.3) |
 | K26 | Scripts | **Resolved for the x86 path (A13, 2026-10-01).** `tests/passive_rx/offline_sync_contract/build_and_run.sh` is arch-aware: x86 command lines unchanged (echo-diff empty with a system libgtest; without one it links `lib/libgtest.a` + CPM include), aarch64 branch = `offline_sync_arm.sh` (echo-diff empty). x86 run OfflineSync.* 5/5 `[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 3b6119853f]`. **aarch64 run pending on the DGX.** Pre-existing: x86 flags include `-mgfni` (this cloud CPU lacks GFNI; no effect on the test) | `cloud_run_2026-10-01/a13_sync_contract/README.txt` | Low | — | Run the script on the DGX and compare with `offline_sync_arm.sh` (§25) |
-| K27 | Parallelism | **Updated 2026-10-01 (A7, `b6e5fb27ac`, `1d6cbdf5c3`): the blind-PDCCH scan consumer is no longer single-threaded.** `pdcch_blind_monitor_scan_thread "N:depth:core"` with N <= 4 is safe: counters are relaxed atomics; Phase 2 of an occasion (decode join -> end: accepts, dci_thres EMA, RNTI persistence, census, CFR/PDSCH submission, summary) runs under one lock `g_phase2_mu` (`nr_pdcch_blind_phase2.c`); Phase 1 (FEP/LLR/demap/pre-pass/candidate decode) runs in parallel for bank / CORESET#0-USS / CSS0 passes; the autodiscover (root cfg) pass stays serial for the whole occasion (no parallelism during acquisition before a bank exists); `core = -1` leaves every consumer unpinned, `core >= 0` pins consumer i to core+i. `[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, b6e5fb27ac]`, 106 PRB, `1:8:-1` vs `2:16:-1`, 3 runs each: acc/occ .449-.475 vs .443-.470, CRC 95.0-96.4 vs 94.8-97.8 %, drop_full 1.2-1.6 vs 0.5-0.6 %, scan CPU 72 % on 1 thread vs 79 % on 2 (~40 % each), `scanq max_lag` follows queue depth; TSAN consumer<->consumer 0. **Still open:** `UEthread_0` (100 %) and `pdcchUssHash` (90 %) remain serial; with N>1 and in-line PDSCH decode Phase 2 holds its lock across each decode (LOG_W); the 273-PRB DGX A/B (`1:8:6` vs `2:16:6`) is not run; initial sync at 273 PRB x 4 RX ~90 s mostly one thread (A11 adds the scratch-budget knob, timing DGX-only) | §14.1–§14.3, §14.5 | Medium now, **High for multi-cell** | pin the serial threads to X925 cores | §14.3 items 1-3, 5; §25 |
+| K27 | Parallelism | Three serial hot threads cap one instance (`UEthread_0` 100 %, `pdcchUssHash` 90 %, `passivePdcch0` 79 % at 273 PRB 1 RX); the blind-PDCCH scan ~~cannot use > 1 consumer~~ — **2026-10-01: N consumers thread-safe (A7 `b6e5fb27ac` + follow-up `71dbfd582a`, §14.5, cloud x86 rfsim only; benefit on the DGX not measured)**; initial sync at 273 PRB × 4 RX takes ~90 s mostly on one thread | §14.1–§14.3 profiles | Medium now, **High for multi-cell** | pin the three threads to X925 cores | §14.3 items 1–5 |
 | K28 | Observations / UL | The UL hook of `nr_passive_obs` is compiled and reviewed but **never exercised at runtime**: phy-test rfsim has no PUSCH (`pusch_try = 0`); all 19 k observed records are DL | `a3_obs/README.txt`, `a4_campaign_smoke/` metrics `pusch_try 0` | Medium for UL observation consumers | — | Run an UL-bearing bed (OAI SA with UE traffic, OCUDU) and check `dir:"UL"` records |
 | K29 | Observations / DL | In-line DL decode (used when the deferred PDSCH queue is not running, `nr_pdcch_blind_monitor_rt.c` ~6616) is **not recorded** by obs v1; configs without the deferred queue produce no DL records (documented in the header) | `nr_passive_obs.h` | Low–Medium | keep the PDSCH queue on | Hook the in-line path or require the queue |
-| K30 | Thread safety (pre-existing) | Remaining TSAN races: `UEthread_0` <-> `passivePdcchN` in `nr_pdcch_blind_monitor.c` (13 reports: `autodiscover_step` on the receive thread vs `note_rnti_for_windows` / extent advance on a consumer) and inside the PDSCH decode pool (`passivePdsch1/2`, `nr_pdsch_passive_queue_thread`, 4 reports). All exist with **one** consumer too; none is consumer<->consumer. A7 changed diagnostics semantics: DMRSPROBE/PERRB/ENERGYPROBE populations are per consumer thread | `a7_concurrency/tsan_rfsim_partial_round2.txt` | Medium | none | Follow-up task (suggested, not started): TSAN run incl. PDSCH sweep/queue sources, fix UEthread_0 <-> consumer races |
+| K30 | Thread safety (pre-existing) | **Mostly resolved 2026-10-01 by follow-up `71dbfd582a`** (session claude/elegant-davinci-jlrfol): Technique A receive-thread/consumer races fixed (leaf mutex `s_techA_mu`, deferred footprint commit applied by a consumer under `g_phase2_mu`, atomic SS-occasion gate), PDSCH-pool getenv statics and log budgets made atomic, and upstream `common/utils/threadPool/task_ans.c` join counter changed from `relaxed` to `acq_rel` (**a real hazard on aarch64/DGX**, benign on x86 TSO). Partial TSAN rfsim 300 s: 24 → 5 reports, 0 in blind_monitor / pdsch_passive_queue / pdsch_passive_decode / task_ans / Tpool; remaining 5 = rfsim teardown + SIGINT. Original description: Remaining TSAN races: `UEthread_0` <-> `passivePdcchN` in `nr_pdcch_blind_monitor.c` (13 reports: `autodiscover_step` on the receive thread vs `note_rnti_for_windows` / extent advance on a consumer) and inside the PDSCH decode pool (`passivePdsch1/2`, `nr_pdsch_passive_queue_thread`, 4 reports). All exist with **one** consumer too; none is consumer<->consumer. A7 changed diagnostics semantics: DMR | `tests/passive_rx/cloud_run_2026-10-01/a7_followup_races/` | Low (residual) | — | Re-run TSAN on the DGX (aarch64) |
 | K31 | Cloud/container host quirks (host-specific) | The cloud container has **no IPv6** (rfsimulator server socket is `AF_INET6` -> `V4SHIM` LD_PRELOAD), **no SCTP** (`nr_cuup_functional_test` fails), **`pthread_getaffinity_np` EINVAL** (`test_thread-pool` fails), 4 cores (frozen conf scan core 5 -> EINVAL assert, so `SCANTHREAD=1:8:-1` auto), timing test `time_management_tests` intermittent. Gate thresholds therefore **re-baselined on cloud: crc >= 93.0 %, drop_full <= 2.5 %** (HEAD min 94.93 / max 1.55) vs **DGX 98 % / 1 %**; a < 2-point CRC regression would be invisible at the cloud gate (mitigated by comparing means vs baseline in each report). Do not apply these workarounds or thresholds on the DGX | `a1_baseline/README.txt` | Low | scripts auto-detect | none on the DGX |
 | K32 | PDSCH chest cache | `t_chest_cache` key omits start/number of symbols and the probe horizon (a probe or another (S,L) hypothesis can cache a chest built on a truncated DM-RS set that later hits reuse); key casts 12-bit `dmrs_ports` to `uint8_t` (type-2 ports 8–11 alias 0–3); the cached estimate is mutated in place after caching (interpolation, branch zeroing, SFO rotation) | read-only review 2026-10-01, `nr_pdsch_passive_decode.c` ~2240-2536, 2445, 3159, 3270 | **High** (breaks hypothesis reuse and probe ≡ full) | none | Fix per levers spec §9.1 GrantWork (full-slot chest per DM-RS signature, immutable) |
 | K33 | Stale credit | No sample-lifetime re-check between decode end and Technique D feedback: a CRC_FAIL from IQ overwritten mid-decode (or on the GPU path) is credited to the hypothesis; only UNSUPPORTED counts as stale | review 2026-10-01, `nr_pdsch_passive_queue.c` ~984-1131 | Medium-high | — | Re-check lifetime before feedback → INCONCLUSIVE; epoch tag (reconfiguration spec §4.4) |

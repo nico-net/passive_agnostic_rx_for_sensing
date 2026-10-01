@@ -2802,6 +2802,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     }
   }
   if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_done()
+      && !nr_pdcch_blind_monitor_autodiscover_commit_pending() /* decided; a consumer applies it */
       && !nr_pdcch_blind_monitor_discovery_paused()) { /* paused: every discovered CORESET is banked */
     const uint32_t abs_slot_now = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
     // ponytail: fixed at symbol 0 rather than rotating through the slot. This deployment's
@@ -2880,13 +2881,17 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
   // the SECOND slot of the 2-slot window starting at offset=0, which the old single-slot check could
   // never reach. Duration 1 (the overwhelmingly common case -- every other search space this module
   // handles) makes this identical to the old check, so nothing else changes behavior.
-  const uint32_t ss_dur = (cfg->ss_duration > 0) ? (uint32_t)cfg->ss_duration : 1;
-  if (cfg->ss_monitoring_slot_periodicity <= 0) {
+  /* One consistent snapshot: a scan consumer (deferred autodiscover commit) and the MAC (CSS0 autoconf)
+   * rewrite these fields while this thread gates on them (Task A7 follow-up). */
+  int ss_period, ss_offset, ss_duration;
+  nr_pdcch_blind_monitor_occasion_gate(&ss_period, &ss_offset, &ss_duration);
+  const uint32_t ss_dur = (ss_duration > 0) ? (uint32_t)ss_duration : 1;
+  if (ss_period <= 0) {
     return;
   }
-  const uint32_t rem = gate_slot % (uint32_t)cfg->ss_monitoring_slot_periodicity;
-  bool on_occasion = !(rem < (uint32_t)cfg->ss_monitoring_slot_offset
-                       || rem >= (uint32_t)cfg->ss_monitoring_slot_offset + ss_dur);
+  const uint32_t rem = gate_slot % (uint32_t)ss_period;
+  bool on_occasion = !(rem < (uint32_t)ss_offset
+                       || rem >= (uint32_t)ss_offset + ss_dur);
   /* ---- RA SEARCH SPACE: its own occasions, in addition to the configured one ------------------
    * SIB1 and RA are DIFFERENT common search spaces with independent
    * monitoringSlotPeriodicityAndOffset -- on this cell sib1_ss=0 and ra_ss=1. CSS0 autoconf
@@ -2943,6 +2948,10 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
         LOG_W(PHY, "SENSING: blind PDCCH scan has %d consumers but PDSCH decode is in-line (no PDSCH queue): "
                    "the N>1 scan speed-up assumes deferred PDSCH (pdcch_blind_monitor_pdsch field 6, thread); Phase 2 "
                    "holds its lock across each in-line decode\n", n_cons);
+      /* From here on a consumer owns the discovery state machine: a Technique A decision taken on this
+       * thread is handed over instead of committed here (nr_pdcch_blind_monitor.h, deferred commit). */
+      if (nr_pdcch_passive_queue_running())
+        nr_pdcch_blind_monitor_autodiscover_defer_commit(true);
     }
   }
 
@@ -3010,6 +3019,13 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   if (!root->autodiscover) {
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
     return;
+  }
+  /* A Technique A footprint decision posted by the receive thread is committed here, before any pass
+   * reads the root geometry, under the lock that serialises the discovery state machine. */
+  if (nr_pdcch_blind_monitor_autodiscover_commit_pending()) {
+    nr_pdcch_blind_phase2_lock();
+    nr_pdcch_blind_monitor_autodiscover_apply_pending();
+    nr_pdcch_blind_phase2_unlock();
   }
 
   /* A USS may legally reference CORESET#0. It is the cheapest exact geometry available OTA, so

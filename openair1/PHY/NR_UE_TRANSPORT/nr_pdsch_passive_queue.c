@@ -683,7 +683,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     static __thread int16_t *t_gpu_llr; /* per consumer */
     nr_gpu_pdsch_job_t gj[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
     int gj_ok[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1] = {0};
-    static int s_probe_all_g = -1;
+    static _Atomic int s_probe_all_g = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
     if (s_probe_all_g < 0) s_probe_all_g = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
     if (g_gpu) {
       if (!t_gpu_llr) t_gpu_llr = malloc(GPU_LLR_CAP * sizeof(int16_t));
@@ -813,7 +813,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * buffer: rxdataF carries this job's own slot, which the decode's per-thread FEP cache may reuse for
          * the rest of the slot group. ISAC_PDSCH_K0_PROBE=0 disables it (read once).
          * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs + up to K slots of waiting each). */
-        static int s_k0_probe_on = -1;
+        static _Atomic int s_k0_probe_on = -1; /* _Atomic: N consumers */
         if (s_k0_probe_on < 0) {
           const char *e = getenv("ISAC_PDSCH_K0_PROBE");
           s_k0_probe_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
@@ -878,7 +878,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_decode_result_t dec = {0};
     { /* ISAC_PROBE_ALL=1: every job is a first-code-block probe, pinned confs included -- isolates
        * the probe mechanics from the layout search. */
-      static int s_probe_all = -1;
+      static _Atomic int s_probe_all = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
       if (s_probe_all < 0)
         s_probe_all = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
       if (s_probe_all)
@@ -897,7 +897,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     /* ISAC_GPU_SELFCHECK=N: the first N GPU-fed decodes are re-run on the CPU chain and compared --
      * TB/CB0 CRC agreement, LLR sign agreement and max |dLLR| after matching the two scales. */
     {
-      static int s_chk = -1;
+      static _Atomic int s_chk = -1; /* _Atomic: N consumers */
       if (s_chk < 0) { const char *e = getenv("ISAC_GPU_SELFCHECK"); s_chk = e ? atoi(e) : 0; }
       if (gpu_job && s_chk > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)s_chk
           && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {

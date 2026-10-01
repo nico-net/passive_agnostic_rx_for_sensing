@@ -94,7 +94,7 @@ static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static uint64_t g_pdtim_calls = 0;
-static int      g_pdtim_on    = -1;
+static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
 
 static inline int pdtim_enabled(void)
 {
@@ -270,10 +270,11 @@ static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
  * anything. Measured mean |llr| on this receiver is 232-498, i.e. 2-4x that rail. */
 static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
 /* The DMRSFO tracker's current SFO estimate, in ppm, for the correction stage below. Read-mostly
- * across consumer threads; a torn double would only mean one grant corrected with a slightly stale
- * value, which is why this is a plain double and not a lock. */
-static double g_sfo_ppm_ema = 0.0;
-static double nr_pdsch_passive_sfo_ppm(void) { return g_sfo_ppm_ema; }
+ * across consumer threads; a stale value only means one grant corrected with the previous estimate,
+ * so no lock -- but _Atomic (relaxed), since a plain double read during the tracker's store is a data
+ * race (N passivePdsch consumers, Task A7 follow-up). */
+static _Atomic double g_sfo_ppm_ema = 0.0;
+static double nr_pdsch_passive_sfo_ppm(void) { return atomic_load_explicit(&g_sfo_ppm_ema, memory_order_relaxed); }
 /* SIGNED sum, and the count of positive LLRs. mean|LLR| (above) is BLIND to a sign bias, and a bias
  * is exactly what would explain the dominant failure mode: all-zeros is a valid codeword for any
  * linear code, so LDPC settles on it whenever the LLRs systematically favour 0-bits. With one UE on
@@ -352,7 +353,7 @@ static int prg_sweep_feed(nr_prg_sweep_t *s, int arm, bool tb_ok, bool link_ok)
 }
 static bool prg_sweep_enabled(void)
 {
-  static int on = -1;
+  static _Atomic int on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (on < 0) {
     const char *e = getenv("ISAC_PRG_SWEEP");
     on = (e != NULL && atoi(e) == 0) ? 0 : 1;
@@ -408,7 +409,7 @@ static rnti_dec_t *rnti_dec_find(uint16_t rnti, bool create)
   if (!create)
     return NULL;
   rnti_dec_t *r = &g_rnti_dec[victim];
-  static int s_evict_logs = 20;
+  static _Atomic int s_evict_logs = 20; /* log budget shared by the passivePdsch consumers */
   if (r->rnti && victim_ev && s_evict_logs > 0) {
     s_evict_logs--;
     LOG_W(PHY, "SENSING: RNTI_DEC all %d slots hold evidence: evicted rnti=0x%04x for rnti=0x%04x\n", RNTI_DEC_MAX,
@@ -1059,7 +1060,7 @@ static pthread_mutex_t s_brfo_lock = PTHREAD_MUTEX_INITIALIZER;
 static void brfo_commit(void)
 {
   static double s_fo_corr[NR_DL_CHEST_MAX_ANT];
-  static int s_brfo = -1;
+  static _Atomic int s_brfo = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (!t_brfo_pending)
     return;
   t_brfo_pending = false;
@@ -1131,7 +1132,7 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
   job->dmrs_ref_rb = (uint16_t)(pdu->refPoint ? pdu->BWPStart : 0); /* rb_offset = first_rb + (refPoint ? 0 : BWPStart) */
   job->slot = (uint8_t)slot_rx; /* n_s,f for c_init, as proc->nr_slot_rx in the CPU chest */
   {
-    static int s_tinterp = -1;
+    static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_tinterp < 0) { const char *e = getenv("ISAC_CHEST_TINTERP"); s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0; }
     job->time_interp = (uint8_t)s_tinterp;
   }
@@ -1257,7 +1258,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
    * line, so an MCS that fails deterministically can be diffed against one that succeeds without
    * pairing log lines. Everything the LDPC decoder is handed is here. */
   {
-    static int s_sd = -1;
+    static _Atomic int s_sd = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_sd < 0)
       s_sd = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
     /* RATE-LIMITED (2026-08-25). This fired on EVERY decode: 30204 lines / 16 MB on a 48 s run,
@@ -1747,11 +1748,12 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     return out->status;
   }
   if (dlsch_config->pduBitmap & 0x1) {
-    static int s_ptrs_k = -1, s_ptrs_l = -1;
+    /* _Atomic, L stored before K: a consumer that sees K resolved also sees L (N passivePdsch consumers) */
+    static _Atomic int s_ptrs_k = -1, s_ptrs_l = -1;
     if (s_ptrs_k < 0) {
       const char *ek = getenv("ISAC_PTRS_K"), *el = getenv("ISAC_PTRS_L");
-      s_ptrs_k = (ek && *ek) ? atoi(ek) : 0;
       s_ptrs_l = (el && *el) ? atoi(el) : 0;
+      s_ptrs_k = (ek && *ek) ? atoi(ek) : 0;
     }
     int pk = s_ptrs_k, pl = s_ptrs_l;
     if (ptrs_arm > 0) { uint8_t K = 0, L = 0; nr_ptrs_sweep_arm(ptrs_arm, &K, &L); pk = K; pl = L; } /* the RE count wants literal L */
@@ -2004,7 +2006,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * own PDSCH line, so they can be compared one-for-one instead of inferred from a CRC failure.
    * gNB prints: mcs_index / mod / tbs / tb_size_lbrm / ldpc_base_graph / vrbs=[start..end). */
   {
-    static int s_tbp = -1;
+    static _Atomic int s_tbp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_tbp < 0)
       s_tbp = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
     if (s_tbp)
@@ -2062,7 +2064,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * skipped (their LLR count stays 0, so segment 0's bits are still the first in the buffer); the
    * allocation's last symbol is still visited because nr_rx_pdsch() emits the LLRs there. */
   int probe_last_sym = -1;
-  static int s_probe_horizon = -1; /* ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
+  static _Atomic int s_probe_horizon = -1; /* _Atomic (N consumers). ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
   if (s_probe_horizon < 0) { const char *e = getenv("ISAC_PROBE_HORIZON"); s_probe_horizon = (e && atoi(e) == 0) ? 0 : 1; }
   if (t_probe_first_seg && s_probe_horizon && !ssb_unav) {
     const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
@@ -2201,7 +2203,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * alignment offset between X410 channels -- the one thing every per-branch diagnostic so far
    * (equal DM-RS peak position, 45 % delay-profile compactness, nvar x4000) is consistent with. */
   {
-    static int s_xant = -1;
+    static _Atomic int s_xant = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_xant < 0)
       s_xant = (getenv("ISAC_XANT") != NULL) ? 1 : 0;
     static _Atomic unsigned long s_xant_n = 0;
@@ -2375,7 +2377,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
        * layer's own indexing). Do NOT widen this window without new evidence: the diagnostic's own
        * bin resolution (204 REs) is far coarser than the true affected width. */
       {
-        static int s_dc_fix = -1;
+        static _Atomic int s_dc_fix = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
         if (s_dc_fix < 0) {
           const char *e = getenv("ISAC_DC_FIX");
           s_dc_fix = (e != NULL && atoi(e) != 0) ? 1 : 0;
@@ -2421,7 +2423,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * past the last / before the first) removes both to first order, using estimates we already have.
    * Written into the data symbol's own slot of pdsch_dl_ch_estimates; nr_dlsch_chest_per_symbol makes
    * nr_rx_pdsch read that slot. */
-  static int s_tinterp = -1;
+  static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (s_tinterp < 0) {
     const char *e = getenv("ISAC_CHEST_TINTERP");
     s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0;
@@ -2486,7 +2488,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * the attached path's gates were tuned against it. Flip it only on an alternated >= 5-run-per-arm
    * A/B at comparable offered load (19.3), never on inspection. */
   {
-    static int s_nvfix = -1;
+    static _Atomic int s_nvfix = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_nvfix < 0) {
       s_nvfix = (getenv("ISAC_RX_NVAR_FIX") != NULL) ? atoi(getenv("ISAC_RX_NVAR_FIX")) : 0;
     }
@@ -2506,7 +2508,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * produced an estimate; otherwise the mean stands, so nothing changes for the attached UE, for
    * mode 1/2/3, or for a single-antenna receiver. ISAC_RX_NVAR_PERBRANCH=0 disables it. */
   {
-    static int s_pb = -1;
+    static _Atomic int s_pb = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_pb < 0) {
       const char *e = getenv("ISAC_RX_NVAR_PERBRANCH");
       s_pb = (e != NULL) ? atoi(e) : 1;
@@ -2606,9 +2608,9 @@ chest_done:
     static _Atomic uint64_t s_sfo_n = 0;
     /* The EMA updates are READ-MODIFY-WRITE and this function runs on N consumer threads
      * (nr_pdsch_passive_queue.c starts several). Plain statics raced: a capture showed
-     * "cfo=-41.3 Hz (ema +248.2)", an average nowhere near the samples feeding it. The comment on
-     * g_sfo_ppm_ema justifies a torn READ by a consumer, which is fine and unchanged; it does not
-     * justify a torn update. The critical section is a few flops. */
+     * "cfo=-41.3 Hz (ema +248.2)", an average nowhere near the samples feeding it. The published
+     * g_sfo_ppm_ema is an atomic a consumer may read stale; the update itself needs this lock. The
+     * critical section is a few flops. */
     static pthread_mutex_t s_dfo_lock = PTHREAD_MUTEX_INITIALIZER;
     static double s_cfo_ema = 0.0, s_sfo_ema = 0.0;
     const double dt_d = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
@@ -2770,12 +2772,12 @@ chest_done:
         } else {
           s_sfo_ema = (1.0 - a) * s_sfo_ema + a * sfo_ppm;
         }
-        g_sfo_ppm_ema = s_sfo_ema;  // published for the SFO correction stage
+        atomic_store_explicit(&g_sfo_ppm_ema, s_sfo_ema, memory_order_relaxed); // published for the SFO correction stage
       }
       sfo_pub = s_sfo_ema;
       const double cfo_pub = s_cfo_ema;
       pthread_mutex_unlock(&s_dfo_lock);
-      static int s_apply = -1;
+      static _Atomic int s_apply = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_apply < 0) {
         const char *e = getenv("ISAC_DMRS_FO_APPLY");
         s_apply = (e != NULL && atoi(e) != 0) ? 1 : 0;
@@ -2873,10 +2875,10 @@ chest_done:
    * without bound and no parameter fix can help; if they are well separated, the fault is in the
    * demodulation chain instead. Cheap: one pass over the already-computed estimates. */
   {
-    static int s_cd = -1;
+    static _Atomic int s_cd = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_cd < 0) // ISAC_CHEST_DIAG=1 gives the 12 CHESTDIAG lines without TBPARM's per-TB volume
       s_cd = (getenv("ISAC_PDSCH_TBPARM") != NULL || getenv("ISAC_CHEST_DIAG") != NULL) ? 1 : 0;
-    static int s_cd_left = 40;
+    static _Atomic int s_cd_left = 40; /* log budget shared by the passivePdsch consumers */
     if (s_cd && s_cd_left > 0 && cw->Nl >= 1) {
       s_cd_left--;
       const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
@@ -3140,7 +3142,7 @@ gpu_llr_ready:;
    * warns the imbalance SHAPE itself is not stable run to run) before trusting a live PDSCH number
    * at NANT>1. */
   if (fp->nb_antennas_rx > 1 && dmrs_first >= 0) {
-    static int s_pdsch_ant_gate = -1;
+    static _Atomic int s_pdsch_ant_gate = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_pdsch_ant_gate < 0)
       s_pdsch_ant_gate = (getenv("ISAC_PDSCH_ANT_GATE") != NULL && atoi(getenv("ISAC_PDSCH_ANT_GATE")) != 0) ? 1 : 0;
     if (s_pdsch_ant_gate) {
@@ -3168,7 +3170,7 @@ gpu_llr_ready:;
           kept |= 1 << a;
         }
       }
-      static int s_gate_log = 8;
+      static _Atomic int s_gate_log = 8; /* log budget shared by the passivePdsch consumers */
       if (s_gate_log > 0 && kept != (1 << nrx) - 1) {
         s_gate_log--;
         LOG_W(PHY, "SENSING: PDSCH branch gate kept=0x%x rough=[%.2f %.2f %.2f %.2f]\n", kept, rough[0],
@@ -3200,7 +3202,7 @@ gpu_llr_ready:;
    * SECOND-ORDER, and stated as such: the dominant defect on this receiver is LLR clipping at the
    * int8 rail (see LLRCLIP), which destroys information outright. This only stops a real but
    * smaller error accumulating across a slot. Opt-in until an A/B shows it earns its place. */
-  static int s_sfo_corr = -1;
+  static _Atomic int s_sfo_corr = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (s_sfo_corr < 0) {
     const char *e = getenv("ISAC_SFO_CORRECT");
     s_sfo_corr = (e != NULL && atoi(e) != 0) ? 1 : 0;
@@ -3352,7 +3354,7 @@ gpu_llr_ready:;
    * for this grant's own modulation order -- normalised by the measured RMS, so the arbitrary
    * log2_maxh fixed-point scaling cancels and the number is comparable across runs and MCSs. */
   {
-    static int s_evm = -1;
+    static _Atomic int s_evm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_evm < 0)
       s_evm = (getenv("ISAC_PDSCH_EVM") != NULL) ? 1 : 0;
     static __thread unsigned long s_evm_n = 0;
@@ -3558,7 +3560,7 @@ gpu_llr_ready:;
      * where information is destroyed rather than merely mis-weighted. Opt-in so the default path
      * stays bit-identical until an A/B says otherwise. */
     {
-      static int s_llr_scale = -1;
+      static _Atomic int s_llr_scale = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_llr_scale < 0) {
         const char *e = getenv("ISAC_LLR_SCALE");
         s_llr_scale = (e != NULL) ? atoi(e) : 0;
@@ -3614,7 +3616,7 @@ gpu_llr_ready:;
      * right shift that brings the mean under LLR_NORM_TARGET costs nothing where the scale was
      * already right and keeps the soft information where it was not. ISAC_LLR_NORM=0 disables. */
     {
-      static int s_norm = -1;
+      static _Atomic int s_norm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_norm < 0) { const char *e = getenv("ISAC_LLR_NORM"); s_norm = (e && atoi(e) == 0) ? 0 : 1; }
       if (s_norm && G >= 64) {
         uint64_t acc = 0; uint32_t cnt = 0;
@@ -3652,7 +3654,7 @@ gpu_llr_ready:;
      * decode on 3.5k TBs while MCS 25 gets 49 % -- a lower code rate cannot do that on SNR alone).
      * A rescue at rv=2 is proof; the counters are printed with MCSHIST. */
     {
-      static int s_rvr = -1;
+      static _Atomic int s_rvr = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_rvr < 0) {
         const char *e = getenv("ISAC_RV_RETRY");
         s_rvr = (e != NULL && atoi(e) != 0) ? 1 : 0;
@@ -3865,7 +3867,7 @@ gpu_llr_ready:;
    * test for whether a passive PDSCH failure is positional (precoder conditioned for the served
    * UE) or a defect in the receive path. */
   {
-    static int s_tbp2 = -1;
+    static _Atomic int s_tbp2 = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
     if (s_tbp2 < 0)
       s_tbp2 = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
     if (s_tbp2) {
