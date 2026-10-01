@@ -894,6 +894,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     nr_pdsch_passive_set_llr_override(NULL, 0);
     const bool probe_outcome = nr_pdsch_passive_probe_outcome(); /* before the self-check re-runs the decode */
+    if (job.layout_probe && !gpu_job && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
+      nr_pdsch_passive_probe_equiv_check(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF); /* debug, env-gated */
     /* ISAC_GPU_SELFCHECK=N: the first N GPU-fed decodes are re-run on the CPU chain and compared --
      * TB/CB0 CRC agreement, LLR sign agreement and max |dLLR| after matching the two scales. */
     {

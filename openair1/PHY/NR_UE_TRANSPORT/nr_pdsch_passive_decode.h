@@ -202,6 +202,17 @@ void nr_pdsch_passive_ldpc_stats_dump(void);
  *  nr_pdsch_passive_probe_outcome() and the TB is never reported decoded. */
 void nr_pdsch_passive_probe_mode(bool on);
 bool nr_pdsch_passive_probe_outcome(void);
+/** ISAC_TD_PROBE_EQUIV_CHECK=1 (debug, default off; K32 / spec V2): call right after a layout-probe
+ *  decode on this thread. On 1 probed grant in 50 it re-runs the SAME hypothesis with the whole slot
+ *  processed (no probe horizon) and the chest cache bypassed, compares code block 0's LLRs element-wise
+ *  against the probe's and logs "PROBE_EQUIV mismatches=n/total" (grants with any differing LLR / grants
+ *  compared). The probe's outcome (nr_pdsch_passive_probe_outcome()) is preserved. */
+void nr_pdsch_passive_probe_equiv_check(PHY_VARS_NR_UE *ue,
+                                        const UE_nr_rxtx_proc_t *proc,
+                                        const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                        const freq_alloc_bitmap_t *freq_alloc,
+                                        const nr_pdsch_passive_grant_t *grant,
+                                        c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 /** PT-RS density sweep gate for the next decode on this thread: off while the grant's layout /
  *  Technique-D context is still being searched (a wrong PT-RS arm rotates layer 0 by its bogus CPE,
  *  7-13 % EVM, and would feed that failure into the searches). Default on. */

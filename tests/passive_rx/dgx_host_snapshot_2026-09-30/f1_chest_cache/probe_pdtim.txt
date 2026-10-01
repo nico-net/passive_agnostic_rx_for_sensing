@@ -1,0 +1,10 @@
+# DGX rfsim, ISAC_PROBE_ALL=1 ISAC_PDCCH_TIMING=1, 90 s per arm, last PDTIM line (cumulative means per probe).
+# Probe cost of the full-slot channel estimate (F1 computes every DM-RS symbol even past the probe horizon).
+## before: 106 PRB, 1 RX, rank 1
+PDTIM calls=33200 fep[n=33200 mean=62.3us max=130.0us tot=2.07s] chest[n=33199 mean=41.7us max=162.6us tot=1.38s] alloc[n=33200 mean=1.5us max=208.1us tot=0.05s] demod[n=33199 mean=28.2us max=76.7us tot=0.94s] ldpc[n=33199 mean=278.8us max=2430.1us tot=9.25s] 
+## before: 273 PRB rank-4 pin49r4, 4 RX
+PDTIM calls=1800 fep[n=1800 mean=312.3us max=954.9us tot=0.56s] chest[n=1800 mean=1266.4us max=2375.1us tot=2.28s] alloc[n=1800 mean=30.2us max=1076.8us tot=0.05s] demod[n=1800 mean=4641.4us max=6122.4us tot=8.35s] ldpc[n=1800 mean=574.5us max=1158.8us tot=1.03s] 
+## after: 106 PRB, 1 RX, rank 1
+PDTIM calls=33200 fep[n=33200 mean=71.9us max=154.0us tot=2.39s] chest[n=33199 mean=76.8us max=222.7us tot=2.55s] alloc[n=33200 mean=1.6us max=283.3us tot=0.05s] demod[n=33199 mean=28.1us max=164.7us tot=0.93s] ldpc[n=33199 mean=277.8us max=884.0us tot=9.22s] 
+## after: 273 PRB rank-4 pin49r4, 4 RX
+PDTIM calls=1800 fep[n=1801 mean=493.7us max=1723.9us tot=0.89s] chest[n=1801 mean=2228.9us max=4042.3us tot=4.01s] alloc[n=1801 mean=30.4us max=801.7us tot=0.05s] demod[n=1801 mean=4430.6us max=6025.4us tot=7.98s] ldpc[n=1801 mean=558.8us max=1203.6us tot=1.01s] 

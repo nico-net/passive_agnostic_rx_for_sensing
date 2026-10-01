@@ -28,6 +28,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_qm_oracle.h"
+#include "nr_pdsch_chest_key.h" // K32: complete chest-cache key
 #include "nr_scrambling_id_sweep.h" // per-RNTI dataScramblingIdentityPDSCH TB-CRC walk (Task 13)
 
 #include <stdlib.h>
@@ -1091,6 +1092,10 @@ bool nr_pdsch_passive_probe_outcome(void) { return t_probe_seg_ok; }
 
 static __thread const int16_t *t_last_llr = NULL;
 static __thread uint32_t t_last_G = 0;
+/* Probe-equivalence rerun (ISAC_TD_PROBE_EQUIV_CHECK): process the whole slot despite probe mode, and
+ * neither read nor fill the chest cache, so the reference is a cache-free full-slot decode. */
+static __thread bool t_probe_no_horizon = false, t_chest_bypass = false;
+static __thread int t_last_probe_horizon = -1, t_last_chest_hit = 0; /* for the PROBE_EQUIV log */
 uint32_t nr_pdsch_passive_last_llr(const int16_t **p) { *p = t_last_llr; return t_last_G; }
 static __thread const int16_t *t_llr_ovr = NULL;
 static __thread uint32_t t_llr_ovr_n = 0;
@@ -1494,9 +1499,23 @@ static void nr_slot_fep_ant_task(void *arg)
 typedef struct { int on; int rb_lo, rb_n; } nr_pdsch_slot_share_t;
 static __thread nr_pdsch_slot_share_t t_share = {0, 0, 0};
 static __thread struct { long slot; double fo; int valid; } t_fep_cache = {0, 0.0, 0};
+/* CHEST CACHE (K32, 2026-10-01). Keyed on every estimator input (nr_pdsch_chest_key.h). The estimate
+ * is always built over the slot's FULL DM-RS set, and the cache holds its OWN copy of the DM-RS rows,
+ * written once on a miss and never touched again: a decode works on pdsch_dl_ch_estimates, a per-call
+ * working copy that time interpolation, chest_time averaging, branch zeroing and SFO rotation mutate
+ * freely. nvar is cached RAW (the pre-division sum and the per-branch values): its divisor depends on
+ * the grant's own number_symbols, so the division and the per-branch substitution run per call. A hit
+ * therefore produces exactly what a miss would. Before this, the key had no probe horizon / start or
+ * length of symbols, kept 8 of the 12 port bits, no BWP/refPoint, fo or antenna count, and a hit
+ * reused the working buffer itself, already post-processed by the previous grant. */
 static __thread struct {
-  long slot; uint16_t dmrs_pos; uint8_t cfg_type, nscid, ports_lo, cdm, nl; uint16_t scr;
-  int rb_lo, rb_n; uint32_t nvar, nvar_den; int n_dmrs_sym, dmrs_first, dmrs_last; int only; int valid;
+  nr_pdsch_chest_key_t key;
+  int valid;
+  uint32_t nvar_sum; /* sum over (DM-RS symbol x layer) of the per-antenna mean, before the divisor */
+  uint32_t nvar_ant[NR_DL_CHEST_MAX_ANT]; /* nr_dl_chest_nvar_ant[] as the last estimator call left it */
+  int n_dmrs_sym, dmrs_first, dmrs_last;
+  c16_t *est; /* [layer x antenna][DM-RS symbol k][ofdm_symbol_size], immutable once stored */
+  size_t est_cap;
 } t_chest_cache = {0};
 
 /* ZP EVIDENCE FROM THIS DECODED GRANT (G5 review of merge 060edd290c, Important 1). Every ZP entry the blind
@@ -1612,6 +1631,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
   t_last_sk = -1;
   t_last_llr_have = t_last_data_bits = 0;
+  t_last_llr = NULL; t_last_G = 0; t_seg_E = 0; /* never read a previous decode's LLRs as this one's */
+  t_last_probe_horizon = -1; t_last_chest_hit = 0;
   t_brfo_pending = false; /* the GPU path jumps past the BRANCHFO measurement */
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -2066,7 +2087,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   int probe_last_sym = -1;
   static _Atomic int s_probe_horizon = -1; /* _Atomic (N consumers). ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
   if (s_probe_horizon < 0) { const char *e = getenv("ISAC_PROBE_HORIZON"); s_probe_horizon = (e && atoi(e) == 0) ? 0 : 1; }
-  if (t_probe_first_seg && s_probe_horizon && !ssb_unav) {
+  if (t_probe_first_seg && s_probe_horizon && !ssb_unav && !t_probe_no_horizon) {
     const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
     const uint32_t B = cw->TBS + 24u;
     const uint32_t C_est = (B <= Kcb) ? 1u : (B + (Kcb - 24u) - 1u) / (Kcb - 24u);
@@ -2088,6 +2109,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   }
   const int probe_end = (probe_last_sym >= 0) ? probe_last_sym + 1 : dlsch_config->start_symbol + dlsch_config->number_symbols;
+  t_last_probe_horizon = probe_last_sym;
 
   /* GPU LLRs in hand: everything from here to the LLR buffer (FEP, channel estimation, equaliser,
    * demodulator) is what the GPU already did for this slot. A PT-RS arm or CSI-RS rate matching
@@ -2111,34 +2133,48 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   const int fep_s0 = t_share.on ? 0 : dlsch_config->start_symbol;
   const int fep_n  = t_share.on ? fp->symbols_per_slot
                      : (probe_last_sym >= 0 ? probe_end - dlsch_config->start_symbol : dlsch_config->number_symbols);
+  /* K32: the channel estimate always covers EVERY DM-RS symbol of the slot (the grant's full
+   * dlDmrsSymbPos), never a probe horizon or the [S, S+L) window, so those symbols are transformed
+   * too. A probe still skips the DATA symbols past its horizon; only the DM-RS symbols it would have
+   * skipped are added, one range each. With the slot share on, the whole slot is transformed anyway. */
+  const uint16_t dmrs_full = (uint16_t)(dlsch_config->dlDmrsSymbPos & ((1u << fp->symbols_per_slot) - 1u));
+  int fep_rng[1 + NR_SYMBOLS_PER_SLOT][2] = {{fep_s0, fep_n}};
+  int n_fep_rng = 1;
+  for (int m = 0; m < fp->symbols_per_slot && m < NR_SYMBOLS_PER_SLOT; m++)
+    if (((dmrs_full >> m) & 1) && (m < fep_s0 || m >= fep_s0 + fep_n)) {
+      fep_rng[n_fep_rng][0] = m;
+      fep_rng[n_fep_rng++][1] = 1;
+    }
   atomic_fetch_add(fep_hit ? &g_fep_hit : &g_fep_miss, 1);
   if (gpu_llr) {
     /* the GPU transformed this slot; nothing here reads rxdataF */
   } else if (fep_hit) {
     /* same slot, same offset: this thread transformed it for the previous grant of the group */
   } else if (fp->nb_antennas_rx > 1) {
-    nr_slot_fep_ant_task_t fep_tasks[fp->nb_antennas_rx];
-    task_ans_t fep_ans;
-    init_task_ans(&fep_ans, fp->nb_antennas_rx);
-    for (unsigned int ant = 0; ant < (unsigned int)fp->nb_antennas_rx; ant++) {
-      fep_tasks[ant] = (nr_slot_fep_ant_task_t){.fo_hz = fep_fo, .ue = ue,
-                                                .fp = fp,
-                                                .slot = proc->nr_slot_rx,
-                                                .start_symbol = fep_s0,
-                                                .number_symbols = fep_n,
-                                                .ant = ant,
-                                                .rxdataF_flat = &rxdataF[0][0],
-                                                .stride = fp->samples_per_slot_wCP,
-                                                .rxdata = ue->common_vars.rxdata,
-                                                .ans = &fep_ans};
-      task_t t = {.func = nr_slot_fep_ant_task, .args = &fep_tasks[ant]};
-      pushTpool(&get_nrUE_params()->Tpool, t);
+    for (int g = 0; g < n_fep_rng; g++) {
+      nr_slot_fep_ant_task_t fep_tasks[fp->nb_antennas_rx];
+      task_ans_t fep_ans;
+      init_task_ans(&fep_ans, fp->nb_antennas_rx);
+      for (unsigned int ant = 0; ant < (unsigned int)fp->nb_antennas_rx; ant++) {
+        fep_tasks[ant] = (nr_slot_fep_ant_task_t){.fo_hz = fep_fo, .ue = ue,
+                                                  .fp = fp,
+                                                  .slot = proc->nr_slot_rx,
+                                                  .start_symbol = fep_rng[g][0],
+                                                  .number_symbols = fep_rng[g][1],
+                                                  .ant = ant,
+                                                  .rxdataF_flat = &rxdataF[0][0],
+                                                  .stride = fp->samples_per_slot_wCP,
+                                                  .rxdata = ue->common_vars.rxdata,
+                                                  .ans = &fep_ans};
+        task_t t = {.func = nr_slot_fep_ant_task, .args = &fep_tasks[ant]};
+        pushTpool(&get_nrUE_params()->Tpool, t);
+      }
+      join_task_ans(&fep_ans);
     }
-    join_task_ans(&fep_ans);
   } else {
-    for (int m = fep_s0; m < fep_s0 + fep_n; m++) {
-      nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-    }
+    for (int g = 0; g < n_fep_rng; g++)
+      for (int m = fep_rng[g][0]; m < fep_rng[g][0] + fep_rng[g][1]; m++)
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   }
   if (!fep_hit && !gpu_llr) {
     t_fep_cache.slot = share_slot; t_fep_cache.fo = fep_fo; t_fep_cache.valid = t_share.on;
@@ -2246,37 +2282,63 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * 4x the chest cost (~1.2 ms/grant OTA) for nothing. Sensing does not use this estimate -- it forms
    * H_i = Y_i / X from the raw per-antenna FEP output, which is still produced for every antenna. */
   const int chest_only = nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl);
-  const int chest_hit = !seg_path && t_share.on && t_chest_cache.valid && t_chest_cache.slot == share_slot
-      && t_chest_cache.only == chest_only
-      && t_chest_cache.dmrs_pos == dlsch_config->dlDmrsSymbPos && t_chest_cache.cfg_type == dlsch_config->dmrsConfigType
-      && t_chest_cache.nscid == dlsch_config->nscid && t_chest_cache.ports_lo == (uint8_t)dlsch_config->dmrs_ports
-      && t_chest_cache.cdm == dlsch_config->n_dmrs_cdm_groups && t_chest_cache.nl == cw->Nl
-      && t_chest_cache.scr == dlsch_config->dlDmrsScramblingId
-      /* EQUAL, not <=. nr_pdsch_channel_estimation() writes dl_ch from INDEX 0 = the first RB of
-       * the freq_alloc IT was given, and nr_dlsch_extract_rbs() reads it back from index 0 assuming
-       * that is THIS grant's first RB. Reusing an estimate whose base RB is LOWER therefore hands
-       * the equaliser a channel shifted by (first_rb - rb_lo)*12 subcarriers -- wrong H, not merely
-       * a stale one, and silently so. Requiring equality costs a re-estimate for a grant that
-       * starts higher than the group's widest member; it does not cost correctness. */
-      && t_chest_cache.rb_lo == (int)freq_alloc->first_rb
-      && (int)(freq_alloc->first_rb + freq_alloc->num_rbs) <= t_chest_cache.rb_lo + t_chest_cache.rb_n;
-  atomic_fetch_add(chest_hit ? &g_chest_hit : &g_chest_miss, 1);
-  /* On a miss, estimate over the group's union of RBs so the slot's next grant can reuse it. */
+  /* Estimate over the group's union of RBs so the slot's next grant can reuse it. */
   fapi_nr_dl_config_dlsch_pdu_rel15_t chest_cfg = *dlsch_config;
   freq_alloc_bitmap_t chest_alloc = *freq_alloc;
-  if (t_share.on && t_share.rb_n > 0 && !chest_hit) {
-    /* Widen UPWARD only, for the same index-0 reason as the cache predicate above: the estimate is
-     * indexed from its own first RB, so lowering the base below this grant's first_rb would
-     * misalign the estimate this very call then uses. */
+  if (t_share.on && t_share.rb_n > 0) {
+    /* Widen UPWARD only: nr_pdsch_channel_estimation() writes dl_ch from INDEX 0 = the first RB of
+     * the freq_alloc IT was given, and nr_dlsch_extract_rbs() reads it back from index 0 assuming
+     * that is THIS grant's first RB, so the estimate's base RB must be this grant's first_rb
+     * (a lower base would hand the equaliser a channel shifted by (first_rb - rb_lo)*12
+     * subcarriers). The key below carries rb_lo AND rb_n: grants of one group with the same first
+     * RB compute the same union, hence the same key; a grant starting higher re-estimates. */
     const int lo = (int)freq_alloc->first_rb;
     const int hi0 = t_share.rb_lo + t_share.rb_n, hi1 = (int)(freq_alloc->first_rb + freq_alloc->num_rbs);
     const int hi = hi0 > hi1 ? hi0 : hi1;
     chest_alloc = set_bitmap_from_start_size(lo, hi - lo);
     chest_cfg.start_rb = lo; chest_cfg.number_rbs = hi - lo;
   }
+  const nr_pdsch_chest_key_t chest_key = {.slot = share_slot,
+                                          .dmrs_pos = dmrs_full,
+                                          .cfg_type = (uint8_t)dlsch_config->dmrsConfigType,
+                                          .nscid = dlsch_config->nscid,
+                                          .cdm = dlsch_config->n_dmrs_cdm_groups,
+                                          .nl = cw->Nl,
+                                          .dmrs_ports = (uint16_t)(dlsch_config->dmrs_ports & 0xfffu),
+                                          .scr = dlsch_config->dlDmrsScramblingId,
+                                          .rb_lo = (int)chest_alloc.first_rb,
+                                          .rb_n = (int)chest_alloc.num_rbs,
+                                          .bwp_start = dlsch_config->BWPStart,
+                                          .bwp_size = dlsch_config->BWPSize,
+                                          .ref_point = dlsch_config->refPoint,
+                                          .only_ant = chest_only,
+                                          .n_ant = fp->nb_antennas_rx,
+                                          .fo_hz = fep_fo,
+                                          .seg = seg_path};
+  const bool chest_cacheable = t_share.on && !seg_path && !t_chest_bypass;
+  const int chest_hit = chest_cacheable && t_chest_cache.valid && nr_pdsch_chest_key_eq(&t_chest_cache.key, &chest_key);
+  atomic_fetch_add(chest_hit ? &g_chest_hit : &g_chest_miss, 1);
+  t_last_chest_hit = chest_hit;
+  /* Cached rows: every (layer, antenna) row the estimator writes (one branch when chest_only >= 0),
+   * at every DM-RS symbol of the slot. */
+  const int chest_nrow = cw->Nl * fp->nb_antennas_rx;
+  const int chest_ndmrs = __builtin_popcount(dmrs_full);
   if (chest_hit) {
-    nvar = t_chest_cache.nvar; nvar_den = t_chest_cache.nvar_den; n_dmrs_sym = t_chest_cache.n_dmrs_sym;
+    /* Working copy of the immutable cached estimate: everything below may mutate it. */
+    for (int r = 0; r < chest_nrow; r++) {
+      if (chest_only >= 0 && r % fp->nb_antennas_rx != chest_only)
+        continue;
+      for (int m = 0, k = 0; m < fp->symbols_per_slot; m++) {
+        if (!((dmrs_full >> m) & 1))
+          continue;
+        memcpy(&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * m],
+               &t_chest_cache.est[((size_t)r * chest_ndmrs + k) * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+        k++;
+      }
+    }
+    nvar = t_chest_cache.nvar_sum; n_dmrs_sym = t_chest_cache.n_dmrs_sym;
     dmrs_first = t_chest_cache.dmrs_first; dmrs_last = t_chest_cache.dmrs_last;
+    memcpy(nr_dl_chest_nvar_ant, t_chest_cache.nvar_ant, sizeof(t_chest_cache.nvar_ant));
   }
   /* ---- SEGMENTED ESTIMATE (seg_path only). nr_pdsch_channel_estimation() memsets its whole
    * output row and writes it from index 0 = the first RB of the allocation it is given, so each
@@ -2303,8 +2365,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       return out->status;
     }
   }
-  for (int m = dlsch_config->start_symbol; seg_path && m < probe_end; m++) {
-    if (!((dlsch_config->dlDmrsSymbPos >> m) & 1))
+  for (int m = 0; seg_path && m < fp->symbols_per_slot; m++) { /* K32: every DM-RS symbol of the slot */
+    if (!((dmrs_full >> m) & 1))
       continue;
     if (dmrs_first < 0)
       dmrs_first = m;
@@ -2345,8 +2407,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     n_dmrs_sym++;
   }
   nr_dl_chest_only_ant = chest_only; /* P39: non-segmented path only; reset after the loop */
-  for (int m = dlsch_config->start_symbol; !seg_path && !chest_hit && m < probe_end; m++) {
-    if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
+  for (int m = 0; !seg_path && !chest_hit && m < fp->symbols_per_slot; m++) { /* K32: every DM-RS symbol of the slot */
+    if (!((dmrs_full >> m) & 1)) {
       continue;
     }
     if (dmrs_first < 0) {
@@ -2409,9 +2471,35 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1792 n=%lu\n", n_); }
     return out->status; // no DM-RS in the allocation: nothing to equalise against
   }
-  if (chest_hit) {
-    pdtim_add(PDTIM_CHEST, pdt_che);
-    goto chest_done;
+  if (chest_cacheable && !chest_hit) {
+    /* Store the IMMUTABLE copy now, before any post-processing below touches the working buffer. */
+    const size_t need = (size_t)chest_nrow * chest_ndmrs * fp->ofdm_symbol_size;
+    t_chest_cache.valid = 0;
+    if (t_chest_cache.est_cap < need) {
+      free(t_chest_cache.est);
+      t_chest_cache.est = (c16_t *)malloc16(need * sizeof(c16_t));
+      t_chest_cache.est_cap = t_chest_cache.est ? need : 0;
+    }
+    if (t_chest_cache.est) {
+      for (int r = 0; r < chest_nrow; r++) {
+        if (chest_only >= 0 && r % fp->nb_antennas_rx != chest_only)
+          continue;
+        for (int m = 0, k = 0; m < fp->symbols_per_slot; m++) {
+          if (!((dmrs_full >> m) & 1))
+            continue;
+          memcpy(&t_chest_cache.est[((size_t)r * chest_ndmrs + k) * fp->ofdm_symbol_size],
+                 &pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * m], sizeof(c16_t) * fp->ofdm_symbol_size);
+          k++;
+        }
+      }
+      t_chest_cache.key = chest_key;
+      t_chest_cache.nvar_sum = nvar;
+      memcpy(t_chest_cache.nvar_ant, nr_dl_chest_nvar_ant, sizeof(t_chest_cache.nvar_ant));
+      t_chest_cache.n_dmrs_sym = n_dmrs_sym;
+      t_chest_cache.dmrs_first = dmrs_first;
+      t_chest_cache.dmrs_last = dmrs_last;
+      t_chest_cache.valid = 1;
+    }
   }
   /* ---- TIME INTERPOLATION OF THE CHANNEL ESTIMATE (ISAC_CHEST_TINTERP=1, default off) ----------
    * nr_rx_pdsch() equalises each data symbol against the PREVIOUS DM-RS symbol's estimate
@@ -2430,8 +2518,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
   if (s_tinterp) {
     int dsym[NR_SYMBOLS_PER_SLOT], nd = 0;
-    for (int m = 0; m < NR_SYMBOLS_PER_SLOT && m < probe_end; m++) /* only estimated DM-RS symbols */
-      if ((dlsch_config->dlDmrsSymbPos >> m) & 1)
+    for (int m = 0; m < NR_SYMBOLS_PER_SLOT; m++) /* every DM-RS symbol of the slot is estimated (K32) */
+      if ((dmrs_full >> m) & 1)
         dsym[nd++] = m;
     const int s0 = dlsch_config->start_symbol, s1 = s0 + dlsch_config->number_symbols;
     for (int m = s0; m < s1 && nd >= 1; m++) {
@@ -2535,15 +2623,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
 
   pdtim_add(PDTIM_CHEST, pdt_che);
-  t_chest_cache.slot = share_slot; t_chest_cache.dmrs_pos = dlsch_config->dlDmrsSymbPos;
-  t_chest_cache.cfg_type = dlsch_config->dmrsConfigType; t_chest_cache.nscid = dlsch_config->nscid;
-  t_chest_cache.ports_lo = (uint8_t)dlsch_config->dmrs_ports; t_chest_cache.cdm = dlsch_config->n_dmrs_cdm_groups;
-  t_chest_cache.nl = cw->Nl; t_chest_cache.scr = dlsch_config->dlDmrsScramblingId;
-  t_chest_cache.rb_lo = chest_alloc.first_rb; t_chest_cache.rb_n = chest_alloc.num_rbs;
-  t_chest_cache.nvar = nvar; t_chest_cache.nvar_den = nvar_den; t_chest_cache.n_dmrs_sym = n_dmrs_sym;
-  t_chest_cache.dmrs_first = dmrs_first; t_chest_cache.dmrs_last = dmrs_last; t_chest_cache.only = chest_only;
-  t_chest_cache.valid = t_share.on && !seg_path; /* a segmented estimate is data-ordered, not RB-indexed */
-chest_done:
 
   /* ---- PER-BRANCH FREQUENCY-OFFSET ESTIMATE (2026-09-03) --------------------------------------
    * THE measurement that decides why branches 1-3 are undecodable. Selection diversity established
@@ -3027,7 +3106,7 @@ chest_done:
   out->nvar = nvar;
   out->qm_measured = 0;
 
-  if (ue->chest_time == 1 && probe_last_sym < 0) { /* a probe estimated only the first DM-RS symbol(s) */
+  if (ue->chest_time == 1) { /* every DM-RS symbol is estimated, probes included (K32) */
     nr_chest_time_domain_avg(fp, (int32_t **)pdsch_dl_ch_estimates, dlsch_config->number_symbols,
                              dlsch_config->start_symbol, dlsch_config->dlDmrsSymbPos, freq_alloc->num_rbs, cw->Nl,
                              fp->nb_antennas_rx);
@@ -3925,4 +4004,132 @@ gpu_llr_ready:;
     if (n_ == 1 || (n_ % 200) == 0)
       LOG_A(PHY, "SENSING: PDSCH UNSUP@3234 n=%lu\n", n_); }
   return out->status;
+}
+
+/* ---- PROBE == FULL CHECK (ISAC_TD_PROBE_EQUIV_CHECK=1|2, debug, default off; K32 / spec V2) -----
+ * A probe FAIL may only count as evidence against a hypothesis if the probe computed what the full
+ * decode would have: code block 0's LLRs must be the same numbers. On 1 probed grant in 50 the same
+ * hypothesis is decoded again with the probe horizon off and the chest cache bypassed -- a cache-free
+ * whole-slot reference -- and the two CB0 LLR vectors (descrambled, the decoder's input) are compared
+ * element-wise. Every rerun stays in probe mode (CB0-only LDPC): no HARQ, no TB, no feedback.
+ *
+ * =2 adds the CACHE-HIT arm (K32's own scenario: a probe fills the slot's chest cache, a later decode
+ * of the slot hits it), run FIRST so the decoder's working buffer still holds an older slot's
+ * estimate. A single-grant slot never shares, so the slot share is forced on for this grant alone:
+ * (1) the probe again, cache on -> fills the cache; (2) a whole-slot decode, cache on -> hits it;
+ * (3) the reference. (2) and (3) are compared over ALL G LLRs: a truncated or post-processed cached
+ * estimate shows on the symbols after the probe horizon, not in code block 0. */
+static bool equiv_rerun(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                        const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                        c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], bool no_horizon, bool bypass)
+{
+  fapi_nr_dl_config_dlsch_pdu_rel15_t pdu = *cfg;
+  nr_pdsch_passive_decode_result_t dec = {0};
+  t_probe_no_horizon = no_horizon;
+  t_chest_bypass = bypass;
+  const nr_pdsch_passive_decode_status_t st = nr_pdsch_passive_decode(ue, proc, &pdu, fa, grant, rxdataF, &dec);
+  t_probe_no_horizon = t_chest_bypass = false;
+  return st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && t_last_llr != NULL && t_last_G;
+}
+
+static uint32_t equiv_diff(const int16_t *a, const int16_t *b, uint32_t n, uint32_t *first, int *maxd)
+{
+  uint32_t bad = 0;
+  *first = UINT32_MAX;
+  *maxd = 0;
+  for (uint32_t i = 0; i < n; i++)
+    if (a[i] != b[i]) {
+      if (!bad)
+        *first = i;
+      bad++;
+      const int d = abs((int)a[i] - (int)b[i]);
+      if (d > *maxd)
+        *maxd = d;
+    }
+  return bad;
+}
+
+void nr_pdsch_passive_probe_equiv_check(PHY_VARS_NR_UE *ue,
+                                        const UE_nr_rxtx_proc_t *proc,
+                                        const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                        const freq_alloc_bitmap_t *freq_alloc,
+                                        const nr_pdsch_passive_grant_t *grant,
+                                        c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
+{
+  static _Atomic int s_on = -1; /* _Atomic: N consumers */
+  if (s_on < 0) {
+    const char *e = getenv("ISAC_TD_PROBE_EQUIV_CHECK");
+    s_on = (e != NULL) ? atoi(e) : 0; /* 1: probe vs full; 2: also the cache-hit arm */
+  }
+  if (s_on <= 0 || !t_probe_first_seg || t_last_llr == NULL || t_seg_E == 0 || t_seg_E > t_last_G)
+    return;
+  static _Atomic uint64_t s_seen = 0, s_n = 0, s_bad = 0, s_el = 0, s_el_bad = 0, s_skip = 0;
+  static _Atomic uint64_t s_hn = 0, s_hbad = 0, s_hel = 0, s_hel_bad = 0, s_hskip = 0;
+  if ((atomic_fetch_add(&s_seen, 1) % 50) != 0)
+    return;
+  const uint32_t E = t_seg_E;
+  const int probe_horizon = t_last_probe_horizon, probe_hit = t_last_chest_hit;
+  const bool saved_ok = t_probe_seg_ok;
+  static __thread int16_t *buf = NULL; /* [0, E): the probe's CB0 LLRs; [E, E+G): the cache-hit decode's LLRs */
+  static __thread uint32_t buf_cap = 0;
+  const uint32_t need = E + t_last_G;
+  if (buf_cap < need) {
+    free(buf);
+    buf = malloc((size_t)need * sizeof(int16_t));
+    buf_cap = buf ? need : 0;
+    if (!buf)
+      return;
+  }
+  memcpy(buf, t_last_llr, (size_t)E * sizeof(int16_t));
+  uint32_t first;
+  int maxd;
+
+  if (s_on == 2 && freq_alloc->n_prb_list == 0 && freq_alloc->prg == 0) {
+    const nr_pdsch_slot_share_t saved_share = t_share;
+    t_share = (nr_pdsch_slot_share_t){1, (int)freq_alloc->first_rb, (int)freq_alloc->num_rbs};
+    t_chest_cache.valid = 0;
+    t_fep_cache.valid = 0;
+    (void)equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, false, false); /* (1) the probe fills the cache */
+    const int horizon1 = t_last_probe_horizon;
+    const bool ok2 = equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, true, false); /* (2) hits it */
+    const int hit2 = t_last_chest_hit;
+    const uint32_t G2 = t_last_G;
+    if (ok2 && E + G2 <= buf_cap)
+      memcpy(buf + E, t_last_llr, (size_t)G2 * sizeof(int16_t));
+    const bool ok3 = equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, true, true); /* (3) reference */
+    t_share = saved_share;
+    t_chest_cache.valid = 0;
+    t_fep_cache.valid = 0;
+    if (ok2 && ok3 && hit2 && t_last_G == G2 && E + G2 <= buf_cap) {
+      const uint32_t bad = equiv_diff(buf + E, t_last_llr, G2, &first, &maxd);
+      const uint64_t n = atomic_fetch_add(&s_hn, 1) + 1;
+      const uint64_t nb = atomic_fetch_add(&s_hbad, bad != 0) + (bad != 0);
+      const uint64_t el = atomic_fetch_add(&s_hel, G2) + G2;
+      const uint64_t elb = atomic_fetch_add(&s_hel_bad, bad) + bad;
+      LOG_A(PHY, "SENSING: PROBE_EQUIV_HIT mismatches=%lu/%lu llr_mismatch=%lu/%lu skipped=%lu | this: S=%d L=%d dmrs=0x%x "
+            "G=%u diff=%u first=%d max|d|=%d probe_horizon=%d\n",
+            (unsigned long)nb, (unsigned long)n, (unsigned long)elb, (unsigned long)el, (unsigned long)atomic_load(&s_hskip),
+            dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos, G2, bad,
+            bad ? (int)first : -1, maxd, horizon1);
+    } else if (atomic_fetch_add(&s_hskip, 1) < 5) {
+      LOG_A(PHY, "SENSING: PROBE_EQUIV_HIT skipped: ok2=%d ok3=%d hit=%d G2=%u G3=%u\n", ok2, ok3, hit2, G2, t_last_G);
+    }
+  }
+
+  const bool ok = equiv_rerun(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, true, true);
+  t_probe_seg_ok = saved_ok;
+  if (!ok || t_seg_E != E) {
+    atomic_fetch_add(&s_skip, 1);
+    return;
+  }
+  const uint32_t bad = equiv_diff(buf, t_last_llr, E, &first, &maxd);
+  const uint64_t n = atomic_fetch_add(&s_n, 1) + 1;
+  const uint64_t nb = atomic_fetch_add(&s_bad, bad != 0) + (bad != 0);
+  const uint64_t el = atomic_fetch_add(&s_el, E) + E;
+  const uint64_t elb = atomic_fetch_add(&s_el_bad, bad) + bad;
+  LOG_A(PHY, "SENSING: PROBE_EQUIV mismatches=%lu/%lu llr_mismatch=%lu/%lu skipped=%lu | this: rnti=0x%x S=%d L=%d dmrs=0x%x "
+        "nl=%u E=%u diff=%u first=%d max|d|=%d horizon=%d chest_hit=%d\n",
+        (unsigned long)nb, (unsigned long)n, (unsigned long)elb, (unsigned long)el, (unsigned long)atomic_load(&s_skip),
+        grant->rnti, dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
+        (unsigned)dlsch_config->cw_info[0].Nl, E, bad, bad ? (int)first : -1, maxd, probe_horizon, probe_hit);
 }
