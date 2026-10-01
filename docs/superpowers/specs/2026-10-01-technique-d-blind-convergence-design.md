@@ -1,8 +1,8 @@
 # Technique D blind-case convergence — design addendum
 
-Status: DRAFT 2026-10-01 for operator review. Amends `2026-10-01-technique-d-convergence-levers-design.md` (the
-"levers spec"); where the two disagree, this addendum wins. §3 (CRC-pass acceptance) changes a Global Constraint and is
-**pending operator approval** — it may be designed and simulated behind a default-off flag, but not enabled.
+Status: APPROVED by the operator 2026-10-01 (with the §3 and §4 SUSPECT amendments below). Amends `2026-10-01-technique-d-convergence-levers-design.md` (the
+"levers spec"); where the two disagree, this addendum wins. §3 (CRC-pass acceptance) is approved for design and simulation
+behind a default-off flag; runtime enablement is a **separate operator acceptance decision after BC6**.
 
 ## 1. Why this addendum
 
@@ -36,14 +36,16 @@ of engine state ⇒ no selection bias (contrast P2). Per hypothesis the trials a
 per-hypothesis Bernoulli samples and `nr_crc_interval` remain valid. Main effect: MCS-table twins (differ only in
 `mcs_table`) share every non-exercising grant, and duplicates that legality dedup missed share all grants.
 
-## 3. CRC-pass acceptance (lever C) — PENDING OPERATOR APPROVAL
+## 3. CRC-pass acceptance (lever C) — experimental, default off (operator 2026-10-01)
 
 A wrong hypothesis can pass a 24-bit TB CRC only (a) by a CRC accident (≈ 2⁻²⁴ per decode) or (b) when its
 computation is identical to the truth's (an equivalent hypothesis, §2) or (c) when another transmission matches it
 (HARQ retransmission of the same TB in the slot a wrong `k0` points to). Lever C uses (a) and excludes (b)/(c):
 
 - A pass is **unique** when the decoded hypothesis was alone in its equivalence class among alive hypotheses on that
-  grant. Per hypothesis the engine counts `ok_unique[h]`.
+  grant **and** the grant carries **new data** (new transmission: NDI toggled; never a HARQ retransmission of a TB
+  already counted). Two unique passes therefore come from two independent TBs on two distinct grants. Per hypothesis
+  the engine counts `ok_unique[h]`.
 - Accept leader L (alongside, never instead of, the KL rule) when
   1. `ok_unique[L] >= m*`, and
   2. every other alive hypothesis has `ok_unique == 0` ("clean lead": any unique pass elsewhere — HARQ trap, near
@@ -55,8 +57,14 @@ computation is identical to the truth's (an equivalent hypothesis, §2) or (c) w
   `SWEEP_MIN_RATE`) stays as the safety net.
 - Expected effect: convergence ≈ one round (the truth's first unique pass makes it "hot"; the exploit rule then
   delivers the second within a few grants).
-- Flag `ISAC_TD_CRC_ACCEPT` / simulator `--crc-accept`, default 0. Enabling it by default requires the operator to
-  amend Global Constraint "the KL anytime acceptance rule is not changed" and the BC6 gate to pass.
+- Flag `ISAC_TD_CRC_ACCEPT` / simulator `--crc-accept`, default 0. The KL rule stays untouched alongside it.
+- **Evidence standard.** The 1e-6 wrong-winner argument is **analytical** (CRC-24 bound, new-data independence,
+  exact equivalence collapsing, clean-lead condition). Monte Carlo only exposes implementation and correlation
+  errors: 0 wrong winners in N acquisitions bounds the rate only to ≈ 3/N (95 %), e.g. ≈ 1.5e-4 for 20 000; a
+  1e-6-scale empirical bound would need millions of acquisitions. BC6 therefore also runs a **stress arm** with an
+  inflated false-pass probability (`--crc-false 1e-3`) where the analytical bound predicts a measurable wrong rate,
+  and checks the measured rate against the formula.
+- Enabling at runtime: separate operator decision after BC6 (and an amendment of the levers-plan Global Constraint).
 
 ## 4. Reversible pruning field book (lever F, replaces levers spec §4.6) — operator decision 2026-10-01
 
@@ -84,10 +92,16 @@ FULL JOINT CATALOGUE
   (first independent contradiction) → PROMOTED (re-confirmed by a further independent RNTI) | WITHDRAWN (second
   independent contradiction; global restore of its dormant hypotheses)`. After WITHDRAWN the field returns to
   CANDIDATE with its candidate table (a new value promotes with 2 supporters).
-- **Pruning status.** Only PROMOTED fields of the current epoch prune contexts created afterwards. SUSPECT fields do
-  **not** prune new contexts (hint only, ordering); existing contexts keep their masks until WITHDRAWN.
-  [Operator review point: the operator's text says "reduce/disable its pruning for that RNTI"; this design disables it
-  for all contexts created while SUSPECT, which is the conservative reading.]
+- **Pruning status (operator 2026-10-01).** Only PROMOTED fields of the current epoch prune. On the transition to
+  SUSPECT (first independent contradiction):
+  - new contexts do **not** prune on this field (hint only, ordering);
+  - existing **unsettled** contexts immediately restore the hypotheses dormant **only because of this field**
+    (clear that field's dormant cause; masks of other fields, the prior and deterministic legality are untouched) —
+    a suspect field must not keep narrowing a search that may be the one revealing the contradiction;
+  - already **converged** contexts keep their winner but mark the field-derived assumption untrusted (flag on the
+    context, logged; their probation continues as today).
+  Re-confirmation by a further independent RNTI → PROMOTED (applies to contexts created afterwards); a second
+  independent contradiction → WITHDRAWN.
 - **Independence.** A converged RNTI supports or contradicts field f only if f was **not** pruned in that context
   (or the context was in fail-open when it converged). A context pruned to value v cannot vote for v (circular).
 - **Epochs.** Support and contradiction sets are tagged with `config_epoch`. On an epoch bump PROMOTED/SUSPECT fields
@@ -129,8 +143,9 @@ CB0 probes). Recorded in the levers plan's G4 task.
 ## 8. Validation gate (BC6)
 
 Arms × {oracle 1, oracle 0, oracle-miss 0.3, oracle-wrong 0.05} × rx {4, 1} × cell {SA, NSA-like}, twins 2,
-harq-trap {0, 0.01}, ≥ 2000 acquisitions × 4 RNTIs per cell: baseline (today); +E; +E+F; +E+F+C (only if approved);
-+F with forced wrong promotion (stale-field injection). Pass: wrong = 0 everywhere; undecidable not above baseline;
+harq-trap {0, 0.01}, ≥ 2000 acquisitions × 4 RNTIs per cell: current all-or-nothing prior (today); ordering-only
+field book; +E; reversible-pruning field book (+E+F); +E+F with forced wrong/stale promotion; +E+F+C (experimental);
+plus the lever-C stress arm (`--crc-false 1e-3`) compared with the analytical bound. Pass: wrong = 0 everywhere; undecidable not above baseline;
 oracle-1 time not worse than baseline beyond seed noise; field-book recovery from a forced wrong promotion within
 2 RNTIs; blind cold median ≤ 30 s at 4 RX and ≤ 90 s at 1 RX (target — report the gap if missed).
 

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - All new flags default off (`--equiv 0`, `--crc-accept 0`, `--fieldbook 0`, `ISAC_TD_EQUIV=0`, `ISAC_TD_CRC_ACCEPT=0`, `ISAC_TD_FIELDBOOK=0`) ⇒ **bit-identical** hypothesis sequence and winner vs today for the same RNG seed.
-- The KL anytime acceptance rule (`nr_crc_interval()`, 1e-6 budget, separation test, 300-trial fallback) is not changed. Lever C (CRC-pass acceptance) is an **additional** rule behind a default-off flag; **Task BC2 is not dispatched until the operator approves amending this constraint.**
+- The KL anytime acceptance rule (`nr_crc_interval()`, 1e-6 budget, separation test, 300-trial fallback) is not changed. Lever C (CRC-pass acceptance) is an **additional, experimental** rule behind a default-off flag (operator approved design + simulation 2026-10-01); runtime enablement is a separate operator decision after BC6. Its 1e-6 argument is analytical; Monte Carlo exposes implementation/correlation errors only.
 - MCS table is never promoted cell-wide. Side information is "ordering score", never "prior".
 - Dormant hypotheses accumulate no evidence; a cause that would leave zero active hypotheses is refused.
 - Field-book promotion/contradiction only from **independently converged RNTIs in the current `config_epoch`** (field not pruned in that context, or context in fail-open). Old-epoch support never maintains pruning.
@@ -40,7 +40,7 @@
 | `openair1/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.{h,c}`, `tests/nr_td_fieldbook_test.cc` | field state machine | BC4 |
 | `tests/passive_rx/td_sim/campaign.py`, `test_campaign.py`, `gate_bc.json`, `results_<date>_bc/` | campaigns | BC0, BC6 |
 
-Order: BC0 → BC1 → BC3 → BC4 → BC5 → (BC2 if approved) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
+Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
 
 ---
 
@@ -117,7 +117,8 @@ uint64_t nr_td_equiv_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm, uin
  * idx[1..n-1]. Duplicates and out-of-range indices are ignored. n == 1 is bit-identical to
  * nr_pdsch_config_sweep_feed(st, idx[0], tb_crc_ok). The acceptance check runs once, after crediting, whenever any
  * credited hypothesis reached a multiple of 16 trials. Returns the winner or -1. */
-int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok);
+int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
+                                     bool new_data /* new transmission (NDI toggled); used only by lever C (BC2) */);
 ```
 - Produces simulator flag `--equiv 0|1` (SimCfg `int equiv`, default 0). With `equiv=1` the sim requires `twins >= 2` (exit with an error otherwise: the stress arm is not equivalence-consistent). Class of decoded hypothesis `d` on a grant: all alive `j` with identical `tda_start, tda_length, k0, dmrs_add_pos, dmrs_max_len, dmrs_mask, mapping_type` and (`hyp[j].mcs_table == hyp[d].mcs_table` or `!gr.exercised`). Only the main (K=1) full decode is credited this way; probes are unchanged.
 - Runtime wiring (levers-plan R2, not here): the queue computes each alive hypothesis's key with `nr_get_Qm_dl(mcs, table)` and `nr_get_code_rate_dl(mcs, table)` (openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h:275-276).
@@ -147,7 +148,7 @@ TEST(PdschSweepEquiv, SingleIsBitIdenticalToFeed) {
     nr_pdsch_cfg_hypothesis_t h; const int i = nr_pdsch_config_sweep_next(a.get(), &h);
     const int j = nr_pdsch_config_sweep_next(b.get(), &h); ASSERT_EQ(i, j);
     const bool ok = (i == 7) && (t % 3 == 0);
-    const int wa = nr_pdsch_config_sweep_feed(a.get(), i, ok), wb = nr_pdsch_config_sweep_feed_equiv(b.get(), &i, 1, ok);
+    const int wa = nr_pdsch_config_sweep_feed(a.get(), i, ok), wb = nr_pdsch_config_sweep_feed_equiv(b.get(), &i, 1, ok, true);
     ASSERT_EQ(wa, wb); if (wa >= 0) break;
   }
   EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
@@ -156,7 +157,7 @@ TEST(PdschSweepEquiv, SingleIsBitIdenticalToFeed) {
 TEST(PdschSweepEquiv, CreditsEveryMemberOnceIgnoringDuplicates) {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
   const int idx[] = {3, 5, 5, 9, -1, 1 << 20};
-  nr_pdsch_config_sweep_feed_equiv(s.get(), idx, 6, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), idx, 6, true, true);
   EXPECT_EQ(s->trials[3], 1u); EXPECT_EQ(s->trials[5], 1u); EXPECT_EQ(s->trials[9], 1u);
   EXPECT_EQ(s->ok[3], 1u); EXPECT_EQ(s->ok[5], 1u); EXPECT_EQ(s->ok[9], 1u);
 }
@@ -179,7 +180,7 @@ TEST(TdSim, EquivNeverWrongAndNotSlowerBlind) {
 
 ---
 
-### Task BC2 ★: CRC-pass acceptance (lever C) (Opus) — **BLOCKED until the operator approves amending the KL Global Constraint**
+### Task BC2 ★: CRC-pass acceptance (lever C), experimental, default off (Opus)
 
 **Files:**
 - Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h`, `.c`; Test: `tests/nr_pdsch_config_sweep_test.cc`
@@ -197,7 +198,7 @@ bool     crc_accept_blocked;  ///< a second hypothesis has a unique pass: lever 
 /* Smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6 (log domain). */
 int nr_pdsch_config_sweep_crc_accept_m(int n_alive, uint32_t t_max);
 ```
-- Rule inside `feed_equiv` after crediting: if `st->crc_accept && !st->crc_accept_blocked && tb_crc_ok && n_credited == 1` then `ok_unique[idx[0]]++` (saturating). Then, before `sweep_decide`: let `U` = set of alive hypotheses with `ok_unique > 0`; if `|U| >= 2` set `crc_accept_blocked = true`; else if `|U| == 1`, `L ∈ U`, and `ok_unique[L] >= crc_accept_m(n_alive, max_trials_alive)` ⇒ `st->winner = L; return L`.
+- Rule inside `feed_equiv` after crediting: if `st->crc_accept && !st->crc_accept_blocked && tb_crc_ok && new_data && n_credited == 1` then `ok_unique[idx[0]]++` (saturating). A HARQ retransmission (`new_data == false`) never adds a unique pass. The simulator passes `gr.new_tx`. Then, before `sweep_decide`: let `U` = set of alive hypotheses with `ok_unique > 0`; if `|U| >= 2` set `crc_accept_blocked = true`; else if `|U| == 1`, `L ∈ U`, and `ok_unique[L] >= crc_accept_m(n_alive, max_trials_alive)` ⇒ `st->winner = L; return L`.
 - Simulator `--crc-accept 0|1` (requires `--equiv 1`); summary adds `"crc_accepts"` (decisions made by lever C).
 
 - [ ] **Step 1: Failing tests**
@@ -209,22 +210,29 @@ TEST(PdschSweepCrcAccept, MValues) {
 }
 TEST(PdschSweepCrcAccept, TwoUniquePassesDecideWhenClean) {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4); s->crc_accept = true;
-  const int a = 7; int w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true); EXPECT_EQ(w, -1);
-  w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true); EXPECT_EQ(w, 7);
+  const int a = 7; int w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true); EXPECT_EQ(w, -1);
+  w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true); EXPECT_EQ(w, 7);
 }
 TEST(PdschSweepCrcAccept, SecondUniquePasserBlocksTheRule) {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4); s->crc_accept = true;
   const int a = 7, b = 8;
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true);
-  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true), -1);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true), -1);
   EXPECT_TRUE(s->crc_accept_blocked);
 }
 TEST(PdschSweepCrcAccept, SharedPassIsNotUnique) {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4); s->crc_accept = true;
   const int cls[] = {7, 9};
-  nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true); nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true); nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true);
   EXPECT_EQ(s->ok_unique[7], 0); EXPECT_EQ(s->winner, -1);
+}
+TEST(PdschSweepCrcAccept, RetransmissionPassIsNotUnique) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4); s->crc_accept = true;
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, false), -1); /* HARQ retx of the same TB */
+  EXPECT_EQ(s->ok_unique[7], 1);
 }
 ```
 `nr_td_sim_test.cc` (Review Focus 5):
@@ -238,6 +246,7 @@ TEST(TdSim, HarqTrapNeverAcceptedByCrcRule) {
 }
 ```
 - [ ] **Step 2: Run → FAIL.** **Step 3: Implement** (fields, clearing sites, `crc_accept_m` with `lgamma`, rule in `feed_equiv`; sim flag/counter). **Step 4: Run → PASS**; full ctest.
+- [ ] **Step 4b: Analytical check (stress arm):** run `--oracle 0 --equiv 1 --crc-accept 1 --crc-false 1e-3 --acq 2000` and compare the measured wrong-winner rate with the bound `P(wrong) <= sum_h C(T_h, m*) p_f^m*` evaluated on the run's trial counts (print both in the report). The measured rate must not exceed the bound; at the default `p_f = 2^-24` the bound (not the Monte Carlo) is the evidence for 1e-6.
 - [ ] **Step 5: Commit** — `feat(td): CRC-pass acceptance behind a default-off flag (lever C) + simulator arm`.
 
 ---
@@ -301,7 +310,7 @@ TEST(PdschSweepDormant, FeedOnDormantIsIgnored) { /* Review Focus 3 */
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
   int odd = -1; for (int i = 0; i < s->n_hyp && odd < 0; i++) if (s->hyp[i].tda_length % 2) odd = i;
   nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
-  nr_pdsch_config_sweep_feed(s.get(), odd, true); nr_pdsch_config_sweep_feed_equiv(s.get(), &odd, 1, true);
+  nr_pdsch_config_sweep_feed(s.get(), odd, true); nr_pdsch_config_sweep_feed_equiv(s.get(), &odd, 1, true, true);
   EXPECT_EQ(s->trials[odd], 0u); EXPECT_EQ(s->ok[odd], 0u);
 }
 TEST(PdschSweepDormant, DormantRefusesToEmptyCatalogue) { /* Review Focus 2 */
@@ -370,6 +379,7 @@ void nr_td_fieldbook_force_promote(nr_td_fieldbook_t *fb, nr_td_field_t f, int32
 - Transitions (per field, current epoch only):
   - `converged` with field f independent (bit f clear): add the RNTI to the value's support. If state ∈ {UNSEEN, CANDIDATE} and the value has ≥ `promote_rntis` distinct supporters ⇒ PROMOTED (value set). If PROMOTED/SUSPECT and the value equals the promoted value from an RNTI not already supporting ⇒ (SUSPECT ⇒ PROMOTED, contradictions cleared). If PROMOTED/SUSPECT and the value differs ⇒ contradiction from this RNTI.
   - contradiction (from `converged` or `nr_td_fieldbook_contradict`): distinct RNTIs; 1 ⇒ SUSPECT; ≥ `withdraw_rntis` ⇒ withdrawn: value = −1, state CANDIDATE, `n_withdrawn++`, contradictions cleared, candidate rows kept (the contradicting value may promote immediately if it has enough support).
+  - Caller contract on SUSPECT (operator 2026-10-01; implemented by callers via `generation`): new contexts do not prune on the field; existing **unsettled** contexts immediately `clear_dormant(FIELD_BASE + f)` (only that field's cause); converged contexts keep their winner and set an `untrusted_fields` bit. The field book exposes `nr_td_fieldbook_prunes()` = PROMOTED only, so a caller that re-evaluates `prunes()` on every generation change gets this behaviour.
   - `bump_epoch`: every PROMOTED/SUSPECT field ⇒ CANDIDATE with `hint_value = value`, value = −1; all support and contradiction sets cleared. `fill_side_info` uses `value` when PROMOTED, else `hint_value` (ordering only).
   - Bit f set in `pruned_fields` ⇒ the converge neither supports nor contradicts field f.
 
@@ -437,7 +447,7 @@ Behaviour with `--fieldbook 2`, per RNTI:
 1. Start: copy template; if the cell prior is valid, `set_dormant(PRIOR, keep = prior predicate)`; for each field with `prunes(f, &v)`: `set_dormant(FIELD_BASE + f, keep = hyp_matches(f, v, h))`, record bit f in `pruned_fields` when it returned ≥ 0.
 2. Each grant after feedback: if `fail_open_due(st, fo_alpha, fo_pmin)` ⇒ `set_fail_open(st, true)`, `pruned_fields = 0`, `rec.fail_open = true`.
 3. On convergence: `converged(fb, rnti, winner, g, pruned_fields)`; prior bookkeeping as today.
-4. After each converge, if `generation` changed: for later RNTIs the masks are rebuilt at their start (step 1) — no existing context survives across RNTIs in the sim, so global restore = next RNTI starts without the withdrawn field's mask.
+4. After each converge, if `generation` changed: later RNTIs rebuild their masks at their start (step 1). The sim runs RNTIs one after another, so the "existing unsettled contexts restore on SUSPECT" rule (BC4 caller contract) is not exercised here; it is a levers-plan R2 runtime test (`SuspectRestoresUnsettledContexts`). Count converged RNTIs whose winner relied on a field that later became SUSPECT/WITHDRAWN (`"untrusted_after"`).
 5. `--inject-wrong-field F`: at acquisition start `force_promote(fb, F, wrong)` where wrong = TDRA of the first template entry with a different `(S, L)` and the same mapping; add_pos `= (truth + 1) % 4` if present in the template else skip; max_len `= 3 − truth` (1 ↔ 2).
 
 - [ ] **Step 1: Failing tests**
@@ -470,9 +480,9 @@ TEST(TdSim, FieldBookTwoNotSlowerThanPriorSteady) {
 - Create: `tests/passive_rx/td_sim/gate_bc.json`, `tests/passive_rx/td_sim/results_<date>_bc/summary.md` (+ `analysis.md`; jsonl only if < 5 MB)
 - Modify: `docs/superpowers/specs/2026-10-01-technique-d-blind-convergence-design.md` (§8 decision block), `docs/superpowers/plans/2026-10-01-technique-d-convergence-levers.md` (R2 env line)
 
-- [ ] **Step 1:** `gate_bc.json` arms: `baseline` (fieldbook 0); `E` (equiv 1); `F_order` (fieldbook 1); `E+F` (equiv 1, fieldbook 2); `E+F+inject` (… , inject-wrong-field 0, and separately 1); `E+F+C` (crc-accept 1) only if BC2 landed. Dimensions: oracle settings {`--oracle 1`, `--oracle 0`, `--oracle 1 --oracle-miss 0.3`, `--oracle 1 --oracle-wrong 0.05`} × rx {4, 1} × cell {SA sib1 1, NSA-like sib1 0}; fixed: twins 2, gate 1, K 1, `--harq-trap 0.01 --crc-false 5.96e-8`, seed 1, 2000 acquisitions × 4 RNTIs (oracle-0 cells may drop to 500 acquisitions if the pilot predicts > 4 h; say so).
+- [ ] **Step 1:** `gate_bc.json` arms: `prior` (today, fieldbook 0); `F_order` (ordering-only field book, fieldbook 1); `E` (equiv 1); `E+F` (equiv 1, fieldbook 2, reversible pruning); `E+F+inject` (… , inject-wrong-field 0, and separately 1); `E+F+C` (crc-accept 1, experimental); `C_stress` (oracle 0, equiv 1, crc-accept 1, `--crc-false 1e-3`: measured wrong rate vs analytical bound). Dimensions: oracle settings {`--oracle 1`, `--oracle 0`, `--oracle 1 --oracle-miss 0.3`, `--oracle 1 --oracle-wrong 0.05`} × rx {4, 1} × cell {SA sib1 1, NSA-like sib1 0}; fixed: twins 2, gate 1, K 1, `--harq-trap 0.01 --crc-false 5.96e-8`, seed 1, 2000 acquisitions × 4 RNTIs (oracle-0 cells may drop to 500 acquisitions if the pilot predicts > 4 h; say so).
 - [ ] **Step 2:** Pilot `--acq 50` per arm → wall-time estimate; then run (≤ 8 parallel).
-- [ ] **Step 3: Decide** per spec §8 pass criteria (wrong = 0 everywhere; undecidable ≤ baseline; oracle-1 time ≤ baseline + seed noise; recovery from injected wrong promotion within 2 RNTIs; blind cold median ≤ 30 s at 4 RX / ≤ 90 s at 1 RX, else report the gap). Write the decision block into the addendum §8 and the chosen runtime flags into levers-plan R2 env line (`ISAC_TD_EQUIV`, `ISAC_TD_FIELDBOOK` 0/2, `ISAC_TD_CRC_ACCEPT` only if approved and passed), label `[SIMULATED, DGX host, nr_td_sim @<commit>]`.
+- [ ] **Step 3: Decide** per spec §8 pass criteria (**0 wrong winners is the hard rule**; state the Monte-Carlo resolution ≈ 3/N; lever C runtime enablement is only *recommended* here — the operator decides) (wrong = 0 everywhere; undecidable ≤ baseline; oracle-1 time ≤ baseline + seed noise; recovery from injected wrong promotion within 2 RNTIs; blind cold median ≤ 30 s at 4 RX / ≤ 90 s at 1 RX, else report the gap). Write the decision block into the addendum §8 and the chosen runtime flags into levers-plan R2 env line (`ISAC_TD_EQUIV`, `ISAC_TD_FIELDBOOK` 0/2, `ISAC_TD_CRC_ACCEPT` only if approved and passed), label `[SIMULATED, DGX host, nr_td_sim @<commit>]`.
 - [ ] **Step 4: Commit** — `evidence(td): blind-convergence gate (equivalence, reversible field book, CRC accept)`.
 
 ---
