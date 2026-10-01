@@ -1,0 +1,178 @@
+# Reconfiguration Robustness Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Non-Claude agents (e.g. Codex) must follow the same per-task discipline manually: failing test first, implement, green, commit, write a per-task report, and stop for review before the next task.
+
+**Goal:** Detect and recover from RRC reconfigurations the passive receiver cannot read — on **SA and NSA** cells over the air — by lifting the DCI size cap to 140 bits, re-learning per-RNTI DCI lengths, giving the CORESET bank a life cycle, and introducing one cell-level `CellConfigEpoch` authority whose consumers turn learned state into hints after a change.
+
+**Architecture:** Phase 1 (R1–R6) is local to the blind-PDCCH modules and independently testable. Phase 2 (R7–R11) adds a single pure epoch module (`nr_passive_cfg_epoch`) and connects its consumers one by one. Phase 3 (R12–R14) validates with an offline mid-stream reconfiguration replay, the live SA bed (+ NSA-like arm) and a soak.
+
+**Tech Stack:** C11 (OAI style), C++17 gtest, CMake/Ninja, Python 3 stdlib, OAI rfsim/SA beds.
+
+**Spec:** `docs/superpowers/specs/2026-10-01-reconfiguration-robustness-design.md` (frozen 2026-10-01; read fully). Background: `PROJECT_MEMORY.md` §11.6–§11.11, §23.5–§23.8, §24 K10, K11, K37; levers spec §4.6 (CellFieldBook) and §9 (compute modes).
+
+## Global Constraints
+
+- **SA and NSA (operator rule):** no component may require SIB1, CORESET#0, SI-RNTI, P-RNTI paging or NR-side RA; those are optional evidence (spec §3.6, §4.6). Every live validation has an NSA-like arm.
+- **DCI payload bound:** `NR_DCI_MAX_PAYLOAD 140` (A bits; K = A + 24 = 164 into polar). Search range for 1_1/0_1 lengths: 30..140 unless an earlier lower bound already exists in the code (keep the existing minimum).
+- **One epoch authority:** only `nr_passive_cfg_epoch` increments an epoch; every consumer reads it; learned records carry `{value, epoch_learned, verification_state}`; stale ⇒ `HINT`.
+- **Classes:** HARD_RESET (identity change: PCI, carrier/Point A/SSB ARFCN), HARD_REVERIFY (MIB change, SIB1 semantic change, SI-modification at the next modification boundary, continuity loss logged `CONTINUITY_LOSS`), SOFT (BWP change, ≥ 2 converged RNTIs reopened/SUSPECT within 2 s).
+- Re-verify before discarding (HARD_REVERIFY and SOFT); HARD_RESET never carries dedicated state across identities.
+- All new behaviour behind flags defaulting to today's behaviour (`ISAC_RECONF=0`), **except** the 140-bit capacity (pure extension).
+- Targets: soft recovery ≤ 10 s, hard ≤ 30 s at ≥ 100 grants/s; 0 stale winners; ≤ 1 false SOFT trigger per hour and 0 hard on a stable cell.
+- Repository rules (`CLAUDE.md`): sens6-frozen gate before every commit (`git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30`); new configs use `.cfg`; explicit `git add`; no stash; never build while `pgrep -x nr-uesoftmodem`; evidence labels naming the host; regression gate `tests/passive_rx/dgx/rfsim_regress.sh` (DGX thresholds 98 % / 1 %; cloud x86 93 % / 2.5 %).
+- Branch: `rr/reconfig-robustness` from `adaptive-rx-UL-DL`. Never push to `adaptive-rx-UL-DL`.
+
+## Coordination with the levers plan (branch `td/convergence-levers`)
+
+- Phase 1 touches `nr_pdcch_*` files only — no overlap with levers Tasks 1–7, 4b, 4c, F1, F2 except `CMakeLists.txt` test blocks (trivial merge).
+- Phase 2 R11 changes `nr_td_fieldbook` (levers Task 3) to mirror the central epoch: do R11 **after** `td/convergence-levers` is merged, or rebase onto it.
+- R10 (Technique D consumers) touches `nr_pdsch_config_sweep.c` — coordinate with levers Task 4 / R2 (merge order: levers first).
+
+## Review Focus
+
+1. **NSA cell (no SIB1, no CORESET#0) with a dedicated reconfiguration** — recovery must use only NSA evidence (persistence, CFRA RAR anchor, other banked geometries); pinned in R3 (`SuspectWithoutCoreset0Evidence`) and R14 NSA-like arm.
+2. **NSA SCG churn** (RNTIs appear/vanish in bursts) — must NOT fire `DEDICATED_CHANGE_SUSPECTED`; pinned in R8 (`VanishedRntisDoNotTriggerSoft`).
+3. **Idle cell for minutes** — no CORESET demotion, no SUSPECT; pinned in R4 (`IdleCellNeverDemotes`) and R3 (`InactiveRntiNeverSuspect`).
+4. **SI-modification announcement without an actual SIB1 change** — no epoch bump after the boundary; pinned in R8 (`SiModAnnouncedButUnchangedNoBump`).
+5. **A queued decode job straddling an epoch change** — never credited; pinned in R9 (`OldEpochJobDropped`).
+
+---
+
+## PHASE 1 — local, independently testable
+
+### Task R1: DCI payload bit-vector type (Sonnet)
+
+**Files:** Create `openair1/PHY/NR_UE_TRANSPORT/nr_dci_bits.h` (header-only); Test `openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_bits_test.cc`; Modify `CMakeLists.txt` (test block).
+
+**Interfaces — Produces:**
+```c
+#define NR_DCI_MAX_PAYLOAD 140   /* TS 38.212: cite the DCI CRC-attachment / polar-coding-for-DCI clauses here */
+#define NR_DCI_WORDS 3
+typedef struct { uint64_t w[NR_DCI_WORDS]; } nr_dci_bits_t;   /* same packing as polar_decoder_int16's out[] */
+static inline nr_dci_bits_t nr_dci_bits_from_u64(uint64_t v);
+static inline uint64_t nr_dci_bits_field(const nr_dci_bits_t *b, int len, int msb_pos, int width); /* width <= 64 */
+static inline bool nr_dci_bits_eq(const nr_dci_bits_t *a, const nr_dci_bits_t *b);
+static inline uint32_t nr_dci_bits_hash(const nr_dci_bits_t *b, int len);
+```
+- [ ] **Step 1:** Read how existing extractors index the right-aligned `uint64_t` payload (e.g. `nr_pdcch_blind_extract_01` in `nr_pdcch_blind_monitor.c`, `raw_payload` "right-aligned to dci_length" in `nr_pdcch_blind_monitor.h:693`) and how `polar_decoder_int16(int16_t*, uint64_t *out, ...)` packs words for A > 64 (`openair1/PHY/CODING/nrPolar_tools/`). Write the packing rule as a comment at the top of `nr_dci_bits.h`.
+- [ ] **Step 2: Failing test** — `nr_dci_bits_field` on a 47-bit payload built with `from_u64` equals the existing 64-bit shift/mask result for every (msb_pos, width) with width ≤ 16; for a 140-bit vector with known bits set at positions 0, 63, 64, 127, 128, 139, the field extraction returns them; `eq`/`hash` sanity.
+- [ ] **Step 3–4:** implement, green. **Step 5:** commit `feat(rr): 140-bit DCI payload type (nr_dci_bits_t)`.
+
+### Task R2: Lift the 63-bit cap end to end (Sonnet; Opus review — touches the live blind path)
+
+**Files (touch points, verified 2026-10-01):** `nr_pdcch_dci_length_sweep.h:75` (`NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN 64` → `NR_DCI_MAX_PAYLOAD + 1`); `nr_pdcch_blind_monitor.c` guards `dci_length > 63` at ~3893, 4085, 4121, 4891, 4946, 5064; `nr_pdcch_blind_monitor_rt.c` clamps at ~1280, ~1290 (`x <= 63`), `LANE_BATCH_MAX_LEN 64` ~2009, `SWEEP_BATCH_MAX_LEN 64` ~2214; `uint64_t dci_estimation[2]` → `[NR_DCI_WORDS]` (`dci_nr.c` ~1160, `nr_pdcch_blind_monitor.c` ~3461, ~3515); every `uint64_t payload` / `raw_payload` field and function parameter in `nr_pdcch_blind_monitor.h` (143, 151, 223, 693, 875, 893, 933, 1034, 1078), `nr_pdcch_ul_discovery.h:38`, `nr_pdcch_dci11_layout_sweep.h` (135, 260), `nr_pdcch_joint_live.h:19`, `nr_pdcch_joint_solve.h` (55, 89), `nr_pdcch_discovery_replay.h:13`, `nr_pdsch_passive_queue.h:118` → `nr_dci_bits_t`. Grep again before starting: `grep -rn "uint64_t[^;]*payload\|> 63\|<= 63" openair1/PHY/NR_UE_TRANSPORT`.
+- Joint GF(2) solver (`nr_pdcch_joint_solve.c`, `nr_pdcch_gf2_rnti.c`): if its matrices are sized for ≤ 64 payload bits, either extend to 140 or keep it opt-in with an explicit `dci_length <= 64` guard and a one-shot log — **decide by reading the code; record the decision in the commit.**
+- [ ] **Step 1: Failing tests** (extend existing gtests): `test_nr_pdcch_blind_monitor` — a synthetic DCI 1_1 of 80 and 140 bits is polar-encoded with the real encoder, decoded through the blind candidate path and its RNTI recovered; `test_nr_pdcch_dci_length_sweep` — the sweep locks length 100 on synthetic evidence; existing ≤ 63 tests unchanged.
+- [ ] **Step 2:** mechanical type migration (compile-driven), then raise guards to `NR_DCI_MAX_PAYLOAD`.
+- [ ] **Step 3: Search order** — order candidate lengths by distance to lengths already seen on this cell (any RNTI/geometry), then outward; 6-sigma gate unchanged. Test: with a seen length 47, the first 10 lengths tried are 47, 46, 48, … .
+- [ ] **Step 4:** full ctest; shuffle seeds 1/3/5; rfsim regression gate (cold-sweep time on the 106-PRB bed: `first_crnti_s` → `bank add` must not grow > 25 % vs before, 2 runs each).
+- [ ] **Step 5:** commit `feat(rr): DCI lengths up to 140 bits end to end (K37 part 1)`.
+
+### Task R3: Per-RNTI length state machine SEARCHING/LOCKED/SUSPECT (Sonnet)
+
+**Files:** `nr_pdcch_dci_length_sweep.{c,h}` (context struct ~155: add `uint8_t state; uint32_t miss_occasions; uint32_t epoch_learned;`), callers in `nr_pdcch_blind_monitor_rt.c` (DL ~4009-4152, UL ~4384); tests in `tests/nr_pdcch_dci_length_sweep_test.cc`.
+
+**Interfaces — Produces:**
+```c
+typedef enum { NR_LEN_SEARCHING = 0, NR_LEN_LOCKED = 1, NR_LEN_SUSPECT = 2 } nr_len_state_t;
+/* Called once per occasion in which a candidate set covering the locked length was searched for this RNTI. */
+void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c, bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect);
+/* Returns the lengths to try for a SUSPECT context: old length first, then cell-seen lengths, then full range. */
+int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t *c, const int *cell_seen, int n_seen, int *out, int max);
+```
+- "RNTI active elsewhere" (SA and NSA): persistence-table sighting with this RNTI's mask at any length, RAR anchor (`record_trusted`), accepts on another banked geometry; SA additionally CORESET#0 C-RNTI accepts. Never requires CORESET#0.
+- [ ] **Step 1: Failing tests:** `LockedToSuspectAfterNMisses` (N_suspect = 200 default, env `ISAC_RECONF_N_SUSPECT`), `InactiveRntiNeverSuspect` (misses without activity elsewhere keep LOCKED), `SuspectWithoutCoreset0Evidence` (activity only via persistence/RAR → SUSPECT), `RelockSameLengthReturnsLocked`, `RelockDifferentLengthReplaces` (logs `DCI length RELOCK rnti=… old=… new=…`), `RelockOrderOldFirst`.
+- [ ] **Step 2–4:** implement; on RELOCK reopen the Technique D contexts and the layout pin keyed on the old length (call existing reopen/invalidate entry points — read `nr_pdsch_config_sweep.h` and `nr_dci11_pin.h`); behind `ISAC_RECONF=1`.
+- [ ] **Step 5:** commit `feat(rr): per-RNTI DCI length re-lock (SUSPECT) on SA and NSA evidence (K37 part 2)`.
+
+### Task R4: Two concurrent lengths per (geometry, RNTI) (Sonnet)
+
+- Extend the context to `found[2]` with per-length layout pin; a second significant length for the same RNTI on the same geometry is added (not a conflict). Tests: `SecondLengthAdded`, `ThirdLengthReplacesLeastRecent`, layout pin per length. Commit `feat(rr): up to two locked DCI lengths per (geometry, RNTI)`.
+
+### Task R5: CORESET bank life cycle + remove API (Sonnet)
+
+**Files:** `nr_pdcch_coreset_bank.{c,h}` (entry `nr_pdcch_discovered_coreset_t` in `nr_pdcch_blind_monitor.h:44-58`: add `{uint64_t last_accept_slot; uint32_t accepts_window; uint32_t verified_epoch; uint8_t state;}`), callers in `nr_pdcch_blind_monitor_rt.c`; test `tests/nr_pdcch_coreset_bank_test.cc` (create if absent, pattern of `test_nr_pdcch_coreset_map`).
+
+**Interfaces — Produces:** `int nr_pdcch_coreset_bank_remove(int index);` `void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot);` `void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere, uint32_t t_stale_slots, uint32_t t_remove_slots);` states VERIFIED / STALE / REMOVED.
+- "Traffic elsewhere" (SA and NSA): accepts on other entries, PDCCH DM-RS occupancy outside every banked entry; SA additionally CORESET#0 C-RNTI accepts.
+- [ ] **Step 1: Failing tests:** `IdleCellNeverDemotes`, `StaleWhenOtherTrafficVisible` (T_stale default 5 s), `StaleReverifiedReturnsVerified`, `StaleRemovedAfterTRemove` (default 30 s), `RemoveCompactsAndReopensKeyedContexts` (length + Technique D contexts on that geometry reopened), thread safety under the existing bank lock.
+- [ ] **Step 2–5:** implement behind `ISAC_RECONF=1`; commit `feat(rr): CORESET bank life cycle VERIFIED/STALE/REMOVED (K8, K37 part 3)`.
+
+### Task R6: Continuous low-duty discovery (Sonnet)
+
+- After the first bank entry, keep Technique A running 1 occasion in 20 (`ISAC_RECONF_DISCOVERY_DUTY`); new extents verified and banked as today. Test: unit test on the duty scheduler; rfsim gate with `ISAC_RECONF=1`: `scanq drop_full` not worse than baseline within spread. Commit.
+
+---
+
+## PHASE 2 — one epoch authority and its consumers
+
+### Task R7: `nr_passive_cfg_epoch` pure module (Opus)
+
+**Files:** Create `openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.{c,h}`; test `tests/nr_passive_cfg_epoch_test.cc`.
+
+**Interfaces — Produces:**
+```c
+typedef enum { NR_EPOCH_SOFT = 0, NR_EPOCH_HARD_REVERIFY = 1, NR_EPOCH_HARD_RESET = 2 } nr_epoch_class_t;
+typedef enum { NR_CAUSE_CELL_IDENTITY_CHANGE, NR_CAUSE_MIB_CHANGE, NR_CAUSE_SIB1_CHANGE, NR_CAUSE_SI_MODIFICATION_ANNOUNCED,
+               NR_CAUSE_CONTINUITY_LOSS, NR_CAUSE_BWP_CHANGE, NR_CAUSE_DEDICATED_CHANGE_SUSPECTED } nr_epoch_cause_t;
+typedef struct { uint32_t epoch; uint32_t identity_gen; nr_epoch_class_t last_class; nr_epoch_cause_t last_cause; } nr_cfg_epoch_snapshot_t;
+uint32_t nr_cfg_epoch_current(void);                       /* lock-free read (atomic) */
+uint32_t nr_cfg_epoch_identity_gen(void);                  /* bumps only on HARD_RESET */
+void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point_a);
+void nr_cfg_epoch_note_mib(uint32_t mib_hash_without_sfn);
+void nr_cfg_epoch_note_sib1(uint32_t semantic_hash);       /* SA only; never called on NSA */
+void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t modification_period_slots);
+void nr_cfg_epoch_note_continuity_loss(void);
+void nr_cfg_epoch_note_bwp_change(void);
+void nr_cfg_epoch_note_rnti_reopened(uint16_t rnti, bool was_converged, uint64_t abs_slot);
+void nr_cfg_epoch_tick(uint64_t abs_slot);                 /* handles the SI-modification boundary */
+typedef void (*nr_cfg_epoch_listener_t)(const nr_cfg_epoch_snapshot_t *);
+void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn);
+```
+- [ ] **Step 1: Failing tests:** `PciChangeIsHardResetAndIdentityGen`, `MibChangeIsHardReverify`, `Sib1SemanticChangeBumps` / `Sib1SameSemanticNoBump`, `SiModAnnouncedBumpsOnlyAtBoundaryIfChanged`, `SiModAnnouncedButUnchangedNoBump`, `SiModBoundaryWithoutSib1ReacquiredBumps` (configurable), `ContinuityLossLoggedAsContinuity`, `TwoConvergedRntisWithin2sIsSoft`, `VanishedRntisDoNotTriggerSoft` (`was_converged=false`), `OneRntiReopenNoBump`, listeners called once per bump, thread-safe current().
+- [ ] **Step 2–4:** implement (mutex for state, atomic epoch); log `SENSING: CONFIG_EPOCH n -> n+1 class=… cause=… scope=…`. **Step 5:** commit.
+
+### Task R8: Trigger sources (Sonnet; Opus review)
+
+- MIB hash (excluding SFN/half-frame/SSB index): `nr_ue_decode_mib` path (`openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c`).
+- Identity: PCI from sync, SSB ARFCN/Point A from the acquisition state (`nr_passive_acq_state`).
+- SIB1 **semantic** hash (SA only): canonicalise the decoded fields listed in spec §4.4 (from `config_ue.c` passive extraction / `nr_pdcch_blind_common_config_t`) into a fixed-order struct and hash it; periodic re-decode every 5 s — first check whether the passive MAC already re-decodes SIB1; if not, add a re-decode request hook (spec §7 open item; record the finding). SIB1 cache key → (PCI, semantic hash) (K11).
+- P-RNTI short message: parse `systemInfoModification` from DCI 1_0 P-RNTI short messages in the blind monitor (SA only; the modification period from SIB1 BCCH-Config/PCCH-Config — read from the decoded SIB1).
+- Continuity loss: existing stream-gap → LOST.
+- BWP change: `nr_passive_bwp`.
+- Dedicated reopen: Technique D `reopen_context` and R3 SUSPECT transitions call `note_rnti_reopened(rnti, was_converged=true, slot)`.
+- Tests: unit tests per source with fixtures; `Sib1CanonicalHashIgnoresEncodingOnlyDifferences`. Commit.
+
+### Task R9: Queued jobs carry the epoch (Sonnet)
+
+- PDCCH scan queue, PDSCH and PUSCH decode queues (and GPU batches when present) stamp `config_epoch` at enqueue; a consumer dequeuing an older-epoch job processes nothing, counts `dropped_epoch` (exported in `ISAC_METRICS`), and feeds no Technique D / layout / length evidence. Test `OldEpochJobDropped` (queue unit test with a fake epoch source). Commit.
+
+### Task R10: Consumers — length contexts, layout pins, CORESET bank, Technique D (Sonnet; Opus review)
+
+- Listener: on any bump, length contexts LOCKED → SUSPECT (old length first); layout pin config key includes the epoch; CORESET entries VERIFIED → STALE (hint, re-verified); Technique D settled contexts → VERIFY mode (previous winner tried first; levers spec §9.1) — **coordinate with levers R1/R2; if they are not merged, implement as "reopen with previous winner as first hypothesis" only.**
+- HARD_RESET: drop dedicated state of the old identity (keep dormant keyed by identity_gen; never applied to the new one).
+- Tests: `SoftBumpMakesLockedSuspectKeepsOldFirst`, `HardResetNeverReusesOldIdentityState`, `HintConfirmedRestoresTrusted`. Commit.
+
+### Task R11: CellFieldBook mirrors the central epoch (Sonnet) — after `td/convergence-levers` is merged
+
+- `nr_td_fieldbook_bump_epoch` is called only by the R7 listener; the fieldbook's own `epoch` mirrors `nr_cfg_epoch_current()`. Test: bump via the epoch module → promoted fields lose their ordering bonus (levers test `EpochBumpDropsBonus` adapted). Commit.
+
+---
+
+## PHASE 3 — validation
+
+### Task R12: Offline mid-stream reconfiguration replay (Sonnet)
+
+- Fixture driver (gtest or C harness) over the existing synthetic PDCCH/PDSCH fixtures + hidden-waveform transmitter (`openair1/SIMULATION/NR_PHY/hidden_waveform.h`): inject at deterministic slots (a) DCI 1_1 length change for one RNTI, (b) CORESET move, (c) SIB1 semantic change, (d) PCI change; run each in **SA** (SIB1/CORESET#0 present) and **NSA-like** (absent) variants. Assert recovery (back to LOCKED/VERIFIED/converged) within the target slot budgets **and** that no result computed from old-epoch input reaches new-epoch state (instrumented counters). Commit evidence.
+
+### Task R13: Live SA bed + NSA-like arm (Sonnet; operator for Docker/5G core)
+
+- OAI SA bed (5G core on the DGX if Docker access is confirmed, else OCUDU/OAI-ZMQ fallback): BWP switch via the telnet harness (`tests/passive_rx/run_bwp_switch.sh`), UE detach/re-attach under a changed dedicated config (antenna-ports table change → different 1_1 size), gNB restart with a changed cell config. Arms: SA (SIB1 used) and NSA-like (SIB1/SI/P-RNTI paths disabled). Campaign runner (`tests/passive_rx/campaign/campaign.py`), ≥ 5 runs per arm; score recovery times, `CONFIG_EPOCH` lines (class/cause), `dropped_epoch`, stale winners vs gNB truth (validation only).
+
+### Task R14: Soak + documentation (Sonnet; Opus review)
+
+- 60-min stable-cell soak (SA and NSA-like): false SOFT ≤ 1/h, hard 0. PROJECT_MEMORY: §24 K10/K11/K37 status, §11 new log lines (`CONFIG_EPOCH`, `DCI length RELOCK`, CORESET state changes), §10.2 new env vars (`ISAC_RECONF`, `ISAC_RECONF_N_SUSPECT`, `ISAC_RECONF_DISCOVERY_DUTY`, thresholds), §16, §25. `/code-review` on the branch. Commit and push the branch (not `adaptive-rx-UL-DL`).
+
+## Self-review record (2026-10-01)
+
+Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps.
