@@ -105,6 +105,7 @@ Module `nr_passive_cfg_epoch.{c,h}` (CPU, pure state machine + hooks). Triggers:
 | P-RNTI short message `systemInfoModification` | **pending** HARD_REVERIFY: the updated SI is broadcast in the following modification period (TS 38.331), so the detector arms a re-acquire-and-compare at the next modification-period boundary; the epoch is bumped only if the re-acquired SI differs (or unconditionally at the boundary if SIB1 cannot be re-decoded) | `SI_MODIFICATION_ANNOUNCED` then `SIB1_CHANGE` | ✓ | — (paging on LTE) |
 | Stream gap → LOST (existing continuity detector) | HARD_REVERIFY — a reconfiguration *may have been missed*, not proven | `CONTINUITY_LOSS` | ✓ | ✓ |
 | BWP change reported by `nr_passive_bwp` | SOFT | `BWP_CHANGE` | ✓ | ✓ (if dedicated BWPs are observable) |
+| Cell CSI-RS map change: a CONFIRMED NZP-CSI-RS / TRS / ZP-CSI-RS resource (`nr_csirs_blind_*`) disappears for ≥ T_csirs (default 4 periods) or a new resource confirms with a different row / ports / periodicity / offset / density | SOFT (`CSIRS_MAP_CHANGE`); evidence only — a single missed confirmation is not a change | `CSIRS_MAP_CHANGE` | ✓ | ✓ |
 | ≥ N_cell (default 2) distinct RNTIs whose Technique D contexts reopen or whose lengths go SUSPECT within W (default 2 s) | SOFT (cell-wide dedicated change) | `DEDICATED_CHANGE_SUSPECTED` | ✓ | ✓ — **primary dedicated-change signal on NSA** |
 
 Actions:
@@ -165,7 +166,8 @@ release/addition churn is life cycle (GONE / new incarnation), **never** a recon
   geometry) with its length state (SEARCHING/LOCKED/SUSPECT/RELOCK, §4.2); PDCCH/PDSCH scrambling IDs; Technique D
   result (S, L, k0, mapping, DM-RS add_pos / max_len / mask, MCS table) with its state (searching / converged /
   reopened / fail-open) and the fields that were pruned or voted (levers field book); DM-RS type / CDM groups / antenna
-  ports table evidence; max layers seen; LBRM; BWP (start, size, SCS) from the passive BWP tracker; UL counterparts
+  ports table evidence; max layers seen; LBRM; aperiodic CSI-RS trigger events (DCI 0_1 CSI-request field non-zero ⇒
+  timestamped event, and the CSI-RS resource observed in the triggered slot if any); BWP (start, size, SCS) from the passive BWP tracker; UL counterparts
   (PUSCH layout, DCI 0_1 length, MCS table) where observed.
   Each value is stored as `{value, epoch_learned, verification_state (TRUSTED/HINT/SUSPECT), first_abs_slot,
   last_confirmed_abs_slot, source}`.

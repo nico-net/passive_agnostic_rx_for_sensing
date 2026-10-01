@@ -251,6 +251,44 @@ Coordination: Technique D fields come from the levers branch (`td/convergence-le
 fields, fail-open, levers C/P state); before that branch merges, R17 records only what `adaptive-rx-UL-DL` exposes and
 leaves the extra fields null.
 
+### Task R18: CSI-RS — DGX validation, speed, K9 closure, epoch trigger and per-UE events (Sonnet; Opus review)
+
+Status today (PROJECT_MEMORY §11.10, §16, K9): blind NZP-CSI-RS / TRS / ZP-CSI-RS discovery (`nr_csirs_blind_search.c`,
+`nr_csirs_blind_rt.c`, `nr_csirs_monitor.c`; `ISAC_CSIRS_BLIND=1`, default off; rows 1–5, 6–18 with
+`ISAC_CSIRS_BLIND_WIDE=1`; scrambling-ID sweep `ISAC_CSIRS_BLIND_IDSWEEP=1`) is `[OFFLINE VERIFIED]` only; never run on the
+DGX; lab OTA 2026-09-25 solved the ID sweep (row1 fd4 l4 scramb_id=2) but the confirmation loop never confirmed; the
+false-ZP fixes (probation, decoded-grant revocation) are offline-only (K9); discovery/confirmation time and CPU cost were
+never measured. The DGX rfsim gNB configs already transmit CSI-RS (`do_CSIRS = 1` in `tests/passive_rx/gnb.sa.rfsim*.conf`).
+
+**Files:** Modify `nr_csirs_blind_rt.c` (PDTIM-style timers + counters), `nr_passive_metrics` (new `csirs_*` fields),
+`nr_passive_cfg_epoch` trigger source (after R7), `nr_passive_ue_ctx` (after R17); create
+`tests/passive_rx/dgx/csirs_arm.sh` (wrapper over `rfsim_arm.sh`), evidence under
+`tests/passive_rx/dgx_host_snapshot_2026-09-30/csirs_<date>/`; new gNB variants only as `.cfg` files.
+
+- [ ] **Step 1 — instrumentation:** per-slot µs of CSI-RS blind search / ID sweep / confirmation / CFR extraction
+  (`ISAC_PDCCH_TIMING=1` style), counters `csirs_candidates`, `csirs_confirmed`, `csirs_revoked`, `zp_exported`,
+  `zp_revoked`, time-to-confirm per resource; exported in `ISAC_METRICS`. Unit test for the counter plumbing.
+- [ ] **Step 2 — DGX rfsim A/B (106 PRB, 1 RX and 4 RX):** `ISAC_CSIRS_BLIND=0` vs `=1` (+ `IDSWEEP=1`), ≥ 2 runs per
+  arm: time to first CONFIRMED resource, confirmed resources vs gNB config (validation only — never input), false ZP
+  exports, PDSCH CRC (CSI-RS slots vs others; regression gate must still PASS), CPU µs/slot and thread load
+  (`thrprof.sh`). Add a `.cfg` gNB variant with TRS + ZP-CSI-RS + a 4-port NZP resource if the default config lacks them.
+- [ ] **Step 3 — confirmation-loop diagnosis:** reproduce "ID sweep solved, never confirmed" (lab 2026-09-25 extracts under
+  `tests/passive_rx/latest_ota_2026-09-25/` if the run logs carry the CSIRS lines; else the rfsim arm with a non-default
+  scrambling ID), use superpowers:systematic-debugging, fix with a failing test first.
+- [ ] **Step 4 — K9 closure:** G4 of the ZP probation / decoded-grant revocation on the DGX bed (and the OCUDU CSI-RS bed
+  if available); K9 → resolved or updated with evidence.
+- [ ] **Step 5 — epoch trigger (after R7):** `CSIRS_MAP_CHANGE` per spec §4.4 (SOFT; disappearance for ≥ T_csirs periods
+  or a different confirmed resource); tests `CsirsResourceGoneIsSoft`, `SingleMissedConfirmationNoBump`,
+  `NewResourceDifferentPeriodicityIsSoft`.
+- [ ] **Step 6 — per-UE events (after R17):** aperiodic CSI trigger events in `UeContext` (DCI 0_1 CSI-request ≠ 0 ⇒
+  `ue_change` param `APERIODIC_CSI` with the triggered slot and the observed resource if any); test
+  `AperiodicCsiTriggerLogged`.
+- [ ] **Step 7 — sensing value (report only):** CFR intervals per second from CSI-RS/TRS vs PDSCH DM-RS on an idle and a
+  loaded cell; delay/Doppler stability from TRS. Commit evidence and a short §14 result block (R16 integrates it).
+- [ ] **Step 8: Commit** — `feat(rx): CSI-RS DGX validation, timing, K9 closure, CSIRS_MAP_CHANGE trigger, aperiodic CSI events`.
+
+Out of scope here: CSI-RS-vs-PDSCH precoder/rank inference (candidate follow-up; record findings only).
+
 ## PHASE 3 — validation
 
 ### Task R12: Offline mid-stream reconfiguration replay (Sonnet)
@@ -277,7 +315,7 @@ label (§0.1) naming host and commit; DGX, cloud x86 and OTA results stay in sep
 - [ ] **Step 2 — architecture and modules:** §2.1 pipeline diagram (epoch authority, CORESET life cycle, length re-lock,
   140-bit DCI path, UeContext aggregator); §2.2 block reference updated for B6/B7 (blind PDCCH, DCI recovery); §3.3 new modules
   (`nr_dci_bits.h`, `nr_passive_cfg_epoch.{c,h}`, bank life cycle API, length state machine, optional PDCCH GPU path) with
-  their tests; §3.4 new tools/scripts (replay driver, campaign arms).
+  their tests; §3.4 new tools/scripts (replay driver, campaign arms, `csirs_arm.sh`); §16 CSI-RS row and K9 from R18.
 - [ ] **Step 3 — operation:** §10.2 every new env var / config key with default and agnostic status (`ISAC_RECONF`,
   `ISAC_RECONF_N_SUSPECT`, `ISAC_RECONF_DISCOVERY_DUTY`, thresholds, `ISAC_PDCCH_GPU_SELFCHECK` if R15 ran); §10.4 the beds used
   (SA bed, NSA-like arm flags, 5G core / OCUDU fallback actually used).
@@ -299,4 +337,4 @@ label (§0.1) naming host and commit; DGX, cloud x86 and OTA results stay in sep
 
 ## Self-review record (2026-10-01)
 
-Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.7 UeContext → R17; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Documentation: R16 (mandatory final PROJECT_MEMORY.md update). Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch); PDCCH GPU path as OPTIONAL R15 (profile-gated, verify-before-wire).
+Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.7 UeContext → R17; CSI-RS validation + `CSIRS_MAP_CHANGE` trigger + aperiodic CSI events → R18; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Documentation: R16 (mandatory final PROJECT_MEMORY.md update). Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch); PDCCH GPU path as OPTIONAL R15 (profile-gated, verify-before-wire).
