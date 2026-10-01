@@ -111,6 +111,14 @@ TEST(TdSim, TwinsFlagIsHonoured)
   EXPECT_EQ(none.twins_min, 0);
   EXPECT_NE(all.total_grants, none.total_grants); /* physical twins slow the search / change the engine's evidence */
 }
+/* Review Focus 4 (levers Task 7). twins = 3 is clamped to the 2 physical twins this catalogue has (twins_min 2). */
+TEST(TdSim, NearTwinNeverEliminatesTruthUnderP2)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 3000; c.K = 3; c.p2 = 1; c.twins = 3; c.table_exercise = 0.5;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.truth_eliminated_by_probe, 0); /* a probe FAIL was never admitted on a grant where the truth's full decode passes */
+}
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);

@@ -61,11 +61,19 @@ struct RntiRec {
   double seconds;
   bool winner_ok, wrong, undecidable;
   long n_full, n_probe, gated_phys, gated_chan, promotions, withdrawals;
+  long p2_admitted_fail;  /* probe FAILs admitted as KL failures (st->p2 && p2_admissible && FAIL) */
+  long truth_full;        /* full-TB decodes of the true hypothesis until the decision */
+  long truth_kl_trials;   /* engine KL trials of the true hypothesis at the decision (since the last prune), -1 if pruned */
+  long truth_elim;        /* KL failures the engine added to the truth on grants where its full decode passes */
+  char winner_key[48];    /* content of the winning hypothesis (pairing P1 vs P2), "-" if undecidable */
 };
 struct SimResult {
   long total_grants = 0, wrong = 0, undecidable = 0, acquisitions_rntis = 0, correlation_violations = 0;
   long n_full = 0, n_probe = 0, gated_phys = 0, gated_chan = 0, promotions = 0, withdrawals = 0;
   long twins_min = -1, twins_sum = 0;
+  /* Review Focus 4: KL failures that feed_k added to the TRUE hypothesis on grants where its full decode passes,
+   * measured on the engine's own counters (delta trials - delta ok around feed_k). Must be 0. */
+  long truth_eliminated_by_probe = 0, p2_admitted_fail = 0;
   double median_s = 0, p95_s = 0, mean_s = 0, mean_grants = 0;
   long n_decided = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
@@ -242,14 +250,6 @@ static SimResult run_sim(const SimCfg &cfg)
           return h.dmrs_mask == T.dmrs_mask && h.tda_start + h.tda_length == T.tda_start + T.tda_length && h.k0 == T.k0;
         });
       };
-      if (use_prior && gprior_valid)
-        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
-          return h.mcs_table == gprior.tbl && (h.mapping_type != gprior.map || (h.dmrs_add_pos == gprior.add && h.dmrs_max_len == gprior.len));
-        });
-      if (cfg.oracle && k >= 2) do_observe();
-      bool distinguished = false;
-      int winner = -1;
-      long g = 0;
       /* Hypotheses are identified by CONTENT: oracle pruning re-indexes the state, so catalogue indices drift. */
       auto same_but_table = [&](const nr_pdsch_cfg_hypothesis_t &h) {
         return h.tda_start == T.tda_start && h.tda_length == T.tda_length && h.k0 == T.k0 && h.dmrs_add_pos == T.dmrs_add_pos
@@ -258,6 +258,21 @@ static SimResult run_sim(const SimCfg &cfg)
       auto is_truth = [&](const nr_pdsch_cfg_hypothesis_t &h) { return same_but_table(h) && h.mcs_table == T.mcs_table; };
       /* honours --twins: only the SELECTED twins behave as twins (see above) */
       auto is_twin_h = [&](const nr_pdsch_cfg_hypothesis_t &h) { return same_but_table(h) && h.mcs_table != T.mcs_table && twin_tbl[h.mcs_table]; };
+      int ti = -1; /* current index of the truth in the (re-indexed) state, -1 if pruned out */
+      auto find_truth = [&]() {
+        ti = -1;
+        for (int i = 0; i < st->n_hyp && ti < 0; i++)
+          if (is_truth(st->hyp[i])) ti = i;
+      };
+      if (use_prior && gprior_valid)
+        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
+          return h.mcs_table == gprior.tbl && (h.mapping_type != gprior.map || (h.dmrs_add_pos == gprior.add && h.dmrs_max_len == gprior.len));
+        });
+      if (cfg.oracle && k >= 2) do_observe();
+      find_truth();
+      bool distinguished = false;
+      int winner = -1;
+      long g = 0;
       auto full_pass = [&](int h, const Grant &gr, bool truth_pass) {
         if (is_truth(st->hyp[h])) return truth_pass;
         if (is_twin_h(st->hyp[h])) return gr.exercised ? false : truth_pass;
@@ -293,12 +308,14 @@ static SimResult run_sim(const SimCfg &cfg)
             out[i].kind = NR_TD_FULL_TB;
             out[i].result = p ? NR_TD_PASS : NR_TD_FAIL;
             rec.n_full++;
+            if (idx[i] == ti) rec.truth_full++;
           } else {
             out[i].kind = NR_TD_CB_PROBE;
             const bool inc = ud(prng) < cfg.probe_inconclusive;
             out[i].result = inc ? NR_TD_INCONCLUSIVE : (p ? NR_TD_PASS : NR_TD_FAIL);
             out[i].p2_admissible = gr.new_tx && !inc;
             rec.n_probe++;
+            if (cfg.p2 && out[i].p2_admissible && out[i].result == NR_TD_FAIL) rec.p2_admitted_fail++;
             if (cfg.check_correlation && !inc) {
               if ((is_truth(st->hyp[idx[i]]) && !truth_pass && p) || (is_twin_h(st->hyp[idx[i]]) && !gr.exercised && p != truth_pass))
                 R.correlation_violations++;
@@ -307,13 +324,15 @@ static SimResult run_sim(const SimCfg &cfg)
         }
         if (gr.exercised && truth_pass)
           distinguished = true;
+        const long t0 = ti >= 0 ? (long)st->trials[ti] - (long)st->ok[ti] : 0;
         winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
+        if (ti >= 0 && truth_pass && (long)st->trials[ti] - (long)st->ok[ti] > t0) rec.truth_elim++;
         if (cfg.oracle || cfg.w_obs > 0) {
           /* [ASSUMPTION] The DM-RS oracle needs the layout to be decodable at all (rank <= n_rx); conservative: the runtime
            * measures per-symbol coherence on whatever RX it has. A GATED grant (`continue` above) contributes no
            * observation: gated + unsettled -> no trial -> no job (plan R2). */
           const bool decoded = gr.rank <= cfg.n_rx;
-          if (cfg.oracle && decoded && winner < 0) do_observe();
+          if (cfg.oracle && decoded && winner < 0) { do_observe(); find_truth(); }
           /* [ASSUMPTION] Qm abstention gate: nr_pdsch_qm_classify abstains at low SNR, but no code gives the threshold;
            * modelled as "the truth would pass at this SNR/MCS". Runtime-backed part: called after feedback, two sightings. */
           if (decoded && truth_pass) {
@@ -325,7 +344,7 @@ static SimResult run_sim(const SimCfg &cfg)
               if (inter == 0) { qm_obs = 0; qm_tables = 0; }
               else {
                 qm_tables = inter; qm_obs++;
-                if (qm_obs >= 2) sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) { return (inter >> h.mcs_table) & 1; });
+                if (qm_obs >= 2) { sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) { return (inter >> h.mcs_table) & 1; }); find_truth(); }
               }
             }
           }
@@ -333,9 +352,14 @@ static SimResult run_sim(const SimCfg &cfg)
       }
       rec.grants = g;
       rec.seconds = (double)g / cfg.grants_per_s;
+      rec.truth_kl_trials = ti >= 0 ? (long)st->trials[ti] : -1;
+      snprintf(rec.winner_key, sizeof(rec.winner_key), "-");
       if (winner < 0) {
         rec.undecidable = true;
       } else {
+        const nr_pdsch_cfg_hypothesis_t &w = st->hyp[winner];
+        snprintf(rec.winner_key, sizeof(rec.winner_key), "%d/%d/%d/%d/%d/%x/%d/%d", w.tda_start, w.tda_length, w.k0, w.dmrs_add_pos,
+                 w.dmrs_max_len, w.dmrs_mask, w.mapping_type, w.mcs_table);
         rec.wrong = !is_truth(st->hyp[winner]) && !(is_twin_h(st->hyp[winner]) && !distinguished);
         rec.winner_ok = !rec.wrong;
         if (use_prior) {
@@ -359,6 +383,7 @@ static SimResult run_sim(const SimCfg &cfg)
       R.total_grants += g; R.wrong += rec.wrong; R.undecidable += rec.undecidable; R.acquisitions_rntis++;
       R.n_full += rec.n_full; R.n_probe += rec.n_probe; R.gated_phys += rec.gated_phys; R.gated_chan += rec.gated_chan;
       R.promotions += rec.promotions; R.withdrawals += rec.withdrawals;
+      R.truth_eliminated_by_probe += rec.truth_elim; R.p2_admitted_fail += rec.p2_admitted_fail;
       if (!rec.undecidable) {
         secs.push_back(rec.seconds);
         R.mean_grants += (double)g; R.n_decided++;
@@ -430,17 +455,21 @@ int main(int argc, char **argv)
   const SimResult r = run_sim(c);
   for (const RntiRec &x : r.recs)
     printf("{\"acq\":%d,\"rnti_rank\":%d,\"truth_table\":%d,\"grants\":%ld,\"seconds\":%.4f,\"winner_ok\":%s,\"wrong\":%d,\"undecidable\":%d,"
-           "\"n_full\":%ld,\"n_probe\":%ld,\"gated_phys\":%ld,\"gated_chan\":%ld,\"promotions\":%ld,\"withdrawals\":%ld}\n",
+           "\"n_full\":%ld,\"n_probe\":%ld,\"gated_phys\":%ld,\"gated_chan\":%ld,\"promotions\":%ld,\"withdrawals\":%ld,"
+           "\"p2_admitted_fail\":%ld,\"truth_full\":%ld,\"truth_kl_trials\":%ld,\"truth_elim\":%ld,\"winner\":\"%s\"}\n",
            x.acq, x.rnti_rank, x.truth_table, x.grants, x.seconds, x.winner_ok ? "true" : "false", (int)x.wrong, (int)x.undecidable, x.n_full,
-           x.n_probe, x.gated_phys, x.gated_chan, x.promotions, x.withdrawals);
+           x.n_probe, x.gated_phys, x.gated_chan, x.promotions, x.withdrawals, x.p2_admitted_fail, x.truth_full, x.truth_kl_trials,
+           x.truth_elim, x.winner_key);
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
    * NB: separation is checked every 16 trials, so seconds move in steps of 16 x n_hyp / grants_per_s: prefer the means. */
   printf("{\"summary\":{\"acq\":%d,\"rntis\":%ld,\"decided\":%ld,\"median_s\":%.3f,\"p95_s\":%.3f,\"mean_s\":%.3f,"
          "\"mean_grants\":%.1f,\"wrong\":%ld,\"undecidable\":%ld,"
          "\"n_full\":%ld,\"n_probe\":%ld,\"gated_phys\":%ld,\"gated_chan\":%ld,\"promotions\":%ld,\"withdrawals\":%ld,"
+         "\"p2\":%d,\"p2_admitted_fail\":%ld,\"truth_eliminated_by_probe\":%ld,"
          "\"twins_requested\":%d,\"twins_min\":%ld,\"cap_s\":%.0f,\"seed\":%d,\"n_rx\":%d,\"K\":%d,\"oracle\":%d,\"prior\":%d,\"by_table\":{",
          c.acq, r.acquisitions_rntis, r.n_decided, r.median_s, r.p95_s, r.mean_s, r.mean_grants, r.wrong, r.undecidable,
-         r.n_full, r.n_probe, r.gated_phys, r.gated_chan, r.promotions, r.withdrawals, c.twins, r.twins_min, c.cap_s,
+         r.n_full, r.n_probe, r.gated_phys, r.gated_chan, r.promotions, r.withdrawals, c.p2, r.p2_admitted_fail,
+         r.truth_eliminated_by_probe, c.twins, r.twins_min, c.cap_s,
          c.seed, c.n_rx, c.K, c.oracle, c.prior && !c.fieldbook);
   for (int t = 0; t < 3; t++) {
     const SimResult::TableStat &ts = r.by_table[t];
