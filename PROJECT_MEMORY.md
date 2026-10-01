@@ -1260,6 +1260,8 @@ race, `shm_open() failed: errno 2`, unrelated to the receiver). Log:
 Host: Intel Xeon @2.80 GHz (avx512f, no GFNI), 4 cores, 15 GB, container, Ubuntu 24.04, gcc 13.3, root; no IPv6, no SCTP,
 `pthread_getaffinity_np` EINVAL; build `-DOAI_USRP=OFF`, `-j4` 11 min.
 
+**Final gates at the end of the session (code = final-review fixes `6528bd0cfc`..`343d1f062a` + base merge `d6cb580ce5`):** ctest **126/129**, failures env-only (`test_thread-pool`, `nr_cuup_functional_test`, `time_management_tests` intermittent); blind-monitor shuffle seeds 1/3/5: **197 pass + 2 skips** each; sens6 frozen diff empty; `ENABLE_ISAC_SENSING=OFF` `nr-uesoftmodem` links. `[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, d6cb580ce5]` Evidence: `tests/passive_rx/cloud_run_2026-10-01/final_gates/`.
+
 | Validation | Result | Label |
 |---|---|---|
 | ctest on HEAD `be2e7fa4b6` (before this session's code) | **123/126**; failures env-only: `test_thread-pool` (affinity EINVAL), `nr_cuup_functional_test` (SCTP unsupported), `time_management_tests` (intermittent timing, passes alone). `test_vrtsim_cirdb` passed | `[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, be2e7fa4b6]` |
@@ -1429,6 +1431,8 @@ via `V4SHIM`), scan thread **unpinned** (`1:8:-1`, the frozen conf pins core 5 w
 agnostic bed (`rfsim_regress.sh`), 150 s per arm, binaries built with the code of the commit given. Every run has
 CONVERGED 2/2. Cloud gate (re-baselined, §24 K31): `GATE_CRC_MIN=93.0 GATE_DROP_MAX=2.5` (DGX gate 98 / 1 — HEAD misses it
 on 4 cores; the 4-core budget and the unpinned scan thread are confounded, `[HYPOTHESIS]`).
+
+**Final 3-run gate (code `d6cb580ce5`):** PASS 3/3 — crc **95.33 / 96.18 / 95.68 %**, drop_full 1.50 / 0.87 / 1.46 %, ttc 3.78 / 4.10 / 4.18 s, CONVERGED 2/2 each, CPU ~200 %, RSS 0.89 GB; within the HEAD baseline spread (crc 94.93–96.89, drop 0.77–1.55). `[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, d6cb580ce5]` Evidence: `tests/passive_rx/cloud_run_2026-10-01/final_gates/regress_scores.jsonl`.
 
 | Item | Commit | crc % | drop_full % | ttc s | Other | Label / evidence |
 |---|---|---|---|---|---|---|
@@ -2014,7 +2018,8 @@ connected**; step 10 changes to the Milan-cell survey (§15.0, §15.4) because t
 4. **A12** (DGX-only).
 5. **A13 aarch64 check** — run `offline_sync_contract/build_and_run.sh` on the DGX (expect OfflineSync.* 5/5).
 6. **A7 273-PRB pinned A/B** — `"1:8:6"` vs `"2:16:6"` (cloud had only 106 PRB, unpinned, 4 cores).
-7. Re-run the gate with the DGX thresholds (98 / 1) and a campaign on the DGX; then **Track B** (§25 steps 8 onward, X410/OTA).
+7. **Concurrency follow-ups (K30):** fix the remaining TSAN races UEthread_0 ↔ scan consumers in `nr_pdcch_blind_monitor.c` (discovery state written by `autodiscover_step` without the Phase-2 lock) and inside the PDSCH decode pool; one TSAN run that also instruments the PDSCH sweep/queue sources; launcher check for INSTANCE=A with cluster-1 pins.
+8. Re-run the gate with the DGX thresholds (98 / 1) and a campaign on the DGX; then **Track B** (§25 steps 8 onward, X410/OTA).
 
 **Rule: do not begin new receiver development on the DGX Spark until the current known-good offline baseline (§14)
 has been reproduced and the OTA baseline (§15.4) has been reproduced or its failure understood.**

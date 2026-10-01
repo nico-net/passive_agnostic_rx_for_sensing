@@ -1921,10 +1921,12 @@ Initial sync took ~90 s on the rank-4 bed (§14.2). The scan batch is `min(512 M
 
 ### Task A14: PROJECT_MEMORY integration and Track-A review (Opus orchestrator)
 
-- [ ] **Step 1:** For every A-task: the §-section it touched carries date, commit, evidence path, label.
-- [ ] **Step 2:** §21 gets a pointer to `nr_passive_obs.h` as the implemented schema v1 and a table "field → available / source".
-- [ ] **Step 3:** Run `/code-review` (code-review plugin) on the Track-A diff range and superpowers:requesting-code-review with an Opus reviewer; fix findings.
-- [ ] **Step 4:** Final gates: full ctest, shuffle seeds, `rfsim_regress.sh 3`, sens6 frozen diff empty. Push.
+- [x] **Step 1:** For every A-task: the §-section it touched carries date, commit, evidence path, label.
+- [x] **Step 2:** §21 gets a pointer to `nr_passive_obs.h` as the implemented schema v1 and a table "field → available / source".
+- [x] **Step 3:** Run `/code-review` (code-review plugin) on the Track-A diff range and superpowers:requesting-code-review with an Opus reviewer; fix findings.
+- [x] **Step 4:** Final gates: full ctest, shuffle seeds, `rfsim_regress.sh 3`, sens6 frozen diff empty. Push.
+
+Cloud session 2026-10-01 (adapted): `/code-review` was the session's built-in code-review skill (high effort, 3 low findings, all fixed) and the Opus whole-branch reviewer (no Critical; 3 Important fixed in `6528bd0cfc`..`343d1f062a`); final gates at the final commit: ctest 126/129 env-only failures, shuffle 197+2 x3, `rfsim_regress.sh 3` PASS with the cloud gate (93.0 / 2.5). Evidence: `tests/passive_rx/cloud_run_2026-10-01/final_gates/`.
 
 ---
 
