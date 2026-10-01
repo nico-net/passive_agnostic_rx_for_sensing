@@ -74,7 +74,7 @@ TEST(TdLegal, MatchesRealRxRateMatching)
   srand(0x4b4b);
   static int16_t d[68 * 384 + 16];
   static int16_t soft[1];
-  int n_rej = 0, n_acc = 0;
+  int n_rej = 0, n_acc = 0, n_rej_pos = 0;
   for (int it = 0; it < 6000; it++) {
     const int bg = 1 + (rand() & 1);
     const int zlist[] = {64, 128, 224, 256, 288, 320, 352, 384};
@@ -95,9 +95,47 @@ TEST(TdLegal, MatchesRealRxRateMatching)
     EXPECT_EQ(nr_td_rm_feasible(&g), real_ok != 0) << "it " << it << " BG " << bg << " Z " << Z << " C " << C << " K " << K << " F " << F
                                                    << " tbslbrm " << tbslbrm << " Ncb " << Ncb;
     (real_ok ? n_acc : n_rej)++;
+    if (!real_ok && K - F - 2 * Z >= 0)
+      n_rej_pos++;
   }
+  EXPECT_GE(n_rej_pos, 50); /* rejects from a non-negative Foffset > Ncb, not only the negative wrap */
   EXPECT_GE(n_rej, 100);
   EXPECT_GE(n_acc, 100);
+}
+/* Directed boundary sweep: F is set so that Foffset = K-F-2Zc is exactly Ncb-1, Ncb, Ncb+1. */
+TEST(TdLegal, FoffsetBoundaryMatchesRealRx)
+{
+  srand(0x4b4c);
+  static int16_t d[68 * 384 + 16];
+  static int16_t soft[1];
+  const int zlist[] = {64, 128, 224, 256, 288, 320, 352, 384};
+  int n = 0;
+  while (n < 300) {
+    const int bg = 1 + (rand() & 1);
+    const int Z = zlist[rand() % 8];
+    const int C = 1 + rand() % 150;
+    const int N = (bg == 1 ? 66 : 50) * Z;
+    const int K = (bg == 1 ? 22 : 10) * Z;
+    const uint32_t tbslbrm = 1 + rand() % 1500000;
+    const uint32_t nref = 3 * tbslbrm / (2 * C);
+    const uint32_t Ncb = nref < (uint32_t)N ? nref : N;
+    if ((int)Ncb + 2 > K - 2 * Z) /* need F = K-2Z-Ncb-delta >= 0 for delta in -1..1 */
+      continue;
+    for (int delta = -1; delta <= 1; delta++) {
+      const int F = K - 2 * Z - (int)Ncb - delta;
+      ASSERT_GE(F, 0);
+      nr_td_rm_geom_t g = {1000, 1000, 2, 1, C, K, F, Z, bg, Ncb, 0};
+      const bool real_ok = nr_rate_matching_ldpc_rx(tbslbrm, bg, Z, d, soft, C, 0, 0, 0, F, (uint32_t)(K - F - 2 * Z)) != -1;
+      EXPECT_EQ(nr_td_rm_feasible(&g), real_ok) << "BG " << bg << " Z " << Z << " C " << C << " delta " << delta << " Ncb " << Ncb;
+      EXPECT_EQ(real_ok, delta <= 0) << "Foffset = Ncb + " << delta;
+    }
+    n++;
+  }
+}
+TEST(TdLegal, CAbove255IsInfeasible)
+{
+  nr_td_rm_geom_t g = {50000, 25000, 4, 1, 256, 8448, 0, 384, 1, 25344, 0}; /* real C is uint8_t: 256 wraps to 0 */
+  EXPECT_FALSE(nr_td_rm_feasible(&g));
 }
 int main(int argc, char **argv)
 {

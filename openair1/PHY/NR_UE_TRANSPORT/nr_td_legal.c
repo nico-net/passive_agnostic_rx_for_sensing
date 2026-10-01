@@ -37,7 +37,7 @@ int nr_td_mask_count(const nr_td_mask_t *m, int n_hyp)
  *   r > C-((G/(Nl*Qm))%C)-1; E does not enter the RX reject predicate, so it is not evaluated here. */
 bool nr_td_rm_feasible(const nr_td_rm_geom_t *g)
 {
-  if (g->G == 0 || g->tbs == 0 || g->C < 1)
+  if (g->G == 0 || g->tbs == 0 || g->C < 1 || g->C > 255) /* the real C parameter is uint8_t */
     return false;
   const uint32_t Foffset = (uint32_t)(g->K - g->F - 2 * g->Zc);
   return Foffset <= g->Ncb;
