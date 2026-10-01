@@ -496,7 +496,7 @@ static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t 
  * can carry a tuple the lowest one lacks. Existing indices, evidence and outstanding tickets are
  * untouched; the new entries join the round-robin with zero trials. Fails closed (adds nothing) when
  * the layer would not fit. Returns the number added. */
-static int add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_t k0)
+int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_t k0)
 {
   if (st == NULL || st->n_hyp <= 0 || st->winner >= 0 || k0 > 32)
     return 0;
@@ -520,6 +520,9 @@ static int add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_t k0)
     if (st->hyp[i].k0 == lo) {
       st->hyp[st->n_hyp] = st->hyp[i];
       st->hyp[st->n_hyp].k0 = k0;
+      for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) /* the new layer inherits each source entry's dormancy */
+        if (dorm_bit(st, c, i))
+          st->dormant[c][st->n_hyp >> 6] |= UINT64_C(1) << (st->n_hyp & 63);
       st->order[st->n_hyp] = st->n_hyp;
       st->n_hyp++;
     }
@@ -697,7 +700,7 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
   /* Decide only when EVERY hypothesis has had a fair shot -- otherwise the first one to reach the
    * threshold wins by being early in the rotation rather than by being right. */
   for (int i = 0; i < st->n_hyp; i++) {
-    if (active(st, i) && st->trials[i] < SWEEP_MIN_TRIALS) {
+    if (st->trials[i] < SWEEP_MIN_TRIALS && active(st, i)) {
       return -1;
     }
   }
@@ -770,7 +773,8 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
 {
   (void)new_data; /* lever C (BC2) */
   /* An invalid decoded index idx[0] credits nothing (mirrors _feed): a class defined relative to it is untrustworthy. */
-  if (st == NULL || idx == NULL || n < 1 || idx[0] < 0 || idx[0] >= st->n_hyp) {
+  if (st == NULL || idx == NULL || n < 1 || idx[0] < 0 || idx[0] >= st->n_hyp
+      || !active(st, idx[0])) { /* a dormant decoded hypothesis credits nothing (as _feed) */
     return (st != NULL) ? st->winner : -1;
   }
   if (st->winner >= 0) {
@@ -905,6 +909,8 @@ int nr_pdsch_config_sweep_set_dormant(nr_pdsch_config_sweep_state_t *st, int cau
   }
   if (!any_active)
     return -1;
+  if (memcmp(st->dormant[cause], cand, sizeof(cand)) != 0)
+    st->since_pass = 0; /* the active set changed */
   memcpy(st->dormant[cause], cand, sizeof(cand));
   return newly;
 }
@@ -920,6 +926,8 @@ int nr_pdsch_config_sweep_clear_dormant(nr_pdsch_config_sweep_state_t *st, int c
       if (c != cause)
         others |= st->dormant[c][w];
     reactivated += __builtin_popcountll(st->dormant[cause][w] & ~others);
+    if (st->dormant[cause][w])
+      st->since_pass = 0; /* the active set changed */
     st->dormant[cause][w] = 0;
   }
   return reactivated;
@@ -927,8 +935,10 @@ int nr_pdsch_config_sweep_clear_dormant(nr_pdsch_config_sweep_state_t *st, int c
 
 void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool on)
 {
-  if (st != NULL)
+  if (st != NULL && st->fail_open != on) {
     st->fail_open = on;
+    st->since_pass = 0; /* the active set changed */
+  }
 }
 
 bool nr_pdsch_config_sweep_is_active(const nr_pdsch_config_sweep_state_t *st, int i)
@@ -1110,7 +1120,7 @@ static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
     add_typeb_layer(c->state, c->typeA, c->legality);
   for (int k = 2; r && k <= 32; k++)
     if (r->k0_seen & (UINT64_C(1) << k))
-      add_k0_layer(c->state, (uint8_t)k);
+      nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
 }
 
 static void reopen_context(sweep_context_t *c)
@@ -1326,7 +1336,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     /* k0 values the air has shown for this RNTI (k0 oracle), so each new context does not re-probe. */
     for (int k = 2; k <= 32; k++)
       if (r->k0_seen & (UINT64_C(1) << k))
-        add_k0_layer(c->state, (uint8_t)k);
+        nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
   }
   if (to_free && !g_spare_state) {
     g_spare_state = to_free;
@@ -1457,7 +1467,7 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
   const bool first = !(r->k0_seen & (UINT64_C(1) << k0));
   r->k0_seen |= UINT64_C(1) << k0;
   sweep_context_t *c = ticket_context(t);
-  const int n = c ? add_k0_layer(c->state, k0) : 0;
+  const int n = c ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;
   static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
   if ((first || n > 0) && s_left > 0 && s_left--)
     LOG_W(PHY, "SWEEP: rnti=0x%04x k0=%u observed on air -- %d hypotheses added to tda=%u\n", t->rnti,

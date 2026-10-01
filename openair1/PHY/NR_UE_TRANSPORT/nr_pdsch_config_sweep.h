@@ -94,7 +94,7 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
  * k0 layer, so 8192 leaves room for five observed k0 >= 2 layers on top of it. Per context:
  * 8192 x 22 B = 180 KB, heap-allocated when a context slot is first used (nr-uesoftmodem mlockall()s,
  * so 1024 inline states would pin 185 MB at startup). The 2026-10-01 probe counters (3 x uint16) add
- * 48 KB: sizeof 180244 -> 229416 B; at 1024 contexts + 4 templates + 1 spare + the legacy singleton,
+ * 48 KB: sizeof 180244 -> 229416 B (233520 B with the BC3 dormant masks); at 1024 contexts + 4 templates + 1 spare + the legacy singleton,
  * at most 50.6 MB more, and only for slots actually opened. */
 #define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
@@ -142,7 +142,8 @@ typedef struct {
    * since the last PASS of an active hypothesis. +1 per feed / feed_k / feed_equiv CALL that credited at least one active
    * hypothesis (feed_k: one call = main outcome + its probes, counted once; probe outcomes count only when they add KL
    * evidence, i.e. a P2-admissible FAIL); reset to 0 by a PASS credited to an active hypothesis (a feed_k probe PASS is not
-   * evidence and never resets it). Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
+   * evidence and never resets it). Also reset to 0 whenever the active set changes: set_fail_open toggling, and set_dormant / clear_dormant calls that
+   * change at least one mask bit. Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
   uint32_t since_pass;
 } nr_pdsch_config_sweep_state_t;
 
@@ -197,7 +198,7 @@ int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_
 /* ---- Dormant masks and fail-open (blind-convergence spec section 4) ------------------------------------------ */
 typedef bool (*nr_td_keep_fn_t)(const nr_pdsch_cfg_hypothesis_t *h, const void *arg);
 /** Marks every hypothesis with !keep(h) dormant for `cause` (additive: bits already set stay set). Returns the number
- *  of hypotheses newly dormant FOR THIS CAUSE, or -1 (nothing changed) if st/keep is NULL, `cause` is out of range, or
+ *  of hypotheses newly dormant FOR THIS CAUSE (resets since_pass when a bit changed), or -1 (nothing changed) if st/keep is NULL, `cause` is out of range, or
  *  the result would leave zero active hypotheses under the masks (fail_open is ignored for this test). */
 int nr_pdsch_config_sweep_set_dormant(nr_pdsch_config_sweep_state_t *st, int cause, nr_td_keep_fn_t keep, const void *arg);
 /** Clears `cause`; returns the number of hypotheses that thereby became active under the masks (0 if cause is out of range). */
@@ -214,6 +215,10 @@ bool nr_pdsch_config_sweep_fail_open_due(const nr_pdsch_config_sweep_state_t *st
  *  evidence retained; else the new count with all evidence and since_pass cleared, cursor 0, winner -1), compacting the dormant
  *  masks with the same keep-index mapping. keep(h) true retains h; dormant hypotheses are kept or dropped by the predicate too. */
 int nr_pdsch_config_sweep_prune_keep(nr_pdsch_config_sweep_state_t *st, nr_td_keep_fn_t keep, const void *arg);
+
+/** Pure k0-layer append on a state (what nr_pdsch_config_sweep_add_k0 does on a live context): copies the lowest-k0 layer with
+ *  k0 replaced; each new entry inherits its source entry's dormant bits. Returns the number added (0 = nothing/does not fit). */
+int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_t k0);
 
 /** Winner, or -1 if undecided. */
 int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st);

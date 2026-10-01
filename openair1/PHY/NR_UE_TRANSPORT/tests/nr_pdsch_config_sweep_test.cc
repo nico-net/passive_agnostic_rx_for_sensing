@@ -1303,11 +1303,16 @@ TEST(PdschSweepDormant, NoMasksIsBitIdentical) {
   nr_pdsch_config_sweep_init(a.get(), 4); memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
   ASSERT_GT(nr_pdsch_config_sweep_set_dormant(b.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr), 0);
   nr_pdsch_config_sweep_clear_dormant(b.get(), NR_TD_DORMANT_PRIOR);
-  for (int t = 0; t < 30000; t++) {
+  for (int t = 0; t < 600000 && nr_pdsch_config_sweep_winner(a.get()) < 0; t++) {
     nr_pdsch_cfg_hypothesis_t h; const int i = nr_pdsch_config_sweep_next(a.get(), &h), j = nr_pdsch_config_sweep_next(b.get(), &h);
-    ASSERT_EQ(i, j); const bool ok = (i == 11) && (t % 2 == 0);
+    ASSERT_EQ(i, j); const bool ok = (i == 11) && (((unsigned)t * 2654435761u) >> 16) % 10 < 7; // truth = 11 at ~70 %
     ASSERT_EQ(nr_pdsch_config_sweep_feed(a.get(), i, ok), nr_pdsch_config_sweep_feed(b.get(), j, ok));
   }
+  ASSERT_GE(nr_pdsch_config_sweep_winner(a.get()), 0); // the loop must actually converge, or identity proves little
+  ASSERT_GE(nr_pdsch_config_sweep_winner(b.get()), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_winner(a.get()), nr_pdsch_config_sweep_winner(b.get()));
+  EXPECT_EQ(a->n_hyp, b->n_hyp);
+  EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
 }
 TEST(PdschSweepDormant, NoMasksIsBitIdenticalFeedKAndEquiv) {
   // Same sequence through next_k + feed_k (with P2 probes) and feed_equiv: masks set then cleared == never set.
@@ -1315,7 +1320,7 @@ TEST(PdschSweepDormant, NoMasksIsBitIdenticalFeedKAndEquiv) {
   nr_pdsch_config_sweep_init(a.get(), 4); a->p2 = true; memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
   ASSERT_GT(nr_pdsch_config_sweep_set_dormant(b.get(), NR_TD_DORMANT_FIELD_BASE, keep_k0_0, nullptr), 0);
   nr_pdsch_config_sweep_clear_dormant(b.get(), NR_TD_DORMANT_FIELD_BASE);
-  for (int t = 0; t < 20000; t++) {
+  for (int t = 0; t < 600000 && nr_pdsch_config_sweep_winner(a.get()) < 0; t++) {
     int ia[NR_TD_MAX_K], ib[NR_TD_MAX_K]; nr_pdsch_cfg_hypothesis_t oa[NR_TD_MAX_K], ob[NR_TD_MAX_K];
     const int na = nr_pdsch_config_sweep_next_k(a.get(), 3, ia, oa), nb = nr_pdsch_config_sweep_next_k(b.get(), 3, ib, ob);
     ASSERT_EQ(na, nb);
@@ -1323,13 +1328,18 @@ TEST(PdschSweepDormant, NoMasksIsBitIdenticalFeedKAndEquiv) {
     for (int k = 0; k < na; k++) {
       ASSERT_EQ(ia[k], ib[k]);
       oc[k] = {ia[k], (uint8_t)(k ? NR_TD_CB_PROBE : NR_TD_FULL_TB),
-               (uint8_t)(k == 0 ? ((ia[0] == 5 && t % 3 == 0) ? NR_TD_PASS : NR_TD_FAIL) : NR_TD_FAIL), k > 0};
+               (uint8_t)(k == 0 ? ((ia[0] == 5 && (((unsigned)t * 2654435761u) >> 16) % 10 < 7) ? NR_TD_PASS : NR_TD_FAIL) : NR_TD_FAIL), k > 0};
     }
     ASSERT_EQ(nr_pdsch_config_sweep_feed_k(a.get(), oc, na), nr_pdsch_config_sweep_feed_k(b.get(), oc, na));
-    const int e[2] = {ia[0], (ia[0] + 7) % a->n_hyp};
-    ASSERT_EQ(nr_pdsch_config_sweep_feed_equiv(a.get(), e, 2, t % 5 == 0, true),
-              nr_pdsch_config_sweep_feed_equiv(b.get(), e, 2, t % 5 == 0, true));
+    const int e[2] = {ia[0], (ia[0] + 7) % a->n_hyp}; // non-truth class: both members always fail
+    if (t % 4 == 0 && e[0] != 5 && e[1] != 5)
+      ASSERT_EQ(nr_pdsch_config_sweep_feed_equiv(a.get(), e, 2, false, true),
+                nr_pdsch_config_sweep_feed_equiv(b.get(), e, 2, false, true));
   }
+  ASSERT_GE(nr_pdsch_config_sweep_winner(a.get()), 0); // converged on both
+  ASSERT_GE(nr_pdsch_config_sweep_winner(b.get()), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_winner(a.get()), nr_pdsch_config_sweep_winner(b.get()));
+  EXPECT_EQ(a->n_hyp, b->n_hyp);
   ASSERT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
   ASSERT_EQ(a->since_pass, b->since_pass);
 }
@@ -1444,17 +1454,32 @@ TEST(PdschSweepDormant, SincePassSemantics) {
   nr_pdsch_config_sweep_feed_equiv(s.get(), e2, 2, false, true); // one call, two credited: +1
   EXPECT_EQ(s->since_pass, 6u);
   nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  EXPECT_EQ(s->since_pass, 0u); // the active set changed
+  nr_pdsch_config_sweep_feed(s.get(), even, false); EXPECT_EQ(s->since_pass, 1u);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr); // no bit changes
+  EXPECT_EQ(s->since_pass, 1u);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true); EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_feed(s.get(), even, false);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true); EXPECT_EQ(s->since_pass, 1u); // no change
+  nr_pdsch_config_sweep_set_fail_open(s.get(), false); EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_feed(s.get(), even, false);
+  nr_pdsch_config_sweep_clear_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE); // empty cause: no change
+  EXPECT_EQ(s->since_pass, 1u);
+  nr_pdsch_config_sweep_clear_dormant(s.get(), NR_TD_DORMANT_PRIOR); EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
   nr_pdsch_config_sweep_feed(s.get(), odd, true); // PASS on a dormant hypothesis: ignored, no reset
-  EXPECT_EQ(s->since_pass, 6u);
+  EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_feed(s.get(), even, false); nr_pdsch_config_sweep_feed(s.get(), even, false);
+  EXPECT_EQ(s->since_pass, 2u);
   // feed_k: main FAIL + admissible probe FAIL under p2 is ONE call: +1; a probe PASS neither counts nor resets.
   s->p2 = true;
   nr_td_outcome_t o1[3] = {{even, NR_TD_FULL_TB, NR_TD_FAIL, false}, {even + 2, NR_TD_CB_PROBE, NR_TD_FAIL, true},
                            {even + 4, NR_TD_CB_PROBE, NR_TD_PASS, true}};
   nr_pdsch_config_sweep_feed_k(s.get(), o1, 3);
-  EXPECT_EQ(s->since_pass, 7u);
+  EXPECT_EQ(s->since_pass, 3u);
   nr_td_outcome_t o2[2] = {{even, NR_TD_FULL_TB, NR_TD_INCONCLUSIVE, false}, {even + 2, NR_TD_CB_PROBE, NR_TD_PASS, true}};
   nr_pdsch_config_sweep_feed_k(s.get(), o2, 2); // nothing credited
-  EXPECT_EQ(s->since_pass, 7u);
+  EXPECT_EQ(s->since_pass, 3u);
   nr_pdsch_config_sweep_feed(s.get(), even, true); // PASS on an active hypothesis resets
   EXPECT_EQ(s->since_pass, 0u);
 }
@@ -1498,4 +1523,28 @@ TEST(PdschSweepDormant, RebuildPreservesMasksAndFailOpen) {
   nr_pdsch_config_sweep_set_fail_open(s.get(), true);
   nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
   EXPECT_TRUE(s->fail_open);
+}
+TEST(PdschSweepDormant, DormantDecodedIdxZeroCreditsNothingInEquiv) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  int even = -1, odd = -1;
+  for (int i = 0; i < s->n_hyp; i++) { if (s->hyp[i].tda_length % 2 == 0 && even < 0) even = i; if (s->hyp[i].tda_length % 2 && odd < 0) odd = i; }
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  const int e[2] = {odd, even}; // dormant idx[0], active equivalent member
+  nr_pdsch_config_sweep_feed_equiv(s.get(), e, 2, true, true);
+  EXPECT_EQ(s->trials[odd], 0u); EXPECT_EQ(s->trials[even], 0u); EXPECT_EQ(s->since_pass, 0u);
+}
+TEST(PdschSweepDormant, K0LayerInheritsDormancy) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE, keep_even, nullptr);
+  const int n0 = s->n_hyp;
+  const int added = nr_pdsch_config_sweep_add_k0_layer(s.get(), 3);
+  ASSERT_GT(added, 0);
+  ASSERT_EQ(s->n_hyp, n0 + added);
+  int new_dormant = 0;
+  for (int i = n0; i < s->n_hyp; i++) {
+    ASSERT_EQ(s->hyp[i].k0, 3);
+    ASSERT_EQ(nr_pdsch_config_sweep_is_active(s.get(), i), s->hyp[i].tda_length % 2 == 0) << i;
+    new_dormant += !nr_pdsch_config_sweep_is_active(s.get(), i);
+  }
+  EXPECT_GT(new_dormant, 0);
 }
