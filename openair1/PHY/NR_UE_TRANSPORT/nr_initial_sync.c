@@ -25,13 +25,9 @@
 //#define DEBUG_INITIAL_SYNCH
 #define DUMP_PBCH_CH_ESTIMATES 0
 
-/* Upper bound on the scratch memory nr_initial_sync() may hold for parallel GSCN scanning at any
- * one moment. Each concurrently scanned GSCN needs a private copy of the capture (see the long
- * comment in nr_initial_sync()), so without a cap the requirement grows with numGscn * antennas *
- * bandwidth and reaches ~1.6 GB at 273 PRB / 4 RX / ~40 GSCN. 512 MB comfortably holds several
- * 273 PRB 4-antenna captures (~39 MB each) while staying well inside what a UE host can spare. */
-// The budget is now runtime-configurable (env ISAC_SCAN_SCRATCH_MB, clamped 64..16384, default 512 MB);
-// see nr_initial_sync_budget.c.
+/* The scan scratch budget (upper bound on the memory nr_initial_sync() may hold for parallel GSCN scanning: each
+ * concurrently scanned GSCN needs a private copy of the capture, ~1.6 GB unbounded at 273 PRB / 4 RX / ~40 GSCN) is
+ * runtime-configurable: env ISAC_SCAN_SCRATCH_MB, clamped 64..16384, default 512 MB. See nr_initial_sync_budget.c. */
 
 // structure used for multiple SSB detection
 typedef struct NR_UE_SSB {
@@ -648,7 +644,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
           NR_INITIAL_SYNC_SCRATCH_MB_MIN,
           NR_INITIAL_SYNC_SCRATCH_MB_MAX);
   }
-  int batch = nr_initial_sync_scan_batch(bytes_per_gscn, (int)get_nrUE_params()->Tpool.len_thr, scratch_mb);
+  int batch = nr_initial_sync_scan_batch(bytes_per_gscn, (size_t)get_nrUE_params()->Tpool.len_thr, scratch_mb);
   if (batch > numGscn)
     batch = numGscn;
   LOG_I(NR_PHY,

@@ -50,6 +50,24 @@ TEST(ScanBatch, ThreadCapAndFloor)
   EXPECT_EQ(nr_initial_sync_scan_batch(1UL << 30, 8, 512), 1); /* one GSCN bigger than budget */
 }
 
+TEST(ScanBatch, SizeTThreadCountNoNarrowing)
+{
+  /* len_thr is size_t: a value above INT_MAX must not wrap negative (floor 1) but be capped by the memory budget */
+  EXPECT_EQ(nr_initial_sync_scan_batch(8UL << 20, (size_t)1 << 33, 64), 64 / 8);
+}
+
+TEST(ScanBatch, CachedScratchPublishesFinalValue)
+{
+  setenv("ISAC_SCAN_SCRATCH_MB", "100000", 1);
+  nr_scan_scratch_parse_t st = NR_SCAN_SCRATCH_UNSET;
+  EXPECT_EQ(nr_initial_sync_scratch_mb(&st), 16384);
+  EXPECT_EQ(st, NR_SCAN_SCRATCH_CLAMPED);
+  nr_scan_scratch_parse_t st2 = NR_SCAN_SCRATCH_UNSET;
+  EXPECT_EQ(nr_initial_sync_scratch_mb(&st2), 16384);
+  EXPECT_EQ(st2, NR_SCAN_SCRATCH_CLAMPED);
+  unsetenv("ISAC_SCAN_SCRATCH_MB");
+}
+
 TEST(ScanBatch, Parse)
 {
   long mb = 0;

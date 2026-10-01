@@ -25,7 +25,7 @@ long nr_initial_sync_scratch_mb(nr_scan_scratch_parse_t *status);
 
 /* Number of GSCNs scanned concurrently: min(budget / bytes_per_gscn, len_thr), each floored at 1.
  * scratch_mb is clamped to [MIN, MAX]. The caller still caps the result at numGscn. */
-int nr_initial_sync_scan_batch(size_t bytes_per_gscn, int len_thr, long scratch_mb);
+int nr_initial_sync_scan_batch(size_t bytes_per_gscn, size_t len_thr, long scratch_mb);
 
 #ifdef __cplusplus
 }
