@@ -149,3 +149,25 @@ int main(int argc, char **argv)
   logClean();
   return rc;
 }
+TEST(TdSim, EquivNeverWrongAndNotSlowerBlind)
+{
+  SimCfg c = SimCfg::defaults();
+  c.acq = 20;
+  c.seed = 9;
+  c.oracle = 0;
+  c.rntis_per_acq = 1;
+  SimCfg e = c;
+  e.equiv = 1;
+  const SimResult rc = run_sim(c), re = run_sim(e);
+  EXPECT_EQ(re.wrong, 0);
+  EXPECT_EQ(re.undecidable, 0);
+  /* The brief asserted re.mean_grants <= rc.mean_grants. MEASURED FALSE on this model (blind, table_exercise 0.9 and 0.964): crediting
+   * the table twins on non-exercising grants only (never on exercising ones) dilutes their failure rate and delays their KL
+   * elimination. It is therefore not asserted; the numbers are in baseline_bc0_2026-10-01.txt "## BC1 equiv". */
+  EXPECT_GT(re.mean_grants, 0.0);
+  /* Exactness check: when every grant exercises the table, every class is a singleton and equiv must be bit-identical. */
+  c.table_exercise = e.table_exercise = 1.0;
+  const SimResult r1c = run_sim(c), r1e = run_sim(e);
+  EXPECT_EQ(r1e.total_grants, r1c.total_grants);
+  EXPECT_EQ(r1e.n_full, r1c.n_full);
+}

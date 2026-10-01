@@ -33,6 +33,7 @@ void exit_function(const char *file, const char *fn, int line, const char *messa
 
 struct SimCfg {
   int acq, seed, catalog_tda, n_rx, K, sib1, fieldbook, gate, p2, twins, rntis_per_acq;
+  int equiv;            /* 1 = lever E: the main full decode credits every grant-equivalent hypothesis (needs twins >= 2) */
   int prior;            /* 1 (default) = today's cell-wide/RNTI prior pruning; forced OFF when fieldbook=1 (plan R2 rule) */
   int oracle;           /* 1 = today's runtime (DM-RS/last-symbol/k0 + Qm oracles prune the catalogue), 0 = blind arm */
   int dmrs_typea_pos;   /* ASN.1 enum: 0 = pos2 (rfsim gNB default, 106 PRB cell), 1 = pos3 */
@@ -47,7 +48,7 @@ struct SimCfg {
   {
     SimCfg c;
     c.acq = 100; c.seed = 1; c.catalog_tda = 4; c.n_rx = 4; c.K = 1; c.sib1 = 0; c.fieldbook = 0; c.gate = 0; c.p2 = 0;
-    c.twins = 2; c.rntis_per_acq = 4; c.oracle = 1; c.prior = 1; c.dmrs_typea_pos = 0;
+    c.equiv = 0; c.twins = 2; c.rntis_per_acq = 4; c.oracle = 1; c.prior = 1; c.dmrs_typea_pos = 0;
     c.mu = 15; c.fade = 6; c.snr_est_sigma = 2; c.rank2_frac = 0.3; c.grants_per_s = 200;
     c.probe_inconclusive = 0.1; c.table_exercise = 0.9; c.cap_s = 3600;
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
@@ -169,6 +170,10 @@ struct Grant {
 static SimResult run_sim(const SimCfg &cfg)
 {
   SimResult R;
+  if (cfg.equiv && cfg.twins < 2) {
+    fprintf(stderr, "nr_td_sim: --equiv 1 requires --twins >= 2 (the --twins < 2 stress arm is not equivalence-consistent)\n");
+    exit(EXIT_FAILURE);
+  }
   auto tmpl = std::make_unique<nr_pdsch_config_sweep_state_t>();
   /* Production catalogue: init_legal with the production legality (type A only, masks deduplicated). */
   nr_pdsch_config_sweep_init_legal(tmpl.get(), cfg.catalog_tda, cfg.dmrs_typea_pos, sim_legality);
@@ -331,6 +336,24 @@ static SimResult run_sim(const SimCfg &cfg)
         if (!p && cfg.crc_false > 0 && uf(frng) < cfg.crc_false) { rec.false_passes++; return true; }
         return p;
       };
+      int out_main_idx = -1;
+      /* Class of the decoded hypothesis d on this grant: alive j with identical geometry/DM-RS/mapping and either the same
+       * MCS table or a grant that does not exercise the table (then the computation is identical). */
+      auto feed_equiv_main = [&](bool pass, const Grant &gr) {
+        const int d = out_main_idx;
+        int cls[NR_PDSCH_SWEEP_MAX_HYP];
+        int nc = 0;
+        cls[nc++] = d;
+        const nr_pdsch_cfg_hypothesis_t &hd = st->hyp[d];
+        for (int j = 0; j < st->n_hyp; j++) {
+          const nr_pdsch_cfg_hypothesis_t &hj = st->hyp[j];
+          if (j != d && hj.tda_start == hd.tda_start && hj.tda_length == hd.tda_length && hj.k0 == hd.k0
+              && hj.dmrs_add_pos == hd.dmrs_add_pos && hj.dmrs_max_len == hd.dmrs_max_len && hj.dmrs_mask == hd.dmrs_mask
+              && hj.mapping_type == hd.mapping_type && (hj.mcs_table == hd.mcs_table || !gr.exercised))
+            cls[nc++] = j;
+        }
+        return nr_pdsch_config_sweep_feed_equiv(st.get(), cls, nc, pass, gr.new_tx);
+      };
       for (; g < cap && winner < 0;) {
         g++;
         Grant gr;
@@ -354,6 +377,7 @@ static SimResult run_sim(const SimCfg &cfg)
         const int n = nr_pdsch_config_sweep_next_k(st.get(), cfg.K, idx, hy); /* K=1 == next() (Task 4 bit-identity) */
         if (n < 1) break;
         nr_td_outcome_t out[NR_TD_MAX_K];
+        out_main_idx = idx[0];
         for (int i = 0; i < n; i++) {
           out[i].hyp = idx[i];
           out[i].p2_admissible = false;
@@ -379,7 +403,18 @@ static SimResult run_sim(const SimCfg &cfg)
         if (gr.exercised && truth_pass)
           distinguished = true;
         const long t0 = ti >= 0 ? (long)st->trials[ti] - (long)st->ok[ti] : 0;
-        winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
+        if (cfg.equiv && cfg.K > 1) {
+          /* Lever E: the main decode credits its grant-equivalence class; probe outcomes keep feed_k (probes unchanged). */
+          winner = feed_equiv_main(out[0].result == NR_TD_PASS, gr);
+          if (n > 1) {
+            const int w = nr_pdsch_config_sweep_feed_k(st.get(), out + 1, n - 1);
+            if (w >= 0) winner = w;
+          }
+        } else if (cfg.equiv) {
+          winner = feed_equiv_main(out[0].result == NR_TD_PASS, gr);
+        } else {
+          winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
+        }
         if (ti >= 0 && truth_pass && (long)st->trials[ti] - (long)st->ok[ti] > t0) rec.truth_elim++;
         if ((cfg.oracle || cfg.w_obs > 0) && obs_on) {
           /* [ASSUMPTION] The DM-RS oracle needs the layout to be decodable at all (rank <= n_rx); conservative: the runtime
@@ -475,7 +510,7 @@ int main(int argc, char **argv)
            "  --snr-est-sigma --n-rx --rank2-frac --grants-per-s --sib1 --K --w-sib1 --w-default --w-obs --w-field --w-probe --fieldbook\n"
            "  --oracle-miss P --oracle-wrong P --harq-trap P --crc-false P (realism, default 0)\n"
            "  --gate --p2 --rntis-per-acq --probe-inconclusive --table-exercise --cap-s --oracle --prior --dmrs-typea-pos\n"
-           "  --twins N (default 2 = all physical twins, i.e. every other-table entry). N < 2 is an UNPHYSICAL stress arm: only N\n"
+           "  --equiv 0|1 (lever E: grant-equivalence crediting of the main decode; requires --twins >= 2)\n  --twins N (default 2 = all physical twins, i.e. every other-table entry). N < 2 is an UNPHYSICAL stress arm: only N\n"
            "  twins behave as twins, the other other-table entries always fail.");
       return 0;
     }
@@ -501,6 +536,7 @@ int main(int argc, char **argv)
     else if (f == "--gate") c.gate = atoi(v);
     else if (f == "--p2") c.p2 = atoi(v);
     else if (f == "--twins") c.twins = atoi(v);
+    else if (f == "--equiv") c.equiv = atoi(v);
     else if (f == "--rntis-per-acq") c.rntis_per_acq = atoi(v);
     else if (f == "--probe-inconclusive") c.probe_inconclusive = atof(v);
     else if (f == "--table-exercise") c.table_exercise = atof(v);
