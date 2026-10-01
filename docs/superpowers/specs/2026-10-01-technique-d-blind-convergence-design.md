@@ -136,7 +136,8 @@ CB0 probes). Recorded in the levers plan's G4 task.
 - `--oracle-wrong P`: per RNTI, with probability P the DM-RS oracle reports a legal neighbouring mask/last symbol and
   the Qm oracle a wrong table (destructive prune of the truth, as today's runtime would do).
 - `--harq-trap P`: per grant, with probability P the `k0 ± 1` neighbour of the truth (same S, L, mask, table) passes.
-- `--crc-false P` (default 2⁻²⁴): per wrong-hypothesis decode false-pass probability.
+- `--crc-false P` (default 0 so flags-off output stays identical; campaigns pass 5.96e-8 = 2⁻²⁴): per failing-decode false-pass probability.
+- Known simplification (BC0 review): the runtime's observed-mask prune keeps the **union** of the RNTI's own and the cell-wide (`g_obs`) observations; the simulator models the cell-wide pre-prune followed by the RNTI's own prune. Two wrong RNTIs agreeing on the same decoy (publishing it to `g_obs`) are not modelled.
 - Metrics added: active-catalogue size at RNTI start, fail-open count, recovery latency (grants from a wrong promotion
   to WITHDRAWN and to the first correct convergence), unique passes, lever-C acceptances.
 
