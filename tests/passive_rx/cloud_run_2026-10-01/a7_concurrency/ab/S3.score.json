@@ -1,0 +1,1 @@
+{"arm": "S3", "bank_len": 46, "conv_s": 38.018, "cpu_pct": 202, "crc_pct": 96.37, "drop_full_pct": 1.565, "first_crnti_s": 35.565, "ldpc_ok": 13902, "ldpc_seg_fail": 484, "max_rss_kb": 890492, "n_converged": 2, "pdsch_crc_ok": 13902, "pdsch_decoded": 14426, "scanq_drop_full": 1812, "scanq_queued": 115783, "sync_s": 6.755, "ttc_s": 2.453}

@@ -40,6 +40,7 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 #include <time.h>
 
@@ -63,6 +64,7 @@ void crcTableInit(void);
 #include "nr_pdsch_prb_set.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pdcch_blind_monitor_rt.h"
+#include "nr_pdcch_blind_phase2.h"
 #include "executables/softmodem-common.h"
 }
 
@@ -4498,4 +4500,59 @@ TEST(LookaheadLanes, Al16IsAcceptedAndFitsTheLaneBudget) {
   EXPECT_EQ(nr_pdcch_blind_parse_lane_als("32,3,0", v), 0);
   EXPECT_EQ(nr_pdcch_blind_parse_lane_als(nullptr, v), 0);
   EXPECT_GE(nr_pdcch_blind_lane_re_budget(), 16 * 6 * 9);
+}
+
+// Task A7: the blind-PDCCH scan may now run on N consumers. Phase 2 of an occasion (dci_thres EMA, mismatch
+// gate, RNTI persistence) is the sequential part. Four threads x 10000 synthetic DCI 1_1 accepts of one RNTI go
+// through the production accept gate (nr_pdcch_blind_dl_accept_gate, the function rt.c calls) under the
+// Phase-2 lock, as rt.c does; no sighting may be lost or corrupted. Run under TSAN as well (see
+// tests/passive_rx/cloud_run_2026-10-01/a7_concurrency/): there a data race fails the run.
+TEST(Phase2Concurrent, FourThreadsSameRntiLoseNoAcceptAndNoSighting) {
+  nr_pdcch_blind_phase2_reset_for_test();
+  constexpr int kThreads = 4, kPerThread = 10000;
+  constexpr uint16_t kRnti = 0x4601;
+  int dci_thres = 0;
+  int held[kThreads] = {0};
+  std::vector<std::thread> th;
+  for (int t = 0; t < kThreads; t++)
+    th.emplace_back([&, t] {
+      for (int i = 0; i < kPerThread; i++) {
+        nr_pdcch_blind_phase2_lock();
+        const bool pass = nr_pdcch_blind_dl_accept_gate(&dci_thres, 0, kRnti, 1000, 100, 2);
+        nr_pdcch_blind_phase2_unlock();
+        if (!pass)
+          held[t]++;
+      }
+    });
+  for (auto &x : th)
+    x.join();
+  // Production counter, guarded by the Phase-2 lock: every accept reached the persistence gate exactly once.
+  EXPECT_EQ(nr_pdcch_blind_persistence_sightings(), (uint64_t)kThreads * kPerThread);
+  // Persistence k=2: only the globally first sighting has no earlier one, so exactly one is held.
+  EXPECT_EQ(held[0] + held[1] + held[2] + held[3], 1);
+  // The ring keeps one entry per SIGHTING (by design), so after 40000 sightings it is full and every
+  // entry is this RNTI: no lost, torn or foreign entry.
+  int total = -1;
+  EXPECT_EQ(nr_pdcch_blind_persistence_count_for_test(kRnti, &total), 64);
+  EXPECT_EQ(total, 64);
+  EXPECT_EQ(dci_thres, 0);
+}
+
+// Task A7: the adaptive energy floor is updated per candidate in Phase 1, which runs unlocked on every
+// consumer. A constant population must converge to that constant and count every sample.
+TEST(Phase2Concurrent, EnergyFloorCountsEverySampleFromFourThreads) {
+  nr_pdcch_blind_phase2_reset_for_test();
+  constexpr int kThreads = 4, kPerThread = 10000;
+  std::vector<std::thread> th;
+  for (int t = 0; t < kThreads; t++)
+    th.emplace_back([] {
+      for (int i = 0; i < kPerThread; i++)
+        nr_pdcch_blind_energy_floor_update(5.0f, nullptr);
+    });
+  for (auto &x : th)
+    x.join();
+  uint64_t nseen = 0;
+  const float floor = nr_pdcch_blind_energy_floor_get(&nseen);
+  EXPECT_EQ(nseen, (uint64_t)kThreads * kPerThread);
+  EXPECT_NEAR(floor, 5.0f, 5.0f * 0.011f); // within one frugal step of the population median
 }

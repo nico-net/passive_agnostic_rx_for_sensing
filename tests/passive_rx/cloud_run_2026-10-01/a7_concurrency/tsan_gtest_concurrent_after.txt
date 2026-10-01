@@ -1,0 +1,17 @@
+TSAN gtest Phase2Concurrent* AFTER fix round 1 (test drives the production gate nr_pdcch_blind_dl_accept_gate + production sightings counter)
+reports: 0
+
+[LOG] init aborted, configuration couldn't be performed
+Note: Google Test filter = Phase2Concurrent*
+[==========] Running 2 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 2 tests from Phase2Concurrent
+[ RUN      ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting
+[       OK ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting (409 ms)
+[ RUN      ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads
+[       OK ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads (55 ms)
+[----------] 2 tests from Phase2Concurrent (464 ms total)
+
+[----------] Global test environment tear-down
+[==========] 2 tests from 1 test suite ran. (465 ms total)
+[  PASSED  ] 2 tests.

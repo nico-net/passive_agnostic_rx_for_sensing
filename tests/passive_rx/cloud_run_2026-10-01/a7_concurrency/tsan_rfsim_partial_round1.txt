@@ -1,0 +1,1716 @@
+TSAN (blind-PDCCH sources instrumented, RelWithDebInfo) round-1 fix, same bed, 300 s: reaches TRACKING (bank verified, Technique D converged) -- 2-consumer races still present
+source: tsanp_rx_after/tsan.26572
+reports: 46
+
+by location:
+    6  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607 in nr_pdcch_blind_monitor_autodiscover_step
+    5  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195 in boot_entry_live
+    4  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538 in nr_pdcch_blind_monitor_note_rnti_for_windows
+    4  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198 in boot_entry_live
+    3  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136 in boot_record
+    3  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323 in nr_pdsch_passive_queue_flush
+    2  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134 in boot_record
+    2  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:626 in extent_clear_evidence
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:210 in simulation_candidate_rntis
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:517 in nr_pdcch_blind_monitor_autodiscover_done
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1610 in nr_pdcch_blind_monitor_autodiscover_step
+    1  data race ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:115 in memcpy
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1398 in enqueue_one
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1337 in nr_pdsch_passive_queue_flush
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:151 in boot_record
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292 in nr_pdcch_blind_monitor_dedicated_rnti_set
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:147 in boot_record
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:149 in boot_record
+    1  data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1361 in nr_pdsch_passive_queue_enqueue
+    1  signal-unsafe call inside of a signal common/utils/utils.h:87 in calloc_or_fail
+    1  signal-unsafe call inside of a signal ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 in operator new(unsigned long)
+    1  signal handler spoils errno executables/nr-uesoftmodem.c:203 in trigger_deregistration
+    1  data race radio/rfsimulator/simulator.cpp:388 in removeCirBuf
+    1  data race radio/rfsimulator/simulator.cpp:310 in clear_old_packets
+    1  data race ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 in operator delete(void*, unsigned long)
+
+by accessing thread pair:
+   16  passivePdcch1 <-> passivePdcch0
+   10  passivePdcch0 <-> passivePdcch1
+    5  UEthread_0 <-> passivePdcch1
+    4  UEthread_0 <-> passivePdcch0
+    3  
+    2  passivePdcch0 <-> UEthread_0
+    2  passivePdcch1 <-> UEthread_0
+    2  main thread <-> UEthread_0
+    1  passivePdsch2 <-> Tpool5_-1
+    1  main thread <-> UL__actor
+
+full reports (paths made repo-relative, BuildIds stripped; trimmed to <= 200 KB):
+
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce24 by thread T30:
+    #0 simulation_candidate_rntis openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:210
+    #1 nr_pdcch_blind_monitor_verified_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:275
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3016
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce24 by thread T29:
+    #0 simulation_candidate_rntis openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:211
+    #1 nr_pdcch_blind_monitor_verified_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:275
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3016
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'initialized.2' of size 4 at 0x5616997bce24
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:210 in simulation_candidate_rntis
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 1 at 0x5616997bc91a by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_done openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:517
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2804
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous write of size 1 at 0x5616997bc91a by thread T29 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_autodiscover_next openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2103
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5655
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_dedicated_found' of size 1 at 0x5616997bc91a
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:517 in nr_pdcch_blind_monitor_autodiscover_done
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bc5b8 by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1610
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous write of size 4 at 0x5616997bc5b8 by thread T29 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_autodiscover_next openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2111
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5655
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_obs_calls' of size 4 at 0x5616997bc5b8
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1610 in nr_pdcch_blind_monitor_autodiscover_step
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 2 at 0x5616997bc8dc by thread T29 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 2 at 0x5616997bc8dc by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538 in nr_pdcch_blind_monitor_note_rnti_for_windows
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 2 at 0x5616997bc8c8 by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous read of size 2 at 0x5616997bc8c8 by thread T29 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607 in nr_pdcch_blind_monitor_autodiscover_step
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 2 at 0x5616997bc8c0 by thread T30 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 2 at 0x5616997bc8c0 by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538 in nr_pdcch_blind_monitor_note_rnti_for_windows
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 2 at 0x5616997bc8de by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous read of size 2 at 0x5616997bc8de by thread T30 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607 in nr_pdcch_blind_monitor_autodiscover_step
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 2 at 0x5616997bc8dc by thread T30 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 2 at 0x5616997bc8dc by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538 in nr_pdcch_blind_monitor_note_rnti_for_windows
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 2 at 0x5616997bc8c4 by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous read of size 2 at 0x5616997bc8c4 by thread T30 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607 in nr_pdcch_blind_monitor_autodiscover_step
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 2 at 0x5616997bc8d4 by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous read of size 2 at 0x5616997bc8d4 by thread T29 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607 in nr_pdcch_blind_monitor_autodiscover_step
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 2 at 0x5616997bc8c0 by thread T29 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 2 at 0x5616997bc8c0 by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538 in nr_pdcch_blind_monitor_note_rnti_for_windows
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616997bce48 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5614
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 4 at 0x5616997bce48 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_confirmed_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:250
+    #2 nr_pdcch_nrnti_override openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:443
+    #3 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3360
+    #4 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #5 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616997bce44 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5614
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 4 at 0x5616997bce44 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198
+    #1 nr_pdcch_blind_monitor_confirmed_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:250
+    #2 nr_pdcch_nrnti_override openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:443
+    #3 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3360
+    #4 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #5 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616994e7a60 by thread T30:
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616994e7a60 by thread T29 (mutexes: write M0):
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1337
+    #1 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1321
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_n_pending' of size 4 at 0x5616994e7a60
+
+  Mutex M0 (0x561699569ec0) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdsch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:588
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323 in nr_pdsch_passive_queue_flush
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 2 at 0x5616997bc8de by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous read of size 2 at 0x5616997bc8de by thread T30 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607 in nr_pdcch_blind_monitor_autodiscover_step
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 2 at 0x5616997bc8c6 by thread T23:
+    #0 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607
+    #1 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #2 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #3 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous read of size 2 at 0x5616997bc8c6 by thread T30 (mutexes: write M0):
+    #0 nr_pdcch_blind_monitor_note_rnti_for_windows openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:538
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6136
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_hit_count' of size 90 at 0x5616997bc8c0
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1607 in nr_pdcch_blind_monitor_autodiscover_step
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce44 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198
+    #1 nr_pdcch_blind_monitor_verified_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:272
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3016
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce44 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5614
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 8 at 0x5616997b9520 by thread T23:
+    #0 extent_clear_evidence openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:626
+    #1 nr_pdcch_blind_monitor_autodiscover_step openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1924
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2855
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Previous read of size 8 at 0x5616997b9520 by thread T30:
+    #0 nr_pdcch_blind_monitor_autodiscover_generation openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:643
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3276
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_ext_generation' of size 8 at 0x5616997b9520
+
+  Thread T23 'UEthread_0' (tid=26598, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:626 in extent_clear_evidence
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616994e7a60 by thread T29:
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616994e7a60 by thread T30 (mutexes: write M0, write M1):
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1337
+    #1 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1321
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3085
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_n_pending' of size 4 at 0x5616994e7a60
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Mutex M1 (0x561699569ec0) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdsch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:588
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323 in nr_pdsch_passive_queue_flush
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 8 at 0x72c0004f0370 by thread T27:
+    #0 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:115
+    #1 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:107
+    #2 memcpy /usr/include/x86_64-linux-gnu/bits/string_fortified.h:29
+    #3 passive_ldpc_decode_core openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1358
+
+  Previous write of size 8 at 0x72c0004f0370 by thread T6:
+    #0 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:115
+    #1 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:107
+    #2 memcpy /usr/include/x86_64-linux-gnu/bits/string_fortified.h:29
+    #3 nr_process_decode_segment openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:243
+
+  Location is heap block of size 59200 at 0x72c0004f0000 allocated by thread T27:
+    #0 memalign ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:810
+    #1 passive_harq_prepare openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1001
+
+  Thread T27 'passivePdsch2' (tid=26603, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2746
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T6 'Tpool5_-1' (tid=26581, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:115 in memcpy
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce44 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4009
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce44 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5614
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 8 at 0x5616994e7a80 by thread T30 (mutexes: write M0):
+    #0 enqueue_one openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1398
+    #1 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1336
+    #2 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1321
+    #3 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #4 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #5 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 8 at 0x5616994e7a80 by thread T29 (mutexes: write M1):
+    #0 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:115
+    #1 memcpy ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors_memintrinsics.inc:107
+    #2 nr_pdsch_passive_queue_enqueue openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1350
+    #3 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6432
+    #4 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #5 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_pending' of size 7872 at 0x5616994e7a80
+
+  Mutex M0 (0x561699569ec0) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdsch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:588
+
+  Mutex M1 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1398 in enqueue_one
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616994e7a60 by thread T30 (mutexes: write M0):
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1337
+    #1 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1321
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616994e7a60 by thread T29 (mutexes: write M1):
+    #0 nr_pdsch_passive_queue_enqueue openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1361
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6432
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_n_pending' of size 4 at 0x5616994e7a60
+
+  Mutex M0 (0x561699569ec0) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdsch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:588
+
+  Mutex M1 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1337 in nr_pdsch_passive_queue_flush
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce48 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4009
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce48 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce44 by thread T30:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198
+    #1 nr_pdcch_blind_monitor_verified_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:272
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3016
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce44 by thread T29 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 1 at 0x5616997bce7d by thread T29 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:151
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 1 at 0x5616997bce7d by thread T30:
+    #0 nr_pdcch_blind_monitor_verified_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:272
+    #1 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3016
+    #2 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:151 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 1 at 0x5616997bce72 by thread T30:
+    #0 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4009
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 1 at 0x5616997bce72 by thread T29 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:147
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292 in nr_pdcch_blind_monitor_dedicated_rnti_set
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616997bce44 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 4 at 0x5616997bce44 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4241
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce48 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4009
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce48 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5614
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 1 at 0x5616997bceb2 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:147
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 1 at 0x5616997bceb2 by thread T29:
+    #0 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4241
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:147 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616997bceb8 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:149
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 4 at 0x5616997bceb8 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4241
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:149 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616997bce44 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5614
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 4 at 0x5616997bce44 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4241
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 1 at 0x5616997bcedd by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4009
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 1 at 0x5616997bcedd by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:151
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce48 by thread T30:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4241
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce48 by thread T29 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5614
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616997bce48 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 4 at 0x5616997bce48 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4241
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:134 in boot_record
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bcee8 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4009
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bcee8 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:149
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:195 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 4 at 0x5616994e7a60 by thread T30 (mutexes: write M0):
+    #0 nr_pdsch_passive_queue_enqueue openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1361
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6432
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 4 at 0x5616994e7a60 by thread T29:
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_n_pending' of size 4 at 0x5616994e7a60
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1361 in nr_pdsch_passive_queue_enqueue
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616994e7a60 by thread T30 (mutexes: write M0):
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3085
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616994e7a60 by thread T29 (mutexes: write M1):
+    #0 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1337
+    #1 nr_pdsch_passive_queue_flush openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1321
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3210
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_n_pending' of size 4 at 0x5616994e7a60
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Mutex M1 (0x561699569ec0) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdsch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:588
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1323 in nr_pdsch_passive_queue_flush
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 8 at 0x5616997b9520 by thread T29 (mutexes: write M0, write M1):
+    #0 extent_clear_evidence openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:626
+    #1 extent_advance openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:710
+    #2 extent_advance openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:706
+    #3 nr_pdcch_blind_monitor_autodiscover_retry openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:512
+    #4 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4157
+    #5 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3085
+    #6 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous read of size 8 at 0x5616997b9520 by thread T30:
+    #0 nr_pdcch_blind_monitor_autodiscover_generation openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:643
+    #1 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3276
+    #2 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #3 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 's_ext_generation' of size 8 at 0x5616997b9520
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Mutex M1 (0x5616991fbd60) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 dl_discovery_invalidate openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1190
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3281
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:626 in extent_clear_evidence
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Read of size 4 at 0x5616997bce44 by thread T29:
+    #0 boot_entry_live openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198
+    #1 nr_pdcch_blind_monitor_dedicated_rnti_set openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:292
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4009
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Previous write of size 4 at 0x5616997bce44 by thread T30 (mutexes: write M0):
+    #0 boot_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:136
+    #1 nr_pdcch_blind_rnti_bootstrap_record openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:156
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5920
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3036
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Location is global 'g_boot' of size 256 at 0x5616997bce40
+
+  Mutex M0 (0x56169bbcd160) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1341
+    #1 nr_pdcch_blind_phase2_lock openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c:34
+    #2 nr_pdcch_blind_monitor_run_occasion_one openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145
+    #3 nr_pdcch_blind_monitor_run_occasion openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3030
+    #4 nr_pdcch_passive_queue_thread openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c:134
+
+  Thread T29 'passivePdcch0' (tid=26610, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+  Thread T30 'passivePdcch1' (tid=26611, running) created by thread T23 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+    #2 nr_pdcch_blind_monitor_process_body openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2939
+    #3 nr_pdcch_blind_monitor_process openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2679
+    #4 UE_dl_preprocessing executables/nr-ue.c:646
+
+SUMMARY: ThreadSanitizer: data race openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:198 in boot_entry_live
+==================
+==================
+WARNING: ThreadSanitizer: signal-unsafe call inside of a signal (pid=26572)
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:685
+    #1 calloc_or_fail common/utils/utils.h:87
+    #2 itti_malloc common/utils/ocp_itti/intertask_interface.cpp:48
+    #3 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456
+
+SUMMARY: ThreadSanitizer: signal-unsafe call inside of a signal common/utils/utils.h:87 in calloc_or_fail
+==================
+==================
+WARNING: ThreadSanitizer: signal-unsafe call inside of a signal (pid=26572)
+    #0 operator new(unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64
+    #1 std::__new_allocator<MessageDef_s*>::allocate(unsigned long, void const*) /usr/include/c++/13/bits/new_allocator.h:151
+    #2 std::allocator_traits<std::allocator<MessageDef_s*> >::allocate(std::allocator<MessageDef_s*>&, unsigned long) /usr/include/c++/13/bits/alloc_traits.h:482
+    #3 std::_Vector_base<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_allocate(unsigned long) /usr/include/c++/13/bits/stl_vector.h:381
+    #4 std::_Vector_base<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_allocate(unsigned long) /usr/include/c++/13/bits/stl_vector.h:378
+    #5 void std::vector<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_realloc_insert<MessageDef_s* const&>(__gnu_cxx::__normal_iterator<MessageDef_s**, std::vector<MessageDef_s*, std::allocator<MessageDef_s*> > >, MessageDef_s* const&) /usr/include/c++/13/bits/vector.tcc:459
+    #6 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456
+
+SUMMARY: ThreadSanitizer: signal-unsafe call inside of a signal ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 in operator new(unsigned long)
+==================
+==================
+WARNING: ThreadSanitizer: signal handler spoils errno (pid=26572)
+  Signal 2 handler invoked at:
+    #0 trigger_deregistration executables/nr-uesoftmodem.c:203
+    #1 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456
+
+SUMMARY: ThreadSanitizer: signal handler spoils errno executables/nr-uesoftmodem.c:203 in trigger_deregistration
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 8 at 0x72b000000a20 by main thread:
+    #0 close ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1818
+    #1 removeCirBuf radio/rfsimulator/simulator.cpp:388
+
+  Previous read of size 8 at 0x72b000000a20 by thread T21 (mutexes: write M0, write M1):
+    #0 write ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors.inc:1091
+    #1 fullwrite radio/rfsimulator/simulator.cpp:443
+
+  Location is file descriptor 81 created by thread T22 at:
+    #0 connect ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1793
+    #1 client_try_connect radio/rfsimulator/simulator.cpp:911
+    #2 startClient radio/rfsimulator/simulator.cpp:932
+
+  Mutex M0 (0x561698dd15e0) created at:
+    #0 pthread_mutex_init ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1315
+    #1 openair0_device_load radio/COMMON/common_lib.c:128
+
+  Mutex M1 (0x72b800000008) created at:
+    #0 pthread_mutex_init ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1315
+    #1 device_init radio/rfsimulator/simulator.cpp:1647
+
+  Thread T21 'UL__actor' (tid=26596, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+  Thread T22 'ru_start_thread' (tid=26597, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race radio/rfsimulator/simulator.cpp:388 in removeCirBuf
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 8 at 0x72d0001e0000 by main thread:
+    #0 free ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:724
+    #1 clear_old_packets radio/rfsimulator/simulator.cpp:310
+
+  Previous write of size 8 at 0x72d0001e0000 by thread T23:
+    #0 malloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:665
+    #1 malloc_or_fail common/utils/utils.h:99
+    #2 process_recv_header radio/rfsimulator/simulator.cpp:1156
+    #3 flushInput radio/rfsimulator/simulator.cpp:1293
+
+  Thread T23 'UEthread_0' (tid=26598, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race radio/rfsimulator/simulator.cpp:310 in clear_old_packets
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=26572)
+  Write of size 8 at 0x725000030000 by main thread:
+    #0 operator delete(void*, unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150
+    #1 std::__new_allocator<rfsim_packet_t*>::deallocate(rfsim_packet_t**, unsigned long) /usr/include/c++/13/bits/new_allocator.h:172
+    #2 std::allocator_traits<std::allocator<rfsim_packet_t*> >::deallocate(std::allocator<rfsim_packet_t*>&, rfsim_packet_t**, unsigned long) /usr/include/c++/13/bits/alloc_traits.h:517
+    #3 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_deallocate_node(rfsim_packet_t**) /usr/include/c++/13/bits/stl_deque.h:590
+    #4 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_destroy_nodes(rfsim_packet_t***, rfsim_packet_t***) /usr/include/c++/13/bits/stl_deque.h:700
+    #5 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::~_Deque_base() /usr/include/c++/13/bits/stl_deque.h:622
+    #6 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::~_Deque_base() /usr/include/c++/13/bits/stl_deque.h:617
+
+  Previous write of size 8 at 0x725000030000 by thread T23:
+    #0 operator new(unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64
+    #1 std::__new_allocator<rfsim_packet_t*>::allocate(unsigned long, void const*) /usr/include/c++/13/bits/new_allocator.h:151
+    #2 std::allocator_traits<std::allocator<rfsim_packet_t*> >::allocate(std::allocator<rfsim_packet_t*>&, unsigned long) /usr/include/c++/13/bits/alloc_traits.h:482
+    #3 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_allocate_node() /usr/include/c++/13/bits/stl_deque.h:583
+    #4 void std::deque<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_push_back_aux<rfsim_packet_t*&>(rfsim_packet_t*&) /usr/include/c++/13/bits/deque.tcc:497
+    #5 rfsim_packet_t*& std::deque<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::emplace_back<rfsim_packet_t*&>(rfsim_packet_t*&) /usr/include/c++/13/bits/deque.tcc:176
+    #6 decltype(auto) std::queue<rfsim_packet_t*, std::deque<rfsim_packet_t*, std::allocator<rfsim_packet_t*> > >::emplace<rfsim_packet_t*&>(rfsim_packet_t*&) /usr/include/c++/13/bits/stl_queue.h:297
+    #7 flushInput radio/rfsimulator/simulator.cpp:1303
+
+  Thread T23 'UEthread_0' (tid=26598, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022
+    #1 threadCreate common/utils/system.c:266
+
+SUMMARY: ThreadSanitizer: data race ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 in operator delete(void*, unsigned long)
+==================
+

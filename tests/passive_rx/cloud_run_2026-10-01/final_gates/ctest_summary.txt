@@ -1,0 +1,5 @@
+98% tests passed, 3 tests failed out of 129
+Total Test time (real) =  74.03 sec
+	 63 - test_thread-pool (Subprocess aborted)
+	 64 - time_management_tests (Failed)
+	127 - nr_cuup_functional_test (Failed)

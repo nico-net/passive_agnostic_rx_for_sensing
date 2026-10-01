@@ -1,6 +1,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
+#include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
 #include <dlfcn.h>
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
@@ -1054,6 +1055,7 @@ void *UE_thread(void *arg)
           nr_passive_acq_set_phy_geometry(UE->frame_parms.N_RB_DL, UE->frame_parms.numerology_index,
                                           UE->frame_parms.ssb_start_subcarrier, (double)UE->frame_parms.dl_CarrierFreq);
           nr_passive_acq_note_pbch_locked(); // acquisition-state tracker: MIB applied, frame known
+          atomic_store_explicit(&nr_passive_metrics_pci, UE->frame_parms.Nid_cell, memory_order_relaxed); // for the ISAC_METRICS JSON (Task A2)
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",
                 decoded_frame_rx,

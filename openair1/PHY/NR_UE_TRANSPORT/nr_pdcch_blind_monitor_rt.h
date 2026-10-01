@@ -383,6 +383,9 @@ int nr_pdcch_blind_parse_lane_als(const char *s, uint8_t v[5]);
 /// Extracted-RE capacity of one lookahead lane (c16 REs; one AL-L candidate needs 54*L).
 int nr_pdcch_blind_lane_re_budget(void);
 
+/* Metrics getter (nr_passive_metrics.c): monotonic scan counters, read on the 20 s summary path. */
+void nr_pdcch_blind_monitor_counters(uint64_t *occasions, uint64_t *candidates, uint64_t *accepts, uint64_t *accepts_c);
+
 #ifdef __cplusplus
 }
 #endif

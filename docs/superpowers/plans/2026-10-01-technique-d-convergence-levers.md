@@ -4,9 +4,9 @@
 
 **Goal:** Make Technique D (per-RNTI PDSCH configuration search) converge within ≤ 30 s cold / ≤ 2 s steady state on SA and NSA-like cells with zero wrong winners, via a grant trial gate, top-K CB0 probes, ordering scores and a per-field CellFieldBook — P1 first, failure-only probe evidence (P2) behind a simulator gate — and make cold acquisition limited by informative grants, not compute (spec §9: correctness fixes, shared per-grant work, legality bitsets, signatures, batched GPU PHY work).
 
-**Revision 2 (2026-10-01):** adds spec §9 (compute acceleration) and the verified prerequisites K28–K32: new Tasks 4b, 4c (pure), F1–F3 (correctness fixes + profile), G1–G4 (GPU), and R1–R4 (runtime, replacing old Tasks 8–10).
+**Revision 2 (2026-10-01):** adds spec §9 (compute acceleration) and the verified prerequisites K32–K36: new Tasks 4b, 4c (pure), F1–F3 (correctness fixes + profile), G1–G4 (GPU), and R1–R4 (runtime, replacing old Tasks 8–10).
 
-**Architecture:** New pure units (`nr_td_gate`, `nr_td_order`, `nr_td_fieldbook`) and an engine extension (`next_k`/`feed_k` + score-ordered rounds) inside `nr_pdsch_config_sweep.c`, all default-off so the baseline is bit-identical; a correlated Monte-Carlo simulator (`nr_td_sim`) linking the real engine decides defaults and the P2 gate; runtime work comes after the Track-A cloud branch is merged: first the correctness fixes (F1 chest cache K28, F2 stale credit K29) and a per-grant/per-hypothesis profile (F3), then shared per-grant work (GrantWork, R1) and wiring (R2); the GPU track (G1–G4) fixes K30/K31 before any GPU decode is trusted and batches CB0 probes across grants × hypotheses.
+**Architecture:** New pure units (`nr_td_gate`, `nr_td_order`, `nr_td_fieldbook`) and an engine extension (`next_k`/`feed_k` + score-ordered rounds) inside `nr_pdsch_config_sweep.c`, all default-off so the baseline is bit-identical; a correlated Monte-Carlo simulator (`nr_td_sim`) linking the real engine decides defaults and the P2 gate; runtime work comes after the Track-A cloud branch is merged: first the correctness fixes (F1 chest cache K32, F2 stale credit K33) and a per-grant/per-hypothesis profile (F3), then shared per-grant work (GrantWork, R1) and wiring (R2); the GPU track (G1–G4) fixes K34/K35 before any GPU decode is trusted and batches CB0 probes across grants × hypotheses.
 
 **Tech Stack:** C11 (OAI style), C++17 gtest, CMake/Ninja, Python 3 stdlib (campaign summaries), OAI rfsim beds.
 
@@ -23,8 +23,8 @@
 - P2: a probe FAIL is one KL failure only if: same computation as the full decode on CB0 (segmentation, rate matching, LLR scaling, scrambling, max iterations, early termination), no HARQ soft combining (new transmission), same IQ within sample lifetime, gate ELIGIBLE. A probe PASS never adds a KL success.
 - Speed-up accepted only if the wrong-winner rate does not increase. Targets: cold ≤ 30 s median (≤ 60 s worst of 5), steady ≤ 2 s median at 4 RX; 1 RX ≤ 3× with `UNDECIDABLE` instead of hangs; compute ≤ 4 extra cores (avg and peak) at equal traffic without added sample loss or queue backlog.
 - **P2 same-decoder rule (spec §9.3):** a probe FAIL is admissible only if the probe ran the same LDPC implementation and iteration policy as the hypothesis's full decode (CPU layered ≠ CUDA flooding).
-- **No GPU LDPC result is trusted before G1 (K30 false-pass fix); no GPU FEP result before G3 (K31).** Statistics/state never run on the GPU.
-- **No top-K probing (K > 1) and no P2 at runtime before F1 (K28) and F2 (K29) are merged.**
+- **No GPU LDPC result is trusted before G1 (K34 false-pass fix); no GPU FEP result before G3 (K35).** Statistics/state never run on the GPU.
+- **No top-K probing (K > 1) and no P2 at runtime before F1 (K32) and F2 (K33) are merged.**
 - Starting values: K = 3; ordering weights 0 (neutral); contradiction threshold 2 distinct RNTIs, M = 64; energy start/end observable off.
 - Repository rules (CLAUDE.md / PROJECT_MEMORY §4.0): sens6 files frozen (`git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30` before every commit); evidence labels; explicit `git add`; no `git stash`; SIGINT not SIGKILL.
 
@@ -746,7 +746,7 @@ TEST(TdSim, NearTwinNeverEliminatesTruthUnderP2) {
 
 ## AFTER THE CLOUD MERGE — correctness fixes and profile (F1–F3)
 
-### Task F1 ★: Chest cache correctness (K28) (Opus implements; Sonnet runs rfsim)
+### Task F1 ★: Chest cache correctness (K32) (Opus implements; Sonnet runs rfsim)
 
 **Files:**
 - Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c` (`t_chest_cache` struct ~1486-1492, hit test ~2240-2253, chest loop ~2342, store ~2529-2536; in-place post-processing at ~2445-2447, ~3159, ~3270)
@@ -786,9 +786,9 @@ TEST(ChestKey, IdenticalHits) { auto a = K(), b = K(); EXPECT_TRUE(nr_pdsch_ches
 ```
 - [ ] **Step 2: Run → FAIL. Step 3: Implement** design points (1)–(3) in `nr_pdsch_passive_decode.c`.
 - [ ] **Step 4: Probe ≡ full check (debug harness):** add env `ISAC_TD_PROBE_EQUIV_CHECK=1` (off by default): for a sample of 1-in-50 probed grants, also run the full decode of the same hypothesis and compare the CB0 LLR vectors element-wise; log `PROBE_EQUIV mismatches=n/total`. Run the 106-PRB rfsim arm with `ISAC_PROBE_ALL=1 ISAC_TD_PROBE_EQUIV_CHECK=1` → expected `mismatches=0`. (Before F1 this check is expected to show mismatches on multi-DM-RS grants — record the "before" number too.)
-- [ ] **Step 5:** ctest; rfsim regression gate (A1 `rfsim_regress.sh 2`) unchanged or better CRC; rank-4 pinned bed (`pin49r4`, default env) still 100 %. Commit `"fix(rx): chest cache keyed on full DM-RS signature, immutable cached estimate (K28)"`; PROJECT_MEMORY K28 → resolved.
+- [ ] **Step 5:** ctest; rfsim regression gate (A1 `rfsim_regress.sh 2`) unchanged or better CRC; rank-4 pinned bed (`pin49r4`, default env) still 100 %. Commit `"fix(rx): chest cache keyed on full DM-RS signature, immutable cached estimate (K32)"`; PROJECT_MEMORY K32 → resolved.
 
-### Task F2: No stale credit (K29) (Sonnet)
+### Task F2: No stale credit (K33) (Sonnet)
 
 **Files:**
 - Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c` (between decode end and `nr_pdsch_config_sweep_feedback`, ~984-1131), `nr_passive_sample_lifetime.h`
@@ -810,7 +810,7 @@ TEST(Lifetime, CreditAllowedOnlyWhileSamplesValid) {
 }
 ```
 - [ ] **Step 2: Run → FAIL. Step 3: Implement** (read `nr_passive_samples_valid` and reuse it; add the post-decode check before every feedback call; GPU path included).
-- [ ] **Step 4:** ctest + rfsim gate; metrics line (A2) gets `pdschq_stale_after_decode`. Commit `"fix(rx): no Technique D credit for decodes whose samples expired mid-decode (K29)"`.
+- [ ] **Step 4:** ctest + rfsim gate; metrics line (A2) gets `pdschq_stale_after_decode`. Commit `"fix(rx): no Technique D credit for decodes whose samples expired mid-decode (K33)"`.
 
 ### Task F3: Per-grant / per-hypothesis profile (spec §9 "profile first") (Sonnet; 🔁 Haiku runs)
 
@@ -825,7 +825,7 @@ TEST(Lifetime, CreditAllowedOnlyWhileSamplesValid) {
 
 ## GPU track (G1–G4) — DGX only
 
-### Task G1: CUDA LDPC pool safety (K30) (Sonnet; Opus review)
+### Task G1: CUDA LDPC pool safety (K34) (Sonnet; Opus review)
 
 **Files:**
 - Modify: `openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu` (~991-1088), `openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c` (~111-270)
@@ -834,18 +834,18 @@ TEST(Lifetime, CreditAllowedOnlyWhileSamplesValid) {
 Fix list (exact): (1) `ldpc_pool_decode` returns an error code; on any error or skipped launch every affected slot is **poisoned** (output bits filled with a pattern that cannot pass CRC, e.g. CRC of zero inverted) and the TB is reported failed — never a stale pass; (2) requests > 512 CBs are split into several launches instead of silently skipped; (3) bounded request queue (`g_queue`) with rejection → CPU fallback; (4) slot reservation all-or-nothing (no partial holds → no deadlock); (5) waits with timeout (default 50 ms) → CPU fallback + one-shot LOG_W; (6) `CHECK_CUDA` propagates errors; (7) `ldpc_decoder_shutdown` frees the real device pointers.
 
 - [ ] **Step 1: Failing tests** — (a) `SkippedLaunchNeverPasses`: inject a forced launch skip (test hook env `LDPC_CUDA_TEST_SKIP_LAUNCH=1`) after a successful decode of TB A, then decode TB B (different data) → B must FAIL CRC; (b) `OversizeRequestIsSplit`: 600 CBs decode correctly; (c) `QueueFullFallsBackToCpu`; (d) `TimeoutFallsBackToCpu` (hook `LDPC_CUDA_TEST_STALL_MS=200`).
-- [ ] **Step 2: Run → FAIL. Step 3: Implement. Step 4: Run → PASS**; `ldpctest -v _cuda` BLER table unchanged vs 2026-10-01 (K32 numbers).
-- [ ] **Step 5:** Commit `"fix(gpu): CUDA LDPC pool can no longer produce a stale CRC pass; split, bounded, timed fallback (K30)"`; PROJECT_MEMORY K30 → resolved.
+- [ ] **Step 2: Run → FAIL. Step 3: Implement. Step 4: Run → PASS**; `ldpctest -v _cuda` BLER table unchanged vs 2026-10-01 (K36 numbers).
+- [ ] **Step 5:** Commit `"fix(gpu): CUDA LDPC pool can no longer produce a stale CRC pass; split, bounded, timed fallback (K34)"`; PROJECT_MEMORY K34 → resolved.
 
 ### Task G2: Unified-memory GPU paths on GB10 (Sonnet)
 
 - Modify: the four CUDA modules (`ldpc_decoder.cu`, `nr_pdsch_gpu_fep.cu`, `nr_polar_sc_cuda.cu`, `nr_pdcch_gpu_fep.cu`) behind a CMake option `GPU_UNIFIED_MEMORY` (ON for aarch64 + GB10): replace pinned-staging + `cudaMemcpy` with `cudaMallocManaged` (or mapped host memory + `cudaHostGetDevicePointer`); set `LDPC_CUDA_ARCH` default to `121` when `CMAKE_SYSTEM_PROCESSOR == aarch64` and the detected GPU is GB10 (keep 89 elsewhere).
 - [ ] Steps: failing benchmark assertion (copy bytes per launch = 0 with the option ON, measured by a counter) → implement → GPU tests (`nr_pdsch_gpu_fep_test`, `nr_polar_sc_cuda_test`, G1 tests) pass → benchmark table (probe batch 1/32/256 µs, LDPC µs/CB) before/after → commit.
 
-### Task G3: GPU FEP stale samples (K31) (Sonnet)
+### Task G3: GPU FEP stale samples (K35) (Sonnet)
 
 - Modify: `nr_pdsch_passive_queue.c` (~654-962), `nr_pdsch_gpu_fep.cu` (~446-457): IQ buffers refcounted per slot (the ring slot cannot be reused while a GPU job references it; the producer skips/drops instead of overwriting and counts it) **or** a post-copy lifetime re-check that turns the job INCONCLUSIVE. Choose refcount if F3 shows the copy dominates; else re-check.
-- [ ] Steps: failing test with an artificially delayed worker (env hook) proving a stale job is now INCONCLUSIVE/never decoded → implement → `NR_GPU_FEP=1` rfsim A/B vs CPU (CRC equal within spread) → commit; K31 → resolved.
+- [ ] Steps: failing test with an artificially delayed worker (env hook) proving a stale job is now INCONCLUSIVE/never decoded → implement → `NR_GPU_FEP=1` rfsim A/B vs CPU (CRC equal within spread) → commit; K35 → resolved.
 
 ### Task G4 ★: Batched CB0 probes across grants × hypotheses (Opus design review, Sonnet implements)
 
@@ -884,10 +884,10 @@ Additions vs the former Task 8: the gate and legality masks come from GrantWork;
 ### Task R4: Defaults, documentation, review (Opus) — was Task 10
 
 - [ ] **Step 1:** If targets met with 0 wrong: set chosen defaults (K, weights, gate, fieldbook, P2, GPU paths) in code; else keep neutral defaults and record the gap.
-- [ ] **Step 2:** PROJECT_MEMORY: §23.9, §10.2 env table, §11.8 new log lines, §16, §24 (K28–K32 status), §25.
+- [ ] **Step 2:** PROJECT_MEMORY: §23.9, §10.2 env table, §11.8 new log lines, §16, §24 (K32–K36 status), §25.
 - [ ] **Step 3:** `/code-review` on `adaptive-rx-UL-DL..td/convergence-levers`; superpowers:finishing-a-development-branch; push.
 
 ## Self-review record (revision 2, 2026-10-01)
 
-- Spec coverage: §1 targets → Tasks 6, 7, R3, R4; §2 principles → Global Constraints + Task 4 tests; §4.1 gate → Task 1 + R2; §4.2 exclusions → Task 4b (+ R2 masks); §4.3 → Tasks 4, R2; §4.4 probe decoder → F1 (correct chest), F2, R1, G4; §4.5 → Tasks 2, 4; §4.6 → Tasks 3, R2; §5 P1/P2 (+ §9.3 same decoder) → Tasks 4, 6, 7, R2; §6.1 simulator (shared-IQ, SNR error) → Task 5, replay mode → R3 follow-up; §6.2 → R3; §6.3/§9.5 ablation → Tasks 6, 7, R3; §6.4 → Tasks 4, R2; §9.1 GrantWork → R1, legality bitsets → 4b, signatures → 4c, information-aware ordering → optional term, not scheduled (add to Task 2 only if Task 6 shows ordering is the bottleneck), modes → R1; §9.2 GPU → G1–G4; §9.4 V1–V9 → F1 (V1), F1/R1 (V2), F2 (V3), G1 (V4, V6), G3 (V5), G2 (V7), V8 out of scope (PDCCH GPU), V9 → K32 x86 comparison in R4 notes.
+- Spec coverage: §1 targets → Tasks 6, 7, R3, R4; §2 principles → Global Constraints + Task 4 tests; §4.1 gate → Task 1 + R2; §4.2 exclusions → Task 4b (+ R2 masks); §4.3 → Tasks 4, R2; §4.4 probe decoder → F1 (correct chest), F2, R1, G4; §4.5 → Tasks 2, 4; §4.6 → Tasks 3, R2; §5 P1/P2 (+ §9.3 same decoder) → Tasks 4, 6, 7, R2; §6.1 simulator (shared-IQ, SNR error) → Task 5, replay mode → R3 follow-up; §6.2 → R3; §6.3/§9.5 ablation → Tasks 6, 7, R3; §6.4 → Tasks 4, R2; §9.1 GrantWork → R1, legality bitsets → 4b, signatures → 4c, information-aware ordering → optional term, not scheduled (add to Task 2 only if Task 6 shows ordering is the bottleneck), modes → R1; §9.2 GPU → G1–G4; §9.4 V1–V9 → F1 (V1), F1/R1 (V2), F2 (V3), G1 (V4, V6), G3 (V5), G2 (V7), V8 out of scope (PDCCH GPU), V9 → K36 x86 comparison in R4 notes.
 - Known limitation: Task 4b's real reject vectors must be captured from a live log (Step 2 explains how); an empty vector table fails review.

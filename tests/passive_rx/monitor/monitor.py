@@ -14,6 +14,8 @@ endpoints are shown side by side, never fused.
 
 import argparse
 import json
+import math
+import os
 import re
 import subprocess
 import threading
@@ -581,7 +583,122 @@ def sub_thread(endpoint, store):
                 print(f"[monitor] bad JSON from {endpoint}: {e}")
 
 
-def make_handler(store, logtail, html_path):
+class JsonlTail:
+    """Incremental JSONL reader: tolerates a missing file, a partial last line, truncation/rotation.
+
+    Memory bound: a poll never reads more than MAX_CATCHUP_BYTES. If more than that is waiting
+    (first poll of a huge existing file, or a stalled poller) it seeks to the tail and drops the
+    first, partial line -- the dashboard wants the present, not the whole history."""
+    MAX_CATCHUP_BYTES = 4 * 1024 * 1024
+
+    def __init__(self, path, keep=512):
+        self.path, self.keep = path, keep
+        self.pos, self.pending, self.last, self.history, self.bad_lines = 0, b"", None, [], 0
+        self.ino, self.mtime = None, None
+
+    def poll(self):
+        if not self.path:
+            return []
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            self.pos, self.pending, self.ino = 0, b"", None  # gone (rotated): re-read from 0 when it returns
+            self.history, self.last = [], None
+            return []
+        self.mtime = st.st_mtime
+        if st.st_size < self.pos or (self.ino is not None and st.st_ino != self.ino):
+            self.pos, self.pending = 0, b""  # truncated or rotated: drop samples of the old file
+            self.history, self.last = [], None
+        self.ino = st.st_ino
+        skip_first = False
+        if st.st_size - self.pos > self.MAX_CATCHUP_BYTES:
+            self.pos, self.pending, skip_first = st.st_size - self.MAX_CATCHUP_BYTES, b"", True
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self.pos)
+                data = self.pending + f.read(self.MAX_CATCHUP_BYTES)
+                self.pos = f.tell()
+        except OSError:
+            return []
+        lines = data.split(b"\n")
+        self.pending = lines.pop()  # b"" if data ended with a newline
+        if skip_first and lines:
+            lines.pop(0)  # we landed mid-line
+        elif skip_first:
+            self.pending = b""
+        new = []
+        for l in lines:
+            if not l.strip():
+                continue
+            try:
+                obj = json.loads(l.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                self.bad_lines += 1
+                continue
+            if not isinstance(obj, dict):
+                self.bad_lines += 1
+                continue
+            new.append(obj)
+        if new:
+            self.history = (self.history + new)[-self.keep:]
+            self.last = self.history[-1]
+        return new
+
+
+def _num(d, k):
+    v = d.get(k)
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
+def health_snapshot(metrics, obs):
+    h = {"metrics": metrics.last, "metrics_age_s": None, "bad_lines": metrics.bad_lines + obs.bad_lines,
+         "rates": {"crc_pct_window": None, "grants_per_s": None, "drop_full_pct": None},
+         "obs": {"dl_per_s": 0.0, "ul_per_s": 0.0, "top_rnti": [], "prb_hist": [0] * 10}}
+    if metrics.last is not None and metrics.mtime is not None:
+        h["metrics_age_s"] = max(0.0, time.time() - metrics.mtime)
+    if len(metrics.history) >= 2:
+        a, b = metrics.history[-2], metrics.history[-1]
+        g = lambda k: (_num(a, k), _num(b, k))
+        (t0, t1), (d0, d1), (c0, c1), (q0, q1), (f0, f1) = (
+            g("t_mono_ns"), g("pdschq_decoded"), g("pdschq_crc_ok"), g("scanq_queued"), g("scanq_drop_full"))
+        # A negative delta means a counter reset (receiver restart): no rate for that window.
+        if any(x is not None and y is not None and y < x for x, y in ((d0, d1), (c0, c1), (q0, q1), (f0, f1))):
+            d0 = None  # nulls the pdsch rates
+            q0 = None  # nulls the drop rate
+        if None not in (d0, d1, c0, c1) and d1 - d0 > 0:
+            h["rates"]["crc_pct_window"] = 100.0 * (c1 - c0) / (d1 - d0)
+        if None not in (t0, t1, d0, d1) and t1 > t0:
+            h["rates"]["grants_per_s"] = (d1 - d0) / ((t1 - t0) / 1e9)
+        if None not in (q0, q1, f0, f1) and q1 - q0 > 0:
+            h["rates"]["drop_full_pct"] = 100.0 * (f1 - f0) / (q1 - q0)
+    recent = [o for o in obs.history[-2000:] if _num(o, "t_mono_ns") is not None]
+    if len(recent) >= 2:
+        span = max((recent[-1]["t_mono_ns"] - recent[0]["t_mono_ns"]) / 1e9, 1e-9)
+        h["obs"]["dl_per_s"] = sum(o.get("dir") == "DL" for o in recent) / span
+        h["obs"]["ul_per_s"] = sum(o.get("dir") == "UL" for o in recent) / span
+        cnt = {}
+        for o in recent:
+            r = o.get("rnti")
+            if isinstance(r, int):
+                cnt[r] = cnt.get(r, 0) + 1
+            nb = _num(o, "nb_rb")  # unknown values are JSON null
+            if nb is not None:
+                h["obs"]["prb_hist"][min(9, max(0, int(nb) * 10 // 275))] += 1
+        h["obs"]["top_rnti"] = [list(kv) for kv in sorted(cnt.items(), key=lambda kv: -kv[1])[:5]]
+    return h
+
+
+def poll_thread(*tails):
+    while True:
+        for t in tails:
+            try:
+                t.poll()
+            except Exception as e:  # never let a bad file kill the poller
+                print(f"[monitor] poll {t.path}: {e}")
+        time.sleep(1.0)
+
+
+def make_handler(store, logtail, html_path, metrics=None, obs=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -619,6 +736,9 @@ def make_handler(store, logtail, html_path):
                     "started_at": lg.get("started_at"),
                 }
                 self._send(200, json.dumps(payload).encode(), "application/json")
+            elif self.path.startswith("/health"):
+                snap = health_snapshot(metrics or JsonlTail(None), obs or JsonlTail(None))
+                self._send(200, json.dumps(snap).encode(), "application/json")
             elif self.path.startswith("/paper"):
                 self._send(200, json.dumps(logtail.paper_snapshot() if logtail else {}).encode(),
                            "application/json")
@@ -646,6 +766,10 @@ def main():
     ap.add_argument("--port", type=int, default=8080, help="HTTP port (default 8080)")
     ap.add_argument("--bind", default="0.0.0.0", help="HTTP bind address (default 0.0.0.0, for SSH access)")
     ap.add_argument("--log", help="receiver log file to tail for radio/decode health")
+    ap.add_argument("--metrics", metavar="FILE.jsonl",
+                    help="receiver metrics JSONL (schema 1) for the Receiver health tab / GET /health")
+    ap.add_argument("--obs", metavar="FILE.jsonl",
+                    help="per-grant observation JSONL (schema 1) for the Receiver health tab")
     ap.add_argument("--seed", metavar="FILE.jsonl",
                     help="backfill the store from a report JSONL at startup, then subscribe live. "
                          "ZeroMQ PUB/SUB does not replay, so without this a monitor restart shows an "
@@ -697,11 +821,15 @@ def main():
         logtail = DecoderLogTail(args.log)
         threading.Thread(target=logtail.run, daemon=True).start()
 
+    metrics, obs = JsonlTail(args.metrics), JsonlTail(args.obs, keep=5000)
+    metrics.poll(); obs.poll()
+    threading.Thread(target=poll_thread, args=(metrics, obs), daemon=True).start()
+
     html_path = Path(__file__).with_name("monitor.html")
     if not html_path.exists():
         raise SystemExit(f"missing {html_path}")
 
-    srv = ThreadingHTTPServer((args.bind, args.port), make_handler(store, logtail, html_path))
+    srv = ThreadingHTTPServer((args.bind, args.port), make_handler(store, logtail, html_path, metrics, obs))
     print(f"[monitor] http://{args.bind}:{args.port}/  (ssh -L {args.port}:localhost:{args.port} sens6)")
     srv.serve_forever()
 

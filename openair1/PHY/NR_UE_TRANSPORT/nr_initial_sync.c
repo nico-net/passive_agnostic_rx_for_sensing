@@ -8,6 +8,7 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "nr_transport_proto_ue.h"
+#include "nr_initial_sync_budget.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/utils/nr/nr_common.h"
@@ -24,12 +25,9 @@
 //#define DEBUG_INITIAL_SYNCH
 #define DUMP_PBCH_CH_ESTIMATES 0
 
-/* Upper bound on the scratch memory nr_initial_sync() may hold for parallel GSCN scanning at any
- * one moment. Each concurrently scanned GSCN needs a private copy of the capture (see the long
- * comment in nr_initial_sync()), so without a cap the requirement grows with numGscn * antennas *
- * bandwidth and reaches ~1.6 GB at 273 PRB / 4 RX / ~40 GSCN. 512 MB comfortably holds several
- * 273 PRB 4-antenna captures (~39 MB each) while staying well inside what a UE host can spare. */
-#define NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET (512UL * 1024UL * 1024UL)
+/* The scan scratch budget (upper bound on the memory nr_initial_sync() may hold for parallel GSCN scanning: each
+ * concurrently scanned GSCN needs a private copy of the capture, ~1.6 GB unbounded at 273 PRB / 4 RX / ~40 GSCN) is
+ * runtime-configurable: env ISAC_SCAN_SCRATCH_MB, clamped 64..16384, default 512 MB. See nr_initial_sync_budget.c. */
 
 // structure used for multiple SSB detection
 typedef struct NR_UE_SSB {
@@ -597,7 +595,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
    * power over the antennas it is given and the PBCH step MRCs them, so the scan gets the full
    * combining gain simply by being handed all branches. It used to be handed ONE (antenna 0)
    * because 273 PRB x 4 RX x ~40 GSCN of scratch once exhausted memory; the scratch is now
-   * batched under NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET (4 branches at 273 PRB = 6 GSCN per batch
+   * batched under the scan scratch budget (ISAC_SCAN_SCRATCH_MB) (4 branches at 273 PRB = 6 GSCN per batch
    * instead of 24), so that reason is gone. The receive chain itself is unchanged: nothing is
    * retuned, the stream is the same channels before and after lock. ISAC_SCAN_ANT=N narrows the
    * scan to the N strongest branches (A/B only). */
@@ -633,22 +631,29 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
   }
   const size_t rxdata_len = (size_t)fp->samples_per_frame * n_frames + fp->ofdm_symbol_size;
   const size_t bytes_per_gscn = (size_t)scan_fp.nb_antennas_rx * rxdata_len * sizeof(c16_t);
-  size_t max_by_mem = NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET / (bytes_per_gscn ? bytes_per_gscn : 1);
-  if (max_by_mem < 1)
-    max_by_mem = 1; // one GSCN at a time is the floor; below that the scan cannot run at all
-  size_t max_by_thread = get_nrUE_params()->Tpool.len_thr;
-  if (max_by_thread < 1)
-    max_by_thread = 1; // a pool with no workers runs tasks inline
-  int batch = (int)(max_by_mem < max_by_thread ? max_by_mem : max_by_thread);
+  nr_scan_scratch_parse_t scratch_status;
+  const long scratch_mb = nr_initial_sync_scratch_mb(&scratch_status);
+  static bool scratch_warned = false; // env problems are reported once, not per scan
+  if (!scratch_warned && (scratch_status == NR_SCAN_SCRATCH_CLAMPED || scratch_status == NR_SCAN_SCRATCH_INVALID)) {
+    scratch_warned = true;
+    LOG_W(NR_PHY,
+          "ISAC_SCAN_SCRATCH_MB=\"%s\" is %s, using %ld MB (valid range %ld..%ld)\n",
+          getenv("ISAC_SCAN_SCRATCH_MB"),
+          scratch_status == NR_SCAN_SCRATCH_CLAMPED ? "out of range, clamped" : "not a number, defaulted",
+          scratch_mb,
+          NR_INITIAL_SYNC_SCRATCH_MB_MIN,
+          NR_INITIAL_SYNC_SCRATCH_MB_MAX);
+  }
+  int batch = nr_initial_sync_scan_batch(bytes_per_gscn, (size_t)get_nrUE_params()->Tpool.len_thr, scratch_mb);
   if (batch > numGscn)
     batch = numGscn;
-  if (batch < numGscn)
-    LOG_I(NR_PHY,
-          "Scanning %d GSCN in batches of %d (%zu MB scratch per GSCN, %zu worker threads)\n",
-          numGscn,
-          batch,
-          bytes_per_gscn >> 20,
-          get_nrUE_params()->Tpool.len_thr);
+  LOG_I(NR_PHY,
+        "Scan scratch budget %ld MB (ISAC_SCAN_SCRATCH_MB), %zu MB per GSCN, %zu worker threads: scanning %d GSCN in batches of %d\n",
+        scratch_mb,
+        bytes_per_gscn >> 20,
+        (size_t)get_nrUE_params()->Tpool.len_thr,
+        numGscn,
+        batch);
 
   nr_ue_ssb_scan_t ssb_info[numGscn];
   for (int s = 0; s < numGscn; s++)

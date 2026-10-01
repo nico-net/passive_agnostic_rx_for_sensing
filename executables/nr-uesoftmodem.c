@@ -17,6 +17,7 @@
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/ran_context.h"
 #include "common/config/config_userapi.h"
@@ -251,6 +252,27 @@ int main(int argc, char **argv)
   nr_csirs_monitor_init();
   // Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.
   nr_pdcch_blind_monitor_init();
+  // Per-grant observation API (Task A3): JSONL of every decoded PDSCH/PUSCH grant; off unless ISAC_OBS_PATH is set.
+  {
+    const char *obs_path = getenv("ISAC_OBS_PATH");
+    /* ISAC_OBS_TEST_RING_SLOTS: test hook (overload A/B with a tiny ring); the default is used when unset. */
+    const char *ring_env = getenv("ISAC_OBS_TEST_RING_SLOTS");
+    uint32_t ring = 1u << 14;
+    if (ring_env && *ring_env) {
+      char *end = NULL;
+      const unsigned long v = strtoul(ring_env, &end, 10);
+      if (end && *end == '\0' && v >= 1)
+        ring = v > (1ul << 20) ? (1u << 20) : (uint32_t)v; // clamp to [1, 1<<20]
+      else
+        LOG_W(PHY, "SENSING: ISAC_OBS_TEST_RING_SLOTS=%s invalid, using %u\n", ring_env, ring);
+    }
+    if (obs_path && *obs_path) {
+      if (nr_passive_obs_open(obs_path, ring))
+        LOG_I(PHY, "SENSING: per-grant observations -> %s (ring %u, drop-on-full)\n", obs_path, ring);
+      else
+        LOG_W(PHY, "SENSING: ISAC_OBS_PATH=%s set but the observation writer could not be opened; no observations\n", obs_path);
+    }
+  }
 
   softmodem_verify_mode(get_softmodem_params());
 
@@ -506,6 +528,8 @@ int main(int argc, char **argv)
       }
     }
   }
+
+  nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)
 
   nrue_ru_end();
 

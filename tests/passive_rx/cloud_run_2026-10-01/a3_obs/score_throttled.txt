@@ -1,0 +1,4 @@
+{"arm": "base_r1", "bank_len": 46, "conv_s": 39.904, "cpu_pct": 201, "crc_pct": 95.38, "drop_full_pct": 1.6362, "first_crnti_s": 35.226, "ldpc_ok": 16037, "ldpc_seg_fail": 720, "max_rss_kb": 896368, "n_converged": 2, "pdsch_crc_ok": 16037, "pdsch_decoded": 16814, "scanq_drop_full": 2157, "scanq_queued": 131826, "sync_s": 8.392, "ttc_s": 4.678}
+PASS base_r1
+evidence: /tmp/claude-0/ev/a3/thr
+rc=0

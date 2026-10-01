@@ -1,0 +1,22 @@
+{
+  "base": {
+    "n": 2,
+    "valid": 1,
+    "crc_pct": [
+      95.45,
+      null
+    ],
+    "ttc_s": [
+      4.218,
+      null
+    ],
+    "drop_full_pct": [
+      1.3917,
+      null
+    ],
+    "verdicts": [
+      "VALID",
+      "INTERRUPTED"
+    ]
+  }
+}

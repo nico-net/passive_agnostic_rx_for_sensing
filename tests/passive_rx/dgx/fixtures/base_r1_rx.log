@@ -1,0 +1,807 @@
+0.016 CMDLINE: "/home/user/passive_agnostic_rx_for_sensing/cmake_targets/ran_build/build/nr-uesoftmodem" "--passive-rx" "--rfsim" "-O" "/home/user/passive_agnostic_rx_for_sensing/tests/passive_rx/ue.passive.bwp.agn.conf" "-C" "3319680000" "-r" "106" "--ssb" "516" "--numerology" "1" "--band" "78" "--sensing.pdcch_blind_monitor_scan_thread" "1:8:-1" 
+0.018 [PHY]    SENSING: [sensing] section disabled (enable=0); ISAC pipeline not started
+0.018 [PHY]    SENSING: 1 UE-agnostic CSI-RS monitor resource(s) configured
+0.018 [PHY]    SENSING:   monitor[0] row=2 rb=[0..106) freq_domain=0x1 symb_l0=13 symb_l1=0 cdm=0 density=2 scramb=0 period=160 offset=0
+0.018 [PHY]    SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI-1_1 width reconciliation not applicable (autoconf scans DCI format 1_0 only)
+0.018 [PHY]    SENSING: passive PDSCH decode enabled with NO pdcch_blind_monitor_tda -- the 3GPP default TDRA table will be assumed, which is wrong for any gNB carrying its own pdsch-TimeDomainAllocationList; expect a ~0% CRC pass rate that says nothing about the channel
+0.018 [PHY]    SENSING: blind PDCCH DCI 1_0 scanning alongside format 1_1, ss=ue-specific n_rb_riv=auto:0 rb_offset=auto:-1 dci_length=0 class_mask=0x0 mux_pattern=0 sib1=0 tda_common_entries=0
+0.018 [PHY]    SENSING: blind PDCCH monitor: autoconf mode, will configure once MIB is decoded
+0.018 [UTIL]   running in passive receive-only mode (--passive-rx): cell search and SI acquisition only, no uplink
+0.018 [UTIL]   threadCreate() for Tpool0_-1: creating thread with affinity ffffffff, priority 97
+0.023 [UTIL]   threadCreate() for Tpool1_-1: creating thread with affinity ffffffff, priority 97
+0.026 [UTIL]   threadCreate() for Tpool2_-1: creating thread with affinity ffffffff, priority 97
+0.029 [UTIL]   threadCreate() for Tpool3_-1: creating thread with affinity ffffffff, priority 97
+0.032 [UTIL]   threadCreate() for Tpool4_-1: creating thread with affinity ffffffff, priority 97
+0.035 [UTIL]   threadCreate() for Tpool5_-1: creating thread with affinity ffffffff, priority 97
+0.038 [UTIL]   threadCreate() for Tpool6_-1: creating thread with affinity ffffffff, priority 97
+0.041 [UTIL]   threadCreate() for Tpool7_-1: creating thread with affinity ffffffff, priority 97
+1.050 [OPT]    OPT disabled
+1.051 [HW]     Version: Branch: cloud/dgx-next-steps Abrev. Hash: be2e7fa4b6 Date: Thu Oct 1 09:13:00 2026 +0200
+1.051 [NR_RRC] create TASK_RRC_NRUE 
+1.051 [UTIL]   threadCreate() for TASK_RRC_NRUE: creating thread with affinity ffffffff, priority 50
+1.054 [UTIL]   threadCreate() for TASK_NAS_NRUE: creating thread with affinity ffffffff, priority 50
+1.066 [SIM]    UICC simulation: IMSI=001060000000000, IMEISV=6754567890123413, Ki=00000000000000000000000000000000, OPc=00000000000000000000000000000000
+1.066 [SIM]    loading PDU session parameters from legacy UICC configuration. Please update to use uicc0.pdu_sessions instead to make this warning disappear
+4.066 [SIM]    will request PDU session ID 10, type 1, DNN oai, NSSAI 1.ffffff
+4.067 [NR_MAC] [UE0] Initializing MAC
+4.067 [NR_MAC] Initializing dl and ul config_request. num_slots = 20
+4.067 [RLC]    Activated srb0 for UE 0
+4.067 [UTIL]   threadCreate() for time source iq samples: creating thread with affinity ffffffff, priority 2
+4.070 [UTIL]   time manager configuration: [time source: iq_samples] [mode: standalone] [server IP: 127.0.0.1} [server port: 7374] (server IP/port not used)
+4.070 [PHY]    Set UE nb_rx_antenna 1, nb_tx_antenna 1, threequarter_fs 0, ofdm_offset_divisor 8
+4.070 [PHY]    SA init parameters. DL freq 3319680000 UL offset 0 SSB numerology 1 N_RB_DL 106
+4.070 [PHY]    Init: N_RB_DL 106, first_carrier_offset 1412, nb_prefix_samples 144,nb_prefix_samples0 176, ofdm_symbol_size 2048
+4.070 [PHY]    samples_per_subframe 61440/per second 61440000, wCP 57344
+4.070 [PHY]    Set UE_fo_compensation 0, UE_scan_carrier 0, UE_no_timing_correction 0 
+4.070 , chest-freq 0, chest-time 0
+4.072 [UTIL]   threadCreate() for SYNC__actor: creating thread with affinity ffffffff, priority 97
+4.076 [UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+4.080 [UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+4.083 [UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+4.088 [UTIL]   threadCreate() for DL__actor: creating thread with affinity ffffffff, priority 97
+4.092 [UTIL]   threadCreate() for UL__actor: creating thread with affinity ffffffff, priority 97
+4.097 [UTIL]   threadCreate() for UL__actor: creating thread with affinity ffffffff, priority 97
+4.101 [PHY]    Initializing UE vars for gNB TXant 1, UE RXant 1
+4.268 [PHY]    prs_config configuration NOT found..!! Skipped configuring UE for the PRS reception
+4.313 [PHY]    HW: Configuring ru_id 0, sample_rate 61440000.000000, tx/rx num_channels 1/1, duplex_mode TDD
+4.313 [PHY]    HW: Configuring channel 0 (rf_chain 0): setting tx_freq 3319680000 Hz, rx_freq 3319680000 Hz, tune_offset 0
+4.313 [PHY]    HW: Configuring channel 0 (rf_chain 0): setting tx_gain 0, rx_gain 110
+6.434 [UTIL]   threadCreate() for ru_start_thread: creating thread with affinity ffffffff, priority 97
+6.505 [OCM]    Channel Model (inside of new_channel_desc_scm)=23
+6.506 
+6.506 [OCM]    [CHANNEL] Getting new channel descriptor, nb_tx 1, nb_rx 1, nb_taps 1, channel_length 1
+6.506 [OCM]    Model rfsimu_channel_enB0 type AWGN allocated from config file, list modellist_rfsimu_1
+6.506 [OCM]    Channel Model (inside of new_channel_desc_scm)=23
+6.506 
+6.506 [OCM]    [CHANNEL] Getting new channel descriptor, nb_tx 1, nb_rx 1, nb_taps 1, channel_length 1
+6.506 [OCM]    Model rfsimu_channel_ue0 type AWGN allocated from config file, list modellist_rfsimu_1
+6.506 [HW]     Running as client: will connect to a rfsimulator server side
+6.506 [HW]     [RAU] has loaded RFSIMULATOR device.
+6.506 [HW]     Trying to connect to 127.0.0.1:4043
+6.506 [HW]     Connection to 127.0.0.1:4043 established
+6.506 [HW]     Random channel rfsimu_channel_enB0 in rfsimulator activated
+6.507 [HW]     RFsim: Number of antennas changed from 0 to 1
+6.507 [PHY]    Intializing UE Threads for instance 0 ...
+6.507 [UTIL]   threadCreate() for UEthread_0: creating thread with affinity ffffffff, priority 97
+6.510 [UTIL]   threadCreate() for L1_UE_stats_0: creating thread with affinity ffffffff, priority 1
+8.537 [PHY]    SSB position provided
+8.538 [NR_PHY] Starting sync detection
+8.538 [PHY]    [UE thread Synch] Running Initial Synch 
+8.538 [NR_PHY] Starting cell search with center freq: 3319680000, bandwidth: 106. Scanning for 1 number of GSCN.
+8.573 [NR_PHY] Scanning GSCN: 0, with SSB offset: 516, SSB Freq: 0.000000
+8.574 [PHY]    SENSING: CHRMS acquisition per-channel RMS: ch0=197.3
+8.687 [PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=0 rx_offset=588222 nb_prefix=144 nb_prefix0=0 is_sync=0 s1_mean=85.54 s1_rms=90.65 s2_mean=86.47 s2_rms=91.23 s3_mean=24.72 s3_rms=91.25
+8.688 [PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=1 rx_offset=590414 nb_prefix=144 nb_prefix0=0 is_sync=0 s1_mean=110.81 s1_rms=124.84 s2_mean=111.73 s2_rms=125.39 s3_mean=45.01 s3_rms=125.39
+8.688 [PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=2 rx_offset=592606 nb_prefix=144 nb_prefix0=0 is_sync=0 s1_mean=106.90 s1_rms=120.71 s2_mean=106.69 s2_rms=120.70 s3_mean=41.87 s3_rms=120.63
+8.688 [PHY]    SENSING: FEPDIAG path=acquisition slot=- symbol=3 rx_offset=594798 nb_prefix=144 nb_prefix0=0 is_sync=0 s1_mean=113.03 s1_rms=126.40 s2_mean=111.97 s2_rms=125.40 s3_mean=44.99 s3_rms=125.41
+8.688 [PHY]    Initial sync: pbch decoded sucessfully, ssb index 0
+8.688 [PHY]    pbch rx ok. rsrp:51 dB/RE, adjust_rxgain:-1 dB
+8.688 [NR_PHY] Cell Detected with GSCN: 0, SSB SC offset: 516, SSB Ref: 0.000000, PSS Corr peak: 90 dB, PSS Corr Average: 70
+8.689 [PHY]    SYNCDIAG symbolOffset=2 mu=1 n_symb_prefix0=1 sync_pos_frame=4416 ssbOffset=588096 rx_offset=583680 wrapped=0 samples_per_frame=614400 fft=2048 cp=144 cp0=176 symdur=2192 frame_id=0 init_sync_frame=1 ssbIndex=0 halfFrameBit=0
+8.689 [PHY]    [UE0] In synch, rx_offset 583680 samples
+8.689 [PHY]    [UE 0] Measured Carrier Frequency offset 5 Hz
+8.689 [PHY]    Initial sync successful, PCI: 0
+8.689 [PHY]    HW: Configuring channel 0 (rf_chain 0): setting tx_freq 3319680005 Hz, rx_freq 3319680005 Hz, tune_offset 0
+8.689 [PHY]    Got synch: hw_slot_offset 38, carrier off 5 Hz
+8.690 [NR_RRC] [UE 0] BCCH update: phyCellID 0->0, arfcn_ssb 0->621312
+8.704 [PHY]    SENSING: ACQ_EVENT pbch_locked (n=1, state=SEARCHING)
+8.704 [PHY]    SENSING: ACQ_STATE SEARCHING -> PBCH_LOCKED (updates=1 time_in_prev=0 regressions=0) evidence[len_found=0 coreset_ok=0 ul_bwp=0 dl_win=0 ul_width_win=0 ul_interp_win=0]
+8.704 [PHY]    UE synchronized! decoded_frame_rx=722 UE->init_sync_frame=1 trashed_frames=6
+8.704 [PHY]    Resynchronizing RX by 583680 samples
+8.730 [HW]     received write reorder clear context
+8.730 [PHY]    max_pos_acc = 0, initial_drift_shift = 0, shiftForNextFrame = 0
+8.732 [NR_MAC] Passive RX: MIB indicates no CORESET 0 / SIB1 in this cell -- not scheduling SIB1
+8.732 [PHY]    SENSING: FFTADDR frame=730 slot=0 symbol=3 bias=0 fep_rx_offset=6734 nb_pfx=144 nb_pfx0=176
+8.732 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=5 |H|max=11852
+8.732 [PHY]    SENSING: FFTADDR frame=730 slot=0 symbol=4 bias=0 fep_rx_offset=8926 nb_pfx=144 nb_pfx0=176
+8.732 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5760
+8.732 [PHY]    SENSING: FFTADDR frame=730 slot=0 symbol=5 bias=0 fep_rx_offset=11118 nb_pfx=144 nb_pfx0=176
+8.732 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=5 |H|max=12008
+8.732 [PHY]    SENSING: TRACKLOCK frame=730 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+8.732 [UTIL]   threadCreate() for passivePdsch0: creating thread with affinity ffffffff, priority 40
+8.794 [UTIL]   threadCreate() for passivePdsch1: creating thread with affinity ffffffff, priority 40
+8.794 [PHY]    SENSING: passive PDSCH decode consumer 0 started
+8.877 [UTIL]   threadCreate() for passivePdsch2: creating thread with affinity ffffffff, priority 40
+8.877 [PHY]    SENSING: passive PDSCH decode consumer 1 started
+8.944 [UTIL]   threadCreate() for passivePdsch3: creating thread with affinity ffffffff, priority 40
+8.944 [PHY]    SENSING: passive PDSCH decode consumer 2 started
+9.045 [PHY]    SENSING: passive PDSCH decode pool: 4 consumer(s), depth 64, cores -1..-1, drop-oldest
+9.045 [PHY]    SENSING: passive PDSCH decode DEFERRED to 4 consumer thread(s) (depth=64 core=-1) -- 775us mean decode no longer runs on the PHY receive thread
+9.046 [PHY]    SENSING: passive PDSCH decode consumer 3 started
+9.046 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=66941104 consumed=30720
+9.077 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=67494064 consumed=583680
+9.094 [PHY]    SENSING: FFTADDR frame=732 slot=0 symbol=3 bias=0 fep_rx_offset=6734 nb_pfx=144 nb_pfx0=176
+9.094 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5916
+9.094 [PHY]    SENSING: FFTADDR frame=732 slot=0 symbol=4 bias=0 fep_rx_offset=8926 nb_pfx=144 nb_pfx0=176
+9.094 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5332
+9.094 [PHY]    SENSING: FFTADDR frame=732 slot=0 symbol=5 bias=0 fep_rx_offset=11118 nb_pfx=144 nb_pfx0=176
+9.094 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5968
+9.094 [PHY]    SENSING: TSYNC_OBS frame=220 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+2.000 n_obs=1 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481170020 measure_only=0
+9.094 [PHY]    SENSING: TRACKLOCK frame=732 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.095 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=68169903 consumed=1259519
+9.110 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=68722863 consumed=1812479
+9.126 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=5 |H|max=11928
+9.126 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5800
+9.126 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=5 |H|max=11876
+9.127 [PHY]    SENSING: TSYNC_OBS frame=222 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+1.600 n_obs=2 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=907940732 measure_only=0
+9.127 [PHY]    SENSING: TRACKLOCK frame=734 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.127 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=69398704 consumed=2488320
+9.149 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=69951664 consumed=3041280
+9.178 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5864
+9.178 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5316
+9.178 [PHY]    SENSING: CHESTGAIN N=2048 ant=0 shift=4 |H|max=5928
+9.178 [PHY]    SENSING: TSYNC_OBS frame=224 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+1.640 n_obs=3 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480721826 measure_only=0
+9.178 [PHY]    SENSING: TRACKLOCK frame=736 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.178 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=70627503 consumed=3717119
+9.203 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=71180463 consumed=4270079
+9.234 [PHY]    SENSING: TSYNC_OBS frame=226 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+1.276 n_obs=4 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=909253484 measure_only=0
+9.234 [PHY]    SENSING: TRACKLOCK frame=738 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.234 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=71856304 consumed=4945920
+9.258 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=72409264 consumed=5498880
+9.279 [PHY]    SENSING: TSYNC_OBS frame=228 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+1.348 n_obs=5 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481089538 measure_only=0
+9.280 [PHY]    SENSING: TRACKLOCK frame=740 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.280 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=73085103 consumed=6174719
+9.297 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=73638063 consumed=6727679
+9.320 [PHY]    SENSING: TSYNC_OBS frame=230 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+1.014 n_obs=6 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908283072 measure_only=0
+9.321 [PHY]    SENSING: TRACKLOCK frame=742 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.321 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=74313904 consumed=7403520
+9.343 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=74866864 consumed=7956480
+9.365 [PHY]    SENSING: TSYNC_OBS frame=232 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+1.112 n_obs=7 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481246150 measure_only=0
+9.365 [PHY]    SENSING: TRACKLOCK frame=744 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.365 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=75542703 consumed=8632319
+9.385 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=76095663 consumed=9185279
+9.416 [PHY]    SENSING: TSYNC_OBS frame=234 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+0.801 n_obs=8 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908562770 measure_only=0
+9.421 [PHY]    SENSING: TRACKLOCK frame=746 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.421 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=76771504 consumed=9861120
+9.443 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=77324464 consumed=10414080
+9.475 [PHY]    SENSING: TSYNC_OBS frame=236 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.921 n_obs=9 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=482150748 measure_only=0
+9.475 [PHY]    SENSING: TRACKLOCK frame=748 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.475 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=78000303 consumed=11089919
+9.509 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=78553263 consumed=11642879
+9.535 [PHY]    SENSING: TSYNC_OBS frame=238 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+0.629 n_obs=10 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908476172 measure_only=0
+9.535 [PHY]    SENSING: TRACKLOCK frame=750 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.535 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=79229104 consumed=12318720
+9.563 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=79782064 consumed=12871680
+9.588 [PHY]    SENSING: TSYNC_OBS frame=240 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.766 n_obs=11 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481028050 measure_only=0
+9.588 [PHY]    SENSING: TRACKLOCK frame=752 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.588 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=80457903 consumed=13547519
+9.602 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=81010863 consumed=14100479
+9.621 [PHY]    SENSING: TSYNC_OBS frame=242 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+0.489 n_obs=12 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=909179476 measure_only=0
+9.621 [PHY]    SENSING: TRACKLOCK frame=754 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.621 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=81686704 consumed=14776320
+9.638 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=82239664 consumed=15329280
+9.662 [PHY]    SENSING: TSYNC_OBS frame=244 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.640 n_obs=13 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480981092 measure_only=0
+9.662 [PHY]    SENSING: TRACKLOCK frame=756 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.662 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=82915503 consumed=16005119
+9.679 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=83468463 consumed=16558079
+9.698 [PHY]    SENSING: TSYNC_OBS frame=246 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+0.376 n_obs=14 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=910425096 measure_only=0
+9.698 [PHY]    SENSING: TRACKLOCK frame=758 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.698 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=84144304 consumed=17233920
+9.723 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=84697264 consumed=17786880
+9.746 [PHY]    SENSING: TSYNC_OBS frame=248 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.539 n_obs=15 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481110362 measure_only=0
+9.747 [PHY]    SENSING: TRACKLOCK frame=760 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.747 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=85373103 consumed=18462719
+9.774 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=85926063 consumed=19015679
+9.802 [PHY]    SENSING: TSYNC_OBS frame=250 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+0.285 n_obs=16 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908438660 measure_only=0
+9.802 [PHY]    SENSING: TRACKLOCK frame=762 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.802 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=86601904 consumed=19691520
+9.829 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=87154864 consumed=20244480
+9.852 [PHY]    SENSING: TSYNC_OBS frame=252 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.456 n_obs=17 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480656628 measure_only=0
+9.852 [PHY]    SENSING: TRACKLOCK frame=764 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.852 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=87830703 consumed=20920319
+9.868 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=88383663 consumed=21473279
+9.890 [PHY]    SENSING: TSYNC_OBS frame=254 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=+0.211 n_obs=18 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=907111802 measure_only=0
+9.890 [PHY]    SENSING: TRACKLOCK frame=766 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.890 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=89059504 consumed=22149120
+9.906 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=89612464 consumed=22702080
+9.923 [PHY]    SENSING: TRACKLOCK frame=768 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.923 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=90288303 consumed=23377919
+9.938 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=90841263 consumed=23930879
+9.956 [PHY]    SENSING: TSYNC_OBS frame=2 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.010 n_obs=19 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=911404740 measure_only=0
+9.956 [PHY]    SENSING: TRACKLOCK frame=770 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+9.956 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=91517104 consumed=24606720
+9.970 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=92070064 consumed=25159680
+9.988 [PHY]    SENSING: TSYNC_OBS frame=4 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.191 n_obs=20 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481522776 measure_only=0
+9.988 [PHY]    SENSING: TRACKLOCK frame=772 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+9.988 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=92745903 consumed=25835519
+10.004 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=93298863 consumed=26388479
+10.022 [PHY]    SENSING: TSYNC_OBS frame=6 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.028 n_obs=21 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908007850 measure_only=0
+10.022 [PHY]    SENSING: TRACKLOCK frame=774 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+10.022 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=93974704 consumed=27064320
+10.037 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=94527664 consumed=27617280
+10.054 [PHY]    SENSING: TSYNC_OBS frame=8 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.174 n_obs=22 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481779688 measure_only=0
+10.054 [PHY]    SENSING: TRACKLOCK frame=776 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc -2 -> 0 (delta +2) sampleShift=-1
+10.054 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=95203503 consumed=28293119
+10.069 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=95756463 consumed=28846079
+10.087 [PHY]    SENSING: TSYNC_OBS frame=10 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.043 n_obs=23 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908867408 measure_only=0
+10.087 [PHY]    SENSING: TRACKLOCK frame=778 slot=0 ssb=0 pbch_crc_ok=1 max_pos_acc 0 -> -2 (delta -2) sampleShift=1
+10.087 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=96432304 consumed=29521920
+10.110 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=96985264 consumed=30074880
+10.140 [PHY]    SENSING: COREMAPTOP bg=100.0 excl_w=-1..-1 top: w1=157(5.7sig) w0=156(5.6sig) w12=152(5.2sig)
+10.140 [PHY]    SENSING: COREMAPLT dwell=1 (recurrence across dwells; excl w-1..-1) w0:1/1 dwells,156 hits,rnti=0x0000  w1:1/1 dwells,157 hits,rnti=0x0000  w12:1/1 dwells,152 hits,rnti=0x0000  
+10.142 [PHY]    SENSING: TSYNC_OBS frame=12 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.161 n_obs=24 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480483592 measure_only=0
+10.142 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=97661103 consumed=30750719
+10.156 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=98214063 consumed=31303679
+10.174 [PHY]    SENSING: TSYNC_OBS frame=14 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.055 n_obs=25 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=909514344 measure_only=0
+10.174 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=98889904 consumed=31979520
+10.187 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=99442864 consumed=32532480
+10.205 [PHY]    SENSING: TSYNC_OBS frame=16 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.151 n_obs=26 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480895646 measure_only=0
+10.205 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=100118703 consumed=33208319
+10.218 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=100671663 consumed=33761279
+10.235 [PHY]    SENSING: TSYNC_OBS frame=18 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.064 n_obs=27 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=910260200 measure_only=0
+10.236 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=101347504 consumed=34437120
+10.251 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=101900464 consumed=34990080
+10.272 [PHY]    SENSING: TSYNC_OBS frame=20 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.142 n_obs=28 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480641768 measure_only=0
+10.272 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=102576303 consumed=35665919
+10.289 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=103129263 consumed=36218879
+10.311 [PHY]    SENSING: TSYNC_OBS frame=22 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.072 n_obs=29 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908019522 measure_only=0
+10.312 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=103805104 consumed=36894720
+10.326 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=104358064 consumed=37447680
+10.346 [PHY]    SENSING: TSYNC_OBS frame=24 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.135 n_obs=30 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481225324 measure_only=0
+10.346 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=105033903 consumed=38123519
+10.362 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=105586863 consumed=38676479
+10.381 [PHY]    SENSING: TSYNC_OBS frame=26 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.078 n_obs=31 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=909221484 measure_only=0
+10.381 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=106262704 consumed=39352320
+10.397 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=106815664 consumed=39905280
+10.425 [PHY]    SENSING: TSYNC_OBS frame=28 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.129 n_obs=32 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481053594 measure_only=0
+10.425 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=107491503 consumed=40581119
+10.446 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=108044463 consumed=41134079
+10.464 [PHY]    SENSING: TSYNC_OBS frame=30 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.084 n_obs=33 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=906461968 measure_only=0
+10.464 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=108720304 consumed=41809920
+10.479 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=109273264 consumed=42362880
+10.498 [PHY]    SENSING: TSYNC_OBS frame=32 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.125 n_obs=34 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480497148 measure_only=0
+10.498 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=109949103 consumed=43038719
+10.514 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=110502063 consumed=43591679
+10.533 [PHY]    SENSING: TSYNC_OBS frame=34 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.088 n_obs=35 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=910199336 measure_only=0
+10.533 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=111177904 consumed=44267520
+10.547 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=111730864 consumed=44820480
+10.565 [PHY]    SENSING: TSYNC_OBS frame=36 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.121 n_obs=36 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481101088 measure_only=0
+10.566 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=112406703 consumed=45496319
+10.579 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=112959663 consumed=46049279
+10.596 [PHY]    SENSING: TSYNC_OBS frame=38 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.091 n_obs=37 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=909661920 measure_only=0
+10.596 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=113635504 consumed=46725120
+10.610 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=114188464 consumed=47278080
+10.627 [PHY]    SENSING: TSYNC_OBS frame=40 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.118 n_obs=38 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481802400 measure_only=0
+10.627 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=114864303 consumed=47953919
+10.642 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=115417263 consumed=48506879
+10.659 [PHY]    SENSING: TSYNC_OBS frame=42 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.094 n_obs=39 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=909457930 measure_only=0
+10.659 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=116093104 consumed=49182720
+10.674 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=116646064 consumed=49735680
+10.692 [PHY]    SENSING: TSYNC_OBS frame=44 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.116 n_obs=40 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480546650 measure_only=0
+10.692 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=117321903 consumed=50411519
+10.717 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=117874863 consumed=50964479
+10.747 [PHY]    SENSING: TSYNC_OBS frame=46 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.096 n_obs=41 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=911729884 measure_only=0
+10.747 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=118550704 consumed=51640320
+10.770 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=119103664 consumed=52193280
+10.799 [PHY]    SENSING: TSYNC_OBS frame=48 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.114 n_obs=42 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480660892 measure_only=0
+10.799 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=119779503 consumed=52869119
+10.830 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=120332463 consumed=53422079
+10.867 [PHY]    SENSING: TSYNC_OBS frame=50 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.098 n_obs=43 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=909290460 measure_only=0
+10.867 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=121008304 consumed=54097920
+10.893 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=121561264 consumed=54650880
+10.919 [PHY]    SENSING: TSYNC_OBS frame=52 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.112 n_obs=44 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480820200 measure_only=0
+10.920 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=122237103 consumed=55326719
+10.948 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=122790063 consumed=55879679
+10.967 [PHY]    SENSING: TSYNC_OBS frame=54 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.099 n_obs=45 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=910617482 measure_only=0
+10.967 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=123465904 consumed=56555520
+10.985 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=124018864 consumed=57108480
+11.009 [PHY]    SENSING: TSYNC_OBS frame=56 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.111 n_obs=46 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481018410 measure_only=0
+11.009 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=124694703 consumed=57784319
+11.031 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=125247663 consumed=58337279
+11.054 [PHY]    SENSING: TSYNC_OBS frame=58 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.100 n_obs=47 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=911607648 measure_only=0
+11.054 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=125923504 consumed=59013120
+11.073 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=126476464 consumed=59566080
+11.091 [PHY]    SENSING: TSYNC_OBS frame=60 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.110 n_obs=48 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481354624 measure_only=0
+11.091 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=127152303 consumed=60241919
+11.109 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=127705263 consumed=60794879
+11.126 [PHY]    SENSING: COREMAPTOP bg=100.0 excl_w=-1..-1 top: w1=157(5.7sig) w0=156(5.6sig) w12=152(5.2sig)
+11.126 [PHY]    SENSING: COREMAPLT dwell=2 (recurrence across dwells; excl w-1..-1) w0:2/2 dwells,312 hits,rnti=0x0000  w1:2/2 dwells,314 hits,rnti=0x0000  w12:2/2 dwells,304 hits,rnti=0x0000  
+11.126 [PHY]    SENSING: RFCENSUS slots=2000 ssb_slots=50 pbch_ok=50 pbch_fail=0 rf_pow=170.76 ref=170.76 bad=0 shiftForNextFrame=0 max_pos_acc=0 frame=829
+11.126 [PHY]    SENSING: RFPOW mean(I^2+Q^2) absolute, absolute; rf= is TRUE RF input power via the UHD power reference, -- when uncalibrated: ch0=-47.03dBFS(rf=--,clip=0) 
+11.126 [PHY]    SENSING: ADCPEAK max|I|,|Q| since start; hot = samples above 0.9 full scale: ch0=-29.8dBFS(hot=0.0000%) 
+11.126 [PHY]    SENSING: ANTPOW raw=[170.76 0.00 0.00 0.00] dB=[0.0 0.0 0.0 0.0] (raw |I|+|Q| off the time-domain buffer, BEFORE any alignment -- compare against RXBRANCH pw[])
+11.127 [PHY]    SENSING: TSYNC_OBS frame=62 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.101 n_obs=49 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=908369000 measure_only=0
+11.127 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=128381104 consumed=61470720
+11.154 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=128934064 consumed=62023680
+11.183 [PHY]    SENSING: TSYNC_OBS frame=64 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.109 n_obs=50 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480451074 measure_only=0
+11.183 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=129609903 consumed=62699519
+11.207 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=130162863 consumed=63252479
+11.233 [PHY]    SENSING: TSYNC_OBS frame=66 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.102 n_obs=51 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=910197288 measure_only=0
+11.233 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=130838704 consumed=63928320
+11.255 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=131391664 consumed=64481280
+11.282 [PHY]    SENSING: TSYNC_OBS frame=68 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.108 n_obs=52 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481452302 measure_only=0
+11.282 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=132067503 consumed=65157119
+11.305 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=132620463 consumed=65710079
+11.328 [PHY]    SENSING: TSYNC_OBS frame=70 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.103 n_obs=53 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=910566652 measure_only=0
+11.328 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=133296304 consumed=66385920
+11.349 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=133849264 consumed=66938880
+11.374 [PHY]    SENSING: TSYNC_OBS frame=72 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.108 n_obs=54 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480878014 measure_only=0
+11.375 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=134525103 consumed=67614719
+11.396 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=135078063 consumed=68167679
+11.423 [PHY]    SENSING: TSYNC_OBS frame=74 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.103 n_obs=55 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=911473824 measure_only=0
+11.423 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=135753904 consumed=68843520
+11.448 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=136306864 consumed=69396480
+11.475 [PHY]    SENSING: TSYNC_OBS frame=76 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.107 n_obs=56 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=481543624 measure_only=0
+11.475 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=136982703 consumed=70072319
+11.497 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=137535663 consumed=70625279
+11.513 [PHY]    SENSING: TSYNC_OBS frame=78 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.104 n_obs=57 e_win_frac=0.867 peak_oow=0 reliable=1 max_val=910270930 measure_only=0
+11.514 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=138211504 consumed=71301120
+11.530 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=138764464 consumed=71854080
+11.545 [PHY]    SENSING: TSYNC_OBS frame=80 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.107 n_obs=58 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=480734762 measure_only=0
+11.546 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=139440303 consumed=72529919
+11.561 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=139993263 consumed=73082879
+11.583 [PHY]    SENSING: TSYNC_OBS frame=82 slot=0 corr_pos=-2 prev_pos=2 d_frames=2 d_per_frame=-2.000 drift_ema=-0.104 n_obs=59 e_win_frac=0.868 peak_oow=0 reliable=1 max_val=909487632 measure_only=0
+11.583 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=140669104 consumed=73758720
+11.603 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=141222064 consumed=74311680
+11.616 [PHY]    SENSING: TSYNC_OBS frame=84 slot=0 corr_pos=2 prev_pos=-2 d_frames=2 d_per_frame=+2.000 drift_ema=+0.107 n_obs=60 e_win_frac=0.994 peak_oow=0 reliable=1 max_val=482118636 measure_only=0
+11.616 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=141897903 consumed=74987519
+11.631 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=142450863 consumed=75540479
+11.649 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=143126704 consumed=76216320
+11.669 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=143679664 consumed=76769280
+11.682 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=144355503 consumed=77445119
+11.701 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=144908463 consumed=77998079
+11.714 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=145584304 consumed=78673920
+11.737 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=146137264 consumed=79226880
+11.756 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=146813103 consumed=79902719
+11.771 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=147366063 consumed=80455679
+11.802 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=148041904 consumed=81131520
+11.837 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=148594864 consumed=81684480
+11.855 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=149270703 consumed=82360319
+11.876 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=149823663 consumed=82913279
+11.894 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=150499504 consumed=83589120
+11.913 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=151052464 consumed=84142080
+11.932 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=151728303 consumed=84817919
+11.950 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=152281263 consumed=85370879
+11.965 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=152957104 consumed=86046720
+11.980 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=153510064 consumed=86599680
+11.998 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=154185903 consumed=87275519
+12.025 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=154738863 consumed=87828479
+12.057 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=155414704 consumed=88504320
+12.093 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=155967664 consumed=89057280
+12.096 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=156643503 consumed=89733119
+12.120 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=157196463 consumed=90286079
+12.128 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=157872304 consumed=90961920
+12.142 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=158425264 consumed=91514880
+12.159 [PHY]    SENSING: COREMAPTOP bg=100.0 excl_w=-1..-1 top: w1=157(5.7sig) w0=156(5.6sig) w13=151(5.1sig)
+12.159 [PHY]    SENSING: COREMAPLT dwell=3 (recurrence across dwells; excl w-1..-1) w0:3/3 dwells,468 hits,rnti=0x0000  w1:3/3 dwells,471 hits,rnti=0x0000  w12:2/3 dwells,454 hits,rnti=0x0000  w13:1/3 dwells,451 hits,rnti=0x0000  
+12.159 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=159101103 consumed=92190719
+12.177 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=159654063 consumed=92743679
+12.194 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=160329904 consumed=93419520
+12.210 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=160882864 consumed=93972480
+12.229 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=161558703 consumed=94648319
+12.248 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=162111663 consumed=95201279
+12.276 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=162787504 consumed=95877120
+12.299 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=163340464 consumed=96430080
+12.329 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=164016303 consumed=97105919
+12.353 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=164569263 consumed=97658879
+12.382 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=165245104 consumed=98334720
+12.403 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=165798064 consumed=98887680
+12.428 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=166473903 consumed=99563519
+12.452 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=167026863 consumed=100116479
+12.475 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=167702704 consumed=100792320
+12.496 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=168255664 consumed=101345280
+12.522 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=168931503 consumed=102021119
+12.543 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=169484463 consumed=102574079
+12.570 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=170160304 consumed=103249920
+12.591 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=170713264 consumed=103802880
+12.608 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=171389103 consumed=104478719
+12.625 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=171942063 consumed=105031679
+12.642 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=172617904 consumed=105707520
+12.657 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=173170864 consumed=106260480
+12.674 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=173846703 consumed=106936319
+12.688 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=174399663 consumed=107489279
+12.705 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=175075504 consumed=108165120
+12.721 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=175628464 consumed=108718080
+12.746 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=176304303 consumed=109393919
+12.771 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=176857263 consumed=109946879
+12.795 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> 1 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=177533104 consumed=110622720
+12.818 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) 1 -> 0 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=178086064 consumed=111175680
+12.845 [PHY]    SENSING: TIMEMUT shiftForNextFrame(pbch) 0 -> -1 (delta -1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1801 ts=178761903 consumed=111851519
+12.867 [PHY]    SENSING: TIMEMUT shiftForNextFrame(perframe) -1 -> 0 (delta +1) at /home/user/passive_agnostic_rx_for_sensing/executables/nr-ue.c:1548 ts=179314863 consumed=112404479
+38.339 [PHY]    SENSING: DCI 1_1 length locked coreset=1759264577925293333 rnti=0x1234 len=46 occasions=7 decodes=1904 evidence=distinct_ota
+38.496 [PHY]    SENSING: multi-CORESET bank add index=0 offset=0 span=102 symbol=0 mapping=0/0/0 len=46
+42.557 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+71.128 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+138.061 [PHY]    SENSING: blind PDCCH monitor summary: occasions=158578 candidates=298235 accepts=61460 dci10[accepts=140 C=140 TC=0 SI=0 RA=0 P=0] dci01[accepts=0 rejects=192708] dci00[accepts=0 rejects=0] ulscan[sched=192708 crc_hit=10088 disc=10088] held[energy=1329365 dmrs=0 persist=25 snr=0 mismatch=115 rnti_set=0] efloor=0.26 cfr_submits=0 pdsch_decode[try=0 crc_ok=0 (0.0%) skip_rv=0 unsup=0 over_cap=0 data_submits=0 k0_wait=0] scanq[queued=121066 done=119652 drop_full=1411 drop_stale=0 maxlag=8] last_reject="CRC-recovered value outside plausible RNTI range" last_reject_rnti=0x8779
+138.061 [PHY]    SENSING: LDPCDIAG ok=14503 seg_fail=714 tb_fail=0 zero_tb=0 iface_err=0 segs_decoded=0/1347 (0.0%)
+138.061 [PHY]    SENSING: PDSCHQ queued=15289 decoded=15278 crc_ok=14503 (94.9%) dropped[full=0 stale=11] max_lag_slots=31/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+154.421 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942584976719 rnti=0x1234 sfn=896 slot=11 fmt=1_1 cce=14 al=2
+154.424 [PHY]    SENSING: DL layout candidates n=3 fallback ids(ports/mcs/rv)= 3:1/9/0 7:1/9/0 11:1/9/0 
+154.425 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942588135977 rnti=0x1234 sfn=896 slot=14 fmt=1_1 cce=12 al=2
+154.427 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942590887430 rnti=0x1234 sfn=896 slot=15 fmt=1_1 cce=0 al=2
+154.427 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942592032924 rnti=0x1234 sfn=896 slot=16 fmt=1_1 cce=14 al=2
+154.427 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942592238133 rnti=0x1234 sfn=896 slot=17 fmt=1_1 cce=4 al=2
+154.431 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942596455237 rnti=0x1234 sfn=897 slot=0 fmt=1_1 cce=8 al=2
+154.433 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942596644545 rnti=0x1234 sfn=897 slot=1 fmt=1_1 cce=10 al=2
+154.437 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942600938205 rnti=0x1234 sfn=897 slot=4 fmt=1_1 cce=12 al=2
+154.438 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942601532589 rnti=0x1234 sfn=897 slot=5 fmt=1_1 cce=4 al=2
+154.439 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942604030877 rnti=0x1234 sfn=897 slot=6 fmt=1_1 cce=0 al=2
+154.439 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942604419488 rnti=0x1234 sfn=897 slot=7 fmt=1_1 cce=2 al=2
+154.442 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942607221835 rnti=0x1234 sfn=897 slot=10 fmt=1_1 cce=2 al=2
+154.444 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942609307479 rnti=0x1234 sfn=897 slot=11 fmt=1_1 cce=14 al=2
+154.448 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942613153571 rnti=0x1234 sfn=897 slot=14 fmt=1_1 cce=12 al=2
+154.449 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942613497445 rnti=0x1234 sfn=897 slot=15 fmt=1_1 cce=0 al=2
+154.452 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942617264034 rnti=0x1234 sfn=897 slot=16 fmt=1_1 cce=14 al=2
+154.455 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942617666605 rnti=0x1234 sfn=897 slot=17 fmt=1_1 cce=4 al=2
+154.455 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942620424390 rnti=0x1234 sfn=898 slot=1 fmt=1_1 cce=10 al=2
+154.458 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942622534416 rnti=0x1234 sfn=898 slot=2 fmt=1_1 cce=8 al=2
+154.459 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942624420703 rnti=0x1234 sfn=898 slot=4 fmt=1_1 cce=12 al=2
+154.460 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942624643466 rnti=0x1234 sfn=898 slot=5 fmt=1_1 cce=4 al=2
+154.462 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942626441807 rnti=0x1234 sfn=898 slot=6 fmt=1_1 cce=0 al=2
+154.465 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942628863216 rnti=0x1234 sfn=898 slot=7 fmt=1_1 cce=2 al=2
+154.466 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942630631175 rnti=0x1234 sfn=898 slot=10 fmt=1_1 cce=2 al=2
+154.467 [PHY]    SENSING: USS_TRACK geometry=rb2+102 dur1 map=2/3/0 id=0 obs=64 top=0x3c1f score=16.480 hits=21 hash=2 M=1 gap=0.184 stable=0
+154.467 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942632101238 rnti=0x1234 sfn=898 slot=11 fmt=1_1 cce=14 al=2
+154.470 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942635079737 rnti=0x1234 sfn=898 slot=14 fmt=1_1 cce=12 al=2
+154.471 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942636384893 rnti=0x1234 sfn=898 slot=15 fmt=1_1 cce=0 al=2
+154.473 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942638168453 rnti=0x1234 sfn=898 slot=16 fmt=1_1 cce=14 al=2
+154.476 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942641014762 rnti=0x1234 sfn=898 slot=17 fmt=1_1 cce=4 al=2
+154.480 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942643322005 rnti=0x1234 sfn=899 slot=0 fmt=1_1 cce=8 al=2
+154.481 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942643646385 rnti=0x1234 sfn=899 slot=1 fmt=1_1 cce=10 al=2
+154.483 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942647955123 rnti=0x1234 sfn=899 slot=4 fmt=1_1 cce=12 al=2
+154.483 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942648252853 rnti=0x1234 sfn=899 slot=5 fmt=1_1 cce=4 al=2
+154.486 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942650544385 rnti=0x1234 sfn=899 slot=6 fmt=1_1 cce=0 al=2
+154.487 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942650858956 rnti=0x1234 sfn=899 slot=7 fmt=1_1 cce=2 al=2
+154.490 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942654629283 rnti=0x1234 sfn=899 slot=10 fmt=1_1 cce=2 al=2
+154.492 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942656154261 rnti=0x1234 sfn=899 slot=11 fmt=1_1 cce=14 al=2
+154.496 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942660517129 rnti=0x1234 sfn=899 slot=14 fmt=1_1 cce=12 al=2
+154.496 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942660928632 rnti=0x1234 sfn=899 slot=15 fmt=1_1 cce=0 al=2
+154.499 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942663937292 rnti=0x1234 sfn=899 slot=16 fmt=1_1 cce=14 al=2
+154.499 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942664132409 rnti=0x1234 sfn=899 slot=17 fmt=1_1 cce=4 al=2
+154.505 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942668189417 rnti=0x1234 sfn=900 slot=1 fmt=1_1 cce=10 al=2
+154.505 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942668676919 rnti=0x1234 sfn=900 slot=2 fmt=1_1 cce=8 al=2
+154.506 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942671107209 rnti=0x1234 sfn=900 slot=4 fmt=1_1 cce=12 al=2
+154.508 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942672558253 rnti=0x1234 sfn=900 slot=5 fmt=1_1 cce=4 al=2
+154.514 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942675511403 rnti=0x1234 sfn=900 slot=6 fmt=1_1 cce=0 al=2
+154.514 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942676208631 rnti=0x1234 sfn=900 slot=7 fmt=1_1 cce=2 al=2
+154.514 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942676821055 rnti=0x1234 sfn=900 slot=10 fmt=1_1 cce=2 al=2
+154.516 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942679807098 rnti=0x1234 sfn=900 slot=11 fmt=1_1 cce=14 al=2
+154.521 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942680389134 rnti=0x1234 sfn=900 slot=14 fmt=1_1 cce=12 al=2
+154.521 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942680532025 rnti=0x1234 sfn=900 slot=15 fmt=1_1 cce=0 al=2
+154.521 [PHY]    SENSING: RRCHARVEST census: tb_examined=17200 ccch_sdus=0 dl_ccch_decoded=0 rrcsetup=0
+154.521 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942686274576 rnti=0x1234 sfn=900 slot=16 fmt=1_1 cce=14 al=2
+154.522 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942686513593 rnti=0x1234 sfn=900 slot=17 fmt=1_1 cce=4 al=2
+154.522 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942686868883 rnti=0x1234 sfn=901 slot=0 fmt=1_1 cce=8 al=2
+154.523 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942687089449 rnti=0x1234 sfn=901 slot=1 fmt=1_1 cce=10 al=2
+154.524 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942687452389 rnti=0x1234 sfn=901 slot=4 fmt=1_1 cce=12 al=2
+154.526 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942690679046 rnti=0x1234 sfn=901 slot=5 fmt=1_1 cce=4 al=2
+154.528 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942691021949 rnti=0x1234 sfn=901 slot=6 fmt=1_1 cce=0 al=2
+154.528 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942691426294 rnti=0x1234 sfn=901 slot=7 fmt=1_1 cce=2 al=2
+154.529 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942694329638 rnti=0x1234 sfn=901 slot=10 fmt=1_1 cce=2 al=2
+154.530 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942694505979 rnti=0x1234 sfn=901 slot=11 fmt=1_1 cce=14 al=2
+154.531 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942696441338 rnti=0x1234 sfn=901 slot=14 fmt=1_1 cce=12 al=2
+154.538 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942700845393 rnti=0x1234 sfn=901 slot=15 fmt=1_1 cce=0 al=2
+154.538 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942701330483 rnti=0x1234 sfn=901 slot=16 fmt=1_1 cce=14 al=2
+154.538 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942701503578 rnti=0x1234 sfn=901 slot=17 fmt=1_1 cce=4 al=2
+154.538 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942702136387 rnti=0x1234 sfn=902 slot=1 fmt=1_1 cce=10 al=2
+154.539 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942703967277 rnti=0x1234 sfn=902 slot=2 fmt=1_1 cce=8 al=2
+154.540 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942705245677 rnti=0x1234 sfn=902 slot=4 fmt=1_1 cce=12 al=2
+154.541 [PHY]    SENSING: DL_RANK_PROBE n=17500 | small/crcfail n=38 mean_coh=1.00 low=0 | small/crcok n=0 mean=0.00 low=0 | big/crcfail n=707 mean=1.00 low=0 | big/crcok n=16755 mean=1.00 low=0  (low = coherence<0.5 => 2 ports)
+154.541 [PHY]    SENSING: DL_CDM_PROBE other-comb/dmrs-comb energy ratio (1 = data there = 1 CDM group, 0 = empty = 2 groups): small/crcfail mean=1.00 empty=0/38 | small/crcok mean=0.00 empty=0/0 | big/crcfail mean=1.00 empty=0/707 | big/crcok mean=1.00 empty=0/16755 | receiver assumes cdm=1
+154.542 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942707339584 rnti=0x1234 sfn=902 slot=5 fmt=1_1 cce=4 al=2
+154.543 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942707818143 rnti=0x1234 sfn=902 slot=6 fmt=1_1 cce=0 al=2
+154.545 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942709551044 rnti=0x1234 sfn=902 slot=7 fmt=1_1 cce=2 al=2
+154.547 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942712402932 rnti=0x1234 sfn=902 slot=10 fmt=1_1 cce=2 al=2
+154.549 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942713555836 rnti=0x1234 sfn=902 slot=11 fmt=1_1 cce=14 al=2
+154.552 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942716940298 rnti=0x1234 sfn=902 slot=14 fmt=1_1 cce=12 al=2
+154.553 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942718380865 rnti=0x1234 sfn=902 slot=15 fmt=1_1 cce=0 al=2
+154.556 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942720857440 rnti=0x1234 sfn=902 slot=16 fmt=1_1 cce=14 al=2
+154.556 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942721148270 rnti=0x1234 sfn=902 slot=17 fmt=1_1 cce=4 al=2
+154.559 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942724211173 rnti=0x1234 sfn=903 slot=0 fmt=1_1 cce=8 al=2
+154.561 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942725579379 rnti=0x1234 sfn=903 slot=1 fmt=1_1 cce=10 al=2
+154.564 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942728918921 rnti=0x1234 sfn=903 slot=4 fmt=1_1 cce=12 al=2
+154.566 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942730791851 rnti=0x1234 sfn=903 slot=5 fmt=1_1 cce=4 al=2
+154.567 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942731574626 rnti=0x1234 sfn=903 slot=6 fmt=1_1 cce=0 al=2
+154.569 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942733880100 rnti=0x1234 sfn=903 slot=7 fmt=1_1 cce=2 al=2
+154.571 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942736103405 rnti=0x1234 sfn=903 slot=10 fmt=1_1 cce=2 al=2
+154.573 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942737485864 rnti=0x1234 sfn=903 slot=11 fmt=1_1 cce=14 al=2
+154.576 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942740359994 rnti=0x1234 sfn=903 slot=14 fmt=1_1 cce=12 al=2
+154.577 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942741972767 rnti=0x1234 sfn=903 slot=15 fmt=1_1 cce=0 al=2
+154.580 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942743633256 rnti=0x1234 sfn=903 slot=16 fmt=1_1 cce=14 al=2
+154.580 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942744629595 rnti=0x1234 sfn=903 slot=17 fmt=1_1 cce=4 al=2
+154.586 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942749500815 rnti=0x1234 sfn=904 slot=1 fmt=1_1 cce=10 al=2
+154.588 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942751356694 rnti=0x1234 sfn=904 slot=2 fmt=1_1 cce=8 al=2
+154.589 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942751550831 rnti=0x1234 sfn=904 slot=3 fmt=1_1 cce=0 al=2
+154.589 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942753928330 rnti=0x1234 sfn=904 slot=4 fmt=1_1 cce=12 al=2
+154.590 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942754210294 rnti=0x1234 sfn=904 slot=5 fmt=1_1 cce=4 al=2
+154.591 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942754629985 rnti=0x1234 sfn=904 slot=6 fmt=1_1 cce=0 al=2
+154.593 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942757587295 rnti=0x1234 sfn=904 slot=7 fmt=1_1 cce=2 al=2
+154.593 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942758191906 rnti=0x1234 sfn=904 slot=10 fmt=1_1 cce=2 al=2
+154.596 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942760730509 rnti=0x1234 sfn=904 slot=11 fmt=1_1 cce=14 al=2
+154.597 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942761251616 rnti=0x1234 sfn=904 slot=14 fmt=1_1 cce=12 al=2
+154.601 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942765208990 rnti=0x1234 sfn=904 slot=15 fmt=1_1 cce=0 al=2
+154.601 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942765629880 rnti=0x1234 sfn=904 slot=16 fmt=1_1 cce=14 al=2
+154.601 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942765828877 rnti=0x1234 sfn=904 slot=17 fmt=1_1 cce=4 al=2
+154.601 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942766152861 rnti=0x1234 sfn=905 slot=0 fmt=1_1 cce=8 al=2
+154.603 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942766561899 rnti=0x1234 sfn=905 slot=1 fmt=1_1 cce=10 al=2
+154.605 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942770366535 rnti=0x1234 sfn=905 slot=4 fmt=1_1 cce=12 al=2
+154.611 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942771293149 rnti=0x1234 sfn=905 slot=5 fmt=1_1 cce=4 al=2
+154.612 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942771727590 rnti=0x1234 sfn=905 slot=6 fmt=1_1 cce=0 al=2
+154.612 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942772039285 rnti=0x1234 sfn=905 slot=7 fmt=1_1 cce=2 al=2
+154.612 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942774035252 rnti=0x1234 sfn=905 slot=10 fmt=1_1 cce=2 al=2
+154.612 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942774232314 rnti=0x1234 sfn=905 slot=11 fmt=1_1 cce=14 al=2
+154.615 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942779665690 rnti=0x1234 sfn=905 slot=14 fmt=1_1 cce=12 al=2
+154.615 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942780302876 rnti=0x1234 sfn=905 slot=15 fmt=1_1 cce=0 al=2
+154.616 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942780764686 rnti=0x1234 sfn=905 slot=16 fmt=1_1 cce=14 al=2
+154.616 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942781154508 rnti=0x1234 sfn=905 slot=17 fmt=1_1 cce=4 al=2
+154.619 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942783662941 rnti=0x1234 sfn=906 slot=1 fmt=1_1 cce=10 al=2
+154.619 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942784355079 rnti=0x1234 sfn=906 slot=2 fmt=1_1 cce=8 al=2
+154.624 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942788663496 rnti=0x1234 sfn=906 slot=4 fmt=1_1 cce=12 al=2
+154.627 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942789165245 rnti=0x1234 sfn=906 slot=5 fmt=1_1 cce=4 al=2
+154.627 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942789508958 rnti=0x1234 sfn=906 slot=6 fmt=1_1 cce=0 al=2
+154.627 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942789889637 rnti=0x1234 sfn=906 slot=7 fmt=1_1 cce=2 al=2
+154.627 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942790868245 rnti=0x1234 sfn=906 slot=10 fmt=1_1 cce=2 al=2
+154.627 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942791078493 rnti=0x1234 sfn=906 slot=11 fmt=1_1 cce=14 al=2
+154.629 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942793636601 rnti=0x1234 sfn=906 slot=14 fmt=1_1 cce=12 al=2
+154.633 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942798300488 rnti=0x1234 sfn=906 slot=15 fmt=1_1 cce=0 al=2
+154.634 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942798775690 rnti=0x1234 sfn=906 slot=16 fmt=1_1 cce=14 al=2
+154.634 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942799214988 rnti=0x1234 sfn=906 slot=17 fmt=1_1 cce=4 al=2
+154.635 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942799673753 rnti=0x1234 sfn=907 slot=0 fmt=1_1 cce=8 al=2
+154.635 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942800144285 rnti=0x1234 sfn=907 slot=1 fmt=1_1 cce=10 al=2
+154.641 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942804578616 rnti=0x1234 sfn=907 slot=4 fmt=1_1 cce=12 al=2
+154.641 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942805372614 rnti=0x1234 sfn=907 slot=5 fmt=1_1 cce=4 al=2
+154.641 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942805835121 rnti=0x1234 sfn=907 slot=6 fmt=1_1 cce=0 al=2
+154.641 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942806445494 rnti=0x1234 sfn=907 slot=7 fmt=1_1 cce=2 al=2
+154.642 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942806943698 rnti=0x1234 sfn=907 slot=10 fmt=1_1 cce=2 al=2
+154.642 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942807260843 rnti=0x1234 sfn=907 slot=11 fmt=1_1 cce=14 al=2
+154.647 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942810913136 rnti=0x1234 sfn=907 slot=14 fmt=1_1 cce=12 al=2
+154.650 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942812165945 rnti=0x1234 sfn=907 slot=15 fmt=1_1 cce=0 al=2
+154.650 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942812618675 rnti=0x1234 sfn=907 slot=16 fmt=1_1 cce=14 al=2
+154.650 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942812882926 rnti=0x1234 sfn=907 slot=17 fmt=1_1 cce=4 al=2
+154.653 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942816572788 rnti=0x1234 sfn=908 slot=1 fmt=1_1 cce=10 al=2
+154.663 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942817867936 rnti=0x1234 sfn=908 slot=2 fmt=1_1 cce=8 al=2
+154.663 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942818937339 rnti=0x1234 sfn=908 slot=4 fmt=1_1 cce=12 al=2
+154.663 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942820333638 rnti=0x1234 sfn=908 slot=5 fmt=1_1 cce=4 al=2
+154.663 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942821397890 rnti=0x1234 sfn=908 slot=6 fmt=1_1 cce=0 al=2
+154.663 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942822317932 rnti=0x1234 sfn=908 slot=7 fmt=1_1 cce=2 al=2
+154.663 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942823179272 rnti=0x1234 sfn=908 slot=10 fmt=1_1 cce=2 al=2
+154.665 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942823633323 rnti=0x1234 sfn=908 slot=11 fmt=1_1 cce=14 al=2
+154.665 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942829784645 rnti=0x1234 sfn=908 slot=14 fmt=1_1 cce=12 al=2
+154.667 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942830147942 rnti=0x1234 sfn=908 slot=15 fmt=1_1 cce=0 al=2
+154.667 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942830363865 rnti=0x1234 sfn=908 slot=16 fmt=1_1 cce=14 al=2
+154.667 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942830602917 rnti=0x1234 sfn=908 slot=17 fmt=1_1 cce=4 al=2
+154.667 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942830885539 rnti=0x1234 sfn=909 slot=0 fmt=1_1 cce=8 al=2
+154.667 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942831068397 rnti=0x1234 sfn=909 slot=1 fmt=1_1 cce=10 al=2
+154.672 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942836887420 rnti=0x1234 sfn=909 slot=4 fmt=1_1 cce=12 al=2
+154.672 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942837290737 rnti=0x1234 sfn=909 slot=5 fmt=1_1 cce=4 al=2
+154.673 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942837832887 rnti=0x1234 sfn=909 slot=6 fmt=1_1 cce=0 al=2
+154.673 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942838161728 rnti=0x1234 sfn=909 slot=7 fmt=1_1 cce=2 al=2
+154.674 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942838568944 rnti=0x1234 sfn=909 slot=10 fmt=1_1 cce=2 al=2
+154.674 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942838751334 rnti=0x1234 sfn=909 slot=11 fmt=1_1 cce=14 al=2
+154.678 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942842627064 rnti=0x1234 sfn=909 slot=14 fmt=1_1 cce=12 al=2
+154.678 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942843347370 rnti=0x1234 sfn=909 slot=15 fmt=1_1 cce=0 al=2
+154.679 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942843760572 rnti=0x1234 sfn=909 slot=16 fmt=1_1 cce=14 al=2
+154.679 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942844026728 rnti=0x1234 sfn=909 slot=17 fmt=1_1 cce=4 al=2
+154.684 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942848363405 rnti=0x1234 sfn=910 slot=1 fmt=1_1 cce=10 al=2
+154.684 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942848872940 rnti=0x1234 sfn=910 slot=2 fmt=1_1 cce=8 al=2
+154.686 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942851058757 rnti=0x1234 sfn=910 slot=4 fmt=1_1 cce=12 al=2
+154.687 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942851461248 rnti=0x1234 sfn=910 slot=5 fmt=1_1 cce=4 al=2
+154.689 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942854097809 rnti=0x1234 sfn=910 slot=6 fmt=1_1 cce=0 al=2
+154.689 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942854442732 rnti=0x1234 sfn=910 slot=7 fmt=1_1 cce=2 al=2
+154.692 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942856503311 rnti=0x1234 sfn=910 slot=10 fmt=1_1 cce=2 al=2
+154.692 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942856923833 rnti=0x1234 sfn=910 slot=11 fmt=1_1 cce=14 al=2
+154.696 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942861080544 rnti=0x1234 sfn=910 slot=14 fmt=1_1 cce=12 al=2
+154.697 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942861255690 rnti=0x1234 sfn=910 slot=15 fmt=1_1 cce=0 al=2
+154.697 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942861910998 rnti=0x1234 sfn=910 slot=16 fmt=1_1 cce=14 al=2
+154.698 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942862207775 rnti=0x1234 sfn=910 slot=17 fmt=1_1 cce=4 al=2
+154.698 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942862654898 rnti=0x1234 sfn=911 slot=0 fmt=1_1 cce=8 al=2
+154.701 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942865775688 rnti=0x1234 sfn=911 slot=1 fmt=1_1 cce=10 al=2
+154.702 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942866255827 rnti=0x1234 sfn=911 slot=4 fmt=1_1 cce=12 al=2
+154.702 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942866974926 rnti=0x1234 sfn=911 slot=5 fmt=1_1 cce=4 al=2
+154.704 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942868103427 rnti=0x1234 sfn=911 slot=6 fmt=1_1 cce=0 al=2
+154.705 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942868235432 rnti=0x1234 sfn=911 slot=7 fmt=1_1 cce=2 al=2
+154.707 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942871613991 rnti=0x1234 sfn=911 slot=10 fmt=1_1 cce=2 al=2
+154.709 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942871825603 rnti=0x1234 sfn=911 slot=11 fmt=1_1 cce=14 al=2
+154.711 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942875748344 rnti=0x1234 sfn=911 slot=14 fmt=1_1 cce=12 al=2
+154.712 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942876664184 rnti=0x1234 sfn=911 slot=15 fmt=1_1 cce=0 al=2
+154.713 [PHY]    SENSING: ORACLE_GATE settled=1 gen=7 nrb=106 k0=0 probe=0
+154.714 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942877308822 rnti=0x1234 sfn=911 slot=16 fmt=1_1 cce=14 al=2
+154.714 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942878102606 rnti=0x1234 sfn=911 slot=17 fmt=1_1 cce=4 al=2
+154.715 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942879939085 rnti=0x1234 sfn=912 slot=1 fmt=1_1 cce=10 al=2
+154.717 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942881759275 rnti=0x1234 sfn=912 slot=2 fmt=1_1 cce=8 al=2
+154.719 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942881955848 rnti=0x1234 sfn=912 slot=3 fmt=1_1 cce=0 al=2
+154.723 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942885707521 rnti=0x1234 sfn=912 slot=4 fmt=1_1 cce=12 al=2
+154.723 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942886021781 rnti=0x1234 sfn=912 slot=5 fmt=1_1 cce=4 al=2
+154.723 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942886154753 rnti=0x1234 sfn=912 slot=6 fmt=1_1 cce=0 al=2
+154.723 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942886503484 rnti=0x1234 sfn=912 slot=7 fmt=1_1 cce=2 al=2
+154.723 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942886953588 rnti=0x1234 sfn=912 slot=10 fmt=1_1 cce=2 al=2
+154.723 [PHY]    SENSING: PDSCH UNSUP@3234 n=18000
+154.726 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942889471934 rnti=0x1234 sfn=912 slot=11 fmt=1_1 cce=14 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942892305494 rnti=0x1234 sfn=912 slot=14 fmt=1_1 cce=12 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942892500133 rnti=0x1234 sfn=912 slot=15 fmt=1_1 cce=0 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942892590193 rnti=0x1234 sfn=912 slot=16 fmt=1_1 cce=14 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942895765568 rnti=0x1234 sfn=912 slot=17 fmt=1_1 cce=4 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942896098457 rnti=0x1234 sfn=913 slot=0 fmt=1_1 cce=8 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942897820979 rnti=0x1234 sfn=913 slot=1 fmt=1_1 cce=10 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942900440586 rnti=0x1234 sfn=913 slot=4 fmt=1_1 cce=12 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942900735624 rnti=0x1234 sfn=913 slot=5 fmt=1_1 cce=4 al=2
+154.738 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942900930119 rnti=0x1234 sfn=913 slot=6 fmt=1_1 cce=0 al=2
+154.739 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942904110672 rnti=0x1234 sfn=913 slot=7 fmt=1_1 cce=2 al=2
+154.740 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942904607085 rnti=0x1234 sfn=913 slot=10 fmt=1_1 cce=2 al=2
+154.741 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942905991997 rnti=0x1234 sfn=913 slot=11 fmt=1_1 cce=14 al=2
+154.746 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942910374155 rnti=0x1234 sfn=913 slot=14 fmt=1_1 cce=12 al=2
+154.748 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942912504138 rnti=0x1234 sfn=913 slot=15 fmt=1_1 cce=0 al=2
+154.750 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942914554610 rnti=0x1234 sfn=913 slot=16 fmt=1_1 cce=14 al=2
+154.750 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942915025146 rnti=0x1234 sfn=913 slot=17 fmt=1_1 cce=4 al=2
+154.756 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942920544309 rnti=0x1234 sfn=914 slot=1 fmt=1_1 cce=10 al=2
+154.758 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942922926104 rnti=0x1234 sfn=914 slot=2 fmt=1_1 cce=8 al=2
+154.760 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942924795817 rnti=0x1234 sfn=914 slot=4 fmt=1_1 cce=12 al=2
+154.764 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942927939509 rnti=0x1234 sfn=914 slot=5 fmt=1_1 cce=4 al=2
+154.764 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942928147156 rnti=0x1234 sfn=914 slot=6 fmt=1_1 cce=0 al=2
+154.764 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942928300523 rnti=0x1234 sfn=914 slot=7 fmt=1_1 cce=2 al=2
+154.767 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942931860517 rnti=0x1234 sfn=914 slot=10 fmt=1_1 cce=2 al=2
+154.770 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942933706280 rnti=0x1234 sfn=914 slot=11 fmt=1_1 cce=14 al=2
+154.772 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942937415967 rnti=0x1234 sfn=914 slot=14 fmt=1_1 cce=12 al=2
+154.775 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942940218876 rnti=0x1234 sfn=914 slot=15 fmt=1_1 cce=0 al=2
+154.777 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942940921928 rnti=0x1234 sfn=914 slot=16 fmt=1_1 cce=14 al=2
+154.780 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942944227022 rnti=0x1234 sfn=914 slot=17 fmt=1_1 cce=4 al=2
+154.781 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942946082387 rnti=0x1234 sfn=915 slot=0 fmt=1_1 cce=8 al=2
+154.784 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942948359858 rnti=0x1234 sfn=915 slot=1 fmt=1_1 cce=10 al=2
+154.788 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942952210600 rnti=0x1234 sfn=915 slot=4 fmt=1_1 cce=12 al=2
+154.788 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942952725601 rnti=0x1234 sfn=915 slot=5 fmt=1_1 cce=4 al=2
+154.790 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942954766153 rnti=0x1234 sfn=915 slot=6 fmt=1_1 cce=0 al=2
+154.793 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942957504512 rnti=0x1234 sfn=915 slot=7 fmt=1_1 cce=2 al=2
+154.795 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942959675571 rnti=0x1234 sfn=915 slot=10 fmt=1_1 cce=2 al=2
+154.796 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942961527467 rnti=0x1234 sfn=915 slot=11 fmt=1_1 cce=14 al=2
+154.800 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942964577954 rnti=0x1234 sfn=915 slot=14 fmt=1_1 cce=12 al=2
+154.802 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942966010386 rnti=0x1234 sfn=915 slot=15 fmt=1_1 cce=0 al=2
+154.802 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942966553916 rnti=0x1234 sfn=915 slot=16 fmt=1_1 cce=14 al=2
+154.805 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942969458729 rnti=0x1234 sfn=915 slot=17 fmt=1_1 cce=4 al=2
+154.806 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942969953846 rnti=0x1234 sfn=916 slot=1 fmt=1_1 cce=10 al=2
+154.807 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942972050073 rnti=0x1234 sfn=916 slot=2 fmt=1_1 cce=8 al=2
+154.810 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942972252492 rnti=0x1234 sfn=916 slot=4 fmt=1_1 cce=12 al=2
+154.811 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942974909552 rnti=0x1234 sfn=916 slot=5 fmt=1_1 cce=4 al=2
+154.812 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942975631840 rnti=0x1234 sfn=916 slot=6 fmt=1_1 cce=0 al=2
+154.812 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942975933958 rnti=0x1234 sfn=916 slot=7 fmt=1_1 cce=2 al=2
+154.815 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942977970285 rnti=0x1234 sfn=916 slot=10 fmt=1_1 cce=2 al=2
+154.816 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942978199867 rnti=0x1234 sfn=916 slot=11 fmt=1_1 cce=14 al=2
+154.817 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942982124862 rnti=0x1234 sfn=916 slot=14 fmt=1_1 cce=12 al=2
+154.817 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942982285116 rnti=0x1234 sfn=916 slot=15 fmt=1_1 cce=0 al=2
+154.818 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942982414259 rnti=0x1234 sfn=916 slot=16 fmt=1_1 cce=14 al=2
+154.818 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942982560136 rnti=0x1234 sfn=916 slot=17 fmt=1_1 cce=4 al=2
+154.819 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942984447021 rnti=0x1234 sfn=917 slot=0 fmt=1_1 cce=8 al=2
+154.821 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942985811414 rnti=0x1234 sfn=917 slot=1 fmt=1_1 cce=10 al=2
+154.823 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942988108357 rnti=0x1234 sfn=917 slot=4 fmt=1_1 cce=12 al=2
+154.824 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942988586809 rnti=0x1234 sfn=917 slot=5 fmt=1_1 cce=4 al=2
+154.825 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942989359531 rnti=0x1234 sfn=917 slot=6 fmt=1_1 cce=0 al=2
+154.825 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942989751623 rnti=0x1234 sfn=917 slot=7 fmt=1_1 cce=2 al=2
+154.827 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942991982880 rnti=0x1234 sfn=917 slot=10 fmt=1_1 cce=2 al=2
+154.827 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942992131359 rnti=0x1234 sfn=917 slot=11 fmt=1_1 cce=14 al=2
+154.829 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942994399386 rnti=0x1234 sfn=917 slot=14 fmt=1_1 cce=12 al=2
+154.830 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942994889329 rnti=0x1234 sfn=917 slot=15 fmt=1_1 cce=0 al=2
+154.833 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942997899830 rnti=0x1234 sfn=917 slot=16 fmt=1_1 cce=14 al=2
+154.833 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942998201389 rnti=0x1234 sfn=917 slot=17 fmt=1_1 cce=4 al=2
+154.835 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840942999793632 rnti=0x1234 sfn=918 slot=1 fmt=1_1 cce=10 al=2
+154.836 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943000239535 rnti=0x1234 sfn=918 slot=2 fmt=1_1 cce=8 al=2
+154.839 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943003993751 rnti=0x1234 sfn=918 slot=4 fmt=1_1 cce=12 al=2
+154.839 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943004474010 rnti=0x1234 sfn=918 slot=5 fmt=1_1 cce=4 al=2
+154.840 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943004733927 rnti=0x1234 sfn=918 slot=6 fmt=1_1 cce=0 al=2
+154.840 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943005016496 rnti=0x1234 sfn=918 slot=7 fmt=1_1 cce=2 al=2
+154.840 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943005362307 rnti=0x1234 sfn=918 slot=10 fmt=1_1 cce=2 al=2
+154.842 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943007012479 rnti=0x1234 sfn=918 slot=11 fmt=1_1 cce=14 al=2
+154.844 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943009035035 rnti=0x1234 sfn=918 slot=14 fmt=1_1 cce=12 al=2
+154.847 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943009526424 rnti=0x1234 sfn=918 slot=15 fmt=1_1 cce=0 al=2
+154.847 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943010161714 rnti=0x1234 sfn=918 slot=16 fmt=1_1 cce=14 al=2
+154.847 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943010544278 rnti=0x1234 sfn=918 slot=17 fmt=1_1 cce=4 al=2
+154.849 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943012929229 rnti=0x1234 sfn=919 slot=0 fmt=1_1 cce=8 al=2
+154.849 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943013110235 rnti=0x1234 sfn=919 slot=1 fmt=1_1 cce=10 al=2
+154.852 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943015870795 rnti=0x1234 sfn=919 slot=4 fmt=1_1 cce=12 al=2
+154.853 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943017581934 rnti=0x1234 sfn=919 slot=5 fmt=1_1 cce=4 al=2
+154.854 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943019280619 rnti=0x1234 sfn=919 slot=6 fmt=1_1 cce=0 al=2
+154.856 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943021047196 rnti=0x1234 sfn=919 slot=7 fmt=1_1 cce=2 al=2
+154.878 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943024900902 rnti=0x1234 sfn=919 slot=10 fmt=1_1 cce=2 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943025036595 rnti=0x1234 sfn=919 slot=11 fmt=1_1 cce=14 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943027437953 rnti=0x1234 sfn=919 slot=14 fmt=1_1 cce=12 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943027737634 rnti=0x1234 sfn=919 slot=15 fmt=1_1 cce=0 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943030280463 rnti=0x1234 sfn=919 slot=16 fmt=1_1 cce=14 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943030801156 rnti=0x1234 sfn=919 slot=17 fmt=1_1 cce=4 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943033034844 rnti=0x1234 sfn=920 slot=1 fmt=1_1 cce=10 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943033261952 rnti=0x1234 sfn=920 slot=2 fmt=1_1 cce=8 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943036817916 rnti=0x1234 sfn=920 slot=3 fmt=1_1 cce=0 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943037326561 rnti=0x1234 sfn=920 slot=4 fmt=1_1 cce=12 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943037625916 rnti=0x1234 sfn=920 slot=5 fmt=1_1 cce=4 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943037783867 rnti=0x1234 sfn=920 slot=6 fmt=1_1 cce=0 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943037885795 rnti=0x1234 sfn=920 slot=7 fmt=1_1 cce=2 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943040748071 rnti=0x1234 sfn=920 slot=10 fmt=1_1 cce=2 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943041007780 rnti=0x1234 sfn=920 slot=11 fmt=1_1 cce=14 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943043309735 rnti=0x1234 sfn=920 slot=14 fmt=1_1 cce=12 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943043522717 rnti=0x1234 sfn=920 slot=15 fmt=1_1 cce=0 al=2
+154.879 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943044379485 rnti=0x1234 sfn=920 slot=16 fmt=1_1 cce=14 al=2
+154.880 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943044725335 rnti=0x1234 sfn=920 slot=17 fmt=1_1 cce=4 al=2
+154.882 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943047088911 rnti=0x1234 sfn=921 slot=0 fmt=1_1 cce=8 al=2
+154.882 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943047303093 rnti=0x1234 sfn=921 slot=1 fmt=1_1 cce=10 al=2
+154.885 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943049666887 rnti=0x1234 sfn=921 slot=4 fmt=1_1 cce=12 al=2
+154.888 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943053071003 rnti=0x1234 sfn=921 slot=5 fmt=1_1 cce=4 al=2
+154.888 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943053325897 rnti=0x1234 sfn=921 slot=6 fmt=1_1 cce=0 al=2
+154.890 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943053757837 rnti=0x1234 sfn=921 slot=7 fmt=1_1 cce=2 al=2
+154.890 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943053928933 rnti=0x1234 sfn=921 slot=10 fmt=1_1 cce=2 al=2
+154.890 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943055236622 rnti=0x1234 sfn=921 slot=11 fmt=1_1 cce=14 al=2
+154.894 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943058289695 rnti=0x1234 sfn=921 slot=14 fmt=1_1 cce=12 al=2
+154.894 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943059289389 rnti=0x1234 sfn=921 slot=15 fmt=1_1 cce=0 al=2
+154.895 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943059479867 rnti=0x1234 sfn=921 slot=16 fmt=1_1 cce=14 al=2
+154.895 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943060296399 rnti=0x1234 sfn=921 slot=17 fmt=1_1 cce=4 al=2
+154.897 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943062250052 rnti=0x1234 sfn=922 slot=1 fmt=1_1 cce=10 al=2
+154.900 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943064958710 rnti=0x1234 sfn=922 slot=2 fmt=1_1 cce=8 al=2
+154.903 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943065252162 rnti=0x1234 sfn=922 slot=4 fmt=1_1 cce=12 al=2
+154.903 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943065737483 rnti=0x1234 sfn=922 slot=5 fmt=1_1 cce=4 al=2
+154.903 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943065932660 rnti=0x1234 sfn=922 slot=6 fmt=1_1 cce=0 al=2
+154.905 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943069454497 rnti=0x1234 sfn=922 slot=7 fmt=1_1 cce=2 al=2
+154.905 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943069798202 rnti=0x1234 sfn=922 slot=10 fmt=1_1 cce=2 al=2
+154.905 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943069976613 rnti=0x1234 sfn=922 slot=11 fmt=1_1 cce=14 al=2
+154.908 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943073091301 rnti=0x1234 sfn=922 slot=14 fmt=1_1 cce=12 al=2
+154.909 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943073362487 rnti=0x1234 sfn=922 slot=15 fmt=1_1 cce=0 al=2
+154.911 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943075822769 rnti=0x1234 sfn=922 slot=16 fmt=1_1 cce=14 al=2
+154.911 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943076131431 rnti=0x1234 sfn=922 slot=17 fmt=1_1 cce=4 al=2
+154.913 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943078418719 rnti=0x1234 sfn=923 slot=0 fmt=1_1 cce=8 al=2
+154.916 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943080492965 rnti=0x1234 sfn=923 slot=1 fmt=1_1 cce=10 al=2
+154.920 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943085033675 rnti=0x1234 sfn=923 slot=4 fmt=1_1 cce=12 al=2
+154.923 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943087750966 rnti=0x1234 sfn=923 slot=5 fmt=1_1 cce=4 al=2
+154.925 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943088172879 rnti=0x1234 sfn=923 slot=6 fmt=1_1 cce=0 al=2
+154.926 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943090593907 rnti=0x1234 sfn=923 slot=7 fmt=1_1 cce=2 al=2
+154.930 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943094630390 rnti=0x1234 sfn=923 slot=10 fmt=1_1 cce=2 al=2
+154.932 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943096646147 rnti=0x1234 sfn=923 slot=11 fmt=1_1 cce=14 al=2
+154.937 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943101622967 rnti=0x1234 sfn=923 slot=14 fmt=1_1 cce=12 al=2
+154.939 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943104180321 rnti=0x1234 sfn=923 slot=15 fmt=1_1 cce=0 al=2
+154.943 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943108285750 rnti=0x1234 sfn=923 slot=16 fmt=1_1 cce=14 al=2
+154.944 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943108589503 rnti=0x1234 sfn=923 slot=17 fmt=1_1 cce=4 al=2
+154.949 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943113472547 rnti=0x1234 sfn=924 slot=1 fmt=1_1 cce=10 al=2
+154.951 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943116118420 rnti=0x1234 sfn=924 slot=2 fmt=1_1 cce=8 al=2
+154.955 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943116826946 rnti=0x1234 sfn=924 slot=4 fmt=1_1 cce=12 al=2
+154.955 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943117758864 rnti=0x1234 sfn=924 slot=5 fmt=1_1 cce=4 al=2
+154.955 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943118524361 rnti=0x1234 sfn=924 slot=6 fmt=1_1 cce=0 al=2
+154.955 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943118900659 rnti=0x1234 sfn=924 slot=7 fmt=1_1 cce=2 al=2
+154.956 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943121182523 rnti=0x1234 sfn=924 slot=10 fmt=1_1 cce=2 al=2
+154.958 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943121545075 rnti=0x1234 sfn=924 slot=11 fmt=1_1 cce=14 al=2
+154.960 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943124175534 rnti=0x1234 sfn=924 slot=14 fmt=1_1 cce=12 al=2
+154.960 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943124326888 rnti=0x1234 sfn=924 slot=15 fmt=1_1 cce=0 al=2
+154.961 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943124610423 rnti=0x1234 sfn=924 slot=16 fmt=1_1 cce=14 al=2
+154.961 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943125502103 rnti=0x1234 sfn=924 slot=17 fmt=1_1 cce=4 al=2
+154.962 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943127349504 rnti=0x1234 sfn=925 slot=0 fmt=1_1 cce=8 al=2
+154.963 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943127585857 rnti=0x1234 sfn=925 slot=1 fmt=1_1 cce=10 al=2
+154.965 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943129872586 rnti=0x1234 sfn=925 slot=4 fmt=1_1 cce=12 al=2
+154.968 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943132408839 rnti=0x1234 sfn=925 slot=5 fmt=1_1 cce=4 al=2
+154.969 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943132721369 rnti=0x1234 sfn=925 slot=6 fmt=1_1 cce=0 al=2
+154.969 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943132939271 rnti=0x1234 sfn=925 slot=7 fmt=1_1 cce=2 al=2
+154.970 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943135276974 rnti=0x1234 sfn=925 slot=10 fmt=1_1 cce=2 al=2
+154.971 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943135589582 rnti=0x1234 sfn=925 slot=11 fmt=1_1 cce=14 al=2
+154.974 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943138969333 rnti=0x1234 sfn=925 slot=14 fmt=1_1 cce=12 al=2
+154.976 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943139340314 rnti=0x1234 sfn=925 slot=15 fmt=1_1 cce=0 al=2
+154.976 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943139729132 rnti=0x1234 sfn=925 slot=16 fmt=1_1 cce=14 al=2
+154.976 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943140335083 rnti=0x1234 sfn=925 slot=17 fmt=1_1 cce=4 al=2
+154.977 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943142446740 rnti=0x1234 sfn=926 slot=1 fmt=1_1 cce=10 al=2
+154.980 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943144822747 rnti=0x1234 sfn=926 slot=2 fmt=1_1 cce=8 al=2
+154.980 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943145165024 rnti=0x1234 sfn=926 slot=4 fmt=1_1 cce=12 al=2
+154.981 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943145495083 rnti=0x1234 sfn=926 slot=5 fmt=1_1 cce=4 al=2
+154.983 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943148072904 rnti=0x1234 sfn=926 slot=6 fmt=1_1 cce=0 al=2
+154.983 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943148349811 rnti=0x1234 sfn=926 slot=7 fmt=1_1 cce=2 al=2
+154.985 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943150289375 rnti=0x1234 sfn=926 slot=10 fmt=1_1 cce=2 al=2
+154.987 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943150991801 rnti=0x1234 sfn=926 slot=11 fmt=1_1 cce=14 al=2
+154.989 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943153619257 rnti=0x1234 sfn=926 slot=14 fmt=1_1 cce=12 al=2
+154.989 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943154372238 rnti=0x1234 sfn=926 slot=15 fmt=1_1 cce=0 al=2
+154.990 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943154629483 rnti=0x1234 sfn=926 slot=16 fmt=1_1 cce=14 al=2
+154.991 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943154908417 rnti=0x1234 sfn=926 slot=17 fmt=1_1 cce=4 al=2
+154.991 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943156227346 rnti=0x1234 sfn=927 slot=0 fmt=1_1 cce=8 al=2
+154.993 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943157492477 rnti=0x1234 sfn=927 slot=1 fmt=1_1 cce=10 al=2
+154.995 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943159868710 rnti=0x1234 sfn=927 slot=4 fmt=1_1 cce=12 al=2
+154.996 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943160023310 rnti=0x1234 sfn=927 slot=5 fmt=1_1 cce=4 al=2
+154.996 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943161198232 rnti=0x1234 sfn=927 slot=6 fmt=1_1 cce=0 al=2
+154.998 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943163379245 rnti=0x1234 sfn=927 slot=7 fmt=1_1 cce=2 al=2
+155.001 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943165645040 rnti=0x1234 sfn=927 slot=10 fmt=1_1 cce=2 al=2
+155.001 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943165878805 rnti=0x1234 sfn=927 slot=11 fmt=1_1 cce=14 al=2
+155.005 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943169116096 rnti=0x1234 sfn=927 slot=14 fmt=1_1 cce=12 al=2
+155.006 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943169346817 rnti=0x1234 sfn=927 slot=15 fmt=1_1 cce=0 al=2
+155.006 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943169656397 rnti=0x1234 sfn=927 slot=16 fmt=1_1 cce=14 al=2
+155.006 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943169899416 rnti=0x1234 sfn=927 slot=17 fmt=1_1 cce=4 al=2
+155.008 [NR_PHY] Returned from ITTI signal handler
+155.008 [NR_PHY] UE main thread is ending
+155.009 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943173190743 rnti=0x1234 sfn=928 slot=1 fmt=1_1 cce=10 al=2
+155.009 [PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1790840943173417811 rnti=0x1234 sfn=928 slot=2 fmt=1_1 cce=8 al=2
+155.522 [PHY]    SENSING: USS_TRACK geometry=rb2+102 dur1 map=2/3/0 id=0 obs=64 top=0x3c1f score=16.480 hits=21 hash=2 M=1 gap=0.184 stable=0
+155.614 [CONFIG] function config_libconfig_init returned 0
+155.614 AWGN: ricean_factor 0.000000
+155.614 AWGN: ricean_factor 0.000000
+155.614 Initializing random number generator, seed 17605872823266600424
+155.614 TYPE <CTRL-C> TO TERMINATE
+155.614 Entering ITTI signals handler
+155.614 TYPE <CTRL-C> TO TERMINATE
+155.614 Bye.

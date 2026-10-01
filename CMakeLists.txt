@@ -960,6 +960,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/sss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/cic_filter_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_sl.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ntn_l1.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ue_rf_helpers.c
@@ -1461,7 +1462,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c)
 # nr_scrambling_id_sweep.c lives HERE only (final review I7): nr_pusch_passive_ul_ids.c (this library) and
 # nr_pdsch_passive_decode.c (PHY_NR_UE) both call it. Every executable that pulls nr_pdsch_passive_decode.o
 # already needs this library (nr_prb_segments, nr_pdsch_config_sweep_*), so no PHY_NR_UE-only link unit loses it.
@@ -2525,6 +2526,13 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_passive_acq_state)
   add_test(NAME test_nr_passive_acq_state COMMAND ./test_nr_passive_acq_state)
 
+  add_executable(test_nr_initial_sync_budget ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_initial_sync_budget_test.cc
+                                              ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c)
+  target_include_directories(test_nr_initial_sync_budget PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_initial_sync_budget PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_initial_sync_budget)
+  add_test(NAME test_nr_initial_sync_budget COMMAND ./test_nr_initial_sync_budget)
+
   add_executable(test_nr_dmrs_id_estimate ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dmrs_id_estimate_test.cc
                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
                                           ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
@@ -2541,6 +2549,20 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_scrambling_id_sweep PRIVATE GTest::gtest)
   add_dependencies(tests test_nr_scrambling_id_sweep)
   add_test(NAME test_nr_scrambling_id_sweep COMMAND ./test_nr_scrambling_id_sweep)
+
+  add_executable(test_nr_passive_metrics ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_metrics_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c)
+  target_include_directories(test_nr_passive_metrics PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_metrics PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_passive_metrics)
+  add_test(NAME test_nr_passive_metrics COMMAND ./test_nr_passive_metrics)
+
+  add_executable(test_nr_passive_obs ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c)
+  target_include_directories(test_nr_passive_obs PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_obs PRIVATE GTest::gtest GTest::gtest_main pthread m)
+  add_dependencies(tests test_nr_passive_obs)
+  add_test(NAME test_nr_passive_obs COMMAND ./test_nr_passive_obs)
 
   add_executable(test_nr_pdsch_xoverhead ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_xoverhead_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c)

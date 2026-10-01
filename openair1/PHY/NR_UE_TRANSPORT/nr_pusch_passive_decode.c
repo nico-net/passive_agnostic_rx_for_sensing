@@ -19,6 +19,7 @@
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pusch_data_aided.h"
 #include "nr_pdsch_prb_set.h"
+#include "nr_passive_obs.h" // per-grant observation API (Task A3)
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -96,6 +97,11 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
+{
+  *try_ = atomic_load(&g_try);
+  *crc_ok = atomic_load(&g_crc_ok);
+}
 /* Reserved-UL-MCS retransmission record (gap-harq lane): the UL twin of
  * nr_pdsch_passive_decode.c's g_dl_harq_init, own instance so a UL HARQ pid can never collide with
  * a DL one that happens to share the same number. See nr_harq_init_tx.h. */
@@ -1557,6 +1563,31 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
           (unsigned)g->mcs_table, (unsigned)g->rv, ta_offset_samples, out->tbs_bytes, out->G,
           (unsigned)out->qam_mod_order, out->snr_db, out->est_delay, out->segments_ok,
           out->n_segments, (unsigned)out->status, out->reject_reason ? out->reject_reason : "-");
+  }
+  if (nr_passive_obs_enabled() && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
+                    out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {
+    /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). cfr_only calls end UNSUPPORTED. */
+    struct timespec ts_;
+    clock_gettime(CLOCK_MONOTONIC, &ts_);
+    const NR_DL_FRAME_PARMS *ofp_ = &ue->frame_parms;
+    const nr_passive_obs_t o_ = {
+        .abs_slot = abs_slot ? (int64_t)abs_slot : -1,                  /* 0 = "derive" -> unknown */
+        .t_mono_ns = (uint64_t)ts_.tv_sec * 1000000000ull + (uint64_t)ts_.tv_nsec,
+        .frame = (int16_t)frame, .slot = (int16_t)slot, .pci = (int16_t)ofp_->Nid_cell,
+        .dir = NR_OBS_DIR_UL, .rnti = g->rnti, .rnti_class = -1,
+        .start_rb = (int16_t)(g->bwp_start + g->start_rb), .nb_rb = (int16_t)g->num_rb,
+        .start_sym = (int8_t)g->start_symbol, .nb_sym = (int8_t)g->num_symbols,
+        .mcs = (int8_t)g->mcs, .mcs_table = (int8_t)g->mcs_table, .qm = (int8_t)out->qam_mod_order,
+        .nl = (int8_t)g->nrOfLayers, .dmrs_symb_pos = g->ul_dmrs_symb_pos,
+        .dmrs_scrambling_id = g->ul_dmrs_scrambling_id, .tbs = (int32_t)out->tbs_bytes * 8,
+        .harq_pid = (int8_t)g->harq_pid, .rv = (int8_t)g->rv, .ndi = (int8_t)g->ndi,
+        .crc = out->status == NR_PUSCH_PASSIVE_OK ? NR_OBS_CRC_OK
+             : out->status == NR_PUSCH_PASSIVE_CRC_FAIL ? NR_OBS_CRC_FAIL : NR_OBS_CRC_NA,
+        .nvar = NAN, .snr_db = out->snr_db, .fo_comp_hz = (float)fo_hz, .delay_samples = (float)out->est_delay,
+        .carrier_hz = ofp_->ul_CarrierFreq ? (int64_t)ofp_->ul_CarrierFreq : -1,
+        .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
+        .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
+    nr_passive_obs_push(&o_);
   }
   return ok;
 }
