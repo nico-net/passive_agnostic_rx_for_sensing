@@ -4,7 +4,7 @@
 
 **Goal:** Detect and recover from RRC reconfigurations the passive receiver cannot read — on **SA and NSA** cells over the air — by lifting the DCI size cap to 140 bits, re-learning per-RNTI DCI lengths, giving the CORESET bank a life cycle, and introducing one cell-level `CellConfigEpoch` authority whose consumers turn learned state into hints after a change.
 
-**Architecture:** Phase 1 (R1–R6) is local to the blind-PDCCH modules and independently testable. Phase 2 (R7–R11) adds a single pure epoch module (`nr_passive_cfg_epoch`) and connects its consumers one by one. Phase 3 (R12–R14) validates with an offline mid-stream reconfiguration replay, the live SA bed (+ NSA-like arm) and a soak.
+**Architecture:** Phase 1 (R1–R6) is local to the blind-PDCCH modules and independently testable; R15 (optional) adds a verified, batched PDCCH GPU path if profiling justifies it. Phase 2 (R7–R11) adds a single pure epoch module (`nr_passive_cfg_epoch`) and connects its consumers one by one. Phase 3 (R12–R14) validates with an offline mid-stream reconfiguration replay, the live SA bed (+ NSA-like arm) and a soak.
 
 **Tech Stack:** C11 (OAI style), C++17 gtest, CMake/Ninja, Python 3 stdlib, OAI rfsim/SA beds.
 
@@ -162,6 +162,31 @@ void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn);
 
 ---
 
+### Task R15 (OPTIONAL): PDCCH GPU path (Sonnet implements; Opus reviews)
+
+Optional: do it only if the levers F3 profile (or a dedicated blind-PDCCH profile with `ISAC_PDCCH_TIMING=1`) shows the
+blind-PDCCH scan (FEP/LLR, demap, candidate decode, DM-RS correlation, re-encode checks) is a bottleneck after R2/R6
+widen the search (140-bit lengths, continuous discovery, SUSPECT re-lock sweeps). Control logic stays on the CPU.
+
+**Files:** `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.{cu,h}` (exists, built as `libpdcch_gpu.so`, **never loaded by the
+receiver**, sign convention unverified — levers spec §9.4 V8), call sites in `nr_pdcch_blind_monitor_rt.c` (occasion body:
+FEP/LLR ~3683-5076, candidate decode fan-out ~5309), `nr_polar_gpu_mod.c` (existing, bit-exact GPU polar).
+
+- [ ] **Step 1 (verify before wiring):** live self-check mode (`ISAC_PDCCH_GPU_SELFCHECK=1`): for a sample of occasions run
+  both the CPU path (`nr_pdcch_demapping_deinterleaving` + LLR) and the GPU module on the same IQ and compare LLR signs and
+  magnitudes per REG; pass = sign agreement ≥ 99.99 % and identical accepted DCIs (RNTI, payload) on the 106-PRB rfsim bed.
+  Until this passes the GPU path stays disabled.
+- [ ] **Step 2:** batch per occasion across candidates × aggregation levels × (when R4 applies) both locked lengths, and across
+  occasions of the same slot; CCE/candidate extraction, DM-RS correlation (for the coherence gate and Technique A occupancy)
+  and candidate equalisation on the GPU; polar decode through the existing `nr_polar_gpu_mod` batch; CRC/RNTI recovery,
+  re-encode/mismatch gate and all gates/persistence stay on the CPU (or move to the GPU only if bit-exact by test).
+- [ ] **Step 3:** unified memory on GB10 (no staging copies), one persistent stream per scan consumer, never blocks the
+  receive thread (enqueue + per-occasion completion, CPU fallback on timeout or error, one-shot LOG_W).
+- [ ] **Step 4:** A/B on the DGX (106 and 273 PRB, 1 and 2 scan consumers, SA and NSA-like): accepts per occasion and
+  accepted DCIs identical to the CPU path; `passivePdcchN` CPU and `scanq drop_full` / `max_lag` reported; commit only if
+  identical decisions and lower CPU or latency.
+- [ ] **Step 5:** commit `feat(rr, optional): PDCCH GPU path (verified vs CPU, batched, fallback)`; PROJECT_MEMORY V8 → resolved.
+
 ## PHASE 3 — validation
 
 ### Task R12: Offline mid-stream reconfiguration replay (Sonnet)
@@ -178,4 +203,4 @@ void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn);
 
 ## Self-review record (2026-10-01)
 
-Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch).
+Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch); PDCCH GPU path as OPTIONAL R15 (profile-gated, verify-before-wire).
