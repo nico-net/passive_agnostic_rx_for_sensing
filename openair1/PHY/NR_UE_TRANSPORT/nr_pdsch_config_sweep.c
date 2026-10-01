@@ -18,6 +18,7 @@
 #include "nr_pdsch_config_sweep.h"
 #include "nr_crc_evidence.h"
 #include "nr_pdsch_qm_oracle.h"
+#include "nr_td_order.h"
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -215,6 +216,13 @@ static int add_typeb_layer(nr_pdsch_config_sweep_state_t *st, int typeA, nr_pdsc
  * prune that matches nothing leaves the catalog untouched by construction. Returns 0 (nothing matched,
  * untouched), the unchanged count (everything matched, evidence kept), or the new count with the
  * evidence cleared -- indices have moved, and keeping it would score one hypothesis with another's. */
+/* Probe counters follow the KL evidence: indices move on every prune, so they are cleared with it. */
+static void clear_probe_stats(nr_pdsch_config_sweep_state_t *st)
+{
+  memset(st->probe_pass, 0, sizeof(st->probe_pass));
+  memset(st->probe_fail, 0, sizeof(st->probe_fail));
+  memset(st->probe_inconclusive, 0, sizeof(st->probe_inconclusive));
+}
 static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
 {
   if (n <= 0 || n == st->n_hyp)
@@ -222,6 +230,7 @@ static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
   st->n_hyp = n;
   memset(st->trials, 0, sizeof(st->trials));
   memset(st->ok, 0, sizeof(st->ok));
+  clear_probe_stats(st);
   for (int i = 0; i < n; i++)
     st->order[i] = i;
   st->cursor = 0;
@@ -484,6 +493,56 @@ int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mc
   return prune_prior(st, mcs_table, dmrs_add_pos, dmrs_max_len, 0xFF);
 }
 
+/* SCORE-ORDERED ROUNDS (spec 2026-10-01 §5.1). Side information only changes WHEN a hypothesis is tried
+ * inside a balanced round, never whether: every hypothesis still gets exactly one slot per round, and
+ * acceptance stays with the TB CRC. Stable descending sort of the freshly shuffled round by
+ *   key(i) = nr_td_ordering_score(hyp[i], side) + (probe_pass[i] > 0 ? side->w_probe : 0)
+ * so equal keys keep the shuffle's order: with every key 0 the round is exactly the shuffle (neutral side
+ * information is bit-identical to no side information). The shuffle itself still runs, so RNG use is
+ * unchanged. Bottom-up merge sort on a heap scratch (2 x 32 KB at the cap: too much for a consumer
+ * thread's stack); an all-equal round (the neutral case) returns before allocating. If the scratch
+ * cannot be allocated the round keeps the shuffle order -- ordering is a priority, never a correctness
+ * input. */
+static void score_order_round(nr_pdsch_config_sweep_state_t *st)
+{
+  const int n = st->n_hyp;
+  if (n < 2)
+    return;
+  float *key = malloc(sizeof(*key) * (size_t)n);
+  if (!key)
+    return;
+  bool varied = false;
+  for (int i = 0; i < n; i++) {
+    key[i] = nr_td_ordering_score(&st->hyp[i], st->side) + (st->probe_pass[i] > 0 ? st->side->w_probe : 0.0f);
+    varied |= key[i] != key[0];
+  }
+  int *tmp = varied ? malloc(sizeof(*tmp) * (size_t)n) : NULL;
+  if (tmp) {
+    int *src = st->order, *dst = tmp;
+    for (int w = 1; w < n; w *= 2) {
+      for (int lo = 0; lo < n; lo += 2 * w) {
+        const int mid = lo + w < n ? lo + w : n;
+        const int hi = lo + 2 * w < n ? lo + 2 * w : n;
+        int a = lo, b = mid, k = lo;
+        /* ">=" takes the LEFT run on ties: stable */
+        while (a < mid && b < hi)
+          dst[k++] = key[src[a]] >= key[src[b]] ? src[a++] : src[b++];
+        while (a < mid)
+          dst[k++] = src[a++];
+        while (b < hi)
+          dst[k++] = src[b++];
+      }
+      int *swap = src;
+      src = dst;
+      dst = swap;
+    }
+    if (src != st->order)
+      memcpy(st->order, src, sizeof(*src) * (size_t)n);
+  }
+  free(tmp);
+  free(key);
+}
+
 int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out)
 {
   if (st == NULL || out == NULL || st->n_hyp <= 0) {
@@ -508,7 +567,11 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
     *out = st->hyp[hot];
     return hot;
   }
-  if (!st->cursor) nr_crc_shuffle(st->order, st->n_hyp, &st->random_state);
+  if (!st->cursor) {
+    nr_crc_shuffle(st->order, st->n_hyp, &st->random_state);
+    if (st->side)
+      score_order_round(st);
+  }
   const int idx = st->order[st->cursor];
   st->cursor = (st->cursor + 1) % st->n_hyp;
   *out = st->hyp[idx];
@@ -579,6 +642,73 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
   const double rs = (second >= 0) ? rate_of(st, second) : 0.0;
   if (rb >= SWEEP_MIN_RATE && (rs <= 0.0 || rb >= SWEEP_WIN_RATIO * rs)) {
     st->winner = best;
+  }
+  return st->winner;
+}
+
+int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[])
+{
+  if (st == NULL || idx == NULL || out == NULL || K < 1)
+    return 0;
+  if (K > NR_TD_MAX_K)
+    K = NR_TD_MAX_K;
+  idx[0] = nr_pdsch_config_sweep_next(st, &out[0]);
+  if (idx[0] < 0)
+    return 0;
+  if (st->winner >= 0)
+    return 1;
+  int n = 1;
+  /* Probes: the rest of the current round from the cursor on (wrapping), read-only -- the cursor and
+   * the RNG belong to the main selection alone, so K > 1 never changes the main hypothesis sequence. A
+   * hypothesis already CLEARED by the KL evidence (full fallback trials, no pass) is not worth a probe. */
+  for (int step = 0; step < st->n_hyp && n < K; step++) {
+    const int h = st->order[(st->cursor + step) % st->n_hyp];
+    if (h == idx[0] || (st->trials[h] >= SWEEP_MIN_TRIALS && st->ok[h] == 0))
+      continue;
+    bool dup = false;
+    for (int j = 1; j < n; j++)
+      dup |= idx[j] == h;
+    if (dup)
+      continue;
+    idx[n] = h;
+    out[n] = st->hyp[h];
+    n++;
+  }
+  return n;
+}
+
+static void probe_count(uint16_t *c)
+{
+  if (*c < UINT16_MAX)
+    (*c)++;
+}
+
+int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_outcome_t *outcomes, int n)
+{
+  if (st == NULL || outcomes == NULL || n < 1)
+    return (st != NULL) ? st->winner : -1;
+  const nr_td_outcome_t *m = &outcomes[0];
+  /* Only a decided FULL-TB outcome is KL evidence; an inconclusive main decode is not fed. */
+  if (m->kind == NR_TD_FULL_TB && (m->result == NR_TD_PASS || m->result == NR_TD_FAIL))
+    nr_pdsch_config_sweep_feed(st, m->hyp, m->result == NR_TD_PASS);
+  for (int i = 1; i < n; i++) {
+    const nr_td_outcome_t *o = &outcomes[i];
+    if (o->hyp < 0 || o->hyp >= st->n_hyp)
+      continue;
+    if (o->result == NR_TD_PASS) {
+      probe_count(&st->probe_pass[o->hyp]); /* ordering only (P1): never a KL success */
+    } else if (o->result == NR_TD_FAIL) {
+      probe_count(&st->probe_fail[o->hyp]);
+      /* P2: one KL failure per admissible failed probe, at most once per hypothesis per grant (a
+       * hypothesis repeated in one batch, or equal to the main one, was already scored on this grant). */
+      bool seen = o->hyp == m->hyp;
+      for (int j = 1; j < i && !seen; j++)
+        seen = outcomes[j].hyp == o->hyp;
+      if (st->p2 && o->p2_admissible && !seen)
+        nr_pdsch_config_sweep_feed(st, o->hyp, false);
+    } else {
+      probe_count(&st->probe_inconclusive[o->hyp]);
+    }
   }
   return st->winner;
 }
@@ -744,6 +874,7 @@ static void reopen_context(sweep_context_t *c)
   /* Keep the already checked legal catalog, but discard stale decoding evidence. */
   memset(c->state->trials, 0, sizeof(c->state->trials));
   memset(c->state->ok, 0, sizeof(c->state->ok));
+  clear_probe_stats(c->state);
   c->state->winner = -1;
   c->state->cursor = 0;
   for (int i=0; i<c->state->n_hyp; ++i) c->state->order[i] = i;
@@ -993,6 +1124,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
     const int at = st->n_hyp++;
     st->hyp[at] = h;
     st->trials[at] = st->ok[at] = 0;
+    st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
     st->order[at] = at;
   }
   free(scratch);

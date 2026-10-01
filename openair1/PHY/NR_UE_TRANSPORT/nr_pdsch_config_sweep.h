@@ -44,6 +44,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+struct nr_td_side_info_s; /* nr_td_order.h (which includes this header) */
+
 /// One payload-interpretation hypothesis. Deliberately only the fields the TB CRC can actually
 /// discriminate -- anything the polar CRC already pins (dci_length, bwp_size) is not swept here.
 typedef struct {
@@ -91,7 +93,9 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
  * (S,L)) x k0 {0,1} x 4 add_pos x 2 max_len x 3 mcs_table = 6336; runtime up to ~2154, i.e. ~1077 per
  * k0 layer, so 8192 leaves room for five observed k0 >= 2 layers on top of it. Per context:
  * 8192 x 22 B = 180 KB, heap-allocated when a context slot is first used (nr-uesoftmodem mlockall()s,
- * so 1024 inline states would pin 185 MB at startup). */
+ * so 1024 inline states would pin 185 MB at startup). The 2026-10-01 probe counters (3 x uint16) add
+ * 48 KB: sizeof 180244 -> 229416 B; at 1024 contexts + 4 templates + 1 spare + the legacy singleton,
+ * at most 50.6 MB more, and only for slots actually opened. */
 #define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
@@ -105,7 +109,27 @@ typedef struct {
   uint32_t exploit_tick; ///< 3 of 4 trials go to the hypothesis with the most passes (see _next)
   int      cursor;    ///< position in the shuffled, balanced round
   int      winner;    ///< -1 until decided
+  /* Convergence levers (spec 2026-10-01 §5.1-5.3). Code-block PROBE outcomes, kept apart from the KL
+   * evidence above: they order rounds (P1) and, only with p2 set, an ADMISSIBLE probe failure adds one
+   * KL failure; a probe pass never adds KL evidence. uint16 (saturating) bounds the per-state cost to
+   * 48 KB. Cleared together with trials/ok (indices move on every prune). */
+  uint16_t probe_pass[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t probe_fail[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t probe_inconclusive[NR_PDSCH_SWEEP_MAX_HYP];
+  const struct nr_td_side_info_s *side; ///< ordering side information (nr_td_order.h); NULL = neutral (today's order)
+  bool     p2;        ///< failure-only probe evidence enabled
 } nr_pdsch_config_sweep_state_t;
+
+/* ---- K-hypothesis selection and probe outcomes (spec 2026-10-01 §5.1-5.3) ------------------------- */
+typedef enum { NR_TD_FULL_TB = 0, NR_TD_CB_PROBE = 1 } nr_td_outcome_kind_t;
+typedef enum { NR_TD_PASS = 0, NR_TD_FAIL = 1, NR_TD_INCONCLUSIVE = 2 } nr_td_outcome_result_t;
+typedef struct {
+  int hyp;            ///< hypothesis index in the state that produced it
+  uint8_t kind;       ///< nr_td_outcome_kind_t
+  uint8_t result;     ///< nr_td_outcome_result_t
+  bool p2_admissible; ///< probe failure qualifies as KL evidence (only used when st->p2)
+} nr_td_outcome_t;
+#define NR_TD_MAX_K 8
 
 /** Build the complete supported mapping-A + mapping-B catalog for pure algorithm tests.
  * Runtime uses init_legal() with the real cell DMRS table. TDA field width remains an
@@ -118,6 +142,19 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
 /** Report the TB-CRC outcome of the grant decoded under hypothesis `idx`.
  * Returns the winning index once one is established, else -1. */
 int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok);
+
+/** K = 1 is exactly nr_pdsch_config_sweep_next(). Returns n filled (1..K, K clamped to NR_TD_MAX_K;
+ *  0 when nothing can be selected); idx[0]/out[0] = the main hypothesis (unchanged path and RNG use),
+ *  idx[1..n-1] = distinct probe hypotheses that are not yet cleared (>= SWEEP_MIN_TRIALS trials, no pass),
+ *  taken from the current round order at the cursor WITHOUT advancing it or consuming RNG. Once a winner
+ *  exists only the winner is returned (n = 1). */
+int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[]);
+
+/** outcomes[0] must be the main FULL_TB outcome: PASS/FAIL go through nr_pdsch_config_sweep_feed();
+ *  INCONCLUSIVE (or a non-FULL_TB entry) is not fed. outcomes[1..n-1] are probes: they only update the
+ *  probe counters, except that with st->p2 an admissible FAIL adds exactly one KL failure. A probe PASS
+ *  never adds KL evidence. Returns the winner index or -1 (same contract as _feed). */
+int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_outcome_t *outcomes, int n);
 
 /** Winner, or -1 if undecided. */
 int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st);

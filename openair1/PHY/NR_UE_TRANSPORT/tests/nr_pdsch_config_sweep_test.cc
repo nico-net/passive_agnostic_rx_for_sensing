@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstring>
 #include <chrono>
 #include <algorithm>
 #include <iostream>
@@ -7,6 +8,7 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pdsch_config_sweep.h"
+#include "nr_td_order.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 }
@@ -1006,4 +1008,164 @@ TEST(PdschConfigSweepK0, TargetSlotWrapsFrameAndSfn) {
   EXPECT_EQ(f, 0); EXPECT_EQ(s, 1);
   nr_pdsch_k0_slot(7, 2, 20, 32, &f, &s);
   EXPECT_EQ(f, 8); EXPECT_EQ(s, 14);
+}
+
+TEST(PdschSweepK, K1IsBitIdenticalToNext) {
+  static nr_pdsch_config_sweep_state_t a, b;
+  nr_pdsch_config_sweep_init(&a, 4); nr_pdsch_config_sweep_init(&b, 4);
+  unsigned seed = 7;
+  for (int i = 0; i < 20000 && a.winner < 0; i++) {
+    nr_pdsch_cfg_hypothesis_t ha, hb[NR_TD_MAX_K]; int ib[NR_TD_MAX_K];
+    const int ia = nr_pdsch_config_sweep_next(&a, &ha);
+    ASSERT_EQ(nr_pdsch_config_sweep_next_k(&b, 1, ib, hb), 1);
+    ASSERT_EQ(ia, ib[0]);
+    const bool ok = (ia == 3) && (rand_r(&seed) % 100 < 60);
+    nr_pdsch_config_sweep_feed(&a, ia, ok);
+    const nr_td_outcome_t o = {ib[0], NR_TD_FULL_TB, (uint8_t)(ok ? NR_TD_PASS : NR_TD_FAIL), false};
+    nr_pdsch_config_sweep_feed_k(&b, &o, 1);
+  }
+  EXPECT_EQ(a.winner, b.winner);
+}
+/* Same, on a pruned catalog that actually converges, so the whole sequence up to the winner is compared. */
+TEST(PdschSweepK, K1IsBitIdenticalToNextUntilConvergence) {
+  static nr_pdsch_config_sweep_state_t a, b;
+  nr_pdsch_config_sweep_init(&a, 4);
+  ASSERT_GT(nr_pdsch_config_sweep_prune_to(&a, a.hyp[0].mcs_table, a.hyp[0].dmrs_add_pos, a.hyp[0].dmrs_max_len), 0);
+  b = a;
+  unsigned seed = 7;
+  int i = 0;
+  for (; i < 200000 && a.winner < 0; i++) {
+    nr_pdsch_cfg_hypothesis_t ha, hb[NR_TD_MAX_K]; int ib[NR_TD_MAX_K];
+    const int ia = nr_pdsch_config_sweep_next(&a, &ha);
+    ASSERT_EQ(nr_pdsch_config_sweep_next_k(&b, 1, ib, hb), 1);
+    ASSERT_EQ(ia, ib[0]);
+    const bool ok = (ia == 3) && (rand_r(&seed) % 100 < 60);
+    const int wa = nr_pdsch_config_sweep_feed(&a, ia, ok);
+    const nr_td_outcome_t o = {ib[0], NR_TD_FULL_TB, (uint8_t)(ok ? NR_TD_PASS : NR_TD_FAIL), false};
+    ASSERT_EQ(wa, nr_pdsch_config_sweep_feed_k(&b, &o, 1));
+  }
+  EXPECT_EQ(a.winner, 3);
+  EXPECT_EQ(b.winner, 3);
+  EXPECT_EQ(0, memcmp(a.trials, b.trials, sizeof(a.trials)));
+  EXPECT_EQ(0, memcmp(a.ok, b.ok, sizeof(a.ok)));
+  std::cout << "pruned catalog " << a.n_hyp << " hypotheses converged after " << i << " grants" << std::endl;
+}
+TEST(PdschSweepK, ZeroScoresKeepShuffleOrder) {
+  static nr_pdsch_config_sweep_state_t a, b;
+  nr_pdsch_config_sweep_init(&a, 4); nr_pdsch_config_sweep_init(&b, 4);
+  nr_td_side_info_t s = {}; s.obs_dmrs_mask = -1; s.obs_qm = -1; s.obs_last_symbol = -1;
+  s.f_S = s.f_L = s.f_mapping = s.f_k0 = s.f_dmrs_add_pos = s.f_dmrs_max_len = -1; s.w_sib1 = 1; /* weight on, no data */
+  b.side = &s;
+  for (int i = 0; i < 3 * a.n_hyp; i++) {
+    nr_pdsch_cfg_hypothesis_t h; ASSERT_EQ(nr_pdsch_config_sweep_next(&a, &h), nr_pdsch_config_sweep_next(&b, &h));
+    nr_pdsch_config_sweep_feed(&a, 0, false); nr_pdsch_config_sweep_feed(&b, 0, false);
+  }
+  b.side = nullptr; /* s is a local: do not leave the static state pointing at it */
+}
+TEST(PdschSweepK, ProbesAreDistinctAndDoNotAdvanceCursor) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4);
+  int idx[NR_TD_MAX_K]; nr_pdsch_cfg_hypothesis_t h[NR_TD_MAX_K];
+  const int c0 = st.cursor; const int n = nr_pdsch_config_sweep_next_k(&st, 3, idx, h);
+  ASSERT_EQ(n, 3); EXPECT_NE(idx[0], idx[1]); EXPECT_NE(idx[1], idx[2]); EXPECT_NE(idx[0], idx[2]);
+  EXPECT_EQ(st.cursor, (c0 + 1) % st.n_hyp); /* only the main selection advanced it */
+}
+TEST(PdschSweepK, P1ProbeFailuresDoNotTouchKlStats) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4);
+  const nr_td_outcome_t o[2] = {{0, NR_TD_FULL_TB, NR_TD_FAIL, false}, {5, NR_TD_CB_PROBE, NR_TD_FAIL, true}};
+  nr_pdsch_config_sweep_feed_k(&st, o, 2);
+  EXPECT_EQ(st.trials[5], 0u); EXPECT_EQ(st.probe_fail[5], 1);
+}
+TEST(PdschSweepK, P2AdmissibleProbeFailIsOneKlFailureAndPassIsNothing) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4); st.p2 = true;
+  const nr_td_outcome_t o[3] = {{0, NR_TD_FULL_TB, NR_TD_FAIL, false}, {5, NR_TD_CB_PROBE, NR_TD_FAIL, true},
+                                {6, NR_TD_CB_PROBE, NR_TD_PASS, true}};
+  nr_pdsch_config_sweep_feed_k(&st, o, 3);
+  EXPECT_EQ(st.trials[5], 1u); EXPECT_EQ(st.ok[5], 0u);
+  EXPECT_EQ(st.trials[6], 0u); EXPECT_EQ(st.probe_pass[6], 1);
+  const nr_td_outcome_t na[2] = {{0, NR_TD_FULL_TB, NR_TD_FAIL, false}, {7, NR_TD_CB_PROBE, NR_TD_FAIL, false}};
+  nr_pdsch_config_sweep_feed_k(&st, na, 2);
+  EXPECT_EQ(st.trials[7], 0u); /* not admissible: no KL evidence */
+}
+
+/* Non-neutral side information: the round is the shuffle, stably partitioned by key -- the matching
+ * hypotheses first, each group in the exact order the neutral twin's shuffle produced. */
+TEST(PdschSweepK, ScoredRoundIsStablePartitionOfShuffle) {
+  static nr_pdsch_config_sweep_state_t a, b;
+  nr_pdsch_config_sweep_init(&a, 4); nr_pdsch_config_sweep_init(&b, 4);
+  nr_td_side_info_t s = {}; s.obs_dmrs_mask = -1; s.obs_qm = -1; s.obs_last_symbol = -1;
+  s.f_S = s.f_L = s.f_mapping = s.f_k0 = s.f_dmrs_add_pos = s.f_dmrs_max_len = -1;
+  s.f_S = 1; s.f_L = 13; s.f_conf = 1; s.w_field = 1; /* key 2 for S=1 L=13, 1 for one of them, 0 else */
+  b.side = &s;
+  std::vector<int> ra, rb;
+  for (int i = 0; i < a.n_hyp; i++) {
+    nr_pdsch_cfg_hypothesis_t h;
+    ra.push_back(nr_pdsch_config_sweep_next(&a, &h));
+    rb.push_back(nr_pdsch_config_sweep_next(&b, &h));
+  }
+  EXPECT_EQ(a.random_state, b.random_state); /* same RNG consumption */
+  std::vector<int> expect;
+  for (int k = 2; k >= 0; k--)
+    for (int i : ra)
+      if ((a.hyp[i].tda_start == 1) + (a.hyp[i].tda_length == 13) == k)
+        expect.push_back(i);
+  EXPECT_EQ(rb, expect);
+  EXPECT_NE(rb, ra);
+  b.side = nullptr;
+}
+/* P1: a probe pass moves its hypothesis to the front of the next round (w_probe), no KL evidence. */
+TEST(PdschSweepK, ProbePassBonusOrdersNextRound) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4);
+  nr_td_side_info_t s = {}; s.obs_dmrs_mask = -1; s.obs_qm = -1; s.obs_last_symbol = -1;
+  s.f_S = s.f_L = s.f_mapping = s.f_k0 = s.f_dmrs_add_pos = s.f_dmrs_max_len = -1; s.w_probe = 1;
+  st.side = &s;
+  nr_pdsch_cfg_hypothesis_t h;
+  for (int i = 0; i < st.n_hyp; i++) /* finish round 1 */
+    nr_pdsch_config_sweep_next(&st, &h);
+  ASSERT_EQ(st.cursor, 0);
+  const nr_td_outcome_t o[2] = {{0, NR_TD_FULL_TB, NR_TD_INCONCLUSIVE, false}, {42, NR_TD_CB_PROBE, NR_TD_PASS, true}};
+  nr_pdsch_config_sweep_feed_k(&st, o, 2);
+  EXPECT_EQ(st.trials[0], 0u); /* inconclusive main outcome is not fed */
+  EXPECT_EQ(st.trials[42], 0u);
+  EXPECT_EQ(nr_pdsch_config_sweep_next(&st, &h), 42);
+  st.side = nullptr;
+}
+TEST(PdschSweepK, ProbesSkipClearedAndWinnerReturnsOne) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4);
+  for (int i = 0; i < st.n_hyp; i++)
+    st.trials[i] = 300; /* every hypothesis cleared (no pass) */
+  int idx[NR_TD_MAX_K]; nr_pdsch_cfg_hypothesis_t h[NR_TD_MAX_K];
+  EXPECT_EQ(nr_pdsch_config_sweep_next_k(&st, NR_TD_MAX_K + 5, idx, h), 1);
+  st.ok[7] = 1; st.ok[9] = 1; /* not cleared any more; main goes to the hot one (most passes, lowest index) */
+  const int n = nr_pdsch_config_sweep_next_k(&st, 4, idx, h); /* main is unfiltered; probes only 7 and 9 */
+  std::vector<int> probes(idx + 1, idx + n);
+  std::sort(probes.begin(), probes.end());
+  std::vector<int> expect;
+  if (idx[0] != 7) expect.push_back(7);
+  if (idx[0] != 9) expect.push_back(9);
+  EXPECT_EQ(probes, expect);
+  st.winner = 9;
+  EXPECT_EQ(nr_pdsch_config_sweep_next_k(&st, 4, idx, h), 1);
+  EXPECT_EQ(idx[0], 9);
+  EXPECT_EQ(nr_pdsch_config_sweep_next_k(&st, 0, idx, h), 0);
+}
+TEST(PdschSweepK, ProbeCountersSaturateAndClearOnPrune) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4);
+  st.probe_fail[3] = UINT16_MAX;
+  const nr_td_outcome_t o[3] = {{0, NR_TD_FULL_TB, NR_TD_FAIL, false}, {3, NR_TD_CB_PROBE, NR_TD_FAIL, false},
+                                {4, NR_TD_CB_PROBE, NR_TD_INCONCLUSIVE, false}};
+  nr_pdsch_config_sweep_feed_k(&st, o, 3);
+  EXPECT_EQ(st.probe_fail[3], UINT16_MAX);
+  EXPECT_EQ(st.probe_inconclusive[4], 1);
+  ASSERT_GT(nr_pdsch_config_sweep_prune_to(&st, st.hyp[0].mcs_table, st.hyp[0].dmrs_add_pos, st.hyp[0].dmrs_max_len), 0);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_HYP; i++)
+    ASSERT_EQ(st.probe_fail[i] | st.probe_inconclusive[i] | st.probe_pass[i], 0) << i;
+}
+/* P2 never double-scores one grant: a probe repeating the main hypothesis adds no extra KL failure. */
+TEST(PdschSweepK, P2ProbeEqualToMainIsNotScoredTwice) {
+  static nr_pdsch_config_sweep_state_t st; nr_pdsch_config_sweep_init(&st, 4); st.p2 = true;
+  const nr_td_outcome_t o[3] = {{2, NR_TD_FULL_TB, NR_TD_FAIL, false}, {2, NR_TD_CB_PROBE, NR_TD_FAIL, true},
+                                {5, NR_TD_CB_PROBE, NR_TD_FAIL, true}};
+  nr_pdsch_config_sweep_feed_k(&st, o, 3);
+  EXPECT_EQ(st.trials[2], 1u);
+  EXPECT_EQ(st.trials[5], 1u);
 }
