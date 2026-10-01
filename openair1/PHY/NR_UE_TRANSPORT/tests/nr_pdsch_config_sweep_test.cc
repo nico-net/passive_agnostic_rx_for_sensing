@@ -1292,3 +1292,259 @@ TEST(PdschSweepEquiv, InvalidDecodedIndexCreditsNothing) {
     ASSERT_EQ(s->ok[i], 0u) << i;
   }
 }
+
+// ---- BC3: dormant (reversible) masks + fail-open (blind-convergence spec section 4) -------------------------
+static bool keep_even(const nr_pdsch_cfg_hypothesis_t *h, const void *) { return (h->tda_length % 2) == 0; }
+static bool keep_none(const nr_pdsch_cfg_hypothesis_t *, const void *) { return false; }
+static bool keep_k0_0(const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->k0 == 0; }
+
+TEST(PdschSweepDormant, NoMasksIsBitIdentical) {
+  auto a = std::make_unique<nr_pdsch_config_sweep_state_t>(), b = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(a.get(), 4); memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
+  ASSERT_GT(nr_pdsch_config_sweep_set_dormant(b.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr), 0);
+  nr_pdsch_config_sweep_clear_dormant(b.get(), NR_TD_DORMANT_PRIOR);
+  for (int t = 0; t < 600000 && nr_pdsch_config_sweep_winner(a.get()) < 0; t++) {
+    nr_pdsch_cfg_hypothesis_t h; const int i = nr_pdsch_config_sweep_next(a.get(), &h), j = nr_pdsch_config_sweep_next(b.get(), &h);
+    ASSERT_EQ(i, j); const bool ok = (i == 11) && (((unsigned)t * 2654435761u) >> 16) % 10 < 7; // truth = 11 at ~70 %
+    ASSERT_EQ(nr_pdsch_config_sweep_feed(a.get(), i, ok), nr_pdsch_config_sweep_feed(b.get(), j, ok));
+  }
+  ASSERT_GE(nr_pdsch_config_sweep_winner(a.get()), 0); // the loop must actually converge, or identity proves little
+  ASSERT_GE(nr_pdsch_config_sweep_winner(b.get()), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_winner(a.get()), nr_pdsch_config_sweep_winner(b.get()));
+  EXPECT_EQ(a->n_hyp, b->n_hyp);
+  EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
+}
+TEST(PdschSweepDormant, NoMasksIsBitIdenticalFeedKAndEquiv) {
+  // Same sequence through next_k + feed_k (with P2 probes) and feed_equiv: masks set then cleared == never set.
+  auto a = std::make_unique<nr_pdsch_config_sweep_state_t>(), b = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(a.get(), 4); a->p2 = true; memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
+  ASSERT_GT(nr_pdsch_config_sweep_set_dormant(b.get(), NR_TD_DORMANT_FIELD_BASE, keep_k0_0, nullptr), 0);
+  nr_pdsch_config_sweep_clear_dormant(b.get(), NR_TD_DORMANT_FIELD_BASE);
+  for (int t = 0; t < 600000 && nr_pdsch_config_sweep_winner(a.get()) < 0; t++) {
+    int ia[NR_TD_MAX_K], ib[NR_TD_MAX_K]; nr_pdsch_cfg_hypothesis_t oa[NR_TD_MAX_K], ob[NR_TD_MAX_K];
+    const int na = nr_pdsch_config_sweep_next_k(a.get(), 3, ia, oa), nb = nr_pdsch_config_sweep_next_k(b.get(), 3, ib, ob);
+    ASSERT_EQ(na, nb);
+    nr_td_outcome_t oc[NR_TD_MAX_K];
+    for (int k = 0; k < na; k++) {
+      ASSERT_EQ(ia[k], ib[k]);
+      oc[k] = {ia[k], (uint8_t)(k ? NR_TD_CB_PROBE : NR_TD_FULL_TB),
+               (uint8_t)(k == 0 ? ((ia[0] == 5 && (((unsigned)t * 2654435761u) >> 16) % 10 < 7) ? NR_TD_PASS : NR_TD_FAIL) : NR_TD_FAIL), k > 0};
+    }
+    ASSERT_EQ(nr_pdsch_config_sweep_feed_k(a.get(), oc, na), nr_pdsch_config_sweep_feed_k(b.get(), oc, na));
+    const int e[2] = {ia[0], (ia[0] + 7) % a->n_hyp}; // non-truth class: both members always fail
+    if (t % 4 == 0 && e[0] != 5 && e[1] != 5)
+      ASSERT_EQ(nr_pdsch_config_sweep_feed_equiv(a.get(), e, 2, false, true),
+                nr_pdsch_config_sweep_feed_equiv(b.get(), e, 2, false, true));
+  }
+  ASSERT_GE(nr_pdsch_config_sweep_winner(a.get()), 0); // converged on both
+  ASSERT_GE(nr_pdsch_config_sweep_winner(b.get()), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_winner(a.get()), nr_pdsch_config_sweep_winner(b.get()));
+  EXPECT_EQ(a->n_hyp, b->n_hyp);
+  ASSERT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
+  ASSERT_EQ(a->since_pass, b->since_pass);
+}
+TEST(PdschSweepDormant, DormantNeverSelectedAndAccumulatesNothing) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE, keep_even, nullptr);
+  for (int t = 0; t < 5000; t++) {
+    nr_pdsch_cfg_hypothesis_t h; const int i = nr_pdsch_config_sweep_next(s.get(), &h);
+    ASSERT_TRUE(nr_pdsch_config_sweep_is_active(s.get(), i)); nr_pdsch_config_sweep_feed(s.get(), i, false);
+  }
+  for (int i = 0; i < s->n_hyp; i++) if (!nr_pdsch_config_sweep_is_active(s.get(), i)) ASSERT_EQ(s->trials[i], 0u);
+}
+TEST(PdschSweepDormant, NextKProbesAreActiveAndExploitHotMustBeActive) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  int odd = -1; for (int i = 0; i < s->n_hyp && odd < 0; i++) if (s->hyp[i].tda_length % 2) odd = i;
+  for (int k = 0; k < 20; k++) nr_pdsch_config_sweep_feed(s.get(), odd, true); // hot while still active
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  ASSERT_FALSE(nr_pdsch_config_sweep_is_active(s.get(), odd));
+  for (int t = 0; t < 3000; t++) {
+    int idx[NR_TD_MAX_K]; nr_pdsch_cfg_hypothesis_t out[NR_TD_MAX_K];
+    const int n = nr_pdsch_config_sweep_next_k(s.get(), 4, idx, out);
+    for (int k = 0; k < n; k++) ASSERT_TRUE(nr_pdsch_config_sweep_is_active(s.get(), idx[k]));
+    nr_pdsch_config_sweep_feed(s.get(), idx[0], false);
+  }
+}
+TEST(PdschSweepDormant, RngConsumptionIndependentOfMasks) {
+  // The shuffle covers all n_hyp whatever is dormant: after one full round the RNG state equals the unmasked one.
+  auto a = std::make_unique<nr_pdsch_config_sweep_state_t>(), b = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(a.get(), 4); memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
+  nr_pdsch_config_sweep_set_dormant(b.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  nr_pdsch_cfg_hypothesis_t h;
+  for (int t = 0; t < a->n_hyp; t++) nr_pdsch_config_sweep_next(a.get(), &h); // exactly one round
+  for (int t = 0; t < nr_pdsch_config_sweep_n_active(b.get()); t++) nr_pdsch_config_sweep_next(b.get(), &h);
+  nr_pdsch_config_sweep_next(a.get(), &h); nr_pdsch_config_sweep_next(b.get(), &h); // both start round 2
+  // a consumed 2 shuffles; b consumed 2 shuffles once the all-inactive tail of round 1 was skipped
+  EXPECT_EQ(a->random_state, b->random_state);
+}
+TEST(PdschSweepDormant, FeedOnDormantIsIgnored) { /* Review Focus 3 */
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  int odd = -1; for (int i = 0; i < s->n_hyp && odd < 0; i++) if (s->hyp[i].tda_length % 2) odd = i;
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  nr_pdsch_config_sweep_feed(s.get(), odd, true); nr_pdsch_config_sweep_feed_equiv(s.get(), &odd, 1, true, true);
+  nr_td_outcome_t oc[2] = {{odd, NR_TD_FULL_TB, NR_TD_PASS, false}, {odd, NR_TD_CB_PROBE, NR_TD_FAIL, true}};
+  s->p2 = true; nr_pdsch_config_sweep_feed_k(s.get(), oc, 2);
+  EXPECT_EQ(s->trials[odd], 0u); EXPECT_EQ(s->ok[odd], 0u);
+  EXPECT_EQ(s->probe_fail[odd], 0u);
+  EXPECT_EQ(s->since_pass, 0u);
+}
+TEST(PdschSweepDormant, DormantRefusesToEmptyCatalogue) { /* Review Focus 2 */
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  EXPECT_EQ(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_none, nullptr), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  EXPECT_EQ(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_CAUSES, keep_even, nullptr), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_set_dormant(s.get(), -1, keep_even, nullptr), -1);
+  // A second cause that together with the first would empty the set is also refused, leaving the first intact.
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  const int n1 = nr_pdsch_config_sweep_n_active(s.get());
+  EXPECT_EQ(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE,
+            [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->tda_length % 2 == 1; }, nullptr), -1);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), n1);
+}
+TEST(PdschSweepDormant, ClearRestoresOnlyItsCause) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  const int n0 = s->n_hyp;
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  const int n1 = nr_pdsch_config_sweep_n_active(s.get());
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE, [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->k0 == 0; }, nullptr);
+  ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), n1);
+  nr_pdsch_config_sweep_clear_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), n1); EXPECT_LT(n1, n0);
+}
+TEST(PdschSweepDormant, AcceptanceRangesOverActiveSetOnly) {
+  // A dormant hypothesis with a spotless record must not block (or win) the decision among active ones.
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  int odd = -1, truth = -1;
+  for (int i = 0; i < s->n_hyp; i++) { if (s->hyp[i].tda_length % 2 && odd < 0) odd = i; if (s->hyp[i].tda_length % 2 == 0 && truth < 0) truth = i; }
+  for (int k = 0; k < 40; k++) nr_pdsch_config_sweep_feed(s.get(), odd, true); // dormant-to-be: 40/40, no winner yet
+  ASSERT_LT(nr_pdsch_config_sweep_winner(s.get()), 0);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  drive(*s, truth, 0.7, 0.0, 400000);
+  EXPECT_EQ(nr_pdsch_config_sweep_winner(s.get()), truth);
+  EXPECT_EQ(s->trials[odd], 40u);
+}
+TEST(PdschSweepDormant, FailOpenCountsTrialsNotTime) { /* Review Focus 1 */
+  // Variant used: all active hypotheses fail, so no winner can form before `need` trials (fallback needs 300*na > need);
+  // since_pass is also asserted directly.
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  EXPECT_FALSE(nr_pdsch_config_sweep_fail_open_due(s.get(), 1e-3, 0.05)); /* no trials yet */
+  const int na = nr_pdsch_config_sweep_n_active(s.get());
+  const int need = (int)ceil(na * log(1e3) / 0.05);
+  for (int t = 0; t < need - 1; t++) { nr_pdsch_cfg_hypothesis_t h; nr_pdsch_config_sweep_feed(s.get(), nr_pdsch_config_sweep_next(s.get(), &h), false); }
+  EXPECT_EQ(s->since_pass, (uint32_t)(need - 1));
+  EXPECT_LT(nr_pdsch_config_sweep_winner(s.get()), 0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_fail_open_due(s.get(), 1e-3, 0.05));
+  { nr_pdsch_cfg_hypothesis_t h; nr_pdsch_config_sweep_feed(s.get(), nr_pdsch_config_sweep_next(s.get(), &h), false); }
+  EXPECT_EQ(s->since_pass, (uint32_t)need);
+  EXPECT_TRUE(nr_pdsch_config_sweep_fail_open_due(s.get(), 1e-3, 0.05));
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true);
+  EXPECT_FALSE(nr_pdsch_config_sweep_fail_open_due(s.get(), 1e-3, 0.05)); /* already open */
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), false);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), na);
+}
+TEST(PdschSweepDormant, SincePassSemantics) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  int even = -1, odd = -1;
+  for (int i = 0; i < s->n_hyp; i++) { if (s->hyp[i].tda_length % 2 == 0 && even < 0) even = i; if (s->hyp[i].tda_length % 2 && odd < 0) odd = i; }
+  for (int k = 0; k < 5; k++) nr_pdsch_config_sweep_feed(s.get(), even, false);
+  EXPECT_EQ(s->since_pass, 5u);
+  const int e2[2] = {even, even + 1};
+  nr_pdsch_config_sweep_feed_equiv(s.get(), e2, 2, false, true); // one call, two credited: +1
+  EXPECT_EQ(s->since_pass, 6u);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  EXPECT_EQ(s->since_pass, 0u); // the active set changed
+  nr_pdsch_config_sweep_feed(s.get(), even, false); EXPECT_EQ(s->since_pass, 1u);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr); // no bit changes
+  EXPECT_EQ(s->since_pass, 1u);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true); EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_feed(s.get(), even, false);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true); EXPECT_EQ(s->since_pass, 1u); // no change
+  nr_pdsch_config_sweep_set_fail_open(s.get(), false); EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_feed(s.get(), even, false);
+  nr_pdsch_config_sweep_clear_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE); // empty cause: no change
+  EXPECT_EQ(s->since_pass, 1u);
+  nr_pdsch_config_sweep_clear_dormant(s.get(), NR_TD_DORMANT_PRIOR); EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  nr_pdsch_config_sweep_feed(s.get(), odd, true); // PASS on a dormant hypothesis: ignored, no reset
+  EXPECT_EQ(s->since_pass, 0u);
+  nr_pdsch_config_sweep_feed(s.get(), even, false); nr_pdsch_config_sweep_feed(s.get(), even, false);
+  EXPECT_EQ(s->since_pass, 2u);
+  // feed_k: main FAIL + admissible probe FAIL under p2 is ONE call: +1; a probe PASS neither counts nor resets.
+  s->p2 = true;
+  nr_td_outcome_t o1[3] = {{even, NR_TD_FULL_TB, NR_TD_FAIL, false}, {even + 2, NR_TD_CB_PROBE, NR_TD_FAIL, true},
+                           {even + 4, NR_TD_CB_PROBE, NR_TD_PASS, true}};
+  nr_pdsch_config_sweep_feed_k(s.get(), o1, 3);
+  EXPECT_EQ(s->since_pass, 3u);
+  nr_td_outcome_t o2[2] = {{even, NR_TD_FULL_TB, NR_TD_INCONCLUSIVE, false}, {even + 2, NR_TD_CB_PROBE, NR_TD_PASS, true}};
+  nr_pdsch_config_sweep_feed_k(s.get(), o2, 2); // nothing credited
+  EXPECT_EQ(s->since_pass, 3u);
+  nr_pdsch_config_sweep_feed(s.get(), even, true); // PASS on an active hypothesis resets
+  EXPECT_EQ(s->since_pass, 0u);
+}
+TEST(PdschSweepDormant, DestructivePruneCompactsMasks) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  nr_pdsch_config_sweep_prune_keep(s.get(), [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->k0 == 0; }, nullptr);
+  for (int i = 0; i < s->n_hyp; i++)
+    ASSERT_EQ(nr_pdsch_config_sweep_is_active(s.get(), i), s->hyp[i].tda_length % 2 == 0);
+  for (int i = s->n_hyp; i < NR_PDSCH_SWEEP_MAX_HYP; i++) // no stale bits beyond the live catalogue
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) ASSERT_EQ((s->dormant[c][i / 64] >> (i % 64)) & 1u, 0u);
+}
+TEST(PdschSweepDormant, PruneKeepResetsEvidenceAndRefusesEmpty) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  const int n0 = s->n_hyp;
+  nr_pdsch_config_sweep_feed(s.get(), 3, false);
+  EXPECT_EQ(nr_pdsch_config_sweep_prune_keep(s.get(), keep_none, nullptr), 0);
+  EXPECT_EQ(s->n_hyp, n0); EXPECT_EQ(s->trials[3], 1u);
+  const int n = nr_pdsch_config_sweep_prune_keep(s.get(), keep_k0_0, nullptr);
+  EXPECT_EQ(n, s->n_hyp); EXPECT_LT(n, n0);
+  for (int i = 0; i < s->n_hyp; i++) { ASSERT_EQ(s->trials[i], 0u); ASSERT_EQ(s->hyp[i].k0, 0); }
+  EXPECT_EQ(s->since_pass, 0u); EXPECT_EQ(s->cursor, 0);
+}
+TEST(PdschSweepDormant, PruneNeverLeavesZeroActive) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  nr_pdsch_config_sweep_prune_keep(s.get(), [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->tda_length % 2 == 1; }, nullptr);
+  EXPECT_GT(nr_pdsch_config_sweep_n_active(s.get()), 0);
+}
+TEST(PdschSweepDormant, RebuildPreservesMasksAndFailOpen) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true);
+  const int na = nr_pdsch_config_sweep_n_active(s.get());
+  nr_pdsch_config_sweep_set_fail_open(s.get(), false);
+  const int n_before = nr_pdsch_config_sweep_n_active(s.get());
+  nr_pdsch_config_sweep_feed(s.get(), 0, false);
+  nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), n_before); EXPECT_LT(n_before, na);
+  EXPECT_EQ(s->since_pass, 0u); EXPECT_EQ(s->trials[0], 0u);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true);
+  nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
+  EXPECT_TRUE(s->fail_open);
+}
+TEST(PdschSweepDormant, DormantDecodedIdxZeroCreditsNothingInEquiv) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  int even = -1, odd = -1;
+  for (int i = 0; i < s->n_hyp; i++) { if (s->hyp[i].tda_length % 2 == 0 && even < 0) even = i; if (s->hyp[i].tda_length % 2 && odd < 0) odd = i; }
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  const int e[2] = {odd, even}; // dormant idx[0], active equivalent member
+  nr_pdsch_config_sweep_feed_equiv(s.get(), e, 2, true, true);
+  EXPECT_EQ(s->trials[odd], 0u); EXPECT_EQ(s->trials[even], 0u); EXPECT_EQ(s->since_pass, 0u);
+}
+TEST(PdschSweepDormant, K0LayerInheritsDormancy) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4);
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_FIELD_BASE, keep_even, nullptr);
+  const int n0 = s->n_hyp;
+  const int added = nr_pdsch_config_sweep_add_k0_layer(s.get(), 3);
+  ASSERT_GT(added, 0);
+  ASSERT_EQ(s->n_hyp, n0 + added);
+  int new_dormant = 0;
+  for (int i = n0; i < s->n_hyp; i++) {
+    ASSERT_EQ(s->hyp[i].k0, 3);
+    ASSERT_EQ(nr_pdsch_config_sweep_is_active(s.get(), i), s->hyp[i].tda_length % 2 == 0) << i;
+    new_dormant += !nr_pdsch_config_sweep_is_active(s.get(), i);
+  }
+  EXPECT_GT(new_dormant, 0);
+}
