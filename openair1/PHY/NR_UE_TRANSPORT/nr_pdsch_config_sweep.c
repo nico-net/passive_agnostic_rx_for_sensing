@@ -19,6 +19,7 @@
 #include "nr_crc_evidence.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_td_order.h"
+#include "nr_td_legal.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -73,6 +74,14 @@ void nr_pdsch_k0_slot(int frame, int slot, int slots_per_frame, int k0, int *fra
   *slot_out = abs % slots_per_frame;
 }
 
+/* Lever P evidence (geometry slots) follows the same rule as ok_unique. */
+static inline void clear_geom_evidence(nr_pdsch_config_sweep_state_t *st)
+{
+  memset(st->geom_key, 0, sizeof(st->geom_key));
+  memset(st->ok_geom, 0, sizeof(st->ok_geom));
+  st->n_geom = 0;
+  st->geom_blocked = false;
+}
 /* Appends every legal (S,L,k0,add_pos,max_len,mcs_table) entry of ONE mapping type to st, merging any
  * that duplicate an ALREADY-PRESENT effective PDU (S,L,k0,mask,table) anywhere in the catalog: the TB
  * CRC cannot tell two identical PDUs apart, so neither could ever win. Shared by init_legal (mapping
@@ -129,6 +138,7 @@ static int catalog_add_mapping_type(nr_pdsch_config_sweep_state_t *st, int mt, i
         h->mapping_type = mt;
         st->order[st->n_hyp] = st->n_hyp;
         st->ok_unique[st->n_hyp] = 0;
+        clear_geom_evidence(st);
         st->n_hyp++;
         added++;
        }
@@ -238,6 +248,7 @@ static inline void lever_c_restart(nr_pdsch_config_sweep_state_t *st)
 {
   memset(st->ok_unique, 0, sizeof(st->ok_unique));
   st->crc_accept_blocked = false;
+  clear_geom_evidence(st);
 }
 /* Bits of word w that belong to the live catalogue [0, n). */
 static inline uint64_t live_word(int n, int w)
@@ -289,8 +300,7 @@ static void clear_probe_stats(nr_pdsch_config_sweep_state_t *st)
   memset(st->probe_pass, 0, sizeof(st->probe_pass));
   memset(st->probe_fail, 0, sizeof(st->probe_fail));
   memset(st->probe_inconclusive, 0, sizeof(st->probe_inconclusive));
-  memset(st->ok_unique, 0, sizeof(st->ok_unique)); /* lever C evidence follows the KL evidence */
-  st->crc_accept_blocked = false;
+  lever_c_restart(st); /* lever C and lever P evidence follow the KL evidence */
 }
 static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
 {
@@ -306,6 +316,7 @@ static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
     st->order[i] = i;
   st->cursor = 0;
   st->winner = -1;
+  st->winner_by_crc = false;
   return n;
 }
 
@@ -534,6 +545,7 @@ int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_
           st->dormant[c][st->n_hyp >> 6] |= UINT64_C(1) << (st->n_hyp & 63);
       st->order[st->n_hyp] = st->n_hyp;
       st->ok_unique[st->n_hyp] = 0;
+      clear_geom_evidence(st); /* the active set grows: lever P evidence restarts */
       st->n_hyp++;
     }
   return layer;
@@ -794,8 +806,72 @@ int nr_pdsch_config_sweep_crc_accept_m(int n_alive, uint32_t t_max)
   }
 }
 
-int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
-                                     bool new_data)
+/* Lever P step of the shared feed function (see the header). Returns true when a pin was applied. */
+static bool geom_keep_g(const nr_pdsch_cfg_hypothesis_t *h, const void *arg)
+{
+  return nr_td_geom_key(h) == *(const uint64_t *)arg;
+}
+static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls)
+{
+  const uint64_t key = nr_td_geom_key(&st->hyp[idx0]);
+  for (int k = 0; k < n_cls; k++) /* attribution: a class spanning two geometry groups is ambiguous -> no evidence */
+    if (cls[k] >= 0 && cls[k] < st->n_hyp && nr_td_geom_key(&st->hyp[cls[k]]) != key)
+      return false;
+  int slot = -1;
+  for (int g = 0; g < st->n_geom && slot < 0; g++)
+    if (st->geom_key[g] == key)
+      slot = g;
+  if (slot < 0) {
+    if (st->n_geom >= NR_TD_GEOM_SLOTS) {
+      st->geom_blocked = true;
+      return false;
+    }
+    slot = st->n_geom++;
+    st->geom_key[slot] = key;
+    st->ok_geom[slot] = 0;
+  }
+  if (st->ok_geom[slot] < UINT16_MAX)
+    st->ok_geom[slot]++;
+  if (st->n_geom >= 2) { /* every slot holds >= 1 pass: a second geometry with a pass */
+    st->geom_blocked = true;
+    return false;
+  }
+  if (st->ok_geom[0] < 2) /* crc_accept_m() >= 2: nothing to test yet */
+    return false;
+  /* m*(n_groups_active, T_max): distinct geometry keys among the ACTIVE hypotheses and the largest active trial count. */
+  uint32_t t_max = 0;
+  int n_groups = 0;
+  uint64_t *keys = (uint64_t *)malloc((size_t)st->n_hyp * sizeof(uint64_t));
+  if (keys == NULL)
+    return false;
+  for (int i = 0; i < st->n_hyp; i++) {
+    if (!active(st, i))
+      continue;
+    if (st->trials[i] > t_max)
+      t_max = st->trials[i];
+    const uint64_t k = nr_td_geom_key(&st->hyp[i]);
+    bool seen = false;
+    for (int j = 0; j < n_groups && !seen; j++)
+      seen = keys[j] == k;
+    if (!seen)
+      keys[n_groups++] = k;
+  }
+  free(keys);
+  if (n_groups < 2) /* already a single geometry: nothing to pin (also keeps a no-op re-pin from running on every pass) */
+    return false;
+  if (st->ok_geom[0] < (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_groups, t_max))
+    return false;
+  const uint64_t g = st->geom_key[0];
+  /* set_dormant restarts lever C/P evidence on an active-set change (all slots empty afterwards: no loop, no stale re-pin);
+   * if it refuses (would empty the catalogue) nothing changes. */
+  return nr_pdsch_config_sweep_set_dormant(st, NR_TD_DORMANT_GEOM, geom_keep_g, &g) > 0;
+}
+
+/* The one feed function. Crediting: idx[0..n) (each distinct, in-range, ACTIVE member gets one Bernoulli sample).
+ * Attribution: cls[0..n_cls) (+ idx[0] itself), the FULL class incl. dormant members, for lever-C uniqueness and lever-P
+ * attribution. Order: credit -> lever P -> lever C -> sweep_decide. */
+static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const int *cls, int n_cls, bool tb_crc_ok,
+                       bool new_data)
 {
   /* An invalid decoded index idx[0] credits nothing (mirrors _feed): a class defined relative to it is untrustworthy. */
   if (st == NULL || idx == NULL || n < 1 || idx[0] < 0 || idx[0] >= st->n_hyp
@@ -809,7 +885,6 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
   bool check = false;
   bool credited = false; /* >= 1 ACTIVE member credited; with no mask set idx[0] always is */
   int n_credited = 0;
-  int n_distinct = 0; /* distinct in-range members of the class, DORMANT ones included (lever C uniqueness) */
   for (int k = 0; k < n; k++) {
     const int h = idx[k];
     if (h < 0 || h >= st->n_hyp)
@@ -819,7 +894,6 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
       dup = idx[j] == h;
     if (dup)
       continue;
-    n_distinct++;
     if (!active(st, h))
       continue;
     st->trials[h]++;
@@ -833,8 +907,23 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
   if (!credited) /* every member dormant: no new evidence, no decision */
     return st->winner;
   since_pass_update(st, true, tb_crc_ok);
-  if (st->crc_accept && !st->crc_accept_blocked) {
-    /* Lever C: a unique pass = new data, alone among the ACTIVE hypotheses credited by this grant. */
+  bool pinned = false;
+  if (st->geom_pin && !st->geom_blocked && !st->fail_open && tb_crc_ok && new_data)
+    pinned = lever_p(st, idx[0], cls, n_cls);
+  /* After a pin the active set changed and the evidence restarted: this grant's pass does not count for lever C. */
+  if (st->crc_accept && !st->crc_accept_blocked && !pinned) {
+    /* Lever C: a unique pass = new data, alone in its FULL class (dormant members counted) and alone among the ACTIVE
+     * hypotheses credited by this grant. */
+    int n_distinct = 1; /* idx[0] is always a member of its own class */
+    for (int k = 0; k < n_cls; k++) {
+      const int h = cls[k];
+      if (h < 0 || h >= st->n_hyp || h == idx[0])
+        continue;
+      bool dup = false;
+      for (int j = 0; j < k && !dup; j++)
+        dup = cls[j] == h;
+      n_distinct += !dup;
+    }
     if (tb_crc_ok && new_data && n_distinct == 1 && n_credited == 1 && st->ok_unique[idx[0]] < UINT16_MAX)
       st->ok_unique[idx[0]]++;
     int n_u = 0, lead = -1;
@@ -853,10 +942,23 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
       st->crc_accept_blocked = true;
     else if (n_u == 1 && st->ok_unique[lead] >= (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_active_of(st), t_max)) {
       st->winner = lead;
+      st->winner_by_crc = true;
       return lead;
     }
   }
   return sweep_decide(st, check);
+}
+
+int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
+                                     bool new_data)
+{
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data);
+}
+
+int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                    bool new_data)
+{
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data);
 }
 
 int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[])
@@ -1146,6 +1248,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   const struct nr_td_side_info_s *side = st->side;
   const bool p2 = st->p2;
   const bool crc_accept = st->crc_accept;
+  const bool geom_pin = st->geom_pin;
   const bool fail_open = st->fail_open;
   uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
   memcpy(dormant, st->dormant, sizeof(dormant));
@@ -1157,6 +1260,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   st->side = side;
   st->p2 = p2;
   st->crc_accept = crc_accept;
+  st->geom_pin = geom_pin;
   st->fail_open = fail_open;
   memcpy(st->dormant, dormant, sizeof(dormant));
   normalize_masks(st);
@@ -1210,6 +1314,7 @@ static void reopen_context(sweep_context_t *c)
   clear_probe_stats(c->state);
   c->state->since_pass = 0;
   c->state->winner = -1;
+  c->state->winner_by_crc = false;
   c->state->cursor = 0;
   for (int i=0; i<c->state->n_hyp; ++i) c->state->order[i] = i;
   /* A reopen is the signal that a CONVERGED context stopped working -- the most valuable thing in
@@ -1351,6 +1456,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     fresh->side = NULL;
     fresh->p2 = false;
     fresh->crc_accept = false;
+    fresh->geom_pin = false;
+    fresh->winner_by_crc = false;
     fresh->fail_open = false;
     memset(fresh->dormant, 0, sizeof(fresh->dormant));
     catalog_fill(fresh, tda_count, typeA, legality);
@@ -1467,6 +1574,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
     st->trials[at] = st->ok[at] = 0;
     st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
     st->ok_unique[at] = 0;
+    clear_geom_evidence(st);
     st->order[at] = at;
   }
   free(scratch);

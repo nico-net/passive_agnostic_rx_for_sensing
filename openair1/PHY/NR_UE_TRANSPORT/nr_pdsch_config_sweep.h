@@ -100,10 +100,12 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
 /* Dormant causes: one mask per cause so independent reasons (a cell prior, each field-book field) can be cleared
- * independently. FIELD_BASE + nr_td_field_t (nr_td_fieldbook.h); NR_TD_DORMANT_CAUSES = 1 + NR_TD_F_COUNT. */
+ * independently. FIELD_BASE + nr_td_field_t (nr_td_fieldbook.h); FIELD causes 1..3; NR_TD_DORMANT_GEOM = 4 (lever P). */
 #define NR_TD_DORMANT_PRIOR 0
 #define NR_TD_DORMANT_FIELD_BASE 1
-#define NR_TD_DORMANT_CAUSES 4
+#define NR_TD_DORMANT_GEOM 4 /* lever P: a CRC-pass-pinned geometry group (BC2b); every other geometry is dormant for this cause */
+#define NR_TD_DORMANT_CAUSES 5
+#define NR_TD_GEOM_SLOTS 8
 #define NR_TD_DWORDS ((NR_PDSCH_SWEEP_MAX_HYP + 63) / 64)
 
 typedef struct {
@@ -129,11 +131,24 @@ typedef struct {
    * the main decodes: feed / feed_k never touch ok_unique, and becoming blocked does not undo an existing winner. */
   uint16_t ok_unique[NR_PDSCH_SWEEP_MAX_HYP]; ///< passes on grants where the hypothesis was alone in its equivalence class
   bool     crc_accept_blocked; ///< a second active hypothesis has a unique pass: lever C off until the next prune/rebuild
+  /* Lever P (partition / geometry acceptance, spec 2026-10-01 section 3b, experimental, default off). Counts new-data CRC passes per
+   * GEOMETRY group (nr_td_geom_key: S, L, k0, mapping type, DM-RS mask; the MCS table is NOT in the key). When all passes
+   * so far sit in ONE group G and ok_geom[G] >= nr_pdsch_config_sweep_crc_accept_m(n_groups_active, T_max), every other geometry
+   * becomes dormant for cause NR_TD_DORMANT_GEOM (reversible: fail-open or clear_dormant). It never decides a winner. Evidence-like: the
+   * slots are cleared everywhere ok_unique is (lever_c_restart, clear_probe_stats, rebuild, new context) and at the hypothesis-adding
+   * sites; the pin's own active-set change restarts them (so a pin cannot loop). Two geometries with a pass, or more than
+   * NR_TD_GEOM_SLOTS, block it (sticky until the next restart). Not run while fail_open. */
+  uint64_t geom_key[NR_TD_GEOM_SLOTS];
+  uint16_t ok_geom[NR_TD_GEOM_SLOTS];
+  int      n_geom;
+  bool     geom_blocked;
+  bool     winner_by_crc; ///< the winner was decided by lever C (diagnostic; false after a reset of the winner)
   /* CONFIGURATION, not catalog/evidence: preserved across catalog rebuilds (nr_pdsch_config_sweep_rebuild(),
    * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
   const struct nr_td_side_info_s *side; ///< ordering side information (nr_td_order.h); NULL = neutral (today's order)
   bool     p2;        ///< failure-only probe evidence enabled
   bool     crc_accept; ///< lever C enabled (configuration: preserved across rebuild like side/p2; a new context starts false)
+  bool     geom_pin;   ///< lever P enabled (configuration: preserved across rebuild like crc_accept; a new context starts false)
   /* DORMANT (reversible) hypothesis masks, blind-convergence spec 2026-10-01 section 4. CONFIGURATION+MEMBERSHIP, not
    * evidence: preserved by nr_pdsch_config_sweep_rebuild(), compacted with the same keep-index mapping by every destructive
    * prune (prune_commit, prune_keep). One bit per hypothesis index per cause; bits at indices >= n_hyp are always 0.
@@ -192,7 +207,19 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
  * hypotheses set crc_accept_blocked (sticky until the next prune/rebuild/reopen). With crc_accept false the behaviour is
  * bit-identical to the KL-only rule. */
 int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
-                                     bool new_data /* new transmission (NDI toggled); used only by lever C */);
+                                     bool new_data /* new transmission (NDI toggled); used only by levers C and P */);
+
+/** Attribution-only variant, the RUNTIME API for the levers when grant-equivalence CREDITING is not wanted (lever E off):
+ *  credits ONLY idx0 (exactly nr_pdsch_config_sweep_feed(st, idx0, tb_crc_ok), bit-identical while crc_accept and geom_pin
+ *  are false), but uses `cls[0..n_cls)` -- the FULL grant-equivalence class of the decode INCLUDING dormant members --
+ *  for the lever-C uniqueness test (a pass is unique iff the class has exactly one distinct in-range member; idx0 always counts
+ *  as a member) and for the lever-P attribution (a class spanning two geometry groups gives lever P no evidence). Passing the
+ *  singleton {idx0} instead would make every pass look unique (UNSAFE). nr_pdsch_config_sweep_feed_equiv() is a thin wrapper
+ *  over the same internal function (idx = cls = the class, crediting every active member). Order inside the shared
+ *  function: credit -> lever P (may pin; restarts the evidence) -> lever C -> KL decision (sweep_decide). A pin skips the
+ *  lever-C accumulation of that same call. */
+int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                    bool new_data);
 
 /** Lever C threshold: smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6 (log domain, lgamma). m = 2 when
  *  n_alive <= 1 or t_max == 0; for t_max < m, C = 0 so m qualifies at once (result max(2, m)). */

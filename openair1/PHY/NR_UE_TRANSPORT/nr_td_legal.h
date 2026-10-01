@@ -58,6 +58,15 @@ int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, 
  * UNIT: code_rate_x10240 is nr_get_code_rate_dl() exactly as returned, i.e. R x 1024 x 10 (max 9480, the x10
  * convention of nr_mac_common.c's tables). Masked to 18 bits (bits 42..59); the LBRM class is bit 60. */
 uint64_t nr_td_equiv_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm, uint32_t code_rate_x10240);
+/* Geometry group of a hypothesis (lever P): the fields a CRC pass pins regardless of the MCS table (and of the DM-RS
+ * additional position / max length, which the dmrs_mask already encodes).
+ * = tda_start | tda_length << 4 | k0 << 8 | mapping_type << 14 | (dmrs_mask & 0x3FFF) << 16.
+ * static inline (not an exported symbol) because nr_pdsch_config_sweep.c calls it and is compiled into several targets. */
+static inline uint64_t nr_td_geom_key(const nr_pdsch_cfg_hypothesis_t *h)
+{
+  return (uint64_t)h->tda_start | ((uint64_t)h->tda_length << 4) | ((uint64_t)h->k0 << 8) | ((uint64_t)h->mapping_type << 14)
+         | ((uint64_t)(h->dmrs_mask & 0x3FFF) << 16);
+}
 #ifdef __cplusplus
 }
 #endif

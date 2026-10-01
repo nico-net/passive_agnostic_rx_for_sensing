@@ -253,6 +253,13 @@ TEST(TdEquiv, RateFieldDoesNotOverlapSignature) {
   EXPECT_NE(nr_td_equiv_key(&h_max, 15, 15, 9480), nr_td_equiv_key(&h_max, 15, 15, 9479));
   EXPECT_NE(nr_td_equiv_key(&h_max, 15, 15, 9480), nr_td_equiv_key(&h_max, 15, 15, 0x3FFFF));
 }
+TEST(TdEquiv, GeomKeyIgnoresTableAndAddPos) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 2; a.tda_length = 12; a.dmrs_mask = 0x884;
+  nr_pdsch_cfg_hypothesis_t b = a; b.mcs_table = 1; b.dmrs_add_pos = 2;
+  EXPECT_EQ(nr_td_geom_key(&a), nr_td_geom_key(&b));
+  b = a; b.k0 = 1; EXPECT_NE(nr_td_geom_key(&a), nr_td_geom_key(&b));
+  EXPECT_EQ(nr_td_geom_key(&a), 2u | (12u << 4) | (0x884u << 16));
+}
 int main(int argc, char **argv)
 {
   logInit(); /* the real rate matching reports rejects through LOG_E */
