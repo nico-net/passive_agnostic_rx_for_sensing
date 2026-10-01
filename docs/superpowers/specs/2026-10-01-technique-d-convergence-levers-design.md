@@ -321,6 +321,9 @@ Bayesian rewrite; per-field final decisions; GPU probe batching (A9 / multi-cell
 (same ideas apply later); HARQ soft combining in the search.
 
 ## 8. Open items and starting values (final values from the simulator ablation)
+- **P1 defaults from the simulator ablation** `[SIMULATED, DGX host, nr_td_sim @00dd79eed4]` (evidence: `tests/passive_rx/td_sim/results_2026-10-01_p1/summary.md`):
+  `ISAC_TD_GATE=1` (margin 6 dB), `ISAC_TD_K=1`, `ISAC_TD_W_SIB1/DEFAULT/OBS/FIELD/PROBE=0`, `ISAC_TD_FIELDBOOK=0` (today's `g_prior` pruning stays), `ISAC_TD_P2=0`.
+  Only the gate helped (1 RX blind: cold mean 757 -> 603 s, -20 %, reproduced on seed 2; 4 RX neutral); K=3 and the ordering weights are within seed noise (~1 %) and K=3 costs ~700 M probes; the field book as modelled regresses steady RNTIs (steady median 356.6 s vs 10.6 s at 4 RX blind) because it replaces the pruning prior. 0 wrong, 0 undecidable everywhere (probation withdrawal not modelled). Targets: oracle 1 PASS (cold/steady 1.0 s at 4 RX, 1.4 s at 1 RX); oracle 0 FAIL (cold 358.6 s / 512.6 s, steady 10.6 s / 15.4 s). The K=3 line below is superseded by this result for P1.
 - **K:** start at **3** (main + 2 probes); larger K only if the ablation shows gain within the compute cap.
 - **Ordering weights:** start **neutral** (all `ISAC_TD_W_*` = 0, i.e. today's order); enable term by term in the
   ablation.
