@@ -138,6 +138,7 @@ static int catalog_add_mapping_type(nr_pdsch_config_sweep_state_t *st, int mt, i
         h->mapping_type = mt;
         st->order[st->n_hyp] = st->n_hyp;
         st->ok_unique[st->n_hyp] = 0;
+        st->fp_trials[st->n_hyp] = st->sib_trials[st->n_hyp] = 0;
         clear_geom_evidence(st);
         st->n_hyp++;
         added++;
@@ -154,6 +155,8 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
   }
   memset(st, 0, sizeof(*st));
   st->winner = -1;
+  st->sib_pmin = 0.05f;
+  st->sib_eps = 1e-6f;
   (void)tda_count; /* Contexts are isolated by the observed index; list width is not inferred here. */
 
   /* R30 item 1 (2026-09-26, technique-d-regression.md): mapping type A only, unconditionally. Type B
@@ -249,6 +252,10 @@ static inline void lever_c_restart(nr_pdsch_config_sweep_state_t *st)
   memset(st->ok_unique, 0, sizeof(st->ok_unique));
   st->crc_accept_blocked = false;
   clear_geom_evidence(st);
+  memset(st->fp_trials, 0, sizeof(st->fp_trials)); /* fast-path streams follow ok_unique */
+  memset(st->sib_trials, 0, sizeof(st->sib_trials));
+  st->sib_blocked = false;
+  memset(st->sib_t, 0, sizeof(st->sib_t));
 }
 /* Bits of word w that belong to the live catalogue [0, n). */
 static inline uint64_t live_word(int n, int w)
@@ -545,6 +552,7 @@ int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_
           st->dormant[c][st->n_hyp >> 6] |= UINT64_C(1) << (st->n_hyp & 63);
       st->order[st->n_hyp] = st->n_hyp;
       st->ok_unique[st->n_hyp] = 0;
+      st->fp_trials[st->n_hyp] = st->sib_trials[st->n_hyp] = 0;
       clear_geom_evidence(st); /* the active set grows: lever P evidence restarts */
       st->n_hyp++;
     }
@@ -634,14 +642,77 @@ static void score_order_round(nr_pdsch_config_sweep_state_t *st)
   free(key);
 }
 
-int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out)
+/* ---- K0-sibling guard helpers (fix B, see the header) ---- */
+int nr_pdsch_config_sweep_sib_n(int n_sib, double pmin, double eps)
 {
+  if (n_sib <= 0 || !(pmin > 0.0) || !(eps > 0.0))
+    return 0;
+  const double n = ceil(log((double)n_sib / eps) / pmin);
+  return n > 65535.0 ? 65535 : (n < 1.0 ? 1 : (int)n);
+}
+/* geometry key without k0: the sibling class of a lead */
+static inline uint64_t skey_of(const nr_pdsch_cfg_hypothesis_t *h)
+{
+  return nr_td_geom_key(h) & ~(UINT64_C(0xFF) << 8);
+}
+static inline bool is_sibling_of(const nr_pdsch_config_sweep_state_t *st, int i, uint64_t skey, uint8_t k0)
+{
+  return active(st, i) && st->hyp[i].k0 != k0 && skey_of(&st->hyp[i]) == skey;
+}
+static int count_siblings(const nr_pdsch_config_sweep_state_t *st, uint64_t skey, uint8_t k0)
+{
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    n += is_sibling_of(st, i, skey, k0);
+  return n;
+}
+/* true when every ACTIVE sibling has N_sib sibling-test trials (vacuously true with no sibling or the guard disabled) */
+static bool siblings_clear(const nr_pdsch_config_sweep_state_t *st, uint64_t skey, uint8_t k0)
+{
+  if (!(st->sib_pmin > 0.0f))
+    return true;
+  const int n_sib = count_siblings(st, skey, k0);
+  const int need = nr_pdsch_config_sweep_sib_n(n_sib, st->sib_pmin, st->sib_eps);
+  for (int i = 0; n_sib > 0 && i < st->n_hyp; i++)
+    if (is_sibling_of(st, i, skey, k0) && st->sib_trials[i] < need)
+      return false;
+  return true;
+}
+/* The sibling to test next: over the pending targets, the active sibling with the fewest sib_trials below N_sib (ties: lowest index). -1 = none. */
+static int pick_sibling(const nr_pdsch_config_sweep_state_t *st)
+{
+  int best = -1;
+  for (int t = 0; t < 2; t++) {
+    if (!st->sib_t[t].valid)
+      continue;
+    const int need = nr_pdsch_config_sweep_sib_n(count_siblings(st, st->sib_t[t].skey, st->sib_t[t].k0), st->sib_pmin, st->sib_eps);
+    for (int i = 0; i < st->n_hyp; i++)
+      if (is_sibling_of(st, i, st->sib_t[t].skey, st->sib_t[t].k0) && st->sib_trials[i] < need
+          && (best < 0 || st->sib_trials[i] < st->sib_trials[best]))
+        best = i;
+  }
+  return best;
+}
+
+static int next_core(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out, nr_td_pick_t *kind, bool allow_sib)
+{
+  if (kind != NULL)
+    *kind = NR_TD_PICK_EXPLORE;
   if (st == NULL || out == NULL || st->n_hyp <= 0) {
     return -1;
   }
   if (st->winner >= 0) {
     *out = st->hyp[st->winner];
     return st->winner;
+  }
+  if (allow_sib && (st->crc_accept || st->geom_pin) && !st->sib_blocked) {
+    const int sib = pick_sibling(st);
+    if (sib >= 0) {
+      *out = st->hyp[sib];
+      if (kind != NULL)
+        *kind = NR_TD_PICK_SIBLING;
+      return sib;
+    }
   }
   /* EXPLOIT a hypothesis that has already passed a CRC: three trials in four go to the one with
    * the most passes, the fourth keeps the round-robin exploring. Pure round-robin spent 5/6 of
@@ -656,6 +727,8 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
    * every hypothesis. */
   if (hot >= 0 && st->trials[hot] < 64 && (st->exploit_tick++ & 3) != 3) {
     *out = st->hyp[hot];
+    if (kind != NULL)
+      *kind = NR_TD_PICK_EXPLOIT;
     return hot;
   }
   /* The shuffle always covers all n_hyp (RNG use independent of the masks). Dormant entries are skipped in the round order;
@@ -679,6 +752,15 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
   st->cursor = (st->cursor + 1) % st->n_hyp;
   *out = st->hyp[idx];
   return idx;
+}
+
+int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out)
+{
+  return next_core(st, out, NULL, false);
+}
+int nr_pdsch_config_sweep_next_ex(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out, nr_td_pick_t *kind)
+{
+  return next_core(st, out, kind, true);
 }
 
 static double rate_of(const nr_pdsch_config_sweep_state_t *st, int i)
@@ -806,40 +888,52 @@ int nr_pdsch_config_sweep_crc_accept_m(int n_alive, uint32_t t_max)
   }
 }
 
-/* Lever P step of the shared feed function (see the header). Returns true when a pin was applied. */
+/* Lever P step of the shared feed function (see the header). Returns true when a pin was applied.
+ * `count`: this grant is fast-path evidence (EXPLORE pick, new-data pass). The lead condition is re-evaluated on every call so the sibling
+ * schedule (sib_t[1]) follows it. */
 static bool geom_keep_g(const nr_pdsch_cfg_hypothesis_t *h, const void *arg)
 {
   return nr_td_geom_key(h) == *(const uint64_t *)arg;
 }
-static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls)
+static uint32_t fp_tmax_active(const nr_pdsch_config_sweep_state_t *st)
 {
-  const uint64_t key = nr_td_geom_key(&st->hyp[idx0]);
-  for (int k = 0; k < n_cls; k++) /* attribution: a class spanning two geometry groups is ambiguous -> no evidence */
-    if (cls[k] >= 0 && cls[k] < st->n_hyp && nr_td_geom_key(&st->hyp[cls[k]]) != key)
-      return false;
-  int slot = -1;
-  for (int g = 0; g < st->n_geom && slot < 0; g++)
-    if (st->geom_key[g] == key)
-      slot = g;
-  if (slot < 0) {
-    if (st->n_geom >= NR_TD_GEOM_SLOTS) {
-      st->geom_blocked = true;
-      return false;
+  uint32_t t_max = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (active(st, i) && st->fp_trials[i] > t_max)
+      t_max = st->fp_trials[i];
+  return t_max;
+}
+static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool count)
+{
+  if (count) {
+    const uint64_t key = nr_td_geom_key(&st->hyp[idx0]);
+    for (int k = 0; k < n_cls; k++) /* attribution: a class spanning two geometry groups is ambiguous -> no evidence */
+      if (cls[k] >= 0 && cls[k] < st->n_hyp && nr_td_geom_key(&st->hyp[cls[k]]) != key)
+        return false;
+    int slot = -1;
+    for (int g = 0; g < st->n_geom && slot < 0; g++)
+      if (st->geom_key[g] == key)
+        slot = g;
+    if (slot < 0) {
+      if (st->n_geom >= NR_TD_GEOM_SLOTS) {
+        st->geom_blocked = true;
+        return false;
+      }
+      slot = st->n_geom++;
+      st->geom_key[slot] = key;
+      st->ok_geom[slot] = 0;
     }
-    slot = st->n_geom++;
-    st->geom_key[slot] = key;
-    st->ok_geom[slot] = 0;
+    if (st->ok_geom[slot] < UINT16_MAX)
+      st->ok_geom[slot]++;
   }
-  if (st->ok_geom[slot] < UINT16_MAX)
-    st->ok_geom[slot]++;
   if (st->n_geom >= 2) { /* every slot holds >= 1 pass: a second geometry with a pass */
     st->geom_blocked = true;
     return false;
   }
-  if (st->ok_geom[0] < 2) /* crc_accept_m() >= 2: nothing to test yet */
+  if (st->n_geom < 1 || st->ok_geom[0] < 2) /* crc_accept_m() >= 2: nothing to test yet */
     return false;
-  /* m*(n_groups_active, T_max): distinct geometry keys among the ACTIVE hypotheses and the largest active trial count. */
-  uint32_t t_max = 0;
+  /* m*(n_groups_active, T_max): distinct geometry keys among the ACTIVE hypotheses; T_max over their EXPLORE trials. */
+  const uint32_t t_max = fp_tmax_active(st);
   int n_groups = 0;
   uint64_t *keys = (uint64_t *)malloc((size_t)st->n_hyp * sizeof(uint64_t));
   if (keys == NULL)
@@ -847,8 +941,6 @@ static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls,
   for (int i = 0; i < st->n_hyp; i++) {
     if (!active(st, i))
       continue;
-    if (st->trials[i] > t_max)
-      t_max = st->trials[i];
     const uint64_t k = nr_td_geom_key(&st->hyp[i]);
     bool seen = false;
     for (int j = 0; j < n_groups && !seen; j++)
@@ -862,6 +954,17 @@ static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls,
   if (st->ok_geom[0] < (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_groups, t_max))
     return false;
   const uint64_t g = st->geom_key[0];
+  /* Lead condition holds. The k0 siblings of the group must have passed their sibling tests before the pin. */
+  int rep = -1; /* any active member of G: its (skey, k0) define the siblings */
+  for (int i = 0; i < st->n_hyp && rep < 0; i++)
+    if (active(st, i) && nr_td_geom_key(&st->hyp[i]) == g)
+      rep = i;
+  if (rep >= 0 && !siblings_clear(st, skey_of(&st->hyp[rep]), st->hyp[rep].k0)) {
+    st->sib_t[1].valid = true;
+    st->sib_t[1].skey = skey_of(&st->hyp[rep]);
+    st->sib_t[1].k0 = st->hyp[rep].k0;
+    return false;
+  }
   /* set_dormant restarts lever C/P evidence on an active-set change (all slots empty afterwards: no loop, no stale re-pin);
    * if it refuses (would empty the catalogue) nothing changes. */
   return nr_pdsch_config_sweep_set_dormant(st, NR_TD_DORMANT_GEOM, geom_keep_g, &g) > 0;
@@ -869,9 +972,10 @@ static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls,
 
 /* The one feed function. Crediting: idx[0..n) (each distinct, in-range, ACTIVE member gets one Bernoulli sample).
  * Attribution: cls[0..n_cls) (+ idx[0] itself), the FULL class incl. dormant members, for lever-C uniqueness and lever-P
- * attribution. Order: credit -> lever P -> lever C -> sweep_decide. */
+ * attribution. Order: credit -> lever P -> lever C -> sweep_decide. `kind` is the pick kind of idx[0]: only EXPLORE picks add fast-path
+ * evidence and fp_trials; SIBLING picks add sib_trials and a pass blocks the fast path (see the header); every kind is a normal KL trial. */
 static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const int *cls, int n_cls, bool tb_crc_ok,
-                       bool new_data)
+                       bool new_data, nr_td_pick_t kind)
 {
   /* An invalid decoded index idx[0] credits nothing (mirrors _feed): a class defined relative to it is untrustworthy. */
   if (st == NULL || idx == NULL || n < 1 || idx[0] < 0 || idx[0] >= st->n_hyp
@@ -881,6 +985,7 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
   if (st->winner >= 0) {
     return st->winner;
   }
+  const bool explore = kind == NR_TD_PICK_EXPLORE;
   /* One crediting loop: every distinct in-range member gets exactly this grant's one Bernoulli sample. */
   bool check = false;
   bool credited = false; /* >= 1 ACTIVE member credited; with no mask set idx[0] always is */
@@ -899,6 +1004,8 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
     st->trials[h]++;
     if (tb_crc_ok)
       st->ok[h]++;
+    if (explore && st->fp_trials[h] < UINT16_MAX)
+      st->fp_trials[h]++;
     credited = true;
     n_credited++;
     if ((st->trials[h] % 16) == 0)
@@ -907,13 +1014,20 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
   if (!credited) /* every member dormant: no new evidence, no decision */
     return st->winner;
   since_pass_update(st, true, tb_crc_ok);
+  if (kind == NR_TD_PICK_SIBLING) {
+    if (st->sib_trials[idx[0]] < UINT16_MAX)
+      st->sib_trials[idx[0]]++;
+    if (tb_crc_ok) /* a sibling that passes may be the truth: the fast path is off until the next evidence restart */
+      st->sib_blocked = true;
+  }
+  st->sib_t[0].valid = st->sib_t[1].valid = false; /* re-derived below from the current lead conditions */
   bool pinned = false;
-  if (st->geom_pin && !st->geom_blocked && !st->fail_open && tb_crc_ok && new_data)
-    pinned = lever_p(st, idx[0], cls, n_cls);
+  if (st->geom_pin && !st->geom_blocked && !st->fail_open && !st->sib_blocked)
+    pinned = lever_p(st, idx[0], cls, n_cls, explore && tb_crc_ok && new_data);
   /* After a pin the active set changed and the evidence restarted: this grant's pass does not count for lever C. */
-  if (st->crc_accept && !st->crc_accept_blocked && !pinned) {
+  if (st->crc_accept && !st->crc_accept_blocked && !st->sib_blocked && !pinned) {
     /* Lever C: a unique pass = new data, alone in its FULL class (dormant members counted) and alone among the ACTIVE
-     * hypotheses credited by this grant. */
+     * hypotheses credited by this grant; only exploration picks count. */
     int n_distinct = 1; /* idx[0] is always a member of its own class */
     for (int k = 0; k < n_cls; k++) {
       const int h = cls[k];
@@ -924,50 +1038,62 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
         dup = cls[j] == h;
       n_distinct += !dup;
     }
-    if (tb_crc_ok && new_data && n_distinct == 1 && n_credited == 1 && st->ok_unique[idx[0]] < UINT16_MAX)
+    if (explore && tb_crc_ok && new_data && n_distinct == 1 && n_credited == 1 && st->ok_unique[idx[0]] < UINT16_MAX)
       st->ok_unique[idx[0]]++;
     int n_u = 0, lead = -1;
-    uint32_t t_max = 0;
     for (int i = 0; i < st->n_hyp; i++) {
-      if (!active(st, i))
-        continue;
-      if (st->trials[i] > t_max)
-        t_max = st->trials[i];
-      if (st->ok_unique[i] > 0) {
+      if (active(st, i) && st->ok_unique[i] > 0) {
         n_u++;
         lead = i;
       }
     }
     if (n_u >= 2)
       st->crc_accept_blocked = true;
-    else if (n_u == 1 && st->ok_unique[lead] >= (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_active_of(st), t_max)) {
-      st->winner = lead;
-      st->winner_by_crc = true;
-      return lead;
+    else if (n_u == 1
+             && st->ok_unique[lead] >= (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_active_of(st), fp_tmax_active(st))) {
+      if (siblings_clear(st, skey_of(&st->hyp[lead]), st->hyp[lead].k0)) {
+        st->winner = lead;
+        st->winner_by_crc = true;
+        return lead;
+      }
+      st->sib_t[0].valid = true; /* lead without completed sibling tests: schedule them (next_ex) */
+      st->sib_t[0].skey = skey_of(&st->hyp[lead]);
+      st->sib_t[0].k0 = st->hyp[lead].k0;
     }
   }
   return sweep_decide(st, check);
 }
 
-int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
-                                     bool new_data)
+int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
+                                        nr_td_pick_t kind)
 {
-  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data);
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, kind);
 }
-
+int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data)
+{
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, NR_TD_PICK_EXPLORE);
+}
+int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                       bool new_data, nr_td_pick_t kind)
+{
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, kind);
+}
 int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                     bool new_data)
 {
-  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data);
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, NR_TD_PICK_EXPLORE);
 }
 
-int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[])
+static int next_k_core(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[], nr_td_pick_t *kind,
+                       bool allow_sib)
 {
+  if (kind != NULL)
+    *kind = NR_TD_PICK_EXPLORE;
   if (st == NULL || idx == NULL || out == NULL || K < 1)
     return 0;
   if (K > NR_TD_MAX_K)
     K = NR_TD_MAX_K;
-  idx[0] = nr_pdsch_config_sweep_next(st, &out[0]);
+  idx[0] = next_core(st, &out[0], kind, allow_sib);
   if (idx[0] < 0)
     return 0;
   if (st->winner >= 0)
@@ -990,6 +1116,14 @@ int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int i
     n++;
   }
   return n;
+}
+int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[])
+{
+  return next_k_core(st, K, idx, out, NULL, false);
+}
+int nr_pdsch_config_sweep_next_k_ex(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[], nr_td_pick_t *kind)
+{
+  return next_k_core(st, K, idx, out, kind, true);
 }
 
 static void probe_count(uint16_t *c)
@@ -1249,6 +1383,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   const bool p2 = st->p2;
   const bool crc_accept = st->crc_accept;
   const bool geom_pin = st->geom_pin;
+  const float sib_pmin = st->sib_pmin, sib_eps = st->sib_eps;
   const bool fail_open = st->fail_open;
   uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
   memcpy(dormant, st->dormant, sizeof(dormant));
@@ -1261,6 +1396,8 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   st->p2 = p2;
   st->crc_accept = crc_accept;
   st->geom_pin = geom_pin;
+  st->sib_pmin = sib_pmin;
+  st->sib_eps = sib_eps;
   st->fail_open = fail_open;
   memcpy(st->dormant, dormant, sizeof(dormant));
   normalize_masks(st);
@@ -1457,6 +1594,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     fresh->p2 = false;
     fresh->crc_accept = false;
     fresh->geom_pin = false;
+    fresh->sib_pmin = 0.05f;
+    fresh->sib_eps = 1e-6f;
     fresh->winner_by_crc = false;
     fresh->fail_open = false;
     memset(fresh->dormant, 0, sizeof(fresh->dormant));
@@ -1574,6 +1713,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
     st->trials[at] = st->ok[at] = 0;
     st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
     st->ok_unique[at] = 0;
+    st->fp_trials[at] = st->sib_trials[at] = 0;
     clear_geom_evidence(st);
     st->order[at] = at;
   }

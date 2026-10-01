@@ -143,12 +143,30 @@ typedef struct {
   int      n_geom;
   bool     geom_blocked;
   bool     winner_by_crc; ///< the winner was decided by lever C (diagnostic; false after a reset of the winner)
+  /* FAST-PATH EVIDENCE STREAM (fix A, round 1). The fast-path levers (C and P) count only passes of EXPLORATION picks (a round-robin slot of the
+   * shuffled round, nr_td_pick_t NR_TD_PICK_EXPLORE) and their m* uses T_max over fp_trials = explore trials only. Argument: every active
+   * hypothesis receives at most one exploration slot per round, the slot order is fixed by the shuffle/ordering and does not depend on any
+   * decode outcome, so for a WRONG hypothesis its fast-path passes are Binomial(fp_trials, p_f) and the union bound C(T, m) p_f^m applies.
+   * Exploit (hot) and sibling-test picks are real KL trials but never fast-path evidence: a hot hypothesis gets 3/4 of the trials after one
+   * pass, which a per-hypothesis trial count cannot bound. uint16, saturating (state size +16 KB). Cleared wherever ok_unique is. */
+  uint16_t fp_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  /* K0-SIBLING GUARD (fix B). Siblings of a lead (lever C leader L / lever P group G): ACTIVE hypotheses with identical tda_start,
+   * tda_length, mapping_type and dmrs_mask but a different k0 (table, add_pos, max_len free). Before a fast accept/pin every sibling needs
+   * N_sib = nr_pdsch_config_sweep_sib_n(n_sib, sib_pmin, sib_eps) sibling-test trials (picks of kind NR_TD_PICK_SIBLING, scheduled
+   * deliberately by next_ex while a lead waits) with ZERO passes; a pass on a sibling-test trial sets sib_blocked (fast path off until the
+   * next evidence restart). If a sibling were the truth its per-trial pass probability is >= sib_pmin whenever the test runs, so
+   * P(0 passes in N_sib) <= (1 - p_min)^N_sib <= eps / n_sib per sibling. sib_pmin <= 0 disables the guard (fix A only). */
+  uint16_t sib_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  bool     sib_blocked;
+  struct { bool valid; uint64_t skey; uint8_t k0; } sib_t[2]; ///< pending sibling-test targets: [0] lever C leader, [1] lever P group
   /* CONFIGURATION, not catalog/evidence: preserved across catalog rebuilds (nr_pdsch_config_sweep_rebuild(),
    * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
   const struct nr_td_side_info_s *side; ///< ordering side information (nr_td_order.h); NULL = neutral (today's order)
   bool     p2;        ///< failure-only probe evidence enabled
   bool     crc_accept; ///< lever C enabled (configuration: preserved across rebuild like side/p2; a new context starts false)
   bool     geom_pin;   ///< lever P enabled (configuration: preserved across rebuild like crc_accept; a new context starts false)
+  float    sib_pmin;   ///< sibling guard p_min (configuration; default 0.05; <= 0 disables the guard)
+  float    sib_eps;    ///< sibling guard error budget eps_sib (configuration; default 1e-6)
   /* DORMANT (reversible) hypothesis masks, blind-convergence spec 2026-10-01 section 4. CONFIGURATION+MEMBERSHIP, not
    * evidence: preserved by nr_pdsch_config_sweep_rebuild(), compacted with the same keep-index mapping by every destructive
    * prune (prune_commit, prune_keep). One bit per hypothesis index per cause; bits at indices >= n_hyp are always 0.
@@ -187,6 +205,16 @@ int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
 
 /** Next hypothesis to try, round-robin. Returns its index and fills *out. */
 int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out);
+
+/** What kind of slot a pick was. Fast-path evidence (levers C/P) comes from EXPLORE picks only; SIBLING picks are the guard's deliberate
+ *  tests of k0 siblings. A caller of the fast path MUST pass the kind returned by next_ex/next_k_ex to the *_ex feed functions. */
+typedef enum { NR_TD_PICK_EXPLORE = 0, NR_TD_PICK_EXPLOIT = 1, NR_TD_PICK_SIBLING = 2 } nr_td_pick_t;
+/** nr_pdsch_config_sweep_next() plus the pick kind. Identical RNG/cursor behaviour to next() unless a lever is on and a lead waits for its
+ *  sibling tests, in which case the next sibling (fewest sib_trials, lowest index) is returned with kind SIBLING. next() itself never
+ *  schedules siblings (it is the lever-off path). */
+int nr_pdsch_config_sweep_next_ex(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out, nr_td_pick_t *kind);
+/** N_sib = ceil(ln(n_sib / eps) / pmin); 0 when n_sib <= 0 or pmin <= 0 (guard disabled). Clamped to 65535. */
+int nr_pdsch_config_sweep_sib_n(int n_sib, double pmin, double eps);
 /* Dormant hypotheses are skipped; the per-round shuffle still covers all n_hyp (RNG use unchanged), a round whose remainder is
  * all dormant advances to the next round, and the exploit "hot" hypothesis must be active. */
 
@@ -220,6 +248,12 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
  *  lever-C accumulation of that same call. */
 int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                     bool new_data);
+/** The runtime/fast-path forms: `kind` is the pick kind of the decoded hypothesis idx0 (from next_ex / next_k_ex). feed_equiv / feed_attr are
+ *  these with kind = EXPLORE (every pick treated as exploration: only sound when no hot pick can occur, i.e. tests or lever-off use). */
+int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
+                                        nr_td_pick_t kind);
+int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                       bool new_data, nr_td_pick_t kind);
 
 /** Lever C threshold: smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6 (log domain, lgamma). m = 2 when
  *  n_alive <= 1 or t_max == 0; for t_max < m, C = 0 so m qualifies at once (result max(2, m)). */
@@ -231,6 +265,8 @@ int nr_pdsch_config_sweep_crc_accept_m(int n_alive, uint32_t t_max);
  *  taken from the current round order at the cursor WITHOUT advancing it or consuming RNG. Once a winner
  *  exists only the winner is returned (n = 1). */
 int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[]);
+/** next_k with the pick kind of the MAIN hypothesis idx[0] (see next_ex). K = 1 is exactly next_ex(). */
+int nr_pdsch_config_sweep_next_k_ex(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[], nr_td_pick_t *kind);
 
 /** outcomes[0] must be the main FULL_TB outcome: PASS/FAIL go through nr_pdsch_config_sweep_feed();
  *  INCONCLUSIVE (or a non-FULL_TB entry) is not fed. outcomes[1..n-1] are probes: they only update the

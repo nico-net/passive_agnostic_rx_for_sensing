@@ -1561,7 +1561,7 @@ TEST(PdschSweepCrcAccept, TwoUniquePassesDecideWhenClean)
 {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(s.get(), 4);
-  s->crc_accept = true;
+  s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int a = 7;
   int w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
   EXPECT_EQ(w, -1);
@@ -1572,7 +1572,7 @@ TEST(PdschSweepCrcAccept, SecondUniquePasserBlocksTheRule)
 {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(s.get(), 4);
-  s->crc_accept = true;
+  s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int a = 7, b = 8;
   nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
   nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true, true);
@@ -1583,7 +1583,7 @@ TEST(PdschSweepCrcAccept, SharedPassIsNotUnique)
 {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(s.get(), 4);
-  s->crc_accept = true;
+  s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int cls[] = {7, 9};
   nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true);
   nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true);
@@ -1594,7 +1594,7 @@ TEST(PdschSweepCrcAccept, RetransmissionPassIsNotUnique)
 {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(s.get(), 4);
-  s->crc_accept = true;
+  s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int a = 7;
   nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
   EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, false), -1); /* HARQ retx of the same TB */
@@ -1607,7 +1607,7 @@ static std::unique_ptr<nr_pdsch_config_sweep_state_t> crc_state()
 {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(s.get(), 4);
-  s->crc_accept = true;
+  s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   return s;
 }
 static void feed_new(nr_pdsch_config_sweep_state_t *s, const int *cls, int n, int times, int *last = nullptr)
@@ -1731,7 +1731,7 @@ static std::unique_ptr<nr_pdsch_config_sweep_state_t> geom_state()
 {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(s.get(), 4);
-  s->geom_pin = true;
+  s->geom_pin = true; s->sib_pmin = 0;
   return s;
 }
 static int other_geom(const nr_pdsch_config_sweep_state_t *s, int a)
@@ -2009,4 +2009,217 @@ TEST(PdschSweepFeedAttr, FeedEquivIsAThinWrapperSameResult)
   }
   EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
   EXPECT_EQ(0, memcmp(a->ok_unique, b->ok_unique, sizeof(a->ok_unique)));
+}
+
+/* ---- Fix round 1: exploration-only fast-path evidence (fix A) and k0-sibling guard (fix B) ---- */
+using Pick = nr_td_pick_t;
+static std::unique_ptr<nr_pdsch_config_sweep_state_t> fp_state(bool c, bool p, float pmin)
+{
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(s.get(), 4);
+  s->crc_accept = c; s->geom_pin = p; s->sib_pmin = pmin;
+  return s;
+}
+static int n_siblings(const nr_pdsch_config_sweep_state_t *s, int a)
+{
+  int n = 0;
+  for (int i = 0; i < s->n_hyp; i++)
+    if (i != a && s->hyp[i].tda_start == s->hyp[a].tda_start && s->hyp[i].tda_length == s->hyp[a].tda_length
+        && s->hyp[i].mapping_type == s->hyp[a].mapping_type && s->hyp[i].dmrs_mask == s->hyp[a].dmrs_mask && s->hyp[i].k0 != s->hyp[a].k0
+        && nr_pdsch_config_sweep_is_active(s, i))
+      n++;
+  return n;
+}
+TEST(PdschSweepFastPathEx, SibN)
+{
+  EXPECT_EQ(nr_pdsch_config_sweep_sib_n(1, 0.05, 1e-6), 277);
+  EXPECT_EQ(nr_pdsch_config_sweep_sib_n(0, 0.05, 1e-6), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_sib_n(6, 0.05, 1e-6), (int)std::ceil(std::log(6e6) / 0.05));
+  EXPECT_EQ(nr_pdsch_config_sweep_sib_n(3, 0.0, 1e-6), 0); /* disabled */
+}
+TEST(PdschSweepFastPathEx, NextExMatchesNextAndReportsKinds)
+{
+  auto a = std::make_unique<nr_pdsch_config_sweep_state_t>(), b = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  nr_pdsch_config_sweep_init(a.get(), 4);
+  memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));
+  int n_exploit = 0;
+  for (int t = 0; t < 400; t++) {
+    nr_pdsch_cfg_hypothesis_t h1, h2;
+    Pick k = NR_TD_PICK_SIBLING;
+    const int i = nr_pdsch_config_sweep_next(a.get(), &h1), j = nr_pdsch_config_sweep_next_ex(b.get(), &h2, &k);
+    ASSERT_EQ(i, j);
+    ASSERT_NE(k, NR_TD_PICK_SIBLING); /* no lever on: never a sibling pick */
+    n_exploit += k == NR_TD_PICK_EXPLOIT;
+    const bool ok = t == 0; /* the first pick passes once: it becomes hot */
+    nr_pdsch_config_sweep_feed(a.get(), i, ok);
+    nr_pdsch_config_sweep_feed(b.get(), j, ok);
+  }
+  EXPECT_GT(n_exploit, 0); /* the first pick became hot */
+  EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
+}
+TEST(PdschSweepFastPathEx, OldFeedEquivIsExploreWrapper)
+{
+  auto a = fp_state(true, false, 0), b = fp_state(true, false, 0);
+  const int x = 7;
+  for (int i = 0; i < 2; i++) /* the second unique pass accepts (m* = 2) */
+    ASSERT_EQ(nr_pdsch_config_sweep_feed_equiv(a.get(), &x, 1, true, true),
+              nr_pdsch_config_sweep_feed_equiv_ex(b.get(), &x, 1, true, true, NR_TD_PICK_EXPLORE));
+  EXPECT_EQ(0, memcmp(a->fp_trials, b->fp_trials, sizeof(a->fp_trials)));
+  EXPECT_EQ(a->fp_trials[7], 2);
+  EXPECT_EQ(a->winner, 7);
+}
+TEST(PdschSweepFastPathEx, OnlyExplorePassesCountAndFpTrialsAreExploreOnly)
+{
+  auto s = fp_state(true, false, 0);
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT);
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT);
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_SIBLING);
+  EXPECT_EQ(s->ok_unique[a], 0);
+  EXPECT_EQ(s->fp_trials[a], 0);
+  EXPECT_EQ(s->trials[a], 3u); /* KL credit unchanged */
+  EXPECT_EQ(s->winner, -1);
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_EQ(s->ok_unique[a], 1);
+  EXPECT_EQ(s->fp_trials[a], 1);
+}
+TEST(PdschSweepFastPathEx, GeomEvidenceIsExploreOnly)
+{
+  auto s = fp_state(false, true, 0);
+  const int a = 7;
+  for (int i = 0; i < 5; i++)
+    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT);
+  EXPECT_EQ(s->n_geom, 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+}
+TEST(PdschSweepFastPathEx, MStarUsesExploreTrialsOnly)
+{
+  /* 1000 EXPLOIT failures on a: KL trials 1000, fp_trials 0. m* from fp_trials: two explore passes still accept. */
+  auto s = fp_state(true, false, 0);
+  const int a = 7;
+  for (int i = 0; i < 1000 && s->winner < 0; i++)
+    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_EXPLOIT);
+  if (s->winner >= 0)
+    GTEST_SKIP() << "KL decided first";
+  ASSERT_GE(s->trials[a], 100u);
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), a);
+  EXPECT_TRUE(s->winner_by_crc);
+}
+TEST(PdschSweepFastPathEx, RestartClearsFastPathStreams)
+{
+  auto s = fp_state(true, true, 0.05f);
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_EXPLORE);
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_SIBLING);
+  ASSERT_EQ(s->fp_trials[a], 1);
+  ASSERT_EQ(s->sib_trials[a], 1);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true);
+  EXPECT_EQ(s->fp_trials[a], 0);
+  EXPECT_EQ(s->sib_trials[a], 0);
+  EXPECT_FALSE(s->sib_blocked);
+}
+/* Drive the lever-C sibling test: 2 explore passes on a, then follow next_ex (SIBLING picks) feeding failures. */
+static int drive_siblings(nr_pdsch_config_sweep_state_t *s, int a, bool sibling_passes, int *n_sib_picks)
+{
+  const int cls = a;
+  nr_pdsch_config_sweep_feed_attr_ex(s, a, &cls, 1, true, true, NR_TD_PICK_EXPLORE);
+  nr_pdsch_config_sweep_feed_attr_ex(s, a, &cls, 1, true, true, NR_TD_PICK_EXPLORE);
+  *n_sib_picks = 0;
+  for (int t = 0; t < 20000 && s->winner < 0; t++) {
+    nr_pdsch_cfg_hypothesis_t h;
+    Pick k;
+    const int i = nr_pdsch_config_sweep_next_ex(s, &h, &k);
+    if (s->winner >= 0 || i < 0)
+      break;
+    if (k != NR_TD_PICK_SIBLING) {
+      if (s->sib_blocked)
+        break; /* the guard fired: nothing more to schedule deliberately */
+      nr_pdsch_config_sweep_feed_attr_ex(s, i, &i, 1, false, true, k);
+      continue;
+    }
+    ++*n_sib_picks;
+    EXPECT_EQ(h.tda_start, s->hyp[a].tda_start);
+    EXPECT_NE(h.k0, s->hyp[a].k0);
+    nr_pdsch_config_sweep_feed_attr_ex(s, i, &i, 1, sibling_passes && *n_sib_picks == 5, true, k);
+  }
+  return s->winner;
+}
+TEST(PdschSweepSiblingGuard, LeverCWaitsForSiblingTrialsThenAccepts)
+{
+  auto s = fp_state(true, false, 0.05f);
+  const int a = 7;
+  const int ns = n_siblings(s.get(), a);
+  ASSERT_GT(ns, 0);
+  int picks = 0;
+  EXPECT_EQ(drive_siblings(s.get(), a, false, &picks), a);
+  const int need = nr_pdsch_config_sweep_sib_n(ns, 0.05, 1e-6);
+  EXPECT_EQ(picks, need * ns);
+  for (int i = 0; i < s->n_hyp; i++)
+    if (i != a && s->hyp[i].tda_start == s->hyp[a].tda_start && s->hyp[i].tda_length == s->hyp[a].tda_length
+        && s->hyp[i].mapping_type == s->hyp[a].mapping_type && s->hyp[i].dmrs_mask == s->hyp[a].dmrs_mask && s->hyp[i].k0 != s->hyp[a].k0)
+      EXPECT_EQ(s->sib_trials[i], need);
+}
+TEST(PdschSweepSiblingGuard, SiblingPassBlocksLeverC)
+{
+  auto s = fp_state(true, false, 0.05f);
+  int picks = 0;
+  EXPECT_EQ(drive_siblings(s.get(), 7, true, &picks), -1);
+  EXPECT_TRUE(s->sib_blocked);
+  /* further explore passes cannot accept while blocked */
+  const int a = 7;
+  for (int i = 0; i < 5; i++)
+    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_EQ(s->winner, -1);
+}
+TEST(PdschSweepSiblingGuard, DisabledWhenPminZero)
+{
+  auto s = fp_state(true, false, 0);
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), a);
+}
+TEST(PdschSweepSiblingGuard, NoSiblingsAcceptsImmediately)
+{
+  auto s = fp_state(true, false, 0.05f);
+  const int a = 7;
+  /* make every k0 sibling of a dormant (another cause): no active sibling, the guard is vacuous */
+  struct Arg { const nr_pdsch_cfg_hypothesis_t *h; } arg{&s->hyp[a]};
+  auto keep = [](const nr_pdsch_cfg_hypothesis_t *h, const void *p) { return h->k0 == ((const Arg *)p)->h->k0; };
+  ASSERT_GE(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep, &arg), 0);
+  ASSERT_EQ(n_siblings(s.get(), a), 0);
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), a);
+}
+TEST(PdschSweepSiblingGuard, NextIsNeverASiblingPick)
+{
+  auto s = fp_state(true, false, 0.05f);
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  Pick k;
+  nr_pdsch_cfg_hypothesis_t h;
+  const int i = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+  EXPECT_EQ(k, NR_TD_PICK_SIBLING);
+  EXPECT_NE(s->hyp[i].k0, s->hyp[a].k0);
+  EXPECT_EQ(s->sib_trials[i], 0);
+}
+TEST(PdschSweepSiblingGuard, LeverPWaitsForSiblingsThenPins)
+{
+  auto s = fp_state(false, true, 0.05f);
+  const int a = 7;
+  const uint64_t g = nr_td_geom_key(&s->hyp[a]);
+  int picks = 0;
+  drive_siblings(s.get(), a, false, &picks);
+  EXPECT_GT(picks, 0);
+  for (int i = 0; i < s->n_hyp; i++)
+    ASSERT_EQ(nr_pdsch_config_sweep_is_active(s.get(), i), nr_td_geom_key(&s->hyp[i]) == g);
+}
+TEST(PdschSweepSiblingGuard, SiblingPassBlocksLeverP)
+{
+  auto s = fp_state(false, true, 0.05f);
+  int picks = 0;
+  drive_siblings(s.get(), 7, true, &picks);
+  EXPECT_TRUE(s->sib_blocked);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
