@@ -2,6 +2,8 @@
 # One rfsim phy-test arm on the DGX: gNB (plain HEAD nr-softmodem --phy-test) + passive receiver.
 # COREMAP=1 [INSTANCE=A|B]: launch the receiver through run_rx_dgx.sh (X925 core map, coremap_dgx.env); refuses (exit 3,
 #   before the gNB starts) if the map names a CPU that is not online. Unset = unchanged behaviour.
+# NOTE: COREMAP=1 requires RXCONF=tests/passive_rx/dgx/ue.passive.auto.100mhz.dgx.cfg (the frozen default RXCONF pins scan_thread
+#   to core 5 = the RT core; the launcher refuses that). INSTANCE=B needs its own conf with cluster-1 cores (10-19).
 # usage: GNBCONF=.. RXCONF=.. CELL="-C .. -r .. --ssb .." [RXEXTRA=..] [GNBARGS="-m 9 -n 0 -M 106 -l 1"] rfsim_arm.sh <outdir> <secs>
 set -u
 R=$(cd "$(dirname "$0")/../../.." && pwd); B=${BUILD:-$R/cmake_targets/ran_build/build}
