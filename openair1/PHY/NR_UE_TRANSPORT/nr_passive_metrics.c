@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_passive_metrics.h"
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +58,9 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
 
 void nr_passive_metrics_emit(void)
 {
+  /* The file handle is opened lazily by whichever scan consumer first wins summary_due_now(); with N
+   * consumers (Task A7) successive winners are different threads, so the open/append is serialised. */
+  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
   static FILE *f = NULL;
   static int tried = 0;
   nr_passive_metrics_t m;
@@ -67,6 +71,7 @@ void nr_passive_metrics_emit(void)
     return;
   }
   LOG_A(PHY, "SENSING: ISAC_METRICS %s\n", buf);
+  pthread_mutex_lock(&mu);
   if (!tried) {
     tried = 1;
     const char *p = getenv("ISAC_METRICS_PATH");
@@ -80,4 +85,5 @@ void nr_passive_metrics_emit(void)
   }
   if (f)
     fprintf(f, "%s\n", buf);
+  pthread_mutex_unlock(&mu);
 }

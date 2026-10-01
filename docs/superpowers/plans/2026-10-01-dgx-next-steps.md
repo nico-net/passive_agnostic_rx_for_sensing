@@ -1751,6 +1751,14 @@ git commit -m "feat(dgx): X925 core-map launcher + rfsim A/B measurement"
 - Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c`
 - Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c` (drop the >1 warning once safe; keep `MAX_CONSUMERS 4`)
 - Test: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc` (add a concurrency test) + a TSAN build
+- *(cloud 2026-10-01, implemented)* Create: `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.{c,h}` (lean
+  `nr_pdcch_blind_monitor` library): `g_phase2_mu`, the RNTI-persistence ring and the energy floor moved out of rt.c,
+  because rt.c is compiled into PHY_NR_UE and is NOT in the gtest's link closure -- the `#ifdef NR_PDCCH_BLIND_TESTING`
+  static-export hook of Step 1 cannot link. Also modified (races found by TSAN on a 2-consumer rfsim run, not in the
+  research list): `dci_nr.c` (DM-RS probe accumulators / hot-CCE, mode flags, capture writer), `nr_passive_metrics.c`
+  (emit serialised), `nr_pdcch_passive_queue.c` (max_lag CAS), `nr_pdcch_blind_rnti_bootstrap.c` (table had no lock),
+  `nr_pdsch_passive_queue.c` (producer-side pending batch), `nr_pdcch_blind_monitor.c` (discovery flags atomic);
+  `tests/passive_rx/dgx/thrprof.sh` (per-thread CPU for the A/B). Evidence: `tests/passive_rx/cloud_run_2026-10-01/a7_concurrency/`.
 
 **Interfaces:**
 - Consumes: A1 regression gate, A2 metrics (scanq fields).
@@ -1761,7 +1769,18 @@ Design (decided here, implement exactly):
 2. Energy floor + `dci_thres` EMA + persistence table → one `static pthread_mutex_t g_phase2_mu`, taken for the **whole Phase 2 block** of one occasion (the part after candidate decode that the rt.c:~5320 comment calls sequential). Phase 1 (FEP, LLR, demap, candidate decode — the ~80 % of the cost) runs unlocked in parallel. This preserves the sequential semantics of Phase 2 exactly while parallelising the expensive part.
 3. Ordering: Phase 2 of occasion k may now run before Phase 2 of occasion k-1 if consumers race. Persistence (`rnti_persistence_check`) needs ≥ 2 sightings within a staleness window measured in slots, so out-of-order by < depth slots is harmless; the energy-floor EMA is order-insensitive at the 1e-2 level. Document this in a comment at the mutex.
 
-- [ ] **Step 1: Write the failing concurrency test** — in `nr_pdcch_blind_monitor_test.cc`, a test that calls the Phase-2 entry (the function containing `rnti_persistence_check`; extract it as `static` → `nr_pdcch_blind_phase2_for_test()` exported only under `#ifdef NR_PDCCH_BLIND_TESTING`, which the gtest target defines) from 4 threads × 10 000 synthetic accepts of the same RNTI and asserts: accept counter == 40 000, the persistence table contains the RNTI exactly once, no crash. Run it under TSAN:
+Rulings at implementation (cloud 2026-10-01, Opus): (a) the energy floor is fed per candidate in the PRE-PASS (Phase 1),
+not in Phase 2, so it has its own leaf lock in `nr_pdcch_blind_phase2.c` instead of `g_phase2_mu` (same per-sample
+sequence, no serialisation of Phase 1 behind another occasion's Phase 2). (b) "Phase 2" = from the decode join to the
+END of the occasion (BTIM post, summary, ACQ update included). (c) An occasion of the AUTODISCOVER pass (root cfg,
+`autodiscover=1`) holds `g_phase2_mu` for the whole occasion: its Phase 1 drives the discovery state machine in
+`nr_pdcch_blind_monitor.c`, which rewrites the very cfg the occasion reads; bank / CORESET#0-USS / CSS0 passes carry
+`autodiscover=0` and run Phase 1 unlocked. (d) `g_pdsch_configuration`/`g_pdsch_sweep_on` became `__thread`: they are set
+per pass in Phase 1 and read in the same occasion's Phase 2, so a shared value let another consumer re-key the grants.
+(e) The persistence ring stores one entry per SIGHTING by design, so "contains the RNTI exactly once" is tested as
+"exactly one of 40 000 accepts is held (the first sighting) and all 64 ring entries are that RNTI".
+
+- [x] **Step 1: Write the failing concurrency test** — in `nr_pdcch_blind_monitor_test.cc`, a test that calls the Phase-2 entry (the function containing `rnti_persistence_check`; extract it as `static` → `nr_pdcch_blind_phase2_for_test()` exported only under `#ifdef NR_PDCCH_BLIND_TESTING`, which the gtest target defines) from 4 threads × 10 000 synthetic accepts of the same RNTI and asserts: accept counter == 40 000, the persistence table contains the RNTI exactly once, no crash. Run it under TSAN:
 
 ```bash
 cmake -B /tmp/tsan -S . -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DCMAKE_C_FLAGS=-fsanitize=thread -DCMAKE_CXX_FLAGS=-fsanitize=thread -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
@@ -1769,13 +1788,16 @@ ninja -C /tmp/tsan test_nr_pdcch_blind_monitor && /tmp/tsan/test_nr_pdcch_blind_
 ```
 Expected before the fix: TSAN reports data races on `g_recent*` / counters (FAIL).
 
-- [ ] **Step 2: Implement design points 1–3.**
+- [x] **Step 2: Implement design points 1–3.**
 
-- [ ] **Step 3: Verify** — TSAN run clean; full `test_nr_pdcch_blind_monitor` + shuffle seeds 1/3/5 pass (195 + new, 2 skips).
+- [x] **Step 3: Verify** — TSAN run clean; full `test_nr_pdcch_blind_monitor` + shuffle seeds 1/3/5 pass (195 + new, 2 skips).
 
-- [ ] **Step 4: rfsim A/B** (Sonnet): 273 PRB 1 RX, `scan_thread "1:8:6"` vs `"2:16:6"`, 3 runs each alternating, via A4 campaign runner. Pass: accepts per occasion and CRC % within run-to-run spread; `passivePdcch0+1` total CPU ≈ single consumer's; scanq `max_lag` not worse. Then 106-PRB regression gate.
+- [x] **Step 4: rfsim A/B** (Sonnet): 273 PRB 1 RX, `scan_thread "1:8:6"` vs `"2:16:6"`, 3 runs each alternating, via A4 campaign runner. Pass: accepts per occasion and CRC % within run-to-run spread; `passivePdcch0+1` total CPU ≈ single consumer's; scanq `max_lag` not worse. Then 106-PRB regression gate.
+  *(cloud 2026-10-01, orchestrator ruling: 4-core host, so 106 PRB and UNPINNED `"1:8:-1"` vs `"2:16:-1"`; run by Opus
+  with `tests/passive_rx/dgx/thrprof.sh` for per-thread CPU. `max_lag` follows the queue depth (8 vs 16), not the consumer
+  count -- controls `"2:8:-1"` -> 8 and `"1:16:-1"` -> 16. The 273-PRB `"1:8:6"`/`"2:16:6"` A/B stays a DGX step.)*
 
-- [ ] **Step 5: Commit** with the A/B table in the body; update PROJECT_MEMORY K27 (scan consumer no longer single-threaded) with `[SIM VERIFIED]`.
+- [x] **Step 5: Commit** with the A/B table in the body; update PROJECT_MEMORY K27 (scan consumer no longer single-threaded) with `[SIM VERIFIED]`. *(cloud: the K27 text is handed to the orchestrator, which integrates PROJECT_MEMORY.md.)*
 
 ---
 

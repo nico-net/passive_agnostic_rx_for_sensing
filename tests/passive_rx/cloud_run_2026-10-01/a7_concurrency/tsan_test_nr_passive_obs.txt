@@ -1,0 +1,25 @@
+Running main() from /root/.cache/cpm/googletest/a36d6fcbd7356d396ea479e6b11f4b9760ad0c04/googletest/src/gtest_main.cc
+[==========] Running 8 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 8 tests from PassiveObs
+[ RUN      ] PassiveObs.JsonHasSchemaAndNullsForNan
+[       OK ] PassiveObs.JsonHasSchemaAndNullsForNan (0 ms)
+[ RUN      ] PassiveObs.UnknownsAreNullAndFloatsKeepPrecision
+[       OK ] PassiveObs.UnknownsAreNullAndFloatsKeepPrecision (0 ms)
+[ RUN      ] PassiveObs.PushWithoutOpenIsNoop
+[       OK ] PassiveObs.PushWithoutOpenIsNoop (0 ms)
+[ RUN      ] PassiveObs.WritesEveryRecordFromManyThreads
+[       OK ] PassiveObs.WritesEveryRecordFromManyThreads (817 ms)
+[ RUN      ] PassiveObs.FullRingDropsAndCountsInsteadOfBlocking
+[       OK ] PassiveObs.FullRingDropsAndCountsInsteadOfBlocking (303 ms)
+[ RUN      ] PassiveObs.IoErrorsCountedAndNotWritten
+[       OK ] PassiveObs.IoErrorsCountedAndNotWritten (0 ms)
+[ RUN      ] PassiveObs.PushesAfterCloseAreCounted
+[       OK ] PassiveObs.PushesAfterCloseAreCounted (0 ms)
+[ RUN      ] PassiveObs.DisabledFastPathWhenNeverOpened
+[       OK ] PassiveObs.DisabledFastPathWhenNeverOpened (0 ms)
+[----------] 8 tests from PassiveObs (1123 ms total)
+
+[----------] Global test environment tear-down
+[==========] 8 tests from 1 test suite ran. (1124 ms total)
+[  PASSED  ] 8 tests.

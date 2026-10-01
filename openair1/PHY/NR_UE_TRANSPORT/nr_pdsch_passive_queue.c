@@ -1316,9 +1316,13 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job);
  * slot of latency against a one-frame sample lifetime. */
 static nr_pdsch_passive_job_t g_pending[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
 static int g_n_pending = 0;
+/* The producer side is several blind-PDCCH scan consumers since Task A7 (one flushes at its occasion
+ * start while another enqueues from its Phase 2), so the pending batch has its own lock, taken before
+ * g_lock and never the other way round. */
+static pthread_mutex_t g_pending_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_batches = 0, g_batches_multi = 0; ///< producer flushes, and those with >1 grant
 
-void nr_pdsch_passive_queue_flush(void)
+static void nr_pdsch_passive_queue_flush_locked(void) /* g_pending_mu held */
 {
   if (g_n_pending == 0) return;
   atomic_fetch_add_explicit(&g_batches, 1, memory_order_relaxed);
@@ -1339,14 +1343,22 @@ void nr_pdsch_passive_queue_flush(void)
   pthread_mutex_unlock(&g_lock);
 }
 
+void nr_pdsch_passive_queue_flush(void)
+{
+  pthread_mutex_lock(&g_pending_mu);
+  nr_pdsch_passive_queue_flush_locked();
+  pthread_mutex_unlock(&g_pending_mu);
+}
+
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
     return false;
   }
+  pthread_mutex_lock(&g_pending_mu);
   if (g_n_pending > 0 && (g_pending[0].absolute_slot != job->absolute_slot
                           || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
-    nr_pdsch_passive_queue_flush();
+    nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   /* ONE normalisation for everyone downstream: decoder, data-aided tap (recomputes nb_rb/G from
    * num_rbs), queue probes, narrow-grant budget. A no-op for a contiguous grant. */
@@ -1356,9 +1368,11 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
     if (n_ == 1 || (n_ % 200) == 0)
       LOG_W(PHY, "SENSING: PDSCHQ refused an invalid PRB-list grant n=%lu (n_prb_list=%u bwp_size=%u)\n", n_,
             (unsigned)job->freq_alloc.n_prb_list, (unsigned)job->dlsch_pdu.BWPSize);
+    pthread_mutex_unlock(&g_pending_mu);
     return false;
   }
   g_n_pending++;
+  pthread_mutex_unlock(&g_pending_mu);
   return true;
 }
 

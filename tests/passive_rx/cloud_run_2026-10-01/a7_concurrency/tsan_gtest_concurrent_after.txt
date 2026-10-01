@@ -1,0 +1,27 @@
+TSAN gtest Phase2Concurrent* AFTER the fix
+source: tsan_gtest_after.txt
+reports: 0
+
+by location:
+
+by accessing thread pair:
+
+full reports (paths made repo-relative, BuildIds stripped; trimmed to <= 200 KB):
+
+
+
+gtest output:
+[LOG] init aborted, configuration couldn't be performed
+Note: Google Test filter = Phase2Concurrent*
+[==========] Running 2 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 2 tests from Phase2Concurrent
+[ RUN      ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting
+[       OK ] Phase2Concurrent.FourThreadsSameRntiLoseNoAcceptAndNoSighting (453 ms)
+[ RUN      ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads
+[       OK ] Phase2Concurrent.EnergyFloorCountsEverySampleFromFourThreads (54 ms)
+[----------] 2 tests from Phase2Concurrent (508 ms total)
+
+[----------] Global test environment tear-down
+[==========] 2 tests from 1 test suite ran. (509 ms total)
+[  PASSED  ] 2 tests.

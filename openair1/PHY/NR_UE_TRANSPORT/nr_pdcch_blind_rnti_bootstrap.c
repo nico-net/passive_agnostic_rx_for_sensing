@@ -31,6 +31,7 @@
 #include <string.h>
 #include <stdio.h>   // snprintf, for the BOOTTABLE diagnostic dump
 #include <stdlib.h>
+#include <pthread.h>
 
 // ---- Phase 3 Technique B: C-RNTI bootstrap, MULTI-UE ----------------------------------------
 // A cell carries many UEs and a passive receiver hears all of them, so tracking ONE C-RNTI threw
@@ -55,6 +56,10 @@ typedef struct {
 } nr_boot_entry_t;
 
 static nr_boot_entry_t g_boot[NR_PDCCH_BLIND_MAX_UE];
+/* Every public entry point below takes this leaf lock: accepts are recorded in Phase 2 while other blind
+ * PDCCH scan consumers read the confirmed set in their Phase 1 (Task A7, found by TSAN). The static
+ * helpers are called with it held. */
+static pthread_mutex_t g_boot_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int boot_find(uint16_t rnti, uint8_t cls)
 {
@@ -153,24 +158,32 @@ static void boot_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot, ui
 
 void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
 {
+  pthread_mutex_lock(&g_boot_mu);
   boot_record(rnti, rnti_class, abs_slot, 0, 0);
+  pthread_mutex_unlock(&g_boot_mu);
 }
 
 /* The RAR chain: the only RNTI this receiver can verify without already knowing the answer. */
 void nr_pdcch_blind_rnti_bootstrap_record_verified(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
 {
+  pthread_mutex_lock(&g_boot_mu);
   boot_record(rnti, rnti_class, abs_slot, 1, 1);
+  pthread_mutex_unlock(&g_boot_mu);
 }
 
 void nr_pdcch_blind_rnti_bootstrap_record_trusted(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
 {
+  pthread_mutex_lock(&g_boot_mu);
   boot_record(rnti, rnti_class, abs_slot, 1, 0);
+  pthread_mutex_unlock(&g_boot_mu);
 }
 
 void nr_pdcch_blind_rnti_bootstrap_record_corroborated(uint16_t rnti, uint8_t rnti_class,
                                                        uint32_t abs_slot)
 {
+  pthread_mutex_lock(&g_boot_mu);
   boot_record(rnti, rnti_class, abs_slot, 1, 1);
+  pthread_mutex_unlock(&g_boot_mu);
 }
 
 static bool boot_entry_live(const nr_boot_entry_t *e, uint32_t now)
@@ -240,7 +253,7 @@ static bool simulation_candidate_contains(uint16_t rnti)
   return false;
 }
 
-int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+static int nr_pdcch_blind_monitor_confirmed_rnti_set_locked(uint32_t now_abs_slot, uint16_t *out, int max_out)
 {
   if (out == NULL || max_out <= 0) {
     return 0;
@@ -263,7 +276,7 @@ int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *o
   return n;
 }
 
-int nr_pdcch_blind_monitor_verified_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+static int nr_pdcch_blind_monitor_verified_rnti_set_locked(uint32_t now_abs_slot, uint16_t *out, int max_out)
 {
   if (out == NULL || max_out <= 0)
     return 0;
@@ -283,7 +296,7 @@ int nr_pdcch_blind_monitor_verified_rnti_set(uint32_t now_abs_slot, uint16_t *ou
   return n;
 }
 
-int nr_pdcch_blind_monitor_dedicated_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+static int nr_pdcch_blind_monitor_dedicated_rnti_set_locked(uint32_t now_abs_slot, uint16_t *out, int max_out)
 {
   if (out == NULL || max_out <= 0)
     return 0;
@@ -301,7 +314,7 @@ int nr_pdcch_blind_monitor_dedicated_rnti_set(uint32_t now_abs_slot, uint16_t *o
   return n;
 }
 
-bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti)
+static bool nr_pdcch_blind_monitor_rnti_confirmed_locked(uint32_t now_abs_slot, uint16_t rnti)
 {
   if (simulation_candidate_contains(rnti))
     return true;
@@ -315,8 +328,8 @@ bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti)
 
 /// Best-evidenced live entry. Kept for the single-RNTI consumers (Technique C's sweep and the
 /// footprint log line), which want one representative UE rather than the whole set.
-bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti_out, uint8_t* class_out,
-                                           uint32_t* age_slots_out)
+static bool nr_pdcch_blind_monitor_confirmed_rnti_locked(uint32_t now_abs_slot, uint16_t* rnti_out, uint8_t* class_out,
+                                                         uint32_t* age_slots_out)
 {
   /* TRUSTED FIRST. Two passes, not one comparison: an untrusted entry with more sightings must not
    * outrank a trusted one, because sightings are exactly what a noise RNTI accumulates when the
@@ -359,7 +372,7 @@ bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti
  * happens the whole chain reads as "bootstrap_rnti=0x0" with no way to tell WHY from the outside:
  * a table of one-sighting entries (accepts are false, RNTIs never repeat) looks identical to an
  * empty table. Prints the raw table so the two are distinguishable. */
-int nr_pdcch_blind_rnti_bootstrap_dump(uint32_t now_abs_slot, char *buf, int buflen)
+static int nr_pdcch_blind_rnti_bootstrap_dump_locked(uint32_t now_abs_slot, char *buf, int buflen)
 {
   if (buf == NULL || buflen <= 0) {
     return 0;
@@ -383,7 +396,59 @@ int nr_pdcch_blind_rnti_bootstrap_dump(uint32_t now_abs_slot, char *buf, int buf
   return off;
 }
 
+/* ---- Locked public readers (Task A7) ---- */
+int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+{
+  pthread_mutex_lock(&g_boot_mu);
+  const int r = nr_pdcch_blind_monitor_confirmed_rnti_set_locked(now_abs_slot, out, max_out);
+  pthread_mutex_unlock(&g_boot_mu);
+  return r;
+}
+
+int nr_pdcch_blind_monitor_verified_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+{
+  pthread_mutex_lock(&g_boot_mu);
+  const int r = nr_pdcch_blind_monitor_verified_rnti_set_locked(now_abs_slot, out, max_out);
+  pthread_mutex_unlock(&g_boot_mu);
+  return r;
+}
+
+int nr_pdcch_blind_monitor_dedicated_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+{
+  pthread_mutex_lock(&g_boot_mu);
+  const int r = nr_pdcch_blind_monitor_dedicated_rnti_set_locked(now_abs_slot, out, max_out);
+  pthread_mutex_unlock(&g_boot_mu);
+  return r;
+}
+
+bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti)
+{
+  pthread_mutex_lock(&g_boot_mu);
+  const bool r = nr_pdcch_blind_monitor_rnti_confirmed_locked(now_abs_slot, rnti);
+  pthread_mutex_unlock(&g_boot_mu);
+  return r;
+}
+
+int nr_pdcch_blind_rnti_bootstrap_dump(uint32_t now_abs_slot, char *buf, int buflen)
+{
+  pthread_mutex_lock(&g_boot_mu);
+  const int r = nr_pdcch_blind_rnti_bootstrap_dump_locked(now_abs_slot, buf, buflen);
+  pthread_mutex_unlock(&g_boot_mu);
+  return r;
+}
+
+bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti_out, uint8_t* class_out,
+                                           uint32_t* age_slots_out)
+{
+  pthread_mutex_lock(&g_boot_mu);
+  const bool r = nr_pdcch_blind_monitor_confirmed_rnti_locked(now_abs_slot, rnti_out, class_out, age_slots_out);
+  pthread_mutex_unlock(&g_boot_mu);
+  return r;
+}
+
 void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void)
 {
+  pthread_mutex_lock(&g_boot_mu);
   memset(g_boot, 0, sizeof(g_boot));
+  pthread_mutex_unlock(&g_boot_mu);
 }

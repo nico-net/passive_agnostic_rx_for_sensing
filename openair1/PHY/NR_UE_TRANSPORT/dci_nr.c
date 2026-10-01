@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 
 #include "executables/softmodem-common.h"
@@ -181,13 +183,17 @@ void nr_pdcch_demapping_deinterleaving(uint32_t coreset_nbr_rb,
  *
  * When enabled, the scale is derived per symbol from the observed peak rather than from a mean that
  * the empty REs dominate -- no hand-tuned constant, and it self-adjusts with received level. */
-int nr_pdcch_blind_llr_autoscale = 1;
-int nr_pdcch_blind_dmrs_probe = 0;
-static int    g_dmrs_hot_cce = -1;
-int nr_pdcch_blind_capture = 0;   /* 1 = write the replay fixture */
-static FILE  *g_cap_fp = NULL;
-static int    g_cap_left = 400;
-static double g_dmrs_hot_nc = 0.0; /* TEMPORARY stage-split probe, see DMRSPROBE below */
+/* The blind-PDCCH scan may run on N consumer threads (Task A7): the three mode flags are atomics, the
+ * DM-RS probe's per-symbol hot CCE is per thread (set and consumed within one symbol's processing),
+ * and the replay-fixture writer is serialised. */
+_Atomic int nr_pdcch_blind_llr_autoscale = 1;
+_Atomic int nr_pdcch_blind_dmrs_probe = 0;
+static __thread int    g_dmrs_hot_cce = -1;
+_Atomic int nr_pdcch_blind_capture = 0;   /* 1 = write the replay fixture */
+static pthread_mutex_t g_cap_mu = PTHREAD_MUTEX_INITIALIZER;
+static FILE  *g_cap_fp = NULL;          /* under g_cap_mu */
+static _Atomic int g_cap_left = 400;
+static __thread double g_dmrs_hot_nc = 0.0; /* TEMPORARY stage-split probe, see DMRSPROBE below */
 
 static void nr_pdcch_llr(uint32_t sz, c16_t *rxF, c16_t *llr)
 {
@@ -374,10 +380,10 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
    * UE both appear in one log and can be diffed line-by-line for the SAME slot -- which is the only
    * way to see which derived value the synthetic blind config gets wrong. Read-only, off by default. */
   {
-    static int s_cfgtrace = -1;
+    static _Atomic int s_cfgtrace = -1;
     if (s_cfgtrace < 0)
       s_cfgtrace = (getenv("ISAC_PDCCH_CFGTRACE") != NULL) ? 1 : 0;
-    static int s_cfgslot = -2;
+    static _Atomic int s_cfgslot = -2;
     if (s_cfgslot == -2) {
       const char *e = getenv("ISAC_PDCCH_CFGTRACE_SLOT");
       s_cfgslot = e ? atoi(e) : -1; // -1 = every slot
@@ -437,11 +443,12 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
      * only as sqrt(ln(trials)/18). If max_seen never leaves that envelope, the DM-RS is not being
      * recovered at all -> fault at/before channel estimation. If some symbols do reach ~0.8+, the
      * estimator input is fine and the fault is after equalisation. */
-    static double s_max_corr = -1.0;
-    static int    s_max_cce = -1, s_max_slot = -1;
-    static long   s_symbols = 0, s_hits70 = 0, s_hits80 = 0;
-    static double s_sum = 0.0, s_sum2 = 0.0;
-    static long   s_n = 0;
+    /* Per thread since Task A7 (N blind-scan consumers): each consumer reports its own population. */
+    static __thread double s_max_corr = -1.0;
+    static __thread int    s_max_cce = -1, s_max_slot = -1;
+    static __thread long   s_symbols = 0, s_hits70 = 0, s_hits80 = 0;
+    static __thread double s_sum = 0.0, s_sum2 = 0.0;
+    static __thread long   s_n = 0;
 
     const int symb_sz = fp->ofdm_symbol_size;
     const unsigned short cs_sc =
@@ -495,11 +502,11 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
      * the per-CCE average well above that regardless of timing. */
     cs_sc_cap = cs_sc;
     {
-      static double s_nc_max = 0.0;
-      static long   s_nc_hits = 0, s_nc_n = 0;
-      static double s_nc_sum = 0.0;
-      static long   s_nc_cnt = 0;
-      static double s_best_dphi = 0.0;
+      static __thread double s_nc_max = 0.0;
+      static __thread long   s_nc_hits = 0, s_nc_n = 0;
+      static __thread double s_nc_sum = 0.0;
+      static __thread long   s_nc_cnt = 0;
+      static __thread double s_best_dphi = 0.0;
       double sym_best_nc = 0.0;
       double sym_best_dphi = 0.0;
       int    sym_best_cce_nc = -1;
@@ -589,7 +596,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   // a plain coherent sum. tau is reported too but is only meaningful WHEN coherence is high -- a phase
   // slope fitted to incoherent pilots is noise, and is ambiguous beyond +-ofdm_symbol_size/8.
   {
-    static int audit = -1;
+    static _Atomic int audit = -1;
     if (audit < 0) {
       /* SAME DECIMATION FACTOR as the per-SSB trace in nr_adjust_synch_ue.c, and for a much
        * sharper reason: this probe fires per PDCCH CANDIDATE, not per SSB. Left undecimated while
@@ -606,7 +613,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
         audit = 1;
       }
     }
-    static unsigned audit_n_ = 0;
+    static _Atomic unsigned audit_n_ = 0;
     const int audit_now_ = audit && ((audit_n_++ % (unsigned)audit) == 0);
     if (audit_now_) {
       const int symb_sz = fp->ofdm_symbol_size;
@@ -687,7 +694,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
       if (rough[a] < best_r) best_r = rough[a];
     }
     /* ISAC_PDCCH_ANT_MASK=<hex>: force the kept set (A/B tool: 0x3 = branches 0+1, what 2 RX uses). */
-    static int s_force_mask = -1;
+    static _Atomic int s_force_mask = -1;
     if (s_force_mask < 0) {
       const char *e = getenv("ISAC_PDCCH_ANT_MASK");
       s_force_mask = e ? (int)strtol(e, NULL, 0) : 0;
@@ -702,7 +709,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
       }
     }
     kept_mask = (unsigned)kept;
-    static int s_gate_log = 12;
+    static _Atomic int s_gate_log = 12;
     if (s_gate_log > 0 && fp->nb_antennas_rx > 1 && proc->nr_slot_rx == 1) {
       s_gate_log--;
       LOG_W(PHY, "SENSING: PDCCH branch gate slot=%d symb=%d kept=0x%x rough=[%.2f %.2f %.2f %.2f]\n",
@@ -730,7 +737,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
    * read cv 1.2-2.2 (noise-like) on every acquisition that never decoded SIB1, and 1/2 RX decode it.
    * Which branches are QPSK-like, and which are not, is the discriminating fact. 12 shots, slot 1. */
   {
-    static int s_ant_left = 12;
+    static _Atomic int s_ant_left = 12;
     if (s_ant_left > 0 && fp->nb_antennas_rx > 1 && proc->nr_slot_rx == 1) {
       char b[300];
       int u = 0;
@@ -763,7 +770,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
    * genuinely over-driven front end stays distinguishable from a bad estimate.
    * Gated to a handful of shots and to the strongest symbols only; costs nothing once exhausted. */
   {
-    static int s_preclip_left = 24;
+    static _Atomic int s_preclip_left = 24;
     if (s_preclip_left > 0) {
       const c16_t *cp = rxdataF_comp[0];
       double sum_i = 0.0, sum_q = 0.0, sum_m = 0.0, sum_m2 = 0.0, peak = 0.0;
@@ -856,6 +863,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
     }
   }
   if (nr_pdcch_blind_capture && g_cap_left > 0 && cap_occupied) {
+    pthread_mutex_lock(&g_cap_mu);
     if (g_cap_fp == NULL) {
       g_cap_fp = fopen("/tmp/pdcch_fixture.bin", "wb");
     }
@@ -880,8 +888,9 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
       fflush(g_cap_fp);
       g_cap_left--;
       LOG_W(PHY, "SENSING: CAPTURE wrote record (frame=%d slot=%d cce=%d nc=%.3f) %d left\n",
-            proc->frame_rx, proc->nr_slot_rx, g_dmrs_hot_cce, g_dmrs_hot_nc, g_cap_left);
+            proc->frame_rx, proc->nr_slot_rx, g_dmrs_hot_cce, g_dmrs_hot_nc, (int)g_cap_left);
     }
+    pthread_mutex_unlock(&g_cap_mu);
   }
 
   /* POST-EQUALISATION DATA-RE CHECK, triggered by a CCE whose DM-RS correlated at >0.85 -- i.e. a
@@ -894,7 +903,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
    * Under non-interleaved mapping with duration 1, CCE c covers CORESET RBs [6c,6c+6), i.e.
    * rxdataF_comp REs [54c, 54c+54). */
   if (nr_pdcch_blind_dmrs_probe && g_dmrs_hot_cce >= 0) {
-    static int s_dq_left = 25;
+    static _Atomic int s_dq_left = 25;
     const int base = g_dmrs_hot_cce * 54;
     if (s_dq_left > 0 && base + 54 <= llr_size_symbol) {
       const c16_t *dq = &rxdataF_comp[0][base];
@@ -966,7 +975,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
         rxdataF_comp[0][i].r = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
         rxdataF_comp[0][i].i = (int16_t)(q > 32767 ? 32767 : q < -32768 ? -32768 : q);
       }
-      static int s_shift_log_left = 8;
+      static _Atomic int s_shift_log_left = 8;
       if (s_shift_log_left > 0) {
         LOG_W(PHY, "SENSING: PDCCH autoscale slot=%d symb=%d extra_shift=%d (p90 %d -> %d)\n",
               proc->nr_slot_rx, symbol, sh, p90, sh > 0 ? p90 >> sh : p90 << -sh);
@@ -1092,14 +1101,14 @@ void nr_pdcch_unscrambling(c16_t *e_rx,
  * Read-only, off by default. */
 void nr_pdcch_llr_probe(const char *path, int frame, int slot, int cce, int L, uint32_t crc, const int16_t *e, int n)
 {
-  static int s_on = -1;
+  static _Atomic int s_on = -1;
   if (s_on < 0)
     s_on = (getenv("ISAC_PDCCH_LLRPROBE") != NULL) ? 1 : 0;
   if (!s_on)
     return;
   /* Slot filter: full-rate probing floods the log and has been MEASURED to break the attach that
    * provides the control arm. SIB1 sits in one slot index, so filtering to it costs nothing. */
-  static int s_slot = -2;
+  static _Atomic int s_slot = -2;
   if (s_slot == -2) {
     const char *e2 = getenv("ISAC_PDCCH_LLRPROBE_SLOT");
     s_slot = e2 ? atoi(e2) : -1;

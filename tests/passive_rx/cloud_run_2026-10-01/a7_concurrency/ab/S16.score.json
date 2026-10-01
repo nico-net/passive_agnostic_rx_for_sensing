@@ -1,0 +1,1 @@
+{"arm": "S16", "bank_len": 46, "conv_s": 35.798, "cpu_pct": 204, "crc_pct": 96.71, "drop_full_pct": 0.7224, "first_crnti_s": 32.704, "ldpc_ok": 15572, "ldpc_seg_fail": 463, "max_rss_kb": 888284, "n_converged": 2, "pdsch_crc_ok": 15572, "pdsch_decoded": 16102, "scanq_drop_full": 910, "scanq_queued": 125976, "sync_s": 6.561, "ttc_s": 3.094}

@@ -66,6 +66,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "common/config/config_userapi.h"
 #include <sys/stat.h>
@@ -496,7 +497,7 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * g_cfg.bwp_size to CORESET#0's span, so that field can no longer distinguish "dedicated geometry
  * still unknown" from "CSS0 already populated the common one". Tracked with its own state instead
  * (s_dedicated_found below), separate from anything CSS0 writes. */
-static bool s_dedicated_found = false;
+static _Atomic bool s_dedicated_found = false; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
 
 /* No offset blacklist: lack of evidence for (offset,width) says nothing about
  * other widths at that offset, and a quiet interval proves no geometry wrong. */
@@ -608,9 +609,9 @@ static void map_restart(int span_rb, int duration, int pci)
   s_map_idx = 0;
   map_apply();
 }
-static bool s_ext_verified = false;
+static _Atomic bool s_ext_verified = false; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
 static int  s_ext_occ      = 0;
-static uint64_t s_ext_generation;
+static _Atomic uint64_t s_ext_generation; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
 typedef struct {
   uint16_t rnti;
   uint32_t slot;
