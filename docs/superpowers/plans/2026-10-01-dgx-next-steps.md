@@ -1883,7 +1883,7 @@ Initial sync took ~90 s on the rank-4 bed (§14.2). The scan batch is `min(512 M
 
 - **Files:** Modify: `tests/passive_rx/offline_sync_contract/build_and_run.sh` (**not a sens6-frozen path** — check with the §4.0 git diff anyway).
 - [x] **Step 1:** At the top: `ARCH=$(uname -m)`; if `aarch64`, apply exactly the transformations of `tests/passive_rx/dgx_host_snapshot_2026-09-30/tools/offline_sync_arm.sh` (strip `-DAVX2 -DGFNI -DSIMDE_X86_* -mno-avx512f -mgfni`, `-march=native`→`-mcpu=native`, gtest from `cmake_targets/ran_build/build/lib/libgtest.a` + CPM include dir found with `find ~/.cache/cpm -path '*googletest/include' | head -1`); x86 path byte-identical to today.
-  - Evidence: `tests/passive_rx/cloud_run_2026-10-01/a13_sync_contract/README.txt` [OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, <commit>]
+  - Evidence: `tests/passive_rx/cloud_run_2026-10-01/a13_sync_contract/README.txt` [OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 03fb79aae3]
   - X86 path: byte-identical cc commands confirmed via bash -x trace comparison
   - X86 fallback path: gtest integration tested, all OfflineSync.* 5/5 PASS
 - [ ] **Step 2:** Run on the DGX → `OfflineSync.*` 5/5 PASS.
