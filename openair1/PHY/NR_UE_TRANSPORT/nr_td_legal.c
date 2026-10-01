@@ -72,11 +72,15 @@ static int nr_td_sig_cmp(const void *a, const void *b)
   return (va < vb) ? -1 : (va > vb) ? 1 : 0;
 }
 
-/* Count the distinct signatures in a catalog. Returns the number of distinct signatures,
- * or -1 on error (n <= 0, NULL hyp, NULL qm_per_hyp, or malloc failure). */
+/* Count the distinct signatures in a catalog. Returns the number of distinct signatures (0 for
+ * an empty catalog), or -1 on error (n < 0, NULL hyp/qm_per_hyp with n > 0, or malloc failure). */
 int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp)
 {
-  if (n <= 0 || !hyp || !qm_per_hyp)
+  if (n < 0)
+    return -1;
+  if (n == 0)
+    return 0;
+  if (!hyp || !qm_per_hyp)
     return -1;
 
   /* Allocate array of signatures and compute them */

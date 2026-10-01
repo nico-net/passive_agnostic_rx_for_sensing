@@ -111,8 +111,8 @@ TEST(TdSignature, AddPosDistinguishesWhenMaskZero)
 TEST(TdSignature, CountEdgeCases)
 {
   nr_pdsch_cfg_hypothesis_t h = {};
-  /* n=0 returns -1 */
-  EXPECT_EQ(nr_td_count_signatures(nullptr, 0, 1, nullptr), -1);
+  /* n=0 returns 0 (empty catalog, not an error) */
+  EXPECT_EQ(nr_td_count_signatures(nullptr, 0, 1, nullptr), 0);
   /* n=1 returns 1 */
   h.tda_start = 1;
   h.tda_length = 13;
@@ -138,13 +138,13 @@ TEST(TdSignature, CountOnFullCatalog)
   EXPECT_LT(n_legacy, st_legacy.n_hyp);
   std::cout << "catalog " << st_legacy.n_hyp << " hypotheses -> " << n_legacy << " signatures (legacy mask-0 catalog)" << std::endl;
 
-  /* Real legality (type-A only) catalog */
+  /* Synthetic legality (test_legal mask, not a real DM-RS table) catalog */
   nr_pdsch_config_sweep_init_legal(&st_real, 4, 1 /*typeA only*/, test_legal);
   std::vector<int> qm_real(st_real.n_hyp, 2);
   const int n_real = nr_td_count_signatures(st_real.hyp, st_real.n_hyp, 1, qm_real.data());
   EXPECT_GT(n_real, 0);
   EXPECT_LT(n_real, st_real.n_hyp);
-  std::cout << "catalog " << st_real.n_hyp << " hypotheses -> " << n_real << " signatures (real legality)" << std::endl;
+  std::cout << "catalog " << st_real.n_hyp << " hypotheses -> " << n_real << " signatures (synthetic legality: test_legal mask, not a real DM-RS table)" << std::endl;
 }
 /* Differential test against the REAL nr_rate_matching_ldpc_rx (linked from nr_rate_matching.c). E = 0 keeps every
  * data loop empty (they are bounded by k < E), so only the reject checks run; the function returns -1 exactly when it
