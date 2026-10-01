@@ -3,7 +3,7 @@ F2 K33 evidence, DGX rfsim 106 PRB 1 RX, HEAD 2ab8c05cdb + F2 working tree, rfsi
 PASS base_r1
 {"arm": "base_r2", "bank_len": 46, "conv_s": 16.706, "cpu_pct": 298, "crc_pct": 98.63, "drop_full_pct": 0.07, "first_crnti_s": 15.103, "ldpc_ok": 54651, "ldpc_seg_fail": 711, "max_rss_kb": 691672, "n_converged": 2, "pdsch_crc_ok": 54651, "pdsch_decoded": 55410, "scanq_drop_full": 269, "scanq_queued": 384485, "sync_s": 5.582, "ttc_s": 1.603}
 PASS base_r2
-evidence: /tmp/claude-1001/f2_regress
+
 
 base_r1 pdschq_stale_after_decode values:
       8 pdschq_stale_after_decode":0

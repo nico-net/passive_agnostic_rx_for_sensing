@@ -987,17 +987,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         LOG_A(PHY, "SENSING: LAYOUT_PROBE n=%lu cb0_ok=%lu\n", (unsigned long)atomic_load(&s_probe_n), (unsigned long)atomic_load(&s_probe_ok));
     } else
       nr_passive_replay_dl(&job, &dec);
-    if (job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
-      nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     nr_slot_fep_fo_override_hz = saved_fo;
     /* K33: the producer keeps overwriting the ring while we decode (and the GPU path decodes
      * asynchronously). Re-check lifetime NOW: a CRC computed from overwritten IQ is not evidence for or
-     * against any hypothesis, layout or scrambling id -> INCONCLUSIVE, no feedback of any kind. The
+     * against any hypothesis, layout or scrambling id -> INCONCLUSIVE, no learning-state update of any kind (TD, layout, Qm, data-id, BWP CRC, crc_note/scrambling walk). The
      * decoded TB itself is still delivered downstream (CRC-OK is a property of the bits, not credit). */
     const bool credit_ok = nr_passive_credit_allowed(
         atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
     if (!credit_ok && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
       atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
+    if (credit_ok && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
+      nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
             job.absolute_slot, slots_per_frame))
@@ -1011,7 +1011,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* Scrambling-identity walk eligibility + link health (final review I1): every decode path reports
        * here; the in-line decode in nr_pdcch_blind_monitor_rt.c makes the same call. */
-      if (!job.layout_probe)
+      if (!job.layout_probe && credit_ok)
         nr_pdsch_passive_crc_note(job.rnti, job.grant.scr_dedicated, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* TIMING ADVANCE FROM AN OVERHEARD PDU (nr_passive_mac_ta.h). The payload of a CRC-verified
        * transport block was being discarded; a RAR carries the gNB's absolute advance for the UE it
