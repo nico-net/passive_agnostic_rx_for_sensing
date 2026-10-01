@@ -36,6 +36,18 @@ of engine state ⇒ no selection bias (contrast P2). Per hypothesis the trials a
 per-hypothesis Bernoulli samples and `nr_crc_interval` remain valid. Main effect: MCS-table twins (differ only in
 `mcs_table`) share every non-exercising grant, and duplicates that legality dedup missed share all grants.
 
+**Result 2026-10-01 (BC1, `[SIMULATED, DGX host, nr_td_sim @8eb5f9ff4f]`): lever E as defined is BIASED and slower; it
+stays default off and is not recommended.** Oracle 0, 4 RX, cold mean/median: table-exercise 0.9 — 422 / 357 s without
+vs 567 / 505 s with E; 0.964 — 326 / 297 s vs 376 / 321 s (1 RX similar); wrong 0, undecidable 0 everywhere; identical
+results when the table is always exercised. Cause: when equivalence depends on the grant (MCS-table twins are
+equivalent only on grants whose MCS index does not separate the tables), a twin is credited **only** on grants where
+its outcome equals the truth's, so its estimated rate is biased up from p·(1−e) towards p and the KL separation from
+the truth takes longer. This is the same family of selection bias as P2 (§5.4 of the levers spec): crediting must not
+depend on a grant property that correlates with the outcome difference. Equivalence crediting is unbiased only for
+**grant-invariant** classes (identical computation on every grant), which the production legality catalogue already
+deduplicates, and on real OAI MCS tables twins are almost never equivalent anyway (BC1 engine review). The per-grant
+equivalence key remains useful for lever C ("unique" attribution of a pass), which does not estimate rates.
+
 ## 3. CRC-pass acceptance (lever C) — experimental, default off (operator 2026-10-01)
 
 A wrong hypothesis can pass a 24-bit TB CRC only (a) by a CRC accident (≈ 2⁻²⁴ per decode) or (b) when its

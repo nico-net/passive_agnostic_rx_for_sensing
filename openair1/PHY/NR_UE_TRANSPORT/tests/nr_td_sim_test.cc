@@ -149,7 +149,7 @@ int main(int argc, char **argv)
   logClean();
   return rc;
 }
-TEST(TdSim, EquivNeverWrongAndNotSlowerBlind)
+TEST(TdSim, EquivNeverWrongAndIdenticalWhenTableAlwaysExercised)
 {
   SimCfg c = SimCfg::defaults();
   c.acq = 20;
