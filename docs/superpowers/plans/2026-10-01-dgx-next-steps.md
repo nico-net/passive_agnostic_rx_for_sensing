@@ -134,7 +134,7 @@ Promote the scratch tools (`tests/passive_rx/dgx_host_snapshot_2026-09-30/tools/
 - Produces: `score_rx.py <armdir>... [--json]` → one JSON object per arm: `{"arm", "sync_s", "first_crnti_s", "conv_s", "ttc_s", "n_converged", "bank_len", "ldpc_ok", "ldpc_seg_fail", "pdsch_decoded", "pdsch_crc_ok", "crc_pct", "scanq_queued", "scanq_drop_full", "drop_full_pct", "cpu_pct", "max_rss_kb"}` (missing values = `null`).
 - Produces: `rfsim_regress.sh [n_runs=2]` exit 0 iff every run passes the gate in Global Constraints; prints the JSON lines.
 
-- [ ] **Step 1: Write `rfsim_arm.sh`**
+- [x] **Step 1: Write `rfsim_arm.sh`**
 
 ```bash
 #!/bin/bash
@@ -159,12 +159,13 @@ echo "rx_rc=${PIPESTATUS[0]}" >> time.txt
 kill -INT $G 2>/dev/null; wait $G
 ```
 
-- [ ] **Step 2: Write the failing test `test_score_rx.py`**
+- [x] **Step 2: Write the failing test `test_score_rx.py`**
 
 ```python
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, shutil, subprocess, sys, tempfile, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCORE = os.path.join(HERE, "score_rx.py")
+FIXTURE = os.path.join(HERE, "fixtures", "base_r1_rx.log")
 
 LOG = """\
 5.149 [PHY]    Initial sync successful, PCI: 0
@@ -194,7 +195,7 @@ class ScoreRx(unittest.TestCase):
         self.assertAlmostEqual(s["ttc_s"], 0.745, places=3)
         self.assertEqual(s["n_converged"], 2)
         self.assertEqual(s["bank_len"], 46)
-        self.assertAlmostEqual(s["crc_pct"], 99.12, places=2)
+        self.assertAlmostEqual(s["crc_pct"], 99.11, places=2)
         self.assertAlmostEqual(s["drop_full_pct"], 0.0398, places=4)
         self.assertEqual(s["cpu_pct"], 299)
 
@@ -206,16 +207,24 @@ class ScoreRx(unittest.TestCase):
         s = self.score(self.make_arm(log="\x1b[32m5.0 [PHY]    Initial sync successful, PCI: 0\x1b[0m\n"))
         self.assertEqual(s["sync_s"], 5.0)
 
+    @unittest.skipUnless(os.path.exists(FIXTURE), "fixture base_r1_rx.log not yet created (plan Task A1 Step 7)")
+    def test_real_baseline_fixture(self):
+        d = tempfile.mkdtemp(); os.makedirs(os.path.join(d, "rx"))
+        shutil.copy(FIXTURE, os.path.join(d, "rx", "rx.log"))
+        s = self.score(d)
+        self.assertIsNotNone(s["sync_s"])
+        self.assertGreaterEqual(s["n_converged"], 1)
+
 if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 3: Run it to verify it fails**
+- [x] **Step 3: Run it to verify it fails**
 
 Run: `python3 tests/passive_rx/dgx/test_score_rx.py -v`
 Expected: FAIL (`score_rx.py` does not exist → `CalledProcessError`/`FileNotFoundError`).
 
-- [ ] **Step 4: Write `score_rx.py`**
+- [x] **Step 4: Write `score_rx.py`**
 
 ```python
 #!/usr/bin/env python3
@@ -282,26 +291,30 @@ if __name__ == "__main__":
         print(json.dumps(score(a), sort_keys=True))
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 Run: `python3 tests/passive_rx/dgx/test_score_rx.py -v`
-Expected: 3 tests OK.
+Expected: 3 tests OK + 1 skipped (`test_real_baseline_fixture` skips until the Step 7 fixture exists; with the fixture present: 4 OK). Plan fix: 57897/58414 = 99.11 %, not 99.12 (arithmetic error in the original expectation).
 
-- [ ] **Step 6: Write `rfsim_regress.sh`**
+- [x] **Step 6: Write `rfsim_regress.sh`** (gate thresholds overridable via env `GATE_CRC_MIN`/`GATE_DROP_MAX`; defaults are the DGX values 98.0 / 1.0)
 
 ```bash
 #!/bin/bash
 # Regression gate: N x 150 s 106-PRB fully agnostic baseline. Exit 0 iff all pass.
+# Thresholds are overridable per host: GATE_CRC_MIN (default 98.0, DGX), GATE_DROP_MAX (default 1.0, DGX),
+# e.g. a CPU-limited cloud host may use a re-baselined threshold.
 set -u
+export GATE_CRC_MIN=${GATE_CRC_MIN:-98.0} GATE_DROP_MAX=${GATE_DROP_MAX:-1.0}
 H=$(cd "$(dirname "$0")" && pwd); N=${1:-2}; OUT=${OUT:-/tmp/rfsim_regress_$(date +%Y%m%d_%H%M%S)}
 rc=0
 for i in $(seq 1 "$N"); do
   "$H/rfsim_arm.sh" "$OUT/base_r$i" 150 >/dev/null 2>&1
   j=$(python3 "$H/score_rx.py" --json "$OUT/base_r$i"); echo "$j"
   python3 - "$j" <<'EOF' || rc=1
-import json, sys
+import json, os, sys
 s = json.loads(sys.argv[1])
-ok = s["n_converged"] >= 1 and (s["crc_pct"] or 0) >= 98.0 and s["drop_full_pct"] is not None and s["drop_full_pct"] <= 1.0
+ok = (s["n_converged"] >= 1 and (s["crc_pct"] or 0) >= float(os.environ["GATE_CRC_MIN"])
+      and s["drop_full_pct"] is not None and s["drop_full_pct"] <= float(os.environ["GATE_DROP_MAX"]))
 print(("PASS " if ok else "FAIL ") + s["arm"]); sys.exit(0 if ok else 1)
 EOF
 done
