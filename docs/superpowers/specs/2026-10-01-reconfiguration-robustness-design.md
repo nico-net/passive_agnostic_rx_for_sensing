@@ -147,6 +147,57 @@ NSA-specific caution: SCG addition/release makes C-RNTIs appear and disappear in
 reconfiguration — the SOFT `DEDICATED_CHANGE_SUSPECTED` trigger counts only RNTIs that were **converged** and then
 reopened/SUSPECT, not RNTIs that simply vanished.
 
+### 4.7 Per-UE context (`UeContext`) and per-UE reconfiguration tracking (operator addition 2026-10-01)
+
+Today per-RNTI state is scattered (Technique D contexts and private prior, DCI length per (CORESET, RNTI), DCI 1_1 pins,
+passive BWP tracker, HARQ state, per-grant observation records) and nothing keeps **one record per UE** or a **history
+of its changes**. `UeContext` is that record. It **aggregates; it never decides**: it reads the existing modules and the
+epoch authority (§4.4) and never feeds evidence back into Technique D, the length contexts or the field book.
+
+**Identity and life cycle.** Key = (`identity_gen` of §4.4, RNTI, `incarnation`). States
+`FIRST_SEEN → ACTIVE → IDLE (no grant for T_idle, default 10 s) → GONE (T_gone, default 60 s; or HARD_RESET; or RNTI
+reuse evidence: a TC-RNTI/RAR anchor for an RNTI that is GONE/IDLE starts a new incarnation)`. On NSA, SCG
+release/addition churn is life cycle (GONE / new incarnation), **never** a reconfiguration (§4.6 caution).
+
+**Tracked parameters.** Two kinds, kept apart:
+- *Configuration* (semi-static, RRC-derived; a change is a reconfiguration): RNTI class and anchor (CBRA/CFRA RAR,
+  first-seen geometry); CORESET geometry(ies) and search-space evidence; DCI formats seen and DCI length per (format,
+  geometry) with its length state (SEARCHING/LOCKED/SUSPECT/RELOCK, §4.2); PDCCH/PDSCH scrambling IDs; Technique D
+  result (S, L, k0, mapping, DM-RS add_pos / max_len / mask, MCS table) with its state (searching / converged /
+  reopened / fail-open) and the fields that were pruned or voted (levers field book); DM-RS type / CDM groups / antenna
+  ports table evidence; max layers seen; LBRM; BWP (start, size, SCS) from the passive BWP tracker; UL counterparts
+  (PUSCH layout, DCI 0_1 length, MCS table) where observed.
+  Each value is stored as `{value, epoch_learned, verification_state (TRUSTED/HINT/SUSPECT), first_abs_slot,
+  last_confirmed_abs_slot, source}`.
+- *Statistics* (per grant, change continuously; never "reconfigurations"): grants/s DL and UL, decoded bytes, CRC-OK
+  rate, MCS histogram, PRB start/size statistics, symbols, layers/rank histogram, HARQ PIDs seen and retransmission
+  rate, TBS statistics, SNR / nvar EMA, FO EMA, TA/delay estimate (UL), last activity slot.
+
+**Change log and reconfiguration inference.** Every change of a configuration parameter appends an event
+`{t_mono_ns, abs_slot, epoch, rnti, incarnation, param, old, new, cause, evidence}` with `cause ∈ {FIRST_LEARNED,
+CONVERGED, RELOCK, REOPENED_NEW_WINNER, BWP_CHANGE, CORESET_CHANGE, EPOCH_REVERIFIED, EPOCH_DISCARDED, HARD_RESET}`.
+A per-UE `UE_RECONFIG` event is emitted when a configuration parameter that was TRUSTED changes to a different
+TRUSTED value (e.g. DCI 1_1 length RELOCK to a new length, Technique D reopen converging to a different winner,
+antenna-ports/layers change, BWP change); it carries the list of parameters that changed together within W (default
+2 s) and an inferred class (`DCI_SIZE`, `PDSCH_TDRA_DMRS`, `MCS_TABLE`, `MIMO`, `BWP`, `CORESET`, `MIXED`). These
+per-UE events are the **single source** for the cell-wide `DEDICATED_CHANGE_SUSPECTED` trigger of §4.4 (≥ N_cell
+distinct converged UEs within W), replacing ad-hoc counting.
+
+**Epochs.** On a SOFT / HARD_REVERIFY bump every configuration value becomes `HINT` (not erased); re-confirmed →
+`TRUSTED` (`EPOCH_REVERIFIED`), contradicted → new value (`EPOCH_DISCARDED` + change event). HARD_RESET closes every
+UE of the old identity (GONE, reason `CELL_CHANGE`); contexts of the new identity start empty.
+
+**Persistence (JSON, for later analysis).** JSON Lines file `ISAC_UECTX_PATH` (schema `uectx/1`, append mode, written
+by a non-RT writer thread through a bounded ring, never blocking the RT path, drops counted), three record types:
+`ue_snapshot` (full context: periodic every `ISAC_UECTX_PERIOD_S`, default 5 s, on every life-cycle transition, and a
+final snapshot of every UE at shutdown/SIGINT), `ue_change` (one per change event) and `ue_reconfig` (one per
+inferred reconfiguration). Unknown values are JSON null (same convention as `nr_passive_obs`). The schema is documented
+in the module header (single source) and an offline tool produces per-UE timelines, change tables and CSV.
+
+**SA / NSA.** Same on both; on NSA the anchor is CFRA RAR or persistence only and no SIB1-derived parameters exist.
+
+**Out of scope:** decoding RRC; linking RNTIs to subscriber identities (only RNTIs are stored; no identity inference).
+
 ## 5. Validation
 
 1. **Unit tests (gtest):** length context state machine incl. two concurrent lengths and RELOCK; bank life cycle
@@ -160,6 +211,9 @@ reopened/SUSPECT, not RNTIs that simply vanished.
 4. **Live SA bed:** OAI gNB reconfiguration via the existing BWP-switch harness (telnet); UE detach/re-attach under a
    changed dedicated config (e.g. different antenna-ports table → different 1_1 size); gNB restart with a changed cell
    config (hard change). Score with the Track-A campaign runner; ground truth from gNB logs (validation only).
+4c. **UeContext:** unit tests for life cycle (incl. RNTI reuse → new incarnation, NSA churn ≠ reconfiguration),
+   change events and `UE_RECONFIG` inference, epoch HINT/re-verify, JSON schema round trip; replay fixture (§5.2) must
+   produce exactly the injected per-UE reconfigurations in `ue_reconfig` records.
 5. **Soak:** 60 min stable cell, false-trigger rate within §2.
 6. **OTA (Milan, SA and NSA cells):** any natural reconfiguration is logged by `CONFIG_EPOCH` lines (class + cause) and reviewed.
 
@@ -175,5 +229,7 @@ covers (UL length/interpretation contexts honour the epoch like DL ones).
 ## 8. Implementation phases
 - **Phase 1 (local, independently testable):** 140-bit DCI capacity → per-RNTI length SEARCHING/LOCKED/SUSPECT →
   dual-length support → CORESET life cycle + remove API → continuous low-duty discovery.
+- **Phase 2b:** `UeContext` aggregator + JSON (§4.7); it can start against a stub epoch (always 0) before the epoch
+  owner exists and switches to the real one when R7 lands.
 - **Phase 2:** the single `CellConfigEpoch` owner, then the consumers in order: queued decode jobs → DCI length
   contexts → layout pins → CORESET bank → Technique D contexts → CellFieldBook mirror.

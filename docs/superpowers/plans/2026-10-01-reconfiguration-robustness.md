@@ -187,6 +187,70 @@ FEP/LLR ~3683-5076, candidate decode fan-out ~5309), `nr_polar_gpu_mod.c` (exist
   identical decisions and lower CPU or latency.
 - [ ] **Step 5:** commit `feat(rr, optional): PDCCH GPU path (verified vs CPU, batched, fallback)`; PROJECT_MEMORY V8 → resolved.
 
+### Task R17: `UeContext` — per-UE context, change log and JSON (Opus designs the module, Sonnet implements; spec §4.7)
+
+**Files:**
+- Create: `openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.{c,h}` (aggregator, life cycle, change log, inference, JSON
+  serialisation; the header comment is the single source of the `uectx/1` schema)
+- Create: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc`
+- Create: `tests/passive_rx/uectx/uectx_report.py` (+ `test_uectx_report.py`): per-UE timelines, change tables, CSV
+- Modify (hooks only, one call each, behind `ISAC_UECTX_PATH` set): `nr_passive_obs` push path (tap every observation
+  record), `nr_pdsch_config_sweep` reporter (`nr_pdsch_config_sweep_set_reporter`: converged / reopened / invalidated),
+  DCI length state transitions (R3), CORESET bank transitions (R5), `nr_passive_bwp` changes, `nr_cfg_epoch_subscribe` (R7;
+  stub epoch 0 until R7 lands), PDCCH blind monitor RNTI first-sighting / RAR anchor.
+
+**Interfaces — Produces:**
+```c
+#define NR_UECTX_SCHEMA "uectx/1"
+#define NR_UECTX_MAX_UE 1024           /* GONE contexts evicted LRU first */
+typedef enum { NR_UE_FIRST_SEEN, NR_UE_ACTIVE, NR_UE_IDLE, NR_UE_GONE } nr_ue_state_t;
+typedef enum { NR_UEV_TRUSTED, NR_UEV_HINT, NR_UEV_SUSPECT } nr_ue_verif_t;
+typedef enum { NR_UEP_RNTI_CLASS, NR_UEP_ANCHOR, NR_UEP_CORESET, NR_UEP_DCI_LEN_DL, NR_UEP_DCI_LEN_UL, NR_UEP_DCI_LEN_STATE,
+               NR_UEP_PDCCH_SCR_ID, NR_UEP_PDSCH_SCR_ID, NR_UEP_TD_WINNER, NR_UEP_TD_STATE, NR_UEP_MCS_TABLE, NR_UEP_DMRS_CFG,
+               NR_UEP_MAX_LAYERS, NR_UEP_LBRM, NR_UEP_BWP, NR_UEP_PUSCH_LAYOUT, NR_UEP_COUNT } nr_ue_param_t;
+typedef struct { int64_t value; uint32_t epoch_learned; nr_ue_verif_t verif; int64_t first_abs_slot, last_confirmed_abs_slot;
+                 uint8_t source; } nr_ue_cfg_value_t;   /* value packed per param, documented in the header */
+typedef struct { uint64_t grants_dl, grants_ul, crc_ok_dl, crc_ok_ul, bytes_dl, bytes_ul, retx_dl;
+                 uint32_t mcs_hist[32], layers_hist[5]; float snr_ema_db, nvar_ema, fo_ema_hz, ta_ema_samples;
+                 int16_t prb_start_min, prb_start_max; int16_t prb_size_min, prb_size_max; double prb_size_mean;
+                 int64_t last_abs_slot; } nr_ue_stats_t;
+typedef struct { uint32_t identity_gen; uint16_t rnti; uint16_t incarnation; nr_ue_state_t state;
+                 nr_ue_cfg_value_t cfg[NR_UEP_COUNT]; nr_ue_stats_t st; uint32_t n_changes, n_reconfigs; } nr_ue_ctx_t;
+bool nr_ue_ctx_open(const char *path, uint32_t ring_capacity, double snapshot_period_s);  /* starts aggregator+writer */
+void nr_ue_ctx_close(void);                                        /* final snapshot of every UE, flush, join */
+void nr_ue_ctx_on_obs(const nr_passive_obs_t *o);                  /* any thread, lock-free enqueue */
+void nr_ue_ctx_on_param(uint16_t rnti, nr_ue_param_t p, int64_t value, nr_ue_verif_t v, int cause, int64_t abs_slot);
+void nr_ue_ctx_on_anchor(uint16_t rnti, int anchor_kind, int64_t abs_slot);   /* TC-RNTI/RAR: may start an incarnation */
+bool nr_ue_ctx_get(uint16_t rnti, nr_ue_ctx_t *out);              /* copy of the current incarnation (sensing API) */
+void nr_ue_ctx_stats(uint64_t *events, uint64_t *written, uint64_t *dropped);
+```
+Single-writer design: hooks enqueue small events into a bounded MPSC ring; one aggregator thread owns all contexts,
+applies life cycle / epoch / inference rules and serialises `ue_snapshot`, `ue_change`, `ue_reconfig` lines (keys in the
+header order; unknown = null). The RT path never blocks; full ring ⇒ drop + count.
+
+- [ ] **Step 1: Failing tests** (gtest, fake clock / fake epoch source):
+  `FirstGrantCreatesFirstSeenThenActive`, `IdleAfterTidleGoneAfterTgone`, `RarAnchorOnGoneRntiStartsNewIncarnation`,
+  `NsaChurnIsLifecycleNotReconfig` (RNTI vanishes and reappears without a changed TRUSTED value ⇒ 0 `ue_reconfig`),
+  `TrustedValueChangeEmitsChangeAndReconfig` (DCI length RELOCK 47 → 53 ⇒ one `ue_change` + one `ue_reconfig`
+  class `DCI_SIZE`), `ChangesWithinWindowGroupedAsMixed`, `StatisticsNeverEmitReconfig` (MCS/PRB vary per grant),
+  `EpochBumpMakesHintThenReverified`, `EpochBumpContradictedEmitsDiscardedAndChange`, `HardResetClosesOldIdentity`,
+  `DedicatedChangeSuspectedFromTwoConvergedUes` (feeds `nr_cfg_epoch_note_rnti_reopened` exactly once per UE),
+  `JsonRoundTripSchemaV1` (every key present, unknown = null, one line per record), `FullRingDropsAndCounts`,
+  `CloseWritesFinalSnapshotForEveryUe`.
+- [ ] **Step 2: Run → FAIL. Step 3: Implement** the module; then the hooks (each one guarded so that with
+  `ISAC_UECTX_PATH` unset nothing is enqueued and behaviour is bit-identical). **Step 4: Run → PASS**; full ctest; rfsim
+  regression gate (`tests/passive_rx/dgx/rfsim_regress.sh 2`) with `ISAC_UECTX_PATH` unset ⇒ unchanged, and once with it
+  set ⇒ gate still PASS, writer drops = 0, file parses with `uectx_report.py`.
+- [ ] **Step 5: Offline tool:** `uectx_report.py FILE [--rnti X] [--csv OUT]` → per-UE timeline (life cycle, parameter
+  values over time), change table, reconfiguration list, summary counts; unit test with a fixture file.
+- [ ] **Step 6: Validation hooks:** R12 replay must produce exactly the injected per-UE reconfigurations as
+  `ue_reconfig` records; R13 live bed scores per-UE recovery times from the `ue_change` timestamps.
+- [ ] **Step 7: Commit** — `feat(rx): UeContext per-UE context, change log and uectx/1 JSON (spec 4.7)`.
+
+Coordination: Technique D fields come from the levers branch (`td/convergence-levers`: field book votes/pruned
+fields, fail-open, levers C/P state); before that branch merges, R17 records only what `adaptive-rx-UL-DL` exposes and
+leaves the extra fields null.
+
 ## PHASE 3 — validation
 
 ### Task R12: Offline mid-stream reconfiguration replay (Sonnet)
@@ -211,13 +275,14 @@ label (§0.1) naming host and commit; DGX, cloud x86 and OTA results stay in sep
 
 - [ ] **Step 1 — header:** a dated update block summarising what the branch delivered, the merge commit, and what is still open.
 - [ ] **Step 2 — architecture and modules:** §2.1 pipeline diagram (epoch authority, CORESET life cycle, length re-lock,
-  140-bit DCI path); §2.2 block reference updated for B6/B7 (blind PDCCH, DCI recovery); §3.3 new modules
+  140-bit DCI path, UeContext aggregator); §2.2 block reference updated for B6/B7 (blind PDCCH, DCI recovery); §3.3 new modules
   (`nr_dci_bits.h`, `nr_passive_cfg_epoch.{c,h}`, bank life cycle API, length state machine, optional PDCCH GPU path) with
   their tests; §3.4 new tools/scripts (replay driver, campaign arms).
 - [ ] **Step 3 — operation:** §10.2 every new env var / config key with default and agnostic status (`ISAC_RECONF`,
   `ISAC_RECONF_N_SUSPECT`, `ISAC_RECONF_DISCOVERY_DUTY`, thresholds, `ISAC_PDCCH_GPU_SELFCHECK` if R15 ran); §10.4 the beds used
   (SA bed, NSA-like arm flags, 5G core / OCUDU fallback actually used).
-- [ ] **Step 4 — logging:** §11 every new log line with meaning and normal/abnormal values (`CONFIG_EPOCH … class= cause=`,
+- [ ] **Step 4 — logging:** §11 every new log line with meaning and normal/abnormal values, plus §21 the `uectx/1` JSON
+  schema pointer and `ISAC_UECTX_PATH`/`ISAC_UECTX_PERIOD_S` (`CONFIG_EPOCH … class= cause=`,
   `DCI length RELOCK`, CORESET VERIFIED/STALE/REMOVED transitions, `dropped_epoch`, SIB1 semantic-hash change, SI-modification
   pre-announcement and boundary decision) and the new `ISAC_METRICS` fields.
 - [ ] **Step 5 — validation:** §12 gates touched (G5A/G5B/G6/G7/G11) with the new PASS conditions; §13 offline results
@@ -234,4 +299,4 @@ label (§0.1) naming host and commit; DGX, cloud x86 and OTA results stay in sep
 
 ## Self-review record (2026-10-01)
 
-Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Documentation: R16 (mandatory final PROJECT_MEMORY.md update). Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch); PDCCH GPU path as OPTIONAL R15 (profile-gated, verify-before-wire).
+Spec coverage: §4.1 → R1, R2; §4.2 → R3, R4; §4.3 → R5, R6; §4.4 → R7, R8, R9, R10, R11; §4.5 → R10; §4.7 UeContext → R17; §4.6 SA/NSA → Global Constraints + R3/R5/R8 evidence lists + R12/R13 NSA arms; §5 → R12–R14; §7 open items → R8 (SIB1 re-decode mechanics, modification period) and R12/R13 (thresholds); §8 phases → plan order. Documentation: R16 (mandatory final PROJECT_MEMORY.md update). Gaps: none known; R2's joint-solver decision and R8's SIB1 re-decode finding are explicit decision steps. Acceleration (levers §9) reused: GPU polar (R2 3b, R3), idsweep GPU + N scan consumers (R6), VERIFY/GrantWork/probes/GPU LDPC (R10, dependency on the levers branch); PDCCH GPU path as OPTIONAL R15 (profile-gated, verify-before-wire).
