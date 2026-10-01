@@ -10,13 +10,20 @@ extern "C" {
 typedef enum { NR_TD_F_TDRA = 0, NR_TD_F_DMRS_ADD_POS, NR_TD_F_DMRS_MAX_LEN, NR_TD_F_COUNT } nr_td_field_t;
 /* MCS table is deliberately NOT a field (UE-capability specific; never promoted). TDRA value packs S,L,mapping,k0. */
 #define NR_TD_FB_MAX_RNTI 16
+#define NR_TD_FB_MAX_CAND 4
+/* One candidate value of a field with its own distinct-RNTI support set (order-independent promotion). */
+typedef struct {
+  int32_t value; /* -1 = free row */
+  uint16_t support[NR_TD_FB_MAX_RNTI];
+  int n_support;
+  uint32_t born; /* creation tick, for oldest-first tie-break on eviction */
+} nr_td_field_cand_t;
 typedef struct {
   int32_t value; /* promoted value, -1 = unknown */
-  int32_t candidate; /* value with support but not yet promoted, -1 none */
-  uint16_t support[NR_TD_FB_MAX_RNTI];
-  int n_support; /* distinct RNTIs supporting `candidate`/`value` */
+  nr_td_field_cand_t cand[NR_TD_FB_MAX_CAND]; /* per-value support, incl. the promoted value's own row */
+  uint32_t tick;
   uint16_t contra[NR_TD_FB_MAX_RNTI];
-  int n_contra; /* distinct RNTIs contradicting `value` */
+  int n_contra; /* distinct RNTIs contradicting `value` in the current epoch (cleared on epoch bump) */
   uint32_t epoch; /* config_epoch when last confirmed */
   uint64_t last_confirmed_slot;
 } nr_td_field_entry_t;

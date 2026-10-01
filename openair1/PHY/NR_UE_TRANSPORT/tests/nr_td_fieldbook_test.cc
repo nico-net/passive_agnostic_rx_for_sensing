@@ -57,7 +57,8 @@ TEST(TdFieldBook, ConvergedWithOtherValueContradicts) {
   nr_td_fieldbook_converged(&fb, 2, &h, 2);
   nr_td_fieldbook_converged(&fb, 3, &o, 3);
   nr_td_fieldbook_converged(&fb, 4, &o, 4);
-  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, -1); /* withdrawn by 2 distinct contradicting RNTIs */
+  /* x withdrawn by 2 distinct contradicting RNTIs; their own value o (2 supporters) is promoted in the same call */
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(2, 12, 0, 0));
 }
 TEST(TdFieldBook, EpochBumpDropsBonus) {
   nr_td_fieldbook_t fb;
@@ -93,39 +94,113 @@ TEST(TdFieldBook, EvictedRntiStillCountsForPromotion) {
   nr_td_fieldbook_converged(&fb, 2, &h, 500); /* no intervening traffic: promotes on the second RNTI */
   EXPECT_NE(fb.f[NR_TD_F_TDRA].value, -1);
 }
-TEST(TdFieldBook, OtherTdraValuesBetweenResetCandidate) {
-  /* Plan step-3 algorithm: while a field is unpromoted a converged RNTI with a different value REPLACES `candidate`
-   * and restarts `support` at that single RNTI. So 20 other RNTIs, each with a distinct TDRA (never two with the
-   * same value, so none promotes), wipe RNTI 1's support for h; the next RNTI with h only restarts the count, and
-   * h is promoted only once a further distinct RNTI converges on h again. */
+TEST(TdFieldBook, PromotionIsOrderIndependentAfterChurn) {
+  /* Spec 4.6: two distinct RNTIs converged with the SAME value promote it, whatever converged in between.
+   * Each value keeps its own support set in a small per-field table (evict fewest supporters, ties oldest). */
   nr_td_fieldbook_t fb;
   nr_td_fieldbook_init(&fb, 2, 2);
   const auto h = H(1, 13, 1);
   nr_td_fieldbook_converged(&fb, 1, &h, 1);
   for (int r = 100; r < 120; r++) {
-    const auto o = H((r - 100) % 10, 4 + (r - 100) % 5, 0); /* varying S: distinct from each neighbour */
+    const auto o = H((r - 100) % 10, 4 + (r - 100) % 5, 0); /* 20 other RNTIs, other values */
     nr_td_fieldbook_converged(&fb, (uint16_t)r, &o, r);
   }
-  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, -1);
-  nr_td_fieldbook_converged(&fb, 2, &h, 500); /* support restarts at {2}, RNTI 1 was forgotten */
-  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, -1);
+  /* RNTI 1's support for h may have been evicted from the 4-row table by the churn (it had 1 supporter, like the
+   * newcomers; oldest goes first); so re-confirming by 2 fresh RNTIs must still promote. */
+  nr_td_fieldbook_converged(&fb, 2, &h, 500);
   nr_td_fieldbook_converged(&fb, 3, &h, 501);
   EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(1, 13, 0, 0));
 }
-TEST(TdFieldBook, FullContradictSetIgnoresExtraRntis) {
+TEST(TdFieldBook, SingleLaterRntiPromotesWhenChurnFitsTable) {
+  /* A=x, then 3 other single-supporter values (table of 4 not overflowed), then B=x promotes x. With more
+   * distinct other values than rows, x (1 supporter, oldest) is the eviction victim, see the test above. */
   nr_td_fieldbook_t fb;
-  nr_td_fieldbook_init(&fb, 2, 20); /* threshold above NR_TD_FB_MAX_RNTI: set fills, 17th is ignored */
+  nr_td_fieldbook_init(&fb, 2, 2);
+  const auto h = H(1, 13, 1);
+  nr_td_fieldbook_converged(&fb, 1, &h, 1);
+  for (int r = 100; r < 103; r++) {
+    const auto o = H((r - 100) % 10, 4 + (r - 100) % 5, 0);
+    nr_td_fieldbook_converged(&fb, (uint16_t)r, &o, r);
+  }
+  nr_td_fieldbook_converged(&fb, 2, &h, 500);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(1, 13, 0, 0));
+}
+TEST(TdFieldBook, InterleavedOtherValueDoesNotBlockPromotion) {
+  nr_td_fieldbook_t fb;
+  nr_td_fieldbook_init(&fb, 2, 2);
+  const auto x = H(1, 13, 1), y = H(2, 12, 1);
+  nr_td_fieldbook_converged(&fb, 1, &x, 1);
+  nr_td_fieldbook_converged(&fb, 3, &y, 2);
+  nr_td_fieldbook_converged(&fb, 2, &x, 3); /* A=x, C=y, B=x */
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(1, 13, 0, 0));
+}
+TEST(TdFieldBook, EvictionKeepsBestSupportedCandidate) {
+  nr_td_fieldbook_t fb;
+  nr_td_fieldbook_init(&fb, 3, 2);
+  const auto x = H(1, 13, 1);
+  nr_td_fieldbook_converged(&fb, 1, &x, 1);
+  nr_td_fieldbook_converged(&fb, 2, &x, 2); /* x has 2 supporters, needs 3 */
+  for (int r = 100; r < 120; r++) {
+    const auto o = H((r - 100) % 10, 4 + (r - 100) % 5, 0);
+    nr_td_fieldbook_converged(&fb, (uint16_t)r, &o, r);
+  }
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, -1);
+  nr_td_fieldbook_converged(&fb, 3, &x, 500); /* x survived eviction with its 2 supporters */
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(1, 13, 0, 0));
+}
+TEST(TdFieldBook, WithdrawalPromotesContradictersValueInSameCall) {
+  nr_td_fieldbook_t fb;
+  nr_td_fieldbook_init(&fb, 2, 2);
+  const auto x = H(1, 13, 1), y = H(2, 12, 1);
+  nr_td_fieldbook_converged(&fb, 1, &x, 1);
+  nr_td_fieldbook_converged(&fb, 2, &x, 2);
+  nr_td_fieldbook_converged(&fb, 3, &y, 3);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(1, 13, 0, 0));
+  nr_td_fieldbook_converged(&fb, 4, &y, 4); /* withdraws x AND promotes y in this same call */
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(2, 12, 0, 0));
+  EXPECT_EQ(fb.f[NR_TD_F_DMRS_ADD_POS].value, 1); /* unaffected field untouched */
+}
+TEST(TdFieldBook, ContradictionsClearedOnEpochBump) {
+  nr_td_fieldbook_t fb;
+  nr_td_fieldbook_init(&fb, 2, 2);
+  const auto x = H(1, 13, 1);
+  nr_td_fieldbook_converged(&fb, 1, &x, 1);
+  nr_td_fieldbook_converged(&fb, 2, &x, 2);
+  nr_td_fieldbook_contradict(&fb, 3, NR_TD_F_TDRA);
+  nr_td_fieldbook_bump_epoch(&fb);
+  nr_td_fieldbook_contradict(&fb, 4, NR_TD_F_TDRA);
+  EXPECT_NE(fb.f[NR_TD_F_TDRA].value, -1); /* only 1 contradiction in the new epoch */
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].n_contra, 1);
+}
+TEST(TdFieldBook, PackUnpackRoundTripAndMasking) {
+  nr_td_fieldbook_t fb;
+  nr_td_fieldbook_init(&fb, 1, 1);
+  nr_pdsch_cfg_hypothesis_t h = H(2, 12, 2);
+  h.mapping_type = 1;
+  h.k0 = 5;
+  nr_td_fieldbook_converged(&fb, 1, &h, 1);
+  nr_td_side_info_t s = si0();
+  nr_td_fieldbook_fill_side_info(&fb, &s);
+  EXPECT_EQ(s.f_S, 2);
+  EXPECT_EQ(s.f_L, 12);
+  EXPECT_EQ(s.f_mapping, 1);
+  EXPECT_EQ(s.f_k0, 5);
+  EXPECT_EQ(nr_td_pack_tdra(0x1F2, 0x3C, 3, 0x45), nr_td_pack_tdra(2, 28, 1, 5)); /* inputs masked to field widths */
+}
+TEST(TdFieldBook, ThresholdsClampedToValidRange) {
+  nr_td_fieldbook_t fb;
+  nr_td_fieldbook_init(&fb, 0, 99);
+  EXPECT_EQ(fb.promote_rntis, 1);
+  EXPECT_EQ(fb.withdraw_rntis, NR_TD_FB_MAX_RNTI);
+}
+TEST(TdFieldBook, FullContradictSetAtCapacityWithdrawsAndExtraIsHarmless) {
+  /* Thresholds are clamped to NR_TD_FB_MAX_RNTI, so the largest threshold is reachable exactly at capacity. */
+  nr_td_fieldbook_t fb;
+  nr_td_fieldbook_init(&fb, 2, 16);
   const auto h = H(1, 13, 1);
   nr_td_fieldbook_converged(&fb, 1, &h, 1);
   nr_td_fieldbook_converged(&fb, 2, &h, 2);
-  for (int r = 100; r < 117; r++)
-    nr_td_fieldbook_contradict(&fb, (uint16_t)r, NR_TD_F_TDRA);
-  EXPECT_EQ(fb.f[NR_TD_F_TDRA].n_contra, NR_TD_FB_MAX_RNTI);
-  EXPECT_NE(fb.f[NR_TD_F_TDRA].value, -1);
-  /* threshold within capacity still behaves: 15 keep, the 16th withdraws, a 17th afterwards is harmless */
-  nr_td_fieldbook_init(&fb, 2, 16);
-  nr_td_fieldbook_converged(&fb, 1, &h, 1);
-  nr_td_fieldbook_converged(&fb, 2, &h, 2);
+  /* 15 keep, the 16th withdraws, a 17th afterwards is harmless */
   for (int r = 100; r < 115; r++)
     nr_td_fieldbook_contradict(&fb, (uint16_t)r, NR_TD_F_TDRA);
   EXPECT_NE(fb.f[NR_TD_F_TDRA].value, -1);
