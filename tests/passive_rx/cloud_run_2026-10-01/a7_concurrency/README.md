@@ -31,6 +31,7 @@ pbwp extract opts, lane length state, ...). Round 2 fixed what only the tracking
 REMAINING in round 2 (not consumer<->consumer, so not introduced by N>1): 13 UEthread_0 <-> passivePdcchN races in
 nr_pdcch_blind_monitor.c (autodiscover_step on the receive thread vs note_rnti_for_windows / extent advance on a
 consumer) -- present with ONE consumer too; 4 passivePdsch pool races (nr_pdsch_passive_queue_thread); rfsim/exit.
+FOLLOW-UP: both groups fixed, see ../a7_followup_races/README.md (final partial-TSAN run: 0 reports in that code).
 
 ## 3. rfsim A/B, 106 PRB, 150 s, alternating S/M/S/M/S/M (ab/), plus two depth controls
 S = scan_thread "1:8:-1", M = "2:16:-1". acc/occ = pdcch_accepts/pdcch_occasions over the DL_CONVERGED ISAC_METRICS

@@ -1,0 +1,16 @@
+[==========] 200 tests from 27 test suites ran. (36878 ms total)
+[  PASSED  ] 198 tests.
+seed 1:
+[  PASSED  ] 198 tests.
+[  SKIPPED ] 2 tests, listed below:
+seed 3:
+[  PASSED  ] 198 tests.
+[  SKIPPED ] 2 tests, listed below:
+seed 5:
+[  PASSED  ] 198 tests.
+[  SKIPPED ] 2 tests, listed below:
+[       OK ] DiscoveryGates.Gate1EmptyBankNeverBlocksTheOnOccasionFallback (0 ms)
+[       OK ] DiscoveryGates.BackgroundDiscoveryPassYieldsToABacklogButCannotStarve (0 ms)
+[       OK ] DiscoveryGates.Gate2SparseBackgroundDominantWindowConverges (7 ms)
+[       OK ] DiscoveryGates.Gate2ReconvergesAfterPriorDiscoveryInTheSameProcess (15 ms)
+[       OK ] DiscoveryGates.DeferredCommitIsAppliedByTheConsumerNotTheReceiveThread (15 ms)

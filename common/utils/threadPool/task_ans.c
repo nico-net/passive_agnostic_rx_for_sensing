@@ -43,8 +43,14 @@ void init_task_ans(task_ans_t* ans, uint num_jobs)
 void completed_many_task_ans(task_ans_t* ans, uint num_completed_jobs)
 {
   DevAssert(ans != NULL);
-  // Using atomic counter in contention scenario to avoid locking in producers
-  int num_jobs = atomic_fetch_sub_explicit(&ans->counter, num_completed_jobs, memory_order_relaxed);
+  // Using atomic counter in contention scenario to avoid locking in producers.
+  // acq_rel, not relaxed: only the LAST completer posts the semaphore, so the joiner synchronises with
+  // that worker alone. Each worker's release on this RMW, and the last worker's acquire of the whole
+  // release sequence, are what order every OTHER worker's output writes (e.g. the decoded segments
+  // nr_process_decode_segment() copies into the caller's buffer) before join_task_ans() returns.
+  // With relaxed they were unordered (TSAN: passive PDSCH reassembly memcpy vs a Tpool worker's write;
+  // a real hazard on weakly ordered CPUs such as the DGX's aarch64).
+  int num_jobs = atomic_fetch_sub_explicit(&ans->counter, num_completed_jobs, memory_order_acq_rel);
   if (num_jobs == num_completed_jobs) {
     // Using semaphore to enable blocking call in join_task_ans
     sempost(ans->sem);

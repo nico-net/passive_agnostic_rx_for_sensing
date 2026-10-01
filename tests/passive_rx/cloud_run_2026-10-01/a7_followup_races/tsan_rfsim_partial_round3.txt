@@ -1,0 +1,91 @@
+TSAN partial (blind-PDCCH + passive-PDSCH sources + task_ans.c instrumented), rfsim 106 PRB, scan_thread 2:16:-1, 300 s, round3: FINAL code (+ pdtim/ptrs/log budgets/g_sfo_ppm_ema)
+source: tsanp_rx_followup3/tsan.13611
+reports: 5
+
+by location:
+    1  signal-unsafe call inside of a signal common/utils/utils.h:87 in calloc_or_fail
+    1  signal-unsafe call inside of a signal ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 in operator new(unsigned long)
+    1  signal handler spoils errno executables/nr-uesoftmodem.c:203 in trigger_deregistration
+    1  data race radio/rfsimulator/simulator.cpp:310 in clear_old_packets
+    1  data race ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 in operator delete(void*, unsigned long)
+
+full reports (paths repo-relative, BuildIds stripped):
+
+
+WARNING: ThreadSanitizer: signal-unsafe call inside of a signal (pid=13611)
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:685 (libtsan.so.2+0x54d0d)
+    #1 calloc_or_fail common/utils/utils.h:87 (nr-uesoftmodem+0x5b97c4)
+    #2 itti_malloc common/utils/ocp_itti/intertask_interface.cpp:48 (nr-uesoftmodem+0x5b97c4)
+    #3 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456 (nr-uesoftmodem+0x5bb8c9)
+
+SUMMARY: ThreadSanitizer: signal-unsafe call inside of a signal common/utils/utils.h:87 in calloc_or_fail
+
+==================
+
+WARNING: ThreadSanitizer: signal-unsafe call inside of a signal (pid=13611)
+    #0 operator new(unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 (libtsan.so.2+0xa6fae)
+    #1 std::__new_allocator<MessageDef_s*>::allocate(unsigned long, void const*) /usr/include/c++/13/bits/new_allocator.h:151 (nr-uesoftmodem+0x5bd7c5)
+    #2 std::allocator_traits<std::allocator<MessageDef_s*> >::allocate(std::allocator<MessageDef_s*>&, unsigned long) /usr/include/c++/13/bits/alloc_traits.h:482 (nr-uesoftmodem+0x5bd7c5)
+    #3 std::_Vector_base<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_allocate(unsigned long) /usr/include/c++/13/bits/stl_vector.h:381 (nr-uesoftmodem+0x5bd7c5)
+    #4 std::_Vector_base<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_allocate(unsigned long) /usr/include/c++/13/bits/stl_vector.h:378 (nr-uesoftmodem+0x5bd7c5)
+    #5 void std::vector<MessageDef_s*, std::allocator<MessageDef_s*> >::_M_realloc_insert<MessageDef_s* const&>(__gnu_cxx::__normal_iterator<MessageDef_s**, std::vector<MessageDef_s*, std::allocator<MessageDef_s*> > >, MessageDef_s* const&) /usr/include/c++/13/bits/vector.tcc:459 (nr-uesoftmodem+0x5bd7c5)
+    #6 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456 (nr-uesoftmodem+0x5bb8c9)
+
+SUMMARY: ThreadSanitizer: signal-unsafe call inside of a signal ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 in operator new(unsigned long)
+
+==================
+
+WARNING: ThreadSanitizer: signal handler spoils errno (pid=13611)
+  Signal 2 handler invoked at:
+    #0 trigger_deregistration executables/nr-uesoftmodem.c:203 (nr-uesoftmodem+0x2ecb60)
+    #1 itti_wait_tasks_end common/utils/ocp_itti/intertask_interface.cpp:456 (nr-uesoftmodem+0x5bb8c9)
+
+SUMMARY: ThreadSanitizer: signal handler spoils errno executables/nr-uesoftmodem.c:203 in trigger_deregistration
+
+==================
+
+WARNING: ThreadSanitizer: data race (pid=13611)
+  Write of size 8 at 0x72d000220000 by main thread:
+    #0 free ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:724 (libtsan.so.2+0x57c71)
+    #1 clear_old_packets radio/rfsimulator/simulator.cpp:310 (librfsimulator.so+0x8a00)
+
+  Previous write of size 8 at 0x72d000220000 by thread T23:
+    #0 malloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:665 (libtsan.so.2+0x54b3f)
+    #1 malloc_or_fail common/utils/utils.h:99 (librfsimulator.so+0xc6d8)
+    #2 process_recv_header radio/rfsimulator/simulator.cpp:1156 (librfsimulator.so+0xc6d8)
+    #3 flushInput radio/rfsimulator/simulator.cpp:1293 (librfsimulator.so+0xc6d8)
+
+  Thread T23 'UEthread_0' (tid=13637, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022 (libtsan.so.2+0x5ac1a)
+    #1 threadCreate common/utils/system.c:266 (nr-uesoftmodem+0x6e266a)
+
+SUMMARY: ThreadSanitizer: data race radio/rfsimulator/simulator.cpp:310 in clear_old_packets
+
+==================
+
+WARNING: ThreadSanitizer: data race (pid=13611)
+  Write of size 8 at 0x725000010400 by main thread:
+    #0 operator delete(void*, unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 (libtsan.so.2+0xa66c8)
+    #1 std::__new_allocator<rfsim_packet_t*>::deallocate(rfsim_packet_t**, unsigned long) /usr/include/c++/13/bits/new_allocator.h:172 (librfsimulator.so+0x14a80)
+    #2 std::allocator_traits<std::allocator<rfsim_packet_t*> >::deallocate(std::allocator<rfsim_packet_t*>&, rfsim_packet_t**, unsigned long) /usr/include/c++/13/bits/alloc_traits.h:517 (librfsimulator.so+0x14a80)
+    #3 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_deallocate_node(rfsim_packet_t**) /usr/include/c++/13/bits/stl_deque.h:590 (librfsimulator.so+0x14a80)
+    #4 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_destroy_nodes(rfsim_packet_t***, rfsim_packet_t***) /usr/include/c++/13/bits/stl_deque.h:700 (librfsimulator.so+0x14a80)
+    #5 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::~_Deque_base() /usr/include/c++/13/bits/stl_deque.h:622 (librfsimulator.so+0x14a80)
+    #6 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::~_Deque_base() /usr/include/c++/13/bits/stl_deque.h:617 (librfsimulator.so+0x14a80)
+
+  Previous write of size 8 at 0x725000010400 by thread T23:
+    #0 operator new(unsigned long) ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:64 (libtsan.so.2+0xa6fae)
+    #1 std::__new_allocator<rfsim_packet_t*>::allocate(unsigned long, void const*) /usr/include/c++/13/bits/new_allocator.h:151 (librfsimulator.so+0xcffb)
+    #2 std::allocator_traits<std::allocator<rfsim_packet_t*> >::allocate(std::allocator<rfsim_packet_t*>&, unsigned long) /usr/include/c++/13/bits/alloc_traits.h:482 (librfsimulator.so+0xcffb)
+    #3 std::_Deque_base<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_allocate_node() /usr/include/c++/13/bits/stl_deque.h:583 (librfsimulator.so+0xcffb)
+    #4 void std::deque<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::_M_push_back_aux<rfsim_packet_t*&>(rfsim_packet_t*&) /usr/include/c++/13/bits/deque.tcc:497 (librfsimulator.so+0xcffb)
+    #5 rfsim_packet_t*& std::deque<rfsim_packet_t*, std::allocator<rfsim_packet_t*> >::emplace_back<rfsim_packet_t*&>(rfsim_packet_t*&) /usr/include/c++/13/bits/deque.tcc:176 (librfsimulator.so+0xcffb)
+    #6 decltype(auto) std::queue<rfsim_packet_t*, std::deque<rfsim_packet_t*, std::allocator<rfsim_packet_t*> > >::emplace<rfsim_packet_t*&>(rfsim_packet_t*&) /usr/include/c++/13/bits/stl_queue.h:297 (librfsimulator.so+0xcffb)
+    #7 flushInput radio/rfsimulator/simulator.cpp:1303 (librfsimulator.so+0xcffb)
+
+  Thread T23 'UEthread_0' (tid=13637, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1022 (libtsan.so.2+0x5ac1a)
+    #1 threadCreate common/utils/system.c:266 (nr-uesoftmodem+0x6e266a)
+
+SUMMARY: ThreadSanitizer: data race ../../../../src/libsanitizer/tsan/tsan_new_delete.cpp:150 in operator delete(void*, unsigned long)
+

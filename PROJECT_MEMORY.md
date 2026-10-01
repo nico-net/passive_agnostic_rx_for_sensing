@@ -366,6 +366,7 @@ through sensing metrics.
 | `openair1/PHY/CODING/nrLDPC_coding/...segment_decoder.c`, `nr_rate_matching.c` | LDPC | Diagnostics (`LDPCDIAG`), LBRM n_L handling | Rank-4 MCS-25 wall | Every TB | OTA (older) |
 | `openair2/LAYER2/NR_MAC_UE/config_ue.c` (+427), `nr_ue_procedures.c`, `nr_ue_scheduler.c`, `nr_ue_dci_configuration.c` | UE MAC | Passive SIB1 extraction into blind monitor; MIB DM-RS pos hand-off; maxMIMO-Layers fallback instead of AssertFatal; no RA in passive | Agnostic config | Broadcast | OTA |
 | `openair2/RRC/NR_UE/rrc_UE.c` | UE RRC | `SIB1 CELL` log (PLMN/cell id/TAC) | Cell identification | SIB1 | OTA |
+| `common/utils/threadPool/task_ans.c` | Thread-pool join counter | `completed_many_task_ans()` decrements with `memory_order_acq_rel` instead of relaxed (2026-10-01, A7 follow-up) | Only the last completer posts the semaphore; with relaxed the other workers' outputs (LDPC segments) were unordered w.r.t. the joiner — TSAN on the passive PDSCH pool, real hazard on aarch64 | Every pooled task | TSAN rfsim (`tests/passive_rx/cloud_run_2026-10-01/a7_followup_races/`) |
 | `radio/rfsimulator/apply_channelmod.c`, `simulator.cpp` | rfsim | Sparse-tap convolution; nb_tx from own TX count (layers>1 now reach receiver) | Simulation beds | Sim | SIM |
 | `openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c` | gNB config | Test hooks for beds | Sim | Sim | SIM |
 | `CMakeLists.txt` (+554), `openair1/PHY/CODING/CMakeLists.txt` | Build | New libraries/tests (below), `ENABLE_ISAC_SENSING`, `ENABLE_LDPC_CUDA`, GPU modules | | | |

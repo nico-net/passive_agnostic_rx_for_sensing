@@ -530,14 +530,29 @@ bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset);
  * already-FEP'd frequency-domain samples for exactly this (slot, symbol), indexed [0,
  * ofdm_symbol_size) -- `const void*` rather than `const c16_t*` so this header stays free of the
  * PHY-heavy c16_t definition (nr_pdcch_coreset_map.h pulls in PHY/impl_defs_top.h; the .c file casts
- * internally). Returns true once a candidate footprint is selected and g_cfg is populated.
- * `abs_slot` feeds nr_pdcch_blind_monitor_confirmed_rnti() for the bootstrap-RNTI log line. */
+ * internally). Returns true once a candidate footprint is selected: g_cfg is populated at once, or,
+ * after nr_pdcch_blind_monitor_autodiscover_defer_commit(true), when a scan consumer applies it.
+ * `abs_slot` feeds nr_pdcch_blind_monitor_confirmed_rnti() for the bootstrap-RNTI log line.
+ * Thread safety (Task A7 follow-up): the per-dwell histogram these two functions fill is shared with
+ * the scan consumers (note_rnti_for_windows(), autodiscover_next()/reset()) under a leaf lock that is
+ * held only around the array touches, so the receive thread never waits on a consumer's occasion. */
 void nr_pdcch_blind_monitor_autodiscover_observe_symbol1(const void* rxdataF_symbol, int ofdm_symbol_size,
                                                           int n_rb_carrier, int first_carrier_offset, uint16_t pci,
                                                           int slot);
 bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int ofdm_symbol_size, int n_rb_carrier,
                                               int first_carrier_offset, uint16_t pci, int slot, int symbol,
                                               uint32_t abs_slot);
+
+/* Deferred footprint commit (Task A7 follow-up). The commit of an autodiscover_step() decision rewrites
+ * g_cfg's geometry and the extent/map/lane cursors that a scan consumer advances inside its discovery
+ * occasion under the Phase-2 lock, which the PHY receive thread must never take. defer_commit(true) --
+ * set by the RT tap once the scan pool runs -- makes autodiscover_step() only POST its decision;
+ * apply_pending() then commits it on a consumer, called with the Phase-2 lock held. commit_pending() is
+ * the lock-free "decided, not yet applied" flag (autodiscover_step() is a no-op meanwhile). With
+ * defer_commit(false) (the default: in-line scan, unit tests) the decision is applied at once. */
+void nr_pdcch_blind_monitor_autodiscover_defer_commit(bool on);
+bool nr_pdcch_blind_monitor_autodiscover_commit_pending(void);
+bool nr_pdcch_blind_monitor_autodiscover_apply_pending(void);
 
 /* Technique C's result: called by the RT tap once nr_pdcch_dci_length_sweep() (driven from
  * nr_pdcch_blind_monitor_rt.c, which has the real candidate LLR stream this pure/offline-testable
