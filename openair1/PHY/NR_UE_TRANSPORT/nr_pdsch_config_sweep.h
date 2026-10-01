@@ -99,6 +99,13 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 #define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
+/* Dormant causes: one mask per cause so independent reasons (a cell prior, each field-book field) can be cleared
+ * independently. FIELD_BASE + nr_td_field_t (nr_td_fieldbook.h); NR_TD_DORMANT_CAUSES = 1 + NR_TD_F_COUNT. */
+#define NR_TD_DORMANT_PRIOR 0
+#define NR_TD_DORMANT_FIELD_BASE 1
+#define NR_TD_DORMANT_CAUSES 4
+#define NR_TD_DWORDS ((NR_PDSCH_SWEEP_MAX_HYP + 63) / 64)
+
 typedef struct {
   nr_pdsch_cfg_hypothesis_t hyp[NR_PDSCH_SWEEP_MAX_HYP];
   uint32_t trials[NR_PDSCH_SWEEP_MAX_HYP];
@@ -120,6 +127,23 @@ typedef struct {
    * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
   const struct nr_td_side_info_s *side; ///< ordering side information (nr_td_order.h); NULL = neutral (today's order)
   bool     p2;        ///< failure-only probe evidence enabled
+  /* DORMANT (reversible) hypothesis masks, blind-convergence spec 2026-10-01 section 4. CONFIGURATION+MEMBERSHIP, not
+   * evidence: preserved by nr_pdsch_config_sweep_rebuild(), compacted with the same keep-index mapping by every destructive
+   * prune (prune_commit, prune_keep). One bit per hypothesis index per cause; bits at indices >= n_hyp are always 0.
+   * active(i) = fail_open || no cause marks i. A dormant hypothesis is never selected (next/next_k, incl. the exploit "hot"
+   * pick and K-probes) and accumulates no evidence (feed/feed_k/feed_equiv ignore it, including probe counters). The
+   * acceptance (leader search, separation test, union-bound class count, SWEEP_MIN_TRIALS fallback, ratio test) ranges over
+   * the ACTIVE set only. Invariant: at least one hypothesis is active under the masks alone (set_dormant refuses to empty
+   * the catalogue; a destructive prune that would leave none clears all masks). A decided winner is returned by next()
+   * unconditionally. A new runtime context starts with all masks clear and fail_open false. */
+  uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
+  bool     fail_open; ///< all hypotheses active regardless of dormant masks (per context)
+  /* EVIDENCE-like (cleared with trials/ok by every prune, rebuild, context reopen): credited TRIALS, never wall-clock time,
+   * since the last PASS of an active hypothesis. +1 per feed / feed_k / feed_equiv CALL that credited at least one active
+   * hypothesis (feed_k: one call = main outcome + its probes, counted once; probe outcomes count only when they add KL
+   * evidence, i.e. a P2-admissible FAIL); reset to 0 by a PASS credited to an active hypothesis (a feed_k probe PASS is not
+   * evidence and never resets it). Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
+  uint32_t since_pass;
 } nr_pdsch_config_sweep_state_t;
 
 /* ---- K-hypothesis selection and probe outcomes (spec 2026-10-01 §5.1-5.3) ------------------------- */
@@ -140,6 +164,8 @@ int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
 
 /** Next hypothesis to try, round-robin. Returns its index and fills *out. */
 int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out);
+/* Dormant hypotheses are skipped; the per-round shuffle still covers all n_hyp (RNG use unchanged), a round whose remainder is
+ * all dormant advances to the next round, and the exploit "hot" hypothesis must be active. */
 
 /** Report the TB-CRC outcome of the grant decoded under hypothesis `idx`.
  * Returns the winning index once one is established, else -1. */
@@ -168,13 +194,35 @@ int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int i
  *  never adds KL evidence. Returns the winner index or -1 (same contract as _feed). */
 int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_outcome_t *outcomes, int n);
 
+/* ---- Dormant masks and fail-open (blind-convergence spec section 4) ------------------------------------------ */
+typedef bool (*nr_td_keep_fn_t)(const nr_pdsch_cfg_hypothesis_t *h, const void *arg);
+/** Marks every hypothesis with !keep(h) dormant for `cause` (additive: bits already set stay set). Returns the number
+ *  of hypotheses newly dormant FOR THIS CAUSE, or -1 (nothing changed) if st/keep is NULL, `cause` is out of range, or
+ *  the result would leave zero active hypotheses under the masks (fail_open is ignored for this test). */
+int nr_pdsch_config_sweep_set_dormant(nr_pdsch_config_sweep_state_t *st, int cause, nr_td_keep_fn_t keep, const void *arg);
+/** Clears `cause`; returns the number of hypotheses that thereby became active under the masks (0 if cause is out of range). */
+int nr_pdsch_config_sweep_clear_dormant(nr_pdsch_config_sweep_state_t *st, int cause);
+void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool on);
+/** active(i) = fail_open || no cause marks i; false for an out-of-range i. */
+bool nr_pdsch_config_sweep_is_active(const nr_pdsch_config_sweep_state_t *st, int i);
+/** Number of active hypotheses (n_hyp while fail_open or with no mask set). */
+int  nr_pdsch_config_sweep_n_active(const nr_pdsch_config_sweep_state_t *st);
+/** !fail_open && since_pass > 0 && since_pass >= ceil(n_active * ln(1/alpha) / p_min); counts trials, not time. A state with no
+ *  credited trial is never due. alpha outside (0,1) or p_min <= 0 is never due. */
+bool nr_pdsch_config_sweep_fail_open_due(const nr_pdsch_config_sweep_state_t *st, double alpha, double p_min);
+/** Destructive prune by predicate, exactly prune_commit() semantics (0 = nothing kept: untouched; unchanged count = all kept:
+ *  evidence retained; else the new count with all evidence and since_pass cleared, cursor 0, winner -1), compacting the dormant
+ *  masks with the same keep-index mapping. keep(h) true retains h; dormant hypotheses are kept or dropped by the predicate too. */
+int nr_pdsch_config_sweep_prune_keep(nr_pdsch_config_sweep_state_t *st, nr_td_keep_fn_t keep, const void *arg);
+
 /** Winner, or -1 if undecided. */
 int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st);
 
 typedef int32_t (*nr_pdsch_legality_fn_t)(int, int, int, int, int, int);
 /** Rebuild the full catalog in place exactly as a runtime context does (shared template copy, or
  *  init_legal() when none is available), discarding all evidence but KEEPING the configuration fields
- *  side and p2. st must already be a valid state (side/p2 are read). Returns the hypothesis count. */
+ *  side and p2 and the dormant masks / fail_open (masks are by index: the caller re-applies them if the catalogue
+ *  changed; bits >= the new count are dropped and an all-dormant result is cleared). st must already be a valid state. Returns the hypothesis count. */
 int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA,
                                   nr_pdsch_legality_fn_t legality);
 /** Enumerates the complete catalog, excludes undefined masks, merges identical effective PDUs.

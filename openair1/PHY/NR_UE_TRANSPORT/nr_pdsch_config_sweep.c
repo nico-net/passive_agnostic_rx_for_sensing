@@ -217,6 +217,65 @@ static int add_typeb_layer(nr_pdsch_config_sweep_state_t *st, int typeA, nr_pdsc
  * prune that matches nothing leaves the catalog untouched by construction. Returns 0 (nothing matched,
  * untouched), the unchanged count (everything matched, evidence kept), or the new count with the
  * evidence cleared -- indices have moved, and keeping it would score one hypothesis with another's. */
+/* ---- DORMANT MASKS (spec 2026-10-01 section 4): the one place that knows what "active" means ---------------------------- */
+static inline bool dorm_bit(const nr_pdsch_config_sweep_state_t *st, int c, int i)
+{
+  return (st->dormant[c][i >> 6] >> (i & 63)) & 1u;
+}
+/* active(i) = fail_open || no cause marks i. Every skip in this file goes through here. */
+static inline bool active(const nr_pdsch_config_sweep_state_t *st, int i)
+{
+  if (st->fail_open)
+    return true;
+  for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+    if (dorm_bit(st, c, i))
+      return false;
+  return true;
+}
+/* Bits of word w that belong to the live catalogue [0, n). */
+static inline uint64_t live_word(int n, int w)
+{
+  const int lo = w * 64;
+  return n >= lo + 64 ? ~UINT64_C(0) : n > lo ? (UINT64_C(1) << (n - lo)) - 1 : 0;
+}
+static int count_dormant_union(const nr_pdsch_config_sweep_state_t *st)
+{
+  int dormant = 0;
+  for (int w = 0; w < (st->n_hyp + 63) / 64; w++) {
+    uint64_t u = 0;
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+      u |= st->dormant[c][w];
+    dormant += __builtin_popcountll(u & live_word(st->n_hyp, w));
+  }
+  return dormant;
+}
+/* Number of hypotheses the acceptance ranges over (also the union-bound class count). */
+static inline int n_active_of(const nr_pdsch_config_sweep_state_t *st)
+{
+  return st->fail_open ? st->n_hyp : st->n_hyp - count_dormant_union(st);
+}
+/* Drops bits at indices >= n_hyp; an all-dormant result (a destructive prune kept only dormant entries) clears every mask
+ * so the "at least one active" invariant holds. */
+static void normalize_masks(nr_pdsch_config_sweep_state_t *st)
+{
+  for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+    for (int w = 0; w < NR_TD_DWORDS; w++)
+      st->dormant[c][w] &= live_word(st->n_hyp, w);
+  if (st->n_hyp > 0 && count_dormant_union(st) >= st->n_hyp)
+    memset(st->dormant, 0, sizeof(st->dormant));
+}
+/* The one compaction step of every destructive prune: keep entry i as entry n (n <= i, ascending), moving its mask bits with it. */
+static inline void prune_move(nr_pdsch_config_sweep_state_t *st, int n, int i)
+{
+  if (n != i) {
+    st->hyp[n] = st->hyp[i];
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) {
+      const uint64_t b = (st->dormant[c][i >> 6] >> (i & 63)) & 1u;
+      st->dormant[c][n >> 6] = (st->dormant[c][n >> 6] & ~(UINT64_C(1) << (n & 63))) | (b << (n & 63));
+    }
+  }
+}
+
 /* Probe counters follow the KL evidence: indices move on every prune, so they are cleared with it. */
 static void clear_probe_stats(nr_pdsch_config_sweep_state_t *st)
 {
@@ -229,9 +288,11 @@ static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
   if (n <= 0 || n == st->n_hyp)
     return n == st->n_hyp ? n : 0;
   st->n_hyp = n;
+  normalize_masks(st); /* callers compacted hyp[] AND the masks through prune_move(); drop the stale tail */
   memset(st->trials, 0, sizeof(st->trials));
   memset(st->ok, 0, sizeof(st->ok));
   clear_probe_stats(st);
+  st->since_pass = 0;
   for (int i = 0; i < n; i++)
     st->order[i] = i;
   st->cursor = 0;
@@ -246,7 +307,7 @@ int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
     if (st->hyp[i].dmrs_mask == dmrs_mask)
-      st->hyp[n++] = st->hyp[i];
+      prune_move(st, n++, i);
   return prune_commit(st, n);
 }
 
@@ -266,7 +327,7 @@ static int prune_tables(nr_pdsch_config_sweep_state_t *st, uint8_t mask)
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
     if (mask & (1u << st->hyp[i].mcs_table))
-      st->hyp[n++] = st->hyp[i];
+      prune_move(st, n++, i);
   return prune_commit(st, n);
 }
 
@@ -425,7 +486,7 @@ static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t 
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
     if ((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs))
-      st->hyp[n++] = st->hyp[i];
+      prune_move(st, n++, i);
   return prune_commit(st, n);
 }
 
@@ -480,7 +541,7 @@ static int prune_prior(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table, uin
     const bool dmrs_free = mapping_type != 0xFF && h->mapping_type != mapping_type;
     if (h->mcs_table == mcs_table
         && (dmrs_free || (h->dmrs_add_pos == dmrs_add_pos && h->dmrs_max_len == dmrs_max_len))) {
-      st->hyp[n++] = *h;
+      prune_move(st, n++, i);
     }
   }
   /* Nothing matched: the prior does not describe this catalog at all. The catalog is left in place
@@ -563,7 +624,7 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
    * grants to hit again (rank-4 bed, 809 live layouts, 2026-09-16). Ties keep the lowest index. */
   int hot = -1;
   for (int i = 0; i < st->n_hyp; i++)
-    if (st->ok[i] > 0 && (hot < 0 || st->ok[i] > st->ok[hot]))
+    if (active(st, i) && st->ok[i] > 0 && (hot < 0 || st->ok[i] > st->ok[hot])) /* a dormant hot hypothesis falls through to round-robin */
       hot = i;
   /* Only until the hot one has the 64 trials the separation test needs; after that the fair
    * round-robin resumes so a marginal link (5 % true rate) still reaches SWEEP_MIN_TRIALS on
@@ -572,10 +633,22 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
     *out = st->hyp[hot];
     return hot;
   }
-  if (!st->cursor) {
-    nr_crc_shuffle(st->order, st->n_hyp, &st->random_state);
-    if (st->side)
-      score_order_round(st);
+  /* The shuffle always covers all n_hyp (RNG use independent of the masks). Dormant entries are skipped in the round order;
+   * when the rest of the round is all dormant the next round starts exactly as a cursor wrap does today. The round bound
+   * only guards a violated "one active" invariant (then the entry at the cursor is returned unfiltered). */
+  for (int rounds = 0;; rounds++) {
+    if (!st->cursor) {
+      nr_crc_shuffle(st->order, st->n_hyp, &st->random_state);
+      if (st->side)
+        score_order_round(st);
+    }
+    while (st->cursor < st->n_hyp && !active(st, st->order[st->cursor]))
+      st->cursor++;
+    if (st->cursor < st->n_hyp)
+      break;
+    st->cursor = 0;
+    if (rounds >= 1) /* a full fresh round found no active entry */
+      break;
   }
   const int idx = st->order[st->cursor];
   st->cursor = (st->cursor + 1) % st->n_hyp;
@@ -593,13 +666,18 @@ static double rate_of(const nr_pdsch_config_sweep_state_t *st, int i)
 static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation)
 {
   if (check_separation) {
-    int leader=0;
-    for(int i=1;i<st->n_hyp;i++)
-      if(rate_of(st,i)>rate_of(st,leader)) leader=i;
+    /* Acceptance ranges over the ACTIVE set only; with no mask set first_active == 0 and n_act == n_hyp (today's rule). */
+    const int n_act = n_active_of(st);
+    int leader=-1;
+    for(int i=0;i<st->n_hyp;i++) {
+      if(!active(st,i)) continue;
+      if(leader<0 || rate_of(st,i)>rate_of(st,leader)) leader=i;
+    }
+    if(leader<0) leader=0; /* unreachable (invariant); keeps indices valid */
     double lo,hi;
     /* Class count = the LIVE catalog, not the storage cap: every prune clears evidence and add_k0 only
      * raises n, so the union bound always covers the hypotheses actually competing. */
-    nr_crc_interval(st->ok[leader],st->trials[leader],(unsigned)st->n_hyp,&lo,&hi);
+    nr_crc_interval(st->ok[leader],st->trials[leader],(unsigned)n_act,&lo,&hi);
     /* The absolute floor was 0.60, which silently assumed the TRUE config decodes at >=60 %.
      * MEASURED OTA 2026-09-13: the winning hypothesis decodes at 124/311 = 40 %, so its Wilson
      * lower bound can never reach 0.60 -- early separation could NEVER fire on this link and every
@@ -609,9 +687,9 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
      * dead link (everything near zero) cannot "separate", and let the separation test decide. */
     bool separated=st->trials[leader]>=64 && lo>=SWEEP_MIN_RATE;
     for(int i=0;i<st->n_hyp && separated;i++) {
-      if(i==leader) continue;
+      if(i==leader || !active(st,i)) continue;
       double other_lo,other_hi;
-      nr_crc_interval(st->ok[i],st->trials[i],(unsigned)st->n_hyp,&other_lo,&other_hi);
+      nr_crc_interval(st->ok[i],st->trials[i],(unsigned)n_act,&other_lo,&other_hi);
       if(other_hi>=lo) separated=false;
     }
     if(separated) { st->winner=leader; return leader; }
@@ -619,18 +697,20 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
   /* Decide only when EVERY hypothesis has had a fair shot -- otherwise the first one to reach the
    * threshold wins by being early in the rotation rather than by being right. */
   for (int i = 0; i < st->n_hyp; i++) {
-    if (st->trials[i] < SWEEP_MIN_TRIALS) {
+    if (active(st, i) && st->trials[i] < SWEEP_MIN_TRIALS) {
       return -1;
     }
   }
-  int best = 0, second = -1;
-  for (int i = 1; i < st->n_hyp; i++) {
-    if (rate_of(st, i) > rate_of(st, best)) {
+  int best = -1, second = -1;
+  for (int i = 0; i < st->n_hyp; i++) {
+    if (active(st, i) && (best < 0 || rate_of(st, i) > rate_of(st, best))) {
       best = i;
     }
   }
+  if (best < 0)
+    return st->winner; /* unreachable (invariant) */
   for (int i = 0; i < st->n_hyp; i++) {
-    if (i != best && (second < 0 || rate_of(st, i) > rate_of(st, second))) {
+    if (active(st, i) && i != best && (second < 0 || rate_of(st, i) > rate_of(st, second))) {
       second = i;
     }
   }
@@ -642,19 +722,47 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
   return st->winner;
 }
 
-int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok)
+/* since_pass bookkeeping, once per public feed CALL: +1 when it credited >= 1 active hypothesis, reset by a PASS credited to
+ * an active one. */
+static inline void since_pass_update(nr_pdsch_config_sweep_state_t *st, bool credited, bool pass_credited)
 {
-  if (st == NULL || idx < 0 || idx >= st->n_hyp) {
-    return (st != NULL) ? st->winner : -1;
+  if (!credited)
+    return;
+  if (st->since_pass < UINT32_MAX)
+    st->since_pass++;
+  if (pass_credited)
+    st->since_pass = 0;
+}
+
+/* Credit one outcome to one hypothesis (no since_pass): a dormant or invalid index, or a decided state, credits nothing. */
+static int feed_one(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok, bool *credited)
+{
+  if (idx < 0 || idx >= st->n_hyp) {
+    return st->winner;
   }
   if (st->winner >= 0) {
     return st->winner;
+  }
+  if (!active(st, idx)) {
+    return st->winner; /* feedback that arrived after the hypothesis went dormant: no evidence */
   }
   st->trials[idx]++;
   if (tb_crc_ok) {
     st->ok[idx]++;
   }
+  *credited = true;
   return sweep_decide(st, (st->trials[idx] % 16) == 0);
+}
+
+int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok)
+{
+  if (st == NULL) {
+    return -1;
+  }
+  bool credited = false;
+  const int w = feed_one(st, idx, tb_crc_ok, &credited);
+  since_pass_update(st, credited, credited && tb_crc_ok);
+  return w;
 }
 
 int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
@@ -669,10 +777,11 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
     return st->winner;
   }
   /* One crediting loop: every distinct in-range member gets exactly this grant's one Bernoulli sample. */
-  bool check = false; /* idx[0] is valid, so at least it is credited */
+  bool check = false;
+  bool credited = false; /* >= 1 ACTIVE member credited; with no mask set idx[0] always is */
   for (int k = 0; k < n; k++) {
     const int h = idx[k];
-    if (h < 0 || h >= st->n_hyp)
+    if (h < 0 || h >= st->n_hyp || !active(st, h))
       continue;
     bool dup = false;
     for (int j = 0; j < k && !dup; j++)
@@ -682,9 +791,13 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
     st->trials[h]++;
     if (tb_crc_ok)
       st->ok[h]++;
+    credited = true;
     if ((st->trials[h] % 16) == 0)
       check = true;
   }
+  if (!credited) /* every member dormant: no new evidence, no decision */
+    return st->winner;
+  since_pass_update(st, true, tb_crc_ok);
   return sweep_decide(st, check);
 }
 
@@ -705,7 +818,7 @@ int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int i
    * hypothesis already CLEARED by the KL evidence (full fallback trials, no pass) is not worth a probe. */
   for (int step = 0; step < st->n_hyp && n < K; step++) {
     const int h = st->order[(st->cursor + step) % st->n_hyp];
-    if (h == idx[0] || (st->trials[h] >= SWEEP_MIN_TRIALS && st->ok[h] == 0))
+    if (h == idx[0] || !active(st, h) || (st->trials[h] >= SWEEP_MIN_TRIALS && st->ok[h] == 0))
       continue;
     bool dup = false;
     for (int j = 1; j < n; j++)
@@ -731,11 +844,16 @@ int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_
     return (st != NULL) ? st->winner : -1;
   const nr_td_outcome_t *m = &outcomes[0];
   /* Only a decided FULL-TB outcome is KL evidence; an inconclusive main decode is not fed. */
-  if (m->kind == NR_TD_FULL_TB && (m->result == NR_TD_PASS || m->result == NR_TD_FAIL))
-    nr_pdsch_config_sweep_feed(st, m->hyp, m->result == NR_TD_PASS);
+  bool credited = false, pass_credited = false; /* since_pass: one update per feed_k CALL */
+  if (m->kind == NR_TD_FULL_TB && (m->result == NR_TD_PASS || m->result == NR_TD_FAIL)) {
+    bool c = false;
+    feed_one(st, m->hyp, m->result == NR_TD_PASS, &c);
+    credited |= c;
+    pass_credited = c && m->result == NR_TD_PASS;
+  }
   for (int i = 1; i < n; i++) {
     const nr_td_outcome_t *o = &outcomes[i];
-    if (o->hyp < 0 || o->hyp >= st->n_hyp)
+    if (o->hyp < 0 || o->hyp >= st->n_hyp || !active(st, o->hyp))
       continue;
     if (o->result == NR_TD_PASS) {
       probe_count(&st->probe_pass[o->hyp]); /* ordering only (P1): never a KL success */
@@ -746,18 +864,100 @@ int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_
       bool seen = o->hyp == m->hyp;
       for (int j = 1; j < i && !seen; j++)
         seen = outcomes[j].hyp == o->hyp;
-      if (st->p2 && o->p2_admissible && !seen)
-        nr_pdsch_config_sweep_feed(st, o->hyp, false);
+      if (st->p2 && o->p2_admissible && !seen) {
+        bool c = false; /* KL evidence: counts toward since_pass, a PASS never does */
+        feed_one(st, o->hyp, false, &c);
+        credited |= c;
+      }
     } else {
       probe_count(&st->probe_inconclusive[o->hyp]);
     }
   }
+  since_pass_update(st, credited, pass_credited);
   return st->winner;
 }
 
 int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st)
 {
   return (st != NULL) ? st->winner : -1;
+}
+
+/* ---- Dormant masks and fail-open public API ---------------------------------------------------------------------------- */
+int nr_pdsch_config_sweep_set_dormant(nr_pdsch_config_sweep_state_t *st, int cause, nr_td_keep_fn_t keep, const void *arg)
+{
+  if (st == NULL || keep == NULL || cause < 0 || cause >= NR_TD_DORMANT_CAUSES || st->n_hyp <= 0)
+    return -1;
+  /* Build the candidate mask for this cause; commit only if some hypothesis stays active under ALL causes (fail_open ignored). */
+  uint64_t cand[NR_TD_DWORDS];
+  memcpy(cand, st->dormant[cause], sizeof(cand));
+  for (int i = 0; i < st->n_hyp; i++)
+    if (!keep(&st->hyp[i], arg))
+      cand[i >> 6] |= UINT64_C(1) << (i & 63);
+  bool any_active = false;
+  int newly = 0;
+  for (int w = 0; w < (st->n_hyp + 63) / 64; w++) {
+    uint64_t u = cand[w];
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+      if (c != cause)
+        u |= st->dormant[c][w];
+    any_active |= (~u & live_word(st->n_hyp, w)) != 0;
+    newly += __builtin_popcountll(cand[w] & ~st->dormant[cause][w]);
+  }
+  if (!any_active)
+    return -1;
+  memcpy(st->dormant[cause], cand, sizeof(cand));
+  return newly;
+}
+
+int nr_pdsch_config_sweep_clear_dormant(nr_pdsch_config_sweep_state_t *st, int cause)
+{
+  if (st == NULL || cause < 0 || cause >= NR_TD_DORMANT_CAUSES)
+    return 0;
+  int reactivated = 0;
+  for (int w = 0; w < NR_TD_DWORDS; w++) {
+    uint64_t others = 0;
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+      if (c != cause)
+        others |= st->dormant[c][w];
+    reactivated += __builtin_popcountll(st->dormant[cause][w] & ~others);
+    st->dormant[cause][w] = 0;
+  }
+  return reactivated;
+}
+
+void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool on)
+{
+  if (st != NULL)
+    st->fail_open = on;
+}
+
+bool nr_pdsch_config_sweep_is_active(const nr_pdsch_config_sweep_state_t *st, int i)
+{
+  return st != NULL && i >= 0 && i < st->n_hyp && active(st, i);
+}
+
+int nr_pdsch_config_sweep_n_active(const nr_pdsch_config_sweep_state_t *st)
+{
+  return st != NULL ? n_active_of(st) : 0;
+}
+
+bool nr_pdsch_config_sweep_fail_open_due(const nr_pdsch_config_sweep_state_t *st, double alpha, double p_min)
+{
+  if (st == NULL || st->fail_open || st->since_pass == 0 || !(alpha > 0.0 && alpha < 1.0) || !(p_min > 0.0))
+    return false;
+  const double need = ceil((double)n_active_of(st) * log(1.0 / alpha) / p_min);
+  return (double)st->since_pass >= need;
+}
+
+int nr_pdsch_config_sweep_prune_keep(nr_pdsch_config_sweep_state_t *st, nr_td_keep_fn_t keep, const void *arg)
+{
+  if (st == NULL || keep == NULL || st->n_hyp <= 0)
+    return 0;
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (keep(&st->hyp[i], arg))
+      prune_move(st, n++, i);
+  return prune_commit(st, n);
 }
 
 /* All shared accesses, including winner publication and reset, use one short mutex. */
@@ -876,6 +1076,9 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
     return 0;
   const struct nr_td_side_info_s *side = st->side;
   const bool p2 = st->p2;
+  const bool fail_open = st->fail_open;
+  uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
+  memcpy(dormant, st->dormant, sizeof(dormant));
   const nr_pdsch_config_sweep_state_t *t = legality ? catalog_template(typeA, legality) : NULL;
   if (t)
     memcpy(st, t, sizeof(*st));
@@ -883,6 +1086,9 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
     nr_pdsch_config_sweep_init_legal(st, tda_count, typeA, legality);
   st->side = side;
   st->p2 = p2;
+  st->fail_open = fail_open;
+  memcpy(st->dormant, dormant, sizeof(dormant));
+  normalize_masks(st);
   return st->n_hyp;
 }
 static void catalog_fill(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA, nr_pdsch_legality_fn_t legality)
@@ -931,6 +1137,7 @@ static void reopen_context(sweep_context_t *c)
   memset(c->state->trials, 0, sizeof(c->state->trials));
   memset(c->state->ok, 0, sizeof(c->state->ok));
   clear_probe_stats(c->state);
+  c->state->since_pass = 0;
   c->state->winner = -1;
   c->state->cursor = 0;
   for (int i=0; i<c->state->n_hyp; ++i) c->state->order[i] = i;
@@ -1072,6 +1279,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
      * configuration, which catalog_fill() would otherwise carry over. */
     fresh->side = NULL;
     fresh->p2 = false;
+    fresh->fail_open = false;
+    memset(fresh->dormant, 0, sizeof(fresh->dormant));
     catalog_fill(fresh, tda_count, typeA, legality);
     pthread_mutex_lock(&g_lock);
   }
