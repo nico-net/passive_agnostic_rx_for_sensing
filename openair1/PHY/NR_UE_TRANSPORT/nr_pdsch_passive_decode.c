@@ -652,6 +652,13 @@ static _Atomic uint64_t g_ldpc_seg_fail = 0;
 static _Atomic uint64_t g_ldpc_tb_fail  = 0;
 static _Atomic uint64_t g_ldpc_zero_tb  = 0;
 static _Atomic uint64_t g_ldpc_ok       = 0;
+void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *tb_fail, uint64_t *zero_tb)
+{
+  *ok = atomic_load(&g_ldpc_ok);
+  *seg_fail = atomic_load(&g_ldpc_seg_fail);
+  *tb_fail = atomic_load(&g_ldpc_tb_fail);
+  *zero_tb = atomic_load(&g_ldpc_zero_tb);
+}
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
 static _Atomic uint64_t g_gpu_llr_jobs = 0, g_gpu_cpu_jobs = 0; // decodes fed by the GPU front end vs the CPU chain
 static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L

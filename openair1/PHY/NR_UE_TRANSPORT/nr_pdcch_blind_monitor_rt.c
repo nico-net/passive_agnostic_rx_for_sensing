@@ -94,6 +94,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_uss_tracker.h"
 #include "nr_pdcch_joint_live.h"
 #include "nr_pdcch_al1_map.h"
+#include "nr_passive_metrics.h"
 #include <stdio.h>
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
@@ -1372,6 +1373,15 @@ static uint16_t     g_last_reject_rnti  = 0;
  * "found more C-RNTI fallback grants". Indexed by nr_blind_rnti_class_t. */
 static uint64_t g_accepts_10     = 0;
 static uint64_t g_accepts_class[NR_BLIND_RNTI_CLASS_COUNT] = {0};
+void nr_pdcch_blind_monitor_counters(uint64_t *occasions, uint64_t *candidates, uint64_t *accepts, uint64_t *accepts_c)
+{
+  /* Plain uint64 written by the single scan consumer; an aligned 64-bit load is not torn on aarch64/x86-64.
+   * Values are monotonic counters for a 20 s metrics line, so a one-increment race is harmless. */
+  *occasions = g_occasions_run;
+  *candidates = g_candidates_run;
+  *accepts = g_accepts;
+  *accepts_c = g_accepts_class[NR_BLIND_RNTI_CLASS_C];
+}
 static uint64_t g_cfr_submits    = 0; // final count that actually reached the ISAC engine, i.e. after
                                       // ALL gates (raw accept + energy + persistence + SNR)
 
@@ -6762,6 +6772,7 @@ constdiag_done:;
          (unsigned long)scanq.dropped_stale, (unsigned long)scanq.max_lag_slots,
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
+    nr_passive_metrics_emit(); /* machine-readable twin of the text summaries above (Task A2) */
   }
 
     /* Distinct decode-parameter census. Printed with the periodic summary rather than only at

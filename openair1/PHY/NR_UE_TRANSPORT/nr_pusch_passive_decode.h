@@ -132,4 +132,7 @@ void nr_pusch_passive_stats_dump(void);
  * current/_feed keep the signatures they had when they were defined in this file; the eligibility and
  * DM-RS state accessors changed with final review I1/I5. */
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.h"
+/* Metrics getter (nr_passive_metrics.c). */
+void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok);
+
 #endif // NR_PUSCH_PASSIVE_DECODE_H

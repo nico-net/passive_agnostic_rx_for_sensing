@@ -50,6 +50,7 @@ extern _Atomic int nr_ue_rf_signal_absent;
 // different threads), hence _Atomic rather than __thread; relaxed ordering is sufficient for a
 // diagnostic counter that isn't gating any correctness-relevant control flow.
 _Atomic long nr_ue_diag_producer_absolute_slot = -1;
+extern int nr_passive_metrics_pci; // nr_passive_metrics.c
 _Atomic long nr_ue_diag_producer_wall_ns = 0;
 
 /*
@@ -1054,6 +1055,7 @@ void *UE_thread(void *arg)
           nr_passive_acq_set_phy_geometry(UE->frame_parms.N_RB_DL, UE->frame_parms.numerology_index,
                                           UE->frame_parms.ssb_start_subcarrier, (double)UE->frame_parms.dl_CarrierFreq);
           nr_passive_acq_note_pbch_locked(); // acquisition-state tracker: MIB applied, frame known
+          nr_passive_metrics_pci = UE->frame_parms.Nid_cell; // for the ISAC_METRICS JSON (Task A2)
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",
                 decoded_frame_rx,

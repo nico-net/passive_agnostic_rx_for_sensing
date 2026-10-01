@@ -1,0 +1,3 @@
+ctest -j4 (cloud host) after A2 build: only the known env-only failures
+  61 - test_thread-pool (affinity EINVAL), 62 - time_management_tests (intermittent), 125 - nr_cuup_functional_test (no SCTP)
+test_nr_passive_metrics: 3/3 PASSED

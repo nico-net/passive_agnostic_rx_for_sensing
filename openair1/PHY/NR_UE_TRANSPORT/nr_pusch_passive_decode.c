@@ -96,6 +96,11 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
+{
+  *try_ = atomic_load(&g_try);
+  *crc_ok = atomic_load(&g_crc_ok);
+}
 /* Reserved-UL-MCS retransmission record (gap-harq lane): the UL twin of
  * nr_pdsch_passive_decode.c's g_dl_harq_init, own instance so a UL HARQ pid can never collide with
  * a DL one that happens to share the same number. See nr_harq_init_tx.h. */

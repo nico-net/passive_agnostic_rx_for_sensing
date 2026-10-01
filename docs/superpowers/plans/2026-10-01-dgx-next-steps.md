@@ -393,7 +393,7 @@ void nr_passive_metrics_emit(void);
   - `void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok);` in `nr_pusch_passive_decode.h`
 - Consumes: `nr_pdcch_passive_queue_get_stats()`, `nr_pdsch_passive_queue_get_stats()`, `nr_passive_acq_snapshot()`, `nr_passive_acq_state_name()` (all exist).
 
-- [ ] **Step 1: Write the failing gtest `nr_passive_metrics_test.cc`**
+- [x] **Step 1: Write the failing gtest `nr_passive_metrics_test.cc`**
 
 ```cpp
 #include <gtest/gtest.h>
@@ -434,7 +434,7 @@ TEST(PassiveMetrics, NullStateNameIsReportedAsUnknown) {
 }
 ```
 
-- [ ] **Step 2: Add the CMake test block** (after the `test_nr_scrambling_id_sweep` block, ~2544). The serializer is split into its own translation unit section so the test does not need the receiver:
+- [x] **Step 2: Add the CMake test block** (after the `test_nr_scrambling_id_sweep` block, ~2544). The serializer is split into its own translation unit section so the test does not need the receiver:
 
 ```cmake
   add_executable(test_nr_passive_metrics ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_metrics_test.cc
@@ -447,12 +447,12 @@ TEST(PassiveMetrics, NullStateNameIsReportedAsUnknown) {
 
 (So: `nr_passive_metrics_json.c` holds only `nr_passive_metrics_to_json`; `nr_passive_metrics.c` holds `collect`/`emit`. Add both to the `nr_pdcch_blind_monitor` library at CMakeLists.txt:1464.)
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cd cmake_targets/ran_build/build && cmake . >/dev/null && ninja test_nr_passive_metrics`
 Expected: FAIL — `nr_passive_metrics_json.c` not found / undefined reference.
 
-- [ ] **Step 4: Write `nr_passive_metrics_json.c`**
+- [x] **Step 4: Write `nr_passive_metrics_json.c`**
 
 ```c
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
@@ -484,12 +484,12 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 Run: `ninja test_nr_passive_metrics && ./test_nr_passive_metrics`
 Expected: 3 tests PASS.
 
-- [ ] **Step 6: Add the three getters** (exact code):
+- [x] **Step 6: Add the three getters** (exact code):
 
 In `nr_pdcch_blind_monitor_rt.c` (below the counter definitions, ~1375):
 ```c
@@ -523,7 +523,7 @@ void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
 ```
 Add the prototypes to the three headers listed in Interfaces.
 
-- [ ] **Step 7: Write `nr_passive_metrics.c`**
+- [x] **Step 7: Write `nr_passive_metrics.c`**
 
 ```c
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
@@ -540,8 +540,7 @@ Add the prototypes to the three headers listed in Interfaces.
 #include "nr_pusch_passive_decode.h"
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
-extern int nr_passive_metrics_pci;                     // set by the receiver once PBCH locks (-1 before)
-int nr_passive_metrics_pci = -1;
+int nr_passive_metrics_pci = -1;                       // set by nr-ue.c once PBCH locks (-1 before)
 /* Filled by Task A3; weak so this file links before A3 lands. */
 __attribute__((weak)) void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped)
 {
@@ -600,15 +599,15 @@ void nr_passive_metrics_emit(void)
 }
 ```
 
-Also: set `nr_passive_metrics_pci = fp->Nid_cell;` where `ACQ_EVENT pbch_locked` is logged (grep `pbch_locked` in `executables/nr-ue.c` / `nr_passive_acq_state.c`; add the assignment on the line after that event, with `extern int nr_passive_metrics_pci;`).
+Also: in `executables/nr-ue.c`, right after the `nr_passive_acq_note_pbch_locked();` call (the ACQ_EVENT pbch_locked is logged inside that function, which has no frame_parms in scope), add `nr_passive_metrics_pci = UE->frame_parms.Nid_cell;` with `extern int nr_passive_metrics_pci;` next to the `nr_ue_diag_producer_absolute_slot` definition. `nr_passive_metrics.c` also needs `#include <stdatomic.h>` and uses an explicit relaxed atomic load of the slot counter. In CMake the two sources go on the `nr_pdcch_blind_monitor` library line (nr_dci11_pin.c is the last entry).
 
-- [ ] **Step 8: Call the emitter** — in `nr_pdcch_blind_monitor_rt.c` inside `if (sum_due) {` (~6696), as the last statement of that block:
+- [x] **Step 8: Call the emitter** — in `nr_pdcch_blind_monitor_rt.c` inside `if (sum_due) {` (~6696), as the last statement of that block:
 ```c
     nr_passive_metrics_emit(); /* machine-readable twin of the text summaries above (Task A2) */
 ```
 and `#include "nr_passive_metrics.h"` at the top.
 
-- [ ] **Step 9: Build, ctest, rfsim gate, and check the new line**
+- [x] **Step 9: Build, ctest, rfsim gate, and check the new line**
 
 Run:
 ```bash
@@ -618,7 +617,7 @@ grep -c "ISAC_METRICS {" /tmp/a2/base_r1/rx/rx.log; tail -1 /tmp/m.jsonl | pytho
 ```
 Expected: ctest only the known ARM failures; gate PASS; ≥ 6 `ISAC_METRICS` lines in 150 s; last JSON has `"acq_state"` and `pdschq_crc_ok` equal to the last text `PDSCHQ crc_ok=`. NOTE: `rfsim_arm.sh` must pass `ISAC_METRICS_PATH` through (it inherits the environment — verify it appears in `/proc/<pid>/environ` if the file stays empty).
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.h openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c \
