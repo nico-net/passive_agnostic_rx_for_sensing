@@ -167,6 +167,33 @@ full-TB decode."*
 - Ablation over K, SNR / p_true, catalogue size, probe cost.
 - Live multi-UE validation after simulation.
 
+**Decision 2026-10-01 (levers Task 7, simulator gate): P2 FAILS the gate and stays off (`ISAC_TD_P2=0`).**
+Evidence: `tests/passive_rx/td_sim/results_2026-10-01_p2/summary.md` (matrix `tests/passive_rx/td_sim/gate_p2.json`),
+all numbers `[SIMULATED, DGX host, nr_td_sim @02524c44ff]`. Arms all_P1 vs all_P2 (gate 1, all weights 1, field book 1,
+K 2/3/4; only p2 differs), paired per RNTI on identical channel draws; cells SA / NSA-like, 4 RX / 1 RX, twins 2 (physical)
+and 0 (unphysical stress), table exercise 0.9 / 0.5, mu 8 / 15 / 25 dB, catalogue 4 / 16 TDA rows; 20 160 acquisitions
+per (cell, rx) and arm (oracle 1: 18 720; oracle 0: 1 440, cut for compute).
+- **Oracle 1 (today's runtime DM-RS / Qm oracles), every (cell, rx):** wrong 0 (P1 and P2) — PASS; truth eliminated by
+  probe 0 — PASS; same winner on 74 880 / 74 880 paired RNTIs per (cell, rx) — PASS; true hypothesis not slower (median
+  full-TB decodes of the truth 97 → 69-70) — PASS; full-TB decodes and time reduced (mean n_full/RNTI ~235 → ~159,
+  mean s 1.20 → 0.81 at 4 RX, 1.72 → 1.16 at 1 RX) — PASS; undecidable 0 → 0 — PASS.
+- **Oracle 0 (blind), every (cell, rx):** wrong winners 0 in P1 vs 212-250 per (cell, rx) in P2 (932 in total, all
+  physical twins of the truth, all at twins 2, 920 at table exercise 0.5, none at K 4) — FAIL; truth eliminated by probe
+  0 — PASS; same winner — FAIL (110-185 paired RNTIs decided by both arms with different winners per (cell, rx), plus
+  one-sided decisions); true hypothesis not slower — PASS (median truth full-TB 128-143 → 100-102); full-TB decodes and
+  time reduced (mean s ~490-640 → ~240-340) — PASS; undecidable not increased — FAIL at 4 RX (313/314 → 369), PASS at 1 RX.
+- Cause: failure-only evidence keeps probe FAILs and drops probe PASSes, so the KL rate of any hypothesis that sometimes
+  passes is deflated in proportion to how often it is probed, and probe allocation depends on the search state (cursor,
+  hot exploit). In the wrong RNTIs a median 92 % of the truth's KL trials are admitted probe FAILs (6 % in correct ones),
+  and its physical twin wins. Each admitted FAIL is individually correct; the estimator is biased. This is a design flaw
+  of §5.2 as specified, not a K38 or same-decoder issue, and the Qm oracle at oracle 1 masks it (by pruning the twins)
+  rather than removing it.
+- Regardless of the simulator: runtime P2 at Nl > 1 stays blocked by K38 (probe CB0 LLRs ≠ full decode at rank 4) until
+  K38 is fixed or the probe horizon is forced to 0 when Nl > 1, and any admitted probe FAIL requires the §9.3
+  same-decoder rule. Re-opening P2 needs an unbiased evidence rule (e.g. admit FAILs only from hypotheses probed at a
+  state-independent rate, or score probes as complete Bernoulli samples where a CB0 PASS can be tied to the TB outcome) and
+  a re-run of this gate.
+
 ## 6. Validation
 
 ### 6.1 Simulator (fast, deterministic) — new
