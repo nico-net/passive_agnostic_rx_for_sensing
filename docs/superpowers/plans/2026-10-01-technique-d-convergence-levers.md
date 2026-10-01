@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Hard constraints remove hypotheses. Soft information only reorders them. KL evidence decides the winner.
-- The KL anytime acceptance rule (`nr_crc_interval()`, 1e-6 budget, separation test, 300-trial fallback) is not changed. No Bayesian rewrite. The joint hypothesis remains the decision unit.
+- The KL anytime acceptance rule (`nr_crc_interval()`, 1e-6 budget, separation test, 300-trial fallback) is not changed. (A proposed additional CRC-pass rule is designed in the blind-convergence addendum, lever C, default off; enabling it requires the operator to amend this line.) No Bayesian rewrite. The joint hypothesis remains the decision unit.
 - All levers off (K = 1, weights 0, field book off, gate off, P2 off) ⇒ **bit-identical** hypothesis sequence and winner vs today, for the same RNG seed.
 - Side information is called ordering score / search priority, never "prior".
 - MCS table is never promoted cell-wide.
@@ -25,7 +25,7 @@
 - **P2 same-decoder rule (spec §9.3):** a probe FAIL is admissible only if the probe ran the same LDPC implementation and iteration policy as the hypothesis's full decode (CPU layered ≠ CUDA flooding).
 - **No GPU LDPC result is trusted before G1 (K34 false-pass fix); no GPU FEP result before G3 (K35).** Statistics/state never run on the GPU.
 - **No top-K probing (K > 1) and no P2 at runtime before F1 (K32) and F2 (K33) are merged.**
-- Starting values: K = 3; ordering weights 0 (neutral); contradiction threshold 2 distinct RNTIs, M = 64; energy start/end observable off.
+- Starting values (amended 2026-10-01 after Tasks 6/7): K = 1 (was 3); ordering weights 0 (neutral); contradiction threshold 2 distinct RNTIs, M = 64; energy start/end observable off.
 - Repository rules (CLAUDE.md / PROJECT_MEMORY §4.0): sens6 files frozen (`git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures tests/passive_rx/*.conf tests/passive_rx/sens6_host_snapshot_2026-09-30` before every commit); evidence labels; explicit `git add`; no `git stash`; SIGINT not SIGKILL.
 
 ## Merge gating (operator decision "A")
@@ -850,6 +850,7 @@ Fix list (exact): (1) `ldpc_pool_decode` returns an error code; on any error or 
 ### Task G4 ★: Batched CB0 probes across grants × hypotheses (Opus design review, Sonnet implements)
 
 - Depends on: R1 (GrantWork), G1, G2, F3 decision.
+- Addendum lever G (blind-convergence spec §6): the same batch path must also support K **full-TB** decodes per grant from a state-independent round-robin schedule, PASS and FAIL both credited (no P2 bias; not blocked by K38).
 - Design (exact): RT path enqueues `GrantTrial{GrantWork*, main, probes[K−1], generation, config_epoch}` (bounded ring, drop-and-count when full; never blocks); a GPU worker collects up to B trials (default: whatever is queued within 1 slot, max 64 grants), computes LLRs once per signature (Task 4c) per grant, rate-dematches each hypothesis, and runs one batched LDPC launch for all CB0 probes (CUDA decoder, so the P2 same-decoder rule requires the main decode of probed hypotheses to also run on the CUDA decoder or P2 stays off for them); ≥ 2 CUDA streams overlap pre-processing and LDPC; outcomes go back through `feedback_k`; old-epoch trials dropped; GrantWork released by refcount.
 - [ ] Steps: unit test of the batching queue (ordering, drop-on-full, epoch drop) → implement → rfsim 273-PRB with K=3: probes/s, GPU util, CPU-core equivalents vs CPU-probe baseline → compute row of spec §1 → commit.
 
@@ -870,9 +871,9 @@ Additions vs the former Task 8: the gate and legality masks come from GrantWork;
 - Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.{c,h}` — job carries the ticket_k; main decode + probes on GrantWork; outcomes (`p2_admissible` = new transmission && completed probe && same decoder && samples valid after decode (F2)); `feedback_k`.
 - Side info: SIB1 common TDRA (`nr_pdcch_blind_monitor_set_tda_common` → module-level `nr_td_side_info_t` unless `ISAC_TD_IGNORE_SIB1=1`), MIB `dmrs-TypeA-Position`, observables from the existing oracles.
 - Env flags (defaults chosen by the Task 6 ablation, `[SIMULATED, DGX host, nr_td_sim @00dd79eed4]`: `ISAC_TD_GATE=1`, everything else below as listed, i.e. K=1, weights 0, fieldbook 0, P2 0; evidence `tests/passive_rx/td_sim/results_2026-10-01_p1/summary.md`; all other flags default = today): `ISAC_TD_K=1`, `ISAC_TD_GATE=1` (was 0), `ISAC_TD_GATE_SNR_MARGIN_DB=6`, `ISAC_TD_W_SIB1/DEFAULT/OBS/FIELD/PROBE=0`, `ISAC_TD_FIELDBOOK=0`, `ISAC_TD_P2=0`, `ISAC_TD_IGNORE_SIB1=0`, `ISAC_TD_PROBE_BUDGET_US=400`.
-- [ ] **Step 1:** failing context-level tests `SelectK1EqualsSelect`, `FieldBookOffKeepsPriorPruning`, `FieldBookOnOrdersInsteadOfPruning`.
-- [ ] **Step 2–4:** implement; tests green; full ctest; rfsim regression gate with all flags default ⇒ PASS and identical CONVERGED lines vs pre-change.
-- [ ] **Step 5:** rfsim with levers on (106 PRB, K=3, gate=1, chosen weights, fieldbook=1): CONVERGED, CRC ≥ 98 %, compute row of spec §1 (avg + peak per thread, `pdschq_max_lag`, drops). Commit.
+- [ ] **Step 1:** failing context-level tests `SelectK1EqualsSelect`, `FieldBookOffKeepsPriorPruning`, `FieldBookOnUsesDormantPruning` (amended 2026-10-01: blind-convergence addendum §4 — field book = reversible dormant pruning on top of the prior, per-context fail-open; was `FieldBookOnOrdersInsteadOfPruning`); `EquivCreditsGrantEquivalents` if `ISAC_TD_EQUIV` is wired (addendum §2; keys from `nr_get_Qm_dl`/`nr_get_code_rate_dl`).
+- [ ] **Step 2–4:** implement; tests green; full ctest; rfsim regression gate with all flags at today's values **including explicit `ISAC_TD_GATE=0`** ⇒ PASS and identical CONVERGED lines vs pre-change; then a second gate run with the new defaults (`ISAC_TD_GATE=1`) ⇒ PASS.
+- [ ] **Step 5:** rfsim with levers on (106 PRB, K=1, gate=1, weights 0, equivalence/field-book/CRC-accept flags as decided by blind-convergence Task BC6): CONVERGED, CRC ≥ 98 %, compute row of spec §1 (avg + peak per thread, `pdschq_max_lag`, drops). Commit.
 
 ### Task R3: Live multi-UE acceptance bed — was Task 9
 
