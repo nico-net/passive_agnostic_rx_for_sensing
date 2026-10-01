@@ -40,7 +40,7 @@
 | `openair1/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.{h,c}`, `tests/nr_td_fieldbook_test.cc` | field state machine | BC4 |
 | `tests/passive_rx/td_sim/campaign.py`, `test_campaign.py`, `gate_bc.json`, `results_<date>_bc/` | campaigns | BC0, BC6 |
 
-Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC2b (experimental, operator 2026-10-01) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
+Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC2b (experimental, operator 2026-10-01) → BC7 (K39) → BC8 (sim v2) → BC9 (DCI adjacency) → BC10 (fast-path stream) → BC11 (adaptive k0 test) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
 
 ---
 
@@ -560,12 +560,110 @@ TEST(TdSim, FieldBookTwoNotSlowerThanPriorSteady) {
 
 ---
 
+## PHASE K0 (operator 2026-10-02): K39 fix, simulator v2, certified k0 evidence — runs BEFORE BC6
+
+Order (operator): BC7 (K39) → BC8 (simulator v2) → BC9 (DCI-adjacency certified evidence) → BC10 (fast-path stream) →
+BC11 (adaptive k0-neighbour test) → BC6. Fix B (k0-sibling zero-pass guard, BC2b round 1) is a **safety fallback**, not
+the speed path. Design principle: **only certified, discriminative grants may provide k0 evidence; DM-RS present ⇒ slot
+plausible, not k0 proven.** Background: `docs/superpowers/specs/2026-10-01-technique-d-k0-speed-recovery-notes.md`
+(§0 findings, §1 DCI adjacency, §2 sibling test, §5 fast-path schedule, §6 simulator modelling, §7.2 assumptions).
+
+### Task BC7 ★: K39 — DM-RS presence never pins k0 (Sonnet; Opus review)
+
+**Root cause (code-read):** both DM-RS oracle call sites run only on jobs whose hypothesised k0 is 0 and record
+`k0 = 0` as *observed* (`nr_pdsch_passive_queue.c` in-line path ~577 `observe(ticket, mask, last_sym, 0)` and deferred
+path ~805 `observe(..., job.sweep_ticket.k0)` under `job.sweep_ticket.k0 == 0`); `obs_admits` (`nr_pdsch_config_sweep.c`
+~481-492) then hard-prunes every other k0. Under traffic in adjacent slots the DCI's own slot carries the previous
+grant's DM-RS, so a true k0 = 1 is pruned.
+
+**Files:** `nr_pdsch_config_sweep.{h,c}` (obs set: k0 becomes a plausibility mask), `nr_pdsch_passive_queue.c` (both
+call sites), tests `nr_pdsch_config_sweep_test.cc`; simulator: the oracle model's k0 pruning follows the new rule.
+
+**Interfaces:**
+```c
+/* DM-RS mask / last symbol observed in the slot the job decoded: prunes on mask and last symbol only; k0 is NOT pinned.
+ * k0_plausible: the hypothesised k0 is recorded as plausible (bit set in a uint32_t plausible mask, ordering/logging only). */
+int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *t, uint16_t dmrs_mask, int last_symbol, int k0_plausible);
+/* k0 certified by deterministic evidence (BC9 DCI adjacency / TDD direction): the only call that may prune k0. */
+int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint32_t k0_allowed_mask);
+```
+`obs_admits` ignores k0 unless a certified mask exists for that observation set. Default behaviour changes (this is a
+correctness fix): flag `ISAC_TD_K0_ORACLE_LEGACY=1` restores the old pinning for A/B only.
+
+- [ ] **Step 1: Failing tests** — `DmrsObservationDoesNotPruneOtherK0` (observe mask with k0_plausible=0 on a catalogue
+  with k0 ∈ {0,1}: every k0=1 entry with the same mask/last symbol stays), `CertifiedK0Prunes`, `LegacyFlagRestoresPinning`,
+  and a simulator test `AdjacentTrafficTrueK0OneSurvivesOracle` (oracle 1, truth k0 = 1, adjacent traffic on: never
+  undecidable from a k0 prune).
+- [ ] **Step 2–4:** implement; focused + full ctest; rfsim regression gate (106 PRB) PASS; report ttc before/after (more
+  k0 hypotheses survive ⇒ convergence may be slower: measure, label `[MEASURED, DGX rfsim 106 PRB]`); rank-4 pin49r4 bed
+  still 100 %. PROJECT_MEMORY K39 → resolved with evidence.
+- [ ] **Step 5: Commit** — `fix(rx): DM-RS presence marks k0 plausible, never pins it (K39)`.
+
+### Task BC8: Simulator v2 — slot-indexed traffic, adjacency and DCI observation (Sonnet)
+
+Per notes §6. **Files:** `tests/nr_td_sim.cc`, `nr_td_sim_test.cc`, `tests/passive_rx/td_sim/campaign.py` (+ test).
+
+Model (new flags; all default to the v1 behaviour so v1 output stays byte-identical):
+- `--slot-model 1`: grants are generated on a slot timeline per RNTI (`--grant-prob` per DL slot, `--persist rho`:
+  probability that the next grant repeats the previous allocation/MCS/TBS; link adaptation changes MCS with
+  probability 1−rho). Each grant knows its DCI slot, its PDSCH slot (truth k0) and the neighbouring slots' grants.
+- **Physical shifted-slot trap:** hypothesis with k0' ≠ k0 decodes the PDSCH in slot `dci_slot + k0'`; it passes iff that
+  slot carries a grant for the same RNTI whose (TBS, PRBs, MCS, symbols, DM-RS, rv-compatible) equal the current DCI's
+  and that transmission would pass at its SNR. No random trap probability in v2.
+- **DCI observation:** each DCI is observed with miss probability `--dci-miss` and a false-accept probability
+  `--dci-false` (a spurious DCI with random fields); the receiver-side DCI history the fast path may use contains only
+  observed DCIs.
+- **TDD pattern:** `--tdd "DDDSU"`-style string; slots of the wrong direction carry no DL PDSCH.
+- **Certified flag:** each grant computes, from the observed DCI history only, whether it is k0-unambiguous for each
+  k0 sibling (notes §1.2 per-world occupant check; unseen neighbour ⇒ ambiguous; compatible neighbour ⇒ no information).
+- Counters: `false_passes`, `retx_trap_passes`, `k0_trap_passes` (physical), `certified_grants`, `dci_missed`,
+  `dci_false`.
+
+- [ ] **Step 1: Failing tests** — `SlotModelOffIsByteIdentical` (cmp vs HEAD binary), `PersistentAllocationProducesK0Trap`,
+  `TddWrongDirectionNeverCarriesPdsch`, `UnseenNeighbourIsNeverCertified`, `CompatibleNeighbourGivesNoCertification`.
+- [ ] **Step 2–4:** implement; focused ctest; baselines (`--acq 500`, 4/1 RX, oracle 0 and 1, rho ∈ {0.5, 0.9},
+  dci-miss ∈ {0.01, 0.1}) appended to `baseline_bc0_2026-10-01.txt` under `## BC8 v2`. **Step 5: Commit.**
+
+### Task BC9 ★: DCI-adjacency certified k0 evidence (Opus; Sonnet by override if needed)
+
+**Files:** PDCCH blind monitor (new DL DCI history ring per RNTI, written at DCI accept time before any grant drop —
+notes §1.1; file `nr_pdcch_blind_monitor_rt.c` + a small pure module `nr_dci_history.{c,h}` with tests), engine
+(`feed_attr` gains `bool certified`; levers P/C count only certified passes; `certify_k0` from BC7 for deterministic
+exclusions), simulator (uses BC8's certified flag).
+
+Rules (operator): observed incompatible DCI in the neighbour slot ⇒ certified evidence against that neighbour; neighbour
+DCI unseen ⇒ ambiguous; compatible neighbour allocation ⇒ no k0 information; wrong TDD direction ⇒ deterministic
+exclusion (`certify_k0`). Soundness conditions to state in the header (notes §1.5): one PDSCH per RNTI per slot, PDCCH
+false-accept rate bound, truth in the catalogue.
+
+- [ ] Tests: `DciHistoryRingOrderAndEviction`, `IncompatibleObservedNeighbourCertifies`, `MissedNeighbourDciIsAmbiguous`,
+  `CompatibleNeighbourNotCertified`, `TddWrongDirectionExcludesK0`, engine `UncertifiedPassDoesNotCountForPC`, sim
+  `CertifiedPCNeverWrongUnderPhysicalTrap` (BC8 model, rho 0.9, dci-miss 0.1, dci-false 1e-3: wrong = 0, wrong pins = 0).
+- [ ] rfsim regression gate PASS with the history ring on; commit.
+
+### Task BC10: Dedicated fast-path stream (Sonnet; Opus review)
+
+Per notes §5 / §2.3: a separate per-context fast-path schedule (fixed duty or K hypotheses per grant) whose selection is
+outcome-independent, so P/C evidence no longer depends on the KL round-robin share (fix A's ≈ 8.8 s cost). Optional
+anytime e-process replacing `m*(T_max)` only if the BC2b-style stress check agrees with its bound. Tests: stream
+selection independent of outcomes (`FastPathScheduleIgnoresOutcomes`), bound check at p_f 1e-3, KL unchanged
+(bit-identity with the stream off). Commit.
+
+### Task BC11: Adaptive k0-neighbour test (Sonnet; Opus review)
+
+Per notes §2.1–2.2 / §3a: anytime Ville/SPRT test per neighbour with the 1e-6 budget split; p_min from the leader's
+confirmation-phase lower bound (assumption: shift-stationarity of the truth's pass probability — stress-tested in the
+simulator with non-stationary SNR); neighbours bundled on the same grant; CB0 / abort-after-first-failed-CB decode only
+where the same-decoder rule holds and Nl = 1 (K38). Only certified grants give discrimination credit. Tests include
+`NonStationarySnrNeverWrong`. Commit.
+
 ### Task BC6: Blind-convergence gate campaign and decisions (Opus decides; 🔁 Haiku runs)
 
 **Files:**
 - Create: `tests/passive_rx/td_sim/gate_bc.json`, `tests/passive_rx/td_sim/results_<date>_bc/summary.md` (+ `analysis.md`; jsonl only if < 5 MB)
 - Modify: `docs/superpowers/specs/2026-10-01-technique-d-blind-convergence-design.md` (§8 decision block), `docs/superpowers/plans/2026-10-01-technique-d-convergence-levers.md` (R2 env line)
 
+- [ ] **Step 0 (operator 2026-10-02):** use the BC8 v2 model by default (slot model, physical k0 trap, DCI miss/false, TDD); the any-grant v1 trap and the retransmission-only trap only as comparison arms; report ordinary CRC false passes, HARQ/retransmission ambiguity and new-TB consecutive-slot k0 traps separately. Required comparison (operator): baseline, P/C pre-fix, A, A+B, A+B+adaptive (BC11), A+B+best safe acceleration (BC9/BC10), at 4 RX and 1 RX; measure first/later-RNTI time, wrong winners, wrong pins, sibling trials, full TB decodes, CB0 probes, CPU/GPU cost, fail-open/recovery. Hard rule: 0 wrong winners and 0 wrong pins.
 - [ ] **Step 1:** `gate_bc.json` arms: `prior` (today, fieldbook 0); `F_order` (ordering-only field book, fieldbook 1); `E` (equiv 1); `E+F` (equiv 1, fieldbook 2, reversible pruning); `E+F+inject` (… , inject-wrong-field 0, and separately 1); `E+F+C` (crc-accept 1, experimental); `F+P` (fieldbook 2, geom-pin 1); `F+P+C` (fieldbook 2, geom-pin 1, crc-accept 1); `P_stress` (oracle 0, geom-pin 1, `--crc-false 1e-3`); `C_stress` (oracle 0, equiv 1, crc-accept 1, `--crc-false 1e-3`: measured wrong rate vs analytical bound). Dimensions: oracle settings {`--oracle 1`, `--oracle 0`, `--oracle 1 --oracle-miss 0.3`, `--oracle 1 --oracle-wrong 0.05`} × rx {4, 1} × cell {SA sib1 1, NSA-like sib1 0}; fixed: twins 2, gate 1, K 1, `--harq-trap 0.01 --crc-false 5.96e-8`, seed 1, 2000 acquisitions × 4 RNTIs (oracle-0 cells may drop to 500 acquisitions if the pilot predicts > 4 h; say so).
 - [ ] **Step 2:** Pilot `--acq 50` per arm → wall-time estimate; then run (≤ 8 parallel).
 - [ ] **Step 3: Decide** per spec §8 pass criteria (**0 wrong winners is the hard rule**; state the Monte-Carlo resolution ≈ 3/N; lever C runtime enablement is only *recommended* here — the operator decides) (wrong = 0 everywhere; undecidable ≤ baseline; oracle-1 time ≤ baseline + seed noise; recovery from injected wrong promotion within 2 RNTIs; blind cold median ≤ 30 s at 4 RX / ≤ 90 s at 1 RX, else report the gap). Write the decision block into the addendum §8 and the chosen runtime flags into levers-plan R2 env line (`ISAC_TD_EQUIV`, `ISAC_TD_FIELDBOOK` 0/2, `ISAC_TD_CRC_ACCEPT` only if approved and passed), label `[SIMULATED, DGX host, nr_td_sim @<commit>]`.
