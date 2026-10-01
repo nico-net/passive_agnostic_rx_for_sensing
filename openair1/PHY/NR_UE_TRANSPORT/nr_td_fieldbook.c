@@ -2,6 +2,14 @@
 #include "nr_td_fieldbook.h"
 #include <string.h>
 
+static bool has_rnti(const uint16_t *set, int n, uint16_t rnti)
+{
+  for (int i = 0; i < n; i++)
+    if (set[i] == rnti)
+      return true;
+  return false;
+}
+
 /* Add `rnti` to a distinct-RNTI set; false if already present or the set is full (a full set ignores new RNTIs). */
 static bool add_rnti(uint16_t *set, int *n, uint16_t rnti)
 {
@@ -129,14 +137,17 @@ static void field_observe(nr_td_fieldbook_t *fb, nr_td_field_t f, uint16_t rnti,
     return;
   nr_td_field_entry_t *e = &fb->f[f];
   nr_td_field_cand_t *c = cand_row(e, v);
-  const bool is_new = c && add_rnti(c->support, &c->n_support, rnti);
+  /* "new" = not already a supporter, independent of whether the (capped) insert succeeds */
+  const bool is_new = c && !has_rnti(c->support, c->n_support, rnti);
+  if (c)
+    add_rnti(c->support, &c->n_support, rnti);
   if (e->state == NR_TD_FS_UNSEEN)
     e->state = NR_TD_FS_CANDIDATE; /* first evidence; not a pruning-relevant change, generation untouched */
   if (e->state == NR_TD_FS_PROMOTED || e->state == NR_TD_FS_SUSPECT) {
     if (e->value == v) {
       e->epoch = fb->epoch;
       e->last_confirmed_slot = slot;
-      if (e->state == NR_TD_FS_SUSPECT && is_new) { /* re-confirmed by a further independent RNTI */
+      if (e->state == NR_TD_FS_SUSPECT && is_new && !has_rnti(e->contra, e->n_contra, rnti)) { /* re-confirmed by a further independent RNTI */
         e->n_contra = 0;
         set_state(fb, e, NR_TD_FS_PROMOTED);
       }
@@ -166,9 +177,10 @@ void nr_td_fieldbook_bump_epoch(nr_td_fieldbook_t *fb)
     nr_td_field_entry_t *e = &fb->f[f];
     const nr_td_field_state_t was = e->state;
     const int32_t hint = (was == NR_TD_FS_PROMOTED || was == NR_TD_FS_SUSPECT) ? e->value : e->hint_value;
-    const uint32_t tick = e->tick;
+    const uint32_t tick = e->tick, ep = e->epoch;
     entry_reset(e); /* all support and contradiction sets cleared: old-epoch evidence never counts */
     e->tick = tick;
+    e->epoch = ep; /* config_epoch when last confirmed: kept */
     e->hint_value = hint;
     e->state = (was == NR_TD_FS_UNSEEN) ? NR_TD_FS_UNSEEN : NR_TD_FS_CANDIDATE;
   }

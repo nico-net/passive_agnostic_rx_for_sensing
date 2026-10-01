@@ -36,7 +36,8 @@ typedef struct {
   uint32_t epoch;
   int promote_rntis; /* default 2 */
   int withdraw_rntis; /* default 2 */
-  uint32_t generation; /* bumped on every field state change: promote, suspect, reconfirm, withdraw, epoch bump */
+  uint32_t generation; /* bumped on every change that affects pruning or hints: promote, suspect, reconfirm, withdraw, force_promote, epoch bump.
+                       UNSEEN->CANDIDATE does not bump. */
   uint32_t n_withdrawn;
 } nr_td_fieldbook_t;
 void nr_td_fieldbook_init(nr_td_fieldbook_t *fb, int promote_rntis, int withdraw_rntis);

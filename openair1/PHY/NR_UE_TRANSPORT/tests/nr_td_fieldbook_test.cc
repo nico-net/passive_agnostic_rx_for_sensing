@@ -79,6 +79,7 @@ TEST(TdFieldBook, EpochBumpKeepsHintNeedsTwoNewSupporters) {
   EXPECT_EQ(s.f_dmrs_max_len, 1);
   EXPECT_FLOAT_EQ(s.f_conf, 1.0f);
   nr_td_fieldbook_bump_epoch(&fb);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].epoch, fb.epoch - 1); /* last-confirmed epoch kept across the bump */
   int32_t v;
   for (int f = 0; f < NR_TD_F_COUNT; f++)
     EXPECT_FALSE(nr_td_fieldbook_prunes(&fb, (nr_td_field_t)f, &v));
@@ -91,6 +92,7 @@ TEST(TdFieldBook, EpochBumpKeepsHintNeedsTwoNewSupporters) {
   nr_td_fieldbook_converged(&fb, 6, &h, 10, 0); /* a second distinct one does */
   EXPECT_TRUE(nr_td_fieldbook_prunes(&fb, NR_TD_F_TDRA, &v));
   EXPECT_EQ(v, nr_td_pack_tdra(1, 13, 0, 0));
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].epoch, fb.epoch); /* re-promoted in new epoch */
 }
 TEST(TdFieldBook, EvictedRntiStillCountsForPromotion) {
   /* The field book keeps its own RNTI sets; it does not depend on Technique D's 64-slot RNTI context table. */
@@ -277,4 +279,39 @@ TEST(FieldBookSM, GenerationBumpsOnEveryStateChangeAndForcePromote) {
   EXPECT_EQ(nr_td_fieldbook_generation(&fb), g);
   nr_td_fieldbook_force_promote(&fb, NR_TD_F_DMRS_MAX_LEN, 2);
   int32_t v; EXPECT_TRUE(nr_td_fieldbook_prunes(&fb, NR_TD_F_DMRS_MAX_LEN, &v)); EXPECT_EQ(v, 2);
+}
+TEST(FieldBookSM, ReconfirmWorksWithFullSupportSet) {
+  nr_td_fieldbook_t fb; nr_td_fieldbook_init(&fb, 2, 2); auto a = Hq(2, 12), b = Hq(1, 13);
+  nr_td_fieldbook_converged(&fb, 1, &a, 0, 0); nr_td_fieldbook_converged(&fb, 2, &a, 0, 0);
+  for (int r = 100; r < 116; r++) nr_td_fieldbook_converged(&fb, (uint16_t)r, &a, 0, 0);
+  nr_td_fieldbook_converged(&fb, 3, &b, 0, 0);
+  EXPECT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_SUSPECT);
+  nr_td_fieldbook_converged(&fb, 500, &a, 0, 0);
+  EXPECT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_PROMOTED);
+}
+TEST(FieldBookSM, HypMatchesMappingAndK0) {
+  auto a = Hq(2, 12);
+  EXPECT_FALSE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 1, 0), &a));
+  EXPECT_FALSE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 0, 3), &a));
+}
+TEST(FieldBookSM, PrunedConvergeDoesNotContradict) {
+  nr_td_fieldbook_t fb; nr_td_fieldbook_init(&fb, 2, 2); auto a = Hq(2, 12), b = Hq(1, 13);
+  nr_td_fieldbook_converged(&fb, 1, &a, 0, 0); nr_td_fieldbook_converged(&fb, 2, &a, 0, 0);
+  nr_td_fieldbook_converged(&fb, 3, &b, 0, 1u << NR_TD_F_TDRA);
+  EXPECT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_PROMOTED);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].n_contra, 0);
+}
+TEST(FieldBookSM, RepeatSupporterDoesNotReconfirm) {
+  nr_td_fieldbook_t fb; nr_td_fieldbook_init(&fb, 2, 2); auto a = Hq(2, 12), b = Hq(1, 13);
+  nr_td_fieldbook_converged(&fb, 1, &a, 0, 0); nr_td_fieldbook_converged(&fb, 2, &a, 0, 0);
+  nr_td_fieldbook_converged(&fb, 3, &b, 0, 0);
+  nr_td_fieldbook_converged(&fb, 1, &a, 0, 0);
+  EXPECT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_SUSPECT);
+}
+TEST(FieldBookSM, ContradictingRntiCannotReconfirm) {
+  nr_td_fieldbook_t fb; nr_td_fieldbook_init(&fb, 2, 2); auto a = Hq(2, 12), b = Hq(1, 13);
+  nr_td_fieldbook_converged(&fb, 1, &a, 0, 0); nr_td_fieldbook_converged(&fb, 2, &a, 0, 0);
+  nr_td_fieldbook_converged(&fb, 3, &b, 0, 0);
+  nr_td_fieldbook_converged(&fb, 3, &a, 0, 0); /* the contradicter flips back: not independent */
+  EXPECT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_SUSPECT);
 }
