@@ -588,20 +588,11 @@ static double rate_of(const nr_pdsch_config_sweep_state_t *st, int i)
   return (st->trials[i] > 0) ? ((double)st->ok[i] / (double)st->trials[i]) : 0.0;
 }
 
-int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok)
+/* The acceptance decision, shared by every feed path: the KL separation test when check_separation (a credited
+ * hypothesis just reached a multiple of 16 trials), then the full-round fallback. Evidence must already be credited. */
+static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation)
 {
-  if (st == NULL || idx < 0 || idx >= st->n_hyp) {
-    return (st != NULL) ? st->winner : -1;
-  }
-  if (st->winner >= 0) {
-    return st->winner;
-  }
-  st->trials[idx]++;
-  if (tb_crc_ok) {
-    st->ok[idx]++;
-  }
-
-  if ((st->trials[idx] % 16) == 0) {
+  if (check_separation) {
     int leader=0;
     for(int i=1;i<st->n_hyp;i++)
       if(rate_of(st,i)>rate_of(st,leader)) leader=i;
@@ -649,6 +640,55 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
     st->winner = best;
   }
   return st->winner;
+}
+
+int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok)
+{
+  if (st == NULL || idx < 0 || idx >= st->n_hyp) {
+    return (st != NULL) ? st->winner : -1;
+  }
+  if (st->winner >= 0) {
+    return st->winner;
+  }
+  st->trials[idx]++;
+  if (tb_crc_ok) {
+    st->ok[idx]++;
+  }
+  return sweep_decide(st, (st->trials[idx] % 16) == 0);
+}
+
+int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
+                                     bool new_data)
+{
+  (void)new_data; /* lever C (BC2) */
+  if (st == NULL || idx == NULL || n < 1) {
+    return (st != NULL) ? st->winner : -1;
+  }
+  if (st->winner >= 0) {
+    return st->winner;
+  }
+  /* One crediting loop: every distinct in-range member gets exactly this grant's one Bernoulli sample. */
+  bool credited = false, check = false;
+  for (int k = 0; k < n; k++) {
+    const int h = idx[k];
+    if (h < 0 || h >= st->n_hyp)
+      continue;
+    bool dup = false;
+    for (int j = 0; j < k && !dup; j++)
+      dup = idx[j] == h;
+    if (dup)
+      continue;
+    st->trials[h]++;
+    if (tb_crc_ok)
+      st->ok[h]++;
+    credited = true;
+    if ((st->trials[h] % 16) == 0)
+      check = true;
+  }
+  /* Nothing valid: same as _feed on an out-of-range index (no decision). */
+  if (!credited)
+    return st->winner;
+  return sweep_decide(st, check);
 }
 
 int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[])

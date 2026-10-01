@@ -64,6 +64,14 @@ uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm)
   return sig;
 }
 
+/* Exact grant-equivalence key (blind-convergence spec 2026-10-01 section 2): the signature plus the target code
+ * rate R x1024 of the grant's MCS under the hypothesis's table, so TBS and rate matching are identical too. R sits
+ * in bits 42..59, above every signature field (bits 0..41). */
+uint64_t nr_td_equiv_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm, uint32_t code_rate_x1024)
+{
+  return nr_td_signature(h, nl, qm) ^ ((uint64_t)(code_rate_x1024 & 0x3FFFF) << 42);
+}
+
 /* Comparator for qsort of uint64_t values */
 static int nr_td_sig_cmp(const void *a, const void *b)
 {

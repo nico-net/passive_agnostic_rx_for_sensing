@@ -217,6 +217,26 @@ TEST(TdLegal, CAbove255IsInfeasible)
   nr_td_rm_geom_t g = {50000, 25000, 4, 1, 256, 8448, 0, 384, 1, 25344, 0}; /* real C is uint8_t: 256 wraps to 0 */
   EXPECT_FALSE(nr_td_rm_feasible(&g));
 }
+TEST(TdEquiv, SameComputationSameKey) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 2; a.tda_length = 12; a.dmrs_mask = 0x884; a.dmrs_max_len = 1;
+  nr_pdsch_cfg_hypothesis_t b = a; b.mcs_table = 1; /* differs only in table */
+  EXPECT_EQ(nr_td_equiv_key(&a, 1, 4, 490), nr_td_equiv_key(&b, 1, 4, 490)); /* same Qm and R on this MCS */
+}
+TEST(TdEquiv, DifferentRateOrGeometryDifferentKey) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 2; a.tda_length = 12; a.dmrs_mask = 0x884; a.dmrs_max_len = 1;
+  nr_pdsch_cfg_hypothesis_t b = a;
+  EXPECT_NE(nr_td_equiv_key(&a, 1, 4, 490), nr_td_equiv_key(&b, 1, 4, 553));
+  b.k0 = 1;
+  EXPECT_NE(nr_td_equiv_key(&a, 1, 4, 490), nr_td_equiv_key(&b, 1, 4, 490));
+}
+/* The rate occupies bits 42..59, above every signature field: the key with R = 0 is the signature itself,
+ * and the largest R x 1024 of TS 38.214 Tables 5.1.3.1-1..3 (948) never aliases a field. */
+TEST(TdEquiv, RateFieldDoesNotOverlapSignature) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 13; a.tda_length = 14; a.k0 = 32; a.mapping_type = 1;
+  a.dmrs_mask = 0x3FFF; a.dmrs_max_len = 2; a.dmrs_add_pos = 3;
+  EXPECT_EQ(nr_td_equiv_key(&a, 4, 8, 0), nr_td_signature(&a, 4, 8));
+  EXPECT_EQ(nr_td_equiv_key(&a, 4, 8, 948) ^ nr_td_signature(&a, 4, 8), (uint64_t)948 << 42);
+}
 int main(int argc, char **argv)
 {
   logInit(); /* the real rate matching reports rejects through LOG_E */

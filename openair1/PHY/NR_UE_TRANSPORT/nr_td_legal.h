@@ -49,6 +49,11 @@ uint64_t nr_td_signature(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm);
  * hypothesis (may vary per hypothesis). Returns the number of distinct signature values (0 for an
  * empty catalog), or -1 on error (n < 0, NULL hyp/qm_per_hyp with n > 0, or allocation failure). */
 int nr_td_count_signatures(const nr_pdsch_cfg_hypothesis_t *hyp, int n, int nl, const int *qm_per_hyp);
+
+/* Exact grant-equivalence key: equal keys <=> identical receiver computation on a grant (same geometry, DM-RS,
+ * layers, Qm and target code rate R x1024 of the grant's MCS under the hypothesis's table). Never merges distinct
+ * computations (may over-split via add_pos/max_len). */
+uint64_t nr_td_equiv_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm, uint32_t code_rate_x1024);
 #ifdef __cplusplus
 }
 #endif
