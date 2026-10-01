@@ -123,10 +123,17 @@ typedef struct {
   uint16_t probe_pass[NR_PDSCH_SWEEP_MAX_HYP];
   uint16_t probe_fail[NR_PDSCH_SWEEP_MAX_HYP];
   uint16_t probe_inconclusive[NR_PDSCH_SWEEP_MAX_HYP];
+  /* Lever C (CRC-pass acceptance, spec 2026-10-01 section 3, experimental, default off). ok_unique[h] counts passes on NEW-DATA
+   * grants where h was the only ACTIVE hypothesis credited by that nr_pdsch_config_sweep_feed_equiv() call. Evidence-like:
+   * cleared together with trials/ok (every prune, rebuild, context reopen). Lever C requires the caller to use feed_equiv for
+   * the main decodes: feed / feed_k never touch ok_unique, and becoming blocked does not undo an existing winner. */
+  uint16_t ok_unique[NR_PDSCH_SWEEP_MAX_HYP]; ///< passes on grants where the hypothesis was alone in its equivalence class
+  bool     crc_accept_blocked; ///< a second active hypothesis has a unique pass: lever C off until the next prune/rebuild
   /* CONFIGURATION, not catalog/evidence: preserved across catalog rebuilds (nr_pdsch_config_sweep_rebuild(),
    * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
   const struct nr_td_side_info_s *side; ///< ordering side information (nr_td_order.h); NULL = neutral (today's order)
   bool     p2;        ///< failure-only probe evidence enabled
+  bool     crc_accept; ///< lever C enabled (configuration: preserved across rebuild like side/p2; a new context starts false)
   /* DORMANT (reversible) hypothesis masks, blind-convergence spec 2026-10-01 section 4. CONFIGURATION+MEMBERSHIP, not
    * evidence: preserved by nr_pdsch_config_sweep_rebuild(), compacted with the same keep-index mapping by every destructive
    * prune (prune_commit, prune_keep). One bit per hypothesis index per cause; bits at indices >= n_hyp are always 0.
@@ -143,7 +150,7 @@ typedef struct {
    * hypothesis (feed_k: one call = main outcome + its probes, counted once; probe outcomes count only when they add KL
    * evidence, i.e. a P2-admissible FAIL); reset to 0 by a PASS credited to an active hypothesis (a feed_k probe PASS is not
    * evidence and never resets it). Also reset to 0 whenever the active set changes: set_fail_open toggling, and set_dormant / clear_dormant calls that
-   * change at least one mask bit. Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
+   * change at least one mask bit (these also clear ok_unique and crc_accept_blocked). Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
   uint32_t since_pass;
 } nr_pdsch_config_sweep_state_t;
 
@@ -178,9 +185,18 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
  * nr_pdsch_config_sweep_feed(st, idx[0], tb_crc_ok). The acceptance check runs once, after crediting, whenever any
  * credited hypothesis reached a multiple of 16 trials. Returns the winner or -1.
  * Equivalence (blind-convergence spec 2026-10-01 section 2) is the caller's job: equal nr_td_equiv_key() on this
- * grant. new_data is accepted but currently IGNORED; lever C (task BC2) will use it. */
+ * grant. The caller passes the FULL grant-equivalence class including dormant members (crediting skips dormant members,
+ * but a pass is UNIQUE only when the class has exactly one distinct in-range member, dormant ones counted: a dormant twin
+ * may be the truth). new_data matters only with st->crc_accept (lever C): a pass with tb_crc_ok && new_data on a one-member class counts in ok_unique[idx[0]] (saturating); before the KL decision, if exactly one active hypothesis has
+ * ok_unique > 0 and it reaches nr_pdsch_config_sweep_crc_accept_m(n_active, max active trials), it wins; two or more such
+ * hypotheses set crc_accept_blocked (sticky until the next prune/rebuild/reopen). With crc_accept false the behaviour is
+ * bit-identical to the KL-only rule. */
 int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
-                                     bool new_data /* new transmission (NDI toggled); used only by lever C (BC2) */);
+                                     bool new_data /* new transmission (NDI toggled); used only by lever C */);
+
+/** Lever C threshold: smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6 (log domain, lgamma). m = 2 when
+ *  n_alive <= 1 or t_max == 0; for t_max < m, C = 0 so m qualifies at once (result max(2, m)). */
+int nr_pdsch_config_sweep_crc_accept_m(int n_alive, uint32_t t_max);
 
 /** K = 1 is exactly nr_pdsch_config_sweep_next(). Returns n filled (1..K, K clamped to NR_TD_MAX_K;
  *  0 when nothing can be selected); idx[0]/out[0] = the main hypothesis (unchanged path and RNG use),
