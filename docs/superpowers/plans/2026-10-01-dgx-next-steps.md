@@ -1466,7 +1466,7 @@ if __name__ == "__main__":
 Run: `python3 tests/passive_rx/campaign/test_campaign.py -v`
 Expected: 4 tests OK.
 
-- [ ] **Step 6: Real rfsim campaign smoke** (🔁 Haiku may run this step)
+- [x] **Step 6: Real rfsim campaign smoke** (🔁 Haiku may run this step)
 
 Run:
 ```bash
