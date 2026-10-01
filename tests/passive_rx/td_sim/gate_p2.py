@@ -33,7 +33,7 @@ def cmd(sim, m, arm, j):
     flags = dict(m.get("common", {}), **m["arms"][arm], **m["cells"][j["cell"]], **j["dims"], oracle=j["oracle"])
     c = [sim, "--acq", str(j["acq"]), "--seed", str(j["seed"]), "--n-rx", str(j["rx"])]
     for k, v in flags.items():
-        c += ["--" + ("p-true-snr-mu" if k == "p_true_snr_mu" else k.replace("_", "-")), str(v)]
+        c += ["--" + k.replace("_", "-"), str(v)]
     return c
 
 
@@ -156,6 +156,28 @@ def summarize(a, m):
             w("| %d | %s | %d | %d | %d | %d | %d | %.2f / %.2f |" % (o, v, len(g), sum(x[1]["wrong"] for x in g), sum(x[2]["wrong"] for x in g),
                                                          sum(x[1]["undecidable"] for x in g), sum(x[2]["undecidable"] for x in g),
                                                          mean([x[1]["seconds"] for x in both]), mean([x[2]["seconds"] for x in both])))
+    # Wrong-winner diagnostics (P2 arm). Admitted-fail share of the truth = (truth KL trials - truth full-TB decodes) /
+    # truth KL trials; valid without pruning (oracle 0, prior off because fieldbook 1). CORRELATIONAL, not a causal test.
+    w("\n## Wrong P2 winners: identity and truth admitted-fail share (oracle 0, decided RNTIs; correlational)\n")
+    pairs, shw, shc = {}, [], []
+    for key, g in groups.items():
+        if key[2] != 0:
+            continue
+        for x in g:
+            r = x[2]
+            if r["undecidable"] or x[0]["dims"].get("twins") != 2:
+                continue
+            sh = (r["truth_kl_trials"] - r["truth_full"]) / max(1, r["truth_kl_trials"])
+            (shw if r["wrong"] else shc).append(sh)
+            if r["wrong"]:
+                k2 = (r["truth_table"], int(r["winner"].rsplit("/", 1)[1]))
+                pairs[k2] = pairs.get(k2, 0) + 1
+    w("| (truth table, winner table) | wrong P2 RNTIs |")
+    w("|---|---|")
+    for k2 in sorted(pairs):
+        w("| %s | %d |" % (k2, pairs[k2]))
+    w("\nMedian share of the truth's KL trials that are admitted probe FAILs (twins 2): wrong RNTIs %.2f (n %d), correct RNTIs "
+      "%.2f (n %d)." % (med(shw), len(shw), med(shc), len(shc)))
     with open(os.path.join(a.out, "summary.md"), "w") as fh:
         fh.write("\n".join(L) + "\n")
     print("\n".join(L))

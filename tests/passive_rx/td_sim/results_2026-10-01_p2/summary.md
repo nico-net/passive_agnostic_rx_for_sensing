@@ -76,30 +76,14 @@ Criteria: wrong = 0 in both arms; truth_eliminated_by_probe = 0; same winner for
 | 0 | 4 | 11520 | 0 | 482 | 782 | 767 | 567.61 / 293.57 |
 | 0 | 16 | 11520 | 0 | 450 | 783 | 732 | 558.58 / 290.56 |
 
-## Run record
+## Wrong P2 winners: identity and truth admitted-fail share (oracle 0, decided RNTIs; correlational)
 
-- Simulator `nr_td_sim` built at commit 02524c44ff (branch td/convergence-levers) on the DGX host; runner
-  `python3 tests/passive_rx/td_sim/gate_p2.py run --sim nr_td_sim --matrix tests/passive_rx/td_sim/gate_p2.json --raw RAW -j 8`,
-  then `summarize`. Wall time [MEASURED, DGX host]: oracle 1 half 7 s, oracle 0 half 2396 s (8 processes).
-- Acquisitions (4 RNTIs each) per (cell, rx): oracle 1 = 260 x 72 configs = 18 720; oracle 0 = 20 x 72 configs = 1 440;
-  total 20 160 per (cell, rx), 80 640 overall, per arm. Oracle 0 was cut to 20 acquisitions per config for compute (~40 min
-  for the blind half); the oracle 0 failure is already decisive at this size (932 wrong P2 winners vs 0 in P1).
-- Twins: the brief asked {0, 3}; the simulator caps physical twins at 2 (all other-table entries), so the arms are
-  twins 2 (physical) and twins 0 (UNPHYSICAL stress arm: other-table entries always fail).
-- Raw per-RNTI output (196 MB) is not committed; `per_config.jsonl` holds one aggregate line per (config, arm).
-- `truth_eliminated_by_probe` is measured on the engine's counters (truth KL failures added by feed_k on grants where the
-  truth's full decode passes); 0 everywhere.
+| (truth table, winner table) | wrong P2 RNTIs |
+|---|---|
+| (0, 1) | 471 |
+| (0, 2) | 136 |
+| (1, 0) | 13 |
+| (1, 2) | 198 |
+| (2, 1) | 114 |
 
-## Why P2 produces wrong winners in the blind arm [SIMULATED, DGX host, nr_td_sim @02524c44ff]
-
-Every wrong P2 winner is a physical twin of the truth (same S, L, k0, DM-RS; other mcs_table): (truth, winner) table pairs
-(0,1) 471, (1,2) 198, (0,2) 136, (2,1) 114, (1,0) 13. All wrong winners occur with twins 2 (twins 0: 0 wrong), 920/932 at
-table_exercise 0.5, none at K 4. In the 932 wrong RNTIs the median share of the truth's KL trials that are admitted probe
-FAILs is 0.92; in the 9 089 correct twins-2 oracle-0 RNTIs it is 0.06.
-Mechanism: P2 counts probe FAILs and discards probe PASSes, so the engine's rate ok/trials for any hypothesis that sometimes
-passes is deflated in proportion to how often it is probed. Probe allocation depends on the search state (the probes are the
-next entries at the round-robin cursor; during the "hot" exploit the main decode does not advance the cursor, so the same
-hypothesis is probed on consecutive grants: nr_pdsch_config_sweep.c:564-573 (hot exploit returns without moving the cursor), 669-680 (probes read from the cursor)). When the truth is probed far more
-than its twin, the twin's undeflated rate leads and passes the separation test or the 300-trial fallback. The probe
-outcome is correct on every grant (truth_eliminated_by_probe = 0); the bias is in the estimator, which no longer sees a
-Bernoulli sample. With oracle 1 the Qm oracle removes the twins after two sightings, so no twin is left to win.
+Median share of the truth's KL trials that are admitted probe FAILs (twins 2): wrong RNTIs 0.92 (n 932), correct RNTIs 0.06 (n 9089).

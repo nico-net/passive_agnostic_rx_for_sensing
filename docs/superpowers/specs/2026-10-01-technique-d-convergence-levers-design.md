@@ -168,11 +168,13 @@ full-TB decode."*
 - Live multi-UE validation after simulation.
 
 **Decision 2026-10-01 (levers Task 7, simulator gate): P2 FAILS the gate and stays off (`ISAC_TD_P2=0`).**
-Evidence: `tests/passive_rx/td_sim/results_2026-10-01_p2/summary.md` (matrix `tests/passive_rx/td_sim/gate_p2.json`),
-all numbers `[SIMULATED, DGX host, nr_td_sim @02524c44ff]`. Arms all_P1 vs all_P2 (gate 1, all weights 1, field book 1,
-K 2/3/4; only p2 differs), paired per RNTI on identical channel draws; cells SA / NSA-like, 4 RX / 1 RX, twins 2 (physical)
+Evidence: `tests/passive_rx/td_sim/results_2026-10-01_p2/summary.md` (generated) and `analysis.md` (run record, mechanism)
+(matrix `tests/passive_rx/td_sim/gate_p2.json`), all numbers `[SIMULATED, DGX host, nr_td_sim @02524c44ff]`.
+Arms all_P1 vs all_P2 (gate 1, all weights 1, field book 1, K 2/3/4; only p2 differs), paired per RNTI realisation (same
+truth, channel draws and engine seed; the trajectories diverge); cells SA / NSA-like, 4 RX / 1 RX, twins 2 (physical)
 and 0 (unphysical stress), table exercise 0.9 / 0.5, mu 8 / 15 / 25 dB, catalogue 4 / 16 TDA rows; 20 160 acquisitions
-per (cell, rx) and arm (oracle 1: 18 720; oracle 0: 1 440, cut for compute).
+per (cell, rx) and arm (oracle 1: 18 720; oracle 0: 1 440, cut for compute). probe_inconclusive was left at its default (0.1):
+the probe-cost ablation above was not run, which is moot given the FAIL.
 - **Oracle 1 (today's runtime DM-RS / Qm oracles), every (cell, rx):** wrong 0 (P1 and P2) — PASS; truth eliminated by
   probe 0 — PASS; same winner on 74 880 / 74 880 paired RNTIs per (cell, rx) — PASS; true hypothesis not slower (median
   full-TB decodes of the truth 97 → 69-70) — PASS; full-TB decodes and time reduced (mean n_full/RNTI ~235 → ~159,
@@ -182,17 +184,29 @@ per (cell, rx) and arm (oracle 1: 18 720; oracle 0: 1 440, cut for compute).
   0 — PASS; same winner — FAIL (110-185 paired RNTIs decided by both arms with different winners per (cell, rx), plus
   one-sided decisions); true hypothesis not slower — PASS (median truth full-TB 128-143 → 100-102); full-TB decodes and
   time reduced (mean s ~490-640 → ~240-340) — PASS; undecidable not increased — FAIL at 4 RX (313/314 → 369), PASS at 1 RX.
-- Cause: failure-only evidence keeps probe FAILs and drops probe PASSes, so the KL rate of any hypothesis that sometimes
-  passes is deflated in proportion to how often it is probed, and probe allocation depends on the search state (cursor,
-  hot exploit). In the wrong RNTIs a median 92 % of the truth's KL trials are admitted probe FAILs (6 % in correct ones),
-  and its physical twin wins. Each admitted FAIL is individually correct; the estimator is biased. This is a design flaw
-  of §5.2 as specified, not a K38 or same-decoder issue, and the Qm oracle at oracle 1 masks it (by pruning the twins)
-  rather than removing it.
+- Cause: probe slots go to the first uncleared survivors in score order (nr_pdsch_config_sweep.c:669-681, with the
+  cleared-hypothesis skip at :671; ordering key :519 includes w_obs and w_probe). P2 failures clear the dead hypotheses
+  quickly, so when K−1 is smaller than the number of survivors, the truth — ranked first by correct side information — is
+  probed far more than its twins (≈ 30× its fair share in the reproduction: truth_full ≈ 282 vs truth_kl_trials ≈ 4641).
+  The truth's KL rate p·F/(F+(1−p)·P) is therefore deflated below a rarely probed twin. Each admitted FAIL is individually
+  correct; the estimator is biased, because failure-only counts are not a binomial sample. Supporting evidence: seed 308001
+  (NSA-like, 4 RX, blind, twins 2, te 0.5, K 2, mu 8, catalogue 16) gives 9/20 wrong under P2 and 0/20 with w_obs 0;
+  K 4 gives 0 wrong (all survivors probed equally); bare P2 (no gate, ordering or field book) gave 0/48 wrong. The figure
+  "median 92 % of the truth's KL trials are admitted probe FAILs in wrong RNTIs vs 6 % in correct ones" is correlational.
+  The hot exploit is not the cause (capped at trials[hot] < 64, :571). This is a design flaw of §5.2 as specified, not a
+  K38 or same-decoder issue; the Qm oracle at oracle 1 masks it (by pruning the twins) rather than removing it.
 - Regardless of the simulator: runtime P2 at Nl > 1 stays blocked by K38 (probe CB0 LLRs ≠ full decode at rank 4) until
   K38 is fixed or the probe horizon is forced to 0 when Nl > 1, and any admitted probe FAIL requires the §9.3
-  same-decoder rule. Re-opening P2 needs an unbiased evidence rule (e.g. admit FAILs only from hypotheses probed at a
-  state-independent rate, or score probes as complete Bernoulli samples where a CB0 PASS can be tied to the TB outcome) and
-  a re-run of this gate.
+  same-decoder rule.
+- Not sound as follow-ups: a state-independent probe schedule (full-TB allocation is itself state-dependent, and
+  failure-only counts are not a binomial sample, so nr_crc_interval does not apply); tying a CB0 PASS to the TB outcome
+  (it cannot be); restricting P2 to non-twins (it passes the simulator only because only twins have p > 0 there).
+- The one sound redesign (to be specified and gated before any re-opening): a **separate symmetric CB0 evidence channel**.
+  CB0 PASS and FAIL feed their own per-hypothesis CB0 rate, never mixed with the full-TB counts. It is used one-sided,
+  for ELIMINATION ONLY: under the §9.3 same-decoder and same-IQ conditions the CB0 pass rate is ≥ the TB pass rate, so a
+  non-leader is eliminated when its CB0 upper bound falls below the leader's full-TB lower bound. Election stays with the
+  full-TB KL test. The union-bound budget is split across the two interval families. Probe selection happens before the
+  outcome is known. The channel still requires K38 fixed (or horizon 0 at Nl > 1) and its own simulator gate.
 
 ## 6. Validation
 
