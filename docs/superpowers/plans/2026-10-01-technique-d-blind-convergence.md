@@ -40,7 +40,7 @@
 | `openair1/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.{h,c}`, `tests/nr_td_fieldbook_test.cc` | field state machine | BC4 |
 | `tests/passive_rx/td_sim/campaign.py`, `test_campaign.py`, `gate_bc.json`, `results_<date>_bc/` | campaigns | BC0, BC6 |
 
-Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
+Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC2b (experimental, operator 2026-10-01) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
 
 ---
 
@@ -248,6 +248,92 @@ TEST(TdSim, HarqTrapNeverAcceptedByCrcRule) {
 - [ ] **Step 2: Run → FAIL.** **Step 3: Implement** (fields, clearing sites, `crc_accept_m` with `lgamma`, rule in `feed_equiv`; sim flag/counter). **Step 4: Run → PASS**; full ctest.
 - [ ] **Step 4b: Analytical check (stress arm):** run `--oracle 0 --equiv 1 --crc-accept 1 --crc-false 1e-3 --acq 2000` and compare the measured wrong-winner rate with the bound `P(wrong) <= sum_h C(T_h, m*) p_f^m*` evaluated on the run's trial counts (print both in the report). The measured rate must not exceed the bound; at the default `p_f = 2^-24` the bound (not the Monte Carlo) is the evidence for 1e-6.
 - [ ] **Step 5: Commit** — `feat(td): CRC-pass acceptance behind a default-off flag (lever C) + simulator arm`.
+
+---
+
+### Task BC2b ★: Partition (geometry) acceptance (lever P), experimental, default off (Opus; Sonnet by operator override 2026-10-01)
+
+**Files:**
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_td_legal.h`, `.c` (`nr_td_geom_key`); Test: `tests/nr_td_legal_test.cc`
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h`, `.c`; Test: `tests/nr_pdsch_config_sweep_test.cc`
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_sim.cc`, `nr_td_sim_test.cc`
+
+**Interfaces:**
+- Consumes: BC2 (`feed_equiv` with `new_data`, `lever_c_restart`, `crc_accept_m`), BC3 (dormant causes, `active()`, `n_active`).
+- Produces (nr_td_legal.h):
+```c
+/* Geometry group of a hypothesis: the fields a CRC pass pins regardless of the MCS table. */
+uint64_t nr_td_geom_key(const nr_pdsch_cfg_hypothesis_t *h);
+/* = tda_start | tda_length << 4 | k0 << 8 | mapping_type << 14 | (dmrs_mask & 0x3FFF) << 16 */
+```
+- Produces (nr_pdsch_config_sweep.h):
+```c
+#define NR_TD_DORMANT_GEOM 4          /* new dormant cause; NR_TD_DORMANT_CAUSES becomes 5 */
+#define NR_TD_GEOM_SLOTS 8
+/* state fields (evidence: cleared wherever ok_unique is cleared, including lever_c_restart) */
+uint64_t geom_key[NR_TD_GEOM_SLOTS]; uint16_t ok_geom[NR_TD_GEOM_SLOTS]; int n_geom; bool geom_blocked;
+bool     geom_pin;   /* configuration (preserved across rebuild like crc_accept), default false */
+```
+- Rule inside `feed_equiv`, **before** lever C and `sweep_decide`: if `geom_pin && !geom_blocked && tb_crc_ok && new_data && active(idx[0])`: add 1 to the slot of `nr_td_geom_key(&hyp[idx[0]])` (new slot if absent; if `n_geom == NR_TD_GEOM_SLOTS` ⇒ `geom_blocked = true`). If ≥ 2 slots have `ok_geom > 0` ⇒ `geom_blocked = true`. Else if the single slot G has `ok_geom >= crc_accept_m(n_groups_active, T_max)` (n_groups_active = number of distinct geometry keys among active hypotheses; T_max = max trials over active) ⇒ `set_dormant(st, NR_TD_DORMANT_GEOM, keep = geom_key == G)`; the resulting active-set change restarts lever C/P evidence (`lever_c_restart` also clears `geom_key/ok_geom/n_geom/geom_blocked`). If `set_dormant` refuses (would empty), do nothing.
+- Simulator: `--geom-pin 0|1` (SimCfg `int geom_pin`); requires the main decode to go through `feed_equiv` (pass the full class as BC1/BC2 define; with `--equiv 0` pass the singleton class `{idx[0]}` — lever P needs no crediting, only attribution). Summary adds `"geom_pins"`, `"geom_blocks"`.
+
+- [ ] **Step 1: Failing tests**
+```cpp
+TEST(TdEquiv, GeomKeyIgnoresTableAndAddPos) {
+  nr_pdsch_cfg_hypothesis_t a = {}; a.tda_start = 2; a.tda_length = 12; a.dmrs_mask = 0x884;
+  nr_pdsch_cfg_hypothesis_t b = a; b.mcs_table = 1; b.dmrs_add_pos = 2;
+  EXPECT_EQ(nr_td_geom_key(&a), nr_td_geom_key(&b));
+  b = a; b.k0 = 1; EXPECT_NE(nr_td_geom_key(&a), nr_td_geom_key(&b));
+}
+TEST(PdschSweepGeomPin, TwoPassesPinTheGeometryReversibly) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4); s->geom_pin = true;
+  const int a = 7; const uint64_t g = nr_td_geom_key(&s->hyp[a]);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  for (int i = 0; i < s->n_hyp; i++)
+    ASSERT_EQ(nr_pdsch_config_sweep_is_active(s.get(), i), nr_td_geom_key(&s->hyp[i]) == g);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+}
+TEST(PdschSweepGeomPin, SecondGeometryWithAPassBlocks) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4); s->geom_pin = true;
+  int a = 7, b = -1;
+  for (int i = 0; i < s->n_hyp && b < 0; i++) if (nr_td_geom_key(&s->hyp[i]) != nr_td_geom_key(&s->hyp[a])) b = i;
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  EXPECT_TRUE(s->geom_blocked); EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+}
+TEST(PdschSweepGeomPin, RetransmissionDoesNotCount) {
+  auto s = std::make_unique<nr_pdsch_config_sweep_state_t>(); nr_pdsch_config_sweep_init(s.get(), 4); s->geom_pin = true;
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, false);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+}
+TEST(PdschSweepGeomPin, OffIsBitIdentical) { /* geom_pin false: same sequence/winner as today (reuse the BC3 NoMasksIsBitIdentical pattern with feed_equiv) */ }
+```
+`nr_td_sim_test.cc`:
+```cpp
+TEST(TdSim, GeomPinNeverWrongUnderHarqTrapAndFalsePasses) {
+  SimCfg c = SimCfg::defaults(); c.acq = 200; c.seed = 31; c.oracle = 0; c.geom_pin = 1;
+  c.harq_trap = 0.02; c.crc_false = 1e-4; c.rntis_per_acq = 1;
+  const SimResult r = run_sim(c); EXPECT_EQ(r.wrong, 0); EXPECT_GT(r.geom_pins, 0);
+}
+TEST(TdSim, GeomPinRecoversFromWrongPriorViaFailOpen) {
+  SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 33; c.oracle = 0; c.fieldbook = 2; c.inject_wrong_field = 0; c.geom_pin = 1;
+  const SimResult r = run_sim(c); EXPECT_EQ(r.wrong, 0); EXPECT_EQ(r.undecidable, 0);
+}
+TEST(TdSim, GeomPinFasterBlind) {
+  SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 35; c.oracle = 0; c.rntis_per_acq = 1;
+  SimCfg p = c; p.geom_pin = 1;
+  EXPECT_LT(run_sim(p).mean_grants, 0.5 * run_sim(c).mean_grants);
+}
+```
+(The implementer writes `OffIsBitIdentical` in full following `PdschSweepDormant.NoMasksIsBitIdentical`.)
+- [ ] **Step 2: Run → FAIL. Step 3: Implement** (engine rule, cause 5, clearing in `lever_c_restart`/`clear_probe_stats`, sim flag + counters). **Step 4: Run → PASS**; full ctest.
+- [ ] **Step 4b: Analytical check:** `--oracle 0 --geom-pin 1 --crc-false 1e-3 --acq 2000`: measured wrong rate ≤ the bound `sum over wrong groups C(T_g, m_P*) p_f^m_P*` (print both).
+- [ ] **Step 5: Commit** — `feat(td): partition (geometry) acceptance behind a default-off flag (lever P) + simulator arm`.
 
 ---
 
@@ -480,7 +566,7 @@ TEST(TdSim, FieldBookTwoNotSlowerThanPriorSteady) {
 - Create: `tests/passive_rx/td_sim/gate_bc.json`, `tests/passive_rx/td_sim/results_<date>_bc/summary.md` (+ `analysis.md`; jsonl only if < 5 MB)
 - Modify: `docs/superpowers/specs/2026-10-01-technique-d-blind-convergence-design.md` (§8 decision block), `docs/superpowers/plans/2026-10-01-technique-d-convergence-levers.md` (R2 env line)
 
-- [ ] **Step 1:** `gate_bc.json` arms: `prior` (today, fieldbook 0); `F_order` (ordering-only field book, fieldbook 1); `E` (equiv 1); `E+F` (equiv 1, fieldbook 2, reversible pruning); `E+F+inject` (… , inject-wrong-field 0, and separately 1); `E+F+C` (crc-accept 1, experimental); `C_stress` (oracle 0, equiv 1, crc-accept 1, `--crc-false 1e-3`: measured wrong rate vs analytical bound). Dimensions: oracle settings {`--oracle 1`, `--oracle 0`, `--oracle 1 --oracle-miss 0.3`, `--oracle 1 --oracle-wrong 0.05`} × rx {4, 1} × cell {SA sib1 1, NSA-like sib1 0}; fixed: twins 2, gate 1, K 1, `--harq-trap 0.01 --crc-false 5.96e-8`, seed 1, 2000 acquisitions × 4 RNTIs (oracle-0 cells may drop to 500 acquisitions if the pilot predicts > 4 h; say so).
+- [ ] **Step 1:** `gate_bc.json` arms: `prior` (today, fieldbook 0); `F_order` (ordering-only field book, fieldbook 1); `E` (equiv 1); `E+F` (equiv 1, fieldbook 2, reversible pruning); `E+F+inject` (… , inject-wrong-field 0, and separately 1); `E+F+C` (crc-accept 1, experimental); `F+P` (fieldbook 2, geom-pin 1); `F+P+C` (fieldbook 2, geom-pin 1, crc-accept 1); `P_stress` (oracle 0, geom-pin 1, `--crc-false 1e-3`); `C_stress` (oracle 0, equiv 1, crc-accept 1, `--crc-false 1e-3`: measured wrong rate vs analytical bound). Dimensions: oracle settings {`--oracle 1`, `--oracle 0`, `--oracle 1 --oracle-miss 0.3`, `--oracle 1 --oracle-wrong 0.05`} × rx {4, 1} × cell {SA sib1 1, NSA-like sib1 0}; fixed: twins 2, gate 1, K 1, `--harq-trap 0.01 --crc-false 5.96e-8`, seed 1, 2000 acquisitions × 4 RNTIs (oracle-0 cells may drop to 500 acquisitions if the pilot predicts > 4 h; say so).
 - [ ] **Step 2:** Pilot `--acq 50` per arm → wall-time estimate; then run (≤ 8 parallel).
 - [ ] **Step 3: Decide** per spec §8 pass criteria (**0 wrong winners is the hard rule**; state the Monte-Carlo resolution ≈ 3/N; lever C runtime enablement is only *recommended* here — the operator decides) (wrong = 0 everywhere; undecidable ≤ baseline; oracle-1 time ≤ baseline + seed noise; recovery from injected wrong promotion within 2 RNTIs; blind cold median ≤ 30 s at 4 RX / ≤ 90 s at 1 RX, else report the gap). Write the decision block into the addendum §8 and the chosen runtime flags into levers-plan R2 env line (`ISAC_TD_EQUIV`, `ISAC_TD_FIELDBOOK` 0/2, `ISAC_TD_CRC_ACCEPT` only if approved and passed), label `[SIMULATED, DGX host, nr_td_sim @<commit>]`.
 - [ ] **Step 4: Commit** — `evidence(td): blind-convergence gate (equivalence, reversible field book, CRC accept)`.

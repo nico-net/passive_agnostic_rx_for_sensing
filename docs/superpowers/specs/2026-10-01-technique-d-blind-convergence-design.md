@@ -78,6 +78,33 @@ computation is identical to the truth's (an equivalent hypothesis, §2) or (c) w
   and checks the measured rate against the formula.
 - Enabling at runtime: separate operator decision after BC6 (and an amendment of the levers-plan Global Constraint).
 
+## 3b. Partition (geometry) acceptance (lever P) — experimental, default off (operator 2026-10-01)
+
+Repurposing of lever E (operator decision 2026-10-01): per-grant equivalence is used for (i) compute dedup **only among
+hypotheses scheduled independently of equivalence** (plan G4; diversity-aware top-K that avoids scheduling equivalent
+hypotheses on the same grant is stratum-dependent scheduling and biases the KL rates, so it is not used), (ii) pass
+attribution (levers C and P), never for duplicating KL trials. Stratified/contextual KL (p_h(pass | stratum)) is the
+principled way to share evidence and is deferred unless BC6 misses the targets.
+
+A TB CRC pass is near-proof (CRC-24) that the decoded **computation** is right, so it pins every field that determines
+the computation even when the MCS table is ambiguous on that grant. Lever P uses this per RNTI:
+- **Geometry group** `G(h)` = `nr_td_geom_key(h)` = (tda_start, tda_length, k0, mapping_type, dmrs_mask). Entries with
+  the same key but different `dmrs_add_pos`/`dmrs_max_len` are computation-identical (the production catalogue
+  deduplicates by mask) and stay in the same group. MCS table is not part of the group.
+- A **new-data** main-decode PASS of an active hypothesis h adds 1 to `ok_geom[G(h)]` (up to `NR_TD_GEOM_SLOTS` = 8
+  distinct groups per state; overflow ⇒ lever P blocked).
+- **Clean lead:** if ≥ 2 distinct groups have `ok_geom > 0`, lever P is blocked for this state until the next
+  evidence restart (HARQ-trap neighbour `k0 ± 1` or a genuinely decoding near neighbour is a different group).
+- **Pin:** when exactly one group G has `ok_geom[G] >= m_P*` with `m_P* = crc_accept_m(n_groups_active, T_max)` (same
+  1e-6 budget, n = number of distinct geometry groups among active hypotheses), every active hypothesis outside G is set
+  **dormant** with cause `GEOM` (reversible; fail-open restores it; the active-set change restarts lever-C/P
+  evidence). The remaining catalogue is the group's MCS-table twins; the KL rule (or lever C on table-separating grants)
+  decides the table.
+- **Never** fed to CellFieldBook: per-grant partial evidence is not a converged-RNTI vote (independence rule §4); the
+  RNTI votes normally once it converges.
+- Flag `ISAC_TD_GEOM_PIN` / simulator `--geom-pin`, default 0; runtime enablement is a separate operator decision
+  after BC6 (same evidence standard as §3).
+
 ## 4. Reversible pruning field book (lever F, replaces levers spec §4.6) — operator decision 2026-10-01
 
 Catalogue construction:
@@ -157,7 +184,7 @@ CB0 probes). Recorded in the levers plan's G4 task.
 
 Arms × {oracle 1, oracle 0, oracle-miss 0.3, oracle-wrong 0.05} × rx {4, 1} × cell {SA, NSA-like}, twins 2,
 harq-trap {0, 0.01}, ≥ 2000 acquisitions × 4 RNTIs per cell: current all-or-nothing prior (today); ordering-only
-field book; +E; reversible-pruning field book (+E+F); +E+F with forced wrong/stale promotion; +E+F+C (experimental);
+field book; +E (negative control); reversible-pruning field book (+F); +F with forced wrong/stale promotion; +F+P; +F+P+C (experimental);
 plus the lever-C stress arm (`--crc-false 1e-3`) compared with the analytical bound. Pass: wrong = 0 everywhere; undecidable not above baseline;
 oracle-1 time not worse than baseline beyond seed noise; field-book recovery from a forced wrong promotion within
 2 RNTIs; blind cold median ≤ 30 s at 4 RX and ≤ 90 s at 1 RX (target — report the gap if missed).
