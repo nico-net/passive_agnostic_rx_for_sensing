@@ -321,10 +321,10 @@ done
 echo "evidence: $OUT"; exit $rc
 ```
 
-- [ ] **Step 7: Run the gate on current HEAD (establishes the baseline)**
+- [x] **Step 7: Run the gate on current HEAD (establishes the baseline)**
 
 Run: `chmod +x tests/passive_rx/dgx/*.sh && tests/passive_rx/dgx/rfsim_regress.sh 2`
-Expected: two `PASS base_rN` lines (HEAD measured 98.6–99.1 % on 2026-09-30/10-01), exit 0. Then create the fixture: `mkdir -p tests/passive_rx/dgx/fixtures && F=tests/passive_rx/dgx/fixtures/base_r1_rx.log && head -400 $OUT/base_r1/rx/rx.log > $F && tail -400 $OUT/base_r1/rx/rx.log >> $F`.
+Expected: two `PASS base_rN` lines (HEAD measured 98.6–99.1 % on 2026-09-30/10-01), exit 0. Cloud-host notes (2026-10-01): the arm auto-applies `V4SHIM` (kernel without IPv6; `v4only_shim.c` LD_PRELOAD for the gNB) and `SCANTHREAD` (nproc<=5: unpinned `--sensing.pdcch_blind_monitor_scan_thread 1:8:-1`; frozen conf pins core 5); HEAD measured crc 94.9-96.9 % / drop_full 0.8-1.5 % there, so use `GATE_CRC_MIN=93.0 GATE_DROP_MAX=2.5` on that host (evidence: `tests/passive_rx/cloud_run_2026-10-01/a1_baseline/`). The fixture additionally keeps the first rnti line plus all `bank add`/`CONVERGED` lines between head and tail (convergence falls in the middle of a 150 s log), ANSI stripped. Then create the fixture: `mkdir -p tests/passive_rx/dgx/fixtures && F=tests/passive_rx/dgx/fixtures/base_r1_rx.log && head -400 $OUT/base_r1/rx/rx.log > $F && tail -400 $OUT/base_r1/rx/rx.log >> $F`.
 
 - [ ] **Step 8: Commit**
 
