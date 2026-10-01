@@ -132,11 +132,15 @@ typedef struct {
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
   uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
   uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
+  uint64_t stale_after_decode; ///< decode finished after its IQ expired: INCONCLUSIVE, no TD/layout credit (K33)
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
   uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
   uint64_t batches;        ///< producer slot batches pushed
   uint64_t batches_multi;  ///< of which carried >1 grant (slots the cell shares between UEs)
 } nr_pdsch_passive_queue_stats_t;
+
+/** In-line decode paths (nr_pdcch_blind_monitor_rt.c) report a stale-after-decode outcome here. */
+void nr_pdsch_passive_note_stale_after_decode(void);
 
 /**
  * @brief Start the consumer thread. Idempotent; safe to call when disabled.

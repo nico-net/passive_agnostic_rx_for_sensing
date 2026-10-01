@@ -6684,7 +6684,12 @@ constdiag_done:;
               NR_BLIND_CTR_INC(g_dec_k0_wait);
             btim_add(BTIM_PDSCH, btim_t_pds);
             /* Same feedback contract as deferred decoding: unsupported/internal errors are not CRC trials. */
-            if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
+            /* K33: IQ may have been overwritten while decoding -> INCONCLUSIVE, no feedback of any kind. */
+            if ((st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)
+                && !nr_passive_credit_allowed(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+                                              grant_pd.source_absolute_slot, fp->slots_per_frame)) {
+              nr_pdsch_passive_note_stale_after_decode();
+            } else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
               /* same evidence as the deferred consumer: layout tallies, or DL link health for 0xFFFF */
               nr_pdcch_dci11_layout_feedback(sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;

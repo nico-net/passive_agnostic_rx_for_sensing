@@ -335,6 +335,11 @@ void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
 static _Atomic uint64_t g_dropped_narrow = 0; // budget: narrow grant refused while the ring was nearly full
 static _Atomic uint64_t g_dropped_stale = 0;
+static _Atomic uint64_t g_stale_after_decode = 0; // K33
+void nr_pdsch_passive_note_stale_after_decode(void)
+{
+  atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
+}
 static _Atomic uint64_t g_max_lag       = 0;
 
 static _Atomic int g_running   = 0;
@@ -985,6 +990,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     nr_slot_fep_fo_override_hz = saved_fo;
+    /* K33: the producer keeps overwriting the ring while we decode (and the GPU path decodes
+     * asynchronously). Re-check lifetime NOW: a CRC computed from overwritten IQ is not evidence for or
+     * against any hypothesis, layout or scrambling id -> INCONCLUSIVE, no feedback of any kind. The
+     * decoded TB itself is still delivered downstream (CRC-OK is a property of the bits, not credit). */
+    const bool credit_ok = nr_passive_credit_allowed(
+        atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
+    if (!credit_ok && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
+      atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
             job.absolute_slot, slots_per_frame))
@@ -1123,14 +1136,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * in nr_pdcch_blind_monitor_rt.c consulted when it chose this grant's dlDataScramblingId --
          * only for grants where that sweep's own candidate was actually used (data_id_advance),
          * so an attempt that used the PCI fallback never perturbs a sweep it did not use. */
-        if (job.data_id_advance)
+        if (job.data_id_advance && credit_ok)
           nr_pdsch_passive_data_id_feed(job.rnti, crc);
       }
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
-      nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
-      if (nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
+      if (credit_ok)
+        nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
               winner.dmrs_mask, winner.mcs_table);
@@ -1140,7 +1154,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
        * moved (nr_pdsch_config_sweep_feedback resolves job.sweep_ticket.hypothesis against the
        * pre-prune array). Ordering this after leaves the DM-RS observe at ~682 untouched -- that one
        * runs on a separate, earlier tap and is out of scope here. */
-      if (!job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
+      if (credit_ok && !job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
         const int kept = nr_pdsch_config_sweep_observe_qm(&job.sweep_ticket, job.grant.mcs, dec.qm_measured);
         if (kept > 0)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
@@ -1429,6 +1443,7 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_narrow = atomic_load_explicit(&g_dropped_narrow, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
+  out->stale_after_decode = atomic_load_explicit(&g_stale_after_decode, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
   out->slot_groups   = atomic_load_explicit(&g_slot_groups, memory_order_relaxed);
   out->batches       = atomic_load_explicit(&g_batches, memory_order_relaxed);

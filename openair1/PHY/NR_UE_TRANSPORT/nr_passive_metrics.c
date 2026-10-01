@@ -50,6 +50,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->pdschq_crc_ok = pq.crc_ok;
   m->pdschq_drop_full = pq.dropped_full;
   m->pdschq_drop_stale = pq.dropped_stale;
+  m->pdschq_stale_after_decode = pq.stale_after_decode;
   m->pdschq_max_lag = pq.max_lag_slots;
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
