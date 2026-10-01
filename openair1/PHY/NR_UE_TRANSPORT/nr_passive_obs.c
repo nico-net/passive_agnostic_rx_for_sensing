@@ -12,14 +12,32 @@
 #include <string.h>
 #include <unistd.h>
 
+/* g_mu is re-initialised once (pthread_once, in open) as PTHREAD_PRIO_INHERIT so an RT decode thread that pushes
+ * cannot be priority-inverted by the (normal-priority) writer holding it. The static initialiser keeps it valid
+ * until then. */
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t g_mu_once = PTHREAD_ONCE_INIT;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static nr_passive_obs_t *g_ring = NULL;
 static uint32_t g_cap = 0, g_head = 0, g_count = 0;
 static bool g_open = false, g_stop = false;
 static FILE *g_f = NULL;
 static pthread_t g_thr;
-static _Atomic uint64_t g_pushed, g_written, g_dropped;
+static _Atomic uint64_t g_pushed, g_written, g_dropped, g_io_errors, g_after_close;
+static _Atomic bool g_closed_seen; /* a session was closed (and not re-opened) */
+
+static void mu_init(void)
+{
+  pthread_mutexattr_t a;
+  if (pthread_mutexattr_init(&a) == 0) {
+    pthread_mutexattr_setprotocol(&a, PTHREAD_PRIO_INHERIT);
+    pthread_mutex_init(&g_mu, &a);
+    pthread_mutexattr_destroy(&a);
+  }
+}
+
+/* Fast-path flag read by nr_passive_obs_enabled() (header); only touched through __atomic builtins. */
+bool nr_passive_obs_fast_open = false;
 
 typedef struct {
   char *p;
@@ -98,6 +116,19 @@ int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n)
   return j.ovf ? -1 : (int)j.w;
 }
 
+/* Flush the stdio buffer; the `pending` lines become `written` on success, io_errors on failure. Returns 0. */
+static uint64_t obs_flush(uint64_t pending)
+{
+  const bool bad = fflush(g_f) != 0 || ferror(g_f);
+  if (bad) {
+    clearerr(g_f);
+    atomic_fetch_add(&g_io_errors, pending ? pending : 1);
+  } else {
+    atomic_fetch_add(&g_written, pending);
+  }
+  return 0;
+}
+
 static void *writer(void *arg)
 {
   (void)arg;
@@ -106,12 +137,13 @@ static void *writer(void *arg)
   if (pause && atoi(pause) > 0)
     usleep((useconds_t)atoi(pause) * 1000);
   char line[1024];
+  uint64_t pending = 0; /* lines in the stdio buffer, counted as `written` only once a flush succeeded */
   for (;;) {
     pthread_mutex_lock(&g_mu);
     if (g_count == 0 && !g_stop) {
       /* ring drained: flush so a live tail sees the lines (I/O outside the lock) */
       pthread_mutex_unlock(&g_mu);
-      fflush(g_f);
+      pending = obs_flush(pending);
       pthread_mutex_lock(&g_mu);
     }
     while (g_count == 0 && !g_stop)
@@ -125,15 +157,20 @@ static void *writer(void *arg)
     g_count--;
     pthread_mutex_unlock(&g_mu);
     const int k = nr_passive_obs_to_json(&o, line, sizeof line);
-    if (k > 0 && fwrite(line, 1, (size_t)k, g_f) == (size_t)k && fputc('\n', g_f) != EOF)
-      atomic_fetch_add(&g_written, 1);
+    if (k > 0 && fwrite(line, 1, (size_t)k, g_f) == (size_t)k && fputc('\n', g_f) != EOF) {
+      if (++pending >= 256)
+        pending = obs_flush(pending);
+    } else {
+      atomic_fetch_add(&g_io_errors, 1);
+    }
   }
-  fflush(g_f);
+  obs_flush(pending);
   return NULL;
 }
 
 bool nr_passive_obs_open(const char *path, uint32_t capacity)
 {
+  pthread_once(&g_mu_once, mu_init);
   pthread_mutex_lock(&g_mu);
   const bool already = g_open;
   pthread_mutex_unlock(&g_mu);
@@ -156,10 +193,15 @@ bool nr_passive_obs_open(const char *path, uint32_t capacity)
   atomic_store(&g_pushed, 0);
   atomic_store(&g_written, 0);
   atomic_store(&g_dropped, 0);
+  atomic_store(&g_io_errors, 0);
+  atomic_store(&g_after_close, 0);
+  atomic_store(&g_closed_seen, false);
   pthread_mutex_lock(&g_mu);
   g_open = true;
   pthread_mutex_unlock(&g_mu);
+  __atomic_store_n(&nr_passive_obs_fast_open, true, __ATOMIC_RELAXED);
   if (pthread_create(&g_thr, NULL, writer, NULL) != 0) {
+    __atomic_store_n(&nr_passive_obs_fast_open, false, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_mu);
     g_open = false;
     pthread_mutex_unlock(&g_mu);
@@ -174,9 +216,15 @@ bool nr_passive_obs_open(const char *path, uint32_t capacity)
 
 bool nr_passive_obs_push(const nr_passive_obs_t *o)
 {
+  if (!__atomic_load_n(&nr_passive_obs_fast_open, __ATOMIC_RELAXED)) { /* off / closed: no lock */
+    if (atomic_load(&g_closed_seen))
+      atomic_fetch_add(&g_after_close, 1);
+    return false;
+  }
   pthread_mutex_lock(&g_mu);
-  if (!g_open) {
+  if (!g_open) { /* re-check under the lock: close() may have won the race */
     pthread_mutex_unlock(&g_mu);
+    atomic_fetch_add(&g_after_close, 1);
     return false;
   }
   if (g_count == g_cap) {
@@ -200,6 +248,8 @@ void nr_passive_obs_close(void)
     return;
   }
   g_open = false;
+  __atomic_store_n(&nr_passive_obs_fast_open, false, __ATOMIC_RELAXED);
+  atomic_store(&g_closed_seen, true);
   g_stop = true; /* no push is accepted after this; the writer drains every accepted record */
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_mu);
@@ -218,4 +268,14 @@ void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped
     *written = atomic_load(&g_written);
   if (dropped)
     *dropped = atomic_load(&g_dropped);
+}
+
+uint64_t nr_passive_obs_io_errors(void)
+{
+  return atomic_load(&g_io_errors);
+}
+
+uint64_t nr_passive_obs_after_close(void)
+{
+  return atomic_load(&g_after_close);
 }

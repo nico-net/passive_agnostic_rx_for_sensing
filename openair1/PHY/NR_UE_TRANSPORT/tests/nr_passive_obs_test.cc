@@ -77,3 +77,34 @@ TEST(PassiveObs, FullRingDropsAndCountsInsteadOfBlocking) {
   EXPECT_LE(ok, 64); EXPECT_EQ(p + d, 1000u); EXPECT_GE(d, 936u);
   nr_passive_obs_close(); unsetenv("ISAC_OBS_TEST_WRITER_PAUSE_MS"); unlink(path);
 }
+
+TEST(PassiveObs, IoErrorsCountedAndNotWritten) {
+  ASSERT_TRUE(nr_passive_obs_open("/dev/full", 64)); // every flush fails with ENOSPC
+  const nr_passive_obs_t o = sample();
+  for (int i = 0; i < 10; i++) EXPECT_TRUE(nr_passive_obs_push(&o));
+  nr_passive_obs_close();
+  uint64_t p, w, d; nr_passive_obs_stats(&p, &w, &d);
+  EXPECT_EQ(p, 10u); EXPECT_EQ(w, 0u);
+  EXPECT_EQ(nr_passive_obs_io_errors(), 10u);
+}
+
+TEST(PassiveObs, PushesAfterCloseAreCounted) {
+  char path[] = "/tmp/obs_test_XXXXXX"; const int fd = mkstemp(path); close(fd);
+  const nr_passive_obs_t o = sample();
+  ASSERT_TRUE(nr_passive_obs_open(path, 16));
+  EXPECT_TRUE(nr_passive_obs_enabled());
+  EXPECT_TRUE(nr_passive_obs_push(&o));
+  nr_passive_obs_close();
+  EXPECT_FALSE(nr_passive_obs_enabled());
+  EXPECT_EQ(nr_passive_obs_after_close(), 0u);
+  for (int i = 0; i < 7; i++) EXPECT_FALSE(nr_passive_obs_push(&o));
+  EXPECT_EQ(nr_passive_obs_after_close(), 7u);
+  uint64_t p, w, d; nr_passive_obs_stats(&p, &w, &d);
+  EXPECT_EQ(p, 1u); EXPECT_EQ(w, 1u); EXPECT_EQ(nr_passive_obs_io_errors(), 0u);
+  unlink(path);
+}
+
+TEST(PassiveObs, DisabledFastPathWhenNeverOpened) {
+  // (runs in a fresh state only if no earlier test left a closed session; both cases are "not enabled")
+  EXPECT_FALSE(nr_passive_obs_enabled());
+}

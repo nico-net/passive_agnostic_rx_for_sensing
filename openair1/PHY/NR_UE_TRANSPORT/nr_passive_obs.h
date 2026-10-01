@@ -61,6 +61,8 @@
  * fs_hz               int64     receiver sample rate = N_fft * SCS, Hz                 null     frame_parms.samples_per_subframe*1e3 same
  *
  * (*)  null for DL grants with rnti_class SI/RA/P (DCI 1_0: field reserved/absent, TS 38.212 7.3.1.2.1).
+ * (***) UL only: after an FDRA candidate sweep that ends in CRC_FAIL, start_rb/nb_rb is the LAST candidate tried,
+ *       not necessarily the signalled allocation (a CRC pass records the winning candidate).
  * (**) null for UL ZERO_TB: all-zero TB, the CRC passes by construction, so it is not a verified decode.
  * [KNOWN ISSUE] UL snr_db holds the CFR mean power in dB (not an SNR) when the noise estimate is 0
  *              (nr_pusch_passive_decode.c:1120 vs :1381).
@@ -113,16 +115,32 @@ int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n);
  *       capacity == 0, or the file/ring cannot be created. Re-open after close is allowed. */
 bool nr_passive_obs_open(const char *path, uint32_t capacity);
 /* close: stops accepting pushes, writes every record already accepted, flushes, joins the writer,
- *        closes the file. A no-op when not open. */
+ *        closes the file. A no-op when not open. BLOCKS until the writer has drained and flushed, so it can
+ *        stall at process exit on a stalled disk. Pushes arriving after close (consumer threads may still
+ *        run at exit; nr_pdsch_passive_queue_stop has no caller) are rejected and counted, see
+ *        nr_passive_obs_after_close(). */
 void nr_passive_obs_close(void);
 /* push: never blocks on I/O (a short mutex only). Copies *o into the ring. Returns true if accepted.
- *       When not open: returns false and counts nothing. When the ring is full: returns false and
+ *       When never opened: returns false and counts nothing; after a close: returns false and counts
+ *       after_close. When the ring is full: returns false and
  *       increments `dropped`. MT-safe, also against a concurrent close. */
 bool nr_passive_obs_push(const nr_passive_obs_t *o);
+/* Cheap "is the observation writer open" check for hooks: when false, skip building the record and the
+ * clock_gettime() call. Relaxed read, no lock; may lag open/close by one call, which push() tolerates. */
+extern bool nr_passive_obs_fast_open;
+static inline bool nr_passive_obs_enabled(void)
+{
+  return __atomic_load_n(&nr_passive_obs_fast_open, __ATOMIC_RELAXED);
+}
 /* stats: pushed = accepted, written = lines fully written to the file, dropped = ring-full rejects,
  *        since the last successful open (still readable after close). After close,
  *        pushed - written = records lost to I/O errors. Any pointer may be NULL. MT-safe. */
 void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped);
+/* io_errors: lines lost to fwrite short / fputc / fflush failures since the last open (never counted in
+ *        `written`; `written` advances only after the lines were flushed, at most 256 lines or one ring drain later). after_close: pushes rejected because the writer was closed (since the last
+ *        close; reset by open). Both readable after close, MT-safe. */
+uint64_t nr_passive_obs_io_errors(void);
+uint64_t nr_passive_obs_after_close(void);
 #ifdef __cplusplus
 }
 #endif

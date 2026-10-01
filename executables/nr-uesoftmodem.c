@@ -257,9 +257,21 @@ int main(int argc, char **argv)
     const char *obs_path = getenv("ISAC_OBS_PATH");
     /* ISAC_OBS_TEST_RING_SLOTS: test hook (overload A/B with a tiny ring); the default is used when unset. */
     const char *ring_env = getenv("ISAC_OBS_TEST_RING_SLOTS");
-    const uint32_t ring = (ring_env && atoi(ring_env) > 0) ? (uint32_t)atoi(ring_env) : (1u << 14);
-    if (obs_path && *obs_path && nr_passive_obs_open(obs_path, ring))
-      LOG_I(PHY, "SENSING: per-grant observations -> %s (ring %u, drop-on-full)\n", obs_path, ring);
+    uint32_t ring = 1u << 14;
+    if (ring_env && *ring_env) {
+      char *end = NULL;
+      const unsigned long v = strtoul(ring_env, &end, 10);
+      if (end && *end == '\0' && v >= 1)
+        ring = v > (1ul << 20) ? (1u << 20) : (uint32_t)v; // clamp to [1, 1<<20]
+      else
+        LOG_W(PHY, "SENSING: ISAC_OBS_TEST_RING_SLOTS=%s invalid, using %u\n", ring_env, ring);
+    }
+    if (obs_path && *obs_path) {
+      if (nr_passive_obs_open(obs_path, ring))
+        LOG_I(PHY, "SENSING: per-grant observations -> %s (ring %u, drop-on-full)\n", obs_path, ring);
+      else
+        LOG_W(PHY, "SENSING: ISAC_OBS_PATH=%s set but the observation writer could not be opened; no observations\n", obs_path);
+    }
   }
 
   softmodem_verify_mode(get_softmodem_params());

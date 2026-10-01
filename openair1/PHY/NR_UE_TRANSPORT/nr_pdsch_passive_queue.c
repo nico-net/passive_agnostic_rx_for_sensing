@@ -1144,7 +1144,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
                 job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
       }
-      if (!job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+      if (nr_passive_obs_enabled() && !job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
         /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). Non-blocking. */
         struct timespec ts_;
         clock_gettime(CLOCK_MONOTONIC, &ts_);

@@ -1564,7 +1564,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
           (unsigned)out->qam_mod_order, out->snr_db, out->est_delay, out->segments_ok,
           out->n_segments, (unsigned)out->status, out->reject_reason ? out->reject_reason : "-");
   }
-  if (g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
+  if (nr_passive_obs_enabled() && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
                     out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {
     /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). cfr_only calls end UNSUPPORTED. */
     struct timespec ts_;
