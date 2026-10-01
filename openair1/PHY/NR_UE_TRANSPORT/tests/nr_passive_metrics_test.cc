@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include <gtest/gtest.h>
 #include <string>
 extern "C" {
@@ -33,4 +34,25 @@ TEST(PassiveMetrics, NullStateNameIsReportedAsUnknown) {
   char buf[2048];
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   EXPECT_NE(std::string(buf).find("\"acq_state\":\"UNKNOWN\""), std::string::npos);
+}
+
+TEST(PassiveMetrics, UnknownSlotAndPciSerializeAsMinusOne) {
+  nr_passive_metrics_t m = {};
+  m.abs_slot = -1; m.pci = -1; m.acq_state = "SEARCHING";
+  char buf[2048];
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  const std::string s(buf);
+  EXPECT_NE(s.find("\"abs_slot\":-1"), std::string::npos);
+  EXPECT_NE(s.find("\"pci\":-1"), std::string::npos);
+}
+
+TEST(PassiveMetrics, ExactSizeBufferBoundary) {
+  nr_passive_metrics_t m = {};
+  m.acq_state = "TRACKING";
+  char big[2048];
+  const int w = nr_passive_metrics_to_json(&m, big, sizeof(big));
+  ASSERT_GT(w, 0);
+  std::string a(w + 1, 'x'), b(w, 'x');
+  EXPECT_EQ(nr_passive_metrics_to_json(&m, &a[0], w + 1), w);
+  EXPECT_EQ(nr_passive_metrics_to_json(&m, &b[0], w), -1);
 }

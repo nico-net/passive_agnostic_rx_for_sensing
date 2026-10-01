@@ -13,7 +13,7 @@
 #include "nr_pusch_passive_decode.h"
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
-int nr_passive_metrics_pci = -1;                       // set by nr-ue.c once PBCH locks (-1 before)
+_Atomic int nr_passive_metrics_pci = -1;
 /* Filled by Task A3; weak so this file links before A3 lands. */
 __attribute__((weak)) void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped)
 {
@@ -27,7 +27,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   *m = (nr_passive_metrics_t){0};
   m->t_mono_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-  m->pci = nr_passive_metrics_pci;
+  m->pci = atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed);
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
   m->acq_state = nr_passive_acq_state_name(a.state);
   m->acq_transitions = a.transitions;

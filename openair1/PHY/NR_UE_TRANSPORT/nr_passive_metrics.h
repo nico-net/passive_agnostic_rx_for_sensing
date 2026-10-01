@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #ifndef NR_PASSIVE_METRICS_H
 #define NR_PASSIVE_METRICS_H
+#ifndef __cplusplus
+#include <stdatomic.h>
+#endif
 #include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
@@ -20,6 +23,10 @@ typedef struct {
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
 } nr_passive_metrics_t;
+#ifndef __cplusplus
+/* PCI of the locked cell, -1 before PBCH lock. Written by nr-ue.c (relaxed), read by collect (relaxed). */
+extern _Atomic int nr_passive_metrics_pci;
+#endif
 /* Serialize to one JSON object (no newline). Returns bytes written (excl. NUL) or -1 if buf too small. */
 int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t n);
 /* Fill a snapshot from all live getters (receiver side). */
