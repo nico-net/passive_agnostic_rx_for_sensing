@@ -925,7 +925,7 @@ function tabRxHealth(v) {
   const acqCls = ACQ_GOOD.includes(acq) ? "good" : ACQ_BAD.includes(acq) ? "bad" : "warn";
   const t1 = el("div","row");
   t1.appendChild(card("Acquisition state", acq, acqCls, `${m.acq_transitions ?? "-"} transitions, ${m.acq_sync_losses ?? "-"} sync losses`));
-  t1.appendChild(card("PCI", m.pci == null ? "—" : m.pci, null, `abs slot ${m.abs_slot ?? "-"}`));
+  t1.appendChild(card("PCI", (m.pci == null || m.pci < 0) ? "—" : m.pci, null, `abs slot ${(m.abs_slot == null || m.abs_slot < 0) ? "-" : m.abs_slot}`));
   t1.appendChild(card("PDSCH CRC (window)", r.crc_pct_window == null ? "—" : fmt(r.crc_pct_window, 1) + "%", null,
     `${m.pdschq_crc_ok ?? "-"} CRC-OK / ${m.pdschq_decoded ?? "-"} decoded`));
   t1.appendChild(card("Grants / s", fmt(r.grants_per_s, 1), null, "decoded PDSCH TBs per second"));

@@ -7,6 +7,10 @@ m = [json.loads(l) for l in open(sys.argv[2])][-1]
 dl = [o for o in obs if o["dir"] == "DL" and o["t_mono_ns"] <= m["t_mono_ns"]]
 n, ok = len(dl), sum(o["crc"] == 1 for o in dl)
 dec, cok = m["pdschq_decoded"], m["pdschq_crc_ok"]
+if dec == 0:
+    print("FAIL/NA: pdschq_decoded == 0 in the last ISAC_METRICS line (no PDSCH decoded yet): the obs-vs-metrics "
+          "comparison is not defined; run longer or point at a later metrics line")
+    sys.exit(1)
 res = {
   "n_dl": n, "pdschq_decoded": dec, "layout_probe_share_pct": round(100.0 * (dec - n) / dec, 3),
   "n_dl_crc_ok": ok, "pdschq_crc_ok": cok,
