@@ -266,17 +266,17 @@ TEST(DciLengthBank, InterleavedUesKeepDifferentLengthsAndBudgets) {
       ASSERT_NE(c,nullptr);
       EXPECT_EQ(c->state.occasions_fed,occasion);
       ++c->state.occasions_fed;
-      c->found=41+2*u;
+      c->found[0]=41+2*u;
     }
   for(int u=0;u<3;++u) {
     auto *c=nr_pdcch_dci_length_context(&bank,101,0x3001+u);
-    EXPECT_EQ(c->found,41+2*u);
+    EXPECT_EQ(c->found[0],41+2*u);
     EXPECT_EQ(c->state.occasions_fed,20);
   }
   auto *fresh=nr_pdcch_dci_length_context(&bank,102,0x3001);
-  EXPECT_EQ(fresh->found,0);
+  EXPECT_EQ(fresh->found[0],0);
   EXPECT_EQ(fresh->state.occasions_fed,0);
-  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,102,0x3002)->found,0);
+  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,102,0x3002)->found[0],0);
 }
 
 TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
@@ -291,7 +291,7 @@ TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
   EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
   nr_pdcch_dci_length_context_note_occasion(&c,false,true,0);
   EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
-  EXPECT_EQ(c.found,47);
+  EXPECT_EQ(c.found[0],47);
   EXPECT_EQ(c.state.preferred_len,47);
   setenv("ISAC_RECONF_N_SUSPECT","3",1);
   EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),3u);
@@ -346,7 +346,7 @@ TEST(DciLengthBank, RelockDifferentLengthReplaces) {
     winner=nr_pdcch_dci_length_sweep_feed(&c.state,score,&actual,20,30,140,0x1234);
   ASSERT_EQ(winner,52);
   EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,winner),47);
-  EXPECT_EQ(c.found,52);
+  EXPECT_EQ(c.found[0],52);
   EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
 }
 
@@ -362,6 +362,43 @@ TEST(DciLengthBank, RelockOrderOldFirst) {
   EXPECT_EQ(order[1],52);
   EXPECT_EQ(order[2],41);
   EXPECT_EQ(order[3],30);
+}
+
+TEST(DciLengthBank, SecondLengthAdded) {
+  nr_pdcch_dci_length_context_t c{};
+  EXPECT_EQ(nr_pdcch_dci_length_context_add(&c,47,1),0);
+  EXPECT_EQ(nr_pdcch_dci_length_context_add(&c,52,2),0);
+  EXPECT_EQ(c.found[0],47);
+  EXPECT_EQ(c.found[1],52);
+}
+
+TEST(DciLengthBank, ThirdLengthReplacesLeastRecent) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_add(&c,47,1);
+  nr_pdcch_dci_length_context_add(&c,52,2);
+  nr_pdcch_dci_length_context_touch(&c,47,3);
+  EXPECT_EQ(nr_pdcch_dci_length_context_add(&c,58,4),52);
+  EXPECT_EQ(c.found[0],47);
+  EXPECT_EQ(c.found[1],58);
+}
+
+TEST(DciLengthBank, LayoutPinPerLength) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_add(&c,47,1);
+  nr_pdcch_dci_length_context_add(&c,52,2);
+  auto *a=nr_pdcch_dci_length_context_pin(&c,47);
+  auto *b=nr_pdcch_dci_length_context_pin(&c,52);
+  ASSERT_NE(a,nullptr);
+  ASSERT_NE(b,nullptr);
+  ASSERT_NE(a,b);
+  nr_dci11_pin_seed(a,1,7);
+  nr_dci11_pin_seed(b,1,9);
+  EXPECT_EQ(a->layout,7);
+  EXPECT_EQ(b->layout,9);
+  nr_pdcch_dci_length_context_touch(&c,47,3);
+  nr_pdcch_dci_length_context_add(&c,58,4);
+  EXPECT_EQ(nr_pdcch_dci_length_context_pin(&c,52),nullptr);
+  EXPECT_FALSE(nr_dci11_pin_is_valid(nr_pdcch_dci_length_context_pin(&c,58)));
 }
 TEST(DciLengthBank, FirstConvergenceSeedsExistingAndNewPeersWithoutPublishing) {
   nr_pdcch_dci_length_bank_t bank{};
@@ -384,9 +421,9 @@ TEST(DciLengthBank, FirstConvergenceSeedsExistingAndNewPeersWithoutPublishing) {
 TEST(DciLengthBank, EvictionAndInvalidKeysDoNotInventEvidence) {
   nr_pdcch_dci_length_bank_t bank{};
   for(int u=1;u<=NR_PDCCH_LENGTH_CONTEXTS+1;++u)
-    nr_pdcch_dci_length_context(&bank,8,u)->found=40+u;
-  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,2)->found,42);
-  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,1)->found,0);
+    nr_pdcch_dci_length_context(&bank,8,u)->found[0]=40+u;
+  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,2)->found[0],42);
+  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,1)->found[0],0);
   EXPECT_EQ(nr_pdcch_dci_length_context(nullptr,8,1),nullptr);
   EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,0),nullptr);
 }

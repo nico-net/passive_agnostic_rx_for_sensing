@@ -50,6 +50,7 @@
 #define NR_PDCCH_DCI_LENGTH_SWEEP_H
 
 #include "nr_dci_bits.h"
+#include "nr_dci11_pin.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -172,7 +173,10 @@ uint32_t nr_pdcch_dci_length_n_suspect_from_env(void);
 typedef struct {
   nr_pdcch_dci_length_sweep_state_t state;
   uint16_t rnti;
-  int found;
+  int found[2]; /* oldest-compatible primary and one additional significant length */
+  uint32_t found_recent[2];
+  nr_dci11_pin_t layout_pin[2];
+  uint32_t layout_cursor[2];
   uint8_t len_state;
   uint32_t miss_occasions;
   uint32_t epoch_learned;
@@ -186,6 +190,11 @@ void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
     bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect);
 /* First lock returns 0; re-lock returns the previous length (including same-length confirmation). */
 int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int length);
+/* Add a significant length, evicting the least recently accepted when both slots are full. */
+int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot);
+void nr_pdcch_dci_length_context_touch(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot);
+nr_dci11_pin_t *nr_pdcch_dci_length_context_pin(nr_pdcch_dci_length_context_t *c, int length);
+uint32_t *nr_pdcch_dci_length_context_pin_cursor(nr_pdcch_dci_length_context_t *c, int length);
 int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t *c,
     const int *cell_seen, int n_seen, int *out, int max);
 typedef struct {

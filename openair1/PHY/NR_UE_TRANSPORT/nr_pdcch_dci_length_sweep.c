@@ -137,7 +137,7 @@ int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t
   if (!c || !out || max <= 0 || n_seen < 0 || (n_seen && !seen)) return 0;
   bool used[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN] = {0};
   int n = 0;
-  const int old = c->found;
+  const int old = c->found[0];
   if (old >= 30 && old <= NR_DCI_MAX_PAYLOAD) {
     out[n++] = old;
     used[old] = true;
@@ -166,7 +166,7 @@ uint32_t nr_pdcch_dci_length_n_suspect_from_env(void)
 void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
     bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect)
 {
-  if (!c || c->len_state != NR_LEN_LOCKED || c->found <= 0) return;
+  if (!c || c->len_state != NR_LEN_LOCKED || c->found[0] <= 0) return;
   if (accepted_at_locked) {
     c->miss_occasions = 0;
     return;
@@ -175,8 +175,8 @@ void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
   if (!rnti_active_elsewhere || c->miss_occasions < (n_suspect ? n_suspect : 200)) return;
   c->len_state = NR_LEN_SUSPECT;
   nr_pdcch_dci_length_sweep_reset(&c->state);
-  c->state.preferred_len = c->found;
-  c->state.relock_old_len = c->found;
+  c->state.preferred_len = c->found[0];
+  c->state.relock_old_len = c->found[0];
   c->scout_initialized = false;
   c->exhausted = false;
 }
@@ -184,13 +184,59 @@ void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
 int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int length)
 {
   if (!c || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
-  const int previous = c->len_state == NR_LEN_SUSPECT ? c->found : 0;
-  c->found = length;
+  const int previous = c->len_state == NR_LEN_SUSPECT ? c->found[0] : 0;
+  if (previous && previous != length) {
+    memset(&c->layout_pin[0], 0, sizeof(c->layout_pin[0]));
+    c->layout_cursor[0] = 0;
+  }
+  c->found[0] = length;
   c->len_state = NR_LEN_LOCKED;
   c->miss_occasions = 0;
   c->state.relock_old_len = 0;
   c->scout_initialized = false;
   return previous;
+}
+
+int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot)
+{
+  if (!c || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
+  for (int i = 0; i < 2; ++i)
+    if (c->found[i] == length) {
+      c->found_recent[i] = slot;
+      return 0;
+    }
+  int i = !c->found[0] ? 0 : !c->found[1] ? 1
+          : c->found_recent[0] <= c->found_recent[1] ? 0 : 1;
+  const int replaced = c->found[i];
+  c->found[i] = length;
+  c->found_recent[i] = slot;
+  memset(&c->layout_pin[i], 0, sizeof(c->layout_pin[i]));
+  c->layout_cursor[i] = 0;
+  c->len_state = NR_LEN_LOCKED;
+  return replaced;
+}
+
+void nr_pdcch_dci_length_context_touch(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot)
+{
+  if (!c) return;
+  for (int i = 0; i < 2; ++i)
+    if (c->found[i] == length) c->found_recent[i] = slot;
+}
+
+nr_dci11_pin_t *nr_pdcch_dci_length_context_pin(nr_pdcch_dci_length_context_t *c, int length)
+{
+  if (!c) return NULL;
+  for (int i = 0; i < 2; ++i)
+    if (length > 0 && c->found[i] == length) return &c->layout_pin[i];
+  return NULL;
+}
+
+uint32_t *nr_pdcch_dci_length_context_pin_cursor(nr_pdcch_dci_length_context_t *c, int length)
+{
+  if (!c) return NULL;
+  for (int i = 0; i < 2; ++i)
+    if (length > 0 && c->found[i] == length) return &c->layout_cursor[i];
+  return NULL;
 }
 
 void nr_pdcch_dci_length_sweep_reset(nr_pdcch_dci_length_sweep_state_t* state)
@@ -370,7 +416,7 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
    * hints take effect next round, so a concurrent lock cannot skip/repeat a length. */
   if (!state->resume_len && state->rot_phase == 0) {
     if (state->relock_old_len) {
-      nr_pdcch_dci_length_context_t hint = {.found = state->relock_old_len};
+      nr_pdcch_dci_length_context_t hint = {.found = {state->relock_old_len}};
       int seen[NR_DCI_MAX_PAYLOAD], n_seen = 0;
       for (int len = min_len; len <= max_len; ++len)
         if (atomic_load_explicit(&cell_seen[len], memory_order_relaxed)) seen[n_seen++] = len;
@@ -608,7 +654,7 @@ void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16
      * retained; only an unfinished budget cursor is restarted. */
     for (int i = 0; i < NR_PDCCH_LENGTH_CONTEXTS; ++i) {
       nr_pdcch_dci_length_context_t *c = &bank->ue[i];
-      if (c->rnti && c->rnti != rnti && !c->found && !c->exhausted && !c->state.preferred_len) {
+      if (c->rnti && c->rnti != rnti && !c->found[0] && !c->exhausted && !c->state.preferred_len) {
         c->state.preferred_len = found;
         c->state.preferred_rounds = 0;
         c->state.resume_len = c->state.resume_trial = 0;

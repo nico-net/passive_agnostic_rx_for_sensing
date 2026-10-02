@@ -2501,7 +2501,8 @@ if(ENABLE_TESTS)
   # Qm oracle) -- same fix already applied to the sibling test_nr_pdsch_config_sweep target below,
   # which compiles the same nr_pdsch_config_sweep.c but was updated for this call; this target was not.
   target_sources(test_nr_pdcch_dci_length_sweep PRIVATE
-    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c)
   target_include_directories(test_nr_pdcch_dci_length_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci_length_sweep)
