@@ -375,7 +375,6 @@ typedef struct {
   int8_t   last[OBS_MASKS_MAX]; /* last PDSCH symbol measured with that mask, -1 = unknown */
   int8_t   k0[OBS_MASKS_MAX];   /* LEGACY ONLY (ISAC_TD_K0_ORACLE_LEGACY=1): k0 pinned from the job's hypothesis, -1 = none */
   uint64_t plaus[OBS_MASKS_MAX]; /* bit k: k0 = k was hypothesised on a job that saw this mask (plausible, NOT proven; never prunes) */
-  uint64_t k0_cert; /* K39: k0 values certified by deterministic evidence (certify_k0), 0 = none; the only k0 prune */
   int n;
 } obs_set_t;
 
@@ -415,6 +414,10 @@ typedef struct {
   prior_t prior;
   obs_set_t obs;
   uint64_t k0_seen; /* bit k: the k0 oracle saw this RNTI's PDSCH k slots after its DCI (k >= 2) */
+  /* K39: k0 certified by deterministic evidence, scoped to (configuration, tda row): k0 is a per-TDRA-row field, so a
+   * certification of one row never binds another. Persists across eviction/recreation of that row's context. */
+  uint64_t cert_cfg;
+  uint64_t k0_cert[16]; /* per tda: allowed-k0 bitmask, 0 = none */
   bool typeb_seen; /* R30 item 1: this RNTI's DM-RS oracle has shown a mask type A cannot explain */
 } rnti_ctx_t;
 static rnti_ctx_t g_rnti[RNTI_CTX_MAX];
@@ -444,7 +447,7 @@ static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
       g_rnti[i].touched = ++g_clock;
       return &g_rnti[i];
     }
-    const bool has_evidence = g_rnti[i].prior.valid || g_rnti[i].obs.n > 0;
+    const bool has_evidence = g_rnti[i].prior.valid || g_rnti[i].obs.n > 0 || g_rnti[i].cert_cfg != 0;
     const bool better = victim < 0 || (victim_has_evidence && !has_evidence)
                          || (has_evidence == victim_has_evidence && g_rnti[i].touched < g_rnti[victim].touched);
     if (better) {
@@ -518,8 +521,6 @@ static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o, i
     return false;
   if (o->k0[k] >= 0 && h->k0 != o->k0[k])
     return false;
-  if (o->k0_cert && !(h->k0 <= 32 && (o->k0_cert >> h->k0 & 1)))
-    return false;
   return true;
 }
 static bool obs_any_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o)
@@ -536,8 +537,7 @@ static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t 
     return 0;
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
-    if (((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs))
-        && !(own && own->k0_cert && !(st->hyp[i].k0 <= 32 && (own->k0_cert >> st->hyp[i].k0 & 1)))) /* K39: own certified k0 binds even when the cell-wide set admits */
+    if (((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs)))
       prune_move(st, n++, i);
   return prune_commit(st, n);
 }
@@ -1320,6 +1320,7 @@ typedef struct {
   uint8_t tda;
   int tda_count, typeA;
   bool reported;
+  uint64_t k0_cert; /* K39: certified allowed-k0 mask of THIS (configuration, rnti, tda) context, 0 = none */
   uint8_t qm_tables, qm_obs; /* Qm-oracle evidence: consistent-table bitmask, sightings */
   uint64_t outcomes, locked_trials, locked_passes;
   uint64_t failure_streak, reacquisitions;
@@ -1473,8 +1474,43 @@ static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
       nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
 }
 
+/* K39: bind a context to its certified k0 mask (the only k0 prune). No-op without a certification, when nothing
+ * would survive, or once settled. Used after every prune/append that could bring a non-certified k0 in. g_lock held. */
+static int apply_cert(sweep_context_t *c)
+{
+  nr_pdsch_config_sweep_state_t *st = c->state;
+  if (!c->k0_cert || st->winner >= 0)
+    return st->n_hyp;
+  int keep = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    keep += st->hyp[i].k0 <= 32 && (c->k0_cert >> st->hyp[i].k0 & 1);
+  if (keep == 0 || keep == st->n_hyp)
+    return st->n_hyp;
+  int m = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (st->hyp[i].k0 <= 32 && (c->k0_cert >> st->hyp[i].k0 & 1))
+      prune_move(st, m++, i);
+  const int n = prune_commit(st, m);
+  context_reindexed(c);
+  return n;
+}
+static uint64_t obs_plaus_union(const obs_set_t *o)
+{
+  uint64_t u = 0;
+  for (int i = 0; i < o->n; i++)
+    u |= o->plaus[i];
+  return u;
+}
+
 static void reopen_context(sweep_context_t *c)
 {
+  const bool had_cert = c->k0_cert != 0;
+  c->k0_cert = 0; /* a reopen is the signal the evidence was wrong: the certification goes with it */
+  {
+    rnti_ctx_t *rr = rnti_ctx(c->rnti, false);
+    if (rr && rr->cert_cfg == c->configuration && c->tda < 16)
+      rr->k0_cert[c->tda] = 0;
+  }
   const uint64_t previous = c->generation;
   nr_pdsch_sweep_report_t report = {
       .configuration=c->configuration, .rnti=c->rnti, .tda=c->tda,
@@ -1489,7 +1525,7 @@ static void reopen_context(sweep_context_t *c)
   /* A reopen says this context's evidence is no longer trusted. If its catalog had been pruned by
    * the cell-wide prior, restore the full one: the prior is the most likely thing to be wrong when
    * a previously converged context starts failing. */
-  if (c->priored && c->legality) {
+  if ((c->priored || had_cert) && c->legality) { /* K39: a certified-k0 prune is untrusted evidence too */
     context_catalog(c, rnti_ctx(c->rnti, false));
     c->priored = PRIORED_NONE;
   }
@@ -1694,6 +1730,13 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     for (int k = 2; k <= 32; k++)
       if (r->k0_seen & (UINT64_C(1) << k))
         nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
+    /* K39: inherit this (configuration, tda) key's certification; a different configuration drops them all. */
+    if (r->cert_cfg != configuration) {
+      memset(r->k0_cert, 0, sizeof(r->k0_cert));
+      r->cert_cfg = 0;
+    }
+    c->k0_cert = r->cert_cfg == configuration ? r->k0_cert[tda_index] : 0;
+    apply_cert(c);
   }
   if (to_free && !g_spare_state) {
     g_spare_state = to_free;
@@ -1769,8 +1812,9 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
   free(scratch);
   const int added = st->n_hyp - before;
   if (added)
-    LOG_I(PHY, "SWEEP: ORACLE_RESTORE rnti=0x%04x tda=%u mask=0x%x last=%d k0=%d added=%d\n",
-          c->rnti, c->tda, mask, last_symbol, k0, added);
+    LOG_I(PHY, "SWEEP: ORACLE_RESTORE rnti=0x%04x tda=%u mask=0x%x last=%d k0=%d added=%d plaus_k0=0x%llx\n",
+          c->rnti, c->tda, mask, last_symbol, k0, added,
+          (unsigned long long)(obs_find(&r->obs, mask) >= 0 ? r->obs.plaus[obs_find(&r->obs, mask)] : 0));
   return added;
 }
 
@@ -1814,38 +1858,30 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     n = prune_to_observed(c->state, &r->obs);
     if (c->state->n_hyp != before)
       context_reindexed(c);
+    n = apply_cert(c); /* K39: the certified k0 binds even though the observation (and the cell-wide set) admit more */
   }
   pthread_mutex_unlock(&g_lock);
   return n;
 }
 
-int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint32_t k0_allowed_mask)
+int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t k0_allowed_mask)
 {
   if (t == NULL || t->generation == 0 || k0_allowed_mask == 0)
     return 0;
   pthread_mutex_lock(&g_lock);
-  rnti_ctx_t *r = rnti_ctx(t->rnti, true);
-  /* Intersect with an earlier certification; a contradiction (empty) certifies nothing rather than emptying the context. */
-  const uint64_t merged = r->obs.k0_cert ? (r->obs.k0_cert & k0_allowed_mask) : k0_allowed_mask;
-  r->obs.k0_cert = merged ? merged : r->obs.k0_cert;
-  int n = 0;
   sweep_context_t *c = ticket_context(t);
-  if (c != NULL && c->state->winner < 0 && r->obs.k0_cert) {
-    nr_pdsch_config_sweep_state_t *st = c->state;
-    int keep = 0;
-    for (int i = 0; i < st->n_hyp; i++)
-      if (st->hyp[i].k0 <= 32 && (r->obs.k0_cert >> st->hyp[i].k0 & 1))
-        keep++;
-    if (keep > 0 && keep < st->n_hyp) {
-      int m = 0;
-      for (int i = 0; i < st->n_hyp; i++)
-        if (st->hyp[i].k0 <= 32 && (r->obs.k0_cert >> st->hyp[i].k0 & 1))
-          prune_move(st, m++, i);
-      n = prune_commit(st, m);
-      context_reindexed(c);
-    } else {
-      n = st->n_hyp;
+  int n = 0;
+  if (c != NULL && c->tda < 16) {
+    rnti_ctx_t *r = rnti_ctx(t->rnti, true);
+    if (r->cert_cfg != c->configuration) {
+      memset(r->k0_cert, 0, sizeof(r->k0_cert));
+      r->cert_cfg = c->configuration;
     }
+    /* Intersect with an earlier certification of THIS row; a contradiction (empty) certifies nothing new. */
+    const uint64_t merged = c->k0_cert ? (c->k0_cert & k0_allowed_mask) : k0_allowed_mask;
+    c->k0_cert = merged ? merged : c->k0_cert;
+    r->k0_cert[c->tda] = c->k0_cert;
+    n = apply_cert(c);
   }
   pthread_mutex_unlock(&g_lock);
   return n;
@@ -1860,7 +1896,7 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
   const bool first = !(r->k0_seen & (UINT64_C(1) << k0));
   r->k0_seen |= UINT64_C(1) << k0;
   sweep_context_t *c = ticket_context(t);
-  const int n = c ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;
+  const int n = (c && !(c->k0_cert && !(c->k0_cert >> k0 & 1))) ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;
   static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
   if ((first || n > 0) && s_left > 0 && s_left--)
     LOG_W(PHY, "SWEEP: rnti=0x%04x k0=%u observed on air -- %d hypotheses added to tda=%u\n", t->rnti,
@@ -2046,11 +2082,12 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
                              .mapping_type = c->state->hyp[w].mapping_type};
         LOG_W(PHY,
               "SWEEP: rnti=0x%04x CONVERGED tda=%u mapping=%c k0=%u mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u "
-              "(%u/%u trials on the winner, cfg=0x%llx) -- private to this RNTI until a second agrees\n",
+              "(%u/%u trials on the winner, cfg=0x%llx, plaus_k0=0x%llx) -- private to this RNTI until a second agrees\n",
               c->rnti, (unsigned)c->tda, c->state->hyp[w].mapping_type ? 'B' : 'A',
               (unsigned)c->state->hyp[w].k0, (unsigned)c->state->hyp[w].mcs_table,
               (unsigned)c->state->hyp[w].dmrs_add_pos, (unsigned)c->state->hyp[w].dmrs_max_len,
-              c->state->ok[w], c->state->trials[w], (unsigned long long)c->configuration);
+              c->state->ok[w], c->state->trials[w], (unsigned long long)c->configuration,
+              (unsigned long long)obs_plaus_union(&r->obs));
         prior_promote_locked(r);
       }
       if (winner)

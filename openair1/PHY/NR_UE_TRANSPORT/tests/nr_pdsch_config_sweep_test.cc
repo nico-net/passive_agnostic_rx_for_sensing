@@ -681,7 +681,7 @@ TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguit
   const uint16_t mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1); // S=1 L=13 add 2 len 1
   nr_pdsch_config_sweep_k0_legacy_set(1); // this test documents the OLD pinning (A/B flag)
   const int n = nr_pdsch_config_sweep_observe(&t, mask, 13, 0);
-  nr_pdsch_config_sweep_k0_legacy_set(0);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
   EXPECT_EQ(n, 3);
   nr_pdsch_sweep_ticket_t t2{};
   for (int i = 0; i < 12; i++) {
@@ -707,18 +707,18 @@ static nr_pdsch_sweep_ticket_t k39_open(uint16_t *mask_out)
 {
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
-  nr_pdsch_config_sweep_k0_legacy_set(0);
+  nr_pdsch_config_sweep_k0_legacy_set(0); // default behaviour regardless of the environment; tests restore -1
   nr_pdsch_sweep_ticket_t t{};
   nr_pdsch_cfg_hypothesis_t h{};
   EXPECT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
   *mask_out = (uint16_t)test_legal(0, 13, 1, 0, 2, 1);
   return t;
 }
-static nr_pdsch_sweep_ticket_t k39_fresh()
+static nr_pdsch_sweep_ticket_t k39_fresh(uint8_t tda = 0, uint64_t cfg = 0x1234, uint16_t rnti = 0x4601)
 { // a prune re-numbers the context and invalidates outstanding tickets: take a live one
   nr_pdsch_sweep_ticket_t t{};
   nr_pdsch_cfg_hypothesis_t h{};
-  EXPECT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
+  EXPECT_TRUE(nr_pdsch_config_sweep_select(cfg, rnti, tda, 2, 0, test_legal, &t, &h));
   return t;
 }
 TEST(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
@@ -739,6 +739,7 @@ TEST(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
     k1 |= h.k0 == 1;
   }
   EXPECT_TRUE(k1);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 TEST(PdschConfigSweepK39, CertifiedK0Prunes) {
   uint16_t mask;
@@ -756,6 +757,7 @@ TEST(PdschConfigSweepK39, CertifiedK0Prunes) {
   t = k39_fresh();
   EXPECT_EQ(count_snapshot_k0(t, 1), 3);
   EXPECT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0), 0);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 TEST(PdschConfigSweepK39, LegacyFlagRestoresPinning) {
   uint16_t mask;
@@ -765,7 +767,79 @@ TEST(PdschConfigSweepK39, LegacyFlagRestoresPinning) {
   t = k39_fresh();
   EXPECT_EQ(count_snapshot_k0(t, 1), 0);
   EXPECT_EQ(count_snapshot_k0(t, 0), 3);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
+}
+
+static int32_t ab_legal(int, int length, int start, int mapping_b, int add, int maxlen);
+static int k39_count(const nr_pdsch_sweep_ticket_t &t, int k0) { return count_snapshot_k0(t, k0); }
+TEST(PdschConfigSweepK39, CertificationDoesNotLeakAcrossTdaRows) {
+  uint16_t mask;
+  auto t0 = k39_open(&mask);
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t0, mask, 13, 0), 6);
+  t0 = k39_fresh(0);
+  ASSERT_EQ(nr_pdsch_config_sweep_certify_k0(&t0, 0x2), 3); // tda0: k0 = 1 only
+  const auto t1 = k39_fresh(1);                              // another TDRA row of the same RNTI
+  EXPECT_GT(k39_count(t1, 0), 0);
+  EXPECT_GT(k39_count(t1, 1), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_observe(&t1, mask, 13, 0), 6); // its own observation keeps both k0
+  const auto t1b = k39_fresh(1);
+  EXPECT_EQ(k39_count(t1b, 0), 3);
+  EXPECT_EQ(k39_count(t1b, 1), 3);
+  // A different configuration of the same RNTI/row is not bound either.
+  const auto tc = k39_fresh(0, 0x9999);
+  EXPECT_GT(k39_count(tc, 0), 0);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
+}
+/* M1: the certification binds on every path that could bring another k0 back. */
+TEST(PdschConfigSweepK39, CertificationBindsOverObserveCellWideSetAndK0Layers) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
   nr_pdsch_config_sweep_k0_legacy_set(0);
+  nr_pdsch_sweep_ticket_t a{}, b{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(77, 0x4602, 0, 2, 0, ab_legal, &b, &h));
+  nr_pdsch_config_sweep_observe_mask(&b, 0x20); // a second RNTI shows the type-B-only mask: g_obs carries it
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(77, 0x4601, 0, 2, 0, ab_legal, &a, &h));
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&a, 0x1), 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(77, 0x4601, 0, 2, 0, ab_legal, &a, &h));
+  // the k0 layer (probe path) must not bring in a non-certified k0
+  EXPECT_EQ(nr_pdsch_config_sweep_add_k0(&a, 3), 0);
+  // the observe path adds the type-B layer (k0 {0,1}); the cert must prune k0 = 1 again
+  nr_pdsch_config_sweep_observe_mask(&a, 0x20);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(77, 0x4601, 0, 2, 0, ab_legal, &a, &h));
+  EXPECT_EQ(count_snapshot_k0(a, 1), 0);
+  EXPECT_GT(count_snapshot_k0(a, 0), 0);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
+}
+TEST(PdschConfigSweepK39, CertificationSurvivesContextEvictionForTheSameKey) {
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x2), 0);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS + 40; i++)
+    k39_fresh(0, 0x7000 + i, (uint16_t)(0x5000 + i % 40)); // evict the (cfg, rnti, tda) context
+  const auto again = k39_fresh(0); // recreated: inherits its key's certification
+  EXPECT_EQ(k39_count(again, 0), 0);
+  EXPECT_GT(k39_count(again, 1), 0);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
+}
+TEST_F(PdschRecovery, CertificationClearedOnReopen) {
+  nr_pdsch_config_sweep_k0_legacy_set(0);
+  auto t = recovery_select();
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x1), 0);
+  const auto old = recovery_settle(0);
+  ASSERT_TRUE(old.settled);
+  for (unsigned f = 0; f < 5000 && nr_pdsch_config_sweep_is_settled(800, 0x4601, 0, 0); ++f) {
+    auto x = recovery_select();
+    nr_pdsch_config_sweep_feedback(&x, false, nullptr);
+  }
+  ASSERT_FALSE(nr_pdsch_config_sweep_is_settled(800, 0x4601, 0, 0));
+  auto fresh = recovery_select();
+  // After a reopen the certification is gone: an observation no longer prunes k0 = 1.
+  nr_pdsch_config_sweep_observe(&fresh, 4, 13, 0);
+  fresh = recovery_select();
+  EXPECT_GT(count_snapshot_k0(fresh, 1), 0);
+  EXPECT_GT(count_snapshot_k0(fresh, 0), 0);
+  nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 
 // Opt-in benchmark of the real shared-bank reset, outside an OTA run.

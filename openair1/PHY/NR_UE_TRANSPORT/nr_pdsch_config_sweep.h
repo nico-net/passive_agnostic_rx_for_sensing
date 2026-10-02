@@ -391,9 +391,10 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
  *  in a slot does not prove which slot offset the grant has. (Legacy: ISAC_TD_K0_ORACLE_LEGACY=1 pins it as before.) */
 int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0_plausible);
 /** K39: k0 certified by deterministic evidence (BC9 DCI adjacency / TDD direction): the ONLY call that may prune k0.
- *  Keeps the entries whose k0 is in k0_allowed_mask (bit k = k0 k), for this ticket's RNTI (current context and
- *  later contexts that go through the observed prune). Prunes nothing when no entry would survive. Returns the live hypothesis count (0 = no context). */
-int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint32_t k0_allowed_mask);
+ *  Keeps the entries whose k0 is in k0_allowed_mask (bit k = k0 k), for this ticket's (configuration, RNTI, TDA row) only: k0 is a per-row field,
+ *  so a certification never binds another row. Persists per that key across context eviction; cleared on reopen and on a
+ *  configuration change. Binds the context against later observations, k0 layers and restores. Prunes nothing when no entry would survive. Returns the live hypothesis count (0 = no context). */
+int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t k0_allowed_mask);
 /** Test hook: force the ISAC_TD_K0_ORACLE_LEGACY decision (1 = old k0 pinning, 0 = default, -1 = re-read the env). */
 void nr_pdsch_config_sweep_k0_legacy_set(int legacy);
 /** k0 oracle: the air showed DM-RS on this grant's PRBs `k0` slots after the DCI (and not in the
