@@ -11,6 +11,7 @@
  */
 /* BC9: DL DCI history ring, per-world occupant check (certified flag) and deterministic DCI-adjacency k0 exclusions. */
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <gtest/gtest.h>
 extern "C" {
@@ -175,7 +176,8 @@ TEST(DciHistory, CertifiedNeighbourRowRulesOutK0)
 {
   /* BC7-review example: slot-7 tda2 DCI with k0 certified 0 occupies slot 7, so the slot-6 tda0 grant cannot have k0 = 1 */
   auto h = ring();
-  const nr_dci_hist_entry_t g6 = dci(6, 0), x7 = dci(7, 2, 0, 20); /* the mixed-slot row: fewer PRBs */
+  nr_dci_hist_entry_t g6 = dci(6, 0), x7 = dci(7, 2, 0, 20); /* the mixed-slot row: fewer PRBs */
+  g6.confirmed = x7.confirmed = true; /* BC9d: only CONFIRMED DCIs exclude (AdjacencyUsesOnlyConfirmedNeighbours) */
   nr_dci_hist_push(h.get(), &g6);
   nr_dci_hist_push(h.get(), &x7);
   uint64_t forbid[NR_DCI_HIST_ROWS] = {0};
@@ -193,6 +195,7 @@ TEST(DciHistory, CertifiedNeighbourRowRulesOutK0)
   auto o = ring();
   nr_dci_hist_entry_t g6b = dci(6, 0);
   g6b.cfg = 0xBAD;
+  g6b.confirmed = true;
   nr_dci_hist_push(o.get(), &g6b);
   nr_dci_hist_push(o.get(), &x7);
   uint64_t f4[NR_DCI_HIST_ROWS] = {0};
@@ -236,4 +239,230 @@ TEST(DciHistory, DormantSiblingTableKeepsCrossTableOccupantCompatible)
   ASSERT_GT(nr_pdsch_config_sweep_set_dormant(&gs, NR_TD_DORMANT_GEOM, only_table0, nullptr), 0);
   ASSERT_TRUE(nr_pdsch_config_sweep_siblings_of(&gs, lead, &h, &sib, &tables));
   EXPECT_EQ(tables, 0x1);
+}
+
+/* ---- BC9d: hard TDD / DCI-adjacency exclusions only from CONFIRMED DCIs (TB CRC pass of the grant they scheduled) ---- */
+static int32_t bc9d_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  return mapping_b ? 0 : 1 + start * 1000 + length * 40 + add * 3 + maxlen; /* same catalogue as nr_pdsch_config_sweep_test.cc */
+}
+/* TDD: period 10, slots 8 and 9 UL, the rest DL (a DCI in slot 7 cannot schedule k0 = 1) */
+static bool bc9d_tdd(void *, uint32_t s, int8_t *last)
+{
+  for (int k = 0; k <= NR_DCI_HIST_K0_MAX; k++)
+    last[k] = (int8_t)((s + (uint32_t)k) % 10 >= 8 ? -1 : 13);
+  return true;
+}
+static int g_bc9d_calls;
+static int bc9d_exclude(void *, uint64_t cfg, uint16_t rnti, uint8_t tda, const int8_t *last, bool)
+{
+  g_bc9d_calls++;
+  nr_td_excl_t e;
+  memcpy(e.last, last, sizeof(e.last));
+  return nr_pdsch_config_sweep_exclude_key(cfg, rnti, tda, &e);
+}
+static bool bc9d_constrained(void *, uint64_t cfg, uint16_t rnti) { return nr_pdsch_config_sweep_rnti_constrained(rnti, cfg); }
+static uint64_t bc9d_row_k0(void *, uint64_t cfg, uint16_t rnti, uint8_t tda) { return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda); }
+static const nr_dci_excl_ops_t kOps = {bc9d_tdd, bc9d_exclude, bc9d_constrained, bc9d_row_k0, nullptr};
+static int bc9d_count_k0(uint8_t tda, int k0)
+{ /* hypotheses with this k0 in the live (kCfg, 0x1234, tda) context (select opens it if needed) */
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t hy{};
+  EXPECT_TRUE(nr_pdsch_config_sweep_select(kCfg, 0x1234, tda, 2, 0, bc9d_legal, &t, &hy));
+  static nr_pdsch_config_sweep_state_t st;
+  EXPECT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  int n = 0;
+  for (int i = 0; i < st.n_hyp; i++)
+    n += st.hyp[i].k0 == k0;
+  return n;
+}
+struct DciBc9d : testing::Test {
+  void SetUp() override
+  {
+    nr_pdsch_config_sweep_reset_all();
+    nr_pdsch_config_sweep_prior_reset();
+    nr_pdsch_config_sweep_k0_legacy_set(0);
+    nr_dci_hist_enabled_set(1);
+    g_bc9d_calls = 0;
+  }
+  void TearDown() override
+  {
+    nr_pdsch_config_sweep_k0_legacy_set(-1);
+    nr_dci_hist_enabled_set(-1);
+  }
+};
+
+TEST_F(DciBc9d, ConfirmedBitSetFromFeedback)
+{
+  auto h = ring();
+  push(h.get(), dci(10, 0));
+  push(h.get(), dci(10, 1, 0, 20));
+  nr_dci_hist_entry_t o = dci(11, 0);
+  o.cfg = 0xBAD;
+  push(h.get(), o);
+  bool found = false;
+  EXPECT_EQ(nr_dci_hist_confirm(h.get(), 0x1234, 10, kCfg, 0, &found), 1);
+  EXPECT_TRUE(found);
+  nr_dci_hist_entry_t out[4];
+  ASSERT_EQ(nr_dci_hist_at(h.get(), 0x1234, 10, out, 4), 2);
+  for (int i = 0; i < 2; i++)
+    EXPECT_EQ(out[i].confirmed, out[i].tda == 0) << i; /* only the (slot, cfg, row) of the passing grant */
+  /* a second pass of the same DCI: found, nothing newly confirmed */
+  EXPECT_EQ(nr_dci_hist_confirm(h.get(), 0x1234, 10, kCfg, 0, &found), 0);
+  EXPECT_TRUE(found);
+  /* missed lookups: another slot, configuration, RNTI; an evicted entry */
+  EXPECT_EQ(nr_dci_hist_confirm(h.get(), 0x1234, 12, kCfg, 0, &found), 0);
+  EXPECT_FALSE(found);
+  EXPECT_EQ(nr_dci_hist_confirm(h.get(), 0x1234, 11, kCfg, 0, &found), 0); /* slot 11 holds only cfg 0xBAD */
+  EXPECT_FALSE(found);
+  EXPECT_EQ(nr_dci_hist_confirm(h.get(), 0x9999, 10, kCfg, 0, &found), 0);
+  EXPECT_FALSE(found);
+  ASSERT_EQ(nr_dci_hist_at(h.get(), 0x1234, 11, out, 4), 1);
+  EXPECT_FALSE(out[0].confirmed);
+  for (uint32_t s = 20; s < 90; s++)
+    push(h.get(), dci(s, 0));
+  EXPECT_EQ(nr_dci_hist_confirm(h.get(), 0x1234, 20, kCfg, 0, &found), 0); /* depth 64: overwritten */
+  EXPECT_FALSE(found);
+  /* the driver: a missed lookup still applies the TDD rule (the CRC pass proves the DCI, the key is known) */
+  ASSERT_GT(bc9d_count_k0(0, 1), 0);
+  nr_dci_confirm_out_t co;
+  nr_dci_hist_on_confirm(h.get(), 0x1234, 7, kCfg, 0, &kOps, &co);
+  EXPECT_FALSE(co.found);
+  EXPECT_TRUE(co.tdd);
+  EXPECT_GT(co.tdd_removed, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), 0);
+}
+
+TEST_F(DciBc9d, SpuriousDciNeverExcludesTruth)
+{
+  /* Truth: row 0 has k0 = 1. A spurious row-0 DCI accepted in slot 7 (k0 = 1 would land on UL slot 8) used to remove every
+   * k0 = 1 entry of row 0 at accept time. Accepted but never confirmed (no CRC pass): nothing may be excluded. */
+  auto h = ring();
+  const int k1 = bc9d_count_k0(0, 1);
+  ASSERT_GT(k1, 0);
+  nr_dci_hist_entry_t sp = dci(7, 0);
+  nr_dci_hist_on_accept(h.get(), &sp);
+  EXPECT_EQ(g_bc9d_calls, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), k1);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(kCfg, 0x1234, 0), UINT64_C(0x3));
+  /* Adjacency variant: a REAL row-1 DCI in slot 7 is confirmed (TDD certifies row 1 to k0 = 0: it occupies slot 7). A spurious
+   * row-0 DCI in slot 6 would make "row 0, k0 = 1" collide with it: with the old rule it removed the truth of row 0. */
+  bc9d_count_k0(1, 0); /* open row 1 */
+  auto h2 = ring();
+  nr_dci_hist_entry_t sp6 = dci(6, 0), real7 = dci(7, 1, 0, 20);
+  nr_dci_hist_on_accept(h2.get(), &sp6);
+  nr_dci_hist_on_accept(h2.get(), &real7);
+  nr_dci_confirm_out_t co;
+  nr_dci_hist_on_confirm(h2.get(), 0x1234, 7, kCfg, 1, &kOps, &co);
+  EXPECT_TRUE(co.found);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(kCfg, 0x1234, 1), UINT64_C(0x1)); /* row 1 certified k0 = 0 by its confirmed DCI */
+  EXPECT_EQ(co.adj_rows, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), k1); /* the truth of row 0 survives */
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(kCfg, 0x1234, 0), UINT64_C(0x3));
+}
+
+TEST_F(DciBc9d, ConfirmedDciAppliesTddExclusion)
+{
+  auto h = ring();
+  const int k1 = bc9d_count_k0(0, 1);
+  ASSERT_GT(k1, 0);
+  ASSERT_GT(bc9d_count_k0(0, 0), 0);
+  nr_dci_hist_entry_t d = dci(7, 0);
+  nr_dci_hist_on_accept(h.get(), &d);
+  EXPECT_EQ(bc9d_count_k0(0, 1), k1); /* accept alone: untouched */
+  nr_dci_confirm_out_t co;
+  EXPECT_EQ(nr_dci_hist_on_confirm(h.get(), 0x1234, 7, kCfg, 0, &kOps, &co), 1);
+  EXPECT_TRUE(co.found);
+  EXPECT_EQ(co.newly, 1);
+  EXPECT_TRUE(co.tdd);
+  EXPECT_GT(co.tdd_removed, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), 0);
+  EXPECT_GT(bc9d_count_k0(0, 0), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(kCfg, 0x1234, 0), UINT64_C(0x1));
+  /* a second pass of the same DCI re-applies nothing */
+  g_bc9d_calls = 0;
+  EXPECT_EQ(nr_dci_hist_on_confirm(h.get(), 0x1234, 7, kCfg, 0, &kOps, &co), 0);
+  EXPECT_EQ(g_bc9d_calls, 0);
+  /* no TDD pattern (NSA / no SIB1): a confirmed DCI excludes nothing by TDD */
+  const nr_dci_excl_ops_t no_tdd = {nullptr, bc9d_exclude, bc9d_constrained, bc9d_row_k0, nullptr};
+  nr_dci_hist_entry_t d2 = dci(17, 1);
+  nr_dci_hist_on_accept(h.get(), &d2);
+  const int r1k1 = bc9d_count_k0(1, 1);
+  nr_dci_hist_on_confirm(h.get(), 0x1234, 17, kCfg, 1, &no_tdd, &co);
+  EXPECT_FALSE(co.tdd);
+  EXPECT_EQ(bc9d_count_k0(1, 1), r1k1);
+}
+
+TEST_F(DciBc9d, AdjacencyUsesOnlyConfirmedNeighbours)
+{
+  /* pure rule: unconfirmed x or y never excludes */
+  auto h = ring();
+  nr_dci_hist_entry_t g6 = dci(6, 0), x7 = dci(7, 2, 0, 20);
+  nr_dci_hist_push(h.get(), &g6);
+  nr_dci_hist_push(h.get(), &x7);
+  x7.confirmed = true;
+  uint64_t f[NR_DCI_HIST_ROWS] = {0};
+  EXPECT_EQ(nr_dci_hist_adj_exclusions(h.get(), &x7, row_k0_tda2_cert, nullptr, f), 0); /* neighbour g6 unconfirmed */
+  x7.confirmed = false;
+  g6.confirmed = true;
+  EXPECT_EQ(nr_dci_hist_adj_exclusions(h.get(), &g6, row_k0_tda2_cert, nullptr, f), 0); /* neighbour x7 unconfirmed */
+  /* driver, live sweep: row 0 truth k0 = 0 (real DCI slot 6), row 1 k0 = 0 (real DCI slot 7, certified by TDD) */
+  auto r = ring();
+  bc9d_count_k0(0, 0);
+  bc9d_count_k0(1, 0);
+  const int k1 = bc9d_count_k0(0, 1);
+  nr_dci_hist_entry_t a6 = dci(6, 0), b7 = dci(7, 1, 0, 20);
+  nr_dci_hist_on_accept(r.get(), &a6);
+  nr_dci_hist_on_accept(r.get(), &b7);
+  nr_dci_confirm_out_t co;
+  nr_dci_hist_on_confirm(r.get(), 0x1234, 6, kCfg, 0, &kOps, &co); /* row 1 not yet certified: nothing */
+  EXPECT_EQ(co.adj_rows, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), k1);
+  nr_dci_hist_on_confirm(r.get(), 0x1234, 7, kCfg, 1, &kOps, &co); /* row 1 -> {0}: slot 7 occupied, so row 0 k0 = 1 impossible */
+  EXPECT_EQ(co.adj_rows, 1);
+  EXPECT_GT(co.adj_removed, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(kCfg, 0x1234, 0), UINT64_C(0x1));
+}
+
+TEST_F(DciBc9d, KillSwitchStillDisablesAll)
+{
+  auto h = ring();
+  const int k1 = bc9d_count_k0(0, 1);
+  nr_dci_hist_enabled_set(0);
+  nr_dci_hist_entry_t d = dci(7, 0);
+  nr_dci_hist_on_accept(h.get(), &d);
+  nr_dci_hist_entry_t out[2];
+  EXPECT_EQ(nr_dci_hist_at(h.get(), 0x1234, 7, out, 2), 0); /* no history */
+  push(h.get(), d);
+  nr_dci_confirm_out_t co;
+  EXPECT_EQ(nr_dci_hist_on_confirm(h.get(), 0x1234, 7, kCfg, 0, &kOps, &co), 0);
+  EXPECT_FALSE(co.found);
+  EXPECT_EQ(g_bc9d_calls, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), k1);
+  ASSERT_EQ(nr_dci_hist_at(h.get(), 0x1234, 7, out, 2), 1);
+  EXPECT_FALSE(out[0].confirmed); /* no confirmation either */
+  /* the environment switch, as the receiver reads it */
+  setenv("ISAC_TD_DCI_ADJ", "0", 1);
+  nr_dci_hist_enabled_set(-1);
+  EXPECT_FALSE(nr_dci_hist_enabled());
+  unsetenv("ISAC_TD_DCI_ADJ");
+  nr_dci_hist_enabled_set(-1);
+  EXPECT_TRUE(nr_dci_hist_enabled());
+}
+
+TEST(DciHistory, CertConfirmedOptionCountsOnlyConfirmedOccupants)
+{
+  auto h = ring();
+  const nr_dci_hist_entry_t g = dci(100, 0, 0, 50);
+  nr_dci_hist_push(h.get(), &g);
+  push(h.get(), dci(101, 0, 0, 20)); /* incompatible, unconfirmed (may be spurious) */
+  EXPECT_TRUE(nr_dci_hist_k0_certified(h.get(), &g, 1, 0x3, 0x1, &kGeo, nullptr, nullptr)); /* default: observed suffices */
+  h->cert_confirmed = true;
+  EXPECT_FALSE(nr_dci_hist_k0_certified(h.get(), &g, 1, 0x3, 0x1, &kGeo, nullptr, nullptr));
+  nr_dci_hist_confirm(h.get(), 0x1234, 101, kCfg, 0, nullptr);
+  EXPECT_TRUE(nr_dci_hist_k0_certified(h.get(), &g, 1, 0x3, 0x1, &kGeo, nullptr, nullptr));
+  /* an unconfirmed COMPATIBLE occupant still spoils it (never less conservative than the default) */
+  push(h.get(), dci(101, 0, 0, 50));
+  EXPECT_FALSE(nr_dci_hist_k0_certified(h.get(), &g, 1, 0x3, 0x1, &kGeo, nullptr, nullptr));
 }

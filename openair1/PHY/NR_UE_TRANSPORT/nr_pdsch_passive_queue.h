@@ -185,6 +185,11 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0);
 void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
                                const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok);
+/** BC9d: feedback of a scored Technique D trial whose TB CRC passed (crc_ok; no-op otherwise, for a zero-generation ticket or
+ *  with ISAC_TD_DCI_ADJ=0): the DCI (rnti, ticket configuration / row, dci_abs_slot) is CONFIRMED in the DL DCI history and
+ *  only now feeds the hard exclusions -- its SIB1 TDD per-hypothesis exclusion (numerology mu, M5 cache) and the
+ *  DCI-adjacency exclusions against confirmed neighbours (nr_dci_hist_on_confirm). Call after the KL feedback. */
+void nr_pdsch_passive_bc9_confirm(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot, int mu, bool crc_ok);
 void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
                                     const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
                                     int nr_slot, c16_t *scratch);

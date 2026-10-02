@@ -533,60 +533,18 @@ static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
 
 /* See the header note on GRANTDROP. Rate-limited per reason so a persistent gate logs once and then
  * every 500th time, which is enough to see it without flooding a capture. */
-/* ---- BC9: DL DCI history + deterministic k0 exclusions (nr_dci_history.h, nr_pdsch_config_sweep.h) ----
- * Called for every ACCEPTED C-RNTI DL DCI, before any grant drop: a dropped grant still occupies its PDSCH slot.
- * (1) history: the ring the decode queue reads for the certified flag (and this function for adjacency);
- * (2) TDD: the per-hypothesis exclusion of this DCI's row from the SIB1 common pattern (skipped when no verified SIB1
- *     pattern of this numerology is known: NSA, phy-test cells without SIB1);
- * (3) DCI adjacency: k0 values made impossible by a row whose k0 is certified (A1-A3, nr_dci_history.h).
- * ISAC_TD_DCI_ADJ=0 disables all of it (A/B; read once): no history (so no certified-flag census either), no SIB1 TDD
- * per-hypothesis exclusion and no DCI-adjacency exclusion (review M9: the TDD exclusion is behind the same switch). */
-static uint64_t bc9_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
+/* ---- BC9: DL DCI history (nr_dci_history.h) ----
+ * Called for every ACCEPTED C-RNTI DL DCI, before any grant drop: a dropped grant still occupies its PDSCH slot. It only
+ * records the DCI, UNCONFIRMED: the ring the decode queue reads for the certified flag and for the DCI-adjacency rule.
+ * BC9d: no exclusion is applied here any more. A false accept carrying this RNTI used to hard-remove the truth of its
+ * (RNTI, configuration, row) context through the SIB1 TDD rule or a spurious adjacency; the hard exclusions now run at
+ * feedback time from CONFIRMED DCIs only (TB CRC pass of the grant: nr_pdsch_passive_bc9_confirm, deferred consumer and the
+ * in-line path below). ISAC_TD_DCI_ADJ=0 disables all of it (A/B; read once, nr_dci_hist_enabled): no history (so no
+ * certified-flag census), no confirmation, no SIB1 TDD per-hypothesis exclusion, no DCI-adjacency exclusion. */
+static _Atomic uint64_t g_bc9_dcis;
+static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint32_t abs_slot, const NR_DL_FRAME_PARMS *fp)
 {
-  (void)arg;
-  return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda);
-}
-static _Atomic uint64_t g_bc9_dcis, g_bc9_tdd, g_bc9_tdd_applied, g_bc9_adj_rows, g_bc9_adj_removed, g_bc9_adj_refused;
-/* Review M5 cache: true when this exact constraint is known applied (no lock on g_lock); else applies it and caches it when
- * it persisted (the RNTI is tracked by the sweep). Direct-mapped, own small lock. */
-#define BC9_TDD_CACHE 256
-static struct { uint64_t cfg, epoch; uint16_t rnti; uint8_t tda; bool valid; nr_td_excl_t ex; } g_bc9_tdd_cache[BC9_TDD_CACHE];
-static pthread_mutex_t g_bc9_tdd_cache_lock = PTHREAD_MUTEX_INITIALIZER;
-static bool bc9_tdd_cached(uint16_t rnti, uint64_t cfg, uint8_t tda, const nr_td_excl_t *ex)
-{
-  uint64_t hsh = cfg * UINT64_C(0x9E3779B97F4A7C15) ^ ((uint64_t)rnti << 8) ^ tda;
-  for (int k = 0; k <= NR_TD_K0_MAX; k++)
-    hsh = hsh * 31 + (uint8_t)ex->last[k];
-  const int i = (int)((hsh ^ (hsh >> 29)) % BC9_TDD_CACHE);
-  const uint64_t epoch = nr_pdsch_config_sweep_cert_epoch(); /* read BEFORE applying: a concurrent drop invalidates */
-  pthread_mutex_lock(&g_bc9_tdd_cache_lock);
-  const bool hit = g_bc9_tdd_cache[i].valid && g_bc9_tdd_cache[i].epoch == epoch && g_bc9_tdd_cache[i].rnti == rnti
-                   && g_bc9_tdd_cache[i].cfg == cfg && g_bc9_tdd_cache[i].tda == tda
-                   && !memcmp(g_bc9_tdd_cache[i].ex.last, ex->last, sizeof(ex->last));
-  pthread_mutex_unlock(&g_bc9_tdd_cache_lock);
-  if (hit)
-    return true;
-  nr_pdsch_config_sweep_exclude_key(cfg, rnti, tda, ex);
-  if (nr_pdsch_config_sweep_rnti_constrained(rnti, cfg)) { /* persisted: safe to skip next time */
-    pthread_mutex_lock(&g_bc9_tdd_cache_lock);
-    g_bc9_tdd_cache[i].valid = true;
-    g_bc9_tdd_cache[i].epoch = epoch;
-    g_bc9_tdd_cache[i].rnti = rnti;
-    g_bc9_tdd_cache[i].cfg = cfg;
-    g_bc9_tdd_cache[i].tda = tda;
-    g_bc9_tdd_cache[i].ex = *ex;
-    pthread_mutex_unlock(&g_bc9_tdd_cache_lock);
-  }
-  return false;
-}
-static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint32_t abs_slot, const NR_DL_FRAME_PARMS *fp, bool sweep)
-{
-  static _Atomic int s_on = -1;
-  if (s_on < 0) {
-    const char *e = getenv("ISAC_TD_DCI_ADJ");
-    s_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
-  }
-  if (!s_on)
+  if (!nr_dci_hist_enabled())
     return; /* full kill switch (A/B): no history, no census input, no exclusion */
   static _Atomic int s_period_set;
   nr_dci_hist_t *h = nr_dci_hist_global();
@@ -598,54 +556,15 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
                                  .start_rb = o->start_rb, .num_rb = o->num_rb, .rbg_bwp_start = o->rbg_bwp_start,
                                  .rbg_bitmap = o->rbg_bitmap, .dmrs_ports = o->dmrs_ports, .n_cdm = o->n_dmrs_cdm_groups,
                                  .nscid = o->nscid};
-  nr_dci_hist_push(h, &e);
+  nr_dci_hist_on_accept(h, &e);
   const uint64_t n = atomic_fetch_add(&g_bc9_dcis, 1) + 1;
-  if (sweep && e.dci11 && e.tda < NR_DCI_HIST_ROWS) {
-    nr_td_excl_t ex;
-    nr_td_excl_none(&ex);
-    if (nr_passive_acq_tdd_pdsch_last_symbols(abs_slot, fp->numerology_index, NR_TD_K0_MAX + 1, ex.last)) {
-      atomic_fetch_add(&g_bc9_tdd, 1);
-      /* first: this row's own k0 set feeds the adjacency below. Review M5: a periodic pattern repeats the same constraint
-       * every period, so a cache of applied (RNTI, configuration, row, constraint) skips g_lock until the sweep's
-       * constraint epoch moves (reopen / eviction / reset may have dropped it). */
-      if (!bc9_tdd_cached(e.rnti, cfg, e.tda, &ex))
-        atomic_fetch_add(&g_bc9_tdd_applied, 1);
-    }
-    uint64_t forbid[NR_DCI_HIST_ROWS] = {0};
-    /* Fast path: without any certification / exclusion for this RNTI and configuration no row is certified, so no
-     * exclusion can follow (one lock instead of one per neighbouring row). */
-    if (nr_pdsch_config_sweep_rnti_constrained(e.rnti, cfg) && nr_dci_hist_adj_exclusions(h, &e, bc9_row_k0, NULL, forbid)) {
-      for (int r = 0; r < NR_DCI_HIST_ROWS; r++) {
-        if (!forbid[r])
-          continue;
-        nr_td_excl_t f;
-        nr_td_excl_none(&f);
-        for (int k = 0; k <= NR_TD_K0_MAX; k++)
-          if (forbid[r] >> k & 1)
-            f.last[k] = -1;
-        const int rm = nr_pdsch_config_sweep_exclude_key(cfg, e.rnti, (uint8_t)r, &f);
-        atomic_fetch_add(&g_bc9_adj_rows, 1);
-        if (rm < 0)
-          atomic_fetch_add(&g_bc9_adj_refused, 1);
-        else
-          atomic_fetch_add(&g_bc9_adj_removed, (uint64_t)rm);
-        static _Atomic int s_log = 20;
-        if (rm != 0 && atomic_fetch_sub(&s_log, 1) > 0)
-          LOG_A(PHY, "SENSING: BC9 DCIADJ rnti=0x%x tda=%d k0 forbidden=0x%llx by DCI slot=%u tda=%u -> %s %d\n", e.rnti, r,
-                (unsigned long long)forbid[r], abs_slot, e.tda, rm < 0 ? "REFUSED (contradiction)" : "removed", rm);
-      }
-    }
-  }
   if ((n % 20000) == 0) {
     uint64_t lt2 = 0, ge2 = 0, refused = 0;
     nr_pdsch_config_sweep_excl_stats(&lt2, &ge2, &refused);
-    LOG_A(PHY, "SENSING: BC9 DCIHIST dcis=%llu tdd_known=%d tdd_dcis=%llu tdd_lock_calls=%llu adj_rows=%llu adj_removed=%llu adj_refused=%llu "
-               "excl_removed[k0<2]=%llu excl_removed[k0>=2]=%llu excl_refused=%llu%s\n",
-          (unsigned long long)n, nr_passive_acq_tdd_known(), (unsigned long long)atomic_load(&g_bc9_tdd),
-          (unsigned long long)atomic_load(&g_bc9_tdd_applied),
-          (unsigned long long)atomic_load(&g_bc9_adj_rows), (unsigned long long)atomic_load(&g_bc9_adj_removed),
-          (unsigned long long)atomic_load(&g_bc9_adj_refused), (unsigned long long)lt2, (unsigned long long)ge2,
-          (unsigned long long)refused, "");
+    LOG_A(PHY, "SENSING: BC9 DCIHIST dcis=%llu tdd_known=%d excl_removed[k0<2]=%llu excl_removed[k0>=2]=%llu excl_refused=%llu "
+               "(exclusions from confirmed DCIs only: see BC9 DCICONF)\n",
+          (unsigned long long)n, nr_passive_acq_tdd_known(), (unsigned long long)lt2, (unsigned long long)ge2,
+          (unsigned long long)refused);
   }
 }
 
@@ -6275,8 +6194,7 @@ constdiag_done:;
       nr_pdcch_blind_monitor_note_rnti_for_windows(out.rnti);
     /* BC9: DL DCI history at ACCEPT time, before every grant drop below (a dropped grant still occupies its PDSCH slot). */
     if (out.rnti_class == NR_BLIND_RNTI_CLASS_C)
-      bc9_dci_accept(&out, cand_task[ti].dl_auto ? cand_task[ti].dl_layout_configuration : g_pdsch_configuration, abs_slot, fp,
-                     !is_dci10 && g_pdsch_sweep_on);
+      bc9_dci_accept(&out, cand_task[ti].dl_auto ? cand_task[ti].dl_layout_configuration : g_pdsch_configuration, abs_slot, fp);
 
     /* ON-ACCEPT DM-RS PROBE (ISAC_COREMAP_ONACCEPT=1, default off). This DCI passed CRC from THIS
      * buffer, at THIS symbol -- so the CORESET provably carried a PDCCH here. Correlating now
@@ -6825,6 +6743,9 @@ constdiag_done:;
               /* BC9 census after the KL feedback (read-only; see the deferred consumer) */
               nr_pdsch_passive_bc9_note(&sweep_ticket, out.rnti, abs_slot, &dlsch_pdu, (uint16_t)cfg->pdsch_xoverhead,
                                         st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+              /* BC9d: a TB CRC pass confirms the DCI; only now may it feed the hard TDD / adjacency exclusions */
+              nr_pdsch_passive_bc9_confirm(&sweep_ticket, out.rnti, abs_slot, fp->numerology_index,
+                                           st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               /* Qm oracle, as the deferred consumer runs it: AFTER this trial's own feedback (a prune
                * re-indexes the catalog and retires outstanding tickets). */
               if (!sweep_ticket.settled && sweep_ticket.generation && dec.qm_measured)

@@ -44,6 +44,22 @@
  *  The k0 of a TDRA row is constant under one configuration key (layout x RRC); a reconfiguration is caught by the
  *  sweep's reopen, which clears certifications.
  *
+ * BC9d: HARD EXCLUSIONS ONLY FROM CONFIRMED DCIs. A3 alone is not enough for a destructive prune: a single false accept
+ * carrying R (a spurious 1_1 of row i at slot s) used to HARD-remove the truth of (R, row i) whenever s + k0_true fell on a
+ * UL slot or past a mixed slot's DL symbols (TDD rule), or whenever a spurious neighbour made a k0 "occupied" (adjacency),
+ * until the next reopen. A DCI is CONFIRMED when the PDSCH grant it scheduled passed TB CRC-24 on any hypothesis (the
+ * decode feedback: deferred consumer and in-line path); that proves the DCI real. Entries are pushed UNconfirmed at accept
+ * time (nr_dci_hist_on_accept, which never excludes anything) and confirmed by nr_dci_hist_on_confirm, which then applies
+ * the DCI's own TDD exclusion and the adjacency exclusions against CONFIRMED neighbours only. Because every exclusion (and
+ * so every k0 certification of a row: the runtime has no other certify_k0 caller) now derives from confirmed DCIs, a
+ * "certified neighbour row" is certified by confirmed DCIs only. Cost: a DCI contributes its exclusion only once one of its
+ * decodes passed (slower early pruning), and adjacency needs both DCIs of a pair confirmed.
+ *  The certified FLAG (use 1, statistical, levers C/P, off by default) may keep using observed-but-unconfirmed occupants;
+ *  its residual is `certified_wrong`: a missed real compatible occupant plus a spurious incompatible one standing in for it.
+ *  ISAC_TD_CERT_CONFIRMED=1 (default 0) makes it count only CONFIRMED occupants (an unconfirmed compatible occupant still
+ *  spoils it: never less conservative than the default).
+ *  ISAC_TD_DCI_ADJ=0 (read once; nr_dci_hist_enabled) disables all of it: no history push, no confirmation, no exclusion.
+ *
  * COMPATIBILITY (notes 1.2). X and g are INCOMPATIBLE only on a provable difference of the receiver computation:
  * different PRB set (same RA type and VRB mapping; RA type 0 vs 1 is never compared), different DM-RS ports / CDM groups
  * / nSCID, different rv, or -- for a same-row occupant whose symbols equal g's -- (TBS, Qm) different under EVERY pair
@@ -80,6 +96,7 @@ typedef struct {
   uint32_t rbg_bitmap;
   uint16_t dmrs_ports;
   uint8_t  n_cdm, nscid;
+  bool     confirmed;    ///< BC9d: the grant this DCI scheduled passed TB CRC on some hypothesis (set by nr_dci_hist_confirm)
 } nr_dci_hist_entry_t;
 
 typedef struct {
@@ -94,6 +111,7 @@ typedef struct {
   pthread_mutex_t lock;
   uint32_t period;       ///< slot numbering period (1024 * slots_per_frame); 0 = no wrap
   uint64_t clock;
+  bool cert_confirmed;   ///< BC9d: the certified flag counts only CONFIRMED occupants (ISAC_TD_CERT_CONFIRMED=1; default false)
   nr_dci_hist_rnti_t r[NR_DCI_HIST_RNTIS];
 } nr_dci_hist_t;
 
@@ -129,12 +147,52 @@ bool nr_dci_hist_incompatible(const nr_dci_hist_entry_t *g, const nr_dci_hist_en
 bool nr_dci_hist_k0_certified(nr_dci_hist_t *h, const nr_dci_hist_entry_t *g, int k_lead, uint64_t sib_k0_mask,
                               uint8_t table_mask, const nr_dci_geom_t *geo, nr_dci_row_k0_fn row_k0, void *arg);
 
-/** Use 2 (deterministic): k0 values made impossible by the just-pushed DCI x and the visible DCIs of the same RNTI and
- *  configuration. forbid[row] |= bit k. Returns the number of rows given a non-zero mask. */
+/** Use 2 (deterministic): k0 values made impossible by the CONFIRMED DCI x and the visible CONFIRMED DCIs of the same RNTI
+ *  and configuration (BC9d: an unconfirmed x or neighbour never excludes). forbid[row] |= bit k. Returns the number of rows
+ *  given a non-zero mask. */
 int nr_dci_hist_adj_exclusions(nr_dci_hist_t *h, const nr_dci_hist_entry_t *x, nr_dci_row_k0_fn row_k0, void *arg,
                                uint64_t forbid[NR_DCI_HIST_ROWS]);
 
-/** Process-wide ring used by the receiver (lazily initialised with period 0 until nr_dci_hist_global_init()). */
+/** BC9d: mark the entries of (rnti, cfg, tda, DCI slot abs_slot) confirmed (its grant passed TB CRC). Searches the whole
+ *  ring of the RNTI (not only the visible window). Returns the number of entries newly marked; *found (optional) = some
+ *  entry matched (false = a missed lookup: never pushed, evicted, another configuration). */
+int nr_dci_hist_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, uint64_t cfg, uint8_t tda, bool *found);
+
+/** BC9d runtime driver of the deterministic exclusions. Callbacks (arg passed through):
+ *  tdd_last  fills last[0..NR_DCI_HIST_K0_MAX] (highest symbol a k0 = k PDSCH of a DCI in abs_slot may end on, -1 =
+ *            impossible); false = no verified TDD pattern (NSA, no SIB1): no TDD exclusion. May be NULL.
+ *  exclude   intersects "row tda: a k0 = k entry ends on symbol <= last[k]" into the (cfg, rnti, tda) key; returns the
+ *            hypotheses removed, < 0 = refused. tdd = true for the TDD rule (a caller may cache it per pattern).
+ *  constrained  fast path: false = no row of (rnti, cfg) is constrained, so no adjacency exclusion can follow. May be NULL.
+ *  row_k0    the row's deterministic allowed-k0 set (nr_dci_row_k0_fn). */
+typedef struct {
+  bool (*tdd_last)(void *arg, uint32_t abs_slot, int8_t *last);
+  int (*exclude)(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda, const int8_t *last, bool tdd);
+  bool (*constrained)(void *arg, uint64_t cfg, uint16_t rnti);
+  nr_dci_row_k0_fn row_k0;
+  void *arg;
+} nr_dci_excl_ops_t;
+typedef struct {
+  bool found;       ///< the DCI was in the ring (else a missed lookup: the TDD rule still applies, adjacency uses the key)
+  int newly;        ///< entries newly confirmed (0 with found = already confirmed: nothing re-applied)
+  bool tdd;         ///< the TDD rule was evaluated (a pattern is known)
+  int tdd_removed;  ///< its exclude() result
+  int adj_rows, adj_removed, adj_refused;
+} nr_dci_confirm_out_t;
+/** Accept time: push the DCI UNconfirmed. Never excludes anything (BC9d). No-op when nr_dci_hist_enabled() is false. */
+void nr_dci_hist_on_accept(nr_dci_hist_t *h, const nr_dci_hist_entry_t *e);
+/** Feedback time, on a TB CRC pass of a grant of DCI (rnti, cfg, tda, abs_slot) (format 1_1): confirm it, then (only the
+ *  first time it is confirmed, or on a missed lookup) apply its TDD exclusion and the DCI-adjacency exclusions against
+ *  confirmed neighbours. Returns the number of exclude() calls made; 0 when disabled. o may be NULL. */
+int nr_dci_hist_on_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, uint64_t cfg, uint8_t tda,
+                           const nr_dci_excl_ops_t *ops, nr_dci_confirm_out_t *o);
+/** ISAC_TD_DCI_ADJ != 0 (read once; default on): the whole BC9 runtime path (history, confirmation, exclusions, census). */
+bool nr_dci_hist_enabled(void);
+/** Test hook: 1 / 0 force the switch, -1 re-reads the environment. */
+void nr_dci_hist_enabled_set(int on);
+
+/** Process-wide ring used by the receiver (lazily initialised with period 0 until nr_dci_hist_global_init(), which also
+ *  reads ISAC_TD_CERT_CONFIRMED). */
 nr_dci_hist_t *nr_dci_hist_global(void);
 void nr_dci_hist_global_init(uint32_t period);
 

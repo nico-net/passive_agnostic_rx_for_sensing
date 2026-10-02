@@ -15,6 +15,7 @@
  */
 
 #include "nr_dci_history.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* OAI MCS tables / TBS (openair2/LAYER2/NR_MAC_COMMON). Declared here rather than through nr_mac_common.h, which pulls the
@@ -197,6 +198,7 @@ bool nr_dci_hist_k0_certified(nr_dci_hist_t *h, const nr_dci_hist_entry_t *g, in
   if (sib == 0)
     return false; /* an empty sibling set never certifies */
   const uint32_t u = slot_add(h, g->abs_slot, k_lead);
+  const bool conf_only = h->cert_confirmed; /* ISAC_TD_CERT_CONFIRMED: only confirmed occupants count as observed */
   nr_dci_hist_entry_t nb[NEAR_MAX];
   const int n = nr_dci_hist_near(h, g->rnti, u, 2 * NR_DCI_HIST_K0_MAX, nb, NEAR_MAX);
   for (int ks = 0; ks <= NR_DCI_HIST_K0_MAX; ks++) {
@@ -209,9 +211,9 @@ bool nr_dci_hist_k0_certified(nr_dci_hist_t *h, const nr_dci_hist_entry_t *g, in
       const nr_dci_hist_entry_t *x = &nb[j];
       if (!x->dci11 || x->cfg != g->cfg || x->tda != g->tda || x->abs_slot != t_occ)
         continue;
-      found++;
       if (!nr_dci_hist_incompatible(g, x, table_mask, geo))
-        return false;
+        return false; /* any compatible occupant spoils it, confirmed or not */
+      found += !conf_only || x->confirmed;
     }
     if (found)
       continue;
@@ -223,9 +225,9 @@ bool nr_dci_hist_k0_certified(nr_dci_hist_t *h, const nr_dci_hist_entry_t *g, in
       int ky;
       if (!singleton(row_k0(arg, y->cfg, y->rnti, y->tda), &ky) || slot_add(h, y->abs_slot, ky) != u)
         continue;
-      found++;
       if (!nr_dci_hist_incompatible(g, y, table_mask, NULL)) /* other row: its symbols are unknown */
         return false;
+      found += !conf_only || y->confirmed;
     }
     if (!found)
       return false; /* missed / unseen / evicted: ambiguous */
@@ -237,8 +239,8 @@ bool nr_dci_hist_k0_certified(nr_dci_hist_t *h, const nr_dci_hist_entry_t *g, in
 int nr_dci_hist_adj_exclusions(nr_dci_hist_t *h, const nr_dci_hist_entry_t *x, nr_dci_row_k0_fn row_k0, void *arg,
                                uint64_t forbid[NR_DCI_HIST_ROWS])
 {
-  if (h == NULL || x == NULL || row_k0 == NULL || forbid == NULL || !x->dci11 || x->tda >= NR_DCI_HIST_ROWS)
-    return 0;
+  if (h == NULL || x == NULL || row_k0 == NULL || forbid == NULL || !x->dci11 || x->tda >= NR_DCI_HIST_ROWS || !x->confirmed)
+    return 0; /* BC9d: a hard exclusion needs a CONFIRMED x */
   uint64_t add[NR_DCI_HIST_ROWS] = {0};
   uint64_t rk[NR_DCI_HIST_ROWS]; /* row_k0 memoised per row for this call (the callback may take a lock) */
   uint32_t rk_have = 0;
@@ -249,8 +251,8 @@ int nr_dci_hist_adj_exclusions(nr_dci_hist_t *h, const nr_dci_hist_entry_t *x, n
   const int n = nr_dci_hist_near(h, x->rnti, x->abs_slot, NR_DCI_HIST_K0_MAX, nb, NEAR_MAX);
   for (int j = 0; j < n; j++) {
     const nr_dci_hist_entry_t *y = &nb[j];
-    if (!y->dci11 || y->cfg != x->cfg || y->tda >= NR_DCI_HIST_ROWS)
-      continue;
+    if (!y->dci11 || !y->confirmed || y->cfg != x->cfg || y->tda >= NR_DCI_HIST_ROWS)
+      continue; /* BC9d: ... and CONFIRMED neighbours only (a spurious neighbour must never rule out a k0) */
     const int32_t dy = nr_dci_hist_diff(h, y->abs_slot, x->abs_slot); /* t_y - t_x */
     if (dy == 0 && y->tda == x->tda)
       continue; /* x itself (or a duplicate of it): no second PDSCH */
@@ -275,6 +277,97 @@ int nr_dci_hist_adj_exclusions(nr_dci_hist_t *h, const nr_dci_hist_entry_t *x, n
   return rows;
 }
 
+/* ---- BC9d: confirmation and the exclusion driver ------------------------------------------------------------------ */
+int nr_dci_hist_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, uint64_t cfg, uint8_t tda, bool *found)
+{
+  if (found)
+    *found = false;
+  if (h == NULL || rnti == 0)
+    return 0;
+  int newly = 0, hit = 0;
+  pthread_mutex_lock(&h->lock);
+  nr_dci_hist_rnti_t *r = find_rnti(h, rnti);
+  for (int k = 0; r && k < r->n; k++) { /* the whole ring: a feedback can arrive after the visibility window moved on */
+    nr_dci_hist_entry_t *e = &r->e[(r->w - 1 - k + NR_DCI_HIST_DEPTH) % NR_DCI_HIST_DEPTH];
+    if (!e->dci11 || e->abs_slot != abs_slot || e->cfg != cfg || e->tda != tda)
+      continue;
+    hit++;
+    newly += !e->confirmed;
+    e->confirmed = true;
+  }
+  pthread_mutex_unlock(&h->lock);
+  if (found)
+    *found = hit > 0;
+  return newly;
+}
+
+static int s_enabled = -1; /* -1 = not read yet */
+bool nr_dci_hist_enabled(void)
+{
+  int on = __atomic_load_n(&s_enabled, __ATOMIC_ACQUIRE);
+  if (on < 0) {
+    const char *e = getenv("ISAC_TD_DCI_ADJ");
+    on = (e != NULL && atoi(e) == 0) ? 0 : 1;
+    __atomic_store_n(&s_enabled, on, __ATOMIC_RELEASE);
+  }
+  return on != 0;
+}
+void nr_dci_hist_enabled_set(int on) { __atomic_store_n(&s_enabled, on < 0 ? -1 : (on ? 1 : 0), __ATOMIC_RELEASE); }
+
+void nr_dci_hist_on_accept(nr_dci_hist_t *h, const nr_dci_hist_entry_t *e)
+{
+  if (h == NULL || e == NULL || !nr_dci_hist_enabled())
+    return;
+  nr_dci_hist_entry_t x = *e;
+  x.confirmed = false; /* only the decode feedback confirms */
+  nr_dci_hist_push(h, &x);
+}
+
+int nr_dci_hist_on_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, uint64_t cfg, uint8_t tda,
+                           const nr_dci_excl_ops_t *ops, nr_dci_confirm_out_t *o)
+{
+  nr_dci_confirm_out_t loc;
+  if (o == NULL)
+    o = &loc;
+  memset(o, 0, sizeof(*o));
+  if (h == NULL || ops == NULL || ops->exclude == NULL || rnti == 0 || tda >= NR_DCI_HIST_ROWS || !nr_dci_hist_enabled())
+    return 0;
+  o->newly = nr_dci_hist_confirm(h, rnti, abs_slot, cfg, tda, &o->found);
+  if (o->found && o->newly == 0)
+    return 0; /* already confirmed by an earlier pass: its exclusions were applied then */
+  int calls = 0;
+  /* (1) TDD: this DCI is real, so the row's truth (S, L, k0) ends within the slot abs_slot + k0's DL-capable symbols */
+  int8_t last[NR_DCI_HIST_K0_MAX + 1];
+  if (ops->tdd_last && ops->tdd_last(ops->arg, abs_slot, last)) {
+    o->tdd = true;
+    o->tdd_removed = ops->exclude(ops->arg, cfg, rnti, tda, last, true);
+    calls++;
+  }
+  /* (2) adjacency against CONFIRMED neighbours, after (1) so this row's own k0 set is current. A missed lookup still knows
+   * the key, which is all the adjacency rule reads of x. */
+  if (ops->row_k0 == NULL || (ops->constrained && !ops->constrained(ops->arg, cfg, rnti)))
+    return calls;
+  const nr_dci_hist_entry_t x = {.abs_slot = abs_slot, .cfg = cfg, .rnti = rnti, .dci11 = true, .tda = tda, .confirmed = true};
+  uint64_t forbid[NR_DCI_HIST_ROWS] = {0};
+  if (nr_dci_hist_adj_exclusions(h, &x, ops->row_k0, ops->arg, forbid) == 0)
+    return calls;
+  for (int r = 0; r < NR_DCI_HIST_ROWS; r++) {
+    if (!forbid[r])
+      continue;
+    int8_t f[NR_DCI_HIST_K0_MAX + 1];
+    for (int k = 0; k <= NR_DCI_HIST_K0_MAX; k++)
+      f[k] = (forbid[r] >> k & 1) ? -1 : 13;
+    const int rm = ops->exclude(ops->arg, cfg, rnti, (uint8_t)r, f, false);
+    calls++;
+    o->adj_rows++;
+    if (rm < 0)
+      o->adj_refused++;
+    else
+      o->adj_removed += rm;
+  }
+  return calls;
+}
+
 static nr_dci_hist_t g_hist;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static void g_init(void) { nr_dci_hist_init(&g_hist, 0); }
@@ -286,7 +379,9 @@ nr_dci_hist_t *nr_dci_hist_global(void)
 void nr_dci_hist_global_init(uint32_t period)
 {
   nr_dci_hist_t *h = nr_dci_hist_global();
+  const char *cc = getenv("ISAC_TD_CERT_CONFIRMED");
   pthread_mutex_lock(&h->lock);
   __atomic_store_n(&h->period, period, __ATOMIC_RELEASE);
+  h->cert_confirmed = cc != NULL && atoi(cc) != 0;
   pthread_mutex_unlock(&h->lock);
 }

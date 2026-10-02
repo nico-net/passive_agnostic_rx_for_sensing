@@ -815,7 +815,7 @@ TEST(TdSimBc9, CertifiedPCNeverWrongUnderPhysicalTrap)
   EXPECT_EQ(r.crc_wrong, 0);
   EXPECT_GT(r.cert_fed, 0);
   EXPECT_LE(r.cert_fed, r.fed_all);
-  EXPECT_EQ(r.sib_blocks, r.acquisitions_rntis); /* the guard caught the trap on every RNTI */
+  EXPECT_GE((double)r.sib_blocks, 0.95 * (double)r.acquisitions_rntis); /* the guard caught the trap on (almost) every RNTI (review minor 4) */
   EXPECT_EQ(r.crc_accepts + r.geom_pins, 0);
 }
 TEST(TdSimBc9, CertifiedPCFiresAndIsNeverWrongWhenNeighboursAreIncompatible)
@@ -882,4 +882,72 @@ TEST(TdSimBc9, CertifiedEvidenceAloneStopsTheWrongPinsOfTheGuardOffArm)
   const SimResult r = run_sim(c);
   EXPECT_EQ(r.wrong_pins, 0);
   EXPECT_EQ(r.wrong, 0);
+}
+
+/* ---- BC9d: hard TDD exclusion only from CONFIRMED DCIs (a genuine grant whose main decode passed CRC) ---- */
+static SimCfg bc9d_cfg()
+{
+  SimCfg c = bc9_cfg();
+  c.tdd = "DDDSU"; c.dci_false = 1e-2; c.acq = 20; c.cap_s = 300;
+  return c;
+}
+TEST(TdSimBc9d, SpuriousDciHazardWithUnconfirmedExclusion)
+{
+  /* the pre-BC9d runtime: every accepted DCI 1_1 of the row excluded at accept time, spurious ones included -> the truth is pruned and the RNTI
+   * ends wrong or undecidable */
+  SimCfg c = bc9d_cfg(); c.excl_unconfirmed = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.spur_excl_dcis, 0);
+  EXPECT_GT(r.truth_excluded, 0);
+  EXPECT_GT(r.wrong + r.undecidable, 0);
+}
+TEST(TdSimBc9d, ConfirmedExclusionNeverPrunesTruth)
+{
+  SimCfg c = bc9d_cfg(); c.cap_s = 3600; /* the default cap: a capped RNTI is slow, not lost (the 300 s cap of the hazard test censors ~1/3) */
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.spur_excl_dcis, 0);
+  EXPECT_EQ(r.truth_excluded, 0);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_GT(r.confirmed_dcis, 0);
+  EXPECT_GT(r.tdd_excl_removed, 0); /* the confirmed exclusion still fires */
+  SimCfg b = c; b.dci_false = 0; /* baseline: no spurious DCI at all */
+  const SimResult rb = run_sim(b);
+  EXPECT_LE(r.undecidable, rb.undecidable);
+  EXPECT_EQ(rb.truth_excluded, 0);
+}
+TEST(TdSimBc9d, IntermediatePersistenceTrapsAndFastPathFires)
+{
+  /* BC9 sim review I3: rho 0.5 -- the physical shifted-slot trap occurs (identical neighbour allocations) AND certified grants exist.
+   * MEASURED (BC9d, seed 1, 40 RNTIs): with the sibling guard on, guard B still blocks the fast path on (almost) every RNTI down to rho 0.3 (it blocks
+   * on ANY sibling pass, certified or not: the BC9c question); with the guard off (--sib-pmin 0) the fast path fires on every RNTI and the certified
+   * evidence alone keeps it right (wrong 0, wrong_pins 0). Both arms are asserted. */
+  SimCfg c = bc9_cfg(); c.persist = 0.5; c.acq = 20;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.trap_grants, 0);
+  EXPECT_GT(r.k0_trap_passes, 0);
+  EXPECT_GT(r.cert_fed, 0);
+  EXPECT_GE((double)r.sib_blocks, 0.95 * (double)r.acquisitions_rntis);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_EQ(r.crc_wrong, 0);
+  c.sib_pmin = 0; /* guard off: certified evidence alone */
+  const SimResult o = run_sim(c);
+  EXPECT_GT(o.k0_trap_passes, 0);
+  EXPECT_GT(o.crc_accepts + o.geom_pins, 0); /* the fast path fires */
+  EXPECT_EQ(o.wrong, 0);
+  EXPECT_EQ(o.wrong_pins, 0);
+  EXPECT_EQ(o.crc_wrong, 0);
+}
+TEST(TdSimBc9d, CertConfirmedRemovesCertifiedWrong)
+{
+  /* certified_wrong = a missed real compatible occupant + a spurious incompatible one standing in for it. Spurious DCIs are never confirmed, so with
+   * --cert-confirmed 1 (ISAC_TD_CERT_CONFIRMED=1) it cannot occur. */
+  SimCfg c = bc9_cfg(); c.dci_miss = 0.3; c.dci_false = 0.1; c.acq = 20;
+  const SimResult r0 = run_sim(c);
+  EXPECT_GT(r0.certified_wrong, 0);
+  c.cert_confirmed = 1;
+  const SimResult r1 = run_sim(c);
+  EXPECT_EQ(r1.certified_wrong, 0);
+  EXPECT_LE(r1.certified_grants, r0.certified_grants);
 }

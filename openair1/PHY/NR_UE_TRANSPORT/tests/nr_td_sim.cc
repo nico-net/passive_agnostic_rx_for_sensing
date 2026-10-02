@@ -12,6 +12,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <deque>
 extern "C" {
 #include "nr_pdsch_config_sweep.h"
 #include "nr_td_fieldbook.h"
@@ -78,6 +79,14 @@ struct SimCfg {
   /* BC9: 1 (default; only acts with --tdd and the slot model) = mirror the runtime's deterministic per-hypothesis TDD exclusion (nr_pdsch_config_sweep_exclude) */
   int tdd_exclude;
   int cert_evidence; /* BC9: 1 (default) = slot model feeds the observed-DCI certified flag to the engine; 0 = certified = true (the pre-BC9 arm, for comparison) */
+  /* BC9d: 0 (default, the runtime since BC9d) = the hard TDD exclusion is applied only from CONFIRMED DCIs: a genuine grant whose main (full-TB) decode
+   * passed CRC, after its feedback; spurious DCIs never. 1 = the pre-BC9d runtime (the hazard): every ACCEPTED DCI excludes at accept time, the
+   * genuine one before its decode AND every spurious one (--dci-false), attributed to the truth's TDRA row (worst case: a false accept carries a random
+   * row; only one of the truth's row can hit the truth). */
+  int excl_unconfirmed;
+  /* BC9d: 1 = ISAC_TD_CERT_CONFIRMED=1 mirror: the certified flag counts only CONFIRMED occupants (a genuine DCI whose grant already passed CRC);
+   * an unconfirmed compatible occupant still spoils it. 0 (default) = observed occupants (the runtime default). */
+  int cert_confirmed;
   std::string tdd;
   float sib_pmin, sib_eps; /* sibling guard (engine st->sib_pmin / sib_eps); --sib-pmin 0 disables the guard (fix A only) */
   float w_sib1, w_default, w_obs, w_field, w_probe;
@@ -93,7 +102,7 @@ struct SimCfg {
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
     c.crc_accept = c.geom_pin = c.harq_trap_retx = 0;
     c.slot_model = 0; c.k0_oracle_legacy = 1; c.fo_always = 0; c.truth_k0 = -1;
-    c.other_ue_same_cfg = 0; c.obs_lastset = 1; c.tdd_exclude = 1; c.cert_evidence = 1; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
+    c.other_ue_same_cfg = 0; c.obs_lastset = 1; c.tdd_exclude = 1; c.cert_evidence = 1; c.excl_unconfirmed = 0; c.cert_confirmed = 0; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
     c.retx_trap = c.k0_trap_adj = 0; c.sib_pmin = 0.05f; c.sib_eps = 1e-6f;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
@@ -114,6 +123,8 @@ struct RntiRec {
   long sib_trials, sib_blocks, retx_trap_passes, k0_trap_passes;
   long dci_missed, dci_false, proc_grants, adj_grants, trap_grants, certified_grants, certified_sib, certified_wrong; /* slot model (v2) */
   long cert_fed = 0, fed_all = 0, cert_pass = 0, pass_all = 0, tdd_excl_removed = 0; /* BC9: explore feeds with certified = true / all explore feeds (slot model); hypotheses removed by the TDD exclusion */
+  long confirmed_dcis = 0, spur_excl_dcis = 0; /* BC9d: genuine DCIs confirmed by a main-decode CRC pass; spurious DCIs fed to the exclusion (--excl-unconfirmed 1) */
+  bool truth_excluded = false; /* BC9d: a TDD exclusion removed the truth (impossible from confirmed DCIs) */
   int truth_k0;
   long restores, restore_hyp; /* restore_observed_typea events / entries re-added */
   long k0_probes, k0_probe_hyp, k0_probe_layers, n_hyp_end; /* I3: runtime k0 >= 2 probe layers */
@@ -149,6 +160,7 @@ struct SimResult {
   long geom_pins = 0, geom_blocks = 0, crc_accepts = 0, wrong_pins = 0, crc_wrong = 0, sib_trials = 0, sib_blocks = 0, retx_trap_passes = 0, k0_trap_passes = 0;
   double geom_bound = 0, crc_bound = 0;
   long dci_missed = 0, dci_false = 0, proc_grants = 0, adj_grants = 0, trap_grants = 0, certified_grants = 0, certified_sib = 0, certified_wrong = 0, cert_fed = 0, fed_all = 0, cert_pass = 0, pass_all = 0, tdd_excl_removed = 0;
+  long confirmed_dcis = 0, spur_excl_dcis = 0, truth_excluded = 0; /* BC9d (truth_excluded = RNTIs) */
   long restores = 0, restore_hyp = 0;
   long k0_probes = 0, k0_probe_hyp = 0, k0_probe_layers = 0, n_hyp_end = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
@@ -277,6 +289,7 @@ static bool sim_compat_real(const SimKey &a, const SimKey &b, int tt, unsigned t
 }
 struct SimOcc {
   bool present = false, dci_seen = false, new_tx = true, exercised = false;
+  bool confirmed = false; /* BC9d: the receiver decoded this grant with a CRC pass (its DCI is CONFIRMED) */
   SimKey key;
   double snr = 0;
   float snr_est_noise = 0;
@@ -326,17 +339,23 @@ class SlotTimeline {
     return -1; /* nothing schedulable (e.g. TDD leaves no DL slot after a DL slot for k0 = 1) */
   }
   /* DCIs the RECEIVER holds for PDCCH slot x: the real DCI (scheduling PDSCH slot x + k0) if it was detected, plus a spurious (false-accepted) one.
-   * Empty = nothing observed (a miss, a UL slot, or before the start): never evidence of absence. */
-  std::vector<SimKey> observed_dci(long x)
+   * Empty = nothing observed (a miss, a UL slot, or before the start): never evidence of absence. conf (optional): per entry, CONFIRMED (BC9d: the real
+   * DCI's grant passed CRC; a spurious DCI never is). */
+  std::vector<SimKey> observed_dci(long x, std::vector<char> *conf = nullptr)
   {
     std::vector<SimKey> v;
+    if (conf) conf->clear();
     if (x < 0) return v;
     const SimSlot a = slot(x + k0_);
-    if (a.occ.present && a.occ.dci_seen) v.push_back(a.occ.key);
+    if (a.occ.present && a.occ.dci_seen) { v.push_back(a.occ.key); if (conf) conf->push_back(a.occ.confirmed); }
     const SimSlot b = slot(x);
-    if (b.spur) v.push_back(b.spur_key);
+    if (b.spur) { v.push_back(b.spur_key); if (conf) conf->push_back(0); }
     return v;
   }
+  /* BC9d: the grant in PDSCH slot s passed CRC at the receiver (its DCI is confirmed) */
+  void confirm(long s) { if (s >= base_ && s < base_ + (long)buf_.size()) buf_[(size_t)(s - base_)].occ.confirmed = true; }
+  /* BC9d: PDCCH slots of spurious DCIs not yet handed to the receiver model, oldest first (gen() order) */
+  std::deque<long> spur_q;
   void trim(long keep_from)
   {
     if (keep_from - base_ < 4096) return;
@@ -391,6 +410,7 @@ class SlotTimeline {
       sl.spur_key.prb = (int)(drng_() % 8);
       sl.spur_key.rv = (int)(drng_() % 4);
       n_spur++;
+      spur_q.push_back(s);
     }
     buf_.push_back(sl);
   }
@@ -413,22 +433,29 @@ class SlotTimeline {
  * of alive MCS tables. A miss, a UL slot or a history gap (nothing observed) => ambiguous; a compatible DCI => ambiguous. An EMPTY sibling set is never
  * "certified" (vacuous certification: e.g. every other k0 layer was pruned, so the claim rests on assumption A2 only). `k0mask` = bit k set for every alive
  * catalogue offset k (0..32), `tblmask` bit t for every alive MCS table. */
-static bool sim_certified(SlotTimeline &tl, long t, const SimKey &g, int L, uint64_t k0mask, unsigned tblmask)
+static bool sim_certified(SlotTimeline &tl, long t, const SimKey &g, int L, uint64_t k0mask, unsigned tblmask, bool confirmed_only = false)
 {
   int n_sib = 0;
+  std::vector<char> conf;
   for (int ks = 0; ks < 33; ks++) {
     if (ks == L || !((k0mask >> ks) & 1)) continue;
     n_sib++;
-    const std::vector<SimKey> obs = tl.observed_dci(t + (L - ks));
-    if (obs.empty()) return false;
-    for (const SimKey &x : obs)
-      if (sim_compat_any(x, g, tblmask)) return false;
+    const std::vector<SimKey> obs = tl.observed_dci(t + (L - ks), &conf);
+    int found = 0;
+    for (size_t j = 0; j < obs.size(); j++) {
+      if (sim_compat_any(obs[j], g, tblmask)) return false; /* any compatible occupant spoils it, confirmed or not */
+      found += !confirmed_only || conf[j];
+    }
+    if (!found) return false;
   }
   return n_sib > 0;
 }
 
 /* BC9: the runtime's TDD exclusion for DCI slot t (nr_pdsch_config_sweep_exclude_key's input): last[k] = highest symbol a k0 = k PDSCH may end on in slot
- * t + k: UL -> -1 (impossible), mixed -> tdd_s_dl_symbols - 1 (DL symbols precede the common UL symbols), D -> 13. The predicate itself is the engine's. */
+ * t + k: UL -> -1 (impossible), mixed -> tdd_s_dl_symbols - 1 (DL symbols precede the common UL symbols), D -> 13. The predicate itself is the engine's.
+ * NB (BC9 sim review minor 2): the simulator's 'S' slot has DL symbols then UL symbols only, so this is STRICTER than the runtime whenever the real S slot
+ * has flexible symbols: the runtime (nr_tdd_pdsch_last_symbol, TS 38.213 11.1) admits up to 13 - nrofUplinkSymbols, i.e. flexible symbols are never
+ * excluded. The simulator therefore over-states the exclusion's pruning (and its speed gain) for patterns with flexible symbols in the S slot. */
 static void sim_tdd_excl(const SlotTimeline &tl, long t, const SimCfg &cfg, nr_td_excl_t *e)
 {
   nr_td_excl_none(e);
@@ -791,6 +818,18 @@ static SimResult run_sim(const SimCfg &cfg)
       bool distinguished = false;
       uint64_t k0mask = 0; unsigned tblmask = 0; int k0mask_nhyp = -1; /* slot model: alive k0 offsets / MCS tables of the truth's row, recomputed when the catalogue changes */
       int winner = -1;
+      /* BC9 TDD exclusion of a DCI in PDCCH slot x (the engine's predicate). BC9 sim review I1: the truth index is refreshed after any change. */
+      auto tdd_exclude_at = [&](long x) {
+        nr_td_excl_t ex; sim_tdd_excl(*tl, x, cfg, &ex);
+        const int before = st->n_hyp;
+        const bool had_truth = ti >= 0;
+        nr_pdsch_config_sweep_exclude(st.get(), &ex); /* 0 = nothing would survive: untouched */
+        rec.tdd_excl_removed += before - st->n_hyp;
+        if (st->n_hyp != before) {
+          find_truth();
+          rec.truth_excluded |= had_truth && ti < 0;
+        }
+      };
       long g = 0;
       std::uniform_real_distribution<double> uf(0, 1);
       bool trap_active = false; /* per-grant HARQ-trap draw (frng) */
@@ -896,6 +935,13 @@ static SimResult run_sim(const SimCfg &cfg)
           gr.snr_est_noise = o.snr_est_noise; gr.adj_same = false; gr.key = o.key;
           gr.dci_slot = u - T.k0;
           tl->trim(gr.dci_slot - 40); /* >= 33 slots kept: certification reads offsets down to -32 */
+          /* BC9d: spurious DCIs accepted up to this DCI slot. They are never confirmed (no grant behind them passes CRC), so they exclude nothing
+           * unless --excl-unconfirmed 1 (the pre-BC9d hazard: the accept hook excluded on ANY accepted DCI 1_1 of the row). */
+          while (!tl->spur_q.empty() && tl->spur_q.front() <= gr.dci_slot) {
+            const long x = tl->spur_q.front();
+            tl->spur_q.pop_front();
+            if (cfg.tdd_exclude && !cfg.tdd.empty() && cfg.excl_unconfirmed && winner < 0) { rec.spur_excl_dcis++; tdd_exclude_at(x); }
+          }
           if (!o.dci_seen) { rec.dci_missed++; continue; } /* the grant happened (time passes) but the receiver never detected its DCI: no job */
         } else {
         gr.snr = cfg.mu + cfg.fade * nd(crng);
@@ -921,12 +967,8 @@ static SimResult run_sim(const SimCfg &cfg)
           /* alive catalogue offsets / tables of the truth's row (S, L, mapping, mask) incl. dormant ones: conservative (more siblings, harder to certify).
            * NB add_pos / max_len are ignored in the row key: the sibling set is a conservative SUPERSET (entries with other add_pos/max_len but the same
            * mask are equivalent for the occupant check), so it can only make certification harder, never easier. */
-          if (cfg.tdd_exclude && !cfg.tdd.empty()) {
-            nr_td_excl_t ex; sim_tdd_excl(*tl, gr.dci_slot, cfg, &ex);
-            const int before = st->n_hyp;
-            nr_pdsch_config_sweep_exclude(st.get(), &ex); /* 0 = nothing would survive: untouched */
-            rec.tdd_excl_removed += before - st->n_hyp;
-          }
+          if (cfg.tdd_exclude && !cfg.tdd.empty() && cfg.excl_unconfirmed) /* pre-BC9d: the accepted DCI excludes before any CRC */
+            tdd_exclude_at(gr.dci_slot);
           if (st->n_hyp != k0mask_nhyp) {
             k0mask = 0; tblmask = 0;
             for (int i = 0; i < st->n_hyp; i++) {
@@ -941,7 +983,7 @@ static SimResult run_sim(const SimCfg &cfg)
           bool trap_possible = false;
           for (int L = 0; L < 33; L++) {
             if (!((k0mask >> L) & 1)) continue;
-            gr.certified[L] = sim_certified(*tl, gr.dci_slot, gr.key, L, k0mask, tblmask);
+            gr.certified[L] = sim_certified(*tl, gr.dci_slot, gr.key, L, k0mask, tblmask, cfg.cert_confirmed != 0);
             if (L == T.k0) { rec.certified_grants += gr.certified[L]; continue; }
             /* a sibling leader L != truth: its decode reads the REAL occupant of slot dci + L. certified_wrong = certified although that occupant
              * is compatible (the real DCI was missed and a spurious incompatible DCI stood in for it). */
@@ -1020,6 +1062,13 @@ static SimResult run_sim(const SimCfg &cfg)
           }
         } else {
           winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
+        }
+        /* BC9d: a CRC pass of the main (full-TB) decode confirms this genuine DCI; only then (default) does it feed the hard TDD exclusion, AFTER
+         * the trial's feedback (the runtime order: KL feedback, census, confirmation). Not once a winner is out (an exclusion re-indexes the state). */
+        if (cfg.slot_model && out[0].result == NR_TD_PASS) {
+          tl->confirm(gr.dci_slot + T.k0);
+          rec.confirmed_dcis++;
+          if (cfg.tdd_exclude && !cfg.tdd.empty() && !cfg.excl_unconfirmed && winner < 0) tdd_exclude_at(gr.dci_slot);
         }
         rec.sib_blocks += !pre_sib_blocked && st->sib_blocked;
         if (cfg.geom_pin) {
@@ -1177,6 +1226,7 @@ static SimResult run_sim(const SimCfg &cfg)
       R.restores += rec.restores; R.restore_hyp += rec.restore_hyp; R.k0_probes += rec.k0_probes; R.k0_probe_hyp += rec.k0_probe_hyp; R.k0_probe_layers += rec.k0_probe_layers; R.n_hyp_end += rec.n_hyp_end;
       R.dci_missed += rec.dci_missed; R.dci_false += rec.dci_false; R.proc_grants += rec.proc_grants; R.adj_grants += rec.adj_grants;
       R.trap_grants += rec.trap_grants; R.certified_grants += rec.certified_grants; R.certified_sib += rec.certified_sib; R.certified_wrong += rec.certified_wrong; R.cert_fed += rec.cert_fed; R.fed_all += rec.fed_all; R.cert_pass += rec.cert_pass; R.pass_all += rec.pass_all; R.tdd_excl_removed += rec.tdd_excl_removed;
+      R.confirmed_dcis += rec.confirmed_dcis; R.spur_excl_dcis += rec.spur_excl_dcis; R.truth_excluded += rec.truth_excluded;
       R.oracle_miss_rntis += ostate == 1; R.oracle_wrong_rntis += ostate == 2;
       R.harq_trap_passes += rec.harq_trap_passes; R.false_passes += rec.false_passes;
       R.geom_pins += rec.geom_pins; R.geom_blocks += rec.geom_blocks; R.crc_accepts += rec.crc_accepts;
@@ -1237,6 +1287,9 @@ int main(int argc, char **argv)
            "  --other-ue-same-cfg 0|1 (other UE's DM-RS add_pos/max_len = the truth's, i.e. few distinct masks; default 0 = any catalogue entry)\n"
            "  --cert-evidence 1|0 (BC9: 1 = engine certified flag from observed DCIs, default; 0 = always true, the pre-BC9 behaviour)\n"
            "  --tdd-exclude 1|0 (BC9: mirror the runtime's per-hypothesis TDD exclusion with --tdd + slot model; default 1)\n"
+           "  --excl-unconfirmed 0|1 (BC9d: 0 = exclusion only from CONFIRMED DCIs, i.e. a genuine grant whose main decode passed CRC (runtime, default);\n"
+           "    1 = the pre-BC9d hazard: every accepted DCI excludes, incl. spurious ones (--dci-false), attributed to the truth's row)\n"
+           "  --cert-confirmed 0|1 (BC9d: ISAC_TD_CERT_CONFIRMED mirror: certified flag from CONFIRMED occupants only; default 0)\n"
            "  --obs-lastset 1|0 (BC7b K42: 1 = monotone per-mask last-symbol set + no restore of a dropped mask (runtime), default; 0 = BC8 round-2 relax/re-refine)\n"
            "  --other-ue-occ P (another UE's PDSCH overlaps the grant's PRBs in a DL slot; triggers the K39 legacy oracle + wrong mask) --tdd-s-dl-symbols N (6)\n"
            "  --mcs-change P (per-slot MCS redraw, default 1-persist) --snr-rho R (AR(1) SNR, default 0 = i.i.d.)\n"
@@ -1305,6 +1358,8 @@ int main(int argc, char **argv)
     else if (f == "--obs-lastset") c.obs_lastset = atoi(v);
     else if (f == "--tdd-exclude") c.tdd_exclude = atoi(v);
     else if (f == "--cert-evidence") c.cert_evidence = atoi(v);
+    else if (f == "--excl-unconfirmed") c.excl_unconfirmed = atoi(v);
+    else if (f == "--cert-confirmed") c.cert_confirmed = atoi(v);
     else if (f == "--tdd-s-dl-symbols") c.tdd_s_dl_symbols = atoi(v);
     else if (f == "--mcs-change") c.mcs_change = atof(v);
     else if (f == "--snr-rho") c.snr_rho = atof(v);
@@ -1366,6 +1421,9 @@ int main(int argc, char **argv)
            "\"certified_grants\":%ld,\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,"
            "\"n_hyp_end\":%ld,\"restores\":%ld,\"restore_hyp\":%ld,\"obs_lastset\":%d,\"cert_fed\":%ld,\"fed_all\":%ld,\"cert_pass\":%ld,\"pass_all\":%ld,\"tdd_excl_removed\":%ld", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
            r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end, r.restores, r.restore_hyp, c.obs_lastset, r.cert_fed, r.fed_all, r.cert_pass, r.pass_all, r.tdd_excl_removed);
+  if (c.slot_model)
+    printf(",\"excl_unconfirmed\":%d,\"cert_confirmed\":%d,\"confirmed_dcis\":%ld,\"spur_excl_dcis\":%ld,\"truth_excluded\":%ld", c.excl_unconfirmed,
+           c.cert_confirmed, r.confirmed_dcis, r.spur_excl_dcis, r.truth_excluded);
   if (c.fo_always && c.fieldbook != 2) printf(",\"fail_opens\":%ld", r.fail_opens);
   if (c.retx_trap > 0 || c.k0_trap_adj > 0 || c.slot_model)
     printf(",\"retx_trap\":%g,\"k0_trap_adj\":%g,\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", c.retx_trap, c.k0_trap_adj, r.retx_trap_passes,
