@@ -177,8 +177,9 @@ void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
     c->miss_occasions = 0;
     return;
   }
+  if (!rnti_active_elsewhere) return;
   if (c->miss_occasions < UINT32_MAX) ++c->miss_occasions;
-  if (!rnti_active_elsewhere || c->miss_occasions < (n_suspect ? n_suspect : 200)) return;
+  if (c->miss_occasions < (n_suspect ? n_suspect : 200)) return;
   c->len_state = NR_LEN_SUSPECT;
   nr_pdcch_dci_length_sweep_reset(&c->state);
   c->state.preferred_len = c->found[0];
@@ -195,12 +196,22 @@ int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int lengt
     memset(&c->layout_pin[0], 0, sizeof(c->layout_pin[0]));
     c->layout_cursor[0] = 0;
   }
+  if (c->found[1] == length) {
+    /* The retained secondary already owns this length's layout and recency. */
+    c->layout_pin[0] = c->layout_pin[1];
+    c->layout_cursor[0] = c->layout_cursor[1];
+    c->found_recent[0] = c->found_recent[1];
+    c->found[1] = 0;
+    c->found_recent[1] = 0;
+    memset(&c->layout_pin[1], 0, sizeof(c->layout_pin[1]));
+    c->layout_cursor[1] = 0;
+  }
   c->found[0] = length;
   c->len_state = NR_LEN_LOCKED;
   c->miss_occasions = 0;
   c->state.relock_old_len = 0;
   c->scout_initialized = false;
-  return previous;
+  return previous != length ? previous : 0;
 }
 
 int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot)
@@ -353,7 +364,7 @@ static double measured_null_rate(const nr_pdcch_dci_length_sweep_state_t *state,
   double r[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
   int n = 0;
   for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
-    if (len == skip_len || len == state->excluded_len || state->trials[len] <= 0)
+    if (len == skip_len || len == state->excluded_len || len == state->tertiary_excluded_len || state->trials[len] <= 0)
       continue;
     r[n++] = (double)state->passes[len] / (double)state->trials[len];
   }
@@ -403,7 +414,8 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   if (state->preferred_len >= min_len && state->preferred_len <= max_len
       && state->preferred_len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN
       && state->preferred_len != state->excluded_len
-      && state->preferred_len != state->secondary_excluded_len) {
+      && state->preferred_len != state->secondary_excluded_len
+      && state->preferred_len != state->tertiary_excluded_len) {
     if (state->preferred_rounds < NR_PDCCH_LENGTH_PREFERRED_ROUNDS) {
       prefer = state->preferred_len;
     } else if (state->preferred_len && !state->alt_full) {
@@ -438,8 +450,8 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   for (int index = initial_index; prefer || index < state->order_count; index += stride) {
     const int len = prefer ? prefer : state->order[index];
     if (len < min_len || len > max_len) continue;
-    if (state->secondary_excluded_len
-        && (len == state->excluded_len || len == state->secondary_excluded_len)) continue;
+    if (len == state->tertiary_excluded_len || (state->secondary_excluded_len
+        && (len == state->excluded_len || len == state->secondary_excluded_len))) continue;
     const int initial_trial=(state->resume_len==len) ? state->resume_trial : 0;
     for (int t = initial_trial; t < n_trials_this_call; t++) {
       bool stop=max_trials>0 && completed>=max_trials;
@@ -488,7 +500,7 @@ score_evidence:;
   double best_score = 0.0;
   for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
     if (state->passes[len] == 0 || len == state->excluded_len
-        || len == state->secondary_excluded_len) {
+        || len == state->secondary_excluded_len || len == state->tertiary_excluded_len) {
       continue;
     }
     // Degenerate fixed point: repeated passes, but every one decodes to the SAME payload. Reject
@@ -688,4 +700,9 @@ void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16
     bank->first_rnti = rnti;
     bank->first_len  = found;
   }
+}
+
+bool nr_pdcch_dci_length_scout_due(nr_pdcch_dci_length_bank_t *bank)
+{
+  return (++bank->scout_occasions % 20) == 0;
 }

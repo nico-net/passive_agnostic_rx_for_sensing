@@ -145,3 +145,42 @@ int main(int argc, char **argv)
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+TEST_F(CoresetBank, SingleSpuriousOccupancyHitNeverDemotes) {
+  ASSERT_EQ(add(0,0x1234),0);
+  nr_pdcch_coreset_bank_note_accept(0,100);
+  uint8_t history=0;
+  for (int i=0;i<20;++i) {
+    const bool elsewhere=nr_pdcch_coreset_bank_occupancy_sample(&history,i==0);
+    EXPECT_FALSE(elsewhere);
+    nr_pdcch_coreset_bank_tick(1000+i,elsewhere,50,300);
+    EXPECT_EQ(nr_pdcch_coreset_bank_state(0),NR_CORESET_VERIFIED);
+  }
+}
+
+TEST_F(CoresetBank, RepeatedOccupancySamplesDemote) {
+  ASSERT_EQ(add(0,0x1234),0);
+  nr_pdcch_coreset_bank_note_accept(0,100);
+  uint8_t history=0;
+  EXPECT_FALSE(nr_pdcch_coreset_bank_occupancy_sample(&history,true));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_occupancy_sample(&history,false));
+  EXPECT_FALSE(nr_pdcch_coreset_bank_occupancy_sample(&history,true));
+  const bool elsewhere=nr_pdcch_coreset_bank_occupancy_sample(&history,true);
+  ASSERT_TRUE(elsewhere);
+  nr_pdcch_coreset_bank_tick(1000,elsewhere,50,300);
+  EXPECT_EQ(nr_pdcch_coreset_bank_state(0),NR_CORESET_STALE);
+  for (int i=0;i<8;++i) nr_pdcch_coreset_bank_occupancy_sample(&history,false);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_occupancy_sample(&history,true));
+}
+
+TEST_F(CoresetBank, AcceptEveryOccasionAcrossSfnWrapStaysVerified) {
+  ASSERT_EQ(add(0,0x1234),0);
+  constexpr uint64_t wrap=1024*20; // 10.24 seconds, mu=1
+  nr_pdcch_coreset_bank_tick(wrap-10,false,10000,60000);
+  for (uint64_t mono=wrap-9;mono<wrap+20000;++mono) {
+    nr_pdcch_coreset_bank_note_accept(0,mono);
+    nr_pdcch_coreset_bank_note_dci(0,mono,0x1234,mono);
+    nr_pdcch_coreset_bank_tick(mono,true,10000,60000);
+    ASSERT_EQ(nr_pdcch_coreset_bank_state(0),NR_CORESET_VERIFIED);
+  }
+}

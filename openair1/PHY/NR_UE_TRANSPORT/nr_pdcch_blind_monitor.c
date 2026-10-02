@@ -1715,14 +1715,19 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
                                           first_carrier_offset, pci, slot, symbol, candidates,
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
-  if (nr_pdcch_reconf_enabled())
+  if (nr_pdcch_reconf_enabled()) {
+    static uint8_t outside_history; /* receive thread, one bit per discovery sample */
+    bool hit = false;
     for (int c = 0; c < n; ++c)
       if ((s_css0_excl_first_w < 0 || candidates[c].rb_offset / 6 < s_css0_excl_first_w
            || candidates[c].rb_offset / 6 > s_css0_excl_last_w)
           && nr_pdcch_coreset_bank_occupancy_outside(candidates[c].rb_offset, symbol)) {
-        atomic_store_explicit(&s_outside_occupancy, true, memory_order_relaxed);
+        hit = true;
         break;
       }
+    if (nr_pdcch_coreset_bank_occupancy_sample(&outside_history, hit))
+      atomic_store_explicit(&s_outside_occupancy, true, memory_order_relaxed);
+  }
   {
     /* DIAGNOSTIC (env-gated, kept permanently -- same convention as this project's other ISAC_*
      * debug flags). Originally added 2026-09-05 to debug a then-zero-convergence result; kept

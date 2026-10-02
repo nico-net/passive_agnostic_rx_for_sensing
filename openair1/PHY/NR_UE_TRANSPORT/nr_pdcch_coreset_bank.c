@@ -375,3 +375,10 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
   pthread_mutex_unlock(&g_coreset_bank_lock);
   return at;
 }
+
+bool nr_pdcch_coreset_bank_occupancy_sample(uint8_t *history, bool hit)
+{
+  *history = (uint8_t)((*history << 1) | hit);
+  /* A single candidate or several windows in one sample are not traffic evidence. */
+  return hit && __builtin_popcount((unsigned)*history) >= 3;
+}

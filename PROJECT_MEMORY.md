@@ -2069,6 +2069,13 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 
 ---
 
+[OFFLINE VERIFIED, DGX aarch64, 2026-10-02, rr/reconfig-robustness] R6b's review of R3–R6 fixes is recorded in
+[the R6b report](docs/superpowers/reports/rr/R6b.md): required build passed, ctest 122/131 (only documented ARM/sandbox
+failures), touched binaries passed shuffle seeds 1/3/5. [IMPLEMENTED, NOT VALIDATED on live traffic] Bank health uses
+one producer-slot clock; idle occasions do not accumulate length misses; only changed lengths reopen Technique D;
+second-length fallback exclusion/deduplication, occupancy persistence and occasion-based scouts are corrected.
+The report distinguishes source-reviewed integration changes and rejected subfindings from tested state transitions.
+
 ## 25. Next steps on the DGX Spark (strict order)
 
 **Progress 2026-09-30:** steps 1–4 **done** (§4.2). Step 5: OAI build done (UHD 4.11 installed; X410 compat still to

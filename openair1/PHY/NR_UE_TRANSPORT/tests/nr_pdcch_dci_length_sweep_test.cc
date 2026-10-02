@@ -305,7 +305,7 @@ TEST(DciLengthBank, InactiveRntiNeverSuspect) {
   for(unsigned i=0;i<400;++i)
     nr_pdcch_dci_length_context_note_occasion(&c,false,false,200);
   EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
-  EXPECT_EQ(c.miss_occasions,400u);
+  EXPECT_EQ(c.miss_occasions,0u);
 }
 
 TEST(DciLengthBank, SuspectWithoutCoreset0Evidence) {
@@ -346,7 +346,7 @@ TEST(DciLengthBank, RelockSameLengthReturnsLocked) {
   };
   const int winner=nr_pdcch_dci_length_sweep_feed(&c.state,score,&actual,20,30,140,0x1234);
   ASSERT_EQ(winner,47);
-  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,winner),47);
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,winner),0);
   EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
   EXPECT_EQ(c.miss_occasions,0u);
 }
@@ -793,4 +793,79 @@ TEST(DciLengthSweep, ExplicitMaximumEnablesColdWideRound) {
     EXPECT_EQ(state.trials[100], 1);
     _exit(::testing::Test::HasFailure() ? 1 : 0);
   }()), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(DciLengthBank, IdleThenUlResumeStaysLocked) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_lock(&c,47);
+  for (int i=0;i<400;++i)
+    nr_pdcch_dci_length_context_note_occasion(&c,false,false,200);
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,200); // first UL activity
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+  EXPECT_EQ(c.miss_occasions,1u);
+  nr_pdcch_dci_length_context_note_occasion(&c,true,true,200); // DL resumes
+  EXPECT_EQ(c.miss_occasions,0u);
+}
+
+TEST(DciLengthBank, RelockPreservesSamePinAndClearsReplacedPin) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_add(&c,47,1);
+  nr_pdcch_dci_length_context_add(&c,52,2);
+  nr_dci11_pin_seed(&c.layout_pin[0],1,7);
+  nr_dci11_pin_seed(&c.layout_pin[1],1,9);
+  c.layout_cursor[0]=3;
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,1);
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,47),0);
+  EXPECT_EQ(c.layout_pin[0].layout,7);
+  EXPECT_EQ(c.layout_cursor[0],3u);
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,1);
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,58),47);
+  EXPECT_FALSE(nr_dci11_pin_is_valid(&c.layout_pin[0]));
+  EXPECT_EQ(c.layout_cursor[0],0u);
+  EXPECT_EQ(c.layout_pin[1].layout,9);
+}
+
+TEST(DciLengthBank, RelockToSecondLengthDeduplicatesAndKeepsItsPin) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_add(&c,47,1);
+  nr_pdcch_dci_length_context_add(&c,52,2);
+  nr_dci11_pin_seed(&c.layout_pin[1],1,9);
+  c.layout_cursor[1]=4;
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,1);
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,52),47);
+  EXPECT_EQ(c.found[0],52);
+  EXPECT_EQ(c.found[1],0);
+  EXPECT_EQ(c.found_recent[0],2u);
+  EXPECT_EQ(c.layout_pin[0].layout,9);
+  EXPECT_EQ(c.layout_cursor[0],4u);
+  EXPECT_FALSE(nr_dci11_pin_is_valid(&c.layout_pin[1]));
+}
+
+TEST(DciLengthSweep, SecondLengthExcludesFallback) {
+  nr_pdcch_dci_length_sweep_state_t state{};
+  state.excluded_len=47;
+  state.secondary_excluded_len=52;
+  state.tertiary_excluded_len=44;
+  struct Input { int len; uint16_t rnti; uint32_t serial=0; } input{44,0x1234};
+  auto scorer=[](int len,int,uint16_t *rnti,uint32_t *hash,void *p)->bool {
+    auto &v=*static_cast<Input*>(p);
+    if (len!=v.len) return false;
+    *rnti=v.rnti; *hash=++v.serial; return true;
+  };
+  for (int i=0;i<10;++i)
+    EXPECT_LT(nr_pdcch_dci_length_sweep_feed(&state,scorer,&input,20,30,63,0x1234),0);
+  EXPECT_EQ(state.trials[44],0);
+  input.len=58;
+  int found=-1;
+  for (int i=0;i<30 && found<0;++i)
+    found=nr_pdcch_dci_length_sweep_feed(&state,scorer,&input,20,30,63,0x1234);
+  EXPECT_EQ(found,58);
+}
+
+TEST(DciLengthBank, ScoutDutyUsesOccasionsNotSlotPhase) {
+  nr_pdcch_dci_length_bank_t bank{};
+  int due=0;
+  for (int slot=1;slot<2001;slot+=20)
+    due+=nr_pdcch_dci_length_scout_due(&bank);
+  EXPECT_EQ(due,5);
 }

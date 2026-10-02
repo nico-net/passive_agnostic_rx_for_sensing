@@ -122,6 +122,7 @@ typedef struct {
    * size): its CRC passes are real but say nothing about the 1_1/0_1 size the sweep is after. The
    * SA rfsim cell locked 44 = its 1_0 size on 58 format-1_0 accepts (2026-09-16). 0 = none. */
   int      excluded_len;
+  int      tertiary_excluded_len; /* fallback 1_0 while two dedicated lengths are excluded */
   int      secondary_excluded_len; /* optional second format length during locked-length scouting */
   /* ROTATION. <=1 (the zero-initialised default) tests every length on every call, which is what
    * this sweep did unconditionally until 2026-09-17 -- and what made it the receiver's dominant
@@ -189,7 +190,7 @@ typedef struct {
 /* Caller serializes with its geometry bank lock. A zero n_suspect uses the default 200. */
 void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
     bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect);
-/* First lock returns 0; re-lock returns the previous length (including same-length confirmation). */
+/* First/same-length lock returns 0; a changed length returns the replaced length. */
 int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int length);
 /* Add a significant length, evicting the least recently accepted when both slots are full. */
 int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot);
@@ -201,6 +202,7 @@ int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t
 typedef struct {
   nr_pdcch_dci_length_context_t ue[NR_PDCCH_LENGTH_CONTEXTS];
   uint64_t epoch, clock;
+  uint32_t scout_occasions;
   /* Cell-wide UL dci_length is published only once two DISTINCT RNTIs converge. The first
    * result may seed another UE's bounded preferred-length trial, but that UE still has to confirm
    * it with its own CRC/payload evidence and falls back to the full sweep on failure. */
@@ -214,6 +216,8 @@ typedef struct {
   uint16_t anonymous_rnti;
   bool anonymous_exhausted;
 } nr_pdcch_dci_length_bank_t;
+/* Caller holds the geometry length lock; independent of SFN/TDD slot phase. */
+bool nr_pdcch_dci_length_scout_due(nr_pdcch_dci_length_bank_t *bank);
 nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
     nr_pdcch_dci_length_bank_t *bank, uint64_t epoch, uint16_t rnti);
 /** Record that @p rnti converged on @p found. Publishes the cell-wide length on agreement between

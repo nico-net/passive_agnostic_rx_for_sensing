@@ -83,6 +83,8 @@ bool nr_pdcch_coreset_bank_covers(int rb_offset, int span_rb, int duration, int 
                                   int bundle, int interleaver, int shift, int dmrs_id);
 /* A Technique A six-RB occupancy hit is evidence elsewhere only if no live bank covers it. */
 bool nr_pdcch_coreset_bank_occupancy_outside(int rb_offset, int symbol);
+/* Caller-owned receive-thread history: at least three hits in eight discovery samples. */
+bool nr_pdcch_coreset_bank_occupancy_sample(uint8_t *history, bool hit);
 
 /* Is `rnti` already an owner of some banked geometry? */
 bool nr_pdcch_coreset_bank_has_owner(uint16_t rnti);

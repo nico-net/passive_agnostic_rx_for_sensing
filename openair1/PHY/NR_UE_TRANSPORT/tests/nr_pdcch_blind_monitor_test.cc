@@ -4218,6 +4218,13 @@ TEST(DiscoveryGates, ReconfDiscoveryDutyOneInTwentyAfterFirstBank) {
   EXPECT_TRUE(nr_pdcch_blind_monitor_discovery_duty_due(false, 1, false, 20, &tick));
 }
 
+TEST(DiscoveryGates, ReconfBeforeFirstBankKeepsFullDiscoveryDuty) {
+  uint32_t tick = 0;
+  for (int i = 0; i < 100; ++i)
+    EXPECT_TRUE(nr_pdcch_blind_monitor_discovery_duty_due(true, 0, false, 20, &tick));
+  EXPECT_EQ(tick, 0u);
+}
+
 // Bound shared by both Gate2* tests below: MIN_ORACLE_DWELLS(8) dwells * AUTODISCOVER_OBS_CALLS(1000)
 // /dwell = 8000 calls is the fastest the existing per-dwell floor allows even with Gate 2 fixed. The
 // pre-fix code could only clear the min-bg gate via AUTODISCOVER_MAX_OBS_CALLS(400000)/dwell --
