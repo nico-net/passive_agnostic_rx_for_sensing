@@ -537,7 +537,8 @@ TEST(TdSimV2, TwinTablesAreDistinguishedByTheMcsTableNotADraw)
 }
 TEST(TdSimV2, ObservedSetMirrorsTheRuntime)
 {
-  SimObs o;
+  /* the BC8 round-2 model (--obs-lastset 0); the BC7b set model is ObservedLastSymbolSetIsMonotone below */
+  SimObs o; o.use_set = false;
   EXPECT_EQ(o.record(0x884, 12, -1), 0);
   EXPECT_EQ(o.record(0x884, 12, 0), 0);
   EXPECT_EQ(o.last[0], 12);
@@ -554,15 +555,63 @@ TEST(TdSimV2, ObservedSetMirrorsTheRuntime)
   h.k0 = 0;
   EXPECT_TRUE(o.admits(h, 0));      /* last symbol unknown (relaxed), k0 matches */
   h.k0 = 1;
-  SimObs p; p.record(0x884, 11, 0);
+  SimObs p; p.use_set = false; p.record(0x884, 11, 0);
   EXPECT_FALSE(p.admits(h, 0));     /* legacy k0 pin 0 rejects a k0 = 1 entry */
   p.k0[0] = -1;
   EXPECT_TRUE(p.admits(h, 0));      /* the fixed oracle keeps no pin */
   h.tda_length = 10;
   EXPECT_FALSE(p.admits(h, 0));     /* last symbol S+L-1 = 10 != 11 */
-  SimObs u; u.record(0x1, 3, -1); u.record(0x884, 11, -1);
+  SimObs u; u.use_set = false; u.record(0x1, 3, -1); u.record(0x884, 11, -1);
   h.tda_length = 11;
   EXPECT_TRUE(u.any_admits(h));     /* union semantics */
+}
+TEST(TdSimV2, ObservedLastSymbolSetIsMonotone)
+{
+  /* K42 (BC7b, the runtime's obs_record_set / obs_admits): the measured last symbols of a mask accumulate; nothing is re-refined */
+  SimObs o;
+  ASSERT_TRUE(o.use_set);
+  nr_pdsch_cfg_hypothesis_t h{};
+  h.dmrs_mask = 0x884; h.tda_start = 2; h.k0 = 1;
+  EXPECT_EQ(o.record(0x884, -1, -1), 0);
+  h.tda_length = 6;
+  EXPECT_TRUE(o.admits(h, 0));      /* nothing measured: every duration */
+  o.record(0x884, 13, -1);
+  EXPECT_FALSE(o.admits(h, 0));     /* {13}: ends on 7, rejected */
+  h.tda_length = 12;
+  EXPECT_TRUE(o.admits(h, 0));
+  o.record(0x884, 11, -1);
+  EXPECT_TRUE(o.admits(h, 0));      /* {11, 13}: the earlier admission survives the contradiction */
+  o.record(0x884, 13, -1);
+  EXPECT_TRUE(o.admits(h, 0));
+  h.tda_length = 10;
+  EXPECT_TRUE(o.admits(h, 0));      /* and the new one survives the next observation (no re-refine) */
+  EXPECT_EQ(o.lastset[0], (1u << 11) | (1u << 13));
+  SimObs g; /* promotion carries the whole set */
+  g.record_from(0x884, o, 0);
+  EXPECT_EQ(g.lastset[0], o.lastset[0]);
+  for (int m = 1; m <= 7; m++) EXPECT_GE(o.record((uint16_t)m, 5, -1), 0);
+  EXPECT_EQ(o.record(0x777, 5, -1), -1); /* a full set still drops new masks */
+  SimObs p; p.record(0x884, 11, 0);
+  h.tda_length = 10;
+  EXPECT_FALSE(p.admits(h, 0));     /* the legacy k0 pin is unchanged */
+}
+TEST(TdSimV2, OtherUeK0OneTruthsConverge)
+{
+  /* K42 (BC7b): another UE's PDSCH on the grant's PRBs shows the cell's mask with varying last symbols. The round-2 model (relax / re-refine) re-adds and
+   * re-prunes on every observation and wipes the evidence each time: every k0 = 1 truth stays undecidable (BC8 R2: 1072/1072). The monotone set does not. */
+  SimCfg c = SimCfg::defaults(); c.acq = 10; c.seed = 1; c.oracle = 1; c.slot_model = 1; c.k0_oracle_legacy = 0; c.truth_k0 = 1; c.other_ue_occ = 0.1;
+  c.dci_miss = 0.01; c.cap_s = 600;
+  c.obs_lastset = 0;
+  const SimResult r2 = run_sim(c);
+  c.obs_lastset = 1;
+  const SimResult r = run_sim(c);
+  ASSERT_EQ(r.recs.size(), 40u);
+  EXPECT_EQ(r2.undecidable, 40);                 /* the round-2 thrash */
+  EXPECT_LE(r.undecidable * 3, r2.undecidable);  /* "well below": measured 9 / 40 at this 600 s cap */
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r2.wrong, 0);
+  EXPECT_LT(r.restores * 10, r2.restores);       /* the restore / prune round trips are gone */
+  for (const RntiRec &x : r.recs) EXPECT_EQ(x.truth_k0, 1);
 }
 TEST(TdSimV2, RestoreReAddsTheTruthAfterAForeignMaskPrunedIt)
 {

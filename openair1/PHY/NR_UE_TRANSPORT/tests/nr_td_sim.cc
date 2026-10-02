@@ -72,6 +72,9 @@ struct SimCfg {
   double other_ue_occ, mcs_change, snr_rho;
   int tdd_s_dl_symbols;
   int other_ue_same_cfg; /* 1 = another UE's DM-RS config (add_pos / max_len) equals the truth's (cell-common): its mask differs only through S/L (1-3 distinct masks) */
+  /* BC7b (K42): 1 (default) = the runtime's monotone per-mask last-symbol SET (obs_record ORs, never re-refines) plus F2 (no restore for a mask a full
+   * own set dropped unless g_obs has it); 0 = the BC8 round-2 model (relax to unknown on a contradiction, re-refine on the next observation). Slot model only. */
+  int obs_lastset;
   std::string tdd;
   float sib_pmin, sib_eps; /* sibling guard (engine st->sib_pmin / sib_eps); --sib-pmin 0 disables the guard (fix A only) */
   float w_sib1, w_default, w_obs, w_field, w_probe;
@@ -87,7 +90,7 @@ struct SimCfg {
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
     c.crc_accept = c.geom_pin = c.harq_trap_retx = 0;
     c.slot_model = 0; c.k0_oracle_legacy = 1; c.fo_always = 0; c.truth_k0 = -1;
-    c.other_ue_same_cfg = 0; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
+    c.other_ue_same_cfg = 0; c.obs_lastset = 1; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
     c.retx_trap = c.k0_trap_adj = 0; c.sib_pmin = 0.05f; c.sib_eps = 1e-6f;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
@@ -421,27 +424,47 @@ static bool sim_certified(SlotTimeline &tl, long t, const SimKey &g, int L, uint
 }
 
 /* Observed-mask set, mirroring nr_pdsch_config_sweep.c obs_set_t / obs_record / obs_admits (OBS_MASKS_MAX = 8; a full set drops new masks): one per RNTI (r->obs)
- * and one cell-wide (g_obs, promoted when a second distinct RNTI observes the same mask). last = S+L-1 (-1 unknown); k0 = the legacy (K39 bug) pin, -1 = none. */
+ * and one cell-wide (g_obs, promoted when a second distinct RNTI observes the same mask). k0 = the legacy (K39 bug) pin, -1 = none.
+ * use_set 1 (BC7b, K42, the runtime): lastset = bit per measured S+L-1 (0 = unknown), a record ORs it in; use_set 0 (BC8 round 2): last = S+L-1 (-1 unknown),
+ * relaxed to unknown on a contradiction and re-refined by the next observation. */
 #define SIM_OBS_MAX 8
 struct SimObs {
-  uint16_t mask[SIM_OBS_MAX] = {};
+  bool use_set = true;
+  uint16_t mask[SIM_OBS_MAX] = {}, lastset[SIM_OBS_MAX] = {};
   int8_t last[SIM_OBS_MAX] = {}, k0[SIM_OBS_MAX] = {};
   int n = 0;
   int find(uint16_t m) const { for (int i = 0; i < n; i++) if (mask[i] == m) return i; return -1; }
-  int record(uint16_t m, int l, int kk)
+  int slot(uint16_t m)
   {
     int k = find(m);
-    if (k < 0 && n < SIM_OBS_MAX) { k = n++; mask[k] = m; last[k] = -1; k0[k] = -1; }
+    if (k < 0 && n < SIM_OBS_MAX) { k = n++; mask[k] = m; last[k] = -1; lastset[k] = 0; k0[k] = -1; }
+    return k;
+  }
+  void pin(int k, int kk) { if (kk >= 0) k0[k] = (k0[k] < 0 || k0[k] == kk) ? (int8_t)kk : -1; }
+  int record(uint16_t m, int l, int kk)
+  {
+    const int k = slot(m);
     if (k >= 0) {
-      if (l >= 0) last[k] = (last[k] < 0 || last[k] == l) ? (int8_t)l : -1;
-      if (kk >= 0) k0[k] = (k0[k] < 0 || k0[k] == kk) ? (int8_t)kk : -1;
+      if (use_set) { if (l >= 0 && l < 14) lastset[k] |= (uint16_t)(1u << l); }
+      else if (l >= 0) last[k] = (last[k] < 0 || last[k] == l) ? (int8_t)l : -1;
+      pin(k, kk);
     }
+    return k;
+  }
+  /* promotion copy (set mode: the whole set, as the runtime's obs_record_set) */
+  int record_from(uint16_t m, const SimObs &o, int j)
+  {
+    if (!use_set) return record(m, o.last[j], o.k0[j]);
+    const int k = slot(m);
+    if (k >= 0) { lastset[k] |= o.lastset[j]; pin(k, o.k0[j]); }
     return k;
   }
   bool admits(const nr_pdsch_cfg_hypothesis_t &h, int k) const
   {
     if (h.dmrs_mask != mask[k]) return false;
-    if (last[k] >= 0 && (int)h.tda_start + (int)h.tda_length - 1 != last[k]) return false;
+    const int end = (int)h.tda_start + (int)h.tda_length - 1;
+    if (use_set) { if (lastset[k] && !(end >= 0 && end < 14 && ((lastset[k] >> end) & 1))) return false; }
+    else if (last[k] >= 0 && end != last[k]) return false;
     if (k0[k] >= 0 && h.k0 != k0[k]) return false;
     return true;
   }
@@ -563,6 +586,7 @@ static SimResult run_sim(const SimCfg &cfg)
       decoys.push_back({h.dmrs_mask, h.tda_start + h.tda_length});
     }
     SimObs g_obs;                 /* slot model: cell-wide observed masks of this acquisition (promoted when 2 distinct RNTIs agree) */
+    g_obs.use_set = cfg.obs_lastset != 0;
     std::vector<SimObs> rnti_obs; /* slot model: the observed set of every earlier RNTI of the acquisition (contexts persist at runtime) */
     int n_ok_prev = 0; /* earlier RNTIs of this acquisition whose oracle state was ok */
     for (int k = 0; k < cfg.rntis_per_acq; k++) {
@@ -579,6 +603,7 @@ static SimResult run_sim(const SimCfg &cfg)
         tl = std::make_unique<SlotTimeline>(cfg, T.k0, mix(cfg.seed, a, 0x800 + k), mix(cfg.seed, a, 0x900 + k), T.tda_start + T.tda_length <= cfg.tdd_s_dl_symbols,
                                             &decoys);
       SimObs own; /* this RNTI's observed set (r->obs) */
+      own.use_set = cfg.obs_lastset != 0;
       long probe_tick = 0; /* jobs with an empty own slot (runtime s_probe_tick: 1 in 8 probes) */
       memcpy((void *)st.get(), (const void *)tmpl.get(), sizeof(*st));
       st->random_state = (uint32_t)mix(cfg.seed, a, 0x300 + k) | 1u; /* engine RNG seeded from --seed */
@@ -663,7 +688,7 @@ static SimResult run_sim(const SimCfg &cfg)
         sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) { return o1.any_admits(h) || o2.any_admits(h); });
       };
       auto restore_observed = [&](uint16_t m, int last, int kp) {
-        SimObs one; one.n = 1; one.mask[0] = m; one.last[0] = (int8_t)last; one.k0[0] = (int8_t)kp;
+        SimObs one; one.use_set = cfg.obs_lastset != 0; one.record(m, last, kp);
         for (int i = 0; i < st->n_hyp; i++) if (one.admits(st->hyp[i], 0)) return;
         const int before = st->n_hyp;
         for (int i = 0; i < tmpl->n_hyp && st->n_hyp < NR_PDSCH_SWEEP_MAX_HYP; i++) {
@@ -693,14 +718,16 @@ static SimResult run_sim(const SimCfg &cfg)
       auto do_observe_slot = [&](uint32_t m, int e) {
         if (!m) return; /* the runtime ignores an empty mask */
         const int last = e - 1, kp = cfg.k0_oracle_legacy ? 0 : -1;
-        own.record((uint16_t)m, last, kp);
+        const bool recorded = own.record((uint16_t)m, last, kp) >= 0;
         if (g_obs.find((uint16_t)m) < 0)
           for (const SimObs &o : rnti_obs) {
             const int j = o.find((uint16_t)m);
-            if (j >= 0) { g_obs.record((uint16_t)m, o.last[j], o.k0[j]); break; }
+            if (j >= 0) { g_obs.record_from((uint16_t)m, o, j); break; }
           }
         if (g_obs.find((uint16_t)m) >= 0) g_obs.record((uint16_t)m, last, kp);
-        restore_observed((uint16_t)m, last, kp);
+        /* K42 F2 (obs_lastset 1): a mask the full own set dropped and g_obs lacks is not restored (the prune would remove it again) */
+        if (!cfg.obs_lastset || recorded || g_obs.find((uint16_t)m) >= 0)
+          restore_observed((uint16_t)m, last, kp);
         prune_by_obs(own, g_obs);
       };
       /* v1 cell-wide pre-pruning (slot model 0 only): the consensus of >= 2 earlier RNTIs whose oracles were ok: always the TRUTH's observation */
@@ -1177,6 +1204,7 @@ int main(int argc, char **argv)
            "  --slot-model 0|1 (slot-indexed grants per RNTI + PHYSICAL shifted-slot k0 trap + DCI observation + certified flag)\n"
            "  --grant-prob P (per eligible DL slot, default 0.5) --adjacency A (P(grant | previous eligible slot had one); default -1 = i.i.d. grant-prob)\n"
            "  --other-ue-same-cfg 0|1 (other UE's DM-RS add_pos/max_len = the truth's, i.e. few distinct masks; default 0 = any catalogue entry)\n"
+           "  --obs-lastset 1|0 (BC7b K42: 1 = monotone per-mask last-symbol set + no restore of a dropped mask (runtime), default; 0 = BC8 round-2 relax/re-refine)\n"
            "  --other-ue-occ P (another UE's PDSCH overlaps the grant's PRBs in a DL slot; triggers the K39 legacy oracle + wrong mask) --tdd-s-dl-symbols N (6)\n"
            "  --mcs-change P (per-slot MCS redraw, default 1-persist) --snr-rho R (AR(1) SNR, default 0 = i.i.d.)\n"
            "  --persist RHO (P(next grant repeats the allocation PRB/rank), default 0.9; MCS changes per slot with prob 1-RHO unless --mcs-change) --dci-miss P --dci-false P (spurious DCI per PDCCH slot)\n"
@@ -1241,6 +1269,7 @@ int main(int argc, char **argv)
     else if (f == "--k0-oracle-legacy") c.k0_oracle_legacy = atoi(v);
     else if (f == "--other-ue-occ") c.other_ue_occ = atof(v);
     else if (f == "--other-ue-same-cfg") c.other_ue_same_cfg = atoi(v);
+    else if (f == "--obs-lastset") c.obs_lastset = atoi(v);
     else if (f == "--tdd-s-dl-symbols") c.tdd_s_dl_symbols = atoi(v);
     else if (f == "--mcs-change") c.mcs_change = atof(v);
     else if (f == "--snr-rho") c.snr_rho = atof(v);
@@ -1300,8 +1329,8 @@ int main(int argc, char **argv)
   if (c.slot_model)
     printf(",\"slot_model\":1,\"k0_oracle_legacy\":%d,\"dci_missed\":%ld,\"dci_false\":%ld,\"proc_grants\":%ld,\"adj_grants\":%ld,\"trap_grants\":%ld,"
            "\"certified_grants\":%ld,\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,"
-           "\"n_hyp_end\":%ld,\"restores\":%ld,\"restore_hyp\":%ld", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
-           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end, r.restores, r.restore_hyp);
+           "\"n_hyp_end\":%ld,\"restores\":%ld,\"restore_hyp\":%ld,\"obs_lastset\":%d", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
+           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end, r.restores, r.restore_hyp, c.obs_lastset);
   if (c.fo_always && c.fieldbook != 2) printf(",\"fail_opens\":%ld", r.fail_opens);
   if (c.retx_trap > 0 || c.k0_trap_adj > 0 || c.slot_model)
     printf(",\"retx_trap\":%g,\"k0_trap_adj\":%g,\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", c.retx_trap, c.k0_trap_adj, r.retx_trap_passes,
