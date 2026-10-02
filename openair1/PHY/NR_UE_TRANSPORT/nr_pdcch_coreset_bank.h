@@ -55,7 +55,17 @@ typedef struct {
   uint8_t al1_bank_out;   /* 1 = AL1 evidence excluded the banked mapping's own family */
   uint16_t n_al1_union;
   uint16_t al1_union[NR_PDCCH_AL1_UNION_MAX][6];
+  uint64_t last_accept_slot;
+  uint64_t stale_since_slot;
+  uint64_t stale_proof_slot;
+  uint32_t stale_proof_hash;
+  uint16_t stale_proof_rnti;
+  uint32_t accepts_window;
+  uint32_t verified_epoch;
+  uint8_t state;
 } nr_pdcch_discovered_coreset_t;
+
+typedef enum { NR_CORESET_VERIFIED = 0, NR_CORESET_STALE = 1, NR_CORESET_REMOVED = 2 } nr_coreset_state_t;
 
 /* Number of verified geometries currently banked (0..NR_PDCCH_DISCOVERED_CORESETS). */
 int nr_pdcch_coreset_bank_count(void);
@@ -66,6 +76,7 @@ const nr_pdcch_blind_monitor_cfg_t *nr_pdcch_coreset_bank_cfg(int index);
 
 /* Whole bank entry `index` (0 <= index < nr_pdcch_coreset_bank_count()), for the AL1 UNION fields. */
 nr_pdcch_discovered_coreset_t *nr_pdcch_coreset_bank_entry(int index);
+nr_coreset_state_t nr_pdcch_coreset_bank_state(int index);
 
 /* Does an already-banked geometry cover this RB interval/symbol/mapping? */
 bool nr_pdcch_coreset_bank_covers(int rb_offset, int span_rb, int duration, int symbol,
@@ -81,5 +92,16 @@ int nr_pdcch_coreset_bank_length_hint(void);
  * entry's index when the geometry is already banked), or -1 when nothing was archived. A newly
  * taken slot is zeroed (AL1 UNION fields included) before publication. */
 int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner);
+
+/* Removal compacts the array and returns 0, or -1 for an invalid index. A live dispatch
+ * defers compaction until its final reader leaves, so borrowed cfg/entry pointers stay valid. */
+int nr_pdcch_coreset_bank_remove(int index);
+void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot);
+void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash);
+void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
+                                uint32_t t_stale_slots, uint32_t t_remove_slots);
+void nr_pdcch_coreset_bank_dispatch_enter(void);
+void nr_pdcch_coreset_bank_dispatch_leave(void);
+void nr_pdcch_coreset_bank_set_remove_hook(void (*hook)(const nr_pdcch_blind_monitor_cfg_t *, void *), void *arg);
 
 #endif

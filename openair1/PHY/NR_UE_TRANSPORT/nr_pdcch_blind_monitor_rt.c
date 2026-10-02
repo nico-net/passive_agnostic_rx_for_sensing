@@ -1125,6 +1125,7 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
 static nr_pdcch_dci_length_store_t g_dl_length_store;
 static nr_pdcch_dci_length_store_t g_ul_length_store;
 static pthread_mutex_t g_dl_length_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t ul_length_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_dci11_pin_t g_reconf_dci11_pin[65536];
 static uint32_t g_reconf_dci11_pin_cursor[65536];
 
@@ -1165,6 +1166,35 @@ static uint64_t length_coreset_key(const nr_pdcch_blind_monitor_cfg_t *cfg)
   for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
     h = (h ^ (uint32_t)fields[i]) * UINT64_C(1099511628211);
   return h ? h : 1;
+}
+
+/* Called at bank compaction, after every dispatcher that borrowed the old entry has left. */
+static void bank_reopen_geometry(const nr_pdcch_blind_monitor_cfg_t *cfg, void *unused)
+{
+  (void)unused;
+  const uint64_t key = length_coreset_key(cfg);
+  nr_pdcch_dci_length_store_t *stores[] = {&g_dl_length_store, &g_ul_length_store};
+  pthread_mutex_t *locks[] = {&g_dl_length_lock, &ul_length_lock};
+  for (int s = 0; s < 2; ++s) {
+    pthread_mutex_lock(locks[s]);
+    for (int i = 0; i < NR_PDCCH_LENGTH_CORESETS; ++i) {
+      nr_pdcch_dci_length_coreset_t *e = &stores[s]->coreset[i];
+      if (e->used && e->key == key) {
+        if (e->bank)
+          memset(e->bank, 0, sizeof(*e->bank));
+        e->used = false;
+        e->key = 0;
+      }
+    }
+    pthread_mutex_unlock(locks[s]);
+  }
+  /* Technique D has no geometry-scoped reopen API yet (same limitation as R3/R4). */
+  nr_pdsch_config_sweep_reset_all();
+}
+
+static void bank_register_reopen_hook(void)
+{
+  nr_pdcch_coreset_bank_set_remove_hook(bank_reopen_geometry, NULL);
 }
 
 static uint64_t length_lookahead_key(const nr_pdcch_blind_monitor_cfg_t *cfg,
@@ -1808,7 +1838,6 @@ typedef struct {
   uint8_t      L;
   uint16_t     cce;
 } nr_pdcch_autodiscover_cand_t;
-static pthread_mutex_t ul_length_lock=PTHREAD_MUTEX_INITIALIZER;
 
 
 typedef struct {
@@ -3029,6 +3058,7 @@ static pthread_mutex_t s_dedupe_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct { uint32_t slot; uint16_t rnti; uint8_t dir; } s_dedupe[256];
 static unsigned s_dedupe_w;
 static _Atomic uint64_t g_c0uss_unique, g_bank_accepts, g_dup_dropped;
+static _Thread_local int t_bank_index = -1;
 static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
 {
   bool dup = false;
@@ -3046,8 +3076,11 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
     atomic_fetch_add_explicit(&g_dup_dropped, 1, memory_order_relaxed);
   else if (t_pass_kind == PASS_C0USS)
     atomic_fetch_add_explicit(&g_c0uss_unique, 1, memory_order_relaxed);
-  else if (t_pass_kind == PASS_BANK)
+  else if (t_pass_kind == PASS_BANK) {
     atomic_fetch_add_explicit(&g_bank_accepts, 1, memory_order_relaxed);
+    if (reconf_lengths_enabled())
+      nr_pdcch_coreset_bank_note_accept(t_bank_index, abs_slot);
+  }
   return dup;
 }
 
@@ -3055,9 +3088,28 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                                          bool serial_candidates, long source_absolute_slot)
 {
   const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
+  const bool reconf = reconf_lengths_enabled();
+  if (reconf) {
+    static pthread_once_t hook_once = PTHREAD_ONCE_INIT;
+    static _Atomic uint64_t last_tick_slot = UINT64_MAX;
+    static _Atomic uint64_t last_c0_unique;
+    pthread_once(&hook_once, bank_register_reopen_hook);
+    const uint64_t slot = source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0;
+    uint64_t prev = atomic_load_explicit(&last_tick_slot, memory_order_relaxed);
+    if (slot && (prev == UINT64_MAX || slot > prev)
+        && atomic_compare_exchange_strong_explicit(&last_tick_slot, &prev, slot,
+                                                    memory_order_relaxed, memory_order_relaxed)) {
+      const uint64_t c0 = atomic_load_explicit(&g_c0uss_unique, memory_order_relaxed);
+      const uint64_t old_c0 = atomic_exchange_explicit(&last_c0_unique, c0, memory_order_relaxed);
+      const uint32_t slots_per_second = ue->frame_parms.slots_per_frame * 100;
+      nr_pdcch_coreset_bank_tick(slot, c0 > old_c0, 5 * slots_per_second, 30 * slots_per_second);
+    }
+    nr_pdcch_coreset_bank_dispatch_enter();
+  }
   const int n = nr_pdcch_coreset_bank_count();
   if (!root->autodiscover) {
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
     return;
   }
   /* A Technique A footprint decision posted by the receive thread is committed here, before any pass
@@ -3090,13 +3142,18 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
     t_pass_kind = PASS_OTHER;
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
     return;
   }
   t_pass_kind = PASS_BANK;
   for (int i = 0; i < n; ++i) {
+    if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
+      continue;
+    t_bank_index = i;
     nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
   }
+  t_bank_index = -1;
   nr_pdcch_blind_monitor_cfg_override(NULL);
   {
     /* Gate bookkeeping shared by every scan consumer (Task A7): decided under the Phase-2 lock, the
@@ -3159,6 +3216,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       nr_pdcch_blind_monitor_cfg_override(NULL);
     }
   }
+  if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
 }
 
 /* Scope guard for the Phase-2 lock (Task A7): released on every return path of the occasion. */
@@ -5637,6 +5695,9 @@ constdiag_done:;
         cand_task[ti].ok = false; /* same UL DCI already accepted by another pass this slot */
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
+        if (reconf_lengths_enabled() && t_bank_index >= 0)
+          nr_pdcch_coreset_bank_note_dci(t_bank_index, abs_slot, u->rnti,
+                                         nr_dci_bits_hash(&u->raw_payload, u->dci_length));
         if (reconf_lengths_enabled() && ul_sweep_enabled) {
           pthread_mutex_lock(&ul_length_lock);
           nr_pdcch_dci_length_bank_t *bank = nr_pdcch_dci_length_store_get(&g_ul_length_store, geom, NULL);
@@ -5812,6 +5873,9 @@ constdiag_done:;
         continue;
       if (accept_dup(abs_slot, raw->rnti, 0)) /* same DCI already accepted by another pass this slot */
         continue;
+      if (reconf_lengths_enabled() && t_bank_index >= 0)
+        nr_pdcch_coreset_bank_note_dci(t_bank_index, abs_slot, raw->rnti,
+                                       nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
       if (reconf_lengths_enabled() && dl_uss_auto) {
         pthread_mutex_lock(&g_dl_length_lock);
         nr_pdcch_dci_length_bank_t *bank = nr_pdcch_dci_length_store_get(&g_dl_length_store, dl_geom, NULL);
