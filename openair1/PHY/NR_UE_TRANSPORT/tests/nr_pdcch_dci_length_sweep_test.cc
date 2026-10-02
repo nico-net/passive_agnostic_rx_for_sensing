@@ -35,6 +35,7 @@
 
 extern "C" {
 #include "nr_pdcch_dci_length_sweep.h"
+#include "nr_pdcch_blind_monitor.h"
 #include "common/config/config_userapi.h"
 }
 
@@ -313,6 +314,25 @@ TEST(DciLengthBank, SuspectWithoutCoreset0Evidence) {
   for(unsigned i=0;i<3;++i)
     nr_pdcch_dci_length_context_note_occasion(&c,false,true,3);
   EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
+}
+
+TEST(DciLengthBank, Coreset0AcceptCountsWhenAvailable) {
+  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
+  constexpr uint16_t rnti = 0x4601;
+  nr_pdcch_dci_length_context_t c{};
+  c.rnti = rnti;
+  ASSERT_EQ(nr_pdcch_dci_length_context_lock(&c, 47), 0);
+  /* The CORESET#0 accept path records C-class sightings. Repetition confirms
+   * the RNTI; subsequent accepts supply activity on each missed occasion. */
+  nr_pdcch_blind_rnti_bootstrap_record_trusted(rnti, NR_BLIND_RNTI_CLASS_C, 100);
+  nr_pdcch_blind_rnti_bootstrap_record_trusted(rnti, NR_BLIND_RNTI_CLASS_C, 101);
+  for (uint32_t slot = 102; slot < 105; ++slot) {
+    nr_pdcch_blind_rnti_bootstrap_record_trusted(rnti, NR_BLIND_RNTI_CLASS_C, slot);
+    ASSERT_TRUE(nr_pdcch_blind_rnti_bootstrap_recent(rnti, slot, 1));
+    nr_pdcch_dci_length_context_note_occasion(&c, false,
+        nr_pdcch_blind_rnti_bootstrap_recent(rnti, slot, 1), 3);
+  }
+  EXPECT_EQ(c.len_state, NR_LEN_SUSPECT);
 }
 
 TEST(DciLengthBank, RelockSameLengthReturnsLocked) {

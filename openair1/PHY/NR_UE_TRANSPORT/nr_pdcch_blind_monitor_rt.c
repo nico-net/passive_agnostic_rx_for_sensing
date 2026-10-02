@@ -6194,7 +6194,11 @@ constdiag_done:;
        * dedicated set with false RNTIs. CORESET#0 USS is also only a search hypothesis despite its
        * known physical geometry. Exact identities enter from a common SS, an already verified
        * dedicated CORESET, or record_corroborated() after the joint five-payload lock. */
-      if (ss_bucket == 0) {
+      if (ss_bucket == 0
+          || (cfg->coreset_type == 1 && out.rnti_class == NR_BLIND_RNTI_CLASS_C
+              && nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti))) {
+        /* A decoded CORESET#0 USS C-RNTI accept also supplies activity for length re-lock,
+         * once independent evidence has confirmed the identity. */
         nr_pdcch_blind_rnti_bootstrap_record_trusted(out.rnti, out.rnti_class, abs_slot);
       } else if (cfg->coreset_type == 0 && (!cfg->autodiscover || g_length_found)) {
         nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
