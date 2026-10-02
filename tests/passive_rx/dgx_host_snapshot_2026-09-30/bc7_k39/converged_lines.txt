@@ -1,0 +1,2 @@
+15.317 [0m[93m[PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (80/80 trials on the winner, cfg=0xfbaf065caf6ab251) -- private to this RNTI until 
+17.091 [0m[93m[PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (125/125 trials on the winner, cfg=0xfbaf065caf6ab251) -- private to this RNTI unti

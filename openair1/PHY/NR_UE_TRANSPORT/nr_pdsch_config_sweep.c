@@ -373,9 +373,26 @@ int nr_pdsch_config_sweep_prune_qm(nr_pdsch_config_sweep_state_t *st, uint8_t mc
 typedef struct {
   uint16_t mask[OBS_MASKS_MAX];
   int8_t   last[OBS_MASKS_MAX]; /* last PDSCH symbol measured with that mask, -1 = unknown */
-  int8_t   k0[OBS_MASKS_MAX];   /* k0 of the job the mask was measured on, -1 = unknown */
+  int8_t   k0[OBS_MASKS_MAX];   /* LEGACY ONLY (ISAC_TD_K0_ORACLE_LEGACY=1): k0 pinned from the job's hypothesis, -1 = none */
+  uint64_t plaus[OBS_MASKS_MAX]; /* bit k: k0 = k was hypothesised on a job that saw this mask (plausible, NOT proven; never prunes) */
+  uint64_t k0_cert; /* K39: k0 values certified by deterministic evidence (certify_k0), 0 = none; the only k0 prune */
   int n;
 } obs_set_t;
+
+/* K39: DM-RS presence in a slot proves only that SOME PDSCH is there, never which k0 the grant has (an adjacent
+ * slot's traffic shows the same DM-RS). By default the oracle therefore prunes on mask / last symbol only and
+ * records k0 as plausible; k0 is collapsed solely by nr_pdsch_config_sweep_certify_k0(). ISAC_TD_K0_ORACLE_LEGACY=1
+ * (read once) restores the old pinning, for A/B only. s_k0_legacy: -1 = unread, test hook may force 0/1. */
+static int s_k0_legacy = -1;
+static bool k0_oracle_legacy(void)
+{
+  if (s_k0_legacy < 0) {
+    const char *e = getenv("ISAC_TD_K0_ORACLE_LEGACY");
+    s_k0_legacy = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  return s_k0_legacy != 0;
+}
+void nr_pdsch_config_sweep_k0_legacy_set(int legacy) { s_k0_legacy = legacy; }
 typedef struct {
   bool valid;
   uint64_t configuration;
@@ -478,16 +495,21 @@ static int obs_record(obs_set_t *o, uint16_t mask, int last_symbol, int k0)
     o->mask[k] = mask;
     o->last[k] = -1;
     o->k0[k] = -1;
+    o->plaus[k] = 0;
   }
   if (k >= 0) {
     if (last_symbol >= 0) o->last[k] = (o->last[k] < 0 || o->last[k] == last_symbol) ? (int8_t)last_symbol : -1;
-    if (k0 >= 0) o->k0[k] = (o->k0[k] < 0 || o->k0[k] == k0) ? (int8_t)k0 : -1;
+    if (k0 >= 0 && k0 <= 32) {
+      o->plaus[k] |= UINT64_C(1) << k0;
+      if (k0_oracle_legacy())
+        o->k0[k] = (o->k0[k] < 0 || o->k0[k] == k0) ? (int8_t)k0 : -1;
+    }
   }
   return k;
 }
-/* An observation is (mask, last symbol, k0); an entry is consistent with it when its mask matches,
- * its S+L-1 equals the measured last symbol (when measured) and its k0 equals the job's (when the
- * mask was seen in the DCI's own slot the PDSCH is there: k0 of that job). */
+/* An observation is (mask, last symbol); an entry is consistent with it when its mask matches and its S+L-1
+ * equals the measured last symbol (when measured). k0 is ignored unless the set carries a certified k0 mask
+ * (K39), or in legacy mode a pin from the job's hypothesised k0. */
 static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o, int k)
 {
   if (h->dmrs_mask != o->mask[k])
@@ -495,6 +517,8 @@ static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o, i
   if (o->last[k] >= 0 && (int)h->tda_start + (int)h->tda_length - 1 != o->last[k])
     return false;
   if (o->k0[k] >= 0 && h->k0 != o->k0[k])
+    return false;
+  if (o->k0_cert && !(h->k0 <= 32 && (o->k0_cert >> h->k0 & 1)))
     return false;
   return true;
 }
@@ -512,14 +536,15 @@ static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t 
     return 0;
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
-    if ((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs))
+    if (((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs))
+        && !(own && own->k0_cert && !(st->hyp[i].k0 <= 32 && (own->k0_cert >> st->hyp[i].k0 & 1)))) /* K39: own certified k0 binds even when the cell-wide set admits */
       prune_move(st, n++, i);
   return prune_commit(st, n);
 }
 
 /* Append a k0 layer: every hypothesis of the lowest-k0 layer present, with k0 replaced. The lowest
  * layer holds every (S,L,mask,table) tuple of the catalog: prior/table prunes are k0-agnostic, and a
- * DM-RS observation fixes k0 only to 0 (the oracle measures in the DCI's own slot), so no other layer
+ * DM-RS observation no longer pins k0 (K39), so no other layer
  * can carry a tuple the lowest one lacks. Existing indices, evidence and outstanding tickets are
  * untouched; the new entries join the round-robin with zero trials. Fails closed (adds nothing) when
  * the layer would not fit. Returns the number added. */
@@ -1754,8 +1779,9 @@ int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, ui
   return nr_pdsch_config_sweep_observe(ticket, dmrs_mask, -1, -1);
 }
 
-int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0)
+int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0_plausible)
 {
+  const int k0 = k0_plausible;
   if (ticket == NULL || ticket->generation == 0 || dmrs_mask == 0)
     return 0;
   pthread_mutex_lock(&g_lock);
@@ -1766,7 +1792,7 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     for (int i = 0; i < RNTI_CTX_MAX; i++)
       if (g_rnti[i].rnti && g_rnti[i].rnti != r->rnti && obs_find(&g_rnti[i].obs, dmrs_mask) >= 0) {
         const int j = obs_find(&g_rnti[i].obs, dmrs_mask);
-        obs_record(&g_obs, dmrs_mask, g_rnti[i].obs.last[j], g_rnti[i].obs.k0[j]);
+        obs_record(&g_obs, dmrs_mask, g_rnti[i].obs.last[j], g_rnti[i].obs.k0[j]); /* k0 is -1 unless legacy: no pin */
         break;
       }
   }
@@ -1781,13 +1807,45 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     r->typeb_seen = true;
   int n = 0;
   if (c != NULL && c->state->winner < 0) {
-    restore_observed_typea(c, r, dmrs_mask, last_symbol, k0);
+    restore_observed_typea(c, r, dmrs_mask, last_symbol, k0_oracle_legacy() ? k0 : -1);
     if (r->typeb_seen)
       add_typeb_layer(c->state, c->typeA, c->legality);
     const int before = c->state->n_hyp;
     n = prune_to_observed(c->state, &r->obs);
     if (c->state->n_hyp != before)
       context_reindexed(c);
+  }
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}
+
+int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint32_t k0_allowed_mask)
+{
+  if (t == NULL || t->generation == 0 || k0_allowed_mask == 0)
+    return 0;
+  pthread_mutex_lock(&g_lock);
+  rnti_ctx_t *r = rnti_ctx(t->rnti, true);
+  /* Intersect with an earlier certification; a contradiction (empty) certifies nothing rather than emptying the context. */
+  const uint64_t merged = r->obs.k0_cert ? (r->obs.k0_cert & k0_allowed_mask) : k0_allowed_mask;
+  r->obs.k0_cert = merged ? merged : r->obs.k0_cert;
+  int n = 0;
+  sweep_context_t *c = ticket_context(t);
+  if (c != NULL && c->state->winner < 0 && r->obs.k0_cert) {
+    nr_pdsch_config_sweep_state_t *st = c->state;
+    int keep = 0;
+    for (int i = 0; i < st->n_hyp; i++)
+      if (st->hyp[i].k0 <= 32 && (r->obs.k0_cert >> st->hyp[i].k0 & 1))
+        keep++;
+    if (keep > 0 && keep < st->n_hyp) {
+      int m = 0;
+      for (int i = 0; i < st->n_hyp; i++)
+        if (st->hyp[i].k0 <= 32 && (r->obs.k0_cert >> st->hyp[i].k0 & 1))
+          prune_move(st, m++, i);
+      n = prune_commit(st, m);
+      context_reindexed(c);
+    } else {
+      n = st->n_hyp;
+    }
   }
   pthread_mutex_unlock(&g_lock);
   return n;

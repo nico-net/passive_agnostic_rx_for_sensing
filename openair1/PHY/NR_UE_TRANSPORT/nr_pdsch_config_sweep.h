@@ -386,9 +386,16 @@ int nr_pdsch_config_sweep_prune_qm(nr_pdsch_config_sweep_state_t *st, uint8_t mc
  *  surviving count only when this call removed hypotheses, else 0. ISAC_QM_ORACLE=0 disables. */
 int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint8_t mcs, int qm);
 /** Full oracle observation: the DM-RS mask, the last PDSCH symbol carrying energy on the grant's
- *  PRBs (-1 = unmeasured) and the k0 of the job it was measured on (-1 = unknown). Records it
- *  cell-wide and prunes the ticket's context to the admitted entries. */
-int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0);
+ *  PRBs (-1 = unmeasured) and k0_plausible, the k0 the measuring job hypothesised (-1 = unknown). K39: prunes on
+ *  mask and last symbol ONLY; k0_plausible is recorded as plausible (ordering/logging) and pins nothing, because DM-RS
+ *  in a slot does not prove which slot offset the grant has. (Legacy: ISAC_TD_K0_ORACLE_LEGACY=1 pins it as before.) */
+int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0_plausible);
+/** K39: k0 certified by deterministic evidence (BC9 DCI adjacency / TDD direction): the ONLY call that may prune k0.
+ *  Keeps the entries whose k0 is in k0_allowed_mask (bit k = k0 k), for this ticket's RNTI (current context and
+ *  later contexts that go through the observed prune). Prunes nothing when no entry would survive. Returns the live hypothesis count (0 = no context). */
+int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint32_t k0_allowed_mask);
+/** Test hook: force the ISAC_TD_K0_ORACLE_LEGACY decision (1 = old k0 pinning, 0 = default, -1 = re-read the env). */
+void nr_pdsch_config_sweep_k0_legacy_set(int legacy);
 /** k0 oracle: the air showed DM-RS on this grant's PRBs `k0` slots after the DCI (and not in the
  *  catalog's k0 {0,1} slots). Appends the k0 layer to the ticket's live context (unsettled only) and
  *  remembers it for this RNTI's later contexts. Returns the number of hypotheses added: 0 when the

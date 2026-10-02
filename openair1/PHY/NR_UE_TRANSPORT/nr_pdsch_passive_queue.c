@@ -574,7 +574,7 @@ void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_tic
     LOG_A(PHY, "SENSING: DMRS_ORACLE (in-line) slot=%d rb=%d+%d mask=0x%x last_sym=%d med=%.2f\n", nr_slot, rb, nrb, mask,
           last_sym, med);
   if (mask)
-    nr_pdsch_config_sweep_observe(ticket, mask, last_sym, 0); /* measured on the DCI's own slot: k0 = 0 */
+    nr_pdsch_config_sweep_observe(ticket, mask, last_sym, 0); /* K39: k0 = 0 is only PLAUSIBLE (mask/last symbol prune; k0 is never pinned by DM-RS presence) */
 }
 
 static void *nr_pdsch_passive_queue_thread(void *arg)
@@ -774,7 +774,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * the context is unsettled. */
     /* Only in the DCI's OWN slot (k0 = 0 hypothesis): a k0 > 0 job measures slot + k0, where a busy
      * cell has some other PDSCH -- the rank-4 bed recorded that slot's mask (0x804) with k0 = 1 and
-     * pruned the true entries away (0/10k probes). A mask seen in the DCI's slot proves k0 = 0. */
+     * pruned the true entries away (0/10k probes). K39: a mask seen in the DCI's slot is k0-plausible, not proof of k0 = 0. */
     {
       static _Atomic uint32_t s_gate_n;
       if ((atomic_fetch_add(&s_gate_n, 1) % 2000) == 0)
@@ -802,6 +802,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               prof[8], prof[9], prof[10], prof[11], prof[12], prof[13]);
       }
       if (mask) {
+        /* K39: the hypothesised k0 is recorded as plausible only; DM-RS in this slot never prunes other k0. */
         nr_pdsch_config_sweep_observe(&job.sweep_ticket, mask, last_sym, job.sweep_ticket.k0);
       } else {
         /* k0 ORACLE (Task 14). No DM-RS on this grant's PRBs (rb0/nrb = probe_span(): the largest segment of a

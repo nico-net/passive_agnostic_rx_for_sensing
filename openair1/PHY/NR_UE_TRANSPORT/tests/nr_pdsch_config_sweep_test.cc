@@ -644,19 +644,19 @@ TEST(PdschConfigSweepOracle, LaterShortTdaObservationRestoresCandidatesPrunedByE
   nr_pdsch_sweep_ticket_t t{};
   nr_pdsch_cfg_hypothesis_t h{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 0, 2, 0, long_short_legal, &t, &h));
-  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x884, 13, 0), 3);
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x884, 13, 0), 6); // K39: k0 {0,1} both survive
   ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 1, 2, 0, long_short_legal, &t, &h));
   EXPECT_EQ(h.dmrs_mask, 0x884); // inherited observation is a seed, not proof that TDA1 is long
   nr_pdsch_config_sweep_feedback(&t, false, nullptr);
   const auto outstanding = t;
-  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x84, 7, 0), 6);
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x84, 7, 0), 12);
   // Appending does not move the old hypothesis or invalidate its pending feedback.
   nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
   uint32_t passes = 0, trials = 0;
   nr_pdsch_config_sweep_context_stats(79, 0x4601, 1, 0, &passes, &trials);
   EXPECT_EQ(trials, 2u);
   EXPECT_EQ(passes, 0u);
-  EXPECT_EQ(nr_pdsch_config_sweep_observe(&outstanding, 0x84, 7, 0), 6); // no duplicate append
+  EXPECT_EQ(nr_pdsch_config_sweep_observe(&outstanding, 0x84, 7, 0), 12); // no duplicate append
   bool short_seen = false, long_seen = false;
   for (int i = 0; i < 12; i++) {
     ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 1, 2, 0, long_short_legal, &t, &h));
@@ -679,7 +679,9 @@ TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguit
   nr_pdsch_cfg_hypothesis_t h{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
   const uint16_t mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1); // S=1 L=13 add 2 len 1
+  nr_pdsch_config_sweep_k0_legacy_set(1); // this test documents the OLD pinning (A/B flag)
   const int n = nr_pdsch_config_sweep_observe(&t, mask, 13, 0);
+  nr_pdsch_config_sweep_k0_legacy_set(0);
   EXPECT_EQ(n, 3);
   nr_pdsch_sweep_ticket_t t2{};
   for (int i = 0; i < 12; i++) {
@@ -688,6 +690,82 @@ TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguit
     EXPECT_EQ(h.tda_start + h.tda_length - 1, 13);
     EXPECT_EQ(h.k0, 0);
   }
+}
+
+/* K39: DM-RS presence marks k0 plausible, never pins it. */
+static int count_snapshot_k0(const nr_pdsch_sweep_ticket_t &t, int k0, int *total = nullptr)
+{
+  static nr_pdsch_config_sweep_state_t st;
+  EXPECT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  int n = 0;
+  for (int i = 0; i < st.n_hyp; i++)
+    n += st.hyp[i].k0 == k0;
+  if (total) *total = st.n_hyp;
+  return n;
+}
+static nr_pdsch_sweep_ticket_t k39_open(uint16_t *mask_out)
+{
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_config_sweep_k0_legacy_set(0);
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  EXPECT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
+  *mask_out = (uint16_t)test_legal(0, 13, 1, 0, 2, 1);
+  return t;
+}
+static nr_pdsch_sweep_ticket_t k39_fresh()
+{ // a prune re-numbers the context and invalidates outstanding tickets: take a live one
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  EXPECT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
+  return t;
+}
+TEST(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  int total = 0;
+  EXPECT_EQ(nr_pdsch_config_sweep_observe(&t, mask, 13, 0), 6);
+  t = k39_fresh();
+  EXPECT_EQ(count_snapshot_k0(t, 0, &total), 3);
+  EXPECT_EQ(count_snapshot_k0(t, 1), 3); // same mask and last symbol, k0 = 1 stays
+  EXPECT_EQ(total, 6);
+  // A later context of the same RNTI is seeded with both k0 as well.
+  nr_pdsch_sweep_ticket_t t2{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  bool k1 = false;
+  for (int i = 0; i < 12; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 1, 2, 0, test_legal, &t2, &h));
+    k1 |= h.k0 == 1;
+  }
+  EXPECT_TRUE(k1);
+}
+TEST(PdschConfigSweepK39, CertifiedK0Prunes) {
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, mask, 13, 0), 6);
+  t = k39_fresh();
+  EXPECT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0x3), 6); // {0,1} certified: nothing to prune
+  t = k39_fresh();
+  EXPECT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0x2), 3); // k0 = 1 only
+  t = k39_fresh();
+  EXPECT_EQ(count_snapshot_k0(t, 0), 0);
+  EXPECT_EQ(count_snapshot_k0(t, 1), 3);
+  // A contradictory certification never empties the context.
+  nr_pdsch_config_sweep_certify_k0(&t, 0x1);
+  t = k39_fresh();
+  EXPECT_EQ(count_snapshot_k0(t, 1), 3);
+  EXPECT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0), 0);
+}
+TEST(PdschConfigSweepK39, LegacyFlagRestoresPinning) {
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  nr_pdsch_config_sweep_k0_legacy_set(1);
+  EXPECT_EQ(nr_pdsch_config_sweep_observe(&t, mask, 13, 0), 3);
+  t = k39_fresh();
+  EXPECT_EQ(count_snapshot_k0(t, 1), 0);
+  EXPECT_EQ(count_snapshot_k0(t, 0), 3);
+  nr_pdsch_config_sweep_k0_legacy_set(0);
 }
 
 // Opt-in benchmark of the real shared-bank reset, outside an OTA run.
@@ -958,13 +1036,13 @@ TEST(PdschConfigSweepOracle, TicketIssuedBeforeAPruneCannotScoreAfterIt) {
     found = old.hypothesis < 3 && h.dmrs_mask != mask;
   }
   ASSERT_TRUE(found);
-  ASSERT_EQ(nr_pdsch_config_sweep_observe(&old, mask, 13, 0), 3); // prunes to the 3 mcs tables
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&old, mask, 13, 0), 6); // K39: prunes to 3 mcs tables x k0 {0,1}
   nr_pdsch_config_sweep_feedback(&old, true, nullptr);            // in flight across the prune
   nr_pdsch_sweep_ticket_t now{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(0x51, 0x4601, 0, 2, 0, test_legal, &now, &h));
   nr_pdsch_config_sweep_state_t state{};
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&now, &state));
-  ASSERT_EQ(state.n_hyp, 3);
+  ASSERT_EQ(state.n_hyp, 6);
   for (int i = 0; i < state.n_hyp; i++) {
     EXPECT_EQ(state.trials[i], 0u) << "pre-prune ticket credited to hypothesis " << i;
     EXPECT_EQ(state.ok[i], 0u);
