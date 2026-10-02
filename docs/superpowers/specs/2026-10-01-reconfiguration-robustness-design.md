@@ -44,9 +44,12 @@ Verified state of the code (2026-10-01, `adaptive-rx-UL-DL` @ `03a4cf3ae1`):
 5. All new behaviour is behind flags whose defaults keep today's behaviour until validated, except the 140-bit cap lift
    (a pure capability extension, validated by tests).
 6. **SA and NSA (operator rule).** The receiver must work over the air on both. No component may *require* SIB1, CORESET#0,
-   SI-RNTI, P-RNTI paging or RA on the NR carrier: those are optional evidence when present (SA) and simply absent on
-   NSA (no SIB1, k_SSB ≥ 24 possible, paging and RRC on LTE, contention-free RA with RAR-anchored C-RNTIs). §4.6 lists,
-   per component, what it uses on each.
+   SI-RNTI, P-RNTI paging or RA on the NR carrier: those are optional evidence, **used whenever they are decoded,
+   whatever the network mode**. Network mode and SIB1 presence are independent: an NSA cell may broadcast SIB1
+   (`[HISTORICAL, Switzerland 2026-09-19]` Swisscom PCI 382, NSA per operator statement and 450+ RARs without Msg4,
+   SIB1 decoded: PLMN 228-01, TAC 105 — PROJECT_MEMORY §10.3/§15) or not (k_SSB ≥ 24, no CORESET#0). What NSA does imply:
+   dedicated configuration, paging and RRC on LTE, contention-free RA with RAR-anchored C-RNTIs. §4.6 therefore lists
+   evidence per component by **SIB1 available / SIB1 absent**, not by SA / NSA.
 7. **One epoch authority.** A single `CellConfigEpoch` owner (§4.4) for the whole receiver; Technique D, the
    CellFieldBook (levers spec §4.6), DCI length contexts, layout pins, the CORESET bank and the queues are consumers.
    No module keeps a private epoch counter. Every learned record carries `{value, epoch_learned, verification_state}`
@@ -97,7 +100,7 @@ Verified state of the code (2026-10-01, `adaptive-rx-UL-DL` @ `03a4cf3ae1`):
 ### 4.4 Cell-wide change detector and unified `config_epoch` (G5)
 Module `nr_passive_cfg_epoch.{c,h}` (CPU, pure state machine + hooks). Triggers:
 
-| Trigger (signal only) | Class | Logged cause | SA | NSA |
+| Trigger (signal only) | Class | Logged cause | SIB1 available (SA, or NSA broadcasting SIB1) | SIB1 absent (NSA without SIB1) |
 |---|---|---|---|---|
 | PCI change; carrier / Point A / SSB ARFCN change | **HARD_RESET** (new cell identity) | `CELL_IDENTITY_CHANGE` | ✓ | ✓ |
 | MIB content change (any field except SFN / half-frame / SSB index) | HARD_REVERIFY | `MIB_CHANGE` | ✓ | ✓ |
@@ -117,8 +120,10 @@ Actions:
   status but remain *hints* (tried first); confirmed again → trusted; contradicted → discarded.
 - **HARD_REVERIFY:** `config_epoch++`; re-derive broadcast facts (CORESET#0/SS#0, SIB1 facts, carrier, TDD) from the new
   MIB/SIB1; **all dedicated state becomes hints to re-verify** (operator decision — no reset). The SIB1 cache key
-  becomes (PCI, SIB1 semantic hash), fixing K11. On NSA (no SIB1) broadcast re-derivation is MIB-only (CORESET#0
-  may be absent); carrier/TDD come from startup or signal estimation as today.
+  becomes (PCI, SIB1 semantic hash), fixing K11. Without SIB1 (whatever the network mode) broadcast re-derivation is
+  MIB-only (CORESET#0 may be absent); carrier/TDD come from startup or signal estimation as today. With SIB1 on an NSA
+  cell the SIB1 rows apply as on SA (the TDD pattern and common configuration are cell-wide physical facts); the
+  P-RNTI row still needs NR paging, which NSA cells normally do not use (absence is not evidence).
 - Consumers that must honour the epoch: Technique D contexts (hint = ordering only, via CellFieldBook / ordering
   score), DCI length contexts (LOCKED → SUSPECT on epoch change with old length first), layout pins (config key
   includes epoch), CORESET bank (VERIFIED → STALE), CellFieldBook (`config_epoch`), passive BWP tracker.
@@ -134,14 +139,14 @@ Actions:
 The COLD / VERIFY / TRACKING modes of the levers spec §9 are driven by this module: a hard or soft epoch change puts
 affected contexts in VERIFY (old configuration first, small neighbourhood, moderate probing) instead of COLD.
 
-### 4.6 SA / NSA operation per component
+### 4.6 Operation per component: SIB1 available / SIB1 absent (independent of SA / NSA)
 
-| Component | Evidence used on SA | Evidence used on NSA | Must not assume |
+| Component | Evidence used when SIB1 is available | Evidence used when SIB1 is absent | Must not assume |
 |---|---|---|---|
 | 4.1 DCI capacity | same | same | — |
 | 4.2 length re-lock: "RNTI still active" | persistence sightings, RAR anchor, C-RNTI accepts on CORESET#0 or other geometries | persistence sightings, **CFRA RAR anchor** (NR-leg RA is contention-free), accepts on other banked geometries | CORESET#0 / SI-RNTI traffic |
 | 4.3 CORESET life cycle: "traffic visible elsewhere" | other entries, CORESET#0 C-RNTI accepts, DM-RS occupancy outside banked entries | other banked entries, DM-RS occupancy outside banked entries | CORESET#0 exists |
-| 4.4 triggers | all rows of the table | identity, MIB, continuity, BWP, dedicated-change rows only | SIB1, paging |
+| 4.4 triggers | all rows of the table (P-RNTI only if NR paging is observed) | identity, MIB, continuity, BWP, CSI-RS map, dedicated-change rows only | SIB1, paging |
 | 4.5 modes | same | same | — |
 
 NSA-specific caution: SCG addition/release makes C-RNTIs appear and disappear in bursts; that is RNTI churn, **not** a cell
@@ -196,7 +201,8 @@ final snapshot of every UE at shutdown/SIGINT), `ue_change` (one per change even
 inferred reconfiguration). Unknown values are JSON null (same convention as `nr_passive_obs`). The schema is documented
 in the module header (single source) and an offline tool produces per-UE timelines, change tables and CSV.
 
-**SA / NSA.** Same on both; on NSA the anchor is CFRA RAR or persistence only and no SIB1-derived parameters exist.
+**SA / NSA.** Same on both. On NSA the anchor is CFRA RAR or persistence only; SIB1-derived parameters are recorded
+whenever SIB1 is decoded (some NSA cells broadcast it) and are null otherwise.
 
 **Out of scope:** decoding RRC; linking RNTIs to subscriber identities (only RNTIs are stored; no identity inference).
 
@@ -208,8 +214,10 @@ in the module header (single source) and an offline tool produces per-UE timelin
    where mid-stream the DCI length, the CORESET position, or the SIB1 content changes; pass = recovery within the
    targets and 0 old-epoch outcomes credited.
 3. **Length > 63 bits:** fixture DCIs at 64, 80, 100, 128, 129 and 140 bits decoded and length-locked.
-4b. **NSA-like arm** of every live test: SIB1 ignored (`ISAC_TD_IGNORE_SIB1=1` style flag), no SI/P-RNTI paths; the same
-   recovery targets must hold using only the NSA evidence column of §4.6.
+4b. **SIB1-less arm** of every live test (models an NSA cell that does not broadcast SIB1): SIB1 ignored
+   (`ISAC_TD_IGNORE_SIB1=1` style flag), no SI/P-RNTI paths; the same recovery targets must hold using only the
+   "SIB1 absent" column of §4.6. OTA on an NSA cell that broadcasts SIB1 exercises the "SIB1 available" column with
+   NSA RA/anchors.
 4. **Live SA bed:** OAI gNB reconfiguration via the existing BWP-switch harness (telnet); UE detach/re-attach under a
    changed dedicated config (e.g. different antenna-ports table → different 1_1 size); gNB restart with a changed cell
    config (hard change). Score with the Track-A campaign runner; ground truth from gNB logs (validation only).
