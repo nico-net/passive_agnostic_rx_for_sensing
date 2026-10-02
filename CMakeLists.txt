@@ -2579,6 +2579,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_passive_metrics)
   add_test(NAME test_nr_passive_metrics COMMAND ./test_nr_passive_metrics)
 
+  add_executable(test_nr_passive_job_epoch ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_job_epoch_test.cc)
+  target_include_directories(test_nr_passive_job_epoch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_job_epoch PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_passive_job_epoch)
+  add_test(NAME test_nr_passive_job_epoch COMMAND ./test_nr_passive_job_epoch)
+
   add_executable(test_nr_passive_obs ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc
                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c)
   target_include_directories(test_nr_passive_obs PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)

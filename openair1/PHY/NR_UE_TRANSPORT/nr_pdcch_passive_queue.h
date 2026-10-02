@@ -79,6 +79,7 @@ typedef struct {
   int  nr_slot_rx;
   int  gNB_id;
   long absolute_slot; ///< producer's slot counter at enqueue; drives the staleness check
+  uint32_t config_epoch; ///< captured by the queue at admission
   /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
@@ -89,6 +90,7 @@ typedef struct {
   uint64_t processed;
   uint64_t dropped_full;  ///< evicted at admission because the ring was full
   uint64_t dropped_stale; ///< discarded by the consumer: rxdata already overwritten
+  uint64_t dropped_epoch; ///< dequeued after a configuration epoch change
   uint64_t max_lag_slots; ///< worst producer-consumer gap observed, in slots
 } nr_pdcch_passive_queue_stats_t;
 

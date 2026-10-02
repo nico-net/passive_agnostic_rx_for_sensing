@@ -93,6 +93,7 @@ typedef struct {
   int      nr_slot_rx;    ///< inspection of nr_dl_channel_estimation.c / nr_dlsch_demodulation.c /
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
+  uint32_t config_epoch; ///< captured by the queue at admission
   uint16_t rnti;
   /// nr_blind_rnti_class_t of the DCI that scheduled this PDSCH. Only the consumer's MAC-TA parse
   /// reads it: a RAR (RA-RNTI) and a dedicated DL-SCH PDU carry timing advance in different places,
@@ -133,6 +134,7 @@ typedef struct {
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
   uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
   uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
+  uint64_t dropped_epoch;  ///< dequeued after a configuration epoch change
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
   uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
   uint64_t batches;        ///< producer slot batches pushed

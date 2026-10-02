@@ -95,6 +95,7 @@ typedef struct {
   /// is only the former -- the CFR's slow-time index, which MUST be stamped here because a consumer
   /// reading the producer counter would read a value from after its own samples were taken.
   long     absolute_slot;
+  uint32_t config_epoch; ///< captured by the queue at admission
   /// Mode 2: estimate and emit the CFR, skip the LLR/LDPC half. Carried per job rather than read
   /// from config in the consumer, so a config change cannot alter a job already in flight.
   bool     cfr_only;
@@ -113,6 +114,7 @@ typedef struct {
   uint64_t crc_ok;
   uint64_t dropped_full;  ///< producer evicted the oldest to admit a newer job
   uint64_t dropped_stale; ///< dequeued too late; rxdata for that slot was already overwritten
+  uint64_t dropped_epoch; ///< dequeued after a configuration epoch change
   uint64_t max_lag_slots; ///< worst observed producer-minus-job lag, in slots
 } nr_pusch_passive_queue_stats_t;
 

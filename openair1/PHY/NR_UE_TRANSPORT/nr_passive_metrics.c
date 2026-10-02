@@ -12,6 +12,7 @@
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pusch_passive_decode.h"
+#include "nr_pusch_passive_queue.h"
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
 _Atomic int nr_passive_metrics_pci = -1;
@@ -42,6 +43,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->scanq_processed = sq.processed;
   m->scanq_drop_full = sq.dropped_full;
   m->scanq_drop_stale = sq.dropped_stale;
+  m->scanq_drop_epoch = sq.dropped_epoch;
   m->scanq_max_lag = sq.max_lag_slots;
   nr_pdsch_passive_queue_stats_t pq;
   nr_pdsch_passive_queue_get_stats(&pq);
@@ -50,7 +52,11 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->pdschq_crc_ok = pq.crc_ok;
   m->pdschq_drop_full = pq.dropped_full;
   m->pdschq_drop_stale = pq.dropped_stale;
+  m->pdschq_drop_epoch = pq.dropped_epoch;
   m->pdschq_max_lag = pq.max_lag_slots;
+  nr_pusch_passive_queue_stats_t uq;
+  nr_pusch_passive_queue_get_stats(&uq);
+  m->puschq_drop_epoch = uq.dropped_epoch;
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
