@@ -618,6 +618,11 @@ Model (new flags; all default to the v1 behaviour so v1 output stays byte-identi
   k0 sibling (notes §1.2 per-world occupant check; unseen neighbour ⇒ ambiguous; compatible neighbour ⇒ no information).
 - Counters: `false_passes`, `retx_trap_passes`, `k0_trap_passes` (physical), `certified_grants`, `dci_missed`,
   `dci_false`.
+- BC2b review carry-forwards: k0+1 and k0−1 sides decided separately (each neighbour slot has its own grant or none);
+  bursty persistence (allocation runs, not i.i.d. per grant); MCS-change probability per slot; TDD UL slots carry no
+  PDSCH; arms with adjacency fraction ∈ {0, 0.5, 1}; a wrong-field injection that differs **only in k0**
+  (`--inject-wrong-field 3` = TDRA with same S/L/mapping, other k0) so the "dormant true sibling" hole is exercised;
+  fail-open available outside fieldbook 2 when P pins are active (so a wrong pin can recover).
 
 - [ ] **Step 1: Failing tests** — `SlotModelOffIsByteIdentical` (cmp vs HEAD binary), `PersistentAllocationProducesK0Trap`,
   `TddWrongDirectionNeverCarriesPdsch`, `UnseenNeighbourIsNeverCertified`, `CompatibleNeighbourGivesNoCertification`.
@@ -636,6 +641,10 @@ DCI unseen ⇒ ambiguous; compatible neighbour allocation ⇒ no k0 information;
 exclusion (`certify_k0`). Soundness conditions to state in the header (notes §1.5): one PDSCH per RNTI per slot, PDCCH
 false-accept rate bound, truth in the catalogue.
 
+- BC2b review carry-forward: the k0-sibling guard may ignore a dormant sibling only when its dormancy cause certifies k0
+  (GEOM after a guarded pin, DCI-adjacency / TDD `certify_k0`); siblings dormant through PRIOR/FIELD must be tested or
+  block. Sibling liveness: a sibling that cannot be decoded (TDD UL slot, slot not captured) must not stall the RNTI —
+  skip with a bounded duty cycle (also BC10/R2).
 - [ ] Tests: `DciHistoryRingOrderAndEviction`, `IncompatibleObservedNeighbourCertifies`, `MissedNeighbourDciIsAmbiguous`,
   `CompatibleNeighbourNotCertified`, `TddWrongDirectionExcludesK0`, engine `UncertifiedPassDoesNotCountForPC`, sim
   `CertifiedPCNeverWrongUnderPhysicalTrap` (BC8 model, rho 0.9, dci-miss 0.1, dci-false 1e-3: wrong = 0, wrong pins = 0).
