@@ -1225,6 +1225,8 @@ alternated A/B/A/B, VOID runs reported not discarded silently, never build durin
 | **G13 Multi-carrier** | G12 | Two carriers decoded concurrently (separate channels/LOs or channelizer), no added sample loss | loss/drops increase | per-carrier summaries | multi-gNB beds | two carriers OTA | G12 |
 | **G14 Multi-operator** | G13 | ≥ 2 operators' cells processed within compute budget, persistent states, bounded rediscovery | full rediscovery loops, starvation | per-cell health + scheduler logs | — | OTA 2 operators | G13 |
 
+**Regression gate (rfsim 106 PRB), post-convergence mode, 2026-10-02.** `tests/passive_rx/dgx/rfsim_regress.sh` now defaults to `GATE_MODE=postconv` (operator option a): n_contexts >= 2, post-convergence CRC >= 99.5 %, per-context ttc tda0 <= 12 s / tda2 <= 47 s, overall-CRC search floor 93.0 %, drop_full <= 1 %; `GATE_MODE=legacy` keeps the old overall-CRC >= 98 % criterion (which the K39 search phase fails at ~95-97.6 %). `score_rx.py` gained `contexts`, `ttc_by_tda`, `postconv_crc_pct`, `search_crc_pct`, `ldpc_zero_tb`. [MEASURED, DGX rfsim 106 PRB 1 RX, host idle, @0232f351c3 (code 1a6be6155b)]: 10/10 BC9 idle runs have post-convergence CRC 100.00, ttc0 2.15-5.71 s, ttc2 19.70-23.48 s, overall CRC 95.25-97.57; derivation in `tests/passive_rx/dgx/README.txt`. Option (b), an SA bed broadcasting SIB1, is a later task.
+
 ---
 
 ## 13. Current offline validation
