@@ -25,6 +25,9 @@ typedef struct {
   uint64_t td_sib1_tdra_match_11, td_sib1_tdra_mismatch_11, td_sib1_tdra_none_11;
   uint64_t td_sib1_tdra_match_unk, td_sib1_tdra_mismatch_unk, td_sib1_tdra_none_unk;
   uint64_t td_deftab_match_10, td_deftab_mismatch_10, td_deftab_match_11, td_deftab_mismatch_11, td_deftab_na;
+  /* TD_EXCL census totals (sweep): evidence restarts caused by exclusions, tail truncations without a wipe, contexts that raised
+   * TD_EXCL_RESTART_ALARM (restarts > distinct DCI phases). */
+  uint64_t td_excl_restarts, td_excl_truncs, td_excl_restart_alarms;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then

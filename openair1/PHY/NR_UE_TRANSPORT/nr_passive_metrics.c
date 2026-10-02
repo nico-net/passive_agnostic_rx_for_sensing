@@ -13,6 +13,7 @@
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pusch_passive_decode.h"
 #include "nr_td_order.h"
+#include "nr_pdsch_config_sweep.h"
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
 _Atomic int nr_passive_metrics_pci = -1;
@@ -53,6 +54,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->pdschq_drop_stale = pq.dropped_stale;
   m->pdschq_stale_after_decode = pq.stale_after_decode;
   m->pdschq_max_lag = pq.max_lag_slots;
+  nr_pdsch_config_sweep_excl_restart_stats(&m->td_excl_restarts, &m->td_excl_truncs, &m->td_excl_restart_alarms);
   uint64_t cs[3][3], cd[3][3];
   nr_td_census_get(cs);
   nr_td_census_get_deftab(cd);

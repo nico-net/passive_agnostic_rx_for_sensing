@@ -471,6 +471,15 @@ uint64_t nr_pdsch_config_sweep_cert_epoch(void);
 bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration);
 /** Diagnostics: hypotheses removed by exclusions with k0 < 2 / k0 >= 2 (probe layers), refused contradictions. */
 void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused);
+/** TD_EXCL census (OTA diagnostic, no decision reads it). Record that a confirmed DCI of (configuration, RNTI) was seen at
+ *  `phase` = DCI abs slot mod the TDD period (mod slots_per_frame when TDD is unknown); applies to every TDA row's context. */
+void nr_pdsch_config_sweep_note_dci_phase(uint64_t configuration, uint16_t rnti, uint16_t phase);
+/** Per context: evidence restarts caused by an exclusion (wipe + reindex), exclusion tail truncations without a wipe, distinct
+ *  DCI phases seen. False when no live context has this key. A sound runtime has restarts <= phases. */
+bool nr_pdsch_config_sweep_excl_census(uint64_t configuration, uint16_t rnti, uint8_t tda, uint32_t *restarts, uint32_t *truncs,
+                                       uint32_t *phases);
+/** Totals over all contexts, plus the number of contexts that raised TD_EXCL_RESTART_ALARM (restarts > phases, once each). */
+void nr_pdsch_config_sweep_excl_restart_stats(uint64_t *restarts, uint64_t *truncs, uint64_t *alarms);
 /** Test hook: force the ISAC_TD_K0_ORACLE_LEGACY decision (1 = old k0 pinning, 0 = default, -1 = re-read the env). */
 void nr_pdsch_config_sweep_k0_legacy_set(int legacy);
 /** k0 oracle: the air showed DM-RS on this grant's PRBs `k0` slots after the DCI (and not in the

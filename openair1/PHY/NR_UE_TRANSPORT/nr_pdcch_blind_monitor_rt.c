@@ -6739,7 +6739,7 @@ constdiag_done:;
               nr_pdcch_dci11_layout_feedback(sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;
               if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
-                char bc12[96];
+                char bc12[192];
                 nr_pdsch_passive_bc12_census(&sweep_ticket, &winner, bc12, sizeof(bc12));
                 LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s\n",
                       sweep_ticket.rnti, sweep_ticket.tda_index, winner.tda_start, winner.tda_length,

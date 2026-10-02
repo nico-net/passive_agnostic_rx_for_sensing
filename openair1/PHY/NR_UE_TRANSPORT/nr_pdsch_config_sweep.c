@@ -1572,6 +1572,12 @@ typedef struct {
    * type-B entries). Cleared on reopen and on every catalogue rebuild (context_catalog). */
   bool typeb_latched;
   uint64_t typeb_latch_sig;
+  /* TD_EXCL census (OTA diagnostic, log/metrics only, never read by a decision): evidence wipes caused by a TDD / DCI-adjacency
+   * exclusion (excl_restarts), exclusion tail truncations without a wipe (excl_truncs), and the distinct DCI phases this context's
+   * (configuration, RNTI) has seen (bitset; phase = DCI abs slot mod TDD period). Sound runtime: excl_restarts <= phases. */
+  uint32_t excl_restarts, excl_truncs;
+  uint64_t dci_phase[3];
+  bool excl_alarmed;
   /* Heap, allocated when the slot is first used and kept across reuse: nr-uesoftmodem mlockall()s
    * (MCL_CURRENT|MCL_FUTURE) at startup, so 1024 inline states (180 KB each) would pin 185 MB of BSS
    * whether or not any context ever opens. Non-NULL whenever generation != 0. */
@@ -2186,6 +2192,74 @@ int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t 
   return n;
 }
 
+/* TD_EXCL census helpers (g_lock held). */
+static uint64_t g_td_excl_restarts, g_td_excl_truncs, g_td_excl_alarms;
+static unsigned phase_count(const sweep_context_t *c)
+{
+  return (unsigned)(__builtin_popcountll(c->dci_phase[0]) + __builtin_popcountll(c->dci_phase[1]) + __builtin_popcountll(c->dci_phase[2]));
+}
+/* Run an exclusion-driven apply (apply_cert / apply_cert_from) and classify its outcome: a reindex (generation bump) is an
+ * evidence restart, a pure n_hyp shrink is a tail truncation. Returns what apply_cert_from returned. */
+static int excl_apply_counted(sweep_context_t *c, int base)
+{
+  const uint64_t gen = c->generation;
+  const int before = c->state->n_hyp;
+  const int n = apply_cert_from(c, base);
+  if (c->generation != gen) {
+    c->excl_restarts++;
+    g_td_excl_restarts++;
+    const unsigned ph = phase_count(c);
+    static int s_left = 50;
+    if (c->excl_restarts > ph && !c->excl_alarmed) {
+      c->excl_alarmed = true;
+      g_td_excl_alarms++;
+      if (s_left > 0 && s_left--)
+        LOG_W(PHY, "SENSING: TD_EXCL_RESTART_ALARM rnti=0x%04x tda=%u restarts=%u phases=%u\n", c->rnti, (unsigned)c->tda,
+              c->excl_restarts, ph);
+    }
+  } else if (n != before) {
+    c->excl_truncs++;
+    g_td_excl_truncs++;
+  }
+  return n;
+}
+void nr_pdsch_config_sweep_note_dci_phase(uint64_t configuration, uint16_t rnti, uint16_t phase)
+{
+  if (phase >= 192)
+    return;
+  pthread_mutex_lock(&g_lock);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++) {
+    sweep_context_t *c = &g_contexts[i];
+    if (c->generation && c->configuration == configuration && c->rnti == rnti)
+      c->dci_phase[phase >> 6] |= UINT64_C(1) << (phase & 63);
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+bool nr_pdsch_config_sweep_excl_census(uint64_t configuration, uint16_t rnti, uint8_t tda, uint32_t *restarts, uint32_t *truncs,
+                                       uint32_t *phases)
+{
+  bool found = false;
+  pthread_mutex_lock(&g_lock);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS && !found; i++) {
+    const sweep_context_t *c = &g_contexts[i];
+    if (!c->generation || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
+      continue;
+    found = true;
+    if (restarts) *restarts = c->excl_restarts;
+    if (truncs) *truncs = c->excl_truncs;
+    if (phases) *phases = phase_count(c);
+  }
+  pthread_mutex_unlock(&g_lock);
+  return found;
+}
+void nr_pdsch_config_sweep_excl_restart_stats(uint64_t *restarts, uint64_t *truncs, uint64_t *alarms)
+{
+  pthread_mutex_lock(&g_lock);
+  if (restarts) *restarts = g_td_excl_restarts;
+  if (truncs) *truncs = g_td_excl_truncs;
+  if (alarms) *alarms = g_td_excl_alarms;
+  pthread_mutex_unlock(&g_lock);
+}
 /* ---- BC9 keyed exclusion ---- */
 static uint64_t k0_universe(const rnti_ctx_t *r)
 {
@@ -2237,7 +2311,7 @@ int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uin
       c->excl = merged;
       c->has_excl = true;
       const int before = c->state->n_hyp;
-      removed += before - apply_cert(c);
+      removed += before - excl_apply_counted(c, before);
     }
   }
   pthread_mutex_unlock(&g_lock);
@@ -2331,7 +2405,7 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
    * this g_lock hold, so removing only (part of) it truncates without the evidence wipe or reindex (K42 F3); an exclusion that
    * removes the whole layer (excl.last[k] >= 1 but below every entry's end) no longer re-wipes on every probe hit. */
   if (n > 0)
-    apply_cert_from(c, n0);
+    excl_apply_counted(c, n0);
   static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
   if ((first || n > 0) && s_left > 0 && s_left--)
     LOG_W(PHY, "SWEEP: rnti=0x%04x k0=%u observed on air -- %d hypotheses added to tda=%u\n", t->rnti,
