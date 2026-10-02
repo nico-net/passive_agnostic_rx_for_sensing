@@ -80,6 +80,7 @@
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
 #include "nr_pdcch_coreset_map.h"        // Phase 3 Technique A: nr_pdcch_coreset_map_scan()
+#include "nr_pdcch_coreset_bank.h"
 #include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
 #include "nr_dmrs_id_estimate.h"         // blind UL DM-RS scrambling-identity estimate (Task 13)
 #include "nr_pusch_passive_decode.h"     // nr_pusch_passive_ul_dmrs_id / data-ID sweep (Task 13)
@@ -879,11 +880,29 @@ static disc_coreset_t s_disc[DISC_MAX];
 static int s_disc_n, s_disc_next, s_disc_failed;
 static bool s_disc_active, s_disc_pending;
 static _Atomic bool s_disc_paused; /* _Atomic: read by the PHY receive thread (discovery gate), written by a consumer */
+static _Atomic bool s_outside_occupancy;
 static int s_disc_saved[8];
 
 bool nr_pdcch_blind_monitor_discovery_paused(void)
 {
   return s_disc_paused;
+}
+
+bool nr_pdcch_blind_monitor_discovery_duty_due(bool reconf, int bank_count, bool paused,
+                                               uint32_t duty, uint32_t *tick)
+{
+  if (!reconf)
+    return !paused;
+  if (bank_count == 0)
+    return true;
+  if (duty == 0)
+    duty = 20;
+  return (++*tick % duty) == 0;
+}
+
+bool nr_pdcch_blind_monitor_take_outside_occupancy(void)
+{
+  return atomic_exchange_explicit(&s_outside_occupancy, false, memory_order_relaxed);
 }
 
 /* GATE 1 (R31): see the declaration-site comment in nr_pdcch_blind_monitor.h for the full history --
@@ -1696,6 +1715,14 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
                                           first_carrier_offset, pci, slot, symbol, candidates,
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
+  if (nr_pdcch_reconf_enabled())
+    for (int c = 0; c < n; ++c)
+      if ((s_css0_excl_first_w < 0 || candidates[c].rb_offset / 6 < s_css0_excl_first_w
+           || candidates[c].rb_offset / 6 > s_css0_excl_last_w)
+          && nr_pdcch_coreset_bank_occupancy_outside(candidates[c].rb_offset, symbol)) {
+        atomic_store_explicit(&s_outside_occupancy, true, memory_order_relaxed);
+        break;
+      }
   {
     /* DIAGNOSTIC (env-gated, kept permanently -- same convention as this project's other ISAC_*
      * debug flags). Originally added 2026-09-05 to debug a then-zero-convergence result; kept

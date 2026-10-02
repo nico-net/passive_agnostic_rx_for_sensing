@@ -265,6 +265,26 @@ bool nr_pdcch_coreset_bank_covers(int rb_offset, int span_rb, int duration, int 
   return false;
 }
 
+bool nr_pdcch_coreset_bank_occupancy_outside(int rb_offset, int symbol)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  bool outside = n > 0;
+  for (int i = 0; i < n; ++i) {
+    if (g_coreset_bank[i].state == NR_CORESET_REMOVED)
+      continue;
+    const nr_pdcch_blind_monitor_cfg_t *b = &g_coreset_bank[i].cfg;
+    const int first = b->bwp_start + b->coreset_rb_offset;
+    if (rb_offset >= first && rb_offset + 6 <= first + b->coreset_freq_domain * 6
+        && symbol >= b->ss_first_symbol && symbol < b->ss_first_symbol + b->coreset_duration) {
+      outside = false;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_coreset_bank_lock);
+  return outside;
+}
+
 bool nr_pdcch_coreset_bank_has_owner(uint16_t rnti)
 {
   if (!rnti)

@@ -45,6 +45,24 @@ TEST_F(CoresetBank, IdleCellNeverDemotes)
   EXPECT_EQ(nr_pdcch_coreset_bank_entry(0)->state, NR_CORESET_VERIFIED);
 }
 
+TEST_F(CoresetBank, SingleBankSib1AbsentOutsideOccupancyGoesStale)
+{
+  ASSERT_EQ(add(0, 0x1234), 0); // no CORESET#0 and no second bank
+  nr_pdcch_coreset_bank_note_accept(0, 100);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_occupancy_outside(6, 0));
+  EXPECT_TRUE(nr_pdcch_coreset_bank_occupancy_outside(30, 0));
+  nr_pdcch_coreset_bank_tick(151, nr_pdcch_coreset_bank_occupancy_outside(30, 0), 50, 300);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(0)->state, NR_CORESET_STALE);
+}
+
+TEST_F(CoresetBank, SingleBankSib1AbsentIdleNeverDemotes)
+{
+  ASSERT_EQ(add(0, 0x1234), 0);
+  nr_pdcch_coreset_bank_note_accept(0, 100);
+  nr_pdcch_coreset_bank_tick(1000, false, 50, 300);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(0)->state, NR_CORESET_VERIFIED);
+}
+
 TEST_F(CoresetBank, StaleWhenOtherTrafficVisible)
 {
   ASSERT_EQ(add(0, 0x1234), 0);

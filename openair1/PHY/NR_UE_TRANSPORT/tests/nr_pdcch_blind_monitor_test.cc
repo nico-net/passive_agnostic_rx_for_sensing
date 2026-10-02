@@ -4201,6 +4201,23 @@ TEST(DiscoveryGates, BackgroundDiscoveryPassYieldsToABacklogButCannotStarve) {
   EXPECT_EQ(skipped, 0u);                                                // an idle run restarts the floor
 }
 
+TEST(DiscoveryGates, ReconfDiscoveryDutyOneInTwentyAfterFirstBank) {
+  uint32_t tick = 0;
+  EXPECT_TRUE(nr_pdcch_blind_monitor_discovery_duty_due(true, 0, true, 20, &tick));
+  EXPECT_EQ(tick, 0u);
+  int ran = 0;
+  for (int i = 0; i < 100; ++i)
+    ran += nr_pdcch_blind_monitor_discovery_duty_due(true, 1, true, 20, &tick);
+  EXPECT_EQ(ran, 5);
+  EXPECT_EQ(tick, 100u);
+  tick = 0;
+  for (int i = 0; i < 12; ++i)
+    ran += nr_pdcch_blind_monitor_discovery_duty_due(true, 1, false, 4, &tick);
+  EXPECT_EQ(ran, 8);
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_duty_due(false, 1, true, 20, &tick));
+  EXPECT_TRUE(nr_pdcch_blind_monitor_discovery_duty_due(false, 1, false, 20, &tick));
+}
+
 // Bound shared by both Gate2* tests below: MIN_ORACLE_DWELLS(8) dwells * AUTODISCOVER_OBS_CALLS(1000)
 // /dwell = 8000 calls is the fastest the existing per-dwell floor allows even with Gate 2 fixed. The
 // pre-fix code could only clear the min-bg gate via AUTODISCOVER_MAX_OBS_CALLS(400000)/dwell --

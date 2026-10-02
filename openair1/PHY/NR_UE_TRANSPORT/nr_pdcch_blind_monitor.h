@@ -497,6 +497,12 @@ bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int dur
                                                int shift, int nid);
 /* True while every discovered CORESET is verified: the catalog walk (and its decode pass) is paused. */
 bool nr_pdcch_blind_monitor_discovery_paused(void);
+/* Receive-thread Technique A duty gate. Before the first bank entry it runs every eligible slot;
+ * with reconfiguration enabled it samples one in `duty` even when the file hand-off paused the walk. */
+bool nr_pdcch_blind_monitor_discovery_duty_due(bool reconf, int bank_count, bool paused,
+                                               uint32_t duty, uint32_t *tick);
+/* True once after a Technique A correlation hit outside every banked extent. */
+bool nr_pdcch_blind_monitor_take_outside_occupancy(void);
 
 /* GATE 1 (R31, sa-discovery-stall.md): whether nr_pdcch_blind_monitor_process_body()'s Technique-A
  * discovery block (nr_pdcch_blind_monitor_rt.c) should return early -- instead of falling through

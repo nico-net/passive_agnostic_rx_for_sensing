@@ -81,6 +81,8 @@ nr_coreset_state_t nr_pdcch_coreset_bank_state(int index);
 /* Does an already-banked geometry cover this RB interval/symbol/mapping? */
 bool nr_pdcch_coreset_bank_covers(int rb_offset, int span_rb, int duration, int symbol,
                                   int bundle, int interleaver, int shift, int dmrs_id);
+/* A Technique A six-RB occupancy hit is evidence elsewhere only if no live bank covers it. */
+bool nr_pdcch_coreset_bank_occupancy_outside(int rb_offset, int symbol);
 
 /* Is `rnti` already an owner of some banked geometry? */
 bool nr_pdcch_coreset_bank_has_owner(uint16_t rnti);

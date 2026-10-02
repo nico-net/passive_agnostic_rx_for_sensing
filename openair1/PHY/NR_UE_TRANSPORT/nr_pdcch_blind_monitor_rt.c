@@ -2870,9 +2870,19 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
                                         (uint16_t)fp->Nid_cell, fp->symbols_per_slot);
     }
   }
+  static uint32_t discovery_duty_tick; /* receive thread only */
+  static uint32_t discovery_duty;
+  if (!discovery_duty) {
+    const char *e = getenv("ISAC_RECONF_DISCOVERY_DUTY");
+    char *end;
+    const long v = e ? strtol(e, &end, 10) : 20;
+    discovery_duty = e && (*end || v < 1 || v > 10000) ? 20 : (uint32_t)v;
+  }
   if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_done()
       && !nr_pdcch_blind_monitor_autodiscover_commit_pending() /* decided; a consumer applies it */
-      && !nr_pdcch_blind_monitor_discovery_paused()) { /* paused: every discovered CORESET is banked */
+      && nr_pdcch_blind_monitor_discovery_duty_due(reconf_lengths_enabled(), nr_pdcch_coreset_bank_count(),
+                                                    nr_pdcch_blind_monitor_discovery_paused(), discovery_duty,
+                                                    &discovery_duty_tick)) {
     const uint32_t abs_slot_now = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
     // ponytail: fixed at symbol 0 rather than rotating through the slot. This deployment's
     // dedicated CORESETs are always 1 symbol starting at 0 (see nr_pdcch_blind_monitor.c's
@@ -3102,7 +3112,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       const uint64_t c0 = atomic_load_explicit(&g_c0uss_unique, memory_order_relaxed);
       const uint64_t old_c0 = atomic_exchange_explicit(&last_c0_unique, c0, memory_order_relaxed);
       const uint32_t slots_per_second = ue->frame_parms.slots_per_frame * 100;
-      nr_pdcch_coreset_bank_tick(slot, c0 > old_c0, 5 * slots_per_second, 30 * slots_per_second);
+      const bool outside = nr_pdcch_blind_monitor_take_outside_occupancy();
+      nr_pdcch_coreset_bank_tick(slot, c0 > old_c0 || outside, 5 * slots_per_second, 30 * slots_per_second);
     }
     nr_pdcch_coreset_bank_dispatch_enter();
   }
