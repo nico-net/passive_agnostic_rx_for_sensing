@@ -137,3 +137,68 @@ cold: n=4000 mean_s=1.77 median_s=1.60 decided=4000 wrong=0 undecidable=0
 steady: n=4000 mean_s=1.72 median_s=1.58 decided=4000 wrong=0 undecidable=0
 overall: mean_grants=349.0 wrong=0 undecidable=0 n_full=2791874
 
+
+## BC8 v2
+[SIMULATED, DGX host, nr_td_sim @490d1536fe] slot-model baselines, `--acq 500 --seed 1` (4 RNTIs per acquisition = 2000 RNTIs per row), rx = 4 and 1, 8 parallel processes.
+Common flags: `--slot-model 1 --grant-prob 0.5` (default; i.i.d. per eligible DL slot unless `--adjacency` is given), `--dci-false 0`, cap_s 3600, levers C/P/E off, field book 0.
+Arm name key: o0/o1 = `--oracle`; L1/L0 = `--k0-oracle-legacy` (L1 = the K39 bug in the slot model, L0 = K39 fix: the oracle never prunes on k0);
+rho = `--persist`; m = `--dci-miss`; adj0 / adj1.0 = `--adjacency` (0 = never two consecutive grants, 1 = every eligible slot); tdd = `--tdd DDDSU`.
+Design: the product oracle {0,1} x legacy {1,0} (oracle 1 only; legacy is meaningless with the oracle off) x rho {0.5, 0.9} x dci-miss {0.01, 0.1}
+is small enough (~10 min wall for all 38 runs) to run in full, plus adjacency {0, 1.0} and TDD DDDSU stress arms at rho 0.9 / miss 0.01. The default
+adjacency is "as produced by the model" (adj_frac column, i.i.d. grant-prob 0.5 gives ~0.75 of grants with a same-RNTI PDSCH in a neighbouring slot).
+Columns: wrong / undec = RNTIs; truth_k0=N n/wrong/undec = subset whose TRUE k0 is N (k0 = 1 share = 1072/2000 = 53.6 %, drawn uniformly from the catalogue as in v1);
+mean_s = mean decided seconds (grants / 200); k0_trap_passes = PHYSICAL shifted-slot trap passes; adj_frac = grants with a same-RNTI PDSCH in an adjacent slot;
+f_S = certified_grants / processed grants (certified for the TRUTH's k0 leader, observed DCIs only); cert_sib = (grant, sibling leader) pairs certified;
+cert_wrong = such pairs certified although the real occupant of the shifted slot is compatible (real DCI missed AND stood in for by a spurious DCI, OR, when the oracle
+destructively pruned the true k0 from the catalogue (L1 arms), the vacuous certification over a truncated sibling set, i.e. assumption A2 violated; dci_false is 0 here).
+Reading: levers-off engine, so these are speed/safety baselines for BC9, not lever results.
+
+arm_rx | RNTIs | wrong | undec | truth_k0=1 n/wrong/undec | truth_k0=0 n/wrong/undec | mean_s(decided) | k0_trap_passes | adj_frac | f_S(cert/proc) | cert_sib | cert_wrong | dci_missed | wall_s
+o0_rho0.5_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 438.4 | 33751 | 0.750 | 0.350 | 60819233 | 0 | 1752037 | 189
+o0_rho0.5_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 262.1 | 26572 | 0.750 | 0.350 | 36362302 | 0 | 1047265 | 114
+o0_rho0.5_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 488.7 | 34628 | 0.750 | 0.318 | 56030503 | 0 | 19541127 | 193
+o0_rho0.5_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 290.1 | 26858 | 0.750 | 0.319 | 33264281 | 0 | 11600805 | 116
+o0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 533.6 | 78643 | 0.750 | 0.235 | 49675492 | 0 | 2132414 | 277
+o0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 346.1 | 66470 | 0.750 | 0.235 | 32226100 | 0 | 1383216 | 166
+o0_rho0.9_m0.1_rx1 | 2000 | 0 | 1 | 1072/0/0 | 928/0/1 | 578.8 | 78109 | 0.750 | 0.214 | 44650104 | 0 | 23205417 | 259
+o0_rho0.9_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 379.1 | 66433 | 0.750 | 0.214 | 29177913 | 0 | 15161143 | 165
+o0_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 460.8 | 45861 | 0.603 | 0.166 | 30289391 | 0 | 1842125 | 202
+o0_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 282.4 | 37015 | 0.603 | 0.166 | 18555646 | 0 | 1128411 | 125
+o1_L0_adj0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 3.3 | 0 | 0.000 | 0.000 | 0 | 0 | 13333 | 0
+o1_L0_adj0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 2.0 | 0 | 0.000 | 0.000 | 0 | 0 | 8055 | 0
+o1_L0_adj1.0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 29.3 | 488430 | 1.000 | 0.470 | 5446023 | 0 | 116601 | 4
+o1_L0_adj1.0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 14.2 | 321184 | 1.000 | 0.469 | 2634939 | 0 | 56881 | 2
+o1_L0_rho0.5_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 6.0 | 27290 | 0.750 | 0.350 | 831748 | 0 | 23979 | 1
+o1_L0_rho0.5_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 3.4 | 20106 | 0.749 | 0.349 | 465615 | 0 | 13379 | 0
+o1_L0_rho0.5_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 6.6 | 27716 | 0.750 | 0.319 | 761558 | 0 | 264477 | 1
+o1_L0_rho0.5_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 3.8 | 20501 | 0.749 | 0.318 | 429828 | 0 | 149720 | 0
+o1_L0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 7.6 | 65006 | 0.750 | 0.235 | 702789 | 0 | 30155 | 1
+o1_L0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 4.8 | 53217 | 0.750 | 0.235 | 446107 | 0 | 19108 | 1
+o1_L0_rho0.9_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 8.3 | 64746 | 0.750 | 0.214 | 639091 | 0 | 331606 | 1
+o1_L0_rho0.9_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 5.3 | 53576 | 0.750 | 0.214 | 405774 | 0 | 210242 | 1
+o1_L0_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 6.4 | 37340 | 0.603 | 0.166 | 419817 | 0 | 25532 | 1
+o1_L0_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 3.8 | 28847 | 0.602 | 0.166 | 248821 | 0 | 15144 | 0
+o1_L1_adj0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 2.6 | 0 | 0.000 | 0.318 | 0 | 0 | 10536 | 0
+o1_L1_adj0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 1.6 | 0 | 0.000 | 0.325 | 0 | 0 | 6423 | 0
+o1_L1_adj1.0_rho0.9_m0.01_rx1 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 2.8 | 80155 | 1.000 | 0.301 | 775839 | 406251 | 11212 | 0
+o1_L1_adj1.0_rho0.9_m0.01_rx4 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 1.9 | 84100 | 1.000 | 0.272 | 550608 | 289128 | 7635 | 0
+o1_L1_rho0.5_m0.01_rx1 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.4 | 28292 | 0.749 | 0.248 | 997134 | 145493 | 13390 | 0
+o1_L1_rho0.5_m0.01_rx4 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.0 | 40575 | 0.749 | 0.168 | 999135 | 145836 | 12152 | 0
+o1_L1_rho0.5_m0.1_rx1 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.7 | 28266 | 0.750 | 0.247 | 997067 | 145223 | 146728 | 0
+o1_L1_rho0.5_m0.1_rx4 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.3 | 40793 | 0.749 | 0.168 | 998751 | 145485 | 133199 | 0
+o1_L1_rho0.9_m0.01_rx1 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.4 | 52669 | 0.749 | 0.248 | 1009461 | 264452 | 13628 | 0
+o1_L1_rho0.9_m0.01_rx4 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 2.9 | 69428 | 0.749 | 0.179 | 943281 | 247450 | 11590 | 0
+o1_L1_rho0.9_m0.1_rx1 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.7 | 52434 | 0.749 | 0.248 | 1007774 | 264358 | 148948 | 0
+o1_L1_rho0.9_m0.1_rx4 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.2 | 69242 | 0.749 | 0.179 | 943245 | 247820 | 127376 | 0
+o1_L1_tdd_rho0.9_m0.01_rx1 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.4 | 34912 | 0.593 | 0.248 | 1008884 | 175903 | 13681 | 0
+o1_L1_tdd_rho0.9_m0.01_rx4 | 2000 | 1072 | 0 | 1072/1072/0 | 928/0/0 | 3.1 | 49526 | 0.589 | 0.171 | 1005586 | 175517 | 12271 | 0
+
+Findings (all [SIMULATED]):
+- K39 fixed oracle (L0): wrong 0 and undecidable 0 in every o1 arm, both RX counts, for the 1072 k0 = 1 truths too; legacy oracle (L1) with any adjacency: all 1072 k0 = 1 truths wrong
+  (the true k0 is pruned, the physically trapped k0 = 0 sibling wins; undecidable 0 because the sibling passes) and 0 of the 928 k0 = 0 truths; with adjacency 0 the legacy oracle never claims k0 = 0 and equals the fix.
+- Oracle off: wrong 0, 1 undecidable (rx1, rho 0.9, miss 0.1, k0 = 0 truth) in 2000; the physical trap with the default sibling guard costs no safety here.
+- Certification needs POSITIVE adjacent DCIs: adjacency 0 gives f_S = 0 (absence = ambiguous), adjacency 1 gives f_S ~ 0.47; f_S falls with persistence (rho 0.9: 0.235 vs 0.5: 0.35) and with dci-miss.
+  certified_wrong = 0 in every arm without the oracle bug (dci_false = 0): misses only make grants ambiguous.
+- Full adjacency (L0, adj1.0) slows convergence (14-29 s vs 2-8 s) through the physical trap at 0.47 certified share; this is the headroom BC9 must recover.
+- L1 with adjacency 0 shows f_S ~ 0.32: a k0 = 0 truth makes a (correct) k0 = 0 claim, the catalogue keeps one k0, so certification over the empty sibling set is vacuous.
+- The oracle-0 rows were run on the binary before an oracle-only amend (mask observation made unconditional); oracle 0 never calls the observation, so they are unaffected.
