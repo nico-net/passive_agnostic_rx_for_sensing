@@ -2,6 +2,7 @@
 #define NR_PDCCH_JOINT_LIVE_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_dci_bits.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,7 +17,7 @@ extern "C" {
  * `llr` is what the caller already descrambled with n_RNTI = pre_descrambled_rnti (the worker's configured or
  * alternate scrambling RNTI); nid = the CORESET's pdcch-DMRS-ScramblingID. */
 typedef struct {
-  uint64_t payload;
+  nr_dci_bits_t payload;
   uint16_t rnti;
   uint16_t mismatched_bits;
   const char *reject_reason;

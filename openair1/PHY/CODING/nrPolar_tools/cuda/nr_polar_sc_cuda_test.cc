@@ -26,7 +26,7 @@ struct configmodule_interface_s *uniqCfg = NULL;
 void exit_function(const char *, const char *, int, const char *, int) { abort(); }
 const uint8_t *npc_dbg_last_u(int i);
 int npc_dbg_params(int pid, int *N, int *K, const uint8_t **info, const uint16_t **il);
-int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, uint64_t *payload);
+int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload);
 const uint8_t *npc_ref_last_u(void);
 int npc_gpu_dbg_device_params(int *);
 int npc_gpu_dbg_fetch(int *);
@@ -36,6 +36,7 @@ int npc_gpu_dbg_trace(int16_t *);
 const int16_t *npc_ref_last_trace(void);
 int npc_ref_op(int pid, int k, int *code, int *level, int *fli);
 uint32_t crc24c(unsigned char *inptr, int bitlen);
+void crcTableInit(void);
 }
 
 static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
@@ -44,26 +45,28 @@ static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
 static double gauss(void) { double u = (rnd() + 1.0) / 4294967297.0, v = (rnd() + 1.0) / 4294967297.0; return sqrt(-2 * log(u)) * cos(6.283185307 * v); }
 
 struct pset { uint16_t len; uint8_t al; };
-static const pset P[] = {{39, 1}, {44, 2}, {47, 2}, {49, 2}, {58, 2}, {47, 4}, {58, 4}, {47, 8}, {58, 8}, {39, 8}, {47, 16}, {58, 16}};
+static const pset P[] = {{39, 1}, {44, 2}, {47, 2}, {49, 2}, {58, 2}, {47, 4}, {58, 4}, {47, 8}, {58, 8}, {39, 8}, {47, 16}, {58, 16}, {80, 2}, {128, 2}, {129, 4}, {140, 4}, {140, 16}};
 #define NP ((int)(sizeof(P) / sizeof(P[0])))
 
 static int E_of(const pset &p) { return p.al * 108; }
 
 /* One CPU decode of the exact vector the GPU gets; the CPU path must be warmed first (see .h). */
-static uint32_t cpu_decode(const pset &p, const int16_t *llr, uint64_t *payload)
+static uint32_t cpu_decode(const pset &p, const int16_t *llr, nr_dci_bits_t *payload)
 {
   int16_t tmp[NPC_MAX_E];
   memcpy(tmp, llr, sizeof(int16_t) * E_of(p));
-  uint64_t out[2] = {0, 0};
+  uint64_t out[NR_DCI_WORDS] = {0};
   const uint32_t crc = polar_decoder_int16(tmp, out, 1, NR_POLAR_DCI_MESSAGE_TYPE, p.len, p.al);
-  *payload = out[0];
+  *payload = nr_dci_bits_t{{out[0], out[1], out[2]}};
   return crc;
 }
 
 static void encode(const pset &p, uint64_t payload, uint16_t rnti, double amp, double sigma, int16_t *llr)
 {
   uint8_t out[NPC_MAX_E / 8 + 16] = {0};
-  uint64_t A[2] = {payload, 0};
+  uint64_t A[NR_DCI_WORDS] = {payload, (uint64_t)rnd() << 32 | rnd(), (uint64_t)rnd()};
+  for (int w = (p.len + 63) / 64; w < NR_DCI_WORDS; ++w) A[w] = 0;
+  if (p.len % 64) A[p.len / 64] &= (1ULL << (p.len % 64)) - 1;
   polar_encoder_fast(A, out, rnti, 1, NR_POLAR_DCI_MESSAGE_TYPE, p.len, p.al);
   const int E = E_of(p);
   for (int i = 0; i < E; i++) {
@@ -78,15 +81,15 @@ static int compare(const char *what, const pset &p, int pid, const std::vector<s
 {
   const int n = (int)vecs.size();
   std::vector<npc_item_t> items(n);
-  std::vector<uint32_t> gcrc(n); std::vector<uint64_t> gpay(n);
+  std::vector<uint32_t> gcrc(n); std::vector<nr_dci_bits_t> gpay(n);
   for (int i = 0; i < n; i++) items[i] = (npc_item_t){pid, vecs[i].data()};
   if (npc_decode_batch(items.data(), n, gcrc.data(), gpay.data()) != 0) { printf("  GPU batch failed\n"); return n; }
   int bad = 0, pass = 0;
   for (int i = 0; i < n; i++) {
-    uint64_t cpay; const uint32_t ccrc = cpu_decode(p, vecs[i].data(), &cpay);
-    if (ccrc != gcrc[i] || cpay != gpay[i]) {
+    nr_dci_bits_t cpay; const uint32_t ccrc = cpu_decode(p, vecs[i].data(), &cpay);
+    if (ccrc != gcrc[i] || !nr_dci_bits_eq(&cpay, &gpay[i])) {
       if (bad < 3) printf("  MISMATCH %s len=%u AL=%u item %d: cpu crc=%06x pay=%016llx gpu crc=%06x pay=%016llx\n",
-                          what, p.len, p.al, i, ccrc, (unsigned long long)cpay, gcrc[i], (unsigned long long)gpay[i]);
+                          what, p.len, p.al, i, ccrc, (unsigned long long)cpay.w[0], gcrc[i], (unsigned long long)gpay[i].w[0]);
       bad++;
     }
     if ((ccrc >> 16) == 0) pass++;
@@ -116,17 +119,17 @@ static int debug_one(void)
 {
   npc_gpu_dbg_device_params(NULL);
   const pset p = {39, 1}; const int E = E_of(p); const int pid = npc_register(p.len, p.al);
-  { int16_t z[NPC_MAX_E] = {0}; uint64_t o; cpu_decode(p, z, &o); }
+  { int16_t z[NPC_MAX_E] = {0}; nr_dci_bits_t o; cpu_decode(p, z, &o); }
   int N, K; const uint8_t *info; const uint16_t *il; npc_dbg_params(pid, &N, &K, &info, &il);
   for (int trial = 0; trial < 5; trial++) {
     std::vector<int16_t> v(E); for (int i = 0; i < E; i++) v[i] = (int16_t)(rnd() & 0xffff);
-    npc_item_t it = {pid, v.data()}; uint32_t gcrc; uint64_t gpay;
+    npc_item_t it = {pid, v.data()}; uint32_t gcrc; nr_dci_bits_t gpay;
     npc_decode_batch(&it, 1, &gcrc, &gpay);
-    uint64_t cpay; const uint32_t ccrc = cpu_decode(p, v.data(), &cpay);
-    if (ccrc == gcrc && cpay == gpay) { printf("trial %d: match\n", trial); continue; }
-    uint8_t ucpu[NPC_MAX_N]; cpu_u_from_outputs(pid, p.len, cpay, ccrc, ucpu);
+    nr_dci_bits_t cpay; const uint32_t ccrc = cpu_decode(p, v.data(), &cpay);
+    if (ccrc == gcrc && nr_dci_bits_eq(&cpay, &gpay)) { printf("trial %d: match\n", trial); continue; }
+    uint8_t ucpu[NPC_MAX_N]; cpu_u_from_outputs(pid, p.len, cpay.w[0], ccrc, ucpu);
     const uint8_t *ug = npc_dbg_last_u(0);
-    { uint32_t rc2; uint64_t rp2; npc_item_t it2 = {pid, v.data()}; npc_ref_decode(&it2, 1, &rc2, &rp2);
+    { uint32_t rc2; nr_dci_bits_t rp2; npc_item_t it2 = {pid, v.data()}; npc_ref_decode(&it2, 1, &rc2, &rp2);
       uint8_t uref[NPC_MAX_N]; memcpy(uref, npc_ref_last_u(), NPC_MAX_N);
       npc_decode_batch(&it2, 1, &rc2, &rp2); const uint8_t *ug2 = npc_dbg_last_u(0);
       int fr = -1; for (int nn = 0; nn < N; nn++) if (uref[nn] != ug2[nn]) { fr = nn; break; }
@@ -165,6 +168,7 @@ static int debug_one(void)
 
 int main(int argc, char **argv)
 {
+  crcTableInit();
   const bool quick = argc > 1 && !strcmp(argv[1], "quick");
   if (argc > 1 && !strcmp(argv[1], "dbg")) return debug_one();
   int total_bad = 0;
@@ -173,7 +177,7 @@ int main(int argc, char **argv)
     const int E = E_of(p);
     const int pid = npc_register(p.len, p.al);
     if (pid < 0) { printf("register failed len=%u al=%u\n", p.len, p.al); return 1; }
-    { int16_t z[NPC_MAX_E] = {0}; uint64_t o; cpu_decode(p, z, &o); } /* warm: steady-state betaInit */
+    { int16_t z[NPC_MAX_E] = {0}; nr_dci_bits_t o; cpu_decode(p, z, &o); } /* warm: steady-state betaInit */
 
     std::vector<std::vector<int16_t>> v;
     /* (a) full-range random: what 99 % of blind candidates are, and every saturation edge */
@@ -182,15 +186,15 @@ int main(int argc, char **argv)
     int bad = compare("random", p, pid, v, NULL);
     { /* split kernel bugs from formula bugs: same op list, same formulas, plain sequential C */
       std::vector<npc_item_t> it(v.size()); std::vector<uint32_t> rc(v.size()), gc(v.size());
-      std::vector<uint64_t> rp(v.size()), gp(v.size());
+      std::vector<nr_dci_bits_t> rp(v.size()), gp(v.size());
       for (size_t i = 0; i < v.size(); i++) it[i] = (npc_item_t){pid, v[i].data()};
       npc_ref_decode(it.data(), (int)v.size(), rc.data(), rp.data());
       npc_decode_batch(it.data(), (int)v.size(), gc.data(), gp.data());
       int ref_vs_oai = 0, ref_vs_gpu = 0;
       for (size_t i = 0; i < v.size(); i++) {
-        uint64_t cp; const uint32_t cc = cpu_decode(p, v[i].data(), &cp);
-        if (cc != rc[i] || cp != rp[i]) ref_vs_oai++;
-        if (rc[i] != gc[i] || rp[i] != gp[i]) ref_vs_gpu++;
+        nr_dci_bits_t cp; const uint32_t cc = cpu_decode(p, v[i].data(), &cp);
+        if (cc != rc[i] || !nr_dci_bits_eq(&cp, &rp[i])) ref_vs_oai++;
+        if (rc[i] != gc[i] || !nr_dci_bits_eq(&rp[i], &gp[i])) ref_vs_gpu++;
       }
       printf("  split: ref-vs-OAI %d, ref-vs-GPU %d (of %zu)\n", ref_vs_oai, ref_vs_gpu, v.size());
     }
@@ -216,18 +220,18 @@ int main(int argc, char **argv)
     for (int v = 0; v < 8; v++)
       for (int i = 0; i < 864; i++) packed[v * 864 + i] = vv[v][i] = (int16_t)((rnd() % 4000) - 2000);
     std::vector<npc_item_t> items; std::vector<int> pid, vidx;
-    for (int len = 30; len <= 63; len++)
+    for (int len = 30; len <= NR_DCI_MAX_PAYLOAD; len++)
       for (int v = 0; v < 8; v++) {
         const int id = npc_register((uint16_t)len, als[v % 4]);
         if (id < 0) continue;
         items.push_back({id, vv[v].data()}); pid.push_back(id); vidx.push_back(v);
       }
     const int n = (int)items.size();
-    std::vector<uint32_t> c1(n), c2(n); std::vector<uint64_t> p1(n), p2(n);
+    std::vector<uint32_t> c1(n), c2(n); std::vector<nr_dci_bits_t> p1(n), p2(n);
     const int r1 = npc_decode_batch(items.data(), n, c1.data(), p1.data());
     const int r2 = npc_decode_batch_vec(packed.data(), 864, 8, vidx.data(), pid.data(), n, c2.data(), p2.data());
     int diff = (r1 || r2) ? n : 0;
-    for (int i = 0; i < n && !r1 && !r2; i++) diff += (c1[i] != c2[i] || p1[i] != p2[i]);
+    for (int i = 0; i < n && !r1 && !r2; i++) diff += (c1[i] != c2[i] || !nr_dci_bits_eq(&p1[i], &p2[i]));
     printf("VEC-PATH: %s (%d of %d items differ from the per-item path)\n", diff ? "FAIL" : "PASS", diff, n);
     total_bad += diff;
   }
@@ -239,7 +243,7 @@ int main(int argc, char **argv)
   for (auto &x : pool) { x.resize(E); for (int i = 0; i < E; i++) x[i] = (int16_t)((rnd() % 4000) - 2000); }
   double cpu_us_per_decode = 0.0;
   { /* CPU reference: one core, same vectors */
-    const int reps = 2000; double t0 = now_us(); uint64_t o;
+    const int reps = 2000; double t0 = now_us(); nr_dci_bits_t o;
     for (int r = 0; r < reps; r++) cpu_decode(bp, pool[r % 1024].data(), &o);
     cpu_us_per_decode = (now_us() - t0) / reps;
     printf("CPU polar_decoder_int16 len=%u AL=%u: %.1f us/decode (one core)\n", bp.len, bp.al, cpu_us_per_decode);
@@ -247,7 +251,7 @@ int main(int argc, char **argv)
   const int sizes[] = {1, 8, 32, 128, 512, 1024, 2048, 4096};
   for (int si = 0; si < (int)(sizeof(sizes) / sizeof(sizes[0])); si++) {
     const int n = sizes[si];
-    std::vector<npc_item_t> items(n); std::vector<uint32_t> c(n); std::vector<uint64_t> pay(n);
+    std::vector<npc_item_t> items(n); std::vector<uint32_t> c(n); std::vector<nr_dci_bits_t> pay(n);
     for (int i = 0; i < n; i++) items[i] = (npc_item_t){bpid, pool[i % 1024].data()};
     npc_decode_batch(items.data(), n, c.data(), pay.data()); /* warm */
     const int reps = n >= 2048 ? 10 : (n >= 256 ? 20 : 200);
@@ -261,7 +265,7 @@ int main(int argc, char **argv)
     const int lens[5] = {44, 47, 49, 58, 39}; std::vector<int> pids;
     for (int l = 0; l < 5; l++) pids.push_back(npc_register(lens[l], 2));
     const int n = 8 * 13 * 5;
-    std::vector<npc_item_t> items(n); std::vector<uint32_t> c(n); std::vector<uint64_t> pay(n);
+    std::vector<npc_item_t> items(n); std::vector<uint32_t> c(n); std::vector<nr_dci_bits_t> pay(n);
     for (int i = 0; i < n; i++) items[i] = (npc_item_t){pids[i % 5], pool[i % 1024].data()};
     npc_decode_batch(items.data(), n, c.data(), pay.data());
     double t0 = now_us(); for (int r = 0; r < 20; r++) npc_decode_batch(items.data(), n, c.data(), pay.data());

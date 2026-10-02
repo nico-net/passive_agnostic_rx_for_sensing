@@ -49,6 +49,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_dci_bits.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -140,7 +141,7 @@ void nr_pdcch_blind_reset_common(void);
 typedef struct {
   const int16_t *llr; ///< the exact unscrambled vector the batch decoded; NULL = nothing precomputed
   uint32_t crc;       ///< polar_decoder_int16()'s return value
-  uint64_t payload;   ///< polar_decoder_int16()'s out[0]
+  nr_dci_bits_t payload;   ///< polar_decoder_int16()'s right-aligned payload words
   uint16_t dci_length;
   uint8_t aggregation_level;
 } nr_pdcch_blind_polar_pre_t;
@@ -148,7 +149,7 @@ void nr_pdcch_blind_polar_pre_set(const nr_pdcch_blind_polar_pre_t *pre);
 
 /* Raw length evidence is independent of every RRC interpretation field. */
 typedef struct {
-  uint64_t payload;
+  nr_dci_bits_t payload;
   uint16_t rnti;
   uint16_t mismatched_bits;
   const char *reject_reason;
@@ -220,7 +221,7 @@ typedef struct {
   /// same convention nr_pdcch_blind_ul_result_t::raw_payload already uses, and for the same reason:
   /// a REJECTED 1_0 payload with identifier=0 is a format-0_0 UL grant, and re-reading it costs no
   /// second polar decode. Zero on the format-1_1 paths, which have their own raw result struct.
-  uint64_t    payload;
+  nr_dci_bits_t    payload;
 } nr_pdcch_blind_result_t;
 
 /// Deployment facts a blind receiver cannot read off the air but CAN read off the gNB's own
@@ -690,7 +691,7 @@ typedef struct {
 /// dumping when a width assignment is still being pinned.
 typedef struct {
   // ---- always filled, valid even when !plausible ----
-  uint64_t raw_payload;      ///< the polar-decoded payload word, right-aligned to dci_length
+  nr_dci_bits_t raw_payload;      ///< the polar-decoded payload words, right-aligned to dci_length
   uint16_t dci_length;       ///< payload width this decode was attempted at
   uint16_t crc_rnti;         ///< CRC-recovered RNTI (NOT range-checked; see `rnti` for the checked one)
   uint16_t mismatched_bits;  ///< re-encode-vs-LLR-polarity false-detection measure (as the DL path)
@@ -872,7 +873,7 @@ uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts);
  *  into out_modes in that fixed order; returns the count (0 if opts is unusable or none match). */
 int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts, uint16_t observed_len,
                                             uint8_t *out_modes, int max);
-int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, uint64_t payload,
+int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, nr_dci_bits_t payload,
                                  uint16_t length, uint16_t rnti, nr_pdcch_blind_ul_result_t *out);
 /* Try each allocation at most once, stopping ONLY when attempt reports TB CRC OK.
  * Return the winning index, or -1. Malformed counts invoke no callback. The caller
@@ -890,7 +891,7 @@ bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t a
 bool nr_pdcch_blind_decode_raw_01(const int16_t *llr, uint8_t aggregation_level,
                                 uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
                                 nr_pdcch_blind_ul_result_t *out);
-bool nr_pdcch_blind_extract_01(uint64_t payload, uint16_t dci_length, uint16_t rnti,
+bool nr_pdcch_blind_extract_01(nr_dci_bits_t payload, uint16_t dci_length, uint16_t rnti,
                              const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out);
 
 /**
@@ -930,7 +931,7 @@ bool nr_pdcch_blind_decode_and_extract_01(const int16_t* llr,
  * @param opts         deployment facts; must not be NULL
  * @param[out] out     filled unconditionally; check out->plausible
  */
-bool nr_pdcch_blind_extract_00(uint64_t       payload,
+bool nr_pdcch_blind_extract_00(nr_dci_bits_t       payload,
                                uint16_t       dci_length,
                                uint16_t       crc_rnti,
                                const nr_pdcch_blind_ul_opts_t* opts,
@@ -1031,7 +1032,7 @@ void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void);
 /** Producer-thread-only geometry epoch and fresh-evidence interface. */
 uint64_t nr_pdcch_blind_monitor_autodiscover_generation(void);
 bool nr_pdcch_blind_monitor_autodiscover_extent_verified(void);
-void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, uint64_t payload);
+void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, nr_dci_bits_t payload);
 void nr_pdcch_blind_monitor_autodiscover_reset(void);
 
 /** Multi-candidate-per-occasion lookahead (2026-09-16, PDCCH_GPU_BATCH_HANDOVER.md): the extent/
@@ -1075,7 +1076,7 @@ bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out);
  *  lane. Returns true iff THIS call just verified the lane's geometry -- the caller must then call
  *  nr_pdcch_blind_monitor_autodiscover_set_dci_length() with the lane's own found length, since
  *  g_cfg's dci_length_override is not touched here (rt.c owns per-lane length-sweep state). */
-bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, uint64_t payload);
+bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, nr_dci_bits_t payload);
 /** Bump this lane's occasion counter and advance it to its next candidate if its
  *  NR_PDCCH_EXTENT_VERIFY_OCC dwell just expired. Call once per real occasion this lane was offered
  *  a decode attempt, whether or not it produced evidence. */

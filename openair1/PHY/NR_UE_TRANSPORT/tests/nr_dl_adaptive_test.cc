@@ -206,16 +206,16 @@ TEST_F(DlGeometry, HistoricalRntiCannotVerifyNewGeometry) {
 }
 TEST_F(DlGeometry, FreshDistinctDedicatedGrantsVerifyOnlyTheirOwnEpoch) {
   ASSERT_NO_FATAL_FAILURE(discover_single_window());
-  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1100,11);
-  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1100,12);
-  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1101,11);
+  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1100,nr_dci_bits_from_u64(11));
+  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1100,nr_dci_bits_from_u64(12));
+  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1101,nr_dci_bits_from_u64(11));
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
   const auto generation=nr_pdcch_blind_monitor_autodiscover_generation();
   nr_pdcch_blind_monitor_autodiscover_retry(18);
   EXPECT_GT(nr_pdcch_blind_monitor_autodiscover_generation(),generation);
-  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1102,12);
+  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1102,nr_dci_bits_from_u64(12));
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
-  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1103,13);
+  nr_pdcch_blind_monitor_autodiscover_observe(0x4601,1103,nr_dci_bits_from_u64(13));
   EXPECT_TRUE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
   for(int i=0;i<5000;i++) EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_step(1200+i));
 }
@@ -420,7 +420,7 @@ TEST(UlGrantBook, KeepsThreeUesInOneSlotAndAcceptsLateDci) {
   nr_pdcch_blind_ul_result_t grant{};
   grant.plausible=true;grant.k2=4;
   for(int u=0;u<3;u++) {
-    grant.rnti=0x200+u;grant.raw_payload=10+u;
+    grant.rnti=0x200+u;grant.raw_payload=nr_dci_bits_from_u64(10+u);
     ASSERT_EQ(nr_passive_ul_book_put(&book,&grant,20476),1);
   }
   EXPECT_EQ(nr_passive_ul_book_put(&book,&grant,20476),0);
@@ -442,10 +442,10 @@ TEST(UlGrantBook, ExpiredAndCapacityDropsNeverOverwriteAnotherUe) {
   nr_passive_ul_book_t book{};nr_pdcch_blind_ul_result_t g{};
   g.plausible=true;g.k2=0;g.rnti=0x345;
   for(int i=0;i<NR_PASSIVE_UL_BOOK_CAPACITY;i++) {
-    g.raw_payload=i;
+    g.raw_payload=nr_dci_bits_from_u64(i);
     ASSERT_EQ(nr_passive_ul_book_put(&book,&g,1000),1);
   }
-  g.raw_payload=9999;
+  g.raw_payload=nr_dci_bits_from_u64(9999);
   EXPECT_EQ(nr_passive_ul_book_put(&book,&g,1000),-1);
   nr_passive_ul_book_entry_t e{};unsigned expired=0;
   EXPECT_FALSE(nr_passive_ul_book_take(&book,1018,20,&e,&expired));

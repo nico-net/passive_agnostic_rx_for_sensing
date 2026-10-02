@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stdatomic.h>
 
 // Empirically measured false-accept rate of nr_pdcch_blind_decode_and_extract_ex()'s "plausible"
 // gate on this project's own prior data (42k/10.9M candidates -- see this file's header and
@@ -60,6 +61,41 @@
 // with sqrt(trials) rather than being a constant, it stays conservative however long the
 // observation window runs (unlike the fixed floor it replaces -- see this file's header).
 #define Z_SIGMA 6.0
+
+static _Atomic bool cell_seen[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+void nr_pdcch_dci_length_seen_reset(void)
+{
+  for (int len = 0; len <= NR_DCI_MAX_PAYLOAD; ++len)
+    atomic_store_explicit(&cell_seen[len], false, memory_order_relaxed);
+}
+void nr_pdcch_dci_length_note_seen(int len)
+{
+  if (len > 0 && len <= NR_DCI_MAX_PAYLOAD)
+    atomic_store_explicit(&cell_seen[len], true, memory_order_relaxed);
+}
+int nr_pdcch_dci_length_order(int min_len, int max_len, int *out)
+{
+  if (!out || min_len < 1 || max_len > NR_DCI_MAX_PAYLOAD || min_len > max_len) return 0;
+  int distance[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  for (int len = min_len; len <= max_len; ++len) distance[len] = NR_DCI_MAX_PAYLOAD;
+  for (int seen = 1; seen <= NR_DCI_MAX_PAYLOAD; ++seen) {
+    if (!atomic_load_explicit(&cell_seen[seen], memory_order_relaxed)) continue;
+    for (int len = min_len; len <= max_len; ++len) {
+      int d = abs(len - seen);
+      if (d < distance[len]) distance[len] = d;
+    }
+  }
+  int n = 0;
+  for (int len = min_len; len <= max_len; ++len) {
+    int i = n++;
+    while (i > 0 && distance[out[i - 1]] > distance[len]) {
+      out[i] = out[i - 1];
+      --i;
+    }
+    out[i] = len; // ascending tie break; no seen lengths preserves the cold order
+  }
+  return n;
+}
 
 void nr_pdcch_dci_length_sweep_reset(nr_pdcch_dci_length_sweep_state_t* state)
 {
@@ -192,6 +228,9 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   if (state == NULL || decode_one_candidate == NULL || n_trials_this_call <= 0) {
     return -1;
   }
+  if (min_len < 1) min_len = 1;
+  if (max_len > NR_DCI_MAX_PAYLOAD) max_len = NR_DCI_MAX_PAYLOAD;
+  if (min_len > max_len) return -1;
   /* Rotation (see the header's `stride`): test every stride'th length, phase-shifted per call, so
    * each length is visited exactly once per stride calls -- fair by construction, no length can be
    * starved, and the phase survives the caller restarting the sweep on a new CORESET hypothesis
@@ -227,10 +266,17 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   uint32_t feed_serial = ++state->feed_serial;
   if (feed_serial == 0)
     feed_serial = ++state->feed_serial;
-  const int initial_len=state->resume_len ? state->resume_len : (prefer ? prefer : min_len+state->rot_phase);
-  for (int len = initial_len;
-       len <= (prefer ? prefer : max_len) && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN;
-       len += prefer ? (max_len + 1) : stride) {
+  /* Freeze the order for a complete rotation and any budget suspensions. New cell
+   * hints take effect next round, so a concurrent lock cannot skip/repeat a length. */
+  if (!state->resume_len && state->rot_phase == 0)
+    state->order_count = nr_pdcch_dci_length_order(min_len, max_len, state->order);
+  int initial_index = state->rot_phase;
+  if (state->resume_len)
+    for (int i = 0; i < state->order_count; ++i)
+      if (state->order[i] == state->resume_len) initial_index = i;
+  for (int index = initial_index; prefer || index < state->order_count; index += stride) {
+    const int len = prefer ? prefer : state->order[index];
+    if (len < min_len || len > max_len) continue;
     const int initial_trial=(state->resume_len==len) ? state->resume_trial : 0;
     for (int t = initial_trial; t < n_trials_this_call; t++) {
       bool stop=max_trials>0 && completed>=max_trials;
@@ -255,6 +301,7 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
       add_distinct_hash(state->hashes[len], &state->n_distinct[len], payload_hash);
       add_rnti_evidence(state, len, rnti, payload_hash, feed_serial);
     }
+    if (prefer) break;
   }
   state->resume_len=state->resume_trial=0;
   /* One ROUND -- every length visited once -- is what the caller's give-up cap counts, so the
@@ -334,6 +381,7 @@ score_evidence:;
       fflush(stdout);
     }
   }
+  nr_pdcch_dci_length_note_seen(best_len);
   return best_len;
 }
 
@@ -433,6 +481,7 @@ nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
 
 void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16_t rnti, int found)
 {
+  nr_pdcch_dci_length_note_seen(found);
   if (!bank || !rnti || found <= 0 || bank->cell_len > 0)
     return;
   if (bank->first_rnti == 0 || bank->first_rnti == rnti) {

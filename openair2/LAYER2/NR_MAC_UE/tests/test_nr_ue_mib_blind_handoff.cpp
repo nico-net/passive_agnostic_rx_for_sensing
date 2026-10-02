@@ -214,7 +214,7 @@ int FirstBlindDmrsSymbol(int *mask_out = nullptr)
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
   const uint16_t len = nr_pdcch_blind_dci_size(kBwpSize);
   nr_pdcch_blind_raw_result_t raw = {};
-  raw.payload = 1ULL << (len - 1);
+  raw.payload = nr_dci_bits_from_u64(1ULL << (len - 1));
   raw.rnti = 0x4601;
   nr_pdcch_blind_result_t out = {};
   if (!nr_pdcch_blind_extract_11(&raw, len, kBwpSize, (uint8_t)cfg->dmrs_typeA_position, nullptr, &out)) {

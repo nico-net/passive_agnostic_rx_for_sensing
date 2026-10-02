@@ -26,7 +26,7 @@
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const uint8_t *al, int n,
-                      uint32_t *crc, uint64_t *payload, uint8_t *ok)
+                      uint32_t *crc, nr_dci_bits_t *payload, uint8_t *ok)
 {
   if (llr == NULL || len == NULL || al == NULL || crc == NULL || payload == NULL || ok == NULL)
     return -1;
@@ -37,7 +37,7 @@ static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const
   static npc_item_t item[NPG_MAX_ITEMS];
   static int map[NPG_MAX_ITEMS];
   static uint32_t c[NPG_MAX_ITEMS];
-  static uint64_t p[NPG_MAX_ITEMS];
+  static nr_dci_bits_t p[NPG_MAX_ITEMS];
   int m = 0;
 
   pthread_mutex_lock(&g_lock);
@@ -45,7 +45,7 @@ static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const
     ok[i] = 0;
     /* E beyond the kernel's NPC_MAX_E (AL16 = 1728 fits since NPC_MAX_E = 2048); and the params table
      * is finite, so a long length sweep can legitimately run out. Both cases fall back, not failures. */
-    if ((int)al[i] * 108 > NPC_MAX_E)
+    if ((int)al[i] * 108 > NPC_MAX_E || (int)al[i] * 108 > stride)
       continue;
     const int pid = npc_register(len[i], al[i]);
     if (pid < 0)
@@ -67,7 +67,7 @@ static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const
 }
 
 static int npg_decode_vec(const int16_t *vec, int vstride, int n_vec, const uint16_t *vidx, const uint16_t *len,
-                          const uint8_t *al, int n, uint32_t *crc, uint64_t *payload, uint8_t *ok)
+                          const uint8_t *al, int n, uint32_t *crc, nr_dci_bits_t *payload, uint8_t *ok)
 {
   if (vec == NULL || vidx == NULL || len == NULL || al == NULL || crc == NULL || payload == NULL || ok == NULL)
     return -1;
@@ -75,7 +75,7 @@ static int npg_decode_vec(const int16_t *vec, int vstride, int n_vec, const uint
     return -1;
   static int pid[NPG_MAX_ITEMS], vi[NPG_MAX_ITEMS], map[NPG_MAX_ITEMS];
   static uint32_t c[NPG_MAX_ITEMS];
-  static uint64_t p[NPG_MAX_ITEMS];
+  static nr_dci_bits_t p[NPG_MAX_ITEMS];
   int m = 0;
   pthread_mutex_lock(&g_lock);
   for (int i = 0; i < n; i++) {
@@ -113,8 +113,8 @@ static int npg_decode_vec(const int16_t *vec, int vstride, int n_vec, const uint
 
 static const nr_gpu_polar_api_t g_api = {.decode = npg_decode, .decode_vec = npg_decode_vec};
 
-const nr_gpu_polar_api_t *nr_gpu_polar_api(void);
-const nr_gpu_polar_api_t *nr_gpu_polar_api(void)
+const nr_gpu_polar_api_t *nr_gpu_polar_api_v2(void);
+const nr_gpu_polar_api_t *nr_gpu_polar_api_v2(void)
 {
   return &g_api;
 }

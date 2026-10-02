@@ -43,7 +43,7 @@ typedef struct {
   nr_pdcch_blind_ul_opts_t baseline;
   uint16_t target_rnti, target_length;
   uint64_t generation, touched;
-  uint64_t samples[UL_DISCOVERY_SAMPLES];
+  nr_dci_bits_t samples[UL_DISCOVERY_SAMPLES];
   int nsamples, sample_cursor, tda_index;
   uint64_t feedbacks, grants, late_splits;
   /* Evidence belongs to one identity and one baseline, never to competing UEs. */
@@ -130,7 +130,7 @@ static bool apply_joint(const nr_hyp_t *h, const apply_ctx_t *ctx,
   memcpy(ih.bytes,&j->config,sizeof(j->config));
   return nr_pdcch_ul_interp_sweep_apply(&ih,j->tda,o);
 }
-static bool extract(const nr_hyp_t *h, const uint64_t *p, const apply_ctx_t *ctx,
+static bool extract(const nr_hyp_t *h, const nr_dci_bits_t *p, const apply_ctx_t *ctx,
                     nr_pdcch_blind_ul_result_t *out)
 {
   nr_pdcch_blind_ul_opts_t o=ctx->opts;
@@ -310,7 +310,7 @@ static bool baseline_rejected(const search_t *s)
 /* One bounded round-robin pass. No global winner: two TDA entries can both
  * be correct. Missing a row on this payload is not a failed CRC or evidence
  * eliminating that row. Classes retain exact raw width/TDA/config identity. */
-static int joint_next(ul_context_t *c, const uint64_t *payload, apply_ctx_t *ctx, nr_hyp_t *out)
+static int joint_next(ul_context_t *c, const nr_dci_bits_t *payload, apply_ctx_t *ctx, nr_hyp_t *out)
 {
   nr_hyp_sweep_state_t *e=&c->interp.engine;
   const int nt=c->baseline.tda_count?c->baseline.tda_count:16;
@@ -361,9 +361,9 @@ static void joint_feed(ul_context_t *c, int cls, bool ok)
   }
 }
 bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t len,
-                                 uint16_t rnti, uint64_t payload, nr_pdcch_blind_ul_result_t *out)
+                                 uint16_t rnti, nr_dci_bits_t payload, nr_pdcch_blind_ul_result_t *out)
 {
-  if (!fixed || !out || !rnti || !len || len>63) return false;
+  if (!fixed || !out || !rnti || !len || len>NR_DCI_MAX_PAYLOAD) return false;
   pthread_mutex_lock(&lock);
   s_discovery_dirty=true;
   /* Equal DCI lengths do not prove equal dedicated configurations. Keep
@@ -395,11 +395,11 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
    * sample set. Equivalence classes were always documented as finite-sample EVIDENCE, not proof --
    * freezing makes the class definition stable enough for the CRC oracle to finish scoring it. */
   bool novel = !c->widths.initialized;
-  for (int i=0;i<c->nsamples;++i) if(c->samples[i]==payload) novel=false;
+  for (int i=0;i<c->nsamples;++i) if(nr_dci_bits_eq(&c->samples[i], &payload)) novel=false;
   if (novel) {
   if(c->nsamples<UL_DISCOVERY_SAMPLES)
       LOG_I(PHY,"UL raw sample rnti=0x%x len=%u payload=0x%lx sample=%d/%d; interpretation unresolved\n",
-            rnti,len,(unsigned long)payload,c->nsamples+1,UL_DISCOVERY_SAMPLES);
+            rnti,len,(unsigned long)payload.w[0],c->nsamples+1,UL_DISCOVERY_SAMPLES);
     c->samples[c->sample_cursor]=payload;
     c->sample_cursor=(c->sample_cursor+1)%UL_DISCOVERY_SAMPLES;
     if(c->nsamples<UL_DISCOVERY_SAMPLES) ++c->nsamples;

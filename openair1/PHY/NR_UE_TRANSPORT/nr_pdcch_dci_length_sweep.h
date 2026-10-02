@@ -49,6 +49,7 @@
 #ifndef NR_PDCCH_DCI_LENGTH_SWEEP_H
 #define NR_PDCCH_DCI_LENGTH_SWEEP_H
 
+#include "nr_dci_bits.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -72,8 +73,7 @@ extern "C" {
 typedef bool (*nr_pdcch_dci_length_scorer_fn)(int dci_length, int trial_idx, uint16_t* rnti_out,
                                               uint32_t* payload_hash_out, void* user_ctx);
 
-#define NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN    64 // dci_length is capped at 63 elsewhere in this
-                                                 // project (values 0-63 fit); indexed directly by
+#define NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN (NR_DCI_MAX_PAYLOAD + 1)
                                                  // length, no offset arithmetic to get wrong.
 #define NR_PDCCH_DCI_LENGTH_SWEEP_MAX_HASHES 32 // cap on distinct-payload bookkeeping per length;
                                                  // degenerate detection only needs to distinguish
@@ -93,6 +93,11 @@ typedef struct {
   uint32_t last_feed; /* one identity vote at most per OTA occasion */
   uint32_t hashes[NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_HASHES];
 } nr_pdcch_dci_length_rnti_evidence_t;
+
+/* Cell-wide ordering hints only: never acceptance evidence. Thread-safe for scan consumers. */
+void nr_pdcch_dci_length_seen_reset(void);
+void nr_pdcch_dci_length_note_seen(int len);
+int nr_pdcch_dci_length_order(int min_len, int max_len, int *out);
 
 /** Persistent state, accumulated across many nr_pdcch_dci_length_sweep_feed() calls (one call per
  *  candidate-bearing occasion). Plain struct, no hidden allocation -- zero-initialize (static
@@ -124,6 +129,7 @@ typedef struct {
    * the per-occasion cost falls ~N-fold while the trials each length accumulates per ROUND is
    * unchanged. Set it at the call site before the first feed (the same place excluded_len is set). */
   int      stride;
+  int      order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN], order_count;
   int      resume_len, resume_trial; // budget suspension; reset with the geometry epoch
   int      rot_phase; // 0..stride-1, which interleaved subset this call tests
   /* CELL PRIOR (2026-09-17). When > 0, test ONLY this length for the first

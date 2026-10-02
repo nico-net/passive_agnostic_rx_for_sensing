@@ -842,7 +842,7 @@ static void nr_pdcch_dci01_fdra_stage(bool periodic)
                  : "resumed", ev.t1_ok, ev.t1_try, ev.link_ok);
 }
 static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp_size, int ul_tda_count,
-                                          uint16_t dci_length, uint64_t payload)
+                                          uint16_t dci_length, nr_dci_bits_t payload)
 {
   if (g_dci01_state < 0 || dci_length == 0 || ul_bwp_size == 0) {
     return;
@@ -1000,7 +1000,7 @@ static bool nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cf
 }
 
 static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
-                                          uint16_t dci_length, uint64_t payload)
+                                          uint16_t dci_length, nr_dci_bits_t payload)
 {
   if (g_dci11_state < 0 || cfg == NULL || dci_length == 0 || cfg->bwp_size == 0) {
     return;
@@ -1277,7 +1277,7 @@ static inline int dci_len_min(void)
   if (v < 0) {
     const char *e = getenv("ISAC_DCI_LEN_MIN");
     const int x = (e != NULL) ? atoi(e) : 0;
-    v = (x >= 1 && x <= 63) ? x : 30;
+    v = (x >= 1 && x <= NR_DCI_MAX_PAYLOAD) ? x : 30;
   }
   return v;
 }
@@ -1287,7 +1287,7 @@ static inline int dci_len_max(void)
   if (v < 0) {
     const char *e = getenv("ISAC_DCI_LEN_MAX");
     const int x = (e != NULL) ? atoi(e) : 0;
-    v = (x >= dci_len_min() && x <= 63) ? x : 63;
+    v = (x >= dci_len_min() && x <= NR_DCI_MAX_PAYLOAD) ? x : NR_DCI_MAX_PAYLOAD;
   }
   return v;
 }
@@ -1757,7 +1757,7 @@ static _Atomic uint64_t g_data_submits = 0; // reconstructed CFRs submitted as N
  * this stream. The offline scorer runs after the receiver has exited. */
 static __thread int discovery_evidence_frame = -1, discovery_evidence_slot = -1;
 static void discovery_evidence(const char *stage, const char *direction, int frame, int slot,
-                               int bits, uint16_t rnti, uint64_t payload, int al, int cce)
+                               int bits, uint16_t rnti, nr_dci_bits_t payload, int al, int cce)
 {
   static __thread int enabled = -1;
   if (enabled < 0) {
@@ -1765,10 +1765,19 @@ static void discovery_evidence(const char *stage, const char *direction, int fra
     enabled = e && !strcmp(e, "1");
   }
   if (!enabled) return;
+  char payload_hex[49];
+  if (bits > 128)
+    snprintf(payload_hex, sizeof(payload_hex), "%llx%016llx%016llx",
+             (unsigned long long)payload.w[2], (unsigned long long)payload.w[1], (unsigned long long)payload.w[0]);
+  else if (bits > 64)
+    snprintf(payload_hex, sizeof(payload_hex), "%llx%016llx",
+             (unsigned long long)payload.w[1], (unsigned long long)payload.w[0]);
+  else
+    snprintf(payload_hex, sizeof(payload_hex), "%016llx", (unsigned long long)payload.w[0]);
   LOG_A(PHY, "DISCOVERY_EVIDENCE {\"stage\":\"%s\",\"direction\":\"%s\","
         "\"frame\":%d,\"slot\":%d,\"bits\":%d,\"rnti\":%u,"
-        "\"payload\":\"%016llx\",\"al\":%d,\"cce\":%d}\n",
-        stage, direction, frame, slot, bits, rnti, (unsigned long long)payload, al, cce);
+        "\"payload\":\"%s\",\"al\":%d,\"cce\":%d}\n",
+        stage, direction, frame, slot, bits, rnti, payload_hex, al, cce);
 }
 
 typedef struct {
@@ -1919,7 +1928,7 @@ static void blind_dmrs_rank_candidates(const nr_pdcch_dmrs_rank_grid_t *grid,
 static void blind_discovery_replay(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc,
     const fapi_nr_dl_config_dci_dl_pdu_rel15_t *pdu, int span, int offset, int first_symbol,
     const c16_t *grid, const c16_t *fft, long source_absolute_slot, int expected_index, uint16_t expected_rnti,
-    uint16_t expected_length, uint64_t expected_payload, const c16_t *expected)
+    uint16_t expected_length, nr_dci_bits_t expected_payload, const c16_t *expected)
 {
   static int initialized;
   static FILE *file;
@@ -1945,7 +1954,7 @@ static void blind_discovery_replay(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx
   for (int i = 0; i < pdu->number_of_candidates; i++) /* AL1-union virtual CCEs are not replayable */
     if (pdu->CCE[i] + pdu->L[i] > span * pdu->coreset.duration / 6) return;
   nr_pdcch_discovery_replay_t h = {
-    .magic=NR_PDCCH_REPLAY_MAGIC, .version=2, .header_bytes=sizeof(h), .kind=control?1:2,
+    .magic=NR_PDCCH_REPLAY_MAGIC, .version=3, .header_bytes=sizeof(h), .kind=control?1:2,
     .source_slot=slot_key, .expected_payload=expected_payload,
     .frame=proc->frame_rx, .slot=proc->nr_slot_rx, .pci=fp->Nid_cell,
     .span=span, .offset=offset, .duration=pdu->coreset.duration, .first_symbol=first_symbol,
@@ -2006,7 +2015,7 @@ static int lane_batch_want_stride(void)
 }
 #define LANE_BATCH_MAX_VEC   2048           /* distinct candidates across all lanes */
 #define LANE_BATCH_MAX_ITEMS 131072          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
-#define LANE_BATCH_MAX_LEN   64
+#define LANE_BATCH_MAX_LEN   (NR_DCI_MAX_PAYLOAD + 1)
 
 typedef struct {
   int      base;        /* first item index for this lane, -1 = not in the batch */
@@ -2024,7 +2033,7 @@ static __thread uint16_t *g_lb_vidx = NULL;
 static __thread uint16_t *g_lb_len  = NULL;
 static __thread uint8_t  *g_lb_al   = NULL;
 static __thread uint32_t *g_lb_crc  = NULL;
-static __thread uint64_t *g_lb_pl   = NULL;
+static __thread nr_dci_bits_t *g_lb_pl   = NULL;
 static __thread uint8_t  *g_lb_ok   = NULL;
 static __thread void     *g_lb_pool = NULL;
 
@@ -2043,7 +2052,7 @@ static bool lane_batch_vec_ready(void)
     return true;
   }
   const size_t n = (size_t)LANE_BATCH_MAX_ITEMS;
-  const size_t need = n * (sizeof(uint16_t) * 2 + sizeof(uint8_t) * 2 + sizeof(uint32_t) + sizeof(uint64_t))
+  const size_t need = n * (sizeof(uint16_t) * 2 + sizeof(uint8_t) * 2 + sizeof(uint32_t) + sizeof(nr_dci_bits_t))
                       + 6 * 32;   /* slack so each slice can start 32-byte aligned */
   void *q = NULL;
   if (posix_memalign(&q, 32, need) != 0) {
@@ -2057,7 +2066,7 @@ static bool lane_batch_vec_ready(void)
   g_lb_len  = LB_SLICE(uint16_t, n);
   g_lb_al   = LB_SLICE(uint8_t,  n);
   g_lb_crc  = LB_SLICE(uint32_t, n);
-  g_lb_pl   = LB_SLICE(uint64_t, n);
+  g_lb_pl   = LB_SLICE(nr_dci_bits_t, n);
   g_lb_ok   = LB_SLICE(uint8_t,  n);
   #undef LB_SLICE
   g_lb_vec = (int16_t *)m;
@@ -2163,7 +2172,7 @@ static __thread uint8_t                           g_lane_needs_sweep[NR_PDCCH_LO
 static __thread nr_pdcch_lookahead_geom_t         g_lane_geom_snap[NR_PDCCH_LOOKAHEAD_MAX];
 
 /* Cached result for (lane, candidate, length); false = decode it on the CPU as before. */
-static bool lane_batch_get(const void *ctx, int cand_idx, int dci_length, uint32_t *crc, uint64_t *payload)
+static bool lane_batch_get(const void *ctx, int cand_idx, int dci_length, uint32_t *crc, nr_dci_bits_t *payload)
 {
   if (!g_lb_flushed || g_lb_ok == NULL)
     return false;
@@ -2211,7 +2220,7 @@ static bool lane_batch_get(const void *ctx, int cand_idx, int dci_length, uint32
  * fit, or any item fails -- the scorer below checks `ok` per item and decodes that one on CPU. So
  * this can only be faster, never wrong. */
 #define SWEEP_BATCH_MAX_CAND 45
-#define SWEEP_BATCH_MAX_LEN  64
+#define SWEEP_BATCH_MAX_LEN  (NR_DCI_MAX_PAYLOAD + 1)
 #define SWEEP_BATCH_VSTRIDE  (16 * 108)
 
 typedef struct {
@@ -2220,7 +2229,7 @@ typedef struct {
   uint8_t     valid;
   uint8_t     ok[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
   uint32_t    crc[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
-  uint64_t    payload[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
+  nr_dci_bits_t    payload[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
 } sweep_batch_cache_t;
 
 static __thread sweep_batch_cache_t g_sweep_cache;
@@ -2245,7 +2254,7 @@ static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int 
   static __thread uint16_t lens[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
   static __thread uint8_t  als[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
   static __thread uint32_t crcs[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
-  static __thread uint64_t pls[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread nr_dci_bits_t pls[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
   static __thread uint8_t  oks[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
   if (n_items > (int)(sizeof(vidx) / sizeof(vidx[0])))
     return false;
@@ -2303,6 +2312,13 @@ typedef struct {
   uint16_t rnti, scrambling_rnti, dmrs_id;
   const nr_pdcch_autodiscover_sweep_ctx_t *gpu_ctx;  /* sweep_gpu_prefill()'d for these cands, or NULL */
 } ul_length_ctx_t;
+/* Preserve legacy evidence identities for narrow DCI; include every bit above 64. */
+static uint32_t sweep_payload_hash(const nr_dci_bits_t *payload, int len)
+{
+  return len <= 64 ? (uint32_t)payload->w[0] ^ (uint32_t)(payload->w[0] >> 32)
+                   : nr_dci_bits_hash(payload, len);
+}
+
 static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, void *opaque)
 {
   const ul_length_ctx_t *ctx=opaque;
@@ -2314,10 +2330,10 @@ static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, 
       && ci < g_sweep_cache.n_cand && len >= g_sweep_cache.min_len && len <= g_sweep_cache.max_len
       && g_sweep_cache.ok[ci][len]) {
     const uint32_t crc=g_sweep_cache.crc[ci][len];
-    const uint64_t pl=g_sweep_cache.payload[ci][len];
-    if ((crc>>16)==0 && (uint16_t)crc==ctx->rnti && ((pl>>(len-1))&1)==0) {
+    const nr_dci_bits_t pl=g_sweep_cache.payload[ci][len];
+    if ((crc>>16)==0 && (uint16_t)crc==ctx->rnti && nr_dci_bits_field(&pl, len, 0, 1)==0) {
       *rnti=(uint16_t)crc;
-      *hash=(uint32_t)pl ^ (uint32_t)(pl>>32);
+      *hash=sweep_payload_hash(&pl, len);
       discovery_evidence("sweep_crc", "UL", discovery_evidence_frame, discovery_evidence_slot,
                           len, (uint16_t)crc, pl, ctx->cand[ci].L, ctx->cand[ci].cce);
       return true;
@@ -2343,7 +2359,7 @@ static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, 
     LOG_A(PHY, "SENSING: RNTI_SCRAMBLE_HIT direction=UL rnti=0x%04x len=%d AL=%u CCE=%u\n",
           ctx->rnti, len, c->L, c->cce);
   *rnti=out.rnti;
-  *hash=(uint32_t)out.raw_payload ^ (uint32_t)(out.raw_payload>>32);
+  *hash=sweep_payload_hash(&out.raw_payload, len);
   discovery_evidence("sweep_crc", "UL", discovery_evidence_frame, discovery_evidence_slot,
                       len, out.rnti, out.raw_payload, c->L, c->cce);
   return true;
@@ -2362,7 +2378,7 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
    * test the CPU path applies, so a cached result can never be accepted on weaker evidence. */
   {
     uint32_t bcrc = 0;
-    uint64_t bpl  = 0;
+    nr_dci_bits_t bpl  = {{0}};
     if (lane_batch_get(ctx, cand_idx, dci_length, &bcrc, &bpl)) {
       static _Atomic uint64_t s_bh = 0;
       const uint64_t bh = atomic_fetch_add_explicit(&s_bh, 1, memory_order_relaxed) + 1;
@@ -2373,9 +2389,9 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
        * (dci_length-1) set. That second one is its "format indicator=0 (UL grant, not DL)" reject.
        * A cached result must be judged on exactly the evidence a computed one is. */
       if ((bcrc >> 16) == 0 && bcrc >= ctx->rnti_min && bcrc <= ctx->rnti_max
-          && ((bpl >> (dci_length - 1)) & 1) != 0) {
+          && nr_dci_bits_field(&bpl, dci_length, 0, 1) != 0) {
         *rnti_out         = sweep_evidence_rnti(ctx, (uint16_t)bcrc, dci_length, evidence_cand);
-        *payload_hash_out = (uint32_t)bpl ^ (uint32_t)(bpl >> 32);
+        *payload_hash_out = sweep_payload_hash(&bpl, dci_length);
         discovery_evidence("sweep_crc", "DL", discovery_evidence_frame, discovery_evidence_slot,
                             dci_length, (uint16_t)bcrc, bpl, evidence_cand->L, evidence_cand->cce);
         return true;
@@ -2404,16 +2420,16 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
       && dci_length >= g_sweep_cache.min_len && dci_length <= g_sweep_cache.max_len
       && g_sweep_cache.ok[cand_idx][dci_length]) {
     const uint32_t crc = g_sweep_cache.crc[cand_idx][dci_length];
-    const uint64_t pl  = g_sweep_cache.payload[cand_idx][dci_length];
+    const nr_dci_bits_t pl  = g_sweep_cache.payload[cand_idx][dci_length];
     const bool crc_ok = (crc >> 16) == 0 && crc >= ctx->rnti_min && crc <= ctx->rnti_max;
     /* BUG (found 2026-09-20): this path claimed parity with nr_pdcch_blind_decode_raw_11() but
      * applied only the RNTI-range half of it, so it admitted format-indicator=0 candidates -- UL
      * grants -- that the CPU path rejects. Roughly a factor 2 of extra false accepts fed straight
      * into the sweep's bootstrap-hit statistics, which is exactly the noise the >1-hit threshold
      * is trying to stand above. */
-    if (crc_ok && ((pl >> (dci_length - 1)) & 1) != 0) {
+    if (crc_ok && nr_dci_bits_field(&pl, dci_length, 0, 1) != 0) {
       *rnti_out         = sweep_evidence_rnti(ctx, (uint16_t)crc, dci_length, evidence_cand);
-      *payload_hash_out = (uint32_t)pl ^ (uint32_t)(pl >> 32);
+      *payload_hash_out = sweep_payload_hash(&pl, dci_length);
       discovery_evidence("sweep_crc", "DL", discovery_evidence_frame, discovery_evidence_slot,
                           dci_length, (uint16_t)crc, pl, evidence_cand->L, evidence_cand->cce);
       return true;
@@ -2443,7 +2459,7 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
    * width previously rejected genuine CRC-recovered 47-bit grants against a
    * presumed 51-bit field list, so discovery could never reach interpretation. */
   *rnti_out=sweep_evidence_rnti(ctx, out.rnti, dci_length, evidence_cand);
-  *payload_hash_out=(uint32_t)out.payload ^ (uint32_t)(out.payload>>32);
+  *payload_hash_out=sweep_payload_hash(&out.payload, dci_length);
   discovery_evidence("sweep_crc", "DL", discovery_evidence_frame, discovery_evidence_slot,
                       dci_length, out.rnti, out.payload, evidence_cand->L, evidence_cand->cce);
 
@@ -2526,7 +2542,7 @@ void nr_pdcch_bwp_crc_result(int entry, bool crc_ok)
     LOG_A(PHY, "SENSING: BWP UNRESOLVED entry=%d: 32 TB-CRC failures, no pass -- rescoring from the DM-RS\n", entry);
   pthread_mutex_unlock(&g_pbwp_lock);
 }
-void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh)
+void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh)
 {
   pthread_mutex_lock(&g_pbwp_lock);
   if (entry > 0 && entry < g_pbwp.n && nr_pbwp_score_grant(&g_pbwp, entry, payload, prb_coh))
@@ -2558,7 +2574,7 @@ retry_scrambling:
       LOG_D(PHY, "DCI_INTERPRET format=1_0 frame=%d slot=%d cce=%d rnti=0x%04x "
                  "payload=0x%016lx bits=%u candidates=%u surviving=%u state=%s "
                  "unique=%d evidence=protocol_only scope=supplied_context\n",
-            t->frame, t->slot, t->cce, t->out.rnti, (unsigned long)t->out.payload,
+            t->frame, t->slot, t->cce, t->out.rnti, (unsigned long)t->out.payload.w[0],
             t->dci_length, report.attempted, report.surviving,
             nr_dci_interpretation_state_name(report.state), report.unique_candidate);
       for (unsigned i = 0; i < report.attempted; ++i) {
@@ -3869,7 +3885,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   c16_t pdcch_e_rx[NR_MAX_PDCCH_SIZE];
   if (cfg->autodiscover && cfg->coreset_type != 1)
     blind_discovery_replay(fp,proc,rel15,n_rb,rel15->BWPStart+cset_start+rel15->coreset.rb_offset,cfg->ss_first_symbol,
-        pdcch_llr[0][0],&rxdataF[0][cfg->ss_first_symbol*fp->ofdm_symbol_size],source_absolute_slot,-1,0,0,0,NULL);
+        pdcch_llr[0][0],&rxdataF[0][cfg->ss_first_symbol*fp->ofdm_symbol_size],source_absolute_slot,-1,0,0,(nr_dci_bits_t){{0}},NULL);
   const uint64_t btim_t_dmp = btim_on ? btim_now() : 0;
   /* Grid is built once from this occasion's FFT and reused by all geometry lanes. It has no
    * mutable cross-occasion evidence and cannot associate a stale histogram with a current RNTI. */
@@ -4395,7 +4411,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         /* A single matching decode cannot rule out a degenerate polar fixed point.
          * Require distinct UL payloads before trusting the shared engine's shortcut. */
         int supported_lengths=0;
-        for(int len=30;len<=63;++len)
+        for(int len=dci_len_min();len<=dci_len_max();++len)
           if(ulc->state.n_distinct[len]>1 && ulc->state.bootstrap_hits[len]>=3)
             ++supported_lengths;
         if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
@@ -5566,7 +5582,7 @@ constdiag_done:;
                 "tda=%u prb=%u+%u sym=%u+%u k2=%u cdm=%u ports=0x%x nscid=%u dmrsmask=0x%x fh=%u "
                 "ulsch=%u mism=%u rej=%s\n",
                 cand_task[ti].frame, cand_task[ti].slot, cand_task[ti].cce, (unsigned)cand_task[ti].L,
-                (unsigned)u->dci_length, (unsigned long long)u->raw_payload, u->crc_rnti,
+                (unsigned)u->dci_length, (unsigned long long)u->raw_payload.w[0], u->crc_rnti,
                 cand_task[ti].ok ? 1 : 0,
                 (unsigned)u->mcs, (unsigned)u->rv, (unsigned)u->ndi, (unsigned)u->harq_pid,
                 (unsigned)u->tpc, (unsigned)u->dai, (unsigned)u->antenna_ports_field,
@@ -5682,7 +5698,7 @@ constdiag_done:;
         LOG_I(PHY, "SENSING: DL raw evidence n=%lu len=%u rnti=0x%x payload=0x%lx mm=%u; "
                    "layout requires TB-CRC evidence\n",
               (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
-              (unsigned long)raw->payload, raw->mismatched_bits);
+              (unsigned long)raw->payload.w[0], raw->mismatched_bits);
       nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
       if (!g_pdsch_sweep_on) continue;
       /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
@@ -5860,6 +5876,7 @@ constdiag_done:;
     }
     stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
                        out.rnti, nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti));
+    nr_pdcch_dci_length_note_seen(cand_task[ti].dci_length);
     NR_BLIND_CTR_INC(g_accepts);
     if (al1_bank >= 0 && !cand_task[ti].ul_scan && al1_from_ladder(cand_task[ti].e_rx, pdcch_e_rx)
         && nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti))
@@ -6066,7 +6083,7 @@ constdiag_done:;
           | ((uint64_t)out.mcs << 18) | ((uint64_t)out.rv << 23) | ((uint64_t)out.ndi << 25)
           | ((uint64_t)out.harq_pid << 26) | ((uint64_t)out.tda_index << 30);
       const long mono = source_absolute_slot;
-      nr_pdcch_blind_monitor_autodiscover_observe(out.rnti, mono >= 0 ? (uint32_t)mono : abs_slot, fingerprint);
+      nr_pdcch_blind_monitor_autodiscover_observe(out.rnti, mono >= 0 ? (uint32_t)mono : abs_slot, nr_dci_bits_from_u64(fingerprint));
     }
     }
 

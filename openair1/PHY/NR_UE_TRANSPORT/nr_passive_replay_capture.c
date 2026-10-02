@@ -23,7 +23,7 @@
 #define REPLAY_MAX_BYTES (512u * 1024u * 1024u)
 enum { RP_DISABLED, RP_ARMED, RP_REQUESTED, RP_CAPTURING, RP_DRAINING, RP_WRITING, RP_DONE, RP_VOID };
 typedef struct { long source; double fo; } replay_slot_t;
-typedef struct { long source; uint64_t payload; uint16_t rnti; uint8_t length; } replay_ul_t;
+typedef struct { long source; nr_dci_bits_t payload; uint16_t rnti; uint8_t length; } replay_ul_t;
 typedef struct {
   nr_pdsch_passive_job_t job;
   uint64_t tb_hash;
@@ -183,7 +183,7 @@ static bool recordable(long source)
   /* One full preceding frame for negative UL TA; three following frames for k2. */
   return relative>=header->fp.slots_per_frame && relative<(REPLAY_FRAMES-3)*header->fp.slots_per_frame;
 }
-void nr_passive_replay_ul(long source, uint16_t rnti, unsigned length, uint64_t payload)
+void nr_passive_replay_ul(long source, uint16_t rnti, unsigned length, nr_dci_bits_t payload)
 {
   if (atomic_load(&state)==RP_DISABLED) return;
   atomic_store(&ul_seen,true);
@@ -296,7 +296,7 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   if(!matches) ++failed; /* A failure-only recording is not a replay control. */
   for (unsigned i=0;i<h->n_ul;++i)
     printf("REPLAY-RAW-UL source=%ld rnti=%04x bits=%u payload=%016lx\n",
-           h->ul[i].source,h->ul[i].rnti,h->ul[i].length,(unsigned long)h->ul[i].payload);
+           h->ul[i].source,h->ul[i].rnti,h->ul[i].length,(unsigned long)h->ul[i].payload.w[0]);
   if (h->n_ul<8) printf("UL-SEARCH UNRESOLVED: fewer than eight raw observations; no UL convergence claim\n");
   printf("REPLAY %s: identical DL controls=%u failed=%u raw UL=%u; no radio opened\n",
          failed?"VOID":"PASS",matches,failed,h->n_ul);

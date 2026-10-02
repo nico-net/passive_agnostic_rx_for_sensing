@@ -207,16 +207,15 @@ int nr_dci11_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t
 }
 
 /* MSB-first field read, mirroring nr_pdcch_blind_monitor.c's read_field(). */
-static uint32_t peek(uint64_t payload, uint16_t total, uint16_t off, uint8_t nbits)
+static uint32_t peek(nr_dci_bits_t payload, uint16_t total, uint16_t off, uint8_t nbits)
 {
   if (nbits == 0 || off + nbits > total) {
     return 0;
   }
-  const int shift = total - off - nbits;
-  return (uint32_t)((payload >> shift) & ((1ULL << nbits) - 1ULL));
+  return nr_dci_bits_field(&payload, total, off, nbits);
 }
 
-bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, uint16_t bwp_size)
+bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, uint16_t bwp_size)
 {
   if (off == NULL || bwp_size == 0) {
     return false;
@@ -581,7 +580,7 @@ void nr_dci11_resolver_set_tda_count(nr_dci11_resolver_t *r, uint8_t tda_count)
                               ? tda_count : 0;
 }
 
-static void hist_observe(nr_dci11_resolver_t *r, int i, uint64_t payload)
+static void hist_observe(nr_dci11_resolver_t *r, int i, nr_dci_bits_t payload)
 {
   const nr_dci11_offsets_t *o = &r->off[i];
   r->hist[i][peek(payload, o->total, o->mcs, DCI11_MCS_BITS) & 31]++;
@@ -682,7 +681,7 @@ int nr_dci11_thompson_pick(const uint32_t *ok, const uint32_t *trials, const dou
   return arg;
 }
 
-int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload)
+int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
 {
   if (r == NULL || r->n_hyp <= 0) {
     return 0;

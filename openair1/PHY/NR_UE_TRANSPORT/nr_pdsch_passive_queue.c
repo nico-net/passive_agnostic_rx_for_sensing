@@ -236,7 +236,7 @@ static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
 #define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 8
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
-void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
+void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
 #include "nr_dmrs_id_estimate.h"
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */

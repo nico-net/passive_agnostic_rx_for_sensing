@@ -4,8 +4,7 @@
  * width, then read (payload >> pos): bit zero is the last (LSB) payload bit.
  * The polar decoder extracts information bits into uint64_t words with bit
  * index i at word i / 64, bit i % 64, then removes the low CRC bits. Its
- * current tail writes only out[0] and asserts A <= 64; the wider decoder
- * migration is R2. This type preserves that out[0] convention and extends it
+ * tail writes ceil(A/64) words. This type preserves the out[0] convention and extends it
  * to out[1] and out[2], with the first transmitted payload bit at index A-1.
  */
 #ifndef NR_DCI_BITS_H

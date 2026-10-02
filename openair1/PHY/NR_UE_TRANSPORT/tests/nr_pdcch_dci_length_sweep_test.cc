@@ -500,3 +500,73 @@ TEST(DciLengthStore, LruEvictionClearsRatherThanAliasesEvidence)
                 nr_pdcch_dci_length_store_get(&store, 1, nullptr), 1, 0x2345)->state.trials[47],
             1u);
 }
+
+TEST(DciLengthSweep, LocksLength100) {
+  nr_pdcch_dci_length_sweep_state_t state{};
+  auto scorer = [](int len, int trial, uint16_t *rnti, uint32_t *hash, void *ctx) -> bool {
+    if (len != 100) return false;
+    *rnti = 0x4b31;
+    *hash = ++*static_cast<unsigned *>(ctx);
+    return true;
+  };
+  unsigned serial = 0;
+  int found = -1;
+  for (int i = 0; i < 8; ++i)
+    found = nr_pdcch_dci_length_sweep_feed(&state, scorer, &serial, 2, 30, 140, 0x4b31);
+  EXPECT_EQ(found, 100);
+}
+
+TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_note_seen(47);
+  int order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  const int n = nr_pdcch_dci_length_order(30, 140, order);
+  EXPECT_EQ(n, 111);
+  const int expected[] = {47, 46, 48, 45, 49, 44, 50, 43, 51, 42};
+  for (int i = 0; i < 10; ++i) EXPECT_EQ(order[i], expected[i]);
+  bool visited[141] = {};
+  for (int i = 0; i < n; ++i) {
+    ASSERT_GE(order[i], 30); ASSERT_LE(order[i], 140);
+    EXPECT_FALSE(visited[order[i]]);
+    visited[order[i]] = true;
+  }
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_note_seen(47);
+  nr_pdcch_dci_length_sweep_state_t state{};
+  struct Visits { int lengths[141]; int count = 0; } visits;
+  auto scorer = [](int len, int, uint16_t *, uint32_t *, void *ctx) -> bool {
+    auto *v = static_cast<Visits *>(ctx);
+    v->lengths[v->count++] = len;
+    return false;
+  };
+  // Interrupt in the middle of the outward walk, then discover a distant length.
+  EXPECT_EQ(nr_pdcch_dci_length_sweep_feed_budget(
+      &state, scorer, &visits, 1, 30, 140, 0, 0, 10), -1);
+  EXPECT_EQ(visits.count, 10);
+  const int expected[] = {47, 46, 48, 45, 49, 44, 50, 43, 51, 42};
+  for (int i = 0; i < 10; ++i) EXPECT_EQ(visits.lengths[i], expected[i]);
+  nr_pdcch_dci_length_note_seen(100);
+  EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(
+      &state, scorer, &visits, 1, 30, 140, 0), -1);
+  EXPECT_EQ(visits.count, 111);
+  EXPECT_EQ(visits.lengths[10], 52);
+  bool seen[141] = {};
+  for (int i = 0; i < visits.count; ++i) {
+    EXPECT_FALSE(seen[visits.lengths[i]]);
+    seen[visits.lengths[i]] = true;
+  }
+  EXPECT_EQ(state.occasions_fed, 1);
+  // All RNTI/geometry contexts share the next round's hints.
+  nr_pdcch_dci_length_sweep_state_t other{};
+  visits.count = 0;
+  nr_pdcch_dci_length_sweep_feed_budget(&other, scorer, &visits, 1, 30, 140, 0, 0, 4);
+  EXPECT_EQ(visits.lengths[0], 47);
+  EXPECT_EQ(visits.lengths[1], 100);
+  EXPECT_EQ(visits.lengths[2], 46);
+  EXPECT_EQ(visits.lengths[3], 48);
+  nr_pdcch_dci_length_seen_reset();
+}

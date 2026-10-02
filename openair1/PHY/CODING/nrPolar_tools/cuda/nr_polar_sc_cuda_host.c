@@ -62,6 +62,8 @@ static void emit(npc_dev_params_t *p, const uint8_t *info, int level, int fli)
 
 int npc_register(uint16_t dci_length, uint8_t al)
 {
+  if (!dci_length || dci_length > NR_DCI_MAX_PAYLOAD || dci_length + 24 > al * 108
+      || (al != 1 && al != 2 && al != 4 && al != 8 && al != 16)) return -1;
   for (int i = 0; i < g_np; i++)
     if (g_hp[i].used && g_hp[i].dci_length == dci_length && g_hp[i].al == al) return i;
   if (g_np >= NPC_MAX_PARAMS) return -1;
@@ -94,7 +96,7 @@ int npc_register(uint16_t dci_length, uint8_t al)
 }
 
 /* The tail of polar_decoder_int16(), same operations in the same order (ones_flag = 1, n_pc = 0). */
-static void finish(const npc_host_params_t *h, const uint8_t *u, uint32_t *crc_out, uint64_t *payload)
+static void finish(const npc_host_params_t *h, const uint8_t *u, uint32_t *crc_out, nr_dci_bits_t *payload)
 {
   uint64_t B[4] = {0};
   int k = 0;
@@ -109,6 +111,7 @@ static void finish(const npc_host_params_t *h, const uint8_t *u, uint32_t *crc_o
   const uint64_t rxcrc = B[0] & ((1 << crclen) - 1);
   const uint8_t offset = 3;
   uint32_t crc = 0;
+  *payload = (nr_dci_bits_t){{0}};
   uint64_t Ar = 0;
   if (len <= 32) {
     Ar = (uint32_t)(B[0] >> crclen);
@@ -117,20 +120,31 @@ static void finish(const npc_host_params_t *h, const uint8_t *u, uint32_t *crc_o
     A32_flip[3] = ((const uint8_t *)&Aprime)[3]; A32_flip[4] = ((const uint8_t *)&Aprime)[2];
     A32_flip[5] = ((const uint8_t *)&Aprime)[1]; A32_flip[6] = ((const uint8_t *)&Aprime)[0];
     crc = (crc24c(A32_flip, 8 * offset + len) >> 8) & 0xffffff;
-  } else {
+  } else if (len <= 64) {
     Ar = (B[0] >> crclen) | (B[1] << (64 - crclen));
     uint8_t A64_flip[8 + 3] = {0xff, 0xff, 0xff};
     const uint64_t Aprime = (uint64_t)(Ar << (64 - len));
     for (int i = 0; i < 8; i++) A64_flip[3 + i] = ((const uint8_t *)&Aprime)[7 - i];
     crc = (crc24c(A64_flip, 8 * offset + len) >> 8) & 0xffffff;
   }
-  *payload = Ar;
+  if (len > 64) {
+    uint8_t packed[3 + 18] = {0xff, 0xff, 0xff};
+    for (int w = 0; w < (len + 63) / 64; ++w)
+      payload->w[w] = (B[w] >> crclen) | (B[w + 1] << (64 - crclen));
+    for (int i = 0; i < len; ++i) {
+      int bit = len - 1 - i;
+      packed[3 + i / 8] |= ((payload->w[bit / 64] >> (bit % 64)) & 1) << (7 - i % 8);
+    }
+    crc = (crc24c(packed, 24 + len) >> 8) & 0xffffff;
+  } else {
+    payload->w[0] = Ar;
+  }
   *crc_out = crc ^ (uint32_t)rxcrc;
 }
 
 static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
 
-int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, uint64_t *payload)
+int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload)
 {
   static int cap = 0;
   static int *h_pid = NULL; static int16_t *h_llr = NULL; static uint8_t *h_u = NULL;
@@ -168,7 +182,7 @@ int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, uint64_t *pa
  * decodes each candidate at ~34 lengths, so this removes ~97 % of the copying. Each vector is
  * staged at the widest E any of its items needs (items sharing a vector share its AL, so all equal). */
 int npc_decode_batch_vec(const int16_t *vec, int vstride, int n_vec, const int *vidx, const int *pid, int n,
-                         uint32_t *crc, uint64_t *payload)
+                         uint32_t *crc, nr_dci_bits_t *payload)
 {
   static int cap = 0, vcap = 0;
   static int16_t *h_llr = NULL; static uint8_t *h_u = NULL;
@@ -223,8 +237,8 @@ static int16_t r_subs(int16_t a, int16_t b) { const int r = (int)a - b; return r
 static int16_t r_adds(int16_t a, int16_t b, int sz) { const int r = (int)a + b; const int lo = (sz & 7) ? -32767 : -32768; return r > 32767 ? 32767 : (r < lo ? (int16_t)lo : (int16_t)r); }
 static int16_t r_f(int16_t a, int16_t b, int sz) { const int16_t aa = r_abs(a), ab = r_abs(b); const int16_t m = aa < ab ? aa : ab; if (sz & 3) return ((a < 0) == (b < 0)) ? m : r_neg(m); return r_sign(m, r_sign(a, b)); }
 
-int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, uint64_t *payload);
-int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, uint64_t *payload)
+int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload);
+int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload)
 {
   static int16_t alpha[10 * NPC_MAX_N];
   g_ref_alpha = alpha;

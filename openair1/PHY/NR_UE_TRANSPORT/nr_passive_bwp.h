@@ -29,6 +29,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_dci_bits.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,7 +101,7 @@ bool nr_pbwp_riv_decode(uint32_t riv, uint16_t n, uint16_t *start, uint16_t *len
 /** Length of a DCI 1_1 on a BWP of `n` PRBs with a `d`-bit indicator, same layout otherwise. */
 uint16_t nr_pbwp_len_for(const nr_pbwp_t *t, uint16_t n, uint8_t d);
 /** The FDRA field of a `len`-bit payload with a `d`-bit indicator and an `rb`-bit FDRA. */
-uint32_t nr_pbwp_riv_field(uint64_t payload, uint16_t len, uint8_t d, uint8_t rb);
+uint32_t nr_pbwp_riv_field(nr_dci_bits_t payload, uint16_t len, uint8_t d, uint8_t rb);
 
 /** Entry 0 = the BWP the receiver was configured/derived with. */
 void nr_pbwp_init(nr_pbwp_t *t, uint16_t carrier_rbs, uint16_t base_start, uint16_t base_size,
@@ -130,7 +131,7 @@ int nr_pbwp_probe_accept(nr_pbwp_t *t, uint16_t rnti, uint16_t len);
 
 /** Score one grant of an unresolved entry from its raw payload. `prb_coh[p]` = DM-RS coherence of
  *  CRB p in [0,1] over the whole carrier. Returns true when this grant resolved the entry. */
-bool nr_pbwp_score_grant(nr_pbwp_t *t, int idx, uint64_t payload, const float *prb_coh);
+bool nr_pbwp_score_grant(nr_pbwp_t *t, int idx, nr_dci_bits_t payload, const float *prb_coh);
 
 /** TB-CRC outcome of a grant decoded against a resolved entry. 32 tries with 0 passes un-resolves
  *  it (the DM-RS vote converged on the wrong hypothesis) and scoring restarts. */

@@ -59,6 +59,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_dci_bits.h"
 #include "nr_pdsch_config_sweep.h"
 
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
@@ -115,7 +116,7 @@ typedef struct {
   uint8_t  layout_probe;   ///< 1 = DCI-layout trial: decode code block 0 only, its CRC is the arm outcome
   /// Passive BWP entry the grant was decoded against (>0): its TB CRC is fed back to the tracker.
   int8_t   bwp_entry;
-  uint64_t bwp_probe_payload;
+  nr_dci_bits_t bwp_probe_payload;
   /// True when dlsch_pdu.dlDataScramblingId came from this RNTI's data-ID sweep (Task 13) rather
   /// than the PCI fallback -- gates whether this job's CRC outcome should be fed back into that
   /// sweep (nr_pdsch_passive_data_id_feed), so an attempt that used the PCI never perturbs a sweep

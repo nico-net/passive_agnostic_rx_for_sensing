@@ -139,7 +139,7 @@ int nr_pdcch_ul_field_sweep_generate(const nr_pdcch_blind_ul_opts_t *fixed,
                                     uint16_t len, nr_hyp_t *out, int cap)
 {
   if (!fixed || !out || cap<=0 || fixed->bwp_size<1 || fixed->bwp_size>275 ||
-      fixed->tda_count<0 || fixed->tda_count>16 || len<1 || len>63)
+      fixed->tda_count<0 || fixed->tda_count>16 || len<1 || len>NR_DCI_MAX_PAYLOAD)
     return NR_HYP_SWEEP_INVALID;
   generation_t g = {.fixed=fixed,.target=len,.capacity=cap<NR_HYP_SWEEP_MAX_RAW?cap:NR_HYP_SWEEP_MAX_RAW,.out=out};
   for (int i=15;i>=0;--i) {
