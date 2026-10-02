@@ -133,6 +133,8 @@ void nr_passive_acq_note_sib1_tdd_ref_mu(int mu);
  * False (nothing filled) unless a valid SIB1 pattern AND its reference numerology are known and equal `mu` (the
  * receiver's numerology of dci_abs_slot): an unknown pattern (NSA, a cell without SIB1) never excludes. */
 bool nr_passive_acq_tdd_pdsch_last_symbols(uint32_t dci_abs_slot, int mu, int n, int8_t *last);
+/* TDD period in slots (pattern 1 + pattern 2) when a valid SIB1 pattern at reference numerology `mu` is known, else 0. */
+uint32_t nr_passive_acq_tdd_period_slots(int mu);
 /* Hard invalidation: the receive stream itself was lost (RXDISCONT), so the frame-to-sample
  * mapping -- and therefore every hypothesis being scored against it -- is invalid NOW. Drops
  * straight to NR_ACQ_LOST with NO hysteresis, unlike nr_passive_acq_update()'s evidence path:

@@ -592,8 +592,11 @@ int nr_pdsch_passive_bc12_census(const nr_pdsch_sweep_ticket_t *ticket, const nr
   nr_td_census_count_deftab(ticket->dci_format, d);
   static const char *const sn[] = {"none", "match", "mismatch"};
   static const char *const dn[] = {"na", "match", "mismatch"};
-  return snprintf(buf, n, " k0=%u map=%c dci=%s sib1_row=%s deftab=%s", (unsigned)winner->k0, winner->mapping_type ? 'B' : 'A',
-                  ticket->dci_format == 10 ? "1_0" : ticket->dci_format == 11 ? "1_1" : "?", sn[s], dn[d]);
+  uint32_t er = 0, et = 0, ep = 0;
+  nr_pdsch_config_sweep_excl_census(ticket->configuration, ticket->rnti, ticket->tda_index, &er, &et, &ep);
+  return snprintf(buf, n, " k0=%u map=%c dci=%s sib1_row=%s deftab=%s excl_restarts=%u excl_truncs=%u dci_phases=%u",
+                  (unsigned)winner->k0, winner->mapping_type ? 'B' : 'A',
+                  ticket->dci_format == 10 ? "1_0" : ticket->dci_format == 11 ? "1_1" : "?", sn[s], dn[d], er, et, ep);
 }
 void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0)
 {
@@ -734,6 +737,12 @@ void nr_pdsch_passive_bc9_confirm(const nr_pdsch_sweep_ticket_t *ticket, uint16_
   if (!crc_ok || ticket == NULL || ticket->generation == 0 || !nr_dci_hist_enabled())
     return;
   bc9d_arg_t a = {.mu = mu};
+  { /* TD_EXCL census: the phase of this confirmed DCI, recorded BEFORE its exclusions so a restart it causes is never ahead of it */
+    uint32_t period = nr_passive_acq_tdd_period_slots(mu);
+    if (period == 0)
+      period = 10u << mu; /* slots per frame */
+    nr_pdsch_config_sweep_note_dci_phase(ticket->configuration, rnti, (uint16_t)(dci_abs_slot % period));
+  }
   const nr_dci_excl_ops_t ops = {bc9d_tdd_last, bc9d_exclude, bc9d_constrained, bc9d_row_k0, &a};
   nr_dci_confirm_out_t o;
   nr_dci_hist_on_confirm(nr_dci_hist_global(), rnti, dci_abs_slot, ticket->configuration, ticket->tda_index, &ops, &o);
@@ -1358,7 +1367,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (credit_ok)
         nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
-        char bc12[96];
+        char bc12[192];
         nr_pdsch_passive_bc12_census(&job.sweep_ticket, &winner, bc12, sizeof(bc12));
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,

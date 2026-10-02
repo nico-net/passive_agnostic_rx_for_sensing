@@ -1112,6 +1112,69 @@ TEST_F(PdschConfigSweepK42, WhollyExcludedK0LayerOnRepeatedProbesDoesNotWipe) {
   nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
   EXPECT_EQ(trials(), 21u);
 }
+/* TD_EXCL census (OTA diagnostic, no behaviour change): wipe-causing exclusions are restarts, tail truncations are counted apart. */
+static void excl_census(uint32_t *r, uint32_t *t, uint32_t *p) {
+  constexpr uint64_t kCfg = 0x4242;
+  ASSERT_TRUE(nr_pdsch_config_sweep_excl_census(kCfg, 0x4601, 0, r, t, p));
+}
+TEST_F(PdschConfigSweepK42, ExclCensusCountsWipeAsRestartAndPhasesDistinct) {
+  sel();
+  nr_pdsch_config_sweep_note_dci_phase(kCfg, 0x4601, 3);
+  nr_pdsch_config_sweep_note_dci_phase(kCfg, 0x4601, 3); // same phase again
+  uint64_t r0, t0, a0;
+  nr_pdsch_config_sweep_excl_restart_stats(&r0, &t0, &a0);
+  nr_td_excl_t e;
+  nr_td_excl_none(&e);
+  e.last[0] = 10; // k0 = 0 entries that end on 13 go, from the middle of the catalogue: wipe + reindex
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(kCfg, 0x4601, 0, &e), 0);
+  uint32_t r = 9, t = 9, p = 9;
+  excl_census(&r, &t, &p);
+  EXPECT_EQ(r, 1u);
+  EXPECT_EQ(t, 0u);
+  EXPECT_EQ(p, 1u);
+  nr_pdsch_config_sweep_note_dci_phase(kCfg, 0x4601, 4);
+  excl_census(&r, &t, &p);
+  EXPECT_EQ(p, 2u);
+  uint64_t r1, t1, a1;
+  nr_pdsch_config_sweep_excl_restart_stats(&r1, &t1, &a1);
+  EXPECT_EQ(r1 - r0, 1u);
+  EXPECT_EQ(a1 - a0, 0u); // restarts 1 <= phases 1: sound
+}
+TEST_F(PdschConfigSweepK42, ExclCensusCountsTailTruncationSeparately) {
+  sel();
+  nr_td_excl_t e;
+  nr_td_excl_none(&e);
+  e.last[3] = 11;
+  ASSERT_GE(nr_pdsch_config_sweep_exclude_key(kCfg, 0x4601, 0, &e), 0);
+  fail(20);
+  auto t = sel();
+  ASSERT_GT(nr_pdsch_config_sweep_add_k0(&t, 3), 0); // appended k0 = 3 layer, partly excluded: truncation, no wipe
+  uint32_t r = 9, tr = 9, p = 9;
+  excl_census(&r, &tr, &p);
+  EXPECT_EQ(r, 0u);
+  EXPECT_EQ(tr, 1u);
+  EXPECT_EQ(p, 0u);
+}
+TEST_F(PdschConfigSweepK42, ExclRestartAlarmFiresOnceWhenRestartsExceedPhases) {
+  sel();
+  nr_pdsch_config_sweep_note_dci_phase(kCfg, 0x4601, 0);
+  uint64_t r0, t0, a0;
+  nr_pdsch_config_sweep_excl_restart_stats(&r0, &t0, &a0);
+  nr_td_excl_t e;
+  nr_td_excl_none(&e);
+  e.last[0] = 12; // removes the ends-on-13 entries
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(kCfg, 0x4601, 0, &e), 0); // restart 1, phases 1
+  e.last[0] = 8; // removes the ends-on-11 entries
+  nr_pdsch_config_sweep_exclude_key(kCfg, 0x4601, 0, &e); // restart 2 without a new phase: unsound
+  uint64_t r1, t1, a1;
+  nr_pdsch_config_sweep_excl_restart_stats(&r1, &t1, &a1);
+  EXPECT_EQ(r1 - r0, 2u);
+  EXPECT_EQ(a1 - a0, 1u);
+  e.last[0] = 6;
+  nr_pdsch_config_sweep_exclude_key(kCfg, 0x4601, 0, &e);
+  nr_pdsch_config_sweep_excl_restart_stats(&r1, &t1, &a1);
+  EXPECT_EQ(a1 - a0, 1u) << "the alarm repeats for the same context";
+}
 /* BC7b M1: once the observe path's type-B layer is truncated in full, it is not re-appended until the observed sets change. */
 TEST_F(PdschConfigSweepK42, TruncatedTypeBLayerIsLatchedUntilTheObservedSetsChange) {
   legal = ab_legal;
