@@ -120,6 +120,7 @@ typedef struct {
    * size): its CRC passes are real but say nothing about the 1_1/0_1 size the sweep is after. The
    * SA rfsim cell locked 44 = its 1_0 size on 58 format-1_0 accepts (2026-09-16). 0 = none. */
   int      excluded_len;
+  int      secondary_excluded_len; /* optional second format length during locked-length scouting */
   /* ROTATION. <=1 (the zero-initialised default) tests every length on every call, which is what
    * this sweep did unconditionally until 2026-09-17 -- and what made it the receiver's dominant
    * cost: 34 lengths x ~6 candidates x ~8us of Polar+CRC is ~1.75ms on EVERY occasion, against a
@@ -149,6 +150,7 @@ typedef struct {
    * the SAME LLR slice. Measure it rather than assume it. */
   uint64_t decodes;
   uint32_t feed_serial; /* distinct OTA occasions; resumed work never manufactures recurrence */
+  int relock_old_len; /* SUSPECT only: old length, then seen lengths, then full range */
 } nr_pdcch_dci_length_sweep_state_t;
 /* Rounds a seeded length gets before the full sweep resumes. The sweep's own significance test
  * needs accumulated trials, and one occasion carries only ~6 candidates; 8 rounds is ~50 candidates,
@@ -159,13 +161,27 @@ typedef struct {
 /* A caller-serialized bank. Interleaved UEs never reset one another; geometry
  * epoch changes invalidate all entries. Eviction discards evidence, never reuses it. */
 #define NR_PDCCH_LENGTH_CONTEXTS 16
+typedef enum { NR_LEN_SEARCHING = 0, NR_LEN_LOCKED = 1, NR_LEN_SUSPECT = 2 } nr_len_state_t;
+uint32_t nr_pdcch_dci_length_n_suspect_from_env(void);
 typedef struct {
   nr_pdcch_dci_length_sweep_state_t state;
   uint16_t rnti;
   int found;
+  uint8_t len_state;
+  uint32_t miss_occasions;
+  uint32_t epoch_learned;
+  uint32_t last_accept_slot, last_note_slot;
+  bool scout_initialized;
   bool exhausted;
   uint64_t touched;
 } nr_pdcch_dci_length_context_t;
+/* Caller serializes with its geometry bank lock. A zero n_suspect uses the default 200. */
+void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
+    bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect);
+/* First lock returns 0; re-lock returns the previous length (including same-length confirmation). */
+int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int length);
+int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t *c,
+    const int *cell_seen, int n_seen, int *out, int max);
 typedef struct {
   nr_pdcch_dci_length_context_t ue[NR_PDCCH_LENGTH_CONTEXTS];
   uint64_t epoch, clock;

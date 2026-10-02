@@ -1125,6 +1125,41 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
 static nr_pdcch_dci_length_store_t g_dl_length_store;
 static nr_pdcch_dci_length_store_t g_ul_length_store;
 static pthread_mutex_t g_dl_length_lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_dci11_pin_t g_reconf_dci11_pin[65536];
+static uint32_t g_reconf_dci11_pin_cursor[65536];
+
+static bool reconf_lengths_enabled(void)
+{
+  static _Atomic int enabled = -1;
+  int v = atomic_load_explicit(&enabled, memory_order_relaxed);
+  if (v < 0) {
+    const char *e = getenv("ISAC_RECONF");
+    v = e && atoi(e) == 1;
+    atomic_store_explicit(&enabled, v, memory_order_relaxed);
+  }
+  return v == 1;
+}
+
+static uint32_t reconf_n_suspect(void)
+{
+  static _Atomic uint32_t threshold = 0;
+  uint32_t v = atomic_load_explicit(&threshold, memory_order_relaxed);
+  if (!v) {
+    v = nr_pdcch_dci_length_n_suspect_from_env();
+    atomic_store_explicit(&threshold, v, memory_order_relaxed);
+  }
+  return v;
+}
+
+static void reconf_length_reopened(uint16_t rnti, int old_len, int new_len)
+{
+  LOG_A(PHY, "SENSING: DCI length RELOCK rnti=0x%04x old=%d new=%d\n", rnti, old_len, new_len);
+  nr_pdsch_config_sweep_reset_all();
+  nr_dci11_pin_t *pin = &g_reconf_dci11_pin[rnti];
+  if (nr_dci11_pin_is_valid(pin))
+    (void)nr_dci11_pin_select(pin, pin->cfg + 1, NULL, 0, -1, -1,
+                              false, 0, 0, DCI11_PIN_BLOCK_OCCASIONS, DCI11_PIN_GIVEUP_TRIALS);
+}
 
 static uint64_t length_coreset_key(const nr_pdcch_blind_monitor_cfg_t *cfg)
 {
@@ -4083,7 +4118,20 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
 
     uint16_t bootstrap_rnti = 0;
     nr_pdcch_dci_length_context_t *dlc = NULL;
+    bool dl_scout = false;
     if (n_known_dl > 0) {
+      if (reconf_lengths_enabled() && rel15->number_of_candidates > 0)
+        for (int k = 0; k < n_known_dl; ++k) {
+          nr_pdcch_dci_length_context_t *c =
+              nr_pdcch_dci_length_context(dl_bank, dl_geom, dl_known[k]);
+          if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
+            if (c->last_note_slot != 0)
+              nr_pdcch_dci_length_context_note_occasion(c,
+                  c->last_accept_slot == c->last_note_slot,
+                  nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1), reconf_n_suspect());
+            c->last_note_slot = abs_slot;
+          }
+        }
       uint64_t pick = (uint64_t)abs_slot + dl_geom + UINT64_C(0x9e3779b97f4a7c15);
       pick = (pick ^ (pick >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
       pick = (pick ^ (pick >> 27)) * UINT64_C(0x94d049bb133111eb);
@@ -4093,10 +4141,23 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       for (int k = 0; k < n_known_dl; ++k) {
         const uint16_t r = dl_known[(pick + (uint64_t)k) % (uint64_t)n_known_dl];
         nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(dl_bank, dl_geom, r);
-        if (!c->found && !c->exhausted) {
+        if ((!c->found || (reconf_lengths_enabled() && c->len_state == NR_LEN_SUSPECT)) && !c->exhausted) {
           bootstrap_rnti = r;
           dlc = c;
           break;
+        }
+      }
+      if (!dlc && reconf_lengths_enabled() && abs_slot % 20 == 0) {
+        const uint16_t r = dl_known[pick % (uint64_t)n_known_dl];
+        nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(dl_bank, dl_geom, r);
+        if (c && c->len_state == NR_LEN_LOCKED && c->miss_occasions >= reconf_n_suspect()) {
+          bootstrap_rnti = r;
+          dlc = c;
+          dl_scout = true;
+          if (!c->scout_initialized) {
+            nr_pdcch_dci_length_sweep_reset(&c->state);
+            c->scout_initialized = true;
+          }
         }
       }
     }
@@ -4116,6 +4177,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
       }
       if (disc_n_cand > 0) {
+        if (dl_scout) disc_n_cand = 1;
         nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
             .cand = disc_cand,
             .n_cand = disc_n_cand,
@@ -4136,7 +4198,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         };
         sweep_ctx.n_known = (uint8_t)n_known_dl;
         memcpy(sweep_ctx.known_rnti, dl_known, (size_t)n_known_dl * sizeof(dl_known[0]));
-        dl_state->excluded_len = dci10_length;
+        dl_state->excluded_len = dl_scout ? dlc->found : dci10_length;
+        dl_state->secondary_excluded_len = dl_scout ? dci10_length : 0;
         dl_state->stride = dci_sweep_stride();
         if (dlc && dl_state->preferred_len == 0 && cfg->dci_length_override >= dci_len_min()
             && cfg->dci_length_override <= dci_len_max())
@@ -4154,6 +4217,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                 dl_state, nr_pdcch_autodiscover_length_scorer, &sweep_ctx, disc_n_cand,
                 dci_len_min(), dci_len_max(), bootstrap_rnti, sweep_deadline, 0);
         uint16_t locked_rnti = bootstrap_rnti;
+        if (found_len > 0 && dl_scout && dl_state->bootstrap_hits[found_len] < 2
+            && nr_pdcch_dci_length_sweep_winner_rnti(dl_state, found_len) != bootstrap_rnti)
+          found_len = -1;
         if (found_len > 0 && dl_anonymous) {
           locked_rnti = nr_pdcch_dci_length_sweep_winner_rnti(dl_state, found_len);
           if (!locked_rnti)
@@ -4162,9 +4228,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         discovery_scope.after_feed = btim_on ? btim_now() : 0;
         discovery_scope.trials = dl_state->decodes - trace_decodes;
         discovery_scope.phase = 2;
-        if (found_len > 0) {
+        if (found_len > 0 && dl_scout) {
+          nr_pdcch_dci_length_context_note_occasion(dlc, false, true, reconf_n_suspect());
+        } else if (found_len > 0) {
           if (dlc) {
-            dlc->found = found_len;
+            const int old_len = reconf_lengths_enabled()
+                ? nr_pdcch_dci_length_context_lock(dlc, found_len) : 0;
+            if (!reconf_lengths_enabled()) dlc->found = found_len;
+            if (old_len > 0) reconf_length_reopened(locked_rnti, old_len, found_len);
             nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
           } else {
             dl_bank->anonymous_found = found_len;
@@ -4173,8 +4244,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                 locked_rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
             nr_pdcch_dci_length_context_t *promoted =
                 nr_pdcch_dci_length_context(dl_bank, dl_geom, locked_rnti);
-            if (promoted)
-              promoted->found = found_len;
+            if (promoted) {
+              if (reconf_lengths_enabled()) nr_pdcch_dci_length_context_lock(promoted, found_len);
+              else promoted->found = found_len;
+            }
           }
           LOG_A(PHY, "SENSING: DCI 1_1 length locked coreset=%llu rnti=0x%x len=%d "
                      "occasions=%d decodes=%llu evidence=distinct_ota\n",
@@ -4185,12 +4258,17 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             g_length_swept = true;
             g_length_found = true;
           }
-        } else if (dl_state->occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
-          if (dlc)
+        } else if (!dl_scout && dl_state->occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+          const bool was_suspect = dlc && reconf_lengths_enabled() && dlc->len_state == NR_LEN_SUSPECT;
+          if (was_suspect) {
+            dlc->found = 0;
+            dlc->len_state = NR_LEN_SEARCHING;
+            nr_pdcch_dci_length_sweep_reset(&dlc->state);
+          } else if (dlc)
             dlc->exhausted = true;
           else if (dl_bank)
             dl_bank->anonymous_exhausted = true;
-          if (cfg->autodiscover) {
+          if (cfg->autodiscover && !was_suspect) {
             const int occasions = dl_state->occasions_fed;
             nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
             dl_discovery_invalidate_locked();
@@ -4208,7 +4286,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
     for (int i = 0; i < n_known_dl && n_dl_ready < NR_PDCCH_BLIND_MAX_UE; ++i) {
       nr_pdcch_dci_length_context_t *c =
           nr_pdcch_dci_length_context(dl_bank, dl_geom, dl_known[i]);
-      if (c && c->found > 0) {
+      if (c && c->found > 0 && (!reconf_lengths_enabled() || c->len_state != NR_LEN_SUSPECT)) {
         dl_ready_rnti[n_dl_ready] = dl_known[i];
         dl_ready_len[n_dl_ready] = (uint16_t)c->found;
         ++n_dl_ready;
@@ -4309,6 +4387,17 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   nr_pdcch_dci_length_context_t *ulc = NULL;
   if(ul_sweep_enabled && ul_ss_possible && n_known_ul > 0
       && (!cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
+    if (reconf_lengths_enabled() && rel15->number_of_candidates > 0)
+      for (int k = 0; k < n_known_ul; ++k) {
+        nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(ul_bank, geom, known_ul[k]);
+        if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
+          if (c->last_note_slot != 0)
+            nr_pdcch_dci_length_context_note_occasion(c,
+                c->last_accept_slot == c->last_note_slot,
+                nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1), reconf_n_suspect());
+          c->last_note_slot = abs_slot;
+        }
+      }
     /* Stateless avalanche mixing breaks grant-period/UE-count phase locking while remaining
      * deterministic and independent of any deployment timing. */
     uint64_t pick = (uint64_t)abs_slot + UINT64_C(0x9e3779b97f4a7c15);
@@ -4325,14 +4414,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       if (!dl_resolved(r))
         continue;
       const nr_pdcch_dci_length_context_t *cx = nr_pdcch_dci_length_context(ul_bank, geom, r);
-      if (!cx->found && !cx->exhausted) {
+      if ((!cx->found || (reconf_lengths_enabled() && cx->len_state == NR_LEN_SUSPECT)) && !cx->exhausted) {
         boot_rnti = r;
         sweep_target = true;
         break;
       }
     }
     ulc = nr_pdcch_dci_length_context(ul_bank, geom, boot_rnti);
-    if(sweep_target && !ulc->found && !ulc->exhausted) {
+    if(sweep_target && (!ulc->found || (reconf_lengths_enabled() && ulc->len_state == NR_LEN_SUSPECT)) && !ulc->exhausted) {
       nr_pdcch_autodiscover_cand_t candidates[64];
       int count=0, offset=0;
       for(int c=0;c<rel15->number_of_candidates && count<64;++c) {
@@ -4416,13 +4505,21 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             ++supported_lengths;
         if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
            ulc->state.bootstrap_hits[found]>=3) {
-          ulc->found=found;
+          const int old_len = reconf_lengths_enabled()
+              ? nr_pdcch_dci_length_context_lock(ulc, found) : 0;
+          if (!reconf_lengths_enabled()) ulc->found=found;
+          if (old_len > 0) reconf_length_reopened(boot_rnti, old_len, found);
           LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x (occasions=%d polar_decodes=%llu)\n",
                 found,boot_rnti,ulc->state.occasions_fed,(unsigned long long)ulc->state.decodes);
           /* Publish to the bank. On agreement between two distinct RNTIs this becomes the cell-wide
            * prior and every later RNTI skips its own 34-length sweep -- the discovery cost stops
            * scaling with the number of UEs, which is what breaks the consumer at high grant rates. */
           nr_pdcch_dci_length_bank_converged(ul_bank, boot_rnti, found);
+        } else if (reconf_lengths_enabled() && ulc->len_state == NR_LEN_SUSPECT
+                   && ulc->state.occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+          ulc->found = 0;
+          ulc->len_state = NR_LEN_SEARCHING;
+          nr_pdcch_dci_length_sweep_reset(&ulc->state);
         } else if(ulc->state.occasions_fed>=AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS && dl_resolved(boot_rnti)) {
           /* A PROVEN UE (its own DL length resolved) keeps trying: s3live4's 0x4643 (~2 UL grants/s, and a UL
            * size of 43 where the peer had 45) was exhausted forever inside the occasion budget. Unproven RNTIs --
@@ -4434,14 +4531,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         }
       }
     }
-    ul_ready=ulc->found>0;
+    ul_ready=ulc->found>0 && (!reconf_lengths_enabled() || ulc->len_state != NR_LEN_SUSPECT);
     if(ul_ready) dci01_length=ulc->found;
     /* MULTI-RNTI UL (2026-09-23): every UE whose UL length is resolved gets its own task below. The old
      * path decoded 0_1 for ONE picked UE per occasion, so with 2 UEs at most ~half the UL grants could be
      * recovered (live s3live3: ~30 %). */
     for (int k = 0; k < n_known_ul && n_ul_ready < NR_PDCCH_BLIND_MAX_UE; ++k) {
       const nr_pdcch_dci_length_context_t *cx = nr_pdcch_dci_length_context(ul_bank, geom, known_ul[k]);
-      if (cx->found > 0) {
+      if (cx->found > 0 && (!reconf_lengths_enabled() || cx->len_state != NR_LEN_SUSPECT)) {
         ul_ready_rnti[n_ul_ready] = known_ul[k];
         ul_ready_len[n_ul_ready++] = (uint16_t)cx->found;
       }
@@ -5305,7 +5402,8 @@ constdiag_done:;
     }
     if (found_len > 0) {
       if (lane_len_ctx && lane_len_ctx->found <= 0) {
-        lane_len_ctx->found = found_len;
+        if (reconf_lengths_enabled()) nr_pdcch_dci_length_context_lock(lane_len_ctx, found_len);
+        else lane_len_ctx->found = found_len;
         nr_pdcch_dci_length_bank_converged(lane_bank, lane_locked_rnti, found_len);
       } else if (lane_anonymous) {
         lane_bank->anonymous_found = found_len;
@@ -5314,8 +5412,10 @@ constdiag_done:;
             lane_locked_rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
         nr_pdcch_dci_length_context_t *promoted =
             nr_pdcch_dci_length_context(lane_bank, lane_geom_key, lane_locked_rnti);
-        if (promoted)
-          promoted->found = found_len;
+        if (promoted) {
+          if (reconf_lengths_enabled()) nr_pdcch_dci_length_context_lock(promoted, found_len);
+          else promoted->found = found_len;
+        }
       }
       g_lane_dci_length[lane] = (uint16_t)found_len;
       g_lane_length_rnti[lane] = lane_locked_rnti;
@@ -5495,6 +5595,14 @@ constdiag_done:;
         cand_task[ti].ok = false; /* same UL DCI already accepted by another pass this slot */
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
+        if (reconf_lengths_enabled() && ul_sweep_enabled) {
+          pthread_mutex_lock(&ul_length_lock);
+          nr_pdcch_dci_length_bank_t *bank = nr_pdcch_dci_length_store_get(&g_ul_length_store, geom, NULL);
+          nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(bank, geom, u->rnti);
+          if (c && c->len_state == NR_LEN_LOCKED && c->found == u->dci_length)
+            c->last_accept_slot = abs_slot;
+          pthread_mutex_unlock(&ul_length_lock);
+        }
         discovery_evidence("ul_admitted", "UL", cand_task[ti].frame, cand_task[ti].slot,
                             u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
         nr_pdcch_dci01_layout_observe(ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length,
@@ -5658,6 +5766,14 @@ constdiag_done:;
         continue;
       if (accept_dup(abs_slot, raw->rnti, 0)) /* same DCI already accepted by another pass this slot */
         continue;
+      if (reconf_lengths_enabled() && dl_uss_auto) {
+        pthread_mutex_lock(&g_dl_length_lock);
+        nr_pdcch_dci_length_bank_t *bank = nr_pdcch_dci_length_store_get(&g_dl_length_store, dl_geom, NULL);
+        nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(bank, dl_geom, raw->rnti);
+        if (c && c->len_state == NR_LEN_LOCKED && c->found == cand_task[ti].dci_length)
+          c->last_accept_slot = abs_slot;
+        pthread_mutex_unlock(&g_dl_length_lock);
+      }
       if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_extent_verified()
           && nr_pdcch_coreset_bank_has_owner(raw->rnti)) {
         /* Same alias rule as the lookahead path. The already banked geometry continues decoding
@@ -5797,9 +5913,7 @@ constdiag_done:;
        * (dci11_pin_cursor[]) -- the pre-existing free-running layout_cursor[]/Thompson pick is
        * still computed lazily, only when needed, for the separate "pin still valid but not offered
        * this occasion" one-off substitute, which has no such successive-coverage requirement. */
-      static nr_dci11_pin_t dci11_pin[65536];
-      static uint32_t       dci11_pin_cursor[65536];
-      nr_dci11_pin_t *const pin = &dci11_pin[raw->rnti];
+      nr_dci11_pin_t *const pin = &g_reconf_dci11_pin[raw->rnti];
       uint32_t p_ok = 0, p_tr = 0;
       bool has_stats = false;
       if (nr_dci11_pin_is_valid(pin))
@@ -5830,7 +5944,7 @@ constdiag_done:;
           chosen = layout_cursor[raw->rnti]++ % n;
         } else {
           /* Genuinely needs a new pin (rotated, gave up, cfg changed, or never seeded). */
-          chosen = nr_dci11_pin_round_robin(&dci11_pin_cursor[raw->rnti], n);
+          chosen = nr_dci11_pin_round_robin(&g_reconf_dci11_pin_cursor[raw->rnti], n);
         }
         if (!nr_dci11_pin_is_valid(pin)) {
           static uint32_t s_seed_left=200; /* noise-floor RNTIs can drive this too: bounded, like context eviction */

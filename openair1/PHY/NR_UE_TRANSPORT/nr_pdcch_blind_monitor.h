@@ -1001,6 +1001,8 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
 void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti);
 
 void nr_pdcch_blind_rnti_bootstrap_record_trusted(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+/* Fresh independent activity for a locked-length health check (includes CFRA/RAR evidence). */
+bool nr_pdcch_blind_rnti_bootstrap_recent(uint16_t rnti, uint32_t now_abs_slot, uint32_t max_age);
 /* The RAR chain (RA-RNTI decomposition -> TB CRC -> TC-RNTI): live at ONE sighting. */
 void nr_pdcch_blind_rnti_bootstrap_record_verified(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
 /* Five changing payloads for the same (CORESET,RNTI,length), each from a distinct OTA occasion. */

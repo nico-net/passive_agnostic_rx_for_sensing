@@ -97,6 +97,68 @@ int nr_pdcch_dci_length_order(int min_len, int max_len, int *out)
   return n;
 }
 
+int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t *c,
+    const int *seen, int n_seen, int *out, int max)
+{
+  if (!c || !out || max <= 0 || n_seen < 0 || (n_seen && !seen)) return 0;
+  bool used[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN] = {0};
+  int n = 0;
+  const int old = c->found;
+  if (old >= 30 && old <= NR_DCI_MAX_PAYLOAD) {
+    out[n++] = old;
+    used[old] = true;
+  }
+  for (int i = 0; i < n_seen && n < max; ++i) {
+    const int len = seen[i];
+    if (len >= 30 && len <= NR_DCI_MAX_PAYLOAD && !used[len]) {
+      out[n++] = len;
+      used[len] = true;
+    }
+  }
+  for (int len = 30; len <= NR_DCI_MAX_PAYLOAD && n < max; ++len)
+    if (!used[len]) out[n++] = len;
+  return n;
+}
+
+uint32_t nr_pdcch_dci_length_n_suspect_from_env(void)
+{
+  const char *e = getenv("ISAC_RECONF_N_SUSPECT");
+  if (!e || !*e || *e == '-') return 200;
+  char *end = NULL;
+  const unsigned long n = strtoul(e, &end, 10);
+  return end != e && *end == '\0' && n > 0 && n <= UINT32_MAX ? (uint32_t)n : 200;
+}
+
+void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
+    bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect)
+{
+  if (!c || c->len_state != NR_LEN_LOCKED || c->found <= 0) return;
+  if (accepted_at_locked) {
+    c->miss_occasions = 0;
+    return;
+  }
+  if (c->miss_occasions < UINT32_MAX) ++c->miss_occasions;
+  if (!rnti_active_elsewhere || c->miss_occasions < (n_suspect ? n_suspect : 200)) return;
+  c->len_state = NR_LEN_SUSPECT;
+  nr_pdcch_dci_length_sweep_reset(&c->state);
+  c->state.preferred_len = c->found;
+  c->state.relock_old_len = c->found;
+  c->scout_initialized = false;
+  c->exhausted = false;
+}
+
+int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int length)
+{
+  if (!c || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
+  const int previous = c->len_state == NR_LEN_SUSPECT ? c->found : 0;
+  c->found = length;
+  c->len_state = NR_LEN_LOCKED;
+  c->miss_occasions = 0;
+  c->state.relock_old_len = 0;
+  c->scout_initialized = false;
+  return previous;
+}
+
 void nr_pdcch_dci_length_sweep_reset(nr_pdcch_dci_length_sweep_state_t* state)
 {
   memset(state, 0, sizeof(*state));
@@ -251,7 +313,8 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   int prefer = 0;
   if (state->preferred_len >= min_len && state->preferred_len <= max_len
       && state->preferred_len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN
-      && state->preferred_len != state->excluded_len) {
+      && state->preferred_len != state->excluded_len
+      && state->preferred_len != state->secondary_excluded_len) {
     if (state->preferred_rounds < NR_PDCCH_LENGTH_PREFERRED_ROUNDS) {
       prefer = state->preferred_len;
     } else if (state->preferred_len && !state->alt_full) {
@@ -268,8 +331,17 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
     feed_serial = ++state->feed_serial;
   /* Freeze the order for a complete rotation and any budget suspensions. New cell
    * hints take effect next round, so a concurrent lock cannot skip/repeat a length. */
-  if (!state->resume_len && state->rot_phase == 0)
-    state->order_count = nr_pdcch_dci_length_order(min_len, max_len, state->order);
+  if (!state->resume_len && state->rot_phase == 0) {
+    if (state->relock_old_len) {
+      nr_pdcch_dci_length_context_t hint = {.found = state->relock_old_len};
+      int seen[NR_DCI_MAX_PAYLOAD], n_seen = 0;
+      for (int len = min_len; len <= max_len; ++len)
+        if (atomic_load_explicit(&cell_seen[len], memory_order_relaxed)) seen[n_seen++] = len;
+      state->order_count = nr_pdcch_dci_length_context_relock_order(
+          &hint, seen, n_seen, state->order, NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN);
+    } else
+      state->order_count = nr_pdcch_dci_length_order(min_len, max_len, state->order);
+  }
   int initial_index = state->rot_phase;
   if (state->resume_len)
     for (int i = 0; i < state->order_count; ++i)
@@ -277,6 +349,8 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   for (int index = initial_index; prefer || index < state->order_count; index += stride) {
     const int len = prefer ? prefer : state->order[index];
     if (len < min_len || len > max_len) continue;
+    if (state->secondary_excluded_len
+        && (len == state->excluded_len || len == state->secondary_excluded_len)) continue;
     const int initial_trial=(state->resume_len==len) ? state->resume_trial : 0;
     for (int t = initial_trial; t < n_trials_this_call; t++) {
       bool stop=max_trials>0 && completed>=max_trials;
@@ -323,7 +397,8 @@ score_evidence:;
   int    best_len   = -1;
   double best_score = 0.0;
   for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
-    if (state->passes[len] == 0 || len == state->excluded_len) {
+    if (state->passes[len] == 0 || len == state->excluded_len
+        || len == state->secondary_excluded_len) {
       continue;
     }
     // Degenerate fixed point: repeated passes, but every one decodes to the SAME payload. Reject

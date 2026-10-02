@@ -278,6 +278,91 @@ TEST(DciLengthBank, InterleavedUesKeepDifferentLengthsAndBudgets) {
   EXPECT_EQ(fresh->state.occasions_fed,0);
   EXPECT_EQ(nr_pdcch_dci_length_context(&bank,102,0x3002)->found,0);
 }
+
+TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
+  unsetenv("ISAC_RECONF_N_SUSPECT");
+  EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),200u);
+  nr_pdcch_dci_length_context_t c{};
+  c.rnti=0x1234;
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,47),0);
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+  for(unsigned i=0;i<199;++i)
+    nr_pdcch_dci_length_context_note_occasion(&c,false,true,0);
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,0);
+  EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
+  EXPECT_EQ(c.found,47);
+  EXPECT_EQ(c.state.preferred_len,47);
+  setenv("ISAC_RECONF_N_SUSPECT","3",1);
+  EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),3u);
+  unsetenv("ISAC_RECONF_N_SUSPECT");
+}
+
+TEST(DciLengthBank, InactiveRntiNeverSuspect) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_lock(&c,47);
+  for(unsigned i=0;i<400;++i)
+    nr_pdcch_dci_length_context_note_occasion(&c,false,false,200);
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+  EXPECT_EQ(c.miss_occasions,400u);
+}
+
+TEST(DciLengthBank, SuspectWithoutCoreset0Evidence) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_lock(&c,47);
+  for(unsigned i=0;i<3;++i)
+    nr_pdcch_dci_length_context_note_occasion(&c,false,true,3);
+  EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
+}
+
+TEST(DciLengthBank, RelockSameLengthReturnsLocked) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_lock(&c,47);
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,1);
+  int actual=47;
+  auto score=[](int len,int trial,uint16_t *rnti,uint32_t *hash,void *ctx)->bool {
+    if(len!=*static_cast<int*>(ctx)) return false;
+    *rnti=0x1234; *hash=static_cast<uint32_t>(trial+1); return true;
+  };
+  const int winner=nr_pdcch_dci_length_sweep_feed(&c.state,score,&actual,20,30,140,0x1234);
+  ASSERT_EQ(winner,47);
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,winner),47);
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+  EXPECT_EQ(c.miss_occasions,0u);
+}
+
+TEST(DciLengthBank, RelockDifferentLengthReplaces) {
+  nr_pdcch_dci_length_context_t c{};
+  c.rnti=0x1234;
+  nr_pdcch_dci_length_context_lock(&c,47);
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,1);
+  int actual=52;
+  auto score=[](int len,int trial,uint16_t *rnti,uint32_t *hash,void *ctx)->bool {
+    if(len!=*static_cast<int*>(ctx)) return false;
+    *rnti=0x1234; *hash=static_cast<uint32_t>(trial+1); return true;
+  };
+  int winner=-1;
+  for(int occasion=0;occasion<20 && winner<0;++occasion)
+    winner=nr_pdcch_dci_length_sweep_feed(&c.state,score,&actual,20,30,140,0x1234);
+  ASSERT_EQ(winner,52);
+  EXPECT_EQ(nr_pdcch_dci_length_context_lock(&c,winner),47);
+  EXPECT_EQ(c.found,52);
+  EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
+}
+
+TEST(DciLengthBank, RelockOrderOldFirst) {
+  nr_pdcch_dci_length_context_t c{};
+  nr_pdcch_dci_length_context_lock(&c,47);
+  nr_pdcch_dci_length_context_note_occasion(&c,false,true,1);
+  const int seen[]={52,41,47,52};
+  int order[NR_DCI_MAX_PAYLOAD]{};
+  const int n=nr_pdcch_dci_length_context_relock_order(&c,seen,4,order,NR_DCI_MAX_PAYLOAD);
+  ASSERT_EQ(n,NR_DCI_MAX_PAYLOAD-29);
+  EXPECT_EQ(order[0],47);
+  EXPECT_EQ(order[1],52);
+  EXPECT_EQ(order[2],41);
+  EXPECT_EQ(order[3],30);
+}
 TEST(DciLengthBank, FirstConvergenceSeedsExistingAndNewPeersWithoutPublishing) {
   nr_pdcch_dci_length_bank_t bank{};
   auto *first=nr_pdcch_dci_length_context(&bank,8,0x1001);
