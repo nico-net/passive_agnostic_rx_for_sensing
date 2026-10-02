@@ -1806,11 +1806,11 @@ TEST(PdschSweepDormant, K0LayerInheritsDormancy) {
 /* The legacy feed_equiv/feed_attr carry no pick kind and give no fast-path credit (EXPLOIT); the fast-path tests use the _ex forms with EXPLORE. */
 static int fe(nr_pdsch_config_sweep_state_t *s, const int *idx, int n, bool tb, bool nd)
 {
-  return nr_pdsch_config_sweep_feed_equiv_ex(s, idx, n, tb, nd, NR_TD_PICK_EXPLORE);
+  return nr_pdsch_config_sweep_feed_equiv_cx(s, idx, n, tb, nd, NR_TD_PICK_EXPLORE, true);
 }
 static int fa(nr_pdsch_config_sweep_state_t *s, int idx0, const int *cls, int n_cls, bool tb, bool nd)
 {
-  return nr_pdsch_config_sweep_feed_attr_ex(s, idx0, cls, n_cls, tb, nd, NR_TD_PICK_EXPLORE);
+  return nr_pdsch_config_sweep_feed_attr_cx(s, idx0, cls, n_cls, tb, nd, NR_TD_PICK_EXPLORE, true);
 }
 TEST(PdschSweepCrcAccept, MValues)
 {
@@ -2335,7 +2335,7 @@ TEST(PdschSweepFastPathEx, LegacyWrappersGiveNoFastPathCredit)
   /* the _ex EXPLORE form is the fast-path credit */
   auto e = fp_state(true, false, 0);
   for (int i = 0; i < 2; i++)
-    nr_pdsch_config_sweep_feed_equiv_ex(e.get(), &x, 1, true, true, NR_TD_PICK_EXPLORE);
+    nr_pdsch_config_sweep_feed_equiv_cx(e.get(), &x, 1, true, true, NR_TD_PICK_EXPLORE, true);
   EXPECT_EQ(e->winner, 7);
   EXPECT_EQ(e->fp_trials[7], 2);
 }
@@ -2362,13 +2362,13 @@ TEST(PdschSweepGeomPin, PinUsesGroupTrialSum)
   EXPECT_EQ(tg, (uint32_t)size_max * T);
   const int a = 7;
   for (int i = 0; i < 2; i++)
-    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+    nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp); /* per-hypothesis T would give m = 2 and pin here */
   EXPECT_EQ(s->ok_geom[0], 2);
   /* with the group sums small enough (m = 2) the same two passes pin */
   auto u = geom_state();
   for (int i = 0; i < 2; i++)
-    nr_pdsch_config_sweep_feed_attr_ex(u.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+    nr_pdsch_config_sweep_feed_attr_cx(u.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
   EXPECT_LT(nr_pdsch_config_sweep_n_active(u.get()), u->n_hyp);
 }
 TEST(PdschSweepGeomPin, GeomDormantIsClearedByFailOpenAndRebuild)
@@ -2376,13 +2376,13 @@ TEST(PdschSweepGeomPin, GeomDormantIsClearedByFailOpenAndRebuild)
   auto s = geom_state();
   const int a = 7;
   for (int i = 0; i < 2; i++)
-    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+    nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
   ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
   nr_pdsch_config_sweep_set_fail_open(s.get(), true);
   nr_pdsch_config_sweep_set_fail_open(s.get(), false); /* the pin must not come back when fail-open ends */
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
   for (int i = 0; i < 2; i++)
-    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+    nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
   ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
   nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
@@ -2397,14 +2397,14 @@ TEST(PdschSweepFastPathEx, OnlyExplorePassesCountAndFpTrialsAreExploreOnly)
 {
   auto s = fp_state(true, false, 0);
   const int a = 7;
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT);
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT);
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_SIBLING);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT, true);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT, true);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, false, true, NR_TD_PICK_SIBLING, true);
   EXPECT_EQ(s->ok_unique[a], 0);
   EXPECT_EQ(s->fp_trials[a], 0);
   EXPECT_EQ(s->trials[a], 3u); /* KL credit unchanged */
   EXPECT_EQ(s->winner, -1);
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
   EXPECT_EQ(s->ok_unique[a], 1);
   EXPECT_EQ(s->fp_trials[a], 1);
 }
@@ -2413,7 +2413,7 @@ TEST(PdschSweepFastPathEx, GeomEvidenceIsExploreOnly)
   auto s = fp_state(false, true, 0);
   const int a = 7;
   for (int i = 0; i < 5; i++)
-    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT);
+    nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLOIT, true);
   EXPECT_EQ(s->n_geom, 0);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
@@ -2423,20 +2423,20 @@ TEST(PdschSweepFastPathEx, MStarUsesExploreTrialsOnly)
   auto s = fp_state(true, false, 0);
   const int a = 7;
   for (int i = 0; i < 1000 && s->winner < 0; i++)
-    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_EXPLOIT);
+    nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, false, true, NR_TD_PICK_EXPLOIT, true);
   if (s->winner >= 0)
     GTEST_SKIP() << "KL decided first";
   ASSERT_GE(s->trials[a], 100u);
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
-  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), a);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true), a);
   EXPECT_TRUE(s->winner_by_crc);
 }
 TEST(PdschSweepFastPathEx, RestartClearsFastPathStreams)
 {
   auto s = fp_state(true, true, 0.05f);
   const int a = 7;
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_EXPLORE);
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, false, true, NR_TD_PICK_SIBLING);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, false, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, false, true, NR_TD_PICK_SIBLING, true);
   ASSERT_EQ(s->fp_trials[a], 1);
   ASSERT_EQ(s->sib_trials[a], 1);
   nr_pdsch_config_sweep_set_fail_open(s.get(), true);
@@ -2448,8 +2448,8 @@ TEST(PdschSweepFastPathEx, RestartClearsFastPathStreams)
 static int drive_siblings(nr_pdsch_config_sweep_state_t *s, int a, bool sibling_passes, int *n_sib_picks)
 {
   const int cls = a;
-  nr_pdsch_config_sweep_feed_attr_ex(s, a, &cls, 1, true, true, NR_TD_PICK_EXPLORE);
-  nr_pdsch_config_sweep_feed_attr_ex(s, a, &cls, 1, true, true, NR_TD_PICK_EXPLORE);
+  nr_pdsch_config_sweep_feed_attr_cx(s, a, &cls, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_config_sweep_feed_attr_cx(s, a, &cls, 1, true, true, NR_TD_PICK_EXPLORE, true);
   *n_sib_picks = 0;
   for (int t = 0; t < 20000 && s->winner < 0; t++) {
     nr_pdsch_cfg_hypothesis_t h;
@@ -2460,14 +2460,14 @@ static int drive_siblings(nr_pdsch_config_sweep_state_t *s, int a, bool sibling_
     if (k != NR_TD_PICK_SIBLING) {
       if (s->sib_blocked)
         break; /* the guard fired: nothing more to schedule deliberately */
-      nr_pdsch_config_sweep_feed_attr_ex(s, i, &i, 1, false, true, k);
+      nr_pdsch_config_sweep_feed_attr_cx(s, i, &i, 1, false, true, k, true);
       continue;
     }
     ++*n_sib_picks;
     EXPECT_EQ(h.tda_start, s->hyp[a].tda_start);
     EXPECT_EQ(h.mapping_type, s->hyp[a].mapping_type);
     EXPECT_NE(h.k0, s->hyp[a].k0);
-    nr_pdsch_config_sweep_feed_attr_ex(s, i, &i, 1, sibling_passes && *n_sib_picks == 5, true, k);
+    nr_pdsch_config_sweep_feed_attr_cx(s, i, &i, 1, sibling_passes && *n_sib_picks == 5, true, k, true);
   }
   return s->winner;
 }
@@ -2495,15 +2495,15 @@ TEST(PdschSweepSiblingGuard, SiblingPassBlocksLeverC)
   /* further explore passes cannot accept while blocked */
   const int a = 7;
   for (int i = 0; i < 5; i++)
-    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+    nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
   EXPECT_EQ(s->winner, -1);
 }
 TEST(PdschSweepSiblingGuard, DisabledWhenPminZero)
 {
   auto s = fp_state(true, false, 0);
   const int a = 7;
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
-  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), a);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true), a);
 }
 TEST(PdschSweepSiblingGuard, NoSiblingsAcceptsImmediately)
 {
@@ -2515,15 +2515,15 @@ TEST(PdschSweepSiblingGuard, NoSiblingsAcceptsImmediately)
   /* BC9: only GEOM dormancy (a guarded pin) may hide a sibling; PRIOR/FIELD-dormant siblings are tested (DormantPriorSiblingIsNotIgnored) */
   ASSERT_GE(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_GEOM, keep, &arg), 0);
   ASSERT_EQ(n_siblings(s.get(), a), 0);
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
-  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), a);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true), a);
 }
 TEST(PdschSweepSiblingGuard, NextIsNeverASiblingPick)
 {
   auto s = fp_state(true, false, 0.05f);
   const int a = 7;
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
-  nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
   Pick k;
   nr_pdsch_cfg_hypothesis_t h;
   const int i = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
@@ -2864,4 +2864,41 @@ TEST_F(PdschBc9, RntiConstrainedOnlyAfterAnExclusionOrCertification)
   auto u = k39_fresh(0, 0x5555);
   ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&u, 0x1), 0);
   EXPECT_TRUE(nr_pdsch_config_sweep_rnti_constrained(0x4601, 0x5555));
+}
+
+/* Review I1: a caller that does not state certification gets none (the _ex forms are fail-safe once levers C/P are on). */
+TEST(PdschBc9FastPath, ExFormsAreNeverCertified)
+{
+  auto c = fp_state(true, false, 0);
+  const int a = 7;
+  for (int i = 0; i < 4; i++)
+    EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(c.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), -1);
+  int idx[1] = {a};
+  for (int i = 0; i < 4; i++)
+    EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv_ex(c.get(), idx, 1, true, true, NR_TD_PICK_EXPLORE), -1);
+  EXPECT_EQ(c->ok_unique[a], 0);
+  EXPECT_EQ(c->fp_trials[a], 0);
+}
+
+/* Review I3: a converged context drops the k0-oracle layers it did not win on (statistical). The universe that defines
+ * "row k0 certified" -- and so a destructive adjacency prune -- must not shrink with it. */
+TEST_F(PdschBc9, K0UniverseDoesNotShrinkWithTheStatisticalLayerDrop)
+{
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 0, 0, test_legal, &t, &h));
+  ASSERT_GT(nr_pdsch_config_sweep_add_k0(&t, 3), 0); /* the k0 oracle saw k0 = 3 */
+  for (int i = 0; i < 600000 && !nr_pdsch_config_sweep_is_settled(0x1234, 0x4601, 0, 0); i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 0, 0, test_legal, &t, &h));
+    nr_pdsch_config_sweep_feedback(&t, h.k0 == 0 && h.tda_start == 1 && h.tda_length == 13 && h.mcs_table == 0
+                                           && h.dmrs_add_pos == 1 && h.dmrs_max_len == 1, nullptr);
+  }
+  ASSERT_TRUE(nr_pdsch_config_sweep_is_settled(0x1234, 0x4601, 0, 0)); /* converged on k0 = 0: layer 3 dropped from k0_seen */
+  /* another row of the RNTI: k0 = 1 excluded deterministically; k0 = 3 is still possible (the universe kept it) */
+  k39_fresh(1);
+  nr_td_excl_t f;
+  nr_td_excl_none(&f);
+  f.last[1] = -1;
+  ASSERT_GE(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 1, &f), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 1), UINT64_C(0x9)); /* {0, 3}: NOT certified */
 }

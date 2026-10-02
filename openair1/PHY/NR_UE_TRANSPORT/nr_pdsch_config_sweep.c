@@ -416,6 +416,8 @@ typedef struct {
   prior_t prior;
   obs_set_t obs;
   uint64_t k0_seen; /* bit k: the k0 oracle saw this RNTI's PDSCH k slots after its DCI (k >= 2) */
+  uint64_t k0_ever; /* BC9 review I3: k0_seen without the statistical drop on convergence (never cleared while the RNTI lives):
+                       the universe of the deterministic k0 certification */
   /* K39: k0 certified by deterministic evidence, scoped to (configuration, tda row): k0 is a per-TDRA-row field, so a
    * certification of one row never binds another. Persists across eviction/recreation of that row's context. */
   /* BC9: plus the key's deterministic per-hypothesis exclusion (TDD direction / DCI adjacency). An entry is used iff mask != 0
@@ -1199,7 +1201,7 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
 int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
                                         nr_td_pick_t kind)
 {
-  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, kind, true);
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, kind, false); /* no certification stated: none (I1) */
 }
 int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data)
 {
@@ -1208,7 +1210,7 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
 int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                        bool new_data, nr_td_pick_t kind)
 {
-  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, kind, true);
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, kind, false); /* I1 */
 }
 int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                     bool new_data)
@@ -2037,7 +2039,7 @@ int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t 
 /* ---- BC9 keyed exclusion ---- */
 static uint64_t k0_universe(const rnti_ctx_t *r)
 {
-  return UINT64_C(0x3) | (r ? (r->k0_seen & ~UINT64_C(0x3)) : 0);
+  return UINT64_C(0x3) | (r ? (r->k0_ever & ~UINT64_C(0x3)) : 0); /* never shrinks with the statistical k0_seen drop (I3) */
 }
 /* k0 values of `u` the constraints leave with any legal entry (the shortest legal PDSCH, type B L = 2 at S = 0, ends on 1). */
 static uint64_t k0_allowed_by(uint64_t u, uint64_t cert, const nr_td_excl_t *e)
@@ -2110,22 +2112,27 @@ bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_
     return false;
   pthread_mutex_lock(&g_lock);
   const sweep_context_t *c = ticket_context(t);
-  const bool ok = c != NULL && c->state->winner < 0;
-  if (ok) {
-    const nr_pdsch_config_sweep_state_t *st = c->state;
-    *h = st->hyp[t->hypothesis];
-    const uint64_t sk = skey_of(h);
-    *sib_k0 = 0;
-    *tables = 0;
-    for (int i = 0; i < st->n_hyp; i++) {
-      if (active(st, i))
-        *tables |= (uint8_t)(1u << (st->hyp[i].mcs_table & 7));
-      if (st->hyp[i].k0 <= NR_TD_K0_MAX && is_sibling_of(st, i, sk, h->k0))
-        *sib_k0 |= UINT64_C(1) << st->hyp[i].k0;
-    }
-  }
+  const bool ok = c != NULL && c->state->winner < 0 && nr_pdsch_config_sweep_siblings_of(c->state, t->hypothesis, h, sib_k0, tables);
   pthread_mutex_unlock(&g_lock);
   return ok;
+}
+bool nr_pdsch_config_sweep_siblings_of(const nr_pdsch_config_sweep_state_t *st, int idx, nr_pdsch_cfg_hypothesis_t *h,
+                                       uint64_t *sib_k0, uint8_t *tables)
+{
+  if (st == NULL || h == NULL || sib_k0 == NULL || tables == NULL || idx < 0 || idx >= st->n_hyp)
+    return false;
+  *h = st->hyp[idx];
+  const uint64_t sk = skey_of(h);
+  *sib_k0 = 0;
+  *tables = 0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    /* review I2: every hypothesis that may be the truth -- active or dormant through PRIOR / FIELD -- keeps its table */
+    if (active(st, i) || !dorm_bit(st, NR_TD_DORMANT_GEOM, i))
+      *tables |= (uint8_t)(1u << (st->hyp[i].mcs_table & 7));
+    if (st->hyp[i].k0 <= NR_TD_K0_MAX && is_sibling_of(st, i, sk, h->k0))
+      *sib_k0 |= UINT64_C(1) << st->hyp[i].k0;
+  }
+  return true;
 }
 bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration)
 {
@@ -2154,6 +2161,7 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
   rnti_ctx_t *r = rnti_ctx(t->rnti, true);
   const bool first = !(r->k0_seen & (UINT64_C(1) << k0));
   r->k0_seen |= UINT64_C(1) << k0;
+  r->k0_ever |= UINT64_C(1) << k0;
   sweep_context_t *c = ticket_context(t);
   const bool excluded = c && ((c->k0_cert && !(c->k0_cert >> k0 & 1)) || (c->has_excl && c->excl.last[k0] < 1)); /* BC9: TDD/DCI */
   const int n = (c && !excluded) ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;

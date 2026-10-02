@@ -267,8 +267,8 @@ int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int id
 
 /** BC9 forms with the DCI-adjacency `certified` flag (nr_dci_hist_k0_certified): levers C and P count a pass, and fp_trials a
  *  trial, only for an EXPLORE pick on a k0-unambiguous grant (certified). Uncertified trials stay normal KL evidence. The _ex
- *  forms above are the PRE-BC9 contract (every explore pick counts, the k0-sibling guard alone covers the k0 trap): kept
- *  bit-identical for the simulator until its BC9 part; new callers use _cx. */
+ *  forms above are _cx with certified = false (fail-safe, BC9 review I1): a caller that does not state certification never
+ *  builds fast-path evidence. */
 int nr_pdsch_config_sweep_feed_equiv_cx(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
                                         nr_td_pick_t kind, bool certified);
 int nr_pdsch_config_sweep_feed_attr_cx(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
@@ -442,6 +442,10 @@ uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t r
 /** For the DCI-adjacency certified flag of a decoded job: the ticket's hypothesis, the k0 values of the hypotheses that are
  *  k0 siblings of it (same S, L, mapping type, DM-RS mask; active or dormant through a non-GEOM cause), and the MCS tables of
  *  the active hypotheses. False for a stale ticket or a settled context. */
+/** Pure form of ticket_siblings on a state and a hypothesis index. tables = MCS tables of every hypothesis that may be the
+ *  truth: active, or dormant through a non-GEOM cause (PRIOR / FIELD can be wrong; GEOM follows a guarded pin). */
+bool nr_pdsch_config_sweep_siblings_of(const nr_pdsch_config_sweep_state_t *st, int idx, nr_pdsch_cfg_hypothesis_t *h,
+                                       uint64_t *sib_k0, uint8_t *tables);
 bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_pdsch_cfg_hypothesis_t *h, uint64_t *sib_k0,
                                            uint8_t *tables);
 /** True when some row of (rnti, configuration) carries a k0 certification or an exclusion (else every row's allowed set

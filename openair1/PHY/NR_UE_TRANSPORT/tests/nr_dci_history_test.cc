@@ -202,3 +202,38 @@ TEST(DciHistory, CertifiedNeighbourRowRulesOutK0)
   EXPECT_FALSE(nr_dci_hist_k0_certified(h.get(), &g6, 1, 0x3, 0x1, &kGeo, row_k0_none, nullptr)); /* uncertified row: ambiguous */
 }
 int main(int argc, char **argv) { logInit(); testing::InitGoogleTest(&argc, argv); return RUN_ALL_TESTS(); }
+
+/* Review I2: the table mask of the certified flag covers every hypothesis that may be the truth -- a FIELD/PRIOR-dormant
+ * one included. A sibling dormant in another MCS table makes a cross-table-equivalent occupant compatible: not certified. */
+extern "C" {
+#include "nr_pdsch_config_sweep.h"
+}
+TEST(DciHistory, DormantSiblingTableKeepsCrossTableOccupantCompatible)
+{
+  static nr_pdsch_config_sweep_state_t st;
+  nr_pdsch_config_sweep_init(&st, 4);
+  int lead = -1;
+  for (int i = 0; i < st.n_hyp && lead < 0; i++)
+    if (st.hyp[i].mcs_table == 0 && st.hyp[i].k0 == 1)
+      lead = i;
+  ASSERT_GE(lead, 0);
+  auto only_table0 = [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->mcs_table == 0; };
+  ASSERT_GT(nr_pdsch_config_sweep_set_dormant(&st, NR_TD_DORMANT_FIELD_BASE, only_table0, nullptr), 0);
+  nr_pdsch_cfg_hypothesis_t h{};
+  uint64_t sib = 0;
+  uint8_t tables = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_siblings_of(&st, lead, &h, &sib, &tables));
+  EXPECT_EQ(sib, UINT64_C(0x1));
+  EXPECT_EQ(tables & 0x3, 0x3); /* the FIELD-dormant table-1 hypotheses still count */
+  auto r = ring();
+  const nr_dci_hist_entry_t g = dci(100, 0, 0, 50, 2);
+  push(r.get(), g);
+  push(r.get(), dci(101, 0, 0, 50, 1)); /* table 1 mcs 1 == table 0 mcs 2 */
+  EXPECT_FALSE(nr_dci_hist_k0_certified(r.get(), &g, 1, sib | 0x2, tables, &kGeo, nullptr, nullptr));
+  /* GEOM dormancy (a guarded pin) is the one cause that removes a table from the possible truths */
+  static nr_pdsch_config_sweep_state_t gs;
+  nr_pdsch_config_sweep_init(&gs, 4);
+  ASSERT_GT(nr_pdsch_config_sweep_set_dormant(&gs, NR_TD_DORMANT_GEOM, only_table0, nullptr), 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_siblings_of(&gs, lead, &h, &sib, &tables));
+  EXPECT_EQ(tables, 0x1);
+}

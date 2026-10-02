@@ -462,8 +462,8 @@ static SimResult run_sim(const SimCfg &cfg)
         int cls[NR_PDSCH_SWEEP_MAX_HYP];
         const int nc = build_class(out_main_idx, gr, cls);
         if (cfg.equiv)
-          return nr_pdsch_config_sweep_feed_equiv_ex(st.get(), cls, nc, pass, gr.new_tx, pick_kind);
-        return nr_pdsch_config_sweep_feed_attr_ex(st.get(), out_main_idx, cls, nc, pass, gr.new_tx, pick_kind);
+          return nr_pdsch_config_sweep_feed_equiv_cx(st.get(), cls, nc, pass, gr.new_tx, pick_kind, true);
+        return nr_pdsch_config_sweep_feed_attr_cx(st.get(), out_main_idx, cls, nc, pass, gr.new_tx, pick_kind, true);
       };
       for (; g < cap && winner < 0;) {
         g++;
