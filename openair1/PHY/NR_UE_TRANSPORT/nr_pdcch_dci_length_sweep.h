@@ -135,7 +135,8 @@ typedef struct {
   int      stride;
   int      order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN], order_count;
   int      resume_len, resume_trial; // budget suspension; reset with the geometry epoch
-  bool     wide_range; /* every stage-1 length reached the statistical trial floor without a lock */
+  bool     stage_one_exhausted; /* every stage-1 length reached the statistical trial floor without a lock */
+  uint32_t wide_probe_cursor; /* round-robin over 64..configured max */
   int      round_max; /* frozen across rotation/budget suspension */
   int      rot_phase; // 0..stride-1, which interleaved subset this call tests
   /* CELL PRIOR (2026-09-17). When > 0, test ONLY this length for the first
@@ -161,6 +162,12 @@ typedef struct {
  * ISAC_DCI_LEN_MAX or a cell-seen wide length bypasses the cold 63-bit cap. */
 int nr_pdcch_dci_length_active_max(const nr_pdcch_dci_length_sweep_state_t *state,
                                    int min_len, int max_len);
+/* Snapshot for the NEXT feed: active contiguous range plus at most one wide probe.
+ * Pure (does not advance state); CPU feed and GPU lane/prefill share this selection.
+ * out has NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN entries. */
+int nr_pdcch_dci_length_batch_lengths(const nr_pdcch_dci_length_sweep_state_t *state,
+                                    int min_len, int max_len, int *out);
+uint64_t nr_pdcch_dci_length_wide_probes(void); /* cumulative probe occasions actually scored */
 /* Rounds a seeded length gets before the full sweep resumes. The sweep's own significance test
  * needs accumulated trials, and one occasion carries only ~6 candidates; 8 rounds is ~50 candidates,
  * comfortably enough for a length that is already right and nowhere near enough to make a wrong one

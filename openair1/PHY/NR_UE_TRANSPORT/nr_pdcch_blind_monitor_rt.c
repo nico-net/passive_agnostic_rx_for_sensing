@@ -1327,8 +1327,7 @@ static inline int autodiscover_sweep_budget(void)
   }
   return s_budget;
 }
-/* Configured bounds. The sweep engine starts at min..63 and extends to max
- * after an unsuccessful full round for that context. An explicit MAX or a
+/* Configured bounds. Exhausted cold sweeps retain min..63 plus low-duty probes. An explicit MAX or a
  * cell-seen wide length enables the wider range immediately (next round when
  * budget-suspended). Keep the existing minimum and explicit range overrides. */
 static inline int dci_len_min(void)
@@ -2079,7 +2078,8 @@ static int lane_batch_want_stride(void)
 typedef struct {
   int      base;        /* first item index for this lane, -1 = not in the batch */
   int      n_cand;
-  int      min_len, max_len;
+  int      n_len;
+  int      index[LANE_BATCH_MAX_LEN]; /* sparse probe length -> batch column */
 } lane_batch_slot_t;
 
 /* HEAP, not __thread: at AL8 this buffer is 2048 * 864 * 2 = 3.5 MB (7 MB with AL16), and a TLS block that size is
@@ -2148,7 +2148,8 @@ static void lane_batch_reset(void)
  * depends on (e_rx, L, dmrs_id) and not on dci_length, so doing it inside the length loop repeated
  * it 34x for identical output. Returns false when the lane does not fit; that lane then uses the
  * CPU path untouched. */
-static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int min_len, int max_len)
+static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ctx,
+                           const nr_pdcch_dci_length_sweep_state_t *state, int min_len, int max_len)
 {
   if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || ctx == NULL || ctx->n_cand <= 0)
     return false;
@@ -2156,7 +2157,9 @@ static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ct
     return false;                           /* no buffer: whole lane uses the CPU path, unchanged */
   if (min_len < 0 || max_len >= LANE_BATCH_MAX_LEN || max_len < min_len)
     return false;
-  const int n_len = max_len - min_len + 1;
+  int lengths[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  const int n_len = nr_pdcch_dci_length_batch_lengths(state, min_len, max_len, lengths);
+  if (!n_len) return false;
   if (g_lb_n_vec + ctx->n_cand > LANE_BATCH_MAX_VEC)
     return false;
   if (g_lb_n_items + ctx->n_cand * n_len > LANE_BATCH_MAX_ITEMS)
@@ -2170,8 +2173,9 @@ static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ct
     const int v = g_lb_n_vec + c;
     nr_pdcch_unscrambling((c16_t *)cd->e_rx, ctx->scrambling_rnti, (uint32_t)(cd->L * 108),
                           ctx->dmrs_scrambling_id, &g_lb_vec[v * g_lb_vstride]);
-    for (int l = min_len; l <= max_len; l++) {
-      const int i = g_lb_n_items + c * n_len + (l - min_len);
+    for (int col = 0; col < n_len; col++) {
+      const int l = lengths[col];
+      const int i = g_lb_n_items + c * n_len + col;
       g_lb_vidx[i] = (uint16_t)v;
       g_lb_len[i]  = (uint16_t)l;
       g_lb_al[i]   = cd->L;
@@ -2179,8 +2183,9 @@ static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ct
   }
   g_lb_slot[lane].base    = base;
   g_lb_slot[lane].n_cand  = ctx->n_cand;
-  g_lb_slot[lane].min_len = min_len;
-  g_lb_slot[lane].max_len = max_len;
+  g_lb_slot[lane].n_len = n_len;
+  for (int l = 0; l < LANE_BATCH_MAX_LEN; ++l) g_lb_slot[lane].index[l] = -1;
+  for (int col = 0; col < n_len; ++col) g_lb_slot[lane].index[lengths[col]] = col;
   g_lb_n_vec   += ctx->n_cand;
   g_lb_n_items += ctx->n_cand * n_len;
   return true;
@@ -2242,10 +2247,9 @@ static bool lane_batch_get(const void *ctx, int cand_idx, int dci_length, uint32
   const lane_batch_slot_t *sl = &g_lb_slot[lane];
   if (sl->base < 0 || cand_idx < 0 || cand_idx >= sl->n_cand)
     return false;
-  if (dci_length < sl->min_len || dci_length > sl->max_len)
+  if (dci_length < 0 || dci_length >= LANE_BATCH_MAX_LEN || sl->index[dci_length] < 0)
     return false;
-  const int n_len = sl->max_len - sl->min_len + 1;
-  const int i = sl->base + cand_idx * n_len + (dci_length - sl->min_len);
+  const int i = sl->base + cand_idx * sl->n_len + sl->index[dci_length];
   if (i < 0 || i >= g_lb_n_items || !g_lb_ok[i])
     return false;
   *crc     = g_lb_crc[i];
@@ -2295,7 +2299,8 @@ static __thread sweep_batch_cache_t g_sweep_cache;
 
 /* Unscramble each candidate once, then decode the whole (candidate x length) grid in one GPU call.
  * Returns true when the cache is populated; false leaves the scorer on its original CPU path. */
-static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int min_len, int max_len)
+static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx,
+                              const nr_pdcch_dci_length_sweep_state_t *state, int min_len, int max_len)
 {
   g_sweep_cache.valid = 0;
   if (ctx == NULL || ctx->n_cand <= 0 || ctx->n_cand > SWEEP_BATCH_MAX_CAND)
@@ -2306,7 +2311,9 @@ static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int 
   if (api == NULL || api->decode_vec == NULL)
     return false;
 
-  const int n_len = max_len - min_len + 1;
+  int lengths[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  const int n_len = nr_pdcch_dci_length_batch_lengths(state, min_len, max_len, lengths);
+  if (!n_len) return false;
   const int n_items = ctx->n_cand * n_len;
   static __thread int16_t  vec[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_VSTRIDE];
   static __thread uint16_t vidx[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
@@ -2329,7 +2336,8 @@ static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int 
   /* (2) every (candidate, length) pair as one batch item */
   int n = 0;
   for (int c = 0; c < ctx->n_cand; c++)
-    for (int l = min_len; l <= max_len; l++) {
+    for (int col = 0; col < n_len; col++) {
+      const int l = lengths[col];
       vidx[n] = (uint16_t)c;
       lens[n] = (uint16_t)l;
       als[n]  = ctx->cand[c].L;
@@ -4315,8 +4323,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (budget_active)
           g_sweep_cache.valid = 0;
         else
-          sweep_gpu_prefill(&sweep_ctx, dci_len_min(),
-              nr_pdcch_dci_length_active_max(dl_state, dci_len_min(), dci_len_max()));
+          sweep_gpu_prefill(&sweep_ctx, dl_state, dci_len_min(), dci_len_max());
         discovery_scope.before_feed = btim_on ? btim_now() : 0;
         discovery_scope.phase = 1;
         const uint64_t trace_decodes = dl_state->decodes;
@@ -4617,21 +4624,20 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         const nr_pdcch_autodiscover_sweep_ctx_t gctx={.cand=candidates,.n_cand=sweep_trials,
                             .scrambling_rnti=rel15->coreset.scrambling_rnti,
                             .dmrs_scrambling_id=rel15->coreset.pdcch_dmrs_scrambling_id};
-        const int active_max = nr_pdcch_dci_length_active_max(&ulc->state, dci_len_min(), dci_len_max());
-        const bool gpu=sweep_gpu_prefill(&gctx, dci_len_min(), active_max);
+        ulc->state.stride = dci_sweep_stride();
+        ulc->state.excluded_len = ul_second ? ulc->found[0] : 0;
+        ulc->state.secondary_excluded_len = ul_second ? ulc->found[1] : 0;
+        const bool gpu=sweep_gpu_prefill(&gctx, &ulc->state, dci_len_min(), dci_len_max());
         ul_length_ctx_t ctx={.cand=candidates,.count=sweep_trials,.rnti=boot_rnti,
                             .scrambling_rnti=rel15->coreset.scrambling_rnti,
                             .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id,
                             .gpu_ctx=gpu?&gctx:NULL};
-        ulc->state.stride = dci_sweep_stride();
-        ulc->state.excluded_len = ul_second ? ulc->found[0] : 0;
-        ulc->state.secondary_excluded_len = ul_second ? ulc->found[1] : 0;
         const uint64_t ul_feed_start = btim_now();
         const uint64_t ul_deadline = discovery_budget_us() > 0
                                          ? ul_feed_start + 1000ull * discovery_budget_us()
                                          : 0;
         const int found=nr_pdcch_dci_length_sweep_feed_budget(&ulc->state,ul_length_score,&ctx,
-                                                     sweep_trials, dci_len_min(), active_max,
+                                                     sweep_trials, dci_len_min(), dci_len_max(),
                                                      boot_rnti, ul_deadline, 0);
         if (getenv("ISAC_DISCOVER_DIAG") != NULL)
           LOG_A(PHY, "SENSING: ULSWEEPTIM us=%.2f rnti=0x%x ranked_trials=%d offered=%d decodes=%llu\n",
@@ -4640,7 +4646,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         /* A single matching decode cannot rule out a degenerate polar fixed point.
          * Require distinct UL payloads before trusting the shared engine's shortcut. */
         int supported_lengths=0;
-        for(int len=dci_len_min();len<=active_max;++len)
+        /* Include accumulated probe evidence, even on a non-probe occasion. */
+        for(int len=dci_len_min();len<=dci_len_max();++len)
           if(ulc->state.n_distinct[len]>1 && ulc->state.bootstrap_hits[len]>=3)
             ++supported_lengths;
         if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
@@ -5441,9 +5448,50 @@ constdiag_done:;
         };
         g_lane_geom_snap[lane]   = geom;
         g_lane_needs_sweep[lane] = 1;
-        if (!budget_active)
-          lane_batch_add(lane, &g_lane_sweep_ctx[lane], dci_len_min(),
-                         nr_pdcch_dci_length_active_max(&g_lane_length_state[lane], dci_len_min(), dci_len_max()));
+        /* Snapshot the same per-RNTI/anonymous state that phase B will feed.
+         * Another consumer can advance it before phase B; missing cache items
+         * then fall back to CPU. Never prefill the legacy lane's wider range. */
+        uint16_t lane_boot = 0;
+        nr_pdcch_autodiscover_sweep_ctx_t *lane_ctx = &g_lane_sweep_ctx[lane];
+        uint16_t lane_known[NR_PDCCH_BLIND_MAX_UE];
+        int lane_n_known = nr_pdcch_blind_monitor_dedicated_rnti_set(
+            abs_slot, lane_known, NR_PDCCH_BLIND_MAX_UE);
+        if (lane_n_known > 0) {
+          uint64_t pick = length_lookahead_key(cfg, &g_lane_geom_snap[lane])
+                          + (uint64_t)abs_slot + (uint64_t)lane;
+          pick = (pick ^ (pick >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+          pick = (pick ^ (pick >> 27)) * UINT64_C(0x94d049bb133111eb);
+          pick ^= pick >> 31;
+          lane_boot = lane_known[pick % (uint64_t)lane_n_known];
+          lane_ctx->n_known = 1;
+          lane_ctx->known_rnti[0] = lane_boot;
+          lane_ctx->bootstrap_alias = lane_boot;
+          lane_ctx->rnti_min = lane_boot;
+          lane_ctx->rnti_max = lane_boot;
+        } else {
+          lane_ctx->n_known = 0;
+          lane_ctx->bootstrap_alias = 0;
+        }
+
+        pthread_mutex_lock(&g_dl_length_lock);
+        const uint64_t lane_geom_key = length_lookahead_key(cfg, &g_lane_geom_snap[lane]);
+        nr_pdcch_dci_length_bank_t *lane_bank =
+            nr_pdcch_dci_length_store_get(&g_dl_length_store, lane_geom_key, NULL);
+        nr_pdcch_dci_length_context_t *lane_len_ctx =
+            lane_boot ? nr_pdcch_dci_length_context(lane_bank, lane_geom_key, lane_boot) : NULL;
+        const bool lane_anonymous = !lane_boot && lane_bank && !lane_bank->anonymous_exhausted;
+        nr_pdcch_dci_length_sweep_state_t *lane_state =
+            lane_len_ctx ? &lane_len_ctx->state
+                         : (lane_anonymous ? &lane_bank->anonymous : &g_lane_length_state[lane]);
+        if (lane_state->preferred_len == 0
+            && g_lane_length_state[lane].preferred_len >= dci_len_min()
+            && g_lane_length_state[lane].preferred_len <= dci_len_max())
+          lane_state->preferred_len = g_lane_length_state[lane].preferred_len;
+        lane_state->excluded_len = dci10_length;
+        lane_state->stride = dci_sweep_stride();
+        if (!budget_active && (lane_boot || lane_anonymous))
+          lane_batch_add(lane, &g_lane_sweep_ctx[lane], lane_state, dci_len_min(), dci_len_max());
+        pthread_mutex_unlock(&g_dl_length_lock);
         continue;   /* phase B runs the anchored sweep AND the step for this lane */
       }
     } else {
@@ -5489,27 +5537,8 @@ constdiag_done:;
       nr_pdcch_blind_lookahead_step(lane);
       continue;
     }
-    uint16_t lane_boot = 0;
     nr_pdcch_autodiscover_sweep_ctx_t *lane_ctx = &g_lane_sweep_ctx[lane];
-    uint16_t lane_known[NR_PDCCH_BLIND_MAX_UE];
-    int lane_n_known = nr_pdcch_blind_monitor_dedicated_rnti_set(
-        abs_slot, lane_known, NR_PDCCH_BLIND_MAX_UE);
-    if (lane_n_known > 0) {
-      uint64_t pick = length_lookahead_key(cfg, &g_lane_geom_snap[lane])
-                      + (uint64_t)abs_slot + (uint64_t)lane;
-      pick = (pick ^ (pick >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
-      pick = (pick ^ (pick >> 27)) * UINT64_C(0x94d049bb133111eb);
-      pick ^= pick >> 31;
-      lane_boot = lane_known[pick % (uint64_t)lane_n_known];
-      lane_ctx->n_known = 1;
-      lane_ctx->known_rnti[0] = lane_boot;
-      lane_ctx->bootstrap_alias = lane_boot;
-      lane_ctx->rnti_min = lane_boot;
-      lane_ctx->rnti_max = lane_boot;
-    } else {
-      lane_ctx->n_known = 0;
-      lane_ctx->bootstrap_alias = 0;
-    }
+    const uint16_t lane_boot = lane_ctx->bootstrap_alias;
 
     pthread_mutex_lock(&g_dl_length_lock);
     const uint64_t lane_geom_key = length_lookahead_key(cfg, &g_lane_geom_snap[lane]);
@@ -7131,7 +7160,7 @@ constdiag_done:;
          "held[energy=%lu dmrs=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu k0_wait=%lu] "
          "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
-         "last_reject=\"%s\" last_reject_rnti=0x%x\n",
+         "dci_wide_probes=%lu last_reject=\"%s\" last_reject_rnti=0x%x\n",
          (unsigned long)g_occasions_run, (unsigned long)g_candidates_run, (unsigned long)g_accepts,
          (unsigned long)g_accepts_10,
          (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_C],
@@ -7152,6 +7181,7 @@ constdiag_done:;
          (unsigned long)g_data_submits, (unsigned long)g_dec_k0_wait,
          (unsigned long)scanq.queued, (unsigned long)scanq.processed, (unsigned long)scanq.dropped_full,
          (unsigned long)scanq.dropped_stale, (unsigned long)scanq.max_lag_slots,
+         (unsigned long)nr_pdcch_dci_length_wide_probes(),
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
   }

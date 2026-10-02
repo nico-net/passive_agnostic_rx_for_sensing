@@ -45,6 +45,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <time.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -67,6 +68,8 @@
 static pthread_once_t length_env_once = PTHREAD_ONCE_INIT;
 static bool seen_order_enabled;
 static int explicit_max;
+static unsigned wide_probe_every = 1;
+static _Atomic uint64_t wide_probes;
 static void length_env_init(void)
 {
   const char *e = getenv("ISAC_RECONF");
@@ -75,6 +78,12 @@ static void length_env_init(void)
   char *end = NULL;
   const long n = e ? strtol(e, &end, 10) : 0;
   explicit_max = e && end != e && !*end && n >= 1 && n <= NR_DCI_MAX_PAYLOAD ? (int)n : 0;
+  e = getenv("ISAC_DCI_WIDE_PROBE_EVERY");
+  const long period = e ? strtol(e, &end, 10) : 0;
+  /* The configured cadence is a lower bound; wide_probe_length also accounts
+   * for rotation/preferred-only work to cap extra scorer calls at 5%. */
+  if (e && end != e && !*end && period > 0 && period <= INT_MAX)
+    wide_probe_every = (unsigned)period;
 }
 
 bool nr_pdcch_reconf_enabled(void)
@@ -102,12 +111,51 @@ int nr_pdcch_dci_length_active_max(const nr_pdcch_dci_length_sweep_state_t *stat
   /* Finish the active round before accepting new hints. */
   if (state->round_max && (state->resume_len || state->rot_phase))
     return state->round_max < max_len ? state->round_max : max_len;
-  if (max_len <= 63 || min_len > 63 || explicit_max >= min_len || state->wide_range
+  if (max_len <= 63 || min_len > 63 || explicit_max >= min_len
       || state->relock_old_len)
     return max_len;
   for (int len = 64; len <= NR_DCI_MAX_PAYLOAD; ++len)
     if (atomic_load_explicit(&cell_seen[len], memory_order_relaxed)) return max_len;
   return 63;
+}
+
+static int wide_probe_length(const nr_pdcch_dci_length_sweep_state_t *state,
+                             int min_len, int max_len)
+{
+  const int active = nr_pdcch_dci_length_active_max(state, min_len, max_len);
+  if (!state->stage_one_exhausted || active != 63 || max_len <= 63)
+    return 0;
+  const int width = active - min_len + 1;
+  int stride = state->stride > 1 ? state->stride : 1;
+  if (stride > width) stride = width;
+  /* floor(width/stride) is the smallest per-occasion narrow batch. Exclusions
+   * and a preferred length can reduce it to one; use the conservative bound. */
+  int narrow = width / stride;
+  if (state->preferred_len || state->secondary_excluded_len || state->tertiary_excluded_len)
+    narrow = 1;
+  const unsigned minimum = (20 + narrow - 1) / narrow;
+  const unsigned every = wide_probe_every > minimum ? wide_probe_every : minimum;
+  if (((uint64_t)state->feed_serial + 1) % every != 0)
+    return 0;
+  return 64 + state->wide_probe_cursor % (max_len - 63);
+}
+
+int nr_pdcch_dci_length_batch_lengths(const nr_pdcch_dci_length_sweep_state_t *state,
+                                    int min_len, int max_len, int *out)
+{
+  if (!state || !out || min_len < 1 || max_len > NR_DCI_MAX_PAYLOAD || min_len > max_len)
+    return 0;
+  const int active = nr_pdcch_dci_length_active_max(state, min_len, max_len);
+  int n = 0;
+  for (int len = min_len; len <= active; ++len) out[n++] = len;
+  const int probe = wide_probe_length(state, min_len, max_len);
+  if (probe) out[n++] = probe;
+  return n;
+}
+
+uint64_t nr_pdcch_dci_length_wide_probes(void)
+{
+  return atomic_load_explicit(&wide_probes, memory_order_relaxed);
 }
 
 int nr_pdcch_dci_length_order(int min_len, int max_len, int *out)
@@ -395,6 +443,9 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   if (min_len < 1) min_len = 1;
   if (max_len > NR_DCI_MAX_PAYLOAD) max_len = NR_DCI_MAX_PAYLOAD;
   if (min_len > max_len) return -1;
+  const int evidence_max = max_len;
+  const int probe = wide_probe_length(state, min_len, max_len);
+  if (probe) ++state->wide_probe_cursor;
   max_len = nr_pdcch_dci_length_active_max(state, min_len, max_len);
   state->round_max = max_len;
   bool full_round_completed = false;
@@ -452,9 +503,14 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   if (state->resume_len)
     for (int i = 0; i < state->order_count; ++i)
       if (state->order[i] == state->resume_len) initial_index = i;
-  for (int index = initial_index; prefer || index < state->order_count; index += stride) {
-    const int len = prefer ? prefer : state->order[index];
-    if (len < min_len || len > max_len) continue;
+  /* Probe first so a deadline cannot permanently starve wide discovery. It does
+   * not advance the narrow rotation or its resume cursor. Interrupted probe work
+   * is discarded; the next probe occasion advances to the next wide length. */
+  for (int index = probe ? -1 : initial_index; prefer || index < state->order_count;
+       index = index < 0 ? initial_index : index + stride) {
+    const bool probing = index < 0;
+    const int len = probing ? probe : (prefer ? prefer : state->order[index]);
+    if (len < min_len || (!probing && len > max_len)) continue;
     if (len == state->tertiary_excluded_len || (state->secondary_excluded_len
         && (len == state->excluded_len || len == state->secondary_excluded_len))) continue;
     const int initial_trial=(state->resume_len==len) ? state->resume_trial : 0;
@@ -465,7 +521,12 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
         clock_gettime(CLOCK_MONOTONIC,&now);
         stop |= (uint64_t)now.tv_sec*1000000000ull+(uint64_t)now.tv_nsec >= deadline_ns;
       }
-      if (stop) { state->resume_len=len; state->resume_trial=t; goto score_evidence; }
+      if (stop) {
+        if (!probing) { state->resume_len=len; state->resume_trial=t; }
+        goto score_evidence;
+      }
+      if (probing && t == 0)
+        atomic_fetch_add_explicit(&wide_probes, 1, memory_order_relaxed);
       ++completed;
       uint16_t rnti = 0;
       uint32_t payload_hash = 0;
@@ -483,7 +544,7 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
       add_distinct_hash(state->hashes[len], &state->n_distinct[len], payload_hash);
       add_rnti_evidence(state, len, rnti, payload_hash, feed_serial);
     }
-    if (prefer) break;
+    if (prefer && !probing) break;
   }
   state->resume_len=state->resume_trial=0;
   /* One ROUND -- every length visited once -- is what the caller's give-up cap counts, so the
@@ -505,7 +566,7 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
 score_evidence:;
   int    best_len   = -1;
   double best_score = 0.0;
-  for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
+  for (int len = min_len; len <= evidence_max && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
     if (state->passes[len] == 0 || len == state->excluded_len
         || len == state->secondary_excluded_len || len == state->tertiary_excluded_len) {
       continue;
@@ -568,11 +629,13 @@ score_evidence:;
   if (full_round_completed && best_len < 0 && min_len <= 63) {
     bool stage_one_exhausted = true;
     for (int len = min_len; len <= 63 && len <= max_len; ++len)
-      if (state->trials[len] < MIN_TRIALS_FOR_STATISTICAL_LOCK) {
+      if (len != state->tertiary_excluded_len
+          && !(state->secondary_excluded_len && (len == state->excluded_len || len == state->secondary_excluded_len))
+          && state->trials[len] < MIN_TRIALS_FOR_STATISTICAL_LOCK) {
         stage_one_exhausted = false;
         break;
       }
-    if (stage_one_exhausted) state->wide_range = true;
+    if (stage_one_exhausted) state->stage_one_exhausted = true;
   }
   nr_pdcch_dci_length_note_seen(best_len);
   return best_len;

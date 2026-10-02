@@ -2084,6 +2084,14 @@ result epoch checks. Required targets built; full ctest 125/134 (documented ARM/
 GPU result guards and stable-cell false-trigger targets await orchestrated validation. Per-finding evidence,
 shuffle results and exact deferred commands: [R8b report](docs/superpowers/reports/rr/R8b.md).
 
+[OFFLINE VERIFIED, DGX aarch64, 2026-10-02, rr/reconfig-robustness] R2d bounds exhausted
+DCI sweeps to 30..63 plus one low-duty wide probe (140-bit capacity remains default).
+`ISAC_DCI_WIDE_PROBE_EVERY` defaults to 1 with a stride-aware <=5% work-count bound;
+`dci_wide_probes` is added to the blind summary. Required builds passed; full CTest
+127/135 (only documented ARM/sandbox failures), touched shuffle seeds 1/3/5 passed.
+[IMPLEMENTED, NOT VALIDATED on live traffic/GPU] The orchestrator's measured Phase-1
+regression and exact deferred CPU/GPU commands are in [R2d](docs/superpowers/reports/rr/R2d.md).
+
 ## 25. Next steps on the DGX Spark (strict order)
 
 **Progress 2026-09-30:** steps 1–4 **done** (§4.2). Step 5: OAI build done (UHD 4.11 installed; X410 compat still to

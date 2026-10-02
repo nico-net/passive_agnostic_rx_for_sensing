@@ -752,27 +752,143 @@ TEST(DciLengthSweep, ColdRoundStaysNarrowAcrossStrideAndBudget) {
   while (state.occasions_fed < 2)
     nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 2, 30, 140, 0);
   for (int len = 64; len <= 140; ++len) EXPECT_EQ(state.trials[len], 0);
-  EXPECT_FALSE(state.wide_range);
+  EXPECT_FALSE(state.stage_one_exhausted);
   nr_pdcch_dci_length_seen_reset();
 }
 
-TEST(DciLengthSweep, ColdRangeWidensAfterEveryStageOneLengthHasEnoughTrials) {
+TEST(DciLengthSweep, ColdRangeEnablesProbesAfterEveryStageOneLengthHasEnoughTrials) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
   auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
   for (int round = 0; round < 255; ++round)
     EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0), -1);
-  EXPECT_FALSE(state.wide_range);
+  EXPECT_FALSE(state.stage_one_exhausted);
   EXPECT_EQ(nr_pdcch_dci_length_active_max(&state, 30, 140), 63);
   for (int len = 30; len <= 63; ++len) EXPECT_EQ(state.trials[len], 255);
   EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0), -1);
-  EXPECT_TRUE(state.wide_range);
+  EXPECT_TRUE(state.stage_one_exhausted);
   nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
+  EXPECT_EQ(nr_pdcch_dci_length_active_max(&state, 30, 140), 63);
+  EXPECT_EQ(state.trials[64], 1);
+  for (int len = 65; len <= 140; ++len) EXPECT_EQ(state.trials[len], 0);
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, ExhaustedStage1ProbesWideAtLowDuty) {
+  nr_pdcch_dci_length_seen_reset();
+  for (int stride : {1, 8, 34}) {
+    nr_pdcch_dci_length_sweep_state_t state{};
+    state.stride = stride;
+    auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
+    for (int i = 0; i < 256 * stride; ++i)
+      nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
+    const auto before = state.decodes;
+    constexpr int k = 20 * 34 * 77;
+    for (int i = 0; i < k; ++i)
+      nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
+    const uint64_t narrow = k * 34 / stride;
+    EXPECT_LE(state.decodes - before, narrow * 1.05);
+    EXPECT_GT(state.trials[140], 0);
+    EXPECT_EQ(nr_pdcch_dci_length_active_max(&state, 30, 140), 63);
+  }
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, WideProbeFindsLength100) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_sweep_state_t state{};
+  unsigned serial = 0;
+  auto scorer = [](int len, int, uint16_t *rnti, uint32_t *hash, void *ctx) -> bool {
+    if (len != 100) return false;
+    *rnti = 0x4b31;
+    *hash = ++*static_cast<unsigned *>(ctx);
+    return true;
+  };
+  // Two candidates per occasion exhaust stage 1 in 128 occasions. Length 100
+  // is probe 37, then repeats every 77 probes. Five distinct occasion votes:
+  // 128 + 37 + 4*77 = 473 occasions (inside the live default 500-round dwell).
+  constexpr int bound = 128 + 37 + 4 * 77;
+  int found = -1;
+  for (int i = 0; i < bound && found < 0; ++i) {
+    EXPECT_EQ(nr_pdcch_dci_length_active_max(&state, 30, 140), 63);
+    found = nr_pdcch_dci_length_sweep_feed(&state, scorer, &serial, 2, 30, 140, 0);
+  }
+  EXPECT_EQ(found, 100);
+  EXPECT_EQ(state.max_rnti_distinct[100], 5);
+  EXPECT_LT(state.decodes, uint64_t(bound) * 35 * 2);
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, LanesNeverBatchFullWideRangeWithoutEvidence) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_sweep_state_t state{};
+  state.stage_one_exhausted = true;
+  struct Visit { bool batch[141]; int wide; } visit{};
+  auto scorer = [](int len, int, uint16_t *, uint32_t *, void *ctx) -> bool {
+    auto *v = static_cast<Visit *>(ctx);
+    EXPECT_TRUE(v->batch[len]) << len;
+    if (len > 63) ++v->wide;
+    return false;
+  };
+  int probes = 0;
+  for (int i = 0; i < 77; ++i) {
+    visit = {};
+    int lengths[141];
+    const int n = nr_pdcch_dci_length_batch_lengths(&state, 30, 140, lengths);
+    ASSERT_GE(n, 34);
+    ASSERT_LE(n, 35);
+    for (int j = 0; j < n; ++j) visit.batch[lengths[j]] = true;
+    nr_pdcch_dci_length_sweep_feed(&state, scorer, &visit, 1, 30, 140, 0);
+    EXPECT_EQ(visit.wide, n - 34);
+    probes += visit.wide;
+  }
+  EXPECT_EQ(probes, 77);
   for (int len = 64; len <= 140; ++len) EXPECT_EQ(state.trials[len], 1);
   nr_pdcch_dci_length_seen_reset();
 }
 
-TEST(DciLengthSweep, WideSeenLengthEnablesColdWideRound) {
+TEST(DciLengthSweep, WideProbeCadenceFromEnv) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  EXPECT_EXIT(([]{
+    setenv("ISAC_DCI_WIDE_PROBE_EVERY", "32", 1);
+    unsetenv("ISAC_DCI_LEN_MAX");
+    nr_pdcch_dci_length_seen_reset();
+    nr_pdcch_dci_length_sweep_state_t state{};
+    state.stage_one_exhausted = true;
+    auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
+    const auto before = nr_pdcch_dci_length_wide_probes();
+    for (int i = 0; i < 64; ++i) {
+      int lengths[141];
+      EXPECT_EQ(nr_pdcch_dci_length_batch_lengths(&state, 30, 140, lengths),
+                (i + 1) % 32 == 0 ? 35 : 34);
+      nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
+    }
+    EXPECT_EQ(state.trials[64], 1);
+    EXPECT_EQ(state.trials[65], 1);
+    EXPECT_EQ(nr_pdcch_dci_length_wide_probes() - before, 2u);
+    _exit(::testing::Test::HasFailure() ? 1 : 0);
+  }()), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(DciLengthSweep, WideProbesRespectBudgetAndNarrowResume) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_sweep_state_t state{};
+  state.stage_one_exhausted = true;
+  state.stride = 3;
+  auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
+  for (int i = 0; i < 200; ++i) {
+    const auto before = state.decodes;
+    nr_pdcch_dci_length_sweep_feed_budget(&state, scorer, nullptr, 2, 30, 140, 0, 0, 7);
+    EXPECT_LE(state.decodes - before, 7u);
+    EXPECT_LE(state.resume_len, 63);
+  }
+  EXPECT_GT(state.occasions_fed, 0);
+  for (int len = 30; len <= 63; ++len) EXPECT_GT(state.trials[len], 0);
+  EXPECT_GT(state.trials[100], 0);
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, SeenWideLengthWidensImmediately) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(100);
   nr_pdcch_dci_length_sweep_state_t state{};
