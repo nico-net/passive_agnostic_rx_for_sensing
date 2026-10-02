@@ -2821,12 +2821,58 @@ TEST(PdschBc9FastPath, UndecodableSiblingSkipIsBounded)
   Pick k;
   int i = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
   ASSERT_EQ(k, NR_TD_PICK_SIBLING);
+  const uint16_t before = s->sib_trials[i];
   nr_pdsch_config_sweep_sib_skip(s.get(), i); /* its slot was not captured */
+  EXPECT_EQ(s->sib_trials[i], before);        /* a skip is no sibling trial */
   nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
   EXPECT_NE(k, NR_TD_PICK_SIBLING); /* the RNTI does not stall on it: one normal pick */
   nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
   EXPECT_EQ(k, NR_TD_PICK_SIBLING); /* then the test resumes */
+  /* review M6: a sibling that stays undecodable ends the fast path (fail-safe) after a bounded number of skips */
+  for (int n = 0; n < 4 * NR_TD_SIB_SKIP_MAX && !s->sib_blocked; n++) { /* every other pick is a sibling */
+    i = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+    if (k == NR_TD_PICK_SIBLING)
+      nr_pdsch_config_sweep_sib_skip(s.get(), i);
+  }
+  EXPECT_TRUE(s->sib_blocked);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true), -1); /* KL only */
 }
+
+/* Review M8: a sibling test is a NEW-DATA trial; a retransmission (a possible HARQ trap) does not count toward N_sib. */
+TEST(PdschBc9FastPath, SiblingRetransmissionDoesNotCount)
+{
+  auto s = fp_state(true, false, 0.05f);
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_cfg_hypothesis_t h;
+  Pick k;
+  const int i = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+  ASSERT_EQ(k, NR_TD_PICK_SIBLING);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), i, &i, 1, false, false, NR_TD_PICK_SIBLING, true);
+  EXPECT_EQ(s->sib_trials[i], 0);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), i, &i, 1, false, true, NR_TD_PICK_SIBLING, true);
+  EXPECT_EQ(s->sib_trials[i], 1);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), i, &i, 1, true, false, NR_TD_PICK_SIBLING, true);
+  EXPECT_TRUE(s->sib_blocked); /* any sibling pass still blocks (conservative) */
+}
+
+/* Review M5 / M3 runtime support: a lock-free epoch that moves whenever a persisted certification/exclusion can disappear
+ * (reopen, RNTI eviction, LRU eviction, reset), and the ticket carries its configuration key. */
+TEST_F(PdschBc9, ConstraintEpochMovesOnReopenAndTicketCarriesConfiguration)
+{
+  auto t = k39_fresh(0);
+  EXPECT_EQ(t.configuration, 0x1234u);
+  const uint64_t e0 = nr_pdsch_config_sweep_cert_epoch();
+  nr_td_excl_t f;
+  nr_td_excl_none(&f);
+  f.last[1] = -1;
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 0, &f), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_cert_epoch(), e0); /* adding a constraint never invalidates a cache */
+  nr_pdsch_config_sweep_reset_all();
+  EXPECT_NE(nr_pdsch_config_sweep_cert_epoch(), e0);
+}
+
 
 /* Runtime input of the certified flag: the ticket's hypothesis, its alive k0-sibling offsets and the alive MCS tables. */
 TEST_F(PdschBc9, TicketSiblingsReportsAliveK0OffsetsAndTables)

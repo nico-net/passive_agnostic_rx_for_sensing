@@ -539,13 +539,46 @@ static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
  * (2) TDD: the per-hypothesis exclusion of this DCI's row from the SIB1 common pattern (skipped when no verified SIB1
  *     pattern of this numerology is known: NSA, phy-test cells without SIB1);
  * (3) DCI adjacency: k0 values made impossible by a row whose k0 is certified (A1-A3, nr_dci_history.h).
- * ISAC_TD_DCI_ADJ=0 disables all of it (A/B; read once): no history (so no certified-flag census either), no exclusion. */
+ * ISAC_TD_DCI_ADJ=0 disables all of it (A/B; read once): no history (so no certified-flag census either), no SIB1 TDD
+ * per-hypothesis exclusion and no DCI-adjacency exclusion (review M9: the TDD exclusion is behind the same switch). */
 static uint64_t bc9_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
 {
   (void)arg;
   return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda);
 }
-static _Atomic uint64_t g_bc9_dcis, g_bc9_tdd, g_bc9_adj_rows, g_bc9_adj_removed, g_bc9_adj_refused;
+static _Atomic uint64_t g_bc9_dcis, g_bc9_tdd, g_bc9_tdd_applied, g_bc9_adj_rows, g_bc9_adj_removed, g_bc9_adj_refused;
+/* Review M5 cache: true when this exact constraint is known applied (no lock on g_lock); else applies it and caches it when
+ * it persisted (the RNTI is tracked by the sweep). Direct-mapped, own small lock. */
+#define BC9_TDD_CACHE 256
+static struct { uint64_t cfg, epoch; uint16_t rnti; uint8_t tda; bool valid; nr_td_excl_t ex; } g_bc9_tdd_cache[BC9_TDD_CACHE];
+static pthread_mutex_t g_bc9_tdd_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool bc9_tdd_cached(uint16_t rnti, uint64_t cfg, uint8_t tda, const nr_td_excl_t *ex)
+{
+  uint64_t hsh = cfg * UINT64_C(0x9E3779B97F4A7C15) ^ ((uint64_t)rnti << 8) ^ tda;
+  for (int k = 0; k <= NR_TD_K0_MAX; k++)
+    hsh = hsh * 31 + (uint8_t)ex->last[k];
+  const int i = (int)((hsh ^ (hsh >> 29)) % BC9_TDD_CACHE);
+  const uint64_t epoch = nr_pdsch_config_sweep_cert_epoch(); /* read BEFORE applying: a concurrent drop invalidates */
+  pthread_mutex_lock(&g_bc9_tdd_cache_lock);
+  const bool hit = g_bc9_tdd_cache[i].valid && g_bc9_tdd_cache[i].epoch == epoch && g_bc9_tdd_cache[i].rnti == rnti
+                   && g_bc9_tdd_cache[i].cfg == cfg && g_bc9_tdd_cache[i].tda == tda
+                   && !memcmp(g_bc9_tdd_cache[i].ex.last, ex->last, sizeof(ex->last));
+  pthread_mutex_unlock(&g_bc9_tdd_cache_lock);
+  if (hit)
+    return true;
+  nr_pdsch_config_sweep_exclude_key(cfg, rnti, tda, ex);
+  if (nr_pdsch_config_sweep_rnti_constrained(rnti, cfg)) { /* persisted: safe to skip next time */
+    pthread_mutex_lock(&g_bc9_tdd_cache_lock);
+    g_bc9_tdd_cache[i].valid = true;
+    g_bc9_tdd_cache[i].epoch = epoch;
+    g_bc9_tdd_cache[i].rnti = rnti;
+    g_bc9_tdd_cache[i].cfg = cfg;
+    g_bc9_tdd_cache[i].tda = tda;
+    g_bc9_tdd_cache[i].ex = *ex;
+    pthread_mutex_unlock(&g_bc9_tdd_cache_lock);
+  }
+  return false;
+}
 static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint32_t abs_slot, const NR_DL_FRAME_PARMS *fp, bool sweep)
 {
   static _Atomic int s_on = -1;
@@ -572,7 +605,11 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
     nr_td_excl_none(&ex);
     if (nr_passive_acq_tdd_pdsch_last_symbols(abs_slot, fp->numerology_index, NR_TD_K0_MAX + 1, ex.last)) {
       atomic_fetch_add(&g_bc9_tdd, 1);
-      nr_pdsch_config_sweep_exclude_key(cfg, e.rnti, e.tda, &ex); /* first: this row's own k0 set feeds the adjacency below */
+      /* first: this row's own k0 set feeds the adjacency below. Review M5: a periodic pattern repeats the same constraint
+       * every period, so a cache of applied (RNTI, configuration, row, constraint) skips g_lock until the sweep's
+       * constraint epoch moves (reopen / eviction / reset may have dropped it). */
+      if (!bc9_tdd_cached(e.rnti, cfg, e.tda, &ex))
+        atomic_fetch_add(&g_bc9_tdd_applied, 1);
     }
     uint64_t forbid[NR_DCI_HIST_ROWS] = {0};
     /* Fast path: without any certification / exclusion for this RNTI and configuration no row is certified, so no
@@ -602,9 +639,10 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
   if ((n % 20000) == 0) {
     uint64_t lt2 = 0, ge2 = 0, refused = 0;
     nr_pdsch_config_sweep_excl_stats(&lt2, &ge2, &refused);
-    LOG_A(PHY, "SENSING: BC9 DCIHIST dcis=%llu tdd_known=%d tdd_applied=%llu adj_rows=%llu adj_removed=%llu adj_refused=%llu "
+    LOG_A(PHY, "SENSING: BC9 DCIHIST dcis=%llu tdd_known=%d tdd_dcis=%llu tdd_lock_calls=%llu adj_rows=%llu adj_removed=%llu adj_refused=%llu "
                "excl_removed[k0<2]=%llu excl_removed[k0>=2]=%llu excl_refused=%llu%s\n",
           (unsigned long long)n, nr_passive_acq_tdd_known(), (unsigned long long)atomic_load(&g_bc9_tdd),
+          (unsigned long long)atomic_load(&g_bc9_tdd_applied),
           (unsigned long long)atomic_load(&g_bc9_adj_rows), (unsigned long long)atomic_load(&g_bc9_adj_removed),
           (unsigned long long)atomic_load(&g_bc9_adj_refused), (unsigned long long)lt2, (unsigned long long)ge2,
           (unsigned long long)refused, "");
@@ -6780,10 +6818,12 @@ constdiag_done:;
               nr_pdsch_passive_bc9_note(&sweep_ticket, out.rnti, abs_slot, &dlsch_pdu, (uint16_t)cfg->pdsch_xoverhead,
                                         st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;
-              if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
+              if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
                 LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
                       sweep_ticket.rnti, sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
                       winner.dmrs_mask, winner.mcs_table);
+                nr_pdsch_passive_bc9_converged(&sweep_ticket, winner.k0);
+              }
               /* Qm oracle, as the deferred consumer runs it: AFTER this trial's own feedback (a prune
                * re-indexes the catalog and retires outstanding tickets). */
               if (!sweep_ticket.settled && sweep_ticket.generation && dec.qm_measured)

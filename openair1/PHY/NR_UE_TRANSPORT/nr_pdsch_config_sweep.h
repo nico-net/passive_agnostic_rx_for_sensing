@@ -163,6 +163,7 @@ typedef struct {
   uint16_t sib_trials[NR_PDSCH_SWEEP_MAX_HYP];
   bool     sib_blocked;
   bool     sib_skip;   ///< BC9: the last sibling pick could not be decoded; the next pick is a normal one
+  uint16_t sib_skips;  ///< BC9 M6: skips since the last evidence restart; NR_TD_SIB_SKIP_MAX blocks the fast path
   struct { bool valid; uint64_t skey; uint8_t k0; } sib_t[2]; ///< pending sibling-test targets: [0] lever C leader, [1] lever P group
   /* CONFIGURATION, not catalog/evidence: preserved across catalog rebuilds (nr_pdsch_config_sweep_rebuild(),
    * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
@@ -277,6 +278,8 @@ int nr_pdsch_config_sweep_feed_attr_cx(nr_pdsch_config_sweep_state_t *st, int id
  *  No evidence; the next next_ex()/next_k_ex() call returns a normal pick instead of a sibling (at most every other pick is
  *  spent on an undecodable sibling, so the RNTI never stalls). A TDD-impossible sibling is excluded instead (it is gone). */
 void nr_pdsch_config_sweep_sib_skip(nr_pdsch_config_sweep_state_t *st, int idx);
+/** Review M6: after this many skips since the last evidence restart the fast path is blocked (fail-safe: KL decides). */
+#define NR_TD_SIB_SKIP_MAX 64
 
 /** Lever C threshold: smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6 (log domain, lgamma). m = 2 when
  *  n_alive <= 1 or t_max == 0; for t_max < m, C = 0 so m qualifies at once (result max(2, m)). */
@@ -377,6 +380,7 @@ typedef struct {
   bool settled; ///< this selection uses an already-converged context
   uint16_t layout_index; ///< DCI 1_1 layout (resolver index) this trial was decoded under; 0xFFFF = none
   uint8_t k0;            ///< the selected hypothesis' k0 (the consumer measures the oracle on slot + k0)
+  uint64_t configuration; ///< BC9 M3: the context's configuration key (matches the DCI history entry)
 } nr_pdsch_sweep_ticket_t;
 
 /** Thread-safe per-(configuration,RNTI,TDA) controller. No allocation or decoder work under lock.
@@ -450,6 +454,9 @@ bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_
                                            uint8_t *tables);
 /** True when some row of (rnti, configuration) carries a k0 certification or an exclusion (else every row's allowed set
  *  is the bare universe and no DCI-adjacency exclusion can follow). One lock; the accept hook's fast path. */
+/** Lock-free epoch: changes whenever a persisted certification / exclusion may have disappeared (reopen, RNTI or LRU eviction,
+ *  reset). Callers caching "constraint already applied" must drop the cache when it moves. */
+uint64_t nr_pdsch_config_sweep_cert_epoch(void);
 bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration);
 /** Diagnostics: hypotheses removed by exclusions with k0 < 2 / k0 >= 2 (probe layers), refused contradictions. */
 void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused);

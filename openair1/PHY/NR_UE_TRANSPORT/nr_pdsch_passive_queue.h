@@ -180,6 +180,9 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 /** BC9: census of the DCI-adjacency certified flag (nr_dci_hist_k0_certified) of one scored Technique D trial: how often a
  *  grant is k0-unambiguous for its hypothesis (f_S). Diagnostic only: the runtime feeds the KL rule, which never uses the
  *  flag; levers C/P (the flag's consumers, nr_pdsch_config_sweep_feed_attr_cx) are not enabled in the runtime. */
+/** BC9 review M3: the context converged on k0 = winner_k0; a certified pass recorded for another k0 of this (RNTI,
+ *  configuration, TDA) is an alarm (an A1/A3 violation or a compatibility bug): counted and logged. */
+void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0);
 void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
                                const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok);
 void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,

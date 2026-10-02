@@ -24,6 +24,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include "common/utils/LOG/log.h"
 
 /* OBSERVABILITY (2026-09-17). This module had NO logging at all, which made its central claim --
@@ -256,6 +257,7 @@ static inline void lever_c_restart(nr_pdsch_config_sweep_state_t *st)
   memset(st->sib_trials, 0, sizeof(st->sib_trials));
   st->sib_blocked = false;
   st->sib_skip = false;
+  st->sib_skips = 0;
   memset(st->sib_t, 0, sizeof(st->sib_t));
 }
 /* Bits of word w that belong to the live catalogue [0, n). */
@@ -430,6 +432,7 @@ static rnti_ctx_t g_rnti[RNTI_CTX_MAX];
 static obs_set_t g_obs;   /* cell-wide: observations two RNTIs agree on */
 static prior_t   g_prior; /* cell-wide: a prior two RNTIs converged on */
 static uint64_t g_generation, g_clock;
+static _Atomic uint64_t g_cert_epoch; /* BC9 M5: moves when a persisted certification / exclusion may disappear */
 
 /* MEASURED OTA 2026-09-25, lab cell: pure LRU-by-touch evicted the ONE real, continuously-scheduled
  * RNTI 5 times in a 200s run ("SWEEP: new per-RNTI context rnti=0x4768" x5), each eviction wiping its
@@ -479,8 +482,10 @@ static int cert_slot(rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
       if (r->cert[i].touched < r->cert[lru].touched)
         lru = i;
     }
-    if (slot < 0)
+    if (slot < 0) {
       slot = lru;
+      g_cert_epoch++; /* an LRU key is dropped */
+    }
     memset(&r->cert[slot], 0, sizeof(r->cert[slot]));
     r->cert[slot].cfg = cfg;
     r->cert[slot].tda = tda;
@@ -499,6 +504,7 @@ static void cert_set(rnti_ctx_t *r, uint64_t cfg, uint8_t tda, uint64_t mask)
 static void cert_clear(rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
 {
   const int i = cert_find(r, cfg, tda);
+  g_cert_epoch++;
   if (i >= 0)
     memset(&r->cert[i], 0, sizeof(r->cert[i]));
 }
@@ -531,6 +537,8 @@ static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
     return NULL;
   rnti_ctx_t *r = &g_rnti[victim];
   const uint16_t evicted = r->rnti;
+  if (rnti_has_cert(r))
+    g_cert_epoch++;
   const bool had_prior = r->prior.valid;
   memset(r, 0, sizeof(*r));
   r->rnti = rnti;
@@ -1104,7 +1112,7 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
    * wrong). Its test counts for the guard only: no KL evidence for a dormant hypothesis. */
   if (st != NULL && idx != NULL && n >= 1 && kind == NR_TD_PICK_SIBLING && idx[0] >= 0 && idx[0] < st->n_hyp && st->winner < 0
       && !active(st, idx[0])) {
-    if (st->sib_trials[idx[0]] < UINT16_MAX)
+    if (new_data && st->sib_trials[idx[0]] < UINT16_MAX) /* review M8: only new-data trials count */
       st->sib_trials[idx[0]]++;
     if (tb_crc_ok)
       st->sib_blocked = true;
@@ -1149,7 +1157,7 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
     return st->winner;
   since_pass_update(st, true, tb_crc_ok);
   if (kind == NR_TD_PICK_SIBLING) {
-    if (st->sib_trials[idx[0]] < UINT16_MAX)
+    if (new_data && st->sib_trials[idx[0]] < UINT16_MAX) /* review M8: a retransmission is no sibling test */
       st->sib_trials[idx[0]]++;
     if (tb_crc_ok) /* a sibling that passes may be the truth: the fast path is off until the next evidence restart */
       st->sib_blocked = true;
@@ -1230,8 +1238,11 @@ int nr_pdsch_config_sweep_feed_attr_cx(nr_pdsch_config_sweep_state_t *st, int id
 }
 void nr_pdsch_config_sweep_sib_skip(nr_pdsch_config_sweep_state_t *st, int idx)
 {
-  if (st != NULL && idx >= 0 && idx < st->n_hyp && st->winner < 0)
+  if (st != NULL && idx >= 0 && idx < st->n_hyp && st->winner < 0) {
     st->sib_skip = true;
+    if (++st->sib_skips >= NR_TD_SIB_SKIP_MAX)
+      st->sib_blocked = true; /* review M6: a sibling that stays undecodable cannot be cleared: fail safe to KL */
+  }
 }
 
 static int next_k_core(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[], nr_td_pick_t *kind,
@@ -1894,7 +1905,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   if (h >= 0)
     *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
                                        .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state->winner >= 0,
-                                       .k0=out->k0};
+                                       .k0=out->k0, .configuration=configuration};
   pthread_mutex_unlock(&g_lock);
   free(to_free);
   return h >= 0;
@@ -2133,6 +2144,10 @@ bool nr_pdsch_config_sweep_siblings_of(const nr_pdsch_config_sweep_state_t *st, 
       *sib_k0 |= UINT64_C(1) << st->hyp[i].k0;
   }
   return true;
+}
+uint64_t nr_pdsch_config_sweep_cert_epoch(void)
+{
+  return g_cert_epoch; /* atomic load, no lock */
 }
 bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration)
 {
@@ -2427,6 +2442,7 @@ void nr_pdsch_config_sweep_reset_all(void)
   /* Priors and observations are evidence derived from those contexts; keeping them across a reset
    * would let a cleared run inherit conclusions it can no longer justify. */
   memset(g_rnti, 0, sizeof(g_rnti));
+  g_cert_epoch++;
   memset(&g_obs, 0, sizeof(g_obs));
   g_prior.valid = false;
   /* Do not rewind generation: in-flight jobs from before reset must remain invalid. */

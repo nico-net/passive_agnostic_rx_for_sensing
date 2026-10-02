@@ -556,7 +556,46 @@ static uint64_t bc9_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
   (void)arg;
   return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda);
 }
-static _Atomic uint64_t g_bc9_jobs, g_bc9_cert, g_bc9_cert_ok, g_bc9_nosib, g_bc9_nodci, g_bc9_ok;
+static _Atomic uint64_t g_bc9_jobs, g_bc9_cert, g_bc9_cert_ok, g_bc9_nosib, g_bc9_nodci, g_bc9_ok, g_bc9_alarm;
+static _Atomic uint64_t g_bc9_cert_ok_k0[5]; /* certified passes by the hypothesis' k0: 0, 1, 2, 3, >= 4 */
+/* k0 values with a certified pass per (RNTI, configuration, TDA), checked against the winner on convergence (M3). */
+#define BC9_CPK 64
+static struct { uint64_t cfg, mask, touched; uint16_t rnti; uint8_t tda; } g_bc9_cpk[BC9_CPK];
+static uint64_t g_bc9_cpk_clock;
+static pthread_mutex_t g_bc9_cpk_lock = PTHREAD_MUTEX_INITIALIZER;
+static int bc9_cpk_find(uint16_t rnti, uint64_t cfg, uint8_t tda, bool create)
+{
+  int lru = 0;
+  for (int i = 0; i < BC9_CPK; i++) {
+    if (g_bc9_cpk[i].rnti == rnti && g_bc9_cpk[i].cfg == cfg && g_bc9_cpk[i].tda == tda && g_bc9_cpk[i].rnti)
+      return i;
+    if (g_bc9_cpk[i].touched < g_bc9_cpk[lru].touched)
+      lru = i;
+  }
+  if (!create)
+    return -1;
+  g_bc9_cpk[lru].rnti = rnti;
+  g_bc9_cpk[lru].cfg = cfg;
+  g_bc9_cpk[lru].tda = tda;
+  g_bc9_cpk[lru].mask = 0;
+  return lru;
+}
+void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0)
+{
+  if (ticket == NULL)
+    return;
+  pthread_mutex_lock(&g_bc9_cpk_lock);
+  const int i = bc9_cpk_find(ticket->rnti, ticket->configuration, ticket->tda_index, false);
+  const uint64_t other = i >= 0 ? g_bc9_cpk[i].mask & ~(UINT64_C(1) << (winner_k0 & 63)) : 0;
+  if (i >= 0)
+    g_bc9_cpk[i].rnti = 0;
+  pthread_mutex_unlock(&g_bc9_cpk_lock);
+  if (other) {
+    atomic_fetch_add(&g_bc9_alarm, 1);
+    LOG_W(PHY, "SENSING: BC9 DCIADJ_CERT ALARM rnti=0x%x tda=%u converged on k0=%u but certified passes were seen on k0 mask 0x%llx "
+               "(A1/A3 violation or compatibility bug)\n", ticket->rnti, ticket->tda_index, winner_k0, (unsigned long long)other);
+  }
+}
 void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
                                const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok)
 {
@@ -577,7 +616,7 @@ void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t r
   const int n = nr_dci_hist_at(dh, rnti, dci_abs_slot, g, 4);
   const nr_dci_hist_entry_t *gg = NULL;
   for (int i = 0; i < n && !gg; i++)
-    if (g[i].dci11 && g[i].tda == ticket->tda_index)
+    if (g[i].dci11 && g[i].tda == ticket->tda_index && g[i].cfg == ticket->configuration) /* review M3: same key */
       gg = &g[i];
   const uint64_t jobs = atomic_fetch_add(&g_bc9_jobs, 1) + 1;
   atomic_fetch_add(&g_bc9_ok, crc_ok);
@@ -593,15 +632,26 @@ void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t r
     if (nr_dci_hist_k0_certified(dh, gg, h.k0, sib, tables, &geo, rk, NULL)) {
       atomic_fetch_add(&g_bc9_cert, 1);
       atomic_fetch_add(&g_bc9_cert_ok, crc_ok);
+      if (crc_ok) {
+        atomic_fetch_add(&g_bc9_cert_ok_k0[h.k0 < 4 ? h.k0 : 4], 1);
+        pthread_mutex_lock(&g_bc9_cpk_lock);
+        const int ci = bc9_cpk_find(rnti, ticket->configuration, ticket->tda_index, true);
+        g_bc9_cpk[ci].mask |= UINT64_C(1) << (h.k0 & 63);
+        g_bc9_cpk[ci].touched = ++g_bc9_cpk_clock;
+        pthread_mutex_unlock(&g_bc9_cpk_lock);
+      }
     }
   }
   if ((jobs % 1000) == 0)
     LOG_A(PHY, "SENSING: BC9 DCIADJ_CERT trials=%llu certified=%llu (f_S=%.4f) certified_pass=%llu passes=%llu no_sibling=%llu "
-               "no_dci_in_history=%llu\n",
+               "no_dci_in_history=%llu certified_pass_by_k0[0,1,2,3,>=4]=%llu,%llu,%llu,%llu,%llu wrong_k0_alarms=%llu\n",
           (unsigned long long)jobs, (unsigned long long)atomic_load(&g_bc9_cert),
           (double)atomic_load(&g_bc9_cert) / (double)jobs, (unsigned long long)atomic_load(&g_bc9_cert_ok),
           (unsigned long long)atomic_load(&g_bc9_ok), (unsigned long long)atomic_load(&g_bc9_nosib),
-          (unsigned long long)atomic_load(&g_bc9_nodci));
+          (unsigned long long)atomic_load(&g_bc9_nodci), (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[0]),
+          (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[1]), (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[2]),
+          (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[3]), (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[4]),
+          (unsigned long long)atomic_load(&g_bc9_alarm));
 }
 
 void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
@@ -1204,10 +1254,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (credit_ok)
         nr_pdsch_passive_bc9_note(&job.sweep_ticket, job.rnti, job.dci_abs_slot, &job.dlsch_pdu, job.grant.nb_rb_oh,
                                   st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
-      if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
+      if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
               winner.dmrs_mask, winner.mcs_table);
+        nr_pdsch_passive_bc9_converged(&job.sweep_ticket, winner.k0);
+      }
       /* Qm-oracle prune runs AFTER this job's CRC feedback above: prune_tables() compacts and
        * re-indexes st->hyp[] without bumping the context generation, so pruning before the CRC
        * feedback for the SAME job would credit that outcome to a hypothesis index that has already

@@ -31,23 +31,27 @@ void nr_dci_hist_init(nr_dci_hist_t *h, uint32_t period)
   h->period = period;
 }
 
+/* period is set once by the receiver while readers may run: read and written atomically (review M2). */
+static inline uint32_t period_of(const nr_dci_hist_t *h) { return __atomic_load_n(&h->period, __ATOMIC_ACQUIRE); }
 int32_t nr_dci_hist_diff(const nr_dci_hist_t *h, uint32_t a, uint32_t b)
 {
-  if (!h->period)
+  const int64_t P = period_of(h);
+  if (!P)
     return (int32_t)(a - b);
-  int64_t d = ((int64_t)a - (int64_t)b) % (int64_t)h->period;
-  if (d > (int64_t)h->period / 2)
-    d -= h->period;
-  else if (d <= -(int64_t)h->period / 2)
-    d += h->period;
+  int64_t d = ((int64_t)a - (int64_t)b) % P;
+  if (d > P / 2)
+    d -= P;
+  else if (d <= -P / 2)
+    d += P;
   return (int32_t)d;
 }
 static uint32_t slot_add(const nr_dci_hist_t *h, uint32_t s, int32_t d)
 {
-  if (!h->period)
+  const int64_t P = period_of(h);
+  if (!P)
     return s + (uint32_t)d;
-  int64_t v = ((int64_t)s + d) % (int64_t)h->period;
-  return (uint32_t)(v < 0 ? v + h->period : v);
+  int64_t v = ((int64_t)s + d) % P;
+  return (uint32_t)(v < 0 ? v + P : v);
 }
 
 static nr_dci_hist_rnti_t *find_rnti(nr_dci_hist_t *h, uint16_t rnti)
@@ -283,6 +287,6 @@ void nr_dci_hist_global_init(uint32_t period)
 {
   nr_dci_hist_t *h = nr_dci_hist_global();
   pthread_mutex_lock(&h->lock);
-  h->period = period;
+  __atomic_store_n(&h->period, period, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&h->lock);
 }
