@@ -618,6 +618,8 @@ Model (new flags; all default to the v1 behaviour so v1 output stays byte-identi
   k0 sibling (notes §1.2 per-world occupant check; unseen neighbour ⇒ ambiguous; compatible neighbour ⇒ no information).
 - Counters: `false_passes`, `retx_trap_passes`, `k0_trap_passes` (physical), `certified_grants`, `dci_missed`,
   `dci_false`.
+- BC7 review carry-forward: model the runtime k0 ≥ 2 probe layers (added on a missed DM-RS observation, up to 17 layers)
+  so their cost under the K39 fix is visible.
 - BC2b review carry-forwards: k0+1 and k0−1 sides decided separately (each neighbour slot has its own grant or none);
   bursty persistence (allocation runs, not i.i.d. per grant); MCS-change probability per slot; TDD UL slots carry no
   PDSCH; arms with adjacency fraction ∈ {0, 0.5, 1}; a wrong-field injection that differs **only in k0**
@@ -641,6 +643,14 @@ DCI unseen ⇒ ambiguous; compatible neighbour allocation ⇒ no k0 information;
 exclusion (`certify_k0`). Soundness conditions to state in the header (notes §1.5): one PDSCH per RNTI per slot, PDCCH
 false-accept rate bound, truth in the catalogue.
 
+- BC7 review carry-forward (binding): certification is scoped per (configuration, rnti, tda) context (k0 is a per-TDRA-row
+  field); TDD / slot-format exclusion is a **per-hypothesis predicate** on (S, L, k0) against the DL symbols of slot
+  s + k0 (a mixed slot excludes only entries ending after its DL symbols), applied through a per-context hard-exclusion
+  call, not a k0 mask; DCI adjacency may use neighbour rows whose k0 is already certified (e.g. a slot-7 tda2 DCI with
+  k0 certified 0 occupies slot 7, ruling out k0 = 1 entries of a slot-6 tda0 grant under one-PDSCH-per-RNTI-per-slot);
+  re-measure the rfsim gate (106 PRB, default K39 fix) reporting per-context ttc (tda0, tda2) and `ldpc_zero_tb`;
+  the k0 ≥ 2 probe layers (ISAC_PDSCH_K0_PROBE) are no longer removed by DM-RS observations — exclude them by TDD/DCI
+  evidence where possible and count them.
 - BC2b review carry-forward: the k0-sibling guard may ignore a dormant sibling only when its dormancy cause certifies k0
   (GEOM after a guarded pin, DCI-adjacency / TDD `certify_k0`); siblings dormant through PRIOR/FIELD must be tested or
   block. Sibling liveness: a sibling that cannot be decoded (TDD UL slot, slot not captured) must not stall the RNTI —
