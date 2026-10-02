@@ -8,6 +8,7 @@ Flags are nr_td_sim flags without the leading "--" and with "_" or "-" (e.g. "w-
 Writes <out>/results.jsonl (one line per RNTI, tagged arm/cell/rx) and <out>/summary.md.
 All numbers are SIMULATED (nr_td_sim), never MEASURED. Cold = first two RNTIs of an acquisition, steady = later ones.
 Lever columns (geom_pins, geom_blocks, crc_accepts: lever P / lever C events) come from the simulator summary and are 0 when the levers are off.
+Slot-model (v2) columns (k0_trap_passes = PHYSICAL shifted-slot trap passes, dci_*, certified_*, adj_frac = grants with a same-RNTI PDSCH in an adjacent slot, truth k0=N subsets as n/wrong/undecidable) are 0 without --slot-model.
 Field-book-2 columns (fail_opens, active_start_mean, recovery_*, untrusted_after) come from the simulator summary and are 0 / -1 (recovery, no injection) when absent.
 """
 import argparse, itertools, json, os, statistics, subprocess, sys
@@ -70,6 +71,8 @@ def main(argv=None):
                     cold = [r["seconds"] for r in ok if r["rnti_rank"] < 2]
                     steady = [r["seconds"] for r in ok if r["rnti_rank"] >= 2]
                     allsec = [r["seconds"] for r in ok]
+                    k1 = [r for r in recs if r.get("truth_k0") == 1]  # slot model only (key absent otherwise)
+                    k0 = [r for r in recs if r.get("truth_k0") == 0]
                     tab = {}
                     for t in (0, 1, 2):
                         v = [r["seconds"] for r in ok if r.get("truth_table") == t]
@@ -83,16 +86,20 @@ def main(argv=None):
                                  summ.get("false_passes", 0), summ.get("fail_opens", 0), summ.get("active_start_mean", 0),
                                  summ.get("recovery_grants", 0), summ.get("recovery_rntis", 0), sum(r.get("withdrawals", 0) for r in recs),
                                  summ.get("untrusted_after", 0), summ.get("geom_pins", 0), summ.get("geom_blocks", 0),
-                                 summ.get("crc_accepts", 0)))
+                                 summ.get("crc_accepts", 0), summ.get("k0_trap_passes", 0), summ.get("dci_missed", 0), summ.get("dci_false", 0),
+                                 summ.get("certified_grants", 0), summ.get("certified_wrong", 0),
+                                 summ.get("adj_grants", 0) / summ["proc_grants"] if summ.get("proc_grants") else 0.0,
+                                 "%d/%d/%d" % (len(k1), sum(r["wrong"] for r in k1), sum(r["undecidable"] for r in k1)),
+                                 "%d/%d/%d" % (len(k0), sum(r["wrong"] for r in k0), sum(r["undecidable"] for r in k0))))
     with open(os.path.join(a.out, "summary.md"), "w") as sf:
         sf.write("[SIMULATED, nr_td_sim] cold = first two RNTIs per acquisition; steady = later RNTIs; seconds = grants / grants-per-s.\n"
                  "Undecidable (capped) RNTIs are censored: excluded from medians/means/p95, counted in the undecidable column.\n"
                  "Medians are quantised (separation is checked every 16 trials): prefer the mean columns.\n"
                  "tbl N = truth mcs_table N as count/median s/mean s/wrong.\n\n")
-        sf.write("| arm | cell | rx | oracle | cold median s | cold p95 s | steady median s | cold mean s | steady p95 s | steady mean s | mean s | mean grants | wrong | undecidable | n_full | n_probe | gated | tbl 0 | tbl 1 | tbl 2 | oracle_miss_rntis | oracle_wrong_rntis | harq_trap_passes | false_passes | fail_opens | active_start_mean | recovery_grants | recovery_rntis | withdrawals | untrusted_after | geom_pins | geom_blocks | crc_accepts |\n")
-        sf.write("|---" * 33 + "|\n")
+        sf.write("| arm | cell | rx | oracle | cold median s | cold p95 s | steady median s | cold mean s | steady p95 s | steady mean s | mean s | mean grants | wrong | undecidable | n_full | n_probe | gated | tbl 0 | tbl 1 | tbl 2 | oracle_miss_rntis | oracle_wrong_rntis | harq_trap_passes | false_passes | fail_opens | active_start_mean | recovery_grants | recovery_rntis | withdrawals | untrusted_after | geom_pins | geom_blocks | crc_accepts | k0_trap_passes | dci_missed | dci_false | certified_grants | certified_wrong | adj_frac | truth k0=1 n/wrong/undec | truth k0=0 n/wrong/undec |\n")
+        sf.write("|---" * 41 + "|\n")
         for r in rows:
-            sf.write("| %s | %s | %d | %s | %.1f | %.1f | %.1f | %.2f | %.1f | %.2f | %.2f | %.0f | %d | %d | %d | %d | %d | %s | %s | %s | %d | %d | %d | %d | %d | %.1f | %.1f | %.2f | %d | %d | %d | %d | %d |\n" % r)
+            sf.write("| %s | %s | %d | %s | %.1f | %.1f | %.1f | %.2f | %.1f | %.2f | %.2f | %.0f | %d | %d | %d | %d | %d | %s | %s | %s | %d | %d | %d | %d | %d | %.1f | %.1f | %.2f | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %.3f | %s | %s |\n" % r)
     return 0
 
 

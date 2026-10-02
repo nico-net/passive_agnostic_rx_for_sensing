@@ -11,12 +11,13 @@ acq = int(d["--acq"]); sib = int(d.get("--sib1", 0)); rx = int(d["--n-rx"])
 for i in range(acq):
     for k in range(4):
         print(json.dumps({"acq": i, "rnti_rank": k, "grants": 100, "seconds": 10.0 * (1 + sib) + (0 if k < 2 else -5),
-                          "truth_table": k % 3, "winner_ok": True, "wrong": int(rx == 1 and i == 0 and k == 0), "undecidable": int(i == 1 and k == 3),
+                          "truth_table": k % 3, "truth_k0": k % 2, "winner_ok": True, "wrong": int(rx == 1 and i == 0 and k == 0), "undecidable": int(i == 1 and k == 3),
                           "n_full": 100, "n_probe": 200, "gated_phys": 1, "gated_chan": 2, "promotions": 0, "withdrawals": int(k == 1),
                           "oracle_state": "miss" if (k == 0 and i == 0) else ("wrong" if (k == 1 and i == 0) else "ok")}))
 print(json.dumps({"summary": {"acq": acq, "harq_trap_passes": 7, "false_passes": 2,
                                   "fail_opens": 5, "active_start_mean": 12.5, "recovery_grants": 321.0, "recovery_rntis": 2.5, "untrusted_after": 3,
-                                  "geom_pins": 11, "geom_blocks": 4, "crc_accepts": 9}}))
+                                  "geom_pins": 11, "geom_blocks": 4, "crc_accepts": 9, "k0_trap_passes": 13, "dci_missed": 14, "dci_false": 15,
+                                  "certified_grants": 16, "certified_wrong": 17, "adj_grants": 50, "proc_grants": 200}}))
 """
 
 
@@ -73,6 +74,16 @@ class Campaign(unittest.TestCase):
         self.assertEqual(row["geom_pins"], "11")
         self.assertEqual(row["geom_blocks"], "4")
         self.assertEqual(row["crc_accepts"], "9")
+        # slot-model columns (BC8): summary values pass through, adj_frac = adj/proc, truth-k0 subsets n/wrong/undecidable
+        self.assertEqual(row["k0_trap_passes"], "13")
+        self.assertEqual(row["dci_missed"], "14")
+        self.assertEqual(row["dci_false"], "15")
+        self.assertEqual(row["certified_grants"], "16")
+        self.assertEqual(row["certified_wrong"], "17")
+        self.assertEqual(row["adj_frac"], "0.250")
+        # k % 2 == 1 -> ranks 1, 3 -> 6 RNTIs, undecidable one (acq 1 rank 3); rx 4: wrong 0
+        self.assertEqual(row["truth k0=1 n/wrong/undec"], "6/0/1")
+        self.assertEqual(row["truth k0=0 n/wrong/undec"], "6/0/0")
 
 
 if __name__ == "__main__":

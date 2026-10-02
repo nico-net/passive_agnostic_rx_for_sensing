@@ -141,6 +141,237 @@ TEST(TdSim, HarqTrapPassesAreCounted) {
   SimCfg c = SimCfg::defaults(); c.acq = 5; c.oracle = 0; c.harq_trap = 0.05; c.rntis_per_acq = 1;
   EXPECT_GT(run_sim(c).harq_trap_passes, 0);
 }
+/* ---- Simulator v2 (BC8): slot model, physical k0 trap, DCI observation, TDD, certified flag ---- */
+static std::string td_run_cmd(const std::string &cmd)
+{
+  std::string out;
+  FILE *f = popen(cmd.c_str(), "r");
+  if (!f) return out;
+  char buf[4096];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+  pclose(f);
+  return out;
+}
+/* The v1 reference binary comes from NR_TD_SIM_REF (built at 77775006f2); the tested one is ./nr_td_sim next to this test (ctest cwd = build dir). */
+TEST(TdSimV2, SlotModelOffIsByteIdentical)
+{
+  const char *ref = getenv("NR_TD_SIM_REF");
+  if (!ref) GTEST_SKIP() << "NR_TD_SIM_REF (v1 reference binary) not set";
+  const char *arms[] = {"--oracle 0 --fieldbook 0", "--oracle 1 --fieldbook 0", "--oracle 0 --fieldbook 2", "--oracle 1 --fieldbook 2",
+                        "--oracle 0 --crc-accept 1 --geom-pin 1 --k0-trap-adj 0.3 --crc-false 1e-3 --equiv 0",
+                        "--oracle 1 --fieldbook 2 --inject-wrong-field 0"};
+  for (const char *a : arms) {
+    const std::string tail = std::string(" --acq 20 --seed 1 ") + a;
+    const std::string r = td_run_cmd(std::string(ref) + tail);
+    ASSERT_FALSE(r.empty()) << a;
+    EXPECT_EQ(r, td_run_cmd("./nr_td_sim" + tail)) << a;
+    /* the new flags at their explicit defaults change nothing */
+    EXPECT_EQ(r, td_run_cmd("./nr_td_sim" + tail + " --slot-model 0 --k0-oracle-legacy 1 --fo-always 0 --truth-k0 -1 --dci-miss 0 --dci-false 0")) << a;
+  }
+}
+TEST(TdSimV2, SlotKnobsAreInertWithTheSlotModelOff)
+{
+  SimCfg a = SimCfg::defaults(); a.acq = 20; a.seed = 9;
+  SimCfg b = a; b.grant_prob = 0.1; b.persist = 0.3; b.adjacency = 1.0; b.dci_miss = 0.5; b.dci_false = 0.5; b.tdd = "DDDSU";
+  const SimResult x = run_sim(a), y = run_sim(b);
+  EXPECT_EQ(x.total_grants, y.total_grants);
+  EXPECT_EQ(y.dci_missed + y.dci_false + y.proc_grants + y.certified_grants, 0);
+}
+TEST(TdSimV2, PersistentAllocationProducesK0Trap)
+{
+  /* oracle off: both k0 siblings alive. Full adjacency + persistence: the neighbour slot carries an identical allocation, the physical trap fires. */
+  SimCfg c = SimCfg::defaults(); c.acq = 6; c.seed = 3; c.oracle = 0; c.rntis_per_acq = 1; c.slot_model = 1; c.persist = 1.0; c.adjacency = 1.0; c.cap_s = 100;
+  EXPECT_GT(run_sim(c).k0_trap_passes, 0);
+  /* adjacency 0: never two consecutive grants, so the shifted slot is always empty and the trap can never fire (no random trap probability in v2) */
+  c.adjacency = 0.0;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.k0_trap_passes, 0);
+  EXPECT_EQ(r.adj_grants, 0);
+}
+TEST(TdSimV2, TrapNeedsAnIdenticalAllocation)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 6; c.seed = 3; c.oracle = 0; c.rntis_per_acq = 1; c.slot_model = 1; c.persist = 0.0; c.adjacency = 1.0; c.cap_s = 100;
+  const SimResult r = run_sim(c); /* persist 0: the neighbour's (mcs, rank, PRBs, rv) equal this grant's only by accident (~1e-3) */
+  SimCfg d = c; d.persist = 1.0;
+  EXPECT_LT(r.k0_trap_passes * 20, run_sim(d).k0_trap_passes + 1);
+}
+TEST(TdSimV2, TddWrongDirectionNeverCarriesPdsch)
+{
+  for (int k0 = 0; k0 <= 1; k0++) {
+    SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.tdd = "DDDSU"; c.adjacency = 1.0; c.dci_false = 1.0; c.persist = 0.5;
+    SlotTimeline tl(c, k0, 11, 12);
+    long n_ul = 0, n_pdsch = 0, n_spur = 0;
+    for (long s = 0; s < 4000; s++) {
+      const SimSlot sl = tl.slot(s);
+      if (!tl.dl(s)) {
+        n_ul++;
+        EXPECT_FALSE(sl.occ.present) << "PDSCH in a UL slot " << s;
+        EXPECT_FALSE(sl.spur) << "PDCCH (spurious DCI) in a UL slot " << s;
+        EXPECT_TRUE(tl.observed_dci(s).empty());
+      }
+      if (sl.occ.present) {
+        n_pdsch++;
+        EXPECT_TRUE(tl.dl(s - k0)) << "DCI of slot " << s << " would sit in a UL slot";
+      }
+      n_spur += sl.spur;
+    }
+    EXPECT_EQ(n_ul, 800); /* one U per 5 slots */
+    EXPECT_GT(n_pdsch, 0);
+    EXPECT_GT(n_spur, 0);
+  }
+  /* the pattern also holds end to end: grants/s fall with UL slots, nothing is generated for them */
+  SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.tdd = "DDDSU"; c.adjacency = 1.0; c.acq = 3; c.rntis_per_acq = 1; c.k0_oracle_legacy = 0;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.proc_grants, 0);
+  EXPECT_EQ(r.wrong, 0);
+  /* "UUUUD" has no DL slot whose previous slot is DL: a k0 = 1 truth can never be scheduled -> terminates undecidable (no hang) */
+  c.tdd = "UUUUD"; c.truth_k0 = 1; c.cap_s = 10;
+  const SimResult u = run_sim(c);
+  EXPECT_EQ(u.proc_grants, 0);
+  EXPECT_EQ(u.undecidable, u.acquisitions_rntis);
+}
+TEST(TdSimV2, UnseenNeighbourIsNeverCertified)
+{
+  SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.persist = 0.0; c.adjacency = 1.0; c.dci_miss = 0.5;
+  SlotTimeline tl(c, 0, 21, 22);
+  long certified = 0, unseen = 0, seen = 0;
+  for (long t = 4; t < 4000; t++) {
+    const SimSlot sl = tl.slot(t);
+    if (!sl.occ.present) continue;
+    for (int L = 0; L <= 1; L++) {
+      const long x = t + (L == 0 ? -1 : +1); /* the neighbour slot of the only sibling offset (k0 catalogue {0,1}) */
+      const bool nb_seen = !tl.observed_dci(x).empty();
+      const bool cert = sim_certified(tl, t, sl.occ.key, L, 0x3);
+      nb_seen ? seen++ : unseen++;
+      if (!nb_seen) EXPECT_FALSE(cert) << "t=" << t << " L=" << L;
+      certified += cert;
+    }
+  }
+  EXPECT_GT(unseen, 100);
+  EXPECT_GT(seen, 100);
+  EXPECT_GT(certified, 0); /* a SEEN, incompatible neighbour certifies */
+  EXPECT_LE(certified, seen);
+  /* every DCI missed: nothing is ever certified */
+  c.dci_miss = 1.0;
+  SlotTimeline none(c, 0, 21, 22);
+  for (long t = 4; t < 500; t++)
+    if (none.slot(t).occ.present) EXPECT_FALSE(sim_certified(none, t, none.slot(t).occ.key, 0, 0x3));
+}
+TEST(TdSimV2, CompatibleNeighbourGivesNoCertification)
+{
+  SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.persist = 1.0; c.adjacency = 1.0; c.dci_miss = 0.0;
+  SlotTimeline tl(c, 0, 5, 6);
+  long compat = 0, incompat = 0, cert_inc = 0;
+  for (long t = 4; t < 4000; t++) {
+    const SimSlot sl = tl.slot(t);
+    const SimSlot nb = tl.slot(t - 1); /* leader 0, sibling 1: the world "truth is 1" puts the occupant at t-1 */
+    ASSERT_TRUE(sl.occ.present && nb.occ.present);
+    const bool cert = sim_certified(tl, t, sl.occ.key, 0, 0x3);
+    if (sim_compat(nb.occ.key, sl.occ.key)) {
+      compat++;
+      EXPECT_FALSE(cert) << "compatible observed neighbour must give no certification, t=" << t;
+    } else {
+      incompat++;
+      cert_inc += cert; /* persist 1: only the rv differs; an incompatible (different rv) observed neighbour certifies */
+    }
+  }
+  EXPECT_GT(compat, 100);
+  EXPECT_GT(incompat, 100);
+  EXPECT_EQ(cert_inc, incompat);
+}
+TEST(TdSimV2, SpuriousDciCanCertifyWrongly)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 8; c.seed = 4; c.oracle = 0; c.rntis_per_acq = 1; c.slot_model = 1; c.persist = 1.0; c.adjacency = 1.0;
+  c.dci_miss = 0.5; c.cap_s = 100;
+  EXPECT_EQ(run_sim(c).certified_wrong, 0); /* soundness without false accepts: a miss only ever makes a grant ambiguous */
+  c.dci_false = 1.0;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.certified_wrong, 0); /* real DCI missed + incompatible spurious DCI stands in for it */
+  EXPECT_GT(r.dci_false, 0);
+  EXPECT_GT(r.dci_missed, 0);
+}
+TEST(TdSimV2, CertifiedGrantsAreCountedAndGrowWithObservation)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 6; c.seed = 4; c.oracle = 0; c.rntis_per_acq = 1; c.slot_model = 1; c.persist = 0.5; c.adjacency = 1.0; c.cap_s = 100;
+  const SimResult a = run_sim(c);
+  EXPECT_GT(a.certified_grants, 0);
+  EXPECT_EQ(a.certified_wrong, 0);
+  EXPECT_EQ(a.dci_missed, 0);
+  SimCfg m = c; m.dci_miss = 0.5;
+  const SimResult b = run_sim(m);
+  EXPECT_GT(b.dci_missed, 0);
+  EXPECT_LT((double)b.certified_grants / (double)b.proc_grants, (double)a.certified_grants / (double)a.proc_grants);
+}
+/* K39 in the simulator's own oracle model (BC7 -> BC8 ruling 3) */
+TEST(TdSimV2, AdjacentTrafficTrueK0OneSurvivesOracle)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 12; c.seed = 2; c.oracle = 1; c.truth_k0 = 1; c.slot_model = 1; c.adjacency = 1.0; c.k0_oracle_legacy = 0; c.cap_s = 60;
+  const SimResult r = run_sim(c);
+  ASSERT_GT(r.recs.size(), 0u);
+  for (const RntiRec &x : r.recs) {
+    EXPECT_EQ(x.truth_k0, 1);
+    EXPECT_GE(x.truth_kl_trials, 0) << "the true k0 = 1 hypothesis was pruned by the oracle (acq " << x.acq << " rank " << x.rnti_rank << ")";
+  }
+  EXPECT_EQ(r.wrong, 0);
+}
+TEST(TdSimV2, LegacyOracleWithAdjacentTrafficPrunesTrueK0One)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 12; c.seed = 2; c.oracle = 1; c.truth_k0 = 1; c.slot_model = 1; c.adjacency = 1.0; c.k0_oracle_legacy = 1; c.cap_s = 60;
+  const SimResult r = run_sim(c);
+  long pruned = 0;
+  for (const RntiRec &x : r.recs) pruned += x.truth_kl_trials < 0;
+  EXPECT_GT(pruned, 0);
+  EXPECT_GT(r.undecidable + r.wrong, 0); /* the bug: the true k0 is gone; the run either never decides or the trapped k0 = 0 sibling wins */
+  /* control: no adjacency => the DCI's own slot never carries a PDSCH for a k0 = 1 truth, the legacy oracle makes no k0 claim */
+  c.adjacency = 0.0;
+  const SimResult z = run_sim(c);
+  for (const RntiRec &x : z.recs) EXPECT_GE(x.truth_kl_trials, 0);
+  /* k0 = 0 truths: the legacy claim is correct, with or without adjacency */
+  c.truth_k0 = 0; c.adjacency = 1.0;
+  const SimResult o = run_sim(c);
+  for (const RntiRec &x : o.recs) EXPECT_GE(x.truth_kl_trials, 0);
+}
+TEST(TdSimV2, TruthK0FlagForcesTheTruth)
+{
+  for (int k0 = 0; k0 <= 1; k0++) {
+    SimCfg c = SimCfg::defaults(); c.acq = 10; c.truth_k0 = k0; c.slot_model = 1; c.rntis_per_acq = 1;
+    for (const RntiRec &x : run_sim(c).recs) EXPECT_EQ(x.truth_k0, k0);
+  }
+}
+TEST(TdSimV2, InjectWrongFieldThreeDiffersOnlyInK0AndRecovers)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 20; c.seed = 6; c.oracle = 0; c.fieldbook = 2; c.inject_wrong_field = 3; c.rntis_per_acq = 3; c.cap_s = 600;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.injected, c.acq);
+  EXPECT_EQ(r.inject_skipped, 0);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_GT(r.fail_opens, 0); /* the dormant true sibling can only be recovered by fail-open */
+}
+TEST(TdSimV2, FailOpenAlwaysFiresOutsideFieldbookTwoWhenPPinsAreActive)
+{
+  /* lever P active, fieldbook 0, sibling guard off + physical k0 trap: P pins wrong geometries; without --fo-always nothing reopens them */
+  SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 8; c.oracle = 0; c.rntis_per_acq = 1; c.geom_pin = 1; c.cap_s = 300; c.slot_model = 1;
+  c.adjacency = 1.0; c.persist = 1.0; c.sib_pmin = 0; c.fo_alpha = 0.3; c.fo_pmin = 0.5;
+  const SimResult off = run_sim(c);
+  EXPECT_EQ(off.fail_opens, 0);
+  EXPECT_GT(off.wrong_pins, 0);
+  c.fo_always = 1;
+  const SimResult on = run_sim(c);
+  EXPECT_GT(on.fail_opens, 0);
+  EXPECT_LT(on.wrong, off.wrong); /* a wrong pin can recover */
+}
+TEST(TdSimV2, DciObservationCounters)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 5; c.oracle = 1; c.slot_model = 1; c.rntis_per_acq = 2;
+  const SimResult z = run_sim(c);
+  EXPECT_EQ(z.dci_missed, 0);
+  EXPECT_EQ(z.dci_false, 0);
+  c.dci_miss = 0.3; c.dci_false = 0.3;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.dci_missed, 0);
+  EXPECT_GT(r.dci_false, 0);
+}
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
