@@ -653,7 +653,7 @@ int nr_pdsch_config_sweep_sib_n(int n_sib, double pmin, double eps)
 /* geometry key without k0: the sibling class of a lead */
 static inline uint64_t skey_of(const nr_pdsch_cfg_hypothesis_t *h)
 {
-  return nr_td_geom_key(h) & ~(UINT64_C(0xFF) << 8);
+  return nr_td_geom_key(h) & ~(UINT64_C(0x3F) << 8); /* k0 occupies bits 8..13; mapping_type (bit 14) stays in the key */
 }
 static inline bool is_sibling_of(const nr_pdsch_config_sweep_state_t *st, int i, uint64_t skey, uint8_t k0)
 {
@@ -903,6 +903,37 @@ static uint32_t fp_tmax_active(const nr_pdsch_config_sweep_state_t *st)
       t_max = st->fp_trials[i];
   return t_max;
 }
+int nr_pdsch_config_sweep_geom_groups(const nr_pdsch_config_sweep_state_t *st, int *n_groups, uint32_t *t_g_max)
+{
+  if (st == NULL || n_groups == NULL || t_g_max == NULL)
+    return -1;
+  uint64_t *keys = (uint64_t *)malloc((size_t)(st->n_hyp > 0 ? st->n_hyp : 1) * (sizeof(uint64_t) + sizeof(uint32_t)));
+  if (keys == NULL)
+    return -1;
+  uint32_t *sum = (uint32_t *)(keys + (st->n_hyp > 0 ? st->n_hyp : 1));
+  int ng = 0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    if (!active(st, i))
+      continue;
+    const uint64_t k = nr_td_geom_key(&st->hyp[i]);
+    int g = 0;
+    while (g < ng && keys[g] != k)
+      g++;
+    if (g == ng) {
+      keys[ng] = k;
+      sum[ng++] = 0;
+    }
+    sum[g] += st->fp_trials[i];
+  }
+  uint32_t mx = 0;
+  for (int g = 0; g < ng; g++)
+    if (sum[g] > mx)
+      mx = sum[g];
+  free(keys);
+  *n_groups = ng;
+  *t_g_max = mx;
+  return 0;
+}
 static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool count)
 {
   if (count) {
@@ -932,26 +963,15 @@ static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls,
   }
   if (st->n_geom < 1 || st->ok_geom[0] < 2) /* crc_accept_m() >= 2: nothing to test yet */
     return false;
-  /* m*(n_groups_active, T_max): distinct geometry keys among the ACTIVE hypotheses; T_max over their EXPLORE trials. */
-  const uint32_t t_max = fp_tmax_active(st);
+  /* m*(n_groups_active, T_g,max): ok_geom sums the explore passes of EVERY member of a group, so the trial count that bounds a wrong group
+   * is the SUM of fp_trials over its active members (T_g), maximised over the active groups. */
   int n_groups = 0;
-  uint64_t *keys = (uint64_t *)malloc((size_t)st->n_hyp * sizeof(uint64_t));
-  if (keys == NULL)
+  uint32_t t_g_max = 0;
+  if (nr_pdsch_config_sweep_geom_groups(st, &n_groups, &t_g_max) < 0)
     return false;
-  for (int i = 0; i < st->n_hyp; i++) {
-    if (!active(st, i))
-      continue;
-    const uint64_t k = nr_td_geom_key(&st->hyp[i]);
-    bool seen = false;
-    for (int j = 0; j < n_groups && !seen; j++)
-      seen = keys[j] == k;
-    if (!seen)
-      keys[n_groups++] = k;
-  }
-  free(keys);
   if (n_groups < 2) /* already a single geometry: nothing to pin (also keeps a no-op re-pin from running on every pass) */
     return false;
-  if (st->ok_geom[0] < (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_groups, t_max))
+  if (st->ok_geom[0] < (unsigned)nr_pdsch_config_sweep_crc_accept_m(n_groups, t_g_max))
     return false;
   const uint64_t g = st->geom_key[0];
   /* Lead condition holds. The k0 siblings of the group must have passed their sibling tests before the pin. */
@@ -1071,7 +1091,7 @@ int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const
 }
 int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data)
 {
-  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, NR_TD_PICK_EXPLORE);
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, NR_TD_PICK_EXPLOIT); /* legacy API: no pick kind => no fast-path evidence */
 }
 int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                        bool new_data, nr_td_pick_t kind)
@@ -1081,7 +1101,7 @@ int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int id
 int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                     bool new_data)
 {
-  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, NR_TD_PICK_EXPLORE);
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, NR_TD_PICK_EXPLOIT); /* legacy API (see feed_equiv) */
 }
 
 static int next_k_core(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[], nr_td_pick_t *kind,
@@ -1232,6 +1252,8 @@ void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool
   if (st != NULL && st->fail_open != on) {
     st->fail_open = on;
     st->since_pass = 0; /* the active set changed */
+    if (on) /* the GEOM mask is derived from fast-path evidence: fail-open discards the evidence, so the pin must not outlive it */
+      memset(st->dormant[NR_TD_DORMANT_GEOM], 0, sizeof(st->dormant[NR_TD_DORMANT_GEOM]));
     lever_c_restart(st);
   }
 }
@@ -1387,6 +1409,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   const bool fail_open = st->fail_open;
   uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
   memcpy(dormant, st->dormant, sizeof(dormant));
+  memset(dormant[NR_TD_DORMANT_GEOM], 0, sizeof(dormant[NR_TD_DORMANT_GEOM])); /* GEOM is derived from evidence (cleared by rebuild) */
   const nr_pdsch_config_sweep_state_t *t = legality ? catalog_template(typeA, legality) : NULL;
   if (t)
     memcpy(st, t, sizeof(*st));
@@ -1445,7 +1468,8 @@ static void reopen_context(sweep_context_t *c)
     context_catalog(c, rnti_ctx(c->rnti, false));
     c->priored = PRIORED_NONE;
   }
-  /* Keep the already checked legal catalog, but discard stale decoding evidence. */
+  /* Keep the already checked legal catalog, but discard stale decoding evidence (and the GEOM pin derived from it). */
+  memset(c->state->dormant[NR_TD_DORMANT_GEOM], 0, sizeof(c->state->dormant[NR_TD_DORMANT_GEOM]));
   memset(c->state->trials, 0, sizeof(c->state->trials));
   memset(c->state->ok, 0, sizeof(c->state->ok));
   clear_probe_stats(c->state);

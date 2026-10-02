@@ -1551,6 +1551,15 @@ TEST(PdschSweepDormant, K0LayerInheritsDormancy) {
 }
 
 /* ---- Lever C (BC2): CRC-pass acceptance, default off ---- */
+/* The legacy feed_equiv/feed_attr carry no pick kind and give no fast-path credit (EXPLOIT); the fast-path tests use the _ex forms with EXPLORE. */
+static int fe(nr_pdsch_config_sweep_state_t *s, const int *idx, int n, bool tb, bool nd)
+{
+  return nr_pdsch_config_sweep_feed_equiv_ex(s, idx, n, tb, nd, NR_TD_PICK_EXPLORE);
+}
+static int fa(nr_pdsch_config_sweep_state_t *s, int idx0, const int *cls, int n_cls, bool tb, bool nd)
+{
+  return nr_pdsch_config_sweep_feed_attr_ex(s, idx0, cls, n_cls, tb, nd, NR_TD_PICK_EXPLORE);
+}
 TEST(PdschSweepCrcAccept, MValues)
 {
   EXPECT_EQ(nr_pdsch_config_sweep_crc_accept_m(10, 100), 2);
@@ -1563,9 +1572,9 @@ TEST(PdschSweepCrcAccept, TwoUniquePassesDecideWhenClean)
   nr_pdsch_config_sweep_init(s.get(), 4);
   s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int a = 7;
-  int w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  int w = fe(s.get(), &a, 1, true, true);
   EXPECT_EQ(w, -1);
-  w = nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  w = fe(s.get(), &a, 1, true, true);
   EXPECT_EQ(w, 7);
 }
 TEST(PdschSweepCrcAccept, SecondUniquePasserBlocksTheRule)
@@ -1574,9 +1583,9 @@ TEST(PdschSweepCrcAccept, SecondUniquePasserBlocksTheRule)
   nr_pdsch_config_sweep_init(s.get(), 4);
   s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int a = 7, b = 8;
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true, true);
-  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true), -1);
+  fe(s.get(), &a, 1, true, true);
+  fe(s.get(), &b, 1, true, true);
+  EXPECT_EQ(fe(s.get(), &a, 1, true, true), -1);
   EXPECT_TRUE(s->crc_accept_blocked);
 }
 TEST(PdschSweepCrcAccept, SharedPassIsNotUnique)
@@ -1585,8 +1594,8 @@ TEST(PdschSweepCrcAccept, SharedPassIsNotUnique)
   nr_pdsch_config_sweep_init(s.get(), 4);
   s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int cls[] = {7, 9};
-  nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), cls, 2, true, true);
+  fe(s.get(), cls, 2, true, true);
+  fe(s.get(), cls, 2, true, true);
   EXPECT_EQ(s->ok_unique[7], 0);
   EXPECT_EQ(s->winner, -1);
 }
@@ -1596,8 +1605,8 @@ TEST(PdschSweepCrcAccept, RetransmissionPassIsNotUnique)
   nr_pdsch_config_sweep_init(s.get(), 4);
   s->crc_accept = true; s->sib_pmin = 0; /* these tests exercise fix A only; the sibling guard has its own tests */
   const int a = 7;
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
-  EXPECT_EQ(nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, false), -1); /* HARQ retx of the same TB */
+  fe(s.get(), &a, 1, true, true);
+  EXPECT_EQ(fe(s.get(), &a, 1, true, false), -1); /* HARQ retx of the same TB */
   EXPECT_EQ(s->ok_unique[7], 1);
 }
 
@@ -1613,7 +1622,7 @@ static std::unique_ptr<nr_pdsch_config_sweep_state_t> crc_state()
 static void feed_new(nr_pdsch_config_sweep_state_t *s, const int *cls, int n, int times, int *last = nullptr)
 {
   for (int i = 0; i < times; i++) {
-    const int w = nr_pdsch_config_sweep_feed_equiv(s, cls, n, true, true);
+    const int w = fe(s, cls, n, true, true);
     if (last)
       *last = w;
   }
@@ -1714,7 +1723,7 @@ TEST(PdschSweepCrcAccept, LargeTUsesTmaxAndNActive)
   ASSERT_GT(s->n_hyp, 100);
   const int a = 7;
   for (int i = 0; i < 1000; i++) /* T_max ~ 1000 on another hypothesis, as failures */
-    nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, false, true);
+    fe(s.get(), &a, 1, false, true);
   if (s->winner >= 0)
     GTEST_SKIP() << "KL rule decided first";
   EXPECT_GE(nr_pdsch_config_sweep_crc_accept_m(s->n_hyp, 1000), 2);
@@ -1746,8 +1755,8 @@ TEST(PdschSweepGeomPin, TwoPassesPinTheGeometryReversibly)
   auto s = geom_state();
   const int a = 7;
   const uint64_t g = nr_td_geom_key(&s->hyp[a]);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
   for (int i = 0; i < s->n_hyp; i++)
     ASSERT_EQ(nr_pdsch_config_sweep_is_active(s.get(), i), nr_td_geom_key(&s->hyp[i]) == g);
   EXPECT_EQ(s->n_geom, 0); /* the pin's active-set change restarted the evidence */
@@ -1760,9 +1769,9 @@ TEST(PdschSweepGeomPin, SecondGeometryWithAPassBlocks)
   auto s = geom_state();
   const int a = 7, b = other_geom(s.get(), a);
   ASSERT_GE(b, 0);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
+  fe(s.get(), &b, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
   EXPECT_TRUE(s->geom_blocked);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
@@ -1770,8 +1779,8 @@ TEST(PdschSweepGeomPin, RetransmissionDoesNotCount)
 {
   auto s = geom_state();
   const int a = 7;
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, false);
+  fe(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, false);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
 TEST(PdschSweepGeomPin, FailedDecodeDoesNotCount)
@@ -1779,7 +1788,7 @@ TEST(PdschSweepGeomPin, FailedDecodeDoesNotCount)
   auto s = geom_state();
   const int a = 7;
   for (int i = 0; i < 3; i++)
-    nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, false, true);
+    fe(s.get(), &a, 1, false, true);
   EXPECT_EQ(s->n_geom, 0);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
@@ -1793,7 +1802,7 @@ TEST(PdschSweepGeomPin, OffIsBitIdentical)
     const int i = nr_pdsch_config_sweep_next(a.get(), &h), j = nr_pdsch_config_sweep_next(b.get(), &h);
     ASSERT_EQ(i, j);
     const bool ok = (i == 11) && (((unsigned)t * 2654435761u) >> 16) % 10 < 7;
-    ASSERT_EQ(nr_pdsch_config_sweep_feed(a.get(), i, ok), nr_pdsch_config_sweep_feed_equiv(b.get(), &i, 1, ok, true));
+    ASSERT_EQ(nr_pdsch_config_sweep_feed(a.get(), i, ok), fe(b.get(), &i, 1, ok, true));
   }
   ASSERT_GE(nr_pdsch_config_sweep_winner(a.get()), 0);
   EXPECT_EQ(nr_pdsch_config_sweep_winner(a.get()), nr_pdsch_config_sweep_winner(b.get()));
@@ -1809,7 +1818,7 @@ TEST(PdschSweepGeomPin, OffNeverTouchesGeometryState)
   nr_pdsch_config_sweep_init(s.get(), 4);
   const int a = 7;
   for (int i = 0; i < 5; i++)
-    nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+    fe(s.get(), &a, 1, true, true);
   EXPECT_EQ(s->n_geom, 0);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
@@ -1825,7 +1834,7 @@ TEST(PdschSweepGeomPin, SlotOverflowBlocks)
   ASSERT_EQ((int)reps.size(), NR_TD_GEOM_SLOTS + 1);
   /* every pass on a distinct geometry: the second slot already blocks; with <= 8 distinct it must be blocked by then */
   for (int r : reps)
-    nr_pdsch_config_sweep_feed_equiv(s.get(), &r, 1, true, true);
+    fe(s.get(), &r, 1, true, true);
   EXPECT_TRUE(s->geom_blocked);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
@@ -1841,7 +1850,7 @@ TEST(PdschSweepGeomPin, SingleActiveGeometryNeverRePins)
   const int n_before = nr_pdsch_config_sweep_n_active(s.get());
   ASSERT_LT(n_before, s->n_hyp);
   for (int i = 0; i < 4; i++)
-    nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+    fe(s.get(), &a, 1, true, true);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), n_before);
   EXPECT_FALSE(s->geom_blocked);
   EXPECT_EQ(s->ok_geom[0], 4);
@@ -1852,7 +1861,7 @@ TEST(PdschSweepGeomPin, SkippedWhileFailOpen)
   nr_pdsch_config_sweep_set_fail_open(s.get(), true);
   const int a = 7;
   for (int i = 0; i < 4; i++)
-    nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+    fe(s.get(), &a, 1, true, true);
   EXPECT_EQ(s->n_geom, 0);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
 }
@@ -1860,12 +1869,12 @@ TEST(PdschSweepGeomPin, ActiveSetChangeRestartsEvidence)
 {
   auto s = geom_state();
   const int a = 7;
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
   ASSERT_EQ(s->n_geom, 1);
   nr_pdsch_config_sweep_set_fail_open(s.get(), true);
   EXPECT_EQ(s->n_geom, 0);
   nr_pdsch_config_sweep_set_fail_open(s.get(), false);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
   ASSERT_EQ(s->n_geom, 1);
   nr_pdsch_config_sweep_prune_keep(s.get(), keep_k0_0, nullptr); /* destructive prune clears the evidence too */
   EXPECT_EQ(s->n_geom, 0);
@@ -1875,11 +1884,11 @@ TEST(PdschSweepGeomPin, BlockedStaysBlockedUntilRestart)
 {
   auto s = geom_state();
   const int a = 7, b = other_geom(s.get(), a);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &b, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
+  fe(s.get(), &b, 1, true, true);
   ASSERT_TRUE(s->geom_blocked);
   for (int i = 0; i < 5; i++)
-    nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+    fe(s.get(), &a, 1, true, true);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
   nr_pdsch_config_sweep_set_fail_open(s.get(), true);
   EXPECT_FALSE(s->geom_blocked);
@@ -1888,7 +1897,7 @@ TEST(PdschSweepGeomPin, RebuildKeepsFlagClearsEvidence)
 {
   auto s = geom_state();
   const int a = 7;
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
   nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
   EXPECT_TRUE(s->geom_pin);
   EXPECT_EQ(s->n_geom, 0);
@@ -1902,8 +1911,8 @@ TEST(PdschSweepGeomPin, GeomDormantBitInheritedByK0LayerAndCauseCount)
   /* pick a geometry at k0 == 0 (the lowest k0), pin it, then add a k0 layer: layer entries copy their source's GEOM bit */
   const int a = 7;
   ASSERT_EQ(s->hyp[a].k0, 0);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
-  nr_pdsch_config_sweep_feed_equiv(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
+  fe(s.get(), &a, 1, true, true);
   const int n0 = s->n_hyp;
   ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), n0);
   const int added = nr_pdsch_config_sweep_add_k0_layer(s.get(), 3);
@@ -1932,7 +1941,7 @@ TEST(PdschSweepFeedAttr, OffIsBitIdenticalToFeed)
     ASSERT_EQ(i, j);
     const bool ok = (i == 11) && (((unsigned)t * 2654435761u) >> 16) % 10 < 7;
     const int cls[3] = {i, (i + 7) % a->n_hyp, (i + 13) % a->n_hyp};
-    ASSERT_EQ(nr_pdsch_config_sweep_feed(a.get(), i, ok), nr_pdsch_config_sweep_feed_attr(b.get(), i, cls, 3, ok, t % 3 != 0));
+    ASSERT_EQ(nr_pdsch_config_sweep_feed(a.get(), i, ok), fa(b.get(), i, cls, 3, ok, t % 3 != 0));
   }
   ASSERT_GE(nr_pdsch_config_sweep_winner(a.get()), 0);
   EXPECT_EQ(nr_pdsch_config_sweep_winner(a.get()), nr_pdsch_config_sweep_winner(b.get()));
@@ -1944,7 +1953,7 @@ TEST(PdschSweepFeedAttr, CreditsOnlyIdx0)
 {
   auto s = crc_state();
   const int cls[] = {7, 9, 11};
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 3, true, true);
+  fa(s.get(), 7, cls, 3, true, true);
   EXPECT_EQ(s->trials[7], 1u);
   EXPECT_EQ(s->trials[9], 0u);
   EXPECT_EQ(s->trials[11], 0u);
@@ -1953,22 +1962,22 @@ TEST(PdschSweepFeedAttr, FullClassMakesPassNonUniqueSingletonWouldBeUnsafe)
 {
   auto s = crc_state();
   const int cls[] = {7, 9};
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 2, true, true);
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 2, true, true);
+  fa(s.get(), 7, cls, 2, true, true);
+  fa(s.get(), 7, cls, 2, true, true);
   EXPECT_EQ(s->ok_unique[7], 0);
   EXPECT_EQ(s->winner, -1);
   auto u = crc_state(); /* the same passes with the TRUE singleton class are unique and accept */
   const int one = 7;
-  nr_pdsch_config_sweep_feed_attr(u.get(), 7, &one, 1, true, true);
-  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr(u.get(), 7, &one, 1, true, true), 7);
+  fa(u.get(), 7, &one, 1, true, true);
+  EXPECT_EQ(fa(u.get(), 7, &one, 1, true, true), 7);
 }
 TEST(PdschSweepFeedAttr, DormantClassMemberCountsForUniqueness)
 {
   auto s = crc_state();
   ASSERT_GT(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_not_arg, &s->hyp[9]), 0);
   const int cls[] = {7, 9};
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 2, true, true);
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 2, true, true);
+  fa(s.get(), 7, cls, 2, true, true);
+  fa(s.get(), 7, cls, 2, true, true);
   EXPECT_EQ(s->ok_unique[7], 0);
   EXPECT_EQ(s->winner, -1);
 }
@@ -1976,7 +1985,7 @@ TEST(PdschSweepFeedAttr, Idx0NotInClassStillCountsAsMember)
 {
   auto s = crc_state();
   const int cls[] = {9}; /* defensive: idx0 is always a member of its own class */
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 1, true, true);
+  fa(s.get(), 7, cls, 1, true, true);
   EXPECT_EQ(s->ok_unique[7], 0);
 }
 TEST(PdschSweepFeedAttr, GeomPinUsesClassAndCreditsOnlyIdx0)
@@ -1984,8 +1993,8 @@ TEST(PdschSweepFeedAttr, GeomPinUsesClassAndCreditsOnlyIdx0)
   auto s = geom_state();
   const int cls[] = {7, 9}; /* a class spanning one geometry (twins) */
   const uint64_t g = nr_td_geom_key(&s->hyp[7]);
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 2, true, true);
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 2, true, true);
+  fa(s.get(), 7, cls, 2, true, true);
+  fa(s.get(), 7, cls, 2, true, true);
   EXPECT_EQ(s->trials[9], 0u);
   for (int i = 0; i < s->n_hyp; i++)
     ASSERT_EQ(nr_pdsch_config_sweep_is_active(s.get(), i), nr_td_geom_key(&s->hyp[i]) == g);
@@ -1995,7 +2004,7 @@ TEST(PdschSweepFeedAttr, ClassSpanningTwoGeometriesGivesNoPinEvidence)
   auto s = geom_state();
   const int b = other_geom(s.get(), 7);
   const int cls[] = {7, b}; /* caller bug / ambiguous attribution: lever P abstains */
-  nr_pdsch_config_sweep_feed_attr(s.get(), 7, cls, 2, true, true);
+  fa(s.get(), 7, cls, 2, true, true);
   EXPECT_EQ(s->n_geom, 0);
 }
 TEST(PdschSweepFeedAttr, FeedEquivIsAThinWrapperSameResult)
@@ -2003,8 +2012,8 @@ TEST(PdschSweepFeedAttr, FeedEquivIsAThinWrapperSameResult)
   auto a = crc_state(), b = crc_state();
   const int one = 7;
   for (int i = 0; i < 3; i++) {
-    const int wa = nr_pdsch_config_sweep_feed_equiv(a.get(), &one, 1, true, true);
-    const int wb = nr_pdsch_config_sweep_feed_attr(b.get(), 7, &one, 1, true, true);
+    const int wa = fe(a.get(), &one, 1, true, true);
+    const int wb = fa(b.get(), 7, &one, 1, true, true);
     ASSERT_EQ(wa, wb);
   }
   EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
@@ -2057,16 +2066,80 @@ TEST(PdschSweepFastPathEx, NextExMatchesNextAndReportsKinds)
   EXPECT_GT(n_exploit, 0); /* the first pick became hot */
   EXPECT_EQ(0, memcmp(a->trials, b->trials, sizeof(a->trials)));
 }
-TEST(PdschSweepFastPathEx, OldFeedEquivIsExploreWrapper)
+TEST(PdschSweepFastPathEx, LegacyWrappersGiveNoFastPathCredit)
 {
-  auto a = fp_state(true, false, 0), b = fp_state(true, false, 0);
+  /* feed_equiv / feed_attr carry no pick kind: EXPLOIT, so a lever paired with the old next() never accepts or pins (fails safe). */
+  auto c = fp_state(true, false, 0), p = fp_state(false, true, 0);
   const int x = 7;
-  for (int i = 0; i < 2; i++) /* the second unique pass accepts (m* = 2) */
-    ASSERT_EQ(nr_pdsch_config_sweep_feed_equiv(a.get(), &x, 1, true, true),
-              nr_pdsch_config_sweep_feed_equiv_ex(b.get(), &x, 1, true, true, NR_TD_PICK_EXPLORE));
-  EXPECT_EQ(0, memcmp(a->fp_trials, b->fp_trials, sizeof(a->fp_trials)));
-  EXPECT_EQ(a->fp_trials[7], 2);
-  EXPECT_EQ(a->winner, 7);
+  for (int i = 0; i < 5; i++) {
+    nr_pdsch_config_sweep_feed_equiv(c.get(), &x, 1, true, true);
+    nr_pdsch_config_sweep_feed_attr(p.get(), x, &x, 1, true, true);
+  }
+  EXPECT_EQ(c->winner, -1);
+  EXPECT_EQ(c->ok_unique[x], 0);
+  EXPECT_EQ(c->fp_trials[x], 0);
+  EXPECT_EQ(p->n_geom, 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(p.get()), p->n_hyp);
+  /* the _ex EXPLORE form is the fast-path credit */
+  auto e = fp_state(true, false, 0);
+  for (int i = 0; i < 2; i++)
+    nr_pdsch_config_sweep_feed_equiv_ex(e.get(), &x, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_EQ(e->winner, 7);
+  EXPECT_EQ(e->fp_trials[7], 2);
+}
+TEST(PdschSweepGeomPin, PinUsesGroupTrialSum)
+{
+  /* ok_geom sums the passes of every member of a group, so m_P* must use T_g = sum of fp_trials over the group, not a per-hypothesis T. */
+  auto s = geom_state();
+  int n_groups = 0, size_max = 0;
+  std::vector<uint64_t> keys;
+  for (int i = 0; i < s->n_hyp; i++) if (std::find(keys.begin(), keys.end(), nr_td_geom_key(&s->hyp[i])) == keys.end()) keys.push_back(nr_td_geom_key(&s->hyp[i]));
+  n_groups = (int)keys.size();
+  for (uint64_t k : keys) { int c = 0; for (int i = 0; i < s->n_hyp; i++) c += nr_td_geom_key(&s->hyp[i]) == k; size_max = std::max(size_max, c); }
+  ASSERT_GE(size_max, 2);
+  int T = -1;
+  for (int t = 1; t < 5000 && T < 0; t++)
+    if (nr_pdsch_config_sweep_crc_accept_m(n_groups, t + 2) == 2 && nr_pdsch_config_sweep_crc_accept_m(n_groups, (uint32_t)size_max * t) >= 3)
+      T = t;
+  ASSERT_GT(T, 0) << "no T with m(n, T) = 2 and m(n, size_max*T) = 3 for n_groups " << n_groups;
+  for (int i = 0; i < s->n_hyp; i++)
+    s->fp_trials[i] = (uint16_t)T;
+  int ng = 0; uint32_t tg = 0;
+  ASSERT_EQ(nr_pdsch_config_sweep_geom_groups(s.get(), &ng, &tg), 0);
+  EXPECT_EQ(ng, n_groups);
+  EXPECT_EQ(tg, (uint32_t)size_max * T);
+  const int a = 7;
+  for (int i = 0; i < 2; i++)
+    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp); /* per-hypothesis T would give m = 2 and pin here */
+  EXPECT_EQ(s->ok_geom[0], 2);
+  /* with the group sums small enough (m = 2) the same two passes pin */
+  auto u = geom_state();
+  for (int i = 0; i < 2; i++)
+    nr_pdsch_config_sweep_feed_attr_ex(u.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  EXPECT_LT(nr_pdsch_config_sweep_n_active(u.get()), u->n_hyp);
+}
+TEST(PdschSweepGeomPin, GeomDormantIsClearedByFailOpenAndRebuild)
+{
+  auto s = geom_state();
+  const int a = 7;
+  for (int i = 0; i < 2; i++)
+    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), true);
+  nr_pdsch_config_sweep_set_fail_open(s.get(), false); /* the pin must not come back when fail-open ends */
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  for (int i = 0; i < 2; i++)
+    nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
+  ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  EXPECT_TRUE(s->geom_pin);
+  /* other causes survive a rebuild (unchanged behaviour) */
+  nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_even, nullptr);
+  const int na = nr_pdsch_config_sweep_n_active(s.get());
+  nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), na);
 }
 TEST(PdschSweepFastPathEx, OnlyExplorePassesCountAndFpTrialsAreExploreOnly)
 {
@@ -2140,6 +2213,7 @@ static int drive_siblings(nr_pdsch_config_sweep_state_t *s, int a, bool sibling_
     }
     ++*n_sib_picks;
     EXPECT_EQ(h.tda_start, s->hyp[a].tda_start);
+    EXPECT_EQ(h.mapping_type, s->hyp[a].mapping_type);
     EXPECT_NE(h.k0, s->hyp[a].k0);
     nr_pdsch_config_sweep_feed_attr_ex(s, i, &i, 1, sibling_passes && *n_sib_picks == 5, true, k);
   }
@@ -2222,4 +2296,18 @@ TEST(PdschSweepSiblingGuard, SiblingPassBlocksLeverP)
   drive_siblings(s.get(), 7, true, &picks);
   EXPECT_TRUE(s->sib_blocked);
   EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+}
+
+TEST(PdschSweepSiblingGuard, SiblingsRequireTheSameMappingType)
+{
+  auto s = fp_state(true, false, 0.05f);
+  const int a = 7;
+  const int b = s->n_hyp++; /* same as a but mapping type B and another k0: NOT a sibling (different mapping) */
+  s->hyp[b] = s->hyp[a]; s->hyp[b].mapping_type = 1; s->hyp[b].k0 = (uint8_t)(s->hyp[a].k0 ^ 1); s->order[b] = b;
+  const int ns = n_siblings(s.get(), a);
+  ASSERT_GT(ns, 0);
+  int picks = 0;
+  drive_siblings(s.get(), a, false, &picks); /* asserts every SIBLING pick has a's mapping type */
+  EXPECT_EQ(s->sib_trials[b], 0);
+  EXPECT_EQ(picks, nr_pdsch_config_sweep_sib_n(ns, 0.05, 1e-6) * ns);
 }

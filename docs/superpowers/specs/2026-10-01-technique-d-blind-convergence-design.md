@@ -95,8 +95,9 @@ the computation even when the MCS table is ambiguous on that grant. Lever P uses
   distinct groups per state; overflow ⇒ lever P blocked).
 - **Clean lead:** if ≥ 2 distinct groups have `ok_geom > 0`, lever P is blocked for this state until the next
   evidence restart (HARQ-trap neighbour `k0 ± 1` or a genuinely decoding near neighbour is a different group).
-- **Pin:** when exactly one group G has `ok_geom[G] >= m_P*` with `m_P* = crc_accept_m(n_groups_active, T_max)` (same
-  1e-6 budget, n = number of distinct geometry groups among active hypotheses), every active hypothesis outside G is set
+- **Pin:** when exactly one group G has `ok_geom[G] >= m_P*` with `m_P* = crc_accept_m(n_groups_active, T_g,max)` (same
+  1e-6 budget, n = number of distinct geometry groups among active hypotheses; `T_g` = Σ `fp_trials` over the group's active members,
+  because `ok_geom` sums the explore passes of every member of the group, and `T_g,max` is the maximum over active groups; fix round 2), every active hypothesis outside G is set
   **dormant** with cause `GEOM` (reversible; fail-open restores it; the active-set change restarts lever-C/P
   evidence). The remaining catalogue is the group's MCS-table twins; the KL rule (or lever C on table-separating grants)
   decides the table.

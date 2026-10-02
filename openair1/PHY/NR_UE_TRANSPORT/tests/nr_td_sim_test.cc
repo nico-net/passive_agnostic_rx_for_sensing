@@ -244,6 +244,18 @@ TEST(TdSim, GeomPinNeverWrongUnderTrapsAndFalsePasses)
   EXPECT_EQ(r.wrong, 0);
   EXPECT_EQ(r.wrong_pins, 0);
 }
+TEST(TdSim, GeomPinUnderALightK0TrapPinsAndBlocksAndIsNeverWrong)
+{
+  /* A = 0.5 blocks every pin (vacuous), so this is the non-vacuous trap case: the guard sometimes sees the trap sibling pass (block) and
+   * sometimes passes clean (pin); either way 0 wrong and 0 wrong pins. */
+  SimCfg c = SimCfg::defaults(); c.acq = 60; c.seed = 41; c.oracle = 0; c.geom_pin = 1;
+  c.retx_trap = 0; c.k0_trap_adj = 0.005; c.crc_false = 1e-4; c.rntis_per_acq = 1; /* 0.02 blocks every pin: 300 sibling trials see ~4 trap passes */
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_GT(r.geom_pins, 0);
+  EXPECT_GT(r.sib_blocks, 0);
+}
 TEST(TdSim, GeomPinPinsWithoutTraps)
 {
   SimCfg c = SimCfg::defaults(); c.acq = 100; c.seed = 32; c.oracle = 0; c.geom_pin = 1; c.rntis_per_acq = 1;

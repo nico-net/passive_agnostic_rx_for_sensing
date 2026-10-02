@@ -94,8 +94,9 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
  * k0 layer, so 8192 leaves room for five observed k0 >= 2 layers on top of it. Per context:
  * 8192 x 22 B = 180 KB, heap-allocated when a context slot is first used (nr-uesoftmodem mlockall()s,
  * so 1024 inline states would pin 185 MB at startup). The 2026-10-01 probe counters (3 x uint16) add
- * 48 KB: sizeof 180244 -> 229416 B (233520 B with the BC3 dormant masks); at 1024 contexts + 4 templates + 1 spare + the legacy singleton,
- * at most 50.6 MB more, and only for slots actually opened. */
+ * 48 KB: sizeof 180244 -> 229416 B (233520 B with the BC3 dormant masks); the fast-path levers add ok_unique, fp_trials and sib_trials
+ * (3 x uint16 arrays, +48 KB), the GEOM mask (+1 KB) and small state: sizeof is now 283840 B (measured), of which fp_trials + sib_trials are +32 KB/state; at 1024 contexts + 4 templates + 1 spare + the legacy singleton
+ * (1030 states) that is at most 292 MB (vs 186 MB at 180244 B), and only for slots actually opened. */
 #define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
@@ -133,7 +134,7 @@ typedef struct {
   bool     crc_accept_blocked; ///< a second active hypothesis has a unique pass: lever C off until the next prune/rebuild
   /* Lever P (partition / geometry acceptance, spec 2026-10-01 section 3b, experimental, default off). Counts new-data CRC passes per
    * GEOMETRY group (nr_td_geom_key: S, L, k0, mapping type, DM-RS mask; the MCS table is NOT in the key). When all passes
-   * so far sit in ONE group G and ok_geom[G] >= nr_pdsch_config_sweep_crc_accept_m(n_groups_active, T_max), every other geometry
+   * so far sit in ONE group G and ok_geom[G] >= nr_pdsch_config_sweep_crc_accept_m(n_groups_active, T_g,max) (T_g = sum of fp_trials over the group's active members), every other geometry
    * becomes dormant for cause NR_TD_DORMANT_GEOM (reversible: fail-open or clear_dormant). It never decides a winner. Evidence-like: the
    * slots are cleared everywhere ok_unique is (lever_c_restart, clear_probe_stats, rebuild, new context) and at the hypothesis-adding
    * sites; the pin's own active-set change restarts them (so a pin cannot loop). Two geometries with a pass, or more than
@@ -148,14 +149,17 @@ typedef struct {
    * hypothesis receives at most one exploration slot per round, the slot order is fixed by the shuffle/ordering and does not depend on any
    * decode outcome, so for a WRONG hypothesis its fast-path passes are Binomial(fp_trials, p_f) and the union bound C(T, m) p_f^m applies.
    * Exploit (hot) and sibling-test picks are real KL trials but never fast-path evidence: a hot hypothesis gets 3/4 of the trials after one
-   * pass, which a per-hypothesis trial count cannot bound. uint16, saturating (state size +16 KB). Cleared wherever ok_unique is. */
+   * pass, which a per-hypothesis trial count cannot bound. uint16, saturating (+16 KB/state; with sib_trials +32 KB). Cleared wherever ok_unique is. */
   uint16_t fp_trials[NR_PDSCH_SWEEP_MAX_HYP];
   /* K0-SIBLING GUARD (fix B). Siblings of a lead (lever C leader L / lever P group G): ACTIVE hypotheses with identical tda_start,
    * tda_length, mapping_type and dmrs_mask but a different k0 (table, add_pos, max_len free). Before a fast accept/pin every sibling needs
    * N_sib = nr_pdsch_config_sweep_sib_n(n_sib, sib_pmin, sib_eps) sibling-test trials (picks of kind NR_TD_PICK_SIBLING, scheduled
    * deliberately by next_ex while a lead waits) with ZERO passes; a pass on a sibling-test trial sets sib_blocked (fast path off until the
    * next evidence restart). If a sibling were the truth its per-trial pass probability is >= sib_pmin whenever the test runs, so
-   * P(0 passes in N_sib) <= (1 - p_min)^N_sib <= eps / n_sib per sibling. sib_pmin <= 0 disables the guard (fix A only). */
+   * P(0 passes in N_sib) <= (1 - p_min)^N_sib <= eps / n_sib per sibling. sib_pmin <= 0 disables the guard (fix A only).
+   * DORMANT siblings are ignored by the guard (only ACTIVE hypotheses are siblings). That is safe only under CORRECT dormancy (the GEOM cause
+   * right after a guarded pin; later, k0-certified causes). A wrong k0 FIELD (a field-book/prior mask that hides the true k0) is a known
+   * hole: the guard cannot test a sibling that is dormant; BC8/BC9 address it. */
   uint16_t sib_trials[NR_PDSCH_SWEEP_MAX_HYP];
   bool     sib_blocked;
   struct { bool valid; uint64_t skey; uint8_t k0; } sib_t[2]; ///< pending sibling-test targets: [0] lever C leader, [1] lever P group
@@ -215,6 +219,10 @@ typedef enum { NR_TD_PICK_EXPLORE = 0, NR_TD_PICK_EXPLOIT = 1, NR_TD_PICK_SIBLIN
 int nr_pdsch_config_sweep_next_ex(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out, nr_td_pick_t *kind);
 /** N_sib = ceil(ln(n_sib / eps) / pmin); 0 when n_sib <= 0 or pmin <= 0 (guard disabled). Clamped to 65535. */
 int nr_pdsch_config_sweep_sib_n(int n_sib, double pmin, double eps);
+/** Lever P trial accounting: n_groups = distinct geometry keys among ACTIVE hypotheses; t_g_max = max over those groups of the SUM of fp_trials
+ *  over the group's active members (T_g: ok_geom sums the passes of every member, so T_g, not a per-hypothesis T, bounds a wrong group).
+ *  m_P* = nr_pdsch_config_sweep_crc_accept_m(n_groups, t_g_max). Read-only. Returns 0, or -1 on a NULL argument / allocation failure. */
+int nr_pdsch_config_sweep_geom_groups(const nr_pdsch_config_sweep_state_t *st, int *n_groups, uint32_t *t_g_max);
 /* Dormant hypotheses are skipped; the per-round shuffle still covers all n_hyp (RNG use unchanged), a round whose remainder is
  * all dormant advances to the next round, and the exploit "hot" hypothesis must be active. */
 
@@ -248,8 +256,9 @@ int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const in
  *  lever-C accumulation of that same call. */
 int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                     bool new_data);
-/** The runtime/fast-path forms: `kind` is the pick kind of the decoded hypothesis idx0 (from next_ex / next_k_ex). feed_equiv / feed_attr are
- *  these with kind = EXPLORE (every pick treated as exploration: only sound when no hot pick can occur, i.e. tests or lever-off use). */
+/** The runtime/fast-path forms: `kind` is the pick kind of the decoded hypothesis idx0 (from next_ex / next_k_ex). The legacy feed_equiv /
+ *  feed_attr are these with kind = EXPLOIT: without a pick kind no outcome is fast-path evidence, so a lever paired with the old next()
+ *  fails safe (never accepts/pins). Tests that need fast-path credit use the _ex forms with NR_TD_PICK_EXPLORE. Lever-off behaviour is bit-identical. */
 int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
                                         nr_td_pick_t kind);
 int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
