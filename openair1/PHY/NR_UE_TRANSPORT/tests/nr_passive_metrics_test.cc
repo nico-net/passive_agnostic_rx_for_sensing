@@ -57,3 +57,18 @@ TEST(PassiveMetrics, ExactSizeBufferBoundary) {
   EXPECT_EQ(nr_passive_metrics_to_json(&m, &a[0], w + 1), w);
   EXPECT_EQ(nr_passive_metrics_to_json(&m, &b[0], w), -1);
 }
+
+TEST(PassiveMetrics, Bc12aSib1CensusKeysPresentPerDciFormat) {
+  nr_passive_metrics_t m = {};
+  m.acq_state = "TRACKING";
+  m.td_sib1_tdra_match_10 = 1; m.td_sib1_tdra_mismatch_10 = 2; m.td_sib1_tdra_none_10 = 3;
+  m.td_sib1_tdra_match_11 = 4; m.td_sib1_tdra_mismatch_11 = 5; m.td_sib1_tdra_none_11 = 6;
+  m.td_deftab_match_11 = 7; m.td_deftab_mismatch_11 = 8;
+  char buf[2048];
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  const std::string s(buf);
+  for (const char *k : {"\"td_sib1_tdra_match_10\":1", "\"td_sib1_tdra_mismatch_10\":2", "\"td_sib1_tdra_none_10\":3",
+                        "\"td_sib1_tdra_match_11\":4", "\"td_sib1_tdra_mismatch_11\":5", "\"td_sib1_tdra_none_11\":6",
+                        "\"td_deftab_match_11\":7", "\"td_deftab_mismatch_11\":8", "\"td_sib1_tdra_match_unk\":0"})
+    EXPECT_NE(s.find(k), std::string::npos) << k;
+}

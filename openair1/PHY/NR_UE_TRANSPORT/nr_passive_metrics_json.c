@@ -12,6 +12,10 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"pdcch_occasions\":%" PRIu64 ",\"pdcch_candidates\":%" PRIu64 ",\"pdcch_accepts\":%" PRIu64 ",\"pdcch_accepts_c\":%" PRIu64 ","
       "\"scanq_queued\":%" PRIu64 ",\"scanq_processed\":%" PRIu64 ",\"scanq_drop_full\":%" PRIu64 ",\"scanq_drop_stale\":%" PRIu64 ",\"scanq_max_lag\":%" PRIu64 ","
       "\"pdschq_queued\":%" PRIu64 ",\"pdschq_decoded\":%" PRIu64 ",\"pdschq_crc_ok\":%" PRIu64 ",\"pdschq_drop_full\":%" PRIu64 ",\"pdschq_drop_stale\":%" PRIu64 ",\"pdschq_stale_after_decode\":%" PRIu64 ",\"pdschq_max_lag\":%" PRIu64 ","
+      "\"td_sib1_tdra_match_10\":%" PRIu64 ",\"td_sib1_tdra_mismatch_10\":%" PRIu64 ",\"td_sib1_tdra_none_10\":%" PRIu64 ","
+      "\"td_sib1_tdra_match_11\":%" PRIu64 ",\"td_sib1_tdra_mismatch_11\":%" PRIu64 ",\"td_sib1_tdra_none_11\":%" PRIu64 ","
+      "\"td_sib1_tdra_match_unk\":%" PRIu64 ",\"td_sib1_tdra_mismatch_unk\":%" PRIu64 ",\"td_sib1_tdra_none_unk\":%" PRIu64 ","
+      "\"td_deftab_match_10\":%" PRIu64 ",\"td_deftab_mismatch_10\":%" PRIu64 ",\"td_deftab_match_11\":%" PRIu64 ",\"td_deftab_mismatch_11\":%" PRIu64 ",\"td_deftab_na\":%" PRIu64 ","
       "\"ldpc_ok\":%" PRIu64 ",\"ldpc_seg_fail\":%" PRIu64 ",\"ldpc_tb_fail\":%" PRIu64 ",\"ldpc_zero_tb\":%" PRIu64 ","
       "\"pusch_try\":%" PRIu64 ",\"pusch_crc_ok\":%" PRIu64 ","
       "\"obs_pushed\":%" PRIu64 ",\"obs_written\":%" PRIu64 ",\"obs_dropped\":%" PRIu64 "}",
@@ -20,6 +24,10 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->pdcch_occasions, m->pdcch_candidates, m->pdcch_accepts, m->pdcch_accepts_c,
       m->scanq_queued, m->scanq_processed, m->scanq_drop_full, m->scanq_drop_stale, m->scanq_max_lag,
       m->pdschq_queued, m->pdschq_decoded, m->pdschq_crc_ok, m->pdschq_drop_full, m->pdschq_drop_stale, m->pdschq_stale_after_decode, m->pdschq_max_lag,
+      m->td_sib1_tdra_match_10, m->td_sib1_tdra_mismatch_10, m->td_sib1_tdra_none_10,
+      m->td_sib1_tdra_match_11, m->td_sib1_tdra_mismatch_11, m->td_sib1_tdra_none_11,
+      m->td_sib1_tdra_match_unk, m->td_sib1_tdra_mismatch_unk, m->td_sib1_tdra_none_unk,
+      m->td_deftab_match_10, m->td_deftab_mismatch_10, m->td_deftab_match_11, m->td_deftab_mismatch_11, m->td_deftab_na,
       m->ldpc_ok, m->ldpc_seg_fail, m->ldpc_tb_fail, m->ldpc_zero_tb,
       m->pusch_try, m->pusch_crc_ok,
       m->obs_pushed, m->obs_written, m->obs_dropped);

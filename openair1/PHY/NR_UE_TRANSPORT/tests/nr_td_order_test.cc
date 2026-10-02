@@ -72,3 +72,61 @@ TEST(TdOrder, ScoreIsNeverNegative) {
   const nr_pdsch_cfg_hypothesis_t a = H(9, 4, 1, 1);
   EXPECT_GE(nr_td_ordering_score(&a, &s), 0.0f);
 }
+
+/* BC12a: SIB1 common-TDRA / default table A census predicates (log + metrics only) */
+TEST(TdCensus, Sib1NoneWhenListEmpty) {
+  const nr_pdsch_cfg_hypothesis_t h = H(1, 13, 0, 0);
+  EXPECT_EQ(nr_td_census_sib1(NULL, 0, 0, &h), NR_TD_CENSUS_NONE);
+}
+TEST(TdCensus, Sib1MatchChecksSLMappingAndK0) {
+  const nr_td_tdra_t l[2] = {{1, 13, 0, 0}, {2, 7, 1, 1}};
+  nr_pdsch_cfg_hypothesis_t h = H(1, 13, 0, 0);
+  EXPECT_EQ(nr_td_census_sib1(l, 2, 0, &h), NR_TD_CENSUS_MATCH);
+  EXPECT_EQ(nr_td_census_sib1(l, 2, 1, &h), NR_TD_CENSUS_MISMATCH); /* row 1 is another row */
+  h = H(1, 12, 0, 0); EXPECT_EQ(nr_td_census_sib1(l, 2, 0, &h), NR_TD_CENSUS_MISMATCH);
+  h = H(2, 13, 0, 0); EXPECT_EQ(nr_td_census_sib1(l, 2, 0, &h), NR_TD_CENSUS_MISMATCH);
+  h = H(1, 13, 1, 0); EXPECT_EQ(nr_td_census_sib1(l, 2, 0, &h), NR_TD_CENSUS_MISMATCH); /* type A vs B */
+  h = H(1, 13, 0, 1); EXPECT_EQ(nr_td_census_sib1(l, 2, 0, &h), NR_TD_CENSUS_MISMATCH); /* k0 */
+  h = H(2, 7, 1, 1);  EXPECT_EQ(nr_td_census_sib1(l, 2, 1, &h), NR_TD_CENSUS_MATCH);     /* type B, k0 = 1 */
+}
+TEST(TdCensus, Sib1IndexBeyondListIsMismatchNotNone) {
+  const nr_td_tdra_t l[1] = {{1, 13, 0, 0}};
+  const nr_pdsch_cfg_hypothesis_t h = H(1, 13, 0, 0);
+  EXPECT_EQ(nr_td_census_sib1(l, 1, 3, &h), NR_TD_CENSUS_MISMATCH);
+}
+TEST(TdCensus, DefaultTableARowIsTdaIndexPlusOne) {
+  nr_pdsch_cfg_hypothesis_t h = H(2, 12, 0, 0); /* row 1, pos 2 */
+  EXPECT_EQ(nr_td_census_deftab(2, 0, &h), NR_TD_CENSUS_MATCH);
+  EXPECT_EQ(nr_td_census_deftab(3, 0, &h), NR_TD_CENSUS_MISMATCH); /* pos 3 row 1 is S=3 L=11 */
+  h = H(3, 11, 0, 0); EXPECT_EQ(nr_td_census_deftab(3, 0, &h), NR_TD_CENSUS_MATCH);
+  h = H(9, 4, 1, 0);  EXPECT_EQ(nr_td_census_deftab(2, 5, &h), NR_TD_CENSUS_MATCH);  /* row 6 type B pos 2 */
+  h = H(10, 4, 1, 0); EXPECT_EQ(nr_td_census_deftab(3, 5, &h), NR_TD_CENSUS_MATCH);  /* row 6 type B pos 3 */
+  h = H(1, 13, 0, 0); EXPECT_EQ(nr_td_census_deftab(2, 11, &h), NR_TD_CENSUS_MATCH); /* row 12 */
+  h = H(2, 12, 0, 1); EXPECT_EQ(nr_td_census_deftab(2, 0, &h), NR_TD_CENSUS_MISMATCH); /* default table k0 = 0 */
+  h = H(2, 12, 0, 0); EXPECT_EQ(nr_td_census_deftab(2, 16, &h), NR_TD_CENSUS_MISMATCH); /* invalid row */
+}
+TEST(TdCensus, DefaultTableUnknownPosIsNone) {
+  const nr_pdsch_cfg_hypothesis_t h = H(2, 12, 0, 0);
+  EXPECT_EQ(nr_td_census_deftab(0, 0, &h), NR_TD_CENSUS_NONE);
+}
+TEST(TdCensus, Sib1StoreRoundTripAndClear) {
+  nr_td_tdra_t in[2] = {{1, 13, 0, 0}, {2, 7, 1, 1}}, out[NR_TD_MAX_SIB1_TDRA];
+  nr_td_sib1_store_set(in, 2);
+  ASSERT_EQ(nr_td_sib1_store_get(out), 2);
+  EXPECT_EQ(out[1].S, 2); EXPECT_EQ(out[1].L, 7); EXPECT_EQ(out[1].mapping, 1); EXPECT_EQ(out[1].k0, 1);
+  nr_td_sib1_store_set(NULL, 0);
+  EXPECT_EQ(nr_td_sib1_store_get(out), 0);
+}
+TEST(TdCensus, CounterIndexingByFormat) {
+  nr_td_census_reset();
+  nr_td_census_count(11, NR_TD_CENSUS_MATCH);
+  nr_td_census_count(11, NR_TD_CENSUS_MATCH);
+  nr_td_census_count(10, NR_TD_CENSUS_NONE);
+  nr_td_census_count(0, NR_TD_CENSUS_MISMATCH); /* unknown format is its own bucket, never folded into 1_0/1_1 */
+  uint64_t c[3][3];
+  nr_td_census_get(c);
+  EXPECT_EQ(c[NR_TD_FMT_11][NR_TD_CENSUS_MATCH], 2u);
+  EXPECT_EQ(c[NR_TD_FMT_10][NR_TD_CENSUS_NONE], 1u);
+  EXPECT_EQ(c[NR_TD_FMT_UNK][NR_TD_CENSUS_MISMATCH], 1u);
+  EXPECT_EQ(c[NR_TD_FMT_10][NR_TD_CENSUS_MATCH], 0u);
+}

@@ -381,6 +381,10 @@ typedef struct {
   uint16_t layout_index; ///< DCI 1_1 layout (resolver index) this trial was decoded under; 0xFFFF = none
   uint8_t k0;            ///< the selected hypothesis' k0 (the consumer measures the oracle on slot + k0)
   uint64_t configuration; ///< BC9 M3: the context's configuration key (matches the DCI history entry)
+  /* BC12a census inputs, set by the caller AFTER select() (select never reads them): the DCI format of the grant that created
+   * the context's trial (10 / 11, 0 = not recorded) and the MIB dmrs-TypeA-Position (2 / 3, 0 = unknown). Log/metrics only. */
+  uint8_t dci_format;
+  uint8_t typeA_pos;
 } nr_pdsch_sweep_ticket_t;
 
 /** Thread-safe per-(configuration,RNTI,TDA) controller. No allocation or decoder work under lock.

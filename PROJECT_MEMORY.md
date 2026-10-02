@@ -1128,6 +1128,7 @@ Discovery lines:
 |---|---|
 | `SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring` | DL waveform sweep active (must not appear repeatedly — it did 265 k times/150 s before the fix) |
 | `SWEEP: rnti=0x… CONVERGED tda=… mapping=A k0=… mcs_table=… dmrs_add_pos=… dmrs_max_len=… (x/y trials)` / `SENSING: Technique D CONVERGED rnti=… tda=… S=… L=… mask=0x884 table=…` | converged PDSCH interpretation for that RNTI/TDA (mask 0x884 = DM-RS symbols 2,7,11) |
+| `SENSING: Technique D CONVERGED rnti=… tda=… S=… L=… mask=… table=… k0=<k> map=<A\|B> dci=<1_0\|1_1\|?> sib1_row=<match\|mismatch\|none> deftab=<match\|mismatch\|na>` | **BC12a census (added 2026-10-02, log/metrics only, no behaviour change) `[IMPLEMENTED, NOT VALIDATED]` over the air; `[OFFLINE VERIFIED]` predicates.** At the first convergence of a context the winner's (k0, S, L, mapping) is compared with the SIB1 common-TDRA row selected by the DCI's TDA index (`sib1_row`) and with default table A row `tda+1` for the MIB dmrs-TypeA-Position (`deftab`). `none` = no SIB1 list decoded (always the case on the phy-test rfsim bed); `na` = pos unknown. A tda beyond the broadcast list is `mismatch`. `dci=` is the format of the grant that created the trial (always `1_1` today: the sweep only runs for `!is_dci10`, so `1_0` counters stay 0). SIB1 is used whenever decoded, whatever the network mode. Not merged across cells/hosts. |
 | `SWEEP: ORACLE_RESTORE …` | a measured DM-RS mask re-exposed a pruned short-TDA candidate |
 | `SENSING: SWEEPSTAT …` | per-context census |
 | `SENSING: LDPCDIAG ok= seg_fail= tb_fail= zero_tb= iface_err= segs_decoded=a/b (%)` | LDPC health. **TB decode rate = ok/(ok+seg_fail)**; `segs_decoded` counts only failing TBs (do not score on it). `zero_tb` = CRC-valid all-zero TBs (gNB empty grants, 30 % on the lab gNB) |
@@ -1185,6 +1186,7 @@ to `ISAC_METRICS_PATH`. Flat object, cumulative counters unless noted; unknown =
 | PDCCH | `pdcch_occasions`, `pdcch_candidates`, `pdcch_accepts`, `pdcch_accepts_c` |
 | scan queue | `scanq_queued`, `scanq_processed`, `scanq_drop_full`, `scanq_drop_stale`, `scanq_max_lag` |
 | PDSCH queue | `pdschq_queued`, `pdschq_decoded`, `pdschq_crc_ok`, `pdschq_drop_full`, `pdschq_drop_stale`, `pdschq_max_lag` |
+| BC12a SIB1-TDRA census (2026-10-02) | `td_sib1_tdra_{match,mismatch,none}_{10,11,unk}` (per DCI format of the context; `_unk` = format not recorded), `td_deftab_{match,mismatch}_{10,11}`, `td_deftab_na`. Counted once per context convergence, same predicate as the CONVERGED-line suffix (§11.8). Cumulative, log/metrics only. `[OFFLINE VERIFIED]` serializer (`test_nr_passive_metrics`) and predicates (`test_nr_td_order`); OTA unmeasured |
 | LDPC | `ldpc_ok`, `ldpc_seg_fail`, `ldpc_tb_fail`, `ldpc_zero_tb` |
 | PUSCH | `pusch_try`, `pusch_crc_ok` |
 | observations | `obs_pushed`, `obs_written`, `obs_dropped` |

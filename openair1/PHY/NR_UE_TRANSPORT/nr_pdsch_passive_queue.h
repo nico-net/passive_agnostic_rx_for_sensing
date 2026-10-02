@@ -182,6 +182,10 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
  *  flag; levers C/P (the flag's consumers, nr_pdsch_config_sweep_feed_attr_cx) are not enabled in the runtime. */
 /** BC9 review M3: the context converged on k0 = winner_k0; a certified pass recorded for another k0 of this (RNTI,
  *  configuration, TDA) is an alarm (an A1/A3 violation or a compatibility bug): counted and logged. */
+/** BC12a: SIB1 common-TDRA / default table A census at the first convergence of a context (log + metrics only). Counts into the
+ *  per-DCI-format counters and writes the log suffix " k0=<k> map=<A|B> dci=<1_0|1_1|?> sib1_row=<match|mismatch|none>
+ *  deftab=<match|mismatch|na>" to buf. Returns the suffix length. */
+int nr_pdsch_passive_bc12_census(const nr_pdsch_sweep_ticket_t *ticket, const nr_pdsch_cfg_hypothesis_t *winner, char *buf, size_t n);
 void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0);
 void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
                                const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok);
