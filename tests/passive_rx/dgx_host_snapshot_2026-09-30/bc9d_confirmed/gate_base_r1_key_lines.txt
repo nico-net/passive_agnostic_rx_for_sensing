@@ -1,0 +1,5 @@
+19.072 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+35.719 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+24.649 [PHY]    SENSING: BC9 DCIADJ_CERT trials=1000 certified=202 (f_S=0.2020) certified_pass=31 passes=197 no_sibling=0 no_dci_in_history=0 certified_pass_by_k0[0,1,2,3,>=4]=31,0,0,0,0 wrong_k0_alarms=0
+143.136 [PHY]    SENSING: BC9 DCIHIST dcis=220000 tdd_known=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0 (exclusions from confirmed DCIs only: see BC9 DCICONF)
+153.638 [PHY]    SENSING: BC9 DCICONF confirms=58000 missed_lookup=0 repeat=0 tdd_known=0 tdd_dcis=0 tdd_lock_calls=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0

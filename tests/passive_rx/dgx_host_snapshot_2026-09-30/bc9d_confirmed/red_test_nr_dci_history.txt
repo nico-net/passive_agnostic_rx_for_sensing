@@ -1,0 +1,28 @@
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:462: Failure
+[  FAILED  ] DciHistory.CertConfirmedOptionCountsOnlyConfirmedOccupants (0 ms)
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:304: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:305: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:309: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:312: Failure
+[  FAILED  ] DciBc9d.ConfirmedBitSetFromFeedback (1 ms)
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:357: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:359: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:360: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:361: Failure
+[  FAILED  ] DciBc9d.SpuriousDciNeverExcludesTruth (0 ms)
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:375: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:376: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:384: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:385: Failure
+[  FAILED  ] DciBc9d.ConfirmedDciAppliesTddExclusion (0 ms)
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:405: Failure
+/home/nicola/NICOLA/wt/td-levers/openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:408: Failure
+[  FAILED  ] DciBc9d.AdjacencyUsesOnlyConfirmedNeighbours (0 ms)
+[  PASSED  ] 9 tests.
+[  FAILED  ] 5 tests, listed below:
+[  FAILED  ] DciHistory.CertConfirmedOptionCountsOnlyConfirmedOccupants
+[  FAILED  ] DciBc9d.ConfirmedBitSetFromFeedback
+[  FAILED  ] DciBc9d.SpuriousDciNeverExcludesTruth
+[  FAILED  ] DciBc9d.ConfirmedDciAppliesTddExclusion
+[  FAILED  ] DciBc9d.AdjacencyUsesOnlyConfirmedNeighbours
+ 5 FAILED TESTS

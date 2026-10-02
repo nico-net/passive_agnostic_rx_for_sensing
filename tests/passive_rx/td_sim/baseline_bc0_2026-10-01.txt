@@ -391,3 +391,31 @@ Dropped arms (time budget): TDD only at dci-miss 0.1, other-ue-occ 0.1; rho 0.0 
 Findings (all [SIMULATED]): wrong = 0 and wrong_pins = 0 in all 38 rows (2000 RNTIs each). At persistence 0.9 (the physical trap) the sibling-test decode of the neighbouring slot passes on every RNTI, the engine's sibling guard blocks the fast path
 on ANY sibling pass (certified or not), so levers C/P never fire (0 accepts, 0 pins, 24 rows): the cold/steady gains of CP over base there (about -2 to -5 % cold) are not lever events. The TDD exclusion alone gives -34 % cold mean (4 RX 329.6 vs 521.7 s; 1 RX 571.1 vs 869.6 s).
 At persistence 0.0 the fast path fires (1 RX: 998 accepts + 1468 pins; 4 RX: 1112 + 1392) and cold mean falls 673 -> 258 s (1 RX) and 373 -> 157 s (4 RX); the cold median 596 -> 73.5 s and 329 -> 56.8 s. Certified share of EXPLORE feeds is only 0.1-0.4 % (most feeds are wrong-hypothesis feeds whose leader is not certified), of passing feeds 7-45 %.
+
+## BC9d
+Hard TDD exclusion only from CONFIRMED DCIs (a genuine grant whose main decode passed CRC) vs every accepted DCI (--excl-unconfirmed 1 = the pre-BC9d runtime hazard; spurious DCIs attributed to the truth's row, worst case) vs none (--tdd-exclude 0).
+[SIMULATED, DGX host, nr_td_sim @852b9bb86f] tests/passive_rx/td_sim/bc9d_campaign.py --acq 300 (4 RNTIs/acq = 1200 RNTIs per cell), seed 1, 4 RX, blind (oracle 0), TDD DDDSU, dci-miss 0.1, other-UE 0.1, cap 3600 s. Means/medians over decided RNTIs; cold = RNTI rank < 2. Run after the rfsim gate/rank-4 runs, not concurrently.
+CP_noguard = --crc-accept 1 --geom-pin 1 --sib-pmin 0 (levers on certified evidence alone); certconf = --cert-confirmed (ISAC_TD_CERT_CONFIRMED mirror).
+
+| cell | RNTIs | wrong | undecidable | truth_excluded | mean_s | median_s | cold_mean_s | cold_median_s | tdd_excl_removed | spur_excl_dcis | certified_wrong | wrong_pins | crc_accepts | geom_pins | cert_fed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| rho0.5_df0_confirmed | 1200 | 0 | 0 | 0 | 149.5 | 41.5 | 284.2 | 196.7 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.5_df0_unconfirmed | 1200 | 0 | 0 | 0 | 148.7 | 40.8 | 282.9 | 196.1 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.5_df0_none | 1200 | 0 | 0 | 0 | 210.1 | 101.4 | 398.3 | 329.8 | 0 | 0 | 0 | - | - | - | 0 |
+| rho0.5_df1e-2_confirmed | 1200 | 0 | 0 | 0 | 150.0 | 39.9 | 285.2 | 196.3 | 125222 | 0 | 985 | - | - | - | 0 |
+| rho0.5_df1e-2_unconfirmed | 1200 | 48 | 1048 | 1096 | 25.9 | 14.0 | 44.7 | 36.5 | 789970 | 25866384 | 1 | - | - | - | 0 |
+| rho0.5_df1e-2_none | 1200 | 0 | 0 | 0 | 208.3 | 99.5 | 394.9 | 329.5 | 0 | 0 | 2204 | - | - | - | 0 |
+| rho0.9_df0_confirmed | 1200 | 0 | 0 | 0 | 176.0 | 48.9 | 333.5 | 262.6 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.9_df0_unconfirmed | 1200 | 0 | 0 | 0 | 174.4 | 48.4 | 330.5 | 262.6 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.9_df0_none | 1200 | 0 | 0 | 0 | 274.4 | 117.3 | 518.3 | 396.7 | 0 | 0 | 0 | - | - | - | 0 |
+| rho0.9_df1e-2_confirmed | 1200 | 0 | 0 | 0 | 175.0 | 51.3 | 331.7 | 262.5 | 125222 | 0 | 3561 | - | - | - | 0 |
+| rho0.9_df1e-2_unconfirmed | 1200 | 48 | 1048 | 1096 | 25.1 | 13.8 | 43.2 | 32.0 | 789970 | 25863393 | 7 | - | - | - | 0 |
+| rho0.9_df1e-2_none | 1200 | 0 | 0 | 0 | 275.5 | 110.6 | 520.1 | 434.6 | 0 | 0 | 8436 | - | - | - | 0 |
+| rho0.5_df1e-2_CPnoguard_certconf0 | 1200 | 0 | 0 | 0 | 63.2 | 18.4 | 119.7 | 75.7 | 125222 | 0 | 214 | 0 | 326 | 636 | 14075 |
+| rho0.5_df1e-2_CPnoguard_certconf1 | 1200 | 0 | 0 | 0 | 150.0 | 39.9 | 285.2 | 196.3 | 125222 | 0 | 0 | 0 | 0 | 0 | 148 |
+
+Headline:
+- Hazard: with dci-false 1e-2 the unconfirmed rule prunes the truth on 1096/1200 RNTIs (rho 0.5 and 0.9): 48 wrong winners, 1048 undecidable. Confirmed rule: 0 truth pruned, 0 wrong, 0 undecidable, same speed as dci-false 0.
+- Cost of confirmation (dci-false 0, where both rules are safe): mean +0.5 % (149.5 vs 148.7 s, rho 0.5) and +0.9 % (176.0 vs 174.4 s, rho 0.9); cold mean +0.5/+0.9 %. The exclusion itself still saves 29-36 % of the mean vs none.
+- ISAC_TD_CERT_CONFIRMED=1 removes certified_wrong (214 -> 0) but also every lever event in this model (cert_fed 14075 -> 148; accepts/pins 326/636 -> 0; mean 63.2 -> 150.0 s = levers off): a neighbour is confirmed only once the receiver's own pick of it passed, which during the search is rare. Keep default 0.
+- Simulator S-slot exclusion is stricter than the runtime's when the S slot has flexible symbols (sim_tdd_excl comment), so the exclusion gain is an upper bound for such patterns.
