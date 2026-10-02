@@ -71,6 +71,7 @@ struct SimCfg {
    * tdd_s_dl_symbols = DL symbols of an 'S' slot, mcs_change = per-slot MCS redraw prob (-1 = 1 - persist), snr_rho = AR(1) SNR coefficient (0 = i.i.d.) */
   double other_ue_occ, mcs_change, snr_rho;
   int tdd_s_dl_symbols;
+  int other_ue_same_cfg; /* 1 = another UE's DM-RS config (add_pos / max_len) equals the truth's (cell-common): its mask differs only through S/L (1-3 distinct masks) */
   std::string tdd;
   float sib_pmin, sib_eps; /* sibling guard (engine st->sib_pmin / sib_eps); --sib-pmin 0 disables the guard (fix A only) */
   float w_sib1, w_default, w_obs, w_field, w_probe;
@@ -86,7 +87,7 @@ struct SimCfg {
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
     c.crc_accept = c.geom_pin = c.harq_trap_retx = 0;
     c.slot_model = 0; c.k0_oracle_legacy = 1; c.fo_always = 0; c.truth_k0 = -1;
-    c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
+    c.other_ue_same_cfg = 0; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
     c.retx_trap = c.k0_trap_adj = 0; c.sib_pmin = 0.05f; c.sib_eps = 1e-6f;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
@@ -107,6 +108,7 @@ struct RntiRec {
   long sib_trials, sib_blocks, retx_trap_passes, k0_trap_passes;
   long dci_missed, dci_false, proc_grants, adj_grants, trap_grants, certified_grants, certified_sib, certified_wrong; /* slot model (v2) */
   int truth_k0;
+  long restores, restore_hyp; /* restore_observed_typea events / entries re-added */
   long k0_probes, k0_probe_hyp, k0_probe_layers, n_hyp_end; /* I3: runtime k0 >= 2 probe layers */
   long geom_pins, geom_blocks, crc_accepts; /* lever events in this RNTI (see SimCfg::crc_accept/geom_pin) */
   /* Analytical-bound bookkeeping (spec section 3 evidence standard): wrong_pins = pins that kept a geometry other than the truth's;
@@ -140,6 +142,7 @@ struct SimResult {
   long geom_pins = 0, geom_blocks = 0, crc_accepts = 0, wrong_pins = 0, crc_wrong = 0, sib_trials = 0, sib_blocks = 0, retx_trap_passes = 0, k0_trap_passes = 0;
   double geom_bound = 0, crc_bound = 0;
   long dci_missed = 0, dci_false = 0, proc_grants = 0, adj_grants = 0, trap_grants = 0, certified_grants = 0, certified_sib = 0, certified_wrong = 0;
+  long restores = 0, restore_hyp = 0;
   long k0_probes = 0, k0_probe_hyp = 0, k0_probe_layers = 0, n_hyp_end = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
   std::vector<RntiRec> recs;
@@ -311,7 +314,7 @@ class SlotTimeline {
     for (long n = 0; n < 4000000; n++) {
       cursor_++;
       if (slot(cursor_).occ.present) return cursor_;
-      if ((n & 0xFFF) == 0xFFF) trim(cursor_ - 8); /* long idle stretch (e.g. no eligible slot at all): keep the buffer bounded */
+      if ((n & 0xFFF) == 0xFFF) trim(cursor_ - 40); /* (>= 33 kept: probe layers / certification read back to -32) long idle stretch (e.g. no eligible slot at all): keep the buffer bounded */
     }
     return -1; /* nothing schedulable (e.g. TDD leaves no DL slot after a DL slot for k0 = 1) */
   }
@@ -416,6 +419,34 @@ static bool sim_certified(SlotTimeline &tl, long t, const SimKey &g, int L, uint
   }
   return n_sib > 0;
 }
+
+/* Observed-mask set, mirroring nr_pdsch_config_sweep.c obs_set_t / obs_record / obs_admits (OBS_MASKS_MAX = 8; a full set drops new masks): one per RNTI (r->obs)
+ * and one cell-wide (g_obs, promoted when a second distinct RNTI observes the same mask). last = S+L-1 (-1 unknown); k0 = the legacy (K39 bug) pin, -1 = none. */
+#define SIM_OBS_MAX 8
+struct SimObs {
+  uint16_t mask[SIM_OBS_MAX] = {};
+  int8_t last[SIM_OBS_MAX] = {}, k0[SIM_OBS_MAX] = {};
+  int n = 0;
+  int find(uint16_t m) const { for (int i = 0; i < n; i++) if (mask[i] == m) return i; return -1; }
+  int record(uint16_t m, int l, int kk)
+  {
+    int k = find(m);
+    if (k < 0 && n < SIM_OBS_MAX) { k = n++; mask[k] = m; last[k] = -1; k0[k] = -1; }
+    if (k >= 0) {
+      if (l >= 0) last[k] = (last[k] < 0 || last[k] == l) ? (int8_t)l : -1;
+      if (kk >= 0) k0[k] = (k0[k] < 0 || k0[k] == kk) ? (int8_t)kk : -1;
+    }
+    return k;
+  }
+  bool admits(const nr_pdsch_cfg_hypothesis_t &h, int k) const
+  {
+    if (h.dmrs_mask != mask[k]) return false;
+    if (last[k] >= 0 && (int)h.tda_start + (int)h.tda_length - 1 != last[k]) return false;
+    if (k0[k] >= 0 && h.k0 != k0[k]) return false;
+    return true;
+  }
+  bool any_admits(const nr_pdsch_cfg_hypothesis_t &h) const { for (int k = 0; k < n; k++) if (admits(h, k)) return true; return false; }
+};
 
 struct Grant {
   double snr;
@@ -526,10 +557,14 @@ static SimResult run_sim(const SimCfg &cfg)
     struct Relied { bool conv = false, counted = false; uint32_t bits = 0; int32_t val[NR_TD_F_COUNT]; };
     std::vector<Relied> relied(cfg.rntis_per_acq);
     std::vector<std::pair<uint32_t, int>> decoys; /* (dmrs mask, end symbol) of every catalogue entry: what another UE's PDSCH can look like */
-    for (int i = 0; i < n_hyp; i++) decoys.push_back({tmpl->hyp[i].dmrs_mask, tmpl->hyp[i].tda_start + tmpl->hyp[i].tda_length});
-    int n_obs_prev = 0; /* slot model: earlier ok RNTIs that measured their own mask on a DCI's own slot (cell-wide consensus needs 2) */
+    for (int i = 0; i < n_hyp; i++) {
+      const nr_pdsch_cfg_hypothesis_t &h = tmpl->hyp[i];
+      if (cfg.other_ue_same_cfg && (h.dmrs_add_pos != T.dmrs_add_pos || h.dmrs_max_len != T.dmrs_max_len || h.mapping_type != 0)) continue;
+      decoys.push_back({h.dmrs_mask, h.tda_start + h.tda_length});
+    }
+    SimObs g_obs;                 /* slot model: cell-wide observed masks of this acquisition (promoted when 2 distinct RNTIs agree) */
+    std::vector<SimObs> rnti_obs; /* slot model: the observed set of every earlier RNTI of the acquisition (contexts persist at runtime) */
     int n_ok_prev = 0; /* earlier RNTIs of this acquisition whose oracle state was ok */
-    int n_k0claim_prev = 0; /* slot model + legacy oracle: earlier ok RNTIs that made a k0 = 0 claim (cell-wide consensus needs 2) */
     for (int k = 0; k < cfg.rntis_per_acq; k++) {
       std::mt19937_64 crng(mix(cfg.seed, a, 0x100 + k)); /* channel: fixed draws per grant, so arms are paired */
       std::mt19937_64 prng(mix(cfg.seed, a, 0x200 + k)); /* probe inconclusive draws */
@@ -543,7 +578,7 @@ static SimResult run_sim(const SimCfg &cfg)
       if (cfg.slot_model)
         tl = std::make_unique<SlotTimeline>(cfg, T.k0, mix(cfg.seed, a, 0x800 + k), mix(cfg.seed, a, 0x900 + k), T.tda_start + T.tda_length <= cfg.tdd_s_dl_symbols,
                                             &decoys);
-      bool k0_claimed = false, mask_observed = false;
+      SimObs own; /* this RNTI's observed set (r->obs) */
       long probe_tick = 0; /* jobs with an empty own slot (runtime s_probe_tick: 1 in 8 probes) */
       memcpy((void *)st.get(), (const void *)tmpl.get(), sizeof(*st));
       st->random_state = (uint32_t)mix(cfg.seed, a, 0x300 + k) | 1u; /* engine RNG seeded from --seed */
@@ -618,17 +653,61 @@ static SimResult run_sim(const SimCfg &cfg)
       };
       /* slot model (I1/I2, nr_pdsch_passive_queue.c:577/786): the runtime measures DM-RS ONLY in the DCI's OWN slot, ONLY for a k0 == 0 pick and only on the
        * grant's PRBs; whatever occupies them (this RNTI's own PDSCH with overlapping PRBs, or another UE's) gives the mask / last symbol. Legacy (K39 bug):
-       * a measurement also claims k0 = 0 (job k0 recorded as observed); fixed: mask + last symbol only. */
-      auto do_observe_slot = [&](uint32_t m, int e) {
-        const bool claim0 = cfg.k0_oracle_legacy;
-        k0_claimed |= claim0;
-        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) { return h.dmrs_mask == m && h.tda_start + h.tda_length == e && (claim0 ? h.k0 == 0 : true); });
+       * the observation also pins k0 = 0 (the job's hypothesised k0, kept per mask); fixed: mask + last symbol only. Then the runtime protocol of
+       * nr_pdsch_config_sweep_observe() (sweep.c, the same on both arms): (1) record into r->obs; (2) promote the mask to g_obs once a second distinct RNTI
+       * has it, refine g_obs; (3) restore_observed_typea: if no alive entry admits the new observation, re-append the matching type-A CATALOGUE entries
+       * (catalogue k0, or the pinned k0 in legacy; evidence zeroed; qm / prior filters); (4) prune_to_observed: keep entries admitted by ANY mask of r->obs or
+       * g_obs (a UNION, so an earlier correct mask protects the truth from a later foreign one), untouched when nothing matches. */
+      auto prune_by_obs = [&](const SimObs &o1, const SimObs &o2) {
+        if (o1.n + o2.n <= 0) return;
+        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) { return o1.any_admits(h) || o2.any_admits(h); });
       };
-      /* cell-wide pre-pruning is the consensus of >= 2 earlier RNTIs whose oracles were ok: always the TRUTH's observation */
+      auto restore_observed = [&](uint16_t m, int last, int kp) {
+        SimObs one; one.n = 1; one.mask[0] = m; one.last[0] = (int8_t)last; one.k0[0] = (int8_t)kp;
+        for (int i = 0; i < st->n_hyp; i++) if (one.admits(st->hyp[i], 0)) return;
+        const int before = st->n_hyp;
+        for (int i = 0; i < tmpl->n_hyp && st->n_hyp < NR_PDSCH_SWEEP_MAX_HYP; i++) {
+          nr_pdsch_cfg_hypothesis_t h = tmpl->hyp[i];
+          if (kp >= 0) h.k0 = (uint8_t)kp;
+          if (h.mapping_type != 0 || !one.admits(h, 0)) continue;
+          if (qm_obs >= 2 && !((qm_tables >> h.mcs_table) & 1)) continue;
+          if (use_prior && gprior_valid && (h.mcs_table != gprior.tbl || (gprior.map == h.mapping_type && (h.dmrs_add_pos != gprior.add || h.dmrs_max_len != gprior.len)))) continue;
+          bool dup = false;
+          for (int j = before; j < st->n_hyp; j++) {
+            const nr_pdsch_cfg_hypothesis_t &o = st->hyp[j];
+            dup |= o.tda_start == h.tda_start && o.tda_length == h.tda_length && o.k0 == h.k0 && o.dmrs_mask == h.dmrs_mask && o.mcs_table == h.mcs_table;
+          }
+          if (dup) continue;
+          const int at = st->n_hyp++;
+          st->hyp[at] = h;
+          st->trials[at] = st->ok[at] = 0;
+          st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
+          st->ok_unique[at] = 0;
+          st->fp_trials[at] = st->sib_trials[at] = 0;
+          memset(st->geom_key, 0, sizeof(st->geom_key)); memset(st->ok_geom, 0, sizeof(st->ok_geom)); st->n_geom = 0; st->geom_blocked = false;
+          st->order[at] = at;
+        }
+        rec.restores += st->n_hyp > before;
+        rec.restore_hyp += st->n_hyp - before;
+      };
+      auto do_observe_slot = [&](uint32_t m, int e) {
+        if (!m) return; /* the runtime ignores an empty mask */
+        const int last = e - 1, kp = cfg.k0_oracle_legacy ? 0 : -1;
+        own.record((uint16_t)m, last, kp);
+        if (g_obs.find((uint16_t)m) < 0)
+          for (const SimObs &o : rnti_obs) {
+            const int j = o.find((uint16_t)m);
+            if (j >= 0) { g_obs.record((uint16_t)m, o.last[j], o.k0[j]); break; }
+          }
+        if (g_obs.find((uint16_t)m) >= 0) g_obs.record((uint16_t)m, last, kp);
+        restore_observed((uint16_t)m, last, kp);
+        prune_by_obs(own, g_obs);
+      };
+      /* v1 cell-wide pre-pruning (slot model 0 only): the consensus of >= 2 earlier RNTIs whose oracles were ok: always the TRUTH's observation */
       auto do_observe_cellwide = [&]() {
-        const bool pin_truth = !cfg.slot_model && cfg.k0_oracle_legacy, claim0 = cfg.slot_model && cfg.k0_oracle_legacy && n_k0claim_prev >= 2;
+        const bool pin_truth = cfg.k0_oracle_legacy;
         sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
-          return h.dmrs_mask == T.dmrs_mask && h.tda_start + h.tda_length == T.tda_start + T.tda_length && (pin_truth ? h.k0 == T.k0 : claim0 ? h.k0 == 0 : true);
+          return h.dmrs_mask == T.dmrs_mask && h.tda_start + h.tda_length == T.tda_start + T.tda_length && (pin_truth ? h.k0 == T.k0 : true);
         });
       };
       /* Hypotheses are identified by CONTENT: oracle pruning re-indexes the state, so catalogue indices drift. */
@@ -650,11 +729,11 @@ static SimResult run_sim(const SimCfg &cfg)
       };
       if (!fb2) {
         if (use_prior && gprior_valid) sim_prune(st.get(), prior_keep);
-        if (cfg.oracle && k >= 2 && (cfg.slot_model ? n_obs_prev : n_ok_prev) >= 2) do_observe_cellwide();
+        if (cfg.oracle && (cfg.slot_model ? true : (k >= 2 && n_ok_prev >= 2))) { if (cfg.slot_model) prune_by_obs(own, g_obs); else do_observe_cellwide(); }
       } else {
         /* Reversible pruning: the DESTRUCTIVE oracle pre-prune first (it compacts any mask), then the masks (index-based, applied
          * to the final catalogue; the sim never extends the catalogue, so no new entries appear after this point). */
-        if (cfg.oracle && k >= 2 && (cfg.slot_model ? n_obs_prev : n_ok_prev) >= 2) do_observe_cellwide();
+        if (cfg.oracle && (cfg.slot_model ? true : (k >= 2 && n_ok_prev >= 2))) { if (cfg.slot_model) prune_by_obs(own, g_obs); else do_observe_cellwide(); }
         if (use_prior && gprior_valid) sim_dormant(st.get(), NR_TD_DORMANT_PRIOR, prior_keep);
         for (int f = 0; f < NR_TD_F_COUNT; f++) {
           int32_t v;
@@ -709,7 +788,8 @@ static SimResult run_sim(const SimCfg &cfg)
           const nr_pdsch_cfg_hypothesis_t &hs = st->hyp[h];
           if (is_k0_sib_any(hs)) {
             const SimOcc nb = tl->slot(gr.dci_slot + hs.k0).occ;
-            /* the neighbour was encoded with the TRUE table; this hypothesis reads the grant's MCS under ITS table: the computations must coincide (I4) */
+            /* NB twin_tbl / --twins are IGNORED here (stress-arm semantics differ): the trap follows the physical (Qm, R) equality for every hypothesis table.
+             * the neighbour was encoded with the TRUE table; this hypothesis reads the grant's MCS under ITS table: the computations must coincide (I4) */
             if (nb.present && sim_compat_tbl(gr.key, hs.mcs_table, nb.key, T.mcs_table)) {
               const bool np = nb.key.rank <= cfg.n_rx && nb.snr >= nr_td_required_snr_db(nb.key.mcs, T.mcs_table);
               if (np) { rec.k0_trap_passes++; return true; }
@@ -763,7 +843,7 @@ static SimResult run_sim(const SimCfg &cfg)
           for (int tb = 0; tb < 3; tb++) gr.exercised |= twin_tbl[tb] && sim_tbl_differs(gr.mcs, T.mcs_table, tb); /* some twin is distinguishable */
           gr.snr_est_noise = o.snr_est_noise; gr.adj_same = false; gr.key = o.key;
           gr.dci_slot = u - T.k0;
-          tl->trim(gr.dci_slot - 8);
+          tl->trim(gr.dci_slot - 40); /* >= 33 slots kept: certification reads offsets down to -32 */
           if (!o.dci_seen) { rec.dci_missed++; continue; } /* the grant happened (time passes) but the receiver never detected its DCI: no job */
         } else {
         gr.snr = cfg.mu + cfg.fade * nd(crng);
@@ -945,7 +1025,6 @@ static SimResult run_sim(const SimCfg &cfg)
                 const uint32_t m = same_ov ? decoy_mask : own.other_mask;
                 const int e = same_ov ? decoy_end : own.other_end;
                 do_observe_slot(m, e);
-                mask_observed |= same_ov && ostate == 0;
                 find_truth();
               } else if ((probe_tick++ % 8) == 0) {
                 /* runtime k0 >= 2 probe (queue.c:807-868): DM-RS-free own slot, 1 job in 8 measures slots +1 .. +K (K = min(32, spf - 2), spf = 20 at
@@ -1035,10 +1114,9 @@ static SimResult run_sim(const SimCfg &cfg)
       R.n_full += rec.n_full; R.n_probe += rec.n_probe; R.gated_phys += rec.gated_phys; R.gated_chan += rec.gated_chan;
       R.promotions += rec.promotions; R.withdrawals += rec.withdrawals;
       n_ok_prev += ostate == 0;
-      n_k0claim_prev += k0_claimed && ostate == 0;
-      n_obs_prev += mask_observed;
+      if (cfg.slot_model) rnti_obs.push_back(own);
       rec.n_hyp_end = st->n_hyp;
-      R.k0_probes += rec.k0_probes; R.k0_probe_hyp += rec.k0_probe_hyp; R.k0_probe_layers += rec.k0_probe_layers; R.n_hyp_end += rec.n_hyp_end;
+      R.restores += rec.restores; R.restore_hyp += rec.restore_hyp; R.k0_probes += rec.k0_probes; R.k0_probe_hyp += rec.k0_probe_hyp; R.k0_probe_layers += rec.k0_probe_layers; R.n_hyp_end += rec.n_hyp_end;
       R.dci_missed += rec.dci_missed; R.dci_false += rec.dci_false; R.proc_grants += rec.proc_grants; R.adj_grants += rec.adj_grants;
       R.trap_grants += rec.trap_grants; R.certified_grants += rec.certified_grants; R.certified_sib += rec.certified_sib; R.certified_wrong += rec.certified_wrong;
       R.oracle_miss_rntis += ostate == 1; R.oracle_wrong_rntis += ostate == 2;
@@ -1098,6 +1176,7 @@ int main(int argc, char **argv)
            "  Simulator v2 (all default to v1 behaviour; --slot-model 0 output is byte-identical to v1):\n"
            "  --slot-model 0|1 (slot-indexed grants per RNTI + PHYSICAL shifted-slot k0 trap + DCI observation + certified flag)\n"
            "  --grant-prob P (per eligible DL slot, default 0.5) --adjacency A (P(grant | previous eligible slot had one); default -1 = i.i.d. grant-prob)\n"
+           "  --other-ue-same-cfg 0|1 (other UE's DM-RS add_pos/max_len = the truth's, i.e. few distinct masks; default 0 = any catalogue entry)\n"
            "  --other-ue-occ P (another UE's PDSCH overlaps the grant's PRBs in a DL slot; triggers the K39 legacy oracle + wrong mask) --tdd-s-dl-symbols N (6)\n"
            "  --mcs-change P (per-slot MCS redraw, default 1-persist) --snr-rho R (AR(1) SNR, default 0 = i.i.d.)\n"
            "  --persist RHO (P(next grant repeats the allocation PRB/rank), default 0.9; MCS changes per slot with prob 1-RHO unless --mcs-change) --dci-miss P --dci-false P (spurious DCI per PDCCH slot)\n"
@@ -1161,6 +1240,7 @@ int main(int argc, char **argv)
     else if (f == "--tdd") c.tdd = v;
     else if (f == "--k0-oracle-legacy") c.k0_oracle_legacy = atoi(v);
     else if (f == "--other-ue-occ") c.other_ue_occ = atof(v);
+    else if (f == "--other-ue-same-cfg") c.other_ue_same_cfg = atoi(v);
     else if (f == "--tdd-s-dl-symbols") c.tdd_s_dl_symbols = atoi(v);
     else if (f == "--mcs-change") c.mcs_change = atof(v);
     else if (f == "--snr-rho") c.snr_rho = atof(v);
@@ -1185,9 +1265,9 @@ int main(int argc, char **argv)
     if (c.retx_trap > 0 || c.k0_trap_adj > 0 || c.slot_model) printf(",\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", x.retx_trap_passes, x.k0_trap_passes);
     if (c.slot_model)
       printf(",\"truth_k0\":%d,\"dci_missed\":%ld,\"dci_false\":%ld,\"proc_grants\":%ld,\"adj_grants\":%ld,\"trap_grants\":%ld,\"certified_grants\":%ld,"
-             "\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,\"n_hyp_end\":%ld",
+             "\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,\"n_hyp_end\":%ld,\"restores\":%ld,\"restore_hyp\":%ld",
              x.truth_k0, x.dci_missed, x.dci_false, x.proc_grants, x.adj_grants, x.trap_grants, x.certified_grants,
-             x.certified_sib, x.certified_wrong, x.k0_probes, x.k0_probe_hyp, x.k0_probe_layers, x.n_hyp_end);
+             x.certified_sib, x.certified_wrong, x.k0_probes, x.k0_probe_hyp, x.k0_probe_layers, x.n_hyp_end, x.restores, x.restore_hyp);
     puts("}");
   }
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
@@ -1220,8 +1300,8 @@ int main(int argc, char **argv)
   if (c.slot_model)
     printf(",\"slot_model\":1,\"k0_oracle_legacy\":%d,\"dci_missed\":%ld,\"dci_false\":%ld,\"proc_grants\":%ld,\"adj_grants\":%ld,\"trap_grants\":%ld,"
            "\"certified_grants\":%ld,\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,"
-           "\"n_hyp_end\":%ld", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
-           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end);
+           "\"n_hyp_end\":%ld,\"restores\":%ld,\"restore_hyp\":%ld", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
+           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end, r.restores, r.restore_hyp);
   if (c.fo_always && c.fieldbook != 2) printf(",\"fail_opens\":%ld", r.fail_opens);
   if (c.retx_trap > 0 || c.k0_trap_adj > 0 || c.slot_model)
     printf(",\"retx_trap\":%g,\"k0_trap_adj\":%g,\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", c.retx_trap, c.k0_trap_adj, r.retx_trap_passes,

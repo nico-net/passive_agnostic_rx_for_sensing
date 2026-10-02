@@ -186,6 +186,19 @@ TEST(TdSimV2, GoldenV1Output)
     EXPECT_EQ(r.wrong + r.undecidable, 0);
   }
 }
+TEST(TdSimV2, GoldenV1LeverAndTrapArms)
+{
+  /* numbers from the 77775006f2 reference binary */
+  SimCfg c = SimCfg::defaults(); c.acq = 20; c.seed = 1; c.oracle = 0; c.crc_accept = 1; c.geom_pin = 1; c.k0_trap_adj = 0.3; c.crc_false = 1e-3;
+  const SimResult pc = run_sim(c);
+  EXPECT_EQ(pc.total_grants, 5339781);
+  EXPECT_EQ(pc.k0_trap_passes, 3163);
+  SimCfg d = SimCfg::defaults(); d.acq = 10; d.seed = 7; d.oracle = 0; d.k0_trap_adj = 0.5; d.rntis_per_acq = 1;
+  const SimResult t = run_sim(d);
+  EXPECT_EQ(t.total_grants, 4158534);
+  EXPECT_EQ(t.k0_trap_passes, 2158);
+  EXPECT_EQ(t.undecidable, 2);
+}
 TEST(TdSimV2, SlotKnobsAreInertWithTheSlotModelOff)
 {
   SimCfg a = SimCfg::defaults(); a.acq = 20; a.seed = 9;
@@ -517,6 +530,56 @@ TEST(TdSimV2, TwinTablesAreDistinguishedByTheMcsTableNotADraw)
   SimCfg a = SimCfg::defaults(); a.acq = 6; a.seed = 5; a.oracle = 0; a.slot_model = 1; a.rntis_per_acq = 1; a.cap_s = 200;
   SimCfg b = a; b.table_exercise = 0.0;
   EXPECT_EQ(run_sim(a).total_grants, run_sim(b).total_grants);
+}
+TEST(TdSimV2, ObservedSetMirrorsTheRuntime)
+{
+  SimObs o;
+  EXPECT_EQ(o.record(0x884, 12, -1), 0);
+  EXPECT_EQ(o.record(0x884, 12, 0), 0);
+  EXPECT_EQ(o.last[0], 12);
+  EXPECT_EQ(o.k0[0], 0);            /* a refinement */
+  o.record(0x884, 10, -1);
+  EXPECT_EQ(o.last[0], -1);         /* a contradicting last symbol relaxes it to unknown */
+  for (int m = 1; m <= 7; m++) EXPECT_GE(o.record((uint16_t)m, 5, -1), 0);
+  EXPECT_EQ(o.n, 8);
+  EXPECT_EQ(o.record(0x777, 5, -1), -1); /* OBS_MASKS_MAX = 8: a full set drops new masks */
+  EXPECT_EQ(o.n, 8);
+  nr_pdsch_cfg_hypothesis_t h{};
+  h.dmrs_mask = 0x884; h.tda_start = 1; h.tda_length = 11; h.k0 = 1;
+  EXPECT_FALSE(o.admits(h, 0));     /* k0 pinned to 0 by the earlier refinement: a k0 = 1 entry is rejected */
+  h.k0 = 0;
+  EXPECT_TRUE(o.admits(h, 0));      /* last symbol unknown (relaxed), k0 matches */
+  h.k0 = 1;
+  SimObs p; p.record(0x884, 11, 0);
+  EXPECT_FALSE(p.admits(h, 0));     /* legacy k0 pin 0 rejects a k0 = 1 entry */
+  p.k0[0] = -1;
+  EXPECT_TRUE(p.admits(h, 0));      /* the fixed oracle keeps no pin */
+  h.tda_length = 10;
+  EXPECT_FALSE(p.admits(h, 0));     /* last symbol S+L-1 = 10 != 11 */
+  SimObs u; u.record(0x1, 3, -1); u.record(0x884, 11, -1);
+  h.tda_length = 11;
+  EXPECT_TRUE(u.any_admits(h));     /* union semantics */
+}
+TEST(TdSimV2, RestoreReAddsTheTruthAfterAForeignMaskPrunedIt)
+{
+  /* fixed oracle, a k0 = 1 truth with adjacent same-PRB traffic and another UE on the PRBs when the own PDSCH does not overlap: a foreign mask can arrive
+   * first and prune the truth; the own mask later triggers restore_observed_typea and the union keeps the truth */
+  SimCfg c = SimCfg::defaults(); c.acq = 12; c.seed = 3; c.oracle = 1; c.truth_k0 = 1; c.slot_model = 1; c.adjacency = 1.0; c.persist = 0.5; c.k0_oracle_legacy = 0;
+  c.other_ue_occ = 0.5; c.other_ue_same_cfg = 1; c.rntis_per_acq = 1; c.cap_s = 60;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.restores, 0);
+  EXPECT_EQ(r.wrong, 0);
+  for (const RntiRec &x : r.recs) EXPECT_GE(x.truth_kl_trials, 0) << "the union / restore must keep the truth alive (acq " << x.acq << ")";
+}
+TEST(TdSimV2, LegacyPinTravelsWithTheRestoredMask)
+{
+  /* legacy: the pin k0 = 0 is part of the observation, so a restore re-adds only k0 = 0 entries: a k0 = 1 truth cannot come back */
+  SimCfg c = SimCfg::defaults(); c.acq = 12; c.seed = 3; c.oracle = 1; c.truth_k0 = 1; c.slot_model = 1; c.adjacency = 1.0; c.persist = 0.5; c.k0_oracle_legacy = 1;
+  c.other_ue_occ = 0.5; c.other_ue_same_cfg = 1; c.rntis_per_acq = 1; c.cap_s = 60;
+  const SimResult r = run_sim(c);
+  long pruned = 0;
+  for (const RntiRec &x : r.recs) pruned += x.truth_kl_trials < 0;
+  EXPECT_GT(pruned, 0);
 }
 int main(int argc, char **argv)
 {
