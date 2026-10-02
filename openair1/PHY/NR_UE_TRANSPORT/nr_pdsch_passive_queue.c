@@ -57,6 +57,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_dci_history.h" // BC9 DL DCI history (certified-flag census, BC9d confirmed-DCI exclusions)
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // BC9d: SIB1 TDD PDSCH last symbols
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.h" // Technique D Qm oracle
+#include "PHY/NR_UE_TRANSPORT/nr_td_order.h" // BC12a SIB1 census
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
@@ -580,6 +581,19 @@ static int bc9_cpk_find(uint16_t rnti, uint64_t cfg, uint8_t tda, bool create)
   g_bc9_cpk[lru].tda = tda;
   g_bc9_cpk[lru].mask = 0;
   return lru;
+}
+int nr_pdsch_passive_bc12_census(const nr_pdsch_sweep_ticket_t *ticket, const nr_pdsch_cfg_hypothesis_t *winner, char *buf, size_t n)
+{
+  nr_td_tdra_t l[NR_TD_MAX_SIB1_TDRA];
+  const int nl = nr_td_sib1_store_get(l);
+  const nr_td_census_t s = nr_td_census_sib1(l, nl, ticket->tda_index, winner);
+  const nr_td_census_t d = nr_td_census_deftab(ticket->typeA_pos, ticket->tda_index, winner);
+  nr_td_census_count(ticket->dci_format, s);
+  nr_td_census_count_deftab(ticket->dci_format, d);
+  static const char *const sn[] = {"none", "match", "mismatch"};
+  static const char *const dn[] = {"na", "match", "mismatch"};
+  return snprintf(buf, n, " k0=%u map=%c dci=%s sib1_row=%s deftab=%s", (unsigned)winner->k0, winner->mapping_type ? 'B' : 'A',
+                  ticket->dci_format == 10 ? "1_0" : ticket->dci_format == 11 ? "1_1" : "?", sn[s], dn[d]);
 }
 void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0)
 {
@@ -1344,9 +1358,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (credit_ok)
         nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
-        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
+        char bc12[96];
+        nr_pdsch_passive_bc12_census(&job.sweep_ticket, &winner, bc12, sizeof(bc12));
+        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
-              winner.dmrs_mask, winner.mcs_table);
+              winner.dmrs_mask, winner.mcs_table, bc12);
         nr_pdsch_passive_bc9_converged(&job.sweep_ticket, winner.k0);
       }
       /* BC9 census AFTER the KL feedback: it only reads the sweep and must not delay or reorder the KL path (a trial whose

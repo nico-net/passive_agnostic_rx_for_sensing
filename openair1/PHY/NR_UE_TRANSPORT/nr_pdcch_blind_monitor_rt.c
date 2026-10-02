@@ -6324,6 +6324,10 @@ constdiag_done:;
         continue; /* Unsupported auto context is not a guessed manual success. */
       nr_pdsch_adaptive_apply(&hy, &dlsch_pdu, &grant_mcs_table, &grant_mcs_table_lbrm);
       hy_k0 = hy.k0;
+      /* BC12a: this branch only runs for !is_dci10, i.e. the context is created from a DCI 1_1 grant (is_dci10 is
+       * out.dci_format == NR_BLIND_DCI_FORMAT_1_0 at the top of the grant loop). Census inputs only. */
+      sweep_ticket.dci_format = is_dci10 ? 10 : 11;
+      sweep_ticket.typeA_pos = (uint8_t)(cfg->dmrs_typeA_position + 2);
       sweep_ticket.layout_index = cand_task[ti].dl_auto ? cand_task[ti].dl_layout_index : 0xFFFF;
       dmrs_sym = __builtin_ctz((unsigned)hy.dmrs_mask);
     }
@@ -6735,9 +6739,11 @@ constdiag_done:;
               nr_pdcch_dci11_layout_feedback(sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;
               if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
-                LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
+                char bc12[96];
+                nr_pdsch_passive_bc12_census(&sweep_ticket, &winner, bc12, sizeof(bc12));
+                LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s\n",
                       sweep_ticket.rnti, sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
-                      winner.dmrs_mask, winner.mcs_table);
+                      winner.dmrs_mask, winner.mcs_table, bc12);
                 nr_pdsch_passive_bc9_converged(&sweep_ticket, winner.k0);
               }
               /* BC9 census after the KL feedback (read-only; see the deferred consumer) */
