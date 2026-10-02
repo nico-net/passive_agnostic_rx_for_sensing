@@ -2948,3 +2948,60 @@ TEST_F(PdschBc9, K0UniverseDoesNotShrinkWithTheStatisticalLayerDrop)
   ASSERT_GE(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 1, &f), 0);
   EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 1), UINT64_C(0x9)); /* {0, 3}: NOT certified */
 }
+
+/* Follow-up 1: the BC9 census (nr_pdsch_passive_bc9_note) runs AFTER the KL feedback and only READS the sweep
+ * (ticket_siblings, rnti_constrained, row_k0_allowed, cert_epoch). With no constraint, the KL selection/feedback sequence
+ * must be identical with those reads (BC9 on) and without them (ISAC_TD_DCI_ADJ=0). Two RNTIs x two rows, an observation,
+ * convergence and prior publication: every decision the KL path makes is recorded and compared. */
+static std::vector<int64_t> bc9_kl_trace(bool census_reads)
+{
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  std::vector<int64_t> tr;
+  unsigned seed = 4242;
+  const uint16_t rntis[2] = {0x4601, 0x4602};
+  for (int g = 0; g < 40000; g++) {
+    const uint16_t rnti = rntis[g & 1];
+    const uint8_t tda = (uint8_t)((g >> 1) % 2);
+    nr_pdsch_sweep_ticket_t t{};
+    nr_pdsch_cfg_hypothesis_t h{};
+    if (!nr_pdsch_config_sweep_select(0x1234, rnti, tda, 0, 0, test_legal, &t, &h)) {
+      tr.push_back(-1);
+      continue;
+    }
+    if (g < 8) /* one DM-RS observation per (RNTI, row): k0 {0,1} x 3 tables survive, so the contexts converge */
+      nr_pdsch_config_sweep_observe(&t, (uint16_t)test_legal(0, 13, 1, 0, 1, 1), 13, 0);
+    const bool truth = h.k0 == 0 && h.tda_start == 1 && h.tda_length == 13 && h.mcs_table == 0 && h.dmrs_add_pos == 1
+                       && h.dmrs_max_len == 1;
+    const bool pass = truth && (double)rand_r(&seed) / RAND_MAX < 0.8;
+    nr_pdsch_cfg_hypothesis_t w{};
+    const bool conv = nr_pdsch_config_sweep_feedback(&t, pass, &w);
+    if (census_reads) { /* exactly what the census does after the feedback */
+      nr_pdsch_cfg_hypothesis_t hh{};
+      uint64_t sib = 0;
+      uint8_t tables = 0;
+      nr_pdsch_config_sweep_ticket_siblings(&t, &hh, &sib, &tables);
+      (void)nr_pdsch_config_sweep_rnti_constrained(rnti, t.configuration);
+      (void)nr_pdsch_config_sweep_row_k0_allowed(0x1234, rnti, tda);
+      (void)nr_pdsch_config_sweep_row_k0_allowed(0x1234, rnti, (uint8_t)(tda ^ 1));
+      (void)nr_pdsch_config_sweep_cert_epoch();
+    }
+    tr.push_back((int64_t)t.hypothesis << 8 | (int64_t)t.settled << 4 | (int64_t)conv << 2 | (int64_t)pass);
+  }
+  return tr;
+}
+TEST_F(PdschBc9, CensusReadsLeaveTheKlSequenceUnchanged)
+{
+  const auto off = bc9_kl_trace(false);
+  const auto on = bc9_kl_trace(true);
+  ASSERT_EQ(off.size(), on.size());
+  size_t first_diff = off.size();
+  for (size_t i = 0; i < off.size() && first_diff == off.size(); i++)
+    if (off[i] != on[i])
+      first_diff = i;
+  EXPECT_EQ(first_diff, off.size()) << "KL sequence diverges at grant " << first_diff;
+  int settled = 0;
+  for (auto v : off)
+    settled += (v >> 4) & 1;
+  EXPECT_GT(settled, 0); /* the run reached convergence (and the prior/sibling-row path) */
+}

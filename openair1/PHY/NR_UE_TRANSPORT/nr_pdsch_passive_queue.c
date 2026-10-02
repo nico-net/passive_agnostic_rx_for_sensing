@@ -1251,15 +1251,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_pdsch_cfg_hypothesis_t winner;
       if (credit_ok)
         nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
-      if (credit_ok)
-        nr_pdsch_passive_bc9_note(&job.sweep_ticket, job.rnti, job.dci_abs_slot, &job.dlsch_pdu, job.grant.nb_rb_oh,
-                                  st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
               winner.dmrs_mask, winner.mcs_table);
         nr_pdsch_passive_bc9_converged(&job.sweep_ticket, winner.k0);
       }
+      /* BC9 census AFTER the KL feedback: it only reads the sweep and must not delay or reorder the KL path (a trial whose
+       * own feedback settled the context is not counted: ticket_siblings refuses a settled context). */
+      if (credit_ok)
+        nr_pdsch_passive_bc9_note(&job.sweep_ticket, job.rnti, job.dci_abs_slot, &job.dlsch_pdu, job.grant.nb_rb_oh,
+                                  st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* Qm-oracle prune runs AFTER this job's CRC feedback above: prune_tables() compacts and
        * re-indexes st->hyp[] without bumping the context generation, so pruning before the CRC
        * feedback for the SAME job would credit that outcome to a hypothesis index that has already

@@ -6815,8 +6815,6 @@ constdiag_done:;
             } else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
               /* same evidence as the deferred consumer: layout tallies, or DL link health for 0xFFFF */
               nr_pdcch_dci11_layout_feedback(sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
-              nr_pdsch_passive_bc9_note(&sweep_ticket, out.rnti, abs_slot, &dlsch_pdu, (uint16_t)cfg->pdsch_xoverhead,
-                                        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;
               if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
                 LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
@@ -6824,6 +6822,9 @@ constdiag_done:;
                       winner.dmrs_mask, winner.mcs_table);
                 nr_pdsch_passive_bc9_converged(&sweep_ticket, winner.k0);
               }
+              /* BC9 census after the KL feedback (read-only; see the deferred consumer) */
+              nr_pdsch_passive_bc9_note(&sweep_ticket, out.rnti, abs_slot, &dlsch_pdu, (uint16_t)cfg->pdsch_xoverhead,
+                                        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               /* Qm oracle, as the deferred consumer runs it: AFTER this trial's own feedback (a prune
                * re-indexes the catalog and retires outstanding tickets). */
               if (!sweep_ticket.settled && sweep_ticket.generation && dec.qm_measured)

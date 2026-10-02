@@ -560,6 +560,15 @@ static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
   return r;
 }
 
+/* Read-only lookup for the BC9 queries (row_k0_allowed, rnti_constrained): unlike rnti_ctx(rnti, false) it does not touch
+ * the LRU clock, so the census and the accept hook leave the RNTI / context eviction order exactly as without them. */
+static rnti_ctx_t *rnti_find(uint16_t rnti)
+{
+  for (int i = 0; i < RNTI_CTX_MAX; i++)
+    if (g_rnti[i].rnti == rnti)
+      return &g_rnti[i];
+  return NULL;
+}
 static int obs_find(const obs_set_t *o, uint16_t mask)
 {
   for (int i = 0; i < o->n; i++)
@@ -2107,7 +2116,7 @@ int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uin
 uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t rnti, uint8_t tda)
 {
   pthread_mutex_lock(&g_lock);
-  rnti_ctx_t *r = rnti_ctx(rnti, false);
+  rnti_ctx_t *r = rnti_find(rnti);
   uint64_t a = UINT64_C(0x3);
   if (r) {
     const int ci = cert_find(r, configuration, tda);
@@ -2152,7 +2161,7 @@ uint64_t nr_pdsch_config_sweep_cert_epoch(void)
 bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration)
 {
   pthread_mutex_lock(&g_lock);
-  const rnti_ctx_t *r = rnti_ctx(rnti, false);
+  const rnti_ctx_t *r = rnti_find(rnti);
   bool any = false;
   for (int i = 0; r && i < CERT_PER_RNTI && !any; i++)
     any = cert_used(r, i) && r->cert[i].cfg == configuration;
