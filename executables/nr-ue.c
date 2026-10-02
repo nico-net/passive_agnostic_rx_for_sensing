@@ -2,6 +2,7 @@
 #include "nr_rx_continuity.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
 #include <dlfcn.h>
@@ -1064,7 +1065,8 @@ void *UE_thread(void *arg)
                    - 6 * (int64_t)UE->frame_parms.N_RB_DL)
                       * (15000LL << UE->frame_parms.numerology_index);
             nr_pdcch_blind_set_sib1_semantic_hash(0);
-            nr_cfg_epoch_note_identity(UE->frame_parms.Nid_cell, ssb_hz, 0);
+            nr_cfg_epoch_note_identity(UE->frame_parms.Nid_cell,
+                nr_cfg_identity_frequency(ssb_hz, 15000u << UE->frame_parms.numerology_index), 0);
             nr_cfg_epoch_set_slots_per_second(1000u << UE->frame_parms.numerology_index);
           }
           atomic_store_explicit(&nr_passive_metrics_pci, UE->frame_parms.Nid_cell, memory_order_relaxed); // for the ISAC_METRICS JSON (Task A2)

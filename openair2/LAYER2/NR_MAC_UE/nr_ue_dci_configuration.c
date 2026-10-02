@@ -611,23 +611,34 @@ void ue_dci_configuration(NR_UE_MAC_INST_t *mac, fapi_nr_dl_config_request_t *dl
   int scs = current_DL_BWP ? current_DL_BWP->scs : mac->numerology;
   const int slots_per_frame = get_slots_per_frame_from_scs(scs);
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
-    static uint64_t last_sib1_request_slot;
     const uint64_t abs_slot = nr_cfg_epoch_observe_slot(frame, slot, slots_per_frame);
     nr_cfg_epoch_tick(abs_slot);
+    if (mac->passive_sib1_window
+        && (!mac->get_sib1 || nr_cfg_sib1_window_expired(abs_slot, mac->passive_sib1_request_slot,
+                                                        mac->passive_sib1_occasions, 100u * slots_per_frame))) {
+      mac->get_sib1 = false;
+      mac->passive_sib1_window = false;
+    }
+    const bool due = nr_cfg_sib1_redecode_due(abs_slot, mac->passive_sib1_request_slot, 100u * slots_per_frame);
+    const bool boundary = nr_cfg_epoch_si_redecode_pending(abs_slot)
+        && mac->passive_sib1_request_slot < nr_cfg_epoch_si_boundary();
     if (!mac->get_sib1 && mac->mib && mac->ssb_subcarrier_offset < (mac->frequency_range == FR1 ? 24 : 12)
-        && (nr_cfg_sib1_redecode_due(abs_slot, last_sib1_request_slot, 100u * slots_per_frame)
-            || nr_cfg_epoch_si_redecode_pending())) {
+        && nr_cfg_epoch_sib1_request_allowed(abs_slot) && (due || boundary)) {
       mac->get_sib1 = true;
-      last_sib1_request_slot = abs_slot;
+      mac->passive_sib1_window = true;
+      mac->passive_sib1_occasions = 0;
+      mac->passive_sib1_request_slot = abs_slot;
+      mac->update_pdcch_config = true;
     }
   }
-  if (mac->get_sib1 || mac->update_pdcch_config) {
+  if ((mac->get_sib1 && !mac->passive_sib1_window) || mac->update_pdcch_config) {
     update_pdcch_config(mac);
     mac->update_pdcch_config = false;
   }
   if (mac->get_sib1) {
     bool is_occasion = is_ss_monitor_occasion(frame, slot, slots_per_frame, mac->search_space_zero);
     if (is_occasion) {
+      if (mac->passive_sib1_window) mac->passive_sib1_occasions++;
       LOG_D(NR_MAC_DCI, "Monitoring DCI for SIB1 in frame %d slot %d\n", frame, slot);
       config_dci_pdu(mac, dl_config, TYPE_SI_RNTI_, slot, mac->search_space_zero);
     }

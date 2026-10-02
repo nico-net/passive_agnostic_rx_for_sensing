@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -90,6 +91,7 @@ void nr_pdcch_dci_length_seen_reset(void)
 }
 void nr_pdcch_dci_length_note_seen(int len)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (len > 0 && len <= NR_DCI_MAX_PAYLOAD)
     atomic_store_explicit(&cell_seen[len], true, memory_order_relaxed);
 }
@@ -190,6 +192,7 @@ void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
 
 int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int length)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   if (!c || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
   const int previous = c->len_state == NR_LEN_SUSPECT ? c->found[0] : 0;
   if (previous && previous != length) {
@@ -216,6 +219,7 @@ int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int lengt
 
 int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   if (!c || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
   for (int i = 0; i < 2; ++i)
     if (c->found[i] == length) {
@@ -235,6 +239,7 @@ int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length
 
 void nr_pdcch_dci_length_context_touch(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (!c) return;
   for (int i = 0; i < 2; ++i)
     if (c->found[i] == length) c->found_recent[i] = slot;
@@ -464,9 +469,11 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
       ++completed;
       uint16_t rnti = 0;
       uint32_t payload_hash = 0;
+      const bool decoded = decode_one_candidate(len, t, &rnti, &payload_hash, user_ctx);
+      if (!nr_cfg_epoch_work_current()) return -1;
       state->trials[len]++;
       state->decodes++;
-      if (!decode_one_candidate(len, t, &rnti, &payload_hash, user_ctx)) {
+      if (!decoded) {
         continue;
       }
       state->passes[len]++;
@@ -667,6 +674,7 @@ nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
 
 void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16_t rnti, int found)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   nr_pdcch_dci_length_note_seen(found);
   if (!bank || !rnti || found <= 0 || bank->cell_len > 0)
     return;

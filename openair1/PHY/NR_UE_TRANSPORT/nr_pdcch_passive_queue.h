@@ -65,6 +65,7 @@
 
 #ifdef __cplusplus
 extern "C" {
+
 #endif
 
 #define NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH     64
@@ -122,6 +123,7 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out);
 int nr_pdcch_passive_queue_backlog(void);
 
 void nr_pdcch_passive_queue_stop(void);
+void *nr_pdcch_passive_queue_epoch_counter(void);
 
 #ifdef __cplusplus
 }

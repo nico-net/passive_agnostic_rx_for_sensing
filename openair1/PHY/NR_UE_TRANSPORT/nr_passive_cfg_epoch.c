@@ -17,16 +17,16 @@ typedef struct {
   uint32_t hash;
 } hash_state_t;
 typedef struct {
-  bool active, observed;
+  bool active;
   uint64_t boundary;
-  uint32_t candidate;
 } si_pending_t;
 typedef struct {
   bool valid;
   uint16_t rnti;
   uint64_t slot;
 } reopened_t;
-typedef struct {
+typedef struct epoch_event {
+  struct epoch_event *next;
   bool bumped;
   nr_cfg_epoch_snapshot_t snapshot;
   nr_cfg_epoch_listener_t listeners[NR_CFG_LISTENERS_MAX];
@@ -47,6 +47,9 @@ static uint64_t last_abs_frame;
 static bool have_sfn;
 static nr_cfg_epoch_listener_t listeners[NR_CFG_LISTENERS_MAX];
 static unsigned n_listeners;
+static epoch_event_t *event_head, *event_tail;
+static atomic_flag draining = ATOMIC_FLAG_INIT;
+static _Thread_local nr_cfg_epoch_work_t *current_work;
 static pthread_once_t enable_once = PTHREAD_ONCE_INIT;
 static bool enabled;
 
@@ -96,6 +99,13 @@ static void bump_locked(epoch_event_t *event, nr_epoch_class_t cls, nr_epoch_cau
   event->snapshot = state;
   event->n_listeners = n_listeners;
   memcpy(event->listeners, listeners, n_listeners * sizeof(listeners[0]));
+  epoch_event_t *queued = malloc(sizeof(*queued));
+  AssertFatal(queued, "epoch event allocation failed\n");
+  *queued = *event;
+  queued->next = NULL;
+  if (event_tail) event_tail->next = queued;
+  else event_head = queued;
+  event_tail = queued;
 }
 static void dispatch(const epoch_event_t *event)
 {
@@ -105,6 +115,52 @@ static void dispatch(const epoch_event_t *event)
         s->epoch - 1, s->epoch, class_name(s->last_class), cause_name(s->last_cause),
         s->last_class == NR_EPOCH_HARD_RESET ? "cell_identity" : "cell");
   for (unsigned i = 0; i < event->n_listeners; ++i) event->listeners[i](s);
+}
+
+/* Only call from a point with no receiver locks held. One drainer preserves bump order;
+ * callbacks may themselves enqueue bumps or attempt a recursive drain. */
+void nr_cfg_epoch_drain(void)
+{
+  if (atomic_flag_test_and_set_explicit(&draining, memory_order_acquire)) return;
+  for (;;) {
+    pthread_mutex_lock(&lock);
+    epoch_event_t *event = event_head;
+    if (event) {
+      event_head = event->next;
+      if (!event_head) event_tail = NULL;
+    }
+    pthread_mutex_unlock(&lock);
+    if (!event) break;
+    nr_cfg_epoch_work_t *saved_work = current_work;
+    current_work = NULL;
+    dispatch(event);
+    current_work = saved_work;
+    free(event);
+  }
+  atomic_flag_clear_explicit(&draining, memory_order_release);
+}
+
+void nr_cfg_epoch_work_begin(nr_cfg_epoch_work_t *work, uint32_t stamp, void *counter)
+{
+  *work = (nr_cfg_epoch_work_t){.parent = current_work, .epoch = stamp, .dropped_counter = counter};
+  work->owner = current_work && current_work->epoch == stamp
+      && (!counter || counter == current_work->owner->dropped_counter) ? current_work->owner : work;
+  current_work = work;
+}
+void nr_cfg_epoch_work_end(nr_cfg_epoch_work_t *work) { current_work = work->parent; }
+uint32_t nr_cfg_epoch_work_stamp(void)
+{
+  return current_work ? current_work->epoch : nr_cfg_epoch_current();
+}
+bool nr_cfg_epoch_work_current(void)
+{
+  if (!is_enabled() || !current_work || current_work->epoch == nr_cfg_epoch_current()) return true;
+  nr_cfg_epoch_work_t *owner = current_work->owner;
+  if (!owner->counted) {
+    owner->counted = true;
+    if (owner->dropped_counter) __atomic_fetch_add((uint64_t *)owner->dropped_counter, 1, __ATOMIC_RELAXED);
+  }
+  return false;
 }
 
 uint32_t nr_cfg_epoch_current(void) { return atomic_load_explicit(&epoch, memory_order_acquire); }
@@ -119,6 +175,12 @@ nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void)
 void nr_cfg_epoch_reset(void)
 {
   pthread_mutex_lock(&lock);
+  while (event_head) {
+    epoch_event_t *next = event_head->next;
+    free(event_head);
+    event_head = next;
+  }
+  event_tail = NULL;
   memset(&state, 0, sizeof(state));
   memset(&identity, 0, sizeof(identity));
   memset(&mib, 0, sizeof(mib));
@@ -161,11 +223,25 @@ uint32_t nr_cfg_epoch_si_period(void)
 {
   return atomic_load_explicit(&si_period_slots, memory_order_acquire);
 }
-bool nr_cfg_epoch_si_redecode_pending(void)
+uint64_t nr_cfg_epoch_si_boundary(void)
+{
+  pthread_mutex_lock(&lock);
+  const uint64_t boundary = pending.active ? pending.boundary : 0;
+  pthread_mutex_unlock(&lock);
+  return boundary;
+}
+bool nr_cfg_epoch_sib1_request_allowed(uint64_t abs_slot)
+{
+  pthread_mutex_lock(&lock);
+  const bool allowed = !pending.active || abs_slot >= pending.boundary;
+  pthread_mutex_unlock(&lock);
+  return allowed;
+}
+bool nr_cfg_epoch_si_redecode_pending(uint64_t abs_slot)
 {
   if (!is_enabled()) return false;
   pthread_mutex_lock(&lock);
-  const bool needed = pending.active && !pending.observed;
+  const bool needed = pending.active && abs_slot >= pending.boundary;
   pthread_mutex_unlock(&lock);
   return needed;
 }
@@ -194,11 +270,12 @@ void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point
     memset(&sib1, 0, sizeof(sib1));
     memset(&pending, 0, sizeof(pending));
     reopened.valid = false;
+    atomic_store_explicit(&si_period_slots, 0, memory_order_release);
     bump_locked(&event, NR_EPOCH_HARD_RESET, NR_CAUSE_CELL_IDENTITY_CHANGE);
   }
   identity = (cell_identity_t){true, pci, ssb_arfcn, point_a ? point_a : (changed ? 0 : identity.point_a)};
   pthread_mutex_unlock(&lock);
-  dispatch(&event);
+
 }
 void nr_cfg_epoch_refine_point_a(uint64_t point_a)
 {
@@ -210,11 +287,12 @@ void nr_cfg_epoch_refine_point_a(uint64_t point_a)
     memset(&sib1, 0, sizeof(sib1));
     memset(&pending, 0, sizeof(pending));
     reopened.valid = false;
+    atomic_store_explicit(&si_period_slots, 0, memory_order_release);
     bump_locked(&event, NR_EPOCH_HARD_RESET, NR_CAUSE_CELL_IDENTITY_CHANGE);
   }
   if (identity.valid) identity.point_a = point_a;
   pthread_mutex_unlock(&lock);
-  dispatch(&event);
+
 }
 void nr_cfg_epoch_note_mib(uint32_t hash)
 {
@@ -224,34 +302,37 @@ void nr_cfg_epoch_note_mib(uint32_t hash)
   if (mib.valid && mib.hash != hash) bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_MIB_CHANGE);
   mib = (hash_state_t){true, hash};
   pthread_mutex_unlock(&lock);
-  dispatch(&event);
+
 }
-void nr_cfg_epoch_note_sib1(uint32_t hash)
+bool nr_cfg_epoch_note_sib1(uint32_t hash, uint64_t abs_slot)
 {
-  if (!is_enabled()) return;
+  if (!is_enabled()) return true;
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
-  if (pending.active) {
-    pending.observed = true;
-    pending.candidate = hash;
-  } else {
-    if (sib1.valid && sib1.hash != hash) bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SIB1_CHANGE);
-    sib1 = (hash_state_t){true, hash};
+  if (pending.active && abs_slot < pending.boundary) {
+    pthread_mutex_unlock(&lock);
+    return false; /* old-period SI cannot complete the requested comparison */
   }
+  if (sib1.valid && sib1.hash != hash) bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SIB1_CHANGE);
+  sib1 = (hash_state_t){true, hash};
+  pending.active = false;
   pthread_mutex_unlock(&lock);
-  dispatch(&event);
+  return true;
 }
 void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t period)
 {
   if (!is_enabled() || !period) return;
   pthread_mutex_lock(&lock);
+  /* TS 38.331 5.2.2.2.2 defines SFN mod m = 0, not an arbitrary unwrapped
+   * frame origin. For m > 1024 the only representable boundary SFN is zero. */
+  const uint32_t sfn_cycle = 1024u * (slots_per_second / 100u);
+  if (sfn_cycle && period > sfn_cycle) period = sfn_cycle;
   const uint64_t next_boundary = (abs_slot / period + 1) * (uint64_t)period;
   if (pending.active && pending.boundary == next_boundary) {
     pthread_mutex_unlock(&lock);
     return;
   }
   pending.active = true;
-  pending.observed = false;
   pending.boundary = next_boundary;
   const uint64_t boundary = pending.boundary;
   pthread_mutex_unlock(&lock);
@@ -263,20 +344,17 @@ void nr_cfg_epoch_tick(uint64_t abs_slot)
   if (!is_enabled()) return;
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
-  if (pending.active && abs_slot >= pending.boundary) {
-    if (pending.observed) {
-      if (!sib1.valid || pending.candidate != sib1.hash)
-        bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SIB1_CHANGE);
-      sib1 = (hash_state_t){true, pending.candidate};
-    } else {
-      const char *setting = getenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
-      if (!setting || strcmp(setting, "0") != 0)
-        bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SI_MODIFICATION_ANNOUNCED);
-    }
+  const char *grace = getenv("ISAC_RECONF_SI_GRACE_MS");
+  const unsigned grace_ms = grace && atoi(grace) > 0 ? (unsigned)atoi(grace) : 5000;
+  if (pending.active && abs_slot >= pending.boundary
+      && abs_slot - pending.boundary >= (uint64_t)grace_ms * slots_per_second / 1000) {
+    const char *setting = getenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
+    if (!setting || strcmp(setting, "0") != 0)
+      bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SI_MODIFICATION_ANNOUNCED);
     pending.active = false;
   }
   pthread_mutex_unlock(&lock);
-  dispatch(&event);
+
 }
 static void simple_bump(nr_epoch_class_t cls, nr_epoch_cause_t cause)
 {
@@ -285,7 +363,7 @@ static void simple_bump(nr_epoch_class_t cls, nr_epoch_cause_t cause)
   pthread_mutex_lock(&lock);
   bump_locked(&event, cls, cause);
   pthread_mutex_unlock(&lock);
-  dispatch(&event);
+
 }
 void nr_cfg_epoch_note_continuity_loss(void) { simple_bump(NR_EPOCH_HARD_REVERIFY, NR_CAUSE_CONTINUITY_LOSS); }
 void nr_cfg_epoch_note_bwp_change(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_BWP_CHANGE); }
@@ -303,5 +381,5 @@ void nr_cfg_epoch_note_rnti_reopened(uint16_t rnti, bool was_converged, uint64_t
     reopened = (reopened_t){true, rnti, abs_slot};
   }
   pthread_mutex_unlock(&lock);
-  dispatch(&event);
+
 }

@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
 /*
@@ -588,6 +589,7 @@ static _Atomic uint64_t g_dl_link_pass_at = UINT64_MAX; /* g_dl_layout_trials at
 static _Atomic int g_dl_type1_pass = -1;              /* a type-1 layout that passed: disarm (observer applies it) */
 void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (layout_index >= NR_DCI11_LAYOUT_MAX) {
     if (cb0_ok) /* 0xFFFF: not a stage-2 trial -- a link-health pass */
       atomic_store_explicit(&g_dl_link_pass_at, atomic_load_explicit(&g_dl_layout_trials, memory_order_relaxed),
@@ -805,6 +807,7 @@ static inline bool dci01_oracle_grant(const nr_pdcch_blind_ul_result_t *g)
 }
 void nr_pdcch_dci01_fdra_feedback(const nr_pdcch_blind_ul_result_t *g, bool tb_crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   const bool oracle = dci01_oracle_grant(g);
   pthread_mutex_lock(&g_dci01_fdra_lock);
   nr_dci01_fdra_note(&g_dci01_fdra_ev, oracle, tb_crc_ok);
@@ -846,6 +849,7 @@ static void nr_pdcch_dci01_fdra_stage(bool periodic)
 static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp_size, int ul_tda_count,
                                           uint16_t dci_length, nr_dci_bits_t payload)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (g_dci01_state < 0 || dci_length == 0 || ul_bwp_size == 0) {
     return;
   }
@@ -1004,6 +1008,7 @@ static bool nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cf
 static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
                                           uint16_t dci_length, nr_dci_bits_t payload)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (g_dci11_state < 0 || cfg == NULL || dci_length == 0 || cfg->bwp_size == 0) {
     return;
   }
@@ -3101,6 +3106,9 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot)
 {
+  nr_cfg_epoch_drain();
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), nr_pdcch_passive_queue_epoch_counter());
+  if (!nr_cfg_epoch_work_current()) return;
   const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
   const bool reconf = reconf_lengths_enabled();
   if (reconf) {
@@ -5638,6 +5646,7 @@ constdiag_done:;
   int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
   bool retired_lookahead[NR_PDCCH_LOOKAHEAD_MAX] = {false};
   for (int ti = 0; ti < nof_tasks; ti++) {
+    if (!nr_cfg_epoch_work_current()) break;
     if (cand_task[ti].is_lookahead) {
       /* Routed independently of the primary's dl_auto branch below on purpose: that branch updates
        * PRIMARY-only global state (ue->dci_thres EMA, RNTI persistence, AL census, DCI11 layout
@@ -5772,7 +5781,7 @@ constdiag_done:;
                              : "booked anyway (ISAC_UL_FDRA_REFUSE=1 to refuse; a 0_1-only scrambling/MCS cause looks identical)");
         }
         if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce)) {
-          nr_pusch_grant_book_add(u, source_absolute_slot);
+          if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(u, source_absolute_slot);
         } else if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
           /* Gap item 1 (PUSCH RA type 0 / dynamicSwitch). Type 1 is refuted for this class; rather than
            * drop the already-CRC-verified payload, re-extract it under each FDRA mode that reproduces
@@ -5793,7 +5802,7 @@ constdiag_done:;
                     nb, u->rnti, n_cand);
             /* One queue job preserves all interpretations through book deduplication.
              * Only the consumer's TB CRC may stop the bounded (at most four) search. */
-            nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
+            if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
           }
         }
       } else {
@@ -5878,7 +5887,7 @@ constdiag_done:;
                   ul00.rnti, (unsigned)ul00.start_rb, (unsigned)ul00.num_rb,
                   (unsigned)ul00.start_symbol, (unsigned)ul00.num_symbols,
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
-          nr_pusch_grant_book_add(&ul00, source_absolute_slot);
+          if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ul00, source_absolute_slot);
         } else {
           NR_BLIND_CTR_INC(g_ul00_rejects);
         }
@@ -6060,6 +6069,7 @@ constdiag_done:;
        * (dci11_pin_cursor[]) -- the pre-existing free-running layout_cursor[]/Thompson pick is
        * still computed lazily, only when needed, for the separate "pin still valid but not offered
        * this occasion" one-off substitute, which has no such successive-coverage requirement. */
+      if (!nr_cfg_epoch_work_current()) continue;
       nr_dci11_pin_t *pin = &g_reconf_dci11_pin[raw->rnti];
       uint32_t *pin_cursor = &g_reconf_dci11_pin_cursor[raw->rnti];
       const bool per_length_pin = reconf_lengths_enabled() && dl_uss_auto;
@@ -6126,14 +6136,15 @@ constdiag_done:;
       if (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P
           && out.reject_reason && strcmp(out.reject_reason,
                "DCI-1_0/P-RNTI carries a short message only (no PDSCH assignment)") == 0
-          && nr_cfg_prnti_si_modified(out.short_messages_ind, out.short_messages))
+          && nr_cfg_prnti_si_credible(out.short_messages_ind, out.short_messages,
+                                      out.mismatched_bits, ue->dci_thres))
         nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
       g_last_reject_reason = out.reject_reason; // TEMPORARY diagnostic, see periodic summary below
       g_last_reject_rnti   = out.rnti;
       /* A SELF-VERIFYING class (SI/RA/TC) that decodes and is then rejected downstream is the one
        * case worth a line each: those RNTIs cannot be chance hits, so the reject reason IS the
        * defect. Chatty C-RNTI rejects stay in the periodic summary. */
-      if (out.rnti_class == NR_BLIND_RNTI_CLASS_RA || out.rnti_class == NR_BLIND_RNTI_CLASS_TC || out.rnti_class == NR_BLIND_RNTI_CLASS_P) {
+      if (out.rnti_class == NR_BLIND_RNTI_CLASS_RA || out.rnti_class == NR_BLIND_RNTI_CLASS_TC || (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P)) {
         LOG_A(PHY, "SENSING: DCIREJECT (%d.%d) rnti=0x%x class=%d L=%d reason=%s\n",
               proc->frame_rx, proc->nr_slot_rx, (unsigned)out.rnti, (int)out.rnti_class, cand_task[ti].L,
               out.reject_reason ? out.reject_reason : "(none)");
@@ -6157,7 +6168,8 @@ constdiag_done:;
                        out.rnti, nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti));
     nr_pdcch_dci_length_note_seen(cand_task[ti].dci_length);
     if (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P
-        && nr_cfg_prnti_si_modified(out.short_messages_ind, out.short_messages))
+        && nr_cfg_prnti_si_credible(out.short_messages_ind, out.short_messages,
+                                    out.mismatched_bits, ue->dci_thres))
       nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
     NR_BLIND_CTR_INC(g_accepts);
     if (al1_bank >= 0 && !cand_task[ti].ul_scan && al1_from_ladder(cand_task[ti].e_rx, pdcch_e_rx)

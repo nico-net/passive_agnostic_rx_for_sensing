@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -545,8 +546,10 @@ static void log_progress_locked(const search_t *s, const char *what, uint16_t rn
 
 void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (!g || !g->hyp_generation) return;
   pthread_mutex_lock(&lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&lock); return; }
   s_discovery_dirty=true;
   const bool width_owner=g->width_hyp_class>=0, interp_owner=g->interp_hyp_class>=0;
   if (width_owner==interp_owner || g->width_hyp_class < -1 || g->interp_hyp_class < -1) {

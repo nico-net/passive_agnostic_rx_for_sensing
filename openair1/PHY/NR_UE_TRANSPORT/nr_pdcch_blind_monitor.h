@@ -127,6 +127,7 @@ typedef struct {
   uint8_t ul_start[16], ul_length[16], ul_mapping[16], ul_k2[16];
 } nr_pdcch_blind_common_config_t;
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts);
+uint32_t nr_pdcch_blind_sib1_semantic_hash(void); /* live applied hash; hints leave this zero */
 void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t hash);
 bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *facts);
 void nr_pdcch_blind_reset_common(void);

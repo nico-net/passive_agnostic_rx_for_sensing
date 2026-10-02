@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -1010,9 +1011,11 @@ int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, ui
 
 int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0)
 {
+  if (!nr_cfg_epoch_work_current()) return 0;
   if (ticket == NULL || ticket->generation == 0 || dmrs_mask == 0)
     return 0;
   pthread_mutex_lock(&g_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return 0; }
   rnti_ctx_t *r = rnti_ctx(ticket->rnti, true);
   obs_record(&r->obs, dmrs_mask, last_symbol, k0);
   /* Promote to the cell-wide set once a second distinct RNTI has seen the same mask. */
@@ -1049,9 +1052,11 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
 
 int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
 {
+  if (!nr_cfg_epoch_work_current()) return 0;
   if (t == NULL || t->generation == 0 || k0 < 2 || k0 > 32)
     return 0;
   pthread_mutex_lock(&g_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return 0; }
   rnti_ctx_t *r = rnti_ctx(t->rnti, true);
   const bool first = !(r->k0_seen & (UINT64_C(1) << k0));
   r->k0_seen |= UINT64_C(1) << k0;
@@ -1067,6 +1072,7 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
 
 int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint8_t mcs, int qm)
 {
+  if (!nr_cfg_epoch_work_current()) return 0;
   static int enabled = -1;
   if (enabled < 0) {
     const char *e = getenv("ISAC_QM_ORACLE");
@@ -1078,6 +1084,7 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
   if (mask == 0 || mask == 0x7)
     return 0; /* impossible for this MCS, or every table agrees: no information */
   pthread_mutex_lock(&g_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return 0; }
   sweep_context_t *c = ticket_context(ticket);
   int n = 0;
   if (c != NULL && c->state->winner < 0) {
@@ -1139,7 +1146,9 @@ static void census_log(const sweep_context_t *c)
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner)
 {
+  if (!nr_cfg_epoch_work_current()) return false;
   pthread_mutex_lock(&g_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return false; }
   sweep_context_t *c = ticket_context(ticket);
   bool announced = false;
   if (!c && ticket && ticket->generation)

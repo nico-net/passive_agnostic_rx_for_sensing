@@ -110,8 +110,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     g_count--;
     pthread_mutex_unlock(&g_lock);
 
-    if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), job.config_epoch, nr_cfg_epoch_current)) {
-      atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
+    NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
+    if (!nr_cfg_epoch_work_current()) {
       continue;
     }
 
@@ -131,8 +131,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
-    if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), job.config_epoch, nr_cfg_epoch_current)) {
-      atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
+    if (!nr_cfg_epoch_work_current()) {
       continue;
     }
     if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
@@ -225,7 +224,7 @@ bool nr_pusch_passive_queue_enqueue(const nr_pusch_passive_job_t *job)
     atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
   }
   g_ring[g_head] = *job;
-  g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_current);
+  g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
   g_head         = (g_head + 1) % g_depth;
   g_count++;
   pthread_cond_signal(&g_cv);

@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -112,7 +113,9 @@ int nr_pdcch_coreset_bank_remove(int index)
 
 void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   pthread_mutex_lock(&g_coreset_bank_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_coreset_bank_lock); return; }
   const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
   if (index >= 0 && index < n && g_coreset_bank[index].state != NR_CORESET_REMOVED) {
     nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[index];
@@ -126,7 +129,9 @@ void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot)
 
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   pthread_mutex_lock(&g_coreset_bank_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_coreset_bank_lock); return; }
   const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
   if (index >= 0 && index < n && rnti && g_coreset_bank[index].state == NR_CORESET_STALE) {
     nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[index];
@@ -331,6 +336,7 @@ int nr_pdcch_coreset_bank_length_hint(void)
 
 int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   if (cfg == NULL || cfg->dci_length_override <= 0)
     return -1;
   pthread_mutex_lock(&g_coreset_bank_lock);

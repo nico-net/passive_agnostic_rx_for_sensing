@@ -578,6 +578,7 @@ static int s_obs_calls;
 static pthread_mutex_t s_techA_mu = PTHREAD_MUTEX_INITIALIZER;
 void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   /* Tag every currently-hot window with the RNTI just accepted. Cheap and approximate on purpose:
    * it answers "which UE was on air while this window was lit", not "which UE owns this CORESET". */
   pthread_mutex_lock(&s_techA_mu);
@@ -760,6 +761,7 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_verified(void)
 }
 void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, nr_dci_bits_t payload)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   /* Called ONLY for a CRC/plausibility-accepted dedicated DL DCI in the current geometry.
    * Bootstrap history is deliberately not an input. Repeated candidates in one slot or
    * a repeated fixed payload cannot verify a geometry. */
@@ -1289,6 +1291,7 @@ bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out)
 
 bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, nr_dci_bits_t payload)
 {
+  if (!nr_cfg_epoch_work_current()) return false;
   if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || !rnti)
     return false;
   nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
@@ -3734,6 +3737,11 @@ static bool dci10_parse(nr_dci_bits_t                             payload,
         return false;
       }
       if (sm_ind == 2) {
+        /* TS 38.212 7.3.1.2.1: ALL scheduling fields are reserved for SMI=10. */
+        if (nr_cfg_reconf_enabled() && (fdra || tda_idx || vrb || mcs || tb_scaling)) {
+          out->reject_reason = "DCI-1_0/P-RNTI short-only reserved scheduling fields are non-zero";
+          return false;
+        }
         out->short_messages_ind = (uint8_t)sm_ind;
         out->short_messages = (uint8_t)sm;
         out->reject_reason = "DCI-1_0/P-RNTI carries a short message only (no PDSCH assignment)";
@@ -5274,10 +5282,22 @@ static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *len
   return true;
 }
 static bool sib1_cache_suppressed;
+static uint16_t sib1_cache_tried_pci = 0xFFFF;
 static _Atomic uint32_t sib1_semantic_hash;
+uint32_t nr_pdcch_blind_sib1_semantic_hash(void)
+{
+  return atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
+}
 void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t hash)
 {
   atomic_store_explicit(&sib1_semantic_hash, hash, memory_order_release);
+  if (nr_cfg_reconf_enabled() && !hash) {
+    pthread_mutex_lock(&common_facts_lock);
+    common_facts_valid = false;
+    sib1_cache_suppressed = false;
+    sib1_cache_tried_pci = 0xFFFF;
+    pthread_mutex_unlock(&common_facts_lock);
+  }
 }
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f);
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
@@ -5293,7 +5313,7 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
   common_facts_valid=true;
   sib1_cache_suppressed=false;
   pthread_mutex_unlock(&common_facts_lock);
-  if(changed)
+  if(changed || nr_cfg_reconf_enabled())
     sib1_cache_store(f);
   if(changed)
     LOG_I(PHY,"PASSIVE: SIB1 common facts PCI=%u DL-BWP=%u+%u DL-TDAs=%u "
@@ -5310,12 +5330,17 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
  * cached facts are loaded only when the live ones are absent, are logged as CACHED, and stay what
  * they always were: a hypothesis the TB CRC judges. ISAC_SIB1_CACHE=0 disables; the path is
  * ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx). */
-static void sib1_cache_path(uint16_t pci, char *out, size_t n)
+static void sib1_cache_path(uint16_t pci, uint32_t hash, char *out, size_t n)
 {
   const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
   nr_cfg_sib1_cache_name(out, n, dir, pci,
-                          atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire),
+                          hash,
                           nr_cfg_reconf_enabled());
+}
+static void sib1_cache_index_path(uint16_t pci, char *out, size_t n)
+{
+  const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
+  snprintf(out, n, "%s/sib1_common_pci%u_last_hash.bin", dir && *dir ? dir : "/tmp/passive_rx", pci);
 }
 static bool sib1_cache_enabled(void)
 {
@@ -5327,21 +5352,35 @@ static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
   if (!sib1_cache_enabled()) return;
   if (nr_cfg_reconf_enabled() && !atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire)) return;
   char path[256];
-  sib1_cache_path(f->pci, path, sizeof(path));
+  const uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
+  sib1_cache_path(f->pci, hash, path, sizeof(path));
   FILE *fp = fopen(path, "wb");
   if (fp == NULL) { mkdir("/tmp/passive_rx", 0777); fp = fopen(path, "wb"); }
   if (fp == NULL) return;
   const uint32_t magic = 0x53494231u; /* "SIB1" */
-  fwrite(&magic, sizeof(magic), 1, fp);
-  fwrite(f, sizeof(*f), 1, fp);
-  fclose(fp);
+  const bool written = fwrite(&magic, sizeof(magic), 1, fp) == 1 && fwrite(f, sizeof(*f), 1, fp) == 1;
+  const bool closed = fclose(fp) == 0;
+  if (nr_cfg_reconf_enabled() && written && closed) {
+    sib1_cache_index_path(f->pci, path, sizeof(path));
+    fp = fopen(path, "wb");
+    if (fp) { fwrite(&hash, sizeof(hash), 1, fp); fclose(fp); }
+  }
 }
 static bool sib1_cache_load(uint16_t pci, nr_pdcch_blind_common_config_t *f)
 {
   if (!sib1_cache_enabled()) return false;
-  if (nr_cfg_reconf_enabled() && !atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire)) return false;
+  uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
   char path[256];
-  sib1_cache_path(pci, path, sizeof(path));
+  if (nr_cfg_reconf_enabled() && !hash) {
+    sib1_cache_index_path(pci, path, sizeof(path));
+    FILE *index = fopen(path, "rb");
+    if (!index) return false;
+    const bool ok = fread(&hash, sizeof(hash), 1, index) == 1 && hash;
+    fclose(index);
+    if (!ok) return false;
+    /* This selects a HINT only: never publish this hash as a decoded SIB1. */
+  }
+  sib1_cache_path(pci, hash, path, sizeof(path));
   FILE *fp = fopen(path, "rb");
   if (fp == NULL) return false;
   uint32_t magic = 0;
@@ -5358,9 +5397,8 @@ bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)
   if(ok) *f=common_facts; else memset(f,0,sizeof(*f));
   pthread_mutex_unlock(&common_facts_lock);
   if (!ok && !sib1_cache_suppressed) {
-    static uint16_t s_tried_pci = 0xFFFF;
-    if (s_tried_pci != pci) {
-      s_tried_pci = pci;
+    if (sib1_cache_tried_pci != pci) {
+      sib1_cache_tried_pci = pci;
       nr_pdcch_blind_common_config_t c;
       if (sib1_cache_load(pci, &c)) {
         LOG_A(PHY, "PASSIVE: SIB1 common facts for PCI %u loaded from CACHE (live SIB1 not decoded yet): "

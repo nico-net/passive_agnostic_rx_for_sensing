@@ -154,7 +154,7 @@ static void *gpu_fep_worker_thread(void *arg)
       const uint64_t t1 = now_ns();
       if (rc == 0) rc = g_gpu->pdsch_llr(r->jobs, r->n_jobs, r->out, r->out_cap);
       const uint64_t t2 = now_ns();
-      r->rc = rc;
+      r->rc = nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), r->config_epoch, nr_cfg_epoch_current) ? -1 : rc;
       if (rc >= 0) {
         atomic_fetch_add(&g_gpu_slots, 1);
         atomic_fetch_add(&g_gpu_jobs, (uint64_t)r->n_jobs);
@@ -409,6 +409,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slot, int mu,
                               uint32_t abs_slot, const uint8_t *tb, uint32_t tb_bytes)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (tb == NULL || tb_bytes == 0)
     return;
   if (is_ra_rnti) {
@@ -754,8 +755,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     for (int gi = -1; gi < n_more; gi++) {
     if (gi >= 0) job = more[gi];
-    if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), job.config_epoch, nr_cfg_epoch_current)) {
-      atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
+    NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
+    if (!nr_cfg_epoch_work_current()) {
       continue;
     }
     const nr_gpu_pdsch_job_t *gpu_job = gj_ok[gi + 1] ? &gj[gi + 1] : NULL;
@@ -1002,9 +1003,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
         : (probe_outcome ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
     nr_pdsch_passive_probe_mode(false);
-    if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), job.config_epoch, nr_cfg_epoch_current)) {
+    if (!nr_cfg_epoch_work_current()) {
       nr_slot_fep_fo_override_hz = saved_fo;
-      atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
       continue;
     }
     if (job.layout_probe) {
@@ -1396,7 +1396,7 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
                           || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
-  g_pending[g_n_pending].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_current);
+  g_pending[g_n_pending].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
   /* ONE normalisation for everyone downstream: decoder, data-aided tap (recomputes nb_rb/G from
    * num_rbs), queue probes, narrow-grant budget. A no-op for a contiguous grant. */
   if (!nr_pdsch_passive_alloc_normalise(&g_pending[g_n_pending].freq_alloc, job->dlsch_pdu.BWPSize)) {

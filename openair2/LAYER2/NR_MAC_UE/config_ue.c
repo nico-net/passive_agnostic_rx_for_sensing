@@ -2409,7 +2409,7 @@ static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfig
   return probe;
 }
 
-static uint32_t passive_sib1_semantic_hash(const NR_SIB1_t *sib1, uint16_t pci)
+uint32_t nr_passive_sib1_semantic_hash(const NR_SIB1_t *sib1, uint16_t pci)
 {
   uint32_t h = nr_cfg_semantic_start();
 #define H(v) (h = nr_cfg_semantic_add(h, (uint64_t)(v)))
@@ -2563,8 +2563,7 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
       const uint64_t point_a = (uint64_t)scc->downlinkConfigCommon.frequencyInfoDL.offsetToPointA + 1;
       nr_cfg_epoch_refine_point_a(point_a);
     }
-    const uint32_t semantic_hash = passive_sib1_semantic_hash(sib1, (uint16_t)mac->physCellId);
-    nr_cfg_epoch_note_sib1(semantic_hash);
+    const uint32_t semantic_hash = nr_passive_sib1_semantic_hash(sib1, (uint16_t)mac->physCellId);
     nr_pdcch_blind_set_sib1_semantic_hash(semantic_hash);
     const unsigned coeff = 2u << (unsigned)scc->downlinkConfigCommon.bcch_Config.modificationPeriodCoeff;
     const unsigned paging_cycle = nr_pcch_default_paging_cycle_rf(&scc->downlinkConfigCommon.pcch_Config);

@@ -108,8 +108,8 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     g_count--;
     pthread_mutex_unlock(&g_lock);
 
-    if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), job.config_epoch, nr_cfg_epoch_current)) {
-      atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
+    NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
+    if (!nr_cfg_epoch_work_current()) {
       continue;
     }
 
@@ -218,7 +218,7 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
     atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
   }
   g_ring[g_head] = *job;
-  g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_current);
+  g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
   g_head         = (g_head + 1) % g_depth;
   g_count++;
   pthread_cond_signal(&g_cv);
@@ -264,3 +264,5 @@ void nr_pdcch_passive_queue_stop(void)
   }
   atomic_store_explicit(&g_running, 0, memory_order_release);
 }
+
+void *nr_pdcch_passive_queue_epoch_counter(void) { return &g_dropped_epoch; }

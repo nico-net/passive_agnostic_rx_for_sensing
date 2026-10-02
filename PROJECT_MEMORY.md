@@ -2076,6 +2076,14 @@ one producer-slot clock; idle occasions do not accumulate length misses; only ch
 second-length fallback exclusion/deduplication, occupancy persistence and occasion-based scouts are corrected.
 The report distinguishes source-reviewed integration changes and rejected subfindings from tested state transitions.
 
+[OFFLINE VERIFIED, DGX aarch64, 2026-10-02, rr/reconfig-robustness] R8b corrects R7/R8 review findings:
+post-boundary SIB1 comparison with a five-second fallback grace, strict short-only P-RNTI evidence, startup
+cache hints, deferred listener dispatch, bounded SIB1 monitoring, identity frequency rounding, and in-flight
+result epoch checks. Required targets built; full ctest 125/134 (documented ARM/sandbox failures only).
+[IMPLEMENTED, NOT VALIDATED on live traffic] RRC skips full configuration for unchanged periodic SIB1;
+GPU result guards and stable-cell false-trigger targets await orchestrated validation. Per-finding evidence,
+shuffle results and exact deferred commands: [R8b report](docs/superpowers/reports/rr/R8b.md).
+
 ## 25. Next steps on the DGX Spark (strict order)
 
 **Progress 2026-09-30:** steps 1–4 **done** (§4.2). Step 5: OAI build done (UHD 4.11 installed; X410 compat still to

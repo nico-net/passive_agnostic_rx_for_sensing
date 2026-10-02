@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 #include "nr_passive_uci_probe.h"
 #include "nr_passive_uci_learn.h"
@@ -1350,7 +1351,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
     if (rescued) {
       atomic_fetch_add_explicit(&g_uci_rescued, 1, memory_order_relaxed);
-      nr_passive_uci_learn_record(g->rnti, (uint16_t)won_re, won_csi != 0);
+      if (nr_cfg_epoch_work_current()) nr_passive_uci_learn_record(g->rnti, (uint16_t)won_re, won_csi != 0);
       out->G = won_bits;
       out->uci_ack_re = (uint16_t)won_re;   /* inferred footprint; CSI vs ACK distinguished below */
       out->o_ack = 0;                        /* unknown: a footprint is not an O_ACK */
@@ -1375,6 +1376,11 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0);
   }
   PUSCH_STAGE(6, "ulsch_decoding returned");
+  if (!nr_cfg_epoch_work_current()) {
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "old configuration epoch";
+    return false;
+  }
   s_stage = 0;
 #undef PUSCH_STAGE
 
@@ -1450,7 +1456,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   // retransmission, not a fresh resolvable MCS, so it does not refresh the record either.
   if (!have_ul_init_tx) {
     pthread_mutex_lock(&g_ul_harq_init_lock);
-    nr_harq_init_tx_record(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, pdu.qam_mod_order, g->nrOfLayers,
+    if (nr_cfg_epoch_work_current()) nr_harq_init_tx_record(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, pdu.qam_mod_order, g->nrOfLayers,
                            pdu.maintenance_parms_v3.ldpcBaseGraph, tbs, pdu.target_code_rate);
     pthread_mutex_unlock(&g_ul_harq_init_lock);
   }
@@ -1526,6 +1532,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              double   fo_hz,
                              nr_pusch_passive_out_t *out)
 {
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   bool ok;
   passive_fdra_attempt_t retry = {0};
   if (g && g->fdra_candidate_count) {

@@ -2499,7 +2499,7 @@ if(ENABLE_TESTS)
 
   add_executable(test_nr_pdcch_coreset_bank ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc
                                              ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c)
-  target_link_libraries(test_nr_pdcch_coreset_bank PRIVATE nr_common UTIL GTest::gtest)
+  target_link_libraries(test_nr_pdcch_coreset_bank PRIVATE nr_passive_cfg_epoch nr_common UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_coreset_bank)
   add_test(NAME test_nr_pdcch_coreset_bank COMMAND ./test_nr_pdcch_coreset_bank)
 
@@ -2517,7 +2517,7 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c)
   target_include_directories(test_nr_pdcch_dci_length_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE UTIL GTest::gtest)
+  target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE nr_passive_cfg_epoch UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci_length_sweep)
   add_test(NAME test_nr_pdcch_dci_length_sweep COMMAND ./test_nr_pdcch_dci_length_sweep)
   add_executable(test_nr_hyp_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_hyp_sweep_test.cc
@@ -2547,6 +2547,8 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_passive_cfg_epoch PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_passive_cfg_epoch)
   add_test(NAME test_nr_passive_cfg_epoch COMMAND ./test_nr_passive_cfg_epoch)
+  add_test(NAME test_nr_sib1_cache_hint COMMAND test_nr_pdcch_blind_monitor --gtest_filter=Sib1Cache.*:EpochFeedback.*:BlindPdcchTest.NoisePrntiShortOnly*:BlindPdcchTest.Dci10PRntiShortMessageOnly*)
+  set_tests_properties(test_nr_sib1_cache_hint PROPERTIES ENVIRONMENT "ISAC_RECONF=1")
 
   add_executable(test_nr_initial_sync_budget ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_initial_sync_budget_test.cc
                                               ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c)
@@ -2604,7 +2606,7 @@ if(ENABLE_TESTS)
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
   target_include_directories(test_nr_pdsch_config_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_pdsch_config_sweep PRIVATE UTIL GTest::gtest)
+  target_link_libraries(test_nr_pdsch_config_sweep PRIVATE nr_passive_cfg_epoch UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdsch_config_sweep)
   add_test(NAME test_nr_pdsch_config_sweep COMMAND ./test_nr_pdsch_config_sweep)
 

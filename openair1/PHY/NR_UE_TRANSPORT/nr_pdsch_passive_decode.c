@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 /*
@@ -438,9 +439,11 @@ static int rnti_nl_get(uint16_t rnti, bool sweepable)
 /* Returns the value this RNTI read before the latch (for the log). */
 static int rnti_nl_latch(uint16_t rnti, bool sweepable, int nl)
 {
+  if (!nr_cfg_epoch_work_current()) return nl;
   if (!sweepable)
     return nl; /* no per-RNTI state for SI/RA/P: nothing to latch, nothing to log */
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return nl; }
   rnti_dec_t *r = rnti_dec(rnti);
   const int prev = r->nl ? r->nl : atomic_load(&g_lbrm_nl);
   r->nl = nl;
@@ -487,7 +490,9 @@ uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_
 }
 void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return; }
   rnti_dec_t *r = rnti_dec_find(rnti, false);
   if (r && r->data_id.n > 0 && r->data_id.latched < 0) {
     const int tried = nr_scrambling_id_sweep_current(&r->data_id);
@@ -511,7 +516,9 @@ static int rnti_ptrs_pick(uint16_t rnti)
 }
 static int rnti_ptrs_feed(uint16_t rnti, int arm, bool tb_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return -1; }
   const int latched = nr_ptrs_sweep_feed(&rnti_dec(rnti)->ptrs, arm, tb_ok);
   if (latched >= 0 && g_ptrs_cell_arm < 0)
     for (int i = 0; i < RNTI_DEC_MAX; i++)
@@ -531,7 +538,9 @@ static int rnti_vrbl_pick(uint16_t rnti)
 }
 static int rnti_vrbl_feed(uint16_t rnti, int arm, bool tb_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return -1; }
   const int latched = vrbl_sweep_feed(&rnti_dec(rnti)->vrbl, arm, tb_ok);
   pthread_mutex_unlock(&g_ptrs_lock);
   return latched;
@@ -549,7 +558,9 @@ static int rnti_prg_pick(uint16_t rnti)
 }
 static int rnti_prg_feed(uint16_t rnti, int arm, bool tb_ok, bool link_ok, bool *explore_started)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return -1; }
   nr_prg_sweep_t *p = &rnti_dec(rnti)->prg;
   const bool was = p->explore;
   const int latched = prg_sweep_feed(p, arm, tb_ok, link_ok);
@@ -580,6 +591,7 @@ static nr_scr_link_t g_dl_scr_link;
 static _Atomic uint32_t g_ded_fails_since_ok[65536];
 void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   nr_scr_link_note(&g_dl_scr_link, rnti, dedicated, crc_ok);
   if (!dedicated)
     return;
@@ -1608,6 +1620,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out)
 {
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   memset(out, 0, sizeof(*out));
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
   t_last_sk = -1;
@@ -2162,7 +2175,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                       fp->samples_per_slot_wCP, proc->nr_slot_rx, fep_s0, fep_n,
                                                       ssb_event.symbols, grant->scr_dedicated, i);
     if (zs >= 0.0)
-      nr_csirs_blind_rt_zp_grant_evidence((uint32_t)grant->source_absolute_slot, &dlsch_config->csiRsForRateMatching[i], zs);
+      if (nr_cfg_epoch_work_current()) nr_csirs_blind_rt_zp_grant_evidence((uint32_t)grant->source_absolute_slot, &dlsch_config->csiRsForRateMatching[i], zs);
   }
 
   // ---- Channel estimation on the DM-RS symbols. ----
@@ -3850,7 +3863,7 @@ gpu_llr_ready:;
       // only the genuinely resolvable grant that established have_init_tx=false does.
       if (!have_init_tx && rnti_sweepable(grant->rnti, grant->rnti_class)) {
         pthread_mutex_lock(&g_harqc_lock);
-        nr_harq_init_tx_record(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, cw->qamModOrder, cw->Nl,
+        if (nr_cfg_epoch_work_current()) nr_harq_init_tx_record(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, cw->qamModOrder, cw->Nl,
                                cw->ldpcBaseGraph, cw->TBS, cw->targetCodeRate);
         pthread_mutex_unlock(&g_harqc_lock);
       }

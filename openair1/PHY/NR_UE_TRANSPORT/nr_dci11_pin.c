@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -31,6 +32,7 @@ int nr_dci11_pin_select(nr_dci11_pin_t *pin, uint64_t current_cfg, const uint16_
                         int settled, int preferred, bool has_stats, uint32_t trial_ok, uint32_t trial_tr,
                         uint32_t block_occasions, uint32_t giveup_trials)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   if (settled >= 0)
     return settled;
   if (preferred >= 0)
@@ -67,6 +69,7 @@ int nr_dci11_pin_select(nr_dci11_pin_t *pin, uint64_t current_cfg, const uint16_
 
 void nr_dci11_pin_seed(nr_dci11_pin_t *pin, uint64_t current_cfg, uint16_t layout_id)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   pin->layout = layout_id;
   pin->cfg = current_cfg;
   pin->occ = 0;

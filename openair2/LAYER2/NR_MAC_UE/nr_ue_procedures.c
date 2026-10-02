@@ -893,9 +893,11 @@ static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
   dlsch_pdu->pduBitmap = 0;
   NR_UE_DL_BWP_t *current_DL_BWP = mac->current_DL_BWP;
   nr_rnti_type_t rnti_type = get_rnti_type(mac, dci_ind->rnti);
+  const bool decoding_sib1 = mac->get_sib1
+      && (!nr_cfg_reconf_enabled() || rnti_type == TYPE_SI_RNTI_);
   /* Dedicated PDSCH-Config does not apply to P-RNTI PCCH or SIB1 acquisition: use common defaults. */
   NR_PDSCH_Config_t *pdsch_config =
-      (rnti_type == TYPE_P_RNTI_ || !current_DL_BWP || mac->get_sib1) ? NULL : current_DL_BWP->pdsch_Config;
+      (rnti_type == TYPE_P_RNTI_ || !current_DL_BWP || decoding_sib1) ? NULL : current_DL_BWP->pdsch_Config;
   if (dci_ind->ss_type == NR_SearchSpace__searchSpaceType_PR_common) {
     dlsch_pdu->BWPSize =
         mac->type0_PDCCH_CSS_config.num_rbs ? mac->type0_PDCCH_CSS_config.num_rbs : mac->sc_info.initial_dl_BWPSize;
@@ -981,7 +983,7 @@ static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
     return -1;
   }
 
-  dlsch_pdu->refPoint = mac->get_sib1 ? 1 : 0;
+  dlsch_pdu->refPoint = decoding_sib1 ? 1 : 0;
 
   /* TIME_DOM_RESOURCE_ASSIGNMENT */
   int dmrs_typeA_pos = mac->dmrs_TypeA_Position;
@@ -995,7 +997,7 @@ static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
                                            mux_pattern,
                                            rnti_type,
                                            coreset_type,
-                                           mac->get_sib1);
+                                           decoding_sib1);
   if (!tda_info.valid_tda)
     return -1;
 

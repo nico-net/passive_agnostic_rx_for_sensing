@@ -57,6 +57,7 @@ void crcTableInit(void);
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // NR_tda_info_t, get_dl_tda_info(), TYPE_C_RNTI_
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_passive_cfg_sources.h"
+#include "nr_passive_cfg_epoch.h"
 #include "nr_pdsch_config_sweep.h"
 #include "nr_pdcch_coreset_map.h"
 #include "nr_pdcch_discovery_replay.h"
@@ -1193,6 +1194,7 @@ TEST_F(BlindPdcchTest, Dci10PRntiShortMessageOnlyCarriesNoGrant) {
   EXPECT_EQ(out.short_messages, 0xA5);
   EXPECT_EQ(out.short_messages_ind, 3);
 
+  gt.riv = gt.tda = gt.vrb = gt.mcs = gt.tb_scaling = 0;
   gt.sm_ind = 2; // short message only
   auto sm_only = EncodeToLLR(PackDci10P(gt, riv_bits), 0xFFFE, len, kAggregationLevel, 40.0, rng_);
   EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(sm_only.data(), kAggregationLevel, len, &ctx, 0x0001,
@@ -1201,6 +1203,23 @@ TEST_F(BlindPdcchTest, Dci10PRntiShortMessageOnlyCarriesNoGrant) {
   EXPECT_EQ(out.short_messages_ind, 2);
   EXPECT_EQ(out.short_messages, 0xA5);
   EXPECT_TRUE(nr_cfg_prnti_si_modified(out.short_messages_ind, out.short_messages));
+}
+
+TEST_F(BlindPdcchTest, NoisePrntiShortOnlyReservedFieldsNeverArm) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
+  const uint16_t len = nr_pdcch_blind_dci10_size(48);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, 48);
+  auto opts = OptsWithTdaLists();
+  // Condition on a recovered P-RNTI, SMI=10/MSB=1 and zero trailing six bits.
+  // Every other scheduling bit is reserved too, not arbitrary noise.
+  for (unsigned bit = 6; bit + 10u < len; ++bit) {
+    const uint64_t payload = (uint64_t(0x280) << (len - 10)) | (1ULL << bit);
+    auto llr = EncodeToLLR(payload, 0xFFFE, len, kAggregationLevel, 40.0, rng_);
+    nr_pdcch_blind_result_t out{};
+    EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx,
+                                                    1, 0xFFEF, &opts, &out));
+    EXPECT_FALSE(nr_cfg_prnti_si_modified(out.short_messages_ind, out.short_messages)) << bit;
+  }
 }
 
 // --- The three things the search-space kind changes ----------------------------------------------
@@ -4811,4 +4830,68 @@ TEST_F(BlindPdcchTest, PolarAllocationSizesFollowShape) {
       polarReturn(p);
     }
   }
+}
+
+TEST(Sib1Cache, StartupHintRekeysOnLiveDecodeWithoutEpochBump) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
+  char dir[] = "/tmp/rr-r8b-cache-XXXXXX";
+  ASSERT_NE(mkdtemp(dir), nullptr);
+  setenv("ISAC_SIB1_CACHE_DIR", dir, 1);
+  setenv("ISAC_SIB1_CACHE", "1", 1);
+  nr_cfg_epoch_reset();
+  nr_pdcch_blind_common_config_t f{}, got{};
+  f.pci = 997; f.dl_bwp_size = 106;
+  nr_pdcch_blind_set_sib1_semantic_hash(0x1234);
+  ASSERT_TRUE(nr_pdcch_blind_publish_common(&f));
+  nr_pdcch_blind_reset_common();
+  nr_pdcch_blind_set_sib1_semantic_hash(0); // next sync, no live SIB1
+  ASSERT_TRUE(nr_pdcch_blind_get_common(f.pci, &got));
+  EXPECT_EQ(got.dl_bwp_size, 106);
+  EXPECT_EQ(nr_pdcch_blind_sib1_semantic_hash(), 0u);
+  nr_cfg_epoch_note_sib1(0x5678, 100);
+  nr_pdcch_blind_set_sib1_semantic_hash(0x5678);
+  ASSERT_TRUE(nr_pdcch_blind_publish_common(&f)); // same common subset, different full semantic hash
+  EXPECT_EQ(nr_cfg_epoch_current(), 0u); // hint never established a decoded baseline
+  nr_pdcch_blind_reset_common();
+  nr_pdcch_blind_set_sib1_semantic_hash(0);
+  ASSERT_TRUE(nr_pdcch_blind_get_common(f.pci, &got));
+  char path[256];
+  nr_cfg_sib1_cache_name(path, sizeof(path), dir, f.pci, 0x5678, true);
+  FILE *fp = fopen(path, "rb");
+  ASSERT_NE(fp, nullptr);
+  fclose(fp);
+  remove(path);
+  nr_cfg_sib1_cache_name(path, sizeof(path), dir, f.pci, 0x1234, true);
+  remove(path);
+  snprintf(path, sizeof(path), "%s/sib1_common_pci997_last_hash.bin", dir);
+  remove(path);
+  nr_pdcch_blind_reset_common();
+  unsetenv("ISAC_SIB1_CACHE_DIR");
+  unsetenv("ISAC_SIB1_CACHE");
+}
+
+TEST(EpochFeedback, InFlightJobAcrossBumpNotCredited) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
+  nr_cfg_epoch_reset();
+  uint64_t dropped = 0;
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_current(), &dropped);
+  nr_pdcch_dci_length_sweep_state_t state{};
+  auto decode = [](int, int, uint16_t *rnti, uint32_t *hash, void *) -> bool {
+    nr_cfg_epoch_note_bwp_change(); // CPU decoder or GPU wait straddles the bump
+    *rnti = 0x1234; *hash = 17;
+    return true;
+  };
+  EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, decode, nullptr, 1, 47, 47, 0x1234), -1);
+  EXPECT_EQ(state.trials[47], 0);
+  EXPECT_EQ(state.passes[47], 0);
+  nr_pdcch_dci_length_context_t ctx{};
+  nr_pdcch_dci_length_context_add(&ctx, 47, 100);
+  EXPECT_EQ(ctx.found[0], 0);
+  nr_pdsch_sweep_ticket_t ticket{};
+  nr_pdsch_cfg_hypothesis_t winner{};
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&ticket, true, &winner));
+  nr_dci11_pin_t pin{};
+  nr_dci11_pin_seed(&pin, 1, 2);
+  EXPECT_FALSE(nr_dci11_pin_is_valid(&pin));
+  EXPECT_EQ(dropped, 1u);
 }
