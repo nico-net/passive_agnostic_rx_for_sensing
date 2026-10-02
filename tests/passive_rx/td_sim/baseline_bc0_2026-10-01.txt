@@ -137,3 +137,147 @@ cold: n=4000 mean_s=1.77 median_s=1.60 decided=4000 wrong=0 undecidable=0
 steady: n=4000 mean_s=1.72 median_s=1.58 decided=4000 wrong=0 undecidable=0
 overall: mean_grants=349.0 wrong=0 undecidable=0 n_full=2791874
 
+
+## BC8 v2
+[SIMULATED, DGX host, nr_td_sim @f59112743e for the rows marked (R2) below; all other rows @b761021bb1 (same simulator logic for them: round 2 only changes the mask-observation path, verified byte-identical on the adjacency-0 rows)] slot-model baselines after fidelity round 1 (supersedes the first BC8 table, commit 65a17b1832, whose oracle model
+observed the mask on every decoded grant and had no PRB-overlap / other-UE / k0 >= 2 probe / per-table compatibility). `--acq 500 --seed 1` (4 RNTIs per acquisition =
+2000 RNTIs per row), rx = 4 and 1, 8 parallel processes, 56 runs, ~75 min wall (the two adjacency-0 arms with the grown k0 catalogue dominate: up to 68 min per run).
+Common flags: `--slot-model 1 --grant-prob 0.5` (i.i.d. per eligible DL slot unless `--adjacency` is given), `--dci-false 0`, cap_s 3600, levers C/P/E off, field book 0,
+`--tdd-s-dl-symbols 6`, `--snr-rho 0` (i.i.d.) unless named. Arm name key: o0/o1 = `--oracle`; L1/L0 = `--k0-oracle-legacy` (L1 = K39 bug in the slot model; L0 = K39 fix);
+rho = `--persist` (allocation PRB/rank repeat; MCS redrawn per slot with 1 - rho); m = `--dci-miss`; adj0 / adj1.0 = `--adjacency`; tdd = `--tdd DDDSU`;
+ouX = `--other-ue-occ X`; snr0.9 = `--snr-rho 0.9`.
+Oracle model (I1/I2/I3): the DM-RS oracle measures ONLY the DCI's own slot, ONLY on k0 == 0 picks, ONLY on the grant's PRBs: this RNTI's own PDSCH there (PRB-id overlap)
+or another UE's (wrong mask) is measured; nothing there = no observation, and then 1 job in 8 runs the runtime k0 >= 2 probe (slots +2..+18, a layer per slot showing DM-RS).
+Legacy (K39 bug) = a measurement also claims k0 = 0; fixed = mask + last symbol only. Compatibility is per MCS table on (Qm, R, PRBs, rank, rv) with the MAC tables; certification needs
+a non-empty sibling set and incompatibility under all alive table pairs. Design: full product oracle {0,1} x legacy {1,0} (oracle 1 only) x rho {0.5, 0.9} x dci-miss {0.01, 0.1},
+plus adjacency {0, 1.0}, TDD DDDSU, other-UE {0.1, 0.3} (adjacent default and adjacency 0), and one AR(1) SNR arm; no fractional design needed.
+Columns: wrong / undec = RNTIs; truth_k0=N n/wrong/undec = subset with that TRUE k0 (k0 = 1 share 1072/2000 = 53.6 %, uniform catalogue draw); mean_s = mean DECIDED seconds (grants / 200);
+k0_trap_passes = PHYSICAL shifted-slot passes; adj_frac = grants with a same-RNTI PDSCH in an adjacent slot; f_S = certified_grants / processed grants (certified for the TRUTH's k0 leader);
+cert_sib = (grant, sibling leader) pairs certified; cert_wrong = such pairs certified although the real occupant of the shifted slot is compatible (dci_false is 0 here, so these arise
+only when the oracle bug pruned the TRUE k0 layer while other k0 layers (probe layers) stay alive: the certification then rests on a catalogue missing the true layer, A2 violated);
+probe_hyp_added = hypotheses added by the k0 >= 2 probe layers (sum over the 2000 RNTIs); mean_n_hyp_end = mean catalogue size at the end of an RNTI (after prunes; oracle-0 rows
+keep the initial catalogue, ~399 hypotheses). Levers off: speed/safety baselines for BC9, not lever results.
+ROUND 2 (R2) oracle protections now mirrored (nr_pdsch_config_sweep_observe): per-RNTI observed set (r->obs, OBS_MASKS_MAX = 8, a full set drops new masks) UNIONed with the promoted
+cell-wide g_obs for the prune; restore_observed_typea re-appends the matching type-A catalogue entries (catalogue k0, or the pinned k0 in legacy; evidence zeroed) when no alive entry admits
+the new observation; a mask is promoted to g_obs when a second distinct RNTI of the acquisition has observed it; the legacy k0=0 pin travels with the mask (obs.k0), a record refines
+(a relaxed last symbol is re-refined by the next observation, as in the runtime). Rows whose names contain ou / adj0_ou are R2 re-runs (old values in the comparison below);
+`_cc` rows = `--other-ue-same-cfg 1` (another UE with the cell's add_pos/max_len: 1-3 distinct masks instead of any catalogue entry). The two adj0 rows without other UE were re-run and are
+IDENTICAL to round 1 (no foreign mask => no union/restore effect). New columns: none; the probe_hyp_added column now also counts layers re-added after restore/prune thrash.
+NOT MODELLED / simplifications still in force (the direction of the bias for the other-UE thrash rows is UNKNOWN: runtime damage (vii)-(ix) is missing, protections (ii)-(iv) are missing):
+ (ii) g_obs is dynamic at runtime (concurrent RNTIs, eviction, invalidation); here it is built only from the EARLIER RNTIs of the same acquisition (sequential), so a later RNTI's masks never help an earlier one;
+ (iii) another UE's DM-RS is assumed to share the scrambling id, so it is always measured as DM-RS on the grant's PRBs (the runtime measures with this RNTI's nscid / scrambling id);
+ (iv) the oracle_nrb >= 4 gate and probe_span's largest-segment PRB selection are not modelled (the measurement is always available);
+ (v) the in-line oracle path used when deferral is off (monitor_rt.c:6833 -> queue.c:607-631: no k0 == 0 gate) is not modelled; only the deferred-path k0 == 0 measurement is;
+ (vi) all RNTIs of an acquisition share the truth (same S/L/mask/k0/table) and the same cell config;
+ (vii) in-flight tickets go stale after context_reindexed and their CRC feedback is dropped (the simulator feeds every outcome);
+ (viii) BC9 runs apply_cert after restore: a further evidence wipe not modelled;
+ (ix) type-B widening from foreign type-B-only masks (add_typeb_layer) is not modelled;
+ (x) energy-threshold jitter in the measured last_sym (a further source of the same-mask / different-last pattern);
+ Minor: the simulator's restore prior filter uses only gprior, whereas the runtime uses r->prior first; no effect while each RNTI has a single TDRA row.
+ plus: PRBs are 8 coarse ids (overlap = equal id); one TDRA row per RNTI; other-UE mask = random catalogue entry (or cell-config entry with _cc); per-RNTI context only (no cross-RNTI k0_seen);
+ probe latency/retention not modelled (spf 20, K = 18); DM-RS measurement perfect; no HARQ processes; spurious DCIs history-only; known TDD not used by the receiver; S-slot rule = truth fits; w_obs inputs use the truth mask;
+ reserved MCS never drawn; rank gating conservative; slot-model + fieldbook 2: restored entries are not covered by the field-book dormant masks.
+
+arm_rx | RNTIs | wrong | undec | truth_k0=1 n/wrong/undec | truth_k0=0 n/wrong/undec | mean_s(decided) | k0_trap_passes | adj_frac | f_S(cert/proc) | cert_sib | cert_wrong | probe_hyp_added | mean_n_hyp_end | wall_s
+o0_rho0.5_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 374.5 | 14892 | 0.750 | 0.405 | 60089315 | 0 | 0 | 399 | 164
+o0_rho0.5_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 206.4 | 11114 | 0.750 | 0.405 | 33119033 | 0 | 0 | 399 | 90
+o0_rho0.5_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 414.2 | 14862 | 0.750 | 0.368 | 54914799 | 0 | 0 | 399 | 167
+o0_rho0.5_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 227.5 | 11037 | 0.750 | 0.368 | 30164663 | 0 | 0 | 399 | 91
+o0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 507.4 | 62837 | 0.750 | 0.255 | 51244264 | 0 | 0 | 399 | 233
+o0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 330.4 | 53444 | 0.750 | 0.255 | 33369907 | 0 | 0 | 399 | 155
+o0_rho0.9_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 560.1 | 63061 | 0.750 | 0.232 | 46752362 | 0 | 0 | 399 | 234
+o0_rho0.9_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 363.6 | 53810 | 0.750 | 0.232 | 30352777 | 0 | 0 | 399 | 155
+o0_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 419.8 | 29523 | 0.549 | 0.152 | 25349083 | 0 | 0 | 399 | 191
+o0_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 250.8 | 23342 | 0.550 | 0.153 | 15184114 | 0 | 0 | 399 | 115
+o1_L0_adj0_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 3005079 | 0.000 | 0.000 | 0 | 0 | 66445467 | 35 | 221
+o1_L0_adj0_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 4615397 | 0.000 | 0.000 | 0 | 0 | 91623528 | 35 | 238
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1021970 | 0.000 | 0.000 | 0 | 0 | 25054817 | 143 | 473
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 1700302 | 0.000 | 0.000 | 0 | 0 | 34599916 | 147 | 537
+o1_L0_adj0_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 4140138 | 0.000 | 0.000 | 0 | 0 | 183248546 | 34 | 249
+o1_L0_adj0_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 6576117 | 0.000 | 0.000 | 0 | 0 | 246977947 | 34 | 275
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1302930 | 0.000 | 0.000 | 0 | 0 | 70519686 | 144 | 530
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 2272409 | 0.000 | 0.000 | 0 | 0 | 98632105 | 148 | 617
+o1_L0_adj0_rho0.9_m0.01_rx1 | 2000 | 0 | 574 | 1072/0/574 | 928/0/0 | 632.5 | 427892 | 0.000 | 0.000 | 0 | 0 | 2043729 | 576 | 4074
+o1_L0_adj0_rho0.9_m0.01_rx4 | 2000 | 0 | 299 | 1072/0/299 | 928/0/0 | 470.3 | 363516 | 0.000 | 0.000 | 0 | 0 | 1740376 | 496 | 2318
+o1_L0_adj1.0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 144.9 | 1594112 | 1.000 | 0.218 | 161930532 | 0 | 939704 | 33 | 169
+o1_L0_adj1.0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 69.7 | 1041028 | 1.000 | 0.219 | 77337265 | 0 | 994236 | 32 | 78
+o1_L0_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1063 | 1072/0/1063 | 928/0/0 | 17.1 | 14074000 | 0.750 | 0.004 | 3773899 | 0 | 6486548 | 36 | 572
+o1_L0_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1021 | 1072/0/1021 | 928/0/0 | 93.1 | 19777888 | 0.750 | 0.004 | 3658833 | 0 | 8370834 | 36 | 563
+o1_L0_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 8007817 | 0.750 | 0.041 | 32910596 | 0 | 6977798 | 120 | 714
+o1_L0_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12542314 | 0.750 | 0.042 | 33357263 | 0 | 9013745 | 116 | 762
+o1_L0_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 14747979 | 0.750 | 0.020 | 18244776 | 0 | 34316400 | 34 | 532
+o1_L0_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1070 | 1072/0/1070 | 928/0/0 | 6.8 | 21368689 | 0.750 | 0.020 | 17743714 | 0 | 44646568 | 34 | 540
+o1_L0_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 7872943 | 0.750 | 0.075 | 61168672 | 0 | 20930197 | 120 | 707
+o1_L0_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12320337 | 0.750 | 0.075 | 61577127 | 0 | 27844833 | 121 | 776
+o1_L0_rho0.5_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 31.6 | 34184 | 0.750 | 0.032 | 458538 | 0 | 357615 | 32 | 11
+o1_L0_rho0.5_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 17.3 | 25465 | 0.750 | 0.034 | 270694 | 0 | 378275 | 31 | 6
+o1_L0_rho0.5_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 34.8 | 34168 | 0.750 | 0.029 | 399389 | 0 | 360638 | 32 | 11
+o1_L0_rho0.5_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 18.8 | 24893 | 0.750 | 0.030 | 232717 | 0 | 375111 | 30 | 6
+o1_L0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 44.3 | 297022 | 0.750 | 0.019 | 349296 | 0 | 919403 | 33 | 14
+o1_L0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 27.7 | 242326 | 0.750 | 0.019 | 219760 | 0 | 909772 | 33 | 9
+o1_L0_rho0.9_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 49.3 | 299663 | 0.750 | 0.018 | 315516 | 0 | 920733 | 33 | 14
+o1_L0_rho0.9_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 30.5 | 241403 | 0.750 | 0.018 | 197271 | 0 | 911960 | 33 | 9
+o1_L0_snr0.9_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 44.1 | 294690 | 0.750 | 0.020 | 348057 | 0 | 916047 | 33 | 14
+o1_L0_snr0.9_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 27.7 | 242380 | 0.750 | 0.019 | 218010 | 0 | 904174 | 33 | 9
+o1_L0_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 25.3 | 113882 | 0.522 | 0.020 | 202485 | 0 | 541367 | 23 | 6
+o1_L0_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 14.4 | 87451 | 0.522 | 0.020 | 117089 | 0 | 513677 | 23 | 4
+o1_L1_adj0_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 11961156 | 0.000 | 0.000 | 1503150 | 0 | 279101057 | 32 | 233
+o1_L1_adj0_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 20660290 | 0.000 | 0.000 | 940870 | 0 | 367093573 | 32 | 248
+o1_L1_adj0_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 3083621 | 0.000 | 0.000 | 1952474 | 0 | 3257838411 | 167 | 597
+o1_L1_adj0_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 3351948 | 0.000 | 0.000 | 1403991 | 0 | 7928940897 | 150 | 770
+o1_L1_adj0_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 11722720 | 0.000 | 0.000 | 944629 | 0 | 896209176 | 28 | 283
+o1_L1_adj0_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 20492450 | 0.000 | 0.000 | 498950 | 0 | 1224564963 | 29 | 324
+o1_L1_adj0_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 1064107 | 0.000 | 0.000 | 1337699 | 0 | 11342253852 | 91 | 783
+o1_L1_adj0_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 7848 | 0.000 | 0.000 | 577541 | 0 | 21789672327 | 68 | 1158
+o1_L1_adj0_rho0.9_m0.01_rx1 | 2000 | 0 | 574 | 1072/0/574 | 928/0/0 | 631.5 | 427892 | 0.000 | 0.000 | 0 | 0 | 2043729 | 575 | 4078
+o1_L1_adj0_rho0.9_m0.01_rx4 | 2000 | 0 | 299 | 1072/0/299 | 928/0/0 | 469.8 | 363516 | 0.000 | 0.000 | 0 | 0 | 1740376 | 495 | 2317
+o1_L1_adj1.0_rho0.9_m0.01_rx1 | 2000 | 339 | 733 | 1072/339/733 | 928/0/0 | 360.2 | 85819744 | 1.000 | 0.000 | 49674199 | 5522390 | 120407562 | 3 | 150
+o1_L1_adj1.0_rho0.9_m0.01_rx4 | 2000 | 438 | 634 | 1072/438/634 | 928/0/0 | 372.4 | 120574323 | 1.000 | 0.000 | 39779666 | 5064344 | 156089097 | 3 | 135
+o1_L1_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 3 | 1069 | 1072/3/1069 | 928/0/0 | 8.1 | 34337439 | 0.750 | 0.000 | 24648003 | 2105336 | 856786930 | 12 | 319
+o1_L1_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 49367667 | 0.750 | 0.000 | 20500121 | 1559189 | 1170319883 | 13 | 360
+o1_L1_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 5844175 | 0.750 | 0.000 | 26996640 | 2465001 | 7107128553 | 46 | 527
+o1_L1_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 8515852 | 0.750 | 0.000 | 11141416 | 790353 | 11522444291 | 36 | 659
+o1_L1_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 30720992 | 0.750 | 0.000 | 6241154 | 392861 | 1017085101 | 11 | 376
+o1_L1_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 44325061 | 0.750 | 0.000 | 5103506 | 296931 | 1439978373 | 12 | 439
+o1_L1_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 5378284 | 0.750 | 0.000 | 6146047 | 409739 | 7634781486 | 46 | 627
+o1_L1_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 7792293 | 0.750 | 0.000 | 1822908 | 97138 | 12035961653 | 33 | 802
+o1_L1_rho0.5_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 11099078 | 0.750 | 0.000 | 158165904 | 5300261 | 190643965 | 5 | 242
+o1_L1_rho0.5_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 15390874 | 0.750 | 0.000 | 160969194 | 5200133 | 269122451 | 5 | 256
+o1_L1_rho0.5_m0.1_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.9 | 10126401 | 0.750 | 0.000 | 118932659 | 4163216 | 172492565 | 5 | 225
+o1_L1_rho0.5_m0.1_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.2 | 14070466 | 0.750 | 0.000 | 120530894 | 4075162 | 243414266 | 6 | 237
+o1_L1_rho0.9_m0.01_rx1 | 2000 | 12 | 1060 | 1072/12/1060 | 928/0/0 | 9.8 | 45831566 | 0.750 | 0.000 | 24737065 | 2250773 | 412115183 | 7 | 268
+o1_L1_rho0.9_m0.01_rx4 | 2000 | 12 | 1060 | 1072/12/1060 | 928/0/0 | 25.7 | 66065440 | 0.750 | 0.000 | 22343674 | 1763318 | 567939505 | 8 | 291
+o1_L1_rho0.9_m0.1_rx1 | 2000 | 14 | 1058 | 1072/14/1058 | 928/0/0 | 15.7 | 41708371 | 0.750 | 0.000 | 17646051 | 1704029 | 374787852 | 7 | 246
+o1_L1_rho0.9_m0.1_rx4 | 2000 | 12 | 1060 | 1072/12/1060 | 928/0/0 | 22.3 | 60113882 | 0.750 | 0.000 | 15608827 | 1309315 | 515436680 | 8 | 267
+o1_L1_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 20392765 | 0.510 | 0.000 | 41373602 | 3289528 | 206313083 | 7 | 269
+o1_L1_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 30040117 | 0.510 | 0.000 | 39778356 | 3005689 | 281972308 | 7 | 284
+
+Findings (all [SIMULATED], single-seed, 2000 RNTIs per row; round-1 findings for unchanged rows stand):
+- Fixed oracle (L0), default traffic, no other UE: unchanged, wrong 0 / undecidable 0, decided 14-49 s. Oracle off: unchanged. Adjacency-0 rows without other UE: unchanged to the digit.
+- ROUND 2 CHANGE, other-UE rows (o1_L*_ou*, o1_L*_adj0_ou*), old (round 1) -> new (R2), k0 = 1 truths undecidable of 1072:
+  L0 ou0.1: 88 (rx4) / 82 (rx1) -> 1072 / 1072; L0 ou0.3: 214 / 214 -> 1072 / 1072; L0 adj0_ou0.1: 1049 / 1038 -> 1072 / 1072; L0 adj0_ou0.3: 1034 / 1040 -> 1072 / 1072.
+  L1 ou0.1/0.3 and L1 adj0_ou: were 1058-1072 undecidable with up to 13 wrong -> now 1072/1072 undecidable and wrong 0 (the earlier few wrong winners vanish); the one exception is L1 ou0.1_cc rx1 (3 wrong / 1069 undecidable).
+  k0 = 0 truths are untouched in every row (0/0).
+- WHY the protections do not help here (mechanism read from the runtime code and reproduced in the simulator): another UE's PDSCH on the grant's PRBs shows the cell's DM-RS mask with a DIFFERENT last
+  symbol from slot to slot (cell-common mask, varying S/L). obs_record relaxes this RNTI's last symbol to unknown on the contradiction and the next own measurement REFINES it back; each time,
+  restore_observed_typea re-adds entries for the foreign (mask, last) and prune_to_observed then removes them again; every size-changing prune_commit zeroes ALL trial/ok evidence
+  (hundreds to thousands of events per RNTI: restores column), so the KL rule never accumulates and the RNTI stays undecidable. The union does keep the truth alive (truth_kl_trials >= 0), it does not let it converge.
+  Reduced diversity (_cc rows) reduces but does not remove it (L0 ou0.1_cc: 1021 (rx4) / 1063 (rx1) undecidable; L0 ou0.3_cc: 1070 / 1072; adj0_ou_cc: 1072).
+  The thrash occurs when the observations reaching ONE context contain the same mask with at least 2 distinct last symbols, interleaved so that a refine follows a relax. Causes include a fixed
+  other-UE last symbol that differs from the RNTI's own, the RNTI's own PDSCH from other TDRA rows, and energy-threshold jitter in last_sym (x). Physically a mask can carry different last symbols only within one duration class.
+  The simulator reproduces the first cause only (the other UE's last symbol varies per slot). The numbers are conditional on (b) assumptions (ii)-(x). The DIRECTION of the bias is UNKNOWN: the simulator lacks runtime damage
+  (vii) in-flight tickets go stale after context_reindexed, so CRC feedback is dropped; (viii) BC9 runs apply_cert after restore, a further wipe; (ix) type-B widening from foreign type-B-only masks; and it lacks protections (ii)-(iv).
+  The effect, if real, is a runtime pathology (evidence wipe on every observation-driven prune) that exists with the K39 fix too, independent of k0.
+- Where the earlier round-1 text said "the K39 fix is necessary, not sufficient (82-88 / 214 / 1034-1049 undecidable)", read the R2 numbers above.
+
+Round-1 findings that still hold for the unchanged rows:
+- Fixed oracle (L0), model-default traffic (adj_frac 0.75, no other UE): wrong 0 and undecidable 0 in every arm, rx 4 and 1, k0 = 1 truths included; but decided time is 14-49 s
+  (the earlier 2-5 s was overstated: k0 = 1 truths often have no own-slot measurement and the probe layers enlarge the catalogue by ~460 hypotheses per RNTI on average).
+- k0 >= 2 probe layers cut the certified share: f_S 0.019 (o1_L0, rho 0.9) vs 0.255 with the oracle off (no probe layers) at the same traffic; 0.032 vs 0.405 at rho 0.5; TDD 0.020 vs 0.152.
+  Full adjacency (L0, adj1.0): f_S 0.22 and decided time 70-145 s.
+- Legacy oracle (L1) with same-RNTI adjacency: the true k0 = 1 is pruned for essentially every k0 = 1 truth (undecidable 1058-1072 of 1072 at default traffic; the earlier "1072/1072 wrong"
+  headline is RETRACTED: it held only for single-UE, same-PRB adjacency without k0 >= 2 layers). Wrong winners are rare (<= 14 of 1072) at default traffic; they reach 339-438 of 1072 at
+  adjacency 1.0 (persistent identical neighbours let a trapped sibling win) with the rest undecidable. No k0 = 0 truth is ever wrong or undecidable (rows truth_k0=0 are 0/0).
+- Adjacency 0 (alternating grants), no other UE: L0 and L1 are identical (no own-slot PDSCH, no claim); k0 = 1 truths have no mask observation and blind-search an enlarged catalogue:
+  undecidable 299 (rx4) / 574 (rx1) of 1072 at the 3600 s cap, mean decided 470-630 s; certification is 0 (absence = ambiguous).
+- Oracle off: wrong 0, undecidable 0 in all 10 rows; physical trap with the default sibling guard costs no safety here. certified_wrong = 0 in every arm without the oracle bug.
