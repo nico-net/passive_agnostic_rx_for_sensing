@@ -40,7 +40,7 @@
 | `openair1/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.{h,c}`, `tests/nr_td_fieldbook_test.cc` | field state machine | BC4 |
 | `tests/passive_rx/td_sim/campaign.py`, `test_campaign.py`, `gate_bc.json`, `results_<date>_bc/` | campaigns | BC0, BC6 |
 
-Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC2b (experimental, operator 2026-10-01) → BC7 (K39) → BC8 (sim v2) → BC9 (DCI adjacency) → BC10 (fast-path stream) → BC11 (adaptive k0 test) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
+Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC2b (experimental, operator 2026-10-01) → BC7 (K39) → BC8 (sim v2) → BC9 (DCI adjacency) → BC7b (K42 thrash) → BC10 (fast-path stream) → BC11 (adaptive k0 test) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
 
 ---
 
@@ -598,6 +598,32 @@ correctness fix): flag `ISAC_TD_K0_ORACLE_LEGACY=1` restores the old pinning for
   k0 hypotheses survive ⇒ convergence may be slower: measure, label `[MEASURED, DGX rfsim 106 PRB]`); rank-4 pin49r4 bed
   still 100 %. PROJECT_MEMORY K39 → resolved with evidence.
 - [ ] **Step 5: Commit** — `fix(rx): DM-RS presence marks k0 plausible, never pins it (K39)`.
+
+### Task BC7b ★: K42 — observation thrash (monotone last-symbol set, no wipe on restore round-trips) (Opus)
+
+**Root cause [CODE-READ, BC8 round-2 review]:** `obs_record` relaxes a mask's last symbol to −1 on a contradicting
+observation and re-refines it on the next one (`nr_pdsch_config_sweep.c` ~593); `restore_observed_typea` (~2020) appends
+entries that the following refine-prune removes again; every size-changing `prune_commit` (~320-330) zeroes all evidence
+and `context_reindexed` stales in-flight tickets. Triggers: another UE's DM-RS (K41) with a different last symbol, the
+RNTI's own PDSCH from other TDRA rows, energy-threshold last-symbol jitter; also the full-set (9th mask) restore→prune
+wipe and the BC9 restore→`apply_cert` wipe. Effect: a k0 ≥ 1 truth can stay alive but never converge, or be pruned
+repeatedly (`[SIMULATED, nr_td_sim @f59112743e]` 1072/1072 k0=1 truths undecidable with another UE).
+
+**Fix (exact):** F1 — per-mask last-symbol **set** (`uint16_t lastset`, bit per symbol; `lastset == 0` = unknown) in
+`r->obs` and `g_obs`; `obs_record` ORs the bit (never re-refines); `obs_admits` passes iff `lastset == 0` or the entry's
+`S+L−1` bit is set. Admitted sets only grow ⇒ `prune_to_observed` never removes an entry an earlier observation admitted.
+F2 — skip `restore_observed_typea` when `obs_record` dropped the mask (full set) and the mask is not in `g_obs`.
+F3 — when the observe-path prune (or `apply_cert`) removes only entries appended by this call's restore (index ≥ the
+pre-restore `n_hyp`), truncate (`n_hyp = n`, normalise masks) without wipe or reindex; additionally filter restored
+entries through the per-context certification before appending. No evidence remapping on general prunes.
+Simulator: mirror F1 in `SimObs` (flag `--obs-lastset 0|1`, default 1 after this task; 0 keeps the round-2 model).
+
+- [ ] Tests (RED first): `AlternatingLastSymbolNeverWipesEvidence`, `ForeignLastSymbolOnlyWidens`,
+  `FullSetForeignMaskDoesNotWipe`, `RestoreThenCertDoesNotWipe`, `OwnObservationAfterForeignKeepsTruth`, legacy-flag
+  identity where applicable; simulator `OtherUeK0OneTruthsConverge` (slot model, other-UE 0.1, fixed oracle: undecidable
+  ≪ round-2 value, wrong = 0).
+- [ ] rfsim regression gate + rank-4 bed (host idle); PROJECT_MEMORY K42 row (new) and K41 cross-reference.
+- [ ] Commit `fix(rx): monotone observed last-symbol sets, no evidence wipe on restore round-trips (K42)`.
 
 ### Task BC8: Simulator v2 — slot-indexed traffic, adjacency and DCI observation (Sonnet)
 
