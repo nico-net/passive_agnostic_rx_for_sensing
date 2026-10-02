@@ -281,3 +281,60 @@ Round-1 findings that still hold for the unchanged rows:
 - Adjacency 0 (alternating grants), no other UE: L0 and L1 are identical (no own-slot PDSCH, no claim); k0 = 1 truths have no mask observation and blind-search an enlarged catalogue:
   undecidable 299 (rx4) / 574 (rx1) of 1072 at the 3600 s cap, mean decided 470-630 s; certification is 0 (absence = ambiguous).
 - Oracle off: wrong 0, undecidable 0 in all 10 rows; physical trap with the default sibling guard costs no safety here. certified_wrong = 0 in every arm without the oracle bug.
+
+
+## BC7b
+[SIMULATED, DGX host, nr_td_sim @44a9391975] K42 monotone last-symbol set, `--obs-lastset 1` (BC7b, now the default: per-mask last-symbol SET, a record ORs and never re-refines, plus F2 = no restore of a
+mask the full own set dropped unless g_obs has it) vs `--obs-lastset 0` (the BC8 round-2 relax / re-refine model; output byte-identical to the 8af53c3a40 binary apart from the new "obs_lastset" JSON key).
+Rows: the BC8 other-UE rows with the FIXED oracle only: `--acq 500 --seed 1 --oracle 1 --slot-model 1 --grant-prob 0.5 --dci-false 0 --persist 0.9 --dci-miss 0.01 --k0-oracle-legacy 0 --other-ue-occ {0.1,0.3}`,
+adjacency 0 (`--adjacency 0`, adj0 rows) and the default i.i.d. traffic (no adj0 in the name), `--n-rx {4,1}`; 2000 RNTIs per row; at most 8 parallel processes, run after the rfsim measurements
+(never concurrently). The LEGACY k0-oracle arms (`--k0-oracle-legacy 1`) were DROPPED by controller decision (operator-approved): they only re-document the K39 bug and are not needed to evaluate
+K42; the legacy runs that had started were stopped by SIGINT and are not reported. Columns as in ## BC8 v2, plus restores = restore_observed_typea events (sum over RNTIs); `_lsN` = --obs-lastset N.
+Check: every ls0 row equals the corresponding BC8 R2 row to the digit (wrong/undec/mean_s/k0_trap_passes/f_S/cert_sib/probe_hyp_added/mean_n_hyp_end).
+
+arm_rx_lastset | RNTIs | wrong | undec | truth_k0=1 n/wrong/undec | truth_k0=0 n/wrong/undec | mean_s(decided) | k0_trap_passes | adj_frac | f_S(cert/proc) | cert_sib | cert_wrong | probe_hyp_added | mean_n_hyp_end | restores | wall_s
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1021970 | 0.000 | 0.000 | 0 | 0 | 25054817 | 143 | 6207276 | 480
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 118 | 1072/0/118 | 928/0/0 | 474.5 | 270611 | 0.000 | 0.000 | 0 | 0 | 1749972 | 325 | 19644 | 979
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 1700302 | 0.000 | 0.000 | 0 | 0 | 34599916 | 147 | 8782114 | 545
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 56 | 1072/0/56 | 928/0/0 | 283.3 | 178851 | 0.000 | 0.000 | 0 | 0 | 1749067 | 319 | 19550 | 495
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1302930 | 0.000 | 0.000 | 0 | 0 | 70519686 | 144 | 18635857 | 531
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 133 | 1072/0/133 | 928/0/0 | 467.3 | 272987 | 0.000 | 0.000 | 0 | 0 | 1804326 | 343 | 19644 | 1076
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 2272409 | 0.000 | 0.000 | 0 | 0 | 98632105 | 148 | 26298069 | 620
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 58 | 1072/0/58 | 928/0/0 | 308.8 | 196221 | 0.000 | 0.000 | 0 | 0 | 1711915 | 323 | 19576 | 574
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 8007817 | 0.750 | 0.041 | 32910596 | 0 | 6977798 | 120 | 3955382 | 714
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 353.0 | 302575 | 0.750 | 0.003 | 406360 | 0 | 1207997 | 257 | 19324 | 230
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12542314 | 0.750 | 0.042 | 33357263 | 0 | 9013745 | 116 | 5423869 | 813
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 223.3 | 252454 | 0.750 | 0.003 | 280247 | 0 | 1236561 | 256 | 19333 | 154
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 7872943 | 0.750 | 0.075 | 61168672 | 0 | 20930197 | 120 | 10759414 | 704
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 369.0 | 283449 | 0.750 | 0.003 | 613155 | 0 | 1300638 | 274 | 19395 | 256
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12320337 | 0.750 | 0.075 | 61577127 | 0 | 27844833 | 121 | 14519757 | 768
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 239.4 | 241736 | 0.750 | 0.003 | 360824 | 0 | 1315681 | 274 | 19353 | 170
+
+Decided time split by the true k0 (seconds = grants / 200; undecidable RNTIs excluded):
+arm | mean_s decided truth_k0=0 | mean_s decided truth_k0=1 | p95_s k0=1
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls0 | 3.3 | - | -
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls1 | 3.3 | 932.9 | 2554
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls0 | 2.0 | - | -
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls1 | 2.0 | 540.3 | 1948
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls0 | 3.3 | - | -
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls1 | 3.3 | 925.9 | 2551
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls0 | 2.0 | - | -
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls1 | 2.0 | 589.5 | 2110
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls0 | 7.1 | - | -
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls1 | 7.1 | 652.3 | 1419
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls0 | 4.4 | - | -
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls1 | 4.4 | 412.8 | 959
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls0 | 7.1 | - | -
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls1 | 7.1 | 682.3 | 1379
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls0 | 4.4 | - | -
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls1 | 4.4 | 442.8 | 959
+
+Findings:
+- The thrash is gone in the model: k0 = 1 truths undecidable 1072/1072 -> adjacency 0: 56 (ou0.1 rx4), 58 (ou0.3 rx4), 118 (ou0.1 rx1), 133 (ou0.3 rx1); default traffic: 0 in all four rows. Wrong = 0 and
+  cert_wrong = 0 in every row. restore events drop from 3.9-26.3 M to ~19.3-19.6 k per 2000 RNTIs. k0 = 0 truths are unchanged to the digit (they are decided before any foreign mask matters).
+- The cost is speed, not safety: a foreign (mask, last) now widens the admitted set for good (that is the monotonicity), so the k0 = 1 catalogue stays wide (mean_n_hyp_end ~256-343 vs ~116-148) and
+  k0 = 1 truths decide in 413-682 s mean at default traffic (p95 959-1419 s) and 540-933 s at adjacency 0 (p95 1948-2554 s). For reference (## BC8 v2, no other UE, fixed oracle): 27.7-44.3 s mean over
+  all RNTIs at default traffic, 470-632 s at adjacency 0 (undecidable 299/574). K41 (attribution of another UE's DM-RS) is NOT fixed by BC7b; it is what remains to make these rows fast.
+- The adjacency-0 rows with another UE now decide MORE k0 = 1 truths than the adjacency-0 rows without another UE (56-133 vs 299-574 undecidable): [HYPOTHESIS, not separately measured] a foreign mask equal to the truth's (same cell config)
+  is an observation the RNTI's own empty DCI slot never gives. Simulator conditionality of ## BC8 v2 (b) (ii)-(x) still applies; (vii) (stale tickets) and (viii) (apply_cert wipe) no longer apply to the
+  runtime after BC7b.

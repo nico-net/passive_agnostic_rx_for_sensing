@@ -1,0 +1,93 @@
+== gate base_r1
+14.925 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.55 prof=[0.42 0.51 1.00 0.54 0.50 0.47 0.56 0.59 0.55 0.57 0.58 1.00 0.57 0.53]
+14.971 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.40 0.48 1.00 0.51 0.52 0.52 0.51 0.53 0.59 0.51 0.51 1.00 0.52 0.53]
+14.994 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=38+68 mask=0x4 last_sym=5 k0=0 med=0.45 prof=[0.37 0.49 1.00 0.53 0.51 0.55 0.32 0.45 0.30 0.49 0.32 0.51 0.33 0.44]
+14.994 [PHY]    SWEEP: ORACLE_RESTORE rnti=0x1234 tda=6 mask=0x4 last=5 k0=-1 added=18 plaus_k0=0x1
+14.996 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.31 0.44 1.00 0.50 0.60 0.54 0.50 0.52 0.55 0.57 0.52 1.00 0.55 0.53]
+14.996 [PHY]    SENSING: DMRS_ORACLE slot=4 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.39 0.58 1.00 0.52 0.55 0.54 0.55 0.52 0.52 0.53 0.56 1.00 0.51 0.51]
+14.997 [PHY]    SENSING: DMRS_ORACLE slot=5 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.35 0.51 1.00 0.51 0.53 0.52 0.52 0.53 0.52 0.53 0.49 1.00 0.59 0.55]
+15.020 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=0+106 mask=0x4 last_sym=5 k0=0 med=0.48 prof=[0.37 0.54 1.00 0.52 0.52 0.49 0.32 0.55 0.32 0.48 0.32 0.46 0.30 0.48]
+15.022 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.37 0.50 1.00 0.51 0.52 0.56 0.51 0.58 0.54 0.50 0.55 1.00 0.50 0.52]
+15.022 [PHY]    SENSING: DMRS_ORACLE slot=4 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.33 0.53 1.00 0.53 0.53 0.51 0.49 0.53 0.49 0.50 0.53 1.00 0.55 0.55]
+15.037 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.38 0.52 1.00 0.54 0.50 0.57 0.55 0.54 0.54 0.53 0.53 1.00 0.52 0.53]
+15.047 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=0+106 mask=0x4 last_sym=5 k0=0 med=0.50 prof=[0.38 0.52 1.00 0.54 0.54 0.53 0.34 0.47 0.32 0.52 0.38 0.53 0.31 0.50]
+15.049 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.35 0.51 1.00 0.53 0.54 0.55 0.52 0.49 0.53 0.53 0.51 1.00 0.51 0.53]
+21.731 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (157/157 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agre
+21.731 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+38.334 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+144.381 [PHY]    SENSING: SWEEPSTAT scored=53248 stale=6 created=5 reindexed=6 live=5 | rnti=0x1234 tda=0 n_hyp=24 outcomes=48008 trials[min=95 max=157] leader=12 S=1 L=13 k0=0 tbl=0 ok=157/157 lo=0.838 max_other_hi=0.80
+148.287 [PHY]    SENSING: LDPCDIAG ok=51929 seg_fail=2455 tb_fail=0 zero_tb=432 iface_err=0 segs_decoded=269/4708 (5.7%)
+== gate base_r2
+15.218 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=38+68 mask=0x4 last_sym=5 k0=0 med=0.51 prof=[0.36 0.58 1.00 0.51 0.51 0.52 0.30 0.52 0.32 0.51 0.32 0.52 0.37 0.49]
+15.219 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.30 0.48 1.00 0.52 0.50 0.55 0.61 0.52 0.58 0.49 0.53 1.00 0.51 0.53]
+15.219 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.40 0.52 1.00 0.53 0.51 0.48 0.55 0.51 0.50 0.52 0.52 1.00 0.49 0.54]
+15.234 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.55 prof=[0.42 0.54 1.00 0.53 0.57 0.53 0.56 0.59 0.55 0.55 0.49 1.00 0.57 0.55]
+15.241 [PHY]    SENSING: DMRS_ORACLE slot=14 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.45 0.55 1.00 0.56 0.56 0.54 0.52 0.54 0.56 0.47 0.54 1.00 0.55 0.52]
+15.243 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.39 0.53 1.00 0.53 0.57 0.55 0.53 0.51 0.51 0.52 0.53 1.00 0.55 0.48]
+15.258 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.37 0.51 1.00 0.54 0.52 0.52 0.57 0.54 0.56 0.59 0.55 1.00 0.54 0.48]
+15.265 [PHY]    SENSING: DMRS_ORACLE slot=14 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.34 0.51 1.00 0.53 0.53 0.53 0.52 0.56 0.54 0.53 0.56 1.00 0.54 0.56]
+15.265 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=0+106 mask=0x4 last_sym=5 k0=0 med=0.50 prof=[0.37 0.52 1.00 0.56 0.53 0.51 0.32 0.50 0.28 0.54 0.33 0.50 0.40 0.46]
+15.267 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.38 0.53 1.00 0.55 0.50 0.53 0.49 0.52 0.54 0.53 0.54 1.00 0.51 0.54]
+15.268 [PHY]    SENSING: DMRS_ORACLE slot=5 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.36 0.52 1.00 0.49 0.50 0.52 0.53 0.53 0.55 0.46 0.54 1.00 0.50 0.56]
+15.281 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.39 0.56 1.00 0.53 0.51 0.51 0.56 0.51 0.58 0.59 0.50 1.00 0.51 0.52]
+19.745 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (125/125 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agre
+19.745 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+37.310 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+148.503 [PHY]    SENSING: LDPCDIAG ok=52712 seg_fail=1839 tb_fail=0 zero_tb=382 iface_err=0 segs_decoded=213/3547 (6.0%)
+154.300 [PHY]    SENSING: SWEEPSTAT scored=57344 stale=5 created=5 reindexed=7 live=5 | rnti=0x1234 tda=0 n_hyp=24 outcomes=51618 trials[min=62 max=125] leader=12 S=1 L=13 k0=0 tbl=0 ok=125/125 lo=0.803 max_other_hi=0.79
+== gate base_r3
+15.075 [PHY]    SENSING: DMRS_ORACLE slot=15 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.34 0.47 1.00 0.56 0.56 0.58 0.54 0.53 0.54 0.51 0.60 1.00 0.54 0.49]
+15.081 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.32 0.56 1.00 0.52 0.57 0.50 0.53 0.54 0.54 0.52 0.55 1.00 0.57 0.54]
+15.086 [PHY]    SENSING: DMRS_ORACLE slot=16 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.44 0.56 1.00 0.48 0.53 0.53 0.53 0.52 0.51 0.56 0.51 1.00 0.52 0.48]
+15.103 [PHY]    SENSING: DMRS_ORACLE slot=14 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.38 0.52 1.00 0.50 0.56 0.59 0.53 0.45 0.52 0.52 0.53 1.00 0.53 0.53]
+15.118 [PHY]    SENSING: DMRS_ORACLE slot=5 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.40 0.53 1.00 0.53 0.54 0.54 0.46 0.52 0.56 0.53 0.46 1.00 0.52 0.49]
+15.127 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.41 0.55 1.00 0.53 0.55 0.54 0.51 0.53 0.51 0.49 0.51 1.00 0.60 0.51]
+15.146 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.37 0.52 1.00 0.56 0.54 0.52 0.50 0.47 0.52 0.54 0.53 1.00 0.52 0.45]
+15.155 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.55 prof=[0.39 0.56 1.00 0.55 0.58 0.51 0.53 0.57 0.52 0.54 0.50 1.00 0.55 0.56]
+15.179 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.38 0.57 1.00 0.50 0.54 0.55 0.53 0.55 0.53 0.53 0.49 1.00 0.51 0.49]
+15.180 [PHY]    SENSING: DMRS_ORACLE slot=5 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.38 0.56 1.00 0.55 0.54 0.54 0.50 0.53 0.55 0.55 0.44 1.00 0.54 0.54]
+15.190 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.36 0.48 1.00 0.50 0.51 0.57 0.55 0.57 0.55 0.52 0.51 1.00 0.55 0.54]
+15.193 [PHY]    SENSING: DMRS_ORACLE slot=15 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.36 0.54 1.00 0.56 0.50 0.55 0.50 0.48 0.52 0.50 0.55 1.00 0.55 0.54]
+15.483 [PHY]    SWEEP: ORACLE_RESTORE rnti=0x1234 tda=2 mask=0x4 last=5 k0=-1 added=18 plaus_k0=0x1
+15.538 [PHY]    SWEEP: ORACLE_RESTORE rnti=0x1234 tda=0 mask=0x4 last=5 k0=-1 added=12 plaus_k0=0x1
+18.141 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (142/142 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agre
+18.141 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+37.129 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+146.934 [PHY]    SENSING: SWEEPSTAT scored=57344 stale=2 created=5 reindexed=6 live=5 | rnti=0x1234 tda=0 n_hyp=12 outcomes=51895 trials[min=79 max=142] leader=4 S=1 L=13 k0=0 tbl=0 ok=142/142 lo=0.827 max_other_hi=0.780
+148.392 [PHY]    SENSING: LDPCDIAG ok=56309 seg_fail=1304 tb_fail=0 zero_tb=296 iface_err=0 segs_decoded=266/3150 (8.4%)
+== gate base_r4
+15.128 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.38 0.59 1.00 0.56 0.58 0.49 0.55 0.54 0.54 0.56 0.49 1.00 0.50 0.51]
+15.134 [PHY]    SENSING: DMRS_ORACLE slot=11 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.44 0.55 1.00 0.54 0.54 0.54 0.53 0.56 0.54 0.53 0.52 1.00 0.51 0.52]
+15.152 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=38+68 mask=0x4 last_sym=5 k0=0 med=0.49 prof=[0.36 0.54 1.00 0.52 0.50 0.56 0.29 0.44 0.32 0.49 0.30 0.51 0.33 0.52]
+15.154 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.56 prof=[0.34 0.56 1.00 0.58 0.53 0.58 0.58 0.54 0.53 0.51 0.56 1.00 0.52 0.57]
+15.162 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.33 0.54 1.00 0.51 0.52 0.55 0.55 0.54 0.52 0.51 0.51 1.00 0.54 0.50]
+15.163 [PHY]    SENSING: DMRS_ORACLE slot=4 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.51 prof=[0.43 0.49 1.00 0.55 0.54 0.51 0.54 0.53 0.48 0.50 0.48 1.00 0.52 0.51]
+15.169 [PHY]    SENSING: DMRS_ORACLE slot=4 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.40 0.50 1.00 0.52 0.54 0.55 0.57 0.57 0.54 0.56 0.55 1.00 0.50 0.52]
+15.181 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=0+106 mask=0x4 last_sym=5 k0=0 med=0.47 prof=[0.40 0.51 1.00 0.56 0.47 0.51 0.29 0.49 0.27 0.48 0.28 0.51 0.33 0.46]
+15.182 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.40 0.49 1.00 0.57 0.56 0.54 0.51 0.53 0.54 0.52 0.56 1.00 0.51 0.53]
+15.183 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.51 prof=[0.42 0.54 1.00 0.51 0.50 0.55 0.51 0.51 0.53 0.51 0.53 1.00 0.54 0.50]
+15.191 [PHY]    SENSING: DMRS_ORACLE slot=5 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.41 0.52 1.00 0.55 0.50 0.55 0.53 0.54 0.51 0.54 0.53 1.00 0.51 0.50]
+15.210 [PHY]    SENSING: DMRS_ORACLE slot=14 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.41 0.56 1.00 0.51 0.54 0.52 0.52 0.52 0.53 0.55 0.51 1.00 0.52 0.49]
+20.911 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (143/143 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agre
+20.911 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+36.292 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+144.011 [PHY]    SENSING: SWEEPSTAT scored=53248 stale=2 created=5 reindexed=7 live=5 | rnti=0x1234 tda=0 n_hyp=24 outcomes=47877 trials[min=79 max=143] leader=12 S=1 L=13 k0=0 tbl=0 ok=143/143 lo=0.824 max_other_hi=0.82
+148.489 [PHY]    SENSING: LDPCDIAG ok=52463 seg_fail=2161 tb_fail=0 zero_tb=415 iface_err=0 segs_decoded=255/4181 (6.1%)
+== gate base_r5
+14.991 [PHY]    SENSING: DMRS_ORACLE slot=14 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.36 0.51 1.00 0.49 0.56 0.52 0.52 0.49 0.55 0.46 0.50 1.00 0.52 0.53]
+14.993 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=38+68 mask=0x4 last_sym=5 k0=0 med=0.47 prof=[0.34 0.52 1.00 0.53 0.51 0.56 0.34 0.46 0.35 0.53 0.35 0.52 0.33 0.47]
+14.995 [PHY]    SENSING: DMRS_ORACLE slot=5 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.54 prof=[0.39 0.52 1.00 0.53 0.53 0.54 0.54 0.51 0.49 0.56 0.54 1.00 0.56 0.54]
+15.044 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.53 prof=[0.38 0.51 1.00 0.54 0.49 0.57 0.56 0.54 0.52 0.53 0.49 1.00 0.56 0.51]
+15.045 [PHY]    SENSING: DMRS_ORACLE slot=5 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.38 0.55 1.00 0.51 0.57 0.52 0.58 0.50 0.50 0.58 0.51 1.00 0.58 0.50]
+15.054 [PHY]    SENSING: DMRS_ORACLE slot=4 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.41 0.51 1.00 0.48 0.52 0.51 0.52 0.53 0.56 0.52 0.51 1.00 0.53 0.46]
+15.068 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.51 prof=[0.38 0.49 1.00 0.51 0.51 0.51 0.49 0.52 0.52 0.53 0.55 1.00 0.54 0.51]
+15.069 [PHY]    SENSING: DMRS_ORACLE slot=2 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.46 0.50 1.00 0.51 0.52 0.53 0.52 0.52 0.50 0.52 0.53 1.00 0.52 0.57]
+15.071 [PHY]    SENSING: DMRS_ORACLE slot=6 rb=38+68 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.42 0.54 1.00 0.49 0.49 0.52 0.49 0.52 0.56 0.56 0.46 1.00 0.54 0.59]
+15.093 [PHY]    SENSING: DMRS_ORACLE slot=14 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.41 0.52 1.00 0.55 0.54 0.52 0.50 0.55 0.55 0.50 0.52 1.00 0.54 0.52]
+15.095 [PHY]    SENSING: DMRS_ORACLE slot=17 rb=0+106 mask=0x4 last_sym=5 k0=0 med=0.49 prof=[0.35 0.54 1.00 0.53 0.50 0.56 0.30 0.50 0.33 0.49 0.31 0.51 0.23 0.48]
+15.096 [PHY]    SENSING: DMRS_ORACLE slot=1 rb=0+106 mask=0x804 last_sym=13 k0=0 med=0.52 prof=[0.35 0.54 1.00 0.56 0.51 0.53 0.51 0.52 0.51 0.55 0.50 1.00 0.51 0.56]
+19.579 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (125/125 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agre
+19.579 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+37.069 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+148.441 [PHY]    SENSING: LDPCDIAG ok=52913 seg_fail=1786 tb_fail=0 zero_tb=379 iface_err=0 segs_decoded=243/3484 (7.0%)
+153.793 [PHY]    SENSING: SWEEPSTAT scored=57344 stale=5 created=5 reindexed=6 live=5 | rnti=0x1234 tda=0 n_hyp=24 outcomes=51767 trials[min=62 max=125] leader=12 S=1 L=13 k0=0 tbl=0 ok=125/125 lo=0.803 max_other_hi=0.75
