@@ -444,6 +444,9 @@ uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t r
  *  the active hypotheses. False for a stale ticket or a settled context. */
 bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_pdsch_cfg_hypothesis_t *h, uint64_t *sib_k0,
                                            uint8_t *tables);
+/** True when some row of (rnti, configuration) carries a k0 certification or an exclusion (else every row's allowed set
+ *  is the bare universe and no DCI-adjacency exclusion can follow). One lock; the accept hook's fast path. */
+bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration);
 /** Diagnostics: hypotheses removed by exclusions with k0 < 2 / k0 >= 2 (probe layers), refused contradictions. */
 void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused);
 /** Test hook: force the ISAC_TD_K0_ORACLE_LEGACY decision (1 = old k0 pinning, 0 = default, -1 = re-read the env). */

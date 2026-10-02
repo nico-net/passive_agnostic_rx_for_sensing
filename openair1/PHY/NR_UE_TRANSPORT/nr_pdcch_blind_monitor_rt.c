@@ -539,7 +539,7 @@ static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
  * (2) TDD: the per-hypothesis exclusion of this DCI's row from the SIB1 common pattern (skipped when no verified SIB1
  *     pattern of this numerology is known: NSA, phy-test cells without SIB1);
  * (3) DCI adjacency: k0 values made impossible by a row whose k0 is certified (A1-A3, nr_dci_history.h).
- * ISAC_TD_DCI_ADJ=0 disables (2) and (3) (A/B; read once). The history is always written. */
+ * ISAC_TD_DCI_ADJ=0 disables all of it (A/B; read once): no history (so no certified-flag census either), no exclusion. */
 static uint64_t bc9_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
 {
   (void)arg;
@@ -553,6 +553,8 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
     const char *e = getenv("ISAC_TD_DCI_ADJ");
     s_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
   }
+  if (!s_on)
+    return; /* full kill switch (A/B): no history, no census input, no exclusion */
   static _Atomic int s_period_set;
   nr_dci_hist_t *h = nr_dci_hist_global();
   if (!atomic_exchange(&s_period_set, 1))
@@ -565,7 +567,7 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
                                  .nscid = o->nscid};
   nr_dci_hist_push(h, &e);
   const uint64_t n = atomic_fetch_add(&g_bc9_dcis, 1) + 1;
-  if (s_on && sweep && e.dci11 && e.tda < NR_DCI_HIST_ROWS) {
+  if (sweep && e.dci11 && e.tda < NR_DCI_HIST_ROWS) {
     nr_td_excl_t ex;
     nr_td_excl_none(&ex);
     if (nr_passive_acq_tdd_pdsch_last_symbols(abs_slot, fp->numerology_index, NR_TD_K0_MAX + 1, ex.last)) {
@@ -573,7 +575,9 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
       nr_pdsch_config_sweep_exclude_key(cfg, e.rnti, e.tda, &ex); /* first: this row's own k0 set feeds the adjacency below */
     }
     uint64_t forbid[NR_DCI_HIST_ROWS] = {0};
-    if (nr_dci_hist_adj_exclusions(h, &e, bc9_row_k0, NULL, forbid)) {
+    /* Fast path: without any certification / exclusion for this RNTI and configuration no row is certified, so no
+     * exclusion can follow (one lock instead of one per neighbouring row). */
+    if (nr_pdsch_config_sweep_rnti_constrained(e.rnti, cfg) && nr_dci_hist_adj_exclusions(h, &e, bc9_row_k0, NULL, forbid)) {
       for (int r = 0; r < NR_DCI_HIST_ROWS; r++) {
         if (!forbid[r])
           continue;
@@ -603,7 +607,7 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
           (unsigned long long)n, nr_passive_acq_tdd_known(), (unsigned long long)atomic_load(&g_bc9_tdd),
           (unsigned long long)atomic_load(&g_bc9_adj_rows), (unsigned long long)atomic_load(&g_bc9_adj_removed),
           (unsigned long long)atomic_load(&g_bc9_adj_refused), (unsigned long long)lt2, (unsigned long long)ge2,
-          (unsigned long long)refused, s_on ? "" : " (ISAC_TD_DCI_ADJ=0)");
+          (unsigned long long)refused, "");
   }
 }
 

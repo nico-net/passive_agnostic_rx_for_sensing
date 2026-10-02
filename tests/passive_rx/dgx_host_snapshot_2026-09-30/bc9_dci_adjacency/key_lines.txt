@@ -1,0 +1,127 @@
+== /tmp/bc9_gate/base_r1
+53.243 [PHY]    SENSING: BC9 DCIHIST dcis=60000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+67.830 [PHY]    SENSING: LDPCDIAG ok=18075 seg_fail=1473 tb_fail=0 zero_tb=298 iface_err=0 segs_decoded=273/3599 (7.6%)
+68.090 [PHY]    SENSING: BC9 DCIHIST dcis=80000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+83.236 [PHY]    SENSING: BC9 DCIHIST dcis=100000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+87.830 [PHY]    SENSING: LDPCDIAG ok=24743 seg_fail=1473 tb_fail=0 zero_tb=298 iface_err=0 segs_decoded=273/3599 (7.6%)
+97.634 [PHY]    SENSING: BC9 DCIHIST dcis=120000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+107.831 [PHY]    SENSING: LDPCDIAG ok=31544 seg_fail=1473 tb_fail=0 zero_tb=298 iface_err=0 segs_decoded=273/3599 (7.6%)
+112.566 [PHY]    SENSING: BC9 DCIHIST dcis=140000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+127.577 [PHY]    SENSING: BC9 DCIHIST dcis=160000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+127.831 [PHY]    SENSING: LDPCDIAG ok=38244 seg_fail=1473 tb_fail=0 zero_tb=298 iface_err=0 segs_decoded=273/3599 (7.6%)
+142.318 [PHY]    SENSING: BC9 DCIHIST dcis=180000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+147.831 [PHY]    SENSING: LDPCDIAG ok=45095 seg_fail=1473 tb_fail=0 zero_tb=298 iface_err=0 segs_decoded=273/3599 (7.6%)
+== /tmp/bc9_gate/base_r2
+68.054 [PHY]    SENSING: LDPCDIAG ok=19866 seg_fail=2164 tb_fail=0 zero_tb=383 iface_err=0 segs_decoded=259/4180 (6.2%)
+74.105 [PHY]    SENSING: BC9 DCIHIST dcis=100000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+85.432 [PHY]    SENSING: BC9 DCIHIST dcis=120000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+88.054 [PHY]    SENSING: LDPCDIAG ok=28554 seg_fail=2164 tb_fail=0 zero_tb=383 iface_err=0 segs_decoded=259/4180 (6.2%)
+96.711 [PHY]    SENSING: BC9 DCIHIST dcis=140000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+108.048 [PHY]    SENSING: BC9 DCIHIST dcis=160000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+108.054 [PHY]    SENSING: LDPCDIAG ok=37391 seg_fail=2164 tb_fail=0 zero_tb=383 iface_err=0 segs_decoded=259/4180 (6.2%)
+119.386 [PHY]    SENSING: BC9 DCIHIST dcis=180000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+128.055 [PHY]    SENSING: LDPCDIAG ok=46245 seg_fail=2164 tb_fail=0 zero_tb=383 iface_err=0 segs_decoded=259/4180 (6.2%)
+130.672 [PHY]    SENSING: BC9 DCIHIST dcis=200000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+141.892 [PHY]    SENSING: BC9 DCIHIST dcis=220000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+148.055 [PHY]    SENSING: LDPCDIAG ok=55122 seg_fail=2164 tb_fail=0 zero_tb=383 iface_err=0 segs_decoded=259/4180 (6.2%)
+== /tmp/bc9_gate2/base_r1
+68.014 [PHY]    SENSING: LDPCDIAG ok=19774 seg_fail=2457 tb_fail=0 zero_tb=453 iface_err=0 segs_decoded=294/4733 (6.2%)
+73.151 [PHY]    SENSING: BC9 DCIHIST dcis=100000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+84.513 [PHY]    SENSING: BC9 DCIHIST dcis=120000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+88.015 [PHY]    SENSING: LDPCDIAG ok=28565 seg_fail=2457 tb_fail=0 zero_tb=453 iface_err=0 segs_decoded=294/4733 (6.2%)
+95.869 [PHY]    SENSING: BC9 DCIHIST dcis=140000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+107.276 [PHY]    SENSING: BC9 DCIHIST dcis=160000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+108.015 [PHY]    SENSING: LDPCDIAG ok=37365 seg_fail=2457 tb_fail=0 zero_tb=453 iface_err=0 segs_decoded=294/4733 (6.2%)
+118.646 [PHY]    SENSING: BC9 DCIHIST dcis=180000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+128.015 [PHY]    SENSING: LDPCDIAG ok=46165 seg_fail=2457 tb_fail=0 zero_tb=453 iface_err=0 segs_decoded=294/4733 (6.2%)
+129.968 [PHY]    SENSING: BC9 DCIHIST dcis=200000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+141.413 [PHY]    SENSING: BC9 DCIHIST dcis=220000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+148.015 [PHY]    SENSING: LDPCDIAG ok=54913 seg_fail=2457 tb_fail=0 zero_tb=453 iface_err=0 segs_decoded=294/4733 (6.2%)
+== /tmp/bc9_gate2/base_r2
+71.159 [PHY]    SENSING: BC9 DCIHIST dcis=100000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+82.605 [PHY]    SENSING: BC9 DCIHIST dcis=120000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+88.082 [PHY]    SENSING: LDPCDIAG ok=31091 seg_fail=1020 tb_fail=0 zero_tb=247 iface_err=0 segs_decoded=203/2398 (8.5%)
+93.941 [PHY]    SENSING: BC9 DCIHIST dcis=140000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+105.372 [PHY]    SENSING: BC9 DCIHIST dcis=160000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+108.082 [PHY]    SENSING: LDPCDIAG ok=39868 seg_fail=1020 tb_fail=0 zero_tb=247 iface_err=0 segs_decoded=203/2398 (8.5%)
+116.786 [PHY]    SENSING: BC9 DCIHIST dcis=180000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+128.083 [PHY]    SENSING: LDPCDIAG ok=48619 seg_fail=1020 tb_fail=0 zero_tb=247 iface_err=0 segs_decoded=203/2398 (8.5%)
+128.204 [PHY]    SENSING: BC9 DCIHIST dcis=200000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+139.633 [PHY]    SENSING: BC9 DCIHIST dcis=220000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+148.083 [PHY]    SENSING: LDPCDIAG ok=57369 seg_fail=1020 tb_fail=0 zero_tb=247 iface_err=0 segs_decoded=203/2398 (8.5%)
+151.059 [PHY]    SENSING: BC9 DCIHIST dcis=240000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+== /tmp/bc9_ab/off_r1
+5.266 [NR_MAC] Passive RX: MIB indicates no CORESET 0 / SIB1 in this cell -- not scheduling SIB1
+18.529 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (126/126 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agrees
+18.529 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+28.078 [PHY]    SENSING: LDPCDIAG ok=3955 seg_fail=1711 tb_fail=0 zero_tb=309 iface_err=0 segs_decoded=208/3305 (6.3%)
+31.623 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+48.079 [PHY]    SENSING: LDPCDIAG ok=12561 seg_fail=1852 tb_fail=0 zero_tb=352 iface_err=0 segs_decoded=249/3602 (6.9%)
+68.079 [PHY]    SENSING: LDPCDIAG ok=21357 seg_fail=1852 tb_fail=0 zero_tb=352 iface_err=0 segs_decoded=249/3602 (6.9%)
+88.079 [PHY]    SENSING: LDPCDIAG ok=30124 seg_fail=1852 tb_fail=0 zero_tb=352 iface_err=0 segs_decoded=249/3602 (6.9%)
+108.079 [PHY]    SENSING: LDPCDIAG ok=39032 seg_fail=1852 tb_fail=0 zero_tb=352 iface_err=0 segs_decoded=249/3602 (6.9%)
+128.079 [PHY]    SENSING: LDPCDIAG ok=48973 seg_fail=1852 tb_fail=0 zero_tb=352 iface_err=0 segs_decoded=249/3602 (6.9%)
+148.079 [PHY]    SENSING: LDPCDIAG ok=58856 seg_fail=1852 tb_fail=0 zero_tb=352 iface_err=0 segs_decoded=249/3602 (6.9%)
+== /tmp/bc9_ab/on_r1
+71.667 [PHY]    SENSING: BC9 DCIHIST dcis=100000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+83.227 [PHY]    SENSING: BC9 DCIHIST dcis=120000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+88.228 [PHY]    SENSING: LDPCDIAG ok=29545 seg_fail=2138 tb_fail=0 zero_tb=417 iface_err=0 segs_decoded=241/4123 (5.8%)
+94.827 [PHY]    SENSING: BC9 DCIHIST dcis=140000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+106.365 [PHY]    SENSING: BC9 DCIHIST dcis=160000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+108.228 [PHY]    SENSING: LDPCDIAG ok=38187 seg_fail=2138 tb_fail=0 zero_tb=417 iface_err=0 segs_decoded=241/4123 (5.8%)
+117.936 [PHY]    SENSING: BC9 DCIHIST dcis=180000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+128.229 [PHY]    SENSING: LDPCDIAG ok=46832 seg_fail=2138 tb_fail=0 zero_tb=417 iface_err=0 segs_decoded=241/4123 (5.8%)
+129.506 [PHY]    SENSING: BC9 DCIHIST dcis=200000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+141.043 [PHY]    SENSING: BC9 DCIHIST dcis=220000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+148.229 [PHY]    SENSING: LDPCDIAG ok=55484 seg_fail=2138 tb_fail=0 zero_tb=417 iface_err=0 segs_decoded=241/4123 (5.8%)
+152.621 [PHY]    SENSING: BC9 DCIHIST dcis=240000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+== /tmp/bc9_ab/off_r2
+5.442 [NR_MAC] Passive RX: MIB indicates no CORESET 0 / SIB1 in this cell -- not scheduling SIB1
+19.746 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (141/141 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agrees
+19.746 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+28.233 [PHY]    SENSING: LDPCDIAG ok=3543 seg_fail=1981 tb_fail=0 zero_tb=369 iface_err=0 segs_decoded=206/3804 (5.4%)
+32.315 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+48.233 [PHY]    SENSING: LDPCDIAG ok=11954 seg_fail=2119 tb_fail=0 zero_tb=433 iface_err=0 segs_decoded=239/4103 (5.8%)
+68.233 [PHY]    SENSING: LDPCDIAG ok=20608 seg_fail=2119 tb_fail=0 zero_tb=433 iface_err=0 segs_decoded=239/4103 (5.8%)
+88.233 [PHY]    SENSING: LDPCDIAG ok=29287 seg_fail=2119 tb_fail=0 zero_tb=433 iface_err=0 segs_decoded=239/4103 (5.8%)
+108.233 [PHY]    SENSING: LDPCDIAG ok=37923 seg_fail=2119 tb_fail=0 zero_tb=433 iface_err=0 segs_decoded=239/4103 (5.8%)
+128.234 [PHY]    SENSING: LDPCDIAG ok=46534 seg_fail=2119 tb_fail=0 zero_tb=433 iface_err=0 segs_decoded=239/4103 (5.8%)
+148.234 [PHY]    SENSING: LDPCDIAG ok=55198 seg_fail=2119 tb_fail=0 zero_tb=433 iface_err=0 segs_decoded=239/4103 (5.8%)
+== /tmp/bc9_ab/on_r2
+68.008 [PHY]    SENSING: LDPCDIAG ok=21779 seg_fail=1009 tb_fail=0 zero_tb=268 iface_err=0 segs_decoded=201/2381 (8.4%)
+72.327 [PHY]    SENSING: BC9 DCIHIST dcis=100000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+83.820 [PHY]    SENSING: BC9 DCIHIST dcis=120000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+88.008 [PHY]    SENSING: LDPCDIAG ok=30436 seg_fail=1009 tb_fail=0 zero_tb=268 iface_err=0 segs_decoded=201/2381 (8.4%)
+95.405 [PHY]    SENSING: BC9 DCIHIST dcis=140000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+106.999 [PHY]    SENSING: BC9 DCIHIST dcis=160000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+108.008 [PHY]    SENSING: LDPCDIAG ok=39085 seg_fail=1009 tb_fail=0 zero_tb=268 iface_err=0 segs_decoded=201/2381 (8.4%)
+118.516 [PHY]    SENSING: BC9 DCIHIST dcis=180000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+128.008 [PHY]    SENSING: LDPCDIAG ok=47745 seg_fail=1009 tb_fail=0 zero_tb=268 iface_err=0 segs_decoded=201/2381 (8.4%)
+130.068 [PHY]    SENSING: BC9 DCIHIST dcis=200000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+141.659 [PHY]    SENSING: BC9 DCIHIST dcis=220000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+148.009 [PHY]    SENSING: LDPCDIAG ok=56434 seg_fail=1009 tb_fail=0 zero_tb=268 iface_err=0 segs_decoded=201/2381 (8.4%)
+== /tmp/bc9_ab/off_r3
+5.207 [NR_MAC] Passive RX: MIB indicates no CORESET 0 / SIB1 in this cell -- not scheduling SIB1
+17.241 [PHY]    SWEEP: rnti=0x1234 CONVERGED tda=0 mapping=A k0=0 mcs_table=0 dmrs_add_pos=1 dmrs_max_len=1 (144/144 trials on the winner, cfg=0xfbaf065caf6ab251, plaus_k0=0x1) -- private to this RNTI until a second agrees
+17.241 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0
+28.028 [PHY]    SENSING: LDPCDIAG ok=4378 seg_fail=1206 tb_fail=0 zero_tb=249 iface_err=0 segs_decoded=219/2956 (7.4%)
+31.609 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=2 S=1 L=5 mask=0x4 table=0
+48.028 [PHY]    SENSING: LDPCDIAG ok=12915 seg_fail=1323 tb_fail=0 zero_tb=295 iface_err=0 segs_decoded=243/3199 (7.6%)
+68.028 [PHY]    SENSING: LDPCDIAG ok=21582 seg_fail=1323 tb_fail=0 zero_tb=295 iface_err=0 segs_decoded=243/3199 (7.6%)
+88.028 [PHY]    SENSING: LDPCDIAG ok=30246 seg_fail=1323 tb_fail=0 zero_tb=295 iface_err=0 segs_decoded=243/3199 (7.6%)
+108.029 [PHY]    SENSING: LDPCDIAG ok=38722 seg_fail=1323 tb_fail=0 zero_tb=295 iface_err=0 segs_decoded=243/3199 (7.6%)
+128.029 [PHY]    SENSING: LDPCDIAG ok=47268 seg_fail=1323 tb_fail=0 zero_tb=295 iface_err=0 segs_decoded=243/3199 (7.6%)
+148.029 [PHY]    SENSING: LDPCDIAG ok=55756 seg_fail=1323 tb_fail=0 zero_tb=295 iface_err=0 segs_decoded=243/3199 (7.6%)
+== /tmp/bc9_ab/on_r3
+68.192 [PHY]    SENSING: LDPCDIAG ok=21568 seg_fail=1030 tb_fail=0 zero_tb=256 iface_err=0 segs_decoded=239/2411 (9.9%)
+73.127 [PHY]    SENSING: BC9 DCIHIST dcis=100000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+84.938 [PHY]    SENSING: BC9 DCIHIST dcis=120000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+88.192 [PHY]    SENSING: LDPCDIAG ok=30051 seg_fail=1030 tb_fail=0 zero_tb=256 iface_err=0 segs_decoded=239/2411 (9.9%)
+96.738 [PHY]    SENSING: BC9 DCIHIST dcis=140000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+108.193 [PHY]    SENSING: LDPCDIAG ok=38550 seg_fail=1030 tb_fail=0 zero_tb=256 iface_err=0 segs_decoded=239/2411 (9.9%)
+108.432 [PHY]    SENSING: BC9 DCIHIST dcis=160000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+120.208 [PHY]    SENSING: BC9 DCIHIST dcis=180000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+128.193 [PHY]    SENSING: LDPCDIAG ok=47074 seg_fail=1030 tb_fail=0 zero_tb=256 iface_err=0 segs_decoded=239/2411 (9.9%)
+131.908 [PHY]    SENSING: BC9 DCIHIST dcis=200000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+143.615 [PHY]    SENSING: BC9 DCIHIST dcis=220000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0
+148.193 [PHY]    SENSING: LDPCDIAG ok=55592 seg_fail=1030 tb_fail=0 zero_tb=256 iface_err=0 segs_decoded=239/2411 (9.9%)

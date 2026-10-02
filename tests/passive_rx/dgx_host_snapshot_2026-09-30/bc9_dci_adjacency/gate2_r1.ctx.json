@@ -1,0 +1,1 @@
+{"arm": "/tmp/bc9_gate2/base_r1", "first_1_1_s": 16.03, "ttc_per_tda": {"0": 6.46, "2": 17.013}, "winner_trials": {"0": "157"}, "ldpc_ok_segfail_zero_tb": ["54913", "2457", "453"], "bc9_dcihist": "BC9 DCIHIST dcis=220000 tdd_known=0 tdd_applied=0 adj_rows=0 adj_removed=0 adj_refused=0 excl_removed[k0<2]=0 excl_removed[k0>=2]=0 excl_refused=0", "bc9_cert": null}

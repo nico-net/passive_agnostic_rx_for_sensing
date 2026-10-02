@@ -2127,6 +2127,16 @@ bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_
   pthread_mutex_unlock(&g_lock);
   return ok;
 }
+bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration)
+{
+  pthread_mutex_lock(&g_lock);
+  const rnti_ctx_t *r = rnti_ctx(rnti, false);
+  bool any = false;
+  for (int i = 0; r && i < CERT_PER_RNTI && !any; i++)
+    any = cert_used(r, i) && r->cert[i].cfg == configuration;
+  pthread_mutex_unlock(&g_lock);
+  return any;
+}
 void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused)
 {
   pthread_mutex_lock(&g_lock);

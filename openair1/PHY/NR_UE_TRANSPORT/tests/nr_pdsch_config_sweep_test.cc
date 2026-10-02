@@ -2848,3 +2848,20 @@ TEST_F(PdschBc9, TicketSiblingsReportsAliveK0OffsetsAndTables)
   EXPECT_EQ(h.k0, 0);
   EXPECT_EQ(sib, 0u); /* no sibling left: such a grant can never be certified */
 }
+
+/* Runtime fast path of the accept hook: one lock to learn the RNTI has no deterministic constraint at all. */
+TEST_F(PdschBc9, RntiConstrainedOnlyAfterAnExclusionOrCertification)
+{
+  EXPECT_FALSE(nr_pdsch_config_sweep_rnti_constrained(0x4601, 0x1234)); /* unknown RNTI */
+  auto t = k39_fresh(0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_rnti_constrained(0x4601, 0x1234));
+  nr_td_excl_t f;
+  nr_td_excl_none(&f);
+  f.last[1] = -1;
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 0, &f), 0);
+  EXPECT_TRUE(nr_pdsch_config_sweep_rnti_constrained(0x4601, 0x1234));
+  EXPECT_FALSE(nr_pdsch_config_sweep_rnti_constrained(0x4601, 0x9999)); /* another configuration */
+  auto u = k39_fresh(0, 0x5555);
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&u, 0x1), 0);
+  EXPECT_TRUE(nr_pdsch_config_sweep_rnti_constrained(0x4601, 0x5555));
+}

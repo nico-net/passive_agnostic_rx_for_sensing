@@ -560,7 +560,12 @@ static _Atomic uint64_t g_bc9_jobs, g_bc9_cert, g_bc9_cert_ok, g_bc9_nosib, g_bc
 void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
                                const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok)
 {
-  if (ticket == NULL || pdu == NULL || ticket->generation == 0 || ticket->settled)
+  static _Atomic int s_on = -1; /* ISAC_TD_DCI_ADJ=0: the whole BC9 runtime path is off (A/B) */
+  if (s_on < 0) {
+    const char *e = getenv("ISAC_TD_DCI_ADJ");
+    s_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
+  }
+  if (!s_on || ticket == NULL || pdu == NULL || ticket->generation == 0 || ticket->settled)
     return;
   nr_pdsch_cfg_hypothesis_t h;
   uint64_t sib = 0;
@@ -584,12 +589,13 @@ void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t r
     const nr_dci_geom_t geo = {.nb_symb = h.tda_length, .dmrs_mask = h.dmrs_mask,
                                .dmrs_type = (uint8_t)(pdu->dmrsConfigType == NFAPI_NR_DMRS_TYPE2),
                                .nl = (uint8_t)__builtin_popcount(pdu->dmrs_ports), .xoh = xoh};
-    if (nr_dci_hist_k0_certified(dh, gg, h.k0, sib, tables, &geo, bc9_row_k0, NULL)) {
+    const nr_dci_row_k0_fn rk = nr_pdsch_config_sweep_rnti_constrained(rnti, gg->cfg) ? bc9_row_k0 : NULL; /* no certified row: skip */
+    if (nr_dci_hist_k0_certified(dh, gg, h.k0, sib, tables, &geo, rk, NULL)) {
       atomic_fetch_add(&g_bc9_cert, 1);
       atomic_fetch_add(&g_bc9_cert_ok, crc_ok);
     }
   }
-  if ((jobs % 4000) == 0)
+  if ((jobs % 1000) == 0)
     LOG_A(PHY, "SENSING: BC9 DCIADJ_CERT trials=%llu certified=%llu (f_S=%.4f) certified_pass=%llu passes=%llu no_sibling=%llu "
                "no_dci_in_history=%llu\n",
           (unsigned long long)jobs, (unsigned long long)atomic_load(&g_bc9_cert),

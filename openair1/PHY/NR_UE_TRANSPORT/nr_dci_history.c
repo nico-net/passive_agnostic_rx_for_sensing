@@ -236,8 +236,11 @@ int nr_dci_hist_adj_exclusions(nr_dci_hist_t *h, const nr_dci_hist_entry_t *x, n
   if (h == NULL || x == NULL || row_k0 == NULL || forbid == NULL || !x->dci11 || x->tda >= NR_DCI_HIST_ROWS)
     return 0;
   uint64_t add[NR_DCI_HIST_ROWS] = {0};
+  uint64_t rk[NR_DCI_HIST_ROWS]; /* row_k0 memoised per row for this call (the callback may take a lock) */
+  uint32_t rk_have = 0;
+#define ROW_K0(t) ((rk_have >> (t) & 1) ? rk[t] : (rk_have |= 1u << (t), rk[t] = row_k0(arg, x->cfg, x->rnti, (t))))
   int kx = -1;
-  const bool x_cert = singleton(row_k0(arg, x->cfg, x->rnti, x->tda), &kx);
+  const bool x_cert = singleton(ROW_K0(x->tda), &kx);
   nr_dci_hist_entry_t nb[NEAR_MAX];
   const int n = nr_dci_hist_near(h, x->rnti, x->abs_slot, NR_DCI_HIST_K0_MAX, nb, NEAR_MAX);
   for (int j = 0; j < n; j++) {
@@ -253,12 +256,13 @@ int nr_dci_hist_adj_exclusions(nr_dci_hist_t *h, const nr_dci_hist_entry_t *x, n
         add[y->tda] |= UINT64_C(1) << k;
     }
     int ky; /* y occupies t_y + ky, so row(x) cannot have k0 = t_y + ky - t_x */
-    if (singleton(row_k0(arg, y->cfg, y->rnti, y->tda), &ky)) {
+    if (singleton(ROW_K0(y->tda), &ky)) {
       const int k = ky + dy;
       if (k >= 0 && k <= NR_DCI_HIST_K0_MAX)
         add[x->tda] |= UINT64_C(1) << k;
     }
   }
+#undef ROW_K0
   int rows = 0;
   for (int r = 0; r < NR_DCI_HIST_ROWS; r++) {
     rows += add[r] != 0;
