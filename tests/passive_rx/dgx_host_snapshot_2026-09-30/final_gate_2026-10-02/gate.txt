@@ -2,3 +2,7 @@
 rc=0
 PASS base_r1 [postconv] n_contexts=2>=2.0 postconv_crc=100.00>=99.8 postconv_decoded=43479>=5000.0 reopens=0<=0.0 ttc_tda0=4.573<=8.6 ttc_tda2=20.727<=35.3 crc_floor=96.11>=94.5 drop_full=0.0588<=1.0
 PASS base_r2 [postconv] n_contexts=2>=2.0 postconv_crc=100.00>=99.8 postconv_decoded=42521>=5000.0 reopens=0<=0.0 ttc_tda0=3.572<=8.6 ttc_tda2=22.543<=35.3 crc_floor=96.65>=94.5 drop_full=0.0434<=1.0
+
+# Regression gate (postconv) on merged tree @ca1cbc5470 (BC9d + BC12a) — [MEASURED, DGX rfsim 106 PRB 1 RX, host idle (load 1.85)]
+PASS base_r1 [postconv] n_contexts=2>=2.0 postconv_crc=100.00>=99.8 postconv_decoded=41872>=5000.0 reopens=0<=0.0 ttc_tda0=2.979<=8.6 ttc_tda2=20.594<=35.3 crc_floor=97.05>=94.5 drop_full=0.0441<=1.0
+PASS base_r2 [postconv] n_contexts=2>=2.0 postconv_crc=100.00>=99.8 postconv_decoded=42406>=5000.0 reopens=0<=0.0 ttc_tda0=2.006<=8.6 ttc_tda2=20.351<=35.3 crc_floor=97.67>=94.5 drop_full=0.0758<=1.0
