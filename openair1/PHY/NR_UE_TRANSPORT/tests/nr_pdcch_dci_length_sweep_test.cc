@@ -602,6 +602,9 @@ TEST(DciLengthSweep, LocksLength100) {
 }
 
 TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  EXPECT_EXIT(([]{
+  setenv("ISAC_RECONF", "1", 1);
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(47);
   int order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
@@ -616,9 +619,14 @@ TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
     visited[order[i]] = true;
   }
   nr_pdcch_dci_length_seen_reset();
+  _exit(::testing::Test::HasFailure() ? 1 : 0);
+  }()), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  EXPECT_EXIT(([]{
+  setenv("ISAC_RECONF", "1", 1);
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(47);
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -637,7 +645,7 @@ TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   nr_pdcch_dci_length_note_seen(100);
   EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(
       &state, scorer, &visits, 1, 30, 140, 0), -1);
-  EXPECT_EQ(visits.count, 111);
+  EXPECT_EQ(visits.count, 34);
   EXPECT_EQ(visits.lengths[10], 52);
   bool seen[141] = {};
   for (int i = 0; i < visits.count; ++i) {
@@ -654,4 +662,58 @@ TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   EXPECT_EQ(visits.lengths[2], 46);
   EXPECT_EQ(visits.lengths[3], 48);
   nr_pdcch_dci_length_seen_reset();
+  _exit(::testing::Test::HasFailure() ? 1 : 0);
+  }()), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(DciLengthSweep, DefaultOrderIsAscending) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  EXPECT_EXIT(([]{
+    unsetenv("ISAC_RECONF");
+    nr_pdcch_dci_length_note_seen(47);
+    int order[141];
+    EXPECT_EQ(nr_pdcch_dci_length_order(30, 140, order), 111);
+    for (int i = 0; i < 111; ++i) EXPECT_EQ(order[i], 30 + i);
+    _exit(::testing::Test::HasFailure() ? 1 : 0);
+  }()), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(DciLengthSweep, ColdRoundStaysNarrowAcrossStrideAndBudget) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_sweep_state_t state{};
+  state.stride = 3;
+  auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
+  while (!state.occasions_fed) {
+    nr_pdcch_dci_length_sweep_feed_budget(&state, scorer, nullptr, 2, 30, 140, 0, 0, 7);
+    for (int len = 64; len <= 140; ++len) EXPECT_EQ(state.trials[len], 0);
+  }
+  EXPECT_EQ(state.decodes, 34u * 2);
+  for (int len = 30; len <= 63; ++len) EXPECT_EQ(state.trials[len], 2);
+  while (state.occasions_fed < 2)
+    nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 2, 30, 140, 0);
+  for (int len = 64; len <= 140; ++len) EXPECT_EQ(state.trials[len], 2);
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, WideSeenLengthEnablesColdWideRound) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_note_seen(100);
+  nr_pdcch_dci_length_sweep_state_t state{};
+  auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
+  nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
+  EXPECT_EQ(state.trials[100], 1);
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, ExplicitMaximumEnablesColdWideRound) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  EXPECT_EXIT(([]{
+    setenv("ISAC_DCI_LEN_MAX", "100", 1);
+    nr_pdcch_dci_length_seen_reset();
+    nr_pdcch_dci_length_sweep_state_t state{};
+    auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
+    nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 100, 0);
+    EXPECT_EQ(state.trials[100], 1);
+    _exit(::testing::Test::HasFailure() ? 1 : 0);
+  }()), ::testing::ExitedWithCode(0), "");
 }

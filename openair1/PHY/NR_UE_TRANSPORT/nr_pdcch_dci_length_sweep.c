@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <pthread.h>
 
 // Empirically measured false-accept rate of nr_pdcch_blind_decode_and_extract_ex()'s "plausible"
 // gate on this project's own prior data (42k/10.9M candidates -- see this file's header and
@@ -62,6 +63,19 @@
 // observation window runs (unlike the fixed floor it replaces -- see this file's header).
 #define Z_SIGMA 6.0
 
+static pthread_once_t length_env_once = PTHREAD_ONCE_INIT;
+static bool seen_order_enabled;
+static int explicit_max;
+static void length_env_init(void)
+{
+  const char *e = getenv("ISAC_RECONF");
+  seen_order_enabled = e && strcmp(e, "1") == 0;
+  e = getenv("ISAC_DCI_LEN_MAX");
+  char *end = NULL;
+  const long n = e ? strtol(e, &end, 10) : 0;
+  explicit_max = e && end != e && !*end && n >= 1 && n <= NR_DCI_MAX_PAYLOAD ? (int)n : 0;
+}
+
 static _Atomic bool cell_seen[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
 void nr_pdcch_dci_length_seen_reset(void)
 {
@@ -73,9 +87,29 @@ void nr_pdcch_dci_length_note_seen(int len)
   if (len > 0 && len <= NR_DCI_MAX_PAYLOAD)
     atomic_store_explicit(&cell_seen[len], true, memory_order_relaxed);
 }
+int nr_pdcch_dci_length_active_max(const nr_pdcch_dci_length_sweep_state_t *state,
+                                   int min_len, int max_len)
+{
+  pthread_once(&length_env_once, length_env_init);
+  /* Finish the active round before accepting new hints. */
+  if (state->round_max && (state->resume_len || state->rot_phase))
+    return state->round_max < max_len ? state->round_max : max_len;
+  if (max_len <= 63 || min_len > 63 || explicit_max >= min_len || state->wide_range
+      || state->relock_old_len)
+    return max_len;
+  for (int len = 64; len <= NR_DCI_MAX_PAYLOAD; ++len)
+    if (atomic_load_explicit(&cell_seen[len], memory_order_relaxed)) return max_len;
+  return 63;
+}
+
 int nr_pdcch_dci_length_order(int min_len, int max_len, int *out)
 {
   if (!out || min_len < 1 || max_len > NR_DCI_MAX_PAYLOAD || min_len > max_len) return 0;
+  pthread_once(&length_env_once, length_env_init);
+  if (!seen_order_enabled) {
+    for (int len = min_len; len <= max_len; ++len) out[len - min_len] = len;
+    return max_len - min_len + 1;
+  }
   int distance[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
   for (int len = min_len; len <= max_len; ++len) distance[len] = NR_DCI_MAX_PAYLOAD;
   for (int seen = 1; seen <= NR_DCI_MAX_PAYLOAD; ++seen) {
@@ -293,6 +327,9 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   if (min_len < 1) min_len = 1;
   if (max_len > NR_DCI_MAX_PAYLOAD) max_len = NR_DCI_MAX_PAYLOAD;
   if (min_len > max_len) return -1;
+  max_len = nr_pdcch_dci_length_active_max(state, min_len, max_len);
+  state->round_max = max_len;
+  bool full_round_completed = false;
   /* Rotation (see the header's `stride`): test every stride'th length, phase-shifted per call, so
    * each length is visited exactly once per stride calls -- fair by construction, no length can be
    * starved, and the phase survives the caller restarting the sweep on a new CORESET hypothesis
@@ -385,6 +422,7 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
     state->rot_phase = 0;
     state->occasions_fed++; // one length is the whole round when a prior is seeded
   } else if (++state->rot_phase >= stride) {
+    full_round_completed = true;
     state->rot_phase = 0;
     state->occasions_fed++;
     if (state->alt_full) { /* full lap done: back to the hypothesis */
@@ -456,6 +494,7 @@ score_evidence:;
       fflush(stdout);
     }
   }
+  if (full_round_completed && best_len < 0) state->wide_range = true;
   nr_pdcch_dci_length_note_seen(best_len);
   return best_len;
 }

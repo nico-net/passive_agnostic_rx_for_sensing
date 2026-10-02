@@ -39,3 +39,17 @@ TEST(NrDciBits, EqualityAndHash)
   EXPECT_NE(nr_dci_bits_hash(&a, 140), nr_dci_bits_hash(&b, 140));
   EXPECT_NE(nr_dci_bits_hash(&a, 47), nr_dci_bits_hash(&a, 48));
 }
+
+TEST(NrDciBits, HexPreservesNarrowLogsAndIncludesWideWords)
+{
+  const uint64_t words[] = {0x123, 0x456, 0x789};
+  char out[49], legacy[49];
+  for (int len = 1; len <= 64; ++len) {
+    snprintf(legacy, sizeof(legacy), "%016lx", (unsigned long)words[0]);
+    EXPECT_STREQ(nr_dci_bits_hex(words, len, true, out), legacy);
+    snprintf(legacy, sizeof(legacy), "%lx", (unsigned long)words[0]);
+    EXPECT_STREQ(nr_dci_bits_hex(words, len, false, out), legacy);
+  }
+  EXPECT_STREQ(nr_dci_bits_hex(words, 100, false, out), "00000000000004560000000000000123");
+  EXPECT_STREQ(nr_dci_bits_hex(words, 140, true, out), "000000000000078900000000000004560000000000000123");
+}

@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /* TS 38.212 clauses 7.3.2 (DCI CRC attachment) and 7.3.3 (polar coding
  * for DCI): A <= 140 payload bits, K = A + 24 <= 164 after CRC attachment. */
@@ -24,6 +25,20 @@ static inline nr_dci_bits_t nr_dci_bits_from_u64(uint64_t v)
 {
   nr_dci_bits_t b = {{v, 0, 0}};
   return b;
+}
+
+/* Hex in transmission order. Preserve each legacy log's narrow padding; wide
+ * payloads print every occupied word with 16 hex digits per word. */
+static inline const char *nr_dci_bits_hex(const uint64_t *w, int len, bool padded, char out[49])
+{
+  if (len > 128)
+    snprintf(out, 49, "%016llx%016llx%016llx", (unsigned long long)w[2],
+             (unsigned long long)w[1], (unsigned long long)w[0]);
+  else if (len > 64)
+    snprintf(out, 49, "%016llx%016llx", (unsigned long long)w[1], (unsigned long long)w[0]);
+  else
+    snprintf(out, 49, padded ? "%016llx" : "%llx", (unsigned long long)w[0]);
+  return out;
 }
 
 /* msb_pos counts from the first payload bit; invalid ranges return zero. */

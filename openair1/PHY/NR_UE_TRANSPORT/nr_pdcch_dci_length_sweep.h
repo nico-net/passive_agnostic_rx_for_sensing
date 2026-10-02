@@ -132,6 +132,8 @@ typedef struct {
   int      stride;
   int      order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN], order_count;
   int      resume_len, resume_trial; // budget suspension; reset with the geometry epoch
+  bool     wide_range; /* a complete cold round found no lock */
+  int      round_max; /* frozen across rotation/budget suspension */
   int      rot_phase; // 0..stride-1, which interleaved subset this call tests
   /* CELL PRIOR (2026-09-17). When > 0, test ONLY this length for the first
    * NR_PDCCH_LENGTH_PREFERRED_ROUNDS rounds instead of all 34. Set from the bank's cell-wide length
@@ -152,6 +154,10 @@ typedef struct {
   uint32_t feed_serial; /* distinct OTA occasions; resumed work never manufactures recurrence */
   int relock_old_len; /* SUSPECT only: old length, then seen lengths, then full range */
 } nr_pdcch_dci_length_sweep_state_t;
+/* Active range shared by CPU scoring, prefill and UL uniqueness checks. Explicit
+ * ISAC_DCI_LEN_MAX or a cell-seen wide length bypasses the cold 63-bit cap. */
+int nr_pdcch_dci_length_active_max(const nr_pdcch_dci_length_sweep_state_t *state,
+                                   int min_len, int max_len);
 /* Rounds a seeded length gets before the full sweep resumes. The sweep's own significance test
  * needs accumulated trials, and one occasion carries only ~6 candidates; 8 rounds is ~50 candidates,
  * comfortably enough for a length that is already right and nowhere near enough to make a wrong one

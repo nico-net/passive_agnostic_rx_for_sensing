@@ -170,16 +170,36 @@ static inline decoder_node_t *add_nodes(decoder_tree_t *tree,
   return (new_node);
 }
 
+/* Measure the pruned tree before allocating: same frozen-subtree rule as
+ * add_nodes(), with each node/alpha/beta allocation rounded to 32 bytes. */
+static size_t decoder_tree_size(int level, int first, const uint8_t *pattern, int *ops)
+{
+  const int nv = 1 << level;
+  const int leaf_sz = (nv + 7) & ~7;
+  size_t bytes = ((sizeof(decoder_node_t) + 31) & ~(size_t)31) + 3 * leaf_sz;
+  bytes = (bytes + 31) & ~(size_t)31;
+  bool frozen = true;
+  for (int i = first; i < first + nv && frozen; ++i) frozen = pattern[i] == 0;
+  if (level && !frozen) {
+    *ops += 3;
+    bytes += decoder_tree_size(level - 1, first, pattern, ops);
+    bytes += decoder_tree_size(level - 1, first + nv / 2, pattern, ops);
+  }
+  return bytes;
+}
+
 void build_decoder_tree(t_nrPolar_params *pp)
 {
-  uintptr_t tmp = (uintptr_t)pp->decoder.buffer;
-  tmp = (tmp + sizeof(*pp->decoder.buffer) - 1) & ~(sizeof(*pp->decoder.buffer) - 1);
-  simde__m256i *buffer = (simde__m256i *)tmp;
+  pp->decoder.buffer_bytes = decoder_tree_size(pp->n, 0, pp->information_bit_pattern,
+                                                &pp->tree_linearization.capacity);
+  pp->decoder.buffer = memalign(32, pp->decoder.buffer_bytes);
+  pp->tree_linearization.op_list = calloc(pp->tree_linearization.capacity,
+                                           sizeof(*pp->tree_linearization.op_list));
+  AssertFatal(pp->decoder.buffer && pp->tree_linearization.op_list, "Polar tree allocation failed\n");
+  simde__m256i *buffer = pp->decoder.buffer;
   pp->decoder.root = add_nodes(&pp->decoder, pp->n, 0, pp->information_bit_pattern, &buffer);
-  AssertFatal(buffer < pp->decoder.buffer + sizeofArray(pp->decoder.buffer),
-              "Arbitrary size too small (also check arbitrary max size of the entire polar decoder) %ld instead of max %ld\n",
-              buffer - pp->decoder.buffer,
-              sizeofArray(pp->decoder.buffer));
+  AssertFatal((uintptr_t)buffer <= (uintptr_t)pp->decoder.buffer + pp->decoder.buffer_bytes,
+              "Polar tree exceeded measured allocation\n");
 }
 
 static inline void applyFtoleft(const t_nrPolar_params *pp, decoder_node_t *node, uint8_t *output)
@@ -410,9 +430,9 @@ void generic_polar_decoder(t_nrPolar_params *pp, decoder_node_t *node, uint8_t *
     pp->tree_linearization.iter = 0;
     generic_polar_decoder_recursive(pp, node, nr_polar_U);
     pp->tree_linearization.is_initialized = true;
-    AssertFatal(pp->tree_linearization.iter < sizeofArray(pp->tree_linearization.op_list),
-                "Arbitrary size %lu is too small, number of operations is %d",
-                sizeofArray(pp->tree_linearization.op_list),
+    AssertFatal(pp->tree_linearization.iter <= pp->tree_linearization.capacity,
+                "Polar operation capacity %d is too small, number of operations is %d",
+                pp->tree_linearization.capacity,
                 pp->tree_linearization.iter);
   } else {
     for (int i = 0; i < pp->tree_linearization.iter; i++) {

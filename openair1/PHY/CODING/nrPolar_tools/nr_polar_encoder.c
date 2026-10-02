@@ -323,6 +323,14 @@ void build_polar_tables(t_nrPolar_params *polarParams)
   AssertFatal(polarParams->K <= 164, "K = %d > 164, is not supported yet\n", polarParams->K);
   const int numbytes = (polarParams->K + 7) / 8;
   const int residue = polarParams->K & 7;
+  /* The <=64 unrolled encoder reads eight rows, including zero padding. */
+  polarParams->cprime_tab0 = calloc(numbytes < 8 ? 8 : numbytes, sizeof(*polarParams->cprime_tab0));
+  if (polarParams->K > 64)
+    polarParams->cprime_tab1 = calloc(numbytes, sizeof(*polarParams->cprime_tab1));
+  if (polarParams->K > 128)
+    polarParams->cprime_tab2 = calloc(numbytes, sizeof(*polarParams->cprime_tab2));
+  AssertFatal(polarParams->cprime_tab0 && (polarParams->K <= 64 || polarParams->cprime_tab1)
+                  && (polarParams->K <= 128 || polarParams->cprime_tab2), "Polar table allocation failed\n");
   uint deinterleaving_pattern[polarParams->K];
 
   for (int i = 0; i < polarParams->K; i++)
@@ -342,8 +350,8 @@ void build_polar_tables(t_nrPolar_params *polarParams)
         tab[ip / 64] |= bit_i << (ip % 64);
       }
       polarParams->cprime_tab0[byte][val] = tab[0];
-      polarParams->cprime_tab1[byte][val] = tab[1];
-      polarParams->cprime_tab2[byte][val] = tab[2];
+      if (polarParams->cprime_tab1) polarParams->cprime_tab1[byte][val] = tab[1];
+      if (polarParams->cprime_tab2) polarParams->cprime_tab2[byte][val] = tab[2];
     }
   }
 
@@ -591,7 +599,7 @@ void polar_encoder_fast(uint64_t *A,
     for (int i = 0; i < (polarParams->K + 7) / 8; i++) {
       Cprime[0] |= polarParams->cprime_tab0[i][Bbyte[i]];
       Cprime[1] |= polarParams->cprime_tab1[i][Bbyte[i]];
-      Cprime[2] |= polarParams->cprime_tab2[i][Bbyte[i]];
+      if (polarParams->cprime_tab2) Cprime[2] |= polarParams->cprime_tab2[i][Bbyte[i]];
     }
   }
 

@@ -397,9 +397,10 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
   bool novel = !c->widths.initialized;
   for (int i=0;i<c->nsamples;++i) if(nr_dci_bits_eq(&c->samples[i], &payload)) novel=false;
   if (novel) {
+    char payload_hex[49];
   if(c->nsamples<UL_DISCOVERY_SAMPLES)
-      LOG_I(PHY,"UL raw sample rnti=0x%x len=%u payload=0x%lx sample=%d/%d; interpretation unresolved\n",
-            rnti,len,(unsigned long)payload.w[0],c->nsamples+1,UL_DISCOVERY_SAMPLES);
+      LOG_I(PHY,"UL raw sample rnti=0x%x len=%u payload=0x%s sample=%d/%d; interpretation unresolved\n",
+            rnti,len,nr_dci_bits_hex(payload.w, len, false, payload_hex),c->nsamples+1,UL_DISCOVERY_SAMPLES);
     c->samples[c->sample_cursor]=payload;
     c->sample_cursor=(c->sample_cursor+1)%UL_DISCOVERY_SAMPLES;
     if(c->nsamples<UL_DISCOVERY_SAMPLES) ++c->nsamples;

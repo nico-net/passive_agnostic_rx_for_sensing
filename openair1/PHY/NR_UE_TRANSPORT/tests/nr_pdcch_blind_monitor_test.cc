@@ -4715,3 +4715,71 @@ TEST_F(BlindPdcchTest, WidePaddingIsCheckedAcrossAllWords) {
         << bad_bit << ": " << (uout.reject_reason ? uout.reject_reason : "");
   }
 }
+
+TEST_F(BlindPdcchTest, PolarParamsDoNotEmbedMaximumBuffers) {
+  EXPECT_LT(sizeof(t_nrPolar_params), 1024u);
+}
+
+TEST_F(BlindPdcchTest, PolarCacheBusyDuplicatesAreReused) {
+  auto *a = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, 47, 2);
+  auto *b = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, 47, 2);
+  EXPECT_NE(a, b);
+  EXPECT_FALSE(nr_polar_try_cleanup());
+  polarReturn(a);
+  auto *c = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, 47, 2);
+  EXPECT_EQ(c, a);
+  polarReturn(b);
+  polarReturn(c);
+}
+
+TEST_F(BlindPdcchTest, PolarCacheConcurrentConsumersOwnPrivateTrees) {
+  std::atomic<int> ready{0};
+  std::atomic<bool> release{false};
+  t_nrPolar_params *held[4]{};
+  std::thread consumers[4];
+  for (int i = 0; i < 4; ++i)
+    consumers[i] = std::thread([&, i] {
+      held[i] = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, 100, 4);
+      ++ready;
+      while (!release.load()) std::this_thread::yield();
+      polarReturn(held[i]);
+    });
+  while (ready.load() < 4) std::this_thread::yield();
+  for (int i = 0; i < 4; ++i)
+    for (int j = 0; j < i; ++j) EXPECT_NE(held[i], held[j]);
+  EXPECT_FALSE(nr_polar_try_cleanup());
+  release = true;
+  for (auto &t : consumers) t.join();
+  EXPECT_TRUE(nr_polar_try_cleanup());
+  // Cleanup must clear the direct index, too.
+  auto *fresh = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, 100, 4);
+  EXPECT_EQ(fresh->K, 124);
+  polarReturn(fresh);
+}
+
+TEST_F(BlindPdcchTest, PolarAllocationSizesFollowShape) {
+  for (int type : {NR_POLAR_PBCH_MESSAGE_TYPE, NR_POLAR_UCI_PUCCH_MESSAGE_TYPE, NR_POLAR_DCI_MESSAGE_TYPE}) {
+    for (int a : {32, 47, 100, 140}) {
+      if (type != NR_POLAR_DCI_MESSAGE_TYPE && a != 32) continue;
+      auto *p = nr_polar_params(type, a, 4);
+      const size_t rows = (p->K + 7) / 8;
+      const size_t tables = (std::max(size_t(8), rows) + (p->K > 64 ? rows : 0)
+                            + (p->K > 128 ? rows : 0)) * 256 * sizeof(uint64_t);
+      const size_t changed = sizeof(*p) + tables + p->decoder.buffer_bytes
+                             + p->tree_linearization.capacity * sizeof(*p->tree_linearization.op_list);
+      // Unchanged owned arrays; shared G_N/Q_0 are excluded, allocator metadata excluded.
+      const size_t vectors = 2 * p->K + 2 * p->encoderLength + 2 * p->N
+          + 2 * (p->K + p->n_pc) + 2 * (p->N + 1) + 2 * p->n_pc
+          + (p->i_bil ? 2 * p->encoderLength : 0)
+          + (p->crc_generator_matrix ? (type == NR_POLAR_DCI_MESSAGE_TYPE ? p->K : p->payloadBits) * 32 : 0)
+          + sizeof(int) * (p->encoderLength / p->groupsize);
+      printf("POLAR-SIZE type=%d A=%u K=%u N=%u struct=%zu tables=%zu tree=%zu ops=%zu "
+             "changed=%zu vectors=%zu total=%zu\n", type, p->payloadBits, p->K, p->N, sizeof(*p),
+             tables, p->decoder.buffer_bytes, p->tree_linearization.capacity * sizeof(*p->tree_linearization.op_list),
+             changed, vectors, changed + vectors);
+      if (p->K <= 128) { EXPECT_LT(changed, 108080u); }
+      EXPECT_EQ(p->cprime_tab2 != nullptr, p->K > 128);
+      polarReturn(p);
+    }
+  }
+}

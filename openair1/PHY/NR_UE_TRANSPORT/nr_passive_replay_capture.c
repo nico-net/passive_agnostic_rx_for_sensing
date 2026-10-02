@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
@@ -16,6 +17,8 @@
 #include <sys/stat.h>
 #include <math.h>
 
+/* v3 = wide DCI records, v4 = same layout with failed DL controls included.
+ * v1/v2 used scalar payloads and must never be replayed as this layout. */
 #define REPLAY_FRAMES 16
 #define REPLAY_SLOTS (REPLAY_FRAMES * 160)
 #define REPLAY_UL 2048
@@ -115,7 +118,7 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   }
   memset(iq,0,bytes); /* Prefault before RF start, never page in 157 MB at capture time. */
   header->magic=UINT64_C(0x314951525041534e);
-  header->version=getenv("ISAC_PASSIVE_REPLAY_FAILURES")?2:1;
+  header->version=getenv("ISAC_PASSIVE_REPLAY_FAILURES")?4:3;
   header->header_bytes=sizeof(*header);
   header->job_bytes=sizeof(nr_pdsch_passive_job_t); header->fp_bytes=sizeof(*fp);
   header->iq_bytes=bytes; header->slots=REPLAY_FRAMES*fp->slots_per_frame;
@@ -199,7 +202,7 @@ void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
 {
   if (atomic_load(&state)==RP_DISABLED) return;
   const bool success=result->status==NR_PDSCH_PASSIVE_DECODE_CRC_OK && result->tb;
-  const bool failures=header->version>=2;
+  const bool failures=header->version==4;
   if(!success && !(failures && job->sweep_ticket.settled &&
                   result->status==NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
     return;
@@ -230,10 +233,17 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   if (!strcmp(path,"@delay-contract")) return replay_delay_contract();
   replay_header_t *h=malloc(sizeof(*h));
   if (!f || !h) { fprintf(stderr,"REPLAY VOID: cannot open input\n"); return 2; }
-  bool ok=fread(h,sizeof(*h),1,f)==1;
+  bool ok=fread(h, offsetof(replay_header_t, header_bytes), 1, f)==1;
+  if (ok && h->magic==UINT64_C(0x314951525041534e) && h->version != 3 && h->version != 4) {
+    fprintf(stderr, "REPLAY VOID: unsupported capture version %u; expected 3/4 (140-bit DCI records); "
+                    "v1/v2 files must be recaptured with this build\n", h->version);
+    fclose(f); free(h); return 2;
+  }
+  rewind(f);
+  ok=ok && fread(h,sizeof(*h),1,f)==1;
   const NR_DL_FRAME_PARMS *fp=&h->fp, *allocated=&ue->frame_parms;
   ok=ok && h->magic==UINT64_C(0x314951525041534e) &&
-     (h->version==1 || h->version==2) &&
+     (h->version==3 || h->version==4) &&
      h->header_bytes==sizeof(*h) && h->job_bytes==sizeof(nr_pdsch_passive_job_t) &&
      h->fp_bytes==sizeof(*fp) && h->n_dl>0 && h->n_dl<=REPLAY_DL &&
      h->n_ul>0 && h->n_ul<=REPLAY_UL && fp->nb_antennas_rx>0 && fp->nb_antennas_rx<=4 &&
@@ -263,7 +273,7 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
     if (index<fp->slots_per_frame || index>=h->slots ||
         r->job.nr_slot_rx!=index%fp->slots_per_frame ||
         r->job.frame_rx!=(r->job.absolute_slot/fp->slots_per_frame)%1024 ||
-        (!r->tb_bytes && h->version<2) || r->tb_bytes>1024*1024) { ++failed; continue; }
+        (!r->tb_bytes && h->version==3) || r->tb_bytes>1024*1024) { ++failed; continue; }
     size_t frame=index/fp->slots_per_frame;
     unsigned end=get_samples_slot_timestamp(fp,r->job.nr_slot_rx)+get_samples_per_slot(r->job.nr_slot_rx,fp);
     for (unsigned a=0;a<fp->nb_antennas_rx;++a) {
@@ -294,9 +304,10 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   }
   nr_slot_fep_fo_override_hz=NAN;
   if(!matches) ++failed; /* A failure-only recording is not a replay control. */
+  char payload_hex[49];
   for (unsigned i=0;i<h->n_ul;++i)
-    printf("REPLAY-RAW-UL source=%ld rnti=%04x bits=%u payload=%016lx\n",
-           h->ul[i].source,h->ul[i].rnti,h->ul[i].length,(unsigned long)h->ul[i].payload.w[0]);
+    printf("REPLAY-RAW-UL source=%ld rnti=%04x bits=%u payload=%s\n",
+           h->ul[i].source,h->ul[i].rnti,h->ul[i].length,nr_dci_bits_hex(h->ul[i].payload.w, h->ul[i].length, true, payload_hex));
   if (h->n_ul<8) printf("UL-SEARCH UNRESOLVED: fewer than eight raw observations; no UL convergence claim\n");
   printf("REPLAY %s: identical DL controls=%u failed=%u raw UL=%u; no radio opened\n",
          failed?"VOID":"PASS",matches,failed,h->n_ul);

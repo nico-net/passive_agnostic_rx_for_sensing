@@ -1297,15 +1297,10 @@ static inline int autodiscover_sweep_budget(void)
   }
   return s_budget;
 }
-/* ISAC_DCI_LEN_MIN / ISAC_DCI_LEN_MAX: narrow the blind dci_length range (default 30..63, i.e. 34
- * lengths). Total sweep work is hypotheses x dwell x candidates x LENGTHS, so this is one of only
- * two knobs that cut TOTAL work rather than moving it in time (the other is the dwell above) --
- * batching and reordering cannot, because the search is throughput-bound, not launch-bound
- * (MEASURED 2026-09-20: 96 GPU calls -> 1 moved prepass by 5%).
- *
- * Narrowing is a PRIOR, not a fact: a real length outside the window becomes undiscoverable. Keep
- * the default wide and narrow only when the deployment's DCI 1_1 size is already known for the
- * bandwidth in use (e.g. ~47-48 at 273 PRB), and widen again if nothing converges. */
+/* Configured bounds. The sweep engine starts at min..63 and extends to max
+ * after an unsuccessful full round for that context. An explicit MAX or a
+ * cell-seen wide length enables the wider range immediately (next round when
+ * budget-suspended). Keep the existing minimum and explicit range overrides. */
 static inline int dci_len_min(void)
 {
   static int v = -1;
@@ -2606,10 +2601,11 @@ retry_scrambling:
                                           t->dci10_ctx, t->rnti_min, t->rnti_max,
                                           t->extract_opts, &t->out, &report);
     if (t->dl_auto && report.attempted) {
+      char payload_hex[49];
       LOG_D(PHY, "DCI_INTERPRET format=1_0 frame=%d slot=%d cce=%d rnti=0x%04x "
-                 "payload=0x%016lx bits=%u candidates=%u surviving=%u state=%s "
+                 "payload=0x%s bits=%u candidates=%u surviving=%u state=%s "
                  "unique=%d evidence=protocol_only scope=supplied_context\n",
-            t->frame, t->slot, t->cce, t->out.rnti, (unsigned long)t->out.payload.w[0],
+            t->frame, t->slot, t->cce, t->out.rnti, nr_dci_bits_hex(t->out.payload.w, t->dci_length, true, payload_hex),
             t->dci_length, report.attempted, report.surviving,
             nr_dci_interpretation_state_name(report.state), report.unique_candidate);
       for (unsigned i = 0; i < report.attempted; ++i) {
@@ -4208,7 +4204,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (budget_active)
           g_sweep_cache.valid = 0;
         else
-          sweep_gpu_prefill(&sweep_ctx, dci_len_min(), dci_len_max());
+          sweep_gpu_prefill(&sweep_ctx, dci_len_min(),
+              nr_pdcch_dci_length_active_max(dl_state, dci_len_min(), dci_len_max()));
         discovery_scope.before_feed = btim_on ? btim_now() : 0;
         discovery_scope.phase = 1;
         const uint64_t trace_decodes = dl_state->decodes;
@@ -4480,7 +4477,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         const nr_pdcch_autodiscover_sweep_ctx_t gctx={.cand=candidates,.n_cand=sweep_trials,
                             .scrambling_rnti=rel15->coreset.scrambling_rnti,
                             .dmrs_scrambling_id=rel15->coreset.pdcch_dmrs_scrambling_id};
-        const bool gpu=sweep_gpu_prefill(&gctx, dci_len_min(), dci_len_max());
+        const int active_max = nr_pdcch_dci_length_active_max(&ulc->state, dci_len_min(), dci_len_max());
+        const bool gpu=sweep_gpu_prefill(&gctx, dci_len_min(), active_max);
         ul_length_ctx_t ctx={.cand=candidates,.count=sweep_trials,.rnti=boot_rnti,
                             .scrambling_rnti=rel15->coreset.scrambling_rnti,
                             .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id,
@@ -4491,7 +4489,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                                          ? ul_feed_start + 1000ull * discovery_budget_us()
                                          : 0;
         const int found=nr_pdcch_dci_length_sweep_feed_budget(&ulc->state,ul_length_score,&ctx,
-                                                     sweep_trials, dci_len_min(), dci_len_max(),
+                                                     sweep_trials, dci_len_min(), active_max,
                                                      boot_rnti, ul_deadline, 0);
         if (getenv("ISAC_DISCOVER_DIAG") != NULL)
           LOG_A(PHY, "SENSING: ULSWEEPTIM us=%.2f rnti=0x%x ranked_trials=%d offered=%d decodes=%llu\n",
@@ -4500,7 +4498,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         /* A single matching decode cannot rule out a degenerate polar fixed point.
          * Require distinct UL payloads before trusting the shared engine's shortcut. */
         int supported_lengths=0;
-        for(int len=dci_len_min();len<=dci_len_max();++len)
+        for(int len=dci_len_min();len<=active_max;++len)
           if(ulc->state.n_distinct[len]>1 && ulc->state.bootstrap_hits[len]>=3)
             ++supported_lengths;
         if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
@@ -5684,13 +5682,14 @@ constdiag_done:;
          * 21 MB in one 150 s run. Same probe-volume trap this file already records costing 163 MB
          * per run and causing the very timing runaway it was added to diagnose. */
         if (s_uldcigt && (cand_task[ti].ok || u->rnti != 0)) {
+          char payload_hex[49];
           LOG_I(PHY,
-                "SENSING: ULDCIGT %d.%d cce=%d al=%u len=%u raw=0x%016llx crc_rnti=0x%x ok=%d "
+                "SENSING: ULDCIGT %d.%d cce=%d al=%u len=%u raw=0x%s crc_rnti=0x%x ok=%d "
                 "mcs=%u rv=%u ndi=%u hid=%u tpc=%u dai=%u ant=%u sri_prec=%u srs=%u csi=%u "
                 "tda=%u prb=%u+%u sym=%u+%u k2=%u cdm=%u ports=0x%x nscid=%u dmrsmask=0x%x fh=%u "
                 "ulsch=%u mism=%u rej=%s\n",
                 cand_task[ti].frame, cand_task[ti].slot, cand_task[ti].cce, (unsigned)cand_task[ti].L,
-                (unsigned)u->dci_length, (unsigned long long)u->raw_payload.w[0], u->crc_rnti,
+                (unsigned)u->dci_length, nr_dci_bits_hex(u->raw_payload.w, u->dci_length, true, payload_hex), u->crc_rnti,
                 cand_task[ti].ok ? 1 : 0,
                 (unsigned)u->mcs, (unsigned)u->rv, (unsigned)u->ndi, (unsigned)u->harq_pid,
                 (unsigned)u->tpc, (unsigned)u->dai, (unsigned)u->antenna_ports_field,
@@ -5810,11 +5809,12 @@ constdiag_done:;
         }
       }
       static uint64_t raw_dl_count;
+      char payload_hex[49];
       if (++raw_dl_count <= 12 || raw_dl_count % 2000 == 0)
-        LOG_I(PHY, "SENSING: DL raw evidence n=%lu len=%u rnti=0x%x payload=0x%lx mm=%u; "
+        LOG_I(PHY, "SENSING: DL raw evidence n=%lu len=%u rnti=0x%x payload=0x%s mm=%u; "
                    "layout requires TB-CRC evidence\n",
               (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
-              (unsigned long)raw->payload.w[0], raw->mismatched_bits);
+              nr_dci_bits_hex(raw->payload.w, cand_task[ti].dci_length, false, payload_hex), raw->mismatched_bits);
       nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
       if (!g_pdsch_sweep_on) continue;
       /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
