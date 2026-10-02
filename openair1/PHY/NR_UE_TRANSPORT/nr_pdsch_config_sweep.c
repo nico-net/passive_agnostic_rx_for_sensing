@@ -407,6 +407,7 @@ typedef struct {
  * poison the cell prior nor be forced onto it. Single-RNTI behaviour is unchanged by construction:
  * with one RNTI its own prior/observations are exactly what the cell-wide ones used to be, and the
  * (never-promoted) cell-wide ones are read only when the RNTI has nothing of its own. */
+#define CERT_PER_RNTI 8 /* K39: certified (configuration, tda) keys kept per RNTI (an RNTI has contexts under several layouts) */
 #define RNTI_CTX_MAX 64 /* was 16: measured OTA 2026-09-25, 16 real+noise RNTIs already thrashed it */
 typedef struct {
   uint16_t rnti;
@@ -416,8 +417,8 @@ typedef struct {
   uint64_t k0_seen; /* bit k: the k0 oracle saw this RNTI's PDSCH k slots after its DCI (k >= 2) */
   /* K39: k0 certified by deterministic evidence, scoped to (configuration, tda row): k0 is a per-TDRA-row field, so a
    * certification of one row never binds another. Persists across eviction/recreation of that row's context. */
-  uint64_t cert_cfg;
-  uint64_t k0_cert[16]; /* per tda: allowed-k0 bitmask, 0 = none */
+  struct { uint64_t cfg, mask, touched; uint8_t tda; } cert[CERT_PER_RNTI]; /* mask 0 = free entry; LRU by touched */
+  uint64_t cert_clock;
   bool typeb_seen; /* R30 item 1: this RNTI's DM-RS oracle has shown a mask type A cannot explain */
 } rnti_ctx_t;
 static rnti_ctx_t g_rnti[RNTI_CTX_MAX];
@@ -438,6 +439,46 @@ static uint64_t g_generation, g_clock;
  * eviction by a zero-evidence slot, regardless of recency. Only when EVERY slot already carries
  * evidence do we fall back to evicting the least-recently-touched one of those -- the genuine
  * "burst of more real RNTIs than we have slots for" case, which still logs loudly below. */
+static bool rnti_has_cert(const rnti_ctx_t *r)
+{
+  for (int i = 0; i < CERT_PER_RNTI; i++)
+    if (r->cert[i].mask)
+      return true;
+  return false;
+}
+static uint64_t cert_get(rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
+{
+  for (int i = 0; i < CERT_PER_RNTI; i++)
+    if (r->cert[i].mask && r->cert[i].cfg == cfg && r->cert[i].tda == tda) {
+      r->cert[i].touched = ++r->cert_clock;
+      return r->cert[i].mask;
+    }
+  return 0;
+}
+/* mask 0 clears the key; a full table evicts the least recently used key. */
+static void cert_set(rnti_ctx_t *r, uint64_t cfg, uint8_t tda, uint64_t mask)
+{
+  int slot = -1, lru = 0;
+  for (int i = 0; i < CERT_PER_RNTI; i++) {
+    if (r->cert[i].mask && r->cert[i].cfg == cfg && r->cert[i].tda == tda) {
+      slot = i;
+      break;
+    }
+    if (slot < 0 && !r->cert[i].mask)
+      slot = i;
+    if (r->cert[i].touched < r->cert[lru].touched)
+      lru = i;
+  }
+  if (slot < 0) {
+    if (!mask)
+      return;
+    slot = lru;
+  }
+  r->cert[slot].cfg = cfg;
+  r->cert[slot].tda = tda;
+  r->cert[slot].mask = mask;
+  r->cert[slot].touched = ++r->cert_clock;
+}
 static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
 {
   int victim = -1;
@@ -447,7 +488,7 @@ static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
       g_rnti[i].touched = ++g_clock;
       return &g_rnti[i];
     }
-    const bool has_evidence = g_rnti[i].prior.valid || g_rnti[i].obs.n > 0 || g_rnti[i].cert_cfg != 0;
+    const bool has_evidence = g_rnti[i].prior.valid || g_rnti[i].obs.n > 0 || rnti_has_cert(&g_rnti[i]);
     const bool better = victim < 0 || (victim_has_evidence && !has_evidence)
                          || (has_evidence == victim_has_evidence && g_rnti[i].touched < g_rnti[victim].touched);
     if (better) {
@@ -1433,6 +1474,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   const bool geom_pin = st->geom_pin;
   const float sib_pmin = st->sib_pmin, sib_eps = st->sib_eps;
   const bool fail_open = st->fail_open;
+  const int old_n_hyp = st->n_hyp;
   uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
   memcpy(dormant, st->dormant, sizeof(dormant));
   memset(dormant[NR_TD_DORMANT_GEOM], 0, sizeof(dormant[NR_TD_DORMANT_GEOM])); /* GEOM is derived from evidence (cleared by rebuild) */
@@ -1448,6 +1490,12 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   st->sib_pmin = sib_pmin;
   st->sib_eps = sib_eps;
   st->fail_open = fail_open;
+  /* PRIOR / FIELD bits are by hypothesis INDEX: when the catalog changed (e.g. pruned -> full) they would be
+   * mis-attributed, so they are cleared (fails safe; the caller re-applies them). An unchanged catalog keeps them bit-identical. */
+  if (st->n_hyp != old_n_hyp)
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+      if (c != NR_TD_DORMANT_GEOM)
+        memset(dormant[c], 0, sizeof(dormant[c]));
   memcpy(st->dormant, dormant, sizeof(dormant));
   normalize_masks(st);
   return st->n_hyp;
@@ -1508,8 +1556,8 @@ static void reopen_context(sweep_context_t *c)
   c->k0_cert = 0; /* a reopen is the signal the evidence was wrong: the certification goes with it */
   {
     rnti_ctx_t *rr = rnti_ctx(c->rnti, false);
-    if (rr && rr->cert_cfg == c->configuration && c->tda < 16)
-      rr->k0_cert[c->tda] = 0;
+    if (rr)
+      cert_set(rr, c->configuration, c->tda, 0);
   }
   const uint64_t previous = c->generation;
   nr_pdsch_sweep_report_t report = {
@@ -1731,11 +1779,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
       if (r->k0_seen & (UINT64_C(1) << k))
         nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
     /* K39: inherit this (configuration, tda) key's certification; a different configuration drops them all. */
-    if (r->cert_cfg != configuration) {
-      memset(r->k0_cert, 0, sizeof(r->k0_cert));
-      r->cert_cfg = 0;
-    }
-    c->k0_cert = r->cert_cfg == configuration ? r->k0_cert[tda_index] : 0;
+    c->k0_cert = cert_get(r, configuration, tda_index);
     apply_cert(c);
   }
   if (to_free && !g_spare_state) {
@@ -1858,7 +1902,14 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     n = prune_to_observed(c->state, &r->obs);
     if (c->state->n_hyp != before)
       context_reindexed(c);
-    n = apply_cert(c); /* K39: the certified k0 binds even though the observation (and the cell-wide set) admit more */
+    {
+      /* K39: the certified k0 binds even though the observation admits more (type-B layer, restores). Contract kept:
+       * the count is reported only when a prune removed something, here or in the certified one. */
+      const int before_cert = c->state->n_hyp;
+      const int after_cert = apply_cert(c);
+      if (after_cert != before_cert)
+        n = after_cert;
+    }
   }
   pthread_mutex_unlock(&g_lock);
   return n;
@@ -1871,16 +1922,12 @@ int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t 
   pthread_mutex_lock(&g_lock);
   sweep_context_t *c = ticket_context(t);
   int n = 0;
-  if (c != NULL && c->tda < 16) {
+  if (c != NULL) {
     rnti_ctx_t *r = rnti_ctx(t->rnti, true);
-    if (r->cert_cfg != c->configuration) {
-      memset(r->k0_cert, 0, sizeof(r->k0_cert));
-      r->cert_cfg = c->configuration;
-    }
     /* Intersect with an earlier certification of THIS row; a contradiction (empty) certifies nothing new. */
     const uint64_t merged = c->k0_cert ? (c->k0_cert & k0_allowed_mask) : k0_allowed_mask;
     c->k0_cert = merged ? merged : c->k0_cert;
-    r->k0_cert[c->tda] = c->k0_cert;
+    cert_set(r, c->configuration, c->tda, c->k0_cert);
     n = apply_cert(c);
   }
   pthread_mutex_unlock(&g_lock);
@@ -1897,6 +1944,8 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
   r->k0_seen |= UINT64_C(1) << k0;
   sweep_context_t *c = ticket_context(t);
   const int n = (c && !(c->k0_cert && !(c->k0_cert >> k0 & 1))) ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;
+  if (n > 0)
+    apply_cert(c); /* a certified k >= 2 layer is itself bound to the certified set (k0 in the mask, the rest pruned) */
   static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
   if ((first || n > 0) && s_left > 0 && s_left--)
     LOG_W(PHY, "SWEEP: rnti=0x%04x k0=%u observed on air -- %d hypotheses added to tda=%u\n", t->rnti,
@@ -2006,6 +2055,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
         if (c->legality) {
           context_catalog(c, rnti_ctx(c->rnti, false));
           context_reindexed(c);
+          apply_cert(c); /* K39: the full catalog is rebuilt; a certified k0 must keep binding */
         }
         if (c->priored == PRIORED_CELL) {
           g_prior.valid = false;

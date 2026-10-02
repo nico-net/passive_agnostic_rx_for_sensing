@@ -254,6 +254,7 @@ struct PdschRecovery : testing::Test {
     nr_pdsch_config_sweep_set_reporter(recovery_report);
   }
   void TearDown() override {
+    nr_pdsch_config_sweep_k0_legacy_set(-1);
     nr_pdsch_config_sweep_set_reporter(nullptr);
     nr_pdsch_config_sweep_set_recovery_policy(32,1e-6);
     nr_pdsch_config_sweep_reset_all();
@@ -721,7 +722,11 @@ static nr_pdsch_sweep_ticket_t k39_fresh(uint8_t tda = 0, uint64_t cfg = 0x1234,
   EXPECT_TRUE(nr_pdsch_config_sweep_select(cfg, rnti, tda, 2, 0, test_legal, &t, &h));
   return t;
 }
-TEST(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
+/* K39 fixture: the legacy-pinning flag is restored to its environment default after every test. */
+struct PdschConfigSweepK39 : testing::Test {
+  void TearDown() override { nr_pdsch_config_sweep_k0_legacy_set(-1); }
+};
+TEST_F(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
   uint16_t mask;
   auto t = k39_open(&mask);
   int total = 0;
@@ -741,7 +746,7 @@ TEST(PdschConfigSweepK39, DmrsObservationDoesNotPruneOtherK0) {
   EXPECT_TRUE(k1);
   nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
-TEST(PdschConfigSweepK39, CertifiedK0Prunes) {
+TEST_F(PdschConfigSweepK39, CertifiedK0Prunes) {
   uint16_t mask;
   auto t = k39_open(&mask);
   ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, mask, 13, 0), 6);
@@ -759,7 +764,7 @@ TEST(PdschConfigSweepK39, CertifiedK0Prunes) {
   EXPECT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0), 0);
   nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
-TEST(PdschConfigSweepK39, LegacyFlagRestoresPinning) {
+TEST_F(PdschConfigSweepK39, LegacyFlagRestoresPinning) {
   uint16_t mask;
   auto t = k39_open(&mask);
   nr_pdsch_config_sweep_k0_legacy_set(1);
@@ -772,7 +777,7 @@ TEST(PdschConfigSweepK39, LegacyFlagRestoresPinning) {
 
 static int32_t ab_legal(int, int length, int start, int mapping_b, int add, int maxlen);
 static int k39_count(const nr_pdsch_sweep_ticket_t &t, int k0) { return count_snapshot_k0(t, k0); }
-TEST(PdschConfigSweepK39, CertificationDoesNotLeakAcrossTdaRows) {
+TEST_F(PdschConfigSweepK39, CertificationDoesNotLeakAcrossTdaRows) {
   uint16_t mask;
   auto t0 = k39_open(&mask);
   ASSERT_EQ(nr_pdsch_config_sweep_observe(&t0, mask, 13, 0), 6);
@@ -791,7 +796,7 @@ TEST(PdschConfigSweepK39, CertificationDoesNotLeakAcrossTdaRows) {
   nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
 /* M1: the certification binds on every path that could bring another k0 back. */
-TEST(PdschConfigSweepK39, CertificationBindsOverObserveCellWideSetAndK0Layers) {
+TEST_F(PdschConfigSweepK39, CertificationBindsOverTypeBLayerAndK0LayerAppends) {
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
   nr_pdsch_config_sweep_k0_legacy_set(0);
@@ -811,7 +816,7 @@ TEST(PdschConfigSweepK39, CertificationBindsOverObserveCellWideSetAndK0Layers) {
   EXPECT_GT(count_snapshot_k0(a, 0), 0);
   nr_pdsch_config_sweep_k0_legacy_set(-1);
 }
-TEST(PdschConfigSweepK39, CertificationSurvivesContextEvictionForTheSameKey) {
+TEST_F(PdschConfigSweepK39, CertificationSurvivesContextEvictionForTheSameKey) {
   uint16_t mask;
   auto t = k39_open(&mask);
   ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x2), 0);
@@ -821,6 +826,84 @@ TEST(PdschConfigSweepK39, CertificationSurvivesContextEvictionForTheSameKey) {
   EXPECT_EQ(k39_count(again, 0), 0);
   EXPECT_GT(k39_count(again, 1), 0);
   nr_pdsch_config_sweep_k0_legacy_set(-1);
+}
+TEST_F(PdschConfigSweepK39, CertificationSurvivesPriorProbationRestore) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_config_sweep_k0_legacy_set(0);
+  const nr_pdsch_cfg_hypothesis_t truth0{1, 13, 0, 1, 1, 0, 1};
+  nr_pdsch_cfg_hypothesis_t w{};
+  ASSERT_GT(drive_context(9, 0x4601, 0, truth0, 0.54, 400000, &w), 0); // publishes a prior (mcs_table 1)
+  auto t = k39_fresh(1, 9);                                          // sibling row seeded by it (pruned catalog)
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x2), 0);
+  for (int i = 0; i < 2600; i++) {                                   // nothing passes: probation fails, full catalog restored
+    t = k39_fresh(1, 9);
+    nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+  }
+  t = k39_fresh(1, 9);
+  EXPECT_EQ(k39_count(t, 0), 0);
+  EXPECT_GT(k39_count(t, 1), 0);
+}
+TEST_F(PdschConfigSweepK39, CertifiedK0LayerAppendIsBoundByTheCertification) {
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, UINT64_C(1) << 3), 0); // no k0 = 3 entry yet: fails safe, nothing pruned
+  t = k39_fresh(0);
+  EXPECT_GT(k39_count(t, 0), 0);
+  ASSERT_GT(nr_pdsch_config_sweep_add_k0(&t, 3), 0);
+  t = k39_fresh(0);
+  EXPECT_GT(k39_count(t, 3), 0);
+  EXPECT_EQ(k39_count(t, 0), 0); // the certified layer now binds the rest away
+  EXPECT_EQ(k39_count(t, 1), 0);
+}
+TEST_F(PdschConfigSweepK39, CertificationPersistsPerConfigurationOnSameRnti) {
+  uint16_t mask;
+  auto a = k39_open(&mask); // cfg 0x1234
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&a, 0x2), 0);
+  auto b = k39_fresh(0, 0x4321);
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&b, 0x1), 0);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS + 40; i++)
+    k39_fresh(0, 0x7000 + i, (uint16_t)(0x5000 + i % 40)); // evict both contexts
+  a = k39_fresh(0, 0x1234);
+  b = k39_fresh(0, 0x4321);
+  EXPECT_EQ(k39_count(a, 0), 0);
+  EXPECT_GT(k39_count(a, 1), 0);
+  EXPECT_EQ(k39_count(b, 1), 0);
+  EXPECT_GT(k39_count(b, 0), 0);
+}
+TEST_F(PdschConfigSweepK39, RebuildClearsPriorAndFieldDormantOnlyWhenTheCatalogChanges) {
+  static nr_pdsch_config_sweep_state_t st;
+  ASSERT_GT(nr_pdsch_config_sweep_init_legal(&st, 2, 0, test_legal), 0);
+  const int full = st.n_hyp;
+  auto even_table = [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return (h->mcs_table & 1) == 0; };
+  auto k0zero = [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->k0 == 0; };
+  ASSERT_GE(nr_pdsch_config_sweep_set_dormant(&st, NR_TD_DORMANT_PRIOR, even_table, nullptr), 0);
+  ASSERT_GE(nr_pdsch_config_sweep_set_dormant(&st, NR_TD_DORMANT_FIELD_BASE, k0zero, nullptr), 0);
+  uint64_t prior[NR_TD_DWORDS], field[NR_TD_DWORDS];
+  memcpy(prior, st.dormant[NR_TD_DORMANT_PRIOR], sizeof(prior));
+  memcpy(field, st.dormant[NR_TD_DORMANT_FIELD_BASE], sizeof(field));
+  nr_pdsch_config_sweep_rebuild(&st, 2, 0, test_legal); // same catalog: bit-identical
+  EXPECT_EQ(st.n_hyp, full);
+  EXPECT_EQ(memcmp(prior, st.dormant[NR_TD_DORMANT_PRIOR], sizeof(prior)), 0);
+  EXPECT_EQ(memcmp(field, st.dormant[NR_TD_DORMANT_FIELD_BASE], sizeof(field)), 0);
+  // pruned -> full: the index-keyed bits would be mis-attributed, so they are cleared
+  ASSERT_GT(nr_pdsch_config_sweep_prune_keep(&st, k0zero, nullptr), 0);
+  ASSERT_LT(st.n_hyp, full);
+  nr_pdsch_config_sweep_set_dormant(&st, NR_TD_DORMANT_PRIOR, even_table, nullptr);
+  nr_pdsch_config_sweep_rebuild(&st, 2, 0, test_legal);
+  EXPECT_EQ(st.n_hyp, full);
+  for (int i = 0; i < NR_TD_DWORDS; i++) {
+    EXPECT_EQ(st.dormant[NR_TD_DORMANT_PRIOR][i], 0u);
+    EXPECT_EQ(st.dormant[NR_TD_DORMANT_FIELD_BASE][i], 0u);
+  }
+}
+TEST_F(PdschConfigSweepK39, ObserveKeepsItsReturnContractWithACertificationActive) {
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x3), 0);
+  t = k39_fresh(0);
+  // a mask no hypothesis produces admits nothing: the observed prune reports 0 (nothing pruned), certification or not
+  EXPECT_EQ(nr_pdsch_config_sweep_observe(&t, 0x1, -1, 0), 0);
 }
 TEST_F(PdschRecovery, CertificationClearedOnReopen) {
   nr_pdsch_config_sweep_k0_legacy_set(0);
@@ -840,6 +923,23 @@ TEST_F(PdschRecovery, CertificationClearedOnReopen) {
   EXPECT_GT(count_snapshot_k0(fresh, 1), 0);
   EXPECT_GT(count_snapshot_k0(fresh, 0), 0);
   nr_pdsch_config_sweep_k0_legacy_set(-1);
+}
+
+TEST_F(PdschRecovery, ClearedCertificationDoesNotComeBackAfterEvictionAndRecreation) {
+  nr_pdsch_config_sweep_k0_legacy_set(0);
+  auto t = recovery_select();
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x1), 0);
+  ASSERT_TRUE(recovery_settle(0).settled);
+  for (unsigned f = 0; f < 5000 && nr_pdsch_config_sweep_is_settled(800, 0x4601, 0, 0); ++f) {
+    auto x = recovery_select();
+    nr_pdsch_config_sweep_feedback(&x, false, nullptr);
+  }
+  ASSERT_FALSE(nr_pdsch_config_sweep_is_settled(800, 0x4601, 0, 0)); // reopened: certification cleared
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS + 40; i++)
+    recovery_select(5000 + i, (uint16_t)(0x5000 + i % 40)); // evict the context
+  const auto again = recovery_select();
+  EXPECT_GT(count_snapshot_k0(again, 0), 0);
+  EXPECT_GT(count_snapshot_k0(again, 1), 0); // a persisted certification would have bound it to k0 = 0
 }
 
 // Opt-in benchmark of the real shared-bank reset, outside an OTA run.
