@@ -103,3 +103,16 @@ bool nr_tdd_slot_has_downlink(const nr_tdd_config_t *cfg, uint32_t absolute_slot
   const nr_tdd_slot_dir_t d = nr_tdd_slot_direction(cfg, absolute_slot);
   return d == NR_TDD_SLOT_DL || d == NR_TDD_SLOT_MIXED;
 }
+
+int nr_tdd_pdsch_last_symbol(const nr_tdd_config_t *cfg, uint32_t absolute_slot)
+{
+  const nr_tdd_slot_dir_t d = nr_tdd_slot_direction(cfg, absolute_slot); /* DL for an unknown/invalid config */
+  if (d == NR_TDD_SLOT_DL)
+    return 13;
+  if (d == NR_TDD_SLOT_UL)
+    return -1;
+  const uint32_t total = (uint32_t)cfg->p1.period_slots + (uint32_t)cfg->p2.period_slots;
+  const nr_tdd_pattern_t *p = (absolute_slot % total) < cfg->p1.period_slots ? &cfg->p1 : &cfg->p2;
+  const int last = 13 - (int)p->ul_symbols;
+  return last < -1 ? -1 : last;
+}

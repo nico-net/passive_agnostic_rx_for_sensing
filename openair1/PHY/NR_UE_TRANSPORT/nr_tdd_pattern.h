@@ -75,4 +75,10 @@ nr_tdd_slot_dir_t nr_tdd_slot_direction(const nr_tdd_config_t *cfg, uint32_t abs
  * counts: the CORESET sits at the start of the slot, which is the downlink part. */
 bool nr_tdd_slot_has_downlink(const nr_tdd_config_t *cfg, uint32_t absolute_slot);
 
+/** BC9: the last OFDM symbol (0..13) a PDSCH may END on in this slot under the COMMON pattern: 13 for a DL slot, a
+ * flexible slot or an unknown/invalid configuration; 13 - nrofUplinkSymbols for the mixed slot; -1 for a UL slot (no
+ * PDSCH possible). Only common UL symbols restrict: dedicated TDD configuration cannot turn them into DL, while
+ * flexible symbols may carry a DCI-scheduled PDSCH (TS 38.213 11.1), so they are never excluded. */
+int nr_tdd_pdsch_last_symbol(const nr_tdd_config_t *cfg, uint32_t absolute_slot);
+
 #endif /* __NR_TDD_PATTERN_H__ */

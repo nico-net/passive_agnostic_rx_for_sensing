@@ -255,6 +255,7 @@ static inline void lever_c_restart(nr_pdsch_config_sweep_state_t *st)
   memset(st->fp_trials, 0, sizeof(st->fp_trials)); /* fast-path streams follow ok_unique */
   memset(st->sib_trials, 0, sizeof(st->sib_trials));
   st->sib_blocked = false;
+  st->sib_skip = false;
   memset(st->sib_t, 0, sizeof(st->sib_t));
 }
 /* Bits of word w that belong to the live catalogue [0, n). */
@@ -417,7 +418,9 @@ typedef struct {
   uint64_t k0_seen; /* bit k: the k0 oracle saw this RNTI's PDSCH k slots after its DCI (k >= 2) */
   /* K39: k0 certified by deterministic evidence, scoped to (configuration, tda row): k0 is a per-TDRA-row field, so a
    * certification of one row never binds another. Persists across eviction/recreation of that row's context. */
-  struct { uint64_t cfg, mask, touched; uint8_t tda; } cert[CERT_PER_RNTI]; /* mask 0 = free entry; LRU by touched */
+  /* BC9: plus the key's deterministic per-hypothesis exclusion (TDD direction / DCI adjacency). An entry is used iff mask != 0
+   * or has_excl. */
+  struct { uint64_t cfg, mask, touched; uint8_t tda; bool has_excl; nr_td_excl_t excl; } cert[CERT_PER_RNTI]; /* LRU by touched */
   uint64_t cert_clock;
   bool typeb_seen; /* R30 item 1: this RNTI's DM-RS oracle has shown a mask type A cannot explain */
 } rnti_ctx_t;
@@ -439,45 +442,71 @@ static uint64_t g_generation, g_clock;
  * eviction by a zero-evidence slot, regardless of recency. Only when EVERY slot already carries
  * evidence do we fall back to evicting the least-recently-touched one of those -- the genuine
  * "burst of more real RNTIs than we have slots for" case, which still logs loudly below. */
+static inline bool cert_used(const rnti_ctx_t *r, int i) { return r->cert[i].mask || r->cert[i].has_excl; }
 static bool rnti_has_cert(const rnti_ctx_t *r)
 {
   for (int i = 0; i < CERT_PER_RNTI; i++)
-    if (r->cert[i].mask)
+    if (cert_used(r, i))
       return true;
   return false;
 }
-static uint64_t cert_get(rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
+static int cert_find(const rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
 {
   for (int i = 0; i < CERT_PER_RNTI; i++)
-    if (r->cert[i].mask && r->cert[i].cfg == cfg && r->cert[i].tda == tda) {
-      r->cert[i].touched = ++r->cert_clock;
-      return r->cert[i].mask;
-    }
-  return 0;
+    if (cert_used(r, i) && r->cert[i].cfg == cfg && r->cert[i].tda == tda)
+      return i;
+  return -1;
 }
-/* mask 0 clears the key; a full table evicts the least recently used key. */
+static uint64_t cert_get(rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
+{
+  const int i = cert_find(r, cfg, tda);
+  if (i < 0)
+    return 0;
+  r->cert[i].touched = ++r->cert_clock;
+  return r->cert[i].mask;
+}
+/* The key's entry, created (free slot, else the LRU key is evicted) when absent. */
+static int cert_slot(rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
+{
+  int slot = cert_find(r, cfg, tda);
+  if (slot < 0) {
+    int lru = 0;
+    for (int i = 0; i < CERT_PER_RNTI; i++) {
+      if (slot < 0 && !cert_used(r, i))
+        slot = i;
+      if (r->cert[i].touched < r->cert[lru].touched)
+        lru = i;
+    }
+    if (slot < 0)
+      slot = lru;
+    memset(&r->cert[slot], 0, sizeof(r->cert[slot]));
+    r->cert[slot].cfg = cfg;
+    r->cert[slot].tda = tda;
+  }
+  r->cert[slot].touched = ++r->cert_clock;
+  return slot;
+}
+/* mask 0 clears the k0 certification of the key (its exclusion stays). */
 static void cert_set(rnti_ctx_t *r, uint64_t cfg, uint8_t tda, uint64_t mask)
 {
-  int slot = -1, lru = 0;
-  for (int i = 0; i < CERT_PER_RNTI; i++) {
-    if (r->cert[i].mask && r->cert[i].cfg == cfg && r->cert[i].tda == tda) {
-      slot = i;
-      break;
-    }
-    if (slot < 0 && !r->cert[i].mask)
-      slot = i;
-    if (r->cert[i].touched < r->cert[lru].touched)
-      lru = i;
-  }
-  if (slot < 0) {
-    if (!mask)
-      return;
-    slot = lru;
-  }
-  r->cert[slot].cfg = cfg;
-  r->cert[slot].tda = tda;
-  r->cert[slot].mask = mask;
-  r->cert[slot].touched = ++r->cert_clock;
+  if (!mask && cert_find(r, cfg, tda) < 0)
+    return;
+  r->cert[cert_slot(r, cfg, tda)].mask = mask;
+}
+/* Reopen: the key forgets everything (certification and exclusion). */
+static void cert_clear(rnti_ctx_t *r, uint64_t cfg, uint8_t tda)
+{
+  const int i = cert_find(r, cfg, tda);
+  if (i >= 0)
+    memset(&r->cert[i], 0, sizeof(r->cert[i]));
+}
+static bool excl_get(rnti_ctx_t *r, uint64_t cfg, uint8_t tda, nr_td_excl_t *out)
+{
+  const int i = cert_find(r, cfg, tda);
+  if (i < 0 || !r->cert[i].has_excl)
+    return false;
+  *out = r->cert[i].excl;
+  return true;
 }
 static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
 {
@@ -721,9 +750,13 @@ static inline uint64_t skey_of(const nr_pdsch_cfg_hypothesis_t *h)
 {
   return nr_td_geom_key(h) & ~(UINT64_C(0x3F) << 8); /* k0 occupies bits 8..13; mapping_type (bit 14) stays in the key */
 }
+/* BC2b carry-forward (BC9): the guard may ignore a dormant sibling only when its dormancy certifies k0 -- the GEOM cause,
+ * set by a pin that itself passed this guard. A sibling dormant through PRIOR / FIELD may be the truth (a wrong prior or
+ * field) and is tested (a sibling pick of a dormant hypothesis is guard evidence only) or blocks. TDD / DCI-adjacency
+ * exclusions REMOVE hypotheses from the catalogue, so an impossible sibling is never a member. */
 static inline bool is_sibling_of(const nr_pdsch_config_sweep_state_t *st, int i, uint64_t skey, uint8_t k0)
 {
-  return active(st, i) && st->hyp[i].k0 != k0 && skey_of(&st->hyp[i]) == skey;
+  return (active(st, i) || !dorm_bit(st, NR_TD_DORMANT_GEOM, i)) && st->hyp[i].k0 != k0 && skey_of(&st->hyp[i]) == skey;
 }
 static int count_siblings(const nr_pdsch_config_sweep_state_t *st, uint64_t skey, uint8_t k0)
 {
@@ -771,7 +804,9 @@ static int next_core(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_
     *out = st->hyp[st->winner];
     return st->winner;
   }
-  if (allow_sib && (st->crc_accept || st->geom_pin) && !st->sib_blocked) {
+  const bool skip = st->sib_skip; /* the previous sibling pick was undecodable: one normal pick first */
+  st->sib_skip = false;
+  if (allow_sib && !skip && (st->crc_accept || st->geom_pin) && !st->sib_blocked) {
     const int sib = pick_sibling(st);
     if (sib >= 0) {
       *out = st->hyp[sib];
@@ -1061,8 +1096,18 @@ static bool lever_p(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls,
  * attribution. Order: credit -> lever P -> lever C -> sweep_decide. `kind` is the pick kind of idx[0]: only EXPLORE picks add fast-path
  * evidence and fp_trials; SIBLING picks add sib_trials and a pass blocks the fast path (see the header); every kind is a normal KL trial. */
 static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const int *cls, int n_cls, bool tb_crc_ok,
-                       bool new_data, nr_td_pick_t kind)
+                       bool new_data, nr_td_pick_t kind, bool certified)
 {
+  /* BC2b carry-forward: a SIBLING pick may be a sibling dormant through PRIOR/FIELD (it may be the truth when that cause is
+   * wrong). Its test counts for the guard only: no KL evidence for a dormant hypothesis. */
+  if (st != NULL && idx != NULL && n >= 1 && kind == NR_TD_PICK_SIBLING && idx[0] >= 0 && idx[0] < st->n_hyp && st->winner < 0
+      && !active(st, idx[0])) {
+    if (st->sib_trials[idx[0]] < UINT16_MAX)
+      st->sib_trials[idx[0]]++;
+    if (tb_crc_ok)
+      st->sib_blocked = true;
+    return st->winner;
+  }
   /* An invalid decoded index idx[0] credits nothing (mirrors _feed): a class defined relative to it is untrustworthy. */
   if (st == NULL || idx == NULL || n < 1 || idx[0] < 0 || idx[0] >= st->n_hyp
       || !active(st, idx[0])) { /* a dormant decoded hypothesis credits nothing (as _feed) */
@@ -1071,7 +1116,8 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
   if (st->winner >= 0) {
     return st->winner;
   }
-  const bool explore = kind == NR_TD_PICK_EXPLORE;
+  /* Fast-path evidence: an EXPLORE pick on a k0-unambiguous grant (BC9 certified flag). */
+  const bool explore = kind == NR_TD_PICK_EXPLORE && certified;
   /* One crediting loop: every distinct in-range member gets exactly this grant's one Bernoulli sample. */
   bool check = false;
   bool credited = false; /* >= 1 ACTIVE member credited; with no mask set idx[0] always is */
@@ -1153,21 +1199,37 @@ static int feed_shared(nr_pdsch_config_sweep_state_t *st, const int *idx, int n,
 int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
                                         nr_td_pick_t kind)
 {
-  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, kind);
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, kind, true);
 }
 int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data)
 {
-  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, NR_TD_PICK_EXPLOIT); /* legacy API: no pick kind => no fast-path evidence */
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, NR_TD_PICK_EXPLOIT, false); /* legacy API: no pick kind => no fast-path evidence */
 }
 int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                        bool new_data, nr_td_pick_t kind)
 {
-  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, kind);
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, kind, true);
 }
 int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                     bool new_data)
 {
-  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, NR_TD_PICK_EXPLOIT); /* legacy API (see feed_equiv) */
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, NR_TD_PICK_EXPLOIT, false); /* legacy API (see feed_equiv) */
+}
+
+int nr_pdsch_config_sweep_feed_equiv_cx(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
+                                        nr_td_pick_t kind, bool certified)
+{
+  return feed_shared(st, idx, n, idx, n, tb_crc_ok, new_data, kind, certified);
+}
+int nr_pdsch_config_sweep_feed_attr_cx(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                       bool new_data, nr_td_pick_t kind, bool certified)
+{
+  return feed_shared(st, &idx0, 1, cls, cls != NULL ? n_cls : 0, tb_crc_ok, new_data, kind, certified);
+}
+void nr_pdsch_config_sweep_sib_skip(nr_pdsch_config_sweep_state_t *st, int idx)
+{
+  if (st != NULL && idx >= 0 && idx < st->n_hyp && st->winner < 0)
+    st->sib_skip = true;
 }
 
 static int next_k_core(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[], nr_td_pick_t *kind,
@@ -1353,6 +1415,31 @@ int nr_pdsch_config_sweep_prune_keep(nr_pdsch_config_sweep_state_t *st, nr_td_ke
   return prune_commit(st, n);
 }
 
+/* ---- BC9: deterministic per-hypothesis exclusion (see the header) ---- */
+void nr_td_excl_none(nr_td_excl_t *e)
+{
+  if (e)
+    memset(e->last, 13, sizeof(e->last));
+}
+bool nr_td_excl_admits(const nr_td_excl_t *e, const nr_pdsch_cfg_hypothesis_t *h)
+{
+  if (e == NULL || h == NULL)
+    return true;
+  if (h->k0 > NR_TD_K0_MAX)
+    return false;
+  return (int)h->tda_start + (int)h->tda_length - 1 <= (int)e->last[h->k0];
+}
+static bool excl_keep(const nr_pdsch_cfg_hypothesis_t *h, const void *arg)
+{
+  return nr_td_excl_admits((const nr_td_excl_t *)arg, h);
+}
+int nr_pdsch_config_sweep_exclude(nr_pdsch_config_sweep_state_t *st, const nr_td_excl_t *e)
+{
+  if (e == NULL)
+    return st ? st->n_hyp : 0;
+  return nr_pdsch_config_sweep_prune_keep(st, excl_keep, e);
+}
+
 /* All shared accesses, including winner publication and reset, use one short mutex. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct {
@@ -1362,6 +1449,8 @@ typedef struct {
   int tda_count, typeA;
   bool reported;
   uint64_t k0_cert; /* K39: certified allowed-k0 mask of THIS (configuration, rnti, tda) context, 0 = none */
+  bool has_excl;     /* BC9: deterministic per-hypothesis exclusion of this context (TDD direction / DCI adjacency) */
+  nr_td_excl_t excl;
   uint8_t qm_tables, qm_obs; /* Qm-oracle evidence: consistent-table bitmask, sightings */
   uint64_t outcomes, locked_trials, locked_passes;
   uint64_t failure_streak, reacquisitions;
@@ -1522,22 +1611,31 @@ static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
       nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
 }
 
+static uint64_t g_excl_removed[2], g_excl_refused; /* BC9 diagnostics (g_lock) */
+static inline bool cert_admits(const sweep_context_t *c, const nr_pdsch_cfg_hypothesis_t *h)
+{
+  if (c->k0_cert && !(h->k0 <= 32 && (c->k0_cert >> h->k0 & 1)))
+    return false;
+  return !c->has_excl || nr_td_excl_admits(&c->excl, h);
+}
 /* K39: bind a context to its certified k0 mask (the only k0 prune). No-op without a certification, when nothing
  * would survive, or once settled. Used after every prune/append that could bring a non-certified k0 in. g_lock held. */
 static int apply_cert(sweep_context_t *c)
 {
   nr_pdsch_config_sweep_state_t *st = c->state;
-  if (!c->k0_cert || st->winner >= 0)
+  if ((!c->k0_cert && !c->has_excl) || st->winner >= 0)
     return st->n_hyp;
   int keep = 0;
   for (int i = 0; i < st->n_hyp; i++)
-    keep += st->hyp[i].k0 <= 32 && (c->k0_cert >> st->hyp[i].k0 & 1);
+    keep += cert_admits(c, &st->hyp[i]);
   if (keep == 0 || keep == st->n_hyp)
     return st->n_hyp;
   int m = 0;
   for (int i = 0; i < st->n_hyp; i++)
-    if (st->hyp[i].k0 <= 32 && (c->k0_cert >> st->hyp[i].k0 & 1))
+    if (cert_admits(c, &st->hyp[i]))
       prune_move(st, m++, i);
+    else
+      g_excl_removed[st->hyp[i].k0 >= 2]++;
   const int n = prune_commit(st, m);
   context_reindexed(c);
   return n;
@@ -1552,12 +1650,13 @@ static uint64_t obs_plaus_union(const obs_set_t *o)
 
 static void reopen_context(sweep_context_t *c)
 {
-  const bool had_cert = c->k0_cert != 0;
+  const bool had_cert = c->k0_cert != 0 || c->has_excl;
   c->k0_cert = 0; /* a reopen is the signal the evidence was wrong: the certification goes with it */
+  c->has_excl = false; /* BC9: and the exclusion (re-derived from the next DCI of the row) */
   {
     rnti_ctx_t *rr = rnti_ctx(c->rnti, false);
     if (rr)
-      cert_set(rr, c->configuration, c->tda, 0);
+      cert_clear(rr, c->configuration, c->tda);
   }
   const uint64_t previous = c->generation;
   nr_pdsch_sweep_report_t report = {
@@ -1780,6 +1879,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
         nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
     /* K39: inherit this (configuration, tda) key's certification; a different configuration drops them all. */
     c->k0_cert = cert_get(r, configuration, tda_index);
+    c->has_excl = excl_get(r, configuration, tda_index, &c->excl);
     apply_cert(c);
   }
   if (to_free && !g_spare_state) {
@@ -1934,6 +2034,78 @@ int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t 
   return n;
 }
 
+/* ---- BC9 keyed exclusion ---- */
+static uint64_t k0_universe(const rnti_ctx_t *r)
+{
+  return UINT64_C(0x3) | (r ? (r->k0_seen & ~UINT64_C(0x3)) : 0);
+}
+/* k0 values of `u` the constraints leave with any legal entry (the shortest legal PDSCH, type B L = 2 at S = 0, ends on 1). */
+static uint64_t k0_allowed_by(uint64_t u, uint64_t cert, const nr_td_excl_t *e)
+{
+  uint64_t a = cert ? (u & cert) : u;
+  for (int k = 0; e && k <= NR_TD_K0_MAX; k++)
+    if (e->last[k] < 1)
+      a &= ~(UINT64_C(1) << k);
+  return a;
+}
+int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uint8_t tda, const nr_td_excl_t *e)
+{
+  if (e == NULL || !rnti || tda >= 16)
+    return 0;
+  pthread_mutex_lock(&g_lock);
+  rnti_ctx_t *r = rnti_ctx(rnti, true);
+  nr_td_excl_t merged;
+  if (!excl_get(r, configuration, tda, &merged))
+    nr_td_excl_none(&merged);
+  bool changed = false;
+  for (int k = 0; k <= NR_TD_K0_MAX; k++)
+    if (e->last[k] < merged.last[k]) {
+      merged.last[k] = e->last[k];
+      changed = true;
+    }
+  int removed = 0;
+  const int ci = cert_find(r, configuration, tda);
+  if (!k0_allowed_by(k0_universe(r), ci >= 0 ? r->cert[ci].mask : 0, &merged)) {
+    g_excl_refused++; /* no k0 of the universe left: an assumption (A1-A3) failed; nothing is applied */
+    removed = -1;
+  } else if (changed || cert_find(r, configuration, tda) < 0 || !r->cert[cert_find(r, configuration, tda)].has_excl) {
+    const int slot = cert_slot(r, configuration, tda);
+    r->cert[slot].excl = merged;
+    r->cert[slot].has_excl = true;
+    for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++) {
+      sweep_context_t *c = &g_contexts[i];
+      if (!c->generation || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
+        continue;
+      c->excl = merged;
+      c->has_excl = true;
+      const int before = c->state->n_hyp;
+      removed += before - apply_cert(c);
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return removed;
+}
+uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t rnti, uint8_t tda)
+{
+  pthread_mutex_lock(&g_lock);
+  rnti_ctx_t *r = rnti_ctx(rnti, false);
+  uint64_t a = UINT64_C(0x3);
+  if (r) {
+    const int ci = cert_find(r, configuration, tda);
+    a = k0_allowed_by(k0_universe(r), ci >= 0 ? r->cert[ci].mask : 0, ci >= 0 && r->cert[ci].has_excl ? &r->cert[ci].excl : NULL);
+  }
+  pthread_mutex_unlock(&g_lock);
+  return a;
+}
+void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused)
+{
+  pthread_mutex_lock(&g_lock);
+  if (removed_k0_lt2) *removed_k0_lt2 = g_excl_removed[0];
+  if (removed_k0_ge2) *removed_k0_ge2 = g_excl_removed[1];
+  if (refused) *refused = g_excl_refused;
+  pthread_mutex_unlock(&g_lock);
+}
+
 int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
 {
   if (t == NULL || t->generation == 0 || k0 < 2 || k0 > 32)
@@ -1943,7 +2115,8 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
   const bool first = !(r->k0_seen & (UINT64_C(1) << k0));
   r->k0_seen |= UINT64_C(1) << k0;
   sweep_context_t *c = ticket_context(t);
-  const int n = (c && !(c->k0_cert && !(c->k0_cert >> k0 & 1))) ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;
+  const bool excluded = c && ((c->k0_cert && !(c->k0_cert >> k0 & 1)) || (c->has_excl && c->excl.last[k0] < 1)); /* BC9: TDD/DCI */
+  const int n = (c && !excluded) ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;
   if (n > 0)
     apply_cert(c); /* a certified k >= 2 layer is itself bound to the certified set (k0 in the mask, the rest pruned) */
   static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */

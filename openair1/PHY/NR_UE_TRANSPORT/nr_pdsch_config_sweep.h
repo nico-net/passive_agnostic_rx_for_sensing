@@ -162,6 +162,7 @@ typedef struct {
    * hole: the guard cannot test a sibling that is dormant; BC8/BC9 address it. */
   uint16_t sib_trials[NR_PDSCH_SWEEP_MAX_HYP];
   bool     sib_blocked;
+  bool     sib_skip;   ///< BC9: the last sibling pick could not be decoded; the next pick is a normal one
   struct { bool valid; uint64_t skey; uint8_t k0; } sib_t[2]; ///< pending sibling-test targets: [0] lever C leader, [1] lever P group
   /* CONFIGURATION, not catalog/evidence: preserved across catalog rebuilds (nr_pdsch_config_sweep_rebuild(),
    * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
@@ -263,6 +264,19 @@ int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const
                                         nr_td_pick_t kind);
 int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
                                        bool new_data, nr_td_pick_t kind);
+
+/** BC9 forms with the DCI-adjacency `certified` flag (nr_dci_hist_k0_certified): levers C and P count a pass, and fp_trials a
+ *  trial, only for an EXPLORE pick on a k0-unambiguous grant (certified). Uncertified trials stay normal KL evidence. The _ex
+ *  forms above are the PRE-BC9 contract (every explore pick counts, the k0-sibling guard alone covers the k0 trap): kept
+ *  bit-identical for the simulator until its BC9 part; new callers use _cx. */
+int nr_pdsch_config_sweep_feed_equiv_cx(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
+                                        nr_td_pick_t kind, bool certified);
+int nr_pdsch_config_sweep_feed_attr_cx(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                       bool new_data, nr_td_pick_t kind, bool certified);
+/** Sibling liveness (BC2b carry-forward): the caller could not decode the SIBLING pick idx (its slot was not captured, ...).
+ *  No evidence; the next next_ex()/next_k_ex() call returns a normal pick instead of a sibling (at most every other pick is
+ *  spent on an undecodable sibling, so the RNTI never stalls). A TDD-impossible sibling is excluded instead (it is gone). */
+void nr_pdsch_config_sweep_sib_skip(nr_pdsch_config_sweep_state_t *st, int idx);
 
 /** Lever C threshold: smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6 (log domain, lgamma). m = 2 when
  *  n_alive <= 1 or t_max == 0; for t_max < m, C = 0 so m qualifies at once (result max(2, m)). */
@@ -395,6 +409,38 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
  *  so a certification never binds another row. Persists per that key across context eviction; cleared on reopen and on a
  *  configuration change. Binds the context against later observations, k0 layers and restores. Prunes nothing when no entry would survive. Returns the live hypothesis count (0 = no context). */
 int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t k0_allowed_mask);
+/* ---- BC9: deterministic per-hypothesis exclusion (TDD slot direction, DCI adjacency) ----------------------------------
+ * A hypothesis (S, L, k0) of a TDRA row is IMPOSSIBLE when the PDSCH it implies would end after the last symbol the slot
+ * s + k0 can carry (s = the DCI slot): a UL slot carries none, a mixed slot none on its common UL symbols (TS 38.213 11.1,
+ * 38.214 5.1.2). The rule is per hypothesis, not a k0 mask: a mixed slot removes only the long entries. last[k] is the
+ * highest symbol a k0 = k entry may END on (13 = unconstrained, -1 = k0 impossible); DCI adjacency (nr_dci_history.h)
+ * expresses "k0 = k impossible for this row" as last[k] = -1. Constraints of several DCIs of one row intersect (element-wise
+ * minimum: the row's (S, L, k0) is the same for all its DCIs). Deterministic, so it is a destructive prune (never a
+ * dormant cause, which fail-open would reopen), applied through the BC7 certification path: scoped to the (configuration,
+ * RNTI, TDA row) context, persisted per key in the RNTI's LRU certification set, inherited on context creation, re-applied
+ * after observe / k0 layers / restores, cleared on reopen (re-derived from the next DCI). Without TDD knowledge (NSA, a
+ * cell without SIB1, an unverified pattern) the caller passes nothing: no exclusion. */
+#define NR_TD_K0_MAX 32
+typedef struct {
+  int8_t last[NR_TD_K0_MAX + 1];
+} nr_td_excl_t;
+/** Every last[k] = 13 (no constraint). */
+void nr_td_excl_none(nr_td_excl_t *e);
+/** True when h survives e: k0 <= 32 and tda_start + tda_length - 1 <= last[k0]. */
+bool nr_td_excl_admits(const nr_td_excl_t *e, const nr_pdsch_cfg_hypothesis_t *h);
+/** Pure: prune_keep(st, admits) (0 = nothing would survive: untouched; unchanged count = evidence kept). */
+int nr_pdsch_config_sweep_exclude(nr_pdsch_config_sweep_state_t *st, const nr_td_excl_t *e);
+/** Live, keyed by (configuration, RNTI, TDA row): intersects e into the key's persisted constraint and binds every live
+ *  context of that key. Refuses (returns -1, nothing changes) a constraint that would leave no k0 of the row's universe
+ *  ({0,1}, the RNTI's k0-oracle layers) with any legal entry -- evidence that an assumption (A1-A3) failed. Else returns
+ *  the number of hypotheses removed from live contexts (0 = none open or nothing to remove). */
+int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uint8_t tda, const nr_td_excl_t *e);
+/** The deterministic allowed-k0 set of a row: the universe ({0,1} | the RNTI's k0-oracle layers), intersected with the
+ *  key's k0 certification and with the k0 values its persisted exclusion leaves any legal entry (end symbol >= 1).
+ *  An over-approximation of the truth's k0 (A2); popcount 1 = certified. */
+uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t rnti, uint8_t tda);
+/** Diagnostics: hypotheses removed by exclusions with k0 < 2 / k0 >= 2 (probe layers), refused contradictions. */
+void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused);
 /** Test hook: force the ISAC_TD_K0_ORACLE_LEGACY decision (1 = old k0 pinning, 0 = default, -1 = re-read the env). */
 void nr_pdsch_config_sweep_k0_legacy_set(int legacy);
 /** k0 oracle: the air showed DM-RS on this grant's PRBs `k0` slots after the DCI (and not in the

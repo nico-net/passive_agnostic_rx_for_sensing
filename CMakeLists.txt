@@ -2591,7 +2591,8 @@ if(ENABLE_TESTS)
   add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
-                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c)
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
   target_include_directories(test_nr_pdsch_config_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdsch_config_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdsch_config_sweep)

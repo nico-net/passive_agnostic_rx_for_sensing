@@ -2512,7 +2512,8 @@ TEST(PdschSweepSiblingGuard, NoSiblingsAcceptsImmediately)
   /* make every k0 sibling of a dormant (another cause): no active sibling, the guard is vacuous */
   struct Arg { const nr_pdsch_cfg_hypothesis_t *h; } arg{&s->hyp[a]};
   auto keep = [](const nr_pdsch_cfg_hypothesis_t *h, const void *p) { return h->k0 == ((const Arg *)p)->h->k0; };
-  ASSERT_GE(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep, &arg), 0);
+  /* BC9: only GEOM dormancy (a guarded pin) may hide a sibling; PRIOR/FIELD-dormant siblings are tested (DormantPriorSiblingIsNotIgnored) */
+  ASSERT_GE(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_GEOM, keep, &arg), 0);
   ASSERT_EQ(n_siblings(s.get(), a), 0);
   nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE);
   EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_ex(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE), a);
@@ -2562,4 +2563,267 @@ TEST(PdschSweepSiblingGuard, SiblingsRequireTheSameMappingType)
   drive_siblings(s.get(), a, false, &picks); /* asserts every SIBLING pick has a's mapping type */
   EXPECT_EQ(s->sib_trials[b], 0);
   EXPECT_EQ(picks, nr_pdsch_config_sweep_sib_n(ns, 0.05, 1e-6) * ns);
+}
+
+/* ---- BC9: deterministic per-hypothesis exclusion (TDD direction, DCI adjacency) and certified fast-path evidence ---- */
+extern "C" {
+#include "nr_tdd_pattern.h"
+}
+/* rfsim cell pattern: 5 ms at 30 kHz = 10 slots, 7 DL, mixed slot 7 (6 DL, 4 UL symbols), 2 UL */
+static nr_tdd_config_t bc9_tdd()
+{
+  nr_tdd_pattern_t p1{};
+  p1.period_slots = 10; p1.dl_slots = 7; p1.dl_symbols = 6; p1.ul_symbols = 4; p1.ul_slots = 2;
+  nr_tdd_config_t c{};
+  EXPECT_TRUE(nr_tdd_config_init(&c, &p1, nullptr));
+  return c;
+}
+static nr_td_excl_t bc9_excl_for_dci_slot(uint32_t dci_slot)
+{
+  const nr_tdd_config_t c = bc9_tdd();
+  nr_td_excl_t e;
+  nr_td_excl_none(&e);
+  for (int k = 0; k <= NR_TD_K0_MAX; k++)
+    e.last[k] = (int8_t)nr_tdd_pdsch_last_symbol(&c, dci_slot + (uint32_t)k);
+  return e;
+}
+static int bc9_count(const nr_pdsch_config_sweep_state_t *s, int k0, int max_last = 13, int min_last = -1)
+{
+  int n = 0;
+  for (int i = 0; i < s->n_hyp; i++) {
+    const int last = s->hyp[i].tda_start + s->hyp[i].tda_length - 1;
+    n += s->hyp[i].k0 == k0 && last <= max_last && last >= min_last;
+  }
+  return n;
+}
+struct PdschBc9 : testing::Test {
+  void SetUp() override
+  {
+    nr_pdsch_config_sweep_reset_all();
+    nr_pdsch_config_sweep_prior_reset();
+    nr_pdsch_config_sweep_k0_legacy_set(0);
+  }
+  void TearDown() override { nr_pdsch_config_sweep_k0_legacy_set(-1); }
+};
+
+TEST_F(PdschBc9, TddUlSlotExcludesK0)
+{
+  /* a slot-7 DCI: k0 = 1, 2 land on UL slots 8, 9 (impossible for every entry); k0 = 0 lands on the mixed slot */
+  const nr_td_excl_t e = bc9_excl_for_dci_slot(7);
+  EXPECT_EQ(e.last[0], 9);
+  EXPECT_EQ(e.last[1], -1);
+  EXPECT_EQ(e.last[2], -1);
+  EXPECT_EQ(e.last[3], 13);
+  static nr_pdsch_config_sweep_state_t st;
+  nr_pdsch_config_sweep_init(&st, 4);
+  const int k0_short = bc9_count(&st, 0, 9);
+  ASSERT_GT(nr_pdsch_config_sweep_exclude(&st, &e), 0);
+  EXPECT_EQ(bc9_count(&st, 1), 0);
+  EXPECT_EQ(bc9_count(&st, 0), k0_short); /* only k0 = 0 entries ending by symbol 9 */
+  EXPECT_EQ(st.n_hyp, k0_short);
+  /* live, keyed (row 1 plays the mixed-slot row: k39_fresh opens a 2-row key space): binds the (configuration, rnti, tda) context, persists across eviction, never leaks to another row */
+  auto t = k39_fresh(1);
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 1, &e), 0);
+  t = k39_fresh(1);
+  EXPECT_EQ(k39_count(t, 1), 0);
+  EXPECT_GT(k39_count(t, 0), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 1), UINT64_C(0x1)); /* certified k0 = 0 */
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 0), UINT64_C(0x3)); /* another row: universe {0,1} */
+  const auto t0 = k39_fresh(0);
+  EXPECT_GT(k39_count(t0, 1), 0);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS + 40; i++)
+    k39_fresh(0, 0x7000 + i, (uint16_t)(0x5000 + i % 40)); /* evict */
+  t = k39_fresh(1);
+  EXPECT_EQ(k39_count(t, 1), 0);
+  EXPECT_GT(k39_count(t, 0), 0);
+  /* a k0 >= 2 layer whose slot is UL is refused, one on a DL slot is appended and bound to the per-hypothesis rule */
+  EXPECT_EQ(nr_pdsch_config_sweep_add_k0(&t, 2), 0);
+  t = k39_fresh(1);
+  EXPECT_GT(nr_pdsch_config_sweep_add_k0(&t, 3), 0);
+  t = k39_fresh(1);
+  EXPECT_GT(k39_count(t, 3), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 1), UINT64_C(0x9)); /* {0, 3}: no longer certified */
+}
+
+TEST_F(PdschBc9, MixedSlotExcludesOnlyLongEntries)
+{
+  /* a slot-6 DCI: k0 = 0 lands on DL slot 6 (no restriction), k0 = 1 on the mixed slot 7 (UL symbols 10..13) */
+  const nr_td_excl_t e = bc9_excl_for_dci_slot(6);
+  EXPECT_EQ(e.last[0], 13);
+  EXPECT_EQ(e.last[1], 9);
+  static nr_pdsch_config_sweep_state_t st;
+  nr_pdsch_config_sweep_init(&st, 4);
+  const int k0_all = bc9_count(&st, 0), k1_short = bc9_count(&st, 1, 9), k1_all = bc9_count(&st, 1);
+  ASSERT_GT(k1_short, 0);
+  ASSERT_LT(k1_short, k1_all);
+  ASSERT_GT(nr_pdsch_config_sweep_exclude(&st, &e), 0);
+  EXPECT_EQ(bc9_count(&st, 0), k0_all);    /* k0 = 0 untouched */
+  EXPECT_EQ(bc9_count(&st, 1), k1_short);  /* k0 = 1 entries ending on the flexible / DL symbols survive */
+  EXPECT_EQ(bc9_count(&st, 1, 13, 10), 0); /* those reaching the UL symbols are gone */
+  /* an unconstrained exclusion keeps everything and the evidence */
+  nr_td_excl_t none;
+  nr_td_excl_none(&none);
+  st.trials[0] = 5;
+  EXPECT_EQ(nr_pdsch_config_sweep_exclude(&st, &none), st.n_hyp);
+  EXPECT_EQ(st.trials[0], 5u);
+  /* keyed: a partial exclusion leaves the row uncertified */
+  k39_fresh(0);
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 0, &e), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 0), UINT64_C(0x3));
+}
+
+TEST_F(PdschBc9, AdjacencyExclusionPrunesK0AndRefusesAContradiction)
+{
+  k39_fresh(0);
+  nr_td_excl_t f;
+  nr_td_excl_none(&f);
+  f.last[1] = -1; /* DCI adjacency: k0 = 1 impossible for this row */
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 0, &f), 0);
+  auto t = k39_fresh(0);
+  EXPECT_EQ(k39_count(t, 1), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 0), UINT64_C(0x1));
+  /* a later constraint that would leave no k0 of the universe is evidence of a broken assumption: refused, nothing changes */
+  nr_td_excl_t g;
+  nr_td_excl_none(&g);
+  g.last[0] = -1;
+  EXPECT_EQ(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 0, &g), -1);
+  t = k39_fresh(0);
+  EXPECT_GT(k39_count(t, 0), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 0), UINT64_C(0x1));
+}
+
+TEST_F(PdschBc9, ExclusionClearedOnReopenOfTheContext)
+{
+  /* the per-key exclusion is persisted in the same LRU set as the k0 certification and dies with it on reopen */
+  nr_td_excl_t f;
+  nr_td_excl_none(&f);
+  f.last[1] = -1;
+  k39_fresh(0);
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 0, &f), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 0), UINT64_C(0x1));
+  /* drive the context to convergence, then fail it until it reopens */
+  nr_pdsch_cfg_hypothesis_t h{};
+  nr_pdsch_sweep_ticket_t t{};
+  int target = -1;
+  for (int i = 0; i < 400000 && !nr_pdsch_config_sweep_is_settled(0x1234, 0x4601, 0, 0); i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 0, 0, test_legal, &t, &h));
+    if (target < 0) target = t.hypothesis;
+    nr_pdsch_config_sweep_feedback(&t, h.tda_start == 1 && h.tda_length == 13 && h.mcs_table == 0 && h.dmrs_add_pos == 1 && h.dmrs_max_len == 1, nullptr);
+  }
+  ASSERT_TRUE(nr_pdsch_config_sweep_is_settled(0x1234, 0x4601, 0, 0));
+  for (int i = 0; i < 5000 && nr_pdsch_config_sweep_is_settled(0x1234, 0x4601, 0, 0); i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 0, 0, test_legal, &t, &h));
+    nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+  }
+  ASSERT_FALSE(nr_pdsch_config_sweep_is_settled(0x1234, 0x4601, 0, 0));
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(0x1234, 0x4601, 0), UINT64_C(0x3));
+  /* the live context forgot it too: an observation (which re-applies the binding) keeps k0 = 1 */
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 0, 0, test_legal, &t, &h));
+  nr_pdsch_config_sweep_observe(&t, (uint16_t)test_legal(0, 13, 1, 0, 1, 1), 13, 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 0, 0, test_legal, &t, &h));
+  EXPECT_GT(count_snapshot_k0(t, 1), 0);
+  EXPECT_GT(count_snapshot_k0(t, 0), 0);
+}
+
+/* certified fast-path evidence: levers C/P count only explore passes on k0-unambiguous grants */
+TEST(PdschBc9FastPath, UncertifiedPassDoesNotCountForPC)
+{
+  auto c = fp_state(true, false, 0);
+  const int a = 7;
+  for (int i = 0; i < 4; i++)
+    EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(c.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, false), -1);
+  EXPECT_EQ(c->ok_unique[a], 0);
+  EXPECT_EQ(c->fp_trials[a], 0);
+  EXPECT_EQ(c->ok[a], 4u); /* still KL evidence */
+  nr_pdsch_config_sweep_feed_attr_cx(c.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(c.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true), a);
+  auto p = fp_state(false, true, 0);
+  for (int i = 0; i < 4; i++)
+    nr_pdsch_config_sweep_feed_attr_cx(p.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, false);
+  EXPECT_EQ(p->n_geom, 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(p.get()), p->n_hyp); /* no pin */
+  int idx[1] = {a};
+  for (int i = 0; i < 4; i++)
+    nr_pdsch_config_sweep_feed_equiv_cx(p.get(), idx, 1, true, true, NR_TD_PICK_EXPLORE, false);
+  EXPECT_EQ(p->n_geom, 0);
+}
+
+/* BC2b carry-forward: a k0 sibling dormant through PRIOR / FIELD may be the truth (a wrong prior): it is tested, or blocks */
+TEST(PdschBc9FastPath, DormantPriorSiblingIsNotIgnored)
+{
+  auto s = fp_state(true, false, 0.05f);
+  const int a = 7;
+  struct Arg { uint8_t k0; } arg{s->hyp[a].k0};
+  auto keep = [](const nr_pdsch_cfg_hypothesis_t *h, const void *p) { return h->k0 == ((const Arg *)p)->k0; };
+  ASSERT_GE(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep, &arg), 0);
+  ASSERT_EQ(n_siblings(s.get(), a), 0); /* no ACTIVE sibling */
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true), -1); /* waits */
+  nr_pdsch_cfg_hypothesis_t h;
+  Pick k;
+  const int sib = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+  ASSERT_EQ(k, NR_TD_PICK_SIBLING);
+  EXPECT_NE(h.k0, s->hyp[a].k0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_is_active(s.get(), sib)); /* the dormant sibling is tested */
+  /* its test: a pass blocks the fast path, failures count without becoming KL evidence */
+  const uint32_t kl_before = s->trials[sib];
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), sib, &sib, 1, false, true, NR_TD_PICK_SIBLING, true);
+  EXPECT_EQ(s->sib_trials[sib], 1);
+  EXPECT_EQ(s->trials[sib], kl_before);
+  int picks = 0;
+  for (int t = 0; t < 20000 && s->winner < 0; t++) {
+    const int i = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+    if (s->winner >= 0) break;
+    if (k == NR_TD_PICK_SIBLING) picks++;
+    nr_pdsch_config_sweep_feed_attr_cx(s.get(), i, &i, 1, false, true, k, true);
+  }
+  EXPECT_EQ(s->winner, a);
+  EXPECT_GT(picks, 0);
+  /* the pass case */
+  auto b = fp_state(true, false, 0.05f);
+  ASSERT_GE(nr_pdsch_config_sweep_set_dormant(b.get(), NR_TD_DORMANT_PRIOR, keep, &arg), 0);
+  nr_pdsch_config_sweep_feed_attr_cx(b.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_config_sweep_feed_attr_cx(b.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  const int sb = nr_pdsch_config_sweep_next_ex(b.get(), &h, &k);
+  ASSERT_EQ(k, NR_TD_PICK_SIBLING);
+  nr_pdsch_config_sweep_feed_attr_cx(b.get(), sb, &sb, 1, true, true, NR_TD_PICK_SIBLING, true);
+  EXPECT_TRUE(b->sib_blocked);
+}
+
+TEST(PdschBc9FastPath, SiblingInTddUlSlotIsExcludedNotScheduled)
+{
+  auto s = fp_state(true, false, 0.05f);
+  nr_td_excl_t e;
+  nr_td_excl_none(&e);
+  e.last[1] = -1; /* the sibling offset lands on a UL slot */
+  ASSERT_GT(nr_pdsch_config_sweep_exclude(s.get(), &e), 0);
+  const int a = 7;
+  ASSERT_EQ(s->hyp[a].k0, 0);
+  int n_k1 = 0;
+  for (int i = 0; i < s->n_hyp; i++)
+    n_k1 += s->hyp[i].k0 == 1;
+  EXPECT_EQ(n_k1, 0); /* excluded from the catalogue, not dormant */
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_cfg_hypothesis_t h;
+  Pick k;
+  nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+  EXPECT_NE(k, NR_TD_PICK_SIBLING);
+  EXPECT_EQ(nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true), a); /* no sibling tests needed */
+}
+
+TEST(PdschBc9FastPath, UndecodableSiblingSkipIsBounded)
+{
+  auto s = fp_state(true, false, 0.05f);
+  const int a = 7;
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_config_sweep_feed_attr_cx(s.get(), a, &a, 1, true, true, NR_TD_PICK_EXPLORE, true);
+  nr_pdsch_cfg_hypothesis_t h;
+  Pick k;
+  int i = nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+  ASSERT_EQ(k, NR_TD_PICK_SIBLING);
+  nr_pdsch_config_sweep_sib_skip(s.get(), i); /* its slot was not captured */
+  nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+  EXPECT_NE(k, NR_TD_PICK_SIBLING); /* the RNTI does not stall on it: one normal pick */
+  nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
+  EXPECT_EQ(k, NR_TD_PICK_SIBLING); /* then the test resumes */
 }

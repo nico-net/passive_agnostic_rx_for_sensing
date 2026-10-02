@@ -99,3 +99,23 @@ int main(int argc, char **argv)
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+/* BC9: the last symbol a PDSCH may END on in a slot, from the COMMON pattern only. Common UL symbols can never carry a
+ * PDSCH; flexible symbols can (a DCI may schedule a PDSCH there, TS 38.213 11.1), so only UL symbols restrict. */
+TEST(TddSlot, PdschLastSymbolUsesCommonUplinkSymbolsOnly) {
+  const nr_tdd_config_t c = dddsu(); // mixed slot: 6 DL, 4 flexible, 4 UL symbols
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(&c, 0), 13);  // DL slot
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(&c, 3), 9);   // mixed: symbols 10..13 are UL; flexible 6..9 may carry PDSCH
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(&c, 4), -1);  // UL slot
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(&c, 8), 9);   // periodic
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(nullptr, 4), 13); // unknown pattern never restricts
+  nr_tdd_config_t bad{};
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(&bad, 4), 13);
+  // Flexible slots past the configured ones restrict nothing.
+  nr_tdd_pattern_t p1{};
+  p1.period_slots = 10; p1.dl_slots = 3; p1.ul_slots = 2;
+  nr_tdd_config_t f{};
+  ASSERT_TRUE(nr_tdd_config_init(&f, &p1, nullptr));
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(&f, 3), -1);
+  EXPECT_EQ(nr_tdd_pdsch_last_symbol(&f, 5), 13);
+}
