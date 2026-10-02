@@ -976,6 +976,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ssb_rate_match.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
@@ -2578,6 +2579,14 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_xoverhead PRIVATE MAC_NR_COMMON UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest m)
   add_dependencies(tests test_nr_pdsch_xoverhead)
   add_test(NAME test_nr_pdsch_xoverhead COMMAND ./test_nr_pdsch_xoverhead)
+
+  add_executable(test_nr_dci_history ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c)
+  target_include_directories(test_nr_dci_history PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  # MAC_NR_COMMON carries nr_get_Qm_dl / nr_get_code_rate_dl / nr_compute_tbs (same trio as test_nr_pdsch_xoverhead).
+  target_link_libraries(test_nr_dci_history PRIVATE MAC_NR_COMMON nr_common UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest pthread m)
+  add_dependencies(tests test_nr_dci_history)
+  add_test(NAME test_nr_dci_history COMMAND ./test_nr_dci_history)
 
   add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
