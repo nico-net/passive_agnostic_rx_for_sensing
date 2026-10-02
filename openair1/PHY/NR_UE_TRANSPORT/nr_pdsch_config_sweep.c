@@ -679,6 +679,22 @@ static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t 
 {
   return prune_to_observed_from(st, own, st ? st->n_hyp : 0, NULL);
 }
+/* BC7b M1: FNV-1a over everything prune_to_observed reads (own set and g_obs: masks, last-symbol sets, legacy k0 pins). Equal
+ * signature = the observed-set prune admits exactly the same entries. */
+static uint64_t obs_sig(const obs_set_t *own)
+{
+  uint64_t h = UINT64_C(1469598103934665603);
+  const obs_set_t *sets[2] = {own, &g_obs};
+  for (int s = 0; s < 2; s++) {
+    const obs_set_t *o = sets[s];
+    const int n = o ? o->n : -1;
+    h = (h ^ (uint64_t)(n + 2)) * UINT64_C(1099511628211);
+    for (int k = 0; k < n; k++)
+      h = (h ^ ((uint64_t)o->mask[k] | (uint64_t)o->lastset[k] << 16 | (uint64_t)(uint8_t)o->k0[k] << 32)) * UINT64_C(1099511628211);
+  }
+  return h;
+}
+static uint64_t g_typeb_appends, g_typeb_latches; /* BC7b M1 diagnostics (g_lock) */
 
 /* Append a k0 layer: every hypothesis of the lowest-k0 layer present, with k0 replaced. The lowest
  * layer holds every (S,L,mask,table) tuple of the catalog: prior/table prunes are k0-agnostic, and a
@@ -1530,6 +1546,12 @@ typedef struct {
    * caller having to hand the legality function back. */
   nr_pdsch_legality_fn_t legality;
   enum { PRIORED_NONE = 0, PRIORED_OWN, PRIORED_CELL } priored; /* which prior pruned this catalog */
+  /* BC7b M1: the observe path appended the type-B layer and its own prune truncated ALL of it again (typeb_seen from a mask no
+   * type-B entry produces, or a type-B mask a full r->obs dropped). Latched with the observed-set signature (obs_sig) it was
+   * truncated under: the layer is not re-appended until that signature changes (a new mask / last symbol / pin could admit
+   * type-B entries). Cleared on reopen and on every catalogue rebuild (context_catalog). */
+  bool typeb_latched;
+  uint64_t typeb_latch_sig;
   /* Heap, allocated when the slot is first used and kept across reuse: nr-uesoftmodem mlockall()s
    * (MCL_CURRENT|MCL_FUTURE) at startup, so 1024 inline states (180 KB each) would pin 185 MB of BSS
    * whether or not any context ever opens. Non-NULL whenever generation != 0. */
@@ -1672,6 +1694,7 @@ static nr_pdsch_config_sweep_state_t *g_spare_state;
 /* Full catalog for a context, plus every k0 layer the air has shown for its RNTI. */
 static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
 {
+  c->typeb_latched = false; /* BC7b M1: a rebuilt catalogue re-arms the type-B layer */
   catalog_fill(c->state, c->tda_count, c->typeA, c->legality);
   /* Restoring the "full" catalog after a bad prior/probation must include type B once the air has
    * already shown it for this RNTI -- that is real evidence, not a prior that could be wrong. */
@@ -1751,6 +1774,7 @@ static void reopen_context(sweep_context_t *c)
   c->reported = false;
   c->outcomes = c->locked_trials = c->locked_passes = c->failure_streak = 0;
   c->reference_crc_lower = 0;
+  c->typeb_latched = false; /* BC7b M1: a reopen re-arms the type-B layer */
   /* A reopen says this context's evidence is no longer trusted. If its catalog had been pruned by
    * the cell-wide prior, restore the full one: the prior is the most likely thing to be wrong when
    * a previously converged context starts failing. */
@@ -2012,8 +2036,11 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
       h.k0 = (uint8_t)k0;
     if (h.mapping_type != 0 || !obs_admits(&h, &observation, 0))
       continue;
+    /* K42 F3: a certified context never appends an entry apply_cert would remove again (wipe). BC7b M2: this filter deliberately
+     * ignores apply_cert's keep == 0 no-op (a certification that would empty the context is not applied there): a restore never
+     * appends an entry the context certification rejects, even when apply_cert itself would have kept it for want of any other. */
     if (!cert_admits(c, &h))
-      continue; /* K42 F3: a certified context never appends an entry apply_cert would remove again (wipe) */
+      continue;
     if (c->qm_obs >= 2 && !(c->qm_tables & (1u << h.mcs_table)))
       continue;
     if (prior && (h.mcs_table != prior->mcs_table
@@ -2060,12 +2087,12 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
   rnti_ctx_t *r = rnti_ctx(ticket->rnti, true);
   const bool recorded = obs_record(&r->obs, dmrs_mask, last_symbol, k0) >= 0;
   /* Promote to the cell-wide set once a second distinct RNTI has seen the same mask. */
+  /* BC7b M3: the promotion ORs the sets of EVERY other RNTI holding the mask (a union, like the prune), not just the first one's. */
   if (obs_find(&g_obs, dmrs_mask) < 0) {
     for (int i = 0; i < RNTI_CTX_MAX; i++)
       if (g_rnti[i].rnti && g_rnti[i].rnti != r->rnti && obs_find(&g_rnti[i].obs, dmrs_mask) >= 0) {
         const int j = obs_find(&g_rnti[i].obs, dmrs_mask);
         obs_record_set(&g_obs, dmrs_mask, g_rnti[i].obs.lastset[j], g_rnti[i].obs.k0[j]); /* K42: the whole set; k0 is -1 unless legacy */
-        break;
       }
   }
   if (obs_find(&g_obs, dmrs_mask) >= 0)
@@ -2085,10 +2112,26 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
      * would remove the restored entries again. */
     if (recorded || obs_find(&g_obs, dmrs_mask) >= 0)
       restore_observed_typea(c, r, dmrs_mask, last_symbol, k0_oracle_legacy() ? k0 : -1);
-    if (r->typeb_seen)
-      add_typeb_layer(c->state, c->typeA, c->legality);
+    const uint64_t sig = obs_sig(&r->obs);
+    const bool tb_added = r->typeb_seen && !(c->typeb_latched && c->typeb_latch_sig == sig)
+                          && add_typeb_layer(c->state, c->typeA, c->legality) > 0;
     bool wiped = false;
     n = prune_to_observed_from(c->state, &r->obs, base, &wiped);
+    if (tb_added && !wiped) {
+      bool any_b = false;
+      for (int i = 0; i < c->state->n_hyp && !any_b; i++)
+        any_b = c->state->hyp[i].mapping_type == 1;
+      if (!any_b) { /* BC7b M1: the whole layer was truncated again: latch until the observed sets change */
+        c->typeb_latched = true;
+        c->typeb_latch_sig = sig;
+        g_typeb_latches++;
+        static int s_left = 20;
+        if (s_left > 0 && s_left--)
+          LOG_I(PHY, "SWEEP: TYPEB_LATCH rnti=0x%04x tda=%u: the type-B layer admits no observation; not re-appended until the "
+                "observed sets change\n", c->rnti, c->tda);
+      }
+    }
+    g_typeb_appends += tb_added;
     if (wiped)
       context_reindexed(c);
     {
@@ -2243,6 +2286,13 @@ void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *remove
   if (refused) *refused = g_excl_refused;
   pthread_mutex_unlock(&g_lock);
 }
+void nr_pdsch_config_sweep_typeb_stats(uint64_t *observe_appends, uint64_t *latches)
+{
+  pthread_mutex_lock(&g_lock);
+  if (observe_appends) *observe_appends = g_typeb_appends;
+  if (latches) *latches = g_typeb_latches;
+  pthread_mutex_unlock(&g_lock);
+}
 
 int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
 {
@@ -2255,9 +2305,13 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
   r->k0_ever |= UINT64_C(1) << k0;
   sweep_context_t *c = ticket_context(t);
   const bool excluded = c && ((c->k0_cert && !(c->k0_cert >> k0 & 1)) || (c->has_excl && c->excl.last[k0] < 1)); /* BC9: TDD/DCI */
+  const int n0 = c ? c->state->n_hyp : 0;
   const int n = (c && !excluded) ? nr_pdsch_config_sweep_add_k0_layer(c->state, k0) : 0;
+  /* A certified / excluded context binds the new layer (k0 in the mask, the rest pruned). BC7b I1: the layer is appended under
+   * this g_lock hold, so removing only (part of) it truncates without the evidence wipe or reindex (K42 F3); an exclusion that
+   * removes the whole layer (excl.last[k] >= 1 but below every entry's end) no longer re-wipes on every probe hit. */
   if (n > 0)
-    apply_cert(c); /* a certified k >= 2 layer is itself bound to the certified set (k0 in the mask, the rest pruned) */
+    apply_cert_from(c, n0);
   static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
   if ((first || n > 0) && s_left > 0 && s_left--)
     LOG_W(PHY, "SWEEP: rnti=0x%04x k0=%u observed on air -- %d hypotheses added to tda=%u\n", t->rnti,

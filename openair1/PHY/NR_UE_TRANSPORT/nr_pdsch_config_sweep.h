@@ -408,6 +408,9 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
  *  mask and last symbol ONLY; k0_plausible is recorded as plausible (ordering/logging) and pins nothing, because DM-RS
  *  in a slot does not prove which slot offset the grant has. (Legacy: ISAC_TD_K0_ORACLE_LEGACY=1 pins it as before.) */
 int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0_plausible);
+/** BC7b M1 diagnostics: type-B layers appended by the observe path, and latches set because such a layer was truncated again
+ *  in full (it is then not re-appended until the observed sets change, a reopen or a catalogue rebuild). */
+void nr_pdsch_config_sweep_typeb_stats(uint64_t *observe_appends, uint64_t *latches);
 /** K39: k0 certified by deterministic evidence (BC9 DCI adjacency / TDD direction): the ONLY call that may prune k0.
  *  Keeps the entries whose k0 is in k0_allowed_mask (bit k = k0 k), for this ticket's (configuration, RNTI, TDA row) only: k0 is a per-row field,
  *  so a certification never binds another row. Persists per that key across context eviction; cleared on reopen and on a

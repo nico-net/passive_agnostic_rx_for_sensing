@@ -1049,11 +1049,11 @@ TEST_F(PdschConfigSweepK42, RestoreThenCertDoesNotWipe) {
 TEST_F(PdschConfigSweepK42, TypeBLayerRoundTripTruncatesWithoutWipe) {
   legal = ab_legal;
   ASSERT_EQ(observe(0x4, 13), 6);
-  observe(0x1, -1); // a mask no type-A entry produces: typeb_seen; the type-B layer is appended, then pruned (not observed)
-  ASSERT_EQ(count([](const auto &h) { return h.mapping_type == 1; }), 0);
   fail(20);
   const auto outstanding = sel();
-  observe(0x4, 13); // re-appends the type-B layer, the prune removes exactly those appended entries again
+  observe(0x1, -1); // a mask no type-A entry produces: typeb_seen; the type-B layer is appended, and the prune removes exactly it
+  EXPECT_EQ(count([](const auto &h) { return h.mapping_type == 1; }), 0);
+  observe(0x4, 13); // (latched since BC7b M1: not re-appended while the observed sets are unchanged)
   EXPECT_EQ(count([](const auto &h) { return h.mapping_type == 1; }), 0);
   EXPECT_EQ(count([](const auto &) { return true; }), 6);
   EXPECT_EQ(trials(), 20u);
@@ -1076,6 +1076,73 @@ TEST_F(PdschConfigSweepK42, CertOnAppendedTypeBLayerTruncatesWithoutWipe) {
   EXPECT_EQ(trials(), 20u);
   nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
   EXPECT_EQ(trials(), 21u);
+}
+/* BC7b I1: a k >= 2 layer appended into a context with a BC9 exclusion is bound by apply_cert_from(c, n0): truncation, no wipe. */
+TEST_F(PdschConfigSweepK42, CertifiedOrExcludedK0LayerAppendDoesNotWipe) {
+  sel(); // full catalogue: L 6 / 10 / 12 (ends 7 / 11 / 13), k0 {0,1}, 3 tables
+  nr_td_excl_t e;
+  nr_td_excl_none(&e);
+  e.last[3] = 11; // k0 = 3 may end at most on symbol 11: a k0 = 3 layer is admitted only partly (L = 12 excluded)
+  ASSERT_GE(nr_pdsch_config_sweep_exclude_key(kCfg, 0x4601, 0, &e), 0);
+  fail(20);
+  ASSERT_EQ(trials(), 20u);
+  const auto outstanding = sel();
+  auto t = sel();
+  ASSERT_GT(nr_pdsch_config_sweep_add_k0(&t, 3), 0);
+  EXPECT_EQ(count([](const auto &h) { return h.k0 == 3; }), 6);
+  EXPECT_EQ(count([](const auto &h) { return h.k0 == 3 && ends(h, 13); }), 0);
+  EXPECT_EQ(trials(), 20u) << "the layer bind wiped the CRC evidence";
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  EXPECT_EQ(trials(), 21u) << "the in-flight ticket was staled";
+}
+TEST_F(PdschConfigSweepK42, WhollyExcludedK0LayerOnRepeatedProbesDoesNotWipe) {
+  sel();
+  nr_td_excl_t e;
+  nr_td_excl_none(&e);
+  e.last[3] = 5; // >= 1, so add_k0 does not refuse k0 = 3, but every entry ends on 7 or later: the whole layer is excluded
+  ASSERT_GE(nr_pdsch_config_sweep_exclude_key(kCfg, 0x4601, 0, &e), 0);
+  fail(20);
+  const auto outstanding = sel();
+  for (int i = 0; i < 5; i++) { // every probe hit re-appends the layer (none of it survives)
+    auto t = sel();
+    nr_pdsch_config_sweep_add_k0(&t, 3);
+    EXPECT_EQ(count([](const auto &h) { return h.k0 == 3; }), 0);
+  }
+  EXPECT_EQ(trials(), 20u) << "a probe hit wiped the CRC evidence";
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  EXPECT_EQ(trials(), 21u);
+}
+/* BC7b M1: once the observe path's type-B layer is truncated in full, it is not re-appended until the observed sets change. */
+TEST_F(PdschConfigSweepK42, TruncatedTypeBLayerIsLatchedUntilTheObservedSetsChange) {
+  legal = ab_legal;
+  ASSERT_EQ(observe(0x4, 13), 6);
+  uint64_t a0 = 0, l0 = 0, a = 0, l = 0;
+  nr_pdsch_config_sweep_typeb_stats(&a0, &l0);
+  observe(0x1, -1); // typeb_seen; the layer is appended and truncated in full: latched
+  nr_pdsch_config_sweep_typeb_stats(&a, &l);
+  ASSERT_EQ(a - a0, 1u);
+  ASSERT_EQ(l - l0, 1u);
+  for (int i = 0; i < 3; i++)
+    observe(0x4, 13); // unchanged observed sets: no append / truncate loop
+  nr_pdsch_config_sweep_typeb_stats(&a, &l);
+  EXPECT_EQ(a - a0, 1u);
+  EXPECT_EQ(l - l0, 1u);
+  observe(0x20, 8); // a new mask (a type-B one): the latch no longer matches, the layer comes back and stays
+  nr_pdsch_config_sweep_typeb_stats(&a, &l);
+  EXPECT_EQ(a - a0, 2u);
+  EXPECT_EQ(l - l0, 1u);
+  EXPECT_EQ(count([](const auto &h) { return h.mapping_type == 1; }), 6);
+}
+/* BC7b M3: the cell-wide promotion is the union of every holder's set. Regression guard only: with today's call order the first
+ * observation of a second RNTI always promotes, so two non-promoted holders cannot coexist and the old "first holder only" code
+ * gives the same result here. */
+TEST_F(PdschConfigSweepK42, PromotionIsTheUnionOfEveryHolder) {
+  observe(0x884, 11, 0, 0x4601);
+  observe(0x884, 13, 0, 0x4602); // promoted: {11} from 0x4601, then 13
+  observe(0x884, 13, 0, 0x4603);
+  const auto c = [&](int last) { return count([last](const auto &h) { return ends(h, last); }, 0, 0x4604); };
+  EXPECT_EQ(c(11), 6);
+  EXPECT_EQ(c(13), 6);
 }
 TEST_F(PdschConfigSweepK42, LegacyPinKeepsK0AndTheLastSymbolSetIsMonotone) {
   nr_pdsch_config_sweep_k0_legacy_set(1);
