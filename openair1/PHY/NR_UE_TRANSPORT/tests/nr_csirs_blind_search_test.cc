@@ -19,6 +19,8 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
 void nr_csirs_blind_rt_test_logging(int enabled);
 int nr_csirs_blind_rt_test_future_export(uint32_t slot);
 int nr_csirs_blind_rt_test_nzp_confirmed(void);
+int nr_csirs_blind_rt_test_nzp_observer_score(uint32_t slot, double rho, int reset, int *misses);
+int nr_csirs_blind_rt_test_recheck_zp_unchanged(void);
 void nr_csirs_blind_rt_test_maintenance_control(int control);
 double nr_csirs_blind_rt_test_union_score(void);
 void nr_csirs_blind_rt_test_status_next(void);
@@ -53,6 +55,32 @@ TEST(CsirsBlindRuntime, OrdinaryModeExportsBothBanks) {
       EXPECT_EQ(types[1], 2);
     }
   }
+}
+
+TEST(CsirsBlindRuntime, NonOccasionSlotsNeverCountAsMiss) {
+  int misses = -1;
+  EXPECT_EQ(nr_csirs_blind_rt_test_nzp_observer_score(4, 0.0, 1, &misses), 0);
+  for (uint32_t slot = 5; slot < 23; ++slot)
+    EXPECT_EQ(nr_csirs_blind_rt_test_nzp_observer_score(slot, 0.0, 0, &misses), 0);
+  EXPECT_EQ(misses, 0);
+  for (uint32_t slot = 23; slot < 83; ++slot)
+    EXPECT_EQ(nr_csirs_blind_rt_test_nzp_observer_score(slot, 0.0, 0, &misses), 0);
+  EXPECT_EQ(misses, 3);
+  EXPECT_EQ(nr_csirs_blind_rt_test_nzp_observer_score(83, 0.0, 0, &misses), 1);
+}
+
+TEST(CsirsBlindRuntime, NearThresholdNoFlap) {
+  int misses = -1;
+  nr_csirs_blind_rt_test_nzp_observer_score(4, 0.0, 1, &misses);
+  for (uint32_t slot = 23; slot <= 203; slot += 20)
+    EXPECT_EQ(nr_csirs_blind_rt_test_nzp_observer_score(slot, 2.5, 0, &misses), 0);
+  EXPECT_EQ(misses, 0);
+}
+
+TEST(CsirsBlindRuntime, ReconfRecheckLeavesZpStateUnchanged) {
+  int mask = 0;
+  nr_csirs_blind_rt_test_slot(2, 0, 0, 0, 1, &mask);
+  EXPECT_TRUE(nr_csirs_blind_rt_test_recheck_zp_unchanged());
 }
 
 TEST(CsirsBlindRuntime, RankModeExportsNeitherBankAndLeavesOutputUntouched) {

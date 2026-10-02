@@ -2603,7 +2603,12 @@ void nr_pdcch_bwp_crc_result(int entry, bool crc_ok)
 }
 void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh)
 {
+  if (nr_cfg_reconf_enabled() && !nr_cfg_epoch_work_current()) return;
   pthread_mutex_lock(&g_pbwp_lock);
+  if (nr_cfg_reconf_enabled() && !nr_cfg_epoch_work_current()) {
+    pthread_mutex_unlock(&g_pbwp_lock);
+    return;
+  }
   if (entry > 0 && entry < g_pbwp.n && nr_pbwp_score_grant(&g_pbwp, entry, payload, prb_coh))
     LOG_A(PHY, "SENSING: BWP RESOLVED entry=%d len=%u size=%u start=%d ind_bits=%u after %u grants\n", entry,
           g_pbwp.e[entry].dci_len, g_pbwp.e[entry].size, g_pbwp.e[entry].start, g_pbwp.e[entry].ind_bits,
@@ -3103,11 +3108,17 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
   return dup;
 }
 
+static _Atomic uint64_t g_inline_drop_epoch;
+uint64_t nr_pdcch_blind_inline_drop_epoch(void)
+{
+  return atomic_load_explicit(&g_inline_drop_epoch, memory_order_relaxed);
+}
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot)
 {
   nr_cfg_epoch_drain();
-  NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), nr_pdcch_passive_queue_epoch_counter());
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), serial_candidates
+      ? nr_pdcch_passive_queue_epoch_counter() : &g_inline_drop_epoch);
   if (!nr_cfg_epoch_work_current()) return;
   const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
   const bool reconf = reconf_lengths_enabled();

@@ -1379,6 +1379,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (!nr_cfg_epoch_work_current()) {
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "old configuration epoch";
+    s_stage = 0;
     return false;
   }
   s_stage = 0;

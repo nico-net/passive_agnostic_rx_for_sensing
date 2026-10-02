@@ -15,6 +15,7 @@
 #include "nr_pusch_passive_queue.h"
 #include "nr_csirs_blind_rt.h"
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
+__attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
 _Atomic int nr_passive_metrics_pci = -1;
@@ -46,6 +47,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->scanq_drop_full = sq.dropped_full;
   m->scanq_drop_stale = sq.dropped_stale;
   m->scanq_drop_epoch = sq.dropped_epoch;
+  if (nr_pdcch_blind_inline_drop_epoch)
+    m->pdcch_inline_drop_epoch = nr_pdcch_blind_inline_drop_epoch();
   m->scanq_max_lag = sq.max_lag_slots;
   nr_pdsch_passive_queue_stats_t pq;
   nr_pdsch_passive_queue_get_stats(&pq);

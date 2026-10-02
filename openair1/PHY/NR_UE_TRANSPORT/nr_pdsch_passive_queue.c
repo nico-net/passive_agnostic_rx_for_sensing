@@ -623,22 +623,23 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     pthread_mutex_unlock(&g_lock);
     /* A slot group can straddle a bump while the producer admits its members. Drop each old
      * member before union estimation, GPU batching, probes, or any decode feedback. */
-    nr_pdsch_passive_job_t live[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
-    int n_live = 0;
-    if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), job.config_epoch, nr_cfg_epoch_current))
-      atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
-    else
-      live[n_live++] = job;
-    for (int k = 0; k < n_more; k++) {
-      if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), more[k].config_epoch, nr_cfg_epoch_current))
+    if (nr_cfg_reconf_enabled()) {
+      int n_live = 0;
+      if (nr_passive_job_epoch_old(true, job.config_epoch, nr_cfg_epoch_current))
         atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
       else
-        live[n_live++] = more[k];
+        n_live = 1;
+      for (int k = 0; k < n_more; k++) {
+        if (nr_passive_job_epoch_old(true, more[k].config_epoch, nr_cfg_epoch_current))
+          atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
+        else if (n_live++ == 0)
+          job = more[k];
+        else
+          more[n_live - 2] = more[k];
+      }
+      if (n_live == 0) continue;
+      n_more = n_live - 1;
     }
-    if (n_live == 0) continue;
-    job = live[0];
-    n_more = n_live - 1;
-    for (int k = 0; k < n_more; k++) more[k] = live[k + 1];
     /* Union of RBs over the group members whose DM-RS configuration matches the head job's. */
     /* PRB-list / PRG grants never read the shared estimate (the decoder bypasses the cache for them),
      * and their first_rb + num_rbs is not their span, so they must not widen the union the OTHER grants

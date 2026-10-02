@@ -10,13 +10,14 @@
 typedef enum { NR_CSIRS_TIME_SEARCH, NR_CSIRS_TIME_IDSWEEP, NR_CSIRS_TIME_CONFIRM, NR_CSIRS_TIME_CFR } nr_csirs_time_t;
 typedef struct {
   uint16_t row, ports, density, period, offset, offset2, freq_domain, start_rb, nr_of_rbs;
+  uint8_t symb_l0;
   uint8_t n_offsets, zp;
 } nr_csirs_resource_t;
 typedef struct {
   nr_csirs_resource_t resource;
   uint64_t first_slot;
   uint32_t last_due;
-  uint8_t misses, active, seen;
+  uint8_t misses, active, seen, disappeared;
 } nr_csirs_observer_entry_t;
 typedef struct {
   nr_csirs_observer_entry_t entry[NR_CSIRS_OBSERVER_MAX];

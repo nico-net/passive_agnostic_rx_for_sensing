@@ -6,6 +6,8 @@ extern configmodule_interface_t *uniqCfg;
 
 enum { TEST_FFT = 128, TEST_RE = TEST_FFT * NR_SYMBOLS_PER_SLOT };
 static c16_t test_samples[TEST_RE];
+static PHY_VARS_NR_UE test_ue;
+static c16_t test_rx[1][TEST_RE];
 static int test_fep_enabled, test_fep_mask;
 static int test_fep_calls;
 static int test_maintenance_control;
@@ -79,8 +81,7 @@ int nr_slot_fep_ant(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *frame_parms,
 int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int empty,
                                       int extra_holes, int reset, int *fep_mask)
 {
-  static PHY_VARS_NR_UE ue;
-  static c16_t rx[1][TEST_RE];
+  PHY_VARS_NR_UE *ue = &test_ue;
   static int initialized;
   if (!initialized) {
     char name[] = "csirs-runtime-test";
@@ -92,19 +93,21 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
     initialized = 1;
   }
   if (reset) {
-    memset(&ue, 0, sizeof(ue));
-    ue.frame_parms = (NR_DL_FRAME_PARMS){.N_RB_DL = 4, .Nid_cell = 17,
+    memset(ue, 0, sizeof(*ue));
+    ue->frame_parms = (NR_DL_FRAME_PARMS){.N_RB_DL = 4, .Nid_cell = 17,
         .ofdm_symbol_size = TEST_FFT, .first_carrier_offset = TEST_FFT - 24,
         .symbols_per_slot = NR_SYMBOLS_PER_SLOT, .slots_per_frame = 20,
         .numerology_index = 1, .nb_antennas_rx = 1, .samples_per_slot_wCP = TEST_RE};
     memset(&g_st, 0, sizeof(g_st));
     memset(&g_zp, 0, sizeof(g_zp));
+    memset(&g_csirs_obs, 0, sizeof(g_csirs_obs));
     g_st.confirmed = g_st.pinned = g_zp.confirmed = g_zp.pinned = -1;
     g_st.n = g_zp.n = 1;
     g_st.cand[0] = g_zp.cand[0] = (nr_csirs_candidate_t){
         .row = row, .nr_of_rbs = 4, .freq_domain = 2, .symb_l0 = 7,
         .cdm_type = row >= 3, .freq_density = 2, .scramb_id = 17};
     g_on = g_armed = 1;
+    g_reconf = 0;
     g_rank = g_wide = g_ids = g_slotsweep = 0;
     g_conf_logged = g_null_n = g_null_w = g_zp_null_n = g_zp_null_w = 0;
     memset(g_zp_logged, 0, sizeof(g_zp_logged));
@@ -120,7 +123,7 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
   c16_t *planes[] = {refs[0], refs[1], refs[2], refs[3]};
   const nr_csirs_candidate_t *c = &g_st.cand[0];
   const csi_mapping_parms_t mapping = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0, c->symb_l1);
-  nr_generate_csi_rs(&ue.frame_parms, &mapping, AMP, slot % 20, c->freq_density, 0, 4,
+  nr_generate_csi_rs(&ue->frame_parms, &mapping, AMP, slot % 20, c->freq_density, 0, 4,
                      c->symb_l0, c->symb_l1, c->row, c->scramb_id, 0, c->cdm_type, planes);
   memset(test_samples, 0, sizeof(test_samples));
   for (int symbol = 7; symbol <= 8; symbol++) {
@@ -141,18 +144,18 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
           || (extra_holes == 3 && (refs[0][pos].r || refs[0][pos].i))
           || (extra_holes == 4 && (holes & bit) && on)
           ? 0 : (((holes & bit) && on) || structural) ? 2 : 700;
-      const int shifted = symbol * TEST_FFT + (k + ue.frame_parms.first_carrier_offset) % TEST_FFT;
+      const int shifted = symbol * TEST_FFT + (k + ue->frame_parms.first_carrier_offset) % TEST_FFT;
       test_samples[shifted] = (c16_t){(k & 1) ? amp : -amp, (k & 2) ? amp : -amp};
     }
   }
-  memset(rx, 0, sizeof(rx));
+  memset(test_rx, 0, sizeof(test_rx));
   test_fep_mask = 0;
   test_fep_calls = 0;
   test_fep_enabled = 1;
   const int16_t *union_refs[] = {(int16_t *)&refs[0][7 * TEST_FFT], (int16_t *)&refs[1][7 * TEST_FFT],
                                (int16_t *)&refs[2][7 * TEST_FFT], (int16_t *)&refs[3][7 * TEST_FFT]};
   test_union_score = nr_csirs_blind_zero_score_ports_shift((int16_t *)&test_samples[7 * TEST_FFT],
-      union_refs, nr_csirs_blind_row_ports(row), TEST_FFT, ue.frame_parms.first_carrier_offset);
+      union_refs, nr_csirs_blind_row_ports(row), TEST_FFT, ue->frame_parms.first_carrier_offset);
   if (test_maintenance_control == 1)
     g_zp_null_n = 0;
   if (test_maintenance_control == 2 || test_maintenance_control == 3) {
@@ -163,12 +166,12 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
   const uint8_t saved_symbol = g_st.cand[0].symb_l0;
   if (test_maintenance_control == 4)
     g_st.cand[0].symb_l0 = 13; // row5 must reject l0+1 beyond the slot before generating
-  nr_csirs_blind_rt_slot(&ue, slot % 20, slot, rx);
+  nr_csirs_blind_rt_slot(ue, slot % 20, slot, test_rx);
   g_st.cand[0].symb_l0 = saved_symbol;
   /* Supply discovery observations to both test resources independent of rotation order.
    * Confirmed maintenance still runs only via the real predicted-occurrence dispatcher. */
   if (test_two_resources && !nr_csirs_blind_is_confirmed(&g_zp, 1))
-    score_candidate(&ue, slot % 20, slot, rx, 1, false);
+    score_candidate(ue, slot % 20, slot, test_rx, 1, false, false);
   test_fep_enabled = 0;
   *fep_mask = test_fep_mask;
   fapi_nr_dl_config_csirs_pdu_rel15_t out[2];
@@ -198,6 +201,41 @@ int nr_csirs_blind_rt_test_future_export(uint32_t slot)
 int nr_csirs_blind_rt_test_nzp_confirmed(void)
 {
   return g_st.n_conf;
+}
+
+int nr_csirs_blind_rt_test_nzp_observer_score(uint32_t slot, double rho, int reset, int *misses)
+{
+  if (reset) {
+    memset(&g_st, 0, sizeof(g_st));
+    memset(&g_csirs_obs, 0, sizeof(g_csirs_obs));
+    g_st.n = g_st.n_conf = 1;
+    g_st.cand[0] = (nr_csirs_candidate_t){.row = 2, .symb_l0 = 7, .freq_density = 2};
+    g_st.conf_period[0] = 20;
+    g_st.conf_n_off[0] = 1;
+    g_st.conf_off[0][0] = 3;
+    const nr_csirs_resource_t key = resource_key(&g_st, 0, false);
+    nr_csirs_observer_confirm(&g_csirs_obs, &key, 3);
+    g_reconf = 1;
+  }
+  const int bumped = nzp_observer_score(0, slot, rho);
+  *misses = g_csirs_obs.entry[0].misses;
+  return bumped;
+}
+
+int nr_csirs_blind_rt_test_recheck_zp_unchanged(void)
+{
+  static nr_csirs_blind_state_t before;
+  static uint8_t before_maint[sizeof(g_zp_maint)];
+  const uint64_t before_veto = g_zp_geometry_veto_total;
+  memcpy(&before, &g_zp, sizeof(before));
+  memcpy(before_maint, g_zp_maint, sizeof(before_maint));
+  g_reconf = 1;
+  test_fep_enabled = 1;
+  score_candidate(&test_ue, 23 % 20, 23, test_rx, 0, false, true);
+  test_fep_enabled = 0;
+  return memcmp(&before, &g_zp, sizeof(before)) == 0
+      && memcmp(before_maint, g_zp_maint, sizeof(before_maint)) == 0
+      && before_veto == g_zp_geometry_veto_total;
 }
 
 int nr_csirs_blind_rt_test_export(int rank, int banks, int types[2], int *untouched)

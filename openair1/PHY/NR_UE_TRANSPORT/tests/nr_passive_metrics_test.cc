@@ -20,6 +20,7 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"pdschq_crc_ok\":57897"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_full\":161"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_epoch\":0"), std::string::npos);
+  EXPECT_NE(s.find("\"pdcch_inline_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"puschq_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pci\":64"), std::string::npos);

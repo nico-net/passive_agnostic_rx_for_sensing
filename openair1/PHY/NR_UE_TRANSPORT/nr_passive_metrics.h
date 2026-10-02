@@ -19,6 +19,7 @@ typedef struct {
   uint64_t acq_transitions, acq_sync_losses, acq_pbch_locks, acq_sib1_decodes;
   uint64_t pdcch_occasions, pdcch_candidates, pdcch_accepts, pdcch_accepts_c;
   uint64_t scanq_queued, scanq_processed, scanq_drop_full, scanq_drop_stale, scanq_drop_epoch, scanq_max_lag;
+  uint64_t pdcch_inline_drop_epoch;
   uint64_t pdschq_queued, pdschq_decoded, pdschq_crc_ok, pdschq_drop_full, pdschq_drop_stale, pdschq_drop_epoch, pdschq_max_lag;
   uint64_t puschq_drop_epoch;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
