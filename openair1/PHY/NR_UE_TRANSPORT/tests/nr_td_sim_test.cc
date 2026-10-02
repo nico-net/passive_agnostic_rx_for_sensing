@@ -188,11 +188,15 @@ TEST(TdSimV2, GoldenV1Output)
 }
 TEST(TdSimV2, GoldenV1LeverAndTrapArms)
 {
-  /* numbers from the 77775006f2 reference binary */
+  /* P+C lever arm: re-pinned after merging BC9 (fffc8bed3a/95f1b2eeaf/663a9200b8 deliberately change lever semantics:
+   * sibling-test trials require new data, the certified table mask covers PRIOR/FIELD-dormant siblings, bounded skips);
+   * value from the merged engine @355284580d. Safety is pinned too. The trap-only arm below still matches 77775006f2. */
   SimCfg c = SimCfg::defaults(); c.acq = 20; c.seed = 1; c.oracle = 0; c.crc_accept = 1; c.geom_pin = 1; c.k0_trap_adj = 0.3; c.crc_false = 1e-3;
   const SimResult pc = run_sim(c);
-  EXPECT_EQ(pc.total_grants, 5339781);
-  EXPECT_EQ(pc.k0_trap_passes, 3163);
+  EXPECT_EQ(pc.total_grants, 5320506);
+  EXPECT_EQ(pc.k0_trap_passes, 3144);
+  EXPECT_EQ(pc.wrong, 0);
+  EXPECT_EQ(pc.wrong_pins, 0);
   SimCfg d = SimCfg::defaults(); d.acq = 10; d.seed = 7; d.oracle = 0; d.k0_trap_adj = 0.5; d.rntis_per_acq = 1;
   const SimResult t = run_sim(d);
   EXPECT_EQ(t.total_grants, 4158534);
