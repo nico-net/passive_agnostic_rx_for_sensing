@@ -1130,14 +1130,7 @@ static uint32_t g_reconf_dci11_pin_cursor[65536];
 
 static bool reconf_lengths_enabled(void)
 {
-  static _Atomic int enabled = -1;
-  int v = atomic_load_explicit(&enabled, memory_order_relaxed);
-  if (v < 0) {
-    const char *e = getenv("ISAC_RECONF");
-    v = e && atoi(e) == 1;
-    atomic_store_explicit(&enabled, v, memory_order_relaxed);
-  }
-  return v == 1;
+  return nr_pdcch_reconf_enabled();
 }
 
 static uint32_t reconf_n_suspect(void)
@@ -5339,7 +5332,8 @@ constdiag_done:;
         g_lane_geom_snap[lane]   = geom;
         g_lane_needs_sweep[lane] = 1;
         if (!budget_active)
-          lane_batch_add(lane, &g_lane_sweep_ctx[lane], dci_len_min(), dci_len_max());
+          lane_batch_add(lane, &g_lane_sweep_ctx[lane], dci_len_min(),
+                         nr_pdcch_dci_length_active_max(&g_lane_length_state[lane], dci_len_min(), dci_len_max()));
         continue;   /* phase B runs the anchored sweep AND the step for this lane */
       }
     } else {

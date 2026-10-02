@@ -624,6 +624,8 @@ TEST(DciLengthStore, LruEvictionClearsRatherThanAliasesEvidence)
 }
 
 TEST(DciLengthSweep, LocksLength100) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_note_seen(100);
   nr_pdcch_dci_length_sweep_state_t state{};
   auto scorer = [](int len, int trial, uint16_t *rnti, uint32_t *hash, void *ctx) -> bool {
     if (len != 100) return false;
@@ -636,6 +638,7 @@ TEST(DciLengthSweep, LocksLength100) {
   for (int i = 0; i < 8; ++i)
     found = nr_pdcch_dci_length_sweep_feed(&state, scorer, &serial, 2, 30, 140, 0x4b31);
   EXPECT_EQ(found, 100);
+  nr_pdcch_dci_length_seen_reset();
 }
 
 TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
@@ -728,7 +731,24 @@ TEST(DciLengthSweep, ColdRoundStaysNarrowAcrossStrideAndBudget) {
   for (int len = 30; len <= 63; ++len) EXPECT_EQ(state.trials[len], 2);
   while (state.occasions_fed < 2)
     nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 2, 30, 140, 0);
-  for (int len = 64; len <= 140; ++len) EXPECT_EQ(state.trials[len], 2);
+  for (int len = 64; len <= 140; ++len) EXPECT_EQ(state.trials[len], 0);
+  EXPECT_FALSE(state.wide_range);
+  nr_pdcch_dci_length_seen_reset();
+}
+
+TEST(DciLengthSweep, ColdRangeWidensAfterEveryStageOneLengthHasEnoughTrials) {
+  nr_pdcch_dci_length_seen_reset();
+  nr_pdcch_dci_length_sweep_state_t state{};
+  auto scorer = [](int, int, uint16_t *, uint32_t *, void *) -> bool { return false; };
+  for (int round = 0; round < 255; ++round)
+    EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0), -1);
+  EXPECT_FALSE(state.wide_range);
+  EXPECT_EQ(nr_pdcch_dci_length_active_max(&state, 30, 140), 63);
+  for (int len = 30; len <= 63; ++len) EXPECT_EQ(state.trials[len], 255);
+  EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0), -1);
+  EXPECT_TRUE(state.wide_range);
+  nr_pdcch_dci_length_sweep_feed(&state, scorer, nullptr, 1, 30, 140, 0);
+  for (int len = 64; len <= 140; ++len) EXPECT_EQ(state.trials[len], 1);
   nr_pdcch_dci_length_seen_reset();
 }
 

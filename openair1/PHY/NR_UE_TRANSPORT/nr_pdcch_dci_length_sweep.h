@@ -99,6 +99,7 @@ typedef struct {
 void nr_pdcch_dci_length_seen_reset(void);
 void nr_pdcch_dci_length_note_seen(int len);
 int nr_pdcch_dci_length_order(int min_len, int max_len, int *out);
+bool nr_pdcch_reconf_enabled(void);
 
 /** Persistent state, accumulated across many nr_pdcch_dci_length_sweep_feed() calls (one call per
  *  candidate-bearing occasion). Plain struct, no hidden allocation -- zero-initialize (static
@@ -133,7 +134,7 @@ typedef struct {
   int      stride;
   int      order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN], order_count;
   int      resume_len, resume_trial; // budget suspension; reset with the geometry epoch
-  bool     wide_range; /* a complete cold round found no lock */
+  bool     wide_range; /* every stage-1 length reached the statistical trial floor without a lock */
   int      round_max; /* frozen across rotation/budget suspension */
   int      rot_phase; // 0..stride-1, which interleaved subset this call tests
   /* CELL PRIOR (2026-09-17). When > 0, test ONLY this length for the first

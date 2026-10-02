@@ -69,11 +69,17 @@ static int explicit_max;
 static void length_env_init(void)
 {
   const char *e = getenv("ISAC_RECONF");
-  seen_order_enabled = e && strcmp(e, "1") == 0;
+  seen_order_enabled = e && atoi(e) == 1;
   e = getenv("ISAC_DCI_LEN_MAX");
   char *end = NULL;
   const long n = e ? strtol(e, &end, 10) : 0;
   explicit_max = e && end != e && !*end && n >= 1 && n <= NR_DCI_MAX_PAYLOAD ? (int)n : 0;
+}
+
+bool nr_pdcch_reconf_enabled(void)
+{
+  pthread_once(&length_env_once, length_env_init);
+  return seen_order_enabled;
 }
 
 static _Atomic bool cell_seen[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
@@ -540,7 +546,15 @@ score_evidence:;
       fflush(stdout);
     }
   }
-  if (full_round_completed && best_len < 0) state->wide_range = true;
+  if (full_round_completed && best_len < 0 && min_len <= 63) {
+    bool stage_one_exhausted = true;
+    for (int len = min_len; len <= 63 && len <= max_len; ++len)
+      if (state->trials[len] < MIN_TRIALS_FOR_STATISTICAL_LOCK) {
+        stage_one_exhausted = false;
+        break;
+      }
+    if (stage_one_exhausted) state->wide_range = true;
+  }
   nr_pdcch_dci_length_note_seen(best_len);
   return best_len;
 }

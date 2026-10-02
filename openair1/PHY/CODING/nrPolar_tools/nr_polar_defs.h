@@ -311,6 +311,7 @@ extern pthread_mutex_t PolarListMutex;
 static inline void polarReturn(t_nrPolar_params *polarParams)
 {
   pthread_mutex_lock(&PolarListMutex);
+  AssertFatal(polarParams->busy, "polarReturn called for an idle entry\n");
   polarParams->busy = false;
   if (polarParams->free_head) {
     polarParams->next_free = *polarParams->free_head;
