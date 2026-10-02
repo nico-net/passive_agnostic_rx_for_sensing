@@ -338,3 +338,56 @@ Findings:
 - The adjacency-0 rows with another UE now decide MORE k0 = 1 truths than the adjacency-0 rows without another UE (56-133 vs 299-574 undecidable): [HYPOTHESIS, not separately measured] a foreign mask equal to the truth's (same cell config)
   is an observation the RNTI's own empty DCI slot never gives. Simulator conditionality of ## BC8 v2 (b) (ii)-(x) still applies; (vii) (stale tickets) and (viii) (apply_cert wipe) no longer apply to the
   runtime after BC7b.
+
+## BC9 sim
+[SIMULATED, DGX host, nr_td_sim @fcbaeb9478] levers C/P with certified k0 evidence (slot model). `--acq 500 --seed 1`, 4 RNTIs per acquisition = 2000 RNTIs per row, 8 parallel processes, 38 runs, ~25 min wall (host load < 2 before start; no nr-uesoftmodem / nr-softmodem; no rfsim).
+Runner: tests/passive_rx/td_sim/bc9_campaign.py. Common flags: `--slot-model 1 --oracle 0 --dci-false 1e-3 --crc-false 0` (blind), cap_s 3600, `--tdd-s-dl-symbols 6`, `--k0-oracle-legacy 1`, all non-named flags default.
+Arms: base = levers off; CP = `--crc-accept 1 --geom-pin 1` with the observed-DCI certified flag fed to the engine (`_cx(..., certified)`: certified iff k0-unambiguous w.r.t. EVERY alive k0 sibling of the decoded hypothesis, only for the truth's row, v1 keeps true);
+CP_fb2 = CP + `--fieldbook 2`; excl = levers off + TDD exclusion. TDD arms: `--tdd DDDSU`; base there = `--tdd-exclude 0` (receiver without TDD knowledge), CP/CP_fb2/excl = exclusion on (mirror of nr_pdsch_config_sweep_exclude; the predicate is the engine's).
+Columns: cold = first two RNTIs of an acquisition, steady = later; mean/median seconds over DECIDED RNTIs (grants/200); undec = capped RNTIs (all 0); cert share = certified fraction of EXPLORE feeds / of passing EXPLORE feeds.
+Dropped arms (time budget): TDD only at dci-miss 0.1, other-ue-occ 0.1; rho 0.0 only at dci-miss 0.1, other-ue-occ 0.1; no fb2-without-levers arm, no pre-BC9 (certified = true) arm in the campaign (single 12-RNTI spot checks only, see report).
+
+| rx | rho | tdd | miss | occ | arm | cold mean/median s | steady mean/median s | wrong | wrong_pins | undec | crc_accepts | geom_pins | cert share (explore feeds) | cert share (passes) | tdd_excl_removed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | rho0.9 | noTDD | 0.01 | 0 | base | 959.0/1136.2 | 58.8/51.7 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0 | CP | 937.9/1097.4 | 57.2/50.6 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.206 | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0 | CP_fb2 | 937.9/1097.4 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.207 | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0.1 | base | 950.7/1130.2 | 58.8/51.8 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0.1 | CP | 939.1/1076.5 | 57.4/48.6 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.207 | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0.1 | CP_fb2 | 939.1/1076.5 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.210 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0 | base | 1053.3/1197.4 | 64.8/58.6 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0 | CP | 1037.2/1190.9 | 63.6/57.7 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0 | CP_fb2 | 1037.2/1190.9 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0.1 | base | 1052.0/1248.6 | 65.6/60.0 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0.1 | CP | 1029.1/1193.3 | 64.2/55.9 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0.1 | CP_fb2 | 1029.1/1193.3 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.189 | 0 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | base | 869.6/862.9 | 52.5/46.9 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | excl | 571.1/528.6 | 32.6/25.4 | 0 | 0 | 0 | 0 | 0 | - | - | 209512 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | CP | 549.0/490.0 | 31.0/23.0 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.071 | 209512 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | CP_fb2 | 549.0/490.0 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.068 | 393144 |
+| 1 | rho0.0 | noTDD | 0.1 | 0.1 | base | 673.3/596.0 | 31.2/28.3 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.0 | noTDD | 0.1 | 0.1 | CP | 257.9/73.5 | 9.2/5.3 | 0 | 0 | 0 | 998 | 1468 | 0.004 | 0.446 | 0 |
+| 1 | rho0.0 | noTDD | 0.1 | 0.1 | CP_fb2 | 257.9/73.5 | 4.2/5.5 | 0 | 0 | 0 | 1080 | 633 | 0.004 | 0.442 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0 | base | 618.7/542.0 | 37.1/26.7 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0 | CP | 603.5/517.9 | 35.8/26.0 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.207 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0 | CP_fb2 | 603.5/517.9 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.209 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0.1 | base | 623.7/542.1 | 37.3/26.8 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0.1 | CP | 608.9/535.5 | 35.3/25.7 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.208 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0.1 | CP_fb2 | 608.9/535.5 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.209 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0 | base | 676.5/596.2 | 40.8/29.3 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0 | CP | 656.0/576.9 | 39.2/28.5 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0 | CP_fb2 | 656.0/576.9 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.190 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0.1 | base | 683.3/596.0 | 40.5/29.1 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0.1 | CP | 655.7/556.1 | 39.0/27.9 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.190 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0.1 | CP_fb2 | 655.7/556.1 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.192 | 0 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | base | 521.7/401.2 | 30.6/22.7 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | excl | 329.6/262.8 | 18.3/11.4 | 0 | 0 | 0 | 0 | 0 | - | - | 209512 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | CP | 310.4/226.0 | 17.1/11.3 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.070 | 209512 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | CP_fb2 | 310.4/226.0 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.066 | 393144 |
+| 4 | rho0.0 | noTDD | 0.1 | 0.1 | base | 372.9/329.1 | 17.3/11.8 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.0 | noTDD | 0.1 | 0.1 | CP | 157.3/56.8 | 6.9/4.6 | 0 | 0 | 0 | 1112 | 1392 | 0.004 | 0.449 | 0 |
+| 4 | rho0.0 | noTDD | 0.1 | 0.1 | CP_fb2 | 157.3/56.8 | 4.7/6.3 | 0 | 0 | 0 | 1066 | 602 | 0.004 | 0.441 | 0 |
+
+Findings (all [SIMULATED]): wrong = 0 and wrong_pins = 0 in all 38 rows (2000 RNTIs each). At persistence 0.9 (the physical trap) the sibling-test decode of the neighbouring slot passes on every RNTI, the engine's sibling guard blocks the fast path
+on ANY sibling pass (certified or not), so levers C/P never fire (0 accepts, 0 pins, 24 rows): the cold/steady gains of CP over base there (about -2 to -5 % cold) are not lever events. The TDD exclusion alone gives -34 % cold mean (4 RX 329.6 vs 521.7 s; 1 RX 571.1 vs 869.6 s).
+At persistence 0.0 the fast path fires (1 RX: 998 accepts + 1468 pins; 4 RX: 1112 + 1392) and cold mean falls 673 -> 258 s (1 RX) and 373 -> 157 s (4 RX); the cold median 596 -> 73.5 s and 329 -> 56.8 s. Certified share of EXPLORE feeds is only 0.1-0.4 % (most feeds are wrong-hypothesis feeds whose leader is not certified), of passing feeds 7-45 %.
