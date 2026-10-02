@@ -320,7 +320,7 @@ void build_polar_tables(t_nrPolar_params *polarParams)
 {
   // build table b -> c'
   AssertFatal(polarParams->K > 17, "K = %d < 18, is not possible\n", polarParams->K);
-  AssertFatal(polarParams->K < 129, "K = %d > 128, is not supported yet\n", polarParams->K);
+  AssertFatal(polarParams->K <= 164, "K = %d > 164, is not supported yet\n", polarParams->K);
   const int numbytes = (polarParams->K + 7) / 8;
   const int residue = polarParams->K & 7;
   uint deinterleaving_pattern[polarParams->K];
@@ -332,20 +332,18 @@ void build_polar_tables(t_nrPolar_params *polarParams)
     int numbits = byte < (polarParams->K >> 3) ? 8 : residue;
     for (uint64_t val = 0; val < 256LU; val++) {
       // uint16_t * tmp=polarParams->deinterleaving_pattern+polarParams->K - 1 - 8 * byte;
-      union {
-        uint128_t full;
-        uint64_t pieces[2];
-      } tab = {0};
+      uint64_t tab[3] = {0};
       uint *tmp = deinterleaving_pattern + polarParams->K - 8 * byte - 1;
       for (int i = 0; i < numbits; i++) {
         // flip bit endian of B bitstring
         const int ip = *tmp--;
-        AssertFatal(ip < 128, "ip = %d\n", ip);
-        const uint128_t bit_i = (val >> i) & 1;
-        tab.full |= bit_i << ip;
+        AssertFatal(ip < 164, "ip = %d\n", ip);
+        const uint64_t bit_i = (val >> i) & 1;
+        tab[ip / 64] |= bit_i << (ip % 64);
       }
-      polarParams->cprime_tab0[byte][val] = tab.pieces[0];
-      polarParams->cprime_tab1[byte][val] = tab.pieces[1];
+      polarParams->cprime_tab0[byte][val] = tab[0];
+      polarParams->cprime_tab1[byte][val] = tab[1];
+      polarParams->cprime_tab2[byte][val] = tab[2];
     }
   }
 
@@ -465,11 +463,11 @@ void polar_encoder_fast(uint64_t *A,
 #endif
 
   //  AssertFatal(polarParams->K > 32, "K = %d < 33, is not supported yet\n",polarParams->K);
-  AssertFatal(polarParams->K < 129, "K = %d > 128, is not supported yet\n", polarParams->K);
-  AssertFatal(polarParams->payloadBits < 65, "payload bits = %d > 64, is not supported yet\n", polarParams->payloadBits);
+  AssertFatal(polarParams->K <= 164, "K = %d > 164, is not supported yet\n", polarParams->K);
+  AssertFatal(polarParams->payloadBits <= 140, "payload bits = %d > 140, is not supported yet\n", polarParams->payloadBits);
   int bitlen = polarParams->payloadBits;
   // append crc
-  AssertFatal(bitlen < 129, "support for payloads <= 128 bits\n");
+  AssertFatal(bitlen <= 140, "support for payloads <= 140 bits\n");
   //  AssertFatal(polarParams->crcParityBits == 24,"support for 24-bit crc only for now\n");
   // int bitlen0=bitlen;
 
@@ -536,20 +534,17 @@ void polar_encoder_fast(uint64_t *A,
       tcrc = (uint64_t)((crcmask ^ (crc24c(A64_flip, 8 * offset + bitlen) >> 8))) & 0xffffff;
     else if (polarParams->crcParityBits == 11)
       tcrc = (uint64_t)((crcmask ^ (crc11(A64_flip, bitlen) >> 21))) & 0x7ff;
-  } else if (bitlen <= 128) {
-    uint8_t A128_flip[16 + offset];
-    if (ones_flag) {
-      A128_flip[0] = 0xff;
-      A128_flip[1] = 0xff;
-      A128_flip[2] = 0xff;
+  } else {
+    uint8_t packed[3 + 18] = {0};
+    if (ones_flag) memset(packed, 0xff, 3);
+    for (int i = 0; i < bitlen; ++i) {
+      int bit = bitlen - 1 - i;
+      packed[offset + i / 8] |= ((A[bit / 64] >> (bit % 64)) & 1) << (7 - i % 8);
     }
-    uint128_t Aprime = (uint128_t)(((uint128_t)*A) << (128 - bitlen));
-    for (int i = 0; i < 16; i++)
-      A128_flip[i + offset] = ((uint8_t *)&Aprime)[15 - i];
     if (polarParams->crcParityBits == 24)
-      tcrc = (uint64_t)((crcmask ^ (crc24c(A128_flip, 8 * offset + bitlen) >> 8))) & 0xffffff;
+      tcrc = (crcmask ^ (crc24c(packed, 8 * offset + bitlen) >> 8)) & 0xffffff;
     else if (polarParams->crcParityBits == 11)
-      tcrc = (uint64_t)((crcmask ^ (crc11(A128_flip, bitlen) >> 21))) & 0x7ff;
+      tcrc = (crcmask ^ (crc11(packed, bitlen) >> 21)) & 0x7ff;
   }
 
   // this is number of quadwords in the bit string
@@ -592,10 +587,11 @@ void polar_encoder_fast(uint64_t *A,
                 | polarParams->cprime_tab0[2][Bbyte[2]] | polarParams->cprime_tab0[3][Bbyte[3]]
                 | polarParams->cprime_tab0[4][Bbyte[4]] | polarParams->cprime_tab0[5][Bbyte[5]]
                 | polarParams->cprime_tab0[6][Bbyte[6]] | polarParams->cprime_tab0[7][Bbyte[7]];
-  } else if (polarParams->K < 129) {
-    for (int i = 0; i < 1 + (polarParams->K / 8); i++) {
+  } else {
+    for (int i = 0; i < (polarParams->K + 7) / 8; i++) {
       Cprime[0] |= polarParams->cprime_tab0[i][Bbyte[i]];
       Cprime[1] |= polarParams->cprime_tab1[i][Bbyte[i]];
+      Cprime[2] |= polarParams->cprime_tab2[i][Bbyte[i]];
     }
   }
 

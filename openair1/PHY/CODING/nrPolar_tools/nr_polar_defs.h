@@ -53,7 +53,7 @@ typedef struct decoder_node_t_s {
 
 typedef struct decoder_tree_t_s {
   decoder_node_t *root;
-  simde__m256i buffer[1024]; // seems enough but to be refined
+  simde__m256i buffer[4096]; // full N=512 tree incl. 32-byte-aligned nodes/alpha/beta
 } decoder_tree_t;
 
 typedef struct nrPolar_params {
@@ -90,8 +90,9 @@ typedef struct nrPolar_params {
   const uint8_t **G_N;
   int groupsize;
   int *rm_tab;
-  uint64_t cprime_tab0[16][256];
-  uint64_t cprime_tab1[16][256];
+  uint64_t cprime_tab0[21][256];
+  uint64_t cprime_tab1[21][256];
+  uint64_t cprime_tab2[21][256];
   decoder_tree_t decoder;
   struct {
     int iter;
@@ -99,7 +100,7 @@ typedef struct nrPolar_params {
     struct {
       int op_code;
       decoder_node_t *node;
-    } op_list[600];
+    } op_list[1536];
   } tree_linearization;
 } t_nrPolar_params;
 

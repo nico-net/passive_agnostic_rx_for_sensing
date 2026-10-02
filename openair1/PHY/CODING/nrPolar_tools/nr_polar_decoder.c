@@ -736,7 +736,7 @@ uint32_t polar_decoder_int16(int16_t *input,
   uint64_t rxcrc = B[0] & ((1 << crclen) - 1);
   uint32_t crc = 0;
   uint64_t Ar = 0;
-  AssertFatal(len < 65, "A must be less than 65 bits\n");
+  AssertFatal(len <= 140, "A must be at most 140 bits\n");
 
   // appending 24 ones before a0 for DCI as stated in 38.212 7.3.2
   uint8_t offset = 0;
@@ -785,6 +785,19 @@ uint32_t polar_decoder_int16(int16_t *input,
       crc = (uint64_t)(crc11(A64_flip, 8 * offset + len) >> 21) & 0x7ff;
     else if (crclen == 6)
       crc = (uint64_t)(crc6(A64_flip, 8 * offset + len) >> 26) & 0x3f;
+  } else {
+    uint8_t packed[3 + 18] = {0};
+    if (ones_flag) memset(packed, 0xff, 3);
+    for (int w = 0; w < (len + 63) / 64; ++w)
+      out[w] = (B[w] >> crclen) | (B[w + 1] << (64 - crclen));
+    for (int i = 0; i < len; ++i) {
+      int bit = len - 1 - i;
+      packed[offset + i / 8] |= ((out[bit / 64] >> (bit % 64)) & 1) << (7 - i % 8);
+    }
+    if (crclen == 24) crc = (crc24c(packed, 8 * offset + len) >> 8) & 0xffffff;
+    else if (crclen == 11) crc = (crc11(packed, 8 * offset + len) >> 21) & 0x7ff;
+    else if (crclen == 6) crc = (crc6(packed, 8 * offset + len) >> 26) & 0x3f;
+    Ar = out[0];
   }
 
 #ifdef POLAR_CODING_DEBUG
