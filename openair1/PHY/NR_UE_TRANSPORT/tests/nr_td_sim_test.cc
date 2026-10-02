@@ -399,6 +399,7 @@ TEST(TdSimV2, FailOpenAlwaysFiresOutsideFieldbookTwoWhenPPinsAreActive)
   /* lever P active, fieldbook 0, sibling guard off + physical k0 trap: P pins wrong geometries; without --fo-always nothing reopens them */
   SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 8; c.oracle = 0; c.rntis_per_acq = 1; c.geom_pin = 1; c.cap_s = 300; c.slot_model = 1;
   c.adjacency = 1.0; c.persist = 1.0; c.sib_pmin = 0; c.fo_alpha = 0.3; c.fo_pmin = 0.5;
+  c.cert_evidence = 0; /* the pre-BC9 arm (certified = true): this test needs the uncertified trap passes to count */
   const SimResult off = run_sim(c);
   EXPECT_EQ(off.fail_opens, 0);
   EXPECT_GT(off.wrong_pins, 0);
@@ -793,4 +794,92 @@ TEST(TdSim, K0TrapAdjIsCountedSeparately)
   const SimResult r = run_sim(c);
   EXPECT_GT(r.k0_trap_passes, 0);
   EXPECT_EQ(r.retx_trap_passes, 0);
+}
+/* BC9 simulator part: levers C/P count only CERTIFIED explore passes (certified = k0-unambiguous w.r.t. every alive k0 sibling of the decoded
+ * hypothesis, from OBSERVED DCIs); TDD exclusion mirrors nr_pdsch_config_sweep_exclude (the engine's own per-hypothesis predicate). */
+static SimCfg bc9_cfg()
+{
+  SimCfg c = SimCfg::defaults();
+  c.slot_model = 1; c.oracle = 0; c.crc_accept = 1; c.geom_pin = 1; c.persist = 0.9; c.dci_miss = 0.1; c.dci_false = 1e-3; c.other_ue_occ = 0.1;
+  c.acq = 60; c.seed = 1; c.rntis_per_acq = 1; c.cap_s = 3600;
+  return c;
+}
+/* MEASURED finding (BC9 sim): at persistence 0.9 the physical trap makes the sibling-test decode of the neighbouring slot PASS on almost every RNTI, and
+ * the engine's sibling guard blocks the fast path on ANY sibling pass (certified or not): levers C/P never fire (sib_blocks == RNTIs, 0 accepts/pins in
+ * 480 RNTIs, 2 seeds). Safety then holds because the guard works, not because certification is rare. The firing case needs low persistence. */
+TEST(TdSimBc9, CertifiedPCNeverWrongUnderPhysicalTrap)
+{
+  const SimResult r = run_sim(bc9_cfg()); /* rho 0.9, dci-miss 0.1, dci-false 1e-3, other-ue 0.1 */
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_EQ(r.crc_wrong, 0);
+  EXPECT_GT(r.cert_fed, 0);
+  EXPECT_LE(r.cert_fed, r.fed_all);
+  EXPECT_EQ(r.sib_blocks, r.acquisitions_rntis); /* the guard caught the trap on every RNTI */
+  EXPECT_EQ(r.crc_accepts + r.geom_pins, 0);
+}
+TEST(TdSimBc9, CertifiedPCFiresAndIsNeverWrongWhenNeighboursAreIncompatible)
+{
+  SimCfg c = bc9_cfg(); c.persist = 0.0; c.acq = 30;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_EQ(r.crc_wrong, 0);
+  EXPECT_GT(r.crc_accepts + r.geom_pins, 0); /* the fast path actually fires */
+  EXPECT_GT(r.cert_fed, 0);
+}
+TEST(TdSimBc9, CertifiedPCNeverWrongUnderPhysicalTrapWithTdd)
+{
+  for (double rho : {0.9, 0.0}) {
+    SimCfg c = bc9_cfg(); c.tdd = "DDDSU"; c.persist = rho; c.acq = 30;
+    const SimResult r = run_sim(c);
+    EXPECT_EQ(r.wrong, 0) << rho;
+    EXPECT_EQ(r.wrong_pins, 0) << rho;
+    EXPECT_EQ(r.crc_wrong, 0) << rho;
+    EXPECT_GT(r.tdd_excl_removed, 0) << rho; /* the exclusion fires */
+    if (rho == 0.0) EXPECT_GT(r.crc_accepts + r.geom_pins, 0);
+    SimCfg o = c; o.tdd_exclude = 0;
+    EXPECT_EQ(run_sim(o).tdd_excl_removed, 0) << rho;
+  }
+}
+TEST(TdSimBc9, ExclusionPredicateIsTheEnginesAndPerHypothesis)
+{
+  /* UL slot: k0 impossible; S slot (6 DL symbols): only entries ending at symbol <= 5 survive; D slot: unconstrained */
+  SimCfg c = SimCfg::defaults(); c.tdd = "DDDSU"; c.tdd_s_dl_symbols = 6;
+  SlotTimeline tl(c, 0, 5, 6);
+  long s = 0;
+  while (tl.dir(s) != 'S') s++;
+  nr_td_excl_t e; sim_tdd_excl(tl, s - 1, c, &e); /* DCI slot s-1: k0 = 1 -> the S slot */
+  EXPECT_EQ(e.last[1], 5);
+  EXPECT_EQ(e.last[0], 13);
+  sim_tdd_excl(tl, s, c, &e); /* k0 = 1 -> the U slot */
+  EXPECT_EQ(e.last[1], -1);
+  nr_pdsch_cfg_hypothesis_t h = {};
+  h.k0 = 1; h.tda_start = 2; h.tda_length = 4; /* ends at 5 */
+  sim_tdd_excl(tl, s - 1, c, &e);
+  EXPECT_TRUE(nr_td_excl_admits(&e, &h));
+  h.tda_length = 5; /* ends at 6 > 5 */
+  EXPECT_FALSE(nr_td_excl_admits(&e, &h));
+}
+TEST(TdSimBc9, SlotModelOffKeepsCertifiedTrue)
+{
+  /* v1: the engine is fed certified = true (byte identity); the counters stay zero */
+  SimCfg c = SimCfg::defaults(); c.acq = 3; c.crc_accept = 1; c.geom_pin = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.cert_fed, 0);
+  EXPECT_EQ(r.fed_all, 0);
+}
+TEST(TdSimBc9, CertifiedEvidenceAloneStopsTheWrongPinsOfTheGuardOffArm)
+{
+  /* same arm as FailOpenAlwaysFires...: lever P, sibling guard OFF, persistence 1, adjacency 1 (the neighbour always carries the compatible TB). With
+   * certified = true the trap pins wrong geometries (wrong_pins > 0); with the observed-DCI certified flag the compatible neighbour is never certified, so
+   * the shifted-slot trap passes are not counted and no wrong pin occurs. */
+  SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 8; c.oracle = 0; c.rntis_per_acq = 1; c.geom_pin = 1; c.cap_s = 300; c.slot_model = 1;
+  c.adjacency = 1.0; c.persist = 1.0; c.sib_pmin = 0; c.fo_alpha = 0.3; c.fo_pmin = 0.5;
+  c.cert_evidence = 0;
+  EXPECT_GT(run_sim(c).wrong_pins, 0);
+  c.cert_evidence = 1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_EQ(r.wrong, 0);
 }

@@ -75,6 +75,9 @@ struct SimCfg {
   /* BC7b (K42): 1 (default) = the runtime's monotone per-mask last-symbol SET (obs_record ORs, never re-refines) plus F2 (no restore for a mask a full
    * own set dropped unless g_obs has it); 0 = the BC8 round-2 model (relax to unknown on a contradiction, re-refine on the next observation). Slot model only. */
   int obs_lastset;
+  /* BC9: 1 (default; only acts with --tdd and the slot model) = mirror the runtime's deterministic per-hypothesis TDD exclusion (nr_pdsch_config_sweep_exclude) */
+  int tdd_exclude;
+  int cert_evidence; /* BC9: 1 (default) = slot model feeds the observed-DCI certified flag to the engine; 0 = certified = true (the pre-BC9 arm, for comparison) */
   std::string tdd;
   float sib_pmin, sib_eps; /* sibling guard (engine st->sib_pmin / sib_eps); --sib-pmin 0 disables the guard (fix A only) */
   float w_sib1, w_default, w_obs, w_field, w_probe;
@@ -90,7 +93,7 @@ struct SimCfg {
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
     c.crc_accept = c.geom_pin = c.harq_trap_retx = 0;
     c.slot_model = 0; c.k0_oracle_legacy = 1; c.fo_always = 0; c.truth_k0 = -1;
-    c.other_ue_same_cfg = 0; c.obs_lastset = 1; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
+    c.other_ue_same_cfg = 0; c.obs_lastset = 1; c.tdd_exclude = 1; c.cert_evidence = 1; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
     c.retx_trap = c.k0_trap_adj = 0; c.sib_pmin = 0.05f; c.sib_eps = 1e-6f;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
@@ -110,6 +113,7 @@ struct RntiRec {
   long harq_trap_passes, false_passes;
   long sib_trials, sib_blocks, retx_trap_passes, k0_trap_passes;
   long dci_missed, dci_false, proc_grants, adj_grants, trap_grants, certified_grants, certified_sib, certified_wrong; /* slot model (v2) */
+  long cert_fed = 0, fed_all = 0, cert_pass = 0, pass_all = 0, tdd_excl_removed = 0; /* BC9: explore feeds with certified = true / all explore feeds (slot model); hypotheses removed by the TDD exclusion */
   int truth_k0;
   long restores, restore_hyp; /* restore_observed_typea events / entries re-added */
   long k0_probes, k0_probe_hyp, k0_probe_layers, n_hyp_end; /* I3: runtime k0 >= 2 probe layers */
@@ -144,7 +148,7 @@ struct SimResult {
   long oracle_miss_rntis = 0, oracle_wrong_rntis = 0, harq_trap_passes = 0, false_passes = 0;
   long geom_pins = 0, geom_blocks = 0, crc_accepts = 0, wrong_pins = 0, crc_wrong = 0, sib_trials = 0, sib_blocks = 0, retx_trap_passes = 0, k0_trap_passes = 0;
   double geom_bound = 0, crc_bound = 0;
-  long dci_missed = 0, dci_false = 0, proc_grants = 0, adj_grants = 0, trap_grants = 0, certified_grants = 0, certified_sib = 0, certified_wrong = 0;
+  long dci_missed = 0, dci_false = 0, proc_grants = 0, adj_grants = 0, trap_grants = 0, certified_grants = 0, certified_sib = 0, certified_wrong = 0, cert_fed = 0, fed_all = 0, cert_pass = 0, pass_all = 0, tdd_excl_removed = 0;
   long restores = 0, restore_hyp = 0;
   long k0_probes = 0, k0_probe_hyp = 0, k0_probe_layers = 0, n_hyp_end = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
@@ -421,6 +425,18 @@ static bool sim_certified(SlotTimeline &tl, long t, const SimKey &g, int L, uint
       if (sim_compat_any(x, g, tblmask)) return false;
   }
   return n_sib > 0;
+}
+
+/* BC9: the runtime's TDD exclusion for DCI slot t (nr_pdsch_config_sweep_exclude_key's input): last[k] = highest symbol a k0 = k PDSCH may end on in slot
+ * t + k: UL -> -1 (impossible), mixed -> tdd_s_dl_symbols - 1 (DL symbols precede the common UL symbols), D -> 13. The predicate itself is the engine's. */
+static void sim_tdd_excl(const SlotTimeline &tl, long t, const SimCfg &cfg, nr_td_excl_t *e)
+{
+  nr_td_excl_none(e);
+  for (int k = 0; k <= NR_TD_K0_MAX; k++) {
+    const char d = tl.dir(t + k);
+    if (d == 'U' || d == 'u') e->last[k] = -1;
+    else if (d == 'S' || d == 's') e->last[k] = (int8_t)(cfg.tdd_s_dl_symbols - 1);
+  }
 }
 
 /* Observed-mask set, mirroring nr_pdsch_config_sweep.c obs_set_t / obs_record / obs_admits (OBS_MASKS_MAX = 8; a full set drops new masks): one per RNTI (r->obs)
@@ -854,9 +870,18 @@ static SimResult run_sim(const SimCfg &cfg)
       auto feed_main = [&](bool pass, const Grant &gr) {
         int cls[NR_PDSCH_SWEEP_MAX_HYP];
         const int nc = build_class(out_main_idx, gr, cls);
+        /* BC9: slot model = the grant is k0-unambiguous w.r.t. every alive k0 sibling of the DECODED hypothesis (gr.certified[its k0], computed from
+         * observed DCIs for the truth's row; a hypothesis of another row has no evidence here => not certified). v1 keeps true (byte identity). */
+        bool certified = true;
+        if (cfg.slot_model && cfg.cert_evidence) {
+          const nr_pdsch_cfg_hypothesis_t &hd = st->hyp[out_main_idx];
+          certified = hd.k0 <= 32 && hd.tda_start == T.tda_start && hd.tda_length == T.tda_length && hd.mapping_type == T.mapping_type
+                      && hd.dmrs_mask == T.dmrs_mask && gr.certified[hd.k0];
+          if (pick_kind == NR_TD_PICK_EXPLORE) { rec.fed_all++; rec.cert_fed += certified; rec.pass_all += pass; rec.cert_pass += pass && certified; }
+        }
         if (cfg.equiv)
-          return nr_pdsch_config_sweep_feed_equiv_cx(st.get(), cls, nc, pass, gr.new_tx, pick_kind, true);
-        return nr_pdsch_config_sweep_feed_attr_cx(st.get(), out_main_idx, cls, nc, pass, gr.new_tx, pick_kind, true);
+          return nr_pdsch_config_sweep_feed_equiv_cx(st.get(), cls, nc, pass, gr.new_tx, pick_kind, certified);
+        return nr_pdsch_config_sweep_feed_attr_cx(st.get(), out_main_idx, cls, nc, pass, gr.new_tx, pick_kind, certified);
       };
       for (; g < cap && winner < 0;) {
         g++;
@@ -896,6 +921,12 @@ static SimResult run_sim(const SimCfg &cfg)
           /* alive catalogue offsets / tables of the truth's row (S, L, mapping, mask) incl. dormant ones: conservative (more siblings, harder to certify).
            * NB add_pos / max_len are ignored in the row key: the sibling set is a conservative SUPERSET (entries with other add_pos/max_len but the same
            * mask are equivalent for the occupant check), so it can only make certification harder, never easier. */
+          if (cfg.tdd_exclude && !cfg.tdd.empty()) {
+            nr_td_excl_t ex; sim_tdd_excl(*tl, gr.dci_slot, cfg, &ex);
+            const int before = st->n_hyp;
+            nr_pdsch_config_sweep_exclude(st.get(), &ex); /* 0 = nothing would survive: untouched */
+            rec.tdd_excl_removed += before - st->n_hyp;
+          }
           if (st->n_hyp != k0mask_nhyp) {
             k0mask = 0; tblmask = 0;
             for (int i = 0; i < st->n_hyp; i++) {
@@ -1145,7 +1176,7 @@ static SimResult run_sim(const SimCfg &cfg)
       rec.n_hyp_end = st->n_hyp;
       R.restores += rec.restores; R.restore_hyp += rec.restore_hyp; R.k0_probes += rec.k0_probes; R.k0_probe_hyp += rec.k0_probe_hyp; R.k0_probe_layers += rec.k0_probe_layers; R.n_hyp_end += rec.n_hyp_end;
       R.dci_missed += rec.dci_missed; R.dci_false += rec.dci_false; R.proc_grants += rec.proc_grants; R.adj_grants += rec.adj_grants;
-      R.trap_grants += rec.trap_grants; R.certified_grants += rec.certified_grants; R.certified_sib += rec.certified_sib; R.certified_wrong += rec.certified_wrong;
+      R.trap_grants += rec.trap_grants; R.certified_grants += rec.certified_grants; R.certified_sib += rec.certified_sib; R.certified_wrong += rec.certified_wrong; R.cert_fed += rec.cert_fed; R.fed_all += rec.fed_all; R.cert_pass += rec.cert_pass; R.pass_all += rec.pass_all; R.tdd_excl_removed += rec.tdd_excl_removed;
       R.oracle_miss_rntis += ostate == 1; R.oracle_wrong_rntis += ostate == 2;
       R.harq_trap_passes += rec.harq_trap_passes; R.false_passes += rec.false_passes;
       R.geom_pins += rec.geom_pins; R.geom_blocks += rec.geom_blocks; R.crc_accepts += rec.crc_accepts;
@@ -1204,6 +1235,8 @@ int main(int argc, char **argv)
            "  --slot-model 0|1 (slot-indexed grants per RNTI + PHYSICAL shifted-slot k0 trap + DCI observation + certified flag)\n"
            "  --grant-prob P (per eligible DL slot, default 0.5) --adjacency A (P(grant | previous eligible slot had one); default -1 = i.i.d. grant-prob)\n"
            "  --other-ue-same-cfg 0|1 (other UE's DM-RS add_pos/max_len = the truth's, i.e. few distinct masks; default 0 = any catalogue entry)\n"
+           "  --cert-evidence 1|0 (BC9: 1 = engine certified flag from observed DCIs, default; 0 = always true, the pre-BC9 behaviour)\n"
+           "  --tdd-exclude 1|0 (BC9: mirror the runtime's per-hypothesis TDD exclusion with --tdd + slot model; default 1)\n"
            "  --obs-lastset 1|0 (BC7b K42: 1 = monotone per-mask last-symbol set + no restore of a dropped mask (runtime), default; 0 = BC8 round-2 relax/re-refine)\n"
            "  --other-ue-occ P (another UE's PDSCH overlaps the grant's PRBs in a DL slot; triggers the K39 legacy oracle + wrong mask) --tdd-s-dl-symbols N (6)\n"
            "  --mcs-change P (per-slot MCS redraw, default 1-persist) --snr-rho R (AR(1) SNR, default 0 = i.i.d.)\n"
@@ -1270,6 +1303,8 @@ int main(int argc, char **argv)
     else if (f == "--other-ue-occ") c.other_ue_occ = atof(v);
     else if (f == "--other-ue-same-cfg") c.other_ue_same_cfg = atoi(v);
     else if (f == "--obs-lastset") c.obs_lastset = atoi(v);
+    else if (f == "--tdd-exclude") c.tdd_exclude = atoi(v);
+    else if (f == "--cert-evidence") c.cert_evidence = atoi(v);
     else if (f == "--tdd-s-dl-symbols") c.tdd_s_dl_symbols = atoi(v);
     else if (f == "--mcs-change") c.mcs_change = atof(v);
     else if (f == "--snr-rho") c.snr_rho = atof(v);
@@ -1329,8 +1364,8 @@ int main(int argc, char **argv)
   if (c.slot_model)
     printf(",\"slot_model\":1,\"k0_oracle_legacy\":%d,\"dci_missed\":%ld,\"dci_false\":%ld,\"proc_grants\":%ld,\"adj_grants\":%ld,\"trap_grants\":%ld,"
            "\"certified_grants\":%ld,\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,"
-           "\"n_hyp_end\":%ld,\"restores\":%ld,\"restore_hyp\":%ld,\"obs_lastset\":%d", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
-           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end, r.restores, r.restore_hyp, c.obs_lastset);
+           "\"n_hyp_end\":%ld,\"restores\":%ld,\"restore_hyp\":%ld,\"obs_lastset\":%d,\"cert_fed\":%ld,\"fed_all\":%ld,\"cert_pass\":%ld,\"pass_all\":%ld,\"tdd_excl_removed\":%ld", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
+           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end, r.restores, r.restore_hyp, c.obs_lastset, r.cert_fed, r.fed_all, r.cert_pass, r.pass_all, r.tdd_excl_removed);
   if (c.fo_always && c.fieldbook != 2) printf(",\"fail_opens\":%ld", r.fail_opens);
   if (c.retx_trap > 0 || c.k0_trap_adj > 0 || c.slot_model)
     printf(",\"retx_trap\":%g,\"k0_trap_adj\":%g,\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", c.retx_trap, c.k0_trap_adj, r.retx_trap_passes,
