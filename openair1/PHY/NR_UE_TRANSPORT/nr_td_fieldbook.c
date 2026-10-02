@@ -27,6 +27,7 @@ static void entry_reset(nr_td_field_entry_t *e)
   memset(e, 0, sizeof(*e));
   e->value = -1;
   e->hint_value = -1;
+  e->k0_alt = -1;
   for (int i = 0; i < NR_TD_FB_MAX_CAND; i++)
     e->cand[i].value = -1;
 }
@@ -99,6 +100,8 @@ static void try_promote(nr_td_fieldbook_t *fb, nr_td_field_entry_t *e, uint64_t 
   e->value = e->cand[best].value;
   e->hint_value = e->value;
   e->n_contra = 0;
+  e->k0_alt = -1;
+  e->n_k0_alt = 0;
   e->epoch = fb->epoch;
   e->last_confirmed_slot = slot;
   set_state(fb, e, NR_TD_FS_PROMOTED);
@@ -159,11 +162,55 @@ static void field_observe(nr_td_fieldbook_t *fb, nr_td_field_t f, uint16_t rnti,
   }
 }
 
+#define TDRA_SLM_MASK 0x3FF /* S (4 bits), L (5), mapping (1): the pruning key; k0 is the bits above */
+/* The k0 part of a PROMOTED/SUSPECT TDRA: a winner on the same (S, L, mapping) with another k0 is evidence against the k0 part only. */
+static void tdra_k0_contradict(nr_td_fieldbook_t *fb, nr_td_field_entry_t *e, uint16_t rnti, int k0)
+{
+  if (e->k0_alt != k0) { /* contradicters must agree on ONE other k0 to re-learn it */
+    e->k0_alt = k0;
+    e->n_k0_alt = 0;
+  }
+  add_rnti(e->k0_alt_rnti, &e->n_k0_alt, rnti);
+  if (e->n_k0_alt < fb->withdraw_rntis)
+    return;
+  const int32_t old = e->value, nv = nr_td_pack_tdra((old & 0xF), (old >> 4) & 0x1F, (old >> 9) & 1, k0);
+  nr_td_field_cand_t *oldrow = NULL, *newrow = NULL;
+  for (int i = 0; i < NR_TD_FB_MAX_CAND; i++) {
+    if (e->cand[i].value == old)
+      oldrow = &e->cand[i];
+    if (e->cand[i].value == nv)
+      newrow = &e->cand[i];
+  }
+  if (oldrow && !newrow)
+    oldrow->value = nv; /* the S/L/mapping supporters carry over: only the k0 part changed */
+  else if (oldrow)
+    oldrow->value = -1;
+  e->value = nv;
+  e->hint_value = nv;
+  e->k0_alt = -1;
+  e->n_k0_alt = 0;
+  fb->n_k0_relearned++;
+  fb->generation++; /* hints (ordering) changed; pruning did not */
+}
+
 void nr_td_fieldbook_converged(nr_td_fieldbook_t *fb, uint16_t rnti, const nr_pdsch_cfg_hypothesis_t *h, uint64_t slot,
                                uint32_t pruned_fields)
 {
-  if (!(pruned_fields & (1u << NR_TD_F_TDRA)))
-    field_observe(fb, NR_TD_F_TDRA, rnti, nr_td_pack_tdra(h->tda_start, h->tda_length, h->mapping_type, h->k0), slot);
+  nr_td_field_entry_t *te = &fb->f[NR_TD_F_TDRA];
+  const int32_t tv = nr_td_pack_tdra(h->tda_start, h->tda_length, h->mapping_type, h->k0);
+  if ((te->state == NR_TD_FS_PROMOTED || te->state == NR_TD_FS_SUSPECT) && ((te->value ^ tv) & TDRA_SLM_MASK) == 0) {
+    /* same (S, L, mapping): k0 is the only open question, and it was never pruned, so the winner is independent evidence for it */
+    if (te->value == tv) {
+      te->k0_alt = -1;
+      te->n_k0_alt = 0;
+    } else {
+      tdra_k0_contradict(fb, te, rnti, h->k0);
+    }
+    if (!(pruned_fields & (1u << NR_TD_F_TDRA)) && te->value == tv)
+      field_observe(fb, NR_TD_F_TDRA, rnti, tv, slot);
+  } else if (!(pruned_fields & (1u << NR_TD_F_TDRA))) {
+    field_observe(fb, NR_TD_F_TDRA, rnti, tv, slot);
+  }
   if (!(pruned_fields & (1u << NR_TD_F_DMRS_ADD_POS)))
     field_observe(fb, NR_TD_F_DMRS_ADD_POS, rnti, h->dmrs_add_pos, slot);
   if (!(pruned_fields & (1u << NR_TD_F_DMRS_MAX_LEN)))
@@ -204,8 +251,8 @@ bool nr_td_fieldbook_prunes(const nr_td_fieldbook_t *fb, nr_td_field_t f, int32_
 bool nr_td_fieldbook_hyp_matches(nr_td_field_t f, int32_t value, const nr_pdsch_cfg_hypothesis_t *h)
 {
   switch (f) {
-    case NR_TD_F_TDRA:
-      return value == nr_td_pack_tdra(h->tda_start, h->tda_length, h->mapping_type, h->k0);
+    case NR_TD_F_TDRA: /* (S, L, mapping) only: k0 is never a pruning key (see the header, BC6b) */
+      return ((value ^ nr_td_pack_tdra(h->tda_start, h->tda_length, h->mapping_type, h->k0)) & TDRA_SLM_MASK) == 0;
     case NR_TD_F_DMRS_ADD_POS:
       return value == h->dmrs_add_pos;
     case NR_TD_F_DMRS_MAX_LEN:
@@ -228,6 +275,8 @@ void nr_td_fieldbook_force_promote(nr_td_fieldbook_t *fb, nr_td_field_t f, int32
   e->value = value;
   e->hint_value = value;
   e->n_contra = 0;
+  e->k0_alt = -1;
+  e->n_k0_alt = 0;
   e->epoch = fb->epoch;
   set_state(fb, e, NR_TD_FS_PROMOTED);
   fb->generation++; /* a forced re-promote of an already PROMOTED field must still be visible */

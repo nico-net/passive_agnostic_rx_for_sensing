@@ -819,11 +819,20 @@ static SimResult run_sim(const SimCfg &cfg)
       uint64_t k0mask = 0; unsigned tblmask = 0; int k0mask_nhyp = -1; /* slot model: alive k0 offsets / MCS tables of the truth's row, recomputed when the catalogue changes */
       int winner = -1;
       /* BC9 TDD exclusion of a DCI in PDCCH slot x (the engine's predicate). BC9 sim review I1: the truth index is refreshed after any change. */
+      /* BC6b: mirror nr_pdsch_config_sweep_exclude_key (sweep.c ~2183-2224): the row's exclusion is MERGED monotonically (element-wise minimum) and acts only
+       * when it tightened something, so each new DCI phase wipes the evidence at most once; a tightening that would leave nothing is refused (nothing applied). */
+      nr_td_excl_t merged_ex; nr_td_excl_none(&merged_ex);
       auto tdd_exclude_at = [&](long x) {
         nr_td_excl_t ex; sim_tdd_excl(*tl, x, cfg, &ex);
+        nr_td_excl_t m = merged_ex;
+        bool tightened = false;
+        for (int kx = 0; kx <= NR_TD_K0_MAX; kx++)
+          if (ex.last[kx] < m.last[kx]) { m.last[kx] = ex.last[kx]; tightened = true; }
+        if (!tightened) return;
         const int before = st->n_hyp;
         const bool had_truth = ti >= 0;
-        nr_pdsch_config_sweep_exclude(st.get(), &ex); /* 0 = nothing would survive: untouched */
+        if (nr_pdsch_config_sweep_exclude(st.get(), &m) == 0) return; /* 0 = nothing would survive: refused, untouched, not persisted */
+        merged_ex = m;
         rec.tdd_excl_removed += before - st->n_hyp;
         if (st->n_hyp != before) {
           find_truth();
@@ -1035,10 +1044,12 @@ static SimResult run_sim(const SimCfg &cfg)
         std::vector<char> pre_act; /* the engine active set just before the call (honours every dormancy cause incl. an earlier GEOM pin) */
         uint64_t pre_gdorm[NR_TD_DWORDS];
         uint64_t pre_gkey = 0; /* geometry of the single pass slot = the group a pin in this call keeps */
+        bool pre_single = false; /* lever P could pin in this call (one pass slot): the only state in which a GEOM-mask change is a pin */
+        bool pin_event = false;  /* BC6b: lever P actually pinned in this call (mask change right after the feed, before any exclusion compaction) */
         std::vector<uint16_t> pre_fp; /* the pin restarts the engine evidence (fp_trials cleared): keep the explore-trial counts it was decided on */
         if (cfg.geom_pin) {
           memcpy(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm));
-          if (st->n_geom == 1) { pre_act.resize(st->n_hyp); for (int i = 0; i < st->n_hyp; i++) pre_act[i] = nr_pdsch_config_sweep_is_active(st.get(), i); pre_gkey = st->geom_key[0]; pre_fp.assign(st->fp_trials, st->fp_trials + st->n_hyp); if (pick_kind == NR_TD_PICK_EXPLORE) pre_fp[out_main_idx]++; }
+          if (st->n_geom == 1) { pre_single = true; pre_act.resize(st->n_hyp); for (int i = 0; i < st->n_hyp; i++) pre_act[i] = nr_pdsch_config_sweep_is_active(st.get(), i); pre_gkey = st->geom_key[0]; pre_fp.assign(st->fp_trials, st->fp_trials + st->n_hyp); if (pick_kind == NR_TD_PICK_EXPLORE) pre_fp[out_main_idx]++; }
         }
         if (cfg.equiv && cfg.K > 1) {
           /* Lever E: the main decode credits its grant-equivalence class; probe outcomes keep feed_k (probes unchanged). */
@@ -1063,6 +1074,7 @@ static SimResult run_sim(const SimCfg &cfg)
         } else {
           winner = nr_pdsch_config_sweep_feed_k(st.get(), out, n);
         }
+        if (cfg.geom_pin) pin_event = pre_single && memcmp(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm)) != 0;
         /* BC9d: a CRC pass of the main (full-TB) decode confirms this genuine DCI; only then (default) does it feed the hard TDD exclusion, AFTER
          * the trial's feedback (the runtime order: KL feedback, census, confirmation). Not once a winner is out (an exclusion re-indexes the state). */
         if (cfg.slot_model && out[0].result == NR_TD_PASS) {
@@ -1073,7 +1085,7 @@ static SimResult run_sim(const SimCfg &cfg)
         rec.sib_blocks += !pre_sib_blocked && st->sib_blocked;
         if (cfg.geom_pin) {
           rec.geom_blocks += !pre_blocked && st->geom_blocked;
-          rec.geom_pins += memcmp(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm)) != 0;
+          rec.geom_pins += pin_event; /* a compaction by a later exclusion is not a pin (BC6b) */
         }
         if (winner >= 0 && st->winner_by_crc) {
           rec.crc_accepts++;
@@ -1086,7 +1098,7 @@ static SimResult run_sim(const SimCfg &cfg)
             if (nr_pdsch_config_sweep_is_active(st.get(), i) && !is_truth(st->hyp[i])) b += sim_binom_pf((double)st->fp_trials[i], m, cfg.crc_false);
           rec.crc_bound += std::min(1.0, b);
         }
-        if (cfg.geom_pin && memcmp(pre_gdorm, st->dormant[NR_TD_DORMANT_GEOM], sizeof(pre_gdorm)) != 0) {
+        if (pin_event) {
           /* Lever P bound at the pin: n_groups/T_max over the hypotheses active just BEFORE it (every cause but GEOM), then
            * sum over WRONG groups g of C(T_g, m) pf^m, T_g = EXPLORE trials of all members of g. A pin to a group other than the truth's is a wrong pin. */
           auto pre_active = [&](int i) { return i < (int)pre_act.size() && pre_act[i]; }; /* same active set the engine used for n_groups / T_g */
@@ -1141,7 +1153,7 @@ static SimResult run_sim(const SimCfg &cfg)
                 for (int kk = 2; kk <= 18; kk++) {
                   const SimSlot fs = tl->slot(gr.dci_slot + kk);
                   if ((fs.occ.present && fs.occ.key.prb == gr.key.prb) || fs.other) {
-                    const int add = nr_pdsch_config_sweep_add_k0_layer(st.get(), (uint8_t)kk);
+                    const int add = nr_pdsch_config_sweep_add_k0_layer_excl(st.get(), (uint8_t)kk, &merged_ex); /* BC6b: refused / tail-trimmed under the row's exclusion, no wipe */
                     rec.k0_probe_hyp += add;
                     rec.k0_probe_layers += add > 0;
                   }
@@ -1205,7 +1217,7 @@ static SimResult run_sim(const SimCfg &cfg)
         for (int j = 0; j < cfg.rntis_per_acq; j++) {
           if (!relied[j].conv || relied[j].counted) continue;
           for (int f = 0; f < NR_TD_F_COUNT; f++)
-            if ((relied[j].bits >> f & 1) && (nr_td_fieldbook_state(&fb, (nr_td_field_t)f) != NR_TD_FS_PROMOTED || fb.f[f].value != relied[j].val[f])) {
+            if ((relied[j].bits >> f & 1) && (nr_td_fieldbook_state(&fb, (nr_td_field_t)f) != NR_TD_FS_PROMOTED || ((fb.f[f].value ^ relied[j].val[f]) & (f == NR_TD_F_TDRA ? 0x3FF : -1)) != 0)) {
               relied[j].counted = true; R.untrusted_after++; break;
             }
         }

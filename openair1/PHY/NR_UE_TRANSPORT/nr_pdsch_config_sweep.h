@@ -441,6 +441,10 @@ void nr_td_excl_none(nr_td_excl_t *e);
 bool nr_td_excl_admits(const nr_td_excl_t *e, const nr_pdsch_cfg_hypothesis_t *h);
 /** Pure: prune_keep(st, admits) (0 = nothing would survive: untouched; unchanged count = evidence kept). */
 int nr_pdsch_config_sweep_exclude(nr_pdsch_config_sweep_state_t *st, const nr_td_excl_t *e);
+/** State-level add_k0 under an exclusion (BC6b; mirrors nr_pdsch_config_sweep_add_k0 + the certification bind): refuses a layer whose k0 `e` leaves
+ *  no legal entry (returns 0), else appends it and drops the appended entries `e` excludes by tail truncation (no evidence wipe, no reindex).
+ *  Returns the number of entries kept. */
+int nr_pdsch_config_sweep_add_k0_layer_excl(nr_pdsch_config_sweep_state_t *st, uint8_t k0, const nr_td_excl_t *e);
 /** Live, keyed by (configuration, RNTI, TDA row): intersects e into the key's persisted constraint and binds every live
  *  context of that key. Refuses (returns -1, nothing changes) a constraint that would leave no k0 of the row's universe
  *  ({0,1}, the RNTI's k0-oracle layers) with any legal entry -- evidence that an assumption (A1-A3) failed. Else returns

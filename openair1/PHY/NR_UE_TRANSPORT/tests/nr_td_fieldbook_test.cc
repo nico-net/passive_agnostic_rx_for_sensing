@@ -292,7 +292,55 @@ TEST(FieldBookSM, ReconfirmWorksWithFullSupportSet) {
 TEST(FieldBookSM, HypMatchesMappingAndK0) {
   auto a = Hq(2, 12);
   EXPECT_FALSE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 1, 0), &a));
-  EXPECT_FALSE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 0, 3), &a));
+  EXPECT_TRUE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 0, 3), &a)); /* BC6b: k0 is never part of the prune predicate */
+}
+TEST(FieldBookSM, FieldBookTdraPruneIgnoresK0) {
+  auto a = Hq(2, 12);
+  for (int k0 = 0; k0 <= 32; k0++) {
+    a.k0 = k0;
+    EXPECT_TRUE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 0, 0), &a)) << k0;
+    EXPECT_TRUE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 0, 5), &a)) << k0;
+  }
+  a.k0 = 0;
+  EXPECT_FALSE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(1, 12, 0, 0), &a)); /* S, L, mapping still prune */
+  EXPECT_FALSE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 11, 0, 0), &a));
+  EXPECT_FALSE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, nr_td_pack_tdra(2, 12, 1, 0), &a));
+}
+TEST(FieldBookSM, WinnerDifferingOnlyInK0ContradictsK0Part) {
+  nr_td_fieldbook_t fb; nr_td_fieldbook_init(&fb, 2, 2);
+  auto a = Hq(2, 12), b = Hq(2, 12);
+  a.k0 = 0; b.k0 = 1;
+  nr_td_fieldbook_converged(&fb, 1, &a, 0, 0); nr_td_fieldbook_converged(&fb, 2, &a, 0, 0);
+  ASSERT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_PROMOTED);
+  const uint32_t g0 = fb.generation;
+  nr_td_fieldbook_converged(&fb, 3, &b, 0, 1u << NR_TD_F_TDRA); /* pruned context: still k0-independent evidence */
+  EXPECT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_PROMOTED); /* S/L/mapping support is not withdrawn, not even SUSPECT */
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].n_contra, 0);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(2, 12, 0, 0)); /* one k0 contradiction is not enough */
+  EXPECT_EQ(fb.generation, g0);
+  nr_td_fieldbook_converged(&fb, 3, &b, 0, 0); /* the same RNTI again does not count twice */
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(2, 12, 0, 0));
+  nr_td_fieldbook_converged(&fb, 4, &b, 0, 0);  /* a second distinct RNTI: the k0 part is re-learned */
+  EXPECT_EQ(nr_td_fieldbook_state(&fb, NR_TD_F_TDRA), NR_TD_FS_PROMOTED);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(2, 12, 0, 1));
+  EXPECT_EQ(fb.n_withdrawn, 0u);
+  int32_t v;
+  EXPECT_TRUE(nr_td_fieldbook_prunes(&fb, NR_TD_F_TDRA, &v)); /* the prune never lapsed */
+  auto c = Hq(2, 12); c.k0 = 0;
+  EXPECT_TRUE(nr_td_fieldbook_hyp_matches(NR_TD_F_TDRA, v, &c)); /* and still keeps the k0 = 0 sibling */
+  nr_td_side_info_t s = si0(); nr_td_fieldbook_fill_side_info(&fb, &s);
+  EXPECT_EQ(s.f_k0, 1);
+}
+TEST(FieldBookSM, K0ContradictionsOfDifferentK0DoNotCombine) {
+  nr_td_fieldbook_t fb; nr_td_fieldbook_init(&fb, 2, 2);
+  auto a = Hq(2, 12), b = Hq(2, 12), c = Hq(2, 12);
+  a.k0 = 0; b.k0 = 1; c.k0 = 2;
+  nr_td_fieldbook_converged(&fb, 1, &a, 0, 0); nr_td_fieldbook_converged(&fb, 2, &a, 0, 0);
+  nr_td_fieldbook_converged(&fb, 3, &b, 0, 0); nr_td_fieldbook_converged(&fb, 4, &c, 0, 0);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(2, 12, 0, 0));
+  nr_td_fieldbook_converged(&fb, 5, &a, 0, 0); /* a confirming RNTI clears the pending k0 evidence */
+  nr_td_fieldbook_converged(&fb, 6, &b, 0, 0);
+  EXPECT_EQ(fb.f[NR_TD_F_TDRA].value, nr_td_pack_tdra(2, 12, 0, 0));
 }
 TEST(FieldBookSM, PrunedConvergeDoesNotContradict) {
   nr_td_fieldbook_t fb; nr_td_fieldbook_init(&fb, 2, 2); auto a = Hq(2, 12), b = Hq(1, 13);

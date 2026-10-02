@@ -8,7 +8,17 @@
 extern "C" {
 #endif
 typedef enum { NR_TD_F_TDRA = 0, NR_TD_F_DMRS_ADD_POS, NR_TD_F_DMRS_MAX_LEN, NR_TD_F_COUNT } nr_td_field_t;
-/* MCS table is deliberately NOT a field (UE-capability specific; never promoted). TDRA value packs S,L,mapping,k0. */
+/* MCS table is deliberately NOT a field (UE-capability specific; never promoted). TDRA value packs S,L,mapping,k0.
+ *
+ * BC6b: the k0 part of the TDRA value is a vote and an ordering hint only, NEVER a pruning key. nr_td_fieldbook_hyp_matches(TDRA) compares
+ * (S, L, mapping) and ignores k0. Reason: a promoted TDRA whose k0 alone is wrong (a stale or a trap-corrupted promotion) would, if it pruned
+ * on k0, put the TRUE entry to sleep while its k0 sibling (which the shifted-slot HARQ trap lets pass) stays active; KL acceptance has no
+ * sibling guard, fail-open is reset by every sibling pass, and a pruned field casts no contradicting vote, so the sibling is accepted and
+ * nothing recovers (BC6 anomaly 2). k0 is removed only by certified evidence (K39 certification, BC9/BC9d exclusions: BC7/BC9d).
+ * A converged winner with the promoted (S, L, mapping) but another k0 is a contradiction of the k0 PART only (own distinct-RNTI set, kept
+ * across the whole epoch of the entry); the S/L/mapping support and the PROMOTED state are untouched. withdraw_rntis distinct RNTIs agreeing on
+ * the same other k0 re-learn the k0 part in place (n_k0_relearned++). This is evaluated for pruned contexts as well: k0 was not pruned there,
+ * so the winner's k0 is independent evidence. */
 #define NR_TD_FB_MAX_RNTI 16
 #define NR_TD_FB_MAX_CAND 4
 /* One candidate value of a field with its own distinct-RNTI support set (order-independent promotion). */
@@ -30,6 +40,10 @@ typedef struct {
   int n_contra; /* distinct RNTIs contradicting `value` in the current epoch (cleared on epoch bump) */
   uint32_t epoch; /* config_epoch when last confirmed */
   uint64_t last_confirmed_slot;
+  /* TDRA only (BC6b): k0 the winners of the k0-only contradictions agree on (-1 none), with their distinct RNTIs */
+  int32_t k0_alt;
+  uint16_t k0_alt_rnti[NR_TD_FB_MAX_RNTI];
+  int n_k0_alt;
 } nr_td_field_entry_t;
 typedef struct {
   nr_td_field_entry_t f[NR_TD_F_COUNT];
@@ -39,6 +53,7 @@ typedef struct {
   uint32_t generation; /* bumped on every change that affects pruning or hints: promote, suspect, reconfirm, withdraw, force_promote, epoch bump.
                        UNSEEN->CANDIDATE does not bump. */
   uint32_t n_withdrawn;
+  uint32_t n_k0_relearned; /* TDRA k0 part replaced in place (S/L/mapping stayed PROMOTED) */
 } nr_td_fieldbook_t;
 void nr_td_fieldbook_init(nr_td_fieldbook_t *fb, int promote_rntis, int withdraw_rntis);
 int32_t nr_td_pack_tdra(int S, int L, int mapping, int k0);

@@ -392,7 +392,8 @@ TEST(TdSimV2, InjectWrongFieldThreeDiffersOnlyInK0AndRecovers)
   EXPECT_EQ(r.injected, c.acq);
   EXPECT_EQ(r.inject_skipped, 0);
   EXPECT_EQ(r.wrong, 0);
-  EXPECT_GT(r.fail_opens, 0); /* the dormant true sibling can only be recovered by fail-open */
+  EXPECT_EQ(r.fail_opens, 0); /* BC6b: the truth is never dormant (pruning ignores k0), so no fail-open is needed; the k0 part is re-learned instead */
+  EXPECT_EQ(r.recovery_never, 0);
 }
 TEST(TdSimV2, FailOpenAlwaysFiresOutsideFieldbookTwoWhenPPinsAreActive)
 {
@@ -950,4 +951,43 @@ TEST(TdSimBc9d, CertConfirmedRemovesCertifiedWrong)
   const SimResult r1 = run_sim(c);
   EXPECT_EQ(r1.certified_wrong, 0);
   EXPECT_LE(r1.certified_grants, r0.certified_grants);
+}
+
+/* ---- BC6b: field-book k0 hole, TDD-exclusion merge, pin counting. Flags = the BC6 gate's common flags (gate_bc.json) ---- */
+static SimCfg bc6_cfg()
+{
+  SimCfg c = SimCfg::defaults();
+  c.slot_model = 1; c.persist = 0.5; c.dci_miss = 0.01; c.dci_false = 1e-3; c.other_ue_occ = 0.1; c.obs_lastset = 1; c.k0_oracle_legacy = 0;
+  c.gate = 1; c.twins = 2; c.K = 1; c.crc_false = 5.96e-8; c.rntis_per_acq = 4; c.sib1 = 1; c.seed = 1;
+  return c;
+}
+TEST(TdSimBc6b, WrongK0OnlyPromotionNeverWrong)
+{
+  /* a force-promoted TDRA with the truth's S/L/mapping and ANOTHER k0 used to put the truth to sleep (BC6: 840-1980 wrong). Pruning ignores k0 now. */
+  SimCfg c = bc6_cfg(); c.acq = 12; c.oracle = 0; c.fieldbook = 2; c.inject_wrong_field = 3; c.persist = 0.9; c.adjacency = 1.0;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.injected, c.acq);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.recovery_never, 0); /* the wrong k0 part is re-learned from the converged winners */
+}
+TEST(TdSimBc6b, TddExclusionMergeNoWipeStorm)
+{
+  /* oracle 1 + DDDSU: every k0 = 1 truth probes k0 >= 2 layers and every confirmed DCI of another phase excludes some of them again. Per-DCI
+   * exclusions without the runtime's per-row merge wiped the KL evidence 1000-1600 times per RNTI (BC6: every k0 = 1 truth undecidable). */
+  SimCfg c = bc6_cfg(); c.acq = 5; c.rntis_per_acq = 1; c.oracle = 1; c.tdd = "DDDSU"; c.truth_k0 = 1; c.n_rx = 4;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.undecidable, 0);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.truth_excluded, 0);
+}
+TEST(TdSimBc6b, PinCountedOncePerLeverRun)
+{
+  /* cp_nog DDDSU: a confirmed-DCI exclusion after a pin compacts the GEOM mask; that is not a second pin and not a wrong one (BC6 anomaly 3,
+   * acq 191 rank 2 of the 4 RX cell: one real pin on the truth's geometry, then a fake "pin" from the compaction). */
+  SimCfg c = bc6_cfg(); c.acq = 200; c.oracle = 0; c.tdd = "DDDSU"; c.crc_accept = 1; c.geom_pin = 1; c.sib_pmin = 0; c.n_rx = 4;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.geom_pins, 0);
+  EXPECT_EQ(r.wrong_pins, 0);
+  EXPECT_EQ(r.wrong, 0);
+  for (const RntiRec &x : r.recs) EXPECT_LE(x.geom_pins, 1) << "acq " << x.acq << " rank " << x.rnti_rank;
 }

@@ -1527,6 +1527,26 @@ int nr_pdsch_config_sweep_exclude(nr_pdsch_config_sweep_state_t *st, const nr_td
   return nr_pdsch_config_sweep_prune_keep(st, excl_keep, e);
 }
 
+/* BC6b: the state-level twin of nr_pdsch_config_sweep_add_k0 on a context that carries the exclusion `e` (same refusal, same tail truncation
+ * as add_k0 + apply_cert_from, sweep.c add_k0): a layer whose k0 `e` leaves no legal entry (last[k0] < 1) is refused, otherwise it is appended and the
+ * appended entries `e` excludes are dropped again WITHOUT the evidence wipe (prune_commit_tail: [0, base) and its evidence stay). */
+int nr_pdsch_config_sweep_add_k0_layer_excl(nr_pdsch_config_sweep_state_t *st, uint8_t k0, const nr_td_excl_t *e)
+{
+  if (st == NULL || e == NULL || k0 > NR_TD_K0_MAX || e->last[k0] < 1)
+    return 0;
+  const int n0 = st->n_hyp;
+  const int added = nr_pdsch_config_sweep_add_k0_layer(st, k0);
+  if (added <= 0)
+    return added;
+  int m = n0;
+  for (int i = n0; i < st->n_hyp; i++)
+    if (nr_td_excl_admits(e, &st->hyp[i]))
+      prune_move(st, m++, i);
+  if (m < st->n_hyp)
+    prune_commit_tail(st, m, n0);
+  return m - n0;
+}
+
 /* All shared accesses, including winner publication and reset, use one short mutex. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct {
