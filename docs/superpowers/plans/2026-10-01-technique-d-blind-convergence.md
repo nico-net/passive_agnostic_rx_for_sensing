@@ -40,7 +40,7 @@
 | `openair1/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.{h,c}`, `tests/nr_td_fieldbook_test.cc` | field state machine | BC4 |
 | `tests/passive_rx/td_sim/campaign.py`, `test_campaign.py`, `gate_bc.json`, `results_<date>_bc/` | campaigns | BC0, BC6 |
 
-Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC2b (experimental, operator 2026-10-01) → BC7 (K39) → BC8 (sim v2) → BC9 (DCI adjacency) → BC7b (K42 thrash) → BC10 (fast-path stream) → BC11 (adaptive k0 test) → BC6. BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
+Order (operator-confirmed): BC0 → BC1 → BC3 → BC4 → BC5 → BC2 (experimental) → BC2b (experimental, operator 2026-10-01) → BC7 (K39) → BC8 (sim v2) → BC9 (DCI adjacency) → BC7b (K42 thrash) → BC12a (SIB1 TDRA census, pre-OTA) → BC6 (reduced, operator 2026-10-02); deferred: BC10 (fast-path stream), BC11 (adaptive k0 test), BC12b (after OTA evidence). BC3 and BC4 touch different files and may run in parallel worktrees; BC5 needs both.
 
 ---
 
@@ -701,6 +701,35 @@ confirmation-phase lower bound (assumption: shift-stationarity of the truth's pa
 simulator with non-stationary SNR); neighbours bundled on the same grant; CB0 / abort-after-first-failed-CB decode only
 where the same-decoder rule holds and Nl = 1 (K38). Only certified grants give discrimination credit. Tests include
 `NonStationarySnrNeverWrong`. Commit.
+
+### Task BC12a: SIB1 common-TDRA census for OTA (log only, no behaviour change) (Sonnet) — before the X410 OTA (2026-10-03)
+
+Purpose: measure over the air whether a context's converged (k0, S, L, mapping) equals the SIB1 common TDRA row with the
+DCI's TDA index (or default table A row, 38.214 Table 5.1.2.1.1-2 with the MIB `dmrs-TypeA-Position`), separately for
+DCI 1_0 and 1_1 contexts. SIB1 is used whenever decoded, whatever the network mode (an NSA cell may broadcast SIB1 —
+Swisscom PCI 382, `[HISTORICAL, Switzerland 2026-09-19]`).
+
+- Source: the decoded SIB1 `pdsch-ConfigCommon.pdsch-TimeDomainAllocationList` already passed to the blind monitor
+  (`nr_pdcch_blind_monitor_set_tda_common` or equivalent — find it; if absent, add a read-only accessor fed at SIB1
+  decode); default table A when the list is absent.
+- At every first convergence of a context (rnti, cfg, tda): append to the CONVERGED line `sib1_row=<match|mismatch|
+  none> deftab=<match|mismatch>` with the DCI format; keep counters per DCI format and export them in `ISAC_METRICS`
+  (`td_sib1_tdra_match`, `td_sib1_tdra_mismatch`, `td_sib1_tdra_none`, per 1_0 / 1_1).
+- Tests: unit test of the match predicate (k0, S, L, mapping; type A/B; default table A rows with typeA pos 2/3);
+  metrics JSON keys present. No behaviour change: rfsim regression gate (postconv) still PASS, output identical except
+  the log/metric fields.
+- Commit `feat(rx): SIB1 common-TDRA match census at convergence (OTA evidence, no behaviour change)`.
+
+### Task BC12b: SIB1 common-TDRA as a reversible pruning cause (Opus) — after BC12a OTA evidence
+
+Only if BC12a shows a useful match rate. A new dormant cause `NR_TD_DORMANT_SIB1_TDRA` (causes 5 → 6) set at context
+creation: keep the hypotheses whose (k0, S, L, mapping) equal the SIB1 (or default-table-A) row of the context's TDA
+index; reversible through the existing fail-open; never a certification (the k0-sibling guard must test siblings dormant
+through this cause); flag `ISAC_TD_SIB1_TDRA=0|1` default 0 until validated. Same treatment for DCI 1_0 and 1_1 and for
+SA and NSA (a hard prune for DCI 1_0 per 38.214 Table 5.1.2.1.1-1 is a later option, only with OTA evidence).
+Simulator: `--sib1-tdra-match P` (probability that the truth's row equals the SIB1 row; otherwise a dedicated row
+differs) — measure convergence and fail-open recovery at P ∈ {1.0, 0.8, 0.0}; wrong = 0 hard rule. rfsim gate PASS;
+OTA A/B with the flag.
 
 ### Task BC6: Blind-convergence gate campaign and decisions (Opus decides; 🔁 Haiku runs)
 
