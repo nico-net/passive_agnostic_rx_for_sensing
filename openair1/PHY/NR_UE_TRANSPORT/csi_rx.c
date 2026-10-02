@@ -24,6 +24,8 @@
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
+#include <time.h>
 
 /// Max rx antennas the CSI-RS sensing tap will extract for the receive-array AoA path.
 #define NR_ISAC_CSIRS_MAX_ANT 8
@@ -1290,6 +1292,13 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
     LOG_D(NR_PHY, "SENSING: csirs_monitor resource csi_type=%d not NZP; skipped\n", csirs_config_pdu->csi_type);
     return;
   }
+  static int csirs_timing = -1;
+  if (csirs_timing < 0) {
+    const char *e = getenv("ISAC_PDCCH_TIMING");
+    csirs_timing = e && atoi(e) != 0;
+  }
+  struct timespec cfr_start = {0};
+  if (csirs_timing) clock_gettime(CLOCK_MONOTONIC, &cfr_start);
 
   const NR_DL_FRAME_PARMS *frame_parms = &ue->frame_parms;
   csi_mapping_parms_t      mapping_parms =
@@ -1373,4 +1382,11 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
   nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, &csi_rs_ls_estimated_channel[0][0][0],
                           (size_t)mapping_parms.ports * frame_parms->ofdm_symbol_size, mapping_parms.loverline[0],
                           noise_power);
+  if (csirs_timing) {
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    const uint64_t us = (uint64_t)(end.tv_sec - cfr_start.tv_sec) * 1000000u
+        + (end.tv_nsec - cfr_start.tv_nsec) / 1000u;
+    nr_csirs_blind_rt_cfr_time_us(us);
+  }
 }

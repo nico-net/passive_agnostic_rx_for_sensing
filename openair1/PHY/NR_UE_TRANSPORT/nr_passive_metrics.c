@@ -13,6 +13,8 @@
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pusch_passive_decode.h"
 #include "nr_pusch_passive_queue.h"
+#include "nr_csirs_blind_rt.h"
+__attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
 _Atomic int nr_passive_metrics_pci = -1;
@@ -60,6 +62,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
+  if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
 }
 
 void nr_passive_metrics_emit(void)
@@ -70,7 +73,7 @@ void nr_passive_metrics_emit(void)
   static FILE *f = NULL;
   static int tried = 0;
   nr_passive_metrics_t m;
-  char buf[2048];
+  char buf[4096];
   nr_passive_metrics_collect(&m);
   if (nr_passive_metrics_to_json(&m, buf, sizeof(buf)) < 0) {
     LOG_W(PHY, "SENSING: ISAC_METRICS buffer too small\n");

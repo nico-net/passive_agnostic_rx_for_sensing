@@ -986,6 +986,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_bwp.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
@@ -2580,6 +2581,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_passive_metrics PRIVATE GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_passive_metrics)
   add_test(NAME test_nr_passive_metrics COMMAND ./test_nr_passive_metrics)
+  add_executable(test_nr_csirs_observer ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_observer_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c)
+  target_include_directories(test_nr_csirs_observer PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_observer PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_csirs_observer)
+  add_test(NAME test_nr_csirs_observer COMMAND ./test_nr_csirs_observer)
 
   add_executable(test_nr_passive_job_epoch ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_job_epoch_test.cc)
   target_include_directories(test_nr_passive_job_epoch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
@@ -2621,6 +2629,7 @@ if(ENABLE_TESTS)
   # sources and libraries as test_nr_csirs_blind_synth below.
   add_executable(test_nr_csirs_blind_search ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_search_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
                                             ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
                                             ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c

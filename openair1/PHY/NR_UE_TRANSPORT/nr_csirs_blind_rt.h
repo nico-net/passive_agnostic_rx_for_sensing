@@ -27,6 +27,7 @@
 #define __NR_CSIRS_BLIND_RT_H__
 
 #include "PHY/defs_nr_UE.h"
+#include "nr_passive_metrics.h"
 
 /** Score one candidate against this slot. Safe to call every slot; no-ops unless enabled.
  * `rxdataF` is the frequency-domain slot buffer the monitor already holds. */
@@ -46,4 +47,6 @@ int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_c
  *  which owns the search state. Entries that match no exported ZP geometry are dropped there. */
 void nr_csirs_blind_rt_zp_grant_evidence(uint32_t pdsch_absolute_slot, const fapi_nr_dl_config_csirs_pdu_rel15_t *zp,
                                          double score);
+void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
+void nr_csirs_blind_rt_cfr_time_us(uint64_t us);
 #endif /* __NR_CSIRS_BLIND_RT_H__ */

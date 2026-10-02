@@ -10,6 +10,7 @@
 extern "C" {
 #endif
 #define NR_PASSIVE_METRICS_SCHEMA 1
+#define NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX 16
 typedef struct {
   uint64_t t_mono_ns;       // CLOCK_MONOTONIC at snapshot
   int64_t abs_slot;         // producer absolute slot (nr_ue_diag_producer_absolute_slot), -1 unknown
@@ -23,6 +24,12 @@ typedef struct {
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
+  uint64_t csirs_candidates, csirs_confirmed, csirs_revoked, zp_exported, zp_revoked;
+  uint64_t csirs_search_us, csirs_idsweep_us, csirs_confirm_us, csirs_cfr_us;
+  uint64_t csirs_time_to_confirm_slots_last, csirs_time_to_confirm_slots_sum;
+  uint32_t csirs_confirm_resource_count;
+  uint64_t csirs_confirm_resource_key[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];
+  uint64_t csirs_confirm_resource_slots[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];
 } nr_passive_metrics_t;
 #ifndef __cplusplus
 /* PCI of the locked cell, -1 before PBCH lock. Written by nr-ue.c (relaxed), read by collect (relaxed). */
