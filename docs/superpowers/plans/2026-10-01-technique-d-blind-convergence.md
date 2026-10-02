@@ -726,7 +726,7 @@ Only if BC12a shows a useful match rate. A new dormant cause `NR_TD_DORMANT_SIB1
 creation: keep the hypotheses whose (k0, S, L, mapping) equal the SIB1 (or default-table-A) row of the context's TDA
 index; reversible through the existing fail-open; never a certification (the k0-sibling guard must test siblings dormant
 through this cause); flag `ISAC_TD_SIB1_TDRA=0|1` default 0 until validated. Same treatment for DCI 1_0 and 1_1 and for
-SA and NSA (a hard prune for DCI 1_0 per 38.214 Table 5.1.2.1.1-1 is a later option, only with OTA evidence).
+SA and NSA. Note (BC12a review): Technique D creates contexts only for DCI 1_1 (`!is_dci10`), so the BC12a census answers only the 1_1 question; a DCI 1_0 prune (38.214 Table 5.1.2.1.1-1) would first need DCI 1_0 contexts and its own evidence.
 Simulator: `--sib1-tdra-match P` (probability that the truth's row equals the SIB1 row; otherwise a dedicated row
 differs) — measure convergence and fail-open recovery at P ∈ {1.0, 0.8, 0.0}; wrong = 0 hard rule. rfsim gate PASS;
 OTA A/B with the flag.
