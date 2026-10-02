@@ -142,6 +142,14 @@ FULL JOINT CATALOGUE
     context, logged; their probation continues as today).
   Re-confirmation by a further independent RNTI → PROMOTED (applies to contexts created afterwards); a second
   independent contradiction → WITHDRAWN.
+- **k0 is never a pruning key (BC6b, 2026-10-02).** The TDRA field's mask matches (S, L, mapping) only; k0 stays in the packed value as a vote and
+  an ordering hint. k0 is removed only by certified evidence (K39 certification, BC9/BC9d confirmed-DCI exclusions). Reason: a TDRA promoted with a
+  wrong k0 alone would put the truth to sleep while its trap-passing k0 sibling stays active; KL acceptance has no sibling guard, fail-open is reset by
+  every sibling pass, and a pruned field casts no contradicting vote (BC6 anomaly 2: 840-1980 of 2000 wrong). A converged winner with the promoted
+  (S, L, mapping) but another k0 contradicts the **k0 part only**: a separate distinct-RNTI set; the S/L/mapping support and the PROMOTED state are
+  not touched; `withdraw_rntis` (2) distinct RNTIs agreeing on the same other k0 re-learn k0 in place. Chosen over a separate k0 field/counter table
+  because the k0 evidence is the same winners that vote the TDRA, no new candidate table, and the next RNTI keeps pruning on S/L/mapping without a
+  gap (the whole-field SUSPECT of the first scratch version made pruning lapse and slowed the next RNTI).
 - **Independence.** A converged RNTI supports or contradicts field f only if f was **not** pruned in that context
   (or the context was in fail-open when it converged). A context pruned to value v cannot vote for v (circular).
 - **Epochs.** Support and contradiction sets are tagged with `config_epoch`. On an epoch bump PROMOTED/SUSPECT fields
@@ -190,30 +198,32 @@ plus the lever-C stress arm (`--crc-false 1e-3`) compared with the analytical bo
 oracle-1 time not worse than baseline beyond seed noise; field-book recovery from a forced wrong promotion within
 2 RNTIs; blind cold median ≤ 30 s at 4 RX and ≤ 90 s at 1 RX (target — report the gap if missed).
 
-### Decision (BC6, reduced scope, operator 2026-10-02)
+### Decision (BC6, reduced scope, operator 2026-10-02; updated after BC6b)
 
-`[SIMULATED, DGX host, nr_td_sim @c826d0e4ae]`, seed 1, acq 500 x 4 RNTIs per cell, simulator v2 (slot model, physical k0 trap, persist 0.5, DCI miss 0.01 / false 1e-3, other-UE occupancy 0.1, K39 fixed), cell SA. Evidence: `tests/passive_rx/td_sim/results_2026-10-02_bc/` (summary.md, analysis.md), matrix `gate_bc.json`. Monte-Carlo resolution about 3/N = 1.5e-3 per RNTI (N = 2000); the 1e-6 argument is analytical, not measured. Runtime enablement stays an operator decision. Runtime wiring of the field book (`ISAC_TD_FIELDBOOK=2`) is plan R2 and is not built.
+`[SIMULATED, DGX host, nr_td_sim @2588a83cc9]` for every re-run row (BC6b), `[SIMULATED, DGX host, nr_td_sim @c826d0e4ae]` for the rows marked "kept" in summary.md. Seed 1, acq 500 x 4 RNTIs per cell, simulator v2 (slot model, physical k0 trap, persist 0.5, DCI miss 0.01 / false 1e-3, other-UE occupancy 0.1, K39 fixed), cell SA. Evidence: `tests/passive_rx/td_sim/results_2026-10-02_bc/` (summary.md, analysis.md), matrices `gate_bc.json`, `gate_bc_supp.json`. Monte-Carlo resolution about 3/N = 1.5e-3 per RNTI (N = 2000); the 1e-6 argument is analytical, not measured. Runtime enablement stays an operator decision. Runtime wiring of the field book (`ISAC_TD_FIELDBOOK=2`) is plan R2 and is not built.
+
+The first BC6 decision (fb2 NOT RECOMMENDED because recovery failed) rested on a field-book defect (the TDRA mask pinned k0) and two simulator artefacts (TDD-exclusion merge; pin counting). All three are fixed in BC6b and the affected cells re-run: 10 oracle-1 DDDSU cells, 24 fb2 / fb2_inject / fb2_cp cells, 10 supplementary cells.
 
 | criterion | fb2 | C/P certified (cp) | fb2 + C/P |
 |---|---|---|---|
-| 0 wrong winners (non-injected, 8 cells) | PASS (0/2000 each) | PASS | PASS |
-| 0 wrong pins | PASS | PASS (but P never fired) | PASS (P never fired) |
-| undecidable <= baseline | PASS (equal) | PASS | PASS |
-| oracle-1 time <= baseline + noise | PASS (cold equal, steady 0.35 vs 121.6 s at 4 RX none) | PASS (equal: levers inert) | PASS |
-| recovery from injected wrong promotion within 2 RNTIs | FAIL: recovery_never 404-497 of 500 acquisitions, 840-1980 of 2000 RNTIs wrong in the inject arm | not run (not in the operator matrix) | not run |
-| stress vs analytical bound (oracle 0, crc-false 1e-3) | n/a | PASS but vacuous: crc_accepts = geom_pins = 0, bound 0 | n/a |
-| blind cold median <= 30 s (4 RX) / 90 s (1 RX) | FAIL (301 / 435 s none; 179 / 257 s DDDSU) | FAIL (same) | FAIL |
+| 0 wrong winners (every cell, incl. inject) | PASS (0/2000 in all 24 fb2, fb2_inject and fb2_cp cells) | PASS | PASS |
+| 0 wrong pins | PASS | PASS (P never fired under the guard) | PASS (P never fired) |
+| undecidable <= baseline | PASS (0 everywhere; oracle-1 DDDSU now 0, the 1072 was a simulator artefact) | PASS | PASS |
+| oracle-1 time <= baseline + noise | PASS (cold equal; steady 2.77 vs 54.55 s median at 4 RX none, 1.01 vs 19.2 s DDDSU) | PASS (equal) | PASS |
+| recovery from the injected wrong promotion within 2 RNTIs | PASS: recovery_never 0/500 in all 8 cells, 2.00 RNTIs, wrong 0 (k0-only injection; the S/L/mapping and DM-RS injections are unit-tested, not re-run in the matrix) | not run | not run (same field book) |
+| stress vs analytical bound (oracle 0, crc-false 1e-3) | n/a | PASS but vacuous with the guard on; guard-off stress arms: C crc_wrong 0 (bound 0.064), P wrong_pins 0 (bound 0.096) | n/a |
+| blind cold median <= 30 s (4 RX) / 90 s (1 RX) | FAIL (301 / 435 s none; 179 / 257 s DDDSU, unchanged) | FAIL (same) | FAIL |
 
-Hard-rule events: fb2_inject has wrong > 0 by construction (forced wrong promotion, never withdrawn within the acquisition). Supplementary arm (outside the matrix) cp with the k0-sibling guard disabled (`--sib-pmin 0`), TDD DDDSU: wrong_pins = 1 at 4 RX and at 1 RX (seed 1, acquisition 191 at 4 RX) against an analytical bound of 1.9e-10; the winner stayed correct. That arm is not recommended.
+Hard rule: 0 wrong and 0 wrong_pins in all 52 cells (42 main + 10 supplementary). No violation. The BC6 supplementary event (cp_nog DDDSU wrong_pins 1) was bookkeeping (anomaly 3): 0 after the fix.
 
 Findings:
-- Levers C and P are inert under the default k0-sibling guard under persistent traffic (persist 0.5): crc_accepts = geom_pins = 0 in all 16 cp / fb2_cp cells, sib_blocks 934-2000 at TDD none. They add no speed (blind cold median 301.1 vs 301.3 s at 4 RX). BC9c (count sibling-test trials only on certified grants) is the open lever if C/P are to work under persistent traffic. With the guard disabled they reach 29.1 s (4 RX none) and 40.5 s (1 RX none), but with the wrong-pin event above at DDDSU.
-- fb2 only speeds up later RNTIs (steady 0.3-0.5 s versus 10-120 s); the first two RNTIs of an acquisition are unchanged.
+- fb2 steady speed after the fix: 0.9-1.1 s oracle 0 at TDD none (0.5-0.7 s DDDSU), 2.8-3.8 s oracle 1 (1.0-1.4 s DDDSU), versus 10-120 s prior-only. The earlier 0.33 s was partly the k0 hole (k0 layers pruned away); keeping them active costs about 0.6-2.4 s, still a 15-50x gain. The first two RNTIs of an acquisition are unchanged (cold medians as before).
+- Levers C and P stay inert under the default k0-sibling guard under persistent traffic (persist 0.5): crc_accepts = geom_pins = 0 in all 16 cp / fb2_cp cells. BC9c (count sibling-test trials only on certified grants) is still the open lever if C/P are to work under persistent traffic. With the guard disabled (supplementary, outside the matrix) they reach 29.1 s (4 RX none) and 40.5 s (1 RX none) cold median with 0 wrong and 0 wrong_pins, at DDDSU 69.4 s / 99.5 s.
 
 Recommendation (operator decides):
-- fb2 (reversible field book): NOT RECOMMENDED for runtime enablement yet. Passes the correctness and time criteria, fails the recovery criterion: after a forced wrong promotion the guard recovers in about 2-3 RNTIs only in 1-19 % of acquisitions. Natural wrong promotions are bounded analytically, but the gate asks for recovery. Needs a faster fail-open or withdrawal path, then re-run of the inject arm; plan R2 wiring is not built.
-- C/P with certified evidence (default guard): NOT RECOMMENDED (nothing to enable: inert; no measured gain). Re-evaluate after BC9c.
-- fb2 + C/P: NOT RECOMMENDED (same recovery failure, and C/P inert). No inject arm with C/P was run.
+- fb2 (reversible field book with k0 never pruned): RECOMMENDED for runtime wiring (plan R2) on the simulated evidence: all criteria except the blind cold-median target pass, and fb2 does not claim to meet that target (it speeds later RNTIs only). Conditions: simulator evidence only, seed 1, a k0-only injection in the matrix; wire it with the dormancy and `fail-open` behaviour as built, then verify OTA before relying on it. The k0 rule (section 4) must be kept in the runtime wiring.
+- C/P with certified evidence under the default guard: NOT RECOMMENDED (inert; no measured gain). Re-evaluate after BC9c. The guard-off result (0 wrong, 0 wrong_pins, bounds 2e-10 to 0.1 with the stress arms) is supplementary and not a reason to disable the guard.
+- fb2 + C/P: NOT RECOMMENDED for now (C/P inert); fb2 alone is the candidate.
 
 ## 9. Amendments to the levers spec
 
