@@ -67,6 +67,10 @@ struct SimCfg {
    * 0 = K39 fix (mask + last symbol only, never k0). fo_always 1 = fail-open also outside fieldbook 2. truth_k0 >= 0 forces the truth's k0. */
   int slot_model, k0_oracle_legacy, fo_always, truth_k0;
   double grant_prob, persist, adjacency, dci_miss, dci_false;
+  /* v2 fidelity round 1: other_ue_occ = P(another UE's PDSCH overlaps the grant's PRBs in a DL slot; cell-scrambled DM-RS, wrong mask),
+   * tdd_s_dl_symbols = DL symbols of an 'S' slot, mcs_change = per-slot MCS redraw prob (-1 = 1 - persist), snr_rho = AR(1) SNR coefficient (0 = i.i.d.) */
+  double other_ue_occ, mcs_change, snr_rho;
+  int tdd_s_dl_symbols;
   std::string tdd;
   float sib_pmin, sib_eps; /* sibling guard (engine st->sib_pmin / sib_eps); --sib-pmin 0 disables the guard (fix A only) */
   float w_sib1, w_default, w_obs, w_field, w_probe;
@@ -82,7 +86,7 @@ struct SimCfg {
     c.oracle_miss = c.oracle_wrong = c.harq_trap = c.crc_false = 0;
     c.crc_accept = c.geom_pin = c.harq_trap_retx = 0;
     c.slot_model = 0; c.k0_oracle_legacy = 1; c.fo_always = 0; c.truth_k0 = -1;
-    c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
+    c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
     c.retx_trap = c.k0_trap_adj = 0; c.sib_pmin = 0.05f; c.sib_eps = 1e-6f;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
@@ -103,6 +107,7 @@ struct RntiRec {
   long sib_trials, sib_blocks, retx_trap_passes, k0_trap_passes;
   long dci_missed, dci_false, proc_grants, adj_grants, trap_grants, certified_grants, certified_sib, certified_wrong; /* slot model (v2) */
   int truth_k0;
+  long k0_probes, k0_probe_hyp, k0_probe_layers, n_hyp_end; /* I3: runtime k0 >= 2 probe layers */
   long geom_pins, geom_blocks, crc_accepts; /* lever events in this RNTI (see SimCfg::crc_accept/geom_pin) */
   /* Analytical-bound bookkeeping (spec section 3 evidence standard): wrong_pins = pins that kept a geometry other than the truth's;
    * *_bound = union bound of that event on the run's own trial counts at the event, with p_f = --crc-false (see run_sim). */
@@ -135,6 +140,7 @@ struct SimResult {
   long geom_pins = 0, geom_blocks = 0, crc_accepts = 0, wrong_pins = 0, crc_wrong = 0, sib_trials = 0, sib_blocks = 0, retx_trap_passes = 0, k0_trap_passes = 0;
   double geom_bound = 0, crc_bound = 0;
   long dci_missed = 0, dci_false = 0, proc_grants = 0, adj_grants = 0, trap_grants = 0, certified_grants = 0, certified_sib = 0, certified_wrong = 0;
+  long k0_probes = 0, k0_probe_hyp = 0, k0_probe_layers = 0, n_hyp_end = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
   std::vector<RntiRec> recs;
 };
@@ -209,37 +215,89 @@ static uint64_t mix(uint64_t a, uint64_t b, uint64_t c)
 }
 
 /* ---- Simulator v2: slot-indexed grant timeline (notes section 6) ---- */
-/* The decode computation of one PDSCH as the DCI describes it: TBS (via mcs index), PRBs, layers/ports, rv. Two transmissions are
- * COMPATIBLE (a decode of one can pass as the other) iff all four are equal; used for the physical trap AND the receiver's observed-DCI check. */
+/* DL MCS tables VERBATIM from openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c (Table_51311/12/13: {Qm, 10 x R}); the table index is
+ * nr_pdsch_cfg_hypothesis_t::mcs_table (0 = 38.214 Table 5.1.3.1-1, 1 = -2, 2 = -3). Pinned by TdSimV2.MacMcsTablesPinned. */
+static const uint16_t Table_51311[32][2] = {{2, 1200}, {2, 1570}, {2, 1930}, {2, 2510}, {2, 3080}, {2, 3790}, {2, 4490}, {2, 5260},
+                                            {2, 6020}, {2, 6790}, {4, 3400}, {4, 3780}, {4, 4340}, {4, 4900}, {4, 5530}, {4, 6160},
+                                            {4, 6580}, {6, 4380}, {6, 4660}, {6, 5170}, {6, 5670}, {6, 6160}, {6, 6660}, {6, 7190},
+                                            {6, 7720}, {6, 8220}, {6, 8730}, {6, 9100}, {6, 9480}, {2, 0}, {4, 0}, {6, 0}};
+static const uint16_t Table_51312[32][2] = {{2, 1200}, {2, 1930}, {2, 3080}, {2, 4490}, {2, 6020}, {4, 3780}, {4, 4340},
+                                            {4, 4900}, {4, 5530}, {4, 6160}, {4, 6580}, {6, 4660}, {6, 5170}, {6, 5670},
+                                            {6, 6160}, {6, 6660}, {6, 7190}, {6, 7720}, {6, 8220}, {6, 8730}, {8, 6825},
+                                            {8, 7110}, {8, 7540}, {8, 7970}, {8, 8410}, {8, 8850}, {8, 9165}, {8, 9480},
+                                            {2, 0}, {4, 0}, {6, 0}, {8, 0}};
+static const uint16_t Table_51313[32][2] = {{2, 300},  {2, 400},  {2, 500},  {2, 640},  {2, 780},  {2, 990},  {2, 1200}, {2, 1570},
+                                            {2, 1930}, {2, 2510}, {2, 3080}, {2, 3790}, {2, 4490}, {2, 5260}, {2, 6020}, {4, 3400},
+                                            {4, 3780}, {4, 4340}, {4, 4900}, {4, 5530}, {4, 6160}, {6, 4380}, {6, 4660}, {6, 5170},
+                                            {6, 5670}, {6, 6160}, {6, 6660}, {6, 7190}, {6, 7720}, {2, 0}, {4, 0}, {6, 0}};
+/* (Qm, R) of an MCS index under a table, as one key: Qm << 16 | 10 x R. Two (table, mcs) pairs decode the same computation iff the keys are equal. */
+static uint32_t sim_cr(int table, int mcs)
+{
+  const uint16_t(*t)[2] = table == 0 ? Table_51311 : table == 1 ? Table_51312 : Table_51313;
+  mcs = std::max(0, std::min(31, mcs));
+  return ((uint32_t)t[mcs][0] << 16) | t[mcs][1];
+}
+/* the table choice changes the computation of this MCS index (a twin table is distinguishable on this grant) */
+static bool sim_tbl_differs(int mcs, int ta, int tb) { return sim_cr(ta, mcs) != sim_cr(tb, mcs); }
+
+/* The decode computation of one PDSCH as the DCI describes it: MCS index (-> Qm, R per table), PRBs, layers/ports, rv. */
 struct SimKey { int mcs = 0, rank = 1, prb = 0, rv = 0; };
-static bool sim_compat(const SimKey &a, const SimKey &b) { return a.mcs == b.mcs && a.rank == b.rank && a.prb == b.prb && a.rv == b.rv; }
+/* Compatibility (a decode of one can pass as the other) when the MCS index is read under tables ta (for a) and tb (for b). */
+static bool sim_compat_tbl(const SimKey &a, int ta, const SimKey &b, int tb)
+{
+  return a.rank == b.rank && a.prb == b.prb && a.rv == b.rv && sim_cr(ta, a.mcs) == sim_cr(tb, b.mcs);
+}
+/* The receiver does not know which table an observed DCI used: compatible if ANY pair of ALIVE tables (tblmask bit t) gives the same computation
+ * (notes 1.2: incompatible only if different under EVERY pair of alive tables). */
+static bool sim_compat_any(const SimKey &a, const SimKey &b, unsigned tblmask)
+{
+  if (!tblmask) tblmask = 7;
+  for (int ta = 0; ta < 3; ta++)
+    for (int tb = 0; tb < 3; tb++)
+      if (((tblmask >> ta) & 1) && ((tblmask >> tb) & 1) && sim_compat_tbl(a, ta, b, tb)) return true;
+  return false;
+}
+/* The REAL occupant b (encoded with the true table tt) against grant a decoded under any alive hypothesis table. */
+static bool sim_compat_real(const SimKey &a, const SimKey &b, int tt, unsigned tblmask)
+{
+  if (!tblmask) tblmask = 7;
+  for (int ta = 0; ta < 3; ta++)
+    if (((tblmask >> ta) & 1) && sim_compat_tbl(a, ta, b, tt)) return true;
+  return false;
+}
 struct SimOcc {
   bool present = false, dci_seen = false, new_tx = true, exercised = false;
   SimKey key;
   double snr = 0;
   float snr_est_noise = 0;
 };
-struct SimSlot { SimOcc occ; bool spur = false; SimKey spur_key; };
-/* One RNTI's timeline. Slot s is the PDSCH slot of occ(s); its DCI is in PDCCH slot s - k0 (the TRUE k0). A slot can carry a PDSCH only if it
- * is DL and its DCI slot s - k0 >= 0 is DL ('U' slots carry neither PDSCH nor PDCCH; 'S' counts as DL). Lazily generated, deterministic from the
- * two seeds (srng: traffic, drng: DCI observation / spurious). */
+/* other = another UE's PDSCH overlapping this RNTI's PRBs in this slot (DM-RS is cell-scrambled: it triggers the DM-RS oracle); its mask / last symbol
+ * are those of a random catalogue entry. */
+struct SimSlot { SimOcc occ; bool spur = false; SimKey spur_key; bool other = false; uint32_t other_mask = 0; int other_end = 0; };
+/* One RNTI's timeline. Slot s is the PDSCH slot of occ(s); its DCI is in PDCCH slot s - k0 (the TRUE k0). PDCCH slots: 'D' and 'S'. PDSCH slots: 'D', and 'S'
+ * only when the truth's allocation ends within the S slot's DL symbols (per-hypothesis rule: an entry ending after the last DL symbol cannot be in a
+ * mixed slot); 'U' carries neither. Lazily generated, deterministic from the two seeds (srng: traffic, drng: DCI observation / spurious). Channel and link
+ * adaptation evolve every slot: SNR AR(1) (--snr-rho; 0 = i.i.d.), MCS redrawn per slot with --mcs-change (default 1 - persist), independent of the
+ * allocation (PRB, rank) which repeats per GRANT with --persist. */
 class SlotTimeline {
  public:
-  SlotTimeline(const SimCfg &c, int true_k0, uint64_t seed_s, uint64_t seed_d)
-      : cfg_(c), k0_(true_k0), srng_(seed_s), drng_(seed_d)
+  SlotTimeline(const SimCfg &c, int true_k0, uint64_t seed_s, uint64_t seed_d, bool fit_in_s = true,
+               const std::vector<std::pair<uint32_t, int>> *decoys = nullptr)
+      : cfg_(c), k0_(true_k0), fit_s_(fit_in_s), decoys_(decoys), srng_(seed_s), drng_(seed_d)
   {
     phase_ = cfg_.tdd.empty() ? 0 : (int)(srng_() % cfg_.tdd.size());
     const double A = cfg_.adjacency, pi = cfg_.grant_prob;
     q_ = A < 0 ? pi : (pi >= 1 ? 1.0 : std::min(1.0, pi * (1 - A) / (1 - pi)));
   }
-  bool dl(long s) const
+  char dir(long s) const { return cfg_.tdd.empty() ? 'D' : cfg_.tdd[(size_t)(s + phase_) % cfg_.tdd.size()]; }
+  bool dl(long s) const { return s >= 0 && dir(s) != 'U' && dir(s) != 'u'; } /* PDCCH-capable ('D' or 'S') */
+  bool pdsch_slot_ok(long s, int end_sym) const
   {
-    if (s < 0) return false;
-    if (cfg_.tdd.empty()) return true;
-    const char ch = cfg_.tdd[(size_t)(s + phase_) % cfg_.tdd.size()];
-    return ch != 'U' && ch != 'u';
+    if (!dl(s)) return false;
+    const char d = dir(s);
+    return !(d == 'S' || d == 's') || end_sym <= cfg_.tdd_s_dl_symbols;
   }
-  bool pdsch_possible(long s) const { return dl(s) && dl(s - k0_); }
+  bool pdsch_possible(long s) const { return pdsch_slot_ok(s, fit_s_ ? 0 : 99) && dl(s - k0_); }
   const SimSlot &slot(long s)
   {
     static const SimSlot none;
@@ -281,6 +339,11 @@ class SlotTimeline {
   void gen(long s)
   {
     SimSlot sl;
+    /* channel + link adaptation evolve every slot */
+    const double rho = cfg_.snr_rho;
+    snr_x_ = rho > 0 ? rho * snr_x_ + std::sqrt(1 - rho * rho) * nd_(srng_) : nd_(srng_);
+    const double mc = cfg_.mcs_change < 0 ? 1 - cfg_.persist : cfg_.mcs_change;
+    if (!have_mcs_ || ud_(srng_) < mc) { mcs_ = (int)(ud_(srng_) * 28) % 28; have_mcs_ = true; }
     if (pdsch_possible(s)) {
       bool on;
       if (!seen_elig_) on = cfg_.adjacency >= 0 ? true : ud_(srng_) < cfg_.grant_prob;
@@ -292,20 +355,24 @@ class SlotTimeline {
         SimKey k;
         if (have_prev_ && ud_(srng_) < cfg_.persist) k = prev_key_;
         else {
-          k.mcs = (int)(ud_(srng_) * 28) % 28;
           k.rank = ud_(srng_) < cfg_.rank2_frac ? 2 : 1;
           k.prb = (int)(srng_() % 8);
         }
         prev_key_ = k; have_prev_ = true;
+        k.mcs = mcs_;
         sl.occ.present = true;
         sl.occ.new_tx = ud_(srng_) < 0.75;
         k.rv = sl.occ.new_tx ? 0 : 1 + (int)(srng_() % 3);
         sl.occ.key = k;
-        sl.occ.snr = cfg_.mu + cfg_.fade * nd_(srng_);
-        sl.occ.exercised = ud_(srng_) < cfg_.table_exercise;
+        sl.occ.snr = cfg_.mu + cfg_.fade * snr_x_;
+        sl.occ.exercised = false; /* slot model: derived from the MCS tables (sim_tbl_differs), not drawn */
         sl.occ.snr_est_noise = (float)(cfg_.snr_est_sigma * nd_(srng_));
         sl.occ.dci_seen = ud_(drng_) >= cfg_.dci_miss;
       }
+    }
+    if (decoys_ && !decoys_->empty() && cfg_.other_ue_occ > 0 && dl(s) && ud_(srng_) < cfg_.other_ue_occ) {
+      const std::pair<uint32_t, int> &d = (*decoys_)[(size_t)(srng_() % decoys_->size())];
+      if (pdsch_slot_ok(s, d.second)) { sl.other = true; sl.other_mask = d.first; sl.other_end = d.second; }
     }
     if (dl(s) && cfg_.dci_false > 0 && ud_(drng_) < cfg_.dci_false) {
       sl.spur = true;
@@ -319,28 +386,35 @@ class SlotTimeline {
   }
   const SimCfg &cfg_;
   int k0_, phase_ = 0;
+  bool fit_s_;
+  const std::vector<std::pair<uint32_t, int>> *decoys_;
   std::mt19937_64 srng_, drng_;
   std::uniform_real_distribution<double> ud_{0, 1};
   std::normal_distribution<double> nd_{0, 1};
   std::vector<SimSlot> buf_;
   long base_ = 0, cursor_ = -1;
-  double q_ = 0;
-  bool seen_elig_ = false, prev_on_ = false, have_prev_ = false;
+  double q_ = 0, snr_x_ = 0;
+  int mcs_ = 0;
+  bool seen_elig_ = false, prev_on_ = false, have_prev_ = false, have_mcs_ = false;
   SimKey prev_key_;
 };
-/* Certified flag (notes section 1.2), from OBSERVED DCIs only. Grant g (DCI slot t) is k0-unambiguous for leader L iff for every other
- * catalogue offset k_s a DCI was observed at t + (L - k_s) and every observed DCI there is incompatible with g. A miss, a UL slot or a history gap
- * (nothing observed) => ambiguous; a compatible DCI => ambiguous. `k0mask` = bit k set for every alive catalogue offset k (0..3). */
-static bool sim_certified(SlotTimeline &tl, long t, const SimKey &g, int L, unsigned k0mask)
+/* Certified flag (notes section 1.2), from OBSERVED DCIs only. Grant g (DCI slot t) is k0-unambiguous for leader L iff the sibling set D(L) is NOT EMPTY
+ * and for every other alive catalogue offset k_s a DCI was observed at t + (L - k_s) and every observed DCI there is incompatible with g under EVERY pair
+ * of alive MCS tables. A miss, a UL slot or a history gap (nothing observed) => ambiguous; a compatible DCI => ambiguous. An EMPTY sibling set is never
+ * "certified" (vacuous certification: e.g. every other k0 layer was pruned, so the claim rests on assumption A2 only). `k0mask` = bit k set for every alive
+ * catalogue offset k (0..32), `tblmask` bit t for every alive MCS table. */
+static bool sim_certified(SlotTimeline &tl, long t, const SimKey &g, int L, uint64_t k0mask, unsigned tblmask)
 {
-  for (int ks = 0; ks < 4; ks++) {
+  int n_sib = 0;
+  for (int ks = 0; ks < 33; ks++) {
     if (ks == L || !((k0mask >> ks) & 1)) continue;
+    n_sib++;
     const std::vector<SimKey> obs = tl.observed_dci(t + (L - ks));
     if (obs.empty()) return false;
     for (const SimKey &x : obs)
-      if (sim_compat(x, g)) return false;
+      if (sim_compat_any(x, g, tblmask)) return false;
   }
-  return true;
+  return n_sib > 0;
 }
 
 struct Grant {
@@ -350,9 +424,8 @@ struct Grant {
   float snr_est_noise;
   /* slot model (v2) */
   long dci_slot = 0;
-  bool own_pdsch = true; /* the DCI's own slot carries a same-RNTI PDSCH (always true for k0 = 0) */
   SimKey key;
-  bool certified[4] = {false, false, false, false}; /* per k0 leader; for BC9 (feed_attr) -- NOT passed to the engine here */
+  bool certified[33] = {}; /* per k0 leader; for BC9 (feed_attr) -- NOT passed to the engine here */
 };
 
 /* min(1, C(t, m) * pf^m) in the log domain (0 when t < m or pf <= 0). */
@@ -452,6 +525,9 @@ static SimResult run_sim(const SimCfg &cfg)
     long rec_grants = -1, rec_rntis = -1;
     struct Relied { bool conv = false, counted = false; uint32_t bits = 0; int32_t val[NR_TD_F_COUNT]; };
     std::vector<Relied> relied(cfg.rntis_per_acq);
+    std::vector<std::pair<uint32_t, int>> decoys; /* (dmrs mask, end symbol) of every catalogue entry: what another UE's PDSCH can look like */
+    for (int i = 0; i < n_hyp; i++) decoys.push_back({tmpl->hyp[i].dmrs_mask, tmpl->hyp[i].tda_start + tmpl->hyp[i].tda_length});
+    int n_obs_prev = 0; /* slot model: earlier ok RNTIs that measured their own mask on a DCI's own slot (cell-wide consensus needs 2) */
     int n_ok_prev = 0; /* earlier RNTIs of this acquisition whose oracle state was ok */
     int n_k0claim_prev = 0; /* slot model + legacy oracle: earlier ok RNTIs that made a k0 = 0 claim (cell-wide consensus needs 2) */
     for (int k = 0; k < cfg.rntis_per_acq; k++) {
@@ -464,8 +540,11 @@ static SimResult run_sim(const SimCfg &cfg)
       std::normal_distribution<double> nd(0, 1);
       std::uniform_real_distribution<double> ud(0, 1);
       std::unique_ptr<SlotTimeline> tl;
-      if (cfg.slot_model) tl = std::make_unique<SlotTimeline>(cfg, T.k0, mix(cfg.seed, a, 0x800 + k), mix(cfg.seed, a, 0x900 + k));
-      bool k0_claimed = false;
+      if (cfg.slot_model)
+        tl = std::make_unique<SlotTimeline>(cfg, T.k0, mix(cfg.seed, a, 0x800 + k), mix(cfg.seed, a, 0x900 + k), T.tda_start + T.tda_length <= cfg.tdd_s_dl_symbols,
+                                            &decoys);
+      bool k0_claimed = false, mask_observed = false;
+      long probe_tick = 0; /* jobs with an empty own slot (runtime s_probe_tick: 1 in 8 probes) */
       memcpy((void *)st.get(), (const void *)tmpl.get(), sizeof(*st));
       st->random_state = (uint32_t)mix(cfg.seed, a, 0x300 + k) | 1u; /* engine RNG seeded from --seed */
       nr_td_side_info_t si;
@@ -531,16 +610,19 @@ static SimResult run_sim(const SimCfg &cfg)
        * once a second RNTI has seen the same mask, so RNTIs k >= 2 start already pruned. k0 = the truth's (the oracle
        * measures on the slot of the job that carried the DM-RS). Qm oracle: two-sighting rule, below. */
       uint8_t qm_tables = 0; int qm_obs = 0;
-      /* k0 rule (BC8 ruling 3): slot_model 0 + legacy 1 = v1 (the oracle pins the truth's k0, a perfect oracle); slot_model 1 + legacy 1 = the K39 bug (the
-       * DCI's own slot carries a same-RNTI PDSCH => DM-RS seen => claim k0 = 0, true or not; no claim otherwise); legacy 0 = the
-       * K39 fix (mask + last symbol only, never k0). The mask / last-symbol observation itself happens on every decoded grant in all modes (the true
-       * hypothesis's slot always carries the DM-RS), so the legacy and fixed arms differ ONLY in the k0 claim. */
-      auto do_observe = [&](bool own_pdsch) {
-        const bool pin_truth = !cfg.slot_model && cfg.k0_oracle_legacy, claim0 = cfg.slot_model && cfg.k0_oracle_legacy && own_pdsch;
-        k0_claimed |= claim0;
+      /* k0 rule (BC8 ruling 3). slot_model 0 = v1: every decoded grant observes; legacy 1 pins the truth's k0 (a perfect oracle), legacy 0 never prunes on k0. */
+      auto do_observe = [&]() {
         sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) {
-          return h.dmrs_mask == decoy_mask && h.tda_start + h.tda_length == decoy_end && (pin_truth ? h.k0 == T.k0 : claim0 ? h.k0 == 0 : true);
+          return h.dmrs_mask == decoy_mask && h.tda_start + h.tda_length == decoy_end && (cfg.k0_oracle_legacy ? h.k0 == T.k0 : true);
         });
+      };
+      /* slot model (I1/I2, nr_pdsch_passive_queue.c:577/786): the runtime measures DM-RS ONLY in the DCI's OWN slot, ONLY for a k0 == 0 pick and only on the
+       * grant's PRBs; whatever occupies them (this RNTI's own PDSCH with overlapping PRBs, or another UE's) gives the mask / last symbol. Legacy (K39 bug):
+       * a measurement also claims k0 = 0 (job k0 recorded as observed); fixed: mask + last symbol only. */
+      auto do_observe_slot = [&](uint32_t m, int e) {
+        const bool claim0 = cfg.k0_oracle_legacy;
+        k0_claimed |= claim0;
+        sim_prune(st.get(), [&](const nr_pdsch_cfg_hypothesis_t &h) { return h.dmrs_mask == m && h.tda_start + h.tda_length == e && (claim0 ? h.k0 == 0 : true); });
       };
       /* cell-wide pre-pruning is the consensus of >= 2 earlier RNTIs whose oracles were ok: always the TRUTH's observation */
       auto do_observe_cellwide = [&]() {
@@ -568,11 +650,11 @@ static SimResult run_sim(const SimCfg &cfg)
       };
       if (!fb2) {
         if (use_prior && gprior_valid) sim_prune(st.get(), prior_keep);
-        if (cfg.oracle && k >= 2 && n_ok_prev >= 2) do_observe_cellwide();
+        if (cfg.oracle && k >= 2 && (cfg.slot_model ? n_obs_prev : n_ok_prev) >= 2) do_observe_cellwide();
       } else {
         /* Reversible pruning: the DESTRUCTIVE oracle pre-prune first (it compacts any mask), then the masks (index-based, applied
          * to the final catalogue; the sim never extends the catalogue, so no new entries appear after this point). */
-        if (cfg.oracle && k >= 2 && n_ok_prev >= 2) do_observe_cellwide();
+        if (cfg.oracle && k >= 2 && (cfg.slot_model ? n_obs_prev : n_ok_prev) >= 2) do_observe_cellwide();
         if (use_prior && gprior_valid) sim_dormant(st.get(), NR_TD_DORMANT_PRIOR, prior_keep);
         for (int f = 0; f < NR_TD_F_COUNT; f++) {
           int32_t v;
@@ -585,7 +667,7 @@ static SimResult run_sim(const SimCfg &cfg)
       }
       find_truth();
       bool distinguished = false;
-      unsigned k0mask = 0; int k0mask_nhyp = -1; /* slot model: alive catalogue k0 offsets of the truth's row, recomputed when the catalogue changes */
+      uint64_t k0mask = 0; unsigned tblmask = 0; int k0mask_nhyp = -1; /* slot model: alive k0 offsets / MCS tables of the truth's row, recomputed when the catalogue changes */
       int winner = -1;
       long g = 0;
       std::uniform_real_distribution<double> uf(0, 1);
@@ -603,9 +685,18 @@ static SimResult run_sim(const SimCfg &cfg)
                && h.tda_length == T.tda_length && h.dmrs_add_pos == T.dmrs_add_pos && h.dmrs_max_len == T.dmrs_max_len
                && h.dmrs_mask == T.dmrs_mask && h.mapping_type == T.mapping_type;
       };
+      /* slot model: any k0 != the truth's with otherwise identical content (the runtime adds k0 >= 2 layers) */
+      auto is_k0_sib_any = [&](const nr_pdsch_cfg_hypothesis_t &h) {
+        return h.k0 != T.k0 && h.tda_start == T.tda_start && h.tda_length == T.tda_length && h.dmrs_add_pos == T.dmrs_add_pos
+               && h.dmrs_max_len == T.dmrs_max_len && h.dmrs_mask == T.dmrs_mask && h.mapping_type == T.mapping_type;
+      };
+      /* twin table distinguishable on this grant: v1 = the i.i.d. `exercised` draw; slot model = (Qm, R) of the MCS index differ between the tables (M2) */
+      auto twin_differs = [&](const nr_pdsch_cfg_hypothesis_t &h, const Grant &gr) {
+        return cfg.slot_model ? sim_tbl_differs(gr.mcs, T.mcs_table, h.mcs_table) : gr.exercised;
+      };
       auto base_pass = [&](int h, const Grant &gr, bool truth_pass) {
         if (is_truth(st->hyp[h])) return truth_pass;
-        if (is_twin_h(st->hyp[h])) return gr.exercised ? false : truth_pass;
+        if (is_twin_h(st->hyp[h])) return twin_differs(st->hyp[h], gr) ? false : truth_pass;
         return false;
       };
       auto full_pass = [&](int h, const Grant &gr, bool truth_pass) {
@@ -616,12 +707,12 @@ static SimResult run_sim(const SimCfg &cfg)
           /* PHYSICAL shifted-slot trap: a hypothesis with k0' decodes slot dci + k0'; it passes iff that slot carries a same-RNTI transmission whose
            * decode computation is compatible with this DCI's (TBS/PRBs/MCS/layers/rv) and that transmission would pass at ITS SNR. No random probability. */
           const nr_pdsch_cfg_hypothesis_t &hs = st->hyp[h];
-          if (is_k0_sibling(hs)) {
+          if (is_k0_sib_any(hs)) {
             const SimOcc nb = tl->slot(gr.dci_slot + hs.k0).occ;
-            if (nb.present && sim_compat(nb.key, gr.key)) {
+            /* the neighbour was encoded with the TRUE table; this hypothesis reads the grant's MCS under ITS table: the computations must coincide (I4) */
+            if (nb.present && sim_compat_tbl(gr.key, hs.mcs_table, nb.key, T.mcs_table)) {
               const bool np = nb.key.rank <= cfg.n_rx && nb.snr >= nr_td_required_snr_db(nb.key.mcs, T.mcs_table);
-              const bool q = hs.mcs_table == T.mcs_table ? np : (twin_tbl[hs.mcs_table] && !nb.exercised ? np : false);
-              if (q) { rec.k0_trap_passes++; return true; }
+              if (np) { rec.k0_trap_passes++; return true; }
             }
           }
         } else if (gr.adj_same && is_k0_sibling(st->hyp[h])) {
@@ -646,7 +737,8 @@ static SimResult run_sim(const SimCfg &cfg)
           const nr_pdsch_cfg_hypothesis_t &hj = st->hyp[j];
           if (j != d && hj.tda_start == hd.tda_start && hj.tda_length == hd.tda_length && hj.k0 == hd.k0
               && hj.dmrs_add_pos == hd.dmrs_add_pos && hj.dmrs_max_len == hd.dmrs_max_len && hj.dmrs_mask == hd.dmrs_mask
-              && hj.mapping_type == hd.mapping_type && (hj.mcs_table == hd.mcs_table || !gr.exercised))
+              && hj.mapping_type == hd.mapping_type
+              && (hj.mcs_table == hd.mcs_table || (cfg.slot_model ? !sim_tbl_differs(gr.mcs, hj.mcs_table, hd.mcs_table) : !gr.exercised)))
             cls[nc++] = j;
         }
         return nc;
@@ -666,10 +758,11 @@ static SimResult run_sim(const SimCfg &cfg)
           const long u = tl->next_pdsch_slot();
           if (u < 0) break;
           const SimOcc o = tl->slot(u).occ;
-          gr.snr = o.snr; gr.rank = o.key.rank; gr.mcs = o.key.mcs; gr.exercised = o.exercised; gr.new_tx = o.new_tx;
+          gr.snr = o.snr; gr.rank = o.key.rank; gr.mcs = o.key.mcs; gr.new_tx = o.new_tx;
+          gr.exercised = false;
+          for (int tb = 0; tb < 3; tb++) gr.exercised |= twin_tbl[tb] && sim_tbl_differs(gr.mcs, T.mcs_table, tb); /* some twin is distinguishable */
           gr.snr_est_noise = o.snr_est_noise; gr.adj_same = false; gr.key = o.key;
           gr.dci_slot = u - T.k0;
-          gr.own_pdsch = tl->slot(gr.dci_slot).occ.present;
           tl->trim(gr.dci_slot - 8);
           if (!o.dci_seen) { rec.dci_missed++; continue; } /* the grant happened (time passes) but the receiver never detected its DCI: no job */
         } else {
@@ -693,25 +786,29 @@ static SimResult run_sim(const SimCfg &cfg)
           rec.proc_grants++;
           const long u = gr.dci_slot + T.k0;
           rec.adj_grants += tl->slot(u - 1).occ.present || tl->slot(u + 1).occ.present;
-          /* alive catalogue offsets of the truth's row (S, L, mapping, mask) incl. dormant ones: conservative (more siblings, harder to certify) */
+          /* alive catalogue offsets / tables of the truth's row (S, L, mapping, mask) incl. dormant ones: conservative (more siblings, harder to certify).
+           * NB add_pos / max_len are ignored in the row key: the sibling set is a conservative SUPERSET (entries with other add_pos/max_len but the same
+           * mask are equivalent for the occupant check), so it can only make certification harder, never easier. */
           if (st->n_hyp != k0mask_nhyp) {
-            k0mask = 0;
+            k0mask = 0; tblmask = 0;
             for (int i = 0; i < st->n_hyp; i++) {
               const nr_pdsch_cfg_hypothesis_t &h = st->hyp[i];
-              if (h.tda_start == T.tda_start && h.tda_length == T.tda_length && h.mapping_type == T.mapping_type && h.dmrs_mask == T.dmrs_mask && h.k0 < 4)
-                k0mask |= 1u << h.k0;
+              if (h.tda_start == T.tda_start && h.tda_length == T.tda_length && h.mapping_type == T.mapping_type && h.dmrs_mask == T.dmrs_mask && h.k0 <= 32) {
+                k0mask |= UINT64_C(1) << h.k0;
+                tblmask |= 1u << h.mcs_table;
+              }
             }
             k0mask_nhyp = st->n_hyp;
           }
           bool trap_possible = false;
-          for (int L = 0; L < 4; L++) {
+          for (int L = 0; L < 33; L++) {
             if (!((k0mask >> L) & 1)) continue;
-            gr.certified[L] = sim_certified(*tl, gr.dci_slot, gr.key, L, k0mask);
+            gr.certified[L] = sim_certified(*tl, gr.dci_slot, gr.key, L, k0mask, tblmask);
             if (L == T.k0) { rec.certified_grants += gr.certified[L]; continue; }
             /* a sibling leader L != truth: its decode reads the REAL occupant of slot dci + L. certified_wrong = certified although that occupant
              * is compatible (the real DCI was missed and a spurious incompatible DCI stood in for it). */
             const SimOcc nb = tl->slot(gr.dci_slot + L).occ;
-            const bool compat = nb.present && sim_compat(nb.key, gr.key);
+            const bool compat = nb.present && sim_compat_real(gr.key, nb.key, T.mcs_table, tblmask);
             trap_possible |= compat;
             rec.certified_sib += gr.certified[L];
             rec.certified_wrong += gr.certified[L] && compat;
@@ -727,6 +824,7 @@ static SimResult run_sim(const SimCfg &cfg)
         rec.sib_trials += pick_kind == NR_TD_PICK_SIBLING;
         nr_td_outcome_t out[NR_TD_MAX_K];
         out_main_idx = idx[0];
+        const int main_k0 = hy[0].k0; /* the oracle runs only on k0 == 0 jobs (queue.c:786) */
         for (int i = 0; i < n; i++) {
           out[i].hyp = idx[i];
           out[i].p2_admissible = false;
@@ -835,7 +933,37 @@ static SimResult run_sim(const SimCfg &cfg)
            * measures per-symbol coherence on whatever RX it has. A GATED grant (`continue` above) contributes no
            * observation: gated + unsettled -> no trial -> no job (plan R2). */
           const bool decoded = gr.rank <= cfg.n_rx;
-          if (cfg.oracle && decoded && winner < 0) { do_observe(gr.own_pdsch); find_truth(); }
+          if (cfg.oracle && decoded && winner < 0) {
+            if (!cfg.slot_model) { do_observe(); find_truth(); }
+            else if (main_k0 == 0) {
+              /* own-slot measurement on the grant's PRBs (I1/I2): this RNTI's own PDSCH there (overlapping PRBs) gives the truth's mask (or the decoy
+               * of a wrong oracle state), another UE's PDSCH gives ITS mask; nothing there = no observation. The own PDSCH is the one in the same slot
+               * and PRBs only: another UE cannot overlap the RNTI's own overlapping PDSCH. */
+              const SimSlot own = tl->slot(gr.dci_slot);
+              const bool same_ov = own.occ.present && own.occ.key.prb == gr.key.prb;
+              if (same_ov || own.other) {
+                const uint32_t m = same_ov ? decoy_mask : own.other_mask;
+                const int e = same_ov ? decoy_end : own.other_end;
+                do_observe_slot(m, e);
+                mask_observed |= same_ov && ostate == 0;
+                find_truth();
+              } else if ((probe_tick++ % 8) == 0) {
+                /* runtime k0 >= 2 probe (queue.c:807-868): DM-RS-free own slot, 1 job in 8 measures slots +1 .. +K (K = min(32, spf - 2), spf = 20 at
+                 * 30 kHz => 18; every slot assumed retained and written in time) and adds a k0 layer for each slot k >= 2 that shows DM-RS on the grant's
+                 * PRBs (this RNTI's own overlapping PDSCH or another UE's). */
+                rec.k0_probes++;
+                for (int kk = 2; kk <= 18; kk++) {
+                  const SimSlot fs = tl->slot(gr.dci_slot + kk);
+                  if ((fs.occ.present && fs.occ.key.prb == gr.key.prb) || fs.other) {
+                    const int add = nr_pdsch_config_sweep_add_k0_layer(st.get(), (uint8_t)kk);
+                    rec.k0_probe_hyp += add;
+                    rec.k0_probe_layers += add > 0;
+                  }
+                }
+                find_truth();
+              }
+            }
+          }
           /* [ASSUMPTION] Qm abstention gate: nr_pdsch_qm_classify abstains at low SNR, but no code gives the threshold;
            * modelled as "the truth would pass at this SNR/MCS". Runtime-backed part: called after feedback, two sightings. */
           if (decoded && truth_pass) {
@@ -908,6 +1036,9 @@ static SimResult run_sim(const SimCfg &cfg)
       R.promotions += rec.promotions; R.withdrawals += rec.withdrawals;
       n_ok_prev += ostate == 0;
       n_k0claim_prev += k0_claimed && ostate == 0;
+      n_obs_prev += mask_observed;
+      rec.n_hyp_end = st->n_hyp;
+      R.k0_probes += rec.k0_probes; R.k0_probe_hyp += rec.k0_probe_hyp; R.k0_probe_layers += rec.k0_probe_layers; R.n_hyp_end += rec.n_hyp_end;
       R.dci_missed += rec.dci_missed; R.dci_false += rec.dci_false; R.proc_grants += rec.proc_grants; R.adj_grants += rec.adj_grants;
       R.trap_grants += rec.trap_grants; R.certified_grants += rec.certified_grants; R.certified_sib += rec.certified_sib; R.certified_wrong += rec.certified_wrong;
       R.oracle_miss_rntis += ostate == 1; R.oracle_wrong_rntis += ostate == 2;
@@ -967,7 +1098,9 @@ int main(int argc, char **argv)
            "  Simulator v2 (all default to v1 behaviour; --slot-model 0 output is byte-identical to v1):\n"
            "  --slot-model 0|1 (slot-indexed grants per RNTI + PHYSICAL shifted-slot k0 trap + DCI observation + certified flag)\n"
            "  --grant-prob P (per eligible DL slot, default 0.5) --adjacency A (P(grant | previous eligible slot had one); default -1 = i.i.d. grant-prob)\n"
-           "  --persist RHO (P(next grant repeats allocation+MCS), default 0.9; MCS changes with prob 1-RHO) --dci-miss P --dci-false P (spurious DCI per PDCCH slot)\n"
+           "  --other-ue-occ P (another UE's PDSCH overlaps the grant's PRBs in a DL slot; triggers the K39 legacy oracle + wrong mask) --tdd-s-dl-symbols N (6)\n"
+           "  --mcs-change P (per-slot MCS redraw, default 1-persist) --snr-rho R (AR(1) SNR, default 0 = i.i.d.)\n"
+           "  --persist RHO (P(next grant repeats the allocation PRB/rank), default 0.9; MCS changes per slot with prob 1-RHO unless --mcs-change) --dci-miss P --dci-false P (spurious DCI per PDCCH slot)\n"
            "  --tdd \"DDDSU\" (U slots carry no PDSCH/PDCCH; S counts as DL) --k0-oracle-legacy 1|0 (1: today's oracle, with the slot model the K39 bug\n"
            "    (claims k0 = 0 when the DCI's own slot carries any same-RNTI PDSCH); 0: K39 fix, mask+last symbol only) --truth-k0 K (force the truth's k0)\n"
            "  --fo-always 0|1 (fail-open outside fieldbook 2) --inject-wrong-field 3 (fieldbook 2: TDRA with the truth's S/L/mapping but another k0)\n"
@@ -1027,6 +1160,10 @@ int main(int argc, char **argv)
     else if (f == "--dci-false") c.dci_false = atof(v);
     else if (f == "--tdd") c.tdd = v;
     else if (f == "--k0-oracle-legacy") c.k0_oracle_legacy = atoi(v);
+    else if (f == "--other-ue-occ") c.other_ue_occ = atof(v);
+    else if (f == "--tdd-s-dl-symbols") c.tdd_s_dl_symbols = atoi(v);
+    else if (f == "--mcs-change") c.mcs_change = atof(v);
+    else if (f == "--snr-rho") c.snr_rho = atof(v);
     else if (f == "--fo-always") c.fo_always = atoi(v);
     else if (f == "--truth-k0") c.truth_k0 = atoi(v);
     else if (f == "--prior") c.prior = atoi(v);
@@ -1048,8 +1185,9 @@ int main(int argc, char **argv)
     if (c.retx_trap > 0 || c.k0_trap_adj > 0 || c.slot_model) printf(",\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", x.retx_trap_passes, x.k0_trap_passes);
     if (c.slot_model)
       printf(",\"truth_k0\":%d,\"dci_missed\":%ld,\"dci_false\":%ld,\"proc_grants\":%ld,\"adj_grants\":%ld,\"trap_grants\":%ld,\"certified_grants\":%ld,"
-             "\"certified_sib\":%ld,\"certified_wrong\":%ld", x.truth_k0, x.dci_missed, x.dci_false, x.proc_grants, x.adj_grants, x.trap_grants, x.certified_grants,
-             x.certified_sib, x.certified_wrong);
+             "\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,\"n_hyp_end\":%ld",
+             x.truth_k0, x.dci_missed, x.dci_false, x.proc_grants, x.adj_grants, x.trap_grants, x.certified_grants,
+             x.certified_sib, x.certified_wrong, x.k0_probes, x.k0_probe_hyp, x.k0_probe_layers, x.n_hyp_end);
     puts("}");
   }
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
@@ -1081,8 +1219,9 @@ int main(int argc, char **argv)
     printf(",\"sib_trials\":%ld,\"sib_blocks\":%ld,\"sib_pmin\":%g,\"sib_eps\":%g", r.sib_trials, r.sib_blocks, (double)c.sib_pmin, (double)c.sib_eps);
   if (c.slot_model)
     printf(",\"slot_model\":1,\"k0_oracle_legacy\":%d,\"dci_missed\":%ld,\"dci_false\":%ld,\"proc_grants\":%ld,\"adj_grants\":%ld,\"trap_grants\":%ld,"
-           "\"certified_grants\":%ld,\"certified_sib\":%ld,\"certified_wrong\":%ld", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
-           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong);
+           "\"certified_grants\":%ld,\"certified_sib\":%ld,\"certified_wrong\":%ld,\"k0_probes\":%ld,\"k0_probe_hyp\":%ld,\"k0_probe_layers\":%ld,"
+           "\"n_hyp_end\":%ld", c.k0_oracle_legacy, r.dci_missed, r.dci_false, r.proc_grants,
+           r.adj_grants, r.trap_grants, r.certified_grants, r.certified_sib, r.certified_wrong, r.k0_probes, r.k0_probe_hyp, r.k0_probe_layers, r.n_hyp_end);
   if (c.fo_always && c.fieldbook != 2) printf(",\"fail_opens\":%ld", r.fail_opens);
   if (c.retx_trap > 0 || c.k0_trap_adj > 0 || c.slot_model)
     printf(",\"retx_trap\":%g,\"k0_trap_adj\":%g,\"retx_trap_passes\":%ld,\"k0_trap_passes\":%ld", c.retx_trap, c.k0_trap_adj, r.retx_trap_passes,

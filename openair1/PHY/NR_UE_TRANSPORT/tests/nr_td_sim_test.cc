@@ -157,7 +157,8 @@ static std::string td_run_cmd(const std::string &cmd)
 TEST(TdSimV2, SlotModelOffIsByteIdentical)
 {
   const char *ref = getenv("NR_TD_SIM_REF");
-  if (!ref) GTEST_SKIP() << "NR_TD_SIM_REF (v1 reference binary) not set";
+  if (!ref) GTEST_SKIP() << "SKIPPED (NOT CHECKED): NR_TD_SIM_REF (path of the v1 reference binary built at 77775006f2) is not set; "
+                            "TdSimV2.GoldenV1Output below still pins the v1 numbers";
   const char *arms[] = {"--oracle 0 --fieldbook 0", "--oracle 1 --fieldbook 0", "--oracle 0 --fieldbook 2", "--oracle 1 --fieldbook 2",
                         "--oracle 0 --crc-accept 1 --geom-pin 1 --k0-trap-adj 0.3 --crc-false 1e-3 --equiv 0",
                         "--oracle 1 --fieldbook 2 --inject-wrong-field 0"};
@@ -170,10 +171,25 @@ TEST(TdSimV2, SlotModelOffIsByteIdentical)
     EXPECT_EQ(r, td_run_cmd("./nr_td_sim" + tail + " --slot-model 0 --k0-oracle-legacy 1 --fo-always 0 --truth-k0 -1 --dci-miss 0 --dci-false 0")) << a;
   }
 }
+/* Always-on v1 pin (M4): numbers produced by the v1 reference binary (77775006f2), `--acq 20 --seed 1`, summed over the per-RNTI records. */
+TEST(TdSimV2, GoldenV1Output)
+{
+  struct G { int oracle, fieldbook, inject; long grants, n_full, n_probe; double mean_grants; };
+  const G gold[] = {{0, 0, -1, 3101544, 3101544, 0, 38769.3}, {1, 0, -1, 16379, 16379, 0, 204.7}, {1, 2, 0, 16544, 16544, 0, 206.8}};
+  for (const G &g : gold) {
+    SimCfg c = SimCfg::defaults(); c.acq = 20; c.seed = 1; c.oracle = g.oracle; c.fieldbook = g.fieldbook; c.inject_wrong_field = g.inject;
+    const SimResult r = run_sim(c);
+    EXPECT_EQ(r.total_grants, g.grants) << g.oracle << g.fieldbook;
+    EXPECT_EQ(r.n_full, g.n_full);
+    EXPECT_EQ(r.n_probe, g.n_probe);
+    EXPECT_NEAR(r.mean_grants, g.mean_grants, 0.05);
+    EXPECT_EQ(r.wrong + r.undecidable, 0);
+  }
+}
 TEST(TdSimV2, SlotKnobsAreInertWithTheSlotModelOff)
 {
   SimCfg a = SimCfg::defaults(); a.acq = 20; a.seed = 9;
-  SimCfg b = a; b.grant_prob = 0.1; b.persist = 0.3; b.adjacency = 1.0; b.dci_miss = 0.5; b.dci_false = 0.5; b.tdd = "DDDSU";
+  SimCfg b = a; b.grant_prob = 0.1; b.persist = 0.3; b.adjacency = 1.0; b.dci_miss = 0.5; b.dci_false = 0.5; b.tdd = "DDDSU"; b.other_ue_occ = 0.5; b.snr_rho = 0.9; b.mcs_change = 0.5; b.tdd_s_dl_symbols = 3;
   const SimResult x = run_sim(a), y = run_sim(b);
   EXPECT_EQ(x.total_grants, y.total_grants);
   EXPECT_EQ(y.dci_missed + y.dci_false + y.proc_grants + y.certified_grants, 0);
@@ -204,6 +220,7 @@ TEST(TdSimV2, TddWrongDirectionNeverCarriesPdsch)
     long n_ul = 0, n_pdsch = 0, n_spur = 0;
     for (long s = 0; s < 4000; s++) {
       const SimSlot sl = tl.slot(s);
+      if (tl.dir(s) == 'S') EXPECT_TRUE(tl.dl(s)); /* PDCCH-capable */
       if (!tl.dl(s)) {
         n_ul++;
         EXPECT_FALSE(sl.occ.present) << "PDSCH in a UL slot " << s;
@@ -219,6 +236,18 @@ TEST(TdSimV2, TddWrongDirectionNeverCarriesPdsch)
     EXPECT_EQ(n_ul, 800); /* one U per 5 slots */
     EXPECT_GT(n_pdsch, 0);
     EXPECT_GT(n_spur, 0);
+  }
+  /* M1: with a truth allocation that does not fit the S slot's DL symbols, S slots carry no PDSCH (but still PDCCH) */
+  {
+    SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.tdd = "DDDSU"; c.adjacency = 1.0; c.tdd_s_dl_symbols = 6;
+    SlotTimeline fit(c, 0, 3, 4, true), nofit(c, 0, 3, 4, false);
+    long s_fit = 0, s_nofit = 0;
+    for (long s = 0; s < 2000; s++) {
+      const bool is_s = fit.dir(s) == 'S';
+      if (is_s) { s_fit += fit.slot(s).occ.present; s_nofit += nofit.slot(s).occ.present; EXPECT_TRUE(nofit.dl(s)); }
+    }
+    EXPECT_GT(s_fit, 0);
+    EXPECT_EQ(s_nofit, 0);
   }
   /* the pattern also holds end to end: grants/s fall with UL slots, nothing is generated for them */
   SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.tdd = "DDDSU"; c.adjacency = 1.0; c.acq = 3; c.rntis_per_acq = 1; c.k0_oracle_legacy = 0;
@@ -242,7 +271,7 @@ TEST(TdSimV2, UnseenNeighbourIsNeverCertified)
     for (int L = 0; L <= 1; L++) {
       const long x = t + (L == 0 ? -1 : +1); /* the neighbour slot of the only sibling offset (k0 catalogue {0,1}) */
       const bool nb_seen = !tl.observed_dci(x).empty();
-      const bool cert = sim_certified(tl, t, sl.occ.key, L, 0x3);
+      const bool cert = sim_certified(tl, t, sl.occ.key, L, 0x3, 7);
       nb_seen ? seen++ : unseen++;
       if (!nb_seen) EXPECT_FALSE(cert) << "t=" << t << " L=" << L;
       certified += cert;
@@ -256,7 +285,7 @@ TEST(TdSimV2, UnseenNeighbourIsNeverCertified)
   c.dci_miss = 1.0;
   SlotTimeline none(c, 0, 21, 22);
   for (long t = 4; t < 500; t++)
-    if (none.slot(t).occ.present) EXPECT_FALSE(sim_certified(none, t, none.slot(t).occ.key, 0, 0x3));
+    if (none.slot(t).occ.present) EXPECT_FALSE(sim_certified(none, t, none.slot(t).occ.key, 0, 0x3, 7));
 }
 TEST(TdSimV2, CompatibleNeighbourGivesNoCertification)
 {
@@ -267,8 +296,8 @@ TEST(TdSimV2, CompatibleNeighbourGivesNoCertification)
     const SimSlot sl = tl.slot(t);
     const SimSlot nb = tl.slot(t - 1); /* leader 0, sibling 1: the world "truth is 1" puts the occupant at t-1 */
     ASSERT_TRUE(sl.occ.present && nb.occ.present);
-    const bool cert = sim_certified(tl, t, sl.occ.key, 0, 0x3);
-    if (sim_compat(nb.occ.key, sl.occ.key)) {
+    const bool cert = sim_certified(tl, t, sl.occ.key, 0, 0x3, 7);
+    if (sim_compat_any(nb.occ.key, sl.occ.key, 7)) {
       compat++;
       EXPECT_FALSE(cert) << "compatible observed neighbour must give no certification, t=" << t;
     } else {
@@ -371,6 +400,123 @@ TEST(TdSimV2, DciObservationCounters)
   const SimResult r = run_sim(c);
   EXPECT_GT(r.dci_missed, 0);
   EXPECT_GT(r.dci_false, 0);
+}
+TEST(TdSimV2, MacMcsTablesPinned)
+{
+  /* verbatim from nr_mac_common.c Table_51311/12/13 ({Qm, 10 x R}) */
+  EXPECT_EQ(sim_cr(0, 0), (2u << 16) | 1200);
+  EXPECT_EQ(sim_cr(0, 2), (2u << 16) | 1930);
+  EXPECT_EQ(sim_cr(1, 1), (2u << 16) | 1930); /* table 1 mcs 2 and table 2 mcs 1 are both Qm 2, R 193 */
+  EXPECT_EQ(sim_cr(2, 8), (2u << 16) | 1930);
+  EXPECT_EQ(sim_cr(0, 28), (6u << 16) | 9480);
+  EXPECT_EQ(sim_cr(1, 27), (8u << 16) | 9480);
+  EXPECT_EQ(sim_cr(1, 20), (8u << 16) | 6825);
+  EXPECT_EQ(sim_cr(2, 0), (2u << 16) | 300);
+  EXPECT_EQ(sim_cr(2, 28), (6u << 16) | 7720);
+  EXPECT_EQ(sim_cr(0, 29), (2u << 16) | 0); /* reserved */
+  EXPECT_TRUE(sim_tbl_differs(5, 0, 1));    /* {2,3790} vs {4,3780} */
+  EXPECT_FALSE(sim_tbl_differs(0, 0, 1));   /* mcs 0 is {2,1200} in tables 0 and 1: a twin on this grant */
+  EXPECT_TRUE(sim_tbl_differs(0, 0, 2));
+}
+TEST(TdSimV2, CompatibilityIsPerTableComputationNotMcsIndex)
+{
+  SimKey a, b;
+  a.mcs = 2; a.rank = 1; a.prb = 3; a.rv = 0;
+  b = a; b.mcs = 1;
+  EXPECT_TRUE(sim_compat_tbl(a, 0, b, 1));  /* table 0 mcs 2 == table 1 mcs 1 */
+  EXPECT_FALSE(sim_compat_tbl(a, 0, b, 0)); /* same table, different index */
+  EXPECT_FALSE(sim_compat_tbl(a, 1, b, 1));
+  EXPECT_TRUE(sim_compat_any(a, b, 0x3));   /* tables 0 and 1 alive: some pair coincides */
+  EXPECT_FALSE(sim_compat_any(a, b, 0x1));  /* only table 0 alive: incompatible under every alive pair */
+  EXPECT_FALSE(sim_compat_any(a, b, 0x4));
+  SimKey c = b; c.prb = 4;
+  EXPECT_FALSE(sim_compat_any(a, c, 7));
+  c = b; c.rv = 2;
+  EXPECT_FALSE(sim_compat_any(a, c, 7));
+  c = b; c.rank = 2;
+  EXPECT_FALSE(sim_compat_any(a, c, 7));
+}
+TEST(TdSimV2, EmptySiblingSetIsNeverCertified)
+{
+  SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.persist = 0.0; c.adjacency = 1.0; c.dci_miss = 0.0;
+  SlotTimeline tl(c, 0, 5, 6);
+  long both = 0;
+  for (long t = 4; t < 500; t++) {
+    const SimOcc o = tl.slot(t).occ;
+    EXPECT_FALSE(sim_certified(tl, t, o.key, 0, 0x1, 7)) << "only k0 = 0 alive: nothing to certify against";
+    EXPECT_FALSE(sim_certified(tl, t, o.key, 0, 0x0, 7));
+    both += sim_certified(tl, t, o.key, 0, 0x3, 7);
+  }
+  EXPECT_GT(both, 0); /* control: with a sibling and observed incompatible DCIs it certifies */
+}
+TEST(TdSimV2, OtherUePdschTriggersTheLegacyOracleAndPrunesTrueK0)
+{
+  /* no same-RNTI adjacency at all (adjacency 0): the legacy oracle never fires without another UE ... */
+  SimCfg c = SimCfg::defaults(); c.acq = 12; c.seed = 2; c.oracle = 1; c.truth_k0 = 1; c.slot_model = 1; c.adjacency = 0.0; c.k0_oracle_legacy = 1; c.cap_s = 30;
+  for (const RntiRec &x : run_sim(c).recs) EXPECT_GE(x.truth_kl_trials, 0);
+  /* ... another UE overlapping the grant's PRBs does: DM-RS is cell-scrambled, the true k0 is pruned and the wrong mask removes the truth's entries, so
+   * the run cannot decide (no same-RNTI neighbour exists to make a trapped sibling win) */
+  c.other_ue_occ = 1.0;
+  const SimResult r = run_sim(c);
+  long pruned = 0;
+  for (const RntiRec &x : r.recs) pruned += x.truth_kl_trials < 0;
+  EXPECT_GT(pruned, 0);
+  EXPECT_GT(r.undecidable, 0);
+  EXPECT_EQ(r.wrong, 0);
+}
+TEST(TdSimV2, MaskObservationNeedsTheOwnSlotOccupied)
+{
+  /* I1: k0 = 1 truth, adjacency 0 (own slot never carries this RNTI's PDSCH), fixed oracle: no mask observation => blind, much slower than a k0 = 0 truth */
+  SimCfg c = SimCfg::defaults(); c.acq = 10; c.seed = 4; c.oracle = 1; c.slot_model = 1; c.adjacency = 0.0; c.k0_oracle_legacy = 0; c.rntis_per_acq = 1; c.cap_s = 600;
+  c.truth_k0 = 0;
+  const SimResult k0 = run_sim(c);
+  c.truth_k0 = 1;
+  const SimResult k1 = run_sim(c);
+  EXPECT_TRUE(k1.undecidable > k0.undecidable || k1.mean_s > 5 * k0.mean_s); /* blind (plus runtime k0 >= 2 probe layers) vs oracle-pruned */
+}
+TEST(TdSimV2, K0ProbeLayersAreAddedWhenTheOwnSlotIsEmpty)
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 10; c.seed = 4; c.oracle = 1; c.slot_model = 1; c.adjacency = 0.0; c.k0_oracle_legacy = 0; c.rntis_per_acq = 1; c.truth_k0 = 1;
+  c.other_ue_occ = 0.3; c.cap_s = 600;
+  const SimResult r = run_sim(c);
+  EXPECT_GT(r.k0_probes, 0);
+  EXPECT_GT(r.k0_probe_hyp, 0);
+  SimCfg d = c; d.truth_k0 = 0; /* a k0 = 0 truth's own slot is never empty: no probes */
+  EXPECT_EQ(run_sim(d).k0_probes, 0);
+}
+TEST(TdSimV2, McsEvolvesPerSlotIndependentOfAllocationAndSnrIsAr1)
+{
+  SimCfg c = SimCfg::defaults(); c.slot_model = 1; c.adjacency = 1.0; c.persist = 1.0; c.mcs_change = 0.5; c.snr_rho = 0.0;
+  SlotTimeline t0(c, 0, 1, 2);
+  long mcs_changes = 0, alloc_changes = 0; SimKey prev; double sx = 0, sxx = 0, sxy = 0; double ps = 0; long n = 0;
+  for (long s = 0; s < 6000; s++) {
+    const SimOcc o = t0.slot(s).occ;
+    if (!o.present) continue;
+    if (s > 0) { mcs_changes += o.key.mcs != prev.mcs; alloc_changes += o.key.prb != prev.prb || o.key.rank != prev.rank; sx += ps; sxx += ps * ps; sxy += ps * o.snr; n++; }
+    prev = o.key; ps = o.snr;
+  }
+  EXPECT_GT(mcs_changes, 1000);
+  EXPECT_EQ(alloc_changes, 0); /* persist 1: the allocation never changes although the MCS does */
+  const double corr0 = (sxy / n - sx / n * sx / n) / (sxx / n - sx / n * sx / n);
+  c.snr_rho = 0.9;
+  SlotTimeline t1(c, 0, 1, 2);
+  sx = sxx = sxy = ps = 0; n = 0;
+  for (long s = 0; s < 6000; s++) {
+    const SimOcc o = t1.slot(s).occ;
+    if (!o.present) continue;
+    if (s > 0) { sx += ps; sxx += ps * ps; sxy += ps * o.snr; n++; }
+    ps = o.snr;
+  }
+  const double corr1 = (sxy / n - sx / n * sx / n) / (sxx / n - sx / n * sx / n);
+  EXPECT_LT(std::fabs(corr0), 0.1);
+  EXPECT_GT(corr1, 0.7);
+}
+TEST(TdSimV2, TwinTablesAreDistinguishedByTheMcsTableNotADraw)
+{
+  /* slot model: the same seed with table-exercise 0 or 1 must give identical results (exercised comes from the MCS tables) */
+  SimCfg a = SimCfg::defaults(); a.acq = 6; a.seed = 5; a.oracle = 0; a.slot_model = 1; a.rntis_per_acq = 1; a.cap_s = 200;
+  SimCfg b = a; b.table_exercise = 0.0;
+  EXPECT_EQ(run_sim(a).total_grants, run_sim(b).total_grants);
 }
 int main(int argc, char **argv)
 {
