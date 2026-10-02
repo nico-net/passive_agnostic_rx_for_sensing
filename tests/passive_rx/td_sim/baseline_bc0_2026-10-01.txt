@@ -163,12 +163,17 @@ the new observation; a mask is promoted to g_obs when a second distinct RNTI of 
 (a relaxed last symbol is re-refined by the next observation, as in the runtime). Rows whose names contain ou / adj0_ou are R2 re-runs (old values in the comparison below);
 `_cc` rows = `--other-ue-same-cfg 1` (another UE with the cell's add_pos/max_len: 1-3 distinct masks instead of any catalogue entry). The two adj0 rows without other UE were re-run and are
 IDENTICAL to round 1 (no foreign mask => no union/restore effect). New columns: none; the probe_hyp_added column now also counts layers re-added after restore/prune thrash.
-NOT MODELLED / simplifications still in force (every L0 other-UE number is therefore an UPPER BOUND on the damage, not an estimate: the protections it lacks are (ii),(iii),(iv)):
+NOT MODELLED / simplifications still in force (the direction of the bias for the other-UE thrash rows is UNKNOWN: runtime damage (vii)-(ix) is missing, protections (ii)-(iv) are missing):
  (ii) g_obs is dynamic at runtime (concurrent RNTIs, eviction, invalidation); here it is built only from the EARLIER RNTIs of the same acquisition (sequential), so a later RNTI's masks never help an earlier one;
  (iii) another UE's DM-RS is assumed to share the scrambling id, so it is always measured as DM-RS on the grant's PRBs (the runtime measures with this RNTI's nscid / scrambling id);
  (iv) the oracle_nrb >= 4 gate and probe_span's largest-segment PRB selection are not modelled (the measurement is always available);
  (v) the in-line oracle path used when deferral is off (monitor_rt.c:6833 -> queue.c:607-631: no k0 == 0 gate) is not modelled; only the deferred-path k0 == 0 measurement is;
  (vi) all RNTIs of an acquisition share the truth (same S/L/mask/k0/table) and the same cell config;
+ (vii) in-flight tickets go stale after context_reindexed and their CRC feedback is dropped (the simulator feeds every outcome);
+ (viii) BC9 runs apply_cert after restore: a further evidence wipe not modelled;
+ (ix) type-B widening from foreign type-B-only masks (add_typeb_layer) is not modelled;
+ (x) energy-threshold jitter in the measured last_sym (a further source of the same-mask / different-last pattern);
+ Minor: the simulator's restore prior filter uses only gprior, whereas the runtime uses r->prior first; no effect while each RNTI has a single TDRA row.
  plus: PRBs are 8 coarse ids (overlap = equal id); one TDRA row per RNTI; other-UE mask = random catalogue entry (or cell-config entry with _cc); per-RNTI context only (no cross-RNTI k0_seen);
  probe latency/retention not modelled (spf 20, K = 18); DM-RS measurement perfect; no HARQ processes; spurious DCIs history-only; known TDD not used by the receiver; S-slot rule = truth fits; w_obs inputs use the truth mask;
  reserved MCS never drawn; rank gating conservative; slot-model + fieldbook 2: restored entries are not covered by the field-book dormant masks.
@@ -258,8 +263,11 @@ Findings (all [SIMULATED], single-seed, 2000 RNTIs per row; round-1 findings for
   restore_observed_typea re-adds entries for the foreign (mask, last) and prune_to_observed then removes them again; every size-changing prune_commit zeroes ALL trial/ok evidence
   (hundreds to thousands of events per RNTI: restores column), so the KL rule never accumulates and the RNTI stays undecidable. The union does keep the truth alive (truth_kl_trials >= 0), it does not let it converge.
   Reduced diversity (_cc rows) reduces but does not remove it (L0 ou0.1_cc: 1021 (rx4) / 1063 (rx1) undecidable; L0 ou0.3_cc: 1070 / 1072; adj0_ou_cc: 1072).
-  This is conditional on (a) the other UE changing its last symbol per slot, (b) assumptions (ii)-(iv): treat every number in these rows as an UPPER BOUND on the runtime damage. The effect, if real, is a
-  runtime pathology (evidence wipe on every observation-driven prune) that exists with the K39 fix too, independent of k0.
+  The thrash occurs when the observations reaching ONE context contain the same mask with at least 2 distinct last symbols, interleaved so that a refine follows a relax. Causes include a fixed
+  other-UE last symbol that differs from the RNTI's own, the RNTI's own PDSCH from other TDRA rows, and energy-threshold jitter in last_sym (x). Physically a mask can carry different last symbols only within one duration class.
+  The simulator reproduces the first cause only (the other UE's last symbol varies per slot). The numbers are conditional on (b) assumptions (ii)-(x). The DIRECTION of the bias is UNKNOWN: the simulator lacks runtime damage
+  (vii) in-flight tickets go stale after context_reindexed, so CRC feedback is dropped; (viii) BC9 runs apply_cert after restore, a further wipe; (ix) type-B widening from foreign type-B-only masks; and it lacks protections (ii)-(iv).
+  The effect, if real, is a runtime pathology (evidence wipe on every observation-driven prune) that exists with the K39 fix too, independent of k0.
 - Where the earlier round-1 text said "the K39 fix is necessary, not sufficient (82-88 / 214 / 1034-1049 undecidable)", read the R2 numbers above.
 
 Round-1 findings that still hold for the unchanged rows:
