@@ -1,0 +1,1 @@
+{"arm": "/tmp/bc9_idle/off_r3", "first_1_1_s": 14.635, "ttc_per_tda": {"0": 4.595, "2": 20.616}, "winner_trials": {"0": "125"}, "ldpc_ok_segfail_zero_tb": ["52880", "1825", "369"], "bc9_dcihist": null, "bc9_cert": null}
