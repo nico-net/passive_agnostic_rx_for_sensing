@@ -92,6 +92,7 @@ typedef struct {
   int      nr_slot_rx;    ///< inspection of nr_dl_channel_estimation.c / nr_dlsch_demodulation.c /
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
+  uint32_t dci_abs_slot;  ///< BC9: the DCI's slot, frame * slots_per_frame + slot (key into the DL DCI history ring)
   uint16_t rnti;
   /// nr_blind_rnti_class_t of the DCI that scheduled this PDSCH. Only the consumer's MAC-TA parse
   /// reads it: a RAR (RA-RNTI) and a dedicated DL-SCH PDU carry timing advance in different places,
@@ -176,6 +177,11 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 /// context (mask + last data symbol, k0 = 0). Call AFTER that ticket's CRC feedback -- a resulting
 /// prune retires outstanding tickets. `scratch` receives antenna-0 FFTs (samples_per_slot_wCP entries).
 /// No-op for a settled/unscored ticket or a grant narrower than 4 PRBs.
+/** BC9: census of the DCI-adjacency certified flag (nr_dci_hist_k0_certified) of one scored Technique D trial: how often a
+ *  grant is k0-unambiguous for its hypothesis (f_S). Diagnostic only: the runtime feeds the KL rule, which never uses the
+ *  flag; levers C/P (the flag's consumers, nr_pdsch_config_sweep_feed_attr_cx) are not enabled in the runtime. */
+void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
+                               const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok);
 void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
                                     const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
                                     int nr_slot, c16_t *scratch);

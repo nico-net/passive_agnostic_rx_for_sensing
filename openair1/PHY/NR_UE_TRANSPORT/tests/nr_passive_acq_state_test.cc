@@ -190,3 +190,22 @@ TEST_F(AcqState, ResetReturnsToSearchingAndClearsCounters) {
   EXPECT_EQ(s.transitions, 0u);
 }
 int main(int argc,char **argv) { logInit(); testing::InitGoogleTest(&argc,argv); return RUN_ALL_TESTS(); }
+
+/* BC9: PDSCH last symbols for the TDD exclusion, only when the SIB1 pattern AND its reference numerology are known and match
+ * the receiver's numerology (the absolute slot numbering is the receiver's). Process-wide state: one test owns it. */
+TEST(AcqStateTdd, PdschLastSymbolsNeedTheSib1PatternAndItsNumerology)
+{
+  int8_t last[33];
+  EXPECT_FALSE(nr_passive_acq_tdd_pdsch_last_symbols(7, 1, 33, last)); /* nothing from SIB1: no exclusion (NSA, phy-test) */
+  nr_tdd_pattern_t p1{};
+  p1.period_slots = 10; p1.dl_slots = 7; p1.dl_symbols = 6; p1.ul_symbols = 4; p1.ul_slots = 2;
+  nr_passive_acq_note_sib1_tdd(&p1, nullptr);
+  EXPECT_FALSE(nr_passive_acq_tdd_pdsch_last_symbols(7, 1, 33, last)); /* reference SCS not recorded */
+  nr_passive_acq_note_sib1_tdd_ref_mu(1);
+  ASSERT_TRUE(nr_passive_acq_tdd_pdsch_last_symbols(7, 1, 33, last));
+  EXPECT_EQ(last[0], 9);
+  EXPECT_EQ(last[1], -1);
+  EXPECT_EQ(last[2], -1);
+  EXPECT_EQ(last[3], 13);
+  EXPECT_FALSE(nr_passive_acq_tdd_pdsch_last_symbols(7, 0, 33, last)); /* another numerology: slots do not map */
+}

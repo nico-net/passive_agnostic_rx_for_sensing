@@ -54,6 +54,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_REFSIG/dmrs_nr.h"                     // get_num_dmrs_re_per_rb
 #include "common/utils/nr/nr_common.h"                // get_num_dmrs
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Technique D scoring
+#include "PHY/NR_UE_TRANSPORT/nr_dci_history.h" // BC9 DL DCI history (certified-flag census)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.h" // Technique D Qm oracle
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
@@ -547,6 +548,54 @@ static int probe_span(const nr_pdsch_passive_job_t *j, int *nrb)
       best = s;
   *nrb = seg[best].n_prb;
   return seg[best].prb_start;
+}
+
+/* ---- BC9 certified-flag census (see the header) ---- */
+static uint64_t bc9_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
+{
+  (void)arg;
+  return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda);
+}
+static _Atomic uint64_t g_bc9_jobs, g_bc9_cert, g_bc9_cert_ok, g_bc9_nosib, g_bc9_nodci, g_bc9_ok;
+void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
+                               const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok)
+{
+  if (ticket == NULL || pdu == NULL || ticket->generation == 0 || ticket->settled)
+    return;
+  nr_pdsch_cfg_hypothesis_t h;
+  uint64_t sib = 0;
+  uint8_t tables = 0;
+  if (!nr_pdsch_config_sweep_ticket_siblings(ticket, &h, &sib, &tables))
+    return;
+  nr_dci_hist_t *dh = nr_dci_hist_global();
+  nr_dci_hist_entry_t g[4];
+  const int n = nr_dci_hist_at(dh, rnti, dci_abs_slot, g, 4);
+  const nr_dci_hist_entry_t *gg = NULL;
+  for (int i = 0; i < n && !gg; i++)
+    if (g[i].dci11 && g[i].tda == ticket->tda_index)
+      gg = &g[i];
+  const uint64_t jobs = atomic_fetch_add(&g_bc9_jobs, 1) + 1;
+  atomic_fetch_add(&g_bc9_ok, crc_ok);
+  if (gg == NULL) {
+    atomic_fetch_add(&g_bc9_nodci, 1);
+  } else {
+    if (!(sib & ~(UINT64_C(1) << h.k0)))
+      atomic_fetch_add(&g_bc9_nosib, 1);
+    const nr_dci_geom_t geo = {.nb_symb = h.tda_length, .dmrs_mask = h.dmrs_mask,
+                               .dmrs_type = (uint8_t)(pdu->dmrsConfigType == NFAPI_NR_DMRS_TYPE2),
+                               .nl = (uint8_t)__builtin_popcount(pdu->dmrs_ports), .xoh = xoh};
+    if (nr_dci_hist_k0_certified(dh, gg, h.k0, sib, tables, &geo, bc9_row_k0, NULL)) {
+      atomic_fetch_add(&g_bc9_cert, 1);
+      atomic_fetch_add(&g_bc9_cert_ok, crc_ok);
+    }
+  }
+  if ((jobs % 4000) == 0)
+    LOG_A(PHY, "SENSING: BC9 DCIADJ_CERT trials=%llu certified=%llu (f_S=%.4f) certified_pass=%llu passes=%llu no_sibling=%llu "
+               "no_dci_in_history=%llu\n",
+          (unsigned long long)jobs, (unsigned long long)atomic_load(&g_bc9_cert),
+          (double)atomic_load(&g_bc9_cert) / (double)jobs, (unsigned long long)atomic_load(&g_bc9_cert_ok),
+          (unsigned long long)atomic_load(&g_bc9_ok), (unsigned long long)atomic_load(&g_bc9_nosib),
+          (unsigned long long)atomic_load(&g_bc9_nodci));
 }
 
 void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
@@ -1146,6 +1195,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_pdsch_cfg_hypothesis_t winner;
       if (credit_ok)
         nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      if (credit_ok)
+        nr_pdsch_passive_bc9_note(&job.sweep_ticket, job.rnti, job.dci_abs_slot, &job.dlsch_pdu, job.grant.nb_rb_oh,
+                                  st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,

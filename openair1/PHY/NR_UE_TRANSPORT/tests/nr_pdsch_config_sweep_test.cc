@@ -2827,3 +2827,24 @@ TEST(PdschBc9FastPath, UndecodableSiblingSkipIsBounded)
   nr_pdsch_config_sweep_next_ex(s.get(), &h, &k);
   EXPECT_EQ(k, NR_TD_PICK_SIBLING); /* then the test resumes */
 }
+
+/* Runtime input of the certified flag: the ticket's hypothesis, its alive k0-sibling offsets and the alive MCS tables. */
+TEST_F(PdschBc9, TicketSiblingsReportsAliveK0OffsetsAndTables)
+{
+  auto t = k39_fresh(0);
+  nr_pdsch_cfg_hypothesis_t h{};
+  uint64_t sib = 0;
+  uint8_t tables = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_ticket_siblings(&t, &h, &sib, &tables));
+  EXPECT_EQ(sib, UINT64_C(1) << (h.k0 ^ 1)); /* the full catalogue has both k0 for every geometry */
+  EXPECT_EQ(tables, 0x7);
+  nr_td_excl_t f;
+  nr_td_excl_none(&f);
+  f.last[1] = -1;
+  ASSERT_GT(nr_pdsch_config_sweep_exclude_key(0x1234, 0x4601, 0, &f), 0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_ticket_siblings(&t, &h, &sib, &tables)); /* stale ticket after the prune */
+  t = k39_fresh(0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_ticket_siblings(&t, &h, &sib, &tables));
+  EXPECT_EQ(h.k0, 0);
+  EXPECT_EQ(sib, 0u); /* no sibling left: such a grant can never be certified */
+}

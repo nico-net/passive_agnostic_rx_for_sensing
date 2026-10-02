@@ -127,6 +127,12 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
 void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_pattern_t *p2);
 bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot);
 bool nr_passive_acq_tdd_known(void);
+/* BC9: reference SCS (referenceSubcarrierSpacing, mu) of the SIB1 pattern; must precede/accompany note_sib1_tdd. */
+void nr_passive_acq_note_sib1_tdd_ref_mu(int mu);
+/* BC9: last[k] = nr_tdd_pdsch_last_symbol(dci_abs_slot + k) for k < n, for the TDD exclusion of the Technique D sweep.
+ * False (nothing filled) unless a valid SIB1 pattern AND its reference numerology are known and equal `mu` (the
+ * receiver's numerology of dci_abs_slot): an unknown pattern (NSA, a cell without SIB1) never excludes. */
+bool nr_passive_acq_tdd_pdsch_last_symbols(uint32_t dci_abs_slot, int mu, int n, int8_t *last);
 /* Hard invalidation: the receive stream itself was lost (RXDISCONT), so the frame-to-sample
  * mapping -- and therefore every hypothesis being scored against it -- is invalid NOW. Drops
  * straight to NR_ACQ_LOST with NO hysteresis, unlike nr_passive_acq_update()'s evidence path:

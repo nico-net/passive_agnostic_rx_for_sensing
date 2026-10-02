@@ -2526,6 +2526,7 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
         tp[i].ul_slots = (uint8_t)pp[i]->nrofUplinkSlots;
         tp[i].ul_symbols = (uint8_t)pp[i]->nrofUplinkSymbols;
       }
+      nr_passive_acq_note_sib1_tdd_ref_mu(mu); /* BC9: the TDD k0 exclusion applies only at this numerology */
       nr_passive_acq_note_sib1_tdd(&tp[0], tc->pattern2 ? &tp[1] : NULL);
     } else {
       LOG_A(PHY, "SENSING: TDD from SIB1 ABSENT (tdd-UL-DL-ConfigurationCommon not in SIB1 -> FDD or pattern unknown)\n");

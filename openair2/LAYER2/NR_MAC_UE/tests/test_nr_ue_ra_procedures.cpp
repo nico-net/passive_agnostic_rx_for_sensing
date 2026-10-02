@@ -50,6 +50,7 @@ void nr_passive_acq_note_sib1_carrier(int, int, int, int, int) {} // same gate (
 void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *, const uint8_t *, const uint8_t *, int) {}
 void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *) {}
 void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *, const nr_tdd_pattern_t *) {}
+void nr_passive_acq_note_sib1_tdd_ref_mu(int) {}
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;

@@ -439,6 +439,11 @@ int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uin
  *  key's k0 certification and with the k0 values its persisted exclusion leaves any legal entry (end symbol >= 1).
  *  An over-approximation of the truth's k0 (A2); popcount 1 = certified. */
 uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t rnti, uint8_t tda);
+/** For the DCI-adjacency certified flag of a decoded job: the ticket's hypothesis, the k0 values of the hypotheses that are
+ *  k0 siblings of it (same S, L, mapping type, DM-RS mask; active or dormant through a non-GEOM cause), and the MCS tables of
+ *  the active hypotheses. False for a stale ticket or a settled context. */
+bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_pdsch_cfg_hypothesis_t *h, uint64_t *sib_k0,
+                                           uint8_t *tables);
 /** Diagnostics: hypotheses removed by exclusions with k0 < 2 / k0 >= 2 (probe layers), refused contradictions. */
 void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused);
 /** Test hook: force the ISAC_TD_K0_ORACLE_LEGACY decision (1 = old k0 pinning, 0 = default, -1 = re-read the env). */

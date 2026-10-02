@@ -2053,7 +2053,13 @@ int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uin
   if (e == NULL || !rnti || tda >= 16)
     return 0;
   pthread_mutex_lock(&g_lock);
-  rnti_ctx_t *r = rnti_ctx(rnti, true);
+  /* Only RNTIs the sweep already tracks: an accepted DCI of an RNTI without a context (a one-off noise accept) must not
+   * take a protected slot of the RNTI table; a real RNTI's constraint is re-derived from its next DCI. */
+  rnti_ctx_t *r = rnti_ctx(rnti, false);
+  if (r == NULL) {
+    pthread_mutex_unlock(&g_lock);
+    return 0;
+  }
   nr_td_excl_t merged;
   if (!excl_get(r, configuration, tda, &merged))
     nr_td_excl_none(&merged);
@@ -2096,6 +2102,30 @@ uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t r
   }
   pthread_mutex_unlock(&g_lock);
   return a;
+}
+bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_pdsch_cfg_hypothesis_t *h, uint64_t *sib_k0,
+                                           uint8_t *tables)
+{
+  if (t == NULL || h == NULL || sib_k0 == NULL || tables == NULL || t->generation == 0)
+    return false;
+  pthread_mutex_lock(&g_lock);
+  const sweep_context_t *c = ticket_context(t);
+  const bool ok = c != NULL && c->state->winner < 0;
+  if (ok) {
+    const nr_pdsch_config_sweep_state_t *st = c->state;
+    *h = st->hyp[t->hypothesis];
+    const uint64_t sk = skey_of(h);
+    *sib_k0 = 0;
+    *tables = 0;
+    for (int i = 0; i < st->n_hyp; i++) {
+      if (active(st, i))
+        *tables |= (uint8_t)(1u << (st->hyp[i].mcs_table & 7));
+      if (st->hyp[i].k0 <= NR_TD_K0_MAX && is_sibling_of(st, i, sk, h->k0))
+        *sib_k0 |= UINT64_C(1) << st->hyp[i].k0;
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return ok;
 }
 void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused)
 {
