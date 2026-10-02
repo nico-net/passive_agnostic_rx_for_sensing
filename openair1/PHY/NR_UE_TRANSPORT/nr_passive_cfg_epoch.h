@@ -53,6 +53,8 @@ void nr_cfg_epoch_note_mib(uint32_t mib_hash_without_sfn);
 bool nr_cfg_epoch_note_sib1(uint32_t semantic_hash, uint64_t abs_slot); /* called whenever SIB1 is decoded (SA or NSA), never required */
 void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t modification_period_slots);
 void nr_cfg_epoch_note_continuity_loss(void);
+/* Signed RF timestamp delta and samples in one millisecond; nonpositive deltas are hard. */
+void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t samples_per_ms);
 void nr_cfg_epoch_note_bwp_change(void);
 void nr_cfg_epoch_note_csirs_map_change(void); /* source must confirm a changed map first */
 void nr_cfg_epoch_note_rnti_reopened(uint16_t rnti, bool was_converged, uint64_t abs_slot);

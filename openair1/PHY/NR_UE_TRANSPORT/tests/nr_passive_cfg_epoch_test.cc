@@ -111,11 +111,36 @@ TEST_F(CfgEpoch, SiModNoReacquireFallbackCanBeDisabled) {
   unsetenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
 }
 TEST_F(CfgEpoch, ContinuityLossLoggedAsContinuity) {
-  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_note_continuity_loss_samples(10000, 1000);
   nr_cfg_epoch_drain();
   EXPECT_EQ(last.last_cause, NR_CAUSE_CONTINUITY_LOSS);
   nr_cfg_epoch_drain();
   EXPECT_EQ(last.last_class, NR_EPOCH_HARD_REVERIFY);
+}
+TEST_F(CfgEpoch, ShortGapIsSoft) {
+  nr_cfg_epoch_note_continuity_loss_samples(9000, 1000);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
+  EXPECT_EQ(last.last_cause, NR_CAUSE_CONTINUITY_LOSS);
+}
+TEST_F(CfgEpoch, LongGapIsHardReverify) {
+  for (uint64_t ms : {10u, 50u}) {
+    nr_cfg_epoch_note_continuity_loss_samples(ms * 1000, 1000);
+    nr_cfg_epoch_drain();
+    EXPECT_EQ(last.last_class, NR_EPOCH_HARD_REVERIFY);
+    EXPECT_EQ(last.last_cause, NR_CAUSE_CONTINUITY_LOSS);
+  }
+  EXPECT_EQ(calls, 2);
+}
+TEST_F(CfgEpoch, GapThresholdFromEnv) {
+  setenv("ISAC_RECONF_GAP_HARD_MS", "20", 1);
+  nr_cfg_epoch_note_continuity_loss_samples(19000, 1000);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
+  nr_cfg_epoch_note_continuity_loss_samples(20000, 1000);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(last.last_class, NR_EPOCH_HARD_REVERIFY);
+  unsetenv("ISAC_RECONF_GAP_HARD_MS");
 }
 TEST_F(CfgEpoch, TwoConvergedRntisWithin2sIsSoft) {
   nr_cfg_epoch_note_rnti_reopened(1, true, 100);

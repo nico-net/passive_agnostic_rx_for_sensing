@@ -1,6 +1,8 @@
 #include "nr_passive_cfg_epoch.h"
 #include "common/utils/LOG/log.h"
 #include <pthread.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,9 @@ typedef struct {
 typedef struct epoch_event {
   struct epoch_event *next;
   bool bumped;
+  bool has_gap;
+  int64_t gap_samples;
+  uint64_t samples_per_ms;
   nr_cfg_epoch_snapshot_t snapshot;
   nr_cfg_epoch_listener_t listeners[NR_CFG_LISTENERS_MAX];
   unsigned n_listeners;
@@ -114,6 +119,9 @@ static void dispatch(const epoch_event_t *event)
   LOG_I(PHY, "SENSING: CONFIG_EPOCH %u -> %u class=%s cause=%s scope=%s\n",
         s->epoch - 1, s->epoch, class_name(s->last_class), cause_name(s->last_cause),
         s->last_class == NR_EPOCH_HARD_RESET ? "cell_identity" : "cell");
+  if (event->has_gap)
+    LOG_I(PHY, "SENSING: CONFIG_EPOCH continuity gap_samples=%" PRId64 " gap_ms=%.3f\n",
+          event->gap_samples, (double)event->gap_samples / event->samples_per_ms);
   for (unsigned i = 0; i < event->n_listeners; ++i) event->listeners[i](s);
 }
 
@@ -366,6 +374,25 @@ static void simple_bump(nr_epoch_class_t cls, nr_epoch_cause_t cause)
 
 }
 void nr_cfg_epoch_note_continuity_loss(void) { simple_bump(NR_EPOCH_HARD_REVERIFY, NR_CAUSE_CONTINUITY_LOSS); }
+void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t samples_per_ms)
+{
+  if (!is_enabled()) return;
+  uint64_t threshold_ms = 10;
+  const char *setting = getenv("ISAC_RECONF_GAP_HARD_MS");
+  if (setting && *setting) {
+    char *end;
+    errno = 0;
+    unsigned long long parsed = strtoull(setting, &end, 10);
+    if (!errno && end != setting && !*end && setting[0] != '-') threshold_ms = parsed;
+  }
+  const bool hard = gap_samples <= 0 || !samples_per_ms ||
+      (threshold_ms <= UINT64_MAX / samples_per_ms && (uint64_t)gap_samples >= threshold_ms * samples_per_ms);
+  epoch_event_t event = {.has_gap = true, .gap_samples = gap_samples,
+                         .samples_per_ms = samples_per_ms ? samples_per_ms : 1};
+  pthread_mutex_lock(&lock);
+  bump_locked(&event, hard ? NR_EPOCH_HARD_REVERIFY : NR_EPOCH_SOFT, NR_CAUSE_CONTINUITY_LOSS);
+  pthread_mutex_unlock(&lock);
+}
 void nr_cfg_epoch_note_bwp_change(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_BWP_CHANGE); }
 void nr_cfg_epoch_note_csirs_map_change(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_CSIRS_MAP_CHANGE); }
 void nr_cfg_epoch_note_rnti_reopened(uint16_t rnti, bool was_converged, uint64_t abs_slot)

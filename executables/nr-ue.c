@@ -1644,7 +1644,7 @@ void *UE_thread(void *arg)
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled())
-            nr_cfg_epoch_note_continuity_loss();
+            nr_cfg_epoch_note_continuity_loss_samples(jump, fp->samples_per_subframe);
           /* No RX/TX job has been allocated for this slot yet. Dispatching it would
            * feed invalid samples to discovery and overwrite UNSYNC with SYNCED below. */
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
