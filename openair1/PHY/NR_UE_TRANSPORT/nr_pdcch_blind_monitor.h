@@ -127,6 +127,7 @@ typedef struct {
   uint8_t ul_start[16], ul_length[16], ul_mapping[16], ul_k2[16];
 } nr_pdcch_blind_common_config_t;
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts);
+void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t hash);
 bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *facts);
 void nr_pdcch_blind_reset_common(void);
 
@@ -212,7 +213,7 @@ typedef struct {
   uint8_t     tb_scaling;         ///< RA-/P-RNTI only: index into TS 38.214 Table 5.1.3.2-2's
                                   ///< scaling factor S = {1, 0.5, 0.25}; 3 is reserved and rejected
   uint8_t     si_indicator;       ///< SI-RNTI only: 0 = SIB1, 1 = SI message (TS 38.212 7.3.1.2.1)
-  uint8_t     short_messages_ind; ///< P-RNTI only (TS 38.331): 2 = paging + short message, 3 = both
+  uint8_t     short_messages_ind; ///< P-RNTI only: 2 = short message only, 3 = paging + short message
   uint8_t     short_messages;     ///< P-RNTI only: the 8-bit short message
   bool        plausible;          ///< false => caller MUST discard this result
   const char* reject_reason;      ///< non-NULL iff !plausible; static string, do not free

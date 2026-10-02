@@ -56,6 +56,7 @@ void crcTableInit(void);
 #include "common/utils/nr/nr_common.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // NR_tda_info_t, get_dl_tda_info(), TYPE_C_RNTI_
 #include "nr_pdcch_blind_monitor.h"
+#include "nr_passive_cfg_sources.h"
 #include "nr_pdsch_config_sweep.h"
 #include "nr_pdcch_coreset_map.h"
 #include "nr_pdcch_discovery_replay.h"
@@ -1196,6 +1197,10 @@ TEST_F(BlindPdcchTest, Dci10PRntiShortMessageOnlyCarriesNoGrant) {
   auto sm_only = EncodeToLLR(PackDci10P(gt, riv_bits), 0xFFFE, len, kAggregationLevel, 40.0, rng_);
   EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(sm_only.data(), kAggregationLevel, len, &ctx, 0x0001,
                                                     0xFFEF, &opts, &out));
+  EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_P);
+  EXPECT_EQ(out.short_messages_ind, 2);
+  EXPECT_EQ(out.short_messages, 0xA5);
+  EXPECT_TRUE(nr_cfg_prnti_si_modified(out.short_messages_ind, out.short_messages));
 }
 
 // --- The three things the search-space kind changes ----------------------------------------------

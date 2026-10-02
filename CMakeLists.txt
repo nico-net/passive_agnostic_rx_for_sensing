@@ -1388,7 +1388,12 @@ if(E2_AGENT)
   target_compile_definitions(L2 PRIVATE ${E2AP_VERSION} ${KPM_VERSION} E2_AGENT)
 endif()
 
+add_library(nr_passive_cfg_epoch STATIC
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c)
+target_link_libraries(nr_passive_cfg_epoch PRIVATE UTIL)
 add_library(MAC_UE_NR ${MAC_NR_SRC_UE})
+target_link_libraries(MAC_UE_NR PRIVATE nr_passive_cfg_epoch)
 target_link_libraries(MAC_UE_NR PRIVATE asn1_lte_rrc_hdrs asn1_nr_rrc_hdrs PUBLIC nr_ue_power_procedures nr_ue_ra_procedures)
 
 add_library(L2_LTE ${L2_LTE_SRC})
@@ -1463,6 +1468,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
 add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c)
+target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_passive_cfg_epoch)
 # nr_scrambling_id_sweep.c lives HERE only (final review I7): nr_pusch_passive_ul_ids.c (this library) and
 # nr_pdsch_passive_decode.c (PHY_NR_UE) both call it. Every executable that pulls nr_pdsch_passive_decode.o
 # already needs this library (nr_prb_segments, nr_pdsch_config_sweep_*), so no PHY_NR_UE-only link unit loses it.
@@ -2535,7 +2541,8 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_passive_acq_state COMMAND ./test_nr_passive_acq_state)
 
   add_executable(test_nr_passive_cfg_epoch ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc
-                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c)
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c)
   target_include_directories(test_nr_passive_cfg_epoch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_passive_cfg_epoch PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_passive_cfg_epoch)

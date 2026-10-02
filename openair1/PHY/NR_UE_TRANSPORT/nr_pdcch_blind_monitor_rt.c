@@ -42,6 +42,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
 #include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
@@ -3428,6 +3430,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * whether the occasion runs here or on the receive thread -- which is what keeps the deferral a
    * pure threading change and therefore A/B-able. */
   const uint32_t abs_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
+  const bool cfg_reconf_on = nr_cfg_reconf_enabled();
+  const uint64_t cfg_abs_slot = cfg_reconf_on
+      ? nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame) : 0;
+  if (cfg_reconf_on) nr_cfg_epoch_tick(cfg_abs_slot);
 
   const bool isac_on     = nr_isac_enabled() != 0;
   const bool want_dmrs   = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
@@ -4189,10 +4195,13 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           nr_pdcch_dci_length_context_t *c =
               nr_pdcch_dci_length_context(dl_bank, dl_geom, dl_known[k]);
           if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
-            if (c->last_note_slot != 0)
+            if (c->last_note_slot != 0) {
               nr_pdcch_dci_length_context_note_occasion(c,
                   c->last_accept_slot == c->last_note_slot,
                   nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1), reconf_n_suspect());
+              if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on)
+                nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
+            }
             c->last_note_slot = abs_slot;
           }
         }
@@ -4310,6 +4319,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         discovery_scope.phase = 2;
         if (found_len > 0 && dl_scout) {
           nr_pdcch_dci_length_context_note_occasion(dlc, false, true, reconf_n_suspect());
+          if (dlc->len_state == NR_LEN_SUSPECT && cfg_reconf_on)
+            nr_cfg_epoch_note_rnti_reopened(dlc->rnti, true, cfg_abs_slot);
         } else if (found_len > 0 && dl_second) {
           const int replaced = nr_pdcch_dci_length_context_add(dlc, found_len, abs_slot);
           nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
@@ -4481,10 +4492,13 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       for (int k = 0; k < n_known_ul; ++k) {
         nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(ul_bank, geom, known_ul[k]);
         if (c && c->len_state == NR_LEN_LOCKED && c->last_note_slot != abs_slot) {
-          if (c->last_note_slot != 0)
+          if (c->last_note_slot != 0) {
             nr_pdcch_dci_length_context_note_occasion(c,
                 c->last_accept_slot == c->last_note_slot,
                 nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1), reconf_n_suspect());
+            if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on)
+              nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
+          }
           c->last_note_slot = abs_slot;
         }
       }
@@ -6109,6 +6123,11 @@ constdiag_done:;
     }
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
+      if (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P
+          && out.reject_reason && strcmp(out.reject_reason,
+               "DCI-1_0/P-RNTI carries a short message only (no PDSCH assignment)") == 0
+          && nr_cfg_prnti_si_modified(out.short_messages_ind, out.short_messages))
+        nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
       g_last_reject_reason = out.reject_reason; // TEMPORARY diagnostic, see periodic summary below
       g_last_reject_rnti   = out.rnti;
       /* A SELF-VERIFYING class (SI/RA/TC) that decodes and is then rejected downstream is the one
@@ -6137,6 +6156,9 @@ constdiag_done:;
     stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
                        out.rnti, nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti));
     nr_pdcch_dci_length_note_seen(cand_task[ti].dci_length);
+    if (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P
+        && nr_cfg_prnti_si_modified(out.short_messages_ind, out.short_messages))
+      nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
     NR_BLIND_CTR_INC(g_accepts);
     if (al1_bank >= 0 && !cand_task[ti].ul_scan && al1_from_ladder(cand_task[ti].e_rx, pdcch_e_rx)
         && nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti))
@@ -6155,6 +6177,8 @@ constdiag_done:;
                       && nr_pbwp_on_accept(&g_pbwp, out.rnti, cand_task[ti].bwp_entry);
       const uint32_t nsw = g_pbwp.switches;
       pthread_mutex_unlock(&g_pbwp_lock);
+      if (sw && cfg_reconf_on)
+        nr_cfg_epoch_note_bwp_change();
       if (sw)
         LOG_A(PHY, "SENSING: BWP SWITCH rnti=0x%x -> entry %d (len %u, start %d, size %u), switches=%u\n",
               out.rnti, cand_task[ti].bwp_entry, cand_task[ti].dci_length,

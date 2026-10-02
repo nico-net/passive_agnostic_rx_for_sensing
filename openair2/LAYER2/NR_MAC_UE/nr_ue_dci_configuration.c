@@ -14,6 +14,8 @@
 #include "executables/softmodem-common.h"
 #include "RRC/NR_UE/rrc_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dci10_size(), for the OTACFG probe
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include <stdio.h>
 
 static void fill_dci_search_candidates(const NR_SearchSpace_t *ss, fapi_nr_dl_config_dci_dl_pdu_rel15_t *rel15, const uint32_t Y)
@@ -448,7 +450,7 @@ static bool monitor_paging_dci(const NR_SearchSpace_t *paging_ss,
    * UE-specific paging cannot succeed (no TMSI to match against pagingRecordList), the specs then expects
    * the UE to still receive broadcast Short Messages in DCI 1_0 with P-RNTI for systemInfoModification,
    * ETWS, CMAS and stopPagingMonitoring. */
-  if (ue_id == 0) {
+  if (ue_id == 0 && !(IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled())) {
     LOG_W(NR_MAC,
           "[UE %d] PF match at %04d.%02d with UE_ID=0 (no 5G-S-TMSI yet, or 5G-S-TMSI mod 1024 == 0): skipping P-RNTI monitoring\n",
           mac->ue_id,
@@ -608,6 +610,17 @@ void ue_dci_configuration(NR_UE_MAC_INST_t *mac, fapi_nr_dl_config_request_t *dl
   NR_BWP_PDCCH_t *pdcch_config = &mac->config_BWP_PDCCH[dl_bwp_id];
   int scs = current_DL_BWP ? current_DL_BWP->scs : mac->numerology;
   const int slots_per_frame = get_slots_per_frame_from_scs(scs);
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
+    static uint64_t last_sib1_request_slot;
+    const uint64_t abs_slot = nr_cfg_epoch_observe_slot(frame, slot, slots_per_frame);
+    nr_cfg_epoch_tick(abs_slot);
+    if (!mac->get_sib1 && mac->mib && mac->ssb_subcarrier_offset < (mac->frequency_range == FR1 ? 24 : 12)
+        && (nr_cfg_sib1_redecode_due(abs_slot, last_sib1_request_slot, 100u * slots_per_frame)
+            || nr_cfg_epoch_si_redecode_pending())) {
+      mac->get_sib1 = true;
+      last_sib1_request_slot = abs_slot;
+    }
+  }
   if (mac->get_sib1 || mac->update_pdcch_config) {
     update_pdcch_config(mac);
     mac->update_pdcch_config = false;

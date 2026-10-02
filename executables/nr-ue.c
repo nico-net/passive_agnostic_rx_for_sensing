@@ -1,6 +1,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
 #include <dlfcn.h>
 /*
@@ -1055,6 +1057,16 @@ void *UE_thread(void *arg)
           nr_passive_acq_set_phy_geometry(UE->frame_parms.N_RB_DL, UE->frame_parms.numerology_index,
                                           UE->frame_parms.ssb_start_subcarrier, (double)UE->frame_parms.dl_CarrierFreq);
           nr_passive_acq_note_pbch_locked(); // acquisition-state tracker: MIB applied, frame known
+          if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
+            /* The acquired SSB centre is stable across SFN/beam-index changes. Point A is refined on SIB1. */
+            const uint64_t ssb_hz = UE->frame_parms.dl_CarrierFreq
+                + ((int64_t)UE->frame_parms.ssb_start_subcarrier + 120
+                   - 6 * (int64_t)UE->frame_parms.N_RB_DL)
+                      * (15000LL << UE->frame_parms.numerology_index);
+            nr_pdcch_blind_set_sib1_semantic_hash(0);
+            nr_cfg_epoch_note_identity(UE->frame_parms.Nid_cell, ssb_hz, 0);
+            nr_cfg_epoch_set_slots_per_second(1000u << UE->frame_parms.numerology_index);
+          }
           atomic_store_explicit(&nr_passive_metrics_pci, UE->frame_parms.Nid_cell, memory_order_relaxed); // for the ISAC_METRICS JSON (Task A2)
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",
@@ -1629,6 +1641,8 @@ void *UE_thread(void *arg)
           /* The state tracker's other inputs are all latched discovery state and cannot regress
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
+          if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled())
+            nr_cfg_epoch_note_continuity_loss();
           /* No RX/TX job has been allocated for this slot yet. Dispatching it would
            * feed invalid samples to discovery and overwrite UNSYNC with SYNCED below. */
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()))

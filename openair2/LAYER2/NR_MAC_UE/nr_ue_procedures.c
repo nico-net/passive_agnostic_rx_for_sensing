@@ -20,6 +20,8 @@
 #include "NR_MAC_COMMON/nr_mac.h"
 #include "NR_MAC_UE/mac_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "common/utils/nr/nr_common.h"
 #include "openair2/NR_UE_PHY_INTERFACE/NR_Packet_Drop.h"
 
@@ -197,6 +199,12 @@ void nr_ue_decode_mib(NR_UE_MAC_INST_t *mac, int cc_id)
   /* Measured cell fact: publish it to the blind PDCCH monitor on every MIB, not only via the CSS0
    * autoconf, which a cell without CORESET#0 (NSA, FR1 k_SSB >= 24) never reaches. */
   nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(mac->dmrs_TypeA_Position);
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled())
+    nr_cfg_epoch_note_mib(nr_cfg_mib_hash(mac->mib->subCarrierSpacingCommon, ssb_subcarrier_offset,
+                                         mac->mib->dmrs_TypeA_Position,
+                                         mac->mib->pdcch_ConfigSIB1.controlResourceSetZero,
+                                         mac->mib->pdcch_ConfigSIB1.searchSpaceZero,
+                                         mac->mib->cellBarred, mac->mib->intraFreqReselection));
 
 }
 
@@ -898,6 +906,12 @@ static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
   }
 
   if (rnti_type == TYPE_P_RNTI_) {
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()
+        && nr_cfg_prnti_si_modified(dci->short_messages_indicator, dci->short_messages)) {
+      const unsigned slots_per_frame = get_slots_per_frame_from_scs(mac->numerology);
+      nr_cfg_epoch_note_si_modification(
+          nr_cfg_epoch_observe_slot(frame, slot, slots_per_frame), nr_cfg_epoch_si_period());
+    }
     /* DCI 1_0 P-RNTI: SMI per TS 38.212 clause 7.3.1.2.1: 00 reserved, 01 paging grant, 10 short
      * message only, 11 paging + short message */
     if (dci->short_messages_indicator == NR_DCI_PRNTI_SMI_RESERVED) {

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "nr_passive_cfg_epoch.h"
+#include "nr_passive_cfg_sources.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 #include <atomic>
@@ -138,6 +139,60 @@ TEST_F(CfgEpoch, CsirsMapChangeIsSoft) {
   nr_cfg_epoch_note_csirs_map_change();
   EXPECT_EQ(last.last_cause, NR_CAUSE_CSIRS_MAP_CHANGE);
   EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
+}
+TEST(CfgSources, MibHashIgnoresFrameAndSsbIndex) {
+  const auto a = nr_cfg_mib_hash(1, 12, 2, 4, 1, 1, 0);
+  EXPECT_EQ(a, nr_cfg_mib_hash(1, 12, 2, 4, 1, 1, 0));
+  EXPECT_NE(a, nr_cfg_mib_hash(1, 12, 3, 4, 1, 1, 0));
+}
+TEST(CfgSources, Sib1CanonicalHashIgnoresEncodingOnlyDifferences) {
+  uint8_t identity_a[] = {0x12, 0x34, 0x50};
+  uint8_t identity_b[] = {0x12, 0x34, 0x5f}; // unused low nibble differs
+  auto make = [](const uint8_t *identity) {
+    uint32_t h = nr_cfg_semantic_start();
+    h = nr_cfg_semantic_add(h, 310); // decoded PLMN
+    h = nr_cfg_semantic_bits(h, identity, 20); // decoded cell identity bits
+    h = nr_cfg_semantic_add(h, 106); // decoded carrier bandwidth
+    return h;
+  };
+  EXPECT_EQ(make(identity_a), make(identity_b));
+  EXPECT_NE(make(identity_a), nr_cfg_semantic_add(make(identity_a), 1));
+}
+TEST(CfgSources, PrntiShortMessageSiModification) {
+  EXPECT_TRUE(nr_cfg_prnti_si_modified(2, 0x80));
+  EXPECT_TRUE(nr_cfg_prnti_si_modified(3, 0x80));
+  EXPECT_FALSE(nr_cfg_prnti_si_modified(1, 0x80));
+  EXPECT_FALSE(nr_cfg_prnti_si_modified(2, 0x40));
+}
+TEST(CfgSources, SiPeriodAndPeriodicRedecode) {
+  EXPECT_EQ(nr_cfg_si_period_slots(4, 128, 20), 10240u);
+  EXPECT_FALSE(nr_cfg_sib1_redecode_due(9999, 0, 2000));
+  EXPECT_TRUE(nr_cfg_sib1_redecode_due(10000, 0, 2000));
+}
+TEST(CfgSources, Sib1CacheKeyIncludesSemanticHash) {
+  char a[100], b[100], legacy[100];
+  nr_cfg_sib1_cache_name(a, sizeof(a), "/tmp/fixture", 17, 0x1234, true);
+  nr_cfg_sib1_cache_name(b, sizeof(b), "/tmp/fixture", 17, 0x1235, true);
+  nr_cfg_sib1_cache_name(legacy, sizeof(legacy), "/tmp/fixture", 17, 0x1235, false);
+  EXPECT_STRNE(a, b);
+  EXPECT_STREQ(legacy, "/tmp/fixture/sib1_common_pci17.bin");
+}
+TEST_F(CfgEpoch, IdentityRefinesUnknownPointAWithoutBump) {
+  nr_cfg_epoch_note_identity(11, 100, 0);
+  nr_cfg_epoch_refine_point_a(201);
+  EXPECT_EQ(calls, 1);
+  nr_cfg_epoch_note_identity(11, 100, 0);
+  EXPECT_EQ(calls, 1);
+}
+TEST_F(CfgEpoch, DecodedBwpAndContinuitySources) {
+  nr_cfg_epoch_note_bwp_change();
+  EXPECT_EQ(last.last_cause, NR_CAUSE_BWP_CHANGE);
+  nr_cfg_epoch_note_continuity_loss();
+  EXPECT_EQ(last.last_cause, NR_CAUSE_CONTINUITY_LOSS);
+}
+TEST_F(CfgEpoch, SfnWrapKeepsSiBoundaryMonotonic) {
+  EXPECT_EQ(nr_cfg_epoch_observe_slot(1023, 19, 20), 20479u);
+  EXPECT_EQ(nr_cfg_epoch_observe_slot(0, 0, 20), 20480u);
 }
 }
 

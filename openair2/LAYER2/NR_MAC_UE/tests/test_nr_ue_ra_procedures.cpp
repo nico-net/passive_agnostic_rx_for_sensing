@@ -29,6 +29,7 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts)
   (void)facts;
   return false;
 }
+void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t) {} // passive reconf hook, disabled in this test
 bool nr_pdcch_blind_monitor_autoconf_wanted(void)
 {
   return false;

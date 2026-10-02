@@ -28,9 +28,11 @@ typedef struct {
 } nr_cfg_epoch_snapshot_t;
 
 uint32_t nr_cfg_epoch_current(void); /* lock-free atomic read */
+bool nr_cfg_reconf_enabled(void); /* ISAC_RECONF=1, read once */
 uint32_t nr_cfg_epoch_identity_gen(void); /* increments only on HARD_RESET */
 nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void);
 void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point_a);
+void nr_cfg_epoch_refine_point_a(uint64_t point_a); /* 0 = unknown; first SIB1 observation fills it */
 void nr_cfg_epoch_note_mib(uint32_t mib_hash_without_sfn);
 void nr_cfg_epoch_note_sib1(uint32_t semantic_hash); /* called whenever SIB1 is decoded (SA or NSA), never required */
 void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t modification_period_slots);
@@ -45,6 +47,10 @@ void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn); /* duplicate subscripti
 /* R8 sets the cell numerology (1000, 2000, 4000, ... slots/s); default 1000.
  * This only controls the two-second dedicated-change window. */
 void nr_cfg_epoch_set_slots_per_second(uint32_t slots_per_second);
+void nr_cfg_epoch_set_si_period(uint32_t period_slots);
+uint32_t nr_cfg_epoch_si_period(void);
+bool nr_cfg_epoch_si_redecode_pending(void);
+uint64_t nr_cfg_epoch_observe_slot(uint16_t sfn, uint8_t slot, uint8_t slots_per_frame);
 /* Clears all state and listeners; intended for a new receiver lifetime and unit-test isolation. */
 void nr_cfg_epoch_reset(void);
 

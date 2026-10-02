@@ -59,6 +59,8 @@
 
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
+#include "nr_passive_cfg_epoch.h"
+#include "nr_passive_cfg_sources.h"
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_cfg_t + get_cfg() accessor (implemented
                                        // below); the RT tap itself lives in nr_pdcch_blind_monitor_rt.c
                                        // -- see that header's file comment for why the split exists.
@@ -3732,6 +3734,8 @@ static bool dci10_parse(nr_dci_bits_t                             payload,
         return false;
       }
       if (sm_ind == 2) {
+        out->short_messages_ind = (uint8_t)sm_ind;
+        out->short_messages = (uint8_t)sm;
         out->reject_reason = "DCI-1_0/P-RNTI carries a short message only (no PDSCH assignment)";
         return false;
       }
@@ -4040,6 +4044,8 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
       return true;
     }
     last_reason = out->reject_reason;
+    const bool short_only = attempts[i] == NR_BLIND_RNTI_CLASS_P && out->short_messages_ind == 2;
+    const uint8_t short_message = out->short_messages;
     // dci10_parse() writes into `out` as it goes, so reset the fields the caller still needs before
     // the next hypothesis -- without this a failed attempt would clear the RNTI a later one reports.
     memset(out, 0, sizeof(*out));
@@ -4048,6 +4054,11 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
     out->rnti            = saved_rnti;
     out->mismatched_bits = saved_mismatches;
     out->reject_reason   = last_reason;
+    if (short_only) {
+      out->rnti_class = NR_BLIND_RNTI_CLASS_P;
+      out->short_messages_ind = 2;
+      out->short_messages = short_message;
+    }
     // The decoded word survives every class hypothesis -- it is what the format-0_0 reader needs.
     out->payload         = (nr_dci_bits_t){{dci_estimation[0], dci_estimation[1], dci_estimation[2]}};
   }
@@ -5263,6 +5274,11 @@ static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *len
   return true;
 }
 static bool sib1_cache_suppressed;
+static _Atomic uint32_t sib1_semantic_hash;
+void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t hash)
+{
+  atomic_store_explicit(&sib1_semantic_hash, hash, memory_order_release);
+}
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f);
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
 {
@@ -5297,7 +5313,9 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
 static void sib1_cache_path(uint16_t pci, char *out, size_t n)
 {
   const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
-  snprintf(out, n, "%s/sib1_common_pci%u.bin", dir && dir[0] ? dir : "/tmp/passive_rx", pci);
+  nr_cfg_sib1_cache_name(out, n, dir, pci,
+                          atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire),
+                          nr_cfg_reconf_enabled());
 }
 static bool sib1_cache_enabled(void)
 {
@@ -5307,6 +5325,7 @@ static bool sib1_cache_enabled(void)
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
 {
   if (!sib1_cache_enabled()) return;
+  if (nr_cfg_reconf_enabled() && !atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire)) return;
   char path[256];
   sib1_cache_path(f->pci, path, sizeof(path));
   FILE *fp = fopen(path, "wb");
@@ -5320,6 +5339,7 @@ static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
 static bool sib1_cache_load(uint16_t pci, nr_pdcch_blind_common_config_t *f)
 {
   if (!sib1_cache_enabled()) return false;
+  if (nr_cfg_reconf_enabled() && !atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire)) return false;
   char path[256];
   sib1_cache_path(pci, path, sizeof(path));
   FILE *fp = fopen(path, "rb");

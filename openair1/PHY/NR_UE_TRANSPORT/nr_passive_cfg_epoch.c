@@ -42,6 +42,9 @@ static hash_state_t mib, sib1;
 static si_pending_t pending;
 static reopened_t reopened;
 static uint32_t slots_per_second = 1000;
+static _Atomic uint32_t si_period_slots;
+static uint64_t last_abs_frame;
+static bool have_sfn;
 static nr_cfg_epoch_listener_t listeners[NR_CFG_LISTENERS_MAX];
 static unsigned n_listeners;
 static pthread_once_t enable_once = PTHREAD_ONCE_INIT;
@@ -57,6 +60,7 @@ static bool is_enabled(void)
   pthread_once(&enable_once, read_enable);
   return enabled;
 }
+bool nr_cfg_reconf_enabled(void) { return is_enabled(); }
 static const char *class_name(nr_epoch_class_t c)
 {
   switch (c) {
@@ -124,6 +128,9 @@ void nr_cfg_epoch_reset(void)
   memset(listeners, 0, sizeof(listeners));
   n_listeners = 0;
   slots_per_second = 1000;
+  atomic_store_explicit(&si_period_slots, 0, memory_order_release);
+  last_abs_frame = 0;
+  have_sfn = false;
   atomic_store_explicit(&epoch, 0, memory_order_release);
   atomic_store_explicit(&identity_gen, 0, memory_order_release);
   pthread_mutex_unlock(&lock);
@@ -146,19 +153,66 @@ void nr_cfg_epoch_set_slots_per_second(uint32_t value)
   reopened.valid = false;
   pthread_mutex_unlock(&lock);
 }
+void nr_cfg_epoch_set_si_period(uint32_t value)
+{
+  if (is_enabled()) atomic_store_explicit(&si_period_slots, value, memory_order_release);
+}
+uint32_t nr_cfg_epoch_si_period(void)
+{
+  return atomic_load_explicit(&si_period_slots, memory_order_acquire);
+}
+bool nr_cfg_epoch_si_redecode_pending(void)
+{
+  if (!is_enabled()) return false;
+  pthread_mutex_lock(&lock);
+  const bool needed = pending.active && !pending.observed;
+  pthread_mutex_unlock(&lock);
+  return needed;
+}
+uint64_t nr_cfg_epoch_observe_slot(uint16_t sfn, uint8_t slot, uint8_t slots_per_frame)
+{
+  if (!slots_per_frame || sfn >= 1024 || slot >= slots_per_frame) return 0;
+  pthread_mutex_lock(&lock);
+  uint64_t frame = have_sfn ? (last_abs_frame / 1024u) * 1024u + sfn : sfn;
+  if (have_sfn && frame + 512u < last_abs_frame) frame += 1024u;
+  else if (have_sfn && frame > last_abs_frame + 512u && frame >= 1024u) frame -= 1024u;
+  if (!have_sfn || frame > last_abs_frame) last_abs_frame = frame;
+  have_sfn = true;
+  const uint64_t absolute = frame * slots_per_frame + slot;
+  pthread_mutex_unlock(&lock);
+  return absolute;
+}
 void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point_a)
 {
   if (!is_enabled()) return;
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
-  if (identity.valid && (identity.pci != pci || identity.ssb_arfcn != ssb_arfcn || identity.point_a != point_a)) {
+  const bool changed = identity.valid && (identity.pci != pci || identity.ssb_arfcn != ssb_arfcn
+      || (point_a && identity.point_a && identity.point_a != point_a));
+  if (changed) {
     memset(&mib, 0, sizeof(mib));
     memset(&sib1, 0, sizeof(sib1));
     memset(&pending, 0, sizeof(pending));
     reopened.valid = false;
     bump_locked(&event, NR_EPOCH_HARD_RESET, NR_CAUSE_CELL_IDENTITY_CHANGE);
   }
-  identity = (cell_identity_t){true, pci, ssb_arfcn, point_a};
+  identity = (cell_identity_t){true, pci, ssb_arfcn, point_a ? point_a : (changed ? 0 : identity.point_a)};
+  pthread_mutex_unlock(&lock);
+  dispatch(&event);
+}
+void nr_cfg_epoch_refine_point_a(uint64_t point_a)
+{
+  if (!is_enabled() || !point_a) return;
+  epoch_event_t event = {0};
+  pthread_mutex_lock(&lock);
+  if (identity.valid && identity.point_a && identity.point_a != point_a) {
+    memset(&mib, 0, sizeof(mib));
+    memset(&sib1, 0, sizeof(sib1));
+    memset(&pending, 0, sizeof(pending));
+    reopened.valid = false;
+    bump_locked(&event, NR_EPOCH_HARD_RESET, NR_CAUSE_CELL_IDENTITY_CHANGE);
+  }
+  if (identity.valid) identity.point_a = point_a;
   pthread_mutex_unlock(&lock);
   dispatch(&event);
 }
@@ -191,9 +245,14 @@ void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t period)
 {
   if (!is_enabled() || !period) return;
   pthread_mutex_lock(&lock);
+  const uint64_t next_boundary = (abs_slot / period + 1) * (uint64_t)period;
+  if (pending.active && pending.boundary == next_boundary) {
+    pthread_mutex_unlock(&lock);
+    return;
+  }
   pending.active = true;
   pending.observed = false;
-  pending.boundary = (abs_slot / period + 1) * (uint64_t)period;
+  pending.boundary = next_boundary;
   const uint64_t boundary = pending.boundary;
   pthread_mutex_unlock(&lock);
   LOG_I(PHY, "SENSING: CONFIG_EPOCH pending cause=SI_MODIFICATION_ANNOUNCED boundary=%lu\n",
