@@ -329,6 +329,26 @@ static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
   st->winner_by_crc = false;
   return n;
 }
+/* K42 F3: commit a prune that removed ONLY entries at index >= base and kept every entry below base in place (prune_move
+ * is the identity there). The caller guarantees that [base, n_hyp) was appended under the SAME g_lock hold (an observe
+ * call's restore_observed_typea / type-B layer): no ticket can name those indices and they carry no evidence. Indices
+ * < base, their evidence and every outstanding ticket therefore stay valid: truncate, without the evidence wipe and
+ * without a reindex. Per-index slots from base on are zeroed (fresh entries, and the slots beyond the new end). */
+static int prune_commit_tail(nr_pdsch_config_sweep_state_t *st, int n, int base)
+{
+  for (int i = base; i < st->n_hyp; i++) {
+    st->trials[i] = st->ok[i] = 0;
+    st->probe_pass[i] = st->probe_fail[i] = st->probe_inconclusive[i] = 0;
+    st->ok_unique[i] = 0;
+    st->fp_trials[i] = st->sib_trials[i] = 0;
+    st->order[i] = i; /* [0, base) of order[] is a permutation of [0, base): the appends set order[at] = at */
+  }
+  st->n_hyp = n;
+  normalize_masks(st);
+  if (st->cursor >= n)
+    st->cursor = 0;
+  return n;
+}
 
 int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t dmrs_mask)
 {
@@ -375,7 +395,11 @@ int nr_pdsch_config_sweep_prune_qm(nr_pdsch_config_sweep_state_t *st, uint8_t mc
 #define OBS_MASKS_MAX 8
 typedef struct {
   uint16_t mask[OBS_MASKS_MAX];
-  int8_t   last[OBS_MASKS_MAX]; /* last PDSCH symbol measured with that mask, -1 = unknown */
+  /* K42: the SET of last PDSCH symbols measured with that mask (bit l = S+L-1 == l, l 0..13); 0 = none measured (unknown, admits
+   * every duration). Monotone: a record only ORs a bit in, never re-refines. One mask is produced by several durations
+   * (another UE's PDSCH, the RNTI's own other TDRA rows, energy-threshold jitter), and the old relax-to-unknown / re-refine
+   * cycle made every refine prune what the previous observation had restored, wiping all CRC evidence each time. */
+  uint16_t lastset[OBS_MASKS_MAX];
   int8_t   k0[OBS_MASKS_MAX];   /* LEGACY ONLY (ISAC_TD_K0_ORACLE_LEGACY=1): k0 pinned from the job's hypothesis, -1 = none */
   uint64_t plaus[OBS_MASKS_MAX]; /* bit k: k0 = k was hypothesised on a job that saw this mask (plausible, NOT proven; never prunes) */
   int n;
@@ -576,21 +600,26 @@ static int obs_find(const obs_set_t *o, uint16_t mask)
       return i;
   return -1;
 }
-/* Record (mask, last symbol, k0) into a set. A later, more specific observation refines the record; a
- * contradiction (a different last symbol under the same mask) relaxes it back to unknown: two TDRA
- * entries can share a mask. Returns the entry index, -1 when the set is full. */
-static int obs_record(obs_set_t *o, uint16_t mask, int last_symbol, int k0)
+static inline uint16_t last_bit(int last_symbol)
+{
+  return last_symbol >= 0 && last_symbol < 14 ? (uint16_t)(1u << last_symbol) : 0;
+}
+/* Record (mask, last-symbol set, k0) into a set. K42: the last symbols of a mask accumulate (OR): the admitted
+ * durations only grow, so a later observation never removes an entry an earlier one admitted (two TDRA entries can
+ * share a mask). The one narrowing left is the first measured last symbol of a mask recorded unmeasured (unknown ->
+ * {l}). The legacy k0 pin (A/B only) keeps its refine/relax semantics. Returns the entry index, -1 when the set is full. */
+static int obs_record_set(obs_set_t *o, uint16_t mask, uint16_t lastset, int k0)
 {
   int k = obs_find(o, mask);
   if (k < 0 && o->n < OBS_MASKS_MAX) {
     k = o->n++;
     o->mask[k] = mask;
-    o->last[k] = -1;
+    o->lastset[k] = 0;
     o->k0[k] = -1;
     o->plaus[k] = 0;
   }
   if (k >= 0) {
-    if (last_symbol >= 0) o->last[k] = (o->last[k] < 0 || o->last[k] == last_symbol) ? (int8_t)last_symbol : -1;
+    o->lastset[k] |= lastset & 0x3FFF;
     if (k0 >= 0 && k0 <= 32) {
       o->plaus[k] |= UINT64_C(1) << k0;
       if (k0_oracle_legacy())
@@ -599,14 +628,19 @@ static int obs_record(obs_set_t *o, uint16_t mask, int last_symbol, int k0)
   }
   return k;
 }
-/* An observation is (mask, last symbol); an entry is consistent with it when its mask matches and its S+L-1
- * equals the measured last symbol (when measured). k0 is ignored unless the set carries a certified k0 mask
- * (K39), or in legacy mode a pin from the job's hypothesised k0. */
+static int obs_record(obs_set_t *o, uint16_t mask, int last_symbol, int k0)
+{
+  return obs_record_set(o, mask, last_bit(last_symbol), k0);
+}
+/* An observation is (mask, last symbol); an entry is consistent with a recorded mask when its mask matches and its
+ * S+L-1 is in the mask's measured last-symbol set (when any was measured). k0 is ignored unless, in legacy mode, the
+ * set carries a pin from the job's hypothesised k0 (the certified k0 is applied per context, apply_cert). */
 static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o, int k)
 {
   if (h->dmrs_mask != o->mask[k])
     return false;
-  if (o->last[k] >= 0 && (int)h->tda_start + (int)h->tda_length - 1 != o->last[k])
+  const int end = (int)h->tda_start + (int)h->tda_length - 1;
+  if (o->lastset[k] && !(end >= 0 && end < 14 && (o->lastset[k] >> end & 1)))
     return false;
   if (o->k0[k] >= 0 && h->k0 != o->k0[k])
     return false;
@@ -619,16 +653,31 @@ static bool obs_any_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *
       return true;
   return false;
 }
-/* Keep the entries admitted by any observation of this RNTI or of the cell; untouched if none matches. */
-static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t *own)
+/* Keep the entries admitted by any observation of this RNTI or of the cell; untouched if none matches. K42 F3: entries
+ * [base, n_hyp) were appended by the calling observe (same g_lock hold); a prune that removes only those truncates
+ * (prune_commit_tail) instead of wiping. *wiped (optional) = the evidence was wiped (the caller must reindex). */
+static int prune_to_observed_from(nr_pdsch_config_sweep_state_t *st, const obs_set_t *own, int base, bool *wiped)
 {
+  if (wiped)
+    *wiped = false;
   if (st == NULL || st->n_hyp <= 0 || ((own ? own->n : 0) + g_obs.n) <= 0)
     return 0;
   int n = 0;
+  bool head_kept = true;
   for (int i = 0; i < st->n_hyp; i++)
     if (((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs)))
       prune_move(st, n++, i);
+    else if (i < base)
+      head_kept = false;
+  if (n > 0 && n < st->n_hyp && head_kept)
+    return prune_commit_tail(st, n, base);
+  if (wiped)
+    *wiped = n > 0 && n != st->n_hyp;
   return prune_commit(st, n);
+}
+static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t *own)
+{
+  return prune_to_observed_from(st, own, st ? st->n_hyp : 0, NULL);
 }
 
 /* Append a k0 layer: every hypothesis of the lowest-k0 layer present, with k0 replaced. The lowest
@@ -1642,7 +1691,9 @@ static inline bool cert_admits(const sweep_context_t *c, const nr_pdsch_cfg_hypo
 }
 /* K39: bind a context to its certified k0 mask (the only k0 prune). No-op without a certification, when nothing
  * would survive, or once settled. Used after every prune/append that could bring a non-certified k0 in. g_lock held. */
-static int apply_cert(sweep_context_t *c)
+/* K42 F3: `base` as in prune_to_observed_from (entries [base, n_hyp) appended under this g_lock hold): removing only those
+ * truncates without wipe or reindex. apply_cert() = no appended tail. */
+static int apply_cert_from(sweep_context_t *c, int base)
 {
   nr_pdsch_config_sweep_state_t *st = c->state;
   if ((!c->k0_cert && !c->has_excl) || st->winner >= 0)
@@ -1653,14 +1704,23 @@ static int apply_cert(sweep_context_t *c)
   if (keep == 0 || keep == st->n_hyp)
     return st->n_hyp;
   int m = 0;
+  bool head_kept = true;
   for (int i = 0; i < st->n_hyp; i++)
     if (cert_admits(c, &st->hyp[i]))
       prune_move(st, m++, i);
-    else
+    else {
       g_excl_removed[st->hyp[i].k0 >= 2]++;
+      head_kept &= i >= base;
+    }
+  if (head_kept)
+    return prune_commit_tail(st, m, base);
   const int n = prune_commit(st, m);
   context_reindexed(c);
   return n;
+}
+static int apply_cert(sweep_context_t *c)
+{
+  return apply_cert_from(c, c->state->n_hyp);
 }
 static uint64_t obs_plaus_union(const obs_set_t *o)
 {
@@ -1930,7 +1990,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
   if (last_symbol < -1 || last_symbol >= 14 || k0 < -1 || k0 > 32)
     return 0;
   nr_pdsch_config_sweep_state_t *st = c->state;
-  obs_set_t observation = {.n = 1, .mask = {mask}, .last = {last_symbol}, .k0 = {k0}};
+  obs_set_t observation = {.n = 1, .mask = {mask}, .lastset = {last_bit(last_symbol)}, .k0 = {k0}};
   for (int i = 0; i < st->n_hyp; i++)
     if (obs_admits(&st->hyp[i], &observation, 0))
       return 0;
@@ -1952,6 +2012,8 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
       h.k0 = (uint8_t)k0;
     if (h.mapping_type != 0 || !obs_admits(&h, &observation, 0))
       continue;
+    if (!cert_admits(c, &h))
+      continue; /* K42 F3: a certified context never appends an entry apply_cert would remove again (wipe) */
     if (c->qm_obs >= 2 && !(c->qm_tables & (1u << h.mcs_table)))
       continue;
     if (prior && (h.mcs_table != prior->mcs_table
@@ -1996,13 +2058,13 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     return 0;
   pthread_mutex_lock(&g_lock);
   rnti_ctx_t *r = rnti_ctx(ticket->rnti, true);
-  obs_record(&r->obs, dmrs_mask, last_symbol, k0);
+  const bool recorded = obs_record(&r->obs, dmrs_mask, last_symbol, k0) >= 0;
   /* Promote to the cell-wide set once a second distinct RNTI has seen the same mask. */
   if (obs_find(&g_obs, dmrs_mask) < 0) {
     for (int i = 0; i < RNTI_CTX_MAX; i++)
       if (g_rnti[i].rnti && g_rnti[i].rnti != r->rnti && obs_find(&g_rnti[i].obs, dmrs_mask) >= 0) {
         const int j = obs_find(&g_rnti[i].obs, dmrs_mask);
-        obs_record(&g_obs, dmrs_mask, g_rnti[i].obs.last[j], g_rnti[i].obs.k0[j]); /* k0 is -1 unless legacy: no pin */
+        obs_record_set(&g_obs, dmrs_mask, g_rnti[i].obs.lastset[j], g_rnti[i].obs.k0[j]); /* K42: the whole set; k0 is -1 unless legacy */
         break;
       }
   }
@@ -2017,18 +2079,23 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     r->typeb_seen = true;
   int n = 0;
   if (c != NULL && c->state->winner < 0) {
-    restore_observed_typea(c, r, dmrs_mask, last_symbol, k0_oracle_legacy() ? k0 : -1);
+    /* K42: entries from `base` on are appended by THIS call (restore, type-B layer); prunes removing only those truncate. */
+    const int base = c->state->n_hyp;
+    /* K42 F2: a full r->obs dropped the mask; unless g_obs carries it nothing would admit a restore, and the prune below
+     * would remove the restored entries again. */
+    if (recorded || obs_find(&g_obs, dmrs_mask) >= 0)
+      restore_observed_typea(c, r, dmrs_mask, last_symbol, k0_oracle_legacy() ? k0 : -1);
     if (r->typeb_seen)
       add_typeb_layer(c->state, c->typeA, c->legality);
-    const int before = c->state->n_hyp;
-    n = prune_to_observed(c->state, &r->obs);
-    if (c->state->n_hyp != before)
+    bool wiped = false;
+    n = prune_to_observed_from(c->state, &r->obs, base, &wiped);
+    if (wiped)
       context_reindexed(c);
     {
       /* K39: the certified k0 binds even though the observation admits more (type-B layer, restores). Contract kept:
        * the count is reported only when a prune removed something, here or in the certified one. */
       const int before_cert = c->state->n_hyp;
-      const int after_cert = apply_cert(c);
+      const int after_cert = apply_cert_from(c, wiped ? c->state->n_hyp : base);
       if (after_cert != before_cert)
         n = after_cert;
     }

@@ -905,6 +905,191 @@ TEST_F(PdschConfigSweepK39, ObserveKeepsItsReturnContractWithACertificationActiv
   // a mask no hypothesis produces admits nothing: the observed prune reports 0 (nothing pruned), certification or not
   EXPECT_EQ(nr_pdsch_config_sweep_observe(&t, 0x1, -1, 0), 0);
 }
+
+/* K42 (BC7b): observation thrash. One DM-RS mask (0x884) is produced by two durations at S = 2 (L = 10 ends on 11, L = 12 ends
+ * on 13), so the same mask legitimately arrives with two last symbols (another UE's PDSCH, the RNTI's own other TDRA rows,
+ * energy-threshold jitter). The observed last symbols of a mask form a monotone SET: an observation only widens it, so an
+ * observation-driven prune never removes an entry an earlier observation admitted, and restore round-trips never wipe evidence. */
+static int32_t k42_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  if (mapping_b || start != 2 || add != 2 || maxlen != 1)
+    return -1;
+  return (length == 12 || length == 10) ? 0x884 : length == 6 ? 0x84 : -1;
+}
+/* The type-B tests use ab_legal (type A S=1 L=13 0x4; type B adds S=5 L=4 0x20): mask_needs_typeb() needs a cached catalog
+ * template, and the 4 template slots are taken by the first legality functions of this binary (ab_legal is one of them). */
+struct PdschConfigSweepK42 : testing::Test {
+  static constexpr uint64_t kCfg = 0x4242;
+  nr_pdsch_legality_fn_t legal = k42_legal;
+  void SetUp() override
+  {
+    nr_pdsch_config_sweep_reset_all();
+    nr_pdsch_config_sweep_prior_reset();
+    nr_pdsch_config_sweep_k0_legacy_set(0);
+  }
+  void TearDown() override { nr_pdsch_config_sweep_k0_legacy_set(-1); }
+  nr_pdsch_sweep_ticket_t sel(uint8_t tda = 0, uint16_t rnti = 0x4601)
+  {
+    nr_pdsch_sweep_ticket_t t{};
+    nr_pdsch_cfg_hypothesis_t h{};
+    EXPECT_TRUE(nr_pdsch_config_sweep_select(kCfg, rnti, tda, 2, 0, legal, &t, &h));
+    return t;
+  }
+  int observe(uint16_t mask, int last, uint8_t tda = 0, uint16_t rnti = 0x4601)
+  {
+    const auto t = sel(tda, rnti); // a live ticket: the observation must reach the context
+    return nr_pdsch_config_sweep_observe(&t, mask, last, 0);
+  }
+  uint32_t trials(uint8_t tda = 0, uint16_t rnti = 0x4601)
+  {
+    uint32_t p = 0, t = 0;
+    nr_pdsch_config_sweep_context_stats(kCfg, rnti, tda, 0, &p, &t);
+    return t;
+  }
+  void fail(int n, uint8_t tda = 0, uint16_t rnti = 0x4601)
+  {
+    for (int i = 0; i < n; i++) {
+      const auto t = sel(tda, rnti);
+      nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+    }
+  }
+  template <class F> int count(F pred, uint8_t tda = 0, uint16_t rnti = 0x4601)
+  {
+    static nr_pdsch_config_sweep_state_t st;
+    const auto t = sel(tda, rnti);
+    EXPECT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+    int n = 0;
+    for (int i = 0; i < st.n_hyp; i++)
+      n += pred(st.hyp[i]);
+    return n;
+  }
+  static bool ends(const nr_pdsch_cfg_hypothesis_t &h, int last) { return h.tda_start + h.tda_length - 1 == last; }
+};
+TEST_F(PdschConfigSweepK42, AlternatingLastSymbolNeverWipesEvidence) {
+  ASSERT_EQ(observe(0x884, 13), 6); // L = 12, k0 {0,1} x 3 tables
+  fail(30);
+  ASSERT_EQ(trials(), 30u);
+  const auto outstanding = sel(); // in flight across the observations below
+  for (int i = 0; i < 6; i++)
+    observe(0x884, (i & 1) ? 13 : 11);
+  EXPECT_EQ(trials(), 30u) << "an observation round-trip wiped the CRC evidence";
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  EXPECT_EQ(trials(), 31u) << "the in-flight ticket was staled (context_reindexed)";
+}
+TEST_F(PdschConfigSweepK42, ForeignLastSymbolOnlyWidens) {
+  ASSERT_EQ(observe(0x884, 13), 6);
+  observe(0x884, 11); // the other duration of the same mask: restored, nothing removed
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 11); }), 6);
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 13); }), 6);
+  observe(0x884, 13); // seen again: the set {11, 13} is not re-refined
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 11); }), 6);
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 13); }), 6);
+  observe(0x884, -1); // an unmeasured last symbol neither widens nor narrows
+  EXPECT_EQ(count([](const auto &) { return true; }), 12);
+  // a later context of the same RNTI is seeded with the whole set (never with L = 6, whose mask was never seen)
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 11); }, 1), 6);
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 13); }, 1), 6);
+  EXPECT_EQ(count([](const auto &) { return true; }, 1), 12);
+}
+TEST_F(PdschConfigSweepK42, PromotedCellMaskCarriesTheLastSymbolSet) {
+  observe(0x884, 13, 0, 0x4601);
+  observe(0x884, 11, 0, 0x4601); // RNTI A: {11, 13}
+  observe(0x884, 13, 0, 0x4602); // RNTI B agrees on the mask: promoted to g_obs with A's set, then B's 13
+  const auto c = [&](int last) { return count([last](const auto &h) { return ends(h, last); }, 0, 0x4603); };
+  EXPECT_EQ(c(11), 6); // a third RNTI is seeded from g_obs: the promoted set, not B's single last symbol
+  EXPECT_EQ(c(13), 6);
+  EXPECT_EQ(c(7), 0);
+}
+TEST_F(PdschConfigSweepK42, OwnObservationAfterForeignKeepsTruth) {
+  // truth: S = 2, L = 10 (last 11), k0 = 1. Another UE's PDSCH (same mask, last 13) is measured first and prunes the truth.
+  ASSERT_EQ(observe(0x884, 13), 6);
+  const auto truth = [](const nr_pdsch_cfg_hypothesis_t &h) { return ends(h, 11) && h.k0 == 1 && h.mcs_table == 1; };
+  ASSERT_EQ(count(truth), 0);
+  observe(0x884, 11); // own measurement: restore re-adds the truth
+  ASSERT_EQ(count(truth), 1);
+  fail(24);
+  const uint32_t before = trials();
+  for (int i = 0; i < 8; i++) { // sequence B: foreign and own alternate
+    observe(0x884, (i & 1) ? 11 : 13);
+    ASSERT_EQ(count(truth), 1) << "the truth was pruned again at step " << i;
+  }
+  EXPECT_EQ(trials(), before);
+}
+TEST_F(PdschConfigSweepK42, FullSetForeignMaskDoesNotWipe) {
+  ASSERT_EQ(observe(0x884, 13), 6);
+  for (uint16_t m = 1; m <= 7; m++) // 7 more masks no entry produces: r->obs is full (OBS_MASKS_MAX = 8)
+    observe(m, 5);
+  ASSERT_EQ(count([](const auto &) { return true; }), 6);
+  fail(20);
+  const auto outstanding = sel();
+  observe(0x84, 7); // a 9th mask, not in g_obs: obs_record drops it, so nothing may be restored for it
+  EXPECT_EQ(count([](const auto &h) { return h.dmrs_mask == 0x84; }), 0);
+  EXPECT_EQ(trials(), 20u);
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  EXPECT_EQ(trials(), 21u);
+}
+TEST_F(PdschConfigSweepK42, RestoreThenCertDoesNotWipe) {
+  ASSERT_EQ(observe(0x884, 13), 6);
+  auto t = sel();
+  ASSERT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0x1), 3); // k0 = 0 certified for this row
+  fail(20);
+  ASSERT_EQ(trials(), 20u);
+  const auto outstanding = sel();
+  uint64_t lt2 = 0, ge2 = 0, lt2_after = 0;
+  nr_pdsch_config_sweep_excl_stats(&lt2, &ge2, nullptr);
+  observe(0x884, 11); // restores L = 10: only certified k0 may be appended
+  nr_pdsch_config_sweep_excl_stats(&lt2_after, &ge2, nullptr);
+  EXPECT_EQ(lt2_after, lt2) << "restored entries were appended and then removed by apply_cert";
+  EXPECT_EQ(count([](const auto &h) { return h.k0 == 1; }), 0);
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 11); }), 3);
+  EXPECT_EQ(trials(), 20u);
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  EXPECT_EQ(trials(), 21u);
+}
+TEST_F(PdschConfigSweepK42, TypeBLayerRoundTripTruncatesWithoutWipe) {
+  legal = ab_legal;
+  ASSERT_EQ(observe(0x4, 13), 6);
+  observe(0x1, -1); // a mask no type-A entry produces: typeb_seen; the type-B layer is appended, then pruned (not observed)
+  ASSERT_EQ(count([](const auto &h) { return h.mapping_type == 1; }), 0);
+  fail(20);
+  const auto outstanding = sel();
+  observe(0x4, 13); // re-appends the type-B layer, the prune removes exactly those appended entries again
+  EXPECT_EQ(count([](const auto &h) { return h.mapping_type == 1; }), 0);
+  EXPECT_EQ(count([](const auto &) { return true; }), 6);
+  EXPECT_EQ(trials(), 20u);
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  EXPECT_EQ(trials(), 21u);
+  observe(0x20, 8); // control: the type-B layer is live for this RNTI (typeb_seen), so the round trips above were real
+  EXPECT_EQ(count([](const auto &h) { return h.mapping_type == 1; }), 6);
+}
+TEST_F(PdschConfigSweepK42, CertOnAppendedTypeBLayerTruncatesWithoutWipe) {
+  legal = ab_legal;
+  ASSERT_EQ(observe(0x4, 13), 6);
+  auto t = sel();
+  ASSERT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 0x1), 3); // k0 = 0 certified
+  observe(0x1, -1); // typeb_seen; the appended type-B layer is not observed: truncated away
+  fail(20);
+  const auto outstanding = sel();
+  observe(0x20, 8); // re-appends the type-B layer (k0 {0,1}); now observed, so only apply_cert removes its k0 = 1 entries
+  EXPECT_EQ(count([](const auto &h) { return h.mapping_type == 1 && h.k0 == 0; }), 3);
+  EXPECT_EQ(count([](const auto &h) { return h.k0 == 1; }), 0);
+  EXPECT_EQ(trials(), 20u);
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  EXPECT_EQ(trials(), 21u);
+}
+TEST_F(PdschConfigSweepK42, LegacyPinKeepsK0AndTheLastSymbolSetIsMonotone) {
+  nr_pdsch_config_sweep_k0_legacy_set(1);
+  ASSERT_EQ(observe(0x884, 13), 3); // legacy: the job's k0 = 0 is pinned
+  observe(0x884, 11);
+  EXPECT_EQ(count([](const auto &h) { return h.k0 == 1; }), 0);
+  EXPECT_EQ(count([](const auto &h) { return ends(h, 11); }), 3);
+  fail(10);
+  for (int i = 0; i < 4; i++)
+    observe(0x884, (i & 1) ? 11 : 13);
+  EXPECT_EQ(count([](const auto &h) { return h.k0 == 1; }), 0);
+  EXPECT_EQ(count([](const auto &) { return true; }), 6);
+  EXPECT_EQ(trials(), 10u);
+}
 TEST_F(PdschRecovery, CertificationClearedOnReopen) {
   nr_pdsch_config_sweep_k0_legacy_set(0);
   auto t = recovery_select();
