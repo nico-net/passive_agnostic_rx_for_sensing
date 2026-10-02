@@ -120,7 +120,7 @@ class PostConv(unittest.TestCase):
         self.assertAlmostEqual(s["search_crc_pct"], 90.28, places=2)
         self.assertAlmostEqual(s["crc_pct"], 97.57, places=2)
 
-def _gate_cli(d, env=None, mode=None):
+def _gate_cli(d, env=None):
     e = {k: v for k, v in os.environ.items() if not k.startswith("GATE_")}
     e.update(env or {})
     r = subprocess.run([sys.executable, SCORE, "--gate", d], capture_output=True, text=True, env=e)
@@ -135,7 +135,7 @@ class Gate(unittest.TestCase):
         return self.make_arm(log)
 
     def test_pass_with_relaxed_floor(self):
-        rc, line = _gate_cli(self.good(), dict(GATE_CRC_FLOOR="80", GATE_POSTCONV_CRC_MIN="98.0"))
+        rc, line = _gate_cli(self.good(), dict(GATE_CRC_FLOOR="80", GATE_POSTCONV_CRC_MIN="98.0", GATE_POSTCONV_MIN_DEC="1"))
         self.assertEqual(rc, 0, line); self.assertTrue(line.startswith("PASS "), line)
         for k in ("n_contexts=2", "postconv_crc=98.00", "ttc_tda0=3.000", "ttc_tda2=20.000", "crc_floor", "drop_full="):
             self.assertIn(k, line)
@@ -145,7 +145,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(rc, 1); self.assertTrue(line.startswith("FAIL ")); self.assertIn("crc_floor=86.00<", line)
 
     def test_each_criterion_can_fail(self):
-        base = dict(GATE_CRC_FLOOR="80", GATE_POSTCONV_CRC_MIN="98.0")
+        base = dict(GATE_CRC_FLOOR="80", GATE_POSTCONV_CRC_MIN="98.0", GATE_POSTCONV_MIN_DEC="1")
         for over, key in ((dict(GATE_POSTCONV_CRC_MIN="98.5"), "postconv_crc"), (dict(GATE_TTC_MAX_TDA0="2.9"), "ttc_tda0"),
                           (dict(GATE_TTC_MAX_TDA2="19"), "ttc_tda2"), (dict(GATE_NCTX_MIN="3"), "n_contexts"),
                           (dict(GATE_DROP_MAX="0.1"), "drop_full")):
@@ -161,6 +161,40 @@ class Gate(unittest.TestCase):
     def test_missing_context_fails(self):
         rc, line = _gate_cli(self.make_arm("5.0 [PHY]    Initial sync successful, PCI: 0\n"))
         self.assertEqual(rc, 1); self.assertTrue(line.startswith("FAIL "))
+
+    def test_min_postconv_sample(self):
+        # one grant after the baseline sample: CRC 100 % but far below GATE_POSTCONV_MIN_DEC
+        log = LOG_PC.replace("decoded=300 crc_ok=258", "decoded=201 crc_ok=161") + "60.0 [PHY]    SENSING: blind PDCCH monitor summary: occasions=1 scanq[queued=1000 done=1000 drop_full=5 drop_stale=0 maxlag=8]\n"
+        rc, line = _gate_cli(self.make_arm(log), dict(GATE_CRC_FLOOR="0", GATE_POSTCONV_CRC_MIN="98"))
+        self.assertEqual(rc, 1); self.assertIn("postconv_decoded=1<5000", line)
+        rc, line = _gate_cli(self.make_arm(log), dict(GATE_CRC_FLOOR="0", GATE_POSTCONV_CRC_MIN="98", GATE_POSTCONV_MIN_DEC="1"))
+        self.assertEqual(rc, 0, line)
+
+    def test_reopen_counts_once_and_fails_gate(self):
+        log = LOG_PC + "60.0 [PHY]    SENSING: blind PDCCH monitor summary: occasions=1 scanq[queued=1000 done=1000 drop_full=5 drop_stale=0 maxlag=8]\n" + "50.0 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0\n"
+        arm = self.make_arm(log)
+        s = ScoreRx.score(self, arm)
+        self.assertEqual(s["n_contexts"], 2); self.assertEqual(s["reopens"], 1)
+        self.assertAlmostEqual(s["ttc_by_tda"]["0"], 3.0)           # first convergence
+        self.assertAlmostEqual(s["postconv_t_s"], 40.0)             # window from first convergences (last = 30.0)
+        env = dict(GATE_CRC_FLOOR="0", GATE_POSTCONV_MIN_DEC="1", GATE_POSTCONV_CRC_MIN="98")
+        rc, line = _gate_cli(arm, env); self.assertEqual(rc, 1); self.assertIn("reopens=1>0", line)
+        rc, line = _gate_cli(arm, dict(env, GATE_REOPENS_MAX="1")); self.assertEqual(rc, 0, line)
+
+    def test_tda0_twice_tda2_never(self):
+        log = "\n".join(l for l in LOG_PC.splitlines() if "tda=2" not in l) + "\n" + \
+            "31.0 [PHY]    SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=1 L=13 mask=0x804 table=0\n" + "60.0 [PHY]    SENSING: blind PDCCH monitor summary: occasions=1 scanq[queued=1000 done=1000 drop_full=5 drop_stale=0 maxlag=8]\n"
+        arm = self.make_arm(log)
+        s = ScoreRx.score(self, arm)
+        self.assertEqual(s["n_contexts"], 1); self.assertEqual(s["reopens"], 1)
+        rc, line = _gate_cli(arm, dict(GATE_CRC_FLOOR="0", GATE_POSTCONV_MIN_DEC="1", GATE_REOPENS_MAX="5"))
+        self.assertEqual(rc, 1); self.assertIn("n_contexts=1<2", line); self.assertIn("ttc_tda2=None", line)
+
+    def test_bad_ttc_env_is_clear_error(self):
+        r = subprocess.run([sys.executable, SCORE, "--gate", self.good()], capture_output=True, text=True,
+                           env=dict(os.environ, GATE_TTC_MAX_TDA0="fast"))
+        self.assertNotEqual(r.returncode, 0); self.assertIn("GATE_TTC_MAX_TDA0", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
 if __name__ == "__main__":
     unittest.main()

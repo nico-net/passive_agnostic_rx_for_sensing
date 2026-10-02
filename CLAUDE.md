@@ -18,5 +18,5 @@ Build (DGX, aarch64): cmake_targets/ran_build/build, Ninja:
 Build (cloud x86): same without oai_usrpdevif, with -DOAI_USRP=OFF: ninja nr-uesoftmodem rfsimulator params_libconfig nr-softmodem tests && ctest -j4
 Evidence labels for non-DGX hosts must name the host (e.g. cloud x86).
 Known ARM ctest failures: dft_test, test_nr_modulation, test_nr_pusch_ra0_qam256, test_nr_pusch_ra0_qam64 (intermittent).
-Regression: tests/passive_rx/dgx/rfsim_regress.sh (106 PRB; default GATE_MODE=postconv: 2 contexts, post-conv CRC >= 99.5, ttc tda0 <= 12 s / tda2 <= 47 s, overall CRC floor 93, drop_full <= 1 %; GATE_MODE=legacy = old CRC >= 98 %; see dgx/README.txt).
+Regression: tests/passive_rx/dgx/rfsim_regress.sh (106 PRB; default GATE_MODE=postconv: 2 contexts, 0 reopens, post-conv CRC >= 99.8 over >= 5000 grants, ttc tda0 <= 8.6 s / tda2 <= 35.3 s, overall CRC floor 94.5, drop_full <= 1 %; GATE_MODE=legacy = old CRC >= 98 %; see dgx/README.txt).
 Plan in progress: docs/superpowers/plans/2026-10-01-dgx-next-steps.md
