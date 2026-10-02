@@ -38,7 +38,8 @@
 typedef enum {
   NR_TDD_SLOT_DL = 0,   ///< every symbol downlink
   NR_TDD_SLOT_UL,       ///< every symbol uplink
-  NR_TDD_SLOT_MIXED,    ///< DL symbols, then a guard, then UL symbols
+  NR_TDD_SLOT_MIXED,    ///< carries the period's nrofDownlinkSymbols (start) and/or nrofUplinkSymbols (end); rest flexible
+  NR_TDD_SLOT_FLEXIBLE, ///< every symbol flexible (between the DL and the UL part of the period)
 } nr_tdd_slot_dir_t;
 
 /// One pattern, exactly as tdd-UL-DL-ConfigurationCommon carries it.

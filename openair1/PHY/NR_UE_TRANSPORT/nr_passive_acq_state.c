@@ -235,7 +235,10 @@ bool nr_passive_acq_tdd_pdsch_last_symbols(uint32_t dci_abs_slot, int mu, int n,
 }
 bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
 {
-  return g_tdd.valid ? nr_tdd_slot_has_downlink(&g_tdd, absolute_slot) : true;
+  pthread_mutex_lock(&g_lock); /* g_tdd is replaced by the SIB1 path: copy it consistently */
+  const nr_tdd_config_t t = g_tdd;
+  pthread_mutex_unlock(&g_lock);
+  return t.valid ? nr_tdd_slot_has_downlink(&t, absolute_slot) : true;
 }
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {

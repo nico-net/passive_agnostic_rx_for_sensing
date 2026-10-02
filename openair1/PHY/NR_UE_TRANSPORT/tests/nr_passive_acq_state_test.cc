@@ -209,3 +209,15 @@ TEST(AcqStateTdd, PdschLastSymbolsNeedTheSib1PatternAndItsNumerology)
   EXPECT_EQ(last[3], 13);
   EXPECT_FALSE(nr_passive_acq_tdd_pdsch_last_symbols(7, 0, 33, last)); /* another numerology: slots do not map */
 }
+
+/* K40: the PDCCH gate must monitor FLEXIBLE slots (TS 38.213 11.1: DL slots first, UL slots last, flexible between). */
+TEST(AcqStateTdd, FlexibleSlotsAreMonitored)
+{
+  nr_tdd_pattern_t p1{};
+  p1.period_slots = 10; p1.dl_slots = 3; p1.ul_slots = 2; // D D D F F F F F U U
+  nr_passive_acq_note_sib1_tdd(&p1, nullptr);
+  for (uint32_t s = 0; s < 8; s++)
+    EXPECT_TRUE(nr_passive_acq_tdd_slot_has_downlink(s)) << s;
+  EXPECT_FALSE(nr_passive_acq_tdd_slot_has_downlink(8));
+  EXPECT_FALSE(nr_passive_acq_tdd_slot_has_downlink(9));
+}
