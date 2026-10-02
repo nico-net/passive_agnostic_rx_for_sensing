@@ -2683,6 +2683,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdcch_al1_map)
   add_test(NAME test_nr_pdcch_al1_map COMMAND ./test_nr_pdcch_al1_map)
 
+  add_executable(test_nr_dci_bits ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci_bits_test.cc)
+  target_include_directories(test_nr_dci_bits PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_dci_bits PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_dci_bits)
+  add_test(NAME test_nr_dci_bits COMMAND ./test_nr_dci_bits)
+
   add_executable(test_nr_pdcch_gf2_rnti ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_gf2_rnti_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_gf2_rnti.c)
   target_include_directories(test_nr_pdcch_gf2_rnti PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
