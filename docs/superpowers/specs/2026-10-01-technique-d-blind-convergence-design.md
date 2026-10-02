@@ -190,6 +190,31 @@ plus the lever-C stress arm (`--crc-false 1e-3`) compared with the analytical bo
 oracle-1 time not worse than baseline beyond seed noise; field-book recovery from a forced wrong promotion within
 2 RNTIs; blind cold median ≤ 30 s at 4 RX and ≤ 90 s at 1 RX (target — report the gap if missed).
 
+### Decision (BC6, reduced scope, operator 2026-10-02)
+
+`[SIMULATED, DGX host, nr_td_sim @c826d0e4ae]`, seed 1, acq 500 x 4 RNTIs per cell, simulator v2 (slot model, physical k0 trap, persist 0.5, DCI miss 0.01 / false 1e-3, other-UE occupancy 0.1, K39 fixed), cell SA. Evidence: `tests/passive_rx/td_sim/results_2026-10-02_bc/` (summary.md, analysis.md), matrix `gate_bc.json`. Monte-Carlo resolution about 3/N = 1.5e-3 per RNTI (N = 2000); the 1e-6 argument is analytical, not measured. Runtime enablement stays an operator decision. Runtime wiring of the field book (`ISAC_TD_FIELDBOOK=2`) is plan R2 and is not built.
+
+| criterion | fb2 | C/P certified (cp) | fb2 + C/P |
+|---|---|---|---|
+| 0 wrong winners (non-injected, 8 cells) | PASS (0/2000 each) | PASS | PASS |
+| 0 wrong pins | PASS | PASS (but P never fired) | PASS (P never fired) |
+| undecidable <= baseline | PASS (equal) | PASS | PASS |
+| oracle-1 time <= baseline + noise | PASS (cold equal, steady 0.35 vs 121.6 s at 4 RX none) | PASS (equal: levers inert) | PASS |
+| recovery from injected wrong promotion within 2 RNTIs | FAIL: recovery_never 404-497 of 500 acquisitions, 840-1980 of 2000 RNTIs wrong in the inject arm | not run (not in the operator matrix) | not run |
+| stress vs analytical bound (oracle 0, crc-false 1e-3) | n/a | PASS but vacuous: crc_accepts = geom_pins = 0, bound 0 | n/a |
+| blind cold median <= 30 s (4 RX) / 90 s (1 RX) | FAIL (301 / 435 s none; 179 / 257 s DDDSU) | FAIL (same) | FAIL |
+
+Hard-rule events: fb2_inject has wrong > 0 by construction (forced wrong promotion, never withdrawn within the acquisition). Supplementary arm (outside the matrix) cp with the k0-sibling guard disabled (`--sib-pmin 0`), TDD DDDSU: wrong_pins = 1 at 4 RX and at 1 RX (seed 1, acquisition 191 at 4 RX) against an analytical bound of 1.9e-10; the winner stayed correct. That arm is not recommended.
+
+Findings:
+- Levers C and P are inert under the default k0-sibling guard under persistent traffic (persist 0.5): crc_accepts = geom_pins = 0 in all 16 cp / fb2_cp cells, sib_blocks 934-2000 at TDD none. They add no speed (blind cold median 301.1 vs 301.3 s at 4 RX). BC9c (count sibling-test trials only on certified grants) is the open lever if C/P are to work under persistent traffic. With the guard disabled they reach 29.1 s (4 RX none) and 40.5 s (1 RX none), but with the wrong-pin event above at DDDSU.
+- fb2 only speeds up later RNTIs (steady 0.3-0.5 s versus 10-120 s); the first two RNTIs of an acquisition are unchanged.
+
+Recommendation (operator decides):
+- fb2 (reversible field book): NOT RECOMMENDED for runtime enablement yet. Passes the correctness and time criteria, fails the recovery criterion: after a forced wrong promotion the guard recovers in about 2-3 RNTIs only in 1-19 % of acquisitions. Natural wrong promotions are bounded analytically, but the gate asks for recovery. Needs a faster fail-open or withdrawal path, then re-run of the inject arm; plan R2 wiring is not built.
+- C/P with certified evidence (default guard): NOT RECOMMENDED (nothing to enable: inert; no measured gain). Re-evaluate after BC9c.
+- fb2 + C/P: NOT RECOMMENDED (same recovery failure, and C/P inert). No inject arm with C/P was run.
+
 ## 9. Amendments to the levers spec
 
 - §4.6 replaced by §4 above. §8 starting value K = 3 → **K = 1** (Task 6 and Task 7 reviews: P1 probes inert, P2 off).
