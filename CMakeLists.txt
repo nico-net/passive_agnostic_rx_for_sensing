@@ -978,6 +978,8 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
+  ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ssb_rate_match.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
@@ -1082,6 +1084,10 @@ target_link_libraries(PHY_NR_NO_AVX_256 nr_phy_common nr_common)
 target_compile_definitions(PHY_NR_NO_AVX_256 PUBLIC USE_128BIT)
 
 add_library(PHY_NR_UE ${PHY_NR_UE_SRC})
+if(ENABLE_LDPC_CUDA)
+  # GrantWork-lite shared buffers in unified memory (cudaMallocManaged via a dlopen'd libcudart: no link dependency).
+  set_source_files_properties(${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c PROPERTIES COMPILE_DEFINITIONS NR_TD_GW_CUDA=1)
+endif()
 target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common UTIL polar smallblock)
 
 # ISAC / passive-radar sensing pipeline (OAI-UE). Faithful port of the srsUE sensing engine
@@ -2630,6 +2636,20 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_td_legal PRIVATE UTIL GTest::gtest m)
   add_dependencies(tests test_nr_td_legal)
   add_test(NAME test_nr_td_legal COMMAND ./test_nr_td_legal)
+
+  # GrantWork-lite (levers plan Task R1): per-grant shared FEP/chest/LLR per geometry signature + CB0 extraction.
+  add_executable(test_nr_td_grantwork ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c
+                                      ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
+  target_include_directories(test_nr_td_grantwork PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                             ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment)
+  target_link_libraries(test_nr_td_grantwork PRIVATE UTIL GTest::gtest pthread ${CMAKE_DL_LIBS} m)
+  if(ENABLE_LDPC_CUDA)
+    target_compile_definitions(test_nr_td_grantwork PRIVATE NR_TD_GW_CUDA=1)
+  endif()
+  add_dependencies(tests test_nr_td_grantwork)
+  add_test(NAME test_nr_td_grantwork COMMAND ./test_nr_td_grantwork)
 
   add_executable(test_nr_td_fieldbook ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_fieldbook_test.cc
                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c)
