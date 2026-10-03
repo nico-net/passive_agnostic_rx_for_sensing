@@ -1479,6 +1479,15 @@ target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${NFAPI_DIR}/common/public_inc)
 target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 
+# Batched first-code-block (CB0) decode of many Technique D hypotheses per grant (nr_td_cb0_batch.h, levers spec
+# 2026-10-01 sections 5.4 / 9). CPU reference + LDPC adapter; the GPU rate de-matching is libtd_cb0_gpu.so
+# (openair1/PHY/CODING/CMakeLists.txt), dlopen'd at run time, so this library has no CUDA link dependency.
+add_library(td_cb0_batch STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c
+                                ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
+target_include_directories(td_cb0_batch PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+target_link_libraries(td_cb0_batch PUBLIC PHY_NR_COMMON MAC_NR_COMMON crc_byte UTIL thread-pool ${CMAKE_DL_LIBS} pthread
+                      PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+
 include_directories("${OPENAIR2_DIR}/NR_UE_PHY_INTERFACE")
 include_directories("${OPENAIR2_DIR}/LAYER2")
 include_directories("${OPENAIR1_DIR}/SCHED_NR_UE")
@@ -2657,6 +2666,38 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_td_fieldbook PRIVATE GTest::gtest GTest::gtest_main m)
   add_dependencies(tests test_nr_td_fieldbook)
   add_test(NAME test_nr_td_fieldbook COMMAND ./test_nr_td_fieldbook)
+
+  # nr_td_cb0_batch: tests + benchmark. The fixture links the receiver's real CPU decoder chain (segment decoder,
+  # nrLDPC_decoder.c = libldpc.so's decoder) and the OAI encoder (ldpc_encoder.c), as libldpc_orig does.
+  set(NR_TD_CB0_FX_SRCS ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_fixture.c
+                        ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c
+                        ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_decoder/nrLDPC_decoder.c
+                        ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_encoder/ldpc_encoder.c)
+  add_executable(test_nr_td_cb0_batch ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc ${NR_TD_CB0_FX_SRCS})
+  target_include_directories(test_nr_td_cb0_batch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(test_nr_td_cb0_batch PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                        thread-pool minimal_lib GTest::gtest GTest::gtest_main m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  # dlopens ./libldpc_cuda.so (CUDA LDPC tests): the plugin takes these from the host executable, as from nr-uesoftmodem
+  set_target_properties(test_nr_td_cb0_batch PROPERTIES ENABLE_EXPORTS ON)
+  foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_td_cb0_batch PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  if(ENABLE_LDPC_CUDA)
+    target_compile_definitions(test_nr_td_cb0_batch PRIVATE NR_TD_CB0_HAVE_CUDA)
+  endif()
+  add_dependencies(tests test_nr_td_cb0_batch)
+  add_test(NAME test_nr_td_cb0_batch COMMAND ./test_nr_td_cb0_batch)
+  # Throughput benchmark (not a ctest; run under flock /tmp/td_measure.lock). dlopens ./libldpc_cuda.so for the
+  # GPU LDPC estimate, resolving that plugin's host symbols from this binary (as nr-uesoftmodem does).
+  add_executable(nr_td_cb0_bench ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_bench.c ${NR_TD_CB0_FX_SRCS})
+  target_include_directories(nr_td_cb0_bench PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(nr_td_cb0_bench PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                        thread-pool minimal_lib m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  set_target_properties(nr_td_cb0_bench PROPERTIES ENABLE_EXPORTS ON)
+  foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(nr_td_cb0_bench PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  add_dependencies(tests nr_td_cb0_bench)
 
   # Correlated Monte-Carlo simulator linking the REAL engine/gate/order/field book (spec 2026-10-01 section 6.1).
   # nr_td_sim is a CLI (not run by ctest); nr_td_sim_test is the gtest (#includes nr_td_sim.cc).
