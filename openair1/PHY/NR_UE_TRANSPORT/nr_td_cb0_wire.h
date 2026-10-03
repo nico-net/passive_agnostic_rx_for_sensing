@@ -14,7 +14,7 @@
  *   nr_td_cb0_wire_feed() AFTER the grant's TB feedback (and before anything that may re-index the context): the
  *                         admissibility decision (nr_td_cb0_admissibility) and the feed through nr_td_cb0_adapter.
  * Requires ISAC_TD_GRANTWORK=1: without it the channel refuses (logged once, reason no_grantwork).
- * Environment (read once): ISAC_TD_CB0_BUDGET_US (20000, sized for 4 RX), ISAC_TD_CB0_CPU_PCT (30), ISAC_TD_CB0_THREADS (8),
+ * Environment (read once): ISAC_TD_CB0_B (96; 0 = from ISAC_TD_CB0_BUDGET_US), ISAC_TD_CB0_BUDGET_US (20000, sized for 4 RX), ISAC_TD_CB0_CPU_PCT (30), ISAC_TD_CB0_THREADS (8),
  * ISAC_TD_CB0_RANK_MAX (4), ISAC_TD_TB_CPU_WHILE_ACQ (1), ISAC_TD_CB0_BACKEND (auto). */
 #ifndef NR_TD_CB0_WIRE_H
 #define NR_TD_CB0_WIRE_H
@@ -36,6 +36,7 @@ void *nr_pdsch_passive_cb0_cpu_ldpc(void);
 void nr_pdsch_passive_force_cpu_tb(bool on);
 
 #define NR_TD_CB0_PLAN_MAX 512 /* items per grant (B is capped by it) */
+#define NR_TD_CB0_B_DEFAULT 96 /* ISAC_TD_CB0_B: CB0 items per grant (coordinator 2026-10-04: B 64..128; simulator first-RNTI 12.9 s at 64, 8.3 s at 128); 0 = budget-derived */
 
 typedef struct {
   int64_t abs_slot;  /* the grant's IQ slot (hash input) */

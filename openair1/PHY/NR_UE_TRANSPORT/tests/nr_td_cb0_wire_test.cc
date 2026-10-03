@@ -653,3 +653,79 @@ TEST_F(Cb0Wire, ReindexedContextCreditsNothing)
   EXPECT_EQ(s.admissible, 0u);
 }
 }  // namespace
+
+namespace {
+/* End to end through the merged engine (ELIM fix round 1): a truth whose TB and CB0 pass, every other hypothesis
+ * failing both. The engine must eliminate wrong hypotheses through the CB0 channel, never the truth, with 0 premise
+ * alarms; the CONVERGED suffix carries the counts. */
+TEST_F(Cb0Wire, EngineEliminatesWrongNeverTruth)
+{
+  ASSERT_TRUE(nr_td_cb0a_engine_wired());
+  auto t0 = ticket();
+  nr_pdsch_config_sweep_state_t *st = (nr_pdsch_config_sweep_state_t *)malloc(sizeof(*st));
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t0, st));
+  ASSERT_TRUE(st->cb0_elim) << "new runtime contexts take ISAC_TD_CB0_ELIM";
+  const nr_pdsch_cfg_hypothesis_t truth = st->hyp[t0.hypothesis];
+  const uint64_t tk = nr_td_cb0_hyp_key(&truth);
+  g_stub.pass[tk] = true;
+  int grants = 0;
+  bool converged = false;
+  for (int g = 0; g < 20000 && !converged; g++) {
+    nr_pdsch_sweep_ticket_t t{};
+    nr_pdsch_cfg_hypothesis_t h{};
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(1, 0x4601, 0, 2, 0, legal_a, &t, &h));
+    if (t.settled)
+      break;
+    const bool tb = nr_td_cb0_hyp_key(&h) == tk;
+    nr_td_cb0_job_t j{};
+    j.abs_slot = 20000 + g;
+    j.job_k0 = t.k0;
+    j.gw_on = true;
+    bool tb_cpu = false;
+    const bool on = nr_td_cb0_wire_pre(&t, gw, &j, &tb_cpu);
+    ASSERT_TRUE(on);
+    nr_td_cb0_wire_run(gw);
+    nr_pdsch_cfg_hypothesis_t w{};
+    converged = nr_pdsch_config_sweep_feedback(&t, tb, &w);
+    nr_td_cb0_tb_t r{};
+    r.tb_fed = true;
+    r.tb_pass = tb;
+    r.tb_decoder = 1;
+    r.iq_ok_after = true;
+    r.nl = 1;
+    nr_td_cb0_wire_feed(&t, &r);
+    grants++;
+    if (converged)
+      EXPECT_EQ(nr_td_cb0_hyp_key(&w), tk) << "wrong winner";
+  }
+  const auto s = stats();
+  EXPECT_EQ(s.premise_alarms, 0u);
+  EXPECT_GT(s.eliminations, 0u) << "after " << grants << " grants";
+  EXPECT_GT(s.admissible, 0u);
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t0, st));
+  for (int i = 0; i < st->n_hyp; i++)
+    if (nr_td_cb0_hyp_key(&st->hyp[i]) == tk)
+      EXPECT_FALSE(nr_pdsch_config_sweep_is_eliminated(st, i)) << "truth eliminated";
+  EXPECT_NE(std::string(nr_td_cb0_wire_converged_suffix(&t0)).find("cb0_elim="), std::string::npos);
+  free(st);
+}
+
+/* A CUDA full-TB outcome noted WITHOUT a batch (budget skip) must make later CPU CB0 batches inadmissible in the engine
+ * (dominance), and the engine counts the rejection. */
+TEST_F(Cb0Wire, TbDecoderNotedWithoutBatchBlocksCpuBatches)
+{
+  nr_pdsch_config_sweep_cb0_stats_reset();
+  nr_td_cb0_wire_test_unlimited(false);
+  const auto t = ticket();
+  nr_td_cb0_wire_test_set_tokens(0.0);
+  setenv("ISAC_TD_CB0_CPU_PCT", "0.0001", 1);
+  ASSERT_TRUE(grant(t, 30000, false, true, true, /*tb_dec=*/2)); /* skipped: only the TB decoder note reaches the engine */
+  EXPECT_EQ(stats().budget_skips, 1u);
+  nr_td_cb0_wire_test_unlimited(true);
+  ASSERT_TRUE(grant(t, 30001, false, true, true, /*tb_dec=*/1)); /* CPU TB, CPU batch: locally admissible */
+  uint64_t alarms = 0, rej[NR_TD_CB0_X_COUNT] = {0};
+  nr_pdsch_config_sweep_cb0_stats(&alarms, rej);
+  EXPECT_EQ(rej[11], 1u) << "engine DECODER rejection: the epoch saw a CUDA TB";
+  unsetenv("ISAC_TD_CB0_CPU_PCT");
+}
+}  // namespace

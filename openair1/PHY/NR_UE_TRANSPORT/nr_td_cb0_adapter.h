@@ -53,13 +53,16 @@ typedef struct {
   int elim_delta;     /* new eliminations in the context after the feed */
 } nr_td_cb0a_feed_out_t;
 bool nr_td_cb0a_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0a_grant_t *g, nr_td_cb0a_feed_out_t *o);
-/* A full-TB outcome fed without a CB0 grant (budget skip, no batch): the engine's dominance bookkeeping. */
-void nr_td_cb0a_note_tb_decoder(const nr_pdsch_sweep_ticket_t *t, uint8_t tb_decoder);
+/* A full-TB outcome fed without a CB0 batch (budget skip, pre-decode reason, nothing testable): the engine's dominance
+ * bookkeeping (nr_pdsch_config_sweep_note_tb_decoder through the ticket form, as an empty grant). */
+void nr_td_cb0a_note_tb_decoder(const nr_pdsch_sweep_ticket_t *t, int tb_hyp, uint8_t tb_decoder);
 /* true when the engine has the per-grant CB0 API (ELIM fix merged). */
 bool nr_td_cb0a_engine_wired(void);
 /* Process-wide: premise alarms seen by the adapter (or the engine once wired), eliminations observed. */
 void nr_td_cb0a_stats(uint64_t *premise_alarms, uint64_t *eliminations);
-/* The engine-defined "active" predicate on a state (adapter-local copy until the engine exports one). */
+/* Test hook: zero the adapter's and the engine's CB0 counters. */
+void nr_td_cb0a_stats_reset(void);
+/* The engine's "active" predicate (nr_pdsch_config_sweep_is_active). */
 bool nr_td_cb0a_is_active(const nr_pdsch_config_sweep_state_t *st, int i);
 
 #ifdef __cplusplus

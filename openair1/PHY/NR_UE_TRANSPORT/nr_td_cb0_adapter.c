@@ -9,6 +9,15 @@
 
 static _Atomic uint64_t s_alarms, s_elims;
 
+void nr_td_cb0a_stats_reset(void)
+{
+  atomic_store(&s_alarms, 0);
+  atomic_store(&s_elims, 0);
+#ifdef NR_TD_CB0_X_COUNT
+  nr_pdsch_config_sweep_cb0_stats_reset();
+#endif
+}
+
 bool nr_td_cb0a_engine_wired(void)
 {
 #ifdef NR_TD_CB0_X_COUNT
@@ -18,9 +27,24 @@ bool nr_td_cb0a_engine_wired(void)
 #endif
 }
 
+#ifdef NR_TD_CB0_X_COUNT
+/* The runtime reasons 0..12 ARE the engine's NR_TD_CB0_X_* bits. */
+_Static_assert(NR_TD_CB0_X_COUNT == 13 && NR_TD_CB0_R_ENGINE_MASK == 0x1FFFu, "CB0 reason bits");
+_Static_assert(NR_TD_CB0_X_NOT_NEW_RV0 == 1u << NR_TD_CB0_R_NOT_NEW_RV0 && NR_TD_CB0_X_GATED == 1u << NR_TD_CB0_R_GATED
+                   && NR_TD_CB0_X_IQ_STALE == 1u << NR_TD_CB0_R_IQ_STALE && NR_TD_CB0_X_LBRM == 1u << NR_TD_CB0_R_LBRM
+                   && NR_TD_CB0_X_RV_RETRY == 1u << NR_TD_CB0_R_RV_RETRY && NR_TD_CB0_X_PRG_PTRS == 1u << NR_TD_CB0_R_PRG_PTRS
+                   && NR_TD_CB0_X_MEMBER_STALE == 1u << NR_TD_CB0_R_MEMBER_STALE
+                   && NR_TD_CB0_X_LLR_SCALE == 1u << NR_TD_CB0_R_LLR_SCALE && NR_TD_CB0_X_GPU_LLR == 1u << NR_TD_CB0_R_GPU_LLR
+                   && NR_TD_CB0_X_LDPC_ERROR == 1u << NR_TD_CB0_R_LDPC_ERROR && NR_TD_CB0_X_RANK == 1u << NR_TD_CB0_R_RANK
+                   && NR_TD_CB0_X_DECODER == 1u << NR_TD_CB0_R_DECODER && NR_TD_CB0_X_CONTRACT == 1u << NR_TD_CB0_R_CONTRACT,
+               "CB0 reason bit positions");
+/* G1 decoder codes are the engine's decoder codes. */
+_Static_assert((int)NR_TD_DEC_CPU == 1 && (int)NR_TD_DEC_CUDA == 2, "decoder codes");
+#endif
+
 void nr_td_cb0a_stats(uint64_t *premise_alarms, uint64_t *eliminations)
 {
-  uint64_t a = atomic_load(&s_alarms);
+  uint64_t a = atomic_load(&s_alarms); /* adapter-side check (diagnostic; identical rule on admissible batches) */
 #ifdef NR_TD_CB0_X_COUNT
   uint64_t ea = 0;
   nr_pdsch_config_sweep_cb0_stats(&ea, NULL);
@@ -35,18 +59,7 @@ void nr_td_cb0a_stats(uint64_t *premise_alarms, uint64_t *eliminations)
 
 bool nr_td_cb0a_is_active(const nr_pdsch_config_sweep_state_t *st, int i)
 {
-  if (i < 0 || i >= st->n_hyp)
-    return false;
-  const uint64_t bit = 1ull << (i & 63);
-  const int w = i >> 6;
-  if (st->dormant[NR_TD_DORMANT_ELIM][w] & bit)
-    return false; /* ELIM is honoured even while fail-open (ELIM fix semantics; base clears ELIM on fail-open) */
-  if (st->fail_open)
-    return true;
-  for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
-    if (st->dormant[c][w] & bit)
-      return false;
-  return true;
+  return nr_pdsch_config_sweep_is_active(st, i); /* the engine's own predicate (ELIM honoured during fail-open) */
 }
 
 /* One snapshot buffer per thread (the state is ~350 KB: never on the stack). */
@@ -142,10 +155,19 @@ bool nr_td_cb0a_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0a_grant_t 
   return o->fed;
 }
 
-void nr_td_cb0a_note_tb_decoder(const nr_pdsch_sweep_ticket_t *t, uint8_t tb_decoder)
+void nr_td_cb0a_note_tb_decoder(const nr_pdsch_sweep_ticket_t *t, int tb_hyp, uint8_t tb_decoder)
 {
+#ifdef NR_TD_CB0_X_COUNT
+  /* The engine has no ticket form of note_tb_decoder; feed_cb0_grant records tb_decoder for any in-range tb_hyp and returns
+   * before crediting when the batch is empty (n = 0), so an empty grant through the ticket form IS the note. */
+  if (t == NULL || tb_hyp < 0)
+    return;
+  const nr_td_cb0_grant_t eg = {.idx = NULL, .pass = NULL, .n = 0, .cb0_decoder = 0, .tb_hyp = tb_hyp, .tb_pass = false,
+                                .tb_decoder = tb_decoder, .inadmissible = 0};
+  nr_pdsch_config_sweep_feedback_cb0(t, &eg);
+#else
   (void)t;
+  (void)tb_hyp;
   (void)tb_decoder;
-  /* ELIM fix: nr_pdsch_config_sweep_note_tb_decoder(state, decoder) has no live-context (ticket) form in the WIP API;
-   * wire it here when the merged engine provides one (or feeds it from feedback()). */
+#endif
 }

@@ -155,8 +155,26 @@ static void refill(nr_td_cb0_sched_t *s, uint64_t now_ns)
     s->last_ns = now_ns;
 }
 
+void nr_td_cb0_sched_set_b(nr_td_cb0_sched_t *s, int b_target)
+{
+  s->b_target = b_target > 0 ? b_target : 0;
+  const double full = s->b_target * nr_td_cb0_sched_item_us(s) + NR_TD_CB0_MAX_GEO * 3 * s->sig_us;
+  s->cap_us = 2.0 * (s->b_target > 0 && full > s->budget_us ? full : s->budget_us);
+  if (s->tokens_us > s->cap_us || s->updates == 0)
+    s->tokens_us = s->cap_us;
+}
+
 void nr_td_cb0_sched_sizes(const nr_td_cb0_sched_t *s, int n_active, int n_geo, nr_td_cb0_sizes_t *z)
 {
+  if (s->b_target > 0) {
+    const int ipg = n_geo > 0 ? (n_active + n_geo - 1) / n_geo : 1; /* hypotheses per geometry */
+    int g = (s->b_target + (ipg > 0 ? ipg : 1) - 1) / (ipg > 0 ? ipg : 1);
+    z->g_target = g < 1 ? 1 : (g > NR_TD_CB0_MAX_GEO ? NR_TD_CB0_MAX_GEO : g);
+    z->b_items = s->b_target;
+    z->m1 = nr_td_cb0_subset_m(n_geo, z->g_target);
+    z->m2 = nr_td_cb0_subset_m((int)nr_td_cb0_subset_m(n_active, (int)z->m1), z->b_items);
+    return;
+  }
   const double per_geo = NR_TD_CB0_SIGS_PER_GEO * s->sig_us;
   double g = per_geo > 0 ? floor(0.4 * s->budget_us / per_geo) : NR_TD_CB0_MAX_GEO;
   z->g_target = g < 1 ? 1 : (g > NR_TD_CB0_MAX_GEO ? NR_TD_CB0_MAX_GEO : (int)g);

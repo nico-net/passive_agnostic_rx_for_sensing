@@ -42,10 +42,11 @@ static void cfg_locked(void)
   g_llr_scale = ls != NULL && *ls && atof(ls) != 0.0 && atof(ls) != 1.0;
   const long nc = sysconf(_SC_NPROCESSORS_ONLN);
   nr_td_cb0_sched_init(&g_sched, env_d("ISAC_TD_CB0_BUDGET_US", NR_TD_CB0_BUDGET_US_DEFAULT), env_d("ISAC_TD_CB0_CPU_PCT", 30), nc > 0 ? (int)nc : 1, 8);
+  nr_td_cb0_sched_set_b(&g_sched, (int)env_d("ISAC_TD_CB0_B", NR_TD_CB0_B_DEFAULT));
   LOG_A(PHY,
-        "SENSING: TD_CB0 wiring on: budget=%.0f us/grant cpu_pct=%.0f ncpu=%d threads=%d B0=%d rank_max=%d tb_cpu_while_acq=%d "
+        "SENSING: TD_CB0 wiring on: B=%d budget=%.0f us/grant cpu_pct=%.0f ncpu=%d threads=%d B0=%d rank_max=%d tb_cpu_while_acq=%d "
         "backend=%d engine_wired=%d\n",
-        g_sched.budget_us, g_sched.cpu_pct, g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max, g_tb_cpu,
+        g_sched.b_target, g_sched.budget_us, g_sched.cpu_pct, g_sched.ncpu, g_threads, nr_td_cb0_sched_B(&g_sched), g_rank_max, g_tb_cpu,
         nr_td_cb0_backend_mode(), nr_td_cb0a_engine_wired() ? 1 : 0);
 }
 
@@ -221,28 +222,90 @@ bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw,
   pthread_mutex_unlock(&g_lock);
   const int ns = nr_td_cb0_subset_select(p->seed, p->abs_slot, p->agkey, p->akey, set.n_active, z.m1, z.m2, p->tb_forced,
                                          p->asel, NR_TD_CB0A_MAX_ACTIVE);
-  const uint64_t main_sig = p->tb_forced >= 0 ? nr_td_cb0_mix64(p->agkey[p->tb_forced] ^ set.hyp[p->tb_forced].mcs_table) : 0;
-  int nsig = 0;
-  for (int s = 0; s < ns && p->n_sel < NR_TD_CB0_PLAN_MAX; s++) {
+  /* Members testable on this grant: the job's k0 only (one GrantWork = one PDSCH slot). */
+  int nt = 0;
+  for (int s = 0; s < ns; s++) {
     const int k = p->asel[s];
-    if (set.hyp[k].k0 != job->job_k0) { /* another PDSCH slot: this grant's GrantWork cannot test it */
+    if (set.hyp[k].k0 != job->job_k0) {
       atomic_fetch_add(&s_not_testable, 1);
       continue;
     }
+    p->asel[nt++] = k;
+  }
+  /* One GrantWork holds NR_TD_GW_MAX_SIG signatures (the main one included). If the selected geometries need more, keep
+   * whole geometries in the order of their rank mix(seed, abs_slot, gkey) -- a function of (seed, slot, catalogue key)
+   * only, never of an outcome -- the scheduled hypothesis's geometry first. Signatures are counted as distinct
+   * (geometry, MCS table): an upper bound (tables with the same Qm share one). */
+  const uint64_t main_g = p->tb_forced >= 0 ? p->agkey[p->tb_forced] : 0;
+  const uint64_t main_sig = p->tb_forced >= 0 ? nr_td_cb0_mix64(main_g ^ set.hyp[p->tb_forced].mcs_table) : 0;
+  const uint64_t rseed = nr_td_cb0_mix64(p->seed ^ nr_td_cb0_mix64((uint64_t)p->abs_slot ^ 0x7A11ull));
+  uint64_t gsel[NR_TD_CB0_PLAN_MAX]; /* accepted geometries */
+  int ng = 0, nsig = 0;
+  uint64_t sigs[NR_TD_GW_MAX_SIG];
+  for (;;) { /* pick the next geometry by rank among the members not yet decided */
+    int best = -1;
+    uint64_t bestr = 0;
+    for (int s = 0; s < nt; s++) {
+      const uint64_t g = p->agkey[p->asel[s]];
+      bool done = false;
+      for (int a = 0; a < ng && !done; a++)
+        done = gsel[a] == g;
+      if (done || g == 0xFFFFFFFFFFFFFFFFull)
+        continue;
+      const uint64_t r = (g == main_g && p->tb_forced >= 0) ? 0 : (nr_td_cb0_mix64(rseed ^ g) | 1);
+      if (best < 0 || r < bestr) {
+        best = s;
+        bestr = r;
+      }
+    }
+    if (best < 0 || ng >= NR_TD_CB0_PLAN_MAX)
+      break;
+    const uint64_t g = p->agkey[p->asel[best]];
+    /* signatures this geometry adds */
+    uint64_t add[3];
+    int na = 0;
+    for (int s = 0; s < nt; s++) {
+      const int k = p->asel[s];
+      if (p->agkey[k] != g)
+        continue;
+      const uint64_t sg = nr_td_cb0_mix64(g ^ set.hyp[k].mcs_table);
+      bool seen = sg == main_sig;
+      for (int a = 0; a < nsig && !seen; a++)
+        seen = sigs[a] == sg;
+      for (int a = 0; a < na && !seen; a++)
+        seen = add[a] == sg;
+      if (!seen && na < 3)
+        add[na++] = sg;
+    }
+    if (nsig + na > NR_TD_GW_MAX_SIG - 1) { /* does not fit: this geometry is left out (and marked decided) */
+      for (int s = 0; s < nt; s++)
+        if (p->agkey[p->asel[s]] == g)
+          atomic_fetch_add(&s_not_testable, 1);
+      gsel[ng++] = g;
+      for (int s = 0; s < nt; s++) /* drop its members */
+        if (p->agkey[p->asel[s]] == g)
+          p->asel[s] = -1 - p->asel[s];
+      int w = 0;
+      for (int s = 0; s < nt; s++)
+        if (p->asel[s] >= 0)
+          p->asel[w++] = p->asel[s];
+      nt = w;
+      ng--; /* not accepted: forget it (its members are gone, so it cannot be picked again) */
+      continue;
+    }
+    for (int a = 0; a < na; a++)
+      sigs[nsig++] = add[a];
+    gsel[ng++] = g;
+  }
+  for (int s = 0; s < nt && p->n_sel < NR_TD_CB0_PLAN_MAX; s++) {
+    const int k = p->asel[s];
     p->idx[p->n_sel] = set.idx[k];
     p->hyp[p->n_sel] = set.hyp[k];
     p->n_sel++;
-    const uint64_t sig = nr_td_cb0_mix64(p->agkey[k] ^ set.hyp[k].mcs_table); /* upper bound of the GrantWork signatures */
-    if (sig != main_sig)
-      p->asort[nsig++] = sig;
   }
   if (p->n_sel == 0)
     return true;
-  p->n_sigs_est = count_distinct(p->asort, nsig);
-  if (p->n_sigs_est > NR_TD_GW_MAX_SIG - 1) { /* would not fit in one GrantWork: skip whole, before decoding */
-    p->pre_reasons |= 1u << NR_TD_CB0_R_MEMBER_STALE;
-    return true;
-  }
+  p->n_sigs_est = nsig;
   pthread_mutex_lock(&g_lock);
   if (g_unlimited)
     g_sched.tokens_us = 1e18;
@@ -371,7 +434,7 @@ void nr_td_cb0_wire_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0_tb_t 
   if (!p->batch) { /* no batch: budget skip, pre-decode reason, or nothing testable on this grant */
     count_reasons(r);
     if (tb->tb_fed)
-      nr_td_cb0a_note_tb_decoder(t, tb->tb_decoder);
+      nr_td_cb0a_note_tb_decoder(t, p->tb_hyp, tb->tb_decoder);
   } else {
     nr_td_cb0_adm_in_t in = {.tb_path_fed = tb->tb_fed,
                              .iq_ok_after = tb->iq_ok_after,
@@ -484,6 +547,7 @@ void nr_td_cb0_wire_reset(void)
   atomic_store(&s_cpu_us, 0);
   atomic_store(&s_be_cpu, 0);
   atomic_store(&s_be_gpu, 0);
+  nr_td_cb0a_stats_reset();
 }
 
 void nr_td_cb0_wire_test_freeze(bool on)

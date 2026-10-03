@@ -109,6 +109,8 @@ typedef struct {
   int max_iter;       /* LDPC iteration policy (8) */
   double us_per_iter; /* CPU-us per LDPC iteration (estimate) */
   double sig_us;      /* CPU-us per lazily computed GrantWork signature (estimate) */
+  int b_target;       /* > 0: items per grant fixed (ISAC_TD_CB0_B), g_target = ceil(b_target / items per geometry) capped at
+                       * NR_TD_CB0_MAX_GEO; the bucket capacity grows to 2 x that grant's planned cost. 0: budget-derived */
   double tokens_us, cap_us;
   uint64_t last_ns;
   uint64_t updates;   /* estimator updates */
@@ -120,6 +122,8 @@ typedef struct {
 #define NR_TD_CB0_SIG_US_INIT 6000.0
 #define NR_TD_CB0_BUDGET_US_DEFAULT 20000.0 /* ISAC_TD_CB0_BUDGET_US default: ~1 new geometry (2 signatures) + ~20 CB0 at 4 RX */
 void nr_td_cb0_sched_init(nr_td_cb0_sched_t *s, double budget_us, double cpu_pct, int ncpu, int max_iter);
+/* Fix the items per grant (0 = budget-derived); sets the bucket capacity accordingly. */
+void nr_td_cb0_sched_set_b(nr_td_cb0_sched_t *s, int b_target);
 /* Worst-case CPU cost of one item, and B = items per grant affordable within the whole budget (>= 1). */
 double nr_td_cb0_sched_item_us(const nr_td_cb0_sched_t *s);
 int nr_td_cb0_sched_B(const nr_td_cb0_sched_t *s);
@@ -127,7 +131,7 @@ typedef struct {
   uint32_t m1, m2;
   int g_target, b_items;
 } nr_td_cb0_sizes_t;
-/* Subset sizes for n_active hypotheses over n_geo geometries (see BUDGET above). */
+/* Subset sizes for n_active hypotheses over n_geo geometries (see BUDGET above; b_target overrides it). */
 void nr_td_cb0_sched_sizes(const nr_td_cb0_sched_t *s, int n_active, int n_geo, nr_td_cb0_sizes_t *z);
 /* Refill to now_ns, then reserve n_sigs * sig_us + n_items * item_us. true = admitted (*planned_us set); false = skip
  * the grant whole. */
