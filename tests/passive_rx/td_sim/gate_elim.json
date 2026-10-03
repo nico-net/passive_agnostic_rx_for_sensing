@@ -1,0 +1,20 @@
+{
+  "_doc": "CB0 elimination channel gate (operator acceleration item 1). Run with gate_elim.py. Simulator v2 slot model, BC6 common flags (dci-miss 0.01, dci-false 1e-3, other-UE occ 0.1, K39 fixed, gate 1, twins 2, K 1, crc-false 2^-24, SA sib1 1), seed 1, acq x 4 RNTIs. Axes: arm (off / elim) x field book (prior = 0, fb2 = 2) x oracle x TDD x rho (= --persist) x rx. CB0 margin 1 dB, all ranks admissible in the main matrix (K38 rank-1-only arm in supp).",
+  "acq": 500, "seed": 1,
+  "common": {"slot-model": 1, "dci-miss": 0.01, "dci-false": 1e-3, "other-ue-occ": 0.1, "obs-lastset": 1,
+             "k0-oracle-legacy": 0, "gate": 1, "twins": 2, "K": 1, "crc-false": 5.96e-8, "rntis-per-acq": 4, "sib1": 1},
+  "arms": {"off": {"cb0-elim": 0}, "elim": {"cb0-elim": 1, "cb0-margin-db": 1}},
+  "fb": {"prior": {"fieldbook": 0}, "fb2": {"fieldbook": 2}},
+  "tdd": {"none": null, "DDDSU": "DDDSU"},
+  "rho": [0.5, 0.9],
+  "rx": [4, 1],
+  "oracle": [0, 1],
+  "supp": {
+    "stress_off":  {"arm": "off",  "fb": "prior", "tdd": "none", "rho": 0.5, "rx": 4, "oracle": 0, "flags": {"crc-false": 1e-3}},
+    "stress_elim": {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.5, "rx": 4, "oracle": 0, "flags": {"crc-false": 1e-3}},
+    "k38_rank1_r05": {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.5, "rx": 4, "oracle": 0, "flags": {"cb0-rank-max": 1}},
+    "k38_rank1_r09": {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.9, "rx": 4, "oracle": 0, "flags": {"cb0-rank-max": 1}},
+    "margin0_r09":   {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.9, "rx": 4, "oracle": 0, "flags": {"cb0-margin-db": 0}},
+    "margin0_r09_1rx": {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.9, "rx": 1, "oracle": 0, "flags": {"cb0-margin-db": 0}}
+  }
+}

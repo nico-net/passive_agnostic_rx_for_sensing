@@ -1,0 +1,6 @@
+{"acq": 500, "seed": 1,
+ "common": {"slot-model": 1, "dci-miss": 0.01, "dci-false": 1e-3, "other-ue-occ": 0.1, "obs-lastset": 1, "k0-oracle-legacy": 0, "gate": 1, "twins": 2, "K": 1, "crc-false": 5.96e-8, "rntis-per-acq": 4, "sib1": 1},
+ "arms": {"off": {"cb0-elim": 0}, "elim": {"cb0-elim": 1, "cb0-margin-db": 1}}, "fb": {"prior": {"fieldbook": 0}}, "tdd": {"none": null}, "rho": [0.9], "rx": [4], "oracle": [0],
+ "supp": {"cuda_cb0": {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.9, "rx": 4, "oracle": 0, "flags": {"cb0-decoder": 1}},
+          "cuda_fallback200": {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.9, "rx": 4, "oracle": 0, "flags": {"cb0-decoder": 1, "cb0-fallback-at": 200}},
+          "cuda_fallback200_1rx": {"arm": "elim", "fb": "prior", "tdd": "none", "rho": 0.9, "rx": 1, "oracle": 0, "flags": {"cb0-decoder": 1, "cb0-fallback-at": 200}}}}

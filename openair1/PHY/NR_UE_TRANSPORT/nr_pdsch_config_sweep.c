@@ -141,6 +141,7 @@ static int catalog_add_mapping_type(nr_pdsch_config_sweep_state_t *st, int mt, i
         st->order[st->n_hyp] = st->n_hyp;
         st->ok_unique[st->n_hyp] = 0;
         st->fp_trials[st->n_hyp] = st->sib_trials[st->n_hyp] = 0;
+        st->cb0_trials[st->n_hyp] = st->cb0_pass[st->n_hyp] = 0;
         clear_geom_evidence(st);
         st->n_hyp++;
         added++;
@@ -312,6 +313,12 @@ static void clear_probe_stats(nr_pdsch_config_sweep_state_t *st)
   memset(st->probe_fail, 0, sizeof(st->probe_fail));
   memset(st->probe_inconclusive, 0, sizeof(st->probe_inconclusive));
   lever_c_restart(st); /* lever C and lever P evidence follow the KL evidence */
+  /* CB0 channel: indices move with every prune, so its counters are cleared with trials/ok, and the ELIM mask with them: every
+   * elimination is justified by the evidence of the current epoch only (same per-epoch accounting as the KL decision). */
+  memset(st->cb0_trials, 0, sizeof(st->cb0_trials));
+  memset(st->cb0_pass, 0, sizeof(st->cb0_pass));
+  st->cb0_dec_pin = 0;
+  memset(st->dormant[NR_TD_DORMANT_ELIM], 0, sizeof(st->dormant[NR_TD_DORMANT_ELIM]));
 }
 static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
 {
@@ -342,6 +349,7 @@ static int prune_commit_tail(nr_pdsch_config_sweep_state_t *st, int n, int base)
     st->probe_pass[i] = st->probe_fail[i] = st->probe_inconclusive[i] = 0;
     st->ok_unique[i] = 0;
     st->fp_trials[i] = st->sib_trials[i] = 0;
+    st->cb0_trials[i] = st->cb0_pass[i] = 0;
     st->order[i] = i; /* [0, base) of order[] is a permutation of [0, base): the appends set order[at] = at */
   }
   st->n_hyp = n;
@@ -727,12 +735,14 @@ int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_
     if (st->hyp[i].k0 == lo) {
       st->hyp[st->n_hyp] = st->hyp[i];
       st->hyp[st->n_hyp].k0 = k0;
-      for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) /* the new layer inherits each source entry's dormancy */
-        if (dorm_bit(st, c, i))
+      for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) /* the new layer inherits each source entry's dormancy, except ELIM: an elimination
+                                                       * is CB0 evidence about the source hypothesis, and another k0 is another hypothesis */
+        if (c != NR_TD_DORMANT_ELIM && dorm_bit(st, c, i))
           st->dormant[c][st->n_hyp >> 6] |= UINT64_C(1) << (st->n_hyp & 63);
       st->order[st->n_hyp] = st->n_hyp;
       st->ok_unique[st->n_hyp] = 0;
       st->fp_trials[st->n_hyp] = st->sib_trials[st->n_hyp] = 0;
+      st->cb0_trials[st->n_hyp] = st->cb0_pass[st->n_hyp] = 0;
       clear_geom_evidence(st); /* the active set grows: lever P evidence restarts */
       st->n_hyp++;
     }
@@ -954,13 +964,61 @@ static double rate_of(const nr_pdsch_config_sweep_state_t *st, int i)
   return (st->trials[i] > 0) ? ((double)st->ok[i] / (double)st->trials[i]) : 0.0;
 }
 
+/* CB0 channel class count: hypotheses active under every dormancy cause EXCEPT ELIM (all of them while fail_open). An elimination
+ * therefore never shrinks the union bound: the eliminated hypotheses stay in the family whose intervals justified their elimination. */
+static int n_classes_cb0(const nr_pdsch_config_sweep_state_t *st)
+{
+  if (st->fail_open)
+    return st->n_hyp;
+  int dormant = 0;
+  for (int w = 0; w < (st->n_hyp + 63) / 64; w++) {
+    uint64_t u = 0;
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+      if (c != NR_TD_DORMANT_ELIM)
+        u |= st->dormant[c][w];
+    dormant += __builtin_popcountll(u & live_word(st->n_hyp, w));
+  }
+  return st->n_hyp - dormant;
+}
+/* One-sided CB0 elimination (levers spec 5.4 redesign): a non-leader ACTIVE h is eliminated when UB_cb0(h) < lo, lo = the leader's
+ * full-TB lower bound. Both bounds use `classes` = NR_TD_CB0_BUDGET_SPLIT x n_classes_cb0 (each family 1e-6 / 2). Returns the number of
+ * hypotheses eliminated; an active-set change restarts the lever-C/P evidence and since_pass (set_dormant semantics). */
+static int cb0_eliminate(nr_pdsch_config_sweep_state_t *st, int leader, double lo, unsigned classes)
+{
+  if (!st->cb0_elim || st->fail_open || !(lo > 0.0))
+    return 0;
+  int eliminated = 0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    if (i == leader || st->cb0_trials[i] == 0 || !active(st, i))
+      continue;
+    if ((double)st->cb0_pass[i] >= lo * (double)st->cb0_trials[i]) /* UB >= empirical rate >= lo: cannot be eliminated (no interval needed) */
+      continue;
+    double l, u;
+    nr_crc_interval(st->cb0_pass[i], st->cb0_trials[i], classes, &l, &u);
+    if (u < lo) {
+      st->dormant[NR_TD_DORMANT_ELIM][i >> 6] |= UINT64_C(1) << (i & 63);
+      eliminated++;
+    }
+  }
+  if (eliminated) {
+    st->since_pass = 0; /* the active set changed */
+    lever_c_restart(st);
+  }
+  return eliminated;
+}
+
 /* The acceptance decision, shared by every feed path: the KL separation test when check_separation (a credited
- * hypothesis just reached a multiple of 16 trials), then the full-round fallback. Evidence must already be credited. */
+ * hypothesis just reached a multiple of 16 trials, or a CB0 batch was credited), then the full-round fallback. Evidence must already be
+ * credited. With cb0_elim the CB0 elimination runs first (it needs the leader's full-TB lower bound) and eliminated hypotheses count as
+ * resolved: the separation test ranges over the remaining ACTIVE others only. */
 static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation)
 {
   if (check_separation) {
     /* Acceptance ranges over the ACTIVE set only; with no mask set first_active == 0 and n_act == n_hyp (today's rule). */
     const int n_act = n_active_of(st);
+    /* Union-bound class count. CB0 channel on: both interval families get half of the 1e-6 budget (classes x 2) over the hypotheses
+     * active under every cause but ELIM. Off: the active set (today's rule, bit-identical). */
+    const unsigned classes = st->cb0_elim ? (unsigned)NR_TD_CB0_BUDGET_SPLIT * (unsigned)n_classes_cb0(st) : (unsigned)n_act;
     int leader=-1;
     for(int i=0;i<st->n_hyp;i++) {
       if(!active(st,i)) continue;
@@ -970,7 +1028,8 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
     double lo,hi;
     /* Class count = the LIVE catalog, not the storage cap: every prune clears evidence and add_k0 only
      * raises n, so the union bound always covers the hypotheses actually competing. */
-    nr_crc_interval(st->ok[leader],st->trials[leader],(unsigned)n_act,&lo,&hi);
+    nr_crc_interval(st->ok[leader],st->trials[leader],classes,&lo,&hi);
+    cb0_eliminate(st, leader, lo, classes);
     /* The absolute floor was 0.60, which silently assumed the TRUE config decodes at >=60 %.
      * MEASURED OTA 2026-09-13: the winning hypothesis decodes at 124/311 = 40 %, so its Wilson
      * lower bound can never reach 0.60 -- early separation could NEVER fire on this link and every
@@ -982,7 +1041,7 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
     for(int i=0;i<st->n_hyp && separated;i++) {
       if(i==leader || !active(st,i)) continue;
       double other_lo,other_hi;
-      nr_crc_interval(st->ok[i],st->trials[i],(unsigned)n_act,&other_lo,&other_hi);
+      nr_crc_interval(st->ok[i],st->trials[i],classes,&other_lo,&other_hi);
       if(other_hi>=lo) separated=false;
     }
     if(separated) { st->winner=leader; return leader; }
@@ -1056,6 +1115,58 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
   const int w = feed_one(st, idx, tb_crc_ok, &credited);
   since_pass_update(st, credited, credited && tb_crc_ok);
   return w;
+}
+
+/* ---- CB0 elimination channel (see the header contract) ---- */
+int nr_pdsch_config_sweep_feed_cb0(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible)
+{
+  return nr_pdsch_config_sweep_feed_cb0_dec(st, idx, n, pass, admissible, NR_TD_DEC_CPU);
+}
+int nr_pdsch_config_sweep_feed_cb0_dec(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible,
+                                       nr_td_decoder_t decoder)
+{
+  if (st == NULL)
+    return -1;
+  if (!st->cb0_elim || !admissible || idx == NULL || pass == NULL || n < 1 || st->winner >= 0 || st->fail_open)
+    return st->winner;
+  /* decoder pin: one decoder per context's CB0 evidence (CRC evidence is not exchangeable between decoders) */
+  if (st->cb0_dec_pin == 0)
+    st->cb0_dec_pin = (uint8_t)(decoder + 1);
+  else if (st->cb0_dec_pin != (uint8_t)(decoder + 1))
+    return st->winner;
+  uint64_t seen[NR_TD_DWORDS];
+  memset(seen, 0, sizeof(seen));
+  bool credited = false;
+  for (int k = 0; k < n; k++) {
+    const int h = idx[k];
+    if (h < 0 || h >= st->n_hyp || ((seen[h >> 6] >> (h & 63)) & 1u))
+      continue;
+    seen[h >> 6] |= UINT64_C(1) << (h & 63);
+    if (!active(st, h) || st->cb0_trials[h] == UINT16_MAX) /* saturation: stop crediting (outcome-independent), the rate stays unbiased */
+      continue;
+    st->cb0_trials[h]++;
+    st->cb0_pass[h] += pass[k] ? 1 : 0;
+    credited = true;
+  }
+  /* No since_pass update: CB0 outcomes are not full-TB evidence (an elimination resets it as an active-set change). */
+  return credited ? sweep_decide(st, true) : st->winner;
+}
+bool nr_pdsch_config_sweep_is_eliminated(const nr_pdsch_config_sweep_state_t *st, int i)
+{
+  return st != NULL && i >= 0 && i < st->n_hyp && dorm_bit(st, NR_TD_DORMANT_ELIM, i);
+}
+static int s_cb0_elim_env = -1;
+bool nr_pdsch_config_sweep_cb0_elim_env(void)
+{
+  if (s_cb0_elim_env < 0) {
+    const char *e = getenv("ISAC_TD_CB0_ELIM");
+    s_cb0_elim_env = (e != NULL && atoi(e) == 1) ? 1 : 0;
+  }
+  return s_cb0_elim_env == 1;
+}
+void nr_pdsch_config_sweep_cb0_elim_env_set(int on)
+{
+  s_cb0_elim_env = on < 0 ? -1 : (on ? 1 : 0);
 }
 
 /* Smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6, in the log domain. */
@@ -1468,8 +1579,15 @@ void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool
   if (st != NULL && st->fail_open != on) {
     st->fail_open = on;
     st->since_pass = 0; /* the active set changed */
-    if (on) /* the GEOM mask is derived from fast-path evidence: fail-open discards the evidence, so the pin must not outlive it */
+    if (on) { /* the GEOM mask is derived from fast-path evidence: fail-open discards the evidence, so the pin must not outlive it */
       memset(st->dormant[NR_TD_DORMANT_GEOM], 0, sizeof(st->dormant[NR_TD_DORMANT_GEOM]));
+      /* the ELIM mask likewise (CB0 evidence): fail-open restores every eliminated hypothesis and is a TB-only safe mode (feed_cb0 is
+       * off while fail_open); the CB0 counters are discarded with it, so a later fail_open = false starts the channel afresh */
+      memset(st->dormant[NR_TD_DORMANT_ELIM], 0, sizeof(st->dormant[NR_TD_DORMANT_ELIM]));
+      memset(st->cb0_trials, 0, sizeof(st->cb0_trials));
+      memset(st->cb0_pass, 0, sizeof(st->cb0_pass));
+      st->cb0_dec_pin = 0;
+    }
     lever_c_restart(st);
   }
 }
@@ -1702,12 +1820,14 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   const bool p2 = st->p2;
   const bool crc_accept = st->crc_accept;
   const bool geom_pin = st->geom_pin;
+  const bool cb0_elim = st->cb0_elim;
   const float sib_pmin = st->sib_pmin, sib_eps = st->sib_eps;
   const bool fail_open = st->fail_open;
   const int old_n_hyp = st->n_hyp;
   uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
   memcpy(dormant, st->dormant, sizeof(dormant));
   memset(dormant[NR_TD_DORMANT_GEOM], 0, sizeof(dormant[NR_TD_DORMANT_GEOM])); /* GEOM is derived from evidence (cleared by rebuild) */
+  memset(dormant[NR_TD_DORMANT_ELIM], 0, sizeof(dormant[NR_TD_DORMANT_ELIM])); /* so is ELIM (CB0 evidence) */
   const nr_pdsch_config_sweep_state_t *t = legality ? catalog_template(typeA, legality) : NULL;
   if (t)
     memcpy(st, t, sizeof(*st));
@@ -1717,6 +1837,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   st->p2 = p2;
   st->crc_accept = crc_accept;
   st->geom_pin = geom_pin;
+  st->cb0_elim = cb0_elim;
   st->sib_pmin = sib_pmin;
   st->sib_eps = sib_eps;
   st->fail_open = fail_open;
@@ -1724,7 +1845,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
    * mis-attributed, so they are cleared (fails safe; the caller re-applies them). An unchanged catalog keeps them bit-identical. */
   if (st->n_hyp != old_n_hyp)
     for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
-      if (c != NR_TD_DORMANT_GEOM)
+      if (c != NR_TD_DORMANT_GEOM && c != NR_TD_DORMANT_ELIM)
         memset(dormant[c], 0, sizeof(dormant[c]));
   memcpy(st->dormant, dormant, sizeof(dormant));
   normalize_masks(st);
@@ -2192,6 +2313,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
     st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
     st->ok_unique[at] = 0;
     st->fp_trials[at] = st->sib_trials[at] = 0;
+    st->cb0_trials[at] = st->cb0_pass[at] = 0;
     clear_geom_evidence(st);
     st->order[at] = at;
   }

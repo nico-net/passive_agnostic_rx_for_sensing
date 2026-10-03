@@ -991,3 +991,73 @@ TEST(TdSimBc6b, PinCountedOncePerLeverRun)
   EXPECT_EQ(r.wrong, 0);
   for (const RntiRec &x : r.recs) EXPECT_LE(x.geom_pins, 1) << "acq " << x.acq << " rank " << x.rnti_rank;
 }
+/* ---- CB0 elimination channel (--cb0-elim; engine nr_pdsch_config_sweep_feed_cb0) ---- */
+static SimCfg cb0_gate_cfg()
+{
+  /* the BC6 gate cell (gate_bc.json common flags), blind */
+  SimCfg c = SimCfg::defaults();
+  c.slot_model = 1; c.persist = 0.5; c.dci_miss = 0.01; c.dci_false = 1e-3; c.other_ue_occ = 0.1; c.obs_lastset = 1; c.k0_oracle_legacy = 0;
+  c.gate = 1; c.twins = 2; c.K = 1; c.crc_false = 5.96e-8; c.sib1 = 1; c.oracle = 0; c.seed = 1;
+  return c;
+}
+TEST(TdSimCb0, OffKnobsAreInert)
+{
+  SimCfg a = cb0_gate_cfg(); a.acq = 3; a.oracle = 1;
+  SimCfg b = a; b.cb0_margin_db = 5; b.cb0_rank_max = 1; /* cb0_elim 0: knobs inert */
+  const SimResult x = run_sim(a), y = run_sim(b);
+  EXPECT_EQ(x.total_grants, y.total_grants);
+  EXPECT_EQ(x.n_full, y.n_full);
+  EXPECT_EQ(y.cb0_decodes, 0);
+}
+TEST(TdSimCb0, Cb0ElimNeverWrongUnderTrap)
+{
+  /* Strong physical k0 trap: persistent allocation (persist 0.9) and back-to-back grants (adjacency 0.9): k0 siblings genuinely pass CB0
+   * (and TB) on compatible grants; MCS-table twins pass on non-separating grants. margin 0 = the worst case CB0 == TB. */
+  long trap = 0, decided = 0;
+  for (double margin : {0.0, 1.0}) {
+    SimCfg c = cb0_gate_cfg(); c.acq = 15; c.persist = 0.9; c.adjacency = 0.9; c.cb0_elim = 1; c.cb0_margin_db = margin;
+    const SimResult r = run_sim(c);
+    EXPECT_EQ(r.wrong, 0) << margin;
+    EXPECT_EQ(r.truth_cb0_elim, 0) << margin;
+    EXPECT_GT(r.cb0_elims, 0) << margin;
+    trap += r.k0_trap_passes;
+    decided += r.n_decided;
+  }
+  EXPECT_GT(trap, 0); /* the trap was actually exercised */
+  EXPECT_GT(decided, 100);
+  /* Discriminating arm: inflated false passes (--crc-false 0.1 on TB and CB0 of wrong hypotheses) make a WRONG hypothesis the full-TB
+   * leader with a positive lower bound early on; only then can an unsound channel eliminate the truth (a failure-only CB0 count, the P2
+   * flaw, does so here: verified by mutation, see the task-ELIM report). */
+  SimCfg c = cb0_gate_cfg(); c.acq = 10; c.persist = 0.9; c.adjacency = 0.9; c.cb0_elim = 1; c.crc_false = 0.1;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.truth_cb0_elim, 0);
+  EXPECT_GT(r.cb0_false_passes, 0);
+}
+TEST(TdSimCb0, Cb0ElimFasterBlind)
+{
+  /* oracle 0, 4 RX, first RNTI of each acquisition: >= 10x faster with the channel on; never wrong. */
+  double s_on = 0, s_off = 0;
+  for (int on = 0; on < 2; on++) {
+    SimCfg c = cb0_gate_cfg(); c.acq = 12; c.rntis_per_acq = 1; c.n_rx = 4; c.cb0_elim = on;
+    const SimResult r = run_sim(c);
+    ASSERT_EQ(r.wrong, 0);
+    ASSERT_EQ(r.undecidable, 0);
+    double sum = 0;
+    for (const RntiRec &x : r.recs) sum += x.seconds;
+    (on ? s_on : s_off) = sum / (double)r.recs.size();
+    if (on) { EXPECT_GT(r.cb0_decodes, 0); EXPECT_EQ(r.truth_cb0_elim, 0); }
+  }
+  EXPECT_GE(s_off, 10.0 * s_on) << "first-RNTI mean off " << s_off << " s, on " << s_on << " s";
+}
+TEST(TdSimCb0, DecoderFallbackMidContextIsDroppedNotMixed)
+{
+  /* CB0 batch on CUDA (1 dB more sensitive than the CPU full-TB decoder), circuit-breaker fallback to the CPU after 200 grants: the engine's
+   * decoder pin drops the CPU batches (never mixes the two decoders' CRC evidence); still never wrong. */
+  SimCfg c = cb0_gate_cfg(); c.acq = 10; c.persist = 0.9; c.adjacency = 0.9; c.cb0_elim = 1; c.cb0_decoder = 1; c.cb0_fallback_at = 200;
+  const SimResult r = run_sim(c);
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_EQ(r.undecidable, 0);
+  EXPECT_EQ(r.truth_cb0_elim, 0);
+  EXPECT_GT(r.cb0_dec_dropped, 0);
+}
