@@ -29,6 +29,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_pdsch_chest_key.h" // K32: complete chest-cache key
+#include "nr_llr_norm.h" // K38: LLR-norm shift over code block 0's span
 #include "nr_scrambling_id_sweep.h" // per-RNTI dataScramblingIdentityPDSCH TB-CRC walk (Task 13)
 
 #include <stdlib.h>
@@ -675,8 +676,6 @@ void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
 static _Atomic uint64_t g_gpu_llr_jobs = 0, g_gpu_cpu_jobs = 0; // decodes fed by the GPU front end vs the CPU chain
 static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L
-/* mean |LLR| the int8 decoder gets: 127/40 ~ 3.2x headroom over the mean for the 256QAM outer bits */
-#define LLR_NORM_TARGET 40u
 static _Atomic uint64_t g_llr_norm_shift[9]; /* TBs by applied right shift */
 static _Atomic uint64_t g_rv_census[2][4]; // [mcs>=24][rv]: does this cell retransmit at rv 0? (HARQ gate)
 static _Atomic uint64_t g_ldpc_iface_err = 0;
@@ -3750,11 +3749,12 @@ gpu_llr_ready:;
       static _Atomic int s_norm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
       if (s_norm < 0) { const char *e = getenv("ISAC_LLR_NORM"); s_norm = (e && atoi(e) == 0) ? 0 : 1; }
       if (s_norm && G >= 64) {
-        uint64_t acc = 0; uint32_t cnt = 0;
-        for (uint32_t i = 0; i < G; i += 16) { acc += (uint32_t)abs(llr[i]); cnt++; }
-        const uint32_t mean = (uint32_t)(acc / cnt);
-        int k = 0;
-        while (k < 8 && (mean >> k) > LLR_NORM_TARGET) k++;
+        /* K38: the mean is taken over code block 0's span, ceil(G/C) LLRs, not all G: a layout probe
+         * leaves every LLR past its horizon at 0, and a whole-buffer mean diluted by those zeros gave
+         * the probe a smaller shift than the whole-slot decode of the same hypothesis (rank 4: CB0
+         * LLRs 2^dk times larger, clipped at the int8 rail). Every decode has demodulated that span. */
+        const uint32_t span = nr_llr_norm_span(G, nr_llr_norm_num_cb(cw->TBS, cw->ldpcBaseGraph));
+        const int k = nr_llr_norm_shift(llr, span);
         if (k > 0) {
           for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
           atomic_fetch_add(&g_llr_norm_shift[k], 1);
