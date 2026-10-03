@@ -22,6 +22,15 @@
  * Unified memory: item.llr is read IN PLACE. On GB10 (pageable memory access through the host page tables)
  * any host pointer works; elsewhere it must be managed (cudaMallocManaged) memory for the GPU dematch, else
  * that item falls back to the CPU dematch. Without the CUDA module the whole batch runs on the CPU.
+ *
+ * GrantWork contract (td/grantwork-lite): item.llr is consumed AS-IS. This module never descrambles, scales or
+ * re-normalises (the GrantWork LLRs are already descrambled and ISAC_LLR_NORM-shifted, exactly what the full
+ * decode receives). nr_td_cb0_batch is synchronous and keeps no reference to any item buffer after it returns, so
+ * the caller retains each GrantWork the batch references for the duration of the call and releases it afterwards.
+ *
+ * Decoder provenance: every result carries decoder_used. Today every item of a batch uses the CPU layered decoder
+ * (the GPU only does the de-matching). A future CUDA LDPC path must set decoder_used per item and must mark any
+ * item that falls back to the CPU accordingly (CUDA and CPU CRC verdicts are not exchangeable, ~1 dB apart).
  */
 #ifndef NR_TD_CB0_BATCH_H
 #define NR_TD_CB0_BATCH_H

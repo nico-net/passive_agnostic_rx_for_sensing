@@ -290,7 +290,10 @@ static void cb0_run(cb0_job_t *j, int threads)
 /* LDPC adapter. Today: the CPU layered decoder (libldpc.so's LDPCdecoder), the same decoder and iteration policy
  * as the receiver's full decode, so a CB0 FAIL is admissible elimination evidence under levers spec section 9.3.
  *
- * HOOK (td/g1-ldpc-safety, K34): once the G1-safe CUDA pool is merged, a GPU variant goes HERE:
+ * HOOK (td/g1-ldpc-safety, K34; approved at 54bc0c49e4, not merged into this branch). POST-MERGE STEP, deliberately
+ * not wired here: G1's pool is owned by one worker thread (sticky-error state, CUDA-graph capture epochs, 200 ms
+ * timeout + bypass breaker), so the CB0 batch must submit through that worker's queue, NOT call ldpc_pool_decode
+ * directly from this thread. Shape of the GPU variant:
  *   - group the valid items by (BG, Z) (ldpc_pool_decode takes one BG / Z / num_iter per call, <= ldpc_pool_max_launch
  *     code blocks per launch); the l slots are already in the pool's input layout (BATCH_LLR_STRIDE = 68*384 int8,
  *     filled exactly like cuda_prepare_segment), and on GB10 they are managed memory, so no host copy is needed

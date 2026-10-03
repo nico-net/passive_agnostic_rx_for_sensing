@@ -56,14 +56,14 @@ int main(int argc, char **argv)
          "ldpc1_us_per_item,batch_gpu+cpuLDPC_T%d_items_per_s,batch_cpu_T1_items_per_s,"
          "gpu_ldpc_est_us_per_cb_it8,gpu_ldpc_est_us_per_cb_it16,pass\n", T);
   const uint16_t prbs[2] = {106, 273};
-  const int Ns[4] = {32, 128, 512, 1024};
+  const int Ns[6] = {32, 64, 256, 600, 1024, 0};
   for (int p = 0; p < 2; p++) {
     cb0_fx_t fx = {.R = 5170, .Qm = 6, .Nl = 2, .rv = 0};
     fx.A = cb0_fx_tbs(6, fx.R, prbs[p], 12, 6, 2);
     fx.G = cb0_fx_G(prbs[p], 12, 6, 1, 6, 2);
     if (cb0_fx_encode(&fx, 11, 64) != 0)
       return 1;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; Ns[k]; k++) {
       const int n = Ns[k];
       nr_td_cb0_item_t *it = calloc(n, sizeof(*it));
       nr_td_cb0_result_t *out = calloc(n, sizeof(*out));
