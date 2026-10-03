@@ -11,6 +11,7 @@
 #include <time.h>
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
 #include "common/utils/LOG/log.h"
+#include "nr_llr_norm.h"
 
 /* ---------------------------------------------------------------------------------------------
  * Allocator. Every buffer carries a 64-byte header {magic, kind, capacity}; the payload is 64-byte
@@ -172,8 +173,11 @@ struct nr_td_grantwork_s {
   void *fep;
   const uint64_t *fep_gen_src;
   uint64_t fep_gen;
-  bool fep_valid;
+  uint16_t fep_mask;
   double fep_fo;
+  pthread_t job_thread;
+  _Atomic bool job_ended;
+  _Atomic uint32_t flags;
   nr_td_gw_compute_fn compute;
   void *ctx;
   pthread_mutex_t lock;         /* entry table */
@@ -205,6 +209,7 @@ nr_td_grantwork_t *nr_td_grantwork_begin(const nr_td_gw_job_t *job)
   gw->fep_gen_src = job->fep_gen_src;
   gw->fep_gen = job->fep_gen_src ? __atomic_load_n(job->fep_gen_src, __ATOMIC_ACQUIRE) : 0;
   gw->compute = job->compute;
+  gw->job_thread = pthread_self();
   pthread_mutex_init(&gw->lock, NULL);
   pthread_cond_init(&gw->cv, NULL);
   pthread_mutexattr_t a;
@@ -244,14 +249,36 @@ bool nr_td_grantwork_fep_alive(const nr_td_grantwork_t *gw)
 {
   return gw->fep_gen_src == NULL || __atomic_load_n(gw->fep_gen_src, __ATOMIC_ACQUIRE) == gw->fep_gen;
 }
-bool nr_td_grantwork_fep_valid(const nr_td_grantwork_t *gw, double fo_hz)
+uint16_t nr_td_grantwork_fep_mask(const nr_td_grantwork_t *gw, double fo_hz)
 {
-  return gw->fep_valid && gw->fep_fo == fo_hz && nr_td_grantwork_fep_alive(gw);
+  return (gw->fep_fo == fo_hz && nr_td_grantwork_fep_alive(gw)) ? gw->fep_mask : 0;
 }
-void nr_td_grantwork_fep_done(nr_td_grantwork_t *gw, double fo_hz)
+void nr_td_grantwork_fep_done(nr_td_grantwork_t *gw, double fo_hz, uint16_t mask)
 {
-  gw->fep_valid = true;
+  if (gw->fep_fo != fo_hz)
+    gw->fep_mask = 0;
   gw->fep_fo = fo_hz;
+  gw->fep_mask |= mask;
+}
+void nr_td_grantwork_flag(nr_td_grantwork_t *gw, uint32_t bits)
+{
+  if (gw)
+    atomic_fetch_or(&gw->flags, bits);
+}
+uint32_t nr_td_grantwork_flags(const nr_td_grantwork_t *gw)
+{
+  return gw ? atomic_load(&((nr_td_grantwork_t *)gw)->flags) : 0;
+}
+static _Atomic uint64_t g_refused;
+void nr_td_grantwork_job_end(nr_td_grantwork_t *gw)
+{
+  if (gw)
+    atomic_store(&gw->job_ended, true);
+}
+uint64_t nr_td_grantwork_refused_count(void) { return atomic_load(&g_refused); }
+static bool may_compute(const nr_td_grantwork_t *gw)
+{
+  return pthread_equal(gw->job_thread, pthread_self()) && !atomic_load(&((nr_td_grantwork_t *)gw)->job_ended);
 }
 
 static gw_entry_t *find(nr_td_grantwork_t *gw, uint64_t sig)
@@ -318,6 +345,7 @@ nr_td_gw_acq_t nr_td_grantwork_acquire(nr_td_grantwork_t *gw, uint64_t sig, nr_t
   nr_td_gw_acq_t r;
   bool claimed = false;
   if (e == NULL) {
+    atomic_fetch_or(&gw->flags, NR_TD_GW_F_FULL);
     r = NR_TD_GW_ACQ_ERR;
   } else if (e->state == E_READY) {
     fill_view(e, out);
@@ -327,7 +355,11 @@ nr_td_gw_acq_t nr_td_grantwork_acquire(nr_td_grantwork_t *gw, uint64_t sig, nr_t
     r = NR_TD_GW_ACQ_FAILED;
   } else if (e->state == E_COMPUTING) { /* claimed by this very thread (lazy path re-entering) */
     r = NR_TD_GW_ACQ_OWNER;
-  } else if (!nr_td_grantwork_fep_alive(gw)) {
+  } else if (!nr_td_grantwork_fep_alive(gw) || !may_compute(gw)) {
+    if (!nr_td_grantwork_fep_alive(gw))
+      atomic_fetch_or(&gw->flags, NR_TD_GW_F_STALE);
+    else
+      atomic_fetch_add(&g_refused, 1);
     gw->n--; /* the EMPTY slot just created (always the last one) */
     r = NR_TD_GW_ACQ_ERR;
   } else {
@@ -410,6 +442,7 @@ int nr_td_grantwork_get_llr(nr_td_grantwork_t *gw, uint64_t sig, const void *hin
   gw_entry_t *e = lookup_wait(gw, sig, &err);
   if (e == NULL) {
     pthread_mutex_unlock(&gw->lock);
+    atomic_fetch_or(&gw->flags, NR_TD_GW_F_FULL);
     return err;
   }
   if (e->state == E_READY || e->state == E_FAILED) {
@@ -423,8 +456,15 @@ int nr_td_grantwork_get_llr(nr_td_grantwork_t *gw, uint64_t sig, const void *hin
     pthread_mutex_unlock(&gw->lock);
     return NR_TD_GW_E_ARG;
   }
-  if (gw->compute == NULL || !nr_td_grantwork_fep_alive(gw)) {
-    const int rc = gw->compute == NULL ? NR_TD_GW_E_NOCOMPUTE : NR_TD_GW_E_STALE;
+  if (gw->compute == NULL || !nr_td_grantwork_fep_alive(gw) || !may_compute(gw)) {
+    int rc = NR_TD_GW_E_NOCOMPUTE;
+    if (gw->compute != NULL && !nr_td_grantwork_fep_alive(gw)) {
+      rc = NR_TD_GW_E_STALE;
+      atomic_fetch_or(&gw->flags, NR_TD_GW_F_STALE);
+    } else if (gw->compute != NULL) {
+      rc = NR_TD_GW_E_NOTOWNER;
+      atomic_fetch_add(&g_refused, 1);
+    }
     gw->n--; /* drop the EMPTY slot just created */
     pthread_mutex_unlock(&gw->lock);
     return rc;
@@ -502,6 +542,24 @@ int nr_td_gw_cb0_extract(const int16_t *llr, uint32_t n_llr, const nr_td_cb0_par
       == -1)
     return NR_TD_GW_E_RM;
   return NR_TD_GW_OK;
+}
+
+int nr_td_gw_cb0_input(const int16_t *llr, uint32_t G, const nr_td_cb0_params_t *p, bool norm, int16_t *e0, int16_t *d,
+                       int *k_out)
+{
+  if (llr == NULL || p == NULL || e0 == NULL || p->E == 0 || p->E > G)
+    return NR_TD_GW_E_ARG;
+  int k = -1;
+  if (norm && G >= 64) /* the decode's ISAC_LLR_NORM block, with this hypothesis's own C (K38) */
+    k = nr_llr_norm_shift(llr, nr_llr_norm_span(G, nr_llr_norm_num_cb(p->A, p->BG)));
+  if (k > 0)
+    for (uint32_t i = 0; i < p->E; i++)
+      e0[i] = (int16_t)(llr[i] >> k);
+  else
+    memcpy(e0, llr, (size_t)p->E * sizeof(int16_t));
+  if (k_out)
+    *k_out = k;
+  return nr_td_gw_cb0_extract(e0, p->E, p, d);
 }
 
 /* ---------------------------------------------------------------------------------------------

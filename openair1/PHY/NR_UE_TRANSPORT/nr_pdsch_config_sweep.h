@@ -43,6 +43,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 struct nr_td_side_info_s; /* nr_td_order.h (which includes this header) */
 
@@ -105,7 +106,8 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 #define NR_TD_DORMANT_PRIOR 0
 #define NR_TD_DORMANT_FIELD_BASE 1
 #define NR_TD_DORMANT_GEOM 4 /* lever P: a CRC-pass-pinned geometry group (BC2b); every other geometry is dormant for this cause */
-#define NR_TD_DORMANT_CAUSES 5
+#define NR_TD_DORMANT_ELIM 5 /* CB0 elimination channel (nr_pdsch_config_sweep_feed_cb0): evidence-derived, cleared with the evidence and by fail-open */
+#define NR_TD_DORMANT_CAUSES 6
 #define NR_TD_GEOM_SLOTS 8
 #define NR_TD_DWORDS ((NR_PDSCH_SWEEP_MAX_HYP + 63) / 64)
 
@@ -191,7 +193,55 @@ typedef struct {
    * evidence and never resets it). Also reset to 0 whenever the active set changes: set_fail_open toggling, and set_dormant / clear_dormant calls that
    * change at least one mask bit (these also clear ok_unique and crc_accept_blocked). Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
   uint32_t since_pass;
+  /* CB0 ELIMINATION CHANNEL (levers spec 2026-10-01 section 5.4 redesign; nr_pdsch_config_sweep_feed_cb0). A SEPARATE, SYMMETRIC evidence
+   * stream: per hypothesis, the first-code-block CRC outcomes (PASS and FAIL both counted) of the CB0 decodes the caller ran on every grant
+   * for every ACTIVE hypothesis. Never mixed into trials/ok, never elects: used one-sided to ELIMINATE a non-leader h when
+   * UB_cb0(h) < LB_tb(leader) (sweep_decide). Evidence-like: cleared with trials/ok (prune_commit, rebuild, reopen) and by fail-open, NOT
+   * by an active-set change (lever_c_restart): a CB0 rate is a property of the hypothesis on the grants it was tested on, not of the
+   * active set. uint16 (+32 KB/state); crediting stops (outcome-independently) at UINT16_MAX trials. */
+  uint16_t cb0_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t cb0_pass[NR_PDSCH_SWEEP_MAX_HYP];
+  uint8_t  cb0_dec_pin; ///< CB0 evidence decoder of this context: 0 = not pinned yet, else nr_td_decoder_t + 1 (cleared with the CB0 evidence)
+  bool     cb0_elim; ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild like crc_accept; ISAC_TD_CB0_ELIM, default false)
 } nr_pdsch_config_sweep_state_t;
+
+/* ---- CB0 elimination channel (ISAC_TD_CB0_ELIM, default 0) ----------------------------------------------------------------
+ * CONTRACT (caller): on a grant, run a CB0 decode for EVERY active hypothesis (or a fixed, state- and outcome-independent subset)
+ * and report all of them in one call; the set tested must be chosen BEFORE any outcome of that grant is known and never depend on
+ * a hypothesis's own outcomes (the P2 failure: probes scheduled on survivors deflated the truth). Report PASS and FAIL alike.
+ * admissible = the CB0 decode used the SAME decoder implementation and iteration policy as the hypothesis's full decode would
+ * (spec section 9.3), on valid (unexpired) samples, and the grant is not rank > 1 while K38 is open (probe CB0 LLRs != full decode at
+ * Nl > 1). An inadmissible call credits nothing. Admissibility must be a grant property known before decoding (never the outcome).
+ * SOUNDNESS: under these conditions a hypothesis's CB0 decode passes whenever its full TB decode would (TB pass => every CB, incl. CB0,
+ * decoded), so q_h (CB0 pass rate) >= p_h (TB pass rate) for the truth; a wrong leader L has p_L <= p_truth. Hence, with both interval
+ * families holding, UB_cb0(truth) >= q_truth >= p_truth >= p_L >= LB_tb(L): the truth is never eliminated. The 1e-6 union-bound budget is
+ * split 0.5e-6 / 0.5e-6 between the full-TB and the CB0 interval families (nr_crc_interval with 2 x the class count; the class count is the
+ * number of hypotheses active under every cause but ELIM, so eliminations never shrink it). Eliminated hypotheses become dormant with
+ * cause NR_TD_DORMANT_ELIM: no scheduling, no evidence, "resolved" in the separation test; fail-open restores them (and clears the CB0
+ * evidence: fail-open distrusts what put them to sleep). With cb0_elim false every function below is a no-op and the engine is
+ * bit-identical to the KL-only rule. */
+#define NR_TD_CB0_BUDGET_SPLIT 2 /* TB and CB0 families each get 1e-6 / 2 (classes x 2 in nr_crc_interval) */
+/** Credit one CB0 outcome (pass[k]) to each distinct, in-range, ACTIVE idx[k] on this grant, then run the decision (elimination +
+ *  KL separation + fallback). No-op (returns the winner) when !st->cb0_elim, !admissible, fail_open, or a winner exists. Returns the
+ *  winner or -1. */
+int nr_pdsch_config_sweep_feed_cb0(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible);
+/** LDPC decoder that produced a CB0 outcome (G1 `decoder_used`). CRC evidence is NOT exchangeable between decoders: the CUDA decoder
+ *  (normalised min-sum, 2x iterations) is ~1 dB more sensitive than OAI's CPU decoder [MEASURED, DGX GB10, bit-exact harness]. */
+typedef enum { NR_TD_DEC_CPU = 0, NR_TD_DEC_CUDA = 1 } nr_td_decoder_t;
+/** feed_cb0 with the decoder of the batch. DECODER PIN: the first admissible batch of a context (or of an evidence epoch) pins its CB0
+ *  decoder; a batch from another decoder (e.g. the CUDA circuit-breaker falling back to the CPU mid-context) is inadmissible and credits
+ *  nothing, so a context's CB0 counts never mix decoders. The pin is cleared with the CB0 evidence (prune, rebuild, reopen, fail-open).
+ *  CALLER CONTRACT (the q >= p premise): the CB0 decoder must be at least as sensitive as every full-TB decoder whose outcomes feed this
+ *  context (CB0 on CUDA with full TBs on CPU is fine, the decoder gain only widens the CB0 margin; CB0 on the CPU while full TBs decode on
+ *  CUDA violates it and must be passed as inadmissible). nr_pdsch_config_sweep_feed_cb0() is this function with NR_TD_DEC_CPU. */
+int nr_pdsch_config_sweep_feed_cb0_dec(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible,
+                                       nr_td_decoder_t decoder);
+/** ISAC_TD_CB0_ELIM=1 (read once; default 0). The runtime wiring (later integration task) copies it into st->cb0_elim of new contexts. */
+bool nr_pdsch_config_sweep_cb0_elim_env(void);
+/** Test hook: 1/0 force the ISAC_TD_CB0_ELIM decision, -1 re-reads the environment. */
+void nr_pdsch_config_sweep_cb0_elim_env_set(int on);
+/** True when hypothesis i is dormant through the CB0 elimination channel. */
+bool nr_pdsch_config_sweep_is_eliminated(const nr_pdsch_config_sweep_state_t *st, int i);
 
 /* ---- K-hypothesis selection and probe outcomes (spec 2026-10-01 §5.1-5.3) ------------------------- */
 typedef enum { NR_TD_FULL_TB = 0, NR_TD_CB_PROBE = 1 } nr_td_outcome_kind_t;
@@ -510,6 +560,27 @@ void nr_pdsch_config_sweep_reset_all(void);
  * Defaults: 32 failures minimum, 1e-6 run probability budget. Process-wide, locked.
  * Invalid arguments leave the active policy unchanged. */
 bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget);
+
+/* ---- Reversible field book (fb2) wiring, env ISAC_TD_FIELDBOOK=0|2 (read once; default 0 = off, bit-identical). ----
+ * fb2: the cell/RNTI prior becomes the dormant cause PRIOR (not a destructive prune) and every PROMOTED field of the module-level
+ * field book becomes a FIELD cause (nr_td_fieldbook_hyp_matches; the TDRA field never prunes k0). Contexts record which fields
+ * pruned them; those votes are excluded at convergence. A generation change clears the FIELD cause of a no-longer-PROMOTED field in
+ * unsettled contexts and flags converged ones untrusted. fail_open_due() reopens a context and zeroes its pruned fields. */
+/** mode 0 or 2; -1 = re-read the environment. Test hook. */
+void nr_pdsch_config_sweep_fieldbook_set_mode(int mode);
+int nr_pdsch_config_sweep_fieldbook_mode(void);
+/** The hook the (future, robustness R7) epoch owner calls on a hard trigger: bumps the field book epoch (all PROMOTED/SUSPECT
+ *  fields become CANDIDATE, support cleared). Called today from the RX-stream discontinuity (sync loss) path. No-op while off. */
+void nr_pdsch_config_sweep_fieldbook_bump_epoch(void);
+/** Test hook: force_promote a field (0 TDRA, 1 add_pos, 2 max_len). */
+void nr_pdsch_config_sweep_fieldbook_force_promote(int field, int32_t value);
+/** Test hook: copy the field book into `out` (sizeof(nr_td_fieldbook_t) bytes, `n` checked). */
+bool nr_pdsch_config_sweep_fieldbook_copy(void *out, size_t n);
+/** pruned: bit f = context is pruned by field f (not independent); untrusted: bit f = a converged context relied on field f which is no
+ *  longer PROMOTED at that value. False for an unknown ticket. */
+bool nr_pdsch_config_sweep_fieldbook_context(const nr_pdsch_sweep_ticket_t *ticket, uint32_t *pruned, uint32_t *untrusted);
+/** Cumulative: promotions, withdrawals, fail-opens, contexts created with at least one field pruned, converged contexts flagged untrusted. */
+void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts, uint64_t *untrusted_contexts);
 
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,

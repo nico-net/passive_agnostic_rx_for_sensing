@@ -266,6 +266,7 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
   nrLDPC_TB_decoding_parameters_t *nrLDPC_TB_decoding_parameters = &nrLDPC_slot_decoding_parameters->TBs[pusch_id];
 
   *nrLDPC_TB_decoding_parameters->processedSegments = 0;
+  nrLDPC_TB_decoding_parameters->decoder_used = NRLDPC_DECODER_CPU;
   t_nrLDPC_dec_params decParams = {.check_crc = check_crc};
   decParams.BG = nrLDPC_TB_decoding_parameters->BG;
   decParams.Z = nrLDPC_TB_decoding_parameters->Z;

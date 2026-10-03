@@ -880,7 +880,6 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     nr_pdsch_passive_set_slot_share(n_more > 0, rb_lo, rb_hi - rb_lo);
     if (n_more > 0) atomic_fetch_add_explicit(&g_slot_groups, 1, memory_order_relaxed);
-    __atomic_fetch_add(&g_fep_gen[idx], 1, __ATOMIC_RELEASE); /* g_rxdataF[idx] now belongs to this slot group */
 
     /* ---- STALENESS CHECK. A job's raw IQ lives in rxdata only until the producer reaches the SAME
      * slot index one frame later, so decoding after that reads the NEXT frame's samples: the CRC
@@ -1128,6 +1127,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     nr_td_grantwork_t *gw = NULL;
     if (s_gw_on && !gpu_job) {
+      /* I4: the borrowed FEP buffer belongs to THIS job: any older gw can no longer compute on it */
+      __atomic_fetch_add(&g_fep_gen[idx], 1, __ATOMIC_RELEASE);
       gw = nr_pdsch_passive_grantwork_begin(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, job.fo_hz,
                                             job.sweep_ticket.k0, &rxdataF[0][0], &g_fep_gen[idx]);
       nr_pdsch_passive_set_grantwork(gw, s_gw_probe != 0);
@@ -1470,6 +1471,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         nr_pdsch_passive_gw_profile(gw, gw_used);
       }
       nr_slot_fep_fo_override_hz = saved_fo;
+      nr_td_grantwork_job_end(gw); /* I3: no lazy compute after this point (READY entries stay readable) */
       nr_td_grantwork_release(gw);
     }
     } /* slot group */

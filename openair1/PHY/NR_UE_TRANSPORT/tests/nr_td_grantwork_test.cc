@@ -14,6 +14,7 @@
 extern "C" {
 #include "nr_td_grantwork.h"
 #include "nr_rate_matching.h"
+#include "nr_llr_norm.h"
 }
 /* Link stubs for the LOG/config layer pulled in by the real nr_rate_matching.c. */
 configmodule_interface_t *uniqCfg = nullptr;
@@ -177,10 +178,13 @@ TEST(GrantWork, OwnerPublishThenReady)
   nr_td_grantwork_t *gw = f.begin();
   nr_td_gw_llr_view_t v;
   ASSERT_EQ(nr_td_grantwork_acquire(gw, 9, &v), NR_TD_GW_ACQ_OWNER);
-  EXPECT_FALSE(nr_td_grantwork_fep_valid(gw, 1.5));
-  nr_td_grantwork_fep_done(gw, 1.5);
-  EXPECT_TRUE(nr_td_grantwork_fep_valid(gw, 1.5));
-  EXPECT_FALSE(nr_td_grantwork_fep_valid(gw, 2.0)); /* another FEP frequency offset is another FEP */
+  EXPECT_EQ(nr_td_grantwork_fep_mask(gw, 1.5), 0);
+  nr_td_grantwork_fep_done(gw, 1.5, 0x0FFC);
+  nr_td_grantwork_fep_done(gw, 1.5, 0x0003); /* lazy extension */
+  EXPECT_EQ(nr_td_grantwork_fep_mask(gw, 1.5), 0x0FFF);
+  EXPECT_EQ(nr_td_grantwork_fep_mask(gw, 2.0), 0); /* another FEP frequency offset is another FEP */
+  nr_td_grantwork_fep_done(gw, 2.0, 0x0004);
+  EXPECT_EQ(nr_td_grantwork_fep_mask(gw, 2.0), 0x0004);
   const int16_t llr[4] = {1, -2, 3, -4};
   ASSERT_EQ(nr_td_grantwork_publish(gw, 9, llr, 4, 2, 4, nullptr, 0), NR_TD_GW_OK);
   EXPECT_EQ(nr_td_grantwork_publish(gw, 9, llr, 4, 2, 4, nullptr, 0), NR_TD_GW_E_ARG); /* immutable */
@@ -196,9 +200,10 @@ TEST(GrantWork, OwnerPublishThenReady)
 TEST(GrantWork, ConcurrentReadersComputeOnce)
 {
   Fixture f;
-  f.ctx.sleep_us = 20000;
-  f.ctx.via_acquire = true;
   nr_td_grantwork_t *gw = f.begin();
+  nr_td_gw_llr_view_t v0;
+  /* the job thread owns the computation (the decoder's acquire/publish) while readers arrive */
+  ASSERT_EQ(nr_td_grantwork_acquire(gw, 33, &v0), NR_TD_GW_ACQ_OWNER);
   const int N = 8;
   std::vector<std::thread> th;
   std::vector<const int16_t *> ptr(N);
@@ -207,32 +212,52 @@ TEST(GrantWork, ConcurrentReadersComputeOnce)
     th.emplace_back([&, t] {
       nr_td_grantwork_t *mine = nr_td_grantwork_retain(gw);
       nr_td_gw_llr_view_t v;
-      rc[t] = nr_td_grantwork_get_llr(mine, 33, nullptr, &v);
+      rc[t] = nr_td_grantwork_get_llr(mine, 33, nullptr, &v); /* waits for the owner */
       ptr[t] = v.llr;
-      for (int i = 0; i < 1000; i++)
+      for (int i = 0; rc[t] == NR_TD_GW_OK && i < 1000; i++)
         if (v.llr[i] != (int16_t)(33 * 7 + i))
           rc[t] = 1000;
       nr_td_grantwork_release(mine);
     });
+  usleep(20000);
+  std::vector<int16_t> llr(1000);
+  for (int i = 0; i < 1000; i++)
+    llr[i] = (int16_t)(33 * 7 + i);
+  ASSERT_EQ(nr_td_grantwork_publish(gw, 33, llr.data(), 1000, 1, 2, nullptr, 0), NR_TD_GW_OK);
   for (auto &t : th)
     t.join();
-  EXPECT_EQ(f.calls.load(), 1);
+  EXPECT_EQ(nr_td_grantwork_compute_count(gw, 33), 1);
   for (int t = 0; t < N; t++) {
     EXPECT_EQ(rc[t], NR_TD_GW_OK);
     EXPECT_EQ(ptr[t], ptr[0]);
   }
-  /* different signatures from several threads: computations are serialised per gw (shared FEP buffer) */
-  th.clear();
-  for (int t = 0; t < 4; t++)
-    th.emplace_back([&, t] {
-      nr_td_gw_llr_view_t v;
-      EXPECT_EQ(nr_td_grantwork_get_llr(gw, 100 + t, nullptr, &v), NR_TD_GW_OK);
-    });
-  for (auto &t : th)
-    t.join();
-  EXPECT_EQ(f.calls.load(), 5);
-  EXPECT_EQ(f.max_inflight.load(), 1);
   EXPECT_EQ(nr_td_grantwork_refcount(gw), 1);
+  nr_td_grantwork_release(gw);
+}
+
+TEST(GrantWork, LazyComputeOnlyOnJobThreadWhileAlive)
+{
+  Fixture f;
+  nr_td_grantwork_t *gw = f.begin();
+  nr_td_gw_llr_view_t v;
+  ASSERT_EQ(nr_td_grantwork_get_llr(gw, 1, nullptr, &v), NR_TD_GW_OK);
+  const uint64_t r0 = nr_td_grantwork_refused_count();
+  int rc_other = 0, rc_read = -1;
+  std::thread t([&] {
+    nr_td_gw_llr_view_t w;
+    rc_other = nr_td_grantwork_get_llr(gw, 2, nullptr, &w); /* missing: not this thread's to compute */
+    rc_read = nr_td_grantwork_get_llr(gw, 1, nullptr, &w);  /* READY: readable anywhere */
+  });
+  t.join();
+  EXPECT_EQ(rc_other, NR_TD_GW_E_NOTOWNER);
+  EXPECT_EQ(rc_read, NR_TD_GW_OK);
+  nr_td_grantwork_job_end(gw);
+  EXPECT_EQ(nr_td_grantwork_get_llr(gw, 3, nullptr, &v), NR_TD_GW_E_NOTOWNER);
+  EXPECT_EQ(nr_td_grantwork_acquire(gw, 4, &v), NR_TD_GW_ACQ_ERR);
+  EXPECT_EQ(nr_td_grantwork_refused_count(), r0 + 3);
+  EXPECT_EQ(nr_td_grantwork_get_llr(gw, 1, nullptr, &v), NR_TD_GW_OK);
+  EXPECT_EQ(f.calls.load(), 1);
+  EXPECT_EQ(nr_td_grantwork_flags(gw), 0u);
   nr_td_grantwork_release(gw);
 }
 
@@ -249,6 +274,7 @@ TEST(GrantWork, BorrowedFepGenerationMakesNewComputesStale)
   EXPECT_EQ(nr_td_grantwork_get_llr(gw, 2, nullptr, &v), NR_TD_GW_E_STALE);
   EXPECT_EQ(nr_td_grantwork_acquire(gw, 3, &v), NR_TD_GW_ACQ_ERR);
   EXPECT_EQ(f.calls.load(), 1);
+  EXPECT_TRUE(nr_td_grantwork_flags(gw) & NR_TD_GW_F_STALE); /* the whole grant is inadmissible */
   nr_td_grantwork_release(gw);
 }
 
@@ -260,6 +286,9 @@ TEST(GrantWork, TableFullAndBadArgs)
   for (int s = 0; s < NR_TD_GW_MAX_SIG; s++)
     ASSERT_EQ(nr_td_grantwork_get_llr(gw, 1000 + s, nullptr, &v), NR_TD_GW_OK);
   EXPECT_EQ(nr_td_grantwork_get_llr(gw, 5000, nullptr, &v), NR_TD_GW_E_FULL);
+  EXPECT_TRUE(nr_td_grantwork_flags(gw) & NR_TD_GW_F_FULL);
+  nr_td_grantwork_flag(gw, NR_TD_GW_F_HARQ);
+  EXPECT_EQ(nr_td_grantwork_flags(gw), NR_TD_GW_F_FULL | NR_TD_GW_F_HARQ);
   EXPECT_EQ(nr_td_grantwork_get_llr(nullptr, 1, nullptr, &v), NR_TD_GW_E_ARG);
   nr_td_grantwork_release(gw);
   nr_td_gw_job_t j = {};
@@ -420,6 +449,65 @@ TEST(GrantWorkCb0, ExtractEqualsSegmentDecoderInputBG2Repetition)
   /* E > Ncb: the bit selection wraps and accumulates (low code rate) */
   run_cb0_case({2, 64, 1, 600, 2, 1, 0, 8000, 0});
   run_cb0_case({2, 64, 1, 600, 2, 1, 1, 8000, 0});
+}
+
+/* K38 x GrantWork (fix round 1, C1): one signature, two hypotheses with different TBS -> different C -> different
+ * normalisation spans. The shared buffer is un-normalised; each hypothesis's CB0 input from it must equal what a
+ * full decode WITHOUT GrantWork computes for that hypothesis: shift k = nr_llr_norm_shift(llr, ceil(G / C)) applied
+ * to all G LLRs (the decode's ISAC_LLR_NORM block), then the segment decoder's r = 0 deinterleave + rate de-match. */
+TEST(GrantWorkCb0, SameSignatureDifferentCNormalisesPerHypothesis)
+{
+  const uint32_t G = 3 * 12 * 1600; /* Qm 4, Nl 1 */
+  std::mt19937 rng(7);
+  std::vector<int16_t> shared(G);
+  /* power that varies along the buffer: code block 0's span alone sees a different mean than the whole G */
+  for (uint32_t i = 0; i < G; i++) {
+    const int amp = i < G / 3 ? 900 : 120;
+    shared[i] = (int16_t)((int)(rng() % (2 * amp + 1)) - amp);
+  }
+  struct H {
+    uint32_t A;
+    int BG, C, K, Z, F;
+  } hyps[2] = {{3000, 1, 1, 8448, 384, 8448 - 3024}, {20000, 1, 3, 8448, 384, 8448 - 6704}};
+  int ks[2];
+  for (int h = 0; h < 2; h++) {
+    nr_td_cb0_params_t p = {};
+    p.G = G;
+    p.A = hyps[h].A;
+    p.C = hyps[h].C;
+    p.K = hyps[h].K;
+    p.Z = hyps[h].Z;
+    p.F = hyps[h].F;
+    p.BG = hyps[h].BG;
+    p.Qm = 4;
+    p.Nl = 1;
+    p.rv = 0;
+    const uint32_t q = G / (p.Nl * p.Qm);
+    p.E = (0 <= p.C - (int)(q % p.C) - 1) ? p.Nl * p.Qm * (q / p.C) : p.Nl * p.Qm * (q / p.C + 1);
+    ASSERT_EQ(nr_llr_norm_num_cb(p.A, p.BG), (uint32_t)p.C);
+    const int dlen = nr_td_gw_cb0_dlen(&p);
+    /* reference: the decode without GrantWork */
+    std::vector<int16_t> full = shared;
+    const int k = nr_llr_norm_shift(full.data(), nr_llr_norm_span(G, nr_llr_norm_num_cb(p.A, p.BG)));
+    for (uint32_t i = 0; i < G; i++)
+      full[i] = (int16_t)(full[i] >> k);
+    std::vector<int16_t> ref(dlen, 0), harq_e(p.E);
+    nr_deinterleaving_ldpc(p.E, p.Qm, harq_e.data(), full.data());
+    ASSERT_EQ(nr_rate_matching_ldpc_rx(0, p.BG, p.Z, ref.data(), harq_e.data(), p.C, p.rv, 1, p.E, p.F, p.K - p.F - 2 * p.Z), 0);
+    /* GrantWork: the shared, un-normalised buffer */
+    std::vector<int16_t> e0(p.E), d(dlen, 99);
+    int kg = -2;
+    ASSERT_EQ(nr_td_gw_cb0_input(shared.data(), G, &p, true, e0.data(), d.data(), &kg), NR_TD_GW_OK);
+    EXPECT_EQ(kg, k);
+    EXPECT_EQ(memcmp(e0.data(), full.data(), (size_t)p.E * sizeof(int16_t)), 0);
+    EXPECT_EQ(memcmp(d.data(), ref.data(), (size_t)dlen * sizeof(int16_t)), 0);
+    ks[h] = k;
+    /* normalisation off: the raw LLRs */
+    ASSERT_EQ(nr_td_gw_cb0_input(shared.data(), G, &p, false, e0.data(), d.data(), &kg), NR_TD_GW_OK);
+    EXPECT_EQ(kg, -1);
+    EXPECT_EQ(memcmp(e0.data(), shared.data(), (size_t)p.E * sizeof(int16_t)), 0);
+  }
+  EXPECT_NE(ks[0], ks[1]); /* the fixture does exercise a C-dependent shift */
 }
 
 TEST(GrantWorkCb0, RejectsWhatTheDecoderRejects)

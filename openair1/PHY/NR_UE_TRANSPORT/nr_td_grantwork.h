@@ -46,12 +46,29 @@ enum {
   NR_TD_GW_E_NOCOMPUTE = -5, /* no compute callback */
   NR_TD_GW_E_NOMEM = -6,
   NR_TD_GW_E_RM = -7,        /* rate de-matching refused the geometry (C/Foffset/Ncb) */
+  NR_TD_GW_E_K0 = -8,        /* the signature's k0 is not the gw's: another PDSCH slot, another GrantWork */
+  NR_TD_GW_E_NOTOWNER = -9,  /* lazy compute refused: not the owning job thread, or the job has ended */
 };
+
+/* Per-grant admissibility (fix round 1, I2): conditions under which the full TB of a hypothesis can pass while its
+ * CB0 computed from shared work cannot (or vice versa), so a CB0 FAIL from this grant is not evidence. Sticky,
+ * OR-ed into the gw by the decoder (main decode) and by this module (STALE / FULL). Read them after the job's main
+ * decode. A CB0 result also carries its per-hypothesis bits (LBRM). */
+#define NR_TD_GW_F_HARQ 0x01u     /* the main decode combined a HARQ retransmission / used a reserved-MCS record */
+#define NR_TD_GW_F_LBRM 0x02u     /* LBRM n_L not latched for the RNTI and E0 > N_ref under some n_L (decode retries) */
+#define NR_TD_GW_F_RV_RETRY 0x04u /* ISAC_RV_RETRY: the full decode re-tries rv 2/3/1 */
+#define NR_TD_GW_F_ARM 0x08u      /* the main decode ran a PRG or PT-RS arm (the shared work has neither) */
+#define NR_TD_GW_F_STALE 0x10u    /* some member could not be computed: borrowed FEP / IQ gone */
+#define NR_TD_GW_F_FULL 0x20u     /* some member did not fit (NR_TD_GW_MAX_SIG) */
+#define NR_TD_GW_F_GRANT_MASK (NR_TD_GW_F_HARQ | NR_TD_GW_F_RV_RETRY | NR_TD_GW_F_ARM | NR_TD_GW_F_STALE | NR_TD_GW_F_FULL)
 
 /* Immutable view of one computed entry. `llr` stays valid until the gw is released. */
 typedef struct {
   uint64_t sig;
-  const int16_t *llr; /* decoder-input LLRs: descrambled + scale-normalised, exactly what LDPC reads */
+  const int16_t *llr; /* demodulated LLRs, DESCRAMBLED (and ISAC_LLR_SCALE'd if set), NOT normalised: the consumer
+                       * applies exactly the per-hypothesis K38 shift k_h = nr_llr_norm_shift(llr, ceil(G / C_h))
+                       * (nr_llr_norm.h, C_h = nr_llr_norm_num_cb(TBS_h, BG_h); none when ISAC_LLR_NORM=0 or G < 64)
+                       * -- nr_td_gw_cb0_input() does it */
   uint32_t G;
   uint8_t nl, qm;
   int status;         /* compute status (decoder-defined) when the entry FAILED */
@@ -100,10 +117,21 @@ int nr_td_grantwork_publish(nr_td_grantwork_t *gw, uint64_t sig, const int16_t *
 /* Owner gives up: the entry becomes FAILED with `status` (sticky: the same inputs fail the same way). */
 void nr_td_grantwork_abandon(nr_td_grantwork_t *gw, uint64_t sig, int status);
 
-/* Shared FEP state (protected by the compute lock: call only between acquire(OWNER) and publish/abandon). */
+/* Shared FEP state (protected by the compute lock: call only between acquire(OWNER) and publish/abandon).
+ * The owner transforms only the symbols it needs ([S, S+L) + DM-RS); later computes extend the mask lazily.
+ * fep_mask(): symbols already transformed with this FEP frequency offset (0 when stale / another offset). */
 void *nr_td_grantwork_fep(const nr_td_grantwork_t *gw);
-bool nr_td_grantwork_fep_valid(const nr_td_grantwork_t *gw, double fo_hz);
-void nr_td_grantwork_fep_done(nr_td_grantwork_t *gw, double fo_hz);
+uint16_t nr_td_grantwork_fep_mask(const nr_td_grantwork_t *gw, double fo_hz);
+void nr_td_grantwork_fep_done(nr_td_grantwork_t *gw, double fo_hz, uint16_t mask);
+/* Admissibility flags (NR_TD_GW_F_*). */
+void nr_td_grantwork_flag(nr_td_grantwork_t *gw, uint32_t bits);
+uint32_t nr_td_grantwork_flags(const nr_td_grantwork_t *gw);
+/* LAZY-COMPUTE RULE (fix round 1, I3/I4): a missing entry is computed only on the thread that created the gw (the
+ * job's consumer thread) and only until nr_td_grantwork_job_end(); anything else gets NR_TD_GW_E_NOTOWNER (counted).
+ * READY entries can be read from any thread for as long as a reference is held. A batch (G4) is called
+ * synchronously from the job thread, before job_end, and retains the gw until its stream sync. */
+void nr_td_grantwork_job_end(nr_td_grantwork_t *gw);
+uint64_t nr_td_grantwork_refused_count(void);
 /* False once the borrowed FEP buffer was handed to another slot (generation moved). */
 bool nr_td_grantwork_fep_alive(const nr_td_grantwork_t *gw);
 long nr_td_grantwork_abs_slot(const nr_td_grantwork_t *gw);
@@ -126,6 +154,12 @@ typedef struct {
   uint32_t G, A, E, tbslbrm; /* A = TBS bits; E = E0 */
   int C, K, Z, F, BG, Qm, Nl, rv;
 } nr_td_cb0_params_t;
+/* From an entry's (un-normalised) LLRs to a hypothesis's CB0 input, exactly as a full decode of that hypothesis
+ * does it: K38 shift k over llr[0, ceil(G / C)) with C = nr_llr_norm_num_cb(A, BG) when `norm` (ISAC_LLR_NORM on)
+ * and G >= 64, applied to code block 0's E LLRs (-> e0, E entries), then nr_td_gw_cb0_extract(). *k_out = k
+ * (-1 = normalisation off). */
+int nr_td_gw_cb0_input(const int16_t *llr, uint32_t G, const nr_td_cb0_params_t *p, bool norm, int16_t *e0, int16_t *d,
+                       int *k_out);
 /* d must hold (BG == 1 ? 68 : 52) * Z int16 (the decoder's per-segment stride); it is fully written
  * (entries the bit selection does not reach are 0). Returns NR_TD_GW_OK, NR_TD_GW_E_ARG or NR_TD_GW_E_RM. */
 int nr_td_gw_cb0_extract(const int16_t *llr, uint32_t n_llr, const nr_td_cb0_params_t *p, int16_t *d);

@@ -29,6 +29,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_pdsch_chest_key.h" // K32: complete chest-cache key
+#include "nr_llr_norm.h" // K38: LLR-norm shift over code block 0's span
 #include "nr_scrambling_id_sweep.h" // per-RNTI dataScramblingIdentityPDSCH TB-CRC walk (Task 13)
 #include "nr_td_grantwork.h" // GrantWork-lite: per-grant shared FEP/chest/LLR per geometry signature
 #include "nr_pdsch_adaptive_config.h" // hypothesis -> PDU (start, length, DM-RS mask, MCS table)
@@ -441,6 +442,15 @@ static int rnti_nl_get(uint16_t rnti, bool sweepable)
   return v;
 }
 /* Returns the value this RNTI read before the latch (for the log). */
+static bool rnti_nl_latched(uint16_t rnti, bool sweepable)
+{
+  if (!sweepable)
+    return false;
+  pthread_mutex_lock(&g_ptrs_lock);
+  const bool l = rnti_dec(rnti)->nl != 0;
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return l;
+}
 static int rnti_nl_latch(uint16_t rnti, bool sweepable, int nl)
 {
   if (!sweepable)
@@ -609,6 +619,17 @@ static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
 static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
 static _Atomic uint64_t g_rbmap_grants;
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
+/* Decoder that produced the last TB on this thread (NRLDPC_DECODER_*, K34/K36). Unit = the TB. Evidence is
+ * stratified by this value: CPU plain min-sum and CUDA normalised min-sum (2x iterations) differ by about 1 dB (K36), so counts, CRC
+ * passes and eliminations from different values are NEVER merged. */
+static __thread uint8_t t_decoder_used_last = 0;
+uint8_t nr_pdsch_passive_last_decoder_used(void) { return t_decoder_used_last; }
+static _Atomic uint64_t g_ldpc_tb_dec[3]; // [decoder_used]: TBs handed to the decoder (all outcomes), 0 = not reported
+void nr_pdsch_passive_ldpc_tb_decoders(uint64_t *cpu, uint64_t *cuda)
+{
+  *cpu = atomic_load(&g_ldpc_tb_dec[1]);
+  *cuda = atomic_load(&g_ldpc_tb_dec[2]);
+}
 static __thread int t_last_sk = -1;        // last TB outcome for TBRESULT: 1 decoded, 0 zero_tb, 2 seg_fail
 static __thread uint32_t t_last_llr_have, t_last_data_bits;
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
@@ -668,8 +689,6 @@ void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
 static _Atomic uint64_t g_gpu_llr_jobs = 0, g_gpu_cpu_jobs = 0; // decodes fed by the GPU front end vs the CPU chain
 static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L
-/* mean |LLR| the int8 decoder gets: 127/40 ~ 3.2x headroom over the mean for the 256QAM outer bits */
-#define LLR_NORM_TARGET 40u
 static _Atomic uint64_t g_llr_norm_shift[9]; /* TBs by applied right shift */
 static _Atomic uint64_t g_rv_census[2][4]; // [mcs>=24][rv]: does this cell retransmit at rv 0? (HARQ gate)
 static _Atomic uint64_t g_ldpc_iface_err = 0;
@@ -1134,6 +1153,7 @@ static __thread bool t_last_hq_retx = false; /* last decode combined a retransmi
 /* CB0 capture of the next LDPC call (GW_EQUIV / PROBE_EQUIV_GW): the rate-de-matched code block 0 the
  * segment decoder built (TB d buffer, r = 0) and its LDPC verdict. */
 static __thread bool t_cap_req = false, t_cap_have = false, t_cap_seg0_ok = false;
+static __thread int t_cap_decoder = 0; /* decoder_used of the captured decode (nr_td_decoder_t) */
 static __thread int16_t *t_cap_d = NULL;
 static __thread uint32_t t_cap_dlen = 0, t_cap_dcap = 0;
 
@@ -1141,7 +1161,6 @@ static __thread uint32_t t_cap_dlen = 0, t_cap_dcap = 0;
 typedef struct {
   uint32_t nvar;
   uint8_t qm_measured;
-  int8_t norm_k; /* ISAC_LLR_NORM shift applied (-1: none) */
   uint32_t dl_valid_re[NR_SYMBOLS_PER_SLOT];
   uint64_t llr_n, llr_absum, llr_zero, llr_sat, llr_clip8, llr_pos;
   int64_t llr_sgnsum;
@@ -1160,6 +1179,7 @@ typedef struct {
   double fo_hz;
   uint8_t k0;
   uint64_t fp;
+  uint8_t main_decoder_used; /* decoder_used of the job's main decode (0 = not known yet) */
 } gw_ctx_t;
 
 /* Grant-constant inputs of the receive chain: a decode only shares a gw with the grant it was made for. */
@@ -1394,8 +1414,12 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   if (ue->nrLDPC_coding_interface.nrLDPC_coding_decoder(&slot_parameters) != 0) {
     LOG_W(NR_PHY, "SENSING: passive PDSCH decode -- nrLDPC_coding_decoder failed\n");
     atomic_fetch_add(&g_ldpc_iface_err, 1);
+    t_decoder_used_last = 0; /* no valid result: do not leave the previous TB's decoder */
     return false;
   }
+  t_decoder_used_last = TB_parameters.decoder_used;
+  atomic_fetch_add(&g_ldpc_tb_dec[TB_parameters.decoder_used < 3 ? TB_parameters.decoder_used : 0], 1);
+  LOG_D(NR_PHY, "SENSING: passive PDSCH decode decoder_used=%u (1=CPU min-sum, 2=CUDA normalised min-sum x2 iterations)\n", TB_parameters.decoder_used);
   if (t_cap_req) { /* GrantWork equivalence checks: code block 0 as the segment decoder de-matched it */
     t_cap_req = false;
     const uint32_t dlen = (TB_parameters.BG == 1 ? 68u : 52u) * TB_parameters.Z;
@@ -1408,6 +1432,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       memcpy(t_cap_d, TB_parameters.d, (size_t)dlen * sizeof(int16_t));
       t_cap_dlen = dlen;
       t_cap_seg0_ok = TB_parameters.decodeSuccess[0];
+      t_cap_decoder = TB_parameters.decoder_used;
       t_cap_have = true;
     }
   }
@@ -2267,11 +2292,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
    * slot_fep_nr.c. Each antenna's FEP is independent, so dispatch one per antenna across the
    * thread pool instead of looping them serially. nb_antennas_rx==1 skips the pool and matches
    * the previous behaviour exactly. */
-  /* GrantWork owner: the whole slot, once per gw (later signatures of the grant reuse it). */
-  const int fep_s0 = (t_share.on || t_gw_owner) ? 0 : dlsch_config->start_symbol;
-  const int fep_n  = (t_share.on || t_gw_owner) ? fp->symbols_per_slot
+  const int fep_s0 = t_share.on ? 0 : dlsch_config->start_symbol;
+  const int fep_n  = t_share.on ? fp->symbols_per_slot
                      : (probe_last_sym >= 0 ? probe_end - dlsch_config->start_symbol : dlsch_config->number_symbols);
-  const bool gw_fep_hit = t_gw_owner && nr_td_grantwork_fep_valid(t_gw, fep_fo);
   if (gw_tim)
     gw_t_fep = nr_td_gw_now_ns();
   /* K32: the channel estimate always covers EVERY DM-RS symbol of the slot (the grant's full
@@ -2286,6 +2309,31 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
       fep_rng[n_fep_rng][0] = m;
       fep_rng[n_fep_rng++][1] = 1;
     }
+  /* GrantWork owner (fix round 1, I5): the same symbols as without GrantWork ([S, S+L) + every DM-RS symbol), minus
+   * those an earlier signature of this grant already transformed with the same offset (per-symbol mask, extended
+   * lazily). With the slot share on the whole slot is transformed as before. */
+  uint16_t gw_fep_need = 0;
+  bool gw_fep_hit = false;
+  if (t_gw_owner && !fep_hit) {
+    for (int g = 0; g < n_fep_rng; g++)
+      for (int m = fep_rng[g][0]; m < fep_rng[g][0] + fep_rng[g][1] && m < NR_SYMBOLS_PER_SLOT; m++)
+        gw_fep_need |= (uint16_t)(1u << m);
+    if (!t_share.on) {
+      const uint16_t todo = gw_fep_need & (uint16_t)~nr_td_grantwork_fep_mask(t_gw, fep_fo);
+      gw_fep_hit = todo == 0;
+      n_fep_rng = 0;
+      for (int m = 0; m < NR_SYMBOLS_PER_SLOT; m++) {
+        if (!((todo >> m) & 1))
+          continue;
+        if (n_fep_rng > 0 && fep_rng[n_fep_rng - 1][0] + fep_rng[n_fep_rng - 1][1] == m) {
+          fep_rng[n_fep_rng - 1][1]++;
+        } else {
+          fep_rng[n_fep_rng][0] = m;
+          fep_rng[n_fep_rng++][1] = 1;
+        }
+      }
+    }
+  }
   atomic_fetch_add(fep_hit || gw_fep_hit ? &g_fep_hit : &g_fep_miss, 1);
   if (gpu_llr || gw_ready) {
     /* the GPU transformed this slot / the GrantWork entry already holds this geometry's LLRs */
@@ -2320,8 +2368,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   if (!fep_hit && !gpu_llr && !gw_ready && !gw_fep_hit) {
     t_fep_cache.slot = share_slot; t_fep_cache.fo = fep_fo; t_fep_cache.valid = t_share.on;
   }
-  if (t_gw_owner)
-    nr_td_grantwork_fep_done(t_gw, fep_fo);
+  if (t_gw_owner && !fep_hit)
+    nr_td_grantwork_fep_done(t_gw, fep_fo, gw_fep_need);
   if (gw_tim) {
     const uint64_t t_ = nr_td_gw_now_ns();
     nr_td_gw_tim_add(NR_TD_GWTIM_FEP, t_ - gw_t_fep);
@@ -3801,7 +3849,6 @@ gpu_llr_ready:;
     int64_t  llr_sgnsum = 0;
     uint64_t posbit[2] = {0, 0}, nbit[2] = {0, 0};
     uint64_t zero_before = 0, pdt_ldp = 0;
-    int norm_k = -1;
     if (gw_ready) { /* descramble + normalisation already in the entry: restore what they measured */
       llr_n = gw_meta->llr_n; llr_absum = gw_meta->llr_absum; llr_zero = gw_meta->llr_zero; llr_sat = gw_meta->llr_sat;
       llr_pos = gw_meta->llr_pos; llr_clip8 = gw_meta->llr_clip8; llr_sgnsum = gw_meta->llr_sgnsum;
@@ -3811,9 +3858,7 @@ gpu_llr_ready:;
       pdt_ldp = pdtim_on ? pdtim_now() : 0;
       t_last_llr = llr; t_last_G = G;
       atomic_fetch_add(&g_rv_census[grant->mcs >= 24][cw->rv & 3], 1);
-      if (gw_meta->norm_k >= 0)
-        atomic_fetch_add(&g_llr_norm_shift[gw_meta->norm_k], 1);
-      goto gw_llr_in;
+      goto gw_llr_norm; /* the K38 shift depends on this decode's C: applied below, as the owner does */
     }
     for (uint32_t i = 0; i < G; i += 32) {
       const int v = llr[i] < 0 ? -llr[i] : llr[i];
@@ -3894,36 +3939,11 @@ gpu_llr_ready:;
       }
     }
     atomic_fetch_add(&g_rv_census[grant->mcs >= 24][cw->rv & 3], 1);
-    /* ---- LLR SCALE NORMALISATION before the int8 decoder ----------------------------------------
-     * The decoder saturates every LLR to +-127 (simde_mm_packs_epi16). The demodulators' output
-     * scale is NOT controlled: the fixed-point 4-layer MMSE scales by det(G) and gave mean |LLR|
-     * 454 with 87 % clipped on the rank-4 bed (417 / 22 % OTA), the float path 79 / 20 %, a rank-2
-     * decode 125 / 0.015 %. Min-sum is scale-invariant except for that clipping, so a uniform
-     * right shift that brings the mean under LLR_NORM_TARGET costs nothing where the scale was
-     * already right and keeps the soft information where it was not. ISAC_LLR_NORM=0 disables. */
-    {
-      static _Atomic int s_norm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
-      if (s_norm < 0) { const char *e = getenv("ISAC_LLR_NORM"); s_norm = (e && atoi(e) == 0) ? 0 : 1; }
-      if (s_norm && G >= 64) {
-        uint64_t acc = 0; uint32_t cnt = 0;
-        for (uint32_t i = 0; i < G; i += 16) { acc += (uint32_t)abs(llr[i]); cnt++; }
-        const uint32_t mean = (uint32_t)(acc / cnt);
-        int k = 0;
-        while (k < 8 && (mean >> k) > LLR_NORM_TARGET) k++;
-        if (k > 0) {
-          for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
-          atomic_fetch_add(&g_llr_norm_shift[k], 1);
-        } else {
-          atomic_fetch_add(&g_llr_norm_shift[0], 1);
-        }
-        norm_k = k;
-      }
-    }
-    if (t_gw_owner) { /* this geometry's decoder-input LLRs: shared, immutable, from here on */
+    if (t_gw_owner) { /* this geometry's LLRs, descrambled, NOT normalised (K38: the shift depends on each hypothesis's C) */
       if (gw_tim)
         nr_td_gw_tim_add(NR_TD_GWTIM_DEMOD, nr_td_gw_now_ns() - gw_t_demod);
       const gw_ctx_t *gc = (const gw_ctx_t *)nr_td_grantwork_ctx(t_gw);
-      gw_meta_t m = {.nvar = nvar, .qm_measured = out->qm_measured, .norm_k = (int8_t)norm_k,
+      gw_meta_t m = {.nvar = nvar, .qm_measured = out->qm_measured,
                      .llr_n = llr_n, .llr_absum = llr_absum, .llr_zero = llr_zero, .llr_sat = llr_sat,
                      .llr_clip8 = llr_clip8, .llr_pos = llr_pos, .llr_sgnsum = llr_sgnsum, .fp = gc->fp};
       memcpy(m.dl_valid_re, dl_valid_re, sizeof(m.dl_valid_re));
@@ -3937,7 +3957,32 @@ gpu_llr_ready:;
         return out->status;
       }
     }
-  gw_llr_in:;
+  gw_llr_norm:;
+    /* ---- LLR SCALE NORMALISATION before the int8 decoder ----------------------------------------
+     * The decoder saturates every LLR to +-127 (simde_mm_packs_epi16). The demodulators' output
+     * scale is NOT controlled: the fixed-point 4-layer MMSE scales by det(G) and gave mean |LLR|
+     * 454 with 87 % clipped on the rank-4 bed (417 / 22 % OTA), the float path 79 / 20 %, a rank-2
+     * decode 125 / 0.015 %. Min-sum is scale-invariant except for that clipping, so a uniform
+     * right shift that brings the mean under LLR_NORM_TARGET costs nothing where the scale was
+     * already right and keeps the soft information where it was not. ISAC_LLR_NORM=0 disables. */
+    {
+      static _Atomic int s_norm = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
+      if (s_norm < 0) { const char *e = getenv("ISAC_LLR_NORM"); s_norm = (e && atoi(e) == 0) ? 0 : 1; }
+      if (s_norm && G >= 64) {
+        /* K38: the mean is taken over code block 0's span, ceil(G/C) LLRs, not all G: a layout probe
+         * leaves every LLR past its horizon at 0, and a whole-buffer mean diluted by those zeros gave
+         * the probe a smaller shift than the whole-slot decode of the same hypothesis (rank 4: CB0
+         * LLRs 2^dk times larger, clipped at the int8 rail). Every decode has demodulated that span. */
+        const uint32_t span = nr_llr_norm_span(G, nr_llr_norm_num_cb(cw->TBS, cw->ldpcBaseGraph));
+        const int k = nr_llr_norm_shift(llr, span);
+        if (k > 0) {
+          for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
+          atomic_fetch_add(&g_llr_norm_shift[k], 1);
+        } else {
+          atomic_fetch_add(&g_llr_norm_shift[0], 1);
+        }
+      }
+    }
     if (nr_agnostic_v2() && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
@@ -4167,6 +4212,25 @@ gpu_llr_ready:;
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
   }
 
+  /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
+  if (t_gw != NULL && !t_quiet && !t_gw_capture) {
+    static _Atomic int s_rvr_gw = -1;
+    if (s_rvr_gw < 0) {
+      const char *e = getenv("ISAC_RV_RETRY");
+      s_rvr_gw = (e != NULL && atoi(e) != 0) ? 1 : 0;
+    }
+    uint32_t f = 0;
+    if (t_last_hq_retx || have_init_tx)
+      f |= NR_TD_GW_F_HARQ;
+    if (s_rvr_gw)
+      f |= NR_TD_GW_F_RV_RETRY;
+    if (prg_arm > 0 || ptrs_arm > 0)
+      f |= NR_TD_GW_F_ARM;
+    nr_td_grantwork_flag(t_gw, f);
+    gw_ctx_t *gc = (gw_ctx_t *)nr_td_grantwork_ctx(t_gw); /* the gw's own copy; written only on the job thread */
+    if (gc != NULL && t_decoder_used_last)
+      gc->main_decoder_used = t_decoder_used_last;
+  }
   /* Per-RNTI outcome (ISAC_PDSCH_TBPARM=1). Run inside an ATTACHED UE this splits the decode
    * population into grants addressed to US and grants addressed to ANOTHER UE, with everything
    * else -- code, rank machinery, config, radio, slot -- held identical. That is the controlled
@@ -4277,7 +4341,7 @@ static int gw_compute(void *vctx, nr_td_grantwork_t *gw, uint64_t sig, const voi
   g.dmrs_mask = (uint16_t)((sig >> 16) & 0x3FFF);
   const int nl = (int)((sig >> 32) & 0xF), qm = (int)((sig >> 36) & 0xF);
   if (g.k0 != c->k0)
-    return NR_TD_GW_E_STALE; /* another PDSCH slot: another GrantWork */
+    return NR_TD_GW_E_K0; /* another PDSCH slot: another GrantWork */
   if (nl != __builtin_popcount(c->pdu.dmrs_ports & 0xFFF))
     return NR_TD_GW_E_ARG;
   int table = -1;
@@ -4355,7 +4419,7 @@ nr_td_grantwork_t *nr_pdsch_passive_grantwork_begin(PHY_VARS_NR_UE *ue, const UE
 /* Hypothesis TBS / table -> code block 0 parameters, exactly as nr_pdsch_passive_decode() (TBS, BG, TBS_LBRM)
  * and passive_ldpc_decode_core() (segmentation, E of r = 0) derive them for a full decode of that hypothesis. */
 static int gw_cb0_params(const gw_ctx_t *c, const nr_pdsch_cfg_hypothesis_t *h, uint32_t G, int nl, int qm,
-                         nr_td_cb0_params_t *p)
+                         nr_td_cb0_params_t *p, uint32_t *flags)
 {
   const uint32_t R = nr_get_code_rate_dl(c->grant.mcs, h->mcs_table);
   const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(c->pdu.dmrsConfigType, c->pdu.n_dmrs_cdm_groups);
@@ -4391,6 +4455,19 @@ static int gw_cb0_params(const gw_ctx_t *c, const nr_pdsch_cfg_hypothesis_t *h, 
   if (E <= 0)
     return NR_TD_GW_E_ARG;
   p->E = (uint32_t)E;
+  /* I2: the full decode re-tries LBRM n_L hypotheses on a failed TB (probes too) while n_L is not latched, whenever
+   * E reaches past the smaller N_ref -- the same condition as the decode's retry loop. CB0 here uses one n_L. */
+  if (flags != NULL && !rnti_nl_latched(c->grant.rnti, rnti_sweepable(c->grant.rnti, c->grant.rnti_class))) {
+    static const int alts[3] = {4, 2, 1};
+    const uint32_t N = (BG == 1 ? 66u : 50u) * Z, nref_now = 3u * p->tbslbrm / (2u * C);
+    for (int a = 0; a < 3; a++) {
+      if (alts[a] == nl_lbrm)
+        continue;
+      const uint32_t nref_h = 3u * nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)alts[a]) / (2u * C);
+      if (!(p->E <= (nref_h < nref_now ? nref_h : nref_now) || (nref_h >= N && nref_now >= N)))
+        *flags |= NR_TD_GW_F_LBRM;
+    }
+  }
   return NR_TD_GW_OK;
 }
 
@@ -4398,20 +4475,29 @@ int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis
 {
   if (gw == NULL || h == NULL || out == NULL)
     return NR_TD_GW_E_ARG;
+  if (h->dmrs_mask == 0)
+    return NR_TD_GW_E_ARG; /* M1: a legacy (mask-less) hypothesis does not say which symbols carry DM-RS */
   const gw_ctx_t *c = (const gw_ctx_t *)nr_td_grantwork_ctx(gw);
+  if (h->k0 != c->k0)
+    return NR_TD_GW_E_K0;
   const int nl = __builtin_popcount(c->pdu.dmrs_ports & 0xFFF);
   const int qm = nr_get_Qm_dl(c->grant.mcs, h->mcs_table);
   if (qm == 0 || nr_get_code_rate_dl(c->grant.mcs, h->mcs_table) == 0)
     return NR_TD_GW_E_ARG; /* reserved MCS: the TBS lives in a HARQ record, not in the hypothesis */
   nr_td_gw_llr_view_t v;
   const int rc = nr_td_grantwork_get_llr(gw, nr_td_grantwork_key(h, nl, qm), h, &v);
+  out->flags = nr_td_grantwork_flags(gw);
+  out->full_decoder_used = c->main_decoder_used;
+  out->decoder = NR_TD_DEC_CPU;
   if (rc != NR_TD_GW_OK)
     return rc;
   const uint64_t t0 = nr_td_gw_now_ns();
   nr_td_cb0_params_t p;
-  int r2 = gw_cb0_params(c, h, v.G, nl, qm, &p);
+  uint32_t hflags = 0;
+  int r2 = gw_cb0_params(c, h, v.G, nl, qm, &p, &hflags);
   if (r2 != NR_TD_GW_OK)
     return r2;
+  out->flags |= hflags;
   const uint32_t dlen = (uint32_t)nr_td_gw_cb0_dlen(&p);
   if (out->dcap < dlen) {
     nr_td_gw_free(out->d);
@@ -4420,11 +4506,27 @@ int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis
     if (out->d == NULL)
       return NR_TD_GW_E_NOMEM;
   }
-  r2 = nr_td_gw_cb0_extract(v.llr, v.G, &p, out->d);
+  if (out->e0cap < p.E) {
+    nr_td_gw_free(out->e0);
+    out->e0 = (int16_t *)nr_td_gw_alloc((size_t)p.E * sizeof(int16_t));
+    out->e0cap = out->e0 ? p.E : 0;
+    if (out->e0 == NULL)
+      return NR_TD_GW_E_NOMEM;
+  }
+  /* C1 (K38): the shared LLRs are not normalised; this hypothesis's own shift, over its own ceil(G/C). */
+  static _Atomic int s_norm = -1;
+  if (s_norm < 0) {
+    const char *e = getenv("ISAC_LLR_NORM");
+    s_norm = (e && atoi(e) == 0) ? 0 : 1;
+  }
+  int k = -1;
+  r2 = nr_td_gw_cb0_input(v.llr, v.G, &p, s_norm != 0, out->e0, out->d, &k);
   if (r2 != NR_TD_GW_OK)
     return r2;
   out->p = p;
-  out->llr = v.llr;
+  out->llr = out->e0;
+  out->llr_shared = v.llr;
+  out->norm_k = k;
   out->sig = v.sig;
   if (nr_td_gw_tim_on())
     nr_td_gw_tim_add(NR_TD_GWTIM_CB0_RM, nr_td_gw_now_ns() - t0);
@@ -4435,19 +4537,21 @@ void nr_pdsch_passive_gw_cb0_free(nr_pdsch_gw_cb0_t *cb)
 {
   if (cb) {
     nr_td_gw_free(cb->d);
-    cb->d = NULL;
-    cb->dcap = 0;
+    nr_td_gw_free(cb->e0);
+    cb->d = cb->e0 = NULL;
+    cb->dcap = cb->e0cap = 0;
   }
 }
 
-/* The decoder library the receiver loaded (loader.ldpc.shlibversion: the CPU decoder by default; the same
- * decoder as the full decode either way -- levers spec 9.3). */
+/* The CPU reference decoder: libldpc.so (version "" forces it whatever loader.ldpc.shlibversion says), i.e.
+ * NR_TD_DEC_CPU. It is NOT necessarily the decoder of the full decode (that one's decoder_used is reported apart,
+ * nr_pdsch_gw_cb0_t.full_decoder_used): CRC evidence is not exchangeable between decoders (levers spec 9.3). */
 static LDPC_decoderfunc_t *g_cb0_ldpc;
 static pthread_once_t g_cb0_ldpc_once = PTHREAD_ONCE_INIT;
 static void cb0_ldpc_load(void)
 {
   loader_shlibfunc_t f[] = {{.fname = "LDPCdecoder"}};
-  if (load_module_version_shlib("ldpc", NULL, f, 1, NULL) >= 0)
+  if (load_module_version_shlib("ldpc", "", f, 1, NULL) >= 0)
     g_cb0_ldpc = (LDPC_decoderfunc_t *)f[0].fptr;
 }
 
@@ -4461,15 +4565,16 @@ bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok)
   const uint64_t t0 = nr_td_gw_now_ns();
   const nr_td_cb0_params_t *p = &cb->p;
   /* nr_process_decode_segment(), r = 0 */
-  static __thread int16_t *z = NULL;
-  static __thread int8_t *l = NULL, *out = NULL;
-  if (z == NULL) {
-    z = (int16_t *)aligned_alloc(32, (68 * 384 + 32) * sizeof(int16_t));
-    l = (int8_t *)aligned_alloc(32, 68 * 384 + 32);
-    out = (int8_t *)aligned_alloc(32, 27008); /* the segment decoder's llrProcBuf: OAI_LDPC_DECODER_MAX_NUM_LLR = 27000 */
-    if (z == NULL || l == NULL || out == NULL)
+  /* M5: one block per thread (z | l | out), allocated once; a failed allocation leaves nothing half-set. */
+  static __thread uint8_t *blk = NULL;
+  if (blk == NULL) {
+    blk = (uint8_t *)aligned_alloc(64, (68 * 384 + 64) * sizeof(int16_t) + (68 * 384 + 64) + 27008);
+    if (blk == NULL)
       return false;
   }
+  int16_t *const z = (int16_t *)blk;
+  int8_t *const l = (int8_t *)(blk + (68 * 384 + 64) * sizeof(int16_t));
+  int8_t *const out = l + (68 * 384 + 64); /* the segment decoder's llrProcBuf: OAI_LDPC_DECODER_MAX_NUM_LLR = 27000 */
   const int Kc = p->BG == 2 ? 52 : 68;
   const int Kprime = p->K - p->F;
   memset(z, 0, 2 * p->Z * sizeof(*z));
@@ -4599,8 +4704,8 @@ void nr_pdsch_passive_gw_check(nr_td_grantwork_t *gw, nr_pdsch_passive_decode_st
   const bool crc_cmp = !hq_a;
   const bool crc_bad = crc_cmp && (st_a != st_b || st_a != st_c);
   /* CB0 of the same hypothesis from the gw vs (c)'s segment decoder */
-  uint32_t cb0_d_bad = 0, cb0_llr_bad = 0, cb0_E = 0;
-  int cb0_rc = -100, cb0_crc = -1, seg0 = -1, cb0_C = 0;
+  uint32_t cb0_d_bad = 0, cb0_llr_bad = 0, cb0_E = 0, cb0_flags = 0;
+  int cb0_rc = -100, cb0_crc = -1, seg0 = -1, cb0_C = 0, cb0_k = -1;
   if (t_cap_have) {
     const nr_pdsch_cfg_hypothesis_t h = gw_hyp_of(c);
     static __thread nr_pdsch_gw_cb0_t cb = {0};
@@ -4609,6 +4714,8 @@ void nr_pdsch_passive_gw_check(nr_td_grantwork_t *gw, nr_pdsch_passive_decode_st
     if (cb0_rc == NR_TD_GW_OK) {
       cb0_C = cb.p.C;
       cb0_E = cb.p.E;
+      cb0_k = cb.norm_k;
+      cb0_flags = cb.flags;
       const uint32_t N = (uint32_t)(cb.p.BG == 1 ? 66 : 50) * (uint32_t)cb.p.Z;
       for (uint32_t i = 0; i < N && i < t_cap_dlen; i++)
         cb0_d_bad += cb.d[i] != t_cap_d[i];
@@ -4638,13 +4745,13 @@ void nr_pdsch_passive_gw_check(nr_td_grantwork_t *gw, nr_pdsch_passive_decode_st
   LOG_A(PHY,
         "SENSING: GW_EQUIV n=%lu llr_mismatch ready=%lu today=%lu crc_mismatch=%lu | cb0 n=%lu d_mismatch=%lu "
         "llr_mismatch=%lu crc_mismatch=%lu sibling_abort=%lu not_ready=%lu | this: rnti=0x%x nl=%u G=%u st a/b/c=%d/%d/%d hq=%d "
-        "diff b=%u c=%u (max %d/%d) cb0 rc=%d C=%d E=%u d_diff=%u llr_diff=%u crc cpu/seg=%d/%d unified=%d\n",
+        "diff b=%u c=%u (max %d/%d) cb0 rc=%d C=%d E=%u k=%d d_diff=%u llr_diff=%u crc cpu/seg=%d/%d full_decoder=%d flags=0x%x unified=%d\n",
         (unsigned long)n, (unsigned long)nb, (unsigned long)nc, (unsigned long)ncrc, (unsigned long)atomic_load(&s_cb0_n),
         (unsigned long)atomic_load(&s_cb0_d_bad), (unsigned long)atomic_load(&s_cb0_llr_bad),
         (unsigned long)atomic_load(&s_cb0_crc_bad), (unsigned long)atomic_load(&s_cb0_sib),
         (unsigned long)atomic_load(&s_not_ready), c->grant.rnti,
         (unsigned)__builtin_popcount(c->pdu.dmrs_ports & 0xFFF), G, st_a, st_b, st_c, hq_a, bad_b, bad_c, maxd_b, maxd_c,
-        cb0_rc, cb0_C, cb0_E, cb0_d_bad, cb0_llr_bad, cb0_crc, seg0, nr_td_gw_unified());
+        cb0_rc, cb0_C, cb0_E, cb0_k, cb0_d_bad, cb0_llr_bad, cb0_crc, seg0, t_cap_decoder, cb0_flags, nr_td_gw_unified());
 }
 
 /* ISAC_TD_GW_PROFILE=1 (default off): after every main decode that went through GrantWork, CB0-decode the
@@ -4882,10 +4989,10 @@ static void probe_equiv_check_body(PHY_VARS_NR_UE *ue,
       const bool crc_bad = gw_cpu != (int)t_cap_seg0_ok;
       const uint64_t gc = atomic_fetch_add(&s_gcrc, crc_bad) + crc_bad;
       LOG_A(PHY, "SENSING: PROBE_EQUIV_GW mismatches=%lu/%lu cb0_input_mismatches=%lu/%lu cb0_crc_mismatches=%lu/%lu skipped=%lu | "
-            "this: rnti=0x%x nl=%u E=%u diff=%u first=%d max|d|=%d d_diff=%u/%u crc cpu/ref=%d/%d\n",
+            "this: rnti=0x%x nl=%u E=%u diff=%u first=%d max|d|=%d d_diff=%u/%u crc cpu/ref=%d/%d ref_decoder=%d\n",
             (unsigned long)gb, (unsigned long)gn, (unsigned long)gd, (unsigned long)gn, (unsigned long)gc, (unsigned long)gn,
             (unsigned long)atomic_load(&s_gskip), grant->rnti, (unsigned)dlsch_config->cw_info[0].Nl, E, gbad,
-            gbad ? (int)gfirst : -1, gmaxd, dbad, gw_N, gw_cpu, t_cap_seg0_ok);
+            gbad ? (int)gfirst : -1, gmaxd, dbad, gw_N, gw_cpu, t_cap_seg0_ok, t_cap_decoder);
     } else if (atomic_fetch_add(&s_gskip, 1) < 5) {
       LOG_A(PHY, "SENSING: PROBE_EQUIV_GW skipped: rc=%d E gw/ref=%u/%u cap=%d fo_moved=%d\n", gw_rc, gw_E, E, t_cap_have,
             t_last_fep_fo != probe_fo);
