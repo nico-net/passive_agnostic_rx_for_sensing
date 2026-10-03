@@ -166,6 +166,35 @@ typedef struct {
 } nr_td_cb0_gpu_api_t;
 #define NR_TD_CB0_GPU_ABI 2 /* 2: nr_td_cb0_gpu_item_t.shift */
 
+/* ---- GPU LDPC backend (td/cb0-gpu-entry): the dedicated CB0 entry of libldpc_cuda.so (nrLDPC_cb0_cuda.h) ----
+ * Decodes already dematched CB0 inputs (l, item i at l + i * NR_TD_CB0_L_STRIDE, e.g. from nr_td_cb0_dematch on the
+ * GPU) described by nr_td_cb0_meta: mixed BG / Z in one submission, CRC and all-zero guard on the GPU, no CPU re-prep.
+ * Decoder = G1's CUDA decoder (normalised x3/4 flooding min-sum), GPU iterations = nr_td_cb0_gpu_iters(max_iter).
+ * Verdict per valid item: pass = CRC ok and not all zero (exactly cb0_guard), iters = GPU iterations executed,
+ * decoder_used = NR_TD_CB0_DEC_CUDA_FLOODING. Invalid meta items are left as the caller set them.
+ * Failure (GPU error, timeout, sticky error, CB0 breaker open, no device): the call returns < 0 and EVERY valid item
+ * has pass = -1, err = NR_TD_CB0_ERR_GPU: the whole batch is inadmissible and the next grant can use the CPU
+ * backend. A CB0 failure never touches libldpc_cuda.so's TB breaker. Registration: the backend hook of the CPU
+ * wiring (ISAC_TD_CB0_BACKEND=auto|cpu|gpu) takes nr_td_cb0_gpu_backend(); NULL = not available here. */
+typedef struct nr_td_cb0_backend_s {
+  const char *name;     /* "cuda-cb0" */
+  uint8_t decoder_used; /* NR_TD_CB0_DEC_CUDA_FLOODING */
+  /* synchronous: submit + collect */
+  int (*decode)(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, nr_td_cb0_result_t *out);
+  /* asynchronous (dematch grant N+1 while grant N decodes): meta and l must stay valid and unchanged until collect
+   * returns; collect must be called exactly once per successful submit. submit < 0: no ticket, the batch has no
+   * verdict (nothing to collect). */
+  int (*submit)(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, void **ticket);
+  int (*collect)(void *ticket, nr_td_cb0_result_t *out);
+} nr_td_cb0_backend_t;
+/* The CUDA CB0 backend, or NULL (no libldpc_cuda.so, no CB0 entry, no device). Loads libldpc_cuda.so once (the
+ * receiver's instance if it is already loaded). */
+const nr_td_cb0_backend_t *nr_td_cb0_gpu_backend(void);
+/* GPU flooding iterations for a CB0 decode whose TB policy is max_iter: 2 x max_iter (G1's TB rule, the dominance-safe
+ * default). ISAC_TD_CB0_GPU_ITERS=<n> overrides it; going below the TB decoder's equivalent needs the paired-codeword
+ * proof (ldpc_cuda_pool_bler paired: 0 cases where the TB decoder passes and CB0 fails at that cap). */
+uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter);
+
 #ifdef __cplusplus
 }
 #endif

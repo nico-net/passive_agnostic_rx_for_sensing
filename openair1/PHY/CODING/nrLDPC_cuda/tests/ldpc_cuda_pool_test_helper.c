@@ -53,7 +53,15 @@ int lcp_load_path(const char *path)
   return f_init();
 }
 
+static int32_t (*f_ref_dec)(nrLDPC_slot_decoding_parameters_t *);
+static int run_with(int32_t (*dec)(nrLDPC_slot_decoding_parameters_t *), int bg1, int Z, int C, const short *llr, uint8_t *ok,
+                    uint8_t *decoder_used, int iters, uint8_t *cout);
 static int run(int bg1, int Z, int C, const short *llr, uint8_t *ok, uint8_t *decoder_used, int iters, uint8_t *cout)
+{
+  return run_with(f_dec, bg1, Z, C, llr, ok, decoder_used, iters, cout);
+}
+static int run_with(int32_t (*dec)(nrLDPC_slot_decoding_parameters_t *), int bg1, int Z, int C, const short *llr, uint8_t *ok,
+                    uint8_t *decoder_used, int iters, uint8_t *cout)
 {
   const int K = (bg1 ? 22 : 10) * Z, E = (bg1 ? 66 : 50) * Z, Kc = bg1 ? 68 : 52;
   int16_t *d = calloc((size_t)C * Kc * Z, sizeof(int16_t));
@@ -74,7 +82,7 @@ static int run(int bg1, int Z, int C, const short *llr, uint8_t *ok, uint8_t *de
   tb->llr = (short *)llr; tb->c = c; tb->d = d; tb->d_to_be_cleared = true;
   nrLDPC_slot_decoding_parameters_t slot = {0};
   slot.nb_TBs = 1; slot.threadPool = &pool; slot.TBs = tb;
-  const int rc = f_dec(&slot);
+  const int rc = dec(&slot);
   for (int r = 0; r < C; r++)
     ok[r] = tb->decodeSuccess[r];
   *decoder_used = tb->decoder_used;
@@ -168,3 +176,63 @@ void lcp_counters(uint64_t *e, uint64_t *f, uint64_t *p, uint64_t *d) { f_ctr(e,
 void lcp_hooks(int a, int b, int c, int d, int e, int f, int g) { if (f_hooks) f_hooks(a, b, c, d, e, f, g); }
 void lcp_reset(void) { f_reset(); }
 int lcp_slots_used(void) { return f_used(); }
+
+void *lcp_sym(const char *name) { return h ? dlsym(h, name) : NULL; }
+
+int lcp_load_ref(const char *path)
+{
+  void *r = dlopen(path, RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
+  if (!r)
+    return -1;
+  int32_t (*init)(void) = dlsym(r, "nrLDPC_coding_init");
+  f_ref_dec = dlsym(r, "nrLDPC_coding_decoder");
+  if (!init || !f_ref_dec)
+    return -2;
+  return init();
+}
+
+int lcp_make_cw(int bg1, int Z, int crc_type, double ebn0_db, int corrupt_crc, uint8_t *src, int8_t *l, short *llr)
+{
+  const int Kb = bg1 ? 22 : 10, K = Kb * Z, N = (bg1 ? 66 : 50) * Z, E = N, KB = K >> 3, Kc = bg1 ? 68 : 52;
+  if (!f_enc || (K & 7) || crc_type < 0 || crc_type > 2)
+    return -1;
+  const int clen = crc_type == 2 ? 16 : 24;
+  const double sigma = ebn0_db >= 99 ? 0 : 1.0 / sqrt(2 * pow(10, ebn0_db / 10.0) * ((double)K / N));
+  uint8_t in[KB + 64];
+  memset(in, 0, sizeof(in));
+  for (int i = 0; i < KB - clen / 8; i++)
+    in[i] = lrand48() & 0xff;
+  uint32_t crc = crc_type == 0 ? crc24a(in, K - 24) >> 8 : crc_type == 1 ? crc24b(in, K - 24) >> 8 : crc16(in, K - 16) >> 16;
+  if (corrupt_crc)
+    crc ^= 1u << (lrand48() % clen);
+  for (int b = 0; b < clen / 8; b++)
+    in[KB - clen / 8 + b] = crc >> (clen - 8 - 8 * b);
+  if (src)
+    memcpy(src, in, KB);
+  uint8_t *out = calloc(68 * 384 + 64, 1);
+  uint8_t *ip = in;
+  encoder_implemparams_t impp = {.Zc = Z, .Kb = Kb, .BG = bg1 ? 1 : 2, .K = K, .gen_code = 0, .n_segments = 1};
+  f_enc(&ip, out, &impp);
+  if (l)
+    memset(l, 0, (size_t)Kc * Z);
+  for (int k = 0; k < E; k++) { /* e[k] = LLR of coded bit k; the TB path interleaves Qm = 2 */
+    const int b = out[k] & 1;
+    const double q = sigma > 0 ? 16.0 * ((1.0 - 2 * b) + sigma * gauss()) / sigma : (b ? -100.0 : 100.0);
+    const short v = (short)(q > 32000 ? 32000 : q < -32000 ? -32000 : lround(q));
+    if (llr) {
+      const int i = k / (E / 2), j = k % (E / 2);
+      llr[i + 2 * j] = v;
+    }
+    if (l)
+      l[2 * Z + k] = (int8_t)(v > 127 ? 127 : v < -128 ? -128 : v);
+  }
+  free(out);
+  return K;
+}
+
+int lcp_decode_cw(int ref, int bg1, int Z, const short *llr, int iters, uint8_t *ok, uint8_t *bits, uint8_t *du)
+{
+  if (ref && !f_ref_dec)
+    return -1;
+  return run_with(ref ? f_ref_dec : f_dec, bg1, Z, 1, llr, ok, du, iters, bits);
+}

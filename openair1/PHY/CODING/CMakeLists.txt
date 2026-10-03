@@ -30,7 +30,15 @@ option(ENABLE_LDPC_CUDA "Build libldpc_cuda.so (CUDA LDPC decoder)" OFF)
 if(ENABLE_LDPC_CUDA)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
-  set(LDPC_CUDA_ARCH "89" CACHE STRING "CUDA architecture for libldpc_cuda.so")
+  # One architecture or a list, e.g. -DLDPC_CUDA_ARCH="89;121" (sens6 RTX 4070 + DGX GB10 in one fat binary), or per
+  # host (89 on sens6, 121 on the DGX). Every CUDA target below (LDPC, CB0 entry, PDSCH/PDCCH GPU, polar) uses it.
+  set(LDPC_CUDA_ARCH "89" CACHE STRING "CUDA architecture(s) for the GPU modules: a number or a ;-list (89;121)")
+  foreach(_arch IN LISTS LDPC_CUDA_ARCH)
+    if(NOT _arch MATCHES "^[0-9]+[af]?(-real|-virtual)?$")
+      message(FATAL_ERROR "LDPC_CUDA_ARCH: '${_arch}' is not a CUDA architecture number (e.g. 89, 121, \"89;121\")")
+    endif()
+  endforeach()
+  message(STATUS "GPU modules: CUDA architectures ${LDPC_CUDA_ARCH}")
   # Own TB decoder (GPU batch per TB) instead of ldpc_segment's per-segment one: the two define the
   # same nrLDPC_coding_* symbols, so the segment encoder and rate matching are compiled in directly.
   add_library(ldpc_cuda MODULE
@@ -40,6 +48,7 @@ if(ENABLE_LDPC_CUDA)
               nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c
               nrLDPC_cuda/nr_ldpc_cuda.c
               nrLDPC_cuda/ldpc_decoder.cu
+              nrLDPC_cuda/ldpc_cb0.cu
               nrLDPC_cuda/nrLDPC_cpu_fallback.c
   )
   set_target_properties(ldpc_cuda PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -67,9 +76,23 @@ if(ENABLE_LDPC_CUDA)
     foreach(sym check_crc crc24a crc24b crc16 crcTableInit completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
       target_link_options(ldpc_cuda_pool_bler PRIVATE "LINKER:--undefined=${sym}")
     endforeach()
-    add_dependencies(ldpc_cuda_pool_bler ldpc_cuda)
+    add_dependencies(ldpc_cuda_pool_bler ldpc_cuda ldpc)
     add_dependencies(tests test_ldpc_cuda_pool)
     add_test(NAME test_ldpc_cuda_pool COMMAND ./test_ldpc_cuda_pool WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    # CB0 batch entry (nrLDPC_cb0_cuda.h): bit-exact vs a CPU model and G1's pool, CRC vs check_crc, CPU TB decoder
+    # verdicts (./libldpc.so), batch sizes, async API, fault injection, forced explicit-copy path. Needs a CUDA device.
+    add_executable(test_ldpc_cb0_cuda nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc nrLDPC_cuda/tests/ldpc_cuda_pool_test_helper.c)
+    target_include_directories(test_ldpc_cb0_cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_cuda/tests ${OPENAIR_DIR} ${OPENAIR1_DIR}
+                               ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(test_ldpc_cb0_cuda PRIVATE GTest::gtest GTest::gtest_main thread-pool LOG minimal_lib crc_byte UTIL
+                          CUDA::cudart ${CMAKE_DL_LIBS} pthread m)
+    set_target_properties(test_ldpc_cb0_cuda PROPERTIES ENABLE_EXPORTS ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    foreach(sym check_crc crc24a crc24b crc16 crcTableInit completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+      target_link_options(test_ldpc_cb0_cuda PRIVATE "LINKER:--undefined=${sym}")
+    endforeach()
+    add_dependencies(test_ldpc_cb0_cuda ldpc_cuda ldpc)
+    add_dependencies(tests test_ldpc_cb0_cuda)
+    add_test(NAME test_ldpc_cb0_cuda COMMAND ./test_ldpc_cb0_cuda WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   endif()
   add_dependencies(nr-uesoftmodem ldpc_cuda)
   # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when

@@ -1483,6 +1483,7 @@ target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_common MAC_NR_COMMON pol
 # 2026-10-01 sections 5.4 / 9). CPU reference + LDPC adapter; the GPU rate de-matching is libtd_cb0_gpu.so
 # (openair1/PHY/CODING/CMakeLists.txt), dlopen'd at run time, so this library has no CUDA link dependency.
 add_library(td_cb0_batch STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c
+                                ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c
                                 ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
 target_include_directories(td_cb0_batch PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
 target_link_libraries(td_cb0_batch PUBLIC PHY_NR_COMMON MAC_NR_COMMON crc_byte UTIL thread-pool ${CMAKE_DL_LIBS} pthread
@@ -2698,6 +2699,29 @@ if(ENABLE_TESTS)
     target_link_options(nr_td_cb0_bench PRIVATE "LINKER:--undefined=${sym}")
   endforeach()
   add_dependencies(tests nr_td_cb0_bench)
+  # CB0 GPU entry (libldpc_cuda.so ldpc_cb0_*) through nr_td_cb0_gpu_backend vs the CPU backend: benchmark (not a
+  # ctest; flock -x /tmp/td_measure.lock) and the backend test (ctest, needs a CUDA device; skips without one).
+  if(ENABLE_LDPC_CUDA)
+    foreach(t nr_td_cb0_gpu_bench test_nr_td_cb0_gpu_backend)
+      if(t STREQUAL "nr_td_cb0_gpu_bench")
+        add_executable(${t} ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c ${NR_TD_CB0_FX_SRCS})
+        target_link_libraries(${t} PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                              thread-pool minimal_lib m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+      else()
+        add_executable(${t} ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc ${NR_TD_CB0_FX_SRCS})
+        target_link_libraries(${t} PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                              thread-pool minimal_lib GTest::gtest GTest::gtest_main m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+        add_test(NAME ${t} COMMAND ./${t})
+      endif()
+      target_include_directories(${t} PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+      set_target_properties(${t} PROPERTIES ENABLE_EXPORTS ON)
+      foreach(sym check_crc crc24a crc24b crc16 completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+        target_link_options(${t} PRIVATE "LINKER:--undefined=${sym}")
+      endforeach()
+      add_dependencies(${t} td_cb0_gpu ldpc_cuda)
+      add_dependencies(tests ${t})
+    endforeach()
+  endif()
 
   # Correlated Monte-Carlo simulator linking the REAL engine/gate/order/field book (spec 2026-10-01 section 6.1).
   # nr_td_sim is a CLI (not run by ctest); nr_td_sim_test is the gtest (#includes nr_td_sim.cc).

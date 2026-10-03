@@ -14,6 +14,8 @@ SPDX-License-Identifier: Apache-2.0
 
 #include "ldpc_tables_bg1.h"
 #include "ldpc_tables_bg2.h"
+#include "ldpc_cuda_bg.h"
+#include <pthread.h>
 
 #define TIMESTAMP_CLOCK_SOURCE CLOCK_MONOTONIC
 
@@ -762,10 +764,41 @@ ThreadContext& ldpc_decoder_init_context(int make_stream) {
     return context;
 }
 
-extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
-    if (bg_cn[0][0])  // lazy, global
-        return &ldpc_decoder_init_context(make_stream);
+/* Global base-graph tables: initialised once under a mutex (the TB worker and the CB0 entry may race at start-up;
+ * the old unlocked "if (bg_cn[0][0])" check could allocate twice). Re-initialised after ldpc_decoder_shutdown. */
+static pthread_mutex_t g_tables_mu = PTHREAD_MUTEX_INITIALIZER;
+static void ldpc_tables_init_locked();
+static int ldpc_tables_init() {
+    pthread_mutex_lock(&g_tables_mu);
+    if (!__atomic_load_n(&bg_cn[1][7], __ATOMIC_ACQUIRE))
+        ldpc_tables_init_locked();
+    const int ok = __atomic_load_n(&bg_cn[1][7], __ATOMIC_ACQUIRE) != nullptr;
+    pthread_mutex_unlock(&g_tables_mu);
+    return ok ? 0 : -1;
+}
 
+extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
+    ldpc_tables_init();
+    return &ldpc_decoder_init_context(make_stream);
+}
+
+/* The device tables for the CB0 entry (ldpc_cb0.cu, ldpc_cuda_bg.h). */
+extern "C" int ldpc_cuda_basegraph(uint32_t BG, uint32_t Z, ldpc_cuda_bg_t* out) {
+    static const uint16_t zs[] = {2, 4, 8, 16, 32, 64, 128, 256, 3, 6, 12, 24, 48, 96, 192, 384, 5, 10, 20, 40, 80, 160,
+                                  320, 7, 14, 28, 56, 112, 224, 9, 18, 36, 72, 144, 288, 11, 22, 44, 88, 176, 352, 13, 26,
+                                  52, 104, 208, 15, 30, 60, 120, 240};
+    bool zok = false;
+    for (unsigned k = 0; k < sizeof(zs) / sizeof(zs[0]); k++)
+        zok |= zs[k] == Z;
+    if ((BG != 1 && BG != 2) || !zok || ldpc_tables_init() != 0)
+        return -1;
+    const BaseGraph bg = get_basegraph(BG, Z);
+    *out = ldpc_cuda_bg_t{bg.num_rows, bg.num_cols, bg.num_edges, bg.cn_degree, bg.vn_degree, bg.cn, bg.vn,
+                          bg.cn_stride, bg.vn_stride};
+    return 0;
+}
+
+static void ldpc_tables_init_locked() {
     printf("Initializing LDPC runtime %d\n", (int) gettid());
     /* Blocking sync: a thread waiting on the GPU sleeps instead of spinning. The point of the offload
      * is CPU time -- the passive receiver is CPU-bound -- so a spinning waiter would give it back.
@@ -797,8 +830,6 @@ extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
             bg_vn_size[b][ils] = table_bg_vn_size[b][ils];
         }
     }
-
-    return &ldpc_decoder_init_context(make_stream);
 }
 
 /* ---- Batched decode (adaptive-rx, 2026-09-15). One launch per iteration decodes every code block of

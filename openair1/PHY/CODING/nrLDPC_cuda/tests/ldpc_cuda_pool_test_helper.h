@@ -23,6 +23,19 @@ void lcp_hooks(int skip, int stall_ms, int inject, int queue_cap, int timeout_ms
 void lcp_reset(void);
 int lcp_slots_used(void);
 enum { LCP_CPU = 1, LCP_CUDA = 2 };
+/* ---- CB0 entry tests / paired harness ---- */
+void *lcp_sym(const char *name); /* dlsym in the loaded plugin */
+/* A second plugin (the CPU TB decoder, e.g. ./libldpc.so), RTLD_LOCAL | RTLD_DEEPBIND; 0 = ok */
+int lcp_load_ref(const char *path);
+/* One code block, C = 1: random payload with a real CRC (crc_type 0 CRC24A, 1 CRC24B, 2 CRC16; corrupt_crc flips one
+ * CRC bit before encoding: a valid LDPC codeword whose CRC fails), OAI encoder, rv0 E = N, Qm = 2, AWGN at ebn0_db
+ * (ebn0_db >= 99: noiseless). K = (bg1 ? 22 : 10) * Z (Z % 4 == 0). Outputs (each may be NULL): src K/8 bytes,
+ * l the CB0 decoder input (Kc*Z int8: 2Z zeros, saturated LLRs), llr the E = N int16 channel LLRs (TB path input).
+ * Uses drand48 / lrand48 (caller seeds). Returns K, or < 0. */
+int lcp_make_cw(int bg1, int Z, int crc_type, double ebn0_db, int corrupt_crc, uint8_t *src, int8_t *l, short *llr);
+/* Decode llr (from lcp_make_cw, C = 1) as a TB through the main plugin (ref = 0) or the reference plugin (ref = 1)
+ * with max_ldpc_iterations = iters. ok = decodeSuccess, bits K/8 bytes (may be NULL), du = decoder_used. */
+int lcp_decode_cw(int ref, int bg1, int Z, const short *llr, int iters, uint8_t *ok, uint8_t *bits, uint8_t *du);
 #ifdef __cplusplus
 }
 #endif
