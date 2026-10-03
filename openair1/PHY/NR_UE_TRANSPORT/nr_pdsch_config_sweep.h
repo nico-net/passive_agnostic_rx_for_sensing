@@ -106,7 +106,7 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 #define NR_TD_DORMANT_PRIOR 0
 #define NR_TD_DORMANT_FIELD_BASE 1
 #define NR_TD_DORMANT_GEOM 4 /* lever P: a CRC-pass-pinned geometry group (BC2b); every other geometry is dormant for this cause */
-#define NR_TD_DORMANT_ELIM 5 /* CB0 elimination channel (nr_pdsch_config_sweep_feed_cb0): evidence-derived, cleared with the evidence and by fail-open */
+#define NR_TD_DORMANT_ELIM 5 /* CB0 elimination channel (nr_pdsch_config_sweep_feed_cb0_grant): engine-only, evidence-derived, cleared with the evidence and by fail-open */
 #define NR_TD_DORMANT_CAUSES 6
 #define NR_TD_GEOM_SLOTS 8
 #define NR_TD_DWORDS ((NR_PDSCH_SWEEP_MAX_HYP + 63) / 64)
@@ -193,50 +193,102 @@ typedef struct {
    * evidence and never resets it). Also reset to 0 whenever the active set changes: set_fail_open toggling, and set_dormant / clear_dormant calls that
    * change at least one mask bit (these also clear ok_unique and crc_accept_blocked). Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
   uint32_t since_pass;
-  /* CB0 ELIMINATION CHANNEL (levers spec 2026-10-01 section 5.4 redesign; nr_pdsch_config_sweep_feed_cb0). A SEPARATE, SYMMETRIC evidence
-   * stream: per hypothesis, the first-code-block CRC outcomes (PASS and FAIL both counted) of the CB0 decodes the caller ran on every grant
-   * for every ACTIVE hypothesis. Never mixed into trials/ok, never elects: used one-sided to ELIMINATE a non-leader h when
-   * UB_cb0(h) < LB_tb(leader) (sweep_decide). Evidence-like: cleared with trials/ok (prune_commit, rebuild, reopen) and by fail-open, NOT
-   * by an active-set change (lever_c_restart): a CB0 rate is a property of the hypothesis on the grants it was tested on, not of the
-   * active set. uint16 (+32 KB/state); crediting stops (outcome-independently) at UINT16_MAX trials. */
+  /* CB0 ELIMINATION CHANNEL (levers spec 2026-10-01 section 5.4 redesign; nr_pdsch_config_sweep_feed_cb0_grant). A SEPARATE,
+   * SYMMETRIC evidence stream: per hypothesis, the first-code-block CRC outcomes (PASS and FAIL both counted) of the CB0 decodes the
+   * caller ran on ADMISSIBLE grants. Never mixed into trials/ok, never elects: used one-sided to ELIMINATE a non-leader h when
+   * UB_cb0(h) < LB_tba(leader) (sweep_decide). tba_* = the full-TB outcomes of the grant's scheduled hypothesis on the SAME admissible
+   * grants (the lower bound must come from TB samples drawn under the same admissibility as the CB0 samples). Evidence-like (one
+   * "CB0 epoch"): cleared with trials/ok (prune_commit, rebuild, reopen), by fail-open (counters only: tba kept) and by a premise
+   * violation; NOT by an active-set change (lever_c_restart): a CB0 rate is a property of the hypothesis on the grants it was tested on.
+   * uint16 (+64 KB/state); crediting of a hypothesis stops (outcome-independently) at UINT16_MAX trials. */
   uint16_t cb0_trials[NR_PDSCH_SWEEP_MAX_HYP];
   uint16_t cb0_pass[NR_PDSCH_SWEEP_MAX_HYP];
-  uint8_t  cb0_dec_pin; ///< CB0 evidence decoder of this context: 0 = not pinned yet, else nr_td_decoder_t + 1 (cleared with the CB0 evidence)
-  bool     cb0_elim; ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild like crc_accept; ISAC_TD_CB0_ELIM, default false)
+  uint16_t tba_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t tba_ok[NR_PDSCH_SWEEP_MAX_HYP];
+  uint8_t  tb_dec_mask;  ///< bit d: a full TB of this epoch was decoded by decoder code d (nr_td_decoder_t)
+  uint8_t  cb0_dec_mask; ///< bit d: a CREDITED CB0 batch of this epoch came from decoder code d
+  bool     cb0_elim;     ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild; new runtime contexts: ISAC_TD_CB0_ELIM, default 0)
+  bool     cb0_disabled; ///< premise violation seen (TB PASS with CB0 FAIL on one (hypothesis, grant)): channel off for the context (sticky)
+  bool     cb0_no_family_exempt; ///< TEST ONLY (simulator discriminating arm): disable the trap-family exemption
+  bool     cb0_no_premise_check; ///< TEST ONLY (simulator discriminating arm): disable the runtime premise check
 } nr_pdsch_config_sweep_state_t;
 
 /* ---- CB0 elimination channel (ISAC_TD_CB0_ELIM, default 0) ----------------------------------------------------------------
- * CONTRACT (caller): on a grant, run a CB0 decode for EVERY active hypothesis (or a fixed, state- and outcome-independent subset)
- * and report all of them in one call; the set tested must be chosen BEFORE any outcome of that grant is known and never depend on
- * a hypothesis's own outcomes (the P2 failure: probes scheduled on survivors deflated the truth). Report PASS and FAIL alike.
- * admissible = the CB0 decode used the SAME decoder implementation and iteration policy as the hypothesis's full decode would
- * (spec section 9.3), on valid (unexpired) samples, and the grant is not rank > 1 while K38 is open (probe CB0 LLRs != full decode at
- * Nl > 1). An inadmissible call credits nothing. Admissibility must be a grant property known before decoding (never the outcome).
- * SOUNDNESS: under these conditions a hypothesis's CB0 decode passes whenever its full TB decode would (TB pass => every CB, incl. CB0,
- * decoded), so q_h (CB0 pass rate) >= p_h (TB pass rate) for the truth; a wrong leader L has p_L <= p_truth. Hence, with both interval
- * families holding, UB_cb0(truth) >= q_truth >= p_truth >= p_L >= LB_tb(L): the truth is never eliminated. The 1e-6 union-bound budget is
- * split 0.5e-6 / 0.5e-6 between the full-TB and the CB0 interval families (nr_crc_interval with 2 x the class count; the class count is the
- * number of hypotheses active under every cause but ELIM, so eliminations never shrink it). Eliminated hypotheses become dormant with
- * cause NR_TD_DORMANT_ELIM: no scheduling, no evidence, "resolved" in the separation test; fail-open restores them (and clears the CB0
- * evidence: fail-open distrusts what put them to sleep). With cb0_elim false every function below is a no-op and the engine is
- * bit-identical to the KL-only rule. */
-#define NR_TD_CB0_BUDGET_SPLIT 2 /* TB and CB0 families each get 1e-6 / 2 (classes x 2 in nr_crc_interval) */
-/** Credit one CB0 outcome (pass[k]) to each distinct, in-range, ACTIVE idx[k] on this grant, then run the decision (elimination +
- *  KL separation + fallback). No-op (returns the winner) when !st->cb0_elim, !admissible, fail_open, or a winner exists. Returns the
- *  winner or -1. */
-int nr_pdsch_config_sweep_feed_cb0(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible);
-/** LDPC decoder that produced a CB0 outcome (G1 `decoder_used`). CRC evidence is NOT exchangeable between decoders: the CUDA decoder
- *  (normalised min-sum, 2x iterations) is ~1 dB more sensitive than OAI's CPU decoder [MEASURED, DGX GB10, bit-exact harness]. */
-typedef enum { NR_TD_DEC_CPU = 0, NR_TD_DEC_CUDA = 1 } nr_td_decoder_t;
-/** feed_cb0 with the decoder of the batch. DECODER PIN: the first admissible batch of a context (or of an evidence epoch) pins its CB0
- *  decoder; a batch from another decoder (e.g. the CUDA circuit-breaker falling back to the CPU mid-context) is inadmissible and credits
- *  nothing, so a context's CB0 counts never mix decoders. The pin is cleared with the CB0 evidence (prune, rebuild, reopen, fail-open).
- *  CALLER CONTRACT (the q >= p premise): the CB0 decoder must be at least as sensitive as every full-TB decoder whose outcomes feed this
- *  context (CB0 on CUDA with full TBs on CPU is fine, the decoder gain only widens the CB0 margin; CB0 on the CPU while full TBs decode on
- *  CUDA violates it and must be passed as inadmissible). nr_pdsch_config_sweep_feed_cb0() is this function with NR_TD_DEC_CPU. */
-int nr_pdsch_config_sweep_feed_cb0_dec(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible,
-                                       nr_td_decoder_t decoder);
-/** ISAC_TD_CB0_ELIM=1 (read once; default 0). The runtime wiring (later integration task) copies it into st->cb0_elim of new contexts. */
+ * PER GRANT the caller makes ONE nr_pdsch_config_sweep_feed_cb0_grant() call AFTER the grant's full-TB feed (feed / feed_attr /
+ * feedback), describing the CB0 batch AND the full-TB outcome of the scheduled hypothesis on that grant.
+ * SCHEDULE CONTRACT: the batch is every ACTIVE hypothesis, or a subset fixed by (context seed, absolute slot, catalogue key) only, plus
+ * ALWAYS the grant's scheduled (full-TB) hypothesis; the set is chosen BEFORE any outcome of the grant is known and never depends on a
+ * hypothesis's own outcomes (the P2 failure: probes scheduled on survivors deflated the truth). PASS and FAIL are both reported.
+ * (Forcing the scheduled hypothesis in can only bias its CB0 rate UP when exploit picks follow recent passes: the safe direction.)
+ * ADMISSIBILITY: the batch credits nothing unless EVERY condition below holds; the caller sets one NR_TD_CB0_X_* bit per violated
+ * condition (all known before the CB0 outcomes are read; never the outcome itself). A violation drops the WHOLE grant, never a subset:
+ *   new data at rv 0 and no soft combining in the full-TB path (the passive DL path combines HARQ retransmissions) ......... NOT_NEW_RV0
+ *   the grant passes the same gate as the full-TB path (nr_td_gate) .................................................... GATED
+ *   the IQ sample lifetime was re-checked AFTER the decodes (F2, nr_passive_credit_allowed) ........................... IQ_STALE
+ *   n_L latched or E <= N_ref (no LBRM retry), no ISAC_RV_RETRY, no PRG / PT-RS arm in the full decode ............... LBRM, RV_RETRY, PRG_PTRS
+ *   no batch member STALE / FULL ......................................................................................... MEMBER_STALE
+ *   ISAC_LLR_SCALE off; the probe was not fed GPU LLRs (until verified equal) ............................................ LLR_SCALE, GPU_LLR
+ *   no LDPC launch error / skipped launch in the batch (G1 splits > 512 CBs; any error = the whole batch) ................ LDPC_ERROR
+ *   caller policy on rank (K38 fixed at c005d19675: rank > 1 CB0 equals the full decode; the bit stays for a runtime choice) RANK
+ * The engine adds DECODER (dominance rule below) and CONTRACT (the scheduled hypothesis is active but not in the batch).
+ * DECODER DOMINANCE (CRC evidence is not exchangeable between LDPC decoders; codes = G1 decoder_used): a batch is admissible iff its
+ * CB0 decoder is at least as sensitive as EVERY full-TB decoder of the context's epoch (sensitivity CPU < CUDA; same iteration policy per
+ * code; an unknown decoder never qualifies as CB0 decoder and, as a TB decoder, blocks every batch). A CUDA CB0 batch always dominates a
+ * CPU or CUDA TB; a CPU batch only while every TB of the epoch was CPU-decoded. A NEW, more sensitive TB decoder starts a new CB0 epoch
+ * (counters and ELIM cleared) when credited CB0 batches no longer dominate it. The TB decoder set learns from feed_cb0_grant (tb_decoder)
+ * and from nr_pdsch_config_sweep_note_tb_decoder(), which the caller MUST call for every full-TB outcome it feeds without a CB0 grant.
+ * PREMISE CHECK (runtime guard of q >= p): with an admissible, dominating batch the scheduled hypothesis's CB0 must pass whenever its TB
+ * passed. The first "TB PASS and CB0 FAIL" on one (hypothesis, grant) disables the channel for the context (cb0_disabled, sticky across
+ * rebuild/reopen), clears ELIM and the CB0 evidence, logs TD_CB0_PREMISE_ALARM and counts nr_pdsch_config_sweep_cb0_stats(alarms).
+ * SOUNDNESS: TB pass => CB0 pass (same decoder or a dominating one, same IQ), so q_T >= p_T on admissible grants; a wrong leader L
+ * has p_L <= p_T (it passes only where its computation equals the truth's or by CRC accident). With all interval families holding,
+ * UB_cb0(T) >= q_T >= p_T >= p_L >= LB_tba(L): the truth is never eliminated. The 1e-6 budget is split in THREE (full-TB election,
+ * admissible-TB lower bound, CB0): nr_crc_interval with 3 x the class count, class count = hypotheses active under every cause but ELIM.
+ * TRAP FAMILY EXEMPTION: CB0 never eliminates a hypothesis sharing (S, L, mapping type, DM-RS mask) with the current leader (its k0
+ * siblings and MCS-table twins), so a leader that is itself a trap sibling or twin of the truth can never eliminate the truth.
+ * ELIM is a dormant cause (NR_TD_DORMANT_ELIM): no scheduling, no evidence, "resolved" in the separation test; reserved to the engine
+ * (set_dormant / clear_dormant refuse it). FAIL-OPEN: ELIM-only dormancy never triggers fail-open (fail_open_due ignores it in the
+ * trigger and in `need`; an elimination does not reset since_pass). Fail-open RE-ARMS the channel: it clears ELIM and the CB0 counters
+ * (a fresh CB0 epoch over the full catalogue: a wrong elimination could be the reason no pass arrives) and ELIM stays honoured while
+ * fail_open (active() = !ELIM then).
+ * LEVER E (feed_equiv crediting a class) is INCOMPATIBLE with cb0_elim: its biased rates (BC1) break p_L <= p_T. Do not enable both.
+ * With cb0_elim false every function below is a no-op and the engine is bit-identical to the KL-only rule. */
+#define NR_TD_CB0_BUDGET_SPLIT 3 /* full-TB, admissible-TB and CB0 families each get 1e-6 / 3 (classes x 3 in nr_crc_interval) */
+/** LDPC decoder codes, equal to G1's NRLDPC_DECODER_* (nrLDPC_coding_interface.h decoder_used). */
+typedef enum { NR_TD_DEC_UNKNOWN = 0, NR_TD_DEC_CPU = 1, NR_TD_DEC_CUDA = 2 } nr_td_decoder_t;
+#define NR_TD_CB0_X_NOT_NEW_RV0 (1u << 0)
+#define NR_TD_CB0_X_GATED (1u << 1)
+#define NR_TD_CB0_X_IQ_STALE (1u << 2)
+#define NR_TD_CB0_X_LBRM (1u << 3)
+#define NR_TD_CB0_X_RV_RETRY (1u << 4)
+#define NR_TD_CB0_X_PRG_PTRS (1u << 5)
+#define NR_TD_CB0_X_MEMBER_STALE (1u << 6)
+#define NR_TD_CB0_X_LLR_SCALE (1u << 7)
+#define NR_TD_CB0_X_GPU_LLR (1u << 8)
+#define NR_TD_CB0_X_LDPC_ERROR (1u << 9)
+#define NR_TD_CB0_X_RANK (1u << 10)
+#define NR_TD_CB0_X_DECODER (1u << 11)  /* engine: the batch decoder does not dominate the epoch's TB decoders */
+#define NR_TD_CB0_X_CONTRACT (1u << 12) /* engine: the scheduled hypothesis is active but missing from the batch */
+#define NR_TD_CB0_X_COUNT 13
+typedef struct {
+  const int *idx;          ///< CB0 batch hypotheses (indices of this state)
+  const bool *pass;        ///< their CB0 CRC outcomes
+  int n;
+  uint8_t cb0_decoder;     ///< nr_td_decoder_t of the batch
+  int tb_hyp;              ///< the grant's scheduled (full-TB) hypothesis, -1 = none decoded
+  bool tb_pass;            ///< its full-TB CRC outcome
+  uint8_t tb_decoder;      ///< nr_td_decoder_t of that full decode
+  uint32_t inadmissible;   ///< NR_TD_CB0_X_* bits set by the caller; 0 = admissible
+} nr_td_cb0_grant_t;
+/** One grant of the channel (see above). Credits the batch and the scheduled hypothesis's admissible-TB counter, then runs the decision
+ *  (elimination + KL separation + fallback). Returns the winner or -1 (a winner decided here is announced by the next feedback()). */
+int nr_pdsch_config_sweep_feed_cb0_grant(nr_pdsch_config_sweep_state_t *st, const nr_td_cb0_grant_t *g);
+/** Record the decoder of a full-TB outcome fed without a CB0 grant (dominance bookkeeping). No-op when !cb0_elim. */
+void nr_pdsch_config_sweep_note_tb_decoder(nr_pdsch_config_sweep_state_t *st, uint8_t decoder);
+/** Process-wide counters: premise alarms, and rejected grants per NR_TD_CB0_X_* bit (rej may be NULL, else NR_TD_CB0_X_COUNT entries). */
+void nr_pdsch_config_sweep_cb0_stats(uint64_t *alarms, uint64_t *rej);
+void nr_pdsch_config_sweep_cb0_stats_reset(void);
+/** ISAC_TD_CB0_ELIM=1 (read once; default 0); copied into st->cb0_elim of every new runtime context. */
 bool nr_pdsch_config_sweep_cb0_elim_env(void);
 /** Test hook: 1/0 force the ISAC_TD_CB0_ELIM decision, -1 re-reads the environment. */
 void nr_pdsch_config_sweep_cb0_elim_env_set(int on);
@@ -545,6 +597,9 @@ void nr_pdsch_k0_slot(int frame, int slot, int slots_per_frame, int k0, int *fra
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);
+/** Live form of nr_pdsch_config_sweep_feed_cb0_grant on the ticket's context (g->idx index that context; a stale ticket credits
+ *  nothing). Returns false for a stale ticket. No runtime caller yet (wiring follows GrantWork + the GPU batch). */
+bool nr_pdsch_config_sweep_feedback_cb0(const nr_pdsch_sweep_ticket_t *ticket, const nr_td_cb0_grant_t *g);
 bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA);
 /** CRC evidence held by one keyed context: total passes and trials over all its hypotheses.
  * Zero/zero when the context does not exist. Lets the caller prefer a DL layout FAMILY that has

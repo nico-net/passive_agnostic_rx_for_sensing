@@ -1050,14 +1050,44 @@ TEST(TdSimCb0, Cb0ElimFasterBlind)
   }
   EXPECT_GE(s_off, 10.0 * s_on) << "first-RNTI mean off " << s_off << " s, on " << s_on << " s";
 }
-TEST(TdSimCb0, DecoderFallbackMidContextIsDroppedNotMixed)
+TEST(TdSimCb0, DecoderFallbackKeepsTheChannel)
 {
-  /* CB0 batch on CUDA (1 dB more sensitive than the CPU full-TB decoder), circuit-breaker fallback to the CPU after 200 grants: the engine's
-   * decoder pin drops the CPU batches (never mixes the two decoders' CRC evidence); still never wrong. */
+  /* CB0 batch on CUDA (1 dB more sensitive than the CPU full-TB decoder), circuit-breaker fallback to the CPU after 200 grants: under the
+   * per-batch dominance rule a CPU batch is still admissible while every TB is CPU-decoded, so nothing is dropped; never wrong. */
   SimCfg c = cb0_gate_cfg(); c.acq = 10; c.persist = 0.9; c.adjacency = 0.9; c.cb0_elim = 1; c.cb0_decoder = 1; c.cb0_fallback_at = 200;
   const SimResult r = run_sim(c);
   EXPECT_EQ(r.wrong, 0);
   EXPECT_EQ(r.undecidable, 0);
   EXPECT_EQ(r.truth_cb0_elim, 0);
-  EXPECT_GT(r.cb0_dec_dropped, 0);
+  EXPECT_EQ(r.cb0_dec_dropped, 0);
+}
+/* Premise-violation arm (fix round 1): a near-perfect MCS-table twin (v1 model, table exercise 0.05: identical TB and CB0 outcomes on 95 %
+ * of grants), CB0 LESS sensitive than the TB (margin -6 dB), soft-combining gain only in the TB of retransmissions that are (wrongly)
+ * admitted, rank-SNR correlation, low SNR; the trap-family exemption is off so that only the premise check stands between the truth
+ * and elimination by a twin leader. */
+static SimCfg premise_arm()
+{
+  SimCfg c = SimCfg::defaults(); c.acq = 30; c.seed = 1; c.oracle = 0; c.n_rx = 4; c.gate = 1; c.rntis_per_acq = 1; c.cap_s = 600;
+  c.cb0_elim = 1; c.cb0_admit_all = 1; c.rank_snr_db = 3; c.cb0_no_family = 1; c.cb0_margin_db = -6; c.harq_gain_db = 6; c.mu = 8;
+  c.table_exercise = 0.05;
+  return c;
+}
+TEST(TdSimCb0, PremiseCheckStopsTheViolationArm)
+{
+  SimCfg off = premise_arm(); off.cb0_no_premise = 1;
+  const SimResult w = run_sim(off);
+  EXPECT_GT(w.wrong, 0) << "the arm must be discriminating (wrong winners without the check)";
+  const SimResult r = run_sim(premise_arm());
+  EXPECT_EQ(r.wrong, 0);
+  EXPECT_GT(r.cb0_alarms, 0);
+}
+TEST(TdSimCb0, SubsetNeverWrong)
+{
+  for (int B : {64, 128}) {
+    SimCfg c = cb0_gate_cfg(); c.acq = 10; c.persist = 0.9; c.adjacency = 0.9; c.cb0_elim = 1; c.cb0_subset = B;
+    const SimResult r = run_sim(c);
+    EXPECT_EQ(r.wrong, 0) << B;
+    EXPECT_EQ(r.truth_cb0_elim, 0) << B;
+    EXPECT_LT((double)r.cb0_decodes / (double)std::max(1L, r.cb0_grants), 2.0 * B + 2) << B;
+  }
 }
