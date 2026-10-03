@@ -30,6 +30,12 @@ typedef struct {
   uint64_t td_excl_restarts, td_excl_truncs, td_excl_restart_alarms;
   /* Field book fb2 (ISAC_TD_FIELDBOOK=2; all 0 while off). */
   uint64_t td_fb_promotions, td_fb_withdrawals, td_fb_failopens, td_fb_pruned_contexts, td_fb_untrusted_ctx;
+  /* CB0 elimination channel (ISAC_TD_CB0_ELIM=1; all 0 while off; nr_td_cb0_wire.h). td_cb0_inadmissible[r] per reason
+   * NR_TD_CB0_R_* (JSON object keyed by nr_td_cb0_reason_name); td_cb0_us_per_item = CPU-us per CB0 item incl. the lazy
+   * GrantWork computes; td_cb0_backend_{cpu,gpu} = batches per backend. */
+  uint64_t td_cb0_grants, td_cb0_batches, td_cb0_admissible, td_cb0_items, td_cb0_inadmissible[16], td_cb0_budget_skips,
+      td_cb0_not_testable, td_cb0_backend_cpu, td_cb0_backend_gpu, td_cb0_premise_alarms, td_cb0_eliminations;
+  double td_cb0_us_per_item;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
   /* CUDA LDPC pool (K34): launch/CUDA errors, TBs sent to the CPU decoder, poisoned slots; 0 when libldpc_cuda is not loaded */
   uint64_t ldpc_cuda_errors, ldpc_cuda_fallbacks, ldpc_cuda_poisoned;

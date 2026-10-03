@@ -623,6 +623,26 @@ static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last
  * stratified by this value: CPU plain min-sum and CUDA normalised min-sum (2x iterations) differ by about 1 dB (K36), so counts, CRC
  * passes and eliminations from different values are NEVER merged. */
 static __thread uint8_t t_decoder_used_last = 0;
+/* CB0 elimination (nr_td_cb0_wire.c): force the CPU TB decoder (libldpc.so's segment decoder, version "") for this
+ * thread's next decodes, whatever loader.ldpc.shlibversion loaded for the UE. decoder_used still reports what ran. */
+static __thread bool t_tb_force_cpu = false;
+static nrLDPC_coding_decoder_t *g_tb_cpu_dec;
+static pthread_once_t g_tb_cpu_once = PTHREAD_ONCE_INIT;
+static void tb_cpu_load(void)
+{
+  loader_shlibfunc_t f[] = {{.fname = "nrLDPC_coding_init"}, {.fname = "nrLDPC_coding_decoder"}};
+  if (load_module_version_shlib("ldpc", "", f, 2, NULL) >= 0 && f[0].fptr && f[1].fptr
+      && ((nrLDPC_coding_init_t *)f[0].fptr)(32) == 0)
+    g_tb_cpu_dec = (nrLDPC_coding_decoder_t *)f[1].fptr;
+  else
+    LOG_W(NR_PHY, "SENSING: CB0 wiring: CPU TB decoder (libldpc.so) not loadable, TB decodes keep the configured decoder\n");
+}
+static nrLDPC_coding_decoder_t *tb_cpu_decoder(void)
+{
+  pthread_once(&g_tb_cpu_once, tb_cpu_load);
+  return g_tb_cpu_dec;
+}
+void nr_pdsch_passive_force_cpu_tb(bool on) { t_tb_force_cpu = on; }
 uint8_t nr_pdsch_passive_last_decoder_used(void) { return t_decoder_used_last; }
 static _Atomic uint64_t g_ldpc_tb_dec[3]; // [decoder_used]: TBs handed to the decoder (all outcomes), 0 = not reported
 void nr_pdsch_passive_ldpc_tb_decoders(uint64_t *cpu, uint64_t *cuda)
@@ -1411,7 +1431,13 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   reset_meas(&TB_parameters.ts_seg_prep);
   reset_meas(&TB_parameters.ts_ldpc_decode);
 
-  if (ue->nrLDPC_coding_interface.nrLDPC_coding_decoder(&slot_parameters) != 0) {
+  nrLDPC_coding_decoder_t *tb_dec = ue->nrLDPC_coding_interface.nrLDPC_coding_decoder;
+  if (t_tb_force_cpu) { /* ISAC_TD_TB_CPU_WHILE_ACQ (CB0 elimination): libldpc's CPU decoder for this TB */
+    nrLDPC_coding_decoder_t *cpu = tb_cpu_decoder();
+    if (cpu != NULL)
+      tb_dec = cpu;
+  }
+  if (tb_dec(&slot_parameters) != 0) {
     LOG_W(NR_PHY, "SENSING: passive PDSCH decode -- nrLDPC_coding_decoder failed\n");
     atomic_fetch_add(&g_ldpc_iface_err, 1);
     t_decoder_used_last = 0; /* no valid result: do not leave the previous TB's decoder */
@@ -4533,6 +4559,64 @@ int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis
   return NR_TD_GW_OK;
 }
 
+/* The batch item of one hypothesis from shared work (nr_td_cb0_batch.h contract): the entry's un-normalised LLRs
+ * (llr = view.llr, read in place: the caller retains the gw until the batch returns), the hypothesis's own TBS / R /
+ * BG / TBS_LBRM / rv, 8 iterations, and its K38 shift k_h (nr_td_gw_cb0_input's rule, without the de-matching: the
+ * batch de-matches). Same pre-checks and return codes as nr_pdsch_passive_gw_cb0(). *flags = grant bits + LBRM. */
+int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis_t *h, nr_td_cb0_item_t *it,
+                                 uint32_t *flags)
+{
+  if (gw == NULL || h == NULL || it == NULL)
+    return NR_TD_GW_E_ARG;
+  if (flags)
+    *flags = 0;
+  if (h->dmrs_mask == 0)
+    return NR_TD_GW_E_ARG;
+  const gw_ctx_t *c = (const gw_ctx_t *)nr_td_grantwork_ctx(gw);
+  if (h->k0 != c->k0)
+    return NR_TD_GW_E_K0;
+  const int nl = __builtin_popcount(c->pdu.dmrs_ports & 0xFFF);
+  const int qm = nr_get_Qm_dl(c->grant.mcs, h->mcs_table);
+  const uint32_t R = nr_get_code_rate_dl(c->grant.mcs, h->mcs_table);
+  if (qm == 0 || R == 0)
+    return NR_TD_GW_E_ARG;
+  nr_td_gw_llr_view_t v;
+  const int rc = nr_td_grantwork_get_llr(gw, nr_td_grantwork_key(h, nl, qm), h, &v);
+  if (flags)
+    *flags = nr_td_grantwork_flags(gw);
+  if (rc != NR_TD_GW_OK)
+    return rc;
+  nr_td_cb0_params_t p;
+  uint32_t hflags = 0;
+  const int r2 = gw_cb0_params(c, h, v.G, nl, qm, &p, &hflags);
+  if (r2 != NR_TD_GW_OK)
+    return r2;
+  if (flags)
+    *flags |= hflags;
+  static _Atomic int s_norm = -1;
+  if (s_norm < 0) {
+    const char *e = getenv("ISAC_LLR_NORM");
+    s_norm = (e && atoi(e) == 0) ? 0 : 1;
+  }
+  int k = 0;
+  if (s_norm != 0 && v.G >= 64)
+    k = nr_llr_norm_shift(v.llr, nr_llr_norm_span(v.G, nr_llr_norm_num_cb(p.A, p.BG)));
+  memset(it, 0, sizeof(*it));
+  it->llr = v.llr;
+  it->G = v.G;
+  it->Qm = (uint8_t)qm;
+  it->Nl = (uint8_t)nl;
+  it->rv = (uint8_t)p.rv;
+  it->tbs = p.A;
+  it->mcs_table = h->mcs_table;
+  it->tbslbrm = p.tbslbrm;
+  it->max_iter = 8; /* passive_ldpc_decode_core(): max_ldpc_iterations */
+  it->R = (uint16_t)R;
+  it->bg = (uint8_t)p.BG; /* = get_BG(A, R), as the decode */
+  it->llr_shift = (uint8_t)(k > 0 ? k : 0);
+  return NR_TD_GW_OK;
+}
+
 void nr_pdsch_passive_gw_cb0_free(nr_pdsch_gw_cb0_t *cb)
 {
   if (cb) {
@@ -4553,6 +4637,12 @@ static void cb0_ldpc_load(void)
   loader_shlibfunc_t f[] = {{.fname = "LDPCdecoder"}};
   if (load_module_version_shlib("ldpc", "", f, 1, NULL) >= 0)
     g_cb0_ldpc = (LDPC_decoderfunc_t *)f[0].fptr;
+}
+
+void *nr_pdsch_passive_cb0_cpu_ldpc(void)
+{
+  pthread_once(&g_cb0_ldpc_once, cb0_ldpc_load);
+  return (void *)g_cb0_ldpc;
 }
 
 bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok)

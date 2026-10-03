@@ -576,7 +576,25 @@ static int key_cmp(const void *a, const void *b, void *keys)
   return r ? r : (*(const int *)a - *(const int *)b); /* stable: the first item of a group is its representative */
 }
 
+static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, bool force_cpu);
 int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
+{
+  return cb0_batch_impl(items, n, out, false);
+}
+/* The CPU backend (nr_td_cb0_batch.h): no CUDA LDPC, no GPU de-matching, whatever NR_TD_CB0_CUDA_LDPC / NR_GPU_CB0 say. */
+int nr_td_cb0_batch_cpu(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
+{
+  return cb0_batch_impl(items, n, out, true);
+}
+int nr_td_cb0_get_threads(void)
+{
+  pthread_mutex_lock(&g_lock);
+  const int t = g_threads;
+  pthread_mutex_unlock(&g_lock);
+  return t;
+}
+
+static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, bool force_cpu)
 {
   if (n <= 0)
     return 0;
@@ -653,7 +671,7 @@ int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *ou
     const char *e = getenv("NR_TD_CB0_CUDA_LDPC");
     use_cuda_locked(e && atoi(e) == 1);
   }
-  if (nr > 0 && g_cuda_on == 1) {
+  if (nr > 0 && g_cuda_on == 1 && !force_cpu) {
     cb0_cuda_job_t j = {.items = ritem, .meta = rmeta, .out = rout, .n = nr, .Emax = Emax};
     atomic_init(&j.next, 0);
     const int T = g_threads < (nr + CB0_CUDA_TBS - 1) / CB0_CUDA_TBS ? g_threads : (nr + CB0_CUDA_TBS - 1) / CB0_CUDA_TBS;
@@ -679,7 +697,7 @@ int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *ou
       rout[r] = (nr_td_cb0_result_t){.pass = -1, .err = NR_TD_CB0_ERR_DECODER};
   } else if (nr > 0) {
     int8_t *l = NULL;
-    if (g_gpu_on == 1 && g_gpu) {
+    if (g_gpu_on == 1 && g_gpu && !force_cpu) {
       l = g_gpu->scratch(0, (size_t)nr * NR_TD_CB0_L_STRIDE);
       if (l && gpu_dematch(g_gpu, ritem, rmeta, nr, l, NULL, have) != 0)
         l = NULL; /* CUDA error: every item falls back to the CPU dematch */
