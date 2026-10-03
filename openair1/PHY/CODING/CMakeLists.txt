@@ -110,3 +110,18 @@ add_library(crc_byte OBJECT crc_byte.c)
 add_subdirectory(nrLDPC_coding)
 add_subdirectory(nrPolar_tools)
 add_subdirectory(nrSmallBlock)
+
+# Batched CB0 rate de-matching on the GPU for the Technique D CB0 elimination channel (nr_td_cb0_batch.h):
+# libtd_cb0_gpu.so, dlopen'd by nr_td_cb0_batch.c (NR_GPU_CB0=1 or nr_td_cb0_use_gpu(1)), so no CUDA link
+# dependency anywhere else and the CPU path works without it.
+if(ENABLE_LDPC_CUDA)
+  add_library(td_cb0_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_td_cb0_batch.cu)
+  set_target_properties(td_cb0_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(td_cb0_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
+  target_link_libraries(td_cb0_gpu PRIVATE CUDA::cudart)
+  add_dependencies(nr-uesoftmodem td_cb0_gpu)
+  if(ENABLE_TESTS)
+    add_dependencies(test_nr_td_cb0_batch td_cb0_gpu)
+  endif()
+endif()
