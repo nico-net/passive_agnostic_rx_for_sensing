@@ -16,6 +16,7 @@
  */
 
 #include "nr_pdsch_config_sweep.h"
+#include "nr_td_fieldbook.h"
 #include "nr_crc_evidence.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_td_order.h"
@@ -1549,6 +1550,22 @@ int nr_pdsch_config_sweep_add_k0_layer_excl(nr_pdsch_config_sweep_state_t *st, u
 
 /* All shared accesses, including winner publication and reset, use one short mutex. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+/* ---- fb2 field book (all under g_lock). Mode read once from ISAC_TD_FIELDBOOK (0 default, 2 = reversible pruning). ---- */
+static nr_td_fieldbook_t g_fb;
+static int g_fb_mode = -1; /* -1 = not read yet */
+static uint64_t g_fb_promotions, g_fb_withdrawals, g_fb_failopens, g_fb_pruned_ctx, g_fb_untrusted_ctx;
+static const char *const g_fb_name[NR_TD_F_COUNT] = {"tdra", "dmrs_add_pos", "dmrs_max_len"};
+static int fb_mode_locked(void)
+{
+  if (g_fb_mode < 0) {
+    const char *e = getenv("ISAC_TD_FIELDBOOK");
+    g_fb_mode = (e && atoi(e) == 2) ? 2 : 0;
+    nr_td_fieldbook_init(&g_fb, 2, 2);
+    if (g_fb_mode)
+      LOG_W(PHY, "SWEEP: field book fb%d ENABLED (ISAC_TD_FIELDBOOK)\n", g_fb_mode);
+  }
+  return g_fb_mode;
+}
 typedef struct {
   uint64_t configuration, generation, touched;
   uint16_t rnti;
@@ -1566,6 +1583,11 @@ typedef struct {
    * caller having to hand the legality function back. */
   nr_pdsch_legality_fn_t legality;
   enum { PRIORED_NONE = 0, PRIORED_OWN, PRIORED_CELL } priored; /* which prior pruned this catalog */
+  /* fb2 (ISAC_TD_FIELDBOOK=2): field-book state of this context. fb_pruned bit f = FIELD cause f is applied (the context is not
+   * independent of field f); fb_val = the value it was applied with; fb_untrusted bit f = a converged context relied on a field that is
+   * no longer PROMOTED at that value; fb_gen = field-book generation this context last synchronised with. */
+  uint32_t fb_pruned, fb_untrusted, fb_gen;
+  int32_t fb_val[NR_TD_F_COUNT];
   /* BC7b M1: the observe path appended the type-B layer and its own prune truncated ALL of it again (typeb_seen from a mask no
    * type-B entry produces, or a type-B mask a full r->obs dropped). Latched with the observed-set signature (obs_sig) it was
    * truncated under: the layer is not re-appended until that signature changes (a new mask / last symbol / pin could admit
@@ -1808,6 +1830,13 @@ static void reopen_context(sweep_context_t *c)
     context_catalog(c, rnti_ctx(c->rnti, false));
     c->priored = PRIORED_NONE;
   }
+  if (g_fb_mode == 2) { /* fb2: a reopen distrusts every reversible assumption of this context */
+    nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_PRIOR);
+    for (int f = 0; f < NR_TD_F_COUNT; f++)
+      nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f);
+    c->fb_pruned = c->fb_untrusted = 0;
+    c->fb_gen = nr_td_fieldbook_generation(&g_fb);
+  }
   /* Keep the already checked legal catalog, but discard stale decoding evidence (and the GEOM pin derived from it). */
   memset(c->state->dormant[NR_TD_DORMANT_GEOM], 0, sizeof(c->state->dormant[NR_TD_DORMANT_GEOM]));
   memset(c->state->trials, 0, sizeof(c->state->trials));
@@ -1898,6 +1927,70 @@ static void prior_promote_locked(const rnti_ctx_t *just_set)
             (unsigned long long)g_prior.configuration);
       return;
     }
+}
+
+
+/* ---- fb2 helpers (g_lock held) ---- */
+static bool fb_prior_keep(const nr_pdsch_cfg_hypothesis_t *h, const void *arg)
+{ /* the same predicate as prune_prior(): MCS table shared; DM-RS only constrained on the prior's own mapping type */
+  const prior_t *p = (const prior_t *)arg;
+  const bool dmrs_free = h->mapping_type != p->mapping_type;
+  return h->mcs_table == p->mcs_table && (dmrs_free || (h->dmrs_add_pos == p->dmrs_add_pos && h->dmrs_max_len == p->dmrs_max_len));
+}
+typedef struct { nr_td_field_t f; int32_t v; } fb_keep_arg_t;
+static bool fb_field_keep(const nr_pdsch_cfg_hypothesis_t *h, const void *arg)
+{
+  const fb_keep_arg_t *a = (const fb_keep_arg_t *)arg;
+  return nr_td_fieldbook_hyp_matches(a->f, a->v, h);
+}
+/* New context: every PROMOTED field becomes a reversible FIELD cause (TDRA matches S/L/mapping, never k0). */
+static void fb_apply_fields_locked(sweep_context_t *c)
+{
+  c->fb_gen = nr_td_fieldbook_generation(&g_fb);
+  c->fb_pruned = c->fb_untrusted = 0;
+  for (int f = 0; f < NR_TD_F_COUNT; f++) {
+    int32_t v;
+    if (!nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v))
+      continue;
+    const fb_keep_arg_t a = {(nr_td_field_t)f, v};
+    if (nr_pdsch_config_sweep_set_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f, fb_field_keep, &a) >= 0) {
+      c->fb_pruned |= 1u << f;
+      c->fb_val[f] = v;
+    }
+  }
+  if (c->fb_pruned)
+    g_fb_pruned_ctx++;
+}
+/* Field-book generation changed (promote / SUSPECT / withdraw / epoch bump): unsettled contexts restore what a no-longer-PROMOTED
+ * field alone suppressed; converged contexts keep their winner and are flagged untrusted (operator SUSPECT rule). */
+static void fb_resync_locked(sweep_context_t *c)
+{
+  const uint32_t gen = nr_td_fieldbook_generation(&g_fb);
+  if (c->fb_gen == gen)
+    return;
+  c->fb_gen = gen;
+  for (int f = 0; f < NR_TD_F_COUNT; f++) {
+    if (!(c->fb_pruned >> f & 1))
+      continue;
+    int32_t v;
+    const bool still = nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v)
+                       && (f == NR_TD_F_TDRA ? ((v ^ c->fb_val[f]) & 0x3FF) == 0 : v == c->fb_val[f]);
+    if (still)
+      continue;
+    if (c->state->winner >= 0 || c->reported) {
+      if (!(c->fb_untrusted >> f & 1)) {
+        c->fb_untrusted |= 1u << f;
+        g_fb_untrusted_ctx++;
+        LOG_W(PHY, "SWEEP: FIELDBOOK rnti=0x%04x tda=%u converged context relied on %s which is no longer PROMOTED -- UNTRUSTED (winner kept)\n",
+              c->rnti, (unsigned)c->tda, g_fb_name[f]);
+      }
+    } else {
+      nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f);
+      c->fb_pruned &= ~(1u << f);
+      LOG_W(PHY, "SWEEP: FIELDBOOK rnti=0x%04x tda=%u SUSPECT/withdraw %s: FIELD cause cleared (unsettled context restored)\n",
+            c->rnti, (unsigned)c->tda, g_fb_name[f]);
+    }
+  }
 }
 
 static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
@@ -2001,14 +2094,24 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     } else if (g_prior.valid && g_prior.configuration == configuration) {
       seed = &g_prior; from = PRIORED_CELL;
     }
-    if (seed && prune_prior(c->state, seed->mcs_table, seed->dmrs_add_pos, seed->dmrs_max_len,
-                            seed->mapping_type) > 0)
-      c->priored = from;
+    const bool fb2 = fb_mode_locked() == 2;
+    if (!fb2) {
+      if (seed && prune_prior(c->state, seed->mcs_table, seed->dmrs_add_pos, seed->dmrs_max_len,
+                              seed->mapping_type) > 0)
+        c->priored = from;
+    }
     prune_to_observed(c->state, &r->obs);
     /* k0 values the air has shown for this RNTI (k0 oracle), so each new context does not re-probe. */
     for (int k = 2; k <= 32; k++)
       if (r->k0_seen & (UINT64_C(1) << k))
         nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
+    if (fb2) {
+      /* fb2: the prior is the reversible dormant cause PRIOR (applied after the destructive observed prune, which compacts masks),
+       * then every PROMOTED field of the field book as a FIELD cause. */
+      if (seed && nr_pdsch_config_sweep_set_dormant(c->state, NR_TD_DORMANT_PRIOR, fb_prior_keep, seed) > 0)
+        c->priored = from;
+      fb_apply_fields_locked(c);
+    }
     /* K39: inherit this (configuration, tda) key's certification; a different configuration drops them all. */
     c->k0_cert = cert_get(r, configuration, tda_index);
     c->has_excl = excl_get(r, configuration, tda_index, &c->excl);
@@ -2020,6 +2123,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
+  if (fb_mode_locked() == 2)
+    fb_resync_locked(c);
   const int h = nr_pdsch_config_sweep_next(c->state, out);
   if (h >= 0)
     *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
@@ -2496,6 +2601,15 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   if (c) {
     int w = nr_pdsch_config_sweep_feed(c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
+    if (fb_mode_locked() == 2 && w < 0 && !c->state->fail_open && nr_pdsch_config_sweep_n_active(c->state) < c->state->n_hyp
+        && nr_pdsch_config_sweep_fail_open_due(c->state, 1e-3, 0.05)) {
+      /* the dormant sets may be wrong: reopen every hypothesis; the context is now independent of every field */
+      nr_pdsch_config_sweep_set_fail_open(c->state, true);
+      LOG_W(PHY, "SWEEP: FIELDBOOK rnti=0x%04x tda=%u FAIL-OPEN (no CRC pass in %u trials on the active set; fb_pruned=0x%x -> 0)\n",
+            c->rnti, (unsigned)c->tda, (unsigned)c->state->since_pass, c->fb_pruned);
+      c->fb_pruned = 0;
+      g_fb_failopens++;
+    }
     if ((++g_st_scored % 4096) == 0)
       census_log(c);
     if (c->priored && c->state->winner < 0 && c->outcomes >= PRIOR_PROBATION) {
@@ -2514,6 +2628,8 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
          * later context pay the same probation. */
         if (c->legality) {
           context_catalog(c, rnti_ctx(c->rnti, false));
+          if (g_fb_mode == 2) /* fb2: the prior is a dormant cause (the catalogue rebuild keeps same-size masks) */
+            nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_PRIOR);
           context_reindexed(c);
           apply_cert(c); /* K39: the full catalog is rebuilt; a certified k0 must keep binding */
         }
@@ -2585,19 +2701,39 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
               (unsigned)c->tda, (unsigned)c->state->hyp[w].k0, (unsigned long long)lost);
       }
       if (!r->prior.valid) {
+        if (g_fb_mode == 2) {
+          /* First convergence of this RNTI: one vote in the field book. A field this context was pruned on carries no vote. */
+          nr_td_fieldbook_t before = g_fb;
+          nr_td_fieldbook_converged(&g_fb, c->rnti, &c->state->hyp[w], (uint64_t)c->outcomes, c->fb_pruned);
+          for (int f = 0; f < NR_TD_F_COUNT; f++) {
+            const nr_td_field_state_t a = before.f[f].state, b = g_fb.f[f].state;
+            if (b == NR_TD_FS_PROMOTED && (a != NR_TD_FS_PROMOTED || before.f[f].value != g_fb.f[f].value)) {
+              g_fb_promotions++;
+              LOG_W(PHY, "SWEEP: FIELDBOOK PROMOTED %s=%d (rnti=0x%04x)\n", g_fb_name[f], (int)g_fb.f[f].value, c->rnti);
+            }
+            if (b == NR_TD_FS_SUSPECT && a != NR_TD_FS_SUSPECT)
+              LOG_W(PHY, "SWEEP: FIELDBOOK SUSPECT %s=%d (rnti=0x%04x contradicts)\n", g_fb_name[f], (int)g_fb.f[f].value, c->rnti);
+          }
+          if (g_fb.n_withdrawn != before.n_withdrawn) {
+            g_fb_withdrawals += g_fb.n_withdrawn - before.n_withdrawn;
+            LOG_W(PHY, "SWEEP: FIELDBOOK WITHDRAWN (total %u) after rnti=0x%04x\n", (unsigned)g_fb.n_withdrawn, c->rnti);
+          }
+        }
         r->prior = (prior_t){.valid = true, .configuration = c->configuration,
                              .mcs_table = c->state->hyp[w].mcs_table,
                              .dmrs_add_pos = c->state->hyp[w].dmrs_add_pos,
                              .dmrs_max_len = c->state->hyp[w].dmrs_max_len,
                              .mapping_type = c->state->hyp[w].mapping_type};
+        char fbs[32] = "";
+        if (g_fb_mode == 2) snprintf(fbs, sizeof(fbs), " fb_pruned=0x%x", c->fb_pruned);
         LOG_W(PHY,
               "SWEEP: rnti=0x%04x CONVERGED tda=%u mapping=%c k0=%u mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u "
-              "(%u/%u trials on the winner, cfg=0x%llx, plaus_k0=0x%llx) -- private to this RNTI until a second agrees\n",
+              "(%u/%u trials on the winner, cfg=0x%llx, plaus_k0=0x%llx)%s -- private to this RNTI until a second agrees\n",
               c->rnti, (unsigned)c->tda, c->state->hyp[w].mapping_type ? 'B' : 'A',
               (unsigned)c->state->hyp[w].k0, (unsigned)c->state->hyp[w].mcs_table,
               (unsigned)c->state->hyp[w].dmrs_add_pos, (unsigned)c->state->hyp[w].dmrs_max_len,
               c->state->ok[w], c->state->trials[w], (unsigned long long)c->configuration,
-              (unsigned long long)obs_plaus_union(&r->obs));
+              (unsigned long long)obs_plaus_union(&r->obs), fbs);
         prior_promote_locked(r);
       }
       if (winner)
@@ -2652,9 +2788,75 @@ int nr_pdsch_config_sweep_settled_count(void)
   return n;
 }
 
+void nr_pdsch_config_sweep_fieldbook_set_mode(int mode)
+{
+  pthread_mutex_lock(&g_lock);
+  if (mode < 0) {
+    g_fb_mode = -1;
+    (void)fb_mode_locked();
+  } else {
+    g_fb_mode = mode == 2 ? 2 : 0;
+    nr_td_fieldbook_init(&g_fb, 2, 2);
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+int nr_pdsch_config_sweep_fieldbook_mode(void)
+{
+  pthread_mutex_lock(&g_lock);
+  const int m = fb_mode_locked();
+  pthread_mutex_unlock(&g_lock);
+  return m;
+}
+void nr_pdsch_config_sweep_fieldbook_bump_epoch(void)
+{
+  pthread_mutex_lock(&g_lock);
+  if (fb_mode_locked() == 2) {
+    nr_td_fieldbook_bump_epoch(&g_fb);
+    LOG_W(PHY, "SWEEP: FIELDBOOK epoch bump (hard trigger) -> epoch %u generation %u\n", (unsigned)g_fb.epoch, (unsigned)g_fb.generation);
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_pdsch_config_sweep_fieldbook_force_promote(int field, int32_t value)
+{
+  pthread_mutex_lock(&g_lock);
+  nr_td_fieldbook_force_promote(&g_fb, (nr_td_field_t)field, value);
+  pthread_mutex_unlock(&g_lock);
+}
+bool nr_pdsch_config_sweep_fieldbook_copy(void *out, size_t n)
+{
+  if (!out || n != sizeof(g_fb))
+    return false;
+  pthread_mutex_lock(&g_lock);
+  memcpy(out, &g_fb, sizeof(g_fb));
+  pthread_mutex_unlock(&g_lock);
+  return true;
+}
+bool nr_pdsch_config_sweep_fieldbook_context(const nr_pdsch_sweep_ticket_t *ticket, uint32_t *pruned, uint32_t *untrusted)
+{
+  pthread_mutex_lock(&g_lock);
+  const sweep_context_t *c = ticket_context(ticket);
+  if (c) {
+    if (pruned) *pruned = c->fb_pruned;
+    if (untrusted) *untrusted = c->fb_untrusted;
+  }
+  pthread_mutex_unlock(&g_lock);
+  return c != NULL;
+}
+void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts)
+{
+  pthread_mutex_lock(&g_lock);
+  if (promotions) *promotions = g_fb_promotions;
+  if (withdrawals) *withdrawals = g_fb_withdrawals;
+  if (failopens) *failopens = g_fb_failopens;
+  if (pruned_contexts) *pruned_contexts = g_fb_pruned_ctx;
+  pthread_mutex_unlock(&g_lock);
+}
+
 void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
+  if (g_fb_mode >= 0)
+    nr_td_fieldbook_init(&g_fb, 2, 2); /* the field book is evidence derived from the contexts too */
   /* Every lookup/feedback path requires a live generation. Invalidate the small
    * identity fields now; select() clears the full state before reusing a slot.
    * Clearing all 1024 hypothesis arrays here used ~1.2 ms even for an empty bank.

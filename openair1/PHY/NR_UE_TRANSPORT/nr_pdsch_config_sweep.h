@@ -43,6 +43,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 struct nr_td_side_info_s; /* nr_td_order.h (which includes this header) */
 
@@ -510,6 +511,27 @@ void nr_pdsch_config_sweep_reset_all(void);
  * Defaults: 32 failures minimum, 1e-6 run probability budget. Process-wide, locked.
  * Invalid arguments leave the active policy unchanged. */
 bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget);
+
+/* ---- Reversible field book (fb2) wiring, env ISAC_TD_FIELDBOOK=0|2 (read once; default 0 = off, bit-identical). ----
+ * fb2: the cell/RNTI prior becomes the dormant cause PRIOR (not a destructive prune) and every PROMOTED field of the module-level
+ * field book becomes a FIELD cause (nr_td_fieldbook_hyp_matches; the TDRA field never prunes k0). Contexts record which fields
+ * pruned them; those votes are excluded at convergence. A generation change clears the FIELD cause of a no-longer-PROMOTED field in
+ * unsettled contexts and flags converged ones untrusted. fail_open_due() reopens a context and zeroes its pruned fields. */
+/** mode 0 or 2; -1 = re-read the environment. Test hook. */
+void nr_pdsch_config_sweep_fieldbook_set_mode(int mode);
+int nr_pdsch_config_sweep_fieldbook_mode(void);
+/** The hook the (future, robustness R7) epoch owner calls on a hard trigger: bumps the field book epoch (all PROMOTED/SUSPECT
+ *  fields become CANDIDATE, support cleared). Called today from the RX-stream discontinuity (sync loss) path. No-op while off. */
+void nr_pdsch_config_sweep_fieldbook_bump_epoch(void);
+/** Test hook: force_promote a field (0 TDRA, 1 add_pos, 2 max_len). */
+void nr_pdsch_config_sweep_fieldbook_force_promote(int field, int32_t value);
+/** Test hook: copy the field book into `out` (sizeof(nr_td_fieldbook_t) bytes, `n` checked). */
+bool nr_pdsch_config_sweep_fieldbook_copy(void *out, size_t n);
+/** pruned: bit f = context is pruned by field f (not independent); untrusted: bit f = a converged context relied on field f which is no
+ *  longer PROMOTED at that value. False for an unknown ticket. */
+bool nr_pdsch_config_sweep_fieldbook_context(const nr_pdsch_sweep_ticket_t *ticket, uint32_t *pruned, uint32_t *untrusted);
+/** Cumulative: promotions, withdrawals, fail-opens, contexts created with at least one field pruned. */
+void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts);
 
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
