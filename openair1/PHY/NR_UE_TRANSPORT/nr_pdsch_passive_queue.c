@@ -357,6 +357,10 @@ static PHY_VARS_NR_UE *g_ue = NULL;
  * PASSIVE_RX_ONLY_HANDOVER.md records a shifted __thread layout producing an AVX alignment fault,
  * and this is far larger than the buffer that did it. */
 static c16_t *g_rxdataF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+/* GrantWork-lite (ISAC_TD_GRANTWORK=1): g_rxdataF[i] is the FEP buffer the grant's GrantWork borrows; its
+ * generation moves on every slot group, so a gw that outlives its group can no longer compute on it. */
+static uint64_t g_fep_gen[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+static bool g_rxdataF_gw; /* g_rxdataF[] came from nr_td_gw_alloc (ISAC_TD_GRANTWORK=1 only: flag off = unchanged) */
 
 typedef struct {
   int idx;
@@ -876,6 +880,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     nr_pdsch_passive_set_slot_share(n_more > 0, rb_lo, rb_hi - rb_lo);
     if (n_more > 0) atomic_fetch_add_explicit(&g_slot_groups, 1, memory_order_relaxed);
+    __atomic_fetch_add(&g_fep_gen[idx], 1, __ATOMIC_RELEASE); /* g_rxdataF[idx] now belongs to this slot group */
 
     /* ---- STALENESS CHECK. A job's raw IQ lives in rxdata only until the producer reaches the SAME
      * slot index one frame later, so decoding after that reads the NEXT frame's samples: the CRC
@@ -1110,6 +1115,23 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (s_probe_all)
         job.layout_probe = 1;
     }
+    /* GRANTWORK-LITE (ISAC_TD_GRANTWORK=1, default off; levers plan R1): this grant's shared per-geometry work
+     * (FEP / chest / LLRs per signature, immutable, unified memory) -- the main decode computes and publishes
+     * its own signature; CB0 of other hypotheses can then be extracted from it (nr_pdsch_passive_gw_cb0).
+     * ISAC_TD_GW_PROBE=1 also serves layout probes from it (whole slot instead of the probe horizon). */
+    static _Atomic int s_gw_on = -1, s_gw_probe = -1; /* _Atomic: N consumers */
+    if (s_gw_on < 0) {
+      const char *e = getenv("ISAC_TD_GW_PROBE");
+      s_gw_probe = (e != NULL && atoi(e) != 0) ? 1 : 0;
+      e = getenv("ISAC_TD_GRANTWORK");
+      s_gw_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
+    }
+    nr_td_grantwork_t *gw = NULL;
+    if (s_gw_on && !gpu_job) {
+      gw = nr_pdsch_passive_grantwork_begin(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, job.fo_hz,
+                                            job.sweep_ticket.k0, &rxdataF[0][0], &g_fep_gen[idx]);
+      nr_pdsch_passive_set_grantwork(gw, s_gw_probe != 0);
+    }
     nr_pdsch_passive_probe_mode(job.layout_probe != 0);
     /* PT-RS density sweep only once the layout and the Technique-D context are settled (a pinned
      * conf has no ticket: generation 0). */
@@ -1122,6 +1144,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const bool probe_outcome = nr_pdsch_passive_probe_outcome(); /* before the self-check re-runs the decode */
     if (job.layout_probe && !gpu_job && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       nr_pdsch_passive_probe_equiv_check(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF); /* debug, env-gated */
+    nr_pdsch_passive_set_grantwork(NULL, false);
     /* ISAC_GPU_SELFCHECK=N: the first N GPU-fed decodes are re-run on the CPU chain and compared --
      * TB/CB0 CRC agreement, LLR sign agreement and max |dLLR| after matching the two scales. */
     {
@@ -1437,6 +1460,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         }
       }
     }
+    if (gw != NULL) {
+      /* Debug / profiling (env-gated), after every use of this job's decoded TB: the reruns reuse the
+       * private HARQ buffers. Then this job's reference goes; the gw is freed with its last one. */
+      const bool gw_used = nr_pdsch_passive_last_used_grantwork(NULL);
+      nr_slot_fep_fo_override_hz = job.fo_hz;
+      if (!job.layout_probe) {
+        nr_pdsch_passive_gw_check(gw, st_raw);
+        nr_pdsch_passive_gw_profile(gw, gw_used);
+      }
+      nr_slot_fep_fo_override_hz = saved_fo;
+      nr_td_grantwork_release(gw);
+    }
     } /* slot group */
   }
 
@@ -1518,10 +1553,19 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 
   const uint32_t rxdataF_sz = ue->frame_parms.samples_per_slot_wCP;
   for (int i = 0; i < n_consumers; i++) {
-    g_rxdataF[i] = (c16_t *)malloc16_clear((size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t));
+    /* nr_td_gw_alloc: unified (managed) memory in a CUDA build, so a GPU kernel can read the FEP output a
+     * GrantWork shares without a copy; plain aligned malloc otherwise. */
+    const size_t rxF_bytes = (size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t);
+    if (i == 0) {
+      const char *e = getenv("ISAC_TD_GRANTWORK");
+      g_rxdataF_gw = e != NULL && atoi(e) != 0;
+    }
+    g_rxdataF[i] = g_rxdataF_gw ? (c16_t *)nr_td_gw_alloc(rxF_bytes) : (c16_t *)malloc16_clear(rxF_bytes);
+    if (g_rxdataF_gw && g_rxdataF[i] != NULL)
+      memset(g_rxdataF[i], 0, rxF_bytes);
     if (g_rxdataF[i] == NULL) {
       LOG_E(PHY, "SENSING: passive PDSCH queue: rxdataF allocation failed for consumer %d\n", i);
-      for (int j = 0; j < i; j++) { free(g_rxdataF[j]); g_rxdataF[j] = NULL; }
+      for (int j = 0; j < i; j++) { if (g_rxdataF_gw) nr_td_gw_free(g_rxdataF[j]); else free(g_rxdataF[j]); g_rxdataF[j] = NULL; }
       return false;
     }
   }
@@ -1697,7 +1741,10 @@ void nr_pdsch_passive_queue_stop(void)
   pthread_mutex_unlock(&g_lock);
   for (int i = 0; i < g_nthreads; i++) {
     pthread_join(g_threads[i], NULL);
-    free(g_rxdataF[i]);
+    if (g_rxdataF_gw)
+      nr_td_gw_free(g_rxdataF[i]);
+    else
+      free(g_rxdataF[i]);
     g_rxdataF[i] = NULL;
   }
   if (atomic_exchange(&g_gpu_worker_running, 0)) {

@@ -268,6 +268,52 @@ double nr_pdsch_passive_zp_grant_score(const NR_DL_FRAME_PARMS *fp, const fapi_n
                                        const freq_alloc_bitmap_t *fa, const c16_t *rxdataF_flat, uint32_t stride,
                                        int slot_rx, int fep_s0, int fep_n, uint16_t skip_symbols, bool dedicated, int i);
 
+/* ---- GrantWork-lite (nr_td_grantwork.h; ISAC_TD_GRANTWORK=1 in the queue) ---------------------------------
+ * A GrantWork made for one grant by nr_pdsch_passive_grantwork_begin() and attached to the calling thread
+ * makes nr_pdsch_passive_decode() look its geometry signature up first: the first decode of a signature
+ * computes as always and publishes its decoder-input LLRs (descrambled, normalised: what the LDPC reads);
+ * every later decode of that signature skips FEP / chest / equalisation / LLRs. */
+#include "nr_td_grantwork.h"
+#include "nr_pdsch_config_sweep.h"
+/** `rxdataF_flat` is the caller's FEP buffer the decodes of this grant use ([ant][samples_per_slot_wCP]);
+ *  `fep_gen` its reuse generation (bumped when the buffer moves to another slot). `pdu` / `grant` as
+ *  enqueued (before any decode wrote into them), `grant` with source_absolute_slot set. `k0` = the job's
+ *  hypothesised k0 (part of the signature). */
+nr_td_grantwork_t *nr_pdsch_passive_grantwork_begin(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                                    const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
+                                                    const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                                                    double fo_hz, uint8_t k0, c16_t *rxdataF_flat,
+                                                    const uint64_t *fep_gen);
+/** Attach (NULL detaches) for this thread's next decodes. `probes_too` (ISAC_TD_GW_PROBE): layout probes
+ *  also take their LLRs from the gw (whole slot, no probe horizon) instead of their own truncated chain. */
+void nr_pdsch_passive_set_grantwork(nr_td_grantwork_t *gw, bool probes_too);
+/** Whether this thread's last decode took (READY) or produced (OWNER) its LLRs through the gw. */
+bool nr_pdsch_passive_last_used_grantwork(bool *served_ready);
+
+/** CB0 of one hypothesis from shared work: the entry of the hypothesis's signature (computed lazily if
+ *  missing), then segmentation / TBS_LBRM / E of the hypothesis's own TBS and MCS table, deinterleave and rate
+ *  de-match of code block 0 -- what a full decode of that hypothesis feeds the LDPC for r = 0. `d` is a
+ *  unified-memory buffer (nr_td_gw_alloc), reused across calls; free with nr_pdsch_passive_gw_cb0_free(). */
+typedef struct {
+  nr_td_cb0_params_t p;
+  int16_t *d;         /* (BG == 1 ? 68 : 52) * Z rate-de-matched LLRs of code block 0 */
+  uint32_t dcap;
+  const int16_t *llr; /* the entry's LLRs (valid while the gw lives); code block 0 = llr[0 .. p.E) */
+  uint64_t sig;
+} nr_pdsch_gw_cb0_t;
+int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis_t *h, nr_pdsch_gw_cb0_t *out);
+void nr_pdsch_passive_gw_cb0_free(nr_pdsch_gw_cb0_t *cb);
+/** CPU reference decode of that CB0 input through the receiver's own LDPC library (segment decoder steps:
+ *  filler, int8 saturation, LDPCdecoder, CRC24B -- CRC24A when C == 1 -- and the all-zero guard). Returns the
+ *  CB0 verdict; *ldpc_ok = the decoder's own CRC verdict before the all-zero guard. */
+bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok);
+/** ISAC_TD_GW_CHECK=N (debug): READY-path and no-GrantWork re-decodes of 1 main decode in N, compared bit
+ *  for bit with it (GW_EQUIV), plus CB0 extraction vs the segment decoder's own CB0 input. Call right after
+ *  the job's last use of the decoded TB, with that decode's status, before any other decode on the thread. */
+void nr_pdsch_passive_gw_check(nr_td_grantwork_t *gw, nr_pdsch_passive_decode_status_t st_first);
+/** ISAC_TD_GW_PROFILE=1 (profiling): CB0-decode the grant under each MCS table (GWTIM costs). */
+void nr_pdsch_passive_gw_profile(nr_td_grantwork_t *gw, bool used);
+
 /* Metrics getter (nr_passive_metrics.c): LDPC census counters. */
 void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *tb_fail, uint64_t *zero_tb);
 
