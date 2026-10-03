@@ -2628,10 +2628,21 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
          * later context pay the same probation. */
         if (c->legality) {
           context_catalog(c, rnti_ctx(c->rnti, false));
-          if (g_fb_mode == 2) /* fb2: the prior is a dormant cause (the catalogue rebuild keeps same-size masks) */
+          if (g_fb_mode == 2) {
+            /* fb2: the rebuild keeps index-based masks when n_hyp is unchanged and zeroes them otherwise, so PRIOR and FIELD bits
+             * could be stale or misattributed after the k0/type-B layers were re-added: clear them all (as reopen_context does). */
             nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_PRIOR);
+            for (int f = 0; f < NR_TD_F_COUNT; f++)
+              nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f);
+            c->fb_pruned = 0;
+          }
           context_reindexed(c);
           apply_cert(c); /* K39: the full catalog is rebuilt; a certified k0 must keep binding */
+          if (g_fb_mode == 2) { /* re-apply the PROMOTED fields on the final catalogue (the prior stays dropped) */
+            const uint64_t keep_cnt = g_fb_pruned_ctx;
+            fb_apply_fields_locked(c);
+            g_fb_pruned_ctx = keep_cnt; /* same context: not a new pruned context */
+          }
         }
         if (c->priored == PRIORED_CELL) {
           g_prior.valid = false;
@@ -2842,13 +2853,14 @@ bool nr_pdsch_config_sweep_fieldbook_context(const nr_pdsch_sweep_ticket_t *tick
   pthread_mutex_unlock(&g_lock);
   return c != NULL;
 }
-void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts)
+void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts, uint64_t *untrusted_contexts)
 {
   pthread_mutex_lock(&g_lock);
   if (promotions) *promotions = g_fb_promotions;
   if (withdrawals) *withdrawals = g_fb_withdrawals;
   if (failopens) *failopens = g_fb_failopens;
   if (pruned_contexts) *pruned_contexts = g_fb_pruned_ctx;
+  if (untrusted_contexts) *untrusted_contexts = g_fb_untrusted_ctx;
   pthread_mutex_unlock(&g_lock);
 }
 

@@ -29,7 +29,7 @@ typedef struct {
    * TD_EXCL_RESTART_ALARM (restarts > distinct DCI phases). */
   uint64_t td_excl_restarts, td_excl_truncs, td_excl_restart_alarms;
   /* Field book fb2 (ISAC_TD_FIELDBOOK=2; all 0 while off). */
-  uint64_t td_fb_promotions, td_fb_withdrawals, td_fb_failopens, td_fb_pruned_contexts;
+  uint64_t td_fb_promotions, td_fb_withdrawals, td_fb_failopens, td_fb_pruned_contexts, td_fb_untrusted_ctx;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then

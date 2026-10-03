@@ -530,8 +530,8 @@ bool nr_pdsch_config_sweep_fieldbook_copy(void *out, size_t n);
 /** pruned: bit f = context is pruned by field f (not independent); untrusted: bit f = a converged context relied on field f which is no
  *  longer PROMOTED at that value. False for an unknown ticket. */
 bool nr_pdsch_config_sweep_fieldbook_context(const nr_pdsch_sweep_ticket_t *ticket, uint32_t *pruned, uint32_t *untrusted);
-/** Cumulative: promotions, withdrawals, fail-opens, contexts created with at least one field pruned. */
-void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts);
+/** Cumulative: promotions, withdrawals, fail-opens, contexts created with at least one field pruned, converged contexts flagged untrusted. */
+void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts, uint64_t *untrusted_contexts);
 
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,

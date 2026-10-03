@@ -71,11 +71,11 @@ TEST(PassiveMetrics, TdExclRestartKeysPresent) {
 TEST(PassiveMetrics, FieldBookKeysPresent) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
-  m.td_fb_promotions = 1; m.td_fb_withdrawals = 2; m.td_fb_failopens = 3; m.td_fb_pruned_contexts = 4;
+  m.td_fb_promotions = 1; m.td_fb_withdrawals = 2; m.td_fb_failopens = 3; m.td_fb_pruned_contexts = 4; m.td_fb_untrusted_ctx = 5;
   char buf[4096];
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   const std::string s(buf);
-  for (const char *k : {"\"td_fb_promotions\":1", "\"td_fb_withdrawals\":2", "\"td_fb_failopens\":3", "\"td_fb_pruned_contexts\":4"})
+  for (const char *k : {"\"td_fb_promotions\":1", "\"td_fb_withdrawals\":2", "\"td_fb_failopens\":3", "\"td_fb_pruned_contexts\":4", "\"td_fb_untrusted_ctx\":5"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }
 TEST(PassiveMetrics, Bc12aSib1CensusKeysPresentPerDciFormat) {

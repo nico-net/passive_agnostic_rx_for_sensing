@@ -3418,8 +3418,8 @@ TEST_F(PdschFieldBook, FieldBookOnUsesDormantPruning)
   uint32_t pr = 0, un = 0;
   ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&t2, &pr, &un));
   EXPECT_EQ(pr, 1u << NR_TD_F_DMRS_ADD_POS);
-  uint64_t p0, w0, f0, c0, p1, w1, f1, c1;
-  nr_pdsch_config_sweep_fieldbook_stats(&p1, &w1, &f1, &c1);
+  uint64_t p0, w0, f0, c0, p1, w1, f1, c1, u1;
+  nr_pdsch_config_sweep_fieldbook_stats(&p1, &w1, &f1, &c1, &u1);
   EXPECT_GE(c1, 1u);
   (void)p0; (void)w0; (void)f0; (void)c0;
   /* the cell/RNTI prior also goes in as the dormant cause PRIOR, not a destructive prune */
@@ -3472,8 +3472,8 @@ TEST_F(PdschFieldBook, FailOpenRestoresAllCauses)
   const auto t0 = open(0x4601, 0);
   const auto &s0 = snap(t0);
   ASSERT_TRUE(dormant_any(s0, NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
-  uint64_t p, wd, fo0, c, fo1;
-  nr_pdsch_config_sweep_fieldbook_stats(&p, &wd, &fo0, &c);
+  uint64_t p, wd, fo0, c, fo1, ut;
+  nr_pdsch_config_sweep_fieldbook_stats(&p, &wd, &fo0, &c, &ut);
   unsigned seed = 5;
   nr_pdsch_cfg_hypothesis_t w{};
   bool conv = false;
@@ -3485,7 +3485,7 @@ TEST_F(PdschFieldBook, FailOpenRestoresAllCauses)
   }
   ASSERT_TRUE(conv) << "fail-open must let the true (dormant) hypothesis be found";
   EXPECT_TRUE(same_hyp(w, fb_truth));
-  nr_pdsch_config_sweep_fieldbook_stats(&p, &wd, &fo1, &c);
+  nr_pdsch_config_sweep_fieldbook_stats(&p, &wd, &fo1, &c, &ut);
   EXPECT_EQ(fo1, fo0 + 1);
   const auto t1 = open(0x4601, 0);
   EXPECT_TRUE(snap(t1).fail_open);
@@ -3531,4 +3531,25 @@ TEST_F(PdschFieldBook, TdraPruneNeverRemovesK0)
   }
   EXPECT_GT(slm_match, 0);
   EXPECT_EQ(kept, slm_match); /* everything else is dormant, nothing of the matching (S, L, mapping) is */
+}
+
+TEST_F(PdschFieldBook, ProbationFailureLeavesNoStaleFieldState)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_cfg_hypothesis_t w{};
+  ASSERT_GT(drive_context(9, 0x4601, 0, fb_truth, 0.54, 400000, &w), 0); /* private prior: mcs_table 1 */
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  /* sibling TDA whose truth the PRIOR excludes (mcs_table 0): probation fails and the catalogue is restored */
+  const nr_pdsch_cfg_hypothesis_t truth1{2, 12, 0, 1, 1, 0, 0};
+  ASSERT_GT(drive_context(9, 0x4601, 1, truth1, 0.54, 400000, &w), 0);
+  EXPECT_TRUE(same_hyp(w, truth1));
+  const auto t = open(0x4601, 1, 9);
+  const auto &s = snap(t);
+  uint32_t pr = 0, un = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&t, &pr, &un));
+  EXPECT_FALSE(dormant_any(s, NR_TD_DORMANT_PRIOR));
+  for (int f = 0; f < NR_TD_F_COUNT; f++)
+    EXPECT_EQ(dormant_any(s, NR_TD_DORMANT_FIELD_BASE + f), (pr >> f & 1) != 0) << "field " << f << ": mask and fb_pruned disagree";
+  ASSERT_GE(s.winner, 0);
+  EXPECT_TRUE(nr_pdsch_config_sweep_is_active(&s, s.winner)) << "the truth must not be asleep";
 }
