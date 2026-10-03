@@ -41,7 +41,7 @@ static void cfg_locked(void)
   const char *ls = getenv("ISAC_LLR_SCALE");
   g_llr_scale = ls != NULL && *ls && atof(ls) != 0.0 && atof(ls) != 1.0;
   const long nc = sysconf(_SC_NPROCESSORS_ONLN);
-  nr_td_cb0_sched_init(&g_sched, env_d("ISAC_TD_CB0_BUDGET_US", 10000), env_d("ISAC_TD_CB0_CPU_PCT", 30), nc > 0 ? (int)nc : 1, 8);
+  nr_td_cb0_sched_init(&g_sched, env_d("ISAC_TD_CB0_BUDGET_US", NR_TD_CB0_BUDGET_US_DEFAULT), env_d("ISAC_TD_CB0_CPU_PCT", 30), nc > 0 ? (int)nc : 1, 8);
   LOG_A(PHY,
         "SENSING: TD_CB0 wiring on: budget=%.0f us/grant cpu_pct=%.0f ncpu=%d threads=%d B0=%d rank_max=%d tb_cpu_while_acq=%d "
         "backend=%d engine_wired=%d\n",
@@ -332,7 +332,18 @@ void nr_td_cb0_wire_run(nr_td_grantwork_t *gw)
     pthread_mutex_lock(&g_lock);
     nr_td_cb0_sched_account(&g_sched, p->planned_us, p->ex.wall_ns, thr, n, g_freeze ? 0 : p->ex.sum_iters, build_ns,
                             g_freeze ? 0 : new_sigs);
+    const nr_td_cb0_sched_t sc = g_sched;
     pthread_mutex_unlock(&g_lock);
+    const uint64_t nb = atomic_load(&s_batches);
+    if (nb == 1 || nb % 500 == 0) {
+      nr_td_cb0_sizes_t z;
+      nr_td_cb0_sched_sizes(&sc, p->n_active, 1, &z);
+      LOG_A(PHY,
+            "SENSING: TD_CB0_SCHED batches=%lu us_per_iter=%.1f item_us=%.0f sig_us=%.0f tokens_us=%.0f b_items=%d g_target=%d "
+            "last: n=%d new_sigs=%d build_us=%.0f batch_wall_us=%.0f threads=%d backend=%u\n",
+            (unsigned long)nb, sc.us_per_iter, nr_td_cb0_sched_item_us(&sc), sc.sig_us, sc.tokens_us, z.b_items, z.g_target, n,
+            new_sigs, build_ns / 1000.0, p->ex.wall_ns / 1000.0, thr, p->ex.backend);
+    }
   } else {
     pthread_mutex_lock(&g_lock);
     nr_td_cb0_sched_account(&g_sched, p->planned_us, 0, 0, 0, 0, build_ns, g_freeze ? 0 : new_sigs); /* refund, charge the build */

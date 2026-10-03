@@ -273,12 +273,19 @@ TEST(Cb0Sched, BudgetSizesAndTokenBucket)
   EXPECT_EQ(nr_td_cb0_sched_B(&s), (int)(10000 / (NR_TD_CB0_US_PER_ITER_INIT * 8)));
   nr_td_cb0_sizes_t z;
   nr_td_cb0_sched_sizes(&s, 700, 100, &z);
-  EXPECT_EQ(z.g_target, 1); /* floor(0.4 * 10000 / (2 * 1600)) */
-  EXPECT_EQ(z.b_items, (int)((10000 - 2 * NR_TD_CB0_SIG_US_INIT) / (NR_TD_CB0_US_PER_ITER_INIT * 8)));
+  EXPECT_EQ(z.g_target, 1); /* floor(0.4 * 10000 / (2 * 6000)) = 0 -> 1 */
+  EXPECT_EQ(z.b_items, 1);  /* 10000 - 12000 < 0: one item */
   EXPECT_EQ(z.m1, 100u);
-  EXPECT_EQ(z.m2, 1u); /* ceil(700 / 100) = 7 items expected <= b_items */
+  EXPECT_EQ(z.m2, 7u); /* ceil(700 / 100) = 7 items per geometry, 1 affordable */
+  nr_td_cb0_sched_t dflt;
+  nr_td_cb0_sched_init(&dflt, 0, 30, 20, 8); /* default budget: sized for 4 RX */
+  EXPECT_EQ(dflt.budget_us, NR_TD_CB0_BUDGET_US_DEFAULT);
+  nr_td_cb0_sched_sizes(&dflt, 700, 100, &z);
+  EXPECT_EQ(z.g_target, 1);
+  EXPECT_EQ(z.b_items, (int)((NR_TD_CB0_BUDGET_US_DEFAULT - 2 * NR_TD_CB0_SIG_US_INIT) / (NR_TD_CB0_US_PER_ITER_INIT * 8)));
+  EXPECT_EQ(z.m2, 1u);
   nr_td_cb0_sched_t big;
-  nr_td_cb0_sched_init(&big, 40000, 30, 20, 8);
+  nr_td_cb0_sched_init(&big, 160000, 30, 20, 8);
   nr_td_cb0_sched_sizes(&big, 700, 100, &z);
   EXPECT_EQ(z.g_target, 5);
   EXPECT_EQ(z.m1, 20u);
@@ -290,7 +297,7 @@ TEST(Cb0Sched, BudgetSizesAndTokenBucket)
   EXPECT_EQ(planned, 0.0);
   EXPECT_EQ(s.tokens_us, before);
   EXPECT_TRUE(nr_td_cb0_sched_admit(&s, 1000, 10, 1, &planned));
-  EXPECT_NEAR(planned, 10 * 360.0 + 1600.0, 1e-6);
+  EXPECT_NEAR(planned, 10 * 360.0 + NR_TD_CB0_SIG_US_INIT, 1e-6);
   /* refill at cpu_pct * ncpu: 30 % of 20 CPUs = 6 CPU-us per us */
   nr_td_cb0_sched_account(&s, planned, 0, 0, 0, 0, 0, 0); /* nothing ran: full refund */
   EXPECT_NEAR(s.tokens_us, before, 1e-6);

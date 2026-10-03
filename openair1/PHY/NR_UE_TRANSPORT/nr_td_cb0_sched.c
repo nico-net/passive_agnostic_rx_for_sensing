@@ -121,7 +121,7 @@ int nr_td_cb0_subset_select(uint64_t seed, int64_t abs_slot, const uint64_t *gke
 void nr_td_cb0_sched_init(nr_td_cb0_sched_t *s, double budget_us, double cpu_pct, int ncpu, int max_iter)
 {
   memset(s, 0, sizeof(*s));
-  s->budget_us = budget_us > 0 ? budget_us : 10000.0;
+  s->budget_us = budget_us > 0 ? budget_us : NR_TD_CB0_BUDGET_US_DEFAULT;
   s->cpu_pct = cpu_pct > 0 ? (cpu_pct > 100 ? 100 : cpu_pct) : 30.0;
   s->ncpu = ncpu > 0 ? ncpu : 1;
   s->max_iter = max_iter > 0 ? max_iter : 8;

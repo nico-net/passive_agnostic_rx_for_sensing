@@ -103,7 +103,7 @@ int nr_td_cb0_subset_select(uint64_t seed, int64_t abs_slot, const uint64_t *gke
 #define NR_TD_CB0_SIGS_PER_GEO 2.0 /* planning: GrantWork signatures per geometry (one per distinct Qm of the 3 MCS tables at the
                                     * grant's MCS index: 1..3, typically 2); admission uses the exact upper bound */
 typedef struct {
-  double budget_us;   /* per-grant CPU budget (ISAC_TD_CB0_BUDGET_US) */
+  double budget_us;   /* per-grant CPU budget (ISAC_TD_CB0_BUDGET_US, default NR_TD_CB0_BUDGET_US_DEFAULT) */
   double cpu_pct;     /* host CPU share cap (ISAC_TD_CB0_CPU_PCT) */
   int ncpu;           /* online CPUs */
   int max_iter;       /* LDPC iteration policy (8) */
@@ -114,7 +114,11 @@ typedef struct {
   uint64_t updates;   /* estimator updates */
 } nr_td_cb0_sched_t;
 #define NR_TD_CB0_US_PER_ITER_INIT 45.0 /* [MEASURED, DGX GB10, task-BATCH] ~360 us per wrong CB0 at 8 iterations, 1 thread */
-#define NR_TD_CB0_SIG_US_INIT 1600.0    /* [MEASURED, DGX rfsim 106 PRB, task-GW GWTIM] shared FEP+chest+LLR 1558 us */
+/* 4 RX sizing (operator 2026-10-04: 4-RX beds only). [MEASURED, DGX rfsim 106 PRB 1 RX, task-GW GWTIM] shared FEP + chest
+ * + LLR = 1558 us per signature (FEP 806, chest 351, demod 357), all antenna-linear; x4 for 4 RX = ~6.2 ms [ESTIMATE, not
+ * measured at 4 RX]: the estimator replaces it with the measured build cost after the first batches. */
+#define NR_TD_CB0_SIG_US_INIT 6000.0
+#define NR_TD_CB0_BUDGET_US_DEFAULT 20000.0 /* ISAC_TD_CB0_BUDGET_US default: ~1 new geometry (2 signatures) + ~20 CB0 at 4 RX */
 void nr_td_cb0_sched_init(nr_td_cb0_sched_t *s, double budget_us, double cpu_pct, int ncpu, int max_iter);
 /* Worst-case CPU cost of one item, and B = items per grant affordable within the whole budget (>= 1). */
 double nr_td_cb0_sched_item_us(const nr_td_cb0_sched_t *s);

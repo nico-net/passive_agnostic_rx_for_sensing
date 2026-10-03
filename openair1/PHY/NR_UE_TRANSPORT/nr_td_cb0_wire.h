@@ -14,7 +14,7 @@
  *   nr_td_cb0_wire_feed() AFTER the grant's TB feedback (and before anything that may re-index the context): the
  *                         admissibility decision (nr_td_cb0_admissibility) and the feed through nr_td_cb0_adapter.
  * Requires ISAC_TD_GRANTWORK=1: without it the channel refuses (logged once, reason no_grantwork).
- * Environment (read once): ISAC_TD_CB0_BUDGET_US (10000), ISAC_TD_CB0_CPU_PCT (30), ISAC_TD_CB0_THREADS (8),
+ * Environment (read once): ISAC_TD_CB0_BUDGET_US (20000, sized for 4 RX), ISAC_TD_CB0_CPU_PCT (30), ISAC_TD_CB0_THREADS (8),
  * ISAC_TD_CB0_RANK_MAX (4), ISAC_TD_TB_CPU_WHILE_ACQ (1), ISAC_TD_CB0_BACKEND (auto). */
 #ifndef NR_TD_CB0_WIRE_H
 #define NR_TD_CB0_WIRE_H
