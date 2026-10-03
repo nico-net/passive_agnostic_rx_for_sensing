@@ -269,6 +269,11 @@ double nr_pdsch_passive_zp_grant_score(const NR_DL_FRAME_PARMS *fp, const fapi_n
                                        int slot_rx, int fep_s0, int fep_n, uint16_t skip_symbols, bool dedicated, int i);
 
 /* Metrics getter (nr_passive_metrics.c): LDPC census counters. */
+/* Decoder of the last TB decoded on this thread: NRLDPC_DECODER_* (0 unknown, 1 CPU, 2 CUDA).
+ * Rule (K34/K36, levers-spec 9.3 same-decoder rule): the unit is the TB; any evidence built from decode outcomes
+ * (CRC passes, first-code-block eliminations) is stratified by this value and NEVER merged across values. */
+uint8_t nr_pdsch_passive_last_decoder_used(void);
+void nr_pdsch_passive_ldpc_tb_decoders(uint64_t *cpu, uint64_t *cuda);
 void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *tb_fail, uint64_t *zero_tb);
 
 #endif // NR_PDSCH_PASSIVE_DECODE_H
