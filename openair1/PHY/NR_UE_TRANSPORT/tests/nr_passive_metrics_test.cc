@@ -21,6 +21,7 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"pdschq_stale_after_decode\":7"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_full\":161"), std::string::npos);
   EXPECT_NE(s.find("\"pci\":64"), std::string::npos);
+  EXPECT_NE(s.find("\"ldpc_cuda_errors\":0,\"ldpc_cuda_fallbacks\":0,\"ldpc_cuda_poisoned\":0,\"ldpc_cuda_disabled\":0,\"ldpc_cuda_breaker_trips\":0,\"ldpc_tb_cpu\":0,\"ldpc_tb_cuda\":0"), std::string::npos);
 }
 
 TEST(PassiveMetrics, ReturnsMinusOneWhenBufferTooSmall) {
@@ -66,6 +67,16 @@ TEST(PassiveMetrics, TdExclRestartKeysPresent) {
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   const std::string s(buf);
   for (const char *k : {"\"td_excl_restarts\":3", "\"td_excl_truncs\":4", "\"td_excl_restart_alarms\":5"})
+    EXPECT_NE(s.find(k), std::string::npos) << k;
+}
+TEST(PassiveMetrics, FieldBookKeysPresent) {
+  nr_passive_metrics_t m = {};
+  m.acq_state = "TRACKING";
+  m.td_fb_promotions = 1; m.td_fb_withdrawals = 2; m.td_fb_failopens = 3; m.td_fb_pruned_contexts = 4; m.td_fb_untrusted_ctx = 5;
+  char buf[4096];
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  const std::string s(buf);
+  for (const char *k : {"\"td_fb_promotions\":1", "\"td_fb_withdrawals\":2", "\"td_fb_failopens\":3", "\"td_fb_pruned_contexts\":4", "\"td_fb_untrusted_ctx\":5"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }
 TEST(PassiveMetrics, Bc12aSib1CensusKeysPresentPerDciFormat) {

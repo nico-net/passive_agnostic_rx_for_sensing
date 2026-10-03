@@ -1,6 +1,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // field book epoch bump on stream discontinuity
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
 #include <dlfcn.h>
 /*
@@ -1629,6 +1630,12 @@ void *UE_thread(void *arg)
           /* The state tracker's other inputs are all latched discovery state and cannot regress
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
+          /* Field book hard trigger (robustness plan R7 will own the epoch centrally; until then this stream-discontinuity edge
+           * is the only one wired): old-epoch field evidence never maintains pruning. No-op unless ISAC_TD_FIELDBOOK=2.
+           * KNOWN LIMITATION: this fires on EVERY sync-invalidating gap, including SOFT gaps under 10 ms (operator rule 2026-10-02:
+           * <10 ms SOFT, >=10 ms HARD_REVERIFY). Robustness plan R7 must REPLACE this call site with the SOFT/HARD classification,
+           * not add a second bump next to it. */
+          nr_pdsch_config_sweep_fieldbook_bump_epoch();
           /* No RX/TX job has been allocated for this slot yet. Dispatching it would
            * feed invalid samples to discovery and overwrite UNSYNC with SYNCED below. */
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()))

@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#define _GNU_SOURCE
 #include "nr_passive_metrics.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <dlfcn.h>
 #include "common/utils/LOG/log.h"
 #include "nr_passive_acq_state.h"
 #include "nr_pdcch_passive_queue.h"
@@ -55,6 +57,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->pdschq_stale_after_decode = pq.stale_after_decode;
   m->pdschq_max_lag = pq.max_lag_slots;
   nr_pdsch_config_sweep_excl_restart_stats(&m->td_excl_restarts, &m->td_excl_truncs, &m->td_excl_restart_alarms);
+  nr_pdsch_config_sweep_fieldbook_stats(&m->td_fb_promotions, &m->td_fb_withdrawals, &m->td_fb_failopens, &m->td_fb_pruned_contexts, &m->td_fb_untrusted_ctx);
   uint64_t cs[3][3], cd[3][3];
   nr_td_census_get(cs);
   nr_td_census_get_deftab(cd);
@@ -73,6 +76,22 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->td_deftab_mismatch_11 = cd[NR_TD_FMT_11][NR_TD_CENSUS_MISMATCH];
   m->td_deftab_na = cd[0][NR_TD_CENSUS_NONE] + cd[1][NR_TD_CENSUS_NONE] + cd[2][NR_TD_CENSUS_NONE];
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
+  { /* libldpc_cuda.so is dlopen'd RTLD_GLOBAL when --loader.ldpc.shlibversion _cuda is used; absent = zeros */
+    typedef void (*cuda_ctr_t)(uint64_t *, uint64_t *, uint64_t *, uint64_t *);
+    static cuda_ctr_t fn;
+    if (!fn) /* keep looking until the plugin is loaded */
+      fn = (cuda_ctr_t)dlsym(RTLD_DEFAULT, "ldpc_cuda_get_counters4");
+    if (fn)
+      fn(&m->ldpc_cuda_errors, &m->ldpc_cuda_fallbacks, &m->ldpc_cuda_poisoned, &m->ldpc_cuda_disabled);
+  }
+  { typedef uint64_t (*trips_t)(void);
+    static trips_t tf;
+    if (!tf)
+      tf = (trips_t)dlsym(RTLD_DEFAULT, "ldpc_cuda_breaker_trips");
+    if (tf)
+      m->ldpc_cuda_breaker_trips = tf();
+  }
+  nr_pdsch_passive_ldpc_tb_decoders(&m->ldpc_tb_cpu, &m->ldpc_tb_cuda);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
 }

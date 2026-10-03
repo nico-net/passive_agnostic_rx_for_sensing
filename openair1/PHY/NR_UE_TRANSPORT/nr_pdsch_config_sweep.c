@@ -16,6 +16,7 @@
  */
 
 #include "nr_pdsch_config_sweep.h"
+#include "nr_td_fieldbook.h"
 #include "nr_crc_evidence.h"
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_td_order.h"
@@ -140,6 +141,7 @@ static int catalog_add_mapping_type(nr_pdsch_config_sweep_state_t *st, int mt, i
         st->order[st->n_hyp] = st->n_hyp;
         st->ok_unique[st->n_hyp] = 0;
         st->fp_trials[st->n_hyp] = st->sib_trials[st->n_hyp] = 0;
+        st->cb0_trials[st->n_hyp] = st->cb0_pass[st->n_hyp] = 0;
         clear_geom_evidence(st);
         st->n_hyp++;
         added++;
@@ -311,6 +313,12 @@ static void clear_probe_stats(nr_pdsch_config_sweep_state_t *st)
   memset(st->probe_fail, 0, sizeof(st->probe_fail));
   memset(st->probe_inconclusive, 0, sizeof(st->probe_inconclusive));
   lever_c_restart(st); /* lever C and lever P evidence follow the KL evidence */
+  /* CB0 channel: indices move with every prune, so its counters are cleared with trials/ok, and the ELIM mask with them: every
+   * elimination is justified by the evidence of the current epoch only (same per-epoch accounting as the KL decision). */
+  memset(st->cb0_trials, 0, sizeof(st->cb0_trials));
+  memset(st->cb0_pass, 0, sizeof(st->cb0_pass));
+  st->cb0_dec_pin = 0;
+  memset(st->dormant[NR_TD_DORMANT_ELIM], 0, sizeof(st->dormant[NR_TD_DORMANT_ELIM]));
 }
 static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
 {
@@ -341,6 +349,7 @@ static int prune_commit_tail(nr_pdsch_config_sweep_state_t *st, int n, int base)
     st->probe_pass[i] = st->probe_fail[i] = st->probe_inconclusive[i] = 0;
     st->ok_unique[i] = 0;
     st->fp_trials[i] = st->sib_trials[i] = 0;
+    st->cb0_trials[i] = st->cb0_pass[i] = 0;
     st->order[i] = i; /* [0, base) of order[] is a permutation of [0, base): the appends set order[at] = at */
   }
   st->n_hyp = n;
@@ -726,12 +735,14 @@ int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_
     if (st->hyp[i].k0 == lo) {
       st->hyp[st->n_hyp] = st->hyp[i];
       st->hyp[st->n_hyp].k0 = k0;
-      for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) /* the new layer inherits each source entry's dormancy */
-        if (dorm_bit(st, c, i))
+      for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) /* the new layer inherits each source entry's dormancy, except ELIM: an elimination
+                                                       * is CB0 evidence about the source hypothesis, and another k0 is another hypothesis */
+        if (c != NR_TD_DORMANT_ELIM && dorm_bit(st, c, i))
           st->dormant[c][st->n_hyp >> 6] |= UINT64_C(1) << (st->n_hyp & 63);
       st->order[st->n_hyp] = st->n_hyp;
       st->ok_unique[st->n_hyp] = 0;
       st->fp_trials[st->n_hyp] = st->sib_trials[st->n_hyp] = 0;
+      st->cb0_trials[st->n_hyp] = st->cb0_pass[st->n_hyp] = 0;
       clear_geom_evidence(st); /* the active set grows: lever P evidence restarts */
       st->n_hyp++;
     }
@@ -953,13 +964,61 @@ static double rate_of(const nr_pdsch_config_sweep_state_t *st, int i)
   return (st->trials[i] > 0) ? ((double)st->ok[i] / (double)st->trials[i]) : 0.0;
 }
 
+/* CB0 channel class count: hypotheses active under every dormancy cause EXCEPT ELIM (all of them while fail_open). An elimination
+ * therefore never shrinks the union bound: the eliminated hypotheses stay in the family whose intervals justified their elimination. */
+static int n_classes_cb0(const nr_pdsch_config_sweep_state_t *st)
+{
+  if (st->fail_open)
+    return st->n_hyp;
+  int dormant = 0;
+  for (int w = 0; w < (st->n_hyp + 63) / 64; w++) {
+    uint64_t u = 0;
+    for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
+      if (c != NR_TD_DORMANT_ELIM)
+        u |= st->dormant[c][w];
+    dormant += __builtin_popcountll(u & live_word(st->n_hyp, w));
+  }
+  return st->n_hyp - dormant;
+}
+/* One-sided CB0 elimination (levers spec 5.4 redesign): a non-leader ACTIVE h is eliminated when UB_cb0(h) < lo, lo = the leader's
+ * full-TB lower bound. Both bounds use `classes` = NR_TD_CB0_BUDGET_SPLIT x n_classes_cb0 (each family 1e-6 / 2). Returns the number of
+ * hypotheses eliminated; an active-set change restarts the lever-C/P evidence and since_pass (set_dormant semantics). */
+static int cb0_eliminate(nr_pdsch_config_sweep_state_t *st, int leader, double lo, unsigned classes)
+{
+  if (!st->cb0_elim || st->fail_open || !(lo > 0.0))
+    return 0;
+  int eliminated = 0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    if (i == leader || st->cb0_trials[i] == 0 || !active(st, i))
+      continue;
+    if ((double)st->cb0_pass[i] >= lo * (double)st->cb0_trials[i]) /* UB >= empirical rate >= lo: cannot be eliminated (no interval needed) */
+      continue;
+    double l, u;
+    nr_crc_interval(st->cb0_pass[i], st->cb0_trials[i], classes, &l, &u);
+    if (u < lo) {
+      st->dormant[NR_TD_DORMANT_ELIM][i >> 6] |= UINT64_C(1) << (i & 63);
+      eliminated++;
+    }
+  }
+  if (eliminated) {
+    st->since_pass = 0; /* the active set changed */
+    lever_c_restart(st);
+  }
+  return eliminated;
+}
+
 /* The acceptance decision, shared by every feed path: the KL separation test when check_separation (a credited
- * hypothesis just reached a multiple of 16 trials), then the full-round fallback. Evidence must already be credited. */
+ * hypothesis just reached a multiple of 16 trials, or a CB0 batch was credited), then the full-round fallback. Evidence must already be
+ * credited. With cb0_elim the CB0 elimination runs first (it needs the leader's full-TB lower bound) and eliminated hypotheses count as
+ * resolved: the separation test ranges over the remaining ACTIVE others only. */
 static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation)
 {
   if (check_separation) {
     /* Acceptance ranges over the ACTIVE set only; with no mask set first_active == 0 and n_act == n_hyp (today's rule). */
     const int n_act = n_active_of(st);
+    /* Union-bound class count. CB0 channel on: both interval families get half of the 1e-6 budget (classes x 2) over the hypotheses
+     * active under every cause but ELIM. Off: the active set (today's rule, bit-identical). */
+    const unsigned classes = st->cb0_elim ? (unsigned)NR_TD_CB0_BUDGET_SPLIT * (unsigned)n_classes_cb0(st) : (unsigned)n_act;
     int leader=-1;
     for(int i=0;i<st->n_hyp;i++) {
       if(!active(st,i)) continue;
@@ -969,7 +1028,8 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
     double lo,hi;
     /* Class count = the LIVE catalog, not the storage cap: every prune clears evidence and add_k0 only
      * raises n, so the union bound always covers the hypotheses actually competing. */
-    nr_crc_interval(st->ok[leader],st->trials[leader],(unsigned)n_act,&lo,&hi);
+    nr_crc_interval(st->ok[leader],st->trials[leader],classes,&lo,&hi);
+    cb0_eliminate(st, leader, lo, classes);
     /* The absolute floor was 0.60, which silently assumed the TRUE config decodes at >=60 %.
      * MEASURED OTA 2026-09-13: the winning hypothesis decodes at 124/311 = 40 %, so its Wilson
      * lower bound can never reach 0.60 -- early separation could NEVER fire on this link and every
@@ -981,7 +1041,7 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
     for(int i=0;i<st->n_hyp && separated;i++) {
       if(i==leader || !active(st,i)) continue;
       double other_lo,other_hi;
-      nr_crc_interval(st->ok[i],st->trials[i],(unsigned)n_act,&other_lo,&other_hi);
+      nr_crc_interval(st->ok[i],st->trials[i],classes,&other_lo,&other_hi);
       if(other_hi>=lo) separated=false;
     }
     if(separated) { st->winner=leader; return leader; }
@@ -1055,6 +1115,58 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
   const int w = feed_one(st, idx, tb_crc_ok, &credited);
   since_pass_update(st, credited, credited && tb_crc_ok);
   return w;
+}
+
+/* ---- CB0 elimination channel (see the header contract) ---- */
+int nr_pdsch_config_sweep_feed_cb0(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible)
+{
+  return nr_pdsch_config_sweep_feed_cb0_dec(st, idx, n, pass, admissible, NR_TD_DEC_CPU);
+}
+int nr_pdsch_config_sweep_feed_cb0_dec(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, const bool *pass, bool admissible,
+                                       nr_td_decoder_t decoder)
+{
+  if (st == NULL)
+    return -1;
+  if (!st->cb0_elim || !admissible || idx == NULL || pass == NULL || n < 1 || st->winner >= 0 || st->fail_open)
+    return st->winner;
+  /* decoder pin: one decoder per context's CB0 evidence (CRC evidence is not exchangeable between decoders) */
+  if (st->cb0_dec_pin == 0)
+    st->cb0_dec_pin = (uint8_t)(decoder + 1);
+  else if (st->cb0_dec_pin != (uint8_t)(decoder + 1))
+    return st->winner;
+  uint64_t seen[NR_TD_DWORDS];
+  memset(seen, 0, sizeof(seen));
+  bool credited = false;
+  for (int k = 0; k < n; k++) {
+    const int h = idx[k];
+    if (h < 0 || h >= st->n_hyp || ((seen[h >> 6] >> (h & 63)) & 1u))
+      continue;
+    seen[h >> 6] |= UINT64_C(1) << (h & 63);
+    if (!active(st, h) || st->cb0_trials[h] == UINT16_MAX) /* saturation: stop crediting (outcome-independent), the rate stays unbiased */
+      continue;
+    st->cb0_trials[h]++;
+    st->cb0_pass[h] += pass[k] ? 1 : 0;
+    credited = true;
+  }
+  /* No since_pass update: CB0 outcomes are not full-TB evidence (an elimination resets it as an active-set change). */
+  return credited ? sweep_decide(st, true) : st->winner;
+}
+bool nr_pdsch_config_sweep_is_eliminated(const nr_pdsch_config_sweep_state_t *st, int i)
+{
+  return st != NULL && i >= 0 && i < st->n_hyp && dorm_bit(st, NR_TD_DORMANT_ELIM, i);
+}
+static int s_cb0_elim_env = -1;
+bool nr_pdsch_config_sweep_cb0_elim_env(void)
+{
+  if (s_cb0_elim_env < 0) {
+    const char *e = getenv("ISAC_TD_CB0_ELIM");
+    s_cb0_elim_env = (e != NULL && atoi(e) == 1) ? 1 : 0;
+  }
+  return s_cb0_elim_env == 1;
+}
+void nr_pdsch_config_sweep_cb0_elim_env_set(int on)
+{
+  s_cb0_elim_env = on < 0 ? -1 : (on ? 1 : 0);
 }
 
 /* Smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6, in the log domain. */
@@ -1467,8 +1579,15 @@ void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool
   if (st != NULL && st->fail_open != on) {
     st->fail_open = on;
     st->since_pass = 0; /* the active set changed */
-    if (on) /* the GEOM mask is derived from fast-path evidence: fail-open discards the evidence, so the pin must not outlive it */
+    if (on) { /* the GEOM mask is derived from fast-path evidence: fail-open discards the evidence, so the pin must not outlive it */
       memset(st->dormant[NR_TD_DORMANT_GEOM], 0, sizeof(st->dormant[NR_TD_DORMANT_GEOM]));
+      /* the ELIM mask likewise (CB0 evidence): fail-open restores every eliminated hypothesis and is a TB-only safe mode (feed_cb0 is
+       * off while fail_open); the CB0 counters are discarded with it, so a later fail_open = false starts the channel afresh */
+      memset(st->dormant[NR_TD_DORMANT_ELIM], 0, sizeof(st->dormant[NR_TD_DORMANT_ELIM]));
+      memset(st->cb0_trials, 0, sizeof(st->cb0_trials));
+      memset(st->cb0_pass, 0, sizeof(st->cb0_pass));
+      st->cb0_dec_pin = 0;
+    }
     lever_c_restart(st);
   }
 }
@@ -1549,6 +1668,22 @@ int nr_pdsch_config_sweep_add_k0_layer_excl(nr_pdsch_config_sweep_state_t *st, u
 
 /* All shared accesses, including winner publication and reset, use one short mutex. */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+/* ---- fb2 field book (all under g_lock). Mode read once from ISAC_TD_FIELDBOOK (0 default, 2 = reversible pruning). ---- */
+static nr_td_fieldbook_t g_fb;
+static int g_fb_mode = -1; /* -1 = not read yet */
+static uint64_t g_fb_promotions, g_fb_withdrawals, g_fb_failopens, g_fb_pruned_ctx, g_fb_untrusted_ctx;
+static const char *const g_fb_name[NR_TD_F_COUNT] = {"tdra", "dmrs_add_pos", "dmrs_max_len"};
+static int fb_mode_locked(void)
+{
+  if (g_fb_mode < 0) {
+    const char *e = getenv("ISAC_TD_FIELDBOOK");
+    g_fb_mode = (e && atoi(e) == 2) ? 2 : 0;
+    nr_td_fieldbook_init(&g_fb, 2, 2);
+    if (g_fb_mode)
+      LOG_W(PHY, "SWEEP: field book fb%d ENABLED (ISAC_TD_FIELDBOOK)\n", g_fb_mode);
+  }
+  return g_fb_mode;
+}
 typedef struct {
   uint64_t configuration, generation, touched;
   uint16_t rnti;
@@ -1566,6 +1701,11 @@ typedef struct {
    * caller having to hand the legality function back. */
   nr_pdsch_legality_fn_t legality;
   enum { PRIORED_NONE = 0, PRIORED_OWN, PRIORED_CELL } priored; /* which prior pruned this catalog */
+  /* fb2 (ISAC_TD_FIELDBOOK=2): field-book state of this context. fb_pruned bit f = FIELD cause f is applied (the context is not
+   * independent of field f); fb_val = the value it was applied with; fb_untrusted bit f = a converged context relied on a field that is
+   * no longer PROMOTED at that value; fb_gen = field-book generation this context last synchronised with. */
+  uint32_t fb_pruned, fb_untrusted, fb_gen;
+  int32_t fb_val[NR_TD_F_COUNT];
   /* BC7b M1: the observe path appended the type-B layer and its own prune truncated ALL of it again (typeb_seen from a mask no
    * type-B entry produces, or a type-B mask a full r->obs dropped). Latched with the observed-set signature (obs_sig) it was
    * truncated under: the layer is not re-appended until that signature changes (a new mask / last symbol / pin could admit
@@ -1680,12 +1820,14 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   const bool p2 = st->p2;
   const bool crc_accept = st->crc_accept;
   const bool geom_pin = st->geom_pin;
+  const bool cb0_elim = st->cb0_elim;
   const float sib_pmin = st->sib_pmin, sib_eps = st->sib_eps;
   const bool fail_open = st->fail_open;
   const int old_n_hyp = st->n_hyp;
   uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
   memcpy(dormant, st->dormant, sizeof(dormant));
   memset(dormant[NR_TD_DORMANT_GEOM], 0, sizeof(dormant[NR_TD_DORMANT_GEOM])); /* GEOM is derived from evidence (cleared by rebuild) */
+  memset(dormant[NR_TD_DORMANT_ELIM], 0, sizeof(dormant[NR_TD_DORMANT_ELIM])); /* so is ELIM (CB0 evidence) */
   const nr_pdsch_config_sweep_state_t *t = legality ? catalog_template(typeA, legality) : NULL;
   if (t)
     memcpy(st, t, sizeof(*st));
@@ -1695,6 +1837,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   st->p2 = p2;
   st->crc_accept = crc_accept;
   st->geom_pin = geom_pin;
+  st->cb0_elim = cb0_elim;
   st->sib_pmin = sib_pmin;
   st->sib_eps = sib_eps;
   st->fail_open = fail_open;
@@ -1702,7 +1845,7 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
    * mis-attributed, so they are cleared (fails safe; the caller re-applies them). An unchanged catalog keeps them bit-identical. */
   if (st->n_hyp != old_n_hyp)
     for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++)
-      if (c != NR_TD_DORMANT_GEOM)
+      if (c != NR_TD_DORMANT_GEOM && c != NR_TD_DORMANT_ELIM)
         memset(dormant[c], 0, sizeof(dormant[c]));
   memcpy(st->dormant, dormant, sizeof(dormant));
   normalize_masks(st);
@@ -1808,6 +1951,13 @@ static void reopen_context(sweep_context_t *c)
     context_catalog(c, rnti_ctx(c->rnti, false));
     c->priored = PRIORED_NONE;
   }
+  if (g_fb_mode == 2) { /* fb2: a reopen distrusts every reversible assumption of this context */
+    nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_PRIOR);
+    for (int f = 0; f < NR_TD_F_COUNT; f++)
+      nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f);
+    c->fb_pruned = c->fb_untrusted = 0;
+    c->fb_gen = nr_td_fieldbook_generation(&g_fb);
+  }
   /* Keep the already checked legal catalog, but discard stale decoding evidence (and the GEOM pin derived from it). */
   memset(c->state->dormant[NR_TD_DORMANT_GEOM], 0, sizeof(c->state->dormant[NR_TD_DORMANT_GEOM]));
   memset(c->state->trials, 0, sizeof(c->state->trials));
@@ -1898,6 +2048,70 @@ static void prior_promote_locked(const rnti_ctx_t *just_set)
             (unsigned long long)g_prior.configuration);
       return;
     }
+}
+
+
+/* ---- fb2 helpers (g_lock held) ---- */
+static bool fb_prior_keep(const nr_pdsch_cfg_hypothesis_t *h, const void *arg)
+{ /* the same predicate as prune_prior(): MCS table shared; DM-RS only constrained on the prior's own mapping type */
+  const prior_t *p = (const prior_t *)arg;
+  const bool dmrs_free = h->mapping_type != p->mapping_type;
+  return h->mcs_table == p->mcs_table && (dmrs_free || (h->dmrs_add_pos == p->dmrs_add_pos && h->dmrs_max_len == p->dmrs_max_len));
+}
+typedef struct { nr_td_field_t f; int32_t v; } fb_keep_arg_t;
+static bool fb_field_keep(const nr_pdsch_cfg_hypothesis_t *h, const void *arg)
+{
+  const fb_keep_arg_t *a = (const fb_keep_arg_t *)arg;
+  return nr_td_fieldbook_hyp_matches(a->f, a->v, h);
+}
+/* New context: every PROMOTED field becomes a reversible FIELD cause (TDRA matches S/L/mapping, never k0). */
+static void fb_apply_fields_locked(sweep_context_t *c)
+{
+  c->fb_gen = nr_td_fieldbook_generation(&g_fb);
+  c->fb_pruned = c->fb_untrusted = 0;
+  for (int f = 0; f < NR_TD_F_COUNT; f++) {
+    int32_t v;
+    if (!nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v))
+      continue;
+    const fb_keep_arg_t a = {(nr_td_field_t)f, v};
+    if (nr_pdsch_config_sweep_set_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f, fb_field_keep, &a) >= 0) {
+      c->fb_pruned |= 1u << f;
+      c->fb_val[f] = v;
+    }
+  }
+  if (c->fb_pruned)
+    g_fb_pruned_ctx++;
+}
+/* Field-book generation changed (promote / SUSPECT / withdraw / epoch bump): unsettled contexts restore what a no-longer-PROMOTED
+ * field alone suppressed; converged contexts keep their winner and are flagged untrusted (operator SUSPECT rule). */
+static void fb_resync_locked(sweep_context_t *c)
+{
+  const uint32_t gen = nr_td_fieldbook_generation(&g_fb);
+  if (c->fb_gen == gen)
+    return;
+  c->fb_gen = gen;
+  for (int f = 0; f < NR_TD_F_COUNT; f++) {
+    if (!(c->fb_pruned >> f & 1))
+      continue;
+    int32_t v;
+    const bool still = nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v)
+                       && (f == NR_TD_F_TDRA ? ((v ^ c->fb_val[f]) & 0x3FF) == 0 : v == c->fb_val[f]);
+    if (still)
+      continue;
+    if (c->state->winner >= 0 || c->reported) {
+      if (!(c->fb_untrusted >> f & 1)) {
+        c->fb_untrusted |= 1u << f;
+        g_fb_untrusted_ctx++;
+        LOG_W(PHY, "SWEEP: FIELDBOOK rnti=0x%04x tda=%u converged context relied on %s which is no longer PROMOTED -- UNTRUSTED (winner kept)\n",
+              c->rnti, (unsigned)c->tda, g_fb_name[f]);
+      }
+    } else {
+      nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f);
+      c->fb_pruned &= ~(1u << f);
+      LOG_W(PHY, "SWEEP: FIELDBOOK rnti=0x%04x tda=%u SUSPECT/withdraw %s: FIELD cause cleared (unsettled context restored)\n",
+            c->rnti, (unsigned)c->tda, g_fb_name[f]);
+    }
+  }
 }
 
 static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
@@ -2001,14 +2215,24 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     } else if (g_prior.valid && g_prior.configuration == configuration) {
       seed = &g_prior; from = PRIORED_CELL;
     }
-    if (seed && prune_prior(c->state, seed->mcs_table, seed->dmrs_add_pos, seed->dmrs_max_len,
-                            seed->mapping_type) > 0)
-      c->priored = from;
+    const bool fb2 = fb_mode_locked() == 2;
+    if (!fb2) {
+      if (seed && prune_prior(c->state, seed->mcs_table, seed->dmrs_add_pos, seed->dmrs_max_len,
+                              seed->mapping_type) > 0)
+        c->priored = from;
+    }
     prune_to_observed(c->state, &r->obs);
     /* k0 values the air has shown for this RNTI (k0 oracle), so each new context does not re-probe. */
     for (int k = 2; k <= 32; k++)
       if (r->k0_seen & (UINT64_C(1) << k))
         nr_pdsch_config_sweep_add_k0_layer(c->state, (uint8_t)k);
+    if (fb2) {
+      /* fb2: the prior is the reversible dormant cause PRIOR (applied after the destructive observed prune, which compacts masks),
+       * then every PROMOTED field of the field book as a FIELD cause. */
+      if (seed && nr_pdsch_config_sweep_set_dormant(c->state, NR_TD_DORMANT_PRIOR, fb_prior_keep, seed) > 0)
+        c->priored = from;
+      fb_apply_fields_locked(c);
+    }
     /* K39: inherit this (configuration, tda) key's certification; a different configuration drops them all. */
     c->k0_cert = cert_get(r, configuration, tda_index);
     c->has_excl = excl_get(r, configuration, tda_index, &c->excl);
@@ -2020,6 +2244,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
+  if (fb_mode_locked() == 2)
+    fb_resync_locked(c);
   const int h = nr_pdsch_config_sweep_next(c->state, out);
   if (h >= 0)
     *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
@@ -2087,6 +2313,7 @@ static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
     st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
     st->ok_unique[at] = 0;
     st->fp_trials[at] = st->sib_trials[at] = 0;
+    st->cb0_trials[at] = st->cb0_pass[at] = 0;
     clear_geom_evidence(st);
     st->order[at] = at;
   }
@@ -2496,6 +2723,15 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   if (c) {
     int w = nr_pdsch_config_sweep_feed(c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
+    if (fb_mode_locked() == 2 && w < 0 && !c->state->fail_open && nr_pdsch_config_sweep_n_active(c->state) < c->state->n_hyp
+        && nr_pdsch_config_sweep_fail_open_due(c->state, 1e-3, 0.05)) {
+      /* the dormant sets may be wrong: reopen every hypothesis; the context is now independent of every field */
+      nr_pdsch_config_sweep_set_fail_open(c->state, true);
+      LOG_W(PHY, "SWEEP: FIELDBOOK rnti=0x%04x tda=%u FAIL-OPEN (no CRC pass in %u trials on the active set; fb_pruned=0x%x -> 0)\n",
+            c->rnti, (unsigned)c->tda, (unsigned)c->state->since_pass, c->fb_pruned);
+      c->fb_pruned = 0;
+      g_fb_failopens++;
+    }
     if ((++g_st_scored % 4096) == 0)
       census_log(c);
     if (c->priored && c->state->winner < 0 && c->outcomes >= PRIOR_PROBATION) {
@@ -2514,8 +2750,21 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
          * later context pay the same probation. */
         if (c->legality) {
           context_catalog(c, rnti_ctx(c->rnti, false));
+          if (g_fb_mode == 2) {
+            /* fb2: the rebuild keeps index-based masks when n_hyp is unchanged and zeroes them otherwise, so PRIOR and FIELD bits
+             * could be stale or misattributed after the k0/type-B layers were re-added: clear them all (as reopen_context does). */
+            nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_PRIOR);
+            for (int f = 0; f < NR_TD_F_COUNT; f++)
+              nr_pdsch_config_sweep_clear_dormant(c->state, NR_TD_DORMANT_FIELD_BASE + f);
+            c->fb_pruned = 0;
+          }
           context_reindexed(c);
           apply_cert(c); /* K39: the full catalog is rebuilt; a certified k0 must keep binding */
+          if (g_fb_mode == 2) { /* re-apply the PROMOTED fields on the final catalogue (the prior stays dropped) */
+            const uint64_t keep_cnt = g_fb_pruned_ctx;
+            fb_apply_fields_locked(c);
+            g_fb_pruned_ctx = keep_cnt; /* same context: not a new pruned context */
+          }
         }
         if (c->priored == PRIORED_CELL) {
           g_prior.valid = false;
@@ -2585,19 +2834,39 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
               (unsigned)c->tda, (unsigned)c->state->hyp[w].k0, (unsigned long long)lost);
       }
       if (!r->prior.valid) {
+        if (g_fb_mode == 2) {
+          /* First convergence of this RNTI: one vote in the field book. A field this context was pruned on carries no vote. */
+          nr_td_fieldbook_t before = g_fb;
+          nr_td_fieldbook_converged(&g_fb, c->rnti, &c->state->hyp[w], (uint64_t)c->outcomes, c->fb_pruned);
+          for (int f = 0; f < NR_TD_F_COUNT; f++) {
+            const nr_td_field_state_t a = before.f[f].state, b = g_fb.f[f].state;
+            if (b == NR_TD_FS_PROMOTED && (a != NR_TD_FS_PROMOTED || before.f[f].value != g_fb.f[f].value)) {
+              g_fb_promotions++;
+              LOG_W(PHY, "SWEEP: FIELDBOOK PROMOTED %s=%d (rnti=0x%04x)\n", g_fb_name[f], (int)g_fb.f[f].value, c->rnti);
+            }
+            if (b == NR_TD_FS_SUSPECT && a != NR_TD_FS_SUSPECT)
+              LOG_W(PHY, "SWEEP: FIELDBOOK SUSPECT %s=%d (rnti=0x%04x contradicts)\n", g_fb_name[f], (int)g_fb.f[f].value, c->rnti);
+          }
+          if (g_fb.n_withdrawn != before.n_withdrawn) {
+            g_fb_withdrawals += g_fb.n_withdrawn - before.n_withdrawn;
+            LOG_W(PHY, "SWEEP: FIELDBOOK WITHDRAWN (total %u) after rnti=0x%04x\n", (unsigned)g_fb.n_withdrawn, c->rnti);
+          }
+        }
         r->prior = (prior_t){.valid = true, .configuration = c->configuration,
                              .mcs_table = c->state->hyp[w].mcs_table,
                              .dmrs_add_pos = c->state->hyp[w].dmrs_add_pos,
                              .dmrs_max_len = c->state->hyp[w].dmrs_max_len,
                              .mapping_type = c->state->hyp[w].mapping_type};
+        char fbs[32] = "";
+        if (g_fb_mode == 2) snprintf(fbs, sizeof(fbs), " fb_pruned=0x%x", c->fb_pruned);
         LOG_W(PHY,
               "SWEEP: rnti=0x%04x CONVERGED tda=%u mapping=%c k0=%u mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u "
-              "(%u/%u trials on the winner, cfg=0x%llx, plaus_k0=0x%llx) -- private to this RNTI until a second agrees\n",
+              "(%u/%u trials on the winner, cfg=0x%llx, plaus_k0=0x%llx)%s -- private to this RNTI until a second agrees\n",
               c->rnti, (unsigned)c->tda, c->state->hyp[w].mapping_type ? 'B' : 'A',
               (unsigned)c->state->hyp[w].k0, (unsigned)c->state->hyp[w].mcs_table,
               (unsigned)c->state->hyp[w].dmrs_add_pos, (unsigned)c->state->hyp[w].dmrs_max_len,
               c->state->ok[w], c->state->trials[w], (unsigned long long)c->configuration,
-              (unsigned long long)obs_plaus_union(&r->obs));
+              (unsigned long long)obs_plaus_union(&r->obs), fbs);
         prior_promote_locked(r);
       }
       if (winner)
@@ -2652,9 +2921,76 @@ int nr_pdsch_config_sweep_settled_count(void)
   return n;
 }
 
+void nr_pdsch_config_sweep_fieldbook_set_mode(int mode)
+{
+  pthread_mutex_lock(&g_lock);
+  if (mode < 0) {
+    g_fb_mode = -1;
+    (void)fb_mode_locked();
+  } else {
+    g_fb_mode = mode == 2 ? 2 : 0;
+    nr_td_fieldbook_init(&g_fb, 2, 2);
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+int nr_pdsch_config_sweep_fieldbook_mode(void)
+{
+  pthread_mutex_lock(&g_lock);
+  const int m = fb_mode_locked();
+  pthread_mutex_unlock(&g_lock);
+  return m;
+}
+void nr_pdsch_config_sweep_fieldbook_bump_epoch(void)
+{
+  pthread_mutex_lock(&g_lock);
+  if (fb_mode_locked() == 2) {
+    nr_td_fieldbook_bump_epoch(&g_fb);
+    LOG_W(PHY, "SWEEP: FIELDBOOK epoch bump (hard trigger) -> epoch %u generation %u\n", (unsigned)g_fb.epoch, (unsigned)g_fb.generation);
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_pdsch_config_sweep_fieldbook_force_promote(int field, int32_t value)
+{
+  pthread_mutex_lock(&g_lock);
+  nr_td_fieldbook_force_promote(&g_fb, (nr_td_field_t)field, value);
+  pthread_mutex_unlock(&g_lock);
+}
+bool nr_pdsch_config_sweep_fieldbook_copy(void *out, size_t n)
+{
+  if (!out || n != sizeof(g_fb))
+    return false;
+  pthread_mutex_lock(&g_lock);
+  memcpy(out, &g_fb, sizeof(g_fb));
+  pthread_mutex_unlock(&g_lock);
+  return true;
+}
+bool nr_pdsch_config_sweep_fieldbook_context(const nr_pdsch_sweep_ticket_t *ticket, uint32_t *pruned, uint32_t *untrusted)
+{
+  pthread_mutex_lock(&g_lock);
+  const sweep_context_t *c = ticket_context(ticket);
+  if (c) {
+    if (pruned) *pruned = c->fb_pruned;
+    if (untrusted) *untrusted = c->fb_untrusted;
+  }
+  pthread_mutex_unlock(&g_lock);
+  return c != NULL;
+}
+void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts, uint64_t *untrusted_contexts)
+{
+  pthread_mutex_lock(&g_lock);
+  if (promotions) *promotions = g_fb_promotions;
+  if (withdrawals) *withdrawals = g_fb_withdrawals;
+  if (failopens) *failopens = g_fb_failopens;
+  if (pruned_contexts) *pruned_contexts = g_fb_pruned_ctx;
+  if (untrusted_contexts) *untrusted_contexts = g_fb_untrusted_ctx;
+  pthread_mutex_unlock(&g_lock);
+}
+
 void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
+  if (g_fb_mode >= 0)
+    nr_td_fieldbook_init(&g_fb, 2, 2); /* the field book is evidence derived from the contexts too */
   /* Every lookup/feedback path requires a live generation. Invalidate the small
    * identity fields now; select() clears the full state before reusing a slot.
    * Clearing all 1024 hypothesis arrays here used ~1.2 ms even for an empty bank.
