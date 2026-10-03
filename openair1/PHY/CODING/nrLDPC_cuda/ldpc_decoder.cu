@@ -1020,6 +1020,27 @@ NB_MODULE(ldpc_decoder, m) {
  * for every K). Requests above POOL_MAX_LAUNCH code blocks are split over several launches. */
 static const uint32_t POOL_MAX_LAUNCH = 512; /* code blocks per launch: bounds msg memory (~615 MB) */
 static uint64_t g_pool_errors, g_pool_poisoned; /* ldpc_pool_counters() */
+/* Test hooks (K34). Defaults come from the environment ONCE (first use); tests override at run time through
+ * ldpc_pool_test_hooks(). skip: skip the launch; stall_ms: sleep before the launch; inject: 1 = CUDA error
+ * before the first launch, 2 = CUDA error inside graph capture, 3 = report a sticky error. */
+static volatile int g_hook_skip, g_hook_stall_ms, g_hook_inject;
+static volatile int g_pool_sticky;     /* a CUDA error that survived cudaGetLastError(): the context is unusable */
+static volatile int g_pool_capturing;  /* the worker is capturing a graph (first use of a key): waiters extend their timeout */
+static void pool_hooks_env_once() {
+    static bool done;
+    if (done) return;
+    done = true;
+    if (getenv("LDPC_CUDA_TEST_SKIP_LAUNCH")) g_hook_skip = atoi(getenv("LDPC_CUDA_TEST_SKIP_LAUNCH"));
+    if (getenv("LDPC_CUDA_TEST_STALL_MS")) g_hook_stall_ms = atoi(getenv("LDPC_CUDA_TEST_STALL_MS"));
+    if (getenv("LDPC_CUDA_TEST_INJECT")) g_hook_inject = atoi(getenv("LDPC_CUDA_TEST_INJECT"));
+}
+extern "C" void ldpc_pool_test_hooks(int skip, int stall_ms, int inject) {
+    pool_hooks_env_once();
+    g_hook_skip = skip; g_hook_stall_ms = stall_ms; g_hook_inject = inject;
+    if (!inject) g_pool_sticky = 0;
+}
+extern "C" int ldpc_pool_sticky(void) { return g_pool_sticky; }
+extern "C" int ldpc_pool_capturing(void) { return g_pool_capturing; }
 
 /* CUDA error inside the pool: counted, logged (rate limited), returned -- never swallowed. */
 #define POOL_CHECK(call) do { \
@@ -1042,8 +1063,8 @@ extern "C" int ldpc_pool_init(uint32_t cap) {
         return -1;
     int rc = 0;
     POOL_CHECK(cudaStreamCreateWithFlags(&g_pool_ctx.stream, cudaStreamNonBlocking));
-    /* GB10 / unified-memory hosts: pinned host memory is already coherent with the GPU; the explicit
-     * copies below are kept (they are device-to-device-local on GB10 and cheap) -- see K34 note. */
+    /* The explicit host<->device copies of the pool are kept (not restructured by K34); making them
+     * copy-free on GB10 needs a kernel indexing change (slots are not contiguous in a launch): follow-up. */
     POOL_CHECK(cudaHostAlloc(&g_pool_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));
     POOL_CHECK(cudaHostAlloc(&g_pool_bits_host, (size_t)cap * BATCH_BITS_STRIDE, cudaHostAllocDefault));
     ldpc_batch_reserve(g_pool_ctx, POOL_MAX_LAUNCH);
@@ -1051,6 +1072,10 @@ extern "C" int ldpc_pool_init(uint32_t cap) {
     g_pool_cap = cap;
     return 0;
 fail:
+    cudaFreeHost(g_pool_llr_host); g_pool_llr_host = nullptr; /* no leak on a partial init */
+    cudaFreeHost(g_pool_bits_host); g_pool_bits_host = nullptr;
+    ldpc_batch_free(g_pool_ctx);
+    if (g_pool_ctx.stream) { cudaStreamDestroy(g_pool_ctx.stream); g_pool_ctx.stream = 0; }
     return rc ? rc : -1;
 }
 extern "C" int8_t* ldpc_pool_host_llr(void) { return g_pool_llr_host; }
@@ -1065,6 +1090,7 @@ extern "C" void ldpc_pool_counters(uint64_t* errors, uint64_t* poisoned) {
 #define LDPC_POOL_POISON 0xA5
 
 static void pool_poison(uint32_t first, uint32_t count) {
+    if (!g_pool_bits_host) return; /* after shutdown */
     memset(g_pool_bits_host + (size_t)first * BATCH_BITS_STRIDE, LDPC_POOL_POISON, (size_t)count * BATCH_BITS_STRIDE);
     __atomic_fetch_add(&g_pool_poisoned, count, __ATOMIC_RELAXED);
 }
@@ -1083,14 +1109,15 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
         __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
         return -2; /* never a silent skip */
     }
-    const char* skip = getenv("LDPC_CUDA_TEST_SKIP_LAUNCH"); /* test hook (K34 test a) */
-    if (skip && atoi(skip)) {
+    pool_hooks_env_once();
+    if (g_hook_skip) { /* test hook (K34 test a) */
         __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
         return -3;
     }
-    const char* stall = getenv("LDPC_CUDA_TEST_STALL_MS");   /* test hook (K34 test d) */
-    if (stall && atoi(stall) > 0)
-        usleep((useconds_t)atoi(stall) * 1000);
+    if (g_hook_stall_ms > 0) /* test hook (K34 test d) */
+        usleep((useconds_t)g_hook_stall_ms * 1000);
+    if (g_hook_inject == 1 || g_hook_inject == 3)  /* real, non-sticky CUDA error: invalid-size copy */
+        POOL_CHECK(cudaMemcpyAsync(c.b_llr_dev, g_pool_llr_host, 1, (cudaMemcpyKind)99, stream));
     n = 0;
     for (int r = 0; r < n_chunk; r++) {
         POOL_CHECK(cudaMemcpyAsync(c.b_llr_dev + (size_t)n * BATCH_LLR_STRIDE, g_pool_llr_host + (size_t)first[r] * BATCH_LLR_STRIDE,
@@ -1117,8 +1144,12 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
     if (use_graph && ge) {
         POOL_CHECK(cudaGraphLaunch(ge, stream));
     } else {
-        if (use_graph)
+        if (use_graph) {
+            g_pool_capturing = 1;
             POOL_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+            if (g_hook_inject == 2) /* illegal call during capture: invalidates it */
+                POOL_CHECK(cudaDeviceSynchronize());
+        }
         dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
         dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), nb);
         dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x), nb);
@@ -1144,6 +1175,7 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
             cudaError_t ei = cudaGraphInstantiate(&ge, g, 0);
             cudaGraphDestroy(g);
             POOL_CHECK(ei);
+            g_pool_capturing = 0;
             POOL_CHECK(cudaGraphLaunch(ge, stream));
         }
     }
@@ -1174,6 +1206,11 @@ fail:
         }
         cudaStreamSynchronize(stream);
         cudaGetLastError();
+        g_pool_capturing = 0;
+        if (cudaGetLastError() != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess || g_hook_inject == 3)
+            g_pool_sticky = 1; /* the error survived being cleared: the context is gone, stop using the GPU */
+        else
+            cudaGetLastError();
     }
     return rc ? rc : -1;
 }

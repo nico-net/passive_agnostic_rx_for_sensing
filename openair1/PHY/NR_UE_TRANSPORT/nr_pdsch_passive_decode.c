@@ -605,6 +605,17 @@ static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
 static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
 static _Atomic uint64_t g_rbmap_grants;
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
+/* Decoder that produced the last TB on this thread (NRLDPC_DECODER_*, K34/K36). Unit = the TB. Evidence is
+ * stratified by this value: CPU layered and CUDA flooding differ in sensitivity (K36), so counts, CRC
+ * passes and eliminations from different values are NEVER merged. */
+static __thread uint8_t t_decoder_used_last = 0;
+uint8_t nr_pdsch_passive_last_decoder_used(void) { return t_decoder_used_last; }
+static _Atomic uint64_t g_ldpc_tb_dec[3]; // [decoder_used]: TBs handed to the decoder (all outcomes), 0 = not reported
+void nr_pdsch_passive_ldpc_tb_decoders(uint64_t *cpu, uint64_t *cuda)
+{
+  *cpu = atomic_load(&g_ldpc_tb_dec[1]);
+  *cuda = atomic_load(&g_ldpc_tb_dec[2]);
+}
 static __thread int t_last_sk = -1;        // last TB outcome for TBRESULT: 1 decoded, 0 zero_tb, 2 seg_fail
 static __thread uint32_t t_last_llr_have, t_last_data_bits;
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
@@ -1318,6 +1329,9 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     atomic_fetch_add(&g_ldpc_iface_err, 1);
     return false;
   }
+  t_decoder_used_last = TB_parameters.decoder_used;
+  atomic_fetch_add(&g_ldpc_tb_dec[TB_parameters.decoder_used < 3 ? TB_parameters.decoder_used : 0], 1);
+  LOG_D(NR_PHY, "SENSING: passive PDSCH decode decoder_used=%u (1=CPU layered, 2=CUDA flooding)\n", TB_parameters.decoder_used);
 
   {
     uint32_t seg_ok = 0;
