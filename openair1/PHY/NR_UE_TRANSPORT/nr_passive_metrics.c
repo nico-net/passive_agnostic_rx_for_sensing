@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#define _GNU_SOURCE
 #include "nr_passive_metrics.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <dlfcn.h>
 #include "common/utils/LOG/log.h"
 #include "nr_passive_acq_state.h"
 #include "nr_pdcch_passive_queue.h"
@@ -73,6 +75,17 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->td_deftab_mismatch_11 = cd[NR_TD_FMT_11][NR_TD_CENSUS_MISMATCH];
   m->td_deftab_na = cd[0][NR_TD_CENSUS_NONE] + cd[1][NR_TD_CENSUS_NONE] + cd[2][NR_TD_CENSUS_NONE];
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
+  { /* libldpc_cuda.so is dlopen'd RTLD_GLOBAL when --loader.ldpc.shlibversion _cuda is used; absent = zeros */
+    typedef void (*cuda_ctr_t)(uint64_t *, uint64_t *, uint64_t *);
+    static cuda_ctr_t fn;
+    static int looked;
+    if (!fn && !looked) {
+      fn = (cuda_ctr_t)dlsym(RTLD_DEFAULT, "ldpc_cuda_get_counters");
+      looked = fn != NULL; /* keep looking until the plugin is loaded */
+    }
+    if (fn)
+      fn(&m->ldpc_cuda_errors, &m->ldpc_cuda_fallbacks, &m->ldpc_cuda_poisoned);
+  }
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
 }

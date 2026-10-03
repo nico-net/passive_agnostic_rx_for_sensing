@@ -29,6 +29,8 @@ typedef struct {
    * TD_EXCL_RESTART_ALARM (restarts > distinct DCI phases). */
   uint64_t td_excl_restarts, td_excl_truncs, td_excl_restart_alarms;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
+  /* CUDA LDPC pool (K34): launch/CUDA errors, TBs sent to the CPU decoder, poisoned slots; 0 when libldpc_cuda is not loaded */
+  uint64_t ldpc_cuda_errors, ldpc_cuda_fallbacks, ldpc_cuda_poisoned;
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
 } nr_passive_metrics_t;

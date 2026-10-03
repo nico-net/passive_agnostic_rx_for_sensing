@@ -14,6 +14,8 @@
 #ifndef __NRLDPC_CODING_INTERFACE__H__
 #define __NRLDPC_CODING_INTERFACE__H__
 
+enum { NRLDPC_DECODER_UNKNOWN = 0, NRLDPC_DECODER_CPU_LAYERED = 1, NRLDPC_DECODER_CUDA_FLOODING = 2 };
+
 /**
  * \typedef nrLDPC_TB_decoding_parameters_t
  * \struct nrLDPC_TB_decoding_parameters_s
@@ -78,6 +80,9 @@ typedef struct nrLDPC_TB_decoding_parameters_s{
   int16_t *d;
   bool d_to_be_cleared;
   bool decodeSuccess[NR_LDPC_MAX_NUM_CB];
+  /// Output: which decoder produced the result of this TB (NRLDPC_DECODER_*), 0 if the implementation does not say.
+  /// Technique D same-decoder rule: CPU layered and CUDA flooding differ in sensitivity (K36).
+  uint8_t decoder_used;
   time_stats_t ts_deinterleave;
   time_stats_t ts_rate_unmatch;
   time_stats_t ts_seg_prep;

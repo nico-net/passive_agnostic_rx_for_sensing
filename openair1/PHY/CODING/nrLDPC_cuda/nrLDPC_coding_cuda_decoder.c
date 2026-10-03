@@ -71,11 +71,11 @@ int ldpc_pool_init(uint32_t cap);
 int8_t *ldpc_pool_host_llr(void);
 uint8_t *ldpc_pool_host_bits(void);
 uint32_t ldpc_pool_max_launch(void);
-void ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_req, const uint32_t *first, const uint32_t *count,
-                      const uint32_t *K);
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <errno.h>
+#include <time.h>
 
 typedef struct {
   uint32_t BG, Z, Kc, K, F, A, C, E, Qm, rv_index, tbslbrm;
@@ -105,7 +105,7 @@ static void cuda_prepare_segment(void *arg)
     /* saturate to int8 with the segment decoder's SIMD pack (a scalar loop here cost ~0.5 ms per
      * 24-segment TB -- more than OAI's whole CPU decode, measured with LDPC_BENCH) */
     simde__m128i *pv = (simde__m128i *)z, *pl = (simde__m128i *)s->batch_llr;
-    for (int i = 0, j = 0; j < (int)((s->Kc * Z) >> 4); i += 2, j++)
+    for (int i = 0, j = 0; j < (int)((s->Kc * Z) >> 4) + 1; i += 2, j++)
       pl[j] = simde_mm_packs_epi16(pv[i], pv[i + 1]);
   }
   completed_task_ans(s->ans);
@@ -113,18 +113,70 @@ static void cuda_prepare_segment(void *arg)
 
 /* ---- Dynamic batching (2026-09-15). One worker thread owns the GPU; every consumer thread's TBs are
  * queued as requests and decoded together, so the ~40 launches of a decode are shared by every TB in
- * flight instead of paid per TB. Submitters sleep on a condition variable while the GPU works. ---- */
+ * flight instead of paid per TB. Submitters sleep on a condition variable while the GPU works.
+ *
+ * K34 safety (2026-10-03): every wait is bounded (LDPC_CUDA_TIMEOUT_MS, default 50), the queue is
+ * bounded, slot reservation is all-or-nothing, and any GPU error / timeout / rejection sends the TB's
+ * code blocks to the CPU layered decoder (same LLR input). A GPU result is accepted only if its
+ * request status is OK; a poisoned slot can never be turned into a pass. ---- */
 #define POOL_CAP 2048 /* slots (code blocks) in the pinned pool: ~53 MB LLR + 7 MB bits */
+#define QUEUE_CAP 256
+enum { REQ_QUEUED, REQ_INFLIGHT, REQ_DONE, REQ_ABANDONED };
 typedef struct {
   uint32_t BG, Z, iters, first, count, K;
-  volatile bool done;
+  int state; /* guarded by g_mu */
+  int rc;    /* 0 = GPU decoded every block of this request */
 } gpu_req_t;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv_work = PTHREAD_COND_INITIALIZER, g_cv_done = PTHREAD_COND_INITIALIZER;
-static gpu_req_t *g_queue[256];
+static gpu_req_t *g_queue[QUEUE_CAP];
 static int g_qn;
 static uint8_t g_slot_used[POOL_CAP];
 static _Atomic uint64_t g_batches, g_batched_reqs;
+static _Atomic uint64_t g_fallbacks; /* TBs decoded on the CPU instead of the GPU (error, timeout, queue full, oversize) */
+
+int ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_req, const uint32_t *first, const uint32_t *count,
+                     const uint32_t *K, int *req_rc);
+void ldpc_pool_counters(uint64_t *errors, uint64_t *poisoned);
+
+/* ISAC_METRICS export (dlsym'd by nr_passive_metrics.c): errors = launch/CUDA errors, fallbacks = TBs sent
+ * to the CPU decoder, poisoned = slots filled with the poison pattern. */
+void ldpc_cuda_get_counters(uint64_t *errors, uint64_t *fallbacks, uint64_t *poisoned)
+{
+  ldpc_pool_counters(errors, poisoned);
+  *fallbacks = atomic_load(&g_fallbacks);
+}
+
+static int pool_timeout_ms(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("LDPC_CUDA_TIMEOUT_MS");
+    v = e && atoi(e) > 0 ? atoi(e) : 50;
+  }
+  return v;
+}
+static int pool_queue_cap(void) /* test hook: LDPC_CUDA_TEST_QUEUE_CAP shrinks the queue */
+{
+  const char *e = getenv("LDPC_CUDA_TEST_QUEUE_CAP");
+  return e && atoi(e) >= 0 && atoi(e) < QUEUE_CAP ? atoi(e) : QUEUE_CAP;
+}
+static void deadline_after_ms(struct timespec *ts, int ms)
+{
+  clock_gettime(CLOCK_REALTIME, ts);
+  ts->tv_sec += ms / 1000;
+  ts->tv_nsec += (long)(ms % 1000) * 1000000L;
+  if (ts->tv_nsec >= 1000000000L) {
+    ts->tv_sec++;
+    ts->tv_nsec -= 1000000000L;
+  }
+}
+static void warn_once(const char *what)
+{
+  static atomic_int done;
+  if (!atomic_exchange(&done, 1))
+    LOG_W(PHY, "CUDA LDPC: %s -> CPU layered fallback (one-shot warning; see ldpc_cuda_fallbacks)\n", what);
+}
 
 /* first-fit contiguous run of n free slots; caller holds g_mu */
 static int slots_reserve(uint32_t n)
@@ -142,43 +194,52 @@ static int slots_reserve(uint32_t n)
 static void *gpu_worker(void *arg)
 {
   (void)arg;
-  const uint32_t max_launch = ldpc_pool_max_launch();
   for (;;) {
-    gpu_req_t *take[256];
+    gpu_req_t *take[QUEUE_CAP];
     pthread_mutex_lock(&g_mu);
     while (g_qn == 0)
       pthread_cond_wait(&g_cv_work, &g_mu);
     const int nt = g_qn;
     memcpy(take, g_queue, nt * sizeof(*take));
     g_qn = 0;
+    for (int a = 0; a < nt; a++)
+      take[a]->state = REQ_INFLIGHT;
     pthread_mutex_unlock(&g_mu);
-    /* group by (BG, Z, iterations), split at the per-launch cap */
-    bool used[256] = {false};
+    /* group by (BG, Z, iterations); the pool splits requests above its per-launch cap itself */
+    bool used[QUEUE_CAP] = {false};
     for (int a = 0; a < nt; a++) {
       if (used[a])
         continue;
-      uint32_t first[256], count[256], K[256], n = 0;
+      uint32_t first[QUEUE_CAP], count[QUEUE_CAP], K[QUEUE_CAP];
+      int idx[QUEUE_CAP], rcs[QUEUE_CAP];
       int nr = 0;
       for (int b = a; b < nt; b++) {
-        if (used[b] || take[b]->BG != take[a]->BG || take[b]->Z != take[a]->Z || take[b]->iters != take[a]->iters
-            || n + take[b]->count > max_launch)
+        if (used[b] || take[b]->BG != take[a]->BG || take[b]->Z != take[a]->Z || take[b]->iters != take[a]->iters)
           continue;
         used[b] = true;
         first[nr] = take[b]->first;
         count[nr] = take[b]->count;
         K[nr] = take[b]->K;
-        n += take[b]->count;
+        idx[nr] = b;
         nr++;
       }
-      ldpc_pool_decode(take[a]->BG, take[a]->Z, take[a]->iters, nr, first, count, K);
+      ldpc_pool_decode(take[a]->BG, take[a]->Z, take[a]->iters, nr, first, count, K, rcs);
+      pthread_mutex_lock(&g_mu);
+      for (int i = 0; i < nr; i++) {
+        gpu_req_t *q = take[idx[i]];
+        q->rc = rcs[i];
+        if (q->state == REQ_ABANDONED) { /* submitter timed out and fell back: we own request and slots now */
+          memset(&g_slot_used[q->first], 0, q->count);
+          free(q);
+        } else {
+          q->state = REQ_DONE;
+        }
+      }
+      pthread_cond_broadcast(&g_cv_done);
+      pthread_mutex_unlock(&g_mu);
       atomic_fetch_add(&g_batches, 1);
       atomic_fetch_add(&g_batched_reqs, nr);
     }
-    pthread_mutex_lock(&g_mu);
-    for (int a = 0; a < nt; a++)
-      take[a]->done = true;
-    pthread_cond_broadcast(&g_cv_done);
-    pthread_mutex_unlock(&g_mu);
   }
   return NULL;
 }
@@ -197,6 +258,35 @@ int32_t nrLDPC_coding_init(void)
 int32_t nrLDPC_coding_shutdown(void)
 {
   return 0;
+}
+
+/* CPU layered fallback: the renamed nrLDPC_decoder.c (see CMakeLists). Input = the int8 LLR block in the
+ * layout the GPU got. Returns true and fills c (K/8 bytes) on CRC pass. */
+int32_t ldpc_cpu_LDPCdecoder(t_nrLDPC_dec_params *p, int8_t *p_llr, uint8_t *p_out, t_nrLDPC_time_stats *ts, decode_abort_t *ab);
+static bool cpu_decode_segment(const nrLDPC_TB_decoding_parameters_t *tb, int r, const int8_t *llr, uint8_t *c)
+{
+  t_nrLDPC_dec_params dp = {.check_crc = check_crc};
+  dp.BG = tb->BG;
+  dp.Z = tb->Z;
+  dp.R = r < tb->first_rE2 ? tb->R : tb->R2;
+  dp.numMaxIter = tb->max_ldpc_iterations;
+  dp.outMode = nrLDPC_outMode_BIT;
+  dp.crc_type = crcType(tb->C, tb->A);
+  dp.Kprime = lenWithCrc(tb->C, tb->A);
+  const int Kc = tb->BG == 2 ? 52 : 68;
+  int8_t l[68 * 384 + 16] __attribute__((aligned(32)));
+  int8_t out[27000] __attribute__((aligned(32)));
+  memcpy(l, llr, (size_t)Kc * tb->Z);
+  t_nrLDPC_time_stats pt = {0};
+  decode_abort_t ab;
+  init_abort(&ab);
+  const int it = ldpc_cpu_LDPCdecoder(&dp, l, (uint8_t *)out, &pt, &ab);
+  pthread_mutex_destroy(&ab.mutex_failure);
+  if (it < dp.numMaxIter) {
+    memcpy(c, out, tb->K >> 3);
+    return true;
+  }
+  return false;
 }
 
 static __thread double t_prep_s, t_gpu_s; /* LDPC_BENCH phase split */
@@ -221,17 +311,41 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   const uint32_t in_stride = ldpc_batch_llr_stride(), bits_stride = ldpc_batch_bits_stride();
   int8_t *pool_llr = ldpc_pool_host_llr();
   const uint8_t *pool_bits = ldpc_pool_host_bits();
+  const int tmo = pool_timeout_ms();
 
-  /* reserve each TB's slots (wait for the worker to free some if the pool is full) */
+  /* Reserve every TB's slots ALL-OR-NOTHING (a partial hold while waiting for the rest could deadlock two
+   * callers). No fit within the timeout, or more blocks than the pool: the whole call goes to the CPU,
+   * with LLRs prepared in a private scratch buffer. */
   int firsts[64];
-  pthread_mutex_lock(&g_mu);
-  for (int t = 0; t < nt; t++) {
-    while ((firsts[t] = slots_reserve(tb_ndec(&slot->TBs[t]))) < 0)
-      pthread_cond_wait(&g_cv_done, &g_mu);
+  bool gpu = nb <= POOL_CAP;
+  if (gpu) {
+    struct timespec dl;
+    deadline_after_ms(&dl, tmo);
+    pthread_mutex_lock(&g_mu);
+    for (;;) {
+      int t = 0;
+      for (; t < nt; t++)
+        if ((firsts[t] = slots_reserve(tb_ndec(&slot->TBs[t]))) < 0)
+          break;
+      if (t == nt)
+        break;
+      for (int u = 0; u < t; u++) /* roll back */
+        memset(&g_slot_used[firsts[u]], 0, tb_ndec(&slot->TBs[u]));
+      if (pthread_cond_timedwait(&g_cv_done, &g_mu, &dl) == ETIMEDOUT) {
+        gpu = false;
+        break;
+      }
+    }
+    pthread_mutex_unlock(&g_mu);
   }
-  pthread_mutex_unlock(&g_mu);
+  int8_t *scratch = NULL; /* private LLR copies: CPU-only call, or a TB whose request was abandoned */
+  if (!gpu) {
+    warn_once("slot pool full or TB larger than the pool");
+    scratch = malloc((size_t)nb * in_stride);
+    AssertFatal(scratch, "CUDA LDPC fallback scratch alloc failed\n");
+  }
 
-  /* phase A: CPU prep of every segment, in the thread pool, straight into the pinned pool */
+  /* phase A: CPU prep of every segment, in the thread pool, straight into the pinned pool (or scratch) */
   nrLDPC_cuda_seg_t seg[nb];
   task_ans_t ans;
   init_task_ans(&ans, nb);
@@ -256,7 +370,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
       s->llr = tb->llr + (second ? tb->first_rE2 * tb->E + (r - tb->first_rE2) * tb->E2 : r * tb->E);
       s->d = tb->d + r * s->Kc * s->Z;
       s->d_to_be_cleared = tb->d_to_be_cleared;
-      s->batch_llr = pool_llr + (size_t)(firsts[t] + r) * in_stride;
+      s->batch_llr = gpu ? pool_llr + (size_t)(firsts[t] + r) * in_stride : scratch + (size_t)k * in_stride;
       s->prep_ok = false;
       s->ans = &ans;
       task_t task = {.func = &cuda_prepare_segment, .args = s};
@@ -266,37 +380,115 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   join_task_ans(&ans);
   const double t_a = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
 
-  /* phase B: queue one request per TB and sleep until the worker has decoded them */
-  gpu_req_t req[nt];
-  pthread_mutex_lock(&g_mu);
-  for (int t = 0; t < nt; t++) {
-    nrLDPC_TB_decoding_parameters_t *tb = &slot->TBs[t];
-    req[t] = (gpu_req_t){.BG = tb->BG, .Z = tb->Z, .iters = 2 * tb->max_ldpc_iterations, .first = firsts[t],
-                         .count = tb_ndec(tb), .K = tb->K, .done = false};
-    g_queue[g_qn++] = &req[t];
-  }
-  pthread_cond_signal(&g_cv_work);
+  /* phase B: queue one heap request per TB, wait with a deadline. A TB that is rejected (queue full) or
+   * not finished at the deadline is decoded on the CPU from a private copy of its LLR slots. */
+  gpu_req_t *req[64] = {NULL};
+  bool tb_gpu_ok[64] = {false}, in_scratch[64];
   for (int t = 0; t < nt; t++)
-    while (!req[t].done)
-      pthread_cond_wait(&g_cv_done, &g_mu);
-  pthread_mutex_unlock(&g_mu);
+    in_scratch[t] = !gpu;
+  if (gpu) {
+    struct timespec dl;
+    deadline_after_ms(&dl, tmo);
+    pthread_mutex_lock(&g_mu);
+    const int qcap = pool_queue_cap();
+    int queued = 0;
+    for (int t = 0; t < nt; t++) {
+      nrLDPC_TB_decoding_parameters_t *tb = &slot->TBs[t];
+      if (g_qn >= qcap) {
+        warn_once("GPU request queue full");
+        continue; /* req[t] stays NULL -> CPU */
+      }
+      gpu_req_t *q = calloc(1, sizeof(*q));
+      AssertFatal(q, "CUDA LDPC request alloc failed\n");
+      *q = (gpu_req_t){.BG = tb->BG, .Z = tb->Z, .iters = 2 * tb->max_ldpc_iterations, .first = firsts[t],
+                       .count = tb_ndec(tb), .K = tb->K, .state = REQ_QUEUED};
+      g_queue[g_qn++] = q;
+      req[t] = q;
+      queued++;
+    }
+    if (queued)
+      pthread_cond_signal(&g_cv_work);
+    for (int t = 0; t < nt; t++) {
+      while (req[t] && req[t]->state != REQ_DONE) {
+        if (pthread_cond_timedwait(&g_cv_done, &g_mu, &dl) == ETIMEDOUT)
+          break;
+      }
+    }
+    pthread_mutex_unlock(&g_mu);
+    /* timed-out TBs: snapshot the LLR slots (only we write them; the GPU only reads) BEFORE giving the
+     * request to the worker, whose completion then frees the slots */
+    for (int t = 0; t < nt; t++) {
+      if (!req[t])
+        continue;
+      pthread_mutex_lock(&g_mu);
+      const bool done = req[t]->state == REQ_DONE;
+      pthread_mutex_unlock(&g_mu);
+      if (done)
+        continue;
+      if (!scratch) {
+        scratch = malloc((size_t)nb * in_stride);
+        AssertFatal(scratch, "CUDA LDPC fallback scratch alloc failed\n");
+      }
+      int kk = 0;
+      for (int u = 0; u < t; u++)
+        kk += tb_ndec(&slot->TBs[u]);
+      memcpy(scratch + (size_t)kk * in_stride, pool_llr + (size_t)firsts[t] * in_stride, (size_t)tb_ndec(&slot->TBs[t]) * in_stride);
+      in_scratch[t] = true;
+      warn_once("GPU wait timeout");
+    }
+  }
   if (ldpc_bench_on())
     t_gpu_s += ldpc_bench_wall_s() - t_a;
+  /* settle each request: DONE -> usable iff rc == 0; otherwise remove it from the queue / abandon it */
+  pthread_mutex_lock(&g_mu);
+  for (int t = 0; t < nt; t++) {
+    gpu_req_t *q = req[t];
+    if (!q)
+      continue;
+    if (q->state == REQ_DONE) {
+      tb_gpu_ok[t] = q->rc == 0;
+      continue;
+    }
+    if (q->state == REQ_QUEUED) { /* never taken by the worker: unqueue, we own it */
+      for (int i = 0; i < g_qn; i++)
+        if (g_queue[i] == q) {
+          memmove(&g_queue[i], &g_queue[i + 1], (g_qn - i - 1) * sizeof(*g_queue));
+          g_qn--;
+          break;
+        }
+      free(q);
+    } else {
+      q->state = REQ_ABANDONED; /* worker frees request AND slots when it finishes */
+    }
+    req[t] = NULL;
+    firsts[t] = -1; /* slots no longer ours */
+  }
+  pthread_mutex_unlock(&g_mu);
 
-  /* phase C: the CRC of every segment, then release the slots */
+  /* phase C: the CRC of every segment (GPU bits only from an OK request), CPU decode otherwise */
   k = 0;
   for (int t = 0; t < nt; t++) {
     nrLDPC_TB_decoding_parameters_t *tb = &slot->TBs[t];
     const int C = tb->C;
     const uint32_t Kprime = lenWithCrc(C, tb->A);
     const uint8_t crc_type = crcType(C, tb->A);
+    const bool use_gpu = gpu && tb_gpu_ok[t];
+    if (!use_gpu)
+      atomic_fetch_add(&g_fallbacks, 1);
+    tb->decoder_used = use_gpu ? NRLDPC_DECODER_CUDA_FLOODING : NRLDPC_DECODER_CPU_LAYERED;
     for (int r = 0; r < tb_ndec(tb); r++, k++) {
-      const uint8_t *b = pool_bits + (size_t)(firsts[t] + r) * bits_stride;
       uint8_t *c = tb->c + r * (tb->K >> 3);
-      const bool ok = seg[k].prep_ok && check_crc((uint8_t *)b, Kprime, crc_type);
-      if (ok)
-        memcpy(c, b, tb->K >> 3);
-      else
+      bool ok;
+      if (use_gpu) {
+        const uint8_t *b = pool_bits + (size_t)(firsts[t] + r) * bits_stride;
+        ok = seg[k].prep_ok && check_crc((uint8_t *)b, Kprime, crc_type);
+        if (ok)
+          memcpy(c, b, tb->K >> 3);
+      } else {
+        const int8_t *l = in_scratch[t] ? scratch + (size_t)k * in_stride : pool_llr + (size_t)(firsts[t] + r) * in_stride;
+        ok = seg[k].prep_ok && cpu_decode_segment(tb, r, l, c);
+      }
+      if (!ok)
         memset(c, 0, tb->K >> 3);
       tb->decodeSuccess[r] = ok;
       *tb->processedSegments += ok;
@@ -304,9 +496,13 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   }
   pthread_mutex_lock(&g_mu);
   for (int t = 0; t < nt; t++)
-    memset(&g_slot_used[firsts[t]], 0, tb_ndec(&slot->TBs[t]));
+    if (gpu && firsts[t] >= 0) {
+      memset(&g_slot_used[firsts[t]], 0, tb_ndec(&slot->TBs[t]));
+      free(req[t]);
+    }
   pthread_cond_broadcast(&g_cv_done);
   pthread_mutex_unlock(&g_mu);
+  free(scratch);
   if (ldpc_bench_on())
     t_prep_s += t_a - t_start;
   return 0;

@@ -40,6 +40,7 @@ if(ENABLE_LDPC_CUDA)
               nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c
               nrLDPC_cuda/nr_ldpc_cuda.c
               nrLDPC_cuda/ldpc_decoder.cu
+              nrLDPC_cuda/nrLDPC_cpu_fallback.c
   )
   set_target_properties(ldpc_cuda PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
@@ -47,6 +48,20 @@ if(ENABLE_LDPC_CUDA)
   target_compile_definitions(ldpc_cuda PRIVATE LDPC_CUDA_DISCRETE LDPC_DECODER_NAME="CUDA LDPC decoder")
   target_link_libraries(ldpc_cuda PRIVATE log_headers CUDA::cudart)
   add_dependencies(ldpctest ldpc_cuda)
+  if(ENABLE_TESTS)
+    # K34 pool-safety tests: need a CUDA device; dlopen ./libldpc_cuda.so, resolving its symbols from the test binary.
+    add_executable(test_ldpc_cuda_pool nrLDPC_cuda/tests/ldpc_cuda_pool_test.cc nrLDPC_cuda/tests/ldpc_cuda_pool_test_helper.c)
+    target_include_directories(test_ldpc_cuda_pool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_cuda/tests ${OPENAIR_DIR} ${OPENAIR1_DIR})
+    target_link_libraries(test_ldpc_cuda_pool PRIVATE GTest::gtest GTest::gtest_main thread-pool LOG minimal_lib crc_byte UTIL ${CMAKE_DL_LIBS} pthread)
+    set_target_properties(test_ldpc_cuda_pool PROPERTIES ENABLE_EXPORTS ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    # the plugin takes these from the host executable (as from nr-uesoftmodem): force them into the test binary
+    foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+      target_link_options(test_ldpc_cuda_pool PRIVATE "LINKER:--undefined=${sym}")
+    endforeach()
+    add_dependencies(test_ldpc_cuda_pool ldpc_cuda)
+    add_dependencies(tests test_ldpc_cuda_pool)
+    add_test(NAME test_ldpc_cuda_pool COMMAND ./test_ldpc_cuda_pool WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  endif()
   add_dependencies(nr-uesoftmodem ldpc_cuda)
   # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
