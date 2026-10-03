@@ -2497,7 +2497,7 @@ if(ENABLE_TESTS)
   # project has already paid for once (upper-8-bits-zero alone, and a degenerate invariant
   # payload) via a fixture engineered to tempt each of them independently.
   add_executable(test_nr_pdcch_dci_length_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc
-                                                 ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)
+                                                 ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c)
   # nr_pdsch_config_sweep.c's qm_table_mask() calls nr_pdsch_qm_of_mcs() (nr_pdsch_qm_oracle.c, Task 6
   # Qm oracle) -- same fix already applied to the sibling test_nr_pdsch_config_sweep target below,
   # which compiles the same nr_pdsch_config_sweep.c but was updated for this call; this target was not.
@@ -2583,6 +2583,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_dci_history ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc
                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c
                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c)
   target_include_directories(test_nr_dci_history PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
@@ -2593,6 +2594,7 @@ if(ENABLE_TESTS)
 
   add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
@@ -2619,6 +2621,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_td_legal ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_legal_test.cc
                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c
                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
                                   ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)

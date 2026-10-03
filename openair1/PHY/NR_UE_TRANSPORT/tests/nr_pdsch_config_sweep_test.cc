@@ -12,6 +12,7 @@ extern "C" {
 #include "nr_pdsch_config_sweep.h"
 #include "nr_td_order.h"
 #include "nr_td_legal.h"
+#include "nr_td_fieldbook.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 }
@@ -3319,4 +3320,236 @@ TEST_F(PdschBc9, CensusReadsLeaveTheKlSequenceUnchanged)
   for (auto v : off)
     settled += (v >> 4) & 1;
   EXPECT_GT(settled, 0); /* the run reached convergence (and the prior/sibling-row path) */
+}
+
+/* ---- Reversible field book (fb2) wiring: ISAC_TD_FIELDBOOK=0|2 ---- */
+struct PdschFieldBook : testing::Test {
+  void SetUp() override
+  {
+    nr_pdsch_config_sweep_k0_legacy_set(0);
+    nr_pdsch_config_sweep_fieldbook_set_mode(0);
+    nr_pdsch_config_sweep_reset_all();
+    nr_pdsch_config_sweep_prior_reset();
+  }
+  void TearDown() override
+  {
+    nr_pdsch_config_sweep_fieldbook_set_mode(0);
+    nr_pdsch_config_sweep_reset_all();
+    nr_pdsch_config_sweep_k0_legacy_set(-1);
+  }
+  static nr_pdsch_config_sweep_state_t &snap(const nr_pdsch_sweep_ticket_t &t)
+  {
+    static nr_pdsch_config_sweep_state_t st;
+    EXPECT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+    return st;
+  }
+  static nr_pdsch_sweep_ticket_t open(uint16_t rnti = 0x4601, uint8_t tda = 0, uint64_t cfg = 7)
+  {
+    nr_pdsch_sweep_ticket_t t{};
+    nr_pdsch_cfg_hypothesis_t h{};
+    EXPECT_TRUE(nr_pdsch_config_sweep_select(cfg, rnti, tda, 2, 0, test_legal, &t, &h));
+    return t;
+  }
+  static bool dormant_any(const nr_pdsch_config_sweep_state_t &st, int cause)
+  {
+    for (int i = 0; i < NR_TD_DWORDS; i++)
+      if (st.dormant[cause][i]) return true;
+    return false;
+  }
+  static nr_td_fieldbook_t book()
+  {
+    nr_td_fieldbook_t fb;
+    EXPECT_TRUE(nr_pdsch_config_sweep_fieldbook_copy(&fb, sizeof(fb)));
+    return fb;
+  }
+};
+static const nr_pdsch_cfg_hypothesis_t fb_truth{1, 13, 0, 1, 1, 0, 1}; /* add_pos=1 */
+
+TEST_F(PdschFieldBook, FieldBookOffIsBitIdentical)
+{
+  auto trace = [](bool promoted) {
+    nr_pdsch_config_sweep_reset_all();
+    nr_pdsch_config_sweep_prior_reset();
+    nr_pdsch_config_sweep_fieldbook_set_mode(0);
+    if (promoted) nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 0);
+    std::vector<int64_t> tr;
+    unsigned seed = 99;
+    for (int i = 0; i < 6000; i++) {
+      nr_pdsch_sweep_ticket_t t{};
+      nr_pdsch_cfg_hypothesis_t h{}, w{};
+      EXPECT_TRUE(nr_pdsch_config_sweep_select(7, 0x4601, 0, 2, 0, test_legal, &t, &h));
+      const bool pass = same_hyp(h, fb_truth) && (double)rand_r(&seed) / RAND_MAX < 0.54;
+      const bool conv = nr_pdsch_config_sweep_feedback(&t, pass, &w);
+      tr.push_back((int64_t)t.hypothesis << 8 | (int64_t)t.settled << 4 | (int64_t)conv << 2 | (int64_t)pass);
+    }
+    return tr;
+  };
+  const auto a = trace(false);
+  const auto b = trace(true); /* a promoted field in the book must be invisible while the flag is off */
+  EXPECT_EQ(a, b);
+  const auto t = open();
+  const auto &st = snap(t);
+  for (int c = 0; c < NR_TD_DORMANT_CAUSES; c++) EXPECT_FALSE(dormant_any(st, c));
+  EXPECT_FALSE(st.fail_open);
+  uint32_t pr = 9, un = 9;
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&t, &pr, &un));
+  EXPECT_EQ(pr, 0u);
+  EXPECT_EQ(un, 0u);
+}
+
+TEST_F(PdschFieldBook, FieldBookOnUsesDormantPruning)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  const auto t = open(0x4601, 0);
+  const auto &st = snap(t);
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_fieldbook_set_mode(0);
+  const int full = snap(open(0x4602, 0)).n_hyp; /* mode-0 catalogue size */
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  const auto t2 = open(0x4601, 0);
+  const auto &s2 = snap(t2);
+  (void)st;
+  EXPECT_EQ(s2.n_hyp, full); /* reversible: the catalogue is NOT shrunk */
+  EXPECT_TRUE(dormant_any(s2, NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
+  EXPECT_LT(nr_pdsch_config_sweep_n_active(&s2), s2.n_hyp);
+  uint32_t pr = 0, un = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&t2, &pr, &un));
+  EXPECT_EQ(pr, 1u << NR_TD_F_DMRS_ADD_POS);
+  uint64_t p0, w0, f0, c0, p1, w1, f1, c1, u1;
+  nr_pdsch_config_sweep_fieldbook_stats(&p1, &w1, &f1, &c1, &u1);
+  EXPECT_GE(c1, 1u);
+  (void)p0; (void)w0; (void)f0; (void)c0;
+  /* the cell/RNTI prior also goes in as the dormant cause PRIOR, not a destructive prune */
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_cfg_hypothesis_t w{};
+  ASSERT_GT(drive_context(7, 0x4601, 0, fb_truth, 0.54, 400000, &w), 0);
+  const auto &s3 = snap(open(0x4601, 1));
+  EXPECT_EQ(s3.n_hyp, full);
+  EXPECT_TRUE(dormant_any(s3, NR_TD_DORMANT_PRIOR));
+  EXPECT_LT(nr_pdsch_config_sweep_n_active(&s3), s3.n_hyp);
+}
+
+TEST_F(PdschFieldBook, SuspectRestoresUnsettledContexts)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_MAX_LEN, 1);
+  const auto t = open(0x4601, 0);
+  ASSERT_TRUE(dormant_any(snap(t), NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
+  /* a converged context under the same fields */
+  nr_pdsch_cfg_hypothesis_t w{};
+  ASSERT_GT(drive_context(7, 0x4603, 0, fb_truth, 0.54, 400000, &w), 0);
+  const auto tc = open(0x4603, 0);
+  ASSERT_GE(snap(tc).winner, 0);
+  uint32_t pr = 0, un = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&tc, &pr, &un));
+  ASSERT_NE(pr, 0u);
+  /* the field leaves PROMOTED (epoch bump): the generation changes */
+  nr_pdsch_config_sweep_fieldbook_bump_epoch();
+  const auto t_after = open(0x4601, 0);
+  const auto &s = snap(t_after);
+  EXPECT_FALSE(dormant_any(s, NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS)); /* only that field's cause is restored */
+  EXPECT_FALSE(dormant_any(s, NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_MAX_LEN));
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(&s), s.n_hyp);
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&t_after, &pr, &un));
+  EXPECT_EQ(pr, 0u);
+  /* the converged context keeps its winner and its mask, but is flagged untrusted */
+  const auto tc2 = open(0x4603, 0);
+  EXPECT_GE(snap(tc2).winner, 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&tc2, &pr, &un));
+  EXPECT_NE(un, 0u);
+}
+
+TEST_F(PdschFieldBook, FailOpenRestoresAllCauses)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 0); /* WRONG: the truth has add_pos=1 */
+  const auto t0 = open(0x4601, 0);
+  const auto &s0 = snap(t0);
+  ASSERT_TRUE(dormant_any(s0, NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
+  uint64_t p, wd, fo0, c, fo1, ut;
+  nr_pdsch_config_sweep_fieldbook_stats(&p, &wd, &fo0, &c, &ut);
+  unsigned seed = 5;
+  nr_pdsch_cfg_hypothesis_t w{};
+  bool conv = false;
+  for (int i = 0; i < 400000 && !conv; i++) {
+    nr_pdsch_sweep_ticket_t t{};
+    nr_pdsch_cfg_hypothesis_t h{};
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(7, 0x4601, 0, 2, 0, test_legal, &t, &h));
+    conv = nr_pdsch_config_sweep_feedback(&t, same_hyp(h, fb_truth) && (double)rand_r(&seed) / RAND_MAX < 0.54, &w);
+  }
+  ASSERT_TRUE(conv) << "fail-open must let the true (dormant) hypothesis be found";
+  EXPECT_TRUE(same_hyp(w, fb_truth));
+  nr_pdsch_config_sweep_fieldbook_stats(&p, &wd, &fo1, &c, &ut);
+  EXPECT_EQ(fo1, fo0 + 1);
+  const auto t1 = open(0x4601, 0);
+  EXPECT_TRUE(snap(t1).fail_open);
+  uint32_t pr = 9, un = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&t1, &pr, &un));
+  EXPECT_EQ(pr, 0u);
+}
+
+TEST_F(PdschFieldBook, PrunedContextDoesNotVote)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  nr_pdsch_cfg_hypothesis_t w{};
+  for (uint16_t rnti : {0x4611, 0x4612}) /* two RNTIs that converge while pruned on add_pos */
+    ASSERT_GT(drive_context(7, rnti, 0, fb_truth, 0.54, 400000, &w), 0);
+  auto fb = book();
+  int64_t support = 0;
+  for (auto &c : fb.f[NR_TD_F_DMRS_ADD_POS].cand)
+    if (c.value == 1) support = c.n_support;
+  EXPECT_EQ(support, 0) << "pruned contexts neither support nor contradict";
+  EXPECT_EQ(fb.f[NR_TD_F_DMRS_ADD_POS].n_contra, 0);
+  /* contrast: after an epoch bump nothing prunes, so two independent RNTIs do vote and promote */
+  nr_pdsch_config_sweep_fieldbook_bump_epoch();
+  for (uint16_t rnti : {0x4621, 0x4622})
+    ASSERT_GT(drive_context(9, rnti, 0, fb_truth, 0.54, 400000, &w), 0);
+  fb = book();
+  EXPECT_EQ(fb.f[NR_TD_F_DMRS_ADD_POS].state, NR_TD_FS_PROMOTED);
+}
+
+TEST_F(PdschFieldBook, TdraPruneNeverRemovesK0)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  /* promote the truth's (S, L, mapping) but a DIFFERENT k0: pruning must match (S, L, mapping) only */
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_TDRA, nr_td_pack_tdra(fb_truth.tda_start, fb_truth.tda_length, 0, 5));
+  const auto t = open(0x4601, 0);
+  const auto &s = snap(t);
+  int kept = 0, slm_match = 0;
+  for (int i = 0; i < s.n_hyp; i++) {
+    const bool m = s.hyp[i].tda_start == fb_truth.tda_start && s.hyp[i].tda_length == fb_truth.tda_length && s.hyp[i].mapping_type == 0;
+    slm_match += m;
+    if (m) EXPECT_TRUE(nr_pdsch_config_sweep_is_active(&s, i)) << "k0=" << (int)s.hyp[i].k0 << " must stay active";
+    kept += nr_pdsch_config_sweep_is_active(&s, i);
+  }
+  EXPECT_GT(slm_match, 0);
+  EXPECT_EQ(kept, slm_match); /* everything else is dormant, nothing of the matching (S, L, mapping) is */
+}
+
+TEST_F(PdschFieldBook, ProbationFailureLeavesNoStaleFieldState)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_cfg_hypothesis_t w{};
+  ASSERT_GT(drive_context(9, 0x4601, 0, fb_truth, 0.54, 400000, &w), 0); /* private prior: mcs_table 1 */
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  /* sibling TDA whose truth the PRIOR excludes (mcs_table 0): probation fails and the catalogue is restored */
+  const nr_pdsch_cfg_hypothesis_t truth1{2, 12, 0, 1, 1, 0, 0};
+  ASSERT_GT(drive_context(9, 0x4601, 1, truth1, 0.54, 400000, &w), 0);
+  EXPECT_TRUE(same_hyp(w, truth1));
+  const auto t = open(0x4601, 1, 9);
+  const auto &s = snap(t);
+  uint32_t pr = 0, un = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&t, &pr, &un));
+  EXPECT_FALSE(dormant_any(s, NR_TD_DORMANT_PRIOR));
+  for (int f = 0; f < NR_TD_F_COUNT; f++)
+    EXPECT_EQ(dormant_any(s, NR_TD_DORMANT_FIELD_BASE + f), (pr >> f & 1) != 0) << "field " << f << ": mask and fb_pruned disagree";
+  ASSERT_GE(s.winner, 0);
+  EXPECT_TRUE(nr_pdsch_config_sweep_is_active(&s, s.winner)) << "the truth must not be asleep";
 }
