@@ -38,17 +38,17 @@ __device__ __forceinline__ uint16_t ring_sum(const nr_td_cb0_gpu_item_t &m, uint
   const uint32_t Eq = m.E / m.Qm;
   uint32_t acc = 0;
   for (uint32_t k = (c + L - p0) % L; k < m.E; k += L)
-    acc += (uint32_t)(int32_t)m.llr[(k % Eq) * m.Qm + k / Eq];
+    acc += (uint32_t)(int32_t)(int16_t)(m.llr[(k % Eq) * m.Qm + k / Eq] >> m.shift); /* K38 k_h, as the full decode */
   return (uint16_t)acc;
 }
 
-__global__ void cb0_dematch_kernel(const nr_td_cb0_gpu_item_t *items, int8_t *l, int16_t *d)
+__global__ void cb0_dematch_kernel(const nr_td_cb0_gpu_item_t *items, int8_t *l, uint32_t l_stride, int16_t *d)
 {
   const nr_td_cb0_gpu_item_t m = items[blockIdx.y];
   if (m.E == 0)
     return; /* invalid item, or left to the CPU */
   const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= NR_TD_CB0_L_STRIDE)
+  if (i >= l_stride)
     return;
   const uint32_t Z = m.Z, K = m.K, KcZ = m.Kc * Z, Kprime = K - m.F;
   int32_t v;
@@ -58,7 +58,7 @@ __global__ void cb0_dematch_kernel(const nr_td_cb0_gpu_item_t *items, int8_t *l,
     v = 127; /* filler (memset 127 on int16 = 0x7F7F, saturated) */
   else
     v = (int16_t)ring_sum(m, i - 2 * Z);
-  l[(size_t)blockIdx.y * NR_TD_CB0_L_STRIDE + i] = (int8_t)(v > 127 ? 127 : (v < -128 ? -128 : v));
+  l[(size_t)blockIdx.y * l_stride + i] = (int8_t)(v > 127 ? 127 : (v < -128 ? -128 : v));
   if (d && i < m.N)
     d[(size_t)blockIdx.y * NR_TD_CB0_D_STRIDE + i] = (int16_t)ring_sum(m, i);
 }
@@ -125,7 +125,7 @@ int ptr_ok(const void *p)
   return a.type == cudaMemoryTypeManaged || a.type == cudaMemoryTypeDevice;
 }
 
-int dematch(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d)
+int dematch_any(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, uint32_t l_stride, int16_t *d)
 {
   if (init() != 1 || n <= 0)
     return -1;
@@ -134,10 +134,10 @@ int dematch(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d)
     return -1;
   memcpy(m, items, (size_t)n * sizeof(*m));
   const int threads = 256;
-  const unsigned bx = (NR_TD_CB0_L_STRIDE + threads - 1) / threads;
+  const unsigned bx = (l_stride + threads - 1) / threads;
   for (int off = 0; off < n; off += 65535) {
     const int cnt = n - off < 65535 ? n - off : 65535;
-    cb0_dematch_kernel<<<dim3(bx, cnt), threads, 0, g.stream>>>(m + off, l + (size_t)off * NR_TD_CB0_L_STRIDE,
+    cb0_dematch_kernel<<<dim3(bx, cnt), threads, 0, g.stream>>>(m + off, l + (size_t)off * l_stride, l_stride,
                                                                d ? d + (size_t)off * NR_TD_CB0_D_STRIDE : nullptr);
   }
   if (cudaGetLastError() != cudaSuccess)
@@ -145,6 +145,11 @@ int dematch(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d)
   if (cudaStreamSynchronize(g.stream) != cudaSuccess)
     return -3;
   return 0;
+}
+
+int dematch(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d)
+{
+  return dematch_any(items, n, l, NR_TD_CB0_L_STRIDE, d);
 }
 
 const nr_td_cb0_gpu_api_t api = {NR_TD_CB0_GPU_ABI, pageable_ok, ptr_ok, dematch, scratch};

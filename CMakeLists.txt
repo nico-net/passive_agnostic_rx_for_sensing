@@ -1479,7 +1479,7 @@ target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_common MAC_NR_COMMON pol
 add_library(td_cb0_batch STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c
                                 ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
 target_include_directories(td_cb0_batch PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-target_link_libraries(td_cb0_batch PUBLIC PHY_NR_COMMON MAC_NR_COMMON crc_byte UTIL ${CMAKE_DL_LIBS} pthread
+target_link_libraries(td_cb0_batch PUBLIC PHY_NR_COMMON MAC_NR_COMMON crc_byte UTIL thread-pool ${CMAKE_DL_LIBS} pthread
                       PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 
 include_directories("${OPENAIR2_DIR}/NR_UE_PHY_INTERFACE")
@@ -2657,6 +2657,11 @@ if(ENABLE_TESTS)
   target_include_directories(test_nr_td_cb0_batch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
   target_link_libraries(test_nr_td_cb0_batch PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
                         thread-pool minimal_lib GTest::gtest GTest::gtest_main m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  # dlopens ./libldpc_cuda.so (CUDA LDPC tests): the plugin takes these from the host executable, as from nr-uesoftmodem
+  set_target_properties(test_nr_td_cb0_batch PROPERTIES ENABLE_EXPORTS ON)
+  foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_td_cb0_batch PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
   if(ENABLE_LDPC_CUDA)
     target_compile_definitions(test_nr_td_cb0_batch PRIVATE NR_TD_CB0_HAVE_CUDA)
   endif()

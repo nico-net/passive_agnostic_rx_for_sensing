@@ -19,6 +19,8 @@
 #include "PHY/CODING/nrLDPC_defs.h"
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
+#include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
+#include "common/utils/threadPool/thread-pool.h"
 
 uint8_t get_BG(uint32_t A, uint16_t R); /* openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c */
 
@@ -94,7 +96,8 @@ int nr_td_cb0_meta(const nr_td_cb0_item_t *it, nr_td_cb0_meta_t *m)
   memset(m, 0, sizeof(*m));
   m->err = NR_TD_CB0_ERR_ARG;
   if (!it->llr || it->G == 0 || !(it->Qm == 2 || it->Qm == 4 || it->Qm == 6 || it->Qm == 8) || it->Nl < 1 || it->Nl > 4
-      || it->rv > 3 || it->tbs == 0 || it->max_iter == 0 || it->bg > 2 || (it->bg == 0 && it->R == 0))
+      || it->rv > 3 || it->tbs == 0 || it->max_iter == 0 || it->bg > 2 || (it->bg == 0 && it->R == 0)
+      || it->llr_shift > 8)
     return m->err;
   m->BG = it->bg ? it->bg : get_BG(it->tbs, it->R); /* cw->ldpcBaseGraph = get_BG(cw->TBS, cw->targetCodeRate) */
   m->A = it->tbs;
@@ -102,6 +105,7 @@ int nr_td_cb0_meta(const nr_td_cb0_item_t *it, nr_td_cb0_meta_t *m)
   m->rv = it->rv;
   m->max_iter = it->max_iter;
   m->tbslbrm = it->tbslbrm;
+  m->shift = it->llr_shift;
   m->err = NR_TD_CB0_ERR_SEG;
   unsigned int C, K, Z, F;
   if (nr_segmentation(NULL, NULL, lenWithCrc(1, m->A), &C, &K, &Z, &F, m->BG) < 0 || C == 0 || C > 255)
@@ -143,7 +147,8 @@ int nr_td_cb0_meta(const nr_td_cb0_item_t *it, nr_td_cb0_meta_t *m)
 
 /* ---- CPU reference dematch: nr_process_decode_segment up to the decoder input ---- */
 typedef struct {
-  int16_t *e; /* E max of the job */
+  int16_t *e;  /* E max of the job */
+  int16_t *sh; /* shifted LLRs, E max */
   int16_t *d; /* NR_TD_CB0_D_STRIDE */
   int16_t *z; /* 68 * 384 + 16 */
   int8_t *l;  /* NR_TD_CB0_L_STRIDE */
@@ -152,15 +157,17 @@ typedef struct {
 static int scratch_alloc(cb0_scratch_t *s, uint32_t Emax)
 {
   s->e = aligned_alloc(64, ((size_t)Emax * sizeof(int16_t) + 63) & ~(size_t)63);
+  s->sh = aligned_alloc(64, ((size_t)Emax * sizeof(int16_t) + 63) & ~(size_t)63);
   s->d = aligned_alloc(64, NR_TD_CB0_D_STRIDE * sizeof(int16_t));
   s->z = aligned_alloc(64, (68 * 384 + 64) * sizeof(int16_t));
   s->l = aligned_alloc(64, NR_TD_CB0_L_STRIDE);
-  return (s->e && s->d && s->z && s->l) ? 0 : -1;
+  return (s->e && s->sh && s->d && s->z && s->l) ? 0 : -1;
 }
 
 static void scratch_free(cb0_scratch_t *s)
 {
   free(s->e);
+  free(s->sh);
   free(s->d);
   free(s->z);
   free(s->l);
@@ -172,7 +179,13 @@ static void cpu_dematch_one(const nr_td_cb0_item_t *it, const nr_td_cb0_meta_t *
 {
   const uint32_t E = m->E, K = m->K, Z = m->Z, F = m->F, Kc = m->Kc, Kprime = K - F;
   int16_t *d = s->d, *z = s->z;
-  nr_deinterleaving_ldpc(E, m->Qm, s->e, (int16_t *)it->llr);
+  const int16_t *in = it->llr;
+  if (m->shift) { /* K38 k_h: exactly the full decode's llr[i] >> k, on the E LLRs code block 0 reads */
+    for (uint32_t i = 0; i < E; i++)
+      s->sh[i] = (int16_t)(it->llr[i] >> m->shift);
+    in = s->sh;
+  }
+  nr_deinterleaving_ldpc(E, m->Qm, s->e, (int16_t *)in);
   nr_rate_matching_ldpc_rx(m->tbslbrm, m->BG, Z, d, s->e, m->C, m->rv, 1 /* clear: new transmission */, E, F,
                            K - F - 2 * Z);
   memset(z, 0, 2 * Z * sizeof(*z));                          /* first 2*Z punctured bits */
@@ -189,24 +202,9 @@ static void cpu_dematch_one(const nr_td_cb0_item_t *it, const nr_td_cb0_meta_t *
     memcpy(d_out, d, m->N * sizeof(*d));
 }
 
-/* ---- CPU layered LDPC decode of one dematched CB0, as nr_process_decode_segment + the probe guards ---- */
-static void cpu_decode_one(LDPC_decoderfunc_t *dec, const nr_td_cb0_meta_t *m, const int8_t *l, nr_td_cb0_result_t *r)
+/* The receiver's all-zero guards on a converged CB0 (bits = decoded K/8 bytes). */
+static int cb0_guard(const nr_td_cb0_meta_t *m, const uint8_t *out, int pass)
 {
-  t_nrLDPC_dec_params p = {.check_crc = check_crc};
-  p.BG = m->BG;
-  p.Z = m->Z;
-  p.numMaxIter = m->max_iter;
-  p.outMode = nrLDPC_outMode_BIT;
-  p.R = m->R_dec;
-  p.crc_type = m->crc_type;
-  p.Kprime = m->Kprime_crc;
-  decode_abort_t ab;
-  init_abort(&ab);
-  t_nrLDPC_time_stats ts = {0};
-  uint8_t out[CB0_LDPC_OUT_BYTES] __attribute__((aligned(32)));
-  const int it = dec(&p, (int8_t *)l, out, &ts, &ab);
-  pthread_mutex_destroy(&ab.mutex_failure);
-  int pass = it < m->max_iter; /* nr_process_decode_segment: decodeIterations < numMaxIter */
   if (pass && m->C > 1) {
     /* the probe's all-zero guard on segment 0 (passive_ldpc_decode_core, t_probe_first_seg) */
     const uint32_t seg_bytes = (m->K >> 3) - (m->F >> 3) - 3;
@@ -226,6 +224,27 @@ static void cpu_decode_one(LDPC_decoderfunc_t *dec, const nr_td_cb0_meta_t *m, c
         pass = 0;
     }
   }
+  return pass;
+}
+
+/* ---- CPU layered LDPC decode of one dematched CB0, as nr_process_decode_segment + the probe guards ---- */
+static void cpu_decode_one(LDPC_decoderfunc_t *dec, const nr_td_cb0_meta_t *m, const int8_t *l, nr_td_cb0_result_t *r)
+{
+  t_nrLDPC_dec_params p = {.check_crc = check_crc};
+  p.BG = m->BG;
+  p.Z = m->Z;
+  p.numMaxIter = m->max_iter;
+  p.outMode = nrLDPC_outMode_BIT;
+  p.R = m->R_dec;
+  p.crc_type = m->crc_type;
+  p.Kprime = m->Kprime_crc;
+  decode_abort_t ab;
+  init_abort(&ab);
+  t_nrLDPC_time_stats ts = {0};
+  uint8_t out[CB0_LDPC_OUT_BYTES] __attribute__((aligned(32)));
+  const int it = dec(&p, (int8_t *)l, out, &ts, &ab);
+  pthread_mutex_destroy(&ab.mutex_failure);
+  const int pass = cb0_guard(m, out, it < m->max_iter); /* nr_process_decode_segment: decodeIterations < numMaxIter */
   r->pass = (int8_t)pass;
   r->iters = (uint8_t)(it > 255 ? 255 : (it < 0 ? 0 : it));
   r->decoder_used = NR_TD_CB0_DEC_CPU_LAYERED;
@@ -290,21 +309,13 @@ static void cb0_run(cb0_job_t *j, int threads)
 /* LDPC adapter. Today: the CPU layered decoder (libldpc.so's LDPCdecoder), the same decoder and iteration policy
  * as the receiver's full decode, so a CB0 FAIL is admissible elimination evidence under levers spec section 9.3.
  *
- * HOOK (td/g1-ldpc-safety, K34; approved at 54bc0c49e4, not merged into this branch). POST-MERGE STEP, deliberately
- * not wired here: G1's pool is owned by one worker thread (sticky-error state, CUDA-graph capture epochs, 200 ms
- * timeout + bypass breaker), so the CB0 batch must submit through that worker's queue, NOT call ldpc_pool_decode
- * directly from this thread. Shape of the GPU variant:
- *   - group the valid items by (BG, Z) (ldpc_pool_decode takes one BG / Z / num_iter per call, <= ldpc_pool_max_launch
- *     code blocks per launch); the l slots are already in the pool's input layout (BATCH_LLR_STRIDE = 68*384 int8,
- *     filled exactly like cuda_prepare_segment), and on GB10 they are managed memory, so no host copy is needed
- *     once the pool accepts device-visible input pointers;
- *   - int rc = ldpc_pool_decode(BG, Z, iters, n_req, first, count, K, rcs): a non-zero rc / rcs[r] means the slot's
- *     bits were NOT produced by this call (K34 safety contract) -> out.pass = -1 (inconclusive), never 0 or 1;
- *   - PASS = check_crc(bits, Kprime_crc, crc_type) on the CPU, plus the same all-zero guards as cpu_decode_one;
- *     decoder_used = NR_TD_CB0_DEC_CUDA_FLOODING.
- *   The CUDA decoder (flooding int8 min-sum, 3/4 damping, 2x iterations) is NOT the CPU layered decoder: its CB0
- *   outcomes may feed the elimination channel only if the full-TB decode of the same hypothesis also runs on CUDA
- *   (section 9.3 same-decoder rule). Do not mix decoder_used values within one hypothesis's evidence. */
+ * CUDA: wired (round 2) through G1's public TB entry -- see cb0_cuda_worker / nr_td_cb0_use_cuda_ldpc. That path
+ * re-does the de-matching on the CPU inside the plugin, and G1's worker launches once per (BG, Z, iterations) group.
+ * A zero-copy path (GPU dematch straight into the pool's pinned slots, one launch for mixed Z) needs a new entry in
+ * libldpc_cuda.so (nrLDPC_cuda/*, owned by G1): proposed in the task-BATCH report, not done here.
+ * The CUDA decoder (normalised flooding min-sum, 2x iterations) is NOT the CPU layered decoder: its CB0 outcomes may
+ * feed the elimination channel only under the section 9.3 same-decoder / dominance rule. Results say decoder_used
+ * per item; never mix them within one hypothesis's evidence. */
 void cb0_ldpc_decode_batch(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, nr_td_cb0_result_t *out)
 {
   LDPC_decoderfunc_t *dec = g_dec;
@@ -335,7 +346,8 @@ static int gpu_dematch(const nr_td_cb0_gpu_api_t *api, const nr_td_cb0_item_t *i
       continue; /* E = 0: the kernel skips the item */
     const nr_td_cb0_meta_t *m = &meta[i];
     g[i] = (nr_td_cb0_gpu_item_t){.llr = items[i].llr, .E = m->E, .Qm = m->Qm, .Kc = m->Kc, .Z = m->Z, .K = m->K,
-                                  .F = m->F, .Ncb = m->Ncb, .k0 = m->k0, .Foffset = m->Foffset, .N = m->N};
+                                  .F = m->F, .Ncb = m->Ncb, .k0 = m->k0, .Foffset = m->Foffset, .N = m->N,
+                                  .shift = m->shift};
     have_l[i] = 1;
     any = 1;
   }
@@ -400,6 +412,170 @@ int nr_td_cb0_dematch(const nr_td_cb0_item_t *items, int n, int use_gpu, int8_t 
   return rc;
 }
 
+/* ---- counters ---- */
+static _Atomic uint64_t st_items, st_decoded, st_cuda_chunks, st_cuda_errors, st_cuda_fb;
+
+void nr_td_cb0_get_stats(nr_td_cb0_stats_t *s)
+{
+  s->items = atomic_load(&st_items);
+  s->decoded = atomic_load(&st_decoded);
+  s->cuda_chunks = atomic_load(&st_cuda_chunks);
+  s->cuda_errors = atomic_load(&st_cuda_errors);
+  s->cuda_fallback_items = atomic_load(&st_cuda_fb);
+}
+
+/* ---- CUDA LDPC through libldpc_cuda.so's public TB entry (G1's worker queue / pool / breaker / fallback) ---- */
+static int32_t (*g_cuda_dec)(nrLDPC_slot_decoding_parameters_t *);
+static int g_cuda_on = -1; /* -1: decide from NR_TD_CB0_CUDA_LDPC at the first batch */
+static tpool_t g_inline_pool; /* no worker threads: the plugin's per-segment prep runs inline in our worker */
+
+static int cuda_load(void)
+{
+  static int tried, ok;
+  if (tried)
+    return ok;
+  tried = 1;
+  void *h = dlopen("libldpc_cuda.so", RTLD_NOW | RTLD_NOLOAD); /* already the receiver's coding library */
+  /* RTLD_DEEPBIND: the plugin's own symbols first. A host that also defines nrLDPC_coding_decoder_impl (a test linking
+   * the segment decoder) would otherwise interpose the CPU decoder under the plugin's entry point. */
+  if (!h)
+    h = dlopen("libldpc_cuda.so", RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
+  if (!h)
+    h = dlopen("./libldpc_cuda.so", RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
+  if (!h)
+    return 0;
+  int32_t (*init)(void) = (int32_t(*)(void))dlsym(h, "nrLDPC_coding_init");
+  g_cuda_dec = (int32_t(*)(nrLDPC_slot_decoding_parameters_t *))dlsym(h, "nrLDPC_coding_decoder");
+  if (!init || !g_cuda_dec || init() != 0) {
+    g_cuda_dec = NULL;
+    return 0;
+  }
+  char p[] = "n";
+  initTpool(p, &g_inline_pool, false);
+  ok = 1;
+  return ok;
+}
+
+static int use_cuda_locked(int on)
+{
+  g_cuda_on = (on && cuda_load()) ? 1 : 0;
+  return g_cuda_on;
+}
+
+int nr_td_cb0_use_cuda_ldpc(int on)
+{
+  pthread_mutex_lock(&g_lock);
+  const int r = use_cuda_locked(on);
+  pthread_mutex_unlock(&g_lock);
+  return r;
+}
+
+#define CB0_CUDA_TBS 64 /* nrLDPC_coding_decoder takes at most 64 TBs per call */
+typedef struct {
+  const nr_td_cb0_item_t *items;
+  const nr_td_cb0_meta_t *meta;
+  nr_td_cb0_result_t *out;
+  int n;
+  uint32_t Emax;
+  atomic_int next;
+} cb0_cuda_job_t;
+
+static void *cb0_cuda_worker(void *arg)
+{
+  cb0_cuda_job_t *j = arg;
+  nrLDPC_TB_decoding_parameters_t *tb = calloc(CB0_CUDA_TBS, sizeof(*tb));
+  int16_t *d = malloc((size_t)CB0_CUDA_TBS * 68 * 384 * sizeof(int16_t));
+  uint8_t *c = malloc((size_t)CB0_CUDA_TBS * 1056 + 64);
+  int16_t *sh = malloc((size_t)CB0_CUDA_TBS * j->Emax * sizeof(int16_t));
+  decode_abort_t ab[CB0_CUDA_TBS];
+  uint32_t processed[CB0_CUDA_TBS];
+  if (!tb || !d || !c || !sh)
+    goto done; /* its items stay undecoded: the caller marks them inconclusive */
+  for (int t = 0; t < CB0_CUDA_TBS; t++)
+    init_abort(&ab[t]);
+  for (int g; (g = atomic_fetch_add(&j->next, CB0_CUDA_TBS)) < j->n;) {
+    const int cnt = j->n - g < CB0_CUDA_TBS ? j->n - g : CB0_CUDA_TBS;
+    for (int t = 0; t < cnt; t++) {
+      const nr_td_cb0_item_t *it = &j->items[g + t];
+      const nr_td_cb0_meta_t *m = &j->meta[g + t];
+      nrLDPC_TB_decoding_parameters_t *b = &tb[t];
+      memset(b, 0, sizeof(*b));
+      const int16_t *llr = it->llr;
+      if (m->shift) { /* K38 k_h on the E LLRs CB0 reads, as the full decode */
+        int16_t *q = sh + (size_t)t * j->Emax;
+        for (uint32_t i = 0; i < m->E; i++)
+          q[i] = (int16_t)(it->llr[i] >> m->shift);
+        llr = q;
+      }
+      /* passive_ldpc_decode_core's TB parameters, probe form (nb_segments_to_decode = 1 when C > 1) */
+      b->harq_unique_pid = 0;
+      b->processedSegments = &processed[t];
+      b->G = it->G;
+      b->Qm = m->Qm;
+      b->nb_layers = it->Nl;
+      b->BG = m->BG;
+      b->rv_index = m->rv;
+      b->max_ldpc_iterations = m->max_iter;
+      set_abort(&ab[t], false);
+      b->abort_decode = &ab[t];
+      b->tbslbrm = m->tbslbrm;
+      b->A = m->A;
+      b->K = m->K;
+      b->Z = m->Z;
+      b->F = m->F;
+      b->C = m->C;
+      b->nb_segments_to_decode = m->C > 1 ? 1 : 0;
+      b->E = b->E2 = (int)m->E;
+      b->R = b->R2 = m->R_dec;
+      b->first_rE2 = (int)m->C;
+      b->llr = (short *)llr;
+      b->c = c + (size_t)t * 1056;
+      b->d = d + (size_t)t * 68 * 384;
+      b->d_to_be_cleared = true;
+    }
+    nrLDPC_slot_decoding_parameters_t slot = {.nb_TBs = cnt, .threadPool = &g_inline_pool, .TBs = tb};
+    const int32_t rc = g_cuda_dec(&slot);
+    atomic_fetch_add(&st_cuda_chunks, 1);
+    for (int t = 0; t < cnt; t++) {
+      nr_td_cb0_result_t *r = &j->out[g + t];
+      if (rc != 0) {
+        r->pass = -1;
+        r->err = NR_TD_CB0_ERR_GPU;
+        r->decoder_used = NR_TD_CB0_DEC_CUDA_FLOODING;
+        atomic_fetch_add(&st_cuda_errors, 1);
+        continue;
+      }
+      const int cuda = tb[t].decoder_used == NRLDPC_DECODER_CUDA_FLOODING;
+      if (!cuda)
+        atomic_fetch_add(&st_cuda_fb, 1);
+      r->decoder_used = cuda ? NR_TD_CB0_DEC_CUDA_FLOODING : NR_TD_CB0_DEC_CPU_LAYERED;
+      r->pass = (int8_t)cb0_guard(&j->meta[g + t], tb[t].c, tb[t].decodeSuccess[0]);
+      r->iters = 0; /* the TB entry does not report iterations */
+    }
+  }
+  for (int t = 0; t < CB0_CUDA_TBS; t++)
+    pthread_mutex_destroy(&ab[t].mutex_failure);
+done:
+  free(tb);
+  free(d);
+  free(c);
+  free(sh);
+  return NULL;
+}
+
+/* ---- exact per-batch deduplication: everything the CB0 verdict depends on ---- */
+typedef struct {
+  const int16_t *llr;
+  uint32_t shift, BG, Z, K, F, E, Qm, rv, Ncb, max_iter, crc_type, Kprime_crc;
+} cb0_key_t;
+
+static int key_cmp(const void *a, const void *b, void *keys)
+{
+  const cb0_key_t *k = keys;
+  const int r = memcmp(&k[*(const int *)a], &k[*(const int *)b], sizeof(cb0_key_t));
+  return r ? r : (*(const int *)a - *(const int *)b); /* stable: the first item of a group is its representative */
+}
+
 int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
 {
   if (n <= 0)
@@ -408,17 +584,21 @@ int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *ou
     return -1;
   pthread_once(&g_crc_once, crcTableInit);
   nr_td_cb0_meta_t *meta = calloc(n, sizeof(*meta));
+  cb0_key_t *key = calloc(n, sizeof(*key));
+  int *ord = calloc(n, sizeof(int)), *rep = calloc(n, sizeof(int));
+  nr_td_cb0_item_t *ritem = calloc(n, sizeof(*ritem));
+  nr_td_cb0_meta_t *rmeta = calloc(n, sizeof(*rmeta));
+  nr_td_cb0_result_t *rout = calloc(n, sizeof(*rout));
   int8_t *have = calloc(n, 1);
-  if (!meta || !have) {
-    free(meta);
-    free(have);
+  if (!meta || !key || !ord || !rep || !ritem || !rmeta || !rout || !have) {
     for (int i = 0; i < n; i++)
       out[i] = (nr_td_cb0_result_t){.pass = -1, .err = NR_TD_CB0_ERR_ARG};
-    return 0;
+    goto out_free;
   }
-  uint32_t Emax = 1;
+  int nv = 0;
   for (int i = 0; i < n; i++) {
     out[i] = (nr_td_cb0_result_t){0};
+    rep[i] = -1;
     if (nr_td_cb0_meta(&items[i], &meta[i]) != 0) {
       out[i].pass = -1;
       out[i].err = meta[i].err;
@@ -426,41 +606,114 @@ int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *ou
     }
     out[i].C = (uint16_t)meta[i].C;
     out[i].tb_result = meta[i].C == 1;
+    const nr_td_cb0_meta_t *m = &meta[i];
+    cb0_key_t *k = &key[i]; /* field by field after the memset: memcmp must not see padding */
+    memset(k, 0, sizeof(*k));
+    k->llr = items[i].llr;
+    k->shift = m->shift;
+    k->BG = m->BG;
+    k->Z = m->Z;
+    k->K = m->K;
+    k->F = m->F;
+    k->E = m->E;
+    k->Qm = m->Qm;
+    k->rv = m->rv;
+    k->Ncb = m->Ncb;
+    k->max_iter = m->max_iter;
+    k->crc_type = m->crc_type;
+    k->Kprime_crc = m->Kprime_crc;
+    ord[nv++] = i;
+  }
+  qsort_r(ord, nv, sizeof(int), key_cmp, key);
+  int nr = 0;
+  uint32_t Emax = 1;
+  for (int a = 0; a < nv; a++) {
+    const int i = ord[a];
+    if (a > 0 && memcmp(&key[i], &key[ord[a - 1]], sizeof(cb0_key_t)) == 0) {
+      rep[i] = rep[ord[a - 1]];
+      out[i].dedup = 1;
+      continue;
+    }
+    rep[i] = nr;
+    ritem[nr] = items[i];
+    rmeta[nr] = meta[i];
     if (meta[i].E > Emax)
       Emax = meta[i].E;
+    nr++;
   }
+  atomic_fetch_add(&st_items, n);
+  atomic_fetch_add(&st_decoded, nr);
 
   pthread_mutex_lock(&g_lock);
   if (g_gpu_on < 0) {
     const char *e = getenv("NR_GPU_CB0");
     use_gpu_locked(e && atoi(e) == 1);
   }
-  int decoded = 0;
-  if (!g_dec) {
-    for (int i = 0; i < n; i++)
-      if (meta[i].valid) {
-        out[i].pass = -1;
-        out[i].err = NR_TD_CB0_ERR_DECODER;
+  if (g_cuda_on < 0) {
+    const char *e = getenv("NR_TD_CB0_CUDA_LDPC");
+    use_cuda_locked(e && atoi(e) == 1);
+  }
+  if (nr > 0 && g_cuda_on == 1) {
+    cb0_cuda_job_t j = {.items = ritem, .meta = rmeta, .out = rout, .n = nr, .Emax = Emax};
+    atomic_init(&j.next, 0);
+    const int T = g_threads < (nr + CB0_CUDA_TBS - 1) / CB0_CUDA_TBS ? g_threads : (nr + CB0_CUDA_TBS - 1) / CB0_CUDA_TBS;
+    pthread_t th[64];
+    int started = 0;
+    for (int t = 1; t < T; t++)
+      if (pthread_create(&th[started], NULL, cb0_cuda_worker, &j) == 0)
+        started++;
+    cb0_cuda_worker(&j);
+    for (int t = 0; t < started; t++)
+      pthread_join(th[t], NULL);
+    /* "any error = the whole batch is inconclusive": one failed CUDA call voids every CUDA verdict of this call */
+    int any_err = 0;
+    for (int r = 0; r < nr; r++)
+      any_err |= rout[r].err == NR_TD_CB0_ERR_GPU;
+    for (int r = 0; r < nr; r++)
+      if (any_err && rout[r].decoder_used == NR_TD_CB0_DEC_CUDA_FLOODING) {
+        rout[r].pass = -1;
+        rout[r].err = NR_TD_CB0_ERR_GPU;
       }
-  } else {
+  } else if (nr > 0 && !g_dec) {
+    for (int r = 0; r < nr; r++)
+      rout[r] = (nr_td_cb0_result_t){.pass = -1, .err = NR_TD_CB0_ERR_DECODER};
+  } else if (nr > 0) {
     int8_t *l = NULL;
     if (g_gpu_on == 1 && g_gpu) {
-      l = g_gpu->scratch(0, (size_t)n * NR_TD_CB0_L_STRIDE);
-      if (l && gpu_dematch(g_gpu, items, meta, n, l, NULL, have) != 0)
+      l = g_gpu->scratch(0, (size_t)nr * NR_TD_CB0_L_STRIDE);
+      if (l && gpu_dematch(g_gpu, ritem, rmeta, nr, l, NULL, have) != 0)
         l = NULL; /* CUDA error: every item falls back to the CPU dematch */
     }
-    cb0_job_t j = {.items = items, .meta = meta, .l = l, .have_l = have, .out = out, .dec = g_dec, .n = n, .Emax = Emax};
+    cb0_job_t j = {.items = ritem, .meta = rmeta, .l = l, .have_l = have, .out = rout, .dec = g_dec, .n = nr, .Emax = Emax};
     cb0_run(&j, g_threads);
-    for (int i = 0; i < n; i++) {
-      if (meta[i].valid && out[i].decoder_used == 0) { /* a worker could not allocate its scratch */
-        out[i].pass = -1;
-        out[i].err = NR_TD_CB0_ERR_ARG;
-      }
-      decoded += out[i].pass != -1;
-    }
   }
   pthread_mutex_unlock(&g_lock);
+  for (int r = 0; r < nr; r++)
+    if (rout[r].decoder_used == 0 && rout[r].err == 0) { /* a worker could not allocate its scratch */
+      rout[r].pass = -1;
+      rout[r].err = NR_TD_CB0_ERR_ARG;
+    }
+  for (int i = 0; i < n; i++) {
+    if (rep[i] < 0)
+      continue;
+    const nr_td_cb0_result_t *r = &rout[rep[i]];
+    out[i].pass = r->pass;
+    out[i].iters = r->iters;
+    out[i].decoder_used = r->decoder_used;
+    out[i].err = r->err;
+    out[i].dematch_gpu = r->dematch_gpu;
+  }
+out_free:;
+  int decoded = 0;
+  for (int i = 0; i < n; i++)
+    decoded += out[i].pass != -1;
   free(meta);
+  free(key);
+  free(ord);
+  free(rep);
+  free(ritem);
+  free(rmeta);
+  free(rout);
   free(have);
   return decoded;
 }

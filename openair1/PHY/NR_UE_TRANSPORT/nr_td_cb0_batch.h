@@ -53,6 +53,10 @@ typedef struct {
   /* --- additions to the 2026-10-03 contract: BG selection (38.212 7.2.2) needs the code rate --- */
   uint16_t R; /* target code rate x 10240, exactly cw->targetCodeRate (get_BG input) */
   uint8_t bg; /* 0 = get_BG(tbs, R); 1 / 2 = forced (a reserved-MCS retransmission keeps the initial BG) */
+  /* K38 LLR-norm shift k_h of THIS hypothesis (0..8): every LLR is read as (llr >> k_h), int16 arithmetic shift,
+   * exactly what the full decode applies to its buffer (nr_llr_norm_shift over nr_llr_norm_span(G,
+   * nr_llr_norm_num_cb(tbs, bg))). The batch applies exactly this value and nothing else; it never computes it. */
+  uint8_t llr_shift;
 } nr_td_cb0_item_t;
 
 enum {
@@ -68,6 +72,7 @@ enum {
   NR_TD_CB0_ERR_E = 3,       /* E <= 0 */
   NR_TD_CB0_ERR_RM = 4,      /* nr_rate_matching_ldpc_rx would return -1 (Foffset > Ncb, empty buffer) */
   NR_TD_CB0_ERR_DECODER = 5, /* no LDPC decoder registered */
+  NR_TD_CB0_ERR_GPU = 6,     /* CUDA LDPC pool error / timeout / rejected request in this batch: no verdict */
 };
 
 typedef struct {
@@ -79,6 +84,7 @@ typedef struct {
   uint8_t err;       /* NR_TD_CB0_ERR_* when pass == -1 */
   uint8_t dematch_gpu; /* 1: the rate de-matching of this item ran on the GPU */
   uint16_t C;        /* code blocks of the hypothesis's TB */
+  uint8_t dedup;     /* 1: identical computation key to an earlier item of the batch, verdict copied (exact) */
 } nr_td_cb0_result_t;
 
 /* Decode CB0 of n items; out[i] for items[i]. Returns the number of items with pass != -1 (decoded), or -1 if
@@ -95,6 +101,20 @@ void nr_td_cb0_set_threads(int n);
 /* GPU rate de-matching: 1 = load libtd_cb0_gpu.so (next to the executable, or ./), 0 = CPU. Returns 1 if the GPU
  * path is active after the call. Default at the first batch: on iff NR_GPU_CB0=1. */
 int nr_td_cb0_use_gpu(int on);
+/* CUDA LDPC through the G1-safe libldpc_cuda.so, via its PUBLIC TB entry nrLDPC_coding_decoder (worker queue,
+ * slot pool, bounded waits, circuit breaker, CPU fallback -- all G1's): each item is submitted as a TB with
+ * nb_segments_to_decode = 1 (exactly the receiver's layout probe), up to 64 per call, calls from the worker threads
+ * batched together by G1's worker. GPU iterations = 2 x max_iter (G1's TB rule). decoder_used comes from G1 per item:
+ * 2 = CUDA flooding, 1 = G1 fell back to its CPU decoder for that TB (error, timeout, breaker, pool full) -- never
+ * silently mixed. The plugin does the de-matching itself (on the CPU), so the GPU dematch is not used on this path.
+ * 1 = use it, 0 = CPU layered (cb0_ldpc_decode_batch). Returns 1 if active. Default at the first batch: on iff
+ * NR_TD_CB0_CUDA_LDPC=1. */
+int nr_td_cb0_use_cuda_ldpc(int on);
+/* Counters since start: items in, items decoded (after dedup), CUDA chunks, CUDA errors, CPU fallbacks. */
+typedef struct {
+  uint64_t items, decoded, cuda_chunks, cuda_errors, cuda_fallback_items;
+} nr_td_cb0_stats_t;
+void nr_td_cb0_get_stats(nr_td_cb0_stats_t *s);
 
 /* ---- per-item metadata (CPU), shared with the GPU kernel ---- */
 typedef struct {
@@ -105,6 +125,7 @@ typedef struct {
   uint32_t N, Ncb, k0, Foffset;          /* k0 = start index in the circular buffer (index_k0 * Ncb / N) * Z */
   uint32_t tbslbrm;
   uint8_t max_iter;
+  uint8_t shift; /* item.llr_shift */
 } nr_td_cb0_meta_t;
 
 /* Compute the metadata of one item. Returns 0 if valid, else the NR_TD_CB0_ERR_* code (meta->valid = 0). */
@@ -129,7 +150,7 @@ void cb0_ldpc_decode_batch(const nr_td_cb0_meta_t *meta, const int8_t *l, int n,
 /* ---- GPU module ABI (libtd_cb0_gpu.so, nr_td_cb0_batch.cu) ---- */
 typedef struct {
   const int16_t *llr;
-  uint32_t E, Qm, Kc, Z, K, F, Ncb, k0, Foffset, N;
+  uint32_t E, Qm, Kc, Z, K, F, Ncb, k0, Foffset, N, shift;
 } nr_td_cb0_gpu_item_t;
 typedef struct {
   int abi; /* NR_TD_CB0_GPU_ABI */
@@ -143,7 +164,7 @@ typedef struct {
   /* Managed scratch of at least bytes, owned by the module (reused across calls); NULL on failure. */
   void *(*scratch)(int which, size_t bytes);
 } nr_td_cb0_gpu_api_t;
-#define NR_TD_CB0_GPU_ABI 1
+#define NR_TD_CB0_GPU_ABI 2 /* 2: nr_td_cb0_gpu_item_t.shift */
 
 #ifdef __cplusplus
 }
