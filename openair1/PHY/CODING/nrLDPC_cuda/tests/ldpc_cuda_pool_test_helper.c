@@ -156,6 +156,7 @@ int lcp_random_tb(int bg1, int Z, int C, double ebn0_db, int iters, uint8_t *ok,
   return rc;
 }
 
+uint64_t lcp_trips(void) { uint64_t (*f)(void) = dlsym(h, "ldpc_cuda_breaker_trips"); return f ? f() : 0; }
 int lcp_init_again(void) { return f_init(); }
 int lcp_pool_decode(uint32_t BG, uint32_t Z, uint32_t iters, uint32_t first, uint32_t count, uint32_t K, int *req_rc)
 {

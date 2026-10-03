@@ -138,22 +138,36 @@ TEST_F(PoolTest, TimeoutFallsBackToCpu) {
   EXPECT_TRUE(r.ok[0]); EXPECT_FALSE(r.ok[1]);
   EXPECT_EQ(r.decoder_used, LCP_CPU);
   EXPECT_EQ(ctr().fb, b.fb + 1);
-  EXPECT_EQ(ctr().dis, 1u); /* any timeout bypasses the GPU */
+  EXPECT_EQ(ctr().dis, 0u) << "a single timeout only sends its TB to the CPU";
   lcp_hooks(0, 0, 0, 256, 50, 4, 300);
   wait_slots_free();
-  usleep(400000); /* bypass over */
   const Result again = run_tb({false});
   EXPECT_TRUE(again.ok[0]);
   EXPECT_EQ(again.decoder_used, LCP_CUDA);
   EXPECT_EQ(ctr().dis, 0u);
 }
 
+/* round 3: N consecutive timeouts (counted together with errors) open the bypass, and the trip counter is monotonic */
+TEST_F(PoolTest, ConsecutiveTimeoutsTripBreaker) {
+  lcp_hooks(0, 400, 0, 256, 50, 4, 5000);
+  const uint64_t t0 = lcp_trips();
+  for (int i = 0; i < 3; i++) { EXPECT_EQ(run_tb({false}).decoder_used, LCP_CPU); EXPECT_EQ(ctr().dis, 0u) << "tripped early at " << i; }
+  EXPECT_EQ(lcp_trips(), t0);
+  EXPECT_EQ(run_tb({false}).decoder_used, LCP_CPU);
+  EXPECT_EQ(ctr().dis, 1u);
+  EXPECT_EQ(lcp_trips(), t0 + 1);
+  lcp_hooks(0, 0, 0, 256, 50, 4, 5000);
+  EXPECT_EQ(run_tb({false}).decoder_used, LCP_CPU) << "bypassed";
+}
+
 /* breaker: N consecutive errors bypass the GPU for T, then it comes back */
 TEST_F(PoolTest, BreakerTripsAfterConsecutiveErrorsThenRecovers) {
   lcp_hooks(1, 0, 0, 256, 50, 4, 700);
+  const uint64_t t0 = lcp_trips();
   for (int i = 0; i < 3; i++) { run_tb({false}); EXPECT_EQ(ctr().dis, 0u) << "tripped early at " << i; }
   run_tb({false});
   EXPECT_EQ(ctr().dis, 1u);
+  EXPECT_EQ(lcp_trips(), t0 + 1);
   lcp_hooks(0, 0, 0, 256, 50, 4, 700); /* GPU healthy again, but the breaker keeps it bypassed */
   const Counters b = ctr();
   const Result r = run_tb({false});
@@ -272,7 +286,7 @@ TEST_F(PoolTest, RandomCodewordAtVeryLowSnrFails) {
   EXPECT_FALSE(match[0]);
 }
 
-/* M5: lifting size 15 (odd): Kc*Z = 780 is not a multiple of 16, so the prep pack ends in a partial vector. It must stay
+/* Documentation, NOT a regression oracle (the BG1 Z=384 canary test is the real overrun guard): lifting size 15 (odd): Kc*Z = 780 is not a multiple of 16, so the prep pack ends in a partial vector. It must stay
  * inside its slot (canary in the next slot) on CUDA and on the CPU fallback. */
 TEST_F(PoolTest, OddZPackStaysInsideSlot) {
   int8_t* next = lcp_host_llr() + IN_STRIDE;

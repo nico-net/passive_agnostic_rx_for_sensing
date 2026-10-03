@@ -161,7 +161,7 @@ int ldpc_pool_capturing(void);
 uint32_t ldpc_pool_capture_epoch(void);
 
 /* ---- tunables / test hooks: environment read ONCE, tests override through ldpc_cuda_test_hooks() ---- */
-static volatile int g_timeout_ms = 50, g_queue_cap = QUEUE_CAP, g_breaker_n = 4, g_breaker_ms = 5000;
+static volatile int g_timeout_ms = 200, g_queue_cap = QUEUE_CAP, g_breaker_n = 4, g_breaker_ms = 5000;
 static void tunables_init(void)
 {
   const char *e;
@@ -179,6 +179,7 @@ static void tunables_env_once(void)
 /* ---- circuit breaker (K34): N consecutive GPU errors or any wait timeout -> bypass the GPU for g_breaker_ms;
  * a sticky CUDA error -> bypass for good. State 0 closed, 1 bypassed, 2 permanently off (ldpc_cuda_disabled). ---- */
 static _Atomic int g_consec_err, g_perm_off;
+static _Atomic uint64_t g_trips; /* monotonic: how many times the breaker opened (ldpc_cuda_breaker_trips) */
 static _Atomic long long g_bypass_until_ms;
 static long long mono_ms(void)
 {
@@ -201,6 +202,7 @@ static void warn_once(int reason, const char *what) /* one-shot per reason */
 }
 static void breaker_trip(int reason, const char *what, bool permanent)
 {
+  atomic_fetch_add(&g_trips, 1);
   if (permanent)
     atomic_store(&g_perm_off, 1);
   else
@@ -208,16 +210,21 @@ static void breaker_trip(int reason, const char *what, bool permanent)
   atomic_store(&g_consec_err, 0);
   warn_once(reason, what);
 }
-static void breaker_note_launch(bool err)
+/* Consecutive failures (launch errors AND wait timeouts) are counted together; N of them open the bypass. A single
+ * error or timeout only sends that TB to the CPU. A sticky CUDA error disables the GPU for good. */
+static void breaker_note_fail(int reason, const char *what)
 {
-  if (!err) {
-    atomic_store(&g_consec_err, 0);
-    return;
-  }
   if (ldpc_pool_sticky())
     breaker_trip(W_STICKY, "sticky CUDA error, GPU decoder disabled permanently", true);
   else if (atomic_fetch_add(&g_consec_err, 1) + 1 >= g_breaker_n)
-    breaker_trip(W_ERRORS, "consecutive GPU decode errors, GPU bypassed for a few seconds", false);
+    breaker_trip(reason, what, false);
+}
+static void breaker_note_launch(bool err)
+{
+  if (!err)
+    atomic_store(&g_consec_err, 0);
+  else
+    breaker_note_fail(W_ERRORS, "consecutive GPU decode errors/timeouts, GPU bypassed for a few seconds");
 }
 
 /* ISAC_METRICS export (dlsym'd by nr_passive_metrics.c): errors = launch/CUDA errors, fallbacks = TBs sent
@@ -228,6 +235,7 @@ void ldpc_cuda_get_counters4(uint64_t *errors, uint64_t *fallbacks, uint64_t *po
   *fallbacks = atomic_load(&g_fallbacks);
   *disabled = (uint64_t)breaker_state();
 }
+uint64_t ldpc_cuda_breaker_trips(void) { return atomic_load(&g_trips); }
 void ldpc_cuda_get_counters(uint64_t *errors, uint64_t *fallbacks, uint64_t *poisoned)
 {
   uint64_t d;
@@ -360,15 +368,18 @@ int32_t nrLDPC_coding_init(void)
   }
   /* Warm-up: the CUDA module load and every first use of a CUDA-graph key (BG, Z, batch size rounded up to a power
    * of two, iterations) cost time that would otherwise land on a receiver thread. Pre-capture, for BG1 Z=384 and
-   * BG2 Z=96 (the common sizes), batch sizes 1..512 and 2x{5,10} iterations. Other Z values still capture on first
+   * BG2 Z=96 (the common sizes), batch sizes 1..512 and 2x{5,8,10} iterations. Other Z values still capture on first
    * use; that is bounded (waiters extend their timeout while the worker captures, and a timeout that overlapped a
    * capture never trips the breaker). A failing warm-up leaves the GPU disabled (CPU only), the plugin still loads. */
   {
     static const struct { uint32_t BG, Z, K; } wu[2] = {{1, 384, 8448}, {2, 96, 960}};
-    static const uint32_t its[2] = {10, 20};
+    /* 2 x max_ldpc_iterations: 16 is the passive receiver's 8 (nr_pdsch_passive_decode.c), 10/20 the 5/10 defaults;
+     * LDPC_CUDA_WARMUP_ITERS=<max_ldpc_iterations> adds 2x that value for a differently configured receiver */
+    const char *we = getenv("LDPC_CUDA_WARMUP_ITERS");
+    const uint32_t its[4] = {16, 10, 20, we && atoi(we) > 0 ? 2u * (uint32_t)atoi(we) : 16};
     memset(ldpc_pool_host_llr(), 0, (size_t)512 * ldpc_batch_llr_stride());
     for (int i = 0; i < 2 && !atomic_load(&g_perm_off); i++)
-      for (int k = 0; k < 2 && !atomic_load(&g_perm_off); k++)
+      for (int k = 0; k < 4 && !atomic_load(&g_perm_off); k++)
         for (uint32_t nb = 1; nb <= 512; nb <<= 1) {
           const uint32_t first = 0, count = nb;
           int rc = 0;
@@ -590,7 +601,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
       if (ldpc_pool_capture_epoch() != ep0) /* the wait overlapped a graph capture: slow, not a GPU fault */
         warn_once(W_CAPTURE, "GPU wait overlapped a CUDA graph capture");
       else
-        breaker_trip(W_TIMEOUT, "GPU wait timeout, GPU bypassed for a few seconds", false);
+        breaker_note_fail(W_TIMEOUT, "consecutive GPU errors/timeouts, GPU bypassed for a few seconds");
     }
   }
   if (ldpc_bench_on())

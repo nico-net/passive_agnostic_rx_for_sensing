@@ -83,6 +83,13 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     if (fn)
       fn(&m->ldpc_cuda_errors, &m->ldpc_cuda_fallbacks, &m->ldpc_cuda_poisoned, &m->ldpc_cuda_disabled);
   }
+  { typedef uint64_t (*trips_t)(void);
+    static trips_t tf;
+    if (!tf)
+      tf = (trips_t)dlsym(RTLD_DEFAULT, "ldpc_cuda_breaker_trips");
+    if (tf)
+      m->ldpc_cuda_breaker_trips = tf();
+  }
   nr_pdsch_passive_ldpc_tb_decoders(&m->ldpc_tb_cpu, &m->ldpc_tb_cuda);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);

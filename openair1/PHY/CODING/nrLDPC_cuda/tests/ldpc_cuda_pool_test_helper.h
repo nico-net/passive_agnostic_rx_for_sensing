@@ -13,6 +13,7 @@ int lcp_run_tb(int bg1, int C, const uint8_t* noise, uint8_t* ok, uint8_t* decod
 int lcp_run_tb_z(int bg1, int Z, int C, const uint8_t* noise, uint8_t* ok, uint8_t* decoder_used);
 /* Random-payload TB through a real encoder and AWGN (see the .c). ok[r] = decodeSuccess, match[r] = decoded == source bytes. */
 int lcp_random_tb(int bg1, int Z, int C, double ebn0_db, int iters, uint8_t* ok, uint8_t* match, uint8_t* decoder_used);
+uint64_t lcp_trips(void); /* ldpc_cuda_breaker_trips */
 int lcp_init_again(void); /* second nrLDPC_coding_init */
 int lcp_pool_decode(uint32_t BG, uint32_t Z, uint32_t iters, uint32_t first, uint32_t count, uint32_t K, int* req_rc);
 int8_t* lcp_host_llr(void);
