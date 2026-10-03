@@ -14,7 +14,7 @@
 #ifndef __NRLDPC_CODING_INTERFACE__H__
 #define __NRLDPC_CODING_INTERFACE__H__
 
-enum { NRLDPC_DECODER_UNKNOWN = 0, NRLDPC_DECODER_CPU_LAYERED = 1, NRLDPC_DECODER_CUDA_FLOODING = 2 };
+enum { NRLDPC_DECODER_UNKNOWN = 0, NRLDPC_DECODER_CPU = 1, NRLDPC_DECODER_CUDA_FLOODING = 2 }; /* CPU = plain min-sum; CUDA = normalised min-sum, 2x iterations */
 
 /**
  * \typedef nrLDPC_TB_decoding_parameters_t
@@ -81,7 +81,10 @@ typedef struct nrLDPC_TB_decoding_parameters_s{
   bool d_to_be_cleared;
   bool decodeSuccess[NR_LDPC_MAX_NUM_CB];
   /// Output: which decoder produced the result of this TB (NRLDPC_DECODER_*), 0 if the implementation does not say.
-  /// Technique D same-decoder rule: CPU layered and CUDA flooding differ in sensitivity (K36).
+  /// NOT interchangeable (K34/K36): NRLDPC_DECODER_CPU is OAI's plain min-sum; NRLDPC_DECODER_CUDA_FLOODING is a
+  /// normalised (x3/4) min-sum run for 2x the iterations, measured about 1 dB more sensitive on BG1 R1/3. A CRC pass or
+  /// fail of one is therefore NOT evidence about the other: every consumer (KL acceptance, CB0 elimination, batch
+  /// search) must stratify by decoder_used or use a single decoder per context. The unit is the TB.
   uint8_t decoder_used;
   time_stats_t ts_deinterleave;
   time_stats_t ts_rate_unmatch;

@@ -210,18 +210,19 @@ TEST_F(PoolTest, InjectedCudaErrorTakesFailPathAndPoolSurvives) {
   EXPECT_TRUE(ok.ok[0]); EXPECT_FALSE(ok.ok[1]);
 }
 
-/* fail: path during graph capture (first use of a batch size): capture aborted, no stuck stream */
+/* fail: path during graph capture (first use of a (BG, Z, batch, iterations) key; Z=88 is not pre-captured by the warm-up) */
 TEST_F(PoolTest, ErrorDuringGraphCaptureIsRecovered) {
   lcp_hooks(0, 0, 2, 256, 50, 4, 5000);
-  const std::vector<bool> tb5 = {false, true, false, false, true}; /* nb = 8: a key no earlier test captured */
-  const Result r = run_tb(tb5);
-  EXPECT_EQ(r.decoder_used, LCP_CPU);
-  EXPECT_TRUE(r.ok[0]); EXPECT_FALSE(r.ok[1]); EXPECT_TRUE(r.ok[3]);
+  const uint8_t nz[5] = {0, 0, 0, 0, 1};
+  uint8_t ok[5], du = 0;
+  EXPECT_EQ(lcp_run_tb_z(0, 88, 5, nz, ok, &du), 0);
+  EXPECT_EQ(du, LCP_CPU);
+  EXPECT_TRUE(ok[0]); EXPECT_TRUE(ok[3]); EXPECT_FALSE(ok[4]);
   lcp_hooks(0, 0, 0, 256, 50, 4, 5000);
   lcp_reset();
-  const Result again = run_tb(tb5);
-  EXPECT_EQ(again.decoder_used, LCP_CUDA);
-  EXPECT_TRUE(again.ok[0]); EXPECT_FALSE(again.ok[1]); EXPECT_TRUE(again.ok[3]);
+  EXPECT_EQ(lcp_run_tb_z(0, 88, 5, nz, ok, &du), 0); /* captures for real now: the stream was left usable */
+  EXPECT_EQ(du, LCP_CUDA);
+  EXPECT_TRUE(ok[0]); EXPECT_TRUE(ok[3]); EXPECT_FALSE(ok[4]);
 }
 
 /* a second caller during a stall must neither reuse the abandoned slots nor be corrupted by the late GPU write */
@@ -234,11 +235,60 @@ TEST_F(PoolTest, SecondCallerDuringStallDoesNotReuseAbandonedSlots) {
   EXPECT_TRUE(A.ok[0]); EXPECT_FALSE(A.ok[1]);
   EXPECT_EQ(lcp_slots_used(), 2) << "abandoned slots must stay held until the worker is done";
   lcp_reset(); /* reopen the breaker so B tries the GPU while the worker is stalled */
-  const Result B = run_tb({true, false, true});
+  /* CPU fallback honours the TB's shared abort flag (like the segment decoder): code blocks after a failed one are aborted */
+  const Result B = run_tb({false, false, true});
   EXPECT_EQ(B.decoder_used, LCP_CPU);
-  EXPECT_FALSE(B.ok[0]); EXPECT_TRUE(B.ok[1]); EXPECT_FALSE(B.ok[2]);
+  EXPECT_TRUE(B.ok[0]); EXPECT_TRUE(B.ok[1]); EXPECT_FALSE(B.ok[2]);
   EXPECT_EQ(lcp_slots_used(), 2) << "B took other slots (A's still held) and released its own";
   wait_slots_free();
   EXPECT_EQ(lcp_slots_used(), 0);
+}
+
+/* I1: non-zero random payloads through a real encoder: BG1 multi-CB (CRC24B per CB) and BG2 C=1 (CRC16). The all-zero codeword
+ * has a zero CRC and hid K35-style false passes; here a pass must also be bit-exact. CUDA and the CPU fallback, same inputs. */
+void expect_random(int bg1, int C, double ebn0, int expect_decoder) {
+  srand48(4242 + bg1 * 10 + C);
+  uint8_t ok[8] = {0}, match[8] = {0}, du = 0;
+  ASSERT_GE(lcp_random_tb(bg1, bg1 ? 384 : 96, C, ebn0, 10, ok, match, &du), 0);
+  EXPECT_EQ(du, expect_decoder);
+  for (int r = 0; r < C; r++) { EXPECT_TRUE(ok[r]) << "cb " << r; EXPECT_TRUE(match[r]) << "cb " << r << " decoded bits differ from source"; }
+}
+TEST_F(PoolTest, RandomCodewordBg1MultiCbCuda) { expect_random(1, 3, 3.0, LCP_CUDA); }
+TEST_F(PoolTest, RandomCodewordBg1MultiCbCpuFallback) {
+  lcp_hooks(1, 0, 0, 256, 50, 1000, 5000);
+  expect_random(1, 3, 3.0, LCP_CPU);
+}
+TEST_F(PoolTest, RandomCodewordBg2Crc16Cuda) { expect_random(0, 1, 4.0, LCP_CUDA); }
+TEST_F(PoolTest, RandomCodewordBg2Crc16CpuFallback) {
+  lcp_hooks(1, 0, 0, 256, 50, 1000, 5000);
+  expect_random(0, 1, 4.0, LCP_CPU);
+}
+/* a corrupted-LLR random block must FAIL, never pass (the pass requires a valid CRC over real data) */
+TEST_F(PoolTest, RandomCodewordAtVeryLowSnrFails) {
+  srand48(99);
+  uint8_t ok[8] = {0}, match[8] = {0}, du = 0;
+  ASSERT_GE(lcp_random_tb(1, 384, 1, -3.0, 10, ok, match, &du), 0);
+  EXPECT_FALSE(ok[0]);
+  EXPECT_FALSE(match[0]);
+}
+
+/* M5: lifting size 15 (odd): Kc*Z = 780 is not a multiple of 16, so the prep pack ends in a partial vector. It must stay
+ * inside its slot (canary in the next slot) on CUDA and on the CPU fallback. */
+TEST_F(PoolTest, OddZPackStaysInsideSlot) {
+  int8_t* next = lcp_host_llr() + IN_STRIDE;
+  for (int mode = 0; mode < 2; mode++) {
+    if (mode) lcp_hooks(1, 0, 0, 256, 50, 1000, 5000);
+    memset(next, 0x5A, IN_STRIDE);
+    uint8_t nz = 0, ok = 0, du = 0;
+    EXPECT_EQ(lcp_run_tb_z(0, 15, 1, &nz, &ok, &du), 0);
+    EXPECT_EQ(du, mode ? LCP_CPU : LCP_CUDA);
+    for (uint32_t i = 0; i < IN_STRIDE; i++) ASSERT_EQ((uint8_t)next[i], 0x5A) << "mode " << mode << " slot 1 clobbered at " << i;
+  }
+}
+
+/* receiver start-up: a second nrLDPC_coding_init must not start a second worker or fail */
+TEST_F(PoolTest, InitIsIdempotent) {
+  EXPECT_EQ(lcp_init_again(), 0);
+  EXPECT_TRUE(run_tb({false}).ok[0]);
 }
 }  // namespace

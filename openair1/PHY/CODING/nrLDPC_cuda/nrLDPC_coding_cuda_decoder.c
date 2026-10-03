@@ -12,7 +12,9 @@
  * TB is decoded by one ldpc_batch_decode(). The CRC of each segment is then checked on the CPU, exactly
  * as the CPU decoder's early termination would have.
  *
- * Iterations: 2 x max_ldpc_iterations -- the GPU runs flooding min-sum, which needs about twice the
+ * Iterations: 2 x max_ldpc_iterations -- the GPU runs normalised (x3/4) flooding min-sum, 2x iterations, which
+ * is about 1 dB MORE sensitive than OAI's CPU plain min-sum (K36, measured), so results are not exchangeable. The
+ * old note said: needs about twice the
  * CPU decoder's iterations for the same BLER (see nr_ldpc_cuda.c). */
 
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
@@ -122,7 +124,7 @@ static void cuda_prepare_segment(void *arg)
  *
  * K34 safety (2026-10-03): every wait is bounded (LDPC_CUDA_TIMEOUT_MS, default 50), the queue is
  * bounded, slot reservation is all-or-nothing, and any GPU error / timeout / rejection sends the TB's
- * code blocks to the CPU layered decoder (same LLR input). A GPU result is accepted only if its
+ * code blocks to the CPU decoder (same LLR input). A GPU result is accepted only if its
  * request status is OK; a poisoned slot can never be turned into a pass. ---- */
 #define POOL_CAP 2048 /* slots (code blocks) in the pinned pool: ~53 MB LLR + 7 MB bits */
 #define QUEUE_CAP 256
@@ -156,6 +158,7 @@ void ldpc_pool_counters(uint64_t *errors, uint64_t *poisoned);
 void ldpc_pool_test_hooks(int skip, int stall_ms, int inject);
 int ldpc_pool_sticky(void);
 int ldpc_pool_capturing(void);
+uint32_t ldpc_pool_capture_epoch(void);
 
 /* ---- tunables / test hooks: environment read ONCE, tests override through ldpc_cuda_test_hooks() ---- */
 static volatile int g_timeout_ms = 50, g_queue_cap = QUEUE_CAP, g_breaker_n = 4, g_breaker_ms = 5000;
@@ -189,12 +192,12 @@ static int breaker_state(void)
     return 2;
   return mono_ms() < atomic_load(&g_bypass_until_ms) ? 1 : 0;
 }
-enum { W_FULL, W_QUEUE, W_TIMEOUT, W_ERRORS, W_STICKY, W_WARMUP, W_NREASON };
+enum { W_FULL, W_QUEUE, W_TIMEOUT, W_ERRORS, W_STICKY, W_WARMUP, W_CAPTURE, W_NREASON };
 static void warn_once(int reason, const char *what) /* one-shot per reason */
 {
   static atomic_int done[W_NREASON];
   if (!atomic_exchange(&done[reason], 1))
-    LOG_W(PHY, "CUDA LDPC: %s -> CPU layered fallback (one-shot warning per reason; see ldpc_cuda_fallbacks/disabled)\n", what);
+    LOG_W(PHY, "CUDA LDPC: %s -> CPU fallback (one-shot warning per reason; see ldpc_cuda_fallbacks/disabled)\n", what);
 }
 static void breaker_trip(int reason, const char *what, bool permanent)
 {
@@ -342,29 +345,47 @@ static void *gpu_worker(void *arg)
 
 int32_t nrLDPC_coding_init(void)
 {
+  static pthread_mutex_t init_mu = PTHREAD_MUTEX_INITIALIZER;
+  static int inited; /* idempotent: a second call must not start a second worker */
+  pthread_mutex_lock(&init_mu);
+  if (inited) {
+    pthread_mutex_unlock(&init_mu);
+    return 0;
+  }
   pthread_once(&g_once, cond_setup);
   tunables_env_once();
-  if (ldpc_pool_init(POOL_CAP) != 0)
+  if (ldpc_pool_init(POOL_CAP) != 0) {
+    pthread_mutex_unlock(&init_mu);
     return -1;
-  /* Warm-up: CUDA module load and the first graph capture cost hundreds of ms and would trip the decode timeout
-   * on the first TB. One launch per base graph, BG1 Z=384 and BG2 Z=96, with the usual 2x10 iterations. A
-   * failing warm-up leaves the GPU disabled (CPU layered only), the plugin still loads. */
+  }
+  /* Warm-up: the CUDA module load and every first use of a CUDA-graph key (BG, Z, batch size rounded up to a power
+   * of two, iterations) cost time that would otherwise land on a receiver thread. Pre-capture, for BG1 Z=384 and
+   * BG2 Z=96 (the common sizes), batch sizes 1..512 and 2x{5,10} iterations. Other Z values still capture on first
+   * use; that is bounded (waiters extend their timeout while the worker captures, and a timeout that overlapped a
+   * capture never trips the breaker). A failing warm-up leaves the GPU disabled (CPU only), the plugin still loads. */
   {
     static const struct { uint32_t BG, Z, K; } wu[2] = {{1, 384, 8448}, {2, 96, 960}};
-    for (int i = 0; i < 2; i++) {
-      memset(ldpc_pool_host_llr(), 0, ldpc_batch_llr_stride());
-      const uint32_t first = 0, count = 1;
-      int rc = 0;
-      if (ldpc_pool_decode(wu[i].BG, wu[i].Z, 20, 1, &first, &count, &wu[i].K, &rc) != 0) {
-        breaker_trip(W_WARMUP, "warm-up launch failed, GPU decoder disabled", true);
-        break;
-      }
-    }
+    static const uint32_t its[2] = {10, 20};
+    memset(ldpc_pool_host_llr(), 0, (size_t)512 * ldpc_batch_llr_stride());
+    for (int i = 0; i < 2 && !atomic_load(&g_perm_off); i++)
+      for (int k = 0; k < 2 && !atomic_load(&g_perm_off); k++)
+        for (uint32_t nb = 1; nb <= 512; nb <<= 1) {
+          const uint32_t first = 0, count = nb;
+          int rc = 0;
+          if (ldpc_pool_decode(wu[i].BG, wu[i].Z, its[k], 1, &first, &count, &wu[i].K, &rc) != 0) {
+            breaker_trip(W_WARMUP, "warm-up launch failed, GPU decoder disabled", true);
+            break;
+          }
+        }
   }
   pthread_t th;
-  if (pthread_create(&th, NULL, gpu_worker, NULL) != 0)
+  if (pthread_create(&th, NULL, gpu_worker, NULL) != 0) {
+    pthread_mutex_unlock(&init_mu);
     return -1;
+  }
   pthread_detach(th);
+  inited = 1;
+  pthread_mutex_unlock(&init_mu);
   return 0;
 }
 
@@ -373,7 +394,7 @@ int32_t nrLDPC_coding_shutdown(void)
   return 0;
 }
 
-/* CPU layered fallback: the renamed nrLDPC_decoder.c (see CMakeLists). Input = the int8 LLR block in the
+/* CPU fallback: the renamed nrLDPC_decoder.c (see CMakeLists). Input = the int8 LLR block in the
  * layout the GPU got. Returns true and fills c (K/8 bytes) on CRC pass. */
 int32_t ldpc_cpu_LDPCdecoder(t_nrLDPC_dec_params *p, int8_t *p_llr, uint8_t *p_out, t_nrLDPC_time_stats *ts, decode_abort_t *ab);
 static bool cpu_decode_segment(const nrLDPC_TB_decoding_parameters_t *tb, int r, const int8_t *llr, uint8_t *c)
@@ -391,10 +412,17 @@ static bool cpu_decode_segment(const nrLDPC_TB_decoding_parameters_t *tb, int r,
   int8_t out[27000] __attribute__((aligned(32)));
   memcpy(l, llr, (size_t)Kc * tb->Z);
   t_nrLDPC_time_stats pt = {0};
-  decode_abort_t ab;
-  init_abort(&ab);
-  const int it = ldpc_cpu_LDPCdecoder(&dp, l, (uint8_t *)out, &pt, &ab);
-  pthread_mutex_destroy(&ab.mutex_failure);
+  /* honour the TB's shared abort flag exactly like the segment decoder (C>1: once one code block failed the others
+   * stop early, the TB is lost anyway); a private flag only if the caller gave none */
+  decode_abort_t own;
+  decode_abort_t *ab = tb->abort_decode;
+  if (!ab) {
+    init_abort(&own);
+    ab = &own;
+  }
+  const int it = ldpc_cpu_LDPCdecoder(&dp, l, (uint8_t *)out, &pt, ab);
+  if (ab == &own)
+    pthread_mutex_destroy(&own.mutex_failure);
   if (it < dp.numMaxIter) {
     memcpy(c, out, tb->K >> 3);
     return true;
@@ -504,6 +532,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
     in_scratch[t] = !gpu;
   if (gpu) {
     struct timespec dl;
+    const uint32_t ep0 = ldpc_pool_capture_epoch(); /* before queueing: a capture started by our own request counts */
     deadline_after_ms(&dl, tmo);
     pthread_mutex_lock(&g_mu);
     const int qcap = g_queue_cap;
@@ -558,7 +587,10 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
         kk += tb_ndec(&slot->TBs[u]);
       memcpy(scratch + (size_t)kk * in_stride, pool_llr + (size_t)firsts[t] * in_stride, (size_t)tb_ndec(&slot->TBs[t]) * in_stride);
       in_scratch[t] = true;
-      breaker_trip(W_TIMEOUT, "GPU wait timeout, GPU bypassed for a few seconds", false);
+      if (ldpc_pool_capture_epoch() != ep0) /* the wait overlapped a graph capture: slow, not a GPU fault */
+        warn_once(W_CAPTURE, "GPU wait overlapped a CUDA graph capture");
+      else
+        breaker_trip(W_TIMEOUT, "GPU wait timeout, GPU bypassed for a few seconds", false);
     }
   }
   if (ldpc_bench_on())
@@ -600,7 +632,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
     const bool use_gpu = gpu && tb_gpu_ok[t];
     if (!use_gpu)
       atomic_fetch_add(&g_fallbacks, 1);
-    tb->decoder_used = use_gpu ? NRLDPC_DECODER_CUDA_FLOODING : NRLDPC_DECODER_CPU_LAYERED;
+    tb->decoder_used = use_gpu ? NRLDPC_DECODER_CUDA_FLOODING : NRLDPC_DECODER_CPU;
     for (int r = 0; r < tb_ndec(tb); r++, k++) {
       uint8_t *c = tb->c + r * (tb->K >> 3);
       bool ok;

@@ -9,6 +9,7 @@
 #include "common/utils/threadPool/thread-pool.h"
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/CODING/coding_defs.h"
+#include "PHY/CODING/nrLDPC_defs.h"
 
 static void *h;
 static int32_t (*f_init)(void);
@@ -21,6 +22,7 @@ static void (*f_hooks)(int, int, int, int, int, int, int);
 static void (*f_reset)(void);
 static int (*f_used)(void);
 static tpool_t pool;
+static int (*f_enc)(uint8_t **, uint8_t *, encoder_implemparams_t *);
 
 int lcp_load(void) { return lcp_load_path("./libldpc_cuda.so"); }
 int lcp_load_path(const char *path)
@@ -41,15 +43,19 @@ int lcp_load_path(const char *path)
   f_used = dlsym(h, "ldpc_cuda_test_slots_used");
   if (!(f_init && f_dec))
     return -2;
+  /* REQUIRED: without the CRC tables check_crc()/crc24a() are wrong on aarch64 (CRC16/table paths compute 0, the CRC24A
+   * PCLMUL constants are unset) and an all-zero or garbage block can "pass". Review 2026-10-03. */
+  crcTableInit();
+  f_enc = dlsym(h, "LDPCencoder"); /* the plugin's own OAI encoder (optim8segmulti), used to build real codewords */
   logInit();
   char p[] = "n";
   initTpool(p, &pool, false);
   return f_init();
 }
 
-static int run(int bg1, int C, const short *llr, uint8_t *ok, uint8_t *decoder_used, int iters)
+static int run(int bg1, int Z, int C, const short *llr, uint8_t *ok, uint8_t *decoder_used, int iters, uint8_t *cout)
 {
-  const int Z = bg1 ? 384 : 96, K = bg1 ? 8448 : 960, E = bg1 ? 25344 : 4800, Kc = bg1 ? 68 : 52;
+  const int K = (bg1 ? 22 : 10) * Z, E = (bg1 ? 66 : 50) * Z, Kc = bg1 ? 68 : 52;
   int16_t *d = calloc((size_t)C * Kc * Z, sizeof(int16_t));
   uint8_t *c = malloc((size_t)C * (K >> 3));
   memset(c, 0xEE, (size_t)C * (K >> 3)); /* the decoder must overwrite every block */
@@ -58,9 +64,7 @@ static int run(int bg1, int C, const short *llr, uint8_t *ok, uint8_t *decoder_u
   tb->processedSegments = &processed;
   tb->Qm = 2; tb->BG = bg1 ? 1 : 2; tb->max_ldpc_iterations = iters; tb->tbslbrm = 100000000;
   tb->K = K; tb->Z = Z; tb->F = 0; tb->C = C;
-  tb->A = C == 1 ? K - 24 : C * (K - 24) - 24;
-  if (!bg1 && C == 1)
-    tb->A = K - 16;
+  tb->A = C == 1 ? K - (K - 24 > 3824 ? 24 : 16) : C * (K - 24) - 24;
   tb->E = E; tb->R = bg1 ? 13 : 15; tb->E2 = E; tb->R2 = tb->R; tb->first_rE2 = C;
   static decode_abort_t ab;
   static int ab_init;
@@ -74,39 +78,85 @@ static int run(int bg1, int C, const short *llr, uint8_t *ok, uint8_t *decoder_u
   for (int r = 0; r < C; r++)
     ok[r] = tb->decodeSuccess[r];
   *decoder_used = tb->decoder_used;
+  if (cout)
+    memcpy(cout, c, (size_t)C * (K >> 3));
   free(d); free(c); free(tb);
   return rc;
 }
 
-int lcp_run_tb(int bg1, int C, const uint8_t *noise, uint8_t *ok, uint8_t *decoder_used)
+int lcp_run_tb_z(int bg1, int Z, int C, const uint8_t *noise, uint8_t *ok, uint8_t *decoder_used)
 {
-  const int E = bg1 ? 25344 : 4800;
+  const int E = (bg1 ? 66 : 50) * Z;
   short *llr = malloc((size_t)C * E * sizeof(short));
   for (int r = 0; r < C; r++)
     for (int i = 0; i < E; i++)
       llr[(size_t)r * E + i] = noise[r] ? (short)((rand() % 81) - 40) : 40;
-  const int rc = run(bg1, C, llr, ok, decoder_used, 10);
+  const int rc = run(bg1, Z, C, llr, ok, decoder_used, 10, NULL);
   free(llr);
   return rc;
+}
+int lcp_run_tb(int bg1, int C, const uint8_t *noise, uint8_t *ok, uint8_t *decoder_used)
+{
+  return lcp_run_tb_z(bg1, bg1 ? 384 : 96, C, noise, ok, decoder_used);
 }
 
 static double gauss(void)
 {
   return sqrt(-2.0 * log(1.0 - drand48())) * cos(2 * M_PI * drand48());
 }
-int lcp_bler_trial(double ebn0_db, uint8_t *decoder_used)
+/* One TB of C code blocks with RANDOM payloads: per-CB CRC (CRC24B for C>1, CRC24A/CRC16 for C=1), real OAI LDPC encoding,
+ * TS 38.212 rv0 bit selection with E = N and Qm=2 interleaving, AWGN at ebn0_db (ldpctest convention, rate K/N), LLR = 16*y/sigma.
+ * Z must make K = Kb*Z a multiple of 8. Uses drand48/lrand48 (caller seeds). ok[r] = decodeSuccess, match[r] = decoded bytes == source
+ * bytes (bit-exact, independent of ok). Returns the decoder rc, or <0 if the harness itself failed (-3 CRC self-check). */
+int lcp_random_tb(int bg1, int Z, int C, double ebn0_db, int iters, uint8_t *ok, uint8_t *match, uint8_t *decoder_used)
 {
-  static short llr[25344];
-  const double sigma = 1.0 / sqrt(2 * pow(10, ebn0_db / 10.0) / 3.0); /* ldpctest: SNR_lin = EbN0 * 1/3 */
-  for (int i = 0; i < 25344; i++) {
-    double q = 16.0 * (1.0 + sigma * gauss()) / sigma; /* int8-range scaling comparable to ldpctest's quantizer */
-    llr[i] = (short)(q > 32000 ? 32000 : q < -32000 ? -32000 : lround(q));
+  const int Kb = bg1 ? 22 : 10, K = Kb * Z, N = (bg1 ? 66 : 50) * Z, E = N, KB = K >> 3;
+  if (!f_enc || (K & 7) || C < 1 || C > 8)
+    return -1;
+  const int crc24 = C > 1 || K - 24 > 3824;
+  const double sigma = 1.0 / sqrt(2 * pow(10, ebn0_db / 10.0) * ((double)K / N));
+  uint8_t *src = calloc((size_t)C, KB + 64);
+  short *llr = malloc((size_t)C * E * sizeof(short));
+  uint8_t *out = malloc(68 * 384 + 64);
+  for (int r = 0; r < C; r++) {
+    uint8_t *in = src + (size_t)r * KB;
+    for (int i = 0; i < KB - (crc24 ? 3 : 2); i++)
+      in[i] = lrand48() & 0xff;
+    if (crc24) {
+      const uint32_t crc = (C > 1 ? crc24b(in, K - 24) : crc24a(in, K - 24)) >> 8;
+      in[KB - 3] = crc >> 16; in[KB - 2] = crc >> 8; in[KB - 1] = crc;
+    } else {
+      const uint32_t crc = crc16(in, K - 16) >> 16;
+      in[KB - 2] = crc >> 8; in[KB - 1] = crc;
+    }
+    if (!check_crc(in, K, C > 1 ? CRC24_B : crc24 ? CRC24_A : CRC16)) {
+      free(src); free(llr); free(out);
+      return -3;
+    }
+    uint8_t *ip = in;
+    uint8_t inbuf[KB + 64];
+    memcpy(inbuf, in, KB); /* the encoder may read a few bytes past the block */
+    memset(inbuf + KB, 0, 64);
+    ip = inbuf;
+    memset(out, 0, 68 * 384);
+    encoder_implemparams_t impp = {.Zc = Z, .Kb = Kb, .BG = bg1 ? 1 : 2, .K = K, .gen_code = 0, .n_segments = 1};
+    f_enc(&ip, out, &impp);
+    for (int j = 0; j < E / 2; j++)
+      for (int i = 0; i < 2; i++) {
+        const int b = out[i * (E / 2) + j] & 1;
+        const double q = 16.0 * ((1.0 - 2 * b) + sigma * gauss()) / sigma;
+        llr[(size_t)r * E + i + 2 * j] = (short)(q > 32000 ? 32000 : q < -32000 ? -32000 : lround(q));
+      }
   }
-  uint8_t ok = 0;
-  const int rc = run(1, 1, llr, &ok, decoder_used, 8);
-  return rc != 0 || !ok;
+  uint8_t *cout = malloc((size_t)C * KB);
+  const int rc = run(bg1, Z, C, llr, ok, decoder_used, iters, cout);
+  for (int r = 0; r < C; r++)
+    match[r] = !memcmp(cout + (size_t)r * KB, src + (size_t)r * KB, KB);
+  free(src); free(llr); free(out); free(cout);
+  return rc;
 }
 
+int lcp_init_again(void) { return f_init(); }
 int lcp_pool_decode(uint32_t BG, uint32_t Z, uint32_t iters, uint32_t first, uint32_t count, uint32_t K, int *req_rc)
 {
   return f_pool(BG, Z, iters, 1, &first, &count, &K, req_rc);

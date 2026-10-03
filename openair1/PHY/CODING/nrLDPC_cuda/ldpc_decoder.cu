@@ -1024,8 +1024,11 @@ static uint64_t g_pool_errors, g_pool_poisoned; /* ldpc_pool_counters() */
  * ldpc_pool_test_hooks(). skip: skip the launch; stall_ms: sleep before the launch; inject: 1 = CUDA error
  * before the first launch, 2 = CUDA error inside graph capture, 3 = report a sticky error. */
 static volatile int g_hook_skip, g_hook_stall_ms, g_hook_inject;
-static volatile int g_pool_sticky;     /* a CUDA error that survived cudaGetLastError(): the context is unusable */
-static volatile int g_pool_capturing;  /* the worker is capturing a graph (first use of a key): waiters extend their timeout */
+static int g_pool_sticky;      /* a CUDA error that survived cudaGetLastError(): the context is unusable (atomic access) */
+static int g_pool_capturing;   /* the worker is capturing a graph (first use of a key): waiters extend their timeout (atomic) */
+static uint32_t g_pool_capture_epoch; /* ++ at every capture start: a timeout that overlapped a capture is not a GPU fault */
+#define AST(v, x) __atomic_store_n(&(v), (x), __ATOMIC_SEQ_CST)
+#define ALD(v) __atomic_load_n(&(v), __ATOMIC_SEQ_CST)
 static void pool_hooks_env_once() {
     static bool done;
     if (done) return;
@@ -1037,10 +1040,11 @@ static void pool_hooks_env_once() {
 extern "C" void ldpc_pool_test_hooks(int skip, int stall_ms, int inject) {
     pool_hooks_env_once();
     g_hook_skip = skip; g_hook_stall_ms = stall_ms; g_hook_inject = inject;
-    if (!inject) g_pool_sticky = 0;
+    if (!inject) AST(g_pool_sticky, 0);
 }
-extern "C" int ldpc_pool_sticky(void) { return g_pool_sticky; }
-extern "C" int ldpc_pool_capturing(void) { return g_pool_capturing; }
+extern "C" int ldpc_pool_sticky(void) { return ALD(g_pool_sticky); }
+extern "C" int ldpc_pool_capturing(void) { return ALD(g_pool_capturing); }
+extern "C" uint32_t ldpc_pool_capture_epoch(void) { return ALD(g_pool_capture_epoch); }
 
 /* CUDA error inside the pool: counted, logged (rate limited), returned -- never swallowed. */
 #define POOL_CHECK(call) do { \
@@ -1145,7 +1149,8 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
         POOL_CHECK(cudaGraphLaunch(ge, stream));
     } else {
         if (use_graph) {
-            g_pool_capturing = 1;
+            __atomic_fetch_add(&g_pool_capture_epoch, 1, __ATOMIC_SEQ_CST);
+            AST(g_pool_capturing, 1);
             POOL_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
             if (g_hook_inject == 2) /* illegal call during capture: invalidates it */
                 POOL_CHECK(cudaDeviceSynchronize());
@@ -1175,7 +1180,7 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
             cudaError_t ei = cudaGraphInstantiate(&ge, g, 0);
             cudaGraphDestroy(g);
             POOL_CHECK(ei);
-            g_pool_capturing = 0;
+            AST(g_pool_capturing, 0);
             POOL_CHECK(cudaGraphLaunch(ge, stream));
         }
     }
@@ -1206,9 +1211,9 @@ fail:
         }
         cudaStreamSynchronize(stream);
         cudaGetLastError();
-        g_pool_capturing = 0;
+        AST(g_pool_capturing, 0);
         if (cudaGetLastError() != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess || g_hook_inject == 3)
-            g_pool_sticky = 1; /* the error survived being cleared: the context is gone, stop using the GPU */
+            AST(g_pool_sticky, 1); /* the error survived being cleared: the context is gone, stop using the GPU */
         else
             cudaGetLastError();
     }
