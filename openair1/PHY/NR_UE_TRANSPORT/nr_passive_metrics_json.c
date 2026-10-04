@@ -3,9 +3,35 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+/* Keys of td_cb0_inadmissible: nr_td_cb0_reason_name order (nr_td_cb0_sched.h, NR_TD_CB0_R_*). */
+static const char *const kCb0Reason[16] = {"not_new_rv0", "gated",      "iq_stale", "lbrm",    "rv_retry", "prg_ptrs",
+                                           "member_stale", "llr_scale", "gpu_llr", "ldpc_error", "rank",     "decoder",
+                                           "contract",   "budget",     "no_grantwork", "reindexed"};
+
+static int cb0_json(const nr_passive_metrics_t *m, char *buf, size_t n)
+{
+  int w = snprintf(buf, n,
+                   ",\"td_cb0_grants\":%" PRIu64 ",\"td_cb0_batches\":%" PRIu64 ",\"td_cb0_admissible\":%" PRIu64
+                   ",\"td_cb0_items\":%" PRIu64 ",\"td_cb0_inadmissible\":{",
+                   m->td_cb0_grants, m->td_cb0_batches, m->td_cb0_admissible, m->td_cb0_items);
+  for (int r = 0; r < 16 && w >= 0 && (size_t)w < n; r++)
+    w += snprintf(buf + w, n - w, "%s\"%s\":%" PRIu64, r ? "," : "", kCb0Reason[r], m->td_cb0_inadmissible[r]);
+  if (w >= 0 && (size_t)w < n)
+    w += snprintf(buf + w, n - w,
+                  "},\"td_cb0_budget_skips\":%" PRIu64 ",\"td_cb0_not_testable\":%" PRIu64 ",\"td_cb0_us_per_item\":%.1f"
+                  ",\"td_cb0_backend\":{\"cpu\":%" PRIu64 ",\"gpu\":%" PRIu64 "},\"td_cb0_premise_alarms\":%" PRIu64
+                  ",\"td_cb0_eliminations\":%" PRIu64,
+                  m->td_cb0_budget_skips, m->td_cb0_not_testable, m->td_cb0_us_per_item, m->td_cb0_backend_cpu,
+                  m->td_cb0_backend_gpu, m->td_cb0_premise_alarms, m->td_cb0_eliminations);
+  return (w < 0 || (size_t)w >= n) ? -1 : w;
+}
+
 int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t n)
 {
   const char *st = m->acq_state ? m->acq_state : "UNKNOWN";
+  char cb0[1024];
+  if (cb0_json(m, cb0, sizeof(cb0)) < 0)
+    return -1;
   const int w = snprintf(buf, n,
       "{\"schema\":%d,\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64 ",\"pci\":%d,\"acq_state\":\"%s\","
       "\"acq_transitions\":%" PRIu64 ",\"acq_sync_losses\":%" PRIu64 ",\"acq_pbch_locks\":%" PRIu64 ",\"acq_sib1_decodes\":%" PRIu64 ","
@@ -17,7 +43,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"td_sib1_tdra_match_unk\":%" PRIu64 ",\"td_sib1_tdra_mismatch_unk\":%" PRIu64 ",\"td_sib1_tdra_none_unk\":%" PRIu64 ","
       "\"td_deftab_match_10\":%" PRIu64 ",\"td_deftab_mismatch_10\":%" PRIu64 ",\"td_deftab_match_11\":%" PRIu64 ",\"td_deftab_mismatch_11\":%" PRIu64 ",\"td_deftab_na\":%" PRIu64 ","
       "\"td_excl_restarts\":%" PRIu64 ",\"td_excl_truncs\":%" PRIu64 ",\"td_excl_restart_alarms\":%" PRIu64 ","
-      "\"td_fb_promotions\":%" PRIu64 ",\"td_fb_withdrawals\":%" PRIu64 ",\"td_fb_failopens\":%" PRIu64 ",\"td_fb_pruned_contexts\":%" PRIu64 ",\"td_fb_untrusted_ctx\":%" PRIu64 ","
+      "\"td_fb_promotions\":%" PRIu64 ",\"td_fb_withdrawals\":%" PRIu64 ",\"td_fb_failopens\":%" PRIu64 ",\"td_fb_pruned_contexts\":%" PRIu64 ",\"td_fb_untrusted_ctx\":%" PRIu64 "%s,"
       "\"ldpc_ok\":%" PRIu64 ",\"ldpc_seg_fail\":%" PRIu64 ",\"ldpc_tb_fail\":%" PRIu64 ",\"ldpc_zero_tb\":%" PRIu64 ","
       "\"ldpc_cuda_errors\":%" PRIu64 ",\"ldpc_cuda_fallbacks\":%" PRIu64 ",\"ldpc_cuda_poisoned\":%" PRIu64 ","
       "\"ldpc_cuda_disabled\":%" PRIu64 ",\"ldpc_cuda_breaker_trips\":%" PRIu64 ",\"ldpc_tb_cpu\":%" PRIu64 ",\"ldpc_tb_cuda\":%" PRIu64 ","
@@ -33,7 +59,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->td_sib1_tdra_match_unk, m->td_sib1_tdra_mismatch_unk, m->td_sib1_tdra_none_unk,
       m->td_deftab_match_10, m->td_deftab_mismatch_10, m->td_deftab_match_11, m->td_deftab_mismatch_11, m->td_deftab_na,
       m->td_excl_restarts, m->td_excl_truncs, m->td_excl_restart_alarms,
-      m->td_fb_promotions, m->td_fb_withdrawals, m->td_fb_failopens, m->td_fb_pruned_contexts, m->td_fb_untrusted_ctx,
+      m->td_fb_promotions, m->td_fb_withdrawals, m->td_fb_failopens, m->td_fb_pruned_contexts, m->td_fb_untrusted_ctx, cb0,
       m->ldpc_ok, m->ldpc_seg_fail, m->ldpc_tb_fail, m->ldpc_zero_tb,
       m->ldpc_cuda_errors, m->ldpc_cuda_fallbacks, m->ldpc_cuda_poisoned,
       m->ldpc_cuda_disabled, m->ldpc_cuda_breaker_trips, m->ldpc_tb_cpu, m->ldpc_tb_cuda,

@@ -166,6 +166,70 @@ typedef struct {
 } nr_td_cb0_gpu_api_t;
 #define NR_TD_CB0_GPU_ABI 2 /* 2: nr_td_cb0_gpu_item_t.shift */
 
+/* ---- Backend interface (td/cb0-cpu-wiring, 2026-10-03) -----------------------------------------------------------
+ * The runtime CB0 scheduler (nr_td_cb0_sched.h, nr_td_cb0_wire.c) never calls a decoder directly: it calls
+ * nr_td_cb0_exec(), which picks a backend per batch.
+ *   ISAC_TD_CB0_BACKEND=auto (default) | cpu | gpu, read once.
+ *     cpu  : always the CPU backend.
+ *     auto : the registered GPU backend when it is registered, healthy() and not backing off; else the CPU backend.
+ *     gpu  : as auto (the CPU backend stays the permanent fallback), but warns once when it has to fall back.
+ *   CPU backend (always present, plain C + simde, portable to x86): nr_td_cb0_batch_cpu() = nr_td_cb0_batch() with the
+ *     CUDA LDPC path and the GPU de-matching forced OFF, i.e. libldpc's CPU decoder (the receiver's TB decoder), on the
+ *     batch's worker threads (nr_td_cb0_set_threads). Every item: decoder_used = NR_TD_CB0_DEC_CPU_LAYERED.
+ *   GPU backend: registered by the GPU entry (td/cb0-gpu-entry) through nr_td_cb0_register_gpu_backend().
+ * FAILURE RULE: a GPU batch that returns non-zero (error, timeout, breaker open), or reports any item with
+ * err == NR_TD_CB0_ERR_GPU, or mixes decoders (an item not decoded by the GPU decoder, e.g. a pool CPU fallback), is
+ * FAILED as a whole: nr_td_cb0_exec() marks every result pass = -1 / err = NR_TD_CB0_ERR_GPU and sets info.failed, and
+ * the caller treats the grant as inadmissible (never partially credited, never re-decoded on the CPU for the same
+ * grant: the decision to use the GPU was taken before any outcome). The GPU is then skipped for the next
+ * ISAC_TD_CB0_GPU_BACKOFF batches (default 64): the NEXT grant runs on the CPU backend.
+ * Every result carries decoder_used; info.decoder is the single decoder of a successful batch (the elimination
+ * engine's dominance rule compares it with the context's full-TB decoders). */
+enum { NR_TD_CB0_BE_AUTO = 0, NR_TD_CB0_BE_CPU = 1, NR_TD_CB0_BE_GPU = 2 };
+typedef struct {
+  const char *name; /* for logs */
+  /* 1 = usable now (device present, warmed up, breaker closed). Called before every GPU batch; must be cheap. */
+  int (*healthy)(void *ctx);
+  /* Decode n items synchronously with a bounded wait. Fill out[i] (pass, iters, decoder_used, err, C, tb_result).
+   * Return 0 when the batch completed; non-zero = error / timeout / breaker open (the whole batch is void). */
+  int (*decode)(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out);
+  void *ctx;
+} nr_td_cb0_backend_t;
+/* Register (copied) the GPU backend; NULL unregisters. Thread-safe; takes effect at the next batch. */
+void nr_td_cb0_register_gpu_backend(const nr_td_cb0_backend_t *be);
+/* ISAC_TD_CB0_BACKEND as NR_TD_CB0_BE_* (read once; an unknown value = auto). */
+int nr_td_cb0_backend_mode(void);
+/* Test hook: force a mode (NR_TD_CB0_BE_*), -1 re-reads the environment. Also clears the GPU back-off. */
+void nr_td_cb0_backend_mode_set(int mode);
+typedef struct {
+  uint8_t backend;    /* NR_TD_CB0_BE_CPU / NR_TD_CB0_BE_GPU: the backend that ran this batch */
+  uint8_t decoder;    /* NR_TD_CB0_DEC_* common to every decoded item; 0 when none decoded */
+  uint8_t failed;     /* 1: GPU failure rule above (whole batch void) */
+  uint8_t mixed;      /* 1: decoded items disagree on decoder_used (also failed) */
+  int decoded;        /* items with pass != -1 */
+  uint32_t sum_iters; /* sum of iterations over decoded items (0 when the backend does not report them) */
+  uint64_t wall_ns;   /* wall time of the batch (incl. waiting for the backend) */
+  uint64_t compute_ns; /* CPU backend: decode wall without the lock wait (nr_td_cb0_last_compute); GPU: = wall_ns */
+  int distinct;        /* CPU backend: items decoded after dedup */
+  int threads;        /* worker threads the batch could use (CPU backend), 0 for the GPU */
+} nr_td_cb0_exec_t;
+/* Run one batch on the selected backend (see above). Returns info.decoded, or -1 on bad arguments. */
+int nr_td_cb0_exec(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, nr_td_cb0_exec_t *info);
+/* nr_td_cb0_batch() with the CUDA LDPC path and the GPU de-matching forced off: the CPU backend. */
+int nr_td_cb0_batch_cpu(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out);
+/* This thread's last nr_td_cb0_batch / _cpu call: wall of the decode itself (after the internal lock was taken, so
+ * without the wait for another thread's batch) and the number of distinct items decoded (after dedup). */
+void nr_td_cb0_last_compute(uint64_t *ns, int *decoded);
+/* Persistent CPU pool workers created so far (round 2: created once, grown to threads - 1, never per batch). */
+int nr_td_cb0_pool_threads(void);
+/* Worker threads configured for the CPU backend (nr_td_cb0_set_threads). */
+int nr_td_cb0_get_threads(void);
+/* Backend counters since start: batches per backend, GPU failures, GPU batches skipped (back-off / unhealthy). */
+typedef struct {
+  uint64_t batches_cpu, batches_gpu, gpu_failed, gpu_skipped;
+} nr_td_cb0_backend_stats_t;
+void nr_td_cb0_backend_get_stats(nr_td_cb0_backend_stats_t *s);
+
 #ifdef __cplusplus
 }
 #endif

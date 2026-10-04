@@ -62,6 +62,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
+#include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM=1, default off)
 
 #include <limits.h>
 #include <math.h>
@@ -1133,6 +1134,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                             job.sweep_ticket.k0, &rxdataF[0][0], &g_fep_gen[idx]);
       nr_pdsch_passive_set_grantwork(gw, s_gw_probe != 0);
     }
+    /* CB0 ELIMINATION CHANNEL (ISAC_TD_CB0_ELIM=1, default off; nr_td_cb0_wire.h): the CB0 hypothesis set of this grant is
+     * fixed HERE, before any decode of the grant; the TB of an acquiring context decodes on the CPU (dominance rule). */
+    bool cb0_tb_cpu = false;
+    const nr_td_cb0_job_t cb0_job = {.abs_slot = job.absolute_slot, .job_k0 = job.sweep_ticket.k0, .layout_probe = job.layout_probe != 0,
+                                     .gpu_job = gpu_job != NULL, .gw_on = s_gw_on != 0};
+    const bool cb0_on = nr_td_cb0_wire_pre(&job.sweep_ticket, gw, &cb0_job, &cb0_tb_cpu);
+    if (cb0_tb_cpu)
+      nr_pdsch_passive_force_cpu_tb(true);
     nr_pdsch_passive_probe_mode(job.layout_probe != 0);
     /* PT-RS density sweep only once the layout and the Technique-D context are settled (a pinned
      * conf has no ticket: generation 0). */
@@ -1142,7 +1151,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     nr_pdsch_passive_set_llr_override(NULL, 0);
+    if (cb0_tb_cpu)
+      nr_pdsch_passive_force_cpu_tb(false);
+    const uint8_t cb0_tb_decoder = cb0_on ? nr_pdsch_passive_last_decoder_used() : 0; /* the main decode's, before any rerun */
     const bool probe_outcome = nr_pdsch_passive_probe_outcome(); /* before the self-check re-runs the decode */
+    if (cb0_on) /* the CB0 batch: after the main decode published its signature, on this (job) thread, before job_end */
+      nr_td_cb0_wire_run(gw);
     if (job.layout_probe && !gpu_job && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       nr_pdsch_passive_probe_equiv_check(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF); /* debug, env-gated */
     nr_pdsch_passive_set_grantwork(NULL, false);
@@ -1393,10 +1407,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
         char bc12[192];
         nr_pdsch_passive_bc12_census(&job.sweep_ticket, &winner, bc12, sizeof(bc12));
-        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s\n",
+        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s%s\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
-              winner.dmrs_mask, winner.mcs_table, bc12);
+              winner.dmrs_mask, winner.mcs_table, bc12, nr_td_cb0_wire_converged_suffix(&job.sweep_ticket));
         nr_pdsch_passive_bc9_converged(&job.sweep_ticket, winner.k0);
+      }
+      /* CB0 elimination feed: AFTER this grant's TB feedback, BEFORE the BC9 / Qm steps that may re-index the context. */
+      if (cb0_on) {
+        const nr_td_cb0_tb_t cb0_tb = {.tb_fed = credit_ok, .tb_pass = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, .tb_decoder = cb0_tb_decoder,
+                                       .iq_ok_after = credit_ok, .rv = job.grant.rv, .nl = dec.cw.Nl};
+        nr_td_cb0_wire_feed(&job.sweep_ticket, &cb0_tb);
       }
       /* BC9 census AFTER the KL feedback: it only reads the sweep and must not delay or reorder the KL path (a trial whose
        * own feedback settled the context is not counted: ticket_siblings refuses a settled context). */
@@ -1461,12 +1481,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         }
       }
     }
+    if (cb0_on) { /* decode error / unsupported: the TB path did not feed this grant (no-op when fed above) */
+      const nr_td_cb0_tb_t cb0_tb = {.tb_fed = false, .tb_pass = false, .tb_decoder = cb0_tb_decoder, .iq_ok_after = credit_ok,
+                                     .rv = job.grant.rv, .nl = dec.cw.Nl};
+      nr_td_cb0_wire_feed(&job.sweep_ticket, &cb0_tb);
+    }
     if (gw != NULL) {
       /* Debug / profiling (env-gated), after every use of this job's decoded TB: the reruns reuse the
        * private HARQ buffers. Then this job's reference goes; the gw is freed with its last one. */
       const bool gw_used = nr_pdsch_passive_last_used_grantwork(NULL);
       nr_slot_fep_fo_override_hz = job.fo_hz;
-      if (!job.layout_probe) {
+      if (!job.layout_probe && !cb0_on) { /* the CB0 batch's lazy entries overwrite the thread's last-decode buffers */
         nr_pdsch_passive_gw_check(gw, st_raw);
         nr_pdsch_passive_gw_profile(gw, gw_used);
       }
