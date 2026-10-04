@@ -47,7 +47,9 @@ int nr_srs_estimate(nr_srs_blind_t *s, const int16_t *iq, int stride, nr_srs_can
     for(int l=0;l<ns;l++) for(int k=0;k<width;k++) {
       const int abs=c->start_rb*12+k, bin=(s->grid.first_carrier_offset+abs)%N;
       double re,im;
-      if(c->comb==8) {
+      if(k>=c->comb_offset && (k-c->comb_offset)%c->comb==0) {
+        re=ls[l*N+bin].r;im=ls[l*N+bin].i;
+      } else if(c->comb==8) {
         /* Upstream has only comb-2/4 filters. Linear interpolation of its LS
          * pilots is bounded at both edges and preserves the measured phase. */
         int j=(k-c->comb_offset)/8;

@@ -28,12 +28,13 @@ static void emit_srs_record(const nr_srs_candidate_t *c,const nr_srs_capture_t *
     "\"rnti\":%s,\"start_rb\":%d,\"nb_rb\":%d,\"n_re\":%d,\"l_syms\":[%s],\"ports\":1,"
     "\"n_ant\":%d,\"noise_var\":%.9g,\"slot_frac\":%.9g,\"cfr_frame_id\":%s,\"truncated\":%s,"
     "\"comb\":%d,\"comb_offset\":%d,\"n_symbols\":%d,\"cs\":%d,\"group\":%d,"
-    "\"period\":%s,\"slot_offset\":%s,\"track_id\":%"PRIu64",\"srs_track_id\":%"PRIu64",\"attribution\":\"%s\","
-    "\"ta_est_samples\":%d,\"ul_timing_ref\":\"dl_frame\",\"timing_cs_ambiguous\":true,"
+    "\"confirmed\":%s,\"delay_ambiguity_samples\":%.9g,\"period\":%s,\"slot_offset\":%s,\"track_id\":%"PRIu64",\"srs_track_id\":%"PRIu64",\"attribution\":\"%s\","
+    "\"ta_est_samples\":%d,\"ul_timing_ref\":\"dl_frame\",\"timing_cs_ambiguous\":%s,"
     "\"transform_precoding\":null,\"freq_hopping\":null,\"dmrs_type\":null,\"dmrs_add_pos\":null,\"dmrs_n_scid\":null,\"cfo_est_hz\":null}",
     epoch,identity,m->abs_slot,m->frame,m->slot,m->t_mono_ns,rx,m->pci,rnti,c->start_rb,c->nb_rb,n_re,syms,
     m->n_ant,isfinite(c->noise_var)?c->noise_var:0,c->start_symbol/14.0,frame_id,truncated?"true":"false",
-    c->comb,c->comb_offset,c->n_symbols,c->cs,c->group,period,offset,c->track_id,c->track_id,method,m->ta_est_samples);
+    c->comb,(c->start_rb*12+c->comb_offset)%c->comb,c->n_symbols,c->cs,c->group,
+    c->confirmed?"true":"false",c->delay_ambiguity_samples,period,offset,c->track_id,c->track_id,method,m->ta_est_samples,c->delay_resolved?"false":"true");
   if(size>0 && size<(int)sizeof(line)) nr_sense_push_record(line);
 }
 uint64_t nr_srs_export(const nr_srs_candidate_t *c,const nr_srs_capture_t *m,

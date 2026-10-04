@@ -1,4 +1,6 @@
 #include "nr_srs_passive.h"
+#include "nr_sense_api.h"
+#include "nr_sense_ul.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 #include "nr_passive_uci_probe.h"
@@ -1078,6 +1080,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           const size_t o = 2 * ((size_t)a * cap + nof_re);
           ul_h[o]     = (float)h[j].r;
           ul_h[o + 1] = (float)h[j].i;
+          nr_sense_ul_to_dl(&ul_h[o],&ul_h[o+1],nr_sense_crb_k(k_abs,fp->first_carrier_offset,fp->ofdm_symbol_size),
+                           fp->first_carrier_offset,fp->ofdm_symbol_size,ul_sample_offset-out->est_delay_pre);
           const double p2 = (double)h[j].r * h[j].r + (double)h[j].i * h[j].i;
           if (a == 0) {
             pw += p2;
@@ -1086,7 +1090,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
             ant_pw[a] += p2;
           }
         }
-        ul_k[nof_re] = (uint32_t)k_abs;
+        ul_k[nof_re] = nr_sense_crb_k(k_abs,fp->first_carrier_offset,fp->ofdm_symbol_size);
         ul_l[nof_re] = (uint32_t)dmrs_sym;
         nof_re++;
       }
@@ -1495,7 +1499,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
-                                    (uint32_t)nant, slot);
+                                    (uint32_t)nant, slot, ul_sample_offset-out->est_delay_pre);
   }
   return true;
 }

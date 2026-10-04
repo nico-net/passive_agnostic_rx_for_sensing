@@ -33,12 +33,20 @@ void nr_srs_note_pusch(nr_srs_blind_t *s,uint16_t rnti,uint64_t slot,int delay,
     e->k[e->n]=k[i];e->h[2*e->n]=cfr[2*i];e->h[2*e->n+1]=cfr[2*i+1];e->n++;
   }
 }
-static double similarity(const srs_ue_evidence_t *e,const float *cfr,const uint16_t *k,int n)
+static double similarity(const srs_ue_evidence_t *e,const nr_srs_candidate_t *c,const float *cfr,const uint16_t *k,int n)
 {
   if(!cfr || !k) return 0;
   double re=0,im=0,ep=0,es=0;int count=0;
   for(int j=0;j<e->n;j++) for(int i=0;i<n;i++) if(k[i]==e->k[j]) {
     double pr=e->h[2*j],pi=e->h[2*j+1],sr=cfr[2*i],si=cfr[2*i+1];
+    if(c->delay_ambiguity_samples>0) {
+      int aliases=lrint((e->delay-c->delay_samples)/c->delay_ambiguity_samples);
+      int relative=(int)k[i]-c->start_rb*12-c->comb_offset;
+      if(aliases && (relative<0 || relative%c->comb)) break;
+      int ncs=c->comb==2?8:c->comb==4?12:6;
+      double phase=2*M_PI*aliases*relative/(c->comb*ncs);
+      double r=sr;sr=r*cos(phase)-si*sin(phase);si=r*sin(phase)+si*cos(phase);
+    }
     re+=pr*sr+pi*si;im+=pr*si-pi*sr;ep+=pr*pr+pi*pi;es+=sr*sr+si*si;count++;break;
   }
   return count>=4 && ep>0 && es>0?(re*re+im*im)/(ep*es):0;
@@ -46,16 +54,28 @@ static double similarity(const srs_ue_evidence_t *e,const float *cfr,const uint1
 void nr_srs_attribute(nr_srs_blind_t *s,nr_srs_candidate_t *c,uint64_t slot,
                      const float *cfr,const uint16_t *k,int n_re)
 {
-  c->rnti=0;c->attribution="anonymous";
+  c->rnti=0;c->attribution="anonymous";c->delay_resolved=false;
   if(!s) return;
   uint16_t triggered=0,matched=0;int nt=0,nm=0;
   for(int i=0;i<NR_SRS_MAX_TRACKS;i++) {
     const srs_ue_evidence_t *e=&s->ues[i];if(!e->rnti) continue;
-    if(!c->period && e->trigger_valid && slot>=e->trigger && slot-e->trigger<=32) {triggered=e->rnti;nt++;}
-    if(e->pusch_valid && slot>=e->pusch_slot && slot-e->pusch_slot<=256
-      && abs(e->delay-c->delay_samples)<=2 && similarity(e,cfr,k,n_re)>=0.9) {matched=e->rnti;nm++;}
+    double delta=e->delay-c->delay_samples;
+    if(c->delay_ambiguity_samples>0) delta=remainder(delta,c->delay_ambiguity_samples);
+    bool timing=e->pusch_valid && slot>=e->pusch_slot && slot-e->pusch_slot<=256 && fabs(delta)<=2;
+    if(timing && e->trigger_valid && slot>=e->trigger && slot-e->trigger<=32) {triggered=e->rnti;nt++;}
+    if(timing && similarity(e,c,cfr,k,n_re)>=0.9) {matched=e->rnti;nm++;}
   }
   /* Conflicting evidence is a reason to remain anonymous, not to pick a winner. */
   if(nt==1 && nm<=1 && (!nm || matched==triggered)) {c->rnti=triggered;c->attribution="dci_request";}
   else if(nt==0 && nm==1) {c->rnti=matched;c->attribution="pusch_delay_cfr";}
+  c->delay_resolved=false;
+  if(c->rnti && c->delay_ambiguity_samples>0) {
+    const srs_ue_evidence_t *e=evidence(s,c->rnti);
+    int aliases=lrint((e->delay-c->delay_samples)/c->delay_ambiguity_samples);
+    int ncs=c->comb==2?8:c->comb==4?12:6;
+    c->cs=((c->cs-aliases)%ncs+ncs)%ncs;
+    c->residual_delay-=aliases*c->delay_ambiguity_samples;
+    c->delay_samples+=lrint(aliases*c->delay_ambiguity_samples);
+    c->delay_resolved=true;
+  }
 }

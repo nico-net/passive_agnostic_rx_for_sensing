@@ -2530,6 +2530,8 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_isac_adapter COMMAND ./test_nr_isac_adapter)
 
   add_executable(test_nr_srs_blind
+    ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_estimate.c
     ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/srs_rx.c

@@ -85,6 +85,12 @@ int nr_srs_comb_detect(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint1
  * k_0_p is uint8_t, so placing a wide-band start in n_shift would wrap it. */
 bool nr_srs_make_info(const nr_srs_candidate_t *c, nr_srs_info_t *info)
 {
+  if (!c || (c->comb!=2 && c->comb!=4 && c->comb!=8)) return false;
+  const int length=c->nb_rb*12/c->comb;
+  bool supported=false;
+  for (unsigned i=0;i<sizeof(ul_allocated_re)/sizeof(*ul_allocated_re);i++)
+    if (length==ul_allocated_re[i]) {supported=true;break;}
+  if (!supported) return false;
   *info=(nr_srs_info_t){.comb_size=c->comb==2?0:c->comb==4?1:2,.K_TC_overbar=c->comb_offset,
     .n_SRS_cs=c->cs,.n_ID_SRS=c->group,.l_offset=c->start_symbol,.N_symb_SRS=c->n_symbols,
     .R=1,.n_srs_ports=1,.resource_type=aperiodic};
@@ -105,14 +111,15 @@ bool nr_srs_valid_candidate(const nr_srs_grid_t *g, const nr_srs_candidate_t *c)
  * the smallest residual delay; this is a convention, not a recovered UE TA. */
 static double score_sequence(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c)
 {
+  s->sequence_trials++;
   nr_srs_info_t info;
   if (!nr_srs_make_info(c,&info)) return 0;
   memset(s->reference,0,4*s->grid.fft_size*sizeof(c16_t));
   if(!generate_srs_nr(s->fp,&s->reference,0,c->start_rb,&info,8192,0,0,1)) return 0;
   const int n=c->nb_rb*12/c->comb, N=s->grid.fft_size;
-  double best=0;int delay=0;
+  double combined=0, total_weight=0, strongest=0, delay=0;
   for(int a=0;a<s->grid.n_ant;a++) {
-    double weakest=1;int first_delay=0;
+    double weakest=1, first_delay=0, weight=0;
     for(int l=0;l<c->n_symbols;l++) {
     double zr[1632],zi[1632],energy=0,dr=0,di=0;
     for(int k=0;k<n;k++) {
@@ -131,38 +138,53 @@ static double score_sequence(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_s
     }
     double score=energy>0?(cr*cr+ci*ci)/(energy*n):0;
     if(score<weakest) weakest=score;
-    if(l==0) first_delay=lrint(-slope*N/(2*M_PI*c->comb));
+    if(l==0) {first_delay=-slope*N/(2*M_PI*c->comb);weight=energy;}
     }
-    if(weakest>best) {best=weakest;delay=first_delay;}
+    combined+=weakest*weight;total_weight+=weight;
+    if(weight>strongest) {strongest=weight;delay=first_delay;}
   }
-  c->delay_samples=delay;
-  return best;
+  c->residual_delay=delay;c->delay_samples=lrint(delay);
+  return total_weight>0?combined/total_weight:0;
 }
 bool nr_srs_group_cs_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,const nr_srs_candidate_t *hint)
 {
   if(!s || !iq || !nr_srs_valid_grid(&s->grid,stride) || !nr_srs_valid_candidate(&s->grid,c)) return false;
+  nr_srs_info_t info;
+  if (!nr_srs_make_info(c,&info)) {s->unsupported_lengths++;return false;}
   nr_srs_candidate_t best=*c;
   double best_rank=-1;
   const int ncs=c->comb==2?8:c->comb==4?12:6;
-  for(int trial=-1;trial<30*ncs;trial++) {
+  /* A union-bound-inspired floor increases with the 30 groups and bounded
+   * geometry/window trials. This is a conservative heuristic, not a calibrated PFA. */
+  const double threshold=fmax(0.65,1-exp(-log(30.0*16*9/1e-6)/fmax(1,c->nb_rb*12/c->comb-2)));
+  for(int trial=-1;trial<30;trial++) {
     nr_srs_candidate_t test=*c;
     if(trial<0) {
       if(!hint || hint->comb!=c->comb || hint->comb_offset!=c->comb_offset || hint->nb_rb!=c->nb_rb) continue;
       test.group=hint->group;test.cs=hint->cs;
-    } else {test.group=trial/ncs;test.cs=trial%ncs;}
+    } else {test.group=trial;test.cs=0;}
     if(test.group<0 || test.group>=30 || test.cs<0 || test.cs>=ncs) continue;
     test.score=score_sequence(s,iq,stride,&test);
-    double rank=test.score-1e-5*abs(test.delay_samples);
+    test.delay_ambiguity_samples=(double)s->grid.fft_size/(c->comb*ncs);
+    if(trial>=0) {
+      /* Every CS has the same de-sloped score. Resolve the representative
+       * algebraically; never regenerate the same group n_cs times. */
+      int shift=lrint(-test.residual_delay/test.delay_ambiguity_samples);
+      test.cs=(shift%ncs+ncs)%ncs;
+      test.residual_delay+=shift*test.delay_ambiguity_samples;
+      test.delay_samples=lrint(test.residual_delay);
+    }
+    double rank=test.score-1e-5*fabs(test.residual_delay);
     if(rank>best_rank) {best_rank=rank;best=test;}
+    if(trial<0 && test.score>=threshold) {best=test;break;}
   }
-  if(best.score<0.65) return false;
+  if(best.score<threshold) return false;
   *c=best;
   return true;
 }
-static unsigned srs_gcd(unsigned a, unsigned b)
+uint64_t nr_srs_unsupported_lengths(const nr_srs_blind_t *s)
 {
-  while (b) { unsigned rem=a%b; a=b; b=rem; }
-  return a;
+  return s?s->unsupported_lengths:0;
 }
 static bool same_resource(const nr_srs_candidate_t *a, const nr_srs_candidate_t *b)
 {
@@ -186,17 +208,70 @@ void nr_srs_observe(nr_srs_blind_t *s,nr_srs_candidate_t *c,uint64_t slot)
     *t=(srs_track_t){.key=*c,.first=slot,.last=slot,.id=++s->next_id,.count=1};
   } else if (slot>t->last) {
     unsigned gap=slot-t->last;
-    t->gcd=t->gcd?srs_gcd(t->gcd,gap):gap;
+    t->consistent_gaps=t->gap==gap?t->consistent_gaps+1:1;
+    t->gap=gap;
     t->last=slot; t->count++;
   }
   c->track_id=t->id; c->period=0; c->slot_offset=0;
   static const unsigned periods[]={1,2,4,5,8,10,16,20,32,40,64,80,160,320,640,1280,2560};
-  if (t->count>=3) for(unsigned i=0;i<sizeof(periods)/sizeof(*periods);i++)
-    if(t->gcd==periods[i]) { c->period=t->gcd; c->slot_offset=t->first%t->gcd; break; }
+  if (t->consistent_gaps>=3) for(unsigned i=0;i<sizeof(periods)/sizeof(*periods);i++)
+    if(t->gap==periods[i]) { c->period=t->gap; c->slot_offset=t->last%t->gap; break; }
+  c->confirmed=c->period>0;
 }
 
 void nr_srs_blind_reset(nr_srs_blind_t *s)
 {
   if(!s) return;
   memset(s->tracks,0,sizeof(s->tracks));memset(s->ues,0,sizeof(s->ues));
+  memset(s->cache,0,sizeof(s->cache));memset(s->grants,0,sizeof(s->grants));
+}
+
+bool nr_srs_sources_selected(const char *sources)
+{
+  if(!sources) return false;
+  while(*sources) {
+    sources+=strspn(sources,", \t");size_t n=strcspn(sources,", \t");
+    if(n==3 && !strncmp(sources,"srs",n)) return true;
+    sources+=n;
+  }
+  return false;
+}
+uint64_t nr_srs_sequence_trials(const nr_srs_blind_t *s) {return s?s->sequence_trials:0;}
+void nr_srs_note_grant(nr_srs_blind_t *s,uint64_t slot,uint16_t mask,int start,int width)
+{
+  if(!s || !mask || start<0 || width<=0) return;
+  unsigned i=s->next_grant++%256;
+  s->grants[i].slot=slot;s->grants[i].mask=mask;s->grants[i].start=start;
+  s->grants[i].width=width;s->grants[i].valid=true;
+}
+bool nr_srs_search_slot(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,
+                        const nr_srs_candidate_t *hint,uint64_t slot)
+{
+  if(!s || !c || !nr_srs_valid_candidate(&s->grid,c)) return false;
+  unsigned mask=((1u<<c->n_symbols)-1)<<c->start_symbol;
+  for(unsigned i=0;i<256;i++)
+    if(s->grants[i].valid && s->grants[i].slot==slot && (s->grants[i].mask&mask)
+       && c->start_rb<s->grants[i].start+s->grants[i].width
+       && s->grants[i].start<c->start_rb+c->nb_rb) return false;
+  for(unsigned i=0;i<64;i++) {
+    nr_srs_candidate_t key=s->cache[i].key;key.group=c->group;key.cs=c->cs;
+    if(s->cache[i].valid && same_resource(&key,c) && slot>=s->cache[i].slot
+       && slot-s->cache[i].slot<(s->cache[i].failed?8:1)) return false;
+  }
+  bool ok=nr_srs_group_cs_search(s,iq,stride,c,hint);
+  unsigned i=s->next_cache++%64;
+  s->cache[i].key=*c;s->cache[i].slot=slot;s->cache[i].valid=true;s->cache[i].failed=!ok;
+  return ok;
+}
+
+bool nr_srs_valid_capture_grid(const nr_srs_grid_t *g)
+{
+  return nr_srs_valid_grid(g,g?14*g->fft_size:0);
+}
+bool nr_srs_refresh_grid(nr_srs_blind_t *s,const nr_srs_grid_t *g)
+{
+  if(!s || !nr_srs_valid_capture_grid(g) || g->fft_size!=s->grid.fft_size
+     || g->n_ant!=s->grid.n_ant || g->slots_per_frame!=s->grid.slots_per_frame) return false;
+  nr_srs_blind_reset(s);s->grid=*g;s->fp->first_carrier_offset=g->first_carrier_offset;
+  return true;
 }

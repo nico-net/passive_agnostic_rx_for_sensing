@@ -15,6 +15,8 @@ void nr_srs_passive_trigger(uint16_t rnti, uint64_t slot, unsigned request);
 void nr_srs_passive_pusch(uint16_t rnti, uint64_t slot, int advance,
                          const float *cfr, const uint32_t *k, int n_re);
 void nr_srs_passive_hint(int comb, int offset, int group, int cs);
+void nr_srs_passive_grant(uint64_t slot,uint16_t mask,int start_rb,int nb_rb);
+void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped);
 bool nr_srs_passive_enabled(void);
 #ifdef __cplusplus
 }

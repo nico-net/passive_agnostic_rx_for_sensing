@@ -11,6 +11,14 @@ extern "C" {
 typedef enum { NR_SENSE_SRC_SSB, NR_SENSE_SRC_CSIRS, NR_SENSE_SRC_PDSCH_DMRS, NR_SENSE_SRC_PDSCH_DATA,
                NR_SENSE_SRC_PUSCH_DMRS, NR_SENSE_SRC_PUSCH_DATA, NR_SENSE_SRC_SRS, NR_SENSE_SRC_COUNT } nr_sense_src_t;
 typedef struct { const char *records_path, *cfr_path, *endpoint; uint32_t cfr_ring_frames, cfr_max_re, rec_ring_slots; } nr_sense_cfg_t;
+/* k_abs: absolute subcarrier index relative to CRB0 / point A, never an FFT bin.
+ * Passive UL exports undo their FFT advance on the copied CFR, so phase refers
+ * to the unadvanced DL-frame FFT window (after symbol/CP rotation). SRS without
+ * attribution still has the explicitly reported CS/delay ambiguity. */
+static inline uint16_t nr_sense_crb_k(int bin,int first_carrier_offset,int fft_size)
+{
+  return (bin-first_carrier_offset+fft_size)%fft_size;
+}
 int nr_sense_open(const nr_sense_cfg_t *cfg);
 void nr_sense_close(void);
 bool nr_sense_enabled(void);

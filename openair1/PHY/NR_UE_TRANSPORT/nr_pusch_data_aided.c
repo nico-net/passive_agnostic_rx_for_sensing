@@ -1,3 +1,4 @@
+#include "nr_sense_ul.h"
 /* Passive uplink data-aided CFR -- see nr_pusch_data_aided.h.
  *
  * Deliberately mirrors nr_pdsch_data_aided.c step for step (segment -> LDPC encode -> scramble ->
@@ -59,7 +60,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t harq_pid_tag,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
-                                     int slot)
+                                     int slot, int fft_advance)
 {
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
     return;
@@ -209,6 +210,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
           const size_t o = 2 * ((size_t)a * cap + nof_re);
           h_buf[o]       = (float)((yr * xr + yi * xi) / p);
           h_buf[o + 1]   = (float)((yi * xr - yr * xi) / p);
+          nr_sense_ul_to_dl(&h_buf[o],&h_buf[o+1],k_crb,fp->first_carrier_offset,symsz,fft_advance);
         }
         k_buf[nof_re] = (uint32_t)k_crb;
         l_buf[nof_re] = (uint32_t)l;
