@@ -4,6 +4,7 @@
 #include "nr_sense_ul.h"
 #include "nr_srs_export.h"
 #include "nr_sense_api.h"
+#include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_passive_cfg_epoch.h"
 #include "PHY/defs_nr_UE.h"
@@ -170,13 +171,12 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   return;
 #endif
   if(nr_srs_passive_enabled() || !nr_sense_enabled() || !ue || ue->frame_parms.frame_type!=TDD) return;
-  char *sources=NULL;int max_re=46200,antennas=0;
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_SRS)) return;
+  int max_re=46200,antennas=0;
   paramdef_t p[]={
-    {.optname="sources",.type=TYPE_STRING,.strptr=&sources,.defstrval="all"},
     {.optname="cfr_max_re",.type=TYPE_INT,.iptr=&max_re,.defintval=46200},
     {.optname="cfr_antennas",.type=TYPE_INT,.iptr=&antennas,.defintval=0}};
-  config_get(uniqCfg,p,3,"sensing");
-  if(!nr_srs_sources_selected(sources)) return;
+  config_get(uniqCfg,p,2,"sensing");
   NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
   sr.grid=(nr_srs_grid_t){fp->ofdm_symbol_size,fp->first_carrier_offset,fp->N_RB_UL,
     fp->nb_antennas_rx,fp->symbols_per_slot,fp->slots_per_frame};
@@ -243,6 +243,7 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
   struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);
   job->meta=(nr_srs_capture_t){.abs_slot=abs_slot,.frame=frame,.slot=slot,.pci=fp->Nid_cell,
     .t_mono_ns=(uint64_t)ts.tv_sec*1000000000+ts.tv_nsec,.reconf=reconf,.epoch=stamp>>32,.identity_gen=stamp,
+    .dedicated_epoch=reconf ? (int)nr_cfg_epoch_dedicated_current() : -1,
     .n_ant=sr.export_ant,.cfr_max_re=sr.cfr_max_re};
   job->advance=(uint64_t)25600*fp->samples_per_subframe/(4096ull*480ull);
   job->fo_hz=ue->cont_fo_comp?ue->dl_Doppler_shift+ue->freq_offset:0;
@@ -281,10 +282,10 @@ void nr_srs_passive_trigger(uint16_t rnti,uint64_t slot,unsigned request)
   if(!nr_srs_passive_enabled() || !rnti || !request) return;
   srs_event_t e={.type=0,.rnti=rnti,.slot=slot,.request=request};post_event(&e);
 }
-void nr_srs_passive_pusch(uint16_t rnti,uint64_t slot,int advance,const float *cfr,const uint32_t *k,int n_re)
+void nr_srs_passive_pusch(uint16_t rnti,uint64_t slot,int ta_est_samples,const float *cfr,const uint32_t *k,int n_re)
 {
   if(!nr_srs_passive_enabled() || !rnti || !cfr || !k || n_re<=0) return;
-  srs_event_t e={.type=1,.rnti=rnti,.slot=slot,.delay=advance};
+  srs_event_t e={.type=1,.rnti=rnti,.slot=slot,.delay=ta_est_samples};
   for(int i=0;i<n_re && e.n<64;i++) {
     if(k[i]>UINT16_MAX) continue;
     bool duplicate=false;for(int j=0;j<e.n;j++) if(e.k[j]==k[i]) duplicate=true;

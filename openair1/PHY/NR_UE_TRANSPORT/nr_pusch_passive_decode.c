@@ -1071,8 +1071,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
        * 256-PRB grants gave pw=[13333 579 58538 53579] (wrong, but believable) and 7-PRB grants
        * gave pw=[0 0 0 0] over 308628 REs, which is what made it visible at all.
        *
-       * The REPORTED subcarrier (ul_k below) stays ABSOLUTE and CRB-referenced -- that is what the
-       * CPI grid indexes on, and it was always correct. Only the read index was wrong. */
+       * The exported ul_k converts the FFT bin to the common CRB0/Point-A axis. */
       for (int j = 0; j < num_sc && nof_re < ul_cap; j++) {
         const int k_abs = (start_sc + j) % fp->ofdm_symbol_size;
         for (uint32_t a = 0; a < nof_ant_cfr; a++) {
@@ -1083,7 +1082,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           ul_h[o]     = (float)h[j].r;
           ul_h[o + 1] = (float)h[j].i;
           nr_sense_ul_to_dl(&ul_h[o],&ul_h[o+1],nr_sense_crb_k(k_abs,fp->first_carrier_offset,fp->ofdm_symbol_size),
-                           fp->first_carrier_offset,fp->ofdm_symbol_size,ul_sample_offset-out->est_delay_pre);
+                           fp->first_carrier_offset,fp->ofdm_symbol_size,out->ta_applied_samples);
           const double p2 = (double)h[j].r * h[j].r + (double)h[j].i * h[j].i;
           if (a == 0) {
             pw += p2;
@@ -1132,8 +1131,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f,
                                       NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                       ul_k, ul_l, nof_re, 1.0f, &rs_meta);
+        /* Attribution uses a measured arrival estimate: actual FFT advance minus
+         * final residual delay. It is not S34's applied-window metadata or UE TA. */
         if (nr_srs_passive_enabled())
-          nr_srs_passive_pusch(g->rnti,abs_slot,ul_sample_offset-out->est_delay_pre-pvp->delay.est_delay,
+          nr_srs_passive_pusch(g->rnti,abs_slot,out->ta_applied_samples-pvp->delay.est_delay,
                                (const float *)ul_h,ul_k,nof_re);
         atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
         for (uint32_t a = 0; a < nof_ant_cfr && a < PASSIVE_UL_MAX_ANT; a++) {

@@ -7004,7 +7004,7 @@ constdiag_done:;
 
     const int num_sc = chest_alloc.num_rbs * NR_NB_SC_PER_RB;
     if (num_sc >= 2) {
-      const uint32_t base_sc = (uint32_t)(rb_origin + chest_alloc.first_rb) * NR_NB_SC_PER_RB;
+      const uint32_t base_sc = nr_sense_crb_re(rb_origin + chest_alloc.first_rb, 0);
       // Export the estimate already computed for every receiver antenna.
       uint32_t nof_ant = (uint32_t)fp->nb_antennas_rx;
       if (nof_ant == 0) {

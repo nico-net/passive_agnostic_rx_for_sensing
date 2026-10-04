@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_srs_blind_internal.h"
+#include "nr_sense_api.h"
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/NR_ESTIMATION/nr_ul_estimation.h"
@@ -45,7 +46,7 @@ int nr_srs_estimate(nr_srs_blind_t *s, const int16_t *iq, int stride, nr_srs_can
         delay.est_delay,noise[a],interpolated,time,shifted,&power,s->fp->delay_table);
     }
     for(int l=0;l<ns;l++) for(int k=0;k<width;k++) {
-      const int abs=c->start_rb*12+k, bin=(s->grid.first_carrier_offset+abs)%N;
+      const int abs=nr_sense_crb_re(c->start_rb,k), bin=(s->grid.first_carrier_offset+abs)%N;
       double re,im;
       if(k>=c->comb_offset && (k-c->comb_offset)%c->comb==0) {
         re=ls[l*N+bin].r;im=ls[l*N+bin].i;

@@ -981,7 +981,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
     if (csirs_config_pdu->freq_density <= 1 && csirs_config_pdu->freq_density != (rb % 2)) {
       continue;
     }
-    const uint16_t kk = rb * NR_NB_SC_PER_RB;
+    const uint16_t kk = nr_sense_crb_re(rb, 0);
     for (uint32_t a = 0; a < nof_ant; a++) {
       const c16_t v = ls[a * ant_stride + kk];
       const size_t o = 2 * ((size_t)a * NR_ISAC_CSIRS_MAX_RE + nof_re);

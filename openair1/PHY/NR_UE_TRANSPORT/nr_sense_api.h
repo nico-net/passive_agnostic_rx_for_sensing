@@ -16,6 +16,10 @@ typedef struct { const char *records_path, *cfr_path, *endpoint; uint32_t cfr_ri
  * Passive UL exports undo their FFT advance on the copied CFR, so phase refers
  * to the unadvanced DL-frame FFT window (after symbol/CP rotation). SRS without
  * attribution still has the explicitly reported CS/delay ambiguity. */
+static inline uint32_t nr_sense_crb_re(int crb, int subcarrier)
+{
+  return crb * 12 + subcarrier;
+}
 static inline uint16_t nr_sense_crb_k(int bin,int first_carrier_offset,int fft_size)
 {
   return (bin-first_carrier_offset+fft_size)%fft_size;

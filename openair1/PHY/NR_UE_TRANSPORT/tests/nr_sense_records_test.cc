@@ -237,3 +237,37 @@ TEST(SenseRecords, PrachAndSrsOptionalFields)
   EXPECT_NE(strstr(line,"\"srs_track_id\":6"),nullptr);
   EXPECT_NE(strstr(line,"\"attribution\":\"delay_match\""),nullptr);
 }
+
+TEST(SenseRecords, SrsSignedTimingAndCrbOffset)
+{
+  nr_sense_rs_meta_t m{};
+  m.ta_est_samples=-7; m.srs_offset=3;
+  char line[2048];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_SRS,&m,0,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"ta_est_samples\":-7"),nullptr);
+  EXPECT_NE(strstr(line,"\"comb_offset\":3"),nullptr);
+}
+
+TEST(SenseRecords, PrachSrsEpochStampedAtCapture)
+{
+  struct Reset { ~Reset() { test_reconf=false; test_epoch=0; nr_sense_close(); } } reset;
+  char path[]="/tmp/nr_sense_new_ul_epoch_XXXXXX";
+  int fd=mkstemp(path); ASSERT_GE(fd,0); close(fd);
+  nr_sense_cfg_t cfg{}; cfg.records_path=path; cfg.rec_ring_slots=4;
+  cfg.cfr_ring_frames=1; cfg.cfr_max_re=1;
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  nr_sense_rs_meta_t m{};
+  m.stamp_valid=true; m.epoch=5; m.identity_gen=2; m.dedicated_epoch=4; m.t_mono_ns=123;
+  test_reconf=true; test_epoch=6;
+  nr_sense_emit_rs(NR_SENSE_SRC_PRACH,&m,0);
+  nr_sense_emit_rs(NR_SENSE_SRC_SRS,&m,0);
+  nr_sense_close();
+  std::ifstream f(path); std::string line;
+  for(int i=0;i<2;i++) {
+    ASSERT_TRUE(std::getline(f,line));
+    EXPECT_NE(line.find("\"epoch\":5"),std::string::npos);
+    EXPECT_NE(line.find("\"dedicated_epoch\":4"),std::string::npos);
+    EXPECT_NE(line.find("\"t_mono_ns\":123"),std::string::npos);
+  }
+  unlink(path);
+}

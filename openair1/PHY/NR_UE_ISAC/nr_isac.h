@@ -47,14 +47,16 @@ typedef enum nr_isac_source_e {
   NR_ISAC_SRC_PUSCH_DMRS = 4,
   NR_ISAC_SRC_PUSCH_DATA = 5,
   NR_ISAC_SRC_SSB    = 6,
-  NR_ISAC_SRC_COUNT  = 7
+  NR_ISAC_SRC_PRACH  = 7,
+  NR_ISAC_SRC_SRS    = 8,
+  NR_ISAC_SRC_COUNT  = 9
 } nr_isac_source_t;
 #define NR_ISAC_NUM_ILLUM 2
 #define NR_ISAC_ILLUM_DL  0
 #define NR_ISAC_ILLUM_UL  1
 static inline unsigned nr_isac_source_illum(nr_isac_source_t s)
 {
-  return (s == NR_ISAC_SRC_PUSCH_DMRS || s == NR_ISAC_SRC_PUSCH_DATA) ? NR_ISAC_ILLUM_UL
+  return (s == NR_ISAC_SRC_PUSCH_DMRS || s == NR_ISAC_SRC_PUSCH_DATA || s == NR_ISAC_SRC_PRACH || s == NR_ISAC_SRC_SRS) ? NR_ISAC_ILLUM_UL
                                                                       : NR_ISAC_ILLUM_DL;
 }
 typedef struct nr_isac_carrier_s {
@@ -74,7 +76,7 @@ int nr_isac_enabled(void);
 int nr_isac_source(void);
 
 int nr_isac_source_enabled(int source);
-/* PRACH has a record only and therefore no CFR source enum. */
+/* PRACH is record-only. PRACH/SRS require explicit sources tokens. */
 int nr_isac_prach_enabled(void);
 
 void nr_isac_submit_cfr(uint32_t                 slot_idx,

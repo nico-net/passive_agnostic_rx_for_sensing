@@ -4,6 +4,7 @@
 #include <cmath>
 #include "nr_srs_blind.h"
 #include "nr_sense_ul.h"
+#include "PHY/NR_UE_ISAC/nr_isac_ssb_axis.h"
 extern "C" void srs_test_init(void);
 extern "C" bool srs_test_generate(const nr_srs_grid_t *,const nr_srs_candidate_t *,int16_t *);
 class SrsBlind : public testing::Test {
@@ -111,8 +112,8 @@ TEST_F(SrsBlind,SrsExportLinksFrameAndDropIsNull) {
   std::vector<float> h(4*96*2,0.5);std::vector<uint16_t> k(96);std::vector<uint8_t> l(96,12);
   for(int i=0;i<96;i++) k[i]=48+i;
   nr_srs_capture_t m{};m.abs_slot=100;m.frame=5;m.slot=0;m.pci=42;m.n_ant=4;m.t_mono_ns=123;
-  m.reconf=true;m.epoch=7;m.identity_gen=3;m.cfr_max_re=48;
-  auto c=truth;c.track_id=1;c.comb=8;c.comb_offset=7;c.start_rb=5;
+  m.reconf=true;m.epoch=7;m.identity_gen=3;m.dedicated_epoch=9;m.cfr_max_re=48;m.ta_est_samples=-7;
+  auto c=truth;c.track_id=(1ull<<40)+1;c.comb=8;c.comb_offset=7;c.start_rb=5;
   EXPECT_EQ(nr_srs_export(&c,&m,96,h.data(),k.data(),l.data()),1);
   m.epoch=8;
   EXPECT_EQ(nr_srs_export(&c,&m,96,h.data(),k.data(),l.data()),0);
@@ -120,6 +121,9 @@ TEST_F(SrsBlind,SrsExportLinksFrameAndDropIsNull) {
   std::ifstream rec(path);std::string first,second;std::getline(rec,first);std::getline(rec,second);
   EXPECT_NE(first.find("\"source\":\"srs\""),std::string::npos);
   EXPECT_NE(first.find("\"epoch\":7"),std::string::npos);
+  EXPECT_NE(first.find("\"dedicated_epoch\":9"),std::string::npos);
+  EXPECT_NE(first.find("\"ta_est_samples\":-7"),std::string::npos);
+  EXPECT_NE(first.find("\"srs_track_id\":1099511627777"),std::string::npos);
   EXPECT_NE(first.find("\"n_ant\":4"),std::string::npos);
   EXPECT_NE(first.find("\"comb_offset\":3"),std::string::npos);
   EXPECT_NE(first.find("\"n_re\":48"),std::string::npos);
@@ -278,4 +282,32 @@ TEST_F(SrsBlind,PuschCfrResolvesDelayAliasWithoutTrigger) {
   nr_srs_note_pusch(s,0x1234,100,-lrint(pd),ph,pk,48);
   nr_srs_attribute(s,&c,102,h.data(),k.data(),n);
   EXPECT_EQ(c.rnti,0x1234);EXPECT_NEAR(c.delay_samples,-pd,2);EXPECT_EQ(c.cs,0);
+}
+
+// Exercise the real SRS estimator and SSB axis against the coordinate helpers
+// used by CSI-RS, PDSCH data/DM-RS and PUSCH data/DM-RS producers.
+TEST_F(SrsBlind,CfrKabsConventionConsistentAcrossSources) {
+  truth.start_rb=12; // the resource crosses FFT bin zero (356 + 144)
+  generate();
+  auto c=truth;
+  std::vector<float> h(4*NR_SRS_MAX_RE*2);
+  std::vector<uint16_t> k(NR_SRS_MAX_RE);
+  std::vector<uint8_t> l(NR_SRS_MAX_RE);
+  const int n=nr_srs_estimate(s,iq.data(),14*512,&c,h.data(),k.data(),l.data());
+  ASSERT_EQ(n,192);
+  uint32_t ssb[240];
+  nr_isac_ssb_k_abs(149,5,g.fft_size,ssb);
+  for(int i=0;i<96;i++) {
+    const int crb=truth.start_rb+i/12, sc=i%12;
+    const auto dl_data=nr_sense_crb_re(crb,sc); // contiguous and sparse RB mapping
+    const auto ul_data=nr_sense_crb_re(7+5+i/12,sc); // includes BWP start
+    const auto dl_dmrs=nr_sense_crb_re(12,0)+i;
+    const int bin=(g.first_carrier_offset+144+i)%g.fft_size;
+    const auto ul_dmrs=nr_sense_crb_k(bin,g.first_carrier_offset,g.fft_size);
+    EXPECT_EQ(k[i],144+i);
+    EXPECT_EQ(k[i],dl_data); EXPECT_EQ(k[i],ul_data);
+    EXPECT_EQ(k[i],dl_dmrs); EXPECT_EQ(k[i],ul_dmrs);
+    if(sc==0) EXPECT_EQ(k[i],nr_sense_crb_re(crb,0)); // CSI-RS per-RB estimate
+    if(i>=5) EXPECT_EQ(k[i],ssb[i-5]); // SSB retains its sub-RB shift
+  }
 }

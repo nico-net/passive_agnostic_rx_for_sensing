@@ -206,7 +206,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // every RE the transmitter mapped a data symbol to -- the same order (and, for DM-RS symbols, the
   // same per-RE bitmap) nr_dlsch_extract_rbs() uses, mirrored here in the forward
   // TX-reconstruction direction. Ĥ[k] = Y[k]/X[k] at every such RE. --
-  const uint32_t base_sc  = (uint32_t)(dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
+  const uint32_t base_sc  = nr_sense_crb_re(dlsch_config->BWPStart + freq_alloc->first_rb, 0);
   const int      num_sc   = (freq_alloc->n_prb_list ? freq_alloc->n_prb_list : freq_alloc->num_rbs) * NR_NB_SC_PER_RB;
   const int      start_re = (fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB)
                            % fp->ofdm_symbol_size;
@@ -298,8 +298,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
         re -= fp->ofdm_symbol_size;
       uint32_t k_abs = base_sc + (uint32_t)j;
       if (freq_alloc->n_prb_list) { // non-contiguous grant: data RB j/12 sits on PRB prb_list[j/12]
-        k_abs = (uint32_t)(dlsch_config->BWPStart + freq_alloc->prb_list[j / NR_NB_SC_PER_RB]) * NR_NB_SC_PER_RB
-                + (uint32_t)(j % NR_NB_SC_PER_RB);
+        k_abs = nr_sense_crb_re(dlsch_config->BWPStart + freq_alloc->prb_list[j / NR_NB_SC_PER_RB],
+                                j % NR_NB_SC_PER_RB);
         re = (int)((fp->first_carrier_offset + k_abs) % fp->ofdm_symbol_size);
       }
       const c16_t x = mod_syms[mod_idx++];

@@ -39,8 +39,7 @@ extern "C" {
 namespace {
 // One full 275-PRB, 14-symbol carrier.
 constexpr uint32_t max_re = 275 * 12 * 14;
-/* PRACH exports records only. Keep this bit clear of CFR enum growth (Task 6b). */
-constexpr unsigned prach_source_mask = 1u << 16;
+/* Masks use the receiver enum; source_map preserves the CFR wire IDs. */
 std::atomic<unsigned> active_sources{0};
 unsigned configured_sources;
 bool initialized, configured, reconf;
@@ -223,15 +222,18 @@ unsigned source_mask(const char *s)
     else if (token == "pdsch_data") mask |= 1u << NR_ISAC_SRC_PDSCH_DATA;
     else if (token == "pusch_dmrs") mask |= 1u << NR_ISAC_SRC_PUSCH_DMRS;
     else if (token == "pusch_data") mask |= 1u << NR_ISAC_SRC_PUSCH_DATA;
-    else if (token == "prach") mask |= prach_source_mask;
+    else if (token == "prach") mask |= 1u << NR_ISAC_SRC_PRACH;
+    else if (token == "srs") mask |= 1u << NR_ISAC_SRC_SRS;
     else LOG_W(PHY, "SENSING: unknown source '%s' ignored\n", token.c_str());
   }
   return mask;
 }
 constexpr nr_sense_src_t source_map[] = {
   NR_SENSE_SRC_CSIRS, NR_SENSE_SRC_PDSCH_DMRS, NR_SENSE_SRC_PDSCH_DATA,
-  NR_SENSE_SRC_PDSCH_DMRS, NR_SENSE_SRC_PUSCH_DMRS, NR_SENSE_SRC_PUSCH_DATA, NR_SENSE_SRC_SSB
+  NR_SENSE_SRC_PDSCH_DMRS, NR_SENSE_SRC_PUSCH_DMRS, NR_SENSE_SRC_PUSCH_DATA, NR_SENSE_SRC_SSB,
+  NR_SENSE_SRC_PRACH, NR_SENSE_SRC_SRS
 };
+static_assert(sizeof(source_map)/sizeof(source_map[0]) == NR_ISAC_SRC_COUNT);
 }
 
 extern "C" void nr_isac_init(void)
@@ -331,7 +333,7 @@ extern "C" int nr_isac_source_enabled(int source)
 }
 extern "C" int nr_isac_prach_enabled(void)
 {
-  return (active_sources.load(std::memory_order_acquire) & prach_source_mask) != 0;
+  return nr_isac_source_enabled(NR_ISAC_SRC_PRACH);
 }
 extern "C" uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)
 {
@@ -372,7 +374,7 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
   m.dedicated_epoch=dedicated;
   m.ta_est_samples=-1; m.transform_precoding=-1; m.dmrs_type=-1; m.dmrs_add_pos=-1; m.dmrs_n_scid=-1;
   m.prach_preamble=-1; m.prach_energy=NAN; m.prach_delay=NAN;
-  m.srs_comb=m.srs_offset=m.srs_cs=m.srs_group=m.srs_period=m.srs_track_id=-1;
+  m.srs_comb=m.srs_offset=m.srs_cs=m.srs_group=m.srs_period=-1;
   for (uint32_t r=0;r<(uint32_t)m.n_re;r++) {
     if (l_sym[r]<32) m.l_sym_mask|=1u<<l_sym[r];
     if (k_abs[r]<=UINT16_MAX && (m.start_rb<0 || int(k_abs[r]/12)<m.start_rb)) m.start_rb=k_abs[r]/12;

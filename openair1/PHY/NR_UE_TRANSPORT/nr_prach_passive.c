@@ -17,6 +17,7 @@
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_api.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "common/utils/LOG/log.h"
@@ -257,28 +258,19 @@ void nr_prach_passive_rar_pdu(uint16_t ra_rnti, uint64_t abs_slot, const uint8_t
     nr_prach_passive_rar(ra_rnti, entries[i].rapid, entries[i].ta, abs_slot);
 }
 
-static void format_record(const prach_detection_t *d, int relation, int rapid, int ta,
-                          char *line, size_t capacity)
+static nr_sense_rs_meta_t detection_meta(const prach_detection_t *d, int relation, int rapid, int ta)
 {
-  char rar_match[8], rar_rapid[16], rar_ta[16], epoch[16], identity[16], dedicated[16];
-  snprintf(rar_match, sizeof(rar_match), "%s", relation < 0 ? "null" : (relation ? "true" : "false"));
-  snprintf(rar_rapid, sizeof(rar_rapid), rapid < 0 ? "null" : "%d", rapid);
-  snprintf(rar_ta, sizeof(rar_ta), ta < 0 ? "null" : "%d", ta);
-  snprintf(epoch, sizeof(epoch), d->epoch == UINT32_MAX ? "null" : "%u", d->epoch);
-  snprintf(identity, sizeof(identity), d->epoch == UINT32_MAX ? "null" : "%u", d->identity_gen);
-  snprintf(dedicated, sizeof(dedicated), d->epoch == UINT32_MAX ? "null" : "%u", d->dedicated_epoch);
-  snprintf(line, capacity,
-           "{\"schema\":2,\"type\":\"rs\",\"source\":\"prach\",\"dir\":\"UL\","
-           "\"epoch\":%s,\"identity_gen\":%s,\"dedicated_epoch\":%s,\"abs_slot\":%llu,"
-           "\"frame\":%d,\"slot\":%d,\"t_mono_ns\":%llu,\"rx_ts\":null,\"pci\":%d,"
-           "\"rnti\":null,\"start_rb\":null,\"nb_rb\":null,\"n_re\":null,\"l_syms\":[],"
-           "\"ports\":null,\"n_ant\":null,\"noise_var\":null,\"slot_frac\":null,"
-           "\"cfr_frame_id\":null,\"preamble\":%d,\"energy\":%d,\"delay_samples\":%d,"
-           "\"occasion\":{\"frame\":%d,\"slot\":%d,\"fdm_index\":%d,\"symbol\":%d},"
-           "\"rar_match\":%s,\"rar_rapid\":%s,\"rar_ta\":%s}",
-           epoch, identity, dedicated, (unsigned long long)d->abs_slot, d->frame, d->slot,
-           (unsigned long long)d->mono_ns, d->pci, d->preamble, d->energy, d->delay_samples,
-           d->frame, d->slot, d->fdm, d->symbol, rar_match, rar_rapid, rar_ta);
+  return (nr_sense_rs_meta_t){
+    .start_rb=-1, .nb_rb=-1, .n_re=-1, .n_ant=-1, .ports=-1, .ssb_index=-1, .k_ssb=-1,
+    .noise_var=NAN, .slot_frac=NAN, .abs_slot=d->abs_slot, .frame=d->frame, .slot=d->slot,
+    .pci=d->pci, .rx_ts=-1, .t_mono_ns=d->mono_ns,
+    .epoch=d->epoch==UINT32_MAX?-1:(int)d->epoch,
+    .identity_gen=d->epoch==UINT32_MAX?-1:(int)d->identity_gen,
+    .dedicated_epoch=d->epoch==UINT32_MAX?-1:(int)d->dedicated_epoch, .stamp_valid=true,
+    .ta_est_samples=-1, .transform_precoding=-1, .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1,
+    .prach_preamble=d->preamble, .prach_energy=d->energy, .prach_delay=d->delay_samples,
+    .prach_fdm=d->fdm, .prach_symbol=d->symbol,
+    .prach_rar_match=relation, .prach_rar_rapid=rapid, .prach_rar_ta=ta};
 }
 
 static void emit_detection(const prach_detection_t *d, uint64_t now)
@@ -298,12 +290,11 @@ static void emit_detection(const prach_detection_t *d, uint64_t now)
       ta = v & 0xffff;
     }
   }
-  char line[768];
-  format_record(d, relation, rapid, ta, line, sizeof(line));
+  const nr_sense_rs_meta_t meta=detection_meta(d,relation,rapid,ta);
 #ifdef NR_PASSIVE_PRACH_TEST
   atomic_fetch_add(&test_export_calls, 1);
 #endif
-  nr_sense_push_record(line);
+  nr_sense_emit_rs(NR_SENSE_SRC_PRACH,&meta,0);
 }
 
 #ifdef NR_PASSIVE_PRACH_TEST
@@ -322,7 +313,8 @@ void nr_prach_passive_format_test(int relation, char *line, uint32_t capacity)
                                .frame = 61, .slot = 14, .ra_slot = 14, .slots_per_frame = 20,
                                .fdm = 1, .symbol = 2,
                                .preamble = 17, .energy = 420, .delay_samples = 32, .pci = 42};
-  format_record(&d, relation, relation < 0 ? -1 : 17, relation < 0 ? -1 : 20, line, capacity);
+  const nr_sense_rs_meta_t meta=detection_meta(&d,relation,relation<0?-1:17,relation<0?-1:20);
+  nr_sense_rs_to_json(NR_SENSE_SRC_PRACH,&meta,0,line,capacity);
 }
 void nr_prach_passive_floor_reset_test(void) { memset(floors, 0, sizeof(floors)); }
 int nr_prach_passive_floor_test(int fdm, int gain_db, int energy)

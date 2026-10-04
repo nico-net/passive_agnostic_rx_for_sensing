@@ -44,7 +44,7 @@ extern "C" {
  * @param ul_slot_idx   producer-timeline slow-time index, identical to the DM-RS path's
  * @param nof_ant       receive antennas to extract (per-antenna phases are preserved for AoA)
  * @param slot          the uplink slot, for the rxdataF ring offset
- * @param fft_advance   actual FFT-window advance, for exported CFR phase reference
+ * @param ta_applied_samples   actual FFT-window advance, for exported CFR phase reference
  */
 void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      PHY_VARS_gNB *gnb,
@@ -55,7 +55,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
                                      int slot,
-                                     int ta_offset_samples);
+                                     int ta_applied_samples);
 
 /// Per-run census: attempts, submissions, and every reason one did not happen.
 void nr_isac_pusch_data_aided_stats_dump(void);

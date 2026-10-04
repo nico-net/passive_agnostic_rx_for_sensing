@@ -101,8 +101,9 @@ int test_prach_floor(int fdm, int gain_db, int energy)
   return nr_prach_passive_floor_test(fdm, gain_db, energy);
 }
 
-static char captured_record[768];
-bool nr_sense_push_record(const char *line)
+static char captured_record[2048];
+bool __wrap_nr_sense_enabled(void) { return true; }
+bool __wrap_nr_sense_push_record(const char *line)
 {
   snprintf(captured_record, sizeof(captured_record), "%s", line);
   return true;

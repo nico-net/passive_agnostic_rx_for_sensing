@@ -31,7 +31,12 @@ typedef struct nr_sense_rs_meta_s {
   bool ta_applied_valid;
   int prach_preamble;
   float prach_energy, prach_delay;
-  int srs_comb, srs_offset, srs_cs, srs_group, srs_period, srs_track_id;
+  int prach_fdm, prach_symbol, prach_rar_match, prach_rar_rapid, prach_rar_ta;
+  int srs_comb, srs_offset, srs_cs, srs_group, srs_period;
+  uint64_t srs_track_id;
+  int srs_n_symbols, srs_slot_offset;
+  bool srs_confirmed, srs_timing_cs_ambiguous;
+  float srs_delay_ambiguity_samples;
   const char *srs_attribution;
 } nr_sense_rs_meta_t;
 

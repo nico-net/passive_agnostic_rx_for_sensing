@@ -2545,6 +2545,7 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_sense_gating)
   add_test(NAME test_nr_sense_gating COMMAND ./test_nr_sense_gating)
   add_executable(test_nr_srs_blind
+    ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
     ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
@@ -2838,12 +2839,12 @@ if(ENABLE_TESTS)
                                       ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_prach.c)
   target_compile_options(test_nr_prach_passive PRIVATE -ffunction-sections -fdata-sections)
   target_compile_definitions(test_nr_prach_passive PRIVATE NR_PASSIVE_PRACH_RX_ONLY NR_PASSIVE_PRACH_TEST)
-  target_link_options(test_nr_prach_passive PRIVATE -Wl,--no-export-dynamic -Wl,--gc-sections
+  target_link_options(test_nr_prach_passive PRIVATE -Wl,--wrap=nr_sense_push_record -Wl,--wrap=nr_sense_enabled -Wl,--no-export-dynamic -Wl,--gc-sections
                       -Wl,--export-dynamic-symbol=T_active -Wl,--export-dynamic-symbol=T_cache
                       -Wl,--export-dynamic-symbol=T_freelist_head -Wl,--export-dynamic-symbol=T_stdout
                       -Wl,--export-dynamic-symbol=g_log -Wl,--export-dynamic-symbol=exit_function
                       -Wl,--export-dynamic-symbol=logRecord_mt -Wl,--export-dynamic-symbol=write_file_matlab)
-  target_link_libraries(test_nr_prach_passive PRIVATE PHY_NR_COMMON MAC_NR_COMMON nr_phy_common nr_common UTIL asn1_nr_rrc_hdrs
+  target_link_libraries(test_nr_prach_passive PRIVATE nr_sense_api PHY_NR_COMMON MAC_NR_COMMON nr_phy_common nr_common UTIL asn1_nr_rrc_hdrs
                         GTest::gtest GTest::gtest_main m)
   add_dependencies(tests test_nr_prach_passive)
   add_test(NAME test_nr_prach_passive COMMAND ./test_nr_prach_passive)

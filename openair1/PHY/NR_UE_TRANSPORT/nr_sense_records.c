@@ -91,7 +91,10 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   integer(&j,"ssb_index",src==NR_SENSE_SRC_SSB?m->ssb_index:-1);
   integer(&j,"k_ssb",src==NR_SENSE_SRC_SSB?m->k_ssb:-1);
   quoted(&j,"csirs_resource",src==NR_SENSE_SRC_CSIRS?m->csirs_resource:NULL);
-  integer(&j,"ta_est_samples",ul?m->ta_est_samples:-1);
+  /* SRS has a measured, signed representative; PUSCH retains S34's unknown sentinel. */
+  signed_optional(&j,"ta_est_samples",m->ta_est_samples,ul && (src==NR_SENSE_SRC_SRS || m->ta_est_samples>=0));
+  quoted(&j,"k_abs_convention","crb0_point_a");
+  integer(&j,"freq_hopping",-1); real(&j,"cfo_est_hz",NAN);
   signed_optional(&j,"ta_applied_samples",m->ta_applied_samples,ul && m->ta_applied_valid);
   integer(&j,"transform_precoding",ul?m->transform_precoding:-1);
   integer(&j,"dmrs_type",ul?m->dmrs_type:-1);
@@ -103,10 +106,25 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   real(&j,"delay",src==NR_SENSE_SRC_PRACH?m->prach_delay:NAN);
   integer(&j,"comb",src==NR_SENSE_SRC_SRS?m->srs_comb:-1);
   integer(&j,"offset",src==NR_SENSE_SRC_SRS?m->srs_offset:-1);
+  integer(&j,"comb_offset",src==NR_SENSE_SRC_SRS?m->srs_offset:-1);
   integer(&j,"cs",src==NR_SENSE_SRC_SRS?m->srs_cs:-1);
   integer(&j,"group",src==NR_SENSE_SRC_SRS?m->srs_group:-1);
   integer(&j,"period",src==NR_SENSE_SRC_SRS?m->srs_period:-1);
-  integer(&j,"srs_track_id",src==NR_SENSE_SRC_SRS?m->srs_track_id:-1);
+  if (src==NR_SENSE_SRC_SRS) {
+    put(&j,",\"srs_track_id\":%" PRIu64 ",\"track_id\":%" PRIu64,m->srs_track_id,m->srs_track_id);
+    integer(&j,"n_symbols",m->srs_n_symbols);
+    integer(&j,"slot_offset",m->srs_slot_offset);
+    put(&j,",\"confirmed\":%s,\"timing_cs_ambiguous\":%s",
+        m->srs_confirmed?"true":"false",m->srs_timing_cs_ambiguous?"true":"false");
+    real(&j,"delay_ambiguity_samples",m->srs_delay_ambiguity_samples);
+  } else integer(&j,"srs_track_id",-1);
+  if (src==NR_SENSE_SRC_PRACH) {
+    real(&j,"delay_samples",m->prach_delay);
+    put(&j,",\"occasion\":{\"frame\":%d,\"slot\":%d,\"fdm_index\":%d,\"symbol\":%d}",
+        m->frame,m->slot,m->prach_fdm,m->prach_symbol);
+    put(&j,",\"rar_match\":%s",m->prach_rar_match<0?"null":m->prach_rar_match?"true":"false");
+    integer(&j,"rar_rapid",m->prach_rar_rapid); integer(&j,"rar_ta",m->prach_rar_ta);
+  }
   quoted(&j,"attribution",src==NR_SENSE_SRC_SRS?m->srs_attribution:NULL);
   put(&j,"}");
   return j.bad ? -1 : (int)j.w;

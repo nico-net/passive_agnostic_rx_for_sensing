@@ -315,3 +315,20 @@ int main(int argc,char **argv) {
   g_log->log_component[PHY].level = OAILOG_WARNING;
   testing::InitGoogleTest(&argc,argv); return RUN_ALL_TESTS();
 }
+
+TEST_F(Adapter, NewUlSourcesRequireExplicitTokens) {
+  for(const char *tokens:{"", "all", "allsrs", "prachish", "srs", "prach", "all,srs,prach"}) {
+    init(cfg(1,tokens));
+#ifdef SENSE_ADAPTER_ON
+    const std::string t=tokens;
+    EXPECT_EQ(bool(nr_isac_source_enabled(NR_ISAC_SRC_SRS)),t=="srs" || t=="all,srs,prach");
+    EXPECT_EQ(bool(nr_isac_source_enabled(NR_ISAC_SRC_PRACH)),t=="prach" || t=="all,srs,prach");
+    EXPECT_EQ(nr_isac_prach_enabled(),nr_isac_source_enabled(NR_ISAC_SRC_PRACH));
+#else
+    EXPECT_FALSE(nr_isac_source_enabled(NR_ISAC_SRC_SRS));
+    EXPECT_FALSE(nr_isac_prach_enabled());
+#endif
+    nr_isac_stop();
+    end_configmodule(uniqCfg); uniqCfg=nullptr;
+  }
+}
