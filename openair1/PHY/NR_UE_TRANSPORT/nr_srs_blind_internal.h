@@ -8,9 +8,18 @@ typedef struct {
   uint64_t first, last, id;
   unsigned gcd, count;
 } srs_track_t;
+typedef struct {
+  uint16_t rnti;
+  uint64_t last, trigger, pusch_slot;
+  bool trigger_valid, pusch_valid;
+  int delay, n;
+  float h[128];
+  uint16_t k[64];
+} srs_ue_evidence_t;
 struct nr_srs_blind {
   nr_srs_grid_t grid;
   srs_track_t tracks[NR_SRS_MAX_TRACKS];
+  srs_ue_evidence_t ues[NR_SRS_MAX_TRACKS];
   uint64_t next_id;
   c16_t *reference;
   PHY_VARS_gNB *gnb;

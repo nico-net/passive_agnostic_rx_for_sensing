@@ -1,3 +1,4 @@
+#include "nr_srs_passive.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 #include "nr_passive_uci_probe.h"
@@ -999,7 +1000,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * The antennas are kept SEPARATE (nof_ant > 1, ant_stride_re) rather than combined: the whole
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
-  if (!gapped && !fdra_unresolved && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
+  if (!gapped && !fdra_unresolved && (nr_srs_passive_enabled()
+      || (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)))) {
     const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
@@ -1116,6 +1118,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f,
                                  NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                  ul_k, ul_l, nof_re, 1.0f);
+        if (nr_srs_passive_enabled())
+          nr_srs_passive_pusch(g->rnti,abs_slot,ul_sample_offset-out->est_delay_pre-pvp->delay.est_delay,
+                               (const float *)ul_h,ul_k,nof_re);
         atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
         for (uint32_t a = 0; a < nof_ant_cfr && a < PASSIVE_UL_MAX_ANT; a++) {
           /* Accumulate the SUM and divide once at report time. Dividing per grant and casting to

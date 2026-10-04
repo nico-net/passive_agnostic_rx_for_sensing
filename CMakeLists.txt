@@ -1063,6 +1063,7 @@ add_library(PHY_NR ${PHY_NR_SRC})
 # contains ONLY files that are not already in PHY_NR_UE; everything else resolves to the UE's copy,
 # which is the copy the rest of this binary already uses.
 set(PHY_NR_PASSIVE_UL_SRC
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_passive.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/srs_rx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_blind.c
@@ -1079,6 +1080,7 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c
   )
 add_library(PHY_NR_PASSIVE_UL ${PHY_NR_PASSIVE_UL_SRC})
+target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE NR_SRS_PASSIVE_EXTRACT_ONLY)
 # Same dependency set PHY_NR itself declares -- these carry the include directories these sources
 # need (nr_common.h, the polar/smallblock decoders, the FAPI p5 headers), not just link objects.
 target_link_libraries(PHY_NR_PASSIVE_UL PUBLIC nr_sense_api nr_phy_common nr_common nr_fapi_p5 polar smallblock ds)
@@ -1111,6 +1113,7 @@ else()
                         ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c)
 endif()
 target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
+target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE $<$<BOOL:${ENABLE_ISAC_SENSING}>:NR_SRS_EXPORT_ON>)
 add_library(nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_api.c)
 target_include_directories(nr_sense_api PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
 target_link_libraries(nr_sense_api PUBLIC pthread PRIVATE LOG ${T_LIB})
@@ -2527,6 +2530,7 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_isac_adapter COMMAND ./test_nr_isac_adapter)
 
   add_executable(test_nr_srs_blind
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_estimate.c
     ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/srs_rx.c
     ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c

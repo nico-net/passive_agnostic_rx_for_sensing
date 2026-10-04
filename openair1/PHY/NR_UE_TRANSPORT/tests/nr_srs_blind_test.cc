@@ -77,16 +77,22 @@ TEST_F(SrsBlind,NonSrsCombRejectedBySequenceSearch) {
 }
 TEST_F(SrsBlind,SrsLsEstimateSynth) {
   for(int comb:{2,4,8}) {
-    truth.comb=comb; generate();
-    for(int a=0;a<4;a++) for(int i=0;i<14*512*2;i++) iq[a*14*512*2+i]=lrint(iq[a*14*512*2+i]*(0.25+0.125*a));
+    truth.comb=comb; truth.comb_offset=comb-1; generate();
+    for(int a=0;a<4;a++) for(int i=0;i<14*512;i++) {
+      int j=2*(a*14*512+i);double re=iq[j],im=iq[j+1],gain=0.25+0.125*a;
+      iq[j]=lrint(gain*(re*std::cos(0.6*a)-im*std::sin(0.6*a)));
+      iq[j+1]=lrint(gain*(re*std::sin(0.6*a)+im*std::cos(0.6*a)));
+    }
     auto c=truth;
     std::vector<float> out(4*NR_SRS_MAX_RE*2);
     std::vector<uint16_t> k(NR_SRS_MAX_RE); std::vector<uint8_t> l(NR_SRS_MAX_RE);
     int n=nr_srs_estimate(s,iq.data(),14*512,&c,out.data(),k.data(),l.data());
     ASSERT_EQ(n,8*12*2);
-    for(int a=0;a<4;a++) for(int i=8;i<8*12-8;i++) {
+    for(int a=0;a<4;a++) for(int i=0;i<8*12;i++) {
       float amplitude=std::hypot(out[2*(a*n+i)],out[2*(a*n+i)+1]);
       EXPECT_NEAR(20*std::log10(amplitude/(0.25+0.125*a)),0,0.5);
+      EXPECT_NEAR(out[2*(a*n+i)],(0.25+0.125*a)*std::cos(0.6*a),0.02);
+      EXPECT_NEAR(out[2*(a*n+i)+1],(0.25+0.125*a)*std::sin(0.6*a),0.02);
       EXPECT_EQ(k[i],4*12+i); EXPECT_EQ(l[i],12);
     }
   }
@@ -122,4 +128,36 @@ TEST_F(SrsBlind,SrsExportLinksFrameAndDropIsNull) {
   ASSERT_GE(bytes.size(),48u);EXPECT_EQ(bytes[16],NR_SENSE_SRC_SRS);EXPECT_EQ(bytes[17],4);
   EXPECT_EQ(bytes[20],48);EXPECT_EQ(bytes[40],7);EXPECT_EQ(bytes[44],3);
   unlink(path);unlink(cfr.c_str());
+}
+TEST_F(SrsBlind,SrsAperiodicAttribution) {
+  auto c=truth;nr_srs_observe(s,&c,102);
+  nr_srs_note_trigger(s,0x1234,100,1);
+  nr_srs_attribute(s,&c,102,nullptr,nullptr,0);
+  EXPECT_EQ(c.rnti,0x1234); EXPECT_STREQ(c.attribution,"dci_request");
+  nr_srs_note_trigger(s,0x4567,101,1);
+  nr_srs_attribute(s,&c,102,nullptr,nullptr,0);
+  EXPECT_EQ(c.rnti,0); EXPECT_STREQ(c.attribution,"anonymous");
+  nr_srs_attribute(s,&c,400,nullptr,nullptr,0); EXPECT_EQ(c.rnti,0);
+}
+TEST_F(SrsBlind,SrsDelayAndCfrAttribution) {
+  auto c=truth;c.delay_samples=23;
+  float h[]={1,0,0,1,-1,0,0,-1};uint16_t k[]={48,49,50,51};
+  nr_srs_note_pusch(s,0x1234,100,23,h,k,4);
+  nr_srs_attribute(s,&c,102,h,k,4); EXPECT_EQ(c.rnti,0x1234);
+  EXPECT_STREQ(c.attribution,"pusch_delay_cfr");
+  nr_srs_note_pusch(s,0x4567,100,23,h,k,4);
+  nr_srs_attribute(s,&c,102,h,k,4); EXPECT_EQ(c.rnti,0);
+}
+TEST_F(SrsBlind,HoppingSymbolsDoNotExportWrongReference) {
+  generate();auto next=truth;next.n_symbols=1;next.start_symbol=13;next.group=5;
+  for(int a=0;a<4;a++) ASSERT_TRUE(srs_test_generate(&g,&next,iq.data()+a*14*512*2));
+  auto c=truth;EXPECT_FALSE(nr_srs_group_cs_search(s,iq.data(),14*512,&c,nullptr));
+  c=truth;c.n_symbols=1;ASSERT_TRUE(nr_srs_group_cs_search(s,iq.data(),14*512,&c,nullptr));EXPECT_EQ(c.group,17);
+  c=next;ASSERT_TRUE(nr_srs_group_cs_search(s,iq.data(),14*512,&c,nullptr));EXPECT_EQ(c.group,5);
+}
+TEST_F(SrsBlind,IdentityResetClearsAttributionAndTracks) {
+  auto c=truth;nr_srs_observe(s,&c,100);auto id=c.track_id;
+  nr_srs_note_trigger(s,0x1234,100,1);nr_srs_blind_reset(s);
+  nr_srs_attribute(s,&c,101,nullptr,nullptr,0);EXPECT_EQ(c.rnti,0);
+  nr_srs_observe(s,&c,101);EXPECT_NE(c.track_id,id);
 }

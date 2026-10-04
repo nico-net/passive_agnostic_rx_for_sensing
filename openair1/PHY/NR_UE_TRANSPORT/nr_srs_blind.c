@@ -30,7 +30,8 @@ void nr_srs_blind_destroy(nr_srs_blind_t *s) { if(s) {free(s->reference);free(s-
 bool nr_srs_valid_grid(const nr_srs_grid_t *g, int stride)
 {
   return g && g->fft_size>=128 && g->fft_size<=4096 && g->n_rb>0 && g->n_rb<=275
-      && g->n_rb*12<=g->fft_size && g->first_carrier_offset>=0 && g->first_carrier_offset<g->fft_size
+      && g->n_rb*12<=g->fft_size && g->first_carrier_offset>=g->fft_size/2
+      && g->first_carrier_offset-g->fft_size/2+g->n_rb*12<=g->fft_size-8
       && g->n_ant>=1 && g->n_ant<=8 && g->symbols_per_slot==14 && stride>=14*g->fft_size;
 }
 int nr_srs_comb_detect(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t mask,nr_srs_candidate_t out[NR_SRS_MAX_CANDIDATES])
@@ -111,11 +112,13 @@ static double score_sequence(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_s
   const int n=c->nb_rb*12/c->comb, N=s->grid.fft_size;
   double best=0;int delay=0;
   for(int a=0;a<s->grid.n_ant;a++) {
+    double weakest=1;int first_delay=0;
+    for(int l=0;l<c->n_symbols;l++) {
     double zr[1632],zi[1632],energy=0,dr=0,di=0;
     for(int k=0;k<n;k++) {
       int bin=(s->grid.first_carrier_offset+c->start_rb*12+c->comb_offset+k*c->comb)%N;
-      const int16_t *v=iq+2*(a*stride+c->start_symbol*N+bin);
-      c16_t r=s->reference[bin];
+      const int16_t *v=iq+2*(a*stride+(c->start_symbol+l)*N+bin);
+      c16_t r=s->reference[l*N+bin];
       zr[k]=(double)v[0]*r.r+(double)v[1]*r.i;
       zi[k]=(double)v[1]*r.r-(double)v[0]*r.i;
       energy+=zr[k]*zr[k]+zi[k]*zi[k];
@@ -127,7 +130,10 @@ static double score_sequence(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_s
       cr+=zr[k]*r+zi[k]*i;ci+=zi[k]*r-zr[k]*i;
     }
     double score=energy>0?(cr*cr+ci*ci)/(energy*n):0;
-    if(score>best) {best=score;delay=lrint(-slope*N/(2*M_PI*c->comb));}
+    if(score<weakest) weakest=score;
+    if(l==0) first_delay=lrint(-slope*N/(2*M_PI*c->comb));
+    }
+    if(weakest>best) {best=weakest;delay=first_delay;}
   }
   c->delay_samples=delay;
   return best;
@@ -187,4 +193,10 @@ void nr_srs_observe(nr_srs_blind_t *s,nr_srs_candidate_t *c,uint64_t slot)
   static const unsigned periods[]={1,2,4,5,8,10,16,20,32,40,64,80,160,320,640,1280,2560};
   if (t->count>=3) for(unsigned i=0;i<sizeof(periods)/sizeof(*periods);i++)
     if(t->gcd==periods[i]) { c->period=t->gcd; c->slot_offset=t->first%t->gcd; break; }
+}
+
+void nr_srs_blind_reset(nr_srs_blind_t *s)
+{
+  if(!s) return;
+  memset(s->tracks,0,sizeof(s->tracks));memset(s->ues,0,sizeof(s->ues));
 }

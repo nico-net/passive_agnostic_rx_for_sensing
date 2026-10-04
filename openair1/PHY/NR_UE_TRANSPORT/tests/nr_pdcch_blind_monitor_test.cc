@@ -140,6 +140,7 @@ struct GroundTruth {
   uint32_t ndi                = 0;
   uint32_t rv                 = 0;
   uint32_t harq_pid           = 0;
+  uint32_t srs_request        = 0;
 };
 
 /// Resolve one overridable field width the same way nr_pdcch_blind_monitor.c's blind_field_bits()
@@ -189,7 +190,7 @@ uint64_t PackPayload(const GroundTruth& gt, int riv_bits, const nr_pdcch_blind_e
   put(0, opts ? PickBits(opts->pdsch_to_harq_bits, 3) : 3);   // PDSCH-to-HARQ timing indicator
   put(gt.antenna_ports, opts ? PickBits(opts->antenna_ports_bits, 4) : 4); // antenna ports
   put(0, opts ? PickBits(opts->tci_bits, 0) : 0);             // TCI
-  put(0, opts ? PickBits(opts->srs_request_bits, 2) : 2);     // SRS request
+  put(gt.srs_request, opts ? PickBits(opts->srs_request_bits, 2) : 2); // SRS request
   put(0, opts ? PickBits(opts->cbg_bits, 0) : 0);             // CBGTI + CBGFI
   put(gt.dmrs_seq_init, 1);           // DMRS sequence initialization
   return p;
@@ -541,6 +542,7 @@ TEST_F(BlindPdcchTest, ExtractsTransportBlockFields) {
   gt.ndi                      = 1;
   gt.rv                       = 2;
   gt.harq_pid                 = 11;
+  gt.srs_request              = 2;
 
   const uint64_t packed = PackPayload(gt, riv_bits);
   auto llr = EncodeToLLR(packed, gt.rnti, dci_length, kAggregationLevel, /*snr_db=*/40.0, rng_);
@@ -554,6 +556,7 @@ TEST_F(BlindPdcchTest, ExtractsTransportBlockFields) {
   EXPECT_EQ(out.ndi, gt.ndi);
   EXPECT_EQ(out.rv, gt.rv);
   EXPECT_EQ(out.harq_pid, gt.harq_pid);
+  EXPECT_EQ(out.srs_request, gt.srs_request);
   EXPECT_EQ(out.tda_index, gt.time_domain_assignment);
   EXPECT_EQ(out.mapping_type, 0); // default TDRA index 1 is mapping type A
 }

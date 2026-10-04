@@ -1,3 +1,4 @@
+#include "nr_srs_passive.h"
 #include "nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
@@ -5912,6 +5913,8 @@ constdiag_done:;
           }
           pthread_mutex_unlock(&ul_length_lock);
         }
+        if (nr_srs_passive_enabled() && u->srs_request && nr_cfg_epoch_work_current())
+          nr_srs_passive_trigger(u->rnti,source_absolute_slot,u->srs_request);
         discovery_evidence("ul_admitted", "UL", cand_task[ti].frame, cand_task[ti].slot,
                             u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
         nr_pdcch_dci01_layout_observe(ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length,
@@ -6329,6 +6332,8 @@ constdiag_done:;
     }
     stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
                        out.rnti, nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti));
+    if (nr_srs_passive_enabled() && out.dci_format==NR_BLIND_DCI_FORMAT_1_1 && out.srs_request && nr_cfg_epoch_work_current())
+      nr_srs_passive_trigger(out.rnti,source_absolute_slot,out.srs_request);
     nr_pdcch_dci_length_note_seen(cand_task[ti].dci_length);
     if (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P
         && nr_cfg_prnti_si_credible(out.short_messages_ind, out.short_messages,

@@ -24,6 +24,7 @@ typedef struct nr_srs_blind nr_srs_blind_t;
 /* Lifecycle only: allocate all scratch before producer threads start. */
 nr_srs_blind_t *nr_srs_blind_create(const nr_srs_grid_t *grid);
 void nr_srs_blind_destroy(nr_srs_blind_t *s);
+void nr_srs_blind_reset(nr_srs_blind_t *s);
 /* Grids are antenna-major, interleaved int16 IQ; stride is complex samples.
  * ul_mask limits examination to the last six symbols actually available for UL. */
 int nr_srs_comb_detect(const nr_srs_grid_t *g, const int16_t *iq, int stride, uint16_t ul_mask,

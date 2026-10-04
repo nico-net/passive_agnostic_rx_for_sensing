@@ -224,6 +224,7 @@ typedef struct {
   /// a REJECTED 1_0 payload with identifier=0 is a format-0_0 UL grant, and re-reading it costs no
   /// second polar decode. Zero on the format-1_1 paths, which have their own raw result struct.
   nr_dci_bits_t    payload;
+  uint8_t srs_request; ///< raw DCI 1_1 SRS request; zero for fallback formats
 } nr_pdcch_blind_result_t;
 
 /// Deployment facts a blind receiver cannot read off the air but CAN read off the gNB's own

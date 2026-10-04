@@ -60,6 +60,11 @@ int nr_srs_estimate(nr_srs_blind_t *s, const int16_t *iq, int stride, nr_srs_can
         double t=fmax(0,fmin(1,(k-c->comb_offset-8*j)/8.0));
         re=(1-t)*ls[l*N+b0].r+t*ls[l*N+b1].r;
         im=(1-t)*ls[l*N+b0].i+t*ls[l*N+b1].i;
+      } else if(k<c->comb_offset) {
+        /* The gNB filters start at the first pilot. Extend that estimate to
+         * the leading allocation edge so every exported RE has a CFR. */
+        int first=(s->grid.first_carrier_offset+c->start_rb*12+c->comb_offset)%N;
+        re=ls[l*N+first].r;im=ls[l*N+first].i;
       } else {
         int centered=s->grid.first_carrier_offset-N/2+abs;
         re=interpolated[l*N+centered].r;im=interpolated[l*N+centered].i;

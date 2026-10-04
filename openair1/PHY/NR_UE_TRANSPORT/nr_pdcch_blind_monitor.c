@@ -4219,7 +4219,7 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   (void)read_field(payload, &pos, f.pdsch_to_harq); // PDSCH-to-HARQ feedback timing indicator
   const uint32_t antenna_ports = read_field(payload, &pos, f.ant_ports);
   (void)read_field(payload, &pos, f.tci);          // TCI
-  (void)read_field(payload, &pos, f.srs);          // SRS request
+  out->srs_request = read_field(payload, &pos, f.srs); // SRS request
   (void)read_field(payload, &pos, f.cbg);          // CBGTI + CBGFI
   const uint32_t dmrs_seq_init = read_field(payload, &pos, 1);
 
