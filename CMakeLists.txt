@@ -2521,6 +2521,18 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_isac_adapter)
   add_test(NAME test_nr_isac_adapter COMMAND ./test_nr_isac_adapter)
 
+  add_executable(test_nr_srs_blind
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/dmrs_nr.c
+    ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_srs.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_blind.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_srs_blind_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_srs_blind_fixture.c
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/ul_ref_seq_nr.c)
+  target_link_libraries(test_nr_srs_blind PRIVATE nr_phy_common PHY_COMMON nr_common nr_fapi_p5 asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL GTest::gtest_main)
+  target_include_directories(test_nr_srs_blind PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  add_dependencies(tests test_nr_srs_blind)
+  add_test(NAME test_nr_srs_blind COMMAND test_nr_srs_blind)
+
   add_executable(test_nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc)
   target_link_libraries(test_nr_sense_api PRIVATE nr_sense_api GTest::gtest GTest::gtest_main)
   if(ZMQ_LIB)
