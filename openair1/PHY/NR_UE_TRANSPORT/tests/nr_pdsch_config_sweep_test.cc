@@ -3561,6 +3561,15 @@ TEST_F(PdschFieldBook, ProbationFailureLeavesNoStaleFieldState)
  * computation-identical on grants that do not exercise its field (prob 1 - e): then it passes exactly as the truth, else it fails.
  * `cb0_always` (-1 = none) passes every CB0 and fails every TB (a hypothesis CB0 cannot refute). Everything else fails both. */
 struct Cb0Model { int truth, twin = -1, cb0_always = -1; double p, q, e = 0; };
+/* Test helper: a CB0 grant with no scheduled full-TB outcome (no premise check, no admissible-TB credit). */
+static int fcb(nr_pdsch_config_sweep_state_t *s, const int *idx, int n, const bool *pass, bool admissible, uint8_t dec = NR_TD_DEC_CPU,
+               int tb_hyp = -1, bool tb_pass = false, uint8_t tb_dec = NR_TD_DEC_CPU)
+{
+  nr_td_cb0_grant_t g{};
+  g.idx = idx; g.pass = pass; g.n = n; g.cb0_decoder = dec; g.tb_hyp = tb_hyp; g.tb_pass = tb_pass; g.tb_decoder = tb_dec;
+  g.inadmissible = admissible ? 0u : NR_TD_CB0_X_NOT_NEW_RV0;
+  return nr_pdsch_config_sweep_feed_cb0_grant(s, &g);
+}
 static int cb0_grant(nr_pdsch_config_sweep_state_t *s, const Cb0Model &m, std::mt19937_64 &rng, bool feed_cb0 = true)
 {
   std::uniform_real_distribution<double> ud(0, 1);
@@ -3578,7 +3587,7 @@ static int cb0_grant(nr_pdsch_config_sweep_state_t *s, const Cb0Model &m, std::m
       if (nr_pdsch_config_sweep_is_active(s, k)) { idx.push_back(k); pass.push_back(cb(k)); }
     bool pb[NR_PDSCH_SWEEP_MAX_HYP];
     for (size_t k = 0; k < pass.size(); k++) pb[k] = pass[k];
-    w = nr_pdsch_config_sweep_feed_cb0(s, idx.data(), (int)idx.size(), pb, true);
+    w = fcb(s, idx.data(), (int)idx.size(), pb, true, NR_TD_DEC_CPU, i, tb(i), NR_TD_DEC_CPU); /* the scheduled hypothesis is in the batch */
   }
   return w;
 }
@@ -3586,11 +3595,12 @@ static std::unique_ptr<nr_pdsch_config_sweep_state_t> cb0_state(int keep_n)
 {
   auto s = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(s.get(), 4);
-  if (keep_n > 0 && keep_n < s->n_hyp) { /* smaller catalogue: keep the first keep_n entries (fast Monte Carlo) */
-    struct A { int n; } a{keep_n};
+  if (keep_n > 0 && keep_n < s->n_hyp) { /* smaller catalogue: keep_n entries spread over the catalogue (varied geometry: several trap families) */
+    struct A { int n, stride; } a{keep_n, s->n_hyp / keep_n};
     static int counter;
     counter = 0;
-    nr_pdsch_config_sweep_prune_keep(s.get(), [](const nr_pdsch_cfg_hypothesis_t *, const void *arg) { return counter++ < ((const A *)arg)->n; }, &a);
+    nr_pdsch_config_sweep_prune_keep(s.get(), [](const nr_pdsch_cfg_hypothesis_t *, const void *arg) {
+      const A *x = (const A *)arg; const int c = counter++; return c % x->stride == 0 && c / x->stride < x->n; }, &a);
   }
   s->cb0_elim = true;
   return s;
@@ -3616,14 +3626,14 @@ TEST(PdschSweepCb0, PassAndFailBothCount)
   auto s = cb0_state(64);
   const int idx[5] = {3, 4, 5, 4, 999}; /* duplicate 4 and out-of-range 999 credit nothing extra */
   const bool pass[5] = {true, false, true, true, true};
-  nr_pdsch_config_sweep_feed_cb0(s.get(), idx, 5, pass, true);
+  fcb(s.get(), idx, 5, pass, true);
   EXPECT_EQ(s->cb0_trials[3], 1u); EXPECT_EQ(s->cb0_pass[3], 1u);
   EXPECT_EQ(s->cb0_trials[4], 1u); EXPECT_EQ(s->cb0_pass[4], 0u); /* a FAIL counts as a trial */
   EXPECT_EQ(s->cb0_trials[5], 1u); EXPECT_EQ(s->cb0_pass[5], 1u); /* a PASS counts too (symmetric channel) */
   /* never mixed into the full-TB evidence */
   for (int i = 0; i < s->n_hyp; i++) { ASSERT_EQ(s->trials[i], 0u); ASSERT_EQ(s->ok[i], 0u); }
   /* inadmissible (different decoder / rank > 1 under K38 / stale samples): nothing */
-  nr_pdsch_config_sweep_feed_cb0(s.get(), idx, 3, pass, false);
+  fcb(s.get(), idx, 3, pass, false);
   EXPECT_EQ(s->cb0_trials[3], 1u);
   /* dormant: nothing */
   auto s2 = cb0_state(64);
@@ -3632,12 +3642,12 @@ TEST(PdschSweepCb0, PassAndFailBothCount)
   for (int i = 0; i < s2->n_hyp && d < 0; i++) if (!nr_pdsch_config_sweep_is_active(s2.get(), i)) d = i;
   ASSERT_GE(d, 0);
   const bool f = false;
-  nr_pdsch_config_sweep_feed_cb0(s2.get(), &d, 1, &f, true);
+  fcb(s2.get(), &d, 1, &f, true);
   EXPECT_EQ(s2->cb0_trials[d], 0u);
   /* flag off: nothing */
   auto s3 = cb0_state(64);
   s3->cb0_elim = false;
-  nr_pdsch_config_sweep_feed_cb0(s3.get(), idx, 3, pass, true);
+  fcb(s3.get(), idx, 3, pass, true);
   EXPECT_EQ(s3->cb0_trials[3], 0u);
 }
 TEST(PdschSweepCb0, EliminationNeverEliminatesTruth)
@@ -3684,7 +3694,7 @@ TEST(PdschSweepCb0, EliminatedAreDormantAndFailOpenRestores)
   EXPECT_EQ(s->trials[e], tr);
   EXPECT_EQ(s->cb0_trials[e], c0); /* an eliminated hypothesis accumulates nothing */
   /* fail-open restores every eliminated hypothesis and discards the CB0 evidence */
-  auto f = cb0_state(64);
+  auto f = cb0_state(0); /* full catalogue: the first elimination comes long before the separation */
   std::mt19937_64 r2(3);
   for (int k = 0; k < 20000 && nr_pdsch_config_sweep_n_active(f.get()) == f->n_hyp; k++) cb0_grant(f.get(), m, r2);
   ASSERT_LT(nr_pdsch_config_sweep_n_active(f.get()), f->n_hyp);
@@ -3694,12 +3704,17 @@ TEST(PdschSweepCb0, EliminatedAreDormantAndFailOpenRestores)
     ASSERT_FALSE(nr_pdsch_config_sweep_is_eliminated(f.get(), i));
     ASSERT_EQ(f->cb0_trials[i], 0u);
   }
-  /* while fail-open, the channel is off (TB-only safe mode) */
+  /* fail-open RE-ARMS the channel: a fresh CB0 epoch over the full catalogue, and new eliminations are honoured while fail_open */
   const int i0 = 1; const bool no = false;
-  nr_pdsch_config_sweep_feed_cb0(f.get(), &i0, 1, &no, true);
-  EXPECT_EQ(f->cb0_trials[1], 0u);
+  fcb(f.get(), &i0, 1, &no, true);
+  EXPECT_EQ(f->cb0_trials[1], 1u);
+  for (int k = 0; k < 20000 && nr_pdsch_config_sweep_n_active(f.get()) == f->n_hyp && nr_pdsch_config_sweep_winner(f.get()) < 0; k++)
+    cb0_grant(f.get(), m, r2);
+  EXPECT_LT(nr_pdsch_config_sweep_n_active(f.get()), f->n_hyp);
+  for (int i = 0; i < f->n_hyp; i++)
+    if (nr_pdsch_config_sweep_is_eliminated(f.get(), i)) { ASSERT_FALSE(nr_pdsch_config_sweep_is_active(f.get(), i)); }
+  EXPECT_FALSE(nr_pdsch_config_sweep_is_eliminated(f.get(), m.truth));
   nr_pdsch_config_sweep_set_fail_open(f.get(), false);
-  EXPECT_EQ(nr_pdsch_config_sweep_n_active(f.get()), f->n_hyp); /* the cleared mask stays cleared */
 }
 TEST(PdschSweepCb0, LeaderStillNeedsFullTbSeparation)
 {
@@ -3711,7 +3726,12 @@ TEST(PdschSweepCb0, LeaderStillNeedsFullTbSeparation)
   for (int t = 0; t < 30000; t++) cb0_grant(s.get(), m, rng);
   EXPECT_EQ(nr_pdsch_config_sweep_winner(s.get()), -1);
   EXPECT_TRUE(nr_pdsch_config_sweep_is_active(s.get(), 21));
-  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), 2); /* everything else eliminated */
+  /* everything outside the leader's trap family (same S, L, mapping, mask: exempt) is eliminated */
+  for (int i = 0; i < s->n_hyp; i++) {
+    const auto &a = s->hyp[i], &b = s->hyp[20];
+    const bool fam = a.tda_start == b.tda_start && a.tda_length == b.tda_length && a.mapping_type == b.mapping_type && a.dmrs_mask == b.dmrs_mask;
+    if (i != 20 && i != 21 && !fam) EXPECT_TRUE(nr_pdsch_config_sweep_is_eliminated(s.get(), i)) << i;
+  }
   /* (2) a hypothesis that passes every CB0 but never a TB is never elected (CB0 never elects) and never eliminated */
   auto c = cb0_state(64);
   const Cb0Model mc{30, -1, 31, 0.4, 0.6, 0.0};
@@ -3773,44 +3793,261 @@ TEST(PdschSweepCb0, EliminationUsesTheCb0UpperBound)
   auto s = cb0_state(64);
   const int L = 3, h = 4, low = 5;
   s->trials[L] = 1000; s->ok[L] = 600;
+  s->tba_trials[L] = 1000; s->tba_ok[L] = 600; /* the elimination bound uses the ADMISSIBLE-TB counters */
   s->cb0_trials[h] = 9; s->cb0_pass[h] = 3; /* rate 0.33 below LB_tb(L) ~0.47 but UB_cb0 far above */
   s->cb0_trials[low] = 1999; s->cb0_pass[low] = 10;
   const int idx[2] = {h, low};
   const bool pass[2] = {false, false};
-  nr_pdsch_config_sweep_feed_cb0(s.get(), idx, 2, pass, true);
+  fcb(s.get(), idx, 2, pass, true);
   EXPECT_FALSE(nr_pdsch_config_sweep_is_eliminated(s.get(), h));
   EXPECT_TRUE(nr_pdsch_config_sweep_is_eliminated(s.get(), low));
   EXPECT_FALSE(nr_pdsch_config_sweep_is_eliminated(s.get(), L)); /* the leader is never eliminated */
   EXPECT_EQ(nr_pdsch_config_sweep_winner(s.get()), -1); /* L still needs full-TB separation from h and the 0-trial others */
 }
-TEST(PdschSweepCb0, DecoderPinnedPerContext)
+TEST(PdschSweepCb0, DecoderDominancePerBatch)
 {
-  /* CRC evidence is not exchangeable between the CUDA and CPU LDPC decoders (~1 dB apart, MEASURED DGX bit-exact harness): the first
-   * admissible CB0 batch pins the context's CB0 decoder; a batch from another decoder (e.g. a circuit-breaker fallback) credits nothing.
-   * The pin is CB0 evidence and is cleared with it (prune, fail-open). */
+  /* CRC evidence is not exchangeable between LDPC decoders: a batch is admissible iff its CB0 decoder is at least as sensitive as every
+   * full-TB decoder of the epoch (CPU < CUDA). A CUDA batch always dominates; a CPU batch only while every TB was CPU-decoded. */
+  static_assert(NR_TD_DEC_CPU == 1 && NR_TD_DEC_CUDA == 2 && NR_TD_DEC_UNKNOWN == 0, "codes equal G1's NRLDPC_DECODER_*");
   auto s = cb0_state(64);
   const int idx[2] = {3, 4};
   const bool pass[2] = {true, false};
-  nr_pdsch_config_sweep_feed_cb0_dec(s.get(), idx, 2, pass, true, NR_TD_DEC_CUDA);
+  fcb(s.get(), idx, 2, pass, true, NR_TD_DEC_CPU, 3, true, NR_TD_DEC_CPU); /* CPU TB, CPU CB0: admissible */
   EXPECT_EQ(s->cb0_trials[3], 1u);
-  nr_pdsch_config_sweep_feed_cb0_dec(s.get(), idx, 2, pass, true, NR_TD_DEC_CPU); /* switch mid-context: inadmissible */
+  fcb(s.get(), idx, 2, pass, true, NR_TD_DEC_CUDA, 3, true, NR_TD_DEC_CPU); /* CUDA CB0 dominates a CPU TB: admissible (no pin) */
+  EXPECT_EQ(s->cb0_trials[3], 2u);
+  fcb(s.get(), idx, 2, pass, true, NR_TD_DEC_CPU, 3, true, NR_TD_DEC_CPU); /* back to CPU (circuit-breaker fallback): still admissible */
+  EXPECT_EQ(s->cb0_trials[3], 3u);
+  /* a CUDA-decoded TB enters the epoch: the credited CPU batches no longer dominate -> new CB0 epoch; CPU batches now inadmissible */
+  nr_pdsch_config_sweep_note_tb_decoder(s.get(), NR_TD_DEC_CUDA);
+  EXPECT_EQ(s->cb0_trials[3], 0u);
+  fcb(s.get(), idx, 2, pass, true, NR_TD_DEC_CPU, 3, true, NR_TD_DEC_CPU);
+  EXPECT_EQ(s->cb0_trials[3], 0u);
+  fcb(s.get(), idx, 2, pass, true, NR_TD_DEC_CUDA, 3, true, NR_TD_DEC_CUDA);
   EXPECT_EQ(s->cb0_trials[3], 1u);
-  nr_pdsch_config_sweep_feed_cb0_dec(s.get(), idx, 2, pass, true, NR_TD_DEC_CUDA);
-  EXPECT_EQ(s->cb0_trials[3], 2u);
-  nr_pdsch_config_sweep_feed_cb0(s.get(), idx, 2, pass, true); /* the plain form is the CPU decoder */
-  EXPECT_EQ(s->cb0_trials[3], 2u);
-  /* an inadmissible batch does not pin */
+  /* a CUDA-only epoch is not reset by a later CPU TB (CUDA still dominates) */
+  nr_pdsch_config_sweep_note_tb_decoder(s.get(), NR_TD_DEC_CPU);
+  EXPECT_EQ(s->cb0_trials[3], 1u);
+  /* unknown decoder: never a CB0 decoder; as a TB decoder it blocks every batch */
   auto u = cb0_state(64);
-  nr_pdsch_config_sweep_feed_cb0_dec(u.get(), idx, 2, pass, false, NR_TD_DEC_CUDA);
-  nr_pdsch_config_sweep_feed_cb0(u.get(), idx, 2, pass, true);
-  EXPECT_EQ(u->cb0_trials[3], 1u);
-  /* fail-open clears the pin with the evidence */
-  nr_pdsch_config_sweep_set_fail_open(s.get(), true);
-  nr_pdsch_config_sweep_set_fail_open(s.get(), false);
-  nr_pdsch_config_sweep_feed_cb0(s.get(), idx, 2, pass, true);
-  EXPECT_EQ(s->cb0_trials[3], 1u);
-  /* a destructive prune too */
-  ASSERT_GT(nr_pdsch_config_sweep_prune_keep(s.get(), keep_even, nullptr), 0);
-  nr_pdsch_config_sweep_feed_cb0_dec(s.get(), idx, 2, pass, true, NR_TD_DEC_CUDA);
-  EXPECT_EQ(s->cb0_trials[3], 1u);
+  fcb(u.get(), idx, 2, pass, true, NR_TD_DEC_UNKNOWN);
+  EXPECT_EQ(u->cb0_trials[3], 0u);
+  nr_pdsch_config_sweep_note_tb_decoder(u.get(), NR_TD_DEC_UNKNOWN);
+  fcb(u.get(), idx, 2, pass, true, NR_TD_DEC_CUDA);
+  EXPECT_EQ(u->cb0_trials[3], 0u);
+  /* a prune (evidence wipe) clears the TB decoder set */
+  auto p = cb0_state(64);
+  nr_pdsch_config_sweep_note_tb_decoder(p.get(), NR_TD_DEC_CUDA);
+  ASSERT_GT(nr_pdsch_config_sweep_prune_keep(p.get(), keep_even, nullptr), 0);
+  fcb(p.get(), idx, 2, pass, true, NR_TD_DEC_CPU);
+  EXPECT_EQ(p->cb0_trials[3], 1u);
+}
+TEST(PdschSweepCb0, PremiseViolationDisablesTheContext)
+{
+  nr_pdsch_config_sweep_cb0_stats_reset();
+  auto s = cb0_state(0);
+  const Cb0Model m{10, -1, -1, 0.5, 0.6, 0};
+  std::mt19937_64 rng(3);
+  for (int t = 0; t < 20000 && nr_pdsch_config_sweep_n_active(s.get()) == s->n_hyp; t++) cb0_grant(s.get(), m, rng);
+  ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  ASSERT_LT(nr_pdsch_config_sweep_winner(s.get()), 0);
+  /* consistent grant (TB FAIL, CB0 FAIL): fine */
+  int idx[1] = {10};
+  bool f[1] = {false}, t1[1] = {true};
+  fcb(s.get(), idx, 1, f, true, NR_TD_DEC_CPU, 10, false);
+  EXPECT_FALSE(s->cb0_disabled);
+  /* the scheduled hypothesis missing from the batch: the grant is rejected (contract), nothing credited */
+  const uint16_t c3 = s->cb0_trials[3];
+  int other[1] = {3};
+  fcb(s.get(), other, 1, t1, true, NR_TD_DEC_CPU, 10, true);
+  EXPECT_EQ(s->cb0_trials[3], c3);
+  uint64_t alarms = 0, rej[NR_TD_CB0_X_COUNT];
+  nr_pdsch_config_sweep_cb0_stats(&alarms, rej);
+  EXPECT_EQ(rej[12], 1u); /* NR_TD_CB0_X_CONTRACT */
+  EXPECT_EQ(alarms, 0u);
+  /* an inadmissible grant (soft-combined retransmission) with TB PASS / CB0 FAIL is not a violation: dropped whole */
+  fcb(s.get(), idx, 1, f, false, NR_TD_DEC_CPU, 10, true);
+  EXPECT_FALSE(s->cb0_disabled);
+  /* TB PASS and CB0 FAIL on the same (hypothesis, grant): alarm, channel off, eliminations restored */
+  fcb(s.get(), idx, 1, f, true, NR_TD_DEC_CPU, 10, true);
+  nr_pdsch_config_sweep_cb0_stats(&alarms, rej);
+  EXPECT_EQ(alarms, 1u);
+  EXPECT_TRUE(s->cb0_disabled);
+  EXPECT_EQ(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  for (int i = 0; i < s->n_hyp; i++) ASSERT_EQ(s->cb0_trials[i], 0u);
+  for (int t = 0; t < 2000; t++) cb0_grant(s.get(), m, rng);
+  for (int i = 0; i < s->n_hyp; i++) ASSERT_EQ(s->cb0_trials[i], 0u); /* sticky */
+  nr_pdsch_config_sweep_rebuild(s.get(), 4, 0, nullptr);
+  EXPECT_TRUE(s->cb0_disabled); /* survives a rebuild (configuration-like) */
+}
+TEST(PdschSweepCb0, ElimIsEngineOnlyAndNeverTriggersFailOpen)
+{
+  auto s = cb0_state(64);
+  EXPECT_EQ(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_ELIM, keep_even, nullptr), -1);
+  const Cb0Model m{10, -1, -1, 0.5, 0.6, 0};
+  std::mt19937_64 rng(3);
+  for (int t = 0; t < 20000 && nr_pdsch_config_sweep_n_active(s.get()) == s->n_hyp; t++) cb0_grant(s.get(), m, rng);
+  ASSERT_LT(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  EXPECT_EQ(nr_pdsch_config_sweep_clear_dormant(s.get(), NR_TD_DORMANT_ELIM), 0);
+  EXPECT_LT(nr_pdsch_config_sweep_n_active(s.get()), s->n_hyp);
+  /* ELIM-only dormancy: never due, however long since the last pass */
+  s->since_pass = 1000000;
+  EXPECT_FALSE(nr_pdsch_config_sweep_fail_open_due(s.get(), 1e-3, 0.05));
+  /* with a PRIOR cause too: due, and `need` counts the hypotheses active under every cause but ELIM */
+  static nr_pdsch_cfg_hypothesis_t tr;
+  tr = s->hyp[10];
+  auto keep_tl = [](const nr_pdsch_cfg_hypothesis_t *h, const void *) { return h->tda_length == tr.tda_length; };
+  ASSERT_GT(nr_pdsch_config_sweep_set_dormant(s.get(), NR_TD_DORMANT_PRIOR, keep_tl, nullptr), 0);
+  int n_cls = 0;
+  for (int i = 0; i < s->n_hyp; i++) n_cls += keep_tl(&s->hyp[i], nullptr);
+  const uint32_t need = (uint32_t)ceil(n_cls * log(1e3) / 0.05);
+  s->since_pass = need - 1;
+  EXPECT_FALSE(nr_pdsch_config_sweep_fail_open_due(s.get(), 1e-3, 0.05));
+  s->since_pass = need;
+  EXPECT_TRUE(nr_pdsch_config_sweep_fail_open_due(s.get(), 1e-3, 0.05));
+}
+TEST(PdschSweepCb0, TrapFamilyOfTheLeaderIsNeverEliminated)
+{
+  /* leader L with a strong admissible-TB bound; its k0 sibling / MCS twin (same S, L, mapping, mask) has a CB0 rate far below: exempt.
+   * A hypothesis of another geometry with the same CB0 counts goes. */
+  auto s = cb0_state(0);
+  int L = 0, fam = -1, other = -1;
+  for (int i = 1; i < s->n_hyp && (fam < 0 || other < 0); i++) {
+    const auto &a = s->hyp[i], &b = s->hyp[L];
+    const bool same = a.tda_start == b.tda_start && a.tda_length == b.tda_length && a.mapping_type == b.mapping_type && a.dmrs_mask == b.dmrs_mask;
+    if (same && fam < 0) fam = i;
+    if (!same && other < 0) other = i;
+  }
+  ASSERT_GE(fam, 0); ASSERT_GE(other, 0);
+  s->trials[L] = s->tba_trials[L] = 1000; s->ok[L] = s->tba_ok[L] = 600;
+  s->cb0_trials[fam] = s->cb0_trials[other] = 1999; s->cb0_pass[fam] = s->cb0_pass[other] = 10;
+  const int idx[2] = {fam, other};
+  const bool pass[2] = {false, false};
+  fcb(s.get(), idx, 2, pass, true);
+  EXPECT_FALSE(nr_pdsch_config_sweep_is_eliminated(s.get(), fam));
+  EXPECT_TRUE(nr_pdsch_config_sweep_is_eliminated(s.get(), other));
+}
+TEST(PdschSweepCb0, Saturation)
+{
+  auto s = cb0_state(64);
+  s->cb0_trials[3] = UINT16_MAX; s->cb0_pass[3] = 100;
+  s->tba_trials[5] = UINT16_MAX; s->tba_ok[5] = 7;
+  const int idx[2] = {3, 5};
+  const bool pass[2] = {true, true};
+  fcb(s.get(), idx, 2, pass, true, NR_TD_DEC_CPU, 5, true);
+  EXPECT_EQ(s->cb0_trials[3], UINT16_MAX);
+  EXPECT_EQ(s->cb0_pass[3], 100u); /* stopped, not wrapped */
+  EXPECT_EQ(s->tba_trials[5], UINT16_MAX);
+  EXPECT_EQ(s->tba_ok[5], 7u);
+  EXPECT_EQ(s->cb0_trials[5], 1u);
+}
+/* ---- context level (ticket API) ---- */
+struct PdschCb0Ctx : testing::Test {
+  void SetUp() override { nr_pdsch_config_sweep_reset_all(); nr_pdsch_config_sweep_prior_reset(); nr_pdsch_config_sweep_cb0_elim_env_set(1);
+                          nr_pdsch_config_sweep_k0_legacy_set(0); }
+  void TearDown() override { nr_pdsch_config_sweep_cb0_elim_env_set(-1); nr_pdsch_config_sweep_k0_legacy_set(-1); nr_pdsch_config_sweep_reset_all(); }
+  static nr_pdsch_config_sweep_state_t snap(const nr_pdsch_sweep_ticket_t &t)
+  {
+    static nr_pdsch_config_sweep_state_t st;
+    EXPECT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+    return st;
+  }
+  static bool feed_all(const nr_pdsch_sweep_ticket_t &t, bool tb_pass, bool cb0_pass_all)
+  {
+    static nr_pdsch_config_sweep_state_t st;
+    if (!nr_pdsch_config_sweep_snapshot(&t, &st)) return false;
+    std::vector<int> idx;
+    for (int i = 0; i < st.n_hyp; i++) if (nr_pdsch_config_sweep_is_active(&st, i)) idx.push_back(i);
+    std::unique_ptr<bool[]> p(new bool[idx.size()]);
+    for (size_t k = 0; k < idx.size(); k++) p[k] = cb0_pass_all || idx[k] == t.hypothesis ? tb_pass || cb0_pass_all : false;
+    nr_td_cb0_grant_t g{};
+    g.idx = idx.data(); g.pass = p.get(); g.n = (int)idx.size(); g.cb0_decoder = NR_TD_DEC_CPU; g.tb_hyp = t.hypothesis; g.tb_pass = tb_pass;
+    g.tb_decoder = NR_TD_DEC_CPU;
+    return nr_pdsch_config_sweep_feedback_cb0(&t, &g);
+  }
+};
+TEST_F(PdschCb0Ctx, NewContextTakesTheFlagAndStartsClean)
+{
+  auto t = recovery_select();
+  auto st = snap(t);
+  EXPECT_TRUE(st.cb0_elim);
+  EXPECT_FALSE(st.cb0_disabled || st.cb0_no_family_exempt || st.cb0_no_premise_check);
+  nr_pdsch_config_sweep_cb0_elim_env_set(0);
+  auto o = recovery_select(801, 0x4602);
+  EXPECT_FALSE(snap(o).cb0_elim);
+  EXPECT_FALSE(feed_all(o, false, false) && snap(o).cb0_trials[0] != 0); /* flag off: nothing credited */
+}
+TEST_F(PdschCb0Ctx, TicketFeedCreditsAndStaleTicketIsIgnored)
+{
+  auto t = recovery_select();
+  nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+  ASSERT_TRUE(feed_all(t, false, false));
+  auto st = snap(t);
+  for (int i = 0; i < st.n_hyp; i++) EXPECT_EQ(st.cb0_trials[i], 1u);
+  EXPECT_EQ(st.tba_trials[t.hypothesis], 1u);
+  nr_pdsch_sweep_ticket_t stale = t;
+  stale.generation += 1000;
+  EXPECT_FALSE(feed_all(stale, false, false));
+}
+TEST_F(PdschCb0Ctx, ApplyCertAndReopenClearTheCb0Epoch)
+{
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  nr_pdsch_config_sweep_cb0_elim_env_set(1);
+  nr_pdsch_config_sweep_reset_all();
+  t = k39_fresh();
+  ASSERT_TRUE(snap(t).cb0_elim);
+  for (int i = 0; i < 5; i++) { t = k39_fresh(); nr_pdsch_config_sweep_feedback(&t, false, nullptr); ASSERT_TRUE(feed_all(t, false, false)); }
+  t = k39_fresh();
+  EXPECT_EQ(snap(t).cb0_trials[0], 5u);
+  ASSERT_GT(nr_pdsch_config_sweep_certify_k0(&t, 0x2), 0); /* destructive prune (apply_cert): a new evidence epoch */
+  t = k39_fresh();
+  auto st = snap(t);
+  for (int i = 0; i < st.n_hyp; i++) { EXPECT_EQ(st.cb0_trials[i], 0u); EXPECT_EQ(st.tba_trials[i], 0u); }
+  /* reopen: settle, then sustained loss */
+  nr_pdsch_config_sweep_reset_all();
+  const auto old = recovery_settle(0);
+  ASSERT_TRUE(old.settled);
+  for (unsigned f = 0; f < 5000 && nr_pdsch_config_sweep_is_settled(800, 0x4601, 0, 0); ++f) {
+    auto x = recovery_select();
+    nr_pdsch_config_sweep_feedback(&x, false, nullptr);
+  }
+  ASSERT_FALSE(nr_pdsch_config_sweep_is_settled(800, 0x4601, 0, 0));
+  auto fresh = recovery_select();
+  ASSERT_TRUE(feed_all(fresh, false, false));
+  st = snap(fresh);
+  for (int i = 0; i < st.n_hyp; i++) EXPECT_LE(st.cb0_trials[i], 1u); /* only the post-reopen grant */
+  EXPECT_TRUE(st.cb0_elim);
+}
+TEST_F(PdschCb0Ctx, RestoredEntriesStartWithZeroCb0Evidence)
+{
+  /* K42 restore path: an observation no alive entry admits re-appends catalogue entries; they carry no CB0 / admissible-TB evidence */
+  uint16_t mask;
+  auto t = k39_open(&mask);
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, mask, 13, 0), 6);
+  t = k39_fresh();
+  for (int i = 0; i < 3; i++) { t = k39_fresh(); nr_pdsch_config_sweep_feedback(&t, false, nullptr); feed_all(t, false, false); }
+  t = k39_fresh();
+  const int before = snap(t).n_hyp;
+  nr_pdsch_config_sweep_observe(&t, mask, 10, 0); /* another duration of the same mask: restore appends */
+  t = k39_fresh();
+  auto st = snap(t);
+  ASSERT_GE(st.n_hyp, before);
+  for (int i = before; i < st.n_hyp; i++) { EXPECT_EQ(st.cb0_trials[i], 0u); EXPECT_EQ(st.tba_trials[i], 0u); EXPECT_FALSE(nr_pdsch_config_sweep_is_eliminated(&st, i)); }
+}
+TEST(PdschSweepCb0, LowerBoundUsesAdmissibleTbOnly)
+{
+  /* The leader's full-TB counters may include soft-combined retransmissions (passes CB0 cannot reproduce): lo comes from the admissible-
+   * grant TB counters only. Strong full-TB evidence with no admissible-TB trial eliminates nothing. */
+  auto s = cb0_state(64);
+  const int L = 3, low = 40;
+  s->trials[L] = 1000; s->ok[L] = 900;
+  s->cb0_trials[low] = 1999; s->cb0_pass[low] = 10;
+  const int idx[1] = {low};
+  const bool pass[1] = {false};
+  fcb(s.get(), idx, 1, pass, true);
+  EXPECT_FALSE(nr_pdsch_config_sweep_is_eliminated(s.get(), low));
+  s->tba_trials[L] = 1000; s->tba_ok[L] = 900;
+  fcb(s.get(), idx, 1, pass, true);
+  EXPECT_TRUE(nr_pdsch_config_sweep_is_eliminated(s.get(), low));
 }

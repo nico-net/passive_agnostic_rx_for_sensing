@@ -1073,6 +1073,16 @@ extern "C" int ldpc_cb0_decode(const ldpc_cb0_item_t* items, int n, const int8_t
   return ldpc_cb0_collect(t, out, bits, bits_stride);
 }
 
+extern "C" int ldpc_cb0_healthy(void)
+{
+  if (ldpc_cb0_init() != 0)
+    return 0;
+  pthread_mutex_lock(&g_state_mu);
+  const int ok = !g_sticky && !g_perm_off && breaker_state_locked() == 0;
+  pthread_mutex_unlock(&g_state_mu);
+  return ok;
+}
+
 extern "C" void ldpc_cb0_get_counters(ldpc_cb0_counters_t* c)
 {
   c->submits = CLD(c_submits);

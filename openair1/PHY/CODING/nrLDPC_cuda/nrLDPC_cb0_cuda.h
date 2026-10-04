@@ -104,6 +104,8 @@ int ldpc_cb0_collect(ldpc_cb0_ticket_t *t, ldpc_cb0_result_t *out, uint8_t *bits
 int ldpc_cb0_decode(const ldpc_cb0_item_t *items, int n, const int8_t *llr, size_t llr_stride, ldpc_cb0_result_t *out,
                     uint8_t *bits, size_t bits_stride);
 
+/* 1 = usable now: device present, entry initialised, CB0 breaker closed (not bypassed, no sticky error). Cheap. */
+int ldpc_cb0_healthy(void);
 /* 1 = UNIFIED, 2 = EXPLICIT, 0 = not initialised / disabled. */
 int ldpc_cb0_mem_mode(void);
 /* Largest n per submission (LDPC_CB0_MAX_ITEMS, default 2048). */

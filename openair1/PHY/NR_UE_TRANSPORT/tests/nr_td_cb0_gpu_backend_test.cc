@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <vector>
 #include "nr_td_cb0_fixture.h"
+#include "nr_td_cb0_sched.h"
 
 namespace {
 
@@ -39,7 +40,7 @@ Fx *mid() /* 24 PRB QPSK R 0.3: C = 1, a third Z */
   return new Fx(A, 3080, 2, 1, 0, G);
 }
 
-const nr_td_cb0_backend_t *B;
+const nr_td_cb0_gpu_entry_t *B;
 
 class Cb0Gpu : public ::testing::Test {
  protected:
@@ -224,6 +225,118 @@ TEST_F(Cb0Gpu, GpuFailureMakesBatchInadmissible)
   EXPECT_EQ(ok.rc, 0);
   EXPECT_EQ(ok.out[0].pass, 1);
   delete b;
+}
+
+
+/* ---- integration with the CPU wiring's backend interface (nr_td_cb0_exec) ---- */
+struct Hooks {
+  void (*hooks)(int, int, int, int, int);
+  void (*reset)(void);
+  Hooks()
+  {
+    void *h = dlopen("libldpc_cuda.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!h)
+      h = dlopen("./libldpc_cuda.so", RTLD_NOW | RTLD_NOLOAD);
+    hooks = h ? (void (*)(int, int, int, int, int))dlsym(h, "ldpc_cb0_test_hooks") : nullptr;
+    reset = h ? (void (*)(void))dlsym(h, "ldpc_cb0_test_reset") : nullptr;
+  }
+};
+
+/* auto: the registered adapter runs the batch on the GPU (decoder CUDA, verdicts = CPU backend's on these clean items);
+ * an injected GPU failure voids THAT batch only (every item -1 / ERR_GPU, info.failed), and the NEXT grant runs on the
+ * CPU backend (back-off); after the back-off the GPU is used again. */
+TEST_F(Cb0Gpu, ExecUsesGpuAndFallsBackToCpuAfterFailure)
+{
+  Hooks hk;
+  ASSERT_TRUE(hk.hooks && hk.reset);
+  ASSERT_EQ(nr_td_cb0_gpu_register(), 1);
+  setenv("ISAC_TD_CB0_GPU_BACKOFF", "2", 1);
+  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
+  Fx *b = big(), *s = small();
+  Set set;
+  build(set, {b, s}, 1);
+  const int n = (int)set.it.size();
+  std::vector<nr_td_cb0_result_t> cpu(n), out(n);
+  nr_td_cb0_batch_cpu(set.it.data(), n, cpu.data());
+  nr_td_cb0_backend_stats_t s0, s1;
+  nr_td_cb0_backend_get_stats(&s0);
+  nr_td_cb0_exec_t ex;
+  ASSERT_GT(nr_td_cb0_exec(set.it.data(), n, out.data(), &ex), 0);
+  EXPECT_EQ(ex.backend, NR_TD_CB0_BE_GPU);
+  EXPECT_EQ(ex.decoder, NR_TD_CB0_DEC_CUDA_FLOODING);
+  EXPECT_EQ(ex.failed, 0);
+  for (int i = 0; i < n; i++) {
+    EXPECT_EQ(out[i].pass, cpu[i].pass) << i;
+    EXPECT_EQ(out[i].decoder_used, NR_TD_CB0_DEC_CUDA_FLOODING) << i;
+    EXPECT_EQ(out[i].dematch_gpu, 1) << i;
+    EXPECT_EQ(out[i].C, cpu[i].C) << i;
+    EXPECT_EQ(out[i].tb_result, cpu[i].tb_result) << i;
+  }
+  /* grant k: GPU fails -> the whole batch is void */
+  hk.hooks(1, 0, 0, 100, 1000);
+  nr_td_cb0_exec(set.it.data(), n, out.data(), &ex);
+  hk.hooks(0, 0, 2000, 4, 5000);
+  EXPECT_EQ(ex.backend, NR_TD_CB0_BE_GPU);
+  EXPECT_EQ(ex.failed, 1);
+  for (int i = 0; i < n; i++) {
+    EXPECT_EQ(out[i].pass, -1) << i;
+    EXPECT_EQ(out[i].err, NR_TD_CB0_ERR_GPU) << i;
+  }
+  /* grant k+1 (and k+2): back-off -> CPU backend, valid CPU verdicts */
+  for (int g = 0; g < 2; g++) {
+    nr_td_cb0_exec(set.it.data(), n, out.data(), &ex);
+    EXPECT_EQ(ex.backend, NR_TD_CB0_BE_CPU) << g;
+    EXPECT_EQ(ex.failed, 0);
+    EXPECT_EQ(ex.decoder, NR_TD_CB0_DEC_CPU_LAYERED);
+    for (int i = 0; i < n; i++)
+      EXPECT_EQ(out[i].pass, cpu[i].pass) << g << " " << i;
+  }
+  /* back-off over: the GPU again */
+  nr_td_cb0_exec(set.it.data(), n, out.data(), &ex);
+  EXPECT_EQ(ex.backend, NR_TD_CB0_BE_GPU);
+  EXPECT_EQ(ex.failed, 0);
+  /* CB0 breaker open -> healthy() = 0 -> CPU without a failed batch */
+  hk.hooks(1, 0, 0, 1, 60000);
+  nr_td_cb0_exec(set.it.data(), n, out.data(), &ex); /* fails, trips the CB0 breaker (N = 1) */
+  hk.hooks(0, 0, 2000, 4, 5000);
+  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO); /* clears the dispatcher's back-off: only health decides now */
+  nr_td_cb0_exec(set.it.data(), n, out.data(), &ex);
+  EXPECT_EQ(ex.backend, NR_TD_CB0_BE_CPU) << "breaker open: unhealthy";
+  EXPECT_EQ(ex.failed, 0);
+  hk.reset();
+  nr_td_cb0_exec(set.it.data(), n, out.data(), &ex);
+  EXPECT_EQ(ex.backend, NR_TD_CB0_BE_GPU);
+  nr_td_cb0_backend_get_stats(&s1);
+  EXPECT_EQ(s1.gpu_failed - s0.gpu_failed, 2u);
+  EXPECT_GE(s1.gpu_skipped - s0.gpu_skipped, 3u);
+  nr_td_cb0_gpu_counters_t gc;
+  nr_td_cb0_gpu_get_counters(&gc);
+  EXPECT_GE(gc.errors, 2u);
+  EXPECT_GE(gc.trips, 1u);
+  nr_td_cb0_register_gpu_backend(nullptr);
+  nr_td_cb0_backend_mode_set(-1);
+  unsetenv("ISAC_TD_CB0_GPU_BACKOFF");
+  delete b;
+  delete s;
+}
+
+/* Dominance: a CUDA CB0 batch is admissible against the CPU TB decoder the wiring forces while acquiring, and against a
+ * CUDA TB; a CPU CB0 against a CUDA TB is not (decoder reason). */
+TEST_F(Cb0Gpu, DominanceRuleAdmitsCudaCb0OverCpuTb)
+{
+  nr_td_cb0_adm_in_t in;
+  memset(&in, 0, sizeof(in));
+  in.nl = 1;
+  in.rank_max = 4;
+  in.cb0_decoder = NR_TD_CB0_DEC_CUDA_FLOODING;
+  in.tb_decoder = 1; /* NRLDPC_DECODER_CPU */
+  EXPECT_EQ(nr_td_cb0_admissibility(&in) & (1u << NR_TD_CB0_R_DECODER), 0u);
+  in.tb_decoder = 2;
+  EXPECT_EQ(nr_td_cb0_admissibility(&in) & (1u << NR_TD_CB0_R_DECODER), 0u);
+  in.cb0_decoder = NR_TD_CB0_DEC_CPU_LAYERED;
+  EXPECT_NE(nr_td_cb0_admissibility(&in) & (1u << NR_TD_CB0_R_DECODER), 0u);
+  /* GPU iterations: G1's TB rule by default */
+  EXPECT_EQ(nr_td_cb0_gpu_iters(8), 16);
 }
 
 } // namespace

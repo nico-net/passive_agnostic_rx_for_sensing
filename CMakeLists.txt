@@ -979,6 +979,8 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_adapter.c
   ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ssb_rate_match.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
@@ -1089,6 +1091,8 @@ if(ENABLE_LDPC_CUDA)
   set_source_files_properties(${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c PROPERTIES COMPILE_DEFINITIONS NR_TD_GW_CUDA=1)
 endif()
 target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common UTIL polar smallblock)
+# CB0 elimination channel (nr_td_cb0_wire.c): backend + scheduler + batch live in td_cb0_batch (defined below)
+target_link_libraries(PHY_NR_UE PRIVATE td_cb0_batch)
 
 # ISAC / passive-radar sensing pipeline (OAI-UE). Faithful port of the srsUE sensing engine
 # (repos/srs-ue-isac-dmd). Off-RT DSP + DetectionReport emission compliant with the central node
@@ -1483,6 +1487,8 @@ target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_common MAC_NR_COMMON pol
 # 2026-10-01 sections 5.4 / 9). CPU reference + LDPC adapter; the GPU rate de-matching is libtd_cb0_gpu.so
 # (openair1/PHY/CODING/CMakeLists.txt), dlopen'd at run time, so this library has no CUDA link dependency.
 add_library(td_cb0_batch STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c
+                                ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c
+                                ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_sched.c
                                 ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c
                                 ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
 target_include_directories(td_cb0_batch PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
@@ -2688,6 +2694,28 @@ if(ENABLE_TESTS)
   endif()
   add_dependencies(tests test_nr_td_cb0_batch)
   add_test(NAME test_nr_td_cb0_batch COMMAND ./test_nr_td_cb0_batch)
+  # CB0 elimination runtime wiring (td/cb0-cpu-wiring): scheduler, backend selection / GPU fallback, admissibility,
+  # engine adapter and the per-grant glue (decode-side GrantWork calls stubbed by the test), real CPU LDPC via the fixture.
+  add_executable(test_nr_td_cb0_wire ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc ${NR_TD_CB0_FX_SRCS}
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_adapter.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
+  target_include_directories(test_nr_td_cb0_wire PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                             ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment)
+  target_link_libraries(test_nr_td_cb0_wire PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                        thread-pool minimal_lib GTest::gtest GTest::gtest_main m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  set_target_properties(test_nr_td_cb0_wire PROPERTIES ENABLE_EXPORTS ON)
+  foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_td_cb0_wire PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  add_dependencies(tests test_nr_td_cb0_wire)
+  add_test(NAME test_nr_td_cb0_wire COMMAND ./test_nr_td_cb0_wire)
   # Throughput benchmark (not a ctest; run under flock /tmp/td_measure.lock). dlopens ./libldpc_cuda.so for the
   # GPU LDPC estimate, resolving that plugin's host symbols from this binary (as nr-uesoftmodem does).
   add_executable(nr_td_cb0_bench ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_bench.c ${NR_TD_CB0_FX_SRCS})

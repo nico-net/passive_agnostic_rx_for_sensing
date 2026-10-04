@@ -3,7 +3,7 @@
  */
 /*! \file nr_td_cb0_gpu_backend.c
  * \brief GPU LDPC backend of nr_td_cb0_batch: the dedicated CB0 entry of libldpc_cuda.so (nrLDPC_cb0_cuda.h), loaded
- * with dlopen so td_cb0_batch keeps no CUDA link dependency. See nr_td_cb0_batch.h (nr_td_cb0_backend_t).
+ * with dlopen so td_cb0_batch keeps no CUDA link dependency. See nr_td_cb0_batch.h (nr_td_cb0_gpu_entry_t, and the nr_td_cb0_backend_t adapter).
  */
 #define _GNU_SOURCE
 #include "nr_td_cb0_batch.h"
@@ -16,6 +16,8 @@
 
 static int (*f_submit)(const ldpc_cb0_item_t *, int, const int8_t *, size_t, int, ldpc_cb0_ticket_t **);
 static int (*f_collect)(ldpc_cb0_ticket_t *, ldpc_cb0_result_t *, uint8_t *, size_t);
+static int (*f_healthy)(void);
+static void (*f_counters)(ldpc_cb0_counters_t *);
 
 uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter)
 {
@@ -28,7 +30,16 @@ uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter)
     if (over)
       fprintf(stderr, "nr_td_cb0: ISAC_TD_CB0_GPU_ITERS=%d overrides 2 x max_iter (dominance proof required)\n", over);
   }
-  if (over)
+  /* dominance: a cap below 2 x max_iter is only proven against the CPU TB decoder (paired harness), so it is honoured
+   * only while the wiring forces the CPU TB decoder for acquiring contexts (ISAC_TD_TB_CPU_WHILE_ACQ, default 1) */
+  static int tb_cpu = -1;
+  if (tb_cpu < 0) {
+    const char *e = getenv("ISAC_TD_TB_CPU_WHILE_ACQ");
+    tb_cpu = !(e && *e && atof(e) == 0.0);
+    if (over && !tb_cpu && over < 2 * max_iter)
+      fprintf(stderr, "nr_td_cb0: ISAC_TD_CB0_GPU_ITERS=%d ignored: TB decodes are not forced onto the CPU decoder\n", over);
+  }
+  if (over && (tb_cpu || over >= 2 * max_iter))
     return (uint8_t)over;
   const int it = 2 * max_iter;
   return (uint8_t)(it > LDPC_CB0_MAX_ITERS ? LDPC_CB0_MAX_ITERS : it);
@@ -151,8 +162,8 @@ static int gpu_decode(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, nr_t
   return gpu_collect(t, out);
 }
 
-static const nr_td_cb0_backend_t g_backend = {"cuda-cb0", NR_TD_CB0_DEC_CUDA_FLOODING, gpu_decode, gpu_submit, gpu_collect};
-static const nr_td_cb0_backend_t *g_ptr;
+static const nr_td_cb0_gpu_entry_t g_backend = {"cuda-cb0", NR_TD_CB0_DEC_CUDA_FLOODING, gpu_decode, gpu_submit, gpu_collect};
+static const nr_td_cb0_gpu_entry_t *g_ptr;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
 static void load(void)
@@ -167,13 +178,119 @@ static void load(void)
   int (*init)(void) = (int (*)(void))dlsym(h, "ldpc_cb0_init");
   f_submit = (int (*)(const ldpc_cb0_item_t *, int, const int8_t *, size_t, int, ldpc_cb0_ticket_t **))dlsym(h, "ldpc_cb0_submit");
   f_collect = (int (*)(ldpc_cb0_ticket_t *, ldpc_cb0_result_t *, uint8_t *, size_t))dlsym(h, "ldpc_cb0_collect");
-  if (!init || !f_submit || !f_collect || init() != 0)
+  f_healthy = (int (*)(void))dlsym(h, "ldpc_cb0_healthy");
+  f_counters = (void (*)(ldpc_cb0_counters_t *))dlsym(h, "ldpc_cb0_get_counters");
+  if (!init || !f_submit || !f_collect || !f_healthy || init() != 0)
     return;
   g_ptr = &g_backend;
 }
 
-const nr_td_cb0_backend_t *nr_td_cb0_gpu_backend(void)
+const nr_td_cb0_gpu_entry_t *nr_td_cb0_gpu_backend(void)
 {
   pthread_once(&g_once, load);
   return g_ptr;
+}
+
+/* ---- adapter: the GPU entry behind the CPU wiring's nr_td_cb0_backend_t (nr_td_cb0_exec) ---- */
+static int ad_healthy(void *ctx)
+{
+  (void)ctx;
+  return nr_td_cb0_gpu_backend() != NULL && f_healthy();
+}
+
+static __thread int8_t *t_l;
+static __thread size_t t_l_cap;
+static __thread nr_td_cb0_meta_t *t_meta;
+static __thread int8_t *t_st;
+static __thread int t_cap_items;
+
+static int ad_decode(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
+{
+  (void)ctx;
+  if (n <= 0)
+    return 0;
+  if (!nr_td_cb0_gpu_backend())
+    return -1;
+  if (n > t_cap_items) { /* per-thread scratch, grown, never shrunk */
+    free(t_meta);
+    free(t_st);
+    t_meta = malloc((size_t)n * sizeof(*t_meta));
+    t_st = malloc((size_t)n);
+    t_cap_items = (t_meta && t_st) ? n : 0;
+    if (!t_cap_items)
+      return -1;
+  }
+  const size_t need = (size_t)n * NR_TD_CB0_L_STRIDE;
+  if (need > t_l_cap) {
+    free(t_l);
+    t_l = aligned_alloc(64, need);
+    t_l_cap = t_l ? need : 0;
+    if (!t_l)
+      return -1;
+  }
+  int valid = 0;
+  for (int i = 0; i < n; i++) {
+    out[i] = (nr_td_cb0_result_t){0};
+    if (nr_td_cb0_meta(&items[i], &t_meta[i]) != 0) {
+      out[i].pass = -1;
+      out[i].err = t_meta[i].err;
+      continue;
+    }
+    out[i].C = (uint16_t)t_meta[i].C;
+    out[i].tb_result = t_meta[i].C == 1;
+    valid++;
+  }
+  if (!valid)
+    return 0;
+  /* GPU dematch, exactly the item's llr_shift; the CPU reference dematch (bit-identical) when the GPU module is absent */
+  int rc = nr_td_cb0_dematch(items, n, 1, t_l, NULL, t_st);
+  if (rc != 0)
+    rc = nr_td_cb0_dematch(items, n, 0, t_l, NULL, t_st);
+  if (rc != 0) {
+    fail_all(t_meta, n, out);
+    return -1;
+  }
+  rc = gpu_decode(t_meta, t_l, n, out);
+  for (int i = 0; i < n; i++)
+    if (t_meta[i].valid)
+      out[i].dematch_gpu = t_st[i] == 1;
+  return rc;
+}
+
+static const nr_td_cb0_backend_t g_adapter = {"cuda-cb0", ad_healthy, ad_decode, NULL};
+
+const nr_td_cb0_backend_t *nr_td_cb0_gpu_backend_adapter(void)
+{
+  return nr_td_cb0_gpu_backend() ? &g_adapter : NULL;
+}
+
+int nr_td_cb0_gpu_register(void)
+{
+  const nr_td_cb0_backend_t *a = nr_td_cb0_gpu_backend_adapter();
+  if (!a)
+    return 0;
+  nr_td_cb0_register_gpu_backend(a);
+  return 1;
+}
+
+void nr_td_cb0_gpu_get_counters(nr_td_cb0_gpu_counters_t *c)
+{
+  memset(c, 0, sizeof(*c));
+  if (!g_ptr || !f_counters) /* never loads the plugin just to read counters */
+    return;
+  ldpc_cb0_counters_t k;
+  f_counters(&k);
+  c->submits = k.submits;
+  c->items = k.items;
+  c->ok = k.ok;
+  c->errors = k.cuda_errors;
+  c->timeouts = k.timeouts;
+  c->busy = k.busy;
+  c->bypassed = k.bypassed;
+  c->sticky = k.sticky;
+  c->trips = k.breaker_trips;
+  c->graphs = k.graphs;
+  c->h2d_bytes = k.h2d_bytes;
+  c->state = k.state;
+  c->mode = k.mode;
 }

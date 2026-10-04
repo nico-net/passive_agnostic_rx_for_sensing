@@ -91,7 +91,7 @@ int main(int argc, char **argv)
   }
   cb0_fx_init();
   const int dm = nr_td_cb0_use_gpu(1);
-  const nr_td_cb0_backend_t *be = nr_td_cb0_gpu_backend();
+  const nr_td_cb0_gpu_entry_t *be = nr_td_cb0_gpu_backend();
   if (!be) {
     fprintf(stderr, "no CUDA CB0 backend\n");
     return 1;

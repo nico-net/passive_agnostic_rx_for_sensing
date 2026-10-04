@@ -1,0 +1,4 @@
+{"flags": "--cb0-no-family 1 --cb0-no-premise 1", "acq": 200, "rntis": 200, "decided": 200, "median_s": 9.295, "mean_s": 13.104, "wrong": 31, "undecidable": 0, "truth_cb0_elim": 31, "cb0_alarms": 0, "cb0_per_grant": 276.4}
+{"flags": "--cb0-no-family 1 --cb0-no-premise 0", "acq": 200, "rntis": 200, "decided": 0, "median_s": 0.0, "mean_s": 0.0, "wrong": 0, "undecidable": 200, "truth_cb0_elim": 0, "cb0_alarms": 200, "cb0_per_grant": 749.9}
+{"flags": "--cb0-no-family 0 --cb0-no-premise 1", "acq": 200, "rntis": 200, "decided": 68, "median_s": 461.37, "mean_s": 456.162, "wrong": 0, "undecidable": 132, "truth_cb0_elim": 0, "cb0_alarms": 0, "cb0_per_grant": 12.48}
+{"flags": "--cb0-no-family 0 --cb0-no-premise 0", "acq": 200, "rntis": 200, "decided": 0, "median_s": 0.0, "mean_s": 0.0, "wrong": 0, "undecidable": 200, "truth_cb0_elim": 0, "cb0_alarms": 200, "cb0_per_grant": 749.9}

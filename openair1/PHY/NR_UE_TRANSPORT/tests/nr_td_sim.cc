@@ -100,6 +100,13 @@ struct SimCfg {
    * RNTI on, the CB0 batch falls back to the CPU decoder (circuit breaker); the engine's per-context decoder pin then drops those batches. */
   int cb0_decoder, cb0_fallback_at;
   double cb0_gpu_gain_db;
+  /* Fix round 1. cb0_subset B > 0: the batch is the scheduled hypothesis plus every active h with hash(ctx seed, abs slot, catalogue key)
+   * mod ceil(n_active / B) == 0 (state-independent thinning, ~B decodes per grant). cb0_admit_all 1 = DO NOT mark retransmission / soft-
+   * combined grants inadmissible (violates the contract; discriminating arm only). cb0_no_premise / cb0_no_family: disable the engine's
+   * premise check / trap-family exemption (discriminating arm only). harq_gain_db: soft-combining gain of a RETRANSMISSION's full-TB decode
+   * (TB only, never CB0). rank_snr_db: SNR offset of rank-2 grants (link adaptation: rank-SNR correlation). All default 0. */
+  int cb0_subset, cb0_admit_all, cb0_no_premise, cb0_no_family;
+  double harq_gain_db, rank_snr_db;
   std::string tdd;
   float sib_pmin, sib_eps; /* sibling guard (engine st->sib_pmin / sib_eps); --sib-pmin 0 disables the guard (fix A only) */
   float w_sib1, w_default, w_obs, w_field, w_probe;
@@ -118,6 +125,7 @@ struct SimCfg {
     c.other_ue_same_cfg = 0; c.obs_lastset = 1; c.tdd_exclude = 1; c.cert_evidence = 1; c.excl_unconfirmed = 0; c.cert_confirmed = 0; c.other_ue_occ = 0; c.mcs_change = -1; c.snr_rho = 0; c.tdd_s_dl_symbols = 6; c.grant_prob = 0.5; c.persist = 0.9; c.adjacency = -1; c.dci_miss = c.dci_false = 0;
     c.retx_trap = c.k0_trap_adj = 0; c.sib_pmin = 0.05f; c.sib_eps = 1e-6f;
     c.cb0_elim = 0; c.cb0_rank_max = 8; c.cb0_margin_db = 1.0; c.cb0_decoder = 0; c.cb0_fallback_at = -1; c.cb0_gpu_gain_db = 1.0;
+    c.cb0_subset = c.cb0_admit_all = c.cb0_no_premise = c.cb0_no_family = 0; c.harq_gain_db = c.rank_snr_db = 0;
     /* Grant cap per RNTI = cap_s * grants_per_s. It MUST exceed the largest baseline (levers-off, oracle-off) need,
      * ~2200 s p95 / ~3000 s max at 1 RX blind: a smaller cap turns slow-but-correct RNTIs into censored
      * `undecidable` ones and biases every quantile downwards. Capped RNTIs are reported separately and excluded
@@ -156,7 +164,8 @@ struct RntiRec {
   long truth_kl_trials;   /* engine KL trials of the true hypothesis at the decision (since the last prune), -1 if pruned */
   long truth_elim;        /* KL failures the engine added to the truth on grants where its full decode passes */
   char winner_key[48];    /* content of the winning hypothesis (pairing P1 vs P2), "-" if undecidable */
-  long cb0_dec_dropped = 0; /* --cb0-elim: CB0 batches dropped by the engine's decoder pin (decoder switched mid-context) */
+  long cb0_dec_dropped = 0; /* --cb0-elim: CB0 grants the engine rejected (dominance / contract / caller inadmissibility) */
+  bool cb0_alarm = false;   /* --cb0-elim: the premise check disabled the channel in this context */
   long cb0_decodes = 0, cb0_grants = 0, cb0_inadmissible = 0, cb0_elims = 0, cb0_false_passes = 0; /* --cb0-elim: CB0 decodes (GPU workload), grants fed */
   bool truth_cb0_elim = false; /* --cb0-elim: the truth was ever eliminated by the CB0 channel (must never happen) */
 };
@@ -179,7 +188,7 @@ struct SimResult {
   long dci_missed = 0, dci_false = 0, proc_grants = 0, adj_grants = 0, trap_grants = 0, certified_grants = 0, certified_sib = 0, certified_wrong = 0, cert_fed = 0, fed_all = 0, cert_pass = 0, pass_all = 0, tdd_excl_removed = 0;
   long confirmed_dcis = 0, spur_excl_dcis = 0, truth_excluded = 0; /* BC9d (truth_excluded = RNTIs) */
   long restores = 0, restore_hyp = 0;
-  long cb0_decodes = 0, cb0_grants = 0, cb0_inadmissible = 0, cb0_elims = 0, cb0_false_passes = 0, truth_cb0_elim = 0, cb0_dec_dropped = 0;
+  long cb0_decodes = 0, cb0_grants = 0, cb0_inadmissible = 0, cb0_elims = 0, cb0_false_passes = 0, truth_cb0_elim = 0, cb0_dec_dropped = 0, cb0_alarms = 0;
   long k0_probes = 0, k0_probe_hyp = 0, k0_probe_layers = 0, n_hyp_end = 0;
   struct TableStat { long n = 0, wrong = 0; double sum_s = 0; std::vector<double> v; } by_table[3];
   std::vector<RntiRec> recs;
@@ -554,6 +563,10 @@ static double sim_binom_pf(double t, int m, double pf)
 static SimResult run_sim(const SimCfg &cfg)
 {
   SimResult R;
+  if (cfg.equiv && cfg.cb0_elim) {
+    fprintf(stderr, "nr_td_sim: --equiv 1 (lever E) is incompatible with --cb0-elim 1 (biased rates break p_L <= p_truth)\n");
+    exit(EXIT_FAILURE);
+  }
   if (cfg.equiv && cfg.twins < 2) {
     fprintf(stderr, "nr_td_sim: --equiv 1 requires --twins >= 2 (the --twins < 2 stress arm is not equivalence-consistent)\n");
     exit(EXIT_FAILURE);
@@ -722,6 +735,10 @@ static SimResult run_sim(const SimCfg &cfg)
       st->sib_pmin = cfg.sib_pmin;
       st->sib_eps = cfg.sib_eps;
       st->cb0_elim = cfg.cb0_elim != 0;
+      st->cb0_disabled = false;
+      st->cb0_no_premise_check = cfg.cb0_no_premise != 0;
+      st->cb0_no_family_exempt = cfg.cb0_no_family != 0;
+      const uint64_t ctx_seed = mix(cfg.seed, a, 0xC00 + k);
       const uint16_t rnti = (uint16_t)(0x4000 + k);
 
       RntiRec rec{};
@@ -772,7 +789,7 @@ static SimResult run_sim(const SimCfg &cfg)
           st->probe_pass[at] = st->probe_fail[at] = st->probe_inconclusive[at] = 0;
           st->ok_unique[at] = 0;
           st->fp_trials[at] = st->sib_trials[at] = 0;
-          st->cb0_trials[at] = st->cb0_pass[at] = 0;
+          st->cb0_trials[at] = st->cb0_pass[at] = st->tba_trials[at] = st->tba_ok[at] = 0;
           memset(st->geom_key, 0, sizeof(st->geom_key)); memset(st->ok_geom, 0, sizeof(st->ok_geom)); st->n_geom = 0; st->geom_blocked = false;
           st->order[at] = at;
         }
@@ -903,7 +920,8 @@ static SimResult run_sim(const SimCfg &cfg)
             /* NB twin_tbl / --twins are IGNORED here (stress-arm semantics differ): the trap follows the physical (Qm, R) equality for every hypothesis table.
              * the neighbour was encoded with the TRUE table; this hypothesis reads the grant's MCS under ITS table: the computations must coincide (I4) */
             if (nb.present && sim_compat_tbl(gr.key, hs.mcs_table, nb.key, T.mcs_table)) {
-              const bool np = nb.key.rank <= cfg.n_rx && nb.snr >= nr_td_required_snr_db(nb.key.mcs, T.mcs_table);
+              const double nsnr = nb.snr + (nb.key.rank == 2 ? cfg.rank_snr_db : 0.0);
+              const bool np = nb.key.rank <= cfg.n_rx && nsnr >= nr_td_required_snr_db(nb.key.mcs, T.mcs_table) - (nb.new_tx ? 0.0 : cfg.harq_gain_db);
               if (np) { rec.k0_trap_passes++; return true; }
             }
           }
@@ -928,7 +946,7 @@ static SimResult run_sim(const SimCfg &cfg)
         if (!p && cfg.slot_model && is_k0_sib_any(hs)) {
           const SimOcc nb = tl->slot(gr.dci_slot + hs.k0).occ;
           if (nb.present && sim_compat_tbl(gr.key, hs.mcs_table, nb.key, T.mcs_table))
-            p = nb.key.rank <= cfg.n_rx && nb.snr >= nr_td_required_snr_db(nb.key.mcs, T.mcs_table) - cb0_margin_now;
+            p = nb.key.rank <= cfg.n_rx && nb.snr + (nb.key.rank == 2 ? cfg.rank_snr_db : 0.0) >= nr_td_required_snr_db(nb.key.mcs, T.mcs_table) - cb0_margin_now;
         } else if (!p && !cfg.slot_model && gr.adj_same && is_k0_sibling(hs)) {
           p = hs.mcs_table == T.mcs_table ? truth_cb0 : (twin_tbl[hs.mcs_table] && !gr.exercised ? truth_cb0 : false);
         }
@@ -980,7 +998,7 @@ static SimResult run_sim(const SimCfg &cfg)
           const long u = tl->next_pdsch_slot();
           if (u < 0) break;
           const SimOcc o = tl->slot(u).occ;
-          gr.snr = o.snr; gr.rank = o.key.rank; gr.mcs = o.key.mcs; gr.new_tx = o.new_tx;
+          gr.snr = o.snr + (o.key.rank == 2 ? cfg.rank_snr_db : 0.0); gr.rank = o.key.rank; gr.mcs = o.key.mcs; gr.new_tx = o.new_tx;
           gr.exercised = false;
           for (int tb = 0; tb < 3; tb++) gr.exercised |= twin_tbl[tb] && sim_tbl_differs(gr.mcs, T.mcs_table, tb); /* some twin is distinguishable */
           gr.snr_est_noise = o.snr_est_noise; gr.adj_same = false; gr.key = o.key;
@@ -1003,7 +1021,9 @@ static SimResult run_sim(const SimCfg &cfg)
         gr.snr_est_noise = (float)(cfg.snr_est_sigma * nd(crng));
         gr.adj_same = cfg.k0_trap_adj > 0 && std::uniform_real_distribution<double>(0, 1)(krng) < cfg.k0_trap_adj;
         }
-        const bool truth_pass = gr.rank <= cfg.n_rx && gr.snr >= nr_td_required_snr_db(gr.mcs, T.mcs_table);
+        if (!cfg.slot_model && cfg.rank_snr_db != 0 && gr.rank == 2) gr.snr += cfg.rank_snr_db;
+        /* --harq-gain-db: a retransmission's full-TB decode is soft-combined (TB only; CB0 never combines) */
+        const bool truth_pass = gr.rank <= cfg.n_rx && gr.snr >= nr_td_required_snr_db(gr.mcs, T.mcs_table) - (gr.new_tx ? 0.0 : cfg.harq_gain_db);
         if (cfg.gate) {
           nr_td_grant_view_t v = {gr.rank, gr.mcs, 2}; /* table 2 = lowest requirement = most permissive */
           nr_td_rx_view_t rx = {cfg.n_rx, (float)gr.snr + gr.snr_est_noise, (int)std::min<long>(g, 1000000), 6.0f};
@@ -1162,29 +1182,53 @@ static SimResult run_sim(const SimCfg &cfg)
           rec.geom_bound += std::min(1.0, b);
           rec.wrong_pins += pre_gkey != tkey;
         }
-        if (cfg.cb0_elim && winner < 0 && !st->fail_open) {
-          /* CB0 batch: EVERY active hypothesis (selection fixed before any outcome; the engine never chooses), PASS and FAIL alike. */
-          const bool admissible = gr.rank <= cfg.cb0_rank_max;
-          if (!admissible) rec.cb0_inadmissible++;
-          else {
-            const int dec = (cfg.cb0_fallback_at >= 0 && rec.proc_grants + rec.gated_phys + rec.gated_chan > cfg.cb0_fallback_at) ? 0 : cfg.cb0_decoder;
-            const double margin = cfg.cb0_margin_db + (dec == 1 ? cfg.cb0_gpu_gain_db : 0.0);
-            const bool truth_cb0 = gr.rank <= cfg.n_rx && gr.snr >= nr_td_required_snr_db(gr.mcs, T.mcs_table) - margin;
-            cb0_idx.clear();
-            for (int i = 0; i < st->n_hyp; i++)
-              if (nr_pdsch_config_sweep_is_active(st.get(), i)) cb0_idx.push_back(i);
-            cb0_margin_now = margin;
-            for (size_t j = 0; j < cb0_idx.size(); j++) cb0_pb[j] = cb0_pass(cb0_idx[j], gr, truth_cb0);
-            const int n_act_before = (int)cb0_idx.size();
-            rec.cb0_decodes += n_act_before;
-            rec.cb0_grants++;
-            winner = nr_pdsch_config_sweep_feed_cb0_dec(st.get(), cb0_idx.data(), (int)cb0_idx.size(), cb0_pb.get(), true, (nr_td_decoder_t)dec);
-            if (winner < 0 && st->cb0_dec_pin != (uint8_t)(dec + 1)) rec.cb0_dec_dropped++;
-            int n_elim = 0;
-            for (int i = 0; i < st->n_hyp; i++) n_elim += nr_pdsch_config_sweep_is_eliminated(st.get(), i);
-            rec.cb0_elims = std::max<long>(rec.cb0_elims, n_elim);
-            if (ti >= 0 && nr_pdsch_config_sweep_is_eliminated(st.get(), ti)) rec.truth_cb0_elim = true;
+        if (cfg.cb0_elim && winner < 0 && !st->cb0_disabled) {
+          /* ONE CB0 grant per processed grant: the batch (every active hypothesis, or the state-independent hash subset, plus ALWAYS the
+           * scheduled one) and the scheduled hypothesis's full-TB outcome; the set is fixed before any outcome. Caller inadmissibility mirrors
+           * the runtime contract: retransmissions (soft-combined in the full-TB path) and rank > cb0_rank_max. TB decodes are CPU. */
+          uint32_t bad = 0;
+          if (!gr.new_tx && !cfg.cb0_admit_all) bad |= NR_TD_CB0_X_NOT_NEW_RV0;
+          if (gr.rank > cfg.cb0_rank_max) bad |= NR_TD_CB0_X_RANK;
+          const int dec = (cfg.cb0_fallback_at >= 0 && rec.proc_grants + rec.gated_phys + rec.gated_chan > cfg.cb0_fallback_at) ? NR_TD_DEC_CPU
+                          : (cfg.cb0_decoder ? NR_TD_DEC_CUDA : NR_TD_DEC_CPU);
+          const double margin = cfg.cb0_margin_db + (dec == NR_TD_DEC_CUDA ? cfg.cb0_gpu_gain_db : 0.0);
+          const bool truth_cb0 = gr.rank <= cfg.n_rx && gr.snr >= nr_td_required_snr_db(gr.mcs, T.mcs_table) - margin;
+          /* the scheduled hypothesis, if a post-feed exclusion did not re-index the state */
+          const int tb_h = (out_main_idx >= 0 && out_main_idx < st->n_hyp && memcmp(&st->hyp[out_main_idx], &hy[0], sizeof(hy[0])) == 0) ? out_main_idx : -1;
+          cb0_idx.clear();
+          int n_act = 0;
+          for (int i = 0; i < st->n_hyp; i++) n_act += nr_pdsch_config_sweep_is_active(st.get(), i);
+          const uint64_t mod = cfg.cb0_subset > 0 ? (uint64_t)((n_act + cfg.cb0_subset - 1) / cfg.cb0_subset) : 1;
+          const long abs_slot = cfg.slot_model ? gr.dci_slot : g;
+          for (int i = 0; i < st->n_hyp; i++) {
+            if (!nr_pdsch_config_sweep_is_active(st.get(), i)) continue;
+            const nr_pdsch_cfg_hypothesis_t &h = st->hyp[i];
+            const uint64_t key = nr_td_geom_key(&h) ^ ((uint64_t)h.mcs_table << 56) ^ ((uint64_t)h.dmrs_add_pos << 60) ^ ((uint64_t)h.dmrs_max_len << 62);
+            if (i == tb_h || mod <= 1 || mix(ctx_seed, (uint64_t)abs_slot, key) % mod == 0) cb0_idx.push_back(i);
           }
+          cb0_margin_now = margin;
+          for (size_t j = 0; j < cb0_idx.size(); j++) cb0_pb[j] = cb0_pass(cb0_idx[j], gr, truth_cb0);
+          /* Decoder consistency: a full TB passes only if all its code blocks, CB0 included, pass; a probe that is the SAME computation (or a
+           * more sensitive one) therefore passes CB0 whenever the full decode passed, incl. a CRC false pass. The violation knobs model a
+           * DIFFERENT computation (less sensitive probe: margin < 0; soft-combined retransmission admitted: TB-only gain) and skip this. */
+          const bool consistent = cfg.cb0_margin_db >= 0 && !(cfg.harq_gain_db > 0 && !gr.new_tx);
+          if (consistent && tb_h >= 0 && out[0].result == NR_TD_PASS)
+            for (size_t j = 0; j < cb0_idx.size(); j++) if (cb0_idx[j] == tb_h) cb0_pb[j] = true;
+          uint64_t rej0[NR_TD_CB0_X_COUNT], rej1[NR_TD_CB0_X_COUNT], al0, al1;
+          nr_pdsch_config_sweep_cb0_stats(&al0, rej0);
+          nr_td_cb0_grant_t cg{};
+          cg.idx = cb0_idx.data(); cg.pass = cb0_pb.get(); cg.n = (int)cb0_idx.size(); cg.cb0_decoder = (uint8_t)dec;
+          cg.tb_hyp = tb_h; cg.tb_pass = out[0].result == NR_TD_PASS; cg.tb_decoder = NR_TD_DEC_CPU; cg.inadmissible = bad;
+          if (bad) rec.cb0_inadmissible++;
+          else { rec.cb0_decodes += (long)cb0_idx.size(); rec.cb0_grants++; }
+          winner = nr_pdsch_config_sweep_feed_cb0_grant(st.get(), &cg);
+          nr_pdsch_config_sweep_cb0_stats(&al1, rej1);
+          if (!bad) for (int b2 = 0; b2 < NR_TD_CB0_X_COUNT; b2++) if (rej1[b2] != rej0[b2]) { rec.cb0_dec_dropped++; break; }
+          rec.cb0_alarm |= st->cb0_disabled;
+          int n_elim = 0;
+          for (int i = 0; i < st->n_hyp; i++) n_elim += nr_pdsch_config_sweep_is_eliminated(st.get(), i);
+          rec.cb0_elims = std::max<long>(rec.cb0_elims, n_elim);
+          if (ti >= 0 && nr_pdsch_config_sweep_is_eliminated(st.get(), ti)) rec.truth_cb0_elim = true;
         }
         if ((fb2 || cfg.fo_always) && winner < 0 && !st->fail_open && nr_pdsch_config_sweep_n_active(st.get()) < st->n_hyp
             && nr_pdsch_config_sweep_fail_open_due(st.get(), cfg.fo_alpha, cfg.fo_pmin)) {
@@ -1313,7 +1357,7 @@ static SimResult run_sim(const SimCfg &cfg)
       R.crc_wrong += rec.wrong && rec.crc_accepts > 0;
       R.truth_eliminated_by_probe += rec.truth_elim; R.p2_admitted_fail += rec.p2_admitted_fail;
       R.cb0_decodes += rec.cb0_decodes; R.cb0_grants += rec.cb0_grants; R.cb0_inadmissible += rec.cb0_inadmissible; R.cb0_elims += rec.cb0_elims;
-      R.cb0_false_passes += rec.cb0_false_passes; R.truth_cb0_elim += rec.truth_cb0_elim; R.cb0_dec_dropped += rec.cb0_dec_dropped;
+      R.cb0_false_passes += rec.cb0_false_passes; R.truth_cb0_elim += rec.truth_cb0_elim; R.cb0_dec_dropped += rec.cb0_dec_dropped; R.cb0_alarms += rec.cb0_alarm;
       if (!rec.undecidable) {
         secs.push_back(rec.seconds);
         if (k >= 2) { steady_sum += rec.seconds; steady_n++; }
@@ -1384,7 +1428,9 @@ int main(int argc, char **argv)
            "  --cb0-elim 0|1 (CB0 elimination channel: every active hypothesis gets a CB0 decode per grant; default 0)\n"
            "  --cb0-margin-db M (truth CB0 passes iff SNR >= req - M; default 1) --cb0-rank-max R (CB0 of rank > R grants inadmissible, K38: 1; default 8)\n"
            "  --cb0-decoder 0|1 (CB0 batch on CPU (default, = full-TB decoder) or CUDA) --cb0-gpu-gain-db G (CUDA sensitivity gain, default 1)\n"
-           "  --cb0-fallback-at G (from the G-th grant of an RNTI the CB0 batch falls back to the CPU; the engine decoder pin drops it; default -1)");
+           "  --cb0-fallback-at G (from the G-th grant of an RNTI the CB0 batch falls back to the CPU decoder; default -1)\n"
+           "  --cb0-subset B (hash subset ~B CB0 decodes/grant + the scheduled hypothesis; 0 = all) --harq-gain-db G (retx TB combining gain) --rank-snr-db D\n"
+           "  DISCRIMINATING ARM ONLY: --cb0-admit-all 1 (admit soft-combined retx grants) --cb0-no-premise 1 --cb0-no-family 1");
       return 0;
     }
     if (i + 1 >= argc) { fprintf(stderr, "missing value for %s\n", f.c_str()); return 2; }
@@ -1457,6 +1503,12 @@ int main(int argc, char **argv)
     else if (f == "--cb0-decoder") c.cb0_decoder = atoi(v);
     else if (f == "--cb0-fallback-at") c.cb0_fallback_at = atoi(v);
     else if (f == "--cb0-gpu-gain-db") c.cb0_gpu_gain_db = atof(v);
+    else if (f == "--cb0-subset") c.cb0_subset = atoi(v);
+    else if (f == "--cb0-admit-all") c.cb0_admit_all = atoi(v);
+    else if (f == "--cb0-no-premise") c.cb0_no_premise = atoi(v);
+    else if (f == "--cb0-no-family") c.cb0_no_family = atoi(v);
+    else if (f == "--harq-gain-db") c.harq_gain_db = atof(v);
+    else if (f == "--rank-snr-db") c.rank_snr_db = atof(v);
     else { fprintf(stderr, "unknown flag %s\n", f.c_str()); return 2; }
   }
   const SimResult r = run_sim(c);
@@ -1478,8 +1530,8 @@ int main(int argc, char **argv)
              x.truth_k0, x.dci_missed, x.dci_false, x.proc_grants, x.adj_grants, x.trap_grants, x.certified_grants,
              x.certified_sib, x.certified_wrong, x.k0_probes, x.k0_probe_hyp, x.k0_probe_layers, x.n_hyp_end, x.restores, x.restore_hyp);
     if (c.cb0_elim)
-      printf(",\"cb0_decodes\":%ld,\"cb0_grants\":%ld,\"cb0_inadmissible\":%ld,\"cb0_elims\":%ld,\"truth_cb0_elim\":%d", x.cb0_decodes, x.cb0_grants,
-             x.cb0_inadmissible, x.cb0_elims, (int)x.truth_cb0_elim);
+      printf(",\"cb0_decodes\":%ld,\"cb0_grants\":%ld,\"cb0_inadmissible\":%ld,\"cb0_elims\":%ld,\"truth_cb0_elim\":%d,\"cb0_alarm\":%d", x.cb0_decodes,
+             x.cb0_grants, x.cb0_inadmissible, x.cb0_elims, (int)x.truth_cb0_elim, (int)x.cb0_alarm);
     puts("}");
   }
   /* Quantiles/means are over DECIDED RNTIs only; capped (undecidable) RNTIs are censored and counted separately.
@@ -1526,13 +1578,15 @@ int main(int argc, char **argv)
            "\"crc_bound\":%.6g,\"wrong_pins\":%ld,\"geom_bound\":%.6g,\"crc_false\":%g",
            c.geom_pin, c.crc_accept, r.geom_pins, r.geom_blocks, r.crc_accepts, r.crc_wrong, r.crc_bound, r.wrong_pins, r.geom_bound,
            c.crc_false);
-  if (c.cb0_elim) /* analytical bound: per RNTI P(wrong winner) <= 1e-6 (TB family 0.5e-6 + CB0 family 0.5e-6), independent of --crc-false */
+  if (c.cb0_elim) /* analytical bound: per RNTI P(wrong winner) <= 1e-6 (three interval families, 1e-6/3 each), independent of --crc-false */
     printf(",\"cb0_elim\":1,\"cb0_margin_db\":%g,\"cb0_rank_max\":%d,\"cb0_decodes\":%ld,\"cb0_grants\":%ld,\"cb0_inadmissible\":%ld,"
            "\"cb0_per_grant\":%.2f,\"cb0_elims\":%ld,\"cb0_false_passes\":%ld,\"truth_cb0_elim\":%ld,\"cb0_bound\":%.3g,"
-           "\"cb0_decoder\":%d,\"cb0_fallback_at\":%d,\"cb0_gpu_gain_db\":%g,\"cb0_dec_dropped\":%ld", c.cb0_margin_db,
+           "\"cb0_decoder\":%d,\"cb0_fallback_at\":%d,\"cb0_gpu_gain_db\":%g,\"cb0_rejected\":%ld,\"cb0_alarms\":%ld,\"cb0_subset\":%d,"
+           "\"harq_gain_db\":%g,\"rank_snr_db\":%g,\"cb0_admit_all\":%d,\"cb0_no_premise\":%d,\"cb0_no_family\":%d", c.cb0_margin_db,
            c.cb0_rank_max, r.cb0_decodes, r.cb0_grants, r.cb0_inadmissible, r.cb0_grants ? (double)r.cb0_decodes / (double)r.cb0_grants : 0.0,
            r.cb0_elims, r.cb0_false_passes, r.truth_cb0_elim, 1e-6 * (double)r.acquisitions_rntis,
-           c.cb0_decoder, c.cb0_fallback_at, c.cb0_gpu_gain_db, r.cb0_dec_dropped);
+           c.cb0_decoder, c.cb0_fallback_at, c.cb0_gpu_gain_db, r.cb0_dec_dropped, r.cb0_alarms, c.cb0_subset, c.harq_gain_db, c.rank_snr_db,
+           c.cb0_admit_all, c.cb0_no_premise, c.cb0_no_family);
   printf("}}\n");
   return 0;
 }

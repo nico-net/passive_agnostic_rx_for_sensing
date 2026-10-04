@@ -16,6 +16,7 @@
 #include "nr_pusch_passive_decode.h"
 #include "nr_td_order.h"
 #include "nr_pdsch_config_sweep.h"
+#include "nr_td_cb0_wire.h"
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
 _Atomic int nr_passive_metrics_pci = -1;
@@ -75,6 +76,35 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->td_deftab_match_11 = cd[NR_TD_FMT_11][NR_TD_CENSUS_MATCH];
   m->td_deftab_mismatch_11 = cd[NR_TD_FMT_11][NR_TD_CENSUS_MISMATCH];
   m->td_deftab_na = cd[0][NR_TD_CENSUS_NONE] + cd[1][NR_TD_CENSUS_NONE] + cd[2][NR_TD_CENSUS_NONE];
+  {
+    nr_td_cb0_wire_stats_t c;
+    nr_td_cb0_wire_stats(&c);
+    m->td_cb0_grants = c.grants;
+    m->td_cb0_batches = c.batches;
+    m->td_cb0_admissible = c.admissible;
+    m->td_cb0_items = c.items;
+    for (int r = 0; r < 16 && r < NR_TD_CB0_R_COUNT; r++)
+      m->td_cb0_inadmissible[r] = c.inadmissible[r];
+    m->td_cb0_budget_skips = c.budget_skips;
+    m->td_cb0_not_testable = c.not_testable;
+    m->td_cb0_us_per_item = c.items ? (double)c.cpu_us / (double)c.items : 0.0;
+    m->td_cb0_backend_cpu = c.backend_cpu;
+    m->td_cb0_backend_gpu = c.backend_gpu;
+    m->td_cb0_premise_alarms = c.premise_alarms;
+    m->td_cb0_eliminations = c.eliminations;
+    m->td_cb0_gpu_submits = c.gpu_submits;
+    m->td_cb0_gpu_items = c.gpu_items;
+    m->td_cb0_gpu_ok = c.gpu_ok;
+    m->td_cb0_gpu_errors = c.gpu_errors;
+    m->td_cb0_gpu_timeouts = c.gpu_timeouts;
+    m->td_cb0_gpu_bypassed = c.gpu_bypassed;
+    m->td_cb0_gpu_sticky = c.gpu_sticky;
+    m->td_cb0_gpu_trips = c.gpu_trips;
+    m->td_cb0_gpu_state = c.gpu_state;
+    m->td_cb0_gpu_mode = c.gpu_mode;
+    m->td_cb0_gpu_failed = c.gpu_failed;
+    m->td_cb0_gpu_skipped = c.gpu_skipped;
+  }
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
   { /* libldpc_cuda.so is dlopen'd RTLD_GLOBAL when --loader.ldpc.shlibversion _cuda is used; absent = zeros */
     typedef void (*cuda_ctr_t)(uint64_t *, uint64_t *, uint64_t *, uint64_t *);
@@ -104,7 +134,7 @@ void nr_passive_metrics_emit(void)
   static FILE *f = NULL;
   static int tried = 0;
   nr_passive_metrics_t m;
-  char buf[2048];
+  char buf[6144]; /* + td_cb0_gpu block */
   nr_passive_metrics_collect(&m);
   if (nr_passive_metrics_to_json(&m, buf, sizeof(buf)) < 0) {
     LOG_W(PHY, "SENSING: ISAC_METRICS buffer too small\n");

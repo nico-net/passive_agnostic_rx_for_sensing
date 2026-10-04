@@ -325,6 +325,12 @@ void nr_pdsch_passive_gw_cb0_free(nr_pdsch_gw_cb0_t *cb);
  *  filler, int8 saturation, LDPCdecoder, CRC24B -- CRC24A when C == 1 -- and the all-zero guard). Returns the
  *  CB0 verdict; *ldpc_ok = the decoder's own CRC verdict before the all-zero guard. */
 bool nr_pdsch_passive_gw_cb0_decode(const nr_pdsch_gw_cb0_t *cb, bool *ldpc_ok);
+/** CB0 elimination wiring: nr_pdsch_passive_gw_cb0_item() (the nr_td_cb0_batch item of a hypothesis from shared work:
+ *  the entry's un-normalised LLRs in place, its TBS / R / BG / TBS_LBRM / rv / 8 iterations and its own K38 shift k_h;
+ *  returns NR_TD_GW_OK, NR_TD_GW_E_K0 / NR_TD_GW_E_ARG (parameter-determined: not testable on this grant) or another
+ *  NR_TD_GW_E_*), nr_pdsch_passive_cb0_cpu_ldpc() (libldpc.so's LDPCdecoder) and nr_pdsch_passive_force_cpu_tb()
+ *  (ISAC_TD_TB_CPU_WHILE_ACQ) are declared in nr_td_cb0_wire.h. */
+#include "nr_td_cb0_wire.h"
 /** ISAC_TD_GW_CHECK=N (debug): READY-path and no-GrantWork re-decodes of 1 main decode in N, compared bit
  *  for bit with it (GW_EQUIV), plus CB0 extraction vs the segment decoder's own CB0 input. Call right after
  *  the job's last use of the decoded TB, with that decode's status, before any other decode on the thread. */
