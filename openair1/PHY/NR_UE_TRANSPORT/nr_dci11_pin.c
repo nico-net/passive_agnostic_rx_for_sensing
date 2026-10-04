@@ -39,7 +39,7 @@ int nr_dci11_pin_select(nr_dci11_pin_t *pin, uint64_t current_cfg, const uint16_
     return preferred;
 
   bool valid = atomic_load_explicit(pin_valid(pin), memory_order_acquire);
-  if (valid && (pin->cfg != current_cfg || (nr_cfg_reconf_enabled() && pin->config_epoch != nr_cfg_epoch_current()))) {
+  if (valid && (pin->cfg != current_cfg || (nr_cfg_reconf_enabled() && pin->config_epoch < nr_cfg_epoch_dedicated_current()))) {
     /* A real cell-geometry change: the pin's own key no longer means what it used to. */
     atomic_store_explicit(pin_valid(pin), false, memory_order_release);
     pin->occ = 0;
@@ -91,5 +91,5 @@ bool nr_dci11_pin_is_valid(const nr_dci11_pin_t *pin)
   /* Same cast idiom as pin_valid() above; const-qualified here since a read never mutates the
    * struct, and pin_valid() itself takes a non-const pointer for its store-side callers. */
   return atomic_load_explicit((_Atomic bool *)&pin->valid, memory_order_acquire)
-      && (!nr_cfg_reconf_enabled() || pin->config_epoch == nr_cfg_epoch_current());
+      && (!nr_cfg_reconf_enabled() || pin->config_epoch >= nr_cfg_epoch_dedicated_current());
 }

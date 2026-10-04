@@ -25,7 +25,25 @@ typedef struct {
   uint32_t identity_gen;
   nr_epoch_class_t last_class;
   nr_epoch_cause_t last_cause;
+  uint32_t dedicated_epoch; /* latest broad invalidation, survives later narrow SOFT events */
 } nr_cfg_epoch_snapshot_t;
+
+/* Consumer scope (SPEC 4.4/4.5):
+ * SOFT continuity/CSI-RS/BWP: withdraw cell length priors and fieldbook trust;
+ * keep per-RNTI lengths, TD winners, layout pins and bank geometry proof.
+ * HARD_REVERIFY or SOFT DEDICATED_CHANGE_SUSPECTED: additionally make lengths
+ * SUSPECT, lazily VERIFY TD contexts, invalidate pins and mark the bank STALE.
+ * HARD_RESET: isolate old identity state, never carry its hints into the new cell.
+ * All classes reject old queued work/tickets. BWP geometry changes also change
+ * the existing geometry keys. R11 owns fieldbook updates on EVERY epoch.
+ */
+static inline bool nr_cfg_epoch_reverifies(const nr_cfg_epoch_snapshot_t *s, uint32_t previous)
+{
+  return s->dedicated_epoch > previous || (s->epoch > previous &&
+      (s->last_class != NR_EPOCH_SOFT || s->last_cause == NR_CAUSE_DEDICATED_CHANGE_SUSPECTED));
+}
+uint32_t nr_cfg_epoch_dedicated_current(void); /* lock-free invalidation watermark */
+uint64_t nr_cfg_epoch_current_slot(void); /* latest producer tick, not last context binding */
 
 /* Thread-local provenance for synchronous feedback inside a queued/inline job.
  * Nested decoders inherit the original stamp; every stale job is counted once. */

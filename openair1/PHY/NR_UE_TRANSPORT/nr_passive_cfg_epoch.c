@@ -41,6 +41,8 @@ typedef struct epoch_event {
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint32_t epoch;
 static _Atomic uint32_t identity_gen;
+static _Atomic uint32_t dedicated_epoch;
+static _Atomic uint64_t current_slot;
 static nr_cfg_epoch_snapshot_t state;
 static cell_identity_t identity;
 static hash_state_t mib, sib1;
@@ -98,6 +100,9 @@ static void bump_locked(epoch_event_t *event, nr_epoch_class_t cls, nr_epoch_cau
   if (cls == NR_EPOCH_HARD_RESET) state.identity_gen++;
   state.last_class = cls;
   state.last_cause = cause;
+  if (cls != NR_EPOCH_SOFT || cause == NR_CAUSE_DEDICATED_CHANGE_SUSPECTED)
+    state.dedicated_epoch = state.epoch;
+  atomic_store_explicit(&dedicated_epoch, state.dedicated_epoch, memory_order_release);
   atomic_store_explicit(&epoch, state.epoch, memory_order_release);
   atomic_store_explicit(&identity_gen, state.identity_gen, memory_order_release);
   event->bumped = true;
@@ -173,6 +178,8 @@ bool nr_cfg_epoch_work_current(void)
 
 uint32_t nr_cfg_epoch_current(void) { return atomic_load_explicit(&epoch, memory_order_acquire); }
 uint32_t nr_cfg_epoch_identity_gen(void) { return atomic_load_explicit(&identity_gen, memory_order_acquire); }
+uint32_t nr_cfg_epoch_dedicated_current(void) { return atomic_load_explicit(&dedicated_epoch, memory_order_acquire); }
+uint64_t nr_cfg_epoch_current_slot(void) { return atomic_load_explicit(&current_slot, memory_order_acquire); }
 nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void)
 {
   pthread_mutex_lock(&lock);
@@ -201,6 +208,8 @@ void nr_cfg_epoch_reset(void)
   atomic_store_explicit(&si_period_slots, 0, memory_order_release);
   last_abs_frame = 0;
   have_sfn = false;
+  atomic_store_explicit(&dedicated_epoch, 0, memory_order_release);
+  atomic_store_explicit(&current_slot, 0, memory_order_release);
   atomic_store_explicit(&epoch, 0, memory_order_release);
   atomic_store_explicit(&identity_gen, 0, memory_order_release);
   pthread_mutex_unlock(&lock);
@@ -350,6 +359,7 @@ void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t period)
 void nr_cfg_epoch_tick(uint64_t abs_slot)
 {
   if (!is_enabled()) return;
+  atomic_store_explicit(&current_slot, abs_slot, memory_order_release);
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
   const char *grace = getenv("ISAC_RECONF_SI_GRACE_MS");

@@ -92,7 +92,7 @@ static void compact_removed(void)
 void nr_pdcch_coreset_bank_dispatch_enter(void)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
-  if (nr_cfg_reconf_enabled()) {
+  if (nr_cfg_reconf_enabled() && g_bank_epoch != nr_cfg_epoch_current()) {
     const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
     bank_epoch_locked(&s);
   }
@@ -183,9 +183,9 @@ void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
     any_accept |= g_coreset_bank[i].accepts_window != 0;
   for (int i = 0; i < n; ++i) {
     nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[i];
-    if (nr_cfg_reconf_enabled() && e->state == NR_CORESET_STALE && e->stale_since_slot == UINT64_MAX)
-      e->stale_since_slot = slot;
     const bool elsewhere = traffic_elsewhere || (any_accept && !e->accepts_window);
+    if (nr_cfg_reconf_enabled() && elsewhere && e->state == NR_CORESET_STALE && e->stale_since_slot == UINT64_MAX)
+      e->stale_since_slot = slot;
     if (!e->last_accept_slot)
       e->last_accept_slot = slot;
     if (e->state == NR_CORESET_VERIFIED && elsewhere && slot >= e->last_accept_slot
@@ -425,19 +425,23 @@ bool nr_pdcch_coreset_bank_occupancy_sample(uint8_t *history, bool hit)
 static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
 {
   if (s->epoch <= g_bank_epoch) return;
+  const bool reverify = nr_cfg_epoch_reverifies(s, g_bank_epoch);
   g_bank_epoch = s->epoch;
   if (s->identity_gen != g_bank_identity) {
     if (!g_identity_reset_pending) g_dormant_bank.identity_gen = g_bank_identity;
     g_bank_identity = s->identity_gen;
     g_identity_reset_pending = g_compaction_pending = true;
-    compact_removed(); /* no geometry-remove callback: other consumers handle the same epoch */
-  } else {
+    /* The RT remove hook only clears length banks and all TD contexts. Both
+     * already isolate by identity_gen; invoking it here would destroy dormant
+     * old-cell records (and potentially freshly opened new-cell contexts). */
+    compact_removed();
+  } else if (reverify) {
     const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
     for (int i = 0; i < n; ++i) {
       nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[i];
       if (e->state == NR_CORESET_REMOVED) continue;
       e->state = NR_CORESET_STALE;
-      e->stale_since_slot = UINT64_MAX; /* start the removal timer on the next producer tick */
+      e->stale_since_slot = UINT64_MAX; /* start only once traffic elsewhere supplies absence evidence */
       e->stale_proof_rnti = 0;
       e->stale_proof_slot = 0;
       e->accepts_window = 0;

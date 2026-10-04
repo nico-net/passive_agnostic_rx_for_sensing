@@ -484,6 +484,7 @@ bool nr_pdsch_config_sweep_rnti_prior_get(uint16_t rnti, uint64_t *configuration
 /** Value-only feedback identity. A zero generation is never scored. */
 typedef struct {
   uint64_t generation;
+  uint32_t config_epoch; /* queued feedback is stale on every epoch, even a narrow SOFT */
   uint16_t context_slot;
   uint16_t rnti;
   uint8_t tda_index;
@@ -621,6 +622,9 @@ void nr_pdsch_config_sweep_reset_all(void);
 /* Record the source length/monotonic DCI slot for targeted relock and epoch source reporting. */
 void nr_pdsch_config_sweep_bind_length(const nr_pdsch_sweep_ticket_t *t, int length, uint64_t slot);
 void nr_pdsch_config_sweep_reopen_length(uint16_t rnti, int old_length);
+/* DL 1_1 relock only; transfer ordering hints to the new length's configuration keys. */
+void nr_pdsch_config_sweep_relock_length(uint16_t rnti, bool uplink, int old_length, int new_length);
+uint64_t nr_pdsch_config_sweep_catalog_copies(void); /* diagnostic: actual template copies */
 /** Local recovery policy; never changes the hypothesis winner/validation criteria.
  * A failure streak must exceed the minimum AND contradict the conservative learned
  * CRC lower bound. This is a health trigger, not an inferred BWP-change assertion.

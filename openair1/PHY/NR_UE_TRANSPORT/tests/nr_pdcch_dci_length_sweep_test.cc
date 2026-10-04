@@ -995,7 +995,7 @@ static nr_pdcch_dci_length_store_t *epoch_store;
 static void length_epoch_test_listener(const nr_cfg_epoch_snapshot_t *s) {
   nr_pdcch_dci_length_store_epoch(epoch_store, s);
 }
-TEST(DciLengthEpoch, SoftBumpMakesLockedSuspectKeepsOldFirst) {
+TEST(DciLengthEpoch, DedicatedChangeReverifiesLengthsAndTd) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
   nr_cfg_epoch_reset();
   nr_pdcch_dci_length_store_t store{};
@@ -1005,7 +1005,8 @@ TEST(DciLengthEpoch, SoftBumpMakesLockedSuspectKeepsOldFirst) {
   nr_pdcch_dci_length_context_add(c, 53, 10);
   epoch_store = &store;
   nr_cfg_epoch_subscribe(length_epoch_test_listener);
-  nr_cfg_epoch_note_bwp_change();
+  nr_cfg_epoch_note_rnti_reopened(0x1111, true, 100);
+  nr_cfg_epoch_note_rnti_reopened(0x2222, true, 101);
   nr_cfg_epoch_drain();
   EXPECT_EQ(c->len_state, NR_LEN_SUSPECT);
   EXPECT_EQ(c->found[1], 0);
@@ -1034,6 +1035,44 @@ TEST(DciLengthEpoch, HardResetNeverReusesOldIdentityState) {
   EXPECT_NE(old, fresh);
   EXPECT_EQ(nr_pdcch_dci_length_context(fresh, 42, 0x1234)->found[0], 0);
   EXPECT_EQ(nr_pdcch_dci_length_context(old, 42, 0x1234)->found[0], 47); // dormant
+  for (auto &e : store.coreset) free(e.bank);
+  nr_cfg_epoch_reset();
+}
+
+TEST(DciLengthEpoch, ShortGapSoftDoesNotReverifyAll) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdcch_dci_length_store_t store{};
+  auto *bank = nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  auto *c = nr_pdcch_dci_length_context(bank, 42, 0x1234);
+  nr_pdcch_dci_length_context_lock(c, 47);
+  nr_pdcch_dci_length_context_add(c, 53, 10);
+  for (int cause = 0; cause < 3; ++cause) {
+    bank->cell_len = 47;
+    if (cause == 0) nr_cfg_epoch_note_continuity_loss_samples(9, 1);
+    if (cause == 1) nr_cfg_epoch_note_csirs_map_change();
+    if (cause == 2) nr_cfg_epoch_note_bwp_change();
+    EXPECT_EQ(nr_pdcch_dci_length_store_get(&store, 42, nullptr), bank);
+    EXPECT_EQ(bank->cell_len, 0);
+    EXPECT_EQ(c->len_state, NR_LEN_LOCKED);
+    EXPECT_EQ(c->found[0], 47);
+    EXPECT_EQ(c->found[1], 53);
+  }
+  for (auto &e : store.coreset) free(e.bank);
+  nr_cfg_epoch_reset();
+}
+
+TEST(DciLengthEpoch, LazyLookupCannotMissHardBeforeSoft) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdcch_dci_length_store_t store{};
+  auto *bank = nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  auto *c = nr_pdcch_dci_length_context(bank, 42, 0x1234);
+  nr_pdcch_dci_length_context_lock(c, 47);
+  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_note_bwp_change();
+  nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  EXPECT_EQ(c->len_state, NR_LEN_SUSPECT);
   for (auto &e : store.coreset) free(e.bank);
   nr_cfg_epoch_reset();
 }

@@ -674,7 +674,7 @@ nr_pdcch_dci_length_bank_t *nr_pdcch_dci_length_store_get(
 {
   if (!store || !key)
     return NULL;
-  if (nr_cfg_reconf_enabled()) {
+  if (nr_cfg_reconf_enabled() && store->config_epoch != nr_cfg_epoch_current()) {
     const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
     nr_pdcch_dci_length_store_epoch(store, &s);
   }
@@ -789,6 +789,7 @@ bool nr_pdcch_dci_length_scout_due(nr_pdcch_dci_length_bank_t *bank)
 void nr_pdcch_dci_length_store_epoch(nr_pdcch_dci_length_store_t *store, const nr_cfg_epoch_snapshot_t *s)
 {
   if (!store || !s || s->epoch <= store->config_epoch) return;
+  const bool reverify = nr_cfg_epoch_reverifies(s, store->config_epoch);
   store->config_epoch = s->epoch;
   if (store->identity_gen != s->identity_gen) {
     store->identity_gen = s->identity_gen;
@@ -800,6 +801,7 @@ void nr_pdcch_dci_length_store_epoch(nr_pdcch_dci_length_store_t *store, const n
     if (!e->used || !e->bank || e->identity_gen != s->identity_gen) continue;
     nr_pdcch_dci_length_bank_t *b = e->bank;
     b->cell_len = b->first_len = b->first_rnti = 0;
+    if (!reverify) continue; /* narrow SOFT withdraws only the cell-wide published length */
     b->anonymous_found = b->anonymous_rnti = 0;
     b->anonymous_exhausted = false;
     nr_pdcch_dci_length_sweep_reset(&b->anonymous);

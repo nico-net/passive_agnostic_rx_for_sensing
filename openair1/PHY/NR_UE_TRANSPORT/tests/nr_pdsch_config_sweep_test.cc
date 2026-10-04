@@ -4216,7 +4216,7 @@ TEST(PdschEpoch, LeversFeedbackDropsOnceAcrossBump)
   uint64_t dropped = 0;
   {
     NR_CFG_EPOCH_WORK(nr_cfg_epoch_current(), &dropped);
-    nr_cfg_epoch_note_bwp_change();
+    nr_cfg_epoch_note_continuity_loss();
     nr_pdsch_sweep_ticket_t stale_selection{};
     nr_pdsch_cfg_hypothesis_t h{};
     EXPECT_FALSE(nr_pdsch_config_sweep_select(992, 0x4602, 0, 2, 0, test_legal, &stale_selection, &h));
@@ -4312,13 +4312,14 @@ TEST(PdschEpoch, SelectionStraddleDoesNotPublishVerifyContext)
   nr_pdsch_config_sweep_reset_all();
 }
 
-TEST_F(PdschRecovery, SoftBumpMakesLockedSuspectKeepsOldFirst) {
+TEST_F(PdschRecovery, DedicatedChangeReverifiesLengthsAndTd) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
   nr_cfg_epoch_reset();
   nr_pdsch_config_sweep_reset_all();
   const auto old = recovery_settle(2);
   ASSERT_TRUE(old.settled);
-  nr_cfg_epoch_note_bwp_change();
+  nr_cfg_epoch_note_rnti_reopened(0x1111, true, 100);
+  nr_cfg_epoch_note_rnti_reopened(0x2222, true, 101);
   nr_cfg_epoch_drain();
   const auto fresh = recovery_select();
   EXPECT_FALSE(fresh.settled);
@@ -4374,4 +4375,126 @@ TEST_F(PdschRecovery, ReopenContextNotesEpochSource) {
   }
   EXPECT_EQ(nr_cfg_epoch_current(), 1u);
   EXPECT_EQ(nr_cfg_epoch_snapshot().last_cause, NR_CAUSE_DEDICATED_CHANGE_SUSPECTED);
+}
+
+TEST_F(PdschRecovery, VerifySurvivesPruneAndRebuild) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  ASSERT_TRUE(recovery_settle(2).settled);
+  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_drain();
+  auto t = recovery_select();
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  const auto hint = st.verify_hint;
+  ASSERT_EQ(st.verify_left, 31);
+  // A real destructive catalogue prune, then the same template rebuild used by context_catalog.
+  const int before = st.n_hyp;
+  nr_pdsch_config_sweep_prune_keep(&st, [](const nr_pdsch_cfg_hypothesis_t *h, const void *) {
+    return h->k0 == 0;
+  }, nullptr);
+  ASSERT_LT(st.n_hyp, before);
+  EXPECT_EQ(st.verify_left, 31);
+  nr_pdsch_config_sweep_rebuild(&st, 0, 0, recovery_legal);
+  EXPECT_EQ(st.verify_left, 31);
+  EXPECT_EQ(nr_td_geom_key(&st.verify_hint), nr_td_geom_key(&hint));
+  int preferred = 1; // the first selection above
+  for (int left = 31; left; --left) {
+    nr_pdsch_cfg_hypothesis_t out{};
+    const int i = nr_pdsch_config_sweep_next(&st, &out);
+    ASSERT_GE(i, 0);
+    if (left % 4 != 1) {
+      EXPECT_EQ(nr_td_geom_key(&st.hyp[i]), nr_td_geom_key(&hint));
+      EXPECT_EQ(st.hyp[i].mcs_table, hint.mcs_table);
+      ++preferred;
+    }
+    EXPECT_EQ(st.verify_left, left - 1);
+  }
+  EXPECT_EQ(preferred, 24);
+}
+
+TEST_F(PdschRecovery, ShortGapSoftDoesNotReverifyAll) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  const auto old = recovery_settle(2);
+  for (int cause = 0; cause < 3; ++cause) {
+    if (cause == 0) nr_cfg_epoch_note_continuity_loss_samples(9, 1);
+    if (cause == 1) nr_cfg_epoch_note_csirs_map_change();
+    if (cause == 2) nr_cfg_epoch_note_bwp_change();
+    nr_cfg_epoch_drain();
+    const auto t = recovery_select();
+    EXPECT_TRUE(t.settled);
+    EXPECT_EQ(t.generation, old.generation);
+  }
+}
+
+TEST_F(PdschRecovery, LazyVerifyNoBulkCopy) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  for (int i = 0; i < 16; ++i) recovery_settle(2, 1, 800 + i, 0x4601 + i);
+  const auto copies = nr_pdsch_config_sweep_catalog_copies();
+  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(nr_pdsch_config_sweep_catalog_copies(), copies);
+  EXPECT_EQ(nr_pdsch_config_sweep_settled_count(), 0);
+  EXPECT_FALSE(recovery_select().settled);
+  EXPECT_EQ(nr_pdsch_config_sweep_catalog_copies(), copies + 1);
+  recovery_select();
+  EXPECT_EQ(nr_pdsch_config_sweep_catalog_copies(), copies + 1);
+}
+TEST_F(PdschRecovery, UlRelockLeavesDlAloneAndDlCarriesHintToNewKey) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  const uint64_t old_key = (UINT64_C(800) ^ 47) * UINT64_C(1099511628211);
+  const uint64_t new_key = (UINT64_C(800) ^ 53) * UINT64_C(1099511628211);
+  const auto old = recovery_settle(2, 1, old_key);
+  nr_pdsch_config_sweep_bind_length(&old, 47, 100);
+  nr_pdsch_config_sweep_relock_length(0x4601, true, 47, 53);
+  EXPECT_TRUE(recovery_select(old_key).settled);
+  EXPECT_EQ(recovery_select(old_key).generation, old.generation);
+  nr_pdsch_config_sweep_relock_length(0x4601, false, 47, 53);
+  const auto fresh = recovery_select(new_key);
+  EXPECT_FALSE(fresh.settled);
+  EXPECT_EQ(fresh.hypothesis, old.hypothesis);
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&fresh, &st));
+  EXPECT_EQ(st.verify_left, 31);
+  for (int i = 0; i < st.n_hyp; ++i) EXPECT_EQ(st.ok[i], 0u);
+}
+TEST_F(PdschRecovery, ReopenUsesCurrentSlotWithoutLengthBinding) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  for (int i = 0; i < 3; ++i) {
+    const auto cfg = 800 + i;
+    const auto rnti = 0x4601 + i;
+    recovery_settle(2, 1, cfg, rnti);
+    nr_cfg_epoch_tick(i == 0 ? 100 : 10000);
+    for (int j = 0; j < 5000 && nr_pdsch_config_sweep_is_settled(cfg, rnti, 0, 0); ++j) {
+      const auto t = recovery_select(cfg, rnti);
+      nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+    }
+    EXPECT_EQ(nr_cfg_epoch_current(), i == 2 ? 1u : 0u);
+  }
+}
+
+TEST_F(PdschRecovery, LazyLookupCannotMissHardBeforeSoft) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  const auto old = recovery_settle(2);
+  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_note_bwp_change();
+  const auto fresh = recovery_select(); // synchronise before callbacks drain
+  EXPECT_FALSE(fresh.settled);
+  EXPECT_NE(fresh.generation, old.generation);
+  EXPECT_EQ(fresh.hypothesis, old.hypothesis);
+  const auto copies = nr_pdsch_config_sweep_catalog_copies();
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(nr_pdsch_config_sweep_catalog_copies(), copies);
+  EXPECT_EQ(recovery_select().generation, fresh.generation);
 }

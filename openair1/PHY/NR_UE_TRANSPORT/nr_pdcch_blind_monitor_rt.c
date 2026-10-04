@@ -1201,10 +1201,10 @@ static uint32_t reconf_n_suspect(void)
   return v;
 }
 
-static void reconf_length_reopened(uint16_t rnti, int old_len, int new_len)
+static void reconf_length_reopened(uint16_t rnti, bool uplink, int old_len, int new_len)
 {
   LOG_A(PHY, "SENSING: DCI length RELOCK rnti=0x%04x old=%d new=%d\n", rnti, old_len, new_len);
-  nr_pdsch_config_sweep_reopen_length(rnti, old_len);
+  nr_pdsch_config_sweep_relock_length(rnti, uplink, old_len, new_len);
   /* context_lock/add already invalidates the replaced per-length pin under the
    * length lock. The legacy global pin is not used by the RECONF auto path. */
 }
@@ -4399,7 +4399,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         } else if (found_len > 0 && dl_second) {
           const int replaced = nr_pdcch_dci_length_context_add(dlc, found_len, abs_slot);
           nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
-          if (replaced > 0) nr_pdsch_config_sweep_reopen_length(locked_rnti, replaced);
+          if (replaced > 0) nr_pdsch_config_sweep_relock_length(locked_rnti, false, replaced, found_len);
           nr_pdcch_dci_length_sweep_reset(&dlc->state);
           dlc->scout_initialized = false;
           LOG_A(PHY, "SENSING: DCI 1_1 additional length coreset=%llu rnti=0x%x len=%d replaced=%d\n",
@@ -4409,7 +4409,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             const int old_len = reconf_lengths_enabled()
                 ? nr_pdcch_dci_length_context_lock(dlc, found_len) : 0;
             if (!reconf_lengths_enabled()) dlc->found[0] = found_len;
-            if (old_len > 0 && old_len != found_len) reconf_length_reopened(locked_rnti, old_len, found_len);
+            if (old_len > 0 && old_len != found_len) reconf_length_reopened(locked_rnti, false, old_len, found_len);
             nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
           } else {
             dl_bank->anonymous_found = found_len;
@@ -4712,7 +4712,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             const int old_len = reconf_lengths_enabled()
                 ? nr_pdcch_dci_length_context_lock(ulc, found) : 0;
             if (!reconf_lengths_enabled()) ulc->found[0]=found;
-            if (old_len > 0 && old_len != found) reconf_length_reopened(boot_rnti, old_len, found);
+            if (old_len > 0 && old_len != found) reconf_length_reopened(boot_rnti, true, old_len, found);
             LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x (occasions=%d polar_decodes=%llu)\n",
                   found,boot_rnti,ulc->state.occasions_fed,(unsigned long long)ulc->state.decodes);
             /* Publish to the bank. On agreement between two distinct RNTIs this becomes the cell-wide
