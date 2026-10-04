@@ -2488,6 +2488,16 @@ once-only dropped-epoch count. Main defaults are retained; R10/R11 and K48 remai
 Full test/shuffle results, conflict decisions and exact flag-off/on 4-RX gates:
 [RI report](docs/superpowers/reports/rr/RI.md).
 
+[CODE-READ; OFFLINE VERIFIED, DGX aarch64, 2026-10-04, rr/w2-uectx] R17b corrects
+UeContext's trusted-only reconfiguration inference, invalid-slot epoch notes,
+DCI-SUSPECT epoch wiring, mixed 0_0/0_1 and CSS configuration flapping, and DCI-only
+UE aging. The writer's shutdown handshake now uses sequential consistency; active
+RNTIs use a direct index and aging scans run once per second. CORESET packing is
+shared between accept and removal paths. A C-writer JSON fixture is parsed by the
+offline report test, which labels CSI-RS evidence as coincident with the request
+slot. Live false-trigger and drop-rate behavior remains unmeasured. Test results
+and deferred 4-RX commands: [R17b report](docs/superpowers/reports/rr/R17b.md).
+
 ## 25. Next steps on the DGX Spark (strict order)
 
 **Progress 2026-09-30:** steps 1–4 **done** (§4.2). Step 5: OAI build done (UHD 4.11 installed; X410 compat still to

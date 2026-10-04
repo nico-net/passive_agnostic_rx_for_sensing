@@ -29,6 +29,7 @@
 #include "L2_interface_ue.h"
 #include "LAYER2/NR_MAC_UE/mac_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 
 #include "intertask_interface.h"
@@ -2279,6 +2280,7 @@ static void nr_rrc_ue_decode_NR_BCCH_DL_SCH_Message(NR_UE_RRC_INST_t *rrc,
           NR_UE_MAC_INST_t *mac = get_mac_inst(rrc->ue_id);
           const uint32_t hash = nr_passive_sib1_semantic_hash(sib1, mac->physCellId);
           const uint64_t abs_slot = nr_cfg_epoch_observe_slot(frame, slot, 10u << mac->numerology);
+          if (nr_ue_ctx_enabled()) nr_ue_ctx_on_sib1(hash, abs_slot);
           if (!nr_cfg_epoch_note_sib1(hash, abs_slot)) break;
           if (nr_pdcch_blind_sib1_semantic_hash() == hash) break;
         }

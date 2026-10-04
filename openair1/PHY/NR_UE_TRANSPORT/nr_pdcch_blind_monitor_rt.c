@@ -44,6 +44,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
 #include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
@@ -1222,10 +1223,27 @@ static uint64_t length_coreset_key(const nr_pdcch_blind_monitor_cfg_t *cfg)
   return h ? h : 1;
 }
 
+static int64_t ue_ctx_coreset_packed(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  return (int64_t)(cfg->bwp_start+cfg->coreset_rb_offset) |
+         ((int64_t)(cfg->coreset_freq_domain*6) << 16) |
+         ((int64_t)cfg->coreset_duration << 32);
+}
+
 /* Called at bank compaction, after every dispatcher that borrowed the old entry has left. */
 static void bank_reopen_geometry(const nr_pdcch_blind_monitor_cfg_t *cfg, void *unused)
 {
   (void)unused;
+  if (nr_ue_ctx_enabled()) {
+    /* cfg is the first field of the bank entry and remains borrowed until this removal hook
+     * returns. The hook runs under the bank lock, so only enqueue immutable copies here. */
+    const nr_pdcch_discovered_coreset_t *entry=(const nr_pdcch_discovered_coreset_t *)cfg;
+    const int64_t packed=ue_ctx_coreset_packed(cfg);
+    for (int i=0;i<entry->nowners;i++)
+      if (entry->owners[i])
+        nr_ue_ctx_on_param(entry->owners[i],NR_UEP_CORESET,packed,NR_UEV_SUSPECT,
+                           NR_UEC_CORESET_CHANGE,-1);
+  }
   const uint64_t key = length_coreset_key(cfg);
   nr_pdcch_dci_length_store_t *stores[] = {&g_dl_length_store, &g_ul_length_store};
   pthread_mutex_t *locks[] = {&g_dl_length_lock, &ul_length_lock};
@@ -4274,8 +4292,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
               nr_pdcch_dci_length_context_note_occasion(c,
                   c->last_accept_slot == c->last_note_slot,
                   nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1), reconf_n_suspect());
-              if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on)
+              if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
+                if (nr_ue_ctx_enabled())
+                  nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
+                                     NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
                 nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
+              }
             }
             c->last_note_slot = abs_slot;
           }
@@ -4394,8 +4416,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         discovery_scope.phase = 2;
         if (found_len > 0 && dl_scout) {
           nr_pdcch_dci_length_context_note_occasion(dlc, false, true, reconf_n_suspect());
-          if (dlc->len_state == NR_LEN_SUSPECT && cfg_reconf_on)
+          if (dlc->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
+            if (nr_ue_ctx_enabled())
+              nr_ue_ctx_on_param(dlc->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
+                                 NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
             nr_cfg_epoch_note_rnti_reopened(dlc->rnti, true, cfg_abs_slot);
+          }
         } else if (found_len > 0 && dl_second) {
           const int replaced = nr_pdcch_dci_length_context_add(dlc, found_len, abs_slot);
           nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
@@ -4405,6 +4431,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           LOG_A(PHY, "SENSING: DCI 1_1 additional length coreset=%llu rnti=0x%x len=%d replaced=%d\n",
                 (unsigned long long)dl_geom, locked_rnti, found_len, replaced);
         } else if (found_len > 0) {
+          if (nr_ue_ctx_enabled() && locked_rnti) {
+            nr_ue_ctx_on_param(locked_rnti, NR_UEP_DCI_LEN_DL, found_len,
+                               NR_UEV_TRUSTED, NR_UEC_RELOCK, cfg_abs_slot);
+            nr_ue_ctx_on_param(locked_rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_LOCKED,
+                               NR_UEV_TRUSTED, NR_UEC_CONVERGED, cfg_abs_slot);
+          }
           if (dlc) {
             const int old_len = reconf_lengths_enabled()
                 ? nr_pdcch_dci_length_context_lock(dlc, found_len) : 0;
@@ -4571,8 +4603,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             nr_pdcch_dci_length_context_note_occasion(c,
                 c->last_accept_slot == c->last_note_slot,
                 nr_pdcch_blind_rnti_bootstrap_recent(c->rnti, abs_slot, 1), reconf_n_suspect());
-            if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on)
+            if (c->len_state == NR_LEN_SUSPECT && cfg_reconf_on) {
+              if (nr_ue_ctx_enabled())
+                nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
+                                   NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
               nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
+            }
           }
           c->last_note_slot = abs_slot;
         }
@@ -4702,6 +4738,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             ++supported_lengths;
         if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
            ulc->state.bootstrap_hits[found]>=3) {
+          if (nr_ue_ctx_enabled()) {
+            nr_ue_ctx_on_param(boot_rnti, NR_UEP_DCI_LEN_UL, found,
+                               NR_UEV_TRUSTED, NR_UEC_RELOCK, cfg_abs_slot);
+            nr_ue_ctx_on_param(boot_rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_LOCKED,
+                               NR_UEV_TRUSTED, NR_UEC_CONVERGED, cfg_abs_slot);
+          }
           if (ul_second) {
             const int replaced = nr_pdcch_dci_length_context_add(ulc, found, abs_slot);
             nr_pdcch_dci_length_sweep_reset(&ulc->state);
@@ -5837,6 +5879,25 @@ constdiag_done:;
         cand_task[ti].ok = false; /* same UL DCI already accepted by another pass this slot */
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
+        if (nr_ue_ctx_enabled()) {
+          const int64_t coreset = ue_ctx_coreset_packed(cfg);
+          nr_ue_ctx_on_dci_accept(u->rnti,u->ul_dci_format==NR_BLIND_UL_DCI_FORMAT_0_1,
+                                  true,cfg->coreset_type==0 && cfg->dci10_ss_type==NR_BLIND_SS_UE_SPECIFIC,
+                                  u->dci_length,coreset,rel15->coreset.pdcch_dmrs_scrambling_id,
+                                  source_absolute_slot);
+          if (u->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1 && u->csi_request != 0) {
+            fapi_nr_dl_config_csirs_pdu_rel15_t observed;
+            const bool have_resource = source_absolute_slot >= 0
+                && nr_csirs_blind_rt_observed_nzp((uint32_t)source_absolute_slot, &observed);
+            const nr_ue_csi_resource_t resource = have_resource
+                ? (nr_ue_csi_resource_t){.row=observed.row, .symb_l0=observed.symb_l0,
+                    .freq_domain=observed.freq_domain, .start_rb=observed.start_rb,
+                    .nr_of_rbs=observed.nr_of_rbs, .scramb_id=observed.scramb_id}
+                : (nr_ue_csi_resource_t){0};
+            nr_ue_ctx_on_dci01_csi(u->rnti, u->csi_request, source_absolute_slot,
+                                    have_resource ? &resource : NULL);
+          }
+        }
         if (reconf_lengths_enabled() && t_bank_index >= 0)
           nr_pdcch_coreset_bank_note_dci(t_bank_index, t_bank_slot, u->rnti,
                                          nr_dci_bits_hash(&u->raw_payload, u->dci_length));
@@ -6274,6 +6335,15 @@ constdiag_done:;
                                     out.mismatched_bits, ue->dci_thres))
       nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
     NR_BLIND_CTR_INC(g_accepts);
+    if (nr_ue_ctx_enabled() && out.rnti) {
+      nr_ue_ctx_on_param(out.rnti, NR_UEP_RNTI_CLASS, out.rnti_class,
+                         NR_UEV_TRUSTED, NR_UEC_FIRST_LEARNED, source_absolute_slot);
+      const int64_t coreset = ue_ctx_coreset_packed(cfg);
+      nr_ue_ctx_on_dci_accept(out.rnti,out.dci_format==NR_BLIND_DCI_FORMAT_1_1,
+                              false,cfg->coreset_type==0 && cfg->dci10_ss_type==NR_BLIND_SS_UE_SPECIFIC,
+                              cand_task[ti].dci_length,coreset,rel15->coreset.pdcch_dmrs_scrambling_id,
+                              source_absolute_slot);
+    }
     if (al1_bank >= 0 && !cand_task[ti].ul_scan && al1_from_ladder(cand_task[ti].e_rx, pdcch_e_rx)
         && nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti))
       al1_union_accept(al1_bank, cand_task[ti].L, cand_task[ti].cce, num_cces, (const uint16_t (*)[6])al1_vset,
@@ -6293,6 +6363,13 @@ constdiag_done:;
       pthread_mutex_unlock(&g_pbwp_lock);
       if (sw && cfg_reconf_on)
         nr_cfg_epoch_note_bwp_change();
+      if (sw && nr_ue_ctx_enabled() && pbwp_snap[cand_task[ti].bwp_entry].start >= 0) {
+        const int64_t bwp = (int64_t)(uint16_t)pbwp_snap[cand_task[ti].bwp_entry].start |
+                            ((int64_t)cand_task[ti].bwp_size << 16) |
+                            ((int64_t)(fp->subcarrier_spacing / 1000) << 32);
+        nr_ue_ctx_on_param(out.rnti, NR_UEP_BWP, bwp, NR_UEV_TRUSTED,
+                           NR_UEC_BWP_CHANGE, source_absolute_slot);
+      }
       if (sw)
         LOG_A(PHY, "SENSING: BWP SWITCH rnti=0x%x -> entry %d (len %u, start %d, size %u), switches=%u\n",
               out.rnti, cand_task[ti].bwp_entry, cand_task[ti].dci_length,

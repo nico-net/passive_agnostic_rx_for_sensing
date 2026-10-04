@@ -1,4 +1,5 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -446,6 +447,7 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
         /* TRUSTED: live at one sighting. See this file's header note and the RAR chain above --
          * three independent checks passed before this line, and a TC-RNTI cannot repeat. */
         nr_pdcch_blind_rnti_bootstrap_record_verified(tc_rnti, NR_BLIND_RNTI_CLASS_TC, abs_slot);
+        if (nr_ue_ctx_enabled()) nr_ue_ctx_on_anchor(tc_rnti, NR_BLIND_RNTI_CLASS_TC, abs_slot);
         /* FRAME-DERIVED, to match what the accept path asks with. slots_per_frame = 10 << mu,
          * never a hardcoded 10 (valid only at 15 kHz, and it has broken a slow-time axis here
          * before). */
@@ -1489,7 +1491,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
                 job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
       }
-      if (nr_passive_obs_enabled() && !job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+      if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled()) && !job.layout_probe &&
+          (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
         /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). Non-blocking. */
         struct timespec ts_;
         clock_gettime(CLOCK_MONOTONIC, &ts_);
@@ -1515,7 +1518,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             .carrier_hz = ofp_->dl_CarrierFreq ? (int64_t)ofp_->dl_CarrierFreq : -1,
             .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
             .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
-        nr_passive_obs_push(&o_);
+        if (nr_passive_obs_enabled()) nr_passive_obs_push(&o_);
+        if (nr_ue_ctx_enabled()) {
+          nr_ue_ctx_on_obs(&o_);
+          if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !no_harq_)
+            nr_ue_ctx_on_param(job.rnti, NR_UEP_PDSCH_SCR_ID, job.dlsch_pdu.dlDataScramblingId,
+                               NR_UEV_TRUSTED, NR_UEC_CONVERGED, job.absolute_slot);
+        }
       }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
@@ -1557,6 +1566,23 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
 static void report_sweep(const nr_pdsch_sweep_report_t *r)
 {
+  if (nr_ue_ctx_enabled() && r->rnti) {
+    if (r->invalidated)
+      nr_ue_ctx_on_param(r->rnti, NR_UEP_TD_STATE, 2, NR_UEV_SUSPECT, NR_UEC_REOPENED_NEW_WINNER, -1);
+    else if (!r->operational && r->winner >= 0) {
+      const nr_pdsch_cfg_hypothesis_t *h = &r->hypothesis;
+      const int64_t packed = (int64_t)h->tda_start | ((int64_t)h->tda_length << 4) |
+                             ((int64_t)h->k0 << 8) | ((int64_t)h->mapping_type << 14) |
+                             ((int64_t)h->dmrs_add_pos << 15) | ((int64_t)(h->dmrs_max_len == 2) << 17) |
+                             ((int64_t)h->dmrs_mask << 18);
+      nr_ue_ctx_on_param(r->rnti, NR_UEP_TD_WINNER, packed, NR_UEV_TRUSTED, NR_UEC_CONVERGED, -1);
+      nr_ue_ctx_on_param(r->rnti, NR_UEP_MCS_TABLE, h->mcs_table, NR_UEV_TRUSTED, NR_UEC_CONVERGED, -1);
+      const int64_t dmrs = h->dmrs_add_pos | ((int64_t)(h->dmrs_max_len == 2) << 2) |
+                           ((int64_t)h->dmrs_mask << 3);
+      nr_ue_ctx_on_param(r->rnti, NR_UEP_DMRS_CFG, dmrs, NR_UEV_TRUSTED, NR_UEC_CONVERGED, -1);
+      nr_ue_ctx_on_param(r->rnti, NR_UEP_TD_STATE, 1, NR_UEV_TRUSTED, NR_UEC_CONVERGED, -1);
+    }
+  }
   if (r->invalidated) {
     LOG_W(PHY,"PDSCH_RELEARN reason=CRC_EVIDENCE_LOSS config=%lx rnti=0x%x tda=%u "
               "generation=%lu->%lu reacquisitions=%lu consecutive_failures=%lu "

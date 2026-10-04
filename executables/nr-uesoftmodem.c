@@ -18,6 +18,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/ran_context.h"
 #include "common/config/config_userapi.h"
@@ -252,6 +253,17 @@ int main(int argc, char **argv)
   nr_csirs_monitor_init();
   // Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.
   nr_pdcch_blind_monitor_init();
+  if (nr_cfg_reconf_enabled()) {
+    const char *uectx_path = getenv("ISAC_UECTX_PATH");
+    if (uectx_path && *uectx_path) {
+      const char *period_env = getenv("ISAC_UECTX_PERIOD_S");
+      const double period = period_env && *period_env ? atof(period_env) : 5.0;
+      if (nr_ue_ctx_open(uectx_path, 16384, period))
+        nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
+      else
+        LOG_W(PHY, "SENSING: ISAC_UECTX_PATH set but writer could not be opened\n");
+    }
+  }
   // Per-grant observation API (Task A3): JSONL of every decoded PDSCH/PUSCH grant; off unless ISAC_OBS_PATH is set.
   {
     const char *obs_path = getenv("ISAC_OBS_PATH");
@@ -530,6 +542,14 @@ int main(int argc, char **argv)
   }
 
   nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)
+  const bool uectx_was_open = nr_ue_ctx_enabled();
+  nr_ue_ctx_close();
+  if (uectx_was_open) {
+    uint64_t events = 0, lines = 0, dropped = 0;
+    nr_ue_ctx_stats(&events, &lines, &dropped);
+    LOG_I(PHY, "SENSING: UECTX_STATS events=%llu written=%llu dropped=%llu\n",
+          (unsigned long long)events, (unsigned long long)lines, (unsigned long long)dropped);
+  }
 
   nrue_ru_end();
 

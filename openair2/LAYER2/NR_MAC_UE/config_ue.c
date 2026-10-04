@@ -23,6 +23,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 
 #define ASIGN_P_VAL(dst, src) \
@@ -2608,6 +2609,27 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
    * and the caller frees the ASN.1 struct straight after, so this is the last point at which the
    * decoded common CORESET / search spaces still exist. */
   publish_sib1_pdcch_prior(mac, scc);
+  if (nr_ue_ctx_enabled()) {
+    const NR_BWP_t *g = &scc->downlinkConfigCommon.initialDownlinkBWP.genericParameters;
+    const int start = NRRIV2PRBOFFSET(g->locationAndBandwidth, MAX_BWP_SIZE);
+    const int size = NRRIV2BW(g->locationAndBandwidth, MAX_BWP_SIZE);
+    const int64_t packed = (int64_t)(uint16_t)start | ((int64_t)(uint16_t)size << 16) |
+                           ((int64_t)(15u << g->subcarrierSpacing) << 32);
+    nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_BWP, packed, -1);
+    const NR_SetupRelease_PDSCH_ConfigCommon_t *pc = scc->downlinkConfigCommon.initialDownlinkBWP.pdsch_ConfigCommon;
+    if (pc && pc->present == NR_SetupRelease_PDSCH_ConfigCommon_PR_setup &&
+        pc->choice.setup->pdsch_TimeDomainAllocationList) {
+      const NR_PDSCH_TimeDomainResourceAllocationList_t *list = pc->choice.setup->pdsch_TimeDomainAllocationList;
+      uint32_t hash = 2166136261u;
+      for (int i = 0; i < list->list.count; i++) {
+        const NR_PDSCH_TimeDomainResourceAllocation_t *row = list->list.array[i];
+        const uint32_t values[] = {(uint32_t)row->startSymbolAndLength, (uint32_t)row->mappingType,
+                                   row->k0 ? (uint32_t)*row->k0 : 0u};
+        for (unsigned j = 0; j < 3; j++) { hash ^= values[j]; hash *= 16777619u; }
+      }
+      nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_TDRA_HASH, hash, -1);
+    }
+  }
 
   if (passive_acquisition_sib1(mac, scc)) {
     ret = pthread_mutex_unlock(&mac->if_mutex);
