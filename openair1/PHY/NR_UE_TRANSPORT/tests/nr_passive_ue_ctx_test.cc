@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 #include "nr_passive_ue_ctx.h"
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 #include <unistd.h>
 
 static std::atomic<int> reopened_count{0};
@@ -102,7 +105,52 @@ TEST_F(UeContext, EpochBumpContradictedEmitsDiscardedAndChange) {
   nr_ue_ctx_on_epoch(&bump);
   nr_ue_ctx_on_param(8,NR_UEP_DCI_LEN_DL,53,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,20);
   auto s=contents(); EXPECT_NE(s.find("\"cause\":\"EPOCH_DISCARDED\""),std::string::npos);
-  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),1);
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
+}
+TEST_F(UeContext, StateFlapIsNotReconfig) {
+  for (auto p : {NR_UEP_TD_STATE, NR_UEP_DCI_LEN_STATE}) {
+    nr_ue_ctx_on_param(18,p,1,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+    nr_ue_ctx_on_param(18,p,2,NR_UEV_SUSPECT,NR_UEC_REOPENED_NEW_WINNER,20);
+    nr_ue_ctx_on_param(18,p,1,NR_UEV_TRUSTED,NR_UEC_CONVERGED,30);
+  }
+  auto s=contents();
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
+  EXPECT_EQ(reopened_count.load(),0);
+}
+TEST_F(UeContext, Mixed00And01NoFlapping) {
+  nr_ue_ctx_on_dci_accept(21,true,true,true,52,0x100020003,55,10);
+  nr_ue_ctx_on_dci_accept(21,false,true,false,34,0x200020003,1,11);
+  nr_ue_ctx_on_dci_accept(21,true,true,true,52,0x100020003,55,12);
+  auto s=contents(); nr_ue_ctx_t c{};
+  ASSERT_TRUE(nr_ue_ctx_get(21,&c));
+  EXPECT_EQ(c.cfg[NR_UEP_DCI_LEN_UL].value,52);
+  EXPECT_EQ(c.cfg[NR_UEP_CORESET].value,0x100020003);
+  EXPECT_EQ(c.cfg[NR_UEP_PDCCH_SCR_ID].value,55);
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
+}
+TEST_F(UeContext, NoEpochNoteWithoutSlot) {
+  nr_ue_ctx_on_param(19,NR_UEP_TD_WINNER,1,NR_UEV_TRUSTED,NR_UEC_CONVERGED,-1);
+  nr_ue_ctx_on_param(19,NR_UEP_TD_WINNER,2,NR_UEV_TRUSTED,NR_UEC_REOPENED_NEW_WINNER,-1);
+  EXPECT_EQ(count(contents(),"\"type\":\"ue_reconfig\""),1);
+  EXPECT_EQ(reopened_count.load(),0);
+}
+TEST_F(UeContext, DciOnlyActivityPreventsGone) {
+  const auto start=std::chrono::steady_clock::now();
+  const auto ns=(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
+  auto o=grant(20,ns-59000000000ull,1); nr_ue_ctx_on_obs(&o);
+  nr_ue_ctx_on_param(20,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,59001);
+  nr_ue_ctx_tick(61000,ns+2000000000ull);
+  contents(); nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(20,&c));
+  EXPECT_NE(c.state,NR_UE_GONE);
+}
+TEST_F(UeContext, CsiActivityPreventsGone) {
+  const auto ns=(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  auto o=grant(22,ns-59000000000ull,1); nr_ue_ctx_on_obs(&o);
+  nr_ue_ctx_on_aperiodic_csi(22,1,59001,-1);
+  nr_ue_ctx_tick(61000,ns+2000000000ull);
+  contents(); nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(22,&c));
+  EXPECT_NE(c.state,NR_UE_GONE);
 }
 TEST_F(UeContext, HardResetClosesOldIdentity) {
   nr_ue_ctx_on_param(9,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
@@ -131,6 +179,17 @@ TEST_F(UeContext, JsonRoundTripSchemaV1) {
   EXPECT_EQ(count(s,"\"type\":\"ue_change\""),1);
   const std::string parse="python3 -c 'import json,sys; [json.loads(line) for line in open(sys.argv[1])]' "+path;
   EXPECT_EQ(std::system(parse.c_str()),0);
+}
+TEST_F(UeContext, WriterFixtureForOfflineTool) {
+  nr_ue_ctx_on_param(0x1234,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  nr_ue_ctx_on_param(0x1234,NR_UEP_DCI_LEN_DL,53,NR_UEV_TRUSTED,NR_UEC_RELOCK,20);
+  auto s=contents();
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),1);
+  if (const char *fixture=std::getenv("ISAC_UECTX_FIXTURE_PATH")) {
+    std::ofstream out(fixture);
+    out << s;
+    ASSERT_TRUE(out.good());
+  }
 }
 TEST_F(UeContext, Sib1ParametersRecordedWhenDecoded) {
   nr_ue_ctx_on_sib1(0x1234,10);
@@ -177,4 +236,22 @@ TEST(UeContextRing, FullRingDropsAndCounts) {
   nr_ue_ctx_close(); unsetenv("ISAC_UECTX_TEST_WRITER_PAUSE_MS"); unlink(name);
   uint64_t events=0,written=0,dropped=0; nr_ue_ctx_stats(&events,&written,&dropped);
   EXPECT_GT(events,0); EXPECT_GT(dropped,0); EXPECT_GT(written,0);
+}
+TEST(UeContextRing, CloseQuiescesConcurrentProducers) {
+  char name[]="/tmp/rr-uectx-close-XXXXXX"; int fd=mkstemp(name); ASSERT_GE(fd,0); close(fd);
+  ASSERT_TRUE(nr_ue_ctx_open(name,64,0));
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> threads;
+  for (int i=0;i<4;i++) threads.emplace_back([&,i] {
+    while (!stop.load(std::memory_order_relaxed))
+      nr_ue_ctx_on_param(100+i,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  nr_ue_ctx_close();
+  stop.store(true,std::memory_order_relaxed);
+  for (auto &thread:threads) thread.join();
+  unlink(name);
+  uint64_t events=0,lines=0,drops=0; nr_ue_ctx_stats(&events,&lines,&drops);
+  EXPECT_GT(events,0);
+  EXPECT_GE(lines,1);
 }

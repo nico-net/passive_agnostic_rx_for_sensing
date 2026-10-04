@@ -12,7 +12,8 @@
  * dmrs_add_pos[15:16],dmrs_max_len[17],dmrs_mask[18:31]; BWP = start[0:15],size[16:31],scs_khz[32:47];
  * CORESET = first_rb[0:15],n_rb[16:31],duration[32:39]. Other scalar values retain their units.
  * APERIODIC_CSI changes carry the DCI 0_1 CSI-request value in new and the observed NZP CSI-RS
- * resource (or null) in evidence; abs_slot is the triggering DCI slot. Resource keys are
+ * resource coincident with the triggering DCI slot (or null) in evidence; this does not identify
+ * the resource selected by the CSI-request field. abs_slot is the triggering DCI slot. Resource keys are
  * row,freq_domain,start_rb,nr_of_rbs,symb_l0,scramb_id. It never emits ue_reconfig.
  * SIB1_HASH, SIB1_BWP and SIB1_TDRA_HASH are present only when an actual SIB1 has been decoded
  * (SA and NSA alike). SIB1_BWP uses the BWP packing above; TDRA_HASH is FNV-1a over common rows.
@@ -76,6 +77,9 @@ bool nr_ue_ctx_open(const char *path, uint32_t ring_capacity, double snapshot_pe
 void nr_ue_ctx_close(void);
 void nr_ue_ctx_on_obs(const nr_passive_obs_t *o);
 void nr_ue_ctx_on_param(uint16_t rnti, nr_ue_param_t p, int64_t value, nr_ue_verif_t v, int cause, int64_t abs_slot);
+/* dedicated_format is 1_1 or 0_1; dedicated_uss excludes common/CSS fallback geometry. */
+void nr_ue_ctx_on_dci_accept(uint16_t rnti, bool dedicated_format, bool is_ul, bool dedicated_uss,
+                             int dci_length, int64_t coreset, int pdcch_scr_id, int64_t abs_slot);
 void nr_ue_ctx_on_anchor(uint16_t rnti, int anchor_kind, int64_t abs_slot);
 void nr_ue_ctx_on_sib1(uint32_t semantic_hash, int64_t abs_slot);
 void nr_ue_ctx_on_sib1_param(nr_ue_param_t p, int64_t value, int64_t abs_slot);
@@ -89,7 +93,7 @@ void nr_ue_ctx_stats(uint64_t *events, uint64_t *written, uint64_t *dropped);
 extern bool nr_ue_ctx_fast_open;
 static inline bool nr_ue_ctx_enabled(void)
 {
-  return __atomic_load_n(&nr_ue_ctx_fast_open, __ATOMIC_RELAXED);
+  return __atomic_load_n(&nr_ue_ctx_fast_open, __ATOMIC_SEQ_CST);
 }
 #ifdef __cplusplus
 }

@@ -8,6 +8,16 @@ from uectx_report import csv_rows, load_records, render, timeline
 
 
 class UeContextReportTest(unittest.TestCase):
+    def test_writer_generated_fixture(self):
+        records = load_records(Path(__file__).with_name("fixture_writer.jsonl"))
+        self.assertEqual({r["type"] for r in records},
+                         {"ue_snapshot", "ue_change", "ue_reconfig"})
+        self.assertEqual(len(timeline(records, 0x1234)), 1)
+        self.assertIn("DCI_LEN_DL: 47 -> 53", render(records))
+        self.assertIn("reconfig DCI_SIZE", render(records))
+        self.assertEqual([r["class"] for r in csv_rows(records)
+                          if r["type"] == "ue_reconfig"], ["DCI_SIZE"])
+
     def test_timeline_change_table_and_csv(self):
         base = {"schema": "uectx/1", "identity_gen": 2, "rnti": 0x1234,
                 "incarnation": 1, "t_mono_ns": 100}
@@ -47,6 +57,13 @@ class UeContextReportTest(unittest.TestCase):
             source.write_text('{"schema":"other","type":"ue_change"}\n')
             with self.assertRaises(ValueError):
                 load_records(source)
+
+    def test_csi_resource_is_labelled_coincident(self):
+        record = {"schema": "uectx/1", "type": "ue_change", "t_mono_ns": 1,
+                  "identity_gen": 0, "rnti": 1, "incarnation": 0,
+                  "param": "APERIODIC_CSI", "old": None, "new": 2,
+                  "cause": "FIRST_LEARNED", "evidence": {"row": 4}}
+        self.assertIn("coincident CSI-RS resource", render([record]))
 
 
 if __name__ == "__main__":

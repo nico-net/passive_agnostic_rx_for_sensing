@@ -2574,9 +2574,10 @@ if(ENABLE_TESTS)
 
   add_executable(test_nr_passive_cfg_epoch ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc
                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c
-                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c)
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
   target_include_directories(test_nr_passive_cfg_epoch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_passive_cfg_epoch PRIVATE UTIL GTest::gtest)
+  target_link_libraries(test_nr_passive_cfg_epoch PRIVATE UTIL GTest::gtest pthread m)
   add_dependencies(tests test_nr_passive_cfg_epoch)
   add_test(NAME test_nr_passive_cfg_epoch COMMAND ./test_nr_passive_cfg_epoch)
   add_test(NAME test_nr_sib1_cache_hint COMMAND test_nr_pdcch_blind_monitor --gtest_filter=Sib1Cache.*:EpochFeedback.*:BlindPdcchTest.NoisePrntiShortOnly*:BlindPdcchTest.Dci10PRntiShortMessageOnly*)

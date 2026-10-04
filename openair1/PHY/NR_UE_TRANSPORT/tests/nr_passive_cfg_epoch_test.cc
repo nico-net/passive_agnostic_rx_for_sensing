@@ -1,12 +1,14 @@
 #include <gtest/gtest.h>
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_cfg_sources.h"
+#include "nr_passive_ue_ctx.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 #include <atomic>
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <unistd.h>
 
 extern "C" {
 configmodule_interface_t *uniqCfg = nullptr;
@@ -151,6 +153,20 @@ TEST_F(CfgEpoch, TwoConvergedRntisWithin2sIsSoft) {
   EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
   nr_cfg_epoch_drain();
   EXPECT_EQ(calls, 1);
+}
+TEST_F(CfgEpoch, SuspectStillReachesEpochWithUeContextOn) {
+  char name[]="/tmp/rr-epoch-uectx-XXXXXX";
+  int fd=mkstemp(name); ASSERT_GE(fd,0); close(fd);
+  ASSERT_TRUE(nr_ue_ctx_open(name,64,0));
+  for (uint16_t rnti : {uint16_t(1),uint16_t(2)}) {
+    nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_STATE,2,NR_UEV_SUSPECT,NR_UEC_RELOCK,100);
+    nr_cfg_epoch_note_rnti_reopened(rnti,true,100);
+  }
+  nr_ue_ctx_close(); unlink(name);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(last.last_class,NR_EPOCH_SOFT);
+  EXPECT_EQ(last.last_cause,NR_CAUSE_DEDICATED_CHANGE_SUSPECTED);
+  EXPECT_EQ(calls,1);
 }
 TEST_F(CfgEpoch, VanishedRntisDoNotTriggerSoft) {
   nr_cfg_epoch_note_rnti_reopened(1, false, 100);

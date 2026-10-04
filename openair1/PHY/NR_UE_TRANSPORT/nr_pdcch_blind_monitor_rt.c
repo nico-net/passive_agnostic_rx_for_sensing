@@ -1213,6 +1213,13 @@ static uint64_t length_coreset_key(const nr_pdcch_blind_monitor_cfg_t *cfg)
   return h ? h : 1;
 }
 
+static int64_t ue_ctx_coreset_packed(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  return (int64_t)(cfg->bwp_start+cfg->coreset_rb_offset) |
+         ((int64_t)(cfg->coreset_freq_domain*6) << 16) |
+         ((int64_t)cfg->coreset_duration << 32);
+}
+
 /* Called at bank compaction, after every dispatcher that borrowed the old entry has left. */
 static void bank_reopen_geometry(const nr_pdcch_blind_monitor_cfg_t *cfg, void *unused)
 {
@@ -1221,9 +1228,7 @@ static void bank_reopen_geometry(const nr_pdcch_blind_monitor_cfg_t *cfg, void *
     /* cfg is the first field of the bank entry and remains borrowed until this removal hook
      * returns. The hook runs under the bank lock, so only enqueue immutable copies here. */
     const nr_pdcch_discovered_coreset_t *entry=(const nr_pdcch_discovered_coreset_t *)cfg;
-    const int64_t packed=(int64_t)(cfg->bwp_start+cfg->coreset_rb_offset) |
-                         ((int64_t)(cfg->coreset_freq_domain*6) << 16) |
-                         ((int64_t)cfg->coreset_duration << 32);
+    const int64_t packed=ue_ctx_coreset_packed(cfg);
     for (int i=0;i<entry->nowners;i++)
       if (entry->owners[i])
         nr_ue_ctx_on_param(entry->owners[i],NR_UEP_CORESET,packed,NR_UEV_SUSPECT,
@@ -4280,7 +4285,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                 if (nr_ue_ctx_enabled())
                   nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
                                      NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-                else nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
+                nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
               }
             }
             c->last_note_slot = abs_slot;
@@ -4403,7 +4408,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             if (nr_ue_ctx_enabled())
               nr_ue_ctx_on_param(dlc->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
                                  NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-            else nr_cfg_epoch_note_rnti_reopened(dlc->rnti, true, cfg_abs_slot);
+            nr_cfg_epoch_note_rnti_reopened(dlc->rnti, true, cfg_abs_slot);
           }
         } else if (found_len > 0 && dl_second) {
           const int replaced = nr_pdcch_dci_length_context_add(dlc, found_len, abs_slot);
@@ -4590,7 +4595,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
               if (nr_ue_ctx_enabled())
                 nr_ue_ctx_on_param(c->rnti, NR_UEP_DCI_LEN_STATE, NR_LEN_SUSPECT,
                                    NR_UEV_SUSPECT, NR_UEC_RELOCK, cfg_abs_slot);
-              else nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
+              nr_cfg_epoch_note_rnti_reopened(c->rnti, true, cfg_abs_slot);
             }
           }
           c->last_note_slot = abs_slot;
@@ -5852,8 +5857,11 @@ constdiag_done:;
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
         if (nr_ue_ctx_enabled()) {
-          nr_ue_ctx_on_param(u->rnti, NR_UEP_DCI_LEN_UL, u->dci_length,
-                             NR_UEV_TRUSTED, NR_UEC_CONVERGED, source_absolute_slot);
+          const int64_t coreset = ue_ctx_coreset_packed(cfg);
+          nr_ue_ctx_on_dci_accept(u->rnti,u->ul_dci_format==NR_BLIND_UL_DCI_FORMAT_0_1,
+                                  true,cfg->coreset_type==0 && cfg->dci10_ss_type==NR_BLIND_SS_UE_SPECIFIC,
+                                  u->dci_length,coreset,rel15->coreset.pdcch_dmrs_scrambling_id,
+                                  source_absolute_slot);
           if (u->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1 && u->csi_request != 0) {
             fapi_nr_dl_config_csirs_pdu_rel15_t observed;
             const bool have_resource = source_absolute_slot >= 0
@@ -6305,15 +6313,11 @@ constdiag_done:;
     if (nr_ue_ctx_enabled() && out.rnti) {
       nr_ue_ctx_on_param(out.rnti, NR_UEP_RNTI_CLASS, out.rnti_class,
                          NR_UEV_TRUSTED, NR_UEC_FIRST_LEARNED, source_absolute_slot);
-      const int64_t coreset = (int64_t)(rel15->BWPStart + cset_start + rel15->coreset.rb_offset) |
-                              ((int64_t)n_rb << 16) | ((int64_t)cfg->coreset_duration << 32);
-      nr_ue_ctx_on_param(out.rnti, NR_UEP_CORESET, coreset,
-                         NR_UEV_TRUSTED, NR_UEC_CORESET_CHANGE, source_absolute_slot);
-      nr_ue_ctx_on_param(out.rnti, NR_UEP_PDCCH_SCR_ID, rel15->coreset.pdcch_dmrs_scrambling_id,
-                         NR_UEV_TRUSTED, NR_UEC_CONVERGED, source_absolute_slot);
-      if (out.dci_format == NR_BLIND_DCI_FORMAT_1_1)
-        nr_ue_ctx_on_param(out.rnti, NR_UEP_DCI_LEN_DL, cand_task[ti].dci_length,
-                           NR_UEV_TRUSTED, NR_UEC_CONVERGED, source_absolute_slot);
+      const int64_t coreset = ue_ctx_coreset_packed(cfg);
+      nr_ue_ctx_on_dci_accept(out.rnti,out.dci_format==NR_BLIND_DCI_FORMAT_1_1,
+                              false,cfg->coreset_type==0 && cfg->dci10_ss_type==NR_BLIND_SS_UE_SPECIFIC,
+                              cand_task[ti].dci_length,coreset,rel15->coreset.pdcch_dmrs_scrambling_id,
+                              source_absolute_slot);
     }
     if (al1_bank >= 0 && !cand_task[ti].ul_scan && al1_from_ladder(cand_task[ti].e_rx, pdcch_e_rx)
         && nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti))

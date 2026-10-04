@@ -66,8 +66,11 @@ def render(records, rnti=None):
                 known = [f"{p}={v['value']}" for p, v in record["cfg"].items() if v is not None]
                 lines.append(f"  {at} {record['state']} " + " ".join(known))
             elif record["type"] == "ue_change":
+                detail = ""
+                if record["param"] == "APERIODIC_CSI" and record.get("evidence") is not None:
+                    detail = f"; coincident CSI-RS resource {record['evidence']}"
                 lines.append(f"  {at} change {record['param']}: {record['old']} -> "
-                             f"{record['new']} ({record['cause']})")
+                             f"{record['new']} ({record['cause']}{detail})")
             else:
                 lines.append(f"  {at} reconfig {record['class']}: "
                              + ", ".join(record["params"]))
