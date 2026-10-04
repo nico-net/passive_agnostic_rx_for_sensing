@@ -6,6 +6,7 @@
 #include "nr-ue-ru.h"
 #include "nr-uesoftmodem.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "common/config/config_paramdesc.h"
 #include "common/config/config_userapi.h"
 #include "openair1/PHY/phy_extern_nr_ue.h"
@@ -544,6 +545,7 @@ int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
   }
 
   int applied_rxgain = cfg->rx_gain[0] - cfg->rx_gain_offset[0];
+  nr_prach_passive_gain_changed(applied_rxgain);
   LOG_I(HW, "Rxgain adjusted by %d dB, RX gain: %d dB \n", gain_change, applied_rxgain);
 
   return gain_change;

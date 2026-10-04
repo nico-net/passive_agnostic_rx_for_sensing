@@ -496,6 +496,7 @@ int main(int argc, char **argv)
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
   nr_isac_start();
+  nr_prach_passive_start();
 
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     LOG_I(PHY,"Intializing UE Threads for instance %d ...\n", inst);
@@ -516,10 +517,6 @@ int main(int argc, char **argv)
   itti_wait_tasks_end(trigger_deregistration);
   LOG_W(NR_PHY, "Returned from ITTI signal handler\n");
   oai_exit = 1;
-
-  // Drain PRACH detections awaiting an overheard RAR before closing records.
-  nr_prach_passive_flush();
-  nr_isac_stop();
 
   nrue_ru_stop();
 
@@ -542,6 +539,10 @@ int main(int argc, char **argv)
       }
     }
   }
+
+  // All slot producers have joined. Drain the PRACH worker before closing records.
+  nr_prach_passive_flush();
+  nr_isac_stop();
 
   nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)
   const bool uectx_was_open = nr_ue_ctx_enabled();

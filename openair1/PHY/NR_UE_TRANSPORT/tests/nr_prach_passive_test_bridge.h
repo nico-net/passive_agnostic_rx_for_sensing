@@ -15,6 +15,18 @@ int test_prach_rar_entries(const uint8_t *pdu, uint32_t len, test_prach_rar_entr
 typedef struct { int preamble, delay, energy; } test_prach_detection_t;
 test_prach_detection_t test_prach_synth(int root, int shift);
 void test_prach_json(int relation, char *line, uint32_t capacity);
+void test_prach_floor_reset(void);
+int test_prach_floor(int fdm, int gain_db, int energy);
+void test_prach_reset(void);
+void test_prach_run_slot(int delay_samples, int msg1_fdm, int mode);
+void test_prach_run_stitched_slot(int phase_shift);
+void test_prach_drain(void);
+void test_prach_finish(void);
+const char *test_prach_record(void);
+void test_prach_threads(unsigned *slot_calls, unsigned *worker_calls, int *same_thread);
+void test_prach_heavy_calls(unsigned *ru, unsigned *correlator, unsigned *exported);
+unsigned test_prach_start_calls(void);
+uint64_t test_prach_skipped(void);
 #ifdef __cplusplus
 }
 #endif

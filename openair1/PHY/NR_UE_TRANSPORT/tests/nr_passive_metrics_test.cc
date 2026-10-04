@@ -10,6 +10,7 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   nr_passive_metrics_t m = {};
   m.t_mono_ns = 123; m.abs_slot = 456; m.pci = 64; m.acq_state = "TRACKING";
   m.pdschq_decoded = 58414; m.pdschq_crc_ok = 57897; m.pdschq_stale_after_decode = 7; m.scanq_queued = 404224; m.scanq_drop_full = 161;
+  m.prach_us = 73; m.prach_drops = 2; m.prach_skipped = 1;
   char buf[4096];
   const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
   ASSERT_GT(n, 0);
@@ -21,6 +22,7 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"pdschq_crc_ok\":57897"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_stale_after_decode\":7"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_full\":161"), std::string::npos);
+  EXPECT_NE(s.find("\"prach_us\":73,\"prach_drops\":2,\"prach_skipped\":1"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdcch_inline_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_drop_epoch\":0"), std::string::npos);

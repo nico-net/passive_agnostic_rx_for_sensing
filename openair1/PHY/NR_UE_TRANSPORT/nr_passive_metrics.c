@@ -19,6 +19,8 @@
 #include "nr_td_cb0_wire.h"
 #include "nr_pusch_passive_queue.h"
 #include "nr_csirs_blind_rt.h"
+#include "nr_prach_passive.h"
+__attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 
@@ -135,6 +137,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   nr_pdsch_passive_ldpc_tb_decoders(&m->ldpc_tb_cpu, &m->ldpc_tb_cuda);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
+  if (nr_prach_passive_metrics)
+    nr_prach_passive_metrics(&m->prach_us, &m->prach_drops, &m->prach_skipped);
   if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
 }
 

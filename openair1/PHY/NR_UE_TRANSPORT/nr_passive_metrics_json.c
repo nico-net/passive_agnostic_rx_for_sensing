@@ -55,6 +55,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"ldpc_cuda_disabled\":%" PRIu64 ",\"ldpc_cuda_breaker_trips\":%" PRIu64 ",\"ldpc_tb_cpu\":%" PRIu64 ",\"ldpc_tb_cuda\":%" PRIu64 ","
       "\"pusch_try\":%" PRIu64 ",\"pusch_crc_ok\":%" PRIu64 ","
       "\"obs_pushed\":%" PRIu64 ",\"obs_written\":%" PRIu64 ",\"obs_dropped\":%" PRIu64 ","
+      "\"prach_us\":%" PRIu64 ",\"prach_drops\":%" PRIu64 ",\"prach_skipped\":%" PRIu64 ","
       "\"csirs_candidates\":%" PRIu64 ",\"csirs_confirmed\":%" PRIu64 ",\"csirs_revoked\":%" PRIu64 ",\"zp_exported\":%" PRIu64 ",\"zp_revoked\":%" PRIu64 ","
       "\"csirs_search_us\":%" PRIu64 ",\"csirs_idsweep_us\":%" PRIu64 ",\"csirs_confirm_us\":%" PRIu64 ",\"csirs_cfr_us\":%" PRIu64 ","
       "\"csirs_time_to_confirm_slots_last\":%" PRIu64 ",\"csirs_time_to_confirm_slots_sum\":%" PRIu64 ","
@@ -75,6 +76,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->ldpc_cuda_disabled, m->ldpc_cuda_breaker_trips, m->ldpc_tb_cpu, m->ldpc_tb_cuda,
       m->pusch_try, m->pusch_crc_ok,
       m->obs_pushed, m->obs_written, m->obs_dropped,
+      m->prach_us, m->prach_drops, m->prach_skipped,
       m->csirs_candidates, m->csirs_confirmed, m->csirs_revoked, m->zp_exported, m->zp_revoked,
       m->csirs_search_us, m->csirs_idsweep_us, m->csirs_confirm_us, m->csirs_cfr_us,
       m->csirs_time_to_confirm_slots_last, m->csirs_time_to_confirm_slots_sum);
