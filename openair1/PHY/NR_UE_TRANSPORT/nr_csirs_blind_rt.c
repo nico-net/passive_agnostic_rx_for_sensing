@@ -1025,6 +1025,21 @@ static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl
   out->freq_density = c->freq_density;
   out->scramb_id = c->scramb_id;
 }
+bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
+{
+  if (!out || pthread_mutex_trylock(&g_csirs_state_lock) != 0) return false;
+  bool found = false;
+  if (g_on > 0 && g_armed != 0 && g_rank <= 0) {
+    int idx[NR_CSIRS_BLIND_MAX_CONF];
+    const int n = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_MAX_CONF);
+    if (n > 0) {
+      fill_pdu(&g_st.cand[idx[0]], 1 /* confirmed NZP */, out);
+      found = true;
+    }
+  }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  return found;
+}
 int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
   pthread_mutex_t *guard __attribute__((cleanup(csirs_unlock))) = &g_csirs_state_lock;

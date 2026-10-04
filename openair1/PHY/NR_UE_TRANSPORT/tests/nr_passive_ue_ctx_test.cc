@@ -151,6 +151,18 @@ TEST_F(UeContext, CoresetRemovalMarksSuspectWithoutReconfig) {
   EXPECT_EQ(count(s,"\"param\":\"CORESET\""),2);
   EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
 }
+TEST_F(UeContext, AperiodicCsiTriggerLogged) {
+  const nr_ue_csi_resource_t observed{4, 7, 0x25, 24, 48, 501};
+  nr_ue_ctx_on_dci01_csi(0x1234, 0, 99, &observed);
+  nr_ue_ctx_on_dci01_csi(0x1234, 2, 100, &observed);
+  nr_ue_ctx_on_dci01_csi(0x1234, 1, 101, nullptr);
+  auto s=contents();
+  EXPECT_EQ(count(s,"\"param\":\"APERIODIC_CSI\""),2);
+  EXPECT_NE(s.find("\"abs_slot\":100,\"epoch\":0,\"identity_gen\":0,\"rnti\":4660,\"incarnation\":0,\"param\":\"APERIODIC_CSI\",\"old\":null,\"new\":2"),std::string::npos);
+  EXPECT_NE(s.find("\"evidence\":{\"row\":4,\"freq_domain\":37,\"start_rb\":24,\"nr_of_rbs\":48,\"symb_l0\":7,\"scramb_id\":501}"),std::string::npos);
+  EXPECT_NE(s.find("\"abs_slot\":101,\"epoch\":0,\"identity_gen\":0,\"rnti\":4660,\"incarnation\":0,\"param\":\"APERIODIC_CSI\",\"old\":null,\"new\":1,\"cause\":\"FIRST_LEARNED\",\"evidence\":null"),std::string::npos);
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
+}
 TEST_F(UeContext, CloseWritesFinalSnapshotForEveryUe) {
   for(uint16_t rnti: {13,14})
     nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);

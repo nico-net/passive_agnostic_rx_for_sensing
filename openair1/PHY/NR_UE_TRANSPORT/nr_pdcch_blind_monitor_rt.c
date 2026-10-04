@@ -5854,6 +5854,18 @@ constdiag_done:;
         if (nr_ue_ctx_enabled()) {
           nr_ue_ctx_on_param(u->rnti, NR_UEP_DCI_LEN_UL, u->dci_length,
                              NR_UEV_TRUSTED, NR_UEC_CONVERGED, source_absolute_slot);
+          if (u->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1 && u->csi_request != 0) {
+            fapi_nr_dl_config_csirs_pdu_rel15_t observed;
+            const bool have_resource = source_absolute_slot >= 0
+                && nr_csirs_blind_rt_observed_nzp((uint32_t)source_absolute_slot, &observed);
+            const nr_ue_csi_resource_t resource = have_resource
+                ? (nr_ue_csi_resource_t){.row=observed.row, .symb_l0=observed.symb_l0,
+                    .freq_domain=observed.freq_domain, .start_rb=observed.start_rb,
+                    .nr_of_rbs=observed.nr_of_rbs, .scramb_id=observed.scramb_id}
+                : (nr_ue_csi_resource_t){0};
+            nr_ue_ctx_on_dci01_csi(u->rnti, u->csi_request, source_absolute_slot,
+                                    have_resource ? &resource : NULL);
+          }
         }
         if (reconf_lengths_enabled() && t_bank_index >= 0)
           nr_pdcch_coreset_bank_note_dci(t_bank_index, t_bank_slot, u->rnti,

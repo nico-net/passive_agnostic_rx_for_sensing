@@ -195,7 +195,14 @@ static void change(entry_t *e,nr_ue_param_t p,int64_t old,int64_t value,int caus
   json_int(old); fputs(",\"new\":",output); json_int(value);
   fprintf(output,",\"cause\":\"%s\",\"evidence\":",
           cause>=0 && cause<=NR_UEC_HARD_RESET?cause_name[cause]:"FIRST_LEARNED");
-  json_int(evidence); fputs("}\n",output); line_done(); c->n_changes++;
+  if(p==NR_UEP_APERIODIC_CSI && evidence>=0) {
+    const uint64_t bits=(uint64_t)evidence;
+    fprintf(output,"{\"row\":%u,\"freq_domain\":%u,\"start_rb\":%u,\"nr_of_rbs\":%u,\"symb_l0\":%u,\"scramb_id\":%u}",
+            (unsigned)(bits&63u),(unsigned)((bits>>6)&65535u),
+            (unsigned)((bits>>22)&511u),(unsigned)((bits>>31)&511u),
+            (unsigned)((bits>>40)&15u),(unsigned)((bits>>44)&65535u));
+  } else json_int(evidence);
+  fputs("}\n",output); line_done(); c->n_changes++;
 }
 static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns)
 {
@@ -438,6 +445,22 @@ void nr_ue_ctx_on_epoch(const nr_cfg_epoch_snapshot_t *s)
 { if(s && nr_ue_ctx_enabled()) {event_t e={.kind=EV_EPOCH,.ns=now_ns(),.epoch=*s};enqueue(&e);} }
 void nr_ue_ctx_on_aperiodic_csi(uint16_t rnti,uint8_t request,int64_t slot,int64_t resource)
 { if(request && nr_ue_ctx_enabled()) {event_t e={.kind=EV_CSI,.ns=now_ns(),.slot=slot,.rnti=rnti,.value=request,.extra=resource};enqueue(&e);} }
+void nr_ue_ctx_on_dci01_csi(uint16_t rnti,uint8_t request,int64_t slot,
+                            const nr_ue_csi_resource_t *observed)
+{
+  if(!request || !nr_ue_ctx_enabled()) return;
+  int64_t resource=-1;
+  if(observed) {
+    const uint64_t bits=(uint64_t)(observed->row&63u)
+       | ((uint64_t)observed->freq_domain<<6)
+       | ((uint64_t)(observed->start_rb&511u)<<22)
+       | ((uint64_t)(observed->nr_of_rbs&511u)<<31)
+       | ((uint64_t)(observed->symb_l0&15u)<<40)
+       | ((uint64_t)observed->scramb_id<<44);
+    resource=(int64_t)bits;
+  }
+  nr_ue_ctx_on_aperiodic_csi(rnti,request,slot,resource);
+}
 void nr_ue_ctx_tick(int64_t slot,uint64_t ns)
 { if(nr_ue_ctx_enabled()) {event_t e={.kind=EV_TICK,.ns=ns,.slot=slot};enqueue(&e);} }
 bool nr_ue_ctx_get(uint16_t rnti,nr_ue_ctx_t *out)
