@@ -34,6 +34,7 @@ class CfgEpoch : public ::testing::Test {
  protected:
   void SetUp() override {
     nr_cfg_epoch_reset();
+    nr_cfg_si_options_reset_for_test();
     calls = 0;
     nr_cfg_epoch_subscribe(listener);
     nr_cfg_epoch_note_identity(10, 100, 200);
@@ -91,6 +92,7 @@ TEST_F(CfgEpoch, IgnoreSib1ArmKeepsOnlyNonSib1EpochSources) {
   nr_cfg_epoch_set_si_period(100);
   nr_cfg_epoch_note_si_modification(51, 100);
   nr_cfg_epoch_tick(5200);
+  EXPECT_EQ(nr_cfg_epoch_current_slot(), 5200u);
   nr_cfg_epoch_refine_point_a(201); // SIB1-derived Point A cannot reset identity in this arm
   EXPECT_EQ(nr_cfg_epoch_current(), 0u);
   EXPECT_EQ(nr_cfg_epoch_si_period(), 0u);
@@ -142,12 +144,29 @@ TEST_F(CfgEpoch, SiModBoundaryWithoutSib1ReacquiredBumps) {
 }
 TEST_F(CfgEpoch, SiModNoReacquireFallbackCanBeDisabled) {
   setenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1", "0", 1);
+  nr_cfg_si_options_reset_for_test();
   nr_cfg_epoch_note_sib1(42, 0);
   nr_cfg_epoch_note_si_modification(51, 100);
   nr_cfg_epoch_tick(100);
   nr_cfg_epoch_drain();
   EXPECT_EQ(calls, 0);
   unsetenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
+  nr_cfg_si_options_reset_for_test();
+}
+TEST_F(CfgEpoch, SiOptionsAreCachedAfterFirstTick) {
+  setenv("ISAC_RECONF_SI_GRACE_MS", "100", 1);
+  nr_cfg_si_options_reset_for_test();
+  nr_cfg_epoch_note_sib1(42, 0);
+  nr_cfg_epoch_note_si_modification(51, 100);
+  nr_cfg_epoch_tick(199);
+  EXPECT_EQ(nr_cfg_epoch_current(), 0u);
+  setenv("ISAC_RECONF_SI_GRACE_MS", "1", 1);
+  nr_cfg_epoch_tick(199);
+  EXPECT_EQ(nr_cfg_epoch_current(), 0u);
+  nr_cfg_epoch_tick(200);
+  EXPECT_EQ(nr_cfg_epoch_current(), 1u);
+  unsetenv("ISAC_RECONF_SI_GRACE_MS");
+  nr_cfg_si_options_reset_for_test();
 }
 TEST_F(CfgEpoch, ContinuityLossLoggedAsContinuity) {
   nr_cfg_epoch_note_continuity_loss_samples(10000, 1000);
@@ -203,6 +222,21 @@ TEST_F(CfgEpoch, SuspectStillReachesEpochWithUeContextOn) {
   nr_cfg_epoch_drain();
   EXPECT_EQ(last.last_class,NR_EPOCH_SOFT);
   EXPECT_EQ(last.last_cause,NR_CAUSE_DEDICATED_CHANGE_SUSPECTED);
+  EXPECT_EQ(calls,1);
+}
+TEST_F(CfgEpoch, DirectRelocksWithUeContextDoNotBumpTwice) {
+  char name[]="/tmp/rr-epoch-uectx-XXXXXX";
+  int fd=mkstemp(name); ASSERT_GE(fd,0); close(fd);
+  ASSERT_TRUE(nr_ue_ctx_open(name,64,0));
+  for (uint16_t rnti : {uint16_t(1),uint16_t(2)}) {
+    nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,90);
+    nr_cfg_epoch_note_rnti_reopened(rnti,true,100);
+    nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_STATE,2,NR_UEV_SUSPECT,NR_UEC_RELOCK,100);
+    nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_DL,53,NR_UEV_TRUSTED,NR_UEC_RELOCK,110);
+  }
+  nr_ue_ctx_close(); unlink(name);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(nr_cfg_epoch_current(),1u);
   EXPECT_EQ(calls,1);
 }
 TEST_F(CfgEpoch, VanishedRntisDoNotTriggerSoft) {

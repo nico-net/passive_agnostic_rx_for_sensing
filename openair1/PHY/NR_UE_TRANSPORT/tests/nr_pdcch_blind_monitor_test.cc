@@ -4521,8 +4521,10 @@ TEST(DciSweepBudget, ExpiredDeadlineDoesNotFabricateAnOccasion) {
   nr_pdcch_dci_length_sweep_state_t state{};
   nr_pdcch_dci_length_sweep_feed_budget(&state,scorer,&calls,8,30,63,0,1,0);
   EXPECT_EQ(calls,0); EXPECT_EQ(state.decodes,0u); EXPECT_EQ(state.occasions_fed,0);
+  const int first=state.resume_len; // prior tests may have seeded the cell-wide length order
+  ASSERT_GE(first,30); ASSERT_LE(first,63);
   nr_pdcch_dci_length_sweep_feed_budget(&state,scorer,&calls,2,30,63,0,0,1);
-  EXPECT_EQ(calls,1); EXPECT_EQ(state.trials[30],1); EXPECT_EQ(state.occasions_fed,0);
+  EXPECT_EQ(calls,1); EXPECT_EQ(state.trials[first],1); EXPECT_EQ(state.occasions_fed,0);
 }
 
 // Timing workload only: immutable OTA soft samples, every legal contiguous width.

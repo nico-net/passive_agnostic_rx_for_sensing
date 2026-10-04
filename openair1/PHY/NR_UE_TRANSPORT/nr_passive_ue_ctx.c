@@ -182,7 +182,11 @@ static void flush_reconfig(entry_t *e)
   }
   fprintf(output,"],\"class\":\"%s\"}\n",reconfig_class(e->pending_params));
   line_done(); c->n_reconfigs++;
-  if (nr_cfg_epoch_note_rnti_reopened && e->pending_slot >= 0)
+  /* DL length and TD reopen owners already notify the epoch authority directly. */
+  const uint64_t directly_notified = (1ull << NR_UEP_DCI_LEN_DL) |
+      (1ull << NR_UEP_TD_WINNER);
+  if (nr_cfg_epoch_note_rnti_reopened && e->pending_slot >= 0 &&
+      !(e->pending_params & directly_notified))
     nr_cfg_epoch_note_rnti_reopened(c->rnti,true,(uint64_t)e->pending_slot);
   e->pending_params=0;
 }
@@ -344,7 +348,9 @@ static void handle(const event_t *v)
       entry_t *e=&entries[i];
       flush_reconfig(e);
       if(v->epoch.last_class==NR_EPOCH_HARD_RESET) {e->ctx.state=NR_UE_GONE; active_index[e->ctx.rnti]=-1; snapshot(e,ns);}
-      else for(int p=0;p<NR_UEP_COUNT;p++) if(e->ctx.cfg[p].value>=0) e->ctx.cfg[p].verif=NR_UEV_HINT;
+      else if(v->epoch.last_class!=NR_EPOCH_SOFT ||
+              v->epoch.last_cause==NR_CAUSE_DEDICATED_CHANGE_SUSPECTED)
+        for(int p=0;p<NR_UEP_COUNT;p++) if(e->ctx.cfg[p].value>=0) e->ctx.cfg[p].verif=NR_UEV_HINT;
     }
     epoch=v->epoch.epoch; identity=v->epoch.identity_gen;
     if(v->epoch.last_class==NR_EPOCH_HARD_RESET)
@@ -464,7 +470,7 @@ void nr_ue_ctx_on_anchor(uint16_t rnti,int kind,int64_t slot)
 void nr_ue_ctx_on_sib1(uint32_t hash,int64_t slot)
 { nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_HASH,hash,slot); }
 void nr_ue_ctx_on_sib1_param(nr_ue_param_t p,int64_t value,int64_t slot)
-{ if(nr_ue_ctx_enabled() && p>=NR_UEP_SIB1_HASH && p<=NR_UEP_SIB1_TDRA_HASH)
+{ if(nr_ue_ctx_enabled() && !nr_cfg_ignore_sib1() && p>=NR_UEP_SIB1_HASH && p<=NR_UEP_SIB1_TDRA_HASH)
     {event_t e={.kind=EV_SIB1,.ns=now_ns(),.slot=slot,.p=p,.value=value};enqueue(&e);} }
 void nr_ue_ctx_on_epoch(const nr_cfg_epoch_snapshot_t *s)
 { if(s && nr_ue_ctx_enabled()) {event_t e={.kind=EV_EPOCH,.ns=now_ns(),.epoch=*s};enqueue(&e);} }

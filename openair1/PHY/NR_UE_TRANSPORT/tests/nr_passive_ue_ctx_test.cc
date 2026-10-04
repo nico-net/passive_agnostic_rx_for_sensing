@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "nr_passive_ue_ctx.h"
+#include "nr_passive_cfg_epoch.h"
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -13,6 +14,11 @@
 
 static std::atomic<int> reopened_count{0};
 extern "C" void nr_cfg_epoch_note_rnti_reopened(uint16_t, bool, uint64_t) { ++reopened_count; }
+extern "C" bool nr_cfg_ignore_sib1(void) {
+  const char *value=getenv("ISAC_TD_IGNORE_SIB1");
+  return value && std::string(value)=="1";
+}
+extern "C" void nr_cfg_ignore_sib1_reset_for_test(void) {}
 
 class UeContext : public ::testing::Test {
  protected:
@@ -93,7 +99,7 @@ TEST_F(UeContext, StatisticsNeverEmitReconfig) {
 }
 TEST_F(UeContext, EpochBumpMakesHintThenReverified) {
   nr_ue_ctx_on_param(7,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
-  nr_cfg_epoch_snapshot_t bump{1,0,NR_EPOCH_SOFT,NR_CAUSE_BWP_CHANGE};
+  nr_cfg_epoch_snapshot_t bump{1,0,NR_EPOCH_HARD_REVERIFY,NR_CAUSE_SIB1_CHANGE};
   nr_ue_ctx_on_epoch(&bump);
   nr_ue_ctx_on_param(7,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,20);
   auto s=contents(); EXPECT_NE(s.find("\"cause\":\"EPOCH_REVERIFIED\""),std::string::npos);
@@ -101,11 +107,21 @@ TEST_F(UeContext, EpochBumpMakesHintThenReverified) {
 }
 TEST_F(UeContext, EpochBumpContradictedEmitsDiscardedAndChange) {
   nr_ue_ctx_on_param(8,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
-  nr_cfg_epoch_snapshot_t bump{1,0,NR_EPOCH_SOFT,NR_CAUSE_BWP_CHANGE};
+  nr_cfg_epoch_snapshot_t bump{1,0,NR_EPOCH_SOFT,NR_CAUSE_DEDICATED_CHANGE_SUSPECTED};
   nr_ue_ctx_on_epoch(&bump);
   nr_ue_ctx_on_param(8,NR_UEP_DCI_LEN_DL,53,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,20);
   auto s=contents(); EXPECT_NE(s.find("\"cause\":\"EPOCH_DISCARDED\""),std::string::npos);
   EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),0);
+}
+TEST_F(UeContext, NarrowSoftKeepsTrustedConfiguration) {
+  nr_ue_ctx_on_param(7,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  nr_cfg_epoch_snapshot_t bump{1,0,NR_EPOCH_SOFT,NR_CAUSE_BWP_CHANGE};
+  nr_ue_ctx_on_epoch(&bump);
+  nr_ue_ctx_on_param(7,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,20);
+  const auto s=contents();
+  EXPECT_EQ(count(s,"\"cause\":\"EPOCH_REVERIFIED\""),0);
+  nr_ue_ctx_t c{}; ASSERT_TRUE(nr_ue_ctx_get(7,&c));
+  EXPECT_EQ(c.cfg[NR_UEP_DCI_LEN_DL].verif,NR_UEV_TRUSTED);
 }
 TEST_F(UeContext, StateFlapIsNotReconfig) {
   for (auto p : {NR_UEP_TD_STATE, NR_UEP_DCI_LEN_STATE}) {
@@ -163,10 +179,19 @@ TEST_F(UeContext, HardResetClosesOldIdentity) {
 }
 TEST_F(UeContext, DedicatedChangeSuspectedFromTwoConvergedUes) {
   for(uint16_t rnti: {10,11}) {
+    nr_ue_ctx_on_param(rnti,NR_UEP_BWP,100,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+    nr_ue_ctx_on_param(rnti,NR_UEP_BWP,200,NR_UEV_TRUSTED,NR_UEC_BWP_CHANGE,20);
+  }
+  contents(); EXPECT_EQ(reopened_count.load(),2);
+}
+TEST_F(UeContext, DirectlyNotifiedReopensAreOnlyRecorded) {
+  for(uint16_t rnti: {10,11}) {
     nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
     nr_ue_ctx_on_param(rnti,NR_UEP_DCI_LEN_DL,53,NR_UEV_TRUSTED,NR_UEC_RELOCK,20);
   }
-  contents(); EXPECT_EQ(reopened_count.load(),2);
+  const auto s=contents();
+  EXPECT_EQ(count(s,"\"type\":\"ue_reconfig\""),2);
+  EXPECT_EQ(reopened_count.load(),0);
 }
 TEST_F(UeContext, JsonRoundTripSchemaV1) {
   nr_ue_ctx_on_param(12,NR_UEP_DCI_LEN_DL,47,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
@@ -200,6 +225,24 @@ TEST_F(UeContext, Sib1ParametersRecordedWhenDecoded) {
   EXPECT_NE(s.find("\"SIB1_HASH\":{\"value\":4660"),std::string::npos);
   EXPECT_NE(s.find("\"SIB1_BWP\":{\"value\":100"),std::string::npos);
   EXPECT_NE(s.find("\"SIB1_TDRA_HASH\":{\"value\":22136"),std::string::npos);
+}
+TEST_F(UeContext, IgnoreSib1KeepsParametersNull) {
+  const char *old=getenv("ISAC_TD_IGNORE_SIB1");
+  const bool had_old=old!=nullptr;
+  const std::string old_value=had_old?old:"";
+  setenv("ISAC_TD_IGNORE_SIB1","1",1);
+  nr_cfg_ignore_sib1_reset_for_test();
+  nr_ue_ctx_on_sib1(0x1234,10);
+  nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_BWP,100,10);
+  nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_TDRA_HASH,0x5678,10);
+  auto o=grant(15,1000000000,11); nr_ue_ctx_on_obs(&o);
+  const auto s=contents();
+  EXPECT_NE(s.find("\"SIB1_HASH\":null"),std::string::npos);
+  EXPECT_NE(s.find("\"SIB1_BWP\":null"),std::string::npos);
+  EXPECT_NE(s.find("\"SIB1_TDRA_HASH\":null"),std::string::npos);
+  if(had_old) setenv("ISAC_TD_IGNORE_SIB1",old_value.c_str(),1);
+  else unsetenv("ISAC_TD_IGNORE_SIB1");
+  nr_cfg_ignore_sib1_reset_for_test();
 }
 TEST_F(UeContext, CoresetRemovalMarksSuspectWithoutReconfig) {
   nr_ue_ctx_on_param(16,NR_UEP_CORESET,123,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);

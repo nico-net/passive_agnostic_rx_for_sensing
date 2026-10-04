@@ -61,6 +61,9 @@ static pthread_once_t enable_once = PTHREAD_ONCE_INIT;
 static bool enabled;
 static pthread_once_t ignore_sib1_once = PTHREAD_ONCE_INIT;
 static bool ignore_sib1;
+static pthread_once_t si_options_once = PTHREAD_ONCE_INIT;
+static unsigned si_grace_ms;
+static bool si_bump_without_sib1;
 
 static void read_enable(void)
 {
@@ -88,6 +91,18 @@ void nr_cfg_ignore_sib1_reset_for_test(void)
   /* Test harnesses call this only between receiver operations, never concurrently. */
   ignore_sib1_once = PTHREAD_ONCE_INIT;
   ignore_sib1 = false;
+}
+static void read_si_options(void)
+{
+  const char *grace = getenv("ISAC_RECONF_SI_GRACE_MS");
+  si_grace_ms = grace && atoi(grace) > 0 ? (unsigned)atoi(grace) : 5000;
+  const char *setting = getenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
+  si_bump_without_sib1 = !setting || strcmp(setting, "0") != 0;
+}
+void nr_cfg_si_options_reset_for_test(void)
+{
+  /* Test harnesses call this only between receiver operations. */
+  si_options_once = PTHREAD_ONCE_INIT;
 }
 static const char *class_name(nr_epoch_class_t c)
 {
@@ -384,14 +399,12 @@ void nr_cfg_epoch_tick(uint64_t abs_slot)
   if (!is_enabled()) return;
   atomic_store_explicit(&current_slot, abs_slot, memory_order_release);
   if (nr_cfg_ignore_sib1()) return; /* SIB1-less arm: no SI-modification boundary handling */
+  pthread_once(&si_options_once, read_si_options);
   epoch_event_t event = {0};
   pthread_mutex_lock(&lock);
-  const char *grace = getenv("ISAC_RECONF_SI_GRACE_MS");
-  const unsigned grace_ms = grace && atoi(grace) > 0 ? (unsigned)atoi(grace) : 5000;
   if (pending.active && abs_slot >= pending.boundary
-      && abs_slot - pending.boundary >= (uint64_t)grace_ms * slots_per_second / 1000) {
-    const char *setting = getenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
-    if (!setting || strcmp(setting, "0") != 0)
+      && abs_slot - pending.boundary >= (uint64_t)si_grace_ms * slots_per_second / 1000) {
+    if (si_bump_without_sib1)
       bump_locked(&event, NR_EPOCH_HARD_REVERIFY, NR_CAUSE_SI_MODIFICATION_ANNOUNCED);
     pending.active = false;
   }

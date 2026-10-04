@@ -190,6 +190,11 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
   }
   nr_cfg_epoch_drain();
   r.epoch_changed = nr_cfg_epoch_current() != old_epoch;
+  if (kind == HIDDEN_RECONF_PCI) {
+    // HARD_RESET archives the old identity's bank; discover the geometry anew.
+    if (nr_pdcch_coreset_bank_count() == 0)
+      new_bank = nr_pdcch_coreset_bank_add(&old, kRnti);
+  }
 
   // Check the ticket's own context. The local changes have no cell epoch bump;
   // exercise the work guard with a stale queued-work stamp explicitly.
@@ -294,11 +299,8 @@ TEST(ReconfigReplay, DciLengthSib1Absent) { expect_replay(HIDDEN_RECONF_DCI_LENG
 TEST(ReconfigReplay, CoresetMoveSib1Available) { expect_replay(HIDDEN_RECONF_CORESET_MOVE, true); }
 TEST(ReconfigReplay, CoresetMoveSib1Absent) { expect_replay(HIDDEN_RECONF_CORESET_MOVE, false); }
 
-// R10 must turn an old Technique D winner into VERIFY after a SIB1-triggered epoch bump.
-TEST(ReconfigReplay, DISABLED_Sib1SemanticChangeSib1Available) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, true); }
+TEST(ReconfigReplay, Sib1SemanticChangeSib1Available) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, true); }
 // TAC-only change is invisible without SIB1: no epoch bump or Technique D reset.
 TEST(ReconfigReplay, Sib1SemanticChangeSib1Absent) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, false); }
-// R10 must discard the old cell's Technique D winner on HARD_RESET.
-TEST(ReconfigReplay, DISABLED_PciChangeSib1Available) { expect_replay(HIDDEN_RECONF_PCI, true); }
-// R10 must discard the old cell's Technique D winner on HARD_RESET without SIB1.
-TEST(ReconfigReplay, DISABLED_PciChangeSib1Absent) { expect_replay(HIDDEN_RECONF_PCI, false); }
+TEST(ReconfigReplay, PciChangeSib1Available) { expect_replay(HIDDEN_RECONF_PCI, true); }
+TEST(ReconfigReplay, PciChangeSib1Absent) { expect_replay(HIDDEN_RECONF_PCI, false); }

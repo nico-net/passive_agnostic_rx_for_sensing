@@ -1,0 +1,48 @@
+# RE — post-merge reconfiguration integration
+
+Host: DGX Spark, aarch64; branch `rr/integration`.
+
+## Changes and decisions
+
+- [OFFLINE VERIFIED] Enabled the three R12 hard-change replay cases that depended on R10: SIB1 semantic change with SIB1 available, and PCI change with SIB1 available and absent. The SIB1-absent TAC case stays enabled with its no-epoch/no-new-generation expectation from R12b. The SIB1 semantic case passed without a consumer change. Both PCI cases initially failed only the CORESET VERIFIED/recovery assertions: the fixture kept using the old identity's archived bank. The bank consumer is correct (`HardResetNeverReusesOldIdentityState`); the **test** was wrong. The fixture now rediscovers the same geometry for the new identity. All eight replay arms pass, with zero stale-ticket credit. Files: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_reconfig_replay_test.cc`.
+- [CODE-READ; OFFLINE VERIFIED] R17b's direct DL length reopen and R10b's sweep reopen already notify the epoch authority. UeContext retains their change log and per-UE reconfiguration records but does not send the same DL length or TD winner transition a second time when flushing JSON. UL length and other trusted configuration changes still notify. An integrated two-RNTI test checks one cell epoch with the writer open, and UeContext tests check RELOCK/change records and the remaining notification path. Narrow SOFT BWP/CSI-RS/short-gap epochs preserve trusted UeContext dedicated values, matching R10b's class/cause scope; broad dedicated SOFT and HARD_REVERIFY turn them into hints. File: `nr_passive_ue_ctx.c` and its tests.
+- [CODE-READ; OFFLINE VERIFIED] With `ISAC_TD_IGNORE_SIB1=1`, UeContext rejects SIB1 parameters even if a caller offers one; a fixture confirms all three remain JSON null. RRC and MAC already block SIB1 ingestion, while the blind monitor and central epoch block its publication, SI boundaries, cache facts and C0 USS assumptions. No consumer requires a SIB1 source in this arm. The epoch tick stores `current_slot` before the SIB1-less return; a test checks that behavior. Files: `nr_passive_ue_ctx.c`, `nr_passive_cfg_epoch_test.cc` and UeContext tests.
+- [OFFLINE VERIFIED] `nr_cfg_epoch_tick` now reads `ISAC_RECONF_SI_GRACE_MS` and `ISAC_RECONF_SI_BUMP_WITHOUT_SIB1` once per receiver lifetime with `pthread_once`, before the epoch mutex. A test-only reset lets independent environment fixtures switch options; a test confirms later environment changes do not alter a running receiver's grace period. Files: `nr_passive_cfg_epoch.{c,h}` and test.
+- [OFFLINE VERIFIED] A shuffled blind-monitor test exposed an unrelated fixture assumption: `ExpiredDeadlineDoesNotFabricateAnOccasion` expected length 30 to be first after a prior test could seed the adaptive cell-wide length order. It now checks the recorded resume length. The sweep implementation was correct. A first shuffle attempt also ran all legacy sweep tests with `ISAC_RECONF=1`; `SuspectRestoresUnsettledContexts` expects a local fieldbook bump that R11 intentionally disables under central epoch ownership. The final shuffle command runs standard binaries with the flag unset and the replay registration with `ISAC_RECONF=1`, matching their CTest modes.
+
+## Validation
+
+- [OFFLINE VERIFIED, DGX aarch64] Every build and test waited while `/home/nicola/NICOLA/wt/rr-orchestration/BUSY` existed and ran under `flock -s -w 7200 /tmp/td_measure.lock` with `nice -n 19`. No rfsim, OTA, simulator campaign, GPU build or benchmark ran.
+- [OFFLINE VERIFIED] Focused initial replay after enabling: six passed, two PCI arms failed because the fixture reused the archived bank. After the fixture fix: **8/8 passed** (`ISAC_RECONF=1 test_nr_pdcch_blind_monitor --gtest_filter='ReconfigReplay.*'`). Focused central epoch **41/41** and UeContext **27/27** passed with `ISAC_RECONF=1`. The required CLAUDE.md target-list build passed (119 initial steps, 23 final incremental steps; `/tmp/rr-re-build{,-final}.log`).
+- [OFFLINE VERIFIED] Final shuffle: **27/27 invocations passed**, seeds 1/3/5, nine invocations per seed; **1707 case passes, 123 expected skips** (`/tmp/rr-re-shuffle-final.log`, `/tmp/rr-re-shuffle/results.json`). The eight standard binaries were `test_nr_passive_cfg_epoch`, `test_nr_pdcch_dci_length_sweep`, `test_nr_pdcch_coreset_bank`, `test_nr_pdcch_blind_monitor`, `test_nr_pdsch_config_sweep`, `test_nr_passive_ue_ctx`, `test_nr_csirs_observer`, `test_nr_passive_metrics`. The ninth invocation used the blind-monitor binary with `--gtest_filter='ReconfigReplay.*'` and `ISAC_RECONF=1`. Each child checked BUSY and took its own shared lock; at most three ran alongside the one remaining CTest registration.
+- [OFFLINE VERIFIED] After the final incremental build, `ctest --test-dir cmake_targets/ran_build/build -j3 -R '^test_nr_(passive_cfg_epoch|passive_ue_ctx|reconfig_replay)$' --output-on-failure` passed **3/3 registrations** under the shared lock. This specifically rechecks the source changed after the full CTest started.
+- [OFFLINE VERIFIED, DGX aarch64] One full CTest completed in **1603.72 s: 148/157 passed, nine failed** (`/tmp/rr-re-ctest.log`). All nine match the documented host failures: ARM `test_nr_pusch_ra0_qam64`, `test_nr_pusch_ra0_qam256`, `dft_test`, `test_nr_modulation`; sandbox sockets `time_management_tests`, `test_gtp`, `test_vrtsim`, `test_vrtsim_cirdb`, `nr_cuup_functional_test`. `nr_td_sim_test`, replay, UeContext, and all epoch consumer registrations passed. The full suite began before the final two small test/UeContext edits; the final incremental build, full shuffle and focused CTest above cover those edits. No second full suite was run.
+- [OFFLINE VERIFIED] `git diff --check` and the sens6 frozen-data gate passed before commit.
+
+```bash
+# Exact per-invocation templates used by /tmp/rr-re-shuffle.py, for each SEED=1,3,5.
+flock -s -w 7200 /tmp/td_measure.lock env -u ISAC_RX_BRANCH_FO -u ISAC_RECONF nice -n 19 cmake_targets/ran_build/build/NAME --gtest_shuffle --gtest_random_seed=SEED --gtest_brief=1 --gtest_filter='*'
+flock -s -w 7200 /tmp/td_measure.lock env -u ISAC_RX_BRANCH_FO ISAC_RECONF=1 nice -n 19 cmake_targets/ran_build/build/test_nr_pdcch_blind_monitor --gtest_shuffle --gtest_random_seed=SEED --gtest_brief=1 --gtest_filter='ReconfigReplay.*'
+```
+
+```bash
+flock -s -w 7200 /tmp/td_measure.lock env CCACHE_DIR=/tmp/rr-re-ccache nice -n 19 ninja -C cmake_targets/ran_build/build -j8 nr-uesoftmodem oai_usrpdevif rfsimulator params_libconfig nr-softmodem tests
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ctest --test-dir cmake_targets/ran_build/build -j4 --output-on-failure
+python3 /tmp/rr-re-shuffle.py
+```
+
+## DEFERRED MEASUREMENTS
+
+[PLANNED] Orchestrator only, idle DGX, exclusive lock per 420-second 4-RX arm. The three commands use the 106-PRB post-convergence gate and preserve merged-main levers. The flag-on arms open distinct UeContext JSONL files. Run each with a distinct output directory; repeat in alternating order for stable comparison. The phy-test cell has no SIB1, so a SIB1-broadcasting bed is additionally needed for live SIB1-available evidence. None was run in RE.
+
+```bash
+cd /home/nicola/NICOLA/wt/rr-int
+flock -x -w 7200 /tmp/td_measure.lock env -u ISAC_RX_BRANCH_FO -u ISAC_RECONF -u ISAC_TD_IGNORE_SIB1 -u ISAC_UECTX_PATH ISAC_TD_GRANTWORK=1 ISAC_TD_CB0_ELIM=1 ISAC_TD_FIELDBOOK=2 ISAC_TD_CB0_BACKEND=auto ISAC_TD_TB_CPU_WHILE_ACQ=1 BUILD=/home/nicola/NICOLA/wt/rr-int/cmake_targets/ran_build/build CELL='-C 3319680000 -r 106 --ssb 516' RXEXTRA='--ue-nb-ant-rx 4' GNBARGS='-m 9 -n 0 -M 106 -l 1' GATE_SECS=420 GATE_MODE=postconv GATE_NCTX_MIN=2 GATE_REOPENS_MAX=0 GATE_POSTCONV_CRC_MIN=99.8 GATE_POSTCONV_MIN_DEC=5000 GATE_TTC_MAX_TDA0=39 GATE_TTC_MAX_TDA2=77 GATE_CRC_FLOOR=93.4 GATE_DROP_MAX=2.5 OUT=/tmp/rr-re-4rx-off-r1 bash tests/passive_rx/dgx/rfsim_regress.sh 1
+flock -x -w 7200 /tmp/td_measure.lock env -u ISAC_RX_BRANCH_FO -u ISAC_TD_IGNORE_SIB1 ISAC_RECONF=1 ISAC_UECTX_PATH=/tmp/rr-re-4rx-on-r1-uectx.jsonl ISAC_TD_GRANTWORK=1 ISAC_TD_CB0_ELIM=1 ISAC_TD_FIELDBOOK=2 ISAC_TD_CB0_BACKEND=auto ISAC_TD_TB_CPU_WHILE_ACQ=1 BUILD=/home/nicola/NICOLA/wt/rr-int/cmake_targets/ran_build/build CELL='-C 3319680000 -r 106 --ssb 516' RXEXTRA='--ue-nb-ant-rx 4' GNBARGS='-m 9 -n 0 -M 106 -l 1' GATE_SECS=420 GATE_MODE=postconv GATE_NCTX_MIN=2 GATE_REOPENS_MAX=0 GATE_POSTCONV_CRC_MIN=99.8 GATE_POSTCONV_MIN_DEC=5000 GATE_TTC_MAX_TDA0=39 GATE_TTC_MAX_TDA2=77 GATE_CRC_FLOOR=93.4 GATE_DROP_MAX=2.5 OUT=/tmp/rr-re-4rx-on-r1 bash tests/passive_rx/dgx/rfsim_regress.sh 1
+flock -x -w 7200 /tmp/td_measure.lock env -u ISAC_RX_BRANCH_FO ISAC_RECONF=1 ISAC_TD_IGNORE_SIB1=1 ISAC_UECTX_PATH=/tmp/rr-re-4rx-ignore-sib1-r1-uectx.jsonl ISAC_TD_GRANTWORK=1 ISAC_TD_CB0_ELIM=1 ISAC_TD_FIELDBOOK=2 ISAC_TD_CB0_BACKEND=auto ISAC_TD_TB_CPU_WHILE_ACQ=1 BUILD=/home/nicola/NICOLA/wt/rr-int/cmake_targets/ran_build/build CELL='-C 3319680000 -r 106 --ssb 516' RXEXTRA='--ue-nb-ant-rx 4' GNBARGS='-m 9 -n 0 -M 106 -l 1' GATE_SECS=420 GATE_MODE=postconv GATE_NCTX_MIN=2 GATE_REOPENS_MAX=0 GATE_POSTCONV_CRC_MIN=99.8 GATE_POSTCONV_MIN_DEC=5000 GATE_TTC_MAX_TDA0=39 GATE_TTC_MAX_TDA2=77 GATE_CRC_FLOOR=93.4 GATE_DROP_MAX=2.5 OUT=/tmp/rr-re-4rx-ignore-sib1-r1 bash tests/passive_rx/dgx/rfsim_regress.sh 1
+```
+
+## Open issues
+
+- [PLANNED] Live 4-RX recovery and SIB1-broadcasting evidence require the deferred beds. CPU-only offline tests cannot establish GPU or RF behavior.
+- [KNOWN ISSUE, inherited] Rank >1 CB0 elimination admissibility, sens6 x86/GPU validation, roughly three CB0 candidates per grant, K45 scan-queue drops, and BC9c/BC10/BC11/BC12b remain outside RE.
