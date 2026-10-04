@@ -320,6 +320,73 @@ TEST_F(Cb0Gpu, ExecUsesGpuAndFallsBackToCpuAfterFailure)
   delete s;
 }
 
+/* Memory lifetime (2026-10-04 review): after a CB0 TIMEOUT (fault injection: stalled stream) or a CUDA error the adapter
+ * ABANDONS its thread-local input buffer -- the GPU may still read it -- instead of reusing / freeing it: the next batch gets a
+ * fresh buffer (a different address: the old one is leaked, never freed), and its verdicts are right. A failure the GPU never
+ * saw (CB0 breaker open: rejected before any enqueue) keeps the buffer. */
+TEST_F(Cb0Gpu, AdapterAbandonsInputBufferAfterTimeoutOrCudaError)
+{
+  Hooks hk;
+  ASSERT_TRUE(hk.hooks && hk.reset);
+  const nr_td_cb0_backend_t *ad = nr_td_cb0_gpu_backend_adapter();
+  ASSERT_NE(ad, nullptr);
+  Fx *b = big();
+  Set set;
+  build(set, {b}, 1);
+  const int n = (int)set.it.size();
+  std::vector<nr_td_cb0_result_t> cpu(n), out(n);
+  nr_td_cb0_batch_cpu(set.it.data(), n, cpu.data());
+  hk.reset();
+  ASSERT_EQ(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0);
+  const void *l0 = nullptr, *l1 = nullptr, *l2 = nullptr, *l3 = nullptr;
+  unsigned long ab0 = 0, ab1 = 0, ab2 = 0, ab3 = 0;
+  nr_td_cb0_gpu_adapter_test_scratch(&l0, &ab0);
+  ASSERT_NE(l0, nullptr);
+  /* TIMEOUT: stall the stream 300 ms with a 30 ms deadline */
+  hk.hooks(2, 300, 30, 100, 1000);
+  EXPECT_NE(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0);
+  hk.hooks(0, 0, 2000, 4, 5000);
+  nr_td_cb0_gpu_adapter_test_scratch(&l1, &ab1);
+  EXPECT_EQ(l1, nullptr) << "abandoned after the timeout";
+  EXPECT_EQ(ab1, ab0 + 1);
+  for (int i = 0; i < n; i++)
+    EXPECT_EQ(out[i].pass, -1) << i;
+  hk.reset();
+  usleep(400000); /* the stalled submission drains (it may still read the abandoned buffer meanwhile) */
+  ASSERT_EQ(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0);
+  nr_td_cb0_gpu_adapter_test_scratch(&l2, &ab2);
+  ASSERT_NE(l2, nullptr);
+  EXPECT_NE(l2, l0) << "a fresh buffer: the abandoned one is never freed, so its address cannot come back";
+  for (int i = 0; i < n; i++)
+    EXPECT_EQ(out[i].pass, cpu[i].pass) << i;
+  /* CUDA error: abandoned too */
+  hk.hooks(1, 0, 0, 100, 1000);
+  EXPECT_NE(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0);
+  hk.hooks(0, 0, 2000, 4, 5000);
+  nr_td_cb0_gpu_adapter_test_scratch(&l3, &ab3);
+  EXPECT_EQ(l3, nullptr);
+  EXPECT_EQ(ab3, ab2 + 1);
+  hk.reset();
+  /* breaker open (N = 1 failure trips it): the next submit is rejected before any GPU work -> the buffer is kept */
+  ASSERT_EQ(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0);
+  hk.hooks(1, 0, 0, 1, 60000);
+  EXPECT_NE(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0); /* CUDA error, trips the breaker: abandoned */
+  hk.hooks(0, 0, 2000, 1, 60000);
+  EXPECT_NE(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0) << "breaker open: rejected";
+  const void *lb = nullptr, *lb2 = nullptr;
+  unsigned long abb = 0, abb2 = 0;
+  nr_td_cb0_gpu_adapter_test_scratch(&lb, &abb);
+  ASSERT_NE(lb, nullptr);
+  EXPECT_NE(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0) << "breaker open: rejected";
+  nr_td_cb0_gpu_adapter_test_scratch(&lb2, &abb2);
+  EXPECT_EQ(lb2, lb) << "a rejected (never enqueued) submission keeps the buffer";
+  EXPECT_EQ(abb2, abb);
+  hk.hooks(0, 0, 2000, 4, 5000);
+  hk.reset();
+  ASSERT_EQ(ad->decode(ad->ctx, set.it.data(), n, out.data()), 0);
+  delete b;
+}
+
 /* Dominance: a CUDA CB0 batch is admissible against the CPU TB decoder the wiring forces while acquiring, and against a
  * CUDA TB; a CPU CB0 against a CUDA TB is not (decoder reason). */
 TEST_F(Cb0Gpu, DominanceRuleAdmitsCudaCb0OverCpuTb)

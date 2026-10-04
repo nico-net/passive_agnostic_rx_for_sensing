@@ -62,15 +62,9 @@ bool nr_td_cb0a_is_active(const nr_pdsch_config_sweep_state_t *st, int i)
   return nr_pdsch_config_sweep_is_active(st, i); /* the engine's own predicate (ELIM honoured during fail-open) */
 }
 
-/* One snapshot buffer per thread (the state is ~350 KB: never on the stack). */
-static nr_pdsch_config_sweep_state_t *snap_buf(void)
-{
-  static __thread nr_pdsch_config_sweep_state_t *b;
-  if (b == NULL)
-    b = malloc(sizeof(*b));
-  return b;
-}
-
+/* State access: in place, under the engine's lock (nr_pdsch_config_sweep_with_context), never a copy of the ~350 KB
+ * state. The read of the active set copies only the active (index, hypothesis) pairs; the feed re-validates the set and
+ * credits the grant in ONE lock section (the context cannot move between the check and the credit). */
 static int count_elim(const nr_pdsch_config_sweep_state_t *st)
 {
   int n = 0;
@@ -79,11 +73,9 @@ static int count_elim(const nr_pdsch_config_sweep_state_t *st)
   return n;
 }
 
-bool nr_td_cb0a_active_set(const nr_pdsch_sweep_ticket_t *t, nr_td_cb0a_set_t *out)
+static void active_set_cb(nr_pdsch_config_sweep_state_t *st, void *arg)
 {
-  nr_pdsch_config_sweep_state_t *st = snap_buf();
-  if (st == NULL || t == NULL || out == NULL || !nr_pdsch_config_sweep_snapshot(t, st))
-    return false;
+  nr_td_cb0a_set_t *out = arg;
   out->n_hyp = st->n_hyp;
   out->winner = st->winner;
   out->fail_open = st->fail_open;
@@ -95,13 +87,56 @@ bool nr_td_cb0a_active_set(const nr_pdsch_sweep_ticket_t *t, nr_td_cb0a_set_t *o
       out->hyp[out->n_active] = st->hyp[i];
       out->n_active++;
     }
-  return true;
+}
+
+bool nr_td_cb0a_active_set(const nr_pdsch_sweep_ticket_t *t, nr_td_cb0a_set_t *out)
+{
+  if (t == NULL || out == NULL || out->idx == NULL || out->hyp == NULL)
+    return false;
+  return nr_pdsch_config_sweep_with_context(t, active_set_cb, out);
 }
 
 static bool same_hyp(const nr_pdsch_cfg_hypothesis_t *a, const nr_pdsch_cfg_hypothesis_t *b)
 {
   return nr_td_cb0_hyp_key(a) == nr_td_cb0_hyp_key(b) && a->tda_start == b->tda_start && a->tda_length == b->tda_length
          && a->k0 == b->k0 && a->dmrs_mask == b->dmrs_mask && a->mcs_table == b->mcs_table;
+}
+
+typedef struct {
+  const nr_td_cb0a_grant_t *g;
+  nr_td_cb0a_feed_out_t *o;
+} feed_arg_t;
+
+static void feed_cb(nr_pdsch_config_sweep_state_t *st, void *arg)
+{
+  const feed_arg_t *a = arg;
+  const nr_td_cb0a_grant_t *g = a->g;
+  nr_td_cb0a_feed_out_t *o = a->o;
+  /* Re-validate: the indices were read before the decodes; the context may have been pruned / re-indexed since. */
+  bool moved = st->n_hyp != g->n_hyp_snapshot;
+  for (int k = 0; k < g->n && !moved; k++)
+    moved = g->idx[k] < 0 || g->idx[k] >= st->n_hyp || !same_hyp(&st->hyp[g->idx[k]], &g->hyp[k]);
+  if (moved) {
+    o->reindexed = true;
+    return;
+  }
+#ifdef NR_TD_CB0_X_COUNT
+  const int e0 = count_elim(st);
+  nr_td_cb0_grant_t eg = {.idx = g->idx,
+                          .pass = g->pass,
+                          .n = g->n,
+                          .cb0_decoder = g->cb0_decoder,
+                          .tb_hyp = g->tb_hyp,
+                          .tb_pass = g->tb_pass,
+                          .tb_decoder = g->tb_decoder,
+                          .inadmissible = g->inadmissible & NR_TD_CB0_R_ENGINE_MASK};
+  if (g->inadmissible & ~NR_TD_CB0_R_ENGINE_MASK) /* runtime-only reasons: still a rejected grant for the engine */
+    eg.inadmissible |= NR_TD_CB0_X_LDPC_ERROR;
+  nr_pdsch_config_sweep_feed_cb0_grant(st, &eg);
+  o->fed = true;
+  const int e1 = count_elim(st);
+  o->elim_delta = e1 > e0 ? e1 - e0 : 0;
+#endif
 }
 
 bool nr_td_cb0a_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0a_grant_t *g, nr_td_cb0a_feed_out_t *o)
@@ -118,40 +153,13 @@ bool nr_td_cb0a_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0a_grant_t 
     o->premise_alarm = true;
     atomic_fetch_add(&s_alarms, 1);
   }
-  /* Re-validate: the indices were read before the decodes; the context may have been pruned / re-indexed since. */
-  nr_pdsch_config_sweep_state_t *st = snap_buf();
-  if (st == NULL || !nr_pdsch_config_sweep_snapshot(t, st)) {
+  const feed_arg_t a = {.g = g, .o = o};
+  if (!nr_pdsch_config_sweep_with_context(t, feed_cb, (void *)&a)) {
     o->reindexed = true; /* stale ticket (context reset / re-keyed since the set was read): nothing is credited */
     return false;
   }
-  bool moved = st->n_hyp != g->n_hyp_snapshot;
-  for (int k = 0; k < g->n && !moved; k++)
-    moved = g->idx[k] < 0 || g->idx[k] >= st->n_hyp || !same_hyp(&st->hyp[g->idx[k]], &g->hyp[k]);
-  if (moved) {
-    o->reindexed = true;
-    return false;
-  }
-#ifdef NR_TD_CB0_X_COUNT
-  {
-    const int e0 = count_elim(st);
-    nr_td_cb0_grant_t eg = {.idx = g->idx,
-                            .pass = g->pass,
-                            .n = g->n,
-                            .cb0_decoder = g->cb0_decoder,
-                            .tb_hyp = g->tb_hyp,
-                            .tb_pass = g->tb_pass,
-                            .tb_decoder = g->tb_decoder,
-                            .inadmissible = g->inadmissible & NR_TD_CB0_R_ENGINE_MASK};
-    if (g->inadmissible & ~NR_TD_CB0_R_ENGINE_MASK) /* runtime-only reasons: still a rejected grant for the engine */
-      eg.inadmissible |= NR_TD_CB0_X_LDPC_ERROR;
-    o->fed = nr_pdsch_config_sweep_feedback_cb0(t, &eg);
-    if (o->fed && nr_pdsch_config_sweep_snapshot(t, st)) {
-      const int e1 = count_elim(st);
-      o->elim_delta = e1 > e0 ? e1 - e0 : 0;
-      atomic_fetch_add(&s_elims, (uint64_t)o->elim_delta);
-    }
-  }
-#endif
+  if (o->elim_delta > 0)
+    atomic_fetch_add(&s_elims, (uint64_t)o->elim_delta);
   return o->fed;
 }
 

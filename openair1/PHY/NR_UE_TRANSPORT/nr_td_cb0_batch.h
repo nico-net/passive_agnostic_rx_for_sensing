@@ -203,6 +203,12 @@ int nr_td_cb0_gpu_backend_registered(void);
 int nr_td_cb0_backend_mode(void);
 /* Test hook: force a mode (NR_TD_CB0_BE_*), -1 re-reads the environment. Also clears the GPU back-off. */
 void nr_td_cb0_backend_mode_set(int mode);
+/* The backend nr_td_cb0_exec() would pick for a batch started NOW (NR_TD_CB0_BE_CPU / _GPU), without consuming the
+ * back-off or counting a skip. A PREDICTION only: another consumer's GPU failure (back-off) or a breaker trip between
+ * this call and the batch can still send the batch to the CPU backend. The wiring uses it to decide, before the main
+ * decode, whether the TB must be decoded on the CPU (dominance); the per-grant and per-epoch dominance rules stay the
+ * safety net for a mis-prediction (CPU CB0 after a CUDA TB = inadmissible, NR_TD_CB0_R_DECODER). */
+int nr_td_cb0_backend_peek(void);
 typedef struct {
   uint8_t backend;    /* NR_TD_CB0_BE_CPU / NR_TD_CB0_BE_GPU: the backend that ran this batch */
   uint8_t decoder;    /* NR_TD_CB0_DEC_* common to every decoded item; 0 when none decoded */
@@ -276,6 +282,9 @@ uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter);
 int nr_td_cb0_gpu_register(void);
 /* The adapter itself (for tests): the descriptor nr_td_cb0_gpu_register() registers; NULL when unavailable. */
 const nr_td_cb0_backend_t *nr_td_cb0_gpu_backend_adapter(void);
+/* Test hook: this thread's adapter input buffer (NULL after an abandon or before the first batch) and the process-wide
+ * count of buffers abandoned after a CB0 timeout / CUDA error (the GPU may still read them: leaked, never reused). */
+void nr_td_cb0_gpu_adapter_test_scratch(const void **l, unsigned long *abandoned);
 /* CB0 entry counters (zeros while libldpc_cuda.so / the entry is not loaded): exported to ISAC_METRICS via the wire. */
 typedef struct {
   uint64_t submits, items, ok, errors, timeouts, busy, bypassed, sticky, trips, graphs, h2d_bytes;

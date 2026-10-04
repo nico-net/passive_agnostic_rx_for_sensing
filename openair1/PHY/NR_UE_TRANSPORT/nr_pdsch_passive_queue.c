@@ -1135,7 +1135,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_pdsch_passive_set_grantwork(gw, s_gw_probe != 0);
     }
     /* CB0 ELIMINATION CHANNEL (ISAC_TD_CB0_ELIM, default ON, 0 disables; nr_td_cb0_wire.h): the CB0 hypothesis set of this grant is
-     * fixed HERE, before any decode of the grant; the TB of an acquiring context decodes on the CPU (dominance rule). */
+     * fixed HERE, before any decode of the grant; the TB decodes on the CPU only when this grant's CB0 batch will run on the
+     * CPU backend (dominance rule; a CUDA CB0 batch dominates either TB decoder). */
     bool cb0_tb_cpu = false;
     const nr_td_cb0_job_t cb0_job = {.abs_slot = job.absolute_slot, .job_k0 = job.sweep_ticket.k0, .layout_probe = job.layout_probe != 0,
                                      .gpu_job = gpu_job != NULL, .gw_on = s_gw_on != 0};
@@ -1404,6 +1405,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_pdsch_cfg_hypothesis_t winner;
       if (credit_ok)
         nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      /* a layout-probe job never enters the CB0 wiring (cb0_on false): its outcome is exempt from note_tb_decoder (it feeds only
+       * the full-TB election counters; nr_pdsch_config_sweep.h, DECODER DOMINANCE) */
       if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
         char bc12[192];
         nr_pdsch_passive_bc12_census(&job.sweep_ticket, &winner, bc12, sizeof(bc12));
