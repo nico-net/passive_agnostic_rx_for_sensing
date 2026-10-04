@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -152,6 +153,7 @@ static int g_ul_dmrs_pin_S, g_ul_dmrs_pin_L, g_ul_dmrs_pin_mapping;
 
 void nr_pusch_ul_dmrs_pin_set(int S, int L)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   /* First observation wins and is never overwritten -- same rule the DL DM-RS oracle already uses.
    * A losing CAS means either a pin already exists (UL_PIN_VALID) or another thread is mid-write
    * (UL_PIN_WRITING) -- either way this caller's own (S,L) is correctly discarded. */

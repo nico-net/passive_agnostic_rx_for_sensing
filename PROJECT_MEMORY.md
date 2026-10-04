@@ -2452,6 +2452,42 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 
 ---
 
+[OFFLINE VERIFIED, DGX aarch64, 2026-10-02, rr/reconfig-robustness] R6b's review of R3–R6 fixes is recorded in
+[the R6b report](docs/superpowers/reports/rr/R6b.md): required build passed, ctest 122/131 (only documented ARM/sandbox
+failures), touched binaries passed shuffle seeds 1/3/5. [IMPLEMENTED, NOT VALIDATED on live traffic] Bank health uses
+one producer-slot clock; idle occasions do not accumulate length misses; only changed lengths reopen Technique D;
+second-length fallback exclusion/deduplication, occupancy persistence and occasion-based scouts are corrected.
+The report distinguishes source-reviewed integration changes and rejected subfindings from tested state transitions.
+
+[OFFLINE VERIFIED, DGX aarch64, 2026-10-02, rr/reconfig-robustness] R8b corrects R7/R8 review findings:
+post-boundary SIB1 comparison with a five-second fallback grace, strict short-only P-RNTI evidence, startup
+cache hints, deferred listener dispatch, bounded SIB1 monitoring, identity frequency rounding, and in-flight
+result epoch checks. Required targets built; full ctest 125/134 (documented ARM/sandbox failures only).
+[IMPLEMENTED, NOT VALIDATED on live traffic] RRC skips full configuration for unchanged periodic SIB1;
+GPU result guards and stable-cell false-trigger targets await orchestrated validation. Per-finding evidence,
+shuffle results and exact deferred commands: [R8b report](docs/superpowers/reports/rr/R8b.md).
+
+[OFFLINE VERIFIED, DGX aarch64, 2026-10-02, rr/reconfig-robustness] R2d bounds exhausted
+DCI sweeps to 30..63 plus one low-duty wide probe (140-bit capacity remains default).
+`ISAC_DCI_WIDE_PROBE_EVERY` defaults to 1 with a stride-aware <=5% work-count bound;
+`dci_wide_probes` is added to the blind summary. Required builds passed; full CTest
+127/135 (only documented ARM/sandbox failures), touched shuffle seeds 1/3/5 passed.
+[IMPLEMENTED, NOT VALIDATED on live traffic/GPU] The orchestrator's measured Phase-1
+regression and exact deferred CPU/GPU commands are in [R2d](docs/superpowers/reports/rr/R2d.md).
+
+[OFFLINE VERIFIED, DGX aarch64, 2026-10-04, rr/integration] RI merges levers main
+`4d98184411` with robustness `7703e9cf02`. Required CPU targets build; focused epoch/metrics
+registrations pass, including stale CB0/GPU-backend completion, fieldbook catalogue allocation,
+RELOCK reset and BC9 history. The union metrics schema needs an 8192-byte emitter/CSI-RS fixture
+buffer. Full CTest completed 140/150; the CSI-RS fixture repair passed separately, leaving
+only four known ARM and five sandbox socket failures. Shuffle seeds 1/3/5 passed 111/111
+invocations (3255 cases passed, 45 documented skips). [IMPLEMENTED, NOT VALIDATED on live traffic/GPU]
+GrantWork and CB0 plans retain the
+admitting epoch; guarded sweep/fieldbook/BC9 consumers reject stale results and use the owner's
+once-only dropped-epoch count. Main defaults are retained; R10/R11 and K48 remain deferred.
+Full test/shuffle results, conflict decisions and exact flag-off/on 4-RX gates:
+[RI report](docs/superpowers/reports/rr/RI.md).
+
 ## 25. Next steps on the DGX Spark (strict order)
 
 **Progress 2026-09-30:** steps 1–4 **done** (§4.2). Step 5: OAI build done (UHD 4.11 installed; X410 compat still to

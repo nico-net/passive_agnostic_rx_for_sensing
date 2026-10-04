@@ -52,7 +52,7 @@ static void gold_seq(uint32_t c_init, int n_bits, uint8_t *out)
 static int joint_eval(const nr_pdcch_joint_model_t *m, uint64_t payload, uint16_t rnti, uint16_t nid, uint8_t *out)
 {
   uint8_t seq[NR_PDCCH_JOINT_MAX_E];
-  if (m->enc(m->ctx, payload, rnti, out, m->E) != 0)
+  if (m->enc(m->ctx, nr_dci_bits_from_u64(payload), rnti, out, m->E) != 0)
     return -1;
   const uint32_t nrnti = m->swr ? rnti : 0;
   gold_seq((uint32_t)((((uint64_t)nrnti << 16) + nid) % (1ULL << 31)), m->E, seq);
@@ -328,7 +328,7 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
   v128 x = x0;
   if (bt >= 0) x = v_xor(x, colInv[bt]);
   if (bu >= 0) x = v_xor(x, colInv[bu]);
-  out->payload = x.w[0] & (m->A == 64 ? ~0ULL : ((1ULL << m->A) - 1));
+  out->payload = nr_dci_bits_from_u64( x.w[0] & (m->A == 64 ? ~0ULL : ((1ULL << m->A) - 1)));
   uint16_t rn = 0;
   for (int b = 0; b < 16; b++)
     if (v_get(x, m->A + b))

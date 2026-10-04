@@ -17,6 +17,10 @@
 #include "nr_td_order.h"
 #include "nr_pdsch_config_sweep.h"
 #include "nr_td_cb0_wire.h"
+#include "nr_pusch_passive_queue.h"
+#include "nr_csirs_blind_rt.h"
+__attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
+__attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
 _Atomic int nr_passive_metrics_pci = -1;
@@ -47,6 +51,9 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->scanq_processed = sq.processed;
   m->scanq_drop_full = sq.dropped_full;
   m->scanq_drop_stale = sq.dropped_stale;
+  m->scanq_drop_epoch = sq.dropped_epoch;
+  if (nr_pdcch_blind_inline_drop_epoch)
+    m->pdcch_inline_drop_epoch = nr_pdcch_blind_inline_drop_epoch();
   m->scanq_max_lag = sq.max_lag_slots;
   nr_pdsch_passive_queue_stats_t pq;
   nr_pdsch_passive_queue_get_stats(&pq);
@@ -105,6 +112,10 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     m->td_cb0_gpu_failed = c.gpu_failed;
     m->td_cb0_gpu_skipped = c.gpu_skipped;
   }
+  m->pdschq_drop_epoch = pq.dropped_epoch;
+  nr_pusch_passive_queue_stats_t uq;
+  nr_pusch_passive_queue_get_stats(&uq);
+  m->puschq_drop_epoch = uq.dropped_epoch;
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
   { /* libldpc_cuda.so is dlopen'd RTLD_GLOBAL when --loader.ldpc.shlibversion _cuda is used; absent = zeros */
     typedef void (*cuda_ctr_t)(uint64_t *, uint64_t *, uint64_t *, uint64_t *);
@@ -124,6 +135,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   nr_pdsch_passive_ldpc_tb_decoders(&m->ldpc_tb_cpu, &m->ldpc_tb_cuda);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
+  if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
 }
 
 void nr_passive_metrics_emit(void)
@@ -134,7 +146,7 @@ void nr_passive_metrics_emit(void)
   static FILE *f = NULL;
   static int tried = 0;
   nr_passive_metrics_t m;
-  char buf[6144]; /* + td_cb0_gpu block */
+  char buf[8192]; /* levers and robustness metrics */
   nr_passive_metrics_collect(&m);
   if (nr_passive_metrics_to_json(&m, buf, sizeof(buf)) < 0) {
     LOG_W(PHY, "SENSING: ISAC_METRICS buffer too small\n");

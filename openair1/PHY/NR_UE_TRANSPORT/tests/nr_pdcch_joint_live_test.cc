@@ -85,7 +85,7 @@ TEST(JointLive, RecoversAnUnknownRntiFromLlrsTheWorkerDescrambledWithRntiZero)
         Descramble(l, 0, nid);  // the worker's step with scrambling_rnti = 0: leaves g(rnti)^g(0) on the LLRs
         nr_pdcch_joint_live_result_t r;
         n++;
-        if (nr_pdcch_joint_live_decode_11(l.data(), L, A, nid, 0, 1, 0xFFEF, &r) && r.rnti == rnti && r.payload == pl) ok++;
+        if (nr_pdcch_joint_live_decode_11(l.data(), L, A, nid, 0, 1, 0xFFEF, &r) && r.rnti == rnti && r.payload.w[0] == pl) ok++;
       }
     }
   printf("[joint-live] %d/%d unknown-RNTI DCIs recovered at 8 dB across AL1/2/4 and two nIDs\n", ok, n);
@@ -103,7 +103,7 @@ TEST(JointLive, HandlesAnAlternateNonZeroPreDescramblingRnti)
     auto l = Rx(pl, rnti, nid, A, L, 6.0, rng);
     Descramble(l, 0x4601, nid);  // the worker's retry with an alternate scrambling RNTI that was WRONG
     nr_pdcch_joint_live_result_t r;
-    if (nr_pdcch_joint_live_decode_11(l.data(), L, A, nid, 0x4601, 1, 0xFFEF, &r) && r.rnti == rnti && r.payload == pl) ok++;
+    if (nr_pdcch_joint_live_decode_11(l.data(), L, A, nid, 0x4601, 1, 0xFFEF, &r) && r.rnti == rnti && r.payload.w[0] == pl) ok++;
   }
   EXPECT_GE(ok, 29);
 }
@@ -153,7 +153,7 @@ TEST(JointLive, AdmitsAnUlGrantOnlyWhenAskedForOne)
     auto l = Rx(pl, rnti, 2, A, L, 8.0, rng);
     Descramble(l, 0, 2);
     nr_pdcch_joint_live_result_t r;
-    ul_ok += (nr_pdcch_joint_live_decode(l.data(), L, A, 2, 0, 1, 0xFFEF, /*indicator=*/0, &r) && r.rnti == rnti && r.payload == pl);
+    ul_ok += (nr_pdcch_joint_live_decode(l.data(), L, A, 2, 0, 1, 0xFFEF, /*indicator=*/0, &r) && r.rnti == rnti && r.payload.w[0] == pl);
     dl_admits_ul += nr_pdcch_joint_live_decode_11(l.data(), L, A, 2, 0, 1, 0xFFEF, &r);
   }
   EXPECT_GE(ul_ok, 38);
@@ -177,4 +177,11 @@ int main(int argc, char** argv)
   logInit();
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+TEST(JointLive, WidePayloadUsesPolarFallback) {
+  nr_pdcch_joint_live_result_t out{};
+  int16_t llr[432] = {};
+  for (int len : {65, 80, 128, 129, 140})
+    EXPECT_FALSE(nr_pdcch_joint_live_decode_11(llr, 4, len, 2, 0, 1, 0xffef, &out));
 }

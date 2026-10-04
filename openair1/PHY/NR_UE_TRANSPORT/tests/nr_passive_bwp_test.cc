@@ -58,7 +58,7 @@ struct Pbwp : ::testing::Test {
       uint16_t s = 0, l = (uint16_t)N;
       if (!full_band) { s = (uint16_t)(rng() % N); l = (uint16_t)(1 + rng() % (N - s)); }
       auto c = busy ? coh_for(C, S + s, l, rng, (int)(rng() % C), 10 + (int)(rng() % 30)) : coh_for(C, S + s, l, rng);
-      if (nr_pbwp_score_grant(t, idx, payload_for(len, d, ind, N, riv_encode(N, s, l), rng), c.data())) return g;
+      if (nr_pbwp_score_grant(t, idx, nr_dci_bits_from_u64(payload_for(len, d, ind, N, riv_encode(N, s, l), rng)), c.data())) return g;
     }
     return -1;
   }
@@ -317,7 +317,7 @@ TEST(PassiveBwp, RivFieldSitsAfterTheIndicator)
 {
   std::mt19937 rng(1);
   const uint64_t p = payload_for(45, 2, 3, 24, 123, rng);
-  EXPECT_EQ(nr_pbwp_riv_field(p, 45, 2, nr_pbwp_riv_bits(24)), 123u);
+  EXPECT_EQ(nr_pbwp_riv_field(nr_dci_bits_from_u64(p), 45, 2, nr_pbwp_riv_bits(24)), 123u);
 }
 
 } // namespace

@@ -12,6 +12,7 @@
 #include "nr_td_test_baseline.h"
 extern "C" {
 #include "nr_pdsch_config_sweep.h"
+#include "nr_passive_cfg_epoch.h"
 #include "nr_td_order.h"
 #include "nr_td_legal.h"
 #include "nr_td_fieldbook.h"
@@ -4129,4 +4130,112 @@ TEST(PdschSweepCb0, LowerBoundUsesAdmissibleTbOnly)
   s->tba_trials[L] = 1000; s->tba_ok[L] = 900;
   fcb(s.get(), idx, 1, pass, true);
   EXPECT_TRUE(nr_pdsch_config_sweep_is_eliminated(s.get(), low));
+}
+
+/* RI: old asynchronous levers outcomes must not mutate live contexts or field evidence. */
+TEST(PdschEpoch, LeversFeedbackDropsOnceAcrossBump)
+{
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_cb0_elim_env_set(1);
+  const auto t = select_context(990, 0x4601, 0);
+  auto before = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  auto after = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, before.get()));
+  nr_td_fieldbook_t fb_before{}, fb_after{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_copy(&fb_before, sizeof(fb_before)));
+  uint64_t dropped = 0;
+  {
+    NR_CFG_EPOCH_WORK(nr_cfg_epoch_current(), &dropped);
+    nr_cfg_epoch_note_bwp_change();
+    nr_pdsch_sweep_ticket_t stale_selection{};
+    nr_pdsch_cfg_hypothesis_t h{};
+    EXPECT_FALSE(nr_pdsch_config_sweep_select(992, 0x4602, 0, 2, 0, test_legal, &stale_selection, &h));
+    EXPECT_EQ(stale_selection.generation, 0u);
+    const int idx = t.hypothesis;
+    const bool pass = true;
+    nr_td_cb0_grant_t cb{};
+    cb.idx = &idx; cb.pass = &pass; cb.n = 1;
+    cb.tb_hyp = idx; cb.tb_pass = true;
+    cb.tb_decoder = cb.cb0_decoder = NR_TD_DEC_CPU;
+    EXPECT_FALSE(nr_pdsch_config_sweep_feedback_cb0(&t, &cb));
+    bool called = false;
+    EXPECT_FALSE(nr_pdsch_config_sweep_with_context(&t, [](nr_pdsch_config_sweep_state_t *, void *p) {
+      *static_cast<bool *>(p) = true;
+    }, &called));
+    EXPECT_FALSE(called);
+    EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&t, true, nullptr));
+    EXPECT_EQ(nr_pdsch_config_sweep_certify_k0(&t, 1ull << t.k0), 0);
+    nr_td_excl_t ex;
+    nr_td_excl_none(&ex);
+    ex.last[1] = -1;
+    EXPECT_EQ(nr_pdsch_config_sweep_exclude_key(t.configuration, t.rnti, t.tda_index, &ex), 0);
+    nr_pdsch_config_sweep_note_dci_phase(t.configuration, t.rnti, 7);
+    EXPECT_EQ(dropped, 1u);
+  }
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, after.get()));
+  EXPECT_EQ(memcmp(before.get(), after.get(), sizeof(*before)), 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_copy(&fb_after, sizeof(fb_after)));
+  EXPECT_EQ(memcmp(&fb_before, &fb_after, sizeof(fb_before)), 0);
+  uint32_t phases = 99;
+  ASSERT_TRUE(nr_pdsch_config_sweep_excl_census(t.configuration, t.rnti, t.tda_index, nullptr, nullptr, &phases));
+  EXPECT_EQ(phases, 0u);
+  nr_pdsch_config_sweep_reset_all();
+}
+
+TEST(PdschEpoch, RelockResetClearsFieldbookAndVerifyContext)
+{
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  const auto old = select_context(991, 0x4601, 0);
+  uint32_t pruned = 0;
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&old, &pruned, nullptr));
+  EXPECT_NE(pruned, 0u);
+  nr_pdsch_config_sweep_reset_all();
+  nr_td_fieldbook_t fb{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_copy(&fb, sizeof(fb)));
+  int32_t value = -1;
+  EXPECT_FALSE(nr_td_fieldbook_prunes(&fb, NR_TD_F_DMRS_ADD_POS, &value));
+  const auto fresh = select_context(991, 0x4601, 0);
+  EXPECT_NE(fresh.generation, old.generation);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old, true, nullptr));
+  ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_context(&fresh, &pruned, nullptr));
+  EXPECT_EQ(pruned, 0u);
+  nr_pdsch_config_sweep_reset_all();
+}
+
+static bool epoch_bump_during_catalog;
+static int32_t epoch_catalog_legal(int a, int length, int start, int mapping_b, int add, int maxlen)
+{
+  if (epoch_bump_during_catalog) {
+    epoch_bump_during_catalog = false;
+    nr_cfg_epoch_note_bwp_change();
+  }
+  return test_legal(a, length, start, mapping_b, add, maxlen);
+}
+
+TEST(PdschEpoch, SelectionStraddleDoesNotPublishVerifyContext)
+{
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  nr_pdsch_config_sweep_reset_all();
+  epoch_bump_during_catalog = true;
+  nr_pdsch_sweep_ticket_t ticket{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  uint64_t dropped = 0;
+  {
+    NR_CFG_EPOCH_WORK(nr_cfg_epoch_current(), &dropped);
+    EXPECT_FALSE(nr_pdsch_config_sweep_select(993, 0x4603, 0, 2, 0, epoch_catalog_legal, &ticket, &h));
+    EXPECT_FALSE(epoch_bump_during_catalog);
+    EXPECT_EQ(ticket.generation, 0u);
+    EXPECT_EQ(dropped, 1u);
+  }
+  // A new epoch's job may allocate normally after the aborted catalogue creation.
+  EXPECT_TRUE(nr_pdsch_config_sweep_select(993, 0x4603, 0, 2, 0, epoch_catalog_legal, &ticket, &h));
+  EXPECT_NE(ticket.generation, 0u);
+  nr_pdsch_config_sweep_reset_all();
 }

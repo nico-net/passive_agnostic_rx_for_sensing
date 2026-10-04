@@ -21,6 +21,7 @@
 #define NR_POLAR_SC_CUDA_H
 
 #include <stdint.h>
+#include "PHY/NR_UE_TRANSPORT/nr_dci_bits.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,7 +30,7 @@ extern "C" {
 #define NPC_MAX_N 512     /* NR_POLAR_DCI_N_MAX = 9 */
 #define NPC_MAX_E 2048    /* AL16 = 1728 (repetition rate matching: E > N) */
 #define NPC_MAX_OPS 2048  /* <= 3 * (2N - 1) */
-#define NPC_MAX_PARAMS 256 /* dlsweep: 34 lengths x AL{1,2,4,8,16} = 170, plus the scan's own */
+#define NPC_MAX_PARAMS 704 /* up to 140 lengths x five aggregation levels */
 
 /* Register one (DCI length, aggregation level) so its patterns and op list live on the device.
  * Idempotent; returns a params id >= 0, or -1. Uses nr_polar_params() for the patterns. */
@@ -42,13 +43,13 @@ typedef struct {
 
 /* Decode n items as one batch (H2D, one kernel, D2H, host extraction + CRC).
  * crc[i] is what polar_decoder_int16() returns (24-bit CRC xor RNTI-masked CRC),
- * payload[i] is what it writes to out[0]. Returns 0 on success. */
-int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, uint64_t *payload);
+ * payload[i] is its three right-aligned payload words. Returns 0 on success. */
+int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload);
 
 /* Items sharing LLR vectors: item i decodes vec + vidx[i]*vstride with params pid[i]; only the
  * n_vec distinct vectors are copied/uploaded. Returns 0 on success. */
 int npc_decode_batch_vec(const int16_t *vec, int vstride, int n_vec, const int *vidx, const int *pid, int n,
-                         uint32_t *crc, uint64_t *payload);
+                         uint32_t *crc, nr_dci_bits_t *payload);
 
 /* Time split of the last npc_decode_batch, microseconds. */
 typedef struct { double h2d, kernel, d2h, host; } npc_timing_t;

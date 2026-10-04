@@ -544,6 +544,9 @@ typedef struct NR_UE_MAC_INST_s {
   int servCellIndex;
   long physCellId;
   bool get_sib1;
+  bool passive_sib1_window;
+  uint64_t passive_sib1_request_slot;
+  unsigned passive_sib1_occasions;
   bool get_otherSI[MAX_SI_GROUPS];
   NR_MIB_t *mib;
 

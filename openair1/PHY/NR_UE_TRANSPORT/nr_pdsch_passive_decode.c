@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 /*
@@ -453,9 +454,11 @@ static bool rnti_nl_latched(uint16_t rnti, bool sweepable)
 }
 static int rnti_nl_latch(uint16_t rnti, bool sweepable, int nl)
 {
+  if (!nr_cfg_epoch_work_current()) return nl;
   if (!sweepable)
     return nl; /* no per-RNTI state for SI/RA/P: nothing to latch, nothing to log */
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return nl; }
   rnti_dec_t *r = rnti_dec(rnti);
   const int prev = r->nl ? r->nl : atomic_load(&g_lbrm_nl);
   r->nl = nl;
@@ -502,7 +505,9 @@ uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_
 }
 void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return; }
   rnti_dec_t *r = rnti_dec_find(rnti, false);
   if (r && r->data_id.n > 0 && r->data_id.latched < 0) {
     const int tried = nr_scrambling_id_sweep_current(&r->data_id);
@@ -526,7 +531,9 @@ static int rnti_ptrs_pick(uint16_t rnti)
 }
 static int rnti_ptrs_feed(uint16_t rnti, int arm, bool tb_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return -1; }
   const int latched = nr_ptrs_sweep_feed(&rnti_dec(rnti)->ptrs, arm, tb_ok);
   if (latched >= 0 && g_ptrs_cell_arm < 0)
     for (int i = 0; i < RNTI_DEC_MAX; i++)
@@ -546,7 +553,9 @@ static int rnti_vrbl_pick(uint16_t rnti)
 }
 static int rnti_vrbl_feed(uint16_t rnti, int arm, bool tb_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return -1; }
   const int latched = vrbl_sweep_feed(&rnti_dec(rnti)->vrbl, arm, tb_ok);
   pthread_mutex_unlock(&g_ptrs_lock);
   return latched;
@@ -564,7 +573,9 @@ static int rnti_prg_pick(uint16_t rnti)
 }
 static int rnti_prg_feed(uint16_t rnti, int arm, bool tb_ok, bool link_ok, bool *explore_started)
 {
+  if (!nr_cfg_epoch_work_current()) return -1;
   pthread_mutex_lock(&g_ptrs_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_ptrs_lock); return -1; }
   nr_prg_sweep_t *p = &rnti_dec(rnti)->prg;
   const bool was = p->explore;
   const int latched = prg_sweep_feed(p, arm, tb_ok, link_ok);
@@ -595,6 +606,7 @@ static nr_scr_link_t g_dl_scr_link;
 static _Atomic uint32_t g_ded_fails_since_ok[65536];
 void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   nr_scr_link_note(&g_dl_scr_link, rnti, dedicated, crc_ok);
   if (!dedicated)
     return;
@@ -1199,6 +1211,7 @@ typedef struct {
   double fo_hz;
   uint8_t k0;
   uint64_t fp;
+  uint32_t config_epoch; /* original PDSCH admission stamp for lazy work */
   uint8_t main_decoder_used; /* decoder_used of the job's main decode (0 = not known yet) */
 } gw_ctx_t;
 
@@ -1780,6 +1793,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                             nr_pdsch_passive_decode_result_t *out)
 {
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   memset(out, 0, sizeof(*out));
   t_gw_used = t_gw_ready = false;
   t_last_hq_retx = false;
@@ -2420,7 +2434,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                       fp->samples_per_slot_wCP, proc->nr_slot_rx, fep_s0, fep_n,
                                                       ssb_event.symbols, grant->scr_dedicated, i);
     if (zs >= 0.0)
-      nr_csirs_blind_rt_zp_grant_evidence((uint32_t)grant->source_absolute_slot, &dlsch_config->csiRsForRateMatching[i], zs);
+      if (nr_cfg_epoch_work_current()) nr_csirs_blind_rt_zp_grant_evidence((uint32_t)grant->source_absolute_slot, &dlsch_config->csiRsForRateMatching[i], zs);
   }
 
   // ---- Channel estimation on the DM-RS symbols. ----
@@ -4227,7 +4241,7 @@ gpu_llr_ready:;
       // only the genuinely resolvable grant that established have_init_tx=false does.
       if (!have_init_tx && !t_quiet && rnti_sweepable(grant->rnti, grant->rnti_class)) {
         pthread_mutex_lock(&g_harqc_lock);
-        nr_harq_init_tx_record(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, cw->qamModOrder, cw->Nl,
+        if (nr_cfg_epoch_work_current()) nr_harq_init_tx_record(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, cw->qamModOrder, cw->Nl,
                                cw->ldpcBaseGraph, cw->TBS, cw->targetCodeRate);
         pthread_mutex_unlock(&g_harqc_lock);
       }
@@ -4359,6 +4373,8 @@ bool nr_pdsch_passive_last_used_grantwork(bool *served_ready)
 static int gw_compute(void *vctx, nr_td_grantwork_t *gw, uint64_t sig, const void *hint)
 {
   const gw_ctx_t *c = (const gw_ctx_t *)vctx;
+  NR_CFG_EPOCH_WORK(c->config_epoch, NULL);
+  if (!nr_cfg_epoch_work_current()) return NR_TD_GW_E_STALE;
   const nr_pdsch_cfg_hypothesis_t *h = (const nr_pdsch_cfg_hypothesis_t *)hint;
   nr_pdsch_cfg_hypothesis_t g = {0}; /* nr_td_signature() layout: S | L << 4 | k0 << 8 | mask << 16 | nl << 32 | qm << 36 */
   g.tda_start = (uint8_t)(sig & 0xF);
@@ -4424,6 +4440,8 @@ nr_td_grantwork_t *nr_pdsch_passive_grantwork_begin(PHY_VARS_NR_UE *ue, const UE
 {
   gw_ctx_t c;
   memset(&c, 0, sizeof(c));
+  if (!nr_cfg_epoch_work_current()) return NULL;
+  c.config_epoch = nr_cfg_epoch_work_stamp();
   c.ue = ue;
   c.proc = *proc;
   c.pdu = *pdu;
@@ -4504,6 +4522,8 @@ int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis
   if (h->dmrs_mask == 0)
     return NR_TD_GW_E_ARG; /* M1: a legacy (mask-less) hypothesis does not say which symbols carry DM-RS */
   const gw_ctx_t *c = (const gw_ctx_t *)nr_td_grantwork_ctx(gw);
+  NR_CFG_EPOCH_WORK(c->config_epoch, NULL);
+  if (!nr_cfg_epoch_work_current()) return NR_TD_GW_E_STALE;
   if (h->k0 != c->k0)
     return NR_TD_GW_E_K0;
   const int nl = __builtin_popcount(c->pdu.dmrs_ports & 0xFFF);
@@ -4515,6 +4535,7 @@ int nr_pdsch_passive_gw_cb0(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis
   out->flags = nr_td_grantwork_flags(gw);
   out->full_decoder_used = c->main_decoder_used;
   out->decoder = NR_TD_DEC_CPU;
+  if (!nr_cfg_epoch_work_current()) return NR_TD_GW_E_STALE;
   if (rc != NR_TD_GW_OK)
     return rc;
   const uint64_t t0 = nr_td_gw_now_ns();
@@ -4573,6 +4594,8 @@ int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypot
   if (h->dmrs_mask == 0)
     return NR_TD_GW_E_ARG;
   const gw_ctx_t *c = (const gw_ctx_t *)nr_td_grantwork_ctx(gw);
+  NR_CFG_EPOCH_WORK(c->config_epoch, NULL);
+  if (!nr_cfg_epoch_work_current()) return NR_TD_GW_E_STALE;
   if (h->k0 != c->k0)
     return NR_TD_GW_E_K0;
   const int nl = __builtin_popcount(c->pdu.dmrs_ports & 0xFFF);
@@ -4584,6 +4607,7 @@ int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypot
   const int rc = nr_td_grantwork_get_llr(gw, nr_td_grantwork_key(h, nl, qm), h, &v);
   if (flags)
     *flags = nr_td_grantwork_flags(gw);
+  if (!nr_cfg_epoch_work_current()) return NR_TD_GW_E_STALE;
   if (rc != NR_TD_GW_OK)
     return rc;
   nr_td_cb0_params_t p;

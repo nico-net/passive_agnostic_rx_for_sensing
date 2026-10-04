@@ -22,6 +22,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_td_order.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 
 #define ASIGN_P_VAL(dst, src) \
   do {                        \
@@ -2414,6 +2416,142 @@ static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfig
   return probe;
 }
 
+uint32_t nr_passive_sib1_semantic_hash(const NR_SIB1_t *sib1, uint16_t pci)
+{
+  uint32_t h = nr_cfg_semantic_start();
+#define H(v) (h = nr_cfg_semantic_add(h, (uint64_t)(v)))
+#define OPT(p) H((p) ? (int64_t)*(p) : -1)
+  const NR_ServingCellConfigCommonSIB_t *scc = sib1->servingCellConfigCommon;
+  long mcc_digits[3] = {-1, -1, -1};
+  H(sib1->cellAccessRelatedInfo.plmn_IdentityInfoList.list.count);
+  for (int i = 0; i < sib1->cellAccessRelatedInfo.plmn_IdentityInfoList.list.count; ++i) {
+    const NR_PLMN_IdentityInfo_t *info = sib1->cellAccessRelatedInfo.plmn_IdentityInfoList.list.array[i];
+    H(info->plmn_IdentityList.list.count);
+    for (int j = 0; j < info->plmn_IdentityList.list.count; ++j) {
+      const NR_PLMN_Identity_t *p = info->plmn_IdentityList.list.array[j];
+      if (p->mcc && p->mcc->list.count == 3)
+        for (int k = 0; k < 3; ++k) mcc_digits[k] = *p->mcc->list.array[k];
+      for (int k = 0; k < 3; ++k) H(mcc_digits[k]);
+      H(p->mnc.list.count);
+      for (int k = 0; k < p->mnc.list.count; ++k) H(*p->mnc.list.array[k]);
+    }
+    h = nr_cfg_semantic_bits(h, info->cellIdentity.buf,
+                             info->cellIdentity.size * 8u - info->cellIdentity.bits_unused);
+    H(info->trackingAreaCode != NULL);
+    if (info->trackingAreaCode)
+      h = nr_cfg_semantic_bits(h, info->trackingAreaCode->buf,
+                               info->trackingAreaCode->size * 8u - info->trackingAreaCode->bits_unused);
+  }
+  const NR_DownlinkConfigCommonSIB_t *dl = &scc->downlinkConfigCommon;
+  const NR_FrequencyInfoDL_SIB_t *fdl = &dl->frequencyInfoDL;
+  H(fdl->offsetToPointA);
+  H(fdl->scs_SpecificCarrierList.list.count);
+  for (int i = 0; i < fdl->scs_SpecificCarrierList.list.count; ++i) {
+    const NR_SCS_SpecificCarrier_t *c = fdl->scs_SpecificCarrierList.list.array[i];
+    H(c->offsetToCarrier); H(c->subcarrierSpacing); H(c->carrierBandwidth);
+  }
+  H(dl->initialDownlinkBWP.genericParameters.locationAndBandwidth);
+  H(dl->initialDownlinkBWP.genericParameters.subcarrierSpacing);
+  const NR_PDSCH_ConfigCommon_t *pdsch = dl->initialDownlinkBWP.pdsch_ConfigCommon
+      && dl->initialDownlinkBWP.pdsch_ConfigCommon->present == NR_SetupRelease_PDSCH_ConfigCommon_PR_setup
+      ? dl->initialDownlinkBWP.pdsch_ConfigCommon->choice.setup : NULL;
+  const NR_PDSCH_TimeDomainResourceAllocationList_t *dt = pdsch ? pdsch->pdsch_TimeDomainAllocationList : NULL;
+  H(dt ? dt->list.count : 0);
+  if (dt) for (int i = 0; i < dt->list.count; ++i) {
+    const NR_PDSCH_TimeDomainResourceAllocation_t *t = dt->list.array[i];
+    H(t->k0 ? *t->k0 : 0); H(t->mappingType); H(t->startSymbolAndLength);
+  }
+  const NR_PDCCH_ConfigCommon_t *pdcch = dl->initialDownlinkBWP.pdcch_ConfigCommon
+      && dl->initialDownlinkBWP.pdcch_ConfigCommon->present == NR_SetupRelease_PDCCH_ConfigCommon_PR_setup
+      ? dl->initialDownlinkBWP.pdcch_ConfigCommon->choice.setup : NULL;
+  H(pdcch != NULL);
+  if (pdcch) {
+    OPT(pdcch->controlResourceSetZero); OPT(pdcch->searchSpaceZero);
+    OPT(pdcch->searchSpaceSIB1); OPT(pdcch->searchSpaceOtherSystemInformation);
+    OPT(pdcch->pagingSearchSpace); OPT(pdcch->ra_SearchSpace);
+    const NR_ControlResourceSet_t *cs = pdcch->commonControlResourceSet;
+    H(cs != NULL);
+    if (cs) {
+      H(cs->controlResourceSetId); H(cs->duration);
+      h = nr_cfg_semantic_bits(h, cs->frequencyDomainResources.buf,
+                               cs->frequencyDomainResources.size * 8u - cs->frequencyDomainResources.bits_unused);
+      H(cs->cce_REG_MappingType.present);
+      if (cs->cce_REG_MappingType.present == NR_ControlResourceSet__cce_REG_MappingType_PR_interleaved) {
+        const struct NR_ControlResourceSet__cce_REG_MappingType__interleaved *m = cs->cce_REG_MappingType.choice.interleaved;
+        H(m->reg_BundleSize); H(m->interleaverSize); H(m->shiftIndex ? *m->shiftIndex : pci);
+      }
+      H(cs->pdcch_DMRS_ScramblingID ? *cs->pdcch_DMRS_ScramblingID : pci);
+    }
+    H(pdcch->commonSearchSpaceList ? pdcch->commonSearchSpaceList->list.count : 0);
+    if (pdcch->commonSearchSpaceList) for (int i = 0; i < pdcch->commonSearchSpaceList->list.count; ++i) {
+      const NR_SearchSpace_t *ss = pdcch->commonSearchSpaceList->list.array[i];
+      int period = 0, offset = 0;
+      if (ss->monitoringSlotPeriodicityAndOffset) get_monitoring_period_offset(ss, &period, &offset);
+      H(ss->searchSpaceId); OPT(ss->controlResourceSetId); H(period); H(offset);
+      H(ss->duration ? *ss->duration : 1);
+      if (ss->monitoringSymbolsWithinSlot)
+        h = nr_cfg_semantic_bits(h, ss->monitoringSymbolsWithinSlot->buf,
+                                 ss->monitoringSymbolsWithinSlot->size * 8u - ss->monitoringSymbolsWithinSlot->bits_unused);
+      else H(0);
+      if (ss->nrofCandidates) {
+        H(ss->nrofCandidates->aggregationLevel1); H(ss->nrofCandidates->aggregationLevel2);
+        H(ss->nrofCandidates->aggregationLevel4); H(ss->nrofCandidates->aggregationLevel8);
+        H(ss->nrofCandidates->aggregationLevel16);
+      } else H(0);
+    }
+  }
+  const NR_TDD_UL_DL_ConfigCommon_t *tc = scc->tdd_UL_DL_ConfigurationCommon;
+  H(tc != NULL);
+  if (tc) {
+    H(tc->referenceSubcarrierSpacing);
+    const NR_TDD_UL_DL_Pattern_t *p[2] = {&tc->pattern1, tc->pattern2};
+    for (int i = 0; i < 2; ++i) {
+      H(p[i] != NULL);
+      if (p[i]) {
+        H(p[i]->dl_UL_TransmissionPeriodicity); H(p[i]->nrofDownlinkSlots);
+        H(p[i]->nrofDownlinkSymbols); H(p[i]->nrofUplinkSlots); H(p[i]->nrofUplinkSymbols);
+        H(p[i]->ext1 && p[i]->ext1->dl_UL_TransmissionPeriodicity_v1530
+              ? *p[i]->ext1->dl_UL_TransmissionPeriodicity_v1530 : -1);
+      }
+    }
+  }
+  H(scc->uplinkConfigCommon != NULL);
+  if (scc->uplinkConfigCommon) {
+    const NR_UplinkConfigCommonSIB_t *ul = scc->uplinkConfigCommon;
+    const NR_FrequencyInfoUL_SIB_t *ful = &ul->frequencyInfoUL;
+    OPT(ful->absoluteFrequencyPointA);
+    H(ful->scs_SpecificCarrierList.list.count);
+    for (int i = 0; i < ful->scs_SpecificCarrierList.list.count; ++i) {
+      const NR_SCS_SpecificCarrier_t *c = ful->scs_SpecificCarrierList.list.array[i];
+      H(c->offsetToCarrier); H(c->subcarrierSpacing); H(c->carrierBandwidth);
+    }
+    H(ul->initialUplinkBWP.genericParameters.locationAndBandwidth);
+    H(ul->initialUplinkBWP.genericParameters.subcarrierSpacing);
+    const NR_PUSCH_ConfigCommon_t *pusch = ul->initialUplinkBWP.pusch_ConfigCommon
+        && ul->initialUplinkBWP.pusch_ConfigCommon->present == NR_SetupRelease_PUSCH_ConfigCommon_PR_setup
+        ? ul->initialUplinkBWP.pusch_ConfigCommon->choice.setup : NULL;
+    const NR_PUSCH_TimeDomainResourceAllocationList_t *ut = pusch ? pusch->pusch_TimeDomainAllocationList : NULL;
+    H(ut ? ut->list.count : 0);
+    if (ut) for (int i = 0; i < ut->list.count; ++i) {
+      const NR_PUSCH_TimeDomainResourceAllocation_t *t = ut->list.array[i];
+      H(t->k2 ? *t->k2 : get_j_for_k2(ul->initialUplinkBWP.genericParameters.subcarrierSpacing));
+      H(t->mappingType); H(t->startSymbolAndLength);
+    }
+    const NR_RACH_ConfigCommon_t *rc = ul->initialUplinkBWP.rach_ConfigCommon
+        && ul->initialUplinkBWP.rach_ConfigCommon->present == NR_SetupRelease_RACH_ConfigCommon_PR_setup
+        ? ul->initialUplinkBWP.rach_ConfigCommon->choice.setup : NULL;
+    H(rc != NULL);
+    if (rc) {
+      H(rc->rach_ConfigGeneric.prach_ConfigurationIndex);
+      H(rc->rach_ConfigGeneric.msg1_FDM); H(rc->rach_ConfigGeneric.msg1_FrequencyStart);
+      H(rc->rach_ConfigGeneric.zeroCorrelationZoneConfig);
+    }
+  }
+#undef OPT
+#undef H
+  return h;
+}
+
 void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *sib1, bool can_start_ra)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2427,6 +2565,18 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
   }
   NR_ServingCellConfigCommonSIB_t *scc = sib1->servingCellConfigCommon;
   AssertFatal(scc, "SIB1 SCC should not be NULL\n");
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
+    if (scc->downlinkConfigCommon.frequencyInfoDL.scs_SpecificCarrierList.list.count > 0) {
+      const uint64_t point_a = (uint64_t)scc->downlinkConfigCommon.frequencyInfoDL.offsetToPointA + 1;
+      nr_cfg_epoch_refine_point_a(point_a);
+    }
+    const uint32_t semantic_hash = nr_passive_sib1_semantic_hash(sib1, (uint16_t)mac->physCellId);
+    nr_pdcch_blind_set_sib1_semantic_hash(semantic_hash);
+    const unsigned coeff = 2u << (unsigned)scc->downlinkConfigCommon.bcch_Config.modificationPeriodCoeff;
+    const unsigned paging_cycle = nr_pcch_default_paging_cycle_rf(&scc->downlinkConfigCommon.pcch_Config);
+    const unsigned slots_per_frame = get_slots_per_frame_from_scs(mac->numerology);
+    nr_cfg_epoch_set_si_period(nr_cfg_si_period_slots(coeff, paging_cycle, slots_per_frame));
+  }
   {
     static bool logged_once = false;
     if (!logged_once) {

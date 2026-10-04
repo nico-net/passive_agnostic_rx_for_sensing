@@ -7,6 +7,7 @@
  * compliance V8.6 2009-03.
  */
 
+#include "nr_dci_bits.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1157,7 +1158,7 @@ static void nr_dci_decoding_procedure(const UE_nr_rxtx_proc_t *proc,
       if (ind < dci_ind->number_of_dcis)
         continue;
 
-      uint64_t dci_estimation[2] = {0};
+      uint64_t dci_estimation[NR_DCI_WORDS] = {0};
       LOG_D(NR_PHY_DCI,
             "(%i.%i) Trying DCI candidate %d of %d number of candidates, CCE %d (%d), L %d, length %d, format %d\n",
             proc->frame_rx,

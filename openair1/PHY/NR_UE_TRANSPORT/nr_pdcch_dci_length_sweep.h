@@ -49,6 +49,8 @@
 #ifndef NR_PDCCH_DCI_LENGTH_SWEEP_H
 #define NR_PDCCH_DCI_LENGTH_SWEEP_H
 
+#include "nr_dci_bits.h"
+#include "nr_dci11_pin.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -72,8 +74,7 @@ extern "C" {
 typedef bool (*nr_pdcch_dci_length_scorer_fn)(int dci_length, int trial_idx, uint16_t* rnti_out,
                                               uint32_t* payload_hash_out, void* user_ctx);
 
-#define NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN    64 // dci_length is capped at 63 elsewhere in this
-                                                 // project (values 0-63 fit); indexed directly by
+#define NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN (NR_DCI_MAX_PAYLOAD + 1)
                                                  // length, no offset arithmetic to get wrong.
 #define NR_PDCCH_DCI_LENGTH_SWEEP_MAX_HASHES 32 // cap on distinct-payload bookkeeping per length;
                                                  // degenerate detection only needs to distinguish
@@ -93,6 +94,12 @@ typedef struct {
   uint32_t last_feed; /* one identity vote at most per OTA occasion */
   uint32_t hashes[NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_HASHES];
 } nr_pdcch_dci_length_rnti_evidence_t;
+
+/* Cell-wide ordering hints only: never acceptance evidence. Thread-safe for scan consumers. */
+void nr_pdcch_dci_length_seen_reset(void);
+void nr_pdcch_dci_length_note_seen(int len);
+int nr_pdcch_dci_length_order(int min_len, int max_len, int *out);
+bool nr_pdcch_reconf_enabled(void);
 
 /** Persistent state, accumulated across many nr_pdcch_dci_length_sweep_feed() calls (one call per
  *  candidate-bearing occasion). Plain struct, no hidden allocation -- zero-initialize (static
@@ -115,6 +122,8 @@ typedef struct {
    * size): its CRC passes are real but say nothing about the 1_1/0_1 size the sweep is after. The
    * SA rfsim cell locked 44 = its 1_0 size on 58 format-1_0 accepts (2026-09-16). 0 = none. */
   int      excluded_len;
+  int      tertiary_excluded_len; /* fallback 1_0 while two dedicated lengths are excluded */
+  int      secondary_excluded_len; /* optional second format length during locked-length scouting */
   /* ROTATION. <=1 (the zero-initialised default) tests every length on every call, which is what
    * this sweep did unconditionally until 2026-09-17 -- and what made it the receiver's dominant
    * cost: 34 lengths x ~6 candidates x ~8us of Polar+CRC is ~1.75ms on EVERY occasion, against a
@@ -124,7 +133,11 @@ typedef struct {
    * the per-occasion cost falls ~N-fold while the trials each length accumulates per ROUND is
    * unchanged. Set it at the call site before the first feed (the same place excluded_len is set). */
   int      stride;
+  int      order[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN], order_count;
   int      resume_len, resume_trial; // budget suspension; reset with the geometry epoch
+  bool     stage_one_exhausted; /* every stage-1 length reached the statistical trial floor without a lock */
+  uint32_t wide_probe_cursor; /* round-robin over 64..configured max */
+  int      round_max; /* frozen across rotation/budget suspension */
   int      rot_phase; // 0..stride-1, which interleaved subset this call tests
   /* CELL PRIOR (2026-09-17). When > 0, test ONLY this length for the first
    * NR_PDCCH_LENGTH_PREFERRED_ROUNDS rounds instead of all 34. Set from the bank's cell-wide length
@@ -143,7 +156,18 @@ typedef struct {
    * the SAME LLR slice. Measure it rather than assume it. */
   uint64_t decodes;
   uint32_t feed_serial; /* distinct OTA occasions; resumed work never manufactures recurrence */
+  int relock_old_len; /* SUSPECT only: old length, then seen lengths, then full range */
 } nr_pdcch_dci_length_sweep_state_t;
+/* Active range shared by CPU scoring, prefill and UL uniqueness checks. Explicit
+ * ISAC_DCI_LEN_MAX or a cell-seen wide length bypasses the cold 63-bit cap. */
+int nr_pdcch_dci_length_active_max(const nr_pdcch_dci_length_sweep_state_t *state,
+                                   int min_len, int max_len);
+/* Snapshot for the NEXT feed: active contiguous range plus at most one wide probe.
+ * Pure (does not advance state); CPU feed and GPU lane/prefill share this selection.
+ * out has NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN entries. */
+int nr_pdcch_dci_length_batch_lengths(const nr_pdcch_dci_length_sweep_state_t *state,
+                                    int min_len, int max_len, int *out);
+uint64_t nr_pdcch_dci_length_wide_probes(void); /* cumulative probe occasions actually scored */
 /* Rounds a seeded length gets before the full sweep resumes. The sweep's own significance test
  * needs accumulated trials, and one occasion carries only ~6 candidates; 8 rounds is ~50 candidates,
  * comfortably enough for a length that is already right and nowhere near enough to make a wrong one
@@ -153,16 +177,39 @@ typedef struct {
 /* A caller-serialized bank. Interleaved UEs never reset one another; geometry
  * epoch changes invalidate all entries. Eviction discards evidence, never reuses it. */
 #define NR_PDCCH_LENGTH_CONTEXTS 16
+typedef enum { NR_LEN_SEARCHING = 0, NR_LEN_LOCKED = 1, NR_LEN_SUSPECT = 2 } nr_len_state_t;
+uint32_t nr_pdcch_dci_length_n_suspect_from_env(void);
 typedef struct {
   nr_pdcch_dci_length_sweep_state_t state;
   uint16_t rnti;
-  int found;
+  int found[2]; /* oldest-compatible primary and one additional significant length */
+  uint32_t found_recent[2];
+  nr_dci11_pin_t layout_pin[2];
+  uint32_t layout_cursor[2];
+  uint8_t len_state;
+  uint32_t miss_occasions;
+  uint32_t epoch_learned;
+  uint32_t last_accept_slot, last_note_slot;
+  bool scout_initialized;
   bool exhausted;
   uint64_t touched;
 } nr_pdcch_dci_length_context_t;
+/* Caller serializes with its geometry bank lock. A zero n_suspect uses the default 200. */
+void nr_pdcch_dci_length_context_note_occasion(nr_pdcch_dci_length_context_t *c,
+    bool accepted_at_locked, bool rnti_active_elsewhere, uint32_t n_suspect);
+/* First/same-length lock returns 0; a changed length returns the replaced length. */
+int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int length);
+/* Add a significant length, evicting the least recently accepted when both slots are full. */
+int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot);
+void nr_pdcch_dci_length_context_touch(nr_pdcch_dci_length_context_t *c, int length, uint32_t slot);
+nr_dci11_pin_t *nr_pdcch_dci_length_context_pin(nr_pdcch_dci_length_context_t *c, int length);
+uint32_t *nr_pdcch_dci_length_context_pin_cursor(nr_pdcch_dci_length_context_t *c, int length);
+int nr_pdcch_dci_length_context_relock_order(const nr_pdcch_dci_length_context_t *c,
+    const int *cell_seen, int n_seen, int *out, int max);
 typedef struct {
   nr_pdcch_dci_length_context_t ue[NR_PDCCH_LENGTH_CONTEXTS];
   uint64_t epoch, clock;
+  uint32_t scout_occasions;
   /* Cell-wide UL dci_length is published only once two DISTINCT RNTIs converge. The first
    * result may seed another UE's bounded preferred-length trial, but that UE still has to confirm
    * it with its own CRC/payload evidence and falls back to the full sweep on failure. */
@@ -176,6 +223,8 @@ typedef struct {
   uint16_t anonymous_rnti;
   bool anonymous_exhausted;
 } nr_pdcch_dci_length_bank_t;
+/* Caller holds the geometry length lock; independent of SFN/TDD slot phase. */
+bool nr_pdcch_dci_length_scout_due(nr_pdcch_dci_length_bank_t *bank);
 nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
     nr_pdcch_dci_length_bank_t *bank, uint64_t epoch, uint16_t rnti);
 /** Record that @p rnti converged on @p found. Publishes the cell-wide length on agreement between

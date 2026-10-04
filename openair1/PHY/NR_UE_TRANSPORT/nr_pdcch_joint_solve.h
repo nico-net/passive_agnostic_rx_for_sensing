@@ -1,6 +1,7 @@
 #ifndef NR_PDCCH_JOINT_SOLVE_H
 #define NR_PDCCH_JOINT_SOLVE_H
 #include <stdint.h>
+#include "nr_dci_bits.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -47,12 +48,12 @@ extern "C" {
  */
 
 #define NR_PDCCH_JOINT_MAX_E 1728 /* AL16: 16 CCE * 108 bits */
-#define NR_PDCCH_JOINT_MAX_A 64  /* polar_encoder_fast's own payload limit */
+#define NR_PDCCH_JOINT_MAX_A 64  /* opt-in solver: two-word matrices, A+16+16 <= 96 */
 
 /* Encode callback: write the E coded bits (0/1 per byte, index = coded-bit order) that the REAL encoder
  * produces for a payload in the low A bits of `payload` and a 16-bit CRC mask `crc_mask`, BEFORE scrambling.
  * Return 0 on success. */
-typedef int (*nr_pdcch_joint_encode_fn)(void *ctx, uint64_t payload, uint16_t crc_mask, uint8_t *coded, int E);
+typedef int (*nr_pdcch_joint_encode_fn)(void *ctx, nr_dci_bits_t payload, uint16_t crc_mask, uint8_t *coded, int E);
 
 typedef struct nr_pdcch_joint_model nr_pdcch_joint_model_t;
 
@@ -86,7 +87,7 @@ void nr_pdcch_joint_model_free(nr_pdcch_joint_model_t *m);
 int nr_pdcch_joint_model_unknowns(const nr_pdcch_joint_model_t *m); /* A + 16 (+16 with unknown n_ID) */
 
 typedef struct {
-  uint64_t payload;   /* recovered DCI payload, low A bits (polar_encoder_fast's packing) */
+  nr_dci_bits_t payload;   /* recovered DCI payload, low A bits (polar_encoder_fast's packing) */
   uint16_t rnti;      /* recovered C-RNTI, all 16 bits (bit 15 comes from the CRC mask) */
   uint16_t nid;       /* recovered n_ID when the model was built with unknown_nid, else the model's n_ID */
   double corr;        /* agreement of the winner with the observation on the redundancy positions, [-1,1] */

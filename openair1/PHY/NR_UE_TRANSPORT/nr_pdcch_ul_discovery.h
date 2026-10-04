@@ -21,6 +21,7 @@
 
 #ifndef NR_PDCCH_UL_DISCOVERY_H
 #define NR_PDCCH_UL_DISCOVERY_H
+#include "nr_dci_bits.h"
 #include "nr_pdcch_blind_monitor.h"
 /* Thread-safe controller. Keeps independent contexts for up to 16 bootstrapped UEs; identity/context changes
  * discard evidence and advance the generation echoed through the grant book. */
@@ -35,7 +36,7 @@ nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void);
 void nr_pdcch_ul_discovery_reset(void);
 bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed,
                                  uint16_t length, uint16_t confirmed_rnti,
-                                 uint64_t payload, nr_pdcch_blind_ul_result_t *out);
+                                 nr_dci_bits_t payload, nr_pdcch_blind_ul_result_t *out);
 /* Only call for an actual decoded transport block; never for dropped, stale, CFR-only,
  * unsupported, or setup-error jobs. crc_ok must mean non-zero TB with verified CRC.
  * Exactly one producer-time class owns the result, including settled grants;

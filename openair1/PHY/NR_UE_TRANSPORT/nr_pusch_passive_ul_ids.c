@@ -1,3 +1,4 @@
+#include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -71,6 +72,7 @@ bool nr_pusch_passive_ul_walk_eligible(uint16_t rnti, int dmrs_decided_id)
 
 void nr_pusch_passive_ul_crc_note(uint16_t rnti, bool dedicated, bool tb_crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   nr_scr_link_note(&g_ul_link, rnti, dedicated, tb_crc_ok);
   if (!dedicated)
     return;
@@ -105,6 +107,7 @@ uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advanc
 
 void nr_pusch_passive_data_id_feed(bool tb_crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   pthread_mutex_lock(&g_ul_data_id_lock);
   if (g_ul_data_id_init && g_ul_data_id.latched < 0) {
     const int tried = nr_scrambling_id_sweep_current(&g_ul_data_id);

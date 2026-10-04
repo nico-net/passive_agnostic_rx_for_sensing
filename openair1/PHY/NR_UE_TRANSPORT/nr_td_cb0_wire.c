@@ -2,6 +2,7 @@
 /* Runtime wiring of the CB0 elimination channel: see nr_td_cb0_wire.h. */
 #define _GNU_SOURCE
 #include "nr_td_cb0_wire.h"
+#include "nr_passive_cfg_epoch.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -110,6 +111,7 @@ static ctx_row_t *ctx_row_locked(uint64_t seed)
 typedef struct {
   bool active, batch, ran, done;
   uint32_t pre_reasons;
+  uint32_t config_epoch; /* inherited from the enqueued PDSCH job, never relabelled */
   uint64_t seed;
   int64_t abs_slot;
   uint8_t job_k0;
@@ -196,6 +198,8 @@ bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw,
   if (p == NULL || t == NULL || job == NULL)
     return false;
   p->active = p->batch = p->ran = p->done = false;
+  p->config_epoch = nr_cfg_epoch_work_stamp();
+  if (!nr_cfg_epoch_work_current()) return false;
   if (t->generation == 0 || t->settled || job->layout_probe)
     return false;
   pthread_mutex_lock(&g_lock);
@@ -359,6 +363,8 @@ void nr_td_cb0_wire_run(nr_td_grantwork_t *gw)
   plan_t *p = t_plan;
   if (p == NULL || !p->active || !p->batch || p->ran)
     return;
+  NR_CFG_EPOCH_WORK(p->config_epoch, NULL);
+  if (!nr_cfg_epoch_work_current()) return;
   p->ran = true;
   p->gw_flags = 0;
   p->member_error = p->backend_failed = false;
@@ -393,8 +399,13 @@ void nr_td_cb0_wire_run(nr_td_grantwork_t *gw)
   const uint64_t build_ns = now_ns() - tb0;
   const int new_sigs = nr_td_grantwork_n_entries(gw) - ent0;
   atomic_fetch_add(&s_cpu_us, build_ns / 1000);
-  if (n > 0 && !p->member_error) {
+  if (n > 0 && !p->member_error && nr_cfg_epoch_work_current()) {
     nr_td_cb0_exec(p->items, n, p->res, &p->ex);
+    /* CPU workers and the async GPU backend return to the owning job here. */
+    if (!nr_cfg_epoch_work_current()) {
+      nr_td_grantwork_release(gw);
+      return;
+    }
     atomic_fetch_add(&s_batches, 1);
     atomic_fetch_add(p->ex.backend == NR_TD_CB0_BE_GPU ? &s_be_gpu : &s_be_cpu, 1);
     if (p->ex.failed || p->ex.mixed)
@@ -459,6 +470,8 @@ void nr_td_cb0_wire_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0_tb_t 
   if (p == NULL || !p->active || p->done || t == NULL || tb == NULL)
     return;
   p->done = true;
+  NR_CFG_EPOCH_WORK(p->config_epoch, NULL);
+  if (!nr_cfg_epoch_work_current()) return;
   uint32_t r = p->pre_reasons;
   ctx_row_t row_add = {0};
   row_add.grants = 1;

@@ -43,6 +43,8 @@
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/system.h" // threadCreate
+#include "nr_passive_cfg_epoch.h"
+#include "nr_passive_job_epoch.h"
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
  * fills that slot's region of rxdata. */
@@ -62,6 +64,7 @@ static _Atomic uint64_t g_decoded       = 0;
 static _Atomic uint64_t g_crc_ok        = 0;
 static _Atomic uint64_t g_dropped_full  = 0;
 static _Atomic uint64_t g_dropped_stale = 0;
+static _Atomic uint64_t g_dropped_epoch = 0;
 static _Atomic uint64_t g_max_lag       = 0;
 
 static _Atomic int g_running  = 0;
@@ -107,6 +110,11 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     g_count--;
     pthread_mutex_unlock(&g_lock);
 
+    NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
+    if (!nr_cfg_epoch_work_current()) {
+      continue;
+    }
+
     /* ---- STALENESS. A job's raw IQ lives in rxdata only until the producer reaches the same slot
      * index one frame later; decoding after that reads the NEXT frame's samples and fails CRC
      * indistinguishably from a weak channel. Count it, never "decode anyway and hope". ---- */
@@ -123,6 +131,9 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
+    if (!nr_cfg_epoch_work_current()) {
+      continue;
+    }
     if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
         out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB)) {
       nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
@@ -213,6 +224,7 @@ bool nr_pusch_passive_queue_enqueue(const nr_pusch_passive_job_t *job)
     atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
   }
   g_ring[g_head] = *job;
+  g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
   g_head         = (g_head + 1) % g_depth;
   g_count++;
   pthread_cond_signal(&g_cv);
@@ -231,6 +243,7 @@ void nr_pusch_passive_queue_get_stats(nr_pusch_passive_queue_stats_t *out)
   out->crc_ok        = atomic_load_explicit(&g_crc_ok, memory_order_relaxed);
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
+  out->dropped_epoch = atomic_load_explicit(&g_dropped_epoch, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
 }
 

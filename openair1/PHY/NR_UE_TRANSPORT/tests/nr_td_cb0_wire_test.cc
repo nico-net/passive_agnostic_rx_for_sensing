@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 #include <thread>
@@ -18,6 +19,7 @@ extern "C" {
 #include "nr_td_cb0_fixture.h"
 #include "nr_td_cb0_sched.h"
 #include "nr_td_cb0_wire.h"
+#include "nr_passive_cfg_epoch.h"
 #include "nr_td_cb0_adapter.h"
 #include "nr_pdsch_config_sweep.h"
 #include "nr_td_grantwork.h"
@@ -366,13 +368,14 @@ TEST(Cb0Sched, AdmissibilityTable)
 
 struct FakeGpu {
   int calls = 0, fail_on = -1;
-  bool healthy = true, mix = false;
+  bool healthy = true, mix = false, bump_epoch = false;
 };
 FakeGpu g_fake;
 int fake_healthy(void *) { return g_fake.healthy ? 1 : 0; }
 int fake_decode(void *, const nr_td_cb0_item_t *it, int n, nr_td_cb0_result_t *out)
 {
   const int call = g_fake.calls++;
+  if (g_fake.bump_epoch) nr_cfg_epoch_note_bwp_change();
   nr_td_cb0_batch_cpu(it, n, out); /* same verdicts, relabelled as the CUDA decoder */
   for (int i = 0; i < n; i++)
     out[i].decoder_used = (g_fake.mix && i == 0) ? NR_TD_CB0_DEC_CPU_LAYERED : NR_TD_CB0_DEC_CUDA_FLOODING;
@@ -934,3 +937,55 @@ TEST_F(Cb0Wire, LlrScaleFollowsTheDecodeRule)
   nr_td_cb0_wire_reset();
 }
 }  // namespace
+
+namespace {
+TEST_F(Cb0Wire, EpochStraddleDuringGpuBatchCreditsNothing)
+{
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
+  nr_cfg_epoch_reset();
+  const auto t = ticket();
+  g_fake = FakeGpu{};
+  g_fake.bump_epoch = true;
+  nr_td_cb0_backend_t be{"epoch-straddle", fake_healthy, fake_decode, nullptr};
+  nr_td_cb0_register_gpu_backend(&be);
+  auto before = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  auto after = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, before.get()));
+  uint64_t dropped = 0;
+  {
+    NR_CFG_EPOCH_WORK(nr_cfg_epoch_current(), &dropped);
+    EXPECT_TRUE(grant(t, 700));
+    EXPECT_EQ(dropped, 1u);
+    EXPECT_FALSE(nr_cfg_epoch_work_current());
+    EXPECT_EQ(dropped, 1u);
+  }
+  EXPECT_EQ(g_fake.calls, 1);
+  EXPECT_EQ(stats().admissible, 0u);
+  EXPECT_EQ(stats().premise_alarms, 0u);
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, after.get()));
+  EXPECT_EQ(memcmp(before.get(), after.get(), sizeof(*before)), 0);
+  EXPECT_EQ(nr_td_grantwork_refcount(gw), 1);
+  g_fake = FakeGpu{};
+  // A fresh job can credit the same context: RI does not implement R10 resets.
+  EXPECT_TRUE(grant(t, 701));
+  EXPECT_EQ(stats().admissible, 1u);
+}
+
+TEST_F(Cb0Wire, EpochBumpBeforeBatchDoesNotDecode)
+{
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
+  nr_cfg_epoch_reset();
+  const auto t = ticket();
+  nr_td_cb0_job_t j{};
+  j.abs_slot = 700; j.job_k0 = t.k0; j.gw_on = true;
+  uint64_t dropped = 0;
+  NR_CFG_EPOCH_WORK(nr_cfg_epoch_current(), &dropped);
+  bool tb_cpu = false;
+  ASSERT_TRUE(nr_td_cb0_wire_pre(&t, gw, &j, &tb_cpu));
+  nr_cfg_epoch_note_bwp_change();
+  nr_td_cb0_wire_run(gw);
+  EXPECT_EQ(g_stub.calls, 0);
+  EXPECT_EQ(stats().batches, 0u);
+  EXPECT_EQ(dropped, 1u);
+}
+} // namespace

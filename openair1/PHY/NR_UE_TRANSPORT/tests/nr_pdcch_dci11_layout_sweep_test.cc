@@ -100,11 +100,11 @@ TEST(Dci11Layout, PlausibilityRejectsAReservedMcs) {
   uint64_t p = 0;
   const int mcs_shift = o.total - o.mcs - 5;
   p |= (uint64_t)30 << mcs_shift;
-  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, 273));
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), 273));
   // Same payload, MCS 10 -> plausible.
   p = 0;
   p |= (uint64_t)10 << mcs_shift;
-  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, 273));
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), 273));
 }
 
 TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeRiv) {
@@ -116,8 +116,8 @@ TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeRiv) {
   uint64_t p = 0;
   p |= (uint64_t)1000 << (o.total - o.riv - 16);
   p |= (uint64_t)10 << (o.total - o.mcs - 5);
-  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, 24));
-  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, 273));
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), 24));
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), 273));
 }
 
 // TS 38.212 Table 7.3.1.2.2-{1,2,3,4} row counts, exactly as nr_pdcch_blind_monitor.c's
@@ -164,8 +164,8 @@ TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeType2AntennaPorts) {
     p |= (uint64_t)ap << (o.total - o.ant_ports - o.ant_ports_bits);   // antenna_ports field
     return p;
   };
-  EXPECT_TRUE(nr_dci11_layout_plausible(&o, build(23), 273));   // last valid row of table -3
-  EXPECT_FALSE(nr_dci11_layout_plausible(&o, build(24), 273));  // one past it
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( build(23)), 273));   // last valid row of table -3
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( build(24)), 273));  // one past it
 }
 
 TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
@@ -208,7 +208,7 @@ TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
   }
 
   int t_ok = 0;
-  for (int i = 0; i < N; i++) if (nr_dci11_layout_plausible(&t_off, payloads[i], 273)) t_ok++;
+  for (int i = 0; i < N; i++) if (nr_dci11_layout_plausible(&t_off,nr_dci_bits_from_u64( payloads[i]), 273)) t_ok++;
   EXPECT_EQ(t_ok, N) << "the true layout must never be rejected by stage 1";
 
   // How far does stage 1 get, and what is it STRUCTURALLY unable to do?
@@ -224,7 +224,7 @@ TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
     nr_dci11_offsets_t w{};
     ASSERT_TRUE(nr_dci11_layout_offsets(&c[j], rb, 2, &w));
     int ok = 0;
-    for (int i = 0; i < N; i++) if (nr_dci11_layout_plausible(&w, payloads[i], 273)) ok++;
+    for (int i = 0; i < N; i++) if (nr_dci11_layout_plausible(&w,nr_dci_bits_from_u64( payloads[i]), 273)) ok++;
     if (ok >= t_ok) survivors++;             // indistinguishable from the truth at stage 1
     sum_rival += 100.0 * ok / N;
     rivals++;
@@ -253,7 +253,7 @@ TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
     nr_dci11_offsets_t w{};
     ASSERT_TRUE(nr_dci11_layout_offsets(&c[j], rb, 2, &w));
     int ok = 0;
-    for (int i = 0; i < N; i++) if (nr_dci11_layout_plausible(&w, payloads[i], 273)) ok++;
+    for (int i = 0; i < N; i++) if (nr_dci11_layout_plausible(&w,nr_dci_bits_from_u64( payloads[i]), 273)) ok++;
     if (ok < t_ok) {
       continue;   // stage 1 rejected it, nothing to prove
     }
@@ -286,7 +286,7 @@ static int drive_resolver(nr_dci11_resolver_t &r, int truth, double p_true, int 
     p |= (uint64_t)(rand_r(&seed) % (273 * 274 / 2)) << (t.total - t.riv - riv_bits);
     p |= (uint64_t)(rand_r(&seed) % 28) << (t.total - t.mcs - 5);
     p |= (uint64_t)(rand_r(&seed) % 12) << (t.total - t.ant_ports - t.ant_ports_bits);
-    nr_dci11_resolver_observe(&r, p);
+    nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( p));
   }
   // stage 2: only the truth decodes
   for (int i = 0; i < n_dec; i++) {
@@ -331,7 +331,7 @@ TEST(Dci11Resolver, Stage1NarrowsButNeverEmptiesTheSet) {
     p |= (uint64_t)(rand_r(&seed) % (273 * 274 / 2)) << (t.total - t.riv - rb);
     p |= (uint64_t)(rand_r(&seed) % 28) << (t.total - t.mcs - 5);
     p |= (uint64_t)(rand_r(&seed) % 12) << (t.total - t.ant_ports - t.ant_ports_bits);
-    nr_dci11_resolver_observe(&r, p);
+    nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( p));
   }
   EXPECT_LT(r.n_alive, n) << "stage 1 pruned nothing";
   EXPECT_GE(r.n_alive, 1) << "stage 1 emptied the set -- it can then never converge";
@@ -363,7 +363,7 @@ TEST(Dci11Resolver, ARetransmittingCellDoesNotDeleteTheTruth) {
     p |= (uint64_t)(rand_r(&seed) % (273 * 274 / 2)) << (t.total - t.riv - rb);
     p |= (uint64_t)mcs << (t.total - t.mcs - 5);
     p |= (uint64_t)(rand_r(&seed) % 12) << (t.total - t.ant_ports - t.ant_ports_bits);
-    nr_dci11_resolver_observe(&r, p);
+    nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( p));
   }
   EXPECT_TRUE(r.alive[truth]) << "a 20 % retransmission rate deleted the true layout";
   std::cerr << "[ MEASURED ] with 20% retransmissions: " << n << " -> " << r.n_alive
@@ -511,7 +511,7 @@ TEST(Dci11Stage1, TheDistributionalTestRanksButNeverDeletes) {
   ASSERT_GT(n, 4);
   const int truth = pick_truth(r);
   unsigned seed = 77;
-  for (int i = 0; i < 20000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 10));
+  for (int i = 0; i < 20000; i++) nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( cell_payload(r.off[truth], rb, seed, 10)));
   EXPECT_TRUE(r.alive[truth]) << "distributional pruning deleted the true layout";
   EXPECT_GT(r.dropped_dist, 0) << "the score should at least RANK on a structured cell";
   // 15 -> 9 here is the impossible-value test alone; with deletion on this read 4 (KEEP_MIN).
@@ -530,7 +530,7 @@ TEST(Dci11Stage1, AHeavilyRetransmittingCellStillKeepsTheTruth) {
   ASSERT_GT(n, 4);
   const int truth = pick_truth(r);
   unsigned seed = 91;
-  for (int i = 0; i < 30000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 35));
+  for (int i = 0; i < 30000; i++) nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( cell_payload(r.off[truth], rb, seed, 35)));
   EXPECT_TRUE(r.alive[truth]) << "a 35 % retransmission rate deleted the true layout";
   EXPECT_GE(r.n_alive, 1);
   std::cerr << "[ MEASURED ] 35% retransmissions: " << n << " -> " << r.n_alive << " live\n";
@@ -543,7 +543,7 @@ TEST(Dci11Stage1, TheTruthScoresAboveEveryPrunedLayout) {
   nr_dci11_resolver_init(&r, 273, rb, 4, 47);
   const int truth = pick_truth(r);
   unsigned seed = 5;
-  for (int i = 0; i < 5000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 10));
+  for (int i = 0; i < 5000; i++) nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( cell_payload(r.off[truth], rb, seed, 10)));
   const double st = nr_dci11_resolver_score(&r, truth);
   int better = 0;
   for (int i = 0; i < r.n_hyp; i++)
@@ -561,10 +561,10 @@ TEST(Dci11Stage1, ATdaIndexBeyondTheListIsImpossible) {
   uint64_t p = cell_payload(o, 16, seed, 0);
   const int sh = o.total - o.tda - 2;
   p &= ~(3ULL << sh);
-  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p | (2ULL << sh), 273));
-  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p | (3ULL << sh), 273)) << "index 3 of a 3-row list accepted";
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p | (2ULL << sh)), 273));
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p | (3ULL << sh)), 273)) << "index 3 of a 3-row list accepted";
   o.tda_valid = 0;
-  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p | (3ULL << sh), 273)) << "the test must stay off when unknown";
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p | (3ULL << sh)), 273)) << "the test must stay off when unknown";
 }
 
 TEST(Dci11Thompson, TrialsConcentrateOnTheArmThatDecodes) {
@@ -753,7 +753,7 @@ static void resolve_fdra_mode(uint8_t mode)
         << "armed at init although a type-1 layout fits";
   }
   unsigned seed = 31u + mode;
-  for (int i = 0; i < 800; i++) nr_dci11_resolver_observe(&r, fdra_payload(o, seed, fdra_field(o, seed, i & 1)));
+  for (int i = 0; i < 800; i++) nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( fdra_payload(o, seed, fdra_field(o, seed, i & 1))));
   int truth = find_layout(r, l), w = -1, arms = 0;
   EXPECT_EQ(truth >= 0, nr_dci11_fdra_stage(mode) < r.fdra_next) << "the truth must be absent until its mode is armed";
   for (int i = 0; i < 2000000 && w < 0; i++) {
@@ -805,18 +805,18 @@ TEST(Dci11Fdra, PlausibilityFollowsTheMode) {
   ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
   uint64_t p = 0;
   put_bits(p, o.total, o.mcs, 5, 10);
-  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp)) << "an empty RBG bitmap allocates nothing";
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), kFdraBwp)) << "an empty RBG bitmap allocates nothing";
   put_bits(p, o.total, o.riv, 14, 0x3FFF);  // all 14 RBGs: fine for a bitmap, an out-of-BWP RIV value
-  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), kFdraBwp));
   l.fdra_mode = NR_FDRA_DYN_CFG1;           // width 15, MSB 0 -> type 0
   ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
   p = 0;
   put_bits(p, o.total, o.mcs, 5, 10);
-  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), kFdraBwp));
   put_bits(p, o.total, o.riv, 15, (1u << 14) | 8000u);  // MSB 1 -> RIV 8000 >= 106*107/2
-  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), kFdraBwp));
   put_bits(p, o.total, o.riv, 15, (1u << 14) | 500u);
-  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), kFdraBwp));
 }
 
 TEST(Dci11Fdra, EveryStageFitsTheCap) {
@@ -947,7 +947,7 @@ TEST(Dci11Fdra, TypeOneCellStage1SurvivorsUnchangedByStaging) {
       put_bits(p, t.total, t.mcs, 5, rand_r(&seed) % 28);
       put_bits(p, t.total, t.rv, 2, 0);
       put_bits(p, t.total, t.ant_ports, 4, rand_r(&seed) % 12);
-      for (auto *r : {&s0, &s1, &all}) nr_dci11_resolver_observe(r, p);
+      for (auto *r : {&s0, &s1, &all}) nr_dci11_resolver_observe(r,nr_dci_bits_from_u64( p));
     }
     EXPECT_EQ(s1.n_hyp, s0.n_hyp);
     EXPECT_EQ(s1.n_alive, s0.n_alive) << "staging changed a type-1 cell's stage-1 survivors";

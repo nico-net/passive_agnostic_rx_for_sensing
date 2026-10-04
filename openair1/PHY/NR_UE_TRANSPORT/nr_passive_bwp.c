@@ -38,13 +38,13 @@ uint16_t nr_pbwp_len_for(const nr_pbwp_t *t, uint16_t n, uint8_t d)
   return (uint16_t)(layout_k(t) + nr_pbwp_riv_bits(n) + d);
 }
 
-uint32_t nr_pbwp_riv_field(uint64_t payload, uint16_t len, uint8_t d, uint8_t rb)
+uint32_t nr_pbwp_riv_field(nr_dci_bits_t payload, uint16_t len, uint8_t d, uint8_t rb)
 {
   /* MSB first: identifier (1) | indicator (d) | FDRA (rb) | ... */
   const int pos = (int)len - 1 - d - rb;
   if (pos < 0 || rb == 0 || rb > 31)
     return 0xffffffffu;
-  return (uint32_t)((payload >> pos) & ((1u << rb) - 1u));
+  return nr_dci_bits_field(&payload, len, 1 + d, rb);
 }
 
 static bool len_registered(const nr_pbwp_t *t, uint16_t len)
@@ -214,7 +214,7 @@ static bool size_dead(const nr_pbwp_group_t *g, int k)
   return k < 64 ? (g->dead_lo >> k) & 1u : (g->dead_hi >> (k - 64)) & 1u;
 }
 
-bool nr_pbwp_score_grant(nr_pbwp_t *t, int idx, uint64_t payload, const float *prb_coh)
+bool nr_pbwp_score_grant(nr_pbwp_t *t, int idx, nr_dci_bits_t payload, const float *prb_coh)
 {
   if (idx <= 0 || idx >= t->n || t->e[idx].ng == 0 || nr_pbwp_resolved(t, idx))
     return false;

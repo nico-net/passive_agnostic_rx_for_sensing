@@ -2,6 +2,7 @@
 /* Engine adapter for the CB0 elimination channel: see nr_td_cb0_adapter.h. The ONLY runtime file that calls the
  * engine's CB0 API; the ELIM-fix merge adapts this file. */
 #include "nr_td_cb0_adapter.h"
+#include "nr_passive_cfg_epoch.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,7 +146,7 @@ bool nr_td_cb0a_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0a_grant_t 
   if (o == NULL)
     o = &loc;
   memset(o, 0, sizeof(*o));
-  if (t == NULL || g == NULL)
+  if (t == NULL || g == NULL || !nr_cfg_epoch_work_current())
     return false;
   /* Premise (q >= p, runtime guard): on an admissible batch the scheduled hypothesis's CB0 must pass whenever its TB
    * passed (same IQ, same decoder or a dominating one). Checked here whether or not the engine is wired. */

@@ -28,6 +28,8 @@
 #include "verify_RRC.h"
 #include "L2_interface_ue.h"
 #include "LAYER2/NR_MAC_UE/mac_proto.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 
 #include "intertask_interface.h"
 
@@ -480,7 +482,8 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
     xer_fprint(stdout, &asn_DEF_NR_SIB1, (const void *) sib1);
   LOG_A(NR_RRC, "SIB1 decoded\n");
 
-  plmn_id_t *plmn_id = malloc_or_fail(sizeof(plmn_id_t));
+  nr_ue_nas_t *nas = get_ue_nas_info(rrc->ue_id);
+  plmn_id_t *plmn_id = nas->sn_id ? nas->sn_id : malloc_or_fail(sizeof(plmn_id_t));
 
   /* selected_plmn_identity is one-indexed */
   AssertFatal(rrc->selected_plmn_identity > 0, "No PLMN selected");
@@ -500,7 +503,6 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
     plmn_id->mnc = (*plmn->mnc.list.array[0]) * 10 + (*plmn->mnc.list.array[1]);
   }
 
-  nr_ue_nas_t *nas = get_ue_nas_info(rrc->ue_id);
   nas->sn_id = plmn_id;
 
   /* Extract 36-bit NR Cell Identity */
@@ -2270,6 +2272,14 @@ static void nr_rrc_ue_decode_NR_BCCH_DL_SCH_Message(NR_UE_RRC_INST_t *rrc,
   if (bcch_message->message.present == NR_BCCH_DL_SCH_MessageType_PR_c1) {
     switch (bcch_message->message.choice.c1->present) {
       case NR_BCCH_DL_SCH_MessageType__c1_PR_systemInformationBlockType1:
+        if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
+          const NR_SIB1_t *sib1 = bcch_message->message.choice.c1->choice.systemInformationBlockType1;
+          NR_UE_MAC_INST_t *mac = get_mac_inst(rrc->ue_id);
+          const uint32_t hash = nr_passive_sib1_semantic_hash(sib1, mac->physCellId);
+          const uint64_t abs_slot = nr_cfg_epoch_observe_slot(frame, slot, 10u << mac->numerology);
+          if (!nr_cfg_epoch_note_sib1(hash, abs_slot)) break;
+          if (nr_pdcch_blind_sib1_semantic_hash() == hash) break;
+        }
         nr_rrc_process_sib1(rrc, SI_info, bcch_message->message.choice.c1->choice.systemInformationBlockType1);
         // mac layer will free after usage the sib1
         bcch_message->message.choice.c1->choice.systemInformationBlockType1 = NULL;

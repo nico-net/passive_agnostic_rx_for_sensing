@@ -56,6 +56,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_dci_bits.h"
 
 #include "nr_pdsch_prb_set.h"   /* NR_FDRA_* modes, N_RBG, FDRA width */
 
@@ -132,7 +133,7 @@ int nr_dci11_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t
 /** Stage-1 oracle: is this payload PLAUSIBLE under this layout? Checks the fields a wrong offset
  * corrupts first -- MCS not in the reserved rows, RV in range, and a RIV inside the BWP. Costs no
  * decode. A right layout passes nearly always; a wrong one fails most of the time. Pure. */
-bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, uint16_t bwp_size);
+bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, uint16_t bwp_size);
 
 /* ---- STATEFUL RESOLVER ------------------------------------------------------------------------
  * Holds the candidate set for one cell configuration and narrows it in the two stages the header
@@ -257,7 +258,7 @@ int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
  * that has been implausible too often is dropped. Costs no decode. Returns the number still alive.
  * Never drops the last candidate: an empty set can never converge, and a run of unlucky payloads
  * must not be able to erase the answer. */
-int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload);
+int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload);
 
 /** Tell every hypothesis how many entries the TDA list has, enabling the impossible-index test.
  * 0 = unknown (the test stays off). */

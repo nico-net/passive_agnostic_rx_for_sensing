@@ -8,11 +8,11 @@
 #include "nr_pdcch_joint_solve.h"
 
 typedef struct { uint16_t A; uint8_t L; } joint_enc_ctx_t;
-static int joint_encode_cb(void *vctx, uint64_t payload, uint16_t crc_mask, uint8_t *coded, int E)
+static int joint_encode_cb(void *vctx, nr_dci_bits_t payload, uint16_t crc_mask, uint8_t *coded, int E)
 {
   const joint_enc_ctx_t *c = (const joint_enc_ctx_t *)vctx;
   uint32_t out[(NR_PDCCH_JOINT_MAX_E + 31) / 32 + 1] = {0};
-  polar_encoder_fast(&payload, out, (int32_t)crc_mask, /*ones_flag=*/1, NR_POLAR_DCI_MESSAGE_TYPE, c->A, c->L);
+  polar_encoder_fast(payload.w, out, (int32_t)crc_mask, /*ones_flag=*/1, NR_POLAR_DCI_MESSAGE_TYPE, c->A, c->L);
   nr_bit2byte_uint32_8(out, E, coded);
   return 0;
 }
@@ -80,6 +80,12 @@ bool nr_pdcch_joint_live_decode(const int16_t *llr, uint8_t aggregation_level, u
                                 int pre_descrambled_rnti, uint16_t rnti_min, uint16_t rnti_max, int indicator,
                                 nr_pdcch_joint_live_result_t *out)
 {
+  if (nr_pdcch_joint_live_enabled() && dci_length > 64) {
+    static atomic_flag warned = ATOMIC_FLAG_INIT;
+    if (!atomic_flag_test_and_set(&warned))
+      LOG_W(PHY, "SENSING: JOINT_RNTI supports dci_length <= 64; wider candidates use polar only\n");
+    return false;
+  }
   if (!nr_pdcch_joint_live_enabled() || out == NULL || dci_length == 0 || dci_length > NR_PDCCH_JOINT_MAX_A
       || (aggregation_level != 1 && aggregation_level != 2 && aggregation_level != 4 && aggregation_level != 8
           && aggregation_level != 16))
@@ -103,7 +109,7 @@ bool nr_pdcch_joint_live_decode(const int16_t *llr, uint8_t aggregation_level, u
     out->reject_reason = "joint solve: RNTI outside plausible range";
     return false;
   }
-  if ((int)((r.payload >> (dci_length - 1)) & 1) != (indicator ? 1 : 0)) { /* the admission raw_11 / raw_01 apply */
+  if ((int)(nr_dci_bits_field(&r.payload, dci_length, 0, 1)) != (indicator ? 1 : 0)) { /* the admission raw_11 / raw_01 apply */
     out->reject_reason = indicator ? "joint solve: format indicator=0 (UL grant, not DL)"
                                    : "joint solve: format indicator=1 (DL assignment, not an UL grant)";
     return false;

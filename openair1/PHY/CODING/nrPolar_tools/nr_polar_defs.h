@@ -53,13 +53,16 @@ typedef struct decoder_node_t_s {
 
 typedef struct decoder_tree_t_s {
   decoder_node_t *root;
-  simde__m256i buffer[1024]; // seems enough but to be refined
+  simde__m256i *buffer;
+  size_t buffer_bytes;
 } decoder_tree_t;
 
 typedef struct nrPolar_params {
   // messageType: 0=PBCH, 1=DCI, -1=UCI
 
   struct nrPolar_params *nextPtr __attribute__((aligned(16)));
+  struct nrPolar_params *next_free;
+  struct nrPolar_params **free_head; /* DCI shape bucket, protected by PolarListMutex */
   bool busy;
   uint32_t idx;
   uint8_t n_max;
@@ -90,8 +93,9 @@ typedef struct nrPolar_params {
   const uint8_t **G_N;
   int groupsize;
   int *rm_tab;
-  uint64_t cprime_tab0[16][256];
-  uint64_t cprime_tab1[16][256];
+  uint64_t (*cprime_tab0)[256];
+  uint64_t (*cprime_tab1)[256];
+  uint64_t (*cprime_tab2)[256];
   decoder_tree_t decoder;
   struct {
     int iter;
@@ -99,7 +103,8 @@ typedef struct nrPolar_params {
     struct {
       int op_code;
       decoder_node_t *node;
-    } op_list[600];
+    } *op_list;
+    int capacity;
   } tree_linearization;
 } t_nrPolar_params;
 
@@ -306,7 +311,12 @@ extern pthread_mutex_t PolarListMutex;
 static inline void polarReturn(t_nrPolar_params *polarParams)
 {
   pthread_mutex_lock(&PolarListMutex);
+  AssertFatal(polarParams->busy, "polarReturn called for an idle entry\n");
   polarParams->busy = false;
+  if (polarParams->free_head) {
+    polarParams->next_free = *polarParams->free_head;
+    *polarParams->free_head = polarParams;
+  }
   pthread_mutex_unlock(&PolarListMutex);
 }
 

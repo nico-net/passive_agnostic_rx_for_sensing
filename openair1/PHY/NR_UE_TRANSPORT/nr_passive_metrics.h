@@ -10,6 +10,7 @@
 extern "C" {
 #endif
 #define NR_PASSIVE_METRICS_SCHEMA 1
+#define NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX 16
 typedef struct {
   uint64_t t_mono_ns;       // CLOCK_MONOTONIC at snapshot
   int64_t abs_slot;         // producer absolute slot (nr_ue_diag_producer_absolute_slot), -1 unknown
@@ -17,8 +18,8 @@ typedef struct {
   const char *acq_state;    // nr_passive_acq_state_name(), never NULL ("UNKNOWN")
   uint64_t acq_transitions, acq_sync_losses, acq_pbch_locks, acq_sib1_decodes;
   uint64_t pdcch_occasions, pdcch_candidates, pdcch_accepts, pdcch_accepts_c;
-  uint64_t scanq_queued, scanq_processed, scanq_drop_full, scanq_drop_stale, scanq_max_lag;
-  uint64_t pdschq_queued, pdschq_decoded, pdschq_crc_ok, pdschq_drop_full, pdschq_drop_stale, pdschq_stale_after_decode, pdschq_max_lag;
+  uint64_t scanq_queued, scanq_processed, scanq_drop_full, scanq_drop_stale, scanq_drop_epoch, scanq_max_lag;
+  uint64_t pdschq_queued, pdschq_decoded, pdschq_crc_ok, pdschq_drop_full, pdschq_drop_stale, pdschq_drop_epoch, pdschq_stale_after_decode, pdschq_max_lag;
   /* BC12a SIB1 common-TDRA census at first convergence of a context, per DCI format of the context (_10 / _11; _unk = format not
    * recorded). td_deftab_*: same against default table A (td_deftab_na = MIB dmrs-TypeA-Position unknown). Log/metrics only. */
   uint64_t td_sib1_tdra_match_10, td_sib1_tdra_mismatch_10, td_sib1_tdra_none_10;
@@ -40,6 +41,7 @@ typedef struct {
   uint64_t td_cb0_gpu_submits, td_cb0_gpu_items, td_cb0_gpu_ok, td_cb0_gpu_errors, td_cb0_gpu_timeouts, td_cb0_gpu_bypassed,
       td_cb0_gpu_sticky, td_cb0_gpu_trips, td_cb0_gpu_state, td_cb0_gpu_mode, td_cb0_gpu_failed, td_cb0_gpu_skipped;
   double td_cb0_us_per_item;
+  uint64_t pdcch_inline_drop_epoch, puschq_drop_epoch;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
   /* CUDA LDPC pool (K34): launch/CUDA errors, TBs sent to the CPU decoder, poisoned slots; 0 when libldpc_cuda is not loaded */
   uint64_t ldpc_cuda_errors, ldpc_cuda_fallbacks, ldpc_cuda_poisoned;
@@ -48,6 +50,12 @@ typedef struct {
   uint64_t ldpc_tb_cpu, ldpc_tb_cuda; /* TBs decoded by CPU min-sum / CUDA normalised min-sum (stratify evidence by decoder) */
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
+  uint64_t csirs_candidates, csirs_confirmed, csirs_revoked, zp_exported, zp_revoked;
+  uint64_t csirs_search_us, csirs_idsweep_us, csirs_confirm_us, csirs_cfr_us;
+  uint64_t csirs_time_to_confirm_slots_last, csirs_time_to_confirm_slots_sum;
+  uint32_t csirs_confirm_resource_count;
+  uint64_t csirs_confirm_resource_key[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];
+  uint64_t csirs_confirm_resource_slots[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];
 } nr_passive_metrics_t;
 #ifndef __cplusplus
 /* PCI of the locked cell, -1 before PBCH lock. Written by nr-ue.c (relaxed), read by collect (relaxed). */

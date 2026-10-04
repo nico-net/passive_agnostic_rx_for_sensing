@@ -90,7 +90,7 @@ TEST(UlFieldSweep, UnknownPrerequisitesDoNotEmitGuessedGrants) {
   nr_pdcch_ul_discovery_reset();
   auto unknown=facts(); unknown.bwp_size=0;
   nr_pdcch_blind_ul_result_t out{};
-  for(int p=1;p<12;++p) EXPECT_FALSE(nr_pdcch_ul_discovery_grant(&unknown,43,0x1234,p,&out));
+  for(int p=1;p<12;++p) EXPECT_FALSE(nr_pdcch_ul_discovery_grant(&unknown,43,0x1234,nr_dci_bits_from_u64(p),&out));
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_classes,0);
   nr_pdcch_ul_discovery_feedback(&out,true);
   nr_pdcch_ul_discovery_reset();
@@ -99,7 +99,7 @@ TEST(UlFieldSweep, DefaultTdaTableIsResolvedAndArmsTheSearch) {
   nr_pdcch_ul_discovery_reset();
   auto resolved=facts(); resolved.tda_count=0;   // default 16-entry table => 4-bit TDA field
   nr_pdcch_blind_ul_result_t out{};
-  for(int p=1;p<12;++p) nr_pdcch_ul_discovery_grant(&resolved,43,0x1234,p,&out);
+  for(int p=1;p<12;++p) nr_pdcch_ul_discovery_grant(&resolved,43,0x1234,nr_dci_bits_from_u64(p),&out);
   EXPECT_GT(nr_pdcch_ul_discovery_snapshot().width_classes,0)
       << "the default TDRA table is a complete interpretation, not an unknown";
   nr_pdcch_ul_discovery_reset();

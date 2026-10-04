@@ -212,6 +212,22 @@ static bool boot_entry_live(const nr_boot_entry_t *e, uint32_t now)
   return age <= RNTI_BOOTSTRAP_STALE_SLOTS;
 }
 
+bool nr_pdcch_blind_rnti_bootstrap_recent(uint16_t rnti, uint32_t now_abs_slot, uint32_t max_age)
+{
+  bool recent = false;
+  pthread_mutex_lock(&g_boot_mu);
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
+    const nr_boot_entry_t *e = &g_boot[i];
+    if (e->rnti == rnti && boot_entry_live(e, now_abs_slot)
+        && now_abs_slot >= e->last_slot && now_abs_slot - e->last_slot <= max_age) {
+      recent = true;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_boot_mu);
+  return recent;
+}
+
 /* Offline hidden-waveform validation may supply candidate identities before dedicated decoding.
  * It is never enabled implicitly and has no OTA source. CRC/payload recurrence must still prove
  * the DCI length and every grant. */

@@ -15,6 +15,7 @@
  */
 
 #include "nr_dci_history.h"
+#include "nr_passive_cfg_epoch.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -65,9 +66,11 @@ static nr_dci_hist_rnti_t *find_rnti(nr_dci_hist_t *h, uint16_t rnti)
 
 void nr_dci_hist_push(nr_dci_hist_t *h, const nr_dci_hist_entry_t *e)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (h == NULL || e == NULL || e->rnti == 0)
     return;
   pthread_mutex_lock(&h->lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&h->lock); return; }
   nr_dci_hist_rnti_t *r = find_rnti(h, e->rnti);
   if (r == NULL) { /* a free slot, else the least recently written RNTI */
     int v = 0;
@@ -282,10 +285,11 @@ int nr_dci_hist_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, uint
 {
   if (found)
     *found = false;
-  if (h == NULL || rnti == 0)
+  if (h == NULL || rnti == 0 || !nr_cfg_epoch_work_current())
     return 0;
   int newly = 0, hit = 0;
   pthread_mutex_lock(&h->lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&h->lock); return 0; }
   nr_dci_hist_rnti_t *r = find_rnti(h, rnti);
   for (int k = 0; r && k < r->n; k++) { /* the whole ring: a feedback can arrive after the visibility window moved on */
     nr_dci_hist_entry_t *e = &r->e[(r->w - 1 - k + NR_DCI_HIST_DEPTH) % NR_DCI_HIST_DEPTH];
@@ -330,7 +334,7 @@ int nr_dci_hist_on_confirm(nr_dci_hist_t *h, uint16_t rnti, uint32_t abs_slot, u
   if (o == NULL)
     o = &loc;
   memset(o, 0, sizeof(*o));
-  if (h == NULL || ops == NULL || ops->exclude == NULL || rnti == 0 || tda >= NR_DCI_HIST_ROWS || !nr_dci_hist_enabled())
+  if (!nr_cfg_epoch_work_current() || h == NULL || ops == NULL || ops->exclude == NULL || rnti == 0 || tda >= NR_DCI_HIST_ROWS || !nr_dci_hist_enabled())
     return 0;
   o->newly = nr_dci_hist_confirm(h, rnti, abs_slot, cfg, tda, &o->found);
   if (o->found && o->newly == 0)

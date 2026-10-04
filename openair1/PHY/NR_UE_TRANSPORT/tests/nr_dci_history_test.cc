@@ -17,6 +17,7 @@
 #include "nr_td_test_baseline.h"
 extern "C" {
 #include "nr_dci_history.h"
+#include "nr_passive_cfg_epoch.h"
 #include "common/utils/LOG/log.h"
 #include "common/config/config_userapi.h"
 configmodule_interface_t *uniqCfg = nullptr;
@@ -495,4 +496,31 @@ TEST(DciHistory, CertConfirmedOptionCountsOnlyConfirmedOccupants)
   /* an unconfirmed COMPATIBLE occupant still spoils it (never less conservative than the default) */
   push(h.get(), dci(101, 0, 0, 50));
   EXPECT_FALSE(nr_dci_hist_k0_certified(h.get(), &g, 1, 0x3, 0x1, &kGeo, nullptr, nullptr));
+}
+
+TEST(DciHistoryEpoch, StaleScanAndPdschCannotInsertOrConfirm)
+{
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
+  nr_cfg_epoch_reset();
+  auto h = ring();
+  const auto e = dci(100, 0);
+  nr_dci_hist_on_accept(h.get(), &e);
+  uint64_t dropped = 0;
+  {
+    NR_CFG_EPOCH_WORK(nr_cfg_epoch_current(), &dropped);
+    nr_cfg_epoch_note_bwp_change();
+    const auto stale = dci(101, 0);
+    nr_dci_hist_on_accept(h.get(), &stale);
+    bool found = true;
+    EXPECT_EQ(nr_dci_hist_confirm(h.get(), e.rnti, e.abs_slot, e.cfg, e.tda, &found), 0);
+    EXPECT_FALSE(found);
+    EXPECT_EQ(dropped, 1u);
+  }
+  nr_dci_hist_entry_t out[2]{};
+  EXPECT_EQ(nr_dci_hist_at(h.get(), e.rnti, 101, out, 2), 0);
+  ASSERT_EQ(nr_dci_hist_at(h.get(), e.rnti, 100, out, 2), 1);
+  EXPECT_FALSE(out[0].confirmed);
+  bool found = false;
+  EXPECT_EQ(nr_dci_hist_confirm(h.get(), e.rnti, e.abs_slot, e.cfg, e.tda, &found), 1);
+  EXPECT_TRUE(found); // Existing history reset policy remains R10, outside RI.
 }

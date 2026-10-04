@@ -29,11 +29,11 @@ extern "C" void exit_function(const char* file, const char* function, const int 
 namespace {
 struct EncCtx { int A; int L; };
 
-int RealEncode(void* vctx, uint64_t payload, uint16_t crc_mask, uint8_t* coded, int E)
+int RealEncode(void* vctx, nr_dci_bits_t payload, uint16_t crc_mask, uint8_t* coded, int E)
 {
   const EncCtx* c = static_cast<EncCtx*>(vctx);
   std::vector<uint32_t> out((E + 31) / 32 + 1, 0);
-  polar_encoder_fast(&payload, out.data(), (int32_t)crc_mask, /*ones_flag=*/1, NR_POLAR_DCI_MESSAGE_TYPE, c->A, c->L);
+  polar_encoder_fast(payload.w, out.data(), (int32_t)crc_mask, /*ones_flag=*/1, NR_POLAR_DCI_MESSAGE_TYPE, c->A, c->L);
   nr_bit2byte_uint32_8(out.data(), E, coded);
   return 0;
 }
@@ -81,7 +81,7 @@ std::vector<uint8_t> TxBits(uint64_t payload, uint16_t rnti, uint16_t nid, int A
   const int E = EncLen(A, L);
   std::vector<uint8_t> coded(E);
   EncCtx c{A, L};
-  RealEncode(&c, payload, rnti, coded.data(), E);
+  RealEncode(&c, nr_dci_bits_from_u64(payload), rnti, coded.data(), E);
   auto s = RefScramble(swr ? rnti : 0, nid, E);
   for (int i = 0; i < E; i++) coded[i] ^= s[i];
   return coded;
@@ -103,8 +103,8 @@ TEST(JointSolve, ModelIsAffineAndFullRankAtDeployedShapes)
 
 TEST(JointSolve, RejectsANonAffineEncoder)
 {
-  auto bad = [](void*, uint64_t p, uint16_t, uint8_t* coded, int E) -> int {
-    for (int i = 0; i < E; i++) coded[i] = (uint8_t)(((p >> (i % 40)) & 1) & ((p >> ((i + 3) % 40)) & 1)); // AND: not affine
+  auto bad = [](void*, nr_dci_bits_t p, uint16_t, uint8_t* coded, int E) -> int {
+    for (int i = 0; i < E; i++) coded[i] = (uint8_t)(((p.w[0] >> (i % 40)) & 1) & ((p.w[0] >> ((i + 3) % 40)) & 1)); // AND: not affine
     return 0;
   };
   EXPECT_EQ(nr_pdcch_joint_model_new(bad, nullptr, 40, 108, 2, 1), nullptr);
@@ -129,9 +129,9 @@ TEST(JointSolve, NoiselessRecoveryOfPayloadAndAllSixteenRntiBits)
           nr_pdcch_joint_result_t r;
           nr_pdcch_joint_solve(m, llr.data(), 1, &r);
           n++;
-          if (r.payload == pl && r.rnti == rnti && r.accepted) ok++;
+          if (r.payload.w[0] == pl && r.rnti == rnti && r.accepted) ok++;
           else ADD_FAILURE() << "A=" << A << " L=" << L << " nid=" << nid << " rnti=0x" << std::hex << rnti
-                             << " got rnti=0x" << r.rnti << " payload ok=" << (r.payload == pl)
+                             << " got rnti=0x" << r.rnti << " payload ok=" << (r.payload.w[0] == pl)
                              << " corr=" << std::dec << r.corr << " thr=" << r.threshold;
         }
         nr_pdcch_joint_model_free(m);
@@ -205,7 +205,7 @@ TEST(JointSolve, AgreesWithTheRealPolarDecoderOnNoisyInput)
     uint64_t est[2] = {0, 0};
     const uint32_t crc = polar_decoder_int16(d.data(), est, 8, NR_POLAR_DCI_MESSAGE_TYPE, A, L);
     checked++;
-    if (crc == r.rnti && est[0] == r.payload) agree++;
+    if (crc == r.rnti && est[0] == r.payload.w[0]) agree++;
   }
   printf("[oracle] accepted %d of 200 at 7 dB; real decoder agrees on %d of them\n", checked, agree);
   EXPECT_GT(checked, 20);
@@ -242,7 +242,7 @@ TEST(JointSolve, SuccessVersusSnrAndCost)
         for (int t = 0; t < N; t++) {
           nr_pdcch_joint_result_t r;
           nr_pdcch_joint_solve(m, ls[t].data(), order, &r);
-          if (r.accepted && r.payload == tr[t].first && r.rnti == tr[t].second) good++;
+          if (r.accepted && r.payload.w[0] == tr[t].first && r.rnti == tr[t].second) good++;
         }
         auto s1 = std::chrono::steady_clock::now();
         printf("[snr] AL%d Es/N0=%4.1f dB order%d: %3d/%d recovered+accepted, %.1f us/solve\n", L, snr, order, good, N,
@@ -268,7 +268,7 @@ TEST(JointSolve, RecoversRntiFromTheCrcMaskAloneWhenScramblingIsRntiFree)
     nr_pdcch_joint_result_t r;
     ASSERT_EQ(nr_pdcch_joint_solve(m, llr.data(), 1, &r), 1);
     EXPECT_EQ(r.rnti, rn);
-    EXPECT_EQ(r.payload, pl);
+    EXPECT_EQ(r.payload.w[0], pl);
   }
   nr_pdcch_joint_model_free(m);
 }
@@ -306,7 +306,7 @@ TEST(JointSolve, HandlesLlrsAlreadyDescrambledWithAnotherRnti)
       nr_pdcch_joint_result_t r;
       ASSERT_EQ(nr_pdcch_joint_solve(m, llr.data(), 0, &r), 1) << "pre=" << pre;
       EXPECT_EQ(r.rnti, rn);
-      EXPECT_EQ(r.payload, pl);
+      EXPECT_EQ(r.payload.w[0], pl);
       EXPECT_EQ(r.mismatched_bits, 0);
     }
     nr_pdcch_joint_model_free(m);
@@ -367,7 +367,7 @@ TEST(JointSolve, RecoversAnUnknownNidTogetherWithTheRnti)
       auto llr = Channel(TxBits(pl, rn, nd, A, L, true), 40.0, rng);
       nr_pdcch_joint_result_t r;
       nr_pdcch_joint_solve(m, llr.data(), 1, &r);
-      if (r.accepted && r.payload == pl && r.rnti == rn && r.nid == nd) exact++;
+      if (r.accepted && r.payload.w[0] == pl && r.rnti == rn && r.nid == nd) exact++;
     }
     EXPECT_EQ(exact, 60) << "AL" << L;
     int ok8 = 0;
@@ -377,7 +377,7 @@ TEST(JointSolve, RecoversAnUnknownNidTogetherWithTheRnti)
       auto llr = Channel(TxBits(pl, rn, nd, A, L, true), 8.0, rng);
       nr_pdcch_joint_result_t r;
       nr_pdcch_joint_solve(m, llr.data(), 0, &r);
-      ok8 += (r.accepted && r.payload == pl && r.rnti == rn && r.nid == nd);
+      ok8 += (r.accepted && r.payload.w[0] == pl && r.rnti == rn && r.nid == nd);
     }
     printf("[unknown-nid] AL%d K=%d: noiseless 60/60, Es/N0 8 dB order0: %d/100\n", L, A + 32, ok8);
     nr_pdcch_joint_model_free(m);
@@ -400,7 +400,7 @@ TEST(JointSolve, HandlesAggregationLevel16)
         const uint16_t rn = (uint16_t)rng();
         auto llr = Channel(TxBits(pl, rn, 2, A, L, true), snr, rng);
         nr_pdcch_joint_result_t r;
-        ok += (nr_pdcch_joint_solve(m, llr.data(), order, &r) && r.payload == pl && r.rnti == rn);
+        ok += (nr_pdcch_joint_solve(m, llr.data(), order, &r) && r.payload.w[0] == pl && r.rnti == rn);
       }
       printf("[AL16] Es/N0 %.0f dB order%d: %d/30\n", snr, order, ok);
       if (snr >= 6.0) EXPECT_GE(ok, 29);
@@ -435,7 +435,7 @@ TEST(JointSolve, OptimisationKeepsResultsBitIdentical)
       for (int order = 0; order <= 2; order++) {
         nr_pdcch_joint_result_t r;
         nr_pdcch_joint_solve(m, llr.data(), order, &r);
-        mix(r.payload); mix(r.rnti); mix(r.nid); mix((uint64_t)r.accepted); mix((uint64_t)r.mismatched_bits);
+        mix(r.payload.w[0]); mix(r.rnti); mix(r.nid); mix((uint64_t)r.accepted); mix((uint64_t)r.mismatched_bits);
         mix((uint64_t)r.n_candidates); mix((uint64_t)std::llround(r.corr * 1e9));
         mix((uint64_t)std::llround(r.threshold * 1e9));
       }

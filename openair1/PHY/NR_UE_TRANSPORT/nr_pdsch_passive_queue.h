@@ -59,6 +59,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_dci_bits.h"
 #include "nr_pdsch_config_sweep.h"
 
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
@@ -93,6 +94,7 @@ typedef struct {
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
   uint32_t dci_abs_slot;  ///< BC9: the DCI's slot, frame * slots_per_frame + slot (key into the DL DCI history ring)
+  uint32_t config_epoch; ///< captured by the queue at admission
   uint16_t rnti;
   /// nr_blind_rnti_class_t of the DCI that scheduled this PDSCH. Only the consumer's MAC-TA parse
   /// reads it: a RAR (RA-RNTI) and a dedicated DL-SCH PDU carry timing advance in different places,
@@ -116,7 +118,7 @@ typedef struct {
   uint8_t  layout_probe;   ///< 1 = DCI-layout trial: decode code block 0 only, its CRC is the arm outcome
   /// Passive BWP entry the grant was decoded against (>0): its TB CRC is fed back to the tracker.
   int8_t   bwp_entry;
-  uint64_t bwp_probe_payload;
+  nr_dci_bits_t bwp_probe_payload;
   /// True when dlsch_pdu.dlDataScramblingId came from this RNTI's data-ID sweep (Task 13) rather
   /// than the PCI fallback -- gates whether this job's CRC outcome should be fed back into that
   /// sweep (nr_pdsch_passive_data_id_feed), so an attempt that used the PCI never perturbs a sweep
@@ -134,6 +136,7 @@ typedef struct {
   uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
   uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
   uint64_t stale_after_decode; ///< decode finished after its IQ expired: INCONCLUSIVE, no TD/layout credit (K33)
+  uint64_t dropped_epoch;  ///< dequeued after a configuration epoch change
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
   uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
   uint64_t batches;        ///< producer slot batches pushed

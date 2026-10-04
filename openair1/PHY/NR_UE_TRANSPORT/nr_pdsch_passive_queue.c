@@ -63,6 +63,8 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
 #include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables)
+#include "nr_passive_cfg_epoch.h"
+#include "nr_passive_job_epoch.h"
 
 #include <limits.h>
 #include <math.h>
@@ -113,6 +115,7 @@ static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,
  * nor a NIC IRQ core. ISAC_GPU_WORKER_CORE overrides; <0 = unpinned. */
 typedef struct {
   nr_gpu_pdsch_job_t *jobs; int n_jobs;
+  uint32_t config_epoch;
   const int16_t *rx[4]; uint32_t ring_len, ring_off, abs_sample; double fo_hz; const int16_t *rot;
   int16_t *out; size_t out_cap;
   volatile int done; int64_t rc;
@@ -146,12 +149,16 @@ static void *gpu_fep_worker_thread(void *arg)
     pthread_mutex_unlock(&g_gpu_wq_lock);
     for (int i = 0; i < nt; i++) {
       gpu_fep_req_t *r = take[i];
+      if (nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), r->config_epoch, nr_cfg_epoch_current)) {
+        r->rc = -1;
+        continue;
+      }
       const uint64_t t0 = now_ns();
       int64_t rc = g_gpu->fep_slot(r->rx, r->ring_len, r->ring_off, r->abs_sample, r->fo_hz, r->rot);
       const uint64_t t1 = now_ns();
       if (rc == 0) rc = g_gpu->pdsch_llr(r->jobs, r->n_jobs, r->out, r->out_cap);
       const uint64_t t2 = now_ns();
-      r->rc = rc;
+      r->rc = nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), r->config_epoch, nr_cfg_epoch_current) ? -1 : rc;
       if (rc >= 0) {
         atomic_fetch_add(&g_gpu_slots, 1);
         atomic_fetch_add(&g_gpu_jobs, (uint64_t)r->n_jobs);
@@ -240,7 +247,7 @@ static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
 #define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 8
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
-void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
+void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
 #include "nr_dmrs_id_estimate.h"
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
@@ -344,6 +351,7 @@ void nr_pdsch_passive_note_stale_after_decode(void)
 {
   atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
 }
+static _Atomic uint64_t g_dropped_epoch = 0;
 static _Atomic uint64_t g_max_lag       = 0;
 
 static _Atomic int g_running   = 0;
@@ -414,6 +422,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slot, int mu,
                               uint32_t abs_slot, const uint8_t *tb, uint32_t tb_bytes)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (tb == NULL || tb_bytes == 0)
     return;
   if (is_ra_rnti) {
@@ -605,9 +614,11 @@ int nr_pdsch_passive_bc12_census(const nr_pdsch_sweep_ticket_t *ticket, const nr
 }
 void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (ticket == NULL)
     return;
   pthread_mutex_lock(&g_bc9_cpk_lock);
+  if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_bc9_cpk_lock); return; }
   const int i = bc9_cpk_find(ticket->rnti, ticket->configuration, ticket->tda_index, false);
   const uint64_t other = i >= 0 ? g_bc9_cpk[i].mask & ~(UINT64_C(1) << (winner_k0 & 63)) : 0;
   if (i >= 0)
@@ -622,6 +633,7 @@ void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8
 void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
                                const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   /* ISAC_TD_DCI_ADJ=0: the whole BC9 runtime path is off (A/B) */
   if (!nr_dci_hist_enabled() || ticket == NULL || pdu == NULL || ticket->generation == 0 || ticket->settled)
     return;
@@ -654,6 +666,7 @@ void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t r
       if (crc_ok) {
         atomic_fetch_add(&g_bc9_cert_ok_k0[h.k0 < 4 ? h.k0 : 4], 1);
         pthread_mutex_lock(&g_bc9_cpk_lock);
+        if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_bc9_cpk_lock); return; }
         const int ci = bc9_cpk_find(rnti, ticket->configuration, ticket->tda_index, true);
         g_bc9_cpk[ci].mask |= UINT64_C(1) << (h.k0 & 63);
         g_bc9_cpk[ci].touched = ++g_bc9_cpk_clock;
@@ -705,6 +718,7 @@ static struct { uint64_t cfg, epoch; uint16_t rnti; uint8_t tda; bool valid; nr_
 static pthread_mutex_t g_bc9_tdd_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static int bc9d_exclude(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda, const int8_t *last, bool tdd)
 {
+  if (!nr_cfg_epoch_work_current()) return 0;
   (void)arg;
   nr_td_excl_t ex;
   memcpy(ex.last, last, sizeof(ex.last));
@@ -727,6 +741,7 @@ static int bc9d_exclude(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda, con
   const int rm = nr_pdsch_config_sweep_exclude_key(cfg, rnti, tda, &ex);
   if (nr_pdsch_config_sweep_rnti_constrained(rnti, cfg)) { /* persisted: safe to skip next time */
     pthread_mutex_lock(&g_bc9_tdd_cache_lock);
+    if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_bc9_tdd_cache_lock); return 0; }
     g_bc9_tdd_cache[i].valid = true;
     g_bc9_tdd_cache[i].epoch = epoch;
     g_bc9_tdd_cache[i].rnti = rnti;
@@ -739,6 +754,7 @@ static int bc9d_exclude(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda, con
 }
 void nr_pdsch_passive_bc9_confirm(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot, int mu, bool crc_ok)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   if (!crc_ok || ticket == NULL || ticket->generation == 0 || !nr_dci_hist_enabled())
     return;
   bc9d_arg_t a = {.mu = mu};
@@ -842,6 +858,25 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       g_count--;
     }
     pthread_mutex_unlock(&g_lock);
+    /* A slot group can straddle a bump while the producer admits its members. Drop each old
+     * member before union estimation, GPU batching, probes, or any decode feedback. */
+    if (nr_cfg_reconf_enabled()) {
+      int n_live = 0;
+      if (nr_passive_job_epoch_old(true, job.config_epoch, nr_cfg_epoch_current))
+        atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
+      else
+        n_live = 1;
+      for (int k = 0; k < n_more; k++) {
+        if (nr_passive_job_epoch_old(true, more[k].config_epoch, nr_cfg_epoch_current))
+          atomic_fetch_add_explicit(&g_dropped_epoch, 1, memory_order_relaxed);
+        else if (n_live++ == 0)
+          job = more[k];
+        else
+          more[n_live - 2] = more[k];
+      }
+      if (n_live == 0) continue;
+      n_more = n_live - 1;
+    }
     /* Union of RBs over the group members whose DM-RS configuration matches the head job's. */
     /* PRB-list / PRG grants never read the shared estimate (the decoder bypasses the cache for them),
      * and their first_rb + num_rbs is not their span, so they must not widen the union the OTHER grants
@@ -922,7 +957,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         const nr_pdsch_passive_job_t *jb = gi < 0 ? &job : &more[gi];
         nr_pdsch_passive_grant_t g = jb->grant;
         g.source_absolute_slot = jb->absolute_slot;
-        gj_ok[gi + 1] = jb->bwp_probe_entry <= 0 && !jb->want_data
+        gj_ok[gi + 1] = !nr_passive_job_epoch_old(nr_cfg_reconf_enabled(), jb->config_epoch, nr_cfg_epoch_current)
+                        && jb->bwp_probe_entry <= 0 && !jb->want_data
                         && nr_pdsch_passive_gpu_job(ue, &jb->dlsch_pdu, &jb->freq_alloc, &g, jb->nr_slot_rx,
                                                     jb->layout_probe || s_probe_all_g, &gj[gi + 1]);
         if (gj_ok[gi + 1]) n_gj++;
@@ -942,7 +978,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * locking and executing the GPU call inline on this consumer thread: this consumer just
          * blocks on its own completion condvar, so a bad core assignment for THIS thread no longer
          * stalls the other five while it happens to be holding the GPU's only lock. */
-        gpu_fep_req_t req = {.jobs = packed, .n_jobs = np, .ring_len = ring_len, .ring_off = off,
+        gpu_fep_req_t req = {.jobs = packed, .n_jobs = np, .config_epoch = job.config_epoch, .ring_len = ring_len, .ring_off = off,
                              .abs_sample = off, .fo_hz = fo, .rot = (const int16_t *)rot,
                              .out = t_gpu_llr, .out_cap = GPU_LLR_CAP};
         for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) req.rx[a] = rx[a];
@@ -957,6 +993,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     for (int gi = -1; gi < n_more; gi++) {
     if (gi >= 0) job = more[gi];
+    NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
+    if (!nr_cfg_epoch_work_current()) {
+      continue;
+    }
     const nr_gpu_pdsch_job_t *gpu_job = gj_ok[gi + 1] ? &gj[gi + 1] : NULL;
     /* Only these three proc fields are read downstream -- verified by inspecting every proc->
      * reference in nr_dl_channel_estimation.c, nr_dlsch_demodulation.c and nr_pdsch_data_aided.c. */
@@ -1238,6 +1278,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
         : (probe_outcome ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
     nr_pdsch_passive_probe_mode(false);
+    if (!nr_cfg_epoch_work_current()) {
+      nr_slot_fep_fo_override_hz = saved_fo;
+      nr_td_grantwork_job_end(gw);
+      nr_td_grantwork_release(gw);
+      continue;
+    }
     if (job.layout_probe) {
       static _Atomic uint64_t s_probe_n, s_probe_ok;
       atomic_fetch_add_explicit(&s_probe_n, 1, memory_order_relaxed);
@@ -1686,6 +1732,7 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
                           || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
+  g_pending[g_n_pending].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
   /* ONE normalisation for everyone downstream: decoder, data-aided tap (recomputes nb_rb/G from
    * num_rbs), queue probes, narrow-grant budget. A no-op for a contiguous grant. */
   if (!nr_pdsch_passive_alloc_normalise(&g_pending[g_n_pending].freq_alloc, job->dlsch_pdu.BWPSize)) {
@@ -1754,6 +1801,7 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->dropped_narrow = atomic_load_explicit(&g_dropped_narrow, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
   out->stale_after_decode = atomic_load_explicit(&g_stale_after_decode, memory_order_relaxed);
+  out->dropped_epoch = atomic_load_explicit(&g_dropped_epoch, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
   out->slot_groups   = atomic_load_explicit(&g_slot_groups, memory_order_relaxed);
   out->batches       = atomic_load_explicit(&g_batches, memory_order_relaxed);

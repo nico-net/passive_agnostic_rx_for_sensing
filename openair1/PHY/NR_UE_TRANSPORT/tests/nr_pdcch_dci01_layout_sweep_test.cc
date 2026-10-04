@@ -109,7 +109,7 @@ TEST(Dci01Resolver, TheSharedResolverScoresUplinkLayouts) {
     p &= ~(31ULL << (t.total - t.mcs - 5));
     p |= (uint64_t)(rand_r(&seed) % (273 * 274 / 2)) << (t.total - t.riv - rb);
     p |= (uint64_t)(rand_r(&seed) % 28) << (t.total - t.mcs - 5);
-    nr_dci11_resolver_observe(&r, p);
+    nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( p));
   }
   EXPECT_LT(r.n_alive, n) << "stage 1 pruned nothing on the uplink format";
   EXPECT_GE(r.n_alive, 1);
@@ -242,7 +242,7 @@ static void resolve_ul_fdra_mode(uint8_t mode)
   ASSERT_GE(truth, 0) << "the constructed layout was not enumerated";
   ASSERT_EQ(r.off[truth].fdra_mode, mode);
   unsigned seed = 57u + mode;
-  for (int i = 0; i < 800; i++) nr_dci11_resolver_observe(&r, ul_payload(t, seed, ul_fdra_field(t, seed, i & 1)));
+  for (int i = 0; i < 800; i++) nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( ul_payload(t, seed, ul_fdra_field(t, seed, i & 1))));
   ASSERT_TRUE(r.alive[truth]) << "stage 1 deleted the true layout";
   int w = -1;
   for (int i = 0; i < 400000 && w < 0; i++) {
@@ -316,7 +316,7 @@ TEST(Dci01Fdra, TypeZeroTruthWithConstantLeadingBitsKeepsType1AliveUntilTbCrcRef
       put_bits(p, t.total, 0, 1 + 3, 0);  // identifier (UL = 0) + UL-SUL/BWP: constant zero
       return p;
     };
-    for (int k = 0; k < 20000; k++) nr_dci11_resolver_observe(&r, payload());
+    for (int k = 0; k < 20000; k++) nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( payload()));
     const int type1_alive = r.n_alive;
     EXPECT_GT(type1_alive, 0) << "stage 1 refuted every type-1 layout -- then stage 1 COULD drive the refusal";
     // The oracle-class 0_1 PUSCH decodes nothing on this cell while DCI 0_0 PUSCH does (link healthy):
@@ -340,7 +340,7 @@ TEST(Dci01Fdra, TypeZeroTruthWithConstantLeadingBitsKeepsType1AliveUntilTbCrcRef
           && r.off[i].total == t.total && r.off[i].rv == t.rv && r.off[i].dmrs_init == t.dmrs_init)
         truth = i;
     ASSERT_GE(truth, 0) << "arming did not add the true layout";
-    for (int k = 0; k < 20000; k++) nr_dci11_resolver_observe(&r, payload());
+    for (int k = 0; k < 20000; k++) nr_dci11_resolver_observe(&r,nr_dci_bits_from_u64( payload()));
     EXPECT_TRUE(r.alive[truth]) << "stage 1 deleted the armed truth";
     EXPECT_EQ(nr_dci01_fdra_verdict(&ev, true, &r), NR_DCI01_FDRA_REFUSE) << "the refusal did not fire on a type-0 cell";
     // Refusal applies to oracle-class 0_1 only: 0_0 and discovery grants stay booked; 1 in 64 is a probe.

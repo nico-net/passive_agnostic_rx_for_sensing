@@ -42,6 +42,8 @@
 #include "common/utils/LOG/log.h"
 #include "common/utils/system.h"
 #include "nr_pdcch_blind_monitor_rt.h"
+#include "nr_passive_cfg_epoch.h"
+#include "nr_passive_job_epoch.h"
 
 /* Monotonic slot counter published by the RF producer; the same source nr_pdsch_passive_queue uses,
  * so the two staleness checks are on one clock. */
@@ -66,6 +68,7 @@ static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_processed     = 0;
 static _Atomic uint64_t g_dropped_full  = 0;
 static _Atomic uint64_t g_dropped_stale = 0;
+static _Atomic uint64_t g_dropped_epoch = 0;
 static _Atomic uint64_t g_max_lag       = 0;
 
 static pthread_t g_threads[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
@@ -104,6 +107,11 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     g_tail = (g_tail + 1) % g_depth;
     g_count--;
     pthread_mutex_unlock(&g_lock);
+
+    NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
+    if (!nr_cfg_epoch_work_current()) {
+      continue;
+    }
 
     /* STALENESS. The job carries no samples, so the scan re-FEPs from ue->common_vars.rxdata. Those
      * samples survive only until the producer reaches the same slot index one frame later; past
@@ -210,6 +218,7 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
     atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
   }
   g_ring[g_head] = *job;
+  g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
   g_head         = (g_head + 1) % g_depth;
   g_count++;
   pthread_cond_signal(&g_cv);
@@ -237,6 +246,7 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out)
   out->processed     = atomic_load_explicit(&g_processed, memory_order_relaxed);
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
+  out->dropped_epoch = atomic_load_explicit(&g_dropped_epoch, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
 }
 
@@ -254,3 +264,5 @@ void nr_pdcch_passive_queue_stop(void)
   }
   atomic_store_explicit(&g_running, 0, memory_order_release);
 }
+
+void *nr_pdcch_passive_queue_epoch_counter(void) { return &g_dropped_epoch; }

@@ -21,7 +21,7 @@ static inline int nr_passive_ul_book_put(nr_passive_ul_book_t *b,
     if(!b->entry[i].valid) {if(free_slot<0) free_slot=i; continue;}
     const nr_passive_ul_book_entry_t *e=&b->entry[i];
     if(e->target==target && e->grant.rnti==g->rnti
-        && e->grant.raw_payload==g->raw_payload) return 0;
+        && nr_dci_bits_eq(&e->grant.raw_payload, &g->raw_payload)) return 0;
   }
   if(free_slot<0) return -1;
   b->entry[free_slot]=(nr_passive_ul_book_entry_t){.grant=*g,.target=target,.valid=true};

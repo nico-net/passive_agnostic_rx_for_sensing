@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include <gtest/gtest.h>
 #include <string>
+#include <cstring>
 extern "C" {
 #include "nr_passive_metrics.h"
 }
@@ -20,6 +21,10 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"pdschq_crc_ok\":57897"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_stale_after_decode\":7"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_full\":161"), std::string::npos);
+  EXPECT_NE(s.find("\"scanq_drop_epoch\":0"), std::string::npos);
+  EXPECT_NE(s.find("\"pdcch_inline_drop_epoch\":0"), std::string::npos);
+  EXPECT_NE(s.find("\"pdschq_drop_epoch\":0"), std::string::npos);
+  EXPECT_NE(s.find("\"puschq_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pci\":64"), std::string::npos);
   EXPECT_NE(s.find("\"ldpc_cuda_errors\":0,\"ldpc_cuda_fallbacks\":0,\"ldpc_cuda_poisoned\":0,\"ldpc_cuda_disabled\":0,\"ldpc_cuda_breaker_trips\":0,\"ldpc_tb_cpu\":0,\"ldpc_tb_cuda\":0"), std::string::npos);
 }
@@ -109,4 +114,21 @@ TEST(PassiveMetrics, Cb0EliminationKeysPresent) {
                         "\"td_cb0_backend\":{\"cpu\":7,\"gpu\":0}", "\"td_cb0_premise_alarms\":0", "\"td_cb0_eliminations\":9",
                         "\"td_cb0_inadmissible\":{\"not_new_rv0\":4,", "\"budget\":3", "\"reindexed\":1}"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
+}
+
+TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
+  nr_passive_metrics_t m;
+  // Maximum integer widths exercise both parents' keys and all CSI-RS records together.
+  memset(&m, 0xff, sizeof(m));
+  m.acq_state = "TRACKING";
+  m.td_cb0_us_per_item = 1000000.0;
+  m.csirs_confirm_resource_count = NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX;
+  char buf[8192];
+  const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
+  ASSERT_GT(n, 0);
+  const std::string s(buf, n);
+  EXPECT_EQ(s.back(), '}');
+  for (const char *key : {"pdschq_stale_after_decode", "pdschq_drop_epoch", "td_cb0_gpu", "td_fb_promotions",
+                           "csirs_time_to_confirm_resources"})
+    EXPECT_NE(s.find(std::string("\"") + key + "\":"), std::string::npos) << key;
 }

@@ -65,6 +65,7 @@
 
 #ifdef __cplusplus
 extern "C" {
+
 #endif
 
 #define NR_PDCCH_PASSIVE_QUEUE_MAX_DEPTH     64
@@ -79,6 +80,7 @@ typedef struct {
   int  nr_slot_rx;
   int  gNB_id;
   long absolute_slot; ///< producer's slot counter at enqueue; drives the staleness check
+  uint32_t config_epoch; ///< captured by the queue at admission
   /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
@@ -89,6 +91,7 @@ typedef struct {
   uint64_t processed;
   uint64_t dropped_full;  ///< evicted at admission because the ring was full
   uint64_t dropped_stale; ///< discarded by the consumer: rxdata already overwritten
+  uint64_t dropped_epoch; ///< dequeued after a configuration epoch change
   uint64_t max_lag_slots; ///< worst producer-consumer gap observed, in slots
 } nr_pdcch_passive_queue_stats_t;
 
@@ -120,6 +123,7 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out);
 int nr_pdcch_passive_queue_backlog(void);
 
 void nr_pdcch_passive_queue_stop(void);
+void *nr_pdcch_passive_queue_epoch_counter(void);
 
 #ifdef __cplusplus
 }

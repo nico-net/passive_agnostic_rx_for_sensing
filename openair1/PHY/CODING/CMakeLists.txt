@@ -132,6 +132,9 @@ if(ENABLE_LDPC_CUDA)
   target_include_directories(nr_polar_sc_cuda_test PRIVATE nrPolar_tools/cuda)
   target_link_libraries(nr_polar_sc_cuda_test PRIVATE polar_sc_cuda polar crc_byte UTIL CUDA::cudart m)
   set_target_properties(nr_polar_sc_cuda_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  if(ENABLE_TESTS)
+    add_test(NAME nr_polar_sc_cuda_test COMMAND nr_polar_sc_cuda_test quick)
+  endif()
   # ... wired into the live candidate scan through libpolar_gpu.so, dlopen'd when NR_GPU_POLAR=1
   # (nr_polar_gpu.h). A MODULE, like pdsch_gpu/pdcch_gpu above, so nr-uesoftmodem itself keeps no
   # CUDA link dependency and a run without the knob is the CPU path.

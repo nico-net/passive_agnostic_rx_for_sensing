@@ -6,8 +6,11 @@
 #include "nr_polar_psbch_defs.h"
 #include "common/utils/LOG/log.h"
 
-#define PolarKey ((messageType << 24) | (messageLength << 8) | aggregation_level)
+#define PolarKey (((uint32_t)(uint8_t)messageType << 24) | (messageLength << 8) | aggregation_level)
 static t_nrPolar_params *PolarList = NULL;
+/* Each bucket contains only idle instances of one DCI (A, AL). Checkout and
+ * return are O(1), including concurrent consumers that require private trees. */
+static t_nrPolar_params *DciFree[141][5];
 pthread_mutex_t PolarListMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int intcmp(const void *p1, const void *p2)
@@ -24,6 +27,11 @@ static void nr_polar_delete_list(t_nrPolar_params *polarParams)
 
   // From build_polar_tables()
   free(polarParams->rm_tab);
+  free(polarParams->cprime_tab0);
+  free(polarParams->cprime_tab1);
+  free(polarParams->cprime_tab2);
+  free(polarParams->decoder.buffer);
+  free(polarParams->tree_linearization.op_list);
   if (polarParams->crc_generator_matrix)
     free(polarParams->crc_generator_matrix);
   // Polar Coding vectors
@@ -53,6 +61,7 @@ bool nr_polar_try_cleanup(void)
   }
   nr_polar_delete_list(PolarList);
   PolarList = NULL;
+  memset(DciFree, 0, sizeof(DciFree));
   pthread_mutex_unlock(&PolarListMutex);
   return true;
 }
@@ -70,7 +79,22 @@ t_nrPolar_params *nr_polar_params(int8_t messageType, uint16_t messageLength, ui
   if (!PolarList)
     atexit(nr_polar_delete);
 
-  t_nrPolar_params *currentPtr = PolarList;
+  t_nrPolar_params **free_head = NULL;
+  if (messageType == NR_POLAR_DCI_MESSAGE_TYPE) {
+    AssertFatal(messageLength <= 140 && aggregation_level && aggregation_level <= 16
+                    && !(aggregation_level & (aggregation_level - 1)),
+                "Invalid DCI polar shape A=%u AL=%u\n", messageLength, aggregation_level);
+    free_head = &DciFree[messageLength][__builtin_ctz((unsigned)aggregation_level)];
+    if (*free_head) {
+      t_nrPolar_params *p = *free_head;
+      *free_head = p->next_free;
+      p->next_free = NULL;
+      p->busy = true;
+      pthread_mutex_unlock(&PolarListMutex);
+      return p;
+    }
+  }
+  t_nrPolar_params *currentPtr = free_head ? NULL : PolarList;
   // Parse the list. If the node is already created, return without initialization.
   while (currentPtr != NULL) {
     // printf("currentPtr->idx %d, (%d,%d)\n",currentPtr->idx,currentPtr->payloadBits,currentPtr->encoderLength);
@@ -88,7 +112,7 @@ t_nrPolar_params *nr_polar_params(int8_t messageType, uint16_t messageLength, ui
   t_nrPolar_params *newPolarInitNode = memalign(32, sizeof(t_nrPolar_params));
 
   AssertFatal(newPolarInitNode, "[nr_polar_init] New t_nrPolar_params * could not be created");
-  *newPolarInitNode = (t_nrPolar_params){.busy = true, .nextPtr = PolarList, .tree_linearization.is_initialized = false};
+  *newPolarInitNode = (t_nrPolar_params){.busy = true, .nextPtr = PolarList, .free_head = free_head, .tree_linearization.is_initialized = false};
   PolarList = newPolarInitNode;
   pthread_mutex_unlock(&PolarListMutex);
   //   LOG_D(PHY,"Setting new polarParams index %d, messageType %d, messageLength %d, aggregation_prime %d\n",(messageType *

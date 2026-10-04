@@ -59,6 +59,8 @@
 
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
+#include "nr_passive_cfg_epoch.h"
+#include "nr_passive_cfg_sources.h"
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_cfg_t + get_cfg() accessor (implemented
                                        // below); the RT tap itself lives in nr_pdcch_blind_monitor_rt.c
                                        // -- see that header's file comment for why the split exists.
@@ -80,6 +82,7 @@
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
 #include "nr_pdcch_coreset_map.h"        // Phase 3 Technique A: nr_pdcch_coreset_map_scan()
+#include "nr_pdcch_coreset_bank.h"
 #include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
 #include "nr_dmrs_id_estimate.h"         // blind UL DM-RS scrambling-identity estimate (Task 13)
 #include "nr_pusch_passive_decode.h"     // nr_pusch_passive_ul_dmrs_id / data-ID sweep (Task 13)
@@ -575,6 +578,7 @@ static int s_obs_calls;
 static pthread_mutex_t s_techA_mu = PTHREAD_MUTEX_INITIALIZER;
 void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   /* Tag every currently-hot window with the RNTI just accepted. Cheap and approximate on purpose:
    * it answers "which UE was on air while this window was lit", not "which UE owns this CORESET". */
   pthread_mutex_lock(&s_techA_mu);
@@ -723,7 +727,7 @@ static _Atomic uint64_t s_ext_generation; /* _Atomic: read by every blind-PDCCH 
 typedef struct {
   uint16_t rnti;
   uint32_t slot;
-  uint64_t payload;
+  nr_dci_bits_t payload;
 } extent_evidence_t;
 static extent_evidence_t s_ext_evidence[NR_PDCCH_BLIND_MAX_UE];
 
@@ -755,8 +759,9 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_verified(void)
 {
   return s_dedicated_found && s_ext_verified;
 }
-void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, uint64_t payload)
+void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, nr_dci_bits_t payload)
 {
+  if (!nr_cfg_epoch_work_current()) return;
   /* Called ONLY for a CRC/plausibility-accepted dedicated DL DCI in the current geometry.
    * Bootstrap history is deliberately not an input. Repeated candidates in one slot or
    * a repeated fixed payload cannot verify a geometry. */
@@ -766,7 +771,7 @@ void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, u
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
     extent_evidence_t *e = &s_ext_evidence[i];
     if (e->rnti == rnti) {
-      if (slot > e->slot && payload != e->payload) {
+      if (slot > e->slot && !nr_dci_bits_eq(&payload, &e->payload)) {
         const int observed_span = g_cfg.coreset_freq_domain * 6;
         g_cfg.coreset_freq_domain = extent_operational_groups(
             g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain, g_cfg.coreset_reg_bundle_size);
@@ -879,11 +884,29 @@ static disc_coreset_t s_disc[DISC_MAX];
 static int s_disc_n, s_disc_next, s_disc_failed;
 static bool s_disc_active, s_disc_pending;
 static _Atomic bool s_disc_paused; /* _Atomic: read by the PHY receive thread (discovery gate), written by a consumer */
+static _Atomic bool s_outside_occupancy;
 static int s_disc_saved[8];
 
 bool nr_pdcch_blind_monitor_discovery_paused(void)
 {
   return s_disc_paused;
+}
+
+bool nr_pdcch_blind_monitor_discovery_duty_due(bool reconf, int bank_count, bool paused,
+                                               uint32_t duty, uint32_t *tick)
+{
+  if (!reconf)
+    return !paused;
+  if (bank_count == 0)
+    return true;
+  if (duty == 0)
+    duty = 20;
+  return (++*tick % duty) == 0;
+}
+
+bool nr_pdcch_blind_monitor_take_outside_occupancy(void)
+{
+  return atomic_exchange_explicit(&s_outside_occupancy, false, memory_order_relaxed);
 }
 
 /* GATE 1 (R31): see the declaration-site comment in nr_pdcch_blind_monitor.h for the full history --
@@ -1266,8 +1289,9 @@ bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out)
   return true;
 }
 
-bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, uint64_t payload)
+bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, nr_dci_bits_t payload)
 {
+  if (!nr_cfg_epoch_work_current()) return false;
   if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || !rnti)
     return false;
   nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
@@ -1277,7 +1301,7 @@ bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, ui
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
     extent_evidence_t *e = &ln->evidence[i];
     if (e->rnti == rnti) {
-      if (slot > e->slot && payload != e->payload) {
+      if (slot > e->slot && !nr_dci_bits_eq(&payload, &e->payload)) {
         /* This lane's geometry just VERIFIED: commit it as THE answer and stop every lane's search,
          * same effect as the primary's own verification (nr_pdcch_blind_monitor_autodiscover_observe).
          * dci_length_override is deliberately left to the caller (see header comment) -- rt.c owns
@@ -1696,6 +1720,19 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
                                           first_carrier_offset, pci, slot, symbol, candidates,
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
+  if (nr_pdcch_reconf_enabled()) {
+    static uint8_t outside_history; /* receive thread, one bit per discovery sample */
+    bool hit = false;
+    for (int c = 0; c < n; ++c)
+      if ((s_css0_excl_first_w < 0 || candidates[c].rb_offset / 6 < s_css0_excl_first_w
+           || candidates[c].rb_offset / 6 > s_css0_excl_last_w)
+          && nr_pdcch_coreset_bank_occupancy_outside(candidates[c].rb_offset, symbol)) {
+        hit = true;
+        break;
+      }
+    if (nr_pdcch_coreset_bank_occupancy_sample(&outside_history, hit))
+      atomic_store_explicit(&s_outside_occupancy, true, memory_order_relaxed);
+  }
   {
     /* DIAGNOSTIC (env-gated, kept permanently -- same convention as this project's other ISAC_*
      * debug flags). Originally added 2026-09-05 to debug a then-zero-convergence result; kept
@@ -2715,6 +2752,7 @@ void nr_pdcch_blind_monitor_init(void)
     return;
   }
   g_parsed = 1;
+  nr_pdcch_dci_length_seen_reset();
 
   memset(&g_cfg, 0, sizeof(g_cfg));
   g_cfg.rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;
@@ -3304,20 +3342,12 @@ static const uint8_t g_table_7_3_2_3_3_4[58][14] = {
     {2,0,0,0,0,0,0,0,0,1,1,0,0,2},
 };
 
-/// Read `nbits` starting at the bit position just below `*pos` (spec/TS-38.212-field order, MSB
-/// first) out of a single 64-bit payload word, then advance `*pos` past them. Payloads sized by
-/// nr_pdcch_blind_dci_size() are always well under 64 bits (46-48 for the BWP sizes this project
-/// uses), so a single uint64_t word (matching polar_decoder_int16()'s out[0]) is sufficient --
-/// mirrors openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c's readBits()/EXTRACT_DCI_ITEM exactly,
-/// just operating on a uint64_t directly instead of a byte-pointer-cast-to-uint64_t.
-static uint32_t read_field(uint64_t payload, int* pos, int nbits)
+/// Consume a field from the right-aligned multi-word payload, MSB first.
+static uint32_t read_field(nr_dci_bits_t payload, int* pos, int nbits)
 {
-  if (nbits == 0) {
-    return 0;
-  }
-  const uint32_t mask = (nbits >= 32) ? 0xFFFFFFFFu : ((1U << nbits) - 1);
+  const uint32_t value = nr_dci_bits_field(&payload, *pos, 0, nbits);
   *pos -= nbits;
-  return (uint32_t)((payload >> *pos) & mask);
+  return value;
 }
 
 /// Resource-allocation-type-1 (RIV) decode -- the only branch this gNB's fixed resourceAllocationType
@@ -3458,10 +3488,12 @@ static uint32_t blind_polar_decode(const int16_t* llr,
                                    uint16_t       dci_length,
                                    uint16_t       rnti_min,
                                    uint16_t       rnti_max,
-                                   uint64_t       dci_estimation[2])
+                                   uint64_t       dci_estimation[NR_DCI_WORDS])
 {
+  if (dci_length + 24 > aggregation_level * 108) return UINT32_MAX;
   dci_estimation[0] = 0;
   dci_estimation[1] = 0;
+  dci_estimation[2] = 0;
   uint32_t crc;
   /* GPU batch hand-off (nr_polar_gpu.h): this candidate was already decoded as part of its
      occasion's batch. One-shot and fully qualified -- anything that does not match exactly falls
@@ -3469,7 +3501,7 @@ static uint32_t blind_polar_decode(const int16_t* llr,
      decoder twice for one candidate. */
   if (tls_polar_pre.llr == llr && tls_polar_pre.dci_length == dci_length
       && tls_polar_pre.aggregation_level == aggregation_level) {
-    dci_estimation[0] = tls_polar_pre.payload;
+    memcpy(dci_estimation, tls_polar_pre.payload.w, sizeof(tls_polar_pre.payload.w));
     crc = tls_polar_pre.crc;
     tls_polar_pre.llr = NULL;
   } else {
@@ -3489,6 +3521,7 @@ static uint32_t blind_polar_decode(const int16_t* llr,
      * Keying this on a PINNED rnti_min was a mistake -- the C-RNTI churns on every re-attach, so a
      * pinned probe only sees the window where the guess happened to be live. Logging every crc with
      * upper==0 finds real DCIs no matter which RNTI they carry. */
+    char payload_hex[49];
     if (s_fullcrc && (crc >> 16) == 0)
       /* payload= is the RAW decoded bits, printed here rather than in DCIGT because DCIGT sits
        * DOWNSTREAM of the accept gate: when the per-field widths are wrong the payload is rejected
@@ -3497,10 +3530,10 @@ static uint32_t blind_polar_decode(const int16_t* llr,
        * lines are a ground-truth-scorable record of real grants that the field-width solve can be
        * run against offline (the method CLAUDE.md section 12 used). MSB-first: bit i of the
        * dci_length-bit payload is bit (dci_length-1-i) of the value. */
-      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d payload=0x%016llx\n",
+      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d payload=0x%s\n",
              (unsigned)aggregation_level, (unsigned)dci_length, crc, crc >> 16,
              (crc >= rnti_min && crc <= rnti_max) ? 1 : 0,
-             (unsigned long long)dci_estimation[0]);
+             nr_dci_bits_hex(dci_estimation, dci_length, true, payload_hex));
   }
   return crc;
 }
@@ -3512,7 +3545,7 @@ static uint32_t blind_polar_decode(const int16_t* llr,
 /// since a genuine decode's re-encoded codeword should agree with almost every soft-bit sign. The
 /// caller owns the accept/reject threshold -- this only measures.
 static uint16_t blind_mismatched_bits(const int16_t* llr,
-                                      uint64_t       dci_estimation[2],
+                                      uint64_t       dci_estimation[NR_DCI_WORDS],
                                       uint32_t       crc,
                                       uint8_t        aggregation_level,
                                       uint16_t       dci_length)
@@ -3602,7 +3635,7 @@ static nr_rnti_type_t dci10_rnti_type(nr_blind_rnti_class_t klass)
 /// against this codebase's OWN gNB packer (gNB_scheduler_primitives.c's NR_DL_DCI_FORMAT_1_0 case,
 /// which writes MSB-first from `dci_size` downward) -- the same reconcile-a-derivation-against-a-
 /// known-good-implementation discipline that caught the SLIV ambiguity in the SIB1 work.
-static bool dci10_parse(uint64_t                             payload,
+static bool dci10_parse(nr_dci_bits_t                             payload,
                         uint16_t                             dci_length,
                         int                                  riv_bits,
                         int                                  pad_bits,
@@ -3704,6 +3737,13 @@ static bool dci10_parse(uint64_t                             payload,
         return false;
       }
       if (sm_ind == 2) {
+        /* TS 38.212 7.3.1.2.1: ALL scheduling fields are reserved for SMI=10. */
+        if (nr_cfg_reconf_enabled() && (fdra || tda_idx || vrb || mcs || tb_scaling)) {
+          out->reject_reason = "DCI-1_0/P-RNTI short-only reserved scheduling fields are non-zero";
+          return false;
+        }
+        out->short_messages_ind = (uint8_t)sm_ind;
+        out->short_messages = (uint8_t)sm;
         out->reject_reason = "DCI-1_0/P-RNTI carries a short message only (no PDSCH assignment)";
         return false;
       }
@@ -3716,12 +3756,14 @@ static bool dci10_parse(uint64_t                             payload,
   // TS 38.212 7.3.1.0: in a UE-specific search space the smaller of format 0_0/1_0 is ZERO-padded
   // up to the other's size. Any non-zero padding means this is not a real format-1_0 payload (or
   // n_rb_riv is wrong, which would invalidate everything above it anyway).
-  if (pad_bits > 0) {
+  while (pad_bits > 0) {
     const int chunk = (pad_bits > 32) ? 32 : pad_bits;
     if (read_field(payload, &pos, chunk) != 0) {
       out->reject_reason = "DCI-1_0 size-alignment padding is non-zero";
       return false;
     }
+    if (dci_length <= 63) break; // preserve the legacy narrow path
+    pad_bits -= chunk;
   }
 
   // TS 38.214 5.1.3.1: a PDSCH scheduled by format 1_0 ALWAYS uses Table 5.1.3.1-1 (qam64),
@@ -3890,7 +3932,7 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
   out->plausible  = false;
   out->dci_format = NR_BLIND_DCI_FORMAT_1_0;
 
-  if (ctx == NULL || dci_length == 0 || dci_length > 63 || ctx->n_rb_riv < 1) {
+  if (ctx == NULL || dci_length == 0 || dci_length > NR_DCI_MAX_PAYLOAD || ctx->n_rb_riv < 1) {
     out->reject_reason = "invalid dci_length / DCI-1_0 context";
     return false;
   }
@@ -3909,12 +3951,12 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
   const int pad_bits = (int)dci_length - need;
 
   // ---- Step 1: one RNTI-independent polar decode, shared by every class hypothesis below. ----
-  uint64_t       dci_estimation[2] = {0};
+  uint64_t       dci_estimation[NR_DCI_WORDS] = {0};
   const uint32_t crc = blind_polar_decode(llr, aggregation_level, dci_length, rnti_min, rnti_max, dci_estimation);
   out->rnti          = (uint16_t)crc;
   // Kept even when this candidate is about to be rejected: TS 38.212 7.3.1.0 size-aligns 0_0 with
   // 1_0, so this same word IS the format-0_0 payload when the identifier bit is 0.
-  out->payload       = dci_estimation[0];
+  out->payload       = (nr_dci_bits_t){{dci_estimation[0], dci_estimation[1], dci_estimation[2]}};
 
   // ---- Step 2: which classes are admissible for this CRC-recovered value. The broadcast RNTIs are
   // FIXED by TS 38.321 Table 7.1-1 (SI-RNTI = 0xFFFF, P-RNTI = 0xFFFE) and sit outside the dynamic
@@ -3998,7 +4040,7 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
   for (int i = 0; i < n_attempts; i++) {
     const char* last_reason = NULL;
     out->rnti_class = (uint8_t)attempts[i];
-    const bool parsed = dci10_parse(dci_estimation[0], dci_length, riv_bits, pad_bits, attempts[i], ctx, opts, out);
+    const bool parsed = dci10_parse(out->payload, dci_length, riv_bits, pad_bits, attempts[i], ctx, opts, out);
     if (report) {
       report->candidates[report->attempted++] = *out;
       if (parsed) {
@@ -4010,6 +4052,8 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
       return true;
     }
     last_reason = out->reject_reason;
+    const bool short_only = attempts[i] == NR_BLIND_RNTI_CLASS_P && out->short_messages_ind == 2;
+    const uint8_t short_message = out->short_messages;
     // dci10_parse() writes into `out` as it goes, so reset the fields the caller still needs before
     // the next hypothesis -- without this a failed attempt would clear the RNTI a later one reports.
     memset(out, 0, sizeof(*out));
@@ -4018,8 +4062,13 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
     out->rnti            = saved_rnti;
     out->mismatched_bits = saved_mismatches;
     out->reject_reason   = last_reason;
+    if (short_only) {
+      out->rnti_class = NR_BLIND_RNTI_CLASS_P;
+      out->short_messages_ind = 2;
+      out->short_messages = short_message;
+    }
     // The decoded word survives every class hypothesis -- it is what the format-0_0 reader needs.
-    out->payload         = dci_estimation[0];
+    out->payload         = (nr_dci_bits_t){{dci_estimation[0], dci_estimation[1], dci_estimation[2]}};
   }
   if (report && report->surviving == 1) {
     *out = report->candidates[report->unique_candidate];
@@ -4082,20 +4131,20 @@ bool nr_pdcch_blind_decode_raw(const int16_t *llr, uint8_t aggregation_level,
 {
   if (!out) return false;
   memset(out,0,sizeof(*out));
-  if (!llr || dci_length<1 || dci_length>63 || !rnti_min || rnti_min>rnti_max ||
+  if (!llr || dci_length<1 || dci_length > NR_DCI_MAX_PAYLOAD || !rnti_min || rnti_min>rnti_max ||
       (aggregation_level!=1 && aggregation_level!=2 && aggregation_level!=4 &&
        aggregation_level!=8 && aggregation_level!=16)) {
     out->reject_reason="invalid raw DL decode arguments";
     return false;
   }
-  uint64_t bits[2]={0};
+  uint64_t bits[NR_DCI_WORDS]={0};
   const uint32_t crc=blind_polar_decode(llr,aggregation_level,dci_length,rnti_min,rnti_max,bits);
-  out->payload=bits[0]; out->rnti=(uint16_t)crc;
+  out->payload=(nr_dci_bits_t){{bits[0], bits[1], bits[2]}}; out->rnti=(uint16_t)crc;
   if(crc<rnti_min || crc>rnti_max) {
     out->reject_reason="CRC-recovered value outside plausible RNTI range";
     return false;
   }
-  if(require_dl_indicator && ((bits[0]>>(dci_length-1))&1)==0) {
+  if(require_dl_indicator && nr_dci_bits_field(&out->payload, dci_length, 0, 1)==0) {
     out->reject_reason="format indicator=0 (UL grant, not DL)";
     return false;
   }
@@ -4118,7 +4167,7 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
 {
   if (!out) return false;
   memset(out, 0, sizeof(*out));
-  if (!raw || !dci_length || dci_length > 63 || !bwp_size) {
+  if (!raw || !dci_length || dci_length > NR_DCI_MAX_PAYLOAD || !bwp_size) {
     out->reject_reason = "invalid raw DCI/extraction arguments";
     return false;
   }
@@ -4147,7 +4196,7 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   }
 
   int            pos     = (int)dci_length;
-  const uint64_t payload = raw->payload;
+  const nr_dci_bits_t payload = raw->payload;
 
   const uint32_t format_indicator = read_field(payload, &pos, 1);
   (void)read_field(payload, &pos, 0);           // carrier indicator (no cross-carrier scheduling)
@@ -4561,7 +4610,7 @@ int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts,
   return n;
 }
 
-int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, uint64_t payload,
+int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, nr_dci_bits_t payload,
                                  uint16_t length, uint16_t rnti, nr_pdcch_blind_ul_result_t *out)
 {
   if (!opts || !out) return 0;
@@ -4888,7 +4937,7 @@ bool nr_pdcch_blind_decode_raw_01(const int16_t* llr,
   out->ul_dci_format  = NR_BLIND_UL_DCI_FORMAT_0_1;
   out->dci_length     = dci_length;
 
-  if (!llr || dci_length == 0 || dci_length > 63 || rnti_min == 0 || rnti_min > rnti_max ||
+  if (!llr || dci_length == 0 || dci_length > NR_DCI_MAX_PAYLOAD || rnti_min == 0 || rnti_min > rnti_max ||
       (aggregation_level != 1 && aggregation_level != 2 && aggregation_level != 4 &&
        aggregation_level != 8 && aggregation_level != 16)) {
     out->reject_reason = "invalid dci_length/opts argument";
@@ -4896,13 +4945,13 @@ bool nr_pdcch_blind_decode_raw_01(const int16_t* llr,
   }
 
   // ---- Step 1: RNTI-independent polar decode, shared verbatim with both DL entry points. ----
-  uint64_t       dci_estimation[2] = {0};
+  uint64_t       dci_estimation[NR_DCI_WORDS] = {0};
   const uint32_t crc = blind_polar_decode(llr, aggregation_level, dci_length, rnti_min, rnti_max, dci_estimation);
 
   // raw_payload/crc_rnti are filled BEFORE any plausibility check: they are the reconciliation
   // instrument (see the header), and a rejected payload is exactly the case worth dumping while a
   // width assignment is still being pinned against the gNB's own log.
-  out->raw_payload = dci_estimation[0];
+  out->raw_payload = (nr_dci_bits_t){{dci_estimation[0], dci_estimation[1], dci_estimation[2]}};
   out->crc_rnti    = (uint16_t)crc;
 
   if (crc < rnti_min || crc > rnti_max) {
@@ -4912,7 +4961,7 @@ bool nr_pdcch_blind_decode_raw_01(const int16_t* llr,
   out->rnti = (uint16_t)crc;
   out->mismatched_bits = blind_mismatched_bits(llr, dci_estimation, crc, aggregation_level, dci_length);
 
-  if ((out->raw_payload >> (dci_length - 1)) & 1) {
+  if (nr_dci_bits_field(&out->raw_payload, dci_length, 0, 1)) {
     out->reject_reason = "format indicator=1 (DL assignment, not an UL grant)";
     return false;
   }
@@ -4932,7 +4981,7 @@ bool nr_pdcch_blind_decode_and_extract_01(const int16_t *llr, uint8_t aggregatio
   return ok;
 }
 
-bool nr_pdcch_blind_extract_01(uint64_t payload, uint16_t dci_length, uint16_t rnti,
+bool nr_pdcch_blind_extract_01(nr_dci_bits_t payload, uint16_t dci_length, uint16_t rnti,
                              const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out)
 {
   if (!out) return false;
@@ -4943,7 +4992,7 @@ bool nr_pdcch_blind_extract_01(uint64_t payload, uint16_t dci_length, uint16_t r
   out->rnti = out->crc_rnti = rnti;
   out->ul_dci_format = NR_BLIND_UL_DCI_FORMAT_0_1;
   if (!opts || opts->bwp_size < 1 || opts->bwp_size > 275 || opts->tda_count < 0 ||
-      opts->tda_count > 16 || dci_length == 0 || dci_length > 63) {
+      opts->tda_count > 16 || dci_length == 0 || dci_length > NR_DCI_MAX_PAYLOAD) {
     out->reject_reason = "invalid UL payload/opts";
     return false;
   }
@@ -5046,7 +5095,7 @@ bool nr_pdcch_blind_extract_01(uint64_t payload, uint16_t dci_length, uint16_t r
   return true;
 }
 
-bool nr_pdcch_blind_extract_00(uint64_t       payload,
+bool nr_pdcch_blind_extract_00(nr_dci_bits_t       payload,
                                uint16_t       dci_length,
                                uint16_t       crc_rnti,
                                const nr_pdcch_blind_ul_opts_t* opts,
@@ -5061,7 +5110,7 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
   out->crc_rnti      = crc_rnti;
   out->rnti          = crc_rnti;
 
-  if (opts == NULL || dci_length == 0 || dci_length > 63 || opts->bwp_size < 1) {
+  if (opts == NULL || dci_length == 0 || dci_length > NR_DCI_MAX_PAYLOAD || opts->bwp_size < 1) {
     out->reject_reason = "invalid dci_length/opts argument";
     return false;
   }
@@ -5096,9 +5145,12 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
   // Size-alignment padding. TS 38.212 7.3.1.0 zero-pads whichever of 0_0/1_0 is smaller in a
   // UE-specific search space, so any excess MUST be zero -- the same check the 1_0 path already
   // applies, and a cheap false-accept discriminator.
-  if (pos > 0 && (payload & ((1ULL << pos) - 1ULL)) != 0) {
-    out->reject_reason = "DCI 0_0 size-alignment padding is non-zero";
-    return false;
+  while (pos > 0) {
+    const int chunk = pos < 32 ? pos : 32;
+    if (read_field(payload, &pos, chunk) != 0) {
+      out->reject_reason = "DCI 0_0 size-alignment padding is non-zero";
+      return false;
+    }
   }
 
   out->freq_domain_assignment = riv;
@@ -5131,7 +5183,7 @@ int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
                                         uint16_t len, uint16_t bwp, uint8_t typeA,
                                         nr_pdcch_blind_result_t out[3], uint8_t ids[3])
 {
-  if (!raw || !out || !ids || !bwp || bwp>275 || !len || len>63) return 0;
+  if (!raw || !out || !ids || !bwp || bwp>275 || !len || len>NR_DCI_MAX_PAYLOAD) return 0;
   int count=0;
   /* Initial supported profile: type-1 RA, one codeword, type-1/len1 port table,
    * no cross-carrier/optional rate-matching fields. These are hypotheses, NOT
@@ -5230,6 +5282,23 @@ static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *len
   return true;
 }
 static bool sib1_cache_suppressed;
+static uint16_t sib1_cache_tried_pci = 0xFFFF;
+static _Atomic uint32_t sib1_semantic_hash;
+uint32_t nr_pdcch_blind_sib1_semantic_hash(void)
+{
+  return atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
+}
+void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t hash)
+{
+  atomic_store_explicit(&sib1_semantic_hash, hash, memory_order_release);
+  if (nr_cfg_reconf_enabled() && !hash) {
+    pthread_mutex_lock(&common_facts_lock);
+    common_facts_valid = false;
+    sib1_cache_suppressed = false;
+    sib1_cache_tried_pci = 0xFFFF;
+    pthread_mutex_unlock(&common_facts_lock);
+  }
+}
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f);
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
 {
@@ -5244,7 +5313,7 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
   common_facts_valid=true;
   sib1_cache_suppressed=false;
   pthread_mutex_unlock(&common_facts_lock);
-  if(changed)
+  if(changed || nr_cfg_reconf_enabled())
     sib1_cache_store(f);
   if(changed)
     LOG_I(PHY,"PASSIVE: SIB1 common facts PCI=%u DL-BWP=%u+%u DL-TDAs=%u "
@@ -5261,10 +5330,17 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
  * cached facts are loaded only when the live ones are absent, are logged as CACHED, and stay what
  * they always were: a hypothesis the TB CRC judges. ISAC_SIB1_CACHE=0 disables; the path is
  * ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx). */
-static void sib1_cache_path(uint16_t pci, char *out, size_t n)
+static void sib1_cache_path(uint16_t pci, uint32_t hash, char *out, size_t n)
 {
   const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
-  snprintf(out, n, "%s/sib1_common_pci%u.bin", dir && dir[0] ? dir : "/tmp/passive_rx", pci);
+  nr_cfg_sib1_cache_name(out, n, dir, pci,
+                          hash,
+                          nr_cfg_reconf_enabled());
+}
+static void sib1_cache_index_path(uint16_t pci, char *out, size_t n)
+{
+  const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
+  snprintf(out, n, "%s/sib1_common_pci%u_last_hash.bin", dir && *dir ? dir : "/tmp/passive_rx", pci);
 }
 static bool sib1_cache_enabled(void)
 {
@@ -5274,21 +5350,37 @@ static bool sib1_cache_enabled(void)
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
 {
   if (!sib1_cache_enabled()) return;
+  if (nr_cfg_reconf_enabled() && !atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire)) return;
   char path[256];
-  sib1_cache_path(f->pci, path, sizeof(path));
+  const uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
+  sib1_cache_path(f->pci, hash, path, sizeof(path));
   FILE *fp = fopen(path, "wb");
   if (fp == NULL) { mkdir("/tmp/passive_rx", 0777); fp = fopen(path, "wb"); }
   if (fp == NULL) return;
   const uint32_t magic = 0x53494231u; /* "SIB1" */
-  fwrite(&magic, sizeof(magic), 1, fp);
-  fwrite(f, sizeof(*f), 1, fp);
-  fclose(fp);
+  const bool written = fwrite(&magic, sizeof(magic), 1, fp) == 1 && fwrite(f, sizeof(*f), 1, fp) == 1;
+  const bool closed = fclose(fp) == 0;
+  if (nr_cfg_reconf_enabled() && written && closed) {
+    sib1_cache_index_path(f->pci, path, sizeof(path));
+    fp = fopen(path, "wb");
+    if (fp) { fwrite(&hash, sizeof(hash), 1, fp); fclose(fp); }
+  }
 }
 static bool sib1_cache_load(uint16_t pci, nr_pdcch_blind_common_config_t *f)
 {
   if (!sib1_cache_enabled()) return false;
+  uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
   char path[256];
-  sib1_cache_path(pci, path, sizeof(path));
+  if (nr_cfg_reconf_enabled() && !hash) {
+    sib1_cache_index_path(pci, path, sizeof(path));
+    FILE *index = fopen(path, "rb");
+    if (!index) return false;
+    const bool ok = fread(&hash, sizeof(hash), 1, index) == 1 && hash;
+    fclose(index);
+    if (!ok) return false;
+    /* This selects a HINT only: never publish this hash as a decoded SIB1. */
+  }
+  sib1_cache_path(pci, hash, path, sizeof(path));
   FILE *fp = fopen(path, "rb");
   if (fp == NULL) return false;
   uint32_t magic = 0;
@@ -5305,9 +5397,8 @@ bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)
   if(ok) *f=common_facts; else memset(f,0,sizeof(*f));
   pthread_mutex_unlock(&common_facts_lock);
   if (!ok && !sib1_cache_suppressed) {
-    static uint16_t s_tried_pci = 0xFFFF;
-    if (s_tried_pci != pci) {
-      s_tried_pci = pci;
+    if (sib1_cache_tried_pci != pci) {
+      sib1_cache_tried_pci = pci;
       nr_pdcch_blind_common_config_t c;
       if (sib1_cache_load(pci, &c)) {
         LOG_A(PHY, "PASSIVE: SIB1 common facts for PCI %u loaded from CACHE (live SIB1 not decoded yet): "
