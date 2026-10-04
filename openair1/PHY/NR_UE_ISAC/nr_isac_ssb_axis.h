@@ -36,6 +36,7 @@ extern "C" {
  * @param k_abs_out            Caller-owned array of at least 240 uint32_t.
  */
 void nr_isac_ssb_k_abs(int ssb_start_subcarrier, int k_ssb, int ofdm_symbol_size, uint32_t* k_abs_out);
+int nr_isac_ssb_normalize_k_ssb(int raw_k_ssb, int numerology, int fr1);
 
 #ifdef __cplusplus
 }

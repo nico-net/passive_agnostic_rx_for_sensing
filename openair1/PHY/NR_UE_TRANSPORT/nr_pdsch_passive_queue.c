@@ -63,6 +63,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables)
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
@@ -1491,7 +1492,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
                 job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
       }
-      if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled()) && !job.layout_probe &&
+      if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && !job.layout_probe &&
           (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
         /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). Non-blocking. */
         struct timespec ts_;
@@ -1519,6 +1520,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
             .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
         if (nr_passive_obs_enabled()) nr_passive_obs_push(&o_);
+        if (nr_sense_enabled()) {
+          nr_sense_grant_meta_t meta = {
+            .stamp_valid=true, .epoch=nr_cfg_reconf_enabled()?(int)job.config_epoch:-1,
+            .identity_gen=nr_cfg_reconf_enabled()?(int)job.sense_identity_gen:-1,
+            .dedicated_epoch=nr_cfg_reconf_enabled()?(int)job.sense_dedicated_epoch:-1,
+            .rx_ts=-1, .k2=-1, .dci_slot=-1, .transform_precoding=-1,
+            .freq_hopping=-1, .dmrs_type=-1, .dmrs_add_pos=-1,
+            .dmrs_n_scid=-1, .ta_est_samples=-1, .cfo_est_hz=NAN};
+          nr_sense_emit_grant_meta(&o_, &meta);
+        }
         if (nr_ue_ctx_enabled()) {
           nr_ue_ctx_on_obs(&o_);
           if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !no_harq_)
@@ -1759,6 +1770,11 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   g_pending[g_n_pending].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
+  if (nr_cfg_reconf_enabled()) {
+    const uint64_t pair=nr_cfg_epoch_cfr_stamp();
+    g_pending[g_n_pending].sense_identity_gen=(uint32_t)pair;
+    g_pending[g_n_pending].sense_dedicated_epoch=nr_cfg_epoch_dedicated_current();
+  }
   /* ONE normalisation for everyone downstream: decoder, data-aided tap (recomputes nb_rb/G from
    * num_rbs), queue probes, narrow-grant budget. A no-op for a contiguous grant. */
   if (!nr_pdsch_passive_alloc_normalise(&g_pending[g_n_pending].freq_alloc, job->dlsch_pdu.BWPSize)) {

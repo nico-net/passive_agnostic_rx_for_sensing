@@ -64,6 +64,7 @@ typedef struct nr_isac_carrier_s {
   uint16_t pci;
   uint16_t slots_per_frame;
 } nr_isac_carrier_t;
+struct nr_sense_rs_meta_s;
 
 void nr_isac_init(void);
 void nr_isac_set_rx_antennas(uint32_t antennas); /* call before start, after RX frame parameters are set */
@@ -104,6 +105,12 @@ void nr_isac_submit_cfr_multi(uint32_t                 slot_idx,
                               const uint32_t*          l_sym,
                               uint32_t                 nof_re,
                               float                    noise_var);
+void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac, int source,
+                                  const nr_isac_carrier_t *carrier, const float *h,
+                                  uint32_t nof_ant, uint32_t ant_stride_re,
+                                  const uint32_t *k_abs, const uint32_t *l_sym,
+                                  uint32_t nof_re, float noise_var,
+                                  const struct nr_sense_rs_meta_s *meta);
 
 uint32_t nr_isac_subslot_config(uint32_t* min_re, float* min_snr_db);
 

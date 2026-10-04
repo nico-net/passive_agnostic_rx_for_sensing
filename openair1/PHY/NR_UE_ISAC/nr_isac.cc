@@ -22,10 +22,12 @@
 /* Receiver-facing CFR export adapter. No sensing algorithms run here. */
 #include "nr_isac.h"
 #include "nr_sense_api.h"
+#include "nr_sense_records.h"
 #include "nr_passive_cfg_epoch.h"
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -200,18 +202,6 @@ const struct { const char *name; int type; } legacy_keys[] = {
   {"report_endpoint", TYPE_STRING},
 };
 
-std::string json_string(const std::string &s)
-{
-  if (s.empty()) return "null";
-  const char hex[] = "0123456789abcdef";
-  std::string out = "\"";
-  for (unsigned char c : s) {
-    if (c == '"' || c == '\\') { out += '\\'; out += c; }
-    else if (c < 32) { out += "\\u00"; out += hex[c >> 4]; out += hex[c & 15]; }
-    else out += c;
-  }
-  return out + "\"";
-}
 unsigned source_mask(const char *s)
 {
   unsigned mask = 0;
@@ -308,13 +298,8 @@ extern "C" void nr_isac_start(void)
     LOG_E(PHY, "SENSING: cannot open export API\n");
     return;
   }
-  const auto stamp = reconf ? nr_cfg_epoch_snapshot() : nr_cfg_epoch_snapshot_t{};
-  // Task 2 config metadata; RF metadata and per-observation records belong to Task 3.
-  const std::string session = "{\"schema\":2,\"type\":\"session\",\"reconf\":" + std::string(reconf ? "true" : "false")
-    + ",\"epoch\":" + (reconf ? std::to_string(stamp.epoch) : "null")
-    + ",\"identity_gen\":" + (reconf ? std::to_string(stamp.identity_gen) : "null")
-    + ",\"rx_id\":" + json_string(rx_id) + ",\"rx_array\":" + json_string(rx_array) + "}";
-  nr_sense_push_record(session.c_str());
+  nr_sense_set_session_identity(rx_id.empty() ? nullptr : rx_id.c_str(), rx_array.empty() ? nullptr : rx_array.c_str());
+  nr_sense_emit_session(nullptr, NAN);
   active_sources.store(configured_sources, std::memory_order_release);
 }
 
@@ -352,18 +337,54 @@ extern "C" uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)
   if (min_snr_db) *min_snr_db = subslot_min_snr_db;
   return subslot_symbols;
 }
-extern "C" void nr_isac_submit_cfr_multi(uint32_t slot_idx, float slot_frac, int source,
+extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac, int source,
     const nr_isac_carrier_t *carrier, const float *h, uint32_t nof_ant, uint32_t ant_stride_re,
-    const uint32_t *k_abs, const uint32_t *l_sym, uint32_t nof_re, float noise_var)
+    const uint32_t *k_abs, const uint32_t *l_sym, uint32_t nof_re, float noise_var,
+    const nr_sense_rs_meta_t *detail)
 {
   if (!nr_isac_source_enabled(source)) return;
   if (!h || !k_abs || !l_sym || nof_ant < 1 || nof_ant > 8 || nof_re < 1 || nof_re > INT_MAX ||
       ant_stride_re < nof_re || ant_stride_re > INT_MAX) { nr_sense_reject_cfr(); return; }
-  (void)carrier; // Carrier metadata is emitted by Task 3.
   // Coherent epoch/identity pair published with the authoritative snapshot, no mutex on RX.
   const uint64_t stamp = reconf ? nr_cfg_epoch_cfr_stamp() : 0;
-  nr_sense_push_cfr_u32(source_map[source], std::min(nof_ant,cfg.cfr_max_ant), h, ant_stride_re, nof_re, k_abs, l_sym,
-                    slot_idx, slot_frac, noise_var, stamp >> 32, (uint32_t)stamp, nullptr);
+  const int dedicated = reconf ? int(nr_cfg_epoch_dedicated_current()) : -1;
+  bool truncated=false;
+  const int n_export_ant=std::min(nof_ant,cfg.cfr_max_ant);
+  const uint64_t frame_id=nr_sense_push_cfr_u32(source_map[source], n_export_ant, h, ant_stride_re, nof_re, k_abs, l_sym,
+                    slot_idx, slot_frac, noise_var, stamp >> 32, (uint32_t)stamp, &truncated);
+  nr_sense_rs_meta_t m{};
+  m.rnti=0; m.start_rb=-1; m.nb_rb=-1; m.n_re=std::min(nof_re,cfg.cfr_max_re);
+  m.n_ant=n_export_ant; m.ports=-1; m.ssb_index=-1; m.k_ssb=-1;
+  m.noise_var=noise_var; m.slot_frac=slot_frac; m.abs_slot=slot_idx;
+  m.frame=carrier && carrier->slots_per_frame ? (slot_idx/carrier->slots_per_frame)%1024 : -1;
+  m.slot=carrier && carrier->slots_per_frame ? slot_idx%carrier->slots_per_frame : -1;
+  m.pci=carrier?carrier->pci:-1; m.rx_ts=-1;
+  m.stamp_valid=true;
+  m.epoch=reconf ? int(stamp>>32) : -1;
+  m.identity_gen=reconf ? int(uint32_t(stamp)) : -1;
+  m.dedicated_epoch=dedicated;
+  m.ta_est_samples=-1; m.transform_precoding=-1; m.dmrs_type=-1; m.dmrs_add_pos=-1; m.dmrs_n_scid=-1;
+  m.prach_preamble=-1; m.prach_energy=NAN; m.prach_delay=NAN;
+  m.srs_comb=m.srs_offset=m.srs_cs=m.srs_group=m.srs_period=m.srs_track_id=-1;
+  for (uint32_t r=0;r<(uint32_t)m.n_re;r++) {
+    if (l_sym[r]<32) m.l_sym_mask|=1u<<l_sym[r];
+    if (k_abs[r]<=UINT16_MAX && (m.start_rb<0 || int(k_abs[r]/12)<m.start_rb)) m.start_rb=k_abs[r]/12;
+  }
+  if (detail) {
+    m.rnti=detail->rnti; m.start_rb=detail->start_rb; m.nb_rb=detail->nb_rb;
+    m.ports=detail->ports; m.ssb_index=detail->ssb_index; m.k_ssb=detail->k_ssb;
+    m.csirs_resource=detail->csirs_resource; m.ta_est_samples=detail->ta_est_samples;
+    m.transform_precoding=detail->transform_precoding; m.dmrs_type=detail->dmrs_type;
+    m.dmrs_add_pos=detail->dmrs_add_pos; m.dmrs_n_scid=detail->dmrs_n_scid;
+  }
+  m.truncated=truncated;
+  nr_sense_emit_rs(source_map[source],&m,frame_id);
+}
+extern "C" void nr_isac_submit_cfr_multi(uint32_t slot_idx, float slot_frac, int source,
+    const nr_isac_carrier_t *carrier, const float *h, uint32_t nof_ant, uint32_t ant_stride_re,
+    const uint32_t *k_abs, const uint32_t *l_sym, uint32_t nof_re, float noise_var)
+{
+  nr_isac_submit_cfr_multi_meta(slot_idx,slot_frac,source,carrier,h,nof_ant,ant_stride_re,k_abs,l_sym,nof_re,noise_var,nullptr);
 }
 extern "C" void nr_isac_submit_cfr_at(uint32_t slot_idx, float slot_frac, int source,
     const nr_isac_carrier_t *carrier, const float *h, const uint32_t *k_abs, const uint32_t *l_sym,

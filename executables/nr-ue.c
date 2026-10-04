@@ -6,6 +6,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include <dlfcn.h>
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
@@ -1071,6 +1072,11 @@ void *UE_thread(void *arg)
             nr_cfg_epoch_set_slots_per_second(1000u << UE->frame_parms.numerology_index);
           }
           atomic_store_explicit(&nr_passive_metrics_pci, UE->frame_parms.Nid_cell, memory_order_relaxed); // for the ISAC_METRICS JSON (Task A2)
+          if (nr_sense_enabled()) {
+            const openair0_config_t *sense_cfg=&openair0_cfg_g[UE->rf_map.card];
+            nr_sense_emit_session(&UE->frame_parms,
+              sense_cfg->rx_gain[UE->rf_map.chain]-sense_cfg->rx_gain_offset[UE->rf_map.chain]);
+          }
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",
                 decoded_frame_rx,

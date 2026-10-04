@@ -2,6 +2,7 @@
 /* Per-grant observation records: JSON serialiser, ring buffer and writer thread (Task A3).
  * Deliberately free of OAI logging so the unit test links standalone. Schema: see nr_passive_obs.h. */
 #include "nr_passive_obs.h"
+#include "nr_sense_records.h"
 #include <inttypes.h>
 #include <math.h>
 #include <pthread.h>
@@ -114,6 +115,44 @@ int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n)
   jb_int(&j, "fs_hz", o->fs_hz);
   jb_put(&j, "}");
   return j.ovf ? -1 : (int)j.w;
+}
+
+/* Schema 2 extends the exact v1 field/value spelling. The legacy writer above
+ * remains the only serializer used by ISAC_OBS_PATH. */
+static void jb_str(jb_t *j, const char *key, const char *v)
+{
+  if (!v) { jb_put(j, ",\"%s\":null", key); return; }
+  jb_put(j, ",\"%s\":\"", key);
+  for (; *v; v++) {
+    const unsigned char c=(unsigned char)*v;
+    if (c=='"' || c=='\\') jb_put(j,"\\%c",c);
+    else if (c<32) jb_put(j,"\\u%04x",c);
+    else jb_put(j,"%c",c);
+  }
+  jb_put(j,"\"");
+}
+int nr_sense_grant_to_json(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *m, char *buf, size_t n)
+{
+  if (!o || !m || !buf || !n) return -1;
+  char v1[1024];
+  if (nr_passive_obs_to_json(o,v1,sizeof v1)<0) return -1;
+  const char *tail=strchr(v1,',');
+  if (!tail) return -1;
+  jb_t j={buf,n,0,false};
+  jb_put(&j,"{\"schema\":2,\"type\":\"grant\"%.*s",(int)(strlen(tail)-1),tail);
+  jb_int(&j,"epoch",m->epoch); jb_int(&j,"identity_gen",m->identity_gen);
+  jb_int(&j,"dedicated_epoch",m->dedicated_epoch); jb_int(&j,"rx_ts",m->rx_ts);
+  jb_str(&j,"dl_coverage",o->dir==NR_OBS_DIR_DL?(m->dl_inline?"inline":"queue"):NULL);
+  jb_str(&j,"verif",m->verif);
+  jb_int(&j,"k2",m->k2); jb_int(&j,"dci_slot",m->dci_slot);
+  jb_int(&j,"transform_precoding",m->transform_precoding);
+  jb_int(&j,"freq_hopping",m->freq_hopping);
+  jb_int(&j,"dmrs_type",m->dmrs_type); jb_int(&j,"dmrs_add_pos",m->dmrs_add_pos);
+  jb_int(&j,"dmrs_n_scid",m->dmrs_n_scid); jb_int(&j,"ta_est_samples",m->ta_est_samples);
+  jb_flt(&j,"cfo_est_hz",m->cfo_est_hz);
+  jb_str(&j,"ul_timing_ref",o->dir==NR_OBS_DIR_UL?(m->ul_timing_ref?m->ul_timing_ref:"dl_frame"):NULL);
+  jb_put(&j,"}");
+  return j.ovf?-1:(int)j.w;
 }
 
 /* Flush the stdio buffer; the `pending` lines become `written` on success, io_errors on failure. Returns 0. */

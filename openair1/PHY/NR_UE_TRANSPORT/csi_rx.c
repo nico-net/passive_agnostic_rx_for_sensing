@@ -23,6 +23,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
 #include <time.h>
@@ -1052,8 +1053,16 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                                  .pci             = frame_parms->Nid_cell,
                                  .slots_per_frame = frame_parms->slots_per_frame};
     const uint32_t slot_idx = (uint32_t)(proc->frame_rx * frame_parms->slots_per_frame + proc->nr_slot_rx);
-    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, nof_ant, NR_ISAC_CSIRS_MAX_RE,
-                             isac_k, isac_l, nof_re, (float)noise_power);
+    char resource[128];
+    snprintf(resource, sizeof resource, "row=%u,fd=%u,l0=%u,density=%u,period=unknown",
+             (unsigned)csirs_config_pdu->row, (unsigned)csirs_config_pdu->freq_domain,
+             (unsigned)csirs_config_pdu->symb_l0, (unsigned)csirs_config_pdu->freq_density);
+    const nr_sense_rs_meta_t meta = {.start_rb=csirs_config_pdu->start_rb,
+      .nb_rb=csirs_config_pdu->nr_of_rbs, .ports=-1, .ssb_index=-1, .k_ssb=-1,
+      .csirs_resource=resource, .ta_est_samples=-1, .transform_precoding=-1,
+      .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
+    nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, nof_ant, NR_ISAC_CSIRS_MAX_RE,
+                                  isac_k, isac_l, nof_re, (float)noise_power, &meta);
   }
 }
 

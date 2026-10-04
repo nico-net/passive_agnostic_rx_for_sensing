@@ -46,6 +46,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
@@ -360,6 +361,10 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->dl_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
+  const nr_sense_rs_meta_t rs_meta = {.rnti=rnti,
+    .start_rb=dlsch_config->BWPStart+freq_alloc->first_rb, .nb_rb=freq_alloc->num_rbs,
+    .ports=-1, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
+    .transform_precoding=-1, .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
   /* Slow-time index for the CPI grid. `proc->frame_rx` WRAPS at 1024, so the obvious
    * frame*slots_per_frame + slot wraps every 20480 slots. In-line that was benign: submissions
    * arrived in strict slot order and a wrap was just a discontinuity between CPIs. Once the decode
@@ -389,8 +394,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const uint32_t sub_target = nr_isac_subslot_config(&sub_min_re, &sub_min_snr_db);
 
   if (sub_target == 0 || nof_sym <= 1) {
-    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                             isac_k, isac_l, nof_re, (float)nvar);
+    nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                  isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
     return;
   }
 
@@ -417,24 +422,24 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
       // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
       // the same symbol offset within its own plane.
-      nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                               isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                               g_re, (float)nvar);
+      nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                    isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                    g_re, (float)nvar, &rs_meta);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
       // Tail that never passed the gates: merge it BACKWARDS by re-emitting from g_first to the end
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
-        nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                                 isac_k, isac_l, nof_re, (float)nvar);
+        nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                      isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
-        nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                                 isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                                 g_re, (float)nvar);
+        nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                      isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                      g_re, (float)nvar, &rs_meta);
       }
     }
   }

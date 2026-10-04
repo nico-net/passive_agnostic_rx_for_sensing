@@ -21,6 +21,7 @@
 #include "nr_pusch_data_aided.h"
 #include "nr_pdsch_prb_set.h"
 #include "nr_passive_obs.h" // per-grant observation API (Task A3)
+#include "nr_sense_records.h"
 #include "nr_passive_ue_ctx.h"
 
 #include "common/utils/LOG/log.h"
@@ -1113,9 +1114,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
          * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
          * (~10 slots in practice against a 20480-slot wrap). */
         const uint32_t ul_slot_idx = passive_ul_slow_time_idx(fp, frame, slot, abs_slot);
-        nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f,
-                                 NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
-                                 ul_k, ul_l, nof_re, 1.0f);
+        const nr_sense_rs_meta_t rs_meta = {
+          .rnti=g->rnti, .start_rb=g->bwp_start+g->start_rb, .nb_rb=g->num_rb,
+          .ports=g->dmrs_ports, .ssb_index=-1, .k_ssb=-1,
+          /* Positive means the UL FFT window was advanced relative to the DL frame. */
+          .ta_est_samples=ta_offset_samples, .transform_precoding=g->transform_precoding,
+          .dmrs_type=g->dmrs_config_type+1, .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
+        nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f,
+                                      NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
+                                      ul_k, ul_l, nof_re, 1.0f, &rs_meta);
         atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
         for (uint32_t a = 0; a < nof_ant_cfr && a < PASSIVE_UL_MAX_ANT; a++) {
           /* Accumulate the SUM and divide once at report time. Dividing per grant and casting to
@@ -1490,7 +1497,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
-                                    (uint32_t)nant, slot);
+                                    (uint32_t)nant, slot, ta_offset_samples);
   }
   return true;
 }
@@ -1573,7 +1580,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
           (unsigned)out->qam_mod_order, out->snr_db, out->est_delay, out->segments_ok,
           out->n_segments, (unsigned)out->status, out->reject_reason ? out->reject_reason : "-");
   }
-  if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
+  if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
                     out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {
     /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). cfr_only calls end UNSUPPORTED. */
     struct timespec ts_;
@@ -1597,6 +1604,15 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
         .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
         .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
     if (nr_passive_obs_enabled()) nr_passive_obs_push(&o_);
+    if (nr_sense_enabled()) {
+      const nr_sense_grant_meta_t meta = {
+        .rx_ts=-1, .k2=g->k2,
+        .dci_slot=ofp_->slots_per_frame ? (slot+ofp_->slots_per_frame-(g->k2%ofp_->slots_per_frame))%ofp_->slots_per_frame : -1,
+        .transform_precoding=g->transform_precoding, .freq_hopping=g->frequency_hopping,
+        .dmrs_type=g->dmrs_config_type+1, .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid,
+        .ta_est_samples=ta_offset_samples, .cfo_est_hz=NAN, .ul_timing_ref="dl_frame"};
+      nr_sense_emit_grant_meta(&o_, &meta);
+    }
     if (nr_ue_ctx_enabled()) nr_ue_ctx_on_obs(&o_);
   }
   return ok;
