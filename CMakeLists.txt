@@ -2455,6 +2455,8 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_field_sweep_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_interp_sweep_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc)
+  target_sources(test_nr_pdcch_blind_monitor PRIVATE
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_reconfig_replay_test.cc)
   add_test(NAME test_nr_dl_adaptive COMMAND test_nr_pdcch_blind_monitor --gtest_filter=DlAdaptive.*:DlGeometry.*)
   add_custom_target(test_nr_pdcch_ul_field_sweep DEPENDS test_nr_pdcch_blind_monitor)
   add_custom_target(test_nr_pdcch_ul_interp_sweep DEPENDS test_nr_pdcch_blind_monitor)
@@ -2465,6 +2467,8 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_blind_monitor PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_monitor)
   add_test(NAME test_nr_pdcch_blind_monitor COMMAND ./test_nr_pdcch_blind_monitor)
+  add_test(NAME test_nr_reconfig_replay COMMAND ./test_nr_pdcch_blind_monitor --gtest_filter=ReconfigReplay.*)
+  set_tests_properties(test_nr_reconfig_replay PROPERTIES ENVIRONMENT "ISAC_RECONF=1")
 
   # L1/FISTA sparse Doppler recovery (sparse_doppler.{h,cc}): peak-to-harmonic ratio vs. dense NUDFT
   # on a gappy tone, and preservation of a genuine second weaker target.
