@@ -412,7 +412,7 @@ through sensing metrics.
 | `cloud/dgx-next-steps` | **Merged 2026-10-01** (`54bbf03b91`). | Track A of the DGX next-steps plan, cloud x86 session (§13.2, §14.5/§14.6). |
 | `claude/elegant-davinci-jlrfol` | **Merged 2026-10-01** (`7f2fb28acf`). | A7 follow-up race fixes incl. upstream `task_ans.c` acq_rel (K30). |
 | `td/convergence-levers` | **Local only. 2026-10-04: HEAD `003b8c3f93` (base `85748c6e1f`); being merged locally into `adaptive-rx-UL-DL` (push needs an explicit operator OK).** Worktree `/home/nicola/NICOLA/wt/td-levers`. | Levers + blind-convergence plans (§0.6, §3.3.1) and the 2026-10-03/04 acceleration round. Sub-branches merged into it: `td/t6-ablation` (`f22d85dc12`), `td/bc1-equiv` (`5c38acf88a`), `td/bc4-fieldbook` (`cddc900813`), `td/bc3-dormant` (`4d450cb022`), `td/bc2-crc` (`25c4d5ac7e`), `td/bc8-simv2` (`355284580d`), `td/gate-postconv` (`b3c531b221`), `td/bc12a-sib1-census` (`ca1cbc5470`), `td/excl-restart-log` (`6e3d6c9a9a`); 2026-10-03/04: `td/g1-ldpc-safety` (`15f2492c6c`), `td/k38-rootcause` (`f929120297`), `td/r2-fieldbook-wiring` (`334c0bfca8`), `td/elim-channel` (`5074c5f61e`, fix round 1 `b922eb4fb3`), `td/grantwork-lite` (`e5c604d9c7`), `td/cb0-gpu-batch` (`4ca2ce2825`), `td/cb0-cpu-wiring` (`16035a1ccb`), `td/cb0-gpu-entry` (fast-forward to `003b8c3f93`). |
-| `td/fast-defaults` | **2026-10-04, created at `003b8c3f93`; the controller applies the new defaults there** (§10.2 "Defaults of the merged main") and the 4-RX gate thresholds in `rfsim_regress.sh` (§12). | Not described further here: its commits postdate this update. |
+| `td/fast-defaults` | **2026-10-04, created at `003b8c3f93`, merged into `td/convergence-levers` at `73754d4c24`.** `f3c9e585de`: fastest combination ON by default (§10.2) + provisional 4-RX gate + 4-RX evidence (`tests/passive_rx/dgx_host_snapshot_2026-09-30/cb0_4rx_2026-10-04/`). `4f0158f046`: pre-merge review fixes (test baseline header `tests/nr_td_test_baseline.h` + new-default tests, order-independent; GPU adapter abandons its input buffer after a CB0 timeout/CUDA error; CPU TB forced only for predicted CPU-backend CB0 batches; `ISAC_LLR_SCALE`/`ISAC_TD_FIELDBOOK` semantics (only 0 disables fb2); in-place adapter access `nr_pdsch_config_sweep_with_context`; CPU-only `ENABLE_LDPC_CUDA=OFF` build 13/13). ctest 141/144 (known ARM). | Final gate below (§14.10 addendum). Known limit (speed only): decoder dominance is per CB0 epoch, so after a CUDA-decoded TB, CPU CB0 batches of that context are rejected until the epoch resets. |
 | `rr/reconfig-robustness` | Local, in progress (worktree `/home/nicola/NICOLA/wt/rr-robust`). | Reconfiguration-robustness plan (K37, epochs, SIB1/CSI-RS change triggers); not covered by this file's 2026-10-02 update. |
 | `sdd/integration`, `sdd/validation`, `sdd/gap-*`, `sdd/agn-*`, `sdd/t*` (receiver lanes) | Merged (ancestors of HEAD), except the ones listed below. | Lane worktrees on sens6 `/home/sens/NICOLA/agn-wt/<lane>`. |
 | `sdd/rfsim-gnb-test` (`67bb0eaa11`) | **Unmerged by design. NOT on the `github` remote (checked 2026-09-30).** | Test-only gNB injection knobs `ISAC_GNB_TEST_*` for the phy-test bed. Never merge. Only on sens6 (`agn-wt/gnbtest`) — without it the DGX phy-test bed runs with a plain HEAD `nr-softmodem` (no knobs; the baseline arm needs none). |
@@ -1888,6 +1888,20 @@ Other measurements of the round (each with its own bed; never pooled):
 | GPU CB0 entry paired dominance | see §3.3.1 (0 violations at caps 16/14/12 in 104 000 codewords; 1 at 10; 836 at 8) | `[MEASURED, DGX GB10, @5a1a278452]`, `task-CB0GPU-paired.csv` |
 | sm_89 build | `-DLDPC_CUDA_ARCH="89;121"` builds `ldpc_cuda`, `td_cb0_gpu`, `pdsch_gpu`, `pdcch_gpu`, `polar_sc_cuda`, `test_ldpc_cb0_cuda`; `cuobjdump` shows sm_89 + sm_121 cubins. **Not compiled with nvcc 12.4, not run on sens6** | `[MEASURED, DGX build]` |
 | R2fb gates | flag OFF and fb2 arms FAILED on a shared host (load 3–5; other branches' baselines degraded the same way) — invalid as evidence; **no idle-host fb2 gate exists** | `[MEASURED, DGX rfsim 106 PRB 1 RX, host LOADED]` |
+
+
+**§14.10 addendum: full default combination, 4-RX gate (2026-10-04).** `[MEASURED, DGX rfsim 106 PRB 4 RX, 420 s, flock -x, idle host]`. All defaults ON (GrantWork + CB0 elimination + fb2 + backend auto + CPU TB while acquiring):
+
+| Binary | Arm | ttc tda0 / tda2 | overall CRC | postconv CRC (decodes) | drop_full | gate |
+|---|---|---|---|---|---|---|
+| `f3c9e585de` (pre-fix) | ON r1 | 22.0 / 42.1 s | 95.6 % | 100 % (11983) | 0.91 % | PASS |
+| `f3c9e585de` (pre-fix) | ON r2 | 12.8 / 49.5 s | 96.6 % | 100 % (11762) | 0.59 % | PASS |
+| `4f0158f046` (final) | ON r1 | 22.2 / 40.3 s | 95.6 % | 100 % (13020) | 0.44 % | PASS |
+| `4f0158f046` (final) | OFF (`ISAC_TD_GRANTWORK=0 ISAC_TD_CB0_ELIM=0 ISAC_TD_FIELDBOOK=0`) | 94.5 / 137.0 s | 73.1 % | 100 % (8464) | 1.64 % | FAIL (ttc, floor: K39 cost, expected) |
+| `4f0158f046` (final) | ON r2 | 24.5 / 39.4 s | 95.2 % | 100 % (12698) | 0.86 % | PASS |
+
+Same winners in every arm (tda0 S1 L13 mask 0x804 k0=0; tda2 S1 L5 mask 0x4), 0 reopens, 0 premise alarms. The 4-RX gate is calibrated for the ON defaults: an all-OFF build fails it by design (K39 at 4 RX). This closes the "full default combination never measured" item of K50 for the rfsim bed; Nl > 1 runtime admissibility and sens6 remain open.
+
 
 ## 15. Current OTA status (latest campaign only)
 
