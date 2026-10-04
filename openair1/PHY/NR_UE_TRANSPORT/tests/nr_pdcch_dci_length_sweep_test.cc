@@ -34,9 +34,11 @@
 #include <gtest/gtest.h>
 
 extern "C" {
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
 #include "nr_pdcch_dci_length_sweep.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "common/config/config_userapi.h"
+#include "common/utils/LOG/log.h"
 }
 
 // Standalone LOG/CONFIG_LIB linkage, matching the other PHY decoder tests.
@@ -238,7 +240,10 @@ TEST(DciLengthSweep, FixedFloorWouldFalseTriggerButScaledTestDoesNot)
 int main(int argc, char** argv)
 {
   testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+  logInit();
+  const int rc = RUN_ALL_TESTS();
+  logClean();
+  return rc;
 }
 
 static bool independent_length(int len,int trial,uint16_t *rnti,uint32_t *hash,void *ctx) {
@@ -984,4 +989,90 @@ TEST(DciLengthBank, ScoutDutyUsesOccasionsNotSlotPhase) {
   for (int slot=1;slot<2001;slot+=20)
     due+=nr_pdcch_dci_length_scout_due(&bank);
   EXPECT_EQ(due,5);
+}
+
+static nr_pdcch_dci_length_store_t *epoch_store;
+static void length_epoch_test_listener(const nr_cfg_epoch_snapshot_t *s) {
+  nr_pdcch_dci_length_store_epoch(epoch_store, s);
+}
+TEST(DciLengthEpoch, DedicatedChangeReverifiesLengthsAndTd) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdcch_dci_length_store_t store{};
+  auto *bank = nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  auto *c = nr_pdcch_dci_length_context(bank, 42, 0x1234);
+  nr_pdcch_dci_length_context_lock(c, 47);
+  nr_pdcch_dci_length_context_add(c, 53, 10);
+  epoch_store = &store;
+  nr_cfg_epoch_subscribe(length_epoch_test_listener);
+  nr_cfg_epoch_note_rnti_reopened(0x1111, true, 100);
+  nr_cfg_epoch_note_rnti_reopened(0x2222, true, 101);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(c->len_state, NR_LEN_SUSPECT);
+  EXPECT_EQ(c->found[1], 0);
+  EXPECT_EQ(c->hint_secondary, 53);
+  int order[140];
+  ASSERT_GT(nr_pdcch_dci_length_context_relock_order(c, nullptr, 0, order, 140), 0);
+  EXPECT_EQ(order[0], 47);
+  nr_pdcch_dci_length_context_lock(c, 47);
+  EXPECT_EQ(c->len_state, NR_LEN_LOCKED);
+  EXPECT_EQ(c->epoch_learned, nr_cfg_epoch_current());
+  EXPECT_EQ(c->found[1], 0);
+  for (auto &e : store.coreset) free(e.bank);
+  nr_cfg_epoch_reset();
+}
+
+TEST(DciLengthEpoch, HardResetNeverReusesOldIdentityState) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_cfg_epoch_note_identity(1, 100, 200);
+  nr_pdcch_dci_length_store_t store{};
+  auto *old = nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context(old, 42, 0x1234), 47);
+  nr_cfg_epoch_note_identity(2, 100, 200);
+  // Lazy lookup must be safe even before the listener is drained.
+  auto *fresh = nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  EXPECT_NE(old, fresh);
+  EXPECT_EQ(nr_pdcch_dci_length_context(fresh, 42, 0x1234)->found[0], 0);
+  EXPECT_EQ(nr_pdcch_dci_length_context(old, 42, 0x1234)->found[0], 47); // dormant
+  for (auto &e : store.coreset) free(e.bank);
+  nr_cfg_epoch_reset();
+}
+
+TEST(DciLengthEpoch, ShortGapSoftDoesNotReverifyAll) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdcch_dci_length_store_t store{};
+  auto *bank = nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  auto *c = nr_pdcch_dci_length_context(bank, 42, 0x1234);
+  nr_pdcch_dci_length_context_lock(c, 47);
+  nr_pdcch_dci_length_context_add(c, 53, 10);
+  for (int cause = 0; cause < 3; ++cause) {
+    bank->cell_len = 47;
+    if (cause == 0) nr_cfg_epoch_note_continuity_loss_samples(9, 1);
+    if (cause == 1) nr_cfg_epoch_note_csirs_map_change();
+    if (cause == 2) nr_cfg_epoch_note_bwp_change();
+    EXPECT_EQ(nr_pdcch_dci_length_store_get(&store, 42, nullptr), bank);
+    EXPECT_EQ(bank->cell_len, 0);
+    EXPECT_EQ(c->len_state, NR_LEN_LOCKED);
+    EXPECT_EQ(c->found[0], 47);
+    EXPECT_EQ(c->found[1], 53);
+  }
+  for (auto &e : store.coreset) free(e.bank);
+  nr_cfg_epoch_reset();
+}
+
+TEST(DciLengthEpoch, LazyLookupCannotMissHardBeforeSoft) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdcch_dci_length_store_t store{};
+  auto *bank = nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  auto *c = nr_pdcch_dci_length_context(bank, 42, 0x1234);
+  nr_pdcch_dci_length_context_lock(c, 47);
+  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_note_bwp_change();
+  nr_pdcch_dci_length_store_get(&store, 42, nullptr);
+  EXPECT_EQ(c->len_state, NR_LEN_SUSPECT);
+  for (auto &e : store.coreset) free(e.bank);
+  nr_cfg_epoch_reset();
 }

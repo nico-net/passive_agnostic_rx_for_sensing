@@ -321,6 +321,7 @@ static void cb0_epoch_reset(nr_pdsch_config_sweep_state_t *st, bool with_tb)
   memset(st->cb0_trials, 0, sizeof(st->cb0_trials));
   memset(st->cb0_pass, 0, sizeof(st->cb0_pass));
   st->cb0_dec_mask = 0;
+  /* VERIFY is ordering by hypothesis content, independent of a CB0/prune evidence reset. */
   memset(st->dormant[NR_TD_DORMANT_ELIM], 0, sizeof(st->dormant[NR_TD_DORMANT_ELIM]));
   if (with_tb) {
     memset(st->tba_trials, 0, sizeof(st->tba_trials));
@@ -917,6 +918,18 @@ static int next_core(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_
   if (st->winner >= 0) {
     *out = st->hyp[st->winner];
     return st->winner;
+  }
+  /* VERIFY is ordering only: 24 old-winner attempts among 32 selections, with
+   * eight ordinary exploration picks. Unsettled tickets keep GrantWork/CB0 active. */
+  if (st->verify_left) {
+    const bool prefer = (st->verify_left-- % 4) != 1;
+    if (prefer)
+      for (int i = 0; i < st->n_hyp; ++i)
+        if (active(st, i) && nr_td_geom_key(&st->hyp[i]) == nr_td_geom_key(&st->verify_hint)
+            && st->hyp[i].mcs_table == st->verify_hint.mcs_table && st->hyp[i].dmrs_mask == st->verify_hint.dmrs_mask) {
+          *out = st->hyp[i];
+          return i;
+        }
   }
   const bool skip = st->sib_skip; /* the previous sibling pick was undecodable: one normal pick first */
   st->sib_skip = false;
@@ -1782,6 +1795,48 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 /* ---- fb2 field book (all under g_lock). Mode read once from ISAC_TD_FIELDBOOK (0 default, 2 = reversible pruning). ---- */
 static nr_td_fieldbook_t g_fb;
 static int g_fb_mode = -1; /* -1 = not read yet */
+static uint32_t g_fb_identity_gen;
+static void sweep_epoch_listener(const nr_cfg_epoch_snapshot_t *s);
+static bool g_sweep_subscribed;
+static void sweep_subscribe_locked(void)
+{
+  if (!g_sweep_subscribed && nr_cfg_reconf_enabled()) {
+    nr_cfg_epoch_subscribe(sweep_epoch_listener);
+    g_sweep_subscribed = true;
+  }
+}
+static void fb_init_locked(void)
+{
+  nr_td_fieldbook_init(&g_fb, 2, 2);
+  if (nr_cfg_reconf_enabled()) {
+    sweep_subscribe_locked();
+    const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
+    g_fb.epoch = s.epoch;
+    g_fb_identity_gen = s.identity_gen;
+  }
+}
+static bool fb_current_locked(void)
+{
+  return !nr_cfg_reconf_enabled()
+      || (g_fb.epoch == nr_cfg_epoch_current() && g_fb_identity_gen == nr_cfg_epoch_identity_gen());
+}
+/* Only the drained R7 callback advances an existing book under ISAC_RECONF. */
+static void fb_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
+{
+  if (g_fb_mode < 0 || s->epoch <= g_fb.epoch) return;
+  const uint32_t generation = g_fb.generation;
+  if (s->identity_gen != g_fb_identity_gen) {
+    nr_td_fieldbook_init(&g_fb, 2, 2);
+    g_fb.generation = generation + 1;
+  } else {
+    nr_td_fieldbook_bump_epoch(&g_fb);
+    /* R11 drops the cell ordering bonus too. Legacy local bumps retain BC4 hints. */
+    for (int f = 0; f < NR_TD_F_COUNT; ++f)
+      g_fb.f[f].hint_value = -1;
+  }
+  g_fb.epoch = s->epoch;
+  g_fb_identity_gen = s->identity_gen;
+}
 static uint64_t g_fb_promotions, g_fb_withdrawals, g_fb_failopens, g_fb_pruned_ctx, g_fb_untrusted_ctx;
 static const char *const g_fb_name[NR_TD_F_COUNT] = {"tdra", "dmrs_add_pos", "dmrs_max_len"};
 static int fb_mode_locked(void)
@@ -1794,7 +1849,7 @@ static int fb_mode_locked(void)
     const long v = (e && *e) ? strtol(e, &end, 10) : 2;
     const bool off = e && *e && end && end != e && *end == 0 && v == 0;
     g_fb_mode = off ? 0 : 2;
-    nr_td_fieldbook_init(&g_fb, 2, 2);
+    fb_init_locked();
     static bool logged;
     if (!logged) { /* once per process (a test re-read does not repeat it) */
       logged = true;
@@ -1806,6 +1861,11 @@ static int fb_mode_locked(void)
 }
 typedef struct {
   uint64_t configuration, generation, touched;
+  uint32_t identity_gen, config_epoch;
+  bool verify_pending;
+  uint64_t relock_key; /* new DL-length key eligible for this old winner hint */
+  uint16_t dci_length;
+  uint64_t last_slot;
   uint16_t rnti;
   uint8_t tda;
   int tda_count, typeA;
@@ -1851,6 +1911,22 @@ typedef struct {
 
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
 static nr_pdsch_sweep_reporter_t g_reporter;
+static uint32_t g_config_epoch, g_identity_gen;
+static void sweep_epoch_locked(const nr_cfg_epoch_snapshot_t *s);
+static void sweep_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
+{
+  pthread_mutex_lock(&g_lock);
+  fb_epoch_locked(s);
+  sweep_epoch_locked(s);
+  pthread_mutex_unlock(&g_lock);
+}
+static bool context_live(const sweep_context_t *c)
+{
+  return c->generation && (!nr_cfg_reconf_enabled()
+      || (c->identity_gen == nr_cfg_epoch_identity_gen() && !c->verify_pending
+          && c->config_epoch >= nr_cfg_epoch_dedicated_current()));
+}
+
 /* Census (lane perf 2026-09-27), all under g_lock: whether evidence ACCUMULATES is the question every
  * "never converged" report needs answered first, and nothing in the log could answer it -- the
  * new-context line is capped at 20 and the evidence line fires only on a pass or every 10000 outcomes
@@ -1931,6 +2007,8 @@ static const nr_pdsch_config_sweep_state_t *catalog_template(int typeA, nr_pdsch
 }
 /* Rebuilds the catalog and discards evidence; side/p2 are CONFIGURATION, not catalog: the whole-state
  * memcpy/memset below would revert them to the template's neutral values, so they are carried over. */
+static uint64_t g_catalog_copies;
+uint64_t nr_pdsch_config_sweep_catalog_copies(void) { return __atomic_load_n(&g_catalog_copies, __ATOMIC_RELAXED); }
 int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA,
                                   nr_pdsch_legality_fn_t legality)
 {
@@ -1939,6 +2017,8 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   const struct nr_td_side_info_s *side = st->side;
   const bool p2 = st->p2;
   const bool crc_accept = st->crc_accept;
+  const uint16_t verify_left = st->verify_left;
+  const nr_pdsch_cfg_hypothesis_t verify_hint = st->verify_hint;
   const bool geom_pin = st->geom_pin;
   const bool cb0_elim = st->cb0_elim, cb0_disabled = st->cb0_disabled;
   const bool cb0_nfe = st->cb0_no_family_exempt, cb0_npc = st->cb0_no_premise_check;
@@ -1950,13 +2030,17 @@ int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_cou
   memset(dormant[NR_TD_DORMANT_GEOM], 0, sizeof(dormant[NR_TD_DORMANT_GEOM])); /* GEOM is derived from evidence (cleared by rebuild) */
   memset(dormant[NR_TD_DORMANT_ELIM], 0, sizeof(dormant[NR_TD_DORMANT_ELIM])); /* so is ELIM (CB0 evidence) */
   const nr_pdsch_config_sweep_state_t *t = legality ? catalog_template(typeA, legality) : NULL;
-  if (t)
+  if (t) {
     memcpy(st, t, sizeof(*st));
+    if (nr_cfg_reconf_enabled()) __atomic_fetch_add(&g_catalog_copies, 1, __ATOMIC_RELAXED);
+  }
   else
     nr_pdsch_config_sweep_init_legal(st, tda_count, typeA, legality);
   st->side = side;
   st->p2 = p2;
   st->crc_accept = crc_accept;
+  st->verify_left = verify_left;
+  st->verify_hint = verify_hint;
   st->geom_pin = geom_pin;
   st->cb0_elim = cb0_elim;
   st->cb0_disabled = cb0_disabled;
@@ -2048,6 +2132,8 @@ static uint64_t obs_plaus_union(const obs_set_t *o)
 
 static void reopen_context(sweep_context_t *c)
 {
+  if (nr_cfg_reconf_enabled() && c->state->winner >= 0)
+    nr_cfg_epoch_note_rnti_reopened(c->rnti, true, nr_cfg_epoch_current_slot());
   const bool had_cert = c->k0_cert != 0 || c->has_excl;
   c->k0_cert = 0; /* a reopen is the signal the evidence was wrong: the certification goes with it */
   c->has_excl = false; /* BC9: and the exclusion (re-derived from the next DCI of the row) */
@@ -2121,7 +2207,7 @@ void nr_pdsch_config_sweep_prior_reset(void)
 static bool prior_get_locked(const prior_t *p, uint64_t *configuration, uint8_t *mcs_table,
                              uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len)
 {
-  if (!p || !p->valid)
+  if (!p || !p->valid || (nr_cfg_reconf_enabled() && g_config_epoch != nr_cfg_epoch_current()))
     return false;
   if (configuration) *configuration = p->configuration;
   if (mcs_table)     *mcs_table     = p->mcs_table;
@@ -2193,6 +2279,7 @@ static void fb_apply_fields_locked(sweep_context_t *c)
 {
   c->fb_gen = nr_td_fieldbook_generation(&g_fb);
   c->fb_pruned = c->fb_untrusted = 0;
+  if (!fb_current_locked()) return; /* a newer epoch may be published before its listener drains */
   for (int f = 0; f < NR_TD_F_COUNT; f++) {
     int32_t v;
     if (!nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v))
@@ -2211,14 +2298,15 @@ static void fb_apply_fields_locked(sweep_context_t *c)
 static void fb_resync_locked(sweep_context_t *c)
 {
   const uint32_t gen = nr_td_fieldbook_generation(&g_fb);
-  if (c->fb_gen == gen)
+  const bool current = fb_current_locked();
+  if (c->fb_gen == gen && current)
     return;
   c->fb_gen = gen;
   for (int f = 0; f < NR_TD_F_COUNT; f++) {
     if (!(c->fb_pruned >> f & 1))
       continue;
     int32_t v;
-    const bool still = nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v)
+    const bool still = current && nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v)
                        && (f == NR_TD_F_TDRA ? ((v ^ c->fb_val[f]) & 0x3FF) == 0 : v == c->fb_val[f]);
     if (still)
       continue;
@@ -2244,8 +2332,91 @@ static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
     return NULL;
   sweep_context_t *c = &g_contexts[t->context_slot];
   /* generation+slot+tda identify the context (the slot's generation changes on every reuse). */
-  return c->generation == t->generation && c->tda == t->tda_index
+  return context_live(c) && (!nr_cfg_reconf_enabled() || t->config_epoch == nr_cfg_epoch_current())
+         && c->generation == t->generation && c->tda == t->tda_index
          && t->hypothesis >= 0 && t->hypothesis < c->state->n_hyp ? c : NULL;
+}
+
+static void context_verify(sweep_context_t *c)
+{
+  const bool settled = c->state->winner >= 0 || c->state->verify_left;
+  const nr_pdsch_cfg_hypothesis_t hint = c->state->winner >= 0 ? c->state->hyp[c->state->winner] : c->state->verify_hint;
+  c->generation = ++g_generation;
+  c->reported = false;
+  c->outcomes = c->locked_trials = c->locked_passes = c->failure_streak = 0;
+  c->reference_crc_lower = 0;
+  c->priored = PRIORED_NONE;
+  c->k0_cert = 0;
+  c->has_excl = false;
+  c->qm_tables = c->qm_obs = 0;
+  c->fb_pruned = c->fb_untrusted = 0;
+  c->fb_gen = nr_td_fieldbook_generation(&g_fb);
+  memset(c->dci_phase, 0, sizeof(c->dci_phase));
+  memset(c->state->dormant, 0, sizeof(c->state->dormant));
+  c->state->fail_open = false;
+  context_catalog(c, NULL); /* restore even hypotheses destructively pruned by old observations */
+  if (settled) {
+    if (hint.mapping_type) add_typeb_layer(c->state, c->typeA, c->legality);
+    if (hint.k0 >= 2) nr_pdsch_config_sweep_add_k0_layer(c->state, hint.k0);
+    c->state->verify_hint = hint;
+    c->state->verify_left = 32;
+  }
+}
+static void sweep_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
+{
+  if (s->epoch <= g_config_epoch) return;
+  const bool reset = s->identity_gen != g_identity_gen;
+  const bool reverify = nr_cfg_epoch_reverifies(s, g_config_epoch);
+  g_config_epoch = s->epoch;
+  g_identity_gen = s->identity_gen;
+  if (reset || reverify) {
+    memset(g_rnti, 0, sizeof(g_rnti));
+    memset(&g_obs, 0, sizeof(g_obs));
+    ++g_cert_epoch;
+  }
+  g_prior.valid = false;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+    sweep_context_t *c = &g_contexts[i];
+    if (!c->generation || c->identity_gen != s->identity_gen || reset) continue;
+    c->verify_pending |= reverify;
+    if (reverify) c->relock_key = 0;
+    c->config_epoch = s->epoch;
+  }
+  /* HARD_RESET leaves old context records dormant under their identity_gen, never selected or credited. */
+}
+void nr_pdsch_config_sweep_bind_length(const nr_pdsch_sweep_ticket_t *t, int length, uint64_t slot)
+{
+  if (!nr_cfg_reconf_enabled() || !nr_cfg_epoch_work_current()) return;
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(t);
+  if (c) { c->dci_length = length; c->last_slot = slot; }
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_pdsch_config_sweep_reopen_length(uint16_t rnti, int old_length)
+{
+  nr_pdsch_config_sweep_relock_length(rnti, false, old_length, 0);
+}
+void nr_pdsch_config_sweep_relock_length(uint16_t rnti, bool uplink, int old_length, int new_length)
+{
+  if (uplink || !nr_cfg_reconf_enabled() || !nr_cfg_epoch_work_current()) return;
+  pthread_mutex_lock(&g_lock);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+    sweep_context_t *c = &g_contexts[i];
+    if (!context_live(c) || c->rnti != rnti || c->dci_length != old_length) continue;
+    rnti_ctx_t *r = rnti_ctx(rnti, false);
+    if (r) {
+      cert_clear(r, c->configuration, c->tda);
+      if (r->prior.configuration == c->configuration) r->prior.valid = false;
+    }
+    if (g_prior.configuration == c->configuration) g_prior.valid = false;
+    context_verify(c);
+    /* Auto layout keys append the DL length with one invertible FNV step.
+     * Undo only that step: geometry/layout/RNTI/TDA scope stays unchanged. */
+    if (new_length > 0 && c->state->verify_left)
+      c->relock_key = ((c->configuration * UINT64_C(0xce965057aff6957b))
+                      ^ (uint64_t)old_length ^ (uint64_t)new_length) * UINT64_C(1099511628211);
+  }
+  pthread_mutex_unlock(&g_lock);
 }
 
 /* under g_lock: the context for this key, or -1 (then *victim, if non-NULL, is the LRU slot) */
@@ -2253,10 +2424,16 @@ static int find_context(uint64_t configuration, uint16_t rnti, uint8_t tda_index
 {
   int v = 0;
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
-    const sweep_context_t *c = &g_contexts[i];
-    if (c->generation && c->configuration == configuration && c->rnti == rnti
-        && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA)
+    sweep_context_t *c = &g_contexts[i];
+    if (c->generation && (!nr_cfg_reconf_enabled() || c->identity_gen == g_identity_gen)
+        && c->configuration == configuration && c->rnti == rnti
+        && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA) {
+      if (c->verify_pending) {
+        context_verify(c);
+        c->verify_pending = false;
+      }
       return i;
+    }
     if (c->touched < g_contexts[v].touched)
       v = i;
   }
@@ -2280,6 +2457,11 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   if (!nr_cfg_epoch_work_current()) return false;
   pthread_mutex_lock(&g_lock);
   if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return false; }
+  sweep_subscribe_locked();
+  if (nr_cfg_reconf_enabled() && g_config_epoch != nr_cfg_epoch_current()) {
+    const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
+    sweep_epoch_locked(&s);
+  }
   int found = find_context(configuration, rnti, tda_index, tda_count, typeA, NULL);
   nr_pdsch_config_sweep_state_t *fresh = NULL;
   if (found < 0) {
@@ -2297,6 +2479,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     fresh->side = NULL;
     fresh->p2 = false;
     fresh->crc_accept = false;
+    fresh->verify_left = 0;
+    memset(&fresh->verify_hint, 0, sizeof(fresh->verify_hint));
     fresh->geom_pin = false;
     fresh->sib_pmin = 0.05f;
     fresh->sib_eps = 1e-6f;
@@ -2313,6 +2497,10 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
       return false;
     }
   }
+  if (nr_cfg_reconf_enabled() && g_config_epoch != nr_cfg_epoch_current()) {
+    const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
+    sweep_epoch_locked(&s);
+  }
   rnti_ctx_t *r = rnti_ctx(rnti, true);
   nr_pdsch_config_sweep_state_t *to_free = NULL;
   int victim = 0;
@@ -2325,6 +2513,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     memset(c, 0, sizeof(*c));
     c->state = fresh;
     c->configuration = configuration;
+    c->identity_gen = g_identity_gen;
+    c->config_epoch = g_config_epoch;
     c->generation = ++g_generation;
     g_st_created++;
     c->rnti = rnti;
@@ -2377,11 +2567,25 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
+  if (fresh && nr_cfg_reconf_enabled() && c->state->winner < 0) {
+    for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+      sweep_context_t *old = &g_contexts[i];
+      if (old == c || !context_live(old) || !old->relock_key || old->relock_key != configuration
+          || old->rnti != rnti || old->tda != tda_index || old->typeA != typeA || old->tda_count != tda_count)
+        continue;
+      if (old->state->verify_left) {
+        c->state->verify_hint = old->state->verify_hint;
+        c->state->verify_left = 32;
+      }
+      old->relock_key = 0;
+      break;
+    }
+  }
   if (fb_mode_locked() == 2)
     fb_resync_locked(c);
   const int h = nr_pdsch_config_sweep_next(c->state, out);
   if (h >= 0)
-    *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
+    *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .config_epoch=g_config_epoch, .context_slot=found,
                                        .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state->winner >= 0,
                                        .k0=out->k0, .configuration=configuration};
   pthread_mutex_unlock(&g_lock);
@@ -2596,7 +2800,7 @@ void nr_pdsch_config_sweep_note_dci_phase(uint64_t configuration, uint16_t rnti,
   if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return; }
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++) {
     sweep_context_t *c = &g_contexts[i];
-    if (c->generation && c->configuration == configuration && c->rnti == rnti)
+    if (context_live(c) && c->configuration == configuration && c->rnti == rnti)
       c->dci_phase[phase >> 6] |= UINT64_C(1) << (phase & 63);
   }
   pthread_mutex_unlock(&g_lock);
@@ -2608,7 +2812,7 @@ bool nr_pdsch_config_sweep_excl_census(uint64_t configuration, uint16_t rnti, ui
   pthread_mutex_lock(&g_lock);
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS && !found; i++) {
     const sweep_context_t *c = &g_contexts[i];
-    if (!c->generation || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
+    if (!context_live(c) || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
       continue;
     found = true;
     if (restarts) *restarts = c->excl_restarts;
@@ -2674,7 +2878,7 @@ int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uin
     r->cert[slot].has_excl = true;
     for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++) {
       sweep_context_t *c = &g_contexts[i];
-      if (!c->generation || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
+      if (!context_live(c) || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
         continue;
       c->excl = merged;
       c->has_excl = true;
@@ -2829,7 +3033,7 @@ static void census_log(const sweep_context_t *c)
   const nr_pdsch_config_sweep_state_t *s = c->state;
   int live = 0;
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++)
-    live += g_contexts[i].generation != 0;
+    live += context_live(&g_contexts[i]);
   int lead = 0;
   for (int i = 1; i < s->n_hyp; i++)
     if (rate_of(s, i) > rate_of(s, lead)) lead = i;
@@ -2993,7 +3197,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
               (unsigned)c->tda, (unsigned)c->state->hyp[w].k0, (unsigned long long)lost);
       }
       if (!r->prior.valid) {
-        if (g_fb_mode == 2) {
+        if (g_fb_mode == 2 && fb_current_locked()) {
           /* First convergence of this RNTI: one vote in the field book. A field this context was pruned on carries no vote. */
           nr_td_fieldbook_t before = g_fb;
           nr_td_fieldbook_converged(&g_fb, c->rnti, &c->state->hyp[w], (uint64_t)c->outcomes, c->fb_pruned);
@@ -3045,7 +3249,7 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
     const sweep_context_t *c=&g_contexts[i];
     /* tda 0xFF = every TDA context of this configuration: a layout hypothesis reads the TDA
      * index at its own offset, so its evidence is spread over the contexts that index created. */
-    if (c->generation && c->configuration==configuration && c->rnti==rnti && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
+    if (context_live(c) && c->configuration==configuration && c->rnti==rnti && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
       for (int h=0; h<c->state->n_hyp; ++h) { *passes += c->state->ok[h]; *trials += c->state->trials[h]; }
       if (tda != 0xFF)
         break;
@@ -3059,7 +3263,7 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
   bool settled=false;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
-    if (c->generation && c->configuration==configuration && c->rnti==rnti
+    if (context_live(c) && c->configuration==configuration && c->rnti==rnti
         && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state->winner>=0) {
       settled=true;
       break;
@@ -3075,7 +3279,7 @@ int nr_pdsch_config_sweep_settled_count(void)
   pthread_mutex_lock(&g_lock);
   int n=0;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i)
-    if (g_contexts[i].generation && g_contexts[i].state->winner>=0) ++n;
+    if (context_live(&g_contexts[i]) && g_contexts[i].state->winner>=0) ++n;
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -3088,7 +3292,7 @@ void nr_pdsch_config_sweep_fieldbook_set_mode(int mode)
     (void)fb_mode_locked();
   } else {
     g_fb_mode = mode == 2 ? 2 : 0;
-    nr_td_fieldbook_init(&g_fb, 2, 2);
+    fb_init_locked();
   }
   pthread_mutex_unlock(&g_lock);
 }
@@ -3101,6 +3305,7 @@ int nr_pdsch_config_sweep_fieldbook_mode(void)
 }
 void nr_pdsch_config_sweep_fieldbook_bump_epoch(void)
 {
+  if (nr_cfg_reconf_enabled()) return; /* central ownership; no second local epoch */
   pthread_mutex_lock(&g_lock);
   if (fb_mode_locked() == 2) {
     nr_td_fieldbook_bump_epoch(&g_fb);
@@ -3148,8 +3353,10 @@ void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withd
 void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
+  g_sweep_subscribed = false; /* reset pairs with a new authority lifetime in fixtures */
+  sweep_subscribe_locked();
   if (g_fb_mode >= 0)
-    nr_td_fieldbook_init(&g_fb, 2, 2); /* the field book is evidence derived from the contexts too */
+    fb_init_locked(); /* the field book is evidence derived from the contexts too */
   /* Every lookup/feedback path requires a live generation. Invalidate the small
    * identity fields now; select() clears the full state before reusing a slot.
    * Clearing all 1024 hypothesis arrays here used ~1.2 ms even for an empty bank.
@@ -3161,6 +3368,8 @@ void nr_pdsch_config_sweep_reset_all(void)
   /* Priors and observations are evidence derived from those contexts; keeping them across a reset
    * would let a cleared run inherit conclusions it can no longer justify. */
   memset(g_rnti, 0, sizeof(g_rnti));
+  g_config_epoch = nr_cfg_reconf_enabled() ? nr_cfg_epoch_current() : 0;
+  g_identity_gen = nr_cfg_reconf_enabled() ? nr_cfg_epoch_identity_gen() : 0;
   g_cert_epoch++;
   memset(&g_obs, 0, sizeof(g_obs));
   g_prior.valid = false;

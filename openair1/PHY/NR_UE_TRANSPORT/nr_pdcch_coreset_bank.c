@@ -44,6 +44,16 @@ static pthread_mutex_t g_coreset_bank_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_coreset_bank_quiescent = PTHREAD_COND_INITIALIZER;
 static unsigned g_dispatch_readers;
 static bool g_compaction_pending;
+static _Atomic bool g_identity_reset_pending;
+static uint32_t g_bank_epoch;
+static _Atomic uint32_t g_bank_identity;
+static struct {
+  uint32_t identity_gen;
+  int n;
+  nr_pdcch_discovered_coreset_t entry[NR_PDCCH_DISCOVERED_CORESETS];
+} g_dormant_bank;
+static void bank_epoch_listener(const nr_cfg_epoch_snapshot_t *s);
+static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s);
 static void (*g_remove_hook)(const nr_pdcch_blind_monitor_cfg_t *, void *);
 static void *g_remove_hook_arg;
 
@@ -54,6 +64,14 @@ static void compact_removed(void)
   if (g_dispatch_readers)
     return;
   int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+  if (g_identity_reset_pending) {
+    g_dormant_bank.n = n;
+    memcpy(g_dormant_bank.entry, g_coreset_bank, sizeof(g_coreset_bank));
+    memset(g_coreset_bank, 0, sizeof(g_coreset_bank));
+    atomic_store_explicit(&g_coreset_bank_n, 0, memory_order_release);
+    g_identity_reset_pending = false;
+    n = 0;
+  }
   for (int i = 0; i < n;) {
     if (g_coreset_bank[i].state != NR_CORESET_REMOVED) {
       ++i;
@@ -74,6 +92,10 @@ static void compact_removed(void)
 void nr_pdcch_coreset_bank_dispatch_enter(void)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
+  if (nr_cfg_reconf_enabled() && g_bank_epoch != nr_cfg_epoch_current()) {
+    const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
+    bank_epoch_locked(&s);
+  }
   while (g_compaction_pending)
     pthread_cond_wait(&g_coreset_bank_quiescent, &g_coreset_bank_lock);
   ++g_dispatch_readers;
@@ -142,6 +164,7 @@ void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uin
     } else if (slot > e->stale_proof_slot && rnti == e->stale_proof_rnti
                && payload_hash != e->stale_proof_hash) {
       e->state = NR_CORESET_VERIFIED;
+      e->verified_epoch = nr_cfg_reconf_enabled() ? nr_cfg_epoch_work_stamp() : 0;
       e->stale_since_slot = 0;
       e->stale_proof_slot = 0;
       LOG_A(PHY, "SENSING: CORESET bank VERIFIED index=%d slot=%llu\n", index, (unsigned long long)slot);
@@ -161,6 +184,8 @@ void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
   for (int i = 0; i < n; ++i) {
     nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[i];
     const bool elsewhere = traffic_elsewhere || (any_accept && !e->accepts_window);
+    if (nr_cfg_reconf_enabled() && elsewhere && e->state == NR_CORESET_STALE && e->stale_since_slot == UINT64_MAX)
+      e->stale_since_slot = slot;
     if (!e->last_accept_slot)
       e->last_accept_slot = slot;
     if (e->state == NR_CORESET_VERIFIED && elsewhere && slot >= e->last_accept_slot
@@ -182,6 +207,7 @@ void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
 
 int nr_pdcch_coreset_bank_count(void)
 {
+  if (nr_cfg_reconf_enabled() && (g_identity_reset_pending || g_bank_identity != nr_cfg_epoch_identity_gen())) return 0;
   return atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
 }
 
@@ -337,10 +363,16 @@ int nr_pdcch_coreset_bank_length_hint(void)
 int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner)
 {
   if (!nr_cfg_epoch_work_current()) return -1;
+  if (nr_cfg_reconf_enabled()) nr_cfg_epoch_subscribe(bank_epoch_listener);
   if (cfg == NULL || cfg->dci_length_override <= 0)
     return -1;
   pthread_mutex_lock(&g_coreset_bank_lock);
+  if (!nr_cfg_epoch_work_current() || g_identity_reset_pending) { pthread_mutex_unlock(&g_coreset_bank_lock); return -1; }
   int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  if (nr_cfg_reconf_enabled() && n == 0) {
+    g_bank_epoch = nr_cfg_epoch_current();
+    g_bank_identity = nr_cfg_epoch_identity_gen();
+  }
   int at = -1;
   for (int i = 0; i < n; ++i)
     if (g_coreset_bank[i].state != NR_CORESET_REMOVED && coreset_same_geometry(&g_coreset_bank[i].cfg, cfg)) { at = i; break; }
@@ -363,6 +395,7 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
     at = n;
     memset(&g_coreset_bank[at], 0, sizeof(g_coreset_bank[at]));
     g_coreset_bank[at].cfg = *cfg;
+    g_coreset_bank[at].verified_epoch = nr_cfg_reconf_enabled() ? nr_cfg_epoch_work_stamp() : 0;
     g_coreset_bank[at].cfg.autodiscover = 0;
     g_coreset_bank[at].cfg.ss_monitoring_slot_periodicity = 1;
     g_coreset_bank[at].cfg.ss_monitoring_slot_offset = 0;
@@ -387,4 +420,37 @@ bool nr_pdcch_coreset_bank_occupancy_sample(uint8_t *history, bool hit)
   *history = (uint8_t)((*history << 1) | hit);
   /* A single candidate or several windows in one sample are not traffic evidence. */
   return hit && __builtin_popcount((unsigned)*history) >= 3;
+}
+
+static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
+{
+  if (s->epoch <= g_bank_epoch) return;
+  const bool reverify = nr_cfg_epoch_reverifies(s, g_bank_epoch);
+  g_bank_epoch = s->epoch;
+  if (s->identity_gen != g_bank_identity) {
+    if (!g_identity_reset_pending) g_dormant_bank.identity_gen = g_bank_identity;
+    g_bank_identity = s->identity_gen;
+    g_identity_reset_pending = g_compaction_pending = true;
+    /* The RT remove hook only clears length banks and all TD contexts. Both
+     * already isolate by identity_gen; invoking it here would destroy dormant
+     * old-cell records (and potentially freshly opened new-cell contexts). */
+    compact_removed();
+  } else if (reverify) {
+    const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_relaxed);
+    for (int i = 0; i < n; ++i) {
+      nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[i];
+      if (e->state == NR_CORESET_REMOVED) continue;
+      e->state = NR_CORESET_STALE;
+      e->stale_since_slot = UINT64_MAX; /* start only once traffic elsewhere supplies absence evidence */
+      e->stale_proof_rnti = 0;
+      e->stale_proof_slot = 0;
+      e->accepts_window = 0;
+    }
+  }
+}
+static void bank_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
+{
+  pthread_mutex_lock(&g_coreset_bank_lock);
+  bank_epoch_locked(s);
+  pthread_mutex_unlock(&g_coreset_bank_lock);
 }

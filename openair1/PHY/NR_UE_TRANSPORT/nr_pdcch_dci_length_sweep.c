@@ -259,6 +259,7 @@ int nr_pdcch_dci_length_context_lock(nr_pdcch_dci_length_context_t *c, int lengt
   }
   c->found[0] = length;
   c->len_state = NR_LEN_LOCKED;
+  c->epoch_learned = nr_cfg_reconf_enabled() ? nr_cfg_epoch_work_stamp() : 0;
   c->miss_occasions = 0;
   c->state.relock_old_len = 0;
   c->scout_initialized = false;
@@ -278,10 +279,12 @@ int nr_pdcch_dci_length_context_add(nr_pdcch_dci_length_context_t *c, int length
           : c->found_recent[0] <= c->found_recent[1] ? 0 : 1;
   const int replaced = c->found[i];
   c->found[i] = length;
+  if (c->hint_secondary == length) c->hint_secondary = 0;
   c->found_recent[i] = slot;
   memset(&c->layout_pin[i], 0, sizeof(c->layout_pin[i]));
   c->layout_cursor[i] = 0;
   c->len_state = NR_LEN_LOCKED;
+  c->epoch_learned = nr_cfg_reconf_enabled() ? nr_cfg_epoch_work_stamp() : 0;
   return replaced;
 }
 
@@ -671,10 +674,14 @@ nr_pdcch_dci_length_bank_t *nr_pdcch_dci_length_store_get(
 {
   if (!store || !key)
     return NULL;
+  if (nr_cfg_reconf_enabled() && store->config_epoch != nr_cfg_epoch_current()) {
+    const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
+    nr_pdcch_dci_length_store_epoch(store, &s);
+  }
   nr_pdcch_dci_length_coreset_t *victim = &store->coreset[0];
   for (int i = 0; i < NR_PDCCH_LENGTH_CORESETS; ++i) {
     nr_pdcch_dci_length_coreset_t *e = &store->coreset[i];
-    if (e->used && e->key == key) {
+    if (e->used && e->key == key && e->identity_gen == store->identity_gen) {
       e->touched = ++store->clock;
       if (evicted_key)
         *evicted_key = 0;
@@ -697,6 +704,7 @@ nr_pdcch_dci_length_bank_t *nr_pdcch_dci_length_store_get(
   victim->bank = bank;
   victim->used = true;
   victim->key = key;
+  victim->identity_gen = store->identity_gen;
   victim->touched = ++store->clock;
   bank->epoch = key;
   return bank;
@@ -776,4 +784,42 @@ void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16
 bool nr_pdcch_dci_length_scout_due(nr_pdcch_dci_length_bank_t *bank)
 {
   return (++bank->scout_occasions % 20) == 0;
+}
+
+void nr_pdcch_dci_length_store_epoch(nr_pdcch_dci_length_store_t *store, const nr_cfg_epoch_snapshot_t *s)
+{
+  if (!store || !s || s->epoch <= store->config_epoch) return;
+  const bool reverify = nr_cfg_epoch_reverifies(s, store->config_epoch);
+  store->config_epoch = s->epoch;
+  if (store->identity_gen != s->identity_gen) {
+    store->identity_gen = s->identity_gen;
+    nr_pdcch_dci_length_seen_reset();
+    return; /* old entries stay dormant, keyed by identity_gen, until LRU eviction */
+  }
+  for (int i = 0; i < NR_PDCCH_LENGTH_CORESETS; ++i) {
+    nr_pdcch_dci_length_coreset_t *e = &store->coreset[i];
+    if (!e->used || !e->bank || e->identity_gen != s->identity_gen) continue;
+    nr_pdcch_dci_length_bank_t *b = e->bank;
+    b->cell_len = b->first_len = b->first_rnti = 0;
+    if (!reverify) continue; /* narrow SOFT withdraws only the cell-wide published length */
+    b->anonymous_found = b->anonymous_rnti = 0;
+    b->anonymous_exhausted = false;
+    nr_pdcch_dci_length_sweep_reset(&b->anonymous);
+    for (int j = 0; j < NR_PDCCH_LENGTH_CONTEXTS; ++j) {
+      nr_pdcch_dci_length_context_t *c = &b->ue[j];
+      if (c->found[1]) {
+        c->hint_secondary = c->found[1];
+        c->found[1] = 0;
+      }
+      c->last_accept_slot = c->last_note_slot = 0;
+      if (c->len_state == NR_LEN_LOCKED)
+        nr_pdcch_dci_length_context_note_occasion(c, false, true, 1);
+      else {
+        nr_pdcch_dci_length_sweep_reset(&c->state);
+        c->state.relock_old_len = c->found[0];
+        c->state.preferred_len = c->found[0];
+        c->exhausted = c->scout_initialized = false;
+      }
+    }
+  }
 }

@@ -51,6 +51,7 @@
 
 #include "nr_dci_bits.h"
 #include "nr_dci11_pin.h"
+#include "nr_passive_cfg_epoch.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -182,6 +183,7 @@ uint32_t nr_pdcch_dci_length_n_suspect_from_env(void);
 typedef struct {
   nr_pdcch_dci_length_sweep_state_t state;
   uint16_t rnti;
+  int hint_secondary; /* epoch-stale second length: ordering only until freshly locked */
   int found[2]; /* oldest-compatible primary and one additional significant length */
   uint32_t found_recent[2];
   nr_dci11_pin_t layout_pin[2];
@@ -245,13 +247,17 @@ typedef struct {
    * MiB even when discovery only observes one or two physical CORESETs. */
   nr_pdcch_dci_length_bank_t *bank;
   uint64_t key;
+  uint32_t identity_gen;
   uint64_t touched;
   bool used;
 } nr_pdcch_dci_length_coreset_t;
 typedef struct {
   nr_pdcch_dci_length_coreset_t coreset[NR_PDCCH_LENGTH_CORESETS];
   uint64_t clock;
+  uint32_t config_epoch, identity_gen;
 } nr_pdcch_dci_length_store_t;
+/* Caller holds its length mutex; listener snapshots are idempotent. */
+void nr_pdcch_dci_length_store_epoch(nr_pdcch_dci_length_store_t *store, const nr_cfg_epoch_snapshot_t *s);
 nr_pdcch_dci_length_bank_t *nr_pdcch_dci_length_store_get(
     nr_pdcch_dci_length_store_t *store, uint64_t key, uint64_t *evicted_key);
 

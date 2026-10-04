@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_dci11_pin.h"
+#include "nr_passive_cfg_epoch.h"
 }
 
 // ---- (a): successive reseeds visit every candidate, for several n ----------------------------
@@ -187,4 +188,36 @@ TEST(Dci11Pin, IsValidAccessorTracksFieldThroughSeedAndSelectTransitions) {
   // Reseeding after the drop must be visible again.
   nr_dci11_pin_seed(&pin, /*cfg=*/1, /*layout=*/8);
   EXPECT_TRUE(nr_dci11_pin_is_valid(&pin));
+}
+
+TEST(Dci11Pin, EpochIsPartOfConfigKey) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_dci11_pin_t pin{};
+  const uint16_t ids[] = {7};
+  nr_dci11_pin_seed(&pin, 42, 7);
+  nr_cfg_epoch_note_rnti_reopened(0x1111, true, 100);
+  nr_cfg_epoch_note_rnti_reopened(0x2222, true, 101);
+  EXPECT_FALSE(nr_dci11_pin_is_valid(&pin));
+  EXPECT_EQ(nr_dci11_pin_select(&pin, 42, ids, 1, -1, -1, false, 0, 0, 100, 100), -1);
+  nr_dci11_pin_seed(&pin, 42, 7);
+  EXPECT_EQ(nr_dci11_pin_select(&pin, 42, ids, 1, -1, -1, false, 0, 0, 100, 100), 0);
+}
+
+TEST(Dci11Pin, ShortGapSoftDoesNotReverifyAll) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_dci11_pin_t pin{};
+  const uint16_t ids[] = {7};
+  nr_dci11_pin_seed(&pin, 42, 7);
+  for (int cause = 0; cause < 3; ++cause) {
+    if (cause == 0) nr_cfg_epoch_note_continuity_loss_samples(9, 1);
+    if (cause == 1) nr_cfg_epoch_note_csirs_map_change();
+    if (cause == 2) nr_cfg_epoch_note_bwp_change();
+    EXPECT_TRUE(nr_dci11_pin_is_valid(&pin));
+    EXPECT_EQ(nr_dci11_pin_select(&pin, 42, ids, 1, -1, -1, false, 0, 0, 100, 100), 0);
+  }
+  nr_cfg_epoch_note_continuity_loss();
+  nr_cfg_epoch_note_bwp_change(); // a later narrow SOFT must not hide the hard event
+  EXPECT_FALSE(nr_dci11_pin_is_valid(&pin));
 }

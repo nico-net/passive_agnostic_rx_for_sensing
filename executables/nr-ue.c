@@ -1644,9 +1644,9 @@ void *UE_thread(void *arg)
           /* The state tracker's other inputs are all latched discovery state and cannot regress
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
-          /* Preserve the levers' local fieldbook discontinuity policy (including flag-off).
-           * Central SOFT/HARD classification below is independent; R11 owns fieldbook mirroring. */
-          nr_pdsch_config_sweep_fieldbook_bump_epoch();
+          /* Legacy fieldbook owns its local epoch; reconf uses only the drained central listener. */
+          if (!nr_cfg_reconf_enabled())
+            nr_pdsch_config_sweep_fieldbook_bump_epoch();
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled())
             nr_cfg_epoch_note_continuity_loss_samples(jump, fp->samples_per_subframe);
           /* No RX/TX job has been allocated for this slot yet. Dispatching it would
