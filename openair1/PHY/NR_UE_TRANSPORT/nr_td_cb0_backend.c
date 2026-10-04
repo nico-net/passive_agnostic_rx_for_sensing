@@ -132,6 +132,21 @@ static bool pick_gpu(nr_td_cb0_backend_t *be)
   return gpu;
 }
 
+int nr_td_cb0_backend_peek(void)
+{
+  nr_td_cb0_backend_t be;
+  pthread_mutex_lock(&g_be_lock);
+  if (g_mode < 0)
+    g_mode = mode_from_env();
+  const bool cand = g_mode != NR_TD_CB0_BE_CPU && g_gpu_be_set && g_backoff == 0;
+  if (cand)
+    be = g_gpu_be;
+  pthread_mutex_unlock(&g_be_lock);
+  if (!cand || (be.healthy != NULL && !be.healthy(be.ctx)))
+    return NR_TD_CB0_BE_CPU;
+  return NR_TD_CB0_BE_GPU;
+}
+
 static void gpu_failed(void)
 {
   pthread_mutex_lock(&g_be_lock);

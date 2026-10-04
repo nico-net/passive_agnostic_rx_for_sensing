@@ -6738,6 +6738,9 @@ constdiag_done:;
               /* same evidence as the deferred consumer: layout tallies, or DL link health for 0xFFFF */
               nr_pdcch_dci11_layout_feedback(sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;
+              /* No nr_pdsch_config_sweep_note_tb_decoder() here, by design: this outcome feeds only the full-TB election
+               * counters, never the CB0 / admissible-TB counters the elimination reads (exemption documented in
+               * nr_pdsch_config_sweep.h, DECODER DOMINANCE). */
               if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
                 char bc12[192];
                 nr_pdsch_passive_bc12_census(&sweep_ticket, &winner, bc12, sizeof(bc12));

@@ -9,6 +9,7 @@
 #include "nr_td_cb0_batch.h"
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +32,8 @@ uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter)
       fprintf(stderr, "nr_td_cb0: ISAC_TD_CB0_GPU_ITERS=%d overrides 2 x max_iter (dominance proof required)\n", over);
   }
   /* dominance: a cap below 2 x max_iter is only proven against the CPU TB decoder (paired harness), so it is honoured
-   * only while the wiring forces the CPU TB decoder for acquiring contexts (ISAC_TD_TB_CPU_WHILE_ACQ, default 1) */
+   * only while the wiring may force the CPU TB decoder (ISAC_TD_TB_CPU_WHILE_ACQ, default 1); with a cap set the wiring
+   * forces it for every grant with a CB0 batch, whatever the backend (nr_td_cb0_wire_pre) */
   static int tb_cpu = -1;
   if (tb_cpu < 0) {
     const char *e = getenv("ISAC_TD_TB_CPU_WHILE_ACQ");
@@ -198,8 +200,14 @@ static int ad_healthy(void *ctx)
   return nr_td_cb0_gpu_backend() != NULL && f_healthy();
 }
 
+/* t_l: the dematched inputs the CB0 entry reads IN PLACE (unified memory) or copies asynchronously (explicit mode) until
+ * collect returns. After a TIMEOUT or a CUDA error the submission is abandoned, NOT cancelled: the GPU may still read
+ * t_l later. The buffer is then leaked (pointer and capacity cleared, a new one is allocated by the next batch), never
+ * reused or freed. Bounded: the CB0 breaker (LDPC_CB0_BREAKER_N failures -> bypass, sticky -> off) and the dispatcher's
+ * back-off stop the GPU path after a few failures; each leak is at most n x NR_TD_CB0_L_STRIDE bytes. */
 static __thread int8_t *t_l;
 static __thread size_t t_l_cap;
+static _Atomic unsigned long s_l_abandoned;
 static __thread nr_td_cb0_meta_t *t_meta;
 static __thread int8_t *t_st;
 static __thread int t_cap_items;
@@ -254,7 +262,20 @@ static int ad_decode(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_
   for (int i = 0; i < n; i++)
     if (t_meta[i].valid)
       out[i].dematch_gpu = t_st[i] == 1;
+  if (rc == LDPC_CB0_E_TIMEOUT || rc == LDPC_CB0_E_CUDA) { /* the GPU may still read t_l: abandon it (see t_l above) */
+    t_l = NULL;
+    t_l_cap = 0;
+    atomic_fetch_add(&s_l_abandoned, 1);
+  }
   return rc;
+}
+
+void nr_td_cb0_gpu_adapter_test_scratch(const void **l, unsigned long *abandoned)
+{
+  if (l)
+    *l = t_l;
+  if (abandoned)
+    *abandoned = atomic_load(&s_l_abandoned);
 }
 
 static const nr_td_cb0_backend_t g_adapter = {"cuda-cb0", ad_healthy, ad_decode, NULL};

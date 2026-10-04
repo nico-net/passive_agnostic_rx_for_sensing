@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <gtest/gtest.h>
+#include "nr_td_test_baseline.h"
 #include <set>
 #include <tuple>
 #include <vector>
@@ -26,6 +27,10 @@ extern "C" {
 uint32_t *nr_gold_pdcch(int, int, unsigned short, int, int);
 void nr_pdcch_dmrs_ref(const uint32_t *, c16_t *, unsigned short);
 }
+
+/* Every test of this binary (test_nr_pdcch_blind_monitor) starts at fb0 / CB0 off, the engine these runtime-context tests were
+ * written against, whatever ran before it (nr_td_test_baseline.h); TypeBTruthConvergesUnderDefaults runs the receiver defaults. */
+static const bool g_td_baseline = nr_td_test::register_baseline();
 
 TEST(DlAdaptive, CompleteLegalCatalogAndNoPermanentlyUnfeedableHypotheses) {
   /* R30 item 1 (technique-d-regression.md): a fresh/initial catalog is mapping type A ONLY now (type
@@ -75,6 +80,7 @@ TEST(DlAdaptive, CompleteLegalCatalogAndNoPermanentlyUnfeedableHypotheses) {
  * smaller synthetic fixtures in nr_pdsch_config_sweep_test.cc). If more than one (S,L) shares
  * `trigger_mask` below, every one of them must still show up in `expected`. */
 TEST(DlAdaptive, TypeBEntriesAreCompleteOnceObserved) {
+  nr_td_test::pin_baseline(); /* the catalogue count below is the fb0 prune's */
   const int typeA = 0;
   using Key=std::tuple<int,int,int,int,int>;
   std::set<Key> expected;
@@ -457,7 +463,8 @@ TEST(UlGrantBook, ExpiredAndCapacityDropsNeverOverwriteAnotherUe) {
  * len 1, 256QAM, k0 0 -> DM-RS on symbols 5 and 9 = 0x220, last symbol 11). ONE oracle observation
  * (mask, last symbol, k0 of the DCI's own slot) must prune the live context to a few entries that
  * include the truth, and the context must then converge on it within the pre-Task-14 400k budget. */
-TEST(DlAdaptive, TypeBTruthIsPinnedByOneOracleObservationAndConverges) {
+static void type_b_truth_pinned_and_converges(const char *tag)
+{
   const int S = 5, L = 7;
   const uint16_t mask = (uint16_t)nr_pdcch_blind_dmrs_mask(0, L, S, 1, 1, 1);
   ASSERT_EQ(mask, 0x220);
@@ -477,7 +484,7 @@ TEST(DlAdaptive, TypeBTruthIsPinnedByOneOracleObservationAndConverges) {
   for (int i = 0; i < st.n_hyp; i++)
     has_truth |= st.hyp[i].tda_start == S && st.hyp[i].tda_length == L && st.hyp[i].k0 == 0
                  && st.hyp[i].dmrs_mask == mask && st.hyp[i].mcs_table == 1 && st.hyp[i].mapping_type == 1;
-  std::cerr << "[ MEASURED ] type-B truth: catalog " << full << " -> " << n << " after one observation" << std::endl;
+  std::cerr << "[ MEASURED ] " << tag << " type-B truth: catalog " << full << " -> " << n << " after one observation" << std::endl;
   EXPECT_GT(n, 0);
   EXPECT_LE(n, 40);
   EXPECT_TRUE(has_truth);
@@ -491,13 +498,22 @@ TEST(DlAdaptive, TypeBTruthIsPinnedByOneOracleObservationAndConverges) {
     if (nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, &w))
       converged = i;
   }
-  std::cerr << "[ MEASURED ] type-B truth converged after " << converged << " outcomes" << std::endl;
+  std::cerr << "[ MEASURED ] " << tag << " type-B truth converged after " << converged << " outcomes" << std::endl;
   ASSERT_GT(converged, 0);
   EXPECT_EQ(w.tda_start, S);
   EXPECT_EQ(w.tda_length, L);
   EXPECT_EQ(w.mapping_type, 1);
   EXPECT_EQ(w.mcs_table, 1);
   nr_pdsch_config_sweep_reset_all();
+}
+TEST(DlAdaptive, TypeBTruthIsPinnedByOneOracleObservationAndConverges) {
+  nr_td_test::pin_baseline(); /* fb0, CB0 off: explicit (also the listener's pin) */
+  type_b_truth_pinned_and_converges("baseline");
+}
+/* Same acquisition under the receiver defaults since 2026-10-04 (fb2 + CB0 elimination on, TB feedback only), on purpose. */
+TEST(DlAdaptive, TypeBTruthConvergesUnderDefaults) {
+  nr_td_test::pin_defaults();
+  type_b_truth_pinned_and_converges("defaults");
 }
 
 TEST(DlAdaptive, MaskOracleCollapsesTheFullCatalogToAFewEntries) {

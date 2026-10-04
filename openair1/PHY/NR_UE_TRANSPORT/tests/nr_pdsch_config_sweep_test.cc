@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 #include <gtest/gtest.h>
+#include "nr_td_test_baseline.h"
 extern "C" {
 #include "nr_pdsch_config_sweep.h"
 #include "nr_td_order.h"
@@ -211,6 +212,8 @@ TEST(PdschConfigSweep, InvalidTicketAndUnavailableContextCannotScore) {
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
+  /* every test starts at the documented baseline (fb0, CB0 elimination off), whatever ran before it: nr_td_test_baseline.h */
+  nr_td_test::register_baseline();
   logInit();
   int rc=RUN_ALL_TESTS();
   logClean();
@@ -1422,6 +1425,9 @@ TEST(PdschConfigSweepTypeB, ObservingATypeBOnlyMaskWidensToExactlyItsMatchingEnt
 /* dmrs-DownlinkForPDSCH-MappingTypeA and -MappingTypeB are separate RRC IEs: a prior learned on a
  * type-A entry says nothing about type-B add_pos/max_len (mcs-Table is shared). */
 TEST(PdschConfigSweepTypeB, PriorFromTypeAKeepsTypeBEntriesOfTheSameTable) {
+  /* the destructive cell/RNTI prior prune is the fb0 behaviour under test (fb2 keeps the entries, dormant PRIOR): pinned, not
+   * inherited (the receiver default is fb2 since 2026-10-04; PriorUnderDefaultsKeepsTheTypeBEntriesActive is the fb2 twin) */
+  nr_td_test::pin(0, 0);
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
   unsigned seed = 77;
@@ -1454,6 +1460,79 @@ TEST(PdschConfigSweepTypeB, PriorFromTypeAKeepsTypeBEntriesOfTheSameTable) {
     EXPECT_EQ(st.hyp[i].dmrs_add_pos, 1);
     EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
   }
+}
+
+/* ---- receiver defaults since 2026-10-04 ("fastest combination"): fb2 + CB0 elimination ON; each disabled ONLY by an explicit 0.
+ * These tests run under the NEW defaults on purpose (the rest of the suite runs at the fb0 / CB0-off baseline, nr_td_test_baseline.h). */
+TEST(PdschSweepDefaults, EmptyEnvironmentResolvesToFb2AndCb0On)
+{
+  nr_td_test::pin_defaults();
+  EXPECT_EQ(nr_pdsch_config_sweep_fieldbook_mode(), 2);
+  EXPECT_TRUE(nr_pdsch_config_sweep_cb0_elim_env());
+  const struct {
+    const char *v;
+    int mode;
+  } fb[] = {{"0", 0}, {"00", 0}, {"2", 2}, {"1", 2} /* meant off before 2026-10-04: now fb2, logged */, {"yes", 2}, {"", 2}, {"0x", 2}};
+  for (const auto &c : fb) {
+    nr_td_test::ScopedEnv e("ISAC_TD_FIELDBOOK", c.v);
+    nr_pdsch_config_sweep_fieldbook_set_mode(-1);
+    EXPECT_EQ(nr_pdsch_config_sweep_fieldbook_mode(), c.mode) << "ISAC_TD_FIELDBOOK='" << c.v << "'";
+  }
+  {
+    nr_td_test::ScopedEnv e("ISAC_TD_CB0_ELIM", "0");
+    nr_pdsch_config_sweep_cb0_elim_env_set(-1);
+    EXPECT_FALSE(nr_pdsch_config_sweep_cb0_elim_env());
+  }
+  nr_td_test::pin_defaults();
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xD5, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+  auto st = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, st.get()));
+  EXPECT_TRUE(st->cb0_elim) << "a new runtime context takes the default CB0 flag";
+  nr_pdsch_config_sweep_reset_all();
+}
+
+/* fb2 twin of PriorFromTypeAKeepsTypeBEntriesOfTheSameTable, under the receiver defaults (fb2 + CB0 on, TB feedback only): the
+ * type-A context still converges on its truth, and the sibling's type-B entries of the prior's table (add_pos 1, observed mask) are
+ * ACTIVE -- fb2 makes the prior a dormant cause instead of a prune, it never drops them. */
+TEST(PdschConfigSweepTypeB, PriorUnderDefaultsKeepsTheTypeBEntriesActive) {
+  nr_td_test::pin_defaults();
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  unsigned seed = 77;
+  bool converged = false;
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{}, w{};
+  for (int i = 0; i < 400000 && !converged; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+    const bool truth = h.mapping_type == 0 && h.k0 == 0 && h.mcs_table == 1;
+    const double u = (double)rand_r(&seed) / (double)RAND_MAX;
+    converged = nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, &w);
+  }
+  ASSERT_TRUE(converged);
+  EXPECT_EQ(w.mapping_type, 0);
+  EXPECT_EQ(w.k0, 0);
+  EXPECT_EQ(w.mcs_table, 1);
+  nr_pdsch_config_sweep_observe_mask(&t, 0x20);
+  nr_pdsch_sweep_ticket_t t1{};
+  nr_pdsch_cfg_hypothesis_t h1{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 1, 2, 0, ab_legal, &t1, &h1));
+  auto st = std::make_unique<nr_pdsch_config_sweep_state_t>();
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, st.get()));
+  int active_b_t1 = 0, active = 0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    if (!nr_pdsch_config_sweep_is_active(st.get(), i))
+      continue;
+    active++;
+    const auto &x = st->hyp[i];
+    active_b_t1 += x.mapping_type == 1 && x.mcs_table == 1 && x.dmrs_add_pos == 1 && x.dmrs_mask == 0x20;
+  }
+  std::cerr << "[ MEASURED ] fb2 sibling: n_hyp " << st->n_hyp << " active " << active << " type-B table-1 active " << active_b_t1 << std::endl;
+  EXPECT_EQ(active_b_t1, 2) << "type B, table 1, k0 {0,1}: active under fb2";
+  nr_pdsch_config_sweep_reset_all();
 }
 
 static int count_k0(const nr_pdsch_config_sweep_state_t &st, int k0)
@@ -3607,9 +3686,9 @@ static std::unique_ptr<nr_pdsch_config_sweep_state_t> cb0_state(int keep_n)
 }
 TEST(PdschSweepCb0, OffIsBitIdentical)
 {
-  nr_pdsch_config_sweep_cb0_elim_env_set(-1);
-  unsetenv("ISAC_TD_CB0_ELIM");
-  EXPECT_FALSE(nr_pdsch_config_sweep_cb0_elim_env()); /* default 0 */
+  /* the OFF engine is under test: pinned explicitly (the default is ON since 2026-10-04, see PdschSweepDefaults) */
+  nr_pdsch_config_sweep_cb0_elim_env_set(0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_cb0_elim_env());
   auto a = std::make_unique<nr_pdsch_config_sweep_state_t>(), b = std::make_unique<nr_pdsch_config_sweep_state_t>();
   nr_pdsch_config_sweep_init(a.get(), 4);
   memcpy((void *)b.get(), (void *)a.get(), sizeof(*a));

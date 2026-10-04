@@ -207,13 +207,13 @@ typedef struct {
   uint16_t tba_ok[NR_PDSCH_SWEEP_MAX_HYP];
   uint8_t  tb_dec_mask;  ///< bit d: a full TB of this epoch was decoded by decoder code d (nr_td_decoder_t)
   uint8_t  cb0_dec_mask; ///< bit d: a CREDITED CB0 batch of this epoch came from decoder code d
-  bool     cb0_elim;     ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild; new runtime contexts: ISAC_TD_CB0_ELIM, default 0)
+  bool     cb0_elim;     ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild; new runtime contexts: ISAC_TD_CB0_ELIM, default 1, 0 disables)
   bool     cb0_disabled; ///< premise violation seen (TB PASS with CB0 FAIL on one (hypothesis, grant)): channel off for the context (sticky)
   bool     cb0_no_family_exempt; ///< TEST ONLY (simulator discriminating arm): disable the trap-family exemption
   bool     cb0_no_premise_check; ///< TEST ONLY (simulator discriminating arm): disable the runtime premise check
 } nr_pdsch_config_sweep_state_t;
 
-/* ---- CB0 elimination channel (ISAC_TD_CB0_ELIM, default 0) ----------------------------------------------------------------
+/* ---- CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables) ----------------------------------------------------------------
  * PER GRANT the caller makes ONE nr_pdsch_config_sweep_feed_cb0_grant() call AFTER the grant's full-TB feed (feed / feed_attr /
  * feedback), describing the CB0 batch AND the full-TB outcome of the scheduled hypothesis on that grant.
  * SCHEDULE CONTRACT: the batch is every ACTIVE hypothesis, or a subset fixed by (context seed, absolute slot, catalogue key) only, plus
@@ -236,7 +236,14 @@ typedef struct {
  * code; an unknown decoder never qualifies as CB0 decoder and, as a TB decoder, blocks every batch). A CUDA CB0 batch always dominates a
  * CPU or CUDA TB; a CPU batch only while every TB of the epoch was CPU-decoded. A NEW, more sensitive TB decoder starts a new CB0 epoch
  * (counters and ELIM cleared) when credited CB0 batches no longer dominate it. The TB decoder set learns from feed_cb0_grant (tb_decoder)
- * and from nr_pdsch_config_sweep_note_tb_decoder(), which the caller MUST call for every full-TB outcome it feeds without a CB0 grant.
+ * and from nr_pdsch_config_sweep_note_tb_decoder(), which the caller MUST call for every full-TB outcome of a grant that went through
+ * the CB0 wiring without a credited batch (budget skip, pre-decode reason, nothing testable: nr_td_cb0_wire_feed does it).
+ * EXEMPT (2026-10-04 review): full-TB outcomes fed ONLY through nr_pdsch_config_sweep_feedback() by paths that never reach the CB0
+ * wiring -- the inline decode of nr_pdcch_blind_monitor_rt.c (serial path) and DCI-layout probe jobs (nr_td_cb0_wire_pre refuses
+ * layout_probe). They credit only the full-TB election counters (ok / trials: leader choice), never tba_ok / tba_trials nor the
+ * CB0 counters, and the elimination inequality UB_cb0(h) < LB_tba(leader) reads only the latter two; the choice of the leader does
+ * not enter the soundness argument (it holds for ANY leader). Noting their decoder would only make the mask more conservative: a
+ * CUDA-decoded inline TB would block every later CPU batch of the epoch for no soundness gain.
  * PREMISE CHECK (runtime guard of q >= p): with an admissible, dominating batch the scheduled hypothesis's CB0 must pass whenever its TB
  * passed. The first "TB PASS and CB0 FAIL" on one (hypothesis, grant) disables the channel for the context (cb0_disabled, sticky across
  * rebuild/reopen), clears ELIM and the CB0 evidence, logs TD_CB0_PREMISE_ALARM and counts nr_pdsch_config_sweep_cb0_stats(alarms).
@@ -288,7 +295,7 @@ void nr_pdsch_config_sweep_note_tb_decoder(nr_pdsch_config_sweep_state_t *st, ui
 /** Process-wide counters: premise alarms, and rejected grants per NR_TD_CB0_X_* bit (rej may be NULL, else NR_TD_CB0_X_COUNT entries). */
 void nr_pdsch_config_sweep_cb0_stats(uint64_t *alarms, uint64_t *rej);
 void nr_pdsch_config_sweep_cb0_stats_reset(void);
-/** ISAC_TD_CB0_ELIM=1 (read once; default 0); copied into st->cb0_elim of every new runtime context. */
+/** ISAC_TD_CB0_ELIM (read once; default ON, 0 disables); copied into st->cb0_elim of every new runtime context. */
 bool nr_pdsch_config_sweep_cb0_elim_env(void);
 /** Test hook: 1/0 force the ISAC_TD_CB0_ELIM decision, -1 re-reads the environment. */
 void nr_pdsch_config_sweep_cb0_elim_env_set(int on);
@@ -616,7 +623,7 @@ void nr_pdsch_config_sweep_reset_all(void);
  * Invalid arguments leave the active policy unchanged. */
 bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget);
 
-/* ---- Reversible field book (fb2) wiring, env ISAC_TD_FIELDBOOK=0|2 (read once; default 0 = off, bit-identical). ----
+/* ---- Reversible field book (fb2) wiring, env ISAC_TD_FIELDBOOK=0|2 (read once; default 2 = fb2 since 2026-10-04; 0 = off, bit-identical to the pre-fb2 engine). ----
  * fb2: the cell/RNTI prior becomes the dormant cause PRIOR (not a destructive prune) and every PROMOTED field of the module-level
  * field book becomes a FIELD cause (nr_td_fieldbook_hyp_matches; the TDRA field never prunes k0). Contexts record which fields
  * pruned them; those votes are excluded at convergence. A generation change clears the FIELD cause of a no-longer-PROMOTED field in
@@ -640,6 +647,12 @@ void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withd
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
                                    nr_pdsch_config_sweep_state_t *out);
+/** Run fn(state, arg) on the ticket's LIVE context under the engine's global lock, without copying the state (~350 KB).
+ *  fn may read the state and call the pure state functions (nr_pdsch_config_sweep_is_active / _is_eliminated /
+ *  _feed_cb0_grant ...); it must NOT call any ticket-form function (they take the same, non-recursive lock) and must be
+ *  short (every consumer and the PHY receive thread wait on that lock). Returns false (fn not called) for a stale ticket. */
+bool nr_pdsch_config_sweep_with_context(const nr_pdsch_sweep_ticket_t *ticket, void (*fn)(nr_pdsch_config_sweep_state_t *st, void *arg),
+                                        void *arg);
 
 /* ---- Process-wide singleton -------------------------------------------------------------------
  * The hypothesis is chosen on the PHY receive thread and scored on a PDSCH consumer thread, i.e.

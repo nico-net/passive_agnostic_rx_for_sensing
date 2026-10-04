@@ -1,0 +1,25 @@
+Command exited with non-zero status 124
+	Command being timed: "timeout -s INT 150 /home/nicola/NICOLA/wt/td-cpuwire/cmake_targets/ran_build/build/nr-uesoftmodem --passive-rx --rfsim -O /home/nicola/NICOLA/wt/td-cpuwire/tests/passive_rx/ue.passive.pin49r4.100mhz.conf -C 3750000000 -r 273 --ssb 1478 --numerology 1 --band 78 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4"
+	User time (seconds): 218.76
+	System time (seconds): 7.69
+	Percent of CPU this job got: 144%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:36.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 2143336
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 543834
+	Voluntary context switches: 56033
+	Involuntary context switches: 1888
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 45096
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 124
+rx_rc=124

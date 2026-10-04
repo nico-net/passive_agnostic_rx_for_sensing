@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Runtime wiring of the CB0 elimination channel into the passive PDSCH consumer (td/cb0-cpu-wiring, 2026-10-03).
- * ISAC_TD_CB0_ELIM=1 (engine flag, default 0) turns it on for Technique D contexts that are ACQUIRING (a ticket with a
+ * ISAC_TD_CB0_ELIM (engine flag, default ON, 0 disables) turns it on for Technique D contexts that are ACQUIRING (a ticket with a
  * generation, not settled, not a layout probe). Flag off: every entry point returns at its first test and the
  * receiver is unchanged (no snapshot, no decode, no log, no TB-decoder change).
  *
@@ -8,12 +8,15 @@
  *   nr_td_cb0_wire_pre()  BEFORE the main decode: reads the context's active set, fixes the CB0 hypothesis set
  *                         (nr_td_cb0_sched.h hash subset + the scheduled hypothesis, only hypotheses with the job's k0:
  *                         one GrantWork = one PDSCH slot), admits it against the token bucket (or skips it whole), and
- *                         says whether the TB must be decoded on the CPU (ISAC_TD_TB_CPU_WHILE_ACQ, default 1).
+ *                         says whether the TB must be decoded on the CPU: only when the batch will run (no pre-decode
+ *                         reason, not budget-skipped, something to test) on the CPU backend (nr_td_cb0_backend_peek),
+ *                         or on the GPU backend under an ISAC_TD_CB0_GPU_ITERS cap; ISAC_TD_TB_CPU_WHILE_ACQ=0 never
+ *                         forces (default 1).
  *   nr_td_cb0_wire_run()  AFTER the main decode, before nr_td_grantwork_job_end(): builds the items from GrantWork
  *                         (lazy entries on this thread), retains the gw, runs nr_td_cb0_exec() synchronously, releases.
  *   nr_td_cb0_wire_feed() AFTER the grant's TB feedback (and before anything that may re-index the context): the
  *                         admissibility decision (nr_td_cb0_admissibility) and the feed through nr_td_cb0_adapter.
- * Requires ISAC_TD_GRANTWORK=1: without it the channel refuses (logged once, reason no_grantwork).
+ * Requires GrantWork (ISAC_TD_GRANTWORK, default on): with ISAC_TD_GRANTWORK=0 the channel refuses (logged once, reason no_grantwork).
  * Environment (read once): ISAC_TD_CB0_B (96; 0 = from ISAC_TD_CB0_BUDGET_US), ISAC_TD_CB0_BUDGET_US (20000, sized for 4 RX), ISAC_TD_CB0_CPU_PCT (30), ISAC_TD_CB0_THREADS (8),
  * ISAC_TD_CB0_RANK_MAX (4), ISAC_TD_TB_CPU_WHILE_ACQ (1), ISAC_TD_CB0_BACKEND (auto). */
 #ifndef NR_TD_CB0_WIRE_H
@@ -46,7 +49,7 @@ typedef struct {
   bool gw_on;        /* ISAC_TD_GRANTWORK=1 */
 } nr_td_cb0_job_t;
 /* Returns true when the grant is an acquiring Technique D grant with the channel on (then call _run and _feed);
- * *tb_cpu = force the CPU TB decoder for the main decode. */
+ * *tb_cpu = force the CPU TB decoder for the main decode (see the header comment: CPU-backend batches only). */
 bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw, const nr_td_cb0_job_t *job, bool *tb_cpu);
 void nr_td_cb0_wire_run(nr_td_grantwork_t *gw);
 typedef struct {

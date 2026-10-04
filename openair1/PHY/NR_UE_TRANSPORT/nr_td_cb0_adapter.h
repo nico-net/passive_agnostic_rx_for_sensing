@@ -3,7 +3,8 @@
  * API is being changed by the ELIM fix round (td/elim-channel: per-grant feed_cb0_grant with the scheduled
  * hypothesis's TB outcome, premise check, dominance rule, admissibility bits NR_TD_CB0_X_*). Everything the runtime
  * needs from the engine goes through this file, so the merge touches only nr_td_cb0_adapter.c.
- *   - the ACTIVE set of a live context (a consistent snapshot, read before any decode of the grant);
+ *   - the ACTIVE set of a live context (read in place under the engine's lock, before any decode of the grant; only the
+ *     active (index, hypothesis) pairs are copied, never the ~350 KB state);
  *   - the per-grant feed (CB0 batch + the scheduled hypothesis's TB outcome + inadmissibility bits);
  *   - the TB-decoder note for a TB outcome fed without a CB0 grant;
  *   - counters (premise alarms, eliminations).

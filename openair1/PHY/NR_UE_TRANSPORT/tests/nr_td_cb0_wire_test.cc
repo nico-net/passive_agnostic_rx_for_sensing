@@ -106,6 +106,9 @@ class Cb0Wire : public ::testing::Test {
   {
     unsetenv("ISAC_TD_CB0_BUDGET_US");
     unsetenv("ISAC_TD_CB0_CPU_PCT");
+    /* both process-wide engine modes pinned to the receiver defaults (fb2 + CB0 elimination on since 2026-10-04), so a test's
+     * mode never depends on the shell's ISAC_TD_* nor on the test order */
+    nr_pdsch_config_sweep_fieldbook_set_mode(2);
     nr_pdsch_config_sweep_reset_all();
     nr_pdsch_config_sweep_cb0_elim_env_set(1);
     nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
@@ -120,6 +123,7 @@ class Cb0Wire : public ::testing::Test {
   void TearDown() override
   {
     nr_td_grantwork_release(gw);
+    nr_td_cb0_register_gpu_backend(nullptr);
     nr_pdsch_config_sweep_cb0_elim_env_set(-1);
   }
   static nr_td_grantwork_t *make_gw()
@@ -766,5 +770,167 @@ TEST_F(Cb0Wire, PersistentPoolConcurrentCallersMatchSequential)
   EXPECT_EQ(bad.load(), 0);
   EXPECT_EQ(nr_td_cb0_pool_threads(), pool0) << "no thread creation per batch";
   nr_td_cb0_set_threads(1);
+}
+}  // namespace
+
+namespace {
+/* ======================= TB-decoder forcing (2026-10-04 review) ======================= */
+/* pre's TB-decoder decision for one acquiring grant (no run / feed) */
+bool pre_tb_cpu(nr_td_grantwork_t *gw, const nr_pdsch_sweep_ticket_t &t, int64_t slot, bool gw_on = true, bool gpu_job = false,
+                int k0 = -1)
+{
+  nr_td_cb0_job_t j{};
+  j.abs_slot = slot;
+  j.job_k0 = k0 < 0 ? t.k0 : (uint8_t)k0;
+  j.gw_on = gw_on;
+  j.gpu_job = gpu_job;
+  bool tb_cpu = true;
+  EXPECT_TRUE(nr_td_cb0_wire_pre(&t, gw, &j, &tb_cpu));
+  nr_td_cb0_tb_t tb{};
+  tb.tb_fed = true;
+  tb.tb_decoder = 1;
+  tb.iq_ok_after = true;
+  tb.nl = 1;
+  nr_td_cb0_wire_run(gw);
+  nr_td_cb0_wire_feed(&t, &tb);
+  return tb_cpu;
+}
+
+/* The CPU TB decoder is forced ONLY for a grant whose CB0 batch will run on the CPU backend and has no pre-decode reason. */
+TEST_F(Cb0Wire, TbForcedOnlyForCpuBackendBatches)
+{
+  const auto t = ticket();
+  /* CPU backend (no GPU registered), batch: forced */
+  EXPECT_TRUE(pre_tb_cpu(gw, t, 40000));
+  /* ISAC_TD_GRANTWORK=0 (no_grantwork reason), GPU-LLR job, no GrantWork: never forced */
+  EXPECT_FALSE(pre_tb_cpu(nullptr, t, 40001, /*gw_on=*/false));
+  EXPECT_FALSE(pre_tb_cpu(nullptr, t, 40002, true, /*gpu_job=*/true));
+  /* no batch possible: no active hypothesis has the job's k0 (legal_a catalogue: k0 in {0, 1}) */
+  EXPECT_FALSE(pre_tb_cpu(gw, t, 40003, true, false, /*k0=*/7));
+  EXPECT_EQ(nr_td_cb0_wire_test_last_reasons(), 0u) << "nothing testable is not a reason, just no batch";
+  /* budget-skipped: never forced */
+  nr_td_cb0_wire_test_unlimited(false);
+  nr_td_cb0_wire_test_set_tokens(0.0);
+  setenv("ISAC_TD_CB0_CPU_PCT", "0.0001", 1);
+  EXPECT_FALSE(pre_tb_cpu(gw, t, 40004));
+  EXPECT_NE(nr_td_cb0_wire_test_last_reasons() & (1u << NR_TD_CB0_R_BUDGET), 0u);
+  unsetenv("ISAC_TD_CB0_CPU_PCT");
+  nr_td_cb0_wire_test_unlimited(true);
+  /* GPU backend registered and healthy: the CUDA batch dominates either TB decoder -> not forced */
+  g_fake = FakeGpu{};
+  nr_td_cb0_backend_t be{"fake", fake_healthy, fake_decode, nullptr};
+  nr_td_cb0_register_gpu_backend(&be);
+  EXPECT_FALSE(pre_tb_cpu(gw, t, 40005));
+  /* unhealthy GPU -> the batch will run on the CPU -> forced */
+  g_fake.healthy = false;
+  EXPECT_TRUE(pre_tb_cpu(gw, t, 40006));
+  g_fake.healthy = true;
+  /* ISAC_TD_CB0_BACKEND=cpu -> forced */
+  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_CPU);
+  EXPECT_TRUE(pre_tb_cpu(gw, t, 40007));
+  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
+  /* GPU back-off after a failed GPU batch -> the next batches run on the CPU -> forced */
+  g_fake.fail_on = g_fake.calls;
+  EXPECT_FALSE(pre_tb_cpu(gw, t, 40008)); /* this batch fails on the GPU */
+  EXPECT_TRUE(pre_tb_cpu(gw, t, 40009));  /* back-off (2 batches): CPU */
+  /* a GPU iteration cap is proven only against the CPU TB: forced even on the GPU backend */
+  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
+  setenv("ISAC_TD_CB0_GPU_ITERS", "12", 1);
+  nr_td_cb0_wire_reset(); /* configuration re-read */
+  EXPECT_TRUE(pre_tb_cpu(gw, t, 40010));
+  unsetenv("ISAC_TD_CB0_GPU_ITERS");
+  /* ISAC_TD_TB_CPU_WHILE_ACQ=0: never forced */
+  setenv("ISAC_TD_TB_CPU_WHILE_ACQ", "0", 1);
+  nr_td_cb0_wire_reset();
+  nr_td_cb0_register_gpu_backend(nullptr);
+  EXPECT_FALSE(pre_tb_cpu(gw, t, 40011));
+  unsetenv("ISAC_TD_TB_CPU_WHILE_ACQ");
+  nr_td_cb0_wire_reset();
+}
+
+/* Safety net: the TB was NOT forced (GPU predicted) and decoded on CUDA, then the batch falls back to the CPU backend (the GPU
+ * became unhealthy / backed off between pre and run): the grant is inadmissible (DECODER), the engine credits nothing, and the
+ * engine's epoch rule then rejects the next CPU batch too (the epoch saw a CUDA TB). */
+TEST_F(Cb0Wire, CpuFallbackAfterCudaTbIsInadmissible)
+{
+  nr_pdsch_config_sweep_cb0_stats_reset();
+  g_fake = FakeGpu{};
+  nr_td_cb0_backend_t be{"fake", fake_healthy, fake_decode, nullptr};
+  nr_td_cb0_register_gpu_backend(&be);
+  const auto t = ticket();
+  nr_td_cb0_job_t j{};
+  j.abs_slot = 41000;
+  j.job_k0 = t.k0;
+  j.gw_on = true;
+  bool tb_cpu = true;
+  ASSERT_TRUE(nr_td_cb0_wire_pre(&t, gw, &j, &tb_cpu));
+  EXPECT_FALSE(tb_cpu) << "GPU predicted: the TB keeps the receiver's (CUDA) decoder";
+  g_fake.healthy = false; /* the GPU goes away before the batch */
+  nr_td_cb0_wire_run(gw);
+  nr_td_cb0_tb_t tb{};
+  tb.tb_fed = true;
+  tb.tb_pass = false;
+  tb.tb_decoder = 2; /* CUDA TB */
+  tb.iq_ok_after = true;
+  tb.nl = 1;
+  nr_td_cb0_wire_feed(&t, &tb);
+  auto s = stats();
+  EXPECT_EQ(s.backend_cpu, 1u) << "the batch fell back to the CPU backend";
+  EXPECT_EQ(s.backend_gpu, 0u);
+  EXPECT_EQ(s.inadmissible[NR_TD_CB0_R_DECODER], 1u);
+  EXPECT_EQ(s.admissible, 0u);
+  nr_pdsch_config_sweep_state_t *st = (nr_pdsch_config_sweep_state_t *)malloc(sizeof(*st));
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, st));
+  for (int i = 0; i < st->n_hyp; i++)
+    ASSERT_EQ(st->cb0_trials[i], 0u) << "nothing credited";
+  EXPECT_NE(st->tb_dec_mask & (1u << 2), 0) << "the CUDA TB is in the epoch's decoder set";
+  free(st);
+  uint64_t alarms = 0, rej[NR_TD_CB0_X_COUNT] = {0};
+  nr_pdsch_config_sweep_cb0_stats(&alarms, rej);
+  EXPECT_GE(rej[11], 1u) << "engine DECODER rejection";
+  /* the next grant: still unhealthy -> forced CPU TB, CPU batch, locally admissible; the engine still rejects it (epoch rule) */
+  ASSERT_TRUE(nr_td_cb0_wire_pre(&t, gw, &j, &tb_cpu));
+  EXPECT_TRUE(tb_cpu);
+  nr_td_cb0_wire_run(gw);
+  tb.tb_decoder = 1;
+  nr_td_cb0_wire_feed(&t, &tb);
+  uint64_t rej2[NR_TD_CB0_X_COUNT] = {0};
+  nr_pdsch_config_sweep_cb0_stats(&alarms, rej2);
+  EXPECT_EQ(rej2[11], rej[11] + 1) << "the epoch rule rejects the CPU batch";
+  EXPECT_EQ(alarms, 0u);
+}
+
+/* ISAC_LLR_SCALE: the decode rescales iff atoi() > 0 (1 included); every such value makes the grant inadmissible, others do not. */
+TEST_F(Cb0Wire, LlrScaleFollowsTheDecodeRule)
+{
+  const auto t = ticket();
+  const struct {
+    const char *v;
+    bool inadm;
+  } c[] = {{"1", true}, {"64", true}, {"0", false}, {"-3", false}, {"abc", false}, {nullptr, false}};
+  for (const auto &x : c) {
+    if (x.v)
+      setenv("ISAC_LLR_SCALE", x.v, 1);
+    else
+      unsetenv("ISAC_LLR_SCALE");
+    nr_td_cb0_wire_reset();
+    bool tb_cpu = false;
+    nr_td_cb0_job_t j{};
+    j.abs_slot = 42000;
+    j.job_k0 = t.k0;
+    j.gw_on = true;
+    ASSERT_TRUE(nr_td_cb0_wire_pre(&t, gw, &j, &tb_cpu));
+    EXPECT_EQ((nr_td_cb0_wire_test_last_reasons() >> NR_TD_CB0_R_LLR_SCALE) & 1u, x.inadm ? 1u : 0u) << (x.v ? x.v : "unset");
+    EXPECT_EQ(tb_cpu, !x.inadm) << "an inadmissible grant never forces the TB decoder";
+    nr_td_cb0_wire_run(gw);
+    nr_td_cb0_tb_t tb{};
+    tb.tb_fed = true;
+    tb.tb_decoder = 1;
+    tb.iq_ok_after = true;
+    tb.nl = 1;
+    nr_td_cb0_wire_feed(&t, &tb);
+  }
+  unsetenv("ISAC_LLR_SCALE");
+  nr_td_cb0_wire_reset();
 }
 }  // namespace

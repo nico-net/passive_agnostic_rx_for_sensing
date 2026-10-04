@@ -14,6 +14,7 @@
 #include <cstring>
 #include <memory>
 #include <gtest/gtest.h>
+#include "nr_td_test_baseline.h"
 extern "C" {
 #include "nr_dci_history.h"
 #include "common/utils/LOG/log.h"
@@ -204,7 +205,13 @@ TEST(DciHistory, CertifiedNeighbourRowRulesOutK0)
   EXPECT_TRUE(nr_dci_hist_k0_certified(h.get(), &g6, 1, 0x3, 0x1, &kGeo, row_k0_tda2_cert, nullptr));
   EXPECT_FALSE(nr_dci_hist_k0_certified(h.get(), &g6, 1, 0x3, 0x1, &kGeo, row_k0_none, nullptr)); /* uncertified row: ambiguous */
 }
-int main(int argc, char **argv) { logInit(); testing::InitGoogleTest(&argc, argv); return RUN_ALL_TESTS(); }
+int main(int argc, char **argv)
+{
+  logInit();
+  testing::InitGoogleTest(&argc, argv);
+  nr_td_test::register_baseline(); /* every test starts at fb0 / CB0 off (the engine BC9 was written against): nr_td_test_baseline.h */
+  return RUN_ALL_TESTS();
+}
 
 /* Review I2: the table mask of the certified flag covers every hypothesis that may be the truth -- a FIELD/PRIOR-dormant
  * one included. A sibling dormant in another MCS table makes a cross-table-equivalent occupant compatible: not certified. */
@@ -391,6 +398,29 @@ TEST_F(DciBc9d, ConfirmedDciAppliesTddExclusion)
   nr_dci_hist_on_confirm(h.get(), 0x1234, 17, kCfg, 1, &no_tdd, &co);
   EXPECT_FALSE(co.tdd);
   EXPECT_EQ(bc9d_count_k0(1, 1), r1k1);
+}
+
+/* The same confirmed-DCI TDD exclusion under the receiver defaults since 2026-10-04 (fb2 + CB0 elimination on), on purpose:
+ * the hard exclusion is a catalogue prune, independent of the field book's dormant causes and of the CB0 channel. */
+TEST_F(DciBc9d, ConfirmedDciAppliesTddExclusionUnderDefaults)
+{
+  nr_td_test::pin_defaults();
+  nr_pdsch_config_sweep_reset_all();
+  ASSERT_EQ(nr_pdsch_config_sweep_fieldbook_mode(), 2);
+  auto h = ring();
+  const int k1 = bc9d_count_k0(0, 1);
+  ASSERT_GT(k1, 0);
+  ASSERT_GT(bc9d_count_k0(0, 0), 0);
+  nr_dci_hist_entry_t d = dci(7, 0);
+  nr_dci_hist_on_accept(h.get(), &d);
+  EXPECT_EQ(bc9d_count_k0(0, 1), k1);
+  nr_dci_confirm_out_t co;
+  EXPECT_EQ(nr_dci_hist_on_confirm(h.get(), 0x1234, 7, kCfg, 0, &kOps, &co), 1);
+  EXPECT_TRUE(co.tdd);
+  EXPECT_GT(co.tdd_removed, 0);
+  EXPECT_EQ(bc9d_count_k0(0, 1), 0);
+  EXPECT_GT(bc9d_count_k0(0, 0), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_row_k0_allowed(kCfg, 0x1234, 0), UINT64_C(0x1));
 }
 
 TEST_F(DciBc9d, AdjacencyUsesOnlyConfirmedNeighbours)

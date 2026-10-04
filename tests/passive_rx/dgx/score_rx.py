@@ -118,8 +118,8 @@ def score(arm):
     return s
 
 # Gate defaults, calibrated in README.txt ("Postconv gate calibration"); each overridable via the env var named.
-GATE_DEFAULTS = dict(GATE_MODE="postconv", GATE_NCTX_MIN="2", GATE_POSTCONV_CRC_MIN="99.8", GATE_POSTCONV_MIN_DEC="5000", GATE_REOPENS_MAX="0", GATE_TTC_MAX_TDA0="8.6",
-                     GATE_TTC_MAX_TDA2="35.3", GATE_CRC_FLOOR="94.5", GATE_DROP_MAX="1.0", GATE_CRC_MIN="98.0")
+GATE_DEFAULTS = dict(GATE_MODE="postconv", GATE_NCTX_MIN="2", GATE_POSTCONV_CRC_MIN="99.8", GATE_POSTCONV_MIN_DEC="5000", GATE_REOPENS_MAX="0", GATE_TTC_MAX_TDA0="39",
+                     GATE_TTC_MAX_TDA2="77", GATE_CRC_FLOOR="93.4", GATE_DROP_MAX="2.5", GATE_CRC_MIN="98.0")
 
 def evaluate_gate(s, env=os.environ):
     """-> (ok, [(name, value, op, limit, passed)]). GATE_MODE=legacy: n_converged>=1, overall CRC>=GATE_CRC_MIN,

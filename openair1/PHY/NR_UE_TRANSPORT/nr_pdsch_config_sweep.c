@@ -1263,8 +1263,8 @@ static int s_cb0_elim_env = -1;
 bool nr_pdsch_config_sweep_cb0_elim_env(void)
 {
   if (s_cb0_elim_env < 0) {
-    const char *e = getenv("ISAC_TD_CB0_ELIM");
-    s_cb0_elim_env = (e != NULL && atoi(e) == 1) ? 1 : 0;
+    const char *e = getenv("ISAC_TD_CB0_ELIM"); /* default ON (operator 2026-10-04: fastest combination); 0 disables */
+    s_cb0_elim_env = (e != NULL && *e && atoi(e) == 0) ? 0 : 1;
   }
   return s_cb0_elim_env == 1;
 }
@@ -1786,11 +1786,20 @@ static const char *const g_fb_name[NR_TD_F_COUNT] = {"tdra", "dmrs_add_pos", "dm
 static int fb_mode_locked(void)
 {
   if (g_fb_mode < 0) {
+    /* default fb2 (operator 2026-10-04: fastest combination). ONLY an explicit integer 0 disables it; any other value
+     * (1 included, which meant "off" before 2026-10-04, and non-numeric text) resolves to fb2 and says so. */
     const char *e = getenv("ISAC_TD_FIELDBOOK");
-    g_fb_mode = (e && atoi(e) == 2) ? 2 : 0;
+    char *end = NULL;
+    const long v = (e && *e) ? strtol(e, &end, 10) : 2;
+    const bool off = e && *e && end && end != e && *end == 0 && v == 0;
+    g_fb_mode = off ? 0 : 2;
     nr_td_fieldbook_init(&g_fb, 2, 2);
-    if (g_fb_mode)
-      LOG_W(PHY, "SWEEP: field book fb%d ENABLED (ISAC_TD_FIELDBOOK)\n", g_fb_mode);
+    static bool logged;
+    if (!logged) { /* once per process (a test re-read does not repeat it) */
+      logged = true;
+      LOG_W(PHY, "SWEEP: field book mode fb%d (ISAC_TD_FIELDBOOK=%s%s)\n", g_fb_mode, e ? e : "unset, default",
+            (e && *e && !off && !(end && *end == 0 && v == 2)) ? ": only 0 disables, resolved to fb2" : "");
+    }
   }
   return g_fb_mode;
 }
@@ -3143,6 +3152,19 @@ bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
   sweep_context_t *c = ticket_context(ticket);
   if (c)
     *out = *c->state;
+  pthread_mutex_unlock(&g_lock);
+  return c != NULL;
+}
+
+bool nr_pdsch_config_sweep_with_context(const nr_pdsch_sweep_ticket_t *ticket, void (*fn)(nr_pdsch_config_sweep_state_t *st, void *arg),
+                                        void *arg)
+{
+  if (!fn)
+    return false;
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(ticket);
+  if (c)
+    fn(c->state, arg);
   pthread_mutex_unlock(&g_lock);
   return c != NULL;
 }
