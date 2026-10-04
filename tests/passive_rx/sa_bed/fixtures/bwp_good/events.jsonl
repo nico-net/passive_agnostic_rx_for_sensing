@@ -1,0 +1,5 @@
+{"t":1000.0,"event":"start","scenario":"bwp_switch","sib":"sa","reconf":"on","gpu":0,"host":"sens6"}
+{"t":1010.0,"event":"ready","scenario":"bwp_switch","sib":"sa","reconf":"on","gpu":0}
+{"t":1020.0,"event":"apply","scenario":"bwp_switch","sib":"sa","reconf":"on","gpu":0}
+{"t":1021.0,"event":"applied","scenario":"bwp_switch","sib":"sa","reconf":"on","gpu":0}
+{"t":1040.0,"event":"end","scenario":"bwp_switch","sib":"sa","reconf":"on","gpu":0}
