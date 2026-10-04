@@ -943,6 +943,7 @@ TEST_F(Cb0Wire, EpochStraddleDuringGpuBatchCreditsNothing)
 {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
   nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
   const auto t = ticket();
   g_fake = FakeGpu{};
   g_fake.bump_epoch = true;
@@ -962,12 +963,16 @@ TEST_F(Cb0Wire, EpochStraddleDuringGpuBatchCreditsNothing)
   EXPECT_EQ(g_fake.calls, 1);
   EXPECT_EQ(stats().admissible, 0u);
   EXPECT_EQ(stats().premise_alarms, 0u);
-  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, after.get()));
-  EXPECT_EQ(memcmp(before.get(), after.get(), sizeof(*before)), 0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&t, after.get())); // R10 retires the old epoch immediately.
+  nr_cfg_epoch_drain();
+  const auto fresh = ticket();
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&fresh, after.get()));
+  for (int i=0; i<after->n_hyp; ++i) EXPECT_EQ(after->cb0_trials[i], 0u);
   EXPECT_EQ(nr_td_grantwork_refcount(gw), 1);
   g_fake = FakeGpu{};
-  // A fresh job can credit the same context: RI does not implement R10 resets.
-  EXPECT_TRUE(grant(t, 701));
+  // Only a fresh ticket may credit the re-verifying context.
+  EXPECT_FALSE(grant(t, 701));
+  EXPECT_TRUE(grant(fresh, 702));
   EXPECT_EQ(stats().admissible, 1u);
 }
 
@@ -975,6 +980,7 @@ TEST_F(Cb0Wire, EpochBumpBeforeBatchDoesNotDecode)
 {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
   nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
   const auto t = ticket();
   nr_td_cb0_job_t j{};
   j.abs_slot = 700; j.job_k0 = t.k0; j.gw_on = true;

@@ -1175,6 +1175,16 @@ static pthread_mutex_t ul_length_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_dci11_pin_t g_reconf_dci11_pin[65536];
 static uint32_t g_reconf_dci11_pin_cursor[65536];
 
+static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
+{
+  pthread_mutex_lock(&g_dl_length_lock);
+  nr_pdcch_dci_length_store_epoch(&g_dl_length_store, s);
+  pthread_mutex_unlock(&g_dl_length_lock);
+  pthread_mutex_lock(&ul_length_lock);
+  nr_pdcch_dci_length_store_epoch(&g_ul_length_store, s);
+  pthread_mutex_unlock(&ul_length_lock);
+}
+
 static bool reconf_lengths_enabled(void)
 {
   return nr_pdcch_reconf_enabled();
@@ -1194,7 +1204,7 @@ static uint32_t reconf_n_suspect(void)
 static void reconf_length_reopened(uint16_t rnti, int old_len, int new_len)
 {
   LOG_A(PHY, "SENSING: DCI length RELOCK rnti=0x%04x old=%d new=%d\n", rnti, old_len, new_len);
-  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_reopen_length(rnti, old_len);
   /* context_lock/add already invalidates the replaced per-length pin under the
    * length lock. The legacy global pin is not used by the RECONF auto path. */
 }
@@ -3161,6 +3171,7 @@ uint64_t nr_pdcch_blind_inline_drop_epoch(void)
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot)
 {
+  if (nr_cfg_reconf_enabled()) nr_cfg_epoch_subscribe(length_epoch_listener);
   nr_cfg_epoch_drain();
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), serial_candidates
       ? nr_pdcch_passive_queue_epoch_counter() : &g_inline_drop_epoch);
@@ -4348,6 +4359,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         };
         sweep_ctx.n_known = (uint8_t)n_known_dl;
         memcpy(sweep_ctx.known_rnti, dl_known, (size_t)n_known_dl * sizeof(dl_known[0]));
+        if (dl_second && dlc->hint_secondary) dl_state->preferred_len = dlc->hint_secondary;
         dl_state->excluded_len = (dl_scout || dl_second) ? dlc->found[0] : dci10_length;
         dl_state->secondary_excluded_len = dl_scout ? dci10_length
             : (dl_second ? dlc->found[1] : 0);
@@ -4387,7 +4399,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         } else if (found_len > 0 && dl_second) {
           const int replaced = nr_pdcch_dci_length_context_add(dlc, found_len, abs_slot);
           nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
-          if (replaced > 0) nr_pdsch_config_sweep_reset_all();
+          if (replaced > 0) nr_pdsch_config_sweep_reopen_length(locked_rnti, replaced);
           nr_pdcch_dci_length_sweep_reset(&dlc->state);
           dlc->scout_initialized = false;
           LOG_A(PHY, "SENSING: DCI 1_1 additional length coreset=%llu rnti=0x%x len=%d replaced=%d\n",
@@ -4663,6 +4675,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                             .dmrs_scrambling_id=rel15->coreset.pdcch_dmrs_scrambling_id};
         ulc->state.stride = dci_sweep_stride();
         ulc->state.excluded_len = ul_second ? ulc->found[0] : 0;
+        if (ul_second && ulc->hint_secondary) ulc->state.preferred_len = ulc->hint_secondary;
         ulc->state.secondary_excluded_len = ul_second ? ulc->found[1] : 0;
         const bool gpu=sweep_gpu_prefill(&gctx, &ulc->state, dci_len_min(), dci_len_max());
         ul_length_ctx_t ctx={.cand=candidates,.count=sweep_trials,.rnti=boot_rnti,
@@ -6079,6 +6092,8 @@ constdiag_done:;
       int settled=-1, n_settled=0;
       for (int i=0;i<n;++i) {
         keys[i]=(g_pdsch_configuration ^ (uint64_t)(layout_ids[i]+1)) * UINT64_C(1099511628211);
+        if (nr_cfg_reconf_enabled())
+          keys[i] = (keys[i] ^ (uint64_t)cand_task[ti].dci_length) * UINT64_C(1099511628211);
         if (nr_pdsch_config_sweep_is_settled(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position)) {
           settled=i; ++n_settled;
         }
@@ -6680,6 +6695,7 @@ constdiag_done:;
                                        out.rnti, out.tda_index, cand_task[ti].dl_auto ? 0 : cfg->extract.tda_count, cfg->dmrs_typeA_position,
                                        nr_pdcch_blind_dmrs_mask, &sweep_ticket, &hy))
         continue; /* Unsupported auto context is not a guessed manual success. */
+      nr_pdsch_config_sweep_bind_length(&sweep_ticket, cand_task[ti].dci_length, cfg_abs_slot);
       nr_pdsch_adaptive_apply(&hy, &dlsch_pdu, &grant_mcs_table, &grant_mcs_table_lbrm);
       hy_k0 = hy.k0;
       /* BC12a: this branch only runs for !is_dci10, i.e. the context is created from a DCI 1_1 grant (is_dci10 is

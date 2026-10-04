@@ -207,6 +207,8 @@ typedef struct {
   uint16_t tba_ok[NR_PDSCH_SWEEP_MAX_HYP];
   uint8_t  tb_dec_mask;  ///< bit d: a full TB of this epoch was decoded by decoder code d (nr_td_decoder_t)
   uint8_t  cb0_dec_mask; ///< bit d: a CREDITED CB0 batch of this epoch came from decoder code d
+  uint16_t verify_left; ///< bounded old-winner-first selection; no synthetic CRC evidence
+  nr_pdsch_cfg_hypothesis_t verify_hint;
   bool     cb0_elim;     ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild; new runtime contexts: ISAC_TD_CB0_ELIM, default 1, 0 disables)
   bool     cb0_disabled; ///< premise violation seen (TB PASS with CB0 FAIL on one (hypothesis, grant)): channel off for the context (sticky)
   bool     cb0_no_family_exempt; ///< TEST ONLY (simulator discriminating arm): disable the trap-family exemption
@@ -616,6 +618,9 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
 /** Diagnostic: number of live keyed contexts with a winner (acquisition-state tracker input). */
 int  nr_pdsch_config_sweep_settled_count(void);
 void nr_pdsch_config_sweep_reset_all(void);
+/* Record the source length/monotonic DCI slot for targeted relock and epoch source reporting. */
+void nr_pdsch_config_sweep_bind_length(const nr_pdsch_sweep_ticket_t *t, int length, uint64_t slot);
+void nr_pdsch_config_sweep_reopen_length(uint16_t rnti, int old_length);
 /** Local recovery policy; never changes the hypothesis winner/validation criteria.
  * A failure streak must exceed the minimum AND contradict the conservative learned
  * CRC lower bound. This is a health trigger, not an inferred BWP-change assertion.

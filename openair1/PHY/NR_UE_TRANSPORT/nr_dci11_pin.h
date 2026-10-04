@@ -52,6 +52,7 @@ typedef struct {
   bool     valid; /* see the file header: touched only via an _Atomic bool* cast in nr_dci11_pin.c */
   uint16_t layout;
   uint64_t cfg;
+  uint32_t config_epoch;
   uint32_t occ;
 } nr_dci11_pin_t;
 

@@ -321,6 +321,7 @@ static void cb0_epoch_reset(nr_pdsch_config_sweep_state_t *st, bool with_tb)
   memset(st->cb0_trials, 0, sizeof(st->cb0_trials));
   memset(st->cb0_pass, 0, sizeof(st->cb0_pass));
   st->cb0_dec_mask = 0;
+  if (with_tb) st->verify_left = 0;
   memset(st->dormant[NR_TD_DORMANT_ELIM], 0, sizeof(st->dormant[NR_TD_DORMANT_ELIM]));
   if (with_tb) {
     memset(st->tba_trials, 0, sizeof(st->tba_trials));
@@ -917,6 +918,18 @@ static int next_core(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_
   if (st->winner >= 0) {
     *out = st->hyp[st->winner];
     return st->winner;
+  }
+  /* VERIFY is ordering only: 24 old-winner attempts among 32 selections, with
+   * eight ordinary exploration picks. Unsettled tickets keep GrantWork/CB0 active. */
+  if (st->verify_left) {
+    const bool prefer = (st->verify_left-- % 4) != 1;
+    if (prefer)
+      for (int i = 0; i < st->n_hyp; ++i)
+        if (active(st, i) && nr_td_geom_key(&st->hyp[i]) == nr_td_geom_key(&st->verify_hint)
+            && st->hyp[i].mcs_table == st->verify_hint.mcs_table && st->hyp[i].dmrs_mask == st->verify_hint.dmrs_mask) {
+          *out = st->hyp[i];
+          return i;
+        }
   }
   const bool skip = st->sib_skip; /* the previous sibling pick was undecodable: one normal pick first */
   st->sib_skip = false;
@@ -1806,6 +1819,9 @@ static int fb_mode_locked(void)
 }
 typedef struct {
   uint64_t configuration, generation, touched;
+  uint32_t identity_gen, config_epoch;
+  uint16_t dci_length;
+  uint64_t last_slot;
   uint16_t rnti;
   uint8_t tda;
   int tda_count, typeA;
@@ -1851,6 +1867,20 @@ typedef struct {
 
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
 static nr_pdsch_sweep_reporter_t g_reporter;
+static uint32_t g_config_epoch, g_identity_gen;
+static void sweep_epoch_locked(const nr_cfg_epoch_snapshot_t *s);
+static void sweep_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
+{
+  pthread_mutex_lock(&g_lock);
+  sweep_epoch_locked(s);
+  pthread_mutex_unlock(&g_lock);
+}
+static bool context_live(const sweep_context_t *c)
+{
+  return c->generation && (!nr_cfg_reconf_enabled()
+      || (c->identity_gen == nr_cfg_epoch_identity_gen() && c->config_epoch == nr_cfg_epoch_current()));
+}
+
 /* Census (lane perf 2026-09-27), all under g_lock: whether evidence ACCUMULATES is the question every
  * "never converged" report needs answered first, and nothing in the log could answer it -- the
  * new-context line is capped at 20 and the evidence line fires only on a pass or every 10000 outcomes
@@ -2048,6 +2078,8 @@ static uint64_t obs_plaus_union(const obs_set_t *o)
 
 static void reopen_context(sweep_context_t *c)
 {
+  if (nr_cfg_reconf_enabled() && c->state->winner >= 0)
+    nr_cfg_epoch_note_rnti_reopened(c->rnti, true, c->last_slot);
   const bool had_cert = c->k0_cert != 0 || c->has_excl;
   c->k0_cert = 0; /* a reopen is the signal the evidence was wrong: the certification goes with it */
   c->has_excl = false; /* BC9: and the exclusion (re-derived from the next DCI of the row) */
@@ -2121,7 +2153,7 @@ void nr_pdsch_config_sweep_prior_reset(void)
 static bool prior_get_locked(const prior_t *p, uint64_t *configuration, uint8_t *mcs_table,
                              uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len)
 {
-  if (!p || !p->valid)
+  if (!p || !p->valid || (nr_cfg_reconf_enabled() && g_config_epoch != nr_cfg_epoch_current()))
     return false;
   if (configuration) *configuration = p->configuration;
   if (mcs_table)     *mcs_table     = p->mcs_table;
@@ -2244,8 +2276,78 @@ static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
     return NULL;
   sweep_context_t *c = &g_contexts[t->context_slot];
   /* generation+slot+tda identify the context (the slot's generation changes on every reuse). */
-  return c->generation == t->generation && c->tda == t->tda_index
+  return context_live(c) && c->generation == t->generation && c->tda == t->tda_index
          && t->hypothesis >= 0 && t->hypothesis < c->state->n_hyp ? c : NULL;
+}
+
+static void context_verify(sweep_context_t *c)
+{
+  const bool settled = c->state->winner >= 0 || c->state->verify_left;
+  const nr_pdsch_cfg_hypothesis_t hint = c->state->winner >= 0 ? c->state->hyp[c->state->winner] : c->state->verify_hint;
+  c->generation = ++g_generation;
+  c->reported = false;
+  c->outcomes = c->locked_trials = c->locked_passes = c->failure_streak = 0;
+  c->reference_crc_lower = 0;
+  c->priored = PRIORED_NONE;
+  c->k0_cert = 0;
+  c->has_excl = false;
+  c->qm_tables = c->qm_obs = 0;
+  c->fb_pruned = c->fb_untrusted = 0;
+  c->fb_gen = nr_td_fieldbook_generation(&g_fb);
+  memset(c->dci_phase, 0, sizeof(c->dci_phase));
+  memset(c->state->dormant, 0, sizeof(c->state->dormant));
+  c->state->fail_open = false;
+  context_catalog(c, NULL); /* restore even hypotheses destructively pruned by old observations */
+  if (settled) {
+    if (hint.mapping_type) add_typeb_layer(c->state, c->typeA, c->legality);
+    if (hint.k0 >= 2) nr_pdsch_config_sweep_add_k0_layer(c->state, hint.k0);
+    c->state->verify_hint = hint;
+    c->state->verify_left = 32;
+  }
+}
+static void sweep_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
+{
+  if (s->epoch <= g_config_epoch) return;
+  const bool reset = s->identity_gen != g_identity_gen;
+  g_config_epoch = s->epoch;
+  g_identity_gen = s->identity_gen;
+  if (reset && g_fb_mode >= 0) nr_td_fieldbook_init(&g_fb, 2, 2);
+  memset(g_rnti, 0, sizeof(g_rnti));
+  memset(&g_obs, 0, sizeof(g_obs));
+  g_prior.valid = false;
+  ++g_cert_epoch;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+    sweep_context_t *c = &g_contexts[i];
+    if (!c->generation || c->identity_gen != s->identity_gen || reset) continue;
+    context_verify(c);
+    c->config_epoch = s->epoch;
+  }
+  /* HARD_RESET leaves old context records dormant under their identity_gen, never selected or credited. */
+}
+void nr_pdsch_config_sweep_bind_length(const nr_pdsch_sweep_ticket_t *t, int length, uint64_t slot)
+{
+  if (!nr_cfg_reconf_enabled() || !nr_cfg_epoch_work_current()) return;
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(t);
+  if (c) { c->dci_length = length; c->last_slot = slot; }
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_pdsch_config_sweep_reopen_length(uint16_t rnti, int old_length)
+{
+  if (!nr_cfg_reconf_enabled() || !nr_cfg_epoch_work_current()) return;
+  pthread_mutex_lock(&g_lock);
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+    sweep_context_t *c = &g_contexts[i];
+    if (!context_live(c) || c->rnti != rnti || c->dci_length != old_length) continue;
+    rnti_ctx_t *r = rnti_ctx(rnti, false);
+    if (r) {
+      cert_clear(r, c->configuration, c->tda);
+      if (r->prior.configuration == c->configuration) r->prior.valid = false;
+    }
+    if (g_prior.configuration == c->configuration) g_prior.valid = false;
+    context_verify(c);
+  }
+  pthread_mutex_unlock(&g_lock);
 }
 
 /* under g_lock: the context for this key, or -1 (then *victim, if non-NULL, is the LRU slot) */
@@ -2254,7 +2356,7 @@ static int find_context(uint64_t configuration, uint16_t rnti, uint8_t tda_index
   int v = 0;
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
     const sweep_context_t *c = &g_contexts[i];
-    if (c->generation && c->configuration == configuration && c->rnti == rnti
+    if (context_live(c) && c->configuration == configuration && c->rnti == rnti
         && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA)
       return i;
     if (c->touched < g_contexts[v].touched)
@@ -2280,6 +2382,11 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   if (!nr_cfg_epoch_work_current()) return false;
   pthread_mutex_lock(&g_lock);
   if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return false; }
+  if (nr_cfg_reconf_enabled()) {
+    nr_cfg_epoch_subscribe(sweep_epoch_listener);
+    const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
+    sweep_epoch_locked(&s);
+  }
   int found = find_context(configuration, rnti, tda_index, tda_count, typeA, NULL);
   nr_pdsch_config_sweep_state_t *fresh = NULL;
   if (found < 0) {
@@ -2325,6 +2432,8 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     memset(c, 0, sizeof(*c));
     c->state = fresh;
     c->configuration = configuration;
+    c->identity_gen = g_identity_gen;
+    c->config_epoch = g_config_epoch;
     c->generation = ++g_generation;
     g_st_created++;
     c->rnti = rnti;
@@ -2596,7 +2705,7 @@ void nr_pdsch_config_sweep_note_dci_phase(uint64_t configuration, uint16_t rnti,
   if (!nr_cfg_epoch_work_current()) { pthread_mutex_unlock(&g_lock); return; }
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++) {
     sweep_context_t *c = &g_contexts[i];
-    if (c->generation && c->configuration == configuration && c->rnti == rnti)
+    if (context_live(c) && c->configuration == configuration && c->rnti == rnti)
       c->dci_phase[phase >> 6] |= UINT64_C(1) << (phase & 63);
   }
   pthread_mutex_unlock(&g_lock);
@@ -2608,7 +2717,7 @@ bool nr_pdsch_config_sweep_excl_census(uint64_t configuration, uint16_t rnti, ui
   pthread_mutex_lock(&g_lock);
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS && !found; i++) {
     const sweep_context_t *c = &g_contexts[i];
-    if (!c->generation || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
+    if (!context_live(c) || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
       continue;
     found = true;
     if (restarts) *restarts = c->excl_restarts;
@@ -2674,7 +2783,7 @@ int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uin
     r->cert[slot].has_excl = true;
     for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++) {
       sweep_context_t *c = &g_contexts[i];
-      if (!c->generation || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
+      if (!context_live(c) || c->configuration != configuration || c->rnti != rnti || c->tda != tda)
         continue;
       c->excl = merged;
       c->has_excl = true;
@@ -2829,7 +2938,7 @@ static void census_log(const sweep_context_t *c)
   const nr_pdsch_config_sweep_state_t *s = c->state;
   int live = 0;
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++)
-    live += g_contexts[i].generation != 0;
+    live += context_live(&g_contexts[i]);
   int lead = 0;
   for (int i = 1; i < s->n_hyp; i++)
     if (rate_of(s, i) > rate_of(s, lead)) lead = i;
@@ -3045,7 +3154,7 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
     const sweep_context_t *c=&g_contexts[i];
     /* tda 0xFF = every TDA context of this configuration: a layout hypothesis reads the TDA
      * index at its own offset, so its evidence is spread over the contexts that index created. */
-    if (c->generation && c->configuration==configuration && c->rnti==rnti && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
+    if (context_live(c) && c->configuration==configuration && c->rnti==rnti && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
       for (int h=0; h<c->state->n_hyp; ++h) { *passes += c->state->ok[h]; *trials += c->state->trials[h]; }
       if (tda != 0xFF)
         break;
@@ -3059,7 +3168,7 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
   bool settled=false;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
-    if (c->generation && c->configuration==configuration && c->rnti==rnti
+    if (context_live(c) && c->configuration==configuration && c->rnti==rnti
         && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state->winner>=0) {
       settled=true;
       break;
@@ -3075,7 +3184,7 @@ int nr_pdsch_config_sweep_settled_count(void)
   pthread_mutex_lock(&g_lock);
   int n=0;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i)
-    if (g_contexts[i].generation && g_contexts[i].state->winner>=0) ++n;
+    if (context_live(&g_contexts[i]) && g_contexts[i].state->winner>=0) ++n;
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -3161,6 +3270,8 @@ void nr_pdsch_config_sweep_reset_all(void)
   /* Priors and observations are evidence derived from those contexts; keeping them across a reset
    * would let a cleared run inherit conclusions it can no longer justify. */
   memset(g_rnti, 0, sizeof(g_rnti));
+  g_config_epoch = nr_cfg_reconf_enabled() ? nr_cfg_epoch_current() : 0;
+  g_identity_gen = nr_cfg_reconf_enabled() ? nr_cfg_epoch_identity_gen() : 0;
   g_cert_epoch++;
   memset(&g_obs, 0, sizeof(g_obs));
   g_prior.valid = false;

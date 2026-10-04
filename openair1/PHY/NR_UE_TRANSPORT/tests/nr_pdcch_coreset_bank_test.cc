@@ -5,6 +5,7 @@
 
 extern "C" {
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 configmodule_interface_t *uniqCfg = nullptr;
@@ -183,4 +184,28 @@ TEST_F(CoresetBank, AcceptEveryOccasionAcrossSfnWrapStaysVerified) {
     nr_pdcch_coreset_bank_tick(mono,true,10000,60000);
     ASSERT_EQ(nr_pdcch_coreset_bank_state(0),NR_CORESET_VERIFIED);
   }
+}
+
+TEST_F(CoresetBank, HintConfirmedRestoresTrusted) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  ASSERT_EQ(add(0, 0x1234), 0);
+  nr_cfg_epoch_note_bwp_change();
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(nr_pdcch_coreset_bank_state(0), NR_CORESET_STALE);
+  nr_pdcch_coreset_bank_note_dci(0, 160, 0x1234, 111);
+  EXPECT_EQ(nr_pdcch_coreset_bank_state(0), NR_CORESET_STALE);
+  nr_pdcch_coreset_bank_note_dci(0, 161, 0x1234, 222);
+  EXPECT_EQ(nr_pdcch_coreset_bank_state(0), NR_CORESET_VERIFIED);
+  EXPECT_EQ(nr_pdcch_coreset_bank_entry(0)->verified_epoch, nr_cfg_epoch_current());
+}
+TEST_F(CoresetBank, HardResetNeverReusesOldIdentityState) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_cfg_epoch_note_identity(1, 100, 200);
+  ASSERT_EQ(add(0, 0x1234), 0);
+  nr_cfg_epoch_note_identity(2, 100, 200);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
+  EXPECT_FALSE(nr_pdcch_coreset_bank_has_owner(0x1234));
 }

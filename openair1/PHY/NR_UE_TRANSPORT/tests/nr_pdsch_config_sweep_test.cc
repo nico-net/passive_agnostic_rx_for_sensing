@@ -4175,13 +4175,18 @@ TEST(PdschEpoch, LeversFeedbackDropsOnceAcrossBump)
     nr_pdsch_config_sweep_note_dci_phase(t.configuration, t.rnti, 7);
     EXPECT_EQ(dropped, 1u);
   }
-  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, after.get()));
-  EXPECT_EQ(memcmp(before.get(), after.get(), sizeof(*before)), 0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&t, after.get())); // R10: stale state is no longer selectable.
   ASSERT_TRUE(nr_pdsch_config_sweep_fieldbook_copy(&fb_after, sizeof(fb_after)));
   EXPECT_EQ(memcmp(&fb_before, &fb_after, sizeof(fb_before)), 0);
   uint32_t phases = 99;
-  ASSERT_TRUE(nr_pdsch_config_sweep_excl_census(t.configuration, t.rnti, t.tda_index, nullptr, nullptr, &phases));
-  EXPECT_EQ(phases, 0u);
+  EXPECT_FALSE(nr_pdsch_config_sweep_excl_census(t.configuration, t.rnti, t.tda_index, nullptr, nullptr, &phases));
+  nr_cfg_epoch_drain();
+  const auto fresh = select_context(990, 0x4601, 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&fresh, after.get()));
+  for (int i=0; i<after->n_hyp; ++i) {
+    EXPECT_EQ(after->trials[i], 0u);
+    EXPECT_EQ(after->cb0_trials[i], 0u);
+  }
   nr_pdsch_config_sweep_reset_all();
 }
 
@@ -4238,4 +4243,68 @@ TEST(PdschEpoch, SelectionStraddleDoesNotPublishVerifyContext)
   EXPECT_TRUE(nr_pdsch_config_sweep_select(993, 0x4603, 0, 2, 0, epoch_catalog_legal, &ticket, &h));
   EXPECT_NE(ticket.generation, 0u);
   nr_pdsch_config_sweep_reset_all();
+}
+
+TEST_F(PdschRecovery, SoftBumpMakesLockedSuspectKeepsOldFirst) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  const auto old = recovery_settle(2);
+  ASSERT_TRUE(old.settled);
+  nr_cfg_epoch_note_bwp_change();
+  nr_cfg_epoch_drain();
+  const auto fresh = recovery_select();
+  EXPECT_FALSE(fresh.settled);
+  EXPECT_NE(fresh.generation, old.generation);
+  EXPECT_EQ(fresh.hypothesis, old.hypothesis);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old, true, nullptr));
+  EXPECT_TRUE(recovery_settle(2).settled);
+}
+TEST_F(PdschRecovery, HardResetNeverReusesOldIdentityState) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  nr_cfg_epoch_note_identity(1, 100, 200);
+  const auto old = recovery_settle(2);
+  nr_cfg_epoch_note_identity(2, 100, 200);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(nr_pdsch_config_sweep_settled_count(), 0);
+  const auto fresh = recovery_select();
+  EXPECT_FALSE(fresh.settled);
+  EXPECT_NE(fresh.generation, old.generation);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old, true, nullptr));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&fresh, &st));
+  for (int i=0; i<st.n_hyp; ++i) EXPECT_EQ(st.trials[i], 0u);
+}
+TEST_F(PdschRecovery, RelockReopensOnlyThatRnti) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  const auto a = recovery_settle(2), b = recovery_settle(1, 1, 801, 0x4602),
+             other_length = recovery_settle(0, 1, 802, 0x4601);
+  nr_pdsch_config_sweep_bind_length(&a, 47, 100);
+  nr_pdsch_config_sweep_bind_length(&b, 47, 100);
+  nr_pdsch_config_sweep_bind_length(&other_length, 53, 100);
+  nr_pdsch_config_sweep_reopen_length(0x4601, 47);
+  EXPECT_FALSE(recovery_select().settled);
+  EXPECT_TRUE(recovery_select(801, 0x4602).settled);
+  EXPECT_TRUE(recovery_select(802, 0x4601).settled);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&a, true, nullptr));
+}
+TEST_F(PdschRecovery, ReopenContextNotesEpochSource) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
+  nr_cfg_epoch_reset();
+  nr_pdsch_config_sweep_reset_all();
+  recovery_settle(0);
+  recovery_settle(1, 1, 801, 0x4602);
+  for (auto rnti : {0x4601, 0x4602}) {
+    const auto cfg = rnti == 0x4601 ? 800 : 801;
+    for (int i=0; i<5000 && nr_pdsch_config_sweep_is_settled(cfg, rnti, 0, 0); ++i) {
+      const auto t = recovery_select(cfg, rnti);
+      nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+    }
+  }
+  EXPECT_EQ(nr_cfg_epoch_current(), 1u);
+  EXPECT_EQ(nr_cfg_epoch_snapshot().last_cause, NR_CAUSE_DEDICATED_CHANGE_SUSPECTED);
 }
