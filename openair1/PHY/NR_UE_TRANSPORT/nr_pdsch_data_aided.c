@@ -214,9 +214,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // not just antenna 0. X is the SAME reconstructed transport block for all of them, so this is a
   // pure inner loop over rxdataF[a] -- the per-element phase difference it captures IS the bearing.
   const uint32_t isac_max_re = 273 * 12 * 14;
-  uint32_t       isac_nof_ant = nr_isac_aoa_antennas();
-  if (isac_nof_ant > (uint32_t)fp->nb_antennas_rx)
-    isac_nof_ant = (uint32_t)fp->nb_antennas_rx;
+  uint32_t       isac_nof_ant = (uint32_t)fp->nb_antennas_rx;
   if (isac_nof_ant == 0)
     isac_nof_ant = 1;
 
@@ -374,7 +372,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                 ? (uint32_t)nr_isac_abs_slot_override
                                 : (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
 
-  // --- Sub-slot sampling (defs_nr_UE_ISAC.h): split this slot's symbols into GROUPS and submit each
+  // --- Sub-slot sampling: split this slot's symbols into GROUPS and submit each
   // as its own slow-time row, multiplying the effective PRF (and hence the unambiguous velocity) by
   // the number of groups. Grouping is ADAPTIVE because a short row is both sparser and noisier:
   //   * SPARSITY gate -- a group must carry >= min_re REs (fewer REs = less frequency coverage =

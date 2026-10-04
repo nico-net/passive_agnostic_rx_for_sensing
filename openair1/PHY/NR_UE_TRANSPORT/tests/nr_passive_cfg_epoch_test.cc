@@ -41,6 +41,27 @@ class CfgEpoch : public ::testing::Test {
   }
 };
 
+TEST_F(CfgEpoch, CfrStampTracksSnapshotWithoutWaitingForDrain) {
+  EXPECT_EQ(nr_cfg_epoch_cfr_stamp(), 0u);
+  std::atomic<bool> done{false};
+  std::thread changes([&] {
+    for (int i = 0; i < 1000; ++i) nr_cfg_epoch_note_identity(11 + i % 2, 100, 200);
+    done.store(true);
+  });
+  do {
+    const uint64_t stamp = nr_cfg_epoch_cfr_stamp();
+    EXPECT_EQ(stamp >> 32, uint32_t(stamp)); // every change here is a HARD_RESET
+  } while (!done.load());
+  changes.join();
+  nr_cfg_epoch_note_bwp_change(); // SOFT changes epoch only
+  const auto snapshot = nr_cfg_epoch_snapshot();
+  EXPECT_EQ(nr_cfg_epoch_cfr_stamp(), (uint64_t(snapshot.epoch) << 32) | snapshot.identity_gen);
+  EXPECT_EQ(snapshot.epoch, 1001u);
+  EXPECT_EQ(snapshot.identity_gen, 1000u);
+  nr_cfg_epoch_reset();
+  EXPECT_EQ(nr_cfg_epoch_cfr_stamp(), 0u);
+}
+
 TEST_F(CfgEpoch, PciChangeIsHardResetAndIdentityGen) {
   nr_cfg_epoch_note_identity(11, 100, 200);
   EXPECT_EQ(nr_cfg_epoch_current(), 1u);

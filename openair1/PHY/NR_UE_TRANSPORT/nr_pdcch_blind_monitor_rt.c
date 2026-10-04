@@ -6997,19 +6997,8 @@ constdiag_done:;
     const int num_sc = chest_alloc.num_rbs * NR_NB_SC_PER_RB;
     if (num_sc >= 2) {
       const uint32_t base_sc = (uint32_t)(rb_origin + chest_alloc.first_rb) * NR_NB_SC_PER_RB;
-      // ---- AoA (2026-07-28): nr_pdsch_channel_estimation() above already computed the estimate for
-      // EVERY rx antenna (it loops aarx in [0,nb_antennas_rx) internally and writes
-      // pdsch_dl_ch_estimates[a][...] for each) -- this was already true before today, nothing new
-      // needed there. The only gap was HERE: extraction/submission only ever read antenna 0 and
-      // called the single-antenna nr_isac_submit_cfr(). Mirrors csi_rx.c's nr_isac_submit_csirs_ls()
-      // exactly (same nr_isac_aoa_antennas()/clamp/pack-then-submit-multi pattern, already
-      // live-validated there for the attached-UE AoA path). Antenna 0 stays primary (feeds
-      // range-Doppler + the SNR gate below); antennas 1..N-1 exist solely for isac_aoa.cc's bearing
-      // estimate.
-      uint32_t nof_ant = nr_isac_aoa_antennas();
-      if (nof_ant > (uint32_t)fp->nb_antennas_rx) {
-        nof_ant = (uint32_t)fp->nb_antennas_rx;
-      }
+      // Export the estimate already computed for every receiver antenna.
+      uint32_t nof_ant = (uint32_t)fp->nb_antennas_rx;
       if (nof_ant == 0) {
         nof_ant = 1;
       }

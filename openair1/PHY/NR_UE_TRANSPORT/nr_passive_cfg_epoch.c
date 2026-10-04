@@ -40,6 +40,7 @@ typedef struct epoch_event {
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint32_t epoch;
+static _Atomic uint64_t cfr_stamp;
 static _Atomic uint32_t identity_gen;
 static _Atomic uint32_t dedicated_epoch;
 static _Atomic uint64_t current_slot;
@@ -138,6 +139,7 @@ static void bump_locked(epoch_event_t *event, nr_epoch_class_t cls, nr_epoch_cau
   atomic_store_explicit(&dedicated_epoch, state.dedicated_epoch, memory_order_release);
   atomic_store_explicit(&epoch, state.epoch, memory_order_release);
   atomic_store_explicit(&identity_gen, state.identity_gen, memory_order_release);
+  atomic_store_explicit(&cfr_stamp, ((uint64_t)state.epoch << 32) | state.identity_gen, memory_order_release);
   event->bumped = true;
   event->snapshot = state;
   event->n_listeners = n_listeners;
@@ -213,6 +215,7 @@ uint32_t nr_cfg_epoch_current(void) { return atomic_load_explicit(&epoch, memory
 uint32_t nr_cfg_epoch_identity_gen(void) { return atomic_load_explicit(&identity_gen, memory_order_acquire); }
 uint32_t nr_cfg_epoch_dedicated_current(void) { return atomic_load_explicit(&dedicated_epoch, memory_order_acquire); }
 uint64_t nr_cfg_epoch_current_slot(void) { return atomic_load_explicit(&current_slot, memory_order_acquire); }
+uint64_t nr_cfg_epoch_cfr_stamp(void) { return atomic_load_explicit(&cfr_stamp, memory_order_acquire); }
 nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void)
 {
   pthread_mutex_lock(&lock);
@@ -230,6 +233,7 @@ void nr_cfg_epoch_reset(void)
   }
   event_tail = NULL;
   memset(&state, 0, sizeof(state));
+  atomic_store_explicit(&cfr_stamp, 0, memory_order_release);
   memset(&identity, 0, sizeof(identity));
   memset(&mib, 0, sizeof(mib));
   memset(&sib1, 0, sizeof(sib1));

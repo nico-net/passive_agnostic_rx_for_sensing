@@ -68,6 +68,8 @@ void nr_cfg_ignore_sib1_reset_for_test(void); /* test-only; call after changing 
 void nr_cfg_si_options_reset_for_test(void); /* test-only; call after changing SI environment options */
 uint32_t nr_cfg_epoch_identity_gen(void); /* increments only on HARD_RESET */
 nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void);
+/* Lock-free coherent CFR subset of snapshot: epoch in high 32 bits, identity_gen in low 32. */
+uint64_t nr_cfg_epoch_cfr_stamp(void);
 void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point_a);
 void nr_cfg_epoch_refine_point_a(uint64_t point_a); /* 0 = unknown; first SIB1 observation fills it */
 void nr_cfg_epoch_note_mib(uint32_t mib_hash_without_sfn);

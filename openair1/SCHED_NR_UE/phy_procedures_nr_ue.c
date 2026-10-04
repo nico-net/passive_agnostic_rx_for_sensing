@@ -1607,10 +1607,7 @@ int nr_process_pbch_symbol(
     // shared NR_MAX_RX_ANTENNAS constant anywhere in the PHY tree (verified by grep), so this
     // follows the existing per-ISAC-tap local-bound pattern rather than inventing a new one.
     enum { NR_ISAC_SSB_MAX_ANT = 8 };
-    const uint32_t nof_ant = nr_isac_aoa_antennas() > 0
-                                  ? (nr_isac_aoa_antennas() < (uint32_t)fp->nb_antennas_rx ? nr_isac_aoa_antennas()
-                                                                                            : (uint32_t)fp->nb_antennas_rx)
-                                  : 1;
+    const uint32_t nof_ant = fp->nb_antennas_rx > 0 ? (uint32_t)fp->nb_antennas_rx : 1;
     // dl_ch_estimates is ANTENNA-MAJOR ALREADY at this call site (dl_ch_estimates[aarx]), and
     // nr_isac_submit_cfr_multi() wants one contiguous antenna-major buffer with an explicit
     // stride -- dl_ch_estimates[aarx] are separate allocations, not one contiguous block, so pack
@@ -1635,10 +1632,10 @@ int nr_process_pbch_symbol(
     // (nr_isac_carrier_t.slots_per_frame * frame_rx + nr_slot_rx) -- proc->nr_slot_rx ALONE is only
     // slot-within-frame [0, slots_per_frame), and this cell's single SSB beam recurs at the SAME
     // within-frame slot every occurrence (period 40 slots = 2 frames), so every submission reported
-    // an IDENTICAL slot_idx: the engine's slow-time delta (sensing_engine.cc accumulate_cpi) saw
+    // an IDENTICAL slot_idx: the engine's slow-time delta (the retired CPI accumulator) saw
     // zero elapsed slots between consecutive rows, merged every submission into row 0, and no CPI
     // ever reached cpi_slots rows to close. Found live 2026-09-04 (Task 4: zero "SENSING: CPI #"
-    // lines over a 150 s ssb-only capture, root-caused by inspecting sensing_engine.cc + the
+    // lines over a 150 s ssb-only capture, root-caused by inspecting the retired engine + the
     // csi_rs tap's slot_idx computation for comparison).
     const uint32_t ssb_abs_slot = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
     nr_isac_submit_cfr_multi(ssb_abs_slot,

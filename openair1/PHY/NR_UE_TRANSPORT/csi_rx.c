@@ -966,9 +966,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
     return;
   }
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
-  uint32_t nof_ant = nr_isac_aoa_antennas();
-  if (nof_ant > (uint32_t)frame_parms->nb_antennas_rx)
-    nof_ant = (uint32_t)frame_parms->nb_antennas_rx;
+  uint32_t nof_ant = (uint32_t)frame_parms->nb_antennas_rx;
   if (nof_ant == 0 || ant_stride == 0)
     nof_ant = 1;
   if (nof_ant > NR_ISAC_CSIRS_MAX_ANT)
@@ -997,9 +995,8 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
   // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change, nothing
   // downstream reads these values). Same coherence/tau estimator as dci_nr.c's TSYNC_PDCCH probe
   // (see that file for the derivation), applied here to the CSI-RS LS estimate (isac_h/isac_k)
-  // BEFORE nr_isac_submit_cfr_multi() below hands it to the consumer thread -- i.e. this measures
-  // the raw per-RB Ĥ phase slope before any of NR_UE_ISAC's own STO/CFO/SFO/LOS-residual
-  // corrections (those all run later, in the sensing_engine consumer thread). Antenna 0 only.
+  // BEFORE nr_isac_submit_cfr_multi() exports the receiver estimates. This measures the raw
+  // per-RB Ĥ phase slope on antenna 0.
   // isac_k[] is an exact arithmetic sequence (step = NR_NB_SC_PER_RB = 12) whenever freq_density
   // > 1 (every csirs_monitor resource in this cell's conf), since the skip-every-other-RB branch
   // above is dead in that case; a non-uniform step is detected and the probe silently skipped
