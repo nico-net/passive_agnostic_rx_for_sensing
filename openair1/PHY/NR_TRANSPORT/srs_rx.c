@@ -102,7 +102,7 @@ int nr_get_srs_signal(PHY_VARS_gNB *gNB,
           }
 
           // Subcarriers without SRS symbols and only noise
-          srs_received_noise[ant][l_line_offset + subcarrier] = rx_signal[l_line_offset + subcarrier + 1];
+          srs_received_noise[ant][l_line_offset + subcarrier] = rx_signal[l_line_offset + (subcarrier + 1) % frame_parms->ofdm_symbol_size];
           for (int n = 1; n < K_TC; n++) {
             uint16_t subcarrier_n = subcarrier + n;
             if (subcarrier_n >= frame_parms->ofdm_symbol_size) {

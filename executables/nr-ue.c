@@ -1,3 +1,4 @@
+#include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
@@ -696,6 +697,8 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
   if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     nr_passive_replay_slot(UE, proc);
     nr_pusch_passive_monitor_process(UE, proc);
+    nr_srs_passive_capture(UE,proc->frame_rx,proc->nr_slot_rx,
+      ((uint64_t)proc->hfn_rx*1024+proc->frame_rx)*UE->frame_parms.slots_per_frame+proc->nr_slot_rx);
   }
 
   TracyCZoneEnd(ctx);

@@ -9,7 +9,7 @@ extern "C" {
 #define NR_SENSE_SCHEMA 2
 #define NR_SENSE_CFR_VERSION 1
 typedef enum { NR_SENSE_SRC_SSB, NR_SENSE_SRC_CSIRS, NR_SENSE_SRC_PDSCH_DMRS, NR_SENSE_SRC_PDSCH_DATA,
-               NR_SENSE_SRC_PUSCH_DMRS, NR_SENSE_SRC_PUSCH_DATA, NR_SENSE_SRC_COUNT } nr_sense_src_t;
+               NR_SENSE_SRC_PUSCH_DMRS, NR_SENSE_SRC_PUSCH_DATA, NR_SENSE_SRC_SRS, NR_SENSE_SRC_COUNT } nr_sense_src_t;
 typedef struct { const char *records_path, *cfr_path, *endpoint; uint32_t cfr_ring_frames, cfr_max_re, rec_ring_slots; } nr_sense_cfg_t;
 int nr_sense_open(const nr_sense_cfg_t *cfg);
 void nr_sense_close(void);

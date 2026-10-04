@@ -75,3 +75,51 @@ TEST_F(SrsBlind,NonSrsCombRejectedBySequenceSearch) {
   auto c=truth;
   EXPECT_FALSE(nr_srs_group_cs_search(s,iq.data(),14*512,&c,nullptr));
 }
+TEST_F(SrsBlind,SrsLsEstimateSynth) {
+  for(int comb:{2,4,8}) {
+    truth.comb=comb; generate();
+    for(int a=0;a<4;a++) for(int i=0;i<14*512*2;i++) iq[a*14*512*2+i]=lrint(iq[a*14*512*2+i]*(0.25+0.125*a));
+    auto c=truth;
+    std::vector<float> out(4*NR_SRS_MAX_RE*2);
+    std::vector<uint16_t> k(NR_SRS_MAX_RE); std::vector<uint8_t> l(NR_SRS_MAX_RE);
+    int n=nr_srs_estimate(s,iq.data(),14*512,&c,out.data(),k.data(),l.data());
+    ASSERT_EQ(n,8*12*2);
+    for(int a=0;a<4;a++) for(int i=8;i<8*12-8;i++) {
+      float amplitude=std::hypot(out[2*(a*n+i)],out[2*(a*n+i)+1]);
+      EXPECT_NEAR(20*std::log10(amplitude/(0.25+0.125*a)),0,0.5);
+      EXPECT_EQ(k[i],4*12+i); EXPECT_EQ(l[i],12);
+    }
+  }
+}
+#include "nr_srs_export.h"
+#include "nr_sense_api.h"
+#include <fstream>
+#include <unistd.h>
+TEST_F(SrsBlind,SrsExportLinksFrameAndDropIsNull) {
+  char path[]="/tmp/srs-export-XXXXXX";int fd=mkstemp(path);ASSERT_GE(fd,0);close(fd);
+  std::string cfr=std::string(path)+".cfr";
+  nr_sense_cfg_t cfg{path,cfr.c_str(),nullptr,1,48,8};
+  ASSERT_EQ(nr_sense_open(&cfg),0);nr_sense_test_pause_writer(true);
+  std::vector<float> h(4*96*2,0.5);std::vector<uint16_t> k(96);std::vector<uint8_t> l(96,12);
+  for(int i=0;i<96;i++) k[i]=48+i;
+  nr_srs_capture_t m{};m.abs_slot=100;m.frame=5;m.slot=0;m.pci=42;m.n_ant=4;m.t_mono_ns=123;
+  m.reconf=true;m.epoch=7;m.identity_gen=3;m.cfr_max_re=48;
+  auto c=truth;c.track_id=1;
+  EXPECT_EQ(nr_srs_export(&c,&m,96,h.data(),k.data(),l.data()),1);
+  m.epoch=8;
+  EXPECT_EQ(nr_srs_export(&c,&m,96,h.data(),k.data(),l.data()),0);
+  nr_sense_test_pause_writer(false);nr_sense_close();
+  std::ifstream rec(path);std::string first,second;std::getline(rec,first);std::getline(rec,second);
+  EXPECT_NE(first.find("\"source\":\"srs\""),std::string::npos);
+  EXPECT_NE(first.find("\"epoch\":7"),std::string::npos);
+  EXPECT_NE(first.find("\"n_ant\":4"),std::string::npos);
+  EXPECT_NE(first.find("\"n_re\":48"),std::string::npos);
+  EXPECT_NE(first.find("\"cfr_frame_id\":1"),std::string::npos);
+  EXPECT_NE(first.find("\"rnti\":null"),std::string::npos);
+  EXPECT_NE(first.find("\"rx_ts\":null"),std::string::npos);
+  EXPECT_NE(second.find("\"cfr_frame_id\":null"),std::string::npos);
+  std::ifstream bin(cfr,std::ios::binary);std::vector<unsigned char> bytes{std::istreambuf_iterator<char>(bin),{}};
+  ASSERT_GE(bytes.size(),48u);EXPECT_EQ(bytes[16],NR_SENSE_SRC_SRS);EXPECT_EQ(bytes[17],4);
+  EXPECT_EQ(bytes[20],48);EXPECT_EQ(bytes[40],7);EXPECT_EQ(bytes[44],3);
+  unlink(path);unlink(cfr.c_str());
+}

@@ -15,6 +15,7 @@
 #include "assertions.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
@@ -495,6 +496,7 @@ int main(int argc, char **argv)
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
   nr_isac_start();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
 
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     LOG_I(PHY,"Intializing UE Threads for instance %d ...\n", inst);
@@ -517,6 +519,7 @@ int main(int argc, char **argv)
   oai_exit = 1;
 
   // Stop the sensing engine, flush the final CPI and close the report sinks.
+  nr_srs_passive_stop();
   nr_isac_stop();
 
   nrue_ru_stop();
