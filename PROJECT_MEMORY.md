@@ -2720,10 +2720,147 @@ path `drop_full` is also pre-existing/unseparated here. The R2 150-s regression 
 default cost (1.7–3.7 % vs pre-R2 0.04 %) and R2d fixed it with the 30..63 plus <=5% low-duty wide probe; do not
 replace that policy with an unbounded sweep. [MEASURED, DGX rfsim 106 PRB 1 RX, R2d]
 
-**Live SA bed on sens6 (R13).** Pending; use `tests/passive_rx/sa_bed/RUNBOOK.md` when folded in. It must exercise
-SA and SIB1-less arms, live dedicated/cell changes, `CONFIG_EPOCH` class/cause, recovery time, stale-winner count and
-epoch-drop metrics. Not validated: R13, OTA with `ISAC_RECONF=1`, any live reconfiguration, or the 60-min soak.
-R18 steps 2–4 and 7 (CSI-RS bed/value work) also remain open; soak results will be added separately.
+**Live SA bed on sens6 (R13).** This is an OAI SA **rfsim** bed, not OTA: the operator runs an Open5GS core, one
+attached active OAI UE, and a separate passive `nr-uesoftmodem --passive-rx` client on **sens6 x86_64**. Preserve each
+result as `[SIM VERIFIED, sens6 SA rfsim, @<commit>, CPU|GPU]`; do not pool it with DGX, OCUDU, or OTA evidence.
+`tests/passive_rx/sa_bed/RUNBOOK.md` is the detailed operator reference; the procedure below is the complete concise
+runbook.
+
+**Prerequisites and core.** Use an idle host and one bed only. Keep `ISAC_RX_BRANCH_FO` unset; stop receiver-owned
+processes with SIGINT only. Before a run check the host's `nr-softmodem`/`nr-uesoftmodem` processes, containers,
+ports and `/tmp` capacity; `sudo -n true` must work. The runner takes the exclusive `/tmp/td_measure.lock`, refuses a
+held lock/BUSY file/occupied rfsim or telnet port, and owns cleanup. Before any commit retain the frozen-sens6 gate:
+
+```bash
+git diff --quiet sens6-frozen-2026-09-30 -- tests/passive_rx/captures 'tests/passive_rx/*.conf' tests/passive_rx/sens6_host_snapshot_2026-09-30
+```
+
+Install MongoDB and Open5GS for the installed Ubuntu release using its official Quickstart; merge (do not replace)
+`tests/passive_rx/sa_bed/open5gs-{amf,smf,upf}.cfg` into the installed service YAML. Configure AMF NGAP at
+`127.0.0.1:38412`, gNB NGAP/NG-U at `127.0.0.100`, and bind UPF GTP-U **only** at `127.0.0.7:2152` (never wildcard or
+another address). Provision `ogstun`, forwarding and the test subscriber in `open5gs-subscriber.cfg`: PLMN 001/06,
+TAC 1, SST 1, SD 000000, DNN `internet`, IMSI `001060123456743` and the matching UE credentials. Restart the affected
+services, then verify AMF/SMF/UPF status, SCTP `:38412`, exact UDP `127.0.0.7:2152`, `ogstun`, and AMF/SMF logs.
+
+The runner automatically creates `r13-ue-<pid>` plus a veth (`192.0.2.1/30` host, `192.0.2.2/30` namespace), runs the
+active UE and UDP sink in that namespace, and retains the UDP sender on the host. Keep that subnet unused; permit host
+INPUT TCP/4043 from the veth if filtered. The assigned UE IP must route through `ogstun`, not `local` or the veth; the
+runner records `ip route get` evidence. It removes the namespace/veth on cleanup. A fresh 10-second interval must show
+at least 100 C-RNTI grants/s before the arm is ready.
+
+**Builds (only while idle; shared lock; maximum `-j8`).** From the repository root, make the CPU control build with
+telnet support, including both CI targets required for the BWP action:
+
+```bash
+R=$PWD; B=$R/cmake_targets/ran_build/build
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 cmake -S "$R" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DENABLE_TELNETSRV=ON -DENABLE_ISAC_SENSING=ON -DOAI_SIMU=ON -DOAI_USRP=OFF -DENABLE_LDPC_CUDA=OFF
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$B" -j8 nr-uesoftmodem rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ctest --test-dir "$B" -j4 --output-on-failure
+```
+
+For a GPU arm first inspect the actual discrete GPU and CUDA toolkit. The 2026-09-30 snapshot says RTX 4060 Ti, while
+the operator expected RTX 4070; both are sm_89, but the observed capability is authoritative. Never use DGX sm_121 on
+sens6 (nvcc 12.4 cannot target it). Build separately, substituting the observed capability if it differs:
+
+```bash
+nvidia-smi --query-gpu=name,memory.total,compute_cap,driver_version --format=csv,noheader; nvcc --version
+BG=$R/cmake_targets/ran_build/build_gpu
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 cmake -S "$R" -B "$BG" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TESTS=ON -DENABLE_TELNETSRV=ON -DENABLE_ISAC_SENSING=ON -DOAI_SIMU=ON -DOAI_USRP=OFF -DENABLE_LDPC_CUDA=ON -DLDPC_CUDA_ARCH=89
+flock -s -w 7200 /tmp/td_measure.lock nice -n 19 ninja -C "$BG" -j8 nr-uesoftmodem rfsimulator params_libconfig nr-softmodem telnetsrv telnetsrv_ci tests
+```
+
+Set `BUILD=$BG R13_GPU=1` only for a GPU campaign. Require `libtelnetsrv.so` and `libtelnetsrv_ci.so`, then verify
+`TD_CB0 GPU backend registered` and `td_cb0_backend.gpu` in `metrics.jsonl`; a fallback is CPU evidence, not GPU
+validation.
+
+**Bring-up and arms.** `gnb_baseline.cfg` is a 106-PRB SA cell; it has a 40-PRB first dedicated BWP. The size variant
+`gnb_dedicated.cfg` uses 24 PRB, so the operator must see a 40-to-24 BWP DCI-1_1 width change in
+`DCI11_WIDTHS`/`Filling Format 1_1 DCI of size` gNB logs. `gnb_cell.cfg` changes PCI 0 to 1. The order is core/preflight
+→ baseline gNB/NG → rfsim :4043 → active-UE RA/PDU session → continuous UDP → passive receiver acquisition, DCI-1_1
+lock and Technique-D convergence → timed action → continued reception → SIGINT teardown. Restart arms retain the same
+passive PID: reconnect has backoff, rebases timestamps and emits `RXDISCONT`; replacing a dead passive receiver makes
+the run INCOMPLETE.
+
+Use a fresh directory for each invocation. These are all scenario/arm combinations; `sa` leaves SIB1 evidence enabled,
+while `sib1less` makes the runner set `ISAC_TD_IGNORE_SIB1=1` (the serving SA cell still broadcasts SIB1). `on` sets
+`ISAC_RECONF=1`; `off` is the flag-off control. Both use receiver-only `ISAC_BWP_TRACK=1`.
+
+| Scenario | Run each of these four arguments |
+|---|---|
+| stable | `stable sa on`, `stable sa off`, `stable sib1less on`, `stable sib1less off` |
+| BWP soft change | `bwp_switch sa on`, `bwp_switch sa off`, `bwp_switch sib1less on`, `bwp_switch sib1less off` |
+| same-PCI size restart | `same_cell_restart_size_change sa on`, `same_cell_restart_size_change sa off`, `same_cell_restart_size_change sib1less on`, `same_cell_restart_size_change sib1less off` |
+| PCI-changing restart | `cell_restart sa on`, `cell_restart sa off`, `cell_restart sib1less on`, `cell_restart sib1less off` |
+
+For each table cell: `bash "$R/tests/passive_rx/sa_bed/run_arm.sh" <arguments>`. Changed arms normally use
+`R13_DURATION_S=180`; stable defaults to 900 seconds after `ready` (minimum 15 minutes), or selects a 3600-second soak
+with `R13_SOAK=1` and no explicit duration. Run five fresh repetitions of all 16 arms without building concurrently:
+
+```bash
+export R=/path/to/repository BUILD=$R/cmake_targets/ran_build/build
+export R13_APPLY_AT_S=45 R13_TRAFFIC_RATE=6M R13_RX_ANT=4 CAMPAIGN_GRACE_S=120 CAMPAIGN_TERM_GRACE_S=120
+C=$(python3 "$R/tests/passive_rx/campaign/campaign.py" new --root /tmp/r13-sens6 --name r13-cpu --site sens6 --cell 'OAI SA rfsim PCI0/1 106PRB PLMN00106')
+for scenario in stable bwp_switch same_cell_restart_size_change cell_restart; do
+  if [ "$scenario" = stable ]; then unset R13_DURATION_S; secs=1800; [ "${R13_SOAK:-0}" = 1 ] && secs=4500; else export R13_DURATION_S=180; secs=900; fi
+  for sib in sa sib1less; do for flag in on off; do for repeat in 1 2 3 4 5; do
+    python3 "$R/tests/passive_rx/campaign/campaign.py" run "$C" --arm "${scenario}_${sib}_${flag}" --secs "$secs" -- bash "$R/tests/passive_rx/sa_bed/run_arm.sh" "$scenario" "$sib" "$flag"
+  done; done; done
+done
+python3 "$R/tests/passive_rx/sa_bed/score_r13.py" "$C"
+```
+
+Expected baseline logs are `Received NGSetupResponse`, `RA procedure succeeded`, `PDU Session Establishment Accept`,
+`UE IPv4`, `SENSING: DCI 1_1 length locked`, and `Technique D CONVERGED`. A switch adds `triggered BWP switch` and
+`BWP RESOLVED`; enabled changed arms add `CONFIG_EPOCH old -> new class=SOFT|HARD_REVERIFY|HARD_RESET cause=...` then
+fresh lock/verification/convergence. Restart arms also show `rfsim passive client reconnect attempt=`, `reconnected
+after`, and `RXDISCONT`; same-PCI needs `HARD_REVERIFY cause=CONTINUITY_LOSS`, PCI change needs `HARD_RESET
+cause=CELL_IDENTITY_CHANGE`. No `CONFIG_EPOCH` is expected in controls.
+
+**R13 VALIDATION RULES (explicit).** `score_r13.py` is authoritative; inspect each `score_r13.{json,txt}` and campaign
+`r13_summary.json`.
+
+1. For each enabled scenario × SIB1-available/SIB1-less arm, require at least five complete runs; also retain at least
+   five complete matching flag-off controls. Controls are comparators, never enabled-R13 passes.
+2. Require at least 100 C-RNTI grants/s from a recent pre-ready 10-second metrics interval. Sparse, missing or stale
+   traffic/metrics is INCOMPLETE.
+3. BWP soft recovery is at most 10 s from apply. Both hard restart recoveries are at most 30 s from the **first
+   post-change gNB DCI** (`validation_start`), not operator/gNB/UE downtime; record the secondary from-apply value too.
+4. Require fresh milestones: BWP RESOLVED plus convergence; new length lock/relock plus convergence; or post-restart
+   acquisition lock/verification plus convergence. Enabled BWP/cell arms require their expected SOFT/HARD_RESET class.
+5. Require zero stale DCI and TDRA/DM-RS winners. gNB logs/config are validation-only scorer input, **never receiver
+   input**. The operator must add a run-local `td_truth_audit.json`; absent/insufficient gNB truth means
+   `stale_winners: null` and INCOMPLETE, never a claimed zero.
+6. In a stable run of at least 15 minutes, require no more than one false SOFT per hour (hour-normalized) and zero false
+   HARD; one false SOFT in a 15-minute run fails. Report all four dropped-epoch deltas and ensure old work gains no
+   credit.
+7. Every evidence label names host `sens6`, bed, commit and CPU/GPU path. Freeze sens6 before every commit; keep CPU
+   and GPU evidence separate. Run beds only on an idle host under the exclusive lock; builds/tests use the shared lock
+   and never overlap a bed.
+
+Known coverage limits are deliberate: one active UE cannot meet the two-distinct-RNTI/2-second condition for
+`DEDICATED_CHANGE_SUSPECTED`, so this validates local DCI relock rather than that cell-wide trigger. The arm is the
+plan deviation `same_cell_restart_size_change`, not a dedicated-config mutation under a continuously running gNB.
+Passive rfsim reconnect is new and bed-validated only here; it is not OTA evidence.
+
+**Teardown and fault handling.** Interrupt `run_arm.sh`/the campaign with SIGINT and wait for its process-group,
+namespace/veth and lock cleanup; do not SIGKILL the passive receiver. Before another arm confirm no softmodem/traffic
+process remains and that :4043/:9090 are free. For NGAP timeout check AMF address, PLMN/TAC, SCTP and logs; for PDU
+failure check subscriber K/OPc/AMF, slice/DNN, SMF/UPF and `ogstun`; for traffic below 100 grants/s check TUN, route,
+traffic logs and scheduler load. For no DCI-size difference inspect the MAC-debug widths (equal/missing is
+unscorable). For restart failure preserve logs, check reconnect/RXDISCONT/epoch order, and never relaunch the receiver
+as proof. For GPU fallback check the observed capability, `LDPC_CUDA_ARCH`, CUDA libraries/`LD_LIBRARY_PATH` and plugin
+registration; label it CPU. See RUNBOOK.md §7–§8 for the exact manual reconnect checks and extended troubleshooting.
+
+**R14 soak results.** `[MEASURED, DGX aarch64 rfsim 106 PRB 4 RX, rr/integration c6fc03be7c, 3600 s each,
+ISAC_RECONF=1]` The SIB1 arm and SIB1-less arm each had 0 `CONFIG_EPOCH` bumps (0 SOFT, 0 HARD), 0 `RXDISCONT`, and
+0 DCI-length RELOCK events. In the SIB1-arm run, two contexts converged with 0 reopens; overall CRC was 99.59%,
+157435 grants decoded, and `drop_full` was 3.10%. The latter is K45 long-run accumulation; gate runs were 0.9–1.1%.
+
+**R14 caveats.** The DGX `--phy-test` rfsim gNB broadcasts no SIB1 (0 SIB1 decodes in every run), so both nominal arms
+were effectively SIB1-less. SIB1 hash, SI modification and SIB1 re-decode sources are testable only on the sens6 SA
+bed. `[CODE-READ]` Script inspection verifies that the arm flag is passed through the environment, but no startup log
+line proves that fact; add one as follow-up. These results are simulated soak evidence, not R13/sens6 or OTA
+validation. R18 steps 2–4 and 7 (CSI-RS bed/value work) remain open.
 
 **Rule: do not begin new receiver development on the DGX Spark until the current known-good offline baseline (§14)
 has been reproduced and the OTA baseline (§15.4) has been reproduced or its failure understood.**
