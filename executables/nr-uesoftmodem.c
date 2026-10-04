@@ -15,6 +15,7 @@
 #include "assertions.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
@@ -516,7 +517,8 @@ int main(int argc, char **argv)
   LOG_W(NR_PHY, "Returned from ITTI signal handler\n");
   oai_exit = 1;
 
-  // Stop the sensing engine, flush the final CPI and close the report sinks.
+  // Drain PRACH detections awaiting an overheard RAR before closing records.
+  nr_prach_passive_flush();
   nr_isac_stop();
 
   nrue_ru_stop();

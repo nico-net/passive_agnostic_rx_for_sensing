@@ -72,6 +72,8 @@ int nr_isac_enabled(void);
 int nr_isac_source(void);
 
 int nr_isac_source_enabled(int source);
+/* PRACH has a record only and therefore no CFR source enum. */
+int nr_isac_prach_enabled(void);
 
 void nr_isac_submit_cfr(uint32_t                 slot_idx,
                         int                      source,

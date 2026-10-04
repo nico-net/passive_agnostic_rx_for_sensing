@@ -108,6 +108,16 @@ TEST_F(Adapter, SourceFilterRespected) {
   EXPECT_FALSE(std::filesystem::exists(cfr));
 #endif
 }
+TEST_F(Adapter, PrachSourceFilter) {
+  init(cfg(1,"prach"));
+#ifdef SENSE_ADAPTER_ON
+  EXPECT_TRUE(nr_isac_prach_enabled());
+  EXPECT_FALSE(nr_isac_source_enabled(NR_ISAC_SRC_SSB));
+  EXPECT_FALSE(nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS));
+#else
+  EXPECT_FALSE(nr_isac_prach_enabled());
+#endif
+}
 TEST_F(Adapter, LegacySensingKeysAcceptedAndIgnored) {
   // Copy first: all edits and parsing are confined to /tmp, never the frozen fixture.
   std::filesystem::copy_file(SENSE_SOURCE_DIR "/tests/passive_rx/adaptive_dl_ul_sensing.conf",config);

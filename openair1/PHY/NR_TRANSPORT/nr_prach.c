@@ -256,6 +256,7 @@ bool get_next_nr_prach(spsc_q_t *q, const fsn_t *now, prach_item_t *p)
   return spsc_q_get_if(q, get_current_prach, (void *)now, p, sizeof(*p));
 }
 
+#ifndef NR_PASSIVE_PRACH_RX_ONLY
 void nr_schedule_rx_prach(PHY_VARS_gNB *gNB, int SFN, int Slot, nfapi_nr_prach_pdu_t *prach_pdu)
 {
   const int fmt = prach_pdu->prach_format;
@@ -309,6 +310,7 @@ void nr_schedule_rx_prach(PHY_VARS_gNB *gNB, int SFN, int Slot, nfapi_nr_prach_p
   if (!found)
     LOG_W(NR_PHY, "%4d.%2d PRACH occ queue is full: dropping PRACH request\n", SFN, Slot);
 }
+#endif
 
 static void rx_nr_prach_ru_internal_rep(prach_item_t *p,
                                         int ant_offset,

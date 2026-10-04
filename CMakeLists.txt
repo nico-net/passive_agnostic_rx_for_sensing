@@ -1066,14 +1066,17 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_decoding.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_prach.c
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach_passive.c
   )
 add_library(PHY_NR_PASSIVE_UL ${PHY_NR_PASSIVE_UL_SRC})
+target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE NR_PASSIVE_PRACH_RX_ONLY)
 # Same dependency set PHY_NR itself declares -- these carry the include directories these sources
 # need (nr_common.h, the polar/smallblock decoders, the FAPI p5 headers), not just link objects.
 target_link_libraries(PHY_NR_PASSIVE_UL PUBLIC nr_phy_common nr_common nr_fapi_p5 polar smallblock ds)
@@ -1109,6 +1112,7 @@ target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
 add_library(nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_api.c)
 target_include_directories(nr_sense_api PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
 target_link_libraries(nr_sense_api PUBLIC pthread PRIVATE LOG ${T_LIB})
+target_link_libraries(PHY_NR_PASSIVE_UL PRIVATE nr_sense_api)
 find_library(ZMQ_LIB zmq)
 if(ZMQ_LIB)
   target_compile_definitions(nr_sense_api PRIVATE NR_SENSE_HAVE_ZMQ)
@@ -2781,6 +2785,22 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_passive_mac_ta PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_passive_mac_ta)
   add_test(NAME test_nr_passive_mac_ta COMMAND ./test_nr_passive_mac_ta)
+
+  add_executable(test_nr_prach_passive ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test.cc
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach_passive.c
+                                      ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_prach.c)
+  target_compile_options(test_nr_prach_passive PRIVATE -ffunction-sections -fdata-sections)
+  target_compile_definitions(test_nr_prach_passive PRIVATE NR_PASSIVE_PRACH_RX_ONLY NR_PASSIVE_PRACH_TEST)
+  target_link_options(test_nr_prach_passive PRIVATE -Wl,--no-export-dynamic -Wl,--gc-sections
+                      -Wl,--export-dynamic-symbol=T_active -Wl,--export-dynamic-symbol=T_cache
+                      -Wl,--export-dynamic-symbol=T_freelist_head -Wl,--export-dynamic-symbol=T_stdout
+                      -Wl,--export-dynamic-symbol=g_log -Wl,--export-dynamic-symbol=exit_function
+                      -Wl,--export-dynamic-symbol=logRecord_mt -Wl,--export-dynamic-symbol=write_file_matlab)
+  target_link_libraries(test_nr_prach_passive PRIVATE PHY_NR_COMMON MAC_NR_COMMON nr_phy_common nr_common UTIL asn1_nr_rrc_hdrs
+                        GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_prach_passive)
+  add_test(NAME test_nr_prach_passive COMMAND ./test_nr_prach_passive)
 
   add_executable(test_nr_pdcch_dci11_layout_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc
                                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c

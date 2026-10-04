@@ -25,6 +25,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.h" // passive UL PUSCH hook
+#include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "executables/softmodem-common.h"
 #include "radio/COMMON/common_lib.h"
 #include "LAYER2/nr_pdcp/nr_pdcp_oai_api.h"
@@ -696,6 +697,7 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
   if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     nr_passive_replay_slot(UE, proc);
     nr_pusch_passive_monitor_process(UE, proc);
+    nr_prach_passive_process(UE, proc);
   }
 
   TracyCZoneEnd(ctx);

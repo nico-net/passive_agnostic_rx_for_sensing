@@ -49,6 +49,7 @@
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
+#include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/LAYER2/NR_MAC_UE
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.h"   // reject-only xOverhead elimination by TB CRC
 #include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h"  // blind DM-RS scrambling-identity estimate
@@ -430,6 +431,10 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
     uint8_t rapid = 0;
     uint16_t ta = 0, tc_rnti = 0;
     if (nr_passive_mac_rar_ta(tb, tb_bytes, &rapid, &ta, &tc_rnti)) {
+      /* Use the decoded PDSCH slot in both inline and deferred paths: the
+       * caller's abs_slot can still name the scheduling DCI when k0 > 0. */
+      const uint64_t rar_slot = (uint64_t)frame * (10u << mu) + slot;
+      nr_prach_passive_rar_pdu(rnti, rar_slot, tb, tb_bytes);
       LOG_A(PHY, "SENSING: MAC_TA RAR (%d.%d) ra_rnti=0x%x rapid=%u ta=%u -> %.1f m one-way, tc_rnti=0x%x\n",
             frame, slot, rnti, rapid, ta, nr_passive_mac_ta_metres(ta, mu), tc_rnti);
       /* THE SEED THE DEDICATED SEARCH NEEDS. Every other RNTI this receiver sees is a guess: the
