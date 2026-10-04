@@ -33,6 +33,8 @@ int nr_isac_source_enabled(int source)
   return 0;
 }
 
+int nr_isac_prach_enabled(void) { return 0; }
+
 void nr_isac_submit_cfr(uint32_t slot_idx,
                         int source,
                         const nr_isac_carrier_t *carrier,

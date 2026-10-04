@@ -208,6 +208,22 @@ static prach_ru_params_t get_prach_ru_params(prach_item_t *p,
   return par;
 }
 
+/* Inclusive start, exclusive end of the samples read by rx_nr_prach_ru.
+ * Used by the passive receiver to snapshot only this occasion for its worker. */
+void nr_prach_rx_sample_range(prach_item_t *p, NR_DL_FRAME_PARMS *fp, int nta, int *start, int *end)
+{
+  *start = INT32_MAX;
+  *end = INT32_MIN;
+  for (int oc = 0; oc < p->pdu.num_prach_ocas; ++oc) {
+    const int symbol = p->pdu.prach_start_symbol + oc * get_nr_prach_duration(p->pdu.prach_format);
+    const prach_ru_params_t par = get_prach_ru_params(p, symbol, fp);
+    const int first = (int)get_samples_slot_timestamp(fp, p->slot) + par.sample_offset_slot - nta + par.Ncp;
+    if (first < *start) *start = first;
+    const int last = first + par.reps * par.dftlen;
+    if (last > *end) *end = last;
+  }
+}
+
 void init_nr_prach(PHY_VARS_gNB *gNB)
 {
   int num_prach = 16;
@@ -256,6 +272,7 @@ bool get_next_nr_prach(spsc_q_t *q, const fsn_t *now, prach_item_t *p)
   return spsc_q_get_if(q, get_current_prach, (void *)now, p, sizeof(*p));
 }
 
+#ifndef NR_PASSIVE_PRACH_RX_ONLY
 void nr_schedule_rx_prach(PHY_VARS_gNB *gNB, int SFN, int Slot, nfapi_nr_prach_pdu_t *prach_pdu)
 {
   const int fmt = prach_pdu->prach_format;
@@ -309,6 +326,7 @@ void nr_schedule_rx_prach(PHY_VARS_gNB *gNB, int SFN, int Slot, nfapi_nr_prach_p
   if (!found)
     LOG_W(NR_PHY, "%4d.%2d PRACH occ queue is full: dropping PRACH request\n", SFN, Slot);
 }
+#endif
 
 static void rx_nr_prach_ru_internal_rep(prach_item_t *p,
                                         int ant_offset,
@@ -317,12 +335,13 @@ static void rx_nr_prach_ru_internal_rep(prach_item_t *p,
                                         int N_TA_offset,
                                         int rep,
                                         const prach_ru_params_t *params,
-                                        c16_t (*rxsigF)[NR_PRACH_SEQ_LEN_L])
+                                        c16_t (*rxsigF)[NR_PRACH_SEQ_LEN_L],
+                                        int sample_base)
 {
   AssertFatal(rep >= 0 && rep < params->reps, "rep %d is out of range (reps = %d)\n", rep, params->reps);
 
   int slot2 = p->prach_sequence_length ? p->slot : p->slot;
-  int sample_offset = get_samples_slot_timestamp(fp, slot2) + params->sample_offset_slot - N_TA_offset + params->Ncp + rep * params->dftlen;
+  int sample_offset = (int)get_samples_slot_timestamp(fp, slot2) + params->sample_offset_slot - N_TA_offset + params->Ncp + rep * params->dftlen - sample_base;
 
   for (int aa = 0; aa < p->nb_rx; aa++) {
     int idx = ant_offset + aa;
@@ -348,7 +367,8 @@ static void rx_nr_prach_ru_internal(prach_item_t *p,
                                     int32_t **rxdata,
                                     NR_DL_FRAME_PARMS *fp,
                                     int N_TA_offset,
-                                    bool das)
+                                    bool das,
+                                    int sample_base)
 {
   prach_ru_params_t params = get_prach_ru_params(p, prachStartSymbol, fp);
   c16_t rxsigF_tmp[p->nb_rx][NR_PRACH_SEQ_LEN_L];
@@ -370,7 +390,7 @@ static void rx_nr_prach_ru_internal(prach_item_t *p,
                         p->pdu.param_v4.numSpatialStreamIndices > 0 ? p->pdu.param_v4.spatialStreamIndices[ant_offset] : 0);
 
   for (int rep = 0; rep < params.reps; rep++) {
-    rx_nr_prach_ru_internal_rep(p, ant_start, rxdata, fp, N_TA_offset, rep, &params, rxsigF_tmp);
+    rx_nr_prach_ru_internal_rep(p, ant_start, rxdata, fp, N_TA_offset, rep, &params, rxsigF_tmp, sample_base);
   }
 
   for (int aa = 0; aa < p->nb_rx; aa++) {
@@ -387,8 +407,15 @@ void rx_nr_prach_ru(prach_item_t *p, int32_t **rxdata, NR_DL_FRAME_PARMS *fp, in
     // comment FK: the standard 38.211 section 5.3.2 has one extra term +14*N_RA_slot. This is because there prachStartSymbol is
     // given wrt to start of the 15kHz slot or 60kHz slot. Here we work slot based, so this function is anyway only called in slots
     // where there is PRACH. Its up to the MAC to schedule another PRACH PDU in the case there are there N_RA_slot \in {0,1}.
-    rx_nr_prach_ru_internal(p, prachStartSymbol, prach_oc, rxdata, fp, N_TA_offset, das);
+    rx_nr_prach_ru_internal(p, prachStartSymbol, prach_oc, rxdata, fp, N_TA_offset, das, 0);
   }
+}
+
+void nr_prach_rx_copied(prach_item_t *p, int32_t **rxdata, NR_DL_FRAME_PARMS *fp, int nta, int sample_base)
+{
+  const int dur = get_nr_prach_duration(p->pdu.prach_format);
+  for (int oc = 0; oc < p->pdu.num_prach_ocas; ++oc)
+    rx_nr_prach_ru_internal(p, p->pdu.prach_start_symbol + oc * dur, oc, rxdata, fp, nta, false, sample_base);
 }
 
 void rx_nr_prach_ru_rep(prach_item_t *p,
@@ -402,7 +429,7 @@ void rx_nr_prach_ru_rep(prach_item_t *p,
   int N_dur = get_nr_prach_duration(p->pdu.prach_format);
   int prachStartSymbol = p->pdu.prach_start_symbol + prachOccasion * N_dur;
   prach_ru_params_t params = get_prach_ru_params(p, prachStartSymbol, fp);
-  rx_nr_prach_ru_internal_rep(p, 0, rxdata, fp, N_TA_offset, rep, &params, rxsigF);
+  rx_nr_prach_ru_internal_rep(p, 0, rxdata, fp, N_TA_offset, rep, &params, rxsigF, 0);
 }
 
 rx_prach_out_t rx_nr_prach(const prach_item_t *in, int occasion)

@@ -39,6 +39,8 @@ extern "C" {
 namespace {
 // One full 275-PRB, 14-symbol carrier.
 constexpr uint32_t max_re = 275 * 12 * 14;
+/* PRACH exports records only. Keep this bit clear of CFR enum growth (Task 6b). */
+constexpr unsigned prach_source_mask = 1u << 16;
 std::atomic<unsigned> active_sources{0};
 unsigned configured_sources;
 bool initialized, configured, reconf;
@@ -221,6 +223,7 @@ unsigned source_mask(const char *s)
     else if (token == "pdsch_data") mask |= 1u << NR_ISAC_SRC_PDSCH_DATA;
     else if (token == "pusch_dmrs") mask |= 1u << NR_ISAC_SRC_PUSCH_DMRS;
     else if (token == "pusch_data") mask |= 1u << NR_ISAC_SRC_PUSCH_DATA;
+    else if (token == "prach") mask |= prach_source_mask;
     else LOG_W(PHY, "SENSING: unknown source '%s' ignored\n", token.c_str());
   }
   return mask;
@@ -325,6 +328,10 @@ extern "C" int nr_isac_source_enabled(int source)
 {
   unsigned mask = active_sources.load(std::memory_order_acquire);
   return source >= 0 && source < NR_ISAC_SRC_COUNT && (mask & (1u << source));
+}
+extern "C" int nr_isac_prach_enabled(void)
+{
+  return (active_sources.load(std::memory_order_acquire) & prach_source_mask) != 0;
 }
 extern "C" uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)
 {
