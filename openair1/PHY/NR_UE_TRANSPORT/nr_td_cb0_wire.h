@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Runtime wiring of the CB0 elimination channel into the passive PDSCH consumer (td/cb0-cpu-wiring, 2026-10-03).
- * ISAC_TD_CB0_ELIM=1 (engine flag, default 0) turns it on for Technique D contexts that are ACQUIRING (a ticket with a
+ * ISAC_TD_CB0_ELIM (engine flag, default ON, 0 disables) turns it on for Technique D contexts that are ACQUIRING (a ticket with a
  * generation, not settled, not a layout probe). Flag off: every entry point returns at its first test and the
  * receiver is unchanged (no snapshot, no decode, no log, no TB-decoder change).
  *

@@ -62,7 +62,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
-#include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM=1, default off)
+#include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables)
 
 #include <limits.h>
 #include <math.h>
@@ -1115,7 +1115,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (s_probe_all)
         job.layout_probe = 1;
     }
-    /* GRANTWORK-LITE (ISAC_TD_GRANTWORK=1, default off; levers plan R1): this grant's shared per-geometry work
+    /* GRANTWORK-LITE (ISAC_TD_GRANTWORK, default ON, 0 disables; levers plan R1): this grant's shared per-geometry work
      * (FEP / chest / LLRs per signature, immutable, unified memory) -- the main decode computes and publishes
      * its own signature; CB0 of other hypotheses can then be extracted from it (nr_pdsch_passive_gw_cb0).
      * ISAC_TD_GW_PROBE=1 also serves layout probes from it (whole slot instead of the probe horizon). */
@@ -1123,8 +1123,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (s_gw_on < 0) {
       const char *e = getenv("ISAC_TD_GW_PROBE");
       s_gw_probe = (e != NULL && atoi(e) != 0) ? 1 : 0;
-      e = getenv("ISAC_TD_GRANTWORK");
-      s_gw_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
+      e = getenv("ISAC_TD_GRANTWORK"); /* default ON (operator 2026-10-04: fastest combination); 0 disables */
+      s_gw_on = (e != NULL && *e && atoi(e) == 0) ? 0 : 1;
     }
     nr_td_grantwork_t *gw = NULL;
     if (s_gw_on && !gpu_job) {
@@ -1134,7 +1134,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                             job.sweep_ticket.k0, &rxdataF[0][0], &g_fep_gen[idx]);
       nr_pdsch_passive_set_grantwork(gw, s_gw_probe != 0);
     }
-    /* CB0 ELIMINATION CHANNEL (ISAC_TD_CB0_ELIM=1, default off; nr_td_cb0_wire.h): the CB0 hypothesis set of this grant is
+    /* CB0 ELIMINATION CHANNEL (ISAC_TD_CB0_ELIM, default ON, 0 disables; nr_td_cb0_wire.h): the CB0 hypothesis set of this grant is
      * fixed HERE, before any decode of the grant; the TB of an acquiring context decodes on the CPU (dominance rule). */
     bool cb0_tb_cpu = false;
     const nr_td_cb0_job_t cb0_job = {.abs_slot = job.absolute_slot, .job_k0 = job.sweep_ticket.k0, .layout_probe = job.layout_probe != 0,
@@ -1584,8 +1584,8 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * GrantWork shares without a copy; plain aligned malloc otherwise. */
     const size_t rxF_bytes = (size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t);
     if (i == 0) {
-      const char *e = getenv("ISAC_TD_GRANTWORK");
-      g_rxdataF_gw = e != NULL && atoi(e) != 0;
+      const char *e = getenv("ISAC_TD_GRANTWORK"); /* default ON, as above */
+      g_rxdataF_gw = !(e != NULL && *e && atoi(e) == 0);
     }
     g_rxdataF[i] = g_rxdataF_gw ? (c16_t *)nr_td_gw_alloc(rxF_bytes) : (c16_t *)malloc16_clear(rxF_bytes);
     if (g_rxdataF_gw && g_rxdataF[i] != NULL)

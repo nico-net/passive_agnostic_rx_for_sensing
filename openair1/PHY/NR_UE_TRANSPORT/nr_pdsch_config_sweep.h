@@ -207,13 +207,13 @@ typedef struct {
   uint16_t tba_ok[NR_PDSCH_SWEEP_MAX_HYP];
   uint8_t  tb_dec_mask;  ///< bit d: a full TB of this epoch was decoded by decoder code d (nr_td_decoder_t)
   uint8_t  cb0_dec_mask; ///< bit d: a CREDITED CB0 batch of this epoch came from decoder code d
-  bool     cb0_elim;     ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild; new runtime contexts: ISAC_TD_CB0_ELIM, default 0)
+  bool     cb0_elim;     ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild; new runtime contexts: ISAC_TD_CB0_ELIM, default 1, 0 disables)
   bool     cb0_disabled; ///< premise violation seen (TB PASS with CB0 FAIL on one (hypothesis, grant)): channel off for the context (sticky)
   bool     cb0_no_family_exempt; ///< TEST ONLY (simulator discriminating arm): disable the trap-family exemption
   bool     cb0_no_premise_check; ///< TEST ONLY (simulator discriminating arm): disable the runtime premise check
 } nr_pdsch_config_sweep_state_t;
 
-/* ---- CB0 elimination channel (ISAC_TD_CB0_ELIM, default 0) ----------------------------------------------------------------
+/* ---- CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables) ----------------------------------------------------------------
  * PER GRANT the caller makes ONE nr_pdsch_config_sweep_feed_cb0_grant() call AFTER the grant's full-TB feed (feed / feed_attr /
  * feedback), describing the CB0 batch AND the full-TB outcome of the scheduled hypothesis on that grant.
  * SCHEDULE CONTRACT: the batch is every ACTIVE hypothesis, or a subset fixed by (context seed, absolute slot, catalogue key) only, plus
@@ -288,7 +288,7 @@ void nr_pdsch_config_sweep_note_tb_decoder(nr_pdsch_config_sweep_state_t *st, ui
 /** Process-wide counters: premise alarms, and rejected grants per NR_TD_CB0_X_* bit (rej may be NULL, else NR_TD_CB0_X_COUNT entries). */
 void nr_pdsch_config_sweep_cb0_stats(uint64_t *alarms, uint64_t *rej);
 void nr_pdsch_config_sweep_cb0_stats_reset(void);
-/** ISAC_TD_CB0_ELIM=1 (read once; default 0); copied into st->cb0_elim of every new runtime context. */
+/** ISAC_TD_CB0_ELIM (read once; default ON, 0 disables); copied into st->cb0_elim of every new runtime context. */
 bool nr_pdsch_config_sweep_cb0_elim_env(void);
 /** Test hook: 1/0 force the ISAC_TD_CB0_ELIM decision, -1 re-reads the environment. */
 void nr_pdsch_config_sweep_cb0_elim_env_set(int on);
@@ -616,7 +616,7 @@ void nr_pdsch_config_sweep_reset_all(void);
  * Invalid arguments leave the active policy unchanged. */
 bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget);
 
-/* ---- Reversible field book (fb2) wiring, env ISAC_TD_FIELDBOOK=0|2 (read once; default 0 = off, bit-identical). ----
+/* ---- Reversible field book (fb2) wiring, env ISAC_TD_FIELDBOOK=0|2 (read once; default 2 = fb2 since 2026-10-04; 0 = off, bit-identical to the pre-fb2 engine). ----
  * fb2: the cell/RNTI prior becomes the dormant cause PRIOR (not a destructive prune) and every PROMOTED field of the module-level
  * field book becomes a FIELD cause (nr_td_fieldbook_hyp_matches; the TDRA field never prunes k0). Contexts record which fields
  * pruned them; those votes are excluded at convergence. A generation change clears the FIELD cause of a no-longer-PROMOTED field in
