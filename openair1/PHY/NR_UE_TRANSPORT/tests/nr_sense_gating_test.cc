@@ -9,6 +9,7 @@ extern "C" {
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_gating.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_api.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 configmodule_interface_t *uniqCfg = nullptr;
@@ -74,6 +75,23 @@ TEST_F(Gating, PdschDmrsSourceDrivesChest) {
   submit(nr_sense_blind_dmrs_source());
   nr_isac_stop();
   EXPECT_EQ(u32(read_file(path),20),4u);
+#else
+  EXPECT_EQ(nr_sense_blind_dmrs_source(),-1);
+#endif
+}
+TEST_F(Gating, DmrsSourceTokenProducesFramesAfterMerge) {
+  start(1,"pdsch_dmrs");
+#ifdef SENSE_GATING_ON
+  const int source=nr_sense_blind_dmrs_source();
+  ASSERT_EQ(source,NR_ISAC_SRC_PDSCH_DMRS);
+  float iq[2]={1,0}; uint32_t k[1]={12}, l[1]={2};
+  nr_sense_rs_meta_t meta{}; meta.rnti=0x1234; meta.start_rb=1; meta.nb_rb=1;
+  meta.ports=-1; meta.ssb_index=-1; meta.k_ssb=-1; meta.ta_est_samples=-1;
+  nr_isac_submit_cfr_multi_meta(33,0,source,nullptr,iq,1,1,k,l,1,1,&meta);
+  nr_isac_stop();
+  const auto b=read_file(path);
+  ASSERT_GE(b.size(),48u);
+  EXPECT_EQ(uint8_t(b[16]),NR_SENSE_SRC_PDSCH_DMRS);
 #else
   EXPECT_EQ(nr_sense_blind_dmrs_source(),-1);
 #endif

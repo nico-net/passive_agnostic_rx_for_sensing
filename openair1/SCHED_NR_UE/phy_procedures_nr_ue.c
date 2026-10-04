@@ -1637,7 +1637,8 @@ int nr_process_pbch_symbol(
     // lines over a 150 s ssb-only capture, root-caused by inspecting the retired engine + the
     // csi_rs tap's slot_idx computation for comparison).
     const uint32_t ssb_abs_slot = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
-    const nr_sense_rs_meta_t rs_meta = {.start_rb=k_abs[0]/12, .nb_rb=NR_PBCH_NUM_RB,
+    const nr_sense_rs_meta_t rs_meta = {.start_rb=k_ssb >= 0 ? (ssb_start_subcarrier-k_ssb)/12 : -1,
+                                      .nb_rb=NR_PBCH_NUM_RB,
                                       .ports=-1, .ssb_index=ssbIndex, .k_ssb=k_ssb,
                                       .ta_est_samples=-1, .transform_precoding=-1,
                                       .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};

@@ -58,6 +58,43 @@ TEST(SenseRecords, UlGrantCarriesUlFields)
   EXPECT_NE(strstr(line, "\"ul_timing_ref\":\"dl_frame\""), nullptr);
 }
 
+TEST(SenseRecords, UlTaSignedAndSweptValue)
+{
+  nr_passive_obs_t o{}; o.dir=NR_OBS_DIR_UL;
+  nr_sense_grant_meta_t m{};
+  m.ta_est_samples=-1; /* no per-UE estimate */
+  m.ta_applied_valid=true;
+  m.ta_applied_samples=nr_sense_ul_ta_applied(1600,-8,4,1);
+  char line[2048];
+  ASSERT_GT(nr_sense_grant_to_json(&o,&m,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"ta_est_samples\":null"),nullptr);
+  EXPECT_NE(strstr(line,"\"ta_applied_samples\":-4"),nullptr);
+  EXPECT_EQ(nr_sense_ul_ta_refined(m.ta_applied_samples,3),-7);
+  m.ta_applied_samples=0;
+  ASSERT_GT(nr_sense_grant_to_json(&o,&m,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"ta_applied_samples\":0"),nullptr);
+  nr_sense_rs_meta_t rs{};
+  rs.ta_est_samples=-1; rs.ta_applied_samples=-4; rs.ta_applied_valid=true;
+  rs.ports=2; rs.port_mask=0x9;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PUSCH_DMRS,&rs,1,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"ta_applied_samples\":-4"),nullptr);
+  EXPECT_NE(strstr(line,"\"ports\":2"),nullptr);
+  EXPECT_NE(strstr(line,"\"port_mask\":9"),nullptr);
+}
+
+TEST(SenseRecords, UlGrantEpochAtCapture)
+{
+  test_reconf=true; test_epoch=7;
+  nr_sense_grant_meta_t m{};
+  nr_sense_capture_grant_stamp(&m);
+  test_epoch=8;
+  nr_passive_obs_t o{}; o.dir=NR_OBS_DIR_UL;
+  char line[2048];
+  ASSERT_GT(nr_sense_grant_to_json(&o,&m,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"epoch\":7"),nullptr);
+  test_reconf=false; test_epoch=0;
+}
+
 TEST(SenseRecords, RsLinksCfrFrame)
 {
   char records[]="/tmp/nr_sense_links_rec_XXXXXX";

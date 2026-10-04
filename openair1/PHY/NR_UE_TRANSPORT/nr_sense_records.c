@@ -27,6 +27,11 @@ static void integer(json_t *j, const char *key, int64_t v)
   if (v < 0) put(j, ",\"%s\":null", key);
   else put(j, ",\"%s\":%" PRId64, key, v);
 }
+static void signed_optional(json_t *j, const char *key, int64_t v, bool valid)
+{
+  if (valid) put(j, ",\"%s\":%" PRId64, key, v);
+  else put(j, ",\"%s\":null", key);
+}
 static void real(json_t *j, const char *key, double v)
 {
   if (!isfinite(v)) put(j, ",\"%s\":null", key);
@@ -78,6 +83,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   for (int l=0;l<32;l++) if (m->l_sym_mask & (1u<<l)) { put(&j,"%s%d",first?"":",",l); first=false; }
   put(&j,"]");
   integer(&j,"ports",m->ports); integer(&j,"n_ant",m->n_ant);
+  integer(&j,"port_mask",m->port_mask > 0 ? m->port_mask : -1);
   real(&j,"noise_var",m->noise_var); real(&j,"slot_frac",m->slot_frac);
   if (frame_id) put(&j,",\"cfr_frame_id\":%" PRIu64,frame_id);
   else put(&j,",\"cfr_frame_id\":null");
@@ -86,6 +92,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   integer(&j,"k_ssb",src==NR_SENSE_SRC_SSB?m->k_ssb:-1);
   quoted(&j,"csirs_resource",src==NR_SENSE_SRC_CSIRS?m->csirs_resource:NULL);
   integer(&j,"ta_est_samples",ul?m->ta_est_samples:-1);
+  signed_optional(&j,"ta_applied_samples",m->ta_applied_samples,ul && m->ta_applied_valid);
   integer(&j,"transform_precoding",ul?m->transform_precoding:-1);
   integer(&j,"dmrs_type",ul?m->dmrs_type:-1);
   integer(&j,"dmrs_add_pos",ul?m->dmrs_add_pos:-1);
@@ -115,6 +122,12 @@ static void stamp(int *epoch, int *identity, int *dedicated)
   uint64_t pair=nr_cfg_epoch_cfr_stamp();
   *epoch=(int)(pair>>32); *identity=(int)(uint32_t)pair;
   *dedicated=(int)nr_cfg_epoch_dedicated_current();
+}
+void nr_sense_capture_grant_stamp(nr_sense_grant_meta_t *m)
+{
+  if (!m) return;
+  stamp(&m->epoch,&m->identity_gen,&m->dedicated_epoch);
+  m->stamp_valid=true;
 }
 void nr_sense_emit_session(const NR_DL_FRAME_PARMS *fp, double gain)
 {

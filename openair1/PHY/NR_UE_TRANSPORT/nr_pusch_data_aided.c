@@ -249,7 +249,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .slots_per_frame = fp->slots_per_frame};
   const nr_sense_rs_meta_t rs_meta = {.rnti=g->rnti,
     .start_rb=g->bwp_start+g->start_rb, .nb_rb=g->num_rb, .ports=-1,
-    .ssb_index=-1, .k_ssb=-1, .ta_est_samples=ta_offset_samples,
+    .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
+    .ta_applied_samples=ta_offset_samples, .ta_applied_valid=true,
     .transform_precoding=g->transform_precoding, .dmrs_type=g->dmrs_config_type+1,
     .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
   nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,

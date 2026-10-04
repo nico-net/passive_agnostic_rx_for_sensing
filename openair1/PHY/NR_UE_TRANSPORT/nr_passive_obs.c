@@ -70,6 +70,12 @@ static void jb_int(jb_t *j, const char *key, int64_t v)
     jb_put(j, ",\"%s\":%" PRId64, key, v);
 }
 
+static void jb_signed_optional(jb_t *j, const char *key, int64_t v, bool valid)
+{
+  if (valid) jb_put(j, ",\"%s\":%" PRId64, key, v);
+  else jb_put(j, ",\"%s\":null", key);
+}
+
 static void jb_flt(jb_t *j, const char *key, float v)
 {
   if (!isfinite(v))
@@ -149,6 +155,7 @@ int nr_sense_grant_to_json(const nr_passive_obs_t *o, const nr_sense_grant_meta_
   jb_int(&j,"freq_hopping",m->freq_hopping);
   jb_int(&j,"dmrs_type",m->dmrs_type); jb_int(&j,"dmrs_add_pos",m->dmrs_add_pos);
   jb_int(&j,"dmrs_n_scid",m->dmrs_n_scid); jb_int(&j,"ta_est_samples",m->ta_est_samples);
+  jb_signed_optional(&j,"ta_applied_samples",m->ta_applied_samples,m->ta_applied_valid);
   jb_flt(&j,"cfo_est_hz",m->cfo_est_hz);
   jb_str(&j,"ul_timing_ref",o->dir==NR_OBS_DIR_UL?(m->ul_timing_ref?m->ul_timing_ref:"dl_frame"):NULL);
   jb_put(&j,"}");

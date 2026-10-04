@@ -95,7 +95,7 @@ typedef struct {
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
   uint32_t dci_abs_slot;  ///< BC9: the DCI's slot, frame * slots_per_frame + slot (key into the DL DCI history ring)
   uint32_t config_epoch; ///< captured by the queue at admission
-  uint32_t sense_identity_gen, sense_dedicated_epoch; ///< schema-2 provenance at admission
+  uint32_t sense_epoch, sense_identity_gen, sense_dedicated_epoch; ///< schema-2 provenance at admission
   uint16_t rnti;
   /// nr_blind_rnti_class_t of the DCI that scheduled this PDSCH. Only the consumer's MAC-TA parse
   /// reads it: a RAR (RA-RNTI) and a dedicated DL-SCH PDU carry timing advance in different places,

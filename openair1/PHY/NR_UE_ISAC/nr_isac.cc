@@ -372,8 +372,11 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
   }
   if (detail) {
     m.rnti=detail->rnti; m.start_rb=detail->start_rb; m.nb_rb=detail->nb_rb;
-    m.ports=detail->ports; m.ssb_index=detail->ssb_index; m.k_ssb=detail->k_ssb;
+    m.ports=detail->ports; m.port_mask=detail->port_mask;
+    m.ssb_index=detail->ssb_index; m.k_ssb=detail->k_ssb;
     m.csirs_resource=detail->csirs_resource; m.ta_est_samples=detail->ta_est_samples;
+    m.ta_applied_samples=detail->ta_applied_samples;
+    m.ta_applied_valid=detail->ta_applied_valid;
     m.transform_precoding=detail->transform_precoding; m.dmrs_type=detail->dmrs_type;
     m.dmrs_add_pos=detail->dmrs_add_pos; m.dmrs_n_scid=detail->dmrs_n_scid;
   }

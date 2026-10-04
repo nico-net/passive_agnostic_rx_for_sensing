@@ -9,7 +9,8 @@ extern "C" {
 #endif
 typedef struct NR_DL_FRAME_PARMS_s NR_DL_FRAME_PARMS;
 
-/* Signed fields use -1 for unknown. Float fields use NAN for unknown. The base
+/* Most integer fields use -1 for unknown; signed TA has a separate validity flag.
+ * Float fields use NAN for unknown. The base
  * RS fields match the Task 3 interface; later fields carry optional UL/PRACH/SRS metadata. */
 typedef struct nr_sense_rs_meta_s {
   uint16_t rnti;
@@ -26,6 +27,8 @@ typedef struct nr_sense_rs_meta_s {
   int epoch, identity_gen, dedicated_epoch;
   bool stamp_valid;
   int ta_est_samples, transform_precoding, dmrs_type, dmrs_add_pos, dmrs_n_scid;
+  int ta_applied_samples, port_mask;
+  bool ta_applied_valid;
   int prach_preamble;
   float prach_energy, prach_delay;
   int srs_comb, srs_offset, srs_cs, srs_group, srs_period, srs_track_id;
@@ -40,9 +43,18 @@ typedef struct {
   const char *verif;
   int k2, dci_slot, transform_precoding, freq_hopping;
   int dmrs_type, dmrs_add_pos, dmrs_n_scid, ta_est_samples;
+  int ta_applied_samples;
+  bool ta_applied_valid;
   float cfo_est_hz;
   const char *ul_timing_ref;
 } nr_sense_grant_meta_t;
+
+/* Sweep index -1 means no sweep. Positive TA advances the UL FFT window. */
+static inline int nr_sense_ul_ta_applied(int caller, int start, int step, int sweep_index)
+{ return sweep_index < 0 ? caller : start + sweep_index * step; }
+static inline int nr_sense_ul_ta_refined(int applied, int residual_delay)
+{ return applied - residual_delay; }
+void nr_sense_capture_grant_stamp(nr_sense_grant_meta_t *m);
 
 /* Pure formatters also serve fixtures; no I/O or allocation. */
 int nr_sense_grant_to_json(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *m, char *buf, size_t n);

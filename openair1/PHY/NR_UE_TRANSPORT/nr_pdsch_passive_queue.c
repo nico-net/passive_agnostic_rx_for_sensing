@@ -1522,7 +1522,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         if (nr_passive_obs_enabled()) nr_passive_obs_push(&o_);
         if (nr_sense_enabled()) {
           nr_sense_grant_meta_t meta = {
-            .stamp_valid=true, .epoch=nr_cfg_reconf_enabled()?(int)job.config_epoch:-1,
+            .stamp_valid=true, .epoch=nr_cfg_reconf_enabled()?(int)job.sense_epoch:-1,
             .identity_gen=nr_cfg_reconf_enabled()?(int)job.sense_identity_gen:-1,
             .dedicated_epoch=nr_cfg_reconf_enabled()?(int)job.sense_dedicated_epoch:-1,
             .rx_ts=-1, .k2=-1, .dci_slot=-1, .transform_precoding=-1,
@@ -1769,9 +1769,12 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
                           || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
-  g_pending[g_n_pending].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
-  if (nr_cfg_reconf_enabled()) {
+  const bool reconf=nr_cfg_reconf_enabled();
+  const bool sense=nr_sense_enabled();
+  g_pending[g_n_pending].config_epoch = nr_passive_job_epoch_stamp(reconf, nr_cfg_epoch_work_stamp);
+  if (sense && reconf) {
     const uint64_t pair=nr_cfg_epoch_cfr_stamp();
+    g_pending[g_n_pending].sense_epoch=(uint32_t)(pair>>32);
     g_pending[g_n_pending].sense_identity_gen=(uint32_t)pair;
     g_pending[g_n_pending].sense_dedicated_epoch=nr_cfg_epoch_dedicated_current();
   }
