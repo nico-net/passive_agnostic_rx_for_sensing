@@ -63,6 +63,8 @@ bool nr_cfg_epoch_work_current(void);
 
 uint32_t nr_cfg_epoch_current(void); /* lock-free atomic read */
 bool nr_cfg_reconf_enabled(void); /* ISAC_RECONF=1, read once */
+bool nr_cfg_ignore_sib1(void); /* independent ISAC_TD_IGNORE_SIB1=1 test arm */
+void nr_cfg_ignore_sib1_reset_for_test(void); /* test-only; call after changing the environment */
 uint32_t nr_cfg_epoch_identity_gen(void); /* increments only on HARD_RESET */
 nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void);
 void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point_a);

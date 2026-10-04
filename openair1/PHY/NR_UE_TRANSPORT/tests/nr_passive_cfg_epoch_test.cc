@@ -6,6 +6,7 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -14,6 +15,15 @@ void exit_function(const char *, const char *, int, const char *, int) { std::ab
 }
 
 namespace {
+struct IgnoreSib1Guard {
+  bool present = getenv("ISAC_TD_IGNORE_SIB1") != nullptr;
+  std::string value = present ? getenv("ISAC_TD_IGNORE_SIB1") : "";
+  ~IgnoreSib1Guard() {
+    if (present) setenv("ISAC_TD_IGNORE_SIB1", value.c_str(), 1);
+    else unsetenv("ISAC_TD_IGNORE_SIB1");
+    nr_cfg_ignore_sib1_reset_for_test();
+  }
+};
 std::atomic<int> calls{0};
 nr_cfg_epoch_snapshot_t last{};
 void listener(const nr_cfg_epoch_snapshot_t *s) { last = *s; ++calls; }
@@ -68,6 +78,33 @@ TEST_F(CfgEpoch, Sib1SameSemanticNoBump) {
   nr_cfg_epoch_note_sib1(42, 0);
   nr_cfg_epoch_drain();
   EXPECT_EQ(calls, 0);
+}
+TEST_F(CfgEpoch, IgnoreSib1ArmKeepsOnlyNonSib1EpochSources) {
+  IgnoreSib1Guard guard;
+  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  nr_cfg_ignore_sib1_reset_for_test();
+  EXPECT_TRUE(nr_cfg_ignore_sib1());
+  EXPECT_FALSE(nr_cfg_epoch_note_sib1(42, 0));
+  EXPECT_FALSE(nr_cfg_epoch_note_sib1(43, 100));
+  nr_cfg_epoch_set_si_period(100);
+  nr_cfg_epoch_note_si_modification(51, 100);
+  nr_cfg_epoch_tick(5200);
+  nr_cfg_epoch_refine_point_a(201); // SIB1-derived Point A cannot reset identity in this arm
+  EXPECT_EQ(nr_cfg_epoch_current(), 0u);
+  EXPECT_EQ(nr_cfg_epoch_si_period(), 0u);
+  EXPECT_EQ(nr_cfg_epoch_si_boundary(), 0u);
+  EXPECT_FALSE(nr_cfg_epoch_sib1_request_allowed(5200));
+  EXPECT_FALSE(nr_cfg_epoch_si_redecode_pending(5200));
+  nr_cfg_epoch_note_mib(1);
+  nr_cfg_epoch_note_mib(2);
+  EXPECT_EQ(nr_cfg_epoch_current(), 1u);
+  unsetenv("ISAC_TD_IGNORE_SIB1");
+  EXPECT_TRUE(nr_cfg_ignore_sib1()); // cached until the test-only reset
+  nr_cfg_ignore_sib1_reset_for_test();
+  EXPECT_FALSE(nr_cfg_ignore_sib1());
+  EXPECT_TRUE(nr_cfg_epoch_note_sib1(42, 0));
+  EXPECT_TRUE(nr_cfg_epoch_note_sib1(43, 100));
+  EXPECT_EQ(nr_cfg_epoch_current(), 2u);
 }
 TEST_F(CfgEpoch, SiModAnnouncedBumpsOnlyAtBoundaryIfChanged) {
   nr_cfg_epoch_note_sib1(42, 0);

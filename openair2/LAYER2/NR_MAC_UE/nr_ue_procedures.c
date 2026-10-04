@@ -908,6 +908,7 @@ static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
   }
 
   if (rnti_type == TYPE_P_RNTI_) {
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_ignore_sib1()) return -1;
     if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()
         && nr_cfg_prnti_si_modified(dci->short_messages_indicator, dci->short_messages)) {
       const unsigned slots_per_frame = get_slots_per_frame_from_scs(mac->numerology);

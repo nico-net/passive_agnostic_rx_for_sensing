@@ -1,5 +1,23 @@
 /* Transmitter-only fixture. Never linked into the passive receiver. */
 #include "PHY/NR_TRANSPORT/nr_dci.h"
+#include "hidden_reconfig_schedule.h"
+
+/* Append four low-order optional bits while retaining the DCI 1_1 indicator at
+ * the top. The fixture uses this only for the named UE's dedicated DL grants. */
+static void hidden_extend_dci(nfapi_nr_dl_tti_pdcch_pdu_rel15_t *p, uint16_t rnti, uint8_t bits)
+{
+  for (int i = 0; i < p->numDlDci; ++i) {
+    nfapi_nr_dl_dci_pdu_t *d = &p->dci_pdu[i];
+    if (d->RNTI != rnti) continue;
+    AssertFatal(d->PayloadSizeBits + bits <= 63, "Hidden DCI extension exceeds 63 bits\n");
+    uint64_t payload = 0;
+    memcpy(&payload, d->Payload, (d->PayloadSizeBits + 7) / 8);
+    payload <<= bits;
+    memset(d->Payload, 0, sizeof(d->Payload));
+    memcpy(d->Payload, &payload, (d->PayloadSizeBits + bits + 7) / 8);
+    d->PayloadSizeBits += bits;
+  }
+}
 
 static void hidden_truth_dci(FILE *truth, int frame, int slot, const char *format,
                              const nfapi_nr_dl_tti_pdcch_pdu_rel15_t *p)
@@ -69,6 +87,12 @@ static int hidden_waveform(PHY_VARS_gNB *tx, gNB_MAC_INST *mac, NR_UE_info_t *ue
   AssertFatal(ue->current_DL_BWP.dci_format == NR_DL_DCI_FORMAT_1_1 &&
               ue->current_UL_BWP.dci_format == NR_UL_DCI_FORMAT_0_1, "Fixture needs dedicated formats\n");
   const bool multi_coreset = getenv("ISAC_HIDDEN_MULTI_CORESET") != NULL;
+  const char *reconf_flag = getenv("ISAC_RECONF");
+  const hidden_reconfig_kind_t reconfig = reconf_flag && strcmp(reconf_flag, "1") == 0
+      ? hidden_reconfig_parse(getenv("ISAC_HIDDEN_RECONFIG")) : HIDDEN_RECONF_NONE;
+  const hidden_reconfig_schedule_t change = hidden_reconfig_schedule(reconfig);
+  const char *ignore_sib1 = getenv("ISAC_TD_IGNORE_SIB1");
+  const bool sib1_less = ignore_sib1 && strcmp(ignore_sib1, "1") == 0;
   const uint16_t second_rnti = (uint16_t)(ue->rnti ^ 0x3101u);
   char path[1024];
   snprintf(path, sizeof(path), "%s/tx.sc16", directory);
@@ -88,13 +112,29 @@ static int hidden_waveform(PHY_VARS_gNB *tx, gNB_MAC_INST *mac, NR_UE_info_t *ue
   c16_t *time = calloc(fp->samples_per_frame, sizeof(*time));
   c16_t *frequency = calloc(fp->ofdm_symbol_size * 14, sizeof(*frequency));
   AssertFatal(rsp && time && frequency, "Allocation failed\n");
-  fprintf(truth, "{\"kind\":\"cell\",\"pci\":%d,\"rnti\":%u,\"rb\":%u,\"fs\":%.0f,"
+  fprintf(truth, "{\"kind\":\"cell\",\"pci\":%ld,\"rnti\":%u,\"rb\":%u,\"fs\":%.0f,"
           "\"center_hz\":%llu,\"frames\":%d,\"dl_format\":%d,\"ul_format\":%d}\n",
           *mac->common_channels[0].ServingCellConfigCommon->physCellId, ue->rnti, fp->N_RB_DL, fs,
           (unsigned long long)fp->dl_CarrierFreq, frames, ue->current_DL_BWP.dci_format, ue->current_UL_BWP.dci_format);
   for (int f = 0; f < frames; ++f) {
     memset(time, 0, fp->samples_per_frame * sizeof(*time));
     for (int s = 0; s < fp->slots_per_frame; ++s) {
+      const uint32_t abs_slot = (uint32_t)f * fp->slots_per_frame + s;
+      const bool changed = change.slot && abs_slot >= change.slot;
+      if (change.slot && abs_slot == change.slot) {
+        fprintf(truth, "{\"kind\":\"reconfig\",\"change\":\"%s\",\"abs_slot\":%u,"
+                "\"sib1_present\":%s,\"rnti\":%u}\n",
+                hidden_reconfig_name(reconfig), abs_slot, sib1_less ? "false" : "true", ue->rnti);
+        if (reconfig == HIDDEN_RECONF_SIB1_SEMANTIC) {
+          get_softmodem_params()->phy_test = 0;
+          nr_mac_configure_sib1(mac, &plmn, change.new_tac, 1);
+          get_softmodem_params()->phy_test = 1;
+        }
+        if (reconfig == HIDDEN_RECONF_PCI) {
+          fp->Nid_cell += change.pci_add;
+          *mac->common_channels[0].ServingCellConfigCommon->physCellId += change.pci_add;
+        }
+      }
       reset_sched_response(rsp, f % 1024, s, 0, 0);
       NR_SCHED_LOCK(&mac->sched_lock);
       memset(mac->common_channels[0].vrb_map[0], 0, MAX_BWP_SIZE * sizeof(uint16_t));
@@ -102,7 +142,7 @@ static int hidden_waveform(PHY_VARS_gNB *tx, gNB_MAC_INST *mac, NR_UE_info_t *ue
       /* Enable SA broadcast scheduling only; no receiver exists in this process. */
       get_softmodem_params()->phy_test = 0;
       schedule_nr_mib(0, f % 1024, s, &rsp->DL_req);
-      schedule_nr_sib1(0, f % 1024, s, &rsp->DL_req, &rsp->TX_req);
+      if (!sib1_less) schedule_nr_sib1(0, f % 1024, s, &rsp->DL_req, &rsp->TX_req);
       get_softmodem_params()->phy_test = 1;
       /* Native DL scheduler produces both the DCI and its PDSCH. */
       if (f >= 8 && (f & 1) && (s == 3 || s == 4) && is_dl_slot(s, &mac->frame_structure)) {
@@ -114,6 +154,17 @@ static int hidden_waveform(PHY_VARS_gNB *tx, gNB_MAC_INST *mac, NR_UE_info_t *ue
         if (multi_coreset)
           hidden_add_second_dl_coreset(&rsp->DL_req.dl_tti_request_body, second_rnti,
                                        (f & 2) ? 4 : 0);
+        nfapi_nr_dl_tti_request_body_t *dl_body = &rsp->DL_req.dl_tti_request_body;
+        for (int i = 0; changed && i < dl_body->nPDUs; ++i)
+          if (dl_body->dl_tti_pdu_list[i].PDUType == NFAPI_NR_DL_TTI_PDCCH_PDU_TYPE) {
+            nfapi_nr_dl_tti_pdcch_pdu_rel15_t *p = &dl_body->dl_tti_pdu_list[i].pdcch_pdu.pdcch_pdu_rel15;
+            if (reconfig == HIDDEN_RECONF_DCI_LENGTH)
+              hidden_extend_dci(p, ue->rnti, change.dci_length_add);
+            if (reconfig == HIDDEN_RECONF_CORESET_MOVE && p->numDlDci && p->dci_pdu[0].RNTI == ue->rnti)
+              hidden_coreset_bitmap(p, change.new_coreset_group, 8, 0);
+            if (reconfig == HIDDEN_RECONF_PCI)
+              for (int d = 0; d < p->numDlDci; ++d) p->dci_pdu[d].ScramblingId = fp->Nid_cell;
+          }
       }
       /* UL grants occupy the downlink. Payload packing and coding are native OAI. */
       if (f >= 8 && (f & 1) && s == 2 && is_dl_slot(s, &mac->frame_structure)) {
@@ -167,6 +218,10 @@ static int hidden_waveform(PHY_VARS_gNB *tx, gNB_MAC_INST *mac, NR_UE_info_t *ue
           request->numPdus = 2;
           hidden_truth_dci(truth, f % 1024, s, "0_1", p2);
         }
+        if (changed && reconfig == HIDDEN_RECONF_CORESET_MOVE)
+          hidden_coreset_bitmap(p, change.new_coreset_group, 8, 0);
+        if (changed && reconfig == HIDDEN_RECONF_PCI)
+          for (int d = 0; d < p->numDlDci; ++d) p->dci_pdu[d].ScramblingId = fp->Nid_cell;
         hidden_truth_dci(truth, f % 1024, s, "0_1", p);
       }
       NR_SCHED_UNLOCK(&mac->sched_lock);

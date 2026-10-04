@@ -171,6 +171,7 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_css0_cfg(void)
 
 bool nr_pdcch_blind_monitor_coreset0_uss_cfg(nr_pdcch_blind_monitor_cfg_t *out)
 {
+  if (nr_cfg_ignore_sib1()) return false;
   const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
   if (out == NULL || !g_css0_cfg_valid || pr == NULL || !pr->dl_bwp_valid
       || pr->dl_bwp_size == 0)
@@ -5286,10 +5287,12 @@ static uint16_t sib1_cache_tried_pci = 0xFFFF;
 static _Atomic uint32_t sib1_semantic_hash;
 uint32_t nr_pdcch_blind_sib1_semantic_hash(void)
 {
+  if (nr_cfg_ignore_sib1()) return 0;
   return atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
 }
 void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t hash)
 {
+  if (nr_cfg_ignore_sib1()) return;
   atomic_store_explicit(&sib1_semantic_hash, hash, memory_order_release);
   if (nr_cfg_reconf_enabled() && !hash) {
     pthread_mutex_lock(&common_facts_lock);
@@ -5302,6 +5305,7 @@ void nr_pdcch_blind_set_sib1_semantic_hash(uint32_t hash)
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f);
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
 {
+  if (nr_cfg_ignore_sib1()) return false;
   if (!f || f->pci>1007 || !f->dl_bwp_size || f->dl_bwp_start+f->dl_bwp_size>275
       || f->ul_bwp_start+f->ul_bwp_size>275 || f->dl_mu>4 || f->ul_mu>4
       || !common_tda_valid(f->dl_count,f->dl_start,f->dl_length,f->dl_mapping)
@@ -5392,6 +5396,7 @@ static bool sib1_cache_load(uint16_t pci, nr_pdcch_blind_common_config_t *f)
 bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)
 {
   if (!f) return false;
+  if (nr_cfg_ignore_sib1()) { memset(f, 0, sizeof(*f)); return false; }
   pthread_mutex_lock(&common_facts_lock);
   bool ok=common_facts_valid && common_facts.pci==pci;
   if(ok) *f=common_facts; else memset(f,0,sizeof(*f));

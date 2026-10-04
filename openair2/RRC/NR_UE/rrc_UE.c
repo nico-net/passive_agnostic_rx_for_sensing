@@ -1167,7 +1167,8 @@ static bool nr_rrc_process_reconfiguration_v1530(NR_UE_RRC_INST_t *rrc, NR_RRCRe
   }
   NR_UE_RRC_SI_INFO *SI_info = &rrc->perNB[gNB_index].SInfo;
   bool dedicatedsib1 = false;
-  if (rec_1530->dedicatedSIB1_Delivery) {
+  if (rec_1530->dedicatedSIB1_Delivery
+      && !(IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_ignore_sib1())) {
     dedicatedsib1 = true;
     NR_SIB1_t *sib1 = NULL;
     asn_dec_rval_t dec_rval = uper_decode(NULL,
@@ -2272,6 +2273,7 @@ static void nr_rrc_ue_decode_NR_BCCH_DL_SCH_Message(NR_UE_RRC_INST_t *rrc,
   if (bcch_message->message.present == NR_BCCH_DL_SCH_MessageType_PR_c1) {
     switch (bcch_message->message.choice.c1->present) {
       case NR_BCCH_DL_SCH_MessageType__c1_PR_systemInformationBlockType1:
+        if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_ignore_sib1()) break;
         if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
           const NR_SIB1_t *sib1 = bcch_message->message.choice.c1->choice.systemInformationBlockType1;
           NR_UE_MAC_INST_t *mac = get_mac_inst(rrc->ue_id);
@@ -2285,6 +2287,7 @@ static void nr_rrc_ue_decode_NR_BCCH_DL_SCH_Message(NR_UE_RRC_INST_t *rrc,
         bcch_message->message.choice.c1->choice.systemInformationBlockType1 = NULL;
         break;
       case NR_BCCH_DL_SCH_MessageType__c1_PR_systemInformation:
+        if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_ignore_sib1()) break;
         LOG_I(NR_RRC, "[UE %ld] %d:%d Decoding SI\n", rrc->ue_id, frame, slot);
         NR_SystemInformation_t *si = bcch_message->message.choice.c1->choice.systemInformation;
         nr_decode_SI(SI_info, si, rrc, hfn, frame);
