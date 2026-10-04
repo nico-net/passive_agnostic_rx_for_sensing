@@ -134,3 +134,9 @@ TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
                            "csirs_time_to_confirm_resources"})
     EXPECT_NE(s.find(std::string("\"") + key + "\":"), std::string::npos) << key;
 }
+TEST(PassiveMetrics,SrsCountersPresent) {
+  nr_passive_metrics_t m={};char buf[6144];
+  ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
+  EXPECT_NE(std::string(buf).find("\"srs_us\":0"),std::string::npos);
+  EXPECT_NE(std::string(buf).find("\"srs_jobs_dropped\":0"),std::string::npos);
+}

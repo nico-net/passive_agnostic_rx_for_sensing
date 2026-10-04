@@ -16,6 +16,7 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
+#include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
@@ -505,6 +506,7 @@ int main(int argc, char **argv)
                           sense_cfg->rx_gain[sense_ue->rf_map.chain] - sense_cfg->rx_gain_offset[sense_ue->rf_map.chain]);
   }
   nr_prach_passive_start();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
 
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     LOG_I(PHY,"Intializing UE Threads for instance %d ...\n", inst);
@@ -550,6 +552,7 @@ int main(int argc, char **argv)
 
   // All slot producers have joined. Drain the PRACH worker before closing records.
   nr_prach_passive_flush();
+  nr_srs_passive_stop();
   nr_isac_stop();
 
   nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)

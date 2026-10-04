@@ -49,6 +49,7 @@ typedef struct {
   uint64_t ldpc_cuda_disabled;        /* breaker state: 0 closed, 1 bypassed for a while, 2 permanently off */
   uint64_t ldpc_tb_cpu, ldpc_tb_cuda; /* TBs decoded by CPU min-sum / CUDA normalised min-sum (stratify evidence by decoder) */
   uint64_t pusch_try, pusch_crc_ok;
+  uint64_t srs_us, srs_jobs_dropped;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
   uint64_t prach_us, prach_drops, prach_skipped;
   uint64_t csirs_candidates, csirs_confirmed, csirs_revoked, zp_exported, zp_revoked;

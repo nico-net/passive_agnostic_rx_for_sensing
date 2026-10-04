@@ -1,4 +1,5 @@
 #include "nr_pdcch_ul_discovery.h"
+#include "nr_srs_passive.h"
 #include <stdatomic.h>
 #include <string.h>
 #include <pthread.h>
@@ -26,7 +27,10 @@ void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_ab
   pthread_mutex_lock(&g_book_lock);
   const int status=nr_passive_ul_book_put(&g_book,g,source_absolute_slot);
   pthread_mutex_unlock(&g_book_lock);
-  if(status>0) atomic_fetch_add_explicit(&g_parked,1,memory_order_relaxed);
+  if(status>0) {
+    atomic_fetch_add_explicit(&g_parked,1,memory_order_relaxed);
+    nr_srs_passive_grant(source_absolute_slot+g->k2,g->ul_dmrs_symb_pos,g->bwp_start+g->start_rb,g->num_rb);
+  }
   if(status<0) atomic_fetch_add_explicit(&g_overwritten,1,memory_order_relaxed);
 }
 

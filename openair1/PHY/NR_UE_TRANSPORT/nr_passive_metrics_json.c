@@ -53,6 +53,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"ldpc_ok\":%" PRIu64 ",\"ldpc_seg_fail\":%" PRIu64 ",\"ldpc_tb_fail\":%" PRIu64 ",\"ldpc_zero_tb\":%" PRIu64 ","
       "\"ldpc_cuda_errors\":%" PRIu64 ",\"ldpc_cuda_fallbacks\":%" PRIu64 ",\"ldpc_cuda_poisoned\":%" PRIu64 ","
       "\"ldpc_cuda_disabled\":%" PRIu64 ",\"ldpc_cuda_breaker_trips\":%" PRIu64 ",\"ldpc_tb_cpu\":%" PRIu64 ",\"ldpc_tb_cuda\":%" PRIu64 ","
+      "\"srs_us\":%" PRIu64 ",\"srs_jobs_dropped\":%" PRIu64 ","
       "\"pusch_try\":%" PRIu64 ",\"pusch_crc_ok\":%" PRIu64 ","
       "\"obs_pushed\":%" PRIu64 ",\"obs_written\":%" PRIu64 ",\"obs_dropped\":%" PRIu64 ","
       "\"prach_us\":%" PRIu64 ",\"prach_drops\":%" PRIu64 ",\"prach_skipped\":%" PRIu64 ","
@@ -74,6 +75,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->ldpc_ok, m->ldpc_seg_fail, m->ldpc_tb_fail, m->ldpc_zero_tb,
       m->ldpc_cuda_errors, m->ldpc_cuda_fallbacks, m->ldpc_cuda_poisoned,
       m->ldpc_cuda_disabled, m->ldpc_cuda_breaker_trips, m->ldpc_tb_cpu, m->ldpc_tb_cuda,
+      m->srs_us,m->srs_jobs_dropped,
       m->pusch_try, m->pusch_crc_ok,
       m->obs_pushed, m->obs_written, m->obs_dropped,
       m->prach_us, m->prach_drops, m->prach_skipped,

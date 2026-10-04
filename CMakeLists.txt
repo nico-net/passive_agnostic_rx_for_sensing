@@ -1063,6 +1063,12 @@ add_library(PHY_NR ${PHY_NR_SRC})
 # contains ONLY files that are not already in PHY_NR_UE; everything else resolves to the UE's copy,
 # which is the copy the rest of this binary already uses.
 set(PHY_NR_PASSIVE_UL_SRC
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_passive.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/srs_rx.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_blind.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_estimate.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_export.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_decoding.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch.c
@@ -1077,9 +1083,10 @@ set(PHY_NR_PASSIVE_UL_SRC
   )
 add_library(PHY_NR_PASSIVE_UL ${PHY_NR_PASSIVE_UL_SRC})
 target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE NR_PASSIVE_PRACH_RX_ONLY)
+target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE NR_SRS_PASSIVE_EXTRACT_ONLY)
 # Same dependency set PHY_NR itself declares -- these carry the include directories these sources
 # need (nr_common.h, the polar/smallblock decoders, the FAPI p5 headers), not just link objects.
-target_link_libraries(PHY_NR_PASSIVE_UL PUBLIC nr_phy_common nr_common nr_fapi_p5 polar smallblock ds)
+target_link_libraries(PHY_NR_PASSIVE_UL PUBLIC nr_sense_api nr_phy_common nr_common nr_fapi_p5 polar smallblock ds)
 # nr_mac_common.h (Qm/code-rate/TBS/BG helpers) pulls generated ASN.1 headers; same dependency
 # PHY_NR_UE declares for the same reason.
 target_link_libraries(PHY_NR_PASSIVE_UL PRIVATE asn1_nr_rrc_hdrs UTIL)
@@ -1112,6 +1119,7 @@ target_link_libraries(NR_UE_ISAC PUBLIC nr_sense_api PRIVATE UTIL)
 add_library(nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_api.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_records.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c)
+target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE $<$<BOOL:${ENABLE_ISAC_SENSING}>:NR_SRS_EXPORT_ON>)
 target_include_directories(nr_sense_api PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
 target_link_libraries(nr_sense_api PUBLIC pthread nr_passive_cfg_epoch PRIVATE LOG ${T_LIB})
 target_link_libraries(PHY_NR_PASSIVE_UL PRIVATE nr_sense_api)
@@ -2536,6 +2544,26 @@ if(ENABLE_TESTS)
   add_dependencies(test_nr_sense_gating params_libconfig)
   add_dependencies(tests test_nr_sense_gating)
   add_test(NAME test_nr_sense_gating COMMAND ./test_nr_sense_gating)
+  add_executable(test_nr_srs_blind
+    ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_estimate.c
+    ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/srs_rx.c
+    ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_export.c
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/dmrs_nr.c
+    ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_srs.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_blind.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_srs_blind_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_srs_blind_fixture.c
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/ul_ref_seq_nr.c)
+  target_link_libraries(test_nr_srs_blind PRIVATE nr_sense_api nr_phy_common PHY_COMMON nr_common nr_fapi_p5 asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL GTest::gtest_main)
+  target_compile_options(test_nr_srs_blind PRIVATE -ffunction-sections -fdata-sections -fvisibility=hidden)
+  target_link_options(test_nr_srs_blind PRIVATE -Wl,--gc-sections)
+  target_include_directories(test_nr_srs_blind PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  add_dependencies(tests test_nr_srs_blind)
+  add_test(NAME test_nr_srs_blind COMMAND test_nr_srs_blind)
 
   add_executable(test_nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc)
   target_link_libraries(test_nr_sense_api PRIVATE nr_sense_api GTest::gtest GTest::gtest_main)
