@@ -6,8 +6,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from score_r13 import score_run
+from check_traffic import recent_rate
 
 FIXTURE = Path(__file__).parent / "fixtures/bwp_good"
 
@@ -30,6 +32,8 @@ class ScoreR13Test(unittest.TestCase):
         r = score_run(self.root)
         self.assertEqual(r["status"], "PASS")
         self.assertEqual(r["recovery_s"], 4)
+        self.assertEqual(r["recovery_origin"], "apply")
+        self.assertEqual(r["recovery_from_apply_s"], 4)
         self.assertEqual(r["gnb_dci_11_bits_after"], 48)
         self.assertEqual(r["dropped_epoch"]["pdschq_drop_epoch"], 3)
 
@@ -70,16 +74,20 @@ class ScoreR13Test(unittest.TestCase):
         self.assertIsNone(r["recovery_s"])
         self.assertTrue(r["errors"])
 
-    def test_dedicated_relock_is_per_ue_without_required_cell_epoch(self):
-        self.events(scenario="dedicated_change")
+    def test_same_cell_restart_uses_first_dci_origin(self):
+        self.events(scenario="same_cell_restart_size_change")
         (self.root / "gnb/after.log").write_text("1021.000000 DCI11_WIDTHS total=49 fdra=9\n")
         (self.root / "rx/rx.log").write_text(
             "1013.000000 SIB1 decoded\n"
+            "1020.500000 CONFIG_EPOCH 1 -> 2 class=HARD_REVERIFY cause=CONTINUITY_LOSS\n"
             "1022.000000 SENSING: DCI length RELOCK rnti=0x1234 old=50 new=49\n"
             "1024.000000 SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=2 L=12 mask=0x4 table=0\n")
         r = score_run(self.root)
         self.assertEqual(r["status"], "PASS")
-        self.assertEqual(r["epoch_count"], 0)
+        self.assertEqual(r["recovery_origin"], "validation_start")
+        self.assertEqual(r["recovery_s"], 3)
+        self.assertEqual(r["recovery_from_apply_s"], 4)
+        self.assertEqual(r["epoch_count"], 1)
 
     def test_cell_restart_needs_hard_reset_and_new_pci(self):
         self.events(scenario="cell_restart")
@@ -97,6 +105,50 @@ class ScoreR13Test(unittest.TestCase):
         r = score_run(self.root)
         self.assertEqual(r["status"], "PASS")
         self.assertEqual(r["receiver_pci_after"], 1)
+        self.assertEqual(r["recovery_origin"], "validation_start")
+        self.assertEqual(r["recovery_s"], 4)
+        self.assertEqual(r["recovery_from_apply_s"], 5)
+
+    def test_restart_downtime_is_secondary_and_missing_truth_has_no_origin_time(self):
+        self.test_same_cell_restart_uses_first_dci_origin()
+        ep = self.root / "events.jsonl"
+        rows = [json.loads(s) for s in ep.read_text().splitlines()]
+        # Move the restart request earlier without moving first DCI or recovery.
+        next(x for x in rows if x["event"] == "apply")["t"] = 1014
+        ep.write_text("".join(json.dumps(x) + "\n" for x in rows))
+        r = score_run(self.root)
+        self.assertEqual(r["status"], "PASS")
+        self.assertEqual(r["recovery_s"], 3)
+        self.assertEqual(r["recovery_from_apply_s"], 10)
+        (self.root / "gnb/after.log").unlink()
+        r = score_run(self.root)
+        self.assertIsNone(r["recovery_origin_t"])
+        self.assertIsNone(r["recovery_s"])
+        self.assertEqual(r["status"], "INCOMPLETE")
+
+    def test_same_cell_restart_requires_continuity_loss(self):
+        self.test_same_cell_restart_uses_first_dci_origin()
+        p = self.root / "rx/rx.log"
+        p.write_text("\n".join(s for s in p.read_text().splitlines() if "CONFIG_EPOCH" not in s))
+        self.assertEqual(score_run(self.root)["status"], "INCOMPLETE")
+
+    def test_legacy_dedicated_name_is_scored_as_restart(self):
+        self.test_same_cell_restart_uses_first_dci_origin()
+        self.events(scenario="dedicated_change")
+        r = score_run(self.root)
+        self.assertEqual(r["scenario"], "same_cell_restart_size_change")
+        self.assertEqual(r["recovery_origin"], "validation_start")
+
+    @patch("check_traffic.time.monotonic_ns", return_value=21000000000)
+    def test_smoke_rate_rejects_sparse_missing_and_stale_traffic(self, _clock):
+        rows = [{"t_mono_ns": 1000000000, "pdcch_accepts_c": 0},
+                {"t_mono_ns": 11000000000, "pdcch_accepts_c": 2000},
+                {"t_mono_ns": 21000000000, "pdcch_accepts_c": 3000}]
+        self.assertEqual(recent_rate(rows), 100)
+        rows[-1]["pdcch_accepts_c"] = 2999
+        self.assertLess(recent_rate(rows), 100)
+        self.assertIsNone(recent_rate(rows[:-1]))
+        self.assertIsNone(recent_rate([]))
 
     def test_sib1less_rejects_sib1_context_evidence(self):
         self.events(sib="sib1less")
@@ -113,7 +165,7 @@ class ScoreR13Test(unittest.TestCase):
         p.write_text("\n".join(s for s in p.read_text().splitlines() if "CONFIG_EPOCH" not in s) + "\n")
         self.assertEqual(score_run(self.root)["status"], "CONTROL")
 
-    def test_stable_cell_needs_full_hour(self):
+    def test_stable_cell_needs_fifteen_minutes(self):
         self.events(scenario="stable")
         (self.root / "gnb/before.log").write_text(
             "1010.000000 Filling Format 1_1 DCI of size 50\n"
@@ -125,19 +177,19 @@ class ScoreR13Test(unittest.TestCase):
         self.assertEqual(score_run(self.root)["status"], "INCOMPLETE")
         ep = self.root / "events.jsonl"
         rows = [json.loads(s) for s in ep.read_text().splitlines()]
-        next(x for x in rows if x["event"] == "end")["t"] = 4700.0
+        next(x for x in rows if x["event"] == "end")["t"] = 1910.0
         ep.write_text("".join(json.dumps(x) + "\n" for x in rows))
         mp = self.root / "metrics.jsonl"
         metrics = [json.loads(s) for s in mp.read_text().splitlines()]
-        metrics[-1]["t_mono_ns"] = 3701000000000
-        metrics[-1]["pdcch_accepts_c"] = 462500
+        metrics[-1]["t_mono_ns"] = 901000000000
+        metrics[-1]["pdcch_accepts_c"] = 112500
         mp.write_text("".join(json.dumps(x) + "\n" for x in metrics))
         self.assertEqual(score_run(self.root)["status"], "PASS")
         with p.open("a") as f:
-            f.write("2000.000000 SENSING: CONFIG_EPOCH 2 -> 3 class=SOFT cause=NOISE scope=RNTI\n")
-        self.assertEqual(score_run(self.root)["status"], "PASS")
+            f.write("1500.000000 SENSING: CONFIG_EPOCH 2 -> 3 class=SOFT cause=NOISE scope=RNTI\n")
+        self.assertEqual(score_run(self.root)["status"], "INCOMPLETE")
         with p.open("a") as f:
-            f.write("3000.000000 SENSING: CONFIG_EPOCH 3 -> 4 class=SOFT cause=NOISE scope=RNTI\n")
+            f.write("1800.000000 SENSING: CONFIG_EPOCH 3 -> 4 class=SOFT cause=NOISE scope=RNTI\n")
         self.assertEqual(score_run(self.root)["status"], "INCOMPLETE")
 
     def test_startup_failure_is_incomplete_instead_of_crashing_campaign(self):
