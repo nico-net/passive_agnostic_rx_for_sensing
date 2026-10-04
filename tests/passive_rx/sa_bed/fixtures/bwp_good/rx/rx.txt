@@ -1,0 +1,6 @@
+1012.000000 SENSING: DCI 1_1 length locked coreset=1 rnti=0x1234 len=50
+1013.000000 SIB1 decoded
+1020.300000 SENSING: CONFIG_EPOCH 1 -> 2 class=SOFT cause=BWP_CHANGE scope=RNTI
+1022.000000 SENSING: DCI length RELOCK rnti=0x1234 old=50 new=48
+1023.000000 SENSING: BWP RESOLVED entry=2 len=48 size=24 start=70 ind_bits=2 after 50 grants
+1024.000000 SENSING: Technique D CONVERGED rnti=0x1234 tda=0 S=2 L=12 mask=0x4 table=0

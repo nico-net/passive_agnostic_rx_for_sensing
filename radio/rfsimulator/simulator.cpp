@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #include <netdb.h>
+#include <poll.h>
 
 #include <common/utils/assertions.h>
 #include <common/utils/LOG/log.h>
@@ -32,6 +33,7 @@
 #include "common_lib.h"
 #include "common/utils/threadPool/pthread_utils.h"
 extern "C" {
+#include "executables/softmodem-common.h"
 #include <common/utils/load_module_shlib.h>
 #include <openair1/SIMULATION/TOOLS/sim.h>
 #include <openair1/SIMULATION/TOOLS/sensing_channel.h>
@@ -47,6 +49,7 @@ extern int get_currentchannels_type(const char *buf,
 #include <sstream>
 #include <algorithm>
 #include <numeric>
+#include <chrono>
 
 #define PORT 4043 // default TCP port for this simulator
 #define sampleToByte(a, b) ((a) * (b) * sizeof(sample_t))
@@ -181,6 +184,9 @@ typedef struct {
   openair0_timestamp_t nextRxTstamp;
   openair0_timestamp_t lastWroteTS;
   simuRole role;
+  bool passive_client;
+  bool reconnect_pending;
+  bool passive_read_clock;
   char *ip;
   uint16_t port;
   int saveIQfile;
@@ -399,9 +405,19 @@ static void socketError(rfsimulator_state_t *bridge, buffer_t *buf)
 {
   if (buf->conn_sock != -1) {
     LOG_W(HW, "Lost socket\n");
+    if (bridge->passive_client)
+      mutexlock(bridge->Sockmutex);
+    if (bridge->passive_client) {
+      // A disconnect can interrupt a payload before it reaches received_packets.
+      free(buf->packet_ptr);
+      buf->packet_ptr = NULL;
+      bridge->reconnect_pending = true;
+    }
     removeCirBuf(bridge, buf);
+    if (bridge->passive_client)
+      mutexunlock(bridge->Sockmutex);
 
-    if (bridge->role == SIMU_ROLE_CLIENT)
+    if (bridge->role == SIMU_ROLE_CLIENT && !bridge->passive_client)
       exit(1);
   }
 }
@@ -440,7 +456,9 @@ static void fullwrite(int fd, void *_buf, ssize_t count, rfsimulator_state_t *t)
   ssize_t l;
 
   while (count) {
-    l = write(fd, buf, count);
+    // Passive clients can race a server shutdown with a dummy uplink write.
+    // Let the reader handle the disconnect instead of dying from SIGPIPE.
+    l = t->passive_client ? send(fd, buf, count, MSG_NOSIGNAL) : write(fd, buf, count);
 
     if (l == 0) {
       LOG_E(HW, "write() failed, returned 0\n");
@@ -882,7 +900,7 @@ static int startServer(openair0_device_t *device)
   return 0;
 }
 
-static int client_try_connect(const char *host, uint16_t port)
+static int client_try_connect(const char *host, uint16_t port, bool passive = false)
 {
   int sock = -1;
   int s;
@@ -908,7 +926,21 @@ static int client_try_connect(const char *host, uint16_t port)
       continue;
     }
 
-    if (connect(sock, rp->ai_addr, rp->ai_addrlen) != -1) {
+    // Bound passive connect waits so SIGINT also works with an unreachable peer.
+    if (passive && setblocking(sock, notBlocking) == -1) {
+      close(sock);
+      sock = -1;
+      continue;
+    }
+    int connected = connect(sock, rp->ai_addr, rp->ai_addrlen);
+    if (passive && connected < 0 && errno == EINPROGRESS) {
+      struct pollfd pfd = {sock, POLLOUT, 0};
+      int error = 0;
+      socklen_t len = sizeof(error);
+      if (poll(&pfd, 1, 200) > 0 && getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0)
+        connected = 0;
+    }
+    if (connected != -1) {
       break;
     }
 
@@ -925,11 +957,20 @@ static int startClient(openair0_device_t *device)
 {
   rfsimulator_state_t *t = static_cast<rfsimulator_state_t *>(device->priv);
   t->role = SIMU_ROLE_CLIENT;
+  const bool reconnecting = t->reconnect_pending;
+  const auto began = std::chrono::steady_clock::now();
+  const auto previous_next = t->nextRxTstamp;
+  unsigned attempt = 0;
   int sock;
 
+retry:
   while (true) {
+    if (t->passive_client && oai_exit)
+      return -1;
+    if (reconnecting)
+      LOG_I(HW, "rfsim passive client reconnect attempt=%u\n", ++attempt);
     LOG_I(HW, "Trying to connect to %s:%d\n", t->ip, t->port);
-    sock = client_try_connect(t->ip, t->port);
+    sock = client_try_connect(t->ip, t->port, t->passive_client);
 
     if (sock > 0) {
       LOG_I(HW, "Connection to %s:%d established\n", t->ip, t->port);
@@ -937,13 +978,22 @@ static int startClient(openair0_device_t *device)
     }
 
     LOG_I(HW, "connect() to %s:%d failed, errno(%d)\n", t->ip, t->port, errno);
-    sleep(1);
+    if (t->passive_client) {
+      for (int i = 0; i < 10 && !oai_exit; ++i)
+        usleep(100000);
+    } else {
+      sleep(1);
+    }
   }
 
   if (setblocking(sock, notBlocking) == -1) {
     return -1;
   }
+  if (t->passive_client)
+    mutexlock(t->Sockmutex);
   buffer_t *b = allocCirBuf(t, sock);
+  if (t->passive_client)
+    mutexunlock(t->Sockmutex);
   if (!b)
     return -1;
   // read a 1 sample block to initialize the current time
@@ -951,12 +1001,37 @@ static int startClient(openair0_device_t *device)
   do {
     have_to_wait = true;
     flushInput(t, 3, true);
+    if (t->passive_client && oai_exit)
+      return -1;
+    if (t->passive_client && b->conn_sock == -1) {
+      usleep(100000);
+      goto retry; // peer can disappear during the initial timestamp handshake too
+    }
     if (b->lastReceivedTS)
       have_to_wait = false;
   } while (have_to_wait);
   if (b->lastReceivedTS > 0)
     b->lastReceivedTS--;
   t->nextRxTstamp = b->lastReceivedTS;
+  if (reconnecting) {
+    // Rebase to the new server's RF clock, never conceal the gap with a continuous
+    // local clock. Even coincident clocks must reach the UE's RXDISCONT check.
+    if (t->nextRxTstamp == previous_next)
+      ++t->nextRxTstamp;
+    clear_beam_queue(&t->beam_ctrl->rx, INT64_MAX);
+    clear_beam_queue(&t->beam_ctrl->tx, INT64_MAX);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
+    LOG_I(HW, "rfsim passive client reconnected after %ld ms\n", (long)ms);
+  }
+  if (t->passive_client)
+    mutexlock(t->Sockmutex);
+  if (reconnecting)
+    t->lastWroteTS = 0;
+  if (reconnecting)
+    t->passive_read_clock = true;
+  t->reconnect_pending = false;
+  if (t->passive_client)
+    mutexunlock(t->Sockmutex);
   LOG_D(HW, "Client got first timestamp: starting at %lu\n", t->nextRxTstamp);
   if (b->channel_model)
     b->channel_model->start_TS = t->nextRxTstamp;
@@ -972,6 +1047,10 @@ static int rfsimulator_write_internal(rfsimulator_state_t *t,
                                       int flags)
 {
   mutexlock(t->Sockmutex);
+  if (t->passive_client && (t->reconnect_pending || t->passive_read_clock)) {
+    mutexunlock(t->Sockmutex);
+    return nsamps;
+  }
   LOG_D(HW, "Sending %d samples at time: %ld, nbAnt %d\n", nsamps, timestamp, nbAnt);
 
   for (int i = 0; i < MAX_FD_RFSIMU; i++) {
@@ -1281,6 +1360,10 @@ static bool flushInput(rfsimulator_state_t *t, int timeout, bool first_time)
 
     ssize_t sz = recv(b->conn_sock, b->transferPtr, b->remainToTransfer, MSG_DONTWAIT);
     if (sz <= 0) {
+      if (t->passive_client && (sz == 0 || (errno != EAGAIN && errno != EINTR))) {
+        socketError(t, b);
+        continue;
+      }
       if (sz < 0 && errno != EAGAIN)
         LOG_E(HW, "recv() failed, errno(%d)\n", errno);
       continue;
@@ -1434,6 +1517,36 @@ static int rfsimulator_read_beams(openair0_device_t *device,
   // check if a UE is connected
   int first_sock;
 
+read_again:
+  // Reconnect only on the reader thread, outside flushInput's event traversal.
+  // No samples are delivered while disconnected, and old peer packets are gone.
+  if (t->passive_client && t->reconnect_pending && startClient(device) < 0) {
+    for (int beam = 0; beam < num_beams; ++beam)
+      for (int a = 0; a < nbAnt; ++a)
+        memset(samplesVoid[beam][a], 0, sampleToByte(nsamps, 1));
+    *ptimestamp = t->nextRxTstamp;
+    t->nextRxTstamp += nsamps;
+    return nsamps; // allow the UE loop to observe shutdown
+  }
+  if (t->passive_read_clock) {
+    // The old UE TX pipeline still carries the previous server's timestamps.
+    // After reconnect, drive this receive-only client's simulator clock here,
+    // using silence, rather than letting old dummy writes advance the new gNB
+    // far into the future. A timestamped one-sample block also represents the
+    // preceding zero gap in process_recv_header(). Keep 10 ms of RX/TX lead.
+    mutexlock(t->Sockmutex);
+    const uint64_t until = t->nextRxTstamp + nsamps + (uint64_t)(t->sample_rate / 100);
+    samplesBlockHeader_t header = {1, (uint32_t)t->tx_num_channels, until, 0, 0, 1};
+    std::vector<c16_t> silence(t->tx_num_channels, c16_t{0, 0});
+    for (int sock = 0; sock < MAX_FD_RFSIMU; ++sock) {
+      buffer_t *b = &t->buf[sock];
+      if (b->conn_sock >= 0) {
+        fullwrite(b->conn_sock, &header, sizeof(header), t);
+        fullwrite(b->conn_sock, silence.data(), sampleToByte(1, t->tx_num_channels), t);
+      }
+    }
+    mutexunlock(t->Sockmutex);
+  }
   for (first_sock = 0; first_sock < MAX_FD_RFSIMU; first_sock++)
     if (t->buf[first_sock].conn_sock != -1)
       break;
@@ -1475,6 +1588,8 @@ static int rfsimulator_read_beams(openair0_device_t *device,
               b->lastReceivedTS,
               t->nextRxTstamp + nsamps);
         flushInput(t, 3, false);
+        if (t->passive_client && t->reconnect_pending)
+          goto read_again;
       }
     } while (have_to_wait);
   }
@@ -1638,6 +1753,7 @@ extern "C" __attribute__((__visibility__("default"))) int device_init(openair0_d
   rfsimulator->tx_bw = openair0_cfg->tx_bw;
   rfsimulator->beam_ctrl = new rfsim_beam_ctrl_t;
   rfsimulator_readconfig(rfsimulator);
+  rfsimulator->passive_client = rfsimulator->role == SIMU_ROLE_CLIENT && IS_PASSIVE_RX_MODE(get_softmodem_params());
   if (rfsimulator->prop_delay_ms > 0.0)
     rfsimulator->chan_offset = ceil(rfsimulator->sample_rate * rfsimulator->prop_delay_ms / 1000);
   if (rfsimulator->chan_offset != 0) {

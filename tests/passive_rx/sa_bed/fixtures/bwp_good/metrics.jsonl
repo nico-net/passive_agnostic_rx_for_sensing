@@ -1,0 +1,2 @@
+{"t_mono_ns":1000000000,"pdcch_accepts_c":0,"scanq_drop_epoch":0,"pdcch_inline_drop_epoch":0,"pdschq_drop_epoch":0,"puschq_drop_epoch":0,"td_cb0_backend":{"cpu":10,"gpu":0}}
+{"t_mono_ns":41000000000,"pdcch_accepts_c":5000,"scanq_drop_epoch":2,"pdcch_inline_drop_epoch":1,"pdschq_drop_epoch":3,"puschq_drop_epoch":0,"td_cb0_backend":{"cpu":20,"gpu":0}}
