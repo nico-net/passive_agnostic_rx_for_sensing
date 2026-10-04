@@ -1402,7 +1402,8 @@ endif()
 
 add_library(nr_passive_cfg_epoch STATIC
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c
-  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c)
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
 target_link_libraries(nr_passive_cfg_epoch PRIVATE UTIL)
 add_library(MAC_UE_NR ${MAC_NR_SRC_UE})
 target_link_libraries(MAC_UE_NR PRIVATE nr_passive_cfg_epoch)
@@ -2631,6 +2632,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_passive_obs PRIVATE GTest::gtest GTest::gtest_main pthread m)
   add_dependencies(tests test_nr_passive_obs)
   add_test(NAME test_nr_passive_obs COMMAND ./test_nr_passive_obs)
+
+  add_executable(test_nr_passive_ue_ctx ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
+  target_include_directories(test_nr_passive_ue_ctx PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_ue_ctx PRIVATE GTest::gtest GTest::gtest_main pthread m)
+  add_dependencies(tests test_nr_passive_ue_ctx)
+  add_test(NAME test_nr_passive_ue_ctx COMMAND ./test_nr_passive_ue_ctx)
 
   add_executable(test_nr_pdsch_xoverhead ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_xoverhead_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c)
