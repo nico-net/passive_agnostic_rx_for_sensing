@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "PHY/sse_intrin.h"
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/CODING/nrLDPC_defs.h"
@@ -577,6 +578,15 @@ static int key_cmp(const void *a, const void *b, void *keys)
 }
 
 static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, bool force_cpu);
+static __thread uint64_t t_last_compute_ns;
+static __thread int t_last_decoded;
+void nr_td_cb0_last_compute(uint64_t *ns, int *decoded)
+{
+  if (ns)
+    *ns = t_last_compute_ns;
+  if (decoded)
+    *decoded = t_last_decoded;
+}
 int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
 {
   return cb0_batch_impl(items, n, out, false);
@@ -663,6 +673,8 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
   atomic_fetch_add(&st_decoded, nr);
 
   pthread_mutex_lock(&g_lock);
+  struct timespec tl0;
+  clock_gettime(CLOCK_MONOTONIC, &tl0); /* compute time only: not the wait for another thread's batch */
   if (g_gpu_on < 0) {
     const char *e = getenv("NR_GPU_CB0");
     use_gpu_locked(e && atoi(e) == 1);
@@ -704,6 +716,12 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
     }
     cb0_job_t j = {.items = ritem, .meta = rmeta, .l = l, .have_l = have, .out = rout, .dec = g_dec, .n = nr, .Emax = Emax};
     cb0_run(&j, g_threads);
+  }
+  {
+    struct timespec tl1;
+    clock_gettime(CLOCK_MONOTONIC, &tl1);
+    t_last_compute_ns = (uint64_t)(tl1.tv_sec - tl0.tv_sec) * 1000000000ull + (uint64_t)tl1.tv_nsec - (uint64_t)tl0.tv_nsec;
+    t_last_decoded = nr;
   }
   pthread_mutex_unlock(&g_lock);
   for (int r = 0; r < nr; r++)

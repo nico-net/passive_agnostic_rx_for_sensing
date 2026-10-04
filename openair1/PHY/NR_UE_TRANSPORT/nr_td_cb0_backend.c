@@ -172,11 +172,16 @@ int nr_td_cb0_exec(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out
     }
   } else {
     nr_td_cb0_batch_cpu(items, n, out);
+    nr_td_cb0_last_compute(&info->compute_ns, &info->distinct);
     info->backend = NR_TD_CB0_BE_CPU;
     info->threads = nr_td_cb0_get_threads();
     atomic_fetch_add(&s_batches_cpu, 1);
   }
   info->wall_ns = now_ns() - t0;
+  if (info->backend == NR_TD_CB0_BE_GPU) {
+    info->compute_ns = info->wall_ns;
+    info->distinct = n;
+  }
   uint8_t dec = 0;
   for (int i = 0; i < n; i++) {
     if (out[i].pass == -1)

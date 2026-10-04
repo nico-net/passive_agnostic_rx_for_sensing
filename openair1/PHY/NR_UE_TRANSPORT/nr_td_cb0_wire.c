@@ -387,13 +387,15 @@ void nr_td_cb0_wire_run(nr_td_grantwork_t *gw)
       p->rpass[p->n_res] = r->pass == 1;
       p->n_res++;
     }
+    /* CPU charged = decode wall (without the wait for another consumer's batch) x threads the distinct items could use */
     const int thr = p->ex.backend == NR_TD_CB0_BE_CPU ? p->ex.threads : 0;
-    int tu = thr < n ? thr : n;
+    const int nd = p->ex.distinct > 0 ? p->ex.distinct : n;
+    int tu = thr < nd ? thr : nd;
     if (tu < 1)
       tu = 1;
-    atomic_fetch_add(&s_cpu_us, (uint64_t)((double)p->ex.wall_ns / 1000.0 * tu));
+    atomic_fetch_add(&s_cpu_us, (uint64_t)((double)p->ex.compute_ns / 1000.0 * tu));
     pthread_mutex_lock(&g_lock);
-    nr_td_cb0_sched_account(&g_sched, p->planned_us, p->ex.wall_ns, thr, n, g_freeze ? 0 : p->ex.sum_iters, build_ns,
+    nr_td_cb0_sched_account(&g_sched, p->planned_us, p->ex.compute_ns, thr, nd, g_freeze ? 0 : p->ex.sum_iters, build_ns,
                             g_freeze ? 0 : new_sigs);
     const nr_td_cb0_sched_t sc = g_sched;
     pthread_mutex_unlock(&g_lock);
@@ -403,9 +405,9 @@ void nr_td_cb0_wire_run(nr_td_grantwork_t *gw)
       nr_td_cb0_sched_sizes(&sc, p->n_active, 1, &z);
       LOG_A(PHY,
             "SENSING: TD_CB0_SCHED batches=%lu us_per_iter=%.1f item_us=%.0f sig_us=%.0f tokens_us=%.0f b_items=%d g_target=%d "
-            "last: n=%d new_sigs=%d build_us=%.0f batch_wall_us=%.0f threads=%d backend=%u\n",
+            "last: n=%d distinct=%d new_sigs=%d build_us=%.0f batch_wall_us=%.0f compute_us=%.0f iters=%u threads=%d backend=%u\n",
             (unsigned long)nb, sc.us_per_iter, nr_td_cb0_sched_item_us(&sc), sc.sig_us, sc.tokens_us, z.b_items, z.g_target, n,
-            new_sigs, build_ns / 1000.0, p->ex.wall_ns / 1000.0, thr, p->ex.backend);
+            nd, new_sigs, build_ns / 1000.0, p->ex.wall_ns / 1000.0, p->ex.compute_ns / 1000.0, p->ex.sum_iters, thr, p->ex.backend);
     }
   } else {
     pthread_mutex_lock(&g_lock);

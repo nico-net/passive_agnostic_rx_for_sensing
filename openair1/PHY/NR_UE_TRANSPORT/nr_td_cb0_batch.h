@@ -208,13 +208,18 @@ typedef struct {
   uint8_t mixed;      /* 1: decoded items disagree on decoder_used (also failed) */
   int decoded;        /* items with pass != -1 */
   uint32_t sum_iters; /* sum of iterations over decoded items (0 when the backend does not report them) */
-  uint64_t wall_ns;   /* wall time of the batch */
+  uint64_t wall_ns;   /* wall time of the batch (incl. waiting for the backend) */
+  uint64_t compute_ns; /* CPU backend: decode wall without the lock wait (nr_td_cb0_last_compute); GPU: = wall_ns */
+  int distinct;        /* CPU backend: items decoded after dedup */
   int threads;        /* worker threads the batch could use (CPU backend), 0 for the GPU */
 } nr_td_cb0_exec_t;
 /* Run one batch on the selected backend (see above). Returns info.decoded, or -1 on bad arguments. */
 int nr_td_cb0_exec(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, nr_td_cb0_exec_t *info);
 /* nr_td_cb0_batch() with the CUDA LDPC path and the GPU de-matching forced off: the CPU backend. */
 int nr_td_cb0_batch_cpu(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out);
+/* This thread's last nr_td_cb0_batch / _cpu call: wall of the decode itself (after the internal lock was taken, so
+ * without the wait for another thread's batch) and the number of distinct items decoded (after dedup). */
+void nr_td_cb0_last_compute(uint64_t *ns, int *decoded);
 /* Worker threads configured for the CPU backend (nr_td_cb0_set_threads). */
 int nr_td_cb0_get_threads(void);
 /* Backend counters since start: batches per backend, GPU failures, GPU batches skipped (back-off / unhealthy). */
