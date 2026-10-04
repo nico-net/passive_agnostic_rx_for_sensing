@@ -1589,7 +1589,7 @@ int nr_process_pbch_symbol(
   // NR cell transmits this on a fixed raster, so it is the sensing source most robust to
   // cell-specific misconfiguration. Guarded by nr_isac_source_enabled() so this is a true no-op
   // (not even the k_abs derivation runs) unless "ssb" is in sensing.sources.
-  if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
+  if (nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
     uint32_t k_abs[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     uint32_t l_sym[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     // k_ssb hardcoded to 0: there is no PHY-side plumbing path to the MAC's real
@@ -2301,7 +2301,7 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
                                          double nvar,
                                          uint32_t G)
 {
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
   if (decoded_tb == NULL)
     return; // caller did not publish a transport block (decode path did not run)

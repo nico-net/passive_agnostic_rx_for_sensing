@@ -67,8 +67,19 @@ void crcTableInit(void);
 #include "nr_pdsch_prb_set.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pdcch_blind_monitor_rt.h"
+#include "nr_sense_gating.h"
 #include "nr_pdcch_blind_phase2.h"
 #include "executables/softmodem-common.h"
+}
+
+TEST(BlindSenseGating, ChestAndCapFollowTheSelectedDmrsSource) {
+  EXPECT_FALSE(nr_sense_blind_need_chest(-1,0.0f));
+  EXPECT_TRUE(nr_sense_blind_need_chest(-1,1.0f));
+  EXPECT_TRUE(nr_sense_blind_need_chest(NR_ISAC_SRC_PDSCH_DMRS,0.0f));
+  EXPECT_TRUE(nr_sense_blind_need_chest(NR_ISAC_SRC_PDSCH_DMRS_BLIND,0.0f));
+  EXPECT_TRUE(nr_sense_blind_skip_capped(-1,1,1));
+  EXPECT_FALSE(nr_sense_blind_skip_capped(NR_ISAC_SRC_PDSCH_DMRS,1,1));
+  EXPECT_FALSE(nr_sense_blind_skip_capped(-1,0,1));
 }
 
 struct SibEnvGuard {

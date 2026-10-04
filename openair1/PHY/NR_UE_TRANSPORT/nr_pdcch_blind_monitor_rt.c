@@ -72,6 +72,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"          // nr_pdsch_channel_estimation
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
+#include "PHY/NR_UE_TRANSPORT/nr_sense_gating.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"        // timing advance out of an overheard MAC PDU
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
@@ -3528,9 +3529,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       ? nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame) : 0;
   if (cfg_reconf_on) nr_cfg_epoch_tick(cfg_abs_slot);
 
-  const bool isac_on     = nr_isac_enabled() != 0;
-  const bool want_dmrs   = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
-  const bool want_data   = isac_on && cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
+  const int dmrs_source  = nr_sense_blind_dmrs_source();
+  const bool want_dmrs   = dmrs_source >= 0;
+  const bool want_data   = cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
   const bool want_decode = cfg->pdsch_decode >= 1;
   const bool defer       = nr_pdsch_passive_queue_running();
 
@@ -6899,7 +6900,7 @@ constdiag_done:;
      * The DEFERRED decode does its own FEP and channel estimation in the consumer, so skipping here
      * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
      * SNR gate off, so on the sensing config this skips the whole block. */
-    const bool need_chest = want_dmrs || (cfg->min_snr_lin > 0.0f);
+    const bool need_chest = nr_sense_blind_need_chest(dmrs_source, cfg->min_snr_lin);
     if (want_decode && (cfg->pdsch_rv0_only && out.rv != 0))
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "rv!=0");
     if (want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot)
@@ -6973,7 +6974,8 @@ constdiag_done:;
      * direction: it is largest in the regime where receive-thread duty is already at the ~18 % PBCH
      * lock threshold. Bail out before the expensive work instead. `want_dmrs` still gets its
      * estimate because the DM-RS CFR tap is not subject to the decode cap. */
-    if (!want_dmrs && want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot) {
+    if (nr_sense_blind_skip_capped(dmrs_source, want_decode,
+                                  decodes_this_occasion >= cfg->pdsch_max_per_slot)) {
       NR_BLIND_CTR_INC(g_dec_over_cap);
       continue;
     }
@@ -7013,15 +7015,19 @@ constdiag_done:;
       for (int j = 0; j < num_sc && nof_re < 273 * NR_NB_SC_PER_RB; j += 2) { // comb-2, matches pdsch_dmrs
         for (uint32_t a = 0; a < nof_ant; a++) {
           const c16_t *dl_ch_a = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_sym];
-          const size_t o       = 2 * ((size_t)a * (273 * NR_NB_SC_PER_RB) + nof_re);
-          isac_h[o]            = (float)dl_ch_a[j].r;
-          isac_h[o + 1]        = (float)dl_ch_a[j].i;
+          if (want_dmrs) {
+            const size_t o = 2 * ((size_t)a * (273 * NR_NB_SC_PER_RB) + nof_re);
+            isac_h[o]     = (float)dl_ch_a[j].r;
+            isac_h[o + 1] = (float)dl_ch_a[j].i;
+          }
           if (a == 0) {
             h_pow_sum += (double)dl_ch_a[j].r * dl_ch_a[j].r + (double)dl_ch_a[j].i * dl_ch_a[j].i;
           }
         }
-        isac_k[nof_re] = base_sc + (uint32_t)j;
-        isac_l[nof_re] = (uint32_t)dmrs_sym;
+        if (want_dmrs) {
+          isac_k[nof_re] = base_sc + (uint32_t)j;
+          isac_l[nof_re] = (uint32_t)dmrs_sym;
+        }
         nof_re++;
       }
       // ---- Gate 3 (last, most expensive to reach): the actual DMRS channel estimate itself looks
@@ -7041,7 +7047,7 @@ constdiag_done:;
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
+          nr_isac_submit_cfr_multi(abs_slot, 0.0f, dmrs_source, &carrier, isac_h, nof_ant,
                                    273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
           NR_BLIND_CTR_INC(g_cfr_submits);
         }
