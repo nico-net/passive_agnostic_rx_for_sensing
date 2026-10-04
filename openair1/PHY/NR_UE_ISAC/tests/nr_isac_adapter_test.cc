@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -7,6 +8,7 @@
 #include <iterator>
 #include <string>
 #include <sstream>
+#include <tuple>
 #include <vector>
 #include <unistd.h>
 extern "C" {
@@ -48,7 +50,7 @@ struct Adapter : testing::Test {
     argv[0]=arg0.data(); argv[1]=arg1.data(); argv[2]=config.data();
     uniqCfg=load_configmodule(3,argv,0);
     ASSERT_NE(uniqCfg,nullptr);
-    nr_isac_init(); nr_isac_start();
+    nr_isac_init(); nr_isac_set_rx_antennas(4); nr_isac_start();
   }
   std::string cfg(int enable, const std::string &sources) {
     return "sensing={enable="+std::to_string(enable)+";sources=\""+sources+
@@ -70,7 +72,7 @@ extern "C" void __wrap_logRecord_mt(const char *, const char *, int, int, int le
   warnings.emplace_back(b);
 }
 TEST_F(Adapter, SubmitMultiProducesOneFramePerCall) {
-  init(cfg(1,"all"));
+  init(cfg(1,"csi_rs,pdsch_dmrs,pdsch_data,pdsch_dmrs_blind,pusch_dmrs,pusch_data,ssb"));
   const int sources[]={NR_ISAC_SRC_CSI_RS, NR_ISAC_SRC_PDSCH_DATA, NR_ISAC_SRC_PDSCH_DMRS_BLIND,
     NR_ISAC_SRC_PUSCH_DMRS, NR_ISAC_SRC_PUSCH_DATA, NR_ISAC_SRC_SSB, NR_ISAC_SRC_PDSCH_DMRS};
   const int mapped[]={NR_SENSE_SRC_CSIRS,NR_SENSE_SRC_PDSCH_DATA,NR_SENSE_SRC_PDSCH_DMRS,
@@ -97,7 +99,7 @@ TEST_F(Adapter, SubmitMultiProducesOneFramePerCall) {
 #endif
 }
 TEST_F(Adapter, SourceFilterRespected) {
-  init(cfg(1,"ssb,csirs"));
+  init(cfg(1,"ssb,csi_rs"));
   EXPECT_FALSE(nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA));
   submit(NR_ISAC_SRC_PDSCH_DATA); submit(NR_ISAC_SRC_PDSCH_DMRS_BLIND); submit(NR_ISAC_SRC_SSB);
   nr_isac_stop();
@@ -117,7 +119,10 @@ TEST_F(Adapter, LegacySensingKeysAcceptedAndIgnored) {
   // Even the red engine must not create its old outputs outside this test's directory.
   for(const std::string old:{"/tmp/passive_rx/x410_manual_reports.jsonl","/tmp/passive_rx/x410_manual_sensing","tcp://*:5556"}) {
     auto pos=body.find(old); ASSERT_NE(pos,std::string::npos);
-    body.replace(pos,old.size(),old=="tcp://*:5556" ? "" : dir+"/legacy");
+    while(pos!=std::string::npos) {
+      body.replace(pos,old.size(),old=="tcp://*:5556" ? "" : dir+"/legacy");
+      pos=body.find(old,pos+1);
+    }
   }
   init(body);
 #ifdef SENSE_ADAPTER_ON
@@ -161,12 +166,14 @@ TEST_F(Adapter, EntireLegacyVocabularyIsInertAndMetadataSurvives) {
   std::istringstream lines(legacy); std::string line;
   while (std::getline(lines,line)) {
     auto pos=line.find(" = ");
-    if(pos!=std::string::npos) { EXPECT_NE(warnings[0].find(line.substr(0,pos)),std::string::npos); }
+    if(pos!=std::string::npos && line.find("source = ")!=0 && line.find("subslot_")!=0) {
+      EXPECT_NE(warnings[0].find(line.substr(0,pos)),std::string::npos);
+    }
   }
   EXPECT_TRUE(nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS));
   EXPECT_FALSE(nr_isac_source_enabled(NR_ISAC_SRC_SSB));
   uint32_t re=1; float snr=1;
-  EXPECT_EQ(nr_isac_subslot_config(&re,&snr),0u); EXPECT_EQ(re,0u); EXPECT_EQ(snr,0);
+  EXPECT_EQ(nr_isac_subslot_config(&re,&snr),0u); EXPECT_EQ(re,0u); EXPECT_EQ(snr,-999);
   submit(NR_ISAC_SRC_CSI_RS); nr_isac_stop();
   EXPECT_FALSE(read(cfr).empty());
   EXPECT_NE(read(records).find("\"rx_array\":\"0,0;0.5,0\""),std::string::npos);
@@ -184,13 +191,13 @@ TEST_F(Adapter, SingleAntennaWrappersAndTruncation) {
   init(body);
 #ifdef SENSE_ADAPTER_ON
   EXPECT_TRUE(nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS));
-  EXPECT_TRUE(nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND));
+  EXPECT_FALSE(nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND));
 #endif
   float iq[24]; uint32_t k[12], l[12];
   for(int i=0;i<24;i++) iq[i]=i+0.25f;
   for(int i=0;i<12;i++) { k[i]=100+i; l[i]=i%4; }
   nr_isac_submit_cfr(8,NR_ISAC_SRC_PDSCH_DMRS,nullptr,iq,k,l,12,2);
-  nr_isac_submit_cfr_at(9,0.75f,NR_ISAC_SRC_PDSCH_DMRS_BLIND,nullptr,iq,k,l,12,2);
+  nr_isac_submit_cfr_at(9,0.75f,NR_ISAC_SRC_PDSCH_DMRS,nullptr,iq,k,l,12,2);
   nr_isac_stop();
 #ifdef SENSE_ADAPTER_ON
   auto b=read(cfr);
@@ -204,6 +211,89 @@ TEST_F(Adapter, SingleAntennaWrappersAndTruncation) {
   nr_sense_stats_t stats{}; nr_sense_stats(&stats); EXPECT_EQ(stats.truncated,2u);
 #else
   EXPECT_FALSE(std::filesystem::exists(cfr));
+#endif
+}
+
+TEST_F(Adapter, EnableWithoutSinkKeepsSourcesActive) {
+  std::filesystem::copy_file(SENSE_SOURCE_DIR "/tests/passive_rx/adaptive_dl_ul_sensing.conf",config);
+  auto body=read(config);
+  for(const std::string old:{"/tmp/passive_rx/x410_manual_reports.jsonl","/tmp/passive_rx/x410_manual_sensing","tcp://*:5556"}) {
+    auto pos=body.find(old); ASSERT_NE(pos,std::string::npos);
+    while(pos!=std::string::npos) {
+      body.replace(pos,old.size(),old=="tcp://*:5556" ? "" : dir+"/legacy");
+      pos=body.find(old,pos+1);
+    }
+  }
+  init(body);
+#ifdef SENSE_ADAPTER_ON
+  EXPECT_TRUE(nr_isac_enabled());
+  EXPECT_TRUE(nr_isac_source_enabled(NR_ISAC_SRC_SSB));
+  EXPECT_TRUE(nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND));
+  submit(NR_ISAC_SRC_SSB);
+  nr_sense_stats_t stats{}; nr_sense_stats(&stats);
+  EXPECT_EQ(stats.cfr_no_sink,1u);
+  EXPECT_EQ(std::count_if(warnings.begin(),warnings.end(),[](const auto &w) { return w.find("no records_path/cfr_path")!=std::string::npos; }),1);
+  EXPECT_FALSE(std::filesystem::exists(dir+"/legacy"));
+#else
+  EXPECT_FALSE(nr_isac_enabled());
+#endif
+}
+
+TEST_F(Adapter, SourceTokensMatchLegacy) {
+  const std::pair<const char *, int> tokens[]={{"csi_rs",NR_ISAC_SRC_CSI_RS},{"pdsch_dmrs",NR_ISAC_SRC_PDSCH_DMRS},
+    {"pdsch_data",NR_ISAC_SRC_PDSCH_DATA},{"pusch_dmrs",NR_ISAC_SRC_PUSCH_DMRS},
+    {"pusch_data",NR_ISAC_SRC_PUSCH_DATA},{"pdsch_dmrs_blind",NR_ISAC_SRC_PDSCH_DMRS_BLIND},
+    {"ssb",NR_ISAC_SRC_SSB}};
+  for (auto [token, expected]:tokens) {
+    init(cfg(1,token));
+#ifdef SENSE_ADAPTER_ON
+    for(int src=0;src<NR_ISAC_SRC_COUNT;src++) EXPECT_EQ(nr_isac_source_enabled(src),src==expected) << token;
+#endif
+    nr_isac_stop(); end_configmodule(uniqCfg); uniqCfg=nullptr;
+  }
+  for (auto [sources, legacy, expected]: {std::tuple<const char *,const char *,int>{"", "pdsch_data",NR_ISAC_SRC_PDSCH_DATA},
+        {"unknown", "pdsch_dmrs",NR_ISAC_SRC_PDSCH_DMRS},{"", "unknown",NR_ISAC_SRC_CSI_RS},
+        {"csirs", "pdsch_data",NR_ISAC_SRC_PDSCH_DATA},
+        {"all", "pdsch_data",NR_ISAC_SRC_PDSCH_DATA}}) {
+    auto body=cfg(1,sources); body.insert(body.rfind("};"),std::string("source=\"")+legacy+"\";");
+    init(body);
+#ifdef SENSE_ADAPTER_ON
+    for(int src=0;src<NR_ISAC_SRC_COUNT;src++) EXPECT_EQ(nr_isac_source_enabled(src),src==expected);
+#endif
+    nr_isac_stop(); end_configmodule(uniqCfg); uniqCfg=nullptr;
+  }
+  auto body=cfg(1,"");
+  body.erase(body.find("sources="),std::strlen("sources=\"\";"));
+  init(body);
+#ifdef SENSE_ADAPTER_ON
+  EXPECT_TRUE(nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS));
+#endif
+}
+
+TEST_F(Adapter, AntennaLimitAndRejectedIndices) {
+  auto body=cfg(1,"ssb"); body.insert(body.rfind("};"),"cfr_antennas=1;");
+  init(body);
+#ifdef SENSE_ADAPTER_ON
+  submit(NR_ISAC_SRC_SSB);
+  float iq[18]={}; uint32_t good_k[1]={100}, bad_k[1]={65536}, l[1]={0};
+  nr_isac_submit_cfr_multi(1,0,NR_ISAC_SRC_SSB,nullptr,iq,9,1,good_k,l,1,0);
+  nr_isac_submit_cfr_multi(1,0,NR_ISAC_SRC_SSB,nullptr,iq,1,1,bad_k,l,1,0);
+  nr_sense_stats_t stats{}; nr_sense_stats(&stats);
+  EXPECT_EQ(stats.cfr_rejected,2u);
+  nr_isac_stop(); auto b=read(cfr);
+  ASSERT_EQ(b.size(),48u+36u+12u*8u);
+  EXPECT_EQ(uint8_t(b[17]),1);
+#endif
+}
+
+TEST_F(Adapter, SubslotConfigPassesThrough) {
+  auto body=cfg(1,"pdsch_data"); body.insert(body.rfind("};"),
+    "subslot_symbols=3;subslot_min_re=72;subslot_min_snr_db=4.5;");
+  init(body);
+#ifdef SENSE_ADAPTER_ON
+  uint32_t re=0; float snr=0;
+  EXPECT_EQ(nr_isac_subslot_config(&re,&snr),3u);
+  EXPECT_EQ(re,72u); EXPECT_FLOAT_EQ(snr,4.5f);
 #endif
 }
 

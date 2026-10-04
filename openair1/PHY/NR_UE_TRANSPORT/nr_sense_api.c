@@ -23,9 +23,9 @@ static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 static _Atomic bool active, closed_seen, pause_writer, fail_writes;
 static _Atomic uint32_t write_chunk, writer_limit, written_items;
 static _Atomic uint64_t after_close;
-static bool opened, stopping;
+static bool opened, stopping, no_sink;
 static uint8_t *frames;
-static uint32_t *frame_lengths, frame_cap, frame_re, frame_stride, frame_head, frame_count;
+static uint32_t *frame_lengths, frame_cap, frame_re, frame_ant, frame_stride, frame_head, frame_count;
 static char *records;
 static uint32_t *record_lengths, record_cap, record_head, record_count;
 static int cfr_fd = -1, record_fd = -1;
@@ -117,13 +117,23 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
 {
   pthread_once(&mu_once, init_mu);
   pthread_mutex_lock(&mu);
+  const uint32_t max_ant = cfg && cfg->cfr_max_ant ? cfg->cfr_max_ant : MAX_ANT;
   if (opened || !cfg || !cfg->cfr_ring_frames || !cfg->cfr_max_re || !cfg->rec_ring_slots ||
-      (!cfg->cfr_path && !cfg->records_path && !cfg->endpoint) ||
-      cfg->cfr_max_re > (SIZE_MAX - FRAME_HEADER - 3) / (3 + 8 * MAX_ANT) ||
+      max_ant > MAX_ANT ||
+      cfg->cfr_max_re > (SIZE_MAX - FRAME_HEADER - 3) / (3 + 8 * max_ant) ||
       cfg->cfr_ring_frames > SIZE_MAX / sizeof(uint32_t) || cfg->rec_ring_slots > SIZE_MAX / RECORD_BYTES) {
     pthread_mutex_unlock(&mu); return -1;
   }
-  const size_t stride=FRAME_HEADER + 3*(size_t)cfg->cfr_max_re + 3 + 8*MAX_ANT*(size_t)cfg->cfr_max_re;
+  no_sink=!cfg->cfr_path && !cfg->records_path && !cfg->endpoint;
+  frame_ant=max_ant;
+  if (no_sink) {
+    frame_cap=cfg->cfr_ring_frames; frame_re=cfg->cfr_max_re; record_cap=cfg->rec_ring_slots;
+    next_id=0; memset(&stats,0,sizeof(stats)); stopping=false; opened=true;
+    atomic_store(&after_close,0); atomic_store(&closed_seen,false);
+    atomic_store_explicit(&active,true,memory_order_release);
+    pthread_mutex_unlock(&mu); return 0;
+  }
+  const size_t stride=FRAME_HEADER + 3*(size_t)cfg->cfr_max_re + 3 + 8*max_ant*(size_t)cfg->cfr_max_re;
   if (stride>UINT32_MAX || cfg->cfr_ring_frames > SIZE_MAX / stride) { pthread_mutex_unlock(&mu); return -1; }
   frame_stride=(uint32_t)stride;
   frames=malloc((size_t)cfg->cfr_ring_frames*frame_stride);
@@ -178,6 +188,7 @@ void nr_sense_close(void)
   if (!opened) { pthread_mutex_unlock(&mu); return; }
   opened=false; atomic_store_explicit(&active,false,memory_order_release);
   atomic_store(&closed_seen,true); stopping=true; pthread_cond_signal(&cv);
+  if (no_sink) { no_sink=false; pthread_mutex_unlock(&mu); return; }
   pthread_mutex_unlock(&mu);
   pthread_join(worker,NULL);
   pthread_mutex_lock(&mu);
@@ -193,31 +204,44 @@ void nr_sense_close(void)
   frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL;
   pthread_mutex_unlock(&mu);
 }
-bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_relaxed); }
+bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire); }
 
-uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
-                           const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,
-                           float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
+void nr_sense_reject_cfr(void)
+{
+  if (!nr_sense_enabled()) return;
+  pthread_mutex_lock(&mu); stats.cfr_rejected++; pthread_mutex_unlock(&mu);
+}
+
+static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
+                         const void *k_abs, const void *l_sym, bool wide, uint64_t abs_slot, float slot_frac,
+                         float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
 {
   if (truncated) *truncated=false;
   if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&after_close,1); return 0; }
-  if (src<0 || src>=NR_SENSE_SRC_COUNT || n_ant<1 || n_ant>MAX_ANT || n_re<1 || ant_stride<n_re || !iq || !k_abs || !l_sym) {
-    pthread_mutex_lock(&mu); stats.cfr_rejected++; pthread_mutex_unlock(&mu); return 0;
+  if (src<0 || src>=NR_SENSE_SRC_COUNT || n_ant<1 || n_ant>frame_ant || n_re<1 || ant_stride<n_re || !iq || !k_abs || !l_sym) {
+    nr_sense_reject_cfr(); return 0;
+  }
+  const bool cut=(uint32_t)n_re>frame_re;
+  const uint32_t keep=cut ? frame_re : (uint32_t)n_re;
+  if (wide) for(uint32_t i=0;i<keep;i++) {
+    if (((const uint32_t *)k_abs)[i]>UINT16_MAX || ((const uint32_t *)l_sym)[i]>UINT8_MAX) {
+      nr_sense_reject_cfr(); return 0;
+    }
   }
   pthread_mutex_lock(&mu);
   if (!opened) { pthread_mutex_unlock(&mu); atomic_fetch_add(&after_close,1); return 0; }
+  if (no_sink) { stats.cfr_no_sink++; pthread_mutex_unlock(&mu); return 0; }
   const uint64_t id=++next_id;
   if (frame_count==frame_cap) { stats.cfr_dropped[src]++; pthread_mutex_unlock(&mu); return 0; }
-  const bool cut=(uint32_t)n_re>frame_re;
-  const uint32_t keep=cut ? frame_re : (uint32_t)n_re;
   const uint32_t at=(frame_head+frame_count)%frame_cap;
   uint8_t *p=frames+(size_t)at*frame_stride;
   memcpy(p,"NRCF",4); put16(p+4,NR_SENSE_CFR_VERSION); put16(p+6,FRAME_HEADER); put64(p+8,id);
   p[16]=(uint8_t)src; p[17]=(uint8_t)n_ant; put16(p+18,0); put32(p+20,keep); put64(p+24,abs_slot);
   putf(p+32,slot_frac); putf(p+36,noise_var); put32(p+40,epoch); put32(p+44,identity_gen);
   size_t off=FRAME_HEADER;
-  for(uint32_t i=0;i<keep;i++) { put16(p+off,k_abs[i]); off+=2; }
-  memcpy(p+off,l_sym,keep); off+=keep;
+  for(uint32_t i=0;i<keep;i++) { put16(p+off,wide ? ((const uint32_t *)k_abs)[i] : ((const uint16_t *)k_abs)[i]); off+=2; }
+  if (wide) { for(uint32_t i=0;i<keep;i++) p[off++]=((const uint32_t *)l_sym)[i]; }
+  else { memcpy(p+off,l_sym,keep); off+=keep; }
   while(off%4) p[off++]=0;
   for(int ant=0;ant<n_ant;ant++) for(uint32_t i=0;i<keep;i++) {
     const float *pair=iq+2*((size_t)ant*ant_stride+i);
@@ -229,6 +253,18 @@ uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int a
   pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return id;
 }
+uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
+                           const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,
+                           float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
+{
+  return push_cfr(src,n_ant,iq,ant_stride,n_re,k_abs,l_sym,false,abs_slot,slot_frac,noise_var,epoch,identity_gen,truncated);
+}
+uint64_t nr_sense_push_cfr_u32(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
+                               const uint32_t *k_abs, const uint32_t *l_sym, uint64_t abs_slot, float slot_frac,
+                               float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
+{
+  return push_cfr(src,n_ant,iq,ant_stride,n_re,k_abs,l_sym,true,abs_slot,slot_frac,noise_var,epoch,identity_gen,truncated);
+}
 bool nr_sense_push_record(const char *json_line)
 {
   if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&after_close,1); return false; }
@@ -236,6 +272,7 @@ bool nr_sense_push_record(const char *json_line)
   const size_t len=strnlen(json_line,RECORD_BYTES);
   pthread_mutex_lock(&mu);
   if (!opened) { pthread_mutex_unlock(&mu); atomic_fetch_add(&after_close,1); return false; }
+  if (no_sink) { stats.rec_dropped++; pthread_mutex_unlock(&mu); return false; }
   if (len>=RECORD_BYTES-1 || memchr(json_line,'\n',len) || record_count==record_cap) { stats.rec_dropped++; pthread_mutex_unlock(&mu); return false; }
   const uint32_t at=(record_head+record_count)%record_cap;
   char *p=records+(size_t)at*RECORD_BYTES;

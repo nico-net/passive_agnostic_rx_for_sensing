@@ -5,6 +5,7 @@
 void nr_isac_init(void)
 {
 }
+void nr_isac_set_rx_antennas(uint32_t antennas) { (void)antennas; }
 
 void nr_isac_start(void)
 {

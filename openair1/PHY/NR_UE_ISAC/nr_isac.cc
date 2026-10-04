@@ -35,15 +35,16 @@ extern "C" {
 }
 
 namespace {
-// One full 275-PRB, 14-symbol carrier. Conversion storage is bounded and per producer.
+// One full 275-PRB, 14-symbol carrier.
 constexpr uint32_t max_re = 275 * 12 * 14;
 std::atomic<unsigned> active_sources{0};
 unsigned configured_sources;
 bool initialized, configured, reconf;
+uint32_t receiver_antennas = 1, cfr_antennas;
+uint32_t subslot_symbols, subslot_min_re;
+float subslot_min_snr_db;
 nr_sense_cfg_t cfg{};
 std::string records_path, cfr_path, endpoint, rx_id, rx_array;
-thread_local uint16_t capture_k[max_re];
-thread_local uint8_t capture_l[max_re];
 
 paramdef_t parameter(const char *name, int type)
 {
@@ -68,7 +69,6 @@ paramdef_t string(const char *name, char **ptr, const char *value = "")
 // Complete compatibility vocabulary of the retired adapter. Config helpers still accept
 // file and command-line values, but none of these values affect receiver or export behaviour.
 const struct { const char *name; int type; } legacy_keys[] = {
-  {"source", TYPE_STRING},
   {"cpi_slots", TYPE_INT},
   {"interpolate", TYPE_INT},
   {"capture", TYPE_INT},
@@ -131,9 +131,6 @@ const struct { const char *name; int type; } legacy_keys[] = {
   {"detector", TYPE_STRING},
   {"mf_per_row_norm", TYPE_INT},
   {"clean_deconv", TYPE_INT},
-  {"subslot_symbols", TYPE_INT},
-  {"subslot_min_re", TYPE_INT},
-  {"subslot_min_snr_db", TYPE_DOUBLE},
   {"clean_occ_aware", TYPE_INT},
   {"clean_max_components", TYPE_INT},
   {"clean_max_components_cap", TYPE_INT},
@@ -227,10 +224,9 @@ unsigned source_mask(const char *s)
     size_t first = token.find_first_not_of(" \t");
     if (first == std::string::npos) continue;
     token = token.substr(first, token.find_last_not_of(" \t") - first + 1);
-    if (token == "all") mask |= (1u << NR_ISAC_SRC_COUNT) - 1;
-    else if (token == "csirs" || token == "csi_rs") mask |= 1u << NR_ISAC_SRC_CSI_RS;
+    if (token == "csi_rs") mask |= 1u << NR_ISAC_SRC_CSI_RS;
     else if (token == "ssb") mask |= 1u << NR_ISAC_SRC_SSB;
-    else if (token == "pdsch_dmrs") mask |= (1u << NR_ISAC_SRC_PDSCH_DMRS) | (1u << NR_ISAC_SRC_PDSCH_DMRS_BLIND);
+    else if (token == "pdsch_dmrs") mask |= 1u << NR_ISAC_SRC_PDSCH_DMRS;
     else if (token == "pdsch_dmrs_blind") mask |= 1u << NR_ISAC_SRC_PDSCH_DMRS_BLIND;
     else if (token == "pdsch_data") mask |= 1u << NR_ISAC_SRC_PDSCH_DATA;
     else if (token == "pusch_dmrs") mask |= 1u << NR_ISAC_SRC_PUSCH_DMRS;
@@ -249,14 +245,21 @@ extern "C" void nr_isac_init(void)
 {
   if (initialized) return;
   initialized = true;
-  int enable = 0, frames = 64, re = max_re;
-  char *sources = nullptr, *rec = nullptr, *cfr = nullptr, *ep = nullptr, *id = nullptr, *array = nullptr;
+  // At 4 RX and 106 PRB the worst allowed RE cap still fits: 32 *
+  // (48 + 3*46200 + 8*4*46200 + 3) + 1024*4096 + index arrays
+  // = 55,944,160 bytes (53.35 MiB). cfr_ring_frames/cfr_max_re may override it.
+  int enable = 0, frames = 32, re = max_re, antennas = 0, sub_syms = 0, sub_re = 600;
+  double sub_snr = 0;
+  char *sources = nullptr, *legacy_source = nullptr, *rec = nullptr, *cfr = nullptr, *ep = nullptr, *id = nullptr, *array = nullptr;
   std::vector<paramdef_t> params = {
-    integer("enable", &enable, 0), string("sources", &sources, "all"),
+    integer("enable", &enable, 0), string("sources", &sources), string("source", &legacy_source, "csi_rs"),
     string("cfr_path", &cfr), string("records_path", &rec), string("endpoint", &ep),
-    integer("cfr_ring_frames", &frames, 64), integer("cfr_max_re", &re, max_re),
+    integer("cfr_ring_frames", &frames, 32), integer("cfr_max_re", &re, max_re), integer("cfr_antennas", &antennas, 0),
+    integer("subslot_symbols", &sub_syms, 0), integer("subslot_min_re", &sub_re, 600),
     string("rx_id", &id), string("rx_array", &array)
   };
+  auto snr = parameter("subslot_min_snr_db", TYPE_DOUBLE); snr.dblptr = &sub_snr; snr.defdblval = 0;
+  params.push_back(snr);
   params[0].paramflags = PARAMFLAG_BOOL;
   const size_t legacy_begin = params.size();
   for (const auto &key : legacy_keys) {
@@ -274,16 +277,23 @@ extern "C" void nr_isac_init(void)
   }
   if (!ignored.empty()) LOG_W(PHY, "SENSING: ignored legacy algorithm keys: %s\n", ignored.c_str());
   if (!enable) return;
-  if (frames < 1 || frames > 65536 || re < 1 || re > (int)max_re) {
-    LOG_E(PHY, "SENSING: invalid cfr_ring_frames (1..65536) or cfr_max_re (1..%u)\n", max_re);
+  if (frames < 1 || frames > 65536 || re < 1 || re > (int)max_re || antennas < 0 || antennas > 8) {
+    LOG_E(PHY, "SENSING: invalid CFR ring, RE, or antenna limit\n");
     return;
   }
   records_path = rec ? rec : ""; cfr_path = cfr ? cfr : ""; endpoint = ep ? ep : "";
   rx_id = id ? id : ""; rx_array = array ? array : "";
   cfg = {records_path.empty() ? nullptr : records_path.c_str(),
          cfr_path.empty() ? nullptr : cfr_path.c_str(), endpoint.empty() ? nullptr : endpoint.c_str(),
-         (uint32_t)frames, (uint32_t)re, 1024};
+         (uint32_t)frames, (uint32_t)re, 1024, 1};
   configured_sources = source_mask(sources);
+  if (!configured_sources) {
+    const std::string fallback = legacy_source ? legacy_source : "csi_rs";
+    configured_sources = fallback == "pdsch_dmrs" ? 1u << NR_ISAC_SRC_PDSCH_DMRS
+      : fallback == "pdsch_data" ? 1u << NR_ISAC_SRC_PDSCH_DATA : 1u << NR_ISAC_SRC_CSI_RS;
+  }
+  cfr_antennas = antennas;
+  subslot_symbols = std::max(sub_syms,0); subslot_min_re = std::max(sub_re,0); subslot_min_snr_db = sub_snr;
   reconf = nr_cfg_reconf_enabled(); // Resolve pthread_once before any producer runs.
   configured = true;
 }
@@ -291,6 +301,9 @@ extern "C" void nr_isac_init(void)
 extern "C" void nr_isac_start(void)
 {
   if (!configured || nr_sense_enabled()) return;
+  cfg.cfr_max_ant = cfr_antennas ? std::min(cfr_antennas,receiver_antennas) : receiver_antennas;
+  if (!cfg.records_path && !cfg.cfr_path && !cfg.endpoint)
+    LOG_W(PHY, "SENSING: no records_path/cfr_path is set; CFR frames will be counted as no_sink\n");
   if (nr_sense_open(&cfg) != 0) {
     LOG_E(PHY, "SENSING: cannot open export API\n");
     return;
@@ -305,11 +318,17 @@ extern "C" void nr_isac_start(void)
   active_sources.store(configured_sources, std::memory_order_release);
 }
 
+extern "C" void nr_isac_set_rx_antennas(uint32_t antennas)
+{
+  if (antennas >= 1 && antennas <= 8) receiver_antennas = std::max(receiver_antennas,antennas);
+}
+
 extern "C" void nr_isac_stop(void)
 {
   active_sources.store(0, std::memory_order_release);
   nr_sense_close();
   initialized = configured = false;
+  receiver_antennas = 1;
 }
 extern "C" int nr_isac_enabled(void) { return active_sources.load(std::memory_order_acquire) != 0; }
 extern "C" int nr_isac_source(void)
@@ -324,9 +343,14 @@ extern "C" int nr_isac_source_enabled(int source)
 }
 extern "C" uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)
 {
-  if (min_re) *min_re = 0;
-  if (min_snr_db) *min_snr_db = 0;
-  return 0;
+  if (!nr_isac_enabled()) {
+    if (min_re) *min_re = 0;
+    if (min_snr_db) *min_snr_db = 0;
+    return 0;
+  }
+  if (min_re) *min_re = subslot_min_re;
+  if (min_snr_db) *min_snr_db = subslot_min_snr_db;
+  return subslot_symbols;
 }
 extern "C" void nr_isac_submit_cfr_multi(uint32_t slot_idx, float slot_frac, int source,
     const nr_isac_carrier_t *carrier, const float *h, uint32_t nof_ant, uint32_t ant_stride_re,
@@ -334,16 +358,11 @@ extern "C" void nr_isac_submit_cfr_multi(uint32_t slot_idx, float slot_frac, int
 {
   if (!nr_isac_source_enabled(source)) return;
   if (!h || !k_abs || !l_sym || nof_ant < 1 || nof_ant > 8 || nof_re < 1 || nof_re > INT_MAX ||
-      ant_stride_re < nof_re || ant_stride_re > INT_MAX) return;
+      ant_stride_re < nof_re || ant_stride_re > INT_MAX) { nr_sense_reject_cfr(); return; }
   (void)carrier; // Carrier metadata is emitted by Task 3.
-  const uint32_t keep = std::min(nof_re, cfg.cfr_max_re);
-  for (uint32_t i = 0; i < keep; ++i) {
-    if (k_abs[i] > UINT16_MAX || l_sym[i] > UINT8_MAX) return;
-    capture_k[i] = k_abs[i]; capture_l[i] = l_sym[i];
-  }
   // Coherent epoch/identity pair published with the authoritative snapshot, no mutex on RX.
   const uint64_t stamp = reconf ? nr_cfg_epoch_cfr_stamp() : 0;
-  nr_sense_push_cfr(source_map[source], nof_ant, h, ant_stride_re, nof_re, capture_k, capture_l,
+  nr_sense_push_cfr_u32(source_map[source], std::min(nof_ant,cfg.cfr_max_ant), h, ant_stride_re, nof_re, k_abs, l_sym,
                     slot_idx, slot_frac, noise_var, stamp >> 32, (uint32_t)stamp, nullptr);
 }
 extern "C" void nr_isac_submit_cfr_at(uint32_t slot_idx, float slot_frac, int source,

@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import re
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -178,7 +177,6 @@ class Acquisition:
         self.runlog = (self.out / 'run.log').open('a', buffering=1)
         self.sequence = 0
         self.child = None
-        self.monitor = None
         self.lock_fd = None
 
     def state(self, state, **values):
@@ -239,21 +237,6 @@ class Acquisition:
             if executable in ('nr-uesoftmodem', 'nr-softmodem'):
                 raise VoidRun(f'Existing radio owner PID {entry.name}; stop it explicitly first')
 
-    def start_monitor(self):
-        # Loopback by default; a LAN bind is an explicit operator choice.
-        # Never replace another user's monitor.
-        with socket.socket() as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind((self.args.monitor_bind, self.args.monitor_port))
-        with (self.out / 'dashboard.log').open('w') as log:
-            self.monitor = subprocess.Popen(
-                [sys.executable, str(REPO / 'tests/passive_rx/monitor/monitor.py'),
-                 '--connect', 'tcp://127.0.0.1:5556', '--log', str(self.out / 'run.log'),
-                 '--port', str(self.args.monitor_port), '--bind', self.args.monitor_bind],
-                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        (self.out / "dashboard.pid").write_text(str(self.monitor.pid) + "\n")
-        self.state('SCANNING', dashboard=f'http://{self.args.monitor_bind}:{self.args.monitor_port}/')
-
     def attempt(self, candidate, probe, expected=None, seed=None):
         self.sequence += 1
         directory = self.out / f'{self.sequence:04d}-{"probe" if probe else "capture"}'
@@ -312,8 +295,6 @@ class Acquisition:
             try:
                 while True:
                     age = time.monotonic() - start
-                    if self.monitor.poll() is not None:
-                        raise VoidRun('Dashboard exited; capture stopped rather than leaving an invisible run')
                     if self.nic_missed() != baseline:
                         raise VoidRun('RF NIC missed samples')
                     for entry in (Path('/proc') / str(self.child.pid) / 'task').glob('*'):
@@ -391,7 +372,7 @@ class Acquisition:
     def run(self, plan):
         try:
             self.acquire_radio_lock()
-            self.start_monitor()
+            self.state('SCANNING')
             for candidate in plan:
                 try:
                     facts, ssb = self.attempt(candidate, True)
@@ -417,8 +398,6 @@ class Acquisition:
             try:
                 self.stop(self.child)
             finally:
-                # Leave this run's dashboard available for diagnosis. It has
-                # its own session, no radio lock, and marks old counters stale.
                 if self.lock_fd is not None:
                     os.close(self.lock_fd)
                 self.runlog.close()
@@ -437,9 +416,6 @@ def main():
     parser.add_argument('--cfo-max-hz', type=int, default=200000, help='Symmetric CFO search bound, not a CFO seed')
     parser.add_argument('--dwell-seconds', type=float, default=180)
     parser.add_argument('--duration-seconds', type=float, default=0, help='Seconds after first broadcast-validated lock; 0 means continuous')
-    parser.add_argument('--monitor-port', type=int, default=8081)
-    parser.add_argument('--monitor-bind', default='127.0.0.1',
-                        help='HTTP bind address; use a LAN address only when explicitly wanted')
     args = parser.parse_args()
     if not 410000000 <= args.start_hz < args.stop_hz <= 7125000000:
         parser.error('Supply ordered FR1 search limits between 410 MHz and 7.125 GHz')
@@ -449,8 +425,8 @@ def main():
         parser.error('Dwell must be finite and positive')
     if not math.isfinite(args.duration_seconds) or args.duration_seconds < 0:
         parser.error('Duration must be finite and nonnegative')
-    if not math.isfinite(args.rx_gain) or not 1 <= args.monitor_port <= 65535:
-        parser.error('Invalid RF gain or monitor port')
+    if not math.isfinite(args.rx_gain):
+        parser.error('Invalid RF gain')
     if os.geteuid() != 0:
         parser.error('Run with sudo for the existing real-time receiver and affinity configuration')
     args.binary = args.binary.resolve(strict=True)

@@ -21,15 +21,15 @@
 
 /* Receiver-facing adapter onto nr_sense_api (CFR v1, records schema 2).
  * init reads [sensing]: enable, sources, cfr_path, records_path, endpoint,
- * cfr_ring_frames, cfr_max_re; rx_id/rx_array are session metadata only.
- * All legacy algorithm keys are accepted and ignored with one warning.
+ * cfr_ring_frames, cfr_max_re, cfr_antennas; rx_id/rx_array are session metadata only.
+ * Legacy source and subslot keys retain receiver behavior; retired algorithm keys warn once.
  * start opens the exporter; stop drains and closes it after producers stop.
  * Disabled calls are no-ops. Submit calls copy once and never block, allocate or do I/O;
  * a full ring drops the frame and counts it. Every call creates an independent frame.
  * h is antenna-major interleaved float IQ; ant_stride_re counts complex RE.
  * k_abs/l_sym are absolute subcarrier / OFDM symbol indices for each RE.
  * slot_frac is the offset within the slot, noise_var is linear per-RE noise power.
- * subslot_config returns zero: retired algorithm grouping/gates do not apply.
+ * subslot_config preserves configured data-aided grouping parameters.
  */
 #ifndef NR_ISAC_H
 #define NR_ISAC_H
@@ -66,6 +66,7 @@ typedef struct nr_isac_carrier_s {
 } nr_isac_carrier_t;
 
 void nr_isac_init(void);
+void nr_isac_set_rx_antennas(uint32_t antennas); /* call before start, after RX frame parameters are set */
 void nr_isac_start(void);
 void nr_isac_stop(void);
 int nr_isac_enabled(void);

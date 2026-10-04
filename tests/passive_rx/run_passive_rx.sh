@@ -43,7 +43,7 @@ set -u
 
 DURATION="${1:-90}"
 OUT_DIR="${2:-/tmp/passive_rx}"
-NUM_RX="${NUM_RX:-2}"   # 1 is supported: see the birth-flag note in the FUSION section
+NUM_RX="${NUM_RX:-2}"   # 1 is supported
 NUM_UE="${NUM_UE:-3}"
 IPERF_RATE="${IPERF_RATE:-3M}"
 TRAFFIC="${TRAFFIC:-udp}"   # udp = udp_dl.py (1% CPU/stream) | iperf3 (100% CPU/stream, measured)
@@ -71,7 +71,6 @@ BUILD_DIR="$SCRIPT_DIR/../../cmake_targets/ran_build/build"
 # the passive receiver's fopen() (see the AssertFatal comment lower down). Capture the real CWD once,
 # up front, before anything below might change directory.
 RUN_CWD="$PWD"
-ISAC_TRACK="/home/sens/NICOLA/repos/isac/target/release/isac-track"
 
 # All 3 confs' out_path/report_path are hardcoded absolute paths (see each .conf's header comment),
 # NOT $OUT_DIR-relative -- kept as-is from Stage 1/2 rather than silently diverging from what the
@@ -572,105 +571,5 @@ for i in "${!RX_LABELS[@]}"; do
   summarize_rx "${RX_LABELS[$i]}" "${RX_LOGS[$i]}" "${RX_REPORTS[$i]}"
 done
 
-# --- 6. fusion ------------------------------------------------------------------------------------
-# Real-wall-clock pairing + isac-track replay. NUM_RX==2 uses tests/sensing_sim's
-# merge_receivers_walltime.py directly (exact pairwise pairing, its original design). NUM_RX>2 uses
-# this dir's own merge_receivers_walltime_n.py instead of chaining merge_receivers_walltime.py
-# pairwise -- chaining was tried first and found live to be lossy (each chain step only keeps
-# records that ALREADY paired in the previous step, so it compounds losses instead of independently
-# checking each receiver against the anchor). MIN_RX=2 (of NUM_RX) matches CLAUDE.md's "isac-track
-# needs >=2 pairs" rule -- a group is emitted once at least 2 receivers have a nearby CPI, not only
-# when ALL of them do.
-echo "--- FUSION ($NUM_RX receivers) ---"
-MISSING=0
-for r in "${RX_REPORTS[@]}"; do [ -f "$r" ] || MISSING=1; done
-if [ "$MISSING" -eq 1 ]; then
-  echo "  SKIPPED: one or more report files missing (${RX_REPORTS[*]})"
-elif [ ! -x "$ISAC_TRACK" ]; then
-  echo "  SKIPPED: isac-track not found/executable at $ISAC_TRACK"
-  echo "  build it with: cd /home/sens/NICOLA/repos/isac && cargo build --release -p isac-track"
-else
-  # Cross-receiver RNTI consistency gate (see rnti_gate.py's header): drop blind-PDCCH-sourced CPIs
-  # whose RNTI wasn't ALSO seen by a different receiver at the same wall-clock time -- a much
-  # stronger noise-floor test than any single receiver's own persistence gate, since it needs no
-  # tuned threshold. csi_rs-only CPIs pass through untouched. Feed the GATED reports into the merge
-  # below instead of the raw ones.
-  MERGE_SPECS=()
-  if [ "$NUM_RX" -eq 1 ]; then
-    # The RNTI gate is a CROSS-RECEIVER consistency test: it keeps a blind-PDCCH CPI only if some
-    # OTHER receiver saw the same RNTI at the same wall-clock time. With one receiver that question
-    # has no answer and the gate rejects every blind-sourced CPI BY CONSTRUCTION, not on evidence --
-    # measured dropping 39 of 67 CPIs on a single-receiver run, leaving only the csi_rs-only ones.
-    # So it is skipped entirely here; there is nothing for it to cross-check against.
-    GATED_REPORTS=("${RX_REPORTS[@]}")
-    echo "  rnti_gate: SKIPPED (single receiver -- a cross-receiver test has no second opinion)"
-  else
-    RNTI_GATE_SPECS=()
-    for i in "${!RX_REPORTS[@]}"; do RNTI_GATE_SPECS+=("${RX_REPORTS[$i]}:${RX_LOGS[$i]}"); done
-    GATED_REPORTS_STR=$(python3 "$SCRIPT_DIR/rnti_gate.py" "$OUT_DIR" "${RNTI_GATE_SPECS[@]}" 2> >(sed 's/^/  rnti_gate: /' >&2))
-    read -r -a GATED_REPORTS <<< "$GATED_REPORTS_STR"
-  fi
-  for i in "${!GATED_REPORTS[@]}"; do MERGE_SPECS+=("${GATED_REPORTS[$i]}@${RX_LOGS[$i]}"); done
-
-  MERGED="$OUT_DIR/fused_reports.jsonl"
-  if [ "$NUM_RX" -eq 1 ]; then
-    # Single receiver: there is nothing to merge, so the (gated) reports ARE the fusion input.
-    cp -f "${GATED_REPORTS[0]}" "$MERGED"
-    echo "  merge: single receiver, $(wc -l < "$MERGED") CPIs passed through unmerged"
-  elif [ "$NUM_RX" -eq 2 ]; then
-    python3 "$SCRIPT_DIR/../sensing_sim/merge_receivers_walltime.py" \
-      "${GATED_REPORTS[0]}" "${GATED_REPORTS[1]}" "$MERGED" 2>&1 | sed 's/^/  merge: /'
-  else
-    python3 "$SCRIPT_DIR/merge_receivers_walltime_n.py" \
-      "$MERGED" 2 auto "${MERGE_SPECS[@]}" 2>&1 | sed 's/^/  merge: /'
-  fi
-  TRACKS="$OUT_DIR/fused_tracks.jsonl"
-  if [ -s "$MERGED" ]; then
-    # AoA-gated fusion (PHASE3_AOA_MULTISTATIC_HANDOVER.md's redundancy gate, previously only wired
-    # into tests/sensing_sim's attached-UE arms, live-verified there taking 2rx precision 16%->100%
-    # on the SAME class of data). --birth-min-pos-redundancy 1 requires a fix be checkable (>=2
-    # pairs, or 1 pair + bearing when a receiver has an array); --birth-max-pos-chi2 9 (~3 sigma)
-    # then rejects inconsistent ones. Both are dimensionless and AUTOMATICALLY INERT when a fix has
-    # no redundancy (isac-track's own guarantee), so this is safe to pass unconditionally even for
-    # receivers running single-antenna/no-AoA (RX*_NANT=1) -- it just does nothing for them.
-    # Birth flags depend on how many receivers there are, and getting this wrong is silent:
-    # redundancy is (pairs + bearings - 2), so ONE pair plus its bearing scores exactly 0 and
-    # --birth-min-pos-redundancy 1 would refuse EVERY birth -- turning a single-receiver arm into
-    # "no tracks" rather than into a result. (Measured on the attached-UE harness: the 1-pair arm
-    # emits 135 track updates without that flag and 0 with it.) A single receiver instead needs
-    # --birth-single-pair-bearing, which localises by ray-ellipse intersection; it buys COVERAGE,
-    # not ghost rejection, because a harmonic ghost shares its parent's bearing.
-    if [ "$NUM_RX" -eq 1 ]; then
-      BIRTH_FLAGS=(--birth-max-pos-chi2 9 --birth-single-pair-bearing)
-    else
-      BIRTH_FLAGS=(--birth-max-pos-chi2 9 --birth-min-pos-redundancy 1)
-    fi
-    "$ISAC_TRACK" --out "$TRACKS" "${BIRTH_FLAGS[@]}" ${ISAC_EXTRA_ARGS:-} \
-      replay "$MERGED" >"$OUT_DIR/isac_track.log" 2>&1
-    NTRACKS=$(wc -l < "$TRACKS" 2>/dev/null || echo 0)
-    echo "  fused tracks: $NTRACKS   (see $TRACKS, $OUT_DIR/isac_track.log)"
-    if [ "$NTRACKS" -gt 0 ]; then
-      NCONF=$(python3 -c "
-import json
-n=sum(1 for l in open('$TRACKS') if json.loads(l).get('status')=='confirmed')
-print(n)
-" 2>/dev/null)
-      echo "  confirmed-status track updates: ${NCONF:-?}"
-      # Ground-truth precision, mirroring tests/sensing_sim's score_world_tracks.py TOL=15m metric.
-      python3 "$SCRIPT_DIR/score_passive_tracks.py" "$TRACKS" "${RX_LOGS[0]}" 2>&1 | sed 's/^/  /'
-      # STANDING REQUIREMENT: every capture gets plotted against ground truth -- fused tracks and
-      # speed, plus per-receiver detections. Numbers alone hid a 33x time-base error and a whole
-      # class of bearing outliers that were obvious the moment they were drawn.
-      python3 "$SCRIPT_DIR/plot_fused_tracks.py" "$TRACKS" "${RX_LOGS[0]}" \
-        "$OUT_DIR/fused_tracks_vs_gt.png" "$(basename "$OUT_DIR")" 2>&1 | sed 's/^/  plot: /'
-      for i in "${!RX_LABELS[@]}"; do
-        python3 "$SCRIPT_DIR/plot_est_vs_gt.py" "${RX_REPORTS[$i]}" "${RX_LOGS[$i]}" \
-          "$OUT_DIR/est_vs_gt_${RX_LABELS[$i]}.png" "${RX_LABELS[$i]}" 2>&1 | sed 's/^/  plot: /'
-      done
-    fi
-  else
-    echo "  SKIPPED isac-track: no paired CPIs (receiver CPI timestamps never landed within tolerance)"
-  fi
-fi
 echo "================================================"
 echo "logs: $GNB_LOG, ${UE_ACTIVE_LOGS[*]}, ${RX_LOGS[*]}"

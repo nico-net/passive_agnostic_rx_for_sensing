@@ -2365,7 +2365,7 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_reconfig_replay COMMAND ./test_nr_pdcch_blind_monitor --gtest_filter=ReconfigReplay.*)
   set_tests_properties(test_nr_reconfig_replay PROPERTIES ENVIRONMENT "ISAC_RECONF=1")
 
-  # L1/FISTA sparse Doppler recovery (sparse_doppler.{h,cc}): peak-to-harmonic ratio vs. dense NUDFT  # Phase 3 Technique B (roadmap artifact "Cell-Agnostic Passive Receiver"): C-RNTI bootstrap
+  # Phase 3 Technique B (roadmap artifact "Cell-Agnostic Passive Receiver"): C-RNTI bootstrap
   # state machine, tested independently of any live RT capture.
   add_executable(test_nr_pdcch_blind_rnti_bootstrap ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_rnti_bootstrap_test.cc)
   target_include_directories(test_nr_pdcch_blind_rnti_bootstrap PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)

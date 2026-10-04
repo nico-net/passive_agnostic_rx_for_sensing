@@ -368,6 +368,7 @@ int main(int argc, char **argv)
     nrue_set_ru_cell_id(ru_id, cell_id);
 
     set_fp_options(cell_id, ru_id);
+    nr_isac_set_rx_antennas(nrue_get_cell_fp(cell_id)->nb_antennas_rx);
     if (IS_SA_MODE(get_softmodem_params()) || get_softmodem_params()->sl_mode)
       nr_init_frame_parms_ue_sa(nrue_get_cell_fp(cell_id), nrue_get_cell(cell_id));
   }
