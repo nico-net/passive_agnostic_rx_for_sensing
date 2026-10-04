@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "nr_td_cb0_fixture.h"
 
 static double now(void)
@@ -224,5 +225,8 @@ int main(int argc, char **argv)
     free(base);
     cb0_fx_free(&fx);
   }
-  return 0;
+  /* _exit: the nvidia-smi sampler (popen) and the CUDA / G1 worker teardown can hang a normal exit for minutes, which
+   * would keep the measurement lock held after the data is out */
+  fflush(stdout);
+  _exit(0);
 }
