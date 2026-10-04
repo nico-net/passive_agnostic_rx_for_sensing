@@ -1,0 +1,18 @@
+{
+  "_doc": "Levers Task 7: P2 failure-only probe evidence gate (spec 2026-10-01 section 5.4). Run with gate_p2.py. Arms are paired: same seed per (config, chunk), only --p2 differs. twins 2 = all physical twins (simulator default); twins 0 = UNPHYSICAL stress arm (brief asked {0, 3}; the simulator caps physical twins at 2). acq is per (config, arm); per (cell, rx) the total is sum over oracle of acq x 72 configs.",
+  "arms": {
+    "all_P1": {"gate": 1, "w_probe": 1, "w_sib1": 1, "w_default": 1, "w_obs": 1, "w_field": 1, "fieldbook": 1, "p2": 0},
+    "all_P2": {"gate": 1, "w_probe": 1, "w_sib1": 1, "w_default": 1, "w_obs": 1, "w_field": 1, "fieldbook": 1, "p2": 1}
+  },
+  "cells": {"SA": {"sib1": 1}, "NSA-like": {"sib1": 0}},
+  "rx": [4, 1],
+  "oracle": {"1": {"acq": 260, "chunk": 130}, "0": {"acq": 20, "chunk": 10}},
+  "dims": {
+    "twins": [2, 0],
+    "table_exercise": [0.9, 0.5],
+    "K": [2, 3, 4],
+    "p_true_snr_mu": [8, 15, 25],
+    "catalog_tda": [4, 16]
+  },
+  "common": {}
+}

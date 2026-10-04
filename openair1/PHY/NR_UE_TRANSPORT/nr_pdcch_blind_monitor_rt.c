@@ -96,6 +96,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_al1_map.h"
 #include "nr_passive_metrics.h"
 #include "nr_pdcch_blind_phase2.h" // Phase-2 lock, persistence ring, energy floor (Task A7)
+#include "nr_dci_history.h"       // BC9: DL DCI history ring, DCI-adjacency k0 evidence
 #include <stdio.h>
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
@@ -532,6 +533,41 @@ static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
 
 /* See the header note on GRANTDROP. Rate-limited per reason so a persistent gate logs once and then
  * every 500th time, which is enough to see it without flooding a capture. */
+/* ---- BC9: DL DCI history (nr_dci_history.h) ----
+ * Called for every ACCEPTED C-RNTI DL DCI, before any grant drop: a dropped grant still occupies its PDSCH slot. It only
+ * records the DCI, UNCONFIRMED: the ring the decode queue reads for the certified flag and for the DCI-adjacency rule.
+ * BC9d: no exclusion is applied here any more. A false accept carrying this RNTI used to hard-remove the truth of its
+ * (RNTI, configuration, row) context through the SIB1 TDD rule or a spurious adjacency; the hard exclusions now run at
+ * feedback time from CONFIRMED DCIs only (TB CRC pass of the grant: nr_pdsch_passive_bc9_confirm, deferred consumer and the
+ * in-line path below). ISAC_TD_DCI_ADJ=0 disables all of it (A/B; read once, nr_dci_hist_enabled): no history (so no
+ * certified-flag census), no confirmation, no SIB1 TDD per-hypothesis exclusion, no DCI-adjacency exclusion. */
+static _Atomic uint64_t g_bc9_dcis;
+static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint32_t abs_slot, const NR_DL_FRAME_PARMS *fp)
+{
+  if (!nr_dci_hist_enabled())
+    return; /* full kill switch (A/B): no history, no census input, no exclusion */
+  static _Atomic int s_period_set;
+  nr_dci_hist_t *h = nr_dci_hist_global();
+  if (!atomic_exchange(&s_period_set, 1))
+    nr_dci_hist_global_init(1024u * (uint32_t)fp->slots_per_frame);
+  const nr_dci_hist_entry_t e = {.abs_slot = abs_slot, .cfg = cfg, .rnti = o->rnti, .dci11 = o->dci_format == NR_BLIND_DCI_FORMAT_1_1,
+                                 .tda = o->tda_index, .mcs = o->mcs, .rv = o->rv, .ndi = o->ndi, .harq_pid = o->harq_pid,
+                                 .ra_type0 = o->ra_type0, .vrb_to_prb = o->vrb_to_prb, .rbg_size = o->rbg_size,
+                                 .start_rb = o->start_rb, .num_rb = o->num_rb, .rbg_bwp_start = o->rbg_bwp_start,
+                                 .rbg_bitmap = o->rbg_bitmap, .dmrs_ports = o->dmrs_ports, .n_cdm = o->n_dmrs_cdm_groups,
+                                 .nscid = o->nscid};
+  nr_dci_hist_on_accept(h, &e);
+  const uint64_t n = atomic_fetch_add(&g_bc9_dcis, 1) + 1;
+  if ((n % 20000) == 0) {
+    uint64_t lt2 = 0, ge2 = 0, refused = 0;
+    nr_pdsch_config_sweep_excl_stats(&lt2, &ge2, &refused);
+    LOG_A(PHY, "SENSING: BC9 DCIHIST dcis=%llu tdd_known=%d excl_removed[k0<2]=%llu excl_removed[k0>=2]=%llu excl_refused=%llu "
+               "(exclusions from confirmed DCIs only: see BC9 DCICONF)\n",
+          (unsigned long long)n, nr_passive_acq_tdd_known(), (unsigned long long)lt2, (unsigned long long)ge2,
+          (unsigned long long)refused);
+  }
+}
+
 static void grantdrop(const nr_pdcch_blind_result_t *out, int frame, int slot, const char *why)
 {
   if (out->rnti_class != NR_BLIND_RNTI_CLASS_SI && out->rnti_class != NR_BLIND_RNTI_CLASS_RA
@@ -6156,6 +6192,9 @@ constdiag_done:;
     /* Tie this accept to whichever CORESET windows are currently lit -- see COREMAPLT. */
     if (out.rnti_class == NR_BLIND_RNTI_CLASS_C || out.rnti_class == NR_BLIND_RNTI_CLASS_TC)
       nr_pdcch_blind_monitor_note_rnti_for_windows(out.rnti);
+    /* BC9: DL DCI history at ACCEPT time, before every grant drop below (a dropped grant still occupies its PDSCH slot). */
+    if (out.rnti_class == NR_BLIND_RNTI_CLASS_C)
+      bc9_dci_accept(&out, cand_task[ti].dl_auto ? cand_task[ti].dl_layout_configuration : g_pdsch_configuration, abs_slot, fp);
 
     /* ON-ACCEPT DM-RS PROBE (ISAC_COREMAP_ONACCEPT=1, default off). This DCI passed CRC from THIS
      * buffer, at THIS symbol -- so the CORESET provably carried a PDCCH here. Correlating now
@@ -6285,6 +6324,10 @@ constdiag_done:;
         continue; /* Unsupported auto context is not a guessed manual success. */
       nr_pdsch_adaptive_apply(&hy, &dlsch_pdu, &grant_mcs_table, &grant_mcs_table_lbrm);
       hy_k0 = hy.k0;
+      /* BC12a: this branch only runs for !is_dci10, i.e. the context is created from a DCI 1_1 grant (is_dci10 is
+       * out.dci_format == NR_BLIND_DCI_FORMAT_1_0 at the top of the grant loop). Census inputs only. */
+      sweep_ticket.dci_format = is_dci10 ? 10 : 11;
+      sweep_ticket.typeA_pos = (uint8_t)(cfg->dmrs_typeA_position + 2);
       sweep_ticket.layout_index = cand_task[ti].dl_auto ? cand_task[ti].dl_layout_index : 0xFFFF;
       dmrs_sym = __builtin_ctz((unsigned)hy.dmrs_mask);
     }
@@ -6440,6 +6483,7 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
+      job.dci_abs_slot  = abs_slot; /* BC9 */
       job.bwp_entry     = cand_task[ti].bwp_entry;
       job.data_id_advance = dl_data_advance;
       /* Wide layout set: this trial is a first-code-block probe, not a full decode. */
@@ -6641,6 +6685,7 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
+              job.dci_abs_slot  = abs_slot; /* BC9 */
               job.bwp_entry     = cand_task[ti].bwp_entry;
               job.data_id_advance = dl_data_advance;
               atomic_fetch_add_explicit(&g_enq_class[1][out.rnti_class], 1, memory_order_relaxed);
@@ -6684,14 +6729,32 @@ constdiag_done:;
               NR_BLIND_CTR_INC(g_dec_k0_wait);
             btim_add(BTIM_PDSCH, btim_t_pds);
             /* Same feedback contract as deferred decoding: unsupported/internal errors are not CRC trials. */
-            if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
+            /* K33: IQ may have been overwritten while decoding -> INCONCLUSIVE, no feedback of any kind. */
+            if ((st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)
+                && !nr_passive_credit_allowed(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+                                              grant_pd.source_absolute_slot, fp->slots_per_frame)) {
+              nr_pdsch_passive_note_stale_after_decode();
+            } else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
               /* same evidence as the deferred consumer: layout tallies, or DL link health for 0xFFFF */
               nr_pdcch_dci11_layout_feedback(sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;
-              if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
-                LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
+              /* No nr_pdsch_config_sweep_note_tb_decoder() here, by design: this outcome feeds only the full-TB election
+               * counters, never the CB0 / admissible-TB counters the elimination reads (exemption documented in
+               * nr_pdsch_config_sweep.h, DECODER DOMINANCE). */
+              if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
+                char bc12[192];
+                nr_pdsch_passive_bc12_census(&sweep_ticket, &winner, bc12, sizeof(bc12));
+                LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s\n",
                       sweep_ticket.rnti, sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
-                      winner.dmrs_mask, winner.mcs_table);
+                      winner.dmrs_mask, winner.mcs_table, bc12);
+                nr_pdsch_passive_bc9_converged(&sweep_ticket, winner.k0);
+              }
+              /* BC9 census after the KL feedback (read-only; see the deferred consumer) */
+              nr_pdsch_passive_bc9_note(&sweep_ticket, out.rnti, abs_slot, &dlsch_pdu, (uint16_t)cfg->pdsch_xoverhead,
+                                        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+              /* BC9d: a TB CRC pass confirms the DCI; only now may it feed the hard TDD / adjacency exclusions */
+              nr_pdsch_passive_bc9_confirm(&sweep_ticket, out.rnti, abs_slot, fp->numerology_index,
+                                           st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               /* Qm oracle, as the deferred consumer runs it: AFTER this trial's own feedback (a prune
                * re-indexes the catalog and retires outstanding tickets). */
               if (!sweep_ticket.settled && sweep_ticket.generation && dec.qm_measured)

@@ -31,15 +31,33 @@ uint16_t nr_tdd_period_slots(uint16_t periodicity_x10_ms, uint8_t mu)
   return (uint16_t)(num / 10u);
 }
 
+/* TS 38.213 11.1 placement (K40): the nrofDownlinkSlots are the FIRST slots of the period and the nrofUplinkSlots the
+ * LAST; nrofDownlinkSymbols are the first symbols of the slot right after the last full DL slot, nrofUplinkSymbols the
+ * last symbols of the slot right before the first full UL slot; every other symbol is flexible. (The model before K40
+ * put the UL slots right after the mixed slot and called the rest of the period DL, which marked flexible slots as UL
+ * whenever dl_slots + mixed + ul_slots < period.) */
 static bool pattern_fits(const nr_tdd_pattern_t *p)
 {
-  if (p->period_slots == 0) {
+  if (p->period_slots == 0 || p->dl_symbols > 13 || p->ul_symbols > 13)
     return false;
+  if ((uint32_t)p->dl_slots + (uint32_t)p->ul_slots > (uint32_t)p->period_slots)
+    return false;
+  if (p->dl_symbols && p->dl_slots >= p->period_slots)
+    return false; /* no slot left for the DL symbols */
+  if (p->ul_symbols && p->ul_slots >= p->period_slots)
+    return false;
+  const uint32_t dl_sym_slot = p->dl_slots, ul_sym_slot = (uint32_t)p->period_slots - p->ul_slots - 1u;
+  if (p->dl_symbols && p->ul_symbols) {
+    if (dl_sym_slot > ul_sym_slot)
+      return false; /* the DL symbols would land in a full UL slot */
+    if (dl_sym_slot == ul_sym_slot && p->dl_symbols + p->ul_symbols > 14)
+      return false;
   }
-  /* The mixed slot exists only if it has symbols in it; otherwise the period is whole slots only.
-   * Counting it unconditionally would over-run the period on a pure DL/UL pattern. */
-  const uint32_t mixed = (p->dl_symbols || p->ul_symbols) ? 1u : 0u;
-  return (uint32_t)p->dl_slots + mixed + (uint32_t)p->ul_slots <= (uint32_t)p->period_slots;
+  if (p->dl_symbols && dl_sym_slot >= (uint32_t)p->period_slots - p->ul_slots)
+    return false;
+  if (p->ul_symbols && p->dl_slots > ul_sym_slot)
+    return false;
+  return true;
 }
 
 bool nr_tdd_config_init(nr_tdd_config_t *out, const nr_tdd_pattern_t *p1, const nr_tdd_pattern_t *p2)
@@ -64,22 +82,32 @@ bool nr_tdd_config_init(nr_tdd_config_t *out, const nr_tdd_pattern_t *p1, const 
   return true;
 }
 
+/* Shape of slot s of one pattern: leading DL symbols and trailing UL symbols (14 = the whole slot). */
+static void slot_shape(const nr_tdd_pattern_t *p, uint16_t s, int *dl_lead, int *ul_trail)
+{
+  *dl_lead = *ul_trail = 0;
+  if (s < p->dl_slots) {
+    *dl_lead = 14;
+    return;
+  }
+  if ((uint32_t)s >= (uint32_t)p->period_slots - p->ul_slots) {
+    *ul_trail = 14;
+    return;
+  }
+  if (s == p->dl_slots)
+    *dl_lead = p->dl_symbols;
+  if ((uint32_t)s == (uint32_t)p->period_slots - p->ul_slots - 1u)
+    *ul_trail = p->ul_symbols;
+}
 static nr_tdd_slot_dir_t direction_in_pattern(const nr_tdd_pattern_t *p, uint16_t s)
 {
-  if (s < p->dl_slots) {
+  int dl, ul;
+  slot_shape(p, s, &dl, &ul);
+  if (dl == 14)
     return NR_TDD_SLOT_DL;
-  }
-  const uint16_t mixed = (p->dl_symbols || p->ul_symbols) ? 1u : 0u;
-  if (mixed && s == p->dl_slots) {
-    return NR_TDD_SLOT_MIXED;
-  }
-  if (s < (uint16_t)(p->dl_slots + mixed + p->ul_slots)) {
+  if (ul == 14)
     return NR_TDD_SLOT_UL;
-  }
-  /* Slots past the configured ones inside the period are flexible. Treating them as DOWNLINK is
-   * the safe default for a monitor: a missed downlink slot loses real grants, whereas scanning a
-   * flexible slot that turns out to be uplink costs only the CPU this was meant to save. */
-  return NR_TDD_SLOT_DL;
+  return (dl || ul) ? NR_TDD_SLOT_MIXED : NR_TDD_SLOT_FLEXIBLE;
 }
 
 nr_tdd_slot_dir_t nr_tdd_slot_direction(const nr_tdd_config_t *cfg, uint32_t absolute_slot)
@@ -100,6 +128,20 @@ nr_tdd_slot_dir_t nr_tdd_slot_direction(const nr_tdd_config_t *cfg, uint32_t abs
 
 bool nr_tdd_slot_has_downlink(const nr_tdd_config_t *cfg, uint32_t absolute_slot)
 {
-  const nr_tdd_slot_dir_t d = nr_tdd_slot_direction(cfg, absolute_slot);
-  return d == NR_TDD_SLOT_DL || d == NR_TDD_SLOT_MIXED;
+  /* Flexible symbols may carry PDCCH (and a DCI-scheduled PDSCH): only a slot that is UL in every symbol is skipped. */
+  return nr_tdd_slot_direction(cfg, absolute_slot) != NR_TDD_SLOT_UL;
+}
+
+int nr_tdd_pdsch_last_symbol(const nr_tdd_config_t *cfg, uint32_t absolute_slot)
+{
+  if (cfg == NULL || !cfg->valid)
+    return 13;
+  const uint32_t total = (uint32_t)cfg->p1.period_slots + (uint32_t)cfg->p2.period_slots;
+  if (total == 0)
+    return 13;
+  const uint32_t s = absolute_slot % total;
+  const nr_tdd_pattern_t *p = s < cfg->p1.period_slots ? &cfg->p1 : &cfg->p2;
+  int dl, ul;
+  slot_shape(p, (uint16_t)(s < cfg->p1.period_slots ? s : s - cfg->p1.period_slots), &dl, &ul);
+  return 13 - ul; /* -1 for a full UL slot */
 }

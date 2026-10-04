@@ -18,8 +18,34 @@ typedef struct {
   uint64_t acq_transitions, acq_sync_losses, acq_pbch_locks, acq_sib1_decodes;
   uint64_t pdcch_occasions, pdcch_candidates, pdcch_accepts, pdcch_accepts_c;
   uint64_t scanq_queued, scanq_processed, scanq_drop_full, scanq_drop_stale, scanq_max_lag;
-  uint64_t pdschq_queued, pdschq_decoded, pdschq_crc_ok, pdschq_drop_full, pdschq_drop_stale, pdschq_max_lag;
+  uint64_t pdschq_queued, pdschq_decoded, pdschq_crc_ok, pdschq_drop_full, pdschq_drop_stale, pdschq_stale_after_decode, pdschq_max_lag;
+  /* BC12a SIB1 common-TDRA census at first convergence of a context, per DCI format of the context (_10 / _11; _unk = format not
+   * recorded). td_deftab_*: same against default table A (td_deftab_na = MIB dmrs-TypeA-Position unknown). Log/metrics only. */
+  uint64_t td_sib1_tdra_match_10, td_sib1_tdra_mismatch_10, td_sib1_tdra_none_10;
+  uint64_t td_sib1_tdra_match_11, td_sib1_tdra_mismatch_11, td_sib1_tdra_none_11;
+  uint64_t td_sib1_tdra_match_unk, td_sib1_tdra_mismatch_unk, td_sib1_tdra_none_unk;
+  uint64_t td_deftab_match_10, td_deftab_mismatch_10, td_deftab_match_11, td_deftab_mismatch_11, td_deftab_na;
+  /* TD_EXCL census totals (sweep): evidence restarts caused by exclusions, tail truncations without a wipe, contexts that raised
+   * TD_EXCL_RESTART_ALARM (restarts > distinct DCI phases). */
+  uint64_t td_excl_restarts, td_excl_truncs, td_excl_restart_alarms;
+  /* Field book fb2 (ISAC_TD_FIELDBOOK=2; all 0 while off). */
+  uint64_t td_fb_promotions, td_fb_withdrawals, td_fb_failopens, td_fb_pruned_contexts, td_fb_untrusted_ctx;
+  /* CB0 elimination channel (ISAC_TD_CB0_ELIM=1; all 0 while off; nr_td_cb0_wire.h). td_cb0_inadmissible[r] per reason
+   * NR_TD_CB0_R_* (JSON object keyed by nr_td_cb0_reason_name); td_cb0_us_per_item = CPU-us per CB0 item incl. the lazy
+   * GrantWork computes; td_cb0_backend_{cpu,gpu} = batches per backend. */
+  uint64_t td_cb0_grants, td_cb0_batches, td_cb0_admissible, td_cb0_items, td_cb0_inadmissible[16], td_cb0_budget_skips,
+      td_cb0_not_testable, td_cb0_backend_cpu, td_cb0_backend_gpu, td_cb0_premise_alarms, td_cb0_eliminations;
+  /* CB0 GPU entry (libldpc_cuda.so ldpc_cb0_*; zeros while not loaded): td_cb0_gpu {submits, items, ok, errors,
+   * timeouts, bypassed, sticky, trips, state 0/1/2, mode 1 unified / 2 explicit, failed / skipped batches (nr_td_cb0_exec)} */
+  uint64_t td_cb0_gpu_submits, td_cb0_gpu_items, td_cb0_gpu_ok, td_cb0_gpu_errors, td_cb0_gpu_timeouts, td_cb0_gpu_bypassed,
+      td_cb0_gpu_sticky, td_cb0_gpu_trips, td_cb0_gpu_state, td_cb0_gpu_mode, td_cb0_gpu_failed, td_cb0_gpu_skipped;
+  double td_cb0_us_per_item;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
+  /* CUDA LDPC pool (K34): launch/CUDA errors, TBs sent to the CPU decoder, poisoned slots; 0 when libldpc_cuda is not loaded */
+  uint64_t ldpc_cuda_errors, ldpc_cuda_fallbacks, ldpc_cuda_poisoned;
+  uint64_t ldpc_cuda_breaker_trips;   /* monotonic: times the CUDA breaker opened */
+  uint64_t ldpc_cuda_disabled;        /* breaker state: 0 closed, 1 bypassed for a while, 2 permanently off */
+  uint64_t ldpc_tb_cpu, ldpc_tb_cuda; /* TBs decoded by CPU min-sum / CUDA normalised min-sum (stratify evidence by decoder) */
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
 } nr_passive_metrics_t;

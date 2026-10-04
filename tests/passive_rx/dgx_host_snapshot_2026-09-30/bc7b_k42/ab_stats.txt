@@ -1,0 +1,7 @@
+Definitions: crc = score_rx crc_pct; ttc0 = ctx first 'Technique D CONVERGED tda=0' minus first 1_1 rnti_seen (all arms the same definition).
+interleaved A/B fix (4) vs pre (4) crc: median 96.950 vs 97.135, U(fix)=5.0, exact two-sided Mann-Whitney p=0.486
+interleaved A/B fix (4) vs pre (4) ttc0: median 3.212 vs 2.949, U(fix)=13.0, exact two-sided Mann-Whitney p=0.200
+all fix (9: A/B + gate) vs pre-fix (14: A/B pre + BC9 idle on/off) crc: median 96.030 vs 97.135, U(fix)=37.0, exact two-sided Mann-Whitney p=0.106
+all fix (9: A/B + gate) vs pre-fix (14: A/B pre + BC9 idle on/off) ttc0: median 4.570 vs 2.949, U(fix)=93.0, exact two-sided Mann-Whitney p=0.062
+tda0 converged at the earliest separation checkpoint (<= 856 outcomes, tda0_search.txt): fix 0/9 vs pre-fix 6/14, Fisher exact two-sided p=0.048 (post hoc, several looks)
+24-hypothesis final tda0 context (tda0_catalogue_mode.txt; post-convergence size, NOT the search size, which is 24 in every arm): fix 6/9 vs pre-fix 5/14, Fisher p=0.214

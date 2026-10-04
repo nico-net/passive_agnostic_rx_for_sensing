@@ -1,0 +1,1 @@
+{"arm": "/tmp/bc7b_k42/ab/pre_r3", "first_1_1_s": 15.121, "ttc_per_tda": {"0": 2.916, "2": 22.938}, "winner_trials": {"0": "141"}, "ldpc_ok_segfail_zero_tb": ["55313", "1304", "294"], "oracle_restore_lines": 1, "sweepstat_last": {"scored": 57344, "stale": 6, "created": 5, "reindexed": 6}}

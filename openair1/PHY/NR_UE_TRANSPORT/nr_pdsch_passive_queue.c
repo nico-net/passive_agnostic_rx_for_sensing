@@ -54,11 +54,15 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_REFSIG/dmrs_nr.h"                     // get_num_dmrs_re_per_rb
 #include "common/utils/nr/nr_common.h"                // get_num_dmrs
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Technique D scoring
+#include "PHY/NR_UE_TRANSPORT/nr_dci_history.h" // BC9 DL DCI history (certified-flag census, BC9d confirmed-DCI exclusions)
+#include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // BC9d: SIB1 TDD PDSCH last symbols
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.h" // Technique D Qm oracle
+#include "PHY/NR_UE_TRANSPORT/nr_td_order.h" // BC12a SIB1 census
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h" // per-grant observation API (Task A3)
+#include "PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h" // CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables)
 
 #include <limits.h>
 #include <math.h>
@@ -335,6 +339,11 @@ void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
 static _Atomic uint64_t g_dropped_narrow = 0; // budget: narrow grant refused while the ring was nearly full
 static _Atomic uint64_t g_dropped_stale = 0;
+static _Atomic uint64_t g_stale_after_decode = 0; // K33
+void nr_pdsch_passive_note_stale_after_decode(void)
+{
+  atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
+}
 static _Atomic uint64_t g_max_lag       = 0;
 
 static _Atomic int g_running   = 0;
@@ -349,6 +358,10 @@ static PHY_VARS_NR_UE *g_ue = NULL;
  * PASSIVE_RX_ONLY_HANDOVER.md records a shifted __thread layout producing an AVX alignment fault,
  * and this is far larger than the buffer that did it. */
 static c16_t *g_rxdataF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+/* GrantWork-lite (ISAC_TD_GRANTWORK=1): g_rxdataF[i] is the FEP buffer the grant's GrantWork borrows; its
+ * generation moves on every slot group, so a gw that outlives its group can no longer compute on it. */
+static uint64_t g_fep_gen[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+static bool g_rxdataF_gw; /* g_rxdataF[] came from nr_td_gw_alloc (ISAC_TD_GRANTWORK=1 only: flag off = unchanged) */
 
 typedef struct {
   int idx;
@@ -544,6 +557,223 @@ static int probe_span(const nr_pdsch_passive_job_t *j, int *nrb)
   return seg[best].prb_start;
 }
 
+/* ---- BC9 certified-flag census (see the header) ---- */
+static uint64_t bc9_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
+{
+  (void)arg;
+  return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda);
+}
+static _Atomic uint64_t g_bc9_jobs, g_bc9_cert, g_bc9_cert_ok, g_bc9_nosib, g_bc9_nodci, g_bc9_ok, g_bc9_alarm;
+static _Atomic uint64_t g_bc9_cert_ok_k0[5]; /* certified passes by the hypothesis' k0: 0, 1, 2, 3, >= 4 */
+/* k0 values with a certified pass per (RNTI, configuration, TDA), checked against the winner on convergence (M3). */
+#define BC9_CPK 64
+static struct { uint64_t cfg, mask, touched; uint16_t rnti; uint8_t tda; } g_bc9_cpk[BC9_CPK];
+static uint64_t g_bc9_cpk_clock;
+static pthread_mutex_t g_bc9_cpk_lock = PTHREAD_MUTEX_INITIALIZER;
+static int bc9_cpk_find(uint16_t rnti, uint64_t cfg, uint8_t tda, bool create)
+{
+  int lru = 0;
+  for (int i = 0; i < BC9_CPK; i++) {
+    if (g_bc9_cpk[i].rnti == rnti && g_bc9_cpk[i].cfg == cfg && g_bc9_cpk[i].tda == tda && g_bc9_cpk[i].rnti)
+      return i;
+    if (g_bc9_cpk[i].touched < g_bc9_cpk[lru].touched)
+      lru = i;
+  }
+  if (!create)
+    return -1;
+  g_bc9_cpk[lru].rnti = rnti;
+  g_bc9_cpk[lru].cfg = cfg;
+  g_bc9_cpk[lru].tda = tda;
+  g_bc9_cpk[lru].mask = 0;
+  return lru;
+}
+int nr_pdsch_passive_bc12_census(const nr_pdsch_sweep_ticket_t *ticket, const nr_pdsch_cfg_hypothesis_t *winner, char *buf, size_t n)
+{
+  nr_td_tdra_t l[NR_TD_MAX_SIB1_TDRA];
+  const int nl = nr_td_sib1_store_get(l);
+  const nr_td_census_t s = nr_td_census_sib1(l, nl, ticket->tda_index, winner);
+  const nr_td_census_t d = nr_td_census_deftab(ticket->typeA_pos, ticket->tda_index, winner);
+  nr_td_census_count(ticket->dci_format, s);
+  nr_td_census_count_deftab(ticket->dci_format, d);
+  static const char *const sn[] = {"none", "match", "mismatch"};
+  static const char *const dn[] = {"na", "match", "mismatch"};
+  uint32_t er = 0, et = 0, ep = 0;
+  nr_pdsch_config_sweep_excl_census(ticket->configuration, ticket->rnti, ticket->tda_index, &er, &et, &ep);
+  return snprintf(buf, n, " k0=%u map=%c dci=%s sib1_row=%s deftab=%s excl_restarts=%u excl_truncs=%u dci_phases=%u",
+                  (unsigned)winner->k0, winner->mapping_type ? 'B' : 'A',
+                  ticket->dci_format == 10 ? "1_0" : ticket->dci_format == 11 ? "1_1" : "?", sn[s], dn[d], er, et, ep);
+}
+void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0)
+{
+  if (ticket == NULL)
+    return;
+  pthread_mutex_lock(&g_bc9_cpk_lock);
+  const int i = bc9_cpk_find(ticket->rnti, ticket->configuration, ticket->tda_index, false);
+  const uint64_t other = i >= 0 ? g_bc9_cpk[i].mask & ~(UINT64_C(1) << (winner_k0 & 63)) : 0;
+  if (i >= 0)
+    g_bc9_cpk[i].rnti = 0;
+  pthread_mutex_unlock(&g_bc9_cpk_lock);
+  if (other) {
+    atomic_fetch_add(&g_bc9_alarm, 1);
+    LOG_W(PHY, "SENSING: BC9 DCIADJ_CERT ALARM rnti=0x%x tda=%u converged on k0=%u but certified passes were seen on k0 mask 0x%llx "
+               "(A1/A3 violation or compatibility bug)\n", ticket->rnti, ticket->tda_index, winner_k0, (unsigned long long)other);
+  }
+}
+void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
+                               const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok)
+{
+  /* ISAC_TD_DCI_ADJ=0: the whole BC9 runtime path is off (A/B) */
+  if (!nr_dci_hist_enabled() || ticket == NULL || pdu == NULL || ticket->generation == 0 || ticket->settled)
+    return;
+  nr_pdsch_cfg_hypothesis_t h;
+  uint64_t sib = 0;
+  uint8_t tables = 0;
+  if (!nr_pdsch_config_sweep_ticket_siblings(ticket, &h, &sib, &tables))
+    return;
+  nr_dci_hist_t *dh = nr_dci_hist_global();
+  nr_dci_hist_entry_t g[4];
+  const int n = nr_dci_hist_at(dh, rnti, dci_abs_slot, g, 4);
+  const nr_dci_hist_entry_t *gg = NULL;
+  for (int i = 0; i < n && !gg; i++)
+    if (g[i].dci11 && g[i].tda == ticket->tda_index && g[i].cfg == ticket->configuration) /* review M3: same key */
+      gg = &g[i];
+  const uint64_t jobs = atomic_fetch_add(&g_bc9_jobs, 1) + 1;
+  atomic_fetch_add(&g_bc9_ok, crc_ok);
+  if (gg == NULL) {
+    atomic_fetch_add(&g_bc9_nodci, 1);
+  } else {
+    if (!(sib & ~(UINT64_C(1) << h.k0)))
+      atomic_fetch_add(&g_bc9_nosib, 1);
+    const nr_dci_geom_t geo = {.nb_symb = h.tda_length, .dmrs_mask = h.dmrs_mask,
+                               .dmrs_type = (uint8_t)(pdu->dmrsConfigType == NFAPI_NR_DMRS_TYPE2),
+                               .nl = (uint8_t)__builtin_popcount(pdu->dmrs_ports), .xoh = xoh};
+    const nr_dci_row_k0_fn rk = nr_pdsch_config_sweep_rnti_constrained(rnti, gg->cfg) ? bc9_row_k0 : NULL; /* no certified row: skip */
+    if (nr_dci_hist_k0_certified(dh, gg, h.k0, sib, tables, &geo, rk, NULL)) {
+      atomic_fetch_add(&g_bc9_cert, 1);
+      atomic_fetch_add(&g_bc9_cert_ok, crc_ok);
+      if (crc_ok) {
+        atomic_fetch_add(&g_bc9_cert_ok_k0[h.k0 < 4 ? h.k0 : 4], 1);
+        pthread_mutex_lock(&g_bc9_cpk_lock);
+        const int ci = bc9_cpk_find(rnti, ticket->configuration, ticket->tda_index, true);
+        g_bc9_cpk[ci].mask |= UINT64_C(1) << (h.k0 & 63);
+        g_bc9_cpk[ci].touched = ++g_bc9_cpk_clock;
+        pthread_mutex_unlock(&g_bc9_cpk_lock);
+      }
+    }
+  }
+  if ((jobs % 1000) == 0)
+    LOG_A(PHY, "SENSING: BC9 DCIADJ_CERT trials=%llu certified=%llu (f_S=%.4f) certified_pass=%llu passes=%llu no_sibling=%llu "
+               "no_dci_in_history=%llu certified_pass_by_k0[0,1,2,3,>=4]=%llu,%llu,%llu,%llu,%llu wrong_k0_alarms=%llu\n",
+          (unsigned long long)jobs, (unsigned long long)atomic_load(&g_bc9_cert),
+          (double)atomic_load(&g_bc9_cert) / (double)jobs, (unsigned long long)atomic_load(&g_bc9_cert_ok),
+          (unsigned long long)atomic_load(&g_bc9_ok), (unsigned long long)atomic_load(&g_bc9_nosib),
+          (unsigned long long)atomic_load(&g_bc9_nodci), (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[0]),
+          (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[1]), (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[2]),
+          (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[3]), (unsigned long long)atomic_load(&g_bc9_cert_ok_k0[4]),
+          (unsigned long long)atomic_load(&g_bc9_alarm));
+}
+
+/* ---- BC9d: deterministic exclusions only from CONFIRMED DCIs (nr_dci_history.h) ----
+ * Runs at feedback time on a TB CRC pass, AFTER the trial's KL feedback (an exclusion re-indexes the context, like the Qm
+ * oracle), in the deferred consumer and the in-line path -- off the PDCCH thread (review M4 of BC9: the accept hook no longer
+ * takes the sweep lock per DCI). */
+_Static_assert(NR_DCI_HIST_K0_MAX == NR_TD_K0_MAX, "BC9d: one k0 range for the history and the sweep");
+typedef struct {
+  int mu;
+} bc9d_arg_t;
+static bool bc9d_tdd_last(void *arg, uint32_t abs_slot, int8_t *last)
+{
+  return nr_passive_acq_tdd_pdsch_last_symbols(abs_slot, ((const bc9d_arg_t *)arg)->mu, NR_TD_K0_MAX + 1, last);
+}
+static uint64_t bc9d_row_k0(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda)
+{
+  (void)arg;
+  return nr_pdsch_config_sweep_row_k0_allowed(cfg, rnti, tda);
+}
+static bool bc9d_constrained(void *arg, uint64_t cfg, uint16_t rnti)
+{
+  (void)arg;
+  return nr_pdsch_config_sweep_rnti_constrained(rnti, cfg);
+}
+static _Atomic uint64_t g_bc9d_confirms, g_bc9d_missed, g_bc9d_repeat, g_bc9d_tdd, g_bc9d_tdd_applied, g_bc9d_adj_rows,
+    g_bc9d_adj_removed, g_bc9d_adj_refused;
+/* Review M5 cache (moved from the accept hook): true when this exact TDD constraint is known applied (no g_lock); else applies
+ * it and caches it when it persisted (the RNTI is tracked by the sweep). Valid while the sweep's constraint epoch is unchanged.
+ * Direct-mapped, own small lock. */
+#define BC9_TDD_CACHE 256
+static struct { uint64_t cfg, epoch; uint16_t rnti; uint8_t tda; bool valid; nr_td_excl_t ex; } g_bc9_tdd_cache[BC9_TDD_CACHE];
+static pthread_mutex_t g_bc9_tdd_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static int bc9d_exclude(void *arg, uint64_t cfg, uint16_t rnti, uint8_t tda, const int8_t *last, bool tdd)
+{
+  (void)arg;
+  nr_td_excl_t ex;
+  memcpy(ex.last, last, sizeof(ex.last));
+  if (!tdd)
+    return nr_pdsch_config_sweep_exclude_key(cfg, rnti, tda, &ex);
+  atomic_fetch_add(&g_bc9d_tdd, 1);
+  uint64_t hsh = cfg * UINT64_C(0x9E3779B97F4A7C15) ^ ((uint64_t)rnti << 8) ^ tda;
+  for (int k = 0; k <= NR_TD_K0_MAX; k++)
+    hsh = hsh * 31 + (uint8_t)ex.last[k];
+  const int i = (int)((hsh ^ (hsh >> 29)) % BC9_TDD_CACHE);
+  const uint64_t epoch = nr_pdsch_config_sweep_cert_epoch(); /* read BEFORE applying: a concurrent drop invalidates */
+  pthread_mutex_lock(&g_bc9_tdd_cache_lock);
+  const bool hit = g_bc9_tdd_cache[i].valid && g_bc9_tdd_cache[i].epoch == epoch && g_bc9_tdd_cache[i].rnti == rnti
+                   && g_bc9_tdd_cache[i].cfg == cfg && g_bc9_tdd_cache[i].tda == tda
+                   && !memcmp(g_bc9_tdd_cache[i].ex.last, ex.last, sizeof(ex.last));
+  pthread_mutex_unlock(&g_bc9_tdd_cache_lock);
+  if (hit)
+    return 0;
+  atomic_fetch_add(&g_bc9d_tdd_applied, 1);
+  const int rm = nr_pdsch_config_sweep_exclude_key(cfg, rnti, tda, &ex);
+  if (nr_pdsch_config_sweep_rnti_constrained(rnti, cfg)) { /* persisted: safe to skip next time */
+    pthread_mutex_lock(&g_bc9_tdd_cache_lock);
+    g_bc9_tdd_cache[i].valid = true;
+    g_bc9_tdd_cache[i].epoch = epoch;
+    g_bc9_tdd_cache[i].rnti = rnti;
+    g_bc9_tdd_cache[i].cfg = cfg;
+    g_bc9_tdd_cache[i].tda = tda;
+    g_bc9_tdd_cache[i].ex = ex;
+    pthread_mutex_unlock(&g_bc9_tdd_cache_lock);
+  }
+  return rm;
+}
+void nr_pdsch_passive_bc9_confirm(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot, int mu, bool crc_ok)
+{
+  if (!crc_ok || ticket == NULL || ticket->generation == 0 || !nr_dci_hist_enabled())
+    return;
+  bc9d_arg_t a = {.mu = mu};
+  { /* TD_EXCL census: the phase of this confirmed DCI, recorded BEFORE its exclusions so a restart it causes is never ahead of it */
+    uint32_t period = nr_passive_acq_tdd_period_slots(mu);
+    if (period == 0)
+      period = 10u << mu; /* slots per frame */
+    nr_pdsch_config_sweep_note_dci_phase(ticket->configuration, rnti, (uint16_t)(dci_abs_slot % period));
+  }
+  const nr_dci_excl_ops_t ops = {bc9d_tdd_last, bc9d_exclude, bc9d_constrained, bc9d_row_k0, &a};
+  nr_dci_confirm_out_t o;
+  nr_dci_hist_on_confirm(nr_dci_hist_global(), rnti, dci_abs_slot, ticket->configuration, ticket->tda_index, &ops, &o);
+  const uint64_t n = atomic_fetch_add(&g_bc9d_confirms, 1) + 1;
+  atomic_fetch_add(&g_bc9d_missed, !o.found);
+  atomic_fetch_add(&g_bc9d_repeat, o.found && o.newly == 0);
+  atomic_fetch_add(&g_bc9d_adj_rows, (uint64_t)o.adj_rows);
+  atomic_fetch_add(&g_bc9d_adj_removed, (uint64_t)o.adj_removed);
+  atomic_fetch_add(&g_bc9d_adj_refused, (uint64_t)o.adj_refused);
+  static _Atomic int s_log = 20;
+  if ((o.adj_removed > 0 || o.adj_refused > 0) && atomic_fetch_sub(&s_log, 1) > 0)
+    LOG_A(PHY, "SENSING: BC9 DCIADJ confirmed DCI rnti=0x%x slot=%u tda=%u -> rows=%d removed=%d refused=%d\n", rnti, dci_abs_slot,
+          ticket->tda_index, o.adj_rows, o.adj_removed, o.adj_refused);
+  if ((n % 2000) == 0) {
+    uint64_t lt2 = 0, ge2 = 0, refused = 0;
+    nr_pdsch_config_sweep_excl_stats(&lt2, &ge2, &refused);
+    LOG_A(PHY, "SENSING: BC9 DCICONF confirms=%llu missed_lookup=%llu repeat=%llu tdd_known=%d tdd_dcis=%llu tdd_lock_calls=%llu "
+               "adj_rows=%llu adj_removed=%llu adj_refused=%llu excl_removed[k0<2]=%llu excl_removed[k0>=2]=%llu excl_refused=%llu\n",
+          (unsigned long long)n, (unsigned long long)atomic_load(&g_bc9d_missed), (unsigned long long)atomic_load(&g_bc9d_repeat),
+          nr_passive_acq_tdd_known(), (unsigned long long)atomic_load(&g_bc9d_tdd),
+          (unsigned long long)atomic_load(&g_bc9d_tdd_applied), (unsigned long long)atomic_load(&g_bc9d_adj_rows),
+          (unsigned long long)atomic_load(&g_bc9d_adj_removed), (unsigned long long)atomic_load(&g_bc9d_adj_refused),
+          (unsigned long long)lt2, (unsigned long long)ge2, (unsigned long long)refused);
+  }
+}
+
 void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
                                     const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
                                     int nr_slot, c16_t *scratch)
@@ -569,7 +799,7 @@ void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_tic
     LOG_A(PHY, "SENSING: DMRS_ORACLE (in-line) slot=%d rb=%d+%d mask=0x%x last_sym=%d med=%.2f\n", nr_slot, rb, nrb, mask,
           last_sym, med);
   if (mask)
-    nr_pdsch_config_sweep_observe(ticket, mask, last_sym, 0); /* measured on the DCI's own slot: k0 = 0 */
+    nr_pdsch_config_sweep_observe(ticket, mask, last_sym, 0); /* K39: k0 = 0 is only PLAUSIBLE (mask/last symbol prune; k0 is never pinned by DM-RS presence) */
 }
 
 static void *nr_pdsch_passive_queue_thread(void *arg)
@@ -769,7 +999,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * the context is unsettled. */
     /* Only in the DCI's OWN slot (k0 = 0 hypothesis): a k0 > 0 job measures slot + k0, where a busy
      * cell has some other PDSCH -- the rank-4 bed recorded that slot's mask (0x804) with k0 = 1 and
-     * pruned the true entries away (0/10k probes). A mask seen in the DCI's slot proves k0 = 0. */
+     * pruned the true entries away (0/10k probes). K39: a mask seen in the DCI's slot is k0-plausible, not proof of k0 = 0. */
     {
       static _Atomic uint32_t s_gate_n;
       if ((atomic_fetch_add(&s_gate_n, 1) % 2000) == 0)
@@ -797,6 +1027,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               prof[8], prof[9], prof[10], prof[11], prof[12], prof[13]);
       }
       if (mask) {
+        /* K39: the hypothesised k0 is recorded as plausible only; DM-RS in this slot never prunes other k0. */
         nr_pdsch_config_sweep_observe(&job.sweep_ticket, mask, last_sym, job.sweep_ticket.k0);
       } else {
         /* k0 ORACLE (Task 14). No DM-RS on this grant's PRBs (rb0/nrb = probe_span(): the largest segment of a
@@ -884,6 +1115,34 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (s_probe_all)
         job.layout_probe = 1;
     }
+    /* GRANTWORK-LITE (ISAC_TD_GRANTWORK, default ON, 0 disables; levers plan R1): this grant's shared per-geometry work
+     * (FEP / chest / LLRs per signature, immutable, unified memory) -- the main decode computes and publishes
+     * its own signature; CB0 of other hypotheses can then be extracted from it (nr_pdsch_passive_gw_cb0).
+     * ISAC_TD_GW_PROBE=1 also serves layout probes from it (whole slot instead of the probe horizon). */
+    static _Atomic int s_gw_on = -1, s_gw_probe = -1; /* _Atomic: N consumers */
+    if (s_gw_on < 0) {
+      const char *e = getenv("ISAC_TD_GW_PROBE");
+      s_gw_probe = (e != NULL && atoi(e) != 0) ? 1 : 0;
+      e = getenv("ISAC_TD_GRANTWORK"); /* default ON (operator 2026-10-04: fastest combination); 0 disables */
+      s_gw_on = (e != NULL && *e && atoi(e) == 0) ? 0 : 1;
+    }
+    nr_td_grantwork_t *gw = NULL;
+    if (s_gw_on && !gpu_job) {
+      /* I4: the borrowed FEP buffer belongs to THIS job: any older gw can no longer compute on it */
+      __atomic_fetch_add(&g_fep_gen[idx], 1, __ATOMIC_RELEASE);
+      gw = nr_pdsch_passive_grantwork_begin(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, job.fo_hz,
+                                            job.sweep_ticket.k0, &rxdataF[0][0], &g_fep_gen[idx]);
+      nr_pdsch_passive_set_grantwork(gw, s_gw_probe != 0);
+    }
+    /* CB0 ELIMINATION CHANNEL (ISAC_TD_CB0_ELIM, default ON, 0 disables; nr_td_cb0_wire.h): the CB0 hypothesis set of this grant is
+     * fixed HERE, before any decode of the grant; the TB decodes on the CPU only when this grant's CB0 batch will run on the
+     * CPU backend (dominance rule; a CUDA CB0 batch dominates either TB decoder). */
+    bool cb0_tb_cpu = false;
+    const nr_td_cb0_job_t cb0_job = {.abs_slot = job.absolute_slot, .job_k0 = job.sweep_ticket.k0, .layout_probe = job.layout_probe != 0,
+                                     .gpu_job = gpu_job != NULL, .gw_on = s_gw_on != 0};
+    const bool cb0_on = nr_td_cb0_wire_pre(&job.sweep_ticket, gw, &cb0_job, &cb0_tb_cpu);
+    if (cb0_tb_cpu)
+      nr_pdsch_passive_force_cpu_tb(true);
     nr_pdsch_passive_probe_mode(job.layout_probe != 0);
     /* PT-RS density sweep only once the layout and the Technique-D context are settled (a pinned
      * conf has no ticket: generation 0). */
@@ -893,7 +1152,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     nr_pdsch_passive_set_llr_override(NULL, 0);
+    if (cb0_tb_cpu)
+      nr_pdsch_passive_force_cpu_tb(false);
+    const uint8_t cb0_tb_decoder = cb0_on ? nr_pdsch_passive_last_decoder_used() : 0; /* the main decode's, before any rerun */
     const bool probe_outcome = nr_pdsch_passive_probe_outcome(); /* before the self-check re-runs the decode */
+    if (cb0_on) /* the CB0 batch: after the main decode published its signature, on this (job) thread, before job_end */
+      nr_td_cb0_wire_run(gw);
+    if (job.layout_probe && !gpu_job && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
+      nr_pdsch_passive_probe_equiv_check(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF); /* debug, env-gated */
+    nr_pdsch_passive_set_grantwork(NULL, false);
     /* ISAC_GPU_SELFCHECK=N: the first N GPU-fed decodes are re-run on the CPU chain and compared --
      * TB/CB0 CRC agreement, LLR sign agreement and max |dLLR| after matching the two scales. */
     {
@@ -980,9 +1247,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         LOG_A(PHY, "SENSING: LAYOUT_PROBE n=%lu cb0_ok=%lu\n", (unsigned long)atomic_load(&s_probe_n), (unsigned long)atomic_load(&s_probe_ok));
     } else
       nr_passive_replay_dl(&job, &dec);
-    if (job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
-      nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     nr_slot_fep_fo_override_hz = saved_fo;
+    /* K33: the producer keeps overwriting the ring while we decode (and the GPU path decodes
+     * asynchronously). Re-check lifetime NOW: a CRC computed from overwritten IQ is not evidence for or
+     * against any hypothesis, layout or scrambling id -> INCONCLUSIVE, no learning-state update of
+     * any kind (TD, layout, Qm, data-id, BWP CRC, crc_note/scrambling walk, DM-RS identity). The
+     * decoded TB itself is still delivered downstream (CRC-OK is a property of the bits, not credit). */
+    const bool credit_ok = nr_passive_credit_allowed(
+        atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
+    if (!credit_ok && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
+      atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
+    if (credit_ok && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
+      nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
             job.absolute_slot, slots_per_frame))
@@ -996,7 +1272,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       /* Scrambling-identity walk eligibility + link health (final review I1): every decode path reports
        * here; the in-line decode in nr_pdcch_blind_monitor_rt.c makes the same call. */
-      if (!job.layout_probe)
+      if (!job.layout_probe && credit_ok)
         nr_pdsch_passive_crc_note(job.rnti, job.grant.scr_dedicated, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* TIMING ADVANCE FROM AN OVERHEARD PDU (nr_passive_mac_ta.h). The payload of a CRC-verified
        * transport block was being discarded; a RAR carries the gNB's absolute advance for the UE it
@@ -1103,7 +1379,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
          * this comment for the full reasoning. */
         const int dl_ns = pdu->nscid & 1;
-        if (job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
+        if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
           nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[dl_ns];
           if (!g_dl_dmrs_id_init[dl_ns]) { nr_dmrs_id_2stage_init(dst, "PDSCH", ue->frame_parms.Nid_cell); g_dl_dmrs_id_init[dl_ns] = true; }
@@ -1121,24 +1397,47 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * in nr_pdcch_blind_monitor_rt.c consulted when it chose this grant's dlDataScramblingId --
          * only for grants where that sweep's own candidate was actually used (data_id_advance),
          * so an attempt that used the PCI fallback never perturbs a sweep it did not use. */
-        if (job.data_id_advance)
+        if (job.data_id_advance && credit_ok)
           nr_pdsch_passive_data_id_feed(job.rnti, crc);
       }
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
-      nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
-      if (nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
-        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
+      if (credit_ok)
+        nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      /* a layout-probe job never enters the CB0 wiring (cb0_on false): its outcome is exempt from note_tb_decoder (it feeds only
+       * the full-TB election counters; nr_pdsch_config_sweep.h, DECODER DOMINANCE) */
+      if (credit_ok && nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner)) {
+        char bc12[192];
+        nr_pdsch_passive_bc12_census(&job.sweep_ticket, &winner, bc12, sizeof(bc12));
+        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u%s%s\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
-              winner.dmrs_mask, winner.mcs_table);
+              winner.dmrs_mask, winner.mcs_table, bc12, nr_td_cb0_wire_converged_suffix(&job.sweep_ticket));
+        nr_pdsch_passive_bc9_converged(&job.sweep_ticket, winner.k0);
+      }
+      /* CB0 elimination feed: AFTER this grant's TB feedback, BEFORE the BC9 / Qm steps that may re-index the context. */
+      if (cb0_on) {
+        const nr_td_cb0_tb_t cb0_tb = {.tb_fed = credit_ok, .tb_pass = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, .tb_decoder = cb0_tb_decoder,
+                                       .iq_ok_after = credit_ok, .rv = job.grant.rv, .nl = dec.cw.Nl};
+        nr_td_cb0_wire_feed(&job.sweep_ticket, &cb0_tb);
+      }
+      /* BC9 census AFTER the KL feedback: it only reads the sweep and must not delay or reorder the KL path (a trial whose
+       * own feedback settled the context is not counted: ticket_siblings refuses a settled context). */
+      if (credit_ok)
+        nr_pdsch_passive_bc9_note(&job.sweep_ticket, job.rnti, job.dci_abs_slot, &job.dlsch_pdu, job.grant.nb_rb_oh,
+                                  st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      /* BC9d: a TB CRC pass (not a first-code-block layout probe) proves the DCI real: only now may it feed the hard TDD /
+       * DCI-adjacency exclusions. After the KL feedback and the census, before the Qm oracle (both may re-index). */
+      if (credit_ok && !job.layout_probe)
+        nr_pdsch_passive_bc9_confirm(&job.sweep_ticket, job.rnti, job.dci_abs_slot, ue->frame_parms.numerology_index,
+                                     st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       /* Qm-oracle prune runs AFTER this job's CRC feedback above: prune_tables() compacts and
        * re-indexes st->hyp[] without bumping the context generation, so pruning before the CRC
        * feedback for the SAME job would credit that outcome to a hypothesis index that has already
        * moved (nr_pdsch_config_sweep_feedback resolves job.sweep_ticket.hypothesis against the
        * pre-prune array). Ordering this after leaves the DM-RS observe at ~682 untouched -- that one
        * runs on a separate, earlier tap and is out of scope here. */
-      if (!job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
+      if (credit_ok && !job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
         const int kept = nr_pdsch_config_sweep_observe_qm(&job.sweep_ticket, job.grant.mcs, dec.qm_measured);
         if (kept > 0)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
@@ -1184,6 +1483,24 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           nr_isac_abs_slot_override = 0;
         }
       }
+    }
+    if (cb0_on) { /* decode error / unsupported: the TB path did not feed this grant (no-op when fed above) */
+      const nr_td_cb0_tb_t cb0_tb = {.tb_fed = false, .tb_pass = false, .tb_decoder = cb0_tb_decoder, .iq_ok_after = credit_ok,
+                                     .rv = job.grant.rv, .nl = dec.cw.Nl};
+      nr_td_cb0_wire_feed(&job.sweep_ticket, &cb0_tb);
+    }
+    if (gw != NULL) {
+      /* Debug / profiling (env-gated), after every use of this job's decoded TB: the reruns reuse the
+       * private HARQ buffers. Then this job's reference goes; the gw is freed with its last one. */
+      const bool gw_used = nr_pdsch_passive_last_used_grantwork(NULL);
+      nr_slot_fep_fo_override_hz = job.fo_hz;
+      if (!job.layout_probe && !cb0_on) { /* the CB0 batch's lazy entries overwrite the thread's last-decode buffers */
+        nr_pdsch_passive_gw_check(gw, st_raw);
+        nr_pdsch_passive_gw_profile(gw, gw_used);
+      }
+      nr_slot_fep_fo_override_hz = saved_fo;
+      nr_td_grantwork_job_end(gw); /* I3: no lazy compute after this point (READY entries stay readable) */
+      nr_td_grantwork_release(gw);
     }
     } /* slot group */
   }
@@ -1266,10 +1583,19 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 
   const uint32_t rxdataF_sz = ue->frame_parms.samples_per_slot_wCP;
   for (int i = 0; i < n_consumers; i++) {
-    g_rxdataF[i] = (c16_t *)malloc16_clear((size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t));
+    /* nr_td_gw_alloc: unified (managed) memory in a CUDA build, so a GPU kernel can read the FEP output a
+     * GrantWork shares without a copy; plain aligned malloc otherwise. */
+    const size_t rxF_bytes = (size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t);
+    if (i == 0) {
+      const char *e = getenv("ISAC_TD_GRANTWORK"); /* default ON, as above */
+      g_rxdataF_gw = !(e != NULL && *e && atoi(e) == 0);
+    }
+    g_rxdataF[i] = g_rxdataF_gw ? (c16_t *)nr_td_gw_alloc(rxF_bytes) : (c16_t *)malloc16_clear(rxF_bytes);
+    if (g_rxdataF_gw && g_rxdataF[i] != NULL)
+      memset(g_rxdataF[i], 0, rxF_bytes);
     if (g_rxdataF[i] == NULL) {
       LOG_E(PHY, "SENSING: passive PDSCH queue: rxdataF allocation failed for consumer %d\n", i);
-      for (int j = 0; j < i; j++) { free(g_rxdataF[j]); g_rxdataF[j] = NULL; }
+      for (int j = 0; j < i; j++) { if (g_rxdataF_gw) nr_td_gw_free(g_rxdataF[j]); else free(g_rxdataF[j]); g_rxdataF[j] = NULL; }
       return false;
     }
   }
@@ -1427,6 +1753,7 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_narrow = atomic_load_explicit(&g_dropped_narrow, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
+  out->stale_after_decode = atomic_load_explicit(&g_stale_after_decode, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
   out->slot_groups   = atomic_load_explicit(&g_slot_groups, memory_order_relaxed);
   out->batches       = atomic_load_explicit(&g_batches, memory_order_relaxed);
@@ -1444,7 +1771,10 @@ void nr_pdsch_passive_queue_stop(void)
   pthread_mutex_unlock(&g_lock);
   for (int i = 0; i < g_nthreads; i++) {
     pthread_join(g_threads[i], NULL);
-    free(g_rxdataF[i]);
+    if (g_rxdataF_gw)
+      nr_td_gw_free(g_rxdataF[i]);
+    else
+      free(g_rxdataF[i]);
     g_rxdataF[i] = NULL;
   }
   if (atomic_exchange(&g_gpu_worker_running, 0)) {

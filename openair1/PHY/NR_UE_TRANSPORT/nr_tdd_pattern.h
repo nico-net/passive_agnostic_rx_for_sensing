@@ -38,7 +38,8 @@
 typedef enum {
   NR_TDD_SLOT_DL = 0,   ///< every symbol downlink
   NR_TDD_SLOT_UL,       ///< every symbol uplink
-  NR_TDD_SLOT_MIXED,    ///< DL symbols, then a guard, then UL symbols
+  NR_TDD_SLOT_MIXED,    ///< carries the period's nrofDownlinkSymbols (start) and/or nrofUplinkSymbols (end); rest flexible
+  NR_TDD_SLOT_FLEXIBLE, ///< every symbol flexible (between the DL and the UL part of the period)
 } nr_tdd_slot_dir_t;
 
 /// One pattern, exactly as tdd-UL-DL-ConfigurationCommon carries it.
@@ -74,5 +75,11 @@ nr_tdd_slot_dir_t nr_tdd_slot_direction(const nr_tdd_config_t *cfg, uint32_t abs
 /** True if the slot can carry PDCCH -- i.e. it has at least one downlink symbol. A mixed slot
  * counts: the CORESET sits at the start of the slot, which is the downlink part. */
 bool nr_tdd_slot_has_downlink(const nr_tdd_config_t *cfg, uint32_t absolute_slot);
+
+/** BC9: the last OFDM symbol (0..13) a PDSCH may END on in this slot under the COMMON pattern: 13 for a DL slot, a
+ * flexible slot or an unknown/invalid configuration; 13 - nrofUplinkSymbols for the mixed slot; -1 for a UL slot (no
+ * PDSCH possible). Only common UL symbols restrict: dedicated TDD configuration cannot turn them into DL, while
+ * flexible symbols may carry a DCI-scheduled PDSCH (TS 38.213 11.1), so they are never excluded. */
+int nr_tdd_pdsch_last_symbol(const nr_tdd_config_t *cfg, uint32_t absolute_slot);
 
 #endif /* __NR_TDD_PATTERN_H__ */

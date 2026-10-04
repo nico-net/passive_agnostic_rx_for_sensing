@@ -19,6 +19,7 @@
 #include "RRC/NR_UE/L2_interface_ue.h"
 #include "oai_asn1.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_td_order.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 
@@ -1771,6 +1772,7 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
      * every other field correct. Wrong symbols means the wrong DM-RS row AND the wrong data REs. */
     if (bwp_id == 0 && bwp->tdaList_Common != NULL && bwp->tdaList_Common->list.count > 0) {
       uint8_t ts[16], tl[16], tm[16];
+      nr_td_tdra_t census[NR_TD_MAX_SIB1_TDRA]; /* BC12a: same rows + k0, read-only census store */
       int nt = bwp->tdaList_Common->list.count;
       if (nt > 16) {
         nt = 16;
@@ -1787,8 +1789,13 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
         ts[t] = (uint8_t)S;
         tl[t] = (uint8_t)L;
         tm[t] = (uint8_t)e->mappingType;
+        /* k0 is OPTIONAL in PDSCH-TimeDomainResourceAllocation (TS 38.331); absent = 0 (TS 38.214 5.1.2.1) */
+        census[t] = (nr_td_tdra_t){.S = ts[t], .L = tl[t], .mapping = tm[t], .k0 = e->k0 ? (uint8_t)*e->k0 : 0};
       }
       nr_pdcch_blind_monitor_set_tda_common(ts, tl, tm, nt);
+      nr_td_sib1_store_set(census, nt);
+    } else if (bwp_id == 0) {
+      nr_td_sib1_store_set(NULL, 0); /* BC12a: no common list now -> census reports sib1_row=none */
     }
 
     /* ---- OTA CONFIG DERIVATION PROBE (ISAC_OTA_CFG=1) -------------------------------------
@@ -2526,6 +2533,7 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
         tp[i].ul_slots = (uint8_t)pp[i]->nrofUplinkSlots;
         tp[i].ul_symbols = (uint8_t)pp[i]->nrofUplinkSymbols;
       }
+      nr_passive_acq_note_sib1_tdd_ref_mu(mu); /* BC9: the TDD k0 exclusion applies only at this numerology */
       nr_passive_acq_note_sib1_tdd(&tp[0], tc->pattern2 ? &tp[1] : NULL);
     } else {
       LOG_A(PHY, "SENSING: TDD from SIB1 ABSENT (tdd-UL-DL-ConfigurationCommon not in SIB1 -> FDD or pattern unknown)\n");

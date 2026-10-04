@@ -1,0 +1,62 @@
+{
+ "_doc": "BC6 SUPPLEMENTARY (not in the operator matrix): same model, oracle 0 only, k0-sibling guard DISABLED (--sib-pmin 0 = fix A only), because the default guard blocks C/P in the main matrix (crc_accepts = geom_pins = 0). Stress arms also guard-off so the bound is exercised.",
+ "acq": 500,
+ "seed": 1,
+ "common": {
+  "slot-model": 1,
+  "persist": 0.5,
+  "dci-miss": 0.01,
+  "dci-false": 0.001,
+  "other-ue-occ": 0.1,
+  "obs-lastset": 1,
+  "k0-oracle-legacy": 0,
+  "gate": 1,
+  "twins": 2,
+  "K": 1,
+  "crc-false": 5.96e-08,
+  "rntis-per-acq": 4,
+  "sib1": 1
+ },
+ "arms": {
+  "cp_nog": {
+   "crc-accept": 1,
+   "geom-pin": 1,
+   "sib-pmin": 0
+  },
+  "fb2_cp_nog": {
+   "fieldbook": 2,
+   "crc-accept": 1,
+   "geom-pin": 1,
+   "sib-pmin": 0
+  }
+ },
+ "tdd": {
+  "none": null,
+  "DDDSU": "DDDSU"
+ },
+ "rx": [
+  4,
+  1
+ ],
+ "oracle": [
+  0
+ ],
+ "stress": {
+  "C_stress_nog": {
+   "oracle": 0,
+   "equiv": 1,
+   "crc-accept": 1,
+   "crc-false": 0.001,
+   "bound": "crc",
+   "sib-pmin": 0
+  },
+  "P_stress_nog": {
+   "oracle": 0,
+   "geom-pin": 1,
+   "crc-false": 0.001,
+   "bound": "geom",
+   "sib-pmin": 0
+  }
+ },
+ "stress_rx": 4
+}

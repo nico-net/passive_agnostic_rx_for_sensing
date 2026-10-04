@@ -214,9 +214,41 @@ void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_patte
           p2 ? p2->period_slots : 0, p2 ? p2->dl_slots : 0, p2 ? p2->dl_symbols : 0, p2 ? p2->ul_slots : 0, p2 ? p2->ul_symbols : 0);
 }
 bool nr_passive_acq_tdd_known(void) { return g_tdd.valid; }
+static int g_tdd_ref_mu = -1; /* BC9: SIB1 referenceSubcarrierSpacing; -1 = unknown */
+void nr_passive_acq_note_sib1_tdd_ref_mu(int mu)
+{
+  pthread_mutex_lock(&g_lock);
+  g_tdd_ref_mu = mu;
+  pthread_mutex_unlock(&g_lock);
+}
+bool nr_passive_acq_tdd_pdsch_last_symbols(uint32_t dci_abs_slot, int mu, int n, int8_t *last)
+{
+  pthread_mutex_lock(&g_lock);
+  const nr_tdd_config_t t = g_tdd;
+  const int ref_mu = g_tdd_ref_mu;
+  pthread_mutex_unlock(&g_lock);
+  if (!t.valid || ref_mu < 0 || ref_mu != mu || last == NULL || n <= 0)
+    return false;
+  for (int k = 0; k < n; k++)
+    last[k] = (int8_t)nr_tdd_pdsch_last_symbol(&t, dci_abs_slot + (uint32_t)k);
+  return true;
+}
+uint32_t nr_passive_acq_tdd_period_slots(int mu)
+{
+  pthread_mutex_lock(&g_lock);
+  const nr_tdd_config_t t = g_tdd;
+  const int ref_mu = g_tdd_ref_mu;
+  pthread_mutex_unlock(&g_lock);
+  if (!t.valid || ref_mu < 0 || ref_mu != mu)
+    return 0;
+  return (uint32_t)t.p1.period_slots + (uint32_t)t.p2.period_slots;
+}
 bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
 {
-  return g_tdd.valid ? nr_tdd_slot_has_downlink(&g_tdd, absolute_slot) : true;
+  pthread_mutex_lock(&g_lock); /* g_tdd is replaced by the SIB1 path: copy it consistently */
+  const nr_tdd_config_t t = g_tdd;
+  pthread_mutex_unlock(&g_lock);
+  return t.valid ? nr_tdd_slot_has_downlink(&t, absolute_slot) : true;
 }
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {

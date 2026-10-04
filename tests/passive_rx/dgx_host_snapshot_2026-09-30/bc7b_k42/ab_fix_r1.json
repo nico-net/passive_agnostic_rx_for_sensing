@@ -1,0 +1,1 @@
+{"arm": "fix_r1", "bank_len": 46, "conv_s": 17.666, "cpu_pct": 301, "crc_pct": 97.08, "drop_full_pct": 0.0664, "first_crnti_s": 14.738, "ldpc_ok": 55271, "ldpc_seg_fail": 1334, "max_rss_kb": 692384, "n_converged": 2, "pdsch_crc_ok": 55270, "pdsch_decoded": 56930, "scanq_drop_full": 262, "scanq_queued": 394491, "sync_s": 5.305, "ttc_s": 2.928}

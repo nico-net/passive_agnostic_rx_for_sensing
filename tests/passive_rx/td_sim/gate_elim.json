@@ -1,0 +1,214 @@
+{
+ "_doc": "CB0 elimination channel gate (operator acceleration item 1; fix round 1). Run with gate_elim.py (no lock: simulator only; pgrep-gated). Simulator v2 slot model, BC6 common flags (dci-miss 0.01, dci-false 1e-3, other-UE occ 0.1, K39 fixed, gate 1, twins 2, K 1, crc-false 2^-24, SA sib1 1), seed 1, acq x 4 RNTIs. Axes: arm (off / elim) x field book (prior, fb2) x oracle x TDD x rho (= --persist) x snr_rho (AR(1) SNR) x rx. CB0 margin 1 dB; retransmissions inadmissible (rv0 new data only); all ranks admissible (K38 fixed). Supplementary: subset B 64/128, trap-family exemption off (speed cost), decoder fallback, crc-false stress, K38 rank-1-only, margin 0. 4 RX only (operator decision 2026-10-03: the 1-RX arms were dropped).",
+ "acq": 500,
+ "seed": 1,
+ "common": {
+  "slot-model": 1,
+  "dci-miss": 0.01,
+  "dci-false": 0.001,
+  "other-ue-occ": 0.1,
+  "obs-lastset": 1,
+  "k0-oracle-legacy": 0,
+  "gate": 1,
+  "twins": 2,
+  "K": 1,
+  "crc-false": 5.96e-08,
+  "rntis-per-acq": 4,
+  "sib1": 1
+ },
+ "arms": {
+  "off": {
+   "cb0-elim": 0
+  },
+  "elim": {
+   "cb0-elim": 1,
+   "cb0-margin-db": 1
+  }
+ },
+ "fb": {
+  "prior": {
+   "fieldbook": 0
+  },
+  "fb2": {
+   "fieldbook": 2
+  }
+ },
+ "tdd": {
+  "none": null,
+  "DDDSU": "DDDSU"
+ },
+ "rho": [
+  0.5,
+  0.9
+ ],
+ "rx": [
+  4
+ ],
+ "oracle": [
+  0,
+  1
+ ],
+ "supp": {
+  "stress_off": {
+   "arm": "off",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.5,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "crc-false": 0.001
+   }
+  },
+  "stress_elim": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.5,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "crc-false": 0.001
+   }
+  },
+  "subset64_r05": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.5,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-subset": 64
+   }
+  },
+  "subset128_r05": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.5,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-subset": 128
+   }
+  },
+  "subset64_r09": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-subset": 64
+   }
+  },
+  "subset128_r09": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-subset": 128
+   }
+  },
+  "subset64_o1": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.5,
+   "rx": 4,
+   "oracle": 1,
+   "flags": {
+    "cb0-subset": 64
+   }
+  },
+  "nofamily_r05": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.5,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-no-family": 1
+   }
+  },
+  "nofamily_r09": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-no-family": 1
+   }
+  },
+  "nofamily_o1_r09": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 1,
+   "flags": {
+    "cb0-no-family": 1
+   }
+  },
+  "cuda_fallback200": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-decoder": 1,
+    "cb0-fallback-at": 200
+   }
+  },
+  "k38_rank1_r09": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-rank-max": 1
+   }
+  },
+  "margin0_r09": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 0,
+   "flags": {
+    "cb0-margin-db": 0
+   }
+  },
+  "rank_snr3_harq3": {
+   "arm": "elim",
+   "fb": "prior",
+   "tdd": "none",
+   "rho": 0.9,
+   "rx": 4,
+   "oracle": 0,
+   "snr_rho": 0.9,
+   "flags": {
+    "rank-snr-db": 3,
+    "harq-gain-db": 3
+   }
+  }
+ },
+ "snr_rho": [
+  0.0,
+  0.9
+ ]
+}

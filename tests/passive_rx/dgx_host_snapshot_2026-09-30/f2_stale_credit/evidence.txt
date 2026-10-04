@@ -1,0 +1,13 @@
+F2 K33 evidence, DGX rfsim 106 PRB 1 RX, HEAD 2ab8c05cdb + F2 working tree, rfsim_regress.sh 2
+{"arm": "base_r1", "bank_len": 46, "conv_s": 16.289, "cpu_pct": 294, "crc_pct": 98.58, "drop_full_pct": 0.0653, "first_crnti_s": 14.712, "ldpc_ok": 54642, "ldpc_seg_fail": 739, "max_rss_kb": 686788, "n_converged": 2, "pdsch_crc_ok": 54642, "pdsch_decoded": 55431, "scanq_drop_full": 251, "scanq_queued": 384572, "sync_s": 5.238, "ttc_s": 1.577}
+PASS base_r1
+{"arm": "base_r2", "bank_len": 46, "conv_s": 16.706, "cpu_pct": 298, "crc_pct": 98.63, "drop_full_pct": 0.07, "first_crnti_s": 15.103, "ldpc_ok": 54651, "ldpc_seg_fail": 711, "max_rss_kb": 691672, "n_converged": 2, "pdsch_crc_ok": 54651, "pdsch_decoded": 55410, "scanq_drop_full": 269, "scanq_queued": 384485, "sync_s": 5.582, "ttc_s": 1.603}
+PASS base_r2
+
+base_r1 pdschq_stale_after_decode values:
+      8 pdschq_stale_after_decode":0
+base_r2 pdschq_stale_after_decode values:
+      8 pdschq_stale_after_decode":0
+
+gtest test_nr_passive_sample_lifetime RED (credit_allowed undeclared) -> GREEN 2/2
+ctest -j4: only known ARM failures: test_nr_pusch_ra0_qam256, dft_test, test_nr_modulation

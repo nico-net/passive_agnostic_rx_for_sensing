@@ -1,0 +1,421 @@
+[SIMULATED, DGX host, nr_td_sim @d21f10e471 + BC0 working tree (commit that adds this file)] --acq 2000 --seed 1, 8000 RNTIs per run (4 per acquisition)
+cold = RNTI rank 0-1, steady = rank >= 2; mean/median/p95 over DECIDED RNTIs (undecidable censored at cap 3600 s); seconds = grants / 200
+Wall: oracle 1 ~0.3-0.4 s; oracle 0 3m46 (4 RX) / 6m54 (1 RX); miss 0.3 2m05 / 1m08; wrong 0.05 ~12 s; trap arm 3m50 / 7m04.
+
+## o1 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1
+cold: n=4000 decided=4000 mean_s=1.08 median_s=1.01 p95_s=1.83 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=1.06 median_s=0.99 p95_s=1.82 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.0, "p95_s": 1.825, "mean_s": 1.074, "mean_grants": 214.7, "wrong": 0, "undecidable": 0, "n_full": 1717916, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.0, "mean_s": 0.987, "wrong": 0}, "1": {"n": 2584, "median_s": 1.61, "mean_s": 1.607, "wrong": 0}, "2": {"n": 2760, "median_s": 0.635, "mean_s": 0.657, "wrong": 0}}}}
+
+## o1 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1
+cold: n=4000 decided=4000 mean_s=1.77 median_s=1.60 p95_s=2.86 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=1.72 median_s=1.58 p95_s=2.81 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.59, "p95_s": 2.845, "mean_s": 1.745, "mean_grants": 349.0, "wrong": 0, "undecidable": 0, "n_full": 2791634, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.6, "mean_s": 1.598, "wrong": 0}, "1": {"n": 2584, "median_s": 2.55, "mean_s": 2.507, "wrong": 0}, "2": {"n": 2760, "median_s": 1.23, "mean_s": 1.172, "wrong": 0}}}}
+
+## o0 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0
+cold: n=4000 decided=4000 mean_s=422.38 median_s=356.57 p95_s=836.57 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=15.58 median_s=10.55 p95_s=35.84 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 116.57, "p95_s": 776.57, "mean_s": 218.982, "mean_grants": 43796.3, "wrong": 0, "undecidable": 0, "n_full": 350370521, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 177.57, "mean_s": 190.985, "wrong": 0}, "1": {"n": 2584, "median_s": 356.87, "mean_s": 377.964, "wrong": 0}, "2": {"n": 2760, "median_s": 116.57, "mean_s": 97.079, "wrong": 0}}}}
+
+## o0 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0
+cold: n=4000 decided=4000 mean_s=756.84 median_s=716.57 p95_s=1125.32 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=28.05 median_s=25.59 p95_s=58.07 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 268.635, "p95_s": 1125.315, "mean_s": 392.445, "mean_grants": 78489.0, "wrong": 0, "undecidable": 0, "n_full": 627912024, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 356.57, "mean_s": 369.188, "wrong": 0}, "1": {"n": 2584, "median_s": 716.57, "mean_s": 568.208, "wrong": 0}, "2": {"n": 2760, "median_s": 268.635, "mean_s": 250.271, "wrong": 0}}}}
+
+## miss03 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --oracle-miss 0.3
+cold: n=4000 decided=4000 mean_s=128.73 median_s=1.39 p95_s=716.57 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=2.63 median_s=1.00 p95_s=14.56 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.065, "p95_s": 536.555, "mean_s": 65.682, "mean_grants": 13136.4, "wrong": 0, "undecidable": 0, "n_full": 105091312, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 2388, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.01, "mean_s": 56.349, "wrong": 0}, "1": {"n": 2584, "median_s": 1.71, "mean_s": 115.593, "wrong": 0}, "2": {"n": 2760, "median_s": 0.64, "mean_s": 27.935, "wrong": 0}}}}
+
+## miss03 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --oracle-miss 0.3
+cold: n=4000 decided=4000 mean_s=231.30 median_s=2.21 p95_s=1125.31 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=4.58 median_s=1.62 p95_s=26.39 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 1.745, "p95_s": 903.25, "mean_s": 117.942, "mean_grants": 23588.4, "wrong": 0, "undecidable": 0, "n_full": 188706902, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 2388, "oracle_wrong_rntis": 0, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2656, "median_s": 1.655, "mean_s": 109.121, "wrong": 0}, "1": {"n": 2584, "median_s": 2.65, "mean_s": 175.294, "wrong": 0}, "2": {"n": 2760, "median_s": 1.24, "mean_s": 72.735, "wrong": 0}}}}
+
+## wrong005 rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --oracle-wrong 0.05
+cold: n=4000 decided=3779 mean_s=1.08 median_s=1.01 p95_s=1.83 wrong=0 undecidable=221
+steady: n=4000 decided=3987 mean_s=1.06 median_s=0.99 p95_s=1.82 wrong=0 undecidable=13
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 7766, "median_s": 1.0, "p95_s": 1.83, "mean_s": 1.073, "mean_grants": 214.7, "wrong": 0, "undecidable": 234, "n_full": 170147095, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 425, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2570, "median_s": 1.0, "mean_s": 0.988, "wrong": 0}, "1": {"n": 2499, "median_s": 1.61, "mean_s": 1.61, "wrong": 0}, "2": {"n": 2697, "median_s": 0.635, "mean_s": 0.658, "wrong": 0}}}}
+
+## wrong005 rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --oracle-wrong 0.05
+cold: n=4000 decided=3779 mean_s=1.76 median_s=1.60 p95_s=2.86 wrong=0 undecidable=221
+steady: n=4000 decided=3987 mean_s=1.73 median_s=1.58 p95_s=2.82 wrong=0 undecidable=13
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 7766, "median_s": 1.59, "p95_s": 2.85, "mean_s": 1.745, "mean_grants": 348.9, "wrong": 0, "undecidable": 234, "n_full": 171189569, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 1, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 425, "harq_trap_passes": 0, "false_passes": 0, "by_table": {"0": {"n": 2570, "median_s": 1.6, "mean_s": 1.598, "wrong": 0}, "1": {"n": 2499, "median_s": 2.55, "mean_s": 2.512, "wrong": 0}, "2": {"n": 2697, "median_s": 1.225, "mean_s": 1.172, "wrong": 0}}}}
+
+## trap rx=4: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0 --harq-trap 0.01 --crc-false 5.96e-8
+cold: n=4000 decided=4000 mean_s=422.49 median_s=356.57 p95_s=836.57 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=16.87 median_s=13.54 p95_s=40.96 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 116.57, "p95_s": 776.57, "mean_s": 219.677, "mean_grants": 43935.5, "wrong": 0, "undecidable": 0, "n_full": 351483958, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 4, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 7265, "false_passes": 21, "by_table": {"0": {"n": 2656, "median_s": 177.57, "mean_s": 191.564, "wrong": 0}, "1": {"n": 2584, "median_s": 356.87, "mean_s": 379.418, "wrong": 0}, "2": {"n": 2760, "median_s": 116.57, "mean_s": 97.177, "wrong": 0}}}}
+
+## trap rx=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0 --harq-trap 0.01 --crc-false 5.96e-8
+cold: n=4000 decided=4000 mean_s=756.90 median_s=716.57 p95_s=1125.32 wrong=0 undecidable=0
+steady: n=4000 decided=4000 mean_s=31.90 median_s=26.39 p95_s=71.67 wrong=0 undecidable=0
+summary line: {"summary": {"acq": 2000, "rntis": 8000, "decided": 8000, "median_s": 268.635, "p95_s": 1125.315, "mean_s": 394.399, "mean_grants": 78879.9, "wrong": 0, "undecidable": 0, "n_full": 631039181, "n_probe": 0, "gated_phys": 0, "gated_chan": 0, "promotions": 0, "withdrawals": 0, "p2": 0, "p2_admitted_fail": 0, "truth_eliminated_by_probe": 0, "twins_requested": 2, "twins_min": 2, "cap_s": 3600, "seed": 1, "n_rx": 1, "K": 1, "oracle": 0, "prior": 1, "oracle_miss_rntis": 0, "oracle_wrong_rntis": 0, "harq_trap_passes": 13217, "false_passes": 36, "by_table": {"0": {"n": 2656, "median_s": 356.57, "mean_s": 370.958, "wrong": 0}, "1": {"n": 2584, "median_s": 716.57, "mean_s": 571.979, "wrong": 0}, "2": {"n": 2760, "median_s": 268.635, "mean_s": 250.702, "wrong": 0}}}}
+
+## BC1 equiv
+[SIMULATED, DGX host, nr_td_sim @cddc900813 + BC1 simulator working tree (commit that adds this section)] --acq 2000 --seed 1, 8000 RNTIs per run, same cold/steady definitions as above.
+te = --table-exercise: 0.9 optimistic (default), 0.964 ~ realistic for MCS 0..27 uniform. equiv=0 reproduces the BC0 numbers above exactly.
+FINDING: with blind (oracle 0) cold RNTIs equiv=1 is SLOWER than equiv=0 (twins are credited only on non-exercising grants, which dilutes their failure rate and delays KL elimination). oracle 1 and steady (prior-pruned) are unchanged. wrong=0, undecidable=0 everywhere. At te=1.0 equiv is bit-identical to equiv=0 (unit-tested).
+
+### te=0.9 (optimistic) o0 rx=4 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0 --table-exercise 0.9 --equiv 0
+cold: n=4000 mean_s=422.38 median_s=356.57 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=15.58 median_s=10.55 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=43796.3 wrong=0 undecidable=0 n_full=350370521
+
+### te=0.9 (optimistic) o0 rx=4 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0 --table-exercise 0.9 --equiv 1
+cold: n=4000 mean_s=566.97 median_s=505.01 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=15.58 median_s=10.55 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=58255.8 wrong=0 undecidable=0 n_full=466046463
+
+### te=0.9 (optimistic) o0 rx=1 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0 --table-exercise 0.9 --equiv 0
+cold: n=4000 mean_s=756.84 median_s=716.57 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=28.05 median_s=25.59 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=78489.0 wrong=0 undecidable=0 n_full=627912024
+
+### te=0.9 (optimistic) o0 rx=1 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0 --table-exercise 0.9 --equiv 1
+cold: n=4000 mean_s=881.52 median_s=989.92 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=28.05 median_s=25.59 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=90956.5 wrong=0 undecidable=0 n_full=727652216
+
+### te=0.9 (optimistic) o1 rx=4 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --table-exercise 0.9 --equiv 0
+cold: n=4000 mean_s=1.08 median_s=1.01 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.06 median_s=0.99 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=214.7 wrong=0 undecidable=0 n_full=1717916
+
+### te=0.9 (optimistic) o1 rx=4 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --table-exercise 0.9 --equiv 1
+cold: n=4000 mean_s=1.08 median_s=1.01 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.06 median_s=0.99 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=214.7 wrong=0 undecidable=0 n_full=1717916
+
+### te=0.9 (optimistic) o1 rx=1 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --table-exercise 0.9 --equiv 0
+cold: n=4000 mean_s=1.77 median_s=1.60 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.72 median_s=1.58 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=349.0 wrong=0 undecidable=0 n_full=2791634
+
+### te=0.9 (optimistic) o1 rx=1 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --table-exercise 0.9 --equiv 1
+cold: n=4000 mean_s=1.77 median_s=1.60 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.72 median_s=1.58 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=349.0 wrong=0 undecidable=0 n_full=2791634
+
+### te=0.964 (realistic-ish) o0 rx=4 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0 --table-exercise 0.964 --equiv 0
+cold: n=4000 mean_s=325.91 median_s=296.57 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=15.58 median_s=10.55 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=34149.7 wrong=0 undecidable=0 n_full=273197862
+
+### te=0.964 (realistic-ish) o0 rx=4 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 0 --table-exercise 0.964 --equiv 1
+cold: n=4000 mean_s=375.90 median_s=320.53 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=15.58 median_s=10.55 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=39148.5 wrong=0 undecidable=0 n_full=313188189
+
+### te=0.964 (realistic-ish) o0 rx=1 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0 --table-exercise 0.964 --equiv 0
+cold: n=4000 mean_s=599.99 median_s=536.57 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=28.05 median_s=25.59 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=62803.3 wrong=0 undecidable=0 n_full=502426336
+
+### te=0.964 (realistic-ish) o0 rx=1 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 0 --table-exercise 0.964 --equiv 1
+cold: n=4000 mean_s=691.24 median_s=621.06 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=28.05 median_s=25.59 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=71928.7 wrong=0 undecidable=0 n_full=575429314
+
+### te=0.964 (realistic-ish) o1 rx=4 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --table-exercise 0.964 --equiv 0
+cold: n=4000 mean_s=1.08 median_s=1.01 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.06 median_s=0.99 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=214.7 wrong=0 undecidable=0 n_full=1717923
+
+### te=0.964 (realistic-ish) o1 rx=4 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 4 --oracle 1 --table-exercise 0.964 --equiv 1
+cold: n=4000 mean_s=1.08 median_s=1.01 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.06 median_s=0.99 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=214.7 wrong=0 undecidable=0 n_full=1717923
+
+### te=0.964 (realistic-ish) o1 rx=1 equiv=0: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --table-exercise 0.964 --equiv 0
+cold: n=4000 mean_s=1.77 median_s=1.60 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.72 median_s=1.58 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=349.0 wrong=0 undecidable=0 n_full=2791874
+
+### te=0.964 (realistic-ish) o1 rx=1 equiv=1: nr_td_sim --acq 2000 --seed 1 --n-rx 1 --oracle 1 --table-exercise 0.964 --equiv 1
+cold: n=4000 mean_s=1.77 median_s=1.60 decided=4000 wrong=0 undecidable=0
+steady: n=4000 mean_s=1.72 median_s=1.58 decided=4000 wrong=0 undecidable=0
+overall: mean_grants=349.0 wrong=0 undecidable=0 n_full=2791874
+
+
+## BC8 v2
+[SIMULATED, DGX host, nr_td_sim @f59112743e for the rows marked (R2) below; all other rows @b761021bb1 (same simulator logic for them: round 2 only changes the mask-observation path, verified byte-identical on the adjacency-0 rows)] slot-model baselines after fidelity round 1 (supersedes the first BC8 table, commit 65a17b1832, whose oracle model
+observed the mask on every decoded grant and had no PRB-overlap / other-UE / k0 >= 2 probe / per-table compatibility). `--acq 500 --seed 1` (4 RNTIs per acquisition =
+2000 RNTIs per row), rx = 4 and 1, 8 parallel processes, 56 runs, ~75 min wall (the two adjacency-0 arms with the grown k0 catalogue dominate: up to 68 min per run).
+Common flags: `--slot-model 1 --grant-prob 0.5` (i.i.d. per eligible DL slot unless `--adjacency` is given), `--dci-false 0`, cap_s 3600, levers C/P/E off, field book 0,
+`--tdd-s-dl-symbols 6`, `--snr-rho 0` (i.i.d.) unless named. Arm name key: o0/o1 = `--oracle`; L1/L0 = `--k0-oracle-legacy` (L1 = K39 bug in the slot model; L0 = K39 fix);
+rho = `--persist` (allocation PRB/rank repeat; MCS redrawn per slot with 1 - rho); m = `--dci-miss`; adj0 / adj1.0 = `--adjacency`; tdd = `--tdd DDDSU`;
+ouX = `--other-ue-occ X`; snr0.9 = `--snr-rho 0.9`.
+Oracle model (I1/I2/I3): the DM-RS oracle measures ONLY the DCI's own slot, ONLY on k0 == 0 picks, ONLY on the grant's PRBs: this RNTI's own PDSCH there (PRB-id overlap)
+or another UE's (wrong mask) is measured; nothing there = no observation, and then 1 job in 8 runs the runtime k0 >= 2 probe (slots +2..+18, a layer per slot showing DM-RS).
+Legacy (K39 bug) = a measurement also claims k0 = 0; fixed = mask + last symbol only. Compatibility is per MCS table on (Qm, R, PRBs, rank, rv) with the MAC tables; certification needs
+a non-empty sibling set and incompatibility under all alive table pairs. Design: full product oracle {0,1} x legacy {1,0} (oracle 1 only) x rho {0.5, 0.9} x dci-miss {0.01, 0.1},
+plus adjacency {0, 1.0}, TDD DDDSU, other-UE {0.1, 0.3} (adjacent default and adjacency 0), and one AR(1) SNR arm; no fractional design needed.
+Columns: wrong / undec = RNTIs; truth_k0=N n/wrong/undec = subset with that TRUE k0 (k0 = 1 share 1072/2000 = 53.6 %, uniform catalogue draw); mean_s = mean DECIDED seconds (grants / 200);
+k0_trap_passes = PHYSICAL shifted-slot passes; adj_frac = grants with a same-RNTI PDSCH in an adjacent slot; f_S = certified_grants / processed grants (certified for the TRUTH's k0 leader);
+cert_sib = (grant, sibling leader) pairs certified; cert_wrong = such pairs certified although the real occupant of the shifted slot is compatible (dci_false is 0 here, so these arise
+only when the oracle bug pruned the TRUE k0 layer while other k0 layers (probe layers) stay alive: the certification then rests on a catalogue missing the true layer, A2 violated);
+probe_hyp_added = hypotheses added by the k0 >= 2 probe layers (sum over the 2000 RNTIs); mean_n_hyp_end = mean catalogue size at the end of an RNTI (after prunes; oracle-0 rows
+keep the initial catalogue, ~399 hypotheses). Levers off: speed/safety baselines for BC9, not lever results.
+ROUND 2 (R2) oracle protections now mirrored (nr_pdsch_config_sweep_observe): per-RNTI observed set (r->obs, OBS_MASKS_MAX = 8, a full set drops new masks) UNIONed with the promoted
+cell-wide g_obs for the prune; restore_observed_typea re-appends the matching type-A catalogue entries (catalogue k0, or the pinned k0 in legacy; evidence zeroed) when no alive entry admits
+the new observation; a mask is promoted to g_obs when a second distinct RNTI of the acquisition has observed it; the legacy k0=0 pin travels with the mask (obs.k0), a record refines
+(a relaxed last symbol is re-refined by the next observation, as in the runtime). Rows whose names contain ou / adj0_ou are R2 re-runs (old values in the comparison below);
+`_cc` rows = `--other-ue-same-cfg 1` (another UE with the cell's add_pos/max_len: 1-3 distinct masks instead of any catalogue entry). The two adj0 rows without other UE were re-run and are
+IDENTICAL to round 1 (no foreign mask => no union/restore effect). New columns: none; the probe_hyp_added column now also counts layers re-added after restore/prune thrash.
+NOT MODELLED / simplifications still in force (the direction of the bias for the other-UE thrash rows is UNKNOWN: runtime damage (vii)-(ix) is missing, protections (ii)-(iv) are missing):
+ (ii) g_obs is dynamic at runtime (concurrent RNTIs, eviction, invalidation); here it is built only from the EARLIER RNTIs of the same acquisition (sequential), so a later RNTI's masks never help an earlier one;
+ (iii) another UE's DM-RS is assumed to share the scrambling id, so it is always measured as DM-RS on the grant's PRBs (the runtime measures with this RNTI's nscid / scrambling id);
+ (iv) the oracle_nrb >= 4 gate and probe_span's largest-segment PRB selection are not modelled (the measurement is always available);
+ (v) the in-line oracle path used when deferral is off (monitor_rt.c:6833 -> queue.c:607-631: no k0 == 0 gate) is not modelled; only the deferred-path k0 == 0 measurement is;
+ (vi) all RNTIs of an acquisition share the truth (same S/L/mask/k0/table) and the same cell config;
+ (vii) in-flight tickets go stale after context_reindexed and their CRC feedback is dropped (the simulator feeds every outcome);
+ (viii) BC9 runs apply_cert after restore: a further evidence wipe not modelled;
+ (ix) type-B widening from foreign type-B-only masks (add_typeb_layer) is not modelled;
+ (x) energy-threshold jitter in the measured last_sym (a further source of the same-mask / different-last pattern);
+ Minor: the simulator's restore prior filter uses only gprior, whereas the runtime uses r->prior first; no effect while each RNTI has a single TDRA row.
+ plus: PRBs are 8 coarse ids (overlap = equal id); one TDRA row per RNTI; other-UE mask = random catalogue entry (or cell-config entry with _cc); per-RNTI context only (no cross-RNTI k0_seen);
+ probe latency/retention not modelled (spf 20, K = 18); DM-RS measurement perfect; no HARQ processes; spurious DCIs history-only; known TDD not used by the receiver; S-slot rule = truth fits; w_obs inputs use the truth mask;
+ reserved MCS never drawn; rank gating conservative; slot-model + fieldbook 2: restored entries are not covered by the field-book dormant masks.
+
+arm_rx | RNTIs | wrong | undec | truth_k0=1 n/wrong/undec | truth_k0=0 n/wrong/undec | mean_s(decided) | k0_trap_passes | adj_frac | f_S(cert/proc) | cert_sib | cert_wrong | probe_hyp_added | mean_n_hyp_end | wall_s
+o0_rho0.5_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 374.5 | 14892 | 0.750 | 0.405 | 60089315 | 0 | 0 | 399 | 164
+o0_rho0.5_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 206.4 | 11114 | 0.750 | 0.405 | 33119033 | 0 | 0 | 399 | 90
+o0_rho0.5_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 414.2 | 14862 | 0.750 | 0.368 | 54914799 | 0 | 0 | 399 | 167
+o0_rho0.5_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 227.5 | 11037 | 0.750 | 0.368 | 30164663 | 0 | 0 | 399 | 91
+o0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 507.4 | 62837 | 0.750 | 0.255 | 51244264 | 0 | 0 | 399 | 233
+o0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 330.4 | 53444 | 0.750 | 0.255 | 33369907 | 0 | 0 | 399 | 155
+o0_rho0.9_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 560.1 | 63061 | 0.750 | 0.232 | 46752362 | 0 | 0 | 399 | 234
+o0_rho0.9_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 363.6 | 53810 | 0.750 | 0.232 | 30352777 | 0 | 0 | 399 | 155
+o0_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 419.8 | 29523 | 0.549 | 0.152 | 25349083 | 0 | 0 | 399 | 191
+o0_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 250.8 | 23342 | 0.550 | 0.153 | 15184114 | 0 | 0 | 399 | 115
+o1_L0_adj0_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 3005079 | 0.000 | 0.000 | 0 | 0 | 66445467 | 35 | 221
+o1_L0_adj0_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 4615397 | 0.000 | 0.000 | 0 | 0 | 91623528 | 35 | 238
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1021970 | 0.000 | 0.000 | 0 | 0 | 25054817 | 143 | 473
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 1700302 | 0.000 | 0.000 | 0 | 0 | 34599916 | 147 | 537
+o1_L0_adj0_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 4140138 | 0.000 | 0.000 | 0 | 0 | 183248546 | 34 | 249
+o1_L0_adj0_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 6576117 | 0.000 | 0.000 | 0 | 0 | 246977947 | 34 | 275
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1302930 | 0.000 | 0.000 | 0 | 0 | 70519686 | 144 | 530
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 2272409 | 0.000 | 0.000 | 0 | 0 | 98632105 | 148 | 617
+o1_L0_adj0_rho0.9_m0.01_rx1 | 2000 | 0 | 574 | 1072/0/574 | 928/0/0 | 632.5 | 427892 | 0.000 | 0.000 | 0 | 0 | 2043729 | 576 | 4074
+o1_L0_adj0_rho0.9_m0.01_rx4 | 2000 | 0 | 299 | 1072/0/299 | 928/0/0 | 470.3 | 363516 | 0.000 | 0.000 | 0 | 0 | 1740376 | 496 | 2318
+o1_L0_adj1.0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 144.9 | 1594112 | 1.000 | 0.218 | 161930532 | 0 | 939704 | 33 | 169
+o1_L0_adj1.0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 69.7 | 1041028 | 1.000 | 0.219 | 77337265 | 0 | 994236 | 32 | 78
+o1_L0_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1063 | 1072/0/1063 | 928/0/0 | 17.1 | 14074000 | 0.750 | 0.004 | 3773899 | 0 | 6486548 | 36 | 572
+o1_L0_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1021 | 1072/0/1021 | 928/0/0 | 93.1 | 19777888 | 0.750 | 0.004 | 3658833 | 0 | 8370834 | 36 | 563
+o1_L0_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 8007817 | 0.750 | 0.041 | 32910596 | 0 | 6977798 | 120 | 714
+o1_L0_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12542314 | 0.750 | 0.042 | 33357263 | 0 | 9013745 | 116 | 762
+o1_L0_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 14747979 | 0.750 | 0.020 | 18244776 | 0 | 34316400 | 34 | 532
+o1_L0_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1070 | 1072/0/1070 | 928/0/0 | 6.8 | 21368689 | 0.750 | 0.020 | 17743714 | 0 | 44646568 | 34 | 540
+o1_L0_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 7872943 | 0.750 | 0.075 | 61168672 | 0 | 20930197 | 120 | 707
+o1_L0_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12320337 | 0.750 | 0.075 | 61577127 | 0 | 27844833 | 121 | 776
+o1_L0_rho0.5_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 31.6 | 34184 | 0.750 | 0.032 | 458538 | 0 | 357615 | 32 | 11
+o1_L0_rho0.5_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 17.3 | 25465 | 0.750 | 0.034 | 270694 | 0 | 378275 | 31 | 6
+o1_L0_rho0.5_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 34.8 | 34168 | 0.750 | 0.029 | 399389 | 0 | 360638 | 32 | 11
+o1_L0_rho0.5_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 18.8 | 24893 | 0.750 | 0.030 | 232717 | 0 | 375111 | 30 | 6
+o1_L0_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 44.3 | 297022 | 0.750 | 0.019 | 349296 | 0 | 919403 | 33 | 14
+o1_L0_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 27.7 | 242326 | 0.750 | 0.019 | 219760 | 0 | 909772 | 33 | 9
+o1_L0_rho0.9_m0.1_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 49.3 | 299663 | 0.750 | 0.018 | 315516 | 0 | 920733 | 33 | 14
+o1_L0_rho0.9_m0.1_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 30.5 | 241403 | 0.750 | 0.018 | 197271 | 0 | 911960 | 33 | 9
+o1_L0_snr0.9_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 44.1 | 294690 | 0.750 | 0.020 | 348057 | 0 | 916047 | 33 | 14
+o1_L0_snr0.9_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 27.7 | 242380 | 0.750 | 0.019 | 218010 | 0 | 904174 | 33 | 9
+o1_L0_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 25.3 | 113882 | 0.522 | 0.020 | 202485 | 0 | 541367 | 23 | 6
+o1_L0_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 14.4 | 87451 | 0.522 | 0.020 | 117089 | 0 | 513677 | 23 | 4
+o1_L1_adj0_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 11961156 | 0.000 | 0.000 | 1503150 | 0 | 279101057 | 32 | 233
+o1_L1_adj0_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 20660290 | 0.000 | 0.000 | 940870 | 0 | 367093573 | 32 | 248
+o1_L1_adj0_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 3083621 | 0.000 | 0.000 | 1952474 | 0 | 3257838411 | 167 | 597
+o1_L1_adj0_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 3351948 | 0.000 | 0.000 | 1403991 | 0 | 7928940897 | 150 | 770
+o1_L1_adj0_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 11722720 | 0.000 | 0.000 | 944629 | 0 | 896209176 | 28 | 283
+o1_L1_adj0_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 20492450 | 0.000 | 0.000 | 498950 | 0 | 1224564963 | 29 | 324
+o1_L1_adj0_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 1064107 | 0.000 | 0.000 | 1337699 | 0 | 11342253852 | 91 | 783
+o1_L1_adj0_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 7848 | 0.000 | 0.000 | 577541 | 0 | 21789672327 | 68 | 1158
+o1_L1_adj0_rho0.9_m0.01_rx1 | 2000 | 0 | 574 | 1072/0/574 | 928/0/0 | 631.5 | 427892 | 0.000 | 0.000 | 0 | 0 | 2043729 | 575 | 4078
+o1_L1_adj0_rho0.9_m0.01_rx4 | 2000 | 0 | 299 | 1072/0/299 | 928/0/0 | 469.8 | 363516 | 0.000 | 0.000 | 0 | 0 | 1740376 | 495 | 2317
+o1_L1_adj1.0_rho0.9_m0.01_rx1 | 2000 | 339 | 733 | 1072/339/733 | 928/0/0 | 360.2 | 85819744 | 1.000 | 0.000 | 49674199 | 5522390 | 120407562 | 3 | 150
+o1_L1_adj1.0_rho0.9_m0.01_rx4 | 2000 | 438 | 634 | 1072/438/634 | 928/0/0 | 372.4 | 120574323 | 1.000 | 0.000 | 39779666 | 5064344 | 156089097 | 3 | 135
+o1_L1_ou0.1_cc_rho0.9_m0.01_rx1 | 2000 | 3 | 1069 | 1072/3/1069 | 928/0/0 | 8.1 | 34337439 | 0.750 | 0.000 | 24648003 | 2105336 | 856786930 | 12 | 319
+o1_L1_ou0.1_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 49367667 | 0.750 | 0.000 | 20500121 | 1559189 | 1170319883 | 13 | 360
+o1_L1_ou0.1_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 5844175 | 0.750 | 0.000 | 26996640 | 2465001 | 7107128553 | 46 | 527
+o1_L1_ou0.1_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 8515852 | 0.750 | 0.000 | 11141416 | 790353 | 11522444291 | 36 | 659
+o1_L1_ou0.3_cc_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 30720992 | 0.750 | 0.000 | 6241154 | 392861 | 1017085101 | 11 | 376
+o1_L1_ou0.3_cc_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 44325061 | 0.750 | 0.000 | 5103506 | 296931 | 1439978373 | 12 | 439
+o1_L1_ou0.3_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 5378284 | 0.750 | 0.000 | 6146047 | 409739 | 7634781486 | 46 | 627
+o1_L1_ou0.3_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 7792293 | 0.750 | 0.000 | 1822908 | 97138 | 12035961653 | 33 | 802
+o1_L1_rho0.5_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 11099078 | 0.750 | 0.000 | 158165904 | 5300261 | 190643965 | 5 | 242
+o1_L1_rho0.5_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 15390874 | 0.750 | 0.000 | 160969194 | 5200133 | 269122451 | 5 | 256
+o1_L1_rho0.5_m0.1_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.9 | 10126401 | 0.750 | 0.000 | 118932659 | 4163216 | 172492565 | 5 | 225
+o1_L1_rho0.5_m0.1_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.2 | 14070466 | 0.750 | 0.000 | 120530894 | 4075162 | 243414266 | 6 | 237
+o1_L1_rho0.9_m0.01_rx1 | 2000 | 12 | 1060 | 1072/12/1060 | 928/0/0 | 9.8 | 45831566 | 0.750 | 0.000 | 24737065 | 2250773 | 412115183 | 7 | 268
+o1_L1_rho0.9_m0.01_rx4 | 2000 | 12 | 1060 | 1072/12/1060 | 928/0/0 | 25.7 | 66065440 | 0.750 | 0.000 | 22343674 | 1763318 | 567939505 | 8 | 291
+o1_L1_rho0.9_m0.1_rx1 | 2000 | 14 | 1058 | 1072/14/1058 | 928/0/0 | 15.7 | 41708371 | 0.750 | 0.000 | 17646051 | 1704029 | 374787852 | 7 | 246
+o1_L1_rho0.9_m0.1_rx4 | 2000 | 12 | 1060 | 1072/12/1060 | 928/0/0 | 22.3 | 60113882 | 0.750 | 0.000 | 15608827 | 1309315 | 515436680 | 8 | 267
+o1_L1_tdd_rho0.9_m0.01_rx1 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.8 | 20392765 | 0.510 | 0.000 | 41373602 | 3289528 | 206313083 | 7 | 269
+o1_L1_tdd_rho0.9_m0.01_rx4 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 1.1 | 30040117 | 0.510 | 0.000 | 39778356 | 3005689 | 281972308 | 7 | 284
+
+Findings (all [SIMULATED], single-seed, 2000 RNTIs per row; round-1 findings for unchanged rows stand):
+- Fixed oracle (L0), default traffic, no other UE: unchanged, wrong 0 / undecidable 0, decided 14-49 s. Oracle off: unchanged. Adjacency-0 rows without other UE: unchanged to the digit.
+- ROUND 2 CHANGE, other-UE rows (o1_L*_ou*, o1_L*_adj0_ou*), old (round 1) -> new (R2), k0 = 1 truths undecidable of 1072:
+  L0 ou0.1: 88 (rx4) / 82 (rx1) -> 1072 / 1072; L0 ou0.3: 214 / 214 -> 1072 / 1072; L0 adj0_ou0.1: 1049 / 1038 -> 1072 / 1072; L0 adj0_ou0.3: 1034 / 1040 -> 1072 / 1072.
+  L1 ou0.1/0.3 and L1 adj0_ou: were 1058-1072 undecidable with up to 13 wrong -> now 1072/1072 undecidable and wrong 0 (the earlier few wrong winners vanish); the one exception is L1 ou0.1_cc rx1 (3 wrong / 1069 undecidable).
+  k0 = 0 truths are untouched in every row (0/0).
+- WHY the protections do not help here (mechanism read from the runtime code and reproduced in the simulator): another UE's PDSCH on the grant's PRBs shows the cell's DM-RS mask with a DIFFERENT last
+  symbol from slot to slot (cell-common mask, varying S/L). obs_record relaxes this RNTI's last symbol to unknown on the contradiction and the next own measurement REFINES it back; each time,
+  restore_observed_typea re-adds entries for the foreign (mask, last) and prune_to_observed then removes them again; every size-changing prune_commit zeroes ALL trial/ok evidence
+  (hundreds to thousands of events per RNTI: restores column), so the KL rule never accumulates and the RNTI stays undecidable. The union does keep the truth alive (truth_kl_trials >= 0), it does not let it converge.
+  Reduced diversity (_cc rows) reduces but does not remove it (L0 ou0.1_cc: 1021 (rx4) / 1063 (rx1) undecidable; L0 ou0.3_cc: 1070 / 1072; adj0_ou_cc: 1072).
+  The thrash occurs when the observations reaching ONE context contain the same mask with at least 2 distinct last symbols, interleaved so that a refine follows a relax. Causes include a fixed
+  other-UE last symbol that differs from the RNTI's own, the RNTI's own PDSCH from other TDRA rows, and energy-threshold jitter in last_sym (x). Physically a mask can carry different last symbols only within one duration class.
+  The simulator reproduces the first cause only (the other UE's last symbol varies per slot). The numbers are conditional on (b) assumptions (ii)-(x). The DIRECTION of the bias is UNKNOWN: the simulator lacks runtime damage
+  (vii) in-flight tickets go stale after context_reindexed, so CRC feedback is dropped; (viii) BC9 runs apply_cert after restore, a further wipe; (ix) type-B widening from foreign type-B-only masks; and it lacks protections (ii)-(iv).
+  The effect, if real, is a runtime pathology (evidence wipe on every observation-driven prune) that exists with the K39 fix too, independent of k0.
+- Where the earlier round-1 text said "the K39 fix is necessary, not sufficient (82-88 / 214 / 1034-1049 undecidable)", read the R2 numbers above.
+
+Round-1 findings that still hold for the unchanged rows:
+- Fixed oracle (L0), model-default traffic (adj_frac 0.75, no other UE): wrong 0 and undecidable 0 in every arm, rx 4 and 1, k0 = 1 truths included; but decided time is 14-49 s
+  (the earlier 2-5 s was overstated: k0 = 1 truths often have no own-slot measurement and the probe layers enlarge the catalogue by ~460 hypotheses per RNTI on average).
+- k0 >= 2 probe layers cut the certified share: f_S 0.019 (o1_L0, rho 0.9) vs 0.255 with the oracle off (no probe layers) at the same traffic; 0.032 vs 0.405 at rho 0.5; TDD 0.020 vs 0.152.
+  Full adjacency (L0, adj1.0): f_S 0.22 and decided time 70-145 s.
+- Legacy oracle (L1) with same-RNTI adjacency: the true k0 = 1 is pruned for essentially every k0 = 1 truth (undecidable 1058-1072 of 1072 at default traffic; the earlier "1072/1072 wrong"
+  headline is RETRACTED: it held only for single-UE, same-PRB adjacency without k0 >= 2 layers). Wrong winners are rare (<= 14 of 1072) at default traffic; they reach 339-438 of 1072 at
+  adjacency 1.0 (persistent identical neighbours let a trapped sibling win) with the rest undecidable. No k0 = 0 truth is ever wrong or undecidable (rows truth_k0=0 are 0/0).
+- Adjacency 0 (alternating grants), no other UE: L0 and L1 are identical (no own-slot PDSCH, no claim); k0 = 1 truths have no mask observation and blind-search an enlarged catalogue:
+  undecidable 299 (rx4) / 574 (rx1) of 1072 at the 3600 s cap, mean decided 470-630 s; certification is 0 (absence = ambiguous).
+- Oracle off: wrong 0, undecidable 0 in all 10 rows; physical trap with the default sibling guard costs no safety here. certified_wrong = 0 in every arm without the oracle bug.
+
+
+## BC7b
+[SIMULATED, DGX host, nr_td_sim @44a9391975] K42 monotone last-symbol set, `--obs-lastset 1` (BC7b, now the default: per-mask last-symbol SET, a record ORs and never re-refines, plus F2 = no restore of a
+mask the full own set dropped unless g_obs has it) vs `--obs-lastset 0` (the BC8 round-2 relax / re-refine model; output byte-identical to the 8af53c3a40 binary apart from the new "obs_lastset" JSON key).
+Rows: the BC8 other-UE rows with the FIXED oracle only: `--acq 500 --seed 1 --oracle 1 --slot-model 1 --grant-prob 0.5 --dci-false 0 --persist 0.9 --dci-miss 0.01 --k0-oracle-legacy 0 --other-ue-occ {0.1,0.3}`,
+adjacency 0 (`--adjacency 0`, adj0 rows) and the default i.i.d. traffic (no adj0 in the name), `--n-rx {4,1}`; 2000 RNTIs per row; at most 8 parallel processes, run after the rfsim measurements
+(never concurrently). The LEGACY k0-oracle arms (`--k0-oracle-legacy 1`) were DROPPED by controller decision (operator-approved): they only re-document the K39 bug and are not needed to evaluate
+K42; the legacy runs that had started were stopped by SIGINT and are not reported. Columns as in ## BC8 v2, plus restores = restore_observed_typea events (sum over RNTIs); `_lsN` = --obs-lastset N.
+Check: every ls0 row equals the corresponding BC8 R2 row to the digit (wrong/undec/mean_s/k0_trap_passes/f_S/cert_sib/probe_hyp_added/mean_n_hyp_end).
+
+arm_rx_lastset | RNTIs | wrong | undec | truth_k0=1 n/wrong/undec | truth_k0=0 n/wrong/undec | mean_s(decided) | k0_trap_passes | adj_frac | f_S(cert/proc) | cert_sib | cert_wrong | probe_hyp_added | mean_n_hyp_end | restores | wall_s
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1021970 | 0.000 | 0.000 | 0 | 0 | 25054817 | 143 | 6207276 | 480
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 118 | 1072/0/118 | 928/0/0 | 474.5 | 270611 | 0.000 | 0.000 | 0 | 0 | 1749972 | 325 | 19644 | 979
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 1700302 | 0.000 | 0.000 | 0 | 0 | 34599916 | 147 | 8782114 | 545
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 56 | 1072/0/56 | 928/0/0 | 283.3 | 178851 | 0.000 | 0.000 | 0 | 0 | 1749067 | 319 | 19550 | 495
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 3.3 | 1302930 | 0.000 | 0.000 | 0 | 0 | 70519686 | 144 | 18635857 | 531
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 133 | 1072/0/133 | 928/0/0 | 467.3 | 272987 | 0.000 | 0.000 | 0 | 0 | 1804326 | 343 | 19644 | 1076
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 2.0 | 2272409 | 0.000 | 0.000 | 0 | 0 | 98632105 | 148 | 26298069 | 620
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 58 | 1072/0/58 | 928/0/0 | 308.8 | 196221 | 0.000 | 0.000 | 0 | 0 | 1711915 | 323 | 19576 | 574
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 8007817 | 0.750 | 0.041 | 32910596 | 0 | 6977798 | 120 | 3955382 | 714
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 353.0 | 302575 | 0.750 | 0.003 | 406360 | 0 | 1207997 | 257 | 19324 | 230
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12542314 | 0.750 | 0.042 | 33357263 | 0 | 9013745 | 116 | 5423869 | 813
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 223.3 | 252454 | 0.750 | 0.003 | 280247 | 0 | 1236561 | 256 | 19333 | 154
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 7.1 | 7872943 | 0.750 | 0.075 | 61168672 | 0 | 20930197 | 120 | 10759414 | 704
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 369.0 | 283449 | 0.750 | 0.003 | 613155 | 0 | 1300638 | 274 | 19395 | 256
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls0 | 2000 | 0 | 1072 | 1072/0/1072 | 928/0/0 | 4.4 | 12320337 | 0.750 | 0.075 | 61577127 | 0 | 27844833 | 121 | 14519757 | 768
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls1 | 2000 | 0 | 0 | 1072/0/0 | 928/0/0 | 239.4 | 241736 | 0.750 | 0.003 | 360824 | 0 | 1315681 | 274 | 19353 | 170
+
+Decided time split by the true k0 (seconds = grants / 200; undecidable RNTIs excluded):
+arm | mean_s decided truth_k0=0 | mean_s decided truth_k0=1 | p95_s k0=1
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls0 | 3.3 | - | -
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx1_ls1 | 3.3 | 932.9 | 2554
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls0 | 2.0 | - | -
+o1_L0_adj0_ou0.1_rho0.9_m0.01_rx4_ls1 | 2.0 | 540.3 | 1948
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls0 | 3.3 | - | -
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx1_ls1 | 3.3 | 925.9 | 2551
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls0 | 2.0 | - | -
+o1_L0_adj0_ou0.3_rho0.9_m0.01_rx4_ls1 | 2.0 | 589.5 | 2110
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls0 | 7.1 | - | -
+o1_L0_ou0.1_rho0.9_m0.01_rx1_ls1 | 7.1 | 652.3 | 1419
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls0 | 4.4 | - | -
+o1_L0_ou0.1_rho0.9_m0.01_rx4_ls1 | 4.4 | 412.8 | 959
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls0 | 7.1 | - | -
+o1_L0_ou0.3_rho0.9_m0.01_rx1_ls1 | 7.1 | 682.3 | 1379
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls0 | 4.4 | - | -
+o1_L0_ou0.3_rho0.9_m0.01_rx4_ls1 | 4.4 | 442.8 | 959
+
+Findings:
+- The thrash is gone in the model: k0 = 1 truths undecidable 1072/1072 -> adjacency 0: 56 (ou0.1 rx4), 58 (ou0.3 rx4), 118 (ou0.1 rx1), 133 (ou0.3 rx1); default traffic: 0 in all four rows. Wrong = 0 and
+  cert_wrong = 0 in every row. restore events drop from 3.9-26.3 M to ~19.3-19.6 k per 2000 RNTIs. k0 = 0 truths are unchanged to the digit (they are decided before any foreign mask matters).
+- The cost is speed, not safety: a foreign (mask, last) now widens the admitted set for good (that is the monotonicity), so the k0 = 1 catalogue stays wide (mean_n_hyp_end ~256-343 vs ~116-148) and
+  k0 = 1 truths decide in 413-682 s mean at default traffic (p95 959-1419 s) and 540-933 s at adjacency 0 (p95 1948-2554 s). For reference (## BC8 v2, no other UE, fixed oracle): 27.7-44.3 s mean over
+  all RNTIs at default traffic, 470-632 s at adjacency 0 (undecidable 299/574). K41 (attribution of another UE's DM-RS) is NOT fixed by BC7b; it is what remains to make these rows fast.
+- The adjacency-0 rows with another UE now decide MORE k0 = 1 truths than the adjacency-0 rows without another UE (56-133 vs 299-574 undecidable): [HYPOTHESIS, not separately measured] a foreign mask equal to the truth's (same cell config)
+  is an observation the RNTI's own empty DCI slot never gives. Simulator conditionality of ## BC8 v2 (b) (ii)-(x) still applies; (vii) (stale tickets) and (viii) (apply_cert wipe) no longer apply to the
+  runtime after BC7b.
+
+## BC9 sim
+[SIMULATED, DGX host, nr_td_sim @fcbaeb9478] levers C/P with certified k0 evidence (slot model). `--acq 500 --seed 1`, 4 RNTIs per acquisition = 2000 RNTIs per row, 8 parallel processes, 38 runs, ~25 min wall (host load < 2 before start; no nr-uesoftmodem / nr-softmodem; no rfsim).
+Runner: tests/passive_rx/td_sim/bc9_campaign.py. Common flags: `--slot-model 1 --oracle 0 --dci-false 1e-3 --crc-false 0` (blind), cap_s 3600, `--tdd-s-dl-symbols 6`, `--k0-oracle-legacy 1`, all non-named flags default.
+Arms: base = levers off; CP = `--crc-accept 1 --geom-pin 1` with the observed-DCI certified flag fed to the engine (`_cx(..., certified)`: certified iff k0-unambiguous w.r.t. EVERY alive k0 sibling of the decoded hypothesis, only for the truth's row, v1 keeps true);
+CP_fb2 = CP + `--fieldbook 2`; excl = levers off + TDD exclusion. TDD arms: `--tdd DDDSU`; base there = `--tdd-exclude 0` (receiver without TDD knowledge), CP/CP_fb2/excl = exclusion on (mirror of nr_pdsch_config_sweep_exclude; the predicate is the engine's).
+Columns: cold = first two RNTIs of an acquisition, steady = later; mean/median seconds over DECIDED RNTIs (grants/200); undec = capped RNTIs (all 0); cert share = certified fraction of EXPLORE feeds / of passing EXPLORE feeds.
+Dropped arms (time budget): TDD only at dci-miss 0.1, other-ue-occ 0.1; rho 0.0 only at dci-miss 0.1, other-ue-occ 0.1; no fb2-without-levers arm, no pre-BC9 (certified = true) arm in the campaign (single 12-RNTI spot checks only, see report).
+
+| rx | rho | tdd | miss | occ | arm | cold mean/median s | steady mean/median s | wrong | wrong_pins | undec | crc_accepts | geom_pins | cert share (explore feeds) | cert share (passes) | tdd_excl_removed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | rho0.9 | noTDD | 0.01 | 0 | base | 959.0/1136.2 | 58.8/51.7 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0 | CP | 937.9/1097.4 | 57.2/50.6 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.206 | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0 | CP_fb2 | 937.9/1097.4 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.207 | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0.1 | base | 950.7/1130.2 | 58.8/51.8 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0.1 | CP | 939.1/1076.5 | 57.4/48.6 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.207 | 0 |
+| 1 | rho0.9 | noTDD | 0.01 | 0.1 | CP_fb2 | 939.1/1076.5 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.210 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0 | base | 1053.3/1197.4 | 64.8/58.6 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0 | CP | 1037.2/1190.9 | 63.6/57.7 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0 | CP_fb2 | 1037.2/1190.9 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0.1 | base | 1052.0/1248.6 | 65.6/60.0 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0.1 | CP | 1029.1/1193.3 | 64.2/55.9 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 1 | rho0.9 | noTDD | 0.1 | 0.1 | CP_fb2 | 1029.1/1193.3 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.189 | 0 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | base | 869.6/862.9 | 52.5/46.9 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | excl | 571.1/528.6 | 32.6/25.4 | 0 | 0 | 0 | 0 | 0 | - | - | 209512 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | CP | 549.0/490.0 | 31.0/23.0 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.071 | 209512 |
+| 1 | rho0.9 | TDD | 0.1 | 0.1 | CP_fb2 | 549.0/490.0 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.068 | 393144 |
+| 1 | rho0.0 | noTDD | 0.1 | 0.1 | base | 673.3/596.0 | 31.2/28.3 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 1 | rho0.0 | noTDD | 0.1 | 0.1 | CP | 257.9/73.5 | 9.2/5.3 | 0 | 0 | 0 | 998 | 1468 | 0.004 | 0.446 | 0 |
+| 1 | rho0.0 | noTDD | 0.1 | 0.1 | CP_fb2 | 257.9/73.5 | 4.2/5.5 | 0 | 0 | 0 | 1080 | 633 | 0.004 | 0.442 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0 | base | 618.7/542.0 | 37.1/26.7 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0 | CP | 603.5/517.9 | 35.8/26.0 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.207 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0 | CP_fb2 | 603.5/517.9 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.209 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0.1 | base | 623.7/542.1 | 37.3/26.8 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0.1 | CP | 608.9/535.5 | 35.3/25.7 | 0 | 0 | 0 | 0 | 0 | 0.003 | 0.208 | 0 |
+| 4 | rho0.9 | noTDD | 0.01 | 0.1 | CP_fb2 | 608.9/535.5 | 0.4/0.3 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.209 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0 | base | 676.5/596.2 | 40.8/29.3 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0 | CP | 656.0/576.9 | 39.2/28.5 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.188 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0 | CP_fb2 | 656.0/576.9 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.190 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0.1 | base | 683.3/596.0 | 40.5/29.1 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0.1 | CP | 655.7/556.1 | 39.0/27.9 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.190 | 0 |
+| 4 | rho0.9 | noTDD | 0.1 | 0.1 | CP_fb2 | 655.7/556.1 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.002 | 0.192 | 0 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | base | 521.7/401.2 | 30.6/22.7 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | excl | 329.6/262.8 | 18.3/11.4 | 0 | 0 | 0 | 0 | 0 | - | - | 209512 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | CP | 310.4/226.0 | 17.1/11.3 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.070 | 209512 |
+| 4 | rho0.9 | TDD | 0.1 | 0.1 | CP_fb2 | 310.4/226.0 | 0.4/0.4 | 0 | 0 | 0 | 0 | 0 | 0.001 | 0.066 | 393144 |
+| 4 | rho0.0 | noTDD | 0.1 | 0.1 | base | 372.9/329.1 | 17.3/11.8 | 0 | 0 | 0 | 0 | 0 | - | - | 0 |
+| 4 | rho0.0 | noTDD | 0.1 | 0.1 | CP | 157.3/56.8 | 6.9/4.6 | 0 | 0 | 0 | 1112 | 1392 | 0.004 | 0.449 | 0 |
+| 4 | rho0.0 | noTDD | 0.1 | 0.1 | CP_fb2 | 157.3/56.8 | 4.7/6.3 | 0 | 0 | 0 | 1066 | 602 | 0.004 | 0.441 | 0 |
+
+Findings (all [SIMULATED]): wrong = 0 and wrong_pins = 0 in all 38 rows (2000 RNTIs each). At persistence 0.9 (the physical trap) the sibling-test decode of the neighbouring slot passes on every RNTI, the engine's sibling guard blocks the fast path
+on ANY sibling pass (certified or not), so levers C/P never fire (0 accepts, 0 pins, 24 rows): the cold/steady gains of CP over base there (about -2 to -5 % cold) are not lever events. The TDD exclusion alone gives -34 % cold mean (4 RX 329.6 vs 521.7 s; 1 RX 571.1 vs 869.6 s).
+At persistence 0.0 the fast path fires (1 RX: 998 accepts + 1468 pins; 4 RX: 1112 + 1392) and cold mean falls 673 -> 258 s (1 RX) and 373 -> 157 s (4 RX); the cold median 596 -> 73.5 s and 329 -> 56.8 s. Certified share of EXPLORE feeds is only 0.1-0.4 % (most feeds are wrong-hypothesis feeds whose leader is not certified), of passing feeds 7-45 %.
+
+## BC9d
+Hard TDD exclusion only from CONFIRMED DCIs (a genuine grant whose main decode passed CRC) vs every accepted DCI (--excl-unconfirmed 1 = the pre-BC9d runtime hazard; spurious DCIs attributed to the truth's row, worst case) vs none (--tdd-exclude 0).
+[SIMULATED, DGX host, nr_td_sim @852b9bb86f] tests/passive_rx/td_sim/bc9d_campaign.py --acq 300 (4 RNTIs/acq = 1200 RNTIs per cell), seed 1, 4 RX, blind (oracle 0), TDD DDDSU, dci-miss 0.1, other-UE 0.1, cap 3600 s. Means/medians over decided RNTIs; cold = RNTI rank < 2. Run after the rfsim gate/rank-4 runs, not concurrently.
+CP_noguard = --crc-accept 1 --geom-pin 1 --sib-pmin 0 (levers on certified evidence alone); certconf = --cert-confirmed (ISAC_TD_CERT_CONFIRMED mirror).
+
+| cell | RNTIs | wrong | undecidable | truth_excluded | mean_s | median_s | cold_mean_s | cold_median_s | tdd_excl_removed | spur_excl_dcis | certified_wrong | wrong_pins | crc_accepts | geom_pins | cert_fed |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| rho0.5_df0_confirmed | 1200 | 0 | 0 | 0 | 149.5 | 41.5 | 284.2 | 196.7 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.5_df0_unconfirmed | 1200 | 0 | 0 | 0 | 148.7 | 40.8 | 282.9 | 196.1 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.5_df0_none | 1200 | 0 | 0 | 0 | 210.1 | 101.4 | 398.3 | 329.8 | 0 | 0 | 0 | - | - | - | 0 |
+| rho0.5_df1e-2_confirmed | 1200 | 0 | 0 | 0 | 150.0 | 39.9 | 285.2 | 196.3 | 125222 | 0 | 985 | - | - | - | 0 |
+| rho0.5_df1e-2_unconfirmed | 1200 | 48 | 1048 | 1096 | 25.9 | 14.0 | 44.7 | 36.5 | 789970 | 25866384 | 1 | - | - | - | 0 |
+| rho0.5_df1e-2_none | 1200 | 0 | 0 | 0 | 208.3 | 99.5 | 394.9 | 329.5 | 0 | 0 | 2204 | - | - | - | 0 |
+| rho0.9_df0_confirmed | 1200 | 0 | 0 | 0 | 176.0 | 48.9 | 333.5 | 262.6 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.9_df0_unconfirmed | 1200 | 0 | 0 | 0 | 174.4 | 48.4 | 330.5 | 262.6 | 125222 | 0 | 0 | - | - | - | 0 |
+| rho0.9_df0_none | 1200 | 0 | 0 | 0 | 274.4 | 117.3 | 518.3 | 396.7 | 0 | 0 | 0 | - | - | - | 0 |
+| rho0.9_df1e-2_confirmed | 1200 | 0 | 0 | 0 | 175.0 | 51.3 | 331.7 | 262.5 | 125222 | 0 | 3561 | - | - | - | 0 |
+| rho0.9_df1e-2_unconfirmed | 1200 | 48 | 1048 | 1096 | 25.1 | 13.8 | 43.2 | 32.0 | 789970 | 25863393 | 7 | - | - | - | 0 |
+| rho0.9_df1e-2_none | 1200 | 0 | 0 | 0 | 275.5 | 110.6 | 520.1 | 434.6 | 0 | 0 | 8436 | - | - | - | 0 |
+| rho0.5_df1e-2_CPnoguard_certconf0 | 1200 | 0 | 0 | 0 | 63.2 | 18.4 | 119.7 | 75.7 | 125222 | 0 | 214 | 0 | 326 | 636 | 14075 |
+| rho0.5_df1e-2_CPnoguard_certconf1 | 1200 | 0 | 0 | 0 | 150.0 | 39.9 | 285.2 | 196.3 | 125222 | 0 | 0 | 0 | 0 | 0 | 148 |
+
+Headline:
+- Hazard: with dci-false 1e-2 the unconfirmed rule prunes the truth on 1096/1200 RNTIs (rho 0.5 and 0.9): 48 wrong winners, 1048 undecidable. Confirmed rule: 0 truth pruned, 0 wrong, 0 undecidable, same speed as dci-false 0.
+- Cost of confirmation (dci-false 0, where both rules are safe): mean +0.5 % (149.5 vs 148.7 s, rho 0.5) and +0.9 % (176.0 vs 174.4 s, rho 0.9); cold mean +0.5/+0.9 %. The exclusion itself still saves 29-36 % of the mean vs none.
+- ISAC_TD_CERT_CONFIRMED=1 removes certified_wrong (214 -> 0) but also every lever event in this model (cert_fed 14075 -> 148; accepts/pins 326/636 -> 0; mean 63.2 -> 150.0 s = levers off): a neighbour is confirmed only once the receiver's own pick of it passed, which during the search is rare. Keep default 0.
+- Simulator S-slot exclusion is stricter than the runtime's when the S slot has flexible symbols (sim_tdd_excl comment), so the exclusion gain is an upper bound for such patterns.

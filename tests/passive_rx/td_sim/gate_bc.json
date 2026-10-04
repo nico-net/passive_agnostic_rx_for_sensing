@@ -1,0 +1,21 @@
+{
+  "_doc": "BC6 reduced blind-convergence gate (operator 2026-10-02). Run with gate_bc.py. Simulator v2 slot model, physical k0 trap (slot model), persist 0.5, DCI miss 0.01 / false 1e-3, other-UE occupancy 0.1, last-symbol-set observations, confirmed exclusions (default), table-exercise default 0.9, K39 fixed (k0-oracle-legacy 0), twins 2, gate 1, K 1, crc-false 2^-24, seed 1, acq x 4 RNTIs. Dropped by the operator: E, F_order, extra seeds, rho/miss sweeps.",
+  "acq": 500, "seed": 1,
+  "common": {"slot-model": 1, "persist": 0.5, "dci-miss": 0.01, "dci-false": 1e-3, "other-ue-occ": 0.1, "obs-lastset": 1,
+             "k0-oracle-legacy": 0, "gate": 1, "twins": 2, "K": 1, "crc-false": 5.96e-8, "rntis-per-acq": 4, "sib1": 1},
+  "arms": {
+    "prior": {"fieldbook": 0},
+    "fb2": {"fieldbook": 2},
+    "fb2_inject": {"fieldbook": 2, "inject-wrong-field": 3},
+    "cp": {"crc-accept": 1, "geom-pin": 1},
+    "fb2_cp": {"fieldbook": 2, "crc-accept": 1, "geom-pin": 1}
+  },
+  "tdd": {"none": null, "DDDSU": "DDDSU"},
+  "rx": [4, 1],
+  "oracle": [1, 0],
+  "stress": {
+    "C_stress": {"oracle": 0, "equiv": 1, "crc-accept": 1, "crc-false": 1e-3, "bound": "crc"},
+    "P_stress": {"oracle": 0, "geom-pin": 1, "crc-false": 1e-3, "bound": "geom"}
+  },
+  "stress_rx": 4
+}

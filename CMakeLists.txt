@@ -976,7 +976,12 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_adapter.c
+  ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ssb_rate_match.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
@@ -1081,7 +1086,13 @@ target_link_libraries(PHY_NR_NO_AVX_256 nr_phy_common nr_common)
 target_compile_definitions(PHY_NR_NO_AVX_256 PUBLIC USE_128BIT)
 
 add_library(PHY_NR_UE ${PHY_NR_UE_SRC})
+if(ENABLE_LDPC_CUDA)
+  # GrantWork-lite shared buffers in unified memory (cudaMallocManaged via a dlopen'd libcudart: no link dependency).
+  set_source_files_properties(${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c PROPERTIES COMPILE_DEFINITIONS NR_TD_GW_CUDA=1)
+endif()
 target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common UTIL polar smallblock)
+# CB0 elimination channel (nr_td_cb0_wire.c): backend + scheduler + batch live in td_cb0_batch (defined below)
+target_link_libraries(PHY_NR_UE PRIVATE td_cb0_batch)
 
 # ISAC / passive-radar sensing pipeline (OAI-UE). Faithful port of the srsUE sensing engine
 # (repos/srs-ue-isac-dmd). Off-RT DSP + DetectionReport emission compliant with the central node
@@ -1462,7 +1473,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_gate.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c)
 # nr_scrambling_id_sweep.c lives HERE only (final review I7): nr_pusch_passive_ul_ids.c (this library) and
 # nr_pdsch_passive_decode.c (PHY_NR_UE) both call it. Every executable that pulls nr_pdsch_passive_decode.o
 # already needs this library (nr_prb_segments, nr_pdsch_config_sweep_*), so no PHY_NR_UE-only link unit loses it.
@@ -1471,6 +1482,18 @@ target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${NFAPI_DIR}/nfapi/public_inc
   ${NFAPI_DIR}/common/public_inc)
 target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+
+# Batched first-code-block (CB0) decode of many Technique D hypotheses per grant (nr_td_cb0_batch.h, levers spec
+# 2026-10-01 sections 5.4 / 9). CPU reference + LDPC adapter; the GPU rate de-matching is libtd_cb0_gpu.so
+# (openair1/PHY/CODING/CMakeLists.txt), dlopen'd at run time, so this library has no CUDA link dependency.
+add_library(td_cb0_batch STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c
+                                ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c
+                                ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_sched.c
+                                ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c
+                                ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
+target_include_directories(td_cb0_batch PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+target_link_libraries(td_cb0_batch PUBLIC PHY_NR_COMMON MAC_NR_COMMON crc_byte UTIL thread-pool ${CMAKE_DL_LIBS} pthread
+                      PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 
 include_directories("${OPENAIR2_DIR}/NR_UE_PHY_INTERFACE")
 include_directories("${OPENAIR2_DIR}/LAYER2")
@@ -2496,12 +2519,13 @@ if(ENABLE_TESTS)
   # project has already paid for once (upper-8-bits-zero alone, and a degenerate invariant
   # payload) via a fixture engineered to tempt each of them independently.
   add_executable(test_nr_pdcch_dci_length_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc
-                                                 ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)
+                                                 ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c)
   # nr_pdsch_config_sweep.c's qm_table_mask() calls nr_pdsch_qm_of_mcs() (nr_pdsch_qm_oracle.c, Task 6
   # Qm oracle) -- same fix already applied to the sibling test_nr_pdsch_config_sweep target below,
   # which compiles the same nr_pdsch_config_sweep.c but was updated for this call; this target was not.
   target_sources(test_nr_pdcch_dci_length_sweep PRIVATE
-    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c) # score-ordered rounds call nr_td_ordering_score()
   target_include_directories(test_nr_pdcch_dci_length_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci_length_sweep)
@@ -2512,6 +2536,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_hyp_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_hyp_sweep)
   add_test(NAME test_nr_hyp_sweep COMMAND ./test_nr_hyp_sweep)
+
+  add_executable(test_nr_passive_sample_lifetime ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_sample_lifetime_test.cc)
+  target_include_directories(test_nr_passive_sample_lifetime PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_sample_lifetime PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_passive_sample_lifetime)
+  add_test(NAME test_nr_passive_sample_lifetime COMMAND ./test_nr_passive_sample_lifetime)
 
   add_executable(test_nr_passive_acq_state ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc
                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c)
@@ -2572,13 +2602,185 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdsch_xoverhead)
   add_test(NAME test_nr_pdsch_xoverhead COMMAND ./test_nr_pdsch_xoverhead)
 
+  add_executable(test_nr_dci_history ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c)
+  target_include_directories(test_nr_dci_history PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  # MAC_NR_COMMON carries nr_get_Qm_dl / nr_get_code_rate_dl / nr_compute_tbs (same trio as test_nr_pdsch_xoverhead).
+  target_link_libraries(test_nr_dci_history PRIVATE MAC_NR_COMMON nr_common UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest pthread m)
+  add_dependencies(tests test_nr_dci_history)
+  add_test(NAME test_nr_dci_history COMMAND ./test_nr_dci_history)
+
   add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
-                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
   target_include_directories(test_nr_pdsch_config_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdsch_config_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdsch_config_sweep)
   add_test(NAME test_nr_pdsch_config_sweep COMMAND ./test_nr_pdsch_config_sweep)
+
+  add_executable(test_nr_td_gate ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_gate_test.cc
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_gate.c)
+  target_include_directories(test_nr_td_gate PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_td_gate PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_td_gate)
+  add_test(NAME test_nr_td_gate COMMAND ./test_nr_td_gate)
+
+  add_executable(test_nr_td_order ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_order_test.cc
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
+  target_include_directories(test_nr_td_order PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_td_order PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_td_order)
+  add_test(NAME test_nr_td_order COMMAND ./test_nr_td_order)
+
+  add_executable(test_nr_td_legal ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_legal_test.cc
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                                  ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
+  target_include_directories(test_nr_td_legal PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                             ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment)
+  target_link_libraries(test_nr_td_legal PRIVATE UTIL GTest::gtest m)
+  add_dependencies(tests test_nr_td_legal)
+  add_test(NAME test_nr_td_legal COMMAND ./test_nr_td_legal)
+
+  # GrantWork-lite (levers plan Task R1): per-grant shared FEP/chest/LLR per geometry signature + CB0 extraction.
+  add_executable(test_nr_td_grantwork ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c
+                                      ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
+  target_include_directories(test_nr_td_grantwork PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                             ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment)
+  target_link_libraries(test_nr_td_grantwork PRIVATE UTIL GTest::gtest pthread ${CMAKE_DL_LIBS} m)
+  if(ENABLE_LDPC_CUDA)
+    target_compile_definitions(test_nr_td_grantwork PRIVATE NR_TD_GW_CUDA=1)
+  endif()
+  add_dependencies(tests test_nr_td_grantwork)
+  add_test(NAME test_nr_td_grantwork COMMAND ./test_nr_td_grantwork)
+
+  add_executable(test_nr_td_fieldbook ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_fieldbook_test.cc
+                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c)
+  target_include_directories(test_nr_td_fieldbook PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_td_fieldbook PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_td_fieldbook)
+  add_test(NAME test_nr_td_fieldbook COMMAND ./test_nr_td_fieldbook)
+
+  # nr_td_cb0_batch: tests + benchmark. The fixture links the receiver's real CPU decoder chain (segment decoder,
+  # nrLDPC_decoder.c = libldpc.so's decoder) and the OAI encoder (ldpc_encoder.c), as libldpc_orig does.
+  set(NR_TD_CB0_FX_SRCS ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_fixture.c
+                        ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c
+                        ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_decoder/nrLDPC_decoder.c
+                        ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_encoder/ldpc_encoder.c)
+  add_executable(test_nr_td_cb0_batch ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc ${NR_TD_CB0_FX_SRCS})
+  target_include_directories(test_nr_td_cb0_batch PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(test_nr_td_cb0_batch PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                        thread-pool minimal_lib GTest::gtest GTest::gtest_main m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  # dlopens ./libldpc_cuda.so (CUDA LDPC tests): the plugin takes these from the host executable, as from nr-uesoftmodem
+  set_target_properties(test_nr_td_cb0_batch PROPERTIES ENABLE_EXPORTS ON)
+  foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_td_cb0_batch PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  if(ENABLE_LDPC_CUDA)
+    target_compile_definitions(test_nr_td_cb0_batch PRIVATE NR_TD_CB0_HAVE_CUDA)
+  endif()
+  add_dependencies(tests test_nr_td_cb0_batch)
+  add_test(NAME test_nr_td_cb0_batch COMMAND ./test_nr_td_cb0_batch)
+  # CB0 elimination runtime wiring (td/cb0-cpu-wiring): scheduler, backend selection / GPU fallback, admissibility,
+  # engine adapter and the per-grant glue (decode-side GrantWork calls stubbed by the test), real CPU LDPC via the fixture.
+  add_executable(test_nr_td_cb0_wire ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc ${NR_TD_CB0_FX_SRCS}
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_adapter.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
+  target_include_directories(test_nr_td_cb0_wire PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                             ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment)
+  target_link_libraries(test_nr_td_cb0_wire PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                        thread-pool minimal_lib GTest::gtest GTest::gtest_main m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  set_target_properties(test_nr_td_cb0_wire PROPERTIES ENABLE_EXPORTS ON)
+  foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_td_cb0_wire PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  add_dependencies(tests test_nr_td_cb0_wire)
+  add_test(NAME test_nr_td_cb0_wire COMMAND ./test_nr_td_cb0_wire)
+  # Throughput benchmark (not a ctest; run under flock /tmp/td_measure.lock). dlopens ./libldpc_cuda.so for the
+  # GPU LDPC estimate, resolving that plugin's host symbols from this binary (as nr-uesoftmodem does).
+  add_executable(nr_td_cb0_bench ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_bench.c ${NR_TD_CB0_FX_SRCS})
+  target_include_directories(nr_td_cb0_bench PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(nr_td_cb0_bench PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                        thread-pool minimal_lib m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  set_target_properties(nr_td_cb0_bench PROPERTIES ENABLE_EXPORTS ON)
+  foreach(sym check_crc completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(nr_td_cb0_bench PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  add_dependencies(tests nr_td_cb0_bench)
+  # CB0 GPU entry (libldpc_cuda.so ldpc_cb0_*) through nr_td_cb0_gpu_backend vs the CPU backend: benchmark (not a
+  # ctest; flock -x /tmp/td_measure.lock) and the backend test (ctest, needs a CUDA device; skips without one).
+  if(ENABLE_LDPC_CUDA)
+    foreach(t nr_td_cb0_gpu_bench test_nr_td_cb0_gpu_backend)
+      if(t STREQUAL "nr_td_cb0_gpu_bench")
+        add_executable(${t} ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c ${NR_TD_CB0_FX_SRCS})
+        target_link_libraries(${t} PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                              thread-pool minimal_lib m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+      else()
+        add_executable(${t} ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc ${NR_TD_CB0_FX_SRCS})
+        target_link_libraries(${t} PRIVATE -Wl,--start-group td_cb0_batch MAC_NR_COMMON nr_common UTIL -Wl,--end-group
+                              thread-pool minimal_lib GTest::gtest GTest::gtest_main m asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+        add_test(NAME ${t} COMMAND ./${t})
+      endif()
+      target_include_directories(${t} PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+      set_target_properties(${t} PROPERTIES ENABLE_EXPORTS ON)
+      foreach(sym check_crc crc24a crc24b crc16 completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+        target_link_options(${t} PRIVATE "LINKER:--undefined=${sym}")
+      endforeach()
+      add_dependencies(${t} td_cb0_gpu ldpc_cuda)
+      add_dependencies(tests ${t})
+    endforeach()
+  endif()
+
+  # Correlated Monte-Carlo simulator linking the REAL engine/gate/order/field book (spec 2026-10-01 section 6.1).
+  # nr_td_sim is a CLI (not run by ctest); nr_td_sim_test is the gtest (#includes nr_td_sim.cc).
+  set(NR_TD_SIM_LIB_SRCS ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_gate.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c)
+  add_executable(nr_td_sim ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_sim.cc ${NR_TD_SIM_LIB_SRCS})
+  target_include_directories(nr_td_sim PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(nr_td_sim PRIVATE UTIL m)
+  add_dependencies(tests nr_td_sim)
+
+  add_executable(nr_td_sim_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_td_sim_test.cc ${NR_TD_SIM_LIB_SRCS})
+  target_include_directories(nr_td_sim_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(nr_td_sim_test PRIVATE UTIL GTest::gtest m)
+  add_dependencies(tests nr_td_sim_test)
+  add_test(NAME nr_td_sim_test COMMAND ./nr_td_sim_test)
+
+  add_executable(test_nr_pdsch_chest_key ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_chest_key_test.cc)
+  target_include_directories(test_nr_pdsch_chest_key PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_chest_key PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_pdsch_chest_key)
+  add_test(NAME test_nr_pdsch_chest_key COMMAND ./test_nr_pdsch_chest_key)
+
+  add_executable(test_nr_llr_norm ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_llr_norm_test.cc)
+  target_include_directories(test_nr_llr_norm PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_llr_norm PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_llr_norm)
+  add_test(NAME test_nr_llr_norm COMMAND ./test_nr_llr_norm)
 
   add_executable(test_nr_pdsch_qm_oracle ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_qm_oracle_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)

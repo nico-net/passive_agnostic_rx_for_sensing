@@ -1,0 +1,18 @@
+# DGX (GB10 aarch64) rfsim 106 PRB, ISAC_PROBE_ALL=1, 150 s each; last cumulative line per arm. 1 probed grant in 50 sampled.
+# mismatches=<grants with any differing LLR>/<grants compared>; llr_mismatch=<LLRs>/<LLRs>.
+## BEFORE F1 (harness on the unfixed decoder)
+# arm b) ISAC_TD_PROBE_EQUIV_CHECK=1 (CB0 of probe vs cache-free whole-slot decode, default env)
+PROBE_EQUIV mismatches=0/1162 llr_mismatch=0/11856152 skipped=0 | this: rnti=0x1234 S=0 L=14 dmrs=0x804 nl=1 E=11024 diff=0 first=-1 max|d|=0 horizon=5 chest_hit=0
+# ISAC_TD_PROBE_EQUIV_CHECK=2 cache-hit arm (probe fills cache, whole-slot decode hits it, vs cache-free; all G LLRs)
+PROBE_EQUIV_HIT mismatches=1125/1195 llr_mismatch=2994053/34949472 skipped=1 | this: S=1 L=13 dmrs=0x804 G=30528 diff=98 first=24207 max|d|=1 probe_horizon=6
+PROBE_EQUIV mismatches=0/1195 llr_mismatch=0/12229124 skipped=1 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=1 E=10176 diff=0 first=-1 max|d|=0 horizon=6 chest_hit=0
+# ISAC_TD_PROBE_EQUIV_CHECK=1 ISAC_CHEST_TINTERP=1 (probe horizon truncates the DM-RS set used by time interpolation)
+PROBE_EQUIV mismatches=1069/1128 llr_mismatch=448260/11486376 skipped=0 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=1 E=10176 diff=26 first=427 max|d|=1 horizon=6 chest_hit=0
+## AFTER F1
+# arm b) ISAC_TD_PROBE_EQUIV_CHECK=1
+PROBE_EQUIV mismatches=0/1165 llr_mismatch=0/11912748 skipped=0 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=1 E=10176 diff=0 first=-1 max|d|=0 horizon=6 chest_hit=0
+# ISAC_TD_PROBE_EQUIV_CHECK=2
+PROBE_EQUIV_HIT mismatches=0/1160 llr_mismatch=0/34022832 skipped=1 | this: S=1 L=13 dmrs=0x804 G=30528 diff=0 first=-1 max|d|=0 probe_horizon=6
+PROBE_EQUIV mismatches=0/1160 llr_mismatch=0/11891252 skipped=1 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=1 E=10176 diff=0 first=-1 max|d|=0 horizon=6 chest_hit=0
+# ISAC_TD_PROBE_EQUIV_CHECK=1 ISAC_CHEST_TINTERP=1
+PROBE_EQUIV mismatches=0/1161 llr_mismatch=0/11873028 skipped=0 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=1 E=10176 diff=0 first=-1 max|d|=0 horizon=6 chest_hit=0

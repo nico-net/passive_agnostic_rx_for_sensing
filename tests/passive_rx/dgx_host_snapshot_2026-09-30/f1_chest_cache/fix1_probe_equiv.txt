@@ -1,0 +1,17 @@
+# Fix round 1 (Important 1: single-branch hit left non-planned rows stale). DGX (GB10 aarch64) rfsim, last cumulative lines.
+## (b) 106 PRB, --ue-nb-ant-rx 4, rank 1, ISAC_PROBE_ALL=1 ISAC_TD_PROBE_EQUIV_CHECK=2 ISAC_TD_PROBE_EQUIV_BRANCH=2 (chest_only=2)
+# BEFORE the zeroing fix (90 s)
+PROBE_EQUIV_CHEST mismatches=167/167 | this: branch=2 chest_re_diff=7656/16384
+PROBE_EQUIV_HIT mismatches=0/167 llr_mismatch=0/4811856 skipped=0 | this: S=1 L=13 dmrs=0x804 G=30528 diff=0 first=-1 max|d|=0 probe_horizon=6
+PROBE_EQUIV mismatches=0/167 llr_mismatch=0/1703692 skipped=0 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=1 E=10176 diff=0 first=-1 max|d|=0 horizon=6 chest_hit=0
+# AFTER (150 s)
+PROBE_EQUIV_CHEST mismatches=0/340 | this: branch=2 chest_re_diff=0/8192
+PROBE_EQUIV_HIT mismatches=0/340 llr_mismatch=0/9909384 skipped=0 | this: S=0 L=6 dmrs=0x4 G=13728 diff=0 first=-1 max|d|=0 probe_horizon=4
+PROBE_EQUIV mismatches=0/340 llr_mismatch=0/3442900 skipped=0 | this: rnti=0x1234 S=0 L=6 dmrs=0x4 nl=1 E=6864 diff=0 first=-1 max|d|=0 horizon=4 chest_hit=0
+## (a) rank-4 pin49r4 (273 PRB, 4 RX, Nl=4), ISAC_TD_PROBE_EQUIV_CHECK=2, default env otherwise (150 s): no probes -> harness idle; crc in fix1_rank4_pin49r4_equiv2_150s.jsonl
+## (a') same bed + ISAC_PROBE_ALL=1 (150 s): chest and cache-hit arms 0; CB0 probe-vs-full differs (demod horizon at Nl=4, see next arm)
+PROBE_EQUIV_CHEST mismatches=0/68 | this: branch=-1 chest_re_diff=0/131072
+PROBE_EQUIV_HIT mismatches=0/68 llr_mismatch=0/78414336 skipped=0 | this: S=1 L=13 dmrs=0x804 G=1153152 diff=0 first=-1 max|d|=0 probe_horizon=3
+PROBE_EQUIV mismatches=68/68 llr_mismatch=657152/657152 skipped=0 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=4 E=9664 diff=9664 first=0 max|d|=165 horizon=3 chest_hit=0
+## (a'') same bed, ISAC_PROBE_HORIZON=0 ISAC_PROBE_ALL=1 ISAC_TD_PROBE_EQUIV_CHECK=1 (60 s): probe with the whole slot demodulated
+PROBE_EQUIV mismatches=0/23 llr_mismatch=0/222464 skipped=0 | this: rnti=0x1234 S=1 L=13 dmrs=0x804 nl=4 E=9664 diff=0 first=-1 max|d|=0 horizon=-1 chest_hit=0

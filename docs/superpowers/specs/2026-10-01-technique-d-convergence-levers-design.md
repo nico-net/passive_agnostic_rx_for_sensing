@@ -121,6 +121,10 @@ Constraints: the score never removes a hypothesis; a hypothesis with score 0 is 
 Weights are configuration (`ISAC_TD_W_*`), defaults chosen by the simulator ablation.
 
 ### 4.6 CellFieldBook (lever 4) — replaces the all-or-nothing cell-wide prior
+> **SUPERSEDED 2026-10-01** by `2026-10-01-technique-d-blind-convergence-design.md` §4 (operator decision: reversible
+> dormant pruning on top of today's prior, fail-open, SUSPECT/WITHDRAWN states, independence rule). Ordering is
+> structurally inert (Task 6 review), so an ordering-only field book cannot replace the prior. Text below is HISTORICAL.
+
 Per field (TDRA entry (S, L, mapping, k0), DM-RS additional position, DM-RS max length, DM-RS type, PRG, PT-RS
 presence, LBRM; **MCS table is never promoted** — it is UE-capability specific):
 `{field, value, confidence, supporting_rntis[], contradictions, last_confirmed_slot, config_epoch}`.
@@ -166,6 +170,47 @@ full-TB decode."*
 - Measurable reduction of full-TB trials and of convergence time.
 - Ablation over K, SNR / p_true, catalogue size, probe cost.
 - Live multi-UE validation after simulation.
+
+**Decision 2026-10-01 (levers Task 7, simulator gate): P2 FAILS the gate and stays off (`ISAC_TD_P2=0`).**
+Evidence: `tests/passive_rx/td_sim/results_2026-10-01_p2/summary.md` (generated) and `analysis.md` (run record, mechanism)
+(matrix `tests/passive_rx/td_sim/gate_p2.json`), all numbers `[SIMULATED, DGX host, nr_td_sim @02524c44ff]`.
+Arms all_P1 vs all_P2 (gate 1, all weights 1, field book 1, K 2/3/4; only p2 differs), paired per RNTI realisation (same
+truth, channel draws and engine seed; the trajectories diverge); cells SA / NSA-like, 4 RX / 1 RX, twins 2 (physical)
+and 0 (unphysical stress), table exercise 0.9 / 0.5, mu 8 / 15 / 25 dB, catalogue 4 / 16 TDA rows; 20 160 acquisitions
+per (cell, rx) and arm (oracle 1: 18 720; oracle 0: 1 440, cut for compute). probe_inconclusive was left at its default (0.1):
+the probe-cost ablation above was not run, which is moot given the FAIL.
+- **Oracle 1 (today's runtime DM-RS / Qm oracles), every (cell, rx):** wrong 0 (P1 and P2) — PASS; truth eliminated by
+  probe 0 — PASS; same winner on 74 880 / 74 880 paired RNTIs per (cell, rx) — PASS; true hypothesis not slower (median
+  full-TB decodes of the truth 97 → 69-70) — PASS; full-TB decodes and time reduced (mean n_full/RNTI ~235 → ~159,
+  mean s 1.20 → 0.81 at 4 RX, 1.72 → 1.16 at 1 RX) — PASS; undecidable 0 → 0 — PASS.
+- **Oracle 0 (blind), every (cell, rx):** wrong winners 0 in P1 vs 212-250 per (cell, rx) in P2 (932 in total, all
+  physical twins of the truth, all at twins 2, 920 at table exercise 0.5, none at K 4) — FAIL; truth eliminated by probe
+  0 — PASS; same winner — FAIL (110-185 paired RNTIs decided by both arms with different winners per (cell, rx), plus
+  one-sided decisions); true hypothesis not slower — PASS (median truth full-TB 128-143 → 100-102); full-TB decodes and
+  time reduced (mean s ~490-640 → ~240-340) — PASS; undecidable not increased — FAIL at 4 RX (313/314 → 369), PASS at 1 RX.
+- Cause: probe slots go to the first uncleared survivors in score order (nr_pdsch_config_sweep.c:669-681, with the
+  cleared-hypothesis skip at :671; ordering key :519 includes w_obs and w_probe). P2 failures clear the dead hypotheses
+  quickly, so when K−1 is smaller than the number of survivors, the truth — ranked first by correct side information — is
+  probed far more than its twins (≈ 30× its fair share in the reproduction: truth_full ≈ 282 vs truth_kl_trials ≈ 4641).
+  The truth's KL rate p·F/(F+(1−p)·P) is therefore deflated below a rarely probed twin. Each admitted FAIL is individually
+  correct; the estimator is biased, because failure-only counts are not a binomial sample. Supporting evidence: seed 308001
+  (NSA-like, 4 RX, blind, twins 2, te 0.5, K 2, mu 8, catalogue 16) gives 9/20 wrong under P2 and 0/20 with w_obs 0;
+  K 4 gives 0 wrong (all survivors probed equally); bare P2 (no gate, ordering or field book) gave 0/48 wrong. The figure
+  "median 92 % of the truth's KL trials are admitted probe FAILs in wrong RNTIs vs 6 % in correct ones" is correlational.
+  The hot exploit is not the cause (capped at trials[hot] < 64, :571). This is a design flaw of §5.2 as specified, not a
+  K38 or same-decoder issue; the Qm oracle at oracle 1 masks it (by pruning the twins) rather than removing it.
+- Regardless of the simulator: runtime P2 at Nl > 1 stays blocked by K38 (probe CB0 LLRs ≠ full decode at rank 4) until
+  K38 is fixed or the probe horizon is forced to 0 when Nl > 1, and any admitted probe FAIL requires the §9.3
+  same-decoder rule.
+- Not sound as follow-ups: a state-independent probe schedule (full-TB allocation is itself state-dependent, and
+  failure-only counts are not a binomial sample, so nr_crc_interval does not apply); tying a CB0 PASS to the TB outcome
+  (it cannot be); restricting P2 to non-twins (it passes the simulator only because only twins have p > 0 there).
+- The one sound redesign (to be specified and gated before any re-opening): a **separate symmetric CB0 evidence channel**.
+  CB0 PASS and FAIL feed their own per-hypothesis CB0 rate, never mixed with the full-TB counts. It is used one-sided,
+  for ELIMINATION ONLY: under the §9.3 same-decoder and same-IQ conditions the CB0 pass rate is ≥ the TB pass rate, so a
+  non-leader is eliminated when its CB0 upper bound falls below the leader's full-TB lower bound. Election stays with the
+  full-TB KL test. The union-bound budget is split across the two interval families. Probe selection happens before the
+  outcome is known. The channel still requires K38 fixed (or horizon 0 at Nl > 1) and its own simulator gate.
 
 ## 6. Validation
 
@@ -280,7 +325,11 @@ Bayesian rewrite; per-field final decisions; GPU probe batching (A9 / multi-cell
 (same ideas apply later); HARQ soft combining in the search.
 
 ## 8. Open items and starting values (final values from the simulator ablation)
-- **K:** start at **3** (main + 2 probes); larger K only if the ablation shows gain within the compute cap.
+- **P1 defaults from the simulator ablation** `[SIMULATED, DGX host, nr_td_sim @00dd79eed4]` (evidence: `tests/passive_rx/td_sim/results_2026-10-01_p1/summary.md`):
+  `ISAC_TD_GATE=1` (margin 6 dB), `ISAC_TD_K=1`, `ISAC_TD_W_SIB1/DEFAULT/OBS/FIELD/PROBE=0`, `ISAC_TD_FIELDBOOK=0` (today's `g_prior` pruning stays), `ISAC_TD_P2=0`.
+  Only the gate helped (1 RX blind: cold mean 757 -> 603 s, -20 %, reproduced on seed 2; 4 RX neutral); K=3 and the ordering weights are within seed noise (~1 %) and K=3 costs ~700 M probes; the field book as modelled regresses steady RNTIs (steady median 356.6 s vs 10.6 s at 4 RX blind) because it replaces the pruning prior. 0 wrong, 0 undecidable everywhere (probation withdrawal not modelled). Targets: oracle 1 PASS (cold/steady 1.0 s at 4 RX, 1.4 s at 1 RX); oracle 0 FAIL (cold 358.6 s / 512.6 s, steady 10.6 s / 15.4 s). The K=3 line below is superseded by this result for P1.
+- **K:** **1** (amended 2026-10-01: Task 6 showed P1 probes inert, Task 7 kept P2 off; K > 1 only for logging or a
+  future P2 redesign with a separate one-sided CB0 elimination channel, §5.4). Was: start at 3.
 - **Ordering weights:** start **neutral** (all `ISAC_TD_W_*` = 0, i.e. today's order); enable term by term in the
   ablation.
 - **Contradiction rule:** counted in independent RNTIs (§4.6); M and the RNTI threshold tuned in the simulator.

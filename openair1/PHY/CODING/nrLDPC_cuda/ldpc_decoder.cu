@@ -14,6 +14,8 @@ SPDX-License-Identifier: Apache-2.0
 
 #include "ldpc_tables_bg1.h"
 #include "ldpc_tables_bg2.h"
+#include "ldpc_cuda_bg.h"
+#include <pthread.h>
 
 #define TIMESTAMP_CLOCK_SOURCE CLOCK_MONOTONIC
 
@@ -762,10 +764,41 @@ ThreadContext& ldpc_decoder_init_context(int make_stream) {
     return context;
 }
 
-extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
-    if (bg_cn[0][0])  // lazy, global
-        return &ldpc_decoder_init_context(make_stream);
+/* Global base-graph tables: initialised once under a mutex (the TB worker and the CB0 entry may race at start-up;
+ * the old unlocked "if (bg_cn[0][0])" check could allocate twice). Re-initialised after ldpc_decoder_shutdown. */
+static pthread_mutex_t g_tables_mu = PTHREAD_MUTEX_INITIALIZER;
+static void ldpc_tables_init_locked();
+static int ldpc_tables_init() {
+    pthread_mutex_lock(&g_tables_mu);
+    if (!__atomic_load_n(&bg_cn[1][7], __ATOMIC_ACQUIRE))
+        ldpc_tables_init_locked();
+    const int ok = __atomic_load_n(&bg_cn[1][7], __ATOMIC_ACQUIRE) != nullptr;
+    pthread_mutex_unlock(&g_tables_mu);
+    return ok ? 0 : -1;
+}
 
+extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
+    ldpc_tables_init();
+    return &ldpc_decoder_init_context(make_stream);
+}
+
+/* The device tables for the CB0 entry (ldpc_cb0.cu, ldpc_cuda_bg.h). */
+extern "C" int ldpc_cuda_basegraph(uint32_t BG, uint32_t Z, ldpc_cuda_bg_t* out) {
+    static const uint16_t zs[] = {2, 4, 8, 16, 32, 64, 128, 256, 3, 6, 12, 24, 48, 96, 192, 384, 5, 10, 20, 40, 80, 160,
+                                  320, 7, 14, 28, 56, 112, 224, 9, 18, 36, 72, 144, 288, 11, 22, 44, 88, 176, 352, 13, 26,
+                                  52, 104, 208, 15, 30, 60, 120, 240};
+    bool zok = false;
+    for (unsigned k = 0; k < sizeof(zs) / sizeof(zs[0]); k++)
+        zok |= zs[k] == Z;
+    if ((BG != 1 && BG != 2) || !zok || ldpc_tables_init() != 0)
+        return -1;
+    const BaseGraph bg = get_basegraph(BG, Z);
+    *out = ldpc_cuda_bg_t{bg.num_rows, bg.num_cols, bg.num_edges, bg.cn_degree, bg.vn_degree, bg.cn, bg.vn,
+                          bg.cn_stride, bg.vn_stride};
+    return 0;
+}
+
+static void ldpc_tables_init_locked() {
     printf("Initializing LDPC runtime %d\n", (int) gettid());
     /* Blocking sync: a thread waiting on the GPU sleeps instead of spinning. The point of the offload
      * is CPU time -- the passive receiver is CPU-bound -- so a spinning waiter would give it back.
@@ -797,8 +830,6 @@ extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
             bg_vn_size[b][ils] = table_bg_vn_size[b][ils];
         }
     }
-
-    return &ldpc_decoder_init_context(make_stream);
 }
 
 /* ---- Batched decode (adaptive-rx, 2026-09-15). One launch per iteration decodes every code block of
@@ -921,6 +952,13 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
     return bits_host;
 }
 
+/* shared pool state (K34), defined here so shutdown can free it */
+static ThreadContext g_pool_ctx;            /* launch buffers + stream, owned by the worker thread */
+static int8_t* g_pool_llr_host;
+static uint8_t* g_pool_bits_host;
+static uint32_t g_pool_cap;
+static void ldpc_batch_free(ThreadContext& c);
+
 extern "C" void ldpc_decoder_shutdown() {
     cudaDeviceSynchronize();
 
@@ -946,12 +984,27 @@ extern "C" void ldpc_decoder_shutdown() {
         active_context = active_context->next_initialized_context;
     }
 
+    /* shared pool (K34): free the real pointers, then forget them so a re-init starts clean */
+    if (g_pool_cap) {
+        ldpc_batch_free(g_pool_ctx);
+        cudaFreeHost(g_pool_llr_host);
+        cudaFreeHost(g_pool_bits_host);
+        if (g_pool_ctx.stream)
+            cudaStreamDestroy(g_pool_ctx.stream);
+        g_pool_ctx = ThreadContext();
+        g_pool_llr_host = nullptr;
+        g_pool_bits_host = nullptr;
+        g_pool_cap = 0;
+    }
+
+    /* K34 (7): the tables are device pointers; the old code passed the ADDRESS of the table slot
+     * (cudaFree(&bg_cn[b][ils])), which freed nothing and returned an error. */
     for (int b = 0; b < 2; ++b) {
         for (int ils = 0; ils < 8; ++ils) {
-            cudaFree(&bg_cn_degree[b][ils]);
-            cudaFree(&bg_vn_degree[b][ils]);
-            cudaFree(&bg_cn[b][ils]);
-            cudaFree(&bg_vn[b][ils]);
+            cudaFree(const_cast<uint32_t*>(bg_cn_degree[b][ils])); bg_cn_degree[b][ils] = nullptr;
+            cudaFree(const_cast<uint32_t*>(bg_vn_degree[b][ils])); bg_vn_degree[b][ils] = nullptr;
+            cudaFree(const_cast<uint32_t*>(bg_cn[b][ils]));        bg_cn[b][ils] = nullptr;
+            cudaFree(const_cast<uint32_t*>(bg_vn[b][ils]));        bg_vn[b][ils] = nullptr;
         }
     }
 }
@@ -989,43 +1042,124 @@ NB_MODULE(ldpc_decoder, m) {
  * measured 537 us of iterations for 24 already-converged code blocks. Here ONE worker thread decodes the
  * code blocks of every queued TB in one launch sequence. Host side: a pinned pool of slots (a TB's code
  * blocks are contiguous slots). Device side: per-launch buffers indexed by launch position b; each
- * request's slot range is copied to [b0, b0+count) and back, so the batched kernels run unchanged. */
+ * request's slot range is copied to [b0, b0+count) and back, so the batched kernels run unchanged.
+ *
+ * Safety contract (K34, 2026-10-03): ldpc_pool_decode NEVER returns success for a slot whose bits were
+ * not produced by this call. Any CUDA error, skipped or failed launch leaves the affected slots filled
+ * with LDPC_POOL_POISON and returns non-zero; the caller must also treat a non-zero status as failure
+ * (the poison pattern is defence in depth, not the guarantee: the CPU CRC cannot be proven to reject it
+ * for every K). Requests above POOL_MAX_LAUNCH code blocks are split over several launches. */
 static const uint32_t POOL_MAX_LAUNCH = 512; /* code blocks per launch: bounds msg memory (~615 MB) */
-static ThreadContext g_pool_ctx;            /* launch buffers + stream, owned by the worker thread */
-static int8_t* g_pool_llr_host;
-static uint8_t* g_pool_bits_host;
-static uint32_t g_pool_cap;
+static uint64_t g_pool_errors, g_pool_poisoned; /* ldpc_pool_counters() */
+/* Test hooks (K34). Defaults come from the environment ONCE (first use); tests override at run time through
+ * ldpc_pool_test_hooks(). skip: skip the launch; stall_ms: sleep before the launch; inject: 1 = CUDA error
+ * before the first launch, 2 = CUDA error inside graph capture, 3 = report a sticky error. */
+static volatile int g_hook_skip, g_hook_stall_ms, g_hook_inject;
+static int g_pool_sticky;      /* a CUDA error that survived cudaGetLastError(): the context is unusable (atomic access) */
+static int g_pool_capturing;   /* the worker is capturing a graph (first use of a key): waiters extend their timeout (atomic) */
+static uint32_t g_pool_capture_epoch; /* ++ at every capture start: a timeout that overlapped a capture is not a GPU fault */
+#define AST(v, x) __atomic_store_n(&(v), (x), __ATOMIC_SEQ_CST)
+#define ALD(v) __atomic_load_n(&(v), __ATOMIC_SEQ_CST)
+static void pool_hooks_env_once() {
+    static bool done;
+    if (done) return;
+    done = true;
+    if (getenv("LDPC_CUDA_TEST_SKIP_LAUNCH")) g_hook_skip = atoi(getenv("LDPC_CUDA_TEST_SKIP_LAUNCH"));
+    if (getenv("LDPC_CUDA_TEST_STALL_MS")) g_hook_stall_ms = atoi(getenv("LDPC_CUDA_TEST_STALL_MS"));
+    if (getenv("LDPC_CUDA_TEST_INJECT")) g_hook_inject = atoi(getenv("LDPC_CUDA_TEST_INJECT"));
+}
+extern "C" void ldpc_pool_test_hooks(int skip, int stall_ms, int inject) {
+    pool_hooks_env_once();
+    g_hook_skip = skip; g_hook_stall_ms = stall_ms; g_hook_inject = inject;
+    if (!inject) AST(g_pool_sticky, 0);
+}
+extern "C" int ldpc_pool_sticky(void) { return ALD(g_pool_sticky); }
+extern "C" int ldpc_pool_capturing(void) { return ALD(g_pool_capturing); }
+extern "C" uint32_t ldpc_pool_capture_epoch(void) { return ALD(g_pool_capture_epoch); }
+
+/* CUDA error inside the pool: counted, logged (rate limited), returned -- never swallowed. */
+#define POOL_CHECK(call) do { \
+        cudaError_t e_ = (call); \
+        if (e_) { rc = (int)e_; pool_log_error(e_, __LINE__); goto fail; } \
+    } while (false)
+
+static void pool_log_error(cudaError_t e, int line) {
+    __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
+    static uint64_t logged;
+    if (__atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) < 8) /* one-shot-ish: first 8 only */
+        fprintf(stderr, "LDPC_CUDA pool error %d (%s) at ldpc_decoder.cu:%d -> slots poisoned, CPU fallback\n", (int)e,
+                cudaGetErrorString(e), line);
+}
 
 extern "C" int ldpc_pool_init(uint32_t cap) {
     if (g_pool_cap)
         return 0;
     if (!ldpc_decoder_init(1)) /* global base-graph tables */
         return -1;
-    CHECK_CUDA(cudaStreamCreateWithFlags(&g_pool_ctx.stream, cudaStreamNonBlocking));
-    CHECK_CUDA(cudaHostAlloc(&g_pool_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&g_pool_bits_host, (size_t)cap * BATCH_BITS_STRIDE, cudaHostAllocDefault));
+    int rc = 0;
+    POOL_CHECK(cudaStreamCreateWithFlags(&g_pool_ctx.stream, cudaStreamNonBlocking));
+    /* The explicit host<->device copies of the pool are kept (not restructured by K34); making them
+     * copy-free on GB10 needs a kernel indexing change (slots are not contiguous in a launch): follow-up. */
+    POOL_CHECK(cudaHostAlloc(&g_pool_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));
+    POOL_CHECK(cudaHostAlloc(&g_pool_bits_host, (size_t)cap * BATCH_BITS_STRIDE, cudaHostAllocDefault));
     ldpc_batch_reserve(g_pool_ctx, POOL_MAX_LAUNCH);
+    if (!g_pool_ctx.b_cap || cudaGetLastError() != cudaSuccess) { rc = -1; pool_log_error(cudaErrorMemoryAllocation, __LINE__); goto fail; }
     g_pool_cap = cap;
     return 0;
+fail:
+    cudaFreeHost(g_pool_llr_host); g_pool_llr_host = nullptr; /* no leak on a partial init */
+    cudaFreeHost(g_pool_bits_host); g_pool_bits_host = nullptr;
+    ldpc_batch_free(g_pool_ctx);
+    if (g_pool_ctx.stream) { cudaStreamDestroy(g_pool_ctx.stream); g_pool_ctx.stream = 0; }
+    return rc ? rc : -1;
 }
 extern "C" int8_t* ldpc_pool_host_llr(void) { return g_pool_llr_host; }
 extern "C" uint8_t* ldpc_pool_host_bits(void) { return g_pool_bits_host; }
 extern "C" uint32_t ldpc_pool_max_launch(void) { return POOL_MAX_LAUNCH; }
+extern "C" void ldpc_pool_counters(uint64_t* errors, uint64_t* poisoned) {
+    *errors = __atomic_load_n(&g_pool_errors, __ATOMIC_RELAXED);
+    *poisoned = __atomic_load_n(&g_pool_poisoned, __ATOMIC_RELAXED);
+}
 
-/* Decode n_req requests sharing BG/Z/num_iter: request r = slots [first[r], first[r]+count[r]) with
- * block length K[r]. Sum of counts <= POOL_MAX_LAUNCH. Bits land in the host pool at the same slots. */
-extern "C" void ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_req, const uint32_t* first,
-                                 const uint32_t* count, const uint32_t* K) {
+/* Output pattern of a slot that was not decoded. Not all-zero: zero data with a zero CRC would PASS. */
+#define LDPC_POOL_POISON 0xA5
+
+static void pool_poison(uint32_t first, uint32_t count) {
+    if (!g_pool_bits_host) return; /* after shutdown */
+    memset(g_pool_bits_host + (size_t)first * BATCH_BITS_STRIDE, LDPC_POOL_POISON, (size_t)count * BATCH_BITS_STRIDE);
+    __atomic_fetch_add(&g_pool_poisoned, count, __ATOMIC_RELAXED);
+}
+
+/* One launch of up to POOL_MAX_LAUNCH code blocks; chunk i = host slots [first[i], first[i]+count[i]),
+ * block length K[i]. Returns 0 or a cudaError_t / negative code; on non-zero the caller poisons. */
+static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, const uint32_t* first, const uint32_t* count,
+                       const uint32_t* K) {
     ThreadContext& c = g_pool_ctx;
     cudaStream_t stream = c.stream;
+    int rc = 0;
     uint32_t n = 0;
-    for (int r = 0; r < n_req; r++) {
-        CHECK_CUDA(cudaMemcpyAsync(c.b_llr_dev + (size_t)n * BATCH_LLR_STRIDE, g_pool_llr_host + (size_t)first[r] * BATCH_LLR_STRIDE,
+    for (int r = 0; r < n_chunk; r++)
+        n += count[r];
+    if (n == 0 || n > POOL_MAX_LAUNCH || !g_pool_cap) {
+        __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
+        return -2; /* never a silent skip */
+    }
+    pool_hooks_env_once();
+    if (g_hook_skip) { /* test hook (K34 test a) */
+        __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
+        return -3;
+    }
+    if (g_hook_stall_ms > 0) /* test hook (K34 test d) */
+        usleep((useconds_t)g_hook_stall_ms * 1000);
+    if (g_hook_inject == 1 || g_hook_inject == 3)  /* real, non-sticky CUDA error: invalid-size copy */
+        POOL_CHECK(cudaMemcpyAsync(c.b_llr_dev, g_pool_llr_host, 1, (cudaMemcpyKind)99, stream));
+    n = 0;
+    for (int r = 0; r < n_chunk; r++) {
+        POOL_CHECK(cudaMemcpyAsync(c.b_llr_dev + (size_t)n * BATCH_LLR_STRIDE, g_pool_llr_host + (size_t)first[r] * BATCH_LLR_STRIDE,
                                    (size_t)count[r] * BATCH_LLR_STRIDE, cudaMemcpyHostToDevice, stream));
         n += count[r];
     }
-    if (n == 0 || n > POOL_MAX_LAUNCH)
-        return;
+    {
     BaseGraph bg = get_basegraph(BG, Z);
     /* The ~4*num_iter iteration launches are replayed from a CUDA graph per (BG, Z, nb, num_iter), nb = n
      * rounded up to a power of two; codewords [n, nb) are pre-marked done (any non-zero word) so their
@@ -1035,18 +1169,23 @@ extern "C" void ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int
     if (use_graph)
         for (nb = 1; nb < n; nb <<= 1)
             ;
-    CHECK_CUDA(cudaMemsetAsync(c.b_done, 0, n * sizeof(uint32_t), stream));
+    POOL_CHECK(cudaMemsetAsync(c.b_done, 0, n * sizeof(uint32_t), stream));
     if (nb > n)
-        CHECK_CUDA(cudaMemsetAsync(c.b_done + n, 1, (nb - n) * sizeof(uint32_t), stream));
-    CHECK_CUDA(cudaMemsetAsync(c.b_unsat, 0, nb * sizeof(uint32_t), stream));
+        POOL_CHECK(cudaMemsetAsync(c.b_done + n, 1, (nb - n) * sizeof(uint32_t), stream));
+    POOL_CHECK(cudaMemsetAsync(c.b_unsat, 0, nb * sizeof(uint32_t), stream));
     static std::map<uint64_t, cudaGraphExec_t> graphs; /* only the pool worker thread gets here */
     const uint64_t key = (uint64_t)BG << 40 | (uint64_t)Z << 24 | (uint64_t)nb << 8 | num_iter;
     cudaGraphExec_t& ge = graphs[key];
     if (use_graph && ge) {
-        CHECK_CUDA(cudaGraphLaunch(ge, stream));
+        POOL_CHECK(cudaGraphLaunch(ge, stream));
     } else {
-        if (use_graph)
-            CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+        if (use_graph) {
+            __atomic_fetch_add(&g_pool_capture_epoch, 1, __ATOMIC_SEQ_CST);
+            AST(g_pool_capturing, 1);
+            POOL_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+            if (g_hook_inject == 2) /* illegal call during capture: invalidates it */
+                POOL_CHECK(cudaDeviceSynchronize());
+        }
         dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
         dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), nb);
         dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x), nb);
@@ -1064,26 +1203,92 @@ extern "C" void ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int
                                                                       bg.cn_stride, bg.num_rows, BATCH_LLR_STRIDE);
                 batch_done_kernel<<<blocks_for(nb, 128), 128, 0, stream>>>(c.b_unsat, c.b_done, nb);
             }
+            POOL_CHECK(cudaGetLastError()); /* launch-configuration errors surface here */
         }
         if (use_graph) {
             cudaGraph_t g;
-            CHECK_CUDA(cudaStreamEndCapture(stream, &g));
-            CHECK_CUDA(cudaGraphInstantiate(&ge, g, 0));
-            CHECK_CUDA(cudaGraphDestroy(g));
-            CHECK_CUDA(cudaGraphLaunch(ge, stream));
+            POOL_CHECK(cudaStreamEndCapture(stream, &g));
+            cudaError_t ei = cudaGraphInstantiate(&ge, g, 0);
+            cudaGraphDestroy(g);
+            POOL_CHECK(ei);
+            AST(g_pool_capturing, 0);
+            POOL_CHECK(cudaGraphLaunch(ge, stream));
         }
     }
     llr_accumulator_t const* llr_total = num_iter ? c.b_total : c.b_llr_dev;
     uint32_t b0 = 0;
-    for (int r = 0; r < n_req; r++) {
+    for (int r = 0; r < n_chunk; r++) {
         dim3 blocks_pack(blocks_for(K[r], PACK_BITS_KERNEL_THREADS), count[r]);
         pack_bits_kernel<<<blocks_pack, PACK_BITS_KERNEL_THREADS, 0, stream>>>(
             llr_total + (size_t)b0 * BATCH_LLR_STRIDE, c.b_bits_dev + (size_t)b0 * BATCH_BITS_STRIDE, K[r],
             BATCH_LLR_STRIDE, BATCH_BITS_STRIDE);
-        CHECK_CUDA(cudaMemcpyAsync(g_pool_bits_host + (size_t)first[r] * BATCH_BITS_STRIDE,
+        POOL_CHECK(cudaGetLastError());
+        POOL_CHECK(cudaMemcpyAsync(g_pool_bits_host + (size_t)first[r] * BATCH_BITS_STRIDE,
                                    c.b_bits_dev + (size_t)b0 * BATCH_BITS_STRIDE, (size_t)count[r] * BATCH_BITS_STRIDE,
                                    cudaMemcpyDeviceToHost, stream));
         b0 += count[r];
     }
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+    POOL_CHECK(cudaStreamSynchronize(stream));
+    POOL_CHECK(cudaGetLastError());
+    }
+    return 0;
+fail:
+    {   /* leave the stream usable: abandon a capture in progress, drain what was queued, clear sticky state */
+        cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+        if (cudaStreamIsCapturing(stream, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone) {
+            cudaGraph_t g = nullptr;
+            cudaStreamEndCapture(stream, &g);
+            if (g) cudaGraphDestroy(g);
+        }
+        cudaStreamSynchronize(stream);
+        cudaGetLastError();
+        AST(g_pool_capturing, 0);
+        if (cudaGetLastError() != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess || g_hook_inject == 3)
+            AST(g_pool_sticky, 1); /* the error survived being cleared: the context is gone, stop using the GPU */
+        else
+            cudaGetLastError();
+    }
+    return rc ? rc : -1;
+}
+
+/* Decode n_req requests sharing BG/Z/num_iter: request r = slots [first[r], first[r]+count[r]) with
+ * block length K[r]. Any count; requests above POOL_MAX_LAUNCH blocks are split over several launches.
+ * Bits land in the host pool at the same slots. req_rc[r] (optional) is 0 only if every block of request r
+ * was decoded by a launch that completed without error; otherwise its slots hold LDPC_POOL_POISON.
+ * Returns 0 if all requests succeeded, else the first error. */
+extern "C" int ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_req, const uint32_t* first,
+                                const uint32_t* count, const uint32_t* K, int* req_rc) {
+    int overall = 0;
+    for (int r = 0; r < n_req; r++)
+        if (req_rc) req_rc[r] = 0;
+    /* greedy pack of (request, sub-range) chunks into launches of <= POOL_MAX_LAUNCH blocks */
+    std::vector<uint32_t> cf, cc, ck;
+    std::vector<int> cr;
+    uint32_t in_launch = 0;
+    auto flush = [&]() {
+        if (cf.empty()) return;
+        int rc = pool_launch(BG, Z, num_iter, (int)cf.size(), cf.data(), cc.data(), ck.data());
+        if (rc) {
+            if (!overall) overall = rc;
+            for (size_t i = 0; i < cf.size(); i++) {
+                pool_poison(cf[i], cc[i]);
+                if (req_rc) req_rc[cr[i]] = rc;
+            }
+        }
+        cf.clear(); cc.clear(); ck.clear(); cr.clear(); in_launch = 0;
+    };
+    for (int r = 0; r < n_req; r++) {
+        uint32_t done = 0;
+        if (count[r] == 0) continue;
+        while (done < count[r]) {
+            uint32_t take = count[r] - done;
+            if (take > POOL_MAX_LAUNCH - in_launch) take = POOL_MAX_LAUNCH - in_launch;
+            cf.push_back(first[r] + done); cc.push_back(take); ck.push_back(K[r]); cr.push_back(r);
+            in_launch += take;
+            done += take;
+            if (in_launch == POOL_MAX_LAUNCH) flush();
+        }
+    }
+    flush();
+    return overall;
 }

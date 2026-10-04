@@ -92,6 +92,7 @@ typedef struct {
   int      nr_slot_rx;    ///< inspection of nr_dl_channel_estimation.c / nr_dlsch_demodulation.c /
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
+  uint32_t dci_abs_slot;  ///< BC9: the DCI's slot, frame * slots_per_frame + slot (key into the DL DCI history ring)
   uint16_t rnti;
   /// nr_blind_rnti_class_t of the DCI that scheduled this PDSCH. Only the consumer's MAC-TA parse
   /// reads it: a RAR (RA-RNTI) and a dedicated DL-SCH PDU carry timing advance in different places,
@@ -132,11 +133,15 @@ typedef struct {
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
   uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
   uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
+  uint64_t stale_after_decode; ///< decode finished after its IQ expired: INCONCLUSIVE, no TD/layout credit (K33)
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
   uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
   uint64_t batches;        ///< producer slot batches pushed
   uint64_t batches_multi;  ///< of which carried >1 grant (slots the cell shares between UEs)
 } nr_pdsch_passive_queue_stats_t;
+
+/** In-line decode paths (nr_pdcch_blind_monitor_rt.c) report a stale-after-decode outcome here. */
+void nr_pdsch_passive_note_stale_after_decode(void);
 
 /**
  * @brief Start the consumer thread. Idempotent; safe to call when disabled.
@@ -172,6 +177,23 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 /// context (mask + last data symbol, k0 = 0). Call AFTER that ticket's CRC feedback -- a resulting
 /// prune retires outstanding tickets. `scratch` receives antenna-0 FFTs (samples_per_slot_wCP entries).
 /// No-op for a settled/unscored ticket or a grant narrower than 4 PRBs.
+/** BC9: census of the DCI-adjacency certified flag (nr_dci_hist_k0_certified) of one scored Technique D trial: how often a
+ *  grant is k0-unambiguous for its hypothesis (f_S). Diagnostic only: the runtime feeds the KL rule, which never uses the
+ *  flag; levers C/P (the flag's consumers, nr_pdsch_config_sweep_feed_attr_cx) are not enabled in the runtime. */
+/** BC9 review M3: the context converged on k0 = winner_k0; a certified pass recorded for another k0 of this (RNTI,
+ *  configuration, TDA) is an alarm (an A1/A3 violation or a compatibility bug): counted and logged. */
+/** BC12a: SIB1 common-TDRA / default table A census at the first convergence of a context (log + metrics only). Counts into the
+ *  per-DCI-format counters and writes the log suffix " k0=<k> map=<A|B> dci=<1_0|1_1|?> sib1_row=<match|mismatch|none>
+ *  deftab=<match|mismatch|na>" to buf. Returns the suffix length. */
+int nr_pdsch_passive_bc12_census(const nr_pdsch_sweep_ticket_t *ticket, const nr_pdsch_cfg_hypothesis_t *winner, char *buf, size_t n);
+void nr_pdsch_passive_bc9_converged(const nr_pdsch_sweep_ticket_t *ticket, uint8_t winner_k0);
+void nr_pdsch_passive_bc9_note(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot,
+                               const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, uint16_t xoh, bool crc_ok);
+/** BC9d: feedback of a scored Technique D trial whose TB CRC passed (crc_ok; no-op otherwise, for a zero-generation ticket or
+ *  with ISAC_TD_DCI_ADJ=0): the DCI (rnti, ticket configuration / row, dci_abs_slot) is CONFIRMED in the DL DCI history and
+ *  only now feeds the hard exclusions -- its SIB1 TDD per-hypothesis exclusion (numerology mu, M5 cache) and the
+ *  DCI-adjacency exclusions against confirmed neighbours (nr_dci_hist_on_confirm). Call after the KL feedback. */
+void nr_pdsch_passive_bc9_confirm(const nr_pdsch_sweep_ticket_t *ticket, uint16_t rnti, uint32_t dci_abs_slot, int mu, bool crc_ok);
 void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
                                     const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
                                     int nr_slot, c16_t *scratch);

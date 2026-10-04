@@ -43,6 +43,9 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
+
+struct nr_td_side_info_s; /* nr_td_order.h (which includes this header) */
 
 /// One payload-interpretation hypothesis. Deliberately only the fields the TB CRC can actually
 /// discriminate -- anything the polar CRC already pins (dci_length, bwp_size) is not swept here.
@@ -91,9 +94,22 @@ void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
  * (S,L)) x k0 {0,1} x 4 add_pos x 2 max_len x 3 mcs_table = 6336; runtime up to ~2154, i.e. ~1077 per
  * k0 layer, so 8192 leaves room for five observed k0 >= 2 layers on top of it. Per context:
  * 8192 x 22 B = 180 KB, heap-allocated when a context slot is first used (nr-uesoftmodem mlockall()s,
- * so 1024 inline states would pin 185 MB at startup). */
+ * so 1024 inline states would pin 185 MB at startup). The 2026-10-01 probe counters (3 x uint16) add
+ * 48 KB: sizeof 180244 -> 229416 B (233520 B with the BC3 dormant masks); the fast-path levers add ok_unique, fp_trials and sib_trials
+ * (3 x uint16 arrays, +48 KB), the GEOM mask (+1 KB) and small state: sizeof is now 283840 B (measured), of which fp_trials + sib_trials are +32 KB/state; at 1024 contexts + 4 templates + 1 spare + the legacy singleton
+ * (1030 states) that is at most 292 MB (vs 186 MB at 180244 B), and only for slots actually opened. */
 #define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
+
+/* Dormant causes: one mask per cause so independent reasons (a cell prior, each field-book field) can be cleared
+ * independently. FIELD_BASE + nr_td_field_t (nr_td_fieldbook.h); FIELD causes 1..3; NR_TD_DORMANT_GEOM = 4 (lever P). */
+#define NR_TD_DORMANT_PRIOR 0
+#define NR_TD_DORMANT_FIELD_BASE 1
+#define NR_TD_DORMANT_GEOM 4 /* lever P: a CRC-pass-pinned geometry group (BC2b); every other geometry is dormant for this cause */
+#define NR_TD_DORMANT_ELIM 5 /* CB0 elimination channel (nr_pdsch_config_sweep_feed_cb0_grant): engine-only, evidence-derived, cleared with the evidence and by fail-open */
+#define NR_TD_DORMANT_CAUSES 6
+#define NR_TD_GEOM_SLOTS 8
+#define NR_TD_DWORDS ((NR_PDSCH_SWEEP_MAX_HYP + 63) / 64)
 
 typedef struct {
   nr_pdsch_cfg_hypothesis_t hyp[NR_PDSCH_SWEEP_MAX_HYP];
@@ -105,7 +121,197 @@ typedef struct {
   uint32_t exploit_tick; ///< 3 of 4 trials go to the hypothesis with the most passes (see _next)
   int      cursor;    ///< position in the shuffled, balanced round
   int      winner;    ///< -1 until decided
+  /* Convergence levers (spec 2026-10-01 §5.1-5.3). Code-block PROBE outcomes, kept apart from the KL
+   * evidence above: they order rounds (P1) and, only with p2 set, an ADMISSIBLE probe failure adds one
+   * KL failure; a probe pass never adds KL evidence. uint16 (saturating) bounds the per-state cost to
+   * 48 KB. Cleared together with trials/ok (indices move on every prune). */
+  uint16_t probe_pass[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t probe_fail[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t probe_inconclusive[NR_PDSCH_SWEEP_MAX_HYP];
+  /* Lever C (CRC-pass acceptance, spec 2026-10-01 section 3, experimental, default off). ok_unique[h] counts passes on NEW-DATA
+   * grants where h was the only ACTIVE hypothesis credited by that nr_pdsch_config_sweep_feed_equiv() call. Evidence-like:
+   * cleared together with trials/ok (every prune, rebuild, context reopen). Lever C requires the caller to use feed_equiv for
+   * the main decodes: feed / feed_k never touch ok_unique, and becoming blocked does not undo an existing winner. */
+  uint16_t ok_unique[NR_PDSCH_SWEEP_MAX_HYP]; ///< passes on grants where the hypothesis was alone in its equivalence class
+  bool     crc_accept_blocked; ///< a second active hypothesis has a unique pass: lever C off until the next prune/rebuild
+  /* Lever P (partition / geometry acceptance, spec 2026-10-01 section 3b, experimental, default off). Counts new-data CRC passes per
+   * GEOMETRY group (nr_td_geom_key: S, L, k0, mapping type, DM-RS mask; the MCS table is NOT in the key). When all passes
+   * so far sit in ONE group G and ok_geom[G] >= nr_pdsch_config_sweep_crc_accept_m(n_groups_active, T_g,max) (T_g = sum of fp_trials over the group's active members), every other geometry
+   * becomes dormant for cause NR_TD_DORMANT_GEOM (reversible: fail-open or clear_dormant). It never decides a winner. Evidence-like: the
+   * slots are cleared everywhere ok_unique is (lever_c_restart, clear_probe_stats, rebuild, new context) and at the hypothesis-adding
+   * sites; the pin's own active-set change restarts them (so a pin cannot loop). Two geometries with a pass, or more than
+   * NR_TD_GEOM_SLOTS, block it (sticky until the next restart). Not run while fail_open. */
+  uint64_t geom_key[NR_TD_GEOM_SLOTS];
+  uint16_t ok_geom[NR_TD_GEOM_SLOTS];
+  int      n_geom;
+  bool     geom_blocked;
+  bool     winner_by_crc; ///< the winner was decided by lever C (diagnostic; false after a reset of the winner)
+  /* FAST-PATH EVIDENCE STREAM (fix A, round 1). The fast-path levers (C and P) count only passes of EXPLORATION picks (a round-robin slot of the
+   * shuffled round, nr_td_pick_t NR_TD_PICK_EXPLORE) and their m* uses T_max over fp_trials = explore trials only. Argument: every active
+   * hypothesis receives at most one exploration slot per round, the slot order is fixed by the shuffle/ordering and does not depend on any
+   * decode outcome, so for a WRONG hypothesis its fast-path passes are Binomial(fp_trials, p_f) and the union bound C(T, m) p_f^m applies.
+   * Exploit (hot) and sibling-test picks are real KL trials but never fast-path evidence: a hot hypothesis gets 3/4 of the trials after one
+   * pass, which a per-hypothesis trial count cannot bound. uint16, saturating (+16 KB/state; with sib_trials +32 KB). Cleared wherever ok_unique is. */
+  uint16_t fp_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  /* K0-SIBLING GUARD (fix B). Siblings of a lead (lever C leader L / lever P group G): ACTIVE hypotheses with identical tda_start,
+   * tda_length, mapping_type and dmrs_mask but a different k0 (table, add_pos, max_len free). Before a fast accept/pin every sibling needs
+   * N_sib = nr_pdsch_config_sweep_sib_n(n_sib, sib_pmin, sib_eps) sibling-test trials (picks of kind NR_TD_PICK_SIBLING, scheduled
+   * deliberately by next_ex while a lead waits) with ZERO passes; a pass on a sibling-test trial sets sib_blocked (fast path off until the
+   * next evidence restart). If a sibling were the truth its per-trial pass probability is >= sib_pmin whenever the test runs, so
+   * P(0 passes in N_sib) <= (1 - p_min)^N_sib <= eps / n_sib per sibling. sib_pmin <= 0 disables the guard (fix A only).
+   * DORMANT siblings are ignored by the guard (only ACTIVE hypotheses are siblings). That is safe only under CORRECT dormancy (the GEOM cause
+   * right after a guarded pin; later, k0-certified causes). A wrong k0 FIELD (a field-book/prior mask that hides the true k0) is a known
+   * hole: the guard cannot test a sibling that is dormant; BC8/BC9 address it. */
+  uint16_t sib_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  bool     sib_blocked;
+  bool     sib_skip;   ///< BC9: the last sibling pick could not be decoded; the next pick is a normal one
+  uint16_t sib_skips;  ///< BC9 M6: skips since the last evidence restart; NR_TD_SIB_SKIP_MAX blocks the fast path
+  struct { bool valid; uint64_t skey; uint8_t k0; } sib_t[2]; ///< pending sibling-test targets: [0] lever C leader, [1] lever P group
+  /* CONFIGURATION, not catalog/evidence: preserved across catalog rebuilds (nr_pdsch_config_sweep_rebuild(),
+   * i.e. context reopen and prior restore); a brand-new runtime context starts with NULL/false. */
+  const struct nr_td_side_info_s *side; ///< ordering side information (nr_td_order.h); NULL = neutral (today's order)
+  bool     p2;        ///< failure-only probe evidence enabled
+  bool     crc_accept; ///< lever C enabled (configuration: preserved across rebuild like side/p2; a new context starts false)
+  bool     geom_pin;   ///< lever P enabled (configuration: preserved across rebuild like crc_accept; a new context starts false)
+  float    sib_pmin;   ///< sibling guard p_min (configuration; default 0.05; <= 0 disables the guard)
+  float    sib_eps;    ///< sibling guard error budget eps_sib (configuration; default 1e-6)
+  /* DORMANT (reversible) hypothesis masks, blind-convergence spec 2026-10-01 section 4. CONFIGURATION+MEMBERSHIP, not
+   * evidence: preserved by nr_pdsch_config_sweep_rebuild(), compacted with the same keep-index mapping by every destructive
+   * prune (prune_commit, prune_keep). One bit per hypothesis index per cause; bits at indices >= n_hyp are always 0.
+   * active(i) = fail_open || no cause marks i. A dormant hypothesis is never selected (next/next_k, incl. the exploit "hot"
+   * pick and K-probes) and accumulates no evidence (feed/feed_k/feed_equiv ignore it, including probe counters). The
+   * acceptance (leader search, separation test, union-bound class count, SWEEP_MIN_TRIALS fallback, ratio test) ranges over
+   * the ACTIVE set only. Invariant: at least one hypothesis is active under the masks alone (set_dormant refuses to empty
+   * the catalogue; a destructive prune that would leave none clears all masks). A decided winner is returned by next()
+   * unconditionally. A new runtime context starts with all masks clear and fail_open false. */
+  uint64_t dormant[NR_TD_DORMANT_CAUSES][NR_TD_DWORDS];
+  bool     fail_open; ///< all hypotheses active regardless of dormant masks (per context)
+  /* EVIDENCE-like (cleared with trials/ok by every prune, rebuild, context reopen): credited TRIALS, never wall-clock time,
+   * since the last PASS of an active hypothesis. +1 per feed / feed_k / feed_equiv CALL that credited at least one active
+   * hypothesis (feed_k: one call = main outcome + its probes, counted once; probe outcomes count only when they add KL
+   * evidence, i.e. a P2-admissible FAIL); reset to 0 by a PASS credited to an active hypothesis (a feed_k probe PASS is not
+   * evidence and never resets it). Also reset to 0 whenever the active set changes: set_fail_open toggling, and set_dormant / clear_dormant calls that
+   * change at least one mask bit (these also clear ok_unique and crc_accept_blocked). Saturates at UINT32_MAX. Input of nr_pdsch_config_sweep_fail_open_due(). */
+  uint32_t since_pass;
+  /* CB0 ELIMINATION CHANNEL (levers spec 2026-10-01 section 5.4 redesign; nr_pdsch_config_sweep_feed_cb0_grant). A SEPARATE,
+   * SYMMETRIC evidence stream: per hypothesis, the first-code-block CRC outcomes (PASS and FAIL both counted) of the CB0 decodes the
+   * caller ran on ADMISSIBLE grants. Never mixed into trials/ok, never elects: used one-sided to ELIMINATE a non-leader h when
+   * UB_cb0(h) < LB_tba(leader) (sweep_decide). tba_* = the full-TB outcomes of the grant's scheduled hypothesis on the SAME admissible
+   * grants (the lower bound must come from TB samples drawn under the same admissibility as the CB0 samples). Evidence-like (one
+   * "CB0 epoch"): cleared with trials/ok (prune_commit, rebuild, reopen), by fail-open (counters only: tba kept) and by a premise
+   * violation; NOT by an active-set change (lever_c_restart): a CB0 rate is a property of the hypothesis on the grants it was tested on.
+   * uint16 (+64 KB/state); crediting of a hypothesis stops (outcome-independently) at UINT16_MAX trials. */
+  uint16_t cb0_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t cb0_pass[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t tba_trials[NR_PDSCH_SWEEP_MAX_HYP];
+  uint16_t tba_ok[NR_PDSCH_SWEEP_MAX_HYP];
+  uint8_t  tb_dec_mask;  ///< bit d: a full TB of this epoch was decoded by decoder code d (nr_td_decoder_t)
+  uint8_t  cb0_dec_mask; ///< bit d: a CREDITED CB0 batch of this epoch came from decoder code d
+  bool     cb0_elim;     ///< CB0 elimination enabled (CONFIGURATION, preserved by rebuild; new runtime contexts: ISAC_TD_CB0_ELIM, default 1, 0 disables)
+  bool     cb0_disabled; ///< premise violation seen (TB PASS with CB0 FAIL on one (hypothesis, grant)): channel off for the context (sticky)
+  bool     cb0_no_family_exempt; ///< TEST ONLY (simulator discriminating arm): disable the trap-family exemption
+  bool     cb0_no_premise_check; ///< TEST ONLY (simulator discriminating arm): disable the runtime premise check
 } nr_pdsch_config_sweep_state_t;
+
+/* ---- CB0 elimination channel (ISAC_TD_CB0_ELIM, default ON, 0 disables) ----------------------------------------------------------------
+ * PER GRANT the caller makes ONE nr_pdsch_config_sweep_feed_cb0_grant() call AFTER the grant's full-TB feed (feed / feed_attr /
+ * feedback), describing the CB0 batch AND the full-TB outcome of the scheduled hypothesis on that grant.
+ * SCHEDULE CONTRACT: the batch is every ACTIVE hypothesis, or a subset fixed by (context seed, absolute slot, catalogue key) only, plus
+ * ALWAYS the grant's scheduled (full-TB) hypothesis; the set is chosen BEFORE any outcome of the grant is known and never depends on a
+ * hypothesis's own outcomes (the P2 failure: probes scheduled on survivors deflated the truth). PASS and FAIL are both reported.
+ * (Forcing the scheduled hypothesis in can only bias its CB0 rate UP when exploit picks follow recent passes: the safe direction.)
+ * ADMISSIBILITY: the batch credits nothing unless EVERY condition below holds; the caller sets one NR_TD_CB0_X_* bit per violated
+ * condition (all known before the CB0 outcomes are read; never the outcome itself). A violation drops the WHOLE grant, never a subset:
+ *   new data at rv 0 and no soft combining in the full-TB path (the passive DL path combines HARQ retransmissions) ......... NOT_NEW_RV0
+ *   the grant passes the same gate as the full-TB path (nr_td_gate) .................................................... GATED
+ *   the IQ sample lifetime was re-checked AFTER the decodes (F2, nr_passive_credit_allowed) ........................... IQ_STALE
+ *   n_L latched or E <= N_ref (no LBRM retry), no ISAC_RV_RETRY, no PRG / PT-RS arm in the full decode ............... LBRM, RV_RETRY, PRG_PTRS
+ *   no batch member STALE / FULL ......................................................................................... MEMBER_STALE
+ *   ISAC_LLR_SCALE off; the probe was not fed GPU LLRs (until verified equal) ............................................ LLR_SCALE, GPU_LLR
+ *   no LDPC launch error / skipped launch in the batch (G1 splits > 512 CBs; any error = the whole batch) ................ LDPC_ERROR
+ *   caller policy on rank (K38 fixed at c005d19675: rank > 1 CB0 equals the full decode; the bit stays for a runtime choice) RANK
+ * The engine adds DECODER (dominance rule below) and CONTRACT (the scheduled hypothesis is active but not in the batch).
+ * DECODER DOMINANCE (CRC evidence is not exchangeable between LDPC decoders; codes = G1 decoder_used): a batch is admissible iff its
+ * CB0 decoder is at least as sensitive as EVERY full-TB decoder of the context's epoch (sensitivity CPU < CUDA; same iteration policy per
+ * code; an unknown decoder never qualifies as CB0 decoder and, as a TB decoder, blocks every batch). A CUDA CB0 batch always dominates a
+ * CPU or CUDA TB; a CPU batch only while every TB of the epoch was CPU-decoded. A NEW, more sensitive TB decoder starts a new CB0 epoch
+ * (counters and ELIM cleared) when credited CB0 batches no longer dominate it. The TB decoder set learns from feed_cb0_grant (tb_decoder)
+ * and from nr_pdsch_config_sweep_note_tb_decoder(), which the caller MUST call for every full-TB outcome of a grant that went through
+ * the CB0 wiring without a credited batch (budget skip, pre-decode reason, nothing testable: nr_td_cb0_wire_feed does it).
+ * EXEMPT (2026-10-04 review): full-TB outcomes fed ONLY through nr_pdsch_config_sweep_feedback() by paths that never reach the CB0
+ * wiring -- the inline decode of nr_pdcch_blind_monitor_rt.c (serial path) and DCI-layout probe jobs (nr_td_cb0_wire_pre refuses
+ * layout_probe). They credit only the full-TB election counters (ok / trials: leader choice), never tba_ok / tba_trials nor the
+ * CB0 counters, and the elimination inequality UB_cb0(h) < LB_tba(leader) reads only the latter two; the choice of the leader does
+ * not enter the soundness argument (it holds for ANY leader). Noting their decoder would only make the mask more conservative: a
+ * CUDA-decoded inline TB would block every later CPU batch of the epoch for no soundness gain.
+ * PREMISE CHECK (runtime guard of q >= p): with an admissible, dominating batch the scheduled hypothesis's CB0 must pass whenever its TB
+ * passed. The first "TB PASS and CB0 FAIL" on one (hypothesis, grant) disables the channel for the context (cb0_disabled, sticky across
+ * rebuild/reopen), clears ELIM and the CB0 evidence, logs TD_CB0_PREMISE_ALARM and counts nr_pdsch_config_sweep_cb0_stats(alarms).
+ * SOUNDNESS: TB pass => CB0 pass (same decoder or a dominating one, same IQ), so q_T >= p_T on admissible grants; a wrong leader L
+ * has p_L <= p_T (it passes only where its computation equals the truth's or by CRC accident). With all interval families holding,
+ * UB_cb0(T) >= q_T >= p_T >= p_L >= LB_tba(L): the truth is never eliminated. The 1e-6 budget is split in THREE (full-TB election,
+ * admissible-TB lower bound, CB0): nr_crc_interval with 3 x the class count, class count = hypotheses active under every cause but ELIM.
+ * TRAP FAMILY EXEMPTION: CB0 never eliminates a hypothesis sharing (S, L, mapping type, DM-RS mask) with the current leader (its k0
+ * siblings and MCS-table twins), so a leader that is itself a trap sibling or twin of the truth can never eliminate the truth.
+ * ELIM is a dormant cause (NR_TD_DORMANT_ELIM): no scheduling, no evidence, "resolved" in the separation test; reserved to the engine
+ * (set_dormant / clear_dormant refuse it). FAIL-OPEN: ELIM-only dormancy never triggers fail-open (fail_open_due ignores it in the
+ * trigger and in `need`; an elimination does not reset since_pass). Fail-open RE-ARMS the channel: it clears ELIM and the CB0 counters
+ * (a fresh CB0 epoch over the full catalogue: a wrong elimination could be the reason no pass arrives) and ELIM stays honoured while
+ * fail_open (active() = !ELIM then).
+ * LEVER E (feed_equiv crediting a class) is INCOMPATIBLE with cb0_elim: its biased rates (BC1) break p_L <= p_T. Do not enable both.
+ * With cb0_elim false every function below is a no-op and the engine is bit-identical to the KL-only rule. */
+#define NR_TD_CB0_BUDGET_SPLIT 3 /* full-TB, admissible-TB and CB0 families each get 1e-6 / 3 (classes x 3 in nr_crc_interval) */
+/** LDPC decoder codes, equal to G1's NRLDPC_DECODER_* (nrLDPC_coding_interface.h decoder_used). */
+typedef enum { NR_TD_DEC_UNKNOWN = 0, NR_TD_DEC_CPU = 1, NR_TD_DEC_CUDA = 2 } nr_td_decoder_t;
+#define NR_TD_CB0_X_NOT_NEW_RV0 (1u << 0)
+#define NR_TD_CB0_X_GATED (1u << 1)
+#define NR_TD_CB0_X_IQ_STALE (1u << 2)
+#define NR_TD_CB0_X_LBRM (1u << 3)
+#define NR_TD_CB0_X_RV_RETRY (1u << 4)
+#define NR_TD_CB0_X_PRG_PTRS (1u << 5)
+#define NR_TD_CB0_X_MEMBER_STALE (1u << 6)
+#define NR_TD_CB0_X_LLR_SCALE (1u << 7)
+#define NR_TD_CB0_X_GPU_LLR (1u << 8)
+#define NR_TD_CB0_X_LDPC_ERROR (1u << 9)
+#define NR_TD_CB0_X_RANK (1u << 10)
+#define NR_TD_CB0_X_DECODER (1u << 11)  /* engine: the batch decoder does not dominate the epoch's TB decoders */
+#define NR_TD_CB0_X_CONTRACT (1u << 12) /* engine: the scheduled hypothesis is active but missing from the batch */
+#define NR_TD_CB0_X_COUNT 13
+typedef struct {
+  const int *idx;          ///< CB0 batch hypotheses (indices of this state)
+  const bool *pass;        ///< their CB0 CRC outcomes
+  int n;
+  uint8_t cb0_decoder;     ///< nr_td_decoder_t of the batch
+  int tb_hyp;              ///< the grant's scheduled (full-TB) hypothesis, -1 = none decoded
+  bool tb_pass;            ///< its full-TB CRC outcome
+  uint8_t tb_decoder;      ///< nr_td_decoder_t of that full decode
+  uint32_t inadmissible;   ///< NR_TD_CB0_X_* bits set by the caller; 0 = admissible
+} nr_td_cb0_grant_t;
+/** One grant of the channel (see above). Credits the batch and the scheduled hypothesis's admissible-TB counter, then runs the decision
+ *  (elimination + KL separation + fallback). Returns the winner or -1 (a winner decided here is announced by the next feedback()). */
+int nr_pdsch_config_sweep_feed_cb0_grant(nr_pdsch_config_sweep_state_t *st, const nr_td_cb0_grant_t *g);
+/** Record the decoder of a full-TB outcome fed without a CB0 grant (dominance bookkeeping). No-op when !cb0_elim. */
+void nr_pdsch_config_sweep_note_tb_decoder(nr_pdsch_config_sweep_state_t *st, uint8_t decoder);
+/** Process-wide counters: premise alarms, and rejected grants per NR_TD_CB0_X_* bit (rej may be NULL, else NR_TD_CB0_X_COUNT entries). */
+void nr_pdsch_config_sweep_cb0_stats(uint64_t *alarms, uint64_t *rej);
+void nr_pdsch_config_sweep_cb0_stats_reset(void);
+/** ISAC_TD_CB0_ELIM (read once; default ON, 0 disables); copied into st->cb0_elim of every new runtime context. */
+bool nr_pdsch_config_sweep_cb0_elim_env(void);
+/** Test hook: 1/0 force the ISAC_TD_CB0_ELIM decision, -1 re-reads the environment. */
+void nr_pdsch_config_sweep_cb0_elim_env_set(int on);
+/** True when hypothesis i is dormant through the CB0 elimination channel. */
+bool nr_pdsch_config_sweep_is_eliminated(const nr_pdsch_config_sweep_state_t *st, int i);
+
+/* ---- K-hypothesis selection and probe outcomes (spec 2026-10-01 §5.1-5.3) ------------------------- */
+typedef enum { NR_TD_FULL_TB = 0, NR_TD_CB_PROBE = 1 } nr_td_outcome_kind_t;
+typedef enum { NR_TD_PASS = 0, NR_TD_FAIL = 1, NR_TD_INCONCLUSIVE = 2 } nr_td_outcome_result_t;
+typedef struct {
+  int hyp;            ///< hypothesis index in the state that produced it
+  uint8_t kind;       ///< nr_td_outcome_kind_t
+  uint8_t result;     ///< nr_td_outcome_result_t
+  bool p2_admissible; ///< probe failure qualifies as KL evidence (only used when st->p2)
+} nr_td_outcome_t;
+#define NR_TD_MAX_K 8
 
 /** Build the complete supported mapping-A + mapping-B catalog for pure algorithm tests.
  * Runtime uses init_legal() with the real cell DMRS table. TDA field width remains an
@@ -115,14 +321,129 @@ int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
 /** Next hypothesis to try, round-robin. Returns its index and fills *out. */
 int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out);
 
+/** What kind of slot a pick was. Fast-path evidence (levers C/P) comes from EXPLORE picks only; SIBLING picks are the guard's deliberate
+ *  tests of k0 siblings. A caller of the fast path MUST pass the kind returned by next_ex/next_k_ex to the *_ex feed functions. */
+typedef enum { NR_TD_PICK_EXPLORE = 0, NR_TD_PICK_EXPLOIT = 1, NR_TD_PICK_SIBLING = 2 } nr_td_pick_t;
+/** nr_pdsch_config_sweep_next() plus the pick kind. Identical RNG/cursor behaviour to next() unless a lever is on and a lead waits for its
+ *  sibling tests, in which case the next sibling (fewest sib_trials, lowest index) is returned with kind SIBLING. next() itself never
+ *  schedules siblings (it is the lever-off path). */
+int nr_pdsch_config_sweep_next_ex(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out, nr_td_pick_t *kind);
+/** N_sib = ceil(ln(n_sib / eps) / pmin); 0 when n_sib <= 0 or pmin <= 0 (guard disabled). Clamped to 65535. */
+int nr_pdsch_config_sweep_sib_n(int n_sib, double pmin, double eps);
+/** Lever P trial accounting: n_groups = distinct geometry keys among ACTIVE hypotheses; t_g_max = max over those groups of the SUM of fp_trials
+ *  over the group's active members (T_g: ok_geom sums the passes of every member, so T_g, not a per-hypothesis T, bounds a wrong group).
+ *  m_P* = nr_pdsch_config_sweep_crc_accept_m(n_groups, t_g_max). Read-only. Returns 0, or -1 on a NULL argument / allocation failure. */
+int nr_pdsch_config_sweep_geom_groups(const nr_pdsch_config_sweep_state_t *st, int *n_groups, uint32_t *t_g_max);
+/* Dormant hypotheses are skipped; the per-round shuffle still covers all n_hyp (RNG use unchanged), a round whose remainder is
+ * all dormant advances to the next round, and the exploit "hot" hypothesis must be active. */
+
 /** Report the TB-CRC outcome of the grant decoded under hypothesis `idx`.
  * Returns the winning index once one is established, else -1. */
 int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool tb_crc_ok);
+
+/* Credit one full-TB outcome to idx[0] (the decoded hypothesis) and to its grant-equivalent alive hypotheses
+ * idx[1..n-1]. Duplicates and out-of-range members are ignored; an invalid idx[0] (or n < 1) credits nothing and
+ * returns the current winner, as _feed does. n == 1 is bit-identical to
+ * nr_pdsch_config_sweep_feed(st, idx[0], tb_crc_ok). The acceptance check runs once, after crediting, whenever any
+ * credited hypothesis reached a multiple of 16 trials. Returns the winner or -1.
+ * Equivalence (blind-convergence spec 2026-10-01 section 2) is the caller's job: equal nr_td_equiv_key() on this
+ * grant. The caller passes the FULL grant-equivalence class including dormant members (crediting skips dormant members,
+ * but a pass is UNIQUE only when the class has exactly one distinct in-range member, dormant ones counted: a dormant twin
+ * may be the truth). new_data matters only with st->crc_accept (lever C): a pass with tb_crc_ok && new_data on a one-member class counts in ok_unique[idx[0]] (saturating); before the KL decision, if exactly one active hypothesis has
+ * ok_unique > 0 and it reaches nr_pdsch_config_sweep_crc_accept_m(n_active, max active trials), it wins; two or more such
+ * hypotheses set crc_accept_blocked (sticky until the next prune/rebuild/reopen). With crc_accept false the behaviour is
+ * bit-identical to the KL-only rule. */
+int nr_pdsch_config_sweep_feed_equiv(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok,
+                                     bool new_data /* new transmission (NDI toggled); used only by levers C and P */);
+
+/** Attribution-only variant, the RUNTIME API for the levers when grant-equivalence CREDITING is not wanted (lever E off):
+ *  credits ONLY idx0 (exactly nr_pdsch_config_sweep_feed(st, idx0, tb_crc_ok), bit-identical while crc_accept and geom_pin
+ *  are false), but uses `cls[0..n_cls)` -- the FULL grant-equivalence class of the decode INCLUDING dormant members --
+ *  for the lever-C uniqueness test (a pass is unique iff the class has exactly one distinct in-range member; idx0 always counts
+ *  as a member) and for the lever-P attribution (a class spanning two geometry groups gives lever P no evidence). Passing the
+ *  singleton {idx0} instead would make every pass look unique (UNSAFE). nr_pdsch_config_sweep_feed_equiv() is a thin wrapper
+ *  over the same internal function (idx = cls = the class, crediting every active member). Order inside the shared
+ *  function: credit -> lever P (may pin; restarts the evidence) -> lever C -> KL decision (sweep_decide). A pin skips the
+ *  lever-C accumulation of that same call. */
+int nr_pdsch_config_sweep_feed_attr(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                    bool new_data);
+/** The runtime/fast-path forms: `kind` is the pick kind of the decoded hypothesis idx0 (from next_ex / next_k_ex). The legacy feed_equiv /
+ *  feed_attr are these with kind = EXPLOIT: without a pick kind no outcome is fast-path evidence, so a lever paired with the old next()
+ *  fails safe (never accepts/pins). Tests that need fast-path credit use the _ex forms with NR_TD_PICK_EXPLORE. Lever-off behaviour is bit-identical. */
+int nr_pdsch_config_sweep_feed_equiv_ex(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
+                                        nr_td_pick_t kind);
+int nr_pdsch_config_sweep_feed_attr_ex(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                       bool new_data, nr_td_pick_t kind);
+
+/** BC9 forms with the DCI-adjacency `certified` flag (nr_dci_hist_k0_certified): levers C and P count a pass, and fp_trials a
+ *  trial, only for an EXPLORE pick on a k0-unambiguous grant (certified). Uncertified trials stay normal KL evidence. The _ex
+ *  forms above are _cx with certified = false (fail-safe, BC9 review I1): a caller that does not state certification never
+ *  builds fast-path evidence. */
+int nr_pdsch_config_sweep_feed_equiv_cx(nr_pdsch_config_sweep_state_t *st, const int *idx, int n, bool tb_crc_ok, bool new_data,
+                                        nr_td_pick_t kind, bool certified);
+int nr_pdsch_config_sweep_feed_attr_cx(nr_pdsch_config_sweep_state_t *st, int idx0, const int *cls, int n_cls, bool tb_crc_ok,
+                                       bool new_data, nr_td_pick_t kind, bool certified);
+/** Sibling liveness (BC2b carry-forward): the caller could not decode the SIBLING pick idx (its slot was not captured, ...).
+ *  No evidence; the next next_ex()/next_k_ex() call returns a normal pick instead of a sibling (at most every other pick is
+ *  spent on an undecodable sibling, so the RNTI never stalls). A TDD-impossible sibling is excluded instead (it is gone). */
+void nr_pdsch_config_sweep_sib_skip(nr_pdsch_config_sweep_state_t *st, int idx);
+/** Review M6: after this many skips since the last evidence restart the fast path is blocked (fail-safe: KL decides). */
+#define NR_TD_SIB_SKIP_MAX 64
+
+/** Lever C threshold: smallest m >= 2 with n_alive * C(t_max, m) * 2^(-24 m) <= 1e-6 (log domain, lgamma). m = 2 when
+ *  n_alive <= 1 or t_max == 0; for t_max < m, C = 0 so m qualifies at once (result max(2, m)). */
+int nr_pdsch_config_sweep_crc_accept_m(int n_alive, uint32_t t_max);
+
+/** K = 1 is exactly nr_pdsch_config_sweep_next(). Returns n filled (1..K, K clamped to NR_TD_MAX_K;
+ *  0 when nothing can be selected); idx[0]/out[0] = the main hypothesis (unchanged path and RNG use),
+ *  idx[1..n-1] = distinct probe hypotheses that are not yet cleared (>= SWEEP_MIN_TRIALS trials, no pass),
+ *  taken from the current round order at the cursor WITHOUT advancing it or consuming RNG. Once a winner
+ *  exists only the winner is returned (n = 1). */
+int nr_pdsch_config_sweep_next_k(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[]);
+/** next_k with the pick kind of the MAIN hypothesis idx[0] (see next_ex). K = 1 is exactly next_ex(). */
+int nr_pdsch_config_sweep_next_k_ex(nr_pdsch_config_sweep_state_t *st, int K, int idx[], nr_pdsch_cfg_hypothesis_t out[], nr_td_pick_t *kind);
+
+/** outcomes[0] must be the main FULL_TB outcome: PASS/FAIL go through nr_pdsch_config_sweep_feed();
+ *  INCONCLUSIVE (or a non-FULL_TB entry) is not fed. outcomes[1..n-1] are probes: they only update the
+ *  probe counters, except that with st->p2 an admissible FAIL adds exactly one KL failure. A probe PASS
+ *  never adds KL evidence. Returns the winner index or -1 (same contract as _feed). */
+int nr_pdsch_config_sweep_feed_k(nr_pdsch_config_sweep_state_t *st, const nr_td_outcome_t *outcomes, int n);
+
+/* ---- Dormant masks and fail-open (blind-convergence spec section 4) ------------------------------------------ */
+typedef bool (*nr_td_keep_fn_t)(const nr_pdsch_cfg_hypothesis_t *h, const void *arg);
+/** Marks every hypothesis with !keep(h) dormant for `cause` (additive: bits already set stay set). Returns the number
+ *  of hypotheses newly dormant FOR THIS CAUSE (resets since_pass when a bit changed), or -1 (nothing changed) if st/keep is NULL, `cause` is out of range, or
+ *  the result would leave zero active hypotheses under the masks (fail_open is ignored for this test). */
+int nr_pdsch_config_sweep_set_dormant(nr_pdsch_config_sweep_state_t *st, int cause, nr_td_keep_fn_t keep, const void *arg);
+/** Clears `cause`; returns the number of hypotheses that thereby became active under the masks (0 if cause is out of range). */
+int nr_pdsch_config_sweep_clear_dormant(nr_pdsch_config_sweep_state_t *st, int cause);
+void nr_pdsch_config_sweep_set_fail_open(nr_pdsch_config_sweep_state_t *st, bool on);
+/** active(i) = fail_open || no cause marks i; false for an out-of-range i. */
+bool nr_pdsch_config_sweep_is_active(const nr_pdsch_config_sweep_state_t *st, int i);
+/** Number of active hypotheses (n_hyp while fail_open or with no mask set). */
+int  nr_pdsch_config_sweep_n_active(const nr_pdsch_config_sweep_state_t *st);
+/** !fail_open && since_pass > 0 && since_pass >= ceil(n_active * ln(1/alpha) / p_min); counts trials, not time. A state with no
+ *  credited trial is never due. alpha outside (0,1) or p_min <= 0 is never due. */
+bool nr_pdsch_config_sweep_fail_open_due(const nr_pdsch_config_sweep_state_t *st, double alpha, double p_min);
+/** Destructive prune by predicate, exactly prune_commit() semantics (0 = nothing kept: untouched; unchanged count = all kept:
+ *  evidence retained; else the new count with all evidence and since_pass cleared, cursor 0, winner -1), compacting the dormant
+ *  masks with the same keep-index mapping. keep(h) true retains h; dormant hypotheses are kept or dropped by the predicate too. */
+int nr_pdsch_config_sweep_prune_keep(nr_pdsch_config_sweep_state_t *st, nr_td_keep_fn_t keep, const void *arg);
+
+/** Pure k0-layer append on a state (what nr_pdsch_config_sweep_add_k0 does on a live context): copies the lowest-k0 layer with
+ *  k0 replaced; each new entry inherits its source entry's dormant bits. Returns the number added (0 = nothing/does not fit). */
+int nr_pdsch_config_sweep_add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_t k0);
 
 /** Winner, or -1 if undecided. */
 int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st);
 
 typedef int32_t (*nr_pdsch_legality_fn_t)(int, int, int, int, int, int);
+/** Rebuild the full catalog in place exactly as a runtime context does (shared template copy, or
+ *  init_legal() when none is available), discarding all evidence but KEEPING the configuration fields
+ *  side and p2 and the dormant masks / fail_open (masks are by index: the caller re-applies them if the catalogue
+ *  changed; bits >= the new count are dropped and an all-dormant result is cleared). st must already be a valid state. Returns the hypothesis count. */
+int nr_pdsch_config_sweep_rebuild(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA,
+                                  nr_pdsch_legality_fn_t legality);
 /** Enumerates the complete catalog, excludes undefined masks, merges identical effective PDUs.
  * The caller-owned pure state is not internally synchronized. */
 int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_count,
@@ -168,6 +489,11 @@ typedef struct {
   bool settled; ///< this selection uses an already-converged context
   uint16_t layout_index; ///< DCI 1_1 layout (resolver index) this trial was decoded under; 0xFFFF = none
   uint8_t k0;            ///< the selected hypothesis' k0 (the consumer measures the oracle on slot + k0)
+  uint64_t configuration; ///< BC9 M3: the context's configuration key (matches the DCI history entry)
+  /* BC12a census inputs, set by the caller AFTER select() (select never reads them): the DCI format of the grant that created
+   * the context's trial (10 / 11, 0 = not recorded) and the MIB dmrs-TypeA-Position (2 / 3, 0 = unknown). Log/metrics only. */
+  uint8_t dci_format;
+  uint8_t typeA_pos;
 } nr_pdsch_sweep_ticket_t;
 
 /** Thread-safe per-(configuration,RNTI,TDA) controller. No allocation or decoder work under lock.
@@ -191,9 +517,80 @@ int nr_pdsch_config_sweep_prune_qm(nr_pdsch_config_sweep_state_t *st, uint8_t mc
  *  surviving count only when this call removed hypotheses, else 0. ISAC_QM_ORACLE=0 disables. */
 int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint8_t mcs, int qm);
 /** Full oracle observation: the DM-RS mask, the last PDSCH symbol carrying energy on the grant's
- *  PRBs (-1 = unmeasured) and the k0 of the job it was measured on (-1 = unknown). Records it
- *  cell-wide and prunes the ticket's context to the admitted entries. */
-int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0);
+ *  PRBs (-1 = unmeasured) and k0_plausible, the k0 the measuring job hypothesised (-1 = unknown). K39: prunes on
+ *  mask and last symbol ONLY; k0_plausible is recorded as plausible (ordering/logging) and pins nothing, because DM-RS
+ *  in a slot does not prove which slot offset the grant has. (Legacy: ISAC_TD_K0_ORACLE_LEGACY=1 pins it as before.) */
+int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0_plausible);
+/** BC7b M1 diagnostics: type-B layers appended by the observe path, and latches set because such a layer was truncated again
+ *  in full (it is then not re-appended until the observed sets change, a reopen or a catalogue rebuild). */
+void nr_pdsch_config_sweep_typeb_stats(uint64_t *observe_appends, uint64_t *latches);
+/** K39: k0 certified by deterministic evidence (BC9 DCI adjacency / TDD direction): the ONLY call that may prune k0.
+ *  Keeps the entries whose k0 is in k0_allowed_mask (bit k = k0 k), for this ticket's (configuration, RNTI, TDA row) only: k0 is a per-row field,
+ *  so a certification never binds another row. Persists per that key across context eviction; cleared on reopen and on a
+ *  configuration change. Binds the context against later observations, k0 layers and restores. Prunes nothing when no entry would survive. Returns the live hypothesis count (0 = no context). */
+int nr_pdsch_config_sweep_certify_k0(const nr_pdsch_sweep_ticket_t *t, uint64_t k0_allowed_mask);
+/* ---- BC9: deterministic per-hypothesis exclusion (TDD slot direction, DCI adjacency) ----------------------------------
+ * A hypothesis (S, L, k0) of a TDRA row is IMPOSSIBLE when the PDSCH it implies would end after the last symbol the slot
+ * s + k0 can carry (s = the DCI slot): a UL slot carries none, a mixed slot none on its common UL symbols (TS 38.213 11.1,
+ * 38.214 5.1.2). The rule is per hypothesis, not a k0 mask: a mixed slot removes only the long entries. last[k] is the
+ * highest symbol a k0 = k entry may END on (13 = unconstrained, -1 = k0 impossible); DCI adjacency (nr_dci_history.h)
+ * expresses "k0 = k impossible for this row" as last[k] = -1. Constraints of several DCIs of one row intersect (element-wise
+ * minimum: the row's (S, L, k0) is the same for all its DCIs). Deterministic, so it is a destructive prune (never a
+ * dormant cause, which fail-open would reopen), applied through the BC7 certification path: scoped to the (configuration,
+ * RNTI, TDA row) context, persisted per key in the RNTI's LRU certification set, inherited on context creation, re-applied
+ * after observe / k0 layers / restores, cleared on reopen (re-derived from the next DCI). Without TDD knowledge (NSA, a
+ * cell without SIB1, an unverified pattern) the caller passes nothing: no exclusion. */
+#define NR_TD_K0_MAX 32
+typedef struct {
+  int8_t last[NR_TD_K0_MAX + 1];
+} nr_td_excl_t;
+/** Every last[k] = 13 (no constraint). */
+void nr_td_excl_none(nr_td_excl_t *e);
+/** True when h survives e: k0 <= 32 and tda_start + tda_length - 1 <= last[k0]. */
+bool nr_td_excl_admits(const nr_td_excl_t *e, const nr_pdsch_cfg_hypothesis_t *h);
+/** Pure: prune_keep(st, admits) (0 = nothing would survive: untouched; unchanged count = evidence kept). */
+int nr_pdsch_config_sweep_exclude(nr_pdsch_config_sweep_state_t *st, const nr_td_excl_t *e);
+/** State-level add_k0 under an exclusion (BC6b; mirrors nr_pdsch_config_sweep_add_k0 + the certification bind): refuses a layer whose k0 `e` leaves
+ *  no legal entry (returns 0), else appends it and drops the appended entries `e` excludes by tail truncation (no evidence wipe, no reindex).
+ *  Returns the number of entries kept. */
+int nr_pdsch_config_sweep_add_k0_layer_excl(nr_pdsch_config_sweep_state_t *st, uint8_t k0, const nr_td_excl_t *e);
+/** Live, keyed by (configuration, RNTI, TDA row): intersects e into the key's persisted constraint and binds every live
+ *  context of that key. Refuses (returns -1, nothing changes) a constraint that would leave no k0 of the row's universe
+ *  ({0,1}, the RNTI's k0-oracle layers) with any legal entry -- evidence that an assumption (A1-A3) failed. Else returns
+ *  the number of hypotheses removed from live contexts (0 = none open or nothing to remove). */
+int nr_pdsch_config_sweep_exclude_key(uint64_t configuration, uint16_t rnti, uint8_t tda, const nr_td_excl_t *e);
+/** The deterministic allowed-k0 set of a row: the universe ({0,1} | the RNTI's k0-oracle layers), intersected with the
+ *  key's k0 certification and with the k0 values its persisted exclusion leaves any legal entry (end symbol >= 1).
+ *  An over-approximation of the truth's k0 (A2); popcount 1 = certified. */
+uint64_t nr_pdsch_config_sweep_row_k0_allowed(uint64_t configuration, uint16_t rnti, uint8_t tda);
+/** For the DCI-adjacency certified flag of a decoded job: the ticket's hypothesis, the k0 values of the hypotheses that are
+ *  k0 siblings of it (same S, L, mapping type, DM-RS mask; active or dormant through a non-GEOM cause), and the MCS tables of
+ *  the active hypotheses. False for a stale ticket or a settled context. */
+/** Pure form of ticket_siblings on a state and a hypothesis index. tables = MCS tables of every hypothesis that may be the
+ *  truth: active, or dormant through a non-GEOM cause (PRIOR / FIELD can be wrong; GEOM follows a guarded pin). */
+bool nr_pdsch_config_sweep_siblings_of(const nr_pdsch_config_sweep_state_t *st, int idx, nr_pdsch_cfg_hypothesis_t *h,
+                                       uint64_t *sib_k0, uint8_t *tables);
+bool nr_pdsch_config_sweep_ticket_siblings(const nr_pdsch_sweep_ticket_t *t, nr_pdsch_cfg_hypothesis_t *h, uint64_t *sib_k0,
+                                           uint8_t *tables);
+/** True when some row of (rnti, configuration) carries a k0 certification or an exclusion (else every row's allowed set
+ *  is the bare universe and no DCI-adjacency exclusion can follow). One lock; the accept hook's fast path. */
+/** Lock-free epoch: changes whenever a persisted certification / exclusion may have disappeared (reopen, RNTI or LRU eviction,
+ *  reset). Callers caching "constraint already applied" must drop the cache when it moves. */
+uint64_t nr_pdsch_config_sweep_cert_epoch(void);
+bool nr_pdsch_config_sweep_rnti_constrained(uint16_t rnti, uint64_t configuration);
+/** Diagnostics: hypotheses removed by exclusions with k0 < 2 / k0 >= 2 (probe layers), refused contradictions. */
+void nr_pdsch_config_sweep_excl_stats(uint64_t *removed_k0_lt2, uint64_t *removed_k0_ge2, uint64_t *refused);
+/** TD_EXCL census (OTA diagnostic, no decision reads it). Record that a confirmed DCI of (configuration, RNTI) was seen at
+ *  `phase` = DCI abs slot mod the TDD period (mod slots_per_frame when TDD is unknown); applies to every TDA row's context. */
+void nr_pdsch_config_sweep_note_dci_phase(uint64_t configuration, uint16_t rnti, uint16_t phase);
+/** Per context: evidence restarts caused by an exclusion (wipe + reindex), exclusion tail truncations without a wipe, distinct
+ *  DCI phases seen. False when no live context has this key. A sound runtime has restarts <= phases. */
+bool nr_pdsch_config_sweep_excl_census(uint64_t configuration, uint16_t rnti, uint8_t tda, uint32_t *restarts, uint32_t *truncs,
+                                       uint32_t *phases);
+/** Totals over all contexts, plus the number of contexts that raised TD_EXCL_RESTART_ALARM (restarts > phases, once each). */
+void nr_pdsch_config_sweep_excl_restart_stats(uint64_t *restarts, uint64_t *truncs, uint64_t *alarms);
+/** Test hook: force the ISAC_TD_K0_ORACLE_LEGACY decision (1 = old k0 pinning, 0 = default, -1 = re-read the env). */
+void nr_pdsch_config_sweep_k0_legacy_set(int legacy);
 /** k0 oracle: the air showed DM-RS on this grant's PRBs `k0` slots after the DCI (and not in the
  *  catalog's k0 {0,1} slots). Appends the k0 layer to the ticket's live context (unsettled only) and
  *  remembers it for this RNTI's later contexts. Returns the number of hypotheses added: 0 when the
@@ -207,6 +604,9 @@ void nr_pdsch_k0_slot(int frame, int slot, int slots_per_frame, int k0, int *fra
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);
+/** Live form of nr_pdsch_config_sweep_feed_cb0_grant on the ticket's context (g->idx index that context; a stale ticket credits
+ *  nothing). Returns false for a stale ticket. No runtime caller yet (wiring follows GrantWork + the GPU batch). */
+bool nr_pdsch_config_sweep_feedback_cb0(const nr_pdsch_sweep_ticket_t *ticket, const nr_td_cb0_grant_t *g);
 bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA);
 /** CRC evidence held by one keyed context: total passes and trials over all its hypotheses.
  * Zero/zero when the context does not exist. Lets the caller prefer a DL layout FAMILY that has
@@ -223,9 +623,36 @@ void nr_pdsch_config_sweep_reset_all(void);
  * Invalid arguments leave the active policy unchanged. */
 bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget);
 
+/* ---- Reversible field book (fb2) wiring, env ISAC_TD_FIELDBOOK=0|2 (read once; default 2 = fb2 since 2026-10-04; 0 = off, bit-identical to the pre-fb2 engine). ----
+ * fb2: the cell/RNTI prior becomes the dormant cause PRIOR (not a destructive prune) and every PROMOTED field of the module-level
+ * field book becomes a FIELD cause (nr_td_fieldbook_hyp_matches; the TDRA field never prunes k0). Contexts record which fields
+ * pruned them; those votes are excluded at convergence. A generation change clears the FIELD cause of a no-longer-PROMOTED field in
+ * unsettled contexts and flags converged ones untrusted. fail_open_due() reopens a context and zeroes its pruned fields. */
+/** mode 0 or 2; -1 = re-read the environment. Test hook. */
+void nr_pdsch_config_sweep_fieldbook_set_mode(int mode);
+int nr_pdsch_config_sweep_fieldbook_mode(void);
+/** The hook the (future, robustness R7) epoch owner calls on a hard trigger: bumps the field book epoch (all PROMOTED/SUSPECT
+ *  fields become CANDIDATE, support cleared). Called today from the RX-stream discontinuity (sync loss) path. No-op while off. */
+void nr_pdsch_config_sweep_fieldbook_bump_epoch(void);
+/** Test hook: force_promote a field (0 TDRA, 1 add_pos, 2 max_len). */
+void nr_pdsch_config_sweep_fieldbook_force_promote(int field, int32_t value);
+/** Test hook: copy the field book into `out` (sizeof(nr_td_fieldbook_t) bytes, `n` checked). */
+bool nr_pdsch_config_sweep_fieldbook_copy(void *out, size_t n);
+/** pruned: bit f = context is pruned by field f (not independent); untrusted: bit f = a converged context relied on field f which is no
+ *  longer PROMOTED at that value. False for an unknown ticket. */
+bool nr_pdsch_config_sweep_fieldbook_context(const nr_pdsch_sweep_ticket_t *ticket, uint32_t *pruned, uint32_t *untrusted);
+/** Cumulative: promotions, withdrawals, fail-opens, contexts created with at least one field pruned, converged contexts flagged untrusted. */
+void nr_pdsch_config_sweep_fieldbook_stats(uint64_t *promotions, uint64_t *withdrawals, uint64_t *failopens, uint64_t *pruned_contexts, uint64_t *untrusted_contexts);
+
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
                                    nr_pdsch_config_sweep_state_t *out);
+/** Run fn(state, arg) on the ticket's LIVE context under the engine's global lock, without copying the state (~350 KB).
+ *  fn may read the state and call the pure state functions (nr_pdsch_config_sweep_is_active / _is_eliminated /
+ *  _feed_cb0_grant ...); it must NOT call any ticket-form function (they take the same, non-recursive lock) and must be
+ *  short (every consumer and the PHY receive thread wait on that lock). Returns false (fn not called) for a stale ticket. */
+bool nr_pdsch_config_sweep_with_context(const nr_pdsch_sweep_ticket_t *ticket, void (*fn)(nr_pdsch_config_sweep_state_t *st, void *arg),
+                                        void *arg);
 
 /* ---- Process-wide singleton -------------------------------------------------------------------
  * The hypothesis is chosen on the PHY receive thread and scored on a PDSCH consumer thread, i.e.
