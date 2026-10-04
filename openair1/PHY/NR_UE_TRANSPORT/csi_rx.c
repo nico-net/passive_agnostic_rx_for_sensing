@@ -954,7 +954,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                              int loverline0,
                              uint32_t noise_power)
 {
-  /* Gate BOTH the engine and the per-source mask here, in the one place every caller passes through.
+  /* Gate the per-source API mask here, in the one place every caller passes through.
    * The csirs_monitor caller (nr_ue_csi_rs_sensing_capture) had NO gate at all -- only the own-CSI-RS
    * caller checked -- so `[sensing] sources` silently did not apply to monitored resources, and the
    * call site in phy_procedures_nr_ue.c states the opposite ("the SUBMISSION to sensing stays gated
@@ -962,7 +962,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
    * still accumulated 126 CSI-RS rows per CPI against 148 pdsch_data rows in the whole run, so the
    * unwanted source dominated the slow-time grid. CSI-RS RECEPTION stays ungated (it is a receive
    * function and the monitor has its own enable); only the sensing SUBMISSION is gated. */
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
     return;
   }
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
@@ -1155,7 +1155,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   // ISAC sensing tap (CSI-RS source): submit the raw per-RB LS estimates (Ĥ) of port 0, for as many rx
   // antennas as the receive-array AoA path asks for (one otherwise).
   // Guarded on measurement_bitmap>1 here because that gates the channel estimation above (own path).
-  if (csirs_config_pdu->measurement_bitmap > 1 && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+  if (csirs_config_pdu->measurement_bitmap > 1 && nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
     nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, &csi_rs_ls_estimated_channel[0][0][0],
                             (size_t)mapping_parms.ports * frame_parms->ofdm_symbol_size, mapping_parms.loverline[0],
                             noise_power);

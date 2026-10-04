@@ -61,7 +61,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t nof_ant,
                                      int slot)
 {
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
     return;
   }
   if (ue == NULL || gnb == NULL || pdu == NULL || g == NULL || tb_bytes == NULL) {

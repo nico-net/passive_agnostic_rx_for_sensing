@@ -999,7 +999,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * The antennas are kept SEPARATE (nof_ant > 1, ant_stride_re) rather than combined: the whole
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
-  if (!gapped && !fdra_unresolved && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
+  if (!gapped && !fdra_unresolved && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
     const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
