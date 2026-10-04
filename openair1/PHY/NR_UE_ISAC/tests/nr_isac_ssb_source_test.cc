@@ -71,3 +71,12 @@ TEST(SsbAxis, NeverProducesGarbageOnANegativeOffset) {
     EXPECT_LT(k_abs[i], 4096u) << "index " << i << " produced garbage (value " << k_abs[i] << ")";
   }
 }
+
+TEST(SsbAxis, SsbKssbNotHardcoded) {
+  const int k_ssb = nr_isac_ssb_normalize_k_ssb(10, 1, 1);
+  ASSERT_EQ(k_ssb, 5);
+  uint32_t k_abs[240];
+  nr_isac_ssb_k_abs(149, k_ssb, 4096, k_abs);
+  EXPECT_EQ(k_abs[0], 144u);
+  EXPECT_EQ(nr_isac_ssb_normalize_k_ssb(25, 1, 1), 25);
+}

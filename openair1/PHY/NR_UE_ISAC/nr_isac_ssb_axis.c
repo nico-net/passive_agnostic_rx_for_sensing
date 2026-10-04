@@ -1,4 +1,8 @@
 #include "nr_isac_ssb_axis.h"
+int nr_isac_ssb_normalize_k_ssb(int raw_k_ssb, int numerology, int fr1)
+{
+  return fr1 && raw_k_ssb < 24 ? raw_k_ssb >> numerology : raw_k_ssb;
+}
 
 void nr_isac_ssb_k_abs(int ssb_start_subcarrier, int k_ssb, int ofdm_symbol_size, uint32_t* k_abs_out)
 {

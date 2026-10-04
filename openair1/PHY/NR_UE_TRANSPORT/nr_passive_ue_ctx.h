@@ -89,6 +89,7 @@ void nr_ue_ctx_on_dci01_csi(uint16_t rnti, uint8_t request, int64_t trigger_slot
                             const nr_ue_csi_resource_t *observed);
 void nr_ue_ctx_tick(int64_t abs_slot, uint64_t t_mono_ns);
 bool nr_ue_ctx_get(uint16_t rnti, nr_ue_ctx_t *out);
+bool nr_ue_ctx_try_get(uint16_t rnti, nr_ue_ctx_t *out); /* producer: miss on lock contention */
 void nr_ue_ctx_stats(uint64_t *events, uint64_t *written, uint64_t *dropped);
 extern bool nr_ue_ctx_fast_open;
 static inline bool nr_ue_ctx_enabled(void)

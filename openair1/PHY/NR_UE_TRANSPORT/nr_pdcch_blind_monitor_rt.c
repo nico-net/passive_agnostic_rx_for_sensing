@@ -73,6 +73,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
 #include "PHY/NR_UE_TRANSPORT/nr_sense_gating.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"        // timing advance out of an overheard MAC PDU
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
@@ -7047,8 +7048,12 @@ constdiag_done:;
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          nr_isac_submit_cfr_multi(abs_slot, 0.0f, dmrs_source, &carrier, isac_h, nof_ant,
-                                   273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
+          const nr_sense_rs_meta_t rs_meta = {.rnti=out.rnti,
+            .start_rb=dlsch_pdu.BWPStart+freq_alloc.first_rb, .nb_rb=freq_alloc.num_rbs,
+            .ports=-1, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
+            .transform_precoding=-1, .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
+          nr_isac_submit_cfr_multi_meta(abs_slot, 0.0f, dmrs_source, &carrier, isac_h, nof_ant,
+                                        273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
           NR_BLIND_CTR_INC(g_cfr_submits);
         }
 
@@ -7184,6 +7189,34 @@ constdiag_done:;
             else
               NR_BLIND_CTR_INC(g_dec_k0_wait);
             btim_add(BTIM_PDSCH, btim_t_pds);
+            if (nr_sense_enabled() && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+              struct timespec sense_ts;
+              clock_gettime(CLOCK_MONOTONIC, &sense_ts);
+              const bool no_harq = out.rnti_class >= NR_BLIND_RNTI_CLASS_SI;
+              const nr_passive_obs_t sense_o = {
+                .abs_slot=grant_pd.source_absolute_slot,
+                .t_mono_ns=(uint64_t)sense_ts.tv_sec*1000000000ull+sense_ts.tv_nsec,
+                .frame=proc_pd.frame_rx, .slot=proc_pd.nr_slot_rx, .pci=fp->Nid_cell,
+                .dir=NR_OBS_DIR_DL, .rnti=out.rnti, .rnti_class=out.rnti_class,
+                .start_rb=dlsch_pdu.BWPStart+freq_alloc.first_rb, .nb_rb=freq_alloc.num_rbs,
+                .start_sym=dlsch_pdu.start_symbol, .nb_sym=dlsch_pdu.number_symbols,
+                .mcs=out.mcs, .mcs_table=grant_mcs_table,
+                .qm=dec.cw.qamModOrder, .nl=dec.cw.Nl,
+                .dmrs_symb_pos=dlsch_pdu.dlDmrsSymbPos,
+                .dmrs_scrambling_id=dlsch_pdu.dlDmrsScramblingId,
+                .tbs=dec.cw.TBS, .harq_pid=no_harq?-1:out.harq_pid,
+                .rv=out.rv, .ndi=no_harq?-1:out.ndi,
+                .crc=st==NR_PDSCH_PASSIVE_DECODE_CRC_OK?NR_OBS_CRC_OK:NR_OBS_CRC_FAIL,
+                .nvar=dec.nvar, .snr_db=NAN,
+                .fo_comp_hz=isnan(nr_slot_fep_fo_override_hz)
+                    ? (ue->cont_fo_comp ? ue->dl_Doppler_shift+ue->freq_offset : 0.0)
+                    : nr_slot_fep_fo_override_hz,
+                .delay_samples=NAN,
+                .carrier_hz=fp->dl_CarrierFreq?(int64_t)fp->dl_CarrierFreq:-1,
+                .scs_khz=fp->subcarrier_spacing/1000,
+                .fs_hz=(int64_t)fp->samples_per_subframe*1000};
+              nr_sense_emit_grant(&sense_o, 1);
+            }
             /* Same feedback contract as deferred decoding: unsupported/internal errors are not CRC trials. */
             /* K33: IQ may have been overwritten while decoding -> INCONCLUSIVE, no feedback of any kind. */
             if ((st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)

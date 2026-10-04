@@ -6,6 +6,7 @@
 #include "nr-ue-ru.h"
 #include "nr-uesoftmodem.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/config/config_paramdesc.h"
 #include "common/config/config_userapi.h"
 #include "openair1/PHY/phy_extern_nr_ue.h"
@@ -545,6 +546,7 @@ int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
 
   int applied_rxgain = cfg->rx_gain[0] - cfg->rx_gain_offset[0];
   LOG_I(HW, "Rxgain adjusted by %d dB, RX gain: %d dB \n", gain_change, applied_rxgain);
+  if (nr_sense_enabled()) nr_sense_emit_session(&UE->frame_parms, applied_rxgain);
 
   return gain_change;
 }

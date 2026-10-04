@@ -18,6 +18,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/ran_context.h"
@@ -496,6 +497,12 @@ int main(int argc, char **argv)
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
   nr_isac_start();
+  if (nr_sense_enabled()) {
+    PHY_VARS_NR_UE *sense_ue = nrPHY_vars_UE_g[0][0];
+    const openair0_config_t *sense_cfg = &openair0_cfg_g[sense_ue->rf_map.card];
+    nr_sense_emit_session(&sense_ue->frame_parms,
+                          sense_cfg->rx_gain[sense_ue->rf_map.chain] - sense_cfg->rx_gain_offset[sense_ue->rf_map.chain]);
+  }
 
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     LOG_I(PHY,"Intializing UE Threads for instance %d ...\n", inst);

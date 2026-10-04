@@ -30,6 +30,8 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_ISAC/nr_isac_ssb_axis.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
+#include "openair2/LAYER2/NR_MAC_UE/mac_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
@@ -1592,14 +1594,11 @@ int nr_process_pbch_symbol(
   if (nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
     uint32_t k_abs[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     uint32_t l_sym[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
-    // k_ssb hardcoded to 0: there is no PHY-side plumbing path to the MAC's real
-    // ssb_subcarrier_offset at this call site (nr_process_pbch_symbol only receives
-    // PHY_VARS_NR_UE*, never the MAC instance) -- and no field on NR_DL_FRAME_PARMS carries it
-    // either (verified: grepped the whole PHY tree, zero hits). CORRECT for this deployment
-    // (Phase 1 already confirmed this cell's actual kSSB is 0) but WRONG for any future cell
-    // with a nonzero kSSB -- flagged, not fixed; adding real MAC->PHY plumbing for this one
-    // value is out of scope for this task.
-    nr_isac_ssb_k_abs(ssb_start_subcarrier, /*k_ssb=*/0, fp->ofdm_symbol_size, k_abs);
+    const NR_UE_MAC_INST_t *ssb_mac = get_mac_inst(ue->Mod_id);
+    const int k_ssb = ssb_mac && ssb_mac->mib
+        ? nr_isac_ssb_normalize_k_ssb(ssb_mac->ssb_subcarrier_offset, fp->numerology_index, fp->freq_range == FR1)
+        : -1;
+    nr_isac_ssb_k_abs(ssb_start_subcarrier, k_ssb >= 0 ? k_ssb : 0, fp->ofdm_symbol_size, k_abs);
     for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
       l_sym[i] = (uint32_t)relPbchSymb;
     }
@@ -1638,7 +1637,11 @@ int nr_process_pbch_symbol(
     // lines over a 150 s ssb-only capture, root-caused by inspecting the retired engine + the
     // csi_rs tap's slot_idx computation for comparison).
     const uint32_t ssb_abs_slot = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
-    nr_isac_submit_cfr_multi(ssb_abs_slot,
+    const nr_sense_rs_meta_t rs_meta = {.start_rb=k_abs[0]/12, .nb_rb=NR_PBCH_NUM_RB,
+                                      .ports=-1, .ssb_index=ssbIndex, .k_ssb=k_ssb,
+                                      .ta_est_samples=-1, .transform_precoding=-1,
+                                      .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
+    nr_isac_submit_cfr_multi_meta(ssb_abs_slot,
                              0.0f,
                              NR_ISAC_SRC_SSB,
                              &carrier,
@@ -1648,7 +1651,7 @@ int nr_process_pbch_symbol(
                              k_abs,
                              l_sym,
                              NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
-                             0.0f);
+                             0.0f, &rs_meta);
   }
 
   // Copy current symbol estimate for FO estimation

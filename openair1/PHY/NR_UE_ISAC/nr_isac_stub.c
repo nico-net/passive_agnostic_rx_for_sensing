@@ -76,6 +76,17 @@ void nr_isac_submit_cfr_multi(uint32_t slot_idx,
   (void)nof_ant; (void)ant_stride_re; (void)k_abs; (void)l_sym;
   (void)nof_re; (void)noise_var;
 }
+void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac, int source,
+                                  const nr_isac_carrier_t *carrier, const float *h,
+                                  uint32_t nof_ant, uint32_t ant_stride_re,
+                                  const uint32_t *k_abs, const uint32_t *l_sym,
+                                  uint32_t nof_re, float noise_var,
+                                  const struct nr_sense_rs_meta_s *meta)
+{
+  (void)meta;
+  nr_isac_submit_cfr_multi(slot_idx, slot_frac, source, carrier, h, nof_ant,
+                           ant_stride_re, k_abs, l_sym, nof_re, noise_var);
+}
 
 
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)

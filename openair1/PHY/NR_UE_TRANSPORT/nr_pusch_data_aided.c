@@ -26,6 +26,7 @@
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/utils/LOG/log.h"
 #include "executables/nr-uesoftmodem.h"
 
@@ -59,7 +60,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t harq_pid_tag,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
-                                     int slot)
+                                     int slot,
+                                     int ta_offset_samples)
 {
   if (!nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
     return;
@@ -245,8 +247,13 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->ul_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
-  nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
-                           k_buf, l_buf, nof_re, 1.0f);
+  const nr_sense_rs_meta_t rs_meta = {.rnti=g->rnti,
+    .start_rb=g->bwp_start+g->start_rb, .nb_rb=g->num_rb, .ports=-1,
+    .ssb_index=-1, .k_ssb=-1, .ta_est_samples=ta_offset_samples,
+    .transform_precoding=g->transform_precoding, .dmrs_type=g->dmrs_config_type+1,
+    .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
+  nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
+                                k_buf, l_buf, nof_re, 1.0f, &rs_meta);
   atomic_fetch_add_explicit(&g_da_ok, 1, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_da_re, nof_re, memory_order_relaxed);
 }

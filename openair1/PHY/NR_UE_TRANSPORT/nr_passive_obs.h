@@ -67,6 +67,8 @@
  * [KNOWN ISSUE] UL snr_db holds the CFR mean power in dB (not an SNR) when the noise estimate is 0
  *              (nr_pusch_passive_decode.c:1120 vs :1381).
  * Evidence: schema [IMPLEMENTED, NOT VALIDATED] until A3 Step 9 (rfsim) passes ([SIM VERIFIED]); no OTA.
+ * Schema 2 grant serialization is additive and lives in nr_sense_grant_to_json
+ * (nr_sense_records.h); the schema-1 file writer and its key/value contract stay unchanged.
  */
 #ifndef NR_PASSIVE_OBS_H
 #define NR_PASSIVE_OBS_H
