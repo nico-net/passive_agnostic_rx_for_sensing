@@ -6,6 +6,7 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -14,6 +15,15 @@ void exit_function(const char *, const char *, int, const char *, int) { std::ab
 }
 
 namespace {
+struct IgnoreSib1Guard {
+  bool present = getenv("ISAC_TD_IGNORE_SIB1") != nullptr;
+  std::string value = present ? getenv("ISAC_TD_IGNORE_SIB1") : "";
+  ~IgnoreSib1Guard() {
+    if (present) setenv("ISAC_TD_IGNORE_SIB1", value.c_str(), 1);
+    else unsetenv("ISAC_TD_IGNORE_SIB1");
+    nr_cfg_ignore_sib1_reset_for_test();
+  }
+};
 std::atomic<int> calls{0};
 nr_cfg_epoch_snapshot_t last{};
 void listener(const nr_cfg_epoch_snapshot_t *s) { last = *s; ++calls; }
@@ -70,7 +80,9 @@ TEST_F(CfgEpoch, Sib1SameSemanticNoBump) {
   EXPECT_EQ(calls, 0);
 }
 TEST_F(CfgEpoch, IgnoreSib1ArmKeepsOnlyNonSib1EpochSources) {
+  IgnoreSib1Guard guard;
   setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  nr_cfg_ignore_sib1_reset_for_test();
   EXPECT_TRUE(nr_cfg_ignore_sib1());
   EXPECT_FALSE(nr_cfg_epoch_note_sib1(42, 0));
   EXPECT_FALSE(nr_cfg_epoch_note_sib1(43, 100));
@@ -87,6 +99,8 @@ TEST_F(CfgEpoch, IgnoreSib1ArmKeepsOnlyNonSib1EpochSources) {
   nr_cfg_epoch_note_mib(2);
   EXPECT_EQ(nr_cfg_epoch_current(), 1u);
   unsetenv("ISAC_TD_IGNORE_SIB1");
+  EXPECT_TRUE(nr_cfg_ignore_sib1()); // cached until the test-only reset
+  nr_cfg_ignore_sib1_reset_for_test();
   EXPECT_FALSE(nr_cfg_ignore_sib1());
   EXPECT_TRUE(nr_cfg_epoch_note_sib1(42, 0));
   EXPECT_TRUE(nr_cfg_epoch_note_sib1(43, 100));

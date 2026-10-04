@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -21,6 +22,17 @@ constexpr uint16_t kRnti = 0x4601;
 constexpr int kOldLength = 47;
 constexpr uint32_t kGrantPeriod = 10; // 200 grants/s at mu=1.
 
+struct EnvGuard {
+  const char *name;
+  bool present;
+  std::string value;
+  explicit EnvGuard(const char *n) : name(n), present(getenv(n) != nullptr), value(present ? getenv(n) : "") {}
+  ~EnvGuard() {
+    if (present) setenv(name, value.c_str(), 1); else unsetenv(name);
+    if (std::string(name) == "ISAC_TD_IGNORE_SIB1") nr_cfg_ignore_sib1_reset_for_test();
+  }
+};
+
 std::vector<int16_t> polar_grant(int len, uint32_t serial)
 {
   uint64_t payload = (1ULL << (len - 1)) | (0x12345u ^ (serial * 0x101u));
@@ -38,8 +50,9 @@ std::vector<int16_t> polar_grant(int len, uint32_t serial)
 
 struct PolarFixture {
   int actual_length;
+  int actual_group;
   std::array<std::vector<int16_t>, 20> grants;
-  PolarFixture(int len, uint32_t slot) : actual_length(len)
+  PolarFixture(int len, int group, uint32_t slot) : actual_length(len), actual_group(group)
   {
     for (int i = 0; i < 20; ++i) grants[i] = polar_grant(len, slot * 20 + i);
   }
@@ -52,8 +65,9 @@ struct PolarFixture {
     *hash = nr_dci_bits_hash(&raw.payload, len);
     return true;
   }
-  bool accepts(int len) const
+  bool accepts(int len, int group) const
   {
+    if (group != actual_group) return false;
     nr_pdcch_blind_raw_result_t raw{};
     return nr_pdcch_blind_decode_raw_11(grants[0].data(), 8, len, kRnti, kRnti, &raw);
   }
@@ -98,19 +112,22 @@ struct ReplayResult {
   bool locked = false;
   bool verified = false;
   bool converged = false;
+  bool generation_unchanged = false;
   bool sib1_evidence_used = false;
-  bool c0_crnti_evidence_used = false;
-  bool cfra_rar_evidence_used = false;
+  bool active_elsewhere_used = false;
+  bool c0_uss_available = false;
 };
 
 ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
 {
   ReplayResult r;
+  EnvGuard ignore_guard("ISAC_TD_IGNORE_SIB1"), cache_guard("ISAC_SIB1_CACHE");
   const auto change = hidden_reconfig_schedule(kind);
   r.injected_slot = change.slot;
   if (sib1_available) unsetenv("ISAC_TD_IGNORE_SIB1");
   else setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
   setenv("ISAC_SIB1_CACHE", "0", 1);
+  nr_cfg_ignore_sib1_reset_for_test();
   nr_cfg_epoch_reset();
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
   nr_cfg_epoch_set_slots_per_second(2000);
@@ -130,9 +147,13 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
   } else {
     r.sib1_evidence_used = nr_cfg_epoch_note_sib1(change.old_tac, 0)
         || nr_pdcch_blind_publish_common(&common);
-    nr_pdcch_blind_rnti_bootstrap_record_verified(kRnti, NR_BLIND_RNTI_CLASS_TC, 0);
-    r.cfra_rar_evidence_used = nr_pdcch_blind_rnti_bootstrap_recent(kRnti, 0, 1);
   }
+  if (!sib1_available) {
+    nr_pdcch_blind_monitor_cfg_t c0_uss{};
+    r.c0_uss_available = nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0_uss);
+  }
+  // A verified RAR is a real activity source for both columns of spec 4.6.
+  nr_pdcch_blind_rnti_bootstrap_record_verified(kRnti, NR_BLIND_RNTI_CLASS_TC, 0);
   auto old = geometry(change.old_coreset_group, kOldLength);
   const int old_bank = nr_pdcch_coreset_bank_add(&old, kRnti);
   nr_pdcch_dci_length_context_t length{};
@@ -140,7 +161,7 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
   const uint64_t old_key = (uint64_t(kOldLength) << 32) | change.old_coreset_group;
   // Every synthetic occasion contains 20 distinct real polar codewords for one RNTI.
   for (uint32_t slot = 100; slot < change.slot && (!r.old_locked || !r.old_converged); slot += kGrantPeriod) {
-    PolarFixture fixture(kOldLength, slot);
+    PolarFixture fixture(kOldLength, change.old_coreset_group, slot);
     if (!r.old_locked) {
       const int found = nr_pdcch_dci_length_sweep_feed(&length.state, PolarFixture::score, &fixture,
                                                        20, 30, 63, kRnti);
@@ -149,7 +170,7 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
         r.old_locked = true;
       }
     }
-    if (fixture.accepts(kOldLength)) nr_pdcch_coreset_bank_note_accept(old_bank, slot);
+    if (fixture.accepts(kOldLength, change.old_coreset_group)) nr_pdcch_coreset_bank_note_accept(old_bank, slot);
     if (r.old_locked) r.old_converged = pdsch_grant(old_key);
   }
   const uint32_t old_epoch = nr_cfg_epoch_current();
@@ -160,6 +181,7 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
   const int new_len = kind == HIDDEN_RECONF_DCI_LENGTH ? kOldLength + change.dci_length_add : kOldLength;
   const int new_group = kind == HIDDEN_RECONF_CORESET_MOVE ? change.new_coreset_group : change.old_coreset_group;
   const uint64_t new_key = (uint64_t(new_len) << 32) | new_group;
+  const bool invisible_sib1_change = kind == HIDDEN_RECONF_SIB1_SEMANTIC && !sib1_available;
   int new_bank = kind == HIDDEN_RECONF_CORESET_MOVE ? -1 : old_bank;
   if (kind == HIDDEN_RECONF_SIB1_SEMANTIC) {
     nr_cfg_epoch_note_sib1(change.new_tac, change.slot);
@@ -169,24 +191,27 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
   nr_cfg_epoch_drain();
   r.epoch_changed = nr_cfg_epoch_current() != old_epoch;
 
-  // A decode queued before the event must never credit the new epoch. For local
-  // changes, the old key remains separate and cannot update the new key.
+  // Check the ticket's own context. The local changes have no cell epoch bump;
+  // exercise the work guard with a stale queued-work stamp explicitly.
   uint32_t before_passes = 0, before_trials = 0, after_passes = 0, after_trials = 0;
-  nr_pdsch_config_sweep_context_stats(new_key, kRnti, 0, 0, &before_passes, &before_trials);
+  nr_pdsch_config_sweep_context_stats(old_key, kRnti, 0, 0, &before_passes, &before_trials);
   uint64_t dropped = 0;
-  nr_cfg_epoch_work_t old_work{};
-  nr_cfg_epoch_work_begin(&old_work, old_epoch, &dropped);
-  nr_pdsch_config_sweep_feedback(&old_ticket, true, nullptr);
-  nr_cfg_epoch_work_end(&old_work);
-  nr_pdsch_config_sweep_context_stats(new_key, kRnti, 0, 0, &after_passes, &after_trials);
+  if (!invisible_sib1_change) {
+    nr_cfg_epoch_work_t old_work{};
+    const uint32_t queued_stamp = r.epoch_changed ? old_epoch : old_epoch ^ 1u;
+    nr_cfg_epoch_work_begin(&old_work, queued_stamp, &dropped);
+    nr_pdsch_config_sweep_feedback(&old_ticket, true, nullptr);
+    nr_cfg_epoch_work_end(&old_work);
+  }
+  nr_pdsch_config_sweep_context_stats(old_key, kRnti, 0, 0, &after_passes, &after_trials);
   r.old_epoch_credited = after_passes - before_passes;
   r.old_epoch_trials_credited = after_trials - before_trials;
   r.stale_dropped = dropped;
 
   const uint32_t budget = hidden_reconfig_hard(kind) ? 60000u : 20000u;
   for (uint32_t slot = change.slot; slot <= change.slot + budget; slot += kGrantPeriod) {
-    PolarFixture fixture(new_len, slot);
-    bool accepted = fixture.accepts(new_len);
+    PolarFixture fixture(new_len, new_group, slot);
+    bool accepted = fixture.accepts(new_len, new_group);
     if (kind == HIDDEN_RECONF_CORESET_MOVE && new_bank < 0) {
       // Traffic outside the old geometry demotes and ultimately removes it.
       nr_pdcch_coreset_bank_tick(slot, true, 50, 300);
@@ -196,11 +221,11 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
       }
     }
     if (kind == HIDDEN_RECONF_DCI_LENGTH) {
-      if (!sib1_available)
-        nr_pdcch_blind_rnti_bootstrap_record(kRnti, NR_BLIND_RNTI_CLASS_C, slot);
-      const bool active_elsewhere = sib1_available
-          || nr_pdcch_blind_rnti_bootstrap_recent(kRnti, slot, 1);
-      nr_pdcch_dci_length_context_note_occasion(&length, fixture.accepts(kOldLength), active_elsewhere, 3);
+      if (accepted) nr_pdcch_blind_rnti_bootstrap_record_trusted(kRnti, NR_BLIND_RNTI_CLASS_C, slot);
+      const bool active_elsewhere = nr_pdcch_blind_rnti_bootstrap_recent(kRnti, slot, 1);
+      r.active_elsewhere_used |= active_elsewhere;
+      nr_pdcch_dci_length_context_note_occasion(&length,
+          fixture.accepts(kOldLength, change.old_coreset_group), active_elsewhere, 3);
       if (length.len_state == NR_LEN_SUSPECT) {
         const int found = nr_pdcch_dci_length_sweep_feed(&length.state, PolarFixture::score, &fixture,
                                                          20, 30, 63, kRnti);
@@ -215,15 +240,14 @@ ReplayResult run_replay(hidden_reconfig_kind_t kind, bool sib1_available)
     const bool settled = accepted && new_bank >= 0 && pdsch_grant(new_key, &current_generation);
     r.locked = length.len_state == NR_LEN_LOCKED && length.found[0] == new_len;
     r.verified = new_bank >= 0 && nr_pdcch_coreset_bank_state(new_bank) == NR_CORESET_VERIFIED;
-    r.converged = settled && (new_key != old_key || current_generation != old_ticket.generation);
+    r.generation_unchanged = current_generation == old_ticket.generation;
+    r.converged = settled && (invisible_sib1_change || new_key != old_key || !r.generation_unchanged);
     if (r.locked && r.verified && r.converged) { r.recovered_slot = slot; break; }
   }
   nr_pdsch_config_sweep_reset_all();
   while (nr_pdcch_coreset_bank_count()) nr_pdcch_coreset_bank_remove(0);
   nr_pdcch_blind_reset_common();
   nr_cfg_epoch_reset();
-  unsetenv("ISAC_TD_IGNORE_SIB1");
-  unsetenv("ISAC_SIB1_CACHE");
   fprintf(stderr, "RECONFIG_REPLAY kind=%s sib1=%u injected=%u recovered=%u epoch=%u "
           "old_passes=%u old_trials=%u stale_dropped=%u\n",
           hidden_reconfig_name(kind), sib1_available, r.injected_slot, r.recovered_slot,
@@ -247,16 +271,20 @@ void expect_replay(hidden_reconfig_kind_t kind, bool sib1_available)
   }
   EXPECT_EQ(r.old_epoch_credited, 0u);
   EXPECT_EQ(r.old_epoch_trials_credited, 0u);
+  if (kind == HIDDEN_RECONF_DCI_LENGTH) { EXPECT_TRUE(r.active_elsewhere_used); }
   EXPECT_EQ(r.epoch_changed, kind == HIDDEN_RECONF_PCI
       || (kind == HIDDEN_RECONF_SIB1_SEMANTIC && sib1_available));
-  if ((kind == HIDDEN_RECONF_SIB1_SEMANTIC && sib1_available) || kind == HIDDEN_RECONF_PCI) {
+  if (kind != HIDDEN_RECONF_SIB1_SEMANTIC || sib1_available) {
     EXPECT_GT(r.stale_dropped, 0u);
+  }
+  if (kind == HIDDEN_RECONF_SIB1_SEMANTIC && !sib1_available) {
+    EXPECT_EQ(r.stale_dropped, 0u);
+    EXPECT_TRUE(r.generation_unchanged);
   }
   if (sib1_available) EXPECT_TRUE(r.sib1_evidence_used);
   else {
     EXPECT_FALSE(r.sib1_evidence_used);
-    EXPECT_FALSE(r.c0_crnti_evidence_used);
-    EXPECT_TRUE(r.cfra_rar_evidence_used);
+    EXPECT_FALSE(r.c0_uss_available);
   }
 }
 } // namespace
@@ -268,8 +296,8 @@ TEST(ReconfigReplay, CoresetMoveSib1Absent) { expect_replay(HIDDEN_RECONF_CORESE
 
 // R10 must turn an old Technique D winner into VERIFY after a SIB1-triggered epoch bump.
 TEST(ReconfigReplay, DISABLED_Sib1SemanticChangeSib1Available) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, true); }
-// R10 must detect dedicated-state drift when SIB1 is absent and re-converge.
-TEST(ReconfigReplay, DISABLED_Sib1SemanticChangeSib1Absent) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, false); }
+// TAC-only change is invisible without SIB1: no epoch bump or Technique D reset.
+TEST(ReconfigReplay, Sib1SemanticChangeSib1Absent) { expect_replay(HIDDEN_RECONF_SIB1_SEMANTIC, false); }
 // R10 must discard the old cell's Technique D winner on HARD_RESET.
 TEST(ReconfigReplay, DISABLED_PciChangeSib1Available) { expect_replay(HIDDEN_RECONF_PCI, true); }
 // R10 must discard the old cell's Technique D winner on HARD_RESET without SIB1.

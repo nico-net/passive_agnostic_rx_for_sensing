@@ -71,6 +71,20 @@ void crcTableInit(void);
 #include "executables/softmodem-common.h"
 }
 
+struct SibEnvGuard {
+  struct Saved {
+    const char *name;
+    bool present;
+    std::string value;
+    explicit Saved(const char *n) : name(n), present(getenv(n) != nullptr), value(present ? getenv(n) : "") {}
+    void restore() const { if (present) setenv(name, value.c_str(), 1); else unsetenv(name); }
+  } ignore{"ISAC_TD_IGNORE_SIB1"}, cache{"ISAC_SIB1_CACHE"}, dir{"ISAC_SIB1_CACHE_DIR"};
+  ~SibEnvGuard() {
+    ignore.restore(); cache.restore(); dir.restore();
+    nr_cfg_ignore_sib1_reset_for_test();
+  }
+};
+
 // nr_mac_common.c's object file (needed here for get_dl_tda_info()/fill_dmrs_mask()) also defines
 // get_pusch_nb_antenna_ports(), which this test never calls but which references
 // get_softmodem_params() -- pulling that in for real means linking executables/softmodem-common.c,
@@ -2214,8 +2228,10 @@ TEST(Css0Autoconf, BwpOriginIsTheCoresetZeroStartNotTheSsbOrigin) {
 }
 
 TEST(Css0Autoconf, IgnoreSib1KeepsMibCss0ButDisablesC0Uss) {
+  SibEnvGuard env_guard;
   ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 996, 12, 2));
   setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  nr_cfg_ignore_sib1_reset_for_test();
   const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
   ASSERT_NE(css0, nullptr);
   EXPECT_EQ(css0->coreset_type, 1);
@@ -4845,6 +4861,8 @@ TEST_F(BlindPdcchTest, PolarAllocationSizesFollowShape) {
 
 TEST(Sib1Cache, StartupHintRekeysOnLiveDecodeWithoutEpochBump) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
+  SibEnvGuard env_guard;
+  nr_cfg_ignore_sib1_reset_for_test();
   char dir[] = "/tmp/rr-r8b-cache-XXXXXX";
   ASSERT_NE(mkdtemp(dir), nullptr);
   setenv("ISAC_SIB1_CACHE_DIR", dir, 1);
@@ -4883,6 +4901,8 @@ TEST(Sib1Cache, StartupHintRekeysOnLiveDecodeWithoutEpochBump) {
 
 TEST(Sib1Cache, IgnoreArmSuppressesPublishLoadAndHash) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
+  SibEnvGuard env_guard;
+  nr_cfg_ignore_sib1_reset_for_test();
   char dir[] = "/tmp/rr-r12a-cache-XXXXXX";
   ASSERT_NE(mkdtemp(dir), nullptr);
   setenv("ISAC_SIB1_CACHE_DIR", dir, 1);
@@ -4895,11 +4915,13 @@ TEST(Sib1Cache, IgnoreArmSuppressesPublishLoadAndHash) {
   nr_pdcch_blind_reset_common();
   nr_pdcch_blind_set_sib1_semantic_hash(0); // new sync permits a cache hint
   setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  nr_cfg_ignore_sib1_reset_for_test();
   EXPECT_FALSE(nr_pdcch_blind_publish_common(&f));
   nr_pdcch_blind_set_sib1_semantic_hash(0x5678);
   EXPECT_EQ(nr_pdcch_blind_sib1_semantic_hash(), 0u);
   EXPECT_FALSE(nr_pdcch_blind_get_common(f.pci, &got));
   unsetenv("ISAC_TD_IGNORE_SIB1");
+  nr_cfg_ignore_sib1_reset_for_test();
   EXPECT_TRUE(nr_pdcch_blind_get_common(f.pci, &got));
   EXPECT_EQ(got.dl_bwp_size, 106);
   nr_pdcch_blind_reset_common();
@@ -4914,12 +4936,16 @@ TEST(Sib1Cache, IgnoreArmSuppressesPublishLoadAndHash) {
 
 TEST(Sib1Cache, IgnoreArmIsIndependentOfReconf) {
   if (nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF unset";
+  SibEnvGuard env_guard;
+  nr_cfg_ignore_sib1_reset_for_test();
   setenv("ISAC_SIB1_CACHE", "0", 1);
   nr_pdcch_blind_common_config_t f{};
   f.pci = 995; f.dl_bwp_size = 106;
   setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  nr_cfg_ignore_sib1_reset_for_test();
   EXPECT_FALSE(nr_pdcch_blind_publish_common(&f));
   unsetenv("ISAC_TD_IGNORE_SIB1");
+  nr_cfg_ignore_sib1_reset_for_test();
   EXPECT_TRUE(nr_pdcch_blind_publish_common(&f));
   nr_pdcch_blind_reset_common();
   unsetenv("ISAC_SIB1_CACHE");

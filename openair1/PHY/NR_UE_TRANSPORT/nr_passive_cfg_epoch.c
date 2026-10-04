@@ -57,6 +57,8 @@ static atomic_flag draining = ATOMIC_FLAG_INIT;
 static _Thread_local nr_cfg_epoch_work_t *current_work;
 static pthread_once_t enable_once = PTHREAD_ONCE_INIT;
 static bool enabled;
+static pthread_once_t ignore_sib1_once = PTHREAD_ONCE_INIT;
+static bool ignore_sib1;
 
 static void read_enable(void)
 {
@@ -69,10 +71,21 @@ static bool is_enabled(void)
   return enabled;
 }
 bool nr_cfg_reconf_enabled(void) { return is_enabled(); }
-bool nr_cfg_ignore_sib1(void)
+static void read_ignore_sib1(void)
 {
   const char *value = getenv("ISAC_TD_IGNORE_SIB1");
-  return value && strcmp(value, "1") == 0;
+  ignore_sib1 = value && strcmp(value, "1") == 0;
+}
+bool nr_cfg_ignore_sib1(void)
+{
+  pthread_once(&ignore_sib1_once, read_ignore_sib1);
+  return ignore_sib1;
+}
+void nr_cfg_ignore_sib1_reset_for_test(void)
+{
+  /* Test harnesses call this only between receiver operations, never concurrently. */
+  ignore_sib1_once = PTHREAD_ONCE_INIT;
+  ignore_sib1 = false;
 }
 static const char *class_name(nr_epoch_class_t c)
 {
