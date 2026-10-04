@@ -14,16 +14,20 @@ typedef struct { const char *records_path, *cfr_path, *endpoint; uint32_t cfr_ri
 int nr_sense_open(const nr_sense_cfg_t *cfg);
 void nr_sense_close(void);
 bool nr_sense_enabled(void);
-/* iq is antenna-major complex float pairs; ant_stride is in complex RE, not floats. */
+/* iq is antenna-major complex float pairs; ant_stride is in complex RE, not floats.
+ * A gap in frame_id = frames dropped. */
 uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                            const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,
                            float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated);
 bool nr_sense_push_record(const char *json_line);
-typedef struct { uint64_t cfr_pushed, cfr_dropped[NR_SENSE_SRC_COUNT], rec_pushed, rec_dropped, io_errors, truncated, after_close; } nr_sense_stats_t;
+typedef struct { uint64_t cfr_pushed, cfr_dropped[NR_SENSE_SRC_COUNT], cfr_rejected, rec_pushed, rec_dropped, io_errors, zmq_drops, truncated, after_close; } nr_sense_stats_t;
 void nr_sense_stats(nr_sense_stats_t *out);
 /* Deterministic fault hooks for the standalone unit test; call from its controlling thread. */
 void nr_sense_test_pause_writer(bool pause);
 void nr_sense_test_fail_writes(bool fail);
+void nr_sense_test_write_chunk(uint32_t bytes);
+void nr_sense_test_writer_limit(uint32_t items);
+uint32_t nr_sense_test_written_items(void);
 #ifdef NR_SENSE_HAVE_ZMQ
 void *nr_sense_test_zmq_context(void);
 #endif

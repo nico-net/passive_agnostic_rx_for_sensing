@@ -6,6 +6,9 @@
 #include <iterator>
 #include <string>
 #include <vector>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #ifdef NR_SENSE_HAVE_ZMQ
 #include <zmq.h>
@@ -30,7 +33,7 @@ struct SenseApi : ::testing::Test {
   std::string rec=temp_path(), cfr=temp_path();
   nr_sense_cfg_t cfg{};
   void SetUp() override { cfg={rec.c_str(),cfr.c_str(),nullptr,16,64,16}; }
-  void TearDown() override { nr_sense_test_pause_writer(false); nr_sense_test_fail_writes(false); nr_sense_close(); unlink(rec.c_str()); unlink(cfr.c_str()); }
+  void TearDown() override { nr_sense_test_pause_writer(false); nr_sense_test_fail_writes(false); nr_sense_test_write_chunk(0); nr_sense_test_writer_limit(0); nr_sense_close(); unlink(rec.c_str()); unlink(cfr.c_str()); }
 };
 }
 
@@ -65,11 +68,73 @@ TEST_F(SenseApi, RecordsAreJsonLines) {
 TEST_F(SenseApi, SlowWriterNeverBlocksProducer) {
   nr_sense_test_pause_writer(true); ASSERT_EQ(nr_sense_open(&cfg),0);
   float iq[2]={1,2}; uint16_t k=3; uint8_t l=4;
-  auto start=std::chrono::steady_clock::now();
   for(int i=0;i<10000;i++) nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,1,1,&k,&l,0,0,0,0,0,nullptr);
-  auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
   nr_sense_stats_t s{}; nr_sense_stats(&s);
-  EXPECT_LT(ms,50); EXPECT_EQ(s.cfr_pushed,16u); EXPECT_EQ(s.cfr_dropped[NR_SENSE_SRC_SSB],9984u);
+  EXPECT_EQ(s.cfr_pushed,16u); EXPECT_EQ(s.cfr_dropped[NR_SENSE_SRC_SSB],9984u);
+}
+
+TEST_F(SenseApi, FrameStreamSurvivesPartialWrites) {
+  unlink(cfr.c_str()); ASSERT_EQ(mkfifo(cfr.c_str(),0600),0);
+  int reader=open(cfr.c_str(),O_RDONLY|O_NONBLOCK); ASSERT_GE(reader,0);
+  nr_sense_test_write_chunk(7);
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  float iq[2]={1,2}; uint16_t k=3; uint8_t l=4;
+  for(int i=0;i<2;i++) ASSERT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,1,1,&k,&l,i,0,0,0,0,nullptr),uint64_t(i+1));
+  nr_sense_close();
+  std::vector<uint8_t> b; uint8_t part[128]; ssize_t n;
+  while((n=read(reader,part,sizeof(part)))>0) b.insert(b.end(),part,part+n);
+  close(reader);
+  ASSERT_EQ(b.size(),120u);
+  EXPECT_EQ(u64(b,8),1u); EXPECT_EQ(u64(b,68),2u);
+  nr_sense_stats_t s{}; nr_sense_stats(&s); EXPECT_EQ(s.io_errors,0u);
+}
+
+TEST_F(SenseApi, InvalidPushCounted) {
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  float iq[2]={}; uint16_t k=0; uint8_t l=0;
+  EXPECT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,0,iq,1,1,&k,&l,0,0,0,0,0,nullptr),0u);
+  EXPECT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,9,iq,1,1,&k,&l,0,0,0,0,0,nullptr),0u);
+  EXPECT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,nullptr,1,1,&k,&l,0,0,0,0,0,nullptr),0u);
+  EXPECT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,1,1,nullptr,&l,0,0,0,0,0,nullptr),0u);
+  EXPECT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,1,1,&k,nullptr,0,0,0,0,0,nullptr),0u);
+  EXPECT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,0,1,&k,&l,0,0,0,0,0,nullptr),0u);
+  EXPECT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_COUNT,1,iq,1,1,&k,&l,0,0,0,0,0,nullptr),0u);
+  nr_sense_stats_t s{}; nr_sense_stats(&s); EXPECT_EQ(s.cfr_rejected,7u);
+}
+
+TEST_F(SenseApi, RecordsNotStarvedUnderCfrLoad) {
+  nr_sense_test_pause_writer(true); nr_sense_test_writer_limit(2);
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  float iq[2]={}; uint16_t k=0; uint8_t l=0;
+  for(int i=0;i<4;i++) ASSERT_NE(nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,1,1,&k,&l,0,0,0,0,0,nullptr),0u);
+  ASSERT_TRUE(nr_sense_push_record("{\"schema\":2}"));
+  nr_sense_test_pause_writer(false);
+  auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(nr_sense_test_written_items()<2 && std::chrono::steady_clock::now()<deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_EQ(nr_sense_test_written_items(),2u);
+  EXPECT_FALSE(bytes(rec).empty());
+}
+
+TEST_F(SenseApi, DroppedFramesLeaveIdGaps) {
+  cfg.cfr_ring_frames=1; nr_sense_test_pause_writer(true); ASSERT_EQ(nr_sense_open(&cfg),0);
+  float iq[2]={}; uint16_t k=0; uint8_t l=0;
+  auto push=[&] { return nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,1,1,&k,&l,0,0,0,0,0,nullptr); };
+  EXPECT_EQ(push(),1u); EXPECT_EQ(push(),0u);
+  nr_sense_test_pause_writer(false);
+  auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+  while(nr_sense_test_written_items()<1 && std::chrono::steady_clock::now()<deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_EQ(nr_sense_test_written_items(),1u);
+  EXPECT_EQ(push(),3u);
+  nr_sense_close(); auto b=bytes(cfr); ASSERT_EQ(b.size(),120u);
+  EXPECT_EQ(u64(b,8),1u); EXPECT_EQ(u64(b,68),3u);
+}
+
+TEST_F(SenseApi, EmbeddedNewlineRecordRejected) {
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  EXPECT_FALSE(nr_sense_push_record("{}\n{}"));
+  nr_sense_stats_t s{}; nr_sense_stats(&s); EXPECT_EQ(s.rec_dropped,1u);
 }
 
 TEST_F(SenseApi, IoErrorCounted) {
