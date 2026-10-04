@@ -2213,6 +2213,17 @@ TEST(Css0Autoconf, BwpOriginIsTheCoresetZeroStartNotTheSsbOrigin) {
   EXPECT_EQ(c->coreset_type, 1);
 }
 
+TEST(Css0Autoconf, IgnoreSib1KeepsMibCss0ButDisablesC0Uss) {
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 996, 12, 2));
+  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
+  ASSERT_NE(css0, nullptr);
+  EXPECT_EQ(css0->coreset_type, 1);
+  nr_pdcch_blind_monitor_cfg_t c0_uss{};
+  EXPECT_FALSE(nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0_uss));
+  unsetenv("ISAC_TD_IGNORE_SIB1");
+}
+
 // ISAC_CSS0_INTERLEAVE_K swaps the WHOLE config struct per occasion, so what it has to guarantee is
 // (a) the snapshot really is the common-search-space one, (b) it carries autodiscover OFF so an
 // interleaved occasion cannot advance -- and then have reverted -- a dedicated-sweep hypothesis, and
@@ -4869,6 +4880,51 @@ TEST(Sib1Cache, StartupHintRekeysOnLiveDecodeWithoutEpochBump) {
   unsetenv("ISAC_SIB1_CACHE_DIR");
   unsetenv("ISAC_SIB1_CACHE");
 }
+
+TEST(Sib1Cache, IgnoreArmSuppressesPublishLoadAndHash) {
+  if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";
+  char dir[] = "/tmp/rr-r12a-cache-XXXXXX";
+  ASSERT_NE(mkdtemp(dir), nullptr);
+  setenv("ISAC_SIB1_CACHE_DIR", dir, 1);
+  setenv("ISAC_SIB1_CACHE", "1", 1);
+  nr_pdcch_blind_common_config_t f{}, got{};
+  f.pci = 996; f.dl_bwp_size = 106;
+  nr_pdcch_blind_reset_common();
+  nr_pdcch_blind_set_sib1_semantic_hash(0x1234);
+  ASSERT_TRUE(nr_pdcch_blind_publish_common(&f));
+  nr_pdcch_blind_reset_common();
+  nr_pdcch_blind_set_sib1_semantic_hash(0); // new sync permits a cache hint
+  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  EXPECT_FALSE(nr_pdcch_blind_publish_common(&f));
+  nr_pdcch_blind_set_sib1_semantic_hash(0x5678);
+  EXPECT_EQ(nr_pdcch_blind_sib1_semantic_hash(), 0u);
+  EXPECT_FALSE(nr_pdcch_blind_get_common(f.pci, &got));
+  unsetenv("ISAC_TD_IGNORE_SIB1");
+  EXPECT_TRUE(nr_pdcch_blind_get_common(f.pci, &got));
+  EXPECT_EQ(got.dl_bwp_size, 106);
+  nr_pdcch_blind_reset_common();
+  char path[256];
+  nr_cfg_sib1_cache_name(path, sizeof(path), dir, f.pci, 0x1234, nr_cfg_reconf_enabled());
+  remove(path);
+  snprintf(path, sizeof(path), "%s/sib1_common_pci996_last_hash.bin", dir);
+  remove(path);
+  unsetenv("ISAC_SIB1_CACHE_DIR");
+  unsetenv("ISAC_SIB1_CACHE");
+}
+
+TEST(Sib1Cache, IgnoreArmIsIndependentOfReconf) {
+  if (nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF unset";
+  setenv("ISAC_SIB1_CACHE", "0", 1);
+  nr_pdcch_blind_common_config_t f{};
+  f.pci = 995; f.dl_bwp_size = 106;
+  setenv("ISAC_TD_IGNORE_SIB1", "1", 1);
+  EXPECT_FALSE(nr_pdcch_blind_publish_common(&f));
+  unsetenv("ISAC_TD_IGNORE_SIB1");
+  EXPECT_TRUE(nr_pdcch_blind_publish_common(&f));
+  nr_pdcch_blind_reset_common();
+  unsetenv("ISAC_SIB1_CACHE");
+}
+
 
 TEST(EpochFeedback, InFlightJobAcrossBumpNotCredited) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "run with ISAC_RECONF=1";

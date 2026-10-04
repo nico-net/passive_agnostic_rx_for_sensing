@@ -5724,6 +5724,16 @@ constdiag_done:;
   bool retired_lookahead[NR_PDCCH_LOOKAHEAD_MAX] = {false};
   for (int ti = 0; ti < nof_tasks; ti++) {
     if (!nr_cfg_epoch_work_current()) break;
+    /* Keep MIB-derived RAR/TC-RNTI evidence, while the SIB1-less arm drops
+     * SI/P-RNTI and CORESET#0 C-RNTI before any persistence or layout pin. */
+    if (nr_cfg_ignore_sib1()
+        && ((cfg->coreset_type == 1 && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1)
+            || (cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_0
+                && (cand_task[ti].out.rnti_class == NR_BLIND_RNTI_CLASS_SI
+                    || cand_task[ti].out.rnti_class == NR_BLIND_RNTI_CLASS_P
+                    || (cfg->coreset_type == 1
+                        && cand_task[ti].out.rnti_class == NR_BLIND_RNTI_CLASS_C)))))
+      continue;
     if (cand_task[ti].is_lookahead) {
       /* Routed independently of the primary's dl_auto branch below on purpose: that branch updates
        * PRIMARY-only global state (ue->dci_thres EMA, RNTI persistence, AL census, DCI11 layout

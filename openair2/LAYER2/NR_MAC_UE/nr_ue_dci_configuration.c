@@ -610,7 +610,12 @@ void ue_dci_configuration(NR_UE_MAC_INST_t *mac, fapi_nr_dl_config_request_t *dl
   NR_BWP_PDCCH_t *pdcch_config = &mac->config_BWP_PDCCH[dl_bwp_id];
   int scs = current_DL_BWP ? current_DL_BWP->scs : mac->numerology;
   const int slots_per_frame = get_slots_per_frame_from_scs(scs);
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
+  const bool ignore_sib1 = IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_ignore_sib1();
+  if (ignore_sib1) {
+    mac->get_sib1 = false;
+    mac->passive_sib1_window = false;
+  }
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled() && !ignore_sib1) {
     const uint64_t abs_slot = nr_cfg_epoch_observe_slot(frame, slot, slots_per_frame);
     nr_cfg_epoch_tick(abs_slot);
     if (mac->passive_sib1_window
@@ -644,7 +649,7 @@ void ue_dci_configuration(NR_UE_MAC_INST_t *mac, fapi_nr_dl_config_request_t *dl
     }
   }
 
-  for (int i = 0; i < MAX_SI_GROUPS; i++) {
+  for (int i = 0; i < MAX_SI_GROUPS && !ignore_sib1; i++) {
     if (!mac->get_otherSI[i])
       continue;
     // If searchSpaceOtherSystemInformation is set to zero,
@@ -714,10 +719,12 @@ void ue_dci_configuration(NR_UE_MAC_INST_t *mac, fapi_nr_dl_config_request_t *dl
 #undef CSS_VALID_CUR_SLOT
       else
         css = mac->search_space_zero;
-      AssertFatal(css, "Atleast one CSS should be present in connected state\n");
-      config_dci_pdu(mac, dl_config, TYPE_C_RNTI_, slot, css);
+      if (!ignore_sib1 || (css && css != mac->search_space_zero)) {
+        AssertFatal(css, "Atleast one CSS should be present in connected state\n");
+        config_dci_pdu(mac, dl_config, TYPE_C_RNTI_, slot, css);
+      }
     }
-  } else if (mac->state == UE_IDLE) {
+  } else if (mac->state == UE_IDLE && !ignore_sib1) {
     /* UE_IDLE (RRC-triggered camped idle) monitors pagingSearchSpace per TS 38.213 §10.1 and TS 38.304 §7.1. */
     if (pdcch_config->paging_SS_id > -1) {
       const NR_SearchSpace_t *paging_ss = get_common_search_space(mac, pdcch_config->paging_SS_id);
