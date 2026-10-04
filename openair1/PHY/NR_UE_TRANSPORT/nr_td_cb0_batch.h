@@ -220,6 +220,8 @@ int nr_td_cb0_batch_cpu(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t
 /* This thread's last nr_td_cb0_batch / _cpu call: wall of the decode itself (after the internal lock was taken, so
  * without the wait for another thread's batch) and the number of distinct items decoded (after dedup). */
 void nr_td_cb0_last_compute(uint64_t *ns, int *decoded);
+/* Persistent CPU pool workers created so far (round 2: created once, grown to threads - 1, never per batch). */
+int nr_td_cb0_pool_threads(void);
 /* Worker threads configured for the CPU backend (nr_td_cb0_set_threads). */
 int nr_td_cb0_get_threads(void);
 /* Backend counters since start: batches per backend, GPU failures, GPU batches skipped (back-off / unhealthy). */

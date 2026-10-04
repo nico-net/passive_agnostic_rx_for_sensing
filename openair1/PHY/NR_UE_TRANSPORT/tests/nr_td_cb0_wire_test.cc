@@ -12,6 +12,8 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <thread>
+#include <atomic>
 extern "C" {
 #include "nr_td_cb0_fixture.h"
 #include "nr_td_cb0_sched.h"
@@ -727,5 +729,39 @@ TEST_F(Cb0Wire, TbDecoderNotedWithoutBatchBlocksCpuBatches)
   nr_pdsch_config_sweep_cb0_stats(&alarms, rej);
   EXPECT_EQ(rej[11], 1u) << "engine DECODER rejection: the epoch saw a CUDA TB";
   unsetenv("ISAC_TD_CB0_CPU_PCT");
+}
+}  // namespace
+
+namespace {
+/* Round 2: the CPU backend's persistent pool. Concurrent callers (PDSCH consumers) get exactly the sequential verdicts,
+ * and the pool does not grow per batch. */
+TEST_F(Cb0Wire, PersistentPoolConcurrentCallersMatchSequential)
+{
+  nr_td_cb0_set_threads(8);
+  std::vector<nr_td_cb0_item_t> it;
+  for (int i = 0; i < 24; i++)
+    it.push_back((i % 3 == 0) ? g_tb->pass_item() : g_tb->fail_item());
+  std::vector<nr_td_cb0_result_t> ref(it.size());
+  ASSERT_EQ(nr_td_cb0_batch_cpu(it.data(), (int)it.size(), ref.data()), (int)it.size());
+  const int pool0 = nr_td_cb0_pool_threads();
+  EXPECT_EQ(pool0, 7) << "threads - 1 workers, the caller is the 8th";
+  std::atomic<int> bad{0};
+  std::vector<std::thread> th;
+  for (int c = 0; c < 4; c++)
+    th.emplace_back([&]() {
+      for (int r = 0; r < 50; r++) {
+        std::vector<nr_td_cb0_result_t> out(it.size());
+        if (nr_td_cb0_batch_cpu(it.data(), (int)it.size(), out.data()) != (int)it.size())
+          bad++;
+        for (size_t k = 0; k < it.size(); k++)
+          if (out[k].pass != ref[k].pass || out[k].iters != ref[k].iters || out[k].decoder_used != NR_TD_CB0_DEC_CPU_LAYERED)
+            bad++;
+      }
+    });
+  for (auto &t : th)
+    t.join();
+  EXPECT_EQ(bad.load(), 0);
+  EXPECT_EQ(nr_td_cb0_pool_threads(), pool0) << "no thread creation per batch";
+  nr_td_cb0_set_threads(1);
 }
 }  // namespace

@@ -262,18 +262,38 @@ typedef struct {
   int n;
   uint32_t Emax;
   atomic_int next;
+  int refs, finished; /* pool bookkeeping (under g_pool.m) */
 } cb0_job_t;
 
-static void *cb0_worker(void *arg)
+/* Per-thread scratch, grown on demand and kept (pool workers and callers reuse it: no allocation per batch). */
+static __thread cb0_scratch_t t_scr;
+static __thread uint32_t t_scr_emax;
+static cb0_scratch_t *scratch_get(uint32_t Emax)
 {
-  cb0_job_t *j = arg;
-  cb0_scratch_t s = {0};
-  const bool need_cpu = j->items != NULL;
-  if (need_cpu && scratch_alloc(&s, j->Emax) != 0) {
-    scratch_free(&s);
-    return NULL; /* items this worker would have taken stay with the others */
+  if (t_scr.l != NULL && t_scr_emax >= Emax)
+    return &t_scr;
+  scratch_free(&t_scr);
+  memset(&t_scr, 0, sizeof(t_scr));
+  t_scr_emax = 0;
+  if (scratch_alloc(&t_scr, Emax) != 0) {
+    scratch_free(&t_scr);
+    memset(&t_scr, 0, sizeof(t_scr));
+    return NULL;
   }
+  t_scr_emax = Emax;
+  return &t_scr;
+}
+
+/* Take items of j until none is left; returns the number this thread finished. */
+static int cb0_work(cb0_job_t *j)
+{
+  const bool need_cpu = j->items != NULL;
+  cb0_scratch_t *s = need_cpu ? scratch_get(j->Emax) : NULL;
+  if (need_cpu && s == NULL)
+    return 0; /* items this thread would have taken stay with the others */
+  int done = 0;
   for (int i; (i = atomic_fetch_add(&j->next, 1)) < j->n;) {
+    done++;
     if (!j->meta[i].valid)
       continue;
     const bool gpu = j->l && (!j->have_l || j->have_l[i]);
@@ -281,30 +301,116 @@ static void *cb0_worker(void *arg)
     if (gpu) {
       li = j->l + (size_t)i * NR_TD_CB0_L_STRIDE;
     } else if (need_cpu) {
-      cpu_dematch_one(&j->items[i], &j->meta[i], &s, s.l, NULL);
-      li = s.l;
+      cpu_dematch_one(&j->items[i], &j->meta[i], s, s->l, NULL);
+      li = s->l;
     } else {
       continue;
     }
     cpu_decode_one(j->dec, &j->meta[i], li, &j->out[i]);
     j->out[i].dematch_gpu = gpu;
   }
-  scratch_free(&s);
+  return done;
+}
+
+/* ---- persistent CPU worker pool (round 2): created once, no thread creation per batch and no lock held while decoding.
+ * Jobs of several callers (PDSCH consumers) are queued; a pool worker serves the oldest job with items left; every caller
+ * also works on its own job and returns once every item is finished and no worker still references the job. ---- */
+#define CB0_POOL_MAXQ 64
+static struct {
+  pthread_mutex_t m;
+  pthread_cond_t cv;   /* work available */
+  pthread_cond_t done; /* a job made progress */
+  cb0_job_t *q[CB0_POOL_MAXQ];
+  int nq, nthreads;
+} g_pool = {.m = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .done = PTHREAD_COND_INITIALIZER};
+
+static void pool_drop_locked(cb0_job_t *j)
+{
+  for (int k = 0; k < g_pool.nq; k++)
+    if (g_pool.q[k] == j) {
+      memmove(&g_pool.q[k], &g_pool.q[k + 1], (size_t)(g_pool.nq - k - 1) * sizeof(g_pool.q[0]));
+      g_pool.nq--;
+      return;
+    }
+}
+
+static void *cb0_pool_main(void *arg)
+{
+  (void)arg;
+  pthread_mutex_lock(&g_pool.m);
+  for (;;) {
+    cb0_job_t *j = NULL;
+    while (j == NULL) {
+      for (int k = 0; k < g_pool.nq && j == NULL; k++)
+        if (atomic_load(&g_pool.q[k]->next) < g_pool.q[k]->n)
+          j = g_pool.q[k];
+      if (j == NULL)
+        pthread_cond_wait(&g_pool.cv, &g_pool.m);
+    }
+    j->refs++;
+    pthread_mutex_unlock(&g_pool.m);
+    const int d = cb0_work(j);
+    pthread_mutex_lock(&g_pool.m);
+    j->finished += d;
+    j->refs--;
+    pthread_cond_broadcast(&g_pool.done);
+  }
   return NULL;
+}
+
+/* Grow the pool to `want` workers (never shrinks). */
+static void pool_ensure(int want)
+{
+  pthread_mutex_lock(&g_pool.m);
+  while (g_pool.nthreads < want && g_pool.nthreads < 64) {
+    pthread_t th;
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    const int rc = pthread_create(&th, &a, cb0_pool_main, NULL);
+    pthread_attr_destroy(&a);
+    if (rc != 0)
+      break;
+    pthread_setname_np(th, "td_cb0_pool");
+    g_pool.nthreads++;
+  }
+  pthread_mutex_unlock(&g_pool.m);
+}
+
+int nr_td_cb0_pool_threads(void)
+{
+  pthread_mutex_lock(&g_pool.m);
+  const int n = g_pool.nthreads;
+  pthread_mutex_unlock(&g_pool.m);
+  return n;
 }
 
 static void cb0_run(cb0_job_t *j, int threads)
 {
   atomic_init(&j->next, 0);
-  int T = threads < j->n ? threads : j->n;
-  pthread_t th[64];
-  int started = 0;
-  for (int t = 1; t < T; t++)
-    if (pthread_create(&th[started], NULL, cb0_worker, j) == 0)
-      started++;
-  cb0_worker(j);
-  for (int t = 0; t < started; t++)
-    pthread_join(th[t], NULL);
+  j->refs = 0;
+  j->finished = 0;
+  const int helpers = (threads < j->n ? threads : j->n) - 1; /* the caller is one of the T threads */
+  bool queued = false;
+  if (helpers > 0) {
+    pool_ensure(threads - 1);
+    pthread_mutex_lock(&g_pool.m);
+    if (g_pool.nq < CB0_POOL_MAXQ) {
+      g_pool.q[g_pool.nq++] = j;
+      queued = true;
+      pthread_cond_broadcast(&g_pool.cv);
+    }
+    pthread_mutex_unlock(&g_pool.m);
+  }
+  const int d = cb0_work(j);
+  pthread_mutex_lock(&g_pool.m);
+  j->finished += d;
+  if (queued) {
+    pool_drop_locked(j); /* no new worker picks it up; wait for the ones still on it */
+    while (j->refs > 0)
+      pthread_cond_wait(&g_pool.done, &g_pool.m);
+  }
+  pthread_mutex_unlock(&g_pool.m);
 }
 
 /* LDPC adapter. Today: the CPU layered decoder (libldpc.so's LDPCdecoder), the same decoder and iteration policy
@@ -672,6 +778,7 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
   atomic_fetch_add(&st_items, n);
   atomic_fetch_add(&st_decoded, nr);
 
+  bool unlocked = false;
   pthread_mutex_lock(&g_lock);
   struct timespec tl0;
   clock_gettime(CLOCK_MONOTONIC, &tl0); /* compute time only: not the wait for another thread's batch */
@@ -715,7 +822,17 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
         l = NULL; /* CUDA error: every item falls back to the CPU dematch */
     }
     cb0_job_t j = {.items = ritem, .meta = rmeta, .l = l, .have_l = have, .out = rout, .dec = g_dec, .n = nr, .Emax = Emax};
-    cb0_run(&j, g_threads);
+    if (l == NULL) {
+      /* CPU path (round 2): nothing shared is touched while decoding (the decoder is reentrant, scratch is per thread),
+       * so the lock is released: consumers no longer serialise on each other's batches. */
+      const int T = g_threads;
+      pthread_mutex_unlock(&g_lock);
+      unlocked = true;
+      clock_gettime(CLOCK_MONOTONIC, &tl0);
+      cb0_run(&j, T);
+    } else {
+      cb0_run(&j, g_threads); /* GPU-dematched: l is the module's shared scratch, keep the lock */
+    }
   }
   {
     struct timespec tl1;
@@ -723,7 +840,8 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
     t_last_compute_ns = (uint64_t)(tl1.tv_sec - tl0.tv_sec) * 1000000000ull + (uint64_t)tl1.tv_nsec - (uint64_t)tl0.tv_nsec;
     t_last_decoded = nr;
   }
-  pthread_mutex_unlock(&g_lock);
+  if (!unlocked)
+    pthread_mutex_unlock(&g_lock);
   for (int r = 0; r < nr; r++)
     if (rout[r].decoder_used == 0 && rout[r].err == 0) { /* a worker could not allocate its scratch */
       rout[r].pass = -1;
