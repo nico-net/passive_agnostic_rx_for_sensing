@@ -636,8 +636,8 @@ bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double
 /** mode 0 or 2; -1 = re-read the environment. Test hook. */
 void nr_pdsch_config_sweep_fieldbook_set_mode(int mode);
 int nr_pdsch_config_sweep_fieldbook_mode(void);
-/** The hook the (future, robustness R7) epoch owner calls on a hard trigger: bumps the field book epoch (all PROMOTED/SUSPECT
- *  fields become CANDIDATE, support cleared). Called today from the RX-stream discontinuity (sync loss) path. No-op while off. */
+/** Legacy RX-stream discontinuity hook: local bump, support cleared, ordering hints kept.
+ *  No-op with ISAC_RECONF=1 (the drained R7 listener alone mirrors its epoch and drops bonuses), or with fieldbook off. */
 void nr_pdsch_config_sweep_fieldbook_bump_epoch(void);
 /** Test hook: force_promote a field (0 TDRA, 1 add_pos, 2 max_len). */
 void nr_pdsch_config_sweep_fieldbook_force_promote(int field, int32_t value);

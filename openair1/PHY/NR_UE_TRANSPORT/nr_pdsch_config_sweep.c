@@ -1795,6 +1795,40 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 /* ---- fb2 field book (all under g_lock). Mode read once from ISAC_TD_FIELDBOOK (0 default, 2 = reversible pruning). ---- */
 static nr_td_fieldbook_t g_fb;
 static int g_fb_mode = -1; /* -1 = not read yet */
+static uint32_t g_fb_identity_gen;
+static void sweep_epoch_listener(const nr_cfg_epoch_snapshot_t *s);
+static void fb_init_locked(void)
+{
+  nr_td_fieldbook_init(&g_fb, 2, 2);
+  if (nr_cfg_reconf_enabled()) {
+    nr_cfg_epoch_subscribe(sweep_epoch_listener);
+    const nr_cfg_epoch_snapshot_t s = nr_cfg_epoch_snapshot();
+    g_fb.epoch = s.epoch;
+    g_fb_identity_gen = s.identity_gen;
+  }
+}
+static bool fb_current_locked(void)
+{
+  return !nr_cfg_reconf_enabled()
+      || (g_fb.epoch == nr_cfg_epoch_current() && g_fb_identity_gen == nr_cfg_epoch_identity_gen());
+}
+/* Only the drained R7 callback advances an existing book under ISAC_RECONF. */
+static void fb_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
+{
+  if (g_fb_mode < 0 || s->epoch <= g_fb.epoch) return;
+  const uint32_t generation = g_fb.generation;
+  if (s->identity_gen != g_fb_identity_gen) {
+    nr_td_fieldbook_init(&g_fb, 2, 2);
+    g_fb.generation = generation + 1;
+  } else {
+    nr_td_fieldbook_bump_epoch(&g_fb);
+    /* R11 drops the cell ordering bonus too. Legacy local bumps retain BC4 hints. */
+    for (int f = 0; f < NR_TD_F_COUNT; ++f)
+      g_fb.f[f].hint_value = -1;
+  }
+  g_fb.epoch = s->epoch;
+  g_fb_identity_gen = s->identity_gen;
+}
 static uint64_t g_fb_promotions, g_fb_withdrawals, g_fb_failopens, g_fb_pruned_ctx, g_fb_untrusted_ctx;
 static const char *const g_fb_name[NR_TD_F_COUNT] = {"tdra", "dmrs_add_pos", "dmrs_max_len"};
 static int fb_mode_locked(void)
@@ -1807,7 +1841,7 @@ static int fb_mode_locked(void)
     const long v = (e && *e) ? strtol(e, &end, 10) : 2;
     const bool off = e && *e && end && end != e && *end == 0 && v == 0;
     g_fb_mode = off ? 0 : 2;
-    nr_td_fieldbook_init(&g_fb, 2, 2);
+    fb_init_locked();
     static bool logged;
     if (!logged) { /* once per process (a test re-read does not repeat it) */
       logged = true;
@@ -1872,6 +1906,7 @@ static void sweep_epoch_locked(const nr_cfg_epoch_snapshot_t *s);
 static void sweep_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
 {
   pthread_mutex_lock(&g_lock);
+  fb_epoch_locked(s);
   sweep_epoch_locked(s);
   pthread_mutex_unlock(&g_lock);
 }
@@ -2225,6 +2260,7 @@ static void fb_apply_fields_locked(sweep_context_t *c)
 {
   c->fb_gen = nr_td_fieldbook_generation(&g_fb);
   c->fb_pruned = c->fb_untrusted = 0;
+  if (!fb_current_locked()) return; /* a newer epoch may be published before its listener drains */
   for (int f = 0; f < NR_TD_F_COUNT; f++) {
     int32_t v;
     if (!nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v))
@@ -2243,14 +2279,15 @@ static void fb_apply_fields_locked(sweep_context_t *c)
 static void fb_resync_locked(sweep_context_t *c)
 {
   const uint32_t gen = nr_td_fieldbook_generation(&g_fb);
-  if (c->fb_gen == gen)
+  const bool current = fb_current_locked();
+  if (c->fb_gen == gen && current)
     return;
   c->fb_gen = gen;
   for (int f = 0; f < NR_TD_F_COUNT; f++) {
     if (!(c->fb_pruned >> f & 1))
       continue;
     int32_t v;
-    const bool still = nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v)
+    const bool still = current && nr_td_fieldbook_prunes(&g_fb, (nr_td_field_t)f, &v)
                        && (f == NR_TD_F_TDRA ? ((v ^ c->fb_val[f]) & 0x3FF) == 0 : v == c->fb_val[f]);
     if (still)
       continue;
@@ -2311,7 +2348,6 @@ static void sweep_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
   const bool reset = s->identity_gen != g_identity_gen;
   g_config_epoch = s->epoch;
   g_identity_gen = s->identity_gen;
-  if (reset && g_fb_mode >= 0) nr_td_fieldbook_init(&g_fb, 2, 2);
   memset(g_rnti, 0, sizeof(g_rnti));
   memset(&g_obs, 0, sizeof(g_obs));
   g_prior.valid = false;
@@ -3102,7 +3138,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
               (unsigned)c->tda, (unsigned)c->state->hyp[w].k0, (unsigned long long)lost);
       }
       if (!r->prior.valid) {
-        if (g_fb_mode == 2) {
+        if (g_fb_mode == 2 && fb_current_locked()) {
           /* First convergence of this RNTI: one vote in the field book. A field this context was pruned on carries no vote. */
           nr_td_fieldbook_t before = g_fb;
           nr_td_fieldbook_converged(&g_fb, c->rnti, &c->state->hyp[w], (uint64_t)c->outcomes, c->fb_pruned);
@@ -3197,7 +3233,7 @@ void nr_pdsch_config_sweep_fieldbook_set_mode(int mode)
     (void)fb_mode_locked();
   } else {
     g_fb_mode = mode == 2 ? 2 : 0;
-    nr_td_fieldbook_init(&g_fb, 2, 2);
+    fb_init_locked();
   }
   pthread_mutex_unlock(&g_lock);
 }
@@ -3210,6 +3246,7 @@ int nr_pdsch_config_sweep_fieldbook_mode(void)
 }
 void nr_pdsch_config_sweep_fieldbook_bump_epoch(void)
 {
+  if (nr_cfg_reconf_enabled()) return; /* central ownership; no second local epoch */
   pthread_mutex_lock(&g_lock);
   if (fb_mode_locked() == 2) {
     nr_td_fieldbook_bump_epoch(&g_fb);
@@ -3258,7 +3295,7 @@ void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
   if (g_fb_mode >= 0)
-    nr_td_fieldbook_init(&g_fb, 2, 2); /* the field book is evidence derived from the contexts too */
+    fb_init_locked(); /* the field book is evidence derived from the contexts too */
   /* Every lookup/feedback path requires a live generation. Invalidate the small
    * identity fields now; select() clears the full state before reusing a slot.
    * Clearing all 1024 hypothesis arrays here used ~1.2 ms even for an empty bank.

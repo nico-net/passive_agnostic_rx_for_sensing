@@ -3446,6 +3446,73 @@ struct PdschFieldBook : testing::Test {
 };
 static const nr_pdsch_cfg_hypothesis_t fb_truth{1, 13, 0, 1, 1, 0, 1}; /* add_pos=1 */
 
+struct PdschFieldBookEpoch : PdschFieldBook {
+  void SetUp() override
+  {
+    if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
+    nr_cfg_epoch_reset();
+    PdschFieldBook::SetUp();
+    nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  }
+};
+
+TEST_F(PdschFieldBookEpoch, EpochBumpDropsBonus)
+{
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  const auto old = open();
+  ASSERT_TRUE(dormant_any(snap(old), NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
+  nr_cfg_epoch_note_bwp_change();
+  nr_cfg_epoch_drain();
+  auto fb = book();
+  EXPECT_EQ(fb.epoch, nr_cfg_epoch_current());
+  int32_t value;
+  EXPECT_FALSE(nr_td_fieldbook_prunes(&fb, NR_TD_F_DMRS_ADD_POS, &value));
+  nr_td_side_info_t si{};
+  si.f_dmrs_add_pos = -1;
+  nr_td_fieldbook_fill_side_info(&fb, &si);
+  EXPECT_FLOAT_EQ(si.f_conf, 0.0f);
+  EXPECT_EQ(si.f_dmrs_add_pos, -1);
+  EXPECT_FALSE(dormant_any(snap(open()), NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
+  nr_td_fieldbook_converged(&fb, 0x4611, &fb_truth, 10, 0);
+  EXPECT_FALSE(nr_td_fieldbook_prunes(&fb, NR_TD_F_DMRS_ADD_POS, &value));
+  nr_td_fieldbook_converged(&fb, 0x4612, &fb_truth, 11, 0);
+  EXPECT_TRUE(nr_td_fieldbook_prunes(&fb, NR_TD_F_DMRS_ADD_POS, &value));
+  EXPECT_EQ(fb.f[NR_TD_F_DMRS_ADD_POS].epoch, fb.epoch);
+}
+
+TEST_F(PdschFieldBookEpoch, OnlyOwnerBumpsAndResetMirrorsCurrent)
+{
+  // Subscription must work even before any Technique D context is opened.
+  nr_cfg_epoch_note_bwp_change();
+  nr_cfg_epoch_note_csirs_map_change();
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(book().epoch, nr_cfg_epoch_current());
+  const auto generation = book().generation;
+  nr_pdsch_config_sweep_fieldbook_bump_epoch(); // old discontinuity hook must not double-bump
+  EXPECT_EQ(book().epoch, nr_cfg_epoch_current());
+  EXPECT_EQ(book().generation, generation);
+  nr_pdsch_config_sweep_reset_all();
+  EXPECT_EQ(book().epoch, nr_cfg_epoch_current());
+  nr_pdsch_config_sweep_fieldbook_set_mode(2);
+  EXPECT_EQ(book().epoch, nr_cfg_epoch_current());
+}
+
+TEST_F(PdschFieldBookEpoch, PendingEpochCannotPruneAndHardResetDropsHints)
+{
+  nr_cfg_epoch_note_identity(1, 100, 200);
+  nr_pdsch_config_sweep_fieldbook_force_promote(NR_TD_F_DMRS_ADD_POS, 1);
+  nr_cfg_epoch_note_bwp_change();
+  // New-epoch work may arrive before the listener is drained.
+  EXPECT_FALSE(dormant_any(snap(open()), NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
+  nr_cfg_epoch_note_identity(2, 100, 200);
+  nr_cfg_epoch_drain();
+  const auto fb = book();
+  EXPECT_EQ(fb.epoch, nr_cfg_epoch_current());
+  EXPECT_EQ(fb.f[NR_TD_F_DMRS_ADD_POS].state, NR_TD_FS_UNSEEN);
+  EXPECT_EQ(fb.f[NR_TD_F_DMRS_ADD_POS].hint_value, -1);
+  EXPECT_FALSE(dormant_any(snap(open()), NR_TD_DORMANT_FIELD_BASE + NR_TD_F_DMRS_ADD_POS));
+}
+
 TEST_F(PdschFieldBook, FieldBookOffIsBitIdentical)
 {
   auto trace = [](bool promoted) {
