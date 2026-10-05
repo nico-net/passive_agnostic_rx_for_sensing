@@ -142,6 +142,7 @@ typedef struct {
   uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
   uint64_t batches;        ///< producer slot batches pushed
   uint64_t batches_multi;  ///< of which carried >1 grant (slots the cell shares between UEs)
+  uint64_t gpu_stale_pre, gpu_stale_post, gpu_selfcheck_fail, gpu_disabled;
 } nr_pdsch_passive_queue_stats_t;
 
 /** In-line decode paths (nr_pdcch_blind_monitor_rt.c) report a stale-after-decode outcome here. */

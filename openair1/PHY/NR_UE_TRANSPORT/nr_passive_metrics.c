@@ -70,6 +70,10 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->pdschq_drop_stale = pq.dropped_stale;
   m->pdschq_stale_after_decode = pq.stale_after_decode;
   m->pdschq_max_lag = pq.max_lag_slots;
+  m->gpu_fep_stale_pre = pq.gpu_stale_pre;
+  m->gpu_fep_stale_post = pq.gpu_stale_post;
+  m->gpu_fep_selfcheck_fail = pq.gpu_selfcheck_fail;
+  m->gpu_fep_disabled = pq.gpu_disabled;
   nr_pdsch_config_sweep_excl_restart_stats(&m->td_excl_restarts, &m->td_excl_truncs, &m->td_excl_restart_alarms);
   nr_pdsch_config_sweep_fieldbook_stats(&m->td_fb_promotions, &m->td_fb_withdrawals, &m->td_fb_failopens, &m->td_fb_pruned_contexts, &m->td_fb_untrusted_ctx);
   uint64_t cs[3][3], cd[3][3];

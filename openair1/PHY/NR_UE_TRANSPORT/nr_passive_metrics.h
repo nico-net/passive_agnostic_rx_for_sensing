@@ -20,6 +20,7 @@ typedef struct {
   uint64_t pdcch_occasions, pdcch_candidates, pdcch_accepts, pdcch_accepts_c;
   uint64_t scanq_queued, scanq_processed, scanq_drop_full, scanq_drop_stale, scanq_drop_epoch, scanq_max_lag;
   uint64_t pdschq_queued, pdschq_decoded, pdschq_crc_ok, pdschq_drop_full, pdschq_drop_stale, pdschq_drop_epoch, pdschq_stale_after_decode, pdschq_max_lag;
+  uint64_t gpu_fep_stale_pre, gpu_fep_stale_post, gpu_fep_selfcheck_fail, gpu_fep_disabled;
   /* BC12a SIB1 common-TDRA census at first convergence of a context, per DCI format of the context (_10 / _11; _unk = format not
    * recorded). td_deftab_*: same against default table A (td_deftab_na = MIB dmrs-TypeA-Position unknown). Log/metrics only. */
   uint64_t td_sib1_tdra_match_10, td_sib1_tdra_mismatch_10, td_sib1_tdra_none_10;

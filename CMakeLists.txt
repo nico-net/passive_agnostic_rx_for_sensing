@@ -2447,6 +2447,11 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_passive_sample_lifetime PRIVATE GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_passive_sample_lifetime)
   add_test(NAME test_nr_passive_sample_lifetime COMMAND ./test_nr_passive_sample_lifetime)
+  add_executable(test_nr_gpu_fep_hygiene ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_gpu_fep_hygiene_test.cc)
+  target_include_directories(test_nr_gpu_fep_hygiene PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_gpu_fep_hygiene PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_gpu_fep_hygiene)
+  add_test(NAME test_nr_gpu_fep_hygiene COMMAND ./test_nr_gpu_fep_hygiene)
 
   add_executable(test_nr_passive_acq_state ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc
                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c)
