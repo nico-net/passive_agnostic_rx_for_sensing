@@ -25,6 +25,20 @@ std::string read(const std::string &p) {
   std::ifstream f(p, std::ios::binary);
   return {std::istreambuf_iterator<char>(f), {}};
 }
+void redirect_legacy_outputs(std::string &body, const std::string &dir) {
+  for (const std::string key : {"report_path", "out_path", "report_endpoint"}) {
+    size_t pos=body.find(key); ASSERT_NE(pos,std::string::npos);
+    size_t first=body.find('"',body.find('=',pos)); ASSERT_NE(first,std::string::npos);
+    size_t last=body.find('"',first+1); ASSERT_NE(last,std::string::npos);
+    body.replace(first+1,last-first-1,key=="report_endpoint" ? "" : dir+"/legacy");
+  }
+}
+void redirect_path(std::string &body, const std::string &key, const std::string &path) {
+  size_t pos=body.find(key+" ="); ASSERT_NE(pos,std::string::npos);
+  size_t first=body.find('"',pos); ASSERT_NE(first,std::string::npos);
+  size_t last=body.find('"',first+1); ASSERT_NE(last,std::string::npos);
+  body.replace(first+1,last-first-1,path);
+}
 uint32_t u32(const std::string &b, size_t p) {
   uint32_t v=0;
   for (int i=0;i<4;i++) v |= uint32_t(uint8_t(b[p+i])) << (8*i);
@@ -110,6 +124,20 @@ TEST_F(Adapter, SourceFilterRespected) {
   EXPECT_FALSE(std::filesystem::exists(cfr));
 #endif
 }
+TEST_F(Adapter, ExampleConfigEnablesExplicitSources) {
+  auto body=read(SENSE_SOURCE_DIR "/tests/passive_rx/sense_api.example.cfg");
+  redirect_path(body,"records_path",records);
+  redirect_path(body,"cfr_path",cfr);
+  init(body);
+#ifdef SENSE_ADAPTER_ON
+  for (int source=0; source<NR_ISAC_SRC_COUNT; ++source)
+    EXPECT_TRUE(nr_isac_source_enabled(source)) << source;
+  EXPECT_TRUE(nr_isac_prach_enabled());
+  EXPECT_TRUE(warnings.empty());
+#else
+  EXPECT_FALSE(nr_isac_enabled());
+#endif
+}
 TEST_F(Adapter, PrachSourceFilter) {
   init(cfg(1,"prach"));
 #ifdef SENSE_ADAPTER_ON
@@ -127,13 +155,7 @@ TEST_F(Adapter, LegacySensingKeysAcceptedAndIgnored) {
   size_t end=body.rfind("};"); ASSERT_NE(end,std::string::npos);
   body.insert(end,"cfr_path=\""+cfr+"\";records_path=\""+records+"\";cfr_ring_frames=16;cfr_max_re=64;\n");
   // Even the red engine must not create its old outputs outside this test's directory.
-  for(const std::string old:{"/tmp/passive_rx/x410_manual_reports.jsonl","/tmp/passive_rx/x410_manual_sensing","tcp://*:5556"}) {
-    auto pos=body.find(old); ASSERT_NE(pos,std::string::npos);
-    while(pos!=std::string::npos) {
-      body.replace(pos,old.size(),old=="tcp://*:5556" ? "" : dir+"/legacy");
-      pos=body.find(old,pos+1);
-    }
-  }
+  redirect_legacy_outputs(body,dir);
   init(body);
 #ifdef SENSE_ADAPTER_ON
   ASSERT_TRUE(nr_isac_enabled());
@@ -227,13 +249,7 @@ TEST_F(Adapter, SingleAntennaWrappersAndTruncation) {
 TEST_F(Adapter, EnableWithoutSinkKeepsSourcesActive) {
   std::filesystem::copy_file(SENSE_SOURCE_DIR "/tests/passive_rx/adaptive_dl_ul_sensing.conf",config);
   auto body=read(config);
-  for(const std::string old:{"/tmp/passive_rx/x410_manual_reports.jsonl","/tmp/passive_rx/x410_manual_sensing","tcp://*:5556"}) {
-    auto pos=body.find(old); ASSERT_NE(pos,std::string::npos);
-    while(pos!=std::string::npos) {
-      body.replace(pos,old.size(),old=="tcp://*:5556" ? "" : dir+"/legacy");
-      pos=body.find(old,pos+1);
-    }
-  }
+  redirect_legacy_outputs(body,dir);
   init(body);
 #ifdef SENSE_ADAPTER_ON
   EXPECT_TRUE(nr_isac_enabled());

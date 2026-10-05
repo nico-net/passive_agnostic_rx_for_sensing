@@ -135,17 +135,11 @@ def receiver_config(out, probe):
   pdcch_blind_monitor_ul_pusch = "1:1:0";
   pdcch_blind_monitor_ul_uci = "256:11:0:32";
   pdcch_blind_monitor_ul_thread = "2:64:2";
-  sources = "csi_rs,ssb,pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data";
-  cpi_slots = 32;
-  interpolate = 1;
-  capture = 1;
-  sync_correction = 1;
-  nominal_los_range_m = 0.0;
-  report_path = %s;
-  out_path = %s;
-  report_endpoint = "tcp://127.0.0.1:5556";
+  sources = "csi_rs,ssb,pdsch_dmrs,pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data,prach,srs";
+  records_path = %s;
+  cfr_path = %s;
   rx_id = "rx_x410";
 };
-''' % (json.dumps(str(out / 'reports.jsonl')), json.dumps(str(out / 'sensing')))
+''' % (json.dumps(str(out / 'sense_records.jsonl')), json.dumps(str(out / 'sense_frames.cfr')))
 
 

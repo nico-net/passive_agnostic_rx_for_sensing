@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-CSSL-1.0
 #
 # Test of the --passive-rx receive-only mode (TOTAL_PASSIVE_UE_HANDOVER.md Phase 1/2), covering
-# Stage 1 (single receiver), Stage 2 (two receivers + iperf + fusion), and the N-receiver
-# no-AoA comparison case -- /home/sens/.claude/plans/zesty-baking-thompson.md,
+# Stage 1 (single receiver), Stage 2 (two receivers + iperf), and the N-receiver
+# comparison case -- /home/sens/.claude/plans/zesty-baking-thompson.md,
 # PHASE3_BLIND_PDCCH_LIVE_WIRING_HANDOVER.md:
 #
 #   nr-softmodem   SA gNB, rfsim server, attached to a local open5gs core
@@ -22,7 +22,6 @@
 #   - the subscriber in ue.active.conf provisioned in the open5gs mongodb
 #   - passwordless sudo (the active UE needs CAP_NET_ADMIN for its TUN; the passive UEs do not)
 #   - iperf3 installed (sustained DL traffic generator, alongside ping)
-#   - repos/isac's isac-track built in --release (fusion step; skipped with a warning if absent)
 #
 # Usage: ./run_passive_rx.sh [duration_s] [out_dir]
 # Env vars: NUM_RX=2|3 (default 2, how many passive receivers to run)
@@ -39,6 +38,10 @@
 #           BW100 (default 0, set to 1 to switch to the 100MHz/273PRB cell -- gnb.sa.rfsim.100mhz.conf
 #                  + ue.passive*.100mhz.conf, see the latter's header for what's live-verified vs
 #                  predicted-not-yet-reverified at this bandwidth)
+#           SENSE_API=1 (default) exports schema-2 records and CFR per receiver in OUT_DIR;
+#                  0 disables the export. Four-RX CFR can cost about 53 MiB per receiver.
+#           SENSE_SOURCES (optional) overrides each receiver config's exact source-token list;
+#                  use the explicit list in sense_api.example.cfg to enable PRACH/SRS too.
 set -u
 
 DURATION="${1:-90}"
@@ -61,6 +64,8 @@ RX1_NANT="${RX1_NANT:-4}"
 RX2_NANT="${RX2_NANT:-4}"
 RX3_NANT="${RX3_NANT:-4}"
 BW100="${BW100:-0}"
+SENSE_API="${SENSE_API:-1}"
+SENSE_SOURCES="${SENSE_SOURCES:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/../../cmake_targets/ran_build/build"
 # nrL1_UE_stats-*.log/etc. are created in each nr-uesoftmodem's own CWD, which is wherever THIS
@@ -72,13 +77,9 @@ BUILD_DIR="$SCRIPT_DIR/../../cmake_targets/ran_build/build"
 # up front, before anything below might change directory.
 RUN_CWD="$PWD"
 
-# All 3 confs' out_path/report_path are hardcoded absolute paths (see each .conf's header comment),
-# NOT $OUT_DIR-relative -- kept as-is from Stage 1/2 rather than silently diverging from what the
-# .conf files actually say.
 if [ "$BW100" -eq 1 ]; then
   GNB_CONF="gnb.sa.rfsim.100mhz.conf"
   ALL_RX_CONFS=("ue.passive${CONF_TAG}.100mhz.conf" "ue.passive2${CONF_TAG}.100mhz.conf" "ue.passive3${CONF_TAG}.100mhz.conf")
-  ALL_RX_REPORTS=("/tmp/passive_rx/passive_reports_100m.jsonl" "/tmp/passive_rx/passive_reports_rx2_100m.jsonl" "/tmp/passive_rx/passive_reports_rx3_100m.jsonl")
   # --ssb sets ssb_start_subcarrier (nr-uesoftmodem.h), NOT an SSB ARFCN -- default 516, left
   # --ssb is ssb_start_subcarrier (nr-uesoftmodem.h), NOT an SSB ARFCN -- and it is BANDWIDTH- AND
   # PLACEMENT-DEPENDENT, which is the root cause of the "273 PRB won't sync" problem first seen here.
@@ -98,29 +99,12 @@ if [ "$BW100" -eq 1 ]; then
 else
   GNB_CONF="gnb.sa.rfsim.conf"
   ALL_RX_CONFS=("ue.passive${CONF_TAG}.conf" "ue.passive2${CONF_TAG}.conf" "ue.passive3${CONF_TAG}.conf")
-  ALL_RX_REPORTS=("/tmp/passive_rx/passive_reports.jsonl" "/tmp/passive_rx/passive_reports_rx2.jsonl" "/tmp/passive_rx/passive_reports_rx3.jsonl")
   # Cell parameters -- must match gnb.sa.rfsim.conf (absoluteFrequencySSB 621312 -> 3319.68 MHz).
   CELL_ARGS=(-C 3319680000 -r 106 --numerology 1 --ssb 516 --band 78)
 fi
 ALL_RX_LABELS=("rx1" "rx2" "rx3")
 RX_CONFS=("${ALL_RX_CONFS[@]:0:$NUM_RX}")
-RX_REPORTS=("${ALL_RX_REPORTS[@]:0:$NUM_RX}")
 RX_LABELS=("${ALL_RX_LABELS[@]:0:$NUM_RX}")
-
-# Prefer each conf's OWN report_path over the hardcoded ALL_RX_REPORTS above. Those arrays only ever
-# knew about the base and .100mhz variants, so any new CONF_TAG whose confs write elsewhere would
-# have been SCORED AGAINST ANOTHER ARM'S FILE -- silently, and looking entirely plausible. Added
-# 2026-07-30 while building the pdsch_data A/B, whose control arm needs distinct report paths
-# precisely so the two arms cannot contaminate each other. Falls back to the array when a conf has
-# no report_path line, so existing behaviour is unchanged.
-for i in "${!RX_CONFS[@]}"; do
-  conf_report=$(sed -n 's/^[[:space:]]*report_path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
-                "$SCRIPT_DIR/${RX_CONFS[$i]}" | head -1)
-  if [ -n "$conf_report" ] && [ "$conf_report" != "${RX_REPORTS[$i]}" ]; then
-    echo "note: ${RX_LABELS[$i]} report path taken from ${RX_CONFS[$i]}: $conf_report"
-    RX_REPORTS[$i]="$conf_report"
-  fi
-done
 
 ALL_UE_CONFS=("${ACTIVE_CONF_OVERRIDE:-ue.active.conf}" "ue.active2.conf" "ue.active3.conf")
 ALL_UE_LABELS=("ue1" "ue2" "ue3")
@@ -138,19 +122,6 @@ RX_LOGS=()
 for label in "${RX_LABELS[@]}"; do RX_LOGS+=("$OUT_DIR/ue_${label}.log"); done
 
 mkdir -p "$OUT_DIR"
-# The .conf files' out_path/report_path are hardcoded to /tmp/passive_rx/... (see the "Hardcoded,
-# not $OUT_DIR-relative" note above) -- ensure that directory exists regardless of $OUT_DIR. This
-# was previously masked by residual state from earlier runs; found live when /tmp/passive_rx got
-# cleaned (systemd-tmpfiles or similar) mid-session and every receiver silently produced 0 reports.
-mkdir -p /tmp/passive_rx
-# sensing_engine.cc opens report_path/out_path files in APPEND mode (std::ios::app, by design -- a
-# single long-running receiver process writes one line per completed CPI) -- meaning across SEPARATE
-# invocations of this script at the same hardcoded /tmp/passive_rx/* paths, reports silently
-# ACCUMULATE forever unless cleared here. Found live 2026-07-28: a fusion run's tracks scored
-# ~612s older than the run's own ground-truth window, i.e. isac-track was replaying leftover reports
-# from an EARLIER run this session, not just the current one. Clear before every run.
-rm -f /tmp/passive_rx/passive_reports*.jsonl /tmp/passive_rx/passive_sensing*
-
 # Both UEs default to Mod_id=0 and each writes nrL1_UE_stats-0.log (among other nr*_stats.log
 # files) into the CWD. The active UE runs under sudo, so its copy is root-owned; when the passive
 # UE (non-root) starts afterward and tries to open/truncate the same filename, open() fails and
@@ -162,8 +133,7 @@ sudo -n rm -f "$RUN_CWD"/nr*_stats*.log 2>/dev/null
 # UE2/UE3's own netns + veth pair (see ue.active2.conf/ue.active3.conf's header comment for WHY --
 # nr-uesoftmodem's PDU session TUN name has no per-process instance knob, so concurrent active UEs
 # must be network-namespace-isolated to each get their own "oaitun_ue1"). Mirrors the netns/veth
-# pattern tests/sensing_sim's run_sim_traffic_iperf_ns3.sh already uses for extra receivers, and
-# OAI's own ci-scripts/yaml_files/5g_vrtsim_multiue (one container = one netns per UE) -- confirmed
+# pattern OAI's own ci-scripts/yaml_files/5g_vrtsim_multiue (one container = one netns per UE) -- confirmed
 # from radio/rfsimulator/simulator.cpp that the rfsim SERVER binds the wildcard address
 # (getaddrinfo(NULL,...)+AI_PASSIVE), so it accepts the veth peer connection with no gNB-side change.
 UE_NETNS_BY_IDX=("" "oai_pue2" "oai_pue3")   # index 0 (ue1) stays in the default netns
@@ -207,7 +177,7 @@ cleanup() {
   # its sleep with nothing left to kill (harmless, but noisy and pointless).
   [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   # Match on the config paths so we never touch unrelated OAI processes on this machine
-  # (e.g. a concurrent tests/sensing_sim run). Prefix match "ue.passive"/"ue.active" (not the exact
+  # (e.g. another UE run). Prefix match "ue.passive"/"ue.active" (not the exact
   # "ue.passive.conf" string) so this catches ue.passive2.conf/ue.active2.conf etc too.
   sudo -n pkill -9 -f "passive_rx/ue.active"        2>/dev/null
   pkill      -9 -f "passive_rx/ue.passive"          2>/dev/null
@@ -223,11 +193,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# WATCHDOG: guarantees the whole run (including its fusion/scoring post-processing, a stuck gNB/UE
+# WATCHDOG: bounds the whole run (including receiver summary, a stuck gNB/UE
 # `wait_for` retry loop, or an iperf3 client that doesn't self-terminate at its own -t deadline under
 # congestion -- see that pkill's own comment above) cannot outlive DURATION plus a bounded grace.
 # Found live 2026-09-27: a 600s run was still alive 30+ minutes later. Nothing between here and the
-# EXIT trap firing is individually timeout-guarded (isac-track/merge/rnti_gate run synchronously with
+# EXIT trap firing is individually timeout-guarded (cleanup runs synchronously with
 # no timeout, and the sequential per-UE/per-receiver wait_for attach budget alone is
 # 30 + NUM_UE*300 + NUM_RX*150 seconds), so a single hang anywhere in that path previously meant an
 # unbounded run. This does not diagnose which one hung; it guarantees the run ends regardless of
@@ -353,23 +323,34 @@ sudo -n chmod 666 "$RUN_CWD"/nr*_stats*.log 2>/dev/null
 
 # --- 3. passive receivers ---------------------------------------------------------------------
 # Started AFTER the active UE is connected, so the CSI-RS/PDCCH they sense is already on the air.
-# rx2/rx3 are additional surveyed positions for fusion -- see ue.passive2.conf/ue.passive3.conf's
-# header comments for what differs per receiver (rx_pos_x/y, distinct rx_id/out_path).
+# rx2/rx3 are additional surveyed positions; each exports independent observations.
 echo "--- starting $NUM_RX PASSIVE UE(s) (--passive-rx) ---"
 ALL_RX_NANT=("$RX1_NANT" "$RX2_NANT" "$RX3_NANT")
+RX_PIDS=()
 for i in "${!RX_CONFS[@]}"; do
   label="${RX_LABELS[$i]}"; conf="${RX_CONFS[$i]}"; log="${RX_LOGS[$i]}"; nant="${ALL_RX_NANT[$i]}"
   ANT_ARGS=()
   if [ "$nant" -gt 1 ]; then
     ANT_ARGS=(--ue-nb-ant-rx "$nant")
-    echo "  $label: AoA enabled, --ue-nb-ant-rx $nant"
+    echo "  $label: --ue-nb-ant-rx $nant"
+  fi
+  if [ "$SENSE_API" -eq 1 ]; then
+    SENSE_ARGS=(--sensing.enable 1
+      --sensing.records_path "$OUT_DIR/${label}.records.jsonl"
+      --sensing.cfr_path "$OUT_DIR/${label}.cfr"
+      --sensing.cfr_antennas "$nant"
+      --sensing.cfr_ring_frames 32 --sensing.cfr_max_re 46200 --sensing.rec_ring_slots 1024)
+    [ -n "$SENSE_SOURCES" ] && SENSE_ARGS+=(--sensing.sources "$SENSE_SOURCES")
+  else
+    SENSE_ARGS=(--sensing.enable 0)
   fi
   $(pin_for rx "$i") "$BUILD_DIR/nr-uesoftmodem" -O "$SCRIPT_DIR/$conf" --rfsim --passive-rx \
-    "${CELL_ARGS[@]}" "${ANT_ARGS[@]}" >"$log" 2>&1 &
+    "${CELL_ARGS[@]}" "${ANT_ARGS[@]}" "${SENSE_ARGS[@]}" >"$log" 2>&1 &
+  RX_PIDS+=("$!")
   # 150s, not 60: the passive receivers start LAST, with the gNB and every active UE already
   # loading the box, and at 273 PRB with 4 antennas initial sync is slow. 60s was marginal and was
   # measured timing out (val8) even though the receiver was healthy -- it had printed its sensing
-  # channel setup and started its engine thread, it simply had not reached SIB1 yet.
+  # channel setup and started export, it simply had not reached SIB1 yet.
   wait_for "$log" "SIB1 decoded" 150 "passive UE $label synced and decoded SIB1" || exit 1
 done
 
@@ -491,6 +472,9 @@ echo "  (per-20s DL timeline -> $TRAFFIC_TS; stalls are warned about as they hap
 
 sleep "$DURATION"
 kill "$TRAFFIC_MON_PID" 2>/dev/null
+# Let each exporter flush its rings and close both files before the reader sees them.
+for pid in "${RX_PIDS[@]}"; do kill -INT "$pid" 2>/dev/null || :; done
+for pid in "${RX_PIDS[@]}"; do wait "$pid" 2>/dev/null || :; done
 
 # --- 5. summary --------------------------------------------------------------------------------
 echo
@@ -530,45 +514,23 @@ if [ -f "$TRAFFIC_TS" ]; then
   echo "  timeline: $TRAFFIC_TS"
 fi
 
-summarize_rx() { # summarize_rx <label> <log_file> <reports_jsonl>
-  local label="$1" log="$2" reports="$3"
+summarize_rx() { # summarize_rx <label> <log_file>
+  local label="$1" log="$2"
   echo "--- PASSIVE $label: never transmitted ---"
-  # Every one of these keywords also appears, case-insensitively, in the receiver's OWN "SENSING:"
-  # log lines that describe UL activity it merely OBSERVED off the air (occ[...pusch=N...] CFR
-  # occupancy telemetry, blind PDCCH's own PUSCH/PRACH decode diagnostics) -- not uplink the passive
-  # receiver itself transmitted. Found live 2026-09-27: those lines false-positived this check on
-  # every run with any blind-PDCCH/ul_pusch activity, even though the receiver never actually
-  # transmitted. All of this receiver's own decode/telemetry output is tagged "SENSING:"; a real
-  # self-transmission would come from the ordinary OAI UL stack, which never uses that tag.
   local ul; ul=$(grep -iE "prach|RAPROC|preamble|Msg3|PUCCH|PUSCH" "$log" 2>/dev/null | grep -vc "SENSING:")
   echo "  uplink/RA log lines: $ul   (MUST be 0)"
   [ "$ul" -eq 0 ] && echo "  VERDICT: no uplink activity" || echo "  VERDICT: *** UPLINK DETECTED ***"
-
-  echo "--- PASSIVE $label: what it captured ---"
-  grep -c "SENSING" "$log" | sed 's/^/  SENSING log lines:   /'
-  grep -oE "occ\[[^]]*\]" "$log" | tail -3 | sed 's/^/  CFR occupancy:       /'
-  grep "blind PDCCH monitor summary" "$log" | tail -1 | sed 's/^/  blind PDCCH:         /'
-  if [ -f "$reports" ]; then
-    wc -l < "$reports" | sed 's/^/  DetectionReports:    /'
-    python3 - "$reports" <<'PY' 2>/dev/null
-import json,sys
-rs=[json.loads(l) for l in open(sys.argv[1])]
-if rs:
-    r=rs[-1]
-    print(f"  CPI duration:        {r['cpi_duration_ns']/1e9:.3f} s   "
-          f"(range_res {r['range_res_m']:.2f} m, vel_max +/-{r['vel_max_mps']:.3f} m/s)")
-    n=sum(1 for x in rs if any(10 <= d['bistatic_range_m']/r['range_res_m'] <= 14 for d in x['detections']))
-    print(f"  CPIs with a detection in the synthetic target's range band: {n}/{len(rs)}")
-    ndet=sum(len(x['detections']) for x in rs)
-    naz=sum(1 for x in rs for d in x['detections'] if 'azimuth_deg' in d)
-    if ndet>0:
-        print(f"  detections carrying azimuth (AoA):    {naz}/{ndet}")
-PY
-  fi
-  grep "SENSING_CHANNEL gt:" "$log" | tail -1 | sed 's/^/  ground truth: /'
+  echo "--- PASSIVE $label: receiver observations ---"
+  grep -c "SENSING" "$log" | sed 's/^/  SENSING log lines: /'
+  grep "blind PDCCH monitor summary" "$log" | tail -1 | sed 's/^/  blind PDCCH: /'
+  grep "ISAC_METRICS" "$log" | tail -1 | sed 's/^/  final metrics: /'
 }
 for i in "${!RX_LABELS[@]}"; do
-  summarize_rx "${RX_LABELS[$i]}" "${RX_LOGS[$i]}" "${RX_REPORTS[$i]}"
+  summarize_rx "${RX_LABELS[$i]}" "${RX_LOGS[$i]}"
+  if [ "$SENSE_API" -eq 1 ] && [ -f "$OUT_DIR/${RX_LABELS[$i]}.records.jsonl" ] && [ -f "$OUT_DIR/${RX_LABELS[$i]}.cfr" ]; then
+    python3 "$SCRIPT_DIR/../../tools/sense_api/read_sense.py" \
+      "$OUT_DIR/${RX_LABELS[$i]}.records.jsonl" "$OUT_DIR/${RX_LABELS[$i]}.cfr"
+  fi
 done
 
 echo "================================================"

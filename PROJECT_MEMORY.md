@@ -243,7 +243,7 @@ TDRA entries are unobservable, and no finite receiver can infer unsignalled, unu
 | Dedicated control | Blind CORESET discovery, C-RNTI recovery, DCI 1_1/0_1 length + layout resolution, bounded search families | Complete, fair, AL-complete, multi-CORESET, change-detecting |
 | Data | PDSCH/PUSCH decode, rank ≤ 4 DL (passive), one-layer UL, Technique D config sweep, data-aided CFR | Same, GPU-resident, HARQ-aware |
 | State | Evidence-label tracker (`nr_passive_acq_state.c`), local DL relearning, stream-gap LOST | Persistent per-cell state machine with degraded/local/global reacquisition |
-| Output | Log lines, sensing CFR rows into the (separate) ISAC engine, JSONL reports | Per-cell observation API (§21) |
+| Output | Log lines, schema-2 grant/RS/session JSONL and CFR v1 frames (§21) | Per-cell observation API across carriers |
 | Validation | Offline + simulated beds; **HEAD never OTA** | Gate model §12, OTA on multiple cells/operators |
 
 ---
@@ -297,9 +297,8 @@ TDRA entries are unobservable, and no finite receiver can infer unsignalled, unu
    v
  Evidence feedback (generation-tagged tickets) -> hypothesis controllers (nr_hyp_sweep.c, nr_crc_evidence.h)
    v
- Outputs: CFR submissions (SSB, PDSCH DM-RS, PDSCH data-aided, PUSCH DM-RS/data, CSI-RS) -> NR_UE_ISAC
-   sensing engine (separate subsystem, out of scope for the receiver work) ; acquisition state log ;
-   counters/summary log lines
+ Outputs: schema-2 session/grant/RS records + NRCF v1 CFR frames (SSB, CSI-RS, PDSCH,
+   PUSCH, SRS; PRACH records), acquisition state and metrics log lines
 ```
 
 ### 2.2 Block-by-block reference (current implementation)
@@ -383,20 +382,19 @@ status. Validation status here is summarized; details are in §13 (offline) and 
 98.9 % CRC; OCUDU 76 % C-RNTI PDSCH CRC). OTA DL TB rate is low (`VOID_DL_RATE`) `[KNOWN ISSUE]`. Branch `td/convergence-levers` (2026-10-02, not merged) reworks Technique D k0 handling and adds DCI-history evidence: §3.3.1, §23.9.
 
 **B9. Reference-signal / CFR production** — `openair1/PHY/NR_UE_ISAC/nr_isac.cc` API
-(`nr_isac_submit_cfr*`), producers in the decoders. The sensing engine itself is **out of scope** for the
-receiver work (see §2.3).
+(`nr_isac_submit_cfr*`), producers in the decoders. The adapter exports CFR and RS records
+through `nr_sense_api` (§21); it runs no sensing algorithm.
 
 **B10. Acquisition state** — `nr_passive_acq_state.c`: evidence labels SEARCHING, PBCH_LOCKED, SIB1_DECODED,
 PDCCH_LOCKED, CORESET_VERIFIED, CELL_CONFIGURED, DL_CONVERGED, UL_CONVERGED, TRACKING, LOST (§11, §19).
 
 ### 2.3 Scope boundary: receiver vs sensing
 
-`openair1/PHY/NR_UE_ISAC/` (range-Doppler, CFAR, clutter/ECA, AoA, trackers, sync STO/CFO/SFO for CPIs) is a
-**separate consumer subsystem** ported from a srsUE sensing pipeline. It is compiled only with
-`-DENABLE_ISAC_SENSING=ON` (default OFF in the root `CMakeLists.txt`; ON in the sens6 build dirs). The most
-recent sensing development lives on the **unmerged** branch `feature/multirx-clean-adaptive` (§3.3). For the
-DGX work, treat sensing as a downstream consumer of the receiver output API (§21); do not debug the receiver
-through sensing metrics.
+**HISTORICAL (before `c7c6fa8bb3`).** The in-receiver range-Doppler, clutter/ECA, CFAR, AoA,
+tracking and detection bus existed on older branches. Commit `c7c6fa8bb3` removed the engine and
+its output consumers. Operational captures on this branch use the receiver's schema-2 sensing export
+(§21); no in-receiver detection or tracking is run. CFO/SFO and data-aided CFR reconstruction
+remain receiver functions.
 
 ---
 
@@ -553,8 +551,8 @@ Defaults: "branch" = code default at `003b8c3f93`; "main" = default on the merge
 | `tests/passive_rx/offline_sync_contract/*` | Offline sync contract gtest. `build_and_run.sh` is now **arch-aware** (x86 lines verbatim, aarch64 branch = the DGX port; A13, `a1a06e1f88`/`3b6119853f`/`2547ff90aa`); aarch64 branch verified only by an echo-diff (§13.2) |
 | `tests/passive_rx/agnostic/run_dci_regression.sh` | CPU-only DCI regression wrapper around `test_nr_pdcch_blind_monitor` |
 | `tests/passive_rx/ota/*` | Older OTA configs/scripts (catch-rate, repeatability) — STALE addresses |
-| `tests/passive_rx/monitor/*` | Live web monitor (sensing oriented) |
-| `tests/sensing_sim/*`, `tests/ota_sync_bench/*` | Sensing simulation scenes/scorers (sensing scope) |
+| `tests/passive_rx/monitor/*`, `tests/sensing_sim/*` | **HISTORICAL:** engine consumers removed in Task 2 (`c7c6fa8bb3`); no live detection bus or scene scorer remains |
+| `tests/ota_sync_bench/*` | OTA waveform and capture utilities; detection/grid consumers were removed in Task 2 (`c7c6fa8bb3`) |
 | `tests/passive_rx/dgx/rfsim_arm.sh`, `rfsim_regress.sh`, `score_rx.py` (+`test_score_rx.py`, `fixtures/`) | **In-tree rfsim regression gate** (A1): one agnostic 106-PRB arm, JSON score (sync/ttc/CONVERGED/crc %/drop_full %/CPU/RSS); gate `GATE_CRC_MIN`/`GATE_DROP_MAX` + CONVERGED>=1. Knobs `V4SHIM`, `SCANTHREAD`, `COREMAP` (§10.2). Cloud thresholds 93.0/2.5, DGX 98/1 — **HISTORICAL for the DGX since 2026-10-02 on `td/convergence-levers`: default is now `GATE_MODE=postconv` (§12); the 98/1 rule survives as `GATE_MODE=legacy`.** `score_rx.py` (`a36eeee63e`, `ce0cdfb973`) adds `contexts` (dedup by (rnti, tda), first convergence), `reopens`, `ttc_by_tda`, `postconv_crc_pct`, `postconv_decoded`, `search_crc_pct`, `ldpc_zero_tb`; `python3 score_rx.py --gate <arm_dir>` re-scores a run; calibration + sensitivity in `tests/passive_rx/dgx/README.txt`. **2026-10-04: the 1-RX 150 s thresholds are superseded by the provisional 4-RX gate (420 s arms, §12), which the controller sets in `rfsim_regress.sh` on `td/fast-defaults`** |
 | `tests/passive_rx/td_sim/campaign.py` (+`test_campaign.py`) | Runs `nr_td_sim` arm matrices in parallel (≤ 8 processes; never while an rfsim bed runs), writes per-run JSON + summaries (levers Task 5/6; `ablation_p1.json`) |
 | `tests/passive_rx/td_sim/gate_p2.py` (+`gate_p2.json`) | Levers Task 7: P2 failure-only probe-evidence Monte-Carlo gate → `results_2026-10-01_p2/` |
@@ -698,7 +696,7 @@ which -a uhd_config_info uhd_find_devices uhd_usrp_probe; uhd_config_info --vers
 | UHD transport | kernel sockets (`DPDK` empty in run_arm; `use_dpdk` not configured) | `run_arm.sh` | Start with kernel sockets. DPDK on ARM is a later optimisation. |
 | NIC names | `enp2s0f1np1` (data), `enp128s31f6` (mgmt); older scripts still carry `enp129s0f0np0`, `enp101s0f1np1` | `run_arm.sh` `NIC=`, `rxg_sweep.sh`, `armval.sh`, host scripts | Pass `NIC=` explicitly; fix defaults later. |
 | IPs | data `192.168.20.2` (X410) / `192.168.20.1` + `192.168.20.65` (host); mgmt `192.168.1.140` (X410, dnsmasq lease) / `192.168.1.1` (host). Stale in older scripts: `192.168.10.2`, `128.178.122.3/.20/.174`, `192.168.10.45` | `run_arm.sh`, `tests/passive_rx/ota/*`, `ab_*.sh` | Discover the new X410's addresses (§7) and pass `DATA=`, `MGMT=`. |
-| Paths | `/home/sens/NICOLA/...` in ~40 scripts (`run_arm.sh` `BASE=/home/sens/NICOLA/captures`, `REPO` default **`/home/sens/NICOLA/openairinterface5g-total-passive-ue`** (!), `cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/cmake_targets`), `ssh sens4 stat /home/sens/NICOLA/gnbLogs/gnb.log` | `tests/passive_rx/captures/*.sh`, `run_passive_rx.sh`, `run_ocudu_passive.sh`, `sensing_sim/_run_*.sh` | Always set `REPO=`/`BIN=`; remove or make optional the `ssh sens4` bracket. |
+| Paths | `/home/sens/NICOLA/...` in older capture scripts (`run_arm.sh` `BASE=/home/sens/NICOLA/captures`, `REPO` default **`/home/sens/NICOLA/openairinterface5g-total-passive-ue`** (!), `cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/cmake_targets`), `ssh sens4 stat /home/sens/NICOLA/gnbLogs/gnb.log` | `tests/passive_rx/captures/*.sh`, `run_passive_rx.sh`, `run_ocudu_passive.sh` | Set `REPO=`/`BIN=` for the active launchers; remove or make optional the `ssh sens4` bracket. The `sensing_sim/_run_*.sh` paths were retired in Task 2 (`c7c6fa8bb3`). |
 | Runtime tmp paths (C code) | `/tmp/passive_rx` (SIB1 cache, idsweep snapshots, reports), `/tmp/coresets_discovered.txt` (discovery hand-off), `/tmp/oaiue_sensing`, `/tmp/pbch_capture.bin`, `/tmp/pdcch_fixture.bin` | `nr_pdcch_blind_monitor.c`, `nr_pdcch_coreset_map.c`, `nr_isac.cc`, `phy_procedures_nr_ue.c`, `dci_nr.c` | Fine on Linux; `/tmp/passive_rx` is root-owned when the receiver runs as root — user tools cannot write there. |
 | Usernames/hosts | `sens`, `sens4`, `sens6`, `sensnuc3`, `root@<mgmt>` for `systemctl restart usrp-hwd` | scripts | Adapt. |
 | Real-time | PREEMPT_RT kernel, `isolcpus=2-3`, reader thread pinned to core 2 (`ISAC_UE_RT_CORE`), thread pool `--thread-pool 0,1,4,5,6,7`, NIC IRQs pinned to cores 8–13, softmodem `taskset 0-7`, governor `performance` | kernel cmdline, `run_arm.sh`, `cpu-performance-governor.service` | Re-derive a core map for the GB10 (big/little cores? check `lscpu`). An RT kernel may not be available on DGX OS; measure drops without it first. |
@@ -879,8 +877,8 @@ There is one build system (OAI CMake). "Modes" are CMake options, not separate p
 
 | Build | Options | Produces |
 |---|---|---|
-| Receiver (passive, no sensing) | `-DENABLE_ISAC_SENSING=OFF` (root default) | `nr-uesoftmodem` with a no-op sensing stub. **12 sensing test binaries fail to link in this mode** (expected). |
-| Receiver + sensing (as on sens6) | `-DENABLE_ISAC_SENSING=ON` | full CFR→sensing engine |
+| Receiver (passive, no sensing export) | `-DENABLE_ISAC_SENSING=OFF` | `nr-uesoftmodem` with a no-op adapter; sensing API unit tests link in OFF mode. |
+| Receiver + sensing export | `-DENABLE_ISAC_SENSING=ON` | schema-2 records and CFR v1 frames from receiver taps; no sensing algorithm. |
 | Offline tests | `-DENABLE_TESTS=ON`, target `tests` | gtest binaries + `ctest` |
 | GPU LDPC (optional) | `-DENABLE_LDPC_CUDA=ON -DLDPC_CUDA_ARCH=<cc>` (DGX `121`, sens6 `89`; a list such as `"89;121"` is accepted and validated) | `libldpc_cuda.so` plugin (G1 TB pool + CB0 entry), `libtd_cb0_gpu.so` (CB0 GPU dematch), `pdsch_gpu`, `pdcch_gpu`, `polar_sc_cuda`, tests `test_ldpc_cuda_pool`, `test_ldpc_cb0_cuda`, `test_nr_td_cb0_gpu_backend`. **Needed for the GPU CB0 backend** (`ISAC_TD_CB0_BACKEND=auto` falls back to the CPU backend and logs "not available, CPU only" when the plugin is absent); in rfsim the receiver found the plugin with `LD_LIBRARY_PATH=<build dir>`. The acceleration round was built and tested with `-DENABLE_LDPC_CUDA=ON -DLDPC_CUDA_ARCH=121` (§13.4) |
 | rfsim beds | `-DOAI_SIMU=ON` + targets `rfsimulator` (+ `nr-softmodem` for the gNB) | `librfsimulator.so` (dlopen'd) |
@@ -960,8 +958,65 @@ CFR; `mcs_table=0` = unknown → Technique D), `pdcch_blind_monitor_rnti_range`,
 `pdcch_blind_monitor_scan_thread`, `pdcch_blind_monitor_dci01`, `pdcch_blind_monitor_ul_pusch`,
 `pdcch_blind_monitor_ul_uci`, `pdcch_blind_monitor_ul_thread`, and manual/oracle keys
 (`pdcch_blind_monitor_coreset/_ss/_bwp/_tda/_tda_common/_dmrs/_dci_bits/_ul_bwp/_ul_tda/_ul_dmrs/_ul_dci_bits/_ul_misc`)
-— **manual keys make a run an oracle arm, not agnostic**. Plus sensing keys (`sources`, `cpi_slots`,
-`report_path`, `out_path`, `report_endpoint`, `rx_id`, …) that only matter with sensing enabled.
+— **manual keys make a run an oracle arm, not agnostic**.
+
+**Sensing API configuration (`sensing = { ... };`, 2026-10-05).** The example is
+`tests/passive_rx/sense_api.example.cfg`. The export adapter accepts these keys:
+
+| Key | Meaning and default |
+|---|---|
+| `enable` | 0 by default. With 0, the adapter returns immediately. |
+| `sources` | Exact comma-separated tokens: `csi_rs,pdsch_dmrs,pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data,ssb,prach,srs`. No `all` alias. Missing/empty/unknown selection falls back to legacy `source` (default `csi_rs`). PRACH and SRS need explicit tokens. |
+| `source` | Legacy single-source fallback: `csi_rs`, `pdsch_dmrs` or `pdsch_data`; unknown → `csi_rs`. |
+| `records_path`, `cfr_path` | Schema-2 JSONL and CFR v1 output paths; unset = no file sink. A configured endpoint is optional. Files are replaced at open. |
+| `endpoint` | Optional ZMQ mirror for `rec` and `cfr` topics when built with libzmq; no detection bus. |
+| `cfr_ring_frames`, `cfr_max_re`, `cfr_antennas`, `rec_ring_slots` | Preallocated ring depth 32 (1..65536), RE cap 46200 (1..46200), antenna cap 0 = receiver RX count (1..8 explicit), record slots 1024 (1..65536). Four RX at defaults costs about 53 MiB. |
+| `rx_id`, `rx_array` | Session identity and antenna-layout metadata only. |
+| `subslot_symbols`, `subslot_min_re`, `subslot_min_snr_db` | Receiver data-aided reconstruction controls, not engine controls; defaults 0, 600, 0. |
+
+The blind PDCCH and CSI-RS monitors also read their own `pdcch_blind_monitor_*` and
+`csirs_monitor` keys in the same section; the manual PDCCH keys listed above remain oracle
+controls. The adapter **accepts and ignores** every retired algorithm key below and logs
+one `SENSING: ignored legacy algorithm keys` line for explicitly set values. They have no
+runtime effect: `cpi_slots`, `interpolate`, `capture`, `selftest`, `selftest_targets`, `selftest_los`,
+`sync_correction`, `sync_sto`, `sync_cfo`, `sync_sfo`, `sync_los`, `nominal_los_range_m`, `cfar_guard`,
+`cfar_train`, `cfar_per_column`, `cfar_per_row`, `subbin_interp`, `gating_reject`, `gating_max_offsets`,
+`gating_min_rel`, `gating_tol_bins`, `gating_snr_margin`, `cfar_pfa`, `cfar_target_fa_per_cpi`,
+`zero_doppler_guard`, `zero_range_guard`, `dealias_taper_bins`, `nms_range_bins`, `nms_doppler_bins`,
+`max_detections`, `conj_image_reject`, `conj_image_guard`, `harmonic_reject`, `harmonic_guard`,
+`harmonic_max_k`, `harmonic_tol`, `harmonic_snr_margin`, `harmonic_pos_reject`, `harmonic_pos_chi2`,
+`harmonic_pos_range_tol_m`, `det_quality_adapt`, `det_quality_cost_ratio`, `adaptive_clutter_guard`,
+`max_range_m`, `far_harmonic_reject`, `far_harmonic_far_m`, `far_harmonic_near_m`,
+`cfar_fa_adapt_enable`, `cfar_fa_min`, `cfar_fa_max`, `cfar_fa_adapt_rate`, `cfar_fa_target_min_det`,
+`cfar_fa_target_max_det`, `cpi_quality_gate`, `cpi_quality_max_ratio`, `cpi_quality_ema_alpha`,
+`clutter_removal`, `eca_delay_max_m`, `eca_doppler_max_mps`, `detector`, `mf_per_row_norm`,
+`clean_deconv`, `clean_occ_aware`, `clean_max_components`, `clean_max_components_cap`, `clean_loop_gain`,
+`clean_stop_db`, `clean_restore_bins`, `range_window`, `range_window_sidelobe_db`, `range_whiten`,
+`doppler_nudft`, `slow_time_complete`, `mc_rank`, `mc_rank_max`, `mc_iters`, `mc_power_iters`,
+`doppler_sparse`, `doppler_sparse_iters`, `doppler_sparse_lambda_scale`, `doppler_sparse_peak_ratio`,
+`doppler_sparse_harmonic_ratio`, `doppler_sparse_lambda_min`, `doppler_sparse_lambda_max`,
+`doppler_sparse_adapt_rate`, `doppler_sparse_target_min_det`, `doppler_sparse_target_max_det`,
+`track_enable`, `track_model`, `track_init_acc_var`, `track_r_var_m2`, `track_rv_var_m2s2`,
+`track_q_accel`, `track_gate_sigma`, `track_init_vel_var`, `track_max_coast`, `track_q_adapt`,
+`track_nis_ewma_alpha`, `track_q_mult_max`, `track_q_adapt_window_sigma`, `track_max_tracks`,
+`track_confirm_m`, `track_confirm_n`, `track_confirm_target_pfa`, `track_assoc_gate_sigma`,
+`track_harmonic_reject`, `track_harmonic_range_m`, `track_flicker_reject`, `track_flicker_max_db`,
+`track_flicker_min_updates`, `track_flicker_ewma_alpha`, `track_assoc_gate_max_sr_m`,
+`track_assoc_gate_max_sv_mps`, `aoa_enable`, `rx_array_boresight_deg`, `aoa_estimator`,
+`aoa_scan_step_deg`, `aoa_min_snr_db`, `aoa_cell_search_bins`, `aoa_broadside_deg`, `aoa_selfcal`,
+`out_path`, `rx_pos_x`, `rx_pos_y`, `illuminator_id`, `tx_pos_x`, `tx_pos_y`, `report_path`,
+`report_endpoint`.
+
+`ISAC_PRACH_MARGIN_DB10` is the PRACH detector's dB×10 floor margin override
+(default 80, valid 1..300; invalid values use 80). `ISAC_METRICS_PATH` and `ISAC_OBS_PATH` remain the metrics JSONL and
+independent schema-1 grant-output paths; `ISAC_RECONF` controls nullable epoch fields. There
+is no engine endpoint or algorithm environment variable to set.
+The `run_passive_rx.sh` launcher accepts `SENSE_API` (default 1; 0 passes
+`--sensing.enable 0`) and `SENSE_SOURCES` (optional exact-token override; unset leaves
+each config's source selection). For tests, `NR_SENSE_GOLDEN_DIR` tells
+`SenseApi.GoldenReaderFixture` where to write its JSONL/CFR fixture;
+`NR_SENSE_API_TEST_BIN` selects that C test binary for the Python tests.
+
 
 **Environment variables added 2026-10-01 (cloud Track-A session):**
 
@@ -1406,6 +1461,7 @@ to `ISAC_METRICS_PATH`. Flat object, cumulative counters unless noted; unknown =
 | CB0 elimination (2026-10-04) | `td_cb0_grants`, `td_cb0_batches`, `td_cb0_admissible`, `td_cb0_items`, `td_cb0_inadmissible{not_new_rv0, gated, iq_stale, lbrm, rv_retry, prg_ptrs, member_stale, llr_scale, gpu_llr, ldpc_error, rank, decoder, contract, budget, no_grantwork, reindexed}`, `td_cb0_budget_skips`, `td_cb0_not_testable` (other k0 etc.), `td_cb0_us_per_item` (CPU-µs incl. lazy signature computes), `td_cb0_backend{cpu, gpu}` (batches per backend), `td_cb0_premise_alarms` (expected 0), `td_cb0_eliminations`; `td_cb0_gpu{submits, items, ok, errors, timeouts, bypassed, sticky, trips, state, mode, failed, skipped}` (first ten = the GPU CB0 entry's own counters, `mode` 1 unified / 2 explicit; `failed`/`skipped` = batches voided / skipped by the backend failure rule and back-off). JSON line buffer raised to 6144 bytes |
 | PUSCH | `pusch_try`, `pusch_crc_ok` |
 | observations | `obs_pushed`, `obs_written`, `obs_dropped` |
+| sensing API v2 | `sense_cfr_drop` (sum across sources), `sense_rec_drop`, `sense_io_errors`, `sense_cfr_no_sink`; cumulative exporter counters. `prach_us`, `prach_drops`, `prach_skipped`, `srs_us`, `srs_jobs_dropped` are UL-worker cost/loss counters. |
 
 Cross-check (rfsim): last JSON `pdschq_crc_ok` equals the text `PDSCHQ … crc_ok` (§14.5). The four queue counters are
 loaded separately (not one atomic snapshot). Other lines:
@@ -1414,6 +1470,19 @@ loaded separately (not one atomic snapshot). Other lines:
 `Scan scratch budget <N> MB (ISAC_SCAN_SCRATCH_MB), <x> MB per GSCN, <t> worker threads: scanning <n> GSCN in batches of <b>`
 (every initial scan; LOG_W once on a bad env value); with N>1 scan consumers, pdsch decode on and no PDSCH queue, a
 LOG_W warns that Phase 2 holds its lock across each in-line decode (A7).
+
+### 11.14 Sensing API v2 export diagnostics (2026-10-05)
+
+`SENSING: ignored legacy algorithm keys: ...` lists explicitly configured retired keys once at init;
+they are accepted but inert (§10.2). `SENSING: unknown source '...' ignored` means that token
+did not enable a tap (`all` is unknown). `SENSING: no records_path/cfr_path is set` means enabled
+sources have no file sink and CFR pushes count as `sense_cfr_no_sink`. Invalid ring/cap values or
+an open failure produce `SENSING: invalid CFR or record ring...` or `cannot open export API`.
+`SENSING: passive PRACH inactive until SIB1 RACH config is available`, `PRACH passive inactive:
+FDD not supported`, and `passive PRACH skipped occasion starting in previous frame` explain
+missing PRACH records. `SENSING: blind SRS sequence hopping v=1 is unsupported` marks the
+unsearched SRS mode; `SENSING: SRS queue dropped=N` reports worker queue loss at shutdown.
+For source coverage and gaps, use the schema-2 reader in §21 and the cumulative counters in §11.13.
 
 ---
 
@@ -1523,7 +1592,7 @@ race, `shm_open() failed: errno 2`, unrelated to the receiver). Log:
 | MIB → blind monitor hand-off (NSA pos3, repeated MIB, no-CSS0) | real MAC MIB path | `ctest -R test_nr_ue_mib_blind_handoff` | 6 pass | pass | PASS |
 | Acquisition state, passive BWP, TDD pattern, MAC TA, MRC weights, arm sweep | synthetic | `ctest -R 'acq_state|passive_bwp|tdd_pattern|mac_ta|mrc_weights|arm_sweep'` | pass | pass | PASS |
 | UE RA procedures (link stubs) | unit | `ctest -R test_nr_ue_ra_procedures` | pass | pass (was a link failure until the misc lane) | PASS |
-| Sensing tests (`test_isac_*`, trackers, ECA, AoA, …) | synthetic | `ctest -R 'isac|tracker|eca|matrix|det_quality|sparse|clean|occ'` | pass with ENABLE_ISAC_SENSING=ON; **do not link with OFF** | pass (ON) | PASS (out of receiver scope) |
+| Sensing export tests (`test_nr_sense_api`, adapter, records, gating, PRACH, SRS) | synthetic | `ctest -R 'sense|isac_adapter|prach_passive|srs_blind'` | pass in sensing ON and OFF builds | [OFFLINE VERIFIED, DGX aarch64, S1–S6M] | live source coverage pending |
 | Raw-baseline SSB reference / normalization / validator | synthetic + no dataset | `cd tests/passive_rx/raw_baseline && OPENBLAS_NUM_THREADS=1 python3 -m unittest test_ssb_reference test_ssb_normalization test_validate_raw` | OK | **9/9 OK (2026-09-30)** | PASS |
 | SSB checker on recorded raw IQ | `captures/raw_batch.*` (4 × 4 s × 122.88 MS/s) | `python3 check_ssb_reference.py <dir> --ssb-center-hz 3408960000 --channel 2 --output …` | PCI 2, 20 ms period | dataset **missing** on sens6 | NOT RUN |
 | Same-build job replay (decoder oracle) | `captures/adaptive_ul_dl_mrc2.*/replay.sh` (55/55 DL TBs byte-identical, 2026-09-11) | `bash <dir>/replay.sh` | 55/55 | dataset **missing** | STALE / NOT RUN |
@@ -1621,7 +1690,7 @@ rank 1, 150 s, fully agnostic receiver config. Baseline on sens6 (2026-09-27, `s
 Receiver = HEAD (`3b67eeee39`, code `621bdc32a2`), gNB = **plain HEAD `nr-softmodem --phy-test`** (the test-gNB
 branch is not on GitHub, K23; the baseline arm needs no knobs), both on the DGX, **run as the normal user (no sudo,
 no RT priority, no pinning)**. Receiver conf = in-tree **fully agnostic** `tests/passive_rx/ue.passive.bwp.agn.conf`
-(106 PRB; no manual CORESET/SS/BWP/TDA/DCI/DM-RS keys; sensing engine disabled) — *not* the sens6 scratch conf
+(106 PRB; no manual CORESET/SS/BWP/TDA/DCI/DM-RS keys; historical capture with sensing disabled) — *not* the sens6 scratch conf
 `phyA2/ue.passive.q.agn.conf` (not in git), so the comparison with the sens6 baseline is close but not identical.
 Launch: `tools/run.sh` / `tools/run2.sh` (gNB `-D 0xff -O gnb.sa.rfsim.conf --rfsim`; receiver `-C 3319680000 -r 106
 --numerology 1 --band 78 --ssb 516`), scored by `tools/score.sh`; scores in `phytest/scores_*.txt`. ttc = time from
@@ -2142,7 +2211,7 @@ reaching SIB1.**
                                     ▼
                    PDSCH / DMRS / reference signals      CURRENTLY IMPLEMENTED (DL rank<=4, UL rank 1)
                                     ▼
-                       PHY/channel observations          CURRENTLY IMPLEMENTED (CFR to sensing engine)
+                       PHY/channel observations          CURRENTLY IMPLEMENTED (schema-2/CFR v1 export)
                                     ▼
                          Per-cell observation API        PLANNED
 ```
@@ -2281,46 +2350,48 @@ LDPC on the GPU is 1.05–1.4× an 8-thread CPU on wrong hypotheses, 2–3× on 
 
 ---
 
-## 21. Final output of the passive receiver (DESIGN TARGET)
+## 21. Final output of the passive receiver (implemented Sensing API v2)
 
-Per observation (one record per decoded/observed grant or reference-signal occasion):
+[IMPLEMENTED, NOT VALIDATED on live traffic, DGX aarch64, 2026-10-05] `nr_sense_api`
+exports schema-2 JSON Lines records (`session`, `grant`, `rs`) and an NRCF little-endian CFR
+version-1 stream. `tools/sense_api/read_sense.py RECORDS CFR` joins `rs.cfr_frame_id`, reports
+frame-ID gaps/drops and per-source counts, and can export `--npz OUT` with optional NumPy.
+A missing CFR link is `null` (PRACH has no CFR); unknown values are JSON `null`.
 
-| Field | Available today? | Where |
-|---|---|---|
-| timestamp (sample index + host time) | partial | sample timestamps in the RF path; CFR rows carry slot times; no unified record |
-| carrier_id, cell_track_id | no | — |
-| PCI, SSB index | yes | frame params |
-| SFN, slot | yes | UE proc / absolute slot counters |
-| frequency, bandwidth | yes | config / SIB1 facts |
-| signal type (SSB, PDCCH, PDSCH DM-RS, PDSCH data, PUSCH DM-RS, PUSCH data, CSI-RS) | yes | CFR source enums in `nr_isac.cc` |
-| scheduled resource information (RNTI, PRBs, symbols, MCS, rank, TDRA, DM-RS) | yes (internal job structs) | PDSCH/PUSCH job structs; not exported as records |
-| channel estimate (per antenna) | yes | CFR submissions (`nr_isac_submit_cfr_multi`) |
-| timing measurement (per-grant delay) | partial | UL per-grant delay refinement; DL via sync |
-| CFO / Doppler-related estimate | partial | CFOTRK, BRANCHFO, DMRSFO (residual) |
-| signal quality (SNR, EVM, CRC) | partial | logs/counters |
-| confidence / uncertainty | no (sensing has `p_real`/sigma, receiver not) | — |
-| operator identity | optional (PLMN from SIB1 when present) | `SIB1 CELL` log only |
-| gNB position | **not required** (never an input) | — |
+| Output | Contract |
+|---|---|
+| Every record | `schema:2`, `type`, `epoch`, `identity_gen`, `dedicated_epoch`, `abs_slot`, `frame`, `slot`, `t_mono_ns`, `rx_ts`, `pci`. Epoch fields are null with `ISAC_RECONF` off. |
+| `session` | RF/carrier/sample-rate/RB/RX/gain metadata, `rx_id`, `rx_array`, build identity; emitted at start and gain/config changes. |
+| `grant` | All schema-1 grant fields, plus `dl_coverage` (`queue` or `inline`), `verif`, UL timing/configuration fields. The inline DL path is recorded (K29 code fix); no live gate yet. |
+| `rs` | Source, direction, allocation/symbols/ports, noise, `n_ant`, `n_re`, slot fraction, CFR link and source details. Sources: SSB, CSI-RS, PDSCH DM-RS/data, PUSCH DM-RS/data, PRACH, SRS. PRACH is record-only with preamble/energy/delay/RAR association; SRS can be anonymous/provisional. |
+| CFR v1 | `NRCF`, version/header length, frame ID, source ID, antenna/RE counts, slot/fraction/noise, epoch/identity, `u16 k_abs[n_re]`, `u8 l_sym[n_re]`, 4-byte padding, antenna-major float32 IQ pairs. IQ shape is `(n_ant,n_re)` complex. Frame-ID gaps count dropped frames between written IDs; a trailing drop cannot be inferred from the file. |
 
-**Implemented 2026-10-01 (Task A3): per-grant observation records, schema v1.** The authoritative schema is the header
-comment of `openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h` (JSON Lines, one record per decoded PDSCH/PUSCH grant, enabled by
-`ISAC_OBS_PATH`, non-blocking ring, unknown = JSON `null`, consumers must ignore unknown keys; a meaning change needs schema 2).
-`[IMPLEMENTED]` code; DL `[SIM VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 385e02b9cf]` (§14.5); UL **not exercised** (K28);
-**no OTA**. Coverage v1: DL = deferred PDSCH queue only (K29); UL = every `nr_pusch_passive_decode()` with OK/CRC_FAIL/ZERO_TB.
+CFR source IDs are SSB=0, CSI-RS=1, PDSCH DM-RS=2, PDSCH data=3,
+PUSCH DM-RS=4, PUSCH data=5, PRACH=6 (record-only) and SRS=7.
 
-| Field above → obs key | Available (v1)? | Source (DL / UL) |
-|---|---|---|
-| timestamp | yes: `abs_slot` (receiver slot of the samples), `t_mono_ns` (decode completion, not air time) | `job.absolute_slot` / arg; `clock_gettime` |
-| PCI; SFN, slot | yes: `pci`, `frame`, `slot` | `frame_parms.Nid_cell`; `job.frame_rx/nr_slot_rx` / args (UL slot = DCI slot + k2) |
-| frequency, bandwidth | yes: `carrier_hz`, `scs_khz`, `fs_hz`, `start_rb`, `nb_rb` (grant BW = nb_rb·12·scs) | `frame_parms` DL/UL carrier, SCS, sample rate |
-| scheduled-resource info | yes: `rnti`, `rnti_class` (DL only), `start_sym`, `nb_sym`, `mcs`, `mcs_table`, `qm`, `nl`, `dmrs_symb_pos`, `dmrs_scrambling_id`, `tbs` (bits), `harq_pid`, `rv`, `ndi` | `job.grant`, `dec.cw`, `freq_alloc`, `dlsch_pdu` / `nr_passive_ul_grant` `g->…`, `out->…` |
-| signal type | partial: `dir` DL (PDSCH data) / UL (PUSCH data) only; SSB, CSI-RS, PDCCH, DM-RS-only records **not** in v1 | — |
-| signal quality | partial: `crc` (null for UL ZERO_TB), `nvar` (DL, receiver-internal scale), `snr_db` (UL; holds CFR mean power when noise est. = 0, known issue) | `dec.nvar`; `out->snr_db` |
-| timing / CFO | partial: `delay_samples` (UL DM-RS CIR peak, 0 also = no clear peak), `fo_comp_hz` (FO the receiver removed, not a per-grant measurement) | `out->est_delay`; `job.fo_hz` / arg |
-| channel estimate | no (CFR path unchanged, `nr_isac_submit_cfr_multi`) | — |
-| carrier_id, cell_track_id, confidence, operator identity | no | — |
+All CFR `k_abs` values are **absolute subcarrier indices relative to CRB0/Point A**, never
+FFT bins or allocation-relative indices. `rs.k_abs_convention` says `crb0_point_a`.
+UL CFR phase refers to the unadvanced DL-frame FFT window after RX symbol/CP rotation;
+positive `ta_applied_samples` means the decoder's UL FFT window was advanced relative to
+the DL frame. `ta_est_samples` on SRS is a measured representative subject to the
+reported cyclic-shift/delay ambiguity; it is not commanded UE TA. UL grant/RS
+`ta_est_samples` is null where no separate estimate exists. SRS attribution is evidence,
+not proof of identity. PRACH energy is in detector dB×10 units.
 
----
+The exporter has bounded preallocated rings, a writer thread and optional ZMQ mirror;
+producers drop on full. `sense_cfr_drop`, `sense_rec_drop`, `sense_io_errors` and
+`sense_cfr_no_sink` are cumulative in `ISAC_METRICS`. `srs_us`, `srs_jobs_dropped`,
+`prach_us`, `prach_drops`, `prach_skipped` report UL worker cost/loss. The independent
+`ISAC_OBS_PATH` schema-1 grant file remains unchanged for its existing consumers.
+`nr_sense_stats()` also exposes `cfr_dropped[source]`, `cfr_pushed`, `cfr_rejected`,
+`rec_pushed`, `rec_dropped`, `io_errors`, `zmq_drops`, `truncated` and `after_close`;
+the metrics CFR drop is the sum of its per-source array.
+
+**HISTORICAL (schema 1 / engine):** `nr_passive_obs.h` defines the older grant-only
+`ISAC_OBS_PATH` contract. Before engine removal commit `c7c6fa8bb3`, receiver-local
+range-Doppler/CFAR/tracking produced detection reports and a ZMQ detection bus. Those
+outputs and operational consumers were retired; recorded results from older commits
+remain historical evidence only.
 
 ## 22. References and algorithm origins
 
@@ -2336,7 +2407,7 @@ comment of `openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h` (JSON Lines, one reco
 | **NRSniffer** (OAI-based sniffer, copy at `sens6:/home/sens/NICOLA/NRSniffer`) | Blind PDCCH candidate handling | Mismatched-bits false-detection gate (migrated from its `dci_nr.c`), candidate class accounting | Adaptive thresholds; integrated into the RT scan thread |
 | **5GSniffer** (NR PDCCH sniffer, published tool) | PDCCH DM-RS coherence gating | `correlate_DMRS()` + per-AL correlation thresholds idea | Adaptive per-occasion median+MAD floor instead of fixed {0.9,0.8,0.7,0.15,0.15}; default OFF (cut weak real grants) |
 | **5GDescrambler** (source comments cite arXiv:2609.07367; not independently verified) | RNTI recovery | Linear GF(2) model of scrambling + CRC mask → joint RNTI/payload solve | Implemented as `nr_pdcch_joint_solve.c`/`gf2_rnti.c`, opt-in, validated in rfsim only |
-| srsUE ISAC sensing pipeline (`srs-ue-isac-dmd`, D. M. Dumitriu) and deck "Multi-Static ISAC Using 5G NR Reference Signals & Data" | Consumer of receiver CFRs | Pipeline shape (CFR → range-Doppler → CFAR → tracking) | Ported into `openair1/PHY/NR_UE_ISAC/` |
+| srsUE ISAC sensing pipeline (`srs-ue-isac-dmd`, D. M. Dumitriu) | HISTORICAL engine reference | Earlier in-receiver pipeline, retired in `c7c6fa8bb3` | Current receiver exports observations only |
 | Wypich & Zieliński 2026 (MDPI Sensors), "Experimental Evaluation of 5G NR OFDM-Based Passive Radar Exploiting Reference, Control, and User Data" | Motivation for data-aided CFR | Data-aided full-band reconstruction concept | — |
 | NVIDIA Aerial CUDA-Accelerated RAN (cuPHY, pyAerial; Apache-2.0) | Future GPU LDPC/polar/PUSCH chains | Candidate building blocks for §20 | Not integrated; GB10 support and licence compatibility to verify |
 | OCUDU / srsRAN gNB, srsUE, open5gs | Simulated beds (ground truth by F1AP pcap / gNB logs) | Truth for validation only | — |
@@ -2444,6 +2515,13 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 
 ## 24. Known bugs and open questions
 
+**Sensing API v2 limits (2026-10-05, [IMPLEMENTED, NOT LIVE VALIDATED]).** SRS
+sequence hopping v=1 is not searched; PRACH long occasions starting in the
+previous frame are skipped; FDD PRACH is inactive because a second UL carrier
+is not received. PRACH is record-only. UL observation coverage has only offline
+tests on this branch; the sens6 SA arm in §25 must establish live K28 coverage.
+The four-RX DGX `api_off`/`api_all` gate and CPU/drop budget are also pending.
+
 | ID | Component | Problem | Evidence | Severity | Workaround | Required investigation |
 |---|---|---|---|---|---|---|
 | K1 | Whole receiver | **HEAD has never run OTA**; 136 commits since the last OTA binary `aa872eba3b` | git + capture `CMDLINE`/hash lines | High | none | §25 steps 6–10 |
@@ -2473,8 +2551,8 @@ Status: PARTIAL (evidence tracker). See §11.11, §19. Pass gates: G10, G11.
 | K25 | DGX real-time | No PREEMPT_RT kernel, no isolated cores, `ulimit -r 0`, no passwordless sudo; big.LITTLE CPU (X925 = cpus 5–9,15–19; A725 = 0–4,10–14). `run_arm.sh` core map (reader core 2, `--thread-pool 0,1,4,5,6,7`, IRQs 8–13, `taskset 0-7`) would put the RF reader on a **little core** | §4.2 | Medium | rfsim beds run fine as the user | Define a DGX core map (reader + NIC IRQs on X925 cores) and measure drops without RT first (§5.3) |
 | K26 | Scripts | **Resolved for the x86 path (A13, 2026-10-01).** `tests/passive_rx/offline_sync_contract/build_and_run.sh` is arch-aware: x86 command lines unchanged (echo-diff empty with a system libgtest; without one it links `lib/libgtest.a` + CPM include), aarch64 branch = `offline_sync_arm.sh` (echo-diff empty). x86 run OfflineSync.* 5/5 `[OFFLINE VERIFIED, cloud x86 Xeon-2.8GHz-4c, 2026-10-01, 3b6119853f]`. **aarch64 run pending on the DGX.** Pre-existing: x86 flags include `-mgfni` (this cloud CPU lacks GFNI; no effect on the test) | `cloud_run_2026-10-01/a13_sync_contract/README.txt` | Low | — | Run the script on the DGX and compare with `offline_sync_arm.sh` (§25) |
 | K27 | Parallelism | Three serial hot threads cap one instance (`UEthread_0` 100 %, `pdcchUssHash` 90 %, `passivePdcch0` 79 % at 273 PRB 1 RX); the blind-PDCCH scan ~~cannot use > 1 consumer~~ — **2026-10-01: N consumers thread-safe (A7 `b6e5fb27ac` + follow-up `71dbfd582a`, §14.5, cloud x86 rfsim only; benefit on the DGX not measured)**; initial sync at 273 PRB × 4 RX takes ~90 s mostly on one thread | §14.1–§14.3 profiles | Medium now, **High for multi-cell** | pin the three threads to X925 cores | §14.3 items 1–5 |
-| K28 | Observations / UL | The UL hook of `nr_passive_obs` is compiled and reviewed but **never exercised at runtime**: phy-test rfsim has no PUSCH (`pusch_try = 0`); all 19 k observed records are DL | `a3_obs/README.txt`, `a4_campaign_smoke/` metrics `pusch_try 0` | Medium for UL observation consumers | — | Run an UL-bearing bed (OAI SA with UE traffic, OCUDU) and check `dir:"UL"` records |
-| K29 | Observations / DL | In-line DL decode (used when the deferred PDSCH queue is not running, `nr_pdcch_blind_monitor_rt.c` ~6616) is **not recorded** by obs v1; configs without the deferred queue produce no DL records (documented in the header) | `nr_passive_obs.h` | Low–Medium | keep the PDSCH queue on | Hook the in-line path or require the queue |
+| K28 | Observations / UL | Schema-2 UL grant/RS/CFR and PRACH/SRS export are implemented and offline tested; phy-test has no PUSCH, so live UL remains unvalidated | S34, S6M; historical A3 metrics | Medium | Do not claim live UL coverage | sens6 SA arm (§25, runbook): attached UE with UL traffic, linked PUSCH RS and timing stability |
+| K29 | Observations / DL | Schema-2 in-line DL grants now carry `dl_coverage:"inline"` (offline verified, T3/S34); the separate v1 writer still has its documented queue-only coverage | T3, S34; `nr_passive_obs.h` | Low for schema 2 | Use schema 2 for new consumers | Validate live inline arm on SA cell |
 | K30 | Thread safety (pre-existing) | **Mostly resolved 2026-10-01 by follow-up `71dbfd582a`** (session claude/elegant-davinci-jlrfol): Technique A receive-thread/consumer races fixed (leaf mutex `s_techA_mu`, deferred footprint commit applied by a consumer under `g_phase2_mu`, atomic SS-occasion gate), PDSCH-pool getenv statics and log budgets made atomic, and upstream `common/utils/threadPool/task_ans.c` join counter changed from `relaxed` to `acq_rel` (**a real hazard on aarch64/DGX**, benign on x86 TSO). Partial TSAN rfsim 300 s: 24 → 5 reports, 0 in blind_monitor / pdsch_passive_queue / pdsch_passive_decode / task_ans / Tpool; remaining 5 = rfsim teardown + SIGINT. Original description: Remaining TSAN races: `UEthread_0` <-> `passivePdcchN` in `nr_pdcch_blind_monitor.c` (13 reports: `autodiscover_step` on the receive thread vs `note_rnti_for_windows` / extent advance on a consumer) and inside the PDSCH decode pool (`passivePdsch1/2`, `nr_pdsch_passive_queue_thread`, 4 reports). All exist with **one** consumer too; none is consumer<->consumer. A7 changed diagnostics semantics: DMR | `tests/passive_rx/cloud_run_2026-10-01/a7_followup_races/` | Low (residual) | — | Re-run TSAN on the DGX (aarch64) |
 | K31 | Cloud/container host quirks (host-specific) | The cloud container has **no IPv6** (rfsimulator server socket is `AF_INET6` -> `V4SHIM` LD_PRELOAD), **no SCTP** (`nr_cuup_functional_test` fails), **`pthread_getaffinity_np` EINVAL** (`test_thread-pool` fails), 4 cores (frozen conf scan core 5 -> EINVAL assert, so `SCANTHREAD=1:8:-1` auto), timing test `time_management_tests` intermittent. Gate thresholds therefore **re-baselined on cloud: crc >= 93.0 %, drop_full <= 2.5 %** (HEAD min 94.93 / max 1.55) vs **DGX 98 % / 1 %**; a < 2-point CRC regression would be invisible at the cloud gate (mitigated by comparing means vs baseline in each report). Do not apply these workarounds or thresholds on the DGX | `a1_baseline/README.txt` | Low | scripts auto-detect | none on the DGX |
 | K32 | PDSCH chest cache | **Resolved 2026-10-01 by F1 + fix round 1 (branch td/convergence-levers)**. Fix: the cache is keyed on the full estimator input (`nr_pdsch_chest_key.h`: full-slot DM-RS mask, 12-bit ports, BWP/refPoint, fo, antenna count, single branch; a segmented estimate is never cached). The estimate always covers every DM-RS symbol of the slot, probes included (a probe still truncates data-symbol FEP/demod). Consequently `chest_time==1` averaging now also runs for probes (intended: probe ≡ full). The cache stores an immutable copy (only the filled rows: Nl×1 when single-branch) plus raw nvar. Each decode works on a working copy: interpolation / chest_time / branch zeroing / SFO rotation / nvar division run per call, and on a single-branch hit the non-planned rows are zeroed exactly as the estimator does, so hit ≡ miss bit for bit. `[MEASURED, DGX rfsim 106 PRB]` `ISAC_TD_PROBE_EQUIV_CHECK` harness: cache-hit arm 1125/1195 grants mismatched → 0/1160; TINTERP probe 1069/1128 → 0/1161; spec arm 0/1162 → 0/1165; 4-RX rank-1 forced branch 2, chest rows 167/167 → 0/340. `[MEASURED, DGX rfsim 106 PRB 1 RX]` regress PASS 99.06/98.64 %. `[MEASURED, DGX rfsim 273 PRB rank-4 pin49r4 4 RX]` crc 100 %. `[MEASURED, DGX rfsim]` probe cost: chest +35 µs (106 PRB, 1 RX); +963 µs chest and +181 µs FEP at rank 4 with 4 RX (~+16 %). Residual (not the chest) moved to K38. Original issue: the key omitted start/number of symbols and the probe horizon, kept 8 of 12 port bits, and the cached estimate was mutated in place | `tests/passive_rx/dgx_host_snapshot_2026-09-30/f1_chest_cache/` | resolved | — | — |
@@ -2724,6 +2802,41 @@ replace that policy with an unbounded sweep. [MEASURED, DGX rfsim 106 PRB 1 RX, 
 SA and SIB1-less arms, live dedicated/cell changes, `CONFIG_EPOCH` class/cause, recovery time, stale-winner count and
 epoch-drop metrics. Not validated: R13, OTA with `ISAC_RECONF=1`, any live reconfiguration, or the 60-min soak.
 R18 steps 2–4 and 7 (CSI-RS bed/value work) also remain open; soak results will be added separately.
+
+**Sensing API v2 sens6 UL arm (Task 5b, operator-owned).** [NOT RUN, sens6] After R13 SA
+bring-up, use an attached UE and four-channel UL routing with UL traffic. Keep
+`ISAC_RX_BRANCH_FO` and `ISAC_RECONF` unset; check the orchestration `BUSY` marker
+before every run, and use an exclusive `/tmp/td_measure.lock` for each observer arm.
+The existing OCUDU broker can establish source occurrence before attachment with
+`PX_FIRST=1`, but offers one RF channel and cannot establish four-RX cost. From this
+worktree its optional occurrence arm is:
+
+```sh
+flock -x -w 7200 /tmp/td_measure.lock env PX=1 PX_FIRST=1 NO_UE=0 UL_PING=0.2 PX_EXTRA='--sensing.enable 1 --sensing.sources csi_rs,pdsch_dmrs,pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data,ssb,prach,srs --sensing.records_path /tmp/sense_s5_ocudu.jsonl --sensing.cfr_path /tmp/sense_s5_ocudu.cfr --sensing.cfr_antennas 1 --sensing.cfr_ring_frames 32 --sensing.cfr_max_re 46200 --sensing.rec_ring_slots 1024' tests/passive_rx/run_ocudu_passive.sh 420 /tmp/sense_s5_ocudu
+python3 tools/sense_api/read_sense.py /tmp/sense_s5_ocudu.jsonl /tmp/sense_s5_ocudu.cfr
+```
+
+For the separately provisioned 106-PRB / 3750-MHz / 30-kHz four-channel SA cell,
+with gNB, core and attached UE already running and UL traffic flowing, run:
+
+```sh
+flock -x -w 7200 /tmp/td_measure.lock timeout --signal=INT 420s cmake_targets/ran_build/build/nr-uesoftmodem -O tests/passive_rx/ue.passive.conf --rfsim --passive-rx --rfsimulator.serveraddr 127.0.0.1 -C 3750000000 -r 106 --numerology 1 --band 78 --ssb 516 --ue-nb-ant-rx 4 --sensing.enable 1 --sensing.sources csi_rs,pdsch_dmrs,pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data,ssb,prach,srs --sensing.records_path /tmp/sense_s5_sa4.jsonl --sensing.cfr_path /tmp/sense_s5_sa4.cfr --sensing.cfr_antennas 4 --sensing.cfr_ring_frames 32 --sensing.cfr_max_re 46200 --sensing.rec_ring_slots 1024
+python3 tools/sense_api/read_sense.py /tmp/sense_s5_sa4.jsonl /tmp/sense_s5_sa4.cfr
+```
+
+Require schema-2 UL grants with CRC and linked PUSCH DM-RS/data `rs` and CFR frames;
+compare PRACH preamble/occasion, RAR RAPID/TA and SRS comb/period (when scheduled)
+with gNB validation logs. For a static UE, measured `ta_est_samples` should be stable
+within ±2 samples only where available; `ta_applied_samples` is the decoder window
+advance and has a different meaning. Require zero missing non-null CFR links. Record
+frame-ID gaps, `sense_cfr_drop`, `sense_rec_drop`, `sense_io_errors`, `prach_drops`,
+`srs_jobs_dropped`, `srs_us` and four-RX CPU cost; investigate drops before treating
+missing sources as a detector failure. Repeat a DL arm on the same SIB1-present cell,
+checking session, grant (`dl_coverage`) and RS records. K28 closes only with live UL
+evidence. PRACH long occasions starting in a prior frame, FDD PRACH and SRS sequence
+hopping v=1 are current limits; SRS attribution can remain anonymous/ambiguous and
+provisional. No DGX phy-test result substitutes for this arm. The orchestrator will
+fold these steps into the main branch SA-bed runbook at merge.
 
 **Rule: do not begin new receiver development on the DGX Spark until the current known-good offline baseline (§14)
 has been reproduced and the OTA baseline (§15.4) has been reproduced or its failure understood.**

@@ -2278,9 +2278,8 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
 // CONFIRMED-CORRECT payload through the real chain (LDPC encode + rate match + scramble + modulate,
 // reusing the exact primitives the UE's own PUSCH TX path uses -- see nr_ulsch_encoding() for the
 // template this mirrors) to reconstruct the transmitted symbol X at EVERY data RE, then submit
-// Ĥ[k] = Y[k]/X[k] to the sensing engine. Unlike the old pdsch_data behaviour (removed above -- it
-// just resampled the DM-RS-INTERPOLATED estimate at comb-1, inheriting a "comb-106" per-PRB
-// interpolator ripple, see tests/sensing_sim/README.md), this is genuine data-aided reconstruction:
+// Ĥ[k] = Y[k]/X[k] to the sensing export API. Unlike the retired pdsch_data behaviour (which
+// resampled the DM-RS-interpolated estimate at comb-1), this is data-aided reconstruction:
 // no interpolation at all, a fresh Ĥ computed directly from the raw received samples at every RE.
 //
 // Scope (falls back to no tap, silently, outside these -- the common do-ra/rfsim-test conditions;

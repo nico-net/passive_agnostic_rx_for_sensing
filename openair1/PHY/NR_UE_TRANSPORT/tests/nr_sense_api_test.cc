@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "nr_sense_api.h"
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -63,6 +64,20 @@ TEST_F(SenseApi, RecordsAreJsonLines) {
   nr_sense_close(); std::ifstream f(rec); std::string line; int count=0;
   while(std::getline(f,line)) { EXPECT_EQ(line,"{\"schema\":2,\"type\":\"rs\"}"); count++; }
   EXPECT_EQ(count,3);
+}
+
+TEST_F(SenseApi, GoldenReaderFixture) {
+  const char *dir=std::getenv("NR_SENSE_GOLDEN_DIR");
+  if (!dir) GTEST_SKIP() << "set NR_SENSE_GOLDEN_DIR to write the reader fixture";
+  std::string records=std::string(dir)+"/records.jsonl", frames=std::string(dir)+"/frames.cfr";
+  cfg.records_path=records.c_str(); cfg.cfr_path=frames.c_str();
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  float iq[]={1,2,3,4,5,6,7,8}; uint16_t k[]={120,121}; uint8_t l[]={2,2};
+  ASSERT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_CSIRS,2,iq,2,2,k,l,42,0.25f,0.5f,3,4,nullptr),1u);
+  ASSERT_TRUE(nr_sense_push_record("{\"schema\":2,\"type\":\"session\"}"));
+  ASSERT_TRUE(nr_sense_push_record("{\"schema\":2,\"type\":\"rs\",\"source\":\"csirs\",\"cfr_frame_id\":1,\"k_abs_convention\":\"crb0_point_a\"}"));
+  ASSERT_TRUE(nr_sense_push_record("{\"schema\":2,\"type\":\"rs\",\"source\":\"prach\",\"cfr_frame_id\":null}"));
+  nr_sense_close();
 }
 
 TEST_F(SenseApi, SlowWriterNeverBlocksProducer) {
