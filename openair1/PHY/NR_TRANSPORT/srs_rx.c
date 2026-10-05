@@ -27,6 +27,8 @@
 
 //#define SRS_DEBUG
 
+#ifndef NR_SRS_PASSIVE_EXTRACT_ONLY
+/* Scheduling is not part of the passive fake-gNB extraction adapter. */
 void nr_fill_srs(PHY_VARS_gNB *gNB, frame_t frame, slot_t slot, nfapi_nr_srs_pdu_t *srs_pdu)
 {
   NR_gNB_SRS_job_t srs = {.frame = frame, .slot = slot, .srs_pdu = *srs_pdu};
@@ -50,6 +52,8 @@ void nr_fill_srs(PHY_VARS_gNB *gNB, frame_t frame, slot_t slot, nfapi_nr_srs_pdu
   if (!found)
     LOG_W(NR_PHY, "SRS list is full: dropping SRS UE %04x\n", srs_pdu->rnti);
 }
+
+#endif
 
 int nr_get_srs_signal(PHY_VARS_gNB *gNB,
                       c16_t **rxdataF,
@@ -102,7 +106,7 @@ int nr_get_srs_signal(PHY_VARS_gNB *gNB,
           }
 
           // Subcarriers without SRS symbols and only noise
-          srs_received_noise[ant][l_line_offset + subcarrier] = rx_signal[l_line_offset + subcarrier + 1];
+          srs_received_noise[ant][l_line_offset + subcarrier] = rx_signal[l_line_offset + (subcarrier + 1) % frame_parms->ofdm_symbol_size];
           for (int n = 1; n < K_TC; n++) {
             uint16_t subcarrier_n = subcarrier + n;
             if (subcarrier_n >= frame_parms->ofdm_symbol_size) {

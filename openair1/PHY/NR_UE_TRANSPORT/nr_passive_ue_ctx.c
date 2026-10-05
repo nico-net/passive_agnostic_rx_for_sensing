@@ -504,5 +504,14 @@ bool nr_ue_ctx_get(uint16_t rnti,nr_ue_ctx_t *out)
   pthread_mutex_unlock(&ctx_lock);
   return found;
 }
+bool nr_ue_ctx_try_get(uint16_t rnti,nr_ue_ctx_t *out)
+{
+  if (!out || !entries || pthread_mutex_trylock(&ctx_lock)) return false;
+  bool found=false;
+  for(int i=0;i<NR_UECTX_MAX_UE;i++) if(entries[i].used && entries[i].ctx.rnti==rnti &&
+      (!found || entries[i].ctx.incarnation>=out->incarnation)) {*out=entries[i].ctx;found=true;}
+  pthread_mutex_unlock(&ctx_lock);
+  return found;
+}
 void nr_ue_ctx_stats(uint64_t *events,uint64_t *lines,uint64_t *drops)
 {if(events)*events=atomic_load(&pushed);if(lines)*lines=atomic_load(&written);if(drops)*drops=atomic_load(&dropped);}

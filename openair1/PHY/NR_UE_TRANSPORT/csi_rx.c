@@ -23,6 +23,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
 #include <time.h>
@@ -954,7 +955,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                              int loverline0,
                              uint32_t noise_power)
 {
-  /* Gate BOTH the engine and the per-source mask here, in the one place every caller passes through.
+  /* Gate the per-source API mask here, in the one place every caller passes through.
    * The csirs_monitor caller (nr_ue_csi_rs_sensing_capture) had NO gate at all -- only the own-CSI-RS
    * caller checked -- so `[sensing] sources` silently did not apply to monitored resources, and the
    * call site in phy_procedures_nr_ue.c states the opposite ("the SUBMISSION to sensing stays gated
@@ -962,13 +963,11 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
    * still accumulated 126 CSI-RS rows per CPI against 148 pdsch_data rows in the whole run, so the
    * unwanted source dominated the slow-time grid. CSI-RS RECEPTION stays ungated (it is a receive
    * function and the monitor has its own enable); only the sensing SUBMISSION is gated. */
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
     return;
   }
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
-  uint32_t nof_ant = nr_isac_aoa_antennas();
-  if (nof_ant > (uint32_t)frame_parms->nb_antennas_rx)
-    nof_ant = (uint32_t)frame_parms->nb_antennas_rx;
+  uint32_t nof_ant = (uint32_t)frame_parms->nb_antennas_rx;
   if (nof_ant == 0 || ant_stride == 0)
     nof_ant = 1;
   if (nof_ant > NR_ISAC_CSIRS_MAX_ANT)
@@ -982,7 +981,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
     if (csirs_config_pdu->freq_density <= 1 && csirs_config_pdu->freq_density != (rb % 2)) {
       continue;
     }
-    const uint16_t kk = rb * NR_NB_SC_PER_RB;
+    const uint16_t kk = nr_sense_crb_re(rb, 0);
     for (uint32_t a = 0; a < nof_ant; a++) {
       const c16_t v = ls[a * ant_stride + kk];
       const size_t o = 2 * ((size_t)a * NR_ISAC_CSIRS_MAX_RE + nof_re);
@@ -997,9 +996,8 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
   // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change, nothing
   // downstream reads these values). Same coherence/tau estimator as dci_nr.c's TSYNC_PDCCH probe
   // (see that file for the derivation), applied here to the CSI-RS LS estimate (isac_h/isac_k)
-  // BEFORE nr_isac_submit_cfr_multi() below hands it to the consumer thread -- i.e. this measures
-  // the raw per-RB Ĥ phase slope before any of NR_UE_ISAC's own STO/CFO/SFO/LOS-residual
-  // corrections (those all run later, in the sensing_engine consumer thread). Antenna 0 only.
+  // BEFORE nr_isac_submit_cfr_multi() exports the receiver estimates. This measures the raw
+  // per-RB Ĥ phase slope on antenna 0.
   // isac_k[] is an exact arithmetic sequence (step = NR_NB_SC_PER_RB = 12) whenever freq_density
   // > 1 (every csirs_monitor resource in this cell's conf), since the skip-every-other-RB branch
   // above is dead in that case; a non-uniform step is detected and the probe silently skipped
@@ -1055,8 +1053,16 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                                  .pci             = frame_parms->Nid_cell,
                                  .slots_per_frame = frame_parms->slots_per_frame};
     const uint32_t slot_idx = (uint32_t)(proc->frame_rx * frame_parms->slots_per_frame + proc->nr_slot_rx);
-    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, nof_ant, NR_ISAC_CSIRS_MAX_RE,
-                             isac_k, isac_l, nof_re, (float)noise_power);
+    char resource[128];
+    snprintf(resource, sizeof resource, "row=%u,fd=%u,l0=%u,density=%u,period=unknown",
+             (unsigned)csirs_config_pdu->row, (unsigned)csirs_config_pdu->freq_domain,
+             (unsigned)csirs_config_pdu->symb_l0, (unsigned)csirs_config_pdu->freq_density);
+    const nr_sense_rs_meta_t meta = {.start_rb=csirs_config_pdu->start_rb,
+      .nb_rb=csirs_config_pdu->nr_of_rbs, .ports=-1, .ssb_index=-1, .k_ssb=-1,
+      .csirs_resource=resource, .ta_est_samples=-1, .transform_precoding=-1,
+      .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
+    nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, nof_ant, NR_ISAC_CSIRS_MAX_RE,
+                                  isac_k, isac_l, nof_re, (float)noise_power, &meta);
   }
 }
 
@@ -1158,7 +1164,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   // ISAC sensing tap (CSI-RS source): submit the raw per-RB LS estimates (Ĥ) of port 0, for as many rx
   // antennas as the receive-array AoA path asks for (one otherwise).
   // Guarded on measurement_bitmap>1 here because that gates the channel estimation above (own path).
-  if (csirs_config_pdu->measurement_bitmap > 1 && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+  if (csirs_config_pdu->measurement_bitmap > 1 && nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
     nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, &csi_rs_ls_estimated_channel[0][0][0],
                             (size_t)mapping_parms.ports * frame_parms->ofdm_symbol_size, mapping_parms.loverline[0],
                             noise_power);

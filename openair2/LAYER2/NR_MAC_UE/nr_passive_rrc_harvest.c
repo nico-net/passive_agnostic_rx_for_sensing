@@ -43,6 +43,28 @@
 #include "NR_CellGroupConfig.h"
 #include "NR_ControlResourceSet.h"
 #include "NR_SearchSpace.h"
+#include "NR_SRS-Config.h"
+#include "NR_SRS-Resource.h"
+#include "NR_SetupRelease.h"
+/* Optional PHY observer: MAC-only binaries do not link the passive UL chain. */
+extern void nr_srs_passive_hint(int comb,int offset,int group,int cs) __attribute__((weak));
+static void harvest_srs_hint(const NR_BWP_UplinkDedicated_t *bwp)
+{
+  if(!nr_srs_passive_hint || !bwp || !bwp->srs_Config
+      || bwp->srs_Config->present!=NR_SetupRelease_SRS_Config_PR_setup) return;
+  const NR_SRS_Config_t *cfg=bwp->srs_Config->choice.setup;
+  if(!cfg || !cfg->srs_ResourceToAddModList) return;
+  for(int i=0;i<cfg->srs_ResourceToAddModList->list.count;i++) {
+    const NR_SRS_Resource_t *r=cfg->srs_ResourceToAddModList->list.array[i];
+    if(!r || r->nrofSRS_Ports!=0 || r->groupOrSequenceHopping!=0) continue;
+    if(r->transmissionComb.present==NR_SRS_Resource__transmissionComb_PR_n2 && r->transmissionComb.choice.n2)
+      nr_srs_passive_hint(2,r->transmissionComb.choice.n2->combOffset_n2,r->sequenceId%30,
+                           r->transmissionComb.choice.n2->cyclicShift_n2);
+    else if(r->transmissionComb.present==NR_SRS_Resource__transmissionComb_PR_n4 && r->transmissionComb.choice.n4)
+      nr_srs_passive_hint(4,r->transmissionComb.choice.n4->combOffset_n4,r->sequenceId%30,
+                           r->transmissionComb.choice.n4->cyclicShift_n4);
+  }
+}
 
 /* TS 38.321 6.2.1: DL-SCH subheader is R(1) F(1) LCID(6); CCCH is LCID 0. Fixed-size CEs carry no
  * length field, so the walk must know their sizes to step over them -- mirrors the walker in
@@ -116,6 +138,12 @@ static void report_dedicated(const NR_CellGroupConfig_t *cg)
     return;
   }
 
+  if(sc->uplinkConfig) {
+    harvest_srs_hint(sc->uplinkConfig->initialUplinkBWP);
+    if(sc->uplinkConfig->uplinkBWP_ToAddModList)
+      for(int i=0;i<sc->uplinkConfig->uplinkBWP_ToAddModList->list.count;i++)
+        harvest_srs_hint(sc->uplinkConfig->uplinkBWP_ToAddModList->list.array[i]->bwp_Dedicated);
+  }
   int n_coreset = 0, n_ss = 0, n_dl_bwp = 0, n_tda = 0;
   bool have_pdcch = false, have_pdsch = false;
 

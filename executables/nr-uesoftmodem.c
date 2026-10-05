@@ -15,9 +15,12 @@
 #include "assertions.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
+#include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/ran_context.h"
@@ -368,6 +371,7 @@ int main(int argc, char **argv)
     nrue_set_ru_cell_id(ru_id, cell_id);
 
     set_fp_options(cell_id, ru_id);
+    nr_isac_set_rx_antennas(nrue_get_cell_fp(cell_id)->nb_antennas_rx);
     if (IS_SA_MODE(get_softmodem_params()) || get_softmodem_params()->sl_mode)
       nr_init_frame_parms_ue_sa(nrue_get_cell_fp(cell_id), nrue_get_cell(cell_id));
   }
@@ -495,6 +499,14 @@ int main(int argc, char **argv)
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
   nr_isac_start();
+  if (nr_sense_enabled()) {
+    PHY_VARS_NR_UE *sense_ue = nrPHY_vars_UE_g[0][0];
+    const openair0_config_t *sense_cfg = &openair0_cfg_g[sense_ue->rf_map.card];
+    nr_sense_emit_session(&sense_ue->frame_parms,
+                          sense_cfg->rx_gain[sense_ue->rf_map.chain] - sense_cfg->rx_gain_offset[sense_ue->rf_map.chain]);
+  }
+  nr_prach_passive_start();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) nr_srs_passive_start(nrPHY_vars_UE_g[0][0]);
 
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     LOG_I(PHY,"Intializing UE Threads for instance %d ...\n", inst);
@@ -515,9 +527,6 @@ int main(int argc, char **argv)
   itti_wait_tasks_end(trigger_deregistration);
   LOG_W(NR_PHY, "Returned from ITTI signal handler\n");
   oai_exit = 1;
-
-  // Stop the sensing engine, flush the final CPI and close the report sinks.
-  nr_isac_stop();
 
   nrue_ru_stop();
 
@@ -540,6 +549,11 @@ int main(int argc, char **argv)
       }
     }
   }
+
+  // All slot producers have joined. Drain the PRACH worker before closing records.
+  nr_prach_passive_flush();
+  nr_srs_passive_stop();
+  nr_isac_stop();
 
   nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)
   const bool uectx_was_open = nr_ue_ctx_enabled();

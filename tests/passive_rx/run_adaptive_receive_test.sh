@@ -13,8 +13,7 @@ test -x "$BUILD/nr-uesoftmodem"
 if find "$REPO/openair1" "$REPO/openair2" "$REPO/executables" "$REPO/radio"      \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \)      -newer "$BUILD/nr-uesoftmodem" -print -quit 2>/dev/null | grep -q .; then
   echo "BLOCKED: nr-uesoftmodem is older than tracked source -- rebuild before capturing"; exit 3
 fi
-# Accepts ON or OFF -- both are valid build states on this branch now that the sensing
-# pipeline (CFO/SFO trackers, LOS baseline, DetectionReport bus) is buildable here; only an
+# Accepts ON or OFF -- both are valid build states for the receiver and export API; only an
 # UNRECOGNISED/missing cache entry is refused, so a broken configure still fails loudly.
 grep -qE "ENABLE_ISAC_SENSING:BOOL=(ON|OFF)" "$BUILD/CMakeCache.txt"
 test "$(readlink "$BUILD/liboai_device.so")" = liboai_usrpdevif.so

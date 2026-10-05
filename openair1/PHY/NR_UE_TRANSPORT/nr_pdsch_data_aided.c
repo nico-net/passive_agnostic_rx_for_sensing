@@ -46,6 +46,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
@@ -86,7 +87,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
             (unsigned long)n, rnti, decode_G, tap_G);
     return;
   }
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
 
   /* SINGLE LAYER ONLY -- and this is a correctness guard, not a scope preference.
@@ -205,7 +206,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // every RE the transmitter mapped a data symbol to -- the same order (and, for DM-RS symbols, the
   // same per-RE bitmap) nr_dlsch_extract_rbs() uses, mirrored here in the forward
   // TX-reconstruction direction. Ĥ[k] = Y[k]/X[k] at every such RE. --
-  const uint32_t base_sc  = (uint32_t)(dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
+  const uint32_t base_sc  = nr_sense_crb_re(dlsch_config->BWPStart + freq_alloc->first_rb, 0);
   const int      num_sc   = (freq_alloc->n_prb_list ? freq_alloc->n_prb_list : freq_alloc->num_rbs) * NR_NB_SC_PER_RB;
   const int      start_re = (fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB)
                            % fp->ofdm_symbol_size;
@@ -214,9 +215,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // not just antenna 0. X is the SAME reconstructed transport block for all of them, so this is a
   // pure inner loop over rxdataF[a] -- the per-element phase difference it captures IS the bearing.
   const uint32_t isac_max_re = 273 * 12 * 14;
-  uint32_t       isac_nof_ant = nr_isac_aoa_antennas();
-  if (isac_nof_ant > (uint32_t)fp->nb_antennas_rx)
-    isac_nof_ant = (uint32_t)fp->nb_antennas_rx;
+  uint32_t       isac_nof_ant = (uint32_t)fp->nb_antennas_rx;
   if (isac_nof_ant == 0)
     isac_nof_ant = 1;
 
@@ -299,8 +298,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
         re -= fp->ofdm_symbol_size;
       uint32_t k_abs = base_sc + (uint32_t)j;
       if (freq_alloc->n_prb_list) { // non-contiguous grant: data RB j/12 sits on PRB prb_list[j/12]
-        k_abs = (uint32_t)(dlsch_config->BWPStart + freq_alloc->prb_list[j / NR_NB_SC_PER_RB]) * NR_NB_SC_PER_RB
-                + (uint32_t)(j % NR_NB_SC_PER_RB);
+        k_abs = nr_sense_crb_re(dlsch_config->BWPStart + freq_alloc->prb_list[j / NR_NB_SC_PER_RB],
+                                j % NR_NB_SC_PER_RB);
         re = (int)((fp->first_carrier_offset + k_abs) % fp->ofdm_symbol_size);
       }
       const c16_t x = mod_syms[mod_idx++];
@@ -362,6 +361,10 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->dl_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
+  const nr_sense_rs_meta_t rs_meta = {.rnti=rnti,
+    .start_rb=dlsch_config->BWPStart+freq_alloc->first_rb, .nb_rb=freq_alloc->num_rbs,
+    .ports=-1, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
+    .transform_precoding=-1, .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
   /* Slow-time index for the CPI grid. `proc->frame_rx` WRAPS at 1024, so the obvious
    * frame*slots_per_frame + slot wraps every 20480 slots. In-line that was benign: submissions
    * arrived in strict slot order and a wrap was just a discontinuity between CPIs. Once the decode
@@ -374,7 +377,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                 ? (uint32_t)nr_isac_abs_slot_override
                                 : (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
 
-  // --- Sub-slot sampling (defs_nr_UE_ISAC.h): split this slot's symbols into GROUPS and submit each
+  // --- Sub-slot sampling: split this slot's symbols into GROUPS and submit each
   // as its own slow-time row, multiplying the effective PRF (and hence the unambiguous velocity) by
   // the number of groups. Grouping is ADAPTIVE because a short row is both sparser and noisier:
   //   * SPARSITY gate -- a group must carry >= min_re REs (fewer REs = less frequency coverage =
@@ -391,8 +394,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const uint32_t sub_target = nr_isac_subslot_config(&sub_min_re, &sub_min_snr_db);
 
   if (sub_target == 0 || nof_sym <= 1) {
-    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                             isac_k, isac_l, nof_re, (float)nvar);
+    nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                  isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
     return;
   }
 
@@ -419,24 +422,24 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
       // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
       // the same symbol offset within its own plane.
-      nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                               isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                               g_re, (float)nvar);
+      nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                    isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                    g_re, (float)nvar, &rs_meta);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
       // Tail that never passed the gates: merge it BACKWARDS by re-emitting from g_first to the end
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
-        nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                                 isac_k, isac_l, nof_re, (float)nvar);
+        nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                      isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
-        nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                                 isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                                 g_re, (float)nvar);
+        nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                      isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                      g_re, (float)nvar, &rs_meta);
       }
     }
   }

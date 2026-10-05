@@ -142,3 +142,27 @@ python3 "$R/tests/passive_rx/sa_bed/score_r13.py" .
 ```
 
 Pass checks: the same passive PID survives the restart; attempts are backoff-spaced; no old peer packets are consumed; resumed RF timestamps cause `RXDISCONT`, then `HARD_REVERIFY cause=CONTINUITY_LOSS`. PCI restart additionally produces `HARD_RESET cause=CELL_IDENTITY_CHANGE`. Check fresh DCI/TD convergence and the two timing fields; the scorer remains INCOMPLETE until the §6 truth audit is supplied. Repeat both commands with `sa off`, `sib1less on`, and `sib1less off` in fresh directories. Controls must reconnect too, with no CONFIG_EPOCH. Repeat a restart to check successive reconnects, and send SIGINT to the runner during the outage to check cleanup without SIGKILL. For ordinary UE regression, in an operator-owned bed leave an active UE running while stopping its gNB with SIGINT: the active client must still exit on socket loss; server-side client departure must retain its existing behavior. The standard DGX 4-RX regression commands are recorded in the W4b report for the orchestrator.
+
+## 9. Sensing API UL validation (sensing-API plan Task 5, Step 5b)
+
+Purpose: the DGX rfsim bed has no PUSCH/PRACH/SRS, so the UL side of the sensing API (UL `grant` records, `pusch_dmrs` /
+`pusch_data` CFR frames, `prach` records, `srs` records/frames) can only be validated here (closes K28 when it passes).
+Run the `stable` scenario with an attached UE generating UL traffic (iperf UL from the UE namespace) and the export on:
+
+```sh
+export R13_RX_EXTRA="--sensing.enable 1 --sensing.sources csi_rs,pdsch_dmrs,pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data,ssb,prach,srs --sensing.records_path $OUT_DIR/sense.jsonl --sensing.cfr_path $OUT_DIR/sense.cfr --sensing.cfr_antennas 4"
+R13_DURATION_S=900 bash tests/passive_rx/sa_bed/run_arm.sh stable sa off
+python3 tools/sense_api/read_sense.py $OUT_DIR/sense.jsonl $OUT_DIR/sense.cfr
+```
+
+Pass (label every result `[MEASURED, sens6 x86 SA bed, <commit>]`; gNB logs are validation-only ground truth):
+- UL `grant` records with `crc` present, UL fields (k2, dci_slot, dmrs_*, ta_*) non-null where decodable;
+- `pusch_dmrs` / `pusch_data` CFR frames present and every `rs.cfr_frame_id` linked (`missing_links=0`), `frame_id_drops`
+  reported (0 expected at this load);
+- `ta_est_samples` stable within ±2 samples for the static UE;
+- `prach` records at the UE's RA (attach) with `rar_match=true` against the overheard RAR;
+- `srs` records only if the gNB config schedules SRS; confirmed resources must match the gNB config (validation only);
+  0 SRS records on a cell without SRS;
+- DL arm repeated on this SA cell (SIB1 present): `session` record carries SIB1-derived carrier; `ssb`/`csirs` frames present.
+Cost note (DGX, 4 RX, all sources): about +55 % receiver CPU and ~17 MB/s of CFR on disk; use fewer sources or
+`--sensing.cfr_antennas 1` if the host is CPU-bound.

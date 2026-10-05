@@ -1,3 +1,4 @@
+#include "nr_sense_ul.h"
 /* Passive uplink data-aided CFR -- see nr_pusch_data_aided.h.
  *
  * Deliberately mirrors nr_pdsch_data_aided.c step for step (segment -> LDPC encode -> scramble ->
@@ -26,6 +27,7 @@
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/utils/LOG/log.h"
 #include "executables/nr-uesoftmodem.h"
 
@@ -59,9 +61,10 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t harq_pid_tag,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
-                                     int slot)
+                                     int slot,
+                                     int ta_applied_samples)
 {
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
     return;
   }
   if (ue == NULL || gnb == NULL || pdu == NULL || g == NULL || tb_bytes == NULL) {
@@ -190,7 +193,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
          * (nr_pdsch_data_aided.c) keeps them apart as start_re/base_sc; this used to use the
          * CRB-absolute value for BOTH, so Y was read ~first_carrier_offset subcarriers away from X
          * and H = Y/X was noise. */
-        const int k_crb = (g->start_rb + g->bwp_start) * 12 + rb * 12 + sc;
+        const int k_crb = nr_sense_crb_re(g->start_rb + g->bwp_start + rb, sc);
         int       k_abs = fp->first_carrier_offset + k_crb;
         if (k_abs >= symsz)
           k_abs -= symsz;
@@ -209,6 +212,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
           const size_t o = 2 * ((size_t)a * cap + nof_re);
           h_buf[o]       = (float)((yr * xr + yi * xi) / p);
           h_buf[o + 1]   = (float)((yi * xr - yr * xi) / p);
+          nr_sense_ul_to_dl(&h_buf[o],&h_buf[o+1],k_crb,fp->first_carrier_offset,symsz,ta_applied_samples);
         }
         k_buf[nof_re] = (uint32_t)k_crb;
         l_buf[nof_re] = (uint32_t)l;
@@ -245,8 +249,14 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->ul_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
-  nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
-                           k_buf, l_buf, nof_re, 1.0f);
+  const nr_sense_rs_meta_t rs_meta = {.rnti=g->rnti,
+    .start_rb=g->bwp_start+g->start_rb, .nb_rb=g->num_rb, .ports=-1,
+    .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
+    .ta_applied_samples=ta_applied_samples, .ta_applied_valid=true,
+    .transform_precoding=g->transform_precoding, .dmrs_type=g->dmrs_config_type+1,
+    .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
+  nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
+                                k_buf, l_buf, nof_re, 1.0f, &rs_meta);
   atomic_fetch_add_explicit(&g_da_ok, 1, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_da_re, nof_re, memory_order_relaxed);
 }

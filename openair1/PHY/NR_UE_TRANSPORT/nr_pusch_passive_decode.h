@@ -61,6 +61,7 @@ typedef struct {
   /// est_delay measured on the FIRST pass, when the window was re-placed and the chain re-run.
   /// 0 when no refinement was needed. Kept separate so a refined grant is distinguishable.
   int      est_delay_pre;
+  int      ta_applied_samples; ///< signed FFT advance used for this attempt, including sweep selection
   /// HARQ-ACK bit count that made the transport block decode, when the UCI reservation search
   /// found one. 0 = decoded with no reservation (no UCI, or O_ACK <= 2, which punctures instead).
   uint16_t uci_ack_re; ///< inferred ACK RE footprint; does not imply a known O_ACK/beta/alpha

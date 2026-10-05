@@ -10,7 +10,9 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   nr_passive_metrics_t m = {};
   m.t_mono_ns = 123; m.abs_slot = 456; m.pci = 64; m.acq_state = "TRACKING";
   m.pdschq_decoded = 58414; m.pdschq_crc_ok = 57897; m.pdschq_stale_after_decode = 7; m.scanq_queued = 404224; m.scanq_drop_full = 161;
-  char buf[4096];
+  m.prach_us = 73; m.prach_drops = 2; m.prach_skipped = 1;
+  m.sense_cfr_drop = 9; m.sense_rec_drop = 2; m.sense_io_errors = 1;
+  char buf[8192];
   const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
   ASSERT_GT(n, 0);
   const std::string s(buf, n);
@@ -21,6 +23,8 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"pdschq_crc_ok\":57897"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_stale_after_decode\":7"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_full\":161"), std::string::npos);
+  EXPECT_NE(s.find("\"prach_us\":73,\"prach_drops\":2,\"prach_skipped\":1"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_cfr_drop\":9,\"sense_rec_drop\":2,\"sense_io_errors\":1"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdcch_inline_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_drop_epoch\":0"), std::string::npos);
@@ -131,4 +135,10 @@ TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
   for (const char *key : {"pdschq_stale_after_decode", "pdschq_drop_epoch", "td_cb0_gpu", "td_fb_promotions",
                            "csirs_time_to_confirm_resources"})
     EXPECT_NE(s.find(std::string("\"") + key + "\":"), std::string::npos) << key;
+}
+TEST(PassiveMetrics,SrsCountersPresent) {
+  nr_passive_metrics_t m={};char buf[6144];
+  ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
+  EXPECT_NE(std::string(buf).find("\"srs_us\":0"),std::string::npos);
+  EXPECT_NE(std::string(buf).find("\"srs_jobs_dropped\":0"),std::string::npos);
 }

@@ -19,7 +19,12 @@
 #include "nr_td_cb0_wire.h"
 #include "nr_pusch_passive_queue.h"
 #include "nr_csirs_blind_rt.h"
+#include "nr_prach_passive.h"
+#include "nr_sense_api.h"
+__attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
+__attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
+__attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
@@ -37,6 +42,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   *m = (nr_passive_metrics_t){0};
   m->t_mono_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+  if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped);
   m->pci = atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed);
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
   m->acq_state = nr_passive_acq_state_name(a.state);
@@ -135,6 +141,17 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   nr_pdsch_passive_ldpc_tb_decoders(&m->ldpc_tb_cpu, &m->ldpc_tb_cuda);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
+  if (nr_sense_stats) {
+    nr_sense_stats_t sense;
+    nr_sense_stats(&sense);
+    for (int source = 0; source < NR_SENSE_SRC_COUNT; ++source)
+      m->sense_cfr_drop += sense.cfr_dropped[source];
+    m->sense_rec_drop = sense.rec_dropped;
+    m->sense_io_errors = sense.io_errors;
+    m->sense_cfr_no_sink = sense.cfr_no_sink;
+  }
+  if (nr_prach_passive_metrics)
+    nr_prach_passive_metrics(&m->prach_us, &m->prach_drops, &m->prach_skipped);
   if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
 }
 

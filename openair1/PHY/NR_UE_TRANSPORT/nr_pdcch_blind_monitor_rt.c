@@ -1,3 +1,4 @@
+#include "nr_srs_passive.h"
 #include "nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
@@ -72,6 +73,8 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"          // nr_pdsch_channel_estimation
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
+#include "PHY/NR_UE_TRANSPORT/nr_sense_gating.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"        // timing advance out of an overheard MAC PDU
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
@@ -3528,9 +3531,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       ? nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame) : 0;
   if (cfg_reconf_on) nr_cfg_epoch_tick(cfg_abs_slot);
 
-  const bool isac_on     = nr_isac_enabled() != 0;
-  const bool want_dmrs   = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
-  const bool want_data   = isac_on && cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
+  const int dmrs_source  = nr_sense_blind_dmrs_source();
+  const bool want_dmrs   = dmrs_source >= 0;
+  const bool want_data   = cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
   const bool want_decode = cfg->pdsch_decode >= 1;
   const bool defer       = nr_pdsch_passive_queue_running();
 
@@ -5912,6 +5915,8 @@ constdiag_done:;
           }
           pthread_mutex_unlock(&ul_length_lock);
         }
+        if (nr_srs_passive_enabled() && u->srs_request && nr_cfg_epoch_work_current())
+          nr_srs_passive_trigger(u->rnti,source_absolute_slot,u->srs_request);
         discovery_evidence("ul_admitted", "UL", cand_task[ti].frame, cand_task[ti].slot,
                             u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
         nr_pdcch_dci01_layout_observe(ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length,
@@ -6329,6 +6334,8 @@ constdiag_done:;
     }
     stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
                        out.rnti, nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti));
+    if (nr_srs_passive_enabled() && out.dci_format==NR_BLIND_DCI_FORMAT_1_1 && out.srs_request && nr_cfg_epoch_work_current())
+      nr_srs_passive_trigger(out.rnti,source_absolute_slot,out.srs_request);
     nr_pdcch_dci_length_note_seen(cand_task[ti].dci_length);
     if (cfg_reconf_on && out.rnti_class == NR_BLIND_RNTI_CLASS_P
         && nr_cfg_prnti_si_credible(out.short_messages_ind, out.short_messages,
@@ -6899,7 +6906,7 @@ constdiag_done:;
      * The DEFERRED decode does its own FEP and channel estimation in the consumer, so skipping here
      * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
      * SNR gate off, so on the sensing config this skips the whole block. */
-    const bool need_chest = want_dmrs || (cfg->min_snr_lin > 0.0f);
+    const bool need_chest = nr_sense_blind_need_chest(dmrs_source, cfg->min_snr_lin);
     if (want_decode && (cfg->pdsch_rv0_only && out.rv != 0))
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "rv!=0");
     if (want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot)
@@ -6973,7 +6980,8 @@ constdiag_done:;
      * direction: it is largest in the regime where receive-thread duty is already at the ~18 % PBCH
      * lock threshold. Bail out before the expensive work instead. `want_dmrs` still gets its
      * estimate because the DM-RS CFR tap is not subject to the decode cap. */
-    if (!want_dmrs && want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot) {
+    if (nr_sense_blind_skip_capped(dmrs_source, want_decode,
+                                  decodes_this_occasion >= cfg->pdsch_max_per_slot)) {
       NR_BLIND_CTR_INC(g_dec_over_cap);
       continue;
     }
@@ -6996,20 +7004,9 @@ constdiag_done:;
 
     const int num_sc = chest_alloc.num_rbs * NR_NB_SC_PER_RB;
     if (num_sc >= 2) {
-      const uint32_t base_sc = (uint32_t)(rb_origin + chest_alloc.first_rb) * NR_NB_SC_PER_RB;
-      // ---- AoA (2026-07-28): nr_pdsch_channel_estimation() above already computed the estimate for
-      // EVERY rx antenna (it loops aarx in [0,nb_antennas_rx) internally and writes
-      // pdsch_dl_ch_estimates[a][...] for each) -- this was already true before today, nothing new
-      // needed there. The only gap was HERE: extraction/submission only ever read antenna 0 and
-      // called the single-antenna nr_isac_submit_cfr(). Mirrors csi_rx.c's nr_isac_submit_csirs_ls()
-      // exactly (same nr_isac_aoa_antennas()/clamp/pack-then-submit-multi pattern, already
-      // live-validated there for the attached-UE AoA path). Antenna 0 stays primary (feeds
-      // range-Doppler + the SNR gate below); antennas 1..N-1 exist solely for isac_aoa.cc's bearing
-      // estimate.
-      uint32_t nof_ant = nr_isac_aoa_antennas();
-      if (nof_ant > (uint32_t)fp->nb_antennas_rx) {
-        nof_ant = (uint32_t)fp->nb_antennas_rx;
-      }
+      const uint32_t base_sc = nr_sense_crb_re(rb_origin + chest_alloc.first_rb, 0);
+      // Export the estimate already computed for every receiver antenna.
+      uint32_t nof_ant = (uint32_t)fp->nb_antennas_rx;
       if (nof_ant == 0) {
         nof_ant = 1;
       }
@@ -7024,15 +7021,19 @@ constdiag_done:;
       for (int j = 0; j < num_sc && nof_re < 273 * NR_NB_SC_PER_RB; j += 2) { // comb-2, matches pdsch_dmrs
         for (uint32_t a = 0; a < nof_ant; a++) {
           const c16_t *dl_ch_a = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_sym];
-          const size_t o       = 2 * ((size_t)a * (273 * NR_NB_SC_PER_RB) + nof_re);
-          isac_h[o]            = (float)dl_ch_a[j].r;
-          isac_h[o + 1]        = (float)dl_ch_a[j].i;
+          if (want_dmrs) {
+            const size_t o = 2 * ((size_t)a * (273 * NR_NB_SC_PER_RB) + nof_re);
+            isac_h[o]     = (float)dl_ch_a[j].r;
+            isac_h[o + 1] = (float)dl_ch_a[j].i;
+          }
           if (a == 0) {
             h_pow_sum += (double)dl_ch_a[j].r * dl_ch_a[j].r + (double)dl_ch_a[j].i * dl_ch_a[j].i;
           }
         }
-        isac_k[nof_re] = base_sc + (uint32_t)j;
-        isac_l[nof_re] = (uint32_t)dmrs_sym;
+        if (want_dmrs) {
+          isac_k[nof_re] = base_sc + (uint32_t)j;
+          isac_l[nof_re] = (uint32_t)dmrs_sym;
+        }
         nof_re++;
       }
       // ---- Gate 3 (last, most expensive to reach): the actual DMRS channel estimate itself looks
@@ -7052,8 +7053,12 @@ constdiag_done:;
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
-                                   273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
+          const nr_sense_rs_meta_t rs_meta = {.rnti=out.rnti,
+            .start_rb=dlsch_pdu.BWPStart+freq_alloc.first_rb, .nb_rb=freq_alloc.num_rbs,
+            .ports=-1, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
+            .transform_precoding=-1, .dmrs_type=-1, .dmrs_add_pos=-1, .dmrs_n_scid=-1};
+          nr_isac_submit_cfr_multi_meta(abs_slot, 0.0f, dmrs_source, &carrier, isac_h, nof_ant,
+                                        273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
           NR_BLIND_CTR_INC(g_cfr_submits);
         }
 
@@ -7189,6 +7194,34 @@ constdiag_done:;
             else
               NR_BLIND_CTR_INC(g_dec_k0_wait);
             btim_add(BTIM_PDSCH, btim_t_pds);
+            if (nr_sense_enabled() && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+              struct timespec sense_ts;
+              clock_gettime(CLOCK_MONOTONIC, &sense_ts);
+              const bool no_harq = out.rnti_class >= NR_BLIND_RNTI_CLASS_SI;
+              const nr_passive_obs_t sense_o = {
+                .abs_slot=grant_pd.source_absolute_slot,
+                .t_mono_ns=(uint64_t)sense_ts.tv_sec*1000000000ull+sense_ts.tv_nsec,
+                .frame=proc_pd.frame_rx, .slot=proc_pd.nr_slot_rx, .pci=fp->Nid_cell,
+                .dir=NR_OBS_DIR_DL, .rnti=out.rnti, .rnti_class=out.rnti_class,
+                .start_rb=dlsch_pdu.BWPStart+freq_alloc.first_rb, .nb_rb=freq_alloc.num_rbs,
+                .start_sym=dlsch_pdu.start_symbol, .nb_sym=dlsch_pdu.number_symbols,
+                .mcs=out.mcs, .mcs_table=grant_mcs_table,
+                .qm=dec.cw.qamModOrder, .nl=dec.cw.Nl,
+                .dmrs_symb_pos=dlsch_pdu.dlDmrsSymbPos,
+                .dmrs_scrambling_id=dlsch_pdu.dlDmrsScramblingId,
+                .tbs=dec.cw.TBS, .harq_pid=no_harq?-1:out.harq_pid,
+                .rv=out.rv, .ndi=no_harq?-1:out.ndi,
+                .crc=st==NR_PDSCH_PASSIVE_DECODE_CRC_OK?NR_OBS_CRC_OK:NR_OBS_CRC_FAIL,
+                .nvar=dec.nvar, .snr_db=NAN,
+                .fo_comp_hz=isnan(nr_slot_fep_fo_override_hz)
+                    ? (ue->cont_fo_comp ? ue->dl_Doppler_shift+ue->freq_offset : 0.0)
+                    : nr_slot_fep_fo_override_hz,
+                .delay_samples=NAN,
+                .carrier_hz=fp->dl_CarrierFreq?(int64_t)fp->dl_CarrierFreq:-1,
+                .scs_khz=fp->subcarrier_spacing/1000,
+                .fs_hz=(int64_t)fp->samples_per_subframe*1000};
+              nr_sense_emit_grant(&sense_o, 1);
+            }
             /* Same feedback contract as deferred decoding: unsupported/internal errors are not CRC trials. */
             /* K33: IQ may have been overwritten while decoding -> INCONCLUSIVE, no feedback of any kind. */
             if ((st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)

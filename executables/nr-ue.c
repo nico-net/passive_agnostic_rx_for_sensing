@@ -1,3 +1,4 @@
+#include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
@@ -6,6 +7,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include <dlfcn.h>
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
@@ -25,6 +27,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.h" // passive UL PUSCH hook
+#include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "executables/softmodem-common.h"
 #include "radio/COMMON/common_lib.h"
 #include "LAYER2/nr_pdcp/nr_pdcp_oai_api.h"
@@ -696,6 +699,9 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
   if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     nr_passive_replay_slot(UE, proc);
     nr_pusch_passive_monitor_process(UE, proc);
+    nr_prach_passive_process(UE, proc);
+    nr_srs_passive_capture(UE,proc->frame_rx,proc->nr_slot_rx,
+      ((uint64_t)proc->hfn_rx*1024+proc->frame_rx)*UE->frame_parms.slots_per_frame+proc->nr_slot_rx);
   }
 
   TracyCZoneEnd(ctx);
@@ -1071,6 +1077,11 @@ void *UE_thread(void *arg)
             nr_cfg_epoch_set_slots_per_second(1000u << UE->frame_parms.numerology_index);
           }
           atomic_store_explicit(&nr_passive_metrics_pci, UE->frame_parms.Nid_cell, memory_order_relaxed); // for the ISAC_METRICS JSON (Task A2)
+          if (nr_sense_enabled()) {
+            const openair0_config_t *sense_cfg=&openair0_cfg_g[UE->rf_map.card];
+            nr_sense_emit_session(&UE->frame_parms,
+              sense_cfg->rx_gain[UE->rf_map.chain]-sense_cfg->rx_gain_offset[UE->rf_map.chain]);
+          }
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",
                 decoded_frame_rx,

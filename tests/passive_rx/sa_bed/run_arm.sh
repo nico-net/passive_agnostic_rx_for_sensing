@@ -158,6 +158,8 @@ unset ISAC_RX_BRANCH_FO
 export LD_LIBRARY_PATH="$B${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 RX_ARGS=()
 [[ ${R13_GPU:-0} == 1 ]] && RX_ARGS=(--loader.ldpc.shlibversion _cuda)
+# Extra receiver CLI arguments (e.g. the sensing-API export flags of RUNBOOK §9), word-split.
+[[ -n ${R13_RX_EXTRA:-} ]] && read -r -a _rx_extra <<< "$R13_RX_EXTRA" && RX_ARGS+=("${_rx_extra[@]}")
 event start
 setup_netns
 start_gnb gnb_baseline.cfg gnb/before.log

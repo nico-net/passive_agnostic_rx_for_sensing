@@ -1,17 +1,6 @@
-/*! \file openair1/PHY/NR_UE_ISAC/nr_isac_ssb_axis.h
- * \brief CRB0-relative absolute-subcarrier axis for SSB's 240-subcarrier channel estimate.
- *
- * Every fusion source submitted through nr_isac_submit_cfr*() must place its k_abs values on the
- * SAME absolute subcarrier axis (relative to CRB0 / point A) -- see nr_isac.h's own doc comment
- * on nr_isac_submit_cfr(). This is a pure function, deliberately split out of the RT tap
- * (phy_procedures_nr_ue.c) so the one genuinely error-prone piece of Phase 2 (the axis
- * derivation) has its own unit test, independent of live hardware.
- *
- * The derivation mirrors nr_ue_dci_configuration.c's ssb_offset_point_a computation exactly
- * (Phase 1, PHASE1_CSS0_AUTOCONF_HANDOVER.md): ssb_offset_point_a = (ssb_start_subcarrier -
- * k_ssb) / 12 gives the RB-aligned CRB0-relative offset of the SSB's lowest RB; index 0 of the
- * 240-wide estimate sits at that RB's first subcarrier.
- */
+/* SSB CFR coordinates: fp->ssb_start_subcarrier + RE offset, relative to
+ * CRB0 / Point A. k_ssb is metadata and does not shift the estimator buffer.
+ * The retained k_ssb and FFT-size arguments are ignored by the axis helper. */
 #ifndef NR_ISAC_SSB_AXIS_H
 #define NR_ISAC_SSB_AXIS_H
 
@@ -36,6 +25,7 @@ extern "C" {
  * @param k_abs_out            Caller-owned array of at least 240 uint32_t.
  */
 void nr_isac_ssb_k_abs(int ssb_start_subcarrier, int k_ssb, int ofdm_symbol_size, uint32_t* k_abs_out);
+int nr_isac_ssb_normalize_k_ssb(int raw_k_ssb, int numerology, int fr1);
 
 #ifdef __cplusplus
 }

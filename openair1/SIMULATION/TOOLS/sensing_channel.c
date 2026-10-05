@@ -422,7 +422,7 @@ void sensing_channel_update(channel_desc_t *cd, int nbSamples, uint64_t TS)
       // wall time; see this function's other timestamp above), which drifts from real host time
       // under load (confirmed live 2026-07-28: up to ~100s drift over a 120s tests/passive_rx run
       // with several concurrent softmodem processes). A GT scorer needs to align against
-      // sensing_engine.cc's cpi_start_time_utc_ns (std::chrono::system_clock::now()), which IS real
+      // the retired consumer's cpi_start_time_utc_ns (std::chrono::system_clock::now()), which IS real
       // UTC, so this line needs its own real-UTC stamp rather than assuming a fixed t->UTC offset.
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
