@@ -29,6 +29,7 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "SCHED_NR_UE/phy_sch_processing_time.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_api.h"
 #include "PHY/NR_UE_ISAC/nr_isac_ssb_axis.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "openair2/LAYER2/NR_MAC_UE/mac_proto.h"
@@ -1592,6 +1593,7 @@ int nr_process_pbch_symbol(
   // cell-specific misconfiguration. Guarded by nr_isac_source_enabled() so this is a true no-op
   // (not even the k_abs derivation runs) unless "ssb" is in sensing.sources.
   if (nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
+    const uint64_t t_sense_prod=nr_sense_now_ns();
     uint32_t k_abs[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     uint32_t l_sym[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     const NR_UE_MAC_INST_t *ssb_mac = get_mac_inst(ue->Mod_id);
@@ -1620,6 +1622,7 @@ int nr_process_pbch_symbol(
         h_packed[2 * (a * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB) + i) + 1] = (float)est[i].i;
       }
     }
+    nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_SSB,nr_sense_now_ns()-t_sense_prod);
     const nr_isac_carrier_t carrier = {
         .nof_prb         = (uint32_t)fp->N_RB_DL,
         .scs_hz          = fp->subcarrier_spacing,

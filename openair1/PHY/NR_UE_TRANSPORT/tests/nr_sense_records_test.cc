@@ -124,6 +124,36 @@ TEST(SenseRecords, RsLinksCfrFrame)
   unlink(records); unlink(frames);
 }
 
+TEST(SenseRecords, DeferredRsFormattingPreservesBytesAndStrings)
+{
+  char records[]="/tmp/nr_sense_deferred_XXXXXX";
+  int fd=mkstemp(records); ASSERT_GE(fd,0); close(fd);
+  nr_sense_cfg_t cfg{}; cfg.records_path=records;
+  cfg.rec_ring_slots=4; cfg.cfr_ring_frames=1; cfg.cfr_max_re=1;
+  nr_sense_test_pause_writer(true);
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  char resource[]="row=3,fd=12,l0=2,density=2,period=unknown";
+  nr_sense_rs_meta_t m{};
+  m.t_mono_ns=123456; m.stamp_valid=true; m.epoch=-1; m.identity_gen=-1;
+  m.dedicated_epoch=-1; m.abs_slot=42; m.frame=2; m.slot=2; m.pci=7;
+  m.start_rb=10; m.nb_rb=20; m.n_re=4; m.n_ant=4; m.ports=-1;
+  m.ssb_index=-1; m.k_ssb=-1; m.csirs_resource=resource;
+  m.ta_est_samples=-1; m.transform_precoding=-1; m.dmrs_type=-1;
+  m.dmrs_add_pos=-1; m.dmrs_n_scid=-1;
+  char expected[2048];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_CSIRS,&m,9,expected,sizeof expected),0);
+  nr_sense_emit_rs(NR_SENSE_SRC_CSIRS,&m,9);
+  memset(resource,'X',strlen(resource));
+  nr_sense_test_pause_writer(false);
+  nr_sense_close();
+  std::ifstream f(records); std::string line;
+  ASSERT_TRUE(std::getline(f,line));
+  EXPECT_EQ(line,expected);
+  nr_sense_stats_t s{}; nr_sense_stats(&s);
+  EXPECT_EQ(s.rec_count,1u);
+  unlink(records);
+}
+
 TEST(SenseRecords, UlRsRecordSelfContained)
 {
   nr_sense_rs_meta_t m{};

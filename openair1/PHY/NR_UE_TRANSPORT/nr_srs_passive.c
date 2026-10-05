@@ -64,6 +64,8 @@ bool nr_srs_passive_enabled(void) { return atomic_load_explicit(&sr.active,memor
 
 static void process_srs(srs_job_t *job)
 {
+  nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
+      {NR_SENSE_SRC_SRS,nr_sense_now_ns()};
   const int N=sr.grid.fft_size,stride=14*N,win=N+2*SRS_MARGIN;
   const uint64_t stamp=((uint64_t)job->meta.epoch<<32)|job->meta.identity_gen;
   if(sr.stamp_valid && stamp!=sr.stamp) {nr_srs_blind_reset(sr.search);sr.have_hint=false;}
@@ -142,7 +144,9 @@ static void process_srs(srs_job_t *job)
       job->meta.ta_est_samples=c->delay_samples;
       nr_srs_observe(sr.search,c,job->meta.abs_slot);
       job->meta.n_ant=sr.export_ant;
+      nr_sense_prod_scope_stop(&prod);
       nr_srs_export(c,&job->meta,nre,sr.cfr,sr.k,sr.l);
+      prod.start_ns=nr_sense_now_ns();
       if(nseen<NR_SRS_MAX_CANDIDATES) seen[nseen++]=*c;
     }
     if(nseen==NR_SRS_MAX_CANDIDATES) break;
@@ -160,7 +164,8 @@ static void *srs_worker(void *unused)
     struct timespec begin,end;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin);
     process_srs(job);
     clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end);
-    atomic_fetch_add(&sr.elapsed_us,((int64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec)/1000);
+    const uint64_t elapsed_ns=(int64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec;
+    atomic_fetch_add(&sr.elapsed_us,elapsed_ns/1000);
     pthread_mutex_lock(&sr.lock);sr.tail=(sr.tail+1)%SRS_DEPTH;sr.count--;pthread_mutex_unlock(&sr.lock);
   }
   return NULL;

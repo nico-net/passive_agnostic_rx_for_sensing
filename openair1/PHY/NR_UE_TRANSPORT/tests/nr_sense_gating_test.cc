@@ -58,6 +58,14 @@ struct Gating : testing::Test {
   }
 };
 }
+TEST(SenseCost, MonitorChestAttributionUsesSourceAndSnrGate) {
+  EXPECT_FALSE(nr_sense_blind_extra_chest(-1,0));
+  EXPECT_FALSE(nr_sense_blind_extra_chest(-1,1));
+  EXPECT_TRUE(nr_sense_blind_extra_chest(NR_ISAC_SRC_PDSCH_DMRS,0));
+  EXPECT_FALSE(nr_sense_blind_extra_chest(NR_ISAC_SRC_PDSCH_DMRS,1));
+  EXPECT_TRUE(nr_sense_blind_extra_chest(NR_ISAC_SRC_PDSCH_DMRS_BLIND,0));
+}
+
 TEST_F(Gating, ApiOffNoExtraChannelEstimation) {
   start(0,"pdsch_dmrs,pdsch_data");
   EXPECT_EQ(nr_sense_blind_dmrs_source(),-1);

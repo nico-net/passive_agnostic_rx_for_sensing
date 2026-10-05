@@ -73,6 +73,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"          // nr_pdsch_channel_estimation
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
+#include "nr_sense_api.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_gating.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
@@ -6992,6 +6993,7 @@ constdiag_done:;
 
     // Full-slot FEP for the PDSCH's own DMRS symbol -- separate from the CORESET FEP above (a
     // different symbol in general; the PDSCH allocation starts after the PDCCH region).
+    const uint64_t t_sense_chest=nr_sense_blind_extra_chest(dmrs_source,cfg->min_snr_lin) ? nr_sense_now_ns() : 0;
     const uint64_t btim_t_che = btim_on ? btim_now() : 0;
     __attribute__((aligned(32))) c16_t rxdataF_pdsch[fp->nb_antennas_rx][rxdataF_sz];
     nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF_pdsch, link_type_dl, 0, ue->common_vars.rxdata);
@@ -7000,6 +7002,8 @@ constdiag_done:;
     nr_pdsch_channel_estimation(ue, proc, &dlsch_pdu, &chest_alloc, 0, get_dmrs_port(0, out.dmrs_ports),
                                (unsigned char)dmrs_sym, pdsch_est_size, pdsch_dl_ch_estimates,
                                fp->samples_per_slot_wCP, rxdataF_pdsch, &nvar);
+    if (t_sense_chest)
+      nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_chest);
     btim_add(BTIM_CHEST, btim_t_che);
 
     const int num_sc = chest_alloc.num_rbs * NR_NB_SC_PER_RB;
@@ -7018,6 +7022,7 @@ constdiag_done:;
       static __thread uint32_t isac_l[273 * NR_NB_SC_PER_RB];
       uint32_t nof_re  = 0;
       double   h_pow_sum = 0; // antenna 0 only -- feeds the post-estimation SNR gate below
+      const uint64_t t_sense_extract=want_dmrs ? nr_sense_now_ns() : 0;
       for (int j = 0; j < num_sc && nof_re < 273 * NR_NB_SC_PER_RB; j += 2) { // comb-2, matches pdsch_dmrs
         for (uint32_t a = 0; a < nof_ant; a++) {
           const c16_t *dl_ch_a = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_sym];
@@ -7036,6 +7041,8 @@ constdiag_done:;
         }
         nof_re++;
       }
+      if (t_sense_extract)
+        nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_extract);
       // ---- Gate 3 (last, most expensive to reach): the actual DMRS channel estimate itself looks
       // like noise even though every payload-level check passed by chance. mean|H|^2/nvar is
       // scale-invariant (both come from the SAME nr_pdsch_channel_estimation() call), so no absolute

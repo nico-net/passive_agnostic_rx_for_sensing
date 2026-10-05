@@ -12,6 +12,10 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   m.pdschq_decoded = 58414; m.pdschq_crc_ok = 57897; m.pdschq_stale_after_decode = 7; m.scanq_queued = 404224; m.scanq_drop_full = 161;
   m.prach_us = 73; m.prach_drops = 2; m.prach_skipped = 1;
   m.sense_cfr_drop = 9; m.sense_rec_drop = 2; m.sense_io_errors = 1;
+  m.sense_prod_us[NR_SENSE_SRC_PDSCH_DATA]=123;
+  m.sense_pack_us[NR_SENSE_SRC_PDSCH_DATA]=45;
+  m.sense_prod_count[NR_SENSE_SRC_PDSCH_DATA]=6;
+  m.sense_rec_us=78; m.sense_write_us=90;
   char buf[8192];
   const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
   ASSERT_GT(n, 0);
@@ -25,6 +29,9 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"scanq_drop_full\":161"), std::string::npos);
   EXPECT_NE(s.find("\"prach_us\":73,\"prach_drops\":2,\"prach_skipped\":1"), std::string::npos);
   EXPECT_NE(s.find("\"sense_cfr_drop\":9,\"sense_rec_drop\":2,\"sense_io_errors\":1"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_prod_us_pdsch_data\":123,\"sense_pack_us_pdsch_data\":45"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_prod_count_pdsch_data\":6"), std::string::npos);
+  EXPECT_NE(s.find("\"sense_rec_us\":78,\"sense_write_us\":90"), std::string::npos);
   EXPECT_NE(s.find("\"scanq_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdcch_inline_drop_epoch\":0"), std::string::npos);
   EXPECT_NE(s.find("\"pdschq_drop_epoch\":0"), std::string::npos);
@@ -42,7 +49,7 @@ TEST(PassiveMetrics, ReturnsMinusOneWhenBufferTooSmall) {
 
 TEST(PassiveMetrics, NullStateNameIsReportedAsUnknown) {
   nr_passive_metrics_t m = {};
-  char buf[4096];
+  char buf[8192];
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   EXPECT_NE(std::string(buf).find("\"acq_state\":\"UNKNOWN\""), std::string::npos);
 }
@@ -127,7 +134,7 @@ TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
   m.acq_state = "TRACKING";
   m.td_cb0_us_per_item = 1000000.0;
   m.csirs_confirm_resource_count = NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX;
-  char buf[8192];
+  char buf[16384];
   const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
   ASSERT_GT(n, 0);
   const std::string s(buf, n);

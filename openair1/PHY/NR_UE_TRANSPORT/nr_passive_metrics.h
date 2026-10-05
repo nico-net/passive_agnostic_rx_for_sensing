@@ -6,6 +6,7 @@
 #endif
 #include <stddef.h>
 #include <stdint.h>
+#include "nr_sense_api.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -52,6 +53,9 @@ typedef struct {
   uint64_t srs_us, srs_jobs_dropped;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
   uint64_t sense_cfr_drop, sense_rec_drop, sense_io_errors, sense_cfr_no_sink;
+  uint64_t sense_prod_us[NR_SENSE_SRC_COUNT], sense_pack_us[NR_SENSE_SRC_COUNT];
+  uint64_t sense_prod_count[NR_SENSE_SRC_COUNT], sense_pack_count[NR_SENSE_SRC_COUNT];
+  uint64_t sense_rec_us, sense_write_us, sense_rec_count, sense_write_count;
   uint64_t prach_us, prach_drops, prach_skipped;
   uint64_t csirs_candidates, csirs_confirmed, csirs_revoked, zp_exported, zp_revoked;
   uint64_t csirs_search_us, csirs_idsweep_us, csirs_confirm_us, csirs_cfr_us;
