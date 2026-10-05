@@ -69,3 +69,37 @@ TEST(GpuFepHygiene, ToleranceGate)
   EXPECT_FALSE(nr_gpu_fep_failure_disables(0));
   EXPECT_TRUE(nr_gpu_fep_failure_disables(1));
 }
+
+TEST(GpuFepHygiene, NotComparableIsSkipped)
+{
+  for (bool llr : {false, true})
+    for (bool snapshot : {false, true})
+      if (!llr || !snapshot) {
+        EXPECT_EQ(NR_GPU_FEP_SKIPPED, nr_gpu_fep_check_result(llr && snapshot, 1, 1, 1, true));
+      }
+  EXPECT_EQ(NR_GPU_FEP_SKIPPED, nr_gpu_fep_check_result(false, -1, 1, 0, false));
+  EXPECT_EQ(NR_GPU_FEP_SKIPPED, nr_gpu_fep_check_result(true, -1, 1, 1, true));
+  const int16_t weak[] = {-8, 0, 8};
+  const int16_t gpu[] = {8, 0, -8};
+  EXPECT_FALSE(isfinite(nr_gpu_fep_sign_agreement(weak, gpu, 3)));
+  const int16_t cpu2[] = {-9, 9, 1};
+  EXPECT_DOUBLE_EQ(1.0, nr_gpu_fep_sign_agreement(cpu2, weak, 3));
+}
+
+TEST(GpuFepHygiene, ExpiredReferenceIsSkipped)
+{
+  EXPECT_EQ(NR_GPU_FEP_SKIPPED, nr_gpu_fep_reference_result(108, 100, 10, true, 1, 1, 1, true));
+  EXPECT_EQ(NR_GPU_FEP_FAIL, nr_gpu_fep_reference_result(107, 100, 10, true, 0, 1, 1, true));
+}
+
+TEST(GpuFepHygiene, ObserveModeNeverDisables)
+{
+  for (uint64_t failures = 0; failures < 10; ++failures)
+    EXPECT_FALSE(nr_gpu_fep_should_disable(false, failures));
+}
+
+TEST(GpuFepHygiene, EnforceModeDisablesAfterTwo)
+{
+  EXPECT_FALSE(nr_gpu_fep_should_disable(true, 0));
+  EXPECT_TRUE(nr_gpu_fep_should_disable(true, 1));
+}

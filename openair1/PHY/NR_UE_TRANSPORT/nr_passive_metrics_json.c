@@ -44,7 +44,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"pdcch_occasions\":%" PRIu64 ",\"pdcch_candidates\":%" PRIu64 ",\"pdcch_accepts\":%" PRIu64 ",\"pdcch_accepts_c\":%" PRIu64 ","
       "\"scanq_queued\":%" PRIu64 ",\"scanq_processed\":%" PRIu64 ",\"scanq_drop_full\":%" PRIu64 ",\"scanq_drop_stale\":%" PRIu64 ",\"scanq_drop_epoch\":%" PRIu64 ",\"scanq_max_lag\":%" PRIu64 ",\"pdcch_inline_drop_epoch\":%" PRIu64 ","
       "\"pdschq_queued\":%" PRIu64 ",\"pdschq_decoded\":%" PRIu64 ",\"pdschq_crc_ok\":%" PRIu64 ",\"pdschq_drop_full\":%" PRIu64 ",\"pdschq_drop_stale\":%" PRIu64 ",\"pdschq_drop_epoch\":%" PRIu64 ",\"pdschq_stale_after_decode\":%" PRIu64 ",\"pdschq_max_lag\":%" PRIu64 ",\"puschq_drop_epoch\":%" PRIu64 ","
-      "\"gpu_fep_stale_pre\":%" PRIu64 ",\"gpu_fep_stale_post\":%" PRIu64 ",\"gpu_fep_selfcheck_fail\":%" PRIu64 ",\"gpu_fep_disabled\":%" PRIu64 ","
+      "\"gpu_fep_stale_pre\":%" PRIu64 ",\"gpu_fep_stale_post\":%" PRIu64 ",\"gpu_fep_selfcheck_fail\":%" PRIu64 ",\"gpu_fep_selfcheck_skipped\":%" PRIu64 ",\"gpu_fep_disabled\":%" PRIu64 ","
       "\"td_sib1_tdra_match_10\":%" PRIu64 ",\"td_sib1_tdra_mismatch_10\":%" PRIu64 ",\"td_sib1_tdra_none_10\":%" PRIu64 ","
       "\"td_sib1_tdra_match_11\":%" PRIu64 ",\"td_sib1_tdra_mismatch_11\":%" PRIu64 ",\"td_sib1_tdra_none_11\":%" PRIu64 ","
       "\"td_sib1_tdra_match_unk\":%" PRIu64 ",\"td_sib1_tdra_mismatch_unk\":%" PRIu64 ",\"td_sib1_tdra_none_unk\":%" PRIu64 ","
@@ -68,7 +68,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->pdcch_occasions, m->pdcch_candidates, m->pdcch_accepts, m->pdcch_accepts_c,
       m->scanq_queued, m->scanq_processed, m->scanq_drop_full, m->scanq_drop_stale, m->scanq_drop_epoch, m->scanq_max_lag, m->pdcch_inline_drop_epoch,
       m->pdschq_queued, m->pdschq_decoded, m->pdschq_crc_ok, m->pdschq_drop_full, m->pdschq_drop_stale, m->pdschq_drop_epoch, m->pdschq_stale_after_decode, m->pdschq_max_lag, m->puschq_drop_epoch,
-      m->gpu_fep_stale_pre, m->gpu_fep_stale_post, m->gpu_fep_selfcheck_fail, m->gpu_fep_disabled,
+      m->gpu_fep_stale_pre, m->gpu_fep_stale_post, m->gpu_fep_selfcheck_fail, m->gpu_fep_selfcheck_skipped, m->gpu_fep_disabled,
       m->td_sib1_tdra_match_10, m->td_sib1_tdra_mismatch_10, m->td_sib1_tdra_none_10,
       m->td_sib1_tdra_match_11, m->td_sib1_tdra_mismatch_11, m->td_sib1_tdra_none_11,
       m->td_sib1_tdra_match_unk, m->td_sib1_tdra_mismatch_unk, m->td_sib1_tdra_none_unk,

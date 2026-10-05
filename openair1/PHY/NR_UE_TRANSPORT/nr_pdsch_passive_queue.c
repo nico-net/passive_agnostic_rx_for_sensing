@@ -90,9 +90,10 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 static const nr_gpu_fep_api_t * _Atomic g_gpu; /* NULL = CPU path; health gate can disable from a consumer */
 static _Atomic uint64_t g_gpu_slots, g_gpu_jobs, g_gpu_fep_ns, g_gpu_llr_ns;
 static _Atomic uint64_t g_gpu_chk_n, g_gpu_chk_crc_agree, g_gpu_chk_crc_gpu_ok, g_gpu_chk_crc_cpu_ok;
-static _Atomic uint64_t g_gpu_stale_pre, g_gpu_stale_post, g_gpu_chk_fail;
+static _Atomic uint64_t g_gpu_stale_pre, g_gpu_stale_post, g_gpu_chk_fail, g_gpu_chk_skipped;
 static _Atomic int g_gpu_disabled;
 static _Atomic int g_gpu_chk_limit;
+static _Atomic int g_gpu_chk_enforce;
 #define GPU_LLR_CAP (16u << 20) /* int16 per consumer: ~13 full-band rank-4 256QAM TBs, or any probe batch */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
@@ -1255,7 +1256,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (job.layout_probe && !gpu_job && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       nr_pdsch_passive_probe_equiv_check(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF); /* debug, env-gated */
     nr_pdsch_passive_set_grantwork(NULL, false);
-    /* ISAC_GPU_SELFCHECK=N: default first 32 GPU-fed decodes, compared with a worker-owned FEP snapshot. */
+    /* ISAC_GPU_SELFCHECK=N: first 32 comparable GPU-fed decodes by default; enforce is opt-in. */
     {
       if (gpu_job && g_gpu_chk_limit > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)g_gpu_chk_limit
           && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
@@ -1271,8 +1272,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         const uint32_t G = st2 == NR_PDSCH_PASSIVE_DECODE_ERROR ? 0 : nr_pdsch_passive_last_llr(&lc);
         const uint32_t n = gpu_job->n_llr < G ? gpu_job->n_llr : G;
         int16_t *lg = malloc((size_t)G * sizeof(int16_t));
-        double sa = 0, mc = 0, mg = 0, dmax = 0, sab[8] = {0}; /* sign agreement per bit position of the RE */
-        if (lc && lg && n) {
+        double sa = NAN, mc = 0, mg = 0, dmax = 0, sab[8] = {0}; /* sign agreement per bit position of the RE */
+        if (lc && lg && n && gpu_job->Qm && gpu_job->Nl) {
           memcpy(lg, t_gpu_llr + gpu_job->llr_offset, (size_t)n * sizeof(int16_t));
           if (n < G) memset(lg + n, 0, (size_t)(G - n) * sizeof(int16_t));
           nr_dlsch_unscrambling(lg, G, 0, pdu2.dlDataScramblingId, job.grant.rnti);
@@ -1280,7 +1281,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           const uint32_t per_re = gpu_job->Nl * gpu_job->Qm, per_sym = 12u * gpu_job->nb_rb * per_re; /* no data on DM-RS symbols assumed */
           for (uint32_t i = 0; i < n; i++) {
             mc += abs(lc[i]); mg += abs(lg[i]);
-            const int e = (lc[i] < 0) == (lg[i] < 0); sa += e; sab[i % gpu_job->Qm] += e;
+            const int e = (lc[i] < 0) == (lg[i] < 0); sab[i % gpu_job->Qm] += e;
             if (i % gpu_job->Qm == 0) { const uint32_t sy = i / per_sym, ly = (i / gpu_job->Qm) % gpu_job->Nl; if (sy < 14) { sas[sy] += e; nss[sy]++; } sal[ly] += e; nsl[ly]++; }
           }
           for (int b = 0; b < gpu_job->Qm; b++) sab[b] /= (double)n / gpu_job->Qm;
@@ -1292,7 +1293,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           LOG_A(PHY, "SENSING: GPU_SELFCHECK_DETAIL%s\n", extra);
           const double f = mg > 0 ? mc / mg : 1.0; /* match the GPU scale to the CPU's mean |LLR| */
           for (uint32_t i = 0; i < n; i++) { const double d = fabs((double)lc[i] - f * lg[i]); if (d > dmax) dmax = d; }
-          sa /= n; mc /= n; mg /= n;
+          sa = nr_gpu_fep_sign_agreement(lc, lg, n); mc /= n; mg /= n;
           gpu_dump_record(ue, &job, gpu_job, lc, lg, G);
         }
         free(lg);
@@ -1313,25 +1314,42 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             if (pa > 0 && pb > 0) { corr = sqrt(cr * cr + ci * ci) / sqrt(pa * pb); ratio = sqrt(pb / pa); }
           }
         }
-        uint64_t checked = atomic_load(&g_gpu_chk_n);
-        while (checked < (uint64_t)g_gpu_chk_limit && !atomic_compare_exchange_weak(&g_gpu_chk_n, &checked, checked + 1)) {}
-        if (checked < (uint64_t)g_gpu_chk_limit) {
         const bool crc_match = st2 != NR_PDSCH_PASSIVE_DECODE_ERROR && gpu_ok == cpu_ok;
-        atomic_fetch_add(&g_gpu_chk_crc_agree, crc_match);
-        atomic_fetch_add(&g_gpu_chk_crc_gpu_ok, gpu_ok);
-        atomic_fetch_add(&g_gpu_chk_crc_cpu_ok, cpu_ok);
-        if (!nr_gpu_fep_health_pass(corr, ratio, sa, crc_match)) {
-          gpu_health_failed = true;
-          if (nr_gpu_fep_failure_disables(atomic_fetch_add(&g_gpu_chk_fail, 1)) && atomic_exchange(&g_gpu, NULL)) {
-            atomic_store(&g_gpu_disabled, 1);
-            LOG_E(PHY, "SENSING: GPU_FEP disabled: 2 self-check tolerance failures; CPU path for remainder of run\n");
+        const nr_gpu_fep_check_t check = nr_gpu_fep_reference_result(
+            atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+            job.absolute_slot, slots_per_frame, st2 != NR_PDSCH_PASSIVE_DECODE_ERROR && lc && lg && n
+                && group_rxF && gpu_job->Qm && gpu_job->Nl, corr, ratio, sa, crc_match);
+        if (check == NR_GPU_FEP_SKIPPED) {
+          atomic_fetch_add(&g_gpu_chk_skipped, 1);
+        } else {
+          uint64_t checked = atomic_load(&g_gpu_chk_n);
+          const int limit = atomic_load(&g_gpu_chk_limit);
+          while (checked < (uint64_t)limit && !atomic_compare_exchange_weak(&g_gpu_chk_n, &checked, checked + 1)) {}
+          if (checked < (uint64_t)limit) {
+            atomic_fetch_add(&g_gpu_chk_crc_agree, crc_match);
+            atomic_fetch_add(&g_gpu_chk_crc_gpu_ok, gpu_ok);
+            atomic_fetch_add(&g_gpu_chk_crc_cpu_ok, cpu_ok);
+            if (check == NR_GPU_FEP_FAIL) {
+              const uint64_t prior = atomic_fetch_add(&g_gpu_chk_fail, 1);
+              if (atomic_load(&g_gpu_chk_enforce)) gpu_health_failed = true;
+              if (nr_gpu_fep_should_disable(atomic_load(&g_gpu_chk_enforce), prior)) {
+                const int was_disabled = atomic_exchange(&g_gpu_disabled, 1);
+                const nr_gpu_fep_api_t *was_gpu = atomic_exchange(&g_gpu, NULL);
+                if (!was_disabled && was_gpu)
+                  LOG_E(PHY, "SENSING: GPU_FEP disabled: 2 self-check tolerance failures; CPU path for remainder of run\n");
+              }
+            }
+            LOG_A(PHY, "SENSING: GPU_SELFCHECK slot=%ld rnti=0x%x probe=%u nrb=%u Nl=%u Qm=%u crc_gpu=%d crc_cpu=%d sign_agree=%.4f mean|llr| cpu=%.1f gpu=%.1f max|dllr|(scaled)=%.0f over %u | per-bit [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f] | rxdataF corr=%.4f gpu/cpu scale=%.3f\n",
+                  job.absolute_slot, job.rnti, job.layout_probe, job.freq_alloc.num_rbs, gpu_job->Nl, gpu_job->Qm, gpu_ok, cpu_ok, sa, mc, mg, dmax, n,
+                  sab[0], sab[1], sab[2], sab[3], sab[4], sab[5], sab[6], sab[7], corr, ratio);
           }
         }
-        LOG_A(PHY, "SENSING: GPU_SELFCHECK slot=%ld rnti=0x%x probe=%u nrb=%u Nl=%u Qm=%u crc_gpu=%d crc_cpu=%d sign_agree=%.4f mean|llr| cpu=%.1f gpu=%.1f max|dllr|(scaled)=%.0f over %u | per-bit [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f] | rxdataF corr=%.4f gpu/cpu scale=%.3f\n",
-              job.absolute_slot, job.rnti, job.layout_probe, job.freq_alloc.num_rbs, gpu_job->Nl, gpu_job->Qm, gpu_ok, cpu_ok, sa, mc, mg, dmax, n,
-              sab[0], sab[1], sab[2], sab[3], sab[4], sab[5], sab[6], sab[7], corr, ratio);
+        } else {
+          atomic_fetch_add(&g_gpu_chk_skipped, 1);
         }
-        }
+      } else if (gpu_job && atomic_load(&g_gpu_chk_limit) > 0
+                 && atomic_load(&g_gpu_chk_n) < (uint64_t)atomic_load(&g_gpu_chk_limit)) {
+        atomic_fetch_add(&g_gpu_chk_skipped, 1);
       }
     }
     /* A layout probe's outcome is code block 0's CRC, mapped onto the TB status the feedback below
@@ -1681,6 +1699,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 {
   if (!atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_load();
   { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 32; }
+  { const char *e = getenv("ISAC_GPU_SELFCHECK_ENFORCE"); g_gpu_chk_enforce = e && !strcmp(e, "1"); }
   if (g_gpu) {
     const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
     const nr_gpu_fep_cfg_t cfg = {.nant = fp->nb_antennas_rx <= 4 ? fp->nb_antennas_rx : 4,
@@ -1917,6 +1936,7 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->gpu_stale_pre = atomic_load_explicit(&g_gpu_stale_pre, memory_order_relaxed);
   out->gpu_stale_post = atomic_load_explicit(&g_gpu_stale_post, memory_order_relaxed);
   out->gpu_selfcheck_fail = atomic_load_explicit(&g_gpu_chk_fail, memory_order_relaxed);
+  out->gpu_selfcheck_skipped = atomic_load_explicit(&g_gpu_chk_skipped, memory_order_relaxed);
   out->gpu_disabled = atomic_load_explicit(&g_gpu_disabled, memory_order_relaxed);
 }
 
