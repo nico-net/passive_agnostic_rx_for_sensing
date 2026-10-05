@@ -148,4 +148,7 @@ TEST(PassiveMetrics,SrsCountersPresent) {
   ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
   EXPECT_NE(std::string(buf).find("\"srs_us\":0"),std::string::npos);
   EXPECT_NE(std::string(buf).find("\"srs_jobs_dropped\":0"),std::string::npos);
+  EXPECT_NE(std::string(buf).find("\"srs_pregate_skip\":0"),std::string::npos);
+  EXPECT_NE(std::string(buf).find("\"srs_backoff_skip\":0"),std::string::npos);
+  EXPECT_NE(std::string(buf).find("\"srs_budget_skip\":0"),std::string::npos);
 }

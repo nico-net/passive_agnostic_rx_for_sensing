@@ -71,6 +71,8 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"ldpc_cuda_errors\":%" PRIu64 ",\"ldpc_cuda_fallbacks\":%" PRIu64 ",\"ldpc_cuda_poisoned\":%" PRIu64 ","
       "\"ldpc_cuda_disabled\":%" PRIu64 ",\"ldpc_cuda_breaker_trips\":%" PRIu64 ",\"ldpc_tb_cpu\":%" PRIu64 ",\"ldpc_tb_cuda\":%" PRIu64 ","
       "\"srs_us\":%" PRIu64 ",\"srs_jobs_dropped\":%" PRIu64 ","
+      "\"srs_pregate_skip\":%" PRIu64 ",\"srs_backoff_skip\":%" PRIu64 ","
+      "\"srs_budget_skip\":%" PRIu64 ",\"srs_idle_resets\":%" PRIu64 ","
       "\"pusch_try\":%" PRIu64 ",\"pusch_crc_ok\":%" PRIu64 ","
       "\"obs_pushed\":%" PRIu64 ",\"obs_written\":%" PRIu64 ",\"obs_dropped\":%" PRIu64 ","
       "\"sense_cfr_drop\":%" PRIu64 ",\"sense_rec_drop\":%" PRIu64 ",\"sense_io_errors\":%" PRIu64 ",\"sense_cfr_no_sink\":%" PRIu64 "%s,"
@@ -93,7 +95,8 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->ldpc_ok, m->ldpc_seg_fail, m->ldpc_tb_fail, m->ldpc_zero_tb,
       m->ldpc_cuda_errors, m->ldpc_cuda_fallbacks, m->ldpc_cuda_poisoned,
       m->ldpc_cuda_disabled, m->ldpc_cuda_breaker_trips, m->ldpc_tb_cpu, m->ldpc_tb_cuda,
-      m->srs_us,m->srs_jobs_dropped,
+      m->srs_us,m->srs_jobs_dropped,m->srs_pregate_skip,m->srs_backoff_skip,
+      m->srs_budget_skip,m->srs_idle_resets,
       m->pusch_try, m->pusch_crc_ok,
       m->obs_pushed, m->obs_written, m->obs_dropped,
       m->sense_cfr_drop, m->sense_rec_drop, m->sense_io_errors, m->sense_cfr_no_sink, sense_cost,

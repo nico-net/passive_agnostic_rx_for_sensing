@@ -19,7 +19,8 @@ void nr_srs_passive_pusch(uint16_t rnti, uint64_t slot, int ta_est_samples,
                          const float *cfr, const uint32_t *k, int n_re);
 void nr_srs_passive_hint(int comb, int offset, int group, int cs);
 void nr_srs_passive_grant(uint64_t slot,uint16_t mask,int start_rb,int nb_rb);
-void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped);
+void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uint64_t *backoff,
+                            uint64_t *budget,uint64_t *resets);
 bool nr_srs_passive_enabled(void);
 #ifdef __cplusplus
 }

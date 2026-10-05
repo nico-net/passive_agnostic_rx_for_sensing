@@ -24,7 +24,7 @@
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
 __attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
-__attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *);
+__attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
@@ -42,7 +42,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   *m = (nr_passive_metrics_t){0};
   m->t_mono_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-  if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped);
+  if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
+      &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);
   m->pci = atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed);
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
   m->acq_state = nr_passive_acq_state_name(a.state);

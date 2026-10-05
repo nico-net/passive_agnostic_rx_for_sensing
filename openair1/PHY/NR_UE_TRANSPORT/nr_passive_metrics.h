@@ -51,6 +51,7 @@ typedef struct {
   uint64_t ldpc_tb_cpu, ldpc_tb_cuda; /* TBs decoded by CPU min-sum / CUDA normalised min-sum (stratify evidence by decoder) */
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t srs_us, srs_jobs_dropped;
+  uint64_t srs_pregate_skip, srs_backoff_skip, srs_budget_skip, srs_idle_resets;
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
   uint64_t sense_cfr_drop, sense_rec_drop, sense_io_errors, sense_cfr_no_sink;
   uint64_t sense_prod_us[NR_SENSE_SRC_COUNT], sense_pack_us[NR_SENSE_SRC_COUNT];
