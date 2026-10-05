@@ -1057,6 +1057,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       uint32_t nof_re = 0;
       double   pw = 0.0;
       double   ant_pw[PASSIVE_UL_MAX_ANT] = {0};
+      const uint64_t t_sense_prod=nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) ? nr_sense_now_ns() : 0;
       /* TWO DIFFERENT SUBCARRIER CONVENTIONS, and mixing them is what this loop got wrong.
        *
        * nr_pusch_channel_estimation() writes ul_ch_estimates[..][symbolSize*symbol + n] with n
@@ -1095,6 +1096,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         ul_l[nof_re] = (uint32_t)dmrs_sym;
         nof_re++;
       }
+      if (t_sense_prod)
+        nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PUSCH_DMRS,nr_sense_now_ns()-t_sense_prod);
       if (nof_re > 0) {
         /* ul_CarrierFreq, not dl_CarrierFreq: the range axis scales with the wavelength of the
          * signal actually observed, and on a TDD cell these are equal only by coincidence of the

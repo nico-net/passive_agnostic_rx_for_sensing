@@ -43,6 +43,8 @@ static struct {
   pthread_t thread;
   _Atomic bool active;
   _Atomic uint64_t dropped, elapsed_us;
+  _Atomic uint64_t pregate_skip, backoff_skip, budget_skip, idle_resets;
+  nr_srs_idle_t idle;
   bool stop;
   unsigned head, tail, count;
   PHY_VARS_NR_UE *owner;
@@ -60,10 +62,25 @@ static struct {
   uint64_t stamp; bool stamp_valid;
 } sr={.lock=PTHREAD_MUTEX_INITIALIZER};
 
+static bool srs_budget_checkpoint(struct timespec *cpu_begin)
+{
+  struct timespec end,wall;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end);
+  clock_gettime(CLOCK_MONOTONIC,&wall);
+  uint64_t now=(uint64_t)wall.tv_sec*1000000000ull+wall.tv_nsec;
+  uint64_t used=(uint64_t)(end.tv_sec-cpu_begin->tv_sec)*1000000000ull+end.tv_nsec-cpu_begin->tv_nsec;
+  if(used) nr_srs_cpu_charge(&sr.idle,now,used);
+  *cpu_begin=end;
+  return nr_srs_cpu_allow(&sr.idle,now,1000000);
+}
+
 bool nr_srs_passive_enabled(void) { return atomic_load_explicit(&sr.active,memory_order_relaxed); }
 
 static void process_srs(srs_job_t *job)
 {
+  nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
+      {NR_SENSE_SRC_SRS,nr_sense_now_ns()};
+  struct timespec cpu_begin;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&cpu_begin);
   const int N=sr.grid.fft_size,stride=14*N,win=N+2*SRS_MARGIN;
   const uint64_t stamp=((uint64_t)job->meta.epoch<<32)|job->meta.identity_gen;
   if(sr.stamp_valid && stamp!=sr.stamp) {nr_srs_blind_reset(sr.search);sr.have_hint=false;}
@@ -86,15 +103,21 @@ static void process_srs(srs_job_t *job)
     /* Bootstrap lookup takes a mutex: keep it on the consumer, never on an
      * observation producer. Unconfirmed RNTIs cannot supply attribution. */
     if(e->type<2 && !nr_pdcch_blind_monitor_rnti_confirmed(e->slot%(1024*sr.grid.slots_per_frame),e->rnti)) continue;
-    if(e->type==0) nr_srs_note_trigger(sr.search,e->rnti,e->slot,e->request);
+    if(e->type==0) {nr_srs_note_trigger(sr.search,e->rnti,e->slot,e->request);nr_srs_idle_result(&sr.idle,true);}
     else if(e->type==1) nr_srs_note_pusch(sr.search,e->rnti,e->slot,e->delay,e->h,e->k,e->n);
-    else if(e->type==2) {sr.hint=e->hint;sr.have_hint=true;}
+    else if(e->type==2) {sr.hint=e->hint;sr.have_hint=true;nr_srs_idle_result(&sr.idle,true);}
     else nr_srs_note_grant(sr.search,e->slot,e->request,e->hint.start_rb,e->hint.nb_rb);
   }
   nr_srs_candidate_t seen[NR_SRS_MAX_CANDIDATES];int nseen=0;
+  nr_srs_candidate_t due[NR_SRS_MAX_TRACKS];
+  bool tracking=nr_srs_has_confirmed(sr.search,job->meta.abs_slot);
+  int ndue=tracking?nr_srs_confirmed_due(sr.search,job->meta.abs_slot,due):0;
+  if(tracking && !ndue) {srs_budget_checkpoint(&cpu_begin);return;}
   static const int offsets[]={0,-100,100,-200,200,-300,300,-400,400};
   nr_srs_candidate_t candidates[NR_SRS_MAX_CANDIDATES];
+  bool budget_exhausted=false, scanned=true, did_gate=false, any_comb=false;
   for(unsigned d=0;d<sizeof(offsets)/sizeof(*offsets);d++) {
+    if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
     memset(sr.freq,0,sr.grid.n_ant*stride*sizeof(c16_t));
     for(int a=0;a<sr.grid.n_ant;a++) for(int l=0;l<6;l++) {
       if(!(job->mask&(1u<<(l+8)))) continue;
@@ -103,16 +126,45 @@ static void process_srs(srs_job_t *job)
         job->fo_hz,sr.samples_per_second/1000,job->sample[l]+SRS_MARGIN+offsets[d],raw,
         sr.freq+a*stride+(l+8)*N);
     }
+    if(!tracking) {
+      bool comb=nr_srs_pregate(&sr.grid,(int16_t *)sr.freq,stride,job->mask);
+      did_gate=true;
+      if(d==0) scanned=nr_srs_idle_scan(&sr.idle,job->meta.abs_slot,comb);
+      else if(comb) nr_srs_idle_result(&sr.idle,true);
+      if(!scanned) break;
+      if(!comb) continue;
+      any_comb=true;
+    }
     int n=nr_srs_comb_detect(&sr.grid,(int16_t *)sr.freq,stride,job->mask,candidates);
+    if(tracking) {
+      int kept=0;
+      for(int i=0;i<n;i++) for(int j=0;j<ndue;j++)
+        if(candidates[i].comb==due[j].comb && candidates[i].comb_offset==due[j].comb_offset &&
+           candidates[i].start_rb==due[j].start_rb && candidates[i].nb_rb==due[j].nb_rb &&
+           candidates[i].start_symbol==due[j].start_symbol && candidates[i].n_symbols==due[j].n_symbols) {
+          candidates[kept++]=candidates[i];break;
+        }
+      n=kept;
+    }
 
     for(int i=0;i<n;i++) {
+      if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
       nr_srs_candidate_t *c=&candidates[i];
       bool duplicate=false;
       for(int j=0;j<nseen;j++) if(seen[j].start_rb==c->start_rb && seen[j].nb_rb==c->nb_rb
         && seen[j].start_symbol==c->start_symbol && seen[j].comb==c->comb && seen[j].comb_offset==c->comb_offset) duplicate=true;
       if(duplicate) continue;
-      nr_srs_candidate_t hint=*c;hint.group=sr.hint.group;hint.cs=sr.hint.cs;
-      bool use_hint=sr.have_hint && c->comb==sr.hint.comb && c->comb_offset==sr.hint.comb_offset;
+      nr_srs_candidate_t hint=*c;
+      bool use_hint=false;
+      if(tracking) for(int j=0;j<ndue;j++)
+        if(c->comb==due[j].comb && c->comb_offset==due[j].comb_offset &&
+           c->start_rb==due[j].start_rb && c->nb_rb==due[j].nb_rb &&
+           c->start_symbol==due[j].start_symbol && c->n_symbols==due[j].n_symbols) {
+          hint.group=due[j].group;hint.cs=due[j].cs;use_hint=true;break;
+        }
+      if(!use_hint && sr.have_hint && c->comb==sr.hint.comb && c->comb_offset==sr.hint.comb_offset) {
+        hint.group=sr.hint.group;hint.cs=sr.hint.cs;use_hint=true;
+      }
       if(!nr_srs_search_slot(sr.search,(int16_t *)sr.freq,stride,c,use_hint?&hint:NULL,job->meta.abs_slot)) {
         /* Hopping may change u between symbols. Only export jointly when every
          * symbol validates; otherwise search each symbol independently. */
@@ -141,12 +193,21 @@ static void process_srs(srs_job_t *job)
       }
       job->meta.ta_est_samples=c->delay_samples;
       nr_srs_observe(sr.search,c,job->meta.abs_slot);
+      nr_srs_idle_result(&sr.idle,true);
       job->meta.n_ant=sr.export_ant;
+      nr_sense_prod_scope_stop(&prod);
       nr_srs_export(c,&job->meta,nre,sr.cfr,sr.k,sr.l);
+      prod.start_ns=nr_sense_now_ns();
       if(nseen<NR_SRS_MAX_CANDIDATES) seen[nseen++]=*c;
     }
-    if(nseen==NR_SRS_MAX_CANDIDATES) break;
+    if(budget_exhausted || nseen==NR_SRS_MAX_CANDIDATES) break;
   }
+  srs_budget_checkpoint(&cpu_begin);
+  if(did_gate && !any_comb && !budget_exhausted) {
+    sr.idle.pregate_skip++;
+    if(scanned && !budget_exhausted) nr_srs_idle_result(&sr.idle,false);
+  }
+  if(tracking && !budget_exhausted) nr_srs_confirmed_miss(sr.search,job->meta.abs_slot,seen,nseen);
 }
 static void *srs_worker(void *unused)
 {
@@ -160,7 +221,12 @@ static void *srs_worker(void *unused)
     struct timespec begin,end;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin);
     process_srs(job);
     clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end);
-    atomic_fetch_add(&sr.elapsed_us,((int64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec)/1000);
+    const uint64_t elapsed_ns=(int64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec;
+    atomic_fetch_add(&sr.elapsed_us,elapsed_ns/1000);
+    atomic_store(&sr.pregate_skip,sr.idle.pregate_skip);
+    atomic_store(&sr.backoff_skip,sr.idle.backoff_skip);
+    atomic_store(&sr.budget_skip,sr.idle.budget_skip);
+    atomic_store(&sr.idle_resets,sr.idle.resets);
     pthread_mutex_lock(&sr.lock);sr.tail=(sr.tail+1)%SRS_DEPTH;sr.count--;pthread_mutex_unlock(&sr.lock);
   }
   return NULL;
@@ -191,6 +257,11 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   for(int i=0;i<SRS_DEPTH;i++) ok=ok && sr.jobs[i].raw;
   sr.owner=ue;sr.stop=false;sr.head=sr.tail=sr.count=sr.event_count=0;sr.have_hint=sr.stamp_valid=false;
   atomic_store(&sr.dropped,0);atomic_store(&sr.elapsed_us,0);
+  sr.idle=(nr_srs_idle_t){.pct=5};
+  const char *cpu_pct=getenv("ISAC_SRS_CPU_PCT");
+  if(cpu_pct) {char *end;long value=strtol(cpu_pct,&end,10);if(end!=cpu_pct && !*end && value>=1 && value<=100) sr.idle.pct=value;}
+  atomic_store(&sr.pregate_skip,0);atomic_store(&sr.backoff_skip,0);
+  atomic_store(&sr.budget_skip,0);atomic_store(&sr.idle_resets,0);
   sr.slots_per_subframe=fp->slots_per_subframe;
   LOG_W(PHY,"SENSING: blind SRS sequence hopping v=1 is unsupported\n");
   sr.samples_per_second=1000.0*fp->samples_per_subframe;
@@ -228,11 +299,11 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
   /* Process the preceding slot so all +/-400 windows are already in RX memory. */
   if(!abs_slot) {pthread_mutex_unlock(&sr.lock);return;}
   abs_slot--;if(--slot<0) {slot=fp->slots_per_frame-1;frame=(frame+1023)%1024;}
-  uint16_t mask=0x3f00;
+  uint16_t mask=0;
   const fapi_nr_tdd_table_t *t=&ue->nrUE_config.tdd_table;
   if(t->max_tdd_periodicity_list && t->tdd_period_in_slots) {
     const fapi_nr_max_tdd_periodicity_t *sl=&t->max_tdd_periodicity_list[slot%t->tdd_period_in_slots];
-    for(int l=8;l<14;l++) if(sl->max_num_of_symbol_per_slot_list[l].slot_config==0) mask&=~(1u<<l);
+    for(int l=8;l<14;l++) if(sl->max_num_of_symbol_per_slot_list[l].slot_config==1) mask|=1u<<l;
   }
   if(!mask) {pthread_mutex_unlock(&sr.lock);return;}
   srs_job_t *job=&sr.jobs[sr.head];job->mask=mask;
@@ -306,7 +377,10 @@ void nr_srs_passive_grant(uint64_t slot,uint16_t mask,int start_rb,int nb_rb)
   srs_event_t e={.type=3,.slot=slot,.request=mask,.hint={.start_rb=start_rb,.nb_rb=nb_rb}};
   post_event(&e);
 }
-void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped)
+void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uint64_t *backoff,
+                            uint64_t *budget,uint64_t *resets)
 {
   *us=atomic_load(&sr.elapsed_us);*dropped=atomic_load(&sr.dropped);
+  *pregate=atomic_load(&sr.pregate_skip);*backoff=atomic_load(&sr.backoff_skip);
+  *budget=atomic_load(&sr.budget_skip);*resets=atomic_load(&sr.idle_resets);
 }

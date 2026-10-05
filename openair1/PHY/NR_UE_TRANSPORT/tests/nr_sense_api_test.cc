@@ -66,6 +66,38 @@ TEST_F(SenseApi, RecordsAreJsonLines) {
   EXPECT_EQ(count,3);
 }
 
+TEST_F(SenseApi, CostCountersSnapshotAndReset) {
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_CSIRS,2501);
+  nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_CSIRS,499);
+  nr_sense_cost_add(NR_SENSE_COST_REC,NR_SENSE_SRC_SSB,900);
+  nr_sense_stats_t s{}; nr_sense_stats(&s);
+  EXPECT_EQ(s.prod_ns[NR_SENSE_SRC_CSIRS],3000u);
+  EXPECT_EQ(s.prod_count[NR_SENSE_SRC_CSIRS],2u);
+  EXPECT_EQ(s.rec_ns,900u);
+  EXPECT_EQ(s.rec_count,1u);
+  nr_sense_close();
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  nr_sense_stats(&s);
+  EXPECT_EQ(s.prod_ns[NR_SENSE_SRC_CSIRS],0u);
+  EXPECT_EQ(s.rec_ns,0u);
+}
+
+TEST_F(SenseApi, BatchesAdjacentFramesWithoutChangingBytes) {
+  nr_sense_test_pause_writer(true);
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  float iq[2]={1,2}; uint16_t k=3; uint8_t l=4;
+  for (int i=0;i<8;i++)
+    ASSERT_EQ(nr_sense_push_cfr(NR_SENSE_SRC_SSB,1,iq,1,1,&k,&l,i,0,0,0,0,nullptr),uint64_t(i+1));
+  nr_sense_test_pause_writer(false);
+  nr_sense_close();
+  auto b=bytes(cfr);
+  ASSERT_EQ(b.size(),8u*60u);
+  for (int i=0;i<8;i++) EXPECT_EQ(u64(b,60*i+8),uint64_t(i+1));
+  nr_sense_stats_t s{}; nr_sense_stats(&s);
+  EXPECT_LT(s.write_count,8u);
+}
+
 TEST_F(SenseApi, GoldenReaderFixture) {
   const char *dir=std::getenv("NR_SENSE_GOLDEN_DIR");
   if (!dir) GTEST_SKIP() << "set NR_SENSE_GOLDEN_DIR to write the reader fixture";

@@ -46,6 +46,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "nr_sense_api.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
@@ -117,6 +118,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     }
     return;
   }
+  nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
+      {NR_SENSE_SRC_PDSCH_DATA,nr_sense_now_ns()};
 
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
@@ -330,6 +333,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     }
   }
 
+  nr_sense_prod_scope_stop(&prod);
   if (nof_re == 0)
     return;
 

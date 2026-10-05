@@ -69,6 +69,8 @@ void nr_sense_emit_session(const NR_DL_FRAME_PARMS *fp, double rx_gain_db);
 void nr_sense_emit_grant(const nr_passive_obs_t *o, int dl_inline);
 void nr_sense_emit_grant_meta(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *m);
 void nr_sense_emit_rs(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_t cfr_frame_id);
+/* 1 queued, 0 dropped, -1 unavailable (a standalone record sink may handle it). */
+int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_t cfr_frame_id);
 #ifdef __cplusplus
 }
 #endif

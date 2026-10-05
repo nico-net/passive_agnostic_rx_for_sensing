@@ -6,7 +6,7 @@
 typedef struct {
   nr_srs_candidate_t key;
   uint64_t first, last, id;
-  unsigned gap, consistent_gaps, count;
+  unsigned gap, consistent_gaps, count, misses;
 } srs_track_t;
 typedef struct {
   uint16_t rnti;

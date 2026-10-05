@@ -26,6 +26,7 @@ TEST_F(SrsBlind,SrsCombDetectorSynth) {
   for(int comb:{2,4,8}) for(int offset=0;offset<comb;offset++) for(int ns:{1,2,4}) {
     truth.comb=comb; truth.comb_offset=offset; truth.n_symbols=ns; truth.start_symbol=14-ns;
     generate(); nr_srs_candidate_t c[NR_SRS_MAX_CANDIDATES];
+    EXPECT_TRUE(nr_srs_pregate(&g,iq.data(),14*512,0x3f00));
     int n=nr_srs_comb_detect(&g,iq.data(),14*512,0x3f00,c);
     ASSERT_GT(n,0); EXPECT_EQ(c[0].comb,comb); EXPECT_EQ(c[0].comb_offset,offset);
     EXPECT_EQ(c[0].n_symbols,ns); EXPECT_EQ(c[0].start_symbol,14-ns);
@@ -38,6 +39,56 @@ TEST_F(SrsBlind,NoiseAndDownlinkRejected) {
   nr_srs_candidate_t c[NR_SRS_MAX_CANDIDATES];
   EXPECT_EQ(nr_srs_comb_detect(&g,iq.data(),14*512,0x3f00,c),0);
   generate(); EXPECT_EQ(nr_srs_comb_detect(&g,iq.data(),14*512,0,c),0);
+}
+TEST_F(SrsBlind,SrsPregateSkipsNoCombEnergy) {
+  uint32_t x=9;
+  for(auto &v:iq) { x=x*1664525u+1013904223u; v=(x>>20)-2048; }
+  EXPECT_FALSE(nr_srs_pregate(&g,iq.data(),14*512,0x3f00));
+  generate();
+  EXPECT_TRUE(nr_srs_pregate(&g,iq.data(),14*512,0x3f00));
+  EXPECT_FALSE(nr_srs_pregate(&g,iq.data(),14*512,0));
+}
+TEST_F(SrsBlind,SrsBackoffResetsOnCandidate) {
+  nr_srs_idle_t idle{};
+  for(uint64_t slot=0;slot<64;slot++) {
+    if(nr_srs_idle_scan(&idle,slot,false)) nr_srs_idle_result(&idle,false);
+  }
+  EXPECT_GT(idle.interval,1u);
+  EXPECT_GT(idle.backoff_skip,0u);
+  nr_srs_idle_result(&idle,true);
+  EXPECT_EQ(idle.interval,1u);
+  EXPECT_TRUE(nr_srs_idle_scan(&idle,64,false));
+}
+TEST_F(SrsBlind,SrsBackoffCountsEligibleSlots) {
+  nr_srs_idle_t idle{};
+  unsigned scans=0;
+  for(uint64_t i=0;i<512;i++)
+    if(nr_srs_idle_scan(&idle,19+20*i,false)) {scans++;nr_srs_idle_result(&idle,false);}
+  EXPECT_EQ(idle.interval,64u);
+  EXPECT_GT(scans,8u);
+}
+TEST_F(SrsBlind,SrsIdleCellCostBounded) {
+  nr_srs_idle_t idle{};
+  uint64_t work=0;
+  uint32_t x=19;
+  for(auto &v:iq) {x=x*1664525u+1013904223u;v=(x>>20)-2048;}
+  nr_srs_candidate_t candidates[NR_SRS_MAX_CANDIDATES];
+  for(uint64_t slot=0;slot<20000;slot++) {
+    uint64_t now=slot*500000u;
+    if(!nr_srs_cpu_allow(&idle,now,5000000u)) continue;
+    if(!nr_srs_idle_scan(&idle,slot,false)) continue;
+    if(slot<128) {
+      EXPECT_FALSE(nr_srs_pregate(&g,iq.data(),14*512,0x3f00));
+      EXPECT_EQ(nr_srs_comb_detect(&g,iq.data(),14*512,0x3f00,candidates),0);
+    }
+    nr_srs_idle_result(&idle,false);
+    nr_srs_cpu_charge(&idle,now,5000000u);
+    work+=5000000u;
+  }
+  EXPECT_LE(work,550000000u); // 5% of ten seconds plus one 50 ms window
+  EXPECT_GT(idle.budget_skip,0u);
+  EXPECT_GT(idle.backoff_skip,0u);
+  EXPECT_EQ(nr_srs_sequence_trials(s),0u);
 }
 TEST_F(SrsBlind,SrsGroupCsSearchSynth) {
   for(int comb:{2,4,8}) for(int group:{0,17,29}) for(int cs:{0,3,5}) {
@@ -53,6 +104,29 @@ TEST_F(SrsBlind,SrsPeriodFromRecurrence) {
   nr_srs_observe(s,&c,47); EXPECT_EQ(c.period,0);
   nr_srs_observe(s,&c,67); EXPECT_EQ(c.period,20); EXPECT_EQ(c.slot_offset,7);
   EXPECT_EQ(c.track_id,id);
+}
+TEST_F(SrsBlind,ConfirmedResourceOnlyOnItsOccasions) {
+  auto c=truth;
+  for(uint64_t slot:{7,27,47,67}) nr_srs_observe(s,&c,slot);
+  ASSERT_TRUE(nr_srs_has_confirmed(s,67));
+  nr_srs_candidate_t due[NR_SRS_MAX_TRACKS];
+  EXPECT_EQ(nr_srs_confirmed_due(s,68,due),0);
+  ASSERT_EQ(nr_srs_confirmed_due(s,87,due),1);
+  EXPECT_EQ(due[0].start_rb,truth.start_rb);
+  generate();nr_srs_candidate_t detected[NR_SRS_MAX_CANDIDATES];
+  ASSERT_GT(nr_srs_comb_detect(&g,iq.data(),14*512,0x3f00,detected),0);
+  auto trials=nr_srs_sequence_trials(s);
+  EXPECT_TRUE(nr_srs_search_slot(s,iq.data(),14*512,&detected[0],&due[0],87));
+  EXPECT_LE(nr_srs_sequence_trials(s)-trials,1u);
+  EXPECT_FALSE(nr_srs_has_confirmed(s,10308)); // stale track cannot suppress blind search
+  for(uint64_t slot:{87,107,127,147}) nr_srs_confirmed_miss(s,slot,nullptr,0);
+  EXPECT_FALSE(nr_srs_has_confirmed(s,147));
+}
+TEST_F(SrsBlind,IllegalGapNeverSuppressesBlindSearch) {
+  auto c=truth;
+  for(uint64_t slot:{7,10,13,16}) nr_srs_observe(s,&c,slot);
+  EXPECT_FALSE(c.confirmed);
+  EXPECT_FALSE(nr_srs_has_confirmed(s,16));
 }
 TEST_F(SrsBlind,SrsHarvestHintOptional) {
   generate(); auto c=truth;c.group=c.cs=-1;auto hint=truth; hint.group=2;

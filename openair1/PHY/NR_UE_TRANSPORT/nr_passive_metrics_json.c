@@ -38,6 +38,23 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   char cb0[2048];
   if (cb0_json(m, cb0, sizeof(cb0)) < 0)
     return -1;
+  static const char *const source[] = {"ssb","csirs","pdsch_dmrs","pdsch_data","pusch_dmrs","pusch_data","prach","srs"};
+  char sense_cost[2048];
+  size_t cost_len=0;
+  for (int s=0;s<NR_SENSE_SRC_COUNT;s++) {
+    int z=snprintf(sense_cost+cost_len,sizeof(sense_cost)-cost_len,
+      ",\"sense_prod_us_%s\":%" PRIu64 ",\"sense_pack_us_%s\":%" PRIu64
+      ",\"sense_prod_count_%s\":%" PRIu64 ",\"sense_pack_count_%s\":%" PRIu64,
+      source[s],m->sense_prod_us[s],source[s],m->sense_pack_us[s],
+      source[s],m->sense_prod_count[s],source[s],m->sense_pack_count[s]);
+    if (z<0 || (size_t)z>=sizeof(sense_cost)-cost_len) return -1;
+    cost_len+=(size_t)z;
+  }
+  int cost_z=snprintf(sense_cost+cost_len,sizeof(sense_cost)-cost_len,
+    ",\"sense_rec_us\":%" PRIu64 ",\"sense_write_us\":%" PRIu64
+    ",\"sense_rec_count\":%" PRIu64 ",\"sense_write_count\":%" PRIu64,
+    m->sense_rec_us,m->sense_write_us,m->sense_rec_count,m->sense_write_count);
+  if (cost_z<0 || (size_t)cost_z>=sizeof(sense_cost)-cost_len) return -1;
   int w = snprintf(buf, n,
       "{\"schema\":%d,\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64 ",\"pci\":%d,\"acq_state\":\"%s\","
       "\"acq_transitions\":%" PRIu64 ",\"acq_sync_losses\":%" PRIu64 ",\"acq_pbch_locks\":%" PRIu64 ",\"acq_sib1_decodes\":%" PRIu64 ","
@@ -55,9 +72,11 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"ldpc_cuda_errors\":%" PRIu64 ",\"ldpc_cuda_fallbacks\":%" PRIu64 ",\"ldpc_cuda_poisoned\":%" PRIu64 ","
       "\"ldpc_cuda_disabled\":%" PRIu64 ",\"ldpc_cuda_breaker_trips\":%" PRIu64 ",\"ldpc_tb_cpu\":%" PRIu64 ",\"ldpc_tb_cuda\":%" PRIu64 ","
       "\"srs_us\":%" PRIu64 ",\"srs_jobs_dropped\":%" PRIu64 ","
+      "\"srs_pregate_skip\":%" PRIu64 ",\"srs_backoff_skip\":%" PRIu64 ","
+      "\"srs_budget_skip\":%" PRIu64 ",\"srs_idle_resets\":%" PRIu64 ","
       "\"pusch_try\":%" PRIu64 ",\"pusch_crc_ok\":%" PRIu64 ","
       "\"obs_pushed\":%" PRIu64 ",\"obs_written\":%" PRIu64 ",\"obs_dropped\":%" PRIu64 ","
-      "\"sense_cfr_drop\":%" PRIu64 ",\"sense_rec_drop\":%" PRIu64 ",\"sense_io_errors\":%" PRIu64 ",\"sense_cfr_no_sink\":%" PRIu64 ","
+      "\"sense_cfr_drop\":%" PRIu64 ",\"sense_rec_drop\":%" PRIu64 ",\"sense_io_errors\":%" PRIu64 ",\"sense_cfr_no_sink\":%" PRIu64 "%s,"
       "\"prach_us\":%" PRIu64 ",\"prach_drops\":%" PRIu64 ",\"prach_skipped\":%" PRIu64 ","
       "\"csirs_candidates\":%" PRIu64 ",\"csirs_confirmed\":%" PRIu64 ",\"csirs_revoked\":%" PRIu64 ",\"zp_exported\":%" PRIu64 ",\"zp_revoked\":%" PRIu64 ","
       "\"csirs_search_us\":%" PRIu64 ",\"csirs_idsweep_us\":%" PRIu64 ",\"csirs_confirm_us\":%" PRIu64 ",\"csirs_cfr_us\":%" PRIu64 ","
@@ -78,10 +97,11 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->ldpc_ok, m->ldpc_seg_fail, m->ldpc_tb_fail, m->ldpc_zero_tb,
       m->ldpc_cuda_errors, m->ldpc_cuda_fallbacks, m->ldpc_cuda_poisoned,
       m->ldpc_cuda_disabled, m->ldpc_cuda_breaker_trips, m->ldpc_tb_cpu, m->ldpc_tb_cuda,
-      m->srs_us,m->srs_jobs_dropped,
+      m->srs_us,m->srs_jobs_dropped,m->srs_pregate_skip,m->srs_backoff_skip,
+      m->srs_budget_skip,m->srs_idle_resets,
       m->pusch_try, m->pusch_crc_ok,
       m->obs_pushed, m->obs_written, m->obs_dropped,
-      m->sense_cfr_drop, m->sense_rec_drop, m->sense_io_errors, m->sense_cfr_no_sink,
+      m->sense_cfr_drop, m->sense_rec_drop, m->sense_io_errors, m->sense_cfr_no_sink, sense_cost,
       m->prach_us, m->prach_drops, m->prach_skipped,
       m->csirs_candidates, m->csirs_confirmed, m->csirs_revoked, m->zp_exported, m->zp_revoked,
       m->csirs_search_us, m->csirs_idsweep_us, m->csirs_confirm_us, m->csirs_cfr_us,

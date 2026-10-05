@@ -422,7 +422,9 @@ static void process_job(const prach_job_t *job)
           .pci = job->fp.Nid_cell};
     }
   }
-  atomic_fetch_add_explicit(&prach_us, (mono_ns() - started) / 1000, memory_order_relaxed);
+  const uint64_t elapsed_ns=mono_ns()-started;
+  atomic_fetch_add_explicit(&prach_us, elapsed_ns / 1000, memory_order_relaxed);
+  nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PRACH,elapsed_ns);
   atomic_fetch_add_explicit(&prach_occasions, processed, memory_order_relaxed);
 }
 

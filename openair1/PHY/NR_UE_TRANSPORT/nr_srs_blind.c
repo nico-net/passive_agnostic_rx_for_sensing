@@ -34,6 +34,78 @@ bool nr_srs_valid_grid(const nr_srs_grid_t *g, int stride)
       && g->first_carrier_offset-g->fft_size/2+g->n_rb*12<=g->fft_size-8
       && g->n_ant>=1 && g->n_ant<=8 && g->symbols_per_slot==14 && stride>=14*g->fft_size;
 }
+bool nr_srs_pregate(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t mask)
+{
+  if(!iq || !mask || !nr_srs_valid_grid(g,stride)) return false;
+  /* Require the same comb in four neighbouring RBs of one eligible symbol.
+   * Compare occupied tones with the other tones in those RBs, which supply
+   * a local noise floor even when receiver gain changes. */
+  for(int l=8;l<14;l++) if(mask&(1u<<l)) {
+    unsigned run[3][8]={{0}};
+    for(int rb=0;rb<g->n_rb;rb++) {
+      double e[12]={0},total=0;
+      for(int k=0;k<12;k++) {
+        int bin=(g->first_carrier_offset+rb*12+k)%g->fft_size;
+        for(int a=0;a<g->n_ant;a++) {
+          const int16_t *v=iq+2*(a*stride+l*g->fft_size+bin);
+          e[k]+=(double)v[0]*v[0]+(double)v[1]*v[1];
+        }
+        total+=e[k];
+      }
+      for(int ci=0,comb=2;comb<=8;ci++,comb*=2) for(int off=0;off<comb;off++) {
+        double on=0;
+        for(int k=0;k<12;k++) if((rb*12+k)%comb==off) on+=e[k];
+        if(total>=16.0*12*g->n_ant && on>0.75*total &&
+           on/(12/comb)>4.0*(total-on)/(12-12/comb)) {
+          if(++run[ci][off]>=4) return true;
+        } else run[ci][off]=0;
+      }
+    }
+  }
+  return false;
+}
+
+void nr_srs_idle_result(nr_srs_idle_t *idle,bool candidate)
+{
+  if(candidate) {idle->empty=0;idle->interval=1;idle->resets++;return;}
+  if(++idle->empty>=4) {
+    idle->empty=0;
+    idle->interval=idle->interval ? (idle->interval<64 ? idle->interval*2 : 64) : 2;
+  }
+}
+bool nr_srs_idle_scan(nr_srs_idle_t *idle,uint64_t slot,bool evidence)
+{
+  (void)slot;
+  idle->eligible++;
+  if(evidence) nr_srs_idle_result(idle,true);
+  if(idle->interval>1 && idle->eligible%idle->interval) {idle->backoff_skip++;return false;}
+  idle->scans++;return true;
+}
+static void cpu_expire(nr_srs_idle_t *idle,uint64_t now)
+{
+  while(idle->cpu_count) {
+    unsigned tail=(idle->cpu_head+NR_SRS_CPU_SAMPLES-idle->cpu_count)%NR_SRS_CPU_SAMPLES;
+    if(now<idle->cpu_time[tail] || now-idle->cpu_time[tail]<1000000000ull) break;
+    idle->cpu_used-=idle->cpu_ns[tail];idle->cpu_count--;
+  }
+}
+bool nr_srs_cpu_allow(nr_srs_idle_t *idle,uint64_t now,uint64_t estimate)
+{
+  cpu_expire(idle,now);
+  unsigned pct=idle->pct ? idle->pct : 5;
+  if(idle->cpu_used+estimate>(uint64_t)pct*10000000ull) {idle->budget_skip++;return false;}
+  return true;
+}
+void nr_srs_cpu_charge(nr_srs_idle_t *idle,uint64_t now,uint64_t ns)
+{
+  cpu_expire(idle,now);
+  if(idle->cpu_count==NR_SRS_CPU_SAMPLES) {
+    idle->cpu_used-=idle->cpu_ns[idle->cpu_head];
+    idle->cpu_count--;
+  }
+  idle->cpu_time[idle->cpu_head]=now;idle->cpu_ns[idle->cpu_head]=ns;
+  idle->cpu_head=(idle->cpu_head+1)%NR_SRS_CPU_SAMPLES;idle->cpu_count++;idle->cpu_used+=ns;
+}
 int nr_srs_comb_detect(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t mask,nr_srs_candidate_t out[NR_SRS_MAX_CANDIDATES])
 {
   if (!iq || !out || !nr_srs_valid_grid(g,stride)) return 0;
@@ -212,11 +284,51 @@ void nr_srs_observe(nr_srs_blind_t *s,nr_srs_candidate_t *c,uint64_t slot)
     t->gap=gap;
     t->last=slot; t->count++;
   }
+  t->misses=0;
   c->track_id=t->id; c->period=0; c->slot_offset=0;
   static const unsigned periods[]={1,2,4,5,8,10,16,20,32,40,64,80,160,320,640,1280,2560};
   if (t->consistent_gaps>=3) for(unsigned i=0;i<sizeof(periods)/sizeof(*periods);i++)
     if(t->gap==periods[i]) { c->period=t->gap; c->slot_offset=t->last%t->gap; break; }
   c->confirmed=c->period>0;
+}
+static bool legal_period(unsigned gap)
+{
+  static const unsigned periods[]={1,2,4,5,8,10,16,20,32,40,64,80,160,320,640,1280,2560};
+  for(unsigned i=0;i<sizeof(periods)/sizeof(*periods);i++) if(periods[i]==gap) return true;
+  return false;
+}
+bool nr_srs_has_confirmed(const nr_srs_blind_t *s,uint64_t slot)
+{
+  if(!s) return false;
+  for(int i=0;i<NR_SRS_MAX_TRACKS;i++) {
+    const srs_track_t *t=&s->tracks[i];
+    if(t->id && t->consistent_gaps>=3 && legal_period(t->gap) && slot>=t->last && slot-t->last<=10240) return true;
+  }
+  return false;
+}
+int nr_srs_confirmed_due(const nr_srs_blind_t *s,uint64_t slot,nr_srs_candidate_t out[NR_SRS_MAX_TRACKS])
+{
+  if(!s || !out) return 0;
+  int n=0;
+  for(int i=0;i<NR_SRS_MAX_TRACKS;i++) {
+    const srs_track_t *t=&s->tracks[i];
+    if(!t->id || t->consistent_gaps<3 || !legal_period(t->gap) || slot<t->last || slot-t->last>10240 ||
+       slot%t->gap!=t->last%t->gap) continue;
+    out[n++]=t->key;
+  }
+  return n;
+}
+void nr_srs_confirmed_miss(nr_srs_blind_t *s,uint64_t slot,const nr_srs_candidate_t *seen,int nseen)
+{
+  if(!s) return;
+  for(int i=0;i<NR_SRS_MAX_TRACKS;i++) {
+    srs_track_t *t=&s->tracks[i];
+    if(!t->id || t->consistent_gaps<3 || !legal_period(t->gap) || slot<=t->last ||
+       slot%t->gap!=t->last%t->gap) continue;
+    bool found=false;
+    for(int j=0;j<nseen;j++) if(same_resource(&t->key,&seen[j])) {found=true;break;}
+    if(!found && ++t->misses>=4) t->consistent_gaps=0;
+  }
 }
 
 void nr_srs_blind_reset(nr_srs_blind_t *s)

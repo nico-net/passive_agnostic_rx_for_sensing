@@ -23,6 +23,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "nr_sense_api.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
@@ -966,6 +967,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
   if (!nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
     return;
   }
+  const uint64_t t_sense_prod=nr_sense_now_ns();
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
   uint32_t nof_ant = (uint32_t)frame_parms->nb_antennas_rx;
   if (nof_ant == 0 || ant_stride == 0)
@@ -992,6 +994,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
     isac_l[nof_re] = (uint32_t)loverline0;
     nof_re++;
   }
+  nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_CSIRS,nr_sense_now_ns()-t_sense_prod);
 
   // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change, nothing
   // downstream reads these values). Same coherence/tau estimator as dci_nr.c's TSYNC_PDCCH probe

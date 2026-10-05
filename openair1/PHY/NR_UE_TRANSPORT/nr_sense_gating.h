@@ -19,6 +19,13 @@ static inline int nr_sense_blind_need_chest(int dmrs_source, float min_snr_lin)
   return dmrs_source >= 0 || min_snr_lin > 0.0f;
 }
 
+/* The decoder makes its own estimate. Only the receiver SNR gate shares this
+ * monitor estimate with sensing. */
+static inline int nr_sense_blind_extra_chest(int dmrs_source, float min_snr_lin)
+{
+  return dmrs_source >= 0 && !(min_snr_lin > 0.0f);
+}
+
 static inline int nr_sense_blind_skip_capped(int dmrs_source, int want_decode, int capped)
 {
   return dmrs_source < 0 && want_decode && capped;

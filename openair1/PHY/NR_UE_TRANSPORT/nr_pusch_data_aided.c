@@ -27,6 +27,7 @@
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "nr_sense_api.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/utils/LOG/log.h"
 #include "executables/nr-uesoftmodem.h"
@@ -73,6 +74,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   if (g->nrOfLayers != 1) {
     return; // single layer only, same scope guard the decode itself applies
   }
+  nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
+      {NR_SENSE_SRC_PUSCH_DATA,nr_sense_now_ns()};
   atomic_fetch_add_explicit(&g_da_try, 1, memory_order_relaxed);
 
   const NR_DL_FRAME_PARMS *fp    = &gnb->frame_parms;
@@ -238,6 +241,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
     }
     return;
   }
+  nr_sense_prod_scope_stop(&prod);
   if (nof_re == 0) {
     return;
   }

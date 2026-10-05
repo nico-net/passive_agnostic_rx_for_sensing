@@ -9,6 +9,7 @@ extern "C" {
 #define NR_SRS_MAX_CANDIDATES 16
 #define NR_SRS_MAX_TRACKS 32
 #define NR_SRS_MAX_RE (272 * 12 * 4)
+#define NR_SRS_CPU_SAMPLES 4096
 typedef struct {
   int fft_size, first_carrier_offset, n_rb, n_ant, symbols_per_slot, slots_per_frame;
 } nr_srs_grid_t;
@@ -23,6 +24,24 @@ typedef struct {
   double delay_ambiguity_samples, residual_delay;
 } nr_srs_candidate_t;
 typedef struct nr_srs_blind nr_srs_blind_t;
+/* Worker-owned idle policy. CPU samples form a rolling one-second window. */
+typedef struct {
+  uint64_t cpu_time[NR_SRS_CPU_SAMPLES], cpu_ns[NR_SRS_CPU_SAMPLES], cpu_used;
+  unsigned cpu_head, cpu_count, pct;
+  unsigned empty, interval;
+  uint64_t eligible, backoff_skip, budget_skip, pregate_skip, scans, resets;
+} nr_srs_idle_t;
+bool nr_srs_pregate(const nr_srs_grid_t *g, const int16_t *iq, int stride, uint16_t ul_mask);
+bool nr_srs_idle_scan(nr_srs_idle_t *idle, uint64_t slot, bool evidence);
+void nr_srs_idle_result(nr_srs_idle_t *idle, bool candidate);
+bool nr_srs_cpu_allow(nr_srs_idle_t *idle, uint64_t now_ns, uint64_t estimate_ns);
+void nr_srs_cpu_charge(nr_srs_idle_t *idle, uint64_t now_ns, uint64_t cpu_ns);
+/* Return only due, confirmed resource geometries. count is zero when still blind. */
+int nr_srs_confirmed_due(const nr_srs_blind_t *s, uint64_t slot,
+                         nr_srs_candidate_t out[NR_SRS_MAX_TRACKS]);
+bool nr_srs_has_confirmed(const nr_srs_blind_t *s, uint64_t slot);
+void nr_srs_confirmed_miss(nr_srs_blind_t *s, uint64_t slot,
+                           const nr_srs_candidate_t *seen, int nseen);
 /* Lifecycle only: allocate all scratch before producer threads start. */
 nr_srs_blind_t *nr_srs_blind_create(const nr_srs_grid_t *grid);
 void nr_srs_blind_destroy(nr_srs_blind_t *s);

@@ -150,6 +150,7 @@ void nr_sense_capture_grant_stamp(nr_sense_grant_meta_t *m)
 void nr_sense_emit_session(const NR_DL_FRAME_PARMS *fp, double gain)
 {
   if (!nr_sense_enabled()) return;
+  const uint64_t t_rec=nr_sense_now_ns();
   char line[2048]; json_t j={line,sizeof line,0,false};
   int e,i,d; stamp(&e,&i,&d);
   put(&j,"{\"schema\":2,\"type\":\"session\",\"reconf\":%s",e<0?"false":"true");
@@ -169,6 +170,7 @@ void nr_sense_emit_session(const NR_DL_FRAME_PARMS *fp, double gain)
 #endif
   put(&j,"}");
   if (!j.bad) nr_sense_push_record(line);
+  nr_sense_cost_add(NR_SENSE_COST_REC,NR_SENSE_SRC_SSB,nr_sense_now_ns()-t_rec);
 }
 
 static nr_sense_grant_meta_t unknown_grant(void)
@@ -181,6 +183,7 @@ static nr_sense_grant_meta_t unknown_grant(void)
 void nr_sense_emit_grant_meta(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *in)
 {
   if (!nr_sense_enabled() || !o) return;
+  const uint64_t t_rec=nr_sense_now_ns();
   nr_sense_grant_meta_t m=in?*in:unknown_grant();
   if (!m.stamp_valid) stamp(&m.epoch,&m.identity_gen,&m.dedicated_epoch);
   if (nr_ue_ctx_enabled()) {
@@ -192,6 +195,7 @@ void nr_sense_emit_grant_meta(const nr_passive_obs_t *o, const nr_sense_grant_me
   }
   char line[2048];
   if (nr_sense_grant_to_json(o,&m,line,sizeof line)>0) nr_sense_push_record(line);
+  nr_sense_cost_add(NR_SENSE_COST_REC,NR_SENSE_SRC_SSB,nr_sense_now_ns()-t_rec);
 }
 void nr_sense_emit_grant(const nr_passive_obs_t *o, int dl_inline)
 {
@@ -203,6 +207,13 @@ void nr_sense_emit_rs(nr_sense_src_t src, const nr_sense_rs_meta_t *in, uint64_t
   if (!nr_sense_enabled() || !in) return;
   nr_sense_rs_meta_t m=*in;
   if (!m.stamp_valid) stamp(&m.epoch,&m.identity_gen,&m.dedicated_epoch);
+  if (!m.t_mono_ns) m.t_mono_ns=mono_ns();
+  if ((!m.csirs_resource || strnlen(m.csirs_resource,256)<256) &&
+      (!m.srs_attribution || strnlen(m.srs_attribution,256)<256)) {
+    if (nr_sense_push_rs_binary(src,&m,frame_id)>=0) return;
+  }
+  const uint64_t t_rec=nr_sense_now_ns();
   char line[2048];
   if (nr_sense_rs_to_json(src,&m,frame_id,line,sizeof line)>0) nr_sense_push_record(line);
+  nr_sense_cost_add(NR_SENSE_COST_REC,src,nr_sense_now_ns()-t_rec);
 }

@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Standalone, bounded export writer. Producers only copy into preallocated slots. */
 #include "nr_sense_api.h"
+#include "nr_sense_records.h"
+/* The standalone core test links without the receiver record module. The receiver
+ * links that module through its emitters and supplies the formatter. */
+__attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_meta_t *, uint64_t, char *, size_t);
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -8,6 +12,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include "common/utils/LOG/log.h"
 #ifdef NR_SENSE_HAVE_ZMQ
@@ -28,10 +33,19 @@ static uint8_t *frames;
 static uint32_t *frame_lengths, frame_cap, frame_re, frame_ant, frame_stride, frame_head, frame_count;
 static char *records;
 static uint32_t *record_lengths, record_cap, record_head, record_count;
+typedef struct {
+  nr_sense_rs_meta_t meta;
+  uint64_t frame_id;
+  nr_sense_src_t src;
+  char csirs_resource[256], srs_attribution[256];
+} rs_job_t;
+static rs_job_t *rs_jobs;
+static uint8_t *record_binary;
 static int cfr_fd = -1, record_fd = -1;
 static pthread_t worker;
 static uint64_t next_id;
 static nr_sense_stats_t stats;
+static _Atomic uint64_t cost_ns[4][NR_SENSE_SRC_COUNT], cost_count[4][NR_SENSE_SRC_COUNT];
 #ifdef NR_SENSE_HAVE_ZMQ
 static void *zmq_context, *zmq_pub;
 #endif
@@ -49,6 +63,41 @@ static void put16(uint8_t *p, uint16_t x) { p[0]=x; p[1]=x>>8; }
 static void put32(uint8_t *p, uint32_t x) { for(int i=0;i<4;i++) p[i]=x>>(8*i); }
 static void put64(uint8_t *p, uint64_t x) { for(int i=0;i<8;i++) p[i]=x>>(8*i); }
 static void putf(uint8_t *p, float x) { uint32_t bits; memcpy(&bits,&x,4); put32(p,bits); }
+static bool write_item(int fd, const void *buf, size_t len);
+
+void nr_sense_cost_add(nr_sense_cost_t kind, nr_sense_src_t src, uint64_t ns)
+{
+  if (kind < NR_SENSE_COST_PROD || kind > NR_SENSE_COST_WRITE || src < 0 || src >= NR_SENSE_SRC_COUNT) return;
+  atomic_fetch_add_explicit(&cost_ns[kind][src], ns, memory_order_relaxed);
+  atomic_fetch_add_explicit(&cost_count[kind][src], 1, memory_order_relaxed);
+}
+
+/* A single writev for several adjacent ring slots; retry short writes without copying. */
+static bool write_batch(int fd, struct iovec *iov, int count)
+{
+  if (fd < 0) return true;
+  if (atomic_load_explicit(&fail_writes, memory_order_relaxed)) { errno=ENOSPC; return false; }
+  if (atomic_load_explicit(&write_chunk, memory_order_relaxed)) {
+    for (int i=0; i<count; i++)
+      if (!write_item(fd, iov[i].iov_base, iov[i].iov_len)) return false;
+    return true;
+  }
+  int first=0;
+  while (first<count) {
+    ssize_t n=writev(fd,iov+first,count-first);
+    if (n<0 && errno==EINTR) continue;
+    if (n<=0) return false;
+    size_t consumed=(size_t)n;
+    while (first<count && consumed>=iov[first].iov_len) {
+      consumed-=iov[first].iov_len; first++;
+    }
+    if (consumed) {
+      iov[first].iov_base=(uint8_t *)iov[first].iov_base+consumed;
+      iov[first].iov_len-=consumed;
+    }
+  }
+  return true;
+}
 
 static bool write_item(int fd, const void *buf, size_t len)
 {
@@ -77,37 +126,58 @@ static void *run_writer(void *arg)
       pthread_cond_wait(&cv, &mu);
     if (stopping && frame_count == 0 && record_count == 0) { pthread_mutex_unlock(&mu); break; }
     const bool frame = frame_count != 0 && (record_count == 0 || !last_frame);
-    const uint8_t *payload = frame ? frames + (size_t)frame_head * frame_stride
-                                   : (uint8_t *)(records + (size_t)record_head * RECORD_BYTES);
-    const uint32_t length = frame ? frame_lengths[frame_head] : record_lengths[record_head];
+    uint32_t count=frame ? frame_count : record_count;
+    /* Bound each run when both streams are ready; the test writer limit observes
+     * one item from each stream, while normal operation amortises syscalls. */
+    if (frame_count && record_count && count>(atomic_load(&writer_limit) ? 1u : 8u))
+      count=atomic_load(&writer_limit) ? 1u : 8u;
+    if (count>16) count=16;
+    const uint32_t limit=atomic_load(&writer_limit);
+    if (limit && !stopping && count>limit-atomic_load(&written_items)) count=limit-atomic_load(&written_items);
     pthread_mutex_unlock(&mu);
-    bool ok;
+    struct iovec vec[16];
+    uint32_t format_drops=0;
+    for (uint32_t i=0;i<count;i++) {
+      uint32_t at=frame ? (frame_head+i)%frame_cap : (record_head+i)%record_cap;
+      if (!frame && record_binary[at]) {
+        const uint64_t t_rec=nr_sense_now_ns();
+        rs_job_t *job=&rs_jobs[at];
+        char *line=records+(size_t)at*RECORD_BYTES;
+        int length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
+        if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; }
+        else { record_lengths[at]=0; format_drops++; }
+        nr_sense_cost_add(NR_SENSE_COST_REC,job->src,nr_sense_now_ns()-t_rec);
+        record_binary[at]=0;
+      }
+      vec[i].iov_base=frame ? (void *)(frames+(size_t)at*frame_stride)
+                            : (void *)(records+(size_t)at*RECORD_BYTES);
+      vec[i].iov_len=frame ? frame_lengths[at] : record_lengths[at];
+    }
+    const int fd=frame ? cfr_fd : record_fd;
+    const uint64_t t_write=fd>=0 ? nr_sense_now_ns() : 0;
+    bool ok=write_batch(fd,vec,(int)count);
+    const uint64_t write_ns=t_write ? nr_sense_now_ns()-t_write : 0;
 #ifdef NR_SENSE_HAVE_ZMQ
     bool zmq_failed=false;
-#endif
-    if (frame) {
-      ok = write_item(cfr_fd, payload, length);
-#ifdef NR_SENSE_HAVE_ZMQ
-      zmq_failed = zmq_pub && (zmq_send(zmq_pub, "cfr", 3, ZMQ_SNDMORE | ZMQ_DONTWAIT) != 3 ||
-                               zmq_send(zmq_pub, payload, length, ZMQ_DONTWAIT) != (int)length);
-#endif
-    } else {
-      /* Record slot reserves its last byte for the newline. */
-      ok = write_item(record_fd, payload, length);
-#ifdef NR_SENSE_HAVE_ZMQ
-      zmq_failed = zmq_pub && (zmq_send(zmq_pub, "rec", 3, ZMQ_SNDMORE | ZMQ_DONTWAIT) != 3 ||
-                               zmq_send(zmq_pub, payload, length, ZMQ_DONTWAIT) != (int)length);
-#endif
+    if (zmq_pub) for (uint32_t i=0;i<count;i++) {
+      const void *payload=frame ? (const void *)(frames+(size_t)((frame_head+i)%frame_cap)*frame_stride)
+                                : (const void *)(records+(size_t)((record_head+i)%record_cap)*RECORD_BYTES);
+      const size_t length=frame ? frame_lengths[(frame_head+i)%frame_cap] : record_lengths[(record_head+i)%record_cap];
+      zmq_failed |= zmq_send(zmq_pub, frame ? "cfr" : "rec", 3, ZMQ_SNDMORE | ZMQ_DONTWAIT) != 3 ||
+                    zmq_send(zmq_pub, payload, length, ZMQ_DONTWAIT) != (int)length;
     }
+#endif
+    if (t_write) nr_sense_cost_add(NR_SENSE_COST_WRITE,NR_SENSE_SRC_SSB,write_ns);
     pthread_mutex_lock(&mu);
+    stats.rec_dropped+=format_drops;
     if (!ok) stats.io_errors++;
 #ifdef NR_SENSE_HAVE_ZMQ
     if (zmq_failed) stats.zmq_drops++;
 #endif
     last_frame=frame;
-    atomic_fetch_add(&written_items,1);
-    if (frame) { frame_head=(frame_head+1)%frame_cap; frame_count--; }
-    else { record_head=(record_head+1)%record_cap; record_count--; }
+    atomic_fetch_add(&written_items,count);
+    if (frame) { frame_head=(frame_head+count)%frame_cap; frame_count-=count; }
+    else { record_head=(record_head+count)%record_cap; record_count-=count; }
     pthread_mutex_unlock(&mu);
   }
   return NULL;
@@ -121,14 +191,17 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
   if (opened || !cfg || !cfg->cfr_ring_frames || !cfg->cfr_max_re || !cfg->rec_ring_slots ||
       max_ant > MAX_ANT ||
       cfg->cfr_max_re > (SIZE_MAX - FRAME_HEADER - 3) / (3 + 8 * max_ant) ||
-      cfg->cfr_ring_frames > SIZE_MAX / sizeof(uint32_t) || cfg->rec_ring_slots > SIZE_MAX / RECORD_BYTES) {
+      cfg->cfr_ring_frames > SIZE_MAX / sizeof(uint32_t) ||
+      cfg->rec_ring_slots > SIZE_MAX / RECORD_BYTES || cfg->rec_ring_slots > SIZE_MAX / sizeof(rs_job_t)) {
     pthread_mutex_unlock(&mu); return -1;
   }
   no_sink=!cfg->cfr_path && !cfg->records_path && !cfg->endpoint;
   frame_ant=max_ant;
   if (no_sink) {
     frame_cap=cfg->cfr_ring_frames; frame_re=cfg->cfr_max_re; record_cap=cfg->rec_ring_slots;
-    next_id=0; memset(&stats,0,sizeof(stats)); stopping=false; opened=true;
+    next_id=0; memset(&stats,0,sizeof(stats));
+    for (int k=0;k<4;k++) for (int s=0;s<NR_SENSE_SRC_COUNT;s++) { atomic_store(&cost_ns[k][s],0); atomic_store(&cost_count[k][s],0); }
+    stopping=false; opened=true;
     atomic_store(&after_close,0); atomic_store(&closed_seen,false);
     atomic_store_explicit(&active,true,memory_order_release);
     pthread_mutex_unlock(&mu); return 0;
@@ -140,6 +213,8 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
   frame_lengths=malloc((size_t)cfg->cfr_ring_frames*sizeof(*frame_lengths));
   records=malloc((size_t)cfg->rec_ring_slots*RECORD_BYTES);
   record_lengths=malloc((size_t)cfg->rec_ring_slots*sizeof(*record_lengths));
+  rs_jobs=calloc(cfg->rec_ring_slots,sizeof(*rs_jobs));
+  record_binary=calloc(cfg->rec_ring_slots,sizeof(*record_binary));
   if (cfg->cfr_path) cfr_fd=open(cfg->cfr_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
   if (cfg->records_path) record_fd=open(cfg->records_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
 #ifndef NR_SENSE_HAVE_ZMQ
@@ -157,11 +232,13 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
     if (!zmq_pub || zmq_bind(zmq_pub,cfg->endpoint) != 0) goto fail;
   }
 #endif
-  if (!frames || !frame_lengths || !records || !record_lengths ||
+  if (!frames || !frame_lengths || !records || !record_lengths || !rs_jobs || !record_binary ||
       (cfg->cfr_path && cfr_fd < 0) || (cfg->records_path && record_fd < 0)) goto fail;
   frame_cap=cfg->cfr_ring_frames; frame_re=cfg->cfr_max_re; record_cap=cfg->rec_ring_slots;
   frame_head=frame_count=record_head=record_count=0;
-  next_id=0; memset(&stats,0,sizeof(stats)); stopping=false; opened=true; atomic_store(&written_items,0);
+  next_id=0; memset(&stats,0,sizeof(stats));
+  for (int k=0;k<4;k++) for (int s=0;s<NR_SENSE_SRC_COUNT;s++) { atomic_store(&cost_ns[k][s],0); atomic_store(&cost_count[k][s],0); }
+  stopping=false; opened=true; atomic_store(&written_items,0);
   atomic_store(&after_close,0); atomic_store(&closed_seen,false);
   if (pthread_create(&worker,NULL,run_writer,NULL) != 0) { opened=false; goto fail; }
   atomic_store_explicit(&active,true,memory_order_release);
@@ -176,8 +253,8 @@ fail:
   if (cfr_fd>=0) close(cfr_fd);
   if (record_fd>=0) close(record_fd);
   cfr_fd=record_fd=-1;
-  free(frames); free(frame_lengths); free(records); free(record_lengths);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(record_binary);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; record_binary=NULL;
   pthread_mutex_unlock(&mu);
   return -1;
 }
@@ -200,8 +277,8 @@ void nr_sense_close(void)
   if (zmq_context) zmq_ctx_term(zmq_context);
   zmq_pub=zmq_context=NULL;
 #endif
-  free(frames); free(frame_lengths); free(records); free(record_lengths);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(record_binary);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; record_binary=NULL;
   pthread_mutex_unlock(&mu);
 }
 bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire); }
@@ -223,30 +300,50 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
   }
   const bool cut=(uint32_t)n_re>frame_re;
   const uint32_t keep=cut ? frame_re : (uint32_t)n_re;
-  if (wide) for(uint32_t i=0;i<keep;i++) {
-    if (((const uint32_t *)k_abs)[i]>UINT16_MAX || ((const uint32_t *)l_sym)[i]>UINT8_MAX) {
-      nr_sense_reject_cfr(); return 0;
-    }
-  }
   pthread_mutex_lock(&mu);
   if (!opened) { pthread_mutex_unlock(&mu); atomic_fetch_add(&after_close,1); return 0; }
   if (no_sink) { stats.cfr_no_sink++; pthread_mutex_unlock(&mu); return 0; }
-  const uint64_t id=++next_id;
-  if (frame_count==frame_cap) { stats.cfr_dropped[src]++; pthread_mutex_unlock(&mu); return 0; }
+  if (frame_count==frame_cap) {
+    if (wide) for(uint32_t i=0;i<keep;i++)
+      if (((const uint32_t *)k_abs)[i]>UINT16_MAX || ((const uint32_t *)l_sym)[i]>UINT8_MAX) {
+        stats.cfr_rejected++; pthread_mutex_unlock(&mu); return 0;
+      }
+    next_id++; stats.cfr_dropped[src]++; pthread_mutex_unlock(&mu); return 0;
+  }
   const uint32_t at=(frame_head+frame_count)%frame_cap;
+  const uint64_t t_pack=nr_sense_now_ns();
   uint8_t *p=frames+(size_t)at*frame_stride;
-  memcpy(p,"NRCF",4); put16(p+4,NR_SENSE_CFR_VERSION); put16(p+6,FRAME_HEADER); put64(p+8,id);
+  memcpy(p,"NRCF",4); put16(p+4,NR_SENSE_CFR_VERSION); put16(p+6,FRAME_HEADER);
   p[16]=(uint8_t)src; p[17]=(uint8_t)n_ant; put16(p+18,0); put32(p+20,keep); put64(p+24,abs_slot);
   putf(p+32,slot_frac); putf(p+36,noise_var); put32(p+40,epoch); put32(p+44,identity_gen);
   size_t off=FRAME_HEADER;
-  for(uint32_t i=0;i<keep;i++) { put16(p+off,wide ? ((const uint32_t *)k_abs)[i] : ((const uint16_t *)k_abs)[i]); off+=2; }
-  if (wide) { for(uint32_t i=0;i<keep;i++) p[off++]=((const uint32_t *)l_sym)[i]; }
+  if (wide) { for(uint32_t i=0;i<keep;i++) {
+    const uint32_t k=((const uint32_t *)k_abs)[i], l=((const uint32_t *)l_sym)[i];
+    if (k>UINT16_MAX || l>UINT8_MAX) { stats.cfr_rejected++; pthread_mutex_unlock(&mu); return 0; }
+    put16(p+off,k); off+=2;
+    p[FRAME_HEADER+2*(size_t)keep+i]=(uint8_t)l;
+  } }
+  else {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    memcpy(p+off,k_abs,2*(size_t)keep); off+=2*(size_t)keep;
+#else
+    for(uint32_t i=0;i<keep;i++) { put16(p+off,((const uint16_t *)k_abs)[i]); off+=2; }
+#endif
+  }
+  if (wide) off+=keep;
   else { memcpy(p+off,l_sym,keep); off+=keep; }
   while(off%4) p[off++]=0;
-  for(int ant=0;ant<n_ant;ant++) for(uint32_t i=0;i<keep;i++) {
-    const float *pair=iq+2*((size_t)ant*ant_stride+i);
-    putf(p+off,pair[0]); putf(p+off+4,pair[1]); off+=8;
+  for(int ant=0;ant<n_ant;ant++) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    memcpy(p+off,iq+2*(size_t)ant*ant_stride,8*(size_t)keep);
+    off+=8*(size_t)keep;
+#else
+    for(uint32_t i=0;i<2*keep;i++) { putf(p+off,iq[2*(size_t)ant*ant_stride+i]); off+=4; }
+#endif
   }
+  const uint64_t id=++next_id;
+  put64(p+8,id);
+  nr_sense_cost_add(NR_SENSE_COST_PACK,src,nr_sense_now_ns()-t_pack);
   frame_lengths[at]=(uint32_t)off; frame_count++; stats.cfr_pushed++;
   if (cut) stats.truncated++;
   if (truncated) *truncated=cut;
@@ -277,14 +374,50 @@ bool nr_sense_push_record(const char *json_line)
   const uint32_t at=(record_head+record_count)%record_cap;
   char *p=records+(size_t)at*RECORD_BYTES;
   memcpy(p,json_line,len); p[len]='\n'; record_lengths[at]=(uint32_t)len+1;
+  record_binary[at]=0;
   record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return true;
+}
+int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *meta, uint64_t frame_id)
+{
+  if (!nr_sense_enabled() || !nr_sense_rs_to_json || !meta || src<0 || src>=NR_SENSE_SRC_COUNT) return -1;
+  const size_t cslen=meta->csirs_resource ? strnlen(meta->csirs_resource,256) : 0;
+  const size_t atlen=meta->srs_attribution ? strnlen(meta->srs_attribution,256) : 0;
+  if (cslen>=256 || atlen>=256) return -1;
+  pthread_mutex_lock(&mu);
+  if (!opened) { pthread_mutex_unlock(&mu); return -1; }
+  if (no_sink || record_count==record_cap) { stats.rec_dropped++; pthread_mutex_unlock(&mu); return 0; }
+  const uint32_t at=(record_head+record_count)%record_cap;
+  rs_job_t *job=&rs_jobs[at];
+  job->meta=*meta; job->src=src; job->frame_id=frame_id;
+  if (meta->csirs_resource) {
+    memcpy(job->csirs_resource,meta->csirs_resource,cslen+1);
+    job->meta.csirs_resource=job->csirs_resource;
+  }
+  if (meta->srs_attribution) {
+    memcpy(job->srs_attribution,meta->srs_attribution,atlen+1);
+    job->meta.srs_attribution=job->srs_attribution;
+  }
+  record_binary[at]=1;
+  record_lengths[at]=0;
+  record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
+  return 1;
 }
 void nr_sense_stats(nr_sense_stats_t *out)
 {
   if (!out) return;
   pthread_mutex_lock(&mu); *out=stats; pthread_mutex_unlock(&mu);
   out->after_close=atomic_load(&after_close);
+  for (int s=0;s<NR_SENSE_SRC_COUNT;s++) {
+    out->prod_ns[s]=atomic_load(&cost_ns[NR_SENSE_COST_PROD][s]);
+    out->pack_ns[s]=atomic_load(&cost_ns[NR_SENSE_COST_PACK][s]);
+    out->prod_count[s]=atomic_load(&cost_count[NR_SENSE_COST_PROD][s]);
+    out->pack_count[s]=atomic_load(&cost_count[NR_SENSE_COST_PACK][s]);
+    out->rec_ns+=atomic_load(&cost_ns[NR_SENSE_COST_REC][s]);
+    out->write_ns+=atomic_load(&cost_ns[NR_SENSE_COST_WRITE][s]);
+    out->rec_count+=atomic_load(&cost_count[NR_SENSE_COST_REC][s]);
+    out->write_count+=atomic_load(&cost_count[NR_SENSE_COST_WRITE][s]);
+  }
 }
 void nr_sense_test_pause_writer(bool pause)
 {

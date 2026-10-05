@@ -24,7 +24,7 @@
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
 __attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
-__attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *);
+__attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 
 extern _Atomic long nr_ue_diag_producer_absolute_slot; // executables/nr-ue.c
@@ -42,7 +42,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   *m = (nr_passive_metrics_t){0};
   m->t_mono_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-  if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped);
+  if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
+      &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);
   m->pci = atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed);
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
   m->acq_state = nr_passive_acq_state_name(a.state);
@@ -149,11 +150,20 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   if (nr_sense_stats) {
     nr_sense_stats_t sense;
     nr_sense_stats(&sense);
-    for (int source = 0; source < NR_SENSE_SRC_COUNT; ++source)
+    for (int source = 0; source < NR_SENSE_SRC_COUNT; ++source) {
       m->sense_cfr_drop += sense.cfr_dropped[source];
+      m->sense_prod_us[source]=sense.prod_ns[source]/1000;
+      m->sense_pack_us[source]=sense.pack_ns[source]/1000;
+      m->sense_prod_count[source]=sense.prod_count[source];
+      m->sense_pack_count[source]=sense.pack_count[source];
+    }
     m->sense_rec_drop = sense.rec_dropped;
     m->sense_io_errors = sense.io_errors;
     m->sense_cfr_no_sink = sense.cfr_no_sink;
+    m->sense_rec_us=sense.rec_ns/1000;
+    m->sense_write_us=sense.write_ns/1000;
+    m->sense_rec_count=sense.rec_count;
+    m->sense_write_count=sense.write_count;
   }
   if (nr_prach_passive_metrics)
     nr_prach_passive_metrics(&m->prach_us, &m->prach_drops, &m->prach_skipped);
@@ -168,7 +178,7 @@ void nr_passive_metrics_emit(void)
   static FILE *f = NULL;
   static int tried = 0;
   nr_passive_metrics_t m;
-  char buf[8192]; /* levers and robustness metrics */
+  char buf[16384]; /* levers, robustness, and per-source sensing metrics */
   nr_passive_metrics_collect(&m);
   if (nr_passive_metrics_to_json(&m, buf, sizeof(buf)) < 0) {
     LOG_W(PHY, "SENSING: ISAC_METRICS buffer too small\n");
