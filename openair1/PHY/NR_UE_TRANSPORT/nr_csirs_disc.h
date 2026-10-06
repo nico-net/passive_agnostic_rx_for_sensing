@@ -8,6 +8,7 @@
 #define NR_CSIRS_DISC_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -41,6 +42,7 @@ typedef struct {
   size_t slot_stride;        /* int16 elements per ring entry */
   nr_csirs_disc_slot_meta_t *meta;   /* [capacity] */
   uint64_t written;          /* entries ever written (ring position = written % capacity) */
+  void *private_state;       /* U1 synchronization/allocation state; consumers must not inspect */
 } nr_csirs_disc_ring_t;
 
 /* Pointer to the I/Q pairs (int16 re,im interleaved) of entry `idx`, antenna `ant`, symbol `sym`. */
@@ -93,6 +95,19 @@ void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r);
  * Returns ring index written, or -1 when dropped. Never blocks. */
 int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r, const int16_t *const *rxdataF, int ofdm_symbol_size,
                             int first_carrier_offset, uint32_t abs_slot, uint16_t frame, uint8_t slot);
+/* The worker calls its process hook with this lock already held. Exposed for standalone consumers/tests. */
+bool nr_csirs_disc_ring_read_lock(nr_csirs_disc_ring_t *r);
+void nr_csirs_disc_ring_read_unlock(nr_csirs_disc_ring_t *r);
+
+typedef struct NR_DL_FRAME_PARMS_s NR_DL_FRAME_PARMS;
+extern void *(*nr_csirs_disc_alloc_unified)(size_t bytes);
+extern void (*nr_csirs_disc_free_unified)(void *ptr);
+extern void (*nr_csirs_disc_process_hook)(nr_csirs_disc_ring_t *ring);
+extern uint64_t csirs_disc_feed_drops;
+int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant);
+void nr_csirs_disc_stop(void);
+bool nr_csirs_disc_running(void);
+nr_csirs_disc_ring_t *nr_csirs_disc_worker_ring(void);
 
 /* U2 (nr_csirs_disc_fp.c CPU reference; GPU in nr_csirs_disc_gpu.cu) */
 typedef struct {

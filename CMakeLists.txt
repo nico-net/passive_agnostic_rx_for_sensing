@@ -991,6 +991,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_bwp.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
@@ -2830,6 +2831,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_csirs_blind_synth PRIVATE nr_phy_common nr_common UTIL m)
   add_dependencies(tests test_nr_csirs_blind_synth)
   add_test(NAME test_nr_csirs_blind_synth COMMAND ./test_nr_csirs_blind_synth)
+
+  add_executable(test_nr_csirs_disc_feed ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_feed_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c)
+  target_include_directories(test_nr_csirs_disc_feed PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_disc_feed PRIVATE GTest::gtest GTest::gtest_main pthread)
+  add_dependencies(tests test_nr_csirs_disc_feed)
+  add_test(NAME test_nr_csirs_disc_feed COMMAND ./test_nr_csirs_disc_feed)
 
   add_executable(test_nr_passive_mac_ta ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_mac_ta_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c)

@@ -34,6 +34,7 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "openair2/LAYER2/NR_MAC_UE/mac_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_disc.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/CODING/coding_defs.h"
@@ -2404,6 +2405,28 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
       }
       nr_ue_csi_rs_sensing_capture(ue, proc, rxdataF, mon[i]);
     }
+  }
+
+  if (nr_csirs_disc_enabled() && nr_csirs_disc_running()) {
+    for (int symb = 0; symb < ue->frame_parms.symbols_per_slot; ++symb) {
+      if (!slot_fep_map[symb]) {
+        nr_slot_fep(ue, &ue->frame_parms, proc->nr_slot_rx, symb, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        slot_fep_map[symb] = true;
+      }
+    }
+    nr_csirs_disc_ring_t *ring = nr_csirs_disc_worker_ring();
+    const int16_t *rxdataF_disc[NR_CSIRS_DISC_MAX_ANT];
+    for (int ant = 0; ant < ring->n_ant; ++ant)
+      rxdataF_disc[ant] = (const int16_t *)rxdataF[ant];
+    const long abs_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+    if (abs_slot >= 0)
+      nr_csirs_disc_ring_push(ring,
+                              rxdataF_disc,
+                              ue->frame_parms.ofdm_symbol_size,
+                              ue->frame_parms.first_carrier_offset,
+                              (uint32_t)abs_slot,
+                              (uint16_t)proc->frame_rx,
+                              (uint8_t)proc->nr_slot_rx);
   }
 
   const int actor_idx_llr = proc->nr_slot_rx % ue->pdsch_num_actors;

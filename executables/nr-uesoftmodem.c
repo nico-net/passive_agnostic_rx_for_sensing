@@ -18,6 +18,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_disc.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
@@ -464,12 +465,19 @@ int main(int argc, char **argv)
     }
   }
 
+  PHY_VARS_NR_UE *disc_ue = nrPHY_vars_UE_g[0][0];
+  if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
+    LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
+
   /* Offline replay exits before any radio initialization. */
   const char *replay_input = getenv("ISAC_PASSIVE_REPLAY_INPUT");
   if (replay_input || getenv("ISAC_PASSIVE_REPLAY_CAPTURE")) {
     AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Replay requires --passive-rx\n");
-    if (replay_input)
-      return nr_passive_replay_read(nrPHY_vars_UE_g[0][0], replay_input);
+    if (replay_input) {
+      const int replay_result = nr_passive_replay_read(nrPHY_vars_UE_g[0][0], replay_input);
+      nr_csirs_disc_stop();
+      return replay_result;
+    }
     nr_passive_replay_init(nrPHY_vars_UE_g[0][0]);
   }
 
@@ -549,6 +557,8 @@ int main(int argc, char **argv)
       }
     }
   }
+
+  nr_csirs_disc_stop();
 
   // All slot producers have joined. Drain the PRACH worker before closing records.
   nr_prach_passive_flush();
