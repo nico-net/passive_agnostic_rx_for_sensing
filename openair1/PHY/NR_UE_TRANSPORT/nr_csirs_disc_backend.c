@@ -80,6 +80,14 @@ static int guarded_sweep(const nr_csirs_disc_ring_t *r,
   return rc;
 }
 
+static int guarded_fft(int fft, int transforms, const int16_t *in, int16_t *out)
+{
+  if (!raw_ops.fft || !breaker_ready()) return -1;
+  int rc = raw_ops.fft(fft, transforms, in, out);
+  breaker_result(rc);
+  return rc;
+}
+
 static void *open_sibling(const char *name)
 {
   void *handle = dlopen(name, RTLD_NOW | RTLD_LOCAL);
@@ -107,6 +115,7 @@ static void load_module(void)
     if (module_ops) {
       raw_ops.footprints = module_ops->footprints;
       raw_ops.normalize = module_ops->normalize;
+      raw_ops.fft = module_ops->fft;
     }
     void *(*alloc)(size_t) = (void *(*)(size_t))dlsym(fp_handle, "nr_csirs_disc_gpu_alloc_unified");
     void (*free_fn)(void *) = (void (*)(void *))dlsym(fp_handle, "nr_csirs_disc_gpu_free_unified");
@@ -124,6 +133,7 @@ static void load_module(void)
 
   public_ops.footprints = raw_ops.footprints ? guarded_footprints : NULL;
   public_ops.normalize = raw_ops.normalize ? guarded_normalize : NULL;
+  public_ops.fft = raw_ops.fft ? guarded_fft : NULL;
   public_ops.sweep = raw_ops.sweep ? guarded_sweep : NULL;
 }
 

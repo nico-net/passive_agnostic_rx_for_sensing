@@ -121,13 +121,62 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   ret=cudaMemcpy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
 }
+static int fft_host(int, int, const int16_t *, int16_t *);
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
-  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host};return &ops;
+  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host};return &ops;
 }
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
   void *ptr=nullptr;return bytes && cudaMallocManaged(&ptr,bytes)==cudaSuccess?ptr:nullptr;
 }
 extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr) { if(ptr) cudaFree(ptr); }
+
+/* T8: only the worker calls this entry. Buffers and plans are retained between
+ * batches; all FFT staging is unified memory on the DGX. OAI's fixed-point
+ * butterfly rounding is not reproduced by floating-point cuFFT. */
+#include <cufft.h>
+#include <mutex>
+__global__ static void fft_unpack(const short2 *in, cufftComplex *out, size_t n)
+{
+  size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x;
+  if (i<n) out[i] = make_float2(in[i].x, in[i].y);
+}
+__global__ static void fft_pack(const cufftComplex *in, short2 *out, size_t n, float scale)
+{
+  size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x;
+  if (i<n) out[i] = make_short2((short)fminf(32767.f,fmaxf(-32768.f,rintf(in[i].x*scale))),
+                               (short)fminf(32767.f,fmaxf(-32768.f,rintf(in[i].y*scale))));
+}
+static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
+{
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> guard(mutex);
+  static cufftHandle plan;
+  static int last_fft, last_transforms;
+  static cufftComplex *work;
+  static size_t capacity;
+  if (fft<=0 || transforms<=0 || !in || !out) return -1;
+  const size_t n=(size_t)fft*transforms;
+  if (last_fft!=fft || last_transforms!=transforms) {
+    if (plan) cufftDestroy(plan);
+    plan=0;last_fft=last_transforms=0;
+    if (cufftPlan1d(&plan,fft,CUFFT_C2C,transforms)!=CUFFT_SUCCESS) return -1;
+    last_fft=fft;last_transforms=transforms;
+  }
+  if (capacity<n) {
+    cudaFree(work);work=nullptr;capacity=0;
+    if (cudaMallocManaged(&work,n*sizeof(*work))!=cudaSuccess) return -1;
+    capacity=n;
+  }
+  fft_unpack<<<(n+255)/256,256>>>((const short2 *)in,work,n);
+  if (cudaGetLastError()!=cudaSuccess || cufftExecC2C(plan,work,work,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
+    cudaDeviceSynchronize(); // Quiesce queued work before the caller's CPU fallback.
+    return -1;
+  }
+  fft_pack<<<(n+255)/256,256>>>(work,(short2 *)out,n,1.f/sqrtf((float)fft));
+  const cudaError_t launch = cudaGetLastError();
+  const cudaError_t complete = cudaDeviceSynchronize();
+  return launch==cudaSuccess && complete==cudaSuccess ? 0 : -1;
+}

@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_csirs_blind_search.h"
+int nr_csirs_blind_rt_test_due_only(void);
 int nr_csirs_blind_rt_test_export(int rank, int banks, int types[2], int *untouched);
 int nr_csirs_blind_rt_test_zp_feed(uint32_t slot, double score, int reset);
 int nr_csirs_blind_rt_test_slot(int row, uint32_t slot, int holes, int empty, int reset, int *fep_mask);
@@ -2824,3 +2825,6 @@ TEST(CsirsBlindZpProbation, FailedAdmissionsCannotStarveLaterGeometryOrReadmissi
   EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), evicted));
   EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 8));
 }
+
+TEST(CsirsBlindDiscovery, LiveFepOnlyDueSymbolsAndNeverWaits)
+{ EXPECT_EQ(nr_csirs_blind_rt_test_due_only(), 0); }

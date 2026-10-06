@@ -996,6 +996,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
@@ -2914,6 +2915,26 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_csirs_blind_synth PRIVATE nr_phy_common nr_common UTIL m)
   add_dependencies(tests test_nr_csirs_blind_synth)
   add_test(NAME test_nr_csirs_blind_synth COMMAND ./test_nr_csirs_blind_synth)
+
+  add_executable(test_nr_csirs_disc_td
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_td_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_td_fixture.c
+    ${OPENAIR1_DIR}/PHY/INIT/nr_parms.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c
+    ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c)
+  target_include_directories(test_nr_csirs_disc_td PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_disc_td PRIVATE nr_phy_common PHY_COMMON nr_common nr_fapi_p5
+    asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
+  target_compile_options(test_nr_csirs_disc_td PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test_nr_csirs_disc_td PRIVATE -Wl,--gc-sections -Wl,--no-export-dynamic
+    "-Wl,--export-dynamic-symbol=T_*" -Wl,--export-dynamic-symbol=g_log
+    -Wl,--export-dynamic-symbol=logRecord_mt -Wl,--export-dynamic-symbol=exit_function
+    -Wl,--export-dynamic-symbol=write_file_matlab)
+  add_dependencies(test_nr_csirs_disc_td dfts)
+  add_dependencies(tests test_nr_csirs_disc_td)
+  add_test(NAME test_nr_csirs_disc_td COMMAND test_nr_csirs_disc_td)
 
   add_executable(test_nr_csirs_disc_feed ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_feed_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c)

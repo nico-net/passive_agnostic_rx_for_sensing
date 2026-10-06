@@ -39,8 +39,12 @@ extern void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_re
 __attribute__((weak)) void nr_cfg_epoch_note_csirs_map_change(void);
 static nr_csirs_observer_t g_csirs_obs;
 /* DL processing can use multiple workers, and rate matching is read by decode workers. */
+static __thread bool *g_disc_fep_map;
+uint64_t csirs_disc_confirm_drops;
+/* Standalone FD dump fixtures do not link the PHY FEP. */
+#pragma weak nr_slot_fep
 static pthread_mutex_t g_csirs_state_lock = PTHREAD_MUTEX_INITIALIZER;
-static void csirs_unlock(pthread_mutex_t **lock) { pthread_mutex_unlock(*lock); }
+static void csirs_unlock(pthread_mutex_t **lock) { if (*lock) pthread_mutex_unlock(*lock); }
 static int g_timing = -1;
 static int g_reconf = -1;
 static uint64_t now_us(void)
@@ -503,11 +507,25 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                             bool maintenance, bool nzp_recheck);
 static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
 
+void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
+                               c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], bool map[14])
+{
+  g_disc_fep_map = map;
+  nr_csirs_blind_rt_slot(ue, slot, absolute_slot, rxdataF);
+  g_disc_fep_map = NULL;
+}
+
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
   pthread_mutex_t *guard __attribute__((cleanup(csirs_unlock))) = &g_csirs_state_lock;
-  pthread_mutex_lock(guard);
+  if (g_disc_fep_map) {
+    if (pthread_mutex_trylock(guard)) {
+      __atomic_fetch_add(&csirs_disc_confirm_drops, 1, __ATOMIC_RELAXED);
+      guard = NULL;
+      return;
+    }
+  } else pthread_mutex_lock(guard);
   const c16_t *rxdataF_ant0 = (rxdataF != NULL) ? &rxdataF[0][0] : NULL;
   if (g_on < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND");
@@ -866,6 +884,17 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     refp[p] = t_refbuf[p < n_planes ? p : n_planes - 1];
   const csi_mapping_parms_t parms = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0,
                                                           c->symb_l1);
+  /* Under the same candidate lock as admission/scoring: no candidate can
+   * appear between selecting its symbols and consuming the completed grid. */
+  if (g_disc > 0 && g_disc_fep_map) {
+    for (int j=0;j<parms.size;++j) for (int lp=0;lp<=parms.lprime;++lp) {
+      int l = parms.loverline[j]+lp;
+      if (l >= 0 && l < 14 && !g_disc_fep_map[l]) {
+        nr_slot_fep(ue, fp, slot, l, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        g_disc_fep_map[l] = true;
+      }
+    }
+  }
   int reference_slot = (slot + c->slot_delta) % fp->slots_per_frame;
   if (reference_slot < 0)
     reference_slot += fp->slots_per_frame;
@@ -1019,7 +1048,7 @@ score_zero_power:
       const unsigned symbol = c->symb_l0 + 1;
       const uint32_t off_other = symbol * fp->ofdm_symbol_size;
       zs_other = -1.0;
-      if (nr_slot_fep_ant(ue, fp, (unsigned)slot, symbol, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata) == 0) {
+      if (g_disc > 0 || nr_slot_fep_ant(ue, fp, (unsigned)slot, symbol, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata) == 0) {
         for (int p = 0; p < n_planes; p++)
           zp_refs[p] = (const int16_t *)&t_refbuf[p][off_other];
         zs_other = nr_csirs_blind_zero_score_ports_shift((const int16_t *)&rxdataF_ant0[off_other], zp_refs, n_planes,

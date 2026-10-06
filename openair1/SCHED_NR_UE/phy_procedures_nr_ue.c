@@ -35,6 +35,8 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "openair2/LAYER2/NR_MAC_UE/mac_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
@@ -2414,28 +2416,13 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
   }
 
   if (nr_csirs_disc_enabled() && nr_csirs_disc_running()) {
-    for (int symb = 0; symb < ue->frame_parms.symbols_per_slot; ++symb) {
-      if (!slot_fep_map[symb]) {
-        nr_slot_fep(ue, &ue->frame_parms, proc->nr_slot_rx, symb, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-        slot_fep_map[symb] = true;
-      }
-    }
-    nr_csirs_disc_ring_t *ring = nr_csirs_disc_worker_ring();
-    const int16_t *rxdataF_disc[NR_CSIRS_DISC_MAX_ANT];
-    for (int ant = 0; ant < ring->n_ant; ++ant)
-      rxdataF_disc[ant] = (const int16_t *)rxdataF[ant];
-    /* Stamp the slot being PROCESSED, not the RF producer's live counter (which runs ahead by a
-     * variable pipeline depth and would smear the period/offset lattice). */
+    /* Stamp processed samples, not the RF producer's live counter. */
     const long abs_slot = ((long)proc->hfn_rx * 1024 + proc->frame_rx) * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
-    if (abs_slot >= 0) {
-      nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx, (uint32_t)abs_slot, rxdataF);
-      nr_csirs_disc_ring_push(ring,
-                              rxdataF_disc,
-                              ue->frame_parms.ofdm_symbol_size,
-                              ue->frame_parms.first_carrier_offset,
-                              (uint32_t)abs_slot,
-                              (uint16_t)proc->frame_rx,
-                              (uint8_t)proc->nr_slot_rx);
+    int8_t last = 13;
+    const bool known = nr_passive_acq_tdd_pdsch_last_symbols(abs_slot, ue->frame_parms.numerology_index, 1, &last);
+    if (abs_slot >= 0 && (!known || last >= 0)) {
+      nr_csirs_disc_td_push(ue, (uint32_t)abs_slot, proc->frame_rx, proc->nr_slot_rx);
+      nr_csirs_blind_rt_slot_fep(ue, proc->nr_slot_rx, (uint32_t)abs_slot, rxdataF, slot_fep_map);
     }
   }
 

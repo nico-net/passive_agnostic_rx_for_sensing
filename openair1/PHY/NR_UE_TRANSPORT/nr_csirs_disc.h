@@ -171,6 +171,8 @@ typedef struct {
   /* Additive U2 batch primitive: Q12 contrasts [capacity][14*12*n_rb+168].
    * Rebuild core and module together when using this extended ops structure. */
   int (*normalize)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *, uint32_t *);
+  /* T8 packed unitary FFT: [transforms][fft] interleaved int16 IQ. */
+  int (*fft)(int fft, int transforms, const int16_t *in, int16_t *out);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by ISAC_CSIRS_DISC=1 and BACKEND=auto|cpu|gpu.

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "PHY/defs_nr_common.h"
 
@@ -50,6 +51,12 @@ static bool g_enabled;
 
 /* U1's standalone test deliberately links no U5 object. */
 extern void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp) __attribute__((weak));
+
+extern int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *, int, int) __attribute__((weak));
+extern void nr_csirs_disc_td_free(void) __attribute__((weak));
+extern void nr_csirs_disc_td_reset(void) __attribute__((weak));
+extern int nr_csirs_disc_td_pending(void) __attribute__((weak));
+extern int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *) __attribute__((weak));
 
 static void worker_note_slot(void);
 
@@ -182,6 +189,7 @@ void nr_csirs_disc_ring_reset(nr_csirs_disc_ring_t *r)
 {
   ring_private_t *state=r?r->private_state:NULL;
   if(!state) return;
+  if (r == &g_worker.ring && nr_csirs_disc_td_reset) nr_csirs_disc_td_reset();
   pthread_mutex_lock(&state->read_lock);
   for(int i=0;i<r->capacity;++i) pthread_mutex_lock(&state->entry_lock[i]);
   memset(r->meta,0,r->capacity*sizeof(*r->meta));
@@ -312,12 +320,20 @@ static void *disc_worker_main(void *unused)
   pthread_mutex_lock(&g_worker.wake_lock);
   uint64_t seen = 0;
   while (!g_worker.stop) {
-    while (!g_worker.stop && seen == g_worker.wake_generation)
-      pthread_cond_wait(&g_worker.wake_cv, &g_worker.wake_lock);
+    while (!g_worker.stop && seen == __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE)
+           && (!nr_csirs_disc_td_pending || nr_csirs_disc_td_pending() < g_worker.batch)) {
+      struct timespec until;
+      clock_gettime(CLOCK_REALTIME, &until);
+      until.tv_nsec += 5000000;
+      if (until.tv_nsec >= 1000000000) { ++until.tv_sec; until.tv_nsec -= 1000000000; }
+      pthread_cond_timedwait(&g_worker.wake_cv, &g_worker.wake_lock, &until);
+    }
     if (g_worker.stop)
       break;
-    seen = g_worker.wake_generation;
+    seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     pthread_mutex_unlock(&g_worker.wake_lock);
+    if (nr_csirs_disc_td_drain) nr_csirs_disc_td_drain(&g_worker.ring);
+    seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     if (nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
       void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
       if (hook != NULL) hook(&g_worker.snapshot);
@@ -357,6 +373,9 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     goto fail;
   if (nr_csirs_disc_ring_init(&g_worker.snapshot, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, false) != 0)
     goto fail;
+  if (nr_csirs_disc_td_init && nr_csirs_disc_td_init(fp, n_ant,
+          env_positive("ISAC_CSIRS_DISC_TD_RING", 1024)) != 0)
+    goto fail;
   pthread_attr_t attr;
   if (pthread_attr_init(&attr) != 0)
     goto fail;
@@ -373,6 +392,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   return 0;
 
 fail:
+  if (nr_csirs_disc_td_free) nr_csirs_disc_td_free();
   nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
   pthread_cond_destroy(&g_worker.wake_cv);
@@ -392,6 +412,7 @@ void nr_csirs_disc_stop(void)
   if (g_worker.thread_started)
     pthread_join(g_worker.thread, NULL);
   atomic_store_explicit(&g_worker.running, false, memory_order_release);
+  if (nr_csirs_disc_td_free) nr_csirs_disc_td_free();
   nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
   if (g_worker.synchronization_ready) {
@@ -415,10 +436,8 @@ static void worker_note_slot(void)
 {
   if (!nr_csirs_disc_running())
     return;
-  pthread_mutex_lock(&g_worker.wake_lock);
   if ((g_worker.ring.written % (uint64_t)g_worker.batch) == 0) {
-    g_worker.wake_generation++;
+    __atomic_add_fetch(&g_worker.wake_generation, 1, __ATOMIC_RELEASE);
     pthread_cond_signal(&g_worker.wake_cv);
   }
-  pthread_mutex_unlock(&g_worker.wake_lock);
 }

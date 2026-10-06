@@ -100,7 +100,7 @@ if(ENABLE_LDPC_CUDA)
     ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_fp.c)
   set_target_properties(csirs_disc_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(csirs_disc_gpu PRIVATE CUDA::cudart m pthread)
+  target_link_libraries(csirs_disc_gpu PRIVATE CUDA::cudart CUDA::cufft m pthread)
   add_dependencies(nr-uesoftmodem csirs_disc_gpu)
   # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.

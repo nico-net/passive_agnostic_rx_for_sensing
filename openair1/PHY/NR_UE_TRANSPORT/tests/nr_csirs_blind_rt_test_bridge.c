@@ -378,3 +378,40 @@ int nr_csirs_blind_rt_test_discovered(int i,fapi_nr_dl_config_csirs_pdu_rel15_t 
   fill_pdu(&g_st.cand[i],1,p);*period=g_st.seed_period[i];
   phases[0]=g_st.seed_offset[i];phases[1]=g_st.seed_offset2[i];return g_st.seed_n_off[i];
 }
+
+/* T8 due-only live entry. Use the same deterministic transform boundary as the
+ * legacy bridge, recording every symbol requested by the real confirmer. */
+int nr_slot_fep(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, unsigned slot, unsigned symbol,
+                c16_t rx[][fp->samples_per_slot_wCP], enum nr_Link link, uint32_t offset, c16_t **raw)
+{
+  return nr_slot_fep_ant(ue,fp,slot,symbol,0,rx,link,offset,raw);
+}
+int nr_csirs_blind_rt_test_due_only(void)
+{
+  int mask;
+  g_disc=0;
+  nr_csirs_blind_rt_test_slot_pattern(5,0,0,0,0,1,&mask);
+  g_disc=1;g_st.discovery_bank=true;
+  nr_csirs_blind_seed(&g_st,0,20,7,0);
+  int rc=0;
+  test_fep_enabled=1;
+  for(int slot=0;slot<20;++slot) {
+    bool map[14]={0};
+    test_fep_mask=test_fep_calls=0;
+    nr_csirs_blind_rt_slot_fep(&test_ue,slot,slot,test_rx,map);
+    if(test_fep_mask != (slot==7 ? (1<<7)|(1<<8) : 0)) rc=-1;
+    if(test_fep_calls != (slot==7 ? 2 : 0)) rc=-2;
+  }
+  // Already transformed symbols are reused, and a busy worker never blocks.
+  bool map[14]={0};map[7]=true;
+  test_fep_mask=test_fep_calls=0;
+  nr_csirs_blind_rt_slot_fep(&test_ue,7,27,test_rx,map);
+  if(test_fep_mask!=(1<<8) || test_fep_calls!=1) rc=-3;
+  pthread_mutex_lock(&g_csirs_state_lock);
+  uint64_t before=csirs_disc_confirm_drops;
+  nr_csirs_blind_rt_slot_fep(&test_ue,7,47,test_rx,map);
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  if(csirs_disc_confirm_drops!=before+1) rc=-4;
+  g_disc=0;test_fep_enabled=0;
+  return rc;
+}
