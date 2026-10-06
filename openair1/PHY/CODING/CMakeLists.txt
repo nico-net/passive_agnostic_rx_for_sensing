@@ -123,6 +123,21 @@ if(ENABLE_LDPC_CUDA)
   set_target_properties(nr_pdcch_gpu_fep_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_pdcch_gpu_fep_test pdcch_gpu)
   add_dependencies(nr-uesoftmodem pdcch_gpu)
+  # U4 CSI-RS ID/slot sweep; separate from U2's footprint module until orchestration merge.
+  # Host mapping/validation services come from nr_csirs_disc_sweep.c in the executable.
+  add_library(nr_csirs_disc_gpu_sweep MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu)
+  set_target_properties(nr_csirs_disc_gpu_sweep PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(nr_csirs_disc_gpu_sweep PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(nr_csirs_disc_gpu_sweep PRIVATE CUDA::cudart)
+  if(ENABLE_TESTS)
+    target_compile_definitions(test_nr_csirs_disc_sweep PRIVATE NR_CSIRS_DISC_TEST_CUDA=1)
+    target_link_libraries(test_nr_csirs_disc_sweep PRIVATE CUDA::cudart)
+    add_dependencies(test_nr_csirs_disc_sweep nr_csirs_disc_gpu_sweep)
+  endif()
+  add_dependencies(nr-uesoftmodem nr_csirs_disc_gpu_sweep)
+  target_link_options(nr-uesoftmodem PRIVATE "LINKER:--undefined=nr_csirs_disc_sweep_cpu")
+
   # Batched polar SC decode for the blind PDCCH search.
   add_library(polar_sc_cuda STATIC nrPolar_tools/cuda/nr_polar_sc_cuda.cu nrPolar_tools/cuda/nr_polar_sc_cuda_host.c)
   set_target_properties(polar_sc_cuda PROPERTIES CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
