@@ -8,6 +8,7 @@
 #define NR_CSIRS_DISC_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -112,8 +113,15 @@ typedef struct {
   int delta_max;                        /* slot-number offsets 0..delta_max-1 tried (1 = none) */
   int block_re;                         /* coherent block length in occupied REs, default 32 */
 } nr_csirs_disc_sweep_cfg_t;
+/* Returns n_hyp on success, 0 while ISAC_CSIRS_DISC is not exactly "1", -1 on error.
+ * NULL cfg selects {0,1024,1,32}; explicit cfg values must be positive (id_first may be zero).
+ * Noise ~1 refers to an individual sequence score; maximizing a sweep raises the noise maximum.
+ * Caller keeps the ring stable during a sweep and initializes OAI modulation tables on startup. */
 int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int n_hyp,
                             const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out);
+/* Separate U4 MODULE entry, with the same signature as gpu_ops.sweep. */
+int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int n_hyp,
+                                 const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out);
 
 /* GPU backends (dlopen'd module like pdsch_gpu; NULL/negative when absent). Same semantics as the CPU versions. */
 typedef struct {
