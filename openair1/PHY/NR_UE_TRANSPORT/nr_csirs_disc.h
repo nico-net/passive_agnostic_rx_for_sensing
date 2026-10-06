@@ -118,6 +118,14 @@ typedef struct {
 int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                                  nr_csirs_disc_fp_t *out, int max_out);
 
+/* Stable detector entry used by the U5 pipeline once per batch (nr_csirs_disc_fp.c). Today it runs the single-ring
+ * detector (GPU ops when loaded, else CPU); T2b makes it stateful (contrast history accumulated since the last reset,
+ * so weak/long-period resources are found beyond the raw ring horizon) WITHOUT changing this signature.
+ * nr_csirs_disc_detect_reset() is called on epoch change / sync loss. */
+int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg, nr_csirs_disc_fp_t *out,
+                         int max_out);
+void nr_csirs_disc_detect_reset(void);
+
 /* U3 (nr_csirs_disc_hyp.c) */
 int nr_csirs_disc_hypotheses(const nr_csirs_disc_fp_t *fps, int n_fp, nr_csirs_disc_hyp_t *out, int max_out);
 
@@ -146,10 +154,9 @@ typedef struct {
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by ISAC_CSIRS_DISC=1 and BACKEND=auto|cpu|gpu.
  * Returns NULL on absence/failure (including forced gpu); caller may fall back to CPU.
- * The module exports gpu_ops above, plus alloc_unified/free_unified. */
+ * The module exports gpu_ops above, plus nr_csirs_disc_gpu_alloc_unified/_free_unified; the loader installs them
+ * into the core hooks nr_csirs_disc_alloc_unified/_free_unified (function pointers, see U1 above). */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
-void *nr_csirs_disc_alloc_unified(size_t bytes);
-void nr_csirs_disc_free_unified(void *ptr);
 
 #ifdef __cplusplus
 }

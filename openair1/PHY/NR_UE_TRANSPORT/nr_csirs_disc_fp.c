@@ -223,3 +223,18 @@ int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_d
   int ret=nr_disc_fp_cluster(r,cfg,out,max_out,fold_cpu,&c);
   free(x);return ret;
 }
+
+/* Stable U5 entry (see nr_csirs_disc.h). Single-ring for now; T2b adds the accumulated history. */
+int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg, nr_csirs_disc_fp_t *out,
+                         int max_out)
+{
+  const nr_csirs_disc_gpu_ops_t *g = nr_csirs_disc_gpu_load();
+  if (g && g->footprints) {
+    const int n = g->footprints(r, cfg, out, max_out);
+    if (n >= 0)
+      return n;
+  }
+  return nr_csirs_disc_footprints_cpu(r, cfg, out, max_out);
+}
+
+void nr_csirs_disc_detect_reset(void) {}

@@ -90,8 +90,8 @@ extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
   static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr};return &ops;
 }
-extern "C" void *nr_csirs_disc_alloc_unified(size_t bytes)
+extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
   void *ptr=nullptr;return bytes && cudaMallocManaged(&ptr,bytes)==cudaSuccess?ptr:nullptr;
 }
-extern "C" void nr_csirs_disc_free_unified(void *ptr) { if(ptr) cudaFree(ptr); }
+extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr) { if(ptr) cudaFree(ptr); }

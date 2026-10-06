@@ -206,8 +206,8 @@ TEST(CsirsDisc, GpuMatchesCpu)
   if(!ops) GTEST_SKIP()<<"CUDA module/device unavailable; run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.GpuMatchesCpu";
   Dl_info info={};ASSERT_NE(dladdr(reinterpret_cast<void *>(ops->footprints),&info),0);
   void *module=dlopen(info.dli_fname,RTLD_NOW|RTLD_LOCAL);ASSERT_NE(module,nullptr);
-  auto alloc=reinterpret_cast<void *(*)(size_t)>(dlsym(module,"nr_csirs_disc_alloc_unified"));
-  auto release=reinterpret_cast<void (*)(void *)>(dlsym(module,"nr_csirs_disc_free_unified"));
+  auto alloc=reinterpret_cast<void *(*)(size_t)>(dlsym(module,"nr_csirs_disc_gpu_alloc_unified"));
+  auto release=reinterpret_cast<void (*)(void *)>(dlsym(module,"nr_csirs_disc_gpu_free_unified"));
   ASSERT_NE(alloc,nullptr);ASSERT_NE(release,nullptr);
   for(int row:{1,2,4,6,11,16,18}) {
     auto c=resource(row);auto cfg=config(&c);Ring r;ASSERT_EQ(nr_csirs_disc_synth(&r.r,&cfg),0);

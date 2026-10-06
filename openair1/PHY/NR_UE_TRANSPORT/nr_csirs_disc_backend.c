@@ -25,7 +25,11 @@ static void load_module(void)
   if(!handle) return;
   const nr_csirs_disc_gpu_ops_t *(*get_ops)(void)=dlsym(handle,"nr_csirs_disc_gpu_ops");
   if(get_ops) ops=get_ops();
-  if(!ops) dlclose(handle);
+  if(!ops) { dlclose(handle); return; }
+  /* Install the module's managed allocator into the U1 ring hooks (core stays CUDA-free). */
+  void *(*a)(size_t)=(void *(*)(size_t))dlsym(handle,"nr_csirs_disc_gpu_alloc_unified");
+  void (*f)(void *)=(void (*)(void *))dlsym(handle,"nr_csirs_disc_gpu_free_unified");
+  if(a && f) { nr_csirs_disc_alloc_unified=a; nr_csirs_disc_free_unified=f; }
 }
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
 {
