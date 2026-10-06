@@ -353,7 +353,7 @@ TEST(CsirsDisc, StatefulGpuMatchesCpu)
   const auto *ops=nr_csirs_disc_gpu_load();
   if(!ops) GTEST_SKIP()<<"CUDA unavailable: run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.StatefulGpuMatchesCpu";
   ASSERT_NE(ops->normalize,nullptr);
-  auto c=resource(2);c.period=160;c.offset=159;auto cfg=config(&c);cfg.n_rb=16;cfg.n_slots=100;
+  auto c=resource(2);c.period=160;c.offset=159;c.rb_start=3;c.n_rb=9;auto cfg=config(&c);cfg.n_rb=16;cfg.n_slots=100;
   auto e=exclusions(cfg.n_rb);nr_csirs_disc_fp_cfg_t fc={0,e.data(),1.03f};
   std::vector<std::vector<nr_csirs_disc_fp_t>> cpu;
   for(const char *backend:{"cpu","gpu","managed"}) {
