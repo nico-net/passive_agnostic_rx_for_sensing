@@ -199,6 +199,26 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
   }
   r->meta[index] = (nr_csirs_disc_slot_meta_t){.abs_slot = abs_slot, .frame = frame, .slot = slot, .valid = 1};
   r->written++;
+  /* Offline-analysis dump (ISAC_CSIRS_DISC_DUMP=<file>): header {magic,n_ant,n_rb,slots_per_frame,nsym}
+   * once, then per slot the meta followed by n_ant x NSYM x 12*n_rb CRB-aligned int16 IQ pairs. */
+  static FILE *dump;
+  static int dump_state;
+  if (dump_state == 0) {
+    const char *path = getenv("ISAC_CSIRS_DISC_DUMP");
+    dump = path && *path ? fopen(path, "wb") : NULL;
+    dump_state = dump ? 1 : -1;
+    if (dump) {
+      const int32_t hdr[5] = {0x43534431, r->n_ant, r->n_rb, r->slots_per_frame, NR_CSIRS_DISC_NSYM};
+      fwrite(hdr, sizeof(hdr), 1, dump);
+    }
+  }
+  if (dump_state == 1) {
+    fwrite(&r->meta[index], sizeof(r->meta[index]), 1, dump);
+    for (int ant = 0; ant < r->n_ant; ++ant)
+      for (int sym = 0; sym < NR_CSIRS_DISC_NSYM; ++sym)
+        fwrite(nr_csirs_disc_ring_sym(r, index, ant, sym), sizeof(int16_t), (size_t)2 * grid_sc, dump);
+    fflush(dump);
+  }
   pthread_mutex_unlock(&state->read_lock);
   if (r == &g_worker.ring)
     worker_note_slot();
