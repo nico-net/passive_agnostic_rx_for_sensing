@@ -8,6 +8,7 @@
 #define NR_CSIRS_DISC_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -122,6 +123,12 @@ typedef struct {
                nr_csirs_disc_win_t *);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
+/* CPU-side loader, gated by ISAC_CSIRS_DISC=1 and BACKEND=auto|cpu|gpu.
+ * Returns NULL on absence/failure (including forced gpu); caller may fall back to CPU.
+ * The module exports gpu_ops above, plus alloc_unified/free_unified. */
+const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
+void *nr_csirs_disc_alloc_unified(size_t bytes);
+void nr_csirs_disc_free_unified(void *ptr);
 
 #ifdef __cplusplus
 }
