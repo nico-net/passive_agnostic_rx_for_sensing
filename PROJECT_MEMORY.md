@@ -66,6 +66,63 @@ agent, terminal or human conversation: everything needed is here or in the repos
 > K45–K50 (§24); deferred work and the OTA checklist additions in §25 (2026-10-04 block). Hosts corrected (§0.3: sens6
 > has an NVIDIA sm_89 GPU, model to verify).
 
+> **Update 2026-10-06 (DGX, first OTA on the DGX, new X410 `34B2AF1`, Milan DEIB; binary = `7cb863effe` + uncommitted
+> fixes listed below).** X410 `34B2AF1`: CG_400 image **with** DDC blocks (HW decimation to 122.88 MS/s), MPM 7.0 /
+> FPGA 11.0, UHD 4.11 + DPDK (data `192.168.10.2` via `use_dpdk=1`, DPDK cores 17–19, mgmt `192.168.30.2`), run as root.
+> `[OTA VERIFIED 2026-10-06, 7cb863effe+fixes, DGX, X410 34B2AF1, 4 RX x 122.88 MS/s]`: cell **PCI 421** (co-channel
+> **PCI 933** on the same SSB), SSB 3679.68 MHz (GSCN 7971, Case C, 5 beams {0,2,4,5,7} every 20 ms), MIB **cellBarred**,
+> k_SSB 14, CORESET#0 idx 12 (48 RB, 1 sym, offset 16), SS#0 idx 5; PBCH tracking 409/409 census windows `pbch_ok=50`
+> over 420 s, 0 RFSTALL; CSS0 autoconf + `PDCCH_SCRAMBLING_ID CONFIRMED [CSS0] n_id=421`, ~12 SI-RNTI DCIs/s CRC-OK;
+> **SIB1 decoded** (several runs; 0/5056 in one gain-32 run) = **PLMN 222-10** (MNC→Vodafone Italia by public registry,
+> not decoded), cell id `0x007ed8847`, no TAC, **no servingCellConfigCommon** (NSA-style SIB1 ⇒ carrier/TDD not in SIB1).
+> Carrier **80 MHz / 217 PRB, centre 3680.01 MHz, Point A 3640.95 MHz, SSB at CRB 97** is `[MEASURED + derived]` (spectrum
+> edges 3640–3720 + k_SSB/CRB consistency + 281 Hz residual CFO on that grid), not decoded. **CSI-RS: not confirmed
+> live; CONFIRMED offline** `[MEASURED, offline raw-IQ replay of the 2026-10-06 OTA capture (4 s, 4 ch, aligned grid,
+> /home/nicola/NICOLA/ota_runs/raw_pci421_aligned_20261006), PCI 415, receiver's own confirm path]`: TRS row 1, density 3,
+> **RB 0–51 only**, scramblingID = PCI 415: `1:0:52:1:4:0:0:3:415:5:0` + `…:1:8:…` (k0 0, symbols 4+8) and
+> `1:0:52:2:5/9:0:0:3:415:160:15` (k0 1, symbols 5+9). Three causes of the live miss: (1) the CSI-RS search runs once
+> per PDCCH occasion, and with no dedicated SS (NSA) occasions are only the SS#0 slots (2 in 20); (2) the TRS spans
+> 52 of 217 PRB, so the whole-band sub-band-averaged z was 2.3 (window 0:54 → z 5.1, 55 hits). **LIVE CONFIRMED later
+> the same day** `[OTA VERIFIED 2026-10-06 17:00, DGX + X410 34B2AF1, 4 RX, PCI 415, run csilive_170040]`: NZP #0
+> `1:0:52:1:4:0:0:3:415:4:0` after 217 slots, #1 `…:1:8:…:415:5:0` after 848 slots, held 300 s with 0 contradictions,
+> 0 RFSTALL, PBCH 291/291 windows, SIB1 decoded, scan-queue drop_full 0.48 % with `ISAC_PDCCH_SCAN_EVERY_SLOT=1`
+> (inferred period 4 vs 5 slots between runs: periodicity unresolved). **4-RX start failures — ROOT CAUSE FOUND:** ~50 %
+> of 4-RX starts all day (not only the afternoon; a reboot did not help) never recycled a single DPDK mbuf (pool
+> exhausted at exactly pool/4 packets per channel: 65536 → sample 32.5 M, 8192 → 4.0 M). The device is created from a
+> SCHED_FIFO 97 thread, so UHD's busy-polling `uhd_ctrl_ep*` thread (FIFO 97, ~65–86 % CPU) inherits RT priority and
+> could land on core 19 next to `dpdk-worker19` (FIFO 97) and starve it. Fix: `ISAC_UHD_CTRL_CORES=2,3,4` (usrp_lib
+> moves `uhd_ctrl*` threads after make and at stream start) → 4/4 clean starts. `benchmark_rate` never failed (not
+> created from an RT thread). Rejected hypotheses: TX streamer (`ISAC_USRP_NO_TX` kept as an option), recv chunk size
+> (`ISAC_USRP_RING_PKTS`), stale host/DPDK state, X410 MPM state, NIC, thermal. (3) IDSWEEP pins the
+> highest-EPR candidate = PDSCH DM-RS (symbol 2/11, EPR ~1.9, z noise) and a pin starves all other candidates.
+> New opt-in knobs (defaults unchanged): `ISAC_PDCCH_SCAN_EVERY_SLOT`, `ISAC_CSIRS_BLIND_RB=start:nrb`,
+> `ISAC_CSIRS_BLIND_ROWS`, `ISAC_CSIRS_BLIND_PER_SLOT`, `ISAC_CSIRS_BLIND_EPRDUMP` (rank mode). The RB window is a
+> signal-derived prior today; an automatic window search is the follow-up. The capture also showed a **third cell,
+> PCI 415**, strongest in that recording (same SSB, N_ID2 1; SIB1 decoded with the same cell identity field). Other occupied
+> n78 blocks seen from DEIB: 3560–3620, 3620–3640, 3720–3800 MHz (not decoded).
+> **Unit/site calibration (differs from sens6, do not carry over):** sample-clock drift ≈ 0 → `--ntn-initial-time-drift 0`
+> (−4.25 / +3.83 put the tracking window ~2000 samples off → PBCH 0/50); oscillator CFO ≈ +4.1 kHz on the aligned grid
+> (+14.1 kHz measured at `-C 3689e6` = +10 kHz off-grid tuning); PSS/SSS fractional CFO estimate biased ~−4 kHz on this
+> loaded cell → run **without `--ue-fo-compensation`** and seed `--initial-fo`; RX gain 38 (`adjust_rxgain` −16 but SIB1
+> needs the digital level; 40 saturates the PBCH chest, 25–32 too low); channel 2 is ~−20 dB (antenna/cable — check);
+> `ISAC_RX_MRC_MODE=1` needed for SIB1 (default decodes branch 0 only); start-up `ERROR_CODE_OVERFLOW (Out of sequence)` /
+> `Unexpected opcode value in STRC packet` frequent → retry after 30 s; stop = SIGINT, second SIGINT ≥ 5 s later.
+> **Code changes (uncommitted, 2026-10-06):** `radio/USRP/CMakeLists.txt` links Boost::thread (UHD 4.11+DPDK libuhd no longer
+> provides it → `symbol lookup error` at stream start); `usrp_lib.cpp`: `USRP_TS_FROZEN` (this unit stamps every packet with
+> the stream start time; timestamps derived from sample count), opt-in **decoupled RX ring** `ISAC_USRP_RING_MS` /
+> `ISAC_USRP_RING_CORE` (producer thread drains UHD; without it 4 x 122.88 MS/s overflowed after every PBCH lock because
+> `UEthread_0` did recv + PHY at 90–100 %); `nr_ue_procedures.c` + `rrc_UE.c`: passive mode ignores MIB cellBarred (was
+> "Cell is barred. Going back to sync mode" + no SIB1 scheduling) and logs `SENSING: MIB fields …`; `rrc_UE.c`: passive SIB1
+> without servingCellConfigCommon no longer asserts; `nr_initial_sync.c`: `SCAN_PBCH_FAIL` diagnostic. Config
+> `tests/passive_rx/dgx/ue.passive.ota.common.dgx.cfg` (common path only). None of this has an offline test yet.
+> Working command (4 RX, robust start): `sudo env ISAC_RX_MRC_MODE=1 ISAC_USRP_RING_MS=500 ISAC_USRP_RING_CORE=16
+> ISAC_SCAN_ANT=1 ISAC_UE_RT_CORE=5 ISAC_PDCCH_USS_CORE=7 ISAC_CSIRS_BLIND=1 ISAC_CSIRS_BLIND_IDSWEEP=1 nr-uesoftmodem
+> --usrp-args type=x4xx,addr=192.168.10.2,mgmt_addr=192.168.30.2,use_dpdk=1,dpdk_num_mbufs=65536 -O
+> tests/passive_rx/dgx/ue.passive.ota.common.dgx.cfg -r 273 --numerology 1 --band 78 -C 3689000000 --ssb 1207 --ue-rxgain 38
+> --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx --initial-fo 14100 --thread-pool 8,9,15 --time-sync-I 0.01
+> --ntn-initial-time-drift 0 -A 90` (CRB-aligned variant for CSI-RS: `-r 217 -C 3680010000 --ssb 1171 --initial-fo 4100`;
+> acquisition there is less reliable, SSB 320 kHz from the LO). Logs: `/home/nicola/NICOLA/ota_runs/*` (not in git).
+
 ---
 
 ## 0. How to read this document

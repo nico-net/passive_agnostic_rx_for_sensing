@@ -7,6 +7,8 @@
 #include <cinttypes>
 #include <string.h>
 #include <pthread.h>
+#include <dirent.h>
+#include <sched.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <uhd/version.hpp>
@@ -667,6 +669,27 @@ typedef struct {
   int64_t tx_count;
   int64_t rx_count;
   int wait_for_first_pps;
+  // Some X410 units (34B2AF1, CG_400, FPGA 11.0, MPM 7.0, UHD 4.11; measured 2026-10-06 over DPDK
+  // and kernel sockets, 1 and 4 channels, 61.44-491.52 MS/s) stamp EVERY RX packet of a stream with
+  // the stream start time. When that is detected the timestamps are derived from the first hardware
+  // timestamp + samples received; sample loss is still caught by UHD's overflow/sequence errors.
+  bool rx_ts_frozen = false;
+  long long rx_ts_next_ticks = -1; // raw-rate ticks of the next sample (frozen mode only)
+  // Decoupled RX ring (ISAC_USRP_RING_MS > 0, decim == 1 only): a producer thread drains UHD into a
+  // per-channel ring so PHY bursts on the reading thread cannot overflow the radio. Measured need
+  // (2026-10-06, DGX + X410 34B2AF1, 4 x 122.88 MS/s over DPDK): UEthread_0 at 90-100 % doing both
+  // recv() and per-slot PHY overflowed the stream right after every PBCH lock; 1 RX never did.
+  std::vector<std::vector<int32_t>> ring;
+  size_t ring_cap = 0;                          // samples per channel
+  std::atomic<uint64_t> ring_written{0};        // samples produced (per channel)
+  std::atomic<uint64_t> ring_read{0};           // samples consumed
+  std::atomic<bool> ring_stop{false};
+  std::atomic<int> ring_err{0};                 // 0 ok, 1 UHD error, 2 ring overrun, 3 exception
+  long long ring_t0_ticks = 0;                  // first hardware timestamp (sample-rate ticks)
+  uhd::rx_metadata_t ring_err_md;
+  std::thread ring_thread;
+  std::mutex ring_mu;
+  std::condition_variable ring_cv;
   std::atomic<bool> rx_stop_requested{false};
   std::mutex rx_mutex;
   bool rx_started = false;
@@ -875,6 +898,189 @@ static void trx_usrp_start_generic_gpio(usrp_state_t *s)
 /*! \brief Called to start the USRP transceiver. Return 0 if OK, < 0 if error
     @param device pointer to the device structure specific to the RF hardware target
 */
+/* ISAC_UHD_CTRL_CORES="a,b,c": move UHD's control-endpoint threads (uhd_ctrl*) to these cores.
+ * MEASURED 2026-10-06 (X410 34B2AF1, DPDK lcores 17-19): the device is created from a SCHED_FIFO 97
+ * thread, so uhd_ctrl_ep* busy-polls at FIFO 97 (~64 % CPU) and was placed on core 19, where
+ * dpdk-worker19 also runs at FIFO 97; equal FIFO priorities never preempt each other. About half the
+ * starts then never recycled a single RX mbuf (pool exhausted at exactly pool/4 packets per channel)
+ * while benchmark_rate, not created from an RT thread, never failed. */
+static void usrp_repin_uhd_threads(const char *when)
+{
+  const char *e = getenv("ISAC_UHD_CTRL_CORES");
+  if (!e || !*e)
+    return;
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (const char *q = e; *q;) {
+    char *end = NULL;
+    const long c = strtol(q, &end, 10);
+    if (end == q)
+      break;
+    if (c >= 0 && c < CPU_SETSIZE)
+      CPU_SET((int)c, &set);
+    q = (*end == ',') ? end + 1 : end;
+  }
+  DIR *d = opendir("/proc/self/task");
+  if (!d)
+    return;
+  int moved = 0;
+  struct dirent *de;
+  while ((de = readdir(d)) != NULL) {
+    if (de->d_name[0] == '.')
+      continue;
+    char path[64], comm[32] = {0};
+    snprintf(path, sizeof(path), "/proc/self/task/%s/comm", de->d_name);
+    FILE *f = fopen(path, "r");
+    if (!f)
+      continue;
+    if (fgets(comm, sizeof(comm), f) && strncmp(comm, "uhd_ctrl", 8) == 0
+        && sched_setaffinity((pid_t)atoi(de->d_name), sizeof(set), &set) == 0)
+      moved++;
+    fclose(f);
+  }
+  closedir(d);
+  LOG_I(HW, "SENSING: UHD_CTRL_REPIN %s: %d uhd_ctrl thread(s) moved to cores %s\n", when, moved, e);
+}
+
+static int usrp_ring_ms(void)
+{
+  static int ms = -1;
+  if (ms < 0) {
+    const char *e = getenv("ISAC_USRP_RING_MS");
+    ms = e ? atoi(e) : 0;
+    if (ms < 0 || ms > 5000)
+      ms = 0;
+  }
+  return ms;
+}
+
+static void usrp_ring_producer(usrp_state_t *s)
+{
+  const char *core = getenv("ISAC_USRP_RING_CORE");
+  if (core && atoi(core) >= 0) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(atoi(core), &set);
+    pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  }
+  struct sched_param sp = {.sched_priority = 95};
+  pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp); // best effort (needs root)
+  pthread_setname_np(pthread_self(), "usrpRing");
+  const size_t nch = s->ring.size();
+  /* ISAC_USRP_RING_PKTS: packets requested per recv() (default 8). benchmark_rate asks for one packet
+   * per call and never exhausted the DPDK mbuf pool, while the 8-packet producer intermittently held
+   * every buffer until the pool ran dry (2026-10-06, frozen-timestamp X410 34B2AF1). */
+  size_t pkts = 8;
+  {
+    const char *e = getenv("ISAC_USRP_RING_PKTS");
+    if (e && atoi(e) > 0 && atoi(e) <= 64)
+      pkts = (size_t)atoi(e);
+  }
+  const size_t chunk = s->rx_stream->get_max_num_samps() * pkts;
+  std::vector<void *> ptr(nch);
+  uhd::rx_metadata_t md;
+  bool started = false;
+  const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!s->ring_stop.load(std::memory_order_relaxed) && !s->rx_stop_requested.load(std::memory_order_relaxed)) {
+    const uint64_t w = s->ring_written.load(std::memory_order_relaxed);
+    const size_t pos = w % s->ring_cap;
+    const size_t n = std::min(chunk, s->ring_cap - pos);
+    if (w + n - s->ring_read.load(std::memory_order_acquire) > s->ring_cap) {
+      s->ring_err_md = md;
+      s->ring_err.store(2);
+      break;
+    }
+    for (size_t c = 0; c < nch; c++)
+      ptr[c] = s->ring[c].data() + pos;
+    size_t got = 0;
+    try {
+      got = s->rx_stream->recv(ptr, n, md, 0.1, !started);
+    } catch (...) {
+      s->ring_err.store(3);
+      break;
+    }
+    if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT && !started
+        && std::chrono::steady_clock::now() < start_deadline)
+      continue;
+    if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+      /* START-UP RESTART. MEASURED 2026-10-06 (X410 34B2AF1, DPDK, 4 x 122.88 MS/s): about half of the
+       * stream starts hit ERROR_CODE_OVERFLOW (Out of sequence) within the first few packets, after
+       * which RFNoC halts the stream (X3) and the receiver used to give up. Within the first second
+       * nothing has synchronised to the stream yet, so stop, drain and re-issue it; the ring keeps
+       * counting so the samples handed downstream stay contiguous in index (the gap lands before
+       * any acquisition). After the first second an error still fails loudly. */
+      static int s_restarts = 0;
+      if (w < (uint64_t)s->sample_rate && s_restarts < 5
+          && md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) { /* overflow/sequence, late START (EOB) */
+        s_restarts++;
+        try {
+          uhd::stream_cmd_t stop(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+          stop.stream_now = true;
+          s->rx_stream->issue_stream_cmd(stop);
+          uhd::rx_metadata_t dmd;
+          for (int k = 0; k < 2000; k++)
+            if (s->rx_stream->recv(ptr, n, dmd, 0.01, false) == 0)
+              break;
+          uhd::stream_cmd_t again(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+          again.stream_now = false;
+          again.time_spec = s->usrp->get_time_now() + uhd::time_spec_t(0.1);
+          s->rx_stream->issue_stream_cmd(again);
+        } catch (...) {
+          s->ring_err.store(3);
+          break;
+        }
+        LOG_W(HW, "SENSING: USRP_RING_RESTART %d after %s at sample %llu (before any sync)\n", s_restarts,
+              md.strerror().c_str(), (unsigned long long)w);
+        continue;
+      }
+      s->ring_err_md = md;
+      s->ring_err.store(1);
+      break;
+    }
+    if (!got)
+      continue;
+    if (!started) {
+      if (!md.has_time_spec) {
+        s->ring_err_md = md;
+        s->ring_err.store(1);
+        break;
+      }
+      s->ring_t0_ticks = md.time_spec.to_ticks(s->sample_rate);
+      started = true;
+    }
+    s->ring_written.store(w + got, std::memory_order_release);
+    s->ring_cv.notify_one();
+  }
+  s->ring_cv.notify_all();
+}
+
+static void usrp_ring_start(usrp_state_t *s)
+{
+  if (usrp_ring_ms() == 0 || s->decim_ratio != 1)
+    return;
+  const size_t nch = s->rx_stream->get_num_channels();
+  const size_t cap = (size_t)(s->sample_rate * usrp_ring_ms() / 1000.0);
+  if (s->ring.size() != nch || s->ring_cap != cap) {
+    s->ring.assign(nch, std::vector<int32_t>(cap));
+    s->ring_cap = cap;
+  }
+  s->ring_written.store(0);
+  s->ring_read.store(0);
+  s->ring_err.store(0);
+  s->ring_stop.store(false);
+  s->ring_thread = std::thread(usrp_ring_producer, s);
+  LOG_I(HW, "SENSING: USRP_RING on: %zu ch x %zu samples (%d ms)\n", nch, cap, usrp_ring_ms());
+}
+
+static void usrp_ring_join(usrp_state_t *s)
+{
+  if (!s->ring_thread.joinable())
+    return;
+  s->ring_stop.store(true);
+  s->ring_cv.notify_all();
+  s->ring_thread.join();
+}
+
 static void trx_usrp_finish_rx(usrp_state_t *s);
 
 static int trx_usrp_start_impl(openair0_device_t *device)
@@ -949,6 +1155,8 @@ static int trx_usrp_start_impl(openair0_device_t *device)
   s->rx_stream->issue_stream_cmd(cmd);
   s->rx_started = true;
   LOG_I(HW, "USRP_RX_START scheduled=%.9f\n", cmd.time_spec.get_real_secs());
+  usrp_repin_uhd_threads("at stream start");
+  usrp_ring_start(s);
 
   return 0;
 }
@@ -989,6 +1197,7 @@ static void trx_usrp_finish_rx(usrp_state_t *s)
 {
   if (!s->rx_stream)
     return;
+  usrp_ring_join(s);
   /* Receive calls are serialized with the producer, including on fatal exit. */
   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
   cmd.stream_now = true;
@@ -1186,9 +1395,9 @@ static int trx_usrp_write(openair0_device_t *device,
         for (int i = 0; i < cc; i++)
           buff_ptrs.push_back(&(((int16_t *)buff_tx[i])[0]));
 
-        ret = (int)s->tx_stream->send(buff_ptrs, nsamps, s->tx_md);
+        ret = s->tx_stream ? (int)s->tx_stream->send(buff_ptrs, nsamps, s->tx_md) : nsamps;
       } else {
-        ret = (int)s->tx_stream->send(&(((int16_t *)buff_tx[0])[0]), nsamps, s->tx_md);
+        ret = s->tx_stream ? (int)s->tx_stream->send(&(((int16_t *)buff_tx[0])[0]), nsamps, s->tx_md) : nsamps;
       }
 
       if (ret != nsamps) {
@@ -1316,10 +1525,10 @@ void *trx_usrp_write_thread(void * arg)
       for (int i=0; i<cc; i++)
         buff_ptrs.push_back(&(((int16_t *)buff_tx[i])[0]));
 
-      ret = (int)s->tx_stream->send(buff_ptrs, nsamps, s->tx_md);
+      ret = s->tx_stream ? (int)s->tx_stream->send(buff_ptrs, nsamps, s->tx_md) : nsamps;
     }
     else {
-      ret = (int)s->tx_stream->send(&(((int16_t *)buff_tx[0])[0]), nsamps, s->tx_md);
+      ret = s->tx_stream ? (int)s->tx_stream->send(&(((int16_t *)buff_tx[0])[0]), nsamps, s->tx_md) : nsamps;
     }
 
     T(T_USRP_TX_ANT0, T_INT(timestamp), T_BUFFER(buff_tx[0], nsamps*4));
@@ -1481,6 +1690,44 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     s->rx_stop_requested.store(true);
     return -1; // never publish a partial/invalid buffer or a fabricated timestamp
   };
+  if (s->ring_thread.joinable()) {
+    /* Decoupled ring (usrp_ring_producer): wait for recv_target samples, copy them out. The
+     * timestamp is the first hardware timestamp plus the sample index (contiguity is guaranteed by
+     * the producer, which stops on any UHD error or ring overrun). */
+    const uint64_t r = s->ring_read.load(std::memory_order_relaxed);
+    {
+      std::unique_lock<std::mutex> lk(s->ring_mu);
+      while (s->ring_written.load(std::memory_order_acquire) - r < (uint64_t)recv_target) {
+        if (s->ring_err.load() || s->rx_stop_requested.load() || std::chrono::steady_clock::now() >= deadline)
+          break;
+        s->ring_cv.wait_for(lk, std::chrono::milliseconds(2));
+      }
+    }
+    if (s->rx_stop_requested.load())
+      return -1;
+    if (s->ring_written.load(std::memory_order_acquire) - r < (uint64_t)recv_target) {
+      const int e = s->ring_err.load();
+      s->rx_md = s->ring_err_md;
+      return receive_failure(e == 2   ? "ring overrun (PHY slower than the radio)"
+                             : e == 1 ? "UHD metadata error"
+                             : e == 3 ? "exception in ring producer"
+                                      : "receive deadline expired");
+    }
+    const int nch = std::min<int>(cc, (int)s->ring.size());
+    const size_t pos = r % s->ring_cap;
+    const size_t n1 = std::min<size_t>(recv_target, s->ring_cap - pos);
+    for (int i = 0; i < nch; i++) {
+      memcpy((int32_t *)buff_tmp[i], s->ring[i].data() + pos, n1 * sizeof(int32_t));
+      if ((size_t)recv_target > n1)
+        memcpy((int32_t *)buff_tmp[i] + n1, s->ring[i].data(), (recv_target - n1) * sizeof(int32_t));
+    }
+    first_metadata = uhd::rx_metadata_t();
+    first_metadata.has_time_spec = true;
+    first_metadata.time_spec = uhd::time_spec_t::from_ticks(s->ring_t0_ticks + (long long)r, s->sample_rate);
+    first_metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_NONE;
+    samples_received = recv_target;
+    s->ring_read.store(r + recv_target, std::memory_order_release);
+  } else
   while (samples_received < recv_target) {
     if (s->rx_stop_requested.load())
       return -1;
@@ -1514,8 +1761,20 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     } else {
       const double raw_rate = s->sample_rate * decim;
       const auto expected = first_metadata.time_spec.to_ticks(raw_rate) + samples_received;
-      if (s->rx_md.time_spec.to_ticks(raw_rate) != expected)
+      const long long got_ticks = s->rx_md.time_spec.to_ticks(raw_rate);
+      if (got_ticks != expected && got_ticks == first_metadata.time_spec.to_ticks(raw_rate)) {
+        if (!s->rx_ts_frozen)
+          LOG_W(HW, "SENSING: USRP_TS_FROZEN every RX packet carries the stream start timestamp %.9f; "
+                    "deriving timestamps from the sample count (loss still detected by UHD error codes)\n",
+                first_metadata.time_spec.get_real_secs());
+        s->rx_ts_frozen = true;
+      } else if (got_ticks != expected) {
+        LOG_E(HW, "SENSING: RFSTALL fragment ticks got=%lld expected=%lld (diff %lld) first=%.9f this=%.9f received=%zu\n",
+              (long long)s->rx_md.time_spec.to_ticks(raw_rate), (long long)expected,
+              (long long)(s->rx_md.time_spec.to_ticks(raw_rate) - expected),
+              first_metadata.time_spec.get_real_secs(), s->rx_md.time_spec.get_real_secs(), received);
         return receive_failure("non-contiguous fragments");
+      }
     }
     samples_received += received;
   }
@@ -1659,6 +1918,13 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     LOG_E(HW, "%s\n", s->rx_md.to_pp_string(true).c_str());
 
   s->rx_count += nsamps;
+  if (s->rx_ts_frozen) {
+    const double raw_rate = s->sample_rate * decim;
+    if (first_buffer || s->rx_ts_next_ticks < 0)
+      s->rx_ts_next_ticks = first_metadata.time_spec.to_ticks(raw_rate);
+    s->rx_md.time_spec = uhd::time_spec_t::from_ticks(s->rx_ts_next_ticks, raw_rate);
+    s->rx_ts_next_ticks += samples_received;
+  }
   s->rx_timestamp = s->rx_md.time_spec.to_ticks(s->sample_rate);
   *ptimestamp = s->rx_timestamp;
 
@@ -2221,6 +2487,7 @@ extern "C" {
     }
 
     s->usrp = uhd::usrp::multi_usrp::make(args);
+    usrp_repin_uhd_threads("after make");
 
   if (device->type==USRP_X300_DEV) {
     openair0_cfg[0].rx_gain_calib_table = calib_table_x310;
@@ -2671,7 +2938,20 @@ extern "C" {
   for (int i = 0; i<openair0_cfg[0].tx_num_channels; i++)
     stream_args_tx.channels.push_back(i+choffset);
 
-  s->tx_stream = s->usrp->get_tx_stream(stream_args_tx);
+  /* ISAC_USRP_NO_TX=1: create no TX streamer at all (receive-only / passive). MEASURED 2026-10-06
+   * (X410 34B2AF1, DPDK, 4 x 122.88 MS/s): intermittently the DPDK mbuf pool was exhausted exactly
+   * after pool_size / 4 packets per channel (65536 mbufs -> sample 32.5 M; 8192 -> 4.0 M), i.e.
+   * received buffers were never returned; the passive receiver never calls send(), so anything the
+   * device queues toward a TX endpoint is never drained. Also narrows passivity issue K13. */
+  {
+    const char *e = getenv("ISAC_USRP_NO_TX");
+    if (e && atoi(e) != 0) {
+      s->tx_stream = NULL;
+      LOG_W(HW, "SENSING: USRP TX streamer NOT created (ISAC_USRP_NO_TX=1, receive-only)\n");
+    } else {
+      s->tx_stream = s->usrp->get_tx_stream(stream_args_tx);
+    }
+  }
 
   /* Setting TX/RX BW after streamers are created due to USRP calibration issue */
   // N310 with UHD >= 4.2.0 has issues with changing the BW, which is a NOP on N310 in earlier versions
@@ -2727,7 +3007,8 @@ extern "C" {
     LOG_I(HW,"  Actual TX gain: %f...\n", s->usrp->get_tx_gain(i+choffset));
     LOG_I(HW,"  Actual TX bandwidth: %fM...\n", s->usrp->get_tx_bandwidth(i+choffset)/1e6);
     LOG_I(HW,"  Actual TX antenna: %s...\n", s->usrp->get_tx_antenna(i+choffset).c_str());
-    LOG_I(HW,"  Actual TX packet size: %lu\n",s->tx_stream->get_max_num_samps());
+    if (s->tx_stream)
+      LOG_I(HW,"  Actual TX packet size: %lu\n",s->tx_stream->get_max_num_samps());
   }
 
   std::cout << boost::format("Using Device: %s") % s->usrp->get_pp_string() << std::endl;

@@ -495,6 +495,13 @@ static void nr_scan_ssb(void *arg)
                                                          &ssbInfo->symbolOffset,
                                                          &ssbInfo->pbchResult,
                                                          rxdataF); // start pbch detection at first symbol after pss
+      if (!ssbInfo->syncRes.cell_detected)
+        LOG_I(NR_PHY,
+              "SENSING: SCAN_PBCH_FAIL gscn=%d ssb_sc=%d ssb_ref=%.0f frame=%d pci=%d pss_peak=%d pss_avg=%d "
+              "fo_seed=%d fo_pss=%d fo_sss=%d pos=%d\n",
+              ssbInfo->gscnInfo.gscn, ssbInfo->gscnInfo.ssbFirstSC, ssbInfo->gscnInfo.ssRef, frame_id,
+              ssbInfo->nidCell, search_params.pss_res.peak, search_params.pss_res.avg, initial_freq_offset,
+              search_params.pss_res.freq_offset, search_params.sss_res.freq_offset, search_params.pss_res.pos);
       if (ssbInfo->syncRes.cell_detected) {
         uint32_t rsrp_avg = nr_ue_calculate_ssb_rsrp(ssbInfo->fp, rxdataF[2], ssbInfo->gscnInfo.ssbFirstSC);
         int rsrp_db_per_re = 10 * log10(rsrp_avg);

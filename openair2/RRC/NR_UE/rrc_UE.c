@@ -545,6 +545,16 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
     si_SchedInfo_v1700 = sib1_v1700->si_SchedulingInfo_v1700;
   }
 
+  /* NSA/EN-DC cells may broadcast a minimal SIB1 without servingCellConfigCommon (OTA 2026-10-06,
+   * PCI 421, PLMN 222-10, barred). A passive receiver keeps the decoded facts (PLMN, cell id,
+   * logged above) and must not invent a carrier/TDD config it was never given. */
+  if (!sib1->servingCellConfigCommon && IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    static bool s_logged = false;
+    if (!s_logged)
+      LOG_W(NR_RRC, "SENSING: SIB1 has no servingCellConfigCommon (NSA-style SIB1); carrier/TDD/common config not available from SIB1\n");
+    s_logged = true;
+    return;
+  }
   AssertFatal(sib1->servingCellConfigCommon, "configuration issue in SIB1\n");
   SI_info->scs = sib1->servingCellConfigCommon->downlinkConfigCommon.initialDownlinkBWP.genericParameters.subcarrierSpacing;
   SI_info->si_windowlength = (sib1->si_SchedulingInfo) ? sib1->si_SchedulingInfo->si_WindowLength : 0;
@@ -2091,7 +2101,11 @@ static void nr_rrc_ue_decode_NR_BCCH_BCH_Message(NR_UE_RRC_INST_t *rrc,
   }
 
   NR_UE_RRC_SI_INFO *SI_info = &rrc->perNB[gNB_index].SInfo;
-  bool barred = rrc->access_barred || bcch_message->message.choice.mib->cellBarred == NR_MIB__cellBarred_barred;
+  /* Passive receiver never camps: an NSA/EN-DC cell's MIB cellBarred bit must not stop SIB1
+   * acquisition or put the MAC in UE_BARRED (OTA 2026-10-06, PCI 421: barred, k_SSB 14, CORESET#0 12). */
+  const bool mib_barred = bcch_message->message.choice.mib->cellBarred == NR_MIB__cellBarred_barred
+                          && !IS_PASSIVE_RX_MODE(get_softmodem_params());
+  bool barred = rrc->access_barred || mib_barred;
   int get_sib = 0;
   if (IS_SA_MODE(get_softmodem_params())
       && !SI_info->sib_pending

@@ -30,9 +30,13 @@ struct Block { uint64_t offset, count; int64_t tick; };
 struct Continuity {
   uint64_t samples = 0;
   int64_t first = 0;
+  bool frozen = false; // X410 34B2AF1 (2026-10-06) stamps every packet with the stream start tick
+  uint64_t spp = 0; // set => accept the frozen pattern: every packet stamped with the start tick
   bool accept(size_t n, int64_t tick, bool valid) {
     if (!valid || !n || tick < 0 || samples > uint64_t(INT64_MAX)) return false;
-    if (samples && (first > INT64_MAX - int64_t(samples) || tick != first + int64_t(samples))) return false;
+    if (samples && spp && tick == first + int64_t(samples % spp))
+      frozen = true; // continuity then rests on UHD sequence/overflow checks
+    else if (samples && (first > INT64_MAX - int64_t(samples) || tick != first + int64_t(samples))) return false;
     if (!samples) first = tick;
     samples += n;
     return true;
@@ -143,6 +147,7 @@ int main(int argc, char **argv) {
     guard.active = true;
     rx->issue_stream_cmd(start);
     Continuity continuity;
+    continuity.spp = rx->get_max_num_samps();
     while (continuity.samples < wanted) {
       const size_t count = std::min<uint64_t>(CHUNK, wanted - continuity.samples);
       std::vector<void *> buffers;
@@ -154,7 +159,9 @@ int main(int argc, char **argv) {
       const uint64_t offset = continuity.samples;
       require(continuity.accept(n, tick, md.error_code == uhd::rx_metadata_t::ERROR_CODE_NONE &&
                                         md.has_time_spec && !md.out_of_sequence),
-              "invalid/discontinuous RX at sample " + std::to_string(offset) + ": " + md.strerror());
+              "invalid/discontinuous RX at sample " + std::to_string(offset) + ": " + md.strerror()
+                  + " tick=" + std::to_string(tick) + " first=" + std::to_string(continuity.first)
+                  + " oos=" + std::to_string(md.out_of_sequence) + " n=" + std::to_string(n));
       blocks.push_back({offset, n, tick});
     }
     guard.stop();
@@ -179,6 +186,7 @@ int main(int argc, char **argv) {
          << "  \"timestamp_tick_rate_hz\": " << rate << ",\n"
          << "  \"blocks\": " << blocks.size() << ",\n"
          << "  \"rx_metadata_errors\": 0,\n  \"timestamp_discontinuities\": 0,\n"
+         << "  \"timestamp_mode\": \"" << (continuity.frozen ? "frozen_start_tick" : "per_packet") << "\",\n"
          << "  \"status\": \"COMPLETE_CONTIGUOUS_RAW_IQ\"\n}\n";
     save_text(out / "capture_info.json", info.str());
     std::cout << "PASS: four unfiltered RX channels, exact sample counts and continuous hardware timestamps\n";

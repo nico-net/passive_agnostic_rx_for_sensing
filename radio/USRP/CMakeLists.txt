@@ -3,10 +3,13 @@
 add_compile_options(-Wunused-parameter)
 #find_package(Boost REQUIRED)
 find_package(UHD REQUIRED UHD)
+# usrp_lib.cpp calls boost::this_thread::sleep; a UHD build that does not itself link
+# libboost_thread (UHD 4.11 + DPDK on the DGX) leaves that symbol unresolved at dlopen time.
+find_package(Boost REQUIRED COMPONENTS thread)
 
 add_library(oai_usrpdevif MODULE usrp_lib.cpp)
 #target_include_directories(oai_usrpdevif PRIVATE Boost::boost)
-target_link_libraries(oai_usrpdevif PRIVATE ${UHD_LIBRARIES})
+target_link_libraries(oai_usrpdevif PRIVATE ${UHD_LIBRARIES} Boost::thread)
 target_include_directories(oai_usrpdevif PRIVATE ${UHD_INCLUDE_DIRS})
 target_link_libraries(oai_usrpdevif PRIVATE log_headers)
 set_target_properties(oai_usrpdevif PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

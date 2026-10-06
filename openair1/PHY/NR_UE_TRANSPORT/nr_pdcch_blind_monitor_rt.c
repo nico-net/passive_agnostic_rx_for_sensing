@@ -3084,6 +3084,16 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
       }
     }
   }
+  /* ISAC_PDCCH_SCAN_EVERY_SLOT=1 (offline replay / diagnostic, default off): treat every slot as an
+   * occasion. The blind CSI-RS search runs once per occasion, so without this it only ever sees the
+   * SS#0 slots when no dedicated search space is known (2026-10-06, NSA PCI 415/421: 2 slots in 20). */
+  static int s_every_slot = -1;
+  if (s_every_slot < 0) {
+    const char *e = getenv("ISAC_PDCCH_SCAN_EVERY_SLOT");
+    s_every_slot = (e && atoi(e) != 0) ? 1 : 0;
+  }
+  if (s_every_slot)
+    on_occasion = true;
   if (!on_occasion) {
     return; // not a monitoring occasion this slot
   }

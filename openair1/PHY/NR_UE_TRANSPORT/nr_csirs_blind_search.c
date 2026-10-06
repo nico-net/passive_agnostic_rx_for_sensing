@@ -219,6 +219,7 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
 /* ---- candidate enumeration and scheduling ------------------------------------------------------ */
 
 #include <string.h>
+#include <stdlib.h>
 
 /* Rows worth searching -- see the header for why the wide-port rows are excluded.
  * Row 1: 1 port, density 3, one symbol. Row 2: 1 port, density 1. Row 4: 4 ports, density 1. */
@@ -265,9 +266,27 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
     return -1;
   }
   int n = 0;
+  /* ISAC_CSIRS_BLIND_ROWS="1,2,..." (default: all of kRows): restrict the enumerated rows. Added
+   * 2026-10-06 for offline replay, where scoring every candidate every slot is affordable only for a
+   * small population (row 1 = TRS = 56 candidates vs 767 for rows 1-5). */
+  const char *rows_env = getenv("ISAC_CSIRS_BLIND_ROWS");
   for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
     if (nr_csirs_blind_row_needs_bits(kRows[r]) != 1) {
       continue;   /* see kRows: a multi-bit row would spin the generator's unbounded bitmap walk */
+    }
+    if (rows_env != NULL && *rows_env != '\0') {
+      bool allowed = false;
+      for (const char *q = rows_env; *q;) {
+        char *end = NULL;
+        const long v = strtol(q, &end, 10);
+        if (end == q)
+          break;
+        if (v == kRows[r])
+          allowed = true;
+        q = (*end == ',') ? end + 1 : end;
+      }
+      if (!allowed)
+        continue;
     }
     for (unsigned d = 0; d < 3; d++) {
       const uint8_t density = kDensities[r][d];
@@ -295,6 +314,17 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
           c->scramb_id = scramb_id;
           c->start_rb = 0;
           c->nr_of_rbs = n_rb;
+          /* ISAC_CSIRS_BLIND_RB="start:nrb" (default: whole grid): search a frequency window only.
+           * Added 2026-10-06: a TRS pair scored z~2.3 over 217 PRB, consistent with a resource that
+           * spans only part of the band; the window localises it. */
+          {
+            const char *w = getenv("ISAC_CSIRS_BLIND_RB");
+            int ws = 0, wn = 0;
+            if (w && sscanf(w, "%d:%d", &ws, &wn) == 2 && ws >= 0 && wn > 0 && ws + wn <= n_rb) {
+              c->start_rb = (uint16_t)ws;
+              c->nr_of_rbs = (uint16_t)wn;
+            }
+          }
         }
       }
     }

@@ -153,7 +153,14 @@ void nr_ue_decode_mib(NR_UE_MAC_INST_t *mac, int cc_id)
 {
   LOG_D(MAC,"[L2][MAC] decode mib\n");
 
-  if (mac->mib->cellBarred == NR_MIB__cellBarred_barred) {
+  /* A passive receiver never camps, so cellBarred (set by NSA/EN-DC NR cells, observed OTA
+   * 2026-10-06 on PCI 421 @ 3679.68 MHz, Milan) is not a reason to drop a valid PBCH lock. */
+  if (mac->mib->cellBarred == NR_MIB__cellBarred_barred && IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    static bool s_barred_logged = false;
+    if (!s_barred_logged)
+      LOG_W(MAC, "SENSING: MIB cellBarred=barred (typical of NSA cells); passive receiver keeps the cell\n");
+    s_barred_logged = true;
+  } else if (mac->mib->cellBarred == NR_MIB__cellBarred_barred) {
     LOG_W(MAC, "Cell is barred. Going back to sync mode.\n");
     mac->synch_request.Mod_id = mac->ue_id;
     mac->synch_request.CC_id = cc_id;
@@ -194,6 +201,18 @@ void nr_ue_decode_mib(NR_UE_MAC_INST_t *mac, int cc_id)
   LOG_I(MAC,"ssb index(extra bits):         %d\n", (int)mac->mib_ssb);
 #endif
 
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    static bool s_mib_logged = false;
+    if (!s_mib_logged)
+      LOG_I(MAC,
+            "SENSING: MIB fields sfn=%d k_ssb=%d%s scs_common=%d coreset0=%d ss0=%d dmrs_typeA=%d barred=%d intraFreqResel=%d\n",
+            (int)mac->mib_frame, (int)ssb_subcarrier_offset,
+            (mac->frequency_range == FR1 && ssb_subcarrier_offset >= 24) ? " (>=24: no CORESET#0 on this SSB)" : "",
+            (int)mac->mib->subCarrierSpacingCommon, (int)mac->mib->pdcch_ConfigSIB1.controlResourceSetZero,
+            (int)mac->mib->pdcch_ConfigSIB1.searchSpaceZero, (int)mac->mib->dmrs_TypeA_Position,
+            mac->mib->cellBarred == NR_MIB__cellBarred_barred, (int)mac->mib->intraFreqReselection);
+    s_mib_logged = true;
+  }
   mac->ssb_subcarrier_offset = ssb_subcarrier_offset;
   mac->dmrs_TypeA_Position = mac->mib->dmrs_TypeA_Position;
   /* Measured cell fact: publish it to the blind PDCCH monitor on every MIB, not only via the CSS0

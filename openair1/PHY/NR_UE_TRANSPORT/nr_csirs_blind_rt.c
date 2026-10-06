@@ -410,6 +410,25 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     g_st.confirmed = -1;
     g_conf_logged = 0;
   }
+    /* ISAC_CSIRS_BLIND_EPRDUMP=<path> (diagnostic, rank mode only): every candidate's mean EPR,
+     * observation count and best z, so a real CSI-RS can be told from PDSCH DM-RS / PDCCH energy
+     * (added 2026-10-06 for the offline replay of PCI 415/421, where the top-5 lists were all DM-RS). */
+  if (g_rank && (g_slots % 500) == 499) {
+    const char *dump = getenv("ISAC_CSIRS_BLIND_EPRDUMP");
+    if (dump) {
+      FILE *f = fopen(dump, "w");
+      if (f) {
+        fprintf(f, "idx\trow\tfd\tl0\tl1\tcdm\tdensity\tepr_mean\tepr_n\tbest_z\thits\ttried\n");
+        for (int i = 0; i < g_st.n && i < NR_CSIRS_BLIND_MAX_CAND; i++) {
+          const nr_csirs_candidate_t *c = &g_st.cand[i];
+          fprintf(f, "%d\t%u\t%u\t%u\t%u\t%u\t%u\t%.3f\t%u\t%.3f\t%u\t%u\n", i, c->row, c->freq_domain, c->symb_l0,
+                  c->symb_l1, c->cdm_type, c->freq_density, g_epr_n[i] ? g_epr_sum[i] / g_epr_n[i] : 0.0, g_epr_n[i],
+                  g_st.best_rho[i], g_st.hits[i], g_st.tried[i]);
+        }
+        fclose(f);
+      }
+    }
+  }
   if (g_rank && (g_slots % 4000) == 3999) {
     /* Top 5 by best SCALE-FREE score (best_rho now holds z = rho*sqrt(n_re); noise ~0.89). */
     int top[5] = {-1, -1, -1, -1, -1};
@@ -479,15 +498,48 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Alternate independent discovery rotations. A geometry retired by NZP must
    * remain eligible for ZP re-admission after pressure eviction. Still at most
    * one ordinary score, deduplicated against the bounded maintenance snapshot. */
-  int idx = nr_csirs_blind_next((g_slots & 1) ? &g_st : &g_zp);
-  if (idx < 0)
-    idx = nr_csirs_blind_next((g_slots & 1) ? &g_zp : &g_st);
-  bool measured = false;
-  for (int k = 0; k < n; k++)
-    if (occurring[k] == idx)
-      measured = true;
-  if (idx >= 0 && !measured)
-    score_candidate(ue, slot, absolute_slot, rxdataF, idx, false, false);
+  /* ISAC_CSIRS_BLIND_PER_SLOT=N (default 1): ordinary discovery scores per slot. N > 1 is for slow
+   * offline replay of a raw capture, where the real-time budget does not apply: the default one score
+   * per slot gave each of ~767 candidates only 10-16 observations in 240 s OTA (2026-10-06, PCI 421),
+   * below the IDSWEEP pin floor of 32, so the scramblingID sweep never started. */
+  static int s_per_slot = -1;
+  if (s_per_slot < 0) {
+    const char *e = getenv("ISAC_CSIRS_BLIND_PER_SLOT");
+    s_per_slot = e ? atoi(e) : 1;
+    if (s_per_slot < 1)
+      s_per_slot = 1;
+    if (s_per_slot > 2 * NR_CSIRS_BLIND_MAX_CAND)
+      s_per_slot = 2 * NR_CSIRS_BLIND_MAX_CAND;
+    if (s_per_slot > 1)
+      LOG_W(PHY, "SENSING: CSIRS_BLIND scoring %d discovery candidates per slot (offline/replay setting)\n", s_per_slot);
+  }
+  int idx = -1;
+  for (int r = 0; r < s_per_slot; r++) {
+    nr_csirs_blind_state_t *first = ((g_slots + r) & 1) ? &g_st : &g_zp;
+    nr_csirs_blind_state_t *other = (first == &g_st) ? &g_zp : &g_st;
+    nr_csirs_blind_state_t *bank = first;
+    idx = nr_csirs_blind_next(bank);
+    if (idx < 0) {
+      bank = other;
+      idx = nr_csirs_blind_next(bank);
+    }
+    if (idx < 0)
+      break;
+    bool measured = false;
+    for (int k = 0; k < n; k++)
+      if (occurring[k] == idx)
+        measured = true;
+    /* both banks index the same candidate population (score_candidate updates both for idx); a
+     * pinned candidate comes back every call, so score each idx at most once per slot */
+    static uint32_t s_seen_slot[NR_CSIRS_BLIND_MAX_CAND];
+    if (s_per_slot > 1 && idx < NR_CSIRS_BLIND_MAX_CAND) {
+      if (s_seen_slot[idx] == absolute_slot + 1)
+        continue;
+      s_seen_slot[idx] = absolute_slot + 1;
+    }
+    if (!measured)
+      score_candidate(ue, slot, absolute_slot, rxdataF, idx, false, false);
+  }
   /* Re-score confirmed NZP occasions only with reconfiguration detection enabled.
    * The search bank remains intact; four scored misses produce one SOFT signal. */
   if (g_reconf && nr_cfg_epoch_note_csirs_map_change) {
