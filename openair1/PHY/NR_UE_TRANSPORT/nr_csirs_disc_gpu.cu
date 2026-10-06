@@ -85,10 +85,32 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   ret=nr_disc_fp_cluster(r,cfg,out,max_out,fold_gpu,&f);
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
 }
+static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,uint32_t *out)
+{
+  if(!nr_disc_fp_valid(r) || !out) return -1;
+  int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168};int ret=-1;
+  size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
+  /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
+  if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
+     cudaMalloc(&f.x,xb)!=cudaSuccess) goto done;
+  if(cudaMemcpy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
+     cudaMemcpy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     cudaMemset(f.x,0,xb)!=cudaSuccess) goto done;
+  if(cfg && cfg->excl_re) {
+    if(cudaMalloc(&excl,f.nr-168)!=cudaSuccess || cudaMemcpy(excl,cfg->excl_re,f.nr-168,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
+  }
+  normalize<<<(r->capacity*r->n_rb+127)/128,128>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
+                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x);
+  if(cudaGetLastError()!=cudaSuccess) goto done;
+  pool<<<(r->capacity*168+127)/128,128>>>(f.x,r->capacity,r->n_rb);
+  if(cudaGetLastError()!=cudaSuccess || cudaDeviceSynchronize()!=cudaSuccess) goto done;
+  ret=cudaMemcpy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
+done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
+}
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
-  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr};return &ops;
+  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host};return &ops;
 }
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {

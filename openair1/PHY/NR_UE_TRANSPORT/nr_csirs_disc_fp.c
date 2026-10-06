@@ -90,32 +90,61 @@ static int rank_strength(const void *a, const void *b)
   return x->sym_mask-y->sym_mask;
 }
 
-int nr_disc_fp_cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
-                       nr_csirs_disc_fp_t *out, int max_out, nr_disc_fold_fn fold, void *ctx)
+/* Every legal period divides 640. Sufficient statistics preserve T2's Q12
+ * samples and pooled comb variance without retaining IQ. One serialized worker. */
+typedef struct {
+  uint64_t *sum, *sq, *total, *totalq;
+  uint64_t counts[640], nt, written;
+  const int16_t *grid;
+  int nr, n_rb, n_ant, capacity;
+  size_t stride;
+  uint16_t symbols;
+  uint8_t *exclude;
+} history_t;
+static history_t history;
+
+static void history_reduce(const history_t *h, int p, int o, int first, int end,
+                           uint64_t *sum, uint64_t *sq)
 {
-  int nk=12*r->n_rb, nr=14*nk+168, nc=0, nt=0;
-  for(int t=0;t<r->capacity;++t) nt+=!!r->meta[t].valid;
+  memset(sum+first,0,(end-first)*sizeof(*sum));
+  memset(sq+first,0,(end-first)*sizeof(*sq));
+  for(int residue=o;residue<640;residue+=p) {
+    const uint64_t *s=h->sum+(size_t)residue*h->nr, *q=h->sq+(size_t)residue*h->nr;
+    for(int j=first;j<end;++j) {sum[j]+=s[j];sq[j]+=q[j];}
+  }
+}
+
+static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
+                   nr_csirs_disc_fp_t *out, int max_out, nr_disc_fold_fn fold, void *ctx, const history_t *h)
+{
+  int nk=12*r->n_rb, nr=14*nk+168, nc=0;
+  uint64_t nt=h ? h->nt:0;
+  if(!h) for(int t=0;t<r->capacity;++t) nt+=!!r->meta[t].valid;
   if(nt<12) return 0;
   candidate_t *cand=calloc(CAND_CAP,sizeof(*cand));
   uint64_t *tot=calloc(nr,sizeof(*tot)), *totq=calloc(nr,sizeof(*totq));
   if(!cand || !tot || !totq) { free(cand); free(tot); free(totq); return -1; }
   float min_strength=cfg && cfg->min_strength>0 ? cfg->min_strength:2.0f;
   for(unsigned pi=0;pi<sizeof(periods)/sizeof(*periods);++pi) {
-    int p=periods[pi], counts[640]={0};
-    for(int t=0;t<r->capacity;++t) if(r->meta[t].valid) ++counts[r->meta[t].abs_slot%p];
+    int p=periods[pi];
+    uint64_t counts[640]={0};
+    if(h) for(int t=0;t<640;++t) counts[t%p]+=h->counts[t];
+    else for(int t=0;t<r->capacity;++t) if(r->meta[t].valid) ++counts[r->meta[t].abs_slot%p];
     int usable=0;
     for(int o=0;o<p;++o) usable+=counts[o]>=3 && nt-counts[o]>=3;
     if(!usable) continue;
-    uint64_t *sum=calloc((size_t)p*nr,sizeof(*sum)), *sq=calloc((size_t)p*nr,sizeof(*sq));
-    if(!sum || !sq || fold(ctx,p,sum,sq)<0) {
+    uint64_t *sum=calloc((size_t)(h?1:p)*nr,sizeof(*sum)), *sq=calloc((size_t)(h?1:p)*nr,sizeof(*sq));
+    if(!sum || !sq || (!h && fold(ctx,p,sum,sq)<0)) {
       free(sum); free(sq); free(cand); free(tot); free(totq); return -1;
     }
     memset(tot,0,nr*sizeof(*tot)); memset(totq,0,nr*sizeof(*totq));
-    for(int o=0;o<p;++o) for(int j=0;j<nr;++j) {tot[j]+=sum[(size_t)o*nr+j];totq[j]+=sq[(size_t)o*nr+j];}
+    if(h) {memcpy(tot,h->total,nr*sizeof(*tot));memcpy(totq,h->totalq,nr*sizeof(*totq));}
+    else for(int o=0;o<p;++o) for(int j=0;j<nr;++j) {tot[j]+=sum[(size_t)o*nr+j];totq[j]+=sq[(size_t)o*nr+j];}
     for(int o=0;o<p;++o) {
-      int on=counts[o], off=nt-on;
+      uint64_t on=counts[o], off=nt-on;
       if(on<3 || off<3) continue;
-      const uint64_t *s=sum+(size_t)o*nr, *q=sq+(size_t)o*nr;
+      if(h) history_reduce(h,p,o,14*nk,nr,sum,sq);
+      const uint64_t *s=sum+(h?0:(size_t)o*nr), *q=sq+(h?0:(size_t)o*nr);
       for(int l=0;l<14;++l) {
         if(cfg && (cfg->excl_sym_mask_any&(1<<l))) continue;
         /* Detect the comb from pooled RB evidence before locating edges. */
@@ -132,6 +161,7 @@ int nr_disc_fp_cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg
           if(a-b>0.025 && a-b>threshold*error) mask|=1<<sc;
         }
         if(!mask) continue;
+        if(h) history_reduce(h,p,o,l*nk,(l+1)*nk,sum,sq);
         /* Noise-penalized contiguous segmentation, separately by RB parity.
          * A half-density extent is the minimal observable span (first..last
          * occupied RB); an unoccupied endpoint cannot be inferred from IQ. */
@@ -210,6 +240,12 @@ int nr_disc_fp_cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg
   free(cand);free(tot);free(totq);return n;
 }
 
+int nr_disc_fp_cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
+                       nr_csirs_disc_fp_t *out, int max_out, nr_disc_fold_fn fold, void *ctx)
+{
+  return cluster(r,cfg,out,max_out,fold,ctx,NULL);
+}
+
 int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                                 nr_csirs_disc_fp_t *out, int max_out)
 {
@@ -224,17 +260,65 @@ int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_d
   free(x);return ret;
 }
 
-/* Stable U5 entry (see nr_csirs_disc.h). Single-ring for now; T2b adds the accumulated history. */
-int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg, nr_csirs_disc_fp_t *out,
-                         int max_out)
+void nr_csirs_disc_detect_reset(void)
 {
-  const nr_csirs_disc_gpu_ops_t *g = nr_csirs_disc_gpu_load();
-  if (g && g->footprints) {
-    const int n = g->footprints(r, cfg, out, max_out);
-    if (n >= 0)
-      return n;
-  }
-  return nr_csirs_disc_footprints_cpu(r, cfg, out, max_out);
+  free(history.sum);free(history.sq);free(history.total);free(history.totalq);free(history.exclude);
+  memset(&history,0,sizeof(history));
 }
 
-void nr_csirs_disc_detect_reset(void) {}
+/* Fold only new writes, including invalid entries in the write cursor but not
+ * the statistics. The caller holds the ring read lock. Missing overwritten IQ
+ * cannot be reconstructed: return -1 before mutating history on an overrun. */
+int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
+                         nr_csirs_disc_fp_t *out, int max_out)
+{
+  if(!nr_disc_fp_valid(r) || !out || max_out<=0) return -1;
+  history_t *h=&history;
+  int nr=14*12*r->n_rb+168;
+  uint16_t symbols=cfg?cfg->excl_sym_mask_any:0;
+  bool changed=h->grid && (h->grid!=r->grid_base || h->n_rb!=r->n_rb || h->n_ant!=r->n_ant ||
+    h->capacity!=r->capacity || h->stride!=r->slot_stride || h->symbols!=symbols || r->written<h->written);
+  if(h->grid && !changed) for(int j=0;j<nr-168;++j)
+    if(h->exclude[j]!=(cfg && cfg->excl_re?cfg->excl_re[j]:0)) {changed=true;break;}
+  if(changed) nr_csirs_disc_detect_reset();
+  if(h->grid && r->written-h->written>(uint64_t)r->capacity) return -1;
+  if(!h->grid) {
+    /* Bootstrap the available snapshot after reset; older IQ is unavailable. */
+    h->written=r->written>(uint64_t)r->capacity?r->written-r->capacity:0;
+    h->sum=calloc((size_t)640*nr,sizeof(uint64_t));h->sq=calloc((size_t)640*nr,sizeof(uint64_t));
+    h->total=calloc(nr,sizeof(uint64_t));h->totalq=calloc(nr,sizeof(uint64_t));h->exclude=calloc(nr-168,1);
+    if(!h->sum || !h->sq || !h->total || !h->totalq || !h->exclude) {nr_csirs_disc_detect_reset();return -1;}
+    h->grid=r->grid_base;h->nr=nr;h->n_rb=r->n_rb;h->n_ant=r->n_ant;
+    h->capacity=r->capacity;h->stride=r->slot_stride;h->symbols=symbols;
+    if(cfg && cfg->excl_re) memcpy(h->exclude,cfg->excl_re,nr-168);
+  }
+  /* 8192^2 per sample; reject rather than silently overflow the exact totals.
+   * At 2000 slots/s this limit is over four years of uninterrupted lock. */
+  if(r->written-h->written>UINT64_MAX/(8192ULL*8192)-h->nt) return -1;
+  const nr_csirs_disc_gpu_ops_t *g=nr_csirs_disc_gpu_load();
+  while(h->written<r->written) {
+    int start=h->written%r->capacity;
+    uint64_t pending=r->written-h->written;
+    int count=pending<(uint64_t)(r->capacity-start)?(int)pending:r->capacity-start;
+    /* Bound temporary storage even for large offline rings. */
+    if(count>100) count=100;
+    nr_csirs_disc_ring_t batch=*r;
+    batch.grid_base+=start*r->slot_stride;batch.meta+=start;batch.capacity=count;
+    uint32_t *x=calloc((size_t)count*nr,sizeof(*x));
+    if(!x) return -1;
+    if(!g || !g->normalize || g->normalize(&batch,cfg,x)<0) nr_disc_fp_normalize(&batch,cfg,x);
+    for(int t=0;t<count;++t) if(batch.meta[t].valid) {
+      int residue=batch.meta[t].abs_slot%640;
+      uint64_t *s=h->sum+(size_t)residue*nr, *q=h->sq+(size_t)residue*nr;
+      const uint32_t *v=x+(size_t)t*nr;
+      for(int j=0;j<nr;++j) {
+        uint64_t square=(uint64_t)v[j]*v[j];
+        s[j]+=v[j];q[j]+=square;h->total[j]+=v[j];h->totalq[j]+=square;
+      }
+      ++h->counts[residue];++h->nt;
+    }
+    free(x);h->written+=count;
+  }
+  if(max_out>NR_CSIRS_DISC_MAX_FP) max_out=NR_CSIRS_DISC_MAX_FP;
+  return cluster(r,cfg,out,max_out,NULL,NULL,h);
+}

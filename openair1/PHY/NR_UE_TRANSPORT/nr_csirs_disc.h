@@ -116,15 +116,19 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring);
 typedef struct {
   uint16_t excl_sym_mask_any;           /* symbols excluded in every slot (e.g. CORESET#0 symbols) */
   const uint8_t *excl_re;               /* optional [14][12*n_rb] mask of REs to ignore (SSB etc.), may be NULL */
-  float min_strength;                   /* default 2.0 */
+  float min_strength;                   /* NULL/zero default 2.0; U5 pipeline passes 1.03 unless
+                                        * ISAC_CSIRS_DISC_MIN_STRENGTH overrides it. */
 } nr_csirs_disc_fp_cfg_t;
 int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                                  nr_csirs_disc_fp_t *out, int max_out);
 
-/* Stable detector entry used by the U5 pipeline once per batch (nr_csirs_disc_fp.c). Today it runs the single-ring
- * detector (GPU ops when loaded, else CPU); T2b makes it stateful (contrast history accumulated since the last reset,
- * so weak/long-period resources are found beyond the raw ring horizon) WITHOUT changing this signature.
- * nr_csirs_disc_detect_reset() is called on epoch change / sync loss. */
+/* Stateful U5 entry, once per batch under the ring read lock. Exact Q12 history
+ * since reset, bootstrapped with the first available ring snapshot. Between
+ * calls every pushed entry must be consumed before overwrite (otherwise -1).
+ * Single serialized worker; serialize reset with detect as well.
+ * On epoch / sync loss reset AND clear old-epoch ring entries. Geometry, exclusion
+ * changes and a rewound written counter also reset automatically. Threshold-only
+ * changes reuse history. Stateless CPU/footprints GPU APIs remain unchanged. */
 int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg, nr_csirs_disc_fp_t *out,
                          int max_out);
 void nr_csirs_disc_detect_reset(void);
@@ -153,6 +157,9 @@ typedef struct {
   int (*footprints)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *, nr_csirs_disc_fp_t *, int);
   int (*sweep)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_hyp_t *, int, const nr_csirs_disc_sweep_cfg_t *,
                nr_csirs_disc_win_t *);
+  /* Additive U2 batch primitive: Q12 contrasts [capacity][14*12*n_rb+168].
+   * Rebuild core and module together when using this extended ops structure. */
+  int (*normalize)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *, uint32_t *);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by ISAC_CSIRS_DISC=1 and BACKEND=auto|cpu|gpu.
