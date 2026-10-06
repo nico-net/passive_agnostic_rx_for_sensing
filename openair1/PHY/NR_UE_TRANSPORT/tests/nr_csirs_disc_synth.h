@@ -17,6 +17,7 @@ typedef struct {
   bool dmrs, ssb;
   const nr_csirs_disc_synth_resource_t *resources;
   int n_resources;
+  bool dmrs_only; /* negative control: leave only scheduled DM-RS and noise */
 } nr_csirs_disc_synth_cfg_t;
 /* Owns malloc'd ring storage; independent of U1, so usable by T4/T5 alone.
  * Init OAI log/modulation once in the test executable before calling.

@@ -138,6 +138,7 @@ int nr_csirs_disc_synth(nr_csirs_disc_ring_t *r,const nr_csirs_disc_synth_cfg_t 
         bool scheduled=rb>=start && rb<start+width;
         double a=ssb?amp*sqrt(2):scheduled?slot_amp:0;
         if(!ssb && scheduled && cfg->dmrs && (l==2 || l==11) && k%2==0) a*=sqrt(1.9);
+        if(cfg->dmrs_only && !ssb && !(cfg->dmrs && (l==2 || l==11) && k%2==0)) a=0;
         double re=(rng(&seed)&1?1:-1)*a/sqrt(2),im=(rng(&seed)&1?1:-1)*a/sqrt(2);
         for(int ant=0;ant<r->n_ant;++ant) {size_t b=((size_t)ant*nre+j)*2;tx[b]=re;tx[b+1]=im;}
       }
