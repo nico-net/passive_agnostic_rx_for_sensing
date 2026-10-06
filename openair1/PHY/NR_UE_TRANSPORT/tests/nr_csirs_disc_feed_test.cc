@@ -128,3 +128,37 @@ TEST(Ring, SnapshotCursorDoesNotHoldProducerLockDuringWork)
   for(int i=0;i<snapshot.capacity;++i) EXPECT_FALSE(snapshot.meta[i].valid);
   nr_csirs_disc_ring_free(&snapshot);nr_csirs_disc_ring_free(&live);
 }
+
+TEST(Ring, DeviceBatchPublicationWrapAndCancel)
+{
+  // Host stand-in for managed allocation tests the publication contract without CUDA.
+  auto saved_alloc=nr_csirs_disc_alloc_unified;
+  auto saved_free=nr_csirs_disc_free_unified;
+  nr_csirs_disc_alloc_unified=malloc;nr_csirs_disc_free_unified=free;
+  nr_csirs_disc_ring_t ring={},copy={};
+  ASSERT_EQ(nr_csirs_disc_ring_init(&ring,4,3,20,3,true),0);
+  ASSERT_EQ(nr_csirs_disc_ring_init(&copy,4,3,20,3,false),0);
+  for(int pass=0;pass<3;++pass) {
+    int first=nr_csirs_disc_ring_write_begin(&ring,2);
+    ASSERT_EQ(first,(2*pass)%3);
+    nr_csirs_disc_slot_meta_t meta[2];
+    for(int i=0;i<2;++i) {
+      meta[i]={(uint32_t)(2*pass+i),0,(uint8_t)(2*pass+i),1};
+      std::fill_n(ring.grid_base+((first+i)%3)*ring.slot_stride,ring.slot_stride,2*pass+i+10);
+    }
+    EXPECT_EQ(ring.written,(uint64_t)2*pass); // Uncommitted device output is invisible.
+    nr_csirs_disc_ring_write_end(&ring,2,meta);
+    ASSERT_EQ(nr_csirs_disc_ring_snapshot(&ring,&copy),0);
+    for(int i=0;i<2;++i) {
+      EXPECT_EQ(copy.meta[(first+i)%3].abs_slot,(uint32_t)(2*pass+i));
+      EXPECT_EQ(copy.grid_base[((first+i)%3)*copy.slot_stride],2*pass+i+10);
+    }
+  }
+  int first=nr_csirs_disc_ring_write_begin(&ring,1);
+  nr_csirs_disc_ring_write_end(&ring,1,nullptr);
+  EXPECT_EQ(ring.written,6u);EXPECT_FALSE(ring.meta[first].valid);
+  nr_csirs_disc_ring_reset(&ring);
+  EXPECT_EQ(ring.written,0u);
+  nr_csirs_disc_ring_free(&ring);nr_csirs_disc_ring_free(&copy);
+  nr_csirs_disc_alloc_unified=saved_alloc;nr_csirs_disc_free_unified=saved_free;
+}

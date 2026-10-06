@@ -2826,5 +2826,5 @@ TEST(CsirsBlindZpProbation, FailedAdmissionsCannotStarveLaterGeometryOrReadmissi
   EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 8));
 }
 
-TEST(CsirsBlindDiscovery, LiveFepOnlyDueSymbolsAndNeverWaits)
+TEST(CsirsBlindDiscovery, LiveFepOnlyDueSymbolsAndPreservesContendedOccasion)
 { EXPECT_EQ(nr_csirs_blind_rt_test_due_only(), 0); }

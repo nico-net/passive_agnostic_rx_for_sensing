@@ -2923,15 +2923,23 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c
     ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c)
   target_include_directories(test_nr_csirs_disc_td PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_csirs_disc_td PRIVATE nr_phy_common PHY_COMMON nr_common nr_fapi_p5
+  target_link_libraries(test_nr_csirs_disc_td PRIVATE nr_csirs_disc_synth nr_phy_common PHY_COMMON nr_common nr_fapi_p5
     asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
   target_compile_options(test_nr_csirs_disc_td PRIVATE -ffunction-sections -fdata-sections)
   target_link_options(test_nr_csirs_disc_td PRIVATE -Wl,--gc-sections -Wl,--no-export-dynamic
     "-Wl,--export-dynamic-symbol=T_*" -Wl,--export-dynamic-symbol=g_log
     -Wl,--export-dynamic-symbol=logRecord_mt -Wl,--export-dynamic-symbol=exit_function
-    -Wl,--export-dynamic-symbol=write_file_matlab)
+    -Wl,--export-dynamic-symbol=write_file_matlab
+    "-Wl,--export-dynamic-symbol=nr_csirs_disc_sweep_*")
+  if(TARGET csirs_disc_gpu)
+    add_dependencies(test_nr_csirs_disc_td csirs_disc_gpu nr_csirs_disc_gpu_sweep)
+  endif()
   add_dependencies(test_nr_csirs_disc_td dfts)
   add_dependencies(tests test_nr_csirs_disc_td)
   add_test(NAME test_nr_csirs_disc_td COMMAND test_nr_csirs_disc_td)

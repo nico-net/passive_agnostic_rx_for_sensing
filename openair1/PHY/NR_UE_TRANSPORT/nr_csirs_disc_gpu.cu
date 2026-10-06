@@ -121,11 +121,14 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   ret=cudaMemcpy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
 }
+static int lattice_host(int,int,uint64_t,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,uint16_t *);
+static int fep_host(const nr_csirs_disc_fep_cfg_t *,const nr_csirs_disc_fep_slot_t *,int,nr_csirs_disc_ring_t *,int);
+static int accumulate_host(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 static int fft_host(int, int, const int16_t *, int16_t *);
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
-  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host};return &ops;
+  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host};return &ops;
 }
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
@@ -179,4 +182,262 @@ static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
   const cudaError_t launch = cudaGetLastError();
   const cudaError_t complete = cudaDeviceSynchronize();
   return launch==cudaSuccess && complete==cudaSuccess ? 0 : -1;
+}
+
+/* T9: preserve OAI's Q14 LUT/128-sample recurrence, including its quantization
+ * drift. One CTA per (slot,symbol), shared ramp across all RX branches. */
+__constant__ short sin_lut[129];
+__device__ static short sat16(int64_t x) { return (short)max(-32768LL,min(32767LL,(long long)x)); }
+__device__ static short2 lut_phase(double phase)
+{
+  int index=phase<0?512-((int)(-phase*512+0.5)%512):(int)(phase*512+0.5)%512;
+  if(index<128) return make_short2(sin_lut[128-index],sin_lut[index]);
+  if(index<256) return make_short2(-sin_lut[index-128],sin_lut[256-index]);
+  if(index<384) return make_short2(-sin_lut[384-index],-sin_lut[index-256]);
+  return make_short2(sin_lut[index-384],-sin_lut[512-index]);
+}
+__device__ static short2 multiply(short2 x,short2 y,int shift,bool saturate)
+{
+  // SIMD madd wraps the 32-bit sum; negate y.i in int16 as in OAI.
+  int re=(int)((unsigned)(x.x*y.x)+(unsigned)(x.y*(short)-y.y));
+  int im=(int)((unsigned)(x.x*y.y)+(unsigned)(x.y*y.x));
+  re>>=shift;im>>=shift;
+  return make_short2(saturate?sat16(re):(short)re,saturate?sat16(im):(short)im);
+}
+__global__ static void fep_unpack(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_disc_fep_slot_t *slots,
+                                  cufftComplex *work)
+{
+  int t=blockIdx.x/14,l=blockIdx.x%14,lane=threadIdx.x;
+  const auto &s=slots[t];
+  __shared__ short2 ramp[128],step;
+  if(lane==0 && s.compensate) {
+    double inc=-s.fo/(cfg.samples_per_ms*1000);
+    double phase=s.offset[l]*inc;phase-=(int)phase;
+    for(int i=0;i<128;++i) {ramp[i]=lut_phase(phase);phase=__dadd_rn(phase,inc);}
+    step=lut_phase(128*inc);
+  }
+  __syncthreads();
+  short2 rot=s.compensate?ramp[lane]:make_short2(16384,0);
+  for(int k=lane;k<cfg.fft;k+=128) {
+    for(int a=0;a<cfg.n_ant;++a) {
+      short2 v=((const short2 *)s.samples)[a*cfg.stride+s.offset[l]-s.offset[0]+k];
+      if(s.compensate) v=multiply(v,rot,14,false); // mult_complex_vectors wraps
+      work[((size_t)(t*cfg.n_ant+a)*14+l)*cfg.fft+k]=make_float2(v.x,v.y);
+    }
+    if(s.compensate) rot=multiply(rot,step,14,true); // rotate_cpx_vector saturates
+  }
+}
+__device__ static short2 symbol_rotate(short2 x,short2 a,int mode)
+{
+  if(mode==2) { // vqdmulh followed by vqrdmlsh/vqrdmlah
+    int re=sat16((int64_t)a.x*x.x>>15),im=sat16((int64_t)a.x*x.y>>15);
+    return make_short2(sat16(((int64_t)re*32768-(int64_t)a.y*x.y+16384)>>15),
+                       sat16(((int64_t)im*32768+(int64_t)a.y*x.x+16384)>>15));
+  }
+  if(mode==1) {
+    int re=(int)((unsigned)(a.x*x.x)-(unsigned)(a.y*x.y));
+    int im=(int)((unsigned)(a.x*x.y)+(unsigned)(a.y*x.x));
+    return make_short2(sat16(((int64_t)re+16384)>>15),sat16(((int64_t)im+16384)>>15));
+  }
+  return multiply(x,a,15,true);
+}
+__global__ static void fep_extract(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_disc_fep_slot_t *slots,
+                                   const cufftComplex *work,short2 *grid,int n,int capacity,int first)
+{
+  size_t id=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
+  int nk=12*cfg.n_rb;
+  size_t stride=(size_t)cfg.n_ant*14*nk;
+  if(id>=(size_t)n*stride) return;
+  int t=id/stride,k=id%nk,l=id/nk%14,a=id/(14*nk)%cfg.n_ant;
+  int bin=(cfg.first_carrier+k)%cfg.fft;
+  cufftComplex v=work[((size_t)(t*cfg.n_ant+a)*14+l)*cfg.fft+bin];
+  float scale=rsqrtf((float)cfg.fft);
+  short2 x=make_short2(sat16((int)rintf(v.x*scale)),sat16((int)rintf(v.y*scale)));
+  short2 rot=((const short2 *)slots[t].rotation)[l];rot.y=(short)-rot.y;
+  // Match the two OAI ranges, including the odd-RB extra six bins and SIMD tail.
+  int length=(cfg.n_rb+(cfg.n_rb&1))*6;
+  int high=cfg.first_carrier-((cfg.n_rb&1)?6:0);
+  int pos=bin<length?bin:bin>=high && bin<high+length?bin-high:-1;
+  if(pos>=0) {
+    x=symbol_rotate(x,rot,pos<(length&~3)?cfg.rotation_mode:0);
+    if(pos<(length&~3)) {
+      short2 shift=((const short2 *)cfg.timeshift)[bin];
+      // oai_mm_cpx_mult conjugates the INPUT, including -32768 wrap.
+      int re=(int)((unsigned)(x.x*shift.x)+(unsigned)((short)-x.y*shift.y));
+      int im=(int)((unsigned)(x.x*shift.y)+(unsigned)(x.y*shift.x));
+      x=make_short2(sat16(re>>15),sat16(im>>15));
+    }
+  }
+  grid[(size_t)((first+t)%capacity)*stride+id%stride]=x;
+}
+
+template<class T> struct Buffer {
+  T *p=nullptr;size_t capacity=0;
+  ~Buffer() {cudaFree(p);}
+  bool reserve(size_t n) {
+    if(n<=capacity) return true;
+    cudaFree(p);p=nullptr;capacity=0;
+    if(cudaMalloc(&p,n*sizeof(T))!=cudaSuccess) return false;
+    capacity=n;return true;
+  }
+};
+static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slot_t *slots,
+                    int n,nr_csirs_disc_ring_t *ring,int first)
+{
+  static std::mutex mutex;std::lock_guard<std::mutex> guard(mutex);
+  static Buffer<cufftComplex> work;
+  static Buffer<nr_csirs_disc_fep_slot_t> desc;
+  static Buffer<short2> shift;
+  // A fixed padded batch avoids re-planning on every variable backlog size.
+  static cufftHandle plan;static int last_fft,last_ant;
+  static bool lut_ready;
+  if(!c || !slots || !ring || n<1 || n>NR_CSIRS_DISC_DEFAULT_BATCH || c->fft<128 || c->fft%128
+      || first<0 || first>=ring->capacity || ring->n_ant!=c->n_ant || ring->n_rb!=c->n_rb) return -1;
+  if(!lut_ready) {
+    short host[129];for(int i=0;i<=128;++i) host[i]=(short)round(sin(3.14159265358979323846*i/256)*16384);
+    if(cudaMemcpyToSymbol(sin_lut,host,sizeof(host))!=cudaSuccess) return -1;
+    lut_ready=true;
+  }
+  if(last_fft!=c->fft || last_ant!=c->n_ant) {
+    if(plan) cufftDestroy(plan);plan=0;last_fft=last_ant=0;
+    if(cufftPlan1d(&plan,c->fft,CUFFT_C2C,NR_CSIRS_DISC_DEFAULT_BATCH*c->n_ant*14)!=CUFFT_SUCCESS) return -1;
+    last_fft=c->fft;last_ant=c->n_ant;
+  }
+  size_t count=(size_t)NR_CSIRS_DISC_DEFAULT_BATCH*c->n_ant*14*c->fft;
+  if(!work.reserve(count) || !desc.reserve(n) || !shift.reserve(c->fft)) return -1;
+  if(cudaMemcpy(desc.p,slots,n*sizeof(*slots),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     cudaMemcpy(shift.p,c->timeshift,c->fft*sizeof(short2),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+  size_t active=(size_t)n*c->n_ant*14*c->fft;
+  if(active<count && cudaMemset(work.p+active,0,(count-active)*sizeof(cufftComplex))!=cudaSuccess) return -1;
+  nr_csirs_disc_fep_cfg_t cfg=*c;cfg.timeshift=(int16_t *)shift.p;
+  fep_unpack<<<n*14,128>>>(cfg,desc.p,work.p);
+  if(cudaGetLastError()!=cudaSuccess || cufftExecC2C(plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
+    cudaDeviceSynchronize();return -1;
+  }
+  size_t out=(size_t)n*c->n_ant*14*12*c->n_rb;
+  fep_extract<<<(out+255)/256,256>>>(cfg,desc.p,work.p,(short2 *)ring->grid_base,n,ring->capacity,first);
+  cudaError_t launch=cudaGetLastError(),complete=cudaDeviceSynchronize();
+  return launch==cudaSuccess && complete==cudaSuccess?0:-1;
+}
+
+__global__ static void accumulate_kernel(const uint32_t *x,const nr_csirs_disc_slot_meta_t *meta,
+                                         int nt,int nr,int pooled,uint64_t *sum,uint64_t *sq,
+                                         uint64_t *s80,uint64_t *s64,uint64_t *total,uint64_t *totalq)
+{
+  int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=nr) return;
+  uint64_t st=total[j],qt=totalq[j];
+  for(int t=0;t<nt;++t) if(meta[t].valid) {
+    int residue=meta[t].abs_slot%640;uint64_t v=x[(size_t)t*nr+j],q=v*v;
+    sum[(size_t)residue*nr+j]+=v;s80[(size_t)(residue%80)*nr+j]+=v;s64[(size_t)(residue%64)*nr+j]+=v;
+    st+=v;qt+=q;
+    if(j>=nr-pooled) sq[(size_t)residue*pooled+j-(nr-pooled)]+=q;
+  }
+  total[j]=st;totalq[j]=qt;
+}
+static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
+                            uint64_t *sum,uint64_t *sq,uint64_t *s80,uint64_t *s64,uint64_t *total,uint64_t *totalq)
+{
+  static std::mutex mutex;std::lock_guard<std::mutex> guard(mutex);
+  static Buffer<int16_t> grid;static Buffer<nr_csirs_disc_slot_meta_t> meta;
+  static Buffer<uint32_t> x;static Buffer<uint8_t> excl;
+  if(!nr_disc_fp_valid(r)) return -1;
+  int tiles=(r->n_rb+15)/16,nr=14*12*r->n_rb+168*tiles;
+  size_t gb=(size_t)r->capacity*r->slot_stride,xb=(size_t)r->capacity*nr;
+  if(!grid.reserve(gb) || !meta.reserve(r->capacity) || !x.reserve(xb) || !excl.reserve(14*12*r->n_rb)) return -1;
+  // Reuse managed input directly, explicit-copy ordinary CPU fixture rings.
+  cudaPointerAttributes attr={};
+  bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && attr.type==cudaMemoryTypeManaged;
+  cudaGetLastError();
+  const int16_t *input=managed?r->grid_base:grid.p;
+  if((!managed && cudaMemcpy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||
+     cudaMemcpy(meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     cudaMemset(x.p,0,xb*sizeof(uint32_t))!=cudaSuccess) return -1;
+  if(cfg && cfg->excl_re && cudaMemcpy(excl.p,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+  normalize<<<(r->capacity*r->n_rb*14+127)/128,128>>>(input,meta.p,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
+      cfg?cfg->excl_sym_mask_any:0,cfg && cfg->excl_re?excl.p:nullptr,x.p,tiles);
+  pool<<<(r->capacity*168*tiles+127)/128,128>>>(x.p,r->capacity,r->n_rb,tiles);
+  accumulate_kernel<<<(nr+127)/128,128>>>(x.p,meta.p,r->capacity,nr,168*tiles,sum,sq,s80,s64,total,totalq);
+  cudaError_t launch=cudaGetLastError(),complete=cudaDeviceSynchronize();
+  return launch==cudaSuccess && complete==cudaSuccess?0:-1;
+}
+
+__global__ static void lattice_pool(int p,int nr,int pooled,const uint64_t *sum,const uint64_t *sq,
+                                    uint64_t *ps,uint64_t *pq)
+{
+  int id=blockIdx.x*blockDim.x+threadIdx.x;if(id>=p*pooled) return;
+  int o=id/pooled,j=id%pooled;uint64_t s=0,q=0;
+  for(int residue=o;residue<640;residue+=p) {s+=sum[(size_t)residue*nr+nr-pooled+j];q+=sq[(size_t)residue*pooled+j];}
+  ps[id]=s;pq[id]=q;
+}
+/* Device implementation of the CPU's tiled significance and phase-background
+ * screen. Keep tile/component order: a failed first tile still marks tried. */
+__global__ static void lattice_screen(int p,int tiles,uint64_t nt,const uint64_t *counts,
+                                      const uint64_t *ps,const uint64_t *pq,const uint64_t *total,
+                                      const uint64_t *totalq,uint16_t *masks)
+{
+  int id=blockIdx.x*blockDim.x+threadIdx.x;if(id>=p*14) return;
+  int o=id/14,l=id%14,pooled=168*tiles;
+  uint64_t on=counts[o],off=nt-on;if(on<3 || off<3) return;
+  double ion=1.0/on/4096.,ioff=1.0/off/4096.;
+  // 4096 bits, private to this (period,offset,symbol).
+  uint32_t tried[128]={0};
+  for(int tile=0;tile<tiles;++tile) {
+    uint16_t observed=0,strong=0;
+    for(int sc=0;sc<12;++sc) {
+      int j=tile*168+l*12+sc;size_t at=(size_t)o*pooled+j;
+      double a=ps[at]*ion,b=(total[j]-ps[at])*ioff;
+      double va=fmax(0.,pq[at]*ion/4096.-a*a),vb=fmax(0.,(totalq[j]-pq[at])*ioff/4096.-b*b),diff=a-b;
+      if(diff>0.025 && diff*diff>16*(vb/(on-1)+vb/(off-1))+1e-12) observed|=1<<sc;
+      if(diff>0.025 && diff*diff>36*(fmax(va,vb)/(on-1)+vb/(off-1))+1e-12) strong|=1<<sc;
+    }
+    for(int component=-2;component<4;++component) {
+      if(component==-1) {
+        bool partial=false;for(int k=0;k<4;++k) partial|=(strong&(0x111u<<k))==strong;
+        if(__popc(strong)<2 || partial) continue;
+      }
+      uint16_t mask=component==-2?strong:component==-1?
+        (strong|((strong&0x555)<<1)|((strong&0xaaa)>>1)):(0x111u<<component);
+      if(!mask || mask==0xfff || (component!=-1 && (mask&observed)!=mask) || (tried[mask/32]&(1u<<(mask%32)))) continue;
+      if(__popc(mask)==1 && !(mask&strong)) continue;
+      bool comb=mask==0x111 || mask==0x222 || mask==0x444 || mask==0x888;
+      bool pairs=(mask&0x555)==((mask>>1)&0x555);
+      if(__popc(mask)!=1 && !comb && !pairs) continue;
+      tried[mask/32]|=1u<<(mask%32);
+      double on_mean=0,off_mean=0,on_error=0;
+      for(int sc=0;sc<12;++sc) if(mask&(1<<sc)) {
+        int j=tile*168+l*12+sc;size_t at=(size_t)o*pooled+j;
+        on_mean+=ps[at]*ion;off_mean+=(total[j]-ps[at])*ioff;
+        double mean=ps[at]*ion;on_error+=fmax(0.,pq[at]*ion/4096.-mean*mean)/on;
+      }
+      int below=0,alternatives=0;
+      for(int other=0;other<p;++other) if(other!=o && counts[other]) {
+        double mean=0,error=0,scale=1.0/(counts[other]*4096.);
+        for(int sc=0;sc<12;++sc) if(mask&(1<<sc)) {
+          size_t at=(size_t)other*pooled+tile*168+l*12+sc;
+          double v=ps[at]*scale,qv=pq[at]*scale/4096.;mean+=v;error+=fmax(0.,qv-v*v)/counts[other];
+        }
+        double delta=on_mean-mean;
+        below+=mean<(on_mean+off_mean)*0.5 && delta>0 && delta*delta>9*(on_error+error);++alternatives;
+      }
+      if(2*below>alternatives) masks[((size_t)id*tiles+tile)*6+component+2]=mask;
+    }
+  }
+}
+static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const uint64_t *sum,
+                         const uint64_t *sq,const uint64_t *total,const uint64_t *totalq,uint16_t *masks)
+{
+  static std::mutex mutex;std::lock_guard<std::mutex> guard(mutex);
+  static Buffer<uint64_t> ps,pq,dc;
+  static Buffer<uint16_t> dm;
+  int tiles=(rb+15)/16,pooled=168*tiles,nr=14*12*rb+pooled;
+  size_t count=(size_t)p*14*tiles*6;
+  if(!ps.reserve((size_t)p*pooled) || !pq.reserve((size_t)p*pooled) || !dc.reserve(p) || !dm.reserve(count)) return -1;
+  if(cudaMemcpy(dc.p,counts,p*sizeof(uint64_t),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     cudaMemset(dm.p,0,count*sizeof(uint16_t))!=cudaSuccess) return -1;
+  lattice_pool<<<(p*pooled+127)/128,128>>>(p,nr,pooled,sum,sq,ps.p,pq.p);
+  lattice_screen<<<(p*14+63)/64,64>>>(p,tiles,nt,dc.p,ps.p,pq.p,total+nr-pooled,totalq+nr-pooled,dm.p);
+  if(cudaGetLastError()!=cudaSuccess || cudaMemcpy(masks,dm.p,count*sizeof(uint16_t),cudaMemcpyDeviceToHost)!=cudaSuccess) {
+    cudaDeviceSynchronize();return -1;
+  }
+  return 0;
 }

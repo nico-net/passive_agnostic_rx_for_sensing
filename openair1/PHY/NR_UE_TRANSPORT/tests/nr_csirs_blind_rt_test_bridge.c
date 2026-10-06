@@ -386,8 +386,21 @@ int nr_slot_fep(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, unsigned slot, 
 {
   return nr_slot_fep_ant(ue,fp,slot,symbol,0,rx,link,offset,raw);
 }
+static pthread_mutex_t due_test_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t due_test_cv=PTHREAD_COND_INITIALIZER;
+static bool due_test_entered;
+static void *due_test_slot(void *unused)
+{
+  (void)unused;
+  bool map[14]={0};
+  pthread_mutex_lock(&due_test_lock);due_test_entered=true;
+  pthread_cond_signal(&due_test_cv);pthread_mutex_unlock(&due_test_lock);
+  nr_csirs_blind_rt_slot_fep(&test_ue,7,47,test_rx,map);
+  return NULL;
+}
 int nr_csirs_blind_rt_test_due_only(void)
 {
+  nr_csirs_blind_rt_discovery_init();
   int mask;
   g_disc=0;
   nr_csirs_blind_rt_test_slot_pattern(5,0,0,0,0,1,&mask);
@@ -402,16 +415,21 @@ int nr_csirs_blind_rt_test_due_only(void)
     if(test_fep_mask != (slot==7 ? (1<<7)|(1<<8) : 0)) rc=-1;
     if(test_fep_calls != (slot==7 ? 2 : 0)) rc=-2;
   }
-  // Already transformed symbols are reused, and a busy worker never blocks.
+  // Already transformed symbols are reused; contested due work is retained.
   bool map[14]={0};map[7]=true;
   test_fep_mask=test_fep_calls=0;
   nr_csirs_blind_rt_slot_fep(&test_ue,7,27,test_rx,map);
   if(test_fep_mask!=(1<<8) || test_fep_calls!=1) rc=-3;
   pthread_mutex_lock(&g_csirs_state_lock);
   uint64_t before=csirs_disc_confirm_drops;
-  nr_csirs_blind_rt_slot_fep(&test_ue,7,47,test_rx,map);
+  test_fep_mask=test_fep_calls=0;due_test_entered=false;
+  pthread_t actor;pthread_create(&actor,NULL,due_test_slot,NULL);
+  pthread_mutex_lock(&due_test_lock);
+  while(!due_test_entered) pthread_cond_wait(&due_test_cv,&due_test_lock);
+  pthread_mutex_unlock(&due_test_lock);
   pthread_mutex_unlock(&g_csirs_state_lock);
-  if(csirs_disc_confirm_drops!=before+1) rc=-4;
+  pthread_join(actor,NULL);
+  if(csirs_disc_confirm_drops!=before || test_fep_calls!=2) rc=-4;
   g_disc=0;test_fep_enabled=0;
   return rc;
 }

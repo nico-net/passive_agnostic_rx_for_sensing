@@ -13,6 +13,7 @@ int csirs_td_concurrent_reset(void);
 double csirs_td_benchmark(void);
 void csirs_td_test_init(void);
 int csirs_td_gpu_parity(void);
+int csirs_td_throughput(void);
 void nr_csirs_disc_fft_cpu(int,int,const int16_t *,int16_t *);
 }
 TEST(CsirsDiscTd, CpuBitExactWithSlotFep) {
@@ -51,4 +52,11 @@ TEST(CsirsDiscTd, DISABLED_GpuParityAndBudget) {
   EXPECT_LE(maxerr,32);EXPECT_LE(sqrt(mse/count),8);EXPECT_LT(ms,50);
   nr_csirs_disc_free_unified(in);nr_csirs_disc_free_unified(gpu);free(cpu);
   EXPECT_EQ(csirs_td_gpu_parity(),0) << "Full CP/CFO/rotation/CRB pipeline, <=64 LSB";
+}
+
+TEST(CsirsDiscTd, DISABLED_GpuSustained2000SlotsPerSecond) {
+  setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
+  const auto *ops=nr_csirs_disc_gpu_load();
+  ASSERT_TRUE(ops && ops->fep && ops->accumulate && ops->lattice && ops->sweep) << "Full GPU pipeline required";
+  ASSERT_EQ(csirs_td_throughput(),0);
 }

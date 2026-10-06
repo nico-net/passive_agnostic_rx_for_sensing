@@ -6,7 +6,10 @@
 #include <stdio.h>
 #include <time.h>
 #include <pthread.h>
+#ifndef NR_CSIRS_DISC_GPU_MODULE
 static uint64_t fp_us(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;}
+
+#endif
 
 /* Local period table avoids coupling U2 to the ring implementation's table. */
 static const int periods[] = {4,5,8,10,16,20,32,40,64,80,160,320,640};
@@ -157,8 +160,27 @@ typedef struct {
   size_t stride;
   uint16_t symbols;
   uint8_t *exclude;
+  const nr_csirs_disc_gpu_ops_t *ops;
 } history_t;
+#ifndef NR_CSIRS_DISC_GPU_MODULE
 static history_t history;
+uint64_t csirs_disc_gpu_detect_batches, csirs_disc_cpu_detect_batches;
+uint64_t csirs_disc_gpu_lattice_calls, csirs_disc_cpu_lattice_calls;
+static bool history_unified;
+static void *history_alloc(size_t count)
+{
+  size_t bytes=count*sizeof(uint64_t);
+  void *p=history_unified?nr_csirs_disc_alloc_unified(bytes):malloc(bytes);
+  if(p) memset(p,0,bytes);
+  return p;
+}
+static void history_free(void *p)
+{
+  if(history_unified) {if(p) nr_csirs_disc_free_unified(p);}
+  else free(p);
+}
+
+#endif
 
 /* Two short-period bases avoid rereading 640 RE vectors for every short
  * lattice. Only pooled tiles need per-phase squares; extent uses the global
@@ -246,7 +268,18 @@ static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *
     else for(int o=0;o<p;++o) for(int j=0;j<nr;++j) {tot[j]+=sum[(size_t)o*nr+j];totq[j]+=sq[(size_t)o*nr+j];}
     const int pooled=POOL(r);
     uint64_t *pool_sum=NULL,*pool_sq=NULL;
-    if(h) {
+    uint16_t *masks=NULL;
+#ifndef NR_CSIRS_DISC_GPU_MODULE
+    if(h && h->ops && h->ops->lattice) {
+      masks=calloc((size_t)p*14*TILES(r)*6,sizeof(*masks));
+      if(masks && h->ops->lattice(r->n_rb,p,nt,counts,h->sum,h->sq,h->total,h->totalq,masks)<0) {
+        free(masks);masks=NULL;
+      }
+      if(masks) __atomic_fetch_add(&csirs_disc_gpu_lattice_calls,1,__ATOMIC_RELAXED);
+    }
+    if(h && !masks) __atomic_fetch_add(&csirs_disc_cpu_lattice_calls,1,__ATOMIC_RELAXED);
+#endif
+    if(h && !masks) {
       pool_sum=calloc((size_t)p*pooled,sizeof(*pool_sum));
       pool_sq=calloc((size_t)p*pooled,sizeof(*pool_sq));
       if(!pool_sum || !pool_sq) {free(pool_sum);free(pool_sq);free(sum);free(sq);free(cand);free(tot);free(totq);return -1;}
@@ -261,7 +294,7 @@ static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *
       if(on<3 || off<3) continue;
       const double ion=1.0/on/Q, ioff=1.0/off/Q;
       const double pooled_error=16.0;
-      if(h) {
+      if(h && !masks) {
         memcpy(sum+14*nk,pool_sum+(size_t)o*pooled,pooled*sizeof(*sum));
         memcpy(sq+14*nk,pool_sq+(size_t)o*pooled,pooled*sizeof(*sq));
       }
@@ -275,7 +308,7 @@ static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *
         double dr[NR_CSIRS_DISC_MAX_RB*12],vr[NR_CSIRS_DISC_MAX_RB*12],br[NR_CSIRS_DISC_MAX_RB*12];
         for(int tile=0;tile<TILES(r);++tile) {
         uint16_t mask=0,strong=0;
-        for(int sc=0;sc<12;++sc) {
+        if(!masks) for(int sc=0;sc<12;++sc) {
           int j=14*nk+tile*168+l*12+sc;
           double a=s[j]*ion,b=(tot[j]-s[j])*ioff;
           double va=fmax(0,q[j]*ion/Q-a*a);
@@ -288,6 +321,10 @@ static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *
         }
         const uint16_t observed=mask;
         for(int component_mask=-2;component_mask<4;++component_mask) {
+        if(masks) {
+          mask=masks[(((size_t)o*14+l)*TILES(r)+tile)*6+component_mask+2];
+          if(!mask) continue;
+        } else {
         if(component_mask==-1) {
           bool partial_comb=false;
           for(int k=0;k<4;++k) partial_comb |= (strong & (0x111u<<k))==strong;
@@ -324,6 +361,7 @@ static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *
           ++alternatives;
         }
         if(2*below<=alternatives) continue;
+        }
         if(!reduced) {
           if(h) history_reduce(h,p,o,l*nk,(l+1)*nk,sum);
           for(int rb=0;rb<r->n_rb;++rb) {
@@ -396,7 +434,7 @@ static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *
       }
     }
     }
-    free(pool_sum);free(pool_sq);free(sum);free(sq);
+    free(masks);free(pool_sum);free(pool_sq);free(sum);free(sq);
   }
   free(tot);free(totq);
   if(raw) {*raw=cand;*nraw=nc;return nc;}
@@ -423,11 +461,13 @@ int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_d
   free(x);return ret;
 }
 
+#ifndef NR_CSIRS_DISC_GPU_MODULE
 void nr_csirs_disc_detect_reset(void)
 {
   for(int i=0;i<4;++i) free(history.groups[i]);
-  free(history.sum80);free(history.sum64);
-  free(history.sum);free(history.sq);free(history.total);free(history.totalq);free(history.exclude);
+  history_free(history.sum80);history_free(history.sum64);
+  history_free(history.sum);history_free(history.sq);history_free(history.total);history_free(history.totalq);free(history.exclude);
+  history_unified=false;
   memset(&history,0,sizeof(history));
 }
 
@@ -528,15 +568,17 @@ static int cluster_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp
  * the statistics. The caller owns a stable snapshot. Missing overwritten IQ
  * cannot be reconstructed: return -1 before mutating history on an overrun. */
 static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
-                         nr_csirs_disc_fp_t *out, int max_out, bool scheduled)
+                         nr_csirs_disc_fp_t *out, int max_out, bool scheduled, bool force_cpu)
 {
   if(!nr_disc_fp_valid(r) || !out || max_out<=0) return -1;
   uint64_t begin=fp_us(), norm=0;
   history_t *h=&history;
+  const nr_csirs_disc_gpu_ops_t *ops=force_cpu?NULL:nr_csirs_disc_gpu_load();
+  bool gpu=ops && ops->accumulate && nr_csirs_disc_alloc_unified && nr_csirs_disc_free_unified;
   int nr=14*12*r->n_rb+POOL(r);
   uint16_t symbols=cfg?cfg->excl_sym_mask_any:0;
   bool changed=h->grid && (h->grid!=r->grid_base || h->n_rb!=r->n_rb || h->n_ant!=r->n_ant ||
-    h->capacity!=r->capacity || h->stride!=r->slot_stride || h->symbols!=symbols || r->written<h->written);
+    history_unified!=gpu || h->capacity!=r->capacity || h->stride!=r->slot_stride || h->symbols!=symbols || r->written<h->written);
   if(h->grid && !changed) for(int j=0;j<nr-POOL(r);++j)
     if(h->exclude[j]!=(cfg && cfg->excl_re?cfg->excl_re[j]:0)) {changed=true;break;}
   if(changed) nr_csirs_disc_detect_reset();
@@ -544,12 +586,13 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
   if(!h->grid) {
     /* Bootstrap the available snapshot after reset; older IQ is unavailable. */
     h->written=r->written>(uint64_t)r->capacity?r->written-r->capacity:0;
-    h->sum=calloc((size_t)640*nr,sizeof(uint64_t));h->sq=calloc((size_t)640*POOL(r),sizeof(uint64_t));
-    h->sum80=calloc((size_t)80*nr,sizeof(uint64_t));h->sum64=calloc((size_t)64*nr,sizeof(uint64_t));
-    h->total=calloc(nr,sizeof(uint64_t));h->totalq=calloc(nr,sizeof(uint64_t));h->exclude=calloc(nr-POOL(r),1);
+    history_unified=gpu;
+    h->sum=history_alloc((size_t)640*nr);h->sq=history_alloc((size_t)640*POOL(r));
+    h->sum80=history_alloc((size_t)80*nr);h->sum64=history_alloc((size_t)64*nr);
+    h->total=history_alloc(nr);h->totalq=history_alloc(nr);h->exclude=calloc(nr-POOL(r),1);
     if(!h->sum80 || !h->sum64 || !h->sum || !h->sq || !h->total || !h->totalq || !h->exclude) {nr_csirs_disc_detect_reset();return -1;}
     h->grid=r->grid_base;h->nr=nr;h->n_rb=r->n_rb;h->n_ant=r->n_ant;
-    h->capacity=r->capacity;h->stride=r->slot_stride;h->symbols=symbols;
+    h->capacity=r->capacity;h->stride=r->slot_stride;h->symbols=symbols;h->ops=gpu?ops:NULL;
     if(cfg && cfg->excl_re) memcpy(h->exclude,cfg->excl_re,nr-POOL(r));
   }
   /* 8192^2 per sample; reject rather than silently overflow the exact totals.
@@ -564,13 +607,30 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
     if(count>100) count=100;
     nr_csirs_disc_ring_t batch=*r;
     batch.grid_base+=start*r->slot_stride;batch.meta+=start;batch.capacity=count;
-    uint32_t *x=calloc((size_t)count*nr,sizeof(*x));
-    if(!x) return -1;
     uint64_t nbegin=fp_us();
-    normalize_parallel(&batch,cfg,x);
-    norm+=fp_us()-nbegin;
-    fold_parallel(&batch,x);
-    free(x);h->written+=count;
+    if(gpu) {
+      if(ops->accumulate(&batch,cfg,h->sum,h->sq,h->sum80,h->sum64,h->total,h->totalq)<0) {
+        /* A device error may have partially updated statistics. Discard them;
+         * CPU rebuilds ONLY the available snapshot, never double-folds a slot. */
+        nr_csirs_disc_detect_reset();
+        return detect(r,cfg,out,max_out,scheduled,true);
+      }
+      for(int t=0;t<count;++t) if(batch.meta[t].valid) {++h->counts[batch.meta[t].abs_slot%640];++h->nt;}
+      norm+=fp_us()-nbegin;
+    } else {
+      uint32_t *x=calloc((size_t)count*nr,sizeof(*x));
+      if(!x) return -1;
+      normalize_parallel(&batch,cfg,x);
+      norm+=fp_us()-nbegin;
+      fold_parallel(&batch,x);free(x);
+    }
+    h->written+=count;
+  }
+  if(gpu) __atomic_fetch_add(&csirs_disc_gpu_detect_batches,1,__ATOMIC_RELAXED);
+  else {
+    __atomic_fetch_add(&csirs_disc_cpu_detect_batches,1,__ATOMIC_RELAXED);
+    static bool warned;
+    if(!warned) {fprintf(stderr,"SENSING: CSIRS_DISC CPU detector fallback (not real-time)\n");warned=true;}
   }
   if(max_out>128) max_out=128;
   uint64_t folded=fp_us();
@@ -584,11 +644,13 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
 int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                           nr_csirs_disc_fp_t *out,int max_out)
 {
-  return detect(r,cfg,out,max_out>NR_CSIRS_DISC_MAX_FP?NR_CSIRS_DISC_MAX_FP:max_out,false);
+  return detect(r,cfg,out,max_out>NR_CSIRS_DISC_MAX_FP?NR_CSIRS_DISC_MAX_FP:max_out,false,false);
 }
 
 int nr_csirs_disc_detect_candidates(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                                      nr_csirs_disc_fp_t *out,int max_out)
 {
-  return detect(r,cfg,out,max_out,true);
+  return detect(r,cfg,out,max_out,true,false);
 }
+
+#endif

@@ -88,6 +88,28 @@ static int guarded_fft(int fft, int transforms, const int16_t *in, int16_t *out)
   return rc;
 }
 
+static int guarded_fep(const nr_csirs_disc_fep_cfg_t *c, const nr_csirs_disc_fep_slot_t *s,
+                       int n, nr_csirs_disc_ring_t *r, int first)
+{
+  if (!raw_ops.fep || !breaker_ready()) return -1;
+  int rc=raw_ops.fep(c,s,n,r,first);breaker_result(rc);return rc;
+}
+static int guarded_accumulate(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c,
+                              uint64_t *s, uint64_t *q, uint64_t *s80, uint64_t *s64,
+                              uint64_t *t, uint64_t *tq)
+{
+  if (!raw_ops.accumulate || !breaker_ready()) return -1;
+  int rc=raw_ops.accumulate(r,c,s,q,s80,s64,t,tq);breaker_result(rc);return rc;
+}
+
+static int guarded_lattice(int rb,int p,uint64_t nt,const uint64_t *counts,
+                           const uint64_t *sum,const uint64_t *sq,const uint64_t *total,
+                           const uint64_t *totalq,uint16_t *masks)
+{
+  if(!raw_ops.lattice || !breaker_ready()) return -1;
+  int rc=raw_ops.lattice(rb,p,nt,counts,sum,sq,total,totalq,masks);breaker_result(rc);return rc;
+}
+
 static void *open_sibling(const char *name)
 {
   void *handle = dlopen(name, RTLD_NOW | RTLD_LOCAL);
@@ -116,6 +138,9 @@ static void load_module(void)
       raw_ops.footprints = module_ops->footprints;
       raw_ops.normalize = module_ops->normalize;
       raw_ops.fft = module_ops->fft;
+      raw_ops.fep = module_ops->fep;
+      raw_ops.accumulate = module_ops->accumulate;
+      raw_ops.lattice = module_ops->lattice;
     }
     void *(*alloc)(size_t) = (void *(*)(size_t))dlsym(fp_handle, "nr_csirs_disc_gpu_alloc_unified");
     void (*free_fn)(void *) = (void (*)(void *))dlsym(fp_handle, "nr_csirs_disc_gpu_free_unified");
@@ -134,6 +159,9 @@ static void load_module(void)
   public_ops.footprints = raw_ops.footprints ? guarded_footprints : NULL;
   public_ops.normalize = raw_ops.normalize ? guarded_normalize : NULL;
   public_ops.fft = raw_ops.fft ? guarded_fft : NULL;
+  public_ops.fep = raw_ops.fep ? guarded_fep : NULL;
+  public_ops.accumulate = raw_ops.accumulate ? guarded_accumulate : NULL;
+  public_ops.lattice = raw_ops.lattice ? guarded_lattice : NULL;
   public_ops.sweep = raw_ops.sweep ? guarded_sweep : NULL;
 }
 
@@ -151,5 +179,5 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
   if (backend && strcmp(backend, "auto") && strcmp(backend, "gpu"))
     return NULL;
   pthread_once(&once, load_module);
-  return nr_csirs_disc_gpu_ops();
+  return breaker_ready()?nr_csirs_disc_gpu_ops():NULL;
 }

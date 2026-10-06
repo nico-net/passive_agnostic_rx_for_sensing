@@ -22,7 +22,7 @@ static struct {
   NR_DL_FRAME_PARMS fp;
   pthread_mutex_t lock, commit;
   void *sample_pool;
-  td_slot *slots, batch[NR_CSIRS_DISC_DEFAULT_BATCH];
+  td_slot **slots, *storage, *batch[NR_CSIRS_DISC_DEFAULT_BATCH];
   int capacity, count, head, tail, n_ant;
   uint64_t epoch;
   size_t stride;
@@ -30,6 +30,9 @@ static struct {
   bool unified, ready;
 } td;
 extern uint64_t csirs_disc_confirm_drops __attribute__((weak));
+extern uint64_t csirs_disc_confirm_wait_max_us __attribute__((weak));
+uint64_t csirs_disc_fep_gpu_chunks, csirs_disc_fep_cpu_chunks;
+uint64_t csirs_disc_fep_us, csirs_disc_fep_max_us;
 uint64_t csirs_disc_fft_us, csirs_disc_fft_batches, csirs_disc_td_overflows;
 
 static uint64_t usec(void)
@@ -59,20 +62,22 @@ int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *fp, int n_ant, int capacity)
   pthread_mutex_init(&td.commit, NULL);
   td.ready = true;
   td.slots = calloc(capacity, sizeof(*td.slots));
-  if (!td.slots) goto fail;
-  /* Plain host staging stays resident on the CPU. Only worker FFT buffers use
-   * managed memory: a GPU page migration can never delay the producer. */
+  td.storage = calloc(capacity+NR_CSIRS_DISC_DEFAULT_BATCH,sizeof(*td.storage));
+  if (!td.slots || !td.storage) goto fail;
+  td.unified = nr_csirs_disc_alloc_unified && nr_csirs_disc_free_unified;
+  /* The worker reads these owned CP-bearing spans directly on the GPU. */
   const size_t slot_bytes = ((td.stride*n_ant*sizeof(c16_t)+63)/64)*64;
   const size_t huge = 2*1024*1024;
   const size_t pool_bytes = ((slot_bytes*(capacity+NR_CSIRS_DISC_DEFAULT_BATCH)+huge-1)/huge)*huge;
-  td.sample_pool = aligned_alloc(huge, pool_bytes);
+  td.sample_pool = td.unified ? nr_csirs_disc_alloc_unified(pool_bytes) : aligned_alloc(huge, pool_bytes);
   if (!td.sample_pool) goto fail;
   /* A GB-scale queue otherwise incurs hundreds of thousands of 4K mappings.
    * Best-effort THP; correctness and allocation do not depend on availability. */
-  madvise(td.sample_pool, pool_bytes, MADV_HUGEPAGE);
+  if (!td.unified) madvise(td.sample_pool, pool_bytes, MADV_HUGEPAGE);
   memset(td.sample_pool, 0, pool_bytes);
   for (int i = 0; i < capacity + NR_CSIRS_DISC_DEFAULT_BATCH; ++i) {
-    td_slot *s = i < capacity ? &td.slots[i] : &td.batch[i-capacity];
+    td_slot *s = &td.storage[i];
+    if(i<capacity) td.slots[i]=s;else td.batch[i-capacity]=s;
     s->samples = (c16_t *)((char *)td.sample_pool+i*slot_bytes);
   }
   size_t bytes = (size_t)NR_CSIRS_DISC_DEFAULT_BATCH*n_ant*14*fp->ofdm_symbol_size*sizeof(c16_t);
@@ -91,8 +96,10 @@ fail:
 void nr_csirs_disc_td_free(void)
 {
   if (!td.ready) return;
-  free(td.sample_pool);
+  if (td.unified && td.sample_pool) nr_csirs_disc_free_unified(td.sample_pool);
+  else free(td.sample_pool);
   free(td.slots);
+  free(td.storage);
   if (td.unified) {
     if (td.input) nr_csirs_disc_free_unified(td.input);
     if (td.output) nr_csirs_disc_free_unified(td.output);
@@ -140,7 +147,7 @@ int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame,
     __atomic_fetch_add(&csirs_disc_td_overflows, 1, __ATOMIC_RELAXED);
     goto drop;
   }
-  td_slot *s = &td.slots[td.tail];
+  td_slot *s = td.slots[td.tail];
   s->compensate = ue->cont_fo_comp;
   s->fo = isnan(nr_slot_fep_fo_override_hz) ? ue->dl_Doppler_shift+ue->freq_offset : nr_slot_fep_fo_override_hz;
   unsigned offset = get_samples_slot_timestamp(fp, slot);
@@ -188,7 +195,7 @@ int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
     if (n > td.count) n = td.count;
     const uint64_t epoch = td.epoch;
     for (int i=0;i<n;++i) {
-      td_slot swap = td.batch[i];
+      td_slot *swap = td.batch[i];
       td.batch[i] = td.slots[td.head];
       td.slots[td.head] = swap;
       td.head = (td.head+1)%td.capacity;
@@ -197,19 +204,59 @@ int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
     pthread_mutex_unlock(&td.lock);
     if (!n) break;
     const uint64_t begin = usec();
+    const nr_csirs_disc_gpu_ops_t *ops = nr_csirs_disc_gpu_load();
+    bool gpu = false;
+    if (td.unified && ops && ops->fep) {
+      nr_csirs_disc_fep_slot_t slots[NR_CSIRS_DISC_DEFAULT_BATCH];
+      nr_csirs_disc_slot_meta_t meta[NR_CSIRS_DISC_DEFAULT_BATCH];
+      for(int i=0;i<n;++i) {
+        slots[i]=(nr_csirs_disc_fep_slot_t){.samples=(int16_t *)td.batch[i]->samples,
+                                          .fo=td.batch[i]->fo,.compensate=td.batch[i]->compensate};
+        memcpy(slots[i].offset,td.batch[i]->offset,sizeof(slots[i].offset));
+        memcpy(slots[i].rotation,td.batch[i]->rot,sizeof(slots[i].rotation));
+        meta[i]=td.batch[i]->meta;
+      }
+      nr_csirs_disc_fep_cfg_t cfg={.fft=fft,.n_ant=td.n_ant,.n_rb=td.fp.N_RB_DL,
+          .first_carrier=td.fp.first_carrier_offset,.samples_per_ms=td.fp.samples_per_subframe,
+          .stride=td.stride,.timeshift=(int16_t *)td.fp.timeshift_symbol_rotation};
+#if defined(__aarch64__) && defined(__ARM_FEATURE_QRDMX)
+      cfg.rotation_mode=2;
+#elif defined(__aarch64__)
+      cfg.rotation_mode=1;
+#endif
+      pthread_mutex_lock(&td.commit);
+      if(epoch==td.epoch) {
+        int first=nr_csirs_disc_ring_write_begin(ring,n);
+        if(first>=0) {
+          gpu=ops->fep(&cfg,slots,n,ring,first)==0;
+          nr_csirs_disc_ring_write_end(ring,n,gpu?meta:NULL);
+          if(gpu) done+=n;
+        }
+      }
+      pthread_mutex_unlock(&td.commit);
+    }
+    if(gpu) {
+      ++gpu_chunks;
+      __atomic_fetch_add(&csirs_disc_fft_us,usec()-begin,__ATOMIC_RELAXED);
+      __atomic_fetch_add(&csirs_disc_fft_batches,1,__ATOMIC_RELAXED);
+      remaining-=n;
+      continue;
+    }
+    static bool warned;
+    if(!warned) {
+      LOG_W(PHY,"SENSING: CSIRS_DISC CPU FEP fallback (not real-time); GPU chain unavailable or failed\n");
+      warned=true;
+    }
     for (int i=0;i<n;++i) for (int a=0;a<td.n_ant;++a) for (int l=0;l<14;++l) {
-      const td_slot *s = &td.batch[i];
+      const td_slot *s = td.batch[i];
       const c16_t *src = s->samples+a*td.stride+s->offset[l]-s->offset[0];
       c16_t *dst = (c16_t *)td.input+((i*td.n_ant+a)*14+l)*fft;
       if (s->compensate)
         nr_fo_compensation(s->fo, td.fp.samples_per_subframe, s->offset[l], src, dst, fft);
       else memcpy(dst, src, fft*sizeof(c16_t));
     }
-    const nr_csirs_disc_gpu_ops_t *ops = nr_csirs_disc_gpu_ops();
-    if (!ops || !ops->fft || ops->fft(fft,n*td.n_ant*14,td.input,td.output) < 0) {
-      nr_csirs_disc_fft_cpu(fft,n*td.n_ant*14,td.input,td.output);
-      ++cpu_chunks;
-    } else ++gpu_chunks;
+    nr_csirs_disc_fft_cpu(fft,n*td.n_ant*14,td.input,td.output);
+    ++cpu_chunks;
     __atomic_fetch_add(&csirs_disc_fft_us, usec()-begin, __ATOMIC_RELAXED);
     __atomic_fetch_add(&csirs_disc_fft_batches, 1, __ATOMIC_RELAXED);
     for (int i=0;i<n;++i) {
@@ -218,13 +265,13 @@ int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
         ants[a] = td.output+(size_t)(i*td.n_ant+a)*14*fft*2;
         for (int l=0;l<14;++l)
           apply_nr_rotation_symbol_RX(14, 1, td.fp.timeshift_symbol_rotation,
-              td.fp.first_carrier_offset, (c16_t *)ants[a]+l*fft, td.batch[i].rot,
+              td.fp.first_carrier_offset, (c16_t *)ants[a]+l*fft, td.batch[i]->rot,
               td.fp.N_RB_DL, 0, l);
       }
       /* Reset and publication serialize briefly, never during FFT/detection. */
       pthread_mutex_lock(&td.commit);
       if (epoch == td.epoch) {
-        const nr_csirs_disc_slot_meta_t m = td.batch[i].meta;
+        const nr_csirs_disc_slot_meta_t m = td.batch[i]->meta;
         if (nr_csirs_disc_ring_push(ring,ants,fft,td.fp.first_carrier_offset,m.abs_slot,m.frame,m.slot) >= 0)
           ++done;
       }
@@ -232,11 +279,18 @@ int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
     }
     remaining -= n;
   }
-  if (done) LOG_I(PHY, "SENSING: CSIRS_DISC FEP slots=%d total_us=%llu fft_pack_us=%llu gpu_chunks=%d cpu_chunks=%d pending=%d feed_drops=%llu td_overflows=%llu confirm_drops=%llu\n",
+  __atomic_fetch_add(&csirs_disc_fep_gpu_chunks,gpu_chunks,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&csirs_disc_fep_cpu_chunks,cpu_chunks,__ATOMIC_RELAXED);
+  uint64_t elapsed=usec()-start;
+  __atomic_fetch_add(&csirs_disc_fep_us,elapsed,__ATOMIC_RELAXED);
+  uint64_t peak=__atomic_load_n(&csirs_disc_fep_max_us,__ATOMIC_RELAXED);
+  if(elapsed>peak) __atomic_store_n(&csirs_disc_fep_max_us,elapsed,__ATOMIC_RELAXED);
+  if (done) LOG_I(PHY, "SENSING: CSIRS_DISC FEP slots=%d total_us=%llu fft_pack_us=%llu gpu_chunks=%d cpu_chunks=%d pending=%d feed_drops=%llu td_overflows=%llu confirm_drops=%llu confirm_wait_max_us=%llu\n",
       done, (unsigned long long)(usec()-start), (unsigned long long)(csirs_disc_fft_us-fft_start),
       gpu_chunks, cpu_chunks, nr_csirs_disc_td_pending(),
       (unsigned long long)__atomic_load_n(&csirs_disc_feed_drops,__ATOMIC_RELAXED),
       (unsigned long long)__atomic_load_n(&csirs_disc_td_overflows,__ATOMIC_RELAXED),
-      &csirs_disc_confirm_drops ? (unsigned long long)__atomic_load_n(&csirs_disc_confirm_drops,__ATOMIC_RELAXED) : 0ull);
+      &csirs_disc_confirm_drops ? (unsigned long long)__atomic_load_n(&csirs_disc_confirm_drops,__ATOMIC_RELAXED) : 0ull,
+      &csirs_disc_confirm_wait_max_us ? (unsigned long long)__atomic_load_n(&csirs_disc_confirm_wait_max_us,__ATOMIC_RELAXED) : 0ull);
   return done;
 }

@@ -29,9 +29,15 @@ TEST(CsirsDiscDump, ProductionStream)
   int32_t header[5]; ASSERT_EQ(fread(header,sizeof(header),1,file),1u);
   ASSERT_EQ(header[0],0x43534431); ASSERT_EQ(header[1],4); ASSERT_EQ(header[2],217);
   ASSERT_EQ(header[3],20); ASSERT_EQ(header[4],14);
+  const bool require_gpu=getenv("ISAC_CSIRS_DISC_BACKEND") && !strcmp(getenv("ISAC_CSIRS_DISC_BACKEND"),"gpu");
+  if(require_gpu) {
+    const auto *ops=nr_csirs_disc_gpu_load();
+    ASSERT_TRUE(ops && ops->accumulate && ops->lattice && ops->sweep) << "GPU pipeline required";
+  }
+  uint64_t cpu_detect=csirs_disc_cpu_detect_batches,cpu_lattice=csirs_disc_cpu_lattice_calls;
   nr_csirs_disc_ring_t ring={}, snapshot={};
-  ASSERT_EQ(nr_csirs_disc_ring_init(&ring,4,217,20,NR_CSIRS_DISC_DEFAULT_CAPACITY,false),0);
-  ASSERT_EQ(nr_csirs_disc_ring_init(&snapshot,4,217,20,NR_CSIRS_DISC_DEFAULT_CAPACITY,false),0);
+  ASSERT_EQ(nr_csirs_disc_ring_init(&ring,4,217,20,NR_CSIRS_DISC_DEFAULT_CAPACITY,require_gpu),0);
+  ASSERT_EQ(nr_csirs_disc_ring_init(&snapshot,4,217,20,NR_CSIRS_DISC_DEFAULT_CAPACITY,require_gpu),0);
   std::vector<int16_t> iq(ring.slot_stride);
   nr_csirs_disc_slot_meta_t meta;
   unsigned fed=0; int previous=0; double confirm_us=0, snapshot_us=0;
@@ -134,6 +140,11 @@ TEST(CsirsDiscDump, ProductionStream)
       ASSERT_GE(at,0);found|=1u<<at;
     }
     EXPECT_EQ(found,15u)<<"monitor phase="<<phase;
+  }
+  if(require_gpu) {
+    EXPECT_EQ(csirs_disc_cpu_detect_batches,cpu_detect);
+    EXPECT_EQ(csirs_disc_cpu_lattice_calls,cpu_lattice);
+    EXPECT_GT(csirs_disc_gpu_lattice_calls,0u);
   }
   EXPECT_EQ(fed,5468u);EXPECT_EQ(csirs_disc_feed_drops,drops_before);
   nr_csirs_disc_ring_free(&snapshot);nr_csirs_disc_ring_free(&ring);nr_csirs_disc_detect_reset();fclose(file);

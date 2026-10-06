@@ -16,6 +16,7 @@ extern void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn) __attribute__((we
 extern int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *)
     __attribute__((weak));
 extern bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *) __attribute__((weak));
+extern void nr_csirs_blind_rt_discovery_init(void) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_reset(void) __attribute__((weak));
 extern void nr_csirs_monitor_remove_dynamic_all(void) __attribute__((weak));
 
@@ -100,6 +101,7 @@ static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 
 static void init_once(void)
 {
+  if(nr_csirs_blind_rt_discovery_init) nr_csirs_blind_rt_discovery_init();
   (void)nr_csirs_disc_gpu_load();
   nr_csirs_disc_process_hook = nr_csirs_disc_process;
   if (nr_cfg_epoch_subscribe)
@@ -128,8 +130,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   nr_csirs_disc_win_t wins[NR_CSIRS_DISC_MAX_HYP];
   const nr_csirs_disc_fp_cfg_t fp_cfg = {.min_strength = 1.03f};
 
-  /* CPU detection folds every new slot and schedules all legal periods. GPU
-   * acceleration is reserved for the sequence sweep. */
+  /* Incremental GPU local normalization/folding, CPU bounded clustering. */
   int n_fp = nr_csirs_disc_detect_candidates(ring, &fp_cfg, fps, 64);
   if(n_fp<0) { /* Recover after a full ring overrun; unavailable IQ cannot be folded. */
     nr_csirs_disc_detect_reset();
@@ -332,7 +333,9 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         if(canonical.n_rb>refined.n_rb && same_seed(&canonical,&refined)) refined=canonical;
       }
       nr_csirs_disc_win_t verified;
-      if(nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified)!=1
+      int checked=gpu && ops->sweep?ops->sweep(ring,&refined,1,&sweep_cfg,&verified):-1;
+      if(checked<0) checked=nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified);
+      if(checked!=1
           || verified.z<4 || verified.z-verified.z_second<1.5f || verified.scramb_id!=w->scramb_id) continue;
       w=&verified;
       const nr_csirs_disc_hyp_t *h = &refined;
@@ -374,7 +377,16 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   g_metrics.feed_drops = __atomic_load_n(&csirs_disc_feed_drops, __ATOMIC_RELAXED);
   g_metrics.gpu_batches += gpu;
   g_metrics.cpu_batches += !gpu;
-  g_metrics.batch_us += now_us() - begin;
+  uint64_t elapsed=now_us()-begin;
+  g_metrics.batch_us += elapsed;
+  if(g_metrics.batches%20==0) LOG_I(PHY,
+      "SENSING: CSIRS_DISC BATCH total_us=%llu detect_us=%llu hyp_us=%llu sweep_us=%llu gpu_detect=%llu cpu_detect=%llu gpu_lattice=%llu cpu_lattice=%llu sweep_backend=%s\n",
+      (unsigned long long)elapsed,(unsigned long long)(detected-begin),(unsigned long long)(built-detected),
+      (unsigned long long)(now_us()-built),
+      (unsigned long long)__atomic_load_n(&csirs_disc_gpu_detect_batches,__ATOMIC_RELAXED),
+      (unsigned long long)__atomic_load_n(&csirs_disc_cpu_detect_batches,__ATOMIC_RELAXED),
+      (unsigned long long)__atomic_load_n(&csirs_disc_gpu_lattice_calls,__ATOMIC_RELAXED),
+      (unsigned long long)__atomic_load_n(&csirs_disc_cpu_lattice_calls,__ATOMIC_RELAXED),gpu?"gpu":"cpu/idle");
   pthread_mutex_unlock(&g_lock);
   pthread_mutex_unlock(&pipeline_lock);
 }

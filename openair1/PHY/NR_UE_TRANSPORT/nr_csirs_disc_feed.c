@@ -234,6 +234,51 @@ int nr_csirs_disc_ring_snapshot(nr_csirs_disc_ring_t *r, nr_csirs_disc_ring_t *d
   return 0;
 }
 
+/* Only the TD worker reserves batches. Read/entry locks also serialize epoch
+ * reset and public snapshots; the TD producer never touches these locks. */
+int nr_csirs_disc_ring_write_begin(nr_csirs_disc_ring_t *r, int count)
+{
+  ring_private_t *s=r?r->private_state:NULL;
+  if(!s || !s->unified_hook || count<1 || count>r->capacity) return -1;
+  pthread_mutex_lock(&s->read_lock);
+  int first=r->written%r->capacity;
+  for(int i=0;i<count;++i) pthread_mutex_lock(&s->entry_lock[(first+i)%r->capacity]);
+  return first;
+}
+
+static void dump_slot(nr_csirs_disc_ring_t *r, int index)
+{
+  static FILE *dump;
+  static int state;
+  if(!state) {
+    const char *path=getenv("ISAC_CSIRS_DISC_DUMP");
+    dump=path && *path?fopen(path,"wb"):NULL;state=dump?1:-1;
+    if(dump) {
+      const int32_t hdr[5]={0x43534431,r->n_ant,r->n_rb,r->slots_per_frame,NR_CSIRS_DISC_NSYM};
+      fwrite(hdr,sizeof(hdr),1,dump);
+    }
+  }
+  if(state==1) {
+    fwrite(&r->meta[index],sizeof(r->meta[index]),1,dump);
+    fwrite(r->grid_base+index*r->slot_stride,sizeof(int16_t),r->slot_stride,dump);
+    fflush(dump);
+  }
+}
+void nr_csirs_disc_ring_write_end(nr_csirs_disc_ring_t *r, int count, const nr_csirs_disc_slot_meta_t *meta)
+{
+  ring_private_t *s=r->private_state;
+  uint64_t start=r->written;
+  for(int i=0;i<count;++i) {
+    int idx=(start+i)%r->capacity;
+    r->meta[idx]=meta?meta[i]:(nr_csirs_disc_slot_meta_t){0};
+    s->serial[idx]=meta?start+i+1:0;
+    if(meta) dump_slot(r,idx);
+    pthread_mutex_unlock(&s->entry_lock[idx]);
+  }
+  if(meta) __atomic_store_n(&r->written,start+count,__ATOMIC_RELEASE);
+  pthread_mutex_unlock(&s->read_lock);
+}
+
 int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
                             const int16_t *const *rxdataF,
                             int ofdm_symbol_size,
@@ -280,26 +325,7 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
   state->serial[index] = r->written + 1;
   __atomic_add_fetch(&r->written, 1, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&state->entry_lock[index]);
-  /* Offline-analysis dump (ISAC_CSIRS_DISC_DUMP=<file>): header {magic,n_ant,n_rb,slots_per_frame,nsym}
-   * once, then per slot the meta followed by n_ant x NSYM x 12*n_rb CRB-aligned int16 IQ pairs. */
-  static FILE *dump;
-  static int dump_state;
-  if (dump_state == 0) {
-    const char *path = getenv("ISAC_CSIRS_DISC_DUMP");
-    dump = path && *path ? fopen(path, "wb") : NULL;
-    dump_state = dump ? 1 : -1;
-    if (dump) {
-      const int32_t hdr[5] = {0x43534431, r->n_ant, r->n_rb, r->slots_per_frame, NR_CSIRS_DISC_NSYM};
-      fwrite(hdr, sizeof(hdr), 1, dump);
-    }
-  }
-  if (dump_state == 1) {
-    fwrite(&r->meta[index], sizeof(r->meta[index]), 1, dump);
-    for (int ant = 0; ant < r->n_ant; ++ant)
-      for (int sym = 0; sym < NR_CSIRS_DISC_NSYM; ++sym)
-        fwrite(nr_csirs_disc_ring_sym(r, index, ant, sym), sizeof(int16_t), (size_t)2 * grid_sc, dump);
-    fflush(dump);
-  }
+  dump_slot(r,index);
   pthread_mutex_unlock(&state->read_lock);
   if (r == &g_worker.ring)
     worker_note_slot();
@@ -332,11 +358,15 @@ static void *disc_worker_main(void *unused)
       break;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     pthread_mutex_unlock(&g_worker.wake_lock);
-    if (nr_csirs_disc_td_drain) nr_csirs_disc_td_drain(&g_worker.ring);
+    int drained=nr_csirs_disc_td_drain?nr_csirs_disc_td_drain(&g_worker.ring):0;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
-    if (nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
-      void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
-      if (hook != NULL) hook(&g_worker.snapshot);
+    void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
+    if(drained>0) {
+      /* TD mode has a single FD writer: this worker. The pipeline mutex
+       * serializes processing with epoch reset, so no second IQ copy is needed. */
+      if(hook) hook(&g_worker.ring);
+    } else if (nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
+      if(hook) hook(&g_worker.snapshot);
     }
     pthread_mutex_lock(&g_worker.wake_lock);
   }

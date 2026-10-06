@@ -41,9 +41,23 @@ static nr_csirs_observer_t g_csirs_obs;
 /* DL processing can use multiple workers, and rate matching is read by decode workers. */
 static __thread bool *g_disc_fep_map;
 uint64_t csirs_disc_confirm_drops;
+uint64_t csirs_disc_confirm_wait_max_us;
 /* Standalone FD dump fixtures do not link the PHY FEP. */
 #pragma weak nr_slot_fep
 static pthread_mutex_t g_csirs_state_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Called by discovery initialization before its worker and the DL actors start.
+ * Priority inheritance prevents a low-priority admission holder from being
+ * starved while a real-time actor waits to preserve a due occasion. */
+void nr_csirs_blind_rt_discovery_init(void)
+{
+  pthread_mutexattr_t attr;
+  if(pthread_mutexattr_init(&attr)) return;
+  if(!pthread_mutexattr_setprotocol(&attr,PTHREAD_PRIO_INHERIT)
+      && !pthread_mutex_destroy(&g_csirs_state_lock)) {
+    if(pthread_mutex_init(&g_csirs_state_lock,&attr)) pthread_mutex_init(&g_csirs_state_lock,NULL);
+  }
+  pthread_mutexattr_destroy(&attr);
+}
 static void csirs_unlock(pthread_mutex_t **lock) { if (*lock) pthread_mutex_unlock(*lock); }
 static int g_timing = -1;
 static int g_reconf = -1;
@@ -519,13 +533,17 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
   pthread_mutex_t *guard __attribute__((cleanup(csirs_unlock))) = &g_csirs_state_lock;
-  if (g_disc_fep_map) {
-    if (pthread_mutex_trylock(guard)) {
-      __atomic_fetch_add(&csirs_disc_confirm_drops, 1, __ATOMIC_RELAXED);
-      guard = NULL;
-      return;
-    }
-  } else pthread_mutex_lock(guard);
+  /* Never discard a due confirmation because admission/export is reading the
+   * bank. Worker critical sections only update bounded candidate metadata;
+   * FEP, detection and ID sweeps execute outside this mutex. The buffers remain
+   * owned by this actor until scoring finishes. */
+  uint64_t lock_start=g_disc_fep_map?now_us():0;
+  pthread_mutex_lock(guard);
+  if(g_disc_fep_map) {
+    uint64_t wait=now_us()-lock_start;
+    if(wait>__atomic_load_n(&csirs_disc_confirm_wait_max_us,__ATOMIC_RELAXED))
+      __atomic_store_n(&csirs_disc_confirm_wait_max_us,wait,__ATOMIC_RELAXED);
+  }
   const c16_t *rxdataF_ant0 = (rxdataF != NULL) ? &rxdataF[0][0] : NULL;
   if (g_on < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND");

@@ -54,7 +54,7 @@ int csirs_td_parity(int mu, int rb, int sync, int cfo)
   nr_slot_fep_fo_override_hz=cfo==2 ? -721.25 : NAN;
   nr_csirs_disc_ring_t actual={0},expected={0};
   int rc=nr_csirs_disc_td_init(fp,4,16);
-  rc|=nr_csirs_disc_ring_init(&actual,4,rb,fp->slots_per_frame,16,false);
+  rc|=nr_csirs_disc_ring_init(&actual,4,rb,fp->slots_per_frame,16,parity_tolerance>0);
   rc|=nr_csirs_disc_ring_init(&expected,4,rb,fp->slots_per_frame,16,false);
   c16_t (*grid)[fp->samples_per_slot_wCP]=aligned_alloc(64,4*fp->samples_per_slot_wCP*sizeof(c16_t));
   const int16_t *ants[4];for(int a=0;a<4;++a) ants[a]=(const int16_t *)grid[a];
@@ -68,9 +68,18 @@ int csirs_td_parity(int mu, int rb, int sync, int cfo)
   /* Prove that deferred processing does not read capture-time mutable state. */
   ue.freq_offset=-2000;nr_slot_fep_fo_override_hz=55;
   for(int a=0;a<4;++a) memset(ue.common_vars.rxdata[a],0,2*fp->samples_per_frame*sizeof(c16_t));
+  uint64_t gpu_before=csirs_disc_fep_gpu_chunks;
   if(nr_csirs_disc_td_drain(&actual)!=5) rc=-2;
-  if(!rc) for(size_t k=0;k<5*actual.slot_stride;++k)
-    if(abs((int)actual.grid_base[k]-expected.grid_base[k])>parity_tolerance) {rc=-3;break;}
+  if(parity_tolerance && csirs_disc_fep_gpu_chunks!=gpu_before+1) rc=-5;
+  int maxerr=0;double mse=0;
+  for(size_t k=0;k<5*actual.slot_stride;++k) {
+    int error=abs((int)actual.grid_base[k]-expected.grid_base[k]);
+    if(error>maxerr) maxerr=error;
+    mse+=(double)error*error;
+  }
+  double rms=sqrt(mse/(5*actual.slot_stride));
+  if(parity_tolerance) printf("T9 FEP mu=%d rb=%d sync=%d cfo=%d max=%d LSB RMS=%.4f LSB\n",mu,rb,sync,cfo,maxerr,rms);
+  if(maxerr>parity_tolerance || (parity_tolerance && rms>16)) rc=-3;
   if(!rc && memcmp(actual.meta,expected.meta,5*sizeof(*actual.meta))) rc=-4;
   free(grid);nr_csirs_disc_ring_free(&actual);nr_csirs_disc_ring_free(&expected);cleanup();
   nr_slot_fep_fo_override_hz=NAN;
@@ -112,7 +121,8 @@ int csirs_td_gpu_parity(void)
 {
   parity_tolerance=64; /* two Q15 rotations after a <=32-LSB FFT tolerance */
   int rc=0;
-  for(int cfo=0;cfo<3 && !rc;++cfo) rc=csirs_td_parity(1,217,1,cfo);
+  for(int mu=0;mu<3 && !rc;++mu) for(int rb=216;rb<=217 && !rc;++rb)
+    for(int sync=0;sync<2 && !rc;++sync) for(int cfo=0;cfo<3 && !rc;++cfo) rc=csirs_td_parity(mu,rb,sync,cfo);
   parity_tolerance=0;
   return rc;
 }
@@ -160,4 +170,96 @@ int csirs_td_concurrent_reset(void)
   if(result || ring.written) rc=-2; // The in-flight old epoch was discarded.
   if(nr_csirs_disc_td_drain(&ring)!=1 || ring.meta[0].abs_slot!=9) rc=-3;
   nr_csirs_disc_ring_free(&ring);cleanup();return rc;
+}
+
+/* Same production drain and detector as live reception. The producer offers
+ * one owned TD slot every 500 us, with CFO enabled, for eleven seconds. */
+static uint64_t bench_batches,bench_slots,bench_max_us,bench_work_us,bench_last;
+static uint64_t bench_detect_max_us,bench_fep_last,bench_batch_max_us;
+static void bench_process(nr_csirs_disc_ring_t *r)
+{
+  double start=now();
+  nr_csirs_disc_metrics_t before,after;
+  nr_csirs_disc_get_metrics(&before);
+  nr_csirs_disc_process(r);
+  nr_csirs_disc_get_metrics(&after);
+  uint64_t elapsed=now()-start,slots=r->written-bench_last;
+  if(elapsed>bench_max_us) bench_max_us=elapsed;
+  uint64_t normalized=slots?(after.detect_us-before.detect_us)*100/slots:0;
+  if(normalized>bench_detect_max_us) bench_detect_max_us=normalized;
+  uint64_t fep=__atomic_load_n(&csirs_disc_fep_us,__ATOMIC_RELAXED);
+  if(elapsed+fep-bench_fep_last>bench_batch_max_us) bench_batch_max_us=elapsed+fep-bench_fep_last;
+  bench_fep_last=fep;
+  bench_work_us+=elapsed;bench_slots+=slots;bench_last=r->written;
+  __atomic_add_fetch(&bench_batches,1,__ATOMIC_RELEASE);
+}
+static bool bench_producer_done;
+static nr_csirs_disc_ring_t bench_ring;
+static void *bench_consume(void *unused)
+{
+  (void)unused;
+  for(;;) {
+    bool done=__atomic_load_n(&bench_producer_done,__ATOMIC_ACQUIRE);
+    int pending=nr_csirs_disc_td_pending();
+    if(done && !pending) break;
+    if(pending>=100 || (done && pending)) {
+      nr_csirs_disc_td_drain(&bench_ring);
+      bench_process(&bench_ring);
+    } else {
+      struct timespec delay={0,1000000};nanosleep(&delay,NULL);
+    }
+  }
+  return NULL;
+}
+int csirs_td_throughput(void)
+{
+  setup(1,217);ue.is_synchronized=true;ue.cont_fo_comp=true;ue.freq_offset=4100;
+  uint64_t fep0=csirs_disc_fep_us,gpu0=csirs_disc_fep_gpu_chunks,cpu0=csirs_disc_fep_cpu_chunks;
+  uint64_t drops0=csirs_disc_feed_drops,over0=csirs_disc_td_overflows;
+  uint64_t detect_gpu0=csirs_disc_gpu_detect_batches,detect_cpu0=csirs_disc_cpu_detect_batches;
+  uint64_t lattice_cpu0=csirs_disc_cpu_lattice_calls;
+  bench_batches=bench_slots=bench_last=bench_work_us=bench_max_us=bench_detect_max_us=0;
+  bench_fep_last=csirs_disc_fep_us;bench_batch_max_us=0;
+  nr_csirs_disc_detect_reset();
+  nr_csirs_disc_pipeline_init(&ue.frame_parms);
+  if(nr_csirs_disc_td_init(&ue.frame_parms,4,1024) || nr_csirs_disc_ring_init(&bench_ring,4,217,20,640,true)) {
+    cleanup();return -1;
+  }
+  bench_producer_done=false;
+  pthread_t consumer;
+  if(pthread_create(&consumer,NULL,bench_consume,NULL)) abort();
+  const int slots=22000;
+  double push_us=0,start=now();
+  int lost=0;
+  for(int i=0;i<slots;++i) {
+    double deadline=start+500.*i;
+    struct timespec ts={(time_t)(deadline/1e6),(long)(fmod(deadline,1e6)*1000)};
+    clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&ts,NULL);
+    double push_start=now();lost+=nr_csirs_disc_td_push(&ue,i,i/20%1024,i%20)<0;
+    push_us+=now()-push_start;
+  }
+  double producer_end=now();
+  __atomic_store_n(&bench_producer_done,true,__ATOMIC_RELEASE);
+  pthread_join(consumer,NULL); // final partial batch uses the same drain + detector
+  double end=now();
+  uint64_t fep=csirs_disc_fep_us-fep0;
+  double service=bench_slots*1e6/(fep+bench_work_us);
+  nr_csirs_disc_metrics_t metrics;nr_csirs_disc_get_metrics(&metrics);
+  printf("T9 PIPELINE offered=%d duration=%.3fs delivered=%llu wall_rate=%.1f service_rate=%.1f slots/s tail=%.3fms "
+         "push=%.2f fep=%.2f detect=%.2f hyp=%.2f sweep=%.2f us/slot "
+         "worst_batch=%.3fms worst_process=%.3fms worst_fep=%.3fms detect100_max=%.3fms drops=%d td_overflows=%llu "
+         "gpu_fep=%llu cpu_fep=%llu gpu_detect=%llu cpu_detect=%llu\n",
+         slots,(producer_end-start)/1e6,(unsigned long long)bench_slots,bench_slots*1e6/(end-start),service,
+         (end-producer_end)/1000,push_us/slots,(double)fep/slots,(double)metrics.detect_us/slots,
+         (double)metrics.hyp_us/slots,(double)metrics.sweep_us/slots,bench_batch_max_us/1000.,bench_max_us/1000.,csirs_disc_fep_max_us/1000.,
+         bench_detect_max_us/1000.,lost,(unsigned long long)(csirs_disc_td_overflows-over0),
+         (unsigned long long)(csirs_disc_fep_gpu_chunks-gpu0),(unsigned long long)(csirs_disc_fep_cpu_chunks-cpu0),
+         (unsigned long long)(csirs_disc_gpu_detect_batches-detect_gpu0),(unsigned long long)(csirs_disc_cpu_detect_batches-detect_cpu0));
+  int rc=lost || bench_slots!=slots || csirs_disc_feed_drops!=drops0 || csirs_disc_td_overflows!=over0
+      || csirs_disc_fep_cpu_chunks!=cpu0 || csirs_disc_cpu_detect_batches!=detect_cpu0
+      || csirs_disc_cpu_lattice_calls!=lattice_cpu0
+      || csirs_disc_fep_gpu_chunks==gpu0 || csirs_disc_gpu_detect_batches==detect_gpu0
+      || service<2000 || bench_detect_max_us>=25000 || end-producer_end>100000;
+  nr_csirs_disc_ring_free(&bench_ring);
+  nr_csirs_disc_detect_reset();cleanup();return rc?-2:0;
 }

@@ -374,7 +374,8 @@ TEST(CsirsDisc, StatefulGpuMatchesCpu)
   const auto *ops=nr_csirs_disc_gpu_load();
   if(!ops || !ops->footprints) GTEST_SKIP()<<"CUDA unavailable: run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.StatefulGpuMatchesCpu";
   ASSERT_NE(ops->normalize,nullptr);
-  auto c=resource(2);c.period=160;c.offset=159;c.rb_start=3;c.n_rb=9;auto cfg=config(&c);cfg.n_rb=16;cfg.n_slots=100;
+  ASSERT_NE(ops->accumulate,nullptr);ASSERT_NE(ops->lattice,nullptr);
+  auto c=resource(2);c.period=160;c.offset=159;c.rb_start=3;c.n_rb=9;auto cfg=config(&c);cfg.n_rb=37;cfg.n_slots=100;
   auto e=exclusions(cfg.n_rb);nr_csirs_disc_fp_cfg_t fc={0,e.data(),1.03f};
   std::vector<std::vector<nr_csirs_disc_fp_t>> cpu;
   for(const char *backend:{"cpu","gpu","managed"}) {
@@ -390,7 +391,14 @@ TEST(CsirsDisc, StatefulGpuMatchesCpu)
         std::vector<uint32_t> reference(x.size());nr_disc_fp_normalize(&batch.r,&fc,reference.data());
         ASSERT_EQ(x,reference);
       }
+      uint64_t gpu_before=csirs_disc_gpu_detect_batches,cpu_before=csirs_disc_cpu_detect_batches;
+      uint64_t lattice_cpu=csirs_disc_cpu_lattice_calls;
       stream.push(batch.r);auto out=detect(stream,fc);
+      if(strcmp(backend,"cpu")) {
+        EXPECT_EQ(csirs_disc_gpu_detect_batches,gpu_before+1);
+        EXPECT_EQ(csirs_disc_cpu_detect_batches,cpu_before);
+        EXPECT_EQ(csirs_disc_cpu_lattice_calls,lattice_cpu);
+      }
       if(!strcmp(backend,"cpu")) cpu.push_back(out);
       else {
         const auto &ref=cpu[fed/100];ASSERT_EQ(out.size(),ref.size())<<"fed="<<fed;

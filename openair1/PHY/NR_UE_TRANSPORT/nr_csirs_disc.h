@@ -163,6 +163,26 @@ int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *, nr_csirs_disc_hyp_t *
 int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int n_hyp,
                                  const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out);
 
+/* T9 additive worker-only FEP API. Input and destination grids are managed.
+ * offset is the original sample offset (CFO phase), stride is in complex samples.
+ * rotation_mode: 0 SSE truncation, 1 ARM rounded multiply, 2 ARM RDM. */
+typedef struct {
+  const int16_t *samples;
+  unsigned offset[14];
+  int16_t rotation[28];
+  double fo;
+  bool compensate;
+} nr_csirs_disc_fep_slot_t;
+typedef struct {
+  int fft, n_ant, n_rb, first_carrier, samples_per_ms, rotation_mode;
+  size_t stride;
+  const int16_t *timeshift;
+} nr_csirs_disc_fep_cfg_t;
+/* Worker reserves complete entries before device writes; end publishes metadata
+ * only after device completion. A NULL meta cancels (invalidates overwritten IQ). */
+int nr_csirs_disc_ring_write_begin(nr_csirs_disc_ring_t *, int count);
+void nr_csirs_disc_ring_write_end(nr_csirs_disc_ring_t *, int count, const nr_csirs_disc_slot_meta_t *);
+
 /* GPU backends (dlopen'd module like pdsch_gpu; NULL/negative when absent). Same semantics as the CPU versions. */
 typedef struct {
   int (*footprints)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *, nr_csirs_disc_fp_t *, int);
@@ -173,6 +193,18 @@ typedef struct {
   int (*normalize)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *, uint32_t *);
   /* T8 packed unitary FFT: [transforms][fft] interleaved int16 IQ. */
   int (*fft)(int fft, int transforms, const int16_t *in, int16_t *out);
+  int (*fep)(const nr_csirs_disc_fep_cfg_t *, const nr_csirs_disc_fep_slot_t *, int,
+             nr_csirs_disc_ring_t *, int first);
+  /* Tiled local normalization + incremental sufficient statistics, exact Q12.
+   * Arrays are managed; on failure caller must discard history before retry. */
+  int (*accumulate)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *,
+                    uint64_t *sum, uint64_t *sq, uint64_t *sum80, uint64_t *sum64,
+                    uint64_t *total, uint64_t *totalq);
+  /* Read-only lattice screen. Output [period][14][ceil(n_rb/16)][6]
+   * masks in CPU tile/component order, including first-tile duplicate policy. */
+  int (*lattice)(int n_rb, int period, uint64_t nt, const uint64_t *counts,
+                 const uint64_t *sum, const uint64_t *sq, const uint64_t *total,
+                 const uint64_t *totalq, uint16_t *masks);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by ISAC_CSIRS_DISC=1 and BACKEND=auto|cpu|gpu.
@@ -186,6 +218,8 @@ typedef struct {
   uint64_t feed_drops, gpu_batches, cpu_batches, batch_us;
   uint64_t detect_us, hyp_us, sweep_us; /* additive stage timing */
 } nr_csirs_disc_metrics_t;
+extern uint64_t csirs_disc_gpu_detect_batches, csirs_disc_cpu_detect_batches;
+extern uint64_t csirs_disc_gpu_lattice_calls, csirs_disc_cpu_lattice_calls;
 void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *out);
 
 #ifdef __cplusplus

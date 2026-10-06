@@ -49,6 +49,8 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *hyp, const nr_cs
 /** True when this exact U5 geometry is already in the confirmed NZP bank. */
 bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *hyp);
 /** Withdraw discovery-owned runtime state on cell epoch/synchronisation loss. */
+/* Startup only, before discovery worker/DL actors. */
+void nr_csirs_blind_rt_discovery_init(void);
 void nr_csirs_blind_rt_discovery_reset(void);
 /** Every confirmed cell CSI-RS resource occurring in `absolute_slot`, as FAPI PDUs for PDSCH rate
  *  matching: NZP (csi_type 1) first, then ZERO-POWER (csi_type 2, REs to rate-match around, nothing
