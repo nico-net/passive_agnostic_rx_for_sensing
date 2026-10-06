@@ -19,9 +19,48 @@ extern bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *) _
 extern void nr_csirs_blind_rt_discovery_reset(void) __attribute__((weak));
 extern void nr_csirs_monitor_remove_dynamic_all(void) __attribute__((weak));
 
+#define DISC_VIEWS 128
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_csirs_disc_metrics_t g_metrics;
+static pthread_mutex_t pipeline_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct {nr_csirs_disc_hyp_t h; uint64_t written; bool accepted;} sweep_cache_t;
+static sweep_cache_t cache[256];
+static int cache_count;
+static struct {nr_csirs_disc_hyp_t h;uint16_t id;} qualified[256];
+static int qualified_count;
+static const int16_t *cache_grid;
+static uint64_t cache_written;
+static bool same_seed(const nr_csirs_disc_hyp_t *a, const nr_csirs_disc_hyp_t *b)
+{
+  int lo=a->rb_start>b->rb_start?a->rb_start:b->rb_start;
+  int hi=a->rb_start+a->n_rb<b->rb_start+b->n_rb?a->rb_start+a->n_rb:b->rb_start+b->n_rb;
+  return 5*(hi-lo)>=4*(a->n_rb>b->n_rb?a->n_rb:b->n_rb) && a->row==b->row && a->freq_domain==b->freq_domain && a->symb_l0==b->symb_l0 && a->symb_l1==b->symb_l1
+      && a->cdm_type==b->cdm_type && a->density==b->density && a->period==b->period && a->offset==b->offset
+      && a->rb_start < b->rb_start+b->n_rb && b->rb_start < a->rb_start+a->n_rb;
+}
+static bool cached(const nr_csirs_disc_hyp_t *h, uint64_t written)
+{
+  for(int i=0;i<cache_count;++i) if(same_seed(h,&cache[i].h)) {
+    uint64_t delay=3*h->period>2000?3*h->period:2000;
+    if(cache[i].accepted || written-cache[i].written<delay) return true;
+  }
+  return false;
+}
+static void cache_result(const nr_csirs_disc_hyp_t *h, uint64_t written, bool accepted)
+{
+  int at=-1;
+  for(int i=0;i<cache_count;++i) if(same_seed(h,&cache[i].h)) {at=i;break;}
+  if(at<0) at=cache_count<256?cache_count++:(int)(written%256);
+  cache[at]=(sweep_cache_t){*h,written,accepted};
+}
+
+static bool same_extent(const nr_csirs_disc_fp_t *a,const nr_csirs_disc_fp_t *b)
+{
+  int lo=a->rb_start>b->rb_start?a->rb_start:b->rb_start;
+  int hi=a->rb_start+a->n_rb<b->rb_start+b->n_rb?a->rb_start+a->n_rb:b->rb_start+b->n_rb;
+  return hi>lo && 5*(hi-lo)>=4*(a->n_rb>b->n_rb?a->n_rb:b->n_rb);
+}
 
 static uint64_t now_us(void)
 {
@@ -47,17 +86,16 @@ static int delta_limit(const nr_csirs_disc_ring_t *ring)
 static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 {
   (void)snapshot;
+  pthread_mutex_lock(&pipeline_lock);
+  cache_count=qualified_count=0;cache_grid=NULL;cache_written=0;
   nr_csirs_disc_detect_reset();
   if (nr_csirs_blind_rt_discovery_reset)
     nr_csirs_blind_rt_discovery_reset();
   if (nr_csirs_monitor_remove_dynamic_all)
     nr_csirs_monitor_remove_dynamic_all();
   nr_csirs_disc_ring_t *ring = nr_csirs_disc_worker_ring();
-  if (ring && ring->private_state && nr_csirs_disc_ring_read_lock(ring)) {
-    memset(ring->meta, 0, (size_t)ring->capacity * sizeof(*ring->meta));
-    ring->written = 0;
-    nr_csirs_disc_ring_read_unlock(ring);
-  }
+  nr_csirs_disc_ring_reset(ring);
+  pthread_mutex_unlock(&pipeline_lock);
 }
 
 static void init_once(void)
@@ -79,18 +117,26 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
 {
   if (!ring || !nr_csirs_disc_enabled())
     return;
+  pthread_mutex_lock(&pipeline_lock);
+  if(!nr_csirs_disc_ring_snapshot_current(ring)) {pthread_mutex_unlock(&pipeline_lock);return;}
+  if(cache_grid!=ring->grid_base || ring->written<cache_written) cache_count=qualified_count=0;
+  cache_grid=ring->grid_base;cache_written=ring->written;
   const uint64_t begin = now_us();
-  nr_csirs_disc_fp_t fps[NR_CSIRS_DISC_MAX_FP];
+  nr_csirs_disc_fp_t fps[DISC_VIEWS];
   nr_csirs_disc_hyp_t all_hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_hyp_t hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_win_t wins[NR_CSIRS_DISC_MAX_HYP];
   const nr_csirs_disc_fp_cfg_t fp_cfg = {.min_strength = 1.03f};
 
-  /* This is deliberately the detector's sole call for this batch. It owns GPU/CPU
-   * footprint fallback and T2b's cross-ring history. */
-  const int n_fp = nr_csirs_disc_detect(ring, &fp_cfg, fps, NR_CSIRS_DISC_MAX_FP);
-  if (n_fp < 0)
-    return;
+  /* CPU detection folds every new slot and schedules all legal periods. GPU
+   * acceleration is reserved for the sequence sweep. */
+  int n_fp = nr_csirs_disc_detect_candidates(ring, &fp_cfg, fps, 64);
+  if(n_fp<0) { /* Recover after a full ring overrun; unavailable IQ cannot be folded. */
+    nr_csirs_disc_detect_reset();
+    n_fp=nr_csirs_disc_detect_candidates(ring,&fp_cfg,fps,64);
+  }
+  const uint64_t detected = now_us();
+  if (n_fp < 0) {pthread_mutex_unlock(&pipeline_lock);return;}
   for (int i = 0; i < n_fp; ++i)
     LOG_I(PHY,
           "SENSING: CSIRS_DISC FOOTPRINT sym=0x%x sc=0x%x dens=%u rb=%u:%u P/O=%u/%u strength=%.3f\n",
@@ -103,15 +149,26 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
           fps[i].offset,
           fps[i].strength);
 
+  /* Keep all single-symbol row-1 views adjacent in priority order. */
+  int n_views=n_fp;
+  for(int i=0;i<n_views;++i) if(fps[i].density==3 && __builtin_popcount(fps[i].sym_mask)>1) {
+    unsigned symbols=fps[i].sym_mask;
+    fps[i].sym_mask=symbols&-symbols;symbols &= symbols-1;
+    while(symbols && n_views<DISC_VIEWS) {
+      memmove(&fps[i+2],&fps[i+1],(n_views-i-1)*sizeof(*fps));
+      fps[i+1]=fps[i];fps[i+1].sym_mask=symbols&-symbols;
+      symbols &= symbols-1;++n_views;++i;
+    }
+  }
   /* Multi-symbol/CDM rows can appear as one detector footprint per distinct
    * per-symbol comb. Add bounded union views; U3 accepts one only when the
    * union is an exact legal 38.211 row, so unrelated colocated pilots do not
    * become candidates. Preserve the detector outputs for narrow rows. */
-  int n_fp_hyp = n_fp;
-  for (int i = 0; i < n_fp && n_fp_hyp < NR_CSIRS_DISC_MAX_FP; ++i)
-    for (int j = i + 1; j < n_fp && n_fp_hyp < NR_CSIRS_DISC_MAX_FP; ++j)
-      if (fps[i].period == fps[j].period && fps[i].offset == fps[j].offset && fps[i].density == fps[j].density
-          && fps[i].rb_start == fps[j].rb_start && fps[i].n_rb == fps[j].n_rb) {
+  int n_fp_hyp = n_views;
+  for (int i = 0; i < n_views && n_fp_hyp < DISC_VIEWS; ++i)
+    for (int j = i + 1; j < n_views && n_fp_hyp < DISC_VIEWS; ++j)
+      if (fps[i].density != 3 && fps[i].period == fps[j].period && fps[i].offset == fps[j].offset && fps[i].density == fps[j].density
+          && same_extent(&fps[i],&fps[j])) {
         nr_csirs_disc_fp_t u = fps[i];
         u.sym_mask |= fps[j].sym_mask;
         u.sc_mask |= fps[j].sc_mask;
@@ -124,11 +181,11 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         if (!duplicate)
           fps[n_fp_hyp++] = u;
       }
-  for (int i = 0; i < n_fp && n_fp_hyp < NR_CSIRS_DISC_MAX_FP; ++i) {
+  for (int i = 0; i < n_views && n_fp_hyp < DISC_VIEWS; ++i) {
     nr_csirs_disc_fp_t u = fps[i];
-    for (int j = i + 1; j < n_fp; ++j)
+    for (int j = i + 1; j < n_views; ++j)
       if (u.period == fps[j].period && u.offset == fps[j].offset && u.density == fps[j].density
-          && u.rb_start == fps[j].rb_start && u.n_rb == fps[j].n_rb) {
+          && same_extent(&u,&fps[j])) {
         u.sym_mask |= fps[j].sym_mask;
         u.sc_mask |= fps[j].sc_mask;
         if (fps[j].strength < u.strength)
@@ -143,38 +200,56 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       fps[n_fp_hyp++] = u;
   }
 
+  const nr_csirs_disc_gpu_ops_t *ops = nr_csirs_disc_gpu_load();
+  int budget = sweep_limit();
   const int n_all = nr_csirs_disc_hypotheses(fps, n_fp_hyp, all_hyps, NR_CSIRS_DISC_MAX_HYP);
   int n_hyp = 0;
-  for (int i = 0; i < n_all && n_hyp < sweep_limit(); ++i)
-    if (!nr_csirs_blind_rt_discovery_confirmed || !nr_csirs_blind_rt_discovery_confirmed(&all_hyps[i]))
+  for (int i = 0; i < n_all && n_hyp < budget; ++i)
+    if (!cached(&all_hyps[i],ring->written)
+        && (!nr_csirs_blind_rt_discovery_confirmed || !nr_csirs_blind_rt_discovery_confirmed(&all_hyps[i])))
       hyps[n_hyp++] = all_hyps[i];
   LOG_I(PHY, "SENSING: CSIRS_DISC HYPOTHESES n=%d sweep=%d\n", n_all, n_hyp);
 
+  const uint64_t built = now_us();
   int n_win = 0;
   bool gpu = false;
   const nr_csirs_disc_sweep_cfg_t sweep_cfg = {
-      .id_first = 0, .id_count = 1024, .delta_max = delta_limit(ring), .block_re = 32};
-  const nr_csirs_disc_gpu_ops_t *ops = nr_csirs_disc_gpu_load();
+      .id_first = 0, .id_count = 1024, .delta_max = delta_limit(ring), .block_re = 32, .max_slots = 4};
   if (n_hyp > 0 && ops && ops->sweep) {
     n_win = ops->sweep(ring, hyps, n_hyp, &sweep_cfg, wins);
     gpu = n_win >= 0;
   }
   if (n_hyp > 0 && n_win < 0)
     n_win = 0;
-  if (n_hyp > 0 && !gpu)
-    n_win = nr_csirs_disc_sweep_cpu(ring, hyps, n_hyp, &sweep_cfg, wins);
+  if (n_hyp > 0 && !gpu) {
+    n_win=0;
+    for(int i=0;i<n_hyp;++i) {
+      /* Expensive multiport hypotheses first face a bounded CPU screen. The
+       * complete geometry/occasion sweep is still mandatory for admission. */
+      nr_csirs_disc_hyp_t coarse=hyps[i];
+      nr_csirs_disc_sweep_cfg_t screen=sweep_cfg;screen.max_slots=1;
+      if(coarse.n_rb>24) coarse.n_rb=24;
+      int ok=1;
+      if(hyps[i].row>2) {
+        ok=nr_csirs_disc_sweep_cpu(ring,&coarse,1,&screen,&wins[i]);
+        if(ok==1 && wins[i].z>=3) ok=nr_csirs_disc_sweep_cpu(ring,&hyps[i],1,&sweep_cfg,&wins[i]);
+      } else ok=nr_csirs_disc_sweep_cpu(ring,&hyps[i],1,&sweep_cfg,&wins[i]);
+      if(ok!=1) break;
+      wins[i].hyp_index=i;++n_win;
+    }
+  }
 
   uint64_t winners = 0, ambiguous = 0;
   if (n_win > 0) {
-    int best[NR_CSIRS_DISC_MAX_FP], leader[NR_CSIRS_DISC_MAX_FP];
-    for (int f = 0; f < NR_CSIRS_DISC_MAX_FP; ++f)
+    int best[DISC_VIEWS], leader[DISC_VIEWS];
+    for (int f = 0; f < DISC_VIEWS; ++f)
       best[f] = leader[f] = -1;
     for (int i = 0; i < n_win; ++i) {
       const nr_csirs_disc_win_t *w = &wins[i];
       if (w->hyp_index < 0 || w->hyp_index >= n_hyp)
         continue;
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
-      if (h->fp_index >= NR_CSIRS_DISC_MAX_FP)
+      if (h->fp_index >= DISC_VIEWS)
         continue;
       if (getenv("ISAC_CSIRS_DISC_DIAG"))
         LOG_I(PHY,
@@ -198,16 +273,8 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         best[h->fp_index] = i;
     }
 
-    for (int f = 0; f < NR_CSIRS_DISC_MAX_FP; ++f)
-      if (best[f] >= 0 && leader[f] >= 0 && best[f] != leader[f]) {
-        wins[best[f]].scramb_id = wins[leader[f]].scramb_id;
-        wins[best[f]].slot_delta = wins[leader[f]].slot_delta;
-        wins[best[f]].z = wins[leader[f]].z;
-        wins[best[f]].z_second = wins[leader[f]].z_second;
-      }
-
-    int selected[NR_CSIRS_DISC_MAX_FP], n_selected = 0;
-    for (int f = 0; f < NR_CSIRS_DISC_MAX_FP; ++f) {
+    int selected[DISC_VIEWS], n_selected = 0;
+    for (int f = 0; f < DISC_VIEWS; ++f) {
       const int i = best[f];
       if (i < 0)
         continue;
@@ -219,7 +286,9 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         for (int k = 0; k < n_selected; ++k) {
           const nr_csirs_disc_win_t *other_w = &wins[selected[k]];
           const nr_csirs_disc_hyp_t *other_h = &hyps[other_w->hyp_index];
-          if (other_w->scramb_id == w->scramb_id && other_h->rb_start == h->rb_start && other_h->n_rb == h->n_rb) {
+          if (other_h->period == h->period && other_h->offset == h->offset
+              && (fps[other_h->fp_index].sym_mask & fps[h->fp_index].sym_mask)
+              && other_w->scramb_id == w->scramb_id && other_h->rb_start == h->rb_start && other_h->n_rb == h->n_rb) {
             const int symbols = __builtin_popcount((unsigned)fps[h->fp_index].sym_mask);
             const int other_symbols = __builtin_popcount((unsigned)fps[other_h->fp_index].sym_mask);
             if (w->z > other_w->z + 0.1f || (w->z + 0.1f >= other_w->z && symbols > other_symbols))
@@ -231,11 +300,12 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         }
         if (replace >= 0)
           selected[replace] = i;
-        else if (replace == -1 && n_selected < NR_CSIRS_DISC_MAX_FP)
+        else if (replace == -1 && n_selected < DISC_VIEWS)
           selected[n_selected++] = i;
       } else {
         ambiguous++;
-        LOG_I(PHY,
+        cache_result(h,ring->written,false);
+        if(ambiguous==1 && g_metrics.batches%20==0) LOG_I(PHY,
               "SENSING: CSIRS_DISC AMBIGUOUS row=%u fd=%u l0=%u l1=%u id=%u z=%.2f z2=%.2f P/O=%u/%u\n",
               h->row,
               h->freq_domain,
@@ -251,9 +321,28 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
 
     for (int k = 0; k < n_selected; ++k) {
       const nr_csirs_disc_win_t *w = &wins[selected[k]];
-      const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
-      if (nr_csirs_blind_rt_add_discovered && nr_csirs_blind_rt_add_discovered(h, w) >= 0)
+      const int original_index=w->hyp_index;
+      nr_csirs_disc_hyp_t refined = hyps[w->hyp_index];
+      if (nr_csirs_disc_refine_cpu(ring, &refined, w) < 0) continue;
+      /* A weaker burst phase must not create a cropped clone of a wider,
+       * already sequence-qualified resource. Reuse that measured geometry and
+       * verify the entire extent again on this phase before admission. */
+      for(int q=0;q<qualified_count;++q) if(qualified[q].id==w->scramb_id) {
+        nr_csirs_disc_hyp_t canonical=qualified[q].h;canonical.offset=refined.offset;
+        if(canonical.n_rb>refined.n_rb && same_seed(&canonical,&refined)) refined=canonical;
+      }
+      nr_csirs_disc_win_t verified;
+      if(nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified)!=1
+          || verified.z<4 || verified.z-verified.z_second<1.5f || verified.scramb_id!=w->scramb_id) continue;
+      w=&verified;
+      const nr_csirs_disc_hyp_t *h = &refined;
+      if (nr_csirs_blind_rt_add_discovered && nr_csirs_blind_rt_add_discovered(h, w) >= 0) {
         winners++;
+        if(qualified_count<256) {
+          qualified[qualified_count].h=*h;qualified[qualified_count++].id=w->scramb_id;
+        }
+        cache_result(&hyps[original_index],ring->written,true);
+      }
       LOG_A(PHY,
             "SENSING: CSIRS_DISC WINNER row=%u fd=%u l0=%u l1=%u cdm=%u dens=%u rb=%u:%u id=%u delta=%d z=%.2f z2=%.2f P/O=%u/%u\n",
             h->row,
@@ -274,6 +363,9 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   }
 
   pthread_mutex_lock(&g_lock);
+  g_metrics.detect_us += detected - begin;
+  g_metrics.hyp_us += built - detected;
+  g_metrics.sweep_us += now_us() - built;
   g_metrics.batches++;
   g_metrics.footprints += (uint64_t)n_fp;
   g_metrics.hyps += (uint64_t)n_all;
@@ -284,6 +376,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   g_metrics.cpu_batches += !gpu;
   g_metrics.batch_us += now_us() - begin;
   pthread_mutex_unlock(&g_lock);
+  pthread_mutex_unlock(&pipeline_lock);
 }
 
 void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *out)

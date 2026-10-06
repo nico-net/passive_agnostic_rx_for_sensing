@@ -79,8 +79,8 @@ static int g_disc = -1;
 static bool nzp_observer_score(int idx, uint32_t slot, double rho)
 {
   if (!g_reconf) return false;
-  int due[NR_CSIRS_BLIND_MAX_CONF];
-  const int n_due = nr_csirs_blind_occurring(&g_st, slot, due, NR_CSIRS_BLIND_MAX_CONF);
+  int due[NR_CSIRS_BLIND_DISC_MAX_CONF];
+  const int n_due = nr_csirs_blind_occurring(&g_st, slot, due, NR_CSIRS_BLIND_DISC_MAX_CONF);
   for (int j = 0; j < n_due; ++j)
     if (due[j] == idx)
       for (int k = 0; k < g_st.n_conf; ++k)
@@ -219,8 +219,10 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
     pthread_mutex_unlock(&g_csirs_state_lock);
     return -1;
   }
+  g_st.discovery_bank=true;
   if (!g_armed) {
     discovery_empty_state(&g_st);
+    g_st.discovery_bank=true;
     discovery_empty_state(&g_zp);
     g_armed = 1;
   }
@@ -234,41 +236,25 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
                             .start_rb = h->rb_start,
                             .nr_of_rbs = h->n_rb,
                             .slot_delta = w->slot_delta};
-  int at = nr_csirs_blind_append(&g_st, &c);
-  if (at < 0) {
-    for (int i = 0; i < g_st.n; ++i)
-      if (same_candidate(&g_st.cand[i], &c)) {
-        at = i;
-        g_st.cand[i].scramb_id = c.scramb_id;
-        g_st.cand[i].slot_delta = c.slot_delta;
-        break;
-      }
-    if (at < 0 && g_st.n < NR_CSIRS_BLIND_MAX_CAND) {
-      at = g_st.n++;
-      g_st.cand[at] = c;
-    }
-  }
-  int zat = nr_csirs_blind_append(&g_zp, &c);
-  if (zat < 0) {
-    for (int i = 0; i < g_zp.n; ++i)
-      if (same_candidate(&g_zp.cand[i], &c)) {
-        zat = i;
-        g_zp.cand[i].scramb_id = c.scramb_id;
-        g_zp.cand[i].slot_delta = c.slot_delta;
-        break;
-      }
-    if (zat < 0 && g_zp.n < NR_CSIRS_BLIND_MAX_CAND) {
-      zat = g_zp.n++;
-      g_zp.cand[zat] = c;
-    }
-  }
-  if (at >= 0 && zat == at) {
-    nr_csirs_blind_seed(&g_st, at, h->period, h->offset, w->slot_delta);
-    nr_csirs_blind_seed(&g_zp, zat, h->period, h->offset, w->slot_delta);
-    nr_csirs_blind_pin(&g_st, at, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
-    nr_csirs_blind_pin(&g_zp, zat, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
-  } else {
-    at = -1;
+  int at=-1;
+  for (int i=0;i<g_st.n;++i)
+    if (same_candidate(&g_st.cand[i],&c) && g_st.cand[i].scramb_id == c.scramb_id
+        && g_st.seed_period[i] == h->period
+        && (h->offset==g_st.seed_offset[i]
+            || (g_st.seed_n_off[i]==2 && h->offset==g_st.seed_offset2[i])
+            || (g_st.seed_n_off[i]<2 && !nr_csirs_blind_is_confirmed(&g_st,i)))) {at=i;break;}
+  if (at < 0 && g_st.n < NR_CSIRS_BLIND_MAX_CAND && g_st.n == g_zp.n) {
+    at=g_st.n++;
+    g_zp.n++;
+    g_st.cand[at]=g_zp.cand[at]=c;
+    nr_csirs_blind_seed(&g_st,at,h->period,h->offset,w->slot_delta);
+    nr_csirs_blind_seed(&g_zp,at,h->period,h->offset,w->slot_delta);
+  } else if (at >= 0 && h->offset != g_st.seed_offset[at]
+             && g_st.seed_n_off[at] < 2 && !nr_csirs_blind_is_confirmed(&g_st,at)) {
+    g_st.seed_offset2[at]=g_zp.seed_offset2[at]=h->offset;
+    g_st.seed_n_off[at]=g_zp.seed_n_off[at]=2;
+    /* Preserve already scored, distinct slots; record_hit requires three
+     * independent hits on EACH admitted phase before confirming the burst. */
   }
   pthread_mutex_unlock(&g_csirs_state_lock);
   return at;
@@ -284,7 +270,10 @@ bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *h)
     const nr_csirs_candidate_t *c = &g_st.cand[g_st.conf_idx[k]];
     confirmed = c->row == h->row && c->freq_domain == h->freq_domain && c->symb_l0 == h->symb_l0
         && c->symb_l1 == h->symb_l1 && c->cdm_type == h->cdm_type && c->freq_density == h->density
-        && c->start_rb == h->rb_start && c->nr_of_rbs == h->n_rb;
+        && c->start_rb == h->rb_start && c->nr_of_rbs == h->n_rb
+        && g_st.conf_period[k] == h->period
+        && (g_st.conf_off[k][0] == h->offset
+            || (g_st.conf_n_off[k] == 2 && g_st.conf_off[k][1] == h->offset));
   }
   pthread_mutex_unlock(&g_csirs_state_lock);
   return confirmed;
@@ -295,6 +284,7 @@ void nr_csirs_blind_rt_discovery_reset(void)
   pthread_mutex_lock(&g_csirs_state_lock);
   if (g_disc > 0) {
     discovery_empty_state(&g_st);
+    g_st.discovery_bank=true;
     discovery_empty_state(&g_zp);
     g_armed = 1;
     g_conf_logged = 0;
@@ -542,6 +532,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
      * would cost three orders of magnitude for a parameter that can simply be tried first. */
     if (g_disc > 0) {
       discovery_empty_state(&g_st);
+      g_st.discovery_bank=true;
       discovery_empty_state(&g_zp);
     } else {
       if (nr_csirs_blind_init(&g_st, fp->N_RB_DL, fp->Nid_cell) <= 0) {
@@ -700,7 +691,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Shared bounded admission bank: exported maintenance plus unexported probation
    * and divisor probes, even when NZP has retired the geometry. This list is NOT
    * the rate-match bank. At most MAX_CONF scores plus one ordinary discovery. */
-  int occurring[NR_CSIRS_BLIND_MAX_CONF];
+  int occurring[NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n = nr_csirs_blind_zp_due(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
   for (int k = 0; k < n; k++) {
     g_zp_maint[occurring[k]].scheduled++;
@@ -719,7 +710,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
      * seeded confirmation path must reject. */
     for (int i = 0; i < g_st.n; ++i)
       if (!nr_csirs_blind_is_confirmed(&g_st, i) && g_st.seed_period[i]
-          && absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i])
+          && (absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i]
+              || (g_st.seed_n_off[i] == 2 && absolute_slot % g_st.seed_period[i] == g_st.seed_offset2[i])))
         score_candidate(ue, slot, absolute_slot, rxdataF, i, false, false);
   }
   static int s_per_slot = -1;
@@ -763,8 +755,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Re-score confirmed NZP occasions only with reconfiguration detection enabled.
    * The search bank remains intact; four scored misses produce one SOFT signal. */
   if (g_reconf && nr_cfg_epoch_note_csirs_map_change) {
-    int due[NR_CSIRS_BLIND_MAX_CONF];
-    const int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, due, NR_CSIRS_BLIND_MAX_CONF);
+    int due[NR_CSIRS_BLIND_DISC_MAX_CONF];
+    const int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, due, NR_CSIRS_BLIND_DISC_MAX_CONF);
     for (int k = 0; k < nn; ++k)
       if (due[k] != idx) score_candidate(ue, slot, absolute_slot, rxdataF, due[k], false, true);
   }
@@ -1334,8 +1326,8 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
   if (!out || pthread_mutex_trylock(&g_csirs_state_lock) != 0) return false;
   bool found = false;
   if (g_on > 0 && g_armed != 0 && g_rank <= 0) {
-    int idx[NR_CSIRS_BLIND_MAX_CONF];
-    const int n = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_MAX_CONF);
+    int idx[NR_CSIRS_BLIND_DISC_MAX_CONF];
+    const int n = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_DISC_MAX_CONF);
     if (n > 0) {
       fill_pdu(&g_st.cand[idx[0]], 1 /* confirmed NZP */, out);
       found = true;
@@ -1351,11 +1343,11 @@ int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_c
   /* Ranking is diagnostic only: neither newly confirmed NZP nor retained ZP may alter PDSCH. */
   if (out == NULL || max <= 0 || g_on <= 0 || g_armed == 0 || g_rank > 0)
     return 0;
-  int n = 0, idx[NR_CSIRS_BLIND_MAX_CONF];
-  const int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_MAX_CONF);
+  int n = 0, idx[NR_CSIRS_BLIND_DISC_MAX_CONF];
+  const int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_DISC_MAX_CONF);
   for (int i = 0; i < nn && n < max; i++)
     fill_pdu(&g_st.cand[idx[i]], 1 /* NZP */, &out[n++]);
-  const int nz = nr_csirs_blind_occurring(&g_zp, absolute_slot, idx, NR_CSIRS_BLIND_MAX_CONF);
+  const int nz = nr_csirs_blind_occurring(&g_zp, absolute_slot, idx, NR_CSIRS_BLIND_DISC_MAX_CONF);
   for (int i = 0; i < nz && n < max; i++)
   {
     fill_pdu(&g_zp.cand[idx[i]], 2 /* ZP: rate matching only, no estimation */, &out[n++]);

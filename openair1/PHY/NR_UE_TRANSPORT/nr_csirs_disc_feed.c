@@ -23,10 +23,15 @@ uint64_t csirs_disc_feed_drops;
 typedef struct {
   pthread_mutex_t read_lock;
   bool unified_hook;
+  pthread_mutex_t *entry_lock;
+  uint64_t *serial;
+  uint64_t epoch;
+  const nr_csirs_disc_ring_t *source;
 } ring_private_t;
 
 typedef struct {
   nr_csirs_disc_ring_t ring;
+  nr_csirs_disc_ring_t snapshot;
   pthread_t thread;
   pthread_mutex_t wake_lock;
   pthread_cond_t wake_cv;
@@ -125,6 +130,15 @@ int nr_csirs_disc_ring_init(nr_csirs_disc_ring_t *r, int n_ant, int n_rb, int sl
     return -1;
   }
   memset(r->grid_base, 0, grid_bytes);
+  state->entry_lock = calloc(capacity, sizeof(*state->entry_lock));
+  state->serial = calloc(capacity, sizeof(*state->serial));
+  if (!state->entry_lock || !state->serial) {
+    free(state->entry_lock); free(state->serial);
+    if (state->unified_hook && nr_csirs_disc_free_unified) nr_csirs_disc_free_unified(r->grid_base);
+    else free(r->grid_base);
+    free(r->meta); pthread_mutex_destroy(&state->read_lock); free(state); memset(r,0,sizeof(*r)); return -1;
+  }
+  for (int i=0;i<capacity;++i) pthread_mutex_init(&state->entry_lock[i],NULL);
   r->private_state = state;
   return 0;
 }
@@ -142,6 +156,8 @@ void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r)
   }
   free(r->meta);
   if (state != NULL) {
+    for (int i=0;i<r->capacity;++i) pthread_mutex_destroy(&state->entry_lock[i]);
+    free(state->entry_lock); free(state->serial);
     pthread_mutex_destroy(&state->read_lock);
     free(state);
   }
@@ -159,6 +175,55 @@ void nr_csirs_disc_ring_read_unlock(nr_csirs_disc_ring_t *r)
   ring_private_t *state = r != NULL ? r->private_state : NULL;
   if (state != NULL)
     pthread_mutex_unlock(&state->read_lock);
+}
+
+/* Epoch reset is rare and serializes only with entry copying, never computing. */
+void nr_csirs_disc_ring_reset(nr_csirs_disc_ring_t *r)
+{
+  ring_private_t *state=r?r->private_state:NULL;
+  if(!state) return;
+  pthread_mutex_lock(&state->read_lock);
+  for(int i=0;i<r->capacity;++i) pthread_mutex_lock(&state->entry_lock[i]);
+  memset(r->meta,0,r->capacity*sizeof(*r->meta));
+  memset(state->serial,0,r->capacity*sizeof(*state->serial));
+  __atomic_store_n(&r->written,0,__ATOMIC_RELEASE);
+  __atomic_add_fetch(&state->epoch,1,__ATOMIC_RELEASE);
+  for(int i=r->capacity-1;i>=0;--i) pthread_mutex_unlock(&state->entry_lock[i]);
+  pthread_mutex_unlock(&state->read_lock);
+}
+
+bool nr_csirs_disc_ring_snapshot_current(const nr_csirs_disc_ring_t *r)
+{
+  const ring_private_t *state=r?r->private_state:NULL;
+  if(!state || !state->source) return true;
+  const ring_private_t *source=state->source->private_state;
+  return state->epoch==__atomic_load_n(&source->epoch,__ATOMIC_ACQUIRE);
+}
+
+/* Only committed entries behind the producer cursor are copied. Entry locks
+ * protect C memory accesses on overwrite; a collision requires a complete ring
+ * overrun, never ordinary concurrent production. Keep old snapshot IQ for U4. */
+int nr_csirs_disc_ring_snapshot(nr_csirs_disc_ring_t *r, nr_csirs_disc_ring_t *dst)
+{
+  ring_private_t *state = r ? r->private_state : NULL;
+  if (!state || !dst || !dst->private_state || dst->capacity != r->capacity || dst->slot_stride != r->slot_stride) return -1;
+  ring_private_t *copy=dst->private_state;
+  uint64_t epoch=__atomic_load_n(&state->epoch,__ATOMIC_ACQUIRE);
+  uint64_t end = __atomic_load_n(&r->written, __ATOMIC_ACQUIRE);
+  if (epoch!=copy->epoch || end < dst->written) {dst->written=0;memset(dst->meta,0,dst->capacity*sizeof(*dst->meta));}
+  uint64_t first = dst->written;
+  if (end-first > (uint64_t)r->capacity) first=end-r->capacity;
+  for (uint64_t w=first;w<end;++w) {
+    int i=w%r->capacity;
+    pthread_mutex_lock(&state->entry_lock[i]);
+    if (state->serial[i] != w+1) {pthread_mutex_unlock(&state->entry_lock[i]);return -1;}
+    memcpy(dst->grid_base+i*dst->slot_stride,r->grid_base+i*r->slot_stride,r->slot_stride*sizeof(int16_t));
+    dst->meta[i]=r->meta[i];
+    pthread_mutex_unlock(&state->entry_lock[i]);
+  }
+  if(epoch!=__atomic_load_n(&state->epoch,__ATOMIC_ACQUIRE)) return -1;
+  copy->source=r;copy->epoch=epoch;dst->written=end;
+  return 0;
 }
 
 int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
@@ -180,10 +245,16 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
   }
 
   const int index = (int)(r->written % (uint64_t)r->capacity);
+  if (pthread_mutex_trylock(&state->entry_lock[index]) != 0) {
+    pthread_mutex_unlock(&state->read_lock);
+    __atomic_fetch_add(&csirs_disc_feed_drops, 1, __ATOMIC_RELAXED);
+    return -1;
+  }
   const int first_count = grid_sc < ofdm_symbol_size - first_carrier_offset ? grid_sc : ofdm_symbol_size - first_carrier_offset;
   const int second_count = grid_sc - first_count;
   for (int ant = 0; ant < r->n_ant; ++ant) {
     if (rxdataF[ant] == NULL) {
+      pthread_mutex_unlock(&state->entry_lock[index]);
       pthread_mutex_unlock(&state->read_lock);
       return -1;
     }
@@ -198,7 +269,9 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
     }
   }
   r->meta[index] = (nr_csirs_disc_slot_meta_t){.abs_slot = abs_slot, .frame = frame, .slot = slot, .valid = 1};
-  r->written++;
+  state->serial[index] = r->written + 1;
+  __atomic_add_fetch(&r->written, 1, __ATOMIC_RELEASE);
+  pthread_mutex_unlock(&state->entry_lock[index]);
   /* Offline-analysis dump (ISAC_CSIRS_DISC_DUMP=<file>): header {magic,n_ant,n_rb,slots_per_frame,nsym}
    * once, then per slot the meta followed by n_ant x NSYM x 12*n_rb CRB-aligned int16 IQ pairs. */
   static FILE *dump;
@@ -245,11 +318,9 @@ static void *disc_worker_main(void *unused)
       break;
     seen = g_worker.wake_generation;
     pthread_mutex_unlock(&g_worker.wake_lock);
-    if (nr_csirs_disc_ring_read_lock(&g_worker.ring)) {
+    if (nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
       void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
-      if (hook != NULL)
-        hook(&g_worker.ring);
-      nr_csirs_disc_ring_read_unlock(&g_worker.ring);
+      if (hook != NULL) hook(&g_worker.snapshot);
     }
     pthread_mutex_lock(&g_worker.wake_lock);
   }
@@ -272,7 +343,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     nr_csirs_disc_pipeline_init(fp);
 
   memset(&g_worker, 0, sizeof(g_worker));
-  g_worker.batch = env_positive("ISAC_CSIRS_DISC_BATCH", 100);
+  g_worker.batch = env_positive("ISAC_CSIRS_DISC_BATCH", NR_CSIRS_DISC_DEFAULT_BATCH);
   g_worker.core = env_core();
   if (pthread_mutex_init(&g_worker.wake_lock, NULL) != 0)
     return -1;
@@ -281,8 +352,10 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     return -1;
   }
   g_worker.synchronization_ready = true;
-  const int capacity = env_positive("ISAC_CSIRS_DISC_RING", 640);
+  const int capacity = env_positive("ISAC_CSIRS_DISC_RING", NR_CSIRS_DISC_DEFAULT_CAPACITY);
   if (nr_csirs_disc_ring_init(&g_worker.ring, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, true) != 0)
+    goto fail;
+  if (nr_csirs_disc_ring_init(&g_worker.snapshot, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, false) != 0)
     goto fail;
   pthread_attr_t attr;
   if (pthread_attr_init(&attr) != 0)
@@ -300,6 +373,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   return 0;
 
 fail:
+  nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
   pthread_cond_destroy(&g_worker.wake_cv);
   pthread_mutex_destroy(&g_worker.wake_lock);
@@ -318,6 +392,7 @@ void nr_csirs_disc_stop(void)
   if (g_worker.thread_started)
     pthread_join(g_worker.thread, NULL);
   atomic_store_explicit(&g_worker.running, false, memory_order_release);
+  nr_csirs_disc_ring_free(&g_worker.snapshot);
   nr_csirs_disc_ring_free(&g_worker.ring);
   if (g_worker.synchronization_ready) {
     pthread_cond_destroy(&g_worker.wake_cv);

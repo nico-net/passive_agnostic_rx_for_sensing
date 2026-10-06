@@ -395,6 +395,7 @@ void nr_csirs_blind_seed(nr_csirs_blind_state_t *st,
     return;
   st->seed_period[idx] = period;
   st->seed_offset[idx] = offset;
+  st->seed_n_off[idx] = 1;
   st->cand[idx].slot_delta = slot_delta;
 }
 
@@ -405,7 +406,7 @@ int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
   }
   /* Silence does not prove completeness: legal periods extend to 640 slots, and the caller may
    * skip slots. Keep the one-candidate work bound and stop only when no search capacity remains. */
-  if (st->n_conf >= NR_CSIRS_BLIND_MAX_CONF || st->n_conf >= st->n) {
+  if (st->n_conf >= (st->discovery_bank ? NR_CSIRS_BLIND_DISC_MAX_CONF : NR_CSIRS_BLIND_MAX_CONF) || st->n_conf >= st->n) {
     return -1;
   }
   if (st->pin_left > 0 && st->pinned >= 0 && st->pinned < st->n && !nr_csirs_blind_is_confirmed(st, st->pinned)) {
@@ -689,7 +690,8 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   if (zp && st->zp_evidence_floor[idx] && absolute_slot <= st->zp_evidence_floor[idx])
     return false;
   if (!zp && st->seed_period[idx]
-      && absolute_slot % st->seed_period[idx] != st->seed_offset[idx])
+      && absolute_slot % st->seed_period[idx] != st->seed_offset[idx]
+      && !(st->seed_n_off[idx] == 2 && absolute_slot % st->seed_period[idx] == st->seed_offset2[idx]))
     return false;
   if (zp && st->hits[idx] == UINT32_MAX) {
     st->zp_failed_run[idx] = UINT64_MAX;
@@ -706,7 +708,7 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   }
   if (st->pin_left == 0 && st->pinned != idx)
     nr_csirs_blind_pin(st, idx, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
-  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS || structural || st->n_conf >= NR_CSIRS_BLIND_MAX_CONF) {
+  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS || structural || st->n_conf >= (st->discovery_bank ? NR_CSIRS_BLIND_DISC_MAX_CONF : NR_CSIRS_BLIND_MAX_CONF)) {
     return false;
   }
   uint16_t p = 0, off[2] = {0, 0};
@@ -714,7 +716,13 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   if (!zp && st->seed_period[idx]) {
     p = st->seed_period[idx];
     off[0] = st->seed_offset[idx];
-    n_off = 1;
+    n_off = st->seed_n_off[idx] == 2 ? 2 : 1;
+    off[1] = st->seed_offset2[idx];
+    for (int phase=0;phase<n_off;++phase) {
+      int supports=0;
+      for (int h=0;h<st->n_hit_slot[idx];++h) supports += st->hit_slot[idx][h] % p == off[phase];
+      if (supports < CSIRS_MIN_HITS) return false;
+    }
     uint32_t lo = st->hit_slot[idx][0], hi = lo;
     for (int h = 1; h < st->n_hit_slot[idx]; ++h) {
       if (st->hit_slot[idx][h] < lo)

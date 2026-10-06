@@ -71,6 +71,9 @@ TEST(CsirsDiscE2E, ANoConfirmationOnDmrsOnlyCell)
   auto cfg = config(nullptr, 0);
   cfg.n_slots = 160;
   ASSERT_EQ(nr_csirs_disc_synth(&r.ring, &cfg), 0);
+  // Add a strong TDD power cycle without adding any CSI-RS sequence.
+  for(int t=0;t<r.ring.capacity;++t) if(r.ring.meta[t].abs_slot%10>=5)
+    for(size_t i=0;i<r.ring.slot_stride;++i) r.ring.grid_base[t*r.ring.slot_stride+i]/=8;
   nr_csirs_disc_process(&r.ring);
   EXPECT_EQ(nr_csirs_blind_rt_test_candidate_count(), 0);
 }
@@ -117,6 +120,7 @@ TEST(CsirsDiscE2E, MixedRowsDiscoverConfirmAndExportExact)
   uint32_t slots = 0;
   const int n = nr_csirs_blind_rt_test_confirm_ring(&r.ring, pdu, period, offset, delta, 8, &slots);
   ASSERT_EQ(n, 6);
+  for(int k=0;k<n;++k) printf("CONF row=%u fd=%u l=%u rb=%u:%u id=%u P/O=%u/%u\n",pdu[k].row,pdu[k].freq_domain,pdu[k].symb_l0,pdu[k].start_rb,pdu[k].nr_of_rbs,pdu[k].scramb_id,period[k],offset[k]);
   for (const auto &resource : resources) {
     bool found = false;
     for (int k = 0; k < n; ++k)

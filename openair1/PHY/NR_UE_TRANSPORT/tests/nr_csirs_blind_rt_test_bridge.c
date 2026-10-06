@@ -264,6 +264,9 @@ int nr_csirs_blind_rt_test_export(int rank, int banks, int types[2], int *untouc
   return n;
 }
 
+static uint64_t test_confirm_us;
+uint64_t nr_csirs_blind_rt_test_confirm_us(void) {return test_confirm_us;}
+
 int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
                                         fapi_nr_dl_config_csirs_pdu_rel15_t *out,
                                         uint16_t *period,
@@ -283,7 +286,7 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
     return -1;
   PHY_VARS_NR_UE ue = {0};
   ue.frame_parms = (NR_DL_FRAME_PARMS){.N_RB_DL = ring->n_rb,
-                                       .Nid_cell = 415,
+                                       .Nid_cell = 0, /* Deliberately unrelated: production discovery must sweep the ID. */
                                        .ofdm_symbol_size = fft,
                                        .first_carrier_offset = fft - 12 * ring->n_rb,
                                        .symbols_per_slot = NR_SYMBOLS_PER_SLOT,
@@ -296,19 +299,18 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
   g_reconf = g_rank = g_wide = g_ids = g_slotsweep = 0;
   const int initial = g_st.n_conf;
   uint32_t calls = 0;
-  for (int t = 0; t < ring->capacity && g_st.n_conf < g_st.n && g_st.n_conf < max; ++t) {
+  for (int t = 0; t < ring->capacity; ++t) {
     if (!ring->meta[t].valid)
       continue;
     memset(storage, 0, (size_t)ring->n_ant * samples * sizeof(*storage));
     for (int ant = 0; ant < ring->n_ant; ++ant)
       for (int sym = 0; sym < NR_SYMBOLS_PER_SLOT; ++sym) {
         const int16_t *src = nr_csirs_disc_ring_sym(ring, t, ant, sym);
-        for (int k = 0; k < 12 * ring->n_rb; ++k) {
-          const int dst = (ue.frame_parms.first_carrier_offset + k) % fft;
-          rx[ant][sym * fft + dst] = (c16_t){src[2 * k], src[2 * k + 1]};
-        }
+        memcpy(&rx[ant][sym*fft+ue.frame_parms.first_carrier_offset],src,12*ring->n_rb*sizeof(c16_t));
       }
+    uint64_t begin=now_us();
     nr_csirs_blind_rt_slot(&ue, ring->meta[t].slot, ring->meta[t].abs_slot, rx);
+    test_confirm_us+=now_us()-begin;
     calls++;
   }
   const int n = g_st.n_conf < max ? g_st.n_conf : max;
@@ -362,4 +364,17 @@ int nr_csirs_blind_rt_test_post_grant(uint32_t slot, double score, int other_geo
     pdu.symb_l0 = (uint8_t)(pdu.symb_l0 + 1);
   nr_csirs_blind_rt_zp_grant_evidence(slot, &pdu, score);
   return 0;
+}
+
+int nr_csirs_blind_rt_test_phases(int k, uint16_t *out)
+{
+  if(k<0 || k>=g_st.n_conf || !out) return -1;
+  out[0]=g_st.conf_off[k][0];out[1]=g_st.conf_off[k][1];return g_st.conf_n_off[k];
+}
+
+int nr_csirs_blind_rt_test_discovered(int i,fapi_nr_dl_config_csirs_pdu_rel15_t *p,uint16_t *period,uint16_t *phases)
+{
+  if(i<0 || i>=g_st.n) return -1;
+  fill_pdu(&g_st.cand[i],1,p);*period=g_st.seed_period[i];
+  phases[0]=g_st.seed_offset[i];phases[1]=g_st.seed_offset2[i];return g_st.seed_n_off[i];
 }

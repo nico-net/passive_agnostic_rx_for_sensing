@@ -44,6 +44,26 @@ void exit_function(const char *file, const char *function, const int line, const
 }
 }
 
+TEST(CsirsBlindDiscovery, TwoPhaseSeedNeedsIndependentFreshSupport)
+{
+  auto st=std::make_unique<nr_csirs_blind_state_t>();
+  st->n=1;st->confirmed=st->pinned=-1;st->discovery_bank=true;
+  nr_csirs_blind_seed(st.get(),0,160,15,0);
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(),0,15,5,1));
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(),0,175,5,1));
+  // Admission of a second phase must preserve existing independently scored hits.
+  st->seed_n_off[0]=2;st->seed_offset2[0]=16;
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(),0,175,5,1)); // duplicate cannot help
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(),0,176,5,1));
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(),0,177,5,1)); // off-lattice
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(),0,335,5,1));
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(),0,336,5,1));
+  EXPECT_EQ(st->n_conf,0);
+  EXPECT_TRUE(nr_csirs_blind_feed(st.get(),0,496,5,1));
+  ASSERT_EQ(st->n_conf,1);EXPECT_EQ(st->conf_period[0],160);EXPECT_EQ(st->conf_n_off[0],2);
+  EXPECT_EQ(st->conf_off[0][0],15);EXPECT_EQ(st->conf_off[0][1],16);
+}
+
 TEST(CsirsBlindRuntime, OrdinaryModeExportsBothBanks) {
   for (int banks : {1, 2, 3}) {
     int types[2] = {}, untouched = 0;

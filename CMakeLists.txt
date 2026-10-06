@@ -2866,6 +2866,7 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_e2e_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c
@@ -2879,6 +2880,25 @@ if(ENABLE_TESTS)
                                                        ${CMAKE_DL_LIBS} pthread m)
   add_dependencies(tests test_nr_csirs_disc_e2e)
   add_test(NAME test_nr_csirs_disc_e2e COMMAND ./test_nr_csirs_disc_e2e)
+
+  add_executable(test_nr_csirs_disc_dump
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_dump_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c)
+  target_include_directories(test_nr_csirs_disc_dump PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(test_nr_csirs_disc_dump PRIVATE nr_csirs_disc_synth GTest::gtest GTest::gtest_main
+                                                       ${CMAKE_DL_LIBS} pthread m)
+  add_dependencies(tests test_nr_csirs_disc_dump)
+  add_test(NAME test_nr_csirs_disc_dump COMMAND ./test_nr_csirs_disc_dump)
 
   # PLAIN C, not gtest: nr_phy_common.h (which declares nr_generate_csi_rs and csi_mapping_parms_t)
   # also declares nr_mmse_2layers() with C variably-modified array parameters, which C++ rejects --

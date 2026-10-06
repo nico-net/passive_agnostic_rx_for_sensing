@@ -15,6 +15,8 @@
 extern "C" {
 #endif
 
+#define NR_CSIRS_DISC_DEFAULT_CAPACITY 640
+#define NR_CSIRS_DISC_DEFAULT_BATCH 100
 #define NR_CSIRS_DISC_MAX_ANT 4
 #define NR_CSIRS_DISC_NSYM 14
 #define NR_CSIRS_DISC_MAX_RB 275
@@ -95,7 +97,11 @@ void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r);
  * Returns ring index written, or -1 when dropped. Never blocks. */
 int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r, const int16_t *const *rxdataF, int ofdm_symbol_size,
                             int first_carrier_offset, uint32_t abs_slot, uint16_t frame, uint8_t slot);
-/* The worker calls its process hook with this lock already held. Exposed for standalone consumers/tests. */
+/* Legacy standalone lock. The worker processes a private cursor snapshot and
+ * holds no producer lock while running its hook. */
+int nr_csirs_disc_ring_snapshot(nr_csirs_disc_ring_t *r, nr_csirs_disc_ring_t *dst);
+void nr_csirs_disc_ring_reset(nr_csirs_disc_ring_t *r);
+bool nr_csirs_disc_ring_snapshot_current(const nr_csirs_disc_ring_t *r);
 bool nr_csirs_disc_ring_read_lock(nr_csirs_disc_ring_t *r);
 void nr_csirs_disc_ring_read_unlock(nr_csirs_disc_ring_t *r);
 
@@ -116,13 +122,12 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring);
 typedef struct {
   uint16_t excl_sym_mask_any;           /* symbols excluded in every slot (e.g. CORESET#0 symbols) */
   const uint8_t *excl_re;               /* optional [14][12*n_rb] mask of REs to ignore (SSB etc.), may be NULL */
-  float min_strength;                   /* NULL/zero default 2.0; U5 pipeline passes 1.03 unless
-                                        * ISAC_CSIRS_DISC_MIN_STRENGTH overrides it. */
+  float min_strength;                   /* NULL/zero default 2.0; U5 pipeline passes 1.03. */
 } nr_csirs_disc_fp_cfg_t;
 int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                                  nr_csirs_disc_fp_t *out, int max_out);
 
-/* Stateful U5 entry, once per batch under the ring read lock. Exact Q12 history
+/* Stateful entry, once per batch on a stable snapshot. Exact Q12 history
  * since reset, bootstrapped with the first available ring snapshot. Between
  * calls every pushed entry must be consumed before overwrite (otherwise -1).
  * Single serialized worker; serialize reset with detect as well.
@@ -131,6 +136,10 @@ int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_d
  * changes reuse history. Stateless CPU/footprints GPU APIs remain unchanged. */
 int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg, nr_csirs_disc_fp_t *out,
                          int max_out);
+/* Additive production view: fold every new slot, rotate four period groups
+ * across batches (all periods within four calls), retain candidates meanwhile.
+ * Full-ring inputs evaluate all groups. Legacy detect remains exact/capped at 32. */
+int nr_csirs_disc_detect_candidates(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,nr_csirs_disc_fp_t *,int);
 void nr_csirs_disc_detect_reset(void);
 
 /* U3 (nr_csirs_disc_hyp.c) */
@@ -141,6 +150,7 @@ typedef struct {
   int id_first, id_count;               /* scramblingID range, default 0..1023 */
   int delta_max;                        /* slot-number offsets 0..delta_max-1 tried (1 = none) */
   int block_re;                         /* coherent block length in occupied REs, default 32 */
+  int max_slots;                        /* additive: 0 = all; otherwise most recent lattice slots */
 } nr_csirs_disc_sweep_cfg_t;
 /* Returns n_hyp on success, 0 while ISAC_CSIRS_DISC is not exactly "1", -1 on error.
  * NULL cfg selects {0,1024,1,32}; explicit cfg values must be positive (id_first may be zero).
@@ -148,6 +158,7 @@ typedef struct {
  * Caller keeps the ring stable during a sweep and initializes OAI modulation tables on startup. */
 int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int n_hyp,
                             const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out);
+int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *, nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *);
 /* Separate U4 MODULE entry, with the same signature as gpu_ops.sweep. */
 int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int n_hyp,
                                  const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out);
@@ -171,6 +182,7 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
 typedef struct {
   uint64_t batches, footprints, hyps, winners, ambiguous;
   uint64_t feed_drops, gpu_batches, cpu_batches, batch_us;
+  uint64_t detect_us, hyp_us, sweep_us; /* additive stage timing */
 } nr_csirs_disc_metrics_t;
 void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *out);
 

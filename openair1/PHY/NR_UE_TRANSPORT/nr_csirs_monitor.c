@@ -41,7 +41,10 @@ typedef struct {
   bool                                dynamic;
 } nr_csirs_monitor_res_t;
 
-static nr_csirs_monitor_res_t g_monitors[NR_CSIRS_MONITOR_MAX];
+/* Reserve two phases for each discovery confirmation, in addition to the
+ * unchanged manually configured bank. Used only with ISAC_CSIRS_DISC=1. */
+enum { DISC_MONITOR_CAPACITY = NR_CSIRS_MONITOR_MAX + 64 };
+static nr_csirs_monitor_res_t g_monitors[DISC_MONITOR_CAPACITY];
 static int                    g_n_monitors = 0;
 static int                    g_parsed     = 0;
 static pthread_mutex_t        g_monitor_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -189,7 +192,7 @@ int nr_csirs_monitor_due_ex(int frame,
   if (out == NULL || max <= 0 || slots_per_frame <= 0) {
     return 0;
   }
-  static __thread fapi_nr_dl_config_csirs_pdu_rel15_t snapshot[NR_CSIRS_MONITOR_MAX];
+  static __thread fapi_nr_dl_config_csirs_pdu_rel15_t snapshot[DISC_MONITOR_CAPACITY];
   pthread_mutex_lock(&g_monitor_lock);
   const uint32_t abs_slot = (uint32_t)frame * (uint32_t)slots_per_frame + (uint32_t)slot;
   int            count    = 0;
@@ -232,7 +235,9 @@ int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
       }
     }
   }
-  if (g_n_monitors >= NR_CSIRS_MONITOR_MAX) {
+  const char *discovery=getenv("ISAC_CSIRS_DISC");
+  const int capacity=discovery && !strcmp(discovery,"1")?DISC_MONITOR_CAPACITY:NR_CSIRS_MONITOR_MAX;
+  if (g_n_monitors >= capacity) {
     pthread_mutex_unlock(&g_monitor_lock);
     return -1;
   }

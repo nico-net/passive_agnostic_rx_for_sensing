@@ -4,6 +4,8 @@
 
 #include <cstdlib>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 extern "C" {
 #include "nr_csirs_disc.h"
@@ -91,4 +93,38 @@ TEST(Ring, DropsWithoutBlockingWhileReaderOwnsRing)
   EXPECT_EQ(__atomic_load_n(&csirs_disc_feed_drops, __ATOMIC_RELAXED), before + 1);
   EXPECT_EQ(ring.written, 0u);
   nr_csirs_disc_ring_free(&ring);
+}
+
+TEST(Ring, SnapshotCursorDoesNotHoldProducerLockDuringWork)
+{
+  nr_csirs_disc_ring_t live={},snapshot={};
+  ASSERT_EQ(nr_csirs_disc_ring_init(&live,4,217,20,640,false),0);
+  ASSERT_EQ(nr_csirs_disc_ring_init(&snapshot,4,217,20,640,false),0);
+  std::vector<int16_t> samples(live.slot_stride,123);
+  const int16_t *ants[4];for(int a=0;a<4;++a) ants[a]=samples.data()+a*14*24*217;
+  for(unsigned slot=0;slot<100;++slot) ASSERT_GE(nr_csirs_disc_ring_push(&live,ants,12*217,0,slot,slot/20,slot%20),0);
+  ASSERT_EQ(nr_csirs_disc_ring_snapshot(&live,&snapshot),0);
+  const auto before=__atomic_load_n(&csirs_disc_feed_drops,__ATOMIC_RELAXED);
+  // Model a worker stalled in a long sweep, holding only its private snapshot.
+  ASSERT_TRUE(nr_csirs_disc_ring_read_lock(&snapshot));
+  std::thread producer([&] {
+    for(unsigned slot=100;slot<700;++slot) EXPECT_GE(nr_csirs_disc_ring_push(&live,ants,12*217,0,slot,slot/20,slot%20),0);
+  });
+  producer.join();
+  EXPECT_EQ(snapshot.written,100u);
+  EXPECT_EQ(snapshot.meta[0].abs_slot,0u);
+  EXPECT_EQ(snapshot.grid_base[0],123);
+  nr_csirs_disc_ring_read_unlock(&snapshot);
+  EXPECT_EQ(__atomic_load_n(&csirs_disc_feed_drops,__ATOMIC_RELAXED),before);
+  ASSERT_EQ(nr_csirs_disc_ring_snapshot(&live,&snapshot),0);
+  EXPECT_EQ(snapshot.written,700u);
+  for(unsigned w=60;w<700;++w) EXPECT_EQ(snapshot.meta[w%640].abs_slot,w);
+  EXPECT_TRUE(nr_csirs_disc_ring_snapshot_current(&snapshot));
+  nr_csirs_disc_ring_reset(&live);
+  EXPECT_FALSE(nr_csirs_disc_ring_snapshot_current(&snapshot));
+  ASSERT_EQ(nr_csirs_disc_ring_snapshot(&live,&snapshot),0);
+  EXPECT_EQ(snapshot.written,0u);
+  EXPECT_TRUE(nr_csirs_disc_ring_snapshot_current(&snapshot));
+  for(int i=0;i<snapshot.capacity;++i) EXPECT_FALSE(snapshot.meta[i].valid);
+  nr_csirs_disc_ring_free(&snapshot);nr_csirs_disc_ring_free(&live);
 }

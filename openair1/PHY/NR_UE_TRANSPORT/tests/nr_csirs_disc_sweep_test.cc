@@ -320,6 +320,30 @@ TEST(CsirsDiscSweep, GpuEqualsCpu)
 #endif
 }
 
+TEST(CsirsDiscSweep, RecentOccasionsMatchExplicitMaskedRing)
+{
+  Grid grid(64,12);auto h=hyp(1,0,52);grid.add(h,415,0);
+  nr_csirs_disc_sweep_cfg_t limited={0,1024,1,32,4}, all=limited;all.max_slots=0;
+  nr_csirs_disc_win_t got={},expected={};
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&limited,&got),1);
+#ifdef NR_CSIRS_DISC_TEST_CUDA
+  int devices=0;
+  if(cudaGetDeviceCount(&devices)==cudaSuccess && devices) {
+    void *module=nullptr;Sweep fn=gpu(&module);ASSERT_NE(fn,nullptr);
+    nr_csirs_disc_win_t device={};ASSERT_EQ(fn(&grid.r,&h,1,&limited,&device),1);
+    EXPECT_EQ(device.scramb_id,got.scramb_id);EXPECT_EQ(device.n_slots,4);
+    EXPECT_NEAR(device.z,got.z,1e-3);EXPECT_NEAR(device.z_second,got.z_second,1e-3);dlclose(module);
+  }
+#endif
+  std::vector<uint32_t> slots;for(auto m:grid.meta) slots.push_back(m.abs_slot);
+  std::sort(slots.begin(),slots.end());
+  for(auto &m:grid.meta) m.valid=m.abs_slot>=slots[slots.size()-4];
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&all,&expected),1);
+  EXPECT_EQ(got.scramb_id,415);EXPECT_EQ(got.n_slots,4);
+  EXPECT_EQ(got.scramb_id,expected.scramb_id);EXPECT_EQ(got.slot_delta,expected.slot_delta);
+  EXPECT_NEAR(got.z,expected.z,1e-5);EXPECT_NEAR(got.z_second,expected.z_second,1e-5);
+}
+
 TEST(CsirsDiscSweep, DISABLED_GpuBudget)
 {
 #ifdef NR_CSIRS_DISC_TEST_CUDA

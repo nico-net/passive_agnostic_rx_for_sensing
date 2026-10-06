@@ -166,6 +166,7 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
 /* Confirmed resources kept per search (NZP and ZP each). A PDSCH carries at most
  * NFAPI_MAX_NUM_CSI_RATEMATCH (4) of them per slot; 8 covers a TRS pair + CQI + CSI-IM with room. */
 #define NR_CSIRS_BLIND_MAX_CONF 8
+#define NR_CSIRS_BLIND_DISC_MAX_CONF 32
 /* Distinct predicted occasions with decoded-grant evidence kept per ZP (nr_csirs_blind_zp_grant_feed);
  * revocation counts the contradictions among them. A false ZP contradicts on EVERY decoded grant that
  * crosses it, so it is revoked at its second one for any window >= 2; the window only bounds how far
@@ -221,12 +222,15 @@ typedef struct {
   uint16_t             period, offset; ///< of `confirmed` (the FIRST confirmation; legacy single view)
   /* EVERY confirmed resource. A cell carries several and PDSCH is rate-matched around all of them. */
   int                  n_conf;
-  int                  conf_idx[NR_CSIRS_BLIND_MAX_CONF];
-  uint16_t             conf_period[NR_CSIRS_BLIND_MAX_CONF];
-  uint16_t             conf_off[NR_CSIRS_BLIND_MAX_CONF][2];
-  uint8_t              conf_n_off[NR_CSIRS_BLIND_MAX_CONF];
+  int                  conf_idx[NR_CSIRS_BLIND_DISC_MAX_CONF];
+  uint16_t             conf_period[NR_CSIRS_BLIND_DISC_MAX_CONF];
+  uint16_t             conf_off[NR_CSIRS_BLIND_DISC_MAX_CONF][2];
+  uint8_t              conf_n_off[NR_CSIRS_BLIND_DISC_MAX_CONF];
+  bool                 discovery_bank; /* only U5 opts into the larger NZP bank */
   uint16_t             seed_period[NR_CSIRS_BLIND_MAX_CAND];
   uint16_t             seed_offset[NR_CSIRS_BLIND_MAX_CAND];
+  uint16_t             seed_offset2[NR_CSIRS_BLIND_MAX_CAND];
+  uint8_t              seed_n_off[NR_CSIRS_BLIND_MAX_CAND];
   int                  cycle_left, cycle_pad, cycle_last; ///< phase-diverse round-robin cadence
 } nr_csirs_blind_state_t;
 

@@ -56,6 +56,17 @@ static int guarded_footprints(const nr_csirs_disc_ring_t *r,
   return rc;
 }
 
+static int guarded_normalize(const nr_csirs_disc_ring_t *r,
+                              const nr_csirs_disc_fp_cfg_t *cfg,
+                              uint32_t *out)
+{
+  if (!raw_ops.normalize || !breaker_ready())
+    return -1;
+  const int rc = raw_ops.normalize(r, cfg, out);
+  breaker_result(rc);
+  return rc;
+}
+
 static int guarded_sweep(const nr_csirs_disc_ring_t *r,
                          const nr_csirs_disc_hyp_t *hyps,
                          int n_hyp,
@@ -93,11 +104,13 @@ static void load_module(void)
   if (fp_handle) {
     const nr_csirs_disc_gpu_ops_t *(*get_ops)(void) = dlsym(fp_handle, "nr_csirs_disc_gpu_ops");
     const nr_csirs_disc_gpu_ops_t *module_ops = get_ops ? get_ops() : NULL;
-    if (module_ops)
+    if (module_ops) {
       raw_ops.footprints = module_ops->footprints;
+      raw_ops.normalize = module_ops->normalize;
+    }
     void *(*alloc)(size_t) = (void *(*)(size_t))dlsym(fp_handle, "nr_csirs_disc_gpu_alloc_unified");
     void (*free_fn)(void *) = (void (*)(void *))dlsym(fp_handle, "nr_csirs_disc_gpu_free_unified");
-    if (alloc && free_fn) {
+    if (module_ops && alloc && free_fn) {
       nr_csirs_disc_alloc_unified = alloc;
       nr_csirs_disc_free_unified = free_fn;
     }
@@ -110,6 +123,7 @@ static void load_module(void)
         dlsym(sweep_handle, "nr_csirs_disc_gpu_sweep_entry");
 
   public_ops.footprints = raw_ops.footprints ? guarded_footprints : NULL;
+  public_ops.normalize = raw_ops.normalize ? guarded_normalize : NULL;
   public_ops.sweep = raw_ops.sweep ? guarded_sweep : NULL;
 }
 

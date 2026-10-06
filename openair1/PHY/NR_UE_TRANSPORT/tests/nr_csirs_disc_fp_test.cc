@@ -8,7 +8,6 @@
 #include <vector>
 #include <random>
 #include <algorithm>
-#include <dlfcn.h>
 extern "C" {
 void *uniqCfg=nullptr;
 void exit_function(const char *,const char *,int,const char *s,int) {fprintf(stderr,"%s\n",s?s:"");abort();}
@@ -89,6 +88,29 @@ INSTANTIATE_TEST_SUITE_P(Rows,Footprints,::testing::Values(
   std::make_tuple(11,2,5),std::make_tuple(11,2,10),std::make_tuple(11,2,20),
   std::make_tuple(16,2,5),std::make_tuple(16,2,10),std::make_tuple(16,2,20),
   std::make_tuple(18,2,5),std::make_tuple(18,2,10),std::make_tuple(18,2,20)));
+TEST(CsirsDisc, LocalContrastRejectsWholeSymbolGain)
+{
+  nr_csirs_disc_ring_t r={};ASSERT_EQ(nr_csirs_disc_ring_init(&r,4,8,20,2,false),0);
+  for(int t=0;t<2;++t) {
+    r.meta[t]={uint32_t(t),0,uint8_t(t),1};
+    for(int a=0;a<4;++a) for(int l=0;l<14;++l) {
+      int16_t *v=nr_csirs_disc_ring_sym(&r,t,a,l);
+      std::fill(v,v+24*8,(t==1 && l==4)?1000:100);
+    }
+  }
+  std::vector<uint32_t> x(2*(14*12*8+168));
+  nr_disc_fp_normalize(&r,nullptr,x.data());
+  for(auto v:x) EXPECT_EQ(v,4096u);
+  for(int a=0;a<4;++a) for(int rb=0;rb<8;++rb) {
+    auto v=nr_csirs_disc_ring_sym(&r,1,a,4)+24*rb;
+    v[0]=v[1]=3000;
+  }
+  nr_disc_fp_normalize(&r,nullptr,x.data());
+  for(int rb=0;rb<8;++rb) for(int sc=0;sc<12;++sc)
+    EXPECT_EQ(x[(14*12*8+168)+4*12*8+12*rb+sc],sc==0?8192u:4096u);
+  nr_csirs_disc_ring_free(&r);
+}
+
 TEST(CsirsDisc, AllPeriods)
 {
   for(int p:{4,5,8,10,16,20,32,40,64,80,160,320,640}) {
@@ -209,11 +231,11 @@ TEST(CsirsDisc, GpuMatchesCpu)
 {
   setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
   const auto *ops=nr_csirs_disc_gpu_load();
-  if(!ops) GTEST_SKIP()<<"CUDA module/device unavailable; run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.GpuMatchesCpu";
-  Dl_info info={};ASSERT_NE(dladdr(reinterpret_cast<void *>(ops->footprints),&info),0);
-  void *module=dlopen(info.dli_fname,RTLD_NOW|RTLD_LOCAL);ASSERT_NE(module,nullptr);
-  auto alloc=reinterpret_cast<void *(*)(size_t)>(dlsym(module,"nr_csirs_disc_gpu_alloc_unified"));
-  auto release=reinterpret_cast<void (*)(void *)>(dlsym(module,"nr_csirs_disc_gpu_free_unified"));
+  if(!ops || !ops->footprints) GTEST_SKIP()<<"CUDA module/device unavailable; run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.GpuMatchesCpu";
+  // The public ops are circuit-breaker wrappers in the executable; dladdr on
+  // them cannot locate the CUDA module. Use the loader's allocation hooks.
+  auto alloc=nr_csirs_disc_alloc_unified;
+  auto release=nr_csirs_disc_free_unified;
   ASSERT_NE(alloc,nullptr);ASSERT_NE(release,nullptr);
   for(int row:{1,2,4,6,11,16,18}) {
     auto c=resource(row);auto cfg=config(&c);Ring r;ASSERT_EQ(nr_csirs_disc_synth(&r.r,&cfg),0);
@@ -231,7 +253,6 @@ TEST(CsirsDisc, GpuMatchesCpu)
       release(managed);
     }
   }
-  dlclose(module);
 }
 // Uses the production U1 push path: only 640 raw slots remain after each wrap.
 struct Stream {
@@ -351,7 +372,7 @@ TEST(CsirsDisc, StatefulGpuMatchesCpu)
 {
   setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","gpu",1);
   const auto *ops=nr_csirs_disc_gpu_load();
-  if(!ops) GTEST_SKIP()<<"CUDA unavailable: run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.StatefulGpuMatchesCpu";
+  if(!ops || !ops->footprints) GTEST_SKIP()<<"CUDA unavailable: run build_gpu/test_nr_csirs_disc_fp --gtest_filter=CsirsDisc.StatefulGpuMatchesCpu";
   ASSERT_NE(ops->normalize,nullptr);
   auto c=resource(2);c.period=160;c.offset=159;c.rb_start=3;c.n_rb=9;auto cfg=config(&c);cfg.n_rb=16;cfg.n_slots=100;
   auto e=exclusions(cfg.n_rb);nr_csirs_disc_fp_cfg_t fc={0,e.data(),1.03f};

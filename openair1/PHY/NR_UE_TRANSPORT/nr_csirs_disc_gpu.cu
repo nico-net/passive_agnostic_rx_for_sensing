@@ -5,38 +5,50 @@
 #include <cstring>
 
 /* Integer normalization/reduction is bit-identical to the CPU, including
- * quantization and clipping. One block-independent thread per (slot,RB). */
+ * quantization and clipping. One block-independent thread per (slot,RB,symbol). */
 __global__ static void normalize(const int16_t *grid,const nr_csirs_disc_slot_meta_t *meta,
                                  size_t stride,int nt,int na,int nb,uint16_t symbols,
-                                 const uint8_t *exclude,uint32_t *x)
+                                 const uint8_t *exclude,uint32_t *x,int tiles)
 {
   int id=blockIdx.x*blockDim.x+threadIdx.x;
-  if(id>=nt*nb) return;
-  int t=id/nb,rb=id%nb,nk=12*nb,nr=14*nk+168;
+  if(id>=nt*nb*14) return;
+  int l=id%14,rb=(id/14)%nb,t=id/(14*nb),nk=12*nb,nr=14*nk+168*tiles;
   if(!meta[t].valid) return;
-  uint64_t power[168],total=0;int count=0;
-  for(int l=0;l<14;++l) for(int s=0;s<12;++s) {
-    int k=12*rb+s,j=l*12+s;power[j]=0;
+  uint64_t power[12]={0},total=0;int count=0;
+  for(int sc=0;sc<12;++sc) {
+    int k=12*rb+sc;
     if((symbols&(1<<l)) || (exclude && exclude[l*nk+k])) continue;
     for(int a=0;a<na;++a) {
       const int16_t *v=grid+(size_t)t*stride+((size_t)a*14+l)*2*nk+2*k;
-      power[j]+=(int64_t)v[0]*v[0]+(int64_t)v[1]*v[1];
+      power[sc]+=(int64_t)v[0]*v[0]+(int64_t)v[1]*v[1];
     }
-    total+=power[j];++count;
+    total+=power[sc];++count;
   }
-  for(int l=0;l<14;++l) for(int s=0;s<12;++s) {
-    uint64_t v=total?power[l*12+s]*count*4096/total:0;
-    x[(size_t)t*nr+l*nk+12*rb+s]=v>8192?8192:v;
+  uint64_t low[5]={UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX,UINT64_MAX};
+  for(int sc=0;sc<12;++sc) {
+    int k=12*rb+sc;
+    if((symbols&(1<<l)) || (exclude && exclude[l*nk+k])) continue;
+    uint64_t v=power[sc];
+    for(int i=0;i<5;++i) {uint64_t lo=v<low[i]?v:low[i];v=v>low[i]?v:low[i];low[i]=lo;}
+  }
+  int available=count;count=(count+2)/3;total=0;
+  for(int i=0;i<count;++i) total+=low[i];
+  for(int sc=0;sc<12;++sc) {
+    uint64_t reference=total;
+    if(available>count && power[sc]<=low[count-1]) reference+=low[count]-power[sc];
+    uint64_t v=reference?power[sc]*count*4096/reference:0;
+    x[(size_t)t*nr+l*nk+12*rb+sc]=v>8192?8192:v;
   }
 }
-__global__ static void pool(uint32_t *x,int nt,int nb)
+__global__ static void pool(uint32_t *x,int nt,int nb,int tiles)
 {
   int id=blockIdx.x*blockDim.x+threadIdx.x;
-  if(id>=nt*168) return;
-  int t=id/168,l=id%168/12,sc=id%12,nk=12*nb,nr=14*nk+168;
+  if(id>=nt*168*tiles) return;
+  int sc=id%12,l=(id/12)%14,tile=(id/168)%tiles,t=id/(168*tiles),nk=12*nb,nr=14*nk+168*tiles;
+  int first=tiles==1?0:tile*16,end=tiles==1?nb:min(nb,first+16);
   uint64_t sum=0;
-  for(int rb=0;rb<nb;++rb) sum+=x[(size_t)t*nr+l*nk+12*rb+sc];
-  x[(size_t)t*nr+14*nk+l*12+sc]=sum/nb;
+  for(int rb=first;rb<end;++rb) sum+=x[(size_t)t*nr+l*nk+12*rb+sc];
+  x[(size_t)t*nr+14*nk+tile*168+l*12+sc]=sum/(end-first);
 }
 /* Each RE thread folds all slots; no atomics, no floating-point reduction. */
 __global__ static void fold_kernel(const uint32_t *x,const nr_csirs_disc_slot_meta_t *meta,
@@ -66,7 +78,8 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
 {
   if(!nr_disc_fp_valid(r) || !out || max_out<=0) return -1;
   if(max_out>NR_CSIRS_DISC_MAX_FP) max_out=NR_CSIRS_DISC_MAX_FP;
-  int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168};int ret=-1;
+  const int tiles=(r->n_rb+15)/16;
+  int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168*tiles};int ret=-1;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
@@ -75,12 +88,12 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
      cudaMemcpy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
      cudaMemset(f.x,0,xb)!=cudaSuccess) goto done;
   if(cfg && cfg->excl_re) {
-    if(cudaMalloc(&excl,f.nr-168)!=cudaSuccess || cudaMemcpy(excl,cfg->excl_re,f.nr-168,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
+    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || cudaMemcpy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
-  normalize<<<(r->capacity*r->n_rb+127)/128,128>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x);
+  normalize<<<(r->capacity*r->n_rb*14+127)/128,128>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
+                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles);
   if(cudaGetLastError()!=cudaSuccess) goto done;
-  pool<<<(r->capacity*168+127)/128,128>>>(f.x,r->capacity,r->n_rb);
+  pool<<<(r->capacity*168*tiles+127)/128,128>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || cudaDeviceSynchronize()!=cudaSuccess) goto done;
   ret=nr_disc_fp_cluster(r,cfg,out,max_out,fold_gpu,&f);
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
@@ -88,6 +101,7 @@ done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
 static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,uint32_t *out)
 {
   if(!nr_disc_fp_valid(r) || !out) return -1;
+  const int tiles=1;
   int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168};int ret=-1;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
@@ -97,12 +111,12 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
      cudaMemcpy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
      cudaMemset(f.x,0,xb)!=cudaSuccess) goto done;
   if(cfg && cfg->excl_re) {
-    if(cudaMalloc(&excl,f.nr-168)!=cudaSuccess || cudaMemcpy(excl,cfg->excl_re,f.nr-168,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
+    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || cudaMemcpy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
-  normalize<<<(r->capacity*r->n_rb+127)/128,128>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x);
+  normalize<<<(r->capacity*r->n_rb*14+127)/128,128>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
+                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles);
   if(cudaGetLastError()!=cudaSuccess) goto done;
-  pool<<<(r->capacity*168+127)/128,128>>>(f.x,r->capacity,r->n_rb);
+  pool<<<(r->capacity*168*tiles+127)/128,128>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || cudaDeviceSynchronize()!=cudaSuccess) goto done;
   ret=cudaMemcpy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;

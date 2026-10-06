@@ -154,6 +154,11 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
         slots.push_back(r->meta[i].slot);
         indices.push_back(i);
       }
+    if(c.max_slots>0 && indices.size()>(size_t)c.max_slots) {
+      std::sort(indices.begin(),indices.end(),[&](int a,int b) {return r->meta[a].abs_slot!=r->meta[b].abs_slot?r->meta[a].abs_slot<r->meta[b].abs_slot:a<b;});
+      indices.erase(indices.begin(),indices.end()-c.max_slots);
+      slots.clear();for(int i:indices) slots.push_back(r->meta[i].slot);
+    }
     std::fill(mean.begin(), mean.end(), 0);
     if (slots.empty() || !map.n_re) {
       nr_csirs_disc_sweep_winner(mean.data(), &c, h, slots.size(), out + h);
