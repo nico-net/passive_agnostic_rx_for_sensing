@@ -466,6 +466,9 @@ int main(int argc, char **argv)
   }
 
   PHY_VARS_NR_UE *disc_ue = nrPHY_vars_UE_g[0][0];
+  /* Strong reference: the feed reaches the pipeline through a weak symbol, which alone does not
+   * pull nr_csirs_disc.o out of the static PHY archive (the hook stayed NULL, zero batches). */
+  nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
   if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
 

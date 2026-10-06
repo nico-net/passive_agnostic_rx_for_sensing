@@ -2424,7 +2424,9 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
     const int16_t *rxdataF_disc[NR_CSIRS_DISC_MAX_ANT];
     for (int ant = 0; ant < ring->n_ant; ++ant)
       rxdataF_disc[ant] = (const int16_t *)rxdataF[ant];
-    const long abs_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+    /* Stamp the slot being PROCESSED, not the RF producer's live counter (which runs ahead by a
+     * variable pipeline depth and would smear the period/offset lattice). */
+    const long abs_slot = ((long)proc->hfn_rx * 1024 + proc->frame_rx) * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
     if (abs_slot >= 0) {
       nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx, (uint32_t)abs_slot, rxdataF);
       nr_csirs_disc_ring_push(ring,
