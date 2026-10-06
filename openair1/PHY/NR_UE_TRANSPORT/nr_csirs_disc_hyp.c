@@ -108,10 +108,7 @@ static bool mapping_footprint(
     if (!by_symbol[l])
       continue;
     symbols |= (uint16_t)(1u << l);
-    if (!subcarriers)
-      subcarriers = by_symbol[l];
-    else if (subcarriers != by_symbol[l])
-      return false; /* nr_csirs_disc_fp_t represents a rectangular per-RB footprint. */
+    subcarriers |= by_symbol[l];
   }
   if (!symbols || !subcarriers)
     return false;

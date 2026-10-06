@@ -35,6 +35,7 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "openair2/LAYER2/NR_MAC_UE/mac_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/CODING/coding_defs.h"
@@ -2394,8 +2395,13 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
    * its own config instead; the SUBMISSION to sensing stays gated on ISAC inside the capture. */
   if (nr_csirs_monitor_enabled()) {
     const fapi_nr_dl_config_csirs_pdu_rel15_t *mon[NR_CSIRS_MONITOR_MAX];
-    const int nmon = nr_csirs_monitor_due(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame, mon,
-                                          NR_CSIRS_MONITOR_MAX);
+    int16_t slot_delta[NR_CSIRS_MONITOR_MAX];
+    const int nmon = nr_csirs_monitor_due_ex(proc->frame_rx,
+                                             proc->nr_slot_rx,
+                                             ue->frame_parms.slots_per_frame,
+                                             mon,
+                                             slot_delta,
+                                             NR_CSIRS_MONITOR_MAX);
     for (int i = 0; i < nmon; i++) {
       for (int symb = 0; symb < ue->frame_parms.symbols_per_slot; symb++) {
         if (is_csi_rs_in_symbol(*mon[i], symb) && !slot_fep_map[symb]) {
@@ -2403,7 +2409,7 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
           slot_fep_map[symb] = true;
         }
       }
-      nr_ue_csi_rs_sensing_capture(ue, proc, rxdataF, mon[i]);
+      nr_ue_csi_rs_sensing_capture_shifted(ue, proc, rxdataF, mon[i], slot_delta[i]);
     }
   }
 
@@ -2419,7 +2425,8 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
     for (int ant = 0; ant < ring->n_ant; ++ant)
       rxdataF_disc[ant] = (const int16_t *)rxdataF[ant];
     const long abs_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-    if (abs_slot >= 0)
+    if (abs_slot >= 0) {
+      nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx, (uint32_t)abs_slot, rxdataF);
       nr_csirs_disc_ring_push(ring,
                               rxdataF_disc,
                               ue->frame_parms.ofdm_symbol_size,
@@ -2427,6 +2434,7 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
                               (uint32_t)abs_slot,
                               (uint16_t)proc->frame_rx,
                               (uint8_t)proc->nr_slot_rx);
+    }
   }
 
   const int actor_idx_llr = proc->nr_slot_rx % ue->pdsch_num_actors;

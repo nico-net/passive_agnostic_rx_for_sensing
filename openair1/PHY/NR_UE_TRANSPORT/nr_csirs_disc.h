@@ -108,6 +108,9 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant);
 void nr_csirs_disc_stop(void);
 bool nr_csirs_disc_running(void);
 nr_csirs_disc_ring_t *nr_csirs_disc_worker_ring(void);
+/* U5 installs the worker pipeline before U1 allocates its ring. */
+void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp);
+void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring);
 
 /* U2 (nr_csirs_disc_fp.c CPU reference; GPU in nr_csirs_disc_gpu.cu) */
 typedef struct {
@@ -157,6 +160,12 @@ const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GP
  * The module exports gpu_ops above, plus nr_csirs_disc_gpu_alloc_unified/_free_unified; the loader installs them
  * into the core hooks nr_csirs_disc_alloc_unified/_free_unified (function pointers, see U1 above). */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void);
+
+typedef struct {
+  uint64_t batches, footprints, hyps, winners, ambiguous;
+  uint64_t feed_drops, gpu_batches, cpu_batches, batch_us;
+} nr_csirs_disc_metrics_t;
+void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *out);
 
 #ifdef __cplusplus
 }

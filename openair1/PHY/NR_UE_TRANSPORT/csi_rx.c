@@ -1282,10 +1282,11 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   ue->if_inst->dl_indication(&dl_indication);
 }
 
-void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
-                                  const UE_nr_rxtx_proc_t *proc,
-                                  const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                  const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu)
+void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
+                                          const UE_nr_rxtx_proc_t *proc,
+                                          const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                          const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
+                                          int16_t slot_delta)
 {
   // UE-agnostic passive-sensing capture of a CSI-RS resource we are NOT the target of (cell-common /
   // other-UE resource from the [sensing] csirs_monitor list). Mirrors nr_ue_csi_rs_procedures up to the
@@ -1315,10 +1316,13 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
                             csirs_config_pdu->symb_l1);
   nr_csi_info_t *csi_info = ue->nr_csi_info;
 
+  int reference_slot = (proc->nr_slot_rx + slot_delta) % frame_parms->slots_per_frame;
+  if (reference_slot < 0)
+    reference_slot += frame_parms->slots_per_frame;
   nr_generate_csi_rs(frame_parms,
                      &mapping_parms,
                      AMP,
-                     proc->nr_slot_rx,
+                     reference_slot,
                      csirs_config_pdu->freq_density,
                      csirs_config_pdu->start_rb,
                      csirs_config_pdu->nr_of_rbs,
@@ -1398,4 +1402,12 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
         + (end.tv_nsec - cfr_start.tv_nsec) / 1000u;
     nr_csirs_blind_rt_cfr_time_us(us);
   }
+}
+
+void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
+                                  const UE_nr_rxtx_proc_t *proc,
+                                  const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                  const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu)
+{
+  nr_ue_csi_rs_sensing_capture_shifted(ue, proc, rxdataF, csirs_config_pdu, 0);
 }

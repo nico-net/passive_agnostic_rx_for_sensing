@@ -264,6 +264,75 @@ int nr_csirs_blind_rt_test_export(int rank, int banks, int types[2], int *untouc
   return n;
 }
 
+int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
+                                        fapi_nr_dl_config_csirs_pdu_rel15_t *out,
+                                        uint16_t *period,
+                                        uint16_t *offset,
+                                        int16_t *delta,
+                                        int max,
+                                        uint32_t *slots_to_confirm)
+{
+  if (!ring || !out || max <= 0)
+    return -1;
+  int fft = 1;
+  while (fft < 12 * ring->n_rb)
+    fft <<= 1;
+  const int samples = fft * NR_SYMBOLS_PER_SLOT;
+  c16_t *storage = calloc((size_t)ring->n_ant * samples, sizeof(*storage));
+  if (!storage)
+    return -1;
+  PHY_VARS_NR_UE ue = {0};
+  ue.frame_parms = (NR_DL_FRAME_PARMS){.N_RB_DL = ring->n_rb,
+                                       .Nid_cell = 415,
+                                       .ofdm_symbol_size = fft,
+                                       .first_carrier_offset = fft - 12 * ring->n_rb,
+                                       .symbols_per_slot = NR_SYMBOLS_PER_SLOT,
+                                       .slots_per_frame = ring->slots_per_frame,
+                                       .numerology_index = 1,
+                                       .nb_antennas_rx = ring->n_ant,
+                                       .samples_per_slot_wCP = samples};
+  c16_t(*rx)[samples] = (c16_t(*)[samples])storage;
+  g_on = g_disc = g_armed = 1;
+  g_reconf = g_rank = g_wide = g_ids = g_slotsweep = 0;
+  const int initial = g_st.n_conf;
+  uint32_t calls = 0;
+  for (int t = 0; t < ring->capacity && g_st.n_conf < g_st.n && g_st.n_conf < max; ++t) {
+    if (!ring->meta[t].valid)
+      continue;
+    memset(storage, 0, (size_t)ring->n_ant * samples * sizeof(*storage));
+    for (int ant = 0; ant < ring->n_ant; ++ant)
+      for (int sym = 0; sym < NR_SYMBOLS_PER_SLOT; ++sym) {
+        const int16_t *src = nr_csirs_disc_ring_sym(ring, t, ant, sym);
+        for (int k = 0; k < 12 * ring->n_rb; ++k) {
+          const int dst = (ue.frame_parms.first_carrier_offset + k) % fft;
+          rx[ant][sym * fft + dst] = (c16_t){src[2 * k], src[2 * k + 1]};
+        }
+      }
+    nr_csirs_blind_rt_slot(&ue, ring->meta[t].slot, ring->meta[t].abs_slot, rx);
+    calls++;
+  }
+  const int n = g_st.n_conf < max ? g_st.n_conf : max;
+  for (int k = 0; k < n; ++k) {
+    const int idx = g_st.conf_idx[k];
+    fill_pdu(&g_st.cand[idx], 1, &out[k]);
+    if (period)
+      period[k] = g_st.conf_period[k];
+    if (offset)
+      offset[k] = g_st.conf_off[k][0];
+    if (delta)
+      delta[k] = g_st.cand[idx].slot_delta;
+  }
+  if (slots_to_confirm)
+    *slots_to_confirm = calls;
+  free(storage);
+  return n >= initial ? n : -1;
+}
+
+int nr_csirs_blind_rt_test_candidate_count(void)
+{
+  return g_st.n;
+}
+
 /* Feed measured scores into the real ZP confirmation/export path, without seeding a confirmation. */
 int nr_csirs_blind_rt_test_zp_feed(uint32_t slot, double score, int reset)
 {

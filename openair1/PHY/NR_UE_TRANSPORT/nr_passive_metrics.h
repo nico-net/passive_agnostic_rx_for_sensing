@@ -61,6 +61,9 @@ typedef struct {
   uint64_t prach_us, prach_drops, prach_skipped;
   uint64_t csirs_candidates, csirs_confirmed, csirs_revoked, zp_exported, zp_revoked;
   uint64_t csirs_search_us, csirs_idsweep_us, csirs_confirm_us, csirs_cfr_us;
+  uint64_t csirs_disc_batches, csirs_disc_footprints, csirs_disc_hyps, csirs_disc_winners;
+  uint64_t csirs_disc_ambiguous, csirs_disc_feed_drops, csirs_disc_gpu_batches, csirs_disc_cpu_batches;
+  uint64_t csirs_disc_batch_us;
   uint64_t csirs_time_to_confirm_slots_last, csirs_time_to_confirm_slots_sum;
   uint32_t csirs_confirm_resource_count;
   uint64_t csirs_confirm_resource_key[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];

@@ -19,11 +19,13 @@
 #include "nr_td_cb0_wire.h"
 #include "nr_pusch_passive_queue.h"
 #include "nr_csirs_blind_rt.h"
+#include "nr_csirs_disc.h"
 #include "nr_prach_passive.h"
 #include "nr_sense_api.h"
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
 __attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
+__attribute__((weak)) void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *m);
 __attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 
@@ -168,6 +170,19 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   if (nr_prach_passive_metrics)
     nr_prach_passive_metrics(&m->prach_us, &m->prach_drops, &m->prach_skipped);
   if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
+  if (nr_csirs_disc_get_metrics) {
+    nr_csirs_disc_metrics_t d;
+    nr_csirs_disc_get_metrics(&d);
+    m->csirs_disc_batches = d.batches;
+    m->csirs_disc_footprints = d.footprints;
+    m->csirs_disc_hyps = d.hyps;
+    m->csirs_disc_winners = d.winners;
+    m->csirs_disc_ambiguous = d.ambiguous;
+    m->csirs_disc_feed_drops = d.feed_drops;
+    m->csirs_disc_gpu_batches = d.gpu_batches;
+    m->csirs_disc_cpu_batches = d.cpu_batches;
+    m->csirs_disc_batch_us = d.batch_us;
+  }
 }
 
 void nr_passive_metrics_emit(void)

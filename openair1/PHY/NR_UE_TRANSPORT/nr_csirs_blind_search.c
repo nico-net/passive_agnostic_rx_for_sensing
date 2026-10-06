@@ -385,6 +385,19 @@ void nr_csirs_blind_pin(nr_csirs_blind_state_t *st, int idx, uint32_t budget)
   st->pin_left = budget;
 }
 
+void nr_csirs_blind_seed(nr_csirs_blind_state_t *st,
+                         int idx,
+                         uint16_t period,
+                         uint16_t offset,
+                         int16_t slot_delta)
+{
+  if (st == NULL || idx < 0 || idx >= st->n || period == 0 || offset >= period)
+    return;
+  st->seed_period[idx] = period;
+  st->seed_offset[idx] = offset;
+  st->cand[idx].slot_delta = slot_delta;
+}
+
 int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
 {
   if (st == NULL || st->n <= 0) {
@@ -675,6 +688,9 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   nr_csirs_zp_probation_t *bank = zp ? zp_bank(st, idx) : NULL;
   if (zp && st->zp_evidence_floor[idx] && absolute_slot <= st->zp_evidence_floor[idx])
     return false;
+  if (!zp && st->seed_period[idx]
+      && absolute_slot % st->seed_period[idx] != st->seed_offset[idx])
+    return false;
   if (zp && st->hits[idx] == UINT32_MAX) {
     st->zp_failed_run[idx] = UINT64_MAX;
     return false;
@@ -695,7 +711,20 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   }
   uint16_t p = 0, off[2] = {0, 0};
   int n_off = 0;
-  if (!nr_csirs_blind_infer_period2(st->hit_slot[idx], st->n_hit_slot[idx], CSIRS_MIN_HITS, &p, off, &n_off)) {
+  if (!zp && st->seed_period[idx]) {
+    p = st->seed_period[idx];
+    off[0] = st->seed_offset[idx];
+    n_off = 1;
+    uint32_t lo = st->hit_slot[idx][0], hi = lo;
+    for (int h = 1; h < st->n_hit_slot[idx]; ++h) {
+      if (st->hit_slot[idx][h] < lo)
+        lo = st->hit_slot[idx][h];
+      if (st->hit_slot[idx][h] > hi)
+        hi = st->hit_slot[idx][h];
+    }
+    if (hi - lo < p)
+      return false;
+  } else if (!nr_csirs_blind_infer_period2(st->hit_slot[idx], st->n_hit_slot[idx], CSIRS_MIN_HITS, &p, off, &n_off)) {
     if (zp && st->n_hit_slot[idx] == 8)
       zp_restart_epoch(st, idx, absolute_slot);
     return false;   /* scoring high is not enough -- it must also be PERIODIC */

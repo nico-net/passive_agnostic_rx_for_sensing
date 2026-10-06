@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
@@ -36,11 +37,22 @@ typedef struct {
   fapi_nr_dl_config_csirs_pdu_rel15_t pdu;
   uint32_t                            period_slots; ///< slow-time period, in slots (>0)
   uint32_t                            offset_slots; ///< absolute-slot offset within the period
+  int16_t                             slot_delta;
+  bool                                dynamic;
 } nr_csirs_monitor_res_t;
 
 static nr_csirs_monitor_res_t g_monitors[NR_CSIRS_MONITOR_MAX];
 static int                    g_n_monitors = 0;
 static int                    g_parsed     = 0;
+static pthread_mutex_t        g_monitor_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool same_geometry(const fapi_nr_dl_config_csirs_pdu_rel15_t *a,
+                          const fapi_nr_dl_config_csirs_pdu_rel15_t *b)
+{
+  return a->row == b->row && a->freq_domain == b->freq_domain && a->symb_l0 == b->symb_l0
+      && a->symb_l1 == b->symb_l1 && a->cdm_type == b->cdm_type && a->freq_density == b->freq_density
+      && a->start_rb == b->start_rb && a->nr_of_rbs == b->nr_of_rbs && a->scramb_id == b->scramb_id;
+}
 
 /**
  * @brief Parse one "row:start_rb:nr_rbs:freq_domain:symb_l0:symb_l1:cdm_type:freq_density:scramb_id:period:offset"
@@ -88,7 +100,9 @@ static int parse_one(const char* item, nr_csirs_monitor_res_t* m)
 
 void nr_csirs_monitor_init(void)
 {
+  pthread_mutex_lock(&g_monitor_lock);
   if (g_parsed) {
+    pthread_mutex_unlock(&g_monitor_lock);
     return;
   }
   g_parsed = 1;
@@ -103,6 +117,7 @@ void nr_csirs_monitor_init(void)
   config_get(config_get_if(), params, (int)(sizeof(params) / sizeof(params[0])), "sensing");
 
   if (p_monitor == NULL || p_monitor[0] == '\0') {
+    pthread_mutex_unlock(&g_monitor_lock);
     return; // monitor disabled
   }
 
@@ -144,11 +159,15 @@ void nr_csirs_monitor_init(void)
           i, m->pdu.row, m->pdu.start_rb, m->pdu.start_rb + m->pdu.nr_of_rbs, m->pdu.freq_domain, m->pdu.symb_l0,
           m->pdu.symb_l1, m->pdu.cdm_type, m->pdu.freq_density, m->pdu.scramb_id, m->period_slots, m->offset_slots);
   }
+  pthread_mutex_unlock(&g_monitor_lock);
 }
 
 int nr_csirs_monitor_enabled(void)
 {
-  return g_n_monitors > 0;
+  pthread_mutex_lock(&g_monitor_lock);
+  const int enabled = g_n_monitors > 0;
+  pthread_mutex_unlock(&g_monitor_lock);
+  return enabled;
 }
 
 int nr_csirs_monitor_due(int                                         frame,
@@ -157,16 +176,112 @@ int nr_csirs_monitor_due(int                                         frame,
                          const fapi_nr_dl_config_csirs_pdu_rel15_t** out,
                          int                                         max)
 {
-  if (g_n_monitors == 0 || out == NULL || max <= 0 || slots_per_frame <= 0) {
+  return nr_csirs_monitor_due_ex(frame, slot, slots_per_frame, out, NULL, max);
+}
+
+int nr_csirs_monitor_due_ex(int frame,
+                            int slot,
+                            int slots_per_frame,
+                            const fapi_nr_dl_config_csirs_pdu_rel15_t **out,
+                            int16_t *slot_delta,
+                            int max)
+{
+  if (out == NULL || max <= 0 || slots_per_frame <= 0) {
     return 0;
   }
+  static __thread fapi_nr_dl_config_csirs_pdu_rel15_t snapshot[NR_CSIRS_MONITOR_MAX];
+  pthread_mutex_lock(&g_monitor_lock);
   const uint32_t abs_slot = (uint32_t)frame * (uint32_t)slots_per_frame + (uint32_t)slot;
   int            count    = 0;
   for (int i = 0; i < g_n_monitors && count < max; i++) {
     const nr_csirs_monitor_res_t* m = &g_monitors[i];
     if ((abs_slot % m->period_slots) == m->offset_slots) {
-      out[count++] = &m->pdu;
+      snapshot[count] = m->pdu;
+      out[count] = &snapshot[count];
+      if (slot_delta)
+        slot_delta[count] = m->slot_delta;
+      count++;
     }
   }
+  pthread_mutex_unlock(&g_monitor_lock);
   return count;
+}
+
+int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
+                                 uint16_t period,
+                                 uint16_t offset,
+                                 int16_t slot_delta)
+{
+  if (!pdu || period == 0)
+    return -1;
+  pthread_mutex_lock(&g_monitor_lock);
+  for (int i = 0; i < g_n_monitors; ++i) {
+    if (same_geometry(&g_monitors[i].pdu, pdu)) {
+      /* A manually configured resource owns its lifetime.  Discovery may
+       * rediscover it, but must not turn it into an epoch-scoped entry that a
+       * later revoke/remove-all operation can silently delete. */
+      if (!g_monitors[i].dynamic) {
+        if (g_monitors[i].period_slots == period && g_monitors[i].offset_slots == offset % period) {
+          pthread_mutex_unlock(&g_monitor_lock);
+          return i;
+        }
+      } else if (g_monitors[i].period_slots == period && g_monitors[i].offset_slots == offset % period) {
+        g_monitors[i].slot_delta = slot_delta;
+        pthread_mutex_unlock(&g_monitor_lock);
+        return i;
+      }
+    }
+  }
+  if (g_n_monitors >= NR_CSIRS_MONITOR_MAX) {
+    pthread_mutex_unlock(&g_monitor_lock);
+    return -1;
+  }
+  const int index = g_n_monitors++;
+  g_monitors[index] = (nr_csirs_monitor_res_t){.pdu = *pdu,
+                                               .period_slots = period,
+                                               .offset_slots = offset % period,
+                                               .slot_delta = slot_delta,
+                                               .dynamic = true};
+  pthread_mutex_unlock(&g_monitor_lock);
+  LOG_A(PHY,
+        "SENSING: CSIRS_DISC MONITOR_ADD row=%u fd=%u rb=%u:%u id=%u P/O=%u/%u delta=%d\n",
+        pdu->row,
+        pdu->freq_domain,
+        pdu->start_rb,
+        pdu->nr_of_rbs,
+        pdu->scramb_id,
+        period,
+        offset % period,
+        slot_delta);
+  return index;
+}
+
+void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu)
+{
+  if (!pdu)
+    return;
+  pthread_mutex_lock(&g_monitor_lock);
+  for (int i = 0; i < g_n_monitors;) {
+    if (g_monitors[i].dynamic && same_geometry(&g_monitors[i].pdu, pdu)) {
+      memmove(&g_monitors[i], &g_monitors[i + 1], (size_t)(g_n_monitors - i - 1) * sizeof(g_monitors[0]));
+      g_n_monitors--;
+    } else {
+      i++;
+    }
+  }
+  pthread_mutex_unlock(&g_monitor_lock);
+}
+
+void nr_csirs_monitor_remove_dynamic_all(void)
+{
+  pthread_mutex_lock(&g_monitor_lock);
+  for (int i = 0; i < g_n_monitors;) {
+    if (g_monitors[i].dynamic) {
+      memmove(&g_monitors[i], &g_monitors[i + 1], (size_t)(g_n_monitors - i - 1) * sizeof(g_monitors[0]));
+      g_n_monitors--;
+    } else {
+      i++;
+    }
+  }
+  pthread_mutex_unlock(&g_monitor_lock);
 }

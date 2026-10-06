@@ -59,6 +59,7 @@ typedef struct {
   uint8_t  freq_density; ///< 0/1 = dot5 (even/odd RB), 2 = one, 3 = three
   uint16_t scramb_id;    ///< almost always the PCI, but not required to be
   uint16_t start_rb, nr_of_rbs;
+  int16_t  slot_delta;   ///< add to the receiver slot when generating the CSI-RS sequence
 } nr_csirs_candidate_t;
 
 /** Normalised correlation between a received slot and a reference grid, over the REs the
@@ -224,6 +225,8 @@ typedef struct {
   uint16_t             conf_period[NR_CSIRS_BLIND_MAX_CONF];
   uint16_t             conf_off[NR_CSIRS_BLIND_MAX_CONF][2];
   uint8_t              conf_n_off[NR_CSIRS_BLIND_MAX_CONF];
+  uint16_t             seed_period[NR_CSIRS_BLIND_MAX_CAND];
+  uint16_t             seed_offset[NR_CSIRS_BLIND_MAX_CAND];
   int                  cycle_left, cycle_pad, cycle_last; ///< phase-diverse round-robin cadence
 } nr_csirs_blind_state_t;
 
@@ -268,6 +271,13 @@ int nr_csirs_blind_next(nr_csirs_blind_state_t *st);
  *  per n*period calls -- so a candidate the scramblingID sweep is working on, or has just solved,
  *  would otherwise wait minutes for the hits it needs. */
 void nr_csirs_blind_pin(nr_csirs_blind_state_t *st, int idx, uint32_t budget);
+/** Seed a footprint-proven period/offset and slot-number correction for a newly appended
+ * candidate. Confirmation still requires ordinary scored hits. */
+void nr_csirs_blind_seed(nr_csirs_blind_state_t *st,
+                         int idx,
+                         uint16_t period,
+                         uint16_t offset,
+                         int16_t slot_delta);
 #define NR_CSIRS_BLIND_PIN_SWEEP_CALLS   (32 * 640)  /* 1024 ids / 32 per aligned visit x longest period */
 #define NR_CSIRS_BLIND_PIN_CONFIRM_CALLS (4 * 640)   /* > CSIRS_MIN_HITS periods at the longest period */
 

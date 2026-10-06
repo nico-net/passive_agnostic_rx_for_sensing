@@ -37,6 +37,13 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
+#include "nr_csirs_disc.h"
+/** Append a U5 winner to both confirmation banks and seed its known lattice. */
+int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *hyp, const nr_csirs_disc_win_t *win);
+/** True when this exact U5 geometry is already in the confirmed NZP bank. */
+bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *hyp);
+/** Withdraw discovery-owned runtime state on cell epoch/synchronisation loss. */
+void nr_csirs_blind_rt_discovery_reset(void);
 /** Every confirmed cell CSI-RS resource occurring in `absolute_slot`, as FAPI PDUs for PDSCH rate
  *  matching: NZP (csi_type 1) first, then ZERO-POWER (csi_type 2, REs to rate-match around, nothing
  *  to estimate on). Returns how many were written to out[0..max). */

@@ -16,6 +16,8 @@
 #include "PHY/MODULATION/modulation_UE.h"
 #include "nr_csirs_blind_search.h"
 #include "nr_csirs_observer.h"
+#include "nr_csirs_monitor.h"
+#include "nr_csirs_disc_sweep_internal.h"
 
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "common/utils/LOG/log.h"
@@ -26,6 +28,12 @@
 #include <math.h>
 #include <pthread.h>
 #include <time.h>
+
+/* Focused blind-search fixtures link this file without the discovery/monitor units. */
+extern bool nr_csirs_disc_enabled(void) __attribute__((weak));
+extern int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *, uint16_t, uint16_t, int16_t)
+    __attribute__((weak));
+extern void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *) __attribute__((weak));
 
 /* Weak for the standalone blind-search fixture; the receiver links the epoch owner. */
 __attribute__((weak)) void nr_cfg_epoch_note_csirs_map_change(void);
@@ -61,11 +69,13 @@ static void map_changed(void)
  * Rows 1-5 need at most 4 ports,
  * and for the 8-32-port rows every port >= 3 writes into plane 3 as a shared union sink, so a
  * 32-port candidate costs no extra 7 MB of per-thread buffers nor a 7 MB memset per slot. */
-#define NR_CSIRS_BLIND_RT_MAX_PORTS 4
+#define NR_CSIRS_BLIND_RT_LEGACY_PORTS 4
+#define NR_CSIRS_BLIND_RT_MAX_PORTS 32
 #define NR_CSIRS_BLIND_RT_ALL_PORTS 32
 
 static nr_csirs_blind_state_t g_st;
 static nr_csirs_blind_state_t g_zp;      /* zero-power search over the same candidates */
+static int g_disc = -1;
 static bool nzp_observer_score(int idx, uint32_t slot, double rho)
 {
   if (!g_reconf) return false;
@@ -77,7 +87,22 @@ static bool nzp_observer_score(int idx, uint32_t slot, double rho)
         if (g_st.conf_idx[k] == idx) {
           const nr_csirs_resource_t key = resource_key(&g_st, k, false);
           /* Scores between the noise bar and the confirmation bar are inconclusive. */
-          return nr_csirs_observer_due(&g_csirs_obs, &key, slot, rho >= 2.0);
+          const bool revoked = nr_csirs_observer_due(&g_csirs_obs, &key, slot, rho >= 2.0);
+          if (revoked && g_disc > 0 && nr_csirs_monitor_remove_dynamic) {
+            fapi_nr_dl_config_csirs_pdu_rel15_t pdu = {0};
+            const nr_csirs_candidate_t *c = &g_st.cand[idx];
+            pdu.row = c->row;
+            pdu.freq_domain = c->freq_domain;
+            pdu.symb_l0 = c->symb_l0;
+            pdu.symb_l1 = c->symb_l1;
+            pdu.cdm_type = c->cdm_type;
+            pdu.freq_density = c->freq_density;
+            pdu.start_rb = c->start_rb;
+            pdu.nr_of_rbs = c->nr_of_rbs;
+            pdu.scramb_id = c->scramb_id;
+            nr_csirs_monitor_remove_dynamic(&pdu);
+          }
+          return revoked;
         }
   return false;
 }
@@ -168,6 +193,115 @@ static struct { uint64_t count; uint32_t last_slot; } g_zp_geometry_veto[NR_CSIR
 static uint64_t g_zp_geometry_veto_total;
 static int      g_armed;
 static uint64_t g_slots;
+
+static void discovery_empty_state(nr_csirs_blind_state_t *st)
+{
+  memset(st, 0, sizeof(*st));
+  st->confirmed = -1;
+  st->pinned = -1;
+}
+
+static int same_candidate(const nr_csirs_candidate_t *a, const nr_csirs_candidate_t *b)
+{
+  return a->row == b->row && a->freq_domain == b->freq_domain && a->symb_l0 == b->symb_l0
+      && a->symb_l1 == b->symb_l1 && a->cdm_type == b->cdm_type && a->freq_density == b->freq_density
+      && a->start_rb == b->start_rb && a->nr_of_rbs == b->nr_of_rbs;
+}
+
+int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csirs_disc_win_t *w)
+{
+  if (!h || !w)
+    return -1;
+  pthread_mutex_lock(&g_csirs_state_lock);
+  if (g_disc < 0)
+    g_disc = nr_csirs_disc_enabled && nr_csirs_disc_enabled();
+  if (g_disc <= 0) {
+    pthread_mutex_unlock(&g_csirs_state_lock);
+    return -1;
+  }
+  if (!g_armed) {
+    discovery_empty_state(&g_st);
+    discovery_empty_state(&g_zp);
+    g_armed = 1;
+  }
+  nr_csirs_candidate_t c = {.row = h->row,
+                            .freq_domain = h->freq_domain,
+                            .symb_l0 = h->symb_l0,
+                            .symb_l1 = h->symb_l1,
+                            .cdm_type = h->cdm_type,
+                            .freq_density = h->density,
+                            .scramb_id = w->scramb_id,
+                            .start_rb = h->rb_start,
+                            .nr_of_rbs = h->n_rb,
+                            .slot_delta = w->slot_delta};
+  int at = nr_csirs_blind_append(&g_st, &c);
+  if (at < 0) {
+    for (int i = 0; i < g_st.n; ++i)
+      if (same_candidate(&g_st.cand[i], &c)) {
+        at = i;
+        g_st.cand[i].scramb_id = c.scramb_id;
+        g_st.cand[i].slot_delta = c.slot_delta;
+        break;
+      }
+    if (at < 0 && g_st.n < NR_CSIRS_BLIND_MAX_CAND) {
+      at = g_st.n++;
+      g_st.cand[at] = c;
+    }
+  }
+  int zat = nr_csirs_blind_append(&g_zp, &c);
+  if (zat < 0) {
+    for (int i = 0; i < g_zp.n; ++i)
+      if (same_candidate(&g_zp.cand[i], &c)) {
+        zat = i;
+        g_zp.cand[i].scramb_id = c.scramb_id;
+        g_zp.cand[i].slot_delta = c.slot_delta;
+        break;
+      }
+    if (zat < 0 && g_zp.n < NR_CSIRS_BLIND_MAX_CAND) {
+      zat = g_zp.n++;
+      g_zp.cand[zat] = c;
+    }
+  }
+  if (at >= 0 && zat == at) {
+    nr_csirs_blind_seed(&g_st, at, h->period, h->offset, w->slot_delta);
+    nr_csirs_blind_seed(&g_zp, zat, h->period, h->offset, w->slot_delta);
+    nr_csirs_blind_pin(&g_st, at, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
+    nr_csirs_blind_pin(&g_zp, zat, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
+  } else {
+    at = -1;
+  }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  return at;
+}
+
+bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *h)
+{
+  if (!h)
+    return false;
+  pthread_mutex_lock(&g_csirs_state_lock);
+  bool confirmed = false;
+  for (int k = 0; k < g_st.n_conf && !confirmed; ++k) {
+    const nr_csirs_candidate_t *c = &g_st.cand[g_st.conf_idx[k]];
+    confirmed = c->row == h->row && c->freq_domain == h->freq_domain && c->symb_l0 == h->symb_l0
+        && c->symb_l1 == h->symb_l1 && c->cdm_type == h->cdm_type && c->freq_density == h->density
+        && c->start_rb == h->rb_start && c->nr_of_rbs == h->n_rb;
+  }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  return confirmed;
+}
+
+void nr_csirs_blind_rt_discovery_reset(void)
+{
+  pthread_mutex_lock(&g_csirs_state_lock);
+  if (g_disc > 0) {
+    discovery_empty_state(&g_st);
+    discovery_empty_state(&g_zp);
+    g_armed = 1;
+    g_conf_logged = 0;
+    g_slots = 0;
+  }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+}
 /* Recent scores from OTHER candidates, for the RELATIVE detection bar. An absolute correlation
  * threshold would have to be recalibrated per deployment for occupancy, gain and bandwidth --
  * exactly the kind of constant this project replaces with a measured one. */
@@ -313,9 +447,71 @@ static double median_of(const double *src, int n)
 }
 static double null_median(void) { return median_of(g_null, g_null_n); }
 
+static double discovery_score(const NR_DL_FRAME_PARMS *fp,
+                              const nr_csirs_candidate_t *c,
+                              const c16_t *const *rx,
+                              c16_t *const *refs,
+                              int n_ant,
+                              int block,
+                              int *n_used)
+{
+  nr_csirs_disc_hyp_t h = {.row = c->row,
+                           .freq_domain = c->freq_domain,
+                           .symb_l0 = c->symb_l0,
+                           .symb_l1 = c->symb_l1,
+                           .cdm_type = c->cdm_type,
+                           .density = c->freq_density,
+                           .rb_start = c->start_rb,
+                           .n_rb = c->nr_of_rbs,
+                           .period = 1,
+                           .offset = 0};
+  nr_csirs_disc_sweep_map_t map;
+  if (nr_csirs_disc_sweep_map(&h, fp->N_RB_DL, &map) < 0)
+    return -1;
+  double total = 0;
+  int used = 0;
+  for (int ant = 0; ant < n_ant; ++ant) {
+    for (int p = 0; p < map.ports; ++p) {
+      double sum = 0;
+      int blocks = 0;
+      const int first = map.begin[p], last = map.begin[p + 1];
+      for (int begin = first; begin < last;) {
+        const int end = last - begin < block ? last : begin + block;
+        double ar = 0, ai = 0, er = 0, ex = 0;
+        for (int i = begin; i < end; ++i) {
+          const int crb = map.re[i].grid_index % (12 * fp->N_RB_DL);
+          const int symbol = map.re[i].symbol;
+          const int rk = symbol * fp->ofdm_symbol_size + (fp->first_carrier_offset + crb) % fp->ofdm_symbol_size;
+          const int xk = symbol * fp->ofdm_symbol_size + crb;
+          const double yr = rx[ant][rk].r, yi = rx[ant][rk].i;
+          const double xr = refs[p][xk].r, xi = refs[p][xk].i;
+          ar += yr * xr + yi * xi;
+          ai += yi * xr - yr * xi;
+          er += yr * yr + yi * yi;
+          ex += xr * xr + xi * xi;
+        }
+        if (er > 0 && ex > 0) {
+          sum += fmin(1, sqrt((ar * ar + ai * ai) / (er * ex)));
+          blocks++;
+        }
+        begin = end;
+      }
+      const int count = last - first;
+      const double score = blocks ? sum / blocks * sqrt((double)count / blocks) / 0.886 : 0;
+      total += score;
+      used += count;
+    }
+  }
+  free(map.re);
+  if (n_used)
+    *n_used = used;
+  return n_ant && map.ports ? total / (n_ant * map.ports) : -1;
+}
+
 static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], int idx,
                             bool maintenance, bool nzp_recheck);
+static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
 
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
@@ -325,7 +521,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   const c16_t *rxdataF_ant0 = (rxdataF != NULL) ? &rxdataF[0][0] : NULL;
   if (g_on < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND");
-    g_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
+    g_disc = nr_csirs_disc_enabled && nr_csirs_disc_enabled();
+    g_on = (e != NULL && atoi(e) != 0) || g_disc;
   }
   if (!g_on || ue == NULL || rxdataF_ant0 == NULL) {
     return;
@@ -343,19 +540,24 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   if (g_armed == 0) {
     /* scramblingID is taken as the PCI, which acquisition already gives us. Sweeping 1024 values
      * would cost three orders of magnitude for a parameter that can simply be tried first. */
-    if (nr_csirs_blind_init(&g_st, fp->N_RB_DL, fp->Nid_cell) <= 0) {
-      g_on = 0;
-      return;
+    if (g_disc > 0) {
+      discovery_empty_state(&g_st);
+      discovery_empty_state(&g_zp);
+    } else {
+      if (nr_csirs_blind_init(&g_st, fp->N_RB_DL, fp->Nid_cell) <= 0) {
+        g_on = 0;
+        return;
+      }
+      nr_csirs_blind_init(&g_zp, fp->N_RB_DL, fp->Nid_cell);
     }
-    nr_csirs_blind_init(&g_zp, fp->N_RB_DL, fp->Nid_cell);
     memset(g_zp_geometry_veto, 0, sizeof(g_zp_geometry_veto));
     g_zp_geometry_veto_total = 0;
     memset(g_zp_logged, 0, sizeof(g_zp_logged));
     memset(g_zp_events, 0, sizeof(g_zp_events));
     memset(g_zp_maint, 0, sizeof(g_zp_maint));
     g_armed = 1;
-    LOG_I(PHY, "SENSING: CSIRS_BLIND armed: %d candidates, N_RB=%d scramb_id=%d (assumed = PCI)\n",
-          g_st.n, fp->N_RB_DL, fp->Nid_cell);
+    LOG_I(PHY, "SENSING: CSIRS_BLIND armed: %d candidates, N_RB=%d scramb_id=%d%s\n",
+          g_st.n, fp->N_RB_DL, fp->Nid_cell, g_disc > 0 ? " (discovery-fed)" : " (assumed = PCI)");
   }
   /* Historical cost issue: nr_csirs_blind_next() used to return the confirmed index forever
    * after confirmation, so every later call regenerated the SAME resource's full-slot reference
@@ -389,6 +591,15 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     const int k = g_conf_logged, widx = g_st.conf_idx[k];
     const nr_csirs_resource_t key = resource_key(&g_st, k, false);
     if (!g_rank && nr_csirs_observer_confirm(&g_csirs_obs, &key, absolute_slot)) map_changed();
+    if (!g_rank && g_disc > 0 && nr_csirs_monitor_add_dynamic) {
+      fapi_nr_dl_config_csirs_pdu_rel15_t pdu;
+      fill_pdu(&g_st.cand[widx], 1, &pdu);
+      for (int phase = 0; phase < g_st.conf_n_off[k]; ++phase)
+        nr_csirs_monitor_add_dynamic(&pdu,
+                                     g_st.conf_period[k],
+                                     g_st.conf_off[k][phase],
+                                     g_st.cand[widx].slot_delta);
+    }
     char line[128], phase[32] = {0};
     if (nr_csirs_blind_format(&g_st.cand[widx], g_st.conf_period[k], g_st.conf_off[k][0], line, sizeof(line)) <= 0)
       continue;
@@ -502,6 +713,15 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * offline replay of a raw capture, where the real-time budget does not apply: the default one score
    * per slot gave each of ~767 candidates only 10-16 observations in 240 s OTA (2026-10-06, PCI 421),
    * below the IDSWEEP pin floor of 32, so the scramblingID sweep never started. */
+  if (g_disc > 0) {
+    /* U5 already knows each winner's lattice. Score every unconfirmed winner
+     * due now (normally zero or one), instead of spending calls on phases its
+     * seeded confirmation path must reject. */
+    for (int i = 0; i < g_st.n; ++i)
+      if (!nr_csirs_blind_is_confirmed(&g_st, i) && g_st.seed_period[i]
+          && absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i])
+        score_candidate(ue, slot, absolute_slot, rxdataF, i, false, false);
+  }
   static int s_per_slot = -1;
   if (s_per_slot < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND_PER_SLOT");
@@ -514,7 +734,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       LOG_W(PHY, "SENSING: CSIRS_BLIND scoring %d discovery candidates per slot (offline/replay setting)\n", s_per_slot);
   }
   int idx = -1;
-  for (int r = 0; r < s_per_slot; r++) {
+  for (int r = 0; r < (g_disc > 0 ? 0 : s_per_slot); r++) {
     nr_csirs_blind_state_t *first = ((g_slots + r) & 1) ? &g_st : &g_zp;
     nr_csirs_blind_state_t *other = (first == &g_st) ? &g_zp : &g_st;
     nr_csirs_blind_state_t *bank = first;
@@ -618,7 +838,8 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       zp_maint_end(idx, absolute_slot, duplicate, ZPM_SETUP_INVALID, NAN, NAN, NAN, NAN);
     return;
   }
-  const int n_planes = (n_ports < NR_CSIRS_BLIND_RT_MAX_PORTS) ? n_ports : NR_CSIRS_BLIND_RT_MAX_PORTS;
+  const int plane_limit = g_disc > 0 ? NR_CSIRS_BLIND_RT_MAX_PORTS : NR_CSIRS_BLIND_RT_LEGACY_PORTS;
+  const int n_planes = n_ports < plane_limit ? n_ports : plane_limit;
 
   /* ---- ALLOCATED ONCE, NOT PER SLOT -----------------------------------------------------------
    * This runs on the PHY receive thread. The first version called calloc()/free() every slot for
@@ -633,7 +854,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   static __thread c16_t *t_refbuf[NR_CSIRS_BLIND_RT_MAX_PORTS];
   static __thread uint32_t t_refbuf_re;
   if (t_refbuf_re < n_re) {
-    for (int p = 0; p < NR_CSIRS_BLIND_RT_MAX_PORTS; p++) {
+    for (int p = 0; p < plane_limit; p++) {
       c16_t *nb = (c16_t *)realloc(t_refbuf[p], (size_t)n_re * sizeof(c16_t));
       if (nb == NULL) {
         if (maintenance)
@@ -650,10 +871,13 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   c16_t *ref = t_refbuf[0];
   c16_t *refp[NR_CSIRS_BLIND_RT_ALL_PORTS];
   for (int p = 0; p < NR_CSIRS_BLIND_RT_ALL_PORTS; p++)
-    refp[p] = t_refbuf[p < NR_CSIRS_BLIND_RT_MAX_PORTS ? p : NR_CSIRS_BLIND_RT_MAX_PORTS - 1];
+    refp[p] = t_refbuf[p < n_planes ? p : n_planes - 1];
   const csi_mapping_parms_t parms = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0,
                                                           c->symb_l1);
-  nr_generate_csi_rs(fp, &parms, AMP, slot, c->freq_density, c->start_rb, c->nr_of_rbs,
+  int reference_slot = (slot + c->slot_delta) % fp->slots_per_frame;
+  if (reference_slot < 0)
+    reference_slot += fp->slots_per_frame;
+  nr_generate_csi_rs(fp, &parms, AMP, reference_slot, c->freq_density, c->start_rb, c->nr_of_rbs,
                      c->symb_l0, c->symb_l1, c->row, c->scramb_id, 0 /* power offset */,
                      c->cdm_type, refp);
 
@@ -661,7 +885,8 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * dilute the oracle with 13 symbols of unrelated PDSCH. The monitor only FFT'd the CORESET
    * symbols, so transform this candidate's symbol now (antenna 0) -- without this the search
    * scored an empty buffer and never fired (OTA 2026-09-14: 15 min, zero progress lines). */
-  nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+  if (g_disc <= 0)
+    nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   const uint32_t off_sym = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
   /* Footprint evidence for rows 6-18 from the symbol just transformed: one pass over the carrier. */
   if (g_wide < 0) {
@@ -681,10 +906,37 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * realistic 10 dB-SNR match with some residual drift lands around 4-5. */
 #define CSIRS_BLIND_SUBBAND_RE 32
   int n_used = 0;
-  const double rho = nr_csirs_blind_correlate_blocks_shift((const int16_t *)&rxdataF_ant0[off_sym],
-                                                     (const int16_t *)&ref[off_sym],
-                                                     fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
-                                                     fp->first_carrier_offset, &n_used);
+  double rho_sq = 0.0;
+  const int n_ant = g_disc > 0 ? fp->nb_antennas_rx : 1;
+  for (int ant = 0; g_disc <= 0 && ant < n_ant; ++ant) {
+    double best_port = -1.0;
+    int best_used = 0;
+    const int score_planes = g_disc > 0 ? n_planes : 1;
+    for (int p = 0; p < score_planes; ++p) {
+      int ant_used = 0;
+      const double ant_rho = nr_csirs_blind_correlate_blocks_shift(
+          (const int16_t *)&rxdataF[ant][off_sym],
+          (const int16_t *)&t_refbuf[p][off_sym],
+          fp->ofdm_symbol_size,
+          g_disc > 0 ? 40 : CSIRS_BLIND_SUBBAND_RE,
+          fp->first_carrier_offset,
+          &ant_used);
+      if (ant_rho > best_port) {
+        best_port = ant_rho;
+        best_used = ant_used;
+      }
+    }
+    if (best_port >= 0.0) {
+      rho_sq += best_port * best_port;
+      n_used = best_used;
+    }
+  }
+  const c16_t *rx_planes[NR_CSIRS_DISC_MAX_ANT];
+  for (int ant = 0; ant < n_ant; ++ant)
+    rx_planes[ant] = rxdataF[ant];
+  const double rho = g_disc > 0
+      ? discovery_score(fp, c, rx_planes, t_refbuf, n_ant, CSIRS_BLIND_SUBBAND_RE, &n_used)
+      : n_ant > 0 ? sqrt(rho_sq / n_ant) : -1.0;
   if (nzp_observer_score(idx, absolute_slot, rho)) map_changed();
   if ((maintenance || nzp_recheck) && g_timing)
     nr_csirs_observer_add_time(&g_csirs_obs, NR_CSIRS_TIME_CONFIRM, now_us() - confirm_start_us);
@@ -702,7 +954,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * 0.19-0.22 = the expected max of ~950 noise draws at n_used=273; every confirmation this module
    * produced OTA was that artefact. z = rho*sqrt(n_used) is ~0.89 for noise at any size and
    * sqrt(n_used) (>16 here) for a true match, so the bar below is absolute, not relative. */
-  const double z = rho;   /* already normalised: ~1.0 noise, ~6.4 perfect, at any candidate size */
+  const double z = rho; /* already normalised: ~1.0 noise, ~6.4 perfect, at any candidate size */
   /* Sequence-free positional evidence, logged next to z: if z stays at noise while this shows
    * periodic structure, the POSITIONS are right and the SEQUENCE (scramblingID != PCI) is wrong --
    * which the correlation alone cannot distinguish from an empty hypothesis. */
@@ -894,7 +1146,7 @@ score_zero_power:
   /* ---- scramblingID sweep on a candidate whose POSITIONS already look like a pilot ---- */
   if (g_ids < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND_IDSWEEP");
-    g_ids = (e != NULL && atoi(e) != 0) ? 1 : 0;
+    g_ids = g_disc <= 0 && (e != NULL && atoi(e) != 0);
   }
   /* PIN THE SWEEP TO ONE CANDIDATE. First cut advanced the id cursor on ANY slot whose candidate
    * had epr > 2, but the round-robin serves a different candidate every slot, so a "full pass"

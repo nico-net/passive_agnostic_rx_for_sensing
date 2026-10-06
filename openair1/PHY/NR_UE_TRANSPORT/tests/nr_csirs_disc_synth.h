@@ -15,6 +15,7 @@ typedef struct {
   uint32_t first_slot, seed;
   float snr_db, load; /* load=1 full-band every slot; otherwise scheduled fraction */
   bool dmrs, ssb;
+  bool full_rank_mimo; /* equal-energy port channel for multi-resource integration fixtures */
   const nr_csirs_disc_synth_resource_t *resources;
   int n_resources;
 } nr_csirs_disc_synth_cfg_t;

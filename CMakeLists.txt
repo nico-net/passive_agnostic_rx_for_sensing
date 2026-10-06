@@ -993,6 +993,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
@@ -2811,6 +2812,7 @@ if(ENABLE_TESTS)
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c
                                             ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
                                             ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
                                             ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_gen_mod_table.c
@@ -2859,6 +2861,24 @@ if(ENABLE_TESTS)
   endif()
   add_dependencies(tests test_nr_csirs_disc_fp)
   add_test(NAME test_nr_csirs_disc_fp COMMAND ./test_nr_csirs_disc_fp)
+
+  add_executable(test_nr_csirs_disc_e2e
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_e2e_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_sweep.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c)
+  target_include_directories(test_nr_csirs_disc_e2e PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
+  target_link_libraries(test_nr_csirs_disc_e2e PRIVATE nr_csirs_disc_synth GTest::gtest GTest::gtest_main
+                                                       ${CMAKE_DL_LIBS} pthread m)
+  add_dependencies(tests test_nr_csirs_disc_e2e)
+  add_test(NAME test_nr_csirs_disc_e2e COMMAND ./test_nr_csirs_disc_e2e)
 
   # PLAIN C, not gtest: nr_phy_common.h (which declares nr_generate_csi_rs and csi_mapping_parms_t)
   # also declares nr_mmse_2layers() with C variably-modified array parameters, which C++ rejects --

@@ -137,6 +137,11 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
                                   const UE_nr_rxtx_proc_t *proc,
                                   const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                   const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu);
+void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
+                                          const UE_nr_rxtx_proc_t *proc,
+                                          const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                          const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
+                                          int16_t slot_delta);
 
 int psbch_pscch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data);
 void phy_procedures_nrUE_SL_TX(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_tx_t *phy_data, c16_t **txp);

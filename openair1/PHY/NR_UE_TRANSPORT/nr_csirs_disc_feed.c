@@ -43,6 +43,9 @@ static disc_worker_t g_worker;
 static pthread_once_t g_enabled_once = PTHREAD_ONCE_INIT;
 static bool g_enabled;
 
+/* U1's standalone test deliberately links no U5 object. */
+extern void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp) __attribute__((weak));
+
 static void worker_note_slot(void);
 
 static void read_enabled(void)
@@ -242,6 +245,11 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
     return 0;
   if (fp == NULL || fp->symbols_per_slot != NR_CSIRS_DISC_NSYM)
     return -1;
+
+  /* U5 loads the CUDA backend here, before the ring chooses its allocator, and installs
+   * the process hook. The weak edge keeps the U1-only fixture self-contained. */
+  if (nr_csirs_disc_pipeline_init)
+    nr_csirs_disc_pipeline_init(fp);
 
   memset(&g_worker, 0, sizeof(g_worker));
   g_worker.batch = env_positive("ISAC_CSIRS_DISC_BATCH", 100);

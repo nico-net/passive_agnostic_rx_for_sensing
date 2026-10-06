@@ -70,6 +70,22 @@ int nr_csirs_monitor_due(int                                         frame,
                          const fapi_nr_dl_config_csirs_pdu_rel15_t** out,
                          int                                         max);
 
+/** As nr_csirs_monitor_due(), also returning the sequence slot-number delta for each PDU. */
+int nr_csirs_monitor_due_ex(int frame,
+                            int slot,
+                            int slots_per_frame,
+                            const fapi_nr_dl_config_csirs_pdu_rel15_t **out,
+                            int16_t *slot_delta,
+                            int max);
+
+/** Thread-safe, bounded runtime resources exported by blind discovery. Idempotent by geometry and phase. */
+int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
+                                 uint16_t period,
+                                 uint16_t offset,
+                                 int16_t slot_delta);
+void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu);
+void nr_csirs_monitor_remove_dynamic_all(void);
+
 #ifdef __cplusplus
 }
 #endif

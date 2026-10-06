@@ -4052,9 +4052,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * dropped stretches the round-robin search's time-to-confirm by the same factor. Correctness over
    * cleverness: the body costs the csirs bucket below only while unconfirmed. */
   const uint64_t btim_t_csirs = btim_on ? btim_now() : 0;
-  nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
-                         source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
-                         rxdataF);
+  if (!nr_csirs_disc_enabled())
+    nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
+                           source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
+                           rxdataF);
   btim_add(BTIM_CSIRS, btim_t_csirs);
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function

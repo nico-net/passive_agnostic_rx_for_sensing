@@ -113,12 +113,14 @@ int nr_csirs_disc_synth(nr_csirs_disc_ring_t *r,const nr_csirs_disc_synth_cfg_t 
         bool active=false;for(int p=0;p<m.ports;++p) active|=planes[p][j].r || planes[p][j].i;
         if(!active) continue;
         occupied[j]=1;
-        /* All ports generated. A dominant port per CDM group with weak cross
-         * ports is a deterministic flat MIMO channel, not power added on top
-         * of PDSCH. Independent RX phase/gain is applied below. */
+        /* The established detector fixtures use a dominant port per CDM group.
+         * U5's mixed-resource integration fixture opts into an equal-energy,
+         * deterministic full-rank channel so adjacent rows (for example
+         * 11/12) remain identifiable end to end. */
         for(int a=0;a<r->n_ant;++a) for(int p=0;p<m.ports;++p) {
-          double gain=p%gs==0?1.0:0.025;
-          double phase=p%gs==0?0:0.7*(p+1)*(a+1), re=gain*cos(phase),im=gain*sin(phase);
+          double gain=cfg->full_rank_mimo?1.0/sqrt(gs):(p%gs==0?1.0:0.025);
+          double phase=cfg->full_rank_mimo||p%gs?0.7*(p+1)*(a+1):0;
+          double re=gain*cos(phase),im=gain*sin(phase);
           size_t b=((size_t)a*nre+j)*2;
           tx[b]+=sqrt(c->power)*(re*planes[p][j].r-im*planes[p][j].i);
           tx[b+1]+=sqrt(c->power)*(re*planes[p][j].i+im*planes[p][j].r);
