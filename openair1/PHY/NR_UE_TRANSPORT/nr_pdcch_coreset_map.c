@@ -435,7 +435,18 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   if ((g_idsw.dl_calls++ % every) != 0)
     return -1;
   const int dur = nr_pdcch_coreset_map_idsweep_dur();
-  const int starts = sps;
+  /* ISAC_PDCCH_NID_GPU_SYMBOLS=N rotates the window start over the first N symbols only (default: all). PDCCH
+   * CORESETs sit in the first symbols; on PCI 415 (OTA 2026-10-07) the dedicated CORESET is at symbol 0 and a
+   * 14-symbol rotation sampled it 1/14 of the time (first record after ~627 passes / ~50 s). */
+  int starts = sps;
+  if (incremental) {
+    static int s_nsym = -1;
+    if (s_nsym < 0) {
+      const char *e = getenv("ISAC_PDCCH_NID_GPU_SYMBOLS");
+      s_nsym = e && atoi(e) >= 1 ? atoi(e) : 0;
+    }
+    if (s_nsym > 0 && s_nsym < starts) starts = s_nsym;
+  }
   if (starts <= 0) return -1;
   const int start = (int)(g_idsw.cap++ % (uint32_t)starts);
   if (!incremental && start + dur > sps) /* the window would run past the end of the slot: skip this occasion, still
