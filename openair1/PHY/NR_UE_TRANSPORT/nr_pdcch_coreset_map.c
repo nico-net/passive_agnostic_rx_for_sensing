@@ -351,7 +351,9 @@ static struct {
  *  before nr_pdcch_coreset_map_idsweep_push(). */
 int nr_pdcch_coreset_map_idsweep_dur(void)
 {
-  if (g_idsw.dur < 0) {
+  /* <= 0: the static struct zero-initialises dur, so `< 0` never fired and every snapshot carried
+   * dur=0 symbols (2724-byte batches, OTA 2026-10-07 nidsweep). */
+  if (g_idsw.dur <= 0) {
     const char *e = getenv("ISAC_COREMAP_IDSWEEP_DUR");
     int d = (e != NULL) ? atoi(e) : 1;
     if (d < 1) d = 1;
