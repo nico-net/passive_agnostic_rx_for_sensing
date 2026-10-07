@@ -57,6 +57,7 @@
  * assignment being found in nr_radio_config.c).
  */
 
+#include "nr_pdcch_nid_gpu.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
 #include "nr_passive_cfg_epoch.h"
@@ -971,7 +972,33 @@ static void discovered_verified(void)
 
 static bool discovered_load(const char *path)
 {
-  FILE *f = fopen(path, "r");
+  FILE *f;
+  char memory[2048];
+  if (nr_pdcch_nid_gpu_enabled()) {
+    /* Let the current dwell finish before replacing the list underneath it. */
+    if (s_disc_active) return false;
+    static uint64_t generation;
+    nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
+    int n = nr_pdcch_nid_gpu_records(records, NR_PDCCH_NID_MAX_RECORDS, &generation);
+    if (n < 0) return false;
+    if (n == 0) {
+      s_disc_n = s_disc_next = s_disc_failed = 0;
+      s_disc_pending = false;
+      return false;
+    }
+    size_t used = 0;
+    for (int i = 0; i < n; i++) {
+      const nr_pdcch_nid_record_t *r = &records[i];
+      int bytes = snprintf(memory + used, sizeof(memory) - used,
+                          "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d ties=%d\n",
+                          r->nid, r->sym, r->dur, r->grid_rb, r->groups, r->L, r->R, r->shift, r->ties);
+      if (bytes < 0 || (size_t)bytes >= sizeof(memory) - used) break;
+      used += bytes;
+    }
+    f = fmemopen(memory, used, "r");
+  } else {
+    f = fopen(path, "r");
+  }
   if (f == NULL)
     return false;
   char line[256];
@@ -999,15 +1026,16 @@ bool nr_pdcch_blind_monitor_discovered_poll(void)
     return false;
   const char *path = "/tmp/coresets_discovered.txt";
   struct stat st;
-  if (stat(path, &st) == 0 && st.st_mtime != s_mtime) { /* new or changed discovery result */
-    s_mtime = st.st_mtime;
+  if (nr_pdcch_nid_gpu_enabled() || (stat(path, &st) == 0 && st.st_mtime != s_mtime)) {
+    if (!nr_pdcch_nid_gpu_enabled()) s_mtime = st.st_mtime;
     if (discovered_load(path)) {
       s_disc_pending = true;
       if (s_disc_paused) {
         s_disc_paused = false;
-        LOG_A(PHY, "SENSING: discovery file changed; catalog walk un-paused\n");
+        LOG_A(PHY, "SENSING: discovery %s changed; catalog walk un-paused\n",
+              nr_pdcch_nid_gpu_enabled() ? "GPU results" : "file");
       }
-    } else {
+    } else if (!nr_pdcch_nid_gpu_enabled()) {
       LOG_W(PHY, "SENSING: %s present but no usable CORESET line; ignored\n", path);
     }
   }

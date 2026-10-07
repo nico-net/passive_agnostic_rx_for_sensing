@@ -120,6 +120,12 @@ if(ENABLE_LDPC_CUDA)
   # NR_GPU_FEP=1 loader knob as pdsch_gpu above -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on
   # the CPU (nr_slot_fep), already shared across every extent candidate -- see that file's top
   # comment for why.
+  add_library(pdcch_nid_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu)
+  set_target_properties(pdcch_nid_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" CUDA_STANDARD 14)
+  target_compile_options(pdcch_nid_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false>)
+  target_link_libraries(pdcch_nid_gpu PRIVATE CUDA::cudart)
+  add_dependencies(nr-uesoftmodem pdcch_nid_gpu)
   add_library(pdcch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu)
   set_target_properties(pdcch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)

@@ -22,6 +22,7 @@
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c
  * \brief Implementation for nr_pdcch_coreset_map.h -- see that header for the design rationale.
  */
+#include "nr_pdcch_nid_gpu.h"
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -355,7 +356,7 @@ int nr_pdcch_coreset_map_idsweep_dur(void)
    * dur=0 symbols (2724-byte batches, OTA 2026-10-07 nidsweep). */
   if (g_idsw.dur <= 0) {
     const char *e = getenv("ISAC_COREMAP_IDSWEEP_DUR");
-    int d = (e != NULL) ? atoi(e) : 1;
+    int d = (e != NULL) ? atoi(e) : (nr_pdcch_nid_gpu_enabled() ? 3 : 1);
     if (d < 1) d = 1;
     if (d > IDSW_DUR_MAX) d = IDSW_DUR_MAX;
     g_idsw.dur = d;
@@ -407,12 +408,14 @@ static void *idsw_worker(void *arg)
 
 int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
 {
-  if (g_idsw.enabled < 0) {
+  const bool gpu = nr_pdcch_nid_gpu_enabled();
+  if (gpu && !nr_pdcch_nid_gpu_running()) return -1;
+  if (!gpu && g_idsw.enabled < 0) {
     const char *e = getenv("ISAC_COREMAP_IDSWEEP");
     g_idsw.max_batches = (e != NULL) ? atoi(e) : 0;  /* ISAC_COREMAP_IDSWEEP=<batches to dump> */
     g_idsw.enabled = g_idsw.max_batches > 0 ? 1 : 0;
   }
-  if (g_idsw.enabled != 1 || g_idsw.full || sps <= 0)
+  if ((!gpu && (g_idsw.enabled != 1 || g_idsw.full)) || sps <= 0)
     return -1;
   const nr_passive_acq_snapshot_t snap = nr_passive_acq_snapshot();
   if (snap.carrier_verified == 0 || g_css0_first_rb < 0) /* Point A (SIB1) and CORESET#0 (MIB) first */
@@ -439,6 +442,14 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
   const nr_passive_acq_snapshot_t snap = nr_passive_acq_snapshot();
   const int nsc = 12 * n_rb;
   const int dur = nr_pdcch_coreset_map_idsweep_dur();
+  if (nr_pdcch_nid_gpu_enabled()) {
+    const int pa = snap.carrier.point_a_subcarrier;
+    const int pa_mod = ((pa % 12) + 12) % 12;
+    const nr_pdcch_nid_config_t cfg = {nsc, pa, (12 * g_css0_first_rb + pa_mod - pa) / 12,
+                                      g_css0_nrb, pci, sps, dur};
+    nr_pdcch_nid_gpu_push(rxF_sym, fft, fco, slot, sym, &cfg);
+    return;
+  }
   pthread_mutex_lock(&g_idsw.mu);
   if (g_idsw.re == NULL) {
     g_idsw.nsc = nsc;
