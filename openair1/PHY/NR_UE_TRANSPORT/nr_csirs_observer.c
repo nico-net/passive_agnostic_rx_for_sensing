@@ -95,6 +95,12 @@ bool nr_csirs_observer_due(nr_csirs_observer_t *o, const nr_csirs_resource_t *r,
   return true;
 }
 
+void nr_csirs_observer_refine(nr_csirs_observer_t *o, const nr_csirs_resource_t *old, const nr_csirs_resource_t *updated)
+{
+  nr_csirs_observer_entry_t *e = find(o, old);
+  if (e) e->resource = *updated;
+}
+
 void nr_csirs_observer_revoke_zp(nr_csirs_observer_t *o, const nr_csirs_resource_t *r)
 {
   nr_csirs_observer_entry_t *e = find(o, r);

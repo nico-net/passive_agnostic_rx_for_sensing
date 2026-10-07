@@ -33,6 +33,8 @@ void nr_csirs_observer_candidate(nr_csirs_observer_t *o, const nr_csirs_resource
 bool nr_csirs_observer_confirm(nr_csirs_observer_t *o, const nr_csirs_resource_t *r, uint64_t slot);
 /* Caller supplies a scored predicted occasion. Four consecutive misses signal disappearance. */
 bool nr_csirs_observer_due(nr_csirs_observer_t *o, const nr_csirs_resource_t *r, uint32_t slot, bool hit);
+/* Refining one discovery resource's lattice/extent preserves its confirmation count. */
+void nr_csirs_observer_refine(nr_csirs_observer_t *o, const nr_csirs_resource_t *old, const nr_csirs_resource_t *updated);
 void nr_csirs_observer_revoke_zp(nr_csirs_observer_t *o, const nr_csirs_resource_t *r);
 void nr_csirs_observer_export_zp(nr_csirs_observer_t *o);
 void nr_csirs_observer_add_time(nr_csirs_observer_t *o, nr_csirs_time_t kind, uint64_t us);

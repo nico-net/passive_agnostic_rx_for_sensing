@@ -789,13 +789,84 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   return true;
 }
 
+/* U5 seeds schedule observations, never dictate the exported period. Keep cumulative
+ * phase evidence so an old contradiction cannot roll out and resurrect a 2P alias. */
+static bool discovery_hit(nr_csirs_blind_state_t *st, int idx, uint32_t slot)
+{
+  if (st->seed_period[idx] && slot % st->seed_period[idx] != st->seed_offset[idx]
+      && !(st->seed_n_off[idx] == 2 && slot % st->seed_period[idx] == st->seed_offset2[idx])) return false;
+  if (st->hits[idx] && slot <= st->disc_last[idx])
+    return false;
+  if (!st->hits[idx]) st->disc_first[idx] = slot;
+  st->disc_last[idx] = slot;
+  st->hits[idx]++;
+  if (st->n_hit_slot[idx] < 8)
+    st->hit_slot[idx][st->n_hit_slot[idx]++] = slot;
+  for (int pi = 0; pi < NR_CSIRS_BLIND_N_PERIODS; ++pi) {
+    uint8_t *n = &st->disc_n_phase[idx][pi];
+    if (*n == 3) continue;
+    uint16_t phase = slot % nr_csirs_blind_periods[pi];
+    int j = 0;
+    while (j < *n && st->disc_phase[idx][pi][j] != phase) ++j;
+    if (j == *n) {
+      if (++*n == 3) continue;
+      st->disc_phase[idx][pi][j] = phase;
+    }
+    if (st->disc_support[idx][pi][j] < CSIRS_MIN_HITS)
+      st->disc_support[idx][pi][j]++;
+  }
+  int k = 0;
+  while (k < st->n_conf && st->conf_idx[k] != idx) ++k;
+  /* Largest primitive lattice explaining every scored hit. For row 1, a
+   * two-phase TRS burst is adjacent (also across the period boundary). */
+  for (int pi = NR_CSIRS_BLIND_N_PERIODS - 1; pi >= 0; --pi) {
+    const int phases = st->disc_n_phase[idx][pi];
+    uint16_t p = nr_csirs_blind_periods[pi];
+    if (phases < 1 || phases > 2 || slot - st->disc_first[idx] < p
+        || st->disc_support[idx][pi][0] < CSIRS_MIN_HITS
+        || (phases == 2 && st->disc_support[idx][pi][1] < CSIRS_MIN_HITS)) continue;
+    /* Two evenly spaced phases are one phase of P/2, not a burst of 2P. */
+    if (phases == 2) {
+      int gap = abs((int)st->disc_phase[idx][pi][0] - st->disc_phase[idx][pi][1]);
+      if (2 * gap == p || (st->cand[idx].row == 1 && gap != 1 && gap != p - 1)) continue;
+    }
+    /* A newly admitted second burst phase must receive independent support. */
+    bool covered = true;
+    const uint16_t seed = st->seed_period[idx];
+    const uint16_t common = seed && seed < p ? seed : p;
+    for (int j = 0; j < st->seed_n_off[idx]; ++j) {
+      uint16_t expected = (j ? st->seed_offset2[idx] : st->seed_offset[idx]) % common;
+      bool found = false;
+      for (int h = 0; h < phases; ++h)
+        found |= st->disc_phase[idx][pi][h] % common == expected;
+      covered &= found;
+    }
+    if (!covered) continue;
+    if (k == st->n_conf) {
+      if (k == NR_CSIRS_BLIND_DISC_MAX_CONF) return false;
+      st->conf_idx[st->n_conf++] = idx;
+    }
+    uint16_t a = st->disc_phase[idx][pi][0], b = st->disc_phase[idx][pi][1];
+    if (phases == 2 && b < a) { uint16_t tmp = a; a = b; b = tmp; }
+    st->conf_period[k] = p;
+    st->conf_off[k][0] = a;
+    st->conf_off[k][1] = phases == 2 ? b : 0;
+    st->conf_n_off[k] = phases;
+    st->confirmed = st->conf_idx[0];
+    st->period = st->conf_period[0];
+    st->offset = st->conf_off[0][0];
+    return true;
+  }
+  return false;
+}
+
 bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                          double rho, double rho_null)
 {
   if (st == NULL || idx < 0 || idx >= st->n) {
     return false;
   }
-  if (nr_csirs_blind_is_confirmed(st, idx)) {
+  if (!st->discovery_bank && nr_csirs_blind_is_confirmed(st, idx)) {
     return true;
   }
   st->tried[idx]++;
@@ -809,7 +880,8 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
   if (rho <= 0.0 || rho_null <= 0.0 || rho < CSIRS_DETECT_MARGIN * rho_null) {
     return false;
   }
-  return record_hit(st, idx, absolute_slot, false, false);
+  return st->discovery_bank ? discovery_hit(st, idx, absolute_slot)
+                            : record_hit(st, idx, absolute_slot, false, false);
 }
 
 /* ZERO-POWER SCORE. What a ZP CSI-RS is: REs the PDSCH is rate-matched around, dark while the PDSCH

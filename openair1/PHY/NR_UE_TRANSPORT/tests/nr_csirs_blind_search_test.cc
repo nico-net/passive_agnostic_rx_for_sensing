@@ -2828,3 +2828,41 @@ TEST(CsirsBlindZpProbation, FailedAdmissionsCannotStarveLaterGeometryOrReadmissi
 
 TEST(CsirsBlindDiscovery, LiveFepOnlyDueSymbolsAndPreservesContendedOccasion)
 { EXPECT_EQ(nr_csirs_blind_rt_test_due_only(), 0); }
+
+TEST(CsirsBlindDiscovery, InferPeriodFromHitsNotSubperiodSeed)
+{
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  st->n = 1; st->confirmed = st->pinned = -1; st->discovery_bank = true;
+  nr_csirs_blind_seed(st.get(), 0, 80, 15, 0);
+  st->seed_n_off[0] = 2; st->seed_offset2[0] = 16;
+  for (unsigned slot = 0; slot < 800; ++slot)
+    nr_csirs_blind_feed(st.get(), 0, slot, slot % 160 == 15 || slot % 160 == 16 ? 5 : 1, 1);
+  ASSERT_EQ(st->n_conf, 1);
+  EXPECT_EQ(st->conf_period[0], 160);
+  EXPECT_EQ(st->conf_n_off[0], 2);
+  EXPECT_EQ(st->conf_off[0][0], 15);
+  EXPECT_EQ(st->conf_off[0][1], 16);
+  // An extended fade leaves only one super-lattice visible. Earlier hits must
+  // still rule out 320/640 even after more than eight subsequent hits.
+  for (unsigned slot = 800; slot < 12000; ++slot)
+    nr_csirs_blind_feed(st.get(), 0, slot, slot % 640 == 15 || slot % 640 == 16 ? 5 : 1, 1);
+  EXPECT_EQ(st->n_conf, 1);
+  EXPECT_EQ(st->conf_period[0], 160);
+}
+
+TEST(CsirsBlindDiscovery, SuperperiodAndLateSecondPhaseRefineOneEntry)
+{
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  st->n = 1; st->confirmed = st->pinned = -1; st->discovery_bank = true;
+  nr_csirs_blind_seed(st.get(), 0, 640, 15, 0);
+  for (unsigned k = 0; k < 10; ++k) nr_csirs_blind_feed(st.get(), 0, 15 + k * 640, 5, 1);
+  ASSERT_EQ(st->n_conf, 1); EXPECT_EQ(st->conf_period[0], 640);
+  nr_csirs_blind_seed(st.get(), 0, 80, 15, 0);
+  st->seed_n_off[0] = 2; st->seed_offset2[0] = 16;
+  for (unsigned k = 40; k < 46; ++k) {
+    nr_csirs_blind_feed(st.get(), 0, 15 + k * 160, 5, 1);
+    nr_csirs_blind_feed(st.get(), 0, 16 + k * 160, 5, 1);
+  }
+  ASSERT_EQ(st->n_conf, 1); EXPECT_EQ(st->conf_period[0], 160);
+  EXPECT_EQ(st->conf_n_off[0], 2);
+}

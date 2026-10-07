@@ -7,6 +7,8 @@
 #include <vector>
 #include <algorithm>
 #include <array>
+#include <set>
+#include <tuple>
 extern "C" {
 #include "common/utils/LOG/log.h"
 #include "nr_csirs_monitor.h"
@@ -17,6 +19,9 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *, fapi_nr_dl
                                        uint16_t *, uint16_t *, int16_t *, int, uint32_t *);
 int nr_csirs_blind_rt_test_phases(int, uint16_t *);
 uint64_t nr_csirs_blind_rt_test_confirm_us(void);
+void nr_csirs_blind_rt_test_dump_bank(void);
+int nr_csirs_blind_rt_test_confirmed_entry(int, fapi_nr_dl_config_csirs_pdu_rel15_t *, uint16_t *, uint16_t *);
+extern uint64_t csirs_disc_readmit_skipped;
 int nr_csirs_blind_rt_test_discovered(int, fapi_nr_dl_config_csirs_pdu_rel15_t *,uint16_t *,uint16_t *);
 }
 TEST(CsirsDiscDump, ProductionStream)
@@ -105,6 +110,7 @@ TEST(CsirsDiscDump, ProductionStream)
     }
     previous=n;
   }
+  nr_csirs_blind_rt_test_dump_bank();
   printf("DUMP slots=%u confirmed=%d confirm_us=%.0f\n",fed,previous,confirm_us);
   auto stats=[](const char *name,std::vector<uint64_t> values) {
     ASSERT_FALSE(values.empty());std::sort(values.begin(),values.end());uint64_t total=0;
@@ -115,7 +121,47 @@ TEST(CsirsDiscDump, ProductionStream)
   stats("batch",batches);stats("detect",detection);stats("hyp",hypotheses);stats("sweep",sweep);stats("confirm_slot",confirm);
   printf("TIMING snapshot_total=%.0f confirm_total=%.0f us drops=%llu\n",snapshot_us,confirm_us,
     (unsigned long long)(csirs_disc_feed_drops-drops_before));
-  for(int i=0;i<4;++i) {EXPECT_EQ(winner_phases[i],3u)<<i;EXPECT_GT(confirmed_at[i],0u)<<i;EXPECT_LE(confirmed_at[i],2000u)<<i;}
+  for(int i=0;i<4;++i) {EXPECT_EQ(winner_phases[i],3u)<<i;EXPECT_GT(confirmed_at[i],0u)<<i;EXPECT_LE(confirmed_at[i],4000u)<<i;}
+  // T14 checks the entire final physical bank, including weak neighbors. The
+  // four-score actor budget now serves 20 resources; the dump deadline is 2 s
+  // (4000 slots), versus T12's 2000-slot deadline for just the strong subset.
+  using Key=std::tuple<unsigned,unsigned,unsigned,unsigned>;
+  std::set<Key> expected;
+  auto pair=[&](unsigned id,unsigned fd,unsigned rb,unsigned l) {
+    expected.emplace(id,fd,rb,l); expected.emplace(id,fd,rb,l+4);
+  };
+  pair(415,1,0,4); pair(415,2,0,5);
+  pair(748,4,0,4); pair(748,8,0,5);
+  pair(713,4,128,4);
+  pair(380,1,128,4); pair(380,2,128,5);
+  pair(582,4,64,4); pair(582,8,64,5);
+  pair(249,2,64,5);
+  std::set<Key> actual;
+  for(int k=0;;++k) {
+    fapi_nr_dl_config_csirs_pdu_rel15_t p={}; uint16_t period=0, phases[2]={};
+    int count=nr_csirs_blind_rt_test_confirmed_entry(k,&p,&period,phases);
+    if(count<0) break;
+    printf("DUMP FINAL row=%u fd=%u l0=%u rb=%u:%u id=%u P=%u phases=%u,%u nph=%d\n",
+           p.row,p.freq_domain,p.symb_l0,p.start_rb,p.nr_of_rbs,p.scramb_id,period,phases[0],phases[1],count);
+    EXPECT_TRUE(actual.emplace(p.scramb_id,p.freq_domain,p.start_rb,p.symb_l0).second);
+    EXPECT_EQ(p.row,1); EXPECT_EQ(p.nr_of_rbs,52); EXPECT_EQ(p.freq_density,3);
+    EXPECT_EQ(p.cdm_type,0); EXPECT_EQ(p.symb_l1,0); EXPECT_EQ(period,160); EXPECT_EQ(count,2);
+    unsigned phase=p.start_rb==128 && p.symb_l0%4==0 ? 20 : 15;
+    EXPECT_EQ(phases[0],phase); EXPECT_EQ(phases[1],phase+1);
+  }
+  EXPECT_EQ(actual,expected);
+  printf("DUMP readmit_skipped=%llu\n",(unsigned long long)csirs_disc_readmit_skipped);
+  EXPECT_GT(csirs_disc_readmit_skipped,0u);
+  for(unsigned phase : {15u,16u,20u,21u,95u,96u,100u,101u}) {
+    unsigned slot=(meta.abs_slot/640+1)*640+phase;
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *due[64]={};
+    int count=nr_csirs_monitor_due_ex(slot/20,slot%20,20,due,nullptr,64);
+    std::set<Key> exported;
+    for(int k=0;k<count;++k)
+      EXPECT_TRUE(exported.emplace(due[k]->scramb_id,due[k]->freq_domain,due[k]->start_rb,due[k]->symb_l0).second);
+    EXPECT_EQ(count,phase<17?16:phase<22?4:0);
+    for(const auto &key:exported) EXPECT_EQ(expected.count(key),1u);
+  }
   // Confirm actual monitor registration for both phases, including bank pressure from neighbors.
   for(unsigned phase:{15u,16u}) {
     uint32_t future=(meta.abs_slot/160+1)*160+phase;
