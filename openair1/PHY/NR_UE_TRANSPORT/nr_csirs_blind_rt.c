@@ -13,6 +13,8 @@
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c */
 
 #include "nr_csirs_blind_rt.h"
+/* Weak: unit-test targets link this file without the acquisition state. */
+extern void nr_passive_acq_note_carrier_from_rs(const char *evidence) __attribute__((weak));
 #include "PHY/MODULATION/modulation_UE.h"
 #include "nr_csirs_blind_search.h"
 #include "nr_csirs_observer.h"
@@ -641,6 +643,10 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     else
       LOG_A(PHY, "SENSING: CSIRS_BLIND CONFIRMED #%d after %llu slots -- csirs_monitor = \"%s\"%s (search continues)\n",
             k, (unsigned long long)g_slots, line, phase);
+    /* A sequence-confirmed NZP CSI-RS proves the grid's CRB indexing (Point A): verify the carrier when
+     * SIB1 carried none (NSA), which arms the carrier-gated stages (e.g. the PDCCH nID snapshot sweep). */
+    if (g_disc > 0 && !g_rank && nr_passive_acq_note_carrier_from_rs)
+      nr_passive_acq_note_carrier_from_rs(line);
   }
   if (g_rank && g_st.n_conf > 0) {
     /* keep the population moving; see RANKING MODE above */

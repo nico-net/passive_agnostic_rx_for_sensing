@@ -121,6 +121,11 @@ nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_
  * carrier centre as an absolute frequency (the receiver could retune to it on a mismatch). */
 void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier, double dl_carrier_hz);
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb);
+/** SIB1-free carrier verification (NSA SIB1 without servingCellConfigCommon): a reference signal whose
+ *  sequence is indexed from CRB 0 (e.g. a blind NZP CSI-RS confirmed by its Gold sequence over an absolute
+ *  RB extent) was decoded on the started grid, which proves the grid's RB 0 is Point A. Marks the carrier
+ *  verified with the started geometry, only if SIB1 never provided one. `evidence` is logged. */
+void nr_passive_acq_note_carrier_from_rs(const char *evidence);
 /* TDD pattern from SIB1 (tdd-UL-DL-ConfigurationCommon). Slots are in the reference-SCS numbering
  * of the pattern; the query takes the receiver's absolute slot at the SAME numerology. Unknown -> DL. */
 #include "nr_tdd_pattern.h"

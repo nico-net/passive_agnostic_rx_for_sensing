@@ -250,6 +250,26 @@ bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
   pthread_mutex_unlock(&g_lock);
   return t.valid ? nr_tdd_slot_has_downlink(&t, absolute_slot) : true;
 }
+void nr_passive_acq_note_carrier_from_rs(const char *evidence)
+{
+  pthread_mutex_lock(&g_lock);
+  if (g_snap.carrier_verified != 0 || !g_phy_geom_set) {
+    pthread_mutex_unlock(&g_lock);
+    return;
+  }
+  nr_passive_acq_carrier_verdict_t v = {0};
+  v.bw_match = v.mu_match = v.grid_match = true;
+  v.point_a_subcarrier = 0;
+  v.carrier_end_subcarrier = 12 * g_carrier.phy_n_rb;
+  v.derived_centre_hz = v.started_centre_hz = g_carrier.phy_dl_carrier_hz;
+  g_snap.carrier_verified = 1;
+  g_snap.carrier = v;
+  LOG_A(PHY, "SENSING: ACQ carrier CONFIRMED without SIB1 carrier info: %d PRB mu=%d, Point A = grid start, centre %.6f MHz "
+             "(evidence: CRB-indexed reference signal decoded on this grid: %s)\n",
+        g_carrier.phy_n_rb, g_carrier.phy_mu, g_carrier.phy_dl_carrier_hz / 1e6, evidence ? evidence : "?");
+  pthread_mutex_unlock(&g_lock);
+}
+
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {
   pthread_mutex_lock(&g_lock);
