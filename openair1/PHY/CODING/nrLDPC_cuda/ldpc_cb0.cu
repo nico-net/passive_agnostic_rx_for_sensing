@@ -20,6 +20,7 @@
  * is exactly G1's (2 kernels per iteration instead of 4; tested bit-exact against ldpc_pool_decode and a CPU model).
  */
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_cuda.h"
 #include <pthread.h>
 #include <errno.h>
 #include <stdio.h>
@@ -447,15 +448,15 @@ void crc_pow_table(uint32_t poly_top, int L, uint32_t* out)
 
 void slot_free_buffers(Slot& s)
 {
-  if (s.meta_h) cudaFreeHost(s.meta_h);
-  if (s.res_h) cudaFreeHost(s.res_h);
-  if (s.bits_h) cudaFreeHost(s.bits_h);
-  if (s.stage_h) cudaFreeHost(s.stage_h);
-  if (s.arena_d) cudaFree(s.arena_d);
+  if (s.meta_h) (cudaError_t)nr_gpu_free(s.meta_h);
+  if (s.res_h) (cudaError_t)nr_gpu_free(s.res_h);
+  if (s.bits_h) (cudaError_t)nr_gpu_free(s.bits_h);
+  if (s.stage_h) (cudaError_t)nr_gpu_free(s.stage_h);
+  if (s.arena_d) (cudaError_t)nr_gpu_free(s.arena_d);
   if (g.mode == MODE_EXPLICIT) {
-    if (s.meta_d) cudaFree(s.meta_d);
-    if (s.res_d) cudaFree(s.res_d);
-    if (s.bits_d) cudaFree(s.bits_d);
+    if (s.meta_d) (cudaError_t)nr_gpu_free(s.meta_d);
+    if (s.res_d) (cudaError_t)nr_gpu_free(s.res_d);
+    if (s.bits_d) (cudaError_t)nr_gpu_free(s.bits_d);
   }
   free(s.valid);
   const int idx = s.idx;
@@ -475,23 +476,23 @@ int slots_alloc(int mode)
   for (int k = 0; k < g.nslots; k++) {
     Slot& s = g.slot[k];
     const size_t n = (size_t)g.cap;
-    if (cudaHostAlloc(&s.meta_h, n * sizeof(DMeta), cudaHostAllocMapped) != cudaSuccess
-        || cudaHostAlloc(&s.res_h, n * sizeof(ldpc_cb0_result_t), cudaHostAllocMapped) != cudaSuccess
-        || cudaHostAlloc(&s.bits_h, n * LDPC_CB0_BITS_STRIDE, cudaHostAllocMapped) != cudaSuccess)
+    if (nr_gpu_allocate(NR_GPU_STAGING, &s.meta_h, n * sizeof(DMeta)) != cudaSuccess
+        || nr_gpu_allocate(NR_GPU_SHARED_RW, &s.res_h, n * sizeof(ldpc_cb0_result_t)) != cudaSuccess
+        || nr_gpu_allocate(NR_GPU_SHARED_RW, &s.bits_h, n * LDPC_CB0_BITS_STRIDE) != cudaSuccess)
       return -1;
     if (!(s.valid = (int8_t*)calloc(n, 1)))
       return -1;
     if (mode == MODE_UNIFIED) {
-      if (cudaHostGetDevicePointer((void**)&s.meta_d, s.meta_h, 0) != cudaSuccess
-          || cudaHostGetDevicePointer((void**)&s.res_d, s.res_h, 0) != cudaSuccess
-          || cudaHostGetDevicePointer((void**)&s.bits_d, s.bits_h, 0) != cudaSuccess)
-        return -1;
+      s.meta_d = static_cast<DMeta *>(nr_gpu_device_ptr(s.meta_h));
+      s.res_d = static_cast<ldpc_cb0_result_t *>(nr_gpu_device_ptr(s.res_h));
+      s.bits_d = static_cast<uint8_t *>(nr_gpu_device_ptr(s.bits_h));
+      if (!s.meta_d || !s.res_d || !s.bits_d) return -1;
     } else {
-      if (cudaMalloc(&s.meta_d, n * sizeof(DMeta)) != cudaSuccess
-          || cudaMalloc(&s.res_d, n * sizeof(ldpc_cb0_result_t)) != cudaSuccess
-          || cudaMalloc(&s.bits_d, n * LDPC_CB0_BITS_STRIDE) != cudaSuccess
-          || cudaHostAlloc(&s.stage_h, n * CH, cudaHostAllocDefault) != cudaSuccess
-          || cudaMalloc(&s.arena_d, n * CH) != cudaSuccess)
+      if (nr_gpu_allocate(NR_GPU_DEVICE, &s.meta_d, n * sizeof(DMeta)) != cudaSuccess
+          || nr_gpu_allocate(NR_GPU_DEVICE, &s.res_d, n * sizeof(ldpc_cb0_result_t)) != cudaSuccess
+          || nr_gpu_allocate(NR_GPU_DEVICE, &s.bits_d, n * LDPC_CB0_BITS_STRIDE) != cudaSuccess
+          || nr_gpu_allocate(NR_GPU_STAGING, &s.stage_h, n * CH) != cudaSuccess
+          || nr_gpu_allocate(NR_GPU_DEVICE, &s.arena_d, n * CH) != cudaSuccess)
         return -1;
     }
     if (!s.ev_in && cudaEventCreateWithFlags(&s.ev_in, cudaEventDisableTiming) != cudaSuccess)
@@ -530,13 +531,14 @@ int init_locked()
   g.use_graph = env_int("LDPC_CB0_GRAPH", "LDPC_CUDA_GRAPH", 1) != 0;
 
   ldpc_cuda_bg_t bg;
-  if (ldpc_cuda_basegraph(1, 384, &bg) != 0) /* tables first: sets cudaDeviceScheduleBlockingSync before the context */
+  if (ldpc_cuda_basegraph(1, 384, &bg) != 0) /* tables first: platform probe configures the context */
     return 0;
   int dev = 0, v = 0;
   if (cudaGetDevice(&dev) != cudaSuccess)
     return 0;
-  cudaDeviceGetAttribute(&g.integrated, cudaDevAttrIntegrated, dev);
-  cudaDeviceGetAttribute(&g.cma, cudaDevAttrConcurrentManagedAccess, dev);
+  const nr_gpu_caps_t *caps = nr_gpu_platform_probe();
+  g.integrated = caps->integrated;
+  g.cma = caps->concurrent_managed_access;
   if (cudaDeviceGetAttribute(&v, cudaDevAttrL2CacheSize, dev) == cudaSuccess)
     g.l2 = (size_t)v;
   /* UNIFIED only on an integrated GPU: a discrete GPU with HMM also reports pageable access, but every access
@@ -552,18 +554,18 @@ int init_locked()
     return 0;
   g.chunk_max = (uint32_t)std::min(std::max(env_int("LDPC_CB0_WORK_CW", nullptr, 256), 16), 512);
   g.msg_bytes = (size_t)g.chunk_max * MSG_MAX;
-  if (cudaMalloc(&g.msg, g.msg_bytes) != cudaSuccess || cudaMalloc(&g.chan, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
-      || cudaMalloc(&g.total, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
-      || cudaMalloc(&g.done, (size_t)g.chunk_max * 8 * sizeof(uint32_t)) != cudaSuccess
-      || cudaMalloc(&g.unsat, (size_t)g.chunk_max * 8 * 2 * sizeof(uint32_t)) != cudaSuccess
-      || cudaMalloc(&g.iters, (size_t)g.chunk_max * 8) != cudaSuccess
-      || cudaMalloc(&g.crc_pow, 3 * CRC_MAX_BITS * sizeof(uint32_t)) != cudaSuccess)
+  if (nr_gpu_allocate(NR_GPU_DEVICE, &g.msg, g.msg_bytes) != cudaSuccess || nr_gpu_allocate(NR_GPU_DEVICE, &g.chan, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
+      || nr_gpu_allocate(NR_GPU_DEVICE, &g.total, (size_t)g.chunk_max * 8 * CH) != cudaSuccess
+      || nr_gpu_allocate(NR_GPU_DEVICE, &g.done, (size_t)g.chunk_max * 8 * sizeof(uint32_t)) != cudaSuccess
+      || nr_gpu_allocate(NR_GPU_DEVICE, &g.unsat, (size_t)g.chunk_max * 8 * 2 * sizeof(uint32_t)) != cudaSuccess
+      || nr_gpu_allocate(NR_GPU_DEVICE, &g.iters, (size_t)g.chunk_max * 8) != cudaSuccess
+      || nr_gpu_allocate(NR_GPU_DEVICE, &g.crc_pow, 3 * CRC_MAX_BITS * sizeof(uint32_t)) != cudaSuccess)
     return 0;
   std::vector<uint32_t> pw(3 * CRC_MAX_BITS);
   crc_pow_table(0x864cfb00u, 24, &pw[0]);                /* CRC24_A */
   crc_pow_table(0x80006300u, 24, &pw[CRC_MAX_BITS]);     /* CRC24_B */
   crc_pow_table(0x10210000u, 16, &pw[2 * CRC_MAX_BITS]); /* CRC16 */
-  if (cudaMemcpy(g.crc_pow, pw.data(), pw.size() * sizeof(uint32_t), cudaMemcpyHostToDevice) != cudaSuccess)
+  if (nr_gpu_copy(g.crc_pow, pw.data(), pw.size() * sizeof(uint32_t)) != cudaSuccess)
     return 0;
   for (int k = 0; k < MAX_SLOTS; k++)
     g.slot[k].idx = k;
@@ -621,11 +623,11 @@ int modz_tables(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, ModZ* out)
   if (!m.cn) {
     const uint32_t ncn = bg.num_rows * bg.cn_stride, nvn = bg.num_cols * bg.vn_stride;
     uint32_t *cn = nullptr, *vn = nullptr;
-    cudaError_t e = cudaMalloc(&cn, ncn * sizeof(uint32_t));
-    if (!e) e = cudaMalloc(&vn, nvn * sizeof(uint32_t));
+    cudaError_t e = nr_gpu_allocate(NR_GPU_DEVICE, &cn, ncn * sizeof(uint32_t));
+    if (!e) e = nr_gpu_allocate(NR_GPU_DEVICE, &vn, nvn * sizeof(uint32_t));
     if (e) {
-      cudaFree(cn);
-      cudaFree(vn);
+      (cudaError_t)nr_gpu_free(cn);
+      (cudaError_t)nr_gpu_free(vn);
       return (int)e;
     }
     cb0_modz_kernel<<<blocks_for(ncn, 256), 256, 0, g.s>>>(bg.cn, cn, ncn, Z);
@@ -746,10 +748,10 @@ bool recover_stream()
     cudaStreamEndCapture(g.s, &gr);
     if (gr) cudaGraphDestroy(gr);
   }
-  cudaStreamSynchronize(g.s_copy);
-  cudaStreamSynchronize(g.s);
+  (cudaError_t)nr_gpu_sync(g.s_copy);
+  (cudaError_t)nr_gpu_sync(g.s);
   cudaGetLastError();
-  const bool sticky = cudaGetLastError() != cudaSuccess || cudaStreamSynchronize(g.s) != cudaSuccess;
+  const bool sticky = cudaGetLastError() != cudaSuccess || (cudaError_t)nr_gpu_sync(g.s) != cudaSuccess;
   if (!sticky)
     cudaGetLastError();
   return sticky;
@@ -834,7 +836,7 @@ extern "C" int ldpc_cb0_warmup(void)
           rc = launch_iterations(bg, bgid, z, nb, 16);
       }
     }
-    if (!rc) rc = cudaStreamSynchronize(g.s);
+    if (!rc) rc = (cudaError_t)nr_gpu_sync(g.s);
   }
   pthread_mutex_unlock(&g_submit_mu);
   if (!rc) {
@@ -930,7 +932,7 @@ extern "C" int ldpc_cb0_submit(const ldpc_cb0_item_t* items, int n, const int8_t
   if (!rc && g.mode == MODE_EXPLICIT) {
     /* metadata to the device; inputs: device-resident in place, host via pinned staging + async copies in pieces */
     if (!ord.empty())
-      rc = (int)cudaMemcpyAsync(S.meta_d, S.meta_h, ord.size() * sizeof(DMeta), cudaMemcpyHostToDevice, g.s);
+      rc = (int)(cudaError_t)nr_gpu_copy_async(S.meta_d, S.meta_h, ord.size() * sizeof(DMeta), g.s);
     const int cls = classify(llr);
     if (!rc && cls != SRC_DEVICE) {
       const size_t w = std::min<size_t>(llr_stride, CH);
@@ -938,13 +940,11 @@ extern "C" int ldpc_cb0_submit(const ldpc_cb0_item_t* items, int n, const int8_t
       for (int a = 0; !rc && a < n; a += piece) {
         const int m = std::min(piece, n - a);
         if (cls == SRC_PINNED) {
-          rc = (int)cudaMemcpy2DAsync(S.arena_d + (size_t)a * CH, CH, llr + (size_t)a * llr_stride, llr_stride, w, m,
-                                      cudaMemcpyHostToDevice, g.s_copy);
+          rc = (int)nr_gpu_copy_2d_async(S.arena_d + (size_t)a * CH, CH, llr + (size_t)a * llr_stride, llr_stride, w, m, g.s_copy);
         } else {
           for (int r = 0; r < m; r++) /* CPU pack of this piece overlaps the DMA of the previous one */
             memcpy(S.stage_h + (size_t)(a + r) * CH, llr + (size_t)(a + r) * llr_stride, w);
-          rc = (int)cudaMemcpyAsync(S.arena_d + (size_t)a * CH, S.stage_h + (size_t)a * CH, (size_t)m * CH,
-                                    cudaMemcpyHostToDevice, g.s_copy);
+          rc = (int)(cudaError_t)nr_gpu_copy_async(S.arena_d + (size_t)a * CH, S.stage_h + (size_t)a * CH, (size_t)m * CH, g.s_copy);
         }
         CADD(c_h2d, (uint64_t)m * (cls == SRC_PINNED ? w : CH));
       }
@@ -985,9 +985,9 @@ extern "C" int ldpc_cb0_submit(const ldpc_cb0_item_t* items, int n, const int8_t
     p0 = p1;
   }
   if (!rc && g.mode == MODE_EXPLICIT && !ord.empty()) {
-    rc = (int)cudaMemcpyAsync(S.res_h, S.res_d, (size_t)n * sizeof(ldpc_cb0_result_t), cudaMemcpyDeviceToHost, g.s);
+    rc = (int)(cudaError_t)nr_gpu_copy_async(S.res_h, S.res_d, (size_t)n * sizeof(ldpc_cb0_result_t), g.s);
     if (!rc && want_bits)
-      rc = (int)cudaMemcpyAsync(S.bits_h, S.bits_d, (size_t)n * LDPC_CB0_BITS_STRIDE, cudaMemcpyDeviceToHost, g.s);
+      rc = (int)(cudaError_t)nr_gpu_copy_async(S.bits_h, S.bits_d, (size_t)n * LDPC_CB0_BITS_STRIDE, g.s);
   }
   if (!rc) rc = (int)cudaEventRecord(S.ev_done, g.s);
   if (!rc) rc = (int)cudaLaunchHostFunc(g.s, host_done, &S);
@@ -1170,12 +1170,12 @@ extern "C" int ldpc_cb0_test_set_mem(int mode)
 {
   if (ldpc_cb0_init() != 0)
     return 0;
-  if (mode == MODE_UNIFIED && !g.integrated)
+  if (mode == MODE_UNIFIED && !nr_gpu_platform_ready())
     mode = MODE_EXPLICIT;
   if (mode != MODE_UNIFIED && mode != MODE_EXPLICIT)
     return g.mode;
   pthread_mutex_lock(&g_submit_mu);
-  cudaStreamSynchronize(g.s);
+  (cudaError_t)nr_gpu_sync(g.s);
   if (mode != g.mode && slots_alloc(mode) != 0)
     g.state = 0;
   pthread_mutex_unlock(&g_submit_mu);

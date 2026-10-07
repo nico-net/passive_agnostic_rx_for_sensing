@@ -13,6 +13,9 @@ SPDX-License-Identifier: Apache-2.0
 #include "common/utils/load_module_shlib.h"
 #include "assertions.h"
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_platform.h"
+extern int nr_gpu_module_ready(void);
+int32_t ldpc_cpu_LDPCdecoder(t_nrLDPC_dec_params *, int8_t *, uint8_t *, t_nrLDPC_time_stats *, decode_abort_t *);
 #include <stdio.h>
 #include <unistd.h>
 #include <time.h>
@@ -55,24 +58,26 @@ static unsigned add_measurement(struct TimeMeasurements* time, unsigned long lon
 
 int32_t LDPCinit( void )
 {
-    context = ldpc_decoder_init(1);
+    context = nr_gpu_module_ready() ? ldpc_decoder_init(1) : NULL;
     if (context) {
         printf("Initialized CUDA LDPC decoder\n");
         fflush(stdout);
         return 0;
     }
     else
-        return -1;
+        return 0; /* CPU implementation remains available */
 }
 
 int32_t LDPCthreadinit( void ) {
     if (!context) { // only run initialization for new threads
         context = ldpc_decoder_init(1);
-        printf("Initialized new CUDA LDPC decoder context\n");
-        fflush(stdout);
+        if (context) {
+            printf("Initialized new CUDA LDPC decoder context\n");
+            fflush(stdout);
+        }
     }
     if (!context)
-        return -1;
+        return 0; /* Late/unavailable GPU context uses CPU */
     return 0;
 }
 
@@ -91,6 +96,9 @@ int32_t LDPCdecoder(t_nrLDPC_dec_params *p_decParams,
                     decode_abort_t *ab) {
     if (!context) // in case no explicit pre-initialization was performed for this thread
         context = ldpc_decoder_init(1);
+
+    if (!context)
+      return ldpc_cpu_LDPCdecoder(p_decParams, p_llr, p_out, time_stats, ab);
 
     /* Flooding min-sum converges ~2x slower than OAI's CPU decoder: measured on sens6 (RTX 4060 Ti,
      * BG1 K'=8448 R=22/25 Eb/N0 5 dB, 300 blocks) GPU BLER 0.86 at 5 iterations vs CPU 0.12, and

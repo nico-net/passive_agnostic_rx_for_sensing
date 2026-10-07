@@ -209,8 +209,8 @@ int npc_warmup(int max_items)
   int rc = npc_gpu_reserve(max_items);
   if (!rc) {
     h_pid = calloc(max_items, sizeof(int));
-    h_llr = npc_gpu_host_alloc(sizeof(int16_t) * (size_t)NPC_MAX_E * max_items);
-    h_u = npc_gpu_host_alloc((size_t)NPC_MAX_N * max_items);
+    h_llr = npc_gpu_host_alloc(sizeof(int16_t) * (size_t)NPC_MAX_E * max_items, NR_GPU_STAGING);
+    h_u = npc_gpu_host_alloc((size_t)NPC_MAX_N * max_items, NR_GPU_SHARED_RW);
     if (!h_pid || !h_llr || !h_u) rc = -1;
   }
   for (int len = 1; !rc && len <= NR_DCI_MAX_PAYLOAD; len++)

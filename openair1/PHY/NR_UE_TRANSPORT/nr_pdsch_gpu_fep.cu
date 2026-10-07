@@ -2,6 +2,7 @@
 #define NR_GPU_FEP_NO_LOADER
 #include "nr_pdsch_gpu_fep.h"
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_cuda.h"
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
 #include <cufft.h>
@@ -422,6 +423,7 @@ extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
 
 static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
 {
+  if (!nr_gpu_module_ready()) return -1;
   g_cfg = *cfg;
   if (cfg->nant < 1 || cfg->nant > MAX_ANT || cfg->symbols_per_slot < 1 || cfg->symbols_per_slot > MAX_SYM
       || cfg->ofdm_symbol_size <= 0 || cfg->ofdm_offset_divisor <= 0 || cfg->samples_per_ms <= 0
@@ -430,24 +432,24 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   const int N = cfg->ofdm_symbol_size, ns = cfg->symbols_per_slot;
   g_samples_per_slot = cfg->nb_prefix_samples0 + N + (ns - 1) * (N + cfg->nb_prefix_samples);
   CK(cudaStreamCreateWithFlags(&g_stream, cudaStreamNonBlocking));
-  CK(cudaHostAlloc((void **)&g_h_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2), cudaHostAllocDefault));
-  CK(cudaHostAlloc((void **)&g_h_rot, MAX_SYM * sizeof(short2), cudaHostAllocDefault));
-  CK(cudaMalloc((void **)&g_d_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2)));
-  CK(cudaMalloc((void **)&g_d_fft_in, (size_t)cfg->nant * ns * N * sizeof(float2)));
-  CK(cudaMalloc((void **)&g_d_rxF, (size_t)cfg->nant * ns * N * sizeof(float2)));
-  CK(cudaMalloc((void **)&g_d_rot, MAX_SYM * sizeof(short2)));
-  CK(cudaHostAlloc(&g_h_check, (size_t)ns * N * sizeof(float2), cudaHostAllocDefault));
+  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2)));
+  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_rot, MAX_SYM * sizeof(short2)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_fft_in, (size_t)cfg->nant * ns * N * sizeof(float2)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rxF, (size_t)cfg->nant * ns * N * sizeof(float2)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_rot, MAX_SYM * sizeof(short2)));
+  CK(nr_gpu_allocate(NR_GPU_SHARED_RW, &g_h_check, (size_t)ns * N * sizeof(float2)));
   if (cufftPlan1d(&g_plan, N, CUFFT_C2C, cfg->nant * ns) != CUFFT_SUCCESS)
     return -1;
   cufftSetStream(g_plan, g_stream);
-  CK(cudaHostAlloc((void **)&g_h_jobs, MAX_JOBS * sizeof(nr_gpu_pdsch_job_t), cudaHostAllocDefault));
-  CK(cudaMalloc((void **)&g_d_jobs, MAX_JOBS * sizeof(nr_gpu_pdsch_job_t)));
-  CK(cudaMalloc((void **)&g_d_gold, (size_t)MAX_JOBS * MAX_DMRS_SYM * GOLD_WORDS * sizeof(uint32_t)));
-  CK(cudaMalloc((void **)&g_d_ls, (size_t)MAX_JOBS * MAX_DMRS_SYM * MAX_PORTS * MAX_ANT * MAX_PILOTS * sizeof(float2)));
-  CK(cudaMalloc((void **)&g_d_sigma, (size_t)MAX_JOBS * MAX_ANT * sizeof(float)));
+  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_jobs, MAX_JOBS * sizeof(nr_gpu_pdsch_job_t)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_jobs, MAX_JOBS * sizeof(nr_gpu_pdsch_job_t)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_gold, (size_t)MAX_JOBS * MAX_DMRS_SYM * GOLD_WORDS * sizeof(uint32_t)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_ls, (size_t)MAX_JOBS * MAX_DMRS_SYM * MAX_PORTS * MAX_ANT * MAX_PILOTS * sizeof(float2)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_sigma, (size_t)MAX_JOBS * MAX_ANT * sizeof(float)));
   g_llr_cap = (size_t)MAX_JOBS * cfg->n_rb_dl * 12 * MAX_SYM * 4 * 8;
-  CK(cudaHostAlloc((void **)&g_h_llr, g_llr_cap * sizeof(int16_t), cudaHostAllocDefault));
-  CK(cudaMalloc((void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
+  CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
   if (const char *e = getenv("NR_GPU_LLR_SCALE"))
     g_llr_scale = (float)atof(e);
   cudaFuncAttributes attr;
@@ -459,7 +461,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(cudaFuncGetAttributes(&attr, k_llr));
   CK(cudaMemsetAsync(g_d_fft_in, 0, (size_t)cfg->nant * ns * N * sizeof(float2), g_stream));
   if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS) return -1;
-  CK(cudaStreamSynchronize(g_stream));
+  CK((cudaError_t)nr_gpu_sync(g_stream));
   return 0;
 }
 
@@ -506,10 +508,10 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
     if (first < len)
       memcpy(dst + first, src, (len - first) * sizeof(short2));
   }
-  CK(cudaMemcpyAsync(g_d_rx, g_h_rx, (size_t)nant * len * sizeof(short2), cudaMemcpyHostToDevice, g_stream));
+  CK((cudaError_t)nr_gpu_copy_async(g_d_rx, g_h_rx, (size_t)nant * len * sizeof(short2), g_stream));
   if (symbol_rot) {
     memcpy(g_h_rot, symbol_rot, (size_t)ns * sizeof(short2));
-    CK(cudaMemcpyAsync(g_d_rot, g_h_rot, (size_t)ns * sizeof(short2), cudaMemcpyHostToDevice, g_stream));
+    CK((cudaError_t)nr_gpu_copy_async(g_d_rot, g_h_rot, (size_t)ns * sizeof(short2), g_stream));
   }
   const float phase_inc = (float)(-fo_hz / (g_cfg.samples_per_ms * 1000.0));
   dim3 blk(256), grd((N + 255) / 256, ns, nant);
@@ -518,7 +520,7 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
   if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS)
     return -1;
   k_fep_rotate<<<grd, blk, 0, g_stream>>>(g_d_rxF, symbol_rot ? g_d_rot : nullptr, N, ns, early);
-  CK(cudaStreamSynchronize(g_stream));
+  CK((cudaError_t)nr_gpu_sync(g_stream));
   g_fep_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
@@ -538,7 +540,7 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
 {
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant, fco = g_cfg.first_carrier_offset;
   memcpy(g_h_jobs, jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t));
-  CK(cudaMemcpyAsync(g_d_jobs, g_h_jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t), cudaMemcpyHostToDevice, g_stream));
+  CK((cudaError_t)nr_gpu_copy_async(g_d_jobs, g_h_jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t), g_stream));
   k_gold<<<n, MAX_DMRS_SYM, 0, g_stream>>>(g_d_jobs, g_d_gold, ns);
   int max_ls = 0, max_re = 0;
   for (int i = 0; i < n; i++) {
@@ -552,8 +554,8 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
   if (max_re > 0)
     k_llr<<<dim3((max_re + 127) / 128, n), 128, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_sigma, g_d_rxF, N, ns, nant, fco, g_d_llr,
                                                              g_llr_scale);
-  CK(cudaMemcpyAsync(g_h_llr, g_d_llr, (size_t)total * sizeof(int16_t), cudaMemcpyDeviceToHost, g_stream));
-  CK(cudaStreamSynchronize(g_stream));
+  CK((cudaError_t)nr_gpu_copy_async(g_h_llr, g_d_llr, (size_t)total * sizeof(int16_t), g_stream));
+  CK((cudaError_t)nr_gpu_sync(g_stream));
   CK(cudaGetLastError());
   memcpy(llr_out, g_h_llr, (size_t)total * sizeof(int16_t));
   return total;
@@ -612,8 +614,8 @@ static int api_read_rxdataF(int ant, int16_t *out)
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot;
   if (g_init_state != 1 || ant < 0 || ant >= g_cfg.nant) return -1;
   float2 *tmp = g_h_check;
-  CK(cudaMemcpyAsync(tmp, g_d_rxF + (size_t)ant * ns * N, (size_t)ns * N * sizeof(float2), cudaMemcpyDeviceToHost, g_stream));
-  CK(cudaStreamSynchronize(g_stream));
+  CK((cudaError_t)nr_gpu_copy_async(tmp, g_d_rxF + (size_t)ant * ns * N, (size_t)ns * N * sizeof(float2), g_stream));
+  CK((cudaError_t)nr_gpu_sync(g_stream));
   for (size_t i = 0; i < (size_t)ns * N; i++) {
     out[2 * i] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].x)));
     out[2 * i + 1] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].y)));
@@ -628,4 +630,4 @@ static void api_timing(double *fep_us, double *llr_us)
 }
 
 static const nr_gpu_fep_api_t g_api = {api_init, api_fep_slot, api_pdsch_llr, api_read_rxdataF, api_timing};
-extern "C" const nr_gpu_fep_api_t *nr_gpu_fep_api(void) { return &g_api; }
+extern "C" const nr_gpu_fep_api_t *nr_gpu_fep_api(void) { return nr_gpu_module_ready() ? &g_api : nullptr; }

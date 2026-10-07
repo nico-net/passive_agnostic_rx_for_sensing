@@ -13,15 +13,8 @@ extern "C" void nr_dl_gpu_memory_stats(uint64_t *allocs, uint64_t *denied)
   *allocs = __atomic_load_n(&nr_dl_gpu_allocs, __ATOMIC_RELAXED);
   *denied = __atomic_load_n(&nr_dl_gpu_denied, __ATOMIC_RELAXED);
 }
-#define NR_DL_GPU_ALLOC(call) (nr_dl_gpu_sealed ? (__atomic_add_fetch(&nr_dl_gpu_denied, 1, __ATOMIC_RELAXED), cudaErrorNotReady) : (++nr_dl_gpu_allocs, (call)))
-#define cudaMalloc(...) NR_DL_GPU_ALLOC(cudaMalloc(__VA_ARGS__))
-#define cudaMallocHost(...) NR_DL_GPU_ALLOC(cudaMallocHost(__VA_ARGS__))
-#define cudaHostAlloc(...) NR_DL_GPU_ALLOC(cudaHostAlloc(__VA_ARGS__))
-#define cudaMallocManaged(...) NR_DL_GPU_ALLOC(cudaMallocManaged(__VA_ARGS__))
-#define cudaHostRegister(...) NR_DL_GPU_ALLOC(cudaHostRegister(__VA_ARGS__))
-#define cudaFree(...) NR_DL_GPU_ALLOC(cudaFree(__VA_ARGS__))
-#define cudaFreeHost(...) NR_DL_GPU_ALLOC(cudaFreeHost(__VA_ARGS__))
-#define cudaHostUnregister(...) NR_DL_GPU_ALLOC(cudaHostUnregister(__VA_ARGS__))
+#define NR_DL_GPU_ALLOC(call) ((!nr_gpu_allocation_guard() || nr_dl_gpu_sealed) ? (__atomic_add_fetch(&nr_dl_gpu_denied, 1, __ATOMIC_RELAXED), cudaErrorNotReady) : (++nr_dl_gpu_allocs, (call)))
+#define nr_gpu_allocate(...) NR_DL_GPU_ALLOC(nr_gpu_allocate(__VA_ARGS__))
 #define cudaStreamCreate(...) NR_DL_GPU_ALLOC(cudaStreamCreate(__VA_ARGS__))
 #define cudaStreamCreateWithFlags(...) NR_DL_GPU_ALLOC(cudaStreamCreateWithFlags(__VA_ARGS__))
 #define cudaStreamCreateWithPriority(...) NR_DL_GPU_ALLOC(cudaStreamCreateWithPriority(__VA_ARGS__))

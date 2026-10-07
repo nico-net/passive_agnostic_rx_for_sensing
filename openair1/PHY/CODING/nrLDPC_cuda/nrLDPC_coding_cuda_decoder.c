@@ -20,6 +20,8 @@
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
 #include "PHY/CODING/coding_extern.h"
 #include "PHY/CODING/coding_defs.h"
+#include "PHY/TOOLS/nr_gpu_platform.h"
+extern int nr_gpu_module_ready(void);
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/CODING/nrLDPC_extern.h"
 #include "defs.h"
@@ -362,9 +364,17 @@ int32_t nrLDPC_coding_init(void)
   }
   pthread_once(&g_once, cond_setup);
   tunables_env_once();
-  if (ldpc_pool_init(POOL_CAP) != 0) {
+  if (!nr_gpu_module_ready()) {
+    atomic_store(&g_perm_off, true);
+    inited = 1;
     pthread_mutex_unlock(&init_mu);
-    return -1;
+    return 0; /* plugin stays loaded: its CPU TB decoder remains available */
+  }
+  if (ldpc_pool_init(POOL_CAP) != 0) {
+    atomic_store(&g_perm_off, true);
+    inited = 1;
+    pthread_mutex_unlock(&init_mu);
+    return 0; /* Allocation failure must not prevent the CPU decoder from loading. */
   }
   /* Warm-up: the CUDA module load and every first use of a CUDA-graph key (BG, Z, batch size rounded up to a power
    * of two, iterations) cost time that would otherwise land on a receiver thread. Pre-capture, for BG1 Z=384 and

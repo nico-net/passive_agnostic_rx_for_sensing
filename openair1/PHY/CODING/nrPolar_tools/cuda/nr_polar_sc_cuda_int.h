@@ -4,6 +4,7 @@
 #ifndef NR_POLAR_SC_CUDA_INT_H
 #define NR_POLAR_SC_CUDA_INT_H
 #include <stdint.h>
+#include "PHY/TOOLS/nr_gpu_platform.h"
 #include "nr_polar_sc_cuda.h"
 
 enum { NPC_OP_F = 0, NPC_OP_G = 1, NPC_OP_B = 2 };
@@ -29,7 +30,7 @@ int npc_gpu_decode(const int *pid, const int16_t *llr, const int *vidx, int n_ve
                    uint8_t *u_out, int nstride, double *t_h2d, double *t_kernel, double *t_d2h);
 /* page-locked host staging buffers (pinned copies run ~2x faster and are what the eventual
  * async path needs anyway). Fall back to malloc if they fail. */
-void *npc_gpu_host_alloc(size_t bytes);
+void *npc_gpu_host_alloc(size_t bytes, nr_gpu_kind_t kind);
 void npc_gpu_host_free(void *p);
 #ifdef __cplusplus
 }

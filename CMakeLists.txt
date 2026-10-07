@@ -6,6 +6,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(OAI_VERSION 2.4.0)
 
+# Respect either user architecture variable before CUDA compiler detection.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  if(DEFINED LDPC_CUDA_ARCH)
+    set(CMAKE_CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" CACHE STRING "CUDA architectures")
+  else()
+    set(CMAKE_CUDA_ARCHITECTURES "89;121" CACHE STRING "CUDA architectures")
+  endif()
+endif()
+
 option(ENABLE_CHANNEL_SIM_CUDA "Enable CUDA accelerated channel simulation" OFF)
 if(ENABLE_CHANNEL_SIM_CUDA)
     find_package(CUDA REQUIRED)
@@ -14,9 +23,9 @@ if(ENABLE_CHANNEL_SIM_CUDA)
 
     enable_language(CUDA)
 
-    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-        set(CMAKE_CUDA_ARCHITECTURES 90)
-    endif()
+    include(cmake_targets/nr_gpu_arch.cmake)
+    nr_gpu_architectures("${CMAKE_CUDA_ARCHITECTURES}" NR_GPU_SIM_ARCHS)
+    set(CMAKE_CUDA_ARCHITECTURES "${NR_GPU_SIM_ARCHS}")
 
     option(USE_UNIFIED_MEMORY "Enable CUDA Unified Memory path" OFF)
     option(USE_ATS_MEMORY "Enable ATS Hybrid Memory path" ON)
@@ -1036,6 +1045,12 @@ if (${SMBV})
   set(PHY_SRC "${PHY_SRC} ${OPENAIR1_DIR}/PHY/TOOLS/smbv.c")
 endif  (${SMBV})
 
+# Core singleton shared with dlopen GPU modules; deliberately no CUDA dependency.
+add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c)
+target_include_directories(nr_gpu_platform PUBLIC ${OPENAIR1_DIR}/PHY/TOOLS)
+target_link_libraries(nr_gpu_platform PRIVATE ${CMAKE_DL_LIBS} pthread)
+set_target_properties(nr_gpu_platform PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
 add_library(PHY_COMMON ${PHY_SRC_COMMON})
 target_link_libraries(PHY_COMMON
   PRIVATE shlib_loader asn1_lte_rrc_hdrs crc_byte
@@ -1104,6 +1119,7 @@ target_link_libraries(PHY_NR_NO_AVX_256 nr_phy_common nr_common)
 target_compile_definitions(PHY_NR_NO_AVX_256 PUBLIC USE_128BIT)
 
 add_library(PHY_NR_UE ${PHY_NR_UE_SRC})
+target_link_libraries(PHY_NR_UE PUBLIC nr_gpu_platform)
 if(ENABLE_LDPC_CUDA)
   # GrantWork-lite shared buffers in unified memory (cudaMallocManaged via a dlopen'd libcudart: no link dependency).
   set_source_files_properties(${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c PROPERTIES COMPILE_DEFINITIONS NR_TD_GW_CUDA=1)
@@ -3168,3 +3184,16 @@ endif()
 if(PACKAGING_LTE OR PACKAGING_NR OR PACKAGING_COMMON OR PACKAGING_USRP OR PACKAGING_PHYSIM)
   include("tools/packages/packages.cmake")
 endif()
+
+if(ENABLE_TESTS)
+  add_executable(test_nr_gpu_platform openair1/PHY/TOOLS/tests/nr_gpu_platform_test.cc
+                 openair1/PHY/TOOLS/nr_gpu_platform.c)
+  target_compile_definitions(test_nr_gpu_platform PRIVATE NR_GPU_PLATFORM_TEST)
+  target_include_directories(test_nr_gpu_platform PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(test_nr_gpu_platform PRIVATE GTest::gtest_main ${CMAKE_DL_LIBS} pthread)
+  add_test(NAME test_nr_gpu_platform COMMAND test_nr_gpu_platform)
+  add_dependencies(tests test_nr_gpu_platform)
+endif()
+
+# Keep the CUDA-independent core platform beside a relocated receiver binary.
+set_property(TARGET nr-uesoftmodem PROPERTY BUILD_RPATH_USE_ORIGIN ON)
