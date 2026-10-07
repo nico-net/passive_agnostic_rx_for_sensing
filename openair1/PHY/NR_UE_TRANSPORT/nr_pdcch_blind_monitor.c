@@ -1047,12 +1047,19 @@ void nr_pdcch_discovered_reset(void)
   s_add_disc.epoch = nr_cfg_epoch_current();
 }
 
+static bool discovered_load_stream(FILE *f);
 bool nr_pdcch_discovered_load(const char *path)
 {
   if (!nr_pdcch_discovered_enabled() || s_add_disc.active)
     return false;
   FILE *f = fopen(path, "r");
   if (!f) return false;
+  return discovered_load_stream(f);
+}
+
+/* Parses discovered-CORESET lines from any stream (file or the in-process GPU records) and closes it. */
+static bool discovered_load_stream(FILE *f)
+{
   s_add_disc.n = s_add_disc.next = 0;
   char line[256];
   while (s_add_disc.n < (int)(sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0]))
@@ -1084,6 +1091,24 @@ static bool discovered_additional_poll(void)
     nr_pdcch_discovered_reset();
   if (s_add_disc.active || s_add_disc.next < s_add_disc.n || (++s_add_disc.polls & 1023) != 1)
     return false;
+  if (nr_pdcch_nid_gpu_enabled()) {
+    /* In-process GPU stage-1/2 (T17): bank its records too, not only the walk's catalogue hand-off. */
+    static uint64_t generation;
+    nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
+    const int n = nr_pdcch_nid_gpu_records(records, NR_PDCCH_NID_MAX_RECORDS, &generation);
+    if (n <= 0)
+      return false;
+    char text[4096];
+    size_t used = 0;
+    for (int i = 0; i < n && used < sizeof(text); i++)
+      used += (size_t)snprintf(text + used, sizeof(text) - used,
+                               "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d ties=%d\n",
+                               records[i].nid, records[i].sym, records[i].dur, records[i].grid_rb, records[i].groups,
+                               records[i].L, records[i].R, records[i].shift, records[i].ties);
+    if (used >= sizeof(text)) used = sizeof(text) - 1;
+    FILE *m = fmemopen(text, used, "r");
+    return m && nr_pdcch_discovered_enabled() && !s_add_disc.active ? discovered_load_stream(m) : (m && fclose(m), false);
+  }
   const char *path = getenv("ISAC_PDCCH_DISCOVERED_FILE");
   if (!path || !*path) path = "/tmp/coresets_discovered.txt";
   struct stat st;
