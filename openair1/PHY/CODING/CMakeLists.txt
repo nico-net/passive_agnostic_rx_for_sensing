@@ -117,6 +117,11 @@ if(ENABLE_LDPC_CUDA)
   # NR_GPU_FEP=1 loader knob as pdsch_gpu above -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on
   # the CPU (nr_slot_fep), already shared across every extent candidate -- see that file's top
   # comment for why.
+  add_executable(nr_gpu_budget_benchmark ${OPENAIR1_DIR}/PHY/TOOLS/tests/nr_gpu_budget_benchmark.cu)
+  target_include_directories(nr_gpu_budget_benchmark PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(nr_gpu_budget_benchmark PRIVATE nr_gpu_platform CUDA::cudart pthread)
+  set_target_properties(nr_gpu_budget_benchmark PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}"
+    CUDA_RUNTIME_LIBRARY Shared RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_library(pdcch_nid_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu)
   set_target_properties(pdcch_nid_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" CUDA_STANDARD 14)
@@ -205,7 +210,7 @@ endif()
 
 if(ENABLE_LDPC_CUDA)
   string(REPLACE ";" "," NR_GPU_ARCH_METADATA "${NR_GPU_MODULE_ARCHS}")
-  foreach(module ldpc_cuda td_cb0_gpu pdsch_gpu pdcch_gpu polar_sc_cuda csirs_disc_gpu nr_csirs_disc_gpu_sweep)
+  foreach(module pdcch_nid_gpu ldpc_cuda td_cb0_gpu pdsch_gpu pdcch_gpu polar_sc_cuda csirs_disc_gpu nr_csirs_disc_gpu_sweep)
     target_sources(${module} PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_module.c)
     target_compile_definitions(${module} PRIVATE NR_GPU_BUILT_ARCHS="${NR_GPU_ARCH_METADATA}"
                                NR_GPU_MODULE_NAME="${module}")

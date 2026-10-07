@@ -10,7 +10,7 @@ extern "C" {
 #define NR_PDCCH_NID_BATCH 336
 #define NR_PDCCH_NID_MAX_RECORDS 16
 #define NR_PDCCH_NID_MAX_WINDOW 20
-#define NR_PDCCH_NID_ABI 3
+#define NR_PDCCH_NID_ABI 4
 #define NR_PDCCH_NID_KERNEL_KINDS 13
 typedef struct { int16_t r, i; } nr_pdcch_nid_iq_t;
 typedef struct { int nid, sym, dur, grid_rb, groups, L, R, shift, ties; } nr_pdcch_nid_record_t;
@@ -36,6 +36,7 @@ typedef struct {
 } nr_pdcch_nid_result_t;
 typedef struct {
  int nsc, point_a_sc, css0_crb, css0_nrb, pci, sps, dur;
+ uint32_t epoch; /* ABI 4: invalidate incremental history after receiver epoch change. */
 } nr_pdcch_nid_config_t;
 typedef struct {
  nr_pdcch_nid_config_t cfg;
@@ -47,6 +48,10 @@ typedef struct {
  * for no NEW generation, otherwise count (including zero). Never reads a file.
  * A generation is published only after a complete, successful GPU pass. */
 int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out, int capacity, uint64_t *generation);
+/* T24 monitor feedback: generation checked so an old bank observation cannot
+ * pause newly published records. Snapshot is nonblocking, includes unchanged lists. */
+int nr_pdcch_nid_gpu_snapshot(nr_pdcch_nid_record_t *, int, uint64_t *);
+void nr_pdcch_nid_gpu_feedback(uint32_t epoch, uint64_t generation, bool all_verified, bool unexplained);
 bool nr_pdcch_nid_gpu_enabled(void);
 bool nr_pdcch_nid_gpu_running(void);
 /* Call before radio start; all CUDA allocations, registration, module loading,

@@ -165,7 +165,7 @@ int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_
   }
   double h2d, kern, d2h;
   const int rc = npc_gpu_decode(h_pid, h_llr, NULL, 0, n, estride, h_u, nstride, &h2d, &kern, &d2h);
-  if (rc) { g_capacity = 0; return rc; }
+  if (rc) { if(rc!=-3)g_capacity = 0; return rc; } /* admission refusal is retryable */
   g_last_u = h_u; g_nstride = nstride;
   const double t0 = now_us();
   for (int i = 0; i < n; i++)
@@ -194,7 +194,7 @@ int npc_decode_batch_vec(const int16_t *vec, int vstride, int n_vec, const int *
     memcpy(h_llr + (size_t)v * estride, vec + (size_t)v * vstride, sizeof(int16_t) * estride);
   double h2d, kern, d2h;
   const int rc = npc_gpu_decode(pid, h_llr, vidx, n_vec, n, estride, h_u, nstride, &h2d, &kern, &d2h);
-  if (rc) { g_capacity = 0; return rc; }
+  if (rc) { if(rc!=-3)g_capacity = 0; return rc; } /* admission refusal is retryable */
   g_last_u = h_u; g_nstride = nstride;
   const double t0 = now_us();
   for (int i = 0; i < n; i++)

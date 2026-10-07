@@ -69,6 +69,8 @@ typedef struct {
   uint64_t csirs_disc_batches, csirs_disc_footprints, csirs_disc_hyps, csirs_disc_winners;
   uint64_t csirs_disc_ambiguous, csirs_disc_feed_drops, csirs_disc_gpu_batches, csirs_disc_cpu_batches;
   uint64_t csirs_disc_batch_us;
+  double gpu_budget_used_pct;
+  uint64_t discovery_yields, rt_gpu_wait_max_us, rt_gpu_fallbacks, discovery_overruns;
   uint64_t csirs_disc_readmit_skipped;
   uint64_t csirs_time_to_confirm_slots_last, csirs_time_to_confirm_slots_sum;
   uint32_t csirs_confirm_resource_count;

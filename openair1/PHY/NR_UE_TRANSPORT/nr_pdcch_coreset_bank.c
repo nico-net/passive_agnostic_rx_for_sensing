@@ -233,13 +233,14 @@ nr_coreset_state_t nr_pdcch_coreset_bank_state(int index)
 /* Is this geometry already a verified bank entry? (stage 1-2 hand-off: a discovered CORESET the walk found
  * first must not be re-dwelled -- run s3live5 re-tested it, the alias rule retired it as "not verified",
  * and the walk resumed instead of pausing.) */
-bool nr_pdcch_coreset_bank_has_footprint(int rb_offset, int groups, int duration, int symbol,
-                                        int bundle, int interleaver, int shift, int nid)
+static bool bank_footprint(int rb_offset, int groups, int duration, int symbol,
+                           int bundle, int interleaver, int shift, int nid, bool verified)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
   const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
   for (int i = 0; i < n; ++i) {
-    if (g_coreset_bank[i].state == NR_CORESET_REMOVED)
+    if (g_coreset_bank[i].state == NR_CORESET_REMOVED
+        || (verified && g_coreset_bank[i].state != NR_CORESET_VERIFIED))
       continue;
     const nr_pdcch_blind_monitor_cfg_t *b = &g_coreset_bank[i].cfg;
     if ((int)(b->bwp_start + b->coreset_rb_offset) == rb_offset && (int)b->coreset_freq_domain == groups
@@ -252,6 +253,11 @@ bool nr_pdcch_coreset_bank_has_footprint(int rb_offset, int groups, int duration
   pthread_mutex_unlock(&g_coreset_bank_lock);
   return false;
 }
+
+bool nr_pdcch_coreset_bank_has_footprint(int rb,int groups,int dur,int sym,int L,int R,int shift,int nid)
+{ return bank_footprint(rb,groups,dur,sym,L,R,shift,nid,false); }
+bool nr_pdcch_coreset_bank_verified_footprint(int rb,int groups,int dur,int sym,int L,int R,int shift,int nid)
+{ return bank_footprint(rb,groups,dur,sym,L,R,shift,nid,true); }
 
 bool nr_pdcch_blind_monitor_bank_has_geometry(int rb, int groups, int duration, int bundle, int interleaver,
                                                int shift, int nid)

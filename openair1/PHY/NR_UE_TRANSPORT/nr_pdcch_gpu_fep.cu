@@ -17,7 +17,7 @@
 #define NR_GPU_FEP_NO_LOADER
 #include "nr_pdcch_gpu_fep.h"
 #include <cuda_runtime.h>
-#include "PHY/TOOLS/nr_gpu_cuda.h"
+#include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
 #include <algorithm>
@@ -185,7 +185,11 @@ static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
   if (cfg->nant < 1 || cfg->nant > MAX_ANT || cfg->ofdm_symbol_size <= 0 || cfg->n_rb_dl < 1 || cfg->n_rb_dl > 275) return -1;
   g_cfg = *cfg;
   const int N = cfg->ofdm_symbol_size, nant = cfg->nant;
-  CK(cudaStreamCreate(&g_stream));
+  if(nr_gpu_budget_enabled()) {
+    int least=0,greatest=0;
+    CK(cudaDeviceGetStreamPriorityRange(&least,&greatest));
+    CK(cudaStreamCreateWithPriority(&g_stream,cudaStreamNonBlocking,greatest));
+  } else {CK(cudaStreamCreate(&g_stream));}
   CK(nr_gpu_allocate(NR_GPU_DEVICE, &g_d_rxF, (size_t)nant * MAX_DUR * N * sizeof(float2)));
   CK(nr_gpu_allocate(NR_GPU_STAGING, &g_h_rxF_stage, (size_t)nant * MAX_DUR * N * sizeof(float2)));
   CK(nr_gpu_allocate(NR_GPU_STAGING, &g_h_jobs, MAX_JOBS * sizeof(nr_gpu_pdcch_job_t)));
@@ -232,6 +236,7 @@ static int api_upload_slot(const int16_t *const *rxdataF_symb, int max_duration)
   const int N = g_cfg.ofdm_symbol_size, nant = g_cfg.nant;
   const int dur = std::min(max_duration, MAX_DUR);
   if (g_init_state != 1 || max_duration < 1 || max_duration > MAX_DUR) return -1;
+  NrGpuRtScope rt; if(!rt.admitted)return -1;
   if (nr_dl_gpu_radio_mode && !nr_dl_gpu_budget_take(&g_budget,
       (size_t)nant * dur * N * (sizeof(int16_t) * 2 + 2 * sizeof(float2)) + 3 * g_llr_cap * sizeof(int16_t))) return -1;
   for (int a = 0; a < nant; a++)
@@ -242,14 +247,14 @@ static int api_upload_slot(const int16_t *const *rxdataF_symb, int max_duration)
       }
   for (int a = 0; a < nant; a++)
     CK((cudaError_t)nr_gpu_copy_async(g_d_rxF + (size_t)a * MAX_DUR * N, g_h_rxF_stage + (size_t)a * MAX_DUR * N, (size_t)dur * N * sizeof(float2), g_stream));
-  CK((cudaError_t)nr_gpu_sync(g_stream));
+  CK(rt.wait(g_stream));
   g_upload_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
 
 static inline uint32_t job_total_llr(const nr_gpu_pdcch_job_t *j) { return 2u * j->n_rb * RE_PER_RB_OUT_DMRS * j->duration; }
 
-static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint32_t total)
+static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint32_t total, NrGpuRtScope &rt)
 {
   if (n == 0)
     return 0;
@@ -268,7 +273,7 @@ static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint
     k_llr_pdcch<<<dim3((max_re + 127) / 128, n), 128, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_rxF, N, MAX_DUR, nant, fco, g_d_llr,
                                                                      g_llr_scale);
   CK((cudaError_t)nr_gpu_copy_async(g_h_llr, g_d_llr, (size_t)total * sizeof(int16_t), g_stream));
-  CK((cudaError_t)nr_gpu_sync(g_stream));
+  CK(rt.wait(g_stream));
   CK(cudaGetLastError());
   memcpy(llr_out, g_h_llr, (size_t)total * sizeof(int16_t));
   return total;
@@ -277,6 +282,7 @@ static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint
 static int64_t api_pdcch_llr(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, size_t llr_cap)
 {
   if (g_init_state != 1 || !jobs || !llr_out || n < 0) return -1;
+  NrGpuRtScope rt; if(!rt.admitted)return -1;
   const auto t0 = std::chrono::steady_clock::now();
   int64_t written = 0;
   int i = 0;
@@ -301,7 +307,7 @@ static int64_t api_pdcch_llr(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, 
     }
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset -= (uint32_t)written;
-    const int64_t r = run_chunk(&jobs[i], m, llr_out + written, total);
+    const int64_t r = run_chunk(&jobs[i], m, llr_out + written, total, rt);
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset += (uint32_t)written;
     if (r < 0)

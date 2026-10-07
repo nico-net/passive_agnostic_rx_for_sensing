@@ -104,6 +104,8 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_joint_live.h"
 #include "nr_pdcch_al1_map.h"
 #include "nr_passive_metrics.h"
+#include "PHY/TOOLS/nr_gpu_budget.h"
+#include "nr_pdcch_nid_gpu.h"
 #include "nr_pdcch_blind_phase2.h" // Phase-2 lock, persistence ring, energy floor (Task A7)
 #include "nr_dci_history.h"       // BC9: DL DCI history ring, DCI-adjacency k0 evidence
 #include <stdio.h>
@@ -178,7 +180,7 @@ static bool summary_due_now(void)
   clock_gettime(CLOCK_MONOTONIC, &ts);
   const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
   uint64_t last = atomic_load_explicit(&s_last_ns, memory_order_relaxed);
-  if (last != 0 && (int64_t)(now - last) < (int64_t)NR_PDCCH_BLIND_SUMMARY_PERIOD_NS) /* signed: a racer may hold a later now */
+  if (last != 0 && (int64_t)(now - last) < (int64_t)(nr_gpu_budget_enabled()?10000000000ull:NR_PDCCH_BLIND_SUMMARY_PERIOD_NS)) /* signed: a racer may hold a later now */
     return false;
   return atomic_compare_exchange_strong_explicit(&s_last_ns, &last, now, memory_order_acq_rel, memory_order_relaxed);
 }
@@ -3264,6 +3266,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       const uint64_t old_c0 = atomic_exchange_explicit(&last_c0_unique, c0, memory_order_relaxed);
       const uint32_t slots_per_second = ue->frame_parms.slots_per_frame * 100;
       const bool outside = nr_pdcch_blind_monitor_take_outside_occupancy();
+      if(outside)nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),0,false,true);
       nr_pdcch_coreset_bank_tick(slot, c0 > old_c0 || outside, 5 * slots_per_second, 30 * slots_per_second);
     }
     nr_pdcch_coreset_bank_dispatch_enter();
