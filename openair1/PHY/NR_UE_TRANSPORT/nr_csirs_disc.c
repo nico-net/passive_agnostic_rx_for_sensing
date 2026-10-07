@@ -70,6 +70,21 @@ static uint64_t now_us(void)
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
+/* Winner gate on the sequence sweep z (best ID) with margin >= 1.5 over the runner-up ID.
+ * Default 3.5 (was 4.0): live with the bounded windowed feed the sweep averages fewer recent
+ * occasions, and the ID-415 k0=1 sym 5+9 TRS pair (sharing its symbols with ID 748's comb) scored
+ * z=3.6-3.8, z2=1.5-1.7 -> AMBIGUOUS (OTA 2026-10-07). Noise best-of-1024 is ~1.13 (T4) and every
+ * winner still needs repeated live hits to be confirmed. */
+static float win_z(void)
+{
+  static float z = -1.0f;
+  if (z < 0) {
+    const char *s = getenv("ISAC_CSIRS_DISC_WIN_Z");
+    z = s && atof(s) > 0 ? (float)atof(s) : 3.5f;
+  }
+  return z;
+}
+
 static int sweep_limit(void)
 {
   const char *s = getenv("ISAC_CSIRS_DISC_SWEEP_HYPS");
@@ -281,7 +296,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         continue;
       const nr_csirs_disc_win_t *w = &wins[i];
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
-      const bool accepted = w->z >= 4.0f && w->z - w->z_second >= 1.5f;
+      const bool accepted = w->z >= win_z() && w->z - w->z_second >= 1.5f;
       if (accepted) {
         int replace = -1;
         for (int k = 0; k < n_selected; ++k) {
@@ -336,7 +351,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       int checked=gpu && ops->sweep?ops->sweep(ring,&refined,1,&sweep_cfg,&verified):-1;
       if(checked<0) checked=nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified);
       if(checked!=1
-          || verified.z<4 || verified.z-verified.z_second<1.5f || verified.scramb_id!=w->scramb_id) continue;
+          || verified.z<win_z() || verified.z-verified.z_second<1.5f || verified.scramb_id!=w->scramb_id) continue;
       w=&verified;
       const nr_csirs_disc_hyp_t *h = &refined;
       if (nr_csirs_blind_rt_add_discovered && nr_csirs_blind_rt_add_discovered(h, w) >= 0) {

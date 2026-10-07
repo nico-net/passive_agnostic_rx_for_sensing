@@ -1054,7 +1054,11 @@ static void usrp_ring_producer(usrp_state_t *s)
   s->ring_cv.notify_all();
 }
 
-static void usrp_ring_start(usrp_state_t *s)
+/* Allocate (and, under mlockall, fault in) the ~1 GB ring BEFORE the timed stream start. It used to
+ * be allocated after issue_stream_cmd(): zero-filling it took long enough that intermittently nobody
+ * read the stream for > the 65536-mbuf pool (~265 ms at 4 x 122.88 Msps), so every start that lost
+ * the race overflowed at exactly sample 32517716 before sync (OTA 2026-10-07, ~half the starts). */
+static void usrp_ring_alloc(usrp_state_t *s)
 {
   if (usrp_ring_ms() == 0 || s->decim_ratio != 1)
     return;
@@ -1064,6 +1068,15 @@ static void usrp_ring_start(usrp_state_t *s)
     s->ring.assign(nch, std::vector<int32_t>(cap));
     s->ring_cap = cap;
   }
+}
+
+static void usrp_ring_start(usrp_state_t *s)
+{
+  if (usrp_ring_ms() == 0 || s->decim_ratio != 1)
+    return;
+  usrp_ring_alloc(s); /* no-op when already allocated before the stream command */
+  const size_t nch = s->rx_stream->get_num_channels();
+  const size_t cap = s->ring_cap;
   s->ring_written.store(0);
   s->ring_read.store(0);
   s->ring_err.store(0);
@@ -1149,6 +1162,7 @@ static int trx_usrp_start_impl(openair0_device_t *device)
 
   LOG_I(HW,"current pps at %f, starting streaming at %f\n",current_pps.get_real_secs(),current_pps.get_real_secs()+1.0);
 
+  usrp_ring_alloc(s);
   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
   cmd.time_spec = uhd::time_spec_t(current_pps+1.0);
   cmd.stream_now = false; // start at constant delay
