@@ -134,8 +134,9 @@ extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
  * memory is physically shared and coherent, so the GPU reads/writes it zero-copy with no page
  * migration. With cudaMallocManaged the DL actor's per-slot TD copy faulted on GPU-touched pages and
  * took 47.5 % of the actor's samples live (OTA 2026-10-07 prof11c); pinned: 10 % (prof12).
- * ISAC_CSIRS_DISC_MANAGED=1 restores managed memory. */
-static bool use_managed(void) { static int m=-1; if(m<0) m=getenv("ISAC_CSIRS_DISC_MANAGED") && atoi(getenv("ISAC_CSIRS_DISC_MANAGED"))?1:0; return m; }
+ * Default is managed again: live, pinned buffers let the worker ingest more and the radio stream died
+ * (OTA 2026-10-07 t9p_1); the bounded windowed feed is the fix. ISAC_CSIRS_DISC_PINNED=1 opts in. */
+static bool use_managed(void) { static int m=-1; if(m<0) m=!(getenv("ISAC_CSIRS_DISC_PINNED") && atoi(getenv("ISAC_CSIRS_DISC_PINNED"))); return m; }
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
   void *ptr=nullptr;

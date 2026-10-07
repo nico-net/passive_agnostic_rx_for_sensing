@@ -132,6 +132,32 @@ int nr_csirs_disc_td_pending(void)
 int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame, uint8_t slot)
 {
   if (!td.ready || !ue) return -1;
+  /* Bounded, contiguous ingest duty cycle. OTA 2026-10-07 (DGX + X410, 4 x 122.88 Msps DPDK): any
+   * ~2 GB/s of CPU-coherent memory traffic (CPU memcpy or GPU access to host memory) kills the radio
+   * stream, and full-rate ingest is exactly that (re-reading 1 MB/slot). Feed ISAC_CSIRS_DISC_FEED_WIN
+   * (default 640) contiguous slots, then skip FEED_DIV-1 windows (default 7: ~14 %, odd so successive
+   * windows rotate through P=640 residues). Contiguous windows keep TRS burst pairs and off-evidence. */
+  static int feed_div = -1, feed_win = 640;
+  if (feed_div < 0) {
+    const char *e = getenv("ISAC_CSIRS_DISC_FEED_DIV"), *w = getenv("ISAC_CSIRS_DISC_FEED_WIN");
+    feed_div = e && atoi(e) > 0 ? atoi(e) : 7;
+    if (w && atoi(w) >= 160) feed_win = atoi(w);
+  }
+  /* Acquisition burst: feed every slot for the first ISAC_CSIRS_DISC_FEED_BURST slots (default 2560 =
+   * four P=640 lattices, 1.28 s) after the first push, so discovery converges at once (OTA 2026-10-07
+   * t9burst: ID 415 TRS confirmed ~1 s after sync, radio stable); then the bounded duty cycle. */
+  static long burst_end = -1, burst_len = -1;
+  if (burst_len < 0) {
+    const char *b = getenv("ISAC_CSIRS_DISC_FEED_BURST");
+    burst_len = b && atol(b) >= 0 ? atol(b) : 2560;
+  }
+  if (burst_end < 0) burst_end = (long)abs_slot + burst_len;
+  const bool in_burst = (long)abs_slot < burst_end;
+  /* Windows are aligned to the first fed slot so the first window starts at acquisition. */
+  static long feed_origin = -1;
+  if (feed_origin < 0) feed_origin = (long)abs_slot;
+  const long rel = (long)abs_slot - feed_origin;
+  if (!in_burst && feed_div > 1 && rel >= 0 && (rel / feed_win) % feed_div != 0) return 1;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   if (slot >= fp->slots_per_frame || fp->ofdm_symbol_size != td.fp.ofdm_symbol_size
       || fp->N_RB_DL != td.fp.N_RB_DL || fp->nb_antennas_rx != td.n_ant
