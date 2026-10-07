@@ -121,6 +121,23 @@ void nr_csirs_disc_sweep_winner(const float *z, const nr_csirs_disc_sweep_cfg_t 
       w->z_second = best;
     }
   }
+  if (!slots || c->id_count < 2)
+    return;
+  /* Shift by a retained score before accumulating moments: this also stays
+   * accurate when the distribution is nearly constant. */
+  const double origin = z[w->scramb_id == c->id_first ? c->delta_max : 0];
+  double sum = 0, sq = 0;
+  for (int id = 0; id < c->id_count; ++id)
+    if (c->id_first + id != w->scramb_id)
+      for (int d = 0; d < c->delta_max; ++d) {
+        const double v = (double)z[id * c->delta_max + d] - origin;
+        sum += v;
+        sq += v * v;
+      }
+  w->noise_count = (c->id_count - 1) * c->delta_max;
+  const double mu = sum / w->noise_count;
+  w->noise_mu = origin + mu;
+  w->noise_sigma = sqrt(fmax(0, sq / w->noise_count - mu * mu));
 }
 
 /* Same magnitude/energy statistic, block flushing and Rayleigh normalization as

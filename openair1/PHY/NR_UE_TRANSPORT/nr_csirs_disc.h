@@ -86,6 +86,13 @@ typedef struct {
   float z;                /* best normalised score (noise ~1, like nr_csirs_blind_correlate_blocks_shift) */
   float z_second;         /* runner-up (different scramb_id) for the ambiguity margin */
   uint16_t n_slots;       /* lattice slots averaged */
+  /* Additive T12 fields: population moments of the slot-averaged candidate scores,
+   * excluding ALL delta variants of scramb_id (not maxima within the other IDs).
+   * No lattice or no other ID: count=0, mu=sigma=0.
+   * Rebuild the core and GPU module together: the result stride has grown. */
+  float noise_mu;
+  float noise_sigma;
+  uint32_t noise_count;
 } nr_csirs_disc_win_t;
 
 /* ---------------- API ---------------- */
