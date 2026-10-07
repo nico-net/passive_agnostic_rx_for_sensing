@@ -4399,10 +4399,10 @@ class DiscoveredCoresets : public BlindPdcchTest {
   char path[64] = "/tmp/t15-discovered-XXXXXX";
   void SetUp() override {
     BlindPdcchTest::SetUp();
-    const char *v = getenv("ISAC_CSIRS_DISC");
+    const char *v = getenv("ISAC_PDCCH_NID_BANK");
     had_env = v != nullptr;
     if (v) old_env = v;
-    setenv("ISAC_CSIRS_DISC", "1", 1);
+    setenv("ISAC_PDCCH_NID_BANK", "1", 1);
     nr_pdcch_blind_monitor_autodiscover_reset();
     while (nr_pdcch_coreset_bank_count()) nr_pdcch_coreset_bank_remove(0);
     int fd = mkstemp(path);
@@ -4413,8 +4413,8 @@ class DiscoveredCoresets : public BlindPdcchTest {
     unlink(path);
     while (nr_pdcch_coreset_bank_count()) nr_pdcch_coreset_bank_remove(0);
     nr_pdcch_blind_monitor_autodiscover_reset();
-    if (had_env) setenv("ISAC_CSIRS_DISC", old_env.c_str(), 1);
-    else unsetenv("ISAC_CSIRS_DISC");
+    if (had_env) setenv("ISAC_PDCCH_NID_BANK", old_env.c_str(), 1);
+    else unsetenv("ISAC_PDCCH_NID_BANK");
     BlindPdcchTest::TearDown();
   }
   void lines(const char *text) {
@@ -4523,13 +4523,13 @@ TEST_F(DiscoveredCoresets, TwoIdsSameGridAlongsideAlreadyVerifiedPciWalk) {
 }
 
 TEST_F(DiscoveredCoresets, FeatureOffCannotStartAdditionalDwell) {
-  unsetenv("ISAC_CSIRS_DISC");
+  unsetenv("ISAC_PDCCH_NID_BANK");
   EXPECT_FALSE(nr_pdcch_discovered_enabled());
   EXPECT_FALSE(nr_pdcch_discovered_load(path));
   nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token = 0;
   EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
   EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
-  setenv("ISAC_CSIRS_DISC", "0", 1);
+  setenv("ISAC_PDCCH_NID_BANK", "0", 1);
   EXPECT_FALSE(nr_pdcch_discovered_load(path));
 }
 

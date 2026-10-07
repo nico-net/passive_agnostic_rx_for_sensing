@@ -1008,7 +1008,7 @@ static struct {
 
 bool nr_pdcch_discovered_enabled(void)
 {
-  const char *v = getenv("ISAC_CSIRS_DISC");
+  const char *v = getenv("ISAC_PDCCH_NID_BANK"); /* own flag; was mistakenly ISAC_CSIRS_DISC */
   return v && strcmp(v, "1") == 0;
 }
 
