@@ -1475,7 +1475,10 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
+add_library(nr_pdcch_nid_worker ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c)
+target_link_libraries(nr_pdcch_nid_worker PUBLIC UTIL ${CMAKE_DL_LIBS} pthread)
 add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_gate.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c)
+target_link_libraries(nr_pdcch_blind_monitor PUBLIC nr_pdcch_nid_worker)
 target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_passive_cfg_epoch nr_sense_api)
 # nr_scrambling_id_sweep.c lives HERE only (final review I7): nr_pusch_passive_ul_ids.c (this library) and
 # nr_pdsch_passive_decode.c (PHY_NR_UE) both call it. Every executable that pulls nr_pdsch_passive_decode.o
@@ -2346,6 +2349,40 @@ if(ENABLE_TESTS)
 endif()
 
 if(ENABLE_TESTS)
+  add_library(nr_pdcch_nid_reference STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c)
+  target_include_directories(nr_pdcch_nid_reference PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_compile_options(nr_pdcch_nid_reference PRIVATE -ffp-contract=off -Wno-unknown-pragmas)
+  add_executable(test_nr_pdcch_nid_algorithm ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc)
+  target_compile_options(test_nr_pdcch_nid_algorithm PRIVATE -ffp-contract=off)
+  target_link_libraries(test_nr_pdcch_nid_algorithm PRIVATE nr_pdcch_nid_reference m ${CMAKE_DL_LIBS})
+  add_dependencies(tests test_nr_pdcch_nid_algorithm)
+  add_executable(test_nr_pdcch_nid_worker ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc)
+  target_link_libraries(test_nr_pdcch_nid_worker PRIVATE nr_pdcch_nid_worker nr_pdcch_nid_reference m)
+  add_library(pdcch_nid_fake MODULE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_fake.cc)
+  target_include_directories(pdcch_nid_fake PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  set_target_properties(pdcch_nid_fake PROPERTIES OUTPUT_NAME pdcch_nid_gpu
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/nid_test_double)
+  add_dependencies(test_nr_pdcch_nid_worker pdcch_nid_fake)
+  add_dependencies(tests test_nr_pdcch_nid_worker)
+  add_test(NAME test_nr_pdcch_nid_worker COMMAND test_nr_pdcch_nid_worker)
+  set_tests_properties(test_nr_pdcch_nid_worker PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
+
+  foreach(d RANGE 2 3)
+    add_test(NAME test_nr_pdcch_nid_worker_duration${d} COMMAND test_nr_pdcch_nid_worker ${d})
+    set_tests_properties(test_nr_pdcch_nid_worker_duration${d} PROPERTIES
+      ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
+  endforeach()
+  foreach(fixture RANGE 1 6)
+    add_test(NAME test_nr_pdcch_nid_reference${fixture} COMMAND test_nr_pdcch_nid_algorithm ${fixture})
+  endforeach()
+  foreach(d RANGE 1 3)
+    math(EXPR fixture "6 + ${d}")
+    add_test(NAME test_nr_pdcch_nid_duration${d} COMMAND test_nr_pdcch_nid_algorithm ${fixture})
+  endforeach()
+endif()
+
+if(ENABLE_TESTS)
   # Receiver demodulation and PBCH-axis tests survive the engine removal.
   add_executable(test_dlsch_fixed_point ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/dlsch_fixed_point_test.cc)
   target_link_libraries(test_dlsch_fixed_point PRIVATE nr_phy_common UTIL GTest::gtest GTest::gtest_main)
@@ -2414,7 +2451,7 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
   target_include_directories(test_nr_pdcch_coreset_map PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR}/common/utils/ds)
-  target_link_libraries(test_nr_pdcch_coreset_map PRIVATE nr_common UTIL GTest::gtest)
+  target_link_libraries(test_nr_pdcch_coreset_map PRIVATE nr_pdcch_nid_worker nr_common UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_coreset_map)
   add_test(NAME test_nr_pdcch_coreset_map COMMAND ./test_nr_pdcch_coreset_map)
 

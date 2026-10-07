@@ -1,3 +1,4 @@
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
@@ -470,6 +471,7 @@ int main(int argc, char **argv)
   /* Strong reference: the feed reaches the pipeline through a weak symbol, which alone does not
    * pull nr_csirs_disc.o out of the static PHY archive (the hook stayed NULL, zero batches). */
   nr_dl_gpu_warmup(disc_ue);
+  nr_pdcch_nid_gpu_start(disc_ue->frame_parms.N_RB_DL);
   nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
   if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
@@ -480,6 +482,7 @@ int main(int argc, char **argv)
     AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Replay requires --passive-rx\n");
     if (replay_input) {
       const int replay_result = nr_passive_replay_read(nrPHY_vars_UE_g[0][0], replay_input);
+      nr_pdcch_nid_gpu_stop();
       nr_csirs_disc_stop();
       return replay_result;
     }
@@ -563,6 +566,7 @@ int main(int argc, char **argv)
     }
   }
 
+  nr_pdcch_nid_gpu_stop();
   nr_csirs_disc_stop();
 
   // All slot producers have joined. Drain the PRACH worker before closing records.

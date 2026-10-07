@@ -3047,6 +3047,25 @@ has been reproduced and the OTA baseline (§15.4) has been reproduced or its fai
 
 ---
 
+### T17 — in-process dedicated PDCCH discovery (2026-10-07, csd/t17)
+
+[CODE-READ] `ISAC_PDCCH_NID_GPU=1` replaces the external snapshot/sweep/file loop with pinned
+capture staging and a SCHED_OTHER worker, GPU-resident windowed nID/geometry analysis, and
+`nr_pdcch_nid_gpu_records()` for the discovered-CORESET hand-off. Default off; legacy capture/file
+behaviour remains available. Defaults: last 10 batches, rerun every 2, capture duration 3 on GPU,
+cooperative 5-second pass budget. All CUDA memory, transfers and kernels are prepared before RX;
+no CPU sweep fallback. The CSI-RS contract is unchanged. T15 owns downstream per-nID banking.
+[OFFLINE VERIFIED, DGX aarch64 host-only] CPU receiver and sm_121 module built; all 12 independent
+CPU-reference and worker tests passed. Full CPU CTest excluding `nr_td_sim_test`: 162/172 passed;
+nine brief-listed ARM/sandbox failures and one unchanged AL1 timing test, which passed its targeted
+rerun. GPU execution, device parity, traffic/latency, receiver-level
+feature-off equivalence and OTA remain DEFERRED, not inferred from host tests. The frozen CPU
+`--selftest5` itself ranks an interleaved winner for its AL1-only NI plant on this host (FAIL);
+T17 preserves that decision for parity, not a claim of correct AL1-only mapping. Full test results,
+limits and exact deferred commands: [T17 report](docs/superpowers/reports/csd/T17.md).
+
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
