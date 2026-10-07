@@ -5,6 +5,7 @@
 #ifndef NR_DL_GPU_MEMORY_H
 #define NR_DL_GPU_MEMORY_H
 #include <stdint.h>
+#include "PHY/TOOLS/nr_gpu_platform.h" /* nr_gpu_allocation_guard() used by NR_DL_GPU_ALLOC */
 static bool nr_dl_gpu_sealed, nr_dl_gpu_radio_mode;
 extern "C" void nr_dl_gpu_enable_radio_mode(void) { nr_dl_gpu_radio_mode = true; }
 static uint64_t nr_dl_gpu_allocs, nr_dl_gpu_denied;
