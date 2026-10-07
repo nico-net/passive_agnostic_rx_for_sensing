@@ -19,6 +19,7 @@
 #include <cuda_runtime_api.h>
 #endif
 extern "C" {
+double nr_csirs_blind_zero_score_evidence_shift(const int16_t *,const int16_t *const *,int,int,int,double *);
 void nr_csirs_disc_test_init(void);
 int nr_csirs_disc_test_mapping(const nr_csirs_disc_hyp_t *, int, int, int);
 int nr_csirs_disc_test_reference(const nr_csirs_disc_hyp_t *, int, int, int, int16_t *);
@@ -490,4 +491,43 @@ int main(int argc,char **argv)
   nr_csirs_disc_test_init();
   setenv("ISAC_CSIRS_DISC","1",1);
   return RUN_ALL_TESTS();
+}
+
+TEST(CsirsDiscSweep, GpuRefinementAndConfirmation)
+{
+#ifdef NR_CSIRS_DISC_TEST_CUDA
+  int count=0;if(cudaGetDeviceCount(&count)!=cudaSuccess || !count) GTEST_SKIP()<<"no CUDA device";
+  void *module=nullptr;ASSERT_NE(gpu(&module),nullptr);
+  using Refine=int (*)(const nr_csirs_disc_ring_t *,nr_csirs_disc_hyp_t *,const nr_csirs_disc_win_t *);
+  using Confirm=int (*)(const nr_csirs_disc_ring_t *,const nr_csirs_disc_hyp_t *,int,double *);
+  auto refine=(Refine)dlsym(module,"nr_csirs_disc_gpu_refine_entry");
+  auto confirm=(Confirm)dlsym(module,"nr_csirs_disc_gpu_confirm_entry");
+  ASSERT_NE(refine,nullptr);ASSERT_NE(confirm,nullptr);
+  for(int row:{1,2,4,5,6,8,11,15,16,17,18}) {
+    auto h=hyp(row,4,52);Grid grid(64,4);grid.add(h,415,0);
+    nr_csirs_disc_win_t win={};win.scramb_id=415;
+    auto cpu=h,device=h;
+    int rc=nr_csirs_disc_refine_cpu(&grid.r,&cpu,&win);
+    ASSERT_EQ(refine(&grid.r,&device,&win),rc)<<row;
+    if(rc==0) {EXPECT_EQ(device.rb_start,cpu.rb_start)<<row;EXPECT_EQ(device.n_rb,cpu.n_rb)<<row;}
+    int t=0;while(t<grid.r.capacity && (!grid.r.meta[t].valid || grid.r.meta[t].abs_slot%h.period!=h.offset)) ++t;
+    ASSERT_LT(t,grid.r.capacity);
+    auto one=grid.r;one.capacity=1;one.grid_base+=t*one.slot_stride;one.meta+=t;
+    h.period=1;h.offset=0;
+    nr_csirs_disc_sweep_cfg_t cfg={415,1,1,32,1};
+    ASSERT_EQ(nr_csirs_disc_sweep_cpu(&one,&h,1,&cfg,&win),1);
+    double scores[5];ASSERT_EQ(confirm(&one,&h,415,scores),0);
+    EXPECT_NEAR(scores[0],win.z,1e-3)<<row;
+    // Whole-geometry energy evidence must be identical to the legacy scorer.
+    std::vector<int16_t> ref(32*14*24*one.n_rb);
+    int ports=nr_csirs_disc_test_reference(&h,one.n_rb,one.meta[0].slot,415,ref.data());
+    const int16_t *planes[32];for(int p=0;p<ports;++p) planes[p]=ref.data()+p*14*24*one.n_rb+h.symb_l0*24*one.n_rb;
+    double old=-1;
+    double expected=nr_csirs_blind_zero_score_evidence_shift(one.grid_base+h.symb_l0*24*one.n_rb,planes,ports,12*one.n_rb,0,&old);
+    EXPECT_DOUBLE_EQ(scores[2],expected)<<row;EXPECT_DOUBLE_EQ(scores[4],old)<<row;
+  }
+  dlclose(module);
+#else
+  GTEST_SKIP()<<"CPU build; CUDA comparison available in build_gpu";
+#endif
 }

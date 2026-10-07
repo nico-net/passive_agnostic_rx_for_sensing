@@ -3,6 +3,29 @@
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+
+/* Dedicated nonblocking stream and blocking host completion: CUDA's default
+ * spin-wait must not consume the single discovery CPU while kernels execute. */
+struct DiscoveryStream {
+  cudaStream_t stream=nullptr;cudaEvent_t done=nullptr;
+  bool init() {
+    if(stream && done) return true;
+    return cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking)==cudaSuccess
+        && cudaEventCreateWithFlags(&done,cudaEventBlockingSync|cudaEventDisableTiming)==cudaSuccess;
+  }
+};
+static DiscoveryStream discovery_stream;
+static cudaStream_t disc_stream() {return discovery_stream.stream;}
+static cudaError_t disc_wait() {
+  cudaError_t rc=cudaEventRecord(discovery_stream.done,disc_stream());
+  return rc==cudaSuccess?cudaEventSynchronize(discovery_stream.done):rc;
+}
+static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
+  cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,disc_stream());
+  return rc==cudaSuccess?disc_wait():rc;
+}
+static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsync(dst,value,n,disc_stream());}
 
 /* Integer normalization/reduction is bit-identical to the CPU, including
  * quantization and clipping. One block-independent thread per (slot,RB,symbol). */
@@ -67,10 +90,10 @@ static int fold_gpu(void *opaque,int p,uint64_t *sum,uint64_t *sq)
   Fold *f=(Fold *)opaque;uint64_t *ds=nullptr,*dq=nullptr;
   size_t bytes=(size_t)p*f->nr*sizeof(*sum);int ret=-1;
   if(cudaMalloc(&ds,bytes)!=cudaSuccess || cudaMalloc(&dq,bytes)!=cudaSuccess) goto done;
-  if(cudaMemset(ds,0,bytes)!=cudaSuccess || cudaMemset(dq,0,bytes)!=cudaSuccess) goto done;
-  fold_kernel<<<(f->nr+127)/128,128>>>(f->x,f->meta,f->nt,f->nr,p,ds,dq);
-  if(cudaGetLastError()!=cudaSuccess || cudaMemcpy(sum,ds,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess ||
-      cudaMemcpy(sq,dq,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess) goto done;
+  if(disc_zero(ds,0,bytes)!=cudaSuccess || disc_zero(dq,0,bytes)!=cudaSuccess) goto done;
+  fold_kernel<<<(f->nr+127)/128,128,0,disc_stream()>>>(f->x,f->meta,f->nt,f->nr,p,ds,dq);
+  if(cudaGetLastError()!=cudaSuccess || disc_copy(sum,ds,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess ||
+      disc_copy(sq,dq,bytes,cudaMemcpyDeviceToHost)!=cudaSuccess) goto done;
   ret=0;
 done: cudaFree(ds);cudaFree(dq);return ret;
 }
@@ -84,17 +107,17 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
      cudaMalloc(&f.x,xb)!=cudaSuccess) goto done;
-  if(cudaMemcpy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
-     cudaMemcpy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
-     cudaMemset(f.x,0,xb)!=cudaSuccess) goto done;
+  if(disc_copy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
+     disc_copy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     disc_zero(f.x,0,xb)!=cudaSuccess) goto done;
   if(cfg && cfg->excl_re) {
-    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || cudaMemcpy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
+    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
-  normalize<<<(r->capacity*r->n_rb*14+127)/128,128>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
+  normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
                                                 cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles);
   if(cudaGetLastError()!=cudaSuccess) goto done;
-  pool<<<(r->capacity*168*tiles+127)/128,128>>>(f.x,r->capacity,r->n_rb,tiles);
-  if(cudaGetLastError()!=cudaSuccess || cudaDeviceSynchronize()!=cudaSuccess) goto done;
+  pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
+  if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
   ret=nr_disc_fp_cluster(r,cfg,out,max_out,fold_gpu,&f);
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
 }
@@ -107,36 +130,51 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
      cudaMalloc(&f.x,xb)!=cudaSuccess) goto done;
-  if(cudaMemcpy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
-     cudaMemcpy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
-     cudaMemset(f.x,0,xb)!=cudaSuccess) goto done;
+  if(disc_copy(grid,r->grid_base,gb,cudaMemcpyHostToDevice)!=cudaSuccess ||
+     disc_copy(f.meta,r->meta,r->capacity*sizeof(*f.meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     disc_zero(f.x,0,xb)!=cudaSuccess) goto done;
   if(cfg && cfg->excl_re) {
-    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || cudaMemcpy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
+    if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
-  normalize<<<(r->capacity*r->n_rb*14+127)/128,128>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
+  normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
                                                 cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles);
   if(cudaGetLastError()!=cudaSuccess) goto done;
-  pool<<<(r->capacity*168*tiles+127)/128,128>>>(f.x,r->capacity,r->n_rb,tiles);
-  if(cudaGetLastError()!=cudaSuccess || cudaDeviceSynchronize()!=cudaSuccess) goto done;
-  ret=cudaMemcpy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
+  pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
+  if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
+  ret=disc_copy(out,f.x,xb,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1;
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
 }
 static int lattice_host(int,int,uint64_t,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,const uint64_t *,uint16_t *);
 static int fep_host(const nr_csirs_disc_fep_cfg_t *,const nr_csirs_disc_fep_slot_t *,int,nr_csirs_disc_ring_t *,int);
 static int accumulate_host(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 static int fft_host(int, int, const int16_t *, int16_t *);
+static int prepare_host(int,int,int,int,size_t);
+static int readback(const nr_csirs_disc_ring_t *r) {
+  return r->device_valid && r->device_grid
+      ? (disc_copy(r->grid_base,r->device_grid,(size_t)r->capacity*r->slot_stride*2,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1):0;
+}
+static int upload_symbols(nr_csirs_disc_ring_t *r,uint16_t symbols)
+{
+  if(!r->device_grid) return -1;
+  for(int a=0;a<r->n_ant;++a) for(int l=0;l<14;++l) if(symbols&(1u<<l)) {
+    size_t at=((size_t)a*14+l)*24*r->n_rb;
+    if(cudaMemcpyAsync(r->device_grid+at,r->grid_base+at,24*r->n_rb*sizeof(int16_t),cudaMemcpyHostToDevice,disc_stream())!=cudaSuccess) return -1;
+  }
+  if(disc_wait()!=cudaSuccess) return -1;
+  r->device_valid=true;return 0;
+}
+static void *device_alloc(size_t n) {void *p=nullptr;return cudaMalloc(&p,n)==cudaSuccess?p:nullptr;}
+static void device_free(void *p) {cudaFree(p);}
+namespace resident {static int detect(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,nr_csirs_disc_fp_t *,int,bool);static void reset();}
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
+  if(!discovery_stream.init()) return nullptr;
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
-  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host};return &ops;
+  static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols};return &ops;
 }
-/* "Unified" buffers (U1 ring, TD staging, histories) are pinned, mapped host memory by default: GB10
- * memory is physically shared and coherent, so the GPU reads/writes it zero-copy with no page
- * migration. With cudaMallocManaged the DL actor's per-slot TD copy faulted on GPU-touched pages and
- * took 47.5 % of the actor's samples live (OTA 2026-10-07 prof11c); pinned: 10 % (prof12).
- * Default is managed again: live, pinned buffers let the worker ingest more and the radio stream died
- * (OTA 2026-10-07 t9p_1); the bounded windowed feed is the fix. ISAC_CSIRS_DISC_PINNED=1 opts in. */
-static bool use_managed(void) { static int m=-1; if(m<0) m=!(getenv("ISAC_CSIRS_DISC_PINNED") && atoi(getenv("ISAC_CSIRS_DISC_PINNED"))); return m; }
+/* Host staging is pinned by default. Managed memory is an explicit diagnostic
+ * opt-in; production FFT, history and sequence workspace use cudaMalloc. */
+static bool use_managed(void) {const char *e=getenv("ISAC_CSIRS_DISC_MANAGED");return e && atoi(e)==1;}
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
   void *ptr=nullptr;
@@ -182,21 +220,22 @@ static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
     if (plan) cufftDestroy(plan);
     plan=0;last_fft=last_transforms=0;
     if (cufftPlan1d(&plan,fft,CUFFT_C2C,transforms)!=CUFFT_SUCCESS) return -1;
+    cufftSetStream(plan,disc_stream());
     last_fft=fft;last_transforms=transforms;
   }
   if (capacity<n) {
     cudaFree(work);work=nullptr;capacity=0;
-    if (cudaMallocManaged(&work,n*sizeof(*work))!=cudaSuccess) return -1;
+    if (cudaMalloc(&work,n*sizeof(*work))!=cudaSuccess) return -1;
     capacity=n;
   }
-  fft_unpack<<<(n+255)/256,256>>>((const short2 *)in,work,n);
+  fft_unpack<<<(n+255)/256,256,0,disc_stream()>>>((const short2 *)in,work,n);
   if (cudaGetLastError()!=cudaSuccess || cufftExecC2C(plan,work,work,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
-    cudaDeviceSynchronize(); // Quiesce queued work before the caller's CPU fallback.
+    disc_wait(); // Quiesce queued work before the caller's CPU fallback.
     return -1;
   }
-  fft_pack<<<(n+255)/256,256>>>(work,(short2 *)out,n,1.f/sqrtf((float)fft));
+  fft_pack<<<(n+255)/256,256,0,disc_stream()>>>(work,(short2 *)out,n,1.f/sqrtf((float)fft));
   const cudaError_t launch = cudaGetLastError();
-  const cudaError_t complete = cudaDeviceSynchronize();
+  const cudaError_t complete = disc_wait();
   return launch==cudaSuccess && complete==cudaSuccess ? 0 : -1;
 }
 
@@ -297,42 +336,65 @@ template<class T> struct Buffer {
     capacity=n;return true;
   }
 };
+struct FepWorkspace {
+  Buffer<cufftComplex> work;
+  Buffer<nr_csirs_disc_fep_slot_t> desc;
+  Buffer<short2> shift,td;
+  cufftHandle plan=0,single_plan=0;int last_fft=0,last_ant=0;bool lut_ready=false;
+};
+static FepWorkspace fep_workspace;
+static int fep_prepare(int fft,int ant,size_t stride)
+{
+  auto &f=fep_workspace;
+  if(!f.lut_ready) {
+    short host[129];for(int i=0;i<=128;++i) host[i]=(short)round(sin(3.14159265358979323846*i/256)*16384);
+    if(cudaMemcpyToSymbol(sin_lut,host,sizeof(host))!=cudaSuccess) return -1;
+    f.lut_ready=true;
+  }
+  if(f.last_fft!=fft || f.last_ant!=ant) {
+    if(f.plan) cufftDestroy(f.plan);if(f.single_plan) cufftDestroy(f.single_plan);
+    f.plan=f.single_plan=0;f.last_fft=f.last_ant=0;
+    if(cufftPlan1d(&f.plan,fft,CUFFT_C2C,NR_CSIRS_DISC_DEFAULT_BATCH*ant*14)!=CUFFT_SUCCESS) return -1;
+    if(cufftPlan1d(&f.single_plan,fft,CUFFT_C2C,ant*14)!=CUFFT_SUCCESS) return -1;
+    cufftSetStream(f.plan,disc_stream());cufftSetStream(f.single_plan,disc_stream());
+    f.last_fft=fft;f.last_ant=ant;
+  }
+  return f.work.reserve((size_t)NR_CSIRS_DISC_DEFAULT_BATCH*ant*14*fft)
+      && f.desc.reserve(NR_CSIRS_DISC_DEFAULT_BATCH) && f.shift.reserve(fft)
+      && f.td.reserve((size_t)NR_CSIRS_DISC_DEFAULT_BATCH*ant*stride)?0:-1;
+}
 static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slot_t *slots,
                     int n,nr_csirs_disc_ring_t *ring,int first)
 {
   static std::mutex mutex;std::lock_guard<std::mutex> guard(mutex);
-  static Buffer<cufftComplex> work;
-  static Buffer<nr_csirs_disc_fep_slot_t> desc;
-  static Buffer<short2> shift;
-  // A fixed padded batch avoids re-planning on every variable backlog size.
-  static cufftHandle plan;static int last_fft,last_ant;
-  static bool lut_ready;
+  auto &work=fep_workspace.work;auto &desc=fep_workspace.desc;auto &shift=fep_workspace.shift;
+  auto &plan=fep_workspace.plan;
   if(!c || !slots || !ring || n<1 || n>NR_CSIRS_DISC_DEFAULT_BATCH || c->fft<128 || c->fft%128
       || first<0 || first>=ring->capacity || ring->n_ant!=c->n_ant || ring->n_rb!=c->n_rb) return -1;
-  if(!lut_ready) {
-    short host[129];for(int i=0;i<=128;++i) host[i]=(short)round(sin(3.14159265358979323846*i/256)*16384);
-    if(cudaMemcpyToSymbol(sin_lut,host,sizeof(host))!=cudaSuccess) return -1;
-    lut_ready=true;
+  if(fep_prepare(c->fft,c->n_ant,c->stride)<0) return -1;
+  size_t count=(size_t)(n==1?1:NR_CSIRS_DISC_DEFAULT_BATCH)*c->n_ant*14*c->fft;
+  nr_csirs_disc_fep_slot_t staged[NR_CSIRS_DISC_DEFAULT_BATCH];
+  for(int i=0;i<n;++i) {
+    staged[i]=slots[i];staged[i].samples=(int16_t *)(fep_workspace.td.p+(size_t)i*c->n_ant*c->stride);
+    if(disc_copy((void *)staged[i].samples,slots[i].samples,c->n_ant*c->stride*sizeof(short2),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
   }
-  if(last_fft!=c->fft || last_ant!=c->n_ant) {
-    if(plan) cufftDestroy(plan);plan=0;last_fft=last_ant=0;
-    if(cufftPlan1d(&plan,c->fft,CUFFT_C2C,NR_CSIRS_DISC_DEFAULT_BATCH*c->n_ant*14)!=CUFFT_SUCCESS) return -1;
-    last_fft=c->fft;last_ant=c->n_ant;
-  }
-  size_t count=(size_t)NR_CSIRS_DISC_DEFAULT_BATCH*c->n_ant*14*c->fft;
-  if(!work.reserve(count) || !desc.reserve(n) || !shift.reserve(c->fft)) return -1;
-  if(cudaMemcpy(desc.p,slots,n*sizeof(*slots),cudaMemcpyHostToDevice)!=cudaSuccess ||
-     cudaMemcpy(shift.p,c->timeshift,c->fft*sizeof(short2),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+  if(disc_copy(desc.p,staged,n*sizeof(*slots),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     disc_copy(shift.p,c->timeshift,c->fft*sizeof(short2),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
   size_t active=(size_t)n*c->n_ant*14*c->fft;
-  if(active<count && cudaMemset(work.p+active,0,(count-active)*sizeof(cufftComplex))!=cudaSuccess) return -1;
+  if(active<count && disc_zero(work.p+active,0,(count-active)*sizeof(cufftComplex))!=cudaSuccess) return -1;
   nr_csirs_disc_fep_cfg_t cfg=*c;cfg.timeshift=(int16_t *)shift.p;
-  fep_unpack<<<n*14,128>>>(cfg,desc.p,work.p);
-  if(cudaGetLastError()!=cudaSuccess || cufftExecC2C(plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
-    cudaDeviceSynchronize();return -1;
+  fep_unpack<<<n*14,128,0,disc_stream()>>>(cfg,desc.p,work.p);
+  if(cudaGetLastError()!=cudaSuccess || cufftExecC2C(n==1?fep_workspace.single_plan:plan,work.p,work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
+    disc_wait();return -1;
   }
   size_t out=(size_t)n*c->n_ant*14*12*c->n_rb;
-  fep_extract<<<(out+255)/256,256>>>(cfg,desc.p,work.p,(short2 *)ring->grid_base,n,ring->capacity,first);
-  cudaError_t launch=cudaGetLastError(),complete=cudaDeviceSynchronize();
+  fep_extract<<<(out+255)/256,256,0,disc_stream()>>>(cfg,desc.p,work.p,(short2 *)(ring->device_grid?ring->device_grid:ring->grid_base),n,ring->capacity,first);
+  ring->device_valid=ring->device_grid!=nullptr;
+  if(ring->device_valid && getenv("ISAC_CSIRS_DISC_DUMP"))
+    for(int i=0;i<n;++i) {size_t at=(size_t)((first+i)%ring->capacity)*ring->slot_stride;
+      if(disc_copy(ring->grid_base+at,ring->device_grid+at,ring->slot_stride*2,cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
+    }
+  cudaError_t launch=cudaGetLastError(),complete=disc_wait();
   return launch==cudaSuccess && complete==cudaSuccess?0:-1;
 }
 
@@ -365,15 +427,15 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && (attr.type==cudaMemoryTypeManaged || attr.type==cudaMemoryTypeHost);
   cudaGetLastError();
   const int16_t *input=managed?r->grid_base:grid.p;
-  if((!managed && cudaMemcpy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||
-     cudaMemcpy(meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
-     cudaMemset(x.p,0,xb*sizeof(uint32_t))!=cudaSuccess) return -1;
-  if(cfg && cfg->excl_re && cudaMemcpy(excl.p,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
-  normalize<<<(r->capacity*r->n_rb*14+127)/128,128>>>(input,meta.p,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
+  if((!managed && disc_copy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||
+     disc_copy(meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     disc_zero(x.p,0,xb*sizeof(uint32_t))!=cudaSuccess) return -1;
+  if(cfg && cfg->excl_re && disc_copy(excl.p,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+  normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(input,meta.p,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
       cfg?cfg->excl_sym_mask_any:0,cfg && cfg->excl_re?excl.p:nullptr,x.p,tiles);
-  pool<<<(r->capacity*168*tiles+127)/128,128>>>(x.p,r->capacity,r->n_rb,tiles);
-  accumulate_kernel<<<(nr+127)/128,128>>>(x.p,meta.p,r->capacity,nr,168*tiles,sum,sq,s80,s64,total,totalq);
-  cudaError_t launch=cudaGetLastError(),complete=cudaDeviceSynchronize();
+  pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(x.p,r->capacity,r->n_rb,tiles);
+  accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(x.p,meta.p,r->capacity,nr,168*tiles,sum,sq,s80,s64,total,totalq);
+  cudaError_t launch=cudaGetLastError(),complete=disc_wait();
   return launch==cudaSuccess && complete==cudaSuccess?0:-1;
 }
 
@@ -448,12 +510,47 @@ static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const ui
   int tiles=(rb+15)/16,pooled=168*tiles,nr=14*12*rb+pooled;
   size_t count=(size_t)p*14*tiles*6;
   if(!ps.reserve((size_t)p*pooled) || !pq.reserve((size_t)p*pooled) || !dc.reserve(p) || !dm.reserve(count)) return -1;
-  if(cudaMemcpy(dc.p,counts,p*sizeof(uint64_t),cudaMemcpyHostToDevice)!=cudaSuccess ||
-     cudaMemset(dm.p,0,count*sizeof(uint16_t))!=cudaSuccess) return -1;
-  lattice_pool<<<(p*pooled+127)/128,128>>>(p,nr,pooled,sum,sq,ps.p,pq.p);
-  lattice_screen<<<(p*14+63)/64,64>>>(p,tiles,nt,dc.p,ps.p,pq.p,total+nr-pooled,totalq+nr-pooled,dm.p);
-  if(cudaGetLastError()!=cudaSuccess || cudaMemcpy(masks,dm.p,count*sizeof(uint16_t),cudaMemcpyDeviceToHost)!=cudaSuccess) {
-    cudaDeviceSynchronize();return -1;
+  if(disc_copy(dc.p,counts,p*sizeof(uint64_t),cudaMemcpyHostToDevice)!=cudaSuccess ||
+     disc_zero(dm.p,0,count*sizeof(uint16_t))!=cudaSuccess) return -1;
+  lattice_pool<<<(p*pooled+127)/128,128,0,disc_stream()>>>(p,nr,pooled,sum,sq,ps.p,pq.p);
+  lattice_screen<<<(p*14+63)/64,64,0,disc_stream()>>>(p,tiles,nt,dc.p,ps.p,pq.p,total+nr-pooled,totalq+nr-pooled,dm.p);
+  if(cudaGetLastError()!=cudaSuccess || disc_copy(masks,dm.p,count*sizeof(uint16_t),cudaMemcpyDeviceToHost)!=cudaSuccess) {
+    disc_wait();return -1;
   }
   return 0;
+}
+
+#include "nr_csirs_disc_gpu_cluster.cuh"
+static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
+{
+  if(!resident::prepare(rb,ant,capacity) || fep_prepare(fft,ant,stride)<0) return -1;
+  auto &f=fep_workspace;
+  // Exercise plans and kernel local storage before RX, including the large
+  // per-symbol segmentation frame. Subsequent calls only clear retained state.
+  nr_csirs_disc_fep_slot_t descriptors[NR_CSIRS_DISC_DEFAULT_BATCH]={};
+  for(int i=0;i<NR_CSIRS_DISC_DEFAULT_BATCH;++i) {
+    descriptors[i].samples=(int16_t *)(f.td.p+(size_t)i*ant*stride);
+    for(int l=0;l<14;++l) descriptors[i].offset[l]=l*fft;
+  }
+  nr_csirs_disc_fep_cfg_t cfg={};cfg.fft=fft;cfg.n_ant=ant;cfg.n_rb=rb;cfg.stride=stride;
+  cfg.timeshift=(int16_t *)f.shift.p;
+  if(disc_zero(f.td.p,0,f.td.capacity*sizeof(short2))!=cudaSuccess
+     || disc_zero(f.shift.p,0,fft*sizeof(short2))!=cudaSuccess
+     || disc_copy(f.desc.p,descriptors,sizeof(descriptors),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+  fep_unpack<<<NR_CSIRS_DISC_DEFAULT_BATCH*14,128,0,disc_stream()>>>(cfg,f.desc.p,f.work.p);
+  if(cufftExecC2C(f.plan,f.work.p,f.work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS
+     || cufftExecC2C(f.single_plan,f.work.p,f.work.p,CUFFT_FORWARD)!=CUFFT_SUCCESS) return -1;
+  size_t n=(size_t)NR_CSIRS_DISC_DEFAULT_BATCH*ant*14*12*rb;
+  fep_extract<<<(n+255)/256,256,0,disc_stream()>>>(cfg,f.desc.p,f.work.p,(short2 *)resident::state.grid.p,100,100,0);
+  int16_t dummy=0;nr_csirs_disc_slot_meta_t meta={};nr_csirs_disc_fp_t out[128];
+  nr_csirs_disc_ring_t ring={};ring.n_ant=ant;ring.n_rb=rb;ring.capacity=1;ring.slots_per_frame=20;
+  ring.slot_stride=(size_t)ant*14*24*rb;ring.grid_base=&dummy;ring.meta=&meta;
+  if(resident::detect(&ring,nullptr,out,128,false)<0) return -1;
+  auto &h=resident::state;int tiles=(rb+15)/16,nr=14*12*rb+168*tiles;
+  if(disc_zero(h.meta.p,0,sizeof(meta))!=cudaSuccess || disc_zero(h.x.p,0,nr*4)!=cudaSuccess) return -1;
+  normalize<<<(rb*14+127)/128,128,0,disc_stream()>>>(h.grid.p,h.meta.p,ring.slot_stride,1,ant,rb,0,nullptr,h.x.p,tiles);
+  pool<<<(168*tiles+127)/128,128,0,disc_stream()>>>(h.x.p,1,rb,tiles);
+  accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(h.x.p,h.meta.p,1,nr,168*tiles,h.sum.p,h.sq.p,h.s80.p,h.s64.p,h.total.p,h.totalq.p);
+  resident::reset();
+  return cudaGetLastError()==cudaSuccess && disc_wait()==cudaSuccess?0:-1;
 }

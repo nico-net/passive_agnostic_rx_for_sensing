@@ -56,6 +56,11 @@ int csirs_td_parity(int mu, int rb, int sync, int cfo)
   int rc=nr_csirs_disc_td_init(fp,4,16);
   rc|=nr_csirs_disc_ring_init(&actual,4,rb,fp->slots_per_frame,16,parity_tolerance>0);
   rc|=nr_csirs_disc_ring_init(&expected,4,rb,fp->slots_per_frame,16,false);
+  const nr_csirs_disc_gpu_ops_t *ops=parity_tolerance?nr_csirs_disc_gpu_load():NULL;
+  if(ops && ops->device_alloc) {
+    actual.device_grid=ops->device_alloc((size_t)actual.capacity*actual.slot_stride*2);
+    if(!actual.device_grid) rc=-6;
+  }
   c16_t (*grid)[fp->samples_per_slot_wCP]=aligned_alloc(64,4*fp->samples_per_slot_wCP*sizeof(c16_t));
   const int16_t *ants[4];for(int a=0;a<4;++a) ants[a]=(const int16_t *)grid[a];
   int slots[]={0,1,2,3,fp->slots_per_frame-1};
@@ -71,6 +76,7 @@ int csirs_td_parity(int mu, int rb, int sync, int cfo)
   uint64_t gpu_before=csirs_disc_fep_gpu_chunks;
   if(nr_csirs_disc_td_drain(&actual)!=5) rc=-2;
   if(parity_tolerance && csirs_disc_fep_gpu_chunks!=gpu_before+1) rc=-5;
+  if(actual.device_valid && (!ops->readback || ops->readback(&actual)<0)) rc=-7;
   int maxerr=0;double mse=0;
   for(size_t k=0;k<5*actual.slot_stride;++k) {
     int error=abs((int)actual.grid_base[k]-expected.grid_base[k]);
@@ -224,6 +230,10 @@ int csirs_td_throughput(void)
   nr_csirs_disc_pipeline_init(&ue.frame_parms);
   if(nr_csirs_disc_td_init(&ue.frame_parms,4,1024) || nr_csirs_disc_ring_init(&bench_ring,4,217,20,640,true)) {
     cleanup();return -1;
+  }
+  const nr_csirs_disc_gpu_ops_t *ops=nr_csirs_disc_gpu_load();
+  if(!ops || !ops->device_alloc || !(bench_ring.device_grid=ops->device_alloc((size_t)bench_ring.capacity*bench_ring.slot_stride*2))) {
+    nr_csirs_disc_ring_free(&bench_ring);cleanup();return -1;
   }
   bench_producer_done=false;
   pthread_t consumer;

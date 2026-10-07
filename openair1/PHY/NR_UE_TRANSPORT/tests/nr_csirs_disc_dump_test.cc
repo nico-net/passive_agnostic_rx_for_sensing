@@ -19,6 +19,7 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *, fapi_nr_dl
                                        uint16_t *, uint16_t *, int16_t *, int, uint32_t *);
 int nr_csirs_blind_rt_test_phases(int, uint16_t *);
 uint64_t nr_csirs_blind_rt_test_confirm_us(void);
+uint64_t nr_csirs_blind_rt_test_confirm_cpu_us(void);
 void nr_csirs_blind_rt_test_dump_bank(void);
 int nr_csirs_blind_rt_test_confirmed_entry(int, fapi_nr_dl_config_csirs_pdu_rel15_t *, uint16_t *, uint16_t *);
 extern uint64_t csirs_disc_readmit_skipped;
@@ -119,6 +120,12 @@ TEST(CsirsDiscDump, ProductionStream)
       (unsigned long long)values[values.size()/2],(unsigned long long)values[(values.size()-1)*95/100],(unsigned long long)values.back());
   };
   stats("batch",batches);stats("detect",detection);stats("hyp",hypotheses);stats("sweep",sweep);stats("confirm_slot",confirm);
+  nr_csirs_disc_metrics_t cpu={};nr_csirs_disc_get_metrics(&cpu);
+  double air=fed/(100.0*ring.slots_per_frame);
+  printf("CPU air_s=%.6f detect_us=%llu hyp_us=%llu sweep_us=%llu confirm_us=%llu cpu_s_per_air_s=%.6f\n",
+      air,(unsigned long long)cpu.detect_cpu_us,(unsigned long long)cpu.hyp_cpu_us,
+      (unsigned long long)cpu.sweep_cpu_us,(unsigned long long)nr_csirs_blind_rt_test_confirm_cpu_us(),
+      (cpu.cpu_us+nr_csirs_blind_rt_test_confirm_cpu_us())/1e6/air);
   printf("TIMING snapshot_total=%.0f confirm_total=%.0f us drops=%llu\n",snapshot_us,confirm_us,
     (unsigned long long)(csirs_disc_feed_drops-drops_before));
   for(int i=0;i<4;++i) {EXPECT_EQ(winner_phases[i],3u)<<i;EXPECT_GT(confirmed_at[i],0u)<<i;EXPECT_LE(confirmed_at[i],4000u)<<i;}

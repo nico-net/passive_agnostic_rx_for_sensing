@@ -141,6 +141,8 @@ static void load_module(void)
       raw_ops.fep = module_ops->fep;
       raw_ops.accumulate = module_ops->accumulate;
       raw_ops.lattice = module_ops->lattice;
+      raw_ops.device_alloc=module_ops->device_alloc;raw_ops.device_free=module_ops->device_free;
+      raw_ops.prepare=module_ops->prepare;raw_ops.detect=module_ops->detect;raw_ops.reset=module_ops->reset;raw_ops.readback=module_ops->readback;raw_ops.upload_symbols=module_ops->upload_symbols;
     }
     void *(*alloc)(size_t) = (void *(*)(size_t))dlsym(fp_handle, "nr_csirs_disc_gpu_alloc_unified");
     void (*free_fn)(void *) = (void (*)(void *))dlsym(fp_handle, "nr_csirs_disc_gpu_free_unified");
@@ -151,10 +153,15 @@ static void load_module(void)
   }
 
   void *sweep_handle = open_sibling("libnr_csirs_disc_gpu_sweep.so");
-  if (sweep_handle)
+  if (sweep_handle) {
+    raw_ops.confirm=dlsym(sweep_handle,"nr_csirs_disc_gpu_confirm_entry");
+    raw_ops.refine=dlsym(sweep_handle,"nr_csirs_disc_gpu_refine_entry");
+    raw_ops.sweep_prepare=dlsym(sweep_handle,"nr_csirs_disc_gpu_sweep_prepare");
     raw_ops.sweep = (int (*)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_hyp_t *, int,
                              const nr_csirs_disc_sweep_cfg_t *, nr_csirs_disc_win_t *))
         dlsym(sweep_handle, "nr_csirs_disc_gpu_sweep_entry");
+  }
+  public_ops=raw_ops;
 
   public_ops.footprints = raw_ops.footprints ? guarded_footprints : NULL;
   public_ops.normalize = raw_ops.normalize ? guarded_normalize : NULL;

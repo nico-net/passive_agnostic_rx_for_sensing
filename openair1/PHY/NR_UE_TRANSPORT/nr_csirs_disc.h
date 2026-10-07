@@ -45,6 +45,8 @@ typedef struct {
   nr_csirs_disc_slot_meta_t *meta;   /* [capacity] */
   uint64_t written;          /* entries ever written (ring position = written % capacity) */
   void *private_state;       /* U1 synchronization/allocation state; consumers must not inspect */
+  int16_t *device_grid;       /* T16 optional device mirror, owned by ring; never CPU dereferenced */
+  bool device_valid;          /* device contains current IQ (host may be stale) */
 } nr_csirs_disc_ring_t;
 
 /* Pointer to the I/Q pairs (int16 re,im interleaved) of entry `idx`, antenna `ant`, symbol `sym`. */
@@ -170,7 +172,8 @@ int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *, nr_csirs_disc_hyp_t *
 int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int n_hyp,
                                  const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out);
 
-/* T9 additive worker-only FEP API. Input and destination grids are managed.
+/* T9 additive worker-only FEP API. T16 uses pinned input staging and an optional
+ * device_grid destination; legacy host-backed destination semantics are retained.
  * offset is the original sample offset (CFO phase), stride is in complex samples.
  * rotation_mode: 0 SSE truncation, 1 ARM rounded multiply, 2 ARM RDM. */
 typedef struct {
@@ -203,7 +206,8 @@ typedef struct {
   int (*fep)(const nr_csirs_disc_fep_cfg_t *, const nr_csirs_disc_fep_slot_t *, int,
              nr_csirs_disc_ring_t *, int first);
   /* Tiled local normalization + incremental sufficient statistics, exact Q12.
-   * Arrays are managed; on failure caller must discard history before retry. */
+   * Legacy arrays are GPU-accessible; on failure discard history before retry.
+   * T16 production uses detect() with private device-only history instead. */
   int (*accumulate)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *,
                     uint64_t *sum, uint64_t *sq, uint64_t *sum80, uint64_t *sum64,
                     uint64_t *total, uint64_t *totalq);
@@ -212,6 +216,19 @@ typedef struct {
   int (*lattice)(int n_rb, int period, uint64_t nt, const uint64_t *counts,
                  const uint64_t *sum, const uint64_t *sq, const uint64_t *total,
                  const uint64_t *totalq, uint16_t *masks);
+  /* T16 additive resident pipeline. Existing batch APIs retain their semantics. */
+  void *(*device_alloc)(size_t);
+  void (*device_free)(void *);
+  int (*prepare)(int n_rb, int n_ant, int capacity, int fft, size_t td_stride);
+  int (*detect)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_fp_cfg_t *, nr_csirs_disc_fp_t *, int, bool scheduled);
+  void (*reset)(void);
+  int (*refine)(const nr_csirs_disc_ring_t *, nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *);
+  int (*sweep_prepare)(int n_rb, int n_ant, int capacity);
+  /* rho, EPR, ZP, second-symbol ZP, legacy median ZP, using a one-slot grid. */
+  int (*confirm)(const nr_csirs_disc_ring_t *, const nr_csirs_disc_hyp_t *, int id, double scores[5]);
+  /* Explicit diagnostic/snapshot readback; production never calls this. */
+  int (*readback)(const nr_csirs_disc_ring_t *);
+  int (*upload_symbols)(nr_csirs_disc_ring_t *, uint16_t symbols);
 } nr_csirs_disc_gpu_ops_t;
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void);   /* NULL when no GPU module */
 /* CPU-side loader, gated by ISAC_CSIRS_DISC=1 and BACKEND=auto|cpu|gpu.
@@ -224,6 +241,7 @@ typedef struct {
   uint64_t batches, footprints, hyps, winners, ambiguous;
   uint64_t feed_drops, gpu_batches, cpu_batches, batch_us;
   uint64_t detect_us, hyp_us, sweep_us; /* additive stage timing */
+  uint64_t cpu_us, detect_cpu_us, hyp_cpu_us, sweep_cpu_us;
 } nr_csirs_disc_metrics_t;
 extern uint64_t csirs_disc_gpu_detect_batches, csirs_disc_cpu_detect_batches;
 extern uint64_t csirs_disc_gpu_lattice_calls, csirs_disc_cpu_lattice_calls;

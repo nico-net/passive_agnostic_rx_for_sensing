@@ -51,12 +51,18 @@ static int slot_order(const void *a,const void *b)
 {
   uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;return (x>y)-(x<y);
 }
-static int re_order(const void *a, const void *b)
+static void re_sort(nr_csirs_disc_re_t *a,int n)
 {
-  return ((const nr_csirs_disc_re_t *)a)->grid_index - ((const nr_csirs_disc_re_t *)b)->grid_index;
+  /* Mapping is nearly ordered; in-place shell sort avoids libc scratch allocation. */
+  for(int gap=n/2;gap>0;gap/=2) for(int i=gap;i<n;++i) {
+    nr_csirs_disc_re_t v=a[i];int j=i;
+    while(j>=gap && a[j-gap].grid_index>v.grid_index) {a[j]=a[j-gap];j-=gap;}
+    a[j]=v;
+  }
 }
 
-int nr_csirs_disc_sweep_map(const nr_csirs_disc_hyp_t *h, int n_rb, nr_csirs_disc_sweep_map_t *out)
+int nr_csirs_disc_sweep_map_into(const nr_csirs_disc_hyp_t *h, int n_rb, nr_csirs_disc_sweep_map_t *out,
+                                 nr_csirs_disc_re_t *storage, size_t capacity)
 {
   memset(out, 0, sizeof(*out));
   if (!valid_hyp(h, n_rb))
@@ -66,7 +72,8 @@ int nr_csirs_disc_sweep_map(const nr_csirs_disc_hyp_t *h, int n_rb, nr_csirs_dis
   const double rho = h->density < 2 ? 0.5 : h->density == 2 ? 1 : 3;
   const double alpha = m.ports == 1 ? rho : 2 * rho;
   const size_t cap = (size_t)h->n_rb * m.size * gs * (m.kprime + 1) * (m.lprime + 1);
-  out->re = malloc(cap * sizeof(*out->re));
+  if(storage && cap>capacity) return -1;
+  out->re = storage?storage:malloc(cap * sizeof(*out->re));
   if (!out->re)
     return -1;
   out->ports = m.ports;
@@ -94,10 +101,15 @@ int nr_csirs_disc_sweep_map(const nr_csirs_disc_hyp_t *h, int n_rb, nr_csirs_dis
           }
       }
     }
-    qsort(out->re + out->begin[p], out->n_re - out->begin[p], sizeof(*out->re), re_order);
+    re_sort(out->re+out->begin[p],out->n_re-out->begin[p]);
   }
   out->begin[m.ports] = out->n_re;
   return 0;
+}
+
+int nr_csirs_disc_sweep_map(const nr_csirs_disc_hyp_t *h,int rb,nr_csirs_disc_sweep_map_t *out)
+{
+  return nr_csirs_disc_sweep_map_into(h,rb,out,NULL,0);
 }
 
 void nr_csirs_disc_sweep_winner(const float *z, const nr_csirs_disc_sweep_cfg_t *c, int h, int slots,

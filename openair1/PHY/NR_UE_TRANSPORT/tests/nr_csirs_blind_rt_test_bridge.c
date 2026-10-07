@@ -264,7 +264,9 @@ int nr_csirs_blind_rt_test_export(int rank, int banks, int types[2], int *untouc
   return n;
 }
 
-static uint64_t test_confirm_us;
+static uint64_t test_confirm_us, test_confirm_cpu_us;
+uint64_t nr_csirs_blind_rt_test_confirm_cpu_us(void) {return test_confirm_cpu_us;}
+static uint64_t thread_us(void) {struct timespec t;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;}
 uint64_t nr_csirs_blind_rt_test_confirm_us(void) {return test_confirm_us;}
 
 int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
@@ -308,9 +310,9 @@ int nr_csirs_blind_rt_test_confirm_ring(const nr_csirs_disc_ring_t *ring,
         const int16_t *src = nr_csirs_disc_ring_sym(ring, t, ant, sym);
         memcpy(&rx[ant][sym*fft+ue.frame_parms.first_carrier_offset],src,12*ring->n_rb*sizeof(c16_t));
       }
-    uint64_t begin=now_us();
+    uint64_t begin=now_us(),cpu_begin=thread_us();
     nr_csirs_blind_rt_slot(&ue, ring->meta[t].slot, ring->meta[t].abs_slot, rx);
-    test_confirm_us+=now_us()-begin;
+    test_confirm_us+=now_us()-begin;test_confirm_cpu_us+=thread_us()-cpu_begin;
     calls++;
   }
   const int n = g_st.n_conf < max ? g_st.n_conf : max;
@@ -462,4 +464,71 @@ int nr_csirs_blind_rt_test_confirmed_entry(int k, fapi_nr_dl_config_csirs_pdu_re
   fill_pdu(&g_st.cand[g_st.conf_idx[k]], 1, p);
   *period = g_st.conf_period[k];
   return nr_csirs_blind_rt_test_phases(k, phases);
+}
+
+void nr_cfg_epoch_note_csirs_map_change(void) {}
+
+/* T16: run in an isolated child (production queue geometry is process lifetime). */
+static unsigned stress_done,stress_errors;
+static c16_t *stress_iq[4];
+static PHY_VARS_NR_UE stress_ue;
+static void *stress_actor(void *arg)
+{
+  uintptr_t actor=(uintptr_t)arg;
+  for(unsigned k=0;k<128;++k) {
+    bool map[14];memset(map,1,sizeof(map));
+    nr_csirs_blind_rt_slot_fep(&stress_ue,(16*k+4*actor+1)%20,16*k+4*actor+1,
+        (c16_t (*)[14*4096])stress_iq[actor],map);
+    fapi_nr_dl_config_csirs_pdu_rel15_t out[64];
+    if(nr_csirs_blind_rt_rate_match_all(16*k+4*actor+1,out,64)!=30) __atomic_fetch_add(&stress_errors,1,__ATOMIC_RELAXED);
+    struct timespec pause={0,2000000};nanosleep(&pause,NULL);
+  }
+  __atomic_add_fetch(&stress_done,1,__ATOMIC_RELEASE);
+  return NULL;
+}
+int nr_csirs_blind_rt_test_async_stress(void)
+{
+  g_disc=g_on=g_armed=1;g_rank=g_wide=g_ids=g_slotsweep=0;g_reconf=1;
+  discovery_empty_state(&g_st);discovery_empty_state(&g_zp);g_st.discovery_bank=true;
+  stress_ue.frame_parms=(NR_DL_FRAME_PARMS){.N_RB_DL=217,.ofdm_symbol_size=4096,
+      .first_carrier_offset=4096-12*217,.nb_antennas_rx=4,.symbols_per_slot=14,
+      .slots_per_frame=20,.samples_per_slot_wCP=14*4096};
+  g_st.n=g_zp.n=31;
+  for(int i=0;i<31;++i) {
+    g_st.cand[i]=g_zp.cand[i]=(nr_csirs_candidate_t){.row=1,.freq_domain=1u<<(i%4),
+      .symb_l0=4+i%6,.freq_density=3,.scramb_id=415+i,.nr_of_rbs=52,.start_rb=52*(i%4)};
+    nr_csirs_blind_seed(&g_st,i,4,1,0);g_disc_scored_slot[i]=UINT32_MAX;
+    if(i<30) {g_st.conf_idx[i]=i;g_st.conf_period[i]=4;g_st.conf_n_off[i]=1;g_st.conf_off[i][0]=1;}
+  }
+  g_st.n=g_zp.n=31;g_st.n_conf=30;
+  if(nr_csirs_blind_rt_discovery_prepare(&stress_ue.frame_parms)) return -1;
+  for(int a=0;a<4;++a) {
+    stress_iq[a]=malloc((size_t)4*14*4096*sizeof(c16_t));if(!stress_iq[a]) return -2;
+    for(int k=0;k<4*14*4096;++k) stress_iq[a][k]=(c16_t){(k%37)*31-500,(k%43)*27-500};
+  }
+  /* The actor must finish while the scoring mutex remains held. */
+  pthread_mutex_lock(&g_csirs_state_lock);
+  bool map[14];memset(map,1,sizeof(map));
+  nr_csirs_blind_rt_slot_fep(&stress_ue,1,1,(c16_t (*)[14*4096])stress_iq[0],map);
+  fapi_nr_dl_config_csirs_pdu_rel15_t exported[64];
+  int exported_count=nr_csirs_blind_rt_rate_match_all(1,exported,64);
+  bool observed=nr_csirs_blind_rt_observed_nzp(1,&exported[63]);
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  if(exported_count!=30 || !observed) return -6;
+  if(nr_csirs_blind_rt_discovery_drain()!=1 || !g_st.tried[30]) return -3;
+  /* Stale queued observations must not modify the next epoch. */
+  nr_csirs_blind_rt_slot_fep(&stress_ue,5,5,(c16_t (*)[14*4096])stress_iq[0],map);
+  unsigned tried=g_st.tried[30];discovery_queue_reset();
+  nr_csirs_blind_rt_discovery_drain();if(g_st.tried[30]!=tried) return -4;
+  g_st.n=g_zp.n=30;discovery_publish();
+  csirs_disc_confirm_cpu_scores=0;csirs_disc_confirm_wait_max_us=0;stress_done=0;
+  pthread_t actors[4];for(uintptr_t a=0;a<4;++a) pthread_create(&actors[a],NULL,stress_actor,(void *)a);
+  while(__atomic_load_n(&stress_done,__ATOMIC_ACQUIRE)<4) {
+    if(!nr_csirs_blind_rt_discovery_drain()) {struct timespec pause={0,1000000};nanosleep(&pause,NULL);}
+  }
+  for(int a=0;a<4;++a) {pthread_join(actors[a],NULL);free(stress_iq[a]);}
+  while(nr_csirs_blind_rt_discovery_drain()) {}
+  printf("T16 STRESS resources=30 actors=4 confirm_wait_max_us=%llu drops=%llu pending_tried=%u scores=%llu\n",
+      (unsigned long long)csirs_disc_confirm_wait_max_us,(unsigned long long)csirs_disc_confirm_drops,g_st.tried[30],(unsigned long long)csirs_disc_confirm_cpu_scores);
+  return csirs_disc_confirm_wait_max_us<100 && csirs_disc_confirm_cpu_scores>=3000 && !stress_errors?0:-5;
 }

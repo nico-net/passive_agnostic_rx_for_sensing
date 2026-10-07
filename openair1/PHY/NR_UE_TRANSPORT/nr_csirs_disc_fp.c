@@ -5,7 +5,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
-#include <pthread.h>
 #ifndef NR_CSIRS_DISC_GPU_MODULE
 static uint64_t fp_us(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;}
 
@@ -464,6 +463,8 @@ int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_d
 #ifndef NR_CSIRS_DISC_GPU_MODULE
 void nr_csirs_disc_detect_reset(void)
 {
+  const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
+  if(gpu && gpu->reset) gpu->reset();
   for(int i=0;i<4;++i) free(history.groups[i]);
   history_free(history.sum80);history_free(history.sum64);
   history_free(history.sum);history_free(history.sq);history_free(history.total);history_free(history.totalq);free(history.exclude);
@@ -471,7 +472,8 @@ void nr_csirs_disc_detect_reset(void)
   memset(&history,0,sizeof(history));
 }
 
-enum { FP_WORKERS=4 };
+/* Four scheduling groups, executed serially on the single discovery worker. */
+enum { FP_GROUPS=4 };
 typedef struct {
   nr_csirs_disc_ring_t ring;
   const nr_csirs_disc_fp_cfg_t *cfg;
@@ -486,21 +488,19 @@ static void *normalize_job(void *opaque)
 }
 static void normalize_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,uint32_t *x)
 {
-  pthread_t threads[FP_WORKERS];bool launched[FP_WORKERS]={0};fp_job_t jobs[FP_WORKERS];
+  fp_job_t jobs[FP_GROUPS];
   int nr=14*12*r->n_rb+POOL(r);
-  for(int i=FP_WORKERS-1;i>=0;--i) {
-    int first=r->capacity*i/FP_WORKERS,end=r->capacity*(i+1)/FP_WORKERS;
+  for(int i=FP_GROUPS-1;i>=0;--i) {
+    int first=r->capacity*i/FP_GROUPS,end=r->capacity*(i+1)/FP_GROUPS;
     jobs[i]=(fp_job_t){.ring=*r,.cfg=cfg,.x=x+(size_t)first*nr};
     jobs[i].ring.grid_base+=(size_t)first*r->slot_stride;jobs[i].ring.meta+=first;jobs[i].ring.capacity=end-first;
-    if(i && pthread_create(&threads[i],NULL,normalize_job,&jobs[i])==0) launched[i]=true;
-    else normalize_job(&jobs[i]);
+    normalize_job(&jobs[i]);
   }
-  for(int i=1;i<FP_WORKERS;++i) if(launched[i]) pthread_join(threads[i],NULL);
 }
 static void *fold_job(void *opaque)
 {
   fp_job_t *job=opaque;history_t *h=&history;const nr_csirs_disc_ring_t *r=&job->ring;
-  int nr=h->nr,pooled=POOL(r),first=nr*job->worker/FP_WORKERS,end=nr*(job->worker+1)/FP_WORKERS;
+  int nr=h->nr,pooled=POOL(r),first=nr*job->worker/FP_GROUPS,end=nr*(job->worker+1)/FP_GROUPS;
   for(int t=0;t<r->capacity;++t) if(r->meta[t].valid) {
     int residue=r->meta[t].abs_slot%640;
     uint64_t *s=h->sum+(size_t)residue*nr,*q=h->sq+(size_t)residue*pooled;
@@ -516,13 +516,11 @@ static void *fold_job(void *opaque)
 }
 static void fold_parallel(const nr_csirs_disc_ring_t *r,uint32_t *x)
 {
-  pthread_t threads[FP_WORKERS];bool launched[FP_WORKERS]={0};fp_job_t jobs[FP_WORKERS];
-  for(int i=FP_WORKERS-1;i>=0;--i) {
+  fp_job_t jobs[FP_GROUPS];
+  for(int i=FP_GROUPS-1;i>=0;--i) {
     jobs[i]=(fp_job_t){.ring=*r,.x=x,.worker=i};
-    if(i && pthread_create(&threads[i],NULL,fold_job,&jobs[i])==0) launched[i]=true;
-    else fold_job(&jobs[i]);
+    fold_job(&jobs[i]);
   }
-  for(int i=1;i<FP_WORKERS;++i) if(launched[i]) pthread_join(threads[i],NULL);
   for(int t=0;t<r->capacity;++t) if(r->meta[t].valid) {++history.counts[r->meta[t].abs_slot%640];++history.nt;}
 }
 
@@ -535,15 +533,13 @@ static void *cluster_job(void *opaque)
 static int cluster_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                             nr_csirs_disc_fp_t *out,int max_out,int group)
 {
-  pthread_t threads[FP_WORKERS];bool launched[FP_WORKERS]={0};fp_job_t jobs[FP_WORKERS];
-  for(int i=FP_WORKERS-1;i>=0;--i) {
-    jobs[i]=(fp_job_t){.ring=*r,.cfg=cfg,.worker=group<0?i:group+FP_WORKERS*i,.period_step=group<0?FP_WORKERS:FP_WORKERS*FP_WORKERS};
-    if(i && pthread_create(&threads[i],NULL,cluster_job,&jobs[i])==0) launched[i]=true;
-    else cluster_job(&jobs[i]);
+  fp_job_t jobs[FP_GROUPS];
+  for(int i=FP_GROUPS-1;i>=0;--i) {
+    jobs[i]=(fp_job_t){.ring=*r,.cfg=cfg,.worker=group<0?i:group+FP_GROUPS*i,.period_step=group<0?FP_GROUPS:FP_GROUPS*FP_GROUPS};
+    cluster_job(&jobs[i]);
   }
   candidate_t *updated=group<0?NULL:calloc(CAND_CAP,sizeof(*updated));int updated_count=0;bool error=false;
-  for(int i=0;i<FP_WORKERS;++i) {
-    if(launched[i]) pthread_join(threads[i],NULL);
+  for(int i=0;i<FP_GROUPS;++i) {
     error |= jobs[i].error;
     if(group<0) {
       free(history.groups[i]);history.groups[i]=jobs[i].candidates;history.group_count[i]=jobs[i].count;
@@ -559,7 +555,7 @@ static int cluster_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp
   }
   candidate_t *all=calloc(CAND_CAP,sizeof(*all));int count=0;
   if(!all) return -1;
-  for(int i=0;i<FP_WORKERS;++i) for(int k=0;k<history.group_count[i];++k)
+  for(int i=0;i<FP_GROUPS;++i) for(int k=0;k<history.group_count[i];++k)
     add_candidate(all,&count,history.groups[i][k]);
   return finish_candidates(all,count,out,max_out);
 }
@@ -574,6 +570,12 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
   uint64_t begin=fp_us(), norm=0;
   history_t *h=&history;
   const nr_csirs_disc_gpu_ops_t *ops=force_cpu?NULL:nr_csirs_disc_gpu_load();
+  if(r->device_valid && (!ops || !ops->detect)) return -1;
+  if(ops && ops->detect) {
+    int rc=ops->detect(r,cfg,out,max_out,scheduled);
+    if(rc>=0) {__atomic_fetch_add(&csirs_disc_gpu_detect_batches,1,__ATOMIC_RELAXED);__atomic_fetch_add(&csirs_disc_gpu_lattice_calls,1,__ATOMIC_RELAXED);}
+    return rc; /* resident IQ cannot be silently scored through a stale host mirror */
+  }
   bool gpu=ops && ops->accumulate && nr_csirs_disc_alloc_unified && nr_csirs_disc_free_unified;
   int nr=14*12*r->n_rb+POOL(r);
   uint16_t symbols=cfg?cfg->excl_sym_mask_any:0;
@@ -634,7 +636,7 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
   }
   if(max_out>128) max_out=128;
   uint64_t folded=fp_us();
-  int group=scheduled && new_slots<(uint64_t)r->capacity?h->round++%FP_WORKERS:-1;
+  int group=scheduled && new_slots<(uint64_t)r->capacity?h->round++%FP_GROUPS:-1;
   int result=cluster_parallel(r,cfg,out,max_out,group);
   if(getenv("ISAC_CSIRS_DISC_DIAG")) fprintf(stderr,"DETECT normalize=%llu fold=%llu cluster=%llu us\n",
     (unsigned long long)norm,(unsigned long long)(folded-begin-norm),(unsigned long long)(fp_us()-folded));
