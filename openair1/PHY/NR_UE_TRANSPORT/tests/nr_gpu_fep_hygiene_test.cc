@@ -103,3 +103,44 @@ TEST(GpuFepHygiene, EnforceModeDisablesAfterTwo)
   EXPECT_FALSE(nr_gpu_fep_should_disable(true, 0));
   EXPECT_TRUE(nr_gpu_fep_should_disable(true, 1));
 }
+
+
+#include "nr_dl_gpu_budget.h"
+TEST(GpuFepHygiene, CoherentTrafficBudgetHasNoCatchupBurst)
+{
+  nr_dl_gpu_budget_t b{};
+  EXPECT_TRUE(nr_dl_gpu_budget_take_at(&b, 1000000, 1000000000));
+  EXPECT_FALSE(nr_dl_gpu_budget_take_at(&b, 1, 1009999999));
+  EXPECT_TRUE(nr_dl_gpu_budget_take_at(&b, 1000000, 1010000000));
+  EXPECT_TRUE(nr_dl_gpu_budget_take_at(&b, 1000000, 2000000000));
+  EXPECT_FALSE(nr_dl_gpu_budget_take_at(&b, 1, 2000000000));
+  EXPECT_EQ(b.bytes, 3000000u);
+  EXPECT_EQ(b.refused, 2u);
+}
+
+// Counting CUDA shim: the production fence must reject before invoking CUDA.
+enum { cudaSuccess = 0, cudaErrorNotReady = 34 };
+static int shim_calls;
+static int cudaMalloc(void **, size_t) { ++shim_calls; return cudaSuccess; }
+static int cudaFree(void *) { ++shim_calls; return cudaSuccess; }
+static int cudaHostRegister(void *, size_t, unsigned) { ++shim_calls; return cudaSuccess; }
+static int cudaStreamCreate(void **) { ++shim_calls; return cudaSuccess; }
+#include "nr_dl_gpu_memory.h"
+TEST(GpuFepHygiene, SealedCudaFenceRejectsAllocationFreeRegistrationAndStreams)
+{
+  void *p = nullptr;
+  nr_dl_gpu_sealed = false;
+  ASSERT_EQ(cudaMalloc(&p, 128), cudaSuccess);
+  ASSERT_EQ(cudaStreamCreate(&p), cudaSuccess);
+  const int before = shim_calls;
+  nr_dl_gpu_sealed = true;
+  EXPECT_EQ(cudaMalloc(&p, 256), cudaErrorNotReady);
+  EXPECT_EQ(cudaFree(p), cudaErrorNotReady);
+  EXPECT_EQ(cudaHostRegister(p, 128, 0), cudaErrorNotReady);
+  EXPECT_EQ(cudaStreamCreate(&p), cudaErrorNotReady);
+  EXPECT_EQ(shim_calls, before);
+  uint64_t allocated, denied;
+  nr_dl_gpu_memory_stats(&allocated, &denied);
+  EXPECT_EQ(allocated, 2u);
+  EXPECT_EQ(denied, 4u);
+}

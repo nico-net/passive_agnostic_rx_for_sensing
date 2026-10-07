@@ -33,6 +33,7 @@
 
 #include "nrLDPC_cb0_cuda.h"
 #include "ldpc_cuda_bg.h"
+#include "../../NR_UE_TRANSPORT/nr_dl_gpu_memory.h"
 
 namespace {
 
@@ -541,7 +542,7 @@ int init_locked()
   /* UNIFIED only on an integrated GPU: a discrete GPU with HMM also reports pageable access, but every access
    * would then cross PCIe. LDPC_CB0_MEM=explicit forces the copy path (tests on GB10). */
   const char* me = getenv("LDPC_CB0_MEM");
-  int mode = g.integrated ? MODE_UNIFIED : MODE_EXPLICIT;
+  int mode = MODE_EXPLICIT; /* bounded staged copies, including on coherent GB10 */
   if (me && !strcmp(me, "explicit"))
     mode = MODE_EXPLICIT;
   int lo = 0, hi = 0;
@@ -614,7 +615,9 @@ struct ModZ {
 std::map<uint32_t, ModZ> g_modz; /* under g_submit_mu */
 int modz_tables(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, ModZ* out)
 {
-  ModZ& m = g_modz[BG << 16 | Z];
+  const uint32_t key = BG << 16 | Z;
+  if (nr_dl_gpu_sealed && g_modz.find(key) == g_modz.end()) return -1;
+  ModZ& m = g_modz[key];
   if (!m.cn) {
     const uint32_t ncn = bg.num_rows * bg.cn_stride, nvn = bg.num_cols * bg.vn_stride;
     uint32_t *cn = nullptr, *vn = nullptr;
@@ -673,7 +676,7 @@ int launch_iterations(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, uint32_
   auto it = g.graphs.find(key);
   if (it != g.graphs.end())
     return (int)cudaGraphLaunch(it->second, g.s);
-  if (g.graphs.size() >= 2048) { /* never evict (no device sync on the hot path): direct launches instead */
+  if (nr_dl_gpu_sealed || g.graphs.size() >= 2048) { /* never evict (no device sync on the hot path): direct launches instead */
     body();
     return (int)cudaPeekAtLastError();
   }
@@ -808,6 +811,47 @@ extern "C" int ldpc_cb0_init(void)
   return st == 1 ? 0 : LDPC_CB0_E_DISABLED;
 }
 
+/* Pre-stream only. Materialize all legal lifting tables. Cache common graph
+ * shapes; uncommon iteration counts use direct launches after the fence. */
+extern "C" int ldpc_cb0_warmup(void)
+{
+  if (nr_dl_gpu_sealed) return g.state == 1 ? 0 : LDPC_CB0_E_DISABLED;
+  int rc = ldpc_cb0_init();
+  pthread_mutex_lock(&g_submit_mu);
+  if (!rc) {
+    cudaFuncAttributes attr;
+    rc = cudaFuncGetAttributes(&attr, cb0_prep_kernel);
+    if (!rc) rc = cudaFuncGetAttributes(&attr, cb0_finish_kernel);
+    for (uint32_t bgid = 1; bgid <= 2 && !rc; bgid++) {
+      for (uint32_t z = 2; z <= 384 && !rc; z++) {
+        ldpc_cuda_bg_t bg;
+        if (ldpc_cuda_basegraph(bgid, z, &bg)) continue;
+        ModZ mz;
+        rc = modz_tables(bg, bgid, z, &mz);
+        // Warm kernels/graphs with inactive codewords, never uninitialised data.
+        if (!rc) rc = cudaMemsetAsync(g.done, 1, (size_t)g.chunk_max * 8 * sizeof(uint32_t), g.s);
+        for (uint32_t nb = 1; !rc && nb <= chunk_for(bg.num_rows, bg.num_cols, bg.num_edges, z); nb *= 2)
+          rc = launch_iterations(bg, bgid, z, nb, 16);
+      }
+    }
+    if (!rc) rc = cudaStreamSynchronize(g.s);
+  }
+  pthread_mutex_unlock(&g_submit_mu);
+  if (!rc) {
+    // Exercise copy/event/prep/finish/host-callback machinery before RX as well.
+    int8_t llr[CH] = {};
+    const ldpc_cb0_item_t item = {1, 2, 2, 44, 32, 2, 1, 0};
+    ldpc_cb0_result_t result;
+    const int inject = g_inject;
+    g_inject = 0; // fault-injection tests target work after warm-up
+    rc = ldpc_cb0_decode(&item, 1, llr, CH, &result, nullptr, 0);
+    g_inject = inject;
+  }
+  if (rc) g.state = 0;
+  nr_dl_gpu_sealed = true;
+  return rc;
+}
+
 extern "C" int ldpc_cb0_mem_mode(void)
 {
   return g.state == 1 ? g.mode : 0;
@@ -826,7 +870,7 @@ extern "C" int ldpc_cb0_submit(const ldpc_cb0_item_t* items, int n, const int8_t
   *t = nullptr;
   if (n <= 0 || !items || !llr || llr_stride == 0)
     return LDPC_CB0_E_ARG;
-  if (ldpc_cb0_init() != 0)
+  if (g.state != 1)
     return LDPC_CB0_E_DISABLED;
   if (n > g.cap)
     return LDPC_CB0_E_TOOBIG;

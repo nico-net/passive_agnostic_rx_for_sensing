@@ -154,17 +154,19 @@ typedef struct {
 } nr_td_cb0_gpu_item_t;
 typedef struct {
   int abi; /* NR_TD_CB0_GPU_ABI */
-  /* 1 if the device can read pageable host memory (GB10: yes), 0 if only managed / device pointers. */
+  /* 1 if host inputs/outputs are supported (explicit staging, not coherent kernel reads). */
   int (*pageable_ok)(void);
-  /* 1 if p is readable by the device (pageable_ok, or managed / device memory). */
+  /* 1 if p is an accepted input (host LLR span). */
   int (*ptr_ok)(const void *p);
   /* Dematch n items into l (and d if non-NULL), both host-visible memory of n * stride. Synchronous.
    * Returns 0 on success; non-zero = CUDA error, the caller must not use l / d. */
   int (*dematch)(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d);
-  /* Managed scratch of at least bytes, owned by the module (reused across calls); NULL on failure. */
+  /* Preallocated pinned scratch of at least bytes, owned by the module (reused across calls); NULL on failure. */
   void *(*scratch)(int which, size_t bytes);
+  int (*dematch_device)(const nr_td_cb0_gpu_item_t *, int, const int8_t **);
+  int (*retire_output)(void);
 } nr_td_cb0_gpu_api_t;
-#define NR_TD_CB0_GPU_ABI 2 /* 2: nr_td_cb0_gpu_item_t.shift */
+#define NR_TD_CB0_GPU_ABI 3 /* 3: bounded device-resident dematch */
 
 /* ---- Backend interface (td/cb0-cpu-wiring, 2026-10-03) -----------------------------------------------------------
  * The runtime CB0 scheduler (nr_td_cb0_sched.h, nr_td_cb0_wire.c) never calls a decoder directly: it calls
@@ -280,6 +282,13 @@ uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter);
  *   ISAC_TD_TB_CPU_WHILE_ACQ != 0 (paired harness: 0 violations against the CPU decoder at cap 12); otherwise ignored.
  * Returns 1 if registered (libldpc_cuda.so with the CB0 entry and a device), 0 otherwise. Idempotent. */
 int nr_td_cb0_gpu_register(void);
+void nr_td_cb0_gpu_warmup(int enable);
+void nr_td_cb0_dematch_warmup(int enable);
+/* Successful begin holds the dematch pool until end (including LDPC collect).
+ * Quarantine after an asynchronous failure: pending device reads may still exist. */
+int nr_td_cb0_dematch_device_begin(const nr_td_cb0_item_t *, const nr_td_cb0_meta_t *, int, const int8_t **);
+void nr_td_cb0_dematch_device_end(int quarantine);
+#define NR_TD_CB0_GPU_REFUSED (-100) /* no GPU verdict: rerun this work item on CPU */
 /* The adapter itself (for tests): the descriptor nr_td_cb0_gpu_register() registers; NULL when unavailable. */
 const nr_td_cb0_backend_t *nr_td_cb0_gpu_backend_adapter(void);
 /* Test hook: this thread's adapter input buffer (NULL after an abandon or before the first batch) and the process-wide

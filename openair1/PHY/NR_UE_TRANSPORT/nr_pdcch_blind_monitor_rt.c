@@ -106,6 +106,9 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_blind_phase2.h" // Phase-2 lock, persistence ring, energy floor (Task A7)
 #include "nr_dci_history.h"       // BC9: DL DCI history ring, DCI-adjacency k0 evidence
 #include <stdio.h>
+#include "nr_pdcch_gpu_fep.h"
+#include "nr_td_cb0_wire.h"
+#include "nr_td_grantwork.h"
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
@@ -7540,4 +7543,64 @@ constdiag_done:;
   }
   if (sum_due)
     nr_passive_metrics_emit(); /* machine-readable twin of the text summaries (Task A2) */
+}
+
+
+static void (*dl_gpu_memory[5])(uint64_t *, uint64_t *);
+static void (*dl_gpu_transfers[5])(uint64_t *, uint64_t *);
+void nr_dl_gpu_get_stats(uint64_t *allocs, uint64_t *denied, uint64_t *bytes, uint64_t *refused)
+{
+  *allocs = *denied = *bytes = *refused = 0;
+  for (int i = 0; i < 5; i++) {
+    uint64_t a = 0, b = 0;
+    if (dl_gpu_memory[i]) { dl_gpu_memory[i](&a, &b); *allocs += a; *denied += b; }
+    if (dl_gpu_transfers[i]) { dl_gpu_transfers[i](&a, &b); *bytes += a; *refused += b; }
+  }
+}
+
+/* Called once after PHY geometry/configuration exists, before nrue_init_openair0.
+ * Failures are sticky CPU fallback, never retried after the stream starts. */
+void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
+{
+  static bool prepared;
+  if (prepared || !ue) return;
+  prepared = true;
+  LOG_I(PHY, "SENSING: DL_GPU warm-up begin (before RX)\n");
+  nr_td_cb0_wire_warmup();
+  (void)nr_gpu_polar_prepare();
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const nr_gpu_pdcch_fep_api_t *pdcch = nr_gpu_pdcch_fep_prepare();
+  if (pdcch) {
+    const nr_gpu_pdcch_fep_cfg_t c = {.nant = fp->nb_antennas_rx, .ofdm_symbol_size = fp->ofdm_symbol_size,
+      .symbols_per_slot = fp->symbols_per_slot, .first_carrier_offset = fp->first_carrier_offset, .n_rb_dl = fp->N_RB_DL};
+    if (pdcch->init(&c)) LOG_W(PHY, "SENSING: DL_GPU PDCCH warm-up unavailable; CPU fallback\n");
+  }
+  nr_pdsch_passive_gpu_warmup(ue);
+  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  int consumers = cfg->pdsch_thread;
+  if (consumers < 1) consumers = 1;
+  if (consumers > NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS) consumers = NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS;
+  int depth = cfg->pdsch_queue_depth > 0 ? cfg->pdsch_queue_depth : 8 * consumers;
+  if (depth < 2) depth = 2;
+  if (depth > NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH) depth = NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH;
+  const char *gw = getenv("ISAC_TD_GRANTWORK");
+  const bool want_gw = !(gw && *gw && atoi(gw) == 0) && cfg->pdsch_decode >= 1;
+  const size_t llr_bytes = (size_t)fp->N_RB_DL * 12 * 14 * 4 * 8 * sizeof(int16_t);
+  if (nr_td_gw_warmup(llr_bytes, want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0))
+    LOG_W(PHY, "SENSING: DL_GPU GrantWork pool partly reserved; exhaustion uses CPU without sharing\n");
+  if (cfg->pdsch_decode >= 1 && cfg->pdsch_thread)
+    (void)nr_pdsch_passive_queue_start(ue, depth, consumers, cfg->pdsch_thread_core);
+  static const char *modules[] = {"libtd_cb0_gpu.so", "libpolar_gpu.so", "libpdsch_gpu.so", "libpdcch_gpu.so", "libldpc_cuda.so"};
+  for (unsigned i = 0; i < sizeof(modules) / sizeof(modules[0]); i++) {
+    void *h = dlopen(modules[i], RTLD_NOW | RTLD_NOLOAD);
+    if (!h) { char local[64]; snprintf(local, sizeof(local), "./%s", modules[i]); h = dlopen(local, RTLD_NOW | RTLD_NOLOAD); }
+    void (*radio)(void) = h ? (void (*)(void))dlsym(h, "nr_dl_gpu_enable_radio_mode") : NULL;
+    if (radio) radio();
+    if (h) {
+      dl_gpu_memory[i] = (void (*)(uint64_t *, uint64_t *))dlsym(h, "nr_dl_gpu_memory_stats");
+      dl_gpu_transfers[i] = (void (*)(uint64_t *, uint64_t *))dlsym(h, "nr_dl_gpu_transfer_stats");
+    }
+  }
+  LOG_I(PHY, "SENSING: DL_GPU warm-up complete consumers=%d depth=%d gw_buffers=%zu llr_bytes=%zu (no late CUDA growth)\n",
+        consumers, depth, want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0, llr_bytes);
 }

@@ -44,6 +44,9 @@
 #include "PHY/defs_nr_UE.h"
 #include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_extract_opts_t, carried in the cfg below
 
+void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue);
+void nr_dl_gpu_get_stats(uint64_t *allocs, uint64_t *denied, uint64_t *bytes, uint64_t *refused);
+
 /// [sensing] pdcch_blind_monitor_* parsed config. Owned (static instance) by
 /// nr_pdcch_blind_monitor.c; read-only access for RT code via nr_pdcch_blind_monitor_get_cfg().
 typedef struct {

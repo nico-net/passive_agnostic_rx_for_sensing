@@ -42,6 +42,7 @@ typedef struct {
    * timeouts, bypassed, sticky, trips, state 0/1/2, mode 1 unified / 2 explicit, failed / skipped batches (nr_td_cb0_exec)} */
   uint64_t td_cb0_gpu_submits, td_cb0_gpu_items, td_cb0_gpu_ok, td_cb0_gpu_errors, td_cb0_gpu_timeouts, td_cb0_gpu_bypassed,
       td_cb0_gpu_sticky, td_cb0_gpu_trips, td_cb0_gpu_state, td_cb0_gpu_mode, td_cb0_gpu_failed, td_cb0_gpu_skipped;
+  uint64_t dl_gpu_allocs, dl_gpu_late_alloc_denied, dl_gpu_transfer_bytes, dl_gpu_transfer_refused, gw_pool_refused;
   double td_cb0_us_per_item;
   uint64_t pdcch_inline_drop_epoch, puschq_drop_epoch;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;

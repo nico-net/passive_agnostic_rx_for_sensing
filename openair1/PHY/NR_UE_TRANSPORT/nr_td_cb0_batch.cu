@@ -14,13 +14,16 @@
  * (E/Qm)] (the de-interleaver). int16 sums wrap like the CPU's `d[ind] += e[k]` (modular, order-independent).
  * One thread per decoder-input position: no atomics, every item in one launch (grid.y = item).
  *
- * LLRs are read IN PLACE: GB10 reads pageable host memory through the host page tables (cudaDevAttr
- * PageableMemoryAccess = 1), elsewhere they must be managed / device memory (ptr_ok). No copies.
+ * Unique LLR spans are explicitly staged into preallocated device storage. Kernels
+ * never walk CPU-coherent host pages. All buffers are reserved before RX.
  */
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <string.h>
 #include "nr_td_cb0_batch.h"
+#include "nr_dl_gpu_memory.h"
+#include "nr_dl_gpu_budget.h"
+#include <stdlib.h>
 
 namespace {
 
@@ -64,99 +67,131 @@ __global__ void cb0_dematch_kernel(const nr_td_cb0_gpu_item_t *items, int8_t *l,
 }
 
 struct Ctx {
-  int ok = -1; /* -1 not initialised, 0 unusable, 1 ready */
-  int pageable = 0;
+  int ok = -1, max_items = 0;
   cudaStream_t stream = nullptr;
-  void *scr[3] = {nullptr, nullptr, nullptr};
-  size_t cap[3] = {0, 0, 0};
+  void *host[3] = {}, *dev[3] = {};
+  size_t cap[3] = {};
+  int16_t *llr_h = nullptr, *llr_d = nullptr;
+  size_t llr_cap = 0;
+  int output_slot = 0;
 };
 Ctx g;
+nr_dl_gpu_budget_t budget;
 
 int init()
 {
-  if (g.ok >= 0)
-    return g.ok;
+  if (g.ok >= 0) return g.ok;
   g.ok = 0;
-  int n = 0;
-  if (cudaGetDeviceCount(&n) != cudaSuccess || n == 0)
-    return 0;
-  int v = 0;
-  if (cudaDeviceGetAttribute(&v, cudaDevAttrPageableMemoryAccess, 0) == cudaSuccess)
-    g.pageable = v;
-  if (cudaStreamCreateWithFlags(&g.stream, cudaStreamNonBlocking) != cudaSuccess)
-    return 0;
+  const char *e = getenv("LDPC_CB0_MAX_ITEMS");
+  g.max_items = e ? atoi(e) : 2048;
+  if (g.max_items < 1) g.max_items = 1;
+  if (g.max_items > 65536) g.max_items = 65536;
+  g.cap[0] = (size_t)g.max_items * NR_TD_CB0_L_STRIDE;
+  g.cap[1] = (size_t)g.max_items * NR_TD_CB0_D_STRIDE * sizeof(int16_t);
+  g.cap[2] = (size_t)g.max_items * sizeof(nr_td_cb0_gpu_item_t);
+  // Up to 16 distinct GrantWork signatures, full-band rank four 256-QAM.
+  g.llr_cap = (size_t)16 * 275 * 12 * 14 * 4 * 8;
+  if (cudaStreamCreateWithFlags(&g.stream, cudaStreamNonBlocking)) return 0;
+  for (int k = 0; k < 3; k++) {
+    if (cudaHostAlloc(&g.host[k], g.cap[k], cudaHostAllocDefault) || cudaMalloc(&g.dev[k], g.cap[k] * (k == 0 ? 8 : 1))) return 0;
+    memset(g.host[k], 0, g.cap[k]);
+  }
+  if (cudaHostAlloc(&g.llr_h, g.llr_cap * sizeof(int16_t), cudaHostAllocDefault)
+      || cudaMalloc(&g.llr_d, g.llr_cap * sizeof(int16_t))) return 0;
+  memset(g.llr_h, 0, g.llr_cap * sizeof(int16_t));
+  // Load the kernel before sealing; E=0 makes this an inactive item.
+  if (cudaMemsetAsync(g.dev[2], 0, sizeof(nr_td_cb0_gpu_item_t), g.stream)) return 0;
+  cb0_dematch_kernel<<<1, 256, 0, g.stream>>>((nr_td_cb0_gpu_item_t *)g.dev[2], (int8_t *)g.dev[0], NR_TD_CB0_L_STRIDE, nullptr);
+  if (cudaStreamSynchronize(g.stream)) return 0;
   g.ok = 1;
   return 1;
 }
 
 void *scratch(int which, size_t bytes)
 {
-  if (which < 0 || which > 2 || init() != 1)
-    return nullptr;
-  if (g.cap[which] < bytes) {
-    if (g.scr[which])
-      cudaFree(g.scr[which]);
-    g.scr[which] = nullptr;
-    g.cap[which] = 0;
-    const size_t want = bytes + bytes / 4;
-    if (cudaMallocManaged(&g.scr[which], want) != cudaSuccess)
-      return nullptr;
-    g.cap[which] = want;
-  }
-  return g.scr[which];
+  return g.ok == 1 && which >= 0 && which < 3 && bytes <= g.cap[which] ? g.host[which] : nullptr;
 }
+// API legacy name: host pointers are accepted via explicit staging, never dereferenced by a kernel.
+int pageable_ok() { return g.ok == 1; }
+int ptr_ok(const void *p) { return g.ok == 1 && p != nullptr; }
 
-int pageable_ok()
+int dematch_impl(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d, const int8_t **device)
 {
-  return init() == 1 && g.pageable;
-}
-
-int ptr_ok(const void *p)
-{
-  if (!p || init() != 1)
-    return 0;
-  if (g.pageable)
-    return 1;
-  cudaPointerAttributes a;
-  if (cudaPointerGetAttributes(&a, p) != cudaSuccess) {
-    cudaGetLastError();
-    return 0;
-  }
-  return a.type == cudaMemoryTypeManaged || a.type == cudaMemoryTypeDevice;
-}
-
-int dematch_any(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, uint32_t l_stride, int16_t *d)
-{
-  if (init() != 1 || n <= 0)
-    return -1;
-  nr_td_cb0_gpu_item_t *m = (nr_td_cb0_gpu_item_t *)scratch(2, (size_t)n * sizeof(*m));
-  if (!m)
-    return -1;
+  if (g.ok != 1 || n <= 0 || n > g.max_items || !items || (!l && !device)) return -1;
+  auto *m = (nr_td_cb0_gpu_item_t *)g.host[2];
   memcpy(m, items, (size_t)n * sizeof(*m));
-  const int threads = 256;
-  const unsigned bx = (l_stride + threads - 1) / threads;
-  for (int off = 0; off < n; off += 65535) {
-    const int cnt = n - off < 65535 ? n - off : 65535;
-    cb0_dematch_kernel<<<dim3(bx, cnt), threads, 0, g.stream>>>(m + off, l + (size_t)off * l_stride, l_stride,
-                                                               d ? d + (size_t)off * NR_TD_CB0_D_STRIDE : nullptr);
+  size_t used = 0;
+  // Copy each unique LLR source once, at the largest E requested by its hypotheses.
+  for (int i = 0; i < n; i++) {
+    if (!items[i].E) continue;
+    int first = i;
+    for (int j = 0; j < i; j++) if (items[j].E && items[j].llr == items[i].llr) { first = j; break; }
+    if (first != i) { m[i].llr = m[first].llr; continue; }
+    size_t need = items[i].E;
+    for (int j = i + 1; j < n; j++) if (items[j].llr == items[i].llr && items[j].E > need) need = items[j].E;
+    if (need > g.llr_cap - used) return -1;
+    // First pass only packs offsets, so budget refusal touches no LLR pages.
+    m[i].llr = g.llr_d + used;
+    used += need;
   }
-  if (cudaGetLastError() != cudaSuccess)
-    return -2;
-  if (cudaStreamSynchronize(g.stream) != cudaSuccess)
-    return -3;
+  if (nr_dl_gpu_radio_mode && !nr_dl_gpu_budget_take(&budget,
+      3 * used * sizeof(int16_t) + (size_t)n * sizeof(*m) * 3
+      + (device ? 0 : (size_t)n * NR_TD_CB0_L_STRIDE * 3)
+      + (d ? (size_t)n * NR_TD_CB0_D_STRIDE * sizeof(int16_t) * 3 : 0))) return -1;
+  for (int i = 0; i < n; i++) {
+    if (!items[i].E) continue;
+    bool first = true;
+    for (int j = 0; j < i; j++) if (items[j].E && items[j].llr == items[i].llr) { first = false; break; }
+    if (!first) continue;
+    size_t need = items[i].E;
+    for (int j = i + 1; j < n; j++) if (items[j].llr == items[i].llr && items[j].E > need) need = items[j].E;
+    memcpy(g.llr_h + (m[i].llr - g.llr_d), items[i].llr, need * sizeof(int16_t));
+  }
+  if (cudaMemcpyAsync(g.llr_d, g.llr_h, used * sizeof(int16_t), cudaMemcpyHostToDevice, g.stream)
+      || cudaMemcpyAsync(g.dev[2], m, (size_t)n * sizeof(*m), cudaMemcpyHostToDevice, g.stream)) goto failed;
+  for (int off = 0; off < n; off += 65535) {
+    const int count = n - off < 65535 ? n - off : 65535;
+    cb0_dematch_kernel<<<dim3((NR_TD_CB0_L_STRIDE + 255) / 256, count), 256, 0, g.stream>>>(
+        (nr_td_cb0_gpu_item_t *)g.dev[2] + off, (int8_t *)g.dev[0] + (size_t)off * NR_TD_CB0_L_STRIDE,
+        NR_TD_CB0_L_STRIDE, d ? (int16_t *)g.dev[1] + (size_t)off * NR_TD_CB0_D_STRIDE : nullptr);
+  }
+  if (cudaGetLastError()
+      || (!device && cudaMemcpyAsync(g.host[0], g.dev[0], (size_t)n * NR_TD_CB0_L_STRIDE, cudaMemcpyDeviceToHost, g.stream))
+      || (d && cudaMemcpyAsync(g.host[1], g.dev[1], (size_t)n * NR_TD_CB0_D_STRIDE * sizeof(int16_t), cudaMemcpyDeviceToHost, g.stream))
+      || cudaStreamSynchronize(g.stream)) goto failed;
+  if (device) { *device = (const int8_t *)g.dev[0]; return 0; }
+  if (l != g.host[0]) memcpy(l, g.host[0], (size_t)n * NR_TD_CB0_L_STRIDE);
+  if (d && d != g.host[1]) memcpy(d, g.host[1], (size_t)n * NR_TD_CB0_D_STRIDE * sizeof(int16_t));
   return 0;
+failed:
+  // Keep storage for any outstanding operation, but never reuse it after a CUDA error.
+  g.ok = 0;
+  return -2;
 }
 
 int dematch(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d)
+{ return dematch_impl(items, n, l, d, nullptr); }
+int dematch_device(const nr_td_cb0_gpu_item_t *items, int n, const int8_t **l)
+{ return dematch_impl(items, n, nullptr, nullptr, l); }
+extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
+{ *bytes = __atomic_load_n(&budget.bytes, __ATOMIC_RELAXED); *refused = __atomic_load_n(&budget.refused, __ATOMIC_RELAXED); }
+
+int retire_output()
 {
-  return dematch_any(items, n, l, NR_TD_CB0_L_STRIDE, d);
+  // Timed-out LDPC may still read this output on another stream. Eight buffers
+  // were reserved at init; retire forever rather than waiting, freeing or growing.
+  if (++g.output_slot >= 8) { g.ok = 0; return -1; }
+  g.dev[0] = (char *)g.dev[0] + g.cap[0];
+  return 0;
 }
 
-const nr_td_cb0_gpu_api_t api = {NR_TD_CB0_GPU_ABI, pageable_ok, ptr_ok, dematch, scratch};
+const nr_td_cb0_gpu_api_t api = {NR_TD_CB0_GPU_ABI, pageable_ok, ptr_ok, dematch, scratch, dematch_device, retire_output};
 
 } // namespace
 
 extern "C" const nr_td_cb0_gpu_api_t *nr_td_cb0_gpu_api(void)
 {
-  return init() == 1 ? &api : nullptr;
+  const int ready = init();
+  nr_dl_gpu_sealed = true;
+  return ready == 1 ? &api : nullptr;
 }

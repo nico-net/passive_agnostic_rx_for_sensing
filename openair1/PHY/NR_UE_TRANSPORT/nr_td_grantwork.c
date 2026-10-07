@@ -13,139 +13,93 @@
 #include "common/utils/LOG/log.h"
 #include "nr_llr_norm.h"
 
-/* ---------------------------------------------------------------------------------------------
- * Allocator. Every buffer carries a 64-byte header {magic, kind, capacity}; the payload is 64-byte
- * aligned. Freed buffers go to a small size-class pool (powers of two from 4 KiB), so the steady state
- * makes no allocation at all -- cudaMallocManaged costs tens of microseconds and must stay off the RT
- * path. */
+/* Ordinary host LLR storage. CUDA never maps or migrates GrantWork/FEP pages.
+ * Warm-up reserves the configured maximum, then exhaustion is a counted refusal. */
 #define GW_HDR 64
-#define GW_MAGIC 0x47574246u /* "GWBF" */
+#define GW_MAGIC 0x47574246u
 #define GW_POOL_CLASSES 24
-#define GW_POOL_DEPTH 32
-typedef struct {
+typedef struct gw_hdr_s {
   uint32_t magic;
-  uint32_t kind; /* 0 = malloc, 1 = cudaMallocManaged */
-  size_t cap;    /* payload bytes */
+  size_t cap;
+  struct gw_hdr_s *next;
 } gw_hdr_t;
 _Static_assert(sizeof(gw_hdr_t) <= GW_HDR, "header fits");
-
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
-static void *g_pool[GW_POOL_CLASSES][GW_POOL_DEPTH];
-static int g_pool_n[GW_POOL_CLASSES];
-static _Atomic uint64_t g_alloc_fresh, g_alloc_reused, g_alloc_unified;
+static gw_hdr_t *g_pool[GW_POOL_CLASSES];
+static bool g_pool_sealed;
+static _Atomic uint64_t g_alloc_fresh, g_alloc_reused, g_alloc_refused;
 
-typedef int (*cuda_malloc_managed_fn)(void **, size_t, unsigned int);
-typedef int (*cuda_free_fn)(void *);
-static pthread_once_t g_cuda_once = PTHREAD_ONCE_INIT;
-static cuda_malloc_managed_fn g_cuda_mm;
-static cuda_free_fn g_cuda_free;
-static bool g_unified;
-
-static void cuda_init(void)
-{
-#ifdef NR_TD_GW_CUDA
-  const char *e = getenv("ISAC_TD_GW_UNIFIED");
-  if (e != NULL && atoi(e) == 0)
-    return;
-  static const char *const names[] = {"libcudart.so", "libcudart.so.13", "libcudart.so.12", "libcudart.so.11.0"};
-  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]) && !g_unified; i++) {
-    void *h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
-    if (h == NULL)
-      continue;
-    g_cuda_mm = (cuda_malloc_managed_fn)dlsym(h, "cudaMallocManaged");
-    g_cuda_free = (cuda_free_fn)dlsym(h, "cudaFree");
-    if (g_cuda_mm == NULL || g_cuda_free == NULL)
-      continue;
-    void *probe = NULL;
-    if (g_cuda_mm(&probe, 4096, 1 /* cudaMemAttachGlobal */) == 0 && probe != NULL) {
-      g_cuda_free(probe);
-      g_unified = true;
-    }
-  }
-#endif
-}
-
-bool nr_td_gw_unified(void)
-{
-  pthread_once(&g_cuda_once, cuda_init);
-  return g_unified;
-}
-
+bool nr_td_gw_unified(void) { return false; }
 static int pool_class(size_t bytes)
 {
   size_t c = 4096;
   int k = 0;
-  while (c < bytes && k < GW_POOL_CLASSES - 1) {
-    c <<= 1;
-    k++;
-  }
+  while (c < bytes && k < GW_POOL_CLASSES - 1) { c <<= 1; k++; }
   return c >= bytes ? k : -1;
 }
 
 void *nr_td_gw_alloc(size_t bytes)
 {
-  if (bytes == 0)
-    bytes = 1;
-  const int k = pool_class(bytes);
-  if (k >= 0) {
-    pthread_mutex_lock(&g_pool_lock);
-    if (g_pool_n[k] > 0) {
-      void *p = g_pool[k][--g_pool_n[k]];
+  int k = pool_class(bytes ? bytes : 1);
+  pthread_mutex_lock(&g_pool_lock);
+  for (int j = k; j >= 0 && j < GW_POOL_CLASSES; j++) {
+    if (g_pool[j]) {
+      gw_hdr_t *h = g_pool[j];
+      g_pool[j] = h->next;
       pthread_mutex_unlock(&g_pool_lock);
       atomic_fetch_add(&g_alloc_reused, 1);
-      return p;
+      return (char *)h + GW_HDR;
     }
-    pthread_mutex_unlock(&g_pool_lock);
+    if (!g_pool_sealed) break;
   }
-  const size_t cap = k >= 0 ? ((size_t)4096 << k) : bytes;
-  uint8_t *base = NULL;
-  uint32_t kind = 0;
-  if (nr_td_gw_unified() && g_cuda_mm((void **)&base, cap + GW_HDR, 1) == 0 && base != NULL) {
-    kind = 1;
-    atomic_fetch_add(&g_alloc_unified, 1);
-  } else {
-    base = NULL;
-    if (posix_memalign((void **)&base, GW_HDR, cap + GW_HDR) != 0)
-      return NULL;
+  const bool sealed = g_pool_sealed;
+  pthread_mutex_unlock(&g_pool_lock);
+  if (sealed || k < 0) {
+    atomic_fetch_add(&g_alloc_refused, 1);
+    return NULL;
   }
-  gw_hdr_t *h = (gw_hdr_t *)base;
+  gw_hdr_t *h = NULL;
+  size_t cap = (size_t)4096 << k;
+  if (posix_memalign((void **)&h, GW_HDR, cap + GW_HDR)) return NULL;
   h->magic = GW_MAGIC;
-  h->kind = kind;
   h->cap = cap;
   atomic_fetch_add(&g_alloc_fresh, 1);
-  return base + GW_HDR;
+  return (char *)h + GW_HDR;
 }
 
 void nr_td_gw_free(void *p)
 {
-  if (p == NULL)
-    return;
-  uint8_t *base = (uint8_t *)p - GW_HDR;
-  gw_hdr_t *h = (gw_hdr_t *)base;
-  if (h->magic != GW_MAGIC)
-    abort(); /* not ours: a double free or a foreign pointer */
+  if (!p) return;
+  gw_hdr_t *h = (gw_hdr_t *)((char *)p - GW_HDR);
+  if (h->magic != GW_MAGIC) abort();
   const int k = pool_class(h->cap);
-  if (k >= 0 && ((size_t)4096 << k) == h->cap) {
-    pthread_mutex_lock(&g_pool_lock);
-    if (g_pool_n[k] < GW_POOL_DEPTH) {
-      g_pool[k][g_pool_n[k]++] = p;
-      pthread_mutex_unlock(&g_pool_lock);
-      return;
-    }
-    pthread_mutex_unlock(&g_pool_lock);
-  }
-  h->magic = 0;
-  if (h->kind == 1)
-    g_cuda_free(base);
-  else
-    free(base);
+  pthread_mutex_lock(&g_pool_lock);
+  h->next = g_pool[k];
+  g_pool[k] = h;
+  pthread_mutex_unlock(&g_pool_lock);
 }
 
+int nr_td_gw_warmup(size_t bytes, size_t count)
+{
+  if (g_pool_sealed) return -1; /* startup only, once */
+  void **p = calloc(count, sizeof(*p));
+  size_t n = 0;
+  if (p) for (; n < count; n++) {
+    p[n] = nr_td_gw_alloc(bytes);
+    if (!p[n]) break;
+    memset(p[n], 0, bytes); /* fault backing pages before mlockall / RX */
+  }
+  for (size_t i = 0; i < n; i++) nr_td_gw_free(p[i]);
+  free(p);
+  g_pool_sealed = true; /* partial failure must also forbid late growth */
+  return n == count ? 0 : -1;
+}
+uint64_t nr_td_gw_pool_refused(void) { return atomic_load(&g_alloc_refused); }
 void nr_td_gw_alloc_stats(uint64_t *fresh, uint64_t *reused, uint64_t *unified)
 {
   *fresh = atomic_load(&g_alloc_fresh);
   *reused = atomic_load(&g_alloc_reused);
-  *unified = atomic_load(&g_alloc_unified);
+  *unified = 0;
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -385,8 +339,10 @@ int nr_td_grantwork_publish(nr_td_grantwork_t *gw, uint64_t sig, const int16_t *
   if (gw == NULL || (G > 0 && llr == NULL) || meta_len > NR_TD_GW_META_MAX)
     return NR_TD_GW_E_ARG;
   int16_t *buf = nr_td_gw_alloc((size_t)(G ? G : 1) * sizeof(int16_t));
-  if (buf == NULL)
+  if (buf == NULL) {
+    nr_td_grantwork_abandon(gw, sig, NR_TD_GW_E_NOMEM);
     return NR_TD_GW_E_NOMEM;
+  }
   memcpy(buf, llr, (size_t)G * sizeof(int16_t));
   pthread_mutex_lock(&gw->lock);
   gw_entry_t *e = find(gw, sig);
@@ -610,5 +566,5 @@ void nr_td_gw_tim_report(bool force)
   uint64_t f, r, un;
   nr_td_gw_alloc_stats(&f, &r, &un);
   LOG_I(PHY, "SENSING: GWTIM %s| alloc fresh=%lu reused=%lu unified=%lu (%s)\n", rep, (unsigned long)f, (unsigned long)r,
-        (unsigned long)un, nr_td_gw_unified() ? "cudaMallocManaged" : "malloc");
+        (unsigned long)un, "host pool");
 }

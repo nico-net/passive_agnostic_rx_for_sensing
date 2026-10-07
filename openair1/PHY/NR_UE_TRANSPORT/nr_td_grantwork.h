@@ -17,9 +17,8 @@
  * recursive, because the lazy path re-enters through the decoder), so the shared FEP buffer is never
  * written by two threads at once.
  *
- * Memory: the LLR buffers come from nr_td_gw_alloc(): cudaMallocManaged (unified memory, GB10) when
- * the CUDA build is enabled (NR_TD_GW_CUDA, libcudart dlopen'd -- no link dependency) and the runtime
- * is present, else plain aligned malloc. Buffers are pooled: no CUDA allocation per grant.
+ * Memory: ordinary aligned host LLR buffers, pre-sized at receiver init. The GPU dematcher
+ * explicitly stages only the required LLR span into device memory. Exhaustion refuses sharing.
  *
  * The decoder side (how an entry is computed from IQ, the hypothesis -> CB0 parameters) lives in
  * nr_pdsch_passive_decode.c; this unit is pure (pthreads + optional libcudart) and unit-tested by
@@ -111,7 +110,7 @@ typedef enum { NR_TD_GW_ACQ_READY = 0, NR_TD_GW_ACQ_OWNER = 1, NR_TD_GW_ACQ_FAIL
 /* READY: `out` filled. OWNER: the caller computes the entry and must publish or abandon it; it then holds
  * the gw compute lock. FAILED: the entry failed before (out->status). ERR: full / stale / bad args. */
 nr_td_gw_acq_t nr_td_grantwork_acquire(nr_td_grantwork_t *gw, uint64_t sig, nr_td_gw_llr_view_t *out);
-/* Copies `llr[0..G)` and `meta` into the entry (unified buffer), marks it READY, wakes waiters. Only the owner. */
+/* Copies `llr[0..G)` and `meta` into the entry (host buffer), marks it READY, wakes waiters. Only the owner. */
 int nr_td_grantwork_publish(nr_td_grantwork_t *gw, uint64_t sig, const int16_t *llr, uint32_t G, uint8_t nl, uint8_t qm,
                             const void *meta, uint32_t meta_len);
 /* Owner gives up: the entry becomes FAILED with `status` (sticky: the same inputs fail the same way). */
@@ -165,10 +164,12 @@ int nr_td_gw_cb0_input(const int16_t *llr, uint32_t G, const nr_td_cb0_params_t 
 int nr_td_gw_cb0_extract(const int16_t *llr, uint32_t n_llr, const nr_td_cb0_params_t *p, int16_t *d);
 static inline int nr_td_gw_cb0_dlen(const nr_td_cb0_params_t *p) { return (p->BG == 1 ? 68 : 52) * p->Z; }
 
-/* ---- Unified-memory allocator (pooled) ---- */
+/* ---- Bounded host-memory pool (warm-up before RX) ---- */
+int nr_td_gw_warmup(size_t bytes, size_t count);
+uint64_t nr_td_gw_pool_refused(void);
 void *nr_td_gw_alloc(size_t bytes);
 void nr_td_gw_free(void *p);
-/* true when nr_td_gw_alloc() returns cudaMallocManaged memory (ISAC_TD_GW_UNIFIED=0 forces malloc). */
+/* Compatibility query: always false; ISAC_TD_GW_UNIFIED no longer permits managed memory. */
 bool nr_td_gw_unified(void);
 /* Allocation counters (tests): fresh backing allocations vs pool reuses. */
 void nr_td_gw_alloc_stats(uint64_t *fresh, uint64_t *reused, uint64_t *unified);

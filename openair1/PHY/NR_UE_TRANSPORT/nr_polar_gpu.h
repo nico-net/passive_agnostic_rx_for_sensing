@@ -43,12 +43,13 @@ typedef struct {
 #include <dlfcn.h>
 #include <stdlib.h>
 /** dlopen libpolar_gpu.so next to the executable when NR_GPU_POLAR=1; NULL = CPU path. */
-static inline const nr_gpu_polar_api_t *nr_gpu_polar_load(void)
+static inline const nr_gpu_polar_api_t *nr_gpu_polar_load_impl(int prepare)
 {
   static const nr_gpu_polar_api_t *api = NULL;
   static int tried = 0;
   if (tried)
     return api;
+  if (!prepare) return NULL;
   tried = 1;
   const char *e = getenv("NR_GPU_POLAR");
   if (e == NULL || atoi(e) == 0)
@@ -62,6 +63,8 @@ static inline const nr_gpu_polar_api_t *nr_gpu_polar_load(void)
   api = get ? get() : NULL;
   return api;
 }
+static inline const nr_gpu_polar_api_t *nr_gpu_polar_load(void) { return nr_gpu_polar_load_impl(0); }
+static inline const nr_gpu_polar_api_t *nr_gpu_polar_prepare(void) { return nr_gpu_polar_load_impl(1); }
 #endif
 
 #ifdef __cplusplus

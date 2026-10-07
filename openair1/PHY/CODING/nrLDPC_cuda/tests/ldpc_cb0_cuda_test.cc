@@ -305,10 +305,7 @@ class Cb0Test : public ::testing::Test {
 
 TEST_F(Cb0Test, ReportsMemoryMode)
 {
-  int integrated = 0;
-  cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, 0);
-  const char *me = getenv("LDPC_CB0_MEM");
-  EXPECT_EQ(A.mode(), (integrated && !(me && !strcmp(me, "explicit"))) ? 1 : 2);
+  EXPECT_EQ(A.mode(), 2); // explicit copies are now the safe default on coherent GPUs too
 }
 
 /* GPU decoder == CPU model, item by item: bits, iterations, early termination; CRC == OAI check_crc; guard. */

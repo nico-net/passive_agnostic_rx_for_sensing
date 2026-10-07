@@ -172,6 +172,10 @@ int nr_td_cb0_exec(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out
     for (int i = 0; i < n; i++)
       out[i] = (nr_td_cb0_result_t){0};
     const int rc = be.decode(be.ctx, items, n, out);
+    if (rc == NR_TD_CB0_GPU_REFUSED || rc == -4 || rc == -7) {
+      atomic_fetch_add(&s_gpu_skipped, 1);
+      goto cpu_fallback;
+    }
     info->backend = NR_TD_CB0_BE_GPU;
     atomic_fetch_add(&s_batches_gpu, 1);
     uint8_t dec = 0;
@@ -194,6 +198,7 @@ int nr_td_cb0_exec(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out
       gpu_failed();
     }
   } else {
+cpu_fallback:
     nr_td_cb0_batch_cpu(items, n, out);
     nr_td_cb0_last_compute(&info->compute_ns, &info->distinct);
     info->backend = NR_TD_CB0_BE_CPU;

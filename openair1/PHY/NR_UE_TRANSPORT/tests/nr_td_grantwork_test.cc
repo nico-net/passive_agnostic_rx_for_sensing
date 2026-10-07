@@ -538,3 +538,34 @@ int main(int argc, char **argv)
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+
+// Isolate the permanent receiver fence from the legacy standalone allocator tests.
+TEST(GrantWork, WarmPoolNeverGrowsAndExhaustionReleasesOwner)
+{
+  ASSERT_EXIT(([] {
+    const size_t bytes = 8u << 20;
+    if (nr_td_gw_warmup(bytes, 3) != 0) _exit(1);
+    uint64_t fresh, reused, unified, f2, r2, u2;
+    nr_td_gw_alloc_stats(&fresh, &reused, &unified);
+    void *p[3];
+    for (auto &v : p) { v = nr_td_gw_alloc(bytes); if (!v) _exit(2); }
+    if (nr_td_gw_alloc(bytes) || nr_td_gw_alloc(bytes * 2)) _exit(3);
+    nr_td_gw_alloc_stats(&f2, &r2, &u2);
+    if (f2 != fresh || unified || u2 || nr_td_gw_pool_refused() < 2) _exit(4);
+    nr_td_gw_job_t job{}; job.slots_per_frame = 20;
+    auto *gw = nr_td_grantwork_begin(&job);
+    nr_td_gw_llr_view_t view{};
+    if (!gw || nr_td_grantwork_acquire(gw, 99, &view) != NR_TD_GW_ACQ_OWNER) _exit(5);
+    // Ask for a pool-sized buffer so no older small standalone pool can satisfy it.
+    if (nr_td_grantwork_publish(gw, 99, (const int16_t *)p[0], bytes / 2, 1, 2, nullptr, 0) != NR_TD_GW_E_NOMEM) _exit(6);
+    if (nr_td_grantwork_get_llr(gw, 99, nullptr, &view) != NR_TD_GW_E_FAILED) _exit(7);
+    nr_td_grantwork_release(gw);
+    nr_td_gw_free(p[0]);
+    void *again = nr_td_gw_alloc(bytes);
+    if (again != p[0]) _exit(8);
+    nr_td_gw_alloc_stats(&f2, &r2, &u2);
+    if (f2 != fresh) _exit(9);
+    _exit(0);
+  }()), ::testing::ExitedWithCode(0), "");
+}

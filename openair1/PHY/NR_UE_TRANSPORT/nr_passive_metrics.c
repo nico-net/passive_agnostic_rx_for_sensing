@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "nr_passive_metrics.h"
+#include "nr_pdcch_blind_monitor_rt.h"
+#include "nr_td_grantwork.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -73,6 +75,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->pdschq_drop_stale = pq.dropped_stale;
   m->pdschq_stale_after_decode = pq.stale_after_decode;
   m->pdschq_max_lag = pq.max_lag_slots;
+  nr_dl_gpu_get_stats(&m->dl_gpu_allocs, &m->dl_gpu_late_alloc_denied, &m->dl_gpu_transfer_bytes, &m->dl_gpu_transfer_refused);
+  m->gw_pool_refused = nr_td_gw_pool_refused();
   m->gpu_fep_stale_pre = pq.gpu_stale_pre;
   m->gpu_fep_stale_post = pq.gpu_stale_post;
   m->gpu_fep_selfcheck_fail = pq.gpu_selfcheck_fail;

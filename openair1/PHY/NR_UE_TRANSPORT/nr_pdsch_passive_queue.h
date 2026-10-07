@@ -71,6 +71,8 @@
 extern "C" {
 #endif
 
+void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue);
+
 #define NR_PDSCH_PASSIVE_QUEUE_MAX_DEPTH 64
 /// Consumers. One consumer sustains ~1/775us = ~1290 decodes/s; the live cell at ~1500 offered
 /// grants/s presented ~1000 accepts/s in bursts and a single consumer dropped 31 % of them at the
