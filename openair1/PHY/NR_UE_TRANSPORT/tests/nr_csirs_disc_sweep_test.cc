@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc.h"
 #include "nr_csirs_disc_sweep_internal.h"
+#include "nr_csirs_disc_gate_internal.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
@@ -11,6 +12,9 @@
 #include <dlfcn.h>
 #include <random>
 #include <vector>
+#include <cstring>
+#include <string>
+#include <array>
 #ifdef NR_CSIRS_DISC_TEST_CUDA
 #include <cuda_runtime_api.h>
 #endif
@@ -211,6 +215,99 @@ TEST(CsirsDiscSweep, CorrelatorParityAndRunnerUp)
   EXPECT_NEAR(w.z,sum,1e-6);
 }
 
+TEST(CsirsDiscSweep, NoisePopulationExcludesWinningIdDeltas)
+{
+  const float z[] = {1, 2, 3, 5, 10, 7, 2, 3, 4};
+  nr_csirs_disc_sweep_cfg_t c = {20, 3, 3, 32};
+  nr_csirs_disc_win_t w;
+  nr_csirs_disc_sweep_winner(z, &c, 7, 4, &w);
+  EXPECT_EQ(w.scramb_id, 21); EXPECT_EQ(w.slot_delta, 1);
+  EXPECT_EQ(w.hyp_index, 7); EXPECT_EQ(w.n_slots, 4);
+  EXPECT_FLOAT_EQ(w.z, 10); EXPECT_FLOAT_EQ(w.z_second, 4);
+  EXPECT_EQ(w.noise_count, 6u);
+  EXPECT_FLOAT_EQ(w.noise_mu, 2.5f);
+  EXPECT_NEAR(w.noise_sigma, std::sqrt(11.0/12), 1e-7);
+  // Identical scores, empty lattice and a single ID have defined moments.
+  const float flat[] = {1,1,1,1,1,1,1,1,1};
+  nr_csirs_disc_sweep_winner(flat, &c, 0, 4, &w);
+  EXPECT_EQ(w.scramb_id, 20); EXPECT_EQ(w.slot_delta, 0);
+  EXPECT_FLOAT_EQ(w.noise_mu, 1); EXPECT_FLOAT_EQ(w.noise_sigma, 0);
+  nr_csirs_disc_sweep_winner(flat, &c, 0, 0, &w);
+  EXPECT_EQ(w.noise_count, 0u); EXPECT_FLOAT_EQ(w.noise_mu, 0);
+  c.id_count = 1;
+  nr_csirs_disc_sweep_winner(z, &c, 0, 4, &w);
+  EXPECT_EQ(w.noise_count, 0u); EXPECT_FLOAT_EQ(w.noise_sigma, 0);
+}
+
+TEST(CsirsDiscSweep, NoiseMomentsMatchIndependentCandidateSweeps)
+{
+  Grid grid(64,3);
+  auto h = hyp(1,7,45); grid.add(h,13,3);
+  nr_csirs_disc_sweep_cfg_t c = {10,7,5,31};
+  nr_csirs_disc_win_t w;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),1);
+  std::vector<double> scores;
+  const auto meta = grid.meta;
+  for (int id=10; id<17; ++id) if (id!=w.scramb_id)
+    for (int delta=0; delta<5; ++delta) {
+      for (int s=0; s<3; ++s) grid.meta[s].slot=(meta[s].slot+delta)%20;
+      nr_csirs_disc_sweep_cfg_t single = {id,1,1,31};
+      nr_csirs_disc_win_t one;
+      ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&single,&one),1);
+      scores.push_back(one.z);
+    }
+  double mu=0, variance=0;
+  for (double v:scores) mu+=v/scores.size();
+  for (double v:scores) variance+=(v-mu)*(v-mu)/scores.size();
+  EXPECT_EQ(w.noise_count,scores.size());
+  EXPECT_NEAR(w.noise_mu,mu,1e-7);
+  EXPECT_NEAR(w.noise_sigma,std::sqrt(variance),1e-7);
+}
+
+TEST(CsirsDiscSweep, AdaptiveGateBoundariesAndLegacyOverride)
+{
+  const nr_csirs_disc_gate_t c = {8,3,2,0};
+  nr_csirs_disc_win_t w = {};
+  w.z=3; w.z_second=2; w.n_slots=4; w.noise_mu=1; w.noise_sigma=.25f; w.noise_count=1023;
+  EXPECT_TRUE(nr_csirs_disc_gate_accept(&w,&c)); // equality at mu+K sigma
+  w.z=std::nextafter(3.f,0.f); EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  w.z=3; w.z_second=2.25f; EXPECT_TRUE(nr_csirs_disc_gate_accept(&w,&c));
+  w.z_second=std::nextafter(2.25f,3.f); EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  w.z=1.99f; w.z_second=1; w.noise_sigma=.01f; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  w.z=2; EXPECT_TRUE(nr_csirs_disc_gate_accept(&w,&c));
+  w.noise_count=0; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  w.noise_count=1023; w.noise_sigma=NAN; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  w.noise_sigma=INFINITY; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  w.noise_sigma=-1; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  w.noise_sigma=0; w.noise_mu=1; EXPECT_TRUE(nr_csirs_disc_gate_accept(&w,&c));
+  w.z=NAN; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&c));
+  auto legacy=c; legacy.fixed=3.5;
+  w.z=3.5; w.z_second=2; w.noise_sigma=NAN; w.noise_count=0;
+  EXPECT_TRUE(nr_csirs_disc_gate_accept(&w,&legacy));
+  w.z_second=2.01; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&legacy));
+  w.z=3.49; w.z_second=1; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&legacy));
+  w.z=4; w.n_slots=0; EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&legacy));
+}
+
+TEST(CsirsDiscSweep, GateEnvironmentValidation)
+{
+  const char *names[]={"ISAC_CSIRS_DISC_WIN_K","ISAC_CSIRS_DISC_WIN_M","ISAC_CSIRS_DISC_WIN_FLOOR","ISAC_CSIRS_DISC_WIN_Z"};
+  std::vector<std::string> saved;
+  std::vector<bool> present;
+  for (auto name:names) { const char *v=getenv(name); present.push_back(v); saved.emplace_back(v?v:""); unsetenv(name); }
+  auto c=nr_csirs_disc_gate_config();
+  EXPECT_FLOAT_EQ(c.k,12); EXPECT_FLOAT_EQ(c.m,4); EXPECT_FLOAT_EQ(c.floor,2); EXPECT_FLOAT_EQ(c.fixed,0);
+  for (auto bad:{"nan","inf","-1","3junk",""}) {
+    for (auto name:names) setenv(name,bad,1);
+    c=nr_csirs_disc_gate_config();
+    EXPECT_FLOAT_EQ(c.k,12); EXPECT_FLOAT_EQ(c.m,4); EXPECT_FLOAT_EQ(c.floor,2); EXPECT_FLOAT_EQ(c.fixed,0);
+  }
+  for (auto name:names) setenv(name,"2.5",1);
+  c=nr_csirs_disc_gate_config();
+  EXPECT_FLOAT_EQ(c.k,2.5); EXPECT_FLOAT_EQ(c.m,2.5); EXPECT_FLOAT_EQ(c.floor,2.5); EXPECT_FLOAT_EQ(c.fixed,2.5);
+  for (int i=0;i<4;++i) { if(present[i]) setenv(names[i],saved[i].c_str(),1); else unsetenv(names[i]); }
+}
+
 TEST(CsirsDiscSweep, LatticeAndFourAntennas)
 {
   auto h = hyp(1,0,32);
@@ -256,6 +353,12 @@ TEST(CsirsDiscSweep, InvalidEmptyAndDisabled)
   EXPECT_EQ(w.z,0);
   EXPECT_EQ(w.n_slots,0);
   unsetenv("ISAC_CSIRS_DISC");
+  memset(&w,0xa5,sizeof(w));
+  std::array<unsigned char,sizeof(w)> before; memcpy(before.data(),&w,sizeof(w));
+  const auto samples=grid.samples;
+  EXPECT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),0);
+  EXPECT_EQ(memcmp(&w,before.data(),sizeof(w)),0);
+  EXPECT_EQ(grid.samples,samples);
   EXPECT_EQ(nr_csirs_disc_sweep_cpu(nullptr,nullptr,0,nullptr,nullptr),0);
   setenv("ISAC_CSIRS_DISC","1",1);
 }
@@ -287,6 +390,9 @@ TEST(CsirsDiscSweep, GpuEqualsCpu)
     EXPECT_EQ(cpu.n_slots,g.n_slots);
     EXPECT_NEAR(cpu.z,g.z,1e-3) << row;
     EXPECT_NEAR(cpu.z_second,g.z_second,1e-3) << row;
+    EXPECT_EQ(cpu.noise_count,g.noise_count);
+    EXPECT_NEAR(cpu.noise_mu,g.noise_mu,1e-3*cpu.noise_mu);
+    EXPECT_NEAR(cpu.noise_sigma,g.noise_sigma,1e-3*cpu.noise_sigma);
     for (int density : {0,1}) {
       if (row == 1) continue;
       h.density = density;
@@ -300,6 +406,9 @@ TEST(CsirsDiscSweep, GpuEqualsCpu)
       EXPECT_EQ(cpu.slot_delta,g.slot_delta);
       EXPECT_NEAR(cpu.z,g.z,1e-3);
       EXPECT_NEAR(cpu.z_second,g.z_second,1e-3);
+      EXPECT_EQ(cpu.noise_count,g.noise_count);
+      EXPECT_NEAR(cpu.noise_mu,g.noise_mu,1e-3*cpu.noise_mu);
+      EXPECT_NEAR(cpu.noise_sigma,g.noise_sigma,1e-3*cpu.noise_sigma);
     }
     // Also compare noise and exact ties (all-zero input).
     for (int mode = 0; mode < 2; ++mode) {
@@ -312,6 +421,9 @@ TEST(CsirsDiscSweep, GpuEqualsCpu)
       EXPECT_EQ(cpu.slot_delta,g.slot_delta);
       EXPECT_NEAR(cpu.z,g.z,1e-3);
       EXPECT_NEAR(cpu.z_second,g.z_second,1e-3);
+      EXPECT_EQ(cpu.noise_count,g.noise_count);
+      EXPECT_NEAR(cpu.noise_mu,g.noise_mu,1e-3*cpu.noise_mu);
+      EXPECT_NEAR(cpu.noise_sigma,g.noise_sigma,1e-3*cpu.noise_sigma);
     }
   }
   dlclose(module);
@@ -332,7 +444,10 @@ TEST(CsirsDiscSweep, RecentOccasionsMatchExplicitMaskedRing)
     void *module=nullptr;Sweep fn=gpu(&module);ASSERT_NE(fn,nullptr);
     nr_csirs_disc_win_t device={};ASSERT_EQ(fn(&grid.r,&h,1,&limited,&device),1);
     EXPECT_EQ(device.scramb_id,got.scramb_id);EXPECT_EQ(device.n_slots,4);
-    EXPECT_NEAR(device.z,got.z,1e-3);EXPECT_NEAR(device.z_second,got.z_second,1e-3);dlclose(module);
+    EXPECT_NEAR(device.z,got.z,1e-3);EXPECT_NEAR(device.z_second,got.z_second,1e-3);
+    EXPECT_EQ(device.noise_count,got.noise_count);
+    EXPECT_NEAR(device.noise_mu,got.noise_mu,1e-3*got.noise_mu);
+    EXPECT_NEAR(device.noise_sigma,got.noise_sigma,1e-3*got.noise_sigma);dlclose(module);
   }
 #endif
   std::vector<uint32_t> slots;for(auto m:grid.meta) slots.push_back(m.abs_slot);

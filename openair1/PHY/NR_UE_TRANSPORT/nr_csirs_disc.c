@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc.h"
+#include "nr_csirs_disc_gate_internal.h"
 
 #include "common/utils/LOG/log.h"
 #include "nr_passive_cfg_epoch.h"
@@ -71,57 +72,6 @@ static uint64_t now_us(void)
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
-/* Noise-adaptive winner gate. Each sweep's runner-up z2 is the best score among the ~1023 WRONG
- * scrambling IDs, i.e. a direct sample of the noise maximum for that geometry and integration.
- * Gate = median(z2) + K * sigma(z2) (robust: 1.4826 * MAD) over the last 512 sweeps, clamped to
- * [2.5, 4.5]; K = ISAC_CSIRS_DISC_WIN_K (default 10). Live OTA 2026-10-07 (PCI 415, 409 sweeps):
- * z2 mean 1.63, std 0.19 -> gate ~3.5, the fixed value proven live (k0=1 sym 5+9 pair confirmed in
- * 5/6 runs; 4.0 left it AMBIGUOUS). Until 32 samples exist, or with ISAC_CSIRS_DISC_WIN_Z=<z>, a
- * fixed gate (default 3.5) is used. The per-sweep margin z - z2 >= 1.5 is unchanged. */
-#define WINZ_HIST 512
-static float g_z2_hist[WINZ_HIST];
-static int g_z2_n, g_z2_w;
-static float g_gate = 3.5f, g_gate_med, g_gate_sig;
-static int cmp_float(const void *a, const void *b)
-{
-  const float x = *(const float *)a, y = *(const float *)b;
-  return (x > y) - (x < y);
-}
-static void win_noise_add(float z2)
-{
-  if (!(z2 > 0.0f) || z2 > 50.0f)
-    return;
-  g_z2_hist[g_z2_w] = z2;
-  g_z2_w = (g_z2_w + 1) % WINZ_HIST;
-  if (g_z2_n < WINZ_HIST)
-    ++g_z2_n;
-}
-static void win_gate_update(void)
-{
-  static float fixed = -1.0f, k = -1.0f;
-  if (fixed < 0) {
-    const char *s = getenv("ISAC_CSIRS_DISC_WIN_Z"), *kk = getenv("ISAC_CSIRS_DISC_WIN_K");
-    fixed = s && atof(s) > 0 ? (float)atof(s) : 0.0f;
-    k = kk && atof(kk) > 0 ? (float)atof(kk) : 10.0f;
-  }
-  if (fixed > 0 || g_z2_n < 32) {
-    g_gate = fixed > 0 ? fixed : 3.5f;
-    return;
-  }
-  float v[WINZ_HIST];
-  memcpy(v, g_z2_hist, (size_t)g_z2_n * sizeof(*v));
-  qsort(v, g_z2_n, sizeof(*v), cmp_float);
-  const float med = v[g_z2_n / 2];
-  for (int i = 0; i < g_z2_n; ++i)
-    v[i] = fabsf(v[i] - med);
-  qsort(v, g_z2_n, sizeof(*v), cmp_float);
-  const float sig = 1.4826f * v[g_z2_n / 2];
-  float gate = med + k * sig;
-  gate = gate < 2.5f ? 2.5f : gate > 4.5f ? 4.5f : gate;
-  g_gate = gate; g_gate_med = med; g_gate_sig = sig;
-}
-static float win_z(void) { return g_gate; }
-
 static int sweep_limit(void)
 {
   const char *s = getenv("ISAC_CSIRS_DISC_SWEEP_HYPS");
@@ -180,7 +130,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   nr_csirs_disc_hyp_t all_hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_hyp_t hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_win_t wins[NR_CSIRS_DISC_MAX_HYP];
-  bool coarse_only[NR_CSIRS_DISC_MAX_HYP] = {false}; /* screened out: z2 from the short coarse sweep */
+  bool coarse_only[NR_CSIRS_DISC_MAX_HYP] = {false}; /* screened out: never eligible for admission */
   const nr_csirs_disc_fp_cfg_t fp_cfg = {.min_strength = 1.03f};
 
   /* Incremental GPU local normalization/folding, CPU bounded clustering. */
@@ -304,20 +254,25 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       if (w->hyp_index < 0 || w->hyp_index >= n_hyp)
         continue;
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
-      if (!coarse_only[w->hyp_index]) win_noise_add(w->z_second); /* full-integration noise only */
       if (h->fp_index >= DISC_VIEWS)
         continue;
       if (getenv("ISAC_CSIRS_DISC_DIAG"))
         LOG_I(PHY,
-              "SENSING: CSIRS_DISC DIAG row=%u fd=%u l0=%u l1=%u fp=%u id=%u z=%.3f z2=%.3f P/O=%u/%u\n",
+              "SENSING: CSIRS_DISC DIAG row=%u fd=%u l0=%u l1=%u fp=%u rb=%u:%u coarse=%u slots=%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u\n",
               h->row,
               h->freq_domain,
               h->symb_l0,
               h->symb_l1,
               h->fp_index,
+              h->rb_start,
+              h->n_rb,
+              (unsigned)coarse_only[w->hyp_index],
+              w->n_slots,
               w->scramb_id,
               w->z,
               w->z_second,
+              w->noise_mu,
+              w->noise_sigma,
               h->period,
               h->offset);
       const int lead = leader[h->fp_index];
@@ -329,11 +284,14 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         best[h->fp_index] = i;
     }
 
-    win_gate_update();
+    const nr_csirs_disc_gate_t gate = nr_csirs_disc_gate_config();
     static uint64_t gate_logged;
-    if (g_metrics.batches - gate_logged >= 50 || !gate_logged) {
-      gate_logged = g_metrics.batches ? g_metrics.batches : 1;
-      LOG_I(PHY, "SENSING: CSIRS_DISC WIN_GATE z>=%.2f (noise z2 median %.2f sigma %.3f, n=%d)\n", g_gate, g_gate_med, g_gate_sig, g_z2_n);
+    static bool gate_has_logged;
+    if (!gate_has_logged || g_metrics.batches - gate_logged >= 50) {
+      gate_logged = g_metrics.batches;
+      gate_has_logged = true;
+      LOG_I(PHY, "SENSING: CSIRS_DISC WIN_GATE mode=%s K=%.3f M=%.3f floor=%.3f fixed=%.3f\n",
+            gate.fixed > 0 ? "legacy" : "per-sweep", gate.k, gate.m, gate.floor, gate.fixed);
     }
     int selected[DISC_VIEWS], n_selected = 0;
     for (int f = 0; f < DISC_VIEWS; ++f) {
@@ -342,7 +300,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         continue;
       const nr_csirs_disc_win_t *w = &wins[i];
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
-      const bool accepted = w->z >= win_z() && w->z - w->z_second >= 1.5f;
+      const bool accepted = !coarse_only[w->hyp_index] && nr_csirs_disc_gate_accept(w, &gate);
       if (accepted) {
         int replace = -1;
         for (int k = 0; k < n_selected; ++k) {
@@ -368,7 +326,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         ambiguous++;
         cache_result(h,ring->written,false);
         if(ambiguous==1 && g_metrics.batches%20==0) LOG_I(PHY,
-              "SENSING: CSIRS_DISC AMBIGUOUS row=%u fd=%u l0=%u l1=%u id=%u z=%.2f z2=%.2f P/O=%u/%u\n",
+              "SENSING: CSIRS_DISC AMBIGUOUS row=%u fd=%u l0=%u l1=%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u\n",
               h->row,
               h->freq_domain,
               h->symb_l0,
@@ -376,6 +334,8 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
               w->scramb_id,
               w->z,
               w->z_second,
+              w->noise_mu,
+              w->noise_sigma,
               h->period,
               h->offset);
       }
@@ -396,8 +356,15 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       nr_csirs_disc_win_t verified;
       int checked=gpu && ops->sweep?ops->sweep(ring,&refined,1,&sweep_cfg,&verified):-1;
       if(checked<0) checked=nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified);
+      if (checked == 1 && getenv("ISAC_CSIRS_DISC_DIAG"))
+        LOG_I(PHY,
+              "SENSING: CSIRS_DISC VERIFY row=%u fd=%u l0=%u l1=%u rb=%u:%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u accepted=%u\n",
+              refined.row, refined.freq_domain, refined.symb_l0, refined.symb_l1,
+              refined.rb_start, refined.n_rb, verified.scramb_id, verified.z, verified.z_second,
+              verified.noise_mu, verified.noise_sigma, refined.period, refined.offset,
+              (unsigned)(nr_csirs_disc_gate_accept(&verified, &gate) && verified.scramb_id == w->scramb_id));
       if(checked!=1
-          || verified.z<win_z() || verified.z-verified.z_second<1.5f || verified.scramb_id!=w->scramb_id) continue;
+          || !nr_csirs_disc_gate_accept(&verified, &gate) || verified.scramb_id!=w->scramb_id) continue;
       w=&verified;
       const nr_csirs_disc_hyp_t *h = &refined;
       if (nr_csirs_blind_rt_add_discovered && nr_csirs_blind_rt_add_discovered(h, w) >= 0) {
@@ -408,7 +375,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         cache_result(&hyps[original_index],ring->written,true);
       }
       LOG_A(PHY,
-            "SENSING: CSIRS_DISC WINNER row=%u fd=%u l0=%u l1=%u cdm=%u dens=%u rb=%u:%u id=%u delta=%d z=%.2f z2=%.2f P/O=%u/%u\n",
+            "SENSING: CSIRS_DISC WINNER row=%u fd=%u l0=%u l1=%u cdm=%u dens=%u rb=%u:%u id=%u delta=%d z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u\n",
             h->row,
             h->freq_domain,
             h->symb_l0,
@@ -421,6 +388,8 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
             w->slot_delta,
             w->z,
             w->z_second,
+            w->noise_mu,
+            w->noise_sigma,
             h->period,
             h->offset);
     }

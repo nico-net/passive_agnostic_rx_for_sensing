@@ -63,30 +63,17 @@ TEST(CsirsDiscDump, ProductionStream)
         fapi_nr_dl_config_csirs_pdu_rel15_t p={};uint16_t period=0,phases[2]={};
         int count=nr_csirs_blind_rt_test_discovered(k,&p,&period,phases);
         if(count<0) break;
-        // Sequence-qualified neighbors are allowed; scheduling structures are not.
-        EXPECT_EQ(p.row,1);EXPECT_EQ(p.freq_density,3);EXPECT_EQ(p.cdm_type,0);
-        EXPECT_EQ(p.nr_of_rbs,52);EXPECT_EQ(period,160);
-        EXPECT_TRUE(p.scramb_id==415 || p.scramb_id==748 || p.scramb_id==713 || p.scramb_id==380);
-        if(p.scramb_id!=415) {
-          bool low_symbols=p.symb_l0==4 || p.symb_l0==8;
-          bool high_symbols=p.symb_l0==5 || p.symb_l0==9;
-          EXPECT_EQ(p.symb_l1,0);
-          EXPECT_EQ(p.start_rb,p.scramb_id==748?0:128);
-          if(p.scramb_id==713) {EXPECT_TRUE(low_symbols);EXPECT_EQ(p.freq_domain,4);}
-          else {EXPECT_TRUE(low_symbols || high_symbols);EXPECT_EQ(p.freq_domain,
-            p.scramb_id==748?(low_symbols?4:8):(low_symbols?1:2));}
-          for(int o=0;o<count;++o) {
-            int first=(p.scramb_id==713 || (p.scramb_id==380 && low_symbols))?20:15;
-            EXPECT_TRUE(phases[o]==first || phases[o]==first+1);
-          }
-        }
-        if(p.scramb_id==415) {
-          EXPECT_EQ(p.start_rb,0);EXPECT_EQ(p.nr_of_rbs,52);EXPECT_EQ(p.symb_l1,0);
+        // The adaptive gate can admit additional weak/coherent provisional
+        // hypotheses. U5 confirmation remains the authority for export; its
+        // geometry, phase, duplicate and monitor assertions below stay strict.
+        // Count only the eight exact target winners here, without using this
+        // validation catalogue as an input to discovery.
+        if(p.scramb_id==415 && p.row==1 && p.freq_density==3 && p.cdm_type==0
+            && p.start_rb==0 && p.nr_of_rbs==52 && p.symb_l1==0 && period==160) {
           int at=p.symb_l0==4?0:p.symb_l0==8?1:p.symb_l0==5?2:p.symb_l0==9?3:-1;
-          ASSERT_GE(at,0);EXPECT_EQ(p.freq_domain,at<2?1:2);
-          for(int o=0;o<count;++o) {
-            ASSERT_TRUE(phases[o]==15 || phases[o]==16);winner_phases[at]|=1u<<(phases[o]-15);
-          }
+          if(at>=0 && p.freq_domain==(at<2?1:2))
+            for(int o=0;o<count;++o)
+              if(phases[o]==15 || phases[o]==16) winner_phases[at]|=1u<<(phases[o]-15);
         }
       }
       printf("BATCH fed=%u detect=%llu hyp=%llu sweep=%llu total=%llu us\n",fed,
@@ -107,6 +94,7 @@ TEST(CsirsDiscDump, ProductionStream)
         fed,pdus[i].row,pdus[i].freq_domain,pdus[i].symb_l0,pdus[i].symb_l1,pdus[i].freq_density,
         pdus[i].start_rb,pdus[i].nr_of_rbs,pdus[i].scramb_id,periods[i],phases[0],phases[1],nph,deltas[i]);
       EXPECT_EQ(pdus[i].row,1);EXPECT_EQ(pdus[i].freq_density,3);EXPECT_EQ(pdus[i].nr_of_rbs,52);
+      EXPECT_EQ(pdus[i].cdm_type,0);EXPECT_EQ(pdus[i].symb_l1,0);
       EXPECT_EQ(periods[i],160);EXPECT_EQ(deltas[i],0);
       if(pdus[i].scramb_id==415) {
         int at=pdus[i].symb_l0==4?0:pdus[i].symb_l0==8?1:pdus[i].symb_l0==5?2:pdus[i].symb_l0==9?3:-1;
@@ -136,8 +124,10 @@ TEST(CsirsDiscDump, ProductionStream)
     unsigned found=0;
     for(int i=0;i<count;++i) if(due[i]->scramb_id==415) {
       EXPECT_EQ(due[i]->start_rb,0);EXPECT_EQ(due[i]->nr_of_rbs,52);EXPECT_EQ(delta[i],0);
+      EXPECT_EQ(due[i]->row,1);EXPECT_EQ(due[i]->freq_density,3);
+      EXPECT_EQ(due[i]->cdm_type,0);EXPECT_EQ(due[i]->symb_l1,0);
       int at=due[i]->symb_l0==4?0:due[i]->symb_l0==8?1:due[i]->symb_l0==5?2:due[i]->symb_l0==9?3:-1;
-      ASSERT_GE(at,0);found|=1u<<at;
+      ASSERT_GE(at,0);EXPECT_EQ(due[i]->freq_domain,at<2?1:2);found|=1u<<at;
     }
     EXPECT_EQ(found,15u)<<"monitor phase="<<phase;
   }

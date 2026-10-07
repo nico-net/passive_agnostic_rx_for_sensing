@@ -98,6 +98,75 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     scores[(size_t)blockIdx.y * gridDim.x + candidate] = (sums[0]+sums[1]+sums[2]+sums[3]) / (map.ports*ants);
 }
 
+/* Average occasions before computing the candidate distribution. */
+__global__ void average_scores(const float *scores, int nc, int slots, float *mean)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= nc) return;
+  double sum = 0;
+  for (int s = 0; s < slots; ++s) sum += scores[(size_t)s * nc + i];
+  mean[i] = sum / slots;
+}
+
+/* One CTA performs the global reduction, with deterministic ascending-ID/delta
+ * tie breaking. FP64 sum/square accumulation avoids cancellation in variance.
+ * Only the result crosses to the host; no candidate/occasion score download. */
+__global__ void reduce_scores(const float *mean, nr_csirs_disc_sweep_cfg_t c, int hyp, int slots,
+                             nr_csirs_disc_win_t *out)
+{
+  __shared__ float best[256];
+  __shared__ int index[256];
+  __shared__ double sum[256], sq[256];
+  __shared__ int winner;
+  int t = threadIdx.x, nc = c.id_count * c.delta_max;
+  float z = 0;
+  int at = 0;
+  for (int i = t; i < nc; i += 256)
+    if (mean[i] > z) { z = mean[i]; at = i; }
+  best[t] = z; index[t] = at;
+  __syncthreads();
+  for (int stride = 128; stride; stride /= 2) {
+    if (t < stride && (best[t + stride] > best[t]
+        || (best[t + stride] == best[t] && index[t + stride] < index[t]))) {
+      best[t] = best[t + stride]; index[t] = index[t + stride];
+    }
+    __syncthreads();
+  }
+  if (!t) {
+    nr_csirs_disc_win_t w = {};
+    w.hyp_index = hyp; w.scramb_id = c.id_first + index[0] / c.delta_max;
+    w.slot_delta = index[0] % c.delta_max; w.z = best[0]; w.n_slots = slots;
+    *out = w;
+    winner = index[0] / c.delta_max;
+  }
+  __syncthreads();
+  double a = 0, b = 0;
+  const double origin = c.id_count > 1 ? mean[winner == 0 ? c.delta_max : 0] : 0;
+  z = 0;
+  for (int i = t; i < nc; i += 256) if (i / c.delta_max != winner) {
+    const double v = (double)mean[i] - origin;
+    a += v; b += v * v; z = fmaxf(z, mean[i]);
+  }
+  best[t] = z; sum[t] = a; sq[t] = b;
+  __syncthreads();
+  for (int stride = 128; stride; stride /= 2) {
+    if (t < stride) {
+      best[t] = fmaxf(best[t], best[t + stride]);
+      sum[t] += sum[t + stride]; sq[t] += sq[t + stride];
+    }
+    __syncthreads();
+  }
+  if (!t) {
+    out->z_second = best[0];
+    if (slots && c.id_count > 1) {
+      out->noise_count = (c.id_count - 1) * c.delta_max;
+      const double mu = sum[0] / out->noise_count;
+      out->noise_mu = origin + mu;
+      out->noise_sigma = sqrt(fmax(0.0, sq[0] / out->noise_count - mu * mu));
+    }
+  }
+}
+
 template<typename T> struct Device {
   T *p = nullptr;
   size_t capacity = 0;
@@ -136,13 +205,14 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
   if (cudaStreamCreateWithFlags(&stream.s, cudaStreamNonBlocking) != cudaSuccess)
     return -1;
   const int nc = c.id_count * c.delta_max;
-  std::vector<float> mean(nc), values;
+  std::vector<float> mean(nc);
   std::vector<short2> packed;
   // Grow workspace only when necessary; avoid four cudaMalloc/cudaFree pairs per hypothesis.
   Device<nr_csirs_disc_re_t> dm;
   Device<short2> dx;
   Device<int> ds;
-  Device<float> dz;
+  Device<float> dz, dmean;
+  Device<nr_csirs_disc_win_t> dw;
   for (int h = 0; h < nh; ++h) {
     Map owner;
     auto &map = owner.m;
@@ -174,8 +244,8 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
           dst[i] = make_short2(src[2*k], src[2*k+1]);
         }
       }
-    values.resize((size_t)nc * slots.size());
-    if (!dm.alloc(map.n_re) || !dx.alloc(packed.size()) || !ds.alloc(slots.size()) || !dz.alloc(values.size()))
+    if (!dm.alloc(map.n_re) || !dx.alloc(packed.size()) || !ds.alloc(slots.size())
+        || !dz.alloc((size_t)nc * slots.size()) || !dmean.alloc(nc) || !dw.alloc(1))
       return -1;
     if (cudaMemcpyAsync(dm.p, map.re, map.n_re*sizeof(*map.re), cudaMemcpyHostToDevice, stream.s) != cudaSuccess
         || cudaMemcpyAsync(dx.p, packed.data(), packed.size()*sizeof(short2), cudaMemcpyHostToDevice, stream.s) != cudaSuccess
@@ -184,17 +254,14 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     auto device_map = map;
     device_map.re = dm.p;
     sweep<<<dim3(nc, slots.size()), 128, 0, stream.s>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p);
+    if (cudaGetLastError() != cudaSuccess) return -1;
+    average_scores<<<(nc + 255) / 256, 256, 0, stream.s>>>(dz.p, nc, slots.size(), dmean.p);
+    if (cudaGetLastError() != cudaSuccess) return -1;
+    reduce_scores<<<1, 256, 0, stream.s>>>(dmean.p, c, h, slots.size(), dw.p);
     if (cudaGetLastError() != cudaSuccess
-        || cudaMemcpyAsync(values.data(), dz.p, values.size()*sizeof(float), cudaMemcpyDeviceToHost, stream.s) != cudaSuccess
+        || cudaMemcpyAsync(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost, stream.s) != cudaSuccess
         || cudaStreamSynchronize(stream.s) != cudaSuccess)
       return -1;
-    for (int i = 0; i < nc; ++i) {
-      double sum = 0;
-      for (size_t s = 0; s < slots.size(); ++s)
-        sum += values[s*nc+i];
-      mean[i] = sum / slots.size();
-    }
-    nr_csirs_disc_sweep_winner(mean.data(), &c, h, slots.size(), out + h);
   }
   return nh;
 }
