@@ -3064,6 +3064,24 @@ feature-off equivalence and OTA remain DEFERRED, not inferred from host tests. T
 T17 preserves that decision for parity, not a claim of correct AL1-only mapping. Full test results,
 limits and exact deferred commands: [T17 report](docs/superpowers/reports/csd/T17.md).
 
+### T19 — dedicated PDCCH multi-symbol evidence (2026-10-07, csd/t19)
+
+[OFFLINE VERIFIED, DGX aarch64 host] The independent nID reference and stage-2
+port now recover the duration-3 fixture missed by T17: nID 12345, first symbol 3,
+duration 3. Duration/start-specific combined hits use one shared 1% per-pass
+Poisson false-alarm budget. New production behavior requires both
+`ISAC_CSIRS_DISC=1` and the existing `ISAC_PDCCH_NID_GPU=1`; the former unset
+selects the original GPU listing/duration path. Internal module ABI is 2;
+record handoff and CSI-RS contract semantics are unchanged. [MEASURED, DGX
+shared host, CPU process time, n=1] Stage-1 cost relative to the base reference
+is 1.013x for duration-1 capture and 1.092x for the same signal in a three-symbol
+capture. [IMPLEMENTED, NOT VALIDATED ON DEVICE] CUDA sm_121 builds; GPU parity,
+sanitizers and runtime cost remain deferred. [OFFLINE VERIFIED, DGX aarch64 host]
+All 24 nID CTests plus manual fixture 0 pass. Full suite excluding `nr_td_sim_test`:
+174/184 passed; nine brief-listed failures and one unchanged CSI-RS stress timing
+failure (passed its targeted rerun). Fixtures, full-suite results,
+statistical derivation and device commands: [T19 report](docs/superpowers/reports/csd/T19.md).
+
 ---
 
 ### T20 — GPU nID pass parallelism (2026-10-07, csd/t20)
@@ -3079,6 +3097,29 @@ Completed passes publish even when the soft budget is exceeded. GPU parity, <=15
 217 PRB/window 10/duration 1, <10 ms kernels and shared-GPU/OTA behavior are **deferred**.
 T19's duration statistic must be merged before duration 2/3 acceptance. See
 [the T20 report](docs/superpowers/reports/csd/T20.md) for exact device/nsys commands and limitations.
+
+---
+
+### T22 — incremental dedicated PDCCH nID discovery (2026-10-07, csd/t22)
+
+[CODE-READ] T19 multi-symbol math merged with T20 parallel kernels. With both
+`ISAC_CSIRS_DISC=1 ISAC_PDCCH_NID_GPU=1`, capture now rotates all start symbols
+on every DL slot (`ISAC_PDCCH_NID_GPU_CAPTURE_EVERY=1`); default 64-snapshot
+batches (`ISAC_PDCCH_NID_GPU_BATCH`) are swept once and immediately evaluated.
+Device statistics subtract evicted batch contributions from a sliding W-batch
+window. Per-look alpha = 0.01/[t(t+1)] shares the inherited Poisson-model budget
+across early looks; this is not an empirical OTA false-alarm guarantee. Published
+nID/start/duration tuples skip repeated geometry work while listed. Internal ABI
+3; the published record/generation and CSI-RS contracts are unchanged.
+[OFFLINE VERIFIED, DGX aarch64 host-only] CPU receiver and sm_121 module/tests
+build; all 27 nID host tests pass, plus separate fixture 0 and final six-test
+targeted checks. Full suite: 178/187 active tests pass, nine brief-listed
+ARM/sandbox exceptions; 15 device benchmarks disabled.
+[IMPLEMENTED, NOT VALIDATED ON DEVICE] Shared pilot/power tiles, bit-parallel
+Gold jump, early publication, stable parallel stage-2 tie selection. The
+<=3 s first record, >=1 TMAC/s, <10 ms kernels and <5 s C-RNTI DCI 1_1 goals
+remain DEFERRED to GB10/receiver measurements. Exact commands, final suite
+outcomes, model assumptions and limits: [T22 report](docs/superpowers/reports/csd/T22.md).
 
 ---
 

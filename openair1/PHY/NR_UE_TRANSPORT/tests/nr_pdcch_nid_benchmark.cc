@@ -8,6 +8,7 @@
 #include <vector>
 
 int main(int argc,char **argv) {
+ setvbuf(stdout,nullptr,_IOLBF,0);setenv("ISAC_CSIRS_DISC","1",1);
  const int rb=argc>1?atoi(argv[1]):217,dur=argc>2?atoi(argv[2]):1,repeats=argc>3?atoi(argv[3]):3;
  if((rb!=217 && rb!=273) || dur<1 || dur>3 || repeats<1)return 2;
  void *lib=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);
@@ -16,7 +17,8 @@ int main(int argc,char **argv) {
  auto stats=(void(*)(uint64_t*,uint64_t*))dlsym(lib,"nr_dl_gpu_memory_stats");
  if(!get || !stats || get()->abi!=NR_PDCCH_NID_ABI)return 2;
  const auto *ops=get();nr_pdcch_nid_iq_t *staging=nullptr;
- void *ctx=ops->create(rb,dur,10,&staging);if(!ctx)return 2;
+ fprintf(stderr,"PDCCH_NID_BENCH start rb=%d dur=%d window=10 repeats=%d\n",rb,dur,repeats);
+ void *ctx=ops->create(rb,dur,10,&staging);if(!ctx){fprintf(stderr,"create failed\n");return 2;}
  nr_pdcch_nid_batch_t src={},b={};nid_reference_make(6+dur,&src);
  b.cfg=src.cfg;b.cfg.nsc=12*rb;b.iq=staging;
  memcpy(b.slot,src.slot,sizeof(b.slot));memcpy(b.sym,src.sym,sizeof(b.sym));
@@ -38,7 +40,7 @@ int main(int argc,char **argv) {
   double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
   if(rc){fprintf(stderr,"run failed rc=%d\n",rc);return 3;}
   bool planted=false;for(int j=0;j<r.count;j++)planted|=r.records[j].nid==12345;
-  if(!planted)return 4;
+  if(!planted){fprintf(stderr,"missing plant rb=%d dur=%d count=%d list=%d stage1_ms=%.3f stage2_ms=%.3f\n",rb,dur,r.count,r.list_n,r.stage1_ms,r.stage2_ms);return 4;}
   if(pass && (r.count!=previous.count || memcmp(r.records,previous.records,r.count*sizeof(r.records[0]))
       || memcmp(r.hit_hash,previous.hit_hash,sizeof(r.hit_hash))))return 4;
   previous=r;

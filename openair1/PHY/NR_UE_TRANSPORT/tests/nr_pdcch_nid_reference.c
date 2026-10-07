@@ -1,4 +1,6 @@
-/* T17 test-only copy of frozen idsweep_offline.c. Do not use in the receiver. */
+/* T17 independent CPU oracle, extended by T19. Frozen source remains untouched. */
+#include "nr_pdcch_nid_stage1.h"
+#include <time.h>
 /* Offline stage-1 sweep: blind PDCCH DM-RS scrambling-ID discovery over all 65536 IDs x all symbols,
  * on snapshots dumped by the receiver (ISAC_COREMAP_IDSWEEP=<batches>, /tmp/passive_rx/idsweep_NNN.bin).
  * DSP is the receiver's own code, moved here because running it in-process starved the RT path.
@@ -23,12 +25,7 @@ int idsw_gpu_batch(int nsnap, int ncrb, int c_lo, int c_hi, int cs_lo, int cs_hi
 #define IDSW_BINS 4096
 static struct {
   int nsc, point_a_sc, css0_crb, css0_nrb, pci, sps, n;
-  int dur; /* consecutive symbols per snapshot entry (2026-09-24 "ISW2" format); 1 for every selftest
-            * and for any real file, that field's stride is a no-op reduction to the original layout.
-            * Only the FIRST symbol of each window is used by the analysis below -- the extra dur-1
-            * captured symbols are stored on disk but not yet exploited by any scoring function here;
-            * see nr_pdcch_coreset_map.c's own comment for why (coherent multi-symbol ranking is
-            * follow-up work, not attempted in this pass). */
+  int dur; /* number of consecutive captured symbols per snapshot */
   int *slot, *sym;
   c16_t *re;
   float *zsum[2];
@@ -170,179 +167,86 @@ static void idsw_report(void)
 }
 
 
-/* STAGE 1 -> LIST of significant (region, ID, symbol) cells. Under the null a cell's hits are Poisson
- * with rate lambda measured over all cells of the region; threshold k is the smallest with
- * N_cells * P(Poisson(lambda) >= k) < 0.01 (family-wise 1 %). Derived from the data only. */
-static double poisson_tail(double lam, int k)
-{
-  double term = exp(-lam), cdf = 0.0;
-  for (int i = 0; i < k; i++) {
-    cdf += term;
-    term *= lam / (i + 1);
-  }
-  return 1.0 - cdf > 0.0 ? 1.0 - cdf : 0.0;
-}
-
-static int g_list_id[40], g_list_sym[40], g_list_n;
+/* T19: independent CPU sweep, shared small statistical/listing policy. */
+static int g_list_id[40], g_list_sym[40], g_list_dur[40], g_list_n;
+static uint16_t *multi_hits;
+static float *multi_zs;
+static nr_pdcch_nid_result_t stage1_result;
 static void idsw_list(void)
 {
-  g_list_n = 0;
-  const size_t ncell = (size_t)IDSW_NSYM * IDSW_NID;
-  for (int r = 0; r < 2; r++) {
-    double tot = 0.0;
-    for (size_t i = 0; i < ncell; i++)
-      tot += g_idsw.hits[r][i];
-    const double lam = tot / (double)ncell;
-    int k = 1;
-    while (k < 1000 && (double)ncell * poisson_tail(lam, k) >= 0.01)
-      k++;
-    char *done = calloc(ncell, 1);
-    int nlist = 0;
-    for (int pass = 0; pass < 40; pass++) {
-      long bi = -1;
-      unsigned bv = 0;
-      for (size_t i = 0; i < ncell; i++)
-        if (!done[i] && g_idsw.hits[r][i] >= (unsigned)k && g_idsw.hits[r][i] > bv) {
-          bv = g_idsw.hits[r][i];
-          bi = (long)i;
-        }
-      if (bi < 0)
-        break;
-      done[bi] = 1;
-      if (r == 1 && g_list_n < 40) {
-        g_list_id[g_list_n] = (int)(bi % IDSW_NID);
-        g_list_sym[g_list_n++] = (int)(bi / IDSW_NID);
-      }
-      printf("STAGE1LIST region=%s id=%ld sym=%ld hits=%u (k=%d lambda=%.2e)\n", r ? "rest" : "css0",
-             bi % IDSW_NID, bi / IDSW_NID, bv, k, lam);
-      nlist++;
-    }
-    if (!nlist)
-      printf("STAGE1LIST region=%s none (k=%d lambda=%.2e)\n", r ? "rest" : "css0", k, lam);
-    free(done);
+  nid_shortlist(multi_hits, multi_zs, g_idsw.dur, &stage1_result);
+  g_list_n=stage1_result.list_n;
+  for(int i=0;i<g_list_n;i++) {
+    g_list_id[i]=stage1_result.list_id[i];g_list_sym[i]=stage1_result.list_sym[i];
+    g_list_dur[i]=stage1_result.list_dur[i];
+    int d=g_list_dur[i]-1,s=g_list_sym[i];
+    printf("STAGE1LIST region=rest id=%d sym=%d dur=%d (k=%d lambda=%.2e)\n",
+           g_list_id[i],s,d+1,stage1_result.threshold[d][s],stage1_result.lambda[d][s]);
   }
-  fflush(stdout);
 }
-
 static void idsw_process(void)
 {
-  const int nsc = g_idsw.nsc, pa = g_idsw.point_a_sc;
-  /* CRBs whose 12 subcarriers lie wholly inside the grid */
-  const int c_lo = pa >= 0 ? 0 : (-pa + 11) / 12;
-  const int c_hi = (nsc - pa) / 12; /* exclusive */
-  const int ncrb = c_hi;            /* arrays indexed by CRB from 0 */
-  if (c_hi - c_lo < 6)
-    return;
-  const int cs_lo = g_idsw.css0_crb, cs_hi = g_idsw.css0_crb + g_idsw.css0_nrb;
-  const bool have_css0 = g_idsw.css0_nrb >= 6 && cs_lo >= c_lo && cs_hi <= c_hi;
-  const int words = (2 * 3 * ncrb) / 32 + 2;
-  float(*yr)[3] = malloc(sizeof(float[3]) * ncrb), (*yi)[3] = malloc(sizeof(float[3]) * ncrb);
-  float *py = malloc(sizeof(float) * ncrb), *v[2] = {malloc(sizeof(float) * IDSW_NID), malloc(sizeof(float) * IDSW_NID)};
-  uint32_t *gold = malloc(sizeof(uint32_t) * words);
-#ifdef USE_GPU
-  float *gyr = NULL, *gyi = NULL, *gpy = NULL, *gvr = NULL, *gvc = NULL;
-#endif
-  if (!yr || !yi || !py || !v[0] || !v[1] || !gold)
-    goto out;
-  const float zb = sqrtf(2.0f * logf((float)IDSW_NID)) + 2.0f;
-#ifdef USE_GPU
-  /* whole batch on the GPU: all (snapshot, ID) correlations at once; standardisation stays on the CPU */
-  gyr = malloc(sizeof(float) * (size_t)g_idsw.n * ncrb * 3); gyi = malloc(sizeof(float) * (size_t)g_idsw.n * ncrb * 3);
-  gpy = malloc(sizeof(float) * (size_t)g_idsw.n * ncrb);
-  gvr = malloc(sizeof(float) * (size_t)g_idsw.n * IDSW_NID); gvc = malloc(sizeof(float) * (size_t)g_idsw.n * IDSW_NID);
-  for (int k = 0; k < g_idsw.n; k++) {
-    const c16_t *re = g_idsw.re + (size_t)k * g_idsw.dur * nsc; /* window's FIRST symbol only */
-    for (int c = 0; c < ncrb; c++) {
-      float p = 0;
-      for (int q = 0; q < 3; q++) {
-        const c16_t y = c >= c_lo ? re[pa + 12 * c + 1 + 4 * q] : (c16_t){0, 0};
-        gyr[((size_t)k * ncrb + c) * 3 + q] = y.r;
-        gyi[((size_t)k * ncrb + c) * 3 + q] = y.i;
-        p += (float)y.r * y.r + (float)y.i * y.i;
-      }
-      gpy[(size_t)k * ncrb + c] = p;
-    }
+  const int nsc=g_idsw.nsc,pa=g_idsw.point_a_sc;
+  const int lo=pa>=0?0:(-pa+11)/12,hi=(nsc-pa)/12,words=6*hi/32+2;
+  const int cs=g_idsw.css0_crb,ce=cs+g_idsw.css0_nrb;
+  const bool css=g_idsw.css0_nrb>=6 && cs>=lo && ce<=hi;
+  if(!multi_hits) {
+    multi_hits=calloc(6*NID_CELLS,sizeof(*multi_hits));
+    multi_zs=calloc(6*NID_CELLS,sizeof(*multi_zs));
   }
-  const bool gpu_ok = idsw_gpu_batch(g_idsw.n, ncrb, c_lo, c_hi, cs_lo, cs_hi, have_css0, g_idsw.sps, g_idsw.slot,
-                                     g_idsw.sym, gyr, gyi, gpy, gvr, gvc) == 0;
-  if (!gpu_ok) fprintf(stderr, "GPU batch failed, falling back to CPU\n");
-  const bool gpucheck = getenv("IDSW_GPUCHECK") != NULL;
-#endif
-  {
-    for (int k = 0; k < g_idsw.n; k++) {
-      const int s = g_idsw.sym[k];
-      const c16_t *re = g_idsw.re + (size_t)k * g_idsw.dur * nsc; /* window's FIRST symbol only */
-      for (int c = c_lo; c < c_hi; c++) {
-        float p = 0;
-        for (int q = 0; q < 3; q++) {
-          const c16_t y = re[pa + 12 * c + 1 + 4 * q];
-          yr[c][q] = y.r;
-          yi[c][q] = y.i;
-          p += (float)y.r * y.r + (float)y.i * y.i;
+  for(int r=0;r<2;r++) {g_idsw.hits[r]=multi_hits+r*NID_CELLS;g_idsw.zsum[r]=multi_zs+r*NID_CELLS;}
+  float (*yr)[3]=malloc(hi*sizeof(float[3])),(*yi)[3]=malloc(hi*sizeof(float[3]));
+  float *py=malloc(hi*sizeof(float)),*values=malloc(2*NID_IDS*sizeof(float));
+  float *z=malloc(6*NID_IDS*sizeof(float)),panel[NID_CAL];
+  const float bound=sqrtf(2.f*logf((float)NID_IDS))+2.f;
+  for(int k=0;k<g_idsw.n;k++) {
+    int sym=g_idsw.sym[k];
+    for(int d=0;d<g_idsw.dur;d++) {
+      const c16_t *re=g_idsw.re+((size_t)k*g_idsw.dur+d)*nsc;
+      for(int c=lo;c<hi;c++) {
+        py[c]=0;
+        for(int q=0;q<3;q++) {
+          c16_t y=re[pa+12*c+1+4*q];yr[c][q]=y.r;yi[c][q]=y.i;
+          py[c]+=(float)y.r*y.r+(float)y.i*y.i;
         }
-        py[c] = p;
       }
-      bool cpu = true;
-#ifdef USE_GPU
-      if (gpu_ok) {
-        memcpy(v[1], gvr + (size_t)k * IDSW_NID, sizeof(float) * IDSW_NID);
-        memcpy(v[0], gvc + (size_t)k * IDSW_NID, sizeof(float) * IDSW_NID);
-        cpu = gpucheck && k < 4;
-      }
-#endif
-      if (cpu) {
-        float *cv0 = malloc(sizeof(float) * IDSW_NID), *cv1 = malloc(sizeof(float) * IDSW_NID);
+      /* Exact z>2 constituent gate: unselected secondary correlations can
+       * never produce a combined hit. Panel IDs are always evaluated. */
 #pragma omp parallel for schedule(static)
-        for (int id = 0; id < IDSW_NID; id++) {
-          uint32_t gold[words];
-          uint32_t x1 = 0, x2 = idsw_cinit(id, g_idsw.slot[k], s);
-          gold[0] = gold_generic(&x1, &x2, 1);
-          for (int w = 1; w < words; w++)
-            gold[w] = gold_generic(&x1, &x2, 0);
-          cv1[id] = idsw_best(yr, yi, py, c_lo, c_hi, have_css0 ? cs_lo : 0, have_css0 ? cs_hi : 0, gold, 0);
-          cv0[id] = have_css0 ? idsw_best(yr, yi, py, cs_lo, cs_hi, 0, 0, gold, cs_lo) : 0.0f;
-        }
-#ifdef USE_GPU
-        if (gpu_ok) { /* check mode: report the largest GPU-vs-CPU difference, keep the GPU values */
-          float d = 0;
-          for (int id = 0; id < IDSW_NID; id++) d = fmaxf(d, fmaxf(fabsf(cv1[id] - v[1][id]), fabsf(cv0[id] - v[0][id])));
-          printf("GPUCHECK snapshot %d: max |gpu - cpu| = %.2e\n", k, d);
-        } else
-#endif
-        {
-          memcpy(v[1], cv1, sizeof(float) * IDSW_NID);
-          memcpy(v[0], cv0, sizeof(float) * IDSW_NID);
-        }
-        free(cv0);
-        free(cv1);
+      for(int id=0;id<NID_IDS;id++) {
+        if(d && id%64 && z[NID_IDS+id]<=2.f) continue;
+        uint32_t gold[words],x1=0,x2=idsw_cinit(id,g_idsw.slot[k],sym+d);
+        for(int w=0;w<words;w++)gold[w]=gold_generic(&x1,&x2,w==0);
+        values[NID_IDS+id]=idsw_best(yr,yi,py,lo,hi,css?cs:0,css?ce:0,gold,0);
+        if(!d)values[id]=css?idsw_best(yr,yi,py,cs,ce,0,0,gold,cs):0;
       }
-      for (int r = have_css0 ? 0 : 1; r < 2; r++) {
-        float med, sig;
-        idsw_med_sig(v[r], IDSW_NID, &med, &sig);
-        float *zs = g_idsw.zsum[r] + (size_t)s * IDSW_NID;
-        uint16_t *hs = g_idsw.hits[r] + (size_t)s * IDSW_NID;
-        for (int id = 0; id < IDSW_NID; id++) {
-          const float z = (v[r][id] - med) / sig;
-          zs[id] += z;
-          if (z > zb && hs[id] < UINT16_MAX)
-            hs[id]++;
+      for(int r=d?1:css?0:1;r<2;r++) {
+        float med,sig;
+        if(d) {
+          for(int j=0;j<NID_CAL;j++)panel[j]=values[NID_IDS+j*64];
+          idsw_med_sig(panel,NID_CAL,&med,&sig);
+        } else idsw_med_sig(values+r*NID_IDS,NID_IDS,&med,&sig);
+        for(int id=0;id<NID_IDS;id++) {
+          if(d && z[NID_IDS+id]<=2.f) continue;
+          float score=(values[r*NID_IDS+id]-med)/sig;
+          z[(2*d+r)*NID_IDS+id]=score;
+          int j=(2*d+r)*NID_CELLS+sym*NID_IDS+id;
+          if(!d) {
+            multi_zs[j]+=score;
+            if(score>bound)multi_hits[j]++;
+          } else {
+            float sum=z[NID_IDS+id];bool pass=sum>2.f;
+            for(int e=1;e<=d;e++) {float v=z[(2*e+1)*NID_IDS+id];sum+=v;pass&=v>2.f;}
+            float combined=sum/sqrtf((float)(d+1));
+            if(pass && combined>bound) {multi_hits[j]++;multi_zs[j]+=combined;}
+          }
         }
       }
     }
   }
-  g_idsw.nsnap += g_idsw.n / (g_idsw.sps > 0 ? g_idsw.sps : IDSW_NSYM);
-  g_idsw.batches++;
+  g_idsw.nsnap+=g_idsw.n/14;g_idsw.batches++;
   idsw_report();
-out:
-#ifdef USE_GPU
-  free(gyr); free(gyi); free(gpy); free(gvr); free(gvc);
-#endif
-  free(yr);
-  free(yi);
-  free(py);
-  free(v[0]);
-  free(v[1]);
-  free(gold);
+  free(yr);free(yi);free(py);free(values);free(z);
 }
 
 
@@ -763,13 +667,16 @@ static double st2_consistency(const st2_snap_t *sn, int nact, const st2_hyp_t *h
   return med;
 }
 
-static int stage2(int nid, int sym0, bool quiet)
+static int stage2_duration(int nid, int sym0, bool quiet, int duration)
 {
   const int pa = g_idsw.point_a_sc;
   g_st2_clo = pa >= 0 ? 0 : (-pa + 11) / 12;
   g_st2_chi = (g_idsw.nsc - pa) / 12;
   g_st2_D = 1; /* duration detection reads each window's FIRST symbol only */
   st2_snap_t tmp = st2_alloc();
+  int dur=duration;
+  /* Legacy seeded geometry tests retain their independent duration inference. */
+  if(!dur) {
   /* duration from per-symbol lit rates */
   int nsym[IDSW_NSYM] = {0}, nlit[IDSW_NSYM] = {0};
   for (int k = 0; k < g_idsw.n; k++) {
@@ -781,23 +688,15 @@ static int stage2(int nid, int sym0, bool quiet)
     nlit[s] += st2_lit(&tmp, &lo, &hi);
   }
   const double r0 = nsym[sym0] ? (double)nlit[sym0] / nsym[sym0] : 0.0;
-  int dur = 1;
+  dur = 1;
   while (dur < 3 && sym0 + dur < IDSW_NSYM && nsym[sym0 + dur]
          && (double)nlit[sym0 + dur] / nsym[sym0 + dur] >= 0.5 * r0)
     dur++;
-  printf("STAGE2 nID=%d start_sym=%d lit rate sym%d..%d: %.3f %.3f %.3f -> duration %d\n", nid, sym0, sym0, sym0 + 2,
-         r0, nsym[sym0 + 1] ? (double)nlit[sym0 + 1] / nsym[sym0 + 1] : 0.0,
-         nsym[sym0 + 2] ? (double)nlit[sym0 + 2] / nsym[sym0 + 2] : 0.0, dur);
-  g_st2_D = 1;
-  if (dur != 1) {
-    if (g_idsw.dur < dur) {
-      printf("STAGE2 duration %d needs snapshots of %d consecutive symbols (this capture holds %d): re-run the receiver with "
-             "ISAC_COREMAP_IDSWEEP_DUR=%d and start symbol %d\n", dur, dur, g_idsw.dur, dur, sym0);
-      return 1;
-    }
-    g_st2_D = dur; /* coherent ranking over the D symbols of each window */
-    printf("STAGE2 duration %d: ranking geometry coherently over %d consecutive symbols per snapshot\n", dur, dur);
   }
+  if(dur<1 || dur>g_idsw.dur || sym0+dur>14) {free(tmp.re);free(tmp.im);free(tmp.p);free(tmp.rr);free(tmp.ri);free(tmp.rp);return 1;}
+  g_st2_D=dur;
+  int nsym[14]={0};
+  for(int k=0;k<g_idsw.n;k++)nsym[g_idsw.sym[k]]++;
   /* active snapshots */
   st2_snap_t *sn = calloc(g_idsw.n, sizeof(st2_snap_t));
   int nact = 0, hlo = 1 << 30, hhi = -1;
@@ -965,6 +864,8 @@ static int stage2(int nid, int sym0, bool quiet)
 /* Synthetic stage-2 capture: Point A at grid sc 7; dedicated CORESET at CRB 60, 30 groups, duration 1,
  * mapping = non-interleaved ("ni") or interleaved L=6 R=2 shift=7 ("il"); one AL2 PDCCH (random even
  * CCE) in every 2nd symbol-0 snapshot, nID 12345, amplitude 1.5 over unit noise. */
+static int stage2(int nid,int sym,bool quiet) {return stage2_duration(nid,sym,quiet,0);}
+
 static void selftest2_make(bool il)
 {
   selftest_make(); /* noise + stage-1 plants; its symbol-3 ID-12345 plant is harmless here */
@@ -1331,6 +1232,59 @@ int nid_reference_original_main(int argc, char **argv)
 /* In-memory test adapter. Production never links this independent CPU oracle. */
 #include "nr_pdcch_nid_reference.h"
 static int reference_fixture;
+/* Independent time-first REG mapper for T19 fixtures. Different from the
+ * scorer: enumerate REG indices, then map each to (RB, symbol). */
+static void plant(c16_t *re,int slot,int symbol,int occasion,int nid,int first,int D,int cs,int ng,int L,int R)
+{
+  if(symbol<first || symbol>=first+D || occasion%3==2)return;
+  int bundle=L?L:6,nb=6*ng*D/bundle,al=2<<((occasion/3)%2);
+  int cce=al*((occasion*7/3)%(ng*D/al));
+  uint32_t gold[54],x1=0,x2=idsw_cinit(nid,slot,symbol);
+  for(int w=0;w<54;w++)gold[w]=gold_generic(&x1,&x2,w==0);
+  for(int j=cce*6/bundle;j<(cce+al)*6/bundle;j++) {
+    int f=L?((j%R)*(nb/R)+j/R+1)%nb:j;
+    for(int reg=f*bundle;reg<(f+1)*bundle;reg++) {
+      if(reg%D!=symbol-first)continue;
+      int rb=cs+reg/D;
+      for(int q=0;q<3;q++) {
+        float xr,xi;idsw_pilot(gold,3*rb+q,&xr,&xi);
+        re[12*rb+1+4*q].r+=(int16_t)(3500*xr);
+        re[12*rb+1+4*q].i-=(int16_t)(3500*xi);
+      }
+    }
+  }
+}
+static void multi_make(int fixture)
+{
+  g_idsw.nsc=12*42;g_idsw.point_a_sc=0;g_idsw.css0_crb=0;g_idsw.css0_nrb=0;g_idsw.pci=2;
+  g_idsw.sps=14;g_idsw.n=336;g_idsw.dur=fixture==20?2:3;
+  g_idsw.slot=malloc(336*sizeof(int));g_idsw.sym=malloc(336*sizeof(int));
+  g_idsw.re=malloc((size_t)336*g_idsw.dur*g_idsw.nsc*sizeof(c16_t));
+  srand(119+fixture);
+  int D=fixture==21?1:fixture<=11 || fixture==20?2:3,first=fixture==10?0:fixture==11?1:fixture==19?11:fixture==20?12:3;
+  int L=fixture==12 || fixture==13?6:fixture==18?3:0,R=fixture==13?3:2;
+  for(int k=0;k<336;k++) {
+    int start=k%14;if(start+g_idsw.dur>14)start=0;
+    g_idsw.slot[k]=(k/14)%20;g_idsw.sym[k]=start;
+    for(int d=0;d<g_idsw.dur;d++) {
+      int sym=start+d;
+      c16_t *re=g_idsw.re+((size_t)k*g_idsw.dur+d)*g_idsw.nsc;
+      for(int i=0;i<g_idsw.nsc;i++) {
+        /* Gaussian noise; load arm adds independent QPSK data and type-1
+         * PDSCH-like DM-RS on even subcarriers (PDCCH uses 1,5,9). */
+        double u=(rand()+1.)/(RAND_MAX+2.),v=rand()/(RAND_MAX+1.);
+        double amp=400*sqrt(-2*log(u));
+        re[i]=(c16_t){amp*cos(2*M_PI*v),amp*sin(2*M_PI*v)};
+        if(fixture==17) {
+          re[i].r+=(rand()&1)?1800:-1800;re[i].i+=(rand()&1)?1800:-1800;
+          if((sym==2 || sym==11) && !(i%2)) {re[i].r+=(rand()&1)?2400:-2400;re[i].i+=(rand()&1)?2400:-2400;}
+        }
+      }
+      if(fixture!=16 && fixture!=17)plant(re,g_idsw.slot[k],sym,k/14,12345,first,D,12,4,L,R);
+      if(fixture==15)plant(re,g_idsw.slot[k],sym,k/14,777,8,1,6,6,0,0);
+    }
+  }
+}
 void nid_reference_make(int fixture, nr_pdcch_nid_batch_t *batch)
 {
  reference_fixture=fixture;
@@ -1339,6 +1293,7 @@ void nid_reference_make(int fixture, nr_pdcch_nid_batch_t *batch)
  else if(fixture==3 || fixture==4)selftest4_make(fixture==4);
  else if(fixture==5)selftest5_make();
  else if(fixture==6)selftest3_make();
+ else if(fixture>=10)multi_make(fixture);
  else {
   g_idsw.nsc=432;g_idsw.point_a_sc=0;g_idsw.css0_crb=0;g_idsw.css0_nrb=6;g_idsw.pci=2;
   g_idsw.sps=14;g_idsw.n=336;g_idsw.dur=fixture-6;
@@ -1380,25 +1335,18 @@ void nid_reference_run(int stage1,nr_pdcch_nid_result_t *out)
 {
  memset(out,0,sizeof(*out));g_nfound=0;
  if(stage1) {
-  for(int r=0;r<2;r++) {
-   g_idsw.zsum[r]=calloc((size_t)14*65536,sizeof(float));g_idsw.hits[r]=calloc((size_t)14*65536,sizeof(uint16_t));
-  }
+  struct timespec t0,t1;clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&t0);
   idsw_process();idsw_list();
-  for(int r=0;r<2;r++) {
-   float best=-1;out->hit_hash[r]=1469598103934665603ULL;
-   for(int i=0;i<14*65536;i++) {
-    out->hit_hash[r]=(out->hit_hash[r]^g_idsw.hits[r][i])*1099511628211ULL;
-    float v=g_idsw.hits[r][i]+g_idsw.zsum[r][i]*1e-4f;
-    if(v>best){best=v;out->top_id[r]=i%65536;out->top_sym[r]=i/65536;}
-   }
-  }
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&t1);
+  *out=stage1_result;out->stage1_ms=(t1.tv_sec-t0.tv_sec)*1000.f+(t1.tv_nsec-t0.tv_nsec)*1e-6f;
+  printf("STAGE1_CPU_MS %.3f\n",out->stage1_ms);
  } else {g_list_n=reference_fixture==6?2:1;g_list_id[0]=12345;g_list_sym[0]=reference_fixture>=7?3:0;
          g_list_id[1]=777;g_list_sym[1]=5;}
  out->list_n=g_list_n;
  for(int i=0;i<g_list_n;i++) {
-  out->list_id[i]=g_list_id[i];out->list_sym[i]=g_list_sym[i];
+  out->list_id[i]=g_list_id[i];out->list_sym[i]=g_list_sym[i];out->list_dur[i]=stage1?g_list_dur[i]:0;
   bool seen=false;for(int j=0;j<i;j++)seen|=g_list_id[j]==g_list_id[i];
-  if(!seen)stage2(g_list_id[i],g_list_sym[i],true);
+  if(stage1 || !seen)stage2_duration(g_list_id[i],g_list_sym[i],true,out->list_dur[i]);
  }
  if(g_idsw.point_a_sc%12)return;
  for(int i=0;i<g_nfound;i++) {
@@ -1410,4 +1358,19 @@ void nid_reference_run(int stage1,nr_pdcch_nid_result_t *out)
   memcpy(out->al_win[out->count],g_found[i].al_win,sizeof(g_found[i].al_win));
   out->records[out->count++]=(nr_pdcch_nid_record_t){g_found_nid[i],g_found_sym[i],g_found_dur[i],h.phase+6*h.g0+g_idsw.point_a_sc/12,h.ng,h.L,h.R,h.shift,g_found_nties[i]};
  }
+}
+
+/* Independent fresh-batch sufficient statistics for the streaming parity test. */
+void nid_reference_batch_stats(const nr_pdcch_nid_batch_t *b,uint16_t *hits,float *zs)
+{
+ __typeof__(g_idsw) saved=g_idsw;
+ g_idsw.nsc=b->cfg.nsc;g_idsw.point_a_sc=b->cfg.point_a_sc;
+ g_idsw.css0_crb=b->cfg.css0_crb;g_idsw.css0_nrb=b->cfg.css0_nrb;
+ g_idsw.sps=b->cfg.sps;g_idsw.dur=b->cfg.dur;g_idsw.n=b->count;
+ g_idsw.slot=(int*)b->slot;g_idsw.sym=(int*)b->sym;g_idsw.re=(c16_t*)b->iq;
+ if(multi_hits)memset(multi_hits,0,6*NID_CELLS*sizeof(*multi_hits));
+ if(multi_zs)memset(multi_zs,0,6*NID_CELLS*sizeof(*multi_zs));
+ idsw_process();
+ memcpy(hits,multi_hits,6*NID_CELLS*sizeof(*hits));memcpy(zs,multi_zs,6*NID_CELLS*sizeof(*zs));
+ g_idsw=saved;
 }

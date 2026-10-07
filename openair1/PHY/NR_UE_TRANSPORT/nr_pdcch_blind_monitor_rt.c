@@ -2966,7 +2966,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     if (idsw_sym >= 0 && s_idsw_buf != NULL) {
       c16_t(*rxF_id)[fp->samples_per_slot_wCP] = (c16_t(*)[fp->samples_per_slot_wCP])s_idsw_buf;
       const int idsw_dur = nr_pdcch_coreset_map_idsweep_dur();
-      for (int d = 0; d < idsw_dur; d++)
+      for (int d = 0; d < idsw_dur && idsw_sym + d < fp->symbols_per_slot; d++)
         nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, idsw_sym + d, 0 /* ant */, rxF_id, link_type_dl, 0,
                         ue->common_vars.rxdata);
       nr_pdcch_coreset_map_idsweep_push(s_idsw_buf + idsw_sym * fp->ofdm_symbol_size, fp->ofdm_symbol_size,

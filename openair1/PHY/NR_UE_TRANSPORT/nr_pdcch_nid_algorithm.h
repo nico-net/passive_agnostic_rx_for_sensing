@@ -311,10 +311,12 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
   // sorted frac[nf/2] >= .5, without malloc or sort.
   return nf && below<=nf/2;
  }
- NID_FN void prepare(int id,int sym) {
+ NID_FN void prepare(int id,int sym,int duration=0) {
   nid=id; sym0=sym; nact=0; alive=0;
   const int pa=g_idsw.point_a_sc;
   g_st2_clo=pa>=0?0:(-pa+11)/12; g_st2_chi=(g_idsw.nsc-pa)/12; g_st2_D=1;
+  int dur=duration;
+  if (!dur) {
   int nsym[14]={0},nlit[14]={0};
   for(int k=0;k<g_idsw.n;k++) {
    int s=g_idsw.sym[g_idsw.index(k)];
@@ -322,9 +324,10 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
    st2_build(k,nid,&tmp);nsym[s]++;nlit[s]+=st2_lit(&tmp);
   }
   double r0=nsym[sym0]?(double)nlit[sym0]/nsym[sym0]:0;
-  int dur=1;
+  dur=1;
   while(dur<3 && sym0+dur<14 && nsym[sym0+dur] && (double)nlit[sym0+dur]/nsym[sym0+dur]>=0.5*r0) dur++;
-  if(dur>g_idsw.dur) return;
+  }
+  if(dur<1 || dur>g_idsw.dur || sym0+dur>14) return;
   g_st2_D=dur;
   for(int k=0;k<g_idsw.n;k++) {
    if(g_idsw.sym[g_idsw.index(k)]!=sym0) continue;

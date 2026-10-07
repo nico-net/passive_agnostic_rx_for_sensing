@@ -20,7 +20,8 @@ static struct {
  int state[3]; /* 0 free, 1 producer, 2 full, 3 worker */
  uint64_t sequence[3], produced, generation, passes, dropped;
  nr_pdcch_nid_result_t result;
- int producer, n, rb, dur, every, window;
+ int producer, n, rb, dur, every, window, batch_size;
+ bool incremental;
  bool stop;
  _Atomic bool running;
 } g = {.mu=PTHREAD_MUTEX_INITIALIZER,.cv=PTHREAD_COND_INITIALIZER,.producer=-1};
@@ -69,7 +70,7 @@ static void *worker(void *unused)
   pthread_mutex_unlock(&g.mu);
   if(rc<0)goto failed;
   batches++;
-  if(batches<(unsigned)g.window || (batches-g.window)%(unsigned)g.every)continue;
+  if(!g.incremental && (batches<(unsigned)g.window || (batches-g.window)%(unsigned)g.every))continue;
   nr_pdcch_nid_result_t result={0};
   rc=g.ops->run(g.device,&result);
   if(rc<0)goto failed;
@@ -77,6 +78,7 @@ static void *worker(void *unused)
    if(rc==2) LOG_W(PHY,"SENSING: PDCCH_NID_GPU pass budget exhausted; previous records retained\n");
    continue;
   }
+  if(result.shortlist_overflow)LOG_W(PHY,"SENSING: PDCCH_NID_GPU shortlist overflow; no truncated evidence published\n");
   if(result.budget_exceeded)LOG_W(PHY,"SENSING: PDCCH_NID_GPU soft pass budget exceeded; completed records published\n");
   pthread_mutex_lock(&g.mu);
   g.result=result;g.generation++;g.passes++;
@@ -111,7 +113,9 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  g.dur=duration?atoi(duration):3;
  if(g.dur<1)g.dur=1;
  if(g.dur>3)g.dur=3;
- g.every=env_int("ISAC_PDCCH_NID_GPU_EVERY",2,1,1000);
+ g.incremental=getenv("ISAC_CSIRS_DISC") && !strcmp(getenv("ISAC_CSIRS_DISC"),"1");
+ g.batch_size=g.incremental?env_int("ISAC_PDCCH_NID_GPU_BATCH",64,1,NR_PDCCH_NID_BATCH):NR_PDCCH_NID_BATCH;
+ g.every=g.incremental?1:env_int("ISAC_PDCCH_NID_GPU_EVERY",2,1,1000);
  g.window=env_int("ISAC_PDCCH_NID_GPU_WINDOW",10,1,NR_PDCCH_NID_MAX_WINDOW);
  g.module=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);
  if(!g.module)goto fail;
@@ -138,8 +142,8 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  pthread_attr_destroy(&attr);
  if(rc)goto fail;
  atomic_store_explicit(&g.running,true,memory_order_release);
- LOG_I(PHY,"SENSING: PDCCH_NID_GPU ready: core=%d SCHED_OTHER window=%d every=%d dur=%d pinned staging=3 batches\n",
-       core,g.window,g.every,g.dur);
+ LOG_I(PHY,"SENSING: PDCCH_NID_GPU ready: core=%d SCHED_OTHER window=%d every=%d dur=%d batch=%d incremental=%d pinned staging=3 batches\n",
+       core,g.window,g.every,g.dur,g.batch_size,g.incremental);
  return 0;
 fail:
  if(g.device)g.ops->destroy(g.device);
@@ -164,7 +168,7 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
 {
  if(!nr_pdcch_nid_gpu_running() || !rx || !cfg || cfg->dur!=g.dur || cfg->nsc<72
     || cfg->nsc>12*g.rb || cfg->nsc>fft || fco<0 || fco>=fft || cfg->sps<1 || cfg->sps>14
-    || sym<0 || sym+cfg->dur>cfg->sps || slot<0 || slot>=160
+    || sym<0 || (g.incremental?sym>=cfg->sps:sym+cfg->dur>cfg->sps) || slot<0 || slot>=160
     || (cfg->nsc-cfg->point_a_sc)/12>275
     || (cfg->nsc-cfg->point_a_sc)/12-(cfg->point_a_sc<0?(-cfg->point_a_sc+11)/12:0)<6)return -1;
  if(pthread_mutex_trylock(&g.mu))return -1;
@@ -178,10 +182,12 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
  const nr_pdcch_nid_iq_t *src=rx;
  for(int d=0;d<g.dur;d++) {
   nr_pdcch_nid_iq_t *dst=b->iq+((size_t)g.n*g.dur+d)*12*g.rb;
-  for(int i=0;i<cfg->nsc;i++)dst[i]=src[(size_t)d*fft+(fco+i)%fft];
+  if(sym+d<cfg->sps)for(int i=0;i<cfg->nsc;i++)dst[i]=src[(size_t)d*fft+(fco+i)%fft];
+  else memset(dst,0,cfg->nsc*sizeof(*dst));
  }
  b->slot[g.n]=slot;b->sym[g.n]=sym;
- if(++g.n==NR_PDCCH_NID_BATCH) {
+ if(++g.n==g.batch_size) {
+  b->count=g.incremental?g.batch_size:0;
   g.state[g.producer]=2;g.sequence[g.producer]=++g.produced;g.producer=-1;g.n=0;
   pthread_cond_signal(&g.cv);
  }

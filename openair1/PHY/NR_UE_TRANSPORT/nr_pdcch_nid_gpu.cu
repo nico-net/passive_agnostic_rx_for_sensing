@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <chrono>
 #include <thread>
+#include <algorithm>
 #include "nr_dl_gpu_memory.h"
 #define NID_FN __device__
 #include "nr_pdcch_nid_stage1.h"
@@ -12,21 +13,37 @@
 namespace {
 constexpr int IDS=65536, CELLS=14*IDS, CHUNK=4, TIMERS=32768;
 enum Kernel {RESET, SWEEP, STANDARDIZE, ACCUMULATE, PREPARE_INIT, PROBE, CONTROL, SNAPSHOTS, HULL, GENERATE, SCORE, FINISH, SUMMARY};
+constexpr int STAT=6*CELLS, CAND_CAP=4096;
+struct Candidate {int cell;float score;};
+struct Compact {unsigned count;Candidate item[CAND_CAP];};
 struct Summary {unsigned total;float peak;int cell;};
 struct Device {
  NidStage2 stage2;
  NidView view;
- float *values, *zsum;
+ bool multisymbol;
+ uint16_t *history_hits, *total_hits;
+ float *history_z;
+ double *total_z;
+ Compact compact;
+ int threshold[3][14];
+ double lambda[3][14];
+ float *values, *zsum, *multi;
+ int *candidates, selected_count[CHUNK];
  uint16_t *hits;
  int *lit,*active;
+ int explicit_duration;
  Summary *summary;
- float median[2*CHUNK], sigma[2*CHUNK];
+ float median[4*CHUNK], sigma[4*CHUNK];
  nr_pdcch_nid_result_t result;
 };
 struct HostTransfer {
  int slot[NR_PDCCH_NID_BATCH],sym[NR_PDCCH_NID_BATCH],control[2];
  nr_pdcch_nid_result_t result;
- uint16_t hits[2*CELLS];
+ Compact compact;
+ double lambda[3][14];
+ int threshold[3][14];
+ uint16_t hits[6*CELLS];
+ float zsum[6*CELLS];
  Summary summary[2*CELLS/256];
 };
 struct Context {
@@ -39,51 +56,89 @@ struct Context {
  HostTransfer *transfer;
  nr_pdcch_nid_config_t cfg;
  int rb, dur, window, batches, budget_ms;
- void *alloc[16]; size_t bytes[16]; int nalloc;
+ int batch_size, pending, first_new;
+ bool incremental;
+ uint64_t look;
+ nr_pdcch_nid_result_t bank;
+ uint64_t last_seen[NR_PDCCH_NID_MAX_RECORDS];
+ void *alloc[28]; size_t bytes[28]; int nalloc;
 };
 __global__ void reset(Device *p, NidView v) {
  if(threadIdx.x || blockIdx.x) return;
  p->view=v; p->stage2.g_idsw=v;
  p->result={};
 }
+// Tile two snapshots across 128 IDs. Cooperative pilot loads are contiguous
+// in DM-RS order; every warp then broadcasts shared REs. Power prefixes and
+// square roots are no longer redundantly calculated for each ID/window.
 __global__ void sweep(Device *p,int first,int count) {
- int id=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
- if(id>=IDS || k>=count) return;
- const NidView &v=p->view; int idx=v.index(first+k);
- uint64_t x=((uint64_t)v.sps*v.slot[idx]+v.sym[idx]+1)*((uint64_t)(id*2)+1);
- uint32_t seed=(uint32_t)(((x<<17)+id*2)&0x7fffffff);
+ __shared__ c16_t pilots[2][3*275];
+ __shared__ float power[2][2][276];
+ int lane=threadIdx.x, tile=threadIdx.y,k=2*blockIdx.y+tile;
+ const NidView &v=p->view;
  int hi=(v.nsc-v.point_a_sc)/12,lo=v.point_a_sc>=0?0:(-v.point_a_sc+11)/12;
  bool css=v.css0_nrb>=6 && v.css0_crb>=lo && v.css0_crb+v.css0_nrb<=hi;
- p->values[(2*k+1)*IDS+id]=nid_best_symbol(v,first+k,seed,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0);
- p->values[(2*k)*IDS+id]=css?nid_best_symbol(v,first+k,seed,v.css0_crb,v.css0_crb+v.css0_nrb,0,0,v.css0_crb):0;
+ if(k<count) {
+  const c16_t *re=v.grid(first+k);
+  for(int m=3*lo+lane;m<3*hi;m+=128)pilots[tile][m]=re[v.point_a_sc+4*m+1];
+ }
+ __syncthreads();
+ if(k<count && lane<2) {
+  int begin=lane && css?v.css0_crb:lo,end=lane && css?v.css0_crb+v.css0_nrb:hi;
+  float sum=0;power[tile][lane][begin]=0;
+  for(int c=begin;c<end;c++) {
+   float a=0;
+   for(int q=0;q<3;q++){c16_t y=pilots[tile][3*c+q];a+=(float)y.r*y.r+(float)y.i*y.i;}
+   sum+=a;power[tile][lane][c+1]=sum;
+  }
+ }
+ __syncthreads();
+ int id=blockIdx.x*128+lane;if(id>=IDS || k>=count)return;
+ int idx=v.index(first+k);
+ uint64_t x=((uint64_t)v.sps*v.slot[idx]+v.sym[idx]+1)*((uint64_t)(id*2)+1);
+ uint32_t seed=(uint32_t)(((x<<17)+id*2)&0x7fffffff);
+ p->values[(2*k+1)*IDS+id]=nid_best_symbol(v,first+k,seed,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0,0,pilots[tile],power[tile][0]);
+ p->values[(2*k)*IDS+id]=css?nid_best_symbol(v,first+k,seed,v.css0_crb,v.css0_crb+v.css0_nrb,0,0,v.css0_crb,0,pilots[tile],power[tile][1]):0;
+}
+__device__ float secondary(const NidView &v,int k,int id,int d) {
+ int idx=v.index(k),hi=(v.nsc-v.point_a_sc)/12,lo=v.point_a_sc>=0?0:(-v.point_a_sc+11)/12;
+ uint64_t x=((uint64_t)v.sps*v.slot[idx]+v.sym[idx]+d+1)*((uint64_t)(id*2)+1);
+ uint32_t seed=(uint32_t)(((x<<17)+id*2)&0x7fffffff);
+ bool css=v.css0_nrb>=6 && v.css0_crb>=lo && v.css0_crb+v.css0_nrb<=hi;
+ return nid_best_symbol(v,k,seed,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0,d);
+}
+__global__ void calibrate(Device *p,int first,int count) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y,d=blockIdx.z+1;
+ if(j>=NID_CAL || k>=count || d>=p->view.dur)return;
+ p->values[(2*CHUNK+2*k+d-1)*IDS+j]=secondary(p->view,first+k,j*64,d);
 }
 __device__ void histogram_add(unsigned *h,int bin) {
  unsigned peers=__match_any_sync(__activemask(),bin);
  if((threadIdx.x&31)==__ffs(peers)-1)atomicAdd(h+bin,__popc(peers));
 }
-__global__ void standardize(Device *p) {
+__global__ void standardize(Device *p,int base=0,int size=IDS) {
  __shared__ unsigned h[4096];
- int k=blockIdx.x,tid=threadIdx.x;
+ int k=base+blockIdx.x,tid=threadIdx.x;
  for(int j=tid;j<4096;j+=blockDim.x)h[j]=0;
  __syncthreads();
  const float *v=p->values+k*IDS;
- for(int i=tid;i<IDS;i+=blockDim.x) {
+ for(int i=tid;i<size;i+=blockDim.x) {
   int b=(int)(v[i]*4095);histogram_add(h,b<0?0:b>=4096?4095:b);
  }
  __syncthreads();
  if(tid==0) {
-  unsigned a=0;int b=0;while(b<4095 && a+h[b]<IDS/2)a+=h[b++];
+  unsigned a=0;int b=0;while(b<4095 && a+h[b]<size/2)a+=h[b++];
   p->median[k]=(b+0.5f)/4095;
  }
  __syncthreads();
  for(int j=tid;j<4096;j+=blockDim.x)h[j]=0;
  __syncthreads();
- for(int i=tid;i<IDS;i+=blockDim.x) {
+ for(int i=tid;i<size;i+=blockDim.x) {
   int b=(int)(fabsf(v[i]-p->median[k])*4095);histogram_add(h,b>=4096?4095:b);
  }
  __syncthreads();
  if(tid==0) {
-  unsigned a=0;int b=0;while(b<4095 && a+h[b]<IDS/2)a+=h[b++];
+  unsigned a=0;int b=0;while(b<4095 && a+h[b]<size/2)a+=h[b++];
   p->sigma[k]=fmaxf(1.4826f*((b+0.5f)/4095),1e-6f);
  }
 }
@@ -100,6 +155,46 @@ __global__ void accumulate(Device *p,int first,int count) {
    float z=(p->values[(2*k+r)*IDS+id]-p->median[2*k+r])/p->sigma[2*k+r];
    int j=r*CELLS+sym*IDS+id;
    p->zsum[j]+=z; if(z>zb && p->hits[j]<65535)p->hits[j]++;
+  }
+ }
+}
+// Compact before secondary Gold generation, so sparse surviving IDs occupy
+// full warps instead of forcing almost every warp through expensive branches.
+__global__ void screen(Device *p,int count) {
+ int id=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
+ if(id>=IDS || k>=count)return;
+ float z=(p->values[(2*k+1)*IDS+id]-p->median[2*k+1])/p->sigma[2*k+1];
+ if(z>2.f) {
+  int j=atomicAdd(p->selected_count+k,1);
+  p->candidates[k*IDS+j]=id;
+ }
+}
+__global__ void combine(Device *p,int first,int count) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
+ if(k>=count || j>=p->selected_count[k])return;
+ int id=p->candidates[k*IDS+j];
+ const float bound=sqrtf(2.f*logf((float)IDS))+2.f;
+ float sum=(p->values[(2*k+1)*IDS+id]-p->median[2*k+1])/p->sigma[2*k+1];
+ for(int d=1;d<p->view.dur && p->view.sym[p->view.index(first+k)]+d<p->view.sps;d++) {
+  int cal=2*CHUNK+2*k+d-1;
+  float value=id%64?secondary(p->view,first+k,id,d):p->values[cal*IDS+id/64];
+  float z=(value-p->median[cal])/p->sigma[cal];
+  if(z<=2.f)break;
+  sum+=z;
+  float combined=sum/sqrtf((float)(d+1));
+  p->multi[(2*k+d-1)*IDS+id]=combined>bound?combined:0;
+ }
+}
+__global__ void collect(Device *p,int first,int count) {
+ int id=blockIdx.x*blockDim.x+threadIdx.x;
+ if(id>=IDS)return;
+ for(int k=0;k<count;k++) {
+  // Scores are written by ID into a separate workspace, preserving CPU order.
+  for(int d=1;d<p->view.dur;d++) {
+   float value=p->multi[(2*k+d-1)*IDS+id];
+   if(value<=0)continue;
+   int sym=p->view.sym[p->view.index(first+k)],cell=(2*d+1)*CELLS+sym*IDS+id;
+   p->hits[cell]++;p->zsum[cell]+=value;
   }
  }
 }
@@ -150,6 +245,65 @@ void shortlist(HostTransfer *p) {
   for(int t=0;t<n;t++){p->result.list_id[t]=selected[t]%IDS;p->result.list_sym[t]=selected[t]/IDS;}
  }
 }
+// Each new batch is scored once. Subtract the evicted batch, add the new one.
+// IQ and sufficient statistics share the same batch ring position.
+__global__ void slide(Device *p,int ring,bool empty,bool evict) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=STAT)return;
+ size_t h=(size_t)ring*STAT+j;
+ unsigned old=evict?p->history_hits[h]:0;
+ double zold=evict?p->history_z[h]:0;
+ p->total_hits[j]=(empty?0:p->total_hits[j])-old+p->hits[j];
+ p->total_z[j]=(empty?0:p->total_z[j])-zold+p->zsum[j];
+ p->history_hits[h]=p->hits[j];p->history_z[h]=p->zsum[j];
+}
+// Explicit diagnostic only; production never copies the statistics to the CPU.
+__global__ void diagnostic_stats(Device *p) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=STAT)return;
+ p->hits[j]=p->total_hits[j];p->zsum[j]=(float)p->total_z[j];
+}
+__global__ void family_totals(Device *p) {
+ __shared__ unsigned sums[256];
+ int j=blockIdx.x*256+threadIdx.x;
+ sums[threadIdx.x]=p->total_hits[j];__syncthreads();
+ for(int n=128;n;n/=2){if(threadIdx.x<n)sums[threadIdx.x]+=sums[threadIdx.x+n];__syncthreads();}
+ if(!threadIdx.x)p->summary[blockIdx.x].total=sums[0];
+}
+__global__ void thresholds(Device *p,double alpha) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x;
+ if(j==0)p->compact.count=0;
+ if(j>=42)return;
+ int d=j/14,s=j%14;
+ if(d>=p->view.dur || s+d>=p->view.sps){p->threshold[d][s]=0;p->lambda[d][s]=0;return;}
+ unsigned sum=0;
+ int base=((2*d+1)*CELLS+s*IDS)/256;
+ for(int k=0;k<IDS/256;k++)sum+=p->summary[base+k].total;
+ double lambda=(double)sum/IDS;
+ int families=0;for(int n=0;n<p->view.dur;n++)families+=p->view.sps-n;
+ p->threshold[d][s]=nid_threshold_alpha(lambda,families,alpha);
+ p->lambda[d][s]=lambda;
+}
+__global__ void compact_list(Device *p) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x;
+ if(j>=3*CELLS)return;
+ int d=j/CELLS,s=j%CELLS/IDS;
+ if(d>=p->view.dur || s+d>=p->view.sps)return;
+ int cell=(2*d+1)*CELLS+j%CELLS;
+ if(p->total_hits[cell]<p->threshold[d][s])return;
+ unsigned n=atomicAdd(&p->compact.count,1);
+ if(n<CAND_CAP)p->compact.item[n]={j,(float)p->total_z[cell]};
+}
+// Scan order is independent of CUDA atomic append order. Overflow fails closed.
+void incremental_shortlist(HostTransfer *t) {
+ auto &out=t->result;out={};
+ if(t->compact.count>CAND_CAP){out.shortlist_overflow=1;return;}
+ std::sort(t->compact.item,t->compact.item+t->compact.count,
+           [](const Candidate &a,const Candidate &b){return a.cell<b.cell;});
+ for(unsigned n=0;n<t->compact.count;n++) {
+  const auto &c=t->compact.item[n];
+  int d=c.cell/CELLS,s=c.cell%CELLS/IDS,id=c.cell%IDS;
+  nid_list_insert(&out,id,s,d,c.score);
+ }
+}
 // Parallel work is separate from NidStage2's scalar, reference-order arithmetic.
 // Control lanes only scan bounded metadata; each snapshot keeps its own sums.
 __global__ void prepare_init(Device *p,int list) {
@@ -158,11 +312,12 @@ __global__ void prepare_init(Device *p,int list) {
   s.alive=0;s.nact=0;s.nh=0;
   if(list>=p->result.list_n)return;
   int nid=p->result.list_id[list];
-  for(int j=0;j<list;j++)if(p->result.list_id[j]==nid)return;
+  if(!p->multisymbol)for(int j=0;j<list;j++)if(p->result.list_id[j]==nid)return;
   s.nid=nid;s.sym0=p->result.list_sym[list];
   int pa=s.g_idsw.point_a_sc;
   s.g_st2_clo=pa>=0?0:(-pa+11)/12;s.g_st2_chi=(s.g_idsw.nsc-pa)/12;
-  s.g_st2_D=1;s.alive=1;
+  p->explicit_duration=p->result.list_dur[list];
+  s.g_st2_D=p->result.list_dur[list]>0?p->result.list_dur[list]:1;s.alive=1;
  }
 }
 __global__ void prepare_probe(Device *p,bool active) {
@@ -171,6 +326,7 @@ __global__ void prepare_probe(Device *p,bool active) {
  p->lit[k]=0;
  if(!s.alive)return;
  int sym=s.g_idsw.sym[s.g_idsw.index(k)];
+ if(sym+s.g_st2_D>s.g_idsw.sps)return;
  if(active?sym!=s.sym0:(sym<s.sym0 || sym>s.sym0+2))return;
  s.st2_build(k,s.nid,s.sn+k);p->lit[k]=s.st2_lit(s.sn+k);
 }
@@ -181,6 +337,7 @@ __global__ void prepare_control(Device *p,bool active) {
   for(int k=0;k<s.g_idsw.n;k++)if(p->lit[k])p->active[s.nact++]=k;
   s.alive=s.nact>0;
  } else {
+  if(p->multisymbol && p->explicit_duration>0)return;
   int nsym[14]={},nlit[14]={};
   for(int k=0;k<s.g_idsw.n;k++) {
    int sym=s.g_idsw.sym[s.g_idsw.index(k)];nsym[sym]++;nlit[sym]+=p->lit[k];
@@ -285,22 +442,43 @@ __global__ void finish(Device *p) {
   if(tid==0 && s.st2_paired_t(s.vr,s.vd,s.nact)<5.0)s.alive=0;
   __syncthreads();if(!s.alive)return;
  }
- if(tid==0) {
-  int ties=0,chosen[64];st2_hyp_t handoff=win;
-  for(int i=0;i<s.nh;i++) {
-   const auto &h=s.H[i];
-   if(h.L!=win.L || h.R!=win.R || h.phase!=win.phase || fabs(h.score-win.score)>1e-9*(1+fabs(win.score)))continue;
-   int at=0;while(at<ties && s.H[chosen[at]].score>=h.score)at++;
-   if(at>=64)continue;
-   if(ties<64)ties++;
-   for(int j=ties-1;j>at;j--)chosen[j]=chosen[j-1];chosen[at]=i;
+ // Per-lane sorted tie lists, merged in stable score/index order. The old
+ // control lane scanned up to 1M hypotheses here and exceeded 10 ms on GB10.
+ int chosen[64],ntie=0;
+ for(int i=tid;i<s.nh;i+=blockDim.x) {
+  const auto &h=s.H[i];
+  if(h.L!=win.L || h.R!=win.R || h.phase!=win.phase || fabs(h.score-win.score)>1e-9*(1+fabs(win.score)))continue;
+  int at=0;while(at<ntie && s.H[chosen[at]].score>=h.score)at++;
+  if(at>=64)continue;
+  if(ntie<64)ntie++;
+  for(int j=ntie-1;j>at;j--)chosen[j]=chosen[j-1];chosen[at]=i;
+ }
+ __shared__ int owner,ties;
+ __shared__ st2_hyp_t handoff;
+ if(tid==0){handoff=win;ties=0;}
+ int used=0;
+ for(int t=0;t<64;t++) {
+  candidates[tid]=used<ntie?chosen[used]:-1;__syncthreads();
+  for(int step=128;step;step/=2) {
+   if(tid<step) {
+    int a=candidates[tid],b=candidates[tid+step];
+    if(b>=0 && (a<0 || s.H[b].score>s.H[a].score || (s.H[b].score==s.H[a].score && b<a)))candidates[tid]=b;
+   }
+   __syncthreads();
   }
-  for(int t=0;t<ties;t++) {
-   const auto &h=s.H[chosen[t]];
-   if(!win.L && h.phase+6*h.g0<handoff.phase+6*handoff.g0) {
-    handoff=h;handoff.ng=(s.g_st2_chi-(handoff.phase+6*handoff.g0))/6;
+  if(tid==0) {
+   int i=candidates[0];owner=i<0?-1:i%(int)blockDim.x;
+   if(i>=0) {
+    ties++;const auto &h=s.H[i];
+    if(!win.L && h.phase+6*h.g0<handoff.phase+6*handoff.g0) {
+     handoff=h;handoff.ng=(s.g_st2_chi-(handoff.phase+6*handoff.g0))/6;
+    }
    }
   }
+  __syncthreads();if(owner<0)break;
+  if(tid==owner)used++;
+ }
+ if(tid==0) {
   auto &out=p->result;
   if(out.count<NR_PDCCH_NID_MAX_RECORDS && s.g_idsw.point_a_sc%12==0) {
    memcpy(out.al_win[out.count],win.al_win,sizeof(win.al_win));
@@ -341,6 +519,8 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  }
  int n=window*NR_PDCCH_NID_BATCH,sc=12*rb;
  Device &p=c->host;
+ const char *enable=getenv("ISAC_CSIRS_DISC");
+ p.multisymbol=enable && !strcmp(enable,"1");
  int *slots=nullptr; c16_t *iq=nullptr;double *scratch=nullptr;st2_snap_t *sn=nullptr;
  int least_priority=0,greatest_priority=0;
  if(cudaDeviceGetStreamPriorityRange(&least_priority,&greatest_priority)!=cudaSuccess
@@ -353,8 +533,11 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(cudaHostAlloc(&c->transfer,sizeof(HostTransfer),cudaHostAllocDefault)!=cudaSuccess)goto fail;
  memset(c->transfer,0,sizeof(HostTransfer));
  if(!allocate(c,&c->dev,1) || !allocate(c,&iq,(size_t)n*dur*sc) || !allocate(c,&slots,2*n)
-    || !allocate(c,&p.values,2*CHUNK*IDS) || !allocate(c,&p.zsum,2*CELLS) || !allocate(c,&p.hits,2*CELLS)
-    || !allocate(c,&p.summary,2*CELLS/256) || !allocate(c,&p.lit,n) || !allocate(c,&p.active,n)
+    || !allocate(c,&p.candidates,CHUNK*IDS) || !allocate(c,&p.multi,2*CHUNK*IDS)
+    || !allocate(c,&p.values,4*CHUNK*IDS) || !allocate(c,&p.zsum,6*CELLS) || !allocate(c,&p.hits,6*CELLS)
+    || !allocate(c,&p.history_hits,(size_t)window*STAT) || !allocate(c,&p.history_z,(size_t)window*STAT)
+    || !allocate(c,&p.total_hits,STAT) || !allocate(c,&p.total_z,STAT)
+    || !allocate(c,&p.summary,STAT/256) || !allocate(c,&p.lit,n) || !allocate(c,&p.active,n)
     || !allocate(c,&p.stage2.H,NID_HYP_CAP) || !allocate(c,&sn,4*n+1)
     || !allocate(c,&scratch,(size_t)(4*n+1)*6*276+2*n))goto fail;
  // Commit/touch every device workspace before RX, not at the first pass.
@@ -376,16 +559,25 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  p.stage2.vr=scratch+(size_t)(4*n+1)*6*276;p.stage2.vd=p.stage2.vr+n;
  if(cudaMemcpyAsync(c->dev,&p,sizeof(p),cudaMemcpyHostToDevice,c->stream)!=cudaSuccess)goto fail;
  // Eager-load every kernel before RX (CUDA_MODULE_LOADING=LAZY included).
- for(const void *f : { (const void*)reset,(const void*)sweep,(const void*)standardize,
-                      (const void*)accumulate,(const void*)prepare_init,(const void*)prepare_probe,
+ for(const void *f : { (const void*)diagnostic_stats,(const void*)slide,(const void*)family_totals,(const void*)thresholds,(const void*)compact_list,(const void*)reset,(const void*)sweep,(const void*)standardize,
+                      (const void*)calibrate,(const void*)screen,(const void*)combine,(const void*)collect,(const void*)accumulate,(const void*)prepare_init,(const void*)prepare_probe,
                       (const void*)prepare_control,(const void*)prepare_snapshots,(const void*)hull,
                       (const void*)generate,(const void*)score,(const void*)finish,(const void*)summarize }) {
   cudaFuncAttributes a;if(cudaFuncGetAttributes(&a,f)!=cudaSuccess)goto fail;
  }
  reset<<<1,256,0,c->stream>>>(c->dev,p.view);
- sweep<<<dim3(IDS/128,1),128,0,c->stream>>>(c->dev,0,0);
+ slide<<<STAT/256,256,0,c->stream>>>(c->dev,0,true,false);
+ diagnostic_stats<<<STAT/256,256,0,c->stream>>>(c->dev);
+ family_totals<<<STAT/256,256,0,c->stream>>>(c->dev);
+ thresholds<<<1,64,0,c->stream>>>(c->dev,0.01);
+ compact_list<<<3*CELLS/256,256,0,c->stream>>>(c->dev);
+ sweep<<<dim3(IDS/128,1),dim3(128,2),0,c->stream>>>(c->dev,0,0);
  standardize<<<2*CHUNK,256,0,c->stream>>>(c->dev);
  accumulate<<<IDS/256,256,0,c->stream>>>(c->dev,0,0);
+ calibrate<<<dim3(NID_CAL/128,1,2),128,0,c->stream>>>(c->dev,0,0);
+ screen<<<1,256,0,c->stream>>>(c->dev,0);
+ combine<<<1,256,0,c->stream>>>(c->dev,0,0);
+ collect<<<IDS/256,256,0,c->stream>>>(c->dev,0,0);
  prepare_init<<<1,256,0,c->stream>>>(c->dev,0);
  prepare_probe<<<1,128,0,c->stream>>>(c->dev,false);
  prepare_control<<<1,256,0,c->stream>>>(c->dev,false);
@@ -410,11 +602,17 @@ fail: destroy(c);return nullptr;
 }
 int upload(void *ptr,const nr_pdcch_nid_batch_t *b) {
  Context *c=(Context*)ptr;
- if(b->cfg.nsc<72 || b->cfg.nsc>12*c->rb || b->cfg.dur!=c->dur
+ if(b->cfg.sps<1 || b->cfg.sps>14 || b->cfg.nsc<72 || b->cfg.nsc>12*c->rb || b->cfg.dur!=c->dur
     || (b->cfg.nsc-b->cfg.point_a_sc)/12>275
     || (b->cfg.nsc-b->cfg.point_a_sc)/12-(b->cfg.point_a_sc<0?(-b->cfg.point_a_sc+11)/12:0)<6)return -1;
- if(memcmp(&b->cfg,&c->cfg,sizeof(c->cfg))) {c->batches=0;c->cfg=b->cfg;}
- int first=(c->batches%c->window)*NR_PDCCH_NID_BATCH;
+ int count=b->count?b->count:NR_PDCCH_NID_BATCH;
+ if(count<1 || count>NR_PDCCH_NID_BATCH || (b->count && !c->host.multisymbol))return -1;
+ if(c->pending && c->incremental)return -1; // never silently lose an unscored batch
+ bool changed=memcmp(&b->cfg,&c->cfg,sizeof(c->cfg)) || count!=c->batch_size || c->incremental!=(b->count>0);
+ if(changed) {c->batches=0;c->cfg=b->cfg;c->bank={};}
+ c->batch_size=count;c->incremental=b->count>0;
+ for(int k=0;k<count;k++)if(b->sym[k]<0 || b->sym[k]>=b->cfg.sps || b->slot[k]<0 || b->slot[k]>=160)return -1;
+ int first=(c->batches%c->window)*count;
  auto stream=c->stream;NidView &v=c->host.view;
  // Only these small metadata arrays need a host copy; CUDA never stages
  // pageable pointers in the processing path (including result/control D2H).
@@ -422,13 +620,15 @@ int upload(void *ptr,const nr_pdcch_nid_batch_t *b) {
  memcpy(c->transfer->sym,b->sym,sizeof(b->sym));
  // Staging has max-RB stride; no repack or host-side pilot extraction.
  if(cudaMemcpyAsync((void*)(v.re+(size_t)first*c->dur*v.stride),b->iq,
-                     (size_t)NR_PDCCH_NID_BATCH*c->dur*v.stride*sizeof(c16_t),cudaMemcpyHostToDevice,stream)!=cudaSuccess
-    || cudaMemcpyAsync((void*)(v.slot+first),c->transfer->slot,sizeof(b->slot),cudaMemcpyHostToDevice,stream)!=cudaSuccess
-    || cudaMemcpyAsync((void*)(v.sym+first),c->transfer->sym,sizeof(b->sym),cudaMemcpyHostToDevice,stream)!=cudaSuccess)return -1;
- c->batches++;
+                     (size_t)count*c->dur*v.stride*sizeof(c16_t),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+    || cudaMemcpyAsync((void*)(v.slot+first),c->transfer->slot,count*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+    || cudaMemcpyAsync((void*)(v.sym+first),c->transfer->sym,count*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess)return -1;
+ c->batches++;c->pending=count;
+ v.capacity=c->window*count;
  v.nsc=b->cfg.nsc;v.point_a_sc=b->cfg.point_a_sc;v.css0_crb=b->cfg.css0_crb;v.css0_nrb=b->cfg.css0_nrb;v.sps=b->cfg.sps;
- v.n=(c->batches<c->window?c->batches:c->window)*NR_PDCCH_NID_BATCH;
- v.begin=c->batches<c->window?0:(c->batches%c->window)*NR_PDCCH_NID_BATCH;
+ v.n=(c->batches<c->window?c->batches:c->window)*count;
+ v.begin=c->batches<c->window?0:(c->batches%c->window)*count;
+ c->first_new=v.n-count;
  return cudaStreamSynchronize(stream)==cudaSuccess?0:-1;
 }
 // Events are allocated/touched before RX. No CUDA allocation or chunk wait here.
@@ -463,36 +663,71 @@ bool complete(Context *c,const std::chrono::steady_clock::time_point &start) {
 }
 int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *seed) {
  Context *c=(Context*)ptr;auto stream=c->stream;Device *p=c->dev;
- if(c->batches<c->window)return 1;
+ if(!c->batches || (!c->incremental && c->batches<c->window))return 1;
+ if(c->incremental && !c->pending){*out=c->bank;return 0;}
  const auto start=std::chrono::steady_clock::now();c->timing={};c->ntimer=0;
  if(cudaEventRecord(c->event[0],stream)!=cudaSuccess
-    || cudaMemsetAsync(c->host.hits,0,2*CELLS*sizeof(uint16_t),stream)!=cudaSuccess
-    || cudaMemsetAsync(c->host.zsum,0,2*CELLS*sizeof(float),stream)!=cudaSuccess)return -1;
+    || cudaMemsetAsync(c->host.hits,0,6*CELLS*sizeof(uint16_t),stream)!=cudaSuccess
+    || cudaMemsetAsync(c->host.zsum,0,6*CELLS*sizeof(float),stream)!=cudaSuccess)return -1;
  LAUNCH(RESET,reset<<<1,256,0,stream>>>(p,c->host.view));
  if(!seed) {
-  const int chunk=CHUNK/c->dur;
-  for(int first=0;first<c->host.view.n;first+=chunk) {
+  const int chunk=CHUNK;
+  for(int first=c->incremental?c->first_new:0;first<c->host.view.n;first+=chunk) {
    int n=c->host.view.n-first;if(n>chunk)n=chunk;
-   LAUNCH(SWEEP,sweep<<<dim3(IDS/128,n),128,0,stream>>>(p,first,n));
+   LAUNCH(SWEEP,sweep<<<dim3(IDS/128,(n+1)/2),dim3(128,2),0,stream>>>(p,first,n));
    LAUNCH(STANDARDIZE,standardize<<<2*n,256,0,stream>>>(p));
    LAUNCH(ACCUMULATE,accumulate<<<IDS/256,256,0,stream>>>(p,first,n));
+   if(c->host.multisymbol && c->dur>1) {
+    LAUNCH(SWEEP,calibrate<<<dim3(NID_CAL/128,n,c->dur-1),128,0,stream>>>(p,first,n));
+    LAUNCH(STANDARDIZE,standardize<<<2*n,256,0,stream>>>(p,2*CHUNK,NID_CAL));
+    if(cudaMemsetAsync(p->selected_count,0,sizeof(c->host.selected_count),stream)!=cudaSuccess
+       || cudaMemsetAsync(c->host.multi,0,2*n*IDS*sizeof(float),stream)!=cudaSuccess)return -1;
+    LAUNCH(ACCUMULATE,screen<<<dim3(IDS/256,n),256,0,stream>>>(p,n));
+    LAUNCH(SWEEP,combine<<<dim3(IDS/128,n),128,0,stream>>>(p,first,n));
+    LAUNCH(ACCUMULATE,collect<<<IDS/256,256,0,stream>>>(p,first,n));
+   }
   }
-  // The FNV diagnostic is order dependent; keep it and exact stable selection
-  // on the worker CPU. Bounded 3.6 MiB D2H, independent of window/duration.
-  LAUNCH(SUMMARY,summarize<<<2*CELLS/256,256,0,stream>>>(p));
-  if(cudaMemcpyAsync(c->transfer->hits,c->host.hits,sizeof(c->transfer->hits),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
-     || cudaMemcpyAsync(c->transfer->summary,c->host.summary,sizeof(c->transfer->summary),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
-     || !complete(c,start))return -1;
-  c->transfer->result={};shortlist(c->transfer);
+  if(c->incremental) {
+   LAUNCH(ACCUMULATE,slide<<<STAT/256,256,0,stream>>>(p,(c->batches-1)%c->window,c->batches==1,c->batches>c->window));
+   LAUNCH(SUMMARY,family_totals<<<STAT/256,256,0,stream>>>(p));
+   LAUNCH(SUMMARY,thresholds<<<1,64,0,stream>>>(p,nid_look_alpha(++c->look)));
+   LAUNCH(SUMMARY,compact_list<<<3*CELLS/256,256,0,stream>>>(p));
+   if(cudaMemcpyAsync(&c->transfer->compact,&p->compact,sizeof(Compact),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+      || cudaMemcpyAsync(c->transfer->lambda,p->lambda,sizeof(p->lambda),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+      || cudaMemcpyAsync(c->transfer->threshold,p->threshold,sizeof(p->threshold),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+      || !complete(c,start))return -1;
+   incremental_shortlist(c->transfer);
+   memcpy(c->transfer->result.lambda,c->transfer->lambda,sizeof(p->lambda));
+   memcpy(c->transfer->result.threshold,c->transfer->threshold,sizeof(p->threshold));
+  } else {
+   // Diagnostic fixed-window parity API only: full hashes/strength readback.
+   LAUNCH(SUMMARY,summarize<<<2*CELLS/256,256,0,stream>>>(p));
+   if(cudaMemcpyAsync(c->transfer->hits,c->host.hits,sizeof(c->transfer->hits),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+      || cudaMemcpyAsync(c->transfer->summary,c->host.summary,sizeof(c->transfer->summary),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+      || cudaMemcpyAsync(c->transfer->zsum,c->host.zsum,sizeof(c->transfer->zsum),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+      || !complete(c,start))return -1;
+   c->transfer->result={};
+   if(c->host.multisymbol)nid_shortlist(c->transfer->hits,c->transfer->zsum,c->dur,&c->transfer->result);
+   else shortlist(c->transfer);
+  }
  } else {
   c->transfer->result={};c->transfer->result.list_n=seed->list_n;
   memcpy(c->transfer->result.list_id,seed->list_id,sizeof(seed->list_id));
   memcpy(c->transfer->result.list_sym,seed->list_sym,sizeof(seed->list_sym));
+  memcpy(c->transfer->result.list_dur,seed->list_dur,sizeof(seed->list_dur));
  }
  int lists=c->transfer->result.list_n;
  if(cudaMemcpyAsync(&p->result,&c->transfer->result,sizeof(*out),cudaMemcpyHostToDevice,stream)!=cudaSuccess
     || cudaEventRecord(c->event[1],stream)!=cudaSuccess)return -1;
  for(int j=0;j<lists;j++) {
+  bool known=false;
+  if(c->incremental)for(int k=0;k<c->bank.count;k++) {
+   const auto &r=c->bank.records[k];const auto &list=c->transfer->result;
+   if(r.nid==list.list_id[j] && r.sym==list.list_sym[j] && r.dur==list.list_dur[j]) {
+    known=true;c->last_seen[k]=c->look;
+   }
+  }
+  if(known)continue;
   const int blocks=(c->host.view.n+127)/128;
   LAUNCH(PREPARE_INIT,prepare_init<<<1,256,0,stream>>>(p,j));
   LAUNCH(PROBE,prepare_probe<<<blocks,128,0,stream>>>(p,false));
@@ -518,6 +753,19 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
     || cudaMemcpyAsync(&c->transfer->result,&p->result,sizeof(*out),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
     || !complete(c,start))return -1;
  *out=c->transfer->result;
+ if(c->incremental) {
+  for(int k=0;k<c->bank.count;) {
+   if(c->look-c->last_seen[k]<(uint64_t)c->window){k++;continue;}
+   int last=--c->bank.count;c->bank.records[k]=c->bank.records[last];c->last_seen[k]=c->last_seen[last];
+  }
+  for(int j=0;j<out->count;j++) {
+   int k=0;for(;k<c->bank.count;k++)if(!memcmp(c->bank.records+k,out->records+j,sizeof(out->records[j])))break;
+   if(k==c->bank.count && k<NR_PDCCH_NID_MAX_RECORDS)c->bank.count++;
+   if(k<NR_PDCCH_NID_MAX_RECORDS){c->bank.records[k]=out->records[j];c->last_seen[k]=c->look;}
+  }
+  out->count=c->bank.count;memcpy(out->records,c->bank.records,sizeof(out->records));
+  c->pending=0;
+ }
  if(cudaEventElapsedTime(&out->stage1_ms,c->event[0],c->event[1])!=cudaSuccess
     || cudaEventElapsedTime(&out->stage2_ms,c->event[1],c->event[2])!=cudaSuccess)return -1;
  out->kernel_max_ms=c->timing.kernel_max_ms;
@@ -538,4 +786,14 @@ extern "C" int nr_pdcch_nid_gpu_stage2_check(void *ctx,const nr_pdcch_nid_result
  if(!seed || seed->list_n<1 || seed->list_n>40)return -1;
  for(int i=0;i<seed->list_n;i++)if(seed->list_id[i]<0 || seed->list_id[i]>65535 || seed->list_sym[i]<0 || seed->list_sym[i]>13)return -1;
  return run_impl(ctx,out,seed);
+}
+
+extern "C" int nr_pdcch_nid_gpu_statistics_check(void *ctx,uint16_t *hits,float *zs) {
+ auto *c=(Context*)ctx;
+ if(!c || !c->incremental || c->pending || !hits || !zs)return -1;
+ diagnostic_stats<<<STAT/256,256,0,c->stream>>>(c->dev);
+ if(cudaMemcpyAsync(c->transfer->hits,c->host.hits,sizeof(c->transfer->hits),cudaMemcpyDeviceToHost,c->stream)!=cudaSuccess
+    || cudaMemcpyAsync(c->transfer->zsum,c->host.zsum,sizeof(c->transfer->zsum),cudaMemcpyDeviceToHost,c->stream)!=cudaSuccess
+    || cudaStreamSynchronize(c->stream)!=cudaSuccess)return -1;
+ memcpy(hits,c->transfer->hits,sizeof(c->transfer->hits));memcpy(zs,c->transfer->zsum,sizeof(c->transfer->zsum));return 0;
 }
