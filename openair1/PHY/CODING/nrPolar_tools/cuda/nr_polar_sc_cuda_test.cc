@@ -118,6 +118,7 @@ static void cpu_u_from_outputs(int pid, int len, uint64_t Ar, uint32_t ret, uint
 static int debug_one(void)
 {
   npc_gpu_dbg_device_params(NULL);
+  if (npc_warmup(8192)) return 1;
   const pset p = {39, 1}; const int E = E_of(p); const int pid = npc_register(p.len, p.al);
   { int16_t z[NPC_MAX_E] = {0}; nr_dci_bits_t o; cpu_decode(p, z, &o); }
   int N, K; const uint8_t *info; const uint16_t *il; npc_dbg_params(pid, &N, &K, &info, &il);
@@ -166,11 +167,15 @@ static int debug_one(void)
   return 0;
 }
 
+extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
 int main(int argc, char **argv)
 {
   crcTableInit();
   const bool quick = argc > 1 && !strcmp(argv[1], "quick");
   if (argc > 1 && !strcmp(argv[1], "dbg")) return debug_one();
+  if (npc_warmup(131072)) return 1;
+  uint64_t alloc_before, denied_before;
+  nr_dl_gpu_memory_stats(&alloc_before, &denied_before);
   int total_bad = 0;
   for (int pi = 0; pi < NP; pi++) {
     const pset &p = P[pi];
@@ -235,7 +240,11 @@ int main(int argc, char **argv)
     printf("VEC-PATH: %s (%d of %d items differ from the per-item path)\n", diff ? "FAIL" : "PASS", diff, n);
     total_bad += diff;
   }
-  if (total_bad || quick) return total_bad ? 1 : 0;
+  if (total_bad || quick) {
+    uint64_t a, d;
+    nr_dl_gpu_memory_stats(&a, &d);
+    return total_bad || a != alloc_before || d != denied_before ? 1 : 0;
+  }
 
   /* ---- throughput ---------------------------------------------------------------------- */
   const pset bp = {47, 2}; const int bpid = npc_register(bp.len, bp.al); const int E = E_of(bp);
@@ -280,5 +289,8 @@ int main(int argc, char **argv)
            "CPU core (measured %.1f us/decode) -> %.1fx\n",
            n, gpu_us, n * cpu_us_per_decode, cpu_us_per_decode, (n * cpu_us_per_decode) / gpu_us);
   }
+  uint64_t alloc_after, denied_after;
+  nr_dl_gpu_memory_stats(&alloc_after, &denied_after);
+  if (alloc_before != alloc_after || denied_before != denied_after) { fprintf(stderr, "late CUDA allocation in polar test\n"); return 1; }
   return 0;
 }

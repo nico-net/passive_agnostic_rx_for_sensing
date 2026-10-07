@@ -35,6 +35,8 @@ extern "C" {
 /* Register one (DCI length, aggregation level) so its patterns and op list live on the device.
  * Idempotent; returns a params id >= 0, or -1. Uses nr_polar_params() for the patterns. */
 int npc_register(uint16_t dci_length, uint8_t aggregation_level);
+/* Preallocate staging/device batches and all legal DCI parameters, then seal. */
+int npc_warmup(int max_items);
 
 typedef struct {
   int pid;            /* from npc_register */

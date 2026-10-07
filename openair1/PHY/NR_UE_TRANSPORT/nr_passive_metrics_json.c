@@ -29,6 +29,13 @@ static int cb0_json(const nr_passive_metrics_t *m, char *buf, size_t n)
                   m->td_cb0_gpu_items, m->td_cb0_gpu_ok, m->td_cb0_gpu_errors, m->td_cb0_gpu_timeouts, m->td_cb0_gpu_bypassed,
                   m->td_cb0_gpu_sticky, m->td_cb0_gpu_trips, m->td_cb0_gpu_state, m->td_cb0_gpu_mode, m->td_cb0_gpu_failed,
                   m->td_cb0_gpu_skipped);
+  if (w >= 0 && (size_t)w < n)
+    w += snprintf(buf + w, n - w,
+                  ",\"dl_gpu_allocs\":%" PRIu64 ",\"dl_gpu_late_alloc_denied\":%" PRIu64
+                  ",\"dl_gpu_transfer_bytes\":%" PRIu64 ",\"dl_gpu_transfer_refused\":%" PRIu64
+                  ",\"gw_pool_refused\":%" PRIu64,
+                  m->dl_gpu_allocs, m->dl_gpu_late_alloc_denied, m->dl_gpu_transfer_bytes, m->dl_gpu_transfer_refused,
+                  m->gw_pool_refused);
   return (w < 0 || (size_t)w >= n) ? -1 : w;
 }
 

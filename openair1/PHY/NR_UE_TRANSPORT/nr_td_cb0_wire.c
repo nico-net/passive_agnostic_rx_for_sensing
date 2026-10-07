@@ -77,6 +77,17 @@ static void backends_locked(void)
   }
 }
 
+void nr_td_cb0_wire_warmup(void)
+{
+  const char *ar = getenv("ISAC_TD_CB0_GPU_AUTOREG");
+  int enable = nr_td_cb0_backend_mode() != NR_TD_CB0_BE_CPU && !(ar && atoi(ar) == 0);
+  nr_td_cb0_gpu_warmup(enable);
+  pthread_mutex_lock(&g_lock);
+  cfg_locked();
+  backends_locked();
+  pthread_mutex_unlock(&g_lock);
+}
+
 /* ---- counters ---- */
 static _Atomic uint64_t s_grants, s_batches, s_adm, s_items, s_inadm[NR_TD_CB0_R_COUNT], s_budget, s_not_testable, s_cpu_us,
     s_be_cpu, s_be_gpu;

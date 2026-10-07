@@ -116,5 +116,5 @@ static const nr_gpu_polar_api_t g_api = {.decode = npg_decode, .decode_vec = npg
 const nr_gpu_polar_api_t *nr_gpu_polar_api_v2(void);
 const nr_gpu_polar_api_t *nr_gpu_polar_api_v2(void)
 {
-  return &g_api;
+  return npc_warmup(NPG_MAX_ITEMS) == 0 ? &g_api : NULL;
 }

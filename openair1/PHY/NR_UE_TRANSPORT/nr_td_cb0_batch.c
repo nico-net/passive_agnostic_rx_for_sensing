@@ -55,13 +55,17 @@ void nr_td_cb0_set_threads(int n)
   pthread_mutex_unlock(&g_lock);
 }
 
+static bool g_gpu_loading_allowed = true;
+static bool g_gpu_quarantined;
 static const nr_td_cb0_gpu_api_t *gpu_load(void)
 {
   static int tried;
   static const nr_td_cb0_gpu_api_t *api;
+  if (g_gpu_quarantined) return NULL;
   if (tried)
     return api;
   tried = 1;
+  if (!g_gpu_loading_allowed) return NULL;
   void *h = dlopen("libtd_cb0_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!h)
     h = dlopen("./libtd_cb0_gpu.so", RTLD_NOW | RTLD_LOCAL);
@@ -89,6 +93,16 @@ int nr_td_cb0_use_gpu(int on)
   const int r = use_gpu_locked(on);
   pthread_mutex_unlock(&g_lock);
   return r;
+}
+
+void nr_td_cb0_dematch_warmup(int enable)
+{
+  pthread_mutex_lock(&g_lock);
+  g_gpu_loading_allowed = enable != 0;
+  const nr_td_cb0_gpu_api_t *api = gpu_load();
+  (void)api;
+  g_gpu_loading_allowed = false;
+  pthread_mutex_unlock(&g_lock);
 }
 
 /* ---- metadata: passive_ldpc_decode_core's parameter derivation for segment 0 ---- */
@@ -465,6 +479,35 @@ static int gpu_dematch(const nr_td_cb0_gpu_api_t *api, const nr_td_cb0_item_t *i
   return rc;
 }
 
+int nr_td_cb0_dematch_device_begin(const nr_td_cb0_item_t *items, const nr_td_cb0_meta_t *meta, int n, const int8_t **l)
+{
+  pthread_mutex_lock(&g_lock);
+  const nr_td_cb0_gpu_api_t *api = gpu_load();
+  nr_td_cb0_gpu_item_t *g = api ? api->scratch(2, (size_t)n * sizeof(*g)) : NULL;
+  if (!g || !api->dematch_device) { pthread_mutex_unlock(&g_lock); return -1; }
+  memset(g, 0, (size_t)n * sizeof(*g));
+  for (int i = 0; i < n; i++) {
+    const nr_td_cb0_meta_t *m = &meta[i];
+    if (!m->valid) continue;
+    g[i] = (nr_td_cb0_gpu_item_t){.llr = items[i].llr, .E = m->E, .Qm = m->Qm, .Kc = m->Kc, .Z = m->Z, .K = m->K,
+                                 .F = m->F, .Ncb = m->Ncb, .k0 = m->k0, .Foffset = m->Foffset, .N = m->N, .shift = m->shift};
+  }
+  // Module scratch is also its staging array: use an independent metadata input.
+  // Bounded static array is protected by g_lock; no runtime allocation.
+  static nr_td_cb0_gpu_item_t input[65536];
+  memcpy(input, g, (size_t)n * sizeof(*g));
+  if (api->dematch_device(input, n, l)) { pthread_mutex_unlock(&g_lock); return -1; }
+  return 0;
+}
+void nr_td_cb0_dematch_device_end(int quarantine)
+{
+  const nr_td_cb0_gpu_api_t *api = gpu_load();
+  if (quarantine && (!api || !api->retire_output || api->retire_output())) {
+    g_gpu_quarantined = true; g_gpu = NULL; g_gpu_on = 0;
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+
 int nr_td_cb0_dematch(const nr_td_cb0_item_t *items, int n, int use_gpu, int8_t *l, int16_t *d, int8_t *status)
 {
   if (n <= 0)
@@ -782,11 +825,11 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
   pthread_mutex_lock(&g_lock);
   struct timespec tl0;
   clock_gettime(CLOCK_MONOTONIC, &tl0); /* compute time only: not the wait for another thread's batch */
-  if (g_gpu_on < 0) {
+  if (!force_cpu && g_gpu_on < 0) {
     const char *e = getenv("NR_GPU_CB0");
     use_gpu_locked(e && atoi(e) == 1);
   }
-  if (g_cuda_on < 0) {
+  if (!force_cpu && g_cuda_on < 0) {
     const char *e = getenv("NR_TD_CB0_CUDA_LDPC");
     use_cuda_locked(e && atoi(e) == 1);
   }

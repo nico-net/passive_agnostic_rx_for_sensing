@@ -19,6 +19,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_obs.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
@@ -468,6 +469,7 @@ int main(int argc, char **argv)
   PHY_VARS_NR_UE *disc_ue = nrPHY_vars_UE_g[0][0];
   /* Strong reference: the feed reaches the pipeline through a weak symbol, which alone does not
    * pull nr_csirs_disc.o out of the static PHY archive (the hook stayed NULL, zero batches). */
+  nr_dl_gpu_warmup(disc_ue);
   nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
   if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");

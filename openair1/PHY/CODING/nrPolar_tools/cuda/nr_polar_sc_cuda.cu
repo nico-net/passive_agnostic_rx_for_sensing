@@ -12,7 +12,14 @@
 #include <stdlib.h>
 #include <time.h>
 #include "nr_polar_sc_cuda_int.h"
+#include "../../../NR_UE_TRANSPORT/nr_dl_gpu_memory.h"
+#include "../../../NR_UE_TRANSPORT/nr_dl_gpu_budget.h"
 
+static nr_dl_gpu_budget_t budget;
+extern "C" int npc_gpu_admit(uint64_t bytes)
+{ return !nr_dl_gpu_radio_mode || nr_dl_gpu_budget_take(&budget, bytes); }
+extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
+{ *bytes = __atomic_load_n(&budget.bytes, __ATOMIC_RELAXED); *refused = __atomic_load_n(&budget.refused, __ATOMIC_RELAXED); }
 static npc_dev_params_t *g_dp = NULL;
 /* per-slot shared-memory footprint, so the launch can size smem to the batch instead of to
  * NPC_MAX_N. AL2 is N=256/n=8, i.e. 7 KB not 16 KB -- and blocks/SM is set by exactly this. */
@@ -237,37 +244,52 @@ extern "C" int npc_gpu_dbg_fetch(int *out10)
   return cudaMemcpy(out10, d, sizeof(int) * 10, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -1;
 }
 extern "C" void *npc_gpu_host_alloc(size_t bytes)
-{ void *p = NULL; return cudaHostAlloc(&p, bytes, cudaHostAllocDefault) == cudaSuccess ? p : malloc(bytes); }
+{ void *p = NULL; return cudaHostAlloc(&p, bytes, cudaHostAllocDefault) == cudaSuccess ? p : NULL; }
 extern "C" void npc_gpu_host_free(void *p) { if (p && cudaFreeHost(p) != cudaSuccess) free(p); }
+
+static int cap;
+static int *d_pid, *d_vidx, *h_pid_stage, *h_vidx_stage;
+static int16_t *d_llr;
+static uint8_t *d_u;
+static cudaStream_t stream;
+extern "C" int npc_gpu_reserve(int n)
+{
+  if (cap) return n <= cap ? 0 : -1;
+  if (nr_dl_gpu_sealed || n <= 0) return -1;
+  if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking)
+      || cudaMalloc(&d_pid, sizeof(int) * n) || cudaMalloc(&d_vidx, sizeof(int) * n)
+      || cudaHostAlloc(&h_pid_stage, sizeof(int) * n, cudaHostAllocDefault)
+      || cudaHostAlloc(&h_vidx_stage, sizeof(int) * n, cudaHostAllocDefault)
+      || cudaMalloc(&d_llr, sizeof(int16_t) * (size_t)NPC_MAX_E * n)
+      || cudaMalloc(&d_u, (size_t)NPC_MAX_N * n)) return -1;
+  cap = n;
+  return 0;
+}
+extern "C" void npc_gpu_seal(void) { nr_dl_gpu_sealed = true; }
 
 extern "C" int npc_gpu_decode(const int *pid, const int16_t *llr, const int *vidx, int n_vec, int n, int estride,
                               uint8_t *u_out, int nstride, double *t_h2d, double *t_kernel, double *t_d2h)
 {
   /* vidx == NULL: item i reads LLR vector i (n_vec ignored). Otherwise only n_vec vectors are
    * uploaded and item i reads vector vidx[i]. */
-  static int cap = 0;
-  static int *d_pid = NULL, *d_vidx = NULL; static int16_t *d_llr = NULL; static uint8_t *d_u = NULL;
-  if (n > cap) {
-    cudaFree(d_pid); cudaFree(d_vidx); cudaFree(d_llr); cudaFree(d_u);
-    cap = n;
-    if (cudaMalloc(&d_pid, sizeof(int) * cap) || cudaMalloc(&d_vidx, sizeof(int) * cap)
-        || cudaMalloc(&d_llr, sizeof(int16_t) * NPC_MAX_E * cap) || cudaMalloc(&d_u, (size_t)NPC_MAX_N * cap))
-      return -1;
-  }
+  if (n <= 0 || n > cap || estride <= 0 || estride > NPC_MAX_E || nstride <= 0 || nstride > NPC_MAX_N) return -1;
   if (vidx == NULL) n_vec = n;
   if (n_vec > cap) return -1;
   const double t0 = now_us();
-  cudaMemcpy(d_pid, pid, sizeof(int) * n, cudaMemcpyHostToDevice);
-  if (vidx) cudaMemcpy(d_vidx, vidx, sizeof(int) * n, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_llr, llr, sizeof(int16_t) * (size_t)estride * n_vec, cudaMemcpyHostToDevice);
+  memcpy(h_pid_stage, pid, sizeof(int) * n);
+  if (vidx) memcpy(h_vidx_stage, vidx, sizeof(int) * n);
+  if (cudaMemcpyAsync(d_pid, h_pid_stage, sizeof(int) * n, cudaMemcpyHostToDevice, stream)
+      || (vidx && cudaMemcpyAsync(d_vidx, h_vidx_stage, sizeof(int) * n, cudaMemcpyHostToDevice, stream))
+      || cudaMemcpyAsync(d_llr, llr, sizeof(int16_t) * (size_t)estride * n_vec, cudaMemcpyHostToDevice, stream)) return -1;
   int ln = 0, nmax = 0;
   for (int i = 0; i < n; i++) { if (g_ln[pid[i]] > ln) ln = g_ln[pid[i]]; if (g_nn[pid[i]] > nmax) nmax = g_nn[pid[i]]; }
   const size_t shbytes = (size_t)3 * ln + nmax;
   const double t1 = now_us();
-  sc_decode_kernel<<<n, NPC_THREADS, shbytes>>>(g_dp, d_pid, d_llr, vidx ? d_vidx : NULL, estride, d_u, nstride, ln, nmax);
-  if (cudaDeviceSynchronize() != cudaSuccess) return -2;
+  sc_decode_kernel<<<n, NPC_THREADS, shbytes, stream>>>(g_dp, d_pid, d_llr, vidx ? d_vidx : NULL, estride, d_u, nstride, ln, nmax);
+  if (cudaStreamSynchronize(stream) != cudaSuccess) return -2;
   const double t2 = now_us();
-  cudaMemcpy(u_out, d_u, (size_t)nstride * n, cudaMemcpyDeviceToHost);
+  if (cudaMemcpyAsync(u_out, d_u, (size_t)nstride * n, cudaMemcpyDeviceToHost, stream)
+      || cudaStreamSynchronize(stream)) return -2;
   const double t3 = now_us();
   *t_h2d = t1 - t0; *t_kernel = t2 - t1; *t_d2h = t3 - t2;
   return 0;

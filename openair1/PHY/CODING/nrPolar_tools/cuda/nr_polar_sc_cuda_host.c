@@ -28,6 +28,10 @@ typedef struct {
 static npc_host_params_t g_hp[NPC_MAX_PARAMS];
 static npc_dev_params_t g_dev_copy[NPC_MAX_PARAMS]; /* host copy of the op list, for npc_ref_decode */
 static int g_np = 0;
+static int g_sealed, g_capacity;
+static int *h_pid;
+static int16_t *h_llr;
+static uint8_t *h_u;
 static npc_timing_t g_t;
 static const uint8_t *g_last_u;
 static int g_nstride = NPC_MAX_N;
@@ -66,7 +70,7 @@ int npc_register(uint16_t dci_length, uint8_t al)
       || (al != 1 && al != 2 && al != 4 && al != 8 && al != 16)) return -1;
   for (int i = 0; i < g_np; i++)
     if (g_hp[i].used && g_hp[i].dci_length == dci_length && g_hp[i].al == al) return i;
-  if (g_np >= NPC_MAX_PARAMS) return -1;
+  if (g_sealed || g_np >= NPC_MAX_PARAMS) return -1;
 
   t_nrPolar_params *pp = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, dci_length, al);
   npc_dev_params_t *d = calloc(1, sizeof(*d));
@@ -146,15 +150,7 @@ static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 
 int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload)
 {
-  static int cap = 0;
-  static int *h_pid = NULL; static int16_t *h_llr = NULL; static uint8_t *h_u = NULL;
-  if (n > cap) {
-    free(h_pid); npc_gpu_host_free(h_llr); npc_gpu_host_free(h_u);
-    cap = n;
-    h_pid = malloc(sizeof(int) * cap);
-    h_llr = npc_gpu_host_alloc(sizeof(int16_t) * NPC_MAX_E * cap);
-    h_u = npc_gpu_host_alloc((size_t)NPC_MAX_N * cap);
-  }
+  if (n <= 0 || n > g_capacity || !h_pid || !h_llr || !h_u) return -1;
   /* copy only what the batch's widest item needs, not the compile-time max */
   int estride = 0, nstride = 0;
   for (int i = 0; i < n; i++) {
@@ -162,13 +158,14 @@ int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_
     if (h->E > estride) estride = h->E;
     if (h->N > nstride) nstride = h->N;
   }
+  if (!npc_gpu_admit((uint64_t)n * (3 * estride * sizeof(int16_t) + 2 * nstride + 3 * sizeof(int)))) return -1;
   for (int i = 0; i < n; i++) {
     h_pid[i] = items[i].pid;
     memcpy(h_llr + (size_t)i * estride, items[i].llr, sizeof(int16_t) * g_hp[items[i].pid].E);
   }
   double h2d, kern, d2h;
   const int rc = npc_gpu_decode(h_pid, h_llr, NULL, 0, n, estride, h_u, nstride, &h2d, &kern, &d2h);
-  if (rc) return rc;
+  if (rc) { g_capacity = 0; return rc; }
   g_last_u = h_u; g_nstride = nstride;
   const double t0 = now_us();
   for (int i = 0; i < n; i++)
@@ -184,19 +181,7 @@ int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_
 int npc_decode_batch_vec(const int16_t *vec, int vstride, int n_vec, const int *vidx, const int *pid, int n,
                          uint32_t *crc, nr_dci_bits_t *payload)
 {
-  static int cap = 0, vcap = 0;
-  static int16_t *h_llr = NULL; static uint8_t *h_u = NULL;
-  if (n > cap) {
-    npc_gpu_host_free(h_u);
-    cap = n;
-    h_u = npc_gpu_host_alloc((size_t)NPC_MAX_N * cap);
-  }
-  if (n_vec > vcap) {
-    npc_gpu_host_free(h_llr);
-    vcap = n_vec;
-    h_llr = npc_gpu_host_alloc(sizeof(int16_t) * NPC_MAX_E * vcap);
-  }
-  if (h_u == NULL || h_llr == NULL) return -1;
+  if (n <= 0 || n > g_capacity || n_vec <= 0 || n_vec > g_capacity || !h_u || !h_llr) return -1;
   int estride = 0, nstride = 0;
   for (int i = 0; i < n; i++) {
     const npc_host_params_t *h = &g_hp[pid[i]];
@@ -204,17 +189,46 @@ int npc_decode_batch_vec(const int16_t *vec, int vstride, int n_vec, const int *
     if (h->N > nstride) nstride = h->N;
   }
   if (estride > vstride) return -1;
+  if (!npc_gpu_admit((uint64_t)n_vec * 3 * estride * sizeof(int16_t) + (uint64_t)n * (2 * nstride + 6 * sizeof(int)))) return -1;
   for (int v = 0; v < n_vec; v++)
     memcpy(h_llr + (size_t)v * estride, vec + (size_t)v * vstride, sizeof(int16_t) * estride);
   double h2d, kern, d2h;
   const int rc = npc_gpu_decode(pid, h_llr, vidx, n_vec, n, estride, h_u, nstride, &h2d, &kern, &d2h);
-  if (rc) return rc;
+  if (rc) { g_capacity = 0; return rc; }
   g_last_u = h_u; g_nstride = nstride;
   const double t0 = now_us();
   for (int i = 0; i < n; i++)
     finish(&g_hp[pid[i]], h_u + (size_t)i * nstride, &crc[i], &payload[i]);
   g_t = (npc_timing_t){h2d, kern, d2h, now_us() - t0};
   return 0;
+}
+
+int npc_warmup(int max_items)
+{
+  if (g_sealed) return g_capacity >= max_items ? 0 : -1;
+  int rc = npc_gpu_reserve(max_items);
+  if (!rc) {
+    h_pid = calloc(max_items, sizeof(int));
+    h_llr = npc_gpu_host_alloc(sizeof(int16_t) * (size_t)NPC_MAX_E * max_items);
+    h_u = npc_gpu_host_alloc((size_t)NPC_MAX_N * max_items);
+    if (!h_pid || !h_llr || !h_u) rc = -1;
+  }
+  for (int len = 1; !rc && len <= NR_DCI_MAX_PAYLOAD; len++)
+    for (int al = 1; al <= 16; al *= 2)
+      if (len + 24 <= al * 108 && npc_register(len, al) < 0) { rc = -1; break; }
+  if (!rc) {
+    memset(h_llr, 0, sizeof(int16_t) * (size_t)NPC_MAX_E * max_items);
+    memset(h_u, 0, (size_t)NPC_MAX_N * max_items);
+    g_capacity = max_items;
+    npc_item_t item = {.pid = 0, .llr = h_llr};
+    uint32_t crc;
+    nr_dci_bits_t payload;
+    rc = npc_decode_batch(&item, 1, &crc, &payload); /* materialize the kernel */
+  }
+  if (rc) g_capacity = 0;
+  g_sealed = 1;
+  npc_gpu_seal();
+  return rc;
 }
 
 npc_timing_t npc_last_timing(void) { return g_t; }

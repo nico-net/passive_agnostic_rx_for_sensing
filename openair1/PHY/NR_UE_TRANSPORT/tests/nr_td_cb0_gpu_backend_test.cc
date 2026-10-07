@@ -44,14 +44,34 @@ const nr_td_cb0_gpu_entry_t *B;
 
 class Cb0Gpu : public ::testing::Test {
  protected:
+  void (*memory[2])(uint64_t *, uint64_t *) = {};
+  uint64_t allocations[2] = {}, denials[2] = {};
   void SetUp() override
   {
     cb0_fx_init();
     nr_td_cb0_use_cuda_ldpc(0);
     nr_td_cb0_set_threads(4);
+    nr_td_cb0_gpu_warmup(1);
     B = nr_td_cb0_gpu_backend();
     if (!B)
       GTEST_SKIP() << "no CUDA CB0 backend (libldpc_cuda.so / device)";
+    const char *names[] = {"./libldpc_cuda.so", "./libtd_cb0_gpu.so"};
+    for (int i = 0; i < 2; i++) {
+      void *h = dlopen(names[i], RTLD_NOW | RTLD_NOLOAD);
+      ASSERT_NE(h, nullptr);
+      memory[i] = (void (*)(uint64_t *, uint64_t *))dlsym(h, "nr_dl_gpu_memory_stats");
+      ASSERT_NE(memory[i], nullptr);
+      memory[i](&allocations[i], &denials[i]);
+    }
+  }
+  void TearDown() override
+  {
+    for (int i = 0; i < 2; i++) if (memory[i]) {
+      uint64_t a, d;
+      memory[i](&a, &d);
+      EXPECT_EQ(a, allocations[i]);
+      EXPECT_EQ(d, denials[i]);
+    }
   }
 };
 
@@ -322,7 +342,7 @@ TEST_F(Cb0Gpu, ExecUsesGpuAndFallsBackToCpuAfterFailure)
 
 /* Memory lifetime (2026-10-04 review): after a CB0 TIMEOUT (fault injection: stalled stream) or a CUDA error the adapter
  * ABANDONS its thread-local input buffer -- the GPU may still read it -- instead of reusing / freeing it: the next batch gets a
- * fresh buffer (a different address: the old one is leaked, never freed), and its verdicts are right. A failure the GPU never
+ * preallocated spare buffer (a different address: the old one is retired, never freed), and its verdicts are right. A failure the GPU never
  * saw (CB0 breaker open: rejected before any enqueue) keeps the buffer. */
 TEST_F(Cb0Gpu, AdapterAbandonsInputBufferAfterTimeoutOrCudaError)
 {

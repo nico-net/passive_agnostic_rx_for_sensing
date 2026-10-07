@@ -115,12 +115,13 @@ typedef struct {
 #include <stdlib.h>
 /** dlopen libpdcch_gpu.so next to the executable when NR_GPU_FEP=1 (the SAME knob as the PDSCH GPU
  * FEP loader -- see this file's top comment for why one knob is deliberate, not an oversight). */
-static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load(void)
+static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load_impl(int prepare)
 {
   static const nr_gpu_pdcch_fep_api_t *api = NULL;
   static int tried = 0;
   if (tried)
     return api;
+  if (!prepare) return NULL;
   tried = 1;
   const char *e = getenv("NR_GPU_FEP");
   if (e == NULL || atoi(e) == 0)
@@ -134,6 +135,8 @@ static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load(void)
   api = get ? get() : NULL;
   return api;
 }
+static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load(void) { return nr_gpu_pdcch_fep_load_impl(0); }
+static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_prepare(void) { return nr_gpu_pdcch_fep_load_impl(1); }
 #endif
 
 #endif // NR_PDCCH_GPU_FEP_H

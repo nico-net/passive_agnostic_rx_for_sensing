@@ -241,6 +241,11 @@ int main(int argc, char **argv)
   api = get();
   nr_gpu_fep_cfg_t cfg = {NANT, N, NCP, NCP0, NSYM, FCO, NRB, FS / 1000, 8};
   if (api->init(&cfg)) { fprintf(stderr, "init failed\n"); return 2; }
+  auto memory_stats = (void (*)(uint64_t *, uint64_t *))dlsym(h, "nr_dl_gpu_memory_stats");
+  if (!memory_stats) return 2;
+  uint64_t alloc_before, denied_before;
+  memory_stats(&alloc_before, &denied_before);
+  if (api->init(&cfg)) return 2; // idempotent, including the CUDA allocation fence
   std::mt19937 rng(7);
   int fails = 0;
   nr_gpu_pdsch_job_t base = {};
@@ -296,5 +301,8 @@ int main(int argc, char **argv)
     printf("full TBs (273 RB, 13 sym, rank 4, 256QAM) batch %2d: %8.0f us/launch set, %7.0f us/TB\n", batch, us, us / batch);
   }
   printf(fails ? "FAILED (%d)\n" : "ALL OK\n", fails);
+  uint64_t alloc_after, denied_after;
+  memory_stats(&alloc_after, &denied_after);
+  if (alloc_before != alloc_after || denied_before != denied_after) { fprintf(stderr, "late CUDA allocation in FEP test\n"); return 2; }
   return fails ? 1 : 0;
 }

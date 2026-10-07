@@ -94,6 +94,9 @@ static _Atomic uint64_t g_gpu_stale_pre, g_gpu_stale_post, g_gpu_chk_fail, g_gpu
 static _Atomic int g_gpu_disabled;
 static _Atomic int g_gpu_chk_limit;
 static _Atomic int g_gpu_chk_enforce;
+static int (*g_gpu_admit)(const nr_gpu_pdsch_job_t *, int, int);
+static int16_t *g_consumer_gpu_llr[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+static int16_t *g_consumer_gpu_rxF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 #define GPU_LLR_CAP (16u << 20) /* int16 per consumer: ~13 full-band rank-4 256QAM TBs, or any probe batch */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
@@ -155,6 +158,7 @@ static void gpu_req_stale(void *ctx, int stage)
 static int gpu_req_fep(void *ctx)
 {
   gpu_fep_req_t *r = ctx;
+  if (!g_gpu_admit || !g_gpu_admit(r->jobs, r->n_jobs, r->rxdataF != NULL)) return -1;
   const int rc = r->api->fep_slot(r->rx, r->ring_len, r->ring_off, r->abs_sample, r->fo_hz, r->rot);
   r->fep_end_ns = now_ns();
   return rc;
@@ -228,7 +232,7 @@ static int64_t gpu_fep_submit_and_wait(gpu_fep_req_t *req)
 {
   req->done = 0;
   pthread_mutex_lock(&g_gpu_wq_lock);
-  if (g_gpu_wq_n >= GPU_WORKER_QUEUE_MAX) {
+  if (!atomic_load(&g_gpu_worker_running) || g_gpu_wq_n >= GPU_WORKER_QUEUE_MAX) {
     /* worker is badly backed up -- do not grow unbounded; caller falls back to CPU for this group */
     pthread_mutex_unlock(&g_gpu_wq_lock);
     return -1;
@@ -990,15 +994,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     /* ---- GPU front end: one FEP for the slot, one launch set for every eligible job of the group.
      * A job the GPU cannot take (PT-RS, CSI-RS RM, Nl > antennas, wants the data-aided CFR, BWP probe)
      * keeps n_llr = 0 and goes through the CPU chain below unchanged. ---- */
-    static __thread int16_t *t_gpu_llr; /* per consumer */
-    static __thread int16_t *t_gpu_rxF; /* per consumer: worker snapshots this slot before taking the next */
+    int16_t *t_gpu_llr = g_consumer_gpu_llr[idx];
+    int16_t *t_gpu_rxF = g_consumer_gpu_rxF[idx];
     int16_t *group_rxF = NULL;
     nr_gpu_pdsch_job_t gj[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
     int gj_ok[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1] = {0};
     static _Atomic int s_probe_all_g = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
     if (s_probe_all_g < 0) s_probe_all_g = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
     if (g_gpu) {
-      if (!t_gpu_llr) t_gpu_llr = malloc(GPU_LLR_CAP * sizeof(int16_t));
+
       int n_gj = 0;
       for (int gi = -1; gi < n_more; gi++) {
         const nr_pdsch_passive_job_t *jb = gi < 0 ? &job : &more[gi];
@@ -1011,8 +1015,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         if (gj_ok[gi + 1]) n_gj++;
       }
       if (n_gj > 0 && t_gpu_llr) {
-        if (g_gpu_chk_limit > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)g_gpu_chk_limit && !t_gpu_rxF)
-          t_gpu_rxF = malloc((size_t)fp->symbols_per_slot * fp->ofdm_symbol_size * 2 * sizeof(int16_t));
+
         /* mirror nr_slot_fep_ant(): the slot's ring position, FO only with cont_fo_comp, OAI rotation */
         const uint32_t ring_len = 2 * fp->samples_per_frame;
         const uint32_t off = get_samples_slot_timestamp(fp, job.nr_slot_rx);
@@ -1695,12 +1698,16 @@ static void report_sweep(const nr_pdsch_sweep_report_t *r)
           r->hypothesis.tda_length,r->hypothesis.dmrs_mask,r->hypothesis.mcs_table,r->winner);
 }
 
-bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers, int affinity)
+void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
 {
-  if (!atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_load();
+  if (!atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_prepare();
   { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 32; }
   { const char *e = getenv("ISAC_GPU_SELFCHECK_ENFORCE"); g_gpu_chk_enforce = e && !strcmp(e, "1"); }
   if (g_gpu) {
+    void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!h) h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
+    g_gpu_admit = h ? (int (*)(const nr_gpu_pdsch_job_t *, int, int))dlsym(h, "nr_gpu_fep_admit") : NULL;
+    if (!g_gpu_admit) { g_gpu = NULL; return; }
     const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
     const nr_gpu_fep_cfg_t cfg = {.nant = fp->nb_antennas_rx <= 4 ? fp->nb_antennas_rx : 4,
                                   .ofdm_symbol_size = fp->ofdm_symbol_size,
@@ -1729,6 +1736,10 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
       }
     }
   }
+}
+
+bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers, int affinity)
+{
   if (atomic_load_explicit(&g_running, memory_order_acquire)) {
     return true;
   }
@@ -1748,16 +1759,15 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 
   const uint32_t rxdataF_sz = ue->frame_parms.samples_per_slot_wCP;
   for (int i = 0; i < n_consumers; i++) {
-    /* nr_td_gw_alloc: unified (managed) memory in a CUDA build, so a GPU kernel can read the FEP output a
-     * GrantWork shares without a copy; plain aligned malloc otherwise. */
+    /* FEP is CPU-owned; never register/map the full IQ grid with CUDA. */
     const size_t rxF_bytes = (size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t);
-    if (i == 0) {
-      const char *e = getenv("ISAC_TD_GRANTWORK"); /* default ON, as above */
-      g_rxdataF_gw = !(e != NULL && *e && atoi(e) == 0);
+    g_rxdataF_gw = false;
+    g_rxdataF[i] = (c16_t *)malloc16_clear(rxF_bytes);
+    if (g_gpu) {
+      g_consumer_gpu_llr[i] = calloc(GPU_LLR_CAP, sizeof(int16_t));
+      g_consumer_gpu_rxF[i] = calloc((size_t)ue->frame_parms.symbols_per_slot * ue->frame_parms.ofdm_symbol_size * 2, sizeof(int16_t));
+      if (!g_consumer_gpu_llr[i] || !g_consumer_gpu_rxF[i]) g_gpu = NULL;
     }
-    g_rxdataF[i] = g_rxdataF_gw ? (c16_t *)nr_td_gw_alloc(rxF_bytes) : (c16_t *)malloc16_clear(rxF_bytes);
-    if (g_rxdataF_gw && g_rxdataF[i] != NULL)
-      memset(g_rxdataF[i], 0, rxF_bytes);
     if (g_rxdataF[i] == NULL) {
       LOG_E(PHY, "SENSING: passive PDSCH queue: rxdataF allocation failed for consumer %d\n", i);
       for (int j = 0; j < i; j++) { if (g_rxdataF_gw) nr_td_gw_free(g_rxdataF[j]); else free(g_rxdataF[j]); g_rxdataF[j] = NULL; }

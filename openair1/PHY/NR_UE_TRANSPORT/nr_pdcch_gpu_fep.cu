@@ -17,16 +17,20 @@
 #define NR_GPU_FEP_NO_LOADER
 #include "nr_pdcch_gpu_fep.h"
 #include <cuda_runtime.h>
+#include "nr_dl_gpu_memory.h"
+#include "nr_dl_gpu_budget.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 
+static int g_init_state;
+
 #define CK(x)                                                                                     \
   do {                                                                                             \
     cudaError_t e_ = (x);                                                                          \
-    if (e_ != cudaSuccess) {                                                                       \
+    if (e_ != cudaSuccess) { g_init_state = -1;                                                                       \
       fprintf(stderr, "nr_pdcch_gpu_fep: %s at %s:%d\n", cudaGetErrorString(e_), __FILE__, __LINE__); \
       return -1;                                                                                   \
     }                                                                                               \
@@ -170,8 +174,13 @@ __global__ void k_llr_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, const f
   o[1] = (int16_t)fmaxf(-32000.f, fminf(32000.f, z.y * g));
 }
 
-static int api_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
+static nr_dl_gpu_budget_t g_budget;
+extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
+{ *bytes = __atomic_load_n(&g_budget.bytes, __ATOMIC_RELAXED); *refused = __atomic_load_n(&g_budget.refused, __ATOMIC_RELAXED); }
+
+static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
 {
+  if (cfg->nant < 1 || cfg->nant > MAX_ANT || cfg->ofdm_symbol_size <= 0 || cfg->n_rb_dl < 1 || cfg->n_rb_dl > 275) return -1;
   g_cfg = *cfg;
   const int N = cfg->ofdm_symbol_size, nant = cfg->nant;
   CK(cudaStreamCreate(&g_stream));
@@ -185,8 +194,24 @@ static int api_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
   g_llr_cap = (size_t)MAX_JOBS * 273 * RE_PER_RB_OUT_DMRS * MAX_DUR * 2;
   CK(cudaMallocHost(&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(cudaMalloc(&g_d_llr, g_llr_cap * sizeof(int16_t)));
+  cudaFuncAttributes attr;
+  CK(cudaFuncGetAttributes(&attr, k_gold_pdcch));
+  CK(cudaFuncGetAttributes(&attr, k_ls_pdcch));
+  CK(cudaFuncGetAttributes(&attr, k_llr_pdcch));
   return 0;
 }
+
+static int api_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
+{
+  if (!cfg) return -1;
+  if (g_init_state) return g_init_state == 1 && !memcmp(cfg, &g_cfg, sizeof(*cfg)) ? 0 : -1;
+  g_init_state = -1; /* a failed attempt cannot retry while RX is running */
+  const int rc = allocate_init(cfg);
+  if (!rc) g_init_state = 1;
+  nr_dl_gpu_sealed = true;
+  return rc;
+}
+
 
 /* Upload rxdataF_symb[ant]: max_duration * N c16 samples, CORESET-RELATIVE (row 0 = the CORESET's
  * OWN first symbol, i.e. the caller slices/copies starting at start_symbol before calling this --
@@ -204,13 +229,18 @@ static int api_upload_slot(const int16_t *const *rxdataF_symb, int max_duration)
   const auto t0 = std::chrono::steady_clock::now();
   const int N = g_cfg.ofdm_symbol_size, nant = g_cfg.nant;
   const int dur = std::min(max_duration, MAX_DUR);
+  if (g_init_state != 1 || max_duration < 1 || max_duration > MAX_DUR) return -1;
+  if (nr_dl_gpu_radio_mode && !nr_dl_gpu_budget_take(&g_budget,
+      (size_t)nant * dur * N * (sizeof(int16_t) * 2 + 2 * sizeof(float2)) + 3 * g_llr_cap * sizeof(int16_t))) return -1;
   for (int a = 0; a < nant; a++)
     for (int s = 0; s < dur; s++)
       for (int k = 0; k < N; k++) {
         const int16_t re = rxdataF_symb[a][2 * (s * N + k)], im = rxdataF_symb[a][2 * (s * N + k) + 1];
         g_h_rxF_stage[(a * MAX_DUR + s) * N + k] = make_float2((float)re, (float)im);
       }
-  CK(cudaMemcpyAsync(g_d_rxF, g_h_rxF_stage, (size_t)nant * MAX_DUR * N * sizeof(float2), cudaMemcpyHostToDevice, g_stream));
+  for (int a = 0; a < nant; a++)
+    CK(cudaMemcpyAsync(g_d_rxF + (size_t)a * MAX_DUR * N, g_h_rxF_stage + (size_t)a * MAX_DUR * N,
+                       (size_t)dur * N * sizeof(float2), cudaMemcpyHostToDevice, g_stream));
   CK(cudaStreamSynchronize(g_stream));
   g_upload_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
@@ -245,6 +275,7 @@ static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint
 
 static int64_t api_pdcch_llr(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, size_t llr_cap)
 {
+  if (g_init_state != 1 || !jobs || !llr_out || n < 0) return -1;
   const auto t0 = std::chrono::steady_clock::now();
   int64_t written = 0;
   int i = 0;
@@ -254,7 +285,7 @@ static int64_t api_pdcch_llr(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, 
     while (i + m < n && m < MAX_JOBS) {
       nr_gpu_pdcch_job_t *j = &jobs[i + m];
       uint32_t nl = 0;
-      const bool ok = j->n_rb > 0 && j->n_rb <= 273 && j->duration >= 1 && j->duration <= MAX_DUR
+      const bool ok = j->n_rb > 0 && j->n_rb <= 273 && j->bwp_start_rb + j->rb_offset + j->n_rb <= g_cfg.n_rb_dl && j->duration >= 1 && j->duration <= MAX_DUR
                       && j->start_symbol + j->duration <= g_cfg.symbols_per_slot && 3 * (int)j->n_rb <= MAX_PILOTS_PER_JOB;
       if (ok)
         nl = job_total_llr(j);

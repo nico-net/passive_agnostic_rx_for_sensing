@@ -382,6 +382,29 @@ int fake_decode(void *, const nr_td_cb0_item_t *it, int n, nr_td_cb0_result_t *o
   return call == g_fake.fail_on ? -5 : 0;
 }
 
+TEST_F(Cb0Wire, PoolRefusalRunsSameItemsOnCpu)
+{
+  const nr_td_cb0_backend_t be{"exhausted", nullptr,
+    [](void *, const nr_td_cb0_item_t *, int, nr_td_cb0_result_t *) { return NR_TD_CB0_GPU_REFUSED; }, nullptr};
+  nr_td_cb0_register_gpu_backend(&be);
+  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_GPU);
+  std::vector<nr_td_cb0_item_t> items = {g_tb->pass_item(), g_tb->fail_item()};
+  nr_td_cb0_result_t out[2];
+  nr_td_cb0_exec_t ex;
+  nr_td_cb0_backend_stats_t before, after;
+  nr_td_cb0_backend_get_stats(&before);
+  ASSERT_EQ(nr_td_cb0_exec(items.data(), 2, out, &ex), 2);
+  EXPECT_EQ(ex.backend, NR_TD_CB0_BE_CPU);
+  EXPECT_EQ(ex.failed, 0);
+  EXPECT_EQ(out[0].pass, 1);
+  EXPECT_EQ(out[1].pass, 0);
+  nr_td_cb0_backend_get_stats(&after);
+  EXPECT_EQ(after.gpu_skipped, before.gpu_skipped + 1);
+  EXPECT_EQ(after.gpu_failed, before.gpu_failed);
+  nr_td_cb0_register_gpu_backend(nullptr);
+  nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
+}
+
 TEST_F(Cb0Wire, BackendFallbackOnInjectedGpuFailure)
 {
   std::vector<nr_td_cb0_item_t> it = {g_tb->pass_item(), g_tb->fail_item(), g_tb->pass_item()};

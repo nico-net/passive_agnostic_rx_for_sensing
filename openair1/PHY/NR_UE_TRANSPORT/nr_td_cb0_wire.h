@@ -31,6 +31,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+void nr_td_cb0_wire_warmup(void);
+
 
 /* ---- provided by nr_pdsch_passive_decode.c (declared here so the glue does not need the PHY headers) ---- */
 int nr_pdsch_passive_gw_cb0_item(nr_td_grantwork_t *gw, const nr_pdsch_cfg_hypothesis_t *h, nr_td_cb0_item_t *it,

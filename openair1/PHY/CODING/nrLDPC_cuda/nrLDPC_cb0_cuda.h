@@ -19,16 +19,12 @@
  * a caller must not go below the TB decoder's equivalent unless that cap is proven per codeword (paired harness
  * ldpc_cuda_pool_bler paired, task-CB0GPU report).
  *
- * Memory strategy (picked at run time, ldpc_cb0_mem_mode()):
- *  - UNIFIED (integrated GPU, cudaDevAttrIntegrated = 1, e.g. GB10): kernels read the caller's buffer IN PLACE (host
- *    pageable, pinned or managed: no host<->device copy); per-item results and bits are written by the GPU straight
- *    into pinned mapped host memory.
- *  - EXPLICIT (discrete GPU, e.g. RTX 4070 sm_89; or forced with LDPC_CB0_MEM=explicit): device / managed (when
- *    cudaDevAttrConcurrentManagedAccess) inputs are read in place; host inputs go host -> device with async copies in
- *    large pieces on a dedicated copy stream (pageable memory first packed into this module's pinned staging, piece
- *    by piece, so the CPU pack of piece p+1 overlaps the DMA of piece p); every in-flight submission owns its staging
- *    and device arena (double / triple buffering across grants); results and bits come back with one D2H copy each.
- *  Correctness never depends on unified memory: the EXPLICIT path is exercised on GB10 by the tests (forced).
+ * Memory strategy: EXPLICIT on every device, including coherent integrated GPUs.
+ * Host inputs use preallocated pinned staging; device inputs stay on device. The live
+ * adapter passes device-resident dematcher output, so only small metadata/results cross
+ * the coherent fabric. ldpc_cb0_warmup reserves all configured slots/chunk workspaces,
+ * builds every legal (BG,Z) table and seals allocations. Missing graph cache entries use
+ * direct launches. The historical mapped mode remains only for offline test comparison.
  *
  * Asynchrony: ldpc_cb0_submit enqueues everything on the module's own low-priority stream and returns; collect waits
  * (bounded) for that submission. Up to LDPC_CB0_SLOTS submissions can be in flight (the receiver dematches grant N+1
@@ -89,8 +85,10 @@ typedef struct {
 
 typedef struct ldpc_cb0_ticket ldpc_cb0_ticket_t;
 
-/* Idempotent. 0, or LDPC_CB0_E_DISABLED. Called by submit on first use. */
+/* Idempotent. 0, or LDPC_CB0_E_DISABLED. Must be called before submit. */
 int ldpc_cb0_init(void);
+/* Receiver pre-stream warm-up, then permanently forbid CUDA allocation. */
+int ldpc_cb0_warmup(void);
 /* Enqueue n items (llr: item i at llr + i * llr_stride, Kc*Z <= llr_stride bytes valid). want_bits: also return the K
  * hard-decided bits per item (collect's bits). On success *t is set and collect MUST be called once. On failure no
  * ticket exists and the batch has no verdict. */

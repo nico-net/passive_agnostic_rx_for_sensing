@@ -18,6 +18,9 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
+int npc_gpu_reserve(int n);
+int npc_gpu_admit(uint64_t bytes);
+void npc_gpu_seal(void);
 int npc_gpu_upload_params(int slot, const npc_dev_params_t *p);
 /* llr: n x estride int16; u_out: n x nstride bytes. The strides are the batch max, not the
  * compile-time max -- at AL2 that is 216 vs 1024 int16, i.e. 4.7x less to copy.

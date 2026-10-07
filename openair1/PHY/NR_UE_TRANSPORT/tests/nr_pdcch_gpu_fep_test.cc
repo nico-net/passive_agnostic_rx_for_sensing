@@ -64,6 +64,11 @@ int main(int argc, char **argv)
 
   nr_gpu_pdcch_fep_cfg_t cfg = {NANT, N, 14, N - 24 * 6, 273};
   if (api->init(&cfg) != 0) { fprintf(stderr, "init failed\n"); return 1; }
+  auto memory_stats = (void (*)(uint64_t *, uint64_t *))dlsym(h, "nr_dl_gpu_memory_stats");
+  if (!memory_stats) return 2;
+  uint64_t alloc_before, denied_before;
+  memory_stats(&alloc_before, &denied_before);
+  if (api->init(&cfg)) return 2; // idempotent, including the CUDA allocation fence
 
   const int NRB = 4, DUR = 1, NID = 5, SLOT = 3, START_SYM = 2;
   nr_gpu_pdcch_job_t job = {};
@@ -129,5 +134,8 @@ int main(int argc, char **argv)
          (long long)got, NRB * RE_PER_RB);
   printf("NOTE: does not confirm sign convention against nr_pdcch_demapping_deinterleaving -- run the\n"
          "live self-check (nr_pdcch_gpu_fep.h STATUS note) before trusting this path.\n");
+  uint64_t alloc_after, denied_after;
+  memory_stats(&alloc_after, &denied_after);
+  if (alloc_before != alloc_after || denied_before != denied_after) { fprintf(stderr, "late CUDA allocation in FEP test\n"); return 2; }
   return 0;
 }

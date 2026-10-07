@@ -177,7 +177,7 @@ static void load(void)
     h = dlopen("./libldpc_cuda.so", RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
   if (!h)
     return;
-  int (*init)(void) = (int (*)(void))dlsym(h, "ldpc_cb0_init");
+  int (*init)(void) = (int (*)(void))dlsym(h, "ldpc_cb0_warmup");
   f_submit = (int (*)(const ldpc_cb0_item_t *, int, const int8_t *, size_t, int, ldpc_cb0_ticket_t **))dlsym(h, "ldpc_cb0_submit");
   f_collect = (int (*)(ldpc_cb0_ticket_t *, ldpc_cb0_result_t *, uint8_t *, size_t))dlsym(h, "ldpc_cb0_collect");
   f_healthy = (int (*)(void))dlsym(h, "ldpc_cb0_healthy");
@@ -189,8 +189,16 @@ static void load(void)
 
 const nr_td_cb0_gpu_entry_t *nr_td_cb0_gpu_backend(void)
 {
-  pthread_once(&g_once, load);
   return g_ptr;
+}
+
+static int g_warm_allowed;
+static void warm_load(void) { if (g_warm_allowed) load(); }
+void nr_td_cb0_gpu_warmup(int enable)
+{
+  g_warm_allowed = enable;
+  pthread_once(&g_once, warm_load);
+  nr_td_cb0_dematch_warmup(enable);
 }
 
 /* ---- adapter: the GPU entry behind the CPU wiring's nr_td_cb0_backend_t (nr_td_cb0_exec) ---- */
@@ -200,17 +208,12 @@ static int ad_healthy(void *ctx)
   return nr_td_cb0_gpu_backend() != NULL && f_healthy();
 }
 
-/* t_l: the dematched inputs the CB0 entry reads IN PLACE (unified memory) or copies asynchronously (explicit mode) until
- * collect returns. After a TIMEOUT or a CUDA error the submission is abandoned, NOT cancelled: the GPU may still read
- * t_l later. The buffer is then leaked (pointer and capacity cleared, a new one is allocated by the next batch), never
- * reused or freed. Bounded: the CB0 breaker (LDPC_CB0_BREAKER_N failures -> bypass, sticky -> off) and the dispatcher's
- * back-off stop the GPU path after a few failures; each leak is at most n x NR_TD_CB0_L_STRIDE bytes. */
-static __thread int8_t *t_l;
-static __thread size_t t_l_cap;
+/* CPU metadata is bounded; the dematcher owns the device input until collect.
+ * Serialized scratch prevents consumers from growing private CUDA pools. */
+static pthread_mutex_t g_adapter_lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_td_cb0_meta_t t_meta[65536];
+static __thread const int8_t *t_l;
 static _Atomic unsigned long s_l_abandoned;
-static __thread nr_td_cb0_meta_t *t_meta;
-static __thread int8_t *t_st;
-static __thread int t_cap_items;
 
 static int ad_decode(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
 {
@@ -219,23 +222,7 @@ static int ad_decode(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_
     return 0;
   if (!nr_td_cb0_gpu_backend())
     return -1;
-  if (n > t_cap_items) { /* per-thread scratch, grown, never shrunk */
-    free(t_meta);
-    free(t_st);
-    t_meta = malloc((size_t)n * sizeof(*t_meta));
-    t_st = malloc((size_t)n);
-    t_cap_items = (t_meta && t_st) ? n : 0;
-    if (!t_cap_items)
-      return -1;
-  }
-  const size_t need = (size_t)n * NR_TD_CB0_L_STRIDE;
-  if (need > t_l_cap) {
-    free(t_l);
-    t_l = aligned_alloc(64, need);
-    t_l_cap = t_l ? need : 0;
-    if (!t_l)
-      return -1;
-  }
+  if (n > 65536 || pthread_mutex_trylock(&g_adapter_lock)) return NR_TD_CB0_GPU_REFUSED;
   int valid = 0;
   for (int i = 0; i < n; i++) {
     out[i] = (nr_td_cb0_result_t){0};
@@ -248,25 +235,18 @@ static int ad_decode(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_
     out[i].tb_result = t_meta[i].C == 1;
     valid++;
   }
-  if (!valid)
-    return 0;
-  /* GPU dematch, exactly the item's llr_shift; the CPU reference dematch (bit-identical) when the GPU module is absent */
-  int rc = nr_td_cb0_dematch(items, n, 1, t_l, NULL, t_st);
-  if (rc != 0)
-    rc = nr_td_cb0_dematch(items, n, 0, t_l, NULL, t_st);
-  if (rc != 0) {
-    fail_all(t_meta, n, out);
-    return -1;
+  if (!valid) { pthread_mutex_unlock(&g_adapter_lock); return 0; }
+  int rc = nr_td_cb0_dematch_device_begin(items, t_meta, n, &t_l);
+  if (rc) {
+    pthread_mutex_unlock(&g_adapter_lock);
+    return NR_TD_CB0_GPU_REFUSED;
   }
   rc = gpu_decode(t_meta, t_l, n, out);
-  for (int i = 0; i < n; i++)
-    if (t_meta[i].valid)
-      out[i].dematch_gpu = t_st[i] == 1;
-  if (rc == LDPC_CB0_E_TIMEOUT || rc == LDPC_CB0_E_CUDA) { /* the GPU may still read t_l: abandon it (see t_l above) */
-    t_l = NULL;
-    t_l_cap = 0;
-    atomic_fetch_add(&s_l_abandoned, 1);
-  }
+  for (int i = 0; i < n; i++) if (t_meta[i].valid) out[i].dematch_gpu = 1;
+  const int quarantine = rc == LDPC_CB0_E_TIMEOUT || rc == LDPC_CB0_E_CUDA;
+  nr_td_cb0_dematch_device_end(quarantine);
+  if (quarantine) { t_l = NULL; atomic_fetch_add(&s_l_abandoned, 1); }
+  pthread_mutex_unlock(&g_adapter_lock);
   return rc;
 }
 
