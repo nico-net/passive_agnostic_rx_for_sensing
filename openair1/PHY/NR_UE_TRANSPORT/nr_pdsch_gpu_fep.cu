@@ -429,13 +429,12 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     return -1;
   const int N = cfg->ofdm_symbol_size, ns = cfg->symbols_per_slot;
   g_samples_per_slot = cfg->nb_prefix_samples0 + N + (ns - 1) * (N + cfg->nb_prefix_samples);
-  const char *disc = getenv("ISAC_CSIRS_DISC");
-  if (disc && !strcmp(disc, "1")) {
+  /* PDSCH FEP always runs on the highest-priority stream: its IQ has a live deadline, other GPU users (CSI-RS/nID
+   * discovery) do not. (Was mistakenly conditional on ISAC_CSIRS_DISC.) */
+  {
     int least = 0, greatest = 0;
     CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
     CK(cudaStreamCreateWithPriority(&g_stream, cudaStreamNonBlocking, greatest));
-  } else {
-    CK(cudaStreamCreateWithFlags(&g_stream, cudaStreamNonBlocking));
   }
   CK(cudaHostAlloc((void **)&g_h_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2), cudaHostAllocDefault));
   CK(cudaHostAlloc((void **)&g_h_rot, MAX_SYM * sizeof(short2), cudaHostAllocDefault));
