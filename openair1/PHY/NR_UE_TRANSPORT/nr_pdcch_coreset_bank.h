@@ -37,6 +37,12 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_cfg_t (defined there; pulls in nr_pdcch_blind_monitor.h too, same pattern nr_pdcch_blind_monitor.c already uses for this same struct)
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.h" // nr_pdcch_al1_map_t, NR_PDCCH_AL1_MAX_FAM/_UNION_MAX
 
+#define NR_PDCCH_DISCOVERED_CORESETS 8
+
+/* Exact discovered footprint, including start symbol and nID; independent of DCI length. */
+bool nr_pdcch_coreset_bank_has_footprint(int rb, int groups, int duration, int symbol,
+                                        int bundle, int interleaver, int shift, int nid);
+
 /* One bank entry. cfg/owners are immutable after the release-store publishes the entry.
  * The AL1 UNION fields (Task 15) change after publication; nr_pdcch_blind_monitor_rt.c guards them
  * with its g_al1_mu. Exposed (not hidden behind per-field accessors) because the RT union decoding
