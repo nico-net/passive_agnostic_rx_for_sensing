@@ -3119,6 +3119,11 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_joint_live PRIVATE nr_common polar crc_byte UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_joint_live)
   add_test(NAME test_nr_pdcch_joint_live COMMAND ./test_nr_pdcch_joint_live)
+  # offline analysis tool for ISAC_PDCCH_ANON_DUMP files (not a test)
+  add_executable(pdcch_anon_offline ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/pdcch_anon_offline.cc
+                                    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c)
+  target_include_directories(pdcch_anon_offline PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(pdcch_anon_offline PRIVATE nr_common polar crc_byte UTIL)
 
   add_executable(test_nr_pdsch_prb_set ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_prb_set_test.cc
                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c)

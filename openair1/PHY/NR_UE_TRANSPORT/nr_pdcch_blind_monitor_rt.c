@@ -102,6 +102,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_discovery_replay.h"
 #include "nr_pdcch_uss_tracker.h"
 #include "nr_pdcch_joint_live.h"
+#include "nr_pdcch_joint_solve.h" /* nr_pdcch_joint_prescreen (JOINT_ANON candidate screen) */
 #include "nr_pdcch_al1_map.h"
 #include "nr_passive_metrics.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
@@ -1941,7 +1942,89 @@ typedef struct {
   uint8_t  n_known;
   uint16_t bootstrap_alias;
   int lane, rb_offset, span_rb, bundle, interleaver, shift;
+  bool joint_anon; /* ISAC_PDCCH_JOINT_ANON: unknown-RNTI joint solve on a configured-nID CORESET */
 } nr_pdcch_autodiscover_sweep_ctx_t;
+
+static bool nr_pdcch_css_nrnti0_enabled(void)
+{
+  static int en = -1;
+  if (en < 0) {
+    const char *e = getenv("ISAC_PDCCH_CSS_NRNTI0");
+    en = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  return en == 1;
+}
+
+/* ISAC_PDCCH_ANON_DUMP=<path> (default off, diagnostic): append every anonymous configured-nID occasion's
+ * equalised candidate symbols (exactly what the length scorer descrambles) for offline solver iteration.
+ * Record: "PAD1", int32 frame, slot, nid, rb_offset, n_rb, n_cand; per candidate uint8 L, uint8 0,
+ * uint16 cce, int16[L*108]. Bounded by ISAC_PDCCH_ANON_DUMP_MAX occasions (default 20000). */
+static void nr_pdcch_anon_dump(int frame, int slot, int nid, int rb_offset, int n_rb,
+                               const nr_pdcch_autodiscover_cand_t *cand, int n_cand)
+{
+  static FILE *f;
+  static int s_init, s_left;
+  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&mu);
+  if (!s_init) {
+    s_init = 1;
+    const char *p = getenv("ISAC_PDCCH_ANON_DUMP");
+    const char *m = getenv("ISAC_PDCCH_ANON_DUMP_MAX");
+    s_left = m ? atoi(m) : 20000;
+    if (p && *p)
+      f = fopen(p, "wb");
+    if (f)
+      LOG_A(PHY, "SENSING: ANON_DUMP writing up to %d occasions to %s\n", s_left, p);
+  }
+  if (f && s_left > 0) {
+    --s_left;
+    const int32_t hdr[6] = {frame, slot, nid, rb_offset, n_rb, n_cand};
+    fwrite("PAD1", 1, 4, f);
+    fwrite(hdr, sizeof(hdr), 1, f);
+    for (int i = 0; i < n_cand; ++i) {
+      const uint8_t l2[2] = {cand[i].L, 0};
+      fwrite(l2, 1, 2, f);
+      fwrite(&cand[i].cce, 2, 1, f);
+      fwrite(cand[i].e_rx, sizeof(int16_t), (size_t)cand[i].L * 108, f);
+    }
+    if (s_left == 0) {
+      fclose(f);
+      f = NULL;
+    }
+  }
+  pthread_mutex_unlock(&mu);
+}
+
+/* ISAC_PDCCH_JOINT_ANON=1 (default off; needs ISAC_PDCCH_JOINT=1). TS 38.211 7.3.2.3: on a CORESET with
+ * pdcch-DMRS-ScramblingID, USS PDCCH data is scrambled with c_init = (C-RNTI << 16) + n_ID. Before any C-RNTI
+ * is known the anonymous DCI-length sweep descrambles with n_RNTI = 0 (or a confirmed RNTI), so a USS DCI can
+ * never pass the polar CRC there: the anonymous search is structurally unable to find the first C-RNTI. This
+ * flag lets the anonymous length scorer fall back to the GF(2) joint (RNTI, payload) solver for each failed
+ * (length, candidate). Its accepts are ordinary sweep evidence: the length locks only on a recurrent RNTI with
+ * distinct payloads (NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_LOCK), which is the false-accept control. */
+/* Occasions the anonymous search may run on a JOINT_ANON CORESET before giving up (default = the 4000-occasion
+ * discovered-CORESET dwell; ISAC_PDCCH_JOINT_ANON_OCC overrides). */
+static int joint_anon_budget(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDCCH_JOINT_ANON_OCC");
+    v = (e && atoi(e) > 0) ? atoi(e) : 4000;
+  }
+  return v;
+}
+static bool nr_pdcch_joint_anon_enabled(void)
+{
+  static int en = -1;
+  if (en < 0) {
+    const char *e = getenv("ISAC_PDCCH_JOINT_ANON");
+    en = (e != NULL && atoi(e) != 0 && nr_pdcch_joint_live_enabled()) ? 1 : 0;
+    if (e != NULL && atoi(e) != 0)
+      LOG_A(PHY, "SENSING: JOINT_ANON %s (unknown-RNTI joint solve in the anonymous DCI 1_1 length sweep)\n",
+            en ? "enabled" : "requested but ISAC_PDCCH_JOINT is off -> disabled");
+  }
+  return en == 1;
+}
 
 static uint16_t sweep_evidence_rnti(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, uint16_t rnti,
                                     int dci_length, const nr_pdcch_autodiscover_cand_t *cand)
@@ -2584,6 +2667,10 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
     }
   }
   const nr_pdcch_autodiscover_cand_t *c = &ctx->cand[cand_idx];
+  /* JOINT_ANON: with a full-coverage ladder most candidates are empty CCEs; neither the polar decode nor the
+   * solver can pass on them, so one cheap amplitude-consistency screen (the solver's own) skips both. */
+  if (ctx->joint_anon && !nr_pdcch_joint_prescreen((const int16_t *)c->e_rx, c->L * 108))
+    return false;
   // Same unscramble step nr_pdcch_blind_cand_worker_body() below uses on the identical cursor
   // (t->e_rx from the same pdcch_e_rx[]/e_rx_cand_idx walk), just with `dci_length` substituted
   // for the hypothesis under test instead of the (as yet unknown) real one.
@@ -2598,6 +2685,25 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
                           ctx->dmrs_scrambling_id, tmp_e);
     ok=nr_pdcch_blind_decode_raw_11(tmp_e,c->L,(uint16_t)dci_length,ctx->rnti_min,ctx->rnti_max,&out);
     used_alt = ok;
+  }
+  if (!ok && ctx->joint_anon && dci_length <= 64) {
+    /* Re-descramble with n_RNTI = 0 so the solver model key (length, AL, nID, pre = 0) is stable whatever
+     * rotation hypothesis this occasion carried; the model then holds g(C-RNTI) ^ g(0) as unknowns. */
+    nr_pdcch_unscrambling((c16_t *)c->e_rx, 0, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id, tmp_e);
+    nr_pdcch_joint_live_result_t jr;
+    if (nr_pdcch_joint_live_decode_11(tmp_e, c->L, (uint16_t)dci_length, ctx->dmrs_scrambling_id, 0,
+                                      ctx->rnti_min, ctx->rnti_max, &jr)) {
+      out.payload = jr.payload;
+      out.rnti = jr.rnti;
+      out.mismatched_bits = jr.mismatched_bits;
+      ok = true;
+      static _Atomic unsigned s_janon;
+      const unsigned h = atomic_fetch_add_explicit(&s_janon, 1, memory_order_relaxed) + 1;
+      if (h <= 50 || (h % 500) == 0)
+        LOG_A(PHY, "SENSING: JOINT_ANON_HIT #%u nid=%u rnti=0x%04x len=%d AL=%u CCE=%u mismatched_bits=%u frame=%d slot=%d\n",
+              h, ctx->dmrs_scrambling_id, jr.rnti, dci_length, c->L, c->cce, jr.mismatched_bits,
+              discovery_evidence_frame, discovery_evidence_slot);
+    }
   }
   if(!ok) return false;
   if (used_alt)
@@ -2752,7 +2858,13 @@ retry_scrambling:
   if (t->ok && t->configured_scrambling) {
     const uint16_t recovered = t->ul_scan ? t->ul_out.rnti
         : (t->format != NR_BLIND_DCI_FORMAT_1_0 && (t->dl_auto || t->bwp_probe)) ? t->dl_raw.rnti : t->out.rnti;
-    t->ok = data_scrambling_rnti != 0 && recovered == data_scrambling_rnti;
+    /* ISAC_PDCCH_CSS_NRNTI0=1: TS 38.211 7.3.2.3 -- a COMMON search space in a CORESET with
+     * pdcch-DMRS-ScramblingID scrambles with n_RNTI = 0 and n_ID = that ID. A format 1_0 candidate that passes
+     * its CRC under n_RNTI = 0 is therefore a legal CSS DCI (RA-/TC-/C-RNTI in type-1/3 CSS); without the flag
+     * it was always discarded here. */
+    const bool css_ok = data_scrambling_rnti == 0 && t->format == NR_BLIND_DCI_FORMAT_1_0 && !t->ul_scan
+        && nr_pdcch_css_nrnti0_enabled();
+    t->ok = css_ok || (data_scrambling_rnti != 0 && recovered == data_scrambling_rnti);
   }
   if (!t->ok && t->alternate_scrambling_rnti != 0
       && t->alternate_scrambling_rnti != data_scrambling_rnti) {
@@ -3758,6 +3870,16 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       }
       al_cap[idx] = probe_floor + (int)((wsum > 0) ? ((double)spare * w[idx] / wsum) : 0);
     }
+    /* ISAC_PDCCH_JOINT_ANON: g_al_accepts is process-wide and, before any dedicated decode, holds only the
+     * CORESET#0 SI-RNTI accepts (AL4/AL8). Measured on the PCI 415 replay it shrank a 36-CCE discovered
+     * configured-nID CORESET to AL1=2 AL2=2 candidates per occasion, so the unknown-RNTI USS DCIs (AL2 here)
+     * were almost never under test. On such a CORESET, until it is banked, fill the budget in ladder order
+     * (AL2, AL4, AL8, then AL1): 18+9+4+33 = 64 for 36 CCEs, i.e. every AL2/4/8 position each occasion. */
+    if (t_candidate_share > 0 && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
+        && nr_pdcch_joint_anon_enabled())
+      for (int idx = 0; idx < 4; idx++)
+        if (cfg->ss_al_candidates[idx] == 0)
+          al_cap[idx] = max_cand;
   }
 
   /* AL1 UNION: on a bank entry whose AL1 verification left several consistent mapping families, AL1
@@ -4431,6 +4553,15 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
 
     /* Before an identity exists, a deadline-bounded anonymous state remains owned by this exact
      * CORESET bank. It jointly discovers (RNTI,length); it never promotes a hash alias. */
+    /* JOINT_ANON: a discovered configured-nID CORESET is dwelt on repeatedly (one nID at a time); each new
+     * dwell re-opens its anonymous search (evidence is kept, only the give-up counter restarts). */
+    if (dlc == NULL && n_known_dl == 0 && dl_bank && t_discovered_token && cfg->discovered_coreset
+        && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell && nr_pdcch_joint_anon_enabled()
+        && dl_bank->anonymous_dwell != t_discovered_token) {
+      dl_bank->anonymous_dwell = t_discovered_token;
+      dl_bank->anonymous_exhausted = false;
+      dl_bank->anonymous.occasions_fed = 0;
+    }
     const bool dl_anonymous = dlc == NULL && n_known_dl == 0 && dl_bank && !dl_bank->anonymous_exhausted;
     nr_pdcch_dci_length_sweep_state_t *dl_state =
         dlc ? &dlc->state : (dl_anonymous ? &dl_bank->anonymous : NULL);
@@ -4466,6 +4597,12 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         if (cfg->discovered_coreset && bootstrap_rnti
             && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
           sweep_ctx.scrambling_rnti = bootstrap_rnti;
+        const bool anon_cfg_nid = dl_anonymous && cfg->discovered_coreset
+            && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
+        sweep_ctx.joint_anon = anon_cfg_nid && nr_pdcch_joint_anon_enabled();
+        if (anon_cfg_nid && !dl_scout)
+          nr_pdcch_anon_dump(proc->frame_rx, proc->nr_slot_rx, cfg->coreset_pdcch_dmrs_scrambling_id,
+                             (int)sweep_ctx.rb_offset, n_rb, disc_cand, disc_n_cand);
         sweep_ctx.n_known = (uint8_t)n_known_dl;
         memcpy(sweep_ctx.known_rnti, dl_known, (size_t)n_known_dl * sizeof(dl_known[0]));
         if (dl_second && dlc->hint_secondary) dl_state->preferred_len = dlc->hint_secondary;
@@ -4551,7 +4688,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             g_length_swept = true;
             g_length_found = true;
           }
-        } else if (!dl_scout && !dl_second && dl_state->occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+        } else if (!dl_scout && !dl_second && dl_state->occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS
+                   && !(sweep_ctx.joint_anon && dl_state->occasions_fed < joint_anon_budget())) {
           const bool was_suspect = dlc && reconf_lengths_enabled() && dlc->len_state == NR_LEN_SUSPECT;
           if (was_suspect) {
             dlc->found[0] = 0;

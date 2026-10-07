@@ -224,6 +224,7 @@ typedef struct {
   int anonymous_found;
   uint16_t anonymous_rnti;
   bool anonymous_exhausted;
+  uint64_t anonymous_dwell; /* JOINT_ANON: discovered-CORESET dwell token the anonymous search last restarted on */
 } nr_pdcch_dci_length_bank_t;
 /* Caller holds the geometry length lock; independent of SFN/TDD slot phase. */
 bool nr_pdcch_dci_length_scout_due(nr_pdcch_dci_length_bank_t *bank);

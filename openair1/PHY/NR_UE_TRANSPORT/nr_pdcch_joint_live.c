@@ -17,7 +17,10 @@ static int joint_encode_cb(void *vctx, nr_dci_bits_t payload, uint16_t crc_mask,
   return 0;
 }
 
-#define JOINT_CACHE_N 32
+/* 32 shapes was enough for the known-RNTI fallback (one length per UE); the anonymous length sweep
+ * (ISAC_PDCCH_JOINT_ANON) needs every length 30..64 x AL 1..16 x discovered nID. A model is at most
+ * E*17 bytes (~29 KB at AL16), so 1024 shapes stay below ~30 MB worst case. */
+#define JOINT_CACHE_N 1024
 static struct { uint16_t A, nid; uint8_t L; int pre; nr_pdcch_joint_model_t *m; } s_cache[JOINT_CACHE_N];
 static int s_cache_n;
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;

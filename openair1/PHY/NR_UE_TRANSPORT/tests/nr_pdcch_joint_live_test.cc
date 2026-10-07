@@ -171,6 +171,36 @@ TEST(JointLive, RefusesShapesOutsideTheSolverLimits)
   EXPECT_FALSE(nr_pdcch_joint_live_decode_11(l.data(), 2, 65, 2, 0, 1, 0xFFEF, &r));
 }
 
+// ISAC_PDCCH_JOINT_ANON (T26): the anonymous DCI 1_1 length sweep on a configured-nID CORESET calls the solver for
+// every (length, AL) shape at n_RNTI = 0 descrambling. (1) More than the old 32-shape cache must stay solvable;
+// (2) a DCI solved at a WRONG length must not reproduce the true C-RNTI, otherwise recurrence of one RNTI at one
+// length (the sweep's lock rule) would not identify the length.
+TEST(JointLive, AnonymousSweepShapesAndWrongLengthsDoNotAlias)
+{
+  std::mt19937 rng(71);
+  const uint16_t nid = 62922;
+  int ok = 0, n = 0, alias = 0, wrong_trials = 0;
+  for (int A = 30; A <= 52; A++)
+    for (int L : {2, 4}) {
+      const uint16_t rnti = (uint16_t)(0x1000 + rng() % 0xE000);
+      const uint64_t pl = DlPayload(rng, A);
+      auto l = Rx(pl, rnti, nid, A, L, 10.0, rng);
+      Descramble(l, 0, nid);
+      nr_pdcch_joint_live_result_t r;
+      n++;
+      if (nr_pdcch_joint_live_decode_11(l.data(), L, A, nid, 0, 1, 0xFFEF, &r) && r.rnti == rnti && r.payload.w[0] == pl) ok++;
+      for (int W = 30; W <= 64; W++) {
+        if (W == A) continue;
+        wrong_trials++;
+        if (nr_pdcch_joint_live_decode_11(l.data(), L, W, nid, 0, 1, 0xFFEF, &r) && r.rnti == rnti) alias++;
+      }
+    }
+  printf("[joint-anon] %d/%d shapes recovered (46 > old 32-shape cache); wrong-length true-RNTI aliases %d/%d\n", ok, n,
+         alias, wrong_trials);
+  EXPECT_GE(ok, n - 2);
+  EXPECT_EQ(alias, 0);
+}
+
 int main(int argc, char** argv)
 {
   crcTableInit();
