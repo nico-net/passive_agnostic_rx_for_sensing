@@ -56,6 +56,13 @@ static int symbol_test() {
    for(int c=lo;c<hi;c++)for(int q=0;q<3;q++)pilots[3*c+q]=v.grid(0,d)[pa+12*c+1+4*q];
    for(int c=lo;c<=hi;c++)power[c]=ap[c-lo];
    if(want!=nid_best_symbol(v,0,seed,lo,hi,exlo,exhi,m0,d,pilots,power))return 25;
+   NidSigns signs[3*276];float denominator[276];uint32_t x1words[54];
+   for(int c=lo;c<hi;c++)for(int q=0;q<3;q++)signs[3*c+q]=nid_signs(pilots[3*c+q]);
+   nid_denominators(signs,denominator,lo,hi,exlo,exhi);
+   x1=0x5e485840u;for(int w=0;w<54;w++) {
+    x1words[w]=x1;x1=(x1>>1)^(x1>>4);x1^=(x1<<31)^(x1<<28);
+   }
+   if(want!=nid_best_prepared(seed,lo,hi,m0,signs,denominator,x1words))return 26;
   }
  }
  puts("PASS streamed Gold/six-prefix score == full arrays: 36/217/273 PRB, Point A offsets, symbols 1/2/3");
@@ -139,6 +146,24 @@ int main(int argc,char **argv) {
      int nf=0,below=0;
      for(int k=0;k<s.nact;k++) {
       st2_hyp_t one=s.H[i];s.st2_score(&one,s.sn+k,1);h.score+=one.score;
+      const int D=s.g_st2_D,L=one.L?one.L:6,B=L/D,per=6/L,nb=6*one.ng*D/L,cs=one.phase+6*one.g0;
+      double excess[276];
+      if(nb>275)return 27;
+      for(int j=0;j<nb;j++) {
+       int f=one.L?((j%one.R)*(nb/one.R)+j/one.R+one.shift)%nb:j;
+       excess[j]=s.st2_exc(s.sn+k,cs+f*B,B);
+      }
+      double cached=-1;int bal=-1,full=0,partial=0;
+      for(int ai=1;ai<5;ai++)for(int cce=0;cce+(1<<ai)<=one.ng*D;cce+=1<<ai) {
+       double v=nid_cached_candidate(excess,cce*per,(1<<ai)*per);
+       if(v>cached){cached=v;bal=ai;}
+      }
+      if((bal<0?0:cached)!=one.score || (bal>=0 && one.al_win[bal]!=1))return 28;
+      for(int j0=0;j0+per<=nb;j0+=per) {
+       int hits=0;for(int dj=0;dj<per;dj++)hits+=excess[j0+dj]>2.0/(3.0*L-1.0);
+       full+=hits==per;partial+=hits>0 && hits<per;
+      }
+      if((full+partial?(full<partial?0:1):-1)!=s.consistency_vote(&one,k))return 29;
       for(int a=0;a<5;a++)h.al_win[a]+=one.al_win[a];
       int v=s.consistency_vote(&one,k);nf+=v>=0;below+=v==0;
      }

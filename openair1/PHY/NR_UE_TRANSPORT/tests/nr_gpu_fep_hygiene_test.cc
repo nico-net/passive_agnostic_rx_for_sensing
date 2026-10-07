@@ -122,7 +122,7 @@ TEST(GpuFepHygiene, CoherentTrafficBudgetHasNoCatchupBurst)
 enum { cudaSuccess = 0, cudaErrorNotReady = 34 };
 static int shim_calls;
 static int nr_gpu_allocate(int, void **, size_t) { ++shim_calls; return cudaSuccess; }
-static int nr_gpu_allocation_guard() { return 1; }
+extern "C" int nr_gpu_allocation_guard() { return 1; }
 static int cudaStreamCreate(void **) { ++shim_calls; return cudaSuccess; }
 #include "nr_dl_gpu_memory.h"
 TEST(GpuFepHygiene, SealedCudaFenceRejectsAllocationAndStreams)

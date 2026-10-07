@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "nr_passive_metrics.h"
+#include <math.h>
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_td_grantwork.h"
 #include <pthread.h>
@@ -39,11 +40,19 @@ __attribute__((weak)) void nr_passive_obs_stats(uint64_t *pushed, uint64_t *writ
   *pushed = *written = *dropped = 0;
 }
 
+/* Optional when linking the metrics collector without the capture path. */
+extern void nr_pdcch_nid_capture_metrics(uint64_t *, uint64_t *, uint64_t *, float *) __attribute__((weak));
+
 void nr_passive_metrics_collect(nr_passive_metrics_t *m)
 {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   *m = (nr_passive_metrics_t){0};
+  if (nr_pdcch_nid_capture_metrics) {
+    float noise;
+    nr_pdcch_nid_capture_metrics(&m->nid_capture_offered, &m->nid_capture_taken, &m->nid_capture_skipped_empty, &noise);
+    m->nid_capture_noise_floor_db = noise > 0 ? 10.0 * log10(noise) : -120.0;
+  }
   m->t_mono_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
   if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,

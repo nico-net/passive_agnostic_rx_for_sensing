@@ -72,33 +72,37 @@ __global__ void reset(Device *p, NidView v) {
 // in DM-RS order; every warp then broadcasts shared REs. Power prefixes and
 // square roots are no longer redundantly calculated for each ID/window.
 __global__ void sweep(Device *p,int first,int count) {
- __shared__ c16_t pilots[2][3*275];
- __shared__ float power[2][2][276];
+ __shared__ NidSigns signs[2][3*275];
+ __shared__ float denominator[2][2][275];
+ __shared__ uint32_t x1words[54];
  int lane=threadIdx.x, tile=threadIdx.y,k=2*blockIdx.y+tile;
  const NidView &v=p->view;
  int hi=(v.nsc-v.point_a_sc)/12,lo=v.point_a_sc>=0?0:(-v.point_a_sc+11)/12;
  bool css=v.css0_nrb>=6 && v.css0_crb>=lo && v.css0_crb+v.css0_nrb<=hi;
+ if(!lane && !tile) {
+  uint32_t x1=0x5e485840u;
+  for(int w=0;w<54;w++) {x1words[w]=x1;x1=(x1>>1)^(x1>>4);x1^=(x1<<31)^(x1<<28);}
+ }
  if(k<count) {
   const c16_t *re=v.grid(first+k);
-  for(int m=3*lo+lane;m<3*hi;m+=128)pilots[tile][m]=re[v.point_a_sc+4*m+1];
+  for(int m=3*lo+lane;m<3*hi;m+=128) {
+   signs[tile][m]=nid_signs(re[v.point_a_sc+4*m+1]);
+  }
  }
  __syncthreads();
  if(k<count && lane<2) {
   int begin=lane && css?v.css0_crb:lo,end=lane && css?v.css0_crb+v.css0_nrb:hi;
-  float sum=0;power[tile][lane][begin]=0;
-  for(int c=begin;c<end;c++) {
-   float a=0;
-   for(int q=0;q<3;q++){c16_t y=pilots[tile][3*c+q];a+=(float)y.r*y.r+(float)y.i*y.i;}
-   sum+=a;power[tile][lane][c+1]=sum;
-  }
+  nid_denominators(signs[tile],denominator[tile][lane],begin,end,
+                   !lane && css?v.css0_crb:0,!lane && css?v.css0_crb+v.css0_nrb:0);
  }
  __syncthreads();
  int id=blockIdx.x*128+lane;if(id>=IDS || k>=count)return;
  int idx=v.index(first+k);
  uint64_t x=((uint64_t)v.sps*v.slot[idx]+v.sym[idx]+1)*((uint64_t)(id*2)+1);
  uint32_t seed=(uint32_t)(((x<<17)+id*2)&0x7fffffff);
- p->values[(2*k+1)*IDS+id]=nid_best_symbol(v,first+k,seed,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0,0,pilots[tile],power[tile][0]);
- p->values[(2*k)*IDS+id]=css?nid_best_symbol(v,first+k,seed,v.css0_crb,v.css0_crb+v.css0_nrb,0,0,v.css0_crb,0,pilots[tile],power[tile][1]):0;
+ p->values[(2*k+1)*IDS+id]=nid_best_prepared(seed,lo,hi,0,signs[tile],denominator[tile][0],x1words);
+ p->values[(2*k)*IDS+id]=css?nid_best_prepared(seed,v.css0_crb,v.css0_crb+v.css0_nrb,v.css0_crb,
+                                           signs[tile],denominator[tile][1],x1words):0;
 }
 __device__ float secondary(const NidView &v,int k,int id,int d) {
  int idx=v.index(k),hi=(v.nsc-v.point_a_sc)/12,lo=v.point_a_sc>=0?0:(-v.point_a_sc+11)/12;
@@ -390,24 +394,57 @@ __global__ void generate(Device *p) {
  __syncthreads();
  if(ph<6)s.st2_gen(s.H+offset[ph],min(counts[ph],NID_HYP_CAP-offset[ph]),qlo,qhi,ph,ph+1);
 }
-// One block per hypothesis, lanes score independent snapshots. The control
-// lane adds results in original snapshot order (no floating-point tree sum).
+// One block per hypothesis; warps score snapshots. Control adds snapshot
+// results in original order; warp reductions select maxima, never sum scores.
 __global__ void score(Device *p,int base,int count) {
  auto &s=p->stage2;int i=base+blockIdx.x,tid=threadIdx.x;
  if(!s.alive || i>=s.nh || i>=base+count)return;
- __shared__ double value[128];
- __shared__ int vote[128],al[128],nf,below;
+ // A warp owns one snapshot; cache each bundle once, shared across every AL
+ // and the consistency vote. The largest legal geometry has <=275 bundles.
+ __shared__ double excess[4][276],value[4];
+ __shared__ int vote[4],al[4],nf,below;
+ int lane=tid&31,warp=tid/32;
+ const st2_hyp_t h=s.H[i];
+ int D=s.g_st2_D,L=h.L?h.L:6,B=L/D,per=6/L,nb=6*h.ng*D/L;
+ int cs=h.phase+6*h.g0;
  if(tid==0){s.H[i].score=0;memset(s.H[i].al_win,0,sizeof(s.H[i].al_win));nf=below=0;}
  __syncthreads();
- for(int first=0;first<s.nact;first+=128) {
-  int k=first+tid;
-  if(k<s.nact) {
-   st2_hyp_t h=s.H[i];s.st2_score(&h,s.sn+k,1);value[tid]=h.score;
-   al[tid]=-1;for(int j=1;j<5;j++)if(h.al_win[j])al[tid]=j;
-   vote[tid]=s.consistency_vote(&h,k);
+ for(int first=0;first<s.nact;first+=4) {
+  int k=first+warp;
+  if(k<s.nact)for(int j=lane;j<nb;j+=32) {
+   int f=h.L?((j%h.R)*(nb/h.R)+j/h.R+h.shift)%nb:j;
+   excess[warp][j]=s.st2_exc(s.sn+k,cs+f*B,B);
   }
   __syncthreads();
-  if(tid==0)for(int j=0;j<128 && first+j<s.nact;j++) {
+  double best=-1;int key=0x7fffffff,full=0,partial=0;
+  if(k<s.nact) {
+   for(int ai=1;ai<5;ai++) {
+    int aggregation=1<<ai;
+    for(int cce=lane*aggregation;cce+aggregation<=h.ng*D;cce+=32*aggregation) {
+     double v=nid_cached_candidate(excess[warp],cce*per,aggregation*per);
+     int order=ai*512+cce;
+     if(v>best || (v==best && order<key)){best=v;key=order;}
+    }
+   }
+   double threshold=2.0/(3.0*L-1.0);
+   for(int j0=lane*per;j0+per<=nb;j0+=32*per) {
+    int hits=0;for(int dj=0;dj<per;dj++)hits+=excess[warp][j0+dj]>threshold;
+    full+=hits==per;partial+=hits>0 && hits<per;
+   }
+  }
+  for(int offset=16;offset;offset/=2) {
+   double other=__shfl_down_sync(0xffffffff,best,offset);
+   int order=__shfl_down_sync(0xffffffff,key,offset);
+   if(other>best || (other==best && order<key)){best=other;key=order;}
+   full+=__shfl_down_sync(0xffffffff,full,offset);
+   partial+=__shfl_down_sync(0xffffffff,partial,offset);
+  }
+  if(!lane) {
+   value[warp]=key==0x7fffffff?0:best;al[warp]=key==0x7fffffff?-1:key/512;
+   vote[warp]=full+partial?(full<partial?0:1):-1;
+  }
+  __syncthreads();
+  if(tid==0)for(int j=0;j<4 && first+j<s.nact;j++) {
    s.H[i].score+=value[j];if(al[j]>=0)s.H[i].al_win[al[j]]++;
    nf+=vote[j]>=0;below+=vote[j]==0;
   }

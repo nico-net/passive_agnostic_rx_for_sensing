@@ -23,6 +23,8 @@
  * \brief Implementation for nr_pdcch_coreset_map.h -- see that header for the design rationale.
  */
 #include "nr_pdcch_nid_gpu.h"
+#include "nr_pdcch_nid_occupancy.h"
+#include <stdatomic.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -406,6 +408,17 @@ static void *idsw_worker(void *arg)
   return NULL;
 }
 
+/* Capture metrics have one producer; readers use relaxed atomic snapshots. */
+static _Atomic uint64_t nid_capture_offered, nid_capture_taken, nid_capture_skipped_empty;
+static _Atomic float nid_capture_noise;
+void nr_pdcch_nid_capture_metrics(uint64_t *offered, uint64_t *taken, uint64_t *empty, float *noise)
+{
+  *offered = atomic_load_explicit(&nid_capture_offered, memory_order_relaxed);
+  *taken = atomic_load_explicit(&nid_capture_taken, memory_order_relaxed);
+  *empty = atomic_load_explicit(&nid_capture_skipped_empty, memory_order_relaxed);
+  *noise = atomic_load_explicit(&nid_capture_noise, memory_order_relaxed);
+}
+
 int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
 {
   const bool gpu = nr_pdcch_nid_gpu_enabled();
@@ -435,7 +448,7 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   if ((g_idsw.dl_calls++ % every) != 0)
     return -1;
   const int dur = nr_pdcch_coreset_map_idsweep_dur();
-  /* ISAC_PDCCH_NID_GPU_SYMBOLS=N rotates the window start over the first N symbols only (default: all). PDCCH
+  /* ISAC_PDCCH_NID_GPU_SYMBOLS=N rotates the window start over the first N symbols only (default: 3; 0: all). PDCCH
    * CORESETs sit in the first symbols; on PCI 415 (OTA 2026-10-07) the dedicated CORESET is at symbol 0 and a
    * 14-symbol rotation sampled it 1/14 of the time (first record after ~627 passes / ~50 s). */
   int starts = sps;
@@ -443,7 +456,7 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
     static int s_nsym = -1;
     if (s_nsym < 0) {
       const char *e = getenv("ISAC_PDCCH_NID_GPU_SYMBOLS");
-      s_nsym = e && atoi(e) >= 1 ? atoi(e) : 0;
+      s_nsym = e ? (atoi(e) >= 1 ? atoi(e) : 0) : 3;
     }
     if (s_nsym > 0 && s_nsym < starts) starts = s_nsym;
   }
@@ -465,7 +478,39 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
     const int pa_mod = ((pa % 12) + 12) % 12;
     const nr_pdcch_nid_config_t cfg = {nsc, pa, (12 * g_css0_first_rb + pa_mod - pa) / 12,
                                       g_css0_nrb, pci, sps, dur};
-    nr_pdcch_nid_gpu_push(rxF_sym, fft, fco, slot, sym, &cfg);
+    static int occ_enabled = -1, floor_pct = 10;
+    static float ratio = 3.981071706f; /* 6 dB: margin above 54-RE noise averages */
+    static nr_nid_occupancy_t occupancy;
+    static nr_pdcch_nid_config_t previous;
+    static uint64_t previous_sync_losses;
+    if (occ_enabled < 0) {
+      const char *e = getenv("ISAC_PDCCH_NID_GPU_OCC_GATE");
+      occ_enabled = !e || strcmp(e, "0");
+      e = getenv("ISAC_PDCCH_NID_GPU_OCC_DB");
+      if (e) {
+        char *end; float db = strtof(e, &end);
+        if (end != e && !*end && isfinite(db) && db >= 0 && db <= 60) ratio = powf(10.f, db / 10.f);
+      }
+      e = getenv("ISAC_PDCCH_NID_GPU_OCC_FLOOR_PCT");
+      if (e) {
+        char *end; long n = strtol(e, &end, 10);
+        if (end != e && !*end && n >= 1 && n <= 100) floor_pct = (int)n;
+      }
+    }
+    if (memcmp(&previous, &cfg, sizeof(cfg)) || previous_sync_losses != snap.sync_losses) {
+      memset(&occupancy, 0, sizeof(occupancy)); previous = cfg; previous_sync_losses = snap.sync_losses;
+    }
+    atomic_fetch_add_explicit(&nid_capture_offered, 1, memory_order_relaxed);
+    bool take = !occ_enabled || nr_nid_occupancy_take(&occupancy, rxF_sym, fft, fco, nsc, pa,
+                                                     cfg.css0_crb, cfg.css0_nrb, sym, ratio, floor_pct);
+    if (sym >= 0 && sym < 14)
+      atomic_store_explicit(&nid_capture_noise, occupancy.noise[sym], memory_order_relaxed);
+    if (!take) {
+      atomic_fetch_add_explicit(&nid_capture_skipped_empty, 1, memory_order_relaxed);
+      return;
+    }
+    if (!nr_pdcch_nid_gpu_push(rxF_sym, fft, fco, slot, sym, &cfg))
+      atomic_fetch_add_explicit(&nid_capture_taken, 1, memory_order_relaxed);
     return;
   }
   pthread_mutex_lock(&g_idsw.mu);

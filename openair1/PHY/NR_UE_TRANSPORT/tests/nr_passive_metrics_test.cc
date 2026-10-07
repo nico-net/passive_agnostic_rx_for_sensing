@@ -176,3 +176,17 @@ TEST(PassiveMetrics, PdschStageHistogramsAndReasons) {
   EXPECT_EQ(nr_passive_metrics_to_json(&m, exact.data(), exact.size()), n);
   EXPECT_EQ(nr_passive_metrics_to_json(&m, shortbuf.data(), shortbuf.size()), -1);
 }
+
+TEST(PassiveMetrics, NidCapturePolicyCounters) {
+  nr_passive_metrics_t m={};char buf[16384];
+  ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
+  EXPECT_EQ(std::string(buf).find("nid_capture"),std::string::npos);
+  m.nid_capture_offered=100;m.nid_capture_taken=10;m.nid_capture_skipped_empty=89;
+  m.nid_capture_noise_floor_db=42.125;
+  ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
+  std::string s(buf);
+  EXPECT_NE(s.find("\"nid_capture_offered\":100"),std::string::npos);
+  EXPECT_NE(s.find("\"nid_capture_taken\":10"),std::string::npos);
+  EXPECT_NE(s.find("\"nid_capture_skipped_empty\":89"),std::string::npos);
+  EXPECT_NE(s.find("\"nid_capture_noise_floor_db\":42.125"),std::string::npos);
+}

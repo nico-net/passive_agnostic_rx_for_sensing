@@ -28,6 +28,91 @@ NID_FN inline uint32_t nid_gold_start(uint32_t *x1,uint32_t *x2,uint32_t seed) {
  for(int b=0;b<8;b++)*x2^=nid_jump[b][(seed>>(4*b))&15];
  return *x1^*x2;
 }
+// Shared pilot sums/differences are exact integers in binary32, including
+// int16 extrema. Sign selection preserves the oracle's per-RE and prefix order.
+struct NidSigns { float plus, minus; };
+NID_FN inline NidSigns nid_signs(c16_t y) {
+ return {(float)((int)y.r+y.i),(float)((int)y.r-y.i)};
+}
+NID_FN inline uint32_t nid_x2_next(uint32_t x) {
+ x=(x>>1)^(x>>2)^(x>>3)^(x>>4);
+ return x^(x<<31)^(x<<30)^(x<<29)^(x<<28);
+}
+NID_FN inline void nid_qpsk(NidSigns y,unsigned bits,float &r,float &i) {
+ bool flip=(bits&1)!=0, cross=((bits^(bits>>1))&1)!=0;
+ float a=cross?y.minus:y.plus, b=cross?y.plus:-y.minus;
+ r+=flip?-a:a; i+=flip?-b:b;
+}
+// Denominators are computed ONCE per window, in the oracle's power-prefix
+// order. Zero also encodes excluded/short windows. No ID-dependent mask loops.
+NID_FN inline void nid_denominators(const NidSigns *pilots,float *den,int lo,int hi,int exlo,int exhi) {
+ float prefix[6]={},sum=0;
+ for(int c=lo;c<hi;c++) {
+  float p=0;
+  for(int q=0;q<3;q++) {
+   NidSigns y=pilots[3*c+q];
+   float r=(y.plus+y.minus)*.5f,i=(y.plus-y.minus)*.5f;
+   p+=r*r+i*i;
+  }
+  float old=prefix[1];
+#ifdef __CUDACC__
+  #pragma unroll
+#endif
+  for(int j=0;j<5;j++)prefix[j]=prefix[j+1];
+  prefix[5]=sum;sum+=p;
+  bool valid=c-lo>=5 && !(exhi>exlo && c-5<exhi && c+1>exlo);
+  den[c]=valid?(sum-old)*36.f:0;
+ }
+}
+NID_FN inline void nid_max_ratio(float r,float i,float denominator,float &best) {
+ if(denominator<=0)return;
+ float numerator=r*r+i*i,lower=best*denominator;
+#ifdef __CUDA_ARCH__
+ if(lower>0)lower=__uint_as_float(__float_as_uint(lower)-1);
+#else
+ lower=nextafterf(lower,-INFINITY);
+#endif
+ if(numerator>lower) {float value=numerator/denominator;if(value>best)best=value;}
+}
+// Three Gold words cover exactly sixteen RBs. Fully unrolled extraction has
+// constant shifts; x1 is shared, only x2 advances per ID (no per-RE while/div).
+NID_FN inline float nid_best_prepared(uint32_t seed,int lo,int hi,int m0,
+                                     const NidSigns *pilots,const float *den,const uint32_t *x1words) {
+ uint32_t unused,x2;nid_gold_start(&unused,&x2,seed);
+ float ar[6]={},ai[6]={},sr=0,si=0,best=0;
+ for(int base=m0;base<hi;base+=16) {
+  uint32_t words[3];
+#ifdef __CUDACC__
+  #pragma unroll
+#endif
+  for(int w=0;w<3;w++) {words[w]=x2^x1words[3*((base-m0)/16)+w];x2=nid_x2_next(x2);}
+#ifdef __CUDACC__
+  #pragma unroll
+#endif
+  for(int t=0;t<16;t++) {
+   int c=base+t;if(c<lo || c>=hi)continue;
+   float r=0,i=0;
+#ifdef __CUDACC__
+   #pragma unroll
+#endif
+   for(int q=0;q<3;q++)nid_qpsk(pilots[3*c+q],words[(3*t+q)/16]>>(2*((3*t+q)%16)),r,i);
+   float oldr=ar[1],oldi=ai[1];
+#ifdef __CUDACC__
+   #pragma unroll
+#endif
+   for(int j=0;j<5;j++){ar[j]=ar[j+1];ai[j]=ai[j+1];}
+   ar[5]=sr;ai[5]=si;sr+=r;si+=i;
+   nid_max_ratio(sr-oldr,si-oldi,den[c],best);
+  }
+ }
+ return sqrtf(best);
+}
+// Stage 2 caches excess in logical bundle order. Candidate summation still
+// visits each bundle in the original order (no AL hierarchy/tree rounding).
+NID_FN inline double nid_cached_candidate(const double *excess,int first,int count) {
+ double sum=0;for(int j=first;j<first+count;j++)sum+=excess[j];
+ return count?sum/count:0;
+}
 // Prefix arithmetic follows the CPU oracle exactly (the old GPU sliding sum
 // did not). --fmad=false, precise div/sqrt, no fast-math preserve decisions.
 NID_FN inline float nid_best_symbol(const NidView &v,int k,uint32_t seed,int lo,int hi,int exlo,int exhi,int m0,int d=0,const c16_t *pilots=nullptr,const float *power=nullptr) {
