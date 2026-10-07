@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,7 +26,7 @@ static struct {
  bool incremental;
  bool duty_enabled, all_verified;
  uint32_t epoch;
- uint64_t wake;
+ uint64_t wake, last_outside_us;
  unsigned acquire_ms, maintain_ms, recheck_ms;
  bool stop;
  _Atomic bool running;
@@ -51,6 +52,7 @@ static void *worker(void *unused)
  bool have_config=false;
  nr_gpu_discovery_duty_t duty={0};
  uint64_t wake=0;
+ int logged_mode=-1;
  for(;;) {
   pthread_mutex_lock(&g.mu);
   int b=-1;
@@ -62,12 +64,21 @@ static void *worker(void *unused)
   if(g.stop) {pthread_mutex_unlock(&g.mu);break;}
   g.state[b]=3;
   const uint32_t epoch=g.epoch;
-  const bool unexplained=wake!=g.wake || (have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous)));
+  const bool geometry_changed=have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous));
+  const bool unexplained=wake!=g.wake;
+  if(geometry_changed)duty=(nr_gpu_discovery_duty_t){0};
   wake=g.wake;
-  if(g.duty_enabled && !nr_gpu_discovery_due(&duty,nr_gpu_budget_now_us(),epoch,
-       g.result.count>0,g.all_verified,unexplained,1000ull*g.acquire_ms,
-       1000ull*g.maintain_ms,1000ull*g.recheck_ms)) {
-    g.state[b]=0;pthread_mutex_unlock(&g.mu);continue;
+  if(g.duty_enabled) {
+   int due=nr_gpu_discovery_due(&duty,nr_gpu_budget_now_us(),epoch,
+       !geometry_changed && g.result.count>0,!geometry_changed && g.all_verified,unexplained,1000ull*g.acquire_ms,
+       1000ull*g.maintain_ms,1000ull*g.recheck_ms);
+   if(logged_mode!=duty.mode) {
+    static const char *names[]={"ACQUIRE","MAINTAIN","PAUSED"};
+    LOG_A(PHY,"SENSING: PDCCH_NID_GPU mode %s -> %s epoch=%u published=%d verified=%d wake=%d\n",
+          logged_mode<0?"START":names[logged_mode],names[duty.mode],epoch,g.result.count,g.all_verified,unexplained);
+    logged_mode=duty.mode;
+   }
+   if(!due) {g.state[b]=0;pthread_mutex_unlock(&g.mu);continue;}
   }
   pthread_mutex_unlock(&g.mu);
   bool changed=have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous));
@@ -75,7 +86,7 @@ static void *worker(void *unused)
    previous=g.batch[b].cfg;have_config=true;batches=0;
    if(changed) {
     pthread_mutex_lock(&g.mu);
-    memset(&g.result,0,sizeof(g.result));g.generation++;
+    memset(&g.result,0,sizeof(g.result));g.generation++;g.all_verified=false;
     pthread_mutex_unlock(&g.mu);
    }
   }
@@ -97,8 +108,20 @@ static void *worker(void *unused)
   if(result.budget_exceeded)LOG_W(PHY,"SENSING: PDCCH_NID_GPU soft pass budget exceeded; completed records published\n");
   pthread_mutex_lock(&g.mu);
   if(epoch!=g.epoch) {pthread_mutex_unlock(&g.mu);continue;}
-  bool same=g.result.count==result.count && !memcmp(g.result.records,result.records,result.count*sizeof(result.records[0]));
+  bool same=g.result.count==result.count;
+  for(int i=0;i<result.count && same;++i) {
+   bool found=false;
+   for(int j=0;j<g.result.count;++j)
+    found|=!memcmp(result.records+i,g.result.records+j,offsetof(nr_pdcch_nid_record_t,ties));
+   same=found;
+  }
   g.result=result;if(!same || !g.duty_enabled) {g.generation++;g.all_verified=false;}g.passes++;
+  if(g.duty_enabled && result.count && duty.mode==NR_GPU_DISC_ACQUIRE) {
+   duty.published=1;duty.mode=NR_GPU_DISC_MAINTAIN;
+   duty.next_us=nr_gpu_budget_now_us()+1000ull*g.maintain_ms;
+   LOG_A(PHY,"SENSING: PDCCH_NID_GPU mode ACQUIRE -> MAINTAIN epoch=%u published=%d reason=publication\n",epoch,result.count);
+   logged_mode=duty.mode;
+  }
   uint64_t pass=g.passes;
   pthread_mutex_unlock(&g.mu);
   char records[2048];size_t used=0;records[0]=0;
@@ -239,12 +262,21 @@ void nr_pdcch_nid_gpu_feedback(uint32_t epoch,uint64_t generation,bool verified,
  if(!g.duty_enabled)return;
  if(pthread_mutex_trylock(&g.mu))return;
  if(g.epoch!=epoch) {
-  g.epoch=epoch;g.result.count=0;g.generation++;g.all_verified=false;
+  g.epoch=epoch;g.result.count=0;g.generation++;g.all_verified=false;g.last_outside_us=0;
   /* Drop queued old-epoch snapshots, but never reclaim the worker's buffer. */
   for(int i=0;i<3;++i)if(g.state[i]==2)g.state[i]=0;
   if(g.producer>=0)g.n=0;
  }
  if(generation==g.generation)g.all_verified=verified;
- if(unexplained)g.wake++;
+ if(unexplained) {
+  uint64_t now=nr_gpu_budget_now_us();
+  // The monitor reports a level on each occupied occasion. Reopen once per
+  // episode, then permit bank acknowledgement to pause again. A quiet
+  // MAINTAIN interval rearms the edge; a changed epoch always rearms it.
+  if(!g.last_outside_us || now-g.last_outside_us>=1000ull*g.maintain_ms) {
+   g.wake++;g.all_verified=false;
+  }
+  g.last_outside_us=now;
+ }
  pthread_mutex_unlock(&g.mu);
 }

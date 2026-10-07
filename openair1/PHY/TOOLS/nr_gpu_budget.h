@@ -13,7 +13,7 @@ unsigned nr_gpu_rt_deadline_us(void);
 /* Optional compound-operation deadline (e.g. PDSCH FEP + LLR + self-check). */
 void nr_gpu_budget_rt_job_start(uint64_t start_us);
 uint64_t nr_gpu_budget_rt_start_us(void);
-/* RT admission is one atomic operation, never waits for discovery. */
+/* RT admission never waits for discovery; blocks new discovery submissions. */
 int nr_gpu_budget_rt_begin(void);
 void nr_gpu_budget_rt_end(void);
 void nr_gpu_budget_rt_result(uint64_t waited_us, int fallback);
@@ -21,10 +21,11 @@ void nr_gpu_budget_rt_result(uint64_t waited_us, int fallback);
  * contention tests to exercise the production deadline loop without a device. */
 int nr_gpu_budget_rt_wait(int (*query)(void *), void *job, uint64_t start,
                           uint64_t (*clock_us)(void *), void *clock_arg);
-/* Worker-only admission: 1 admitted, 0 yield, -1 disabled after a slice overrun.
+/* Worker-only admission: 1 admitted, 0 yield, -1 disabled after a CUDA error.
  * Completion is charged using CUDA event elapsed time, rounded UP to us.
  * No catch-up bursts; one discovery submission globally, at most 5 ms. */
 int nr_gpu_budget_discovery_begin(uint64_t now_us);
+uint64_t nr_gpu_budget_discovery_delay_us(uint64_t now_us);
 void nr_gpu_budget_discovery_end(uint64_t now_us, uint64_t gpu_us);
 void nr_gpu_budget_fault(void);
 typedef struct {
@@ -33,7 +34,8 @@ typedef struct {
 } nr_gpu_budget_metrics_t;
 void nr_gpu_budget_metrics(nr_gpu_budget_metrics_t *out);
 /* Pure duty policy; callers serialize state and provide epoch/bank evidence. */
-typedef struct { uint64_t epoch, acquired_us, next_us; int published, verified; } nr_gpu_discovery_duty_t;
+enum { NR_GPU_DISC_ACQUIRE, NR_GPU_DISC_MAINTAIN, NR_GPU_DISC_PAUSED };
+typedef struct { uint64_t epoch, acquired_us, next_us; int published, verified, unexplained, mode; } nr_gpu_discovery_duty_t;
 int nr_gpu_discovery_due(nr_gpu_discovery_duty_t *, uint64_t now, uint64_t epoch,
                          int published, int all_verified, int unexplained,
                          uint64_t acquire_us, uint64_t maintain_us, uint64_t recheck_us);

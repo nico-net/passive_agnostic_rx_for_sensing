@@ -30,27 +30,34 @@ int main() {
     }
   });
   using Clock=std::chrono::steady_clock;auto start=Clock::now();
-  uint64_t jobs=0,ok=0,wall_max=0;
+  uint64_t jobs=0,ok=0,wall_max=0,timeouts=0;
   for(int slot=0;slot<20000;++slot) {
     std::this_thread::sleep_until(start+std::chrono::microseconds(slot*500));
     auto before=nr_gpu_budget_now_us();
     NrGpuRtScope scope;++jobs;
     if(scope.admitted) {
       load<<<1,32,0,rt>>>((unsigned long long)khz/50);
-      if(scope.wait(rt)==cudaSuccess)++ok;
-      else break; // quarantine stream; never submit again after timeout
+      auto rc=scope.wait(rt);
+      if(rc==cudaSuccess)++ok;
+      else {
+        if(rc==cudaErrorNotReady)++timeouts;else ++errors;
+        fprintf(stderr,"GPU_RT_FAILURE job=%llu cuda=%s elapsed_us=%llu\n",
+          (unsigned long long)jobs,cudaGetErrorString(rc),(unsigned long long)(nr_gpu_budget_now_us()-before));
+        wall_max=std::max(wall_max,nr_gpu_budget_now_us()-before);
+        break; // quarantine stream; never submit again after timeout
+      }
     }
     wall_max=std::max(wall_max,nr_gpu_budget_now_us()-before);
   }
   stop=true;background.join();
   nr_gpu_budget_metrics_t m;nr_gpu_budget_metrics(&m);
-  printf("GPU_CONTENTION jobs=%llu ok=%llu budget_pct=%.3f yields=%llu wait_max_us=%llu fallbacks=%llu wall_max_us=%llu overruns=%llu errors=%d\n",
+  printf("GPU_CONTENTION jobs=%llu ok=%llu budget_pct=%.3f yields=%llu wait_max_us=%llu fallbacks=%llu wall_max_us=%llu overruns=%llu errors=%d rt_timeouts=%llu\n",
     (unsigned long long)jobs,(unsigned long long)ok,m.gpu_budget_used_pct,(unsigned long long)m.discovery_yields,
     (unsigned long long)m.rt_gpu_wait_max_us,(unsigned long long)m.rt_gpu_fallbacks,(unsigned long long)wall_max,
-    (unsigned long long)m.discovery_overruns,errors.load());
+    (unsigned long long)m.discovery_overruns,errors.load(),(unsigned long long)timeouts);
   // Scheduler/driver latency and measured slice duration are device gates.
   const char *v=getenv("ISAC_GPU_DISCOVERY_BUDGET_PCT");int pct=v?atoi(v):30;
   if(pct<1 || pct>100)pct=30;
-  return errors || m.discovery_overruns || m.gpu_budget_used_pct>pct || !ok
+  return errors || timeouts || m.rt_gpu_fallbacks*100>=jobs || m.discovery_overruns || m.gpu_budget_used_pct>pct || !ok
     || wall_max>=500 || jobs!=20000?1:0;
 }

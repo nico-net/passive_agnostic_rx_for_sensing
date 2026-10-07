@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <initializer_list>
 #include <chrono>
@@ -10,11 +11,13 @@
 #include "nr_dl_gpu_memory.h"
 #define NID_FN __device__
 #include "nr_pdcch_nid_stage1.h"
+#include "nr_pdcch_nid_chunks.h"
 
 namespace {
 constexpr int IDS=65536, CELLS=14*IDS, CHUNK=4, TIMERS=32768;
 enum Kernel {RESET, SWEEP, STANDARDIZE, ACCUMULATE, PREPARE_INIT, PROBE, CONTROL, SNAPSHOTS, HULL, GENERATE, SCORE, FINISH, SUMMARY};
 constexpr int STAT=6*CELLS, CAND_CAP=4096;
+static_assert(offsetof(NidStage2,alive)-offsetof(NidStage2,nact)==4*sizeof(int), "stage-2 control transfer layout");
 struct Candidate {int cell;float score;};
 struct Compact {unsigned count;Candidate item[CAND_CAP];};
 struct Summary {unsigned total;float peak;int cell;};
@@ -39,7 +42,7 @@ struct Device {
  nr_pdcch_nid_result_t result;
 };
 struct HostTransfer {
- int slot[NR_PDCCH_NID_BATCH],sym[NR_PDCCH_NID_BATCH],control[2];
+ int slot[NR_PDCCH_NID_BATCH],sym[NR_PDCCH_NID_BATCH],control[5];
  nr_pdcch_nid_result_t result;
  Compact compact;
  double lambda[3][14];
@@ -54,6 +57,7 @@ struct Context {
  NrGpuDiscoverySlice slice;
  cudaEvent_t event[3], done, timer[TIMERS][2];
  int kind[TIMERS], ntimer;
+ const char *operation[TIMERS];
  nr_pdcch_nid_result_t timing;
  nr_pdcch_nid_iq_t *staging;
  HostTransfer *transfer;
@@ -114,8 +118,8 @@ __device__ float secondary(const NidView &v,int k,int id,int d) {
  bool css=v.css0_nrb>=6 && v.css0_crb>=lo && v.css0_crb+v.css0_nrb<=hi;
  return nid_best_symbol(v,k,seed,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0,d);
 }
-__global__ void calibrate(Device *p,int first,int count) {
- int j=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y,d=blockIdx.z+1;
+__global__ void calibrate(Device *p,int first,int count,int base=0) {
+ int j=base+blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y,d=blockIdx.z+1;
  if(j>=NID_CAL || k>=count || d>=p->view.dur)return;
  p->values[(2*CHUNK+2*k+d-1)*IDS+j]=secondary(p->view,first+k,j*64,d);
 }
@@ -176,8 +180,8 @@ __global__ void screen(Device *p,int count) {
   p->candidates[k*IDS+j]=id;
  }
 }
-__global__ void combine(Device *p,int first,int count) {
- int j=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
+__global__ void combine(Device *p,int first,int count,int base=0) {
+ int j=base+blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
  if(k>=count || j>=p->selected_count[k])return;
  int id=p->candidates[k*IDS+j];
  const float bound=sqrtf(2.f*logf((float)IDS))+2.f;
@@ -699,18 +703,32 @@ int upload(void *ptr,const nr_pdcch_nid_batch_t *b) {
  return cudaStreamSynchronize(stream)==cudaSuccess?0:-1;
 }
 // Events are allocated/touched before RX. No CUDA allocation or chunk wait here.
-bool timing_begin(Context *c,int kind) {
+bool timing_begin(Context *c,int kind,const char *operation) {
  if(c->ntimer==TIMERS)return false;
- c->kind[c->ntimer]=kind;
+ c->kind[c->ntimer]=kind;c->operation[c->ntimer]=operation;
  return cudaEventRecord(c->timer[c->ntimer][0],c->stream)==cudaSuccess;
 }
 bool timing_end(Context *c) {
  return cudaGetLastError()==cudaSuccess && cudaEventRecord(c->timer[c->ntimer++][1],c->stream)==cudaSuccess;
 }
+// Slice completion already retired these events; never enqueue/wait another event.
+bool collect_timing(Context *c) {
+ for(int i=0;i<c->ntimer;i++) {
+  float ms=0;if(cudaEventElapsedTime(&ms,c->timer[i][0],c->timer[i][1])!=cudaSuccess)return false;
+  int k=c->kind[i];
+  if(ms>5.f && ms>c->timing.kernel_peak_ms[k])
+   fprintf(stderr,"PDCCH_NID_GPU kernel_overrun operation=%s elapsed_ms=%.6f\n",c->operation[i],ms);
+  c->timing.kernel_calls[k]++;c->timing.kernel_total_ms[k]+=ms;
+  c->timing.kernel_peak_ms[k]=fmaxf(c->timing.kernel_peak_ms[k],ms);
+  c->timing.kernel_max_ms=fmaxf(c->timing.kernel_max_ms,ms);
+ }
+ c->ntimer=0;return true;
+}
 #define LAUNCH(kind, ...) do { \
- if(c->slice.run(stream,[&]() {if(!timing_begin(c,kind))return cudaErrorUnknown; \
- __VA_ARGS__;return timing_end(c)?cudaSuccess:cudaErrorUnknown;})!=cudaSuccess)return -1; \
- if(nr_gpu_budget_enabled() && !complete(c,start))return -1; \
+ if(c->ntimer==TIMERS && !complete(c,start))return -1; \
+ if(c->slice.run(stream,[&]() {if(!timing_begin(c,kind,#__VA_ARGS__))return cudaErrorUnknown; \
+ __VA_ARGS__;return timing_end(c)?cudaSuccess:cudaErrorUnknown;},#__VA_ARGS__)!=cudaSuccess)return -1; \
+ if(nr_gpu_budget_enabled() && !nr_gpu_allocations_allowed() && !collect_timing(c))return -1; \
 } while(0)
 bool complete(Context *c,const std::chrono::steady_clock::time_point &start) {
  if(cudaEventRecord(c->done,c->stream)!=cudaSuccess)return false;
@@ -722,16 +740,11 @@ bool complete(Context *c,const std::chrono::steady_clock::time_point &start) {
   // complete pass even when shared-device contention exceeds the soft budget.
   if(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count()>=c->budget_ms)
    c->timing.budget_exceeded=1;
-  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::this_thread::yield();
  }
- for(int i=0;i<c->ntimer;i++) {
-  float ms=0;if(cudaEventElapsedTime(&ms,c->timer[i][0],c->timer[i][1])!=cudaSuccess)return false;
-  int k=c->kind[i];c->timing.kernel_calls[k]++;c->timing.kernel_total_ms[k]+=ms;
-  c->timing.kernel_peak_ms[k]=fmaxf(c->timing.kernel_peak_ms[k],ms);
-  c->timing.kernel_max_ms=fmaxf(c->timing.kernel_max_ms,ms);
- }
- c->ntimer=0;return true;
+ return collect_timing(c);
 }
+
 int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *seed) {
  Context *c=(Context*)ptr;auto stream=c->stream;Device *p=c->dev;
  if(!c->batches || (!c->incremental && c->batches<c->window))return 1;
@@ -742,21 +755,29 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
     || budget_zero(c,c->host.zsum,0,6*CELLS*sizeof(float),stream)!=cudaSuccess)return -1;
  LAUNCH(RESET,reset<<<1,256,0,stream>>>(p,c->host.view));
  if(!seed) {
-  const int chunk=nr_gpu_budget_enabled()?1:CHUNK;
+  const int chunk=NR_NID_SWEEP_SNAPSHOTS;
   for(int first=c->incremental?c->first_new:0;first<c->host.view.n;first+=chunk) {
-   int n=c->host.view.n-first;if(n>chunk)n=chunk;
-   const int ids=nr_gpu_budget_enabled()?4096:IDS;
+   int n=nr_nid_chunk_count(c->host.view.n,first,chunk);
+   const int ids=IDS;
    for(int id=0;id<IDS;id+=ids)
     LAUNCH(SWEEP,sweep<<<dim3(ids/128,(n+1)/2),dim3(128,2),0,stream>>>(p,first,n,id));
    LAUNCH(STANDARDIZE,standardize<<<2*n,256,0,stream>>>(p));
    LAUNCH(ACCUMULATE,accumulate<<<IDS/256,256,0,stream>>>(p,first,n));
    if(c->host.multisymbol && c->dur>1) {
-    LAUNCH(SWEEP,calibrate<<<dim3(NID_CAL/128,n,c->dur-1),128,0,stream>>>(p,first,n));
+    for(int base=0;base<NID_CAL;base+=NR_NID_SECONDARY_IDS)
+     LAUNCH(SWEEP,calibrate<<<dim3(NR_NID_SECONDARY_IDS/128,n,c->dur-1),128,0,stream>>>(p,first,n,base));
     LAUNCH(STANDARDIZE,standardize<<<2*n,256,0,stream>>>(p,2*CHUNK,NID_CAL));
     if(budget_zero(c,p->selected_count,0,sizeof(c->host.selected_count),stream)!=cudaSuccess
        || budget_zero(c,c->host.multi,0,2*n*IDS*sizeof(float),stream)!=cudaSuccess)return -1;
     LAUNCH(ACCUMULATE,screen<<<dim3(IDS/256,n),256,0,stream>>>(p,n));
-    LAUNCH(SWEEP,combine<<<dim3(IDS/128,n),128,0,stream>>>(p,first,n));
+    // Read the compact length, not all 65536 possible IDs. Bound even the
+    // adversarial all-survivor case and skip empty tail launches.
+    int *selected=c->transfer->control;
+    if(budget_copy(c,selected,p->selected_count,n*sizeof(int),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+       || !complete(c,start))return -1;
+    int survivors=*std::max_element(selected,selected+n);
+    for(int base=0;base<survivors;base+=NR_NID_SECONDARY_IDS)
+     LAUNCH(SWEEP,combine<<<dim3(NR_NID_SECONDARY_IDS/128,n),128,0,stream>>>(p,first,n,base));
     LAUNCH(ACCUMULATE,collect<<<IDS/256,256,0,stream>>>(p,first,n));
    }
   }
@@ -812,14 +833,15 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
   LAUNCH(GENERATE,generate<<<1,32,0,stream>>>(p));
   for(int it=0;it<6;it++) {
    int *control=c->transfer->control;
-   if(budget_copy(c,control,&p->stage2.nh,2*sizeof(int),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
+   if(budget_copy(c,control,&p->stage2.nact,5*sizeof(int),cudaMemcpyDeviceToHost,stream)!=cudaSuccess
       || !complete(c,start))return -1;
-   if(!control[1])break;
-   const int hypotheses=nr_gpu_budget_enabled()?8:128;
-   const int snapshots=nr_gpu_budget_enabled()?32:100000;
-   for(int base=0;base<control[0];base+=hypotheses)
-    for(int snap=0;snap<c->host.view.n;snap+=snapshots)
-     LAUNCH(SCORE,score<<<hypotheses,128,0,stream>>>(p,base,hypotheses,snap,snapshots));
+   // Contiguous stage-2 metadata: nact, nid, sym0, nh, alive.
+   if(!control[4])break;
+   const int hypotheses=NR_NID_SCORE_HYPOTHESES;
+   const int snapshots=NR_NID_SCORE_SNAPSHOTS;
+   for(int base=0;base<control[3];base+=hypotheses)
+    for(int snap=0;snap<std::max(1,control[0]);snap+=snapshots)
+     LAUNCH(SCORE,score<<<nr_nid_chunk_count(control[3],base,hypotheses),128,0,stream>>>(p,base,hypotheses,snap,snapshots));
    LAUNCH(FINISH,finish<<<1,256,0,stream>>>(p));
    LAUNCH(HULL,hull<<<3,128,0,stream>>>(p));
    LAUNCH(GENERATE,generate<<<1,32,0,stream>>>(p));

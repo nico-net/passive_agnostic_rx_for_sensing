@@ -230,7 +230,7 @@ static bool prepare(int rb,int ant,int capacity)
     && s.count.reserve(1) && s.sizes.reserve(4) && s.nout.reserve(1) && s.out.reserve(128);
 }
 static void reset() {state.identity=nullptr;}
-static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,nr_csirs_disc_fp_t *out,int maxout,bool scheduled)
+template<bool Budget> static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,nr_csirs_disc_fp_t *out,int maxout,bool scheduled)
 {
   if(!nr_disc_fp_valid(r) || maxout<1) return -1;
   auto &s=state;int rb=r->n_rb,tiles=(rb+15)/16,pooled=tiles*168,nr=14*12*rb+pooled;
@@ -243,20 +243,20 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
     s.written=r->written>(uint64_t)r->capacity?r->written-r->capacity:0;
     memset(s.counts,0,sizeof(s.counts));
     if(cfg && cfg->excl_re) memcpy(s.host_exclude,cfg->excl_re,14*12*rb);else memset(s.host_exclude,0,14*12*rb);
-    if(disc_copy(s.exclude.p,s.host_exclude,14*12*rb,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
-    if(disc_zero(s.sum.p,0,640ull*nr*8)!=cudaSuccess || disc_zero(s.sq.p,0,640ull*pooled*8)!=cudaSuccess
-      || disc_zero(s.s80.p,0,80ull*nr*8)!=cudaSuccess || disc_zero(s.s64.p,0,64ull*nr*8)!=cudaSuccess
-      || disc_zero(s.total.p,0,nr*8)!=cudaSuccess || disc_zero(s.totalq.p,0,nr*8)!=cudaSuccess
-      || disc_zero(s.sizes.p,0,4*sizeof(int))!=cudaSuccess) return -1;
+    if(disc_copy<Budget>(s.exclude.p,s.host_exclude,14*12*rb,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+    if(disc_zero<Budget>(s.sum.p,0,640ull*nr*8)!=cudaSuccess || disc_zero<Budget>(s.sq.p,0,640ull*pooled*8)!=cudaSuccess
+      || disc_zero<Budget>(s.s80.p,0,80ull*nr*8)!=cudaSuccess || disc_zero<Budget>(s.s64.p,0,64ull*nr*8)!=cudaSuccess
+      || disc_zero<Budget>(s.total.p,0,nr*8)!=cudaSuccess || disc_zero<Budget>(s.totalq.p,0,nr*8)!=cudaSuccess
+      || disc_zero<Budget>(s.sizes.p,0,4*sizeof(int))!=cudaSuccess) return -1;
     s.identity=r->grid_base;
   }
   if(r->written-s.written>(uint64_t)r->capacity) return -1;
   uint64_t fresh=r->written-s.written;
   while(s.written<r->written) {
-    int first=s.written%r->capacity,n=std::min<uint64_t>(nr_gpu_budget_enabled()?1:100,std::min<uint64_t>(r->capacity-first,r->written-s.written));
+    int first=s.written%r->capacity,n=std::min<uint64_t>(Budget?1:100,std::min<uint64_t>(r->capacity-first,r->written-s.written));
     const int16_t *grid=r->device_valid && r->device_grid?r->device_grid+(size_t)first*r->slot_stride:s.grid.p;
-    if(!(r->device_valid && r->device_grid) && disc_copy(s.grid.p,r->grid_base+(size_t)first*r->slot_stride,n*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
-    if(disc_copy(s.meta.p,r->meta+first,n*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess || disc_zero(s.x.p,0,(size_t)n*nr*4)!=cudaSuccess) return -1;
+    if(!(r->device_valid && r->device_grid) && disc_copy<Budget>(s.grid.p,r->grid_base+(size_t)first*r->slot_stride,n*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+    if(disc_copy<Budget>(s.meta.p,r->meta+first,n*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess || disc_zero<Budget>(s.x.p,0,(size_t)n*nr*4)!=cudaSuccess) return -1;
     DISC_KERNEL(normalize<<<(n*rb*14+127)/128,128,0,disc_stream()>>>(grid,s.meta.p,r->slot_stride,n,r->n_ant,rb,symbols,s.exclude.p,s.x.p,tiles));
     DISC_KERNEL(pool<<<(n*pooled+127)/128,128,0,disc_stream()>>>(s.x.p,n,rb,tiles));
     DISC_KERNEL(accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(s.x.p,s.meta.p,n,nr,pooled,s.sum.p,s.sq.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p));
@@ -270,19 +270,19 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
     bool clear=true;
     for(int pi=g;pi<13;pi+=4) {
       int p=periods[pi];uint64_t counts[640]={};for(int i=0;i<640;++i) counts[i%p]+=s.counts[i];
-      if(disc_copy(s.dc.p,counts,p*8,cudaMemcpyHostToDevice)!=cudaSuccess
-         || disc_zero(s.masks.p,0,(size_t)p*14*tiles*6*2)!=cudaSuccess || disc_zero(s.count.p,0,4)!=cudaSuccess) return -1;
+      if(disc_copy<Budget>(s.dc.p,counts,p*8,cudaMemcpyHostToDevice)!=cudaSuccess
+         || disc_zero<Budget>(s.masks.p,0,(size_t)p*14*tiles*6*2)!=cudaSuccess || disc_zero<Budget>(s.count.p,0,4)!=cudaSuccess) return -1;
       DISC_KERNEL(lattice_pool<<<(p*pooled+127)/128,128,0,disc_stream()>>>(p,nr,pooled,s.sum.p,s.sq.p,s.ps.p,s.pq.p));
       DISC_KERNEL(lattice_screen<<<(p*14+63)/64,64,0,disc_stream()>>>(p,tiles,s.nt,s.dc.p,s.ps.p,s.pq.p,s.total.p+nr-pooled,s.totalq.p+nr-pooled,s.masks.p));
       DISC_KERNEL(segment<<<(p*14+31)/32,32,0,disc_stream()>>>(rb,p,s.nt,s.dc.p,s.sum.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p,s.masks.p,symbols,
         cfg && cfg->min_strength>0?cfg->min_strength:2.f,s.raw.p,s.count.p));
       DISC_KERNEL(collect<<<1,1,0,disc_stream()>>>(s.raw.p,s.count.p,s.groups.p,s.sizes.p,g,clear));clear=false;
-      unsigned count=0;if(disc_copy(&count,s.count.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess || count>GPU_CAND_CAP) return -1;
+      unsigned count=0;if(disc_copy<Budget>(&count,s.count.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess || count>GPU_CAND_CAP) return -1;
     }
   }
   DISC_KERNEL(finish<<<1,1,0,disc_stream()>>>(s.groups.p,s.sizes.p,s.all.p,s.out.p,s.nout.p,std::min(maxout,128)));
-  int n=0;if(cudaGetLastError()!=cudaSuccess || disc_copy(&n,s.nout.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess
-     || disc_copy(out,s.out.p,n*sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
+  int n=0;if(cudaGetLastError()!=cudaSuccess || disc_copy<Budget>(&n,s.nout.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess
+     || disc_copy<Budget>(out,s.out.p,n*sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
   return n;
 }
 } // namespace resident

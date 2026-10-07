@@ -1,5 +1,22 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-08 (DGX aarch64 sandbox, `csd/t24b`).** [CODE-READ]
+> T24b restores the pre-T24 CSI-RS flag-off CUDA launch/copy schedule using
+> compile-time specialization, removes redundant nID per-launch waits, bounds
+> secondary/score work in both modes, and preserves MAINTAIN/bank pause under
+> repeated outside-occupancy feedback. RT may enter a priority stream during an
+> in-flight discovery slice; subsequent discovery waits for RT. Event overruns
+> are charged/reported instead of permanently failing the next discovery call;
+> actual CUDA errors still close admission. [IMPLEMENTED, NOT VALIDATED ON DEVICE]
+> CSI-RS confirmation/timing parity, nID stream recovery, <5 ms kernels and <1%
+> RT fallback require GB10/OTA gates. The supplied aggregate long-kernel log and
+> stream `rc=-1` do not identify the original CUDA operation. See
+> [T24b report](docs/superpowers/reports/csd/T24b.md) for host verification and
+> exact deferred commands. [OFFLINE VERIFIED] GPU targets built; CPU suite
+> excluding `nr_td_sim_test`: 184 passed, nine documented ARM/sandbox failures,
+> 15 existing disabled device benchmarks. Core planner, DCI decoding, and
+> CSI-RS contract unchanged.
+
 > **Update 2026-10-07 (DGX aarch64, `csd/t21`, local).** [CODE-READ + historical OTA logs]
 > PDSCH's low-lag stale losses occur after queue admission: GPU round trip plus CPU SSB FEP
 > outlive the IQ ring, and K33 also discards credit after valid LLR processing. T21, gated by
