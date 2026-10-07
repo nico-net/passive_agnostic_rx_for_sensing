@@ -1,3 +1,4 @@
+#include "PHY/TOOLS/nr_gpu_platform.h"
 #include "nr_srs_passive.h"
 #include "nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
@@ -7652,6 +7653,7 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
   static bool prepared;
   if (prepared || !ue) return;
   prepared = true;
+  nr_gpu_platform_probe();
   LOG_I(PHY, "SENSING: DL_GPU warm-up begin (before RX)\n");
   nr_td_cb0_wire_warmup();
   (void)nr_gpu_polar_prepare();

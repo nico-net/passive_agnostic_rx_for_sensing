@@ -14,6 +14,7 @@
 #include "common/oai_version.h"
 #include "assertions.h"
 #include "PHY/defs_nr_UE.h"
+#include "PHY/TOOLS/nr_gpu_platform.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
@@ -234,6 +235,12 @@ int NB_UE_INST = 1;
 configmodule_interface_t *uniqCfg = NULL;
 nrLDPC_coding_interface_t nrLDPC_coding_interface = {0};
 
+static void gpu_platform_log(int warning, const char *text)
+{
+  if (warning) LOG_W(PHY, "%s\n", text);
+  else LOG_I(PHY, "%s\n", text);
+}
+
 int main(int argc, char **argv)
 {
   start_background_system();
@@ -245,6 +252,7 @@ int main(int argc, char **argv)
   CONFIG_SETRTFLAG(CONFIG_NOEXITONHELP);
   // initialize logging
   logInit();
+  nr_gpu_set_logger(gpu_platform_log);
   // get options and fill parameters from configuration file
 
   get_options(uniqCfg); // Command-line options specific for NRUE
@@ -486,6 +494,7 @@ int main(int argc, char **argv)
     nr_passive_replay_init(nrPHY_vars_UE_g[0][0]);
   }
 
+  nr_gpu_rx_started(); /* All migrated CUDA allocation/registration ends before RX. */
   nrue_init_openair0();
 
 

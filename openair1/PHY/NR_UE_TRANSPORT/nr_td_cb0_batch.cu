@@ -18,6 +18,7 @@
  * never walk CPU-coherent host pages. All buffers are reserved before RX.
  */
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_cuda.h"
 #include <stdint.h>
 #include <string.h>
 #include "nr_td_cb0_batch.h"
@@ -80,6 +81,7 @@ nr_dl_gpu_budget_t budget;
 
 int init()
 {
+  if (!nr_gpu_module_ready()) return 0;
   if (g.ok >= 0) return g.ok;
   g.ok = 0;
   const char *e = getenv("LDPC_CB0_MAX_ITEMS");
@@ -93,16 +95,16 @@ int init()
   g.llr_cap = (size_t)16 * 275 * 12 * 14 * 4 * 8;
   if (cudaStreamCreateWithFlags(&g.stream, cudaStreamNonBlocking)) return 0;
   for (int k = 0; k < 3; k++) {
-    if (cudaHostAlloc(&g.host[k], g.cap[k], cudaHostAllocDefault) || cudaMalloc(&g.dev[k], g.cap[k] * (k == 0 ? 8 : 1))) return 0;
+    if (nr_gpu_allocate(k < 2 ? NR_GPU_SHARED_RW : NR_GPU_STAGING, &g.host[k], g.cap[k]) || nr_gpu_allocate(NR_GPU_DEVICE, &g.dev[k], g.cap[k] * (k == 0 ? 8 : 1))) return 0;
     memset(g.host[k], 0, g.cap[k]);
   }
-  if (cudaHostAlloc(&g.llr_h, g.llr_cap * sizeof(int16_t), cudaHostAllocDefault)
-      || cudaMalloc(&g.llr_d, g.llr_cap * sizeof(int16_t))) return 0;
+  if (nr_gpu_allocate(NR_GPU_STAGING, &g.llr_h, g.llr_cap * sizeof(int16_t))
+      || nr_gpu_allocate(NR_GPU_DEVICE, &g.llr_d, g.llr_cap * sizeof(int16_t))) return 0;
   memset(g.llr_h, 0, g.llr_cap * sizeof(int16_t));
   // Load the kernel before sealing; E=0 makes this an inactive item.
   if (cudaMemsetAsync(g.dev[2], 0, sizeof(nr_td_cb0_gpu_item_t), g.stream)) return 0;
   cb0_dematch_kernel<<<1, 256, 0, g.stream>>>((nr_td_cb0_gpu_item_t *)g.dev[2], (int8_t *)g.dev[0], NR_TD_CB0_L_STRIDE, nullptr);
-  if (cudaStreamSynchronize(g.stream)) return 0;
+  if ((cudaError_t)nr_gpu_sync(g.stream)) return 0;
   g.ok = 1;
   return 1;
 }
@@ -147,8 +149,8 @@ int dematch_impl(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d
     for (int j = i + 1; j < n; j++) if (items[j].llr == items[i].llr && items[j].E > need) need = items[j].E;
     memcpy(g.llr_h + (m[i].llr - g.llr_d), items[i].llr, need * sizeof(int16_t));
   }
-  if (cudaMemcpyAsync(g.llr_d, g.llr_h, used * sizeof(int16_t), cudaMemcpyHostToDevice, g.stream)
-      || cudaMemcpyAsync(g.dev[2], m, (size_t)n * sizeof(*m), cudaMemcpyHostToDevice, g.stream)) goto failed;
+  if ((cudaError_t)nr_gpu_copy_async(g.llr_d, g.llr_h, used * sizeof(int16_t), g.stream)
+      || (cudaError_t)nr_gpu_copy_async(g.dev[2], m, (size_t)n * sizeof(*m), g.stream)) goto failed;
   for (int off = 0; off < n; off += 65535) {
     const int count = n - off < 65535 ? n - off : 65535;
     cb0_dematch_kernel<<<dim3((NR_TD_CB0_L_STRIDE + 255) / 256, count), 256, 0, g.stream>>>(
@@ -156,9 +158,9 @@ int dematch_impl(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d
         NR_TD_CB0_L_STRIDE, d ? (int16_t *)g.dev[1] + (size_t)off * NR_TD_CB0_D_STRIDE : nullptr);
   }
   if (cudaGetLastError()
-      || (!device && cudaMemcpyAsync(g.host[0], g.dev[0], (size_t)n * NR_TD_CB0_L_STRIDE, cudaMemcpyDeviceToHost, g.stream))
-      || (d && cudaMemcpyAsync(g.host[1], g.dev[1], (size_t)n * NR_TD_CB0_D_STRIDE * sizeof(int16_t), cudaMemcpyDeviceToHost, g.stream))
-      || cudaStreamSynchronize(g.stream)) goto failed;
+      || (!device && (cudaError_t)nr_gpu_copy_async(g.host[0], g.dev[0], (size_t)n * NR_TD_CB0_L_STRIDE, g.stream))
+      || (d && (cudaError_t)nr_gpu_copy_async(g.host[1], g.dev[1], (size_t)n * NR_TD_CB0_D_STRIDE * sizeof(int16_t), g.stream))
+      || (cudaError_t)nr_gpu_sync(g.stream)) goto failed;
   if (device) { *device = (const int8_t *)g.dev[0]; return 0; }
   if (l != g.host[0]) memcpy(l, g.host[0], (size_t)n * NR_TD_CB0_L_STRIDE);
   if (d && d != g.host[1]) memcpy(d, g.host[1], (size_t)n * NR_TD_CB0_D_STRIDE * sizeof(int16_t));

@@ -3,6 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 */
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_cuda.h"
 #include <vector>
 #include <map>
 #include <cstdio>
@@ -25,31 +26,8 @@ inline __host__ __device__ uint32_t blocks_for(uint32_t elements, int block_size
 }
 // END marker-grid-blocks-util
 
-/* Unified memory suits Jetson/DGX (the plugin's original targets). A discrete PCIe GPU wants
- * device buffers and explicit copies: build with LDPC_CUDA_DISCRETE (the adaptive-rx default). */
-#ifndef LDPC_CUDA_DISCRETE
-#define USE_UNIFIED_MEMORY
-#endif
-//#define ENABLE_DGX_OPTIMIZATIONS
-//#define USE_GRAPHS
-//#define PRINT_TIMES
-
-#ifdef USE_UNIFIED_MEMORY
-
-#ifndef ENABLE_DGX_OPTIMIZATIONS
-#define cudaMallocStaging(pp, size, hostFlags) cudaHostAlloc(pp, size, hostFlags)
-#define cudaFreeStaging cudaFreeHost
-#else
-#define cudaMallocStaging(pp, size, hostFlags) cudaMallocManaged(pp, size)
-#define cudaFreeStaging cudaFree
-#endif
-
-#else
-
-#define cudaMallocStaging(pp, size, hostFlags) cudaMalloc(pp, size)
-#define cudaFreeStaging cudaFree
-
-#endif
+/* Legacy single-codeword path uses explicit scratch copies, as does the TB pool. */
+#undef USE_UNIFIED_MEMORY /* channel-simulator options must not select receiver memory policy */
 
 static uint32_t const* bg_cn_degree[2][8] = {};
 static uint32_t const* bg_vn_degree[2][8] = {};
@@ -589,7 +567,7 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
 #ifdef USE_UNIFIED_MEMORY
     memcpy(const_cast<int8_t*>(mapped_llr_in), llr_in, num_llrs * sizeof(*llr_in));
 #else
-    CHECK_CUDA(cudaMemcpyAsync(const_cast<int8_t*>(mapped_llr_in), llr_in, num_llrs * sizeof(*llr_in), cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA((cudaError_t)nr_gpu_copy_async(const_cast<int8_t*>(mapped_llr_in), llr_in, num_llrs * sizeof(*llr_in), stream));
 #endif
     // END marker-copy-input
 
@@ -634,12 +612,12 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
     pack_bits_kernel<<<blocks_pack, threads_pack, 0, stream>>>(
         llr_total, mapped_llr_bits_out, block_length, 0, 0);
 #ifndef USE_UNIFIED_MEMORY
-    CHECK_CUDA(cudaMemcpyAsync(llr_bits, mapped_llr_bits_out, num_out_bytes, cudaMemcpyDeviceToHost, stream));
+    CHECK_CUDA((cudaError_t)nr_gpu_copy_async(llr_bits, mapped_llr_bits_out, num_out_bytes, stream));
 #endif
 
     // allow CPU access of output bits while computing syndrome
 #if defined(USE_UNIFIED_MEMORY) && !defined(USE_GRAPHS)
-    cudaStreamSynchronize(stream);
+    (cudaError_t)nr_gpu_sync(stream);
 #endif
 
 #ifdef PRINT_TIMES
@@ -654,7 +632,7 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
             context.llr_total_buffer, context.syndrome_buffer,
             Z, bg.cn, bg.cn_degree, bg.cn_stride, bg.num_rows);
 #ifndef USE_UNIFIED_MEMORY
-      CHECK_CUDA(cudaMemcpyAsync(context.host_syndrome_buffer, context.syndrome_buffer, num_cn * sizeof(*context.syndrome_buffer) / 32, cudaMemcpyDeviceToHost, stream));
+      CHECK_CUDA((cudaError_t)nr_gpu_copy_async(context.host_syndrome_buffer, context.syndrome_buffer, num_cn * sizeof(*context.syndrome_buffer) / 32, stream));
 #endif
     }
 
@@ -674,7 +652,7 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
 
 #if !defined(USE_UNIFIED_MEMORY) || defined(USE_GRAPHS)
     // allow CPU access of output bits and syndrome
-    cudaStreamSynchronize(stream);
+    (cudaError_t)nr_gpu_sync(stream);
 #endif
 
 #ifdef USE_UNIFIED_MEMORY
@@ -699,7 +677,7 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
 #ifdef USE_UNIFIED_MEMORY
     #ifndef USE_GRAPHS
       // allow reading syndrome
-      cudaStreamSynchronize(stream);
+      (cudaError_t)nr_gpu_sync(stream);
     #endif
       p_syndrome = context.syndrome_buffer;
 #else
@@ -748,14 +726,14 @@ ThreadContext& ldpc_decoder_init_context(int make_stream) {
         cudaStreamSetAttribute(context.stream, cudaStreamAttributeSynchronizationPolicy, &attr);
     }
 
-    CHECK_CUDA(cudaMallocStaging(&context.llr_in_buffer, MAX_BG_COLS * MAX_Z * sizeof(int8_t), cudaHostAllocMapped | cudaHostAllocWriteCombined));
-    CHECK_CUDA(cudaMallocStaging(&context.llr_bits_out_buffer, (MAX_BLOCK_LENGTH + 7) / 8 * sizeof(uint8_t), cudaHostAllocMapped));
-    CHECK_CUDA(cudaMallocStaging(&context.syndrome_buffer, MAX_BG_ROWS * MAX_Z * sizeof(uint32_t) / 32, cudaHostAllocMapped));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &context.llr_in_buffer, MAX_BG_COLS * MAX_Z * sizeof(int8_t)));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &context.llr_bits_out_buffer, (MAX_BLOCK_LENGTH + 7) / 8 * sizeof(uint8_t)));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &context.syndrome_buffer, MAX_BG_ROWS * MAX_Z * sizeof(uint32_t) / 32));
 #ifndef USE_UNIFIED_MEMORY
     context.host_syndrome_buffer = (uint32_t*) malloc(MAX_BG_ROWS * MAX_Z * sizeof(uint8_t));
 #endif
-    CHECK_CUDA(cudaMalloc(&context.llr_msg_buffer, MAX_BG_ROWS * MAX_BG_COLS * MAX_Z * sizeof(llr_msg_t)));
-    CHECK_CUDA(cudaMalloc(&context.llr_total_buffer, MAX_BG_COLS * MAX_Z * sizeof(llr_accumulator_t)));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &context.llr_msg_buffer, MAX_BG_ROWS * MAX_BG_COLS * MAX_Z * sizeof(llr_msg_t)));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &context.llr_total_buffer, MAX_BG_COLS * MAX_Z * sizeof(llr_accumulator_t)));
 
     // keep track of active thread contexts for shutdown
     ThreadContext* self = &context;
@@ -769,6 +747,7 @@ ThreadContext& ldpc_decoder_init_context(int make_stream) {
 static pthread_mutex_t g_tables_mu = PTHREAD_MUTEX_INITIALIZER;
 static void ldpc_tables_init_locked();
 static int ldpc_tables_init() {
+    if (!nr_gpu_module_ready()) return -1;
     pthread_mutex_lock(&g_tables_mu);
     if (!__atomic_load_n(&bg_cn[1][7], __ATOMIC_ACQUIRE))
         ldpc_tables_init_locked();
@@ -778,8 +757,9 @@ static int ldpc_tables_init() {
 }
 
 extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
-    ldpc_tables_init();
-    return &ldpc_decoder_init_context(make_stream);
+    if (ldpc_tables_init() || (!thread_context.llr_in_buffer && !nr_gpu_allocation_guard())) return nullptr;
+    ThreadContext &c = ldpc_decoder_init_context(make_stream);
+    return c.llr_in_buffer && c.llr_msg_buffer && c.llr_total_buffer && c.llr_bits_out_buffer && c.syndrome_buffer ? &c : nullptr;
 }
 
 /* The device tables for the CB0 entry (ldpc_cb0.cu, ldpc_cuda_bg.h). */
@@ -800,10 +780,7 @@ extern "C" int ldpc_cuda_basegraph(uint32_t BG, uint32_t Z, ldpc_cuda_bg_t* out)
 
 static void ldpc_tables_init_locked() {
     printf("Initializing LDPC runtime %d\n", (int) gettid());
-    /* Blocking sync: a thread waiting on the GPU sleeps instead of spinning. The point of the offload
-     * is CPU time -- the passive receiver is CPU-bound -- so a spinning waiter would give it back.
-     * Must precede the first CUDA call that creates the context. */
-    cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
+    /* The platform probe sets blocking synchronization and host mapping before context creation. */
 
     const uint32_t* table_bg_cn_degree[2][8] = { { BG1_CN_DEGREE_TABLE() }, { BG2_CN_DEGREE_TABLE() } };
     const uint32_t* table_bg_vn_degree[2][8] = { { BG1_VN_DEGREE_TABLE() }, { BG2_VN_DEGREE_TABLE() } };
@@ -816,15 +793,15 @@ static void ldpc_tables_init_locked() {
 
     for (int b = 0; b < 2; ++b) {
         for (int ils = 0; ils < 8; ++ils) {
-            CHECK_CUDA(cudaMalloc(&bg_cn_degree[b][ils], table_bg_cn_degree_size[b][ils]));
-            CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg_cn_degree[b][ils]), table_bg_cn_degree[b][ils], table_bg_cn_degree_size[b][ils], cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMalloc(&bg_vn_degree[b][ils], table_bg_vn_degree_size[b][ils]));
-            CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg_vn_degree[b][ils]), table_bg_vn_degree[b][ils], table_bg_vn_degree_size[b][ils], cudaMemcpyHostToDevice));
+            CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &bg_cn_degree[b][ils], table_bg_cn_degree_size[b][ils]));
+            CHECK_CUDA(nr_gpu_copy(const_cast<uint32_t*>(bg_cn_degree[b][ils]), table_bg_cn_degree[b][ils], table_bg_cn_degree_size[b][ils]));
+            CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &bg_vn_degree[b][ils], table_bg_vn_degree_size[b][ils]));
+            CHECK_CUDA(nr_gpu_copy(const_cast<uint32_t*>(bg_vn_degree[b][ils]), table_bg_vn_degree[b][ils], table_bg_vn_degree_size[b][ils]));
 
-            CHECK_CUDA(cudaMalloc(&bg_cn[b][ils], table_bg_cn_size[b][ils]));
-            CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg_cn[b][ils]), table_bg_cn[b][ils], table_bg_cn_size[b][ils], cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMalloc(&bg_vn[b][ils], table_bg_vn_size[b][ils]));
-            CHECK_CUDA(cudaMemcpy(const_cast<uint32_t*>(bg_vn[b][ils]), table_bg_vn[b][ils], table_bg_vn_size[b][ils], cudaMemcpyHostToDevice));
+            CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &bg_cn[b][ils], table_bg_cn_size[b][ils]));
+            CHECK_CUDA(nr_gpu_copy(const_cast<uint32_t*>(bg_cn[b][ils]), table_bg_cn[b][ils], table_bg_cn_size[b][ils]));
+            CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &bg_vn[b][ils], table_bg_vn_size[b][ils]));
+            CHECK_CUDA(nr_gpu_copy(const_cast<uint32_t*>(bg_vn[b][ils]), table_bg_vn[b][ils], table_bg_vn_size[b][ils]));
 
             bg_cn_size[b][ils] = table_bg_cn_size[b][ils];
             bg_vn_size[b][ils] = table_bg_vn_size[b][ils];
@@ -843,40 +820,42 @@ static const uint32_t BATCH_MSG_STRIDE  = MAX_BG_ROWS * MAX_BG_COLS * MAX_Z;
 static void ldpc_batch_free(ThreadContext& c) {
     if (!c.b_cap)
         return;
-    cudaFreeHost(c.b_llr_host);
-    cudaFreeHost(c.b_bits_host);
-    cudaFree(c.b_llr_dev);
-    cudaFree(c.b_bits_dev);
-    cudaFree(c.b_msg);
-    cudaFree(c.b_total);
-    cudaFree(c.b_done);
-    cudaFree(c.b_unsat);
+    (cudaError_t)nr_gpu_free(c.b_llr_host);
+    (cudaError_t)nr_gpu_free(c.b_bits_host);
+    (cudaError_t)nr_gpu_free(c.b_llr_dev);
+    (cudaError_t)nr_gpu_free(c.b_bits_dev);
+    (cudaError_t)nr_gpu_free(c.b_msg);
+    (cudaError_t)nr_gpu_free(c.b_total);
+    (cudaError_t)nr_gpu_free(c.b_done);
+    (cudaError_t)nr_gpu_free(c.b_unsat);
     c.b_cap = 0;
 }
 
 static void ldpc_batch_reserve(ThreadContext& c, uint32_t n) {
-    if (n <= c.b_cap)
+    if (n <= c.b_cap || !nr_gpu_allocations_allowed())
         return;
     uint32_t cap = c.b_cap ? c.b_cap : 16;
     while (cap < n)
         cap *= 2;
     ldpc_batch_free(c);
-    CHECK_CUDA(cudaHostAlloc(&c.b_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&c.b_bits_host, (size_t)cap * BATCH_BITS_STRIDE, cudaHostAllocDefault));
-    CHECK_CUDA(cudaMalloc(&c.b_llr_dev, (size_t)cap * BATCH_LLR_STRIDE));
-    CHECK_CUDA(cudaMalloc(&c.b_bits_dev, (size_t)cap * BATCH_BITS_STRIDE));
-    CHECK_CUDA(cudaMalloc(&c.b_msg, (size_t)cap * BATCH_MSG_STRIDE * sizeof(llr_msg_t)));
-    CHECK_CUDA(cudaMalloc(&c.b_total, (size_t)cap * BATCH_LLR_STRIDE * sizeof(llr_accumulator_t)));
-    CHECK_CUDA(cudaMalloc(&c.b_done, (size_t)cap * sizeof(uint32_t)));
-    CHECK_CUDA(cudaMalloc(&c.b_unsat, (size_t)cap * sizeof(uint32_t)));
-    c.b_cap = cap;
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_STAGING, &c.b_llr_host, (size_t)cap * BATCH_LLR_STRIDE));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_SHARED_RW, &c.b_bits_host, (size_t)cap * BATCH_BITS_STRIDE));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &c.b_llr_dev, (size_t)cap * BATCH_LLR_STRIDE));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &c.b_bits_dev, (size_t)cap * BATCH_BITS_STRIDE));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &c.b_msg, (size_t)cap * BATCH_MSG_STRIDE * sizeof(llr_msg_t)));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &c.b_total, (size_t)cap * BATCH_LLR_STRIDE * sizeof(llr_accumulator_t)));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &c.b_done, (size_t)cap * sizeof(uint32_t)));
+    CHECK_CUDA(nr_gpu_allocate(NR_GPU_DEVICE, &c.b_unsat, (size_t)cap * sizeof(uint32_t)));
+    c.b_cap = c.b_llr_host && c.b_bits_host && c.b_llr_dev && c.b_bits_dev && c.b_msg && c.b_total && c.b_done && c.b_unsat ? cap : 0;
 }
 
 /* Pinned host input for this thread's batch: codeword k's int8 LLRs at k * ldpc_batch_llr_stride(). */
 extern "C" int8_t* ldpc_batch_llr_buffer(uint32_t n) {
-    ThreadContext& c = *ldpc_decoder_init(1);
+    ThreadContext *ctx = ldpc_decoder_init(1);
+    if (!ctx) return nullptr;
+    ThreadContext& c = *ctx;
     ldpc_batch_reserve(c, n);
-    return c.b_llr_host;
+    return n <= c.b_cap ? c.b_llr_host : nullptr;
 }
 extern "C" uint32_t ldpc_batch_llr_stride(void) { return BATCH_LLR_STRIDE; }
 extern "C" uint32_t ldpc_batch_bits_stride(void) { return BATCH_BITS_STRIDE; }
@@ -885,7 +864,9 @@ extern "C" uint32_t ldpc_batch_bits_stride(void) { return BATCH_BITS_STRIDE; }
  * iterations; returns the pinned host bits, codeword k at k * ldpc_batch_bits_stride(). */
 extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t first, uint32_t n,
                                             uint32_t block_length, uint32_t num_iter) {
-    ThreadContext& c = *ldpc_decoder_init(1);
+    ThreadContext *ctx = ldpc_decoder_init(1);
+    if (!ctx) return nullptr;
+    ThreadContext& c = *ctx;
     if (n == 0 || first + n > c.b_cap)
         return c.b_bits_host;
     cudaStream_t stream = c.stream;
@@ -896,11 +877,11 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
     uint8_t* bits_dev = c.b_bits_dev + (size_t)first * BATCH_BITS_STRIDE;
     static int bench = -1;
     if (bench < 0) { const char* e = getenv("LDPC_BENCH"); bench = e && atoi(e); }
+    if (bench && !nr_gpu_allocations_allowed()) bench = 0;
     cudaEvent_t ev[4];
     if (bench) for (int e = 0; e < 4; e++) cudaEventCreate(&ev[e]);
     if (bench) cudaEventRecord(ev[0], stream);
-    CHECK_CUDA(cudaMemcpyAsync(llr_dev, c.b_llr_host + (size_t)first * BATCH_LLR_STRIDE, (size_t)n * BATCH_LLR_STRIDE,
-                               cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA((cudaError_t)nr_gpu_copy_async(llr_dev, c.b_llr_host + (size_t)first * BATCH_LLR_STRIDE, (size_t)n * BATCH_LLR_STRIDE, stream));
     if (bench) cudaEventRecord(ev[1], stream);
     uint32_t* done = c.b_done + first;
     uint32_t* unsat = c.b_unsat + first;
@@ -931,16 +912,16 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
     pack_bits_kernel<<<blocks_pack, threads_pack, 0, stream>>>(llr_total, bits_dev, block_length, BATCH_LLR_STRIDE,
                                                                BATCH_BITS_STRIDE);
     uint8_t* bits_host = c.b_bits_host + (size_t)first * BATCH_BITS_STRIDE;
-    CHECK_CUDA(cudaMemcpyAsync(bits_host, bits_dev, (size_t)n * BATCH_BITS_STRIDE, cudaMemcpyDeviceToHost, stream));
+    CHECK_CUDA((cudaError_t)nr_gpu_copy_async(bits_host, bits_dev, (size_t)n * BATCH_BITS_STRIDE, stream));
     if (bench) cudaEventRecord(ev[3], stream);
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+    CHECK_CUDA((cudaError_t)nr_gpu_sync(stream));
     if (bench) {
         static __thread double t_in, t_it, t_out; static __thread long nb, n_done, n_cw;
         float a, b, d;
         cudaEventElapsedTime(&a, ev[0], ev[1]); cudaEventElapsedTime(&b, ev[1], ev[2]); cudaEventElapsedTime(&d, ev[2], ev[3]);
         t_in += a; t_it += b; t_out += d;
         uint32_t h_done[1024]; const uint32_t m = n < 1024 ? n : 1024;
-        cudaMemcpy(h_done, done, m * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        nr_gpu_copy(h_done, done, m * sizeof(uint32_t));
         for (uint32_t k = 0; k < m; k++) n_done += h_done[k];
         n_cw += m;
         for (int e = 0; e < 4; e++) cudaEventDestroy(ev[e]);
@@ -960,16 +941,16 @@ static uint32_t g_pool_cap;
 static void ldpc_batch_free(ThreadContext& c);
 
 extern "C" void ldpc_decoder_shutdown() {
-    cudaDeviceSynchronize();
+    (cudaError_t)nr_gpu_sync_all();
 
     ThreadContext* active_context = nullptr;
     __atomic_exchange(&initialized_thread_contexts, &active_context, &active_context, __ATOMIC_ACQ_REL);
     while (active_context) {
-        cudaFreeStaging(active_context->llr_in_buffer);
-        cudaFree(active_context->llr_msg_buffer);
-        cudaFreeStaging(active_context->llr_bits_out_buffer);
-        cudaFree(active_context->llr_total_buffer);
-        cudaFreeStaging(active_context->syndrome_buffer);
+        nr_gpu_free(active_context->llr_in_buffer);
+        (cudaError_t)nr_gpu_free(active_context->llr_msg_buffer);
+        nr_gpu_free(active_context->llr_bits_out_buffer);
+        (cudaError_t)nr_gpu_free(active_context->llr_total_buffer);
+        nr_gpu_free(active_context->syndrome_buffer);
         ldpc_batch_free(*active_context);
 #ifndef USE_UNIFIED_MEMORY
         free(active_context->host_syndrome_buffer);
@@ -987,8 +968,8 @@ extern "C" void ldpc_decoder_shutdown() {
     /* shared pool (K34): free the real pointers, then forget them so a re-init starts clean */
     if (g_pool_cap) {
         ldpc_batch_free(g_pool_ctx);
-        cudaFreeHost(g_pool_llr_host);
-        cudaFreeHost(g_pool_bits_host);
+        (cudaError_t)nr_gpu_free(g_pool_llr_host);
+        (cudaError_t)nr_gpu_free(g_pool_bits_host);
         if (g_pool_ctx.stream)
             cudaStreamDestroy(g_pool_ctx.stream);
         g_pool_ctx = ThreadContext();
@@ -998,13 +979,13 @@ extern "C" void ldpc_decoder_shutdown() {
     }
 
     /* K34 (7): the tables are device pointers; the old code passed the ADDRESS of the table slot
-     * (cudaFree(&bg_cn[b][ils])), which freed nothing and returned an error. */
+     * ((cudaError_t)nr_gpu_free(&bg_cn[b][ils])), which freed nothing and returned an error. */
     for (int b = 0; b < 2; ++b) {
         for (int ils = 0; ils < 8; ++ils) {
-            cudaFree(const_cast<uint32_t*>(bg_cn_degree[b][ils])); bg_cn_degree[b][ils] = nullptr;
-            cudaFree(const_cast<uint32_t*>(bg_vn_degree[b][ils])); bg_vn_degree[b][ils] = nullptr;
-            cudaFree(const_cast<uint32_t*>(bg_cn[b][ils]));        bg_cn[b][ils] = nullptr;
-            cudaFree(const_cast<uint32_t*>(bg_vn[b][ils]));        bg_vn[b][ils] = nullptr;
+            (cudaError_t)nr_gpu_free(const_cast<uint32_t*>(bg_cn_degree[b][ils])); bg_cn_degree[b][ils] = nullptr;
+            (cudaError_t)nr_gpu_free(const_cast<uint32_t*>(bg_vn_degree[b][ils])); bg_vn_degree[b][ils] = nullptr;
+            (cudaError_t)nr_gpu_free(const_cast<uint32_t*>(bg_cn[b][ils]));        bg_cn[b][ils] = nullptr;
+            (cudaError_t)nr_gpu_free(const_cast<uint32_t*>(bg_vn[b][ils]));        bg_vn[b][ils] = nullptr;
         }
     }
 }
@@ -1100,15 +1081,15 @@ extern "C" int ldpc_pool_init(uint32_t cap) {
     POOL_CHECK(cudaStreamCreateWithFlags(&g_pool_ctx.stream, cudaStreamNonBlocking));
     /* The explicit host<->device copies of the pool are kept (not restructured by K34); making them
      * copy-free on GB10 needs a kernel indexing change (slots are not contiguous in a launch): follow-up. */
-    POOL_CHECK(cudaHostAlloc(&g_pool_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));
-    POOL_CHECK(cudaHostAlloc(&g_pool_bits_host, (size_t)cap * BATCH_BITS_STRIDE, cudaHostAllocDefault));
+    POOL_CHECK(nr_gpu_allocate(NR_GPU_STAGING, &g_pool_llr_host, (size_t)cap * BATCH_LLR_STRIDE));
+    POOL_CHECK(nr_gpu_allocate(NR_GPU_SHARED_RW, &g_pool_bits_host, (size_t)cap * BATCH_BITS_STRIDE));
     ldpc_batch_reserve(g_pool_ctx, POOL_MAX_LAUNCH);
     if (!g_pool_ctx.b_cap || cudaGetLastError() != cudaSuccess) { rc = -1; pool_log_error(cudaErrorMemoryAllocation, __LINE__); goto fail; }
     g_pool_cap = cap;
     return 0;
 fail:
-    cudaFreeHost(g_pool_llr_host); g_pool_llr_host = nullptr; /* no leak on a partial init */
-    cudaFreeHost(g_pool_bits_host); g_pool_bits_host = nullptr;
+    (cudaError_t)nr_gpu_free(g_pool_llr_host); g_pool_llr_host = nullptr; /* no leak on a partial init */
+    (cudaError_t)nr_gpu_free(g_pool_bits_host); g_pool_bits_host = nullptr;
     ldpc_batch_free(g_pool_ctx);
     if (g_pool_ctx.stream) { cudaStreamDestroy(g_pool_ctx.stream); g_pool_ctx.stream = 0; }
     return rc ? rc : -1;
@@ -1155,8 +1136,7 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
         POOL_CHECK(cudaMemcpyAsync(c.b_llr_dev, g_pool_llr_host, 1, (cudaMemcpyKind)99, stream));
     n = 0;
     for (int r = 0; r < n_chunk; r++) {
-        POOL_CHECK(cudaMemcpyAsync(c.b_llr_dev + (size_t)n * BATCH_LLR_STRIDE, g_pool_llr_host + (size_t)first[r] * BATCH_LLR_STRIDE,
-                                   (size_t)count[r] * BATCH_LLR_STRIDE, cudaMemcpyHostToDevice, stream));
+        POOL_CHECK((cudaError_t)nr_gpu_copy_async(c.b_llr_dev + (size_t)n * BATCH_LLR_STRIDE, g_pool_llr_host + (size_t)first[r] * BATCH_LLR_STRIDE, (size_t)count[r] * BATCH_LLR_STRIDE, stream));
         n += count[r];
     }
     {
@@ -1176,15 +1156,16 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
     static std::map<uint64_t, cudaGraphExec_t> graphs; /* only the pool worker thread gets here */
     const uint64_t key = (uint64_t)BG << 40 | (uint64_t)Z << 24 | (uint64_t)nb << 8 | num_iter;
     cudaGraphExec_t& ge = graphs[key];
+    const bool capture = use_graph && nr_gpu_allocations_allowed();
     if (use_graph && ge) {
         POOL_CHECK(cudaGraphLaunch(ge, stream));
     } else {
-        if (use_graph) {
+        if (capture) {
             __atomic_fetch_add(&g_pool_capture_epoch, 1, __ATOMIC_SEQ_CST);
             AST(g_pool_capturing, 1);
             POOL_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
             if (g_hook_inject == 2) /* illegal call during capture: invalidates it */
-                POOL_CHECK(cudaDeviceSynchronize());
+                POOL_CHECK((cudaError_t)nr_gpu_sync_all());
         }
         dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
         dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), nb);
@@ -1205,7 +1186,7 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
             }
             POOL_CHECK(cudaGetLastError()); /* launch-configuration errors surface here */
         }
-        if (use_graph) {
+        if (capture) {
             cudaGraph_t g;
             POOL_CHECK(cudaStreamEndCapture(stream, &g));
             cudaError_t ei = cudaGraphInstantiate(&ge, g, 0);
@@ -1223,12 +1204,10 @@ static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, 
             llr_total + (size_t)b0 * BATCH_LLR_STRIDE, c.b_bits_dev + (size_t)b0 * BATCH_BITS_STRIDE, K[r],
             BATCH_LLR_STRIDE, BATCH_BITS_STRIDE);
         POOL_CHECK(cudaGetLastError());
-        POOL_CHECK(cudaMemcpyAsync(g_pool_bits_host + (size_t)first[r] * BATCH_BITS_STRIDE,
-                                   c.b_bits_dev + (size_t)b0 * BATCH_BITS_STRIDE, (size_t)count[r] * BATCH_BITS_STRIDE,
-                                   cudaMemcpyDeviceToHost, stream));
+        POOL_CHECK((cudaError_t)nr_gpu_copy_async(g_pool_bits_host + (size_t)first[r] * BATCH_BITS_STRIDE, c.b_bits_dev + (size_t)b0 * BATCH_BITS_STRIDE, (size_t)count[r] * BATCH_BITS_STRIDE, stream));
         b0 += count[r];
     }
-    POOL_CHECK(cudaStreamSynchronize(stream));
+    POOL_CHECK((cudaError_t)nr_gpu_sync(stream));
     POOL_CHECK(cudaGetLastError());
     }
     return 0;
@@ -1240,10 +1219,10 @@ fail:
             cudaStreamEndCapture(stream, &g);
             if (g) cudaGraphDestroy(g);
         }
-        cudaStreamSynchronize(stream);
+        (cudaError_t)nr_gpu_sync(stream);
         cudaGetLastError();
         AST(g_pool_capturing, 0);
-        if (cudaGetLastError() != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess || g_hook_inject == 3)
+        if (cudaGetLastError() != cudaSuccess || (cudaError_t)nr_gpu_sync(stream) != cudaSuccess || g_hook_inject == 3)
             AST(g_pool_sticky, 1); /* the error survived being cleared: the context is gone, stop using the GPU */
         else
             cudaGetLastError();

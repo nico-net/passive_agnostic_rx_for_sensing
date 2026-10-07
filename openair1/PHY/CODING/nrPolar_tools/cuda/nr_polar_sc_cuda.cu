@@ -8,6 +8,7 @@
  * reindexes the op list, so do it only with the bit-exactness test in the loop.
  */
 #include <cuda_runtime.h>
+#include "PHY/TOOLS/nr_gpu_cuda.h"
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
@@ -27,9 +28,10 @@ static int g_ln[NPC_MAX_PARAMS], g_nn[NPC_MAX_PARAMS];
 
 extern "C" int npc_gpu_upload_params(int slot, const npc_dev_params_t *p)
 {
-  if (!g_dp && cudaMalloc(&g_dp, sizeof(npc_dev_params_t) * NPC_MAX_PARAMS) != cudaSuccess) return -1;
+  if (!nr_gpu_module_ready()) return -1;
+  if (!g_dp && nr_gpu_allocate(NR_GPU_DEVICE, &g_dp, sizeof(npc_dev_params_t) * NPC_MAX_PARAMS) != cudaSuccess) return -1;
   g_ln[slot] = (p->n + 1) * p->N; g_nn[slot] = p->N;
-  return cudaMemcpy(&g_dp[slot], p, sizeof(*p), cudaMemcpyHostToDevice) == cudaSuccess ? 0 : -1;
+  return nr_gpu_copy(&g_dp[slot], p, sizeof(*p)) == cudaSuccess ? 0 : -1;
 }
 
 /* ---- exact int16 semantics of the CPU path's simde intrinsics ------------------------------ */
@@ -202,20 +204,20 @@ static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 extern "C" int npc_gpu_dbg_device_params(int *out10)
 {
   int *d = NULL;
-  if (cudaMalloc(&d, sizeof(int) * 10) != cudaSuccess) return -1;
+  if (nr_gpu_allocate(NR_GPU_DEVICE, &d, sizeof(int) * 10) != cudaSuccess) return -1;
   cudaMemcpyToSymbol(npc_dbg_params_out, &d, sizeof(d));
   int16_t *a = NULL;
-  if (cudaMalloc(&a, sizeof(int16_t) * NPC_LEVELS * NPC_MAX_N) != cudaSuccess) return -1;
+  if (nr_gpu_allocate(NR_GPU_DEVICE, &a, sizeof(int16_t) * NPC_LEVELS * NPC_MAX_N) != cudaSuccess) return -1;
   cudaMemcpyToSymbol(npc_dbg_alpha_out, &a, sizeof(a));
   int16_t *t = NULL;
-  if (cudaMalloc(&t, sizeof(int16_t) * 4 * NPC_MAX_OPS) != cudaSuccess) return -1;
+  if (nr_gpu_allocate(NR_GPU_DEVICE, &t, sizeof(int16_t) * 4 * NPC_MAX_OPS) != cudaSuccess) return -1;
   cudaMemcpyToSymbol(npc_dbg_trace, &t, sizeof(t));
   return 0;
 }
 extern "C" int npc_gpu_verify_params(int slot, const void *host, int nbytes)
 {
   void *tmp = malloc(nbytes);
-  if (cudaMemcpy(tmp, &g_dp[slot], nbytes, cudaMemcpyDeviceToHost) != cudaSuccess) { free(tmp); return -1; }
+  if (nr_gpu_copy(tmp, &g_dp[slot], nbytes) != cudaSuccess) { free(tmp); return -1; }
   int first = -1;
   for (int i = 0; i < nbytes; i++)
     if (((const unsigned char *)tmp)[i] != ((const unsigned char *)host)[i]) { first = i; break; }
@@ -227,25 +229,25 @@ extern "C" int npc_gpu_dbg_trace(int16_t *out)
   int16_t *t = NULL;
   cudaMemcpyFromSymbol(&t, npc_dbg_trace, sizeof(t));
   if (!t) return -1;
-  return cudaMemcpy(out, t, sizeof(int16_t) * 4 * NPC_MAX_OPS, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -1;
+  return nr_gpu_copy(out, t, sizeof(int16_t) * 4 * NPC_MAX_OPS) == cudaSuccess ? 0 : -1;
 }
 extern "C" int npc_gpu_dbg_alpha(int16_t *out)
 {
   int16_t *a = NULL;
   cudaMemcpyFromSymbol(&a, npc_dbg_alpha_out, sizeof(a));
   if (!a) return -1;
-  return cudaMemcpy(out, a, sizeof(int16_t) * NPC_LEVELS * NPC_MAX_N, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -1;
+  return nr_gpu_copy(out, a, sizeof(int16_t) * NPC_LEVELS * NPC_MAX_N) == cudaSuccess ? 0 : -1;
 }
 extern "C" int npc_gpu_dbg_fetch(int *out10)
 {
   int *d = NULL;
   cudaMemcpyFromSymbol(&d, npc_dbg_params_out, sizeof(d));
   if (!d) return -1;
-  return cudaMemcpy(out10, d, sizeof(int) * 10, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -1;
+  return nr_gpu_copy(out10, d, sizeof(int) * 10) == cudaSuccess ? 0 : -1;
 }
-extern "C" void *npc_gpu_host_alloc(size_t bytes)
-{ void *p = NULL; return cudaHostAlloc(&p, bytes, cudaHostAllocDefault) == cudaSuccess ? p : NULL; }
-extern "C" void npc_gpu_host_free(void *p) { if (p && cudaFreeHost(p) != cudaSuccess) free(p); }
+extern "C" void *npc_gpu_host_alloc(size_t bytes, nr_gpu_kind_t kind)
+{ void *p = NULL; return nr_gpu_allocate(kind, &p, bytes) == cudaSuccess ? p : NULL; }
+extern "C" void npc_gpu_host_free(void *p) { if (p) nr_gpu_free(p); }
 
 static int cap;
 static int *d_pid, *d_vidx, *h_pid_stage, *h_vidx_stage;
@@ -255,13 +257,13 @@ static cudaStream_t stream;
 extern "C" int npc_gpu_reserve(int n)
 {
   if (cap) return n <= cap ? 0 : -1;
-  if (nr_dl_gpu_sealed || n <= 0) return -1;
+  if (!nr_gpu_module_ready() || nr_dl_gpu_sealed || n <= 0) return -1;
   if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking)
-      || cudaMalloc(&d_pid, sizeof(int) * n) || cudaMalloc(&d_vidx, sizeof(int) * n)
-      || cudaHostAlloc(&h_pid_stage, sizeof(int) * n, cudaHostAllocDefault)
-      || cudaHostAlloc(&h_vidx_stage, sizeof(int) * n, cudaHostAllocDefault)
-      || cudaMalloc(&d_llr, sizeof(int16_t) * (size_t)NPC_MAX_E * n)
-      || cudaMalloc(&d_u, (size_t)NPC_MAX_N * n)) return -1;
+      || nr_gpu_allocate(NR_GPU_DEVICE, &d_pid, sizeof(int) * n) || nr_gpu_allocate(NR_GPU_DEVICE, &d_vidx, sizeof(int) * n)
+      || nr_gpu_allocate(NR_GPU_STAGING, &h_pid_stage, sizeof(int) * n)
+      || nr_gpu_allocate(NR_GPU_STAGING, &h_vidx_stage, sizeof(int) * n)
+      || nr_gpu_allocate(NR_GPU_DEVICE, &d_llr, sizeof(int16_t) * (size_t)NPC_MAX_E * n)
+      || nr_gpu_allocate(NR_GPU_DEVICE, &d_u, (size_t)NPC_MAX_N * n)) return -1;
   cap = n;
   return 0;
 }
@@ -278,18 +280,18 @@ extern "C" int npc_gpu_decode(const int *pid, const int16_t *llr, const int *vid
   const double t0 = now_us();
   memcpy(h_pid_stage, pid, sizeof(int) * n);
   if (vidx) memcpy(h_vidx_stage, vidx, sizeof(int) * n);
-  if (cudaMemcpyAsync(d_pid, h_pid_stage, sizeof(int) * n, cudaMemcpyHostToDevice, stream)
-      || (vidx && cudaMemcpyAsync(d_vidx, h_vidx_stage, sizeof(int) * n, cudaMemcpyHostToDevice, stream))
-      || cudaMemcpyAsync(d_llr, llr, sizeof(int16_t) * (size_t)estride * n_vec, cudaMemcpyHostToDevice, stream)) return -1;
+  if ((cudaError_t)nr_gpu_copy_async(d_pid, h_pid_stage, sizeof(int) * n, stream)
+      || (vidx && (cudaError_t)nr_gpu_copy_async(d_vidx, h_vidx_stage, sizeof(int) * n, stream))
+      || (cudaError_t)nr_gpu_copy_async(d_llr, llr, sizeof(int16_t) * (size_t)estride * n_vec, stream)) return -1;
   int ln = 0, nmax = 0;
   for (int i = 0; i < n; i++) { if (g_ln[pid[i]] > ln) ln = g_ln[pid[i]]; if (g_nn[pid[i]] > nmax) nmax = g_nn[pid[i]]; }
   const size_t shbytes = (size_t)3 * ln + nmax;
   const double t1 = now_us();
   sc_decode_kernel<<<n, NPC_THREADS, shbytes, stream>>>(g_dp, d_pid, d_llr, vidx ? d_vidx : NULL, estride, d_u, nstride, ln, nmax);
-  if (cudaStreamSynchronize(stream) != cudaSuccess) return -2;
+  if ((cudaError_t)nr_gpu_sync(stream) != cudaSuccess) return -2;
   const double t2 = now_us();
-  if (cudaMemcpyAsync(u_out, d_u, (size_t)nstride * n, cudaMemcpyDeviceToHost, stream)
-      || cudaStreamSynchronize(stream)) return -2;
+  if ((cudaError_t)nr_gpu_copy_async(u_out, d_u, (size_t)nstride * n, stream)
+      || (cudaError_t)nr_gpu_sync(stream)) return -2;
   const double t3 = now_us();
   *t_h2d = t1 - t0; *t_kernel = t2 - t1; *t_d2h = t3 - t2;
   return 0;

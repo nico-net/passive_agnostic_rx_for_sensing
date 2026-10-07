@@ -30,15 +30,12 @@ option(ENABLE_LDPC_CUDA "Build libldpc_cuda.so (CUDA LDPC decoder)" OFF)
 if(ENABLE_LDPC_CUDA)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
-  # One architecture or a list, e.g. -DLDPC_CUDA_ARCH="89;121" (sens6 RTX 4070 + DGX GB10 in one fat binary), or per
-  # host (89 on sens6, 121 on the DGX). Every CUDA target below (LDPC, CB0 entry, PDSCH/PDCCH GPU, polar) uses it.
-  set(LDPC_CUDA_ARCH "89" CACHE STRING "CUDA architecture(s) for the GPU modules: a number or a ;-list (89;121)")
-  foreach(_arch IN LISTS LDPC_CUDA_ARCH)
-    if(NOT _arch MATCHES "^[0-9]+[af]?(-real|-virtual)?$")
-      message(FATAL_ERROR "LDPC_CUDA_ARCH: '${_arch}' is not a CUDA architecture number (e.g. 89, 121, \"89;121\")")
-    endif()
-  endforeach()
-  message(STATUS "GPU modules: CUDA architectures ${LDPC_CUDA_ARCH}")
+  set(LDPC_CUDA_ARCH "${CMAKE_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architecture list (default 89;121)")
+  include(${PROJECT_SOURCE_DIR}/cmake_targets/nr_gpu_arch.cmake)
+  nr_gpu_architectures("${LDPC_CUDA_ARCH}" NR_GPU_MODULE_ARCHS)
+  # Validate the independently supplied CMake list too.
+  nr_gpu_architectures("${CMAKE_CUDA_ARCHITECTURES}" NR_GPU_CMAKE_ARCHS)
+  message(STATUS "GPU modules: CUDA architectures ${NR_GPU_MODULE_ARCHS}")
   # Own TB decoder (GPU batch per TB) instead of ldpc_segment's per-segment one: the two define the
   # same nrLDPC_coding_* symbols, so the segment encoder and rate matching are compiled in directly.
   add_library(ldpc_cuda MODULE
@@ -52,9 +49,9 @@ if(ENABLE_LDPC_CUDA)
               nrLDPC_cuda/nrLDPC_cpu_fallback.c
   )
   set_target_properties(ldpc_cuda PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+                        CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(ldpc_cuda PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-  target_compile_definitions(ldpc_cuda PRIVATE LDPC_CUDA_DISCRETE LDPC_DECODER_NAME="CUDA LDPC decoder")
+  target_compile_definitions(ldpc_cuda PRIVATE LDPC_DECODER_NAME="CUDA LDPC decoder")
   target_link_libraries(ldpc_cuda PRIVATE log_headers CUDA::cudart)
   add_dependencies(ldpctest ldpc_cuda)
   if(ENABLE_TESTS)
@@ -99,7 +96,7 @@ if(ENABLE_LDPC_CUDA)
     ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_fp.c)
   set_target_properties(csirs_disc_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+    CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_compile_definitions(csirs_disc_gpu PRIVATE NR_CSIRS_DISC_GPU_MODULE)
   target_link_libraries(csirs_disc_gpu PRIVATE CUDA::cudart CUDA::cufft m pthread)
   add_dependencies(nr-uesoftmodem csirs_disc_gpu)
@@ -107,7 +104,7 @@ if(ENABLE_LDPC_CUDA)
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
   add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu)
   set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+                        CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(pdsch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(pdsch_gpu PRIVATE CUDA::cudart CUDA::cufft)
   add_executable(nr_pdsch_gpu_fep_test ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc)
@@ -122,7 +119,7 @@ if(ENABLE_LDPC_CUDA)
   # comment for why.
   add_library(pdcch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu)
   set_target_properties(pdcch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+                        CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(pdcch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(pdcch_gpu PRIVATE CUDA::cudart)
   add_executable(nr_pdcch_gpu_fep_test ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdcch_gpu_fep_test.cc)
@@ -135,7 +132,7 @@ if(ENABLE_LDPC_CUDA)
   # Host mapping/validation services come from nr_csirs_disc_sweep.c in the executable.
   add_library(nr_csirs_disc_gpu_sweep MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu)
   set_target_properties(nr_csirs_disc_gpu_sweep PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+                        CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(nr_csirs_disc_gpu_sweep PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(nr_csirs_disc_gpu_sweep PRIVATE CUDA::cudart)
   if(ENABLE_TESTS)
@@ -148,7 +145,7 @@ if(ENABLE_LDPC_CUDA)
 
   # Batched polar SC decode for the blind PDCCH search.
   add_library(polar_sc_cuda STATIC nrPolar_tools/cuda/nr_polar_sc_cuda.cu nrPolar_tools/cuda/nr_polar_sc_cuda_host.c)
-  set_target_properties(polar_sc_cuda PROPERTIES CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+  set_target_properties(polar_sc_cuda PROPERTIES CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(polar_sc_cuda PRIVATE ${CUDAToolkit_INCLUDE_DIRS} nrPolar_tools/cuda)
   target_link_libraries(polar_sc_cuda PRIVATE polar CUDA::cudart)
   add_executable(nr_polar_sc_cuda_test nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc)
@@ -190,7 +187,7 @@ add_subdirectory(nrSmallBlock)
 if(ENABLE_LDPC_CUDA)
   add_library(td_cb0_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_td_cb0_batch.cu)
   set_target_properties(td_cb0_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+                        CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(td_cb0_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
   target_link_libraries(td_cb0_gpu PRIVATE CUDA::cudart)
   add_dependencies(nr-uesoftmodem td_cb0_gpu)
@@ -198,4 +195,16 @@ if(ENABLE_LDPC_CUDA)
     add_dependencies(test_nr_td_cb0_batch td_cb0_gpu ldpc_cuda)
     add_dependencies(nr_td_cb0_bench td_cb0_gpu ldpc_cuda)
   endif()
+endif()
+
+if(ENABLE_LDPC_CUDA)
+  string(REPLACE ";" "," NR_GPU_ARCH_METADATA "${NR_GPU_MODULE_ARCHS}")
+  foreach(module ldpc_cuda td_cb0_gpu pdsch_gpu pdcch_gpu polar_sc_cuda csirs_disc_gpu nr_csirs_disc_gpu_sweep)
+    target_sources(${module} PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_module.c)
+    target_compile_definitions(${module} PRIVATE NR_GPU_BUILT_ARCHS="${NR_GPU_ARCH_METADATA}"
+                               NR_GPU_MODULE_NAME="${module}")
+    target_link_libraries(${module} PRIVATE nr_gpu_platform)
+    # Use one dynamic cudart instance across the platform and modules.
+    set_target_properties(${module} PROPERTIES CUDA_RUNTIME_LIBRARY Shared BUILD_RPATH_USE_ORIGIN ON)
+  endforeach()
 endif()
