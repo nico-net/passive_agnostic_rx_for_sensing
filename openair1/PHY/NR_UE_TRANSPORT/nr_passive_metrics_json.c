@@ -163,6 +163,15 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   const int sched = pdsch_schedule_json(m, buf + w, n - (size_t)w);
   if (sched < 0) return -1;
   w += sched;
+  if (m->nid_capture_offered) {
+    int z = snprintf(buf + w, n - (size_t)w,
+                     ",\"nid_capture_offered\":%" PRIu64 ",\"nid_capture_taken\":%" PRIu64
+                     ",\"nid_capture_skipped_empty\":%" PRIu64 ",\"nid_capture_noise_floor_db\":%.3f",
+                     m->nid_capture_offered, m->nid_capture_taken, m->nid_capture_skipped_empty,
+                     m->nid_capture_noise_floor_db);
+    if (z < 0 || (size_t)z >= n - (size_t)w) return -1;
+    w += z;
+  }
   char discovery[96] = "";
   if (m->csirs_disc_readmit_skipped)
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,

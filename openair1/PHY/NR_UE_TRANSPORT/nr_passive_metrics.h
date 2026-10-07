@@ -14,6 +14,8 @@ extern "C" {
 #define NR_PASSIVE_METRICS_SCHEMA 1
 #define NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX 16
 typedef struct {
+  uint64_t nid_capture_offered, nid_capture_taken, nid_capture_skipped_empty;
+  double nid_capture_noise_floor_db;
   uint64_t t_mono_ns;       // CLOCK_MONOTONIC at snapshot
   int64_t abs_slot;         // producer absolute slot (nr_ue_diag_producer_absolute_slot), -1 unknown
   int pci;                  // -1 unknown

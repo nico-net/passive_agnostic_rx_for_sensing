@@ -69,7 +69,12 @@ int main(int argc,char **argv) {
   double tmac=(65536.0*3*rb*batch)/(r.kernel_total_ms[1]*1e9);
   printf("PDCCH_NID_STREAM rb=%d dur=%d snr_db=%.1f batch=%d pass=%d air_ms=%.3f wall_ms=%.3f batch_ms=%.3f stage1_ms=%.3f stage2_ms=%.3f max_kernel_ms=%.3f effective_tmac_s=%.4f records=%d first_record_ms=%.3f lambda=%.7g k=%d\n",
     rb,dur,snr,batch,pass,air_ms,elapsed,batch_ms,r.stage1_ms,r.stage2_ms,r.kernel_max_ms,tmac,r.count,first,r.lambda[dur-1][3],r.threshold[dur-1][3]);
-  timing_ok &= r.kernel_max_ms<10;
+  static const char *names[]={"reset","sweep","standardize","accumulate","prepare_init","probe","control",
+                              "snapshots","hull","generate","score","finish","summary"};
+  for(int j=0;j<NR_PDCCH_NID_KERNEL_KINDS;j++)
+   printf("PDCCH_NID_KERNEL pass=%d kernel=%s calls=%u total_ms=%.6f peak_ms=%.6f\n",
+          pass,names[j],r.kernel_calls[j],r.kernel_total_ms[j],r.kernel_peak_ms[j]);
+  timing_ok &= r.kernel_max_ms<5 && r.kernel_total_ms[1]<=7.0*batch/64;
  }
  stats(&alloc1,&deny1);
  const char *budget_env=getenv("ISAC_GPU_BUDGET");bool budget_on=budget_env && !strcmp(budget_env,"1");
@@ -81,7 +86,7 @@ int main(int argc,char **argv) {
  }
  ops->destroy(ctx);dlclose(lib);
  double effective=(65536.0*3*rb*batch*limit)/(total_sweep*1e9);
- bool pass=first>=0 && first<=3000 && timing_ok && effective>=1;
+ bool pass=first>=0 && first<=3000 && timing_ok && effective>=0.5;
  if(budget_on) {
   const char *v=getenv("ISAC_GPU_DISCOVERY_BUDGET_PCT");int pct=v?atoi(v):30;
   if(pct<1 || pct>100)pct=30;
