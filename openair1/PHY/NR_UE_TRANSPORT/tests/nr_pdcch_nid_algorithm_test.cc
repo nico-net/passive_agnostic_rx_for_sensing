@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
-#include "nr_pdcch_nid_algorithm.h"
+#include "nr_pdcch_nid_stage1.h"
 #include "nr_pdcch_nid_reference.h"
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +18,68 @@ static void dump(const char *name,const nr_pdcch_nid_result_t &r) {
  fprintf(stderr,"%s: count=%d top=%d/%d %d/%d\n",name,r.count,r.top_id[0],r.top_sym[0],r.top_id[1],r.top_sym[1]);
  for(int i=0;i<r.count;i++) {const auto &a=r.records[i];fprintf(stderr,"%d %d %d %d %d %d %d %d %d\n",a.nid,a.sym,a.dur,a.grid_rb,a.groups,a.L,a.R,a.shift,a.ties);}
 }
+// Independent full-array oracle for the streamed-word/six-prefix representation.
+static int symbol_test() {
+ std::vector<c16_t> iq(3*12*273);uint32_t random=0x71f938;
+ for(auto &v:iq) {
+  random^=random<<13;random^=random>>17;random^=random<<5;
+  v={(int16_t)random,(int16_t)(random>>16)};
+ }
+ int slot=3,sym=2;
+ for(int rb:{36,217,273})for(int pa:{-7,0,7})for(int d:{0,1,2})for(int id=0;id<65536;id+=257) {
+  NidView v={12*rb,pa,6,12,14,1,3,0,1,12*273,&slot,&sym,iq.data()};
+  uint32_t seed=(uint32_t)((((uint64_t)(14*slot+sym+d+1)*(2*id+1))<<17)+2*id)&0x7fffffff;
+  uint32_t gold[54],x1=0,x2=seed;
+  for(int w=0;w<54;w++)gold[w]=nid_gold(&x1,&x2,w==0);
+  int low=pa<0?(-pa+11)/12:0,high=(12*rb-pa)/12;
+  for(int css=0;css<2;css++) {
+   int lo=css?6:low,hi=css?18:high,m0=css?6:0,exlo=css?0:6,exhi=css?0:18;
+   float ar[276]={},ai[276]={},ap[276]={},want=0;
+   for(int c=lo;c<hi;c++) {
+    float r=0,i=0,power=0;
+    for(int q=0;q<3;q++) {
+     float xr,xi;idsw_pilot(gold,3*(c-m0)+q,&xr,&xi);
+     c16_t y=v.grid(0,d)[pa+12*c+1+4*q];
+     r+=y.r*xr-y.i*xi;i+=y.r*xi+y.i*xr;power+=(float)y.r*y.r+(float)y.i*y.i;
+    }
+    int n=c-lo;ar[n+1]=ar[n]+r;ai[n+1]=ai[n]+i;ap[n+1]=ap[n]+power;
+   }
+   for(int c=lo;c+6<=hi;c++) {
+    if(exhi>exlo && c<exhi && c+6>exlo)continue;
+    int n=c-lo;float r=ar[n+6]-ar[n],i=ai[n+6]-ai[n],power=ap[n+6]-ap[n];
+    float score=power>0?sqrtf((r*r+i*i)/(power*36.f)):0;if(score>want)want=score;
+   }
+   if(want!=nid_best_symbol(v,0,seed,lo,hi,exlo,exhi,m0,d))return 24;
+  }
+ }
+ puts("PASS streamed Gold/six-prefix score == full arrays: 36/217/273 PRB, Point A offsets, symbols 1/2/3");
+ return 0;
+}
+// Validate stable phase concatenation, including cap truncation inside a phase.
+static int structure_test() {
+ if(int rc=symbol_test())return rc;
+ NidStage2 s={};
+ for(int rb:{36,217,273})for(int dur:{1,2,3})for(int lo:{0,7,30})for(int cap:{1,17,1024,NID_HYP_CAP}) {
+  s.g_st2_clo=lo;s.g_st2_chi=rb;s.g_st2_D=dur;
+  std::vector<st2_hyp_t> whole(cap),split(cap);
+  int n=s.st2_gen(whole.data(),cap,lo+3,rb-7),used=0;
+  for(int ph=0;ph<6;ph++) {
+   int count=s.st2_gen(nullptr,cap,lo+3,rb-7,ph,ph+1);
+   int room=cap-used;if(count>room)count=room;
+   int made=s.st2_gen(split.data()+used,count,lo+3,rb-7,ph,ph+1);
+   if(made!=count)return 20;
+   used+=made;
+  }
+  if(n!=used)return 21;
+  for(int i=0;i<n;i++) {
+   const auto &a=whole[i],&b=split[i];
+   if(a.phase!=b.phase || a.g0!=b.g0 || a.ng!=b.ng || a.L!=b.L || a.R!=b.R || a.shift!=b.shift)return 22;
+  }
+ }
+ puts("PASS stable parallel hypothesis generation: phases, clipping, caps, durations 1/2/3");return 0;
+}
 int main(int argc,char **argv) {
+ if(argc>1 && !strcmp(argv[1],"--structure"))return structure_test();
  if(argc>2 && !strcmp(argv[1],"--frozen"))return nid_reference_original_main(argc-1,argv+1);
  int fixture=argc>1?atoi(argv[1]):7;
  bool device=argc>2 && !strcmp(argv[2],"--device");
@@ -62,6 +123,19 @@ int main(int argc,char **argv) {
    s.prepare(want.list_id[j],want.list_sym[j]);
    for(int it=0;it<6 && s.alive;it++) {
     for(int i=0;i<s.nh;i++)s.score(i);
+    // CPU model of the block-per-hypothesis assembly. Check exact sums and
+    // votes against the unsplit arithmetic used by the independent oracle.
+    for(int i=0;i<s.nh;i+=s.nh/7+1) {
+     st2_hyp_t h=s.H[i];h.score=0;memset(h.al_win,0,sizeof(h.al_win));
+     int nf=0,below=0;
+     for(int k=0;k<s.nact;k++) {
+      st2_hyp_t one=s.H[i];s.st2_score(&one,s.sn+k,1);h.score+=one.score;
+      for(int a=0;a<5;a++)h.al_win[a]+=one.al_win[a];
+      int v=s.consistency_vote(&one,k);nf+=v>=0;below+=v==0;
+     }
+     if(!nf || below>nf/2)h.score=0;
+     if(h.score!=s.H[i].score || memcmp(h.al_win,s.H[i].al_win,sizeof(h.al_win)))return 23;
+    }
     s.finish(&got);
    }
   }

@@ -77,6 +77,7 @@ static void *worker(void *unused)
    if(rc==2) LOG_W(PHY,"SENSING: PDCCH_NID_GPU pass budget exhausted; previous records retained\n");
    continue;
   }
+  if(result.budget_exceeded)LOG_W(PHY,"SENSING: PDCCH_NID_GPU soft pass budget exceeded; completed records published\n");
   pthread_mutex_lock(&g.mu);
   g.result=result;g.generation++;g.passes++;
   uint64_t pass=g.passes;
@@ -90,8 +91,8 @@ static void *worker(void *unused)
    if(n<0 || (size_t)n>=sizeof(records)-used)break;
    used+=n;
   }
-  LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms -> %d CORESETs:%s\n",
-        (unsigned long long)pass,result.stage1_ms,result.stage2_ms,result.count,records);
+  LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms (kernels max %.3f ms) -> %d CORESETs:%s\n",
+        (unsigned long long)pass,result.stage1_ms,result.stage2_ms,result.kernel_max_ms,result.count,records);
   continue;
 failed:
   LOG_E(PHY,"SENSING: PDCCH_NID_GPU device failure; capture stopped (no CPU sweep fallback)\n");

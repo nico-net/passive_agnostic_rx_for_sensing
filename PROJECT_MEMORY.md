@@ -3066,6 +3066,22 @@ limits and exact deferred commands: [T17 report](docs/superpowers/reports/csd/T1
 
 ---
 
+### T20 — GPU nID pass parallelism (2026-10-07, csd/t20)
+
+[OFFLINE VERIFIED, DGX aarch64 host-only] Thirteen nID CPU/reference/worker tests pass;
+CUDA sm_121 module and benchmark build. Full host regression after building the missing LDPC
+module: 165/173 pass, eight brief-listed ARM/sandbox failures, six device benchmarks disabled.
+[IMPLEMENTED, NOT VALIDATED] Parallel shortlist
+summaries, snapshot preparation, hypothesis scoring and finish; queued sweep/score chunks
+without per-chunk synchronization; per-pass/kernel timing and disabled 217/273-PRB benchmarks.
+The PDCCH plugin ABI is now 2 (rebuild worker and plugin together); the CSI-RS contract is unchanged.
+Completed passes publish even when the soft budget is exceeded. GPU parity, <=150 ms at
+217 PRB/window 10/duration 1, <10 ms kernels and shared-GPU/OTA behavior are **deferred**.
+T19's duration statistic must be merged before duration 2/3 acceptance. See
+[the T20 report](docs/superpowers/reports/csd/T20.md) for exact device/nsys commands and limitations.
+
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
