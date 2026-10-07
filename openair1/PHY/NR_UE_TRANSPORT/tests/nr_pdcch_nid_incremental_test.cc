@@ -29,7 +29,7 @@ int main(int argc,char **argv) {
  puts("PASS Gold jump and repeated-look false-alarm budget");
  if(argc<2 || strcmp(argv[1],"--device"))return 0;
  int dur=argc>2?atoi(argv[2]):3;
- setenv("ISAC_CSIRS_DISC","1",1);
+ setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL","1",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL","1",1);
  void *lib=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);CHECK(lib);
  auto get=(const nr_pdcch_nid_ops_t*(*)())dlsym(lib,"nr_pdcch_nid_gpu_ops");
  auto read=(int(*)(void*,uint16_t*,float*))dlsym(lib,"nr_pdcch_nid_gpu_statistics_check");

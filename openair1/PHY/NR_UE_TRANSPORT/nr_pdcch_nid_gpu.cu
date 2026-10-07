@@ -519,8 +519,9 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  }
  int n=window*NR_PDCCH_NID_BATCH,sc=12*rb;
  Device &p=c->host;
- const char *enable=getenv("ISAC_CSIRS_DISC");
- p.multisymbol=enable && !strcmp(enable,"1");
+ /* Duration 2/3 multi-symbol evidence (T19): own flag, default on (was ISAC_CSIRS_DISC). */
+ const char *enable=getenv("ISAC_PDCCH_NID_MULTISYMBOL");
+ p.multisymbol=!(enable && !strcmp(enable,"0"));
  int *slots=nullptr; c16_t *iq=nullptr;double *scratch=nullptr;st2_snap_t *sn=nullptr;
  int least_priority=0,greatest_priority=0;
  if(cudaDeviceGetStreamPriorityRange(&least_priority,&greatest_priority)!=cudaSuccess

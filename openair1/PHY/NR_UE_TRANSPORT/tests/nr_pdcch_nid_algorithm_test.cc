@@ -94,7 +94,7 @@ int main(int argc,char **argv) {
  nr_pdcch_nid_result_t want={},got={};
  nid_reference_run(stage1,&want);
  if(device) {
-  setenv("ISAC_CSIRS_DISC","1",1);
+  setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL","1",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL","1",1);
   void *lib=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);
   if(!lib) {fprintf(stderr,"%s\n",dlerror());return 2;}
   auto get=(const nr_pdcch_nid_ops_t*(*)())dlsym(lib,"nr_pdcch_nid_gpu_ops");

@@ -8,7 +8,7 @@
 #include <vector>
 
 int main(int argc,char **argv) {
- setvbuf(stdout,nullptr,_IOLBF,0);setenv("ISAC_CSIRS_DISC","1",1);
+ setvbuf(stdout,nullptr,_IOLBF,0);setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL","1",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL","1",1);
  const int rb=argc>1?atoi(argv[1]):217,dur=argc>2?atoi(argv[2]):1,repeats=argc>3?atoi(argv[3]):3;
  if((rb!=217 && rb!=273) || dur<1 || dur>3 || repeats<1)return 2;
  void *lib=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);

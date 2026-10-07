@@ -16,7 +16,7 @@ int main(int argc,char **argv) {
  double snr=argc>3?atof(argv[3]):5;
  int batch=argc>4?atoi(argv[4]):64,limit=argc>5?atoi(argv[5]):80;
  if(rb<60 || rb>275 || dur<1 || dur>3 || batch<1 || batch>336 || limit<1)return 2;
- setvbuf(stdout,nullptr,_IOLBF,0);setenv("ISAC_CSIRS_DISC","1",1);
+ setvbuf(stdout,nullptr,_IOLBF,0);setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL","1",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL","1",1);
  void *lib=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);
  if(!lib){fprintf(stderr,"dlopen: %s\n",dlerror());return 2;}
  auto get=(const nr_pdcch_nid_ops_t*(*)())dlsym(lib,"nr_pdcch_nid_gpu_ops");

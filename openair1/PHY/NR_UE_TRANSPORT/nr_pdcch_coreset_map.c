@@ -424,7 +424,7 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
     return -1;
   /* Live GPU capture is one rotating start on every DL slot. The legacy
    * diagnostic dump keeps its original every-tenth-slot cadence. */
-  const bool incremental = gpu && getenv("ISAC_CSIRS_DISC") && !strcmp(getenv("ISAC_CSIRS_DISC"), "1");
+  const bool incremental = gpu && (getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL")==NULL || strcmp(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL"),"0")); /* own flag, default on (was ISAC_CSIRS_DISC) */
   int every = 10;
   if (incremental) {
     const char *e = getenv("ISAC_PDCCH_NID_GPU_CAPTURE_EVERY");

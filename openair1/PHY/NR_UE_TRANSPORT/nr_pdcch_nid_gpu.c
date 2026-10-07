@@ -113,7 +113,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  g.dur=duration?atoi(duration):3;
  if(g.dur<1)g.dur=1;
  if(g.dur>3)g.dur=3;
- g.incremental=getenv("ISAC_CSIRS_DISC") && !strcmp(getenv("ISAC_CSIRS_DISC"),"1");
+ g.incremental=(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL")==NULL || strcmp(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL"),"0")); /* own flag, default on (was ISAC_CSIRS_DISC) */
  g.batch_size=g.incremental?env_int("ISAC_PDCCH_NID_GPU_BATCH",64,1,NR_PDCCH_NID_BATCH):NR_PDCCH_NID_BATCH;
  g.every=g.incremental?1:env_int("ISAC_PDCCH_NID_GPU_EVERY",2,1,1000);
  g.window=env_int("ISAC_PDCCH_NID_GPU_WINDOW",10,1,NR_PDCCH_NID_MAX_WINDOW);
