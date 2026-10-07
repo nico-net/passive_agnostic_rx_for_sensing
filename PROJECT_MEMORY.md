@@ -1,5 +1,15 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-07 (DGX aarch64, `csd/t21`, local).** [CODE-READ + historical OTA logs]
+> PDSCH's low-lag stale losses occur after queue admission: GPU round trip plus CPU SSB FEP
+> outlive the IQ ring, and K33 also discards credit after valid LLR processing. T21, gated by
+> `ISAC_CSIRS_DISC=1`, copies IQ with pre/post lifetime guards before GPU waits, uses the private
+> copy for CPU fallback/self-check, releases GPU requests individually, and adds stage histograms
+> and reason counters. FEP/LDPC stream creation alone is changed to high priority; GPU buffer
+> allocation plumbing is unchanged. [OFFLINE VERIFIED] Queue load model and four-RX production
+> decoder overwrite/fallback tests pass. [IMPLEMENTED, NOT VALIDATED] Device/OTA throughput;
+> build/full-suite details, limits and deferred commands: [T21](docs/superpowers/reports/csd/T21.md).
+
 > **Update 2026-10-07 (DGX aarch64, `csd/t15`, local).** T15 adds independent stage-1/2 PDCCH
 > CORESET dwell/banking per geometry+nID alongside the live walk, gated by `ISAC_CSIRS_DISC=1`.
 > [OFFLINE VERIFIED] Two synthetic non-PCI nIDs on one footprint bank and decode while the PCI walk

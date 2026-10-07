@@ -60,6 +60,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "nr_dci_bits.h"
+#include "nr_pdsch_passive_schedule.h"
 #include "nr_pdsch_config_sweep.h"
 
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
@@ -132,13 +133,14 @@ typedef struct {
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in
 /// `decoded` is always attributable rather than merely visible.
 typedef struct {
+  nr_pdsch_schedule_stats_t schedule;
   uint64_t queued;
   uint64_t decoded;
   uint64_t crc_ok;
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
   uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
-  uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
-  uint64_t stale_after_decode; ///< decode finished after its IQ expired: INCONCLUSIVE, no TD/layout credit (K33)
+  uint64_t dropped_stale;  ///< IQ unavailable at admission/copy (legacy also checks after decode)
+  uint64_t stale_after_decode; ///< borrowed-IQ decode finished after expiry: no TD/layout credit (K33)
   uint64_t dropped_epoch;  ///< dequeued after a configuration epoch change
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
   uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)

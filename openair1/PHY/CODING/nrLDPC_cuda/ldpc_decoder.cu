@@ -1097,7 +1097,16 @@ extern "C" int ldpc_pool_init(uint32_t cap) {
     if (!ldpc_decoder_init(1)) /* global base-graph tables */
         return -1;
     int rc = 0;
-    POOL_CHECK(cudaStreamCreateWithFlags(&g_pool_ctx.stream, cudaStreamNonBlocking));
+    {
+        const char *disc = getenv("ISAC_CSIRS_DISC");
+        int least = 0, greatest = 0;
+        if (disc && disc[0] == '1' && disc[1] == '\0') {
+            POOL_CHECK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+            POOL_CHECK(cudaStreamCreateWithPriority(&g_pool_ctx.stream, cudaStreamNonBlocking, greatest));
+        } else {
+            POOL_CHECK(cudaStreamCreateWithFlags(&g_pool_ctx.stream, cudaStreamNonBlocking));
+        }
+    }
     /* The explicit host<->device copies of the pool are kept (not restructured by K34); making them
      * copy-free on GB10 needs a kernel indexing change (slots are not contiguous in a launch): follow-up. */
     POOL_CHECK(cudaHostAlloc(&g_pool_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));

@@ -68,6 +68,9 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->scanq_max_lag = sq.max_lag_slots;
   nr_pdsch_passive_queue_stats_t pq;
   nr_pdsch_passive_queue_get_stats(&pq);
+  m->pdsch_schedule_enabled = nr_csirs_disc_enabled();
+  m->pdsch_schedule = pq.schedule;
+  m->pdschq_drop_narrow = pq.dropped_narrow;
   m->pdschq_queued = pq.queued;
   m->pdschq_decoded = pq.decoded;
   m->pdschq_crc_ok = pq.crc_ok;

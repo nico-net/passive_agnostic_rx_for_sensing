@@ -1159,6 +1159,20 @@ static __thread bool t_eq_snap = false;
 static __thread c16_t *t_eq_snap_buf = NULL;
 static __thread size_t t_eq_snap_cap = 0, t_eq_snap_n = 0;
 uint32_t nr_pdsch_passive_last_llr(const int16_t **p) { *p = t_last_llr; return t_last_G; }
+static __thread c16_t **t_owned_iq;
+static __thread int t_owned_slot = -1;
+static __thread uint64_t t_fep_done_ns;
+void nr_pdsch_passive_set_owned_iq(c16_t **rx, int slot)
+{
+  t_owned_iq = rx;
+  t_owned_slot = rx ? slot : -1;
+}
+c16_t **nr_pdsch_passive_iq_for_slot(int slot, c16_t **live)
+{
+  return t_owned_iq && slot == t_owned_slot ? t_owned_iq : live;
+}
+uint64_t nr_pdsch_passive_last_fep_ns(void) { return t_fep_done_ns; }
+
 static __thread const int16_t *t_llr_ovr = NULL;
 static __thread uint32_t t_llr_ovr_n = 0;
 void nr_pdsch_passive_set_llr_override(const int16_t *llr, uint32_t n) { t_llr_ovr = n ? llr : NULL; t_llr_ovr_n = n; }
@@ -1794,6 +1808,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             nr_pdsch_passive_decode_result_t *out)
 {
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
+  t_fep_done_ns = 0;
   memset(out, 0, sizeof(*out));
   t_gw_used = t_gw_ready = false;
   t_last_hq_retx = false;
@@ -1993,9 +2008,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
         continue;
       if (fp->nb_antennas_rx > 1) {
         for (int ant = 0; ant < fp->nb_antennas_rx; ++ant)
-          nr_slot_fep_ant_snapshot(ue, fp, proc->nr_slot_rx, sym, ant, rxdataF, link_type_dl, 0, ue->common_vars.rxdata, fep_fo);
+          nr_slot_fep_ant_snapshot(ue, fp, proc->nr_slot_rx, sym, ant, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata), fep_fo);
       } else {
-        nr_slot_fep(ue, fp, proc->nr_slot_rx, sym, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, sym, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
       }
     }
     if (grant->check_sample_lifetime && !nr_passive_samples_valid(
@@ -2393,7 +2408,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                   .ant = ant,
                                                   .rxdataF_flat = &rxdataF[0][0],
                                                   .stride = fp->samples_per_slot_wCP,
-                                                  .rxdata = ue->common_vars.rxdata,
+                                                  .rxdata = nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata),
                                                   .ans = &fep_ans};
         task_t t = {.func = nr_slot_fep_ant_task, .args = &fep_tasks[ant]};
         pushTpool(&get_nrUE_params()->Tpool, t);
@@ -2403,7 +2418,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   } else {
     for (int g = 0; g < n_fep_rng; g++)
       for (int m = fep_rng[g][0]; m < fep_rng[g][0] + fep_rng[g][1]; m++)
-        nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
   }
   if (!fep_hit && !gpu_llr && !gw_ready && !gw_fep_hit) {
     t_fep_cache.slot = share_slot; t_fep_cache.fo = fep_fo; t_fep_cache.valid = t_share.on;
@@ -2416,6 +2431,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     gw_t_chest = t_;
   }
   pdtim_add(PDTIM_FEP, pdt_fep);
+  if (t_owned_iq && !gpu_llr) t_fep_done_ns = nr_td_gw_now_ns();
 
   if (grant->check_sample_lifetime && !nr_passive_samples_valid(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
