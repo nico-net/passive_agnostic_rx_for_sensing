@@ -2443,6 +2443,12 @@ uint32_t nr_passive_sib1_semantic_hash(const NR_SIB1_t *sib1, uint16_t pci)
       h = nr_cfg_semantic_bits(h, info->trackingAreaCode->buf,
                                info->trackingAreaCode->size * 8u - info->trackingAreaCode->bits_unused);
   }
+  /* NSA cells broadcast SIB1 without servingCellConfigCommon: hash its absence and stop here (PLMN/cell
+   * identity above still identify the configuration). Dereferencing it crashed the RRC thread with
+   * ISAC_RECONF=1 on PCI 415 (OTA 2026-10-07, SIGSEGV here ~30 s after start). */
+  H(scc != NULL);
+  if (!scc)
+    return h;
   const NR_DownlinkConfigCommonSIB_t *dl = &scc->downlinkConfigCommon;
   const NR_FrequencyInfoDL_SIB_t *fdl = &dl->frequencyInfoDL;
   H(fdl->offsetToPointA);
