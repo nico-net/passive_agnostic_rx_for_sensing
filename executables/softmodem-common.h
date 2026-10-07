@@ -276,6 +276,7 @@ typedef struct {
   //THREAD_STRUCT  thread_struct;
   char           *rf_config_file;
   char *threadPoolConfig;
+  bool threadPoolConfigExplicit; /* config/CLI supplied, not the floating default */
   int            phy_test;
   int            do_ra;
   int            passive_rx;

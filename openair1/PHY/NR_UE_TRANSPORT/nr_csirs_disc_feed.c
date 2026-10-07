@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 
 #define _GNU_SOURCE
+#include "common/utils/nr_core_plan.h"
 #include "nr_csirs_disc.h"
 
 #include <errno.h>
@@ -435,7 +436,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   const bool attr_ready = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED) == 0
                           && pthread_attr_setschedpolicy(&attr, SCHED_OTHER) == 0
                           && pthread_attr_setschedparam(&attr, &sched_param) == 0;
-  const int thread_result = attr_ready ? pthread_create(&g_worker.thread, &attr, disc_worker_main, NULL) : -1;
+  const int thread_result = attr_ready ? nr_core_plan_create(&g_worker.thread, &attr, disc_worker_main, NULL, nr_core_plan_cpu(NR_CP_CSIRS, 0, -1)) : -1;
   pthread_attr_destroy(&attr);
   if (thread_result != 0)
     goto fail;

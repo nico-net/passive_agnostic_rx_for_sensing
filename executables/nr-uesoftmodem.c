@@ -76,6 +76,7 @@ unsigned short config_frames[4] = {2,9,11,13};
 
 #include "nr_nas_msg.h"
 #include "actor.h"
+#include "common/utils/nr_core_plan.h"
 
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
@@ -149,11 +150,113 @@ uint64_t set_nrUE_optmask(uint64_t bitmask) {
 nrUE_params_t *get_nrUE_params(void) {
   return &nrUE_params;
 }
+/* Read configuration before creating any RT workers. The solver itself is independent of OAI. */
+static bool core_dl_count_explicit, core_ul_count_explicit;
+static int core_env_value(const char *name)
+{
+  const char *s = getenv(name);
+  if (!s) return -1;
+  char *end; errno = 0; long c = strtol(s, &end, 10);
+  if (errno || end == s || *end || c < 0 || c >= NR_CP_MAX_CPUS) return -2;
+  return c;
+}
+static bool core_feature(const char *name, bool def)
+{
+  const char *s = getenv(name); return s ? atoi(s) != 0 : def;
+}
+static int passive_core_plan(void)
+{
+  if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !core_feature("ISAC_CORE_PLAN", true)) return 0;
+  nr_core_machine_t machine;
+  nr_core_plan_t plan = {0};
+  char error[512] = "invalid or excessive explicit core setting";
+  const bool radio = !IS_SOFTMODEM_RFSIM && !getenv("ISAC_PASSIVE_REPLAY_INPUT");
+  if (nrue_get_ru_count() != 1) {
+    snprintf(error,sizeof(error),"automatic passive planning currently requires one RU"); goto fail;
+  }
+  const nrUE_RU_params_t *ru = nrue_get_ru(0);
+  if (nr_core_machine_read(&machine, radio ? ru->sdr_addrs : NULL, error, sizeof(error))) goto fail;
+  int physical = 0;
+  for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (machine.online[c] && machine.allowed[c] && !machine.dpdk[c]) {
+    bool duplicate = false;
+    for (int j = 0; j < c; j++) if (machine.online[j] && machine.allowed[j]
+        && machine.package[c] == machine.package[j] && machine.sibling[c] == machine.sibling[j]) duplicate = true;
+    if (!duplicate) physical++;
+  }
+  /* Passive actors do little work compared with the deferred decoders. Preserve explicit counts;
+   * scale the defaults so 4 DL + 2 UL actors do not consume the entire 12-core host. */
+  const int actor_default = physical / 12 > 0 ? physical / 12 : 1;
+  if (!core_dl_count_explicit) nrUE_params.num_dl_actors = actor_default < 4 ? actor_default : 4;
+  if (!core_ul_count_explicit) nrUE_params.num_ul_actors = actor_default < 2 ? actor_default : 2;
+  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+#define ADD(role, count, first) do { if (nr_core_plan_add(&plan, role, count, first)) goto fail; } while (0)
+  ADD(NR_CP_UE, 1, core_env_value("ISAC_UE_RT_CORE"));
+  if (radio && core_feature("ISAC_USRP_RING_MS", false)) ADD(NR_CP_RING, 1, core_env_value("ISAC_USRP_RING_CORE"));
+  if (radio) {
+    const char *s = getenv("ISAC_UHD_CTRL_CORES");
+    if (s) {
+      unsigned char mask[NR_CP_MAX_CPUS];
+      if (nr_core_parse_list(s, mask)) goto fail;
+      int count = 0;
+      for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (mask[c]) { ADD(NR_CP_UHD, 1, c); count++; }
+      if (!count) goto fail;
+    } else {
+      const char *count_env = getenv("ISAC_UHD_CTRL_THREADS");
+      int count = count_env ? atoi(count_env) : 1;
+      if (count < 1) goto fail;
+      ADD(NR_CP_UHD, count, -1);
+    }
+  }
+  ADD(NR_CP_DL, nrUE_params.num_dl_actors, nrUE_params.dl_actor_core_start);
+  ADD(NR_CP_UL, nrUE_params.num_ul_actors, nrUE_params.ul_actor_core_start);
+  ADD(NR_CP_SYNC, 1, nrUE_params.sync_actor_core);
+  ADD(NR_CP_SCAN, cfg->scan_thread < 4 ? cfg->scan_thread : 4, cfg->scan_thread_core);
+  if (core_feature("ISAC_PDCCH_USS_TRACKER", true)) ADD(NR_CP_USS, 1, core_env_value("ISAC_PDCCH_USS_CORE"));
+  ADD(NR_CP_PDSCH, cfg->pdsch_thread < 6 ? cfg->pdsch_thread : 6, cfg->pdsch_thread_core);
+  ADD(NR_CP_PUSCH, cfg->ul_thread < 6 ? cfg->ul_thread : 6, cfg->ul_thread_core);
+  if (get_softmodem_params()->threadPoolConfigExplicit) {
+    char *text = strdup(get_softmodem_params()->threadPoolConfig), *save = NULL;
+    if (!text) goto fail;
+    bool valid = true;
+    int worker_count = 0;
+    for (char *s = strtok_r(text, ",", &save); s; s = strtok_r(NULL, ",", &save)) {
+      if (!strcmp(s,"n") || !strcmp(s,"N")) continue;
+      char *end; errno = 0; long c = strtol(s,&end,10);
+      if (++worker_count > 64 || errno || *end || end == s || c < -1 || c >= NR_CP_MAX_CPUS || nr_core_plan_add(&plan,NR_CP_POOL,1,c)) { valid = false; break; }
+    }
+    free(text); if (!valid) goto fail;
+  } else {
+    int workers = ru->nb_rx > 2 ? ru->nb_rx : 2;
+    ADD(NR_CP_POOL, workers < 8 ? workers : 8, -1);
+  }
+  if (core_feature("NR_GPU_FEP", false)) ADD(NR_CP_GPU, 1, core_env_value("ISAC_GPU_WORKER_CORE"));
+  if (core_feature("ISAC_CSIRS_DISC", false)) ADD(NR_CP_CSIRS, 1, core_env_value("ISAC_CSIRS_DISC_CORE"));
+  if (core_feature("ISAC_PDCCH_NID_GPU", false)) ADD(NR_CP_NID, 1, core_env_value("ISAC_PDCCH_NID_GPU_CORE"));
+  ADD(NR_CP_STATS, 1, -1);
+#undef ADD
+  if (nr_core_plan_build(&machine, &plan, error, sizeof(error))) goto fail;
+  /* Replace only the default pool specification. Explicit -1 entries retain their count and are
+   * filled from the plan too; explicit numbered entries are preserved by the solver. */
+  static char pool[NR_CP_MAX_ROLES * 6];
+  size_t pos = 0;
+  for (int i = 0; i < plan.count; i++) if (plan.a[i].role == NR_CP_POOL)
+    pos += snprintf(pool + pos, sizeof(pool) - pos, "%s%d", pos ? "," : "", plan.a[i].core);
+  if (!pos) strcpy(pool,"n");
+  get_softmodem_params()->threadPoolConfig = pool;
+  if (nr_core_plan_activate(&machine, &plan)) { snprintf(error,sizeof(error),"cannot apply plan: %s",strerror(errno)); goto fail; }
+  return 0;
+fail:
+  fprintf(stderr,"SENSING: CORE_PLAN error: %s; radio startup cancelled (ISAC_CORE_PLAN=0 restores legacy behavior)\n",error);
+  return -1;
+}
+
 static void get_options(configmodule_interface_t *cfg)
 {
   paramdef_t cmdline_params[] = CMDLINE_NRUEPARAMS_DESC;
   int numparams = sizeofArray(cmdline_params);
   config_get(cfg, cmdline_params, numparams, NULL);
+  core_dl_count_explicit = config_isparamset(cmdline_params, config_paramidx_fromname(cmdline_params, numparams, "num-dl-actors"));
+  core_ul_count_explicit = config_isparamset(cmdline_params, config_paramidx_fromname(cmdline_params, numparams, "num-ul-actors"));
   AssertFatal(nrUE_params.extra_pdu_id == -1,
               "Add additional PDU sessions in uicc.pdu_sessions array instead\n");
 }
@@ -228,8 +331,7 @@ static void trigger_deregistration(int sig)
 void *nrue_ru_start_thread(void *arg)
 {
   (void)arg;
-  nrue_ru_start();
-  return NULL;
+  return (void *)(intptr_t)nrue_ru_start();
 }
 
 int NB_UE_INST = 1;
@@ -267,6 +369,9 @@ int main(int argc, char **argv)
   nr_csirs_monitor_init();
   // Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.
   nr_pdcch_blind_monitor_init();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && core_feature("ISAC_CORE_PLAN", true))
+    nrue_set_ru_params(uniqCfg);
+  if (passive_core_plan()) return EXIT_FAILURE;
   if (nr_cfg_reconf_enabled()) {
     const char *uectx_path = getenv("ISAC_UECTX_PATH");
     if (uectx_path && *uectx_path) {
@@ -342,7 +447,7 @@ int main(int argc, char **argv)
   nr_pdcp_layer_init();
   nas_init_nrue(NB_UE_INST);
 
-  nrue_set_ru_params(uniqCfg);
+  if (!nr_core_plan_active()) nrue_set_ru_params(uniqCfg);
   nrue_set_cell_params(uniqCfg);
 
   init_NR_UE(NB_UE_INST,
@@ -439,19 +544,19 @@ int main(int argc, char **argv)
       mac->dl_frequency = cell.rf_frequency;
 
       UE_CC->sl_mode = get_softmodem_params()->sl_mode;
-      init_actor(&UE_CC->sync_actor, "SYNC_", get_nrUE_params()->sync_actor_core);
+      init_actor(&UE_CC->sync_actor, "SYNC_", nr_core_plan_cpu(NR_CP_SYNC, 0, get_nrUE_params()->sync_actor_core));
       if (get_nrUE_params()->num_dl_actors > 0) {
         UE_CC->dl_actors = calloc_or_fail(get_nrUE_params()->num_dl_actors, sizeof(*UE_CC->dl_actors));
         for (int i = 0; i < get_nrUE_params()->num_dl_actors; i++) {
           const int first_core = get_nrUE_params()->dl_actor_core_start;
-          init_actor(&UE_CC->dl_actors[i], "DL_", first_core < 0 ? -1 : first_core + i);
+          init_actor(&UE_CC->dl_actors[i], "DL_", nr_core_plan_cpu(NR_CP_DL, i, first_core < 0 ? -1 : first_core + i));
         }
       }
       if (get_nrUE_params()->num_ul_actors > 0) {
         UE_CC->ul_actors = calloc_or_fail(get_nrUE_params()->num_ul_actors, sizeof(*UE_CC->ul_actors));
         for (int i = 0; i < get_nrUE_params()->num_ul_actors; i++) {
           const int first_core = get_nrUE_params()->ul_actor_core_start;
-          init_actor(&UE_CC->ul_actors[i], "UL_", first_core < 0 ? -1 : first_core + i);
+          init_actor(&UE_CC->ul_actors[i], "UL_", nr_core_plan_cpu(NR_CP_UL, i, first_core < 0 ? -1 : first_core + i));
         }
       }
       init_nr_ue_vars(UE_CC, inst);
@@ -518,9 +623,15 @@ int main(int argc, char **argv)
 
   // Launch a temporary high-priority thread to start the UE RU, ensuring radio library threads inherit this priority
   pthread_t ru_start_thread;
-  threadCreate(&ru_start_thread, nrue_ru_start_thread, NULL, "ru_start_thread", -1, OAI_PRIORITY_RT_MAX);
-  int ret = pthread_join(ru_start_thread, NULL);
+  threadCreate(&ru_start_thread, nrue_ru_start_thread, NULL, "ru_start_thread", nr_core_plan_cpu(NR_CP_UHD, 0, -1), OAI_PRIORITY_RT_MAX);
+  void *ru_start_result = NULL;
+  int ret = pthread_join(ru_start_thread, &ru_start_result);
   AssertFatal(ret == 0, "pthread_join error %d, errno %d (%s)\n", ret, errno, strerror(errno));
+
+  if (ru_start_result) {
+    LOG_E(HW, "SENSING: radio startup failed; receiver exiting without starting RX workers\n");
+    return EXIT_FAILURE;
+  }
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
   nr_isac_start();

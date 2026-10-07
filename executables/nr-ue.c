@@ -15,6 +15,7 @@
 
 #include "PHY/defs_nr_common.h"
 #define _GNU_SOURCE // For pthread_setname_np
+#include "common/utils/nr_core_plan.h"
 #include <pthread.h>
 #include "executables/nr-ue-ru.h"
 #include "executables/nr-uesoftmodem.h"
@@ -2328,6 +2329,6 @@ void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
   threadCreate(&UE->main_thread, UE_thread, (void *)UE, thread_name, rt_core, OAI_PRIORITY_RT_MAX);
   if (!IS_SOFTMODEM_NOSTATS) {
     sprintf(thread_name, "L1_UE_stats_%d", UE->Mod_id);
-    threadCreate(&UE->stat_thread, nrL1_UE_stats_thread, UE, thread_name, -1, OAI_PRIORITY_RT_LOW);
+    threadCreate(&UE->stat_thread, nrL1_UE_stats_thread, UE, thread_name, nr_core_plan_cpu(NR_CP_STATS, 0, -1), OAI_PRIORITY_RT_LOW);
   }
 }

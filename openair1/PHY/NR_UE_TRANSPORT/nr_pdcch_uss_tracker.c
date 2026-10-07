@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "common/utils/nr_core_plan.h"
 #include "nr_pdcch_uss_tracker.h"
 
 #include <errno.h>
@@ -298,7 +299,7 @@ static void tracker_init(void)
           ++g_count[N][mi];
         }
       }
-  if (g_enabled && pthread_create(&g_thread, NULL, tracker_worker, NULL) == 0) {
+  if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, NULL, nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
     pthread_detach(g_thread);
     LOG_A(PHY, "SENSING: USS_TRACK enabled: bounded producer, asynchronous 65535-RNTI hash scorer\n");
   } else {

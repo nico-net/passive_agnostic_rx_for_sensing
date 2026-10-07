@@ -32,6 +32,7 @@
 #include "common_lib.h"
 #include "assertions.h"
 #include "system.h"
+#include "common/utils/nr_core_plan.h"
 
 #include "common/utils/LOG/vcd_signal_dumper.h"
 
@@ -688,6 +689,8 @@ typedef struct {
   long long ring_t0_ticks = 0;                  // first hardware timestamp (sample-rate ticks)
   uhd::rx_metadata_t ring_err_md;
   std::thread ring_thread;
+  pthread_t planned_ring_thread;
+  bool planned_ring_started = false;
   std::mutex ring_mu;
   std::condition_variable ring_cv;
   std::atomic<bool> rx_stop_requested{false};
@@ -904,14 +907,18 @@ static void trx_usrp_start_generic_gpio(usrp_state_t *s)
  * dpdk-worker19 also runs at FIFO 97; equal FIFO priorities never preempt each other. About half the
  * starts then never recycled a single RX mbuf (pool exhausted at exactly pool/4 packets per channel)
  * while benchmark_rate, not created from an RT thread, never failed. */
-static void usrp_repin_uhd_threads(const char *when)
+static bool usrp_repin_uhd_threads(const char *when)
 {
   const char *e = getenv("ISAC_UHD_CTRL_CORES");
   if (!e || !*e)
-    return;
+    return true;
   cpu_set_t set;
   CPU_ZERO(&set);
-  for (const char *q = e; *q;) {
+  if (nr_core_plan_active()) {
+    unsigned char mask[NR_CP_MAX_CPUS];
+    if (nr_core_parse_list(e, mask)) return false;
+    for (int c = 0; c < CPU_SETSIZE; c++) if (mask[c]) CPU_SET(c, &set);
+  } else for (const char *q = e; *q;) {
     char *end = NULL;
     const long c = strtol(q, &end, 10);
     if (end == q)
@@ -922,7 +929,9 @@ static void usrp_repin_uhd_threads(const char *when)
   }
   DIR *d = opendir("/proc/self/task");
   if (!d)
-    return;
+    return !nr_core_plan_active();
+  bool ok = true;
+  int next_core = 0;
   int moved = 0;
   struct dirent *de;
   while ((de = readdir(d)) != NULL) {
@@ -933,13 +942,28 @@ static void usrp_repin_uhd_threads(const char *when)
     FILE *f = fopen(path, "r");
     if (!f)
       continue;
-    if (fgets(comm, sizeof(comm), f) && strncmp(comm, "uhd_ctrl", 8) == 0
-        && sched_setaffinity((pid_t)atoi(de->d_name), sizeof(set), &set) == 0)
-      moved++;
+    if (fgets(comm, sizeof(comm), f) && strncmp(comm, "uhd_ctrl", 8) == 0) {
+      cpu_set_t target = set;
+      if (nr_core_plan_active()) {
+        while (next_core < CPU_SETSIZE && !CPU_ISSET(next_core, &set)) next_core++;
+        if (next_core == CPU_SETSIZE) {
+          LOG_E(HW, "SENSING: CORE_PLAN more UHD busy-pollers than reserved CPUs; stream cancelled. "
+                    "Set ISAC_UHD_CTRL_THREADS to the number of control endpoints\n");
+          ok = false;
+          fclose(f);
+          continue;
+        }
+        CPU_ZERO(&target);
+        CPU_SET(next_core++, &target);
+      }
+      if (sched_setaffinity((pid_t)atoi(de->d_name), sizeof(target), &target) == 0) moved++;
+      else if (nr_core_plan_active()) ok = false;
+    }
     fclose(f);
   }
   closedir(d);
   LOG_I(HW, "SENSING: UHD_CTRL_REPIN %s: %d uhd_ctrl thread(s) moved to cores %s\n", when, moved, e);
+  return ok;
 }
 
 static int usrp_ring_ms(void)
@@ -957,7 +981,7 @@ static int usrp_ring_ms(void)
 static void usrp_ring_producer(usrp_state_t *s)
 {
   const char *core = getenv("ISAC_USRP_RING_CORE");
-  if (core && atoi(core) >= 0) {
+  if (core && atoi(core) >= 0 && atoi(core) < CPU_SETSIZE) {
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(atoi(core), &set);
@@ -1081,17 +1105,26 @@ static void usrp_ring_start(usrp_state_t *s)
   s->ring_read.store(0);
   s->ring_err.store(0);
   s->ring_stop.store(false);
-  s->ring_thread = std::thread(usrp_ring_producer, s);
+  if (nr_core_plan_active()) {
+    char name[] = "usrpRing";
+    threadCreate(&s->planned_ring_thread, [](void *arg) -> void * {
+      usrp_ring_producer(static_cast<usrp_state_t *>(arg)); return nullptr;
+    }, s, name, nr_core_plan_cpu(NR_CP_RING, 0, -1), 95);
+    s->planned_ring_started = true;
+  } else s->ring_thread = std::thread(usrp_ring_producer, s);
   LOG_I(HW, "SENSING: USRP_RING on: %zu ch x %zu samples (%d ms)\n", nch, cap, usrp_ring_ms());
 }
 
 static void usrp_ring_join(usrp_state_t *s)
 {
-  if (!s->ring_thread.joinable())
+  if (!s->ring_thread.joinable() && !s->planned_ring_started)
     return;
   s->ring_stop.store(true);
   s->ring_cv.notify_all();
-  s->ring_thread.join();
+  if (s->planned_ring_started) {
+    pthread_join(s->planned_ring_thread, nullptr);
+    s->planned_ring_started = false;
+  } else s->ring_thread.join();
 }
 
 static void trx_usrp_finish_rx(usrp_state_t *s);
@@ -1165,13 +1198,14 @@ static int trx_usrp_start_impl(openair0_device_t *device)
 
   LOG_I(HW,"current pps at %f, starting streaming at %f\n",current_pps.get_real_secs(),current_pps.get_real_secs()+1.0);
 
+  if (nr_core_plan_active() && !usrp_repin_uhd_threads("before stream start")) return -1;
   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
   cmd.time_spec = uhd::time_spec_t(current_pps+1.0);
   cmd.stream_now = false; // start at constant delay
   s->rx_stream->issue_stream_cmd(cmd);
   s->rx_started = true;
   LOG_I(HW, "USRP_RX_START scheduled=%.9f\n", cmd.time_spec.get_real_secs());
-  usrp_repin_uhd_threads("at stream start");
+  if (!nr_core_plan_active()) usrp_repin_uhd_threads("at stream start");
   usrp_ring_start(s);
 
   return 0;
@@ -1706,7 +1740,7 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     s->rx_stop_requested.store(true);
     return -1; // never publish a partial/invalid buffer or a fabricated timestamp
   };
-  if (s->ring_thread.joinable()) {
+  if (s->ring_thread.joinable() || s->planned_ring_started) {
     /* Decoupled ring (usrp_ring_producer): wait for recv_target samples, copy them out. The
      * timestamp is the first hardware timestamp plus the sample index (contiguity is guaranteed by
      * the producer, which stops on any UHD error or ring overrun). */
@@ -2503,7 +2537,7 @@ extern "C" {
     }
 
     s->usrp = uhd::usrp::multi_usrp::make(args);
-    usrp_repin_uhd_threads("after make");
+    if (!usrp_repin_uhd_threads("after make")) return -1;
 
   if (device->type==USRP_X300_DEV) {
     openair0_cfg[0].rx_gain_calib_table = calib_table_x310;
@@ -2723,6 +2757,11 @@ extern "C" {
         if (i == 0) { // ratio is a device-wide property (shared ADC clock), not per-channel
           s->decim_ratio = (ratio == 4) ? 4 : 1;
           if (s->decim_ratio > 1) {
+            if (nr_core_plan_active()) {
+              LOG_E(HW, "SENSING: CORE_PLAN cannot safely start the legacy software-decimation spin pool; "
+                        "use a hardware-DDC FPGA image (ISAC_CORE_PLAN=0 restores legacy scheduling)\n");
+              return -1;
+            }
             LOG_W(HW,
                   "USRP granted RX rate %.0f Hz != requested %.0f Hz -- enabling %dx software RX "
                   "decimation (no DDC block in this FPGA image)\n",

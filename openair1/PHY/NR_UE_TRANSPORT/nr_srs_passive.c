@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include "common/utils/nr_core_plan.h"
 #include "nr_srs_passive.h"
 #include "nr_srs_fep.h"
 #include "nr_sense_ul.h"
@@ -266,7 +267,7 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   LOG_W(PHY,"SENSING: blind SRS sequence hopping v=1 is unsupported\n");
   sr.samples_per_second=1000.0*fp->samples_per_subframe;
   sr.cfr_max_re=max_re;sr.export_ant=antennas==1?1:sr.grid.n_ant;
-  if(!ok || pthread_create(&sr.thread,NULL,srs_worker,NULL)) {
+  if(!ok || nr_core_plan_create(&sr.thread,NULL,srs_worker,NULL, -1)) {
     nr_srs_blind_destroy(sr.search);sr.search=NULL;free(sr.freq);free(sr.cfr);free(sr.k);free(sr.l);
     for(int i=0;i<SRS_DEPTH;i++) {free(sr.jobs[i].raw);sr.jobs[i].raw=NULL;}
     return;

@@ -22,6 +22,7 @@
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c
  * \brief Implementation for nr_pdcch_coreset_map.h -- see that header for the design rationale.
  */
+#include "common/utils/nr_core_plan.h"
 #include "nr_pdcch_nid_gpu.h"
 #include <math.h>
 #include <stdbool.h>
@@ -460,7 +461,7 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
       return;
     }
     pthread_t th;
-    pthread_create(&th, NULL, idsw_worker, NULL);
+    nr_core_plan_create(&th, NULL, idsw_worker, NULL, -1);
     pthread_detach(th);
     printf("IDSWEEP capture started: Point A at grid subcarrier %d (SIB1), CORESET#0 grid RB %d +%d (MIB), %d batches of %d snapshots x %d symbol(s)\n",
            snap.carrier.point_a_subcarrier, g_css0_first_rb, g_css0_nrb, g_idsw.max_batches, IDSW_NSNAP, dur);

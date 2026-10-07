@@ -1144,7 +1144,7 @@ add_library(nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_api.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c)
 target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE $<$<BOOL:${ENABLE_ISAC_SENSING}>:NR_SRS_EXPORT_ON>)
 target_include_directories(nr_sense_api PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-target_link_libraries(nr_sense_api PUBLIC pthread nr_passive_cfg_epoch PRIVATE LOG ${T_LIB})
+target_link_libraries(nr_sense_api PUBLIC pthread nr_passive_cfg_epoch PRIVATE utils LOG ${T_LIB})
 target_link_libraries(PHY_NR_PASSIVE_UL PRIVATE nr_sense_api)
 find_library(ZMQ_LIB zmq)
 if(ZMQ_LIB)
@@ -2590,7 +2590,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_passive_obs ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc
                                      ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c)
   target_include_directories(test_nr_passive_obs PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_passive_obs PRIVATE GTest::gtest GTest::gtest_main pthread m)
+  target_link_libraries(test_nr_passive_obs PRIVATE utils GTest::gtest GTest::gtest_main pthread m)
   add_dependencies(tests test_nr_passive_obs)
   add_test(NAME test_nr_passive_obs COMMAND ./test_nr_passive_obs)
 
@@ -2655,7 +2655,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_passive_ue_ctx ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
   target_include_directories(test_nr_passive_ue_ctx PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_passive_ue_ctx PRIVATE GTest::gtest GTest::gtest_main pthread m)
+  target_link_libraries(test_nr_passive_ue_ctx PRIVATE utils GTest::gtest GTest::gtest_main pthread m)
   add_dependencies(tests test_nr_passive_ue_ctx)
   add_test(NAME test_nr_passive_ue_ctx COMMAND ./test_nr_passive_ue_ctx)
 
@@ -3006,7 +3006,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_csirs_disc_feed ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_feed_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c)
   target_include_directories(test_nr_csirs_disc_feed PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_csirs_disc_feed PRIVATE GTest::gtest GTest::gtest_main pthread)
+  target_link_libraries(test_nr_csirs_disc_feed PRIVATE utils GTest::gtest GTest::gtest_main pthread)
   add_dependencies(tests test_nr_csirs_disc_feed)
   add_test(NAME test_nr_csirs_disc_feed COMMAND ./test_nr_csirs_disc_feed)
 
