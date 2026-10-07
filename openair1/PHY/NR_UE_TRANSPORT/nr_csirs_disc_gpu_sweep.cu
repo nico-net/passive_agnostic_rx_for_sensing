@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_sweep_internal.h"
 #include <cuda_runtime.h>
-#include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -40,17 +39,16 @@ __device__ float warp_sum(float x)
 /* One CTA per (hypothesis, ID, delta, lattice slot). Each warp scores one
  * port/antenna at a time; its lanes score independent coherent blocks. */
 __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int *slot,
-                      int ants, int spf, nr_csirs_disc_sweep_cfg_t cfg, float *scores, int base=0, int slot_base=0)
+                      int ants, int spf, nr_csirs_disc_sweep_cfg_t cfg, float *scores)
 {
   __shared__ uint32_t gold[14][words_max];
   __shared__ float sums[4];
-  int candidate = base+blockIdx.x;
-  int snapshot = slot_base+blockIdx.y;
+  int candidate = blockIdx.x;
   int id = cfg.id_first + candidate / cfg.delta_max;
   int delta = candidate % cfg.delta_max;
   int l = threadIdx.x;
   if (l < 14 && (map.sym_mask & (1u << l))) {
-    uint64_t t = 14 * ((slot[snapshot] + delta) % spf) + l + 1;
+    uint64_t t = 14 * ((slot[blockIdx.y] + delta) % spf) + l + 1;
     uint32_t init = ((t * (2 * id + 1) << 10) + id) & 0x7fffffff;
     Gold g;
     g.reset(init);
@@ -66,7 +64,7 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     // This form also supports block_re greater than n without integer overflow.
     int nb = n ? 1 + (n - 1) / cfg.block_re : 0;
     float rho = 0, active = 0;
-    const short2 *samples = rx + ((size_t)snapshot * ants + ant) * map.n_re;
+    const short2 *samples = rx + ((size_t)blockIdx.y * ants + ant) * map.n_re;
     for (int b = lane; b < nb; b += 32) {
       int first = b * cfg.block_re, count = min(cfg.block_re, n - first);
       float ar = 0, ai = 0, energy = 0;
@@ -98,7 +96,7 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
     sums[warp] = total;
   __syncthreads();
   if (threadIdx.x == 0)
-    scores[(size_t)snapshot * (cfg.id_count*cfg.delta_max) + candidate] = (sums[0]+sums[1]+sums[2]+sums[3]) / (map.ports*ants);
+    scores[(size_t)blockIdx.y * gridDim.x + candidate] = (sums[0]+sums[1]+sums[2]+sums[3]) / (map.ports*ants);
 }
 
 /* Average occasions before computing the candidate distribution. */
@@ -187,7 +185,6 @@ template<typename T> struct Device {
   }
 };
 struct Workspace {
-  NrGpuDiscoverySlice slice;
   cudaStream_t stream=nullptr;
   cudaEvent_t done=nullptr;
   Device<nr_csirs_disc_re_t> dm;
@@ -197,19 +194,16 @@ struct Workspace {
   Device<nr_csirs_disc_win_t> dw;
   Device<nr_csirs_disc_slot_meta_t> meta;
   Device<nr_csirs_disc_hyp_t> refined;
-  Device<double> energy,refine_accum;
+  Device<double> energy;
   std::vector<nr_csirs_disc_re_t> mapping;
   std::vector<int> slots,indices;
   std::vector<float> mean;
   int rb=0,ant=0,capacity=0;
 } workspace;
-#define SWEEP_KERNEL(...) do { if(workspace.slice.run(workspace.stream,[&]() { \
- __VA_ARGS__;return cudaGetLastError();})!=cudaSuccess)return -1; } while(0)
 static std::mutex workspace_mutex;
 static int prepare(int rb,int ant,int capacity)
 {
   auto &w=workspace;
-  if(!w.slice.init())return -1;
   if(w.rb>=rb && w.ant>=ant && w.capacity>=capacity) return 0;
   if(!w.stream && cudaStreamCreateWithFlags(&w.stream,cudaStreamNonBlocking)!=cudaSuccess) return -1;
   if(!w.done && cudaEventCreateWithFlags(&w.done,cudaEventBlockingSync|cudaEventDisableTiming)!=cudaSuccess) return -1;
@@ -219,7 +213,7 @@ static int prepare(int rb,int ant,int capacity)
   if(!w.dm.alloc(maps) || !w.dx.alloc(packed) || !w.grid.alloc((size_t)capacity*ant*14*12*rb)
      || !w.ds.alloc(capacity) || !w.di.alloc(capacity) || !w.dz.alloc((size_t)1024*160*capacity)
      || !w.dmean.alloc(1024*160) || !w.dw.alloc(1) || !w.meta.alloc(capacity)
-     || !w.energy.alloc(5) || !w.refine_accum.alloc(2*NR_CSIRS_DISC_MAX_RB) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
+     || !w.energy.alloc(5) || !w.refined.alloc(1) || !w.result.alloc(1)) return -1;
   w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);
   w.rb=rb;w.ant=ant;w.capacity=capacity;return 0;
 }
@@ -228,24 +222,13 @@ static cudaError_t complete() {
   return rc==cudaSuccess?cudaEventSynchronize(workspace.done):rc;
 }
 static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
-  const size_t chunk=nr_gpu_budget_enabled()?1024*1024:n;
-  for(size_t at=0;at<n;at+=chunk) {
-    cudaError_t rc=workspace.slice.run(workspace.stream,[&]() {
-      return cudaMemcpyAsync((char *)dst+at,(const char *)src+at,std::min(chunk,n-at),kind,workspace.stream);
-    });
-    if(rc!=cudaSuccess)return rc;
-  }
-  return complete();
+  cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,workspace.stream);
+  return rc==cudaSuccess?complete():rc;
 }
-
-static cudaError_t submit_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
-  return nr_gpu_budget_enabled()?copy(dst,src,n,kind):cudaMemcpyAsync(dst,src,n,kind,workspace.stream);
-}
-
 __global__ void gather(const short2 *grid,size_t stride,const nr_csirs_disc_re_t *map,int nr,
-                      const int *indices,int slots,int ants,int rb,short2 *packed,size_t base=0)
+                      const int *indices,int slots,int ants,int rb,short2 *packed)
 {
-  size_t id=base+(size_t)blockIdx.x*blockDim.x+threadIdx.x;
+  size_t id=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
   if(id>=(size_t)slots*ants*nr) return;
   int i=id%nr,a=id/nr%ants,t=id/(nr*ants);
   packed[id]=grid[(size_t)indices[t]*stride+(size_t)a*14*12*rb+map[i].grid_index];
@@ -292,43 +275,31 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
       nr_csirs_disc_sweep_winner(mean.data(), &c, h, slots.size(), out + h);
       continue;
     }
-    if(submit_copy(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice)!=cudaSuccess
-       || submit_copy(ds.p,slots.data(),slots.size()*sizeof(int),cudaMemcpyHostToDevice)!=cudaSuccess
-       || submit_copy(w.di.p,indices.data(),indices.size()*sizeof(int),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
+    if(cudaMemcpyAsync(dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+       || cudaMemcpyAsync(ds.p,slots.data(),slots.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess
+       || cudaMemcpyAsync(w.di.p,indices.data(),indices.size()*sizeof(int),cudaMemcpyHostToDevice,stream)!=cudaSuccess) return -1;
     size_t packed=(size_t)slots.size()*r->n_ant*map.n_re;
-    size_t gather_chunk=nr_gpu_budget_enabled()?65536:packed;
-    for(size_t base=0;base<packed;base+=gather_chunk)
-      SWEEP_KERNEL(gather<<<(std::min(gather_chunk,packed-base)+255)/256,256,0,stream>>>(
-        grid,r->slot_stride/2,dm.p,map.n_re,w.di.p,slots.size(),r->n_ant,r->n_rb,dx.p,base));
+    gather<<<(packed+255)/256,256,0,stream>>>(grid,r->slot_stride/2,dm.p,map.n_re,w.di.p,slots.size(),r->n_ant,r->n_rb,dx.p);
     auto device_map = map;
     device_map.re = dm.p;
-    const int candidates=nr_gpu_budget_enabled()?32:nc;
-    const int batch_slots=nr_gpu_budget_enabled()?1:(int)slots.size();
-    for(int t=0;t<(int)slots.size();t+=batch_slots)
-      for(int base=0;base<nc;base+=candidates) {
-        SWEEP_KERNEL(sweep<<<dim3(std::min(candidates,nc-base),std::min(batch_slots,(int)slots.size()-t)),128,0,stream>>>(
-          device_map,dx.p,ds.p,r->n_ant,r->slots_per_frame,c,dz.p,base,t));
-      }
+    sweep<<<dim3(nc, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p);
     if (cudaGetLastError() != cudaSuccess) return -1;
-    SWEEP_KERNEL(average_scores<<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p));
+    average_scores<<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p);
     if (cudaGetLastError() != cudaSuccess) return -1;
-    SWEEP_KERNEL(reduce_scores<<<1, 256, 0, stream>>>(dmean.p, c, h, slots.size(), dw.p));
+    reduce_scores<<<1, 256, 0, stream>>>(dmean.p, c, h, slots.size(), dw.p);
     if (cudaGetLastError() != cudaSuccess
-        || submit_copy(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost) != cudaSuccess
+        || cudaMemcpyAsync(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost, stream) != cudaSuccess
         || complete() != cudaSuccess)
       return -1;
   }
   return nh;
 }
 __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
-                         const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map,
-                         double *accum,int first,int end)
+                         const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
 {
-  double local[NR_CSIRS_DISC_MAX_RB]={0};
-  double *evidence=accum?accum:local;
-  if(accum && !first)for(int rb=0;rb<NR_CSIRS_DISC_MAX_RB;++rb)evidence[rb]=0;
+  double evidence[NR_CSIRS_DISC_MAX_RB]={0};
   uint32_t gold[14][64];
-  for(int s=first;s<end;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
+  for(int s=0;s<r->capacity;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
     for(int l=0;l<14;++l) if(map.sym_mask&(1u<<l)) {
       uint64_t t=14*((r->meta[s].slot+win->slot_delta)%r->slots_per_frame)+l+1;
       uint32_t init=((t*(2*win->scramb_id+1)<<10)+win->scramb_id)&0x7fffffff;
@@ -361,10 +332,9 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
       }
     }
   }
-  if(end<r->capacity)return 0;
-  int step=h->density<2?2:1,first_rb=h->density<2?h->density:0;
-  double run=0,best=0;int start=first_rb,bs=0,be=-1;
-  for(int rb=first_rb;rb<r->n_rb;rb+=step) {
+  int step=h->density<2?2:1,first=h->density<2?h->density:0;
+  double run=0,best=0;int start=first,bs=0,be=-1;
+  for(int rb=first;rb<r->n_rb;rb+=step) {
     if(run<=0) {run=evidence[rb];start=rb;} else run+=evidence[rb];
     if(run>best && rb>=h->rb_start && start<h->rb_start+h->n_rb) {best=run;bs=start;be=rb;}
   }
@@ -377,16 +347,13 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
  * the QPSK null cross terms per RB and locate the connected support around that
  * seed. No configured bandwidth, PCI or symbol is an input to this refinement. */
 __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
-                           const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map,
-                           double *accum,int first,int end)
+                           const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
 {
-  if (h->row != 1) return refine_extent(r,h,win,map,accum,first,end);
-  double local[2*NR_CSIRS_DISC_MAX_RB]={0};
-  double *signal=accum?accum:local,*weight=signal+NR_CSIRS_DISC_MAX_RB;
-  if(accum && !first)for(int rb=0;rb<2*NR_CSIRS_DISC_MAX_RB;++rb)accum[rb]=0;
+  if (h->row != 1) return refine_extent(r,h,win,map);
+  double signal[NR_CSIRS_DISC_MAX_RB]={0}, weight[NR_CSIRS_DISC_MAX_RB]={0};
   uint32_t gold[64];
   int slots=0;
-  for(int s=first;s<end;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
+  for(int s=0;s<r->capacity;++s) if(r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset) {
     ++slots;
     uint64_t t=14*((r->meta[s].slot+win->slot_delta)%r->slots_per_frame)+h->symb_l0+1;
     uint32_t init=((t*(2*win->scramb_id+1)<<10)+win->scramb_id)&0x7fffffff;
@@ -407,9 +374,6 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
       weight[rb]+=energy;
     }
   }
-  if(end<r->capacity)return 0;
-  slots=0;for(int s=0;s<r->capacity;++s)
-    slots+=r->meta[s].valid && r->meta[s].abs_slot%h->period==h->offset;
   /* TS 38.214 5.2.2.3.1: configured startingRB/nrofRBs are multiples
    * of four. Maximize measured support over that legal grid; no width prior.
    * A capture boundary may clip the final group. */
@@ -426,10 +390,9 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
 }
 
 __global__ void refine_kernel(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr_csirs_disc_win_t win,
-                             nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result,
-                             double *accum=nullptr,int first=0,int count=100000)
+                             nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result)
 {
-  *result=nr_csirs_disc_refine_cpu(&ring,&h,&win,map,accum,first,min(first+count,ring.capacity));*out=h;
+  *result=nr_csirs_disc_refine_cpu(&ring,&h,&win,map);*out=h;
 }
 
 __device__ double energy_score(const short2 *rx,int rb_count,int symbol,nr_csirs_disc_sweep_map_t map,
@@ -492,16 +455,16 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
        || copy(w.di.p,&zero,sizeof(zero),cudaMemcpyHostToDevice)!=cudaSuccess
        || copy(w.ds.p,&zero,sizeof(zero),cudaMemcpyHostToDevice)!=cudaSuccess
        || cudaMemsetAsync(w.grid.p,0,(size_t)ant*14*12*rb*sizeof(short2),w.stream)!=cudaSuccess) return -1;
-    SWEEP_KERNEL(gather<<<1,32,0,w.stream>>>(w.grid.p,(size_t)ant*14*12*rb,w.dm.p,1,w.di.p,1,ant,rb,w.dx.p));
+    gather<<<1,32,0,w.stream>>>(w.grid.p,(size_t)ant*14*12*rb,w.dm.p,1,w.di.p,1,ant,rb,w.dx.p);
     nr_csirs_disc_sweep_cfg_t cfg={0,1,1,32,1};
-    SWEEP_KERNEL(sweep<<<dim3(1,1),128,0,w.stream>>>(map,w.dx.p,w.ds.p,ant,20,cfg,w.dz.p));
-    SWEEP_KERNEL(average_scores<<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p));
-    SWEEP_KERNEL(reduce_scores<<<1,256,0,w.stream>>>(w.dmean.p,cfg,0,1,w.dw.p));
+    sweep<<<dim3(1,1),128,0,w.stream>>>(map,w.dx.p,w.ds.p,ant,20,cfg,w.dz.p);
+    average_scores<<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p);
+    reduce_scores<<<1,256,0,w.stream>>>(w.dmean.p,cfg,0,1,w.dw.p);
     nr_csirs_disc_ring_t ring={};ring.n_ant=ant;ring.n_rb=rb;ring.capacity=1;ring.slots_per_frame=20;
     ring.slot_stride=(size_t)ant*14*24*rb;ring.grid_base=(int16_t *)w.grid.p;ring.meta=w.meta.p;
     nr_csirs_disc_hyp_t h={};h.row=1;h.period=4;nr_csirs_disc_win_t win={};
-    SWEEP_KERNEL(refine_kernel<<<1,1,0,w.stream>>>(ring,h,win,map,w.refined.p,w.result.p));
-    SWEEP_KERNEL(energies<<<1,1,0,w.stream>>>(w.grid.p,rb,h,map,w.energy.p));
+    refine_kernel<<<1,1,0,w.stream>>>(ring,h,win,map,w.refined.p,w.result.p);
+    energies<<<1,1,0,w.stream>>>(w.grid.p,rb,h,map,w.energy.p);
     return cudaGetLastError()==cudaSuccess && complete()==cudaSuccess?0:-1;
   } catch(...) {return -1;}
 }
@@ -517,9 +480,7 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
     if(copy(w.dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice)!=cudaSuccess
        || copy(w.meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     map.re=w.dm.p;auto ring=*r;ring.grid_base=(int16_t *)grid;ring.meta=w.meta.p;
-    int count=nr_gpu_budget_enabled()?1:ring.capacity;
-    for(int first=0;first<ring.capacity;first+=count)
-      SWEEP_KERNEL(refine_kernel<<<1,1,0,workspace.stream>>>(ring,*h,*win,map,w.refined.p,w.result.p,w.refine_accum.p,first,count));
+    refine_kernel<<<1,1,0,workspace.stream>>>(ring,*h,*win,map,w.refined.p,w.result.p);
     int result=-1;
     if(cudaGetLastError()!=cudaSuccess || copy(&result,w.result.p,sizeof(int),cudaMemcpyDeviceToHost)!=cudaSuccess
        || copy(h,w.refined.p,sizeof(*h),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
@@ -537,7 +498,7 @@ extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,con
     if(nr_csirs_disc_sweep_map_into(h,r->n_rb,&map,w.mapping.data(),w.mapping.size())) return -1;
     map.re=w.dm.p;
     const short2 *grid=r->device_valid?(const short2 *)r->device_grid:w.grid.p;
-    SWEEP_KERNEL(energies<<<1,1,0,workspace.stream>>>(grid,r->n_rb,*h,map,w.energy.p));
+    energies<<<1,1,0,workspace.stream>>>(grid,r->n_rb,*h,map,w.energy.p);
     if(cudaGetLastError()!=cudaSuccess || copy(scores,w.energy.p,5*sizeof(double),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
     scores[0]=win.z;return 0;
   } catch(...) {return -1;}
