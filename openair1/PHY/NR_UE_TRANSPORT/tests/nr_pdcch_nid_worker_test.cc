@@ -17,7 +17,9 @@ void exit_function(const char *,const char *,int,const char *,int) {abort();}
 static void wait_ms(int n) {std::this_thread::sleep_for(std::chrono::milliseconds(n));}
 int main(int argc,char **argv) {
  bool device=argc>1 && !strcmp(argv[1],"--device");
- bool incremental=argc>1 && !strcmp(argv[1],"--incremental");
+ bool duty=argc>1 && !strcmp(argv[1],"--duty");
+ bool incremental=duty || (argc>1 && !strcmp(argv[1],"--incremental"));
+ if(duty) {setenv("ISAC_PDCCH_NID_GPU_DUTY","1",1);setenv("ISAC_PDCCH_NID_GPU_RECHECK_MS","120",1);}
  int batch_size=incremental?64:336;
  int dur=incremental?3:device?1:(argc>1?atoi(argv[1]):1);
  logInit();
@@ -52,6 +54,27 @@ int main(int argc,char **argv) {
   }
   return true;
  };
+ if(duty) {
+  CHECK(push_batch(true));
+  int n=-1;for(int i=0;i<2000 && n<0;++i) {wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);}
+  CHECK(n==1 && runs()==1);
+  nr_pdcch_nid_gpu_feedback(0,generation,true,false);
+  CHECK(push_batch(true));wait_ms(20);CHECK(runs()==1);
+  wait_ms(130);CHECK(push_batch(true));
+  for(int i=0;i<2000 && runs()<2;++i)wait_ms(1);
+  CHECK(runs()==2);
+  wait_ms(5);CHECK(nr_pdcch_nid_gpu_snapshot(records,16,&generation)==1);
+  nr_pdcch_nid_gpu_feedback(0,generation,true,false);
+  CHECK(push_batch(true));wait_ms(20);CHECK(runs()==2);
+  nr_pdcch_nid_gpu_feedback(0,0,false,true);
+  CHECK(push_batch(true));for(int i=0;i<2000 && runs()<3;++i)wait_ms(1);
+  CHECK(runs()==3);
+  nr_pdcch_nid_gpu_feedback(1,0,false,false);
+  CHECK(push_batch(true));for(int i=0;i<2000 && runs()<4;++i)wait_ms(1);
+  CHECK(runs()==4 && errors()==0);
+  nr_pdcch_nid_gpu_stop();dlclose(lib);
+  puts("PASS worker duty: verified-bank pause, periodic recheck, occupancy and epoch resume");return 0;
+ }
  int total=device?3:4;
  for(int pass=1;pass<=total;pass++) {
   CHECK(push_batch(true));

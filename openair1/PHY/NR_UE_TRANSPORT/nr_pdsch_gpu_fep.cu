@@ -2,7 +2,7 @@
 #define NR_GPU_FEP_NO_LOADER
 #include "nr_pdsch_gpu_fep.h"
 #include <cuda_runtime.h>
-#include "PHY/TOOLS/nr_gpu_cuda.h"
+#include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
 #include <cufft.h>
@@ -500,6 +500,7 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
                         double fo_hz, const int16_t *symbol_rot)
 {
   if (g_init_state != 1) return -1;
+  NrGpuRtScope rt; if(!rt.admitted)return -1;
   const auto t0 = std::chrono::steady_clock::now();
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
   const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
@@ -523,10 +524,11 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
   dim3 blk(256), grd((N + 255) / 256, ns, nant);
   k_fep_gather<<<grd, blk, 0, g_stream>>>(g_d_rx, (long long)abs_sample - early, phase_inc, N, g_cfg.nb_prefix_samples,
                                           g_cfg.nb_prefix_samples0, ns, g_samples_per_slot, g_d_fft_in);
-  if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS)
-    return -1;
+  if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS) {
+    g_init_state=-1;nr_gpu_budget_fault();return -1;
+  }
   k_fep_rotate<<<grd, blk, 0, g_stream>>>(g_d_rxF, symbol_rot ? g_d_rot : nullptr, N, ns, early);
-  CK((cudaError_t)nr_gpu_sync(g_stream));
+  CK(rt.wait(g_stream));
   g_fep_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
@@ -542,7 +544,7 @@ static uint32_t job_total_llr(const nr_gpu_pdsch_job_t *j)
   return nre * j->Nl * j->Qm;
 }
 
-static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint32_t total)
+static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint32_t total, NrGpuRtScope &rt)
 {
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant, fco = g_cfg.first_carrier_offset;
   memcpy(g_h_jobs, jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t));
@@ -561,7 +563,7 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
     k_llr<<<dim3((max_re + 127) / 128, n), 128, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_sigma, g_d_rxF, N, ns, nant, fco, g_d_llr,
                                                              g_llr_scale);
   CK((cudaError_t)nr_gpu_copy_async(g_h_llr, g_d_llr, (size_t)total * sizeof(int16_t), g_stream));
-  CK((cudaError_t)nr_gpu_sync(g_stream));
+  CK(rt.wait(g_stream));
   CK(cudaGetLastError());
   memcpy(llr_out, g_h_llr, (size_t)total * sizeof(int16_t));
   return total;
@@ -570,6 +572,7 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
 static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, size_t llr_cap)
 {
   if (g_init_state != 1 || !jobs || !llr_out || n < 0) return -1;
+  NrGpuRtScope rt; if(!rt.admitted)return -1;
   const auto t0 = std::chrono::steady_clock::now();
   int64_t written = 0;
   int i = 0;
@@ -603,7 +606,7 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
     /* the kernels address the chunk's LLRs from 0 */
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset -= (uint32_t)written;
-    const int64_t r = run_chunk(&jobs[i], m, llr_out + written, total);
+    const int64_t r = run_chunk(&jobs[i], m, llr_out + written, total, rt);
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset += (uint32_t)written;
     if (r < 0)
@@ -619,9 +622,10 @@ static int api_read_rxdataF(int ant, int16_t *out)
 {
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot;
   if (g_init_state != 1 || ant < 0 || ant >= g_cfg.nant) return -1;
+  NrGpuRtScope rt; if(!rt.admitted)return -1;
   float2 *tmp = g_h_check;
   CK((cudaError_t)nr_gpu_copy_async(tmp, g_d_rxF + (size_t)ant * ns * N, (size_t)ns * N * sizeof(float2), g_stream));
-  CK((cudaError_t)nr_gpu_sync(g_stream));
+  CK(rt.wait(g_stream));
   for (size_t i = 0; i < (size_t)ns * N; i++) {
     out[2 * i] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].x)));
     out[2 * i + 1] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].y)));

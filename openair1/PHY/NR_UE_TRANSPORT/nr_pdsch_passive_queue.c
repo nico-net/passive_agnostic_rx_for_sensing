@@ -1,3 +1,4 @@
+#include "PHY/TOOLS/nr_gpu_budget.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "nr_passive_sample_lifetime.h"
@@ -257,6 +258,34 @@ complete:
  * done. Returns the same rc fep_slot()/pdsch_llr() would have. */
 static int64_t gpu_fep_submit_and_wait(gpu_fep_req_t *req)
 {
+  if(nr_gpu_budget_enabled()) {
+    /* A stack-owned request cannot be abandoned on the old worker queue: the
+     * worker could still write its output after CPU fallback. Run under one
+     * nonblocking gate instead; CUDA modules quarantine their private buffers
+     * on timeout. One deadline covers FEP, LLR and optional self-check readback. */
+    static pthread_mutex_t direct=PTHREAD_MUTEX_INITIALIZER;
+    if(pthread_mutex_trylock(&direct)) {nr_gpu_budget_rt_result(0,1);return -1;}
+    req->submit_ns=now_ns();
+    nr_gpu_budget_rt_job_start(req->submit_ns/1000);
+    int64_t rc=-1;
+    if(nr_gpu_budget_rt_begin()) {
+      req->api=atomic_load(&g_gpu);
+      if(req->api && !nr_passive_job_epoch_old(nr_cfg_reconf_enabled(),req->config_epoch,nr_cfg_epoch_current)) {
+        rc=req->owned_iq ? (gpu_req_fep(req)==0?gpu_req_llr(req):-1)
+          : nr_gpu_fep_run_checked(req->source_abs_slot,req->slots_per_frame,gpu_req_producer,
+                                  gpu_req_stale,gpu_req_fep,gpu_req_llr,req);
+        if(nr_passive_job_epoch_old(nr_cfg_reconf_enabled(),req->config_epoch,nr_cfg_epoch_current))rc=-1;
+        if(rc>=0) {
+          atomic_fetch_add(&g_gpu_slots,1);atomic_fetch_add(&g_gpu_jobs,req->n_jobs);
+          atomic_fetch_add(&g_gpu_fep_ns,req->fep_end_ns-req->submit_ns);
+          atomic_fetch_add(&g_gpu_llr_ns,now_ns()-req->fep_end_ns);
+        }
+      }
+      nr_gpu_budget_rt_end();
+    }
+    nr_gpu_budget_rt_job_start(0);
+    pthread_mutex_unlock(&direct);return rc;
+  }
   req->done = 0;
   req->submit_ns = req->owned_iq ? now_ns() : 0;
   pthread_mutex_lock(&g_gpu_wq_lock);

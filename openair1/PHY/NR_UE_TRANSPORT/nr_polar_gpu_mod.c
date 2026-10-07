@@ -13,6 +13,8 @@
 #include "nr_polar_sc_cuda.h"
 
 #include <pthread.h>
+#include "PHY/TOOLS/nr_gpu_budget.h"
+#include <string.h>
 
 /* Sized for the LANE BATCH: every lookahead lane's (candidate x length) grid in ONE call, which is
  * the whole point -- at 96 lanes the per-CALL overhead (~90 us) was the entire cost, not the decodes.
@@ -40,7 +42,11 @@ static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const
   static nr_dci_bits_t p[NPG_MAX_ITEMS];
   int m = 0;
 
-  pthread_mutex_lock(&g_lock);
+  if(nr_gpu_budget_enabled()) {
+    if(pthread_mutex_trylock(&g_lock)) {
+      memset(ok,0,n);nr_gpu_budget_rt_result(0,1);return -1;
+    }
+  } else pthread_mutex_lock(&g_lock);
   for (int i = 0; i < n; i++) {
     ok[i] = 0;
     /* E beyond the kernel's NPC_MAX_E (AL16 = 1728 fits since NPC_MAX_E = 2048); and the params table
@@ -77,7 +83,11 @@ static int npg_decode_vec(const int16_t *vec, int vstride, int n_vec, const uint
   static uint32_t c[NPG_MAX_ITEMS];
   static nr_dci_bits_t p[NPG_MAX_ITEMS];
   int m = 0;
-  pthread_mutex_lock(&g_lock);
+  if(nr_gpu_budget_enabled()) {
+    if(pthread_mutex_trylock(&g_lock)) {
+      memset(ok,0,n);nr_gpu_budget_rt_result(0,1);return -1;
+    }
+  } else pthread_mutex_lock(&g_lock);
   for (int i = 0; i < n; i++) {
     ok[i] = 0;
     if ((int)al[i] * 108 > NPC_MAX_E || (int)al[i] * 108 > vstride || vidx[i] >= n_vec)

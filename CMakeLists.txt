@@ -1046,7 +1046,8 @@ if (${SMBV})
 endif  (${SMBV})
 
 # Core singleton shared with dlopen GPU modules; deliberately no CUDA dependency.
-add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c)
+add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c
+  ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_budget.c)
 target_include_directories(nr_gpu_platform PUBLIC ${OPENAIR1_DIR}/PHY/TOOLS)
 target_link_libraries(nr_gpu_platform PRIVATE ${CMAKE_DL_LIBS} pthread)
 set_target_properties(nr_gpu_platform PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -1492,7 +1493,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
 add_library(nr_pdcch_nid_worker ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c)
-target_link_libraries(nr_pdcch_nid_worker PUBLIC UTIL ${CMAKE_DL_LIBS} pthread)
+target_link_libraries(nr_pdcch_nid_worker PUBLIC nr_gpu_platform UTIL ${CMAKE_DL_LIBS} pthread)
 add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_gate.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_order.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_fieldbook.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_legal.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c)
 target_link_libraries(nr_pdcch_blind_monitor PUBLIC nr_pdcch_nid_worker)
 target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_passive_cfg_epoch nr_sense_api)
@@ -2413,6 +2414,9 @@ if(ENABLE_TESTS)
   set_tests_properties(test_nr_pdcch_nid_worker PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
 
+  add_test(NAME test_nr_pdcch_nid_worker_duty COMMAND test_nr_pdcch_nid_worker --duty)
+  set_tests_properties(test_nr_pdcch_nid_worker_duty PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
   add_test(NAME test_nr_pdcch_nid_worker_incremental COMMAND test_nr_pdcch_nid_worker --incremental)
   set_tests_properties(test_nr_pdcch_nid_worker_incremental PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
@@ -3228,6 +3232,13 @@ if(PACKAGING_LTE OR PACKAGING_NR OR PACKAGING_COMMON OR PACKAGING_USRP OR PACKAG
 endif()
 
 if(ENABLE_TESTS)
+  add_executable(test_nr_gpu_budget openair1/PHY/TOOLS/tests/nr_gpu_budget_test.cc
+                 openair1/PHY/TOOLS/nr_gpu_budget.c)
+  target_compile_definitions(test_nr_gpu_budget PRIVATE NR_GPU_BUDGET_TEST)
+  target_include_directories(test_nr_gpu_budget PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(test_nr_gpu_budget PRIVATE GTest::gtest_main pthread)
+  add_test(NAME test_nr_gpu_budget COMMAND test_nr_gpu_budget)
+  add_dependencies(tests test_nr_gpu_budget)
   add_executable(test_nr_gpu_platform openair1/PHY/TOOLS/tests/nr_gpu_platform_test.cc
                  openair1/PHY/TOOLS/nr_gpu_platform.c)
   target_compile_definitions(test_nr_gpu_platform PRIVATE NR_GPU_PLATFORM_TEST)

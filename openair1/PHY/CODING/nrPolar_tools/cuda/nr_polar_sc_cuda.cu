@@ -8,7 +8,7 @@
  * reindexes the op list, so do it only with the bit-exactness test in the loop.
  */
 #include <cuda_runtime.h>
-#include "PHY/TOOLS/nr_gpu_cuda.h"
+#include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
@@ -277,6 +277,7 @@ extern "C" int npc_gpu_decode(const int *pid, const int16_t *llr, const int *vid
   if (n <= 0 || n > cap || estride <= 0 || estride > NPC_MAX_E || nstride <= 0 || nstride > NPC_MAX_N) return -1;
   if (vidx == NULL) n_vec = n;
   if (n_vec > cap) return -1;
+  NrGpuRtScope rt;if(!rt.admitted)return -3; // transient admission refusal, no DMA owns host buffers
   const double t0 = now_us();
   memcpy(h_pid_stage, pid, sizeof(int) * n);
   if (vidx) memcpy(h_vidx_stage, vidx, sizeof(int) * n);
@@ -288,10 +289,10 @@ extern "C" int npc_gpu_decode(const int *pid, const int16_t *llr, const int *vid
   const size_t shbytes = (size_t)3 * ln + nmax;
   const double t1 = now_us();
   sc_decode_kernel<<<n, NPC_THREADS, shbytes, stream>>>(g_dp, d_pid, d_llr, vidx ? d_vidx : NULL, estride, d_u, nstride, ln, nmax);
-  if ((cudaError_t)nr_gpu_sync(stream) != cudaSuccess) return -2;
+  if (rt.wait(stream) != cudaSuccess) return -2;
   const double t2 = now_us();
   if ((cudaError_t)nr_gpu_copy_async(u_out, d_u, (size_t)nstride * n, stream)
-      || (cudaError_t)nr_gpu_sync(stream)) return -2;
+      || rt.wait(stream)) return -2;
   const double t3 = now_us();
   *t_h2d = t1 - t0; *t_kernel = t2 - t1; *t_d2h = t3 - t2;
   return 0;

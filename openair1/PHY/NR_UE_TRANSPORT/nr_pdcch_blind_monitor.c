@@ -1249,8 +1249,26 @@ uint16_t nr_pdcch_discovered_nrnti(uint32_t slot, uint16_t nid)
   return h[(v ^ (v >> 31)) % n];
 }
 
+/* Snapshot and bank checks run on the existing monitor consumer, never in the
+ * RT producer or while holding the nID worker lock. */
+static void nid_budget_feedback(void)
+{
+  if(!nr_pdcch_nid_gpu_running())return;
+  nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];uint64_t generation=0;
+  int n=nr_pdcch_nid_gpu_snapshot(records,NR_PDCCH_NID_MAX_RECORDS,&generation);
+  if(n<0)return;
+  bool verified=n>0;
+  for(int i=0;i<n && verified;++i) {
+    const nr_pdcch_nid_record_t *r=records+i;
+    verified=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid);
+  }
+  nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
+}
+
 bool nr_pdcch_blind_monitor_discovered_poll(void)
 {
+  static unsigned budget_polls;
+  if((++budget_polls & 255)==1)nid_budget_feedback();
   if (nr_pdcch_discovered_enabled()) return discovered_additional_poll();
   static uint64_t s_calls;
   static time_t s_mtime;

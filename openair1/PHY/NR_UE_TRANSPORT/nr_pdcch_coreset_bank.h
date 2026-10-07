@@ -43,6 +43,9 @@
 bool nr_pdcch_coreset_bank_has_footprint(int rb, int groups, int duration, int symbol,
                                         int bundle, int interleaver, int shift, int nid);
 
+/* T24: stale bank entries must resume discovery. */
+bool nr_pdcch_coreset_bank_verified_footprint(int rb,int groups,int duration,int symbol,
+                                            int bundle,int interleaver,int shift,int nid);
 /* One bank entry. cfg/owners are immutable after the release-store publishes the entry.
  * The AL1 UNION fields (Task 15) change after publication; nr_pdcch_blind_monitor_rt.c guards them
  * with its g_al1_mu. Exposed (not hidden behind per-field accessors) because the RT union decoding

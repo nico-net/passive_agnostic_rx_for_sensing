@@ -112,6 +112,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"csirs_search_us\":%" PRIu64 ",\"csirs_idsweep_us\":%" PRIu64 ",\"csirs_confirm_us\":%" PRIu64 ",\"csirs_cfr_us\":%" PRIu64 ","
       "\"csirs_disc_batches\":%" PRIu64 ",\"csirs_disc_footprints\":%" PRIu64 ",\"csirs_disc_hyps\":%" PRIu64 ",\"csirs_disc_winners\":%" PRIu64 ","
       "\"csirs_disc_ambiguous\":%" PRIu64 ",\"csirs_disc_feed_drops\":%" PRIu64 ",\"csirs_disc_gpu_batches\":%" PRIu64 ",\"csirs_disc_cpu_batches\":%" PRIu64 ",\"csirs_disc_batch_us\":%" PRIu64 ","
+      "\"gpu_budget_used_pct\":%.3f,\"discovery_yields\":%" PRIu64 ",\"rt_gpu_wait_max_us\":%" PRIu64 ",\"rt_gpu_fallbacks\":%" PRIu64 ",\"discovery_overruns\":%" PRIu64 ","
       "\"csirs_time_to_confirm_slots_last\":%" PRIu64 ",\"csirs_time_to_confirm_slots_sum\":%" PRIu64 ","
       "\"csirs_time_to_confirm_resources\":[",
       NR_PASSIVE_METRICS_SCHEMA, m->t_mono_ns, m->abs_slot, m->pci, st,
@@ -140,6 +141,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       m->csirs_disc_batches, m->csirs_disc_footprints, m->csirs_disc_hyps, m->csirs_disc_winners,
       m->csirs_disc_ambiguous, m->csirs_disc_feed_drops, m->csirs_disc_gpu_batches,
       m->csirs_disc_cpu_batches, m->csirs_disc_batch_us,
+      m->gpu_budget_used_pct,m->discovery_yields,m->rt_gpu_wait_max_us,m->rt_gpu_fallbacks,m->discovery_overruns,
       m->csirs_time_to_confirm_slots_last, m->csirs_time_to_confirm_slots_sum);
   if (w < 0 || (size_t)w >= n) return -1;
   const uint32_t count = m->csirs_confirm_resource_count < NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX

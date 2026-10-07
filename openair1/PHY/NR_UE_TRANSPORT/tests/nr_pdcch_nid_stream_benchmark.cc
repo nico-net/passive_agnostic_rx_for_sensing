@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_pdcch_nid_stage1.h"
+#include "PHY/TOOLS/nr_gpu_budget.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -24,6 +25,10 @@ int main(int argc,char **argv) {
  if(!get || !stats || get()->abi!=NR_PDCCH_NID_ABI)return 2;
  nr_pdcch_nid_iq_t *iq=nullptr;auto *ops=get();void *ctx=ops->create(rb,dur,10,&iq);
  if(!ctx){fprintf(stderr,"create failed rb=%d dur=%d\n",rb,dur);return 2;}
+ // Exercise the same post-warm-up budget boundary as the receiver, if opted in.
+ if(const char *budget=getenv("ISAC_GPU_BUDGET"))if(!strcmp(budget,"1")) {
+  auto seal=(void(*)())dlsym(lib,"nr_gpu_rx_started");if(!seal)return 2;seal();
+ }
  nr_pdcch_nid_batch_t b={};b.cfg={12*rb,0,0,6,415,14,dur};b.iq=iq;b.count=batch;
  uint64_t alloc0,deny0,alloc1,deny1;stats(&alloc0,&deny0);
  std::mt19937 rng(2207);std::normal_distribution<float> noise(0,400);
@@ -66,9 +71,24 @@ int main(int argc,char **argv) {
     rb,dur,snr,batch,pass,air_ms,elapsed,batch_ms,r.stage1_ms,r.stage2_ms,r.kernel_max_ms,tmac,r.count,first,r.lambda[dur-1][3],r.threshold[dur-1][3]);
   timing_ok &= r.kernel_max_ms<10;
  }
- stats(&alloc1,&deny1);ops->destroy(ctx);dlclose(lib);
+ stats(&alloc1,&deny1);
+ const char *budget_env=getenv("ISAC_GPU_BUDGET");bool budget_on=budget_env && !strcmp(budget_env,"1");
+ nr_gpu_budget_metrics_t budget={};
+ if(budget_on) {
+  auto metrics=(void(*)(nr_gpu_budget_metrics_t *))dlsym(lib,"nr_gpu_budget_metrics");
+  if(!metrics)return 2;
+  metrics(&budget);
+ }
+ ops->destroy(ctx);dlclose(lib);
  double effective=(65536.0*3*rb*batch*limit)/(total_sweep*1e9);
  bool pass=first>=0 && first<=3000 && timing_ok && effective>=1;
+ if(budget_on) {
+  const char *v=getenv("ISAC_GPU_DISCOVERY_BUDGET_PCT");int pct=v?atoi(v):30;
+  if(pct<1 || pct>100)pct=30;
+  pass=first>=0 && max_kernel<=5 && !budget.discovery_overruns && budget.gpu_budget_used_pct<=pct;
+  printf("PDCCH_NID_BUDGET used_pct=%.3f yields=%llu overruns=%llu\n",budget.gpu_budget_used_pct,
+    (unsigned long long)budget.discovery_yields,(unsigned long long)budget.discovery_overruns);
+ }
  printf("PDCCH_NID_STREAM_RESULT %s first_record_ms=%.3f max_kernel_ms=%.3f effective_tmac_s=%.4f late_alloc=%llu denied=%llu\n",pass?"PASS":"FAIL",first,max_kernel,effective,(unsigned long long)(alloc1-alloc0),(unsigned long long)(deny1-deny0));
  if(alloc0!=alloc1 || deny0!=deny1)return 5;
  return pass?0:6;
