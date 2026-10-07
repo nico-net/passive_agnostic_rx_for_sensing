@@ -3,6 +3,7 @@
  */
 
 #include <unistd.h>
+#include "common/utils/nr_core_plan.h"
 #include "nr-ue-ru.h"
 #include "nr-uesoftmodem.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
@@ -363,7 +364,7 @@ void nrue_init_openair0(void)
   }
 }
 
-void nrue_ru_start(void)
+int nrue_ru_start(void)
 {
   for (int ru_id = 0; ru_id < nrue_ru_count; ru_id++) {
     openair0_config_t *cfg = &openair0_cfg_g[ru_id];
@@ -371,12 +372,19 @@ void nrue_ru_start(void)
 
     dev->host_type = RAU_HOST;
     int tmp = openair0_device_load(dev, cfg);
+    if (tmp != 0 && nr_core_plan_active()) {
+      LOG_E(HW, "SENSING: CORE_PLAN radio device %d initialization failed\n", ru_id); return -1;
+    }
     AssertFatal(tmp == 0, "Could not load the device %d\n", ru_id);
     int tmp2 = dev->trx_start_func(dev);
+    if (tmp2 != 0 && nr_core_plan_active()) {
+      LOG_E(HW, "SENSING: CORE_PLAN radio device %d start failed\n", ru_id); return -1;
+    }
     AssertFatal(tmp2 == 0, "Could not start the device %d\n", ru_id);
     if (usrp_tx_thread == 1)
       dev->trx_write_init(dev);
   }
+  return 0;
 }
 
 void nrue_ru_stop(void)

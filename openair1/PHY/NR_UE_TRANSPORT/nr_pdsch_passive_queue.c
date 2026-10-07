@@ -1,4 +1,5 @@
 #include "PHY/TOOLS/nr_gpu_budget.h"
+#include "common/utils/nr_core_plan.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "nr_passive_sample_lifetime.h"
@@ -1936,7 +1937,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * IRQs (FIFO 50): at an equal 50, consumers pinned to the NIC IRQ cores (6..11 vs IRQs on 8-13 on
      * the X410 host) held NAPI off until they blocked. One core each from base_core; <0 unpinned. */
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name,
-                 (affinity >= 0) ? (affinity + i) : -1, 40);
+                 nr_core_plan_cpu(NR_CP_PDSCH, i, (affinity >= 0) ? (affinity + i) : -1), 40);
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);

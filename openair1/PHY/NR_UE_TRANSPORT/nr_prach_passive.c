@@ -2,6 +2,7 @@
 /* PRACH is a receiver observation: use the broadcast RACH geometry and the
  * existing gNB correlator, then export only detections. No receiver state is
  * changed by an overheard RAR. */
+#include "common/utils/nr_core_plan.h"
 #include "nr_prach_passive.h"
 
 #include <math.h>
@@ -451,7 +452,7 @@ void nr_prach_passive_start(void)
   if (!nr_isac_prach_enabled()) return;
   pthread_mutex_lock(&job_mu);
   if (!worker_started && !worker_stop) {
-    if (pthread_create(&job_thread, NULL, prach_worker, NULL))
+    if (nr_core_plan_create(&job_thread, NULL, prach_worker, NULL, -1))
       LOG_W(PHY, "SENSING: passive PRACH worker could not start; occasions will be dropped\n");
     else {
       worker_started = true;

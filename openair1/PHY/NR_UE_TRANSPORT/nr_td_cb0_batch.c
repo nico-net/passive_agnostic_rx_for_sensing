@@ -7,6 +7,7 @@
  * test_nr_td_cb0_batch (CpuReferenceMatchesFullDecodeCb0 runs the receiver's own nrLDPC_coding_decoder).
  */
 #define _GNU_SOURCE
+#include "common/utils/nr_core_plan.h"
 #include "nr_td_cb0_batch.h"
 #include <dlfcn.h>
 #include <pthread.h>
@@ -381,7 +382,7 @@ static void pool_ensure(int want)
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-    const int rc = pthread_create(&th, &a, cb0_pool_main, NULL);
+    const int rc = nr_core_plan_create(&th, &a, cb0_pool_main, NULL, -1);
     pthread_attr_destroy(&a);
     if (rc != 0)
       break;
@@ -840,7 +841,7 @@ static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result
     pthread_t th[64];
     int started = 0;
     for (int t = 1; t < T; t++)
-      if (pthread_create(&th[started], NULL, cb0_cuda_worker, &j) == 0)
+      if (nr_core_plan_create(&th[started], NULL, cb0_cuda_worker, &j, -1) == 0)
         started++;
     cb0_cuda_worker(&j);
     for (int t = 0; t < started; t++)

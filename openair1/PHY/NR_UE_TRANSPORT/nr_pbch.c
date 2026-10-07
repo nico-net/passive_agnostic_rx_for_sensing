@@ -5,6 +5,7 @@
 /*!
  * \brief Top-level routines for generating and decoding  the PBCH/BCH physical/transport channel V8.6 2009-03
  */
+#include "common/utils/nr_core_plan.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/CODING/coding_extern.h"
 #include "PHY/sse_intrin.h"
@@ -977,7 +978,7 @@ void nr_pbch_dmrs_scan_launch(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc
   A->fp = *fp;
   A->proc = *proc;
   pthread_t th;
-  if (pthread_create(&th, NULL, pbch_scan_thread, A) == 0)
+  if (nr_core_plan_create(&th, NULL, pbch_scan_thread, A, -1) == 0)
     pthread_detach(th);
   else
     free(A);

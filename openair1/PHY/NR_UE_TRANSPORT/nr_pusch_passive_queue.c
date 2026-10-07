@@ -1,3 +1,4 @@
+#include "common/utils/nr_core_plan.h"
 #include "nr_passive_sample_lifetime.h"
 #include "nr_pdcch_ul_discovery.h"
 /*
@@ -197,7 +198,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * it must lose. Losing here costs one deferred decode; losing there costs time sync, which is
      * the whole problem this module exists to fix. */
     threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name,
-                 (affinity >= 0) ? (affinity + i) : -1, 50);
+                 nr_core_plan_cpu(NR_CP_PUSCH, i, (affinity >= 0) ? (affinity + i) : -1), 50);
   }
   LOG_I(PHY, "SENSING: passive PUSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);

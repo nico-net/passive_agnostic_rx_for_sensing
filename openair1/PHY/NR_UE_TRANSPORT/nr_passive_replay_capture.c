@@ -3,6 +3,7 @@
  * the receive thread. Binary format is local same-build ABI, not an interchange
  * format. A live CRC and identical decoded bytes are the replay acceptance test.
  */
+#include "common/utils/nr_core_plan.h"
 #include "nr_passive_replay_capture.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
@@ -130,7 +131,7 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   pthread_attr_setschedpolicy(&attr,SCHED_OTHER);
   struct sched_param sp={.sched_priority=0};
   pthread_attr_setschedparam(&attr,&sp);
-  int err=pthread_create(&writer,&attr,write_capture,NULL);
+  int err=nr_core_plan_create(&writer,&attr,write_capture,NULL, -1);
   pthread_attr_destroy(&attr);
   if (err) { atomic_store(&state,RP_VOID); LOG_E(PHY,"REPLAY VOID: writer creation failed %d\n",err); }
   else pthread_detach(writer);

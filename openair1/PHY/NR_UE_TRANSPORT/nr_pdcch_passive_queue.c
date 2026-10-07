@@ -1,3 +1,4 @@
+#include "common/utils/nr_core_plan.h"
 #include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -189,7 +190,7 @@ bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * ever competes with the receive path it must lose. Losing here costs one monitoring occasion;
      * losing there costs time sync, which is the whole reason this deferral exists. */
     threadCreate(&g_threads[i], nr_pdcch_passive_queue_thread, &g_args[i], name,
-                 (affinity >= 0) ? (affinity + i) : -1, 50);
+                 nr_core_plan_cpu(NR_CP_SCAN, i, (affinity >= 0) ? (affinity + i) : -1), 50);
   }
   LOG_I(PHY,
         "SENSING: blind PDCCH scan pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest -- "

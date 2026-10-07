@@ -12,6 +12,7 @@
  */
 
 #define _GNU_SOURCE
+#include "nr_core_plan.h"
 #include "system.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -241,12 +242,15 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
   ret=pthread_attr_init(&attr);
   AssertFatal(ret == 0, "Error in pthread_attr_init(): ret: %d, errno: %d\n", ret, errno);
 
+  ret = nr_core_plan_thread_attr(&attr, affinity, &priority);
+  AssertFatal(ret == 0, "CORE_PLAN cannot apply thread affinity for %s: %d\n", name, ret);
+
   if (set_prio) {
     ret = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
     AssertFatal(ret == 0, "Error in pthread_attr_setinheritsched(): ret: %d, errno: %d\n", ret, errno);
-    ret = pthread_attr_setschedpolicy(&attr, SCHED_OAI);
+    ret = pthread_attr_setschedpolicy(&attr, priority == 0 ? SCHED_OTHER : SCHED_OAI);
     AssertFatal(ret == 0, "Error in pthread_attr_setschedpolicy(): ret: %d, errno: %d\n", ret, errno);
-    AssertFatal(priority >= sched_get_priority_min(SCHED_OAI) && priority <= sched_get_priority_max(SCHED_OAI),
+    AssertFatal(priority == 0 || (priority >= sched_get_priority_min(SCHED_OAI) && priority <= sched_get_priority_max(SCHED_OAI)),
                 "Scheduling priority %d not possible: must be within [%d, %d]\n",
                 priority,
                 sched_get_priority_min(SCHED_OAI),
@@ -258,9 +262,16 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
     AssertFatal(ret == 0, "Error in pthread_attr_setschedparam(): ret: %d errno: %d\n", ret, errno);
     LOG_I(UTIL, "%s() for %s: creating thread with affinity %x, priority %d\n", __func__, name, affinity, priority);
   } else {
-    affinity = -1;
+    if (!nr_core_plan_active()) affinity = -1;
     priority = -1;
-    LOG_I(UTIL, "%s() for %s: creating thread (no affinity, default priority)\n", __func__, name);
+    if (nr_core_plan_active()) {
+      struct sched_param sp = {0};
+      ret = pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+      ret |= pthread_attr_setschedpolicy(&attr, SCHED_OTHER);
+      ret |= pthread_attr_setschedparam(&attr, &sp);
+      AssertFatal(ret == 0, "CORE_PLAN cannot apply SCHED_OTHER for %s: %d\n", name, ret);
+      LOG_I(UTIL, "%s() for %s: planned affinity, default priority (no SYS_NICE)\n", __func__, name);
+    } else LOG_I(UTIL, "%s() for %s: creating thread (no affinity, default priority)\n", __func__, name);
   }
 
   ret=pthread_create(t, &attr, func, param);
@@ -283,7 +294,7 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
     LOG_W(UTIL, "pthread_setname_np(%s) returned %d (thread already gone); continuing\n", short_name, ret);
   }
 
-  if (affinity != -1 ) {
+  if (affinity != -1 && !nr_core_plan_active()) {
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(affinity, &cpuset);

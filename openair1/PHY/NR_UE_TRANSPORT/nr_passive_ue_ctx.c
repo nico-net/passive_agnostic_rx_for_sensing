@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include "common/utils/nr_core_plan.h"
 #include "nr_passive_ue_ctx.h"
 #include <inttypes.h>
 #include <math.h>
@@ -434,7 +435,7 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   atomic_store_explicit(&producers,0,memory_order_seq_cst);
   atomic_store_explicit(&running,true,memory_order_seq_cst);
   __atomic_store_n(&nr_ue_ctx_fast_open,true,__ATOMIC_SEQ_CST);
-  if(pthread_create(&worker,NULL,run,NULL)!=0) {
+  if(nr_core_plan_create(&worker,NULL,run,NULL, -1)!=0) {
     __atomic_store_n(&nr_ue_ctx_fast_open,false,__ATOMIC_SEQ_CST);
     atomic_store_explicit(&running,false,memory_order_seq_cst);
     free(ring);free(entries);fclose(output);ring=NULL;entries=NULL;output=NULL;

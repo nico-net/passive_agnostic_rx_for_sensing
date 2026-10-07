@@ -21,7 +21,7 @@ void nrue_set_ru_params(configmodule_interface_t *cfg);
 
 void nrue_init_openair0(void);
 
-void nrue_ru_start(void);
+int nrue_ru_start(void);
 void nrue_ru_stop(void);
 void nrue_ru_end(void);
 int nrue_ru_restart_rx(void);

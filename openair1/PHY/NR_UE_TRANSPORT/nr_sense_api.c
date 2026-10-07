@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Standalone, bounded export writer. Producers only copy into preallocated slots. */
+#include "common/utils/nr_core_plan.h"
 #include "nr_sense_api.h"
 #include "nr_sense_records.h"
 /* The standalone core test links without the receiver record module. The receiver
@@ -240,7 +241,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
   for (int k=0;k<4;k++) for (int s=0;s<NR_SENSE_SRC_COUNT;s++) { atomic_store(&cost_ns[k][s],0); atomic_store(&cost_count[k][s],0); }
   stopping=false; opened=true; atomic_store(&written_items,0);
   atomic_store(&after_close,0); atomic_store(&closed_seen,false);
-  if (pthread_create(&worker,NULL,run_writer,NULL) != 0) { opened=false; goto fail; }
+  if (nr_core_plan_create(&worker,NULL,run_writer,NULL, -1) != 0) { opened=false; goto fail; }
   atomic_store_explicit(&active,true,memory_order_release);
   pthread_mutex_unlock(&mu);
   return 0;

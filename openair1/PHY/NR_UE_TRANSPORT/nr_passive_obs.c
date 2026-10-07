@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Per-grant observation records: JSON serialiser, ring buffer and writer thread (Task A3).
  * Deliberately free of OAI logging so the unit test links standalone. Schema: see nr_passive_obs.h. */
+#include "common/utils/nr_core_plan.h"
 #include "nr_passive_obs.h"
 #include "nr_sense_records.h"
 #include <inttypes.h>
@@ -246,7 +247,7 @@ bool nr_passive_obs_open(const char *path, uint32_t capacity)
   g_open = true;
   pthread_mutex_unlock(&g_mu);
   __atomic_store_n(&nr_passive_obs_fast_open, true, __ATOMIC_RELAXED);
-  if (pthread_create(&g_thr, NULL, writer, NULL) != 0) {
+  if (nr_core_plan_create(&g_thr, NULL, writer, NULL, -1) != 0) {
     __atomic_store_n(&nr_passive_obs_fast_open, false, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_mu);
     g_open = false;

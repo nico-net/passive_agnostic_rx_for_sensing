@@ -64,6 +64,7 @@ void get_common_options(configmodule_interface_t *cfg)
   int numparams = sizeofArray(cmdline_params);
   config_set_checkfunctions(cmdline_params, cmdline_CheckParams, numparams);
   config_get(cfg, cmdline_params, numparams, NULL);
+  softmodem_params.threadPoolConfigExplicit = config_isparamset(cmdline_params, config_paramidx_fromname(cmdline_params, numparams, "thread-pool"));
   nfapi_index = config_paramidx_fromname(cmdline_params, numparams, "nfapi");
   AssertFatal(nfapi_index >= 0,"Index for nfapi config option not found!");
   nfapi_mode = config_get_processedint(cfg, &cmdline_params[nfapi_index]);
