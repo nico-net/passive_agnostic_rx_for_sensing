@@ -253,6 +253,12 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
                               const freq_alloc_bitmap_t *freq_alloc, const nr_pdsch_passive_grant_t *grant, int slot_rx,
                               bool probe, nr_gpu_pdsch_job_t *job);
 /** LLRs for the NEXT nr_pdsch_passive_decode() call on this thread (n = 0 clears). */
+/* Queue-owned IQ: installed only after a guarded copy, valid until the next group.
+ * FEP tasks receive these pointers explicitly; no borrowed TLS on pool workers. */
+void nr_pdsch_passive_set_owned_iq(c16_t **rx, int slot);
+c16_t **nr_pdsch_passive_iq_for_slot(int slot, c16_t **live);
+uint64_t nr_pdsch_passive_last_fep_ns(void);
+
 void nr_pdsch_passive_set_llr_override(const int16_t *llr, uint32_t n);
 /** The (descrambled) LLR buffer and G of this thread's last decode -- the GPU self-check compares against it. */
 uint32_t nr_pdsch_passive_last_llr(const int16_t **p);

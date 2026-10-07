@@ -2561,6 +2561,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_scrambling_id_sweep)
   add_test(NAME test_nr_scrambling_id_sweep COMMAND ./test_nr_scrambling_id_sweep)
 
+  add_executable(test_nr_pdsch_passive_schedule ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_passive_schedule_test.cc)
+  target_include_directories(test_nr_pdsch_passive_schedule PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_passive_schedule PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_pdsch_passive_schedule)
+  add_test(NAME test_nr_pdsch_passive_schedule COMMAND ./test_nr_pdsch_passive_schedule)
+
   add_executable(test_nr_passive_metrics ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_metrics_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c)
   target_include_directories(test_nr_passive_metrics PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)

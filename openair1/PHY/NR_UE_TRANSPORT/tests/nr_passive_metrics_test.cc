@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <cstring>
+#include <vector>
 extern "C" {
 #include "nr_passive_metrics.h"
 }
@@ -153,4 +154,25 @@ TEST(PassiveMetrics,SrsCountersPresent) {
   EXPECT_NE(std::string(buf).find("\"srs_pregate_skip\":0"),std::string::npos);
   EXPECT_NE(std::string(buf).find("\"srs_backoff_skip\":0"),std::string::npos);
   EXPECT_NE(std::string(buf).find("\"srs_budget_skip\":0"),std::string::npos);
+}
+
+TEST(PassiveMetrics, PdschStageHistogramsAndReasons) {
+  nr_passive_metrics_t m = {};
+  char buf[16384];
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  EXPECT_EQ(std::string(buf).find("pdschq_latency"), std::string::npos);
+  m.pdsch_schedule_enabled = 1;
+  m.pdschq_drop_narrow = 9;
+  m.pdsch_schedule.hist[NR_PDSCH_LAT_FEP][8] = 17;
+  m.pdsch_schedule.reason[NR_PDSCH_DROP_COPY] = 5;
+  const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
+  ASSERT_GT(n, 0);
+  const std::string s(buf);
+  EXPECT_NE(s.find("\"enqueue_fep\":[0,0,0,0,0,0,0,0,17]"), std::string::npos);
+  EXPECT_NE(s.find("\"copy_expired\":5"), std::string::npos);
+  EXPECT_NE(s.find("\"pdschq_drop_narrow\":9"), std::string::npos);
+  EXPECT_EQ(s.back(), '}');
+  std::vector<char> exact(n + 1), shortbuf(n);
+  EXPECT_EQ(nr_passive_metrics_to_json(&m, exact.data(), exact.size()), n);
+  EXPECT_EQ(nr_passive_metrics_to_json(&m, shortbuf.data(), shortbuf.size()), -1);
 }

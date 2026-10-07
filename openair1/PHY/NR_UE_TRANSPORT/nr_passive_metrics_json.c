@@ -39,6 +39,29 @@ static int cb0_json(const nr_passive_metrics_t *m, char *buf, size_t n)
   return (w < 0 || (size_t)w >= n) ? -1 : w;
 }
 
+/* Appended only with T21 enabled: the flag-off JSON remains byte-identical. */
+static int pdsch_schedule_json(const nr_passive_metrics_t *m, char *buf, size_t n)
+{
+  static const char *const stage[] = {"enqueue_dequeue", "enqueue_fep", "fep_ldpc", "enqueue_ldpc", "gpu_wait"};
+  static const char *const reason[] = {"queue_expired", "future_unready", "copy_expired",
+                                      "unsupported", "decode_error", "gpu_fallback"};
+  if (!m->pdsch_schedule_enabled) { if (n) buf[0] = 0; return n ? 0 : -1; }
+  int w = snprintf(buf, n, ",\"pdschq_drop_narrow\":%" PRIu64
+                   ",\"pdschq_latency_us_bounds\":[100,250,500,1000,2000,4000,8000,16000],\"pdschq_latency\":{",
+                   m->pdschq_drop_narrow);
+  for (int s = 0; s < NR_PDSCH_LAT_STAGES && w >= 0 && (size_t)w < n; ++s) {
+    w += snprintf(buf + w, n - w, "%s\"%s\":[", s ? "," : "", stage[s]);
+    for (int b = 0; b < NR_PDSCH_LAT_BINS && w >= 0 && (size_t)w < n; ++b)
+      w += snprintf(buf + w, n - w, "%s%" PRIu64, b ? "," : "", m->pdsch_schedule.hist[s][b]);
+    if (w >= 0 && (size_t)w < n) w += snprintf(buf + w, n - w, "]");
+  }
+  if (w >= 0 && (size_t)w < n) w += snprintf(buf + w, n - w, "},\"pdschq_reasons\":{");
+  for (int r = 0; r < NR_PDSCH_DROP_REASONS && w >= 0 && (size_t)w < n; ++r)
+    w += snprintf(buf + w, n - w, "%s\"%s\":%" PRIu64, r ? "," : "", reason[r], m->pdsch_schedule.reason[r]);
+  if (w >= 0 && (size_t)w < n) w += snprintf(buf + w, n - w, "}");
+  return (w < 0 || (size_t)w >= n) ? -1 : w;
+}
+
 int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t n)
 {
   const char *st = m->acq_state ? m->acq_state : "UNKNOWN";
@@ -133,10 +156,15 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     if (z < 0 || (size_t)z >= n - (size_t)w) return -1;
     w += z;
   }
+  if ((size_t)w + 1 >= n) return -1;
+  buf[w++] = ']';
+  const int sched = pdsch_schedule_json(m, buf + w, n - (size_t)w);
+  if (sched < 0) return -1;
+  w += sched;
   char discovery[96] = "";
   if (m->csirs_disc_readmit_skipped)
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
-  const int z = snprintf(buf + w, n - (size_t)w, "]%s}", discovery);
+  const int z = snprintf(buf + w, n - (size_t)w, "%s}", discovery);
   return (z < 0 || (size_t)z >= n - (size_t)w) ? -1 : w + z;
 }

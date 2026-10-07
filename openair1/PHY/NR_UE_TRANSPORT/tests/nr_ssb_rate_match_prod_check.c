@@ -20,6 +20,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/TOOLS/tools_defs.h"
 #include <math.h>
+#include <stdatomic.h>
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_schedule.h"
 
 // Normally defined by the executable (nr-uesoftmodem / the physims).
 double cpuf;
@@ -395,11 +397,15 @@ typedef struct {
   fapi_nr_dl_cw_info_t cw;
 } decode_result_t;
 
-static decode_result_t run_decoder(const scene_t *sc)
+static long snapshot_producer(void *unused) { return atomic_load(&nr_ue_diag_producer_absolute_slot); }
+
+/* mode 1: expired borrowed ring; 2: copy before expiry, overwrite live ring;
+ * mode 3: same ownership with injected GPU LLRs (host-only GPU handoff test). */
+static decode_result_t run_decoder_mode(const scene_t *sc, int nant, int mode)
 {
   decode_result_t d = {0};
   PHY_VARS_NR_UE *ue = calloc(1, sizeof(*ue));
-  make_fp(&ue->frame_parms, sc->rx_pci, scene_ssb_sc(sc), 1);
+  make_fp(&ue->frame_parms, sc->rx_pci, scene_ssb_sc(sc), nant);
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   ue->is_synchronized = 1;
   ue->nrLDPC_coding_interface.nrLDPC_coding_decoder = ldpc_recorder;
@@ -413,7 +419,7 @@ static decode_result_t run_decoder(const scene_t *sc)
   // Slot 0 of the frame: symbol 0 carries the long CP (nr_slot_fep(), synchronised UE).
   c16_t *rxdata = aligned_alloc(64, sizeof(c16_t) * 2 * fp->samples_per_frame);
   memset(rxdata, 0, sizeof(c16_t) * 2 * fp->samples_per_frame);
-  c16_t *rxdata_ant[1] = {rxdata};
+  c16_t *rxdata_ant[4] = {rxdata, rxdata, rxdata, rxdata};
   ue->common_vars.rxdata = rxdata_ant;
   c16_t *time = aligned_alloc(64, sizeof(c16_t) * FFT);
   uint32_t pos = 0;
@@ -428,8 +434,34 @@ static decode_result_t run_decoder(const scene_t *sc)
 
   nr_pdsch_passive_grant_t grant = {.check_sample_lifetime = false, .rnti = sc->rnti, .mcs = 5, .mcs_table = 0,
                                     .mcs_table_lbrm = -1};
-  c16_t(*rxdataF)[fp->samples_per_slot_wCP] = aligned_alloc(64, sizeof(c16_t) * fp->samples_per_slot_wCP);
-  memset(rxdataF, 0, sizeof(c16_t) * fp->samples_per_slot_wCP);
+  c16_t *owned[4] = {0};
+  int16_t *gpu_llr = NULL;
+  if (mode) {
+    grant.source_absolute_slot = 0;
+    grant.check_sample_lifetime = true;
+    atomic_store(&nr_ue_diag_producer_absolute_slot, 9);
+    if (mode >= 2) {
+      void *dst[4]; const void *src[4];
+      for (int ant = 0; ant < nant; ++ant) {
+        owned[ant] = calloc(2 * fp->samples_per_frame, sizeof(c16_t));
+        dst[ant] = owned[ant]; src[ant] = rxdata;
+      }
+      CHECK(nr_pdsch_copy_iq(dst, src, nant, 2 * fp->samples_per_frame * sizeof(c16_t), 0,
+                             (fp->samples_per_slot0 + FFT) * sizeof(c16_t), 0, 20, snapshot_producer, NULL),
+            "snapshot admission failed");
+      nr_pdsch_passive_set_owned_iq(owned, 0);
+      CHECK(nr_pdsch_passive_iq_for_slot(1, rxdata_ant) == rxdata_ant, "future oracle borrowed wrong slot");
+      memset(rxdata, 0, sizeof(c16_t) * 2 * fp->samples_per_frame);
+      grant.check_sample_lifetime = false; /* same guarded handoff as the queue */
+      if (mode == 3) {
+        gpu_llr = calloc(2 * d.n_tx, sizeof(int16_t));
+        nr_pdsch_passive_set_llr_override(gpu_llr, 2 * d.n_tx);
+      }
+    }
+    atomic_store(&nr_ue_diag_producer_absolute_slot, 25); // GPU/LDPC round trip outlives the ring
+  }
+  c16_t(*rxdataF)[fp->samples_per_slot_wCP] = aligned_alloc(64, sizeof(c16_t) * fp->samples_per_slot_wCP * nant);
+  memset(rxdataF, 0, sizeof(c16_t) * fp->samples_per_slot_wCP * nant);
   nr_pdsch_passive_set_slot_share(0, 0, 0); // slot share off: the decoder FEPs PSS/SSS itself
   ldpc_calls = 0;
   ldpc_seen_G = 0;
@@ -439,6 +471,11 @@ static decode_result_t run_decoder(const scene_t *sc)
   d.cw = out.cw;
   d.ldpc_G = ldpc_seen_G;
   d.ldpc_calls = ldpc_calls;
+  nr_pdsch_passive_set_owned_iq(NULL, -1);
+  nr_pdsch_passive_set_llr_override(NULL, 0);
+  atomic_store(&nr_ue_diag_producer_absolute_slot, -1);
+  for (int ant = 0; ant < nant; ++ant) free(owned[ant]);
+  free(gpu_llr);
   free(rxdataF);
   free(time);
   free(rxdata);
@@ -447,6 +484,8 @@ static decode_result_t run_decoder(const scene_t *sc)
   free(ue);
   return d;
 }
+
+static decode_result_t run_decoder(const scene_t *sc) { return run_decoder_mode(sc, 1, 0); }
 
 static void expect_decoder(const char *name, const decode_result_t *d)
 {
@@ -813,6 +852,16 @@ int main(void)
   expect_decoder("decoder B", &db);
   decode_result_t dc = run_decoder(&c);
   expect_decoder("decoder C", &dc);
+  // T21: real four-RX decoder, late GPU return + SSB observation/CPU fallback.
+  decode_result_t stale = run_decoder_mode(&a, 4, 1);
+  CHECK(stale.status == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && stale.ldpc_calls == 0,
+        "borrowed expired IQ was decoded");
+  decode_result_t owned = run_decoder_mode(&a, 4, 2);
+  expect_decoder("T21 owned IQ with SSB after overwrite", &owned);
+  decode_result_t gpu_owned = run_decoder_mode(&b, 4, 3);
+  expect_decoder("T21 owned IQ with injected GPU LLR after overwrite", &gpu_owned);
+  decode_result_t gpu_fallback = run_decoder_mode(&a, 4, 3);
+  expect_decoder("T21 SSB forces CPU fallback after GPU handoff", &gpu_fallback);
   /* CSI-RS rate matching on the decoder, no SSB: the LLR count must be the RE count G was computed
    * from whatever the BWP offset, the allocation shape, or a resource listed twice (NZP + ZP). */
   const struct {

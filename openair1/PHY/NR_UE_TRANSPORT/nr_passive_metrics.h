@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #ifndef NR_PASSIVE_METRICS_H
 #define NR_PASSIVE_METRICS_H
+#include "nr_pdsch_passive_schedule.h"
 #ifndef __cplusplus
 #include <stdatomic.h>
 #endif
@@ -20,6 +21,9 @@ typedef struct {
   uint64_t acq_transitions, acq_sync_losses, acq_pbch_locks, acq_sib1_decodes;
   uint64_t pdcch_occasions, pdcch_candidates, pdcch_accepts, pdcch_accepts_c;
   uint64_t scanq_queued, scanq_processed, scanq_drop_full, scanq_drop_stale, scanq_drop_epoch, scanq_max_lag;
+  int pdsch_schedule_enabled;
+  nr_pdsch_schedule_stats_t pdsch_schedule;
+  uint64_t pdschq_drop_narrow;
   uint64_t pdschq_queued, pdschq_decoded, pdschq_crc_ok, pdschq_drop_full, pdschq_drop_stale, pdschq_drop_epoch, pdschq_stale_after_decode, pdschq_max_lag;
   uint64_t gpu_fep_stale_pre, gpu_fep_stale_post, gpu_fep_selfcheck_fail, gpu_fep_selfcheck_skipped, gpu_fep_disabled;
   /* BC12a SIB1 common-TDRA census at first convergence of a context, per DCI format of the context (_10 / _11; _unk = format not
