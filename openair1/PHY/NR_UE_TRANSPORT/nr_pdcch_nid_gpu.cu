@@ -7,15 +7,18 @@
 #include "nr_dl_gpu_memory.h"
 #define NID_FN __device__
 #include "nr_pdcch_nid_algorithm.h"
+#include "nr_pdcch_nid_stage1.h"
 
 namespace {
 constexpr int IDS=65536, CELLS=14*IDS, CHUNK=16;
 struct Device {
  NidStage2 stage2;
+ bool multisymbol;
  NidView view;
- float *values, *zsum;
+ float *values, *zsum, *multi;
  uint16_t *hits;
- float median[2*CHUNK], sigma[2*CHUNK];
+ int *candidates, selected_count[CHUNK];
+ float median[4*CHUNK], sigma[4*CHUNK];
  nr_pdcch_nid_result_t result;
 };
 struct HostTransfer {
@@ -40,11 +43,11 @@ __global__ void reset(Device *p, NidView v) {
 }
 // Prefix arithmetic follows the CPU oracle exactly (the old GPU sliding sum
 // did not). --fmad=false, precise div/sqrt, no fast-math preserve decisions.
-__device__ float best(const NidView &v,int k,const uint32_t *g,int lo,int hi,int exlo,int exhi,int m0) {
+__device__ float best(const NidView &v,int k,const uint32_t *g,int lo,int hi,int exlo,int exhi,int m0,int d=0) {
  // Keep the last six PREFIX values, not a sliding sum: subtraction and
  // rounding are identical to the CPU's full prefix arrays, with no large spills.
  float ar[6],ai[6],ap[6],sr=0,si=0,sp=0,b=0;
- const c16_t *re=v.grid(k);
+ const c16_t *re=v.grid(k,d);
  for(int c=lo;c<hi;c++) {
   float r=0,i=0,p=0;
   for(int q=0;q<3;q++) {
@@ -78,29 +81,42 @@ __global__ void sweep(Device *p,int first,int count) {
  p->values[(2*k+1)*IDS+id]=best(v,first+k,g,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0);
  p->values[(2*k)*IDS+id]=css?best(v,first+k,g,v.css0_crb,v.css0_crb+v.css0_nrb,0,0,v.css0_crb):0;
 }
-__global__ void standardize(Device *p) {
+__device__ float secondary(const NidView &v,int k,int id,int d) {
+ int idx=v.index(k),hi=(v.nsc-v.point_a_sc)/12,lo=v.point_a_sc>=0?0:(-v.point_a_sc+11)/12;
+ uint64_t x=((uint64_t)v.sps*v.slot[idx]+v.sym[idx]+d+1)*((uint64_t)(id*2)+1);
+ uint32_t x1=0,x2=(uint32_t)(((x<<17)+id*2)&0x7fffffff),g[54];
+ for(int w=0;w<6*hi/32+2;w++)g[w]=nid_gold(&x1,&x2,w==0);
+ bool css=v.css0_nrb>=6 && v.css0_crb>=lo && v.css0_crb+v.css0_nrb<=hi;
+ return best(v,k,g,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0,d);
+}
+__global__ void calibrate(Device *p,int first,int count) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y,d=blockIdx.z+1;
+ if(j>=NID_CAL || k>=count || d>=p->view.dur)return;
+ p->values[(2*CHUNK+2*k+d-1)*IDS+j]=secondary(p->view,first+k,j*64,d);
+}
+__global__ void standardize(Device *p,int base=0,int size=IDS) {
  __shared__ unsigned h[4096];
- int k=blockIdx.x,tid=threadIdx.x;
+ int k=base+blockIdx.x,tid=threadIdx.x;
  for(int j=tid;j<4096;j+=blockDim.x)h[j]=0;
  __syncthreads();
  const float *v=p->values+k*IDS;
- for(int i=tid;i<IDS;i+=blockDim.x) {
+ for(int i=tid;i<size;i+=blockDim.x) {
   int b=(int)(v[i]*4095);atomicAdd(h+(b<0?0:b>=4096?4095:b),1);
  }
  __syncthreads();
  if(tid==0) {
-  unsigned a=0;int b=0;while(b<4095 && a+h[b]<IDS/2)a+=h[b++];
+  unsigned a=0;int b=0;while(b<4095 && a+h[b]<size/2)a+=h[b++];
   p->median[k]=(b+0.5f)/4095;
  }
  __syncthreads();
  for(int j=tid;j<4096;j+=blockDim.x)h[j]=0;
  __syncthreads();
- for(int i=tid;i<IDS;i+=blockDim.x) {
+ for(int i=tid;i<size;i+=blockDim.x) {
   int b=(int)(fabsf(v[i]-p->median[k])*4095);atomicAdd(h+(b>=4096?4095:b),1);
  }
  __syncthreads();
  if(tid==0) {
-  unsigned a=0;int b=0;while(b<4095 && a+h[b]<IDS/2)a+=h[b++];
+  unsigned a=0;int b=0;while(b<4095 && a+h[b]<size/2)a+=h[b++];
   p->sigma[k]=fmaxf(1.4826f*((b+0.5f)/4095),1e-6f);
  }
 }
@@ -120,7 +136,47 @@ __global__ void accumulate(Device *p,int first,int count) {
   }
  }
 }
-__global__ void shortlist(Device *p) {
+// Compact before secondary Gold generation, so sparse surviving IDs occupy
+// full warps instead of forcing almost every warp through expensive branches.
+__global__ void screen(Device *p,int count) {
+ int id=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
+ if(id>=IDS || k>=count)return;
+ float z=(p->values[(2*k+1)*IDS+id]-p->median[2*k+1])/p->sigma[2*k+1];
+ if(z>2.f) {
+  int j=atomicAdd(p->selected_count+k,1);
+  p->candidates[k*IDS+j]=id;
+ }
+}
+__global__ void combine(Device *p,int first,int count) {
+ int j=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
+ if(k>=count || j>=p->selected_count[k])return;
+ int id=p->candidates[k*IDS+j];
+ const float bound=sqrtf(2.f*logf((float)IDS))+2.f;
+ float sum=(p->values[(2*k+1)*IDS+id]-p->median[2*k+1])/p->sigma[2*k+1];
+ for(int d=1;d<p->view.dur;d++) {
+  int cal=2*CHUNK+2*k+d-1;
+  float value=id%64?secondary(p->view,first+k,id,d):p->values[cal*IDS+id/64];
+  float z=(value-p->median[cal])/p->sigma[cal];
+  if(z<=2.f)break;
+  sum+=z;
+  float combined=sum/sqrtf((float)(d+1));
+  p->multi[(2*k+d-1)*IDS+id]=combined>bound?combined:0;
+ }
+}
+__global__ void collect(Device *p,int first,int count) {
+ int id=blockIdx.x*blockDim.x+threadIdx.x;
+ if(id>=IDS)return;
+ for(int k=0;k<count;k++) {
+  // Scores are written by ID into a separate workspace, preserving CPU order.
+  for(int d=1;d<p->view.dur;d++) {
+   float value=p->multi[(2*k+d-1)*IDS+id];
+   if(value<=0)continue;
+   int sym=p->view.sym[p->view.index(first+k)],cell=(2*d+1)*CELLS+sym*IDS+id;
+   p->hits[cell]++;p->zsum[cell]+=value;
+  }
+ }
+}
+__device__ void legacy_shortlist(Device *p) {
  if(threadIdx.x || blockIdx.x) return;
  for(int r=0;r<2;r++) {
   double total=0;float bv=-1;int bi=0;uint64_t hash=1469598103934665603ULL;
@@ -153,13 +209,18 @@ __global__ void shortlist(Device *p) {
   for(int t=0;t<n;t++){p->result.list_id[t]=selected[t]%IDS;p->result.list_sym[t]=selected[t]/IDS;}
  }
 }
+__global__ void shortlist(Device *p) {
+ if(threadIdx.x || blockIdx.x)return;
+ if(p->multisymbol)nid_shortlist(p->hits,p->zsum,p->view.dur,&p->result);
+ else legacy_shortlist(p);
+}
 __global__ void prepare(Device *p,int list) {
  if(threadIdx.x || blockIdx.x)return;
  p->stage2.alive=0;
  if(list>=p->result.list_n)return;
  int nid=p->result.list_id[list];
- for(int j=0;j<list;j++)if(p->result.list_id[j]==nid)return;
- p->stage2.prepare(nid,p->result.list_sym[list]);
+ if(!p->multisymbol)for(int j=0;j<list;j++)if(p->result.list_id[j]==nid)return;
+ p->stage2.prepare(nid,p->result.list_sym[list],p->result.list_dur[list]);
 }
 __global__ void score(Device *p,int base,int count) {
  int i=base+blockIdx.x*blockDim.x+threadIdx.x;
@@ -193,6 +254,8 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  }
  int n=window*NR_PDCCH_NID_BATCH,sc=12*rb;
  Device &p=c->host;
+ const char *enable=getenv("ISAC_CSIRS_DISC");
+ p.multisymbol=enable && !strcmp(enable,"1");
  int *slots=nullptr; c16_t *iq=nullptr;double *scratch=nullptr;st2_snap_t *sn=nullptr;
  int least_priority=0,greatest_priority=0;
  if(cudaDeviceGetStreamPriorityRange(&least_priority,&greatest_priority)!=cudaSuccess
@@ -203,7 +266,8 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(cudaHostAlloc(&c->transfer,sizeof(HostTransfer),cudaHostAllocDefault)!=cudaSuccess)goto fail;
  memset(c->transfer,0,sizeof(HostTransfer));
  if(!allocate(c,&c->dev,1) || !allocate(c,&iq,(size_t)n*dur*sc) || !allocate(c,&slots,2*n)
-    || !allocate(c,&p.values,2*CHUNK*IDS) || !allocate(c,&p.zsum,2*CELLS) || !allocate(c,&p.hits,2*CELLS)
+    || !allocate(c,&p.candidates,CHUNK*IDS) || !allocate(c,&p.multi,2*CHUNK*IDS)
+    || !allocate(c,&p.values,4*CHUNK*IDS) || !allocate(c,&p.zsum,6*CELLS) || !allocate(c,&p.hits,6*CELLS)
     || !allocate(c,&p.stage2.H,NID_HYP_CAP) || !allocate(c,&sn,4*n+1)
     || !allocate(c,&scratch,(size_t)(4*n+1)*6*276+2*n))goto fail;
  // Commit/touch every device workspace before RX, not at the first pass.
@@ -226,17 +290,21 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(cudaMemcpyAsync(c->dev,&p,sizeof(p),cudaMemcpyHostToDevice,c->stream)!=cudaSuccess)goto fail;
  // Eager-load every kernel before RX (CUDA_MODULE_LOADING=LAZY included).
  for(const void *f : { (const void*)noop,(const void*)reset,(const void*)sweep,(const void*)standardize,
-                      (const void*)accumulate,(const void*)shortlist,(const void*)prepare,(const void*)score,(const void*)finish }) {
+                      (const void*)calibrate,(const void*)screen,(const void*)combine,(const void*)collect,(const void*)accumulate,(const void*)shortlist,(const void*)prepare,(const void*)score,(const void*)finish }) {
   cudaFuncAttributes a;if(cudaFuncGetAttributes(&a,f)!=cudaSuccess)goto fail;
  }
  // Execute all entry kernels as well as loading their code before sealing.
- cudaMemsetAsync(p.values,0,2*CHUNK*IDS*sizeof(float),c->stream);
- cudaMemsetAsync(p.hits,0,2*CELLS*sizeof(uint16_t),c->stream);
- cudaMemsetAsync(p.zsum,0,2*CELLS*sizeof(float),c->stream);
+ cudaMemsetAsync(p.values,0,4*CHUNK*IDS*sizeof(float),c->stream);
+ cudaMemsetAsync(p.hits,0,6*CELLS*sizeof(uint16_t),c->stream);
+ cudaMemsetAsync(p.zsum,0,6*CELLS*sizeof(float),c->stream);
  reset<<<1,1,0,c->stream>>>(c->dev,p.view);
  sweep<<<dim3(IDS/128,CHUNK),128,0,c->stream>>>(c->dev,0,0);
  standardize<<<2*CHUNK,256,0,c->stream>>>(c->dev);
  accumulate<<<IDS/256,256,0,c->stream>>>(c->dev,0,0);
+ calibrate<<<dim3(NID_CAL/128,1,2),128,0,c->stream>>>(c->dev,0,0);
+ screen<<<1,256,0,c->stream>>>(c->dev,0);
+ combine<<<1,256,0,c->stream>>>(c->dev,0,0);
+ collect<<<IDS/256,256,0,c->stream>>>(c->dev,0,0);
  shortlist<<<1,1,0,c->stream>>>(c->dev);
  prepare<<<1,1,0,c->stream>>>(c->dev,0);
  score<<<8,128,0,c->stream>>>(c->dev,0,0);
@@ -281,8 +349,8 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
  const auto start=std::chrono::steady_clock::now();
  auto expired=[&]() {return std::chrono::duration_cast<std::chrono::milliseconds>(
     std::chrono::steady_clock::now()-start).count()>=c->budget_ms;};
- if(cudaMemsetAsync(c->host.hits,0,2*CELLS*sizeof(uint16_t),stream)!=cudaSuccess
-    || cudaMemsetAsync(c->host.zsum,0,2*CELLS*sizeof(float),stream)!=cudaSuccess)return -1;
+ if(cudaMemsetAsync(c->host.hits,0,6*CELLS*sizeof(uint16_t),stream)!=cudaSuccess
+    || cudaMemsetAsync(c->host.zsum,0,6*CELLS*sizeof(float),stream)!=cudaSuccess)return -1;
  reset<<<1,1,0,stream>>>(p,c->host.view);cudaEventRecord(c->event[0],stream);
  if(!seed) {
  for(int first=0;first<c->host.view.n;first+=CHUNK) {
@@ -290,6 +358,15 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
   sweep<<<dim3(IDS/128,n),128,0,stream>>>(p,first,n);
   standardize<<<2*n,256,0,stream>>>(p);
   accumulate<<<IDS/256,256,0,stream>>>(p,first,n);
+  if(c->host.multisymbol && c->dur>1) {
+   calibrate<<<dim3(NID_CAL/128,n,c->dur-1),128,0,stream>>>(p,first,n);
+   standardize<<<2*n,256,0,stream>>>(p,2*CHUNK,NID_CAL);
+   if(cudaMemsetAsync(p->selected_count,0,sizeof(c->host.selected_count),stream)!=cudaSuccess
+      || cudaMemsetAsync(c->host.multi,0,2*n*IDS*sizeof(float),stream)!=cudaSuccess)return -1;
+   screen<<<dim3(IDS/256,n),256,0,stream>>>(p,n);
+   combine<<<dim3(IDS/128,n),128,0,stream>>>(p,first,n);
+   collect<<<IDS/256,256,0,stream>>>(p,first,n);
+  }
   // Yield between bounded chunks, never monopolize the device with an entire window.
   if(cudaStreamSynchronize(stream)!=cudaSuccess)return -1;
   if(expired())return 2;
@@ -300,6 +377,7 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
   c->transfer->result={};c->transfer->result.list_n=seed->list_n;
   memcpy(c->transfer->result.list_id,seed->list_id,sizeof(seed->list_id));
   memcpy(c->transfer->result.list_sym,seed->list_sym,sizeof(seed->list_sym));
+  memcpy(c->transfer->result.list_dur,seed->list_dur,sizeof(seed->list_dur));
   if(cudaMemcpyAsync(&p->result,&c->transfer->result,sizeof(*out),cudaMemcpyHostToDevice,stream)!=cudaSuccess)return -1;
  }
  cudaEventRecord(c->event[1],stream);
@@ -339,6 +417,6 @@ extern "C" const nr_pdcch_nid_ops_t *nr_pdcch_nid_gpu_ops(void) {return &ops;}
 // Synthetic parity harness only; the receiver's ABI always calls the full pipeline.
 extern "C" int nr_pdcch_nid_gpu_stage2_check(void *ctx,const nr_pdcch_nid_result_t *seed,nr_pdcch_nid_result_t *out) {
  if(!seed || seed->list_n<1 || seed->list_n>40)return -1;
- for(int i=0;i<seed->list_n;i++)if(seed->list_id[i]<0 || seed->list_id[i]>65535 || seed->list_sym[i]<0 || seed->list_sym[i]>13)return -1;
+ for(int i=0;i<seed->list_n;i++)if(seed->list_id[i]<0 || seed->list_id[i]>65535 || seed->list_sym[i]<0 || seed->list_sym[i]>13 || seed->list_dur[i]<0 || seed->list_dur[i]>3 || seed->list_sym[i]+seed->list_dur[i]>14)return -1;
  return run_impl(ctx,out,seed);
 }

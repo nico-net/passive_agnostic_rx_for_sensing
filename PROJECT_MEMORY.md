@@ -3064,6 +3064,24 @@ feature-off equivalence and OTA remain DEFERRED, not inferred from host tests. T
 T17 preserves that decision for parity, not a claim of correct AL1-only mapping. Full test results,
 limits and exact deferred commands: [T17 report](docs/superpowers/reports/csd/T17.md).
 
+### T19 — dedicated PDCCH multi-symbol evidence (2026-10-07, csd/t19)
+
+[OFFLINE VERIFIED, DGX aarch64 host] The independent nID reference and stage-2
+port now recover the duration-3 fixture missed by T17: nID 12345, first symbol 3,
+duration 3. Duration/start-specific combined hits use one shared 1% per-pass
+Poisson false-alarm budget. New production behavior requires both
+`ISAC_CSIRS_DISC=1` and the existing `ISAC_PDCCH_NID_GPU=1`; the former unset
+selects the original GPU listing/duration path. Internal module ABI is 2;
+record handoff and CSI-RS contract semantics are unchanged. [MEASURED, DGX
+shared host, CPU process time, n=1] Stage-1 cost relative to the base reference
+is 1.013x for duration-1 capture and 1.092x for the same signal in a three-symbol
+capture. [IMPLEMENTED, NOT VALIDATED ON DEVICE] CUDA sm_121 builds; GPU parity,
+sanitizers and runtime cost remain deferred. [OFFLINE VERIFIED, DGX aarch64 host]
+All 24 nID CTests plus manual fixture 0 pass. Full suite excluding `nr_td_sim_test`:
+174/184 passed; nine brief-listed failures and one unchanged CSI-RS stress timing
+failure (passed its targeted rerun). Fixtures, full-suite results,
+statistical derivation and device commands: [T19 report](docs/superpowers/reports/csd/T19.md).
+
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)

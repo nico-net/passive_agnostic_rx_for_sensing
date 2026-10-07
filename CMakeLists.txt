@@ -2380,6 +2380,10 @@ if(ENABLE_TESTS)
     math(EXPR fixture "6 + ${d}")
     add_test(NAME test_nr_pdcch_nid_duration${d} COMMAND test_nr_pdcch_nid_algorithm ${fixture})
   endforeach()
+  foreach(fixture RANGE 10 21)
+    add_test(NAME test_nr_pdcch_nid_multisymbol${fixture} COMMAND test_nr_pdcch_nid_algorithm ${fixture})
+  endforeach()
+
 endif()
 
 if(ENABLE_TESTS)

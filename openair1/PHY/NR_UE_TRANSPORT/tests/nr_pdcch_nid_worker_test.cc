@@ -25,7 +25,7 @@ int main(int argc,char **argv) {
  CHECK(nr_pdcch_nid_gpu_start(36)==0 && !nr_pdcch_nid_gpu_running());
  CHECK(nr_pdcch_nid_gpu_records(records,16,&generation)==-1 && !memcmp(records,sentinel,sizeof(records)) && generation==0);
  nr_pdcch_nid_batch_t b={};nr_pdcch_nid_result_t expected={};
- if(device) {nid_reference_make(7,&b);nid_reference_run(1,&expected);}
+ if(device) {setenv("ISAC_CSIRS_DISC","1",1);nid_reference_make(7,&b);nid_reference_run(1,&expected);}
  else b.cfg={432,0,0,6,2,14,dur};
  setenv("ISAC_PDCCH_NID_GPU","1",1);char duration[8];snprintf(duration,sizeof(duration),"%d",dur);setenv("ISAC_COREMAP_IDSWEEP_DUR",duration,1);
  setenv("ISAC_PDCCH_NID_GPU_WINDOW",device?"1":"2",1);setenv("ISAC_PDCCH_NID_GPU_EVERY","2",1);

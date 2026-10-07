@@ -10,7 +10,7 @@ extern "C" {
 #define NR_PDCCH_NID_BATCH 336
 #define NR_PDCCH_NID_MAX_RECORDS 16
 #define NR_PDCCH_NID_MAX_WINDOW 20
-#define NR_PDCCH_NID_ABI 1
+#define NR_PDCCH_NID_ABI 2
 typedef struct { int16_t r, i; } nr_pdcch_nid_iq_t;
 typedef struct { int nid, sym, dur, grid_rb, groups, L, R, shift, ties; } nr_pdcch_nid_record_t;
 typedef struct {
@@ -21,6 +21,11 @@ typedef struct {
  int top_id[2], top_sym[2], list_n, list_id[40], list_sym[40];
  uint64_t hit_hash[2];
  int al_win[NR_PDCCH_NID_MAX_RECORDS][5];
+ /* ABI 2: explicit multi-symbol shortlist and false-alarm diagnostics. */
+ int list_dur[40];
+ float list_score[40];
+ double lambda[3][14];
+ int threshold[3][14];
 } nr_pdcch_nid_result_t;
 typedef struct {
  int nsc, point_a_sc, css0_crb, css0_nrb, pci, sps, dur;
