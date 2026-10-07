@@ -5,6 +5,7 @@ DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$DIR/../../.." && pwd)
 B=${BUILD:-$REPO/cmake_targets/ran_build/build}
 SCENARIO=${1:-}; SIB=${2:-}; RECONF=${3:-}
+[[ ${R13_UE2:-0} == 0 || $1 == stable ]] || { echo "R13_UE2=1 supports the stable scenario only" >&2; exit 2; }
 case "$SCENARIO" in stable|bwp_switch|same_cell_restart_size_change|cell_restart) ;; *) echo "usage: $0 {stable|bwp_switch|same_cell_restart_size_change|cell_restart} {sa|sib1less} {on|off}" >&2; exit 2;; esac
 case "$SIB" in sa|sib1less) ;; *) echo "arm must be sa or sib1less" >&2; exit 2;; esac
 case "$RECONF" in on|off) ;; *) echo "flag must be on or off" >&2; exit 2;; esac
@@ -52,6 +53,8 @@ declare -A ACTIVE=()
 NS=r13-ue-$$
 VETH=r13h$$
 NS_CREATED=0; VETH_CREATED=0
+NS2=r13-ue2-$$; VETH2=r13i$$; NS2_CREATED=0; VETH2_CREATED=0
+UE2_ON=${R13_UE2:-0}
 # Only the UE and traffic sink enter this namespace. RF TCP crosses the veth;
 # downlink traffic stays in the host and reaches the UE through ogstun/GTP-U.
 setup_netns() {
@@ -64,6 +67,13 @@ setup_netns() {
   sudo -n ip netns exec "$NS" ip addr add 192.0.2.2/30 dev r13rf
   sudo -n ip netns exec "$NS" ip link set r13rf up
   sudo -n ip netns exec "$NS" ip link set lo up
+  if [[ $UE2_ON == 1 ]]; then
+    sudo -n ip netns add "$NS2"; NS2_CREATED=1
+    sudo -n ip link add "$VETH2" type veth peer name r13rf netns "$NS2"; VETH2_CREATED=1
+    sudo -n ip addr add 192.0.2.5/30 dev "$VETH2"; sudo -n ip link set "$VETH2" up
+    sudo -n ip netns exec "$NS2" ip addr add 192.0.2.6/30 dev r13rf
+    sudo -n ip netns exec "$NS2" ip link set r13rf up; sudo -n ip netns exec "$NS2" ip link set lo up
+  fi
 }
 event() { python3 - "$OUT/events.jsonl" "$1" "$SCENARIO" "$SIB" "$RECONF" <<'PY'
 import json,os,socket,sys,time
@@ -97,6 +107,8 @@ cleanup() {
   stop_pid "${GNB:-}" || rc=1
   for pid in "${!ACTIVE[@]}"; do stop_pid "$pid" "${ACTIVE[$pid]}" || rc=1; done
   if [[ $VETH_CREATED == 1 ]]; then sudo -n ip link del "$VETH" 2>/dev/null || true; fi
+  if [[ $VETH2_CREATED == 1 ]]; then sudo -n ip link del "$VETH2" 2>/dev/null || true; fi
+  if [[ $NS2_CREATED == 1 ]]; then sudo -n ip netns del "$NS2" 2>/dev/null || true; fi
   if [[ $NS_CREATED == 1 ]]; then sudo -n ip netns del "$NS" 2>/dev/null || true; fi
   sleep 1  # let timestamping pipe readers drain before campaign.py scores the run
   exit "$rc"
@@ -142,6 +154,23 @@ start_traffic() {
   ( exec 9>&-; cd traffic; exec env --default-signal=INT,TERM setsid python3 "$REPO/tests/passive_rx/udp_dl.py" send --dst "$UEIP" --port 5201 --rate "${R13_TRAFFIC_RATE:-6M}" --dur "$((DUR+900))" >"$OUT/traffic/${phase}_send.log" 2>&1 ) &
   TX=$!; ACTIVE[$TX]=0
 }
+start_ue2() {
+  local log=$1
+  ( exec 9>&-; cd ue; touch nrL1_UE_stats-0.log
+    exec env --default-signal=INT,TERM setsid sudo -n ip netns exec "$NS2" env "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" "$B/nr-uesoftmodem" -O "$DIR/ue_active2.cfg" --rfsim --rfsimulator.serveraddr 192.0.2.5 -C 3319680000 -r 106 --numerology 1 --band 78 --ssb 516 \
+      > >(python3 "$DIR/stamp.py" "$OUT/$log") 2>&1 ) &
+  UE2=$!; ACTIVE[$UE2]=1
+  wait_pattern "$OUT/$log" 'RA procedure succeeded' 150 'UE2 random access'
+  wait_pattern "$OUT/$log" 'PDU Session Establishment Accept' 150 'UE2 PDU session'
+  UEIP2=$(sed -n 's/.*UE IPv4: \([0-9.]*\).*/\1/p' "$OUT/$log" | tail -1)
+  [[ -n $UEIP2 ]] || { echo "UE2 attached without IPv4 address in $log" >&2; return 1; }
+  ip route get "$UEIP2" | tee "$OUT/traffic/before2_route.log"
+  grep -q 'dev ogstun' "$OUT/traffic/before2_route.log" || { echo "UE2 downlink route must use ogstun" >&2; return 1; }
+  ( exec 9>&-; cd traffic; exec env --default-signal=INT,TERM setsid sudo -n ip netns exec "$NS2" python3 "$REPO/tests/passive_rx/udp_dl.py" recv --bind "$UEIP2" --port 5201 --dur "$((DUR+900))" >"$OUT/traffic/before2_recv.log" 2>&1 ) &
+  TR2=$!; ACTIVE[$TR2]=1; sleep 2
+  ( exec 9>&-; cd traffic; exec env --default-signal=INT,TERM setsid python3 "$REPO/tests/passive_rx/udp_dl.py" send --dst "$UEIP2" --port 5201 --rate "${R13_TRAFFIC_RATE:-6M}" --dur "$((DUR+900))" >"$OUT/traffic/before2_send.log" 2>&1 ) &
+  TX2=$!; ACTIVE[$TX2]=0
+}
 stop_traffic() { stop_pid "$TX"; stop_pid "$TR" 1; }
 ci() {
   exec 3<>/dev/tcp/127.0.0.1/9091
@@ -168,6 +197,7 @@ setup_netns
 start_gnb "${R13_GNB_CFG:-gnb_baseline.cfg}" gnb/before.log
 start_ue ue/before.log
 start_traffic before
+if [[ $UE2_ON == 1 ]]; then start_ue2 ue/before2.log; fi
 ( exec 9>&-; cd rx; touch nrL1_UE_stats-0.log
   exec env --default-signal=INT,TERM setsid "${RX_ENV[@]}" "$B/nr-uesoftmodem" --passive-rx --rfsim -O "${R13_RX_CFG:-$DIR/ue_passive.cfg}" -C 3319680000 -r 106 --numerology 1 --band 78 --ssb 516 \
     --ue-nb-ant-rx "${R13_RX_ANT:-4}" "${RX_ARGS[@]}" > >(python3 "$DIR/stamp.py" "$OUT/rx/rx.log") 2>&1 ) &

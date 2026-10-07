@@ -250,6 +250,7 @@ static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
 void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
+void nr_pdcch_bwp_crc_search_result(int entry, bool crc_ok);
 #include "nr_dmrs_id_estimate.h"
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
 static _Atomic uint64_t g_decoded       = 0;
@@ -1305,8 +1306,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
     if (!credit_ok && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
       atomic_fetch_add_explicit(&g_stale_after_decode, 1, memory_order_relaxed);
-    if (credit_ok && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
-      nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+    /* A TB-CRC fail under a Technique D hypothesis that is still being searched says nothing about the BWP geometry (measured on the sa-bed:
+     * 131 un-resolves in 101 s with the geometry correct every time, which also dropped the layout pin and reset the search). Only a
+     * job outside that search -- the manual, single-hypothesis layout -- may refute the BWP. */
+    if (credit_ok && job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
+      if (job.sweep_ticket.generation == 0)
+        nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      else /* 32 failures mean nothing here, but thousands without one pass do */
+        nr_pdcch_bwp_crc_search_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+    }
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
             job.absolute_slot, slots_per_frame))
@@ -1427,6 +1435,24 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
          * this comment for the full reasoning. */
         const int dl_ns = pdu->nscid & 1;
+        /* The DL DM-RS scrambling id defaults to the PCI. The 2-stage state below is initialised ONCE, so after a cell-identity change
+         * (gNB restarted with another PCI) it kept the id decided under the OLD cell (`dmrs_id[dl=CONFIRMED:0/16]` in every status line after
+         * the restart), the channel estimate was built from the wrong pilot sequence, every TB CRC failed and Technique D never converged.
+         * Re-initialise it from the new Nid_cell when the PCI this state was built for changes. */
+        if (credit_ok) {
+          static _Atomic int s_dl_dmrs_nid = -1;
+          const int nid_now = (int)ue->frame_parms.Nid_cell;
+          const int nid_was = atomic_exchange_explicit(&s_dl_dmrs_nid, nid_now, memory_order_relaxed);
+          if (nid_was >= 0 && nid_was != nid_now) {
+            for (int ns = 0; ns < NR_DL_DMRS_NSCID; ++ns) {
+              pthread_mutex_lock(&g_dl_dmrs_id_lock[ns]);
+              nr_dmrs_id_2stage_init(&g_dl_dmrs_id[ns], "PDSCH", nid_now);
+              g_dl_dmrs_id_init[ns] = true;
+              pthread_mutex_unlock(&g_dl_dmrs_id_lock[ns]);
+            }
+            LOG_A(PHY, "SENSING: DL DM-RS id state RESET: PCI %d -> %d (the decided id belonged to the old cell)\n", nid_was, nid_now);
+          }
+        }
         if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
           nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[dl_ns];

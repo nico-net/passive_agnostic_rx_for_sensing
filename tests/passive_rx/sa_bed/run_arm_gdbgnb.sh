@@ -107,7 +107,7 @@ trap 'exit 143' TERM
 start_gnb() {
   local cfg=$1 log=$2
   ( exec 9>&-; cd gnb; touch nrL1_stats.log nrMAC_stats.log nr_stats.log
-    exec env --default-signal=INT,TERM setsid "$B/nr-softmodem" -O "$DIR/$cfg" --rfsim --telnetsrv --telnetsrv.listenport 9091 --telnetsrv.shrmod ci \
+    exec env --default-signal=INT,TERM setsid gdb -q -batch -ex "handle SIGPIPE SIGUSR1 SIGUSR2 SIG32 SIG33 SIG34 SIG35 nostop noprint pass" -ex run -ex "bt 25" -ex "thread apply all bt 5" --args "$B/nr-softmodem" -O "$DIR/$cfg" --rfsim --telnetsrv --telnetsrv.listenport 9091 --telnetsrv.shrmod ci \
       > >(python3 "$DIR/stamp.py" "$OUT/$log") 2>&1 ) &
   GNB=$!; ACTIVE[$GNB]=0
   wait_pattern "$OUT/$log" 'Received NGSetupResponse' 40 "gNB NG setup"

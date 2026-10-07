@@ -98,6 +98,8 @@ void nr_pdcch_coreset_pilot(uint16_t scrambling_id, int slot, int symbol, int n_
  *  the BWP start on OAI). -1 when the window is not covered by the pilots. */
 double nr_pdcch_coreset_window_corr(const c16_t *rxdataF, int ofdm_symbol_size, int first_carrier_offset,
                                     const c16_t *pilot, int n_pilot_rb, int rb_offset, int ref_rb);
+double nr_pdcch_coreset_window_corr_n(const c16_t *rxdataF, int ofdm_symbol_size, int first_carrier_offset,
+                                      const c16_t *pilot, int n_pilot_rb, int rb_offset, int ref_rb, int width);
 
 /* Per-occasion prefix sums of Y*conj(DMRS), |Y|^2 and |DMRS|^2. No history, RNTI or
  * detector threshold: scores are a scheduling priority, not proof of a PDCCH. */

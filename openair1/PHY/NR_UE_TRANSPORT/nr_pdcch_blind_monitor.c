@@ -515,7 +515,16 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * dedicated config when it finishes, which would silently revert such an advance while the sweep's
    * own index had already moved on -- i.e. the sweep would go on testing the previous mapping while
    * believing it was testing the next one. A CSS0 occasion is not part of that sweep anyway. */
+  /* g_cfg also carries dedicated-discovery residue (coreset_rb_offset is written by the discovery paths and
+   * never by this function): CORESET#0 starts at its own bwp_start, so its snapshot must not inherit one.
+   * Measured on the sa-bed (cell_restart, PCI 0->1): a stale rb_offset=5 made CORESET#0 demap 5 RB off and SI-RNTI
+   * accepts stopped; the run whose bank offset was 0 kept decoding SI after the restart. */
+  const int stale_rb_offset = g_cfg.coreset_rb_offset;
   g_css0_cfg              = g_cfg;
+  g_css0_cfg.coreset_rb_offset = 0;
+  LOG_A(PHY, "SENSING: CSS0 SNAPSHOT rb_offset=%d(stale, forced 0) bwp=%d+%d dci_len_ovr=%d type=%d freq_dom=%d shift=%d scramb=%d\n",
+        stale_rb_offset, g_css0_cfg.bwp_start, g_css0_cfg.bwp_size, g_css0_cfg.dci_length_override, g_css0_cfg.coreset_type,
+        g_css0_cfg.coreset_freq_domain, g_css0_cfg.coreset_shift_index, g_css0_cfg.coreset_pdcch_dmrs_scrambling_id);
   g_css0_cfg.autodiscover = 0;
   g_css0_cfg_valid        = true;
   return true;
@@ -722,7 +731,25 @@ static void map_restart(int span_rb, int duration, int pci)
   s_map_idx = 0;
   map_apply();
 }
+static bool s_early_commit_enabled = true; /* tests switch it off to exercise the oracle's seeded commit */
+static bool s_early_applied = false;       /* the unseeded commit has been posted/applied */
+static bool s_reseeded = false;            /* the oracle has since re-ordered the catalogue (once) */
+static bool s_early_commit_used = false; /* the unseeded first commit of this discovery epoch has been taken */
+static uint8_t s_dur_tried = 0;  /* bit d set: CORESET duration d has had a full catalogue lap this discovery */
 static _Atomic bool s_ext_verified = false; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
+/* The walk began unseeded and nothing has verified yet: the oracle keeps observing and re-orders the catalogue once its evidence matures
+ * (the SA bed's seeds are noise, the OCUDU bed's put the right extent first: an unseeded walk verified offset 3 there instead of 0). */
+static _Atomic int s_hint_first_w = -1, s_hint_last_w = -1;
+void nr_pdcch_blind_monitor_autodiscover_extent_hint(int first_w, int last_w)
+{
+  atomic_store(&s_hint_first_w, first_w);
+  atomic_store(&s_hint_last_w, last_w);
+}
+bool nr_pdcch_blind_monitor_autodiscover_reseed_pending(void)
+{
+  return s_early_applied && !s_reseeded && s_dedicated_found && !s_ext_verified;
+}
+
 static int  s_ext_occ      = 0;
 static _Atomic uint64_t s_ext_generation; /* _Atomic: read by every blind-PDCCH scan consumer (Task A7) */
 typedef struct {
@@ -855,6 +882,18 @@ static bool extent_advance(void)
       s_map_stage = 1;
       s_ext_idx = 0;
       LOG_A(PHY, "SENSING: autodiscover mapping stage 1: primary fast lap exhausted, widening to all shifts\n");
+    } else if (s_dur_tried != 0x0e) {
+      /* The walk fixed the CORESET duration from the oracle's symbol-1 hits, which reads 1 whenever the CORESET sits in windows the oracle
+       * excludes (here: inside CORESET#0's footprint, real duration 2). CCE-to-REG numbering is time-first, so a wrong duration can never
+       * verify. Duration is a hypothesis too: repeat the lap for each remaining one before giving up. */
+      int d = 1;
+      while (d <= 3 && (s_dur_tried & (1 << d)))
+        d++;
+      s_dur_tried |= (uint8_t)(1 << d);
+      g_cfg.coreset_duration = d;
+      s_map_stage = 0;
+      s_ext_idx = 0;
+      LOG_A(PHY, "SENSING: autodiscover duration lap: candidates exhausted, retrying every extent with CORESET duration %d\n", d);
     } else {
       s_dedicated_found = false;
       s_ext_n = 0;
@@ -1383,9 +1422,31 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
   memset(s_lt_rnti, 0, sizeof(s_lt_rnti));
   s_lt_ndwell = 0;
   pthread_mutex_unlock(&s_techA_mu);
+  s_early_commit_used = false;
+  s_early_applied = false;
+  s_reseeded = false;
 }
 
+static int map_candidates_impl(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out, int *pass0_n_out);
 int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out)
+{
+  int n_pass0 = 0;
+  const int n = map_candidates_impl(span_rb, duration, pci, out, max_out, &n_pass0);
+  s_map_pass0_n = n_pass0;
+  return n;
+}
+int nr_pdcch_map_candidates_pass0(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out)
+{
+  nr_pdcch_map_cand_t all[NR_PDCCH_MAP_MAX_CAND];
+  int n_pass0 = 0;
+  const int n = map_candidates_impl(span_rb, duration, pci, all, NR_PDCCH_MAP_MAX_CAND, &n_pass0);
+  const int m = (n_pass0 > 0 && n_pass0 < n) ? n_pass0 : n;
+  const int k = m < max_out ? m : max_out;
+  for (int i = 0; i < k; i++)
+    out[i] = all[i];
+  return k;
+}
+static int map_candidates_impl(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out, int *pass0_n_out)
 {
   if (out == NULL || max_out <= 0 || span_rb <= 0 || duration < 1 || duration > 3)
     return 0;
@@ -1453,7 +1514,7 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
       }
     }
   }
-  s_map_pass0_n = (n_pass == 1) ? n : n_pass0;
+  *pass0_n_out = (n_pass == 1) ? n : n_pass0;
   return n;
 }
 
@@ -1717,6 +1778,40 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   /* A posted footprint decision is waiting for a scan consumer to apply it (deferred commit). */
   if (s_commit_pending)
     return false;
+  /* FIRST commit of a discovery epoch is UNSEEDED, taken on the first call (the CSS0 lock). The oracle's evidence only orders the catalogue
+   * (it is complete with nseed == 0), yet the commit is what switches the receiver from CSS0-only scanning to the dedicated search, and with
+   * it the BWP tracker's view of the cell: while the receiver is CSS0-only, a dedicated CORESET inside CORESET#0's windows is attributed to
+   * the configured CORESET and the proposal stays 6 RB x 1 symbol (measured). Waiting for 2-8 hit-driven dwells therefore cost 30-110 s for
+   * seeds that were noise on the SA bed (the oracle excludes CORESET#0's windows, where the real CORESET sits). A later exhaustion restarts
+   * the discovery epoch and goes through the oracle as before, so its ordering is still used where it exists. */
+  if (s_early_commit_enabled && !s_early_commit_used) {
+    s_early_commit_used = true;
+    techA_commit_t *c = &s_commit_rx;
+    const int nw_total = n_rb_carrier / 6;
+    c->ext_n = nr_pdcch_extent_candidates_multi(NULL, 0, nw_total, c->ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
+    if (c->ext_n > 0) {
+      c->nseed = 0;
+      c->ndwell = 0;
+      c->recurrence_floor = 0;
+      c->n_rb_carrier = n_rb_carrier;
+      c->pci = pci;
+      c->symbol = symbol;
+      c->abs_slot = abs_slot;
+      c->h0 = c->h1 = 0; /* no duration evidence: 1; the duration lap in extent_advance() covers 2 and 3 */
+      techA_clear_dwell();
+      s_early_applied = true;
+      s_reseeded = false;
+      if (!s_commit_defer) {
+        techA_commit_apply(c);
+        return true;
+      }
+      pthread_mutex_lock(&s_techA_mu);
+      s_commit = *c;
+      s_commit_pending = true;
+      pthread_mutex_unlock(&s_techA_mu);
+      return true;
+    }
+  }
   nr_pdcch_coreset_candidate_t candidates[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
   const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
                                           first_carrier_offset, pci, slot, symbol, candidates,
@@ -2056,8 +2151,13 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   /* Do not commit a permanent catalogue from one transient dwell. Measured on Salt, the old path
    * committed after dwell 3 to w13 although the persistent table had w0 and w13 tied at 2/3. It
    * then generated only the 322 intervals containing w13, making every CORESET elsewhere
-   * impossible to discover. Eight independent dwells are cheap compared with the catalogue walk. */
-  enum { MIN_ORACLE_DWELLS = 8, MAX_ORACLE_SEEDS = 8 };
+   * impossible to discover. That failure was about ELIGIBILITY and is gone: the catalogue built below
+   * is complete even with nseed==0 (oracle evidence changes ORDER only), so the number of dwells now
+   * only trades ordering quality against time. Eight dwells cost ~110 s on the SA bed (each dwell ends
+   * on evidence, ~14 s), during which no dedicated PDCCH is scanned at all; the real CORESET there sits
+   * inside CORESET#0's excluded windows, so the oracle's seeds were noise and 100 s bought nothing.
+   * Two is the minimum for which "recurrence across dwells" (floor, ranking) is defined. */
+  enum { MIN_ORACLE_DWELLS = 2, MAX_ORACLE_SEEDS = 8 };
   if (lt_ndwell < MIN_ORACLE_DWELLS) {
     techA_clear_dwell();
     return false;
@@ -2088,8 +2188,28 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * catalogue is complete even when nseed==0: oracle evidence changes order, never eligibility. */
   techA_commit_t *c = &s_commit_rx;
   c->ext_n = nr_pdcch_extent_candidates_multi(seeds, nseed, nw_total, c->ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
+  if (s_early_applied)
+    s_reseeded = true; /* this is the oracle RE-ORDERING a walk that began unseeded, not a first commit */
   if (c->ext_n <= 0)
     return false;
+  {
+    /* The solver's extent goes first when it strictly contains the observed one (see the declaration). A hint that does not contain it
+     * is not used: it may be the common CORESET, and a wrong first candidate costs a full lap. */
+    const int hf = atomic_load(&s_hint_first_w), hl = atomic_load(&s_hint_last_w);
+    const nr_pdcch_extent_cand_t o = c->ext_cand[0];
+    if (hf >= 0 && hl >= hf && hl < nw_total && o.first_w >= hf && o.last_w <= hl && (o.first_w > hf || o.last_w < hl)) {
+      int at = -1;
+      for (int i = 0; i < c->ext_n; i++)
+        if (c->ext_cand[i].first_w == hf && c->ext_cand[i].last_w == hl) { at = i; break; }
+      if (at < 0) {
+        at = c->ext_n < NR_PDCCH_EXTENT_MAX_CAND ? c->ext_n++ : c->ext_n - 1;
+      }
+      for (int i = at; i > 0; i--)
+        c->ext_cand[i] = c->ext_cand[i - 1];
+      c->ext_cand[0] = (nr_pdcch_extent_cand_t){.first_w = hf, .last_w = hl};
+      LOG_A(PHY, "SENSING: autodiscover extent hint: solver extent w%d..w%d first (observed w%d..w%d)\n", hf, hl, o.first_w, o.last_w);
+    }
+  }
   c->nseed = nseed;
   c->ndwell = lt_ndwell;
   c->recurrence_floor = recurrence_floor;
@@ -2253,6 +2373,7 @@ static void techA_commit_apply(const techA_commit_t *c)
     g_cfg.coreset_duration = (h0 > 0 && h1 * 2 >= h0) ? 2 : 1; /* symbol 1 lit at >= half of symbol 0's rate */
     LOG_I(PHY, "SENSING: Phase 3 autodiscover -- CORESET duration %d (symbol-0 hits %u, symbol-1 hits %u over the footprint)\n",
           g_cfg.coreset_duration, h0, h1);
+    s_dur_tried = (uint8_t)(1 << g_cfg.coreset_duration);
   }
   /* CCE-to-REG mapping: hypothesis 0 is non-interleaved (bundle 0 -- the demapper's identity
    * path, this project's every captured dedicated CORESET); the interleaved (L, R, shift)
@@ -2295,6 +2416,14 @@ static void techA_commit_apply(const techA_commit_t *c)
 void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length)
 {
   g_cfg.dci_length_override = dci_length;
+}
+
+void nr_pdcch_blind_monitor_autodiscover_early_commit_enable(bool on)
+{
+  s_early_commit_enabled = on;
+  s_early_commit_used = false;
+  s_early_applied = false;
+  s_reseeded = false;
 }
 
 void nr_pdcch_blind_monitor_autodiscover_next(void)

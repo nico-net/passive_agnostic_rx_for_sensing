@@ -2951,3 +2951,65 @@ other OTA result is in §15.5 or §8, labelled HISTORICAL. Results from differen
 | 24 | What to do first | §25 |
 | 25 | Technique D blind convergence (branch `td/convergence-levers`): modules, env, logs, results, open issues | §3.3.1, §10.2, §11.8, §12, §14.8, §14.9, §24 K38–K44, §25 (2026-10-02 block) |
 | 26 | Acceleration round 2026-10-03/04 (G1, K38, fb2, CB0 elimination, GrantWork, CB0 CPU/GPU backends): defaults, metrics, 4-RX results, gate, hosts, open items | header 2026-10-04, §0.3, §3.3.1 (second table), §10.2 (merged-main defaults), §11.8, §11.13, §12 (4-RX gate), §14.9–§14.10, §24 K34/K36/K38/K39, K45–K50, §25 (2026-10-04 block), §26 |
+
+## 29. SA bed on sensnuc3 (OAI gNB + OAI UE + Open5GS, rfsim, CPU): UL grant discovery — OPEN, to resume later
+
+Added 2026-10-05. Evidence label for everything here: `[SIM VERIFIED, sensnuc3 SA rfsim, CPU, uncommitted tree on top of 4fe484ea79]`, single active UE, fully agnostic receiver (`tests/passive_rx/sa_bed/ue_passive.cfg`, no pins). The bed runs on sensnuc3 because sens6 (kernel 7.0) cannot run MongoDB; runner edits are listed in the agent memory file `sa-bed-runs-on-sensnuc3-not-sens6.md`.
+
+### 29.1 Open item: the receiver cannot discover the UE's UL grants (DCI 0_1) in a tracker-proposed dedicated CORESET
+
+**Problem in one paragraph.** To decode a UE's uplink (PUSCH) the receiver must first read its UL grants from the PDCCH. UL grants are downlink control, so this is observable even in rfsim. With a UE in a dedicated BWP the receiver now discovers the DL side unaided (BWP tracker -> `BWP RESOLVED` -> `dl_auto` -> Technique D converges), but it finds no UL grants: `dci01[accepts=0]`, `ulscan[sched=0]`, `pusch_passive[try=0]` before and after a PCI change. On the no-BWP bed the UL length does lock (`UL automatic DCI length locked: 38`).
+
+**Root cause (design gap, not bed tuning).** The UL DCI length sweep (`ul_sweep_enabled`, `nr_pdcch_blind_monitor_rt.c` ~4706-4840, hashed length rotation, GPU prefill via `sweep_gpu_prefill`) runs only inside the main scan passes, per CORESET geometry and per UE whose DL length is resolved. The CORESET that the BWP tracker proposes (second pass, `nr_pbwp_coreset_hypothesis`, block "Passive BWP: second monitoring pass") builds only DL tasks (resolved-entry decode, `bwp_probe`). It has no UL scan, so UL grants in that CORESET are never looked for.
+
+**gNB ground truth (from `nr_mac_log_level=debug`, config-only, `tests/passive_rx/sa_bed/gnb_uldebug.cfg`, run `ul_gnbdbg1`):**
+- UL grants are DCI **format 0_1, 36 bits** (`Filling NR_UL_DCI_FORMAT_0_1 size 36`); `DCI format 0 size: 39 alt_size 0` is the aligned 0_0/1_0 size. DL 1_1 is 43 bits.
+- Same dedicated CORESET (24 PRB x 2 symbols, non-interleaved) as the DL grants, **AL2**, at **CCE 6 (~3,800)** and **CCE 2 (~3,350)**, ~7,200 grants in ~300 s (~24/s vs ~300 DL grants/s).
+- **Only in slots 1 and 11 of the 20-slot frame**, i.e. one slot every 10 slots (TDD period 5 ms @ 30 kHz).
+- The UE's own UL link is healthy: `ulsch_errors 0`, `ulsch_DTX 0`, BLER 0, SNR ~22 dB, MCS 28 on 5 PRB.
+
+**An earlier negative result is NOT valid — do not cite it.** A diagnostic probe (receiver `DIAG ul-probe`, exact-RNTI raw 0_1 decode over lengths 30..63 at every AL/CCE in the proposed CORESET) found no UL matches while its DL control (exact RNTI at length 43, AL2) gave ~2,000 matches. The probe stepped through the 34 lengths once per occasion, but UL grants only occur every 10th slot, and gcd(10, 34) = 2, so on UL slots only half of the lengths are ever tested; length 36 may never have been tried. The production sweep avoids this with a hashed (avalanche-mixed) pick; the probe did not. So "UL grants not decodable here" is **not established**.
+
+**What to do when resuming (in order):**
+1. Re-run the probe with a hashed length pick (diagnostic only). Expected: matches at length 36, AL2, CCE 2/6, exact RNTI. This confirms UL grants are decodable in the proposed CORESET.
+2. Real fix (general, not tuned to this bed): run the **existing** UL length sweep (hashed rotation, same state machine) on the second-pass geometry, keyed by that geometry and by the tracker entry's RNTI, so a UE in a dedicated BWP gets UL grant discovery like a UE in the base BWP. Keep the DL `dl_auto`/layout machinery as is.
+3. Validation: the bed cannot validate PUSCH decode itself, because rfsim never forwards the UE's uplink to a passive client (`rfsimulator_write_internal` writes only to the sockets a process owns; the UE has one, to the gNB; passive clients skip writes). `pusch_passive[... zero_tb=100%]` on rfsim is therefore expected and says nothing about receiver health. Validate grant discovery here (`dci01 accepts`, `ulscan[sched=...]`, UL length lock line), and PUSCH decode only OTA or on a bed that forwards UL.
+
+### 29.2 Related UL item: stale UL DM-RS id after a PCI change (untested)
+The DL DM-RS id state (`g_dl_dmrs_id`, `nr_pdsch_passive_queue.c`) was initialised once and stayed at the old cell's id after a PCI change; it is now re-initialised from `Nid_cell` when the PCI changes (`DL DM-RS id state RESET: PCI 0 -> 1`, measured: Technique D then converges for the new UE). The UL twin (`nr_pusch_passive_decode.c`, `nr_dmrs_id_2stage_init(dst, "PUSCH", ...)`) has the same one-time init and presumably the same defect, but it cannot be exercised on rfsim (UL id stays `pending`). Apply the same reset when UL can be tested.
+
+Note (2026-10-07): the `DIAG ul-probe` receiver code mentioned in 29.1 was removed in the 2026-10-07 cleanup (together with the other sa-bed investigation blocks and the knobs `ISAC_PBWP_K_ADJ`, `ISAC_DIAG_RNTI`, `ISAC_PBWP_PRE`, `ISAC_EARLY_COMMIT`). The finding it produced stays valid; to repeat it, re-add a probe, do not look for the old one.
+
+## 30. Blind DM-RS identity solver and dedicated-CORESET discovery: results of the 2026-10-06/07 bed rounds
+
+Evidence label for everything here: `[SIM VERIFIED, sensnuc3 SA rfsim, CPU, uncommitted tree on top of 4fe484ea79]` (rounds 24-30), noiseless rfsim, fully agnostic receiver, no tuning, no MCS cap. NOT validated OTA, NOT validated with noise, multipath or CFO: see 30.4.
+
+### 30.1 What was added
+- **`nr_dmrs_nid_solve.{c,h}`**: recovers a PDCCH DM-RS scrambling identity N_ID (0..65535) from received pilots by solving the Gold sequence over GF(2) (c(n) is linear in the 31-bit c_init; c_init inverts in closed form to N_ID, valid iff < 65536, false-valid chance 2^-15). Rotation by the 4th power (4 classes), information-set decoding on the most reliable equations (top-K = 384 selected once per rotation), parity checks, and a rank-deficient path that enumerates the free bits when the reliable pilots span < 31 dimensions (two split bundles). Unit tests `test_nr_dmrs_nid_solve` (7): noiseless recovery, SNR sweep, pure noise (1/3000 false valid), all-zero window, split bundles in noise (95/100), cost (0.85 ms per 273-PRB symbol, 8.7 us per 18-pilot window).
+- **Receiver wiring (`nr_pdcch_blind_monitor_rt.c`)**: on 1 occasion in 32 the CORESET symbols' pilots are copied (<= 828 values) to a 4-slot ring and solved on a worker thread (`nid_solver`): per-window solves (7 references) and a whole-symbol solve (references CRB 0 and the BWP start). Votes per (N_ID, reference); leader at >= 4 votes; occupancy = windows where >= 2 RBs agree on all 3 pilots; the lit rule is decay 0.97 per scan, score >= 0.3 and >= top/32. The leader's CORESET proposal replaces the window-correlation proposal for the tracker's second pass and supplies the DM-RS identity; its extent is also handed to the oracle (`nr_pdcch_blind_monitor_autodiscover_extent_hint`) and goes first in a committed catalogue when it strictly contains the oracle's observed footprint. `ISAC_NID_SOLVE=0` is the runtime kill switch (the old observer path then carries discovery).
+- **Tracker (`nr_passive_bwp.c`)**: a resolved BWP entry is refuted after 2500 TB trials with not one pass during the layout search (`nr_pbwp_feed_crc_search`) and the refuted (size, start, ind_bits) is excluded from every later resolution. Needed because with every grant spanning the BWP the DM-RS vote cannot tell 40@30 from 89@1.
+- Other receiver changes of the same rounds: walk fix (every other eligible grant, 2-pass latch, `g_ded_ever_ok`), early unseeded commit with oracle re-seed, resolved-entry exemptions in the autodiscover gates, pass-2 mapping rotation with vote lock, half-window observer, observer decay, duration lap in the extent walk (see git log).
+- Bed: gNB hook `ISAC_GNB_CORESET_IL="L:R[:shift]"`, null check for the UE capability in `config_pucch_resset0/1`, `choice.interleaved` allocation in `config_ue.c` (OAI UE crash on an interleaved dedicated CORESET), and `tests/passive_rx/sa_bed/` arms: `gnb_al1.cfg`, `gnb_pci500.cfg`, `gnb_bwpswitch.cfg` (BWP 2 = 24@72), `run_arm_mu.sh`, `run_arm_gdbgnb.sh`.
+
+### 30.2 Results (round 30: 15 min soak + 5 repeats of each arm; median [min..max])
+| Arm | BWP resolved | Technique D | UE CRC (best RNTI) |
+|---|---|---|---|
+| SA | 11 s [9-12] | 12 s [11-40] | 91 % [45-93] |
+| PCI 500 | 11 s [10-12] | 13 s [11-52] | 94 % [75-95] |
+| interleaved 6:2 | 10 s [10-11] | 11 s [11-12] | 96 % [91-98] |
+| interleaved 2:3 | 10 s [10-12] | 11 s [11-13] | 100 % [98-100] |
+| AL1 (UE-specific AL1) | 10 s [10-10] | 12 s [11-35] | 79 % [67-86] |
+| BWP switch | 11 s [10-12] | 13 s [10-33] | 90 % [88-95] |
+Soak (SA, 900 s): CRC flat at 94 %, no crash, no BWP unresolve. 29/30 runs resolve in 9-12 s; four Technique D tails (33, 35, 40, 52 s) and two low-CRC SA runs (75 %, 45 %) are not root-caused. Before this work AL1 ranged from 11 s to never converging (rounds 23-28); the fixes were: occupancy needs >= 2 RBs x 3 pilots (a single RB agrees by chance 1/64 and lit every window), window decay/lit rule suited to a DCI that lights one CCE at a time, a faster solver trigger off the receive thread, and the BWP refutation.
+
+### 30.3 Bed artefacts (do not read them as receiver results)
+- BWP-switch arm: the OAI active UE re-establishes RRC 9-83 times after the switch (new RNTI each time); one run in five never recovers (void). Measure the receiver's recovery from the UE's LAST re-establishment (4-15 s measured), never from the trigger.
+- The attach segfault flake (~1/18) can void any arm.
+
+### 30.4 Not done / next
+- OTA readiness: the solver assumes a frequency-flat window; the whole-symbol solve assumes one complex gain across the carrier (residual timing offset and multipath will break that); noise-floor-dependent constants (>= 4 checks, 5x median floor, top/32) were set on synthetic noise only. First test: replay the solver offline on the frozen OTA captures (read-only), then rfsim with noise and a delay profile.
+- The 5 s baseline and 30 s changing-scenario targets: baseline resolves in 10-11 s median; the time is dominated by SSB/CSS0 start-up and by waiting for grants (not compute), so a GPU does not shorten it; measure the milestones on the X410 first.
+- The oracle's recurrent commit still recommits about every 14 s (65 in 900 s) and re-seeds the scan geometry; harmless for decoding here, remove before OTA if convergence allows.
+- Memory use over a long soak was not sampled.
+- Search-space hash elimination (TS 38.213 Y_{p,n}) is not implemented; UL grant discovery (29.1) is still open.
+
