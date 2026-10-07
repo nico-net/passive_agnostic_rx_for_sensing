@@ -104,6 +104,252 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include <stdio.h>
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
+#include "nr_dmrs_nid_solve.h"
+/* ---- Blind PDCCH DM-RS identity discovery (nr_dmrs_nid_solve.h). On 1 occasion in 32, every 6-RB window of the CORESET symbols is
+ * solved for N_ID under each candidate DM-RS reference (CRB 0 per 38.211, or the window start minus 0..5 RB as OAI references a
+ * dedicated BWP). A valid solution is confirmed by its own structure (a wrong one is valid with probability 2^-15), so each hit is a
+ * near-certain "a PDCCH with this scrambling identity and reference occupies this window", with no per-slot SNR threshold. Votes are
+ * kept per (N_ID, reference); the leader is logged when it changes. ISAC_NID_SOLVE=0 turns it off (runtime kill switch: the old observer path then carries discovery alone). */
+typedef struct { int nid; int ref; uint32_t votes; uint64_t win_mask; } nid_vote_t;
+static nid_vote_t g_nid_votes[64];
+static pthread_mutex_t g_nid_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_nid_leader = -1;
+static float g_nid_win[2][NR_PBWP_CS_MAXWIN]; /* decayed hit score per (CORESET symbol, 6-RB window) for the LEADER (N_ID, reference) */
+static int g_nid_pci = -1;
+static bool nid_solve_enabled(void)
+{
+  static _Atomic int s_v = -1;
+  if (s_v < 0) { const char *e = getenv("ISAC_NID_SOLVE"); s_v = (e != NULL && atoi(e) == 0) ? 0 : 1; }
+  return s_v != 0;
+}
+static void nid_vote(int nid, int ref, int win, int symidx)
+{
+  pthread_mutex_lock(&g_nid_lock);
+  int k = -1, free_k = -1, min_k = 0;
+  for (int i = 0; i < 64; i++) {
+    if (g_nid_votes[i].votes && g_nid_votes[i].nid == nid && g_nid_votes[i].ref == ref) { k = i; break; }
+    if (!g_nid_votes[i].votes && free_k < 0) free_k = i;
+    if (g_nid_votes[i].votes < g_nid_votes[min_k].votes) min_k = i;
+  }
+  if (k < 0) {
+    k = free_k >= 0 ? free_k : min_k; /* a full table evicts its weakest entry */
+    g_nid_votes[k] = (nid_vote_t){nid, ref, 0, 0};
+  }
+  g_nid_votes[k].votes++;
+  if (win < 64) g_nid_votes[k].win_mask |= 1ull << win;
+  if (g_nid_leader >= 0 && g_nid_votes[g_nid_leader].nid == nid && g_nid_votes[g_nid_leader].ref == ref && win < NR_PBWP_CS_MAXWIN && symidx >= 0 && symidx < 2)
+    g_nid_win[symidx][win] += 1.0f;
+  if ((g_nid_votes[k].votes & 31) == 0)
+    LOG_A(PHY, "SENSING: NID_SOLVE votes N_ID=%d ref_rb=%d votes=%u windows=0x%llx\n", nid, ref, g_nid_votes[k].votes,
+          (unsigned long long)g_nid_votes[k].win_mask);
+  int lead = 0;
+  for (int i = 1; i < 64; i++)
+    if (g_nid_votes[i].votes > g_nid_votes[lead].votes) lead = i;
+  if (lead != g_nid_leader && g_nid_votes[lead].votes >= 3 && (g_nid_leader < 0 || g_nid_votes[lead].votes > g_nid_votes[g_nid_leader].votes + 2)) {
+    g_nid_leader = lead;
+    memset(g_nid_win, 0, sizeof(g_nid_win));
+    LOG_A(PHY, "SENSING: NID_SOLVE leader N_ID=%d ref_rb=%d votes=%u windows=0x%llx\n", g_nid_votes[lead].nid, g_nid_votes[lead].ref,
+          g_nid_votes[lead].votes, (unsigned long long)g_nid_votes[lead].win_mask);
+  }
+  pthread_mutex_unlock(&g_nid_lock);
+}
+/* CORESET proposal from the leader's confirmed windows. A window's score is its recent confirmed hits (a hit needs a confirmed solve, so
+ * an unoccupied window collects only chance agreements: ~0.4 % of the solves). Lit = a hit within the last ~40 scans, about 13 s (score >= 0.3
+ * after the 0.97 decay) and not negligible against the strongest window (>= top/32, so a CORESET that moved stops being proposed once
+ * the new windows dominate). An AL1 grant occupies one CCE at a time, so its windows light only every few seconds each. The proposal is
+ * the longest run of lit windows (one unlit window of slack), duration 2 when CORESET symbol 1 is lit as often as symbol 0. Needs >= 4
+ * votes on the leader (three confirmed solves of one (N_ID, reference) already exclude chance by 2^-45). */
+static bool nid_proposal(int *start_rb, int *n_rb, int *dur, int *ref_rb, int *nid)
+{
+  bool have = false;
+  pthread_mutex_lock(&g_nid_lock);
+  if (g_nid_leader >= 0 && g_nid_votes[g_nid_leader].votes >= 4) {
+    int best_lo = -1, best_hi = -1, lo = -1, last = -100;
+    float top = 0.0f;
+    for (int w = 0; w < NR_PBWP_CS_MAXWIN; w++)
+      for (int sy = 0; sy < 2; sy++)
+        if (g_nid_win[sy][w] > top) top = g_nid_win[sy][w];
+    const float lit_min = top / 32.0f > 0.3f ? top / 32.0f : 0.3f;
+    for (int w = 0; w < NR_PBWP_CS_MAXWIN; w++) {
+      if (g_nid_win[0][w] < lit_min && g_nid_win[1][w] < lit_min)
+        continue;
+      if (w - last > 2) lo = w;
+      last = w;
+      if (best_lo < 0 || w - lo > best_hi - best_lo) { best_lo = lo; best_hi = w; }
+    }
+    if (best_lo >= 0) {
+      float s0 = 0, s1 = 0;
+      for (int w = best_lo; w <= best_hi; w++) { s0 += g_nid_win[0][w]; s1 += g_nid_win[1][w]; }
+      *start_rb = best_lo * 6;
+      *n_rb = (best_hi - best_lo + 1) * 6;
+      *dur = (s1 * 10 >= s0 * 3) ? 2 : 1;
+      *ref_rb = g_nid_votes[g_nid_leader].ref;
+      *nid = g_nid_votes[g_nid_leader].nid;
+      have = true;
+    }
+  }
+  pthread_mutex_unlock(&g_nid_lock);
+  return have;
+}
+/* The DM-RS identity to use for pilots: the leader's once it has >= 4 votes, else the caller's default (the PCI). */
+static int nid_pilot_id(int dflt)
+{
+  int v = dflt;
+  pthread_mutex_lock(&g_nid_lock);
+  if (g_nid_leader >= 0 && g_nid_votes[g_nid_leader].votes >= 4)
+    v = g_nid_votes[g_nid_leader].nid;
+  pthread_mutex_unlock(&g_nid_lock);
+  return v;
+}
+/* Whole-symbol solve: pilots from EVERY RB of the CORESET symbol (exactly-zero samples dropped) are solved together under each candidate
+ * reference, so a DCI that is split over scattered bundles (6-REG bundles, interleaved mappings, AL1) still has >= 16 pilots in the
+ * system; the most reliable equations pick themselves. A hit is confirmed by the extra reliable checks, and the solved sequence then
+ * tells which RBs are occupied (their pilots agree with it), which feeds the leader's window scores at bundle granularity. */
+typedef struct {
+  int slot, symbol, symidx, n_rb, bwp_start, pci;
+  float yr[3 * 276], yi[3 * 276]; /* the 3 DM-RS REs of every RB of the CORESET symbol (pilot p of RB r at 3 r + p), copied off the receive thread */
+} nid_job_t;
+static void nid_solve_carrier(const nid_job_t *jb)
+{
+  static __thread float yr[NR_NID_SOLVE_MAX_PILOT], yi[NR_NID_SOLVE_MAX_PILOT];
+  static __thread int mm[NR_NID_SOLVE_MAX_PILOT], rbof[NR_NID_SOLVE_MAX_PILOT];
+  const int n_rb = jb->n_rb, slot = jb->slot, symbol = jb->symbol, symidx = jb->symidx;
+  const int refs[2] = {0, jb->bwp_start};
+  for (int ri = 0; ri < 2; ri++) {
+    const int ref = refs[ri];
+    if (ri == 1 && ref <= 0) continue;
+    int n = 0;
+    for (int rb = ref; rb < n_rb; rb++)
+      for (int p = 0; p < 3 && n < NR_NID_SOLVE_MAX_PILOT; p++) {
+        const float sr = jb->yr[3 * rb + p], si = jb->yi[3 * rb + p];
+        if (sr == 0.0f && si == 0.0f) continue;
+        yr[n] = sr;
+        yi[n] = si;
+        mm[n] = 3 * (rb - ref) + p;
+        rbof[n] = rb;
+        n++;
+      }
+    if (n < 16) continue;
+    nr_nid_solution_t sol[2];
+    const int ns = nr_dmrs_nid_solve(yr, yi, mm, n, slot, symbol, 14, -1, sol, 2);
+    for (int i = 0; i < ns; i++) {
+      /* a DCI split over two bundles has only ~5 reliable checks: all must agree (validity alone is 2^-15, 5 checks make it 2^-20) */
+      if (sol[i].top_checks < 4 || sol[i].top_mismatches > sol[i].top_checks / 8) continue;
+      /* Occupancy: an RB is lit when all 3 of its pilots agree with the solved sequence (chance 1/64), a window when >= 2 of its RBs are
+       * (chance ~0.4 %): the solve itself is confirmed at 2^-15 or better, but a single RB is not, and accumulating single-RB chance hits
+       * lit every window of the carrier. A CCE (6 RB) or any bundle layout puts >= 2 RBs of a DCI into at least one window. */
+      uint8_t cnt[64];
+      memset(cnt, 0, sizeof(cnt));
+      int rb_ok[3] = {0, 0, 0}, rb_cur = -1, k = 0;
+      for (int j = 0; j <= n; j++) {
+        if (j == n || rbof[j] != rb_cur) {
+          if (rb_cur >= 0 && k == 3 && rb_ok[0] + rb_ok[1] + rb_ok[2] == 3 && rb_cur / 6 < 64) cnt[rb_cur / 6]++;
+          if (j == n) break;
+          rb_cur = rbof[j]; rb_ok[0] = rb_ok[1] = rb_ok[2] = 0; k = 0;
+        }
+        const double rr = yr[j] * cos(sol[i].phi) + yi[j] * sin(sol[i].phi);
+        const double ii = yi[j] * cos(sol[i].phi) - yr[j] * sin(sol[i].phi);
+        const int bits = (rr < 0) | ((ii < 0) << 1);
+        rb_ok[k % 3] = bits == nr_dmrs_nid_predict_bits(sol[i].cinit, mm[j]);
+        k++;
+      }
+      for (int w = 0; w < 64; w++)
+        if (cnt[w] >= 2) nid_vote(sol[i].nid, ref, w, symidx);
+    }
+  }
+}
+static void nid_solve_scan(const nid_job_t *jb)
+{
+  const int n_win = jb->n_rb / 6, slot = jb->slot, symbol = jb->symbol, symidx = jb->symidx;
+  pthread_mutex_lock(&g_nid_lock);
+  if (g_nid_pci != jb->pci) { /* a different cell: nothing learned about the old one applies */
+    memset(g_nid_votes, 0, sizeof(g_nid_votes));
+    memset(g_nid_win, 0, sizeof(g_nid_win));
+    g_nid_leader = -1;
+    g_nid_pci = jb->pci;
+  }
+  for (int sy = 0; sy < 2; sy++)
+    for (int w = 0; w < NR_PBWP_CS_MAXWIN; w++)
+      g_nid_win[sy][w] *= 0.97f; /* ~3 scans/s: half-life ~8 s */
+  pthread_mutex_unlock(&g_nid_lock);
+  for (int w = 0; w < n_win; w++) {
+    const float *yr = &jb->yr[18 * w], *yi = &jb->yi[18 * w]; /* the 18 pilots of the window's 6 RBs */
+    for (int d = -1; d <= 5; d++) { /* d = -1: CRB 0 (spec); else the window start minus d (OAI: the BWP start) */
+      const int ref = d < 0 ? 0 : 6 * w - d;
+      if (ref < 0 || (d >= 0 && ref == 0 && w > 0)) continue;
+      int m[18];
+      bool ok = true;
+      for (int i = 0; i < 18; i++) {
+        const int rb = 6 * w + i / 3;
+        m[i] = 3 * (rb - ref) + (i % 3);
+        if (m[i] < 0) ok = false;
+      }
+      if (!ok) continue;
+      nr_nid_solution_t sol[2];
+      const int ns = nr_dmrs_nid_solve(yr, yi, m, 18, slot, symbol, 14, -1, sol, 2);
+      for (int i = 0; i < ns; i++)
+        if (sol[i].mismatches <= 1) nid_vote(sol[i].nid, ref, w, symidx);
+    }
+  }
+}
+
+/* The solves run on their own thread: one whole-symbol solve is ~0.9 ms at 273 PRB and a window scan several times that, far too much
+ * to stall the receive thread with. The receive thread only copies the pilots (a few KB) into a small ring and drops the job when the
+ * ring is full. Normal scheduling priority: a late or dropped job costs a little discovery time, never a slot. */
+#define NID_RING 4
+static nid_job_t g_nid_ring[NID_RING];
+static int g_nid_head, g_nid_count;
+static pthread_mutex_t g_nid_q_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_nid_q_cond = PTHREAD_COND_INITIALIZER;
+static pthread_once_t g_nid_thr_once = PTHREAD_ONCE_INIT;
+static void *nid_worker(void *arg)
+{
+  (void)arg;
+  static nid_job_t job;
+  for (;;) {
+    pthread_mutex_lock(&g_nid_q_lock);
+    while (g_nid_count == 0)
+      pthread_cond_wait(&g_nid_q_cond, &g_nid_q_lock);
+    job = g_nid_ring[g_nid_head];
+    g_nid_head = (g_nid_head + 1) % NID_RING;
+    g_nid_count--;
+    pthread_mutex_unlock(&g_nid_q_lock);
+    nid_solve_scan(&job);
+    nid_solve_carrier(&job);
+  }
+  return NULL;
+}
+static void nid_start_thread(void)
+{
+  pthread_t th;
+  if (pthread_create(&th, NULL, nid_worker, NULL) == 0) {
+    pthread_setname_np(th, "nid_solver");
+    pthread_detach(th);
+  }
+}
+static void nid_submit(const c16_t *y, int fft, int fco, int n_rb, int slot, int symbol, int symidx, int pci, int bwp_start)
+{
+  if (n_rb > 276) return;
+  pthread_once(&g_nid_thr_once, nid_start_thread);
+  pthread_mutex_lock(&g_nid_q_lock);
+  if (g_nid_count < NID_RING) {
+    nid_job_t *jb = &g_nid_ring[(g_nid_head + g_nid_count) % NID_RING];
+    jb->slot = slot; jb->symbol = symbol; jb->symidx = symidx; jb->n_rb = n_rb; jb->bwp_start = bwp_start; jb->pci = pci;
+    for (int rb = 0; rb < n_rb; rb++)
+      for (int p = 0; p < 3; p++) {
+        const c16_t sm = y[(fco + rb * 12 + 1 + 4 * p) % fft];
+        jb->yr[3 * rb + p] = (float)sm.r;
+        jb->yi[3 * rb + p] = (float)sm.i;
+      }
+    g_nid_count++;
+    pthread_cond_signal(&g_nid_q_cond);
+  }
+  pthread_mutex_unlock(&g_nid_q_lock);
+}
+
+/* Second-pass mapping hypotheses that produced a CRC-accepted DCI 1_1, for the CURRENT proposed geometry (reset when it changes). */
+static _Atomic uint32_t g_p2_votes[32];
+
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
 // most floor(275/6) = 45 groups = 270 PRB; duration is 1..3 symbols (38.331 ControlResourceSet).
 #define NR_PDCCH_BLIND_MAX_CORESET_RB 270
@@ -2644,6 +2890,7 @@ typedef struct {
   bool         ok;             // OUTPUT
   int8_t       bwp_entry;      // passive BWP entry this length belongs to (0 = the configured BWP)
   uint8_t      bwp_probe;      // 1 = raw decode only: BWP discovery / DM-RS scoring probe
+  int8_t       p2h;            // BWP-tracker second pass: mapping hypothesis index + 1 (0 = not a second-pass task)
   uint8_t      open_rnti;      // 1 = open RNTI range at a known length: finds UEs not yet resolved
   bool         is_lookahead;   // multi-candidate-per-occasion lookahead task (see the lookahead block)
   int8_t       lookahead_lane; // which lane; valid only when is_lookahead
@@ -2674,6 +2921,17 @@ void nr_pdcch_bwp_crc_result(int entry, bool crc_ok)
     LOG_A(PHY, "SENSING: BWP UNRESOLVED entry=%d: 32 TB-CRC failures, no pass -- rescoring from the DM-RS\n", entry);
   pthread_mutex_unlock(&g_pbwp_lock);
 }
+/* TB-CRC outcome of a grant decoded while the layout is still being searched: a long run with no pass at all refutes the geometry. */
+void nr_pdcch_bwp_crc_search_result(int entry, bool crc_ok)
+{
+  pthread_mutex_lock(&g_pbwp_lock);
+  const bool was = nr_pbwp_resolved(&g_pbwp, entry);
+  nr_pbwp_feed_crc_search(&g_pbwp, entry, crc_ok);
+  if (was && !nr_pbwp_resolved(&g_pbwp, entry))
+    LOG_A(PHY, "SENSING: BWP UNRESOLVED entry=%d: %d TB trials during the layout search, not one pass -- hypothesis refuted, rescoring\n",
+          entry, NR_PBWP_SEARCH_REFUTE_TRIES);
+  pthread_mutex_unlock(&g_pbwp_lock);
+}
 void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh)
 {
   if (nr_cfg_reconf_enabled() && !nr_cfg_epoch_work_current()) return;
@@ -2682,10 +2940,16 @@ void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *pr
     pthread_mutex_unlock(&g_pbwp_lock);
     return;
   }
-  if (entry > 0 && entry < g_pbwp.n && nr_pbwp_score_grant(&g_pbwp, entry, payload, prb_coh))
-    LOG_A(PHY, "SENSING: BWP RESOLVED entry=%d len=%u size=%u start=%d ind_bits=%u after %u grants\n", entry,
+  if (entry > 0 && entry < g_pbwp.n && nr_pbwp_score_grant(&g_pbwp, entry, payload, prb_coh)) {
+    LOG_A(PHY, "SENSING: BWP RESOLVED entry=%d len=%u size=%u start=%d ind_bits=%u tda_bits=%d(4-%u) after %u grants\n", entry,
           g_pbwp.e[entry].dci_len, g_pbwp.e[entry].size, g_pbwp.e[entry].start, g_pbwp.e[entry].ind_bits,
-          g_pbwp.e[entry].grants_scored);
+          4 - (int)g_pbwp.e[entry].tda_dk, g_pbwp.e[entry].tda_dk, g_pbwp.e[entry].grants_scored);
+    /* The line the sa-bed runner (and every earlier acquisition log) reads as "the dedicated DCI 1_1 layout is known". */
+    LOG_A(PHY, "SENSING: DCI 1_1 length locked coreset=bwp-tracker rnti=0x%x len=%u bwp=%u+%d ind_bits=%u tda_bits=%d occasions=%u "
+               "decodes=%u evidence=bwp_dm-rs_resolved\n",
+          nr_pbwp_last_rnti(&g_pbwp, entry), g_pbwp.e[entry].dci_len, g_pbwp.e[entry].size, (int)g_pbwp.e[entry].start,
+          g_pbwp.e[entry].ind_bits, 4 - (int)g_pbwp.e[entry].tda_dk, g_pbwp.cs.occ, g_pbwp.e[entry].grants_scored);
+  }
   pthread_mutex_unlock(&g_pbwp_lock);
 }
 
@@ -2963,7 +3227,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     const long v = e ? strtol(e, &end, 10) : 20;
     discovery_duty = e && (*end || v < 1 || v > 10000) ? 20 : (uint32_t)v;
   }
-  if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_done()
+  if (cfg->autodiscover && (!nr_pdcch_blind_monitor_autodiscover_done() || nr_pdcch_blind_monitor_autodiscover_reseed_pending())
       && !nr_pdcch_blind_monitor_autodiscover_commit_pending() /* decided; a consumer applies it */
       && nr_pdcch_blind_monitor_discovery_duty_due(reconf_lengths_enabled(), nr_pdcch_coreset_bank_count(),
                                                     nr_pdcch_blind_monitor_discovery_paused(), discovery_duty,
@@ -3772,38 +4036,110 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   rel15->num_dci_options       = 1;
   rel15->dci_length_options[0] = dci_length;
   /* Passive BWP tracking: snapshot the resolved entries for this occasion and pick the probe. */
-  const bool pbwp_on = nr_pbwp_enabled() != 0;
-  struct { uint16_t len, size; int16_t start; } pbwp_snap[NR_PBWP_MAX];
+  bool pbwp_on = nr_pbwp_enabled() != 0;
+  struct { uint16_t len, size; int16_t start; uint8_t ind, dk; uint16_t rnti; } pbwp_snap[NR_PBWP_MAX];
   memset(pbwp_snap, 0, sizeof(pbwp_snap));
   /* Per-occasion copy (Task A7): a shared array rewritten here was read by another consumer's decode. */
   nr_pdcch_blind_extract_opts_t pbwp_opts[NR_PBWP_MAX];
   int pbwp_n = 0, pbwp_probe_entry = 0;
   uint16_t pbwp_probe_len = 0;
   bool cs_have = false;
-  int cs_start = 0, cs_n = 0, cs_dur = 1, cs_ref = 0;
+  int cs_start = 0, cs_n = 0, cs_dur = 1, cs_ref = 0, cs_nid = -1;
+  if (pbwp_on) {
+    /* ONE tracker, several scan passes with different base (len, size): each pass re-armed it for its own
+     * base on every occasion (98k re-arms in 187 s on the sa-bed), wiping the CORESET evidence before it
+     * could reach NR_PBWP_CS_MIN_OCC. The first pass to arm owns the tracker; a pass with another base skips
+     * it. The ownership is a lease (refreshed by every owner occasion) so a real reconfiguration -- the owner
+     * going quiet for >5 s, e.g. after a cell restart -- hands the tracker to whoever runs next. */
+    static uint16_t s_pbwp_own_len, s_pbwp_own_size;
+    static int64_t s_pbwp_own_ms = INT64_MIN / 2;
+    struct timespec ts_own;
+    clock_gettime(CLOCK_MONOTONIC, &ts_own);
+    const int64_t now_ms = (int64_t)ts_own.tv_sec * 1000 + ts_own.tv_nsec / 1000000;
+    pthread_mutex_lock(&g_pbwp_lock);
+    /* Only a pass that scans format 1_1 can use the tracker's second CORESET pass; a CSS0-only pass (dci10_scan == 2)
+     * that grabbed it first starved the pass that could (measured: scan_11 false on every evaluation). */
+    /* Agnostic mode (dl_full_auto + autodiscover) lets the tracker run from the CSS0 lock instead of waiting for the footprint
+     * oracle's commit: the second pass builds its own CORESET from the tracker's DM-RS occupancy, which needs nothing the commit sets. */
+    const bool pbwp_pre = cfg->dl_full_auto && cfg->autodiscover;
+    const bool own = (cfg->dci10_scan != 2 || pbwp_pre)
+                     && ((s_pbwp_own_len == dci_length && s_pbwp_own_size == (uint16_t)cfg->bwp_size)
+                         || now_ms - s_pbwp_own_ms > 5000);
+    if (own) {
+      s_pbwp_own_len = dci_length;
+      s_pbwp_own_size = (uint16_t)cfg->bwp_size;
+      s_pbwp_own_ms = now_ms;
+    }
+    pthread_mutex_unlock(&g_pbwp_lock);
+    if (!own)
+      pbwp_on = false;
+  }
   if (pbwp_on) {
     pthread_mutex_lock(&g_pbwp_lock);
     const uint8_t base_ind = cfg->extract.bwp_indicator_bits >= 0 ? (uint8_t)cfg->extract.bwp_indicator_bits : 1;
-    if (g_pbwp.base_len != dci_length || g_pbwp.base_size != (uint16_t)cfg->bwp_size) {
-      nr_pbwp_init(&g_pbwp, (uint16_t)ue->frame_parms.N_RB_DL, (uint16_t)cfg->bwp_start, (uint16_t)cfg->bwp_size,
-                   dci_length, base_ind);
+    const uint16_t pb_len = (uint16_t)dci_length;
+    /* Never wipe a RESOLVED entry for the length it already explains. Without SIB1 the DL length sweep can lock
+     * len 43 against the default 106-PRB base (the real BWP is 40 PRB); re-arming for that "base" erased the
+     * correct 40@30 entry the tracker had resolved from the DM-RS 3 s into the run, after which every grant of
+     * the UE decoded against a 106-PRB layout (prb=39+66) and failed -- 0 of 25628 TB CRCs on the SIB1-less arm. */
+    bool pbwp_len_resolved = false;
+    for (int bi = 0; bi < g_pbwp.n; bi++)
+      if (nr_pbwp_resolved(&g_pbwp, bi) && g_pbwp.e[bi].dci_len == (uint16_t)dci_length)
+        pbwp_len_resolved = true;
+    if (!pbwp_len_resolved && (g_pbwp.base_len != pb_len || g_pbwp.base_size != (uint16_t)cfg->bwp_size)) {
+      /* k_slack 4: the formula K assumes the spec-default 4-bit TDA field; a gNB with a short TDRA list uses fewer bits, which
+       * shifts every candidate length and made the true (BWP size, indicator) pair unrepresentable. Hypothesise 0..4 fewer. */
+      nr_pbwp_init_ex(&g_pbwp, (uint16_t)ue->frame_parms.N_RB_DL, (uint16_t)cfg->bwp_start, (uint16_t)cfg->bwp_size,
+                      pb_len, base_ind, 4);
       LOG_A(PHY, "SENSING: BWP tracking armed: base len=%u size=%d start=%d ind_bits=%u, %d candidate lengths\n",
             dci_length, cfg->bwp_size, cfg->bwp_start, base_ind, g_pbwp.n_cand);
     }
     pbwp_n = g_pbwp.n;
+    static _Atomic uint32_t s_unres_tick;
+    const uint32_t s_unres_pick = atomic_fetch_add_explicit(&s_unres_tick, 1, memory_order_relaxed); /* one draw per occasion */
     for (int bi = 0; bi < g_pbwp.n; bi++) {
       pbwp_snap[bi].len = g_pbwp.e[bi].dci_len;
       pbwp_snap[bi].size = g_pbwp.e[bi].size;
       pbwp_snap[bi].start = g_pbwp.e[bi].start;
+      pbwp_snap[bi].ind = g_pbwp.e[bi].ind_bits;
+      pbwp_snap[bi].dk = g_pbwp.e[bi].tda_dk;
+      pbwp_snap[bi].rnti = bi > 0 && g_pbwp.e[bi].start >= 0 ? nr_pbwp_last_rnti(&g_pbwp, bi) : 0;
       if (bi > 0 && g_pbwp.e[bi].start >= 0) {
         pbwp_opts[bi] = cfg->extract;
         pbwp_opts[bi].bwp_indicator_bits = g_pbwp.e[bi].ind_bits;
       } else if (bi > 0 && !pbwp_probe_len) {
-        pbwp_probe_len = g_pbwp.e[bi].dci_len; /* unresolved: collect DM-RS-scored grants */
-        pbwp_probe_entry = bi;
+        /* An unresolved entry (a registered length whose size/start never resolves -- e.g. a spurious one) used
+         * to take the single probe slot on EVERY occasion, so the 1-in-4 rotation over new candidate lengths below
+         * never ran again (measured: entry 1 = len 44 stuck at start=-1, e2 never registered, true len 43 never
+         * probed). Give it every other occasion; the rest stay available to the rotation. */
+        /* ROTATE across the unresolved entries (the first one used to win every time, starving the others). */
+        int n_unres = 0, rank = 0;
+        for (int q = 1; q < g_pbwp.n; q++)
+          if (g_pbwp.e[q].start < 0) {
+            if (q == bi) rank = n_unres;
+            n_unres++;
+          }
+        if ((s_unres_pick & 1) == 0 && n_unres > 0 && (int)((s_unres_pick >> 1) % (uint32_t)n_unres) == rank) {
+          pbwp_probe_len = g_pbwp.e[bi].dci_len; /* unresolved: collect DM-RS-scored grants */
+          pbwp_probe_entry = bi;
+        }
       }
     }
     cs_have = nr_pbwp_coreset_hypothesis(&g_pbwp, &cs_start, &cs_n, &cs_dur, &cs_ref);
+    /* The solver's confirmed occupancy, when it has a consensus, replaces the window-correlation proposal: it needs no per-slot SNR
+     * threshold and does not care about partial window occupancy, the mapping, or an identity other than the PCI. */
+    if (nid_solve_enabled()) {
+      int ss, sn, sd, sr, snid;
+      if (nid_proposal(&ss, &sn, &sd, &sr, &snid)) {
+        cs_have = true;
+        cs_start = ss;
+        cs_n = sn;
+        cs_dur = sd;
+        cs_ref = sr;
+        cs_nid = snid;
+        nr_pdcch_blind_monitor_autodiscover_extent_hint(ss / 6, (ss + sn) / 6 - 1);
+      }
+    }
     static uint32_t s_probe_tick;
     if (!pbwp_probe_len && (++s_probe_tick & 3) == 0) /* discovery: 1 occasion in 4 */
       pbwp_probe_len = nr_pbwp_next_probe_len(&g_pbwp);
@@ -3817,6 +4153,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * is pdsch-ConfigCommon's rather than the dedicated one. Resolved once per occasion, then shared
    * (read-only) by every candidate task. ---- */
   const bool scan_11 = (cfg->dci10_scan != 2);
+  const bool pbwp_pass2_ok = scan_11 || (cfg->dl_full_auto && cfg->autodiscover);
   bool scan_10 = (cfg->dci10_scan >= 1);
   /* DISCOVERY vs DECODE VOLUME (V2). Scanning format 1_0 next to 1_1 doubles the polar decodes per
    * candidate, and the scan queue was dropping 34 % of occasions. Once the cell has shown what it
@@ -3953,25 +4290,30 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   }
   btim_add(BTIM_FEP_LLR, btim_t_fep);
   /* ---- Passive BWP: CORESET discovery (nr_passive_bwp.h). A dedicated BWP's CORESET lives inside that
-   * BWP, so this CORESET never carries its DCIs. Every 8th occasion, correlate each 6-RB window of the
+   * BWP, so this CORESET never carries its DCIs. On every occasion, correlate each 6-RB window of the
    * CORESET symbols against the PDCCH DM-RS under the spec reference (CRB 0) and the OAI one (the BWP
-   * start, within 5 RB below the window), and let the tracker find a second CORESET. ~6k MAC/symbol. */
+   * start, within 5 RB below the window), and let the tracker find a second CORESET. ~6k MAC/symbol.
+   * This ran on every 8th occasion; the CORESET proposal needs MIN_HITS lit windows per 6-RB window and each
+   * grant lights one, so the subsampling stretched the proposal (6 RB x 1 symbol at 10 s, the real 24 x 2 at
+   * 57 s on the SA bed: 51 observations/s) for a saving of a few microseconds per occasion. */
   const uint64_t btim_t_pbwp = btim_on ? btim_now() : 0;
   if (pbwp_on) {
-    static _Atomic uint32_t s_cs_tick; /* _Atomic: N scan consumers (Task A7) */
     static _Atomic bool s_cs_logged; /* _Atomic: N scan consumers (Task A7) */
-    if ((++s_cs_tick & 7) == 0) {
+    {
       const int n_win = fp->N_RB_DL / 6 < NR_PBWP_CS_MAXWIN ? fp->N_RB_DL / 6 : NR_PBWP_CS_MAXWIN;
       const int base_lo = (cfg->bwp_start + cfg->coreset_rb_offset) / 6;
       const int base_hi = base_lo + cfg->coreset_freq_domain - 1;
       c16_t pilot[fp->N_RB_DL * 3];
       float corr[NR_PBWP_CS_MAXWIN];
       int16_t ref[NR_PBWP_CS_MAXWIN];
+      /* One decision per OCCASION (1 in 32; the solves run on a worker thread), applied to BOTH CORESET symbols: a per-symbol counter always landed on the same symbol. */
+      static _Atomic uint32_t s_nid_tick;
+      const bool nid_trig = nid_solve_enabled() && (atomic_fetch_add_explicit(&s_nid_tick, 1, memory_order_relaxed) & 31) == 0;
       for (int sym = 0; sym < 2; sym++) {
         const int symbol = cfg->ss_first_symbol + sym;
         if (sym >= rel15->coreset.duration)
           nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-        nr_pdcch_coreset_pilot(cfg->coreset_pdcch_dmrs_scrambling_id, proc->nr_slot_rx, symbol, fp->N_RB_DL, pilot);
+        nr_pdcch_coreset_pilot((uint16_t)nid_pilot_id(cfg->coreset_pdcch_dmrs_scrambling_id), proc->nr_slot_rx, symbol, fp->N_RB_DL, pilot);
         const c16_t *y = &rxdataF[0][symbol * fp->ofdm_symbol_size];
         for (int w = 0; w < n_win; w++) {
           corr[w] = (float)nr_pdcch_coreset_window_corr(y, fp->ofdm_symbol_size, fp->first_carrier_offset, pilot,
@@ -3982,10 +4324,22 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                                                                 pilot, fp->N_RB_DL, w * 6, w * 6 - d);
             if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
           }
+          /* Half-window occupancy (3 RBs = one REG bundle at duration 2): an interleaved CORESET lights half of a window at a time. */
+          if (corr[w] < 0.8f)
+            for (int h = 0; h < 2; h++)
+              for (int d = 0; d <= 5 && w * 6 + h * 3 - d > 0; d++) {
+                const float c = (float)nr_pdcch_coreset_window_corr_n(y, fp->ofdm_symbol_size, fp->first_carrier_offset, pilot,
+                                                                      fp->N_RB_DL, w * 6 + h * 3, w * 6 - d, 3);
+                if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
+              }
         }
         pthread_mutex_lock(&g_pbwp_lock);
         nr_pbwp_coreset_observe(&g_pbwp, n_win, base_lo, base_hi, cfg->bwp_start, corr, ref, sym, 0.8f);
         pthread_mutex_unlock(&g_pbwp_lock);
+        if (nid_trig) {
+          nid_submit(y, fp->ofdm_symbol_size, fp->first_carrier_offset, fp->N_RB_DL, proc->nr_slot_rx, symbol, sym, (int)fp->Nid_cell,
+                     cfg->bwp_start);
+        }
         /* ISAC_BWP_DIAG=1: every 256 observations, the 4 strongest windows of symbol 0 with their winning
          * reference -- what the tracker is actually seeing, when no CORESET gets declared. */
         static _Atomic int s_bwp_diag = -1; /* _Atomic: N scan consumers (Task A7) */
@@ -5057,7 +5411,9 @@ constdiag_done:;
         cand_task[nof_tasks].dci_length   = pbwp_snap[bi].len;
         cand_task[nof_tasks].bwp_size     = pbwp_snap[bi].size;
         cand_task[nof_tasks].extract_opts = &pbwp_opts[bi];
-        cand_task[nof_tasks].dl_auto      = false;
+        /* Agnostic mode: resolved BWPs go through the SAME raw decode + layout candidates + Technique D route as the base BWP.
+         * The manual layout (cfg->extract: spec-default 4-bit TDA, the base BWP size) cannot parse a dedicated BWP's grants. */
+        cand_task[nof_tasks].dl_auto      = cfg->dl_full_auto != 0;
         cand_task[nof_tasks].bwp_entry    = (int8_t)bi;
         nof_tasks++;
       }
@@ -5106,13 +5462,58 @@ constdiag_done:;
    * differs, and only the lengths of discovered BWPs are tried there (the resolved ones + the probe).
    * DM-RS reference = the voted reference RB: the BWP start on OAI, 0 (CRB 0) per 38.211. ---- */
   static __thread c16_t s_pdcch_e_rx2[NR_MAX_PDCCH_SIZE];
-  if (pbwp_on && cs_have && scan_11 && (pbwp_n > 1 || pbwp_probe_len) && cs_n >= 6
+  if (pbwp_on && cs_have && pbwp_pass2_ok && (pbwp_n > 1 || pbwp_probe_len) && cs_n >= 6
       && cs_n <= NR_PDCCH_BLIND_MAX_CORESET_RB && cs_dur <= NR_PDCCH_BLIND_MAX_CORESET_DURATION) {
     nr_phy_data_t phy_b = local_phy_data;
     fapi_nr_dl_config_dci_dl_pdu_rel15_t *rb = &phy_b.phy_pdcch_config.pdcch_config[0];
     rb->BWPStart = (uint16_t)cs_ref;
     rb->coreset.rb_offset = (uint16_t)(cs_start - cs_ref);
     rb->coreset.duration = (uint8_t)cs_dur;
+    if (cs_nid >= 0)
+      rb->coreset.pdcch_dmrs_scrambling_id = (uint16_t)cs_nid;
+    /* MAPPING HYPOTHESES. phy_b was copied from the OWNING pass, whose CORESET is usually CORESET#0 (MIB/SIB1 type, INTERLEAVED
+     * bundle 6 / interleaver 2) -- but the CORESET proposed here is a DEDICATED one, which OAI configures non-interleaved. Only the
+     * offset/duration/bitmap were overridden, so the dedicated CORESET was demapped with CORESET#0's interleaver and no CRC could
+     * ever pass (measured: true-length CRC passes at chance for both a 24x2 and a 48x1 dedicated CORESET). Alternate the two
+     * hypotheses per occasion: non-interleaved PDCCH-Config first, then the inherited mapping (a gNB that interleaves it). */
+    /* The tracker fixes the extent and duration from DM-RS occupancy, which does not depend on the CCE-to-REG mapping; only the mapping is
+     * left to hypothesise, and its likely set is small (nr_pdcch_map_candidates pass 0: SIB1 prior, non-interleaved, PCI residue / 0 of
+     * every legal (L, R)). One per occasion, so a wrong one costs an occasion, not a dwell. The inherited mapping closes the rotation. */
+    static _Atomic uint32_t s_p2_hyp;
+    nr_pdcch_map_cand_t p2m[24];
+    const int p2n = nr_pdcch_map_candidates_pass0(cs_n, cs_dur, (int)ue->frame_parms.Nid_cell, p2m, 24);
+    /* Rotating over every hypothesis divides the second pass's detection rate by p2n + 1; once one has produced CRC-accepted DCIs for this
+     * geometry, spend 15 of 16 occasions on it and keep exploring with the rest. */
+    static _Atomic uint64_t s_p2_geom;
+    const uint64_t p2_geom = ((uint64_t)cs_start << 32) | ((uint64_t)cs_n << 8) | (uint64_t)cs_dur;
+    if (atomic_exchange_explicit(&s_p2_geom, p2_geom, memory_order_relaxed) != p2_geom)
+      for (int i = 0; i < 32; i++)
+        atomic_store_explicit(&g_p2_votes[i], 0, memory_order_relaxed);
+    const uint32_t p2_tick = atomic_fetch_add_explicit(&s_p2_hyp, 1, memory_order_relaxed);
+    uint32_t p2h = p2_tick % (uint32_t)(p2n + 1);
+    {
+      uint32_t bv = 0;
+      int bi_ = -1;
+      for (int i = 0; i <= p2n && i < 32; i++) {
+        const uint32_t v = atomic_load_explicit(&g_p2_votes[i], memory_order_relaxed);
+        if (v > bv) { bv = v; bi_ = i; }
+      }
+      if (bi_ >= 0 && bv >= 3 && (p2_tick & 15) != 0)
+        p2h = (uint32_t)bi_;
+    }
+    if ((int)p2h < p2n) {
+      rb->coreset.CoreSetType = NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG;
+      rb->coreset.CceRegMappingType = p2m[p2h].bundle ? FAPI_NR_CCE_REG_MAPPING_TYPE_INTERLEAVED
+                                                       : FAPI_NR_CCE_REG_MAPPING_TYPE_NON_INTERLEAVED;
+      rb->coreset.RegBundleSize = p2m[p2h].bundle;
+      rb->coreset.InterleaverSize = p2m[p2h].interleaver;
+      rb->coreset.ShiftIndex = p2m[p2h].shift;
+      /* Express the position EXACTLY as the MAC-driven UE does for a dedicated CORESET (BWPStart = CORESET start, rb_offset = 0;
+       * measured with ISAC_PDCCH_CFGTRACE: BWPStart=30 rb_offset=0 dmrs_ref=30). The two forms add up to the same pilot index but
+       * the sub-paths (extraction vs estimation) need not treat them alike. */
+      rb->BWPStart = (uint16_t)cs_start;
+      rb->coreset.rb_offset = 0;
+    }
     build_coreset_bitmap(cs_n / 6, rb->coreset.frequency_domain_resource);
     const int ncce_b = cs_n * cs_dur / 6;
     static const int al_b[4] = {2, 4, 1, 8};
@@ -5144,13 +5545,15 @@ constdiag_done:;
                                       rb->number_of_candidates, rb->CCE, rb->L, llr_sym_b);
     const int cap = (int)(sizeof(cand_task) / sizeof(cand_task[0]));
     int idx2 = 0;
+    /* Run from the CSS0 pass (before the oracle commit) the config still carries CSS0's SI-RNTI-only pin; a dedicated search needs the C-RNTI range. */
+    const bool p2_si_pinned = cfg->rnti_min == 0xFFFF && cfg->rnti_max == 0xFFFF;
     for (int c = 0; c < nc_b; c++) {
       const nr_pdcch_blind_cand_task_t t2 = {
           .e_rx = &s_pdcch_e_rx2[idx2],
           .L = rb->L[c],
           .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
-          .rnti_min = cfg->rnti_min,
-          .rnti_max = cfg->rnti_max,
+          .rnti_min = p2_si_pinned ? NR_PDCCH_BLIND_RNTI_MIN_DEFAULT : cfg->rnti_min,
+          .rnti_max = p2_si_pinned ? NR_PDCCH_BLIND_RNTI_MAX_DEFAULT : cfg->rnti_max,
           .scrambling_rnti = rb->coreset.scrambling_rnti,
           .dmrs_scrambling_id = rb->coreset.pdcch_dmrs_scrambling_id,
           .frame = proc->frame_rx,
@@ -5158,6 +5561,7 @@ constdiag_done:;
           .cce = rb->CCE[c],
           .format = NR_BLIND_DCI_FORMAT_1_1,
           .dl_auto = false,
+          .p2h = (int8_t)(p2h + 1),
       };
       for (int bi = 1; bi < pbwp_n && nof_tasks < cap; bi++) {
         if (pbwp_snap[bi].start < 0)
@@ -5166,6 +5570,7 @@ constdiag_done:;
         cand_task[nof_tasks].dci_length = pbwp_snap[bi].len;
         cand_task[nof_tasks].bwp_size = pbwp_snap[bi].size;
         cand_task[nof_tasks].extract_opts = &pbwp_opts[bi];
+        cand_task[nof_tasks].dl_auto = cfg->dl_full_auto != 0; /* see the main-pass block above */
         cand_task[nof_tasks].bwp_entry = (int8_t)bi;
         nof_tasks++;
       }
@@ -5835,7 +6240,8 @@ constdiag_done:;
         const int be = cand_task[ti].bwp_entry;
         pthread_mutex_lock(&g_pbwp_lock);
         const bool proven = nr_pbwp_rnti_seen(&g_pbwp, pr->rnti);
-        const int ne = (be == 0) ? nr_pbwp_probe_accept(&g_pbwp, pr->rnti, cand_task[ti].dci_length) : -1;
+        const int ne = (be == 0) ? nr_pbwp_probe_accept(&g_pbwp, pr->rnti, cand_task[ti].dci_length,
+                                                              nr_dci_bits_hash(&pr->payload, cand_task[ti].dci_length)) : -1;
         const int ng = (ne > 0) ? g_pbwp.e[ne].ng : 0;
         pthread_mutex_unlock(&g_pbwp_lock);
         if (ne > 0)
@@ -6055,7 +6461,10 @@ constdiag_done:;
       }
     }
     if (cand_task[ti].dl_auto && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) {
-      if (!cand_task[ti].ok || (cfg->autodiscover && !g_length_found))
+      /* Autodiscover holds raw DL accepts until ITS length sweep has found a length. A task of a RESOLVED BWP entry already carries the
+       * length (and size/start) the tracker proved by CRC, so it needs no such wait: without SIB1 the tracker's pass is owned by the
+       * autodiscover pass, whose sweep may never lock a length, and every resolved UE was silently dropped here (0 DCI 1_1 accepts). */
+      if (!cand_task[ti].ok || (cfg->autodiscover && !g_length_found && cand_task[ti].bwp_entry <= 0))
         continue;
       const nr_pdcch_blind_raw_result_t *raw = &cand_task[ti].dl_raw;
       if (cand_task[ti].open_rnti) { /* resolved UEs are decoded by their own exact task */
@@ -6132,21 +6541,40 @@ constdiag_done:;
                    "layout requires TB-CRC evidence\n",
               (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
               nr_dci_bits_hex(raw->payload.w, cand_task[ti].dci_length, false, payload_hex), raw->mismatched_bits);
-      nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
-      if (!g_pdsch_sweep_on) continue;
+      /* A resolved dedicated BWP (bwp_entry > 0) has its own length and BWP size; the global layout observer / stage-2 resolver are
+       * armed for the base BWP only, so use the stateless candidate enumeration with the ENTRY'S size for these. */
+      const bool bwp_entry_task = cand_task[ti].bwp_entry > 0;
+      if (!bwp_entry_task) nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
+      /* A resolved BWP entry decodes through its own layout candidates and per-RNTI contexts, whatever the owning pass's autodiscover state:
+       * g_pdsch_sweep_on is 'ready' = this pass's sweep finished, which the autodiscover pass (the tracker's owner without SIB1) never does. */
+      if (!g_pdsch_sweep_on && !(cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto)) continue;
       /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
        * consumer's stack, and 512 results there overflowed it on the first DL grant (OTA 2026-09-15). */
       nr_pdcch_blind_result_t layouts[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       uint16_t layout_ids[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       int n = 0;
-      if ((nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) && g_dci11_state == 1)
+      if (!bwp_entry_task && (nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) && g_dci11_state == 1)
         n = nr_pdcch_dci11_stage2_candidates(raw, cand_task[ti].dci_length, cfg, layouts, layout_ids, NR_DCI11_STAGE2_MAX_ALIVE);
       const bool from_stage2 = (n > 0);
       if (!n) {
         uint8_t ids8[3];
         n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
-            cfg->bwp_size, cfg->dmrs_typeA_position, layouts, ids8);
+            bwp_entry_task ? cand_task[ti].bwp_size : cfg->bwp_size, cfg->dmrs_typeA_position, layouts, ids8);
         for (int i = 0; i < n && i < 3; i++) layout_ids[i] = ids8[i];
+      }
+      if (bwp_entry_task && !from_stage2 && n > 0) {
+        /* The tracker has ALREADY resolved this entry's indicator and TDA widths from the DM-RS; the enumerator (stateless) offers every
+         * (bw, td) that sums to the length and the pin used to rotate through them -- seeding the wrong one first (measured: layout_id=3,
+         * tda=6, impossible for a 3-entry list) and discarding Technique D's progress at every switch. Keep only the resolved one. */
+        const int want = (int)pbwp_snap[cand_task[ti].bwp_entry].ind * 5 + (4 - (int)pbwp_snap[cand_task[ti].bwp_entry].dk);
+        int w = 0;
+        for (int i = 0; i < n; i++)
+          if ((int)layout_ids[i] == want) {
+            layouts[w] = layouts[i];
+            layout_ids[w] = layout_ids[i];
+            w++;
+          }
+        n = w;
       }
       if (!n) continue;
       {
@@ -6359,6 +6787,8 @@ constdiag_done:;
       nr_pbwp_mark_seen(&g_pbwp, out.rnti);
       const bool sw = out.dci_format == NR_BLIND_DCI_FORMAT_1_1
                       && nr_pbwp_on_accept(&g_pbwp, out.rnti, cand_task[ti].bwp_entry);
+      if (cand_task[ti].p2h > 0 && out.dci_format == NR_BLIND_DCI_FORMAT_1_1)
+        atomic_fetch_add_explicit(&g_p2_votes[(cand_task[ti].p2h - 1) & 31], 1, memory_order_relaxed);
       const uint32_t nsw = g_pbwp.switches;
       pthread_mutex_unlock(&g_pbwp_lock);
       if (sw && cfg_reconf_on)
@@ -6677,11 +7107,11 @@ constdiag_done:;
     // own real DLSCH config. ----
     /* Accepted DCI may still be discovery evidence. Do not emit PDSCH/CFR from
      * unverified geometry or silently use manual interpretation while full-auto is waiting. */
-    if (cfg->autodiscover && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
+    if (cfg->autodiscover && !(cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto) && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "autodiscover-unverified");
       continue;
     }
-    if (cfg->dl_full_auto && !is_dci10 && !g_pdsch_sweep_on) {
+    if (cfg->dl_full_auto && !is_dci10 && !g_pdsch_sweep_on && !(cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto)) {
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "full_auto-no-sweep");
       continue;
     }
@@ -6754,9 +7184,19 @@ constdiag_done:;
     // DECIDED, the link is healthy (N_ID^cell grants or another RNTI passing), and this RNTI's
     // dedicated grants failed CRC >= NR_SCR_WALK_MIN_FAILS times in a row (final review I1: the former
     // "Technique D converged" gate was circular -- convergence needs CRC passes a wrong id never gives).
-    const bool dl_data_advance = dl_dedicated
-                                 && nr_scrambling_walk_eligible(dl_dmrs_decided, nr_pdsch_passive_link_healthy(out.rnti),
-                                                                nr_pdsch_passive_rnti_ded_fails(out.rnti));
+    /* The walk takes only every OTHER grant of an eligible RNTI; the rest keep decoding under the PCI.
+     * A walk step is only informative if this grant's other hypotheses (Technique D layout, TDA, mask)
+     * are right, and until Technique D has settled most grants are deliberately wrong trials. Handing
+     * the walk EVERY grant moved it off the correct id (== PCI, the usual case) after one wrong-layout
+     * failure, ~0.3 s after an RNTI appeared, before any layout could be tested under the right id
+     * (measured: second attached UE decoded 1 of 46761). Keeping the PCI in rotation lets Technique D
+     * converge under it; the first CRC pass then closes the walk (nr_pdsch_passive_rnti_ded_fails). */
+    static _Atomic uint8_t s_walk_tog[65536];
+    bool dl_data_advance = dl_dedicated
+                           && nr_scrambling_walk_eligible(dl_dmrs_decided, nr_pdsch_passive_link_healthy(out.rnti),
+                                                          nr_pdsch_passive_rnti_ded_fails(out.rnti));
+    if (dl_data_advance)
+      dl_data_advance = (atomic_fetch_add_explicit(&s_walk_tog[out.rnti], 1, memory_order_relaxed) & 1) != 0;
     dlsch_pdu.dlDataScramblingId = dl_dedicated ? nr_pdsch_passive_data_id_current(out.rnti, (uint16_t)fp->Nid_cell,
                                                                                    dl_dmrs_decided, dl_data_advance)
                                                 : (uint16_t)fp->Nid_cell;
@@ -6772,7 +7212,7 @@ constdiag_done:;
      * included) to stage-2 layout 0. 0xFFFF = none, which the feedback counts as DL link health. */
     sweep_ticket.layout_index = 0xFFFF;
     int8_t grant_mcs_table_lbrm = (int8_t)cfg->pdsch_mcs_table;
-    if (g_pdsch_sweep_on && !is_dci10) {
+    if ((g_pdsch_sweep_on || (cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto)) && !is_dci10) {
       /* Rotate only grants eligible for a CRC attempt, not deterministic RV/cap drops. */
       if (!want_decode || (cfg->pdsch_rv0_only && out.rv != 0)
           || decodes_this_occasion >= cfg->pdsch_max_per_slot)

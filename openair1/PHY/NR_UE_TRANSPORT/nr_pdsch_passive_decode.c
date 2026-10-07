@@ -511,7 +511,21 @@ void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
   rnti_dec_t *r = rnti_dec_find(rnti, false);
   if (r && r->data_id.n > 0 && r->data_id.latched < 0) {
     const int tried = nr_scrambling_id_sweep_current(&r->data_id);
-    nr_scrambling_id_sweep_feed(&r->data_id, tb_crc_ok ? 1 : 0);
+    /* A latch is permanent, so ONE pass is not enough: a wrong candidate can pass by accident (measured:
+     * a QPSK/tbs=2024 trial hypothesis passed under n_id=121 after 122 tries on a second attached UE
+     * that really uses the PCI; the latch then pinned 121 and every later decode of that UE failed).
+     * The true id passes again within a few grants (92 % of its real-layout grants); a coincidence does
+     * not. So hold the candidate after its first pass and latch on the second; a fail clears the hold. */
+    static uint32_t s_pend_cand[65536]; /* guarded by g_ptrs_lock; 0 = none, else candidate+1 */
+    int fed = tb_crc_ok ? 1 : 0;
+    if (tb_crc_ok && s_pend_cand[rnti] != (uint32_t)tried + 1) {
+      s_pend_cand[rnti] = (uint32_t)tried + 1; /* first pass at this candidate: stay on it, do not latch */
+      pthread_mutex_unlock(&g_ptrs_lock);
+      return;
+    }
+    if (!tb_crc_ok)
+      s_pend_cand[rnti] = 0;
+    nr_scrambling_id_sweep_feed(&r->data_id, fed);
     if (r->data_id.latched >= 0)
       LOG_A(PHY, "SENSING: DATA_ID_WALK LATCHED rnti=0x%04x n_id=%d after %u tries (reason: TB CRC pass)\n", rnti,
             r->data_id.latched, r->data_id.tries);
@@ -604,19 +618,33 @@ static nr_scr_link_t g_dl_scr_link;
  * dedicated pass. Grants that use N_ID^cell (SIB1, RAR, CSS fallback) neither count nor reset it: they
  * pass under a wrong dedicated identity and would otherwise keep the walk from ever opening. */
 static _Atomic uint32_t g_ded_fails_since_ok[65536];
+/* A dedicated CRC pass PROVES the data identity in use (c_init = RNTI*2^15 + n_ID: any other n_ID fails
+ * LDPC). So an RNTI that has ever passed has nothing left for the walk to find. Without this, the
+ * "20 consecutive fails" trigger fires on failures that have nothing to do with the identity: the
+ * Technique D sweep deliberately decodes grants under WRONG layout hypotheses, which fail by
+ * construction, so a streak of 20 is reached within a second of a correct id. The walk then leaves the
+ * right id after ONE failed look (that grant was a wrong-layout trial) and needs 1024 further failing
+ * grants to come back: measured on the SA bed as a UE that decodes for ~10 s, then sweeps ids for
+ * minutes with perfect EVM (0 % TB CRC) or recovers after a random time. */
+static _Atomic uint8_t g_ded_ever_ok[65536];
 void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok)
 {
   if (!nr_cfg_epoch_work_current()) return;
   nr_scr_link_note(&g_dl_scr_link, rnti, dedicated, crc_ok);
   if (!dedicated)
     return;
-  if (crc_ok)
+  if (crc_ok) {
     atomic_store_explicit(&g_ded_fails_since_ok[rnti], 0, memory_order_relaxed);
-  else
+    atomic_store_explicit(&g_ded_ever_ok[rnti], 1, memory_order_relaxed);
+  } else
     atomic_fetch_add_explicit(&g_ded_fails_since_ok[rnti], 1, memory_order_relaxed);
 }
 uint32_t nr_pdsch_passive_rnti_ded_fails(uint16_t rnti)
 {
+  /* ponytail: a dataScramblingIdentity change by RRC reconfiguration AFTER a pass is not re-walked until
+   * the RNTI changes; clear g_ded_ever_ok on a sustained zero-pass window if that case ever appears. */
+  if (atomic_load_explicit(&g_ded_ever_ok[rnti], memory_order_relaxed))
+    return 0;
   return atomic_load_explicit(&g_ded_fails_since_ok[rnti], memory_order_relaxed);
 }
 bool nr_pdsch_passive_link_healthy(uint16_t rnti)

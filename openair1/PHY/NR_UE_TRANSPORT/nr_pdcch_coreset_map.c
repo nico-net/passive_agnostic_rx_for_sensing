@@ -818,10 +818,19 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
 double nr_pdcch_coreset_window_corr(const c16_t *rxdataF, int ofdm_symbol_size, int first_carrier_offset,
                                     const c16_t *pilot, int n_pilot_rb, int rb_offset, int ref_rb)
 {
-  if (rb_offset < ref_rb || rb_offset - ref_rb + 6 > n_pilot_rb)
+  return nr_pdcch_coreset_window_corr_n(rxdataF, ofdm_symbol_size, first_carrier_offset, pilot, n_pilot_rb, rb_offset, ref_rb, 6);
+}
+
+/* Same statistic over an arbitrary number of RBs. A window of 6 RBs that is only HALF occupied (a REG bundle of 6 REGs at duration 2 is 3 RBs,
+ * and an interleaved CORESET scatters bundles) correlates at sqrt(1/2) = 0.71 even with no noise, below the 0.8 lit threshold, so a CORESET
+ * whose bundles are 3 RBs wide is never declared; a 3-RB sub-window that is fully occupied correlates at 1. */
+double nr_pdcch_coreset_window_corr_n(const c16_t *rxdataF, int ofdm_symbol_size, int first_carrier_offset,
+                                      const c16_t *pilot, int n_pilot_rb, int rb_offset, int ref_rb, int width)
+{
+  if (width < 1 || rb_offset < ref_rb || rb_offset - ref_rb + width > n_pilot_rb)
     return -1.0;
   double cr = 0.0, ci = 0.0, py = 0.0, px = 0.0;
-  for (int rb = rb_offset; rb < rb_offset + 6; rb++) {
+  for (int rb = rb_offset; rb < rb_offset + width; rb++) {
     for (int p = 0; p < 3; p++) {
       const int k = (first_carrier_offset + rb * 12 + 1 + 4 * p) % ofdm_symbol_size;
       const c16_t y = rxdataF[k];

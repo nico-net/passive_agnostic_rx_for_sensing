@@ -3879,6 +3879,11 @@ TEST_F(BlindPdcchTest, Dci01FdraModeCandidatesNarrowByLengthConsistency) {
 
 #include "nr_passive_ul_grant_book.h"
 
+// These tests exercise the oracle's SEEDED commit; the unseeded first commit (default in production) is covered by
+// DlAdaptive.FirstDiscoveryCallCommitsAnUnseededCompleteCatalogue.
+static const int s_early_commit_off_for_this_file = (nr_pdcch_blind_monitor_autodiscover_early_commit_enable(false), 0);
+
+
 TEST_F(BlindPdcchTest, Dci01EqualLengthFdraHypothesesSurviveBookUntilCrc) {
   nr_pdcch_blind_ul_opts_t o{};
   o.bwp_size = 106;

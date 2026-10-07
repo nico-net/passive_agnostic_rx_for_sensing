@@ -38,6 +38,8 @@ extern "C" {
 #define NR_PBWP_MAX        5    /* initial/configured + up to 4 dedicated */
 #define NR_PBWP_MIN_SIZE   20   /* smallest BWP a probe length is derived for */
 #define NR_PBWP_NEW_HITS   3    /* proven-RNTI accepts at an unregistered length to register it */
+#define NR_PBWP_MAX_EXCL 8
+#define NR_PBWP_SEARCH_REFUTE_TRIES 2500 /* TB trials of a resolved entry with no pass at all while layouts are still being searched */
 #define NR_PBWP_MIN_GRANTS 8    /* grants scored before a hypothesis may be declared */
 #define NR_PBWP_MARGIN     2.0  /* summed-score lead over the runner-up to declare */
 #define NR_PBWP_IND_LEARN  8    /* steady-state DCIs binding a BWP-indicator value to an entry */
@@ -46,8 +48,10 @@ extern "C" {
 #define NR_PBWP_CS_MIN_OCC 64   /* observed occasions before a CORESET may be declared */
 #define NR_PBWP_CS_MIN_HITS 8   /* above-threshold hits for a window to count as lit */
 
+#define NR_PBWP_MAX_GROUPS 18 /* 3 indicator widths x up to 6 fixed-bit shortfalls (0..5) */
 typedef struct {
   uint8_t  d;                /* BWP-indicator width of this hypothesis group */
+  uint8_t  dk;               /* fixed-bit shortfall vs the formula's K (e.g. TDA 2 bits instead of 4 => dk=2) */
   uint16_t lo, hi;           /* sizes sharing this group's FDRA width */
   uint16_t n_starts;
   uint64_t dead_lo, dead_hi; /* bit (N - lo): size refuted by an impossible RIV */
@@ -59,8 +63,11 @@ typedef struct {
   int16_t  start;            /* first PRB (CRB index); -1 until resolved */
   uint16_t size;             /* valid once resolved */
   uint8_t  ind_bits;         /* BWP-indicator width; valid once resolved */
+  uint8_t  tda_dk;           /* fixed-bit shortfall (TDA width = default - tda_dk); valid once resolved */
   uint32_t hits, grants_scored, crc_try, crc_ok;
-  nr_pbwp_group_t g[3];
+  uint8_t  n_excl;           /* hypotheses a TB-CRC verdict refuted: never resolved to again (survives a rescore) */
+  struct { uint16_t size; int16_t start; uint8_t ind_bits; } excl[NR_PBWP_MAX_EXCL];
+  nr_pbwp_group_t g[NR_PBWP_MAX_GROUPS];
   int ng;
 } nr_pbwp_entry_t;
 
@@ -71,6 +78,7 @@ typedef struct {
  * RB -- on OAI it IS the BWP start. */
 typedef struct {
   uint32_t occ;
+  int n_win;                                /* carrier windows observed (the background estimate must not include windows past the carrier) */
   uint32_t hits[NR_PBWP_CS_MAXWIN][2];      /* per window, CORESET symbol 0 / 1 */
   uint32_t base_hits[NR_PBWP_CS_MAXWIN][2]; /* same, inside the configured CORESET at its own reference */
   int16_t base_lo, base_hi, base_ref;       /* configured CORESET of the last observation */
@@ -80,12 +88,15 @@ typedef struct {
 typedef struct {
   uint16_t carrier_rbs, base_len, base_size;
   uint8_t base_ind_bits;
+  uint8_t k_slack;             /* hypothesise K shortfalls 0..k_slack (0 = the formula K only, the original behaviour) */
   nr_pbwp_entry_t e[NR_PBWP_MAX];
   int n;
   uint16_t cand_len[NR_PBWP_MAX_CAND];
   uint32_t cand_hits[NR_PBWP_MAX_CAND];
   uint16_t cand_rnti[NR_PBWP_MAX_CAND][4];  /* repetition proof: recent RNTIs per candidate length */
   uint8_t  cand_rnti_n[NR_PBWP_MAX_CAND][4];
+  uint32_t cand_rnti_h[NR_PBWP_MAX_CAND][4]; /* first payload hash seen for that RNTI at that length */
+  uint8_t  cand_rnti_d[NR_PBWP_MAX_CAND][4]; /* 1 once a DIFFERENT payload was seen: a real DCI changes with scheduling */
   int n_cand, probe_cursor;
   uint8_t ind_map[4];          /* BWP-indicator value -> entry index + 1 (0 = unknown) */
   uint16_t ind_votes[4][NR_PBWP_MAX];
@@ -95,6 +106,9 @@ typedef struct {
   nr_pbwp_coreset_t cs;
 } nr_pbwp_t;
 
+void nr_pbwp_init_ex(nr_pbwp_t *t, uint16_t carrier_rbs, uint16_t base_start, uint16_t base_size,
+                     uint16_t base_len, uint8_t base_ind_bits, uint8_t k_slack);
+uint16_t nr_pbwp_last_rnti(const nr_pbwp_t *t, int idx); /* an RNTI bound to entry idx, 0 if none */
 uint8_t nr_pbwp_riv_bits(uint16_t n);
 /** TS 38.214 5.1.2.2.2 Type-1 decode, same arithmetic as NRRIV2BW / NRRIV2PRBOFFSET. */
 bool nr_pbwp_riv_decode(uint32_t riv, uint16_t n, uint16_t *start, uint16_t *len);
@@ -127,7 +141,7 @@ uint16_t nr_pbwp_next_probe_len(nr_pbwp_t *t);
  *  RNTIs, or after NR_PBWP_NEW_HITS accepts from the SAME unproven RNTI (repetition proof: when every UE
  *  has moved to a dedicated BWP none is ever proven on the base one, and noise accepts carry uniformly
  *  random RNTIs). Returns the new entry index, or -1. */
-int nr_pbwp_probe_accept(nr_pbwp_t *t, uint16_t rnti, uint16_t len);
+int nr_pbwp_probe_accept(nr_pbwp_t *t, uint16_t rnti, uint16_t len, uint32_t payload_hash);
 
 /** Score one grant of an unresolved entry from its raw payload. `prb_coh[p]` = DM-RS coherence of
  *  CRB p in [0,1] over the whole carrier. Returns true when this grant resolved the entry. */
@@ -136,6 +150,11 @@ bool nr_pbwp_score_grant(nr_pbwp_t *t, int idx, nr_dci_bits_t payload, const flo
 /** TB-CRC outcome of a grant decoded against a resolved entry. 32 tries with 0 passes un-resolves
  *  it (the DM-RS vote converged on the wrong hypothesis) and scoring restarts. */
 void nr_pbwp_feed_crc(nr_pbwp_t *t, int idx, bool ok);
+
+/** Same for a TB decoded while the layout (Technique D) is still being searched: those fail by design one hypothesis at a time, so
+ *  only a long run with NOT A SINGLE pass (NR_PBWP_SEARCH_REFUTE_TRIES) refutes the geometry. Without this a wrong resolution (e.g.
+ *  89@1 for a 40@30 BWP whose grants all span the whole BWP, so both explain the same lit PRBs) can never be undone. */
+void nr_pbwp_feed_crc_search(nr_pbwp_t *t, int idx, bool ok);
 
 /** TS 38.212 7.3.1.1.2: FDRA sized for the CURRENT BWP, interpreted for the target one. */
 uint32_t nr_pbwp_translate_riv(uint32_t value, uint8_t cur_bits, uint8_t tgt_bits);

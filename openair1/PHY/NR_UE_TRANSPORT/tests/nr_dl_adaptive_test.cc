@@ -313,7 +313,9 @@ TEST_F(DlGeometry, RetrySearchesOtherWidthsAtSameOffsetAndNeverInventsVerificati
   // The catalog's own size is the ground truth (see above) -- every one of its n_ext entries must
   // be searched exactly once before autodiscover_done() gives up.
   // is taken as the second hypothesis and is one of those 20, so the count is unchanged.
-  EXPECT_EQ(extents,n_ext);
+  // The walk repeats the whole catalogue once per CORESET duration (1, 2, 3) before giving up: the duration used to be fixed from the
+  // oracle's symbol-1 hits, which is wrong whenever the real CORESET lies in windows the oracle excludes.
+  EXPECT_EQ(extents,3*n_ext);
   ASSERT_NO_FATAL_FAILURE(discover_single_window()); // quiet intervals do not permanently blacklist
 }
 TEST(DlAdaptive, ExtentCatalogContainsEveryAdmissibleContiguousGeometry) {
@@ -421,6 +423,11 @@ TEST(DlAdaptive, DeferredSamplesExpireDuringFepAndMustNotScore) {
 }
 
 #include "../nr_passive_ul_grant_book.h"
+
+// These tests exercise the oracle's SEEDED commit; the unseeded first commit (default in production) is covered by
+// DlAdaptive.FirstDiscoveryCallCommitsAnUnseededCompleteCatalogue.
+static const int s_early_commit_off_for_this_file = (nr_pdcch_blind_monitor_autodiscover_early_commit_enable(false), 0);
+
 TEST(UlGrantBook, KeepsThreeUesInOneSlotAndAcceptsLateDci) {
   nr_passive_ul_book_t book{};
   nr_pdcch_blind_ul_result_t grant{};
@@ -532,4 +539,18 @@ TEST(DlAdaptive, MaskOracleCollapsesTheFullCatalogToAFewEntries) {
   EXPECT_GT(n, 0);
   EXPECT_LE(n, 40);
   for (int i = 0; i < n; i++) EXPECT_EQ(st.hyp[i].dmrs_mask, 0x884);
+}
+
+TEST(DlAdaptive, FirstDiscoveryCallCommitsAnUnseededCompleteCatalogue) {
+  nr_pdcch_blind_monitor_autodiscover_early_commit_enable(true);
+  nr_pdcch_blind_monitor_autodiscover_reset();
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(18,1,0,12,40,0,2,0,1,2,12,2));
+  constexpr int nrb=48, fft=1024, offset=10, pci=2, slot=3;
+  std::vector<c16_t> rx(fft); // silence: the oracle would never commit on this
+  const bool committed=nr_pdcch_blind_monitor_autodiscover_step(rx.data(),fft,nrb,offset,pci,slot,0,100);
+  EXPECT_TRUE(committed);
+  EXPECT_TRUE(nr_pdcch_blind_monitor_autodiscover_done());
+  EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_verified()); // a commit is a hypothesis, never a verification
+  nr_pdcch_blind_monitor_autodiscover_early_commit_enable(false);
+  nr_pdcch_blind_monitor_autodiscover_reset();
 }

@@ -981,12 +981,23 @@ typedef struct { uint8_t bundle; uint8_t interleaver; uint16_t shift; } nr_pdcch
  *  every distinct shift modulo N_REG/L, the PCI's residue first and 0 second: the PCI is one
  *  hypothesis, never the seeded answer. Returns the number written (capped by max_out). */
 int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out);
+/** Only the likely prefix of nr_pdcch_map_candidates() (SIB1 prior, non-interleaved, PCI residue / 0 of every legal (L, R)): a few
+ *  entries, small enough to rotate one per occasion. Thread-safe (touches no shared state). */
+int nr_pdcch_map_candidates_pass0(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out);
 
 /** Phase 3 Technique A, extent verification. Call once per candidate-bearing occasion after the
  * footprint is found: it scores the currently applied CORESET extent by whether Technique B
  * confirms a C-RNTI under it, and advances to the next admissible extent hypothesis if not.
  * Returns true when it has just changed the applied extent. */
 bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
+/** The first discovery call commits an UNSEEDED catalogue (default on). Tests of the oracle's seeded commit switch it off. */
+void nr_pdcch_blind_monitor_autodiscover_early_commit_enable(bool on);
+/** True while the oracle may still re-order a catalogue that began unseeded (nothing verified, not yet re-seeded). */
+bool nr_pdcch_blind_monitor_autodiscover_reseed_pending(void);
+/** The DM-RS solver's confirmed CORESET extent in 6-RB windows (first_w..last_w), or (-1,-1) for none. The oracle puts it FIRST in a
+ *  committed catalogue when its own observed footprint is a strict subset of it: an AL1 grant lights one CCE (one window) at a time, so
+ *  the oracle's histogram alone settles on a single window and the scan then catches only the grants that land on that CCE. */
+void nr_pdcch_blind_monitor_autodiscover_extent_hint(int first_w, int last_w);
 
 /** Maximum simultaneously tracked UEs. A passive receiver hears every UE on the cell, so this is
  * the ceiling on how many it can follow at once, not a property of the deployment. */
