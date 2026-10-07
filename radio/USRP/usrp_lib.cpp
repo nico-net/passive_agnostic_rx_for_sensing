@@ -1148,6 +1148,9 @@ static int trx_usrp_start_impl(openair0_device_t *device)
   s->rx_timestamp = 0;
 
     //wait for next pps
+  /* Before reading the PPS: allocating after it made the timed start command late
+   * (ERROR_CODE_LATE_COMMAND at sample 0, OTA 2026-10-07 adapt_3). */
+  usrp_ring_alloc(s);
   uhd::time_spec_t last_pps = s->usrp->get_time_last_pps();
   uhd::time_spec_t current_pps = s->usrp->get_time_last_pps();
   const auto pps_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -1162,7 +1165,6 @@ static int trx_usrp_start_impl(openair0_device_t *device)
 
   LOG_I(HW,"current pps at %f, starting streaming at %f\n",current_pps.get_real_secs(),current_pps.get_real_secs()+1.0);
 
-  usrp_ring_alloc(s);
   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
   cmd.time_spec = uhd::time_spec_t(current_pps+1.0);
   cmd.stream_now = false; // start at constant delay

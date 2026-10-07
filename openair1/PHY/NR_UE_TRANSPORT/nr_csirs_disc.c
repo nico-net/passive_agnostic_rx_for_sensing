@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <time.h>
 
@@ -70,20 +71,56 @@ static uint64_t now_us(void)
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
-/* Winner gate on the sequence sweep z (best ID) with margin >= 1.5 over the runner-up ID.
- * Default 3.5 (was 4.0): live with the bounded windowed feed the sweep averages fewer recent
- * occasions, and the ID-415 k0=1 sym 5+9 TRS pair (sharing its symbols with ID 748's comb) scored
- * z=3.6-3.8, z2=1.5-1.7 -> AMBIGUOUS (OTA 2026-10-07). Noise best-of-1024 is ~1.13 (T4) and every
- * winner still needs repeated live hits to be confirmed. */
-static float win_z(void)
+/* Noise-adaptive winner gate. Each sweep's runner-up z2 is the best score among the ~1023 WRONG
+ * scrambling IDs, i.e. a direct sample of the noise maximum for that geometry and integration.
+ * Gate = median(z2) + K * sigma(z2) (robust: 1.4826 * MAD) over the last 512 sweeps, clamped to
+ * [2.5, 4.5]; K = ISAC_CSIRS_DISC_WIN_K (default 10). Live OTA 2026-10-07 (PCI 415, 409 sweeps):
+ * z2 mean 1.63, std 0.19 -> gate ~3.5, the fixed value proven live (k0=1 sym 5+9 pair confirmed in
+ * 5/6 runs; 4.0 left it AMBIGUOUS). Until 32 samples exist, or with ISAC_CSIRS_DISC_WIN_Z=<z>, a
+ * fixed gate (default 3.5) is used. The per-sweep margin z - z2 >= 1.5 is unchanged. */
+#define WINZ_HIST 512
+static float g_z2_hist[WINZ_HIST];
+static int g_z2_n, g_z2_w;
+static float g_gate = 3.5f, g_gate_med, g_gate_sig;
+static int cmp_float(const void *a, const void *b)
 {
-  static float z = -1.0f;
-  if (z < 0) {
-    const char *s = getenv("ISAC_CSIRS_DISC_WIN_Z");
-    z = s && atof(s) > 0 ? (float)atof(s) : 3.5f;
-  }
-  return z;
+  const float x = *(const float *)a, y = *(const float *)b;
+  return (x > y) - (x < y);
 }
+static void win_noise_add(float z2)
+{
+  if (!(z2 > 0.0f) || z2 > 50.0f)
+    return;
+  g_z2_hist[g_z2_w] = z2;
+  g_z2_w = (g_z2_w + 1) % WINZ_HIST;
+  if (g_z2_n < WINZ_HIST)
+    ++g_z2_n;
+}
+static void win_gate_update(void)
+{
+  static float fixed = -1.0f, k = -1.0f;
+  if (fixed < 0) {
+    const char *s = getenv("ISAC_CSIRS_DISC_WIN_Z"), *kk = getenv("ISAC_CSIRS_DISC_WIN_K");
+    fixed = s && atof(s) > 0 ? (float)atof(s) : 0.0f;
+    k = kk && atof(kk) > 0 ? (float)atof(kk) : 10.0f;
+  }
+  if (fixed > 0 || g_z2_n < 32) {
+    g_gate = fixed > 0 ? fixed : 3.5f;
+    return;
+  }
+  float v[WINZ_HIST];
+  memcpy(v, g_z2_hist, (size_t)g_z2_n * sizeof(*v));
+  qsort(v, g_z2_n, sizeof(*v), cmp_float);
+  const float med = v[g_z2_n / 2];
+  for (int i = 0; i < g_z2_n; ++i)
+    v[i] = fabsf(v[i] - med);
+  qsort(v, g_z2_n, sizeof(*v), cmp_float);
+  const float sig = 1.4826f * v[g_z2_n / 2];
+  float gate = med + k * sig;
+  gate = gate < 2.5f ? 2.5f : gate > 4.5f ? 4.5f : gate;
+  g_gate = gate; g_gate_med = med; g_gate_sig = sig;
+}
+static float win_z(void) { return g_gate; }
 
 static int sweep_limit(void)
 {
@@ -143,6 +180,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   nr_csirs_disc_hyp_t all_hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_hyp_t hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_win_t wins[NR_CSIRS_DISC_MAX_HYP];
+  bool coarse_only[NR_CSIRS_DISC_MAX_HYP] = {false}; /* screened out: z2 from the short coarse sweep */
   const nr_csirs_disc_fp_cfg_t fp_cfg = {.min_strength = 1.03f};
 
   /* Incremental GPU local normalization/folding, CPU bounded clustering. */
@@ -249,6 +287,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       if(hyps[i].row>2) {
         ok=nr_csirs_disc_sweep_cpu(ring,&coarse,1,&screen,&wins[i]);
         if(ok==1 && wins[i].z>=3) ok=nr_csirs_disc_sweep_cpu(ring,&hyps[i],1,&sweep_cfg,&wins[i]);
+        else coarse_only[i]=true;
       } else ok=nr_csirs_disc_sweep_cpu(ring,&hyps[i],1,&sweep_cfg,&wins[i]);
       if(ok!=1) break;
       wins[i].hyp_index=i;++n_win;
@@ -265,6 +304,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       if (w->hyp_index < 0 || w->hyp_index >= n_hyp)
         continue;
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
+      if (!coarse_only[w->hyp_index]) win_noise_add(w->z_second); /* full-integration noise only */
       if (h->fp_index >= DISC_VIEWS)
         continue;
       if (getenv("ISAC_CSIRS_DISC_DIAG"))
@@ -289,6 +329,12 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         best[h->fp_index] = i;
     }
 
+    win_gate_update();
+    static uint64_t gate_logged;
+    if (g_metrics.batches - gate_logged >= 50 || !gate_logged) {
+      gate_logged = g_metrics.batches ? g_metrics.batches : 1;
+      LOG_I(PHY, "SENSING: CSIRS_DISC WIN_GATE z>=%.2f (noise z2 median %.2f sigma %.3f, n=%d)\n", g_gate, g_gate_med, g_gate_sig, g_z2_n);
+    }
     int selected[DISC_VIEWS], n_selected = 0;
     for (int f = 0; f < DISC_VIEWS; ++f) {
       const int i = best[f];
