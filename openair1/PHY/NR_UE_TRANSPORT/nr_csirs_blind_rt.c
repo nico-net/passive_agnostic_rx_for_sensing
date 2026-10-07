@@ -729,9 +729,23 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * the rate-match bank. At most MAX_CONF scores plus one ordinary discovery. */
   int occurring[NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n = nr_csirs_blind_zp_due(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
-  for (int k = 0; k < n; k++) {
+  /* Discovery mode runs this on a FIFO-97 DL actor under g_csirs_state_lock: bound the scoring work
+   * per slot (ISAC_CSIRS_DISC_CONFIRM_MAX, default 4), rotating the start so every due resource is
+   * served over its occasions. OTA 2026-10-07 acq50_1: confirm_wait_max_us=7498 during a 14-winner
+   * admission burst -> RX ring overrun. */
+  static int s_conf_max = -1;
+  static unsigned s_conf_rot;
+  if (s_conf_max < 0) {
+    const char *e = getenv("ISAC_CSIRS_DISC_CONFIRM_MAX");
+    s_conf_max = e && atoi(e) > 0 ? atoi(e) : 4;
+  }
+  int budget = g_disc > 0 ? s_conf_max : 1 << 30;
+  const unsigned rot0 = g_disc > 0 ? s_conf_rot++ : 0;
+  for (int kk = 0; kk < n && budget > 0; kk++) {
+    const int k = (int)((rot0 + kk) % (unsigned)n);
     g_zp_maint[occurring[k]].scheduled++;
     score_candidate(ue, slot, absolute_slot, rxdataF, occurring[k], true, false);
+    --budget;
   }
   /* Alternate independent discovery rotations. A geometry retired by NZP must
    * remain eligible for ZP re-admission after pressure eviction. Still at most
@@ -744,11 +758,16 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     /* U5 already knows each winner's lattice. Score every unconfirmed winner
      * due now (normally zero or one), instead of spending calls on phases its
      * seeded confirmation path must reject. */
-    for (int i = 0; i < g_st.n; ++i)
+    for (int ii = 0; ii < g_st.n && budget > 0; ++ii) {
+      const int i = (int)((rot0 + ii) % (unsigned)g_st.n);
       if (!nr_csirs_blind_is_confirmed(&g_st, i) && g_st.seed_period[i]
           && (absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i]
               || (g_st.seed_n_off[i] == 2 && absolute_slot % g_st.seed_period[i] == g_st.seed_offset2[i])))
+      {
         score_candidate(ue, slot, absolute_slot, rxdataF, i, false, false);
+        --budget;
+      }
+    }
   }
   static int s_per_slot = -1;
   if (s_per_slot < 0) {

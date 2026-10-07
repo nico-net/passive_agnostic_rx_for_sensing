@@ -143,17 +143,21 @@ int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame,
     feed_div = e && atoi(e) > 0 ? atoi(e) : 7;
     if (w && atoi(w) >= 160) feed_win = atoi(w);
   }
-  /* Acquisition burst: feed every slot for the first ISAC_CSIRS_DISC_FEED_BURST slots (default 2560 =
-   * four P=640 lattices, 1.28 s) after the first push, so discovery converges at once (OTA 2026-10-07
-   * t9burst: ID 415 TRS confirmed ~1 s after sync, radio stable); then the bounded duty cycle. */
+  /* Acquisition phase: for the first ISAC_CSIRS_DISC_FEED_BURST slots (default 5120 = 2.56 s) after the
+   * first push, feed at ISAC_CSIRS_DISC_FEED_ACQ_DIV duty (default 2: alternate 320-slot windows, ~50 %),
+   * then the steady duty cycle. A full-rate 2560-slot burst killed the radio stream in ~1 of 7 starts
+   * (OTA 2026-10-07 adapt2_5, t9wb); 50 % keeps the same amount of data at half the memory pressure. */
   static long burst_end = -1, burst_len = -1;
+  static int acq_div = -1;
   if (burst_len < 0) {
-    const char *b = getenv("ISAC_CSIRS_DISC_FEED_BURST");
-    burst_len = b && atol(b) >= 0 ? atol(b) : 2560;
+    const char *b = getenv("ISAC_CSIRS_DISC_FEED_BURST"), *ad = getenv("ISAC_CSIRS_DISC_FEED_ACQ_DIV");
+    burst_len = b && atol(b) >= 0 ? atol(b) : 5120;
+    acq_div = ad && atoi(ad) > 0 ? atoi(ad) : 2;
   }
   if (burst_end < 0) burst_end = (long)abs_slot + burst_len;
   const bool in_burst = (long)abs_slot < burst_end;
-  /* Windows are aligned to the first fed slot so the first window starts at acquisition. */
+  if (in_burst && acq_div > 1 && ((long)abs_slot - (burst_end - burst_len)) / 320 % acq_div != 0) return 1;
+  /* Steady windows are aligned to the first fed slot. */
   static long feed_origin = -1;
   if (feed_origin < 0) feed_origin = (long)abs_slot;
   const long rel = (long)abs_slot - feed_origin;
