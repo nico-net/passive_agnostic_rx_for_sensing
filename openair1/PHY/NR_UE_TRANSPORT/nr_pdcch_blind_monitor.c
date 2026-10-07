@@ -59,6 +59,7 @@
 
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
+#include "nr_pdcch_coreset_bank.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_cfg_sources.h"
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_cfg_t + get_cfg() accessor (implemented
@@ -991,8 +992,214 @@ static bool discovered_load(const char *path)
   return s_disc_n > 0;
 }
 
+/* Independent stage-1/2 queue. The legacy handoff below remains the feature-off
+ * control. File refreshes wait for the current dwell; they never erase its evidence. */
+static struct {
+  disc_coreset_t line[128]; /* candidate queue may exceed the eight verified bank slots */
+  int n, next, occasions;
+  uint64_t generation, last_slot;
+  uint32_t epoch;
+  bool active;
+  nr_pdcch_blind_monitor_cfg_t cfg;
+  struct { uint16_t rnti; int length; uint64_t slot; nr_dci_bits_t payload; } evidence[NR_PDCCH_BLIND_MAX_UE];
+  struct stat file;
+  uint64_t polls;
+} s_add_disc;
+
+bool nr_pdcch_discovered_enabled(void)
+{
+  const char *v = getenv("ISAC_PDCCH_NID_BANK"); /* own flag; was mistakenly ISAC_CSIRS_DISC */
+  return v && strcmp(v, "1") == 0;
+}
+
+void nr_pdcch_discovered_reset(void)
+{
+  const uint64_t generation = s_add_disc.generation + 1;
+  memset(&s_add_disc, 0, sizeof(s_add_disc));
+  s_add_disc.generation = generation;
+  s_add_disc.epoch = nr_cfg_epoch_current();
+}
+
+bool nr_pdcch_discovered_load(const char *path)
+{
+  if (!nr_pdcch_discovered_enabled() || s_add_disc.active)
+    return false;
+  FILE *f = fopen(path, "r");
+  if (!f) return false;
+  s_add_disc.n = s_add_disc.next = 0;
+  char line[256];
+  while (s_add_disc.n < (int)(sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0]))
+         && fgets(line, sizeof(line), f)) {
+    disc_coreset_t d;
+    if (sscanf(line, "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d",
+               &d.nid, &d.sym, &d.dur, &d.rb, &d.ng, &d.L, &d.R, &d.sh) != 8)
+      continue;
+    const int carrier_end = 275; /* actual tuned width is checked when taking a snapshot */
+    if (d.nid < 0 || d.nid > 65535 || d.sym < 0 || d.dur < 1 || d.dur > 3
+        || d.sym > 14 - d.dur || d.rb < 0 || d.rb > carrier_end || d.ng < 1 || d.ng > 45
+        || d.ng * 6 > carrier_end - d.rb || d.sh < 0 || d.sh > 65535
+        || (d.L != 0 && d.L != 2 && d.L != 3 && d.L != 6)
+        || (d.L && ((d.R != 2 && d.R != 3 && d.R != 6) || d.L % d.dur
+                     || (d.dur < 3 && d.L == 3) || (d.ng * 6 * d.dur) % (d.L * d.R)))) {
+      LOG_W(PHY, "SENSING: discovered CORESET nid=%d rejected (invalid geometry)\n", d.nid);
+      continue;
+    }
+    if (!d.L) d.R = d.sh = 0;
+    s_add_disc.line[s_add_disc.n++] = d;
+  }
+  fclose(f);
+  return s_add_disc.n > 0;
+}
+
+static bool discovered_additional_poll(void)
+{
+  if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
+    nr_pdcch_discovered_reset();
+  if (s_add_disc.active || s_add_disc.next < s_add_disc.n || (++s_add_disc.polls & 1023) != 1)
+    return false;
+  const char *path = getenv("ISAC_PDCCH_DISCOVERED_FILE");
+  if (!path || !*path) path = "/tmp/coresets_discovered.txt";
+  struct stat st;
+  if (stat(path, &st) || (st.st_ino == s_add_disc.file.st_ino && st.st_size == s_add_disc.file.st_size
+      && st.st_mtim.tv_sec == s_add_disc.file.st_mtim.tv_sec
+      && st.st_mtim.tv_nsec == s_add_disc.file.st_mtim.tv_nsec))
+    return false;
+  s_add_disc.file = st;
+  return nr_pdcch_discovered_load(path);
+}
+
+bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *token, int carrier_rb)
+{
+  if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current()) return false;
+  if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
+    nr_pdcch_discovered_reset();
+  while (!s_add_disc.active && s_add_disc.next < s_add_disc.n) {
+    const disc_coreset_t *d = &s_add_disc.line[s_add_disc.next];
+    if (d->rb + d->ng * 6 > carrier_rb) {
+      LOG_W(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (outside carrier)\n",
+            s_add_disc.next + 1, s_add_disc.n, d->nid);
+      ++s_add_disc.next;
+      continue;
+    }
+    /* Include symbol: the legacy geometry query predates symbol sweeps. */
+    if (nr_pdcch_coreset_bank_has_footprint(d->rb, d->ng, d->dur, d->sym,
+                                    d->L, d->R, d->sh, d->nid)) {
+      ++s_add_disc.next;
+      continue;
+    }
+    if (nr_pdcch_coreset_bank_count() >= NR_PDCCH_DISCOVERED_CORESETS)
+      return false; /* keep queued: expiry may free space */
+    s_add_disc.cfg = g_cfg;
+    nr_pdcch_blind_monitor_cfg_t *c = &s_add_disc.cfg;
+    /* grid_rb is absolute in the carrier grid, not relative to CSS0's BWP. */
+    c->bwp_size = carrier_rb;
+    c->bwp_start = 0;
+    c->autodiscover = 0;
+    c->discovered_coreset = true;
+    c->coreset_type = 0;
+    c->dci10_ss_type = NR_BLIND_SS_UE_SPECIFIC;
+    c->dl_full_auto = 1;
+    c->dci10_scan = 1;
+    c->dci10_n_rb_riv = carrier_rb;
+    c->dci10_rb_offset = 0;
+    c->dci10_class_mask = 1u << NR_BLIND_RNTI_CLASS_C;
+    c->dci10_mux_pattern = c->dci10_sib1 = 0;
+    c->rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;
+    c->rnti_max = NR_PDCCH_BLIND_RNTI_MAX_DEFAULT;
+    c->dci_length_override = 0;
+    c->coreset_rb_offset = d->rb;
+    c->coreset_freq_domain = d->ng;
+    c->coreset_duration = d->dur;
+    c->coreset_reg_bundle_size = d->L;
+    c->coreset_interleaver_size = d->R;
+    c->coreset_shift_index = d->sh;
+    c->coreset_pdcch_dmrs_scrambling_id = d->nid;
+    c->ss_first_symbol = d->sym;
+    c->ss_monitoring_slot_periodicity = c->ss_duration = 1;
+    c->ss_monitoring_slot_offset = 0;
+    memset(c->ss_al_candidates, 0, sizeof(c->ss_al_candidates));
+    memset(s_add_disc.evidence, 0, sizeof(s_add_disc.evidence));
+    s_add_disc.active = true;
+    s_add_disc.occasions = 0;
+    s_add_disc.last_slot = UINT64_MAX;
+    ++s_add_disc.generation;
+    LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d dwell start sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d\n",
+          s_add_disc.next + 1, s_add_disc.n, d->nid, d->sym, d->dur, d->rb, d->ng, d->L, d->R, d->sh);
+  }
+  if (!s_add_disc.active) return false;
+  *cfg = s_add_disc.cfg;
+  *token = s_add_disc.generation;
+  return true;
+}
+
+void nr_pdcch_discovered_step(uint64_t token, uint64_t slot)
+{
+  if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
+      || (s_add_disc.last_slot != UINT64_MAX && slot <= s_add_disc.last_slot)) return;
+  s_add_disc.last_slot = slot;
+  if (++s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC) return;
+  LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence in %d occasions)\n",
+        s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions);
+  s_add_disc.active = false;
+  ++s_add_disc.next;
+}
+
+int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
+                                nr_dci_bits_t payload, int length)
+{
+  if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
+      || !rnti || length < 1 || length > NR_DCI_MAX_PAYLOAD) return -1;
+  int victim = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
+    if (s_add_disc.evidence[i].rnti == rnti && s_add_disc.evidence[i].length == length) {
+      if (slot <= s_add_disc.evidence[i].slot || nr_dci_bits_eq(&payload, &s_add_disc.evidence[i].payload)) return -1;
+      nr_pdcch_blind_monitor_cfg_t c = s_add_disc.cfg;
+      c.dci_length_override = length;
+      const int bank = nr_pdcch_coreset_bank_add(&c, rnti);
+      if (bank >= 0) {
+        nr_pdcch_coreset_bank_note_accept(bank, slot);
+        LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d VERIFIED -> bank add index=%d rnti=0x%04x len=%d\n",
+              s_add_disc.next + 1, s_add_disc.n, c.coreset_pdcch_dmrs_scrambling_id, bank, rnti, length);
+      } else {
+        LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (bank admission failed)\n",
+              s_add_disc.next + 1, s_add_disc.n, c.coreset_pdcch_dmrs_scrambling_id);
+      }
+      s_add_disc.active = false;
+      ++s_add_disc.next;
+      return bank;
+    }
+    if (!s_add_disc.evidence[i].rnti || s_add_disc.evidence[i].slot < s_add_disc.evidence[victim].slot)
+      victim = i;
+  }
+  s_add_disc.evidence[victim].rnti = rnti;
+  s_add_disc.evidence[victim].length = length;
+  s_add_disc.evidence[victim].slot = slot;
+  s_add_disc.evidence[victim].payload = payload;
+  return -1;
+}
+
+int nr_pdcch_discovered_candidate_share(int entries, int index, uint64_t visit)
+{
+  if (entries < 1 || index < 0 || index >= entries) return 0;
+  return NR_PDCCH_BANK_CANDIDATE_BUDGET / entries
+      + ((index + entries - (int)(visit % entries)) % entries < NR_PDCCH_BANK_CANDIDATE_BUDGET % entries);
+}
+
+uint16_t nr_pdcch_discovered_nrnti(uint32_t slot, uint16_t nid)
+{
+  uint16_t h[NR_PDCCH_BLIND_MAX_UE + 1] = {0};
+  const int n = 1 + nr_pdcch_blind_monitor_confirmed_rnti_set(slot, h + 1, NR_PDCCH_BLIND_MAX_UE);
+  /* Keep exploring even after another CORESET decides zero. Exact-owner decode
+   * tasks use their C-RNTI directly; this rotation serves unresolved identities. */
+  uint64_t v = ((uint64_t)slot << 16) | nid;
+  v = (v ^ (v >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  v = (v ^ (v >> 27)) * UINT64_C(0x94d049bb133111eb);
+  return h[(v ^ (v >> 31)) % n];
+}
+
 bool nr_pdcch_blind_monitor_discovered_poll(void)
 {
+  if (nr_pdcch_discovered_enabled()) return discovered_additional_poll();
   static uint64_t s_calls;
   static time_t s_mtime;
   if ((++s_calls & 1023) != 1)
@@ -1351,6 +1558,7 @@ void nr_pdcch_blind_lookahead_retry(int lane)
 
 void nr_pdcch_blind_monitor_autodiscover_reset(void)
 {
+  nr_pdcch_discovered_reset();
   s_css0_applied = false;
   s_dedicated_found = false;
   s_ext_n = s_ext_idx = s_ext_phase_idx = 0;

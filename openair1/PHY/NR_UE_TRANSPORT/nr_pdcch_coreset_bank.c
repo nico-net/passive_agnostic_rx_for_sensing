@@ -37,7 +37,6 @@
 /* Verified dedicated geometries remain operational while discovery continues for another UE's
  * CORESET. Entries are immutable after the release-store publishes them, so the receive producer
  * may test the count while the single scan consumer appends without a lock. */
-#define NR_PDCCH_DISCOVERED_CORESETS 8
 static nr_pdcch_discovered_coreset_t g_coreset_bank[NR_PDCCH_DISCOVERED_CORESETS];
 static _Atomic int g_coreset_bank_n;
 static pthread_mutex_t g_coreset_bank_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -234,8 +233,8 @@ nr_coreset_state_t nr_pdcch_coreset_bank_state(int index)
 /* Is this geometry already a verified bank entry? (stage 1-2 hand-off: a discovered CORESET the walk found
  * first must not be re-dwelled -- run s3live5 re-tested it, the alias rule retired it as "not verified",
  * and the walk resumed instead of pausing.) */
-bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int duration, int bundle, int interleaver,
-                                               int shift, int nid)
+bool nr_pdcch_coreset_bank_has_footprint(int rb_offset, int groups, int duration, int symbol,
+                                        int bundle, int interleaver, int shift, int nid)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
   const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
@@ -244,6 +243,7 @@ bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int dur
       continue;
     const nr_pdcch_blind_monitor_cfg_t *b = &g_coreset_bank[i].cfg;
     if ((int)(b->bwp_start + b->coreset_rb_offset) == rb_offset && (int)b->coreset_freq_domain == groups
+        && (symbol < 0 || b->ss_first_symbol == symbol)
         && (int)b->coreset_duration == duration && (int)b->coreset_reg_bundle_size == bundle
         && (bundle == 0 || ((int)b->coreset_interleaver_size == interleaver && (int)b->coreset_shift_index == shift))
         && (int)b->coreset_pdcch_dmrs_scrambling_id == nid)
@@ -251,6 +251,12 @@ bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int dur
   }
   pthread_mutex_unlock(&g_coreset_bank_lock);
   return false;
+}
+
+bool nr_pdcch_blind_monitor_bank_has_geometry(int rb, int groups, int duration, int bundle, int interleaver,
+                                               int shift, int nid)
+{
+  return nr_pdcch_coreset_bank_has_footprint(rb, groups, duration, -1, bundle, interleaver, shift, nid);
 }
 
 static bool coreset_same_geometry(const nr_pdcch_blind_monitor_cfg_t *a,
@@ -265,7 +271,7 @@ static bool coreset_same_geometry(const nr_pdcch_blind_monitor_cfg_t *a,
       && a->coreset_shift_index == b->coreset_shift_index
       && a->coreset_pdcch_dmrs_scrambling_id == b->coreset_pdcch_dmrs_scrambling_id
       && a->ss_first_symbol == b->ss_first_symbol
-      && a->dci_length_override == b->dci_length_override;
+      && (b->discovered_coreset || a->dci_length_override == b->dci_length_override);
 }
 
 /* A banked operational scan may deliberately cover a wider RB interval than the observed
@@ -380,7 +386,7 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
     /* A narrow CCE-compatible subset can decode the same UE as its already banked CORESET. It is
      * useful evidence but not a second independent configuration; retaining every such alias can
      * fill the bounded bank before another UE is reached. */
-    for (int i = 0; owner && i < n; ++i)
+    for (int i = 0; owner && !cfg->discovered_coreset && i < n; ++i)
       if (g_coreset_bank[i].state != NR_CORESET_REMOVED)
         for (int j = 0; j < g_coreset_bank[i].nowners; ++j)
           if (g_coreset_bank[i].owners[j] == owner) {

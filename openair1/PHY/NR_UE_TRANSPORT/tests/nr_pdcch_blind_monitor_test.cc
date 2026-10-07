@@ -67,6 +67,8 @@ void crcTableInit(void);
 #include "nr_pdsch_prb_set.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pdcch_blind_monitor_rt.h"
+#include "nr_pdcch_coreset_bank.h"
+#include <unistd.h>
 #include "nr_sense_gating.h"
 #include "nr_pdcch_blind_phase2.h"
 #include "executables/softmodem-common.h"
@@ -4195,9 +4197,9 @@ void nr_pdcch_dmrs_ref(const uint32_t* gold, c16_t* pilot, unsigned short nb_rb_
 // correctly-generated PDCCH DM-RS window (occupied_rb_offset) and drive
 // nr_pdcch_blind_monitor_autodiscover_step() with it, same (slot, symbol) every call, until it
 // converges or max_calls is exhausted. Returns the call count at convergence, or -1.
-static int RunSparseDiscoveryToConvergence(int occupied_rb_offset, int max_calls) {
-  const int n_rb_carrier = 48, ofdm_symbol_size = 512, first_carrier_offset = 10;
-  const uint16_t scrambling_id = 2;
+static int RunSparseDiscoveryToConvergence(int occupied_rb_offset, int max_calls,
+                                            uint16_t scrambling_id = 2, int n_rb_carrier = 48) {
+  const int ofdm_symbol_size = n_rb_carrier > 48 ? 4096 : 512, first_carrier_offset = 10;
   const int slot = 3, symbol = 0;
 
   std::vector<c16_t> rxdataF(ofdm_symbol_size, {0, 0});
@@ -4388,6 +4390,246 @@ TEST(DiscoveryGates, DeferredCommitIsAppliedByTheConsumerNotTheReceiveThread) {
 
   nr_pdcch_blind_monitor_autodiscover_defer_commit(false);
   nr_pdcch_blind_monitor_autodiscover_reset();
+}
+
+class DiscoveredCoresets : public BlindPdcchTest {
+ protected:
+  std::string old_env;
+  bool had_env;
+  char path[64] = "/tmp/t15-discovered-XXXXXX";
+  void SetUp() override {
+    BlindPdcchTest::SetUp();
+    const char *v = getenv("ISAC_PDCCH_NID_BANK");
+    had_env = v != nullptr;
+    if (v) old_env = v;
+    setenv("ISAC_PDCCH_NID_BANK", "1", 1);
+    nr_pdcch_blind_monitor_autodiscover_reset();
+    while (nr_pdcch_coreset_bank_count()) nr_pdcch_coreset_bank_remove(0);
+    int fd = mkstemp(path);
+    ASSERT_GE(fd, 0);
+    close(fd);
+  }
+  void TearDown() override {
+    unlink(path);
+    while (nr_pdcch_coreset_bank_count()) nr_pdcch_coreset_bank_remove(0);
+    nr_pdcch_blind_monitor_autodiscover_reset();
+    if (had_env) setenv("ISAC_PDCCH_NID_BANK", old_env.c_str(), 1);
+    else unsetenv("ISAC_PDCCH_NID_BANK");
+    BlindPdcchTest::TearDown();
+  }
+  void lines(const char *text) {
+    FILE *f = fopen(path, "w");
+    ASSERT_NE(f, nullptr);
+    fputs(text, f); fclose(f);
+    ASSERT_TRUE(nr_pdcch_discovered_load(path));
+  }
+  // Flat unit-channel synthetic frequency grid: real Gold pilots, polar encoder,
+  // QPSK/data scrambling, production ranking, demapper, descrambler and CRC recovery.
+  std::vector<c16_t> grid(int slot, uint64_t payload) {
+    std::vector<c16_t> fft(4096 * 14);
+    for (int which = 0; which < 2; ++which) {
+      const uint16_t nid = which ? 10163 : 62922, rnti = which ? 0x4567 : 0x1234;
+      const int rb0 = which ? 48 : 0;
+      auto coded = EncodeToLLR(payload + which, rnti, 47, 4, 40.0, rng_);
+      std::vector<c16_t> qpsk(216), scrambled(216), pilot(217 * 3);
+      for (int i = 0; i < 216; ++i) qpsk[i] = {coded[2*i], coded[2*i+1]};
+      nr_pdcch_unscrambling(qpsk.data(), rnti, 432, nid, (int16_t *)scrambled.data());
+      nr_pdcch_dmrs_ref(nr_gold_pdcch(217, 14, nid, slot, 0), pilot.data(), 217);
+      int data = 0;
+      for (int rb = rb0; rb < rb0 + 24; ++rb)
+        for (int sc = 0; sc < 12; ++sc) {
+          c16_t v;
+          if (sc % 4 == 1) {
+            v = pilot[rb * 3 + sc / 4]; v.i = -v.i;
+          } else v = scrambled[data++];
+          fft[rb * 12 + sc] = v;
+        }
+    }
+    return fft;
+  }
+  bool decode(const nr_pdcch_blind_monitor_cfg_t &c, std::vector<c16_t> &fft, int slot,
+              uint16_t nrnti, nr_pdcch_blind_raw_result_t *raw) {
+    nr_pdcch_dmrs_rank_grid_t rank{};
+    if (!nr_pdcch_dmrs_rank_grid(&rank, fft.data(), 4096, 0, 217,
+                                c.coreset_pdcch_dmrs_scrambling_id, slot, c.ss_first_symbol, 1, 0)) return false;
+    const int span = c.coreset_freq_domain * 6;
+    std::vector<c16_t> llr(span * 9), out(216);
+    int n = 0;
+    for (int rb = 0; rb < span; ++rb)
+      for (int sc = 0; sc < 12; ++sc)
+        if (sc % 4 != 1) llr[n++] = fft[(c.coreset_rb_offset + rb) * 12 + sc];
+    for (uint16_t cce : {0, 8}) {
+      const double score = nr_pdcch_dmrs_candidate_score(&rank, c.coreset_rb_offset, span, 0, 0, 0, cce, 4);
+      if (score < 0.9) continue;
+      uint8_t al = 4;
+      nr_pdcch_demapping_deinterleaving(span, llr.data(), out.data(), 1, 0, 0, 0, 1, &cce, &al, span * 9);
+      int16_t bits[432];
+      nr_pdcch_unscrambling(out.data(), nrnti, 432, c.coreset_pdcch_dmrs_scrambling_id, bits);
+      if (nr_pdcch_blind_decode_raw_11(bits, 4, 47, nrnti, nrnti, raw)) return true;
+    }
+    return false;
+  }
+};
+
+TEST_F(DiscoveredCoresets, TwoIdsSameGridAlongsideAlreadyVerifiedPciWalk) {
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(6, 1, 210, 0, 40, 0, 415, 0, 1, 2, 0, 0));
+  ASSERT_GT(RunSparseDiscoveryToConvergence(108, 9000, 415, 217), 0);
+  nr_pdcch_blind_monitor_autodiscover_set_dci_length(47);
+  // A small PCI footprint was already corroborated by the walk. Its verification
+  // state and generation must remain unchanged throughout both additional dwells.
+  nr_pdcch_blind_monitor_autodiscover_observe(0xaaab, 1, nr_dci_bits_from_u64(0x400000001234));
+  nr_pdcch_blind_monitor_autodiscover_observe(0xaaab, 2, nr_dci_bits_from_u64(0x400000005678));
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
+  const auto root = *nr_pdcch_blind_monitor_get_cfg();
+  const auto generation = nr_pdcch_blind_monitor_autodiscover_generation();
+  ASSERT_EQ(nr_pdcch_coreset_bank_add(&root, 0xaaab), 0);
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  for (int i = 0; i < 2; ++i) {
+    nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+    ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+    EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, i ? 10163 : 62922);
+    EXPECT_EQ(c.coreset_freq_domain, 36); EXPECT_EQ(c.coreset_rb_offset, 0);
+    const uint16_t rnti = i ? 0x4567 : 0x1234;
+    for (int j = 0; j < 2; ++j) {
+      const int slot = 3 + 2*i + j;
+      auto fft = grid(slot, 0x400000002345 + j*16);
+      nr_pdcch_blind_raw_result_t raw{};
+      ASSERT_TRUE(decode(c, fft, slot, rnti, &raw));
+      EXPECT_EQ(raw.rnti, rnti);
+      EXPECT_EQ(raw.payload.w[0], 0x400000002345u + j*16 + i);
+      nr_pdcch_blind_raw_result_t wrong{};
+      EXPECT_FALSE(decode(c, fft, slot, 0, &wrong));
+      const int bank = nr_pdcch_discovered_observe(token, raw.rnti, slot, raw.payload, 47);
+      EXPECT_EQ(bank, j ? i+1 : -1);
+      nr_pdcch_discovered_step(token, slot);
+    }
+    EXPECT_TRUE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
+    EXPECT_EQ(nr_pdcch_blind_monitor_autodiscover_generation(), generation);
+    EXPECT_EQ(memcmp(nr_pdcch_blind_monitor_get_cfg(), &root, sizeof(root)), 0);
+  }
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 3);
+  auto fft = grid(10, 0x400000001337);
+  for (int i = 1; i < 3; ++i) {
+    const auto *c = nr_pdcch_coreset_bank_cfg(i);
+    nr_pdcch_blind_raw_result_t raw{};
+    ASSERT_TRUE(decode(*c, fft, 10, i == 1 ? 0x1234 : 0x4567, &raw));
+    EXPECT_EQ(raw.payload.w[0], 0x400000001337u + i-1);
+  }
+  ASSERT_TRUE(nr_pdcch_discovered_load(path));
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217)); // already banked, no dwell
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_paused());
+}
+
+TEST_F(DiscoveredCoresets, FeatureOffCannotStartAdditionalDwell) {
+  unsetenv("ISAC_PDCCH_NID_BANK");
+  EXPECT_FALSE(nr_pdcch_discovered_enabled());
+  EXPECT_FALSE(nr_pdcch_discovered_load(path));
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token = 0;
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
+  setenv("ISAC_PDCCH_NID_BANK", "0", 1);
+  EXPECT_FALSE(nr_pdcch_discovered_load(path));
+}
+
+TEST_F(DiscoveredCoresets, DwellRejectsRepeatedEvidenceAndLateTokens) {
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  const auto a = nr_dci_bits_from_u64(123), b = nr_dci_bits_from_u64(456);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 1, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 1, b, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 2, a, 47), -1);
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 2, b, 48), -1);
+  EXPECT_FALSE(nr_pdcch_discovered_load(path)); // refresh must not clobber the active dwell
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, i);
+  const auto old = token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_NE(token, old); EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 10163);
+  EXPECT_EQ(nr_pdcch_discovered_observe(old, 0x1234, 4001, b, 47), -1);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
+  nr_pdcch_discovered_reset();
+  EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 4002, b, 47), -1);
+}
+
+TEST_F(DiscoveredCoresets, BankAllowsSameOwnerAtDifferentIdsAndSymbols) {
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
+        "CORESET nid=10163 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n"
+        "CORESET nid=10163 sym=1 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  for (int i = 0; i < 3; ++i) {
+    nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+    ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+    EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 1, nr_dci_bits_from_u64(123), 47), -1);
+    EXPECT_EQ(nr_pdcch_discovered_observe(token, 0x1234, 2, nr_dci_bits_from_u64(456), 47), i);
+  }
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 3);
+  nr_pdcch_coreset_bank_tick(3, false, 5, 30);
+  nr_pdcch_coreset_bank_tick(8, true, 5, 30);
+  for (int i = 0; i < 3; ++i) EXPECT_EQ(nr_pdcch_coreset_bank_state(i), NR_CORESET_STALE);
+  nr_pdcch_coreset_bank_tick(38, true, 5, 30);
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
+}
+
+TEST_F(DiscoveredCoresets, StartsBeforeWalkAndReadsBeyondEightLines) {
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 90, 0, 40, 0, 415, 0, 1, 2, 0, 0));
+  ASSERT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
+  FILE *f = fopen(path, "w"); ASSERT_NE(f, nullptr);
+  fputs("CORESET nid=123 sym=13 dur=2 grid_rb=0 groups=36 L=0 R=0 shift=0\n", f);
+  fputs("CORESET nid=124 sym=0 dur=1 grid_rb=0 groups=36 L=6 R=0 shift=0\n", f);
+  for (int i = 0; i < 11; ++i)
+    fprintf(f, "CORESET nid=%d sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n", 60000+i);
+  fclose(f); ASSERT_TRUE(nr_pdcch_discovered_load(path));
+  for (int i = 0; i < 11; ++i) {
+    nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+    ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+    EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 60000+i);
+    EXPECT_EQ(c.bwp_start, 0); EXPECT_EQ(c.bwp_size, 217);
+    EXPECT_EQ(c.dci10_ss_type, NR_BLIND_SS_UE_SPECIFIC);
+    EXPECT_EQ(c.dci10_sib1, 0); EXPECT_EQ(c.dci10_n_rb_riv, 217);
+    EXPECT_LT(c.rnti_min, 0x1234); EXPECT_GT(c.rnti_max, 0xaaab);
+    for (int slot = 0; slot < 4000; ++slot) nr_pdcch_discovered_step(token, slot);
+  }
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
+}
+
+TEST_F(DiscoveredCoresets, NrntiRotationVisitsAllConfirmedOwnersPerId) {
+  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
+  // Seed only via independently CRC-recovered synthetic common-channel DCIs.
+  for (uint16_t rnti : {0x1234, 0x4567}) {
+    auto llr = EncodeToLLR(0x400000001234, rnti, 47, 4, 40.0, rng_);
+    nr_pdcch_blind_raw_result_t raw{};
+    ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(), 4, 47, 1, 65519, &raw));
+    nr_pdcch_blind_rnti_bootstrap_record_corroborated(raw.rnti, NR_BLIND_RNTI_CLASS_C, 1);
+  }
+  for (uint16_t nid : {62922, 10163}) {
+    bool zero = false, first = false, second = false;
+    for (int slot = 2; slot < 1000; ++slot) {
+      auto rnti = nr_pdcch_discovered_nrnti(slot, nid);
+      zero |= rnti == 0; first |= rnti == 0x1234; second |= rnti == 0x4567;
+      EXPECT_TRUE(rnti == 0 || rnti == 0x1234 || rnti == 0x4567);
+    }
+    EXPECT_TRUE(zero); EXPECT_TRUE(first); EXPECT_TRUE(second);
+  }
+  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
+}
+
+TEST(DiscoveredBudget, EqualSharesAndRotatingRemainder) {
+  for (int n = 1; n <= 9; ++n) {
+    int totals[9]{};
+    for (int visit = 0; visit < n; ++visit) {
+      int sum = 0;
+      for (int i = 0; i < n; ++i) {
+        int share = nr_pdcch_discovered_candidate_share(n, i, visit);
+        EXPECT_GE(share, 7); totals[i] += share; sum += share;
+      }
+      EXPECT_EQ(sum, 64);
+    }
+    for (int i = 0; i < n; ++i) EXPECT_EQ(totals[i], 64);
+  }
 }
 
 TEST(DmrsRankMapping, MatchesProductionDemapperAcrossLegalMappings) {

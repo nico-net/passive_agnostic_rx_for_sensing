@@ -279,6 +279,8 @@ typedef struct {
    * Default 0, every existing deployment untouched. Requires autoconf above to already be 1 --
    * the bootstrap RNTI this depends on comes from that path's own CSS0/SIB1 grants. */
   int autodiscover;
+  /* Stage-1/2 geometry+nID: independent dwell/bank, enabled by ISAC_CSIRS_DISC=1. */
+  bool discovered_coreset;
 
   /* MASTER SWITCH for payload-INTERPRETATION auto mode (Technique D onward). Default 0: the
    * receiver still self-discovers WHERE the dedicated CORESET is, HOW LONG the DCI is, and WHICH
@@ -294,6 +296,21 @@ typedef struct {
    * for compatibility with existing callers; the config key is pdcch_blind_monitor_full_auto. */
   int dl_full_auto;
 } nr_pdcch_blind_monitor_cfg_t;
+
+/* All discovered dwell APIs run under the Phase-2 lock. Snapshots are immutable for
+ * one pass; the token rejects late results from another dwell or an epoch reset. */
+bool nr_pdcch_discovered_enabled(void);
+bool nr_pdcch_discovered_load(const char *path);
+bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *token, int carrier_rb);
+void nr_pdcch_discovered_step(uint64_t token, uint64_t slot);
+int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
+                                nr_dci_bits_t payload, int length);
+void nr_pdcch_discovered_reset(void);
+/* Fixed total across bank entries and the additional dwell pass; remainder rotates. */
+#define NR_PDCCH_BANK_CANDIDATE_BUDGET 64
+int nr_pdcch_discovered_candidate_share(int entries, int index, uint64_t visit);
+uint16_t nr_pdcch_discovered_nrnti(uint32_t slot, uint16_t nid);
+
 
 /* Keep validated operator intent separate from temporary CSS0 suppression. Both manual
  * and automatic 0_1 paths must use this gate: 0_1 is a dedicated-USS format. */

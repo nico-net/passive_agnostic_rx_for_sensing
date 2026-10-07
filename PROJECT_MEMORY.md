@@ -1,5 +1,12 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-07 (DGX aarch64, `csd/t15`, local).** T15 adds independent stage-1/2 PDCCH
+> CORESET dwell/banking per geometry+nID alongside the live walk, gated by `ISAC_CSIRS_DISC=1`.
+> [OFFLINE VERIFIED] Two synthetic non-PCI nIDs on one footprint bank and decode while the PCI walk
+> stays verified; seven new tests pass. Bank+dwell share a 64-candidate cap. [IMPLEMENTED, NOT VALIDATED]
+> OTA behavior/performance; report, full-suite results and deferred live sweep command:
+> [T15](docs/superpowers/reports/csd/T15.md). No CSI-RS contract or GPU/radio implementation changes.
+
 **This file is the single source of truth for this project.** It was consolidated on **2026-09-30** on host
 `sens6`, branch `adaptive-rx-UL-DL`, for the migration to a new development machine (**NVIDIA DGX Spark**).
 Every other project-authored Markdown file was retired in the commit that follows the one introducing this file
