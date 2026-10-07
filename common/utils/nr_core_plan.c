@@ -120,25 +120,32 @@ int nr_core_plan_build(const nr_core_machine_t *m, nr_core_plan_t *p, char *erro
     int c = a->core;
     if (c < 0 || c >= NR_CP_MAX_CPUS || !m->online[c] || !m->allowed[c] || reserved[c])
       return fail(error,n,"explicit %s[%d]:%d is offline, outside the cpuset, or reserved for DPDK",nr_core_role_name(a->role),a->index,c);
-    for (int j = 0; j < i; j++) if (p->a[j].explicit_core && same_core(m,c,p->a[j].core)
-        && (rt(a->role) || rt(p->a[j].role)))
-      return fail(error,n,"explicit %s[%d] and %s[%d] collide on physical CPU %d", nr_core_role_name(a->role),a->index,
-                  nr_core_role_name(p->a[j].role),p->a[j].index,c);
     used[c]++;
     if (rt(a->role)) p->realtime[c] = 1;
   }
   for (int role = 0; role < NR_CP_ROLE_COUNT; role++) for (int i = 0; i < p->count; i++) {
     nr_core_assignment_t *a = &p->a[i]; if (a->role != role || a->explicit_core) continue;
     long best = LONG_MIN; int chosen = -1;
-    for (int c = 0; c < NR_CP_MAX_CPUS; c++) {
+    /* Keep automatic RT roles exclusive when possible. Numbered user pins can exhaust
+     * the free cores; in that case share a non-DPDK core rather than reject a working
+     * legacy layout. Prefer sharing another actor over a busy-polling reader/control. */
+    for (int pass = 0; pass < 2 && chosen < 0; pass++) for (int c = 0; c < NR_CP_MAX_CPUS; c++) {
       if (!m->online[c] || !m->allowed[c] || reserved[c]) continue;
-      bool blocked = false; int physical_load = 0;
+      bool busy = false, realtime = false, nonrealtime = false; int physical_load = 0;
       for (int j = 0; j < NR_CP_MAX_CPUS; j++) if (used[j] && same_core(m,c,j)) {
         physical_load += used[j];
-        if (rt(role) || p->realtime[j]) blocked = true;
+        if (p->realtime[j]) realtime = true;
       }
-      if (blocked) continue;
+      for (int j = 0; j < p->count; j++) if (p->a[j].core >= 0 && (p->a[j].explicit_core || p->a[j].role < role)
+          && same_core(m,c,p->a[j].core)) {
+        if (p->a[j].role <= NR_CP_UHD) busy = true;
+        if (!rt(p->a[j].role)) nonrealtime = true;
+      }
+      if (pass == 0 && (rt(role) ? physical_load != 0 : realtime)) continue;
       long score = -(long)used[c] * 1000000000L - (long)physical_load * 100000000L;
+      if (pass && busy) score -= 10000000000L;
+      if (pass && rt(role) && nonrealtime) score -= 5000000000L;
+      if (pass && realtime && !rt(role)) score -= 1000000000L;
       /* Linux capacity is frequency-invariant but can differ a few percent even within the
        * same big/little class (997 vs 1017 on GB10). Bucket at 10% to avoid chasing that noise. */
       long capacity = ((long)m->capacity[c] * 10 + max_capacity / 2) / max_capacity;
@@ -154,7 +161,7 @@ int nr_core_plan_build(const nr_core_machine_t *m, nr_core_plan_t *p, char *erro
       }
       if (score > best) { best = score; chosen = c; }
     }
-    if (chosen < 0) return fail(error,n,"insufficient physical CPUs for %s[%d]; reduce actors/features or DPDK lcores",nr_core_role_name(role),a->index);
+    if (chosen < 0) return fail(error,n,"no allowed non-DPDK CPU for %s[%d]",nr_core_role_name(role),a->index);
     a->core = chosen; used[chosen]++;
     if (rt(role)) p->realtime[chosen] = 1;
   }
@@ -164,7 +171,13 @@ int nr_core_plan_build(const nr_core_machine_t *m, nr_core_plan_t *p, char *erro
     for (int j = 0; j < NR_CP_MAX_CPUS; j++) if (p->realtime[j] && same_core(m,c,j)) blocked = true;
     if (!blocked) { p->background[c] = 1; bg++; }
   }
-  if (!bg) return fail(error,n,"no CPU remains for non-RT workers; reduce actors/features");
+  if (!bg) {
+    /* An all-RT layout still needs a legal inherited mask for helper threads. */
+    for (int c = 0; c < NR_CP_MAX_CPUS; c++) if (m->online[c] && m->allowed[c] && !reserved[c]) {
+      p->background[c] = 1; bg++;
+    }
+  }
+  if (!bg) return fail(error,n,"no allowed non-DPDK CPU for helper threads");
   for (int i = 0; i < p->count; i++) {
     p->a[i].shared = false;
     for (int j = 0; j < p->count; j++) if (i != j && same_core(m,p->a[i].core,p->a[j].core)) p->a[i].shared = true;
@@ -277,7 +290,8 @@ int nr_core_plan_activate(const nr_core_machine_t *m, const nr_core_plan_t *p)
   for(int i=0;i<p->count;i++) fprintf(stderr," %s[%d]:%d%s",nr_core_role_name(p->a[i].role),p->a[i].index,p->a[i].core,p->a[i].explicit_core ? "(user)" : "");
   fprintf(stderr,"\n");
   for(int i=0;i<p->count;i++) if(p->a[i].shared)
-    fprintf(stderr,"SENSING: CORE_PLAN warning: forced non-RT sharing %s[%d]:%d (SCHED_OTHER)\n",nr_core_role_name(p->a[i].role),p->a[i].index,p->a[i].core);
+    fprintf(stderr,"SENSING: CORE_PLAN warning: shared physical CPU %s[%d]:%d%s\n",nr_core_role_name(p->a[i].role),p->a[i].index,p->a[i].core,
+            rt(p->a[i].role) ? " (RT role)" : "");
   return 0;
 }
 bool nr_core_plan_active(void) { return active; }
