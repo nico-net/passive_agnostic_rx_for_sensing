@@ -17,15 +17,18 @@ void exit_function(const char *,const char *,int,const char *,int) {abort();}
 static void wait_ms(int n) {std::this_thread::sleep_for(std::chrono::milliseconds(n));}
 int main(int argc,char **argv) {
  bool device=argc>1 && !strcmp(argv[1],"--device");
- int dur=device?1:(argc>1?atoi(argv[1]):1);
+ bool incremental=argc>1 && !strcmp(argv[1],"--incremental");
+ int batch_size=incremental?64:336;
+ int dur=incremental?3:device?1:(argc>1?atoi(argv[1]):1);
  logInit();
+ setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL",incremental?"1":"0",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL",incremental?"1":"0",1);
  unsetenv("ISAC_PDCCH_NID_GPU");
  nr_pdcch_nid_record_t records[16],sentinel[16];memset(records,0xa5,sizeof(records));memcpy(sentinel,records,sizeof(records));
  uint64_t generation=0;
  CHECK(nr_pdcch_nid_gpu_start(36)==0 && !nr_pdcch_nid_gpu_running());
  CHECK(nr_pdcch_nid_gpu_records(records,16,&generation)==-1 && !memcmp(records,sentinel,sizeof(records)) && generation==0);
  nr_pdcch_nid_batch_t b={};nr_pdcch_nid_result_t expected={};
- if(device) {nid_reference_make(7,&b);nid_reference_run(1,&expected);}
+ if(device) {setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL","1",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL","1",1);setenv("ISAC_PDCCH_NID_GPU_BATCH","336",1);nid_reference_make(7,&b);nid_reference_run(1,&expected);}
  else b.cfg={432,0,0,6,2,14,dur};
  setenv("ISAC_PDCCH_NID_GPU","1",1);char duration[8];snprintf(duration,sizeof(duration),"%d",dur);setenv("ISAC_COREMAP_IDSWEEP_DUR",duration,1);
  setenv("ISAC_PDCCH_NID_GPU_WINDOW",device?"1":"2",1);setenv("ISAC_PDCCH_NID_GPU_EVERY","2",1);
@@ -38,11 +41,11 @@ int main(int argc,char **argv) {
  if(!device)CHECK(uploaded && errors && pause && runs);
  std::vector<nr_pdcch_nid_iq_t> fft(512*dur);
  auto push_batch=[&](bool retry) {
-  for(int k=0;k<336;k++) {
+  for(int k=0;k<batch_size;k++) {
    for(int d=0;d<dur;d++)for(int i=0;i<432;i++)fft[d*512+(499+i)%512]=device?b.iq[(size_t)k*432+i]:nr_pdcch_nid_iq_t{(int16_t)(k+d+i),(int16_t)(-k-d-i)};
    int rc;
    do {
-    rc=nr_pdcch_nid_gpu_push(fft.data(),512,499,device?b.slot[k]:k/14,device?b.sym[k]:k%(15-dur),&b.cfg);
+    rc=nr_pdcch_nid_gpu_push(fft.data(),512,499,device?b.slot[k]:k/14,device?b.sym[k]:k%(incremental?14:15-dur),&b.cfg);
     if(rc && retry)wait_ms(1);
    }while(rc && retry);
    if(rc)return false;
@@ -52,7 +55,7 @@ int main(int argc,char **argv) {
  int total=device?3:4;
  for(int pass=1;pass<=total;pass++) {
   CHECK(push_batch(true));
-  bool due=device?(pass==1 || pass==3):(pass==2 || pass==4);
+  bool due=incremental || device || pass==2 || pass==4;
   if(due) {
    int n=-1;
    for(int attempt=0;attempt<30000 && n<0;attempt++) {wait_ms(10);n=nr_pdcch_nid_gpu_records(records,16,&generation);}
@@ -65,7 +68,7 @@ int main(int argc,char **argv) {
   }
  }
  if(!device) {
-  CHECK(errors()==0 && runs()==2);
+  CHECK(errors()==0 && runs()==(incremental?total:2));
   // Hold worker ownership, fill remaining staging entries, verify bounded drop.
   pause(1);CHECK(push_batch(true));CHECK(push_batch(true));CHECK(push_batch(true));
   CHECK(!push_batch(false));pause(0);
@@ -74,7 +77,10 @@ int main(int argc,char **argv) {
   b.cfg.pci=3;CHECK(push_batch(true));
   for(int t=0;t<2000 && uploaded()<8;t++)wait_ms(1);
   CHECK(uploaded()==8);
-  CHECK(nr_pdcch_nid_gpu_records(records,16,&generation)==0);
+  if(incremental) {
+   int n=-1;for(int t=0;t<2000;t++){wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);if(n==1)break;}
+   CHECK(n==1 && records[0].nid==12008);
+  } else CHECK(nr_pdcch_nid_gpu_records(records,16,&generation)==0);
   CHECK(push_batch(true));
   int n=-1;
   for(int t=0;t<2000 && n<0;t++){wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);}

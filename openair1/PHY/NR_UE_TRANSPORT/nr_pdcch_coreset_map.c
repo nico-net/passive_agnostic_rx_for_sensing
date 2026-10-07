@@ -422,16 +422,23 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
     return -1;
   if (!nr_passive_acq_tdd_slot_has_downlink(abs_slot))
     return -1;
-  /* ONE window, rotating through the slot, on every 10th DL slot: RT cost stays a small, fixed number
-   * of FEP calls per occasion (dur of them, dur=1 by default), and a batch spread over ~20 s rather
-   * than packed into the ~0.3 s right after SIB1, when the timing and CFO loops are still settling
-   * (run s01e: every early symbol-0 snapshot read as noise).
-   * ponytail: 10 is a sampling stride, not a cell parameter. */
-  if ((g_idsw.dl_calls++ % 10) != 0)
+  /* Live GPU capture is one rotating start on every DL slot. The legacy
+   * diagnostic dump keeps its original every-tenth-slot cadence. */
+  const bool incremental = gpu && (getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL")==NULL || strcmp(getenv("ISAC_PDCCH_NID_GPU_INCREMENTAL"),"0")); /* own flag, default on (was ISAC_CSIRS_DISC) */
+  int every = 10;
+  if (incremental) {
+    const char *e = getenv("ISAC_PDCCH_NID_GPU_CAPTURE_EVERY");
+    char *end = NULL;
+    long n = e ? strtol(e, &end, 10) : 1;
+    every = n >= 1 && n <= 1000 && (!e || (end != e && !*end)) ? (int)n : 1;
+  }
+  if ((g_idsw.dl_calls++ % every) != 0)
     return -1;
   const int dur = nr_pdcch_coreset_map_idsweep_dur();
-  const int start = (int)(g_idsw.cap++ % (uint32_t)sps);
-  if (start + dur > sps) /* the window would run past the end of the slot: skip this occasion, still
+  const int starts = sps;
+  if (starts <= 0) return -1;
+  const int start = (int)(g_idsw.cap++ % (uint32_t)starts);
+  if (!incremental && start + dur > sps) /* the window would run past the end of the slot: skip this occasion, still
                           * advancing cap so the rotation does not get stuck retrying the same start */
     return -1;
   return start;

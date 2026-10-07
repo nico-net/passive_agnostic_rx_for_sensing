@@ -222,13 +222,14 @@ NID_FN int st2_remove(st2_snap_t *s, const st2_hyp_t *h)
     }
   return removed;
 }
-NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi)
+NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, int phhi=6)
 {
   size_t nh = 0;
-  for (int ph = 0; ph < 6; ph++) {
+  for (int ph = phlo; ph < phhi; ph++) {
     for (int cs = ph; cs + 6 <= g_st2_chi && nh < cap; cs += 6) {
       if (cs < g_st2_clo) continue;
-      H[nh++] = (st2_hyp_t){ph, (cs - ph) / 6, (g_st2_chi - cs) / 6, 0, 0, 0, 0.0, {0}};
+      if (H) H[nh] = (st2_hyp_t){ph, (cs - ph) / 6, (g_st2_chi - cs) / 6, 0, 0, 0, 0.0, {0}};
+      nh++;
     }
     const int gl = (int)floor((qlo - ph) / 6.0), gh = (int)floor((qhi - ph) / 6.0);
     /* a lit 6-CRB window can start up to 5 CRBs before the CORESET and end up to 5 after it, so the
@@ -247,8 +248,10 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi)
           for (int ri = 0; ri < 3; ri++) {
             const int nb = 6 * ng * g_st2_D / Ls[li];
             if (nb % Rs[ri]) continue;
-            for (int sh = 0; sh < nb && nh < cap; sh++)
-              H[nh++] = (st2_hyp_t){ph, a0, ng, Ls[li], Rs[ri], sh, 0.0, {0}};
+            for (int sh = 0; sh < nb && nh < cap; sh++) {
+              if (H) H[nh] = (st2_hyp_t){ph, a0, ng, Ls[li], Rs[ri], sh, 0.0, {0}};
+              nh++;
+            }
           }
       }
   }
@@ -280,12 +283,11 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi)
   }
   return (int)st2_gen(H,NID_HYP_CAP,qlo,qhi);
  }
- NID_FN bool consistent(const st2_hyp_t *h) const {
+ NID_FN int consistency_vote(const st2_hyp_t *h,int k) const {
   const int D=g_st2_D,L=h->L?h->L:6,R=h->L?h->R:1,b=L/D;
   const int nb=6*h->ng*D/L,cs=h->phase+6*h->g0,per=6/L;
   const double thr=2.0/(3.0*L-1.0);
-  int nf=0,below=0;
-  for(int k=0;k<nact;k++) {
+
    int full=0,partial=0;
    for(int j0=0;j0+per<=nb;j0+=per) {
     int hit=0;
@@ -299,15 +301,22 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi)
     }
     if(hit==per) full++; else if(hit) partial++;
    }
-   if(full+partial) {nf++; below+=full<partial;}
+   return full+partial ? (full<partial?0:1) : -1;
+ }
+ NID_FN bool consistent(const st2_hyp_t *h) const {
+  int nf=0,below=0;
+  for(int k=0;k<nact;k++) {
+   int v=consistency_vote(h,k);nf+=v>=0;below+=v==0;
   }
-  // sorted frac[nf/2] >= .5, without malloc or sort in each GPU thread.
+  // sorted frac[nf/2] >= .5, without malloc or sort.
   return nf && below<=nf/2;
  }
- NID_FN void prepare(int id,int sym) {
+ NID_FN void prepare(int id,int sym,int duration=0) {
   nid=id; sym0=sym; nact=0; alive=0;
   const int pa=g_idsw.point_a_sc;
   g_st2_clo=pa>=0?0:(-pa+11)/12; g_st2_chi=(g_idsw.nsc-pa)/12; g_st2_D=1;
+  int dur=duration;
+  if (!dur) {
   int nsym[14]={0},nlit[14]={0};
   for(int k=0;k<g_idsw.n;k++) {
    int s=g_idsw.sym[g_idsw.index(k)];
@@ -315,9 +324,10 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi)
    st2_build(k,nid,&tmp);nsym[s]++;nlit[s]+=st2_lit(&tmp);
   }
   double r0=nsym[sym0]?(double)nlit[sym0]/nsym[sym0]:0;
-  int dur=1;
+  dur=1;
   while(dur<3 && sym0+dur<14 && nsym[sym0+dur] && (double)nlit[sym0+dur]/nsym[sym0+dur]>=0.5*r0) dur++;
-  if(dur>g_idsw.dur) return;
+  }
+  if(dur<1 || dur>g_idsw.dur || sym0+dur>14) return;
   g_st2_D=dur;
   for(int k=0;k<g_idsw.n;k++) {
    if(g_idsw.sym[g_idsw.index(k)]!=sym0) continue;

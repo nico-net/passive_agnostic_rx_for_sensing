@@ -17,9 +17,9 @@ static int upload(void *p,const nr_pdcch_nid_batch_t *b) {
  while(paused.load())std::this_thread::sleep_for(std::chrono::milliseconds(1));
  cpu_set_t cpus;CPU_ZERO(&cpus);sched_getaffinity(0,sizeof(cpus),&cpus);
  if(sched_getscheduler(0)!=SCHED_OTHER || CPU_COUNT(&cpus)!=1)errors++;
- for(int k=0;k<336;k++)for(int d=0;d<f->dur;d++)for(int i=0;i<b->cfg.nsc;i++) {
+ for(int k=0;k<(b->count?b->count:336);k++)for(int d=0;d<f->dur;d++)for(int i=0;i<b->cfg.nsc;i++) {
   auto y=b->iq[((size_t)k*f->dur+d)*12*f->rb+i];
-  int v=k+d+i;
+  int v=b->sym[k]+d<b->cfg.sps?k+d+i:0;
   if(y.r!=v || y.i!=-v){errors++;return -1;}
  }
  uploaded++;return 0;
