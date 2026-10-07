@@ -231,6 +231,12 @@ typedef struct {
   uint16_t             seed_offset[NR_CSIRS_BLIND_MAX_CAND];
   uint16_t             seed_offset2[NR_CSIRS_BLIND_MAX_CAND];
   uint8_t              seed_n_off[NR_CSIRS_BLIND_MAX_CAND];
+  /* Discovery-only cumulative lattice evidence. A third phase permanently rejects
+   * a period; missing observations never count as negative evidence. */
+  uint16_t disc_phase[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_N_PERIODS][2];
+  uint8_t disc_support[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_N_PERIODS][2];
+  uint8_t disc_n_phase[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_N_PERIODS];
+  uint32_t disc_first[NR_CSIRS_BLIND_MAX_CAND], disc_last[NR_CSIRS_BLIND_MAX_CAND];
   int                  cycle_left, cycle_pad, cycle_last; ///< phase-diverse round-robin cadence
 } nr_csirs_blind_state_t;
 

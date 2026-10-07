@@ -41,6 +41,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
 void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                                c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], bool map[14]);
 extern uint64_t csirs_disc_confirm_drops;
+extern uint64_t csirs_disc_readmit_skipped;
 
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
 #include "nr_csirs_disc.h"

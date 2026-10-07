@@ -40,6 +40,7 @@ __attribute__((weak)) void nr_cfg_epoch_note_csirs_map_change(void);
 static nr_csirs_observer_t g_csirs_obs;
 /* DL processing can use multiple workers, and rate matching is read by decode workers. */
 static __thread bool *g_disc_fep_map;
+uint64_t csirs_disc_readmit_skipped;
 uint64_t csirs_disc_confirm_drops;
 uint64_t csirs_disc_confirm_wait_max_us;
 /* Standalone FD dump fixtures do not link the PHY FEP. */
@@ -67,7 +68,11 @@ static uint64_t now_us(void)
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
-void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m) { nr_csirs_observer_metrics(&g_csirs_obs, m); }
+void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m)
+{
+  nr_csirs_observer_metrics(&g_csirs_obs, m);
+  m->csirs_disc_readmit_skipped = __atomic_load_n(&csirs_disc_readmit_skipped, __ATOMIC_RELAXED);
+}
 void nr_csirs_blind_rt_cfr_time_us(uint64_t us) { nr_csirs_observer_add_time(&g_csirs_obs, NR_CSIRS_TIME_CFR, us); }
 static nr_csirs_resource_t resource_key(const nr_csirs_blind_state_t *s, int k, bool zp)
 {
@@ -93,7 +98,18 @@ static void map_changed(void)
 
 static nr_csirs_blind_state_t g_st;
 static nr_csirs_blind_state_t g_zp;      /* zero-power search over the same candidates */
+static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
 static int g_disc = -1;
+static float g_disc_strength[NR_CSIRS_BLIND_MAX_CAND];
+static uint8_t g_disc_probe[NR_CSIRS_BLIND_MAX_CAND][2];
+static uint32_t g_disc_visits[NR_CSIRS_BLIND_MAX_CAND][2];
+static uint32_t g_disc_scored_slot[NR_CSIRS_BLIND_MAX_CAND];
+static struct {
+  nr_csirs_candidate_t candidate;
+  uint16_t period, off[2];
+  uint8_t n_off;
+} g_disc_export[NR_CSIRS_BLIND_MAX_CAND];
+
 static bool nzp_observer_score(int idx, uint32_t slot, double rho)
 {
   if (!g_reconf) return false;
@@ -219,11 +235,40 @@ static void discovery_empty_state(nr_csirs_blind_state_t *st)
   st->pinned = -1;
 }
 
-static int same_candidate(const nr_csirs_candidate_t *a, const nr_csirs_candidate_t *b)
+/* Nested verified extents and small boundary jitter describe the same resource.
+ * Never join disjoint extents, IDs, slot corrections or different RE mappings. */
+static bool discovery_same_resource(const nr_csirs_candidate_t *a, const nr_csirs_candidate_t *b)
 {
-  return a->row == b->row && a->freq_domain == b->freq_domain && a->symb_l0 == b->symb_l0
+  int ae = a->start_rb + a->nr_of_rbs, be = b->start_rb + b->nr_of_rbs;
+  bool extent = (a->start_rb <= b->start_rb && ae >= be)
+      || (b->start_rb <= a->start_rb && be >= ae)
+      || (abs((int)a->start_rb - b->start_rb) <= 4 && abs(ae - be) <= 4);
+  return extent && a->start_rb < be && b->start_rb < ae
+      && a->row == b->row && a->freq_domain == b->freq_domain && a->symb_l0 == b->symb_l0
       && a->symb_l1 == b->symb_l1 && a->cdm_type == b->cdm_type && a->freq_density == b->freq_density
-      && a->start_rb == b->start_rb && a->nr_of_rbs == b->nr_of_rbs;
+      && a->scramb_id == b->scramb_id && a->slot_delta == b->slot_delta;
+}
+
+/* Union compatible sub/super-lattices into a sampling schedule. The actual
+ * export is inferred separately from independent per-slot sequence hits. */
+static bool discovery_union_seed(int i, uint16_t p, uint16_t off, uint16_t *period, uint16_t offsets[2], int *n)
+{
+  uint16_t old = g_st.seed_period[i];
+  if (!old || !p || (old % p && p % old)) return false;
+  *period = old < p ? old : p;
+  *n = 0;
+  uint16_t all[] = {g_st.seed_offset[i], g_st.seed_offset2[i], off};
+  for (int j = 0; j < 3; ++j) {
+    if (j == 1 && g_st.seed_n_off[i] < 2) continue;
+    uint16_t phase = all[j] % *period;
+    if (*n && offsets[0] == phase) continue;
+    if (*n == 2) { if (offsets[1] == phase) continue; return false; }
+    offsets[(*n)++] = phase;
+  }
+  /* A second TRS burst phase is adjacent, including wraparound. Unrelated
+   * phases must not poison an existing candidate's confirmation evidence. */
+  return g_st.cand[i].row != 1 || *n < 2 || abs((int)offsets[0] - offsets[1]) == 1
+      || abs((int)offsets[0] - offsets[1]) == *period - 1;
 }
 
 int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csirs_disc_win_t *w)
@@ -254,25 +299,57 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
                             .start_rb = h->rb_start,
                             .nr_of_rbs = h->n_rb,
                             .slot_delta = w->slot_delta};
-  int at=-1;
-  for (int i=0;i<g_st.n;++i)
-    if (same_candidate(&g_st.cand[i],&c) && g_st.cand[i].scramb_id == c.scramb_id
-        && g_st.seed_period[i] == h->period
-        && (h->offset==g_st.seed_offset[i]
-            || (g_st.seed_n_off[i]==2 && h->offset==g_st.seed_offset2[i])
-            || (g_st.seed_n_off[i]<2 && !nr_csirs_blind_is_confirmed(&g_st,i)))) {at=i;break;}
+  int at = -1, n = 1;
+  uint16_t period = h->period, offsets[2] = {h->offset, 0};
+  if (!period || h->offset >= period || !nr_csirs_blind_candidate_safe(&c)) {
+    pthread_mutex_unlock(&g_csirs_state_lock);
+    return -1;
+  }
+  for (int i = 0; i < g_st.n; ++i) {
+    if (!discovery_same_resource(&g_st.cand[i], &c)) continue;
+    uint16_t old = g_st.seed_period[i];
+    if (!old || (old % h->period && h->period % old)) continue;
+    if (!discovery_union_seed(i, h->period, h->offset, &period, offsets, &n)) {
+      /* Incompatible sweep phases can come from sequence leakage. Retain one
+       * physical resource and the strongest provisional burst, never clones. */
+      if (nr_csirs_blind_is_confirmed(&g_st, i) || w->z <= g_disc_strength[i]) {
+        __atomic_fetch_add(&csirs_disc_readmit_skipped, 1, __ATOMIC_RELAXED);
+        pthread_mutex_unlock(&g_csirs_state_lock);
+        return i;
+      }
+      period = h->period; offsets[0] = h->offset; offsets[1] = 0; n = 1;
+      g_st.hits[i] = g_st.n_hit_slot[i] = 0;
+      memset(g_st.disc_n_phase[i], 0, sizeof(g_st.disc_n_phase[i]));
+      memset(g_st.disc_support[i], 0, sizeof(g_st.disc_support[i]));
+      /* Only provisional evidence is replaced; an independently confirmed burst
+       * wins over an incompatible sweep proposal until an epoch reset. */
+    }
+    at = i;
+    __atomic_fetch_add(&csirs_disc_readmit_skipped, 1, __ATOMIC_RELAXED);
+    if (c.nr_of_rbs > g_st.cand[i].nr_of_rbs) g_st.cand[i] = g_zp.cand[i] = c;
+    break;
+  }
   if (at < 0 && g_st.n < NR_CSIRS_BLIND_MAX_CAND && g_st.n == g_zp.n) {
-    at=g_st.n++;
+    at = g_st.n++;
     g_zp.n++;
-    g_st.cand[at]=g_zp.cand[at]=c;
-    nr_csirs_blind_seed(&g_st,at,h->period,h->offset,w->slot_delta);
-    nr_csirs_blind_seed(&g_zp,at,h->period,h->offset,w->slot_delta);
-  } else if (at >= 0 && h->offset != g_st.seed_offset[at]
-             && g_st.seed_n_off[at] < 2 && !nr_csirs_blind_is_confirmed(&g_st,at)) {
-    g_st.seed_offset2[at]=g_zp.seed_offset2[at]=h->offset;
-    g_st.seed_n_off[at]=g_zp.seed_n_off[at]=2;
-    /* Preserve already scored, distinct slots; record_hit requires three
-     * independent hits on EACH admitted phase before confirming the burst. */
+    g_st.cand[at] = g_zp.cand[at] = c;
+    g_disc_scored_slot[at] = UINT32_MAX;
+    period = h->period; offsets[0] = h->offset; offsets[1] = 0; n = 1;
+  }
+  if (at >= 0) {
+    if (g_st.seed_period[at] != period || g_st.seed_offset[at] != offsets[0]
+        || g_st.seed_offset2[at] != offsets[1] || g_st.seed_n_off[at] != n) {
+      g_disc_probe[at][0] = g_disc_probe[at][1] = 3;
+      g_disc_visits[at][0] = g_disc_visits[at][1] = 0;
+    }
+    if (w->z > g_disc_strength[at]) g_disc_strength[at] = w->z;
+    nr_csirs_blind_state_t *states[] = {&g_st, &g_zp};
+    for (int j = 0; j < 2; ++j) {
+      states[j]->seed_period[at] = period;
+      states[j]->seed_offset[at] = offsets[0];
+      states[j]->seed_offset2[at] = offsets[1];
+      states[j]->seed_n_off[at] = n;
+    }
   }
   pthread_mutex_unlock(&g_csirs_state_lock);
   return at;
@@ -301,6 +378,17 @@ void nr_csirs_blind_rt_discovery_reset(void)
 {
   pthread_mutex_lock(&g_csirs_state_lock);
   if (g_disc > 0) {
+    for (int i = 0; i < g_st.n; ++i)
+      if (g_disc_export[i].n_off && nr_csirs_monitor_remove_dynamic) {
+        fapi_nr_dl_config_csirs_pdu_rel15_t old;
+        fill_pdu(&g_disc_export[i].candidate, 1, &old);
+        nr_csirs_monitor_remove_dynamic(&old);
+      }
+    memset(g_disc_export, 0, sizeof(g_disc_export));
+    memset(g_disc_visits, 0, sizeof(g_disc_visits));
+    memset(g_disc_probe, 0, sizeof(g_disc_probe));
+    memset(g_disc_strength, 0, sizeof(g_disc_strength));
+    memset(g_disc_scored_slot, 0xff, sizeof(g_disc_scored_slot));
     discovery_empty_state(&g_st);
     g_st.discovery_bank=true;
     discovery_empty_state(&g_zp);
@@ -519,7 +607,7 @@ static double discovery_score(const NR_DL_FRAME_PARMS *fp,
 static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], int idx,
                             bool maintenance, bool nzp_recheck);
-static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
+
 
 void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                                c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], bool map[14])
@@ -614,8 +702,34 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     g_rank = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
   /* Every confirmation is logged once; nr_csirs_blind_next() skips confirmed candidates. */
-  for (; g_conf_logged < g_st.n_conf; g_conf_logged++) {
-    const int k = g_conf_logged, widx = g_st.conf_idx[k];
+  for (int k = g_disc > 0 ? 0 : g_conf_logged; k < g_st.n_conf; ++k) {
+    const int widx = g_st.conf_idx[k];
+    if (g_disc > 0) {
+      if (g_disc_export[widx].n_off == g_st.conf_n_off[k]
+          && g_disc_export[widx].period == g_st.conf_period[k]
+          && !memcmp(g_disc_export[widx].off, g_st.conf_off[k], sizeof(g_disc_export[widx].off))
+          && !memcmp(&g_disc_export[widx].candidate, &g_st.cand[widx], sizeof(g_st.cand[widx]))) continue;
+      if (g_disc_export[widx].n_off && nr_csirs_monitor_remove_dynamic) {
+        fapi_nr_dl_config_csirs_pdu_rel15_t old;
+        fill_pdu(&g_disc_export[widx].candidate, 1, &old);
+        nr_csirs_monitor_remove_dynamic(&old);
+      }
+      if (g_disc_export[widx].n_off) {
+        nr_csirs_resource_t updated = resource_key(&g_st, k, false), old = updated;
+        old.start_rb = g_disc_export[widx].candidate.start_rb;
+        old.nr_of_rbs = g_disc_export[widx].candidate.nr_of_rbs;
+        old.period = g_disc_export[widx].period;
+        old.offset = g_disc_export[widx].off[0];
+        old.offset2 = g_disc_export[widx].off[1];
+        old.n_offsets = g_disc_export[widx].n_off;
+        nr_csirs_observer_refine(&g_csirs_obs, &old, &updated);
+      }
+      g_disc_export[widx].candidate = g_st.cand[widx];
+      g_disc_export[widx].period = g_st.conf_period[k];
+      memcpy(g_disc_export[widx].off, g_st.conf_off[k], sizeof(g_disc_export[widx].off));
+      g_disc_export[widx].n_off = g_st.conf_n_off[k];
+    }
+    g_conf_logged = k + 1;
     const nr_csirs_resource_t key = resource_key(&g_st, k, false);
     if (!g_rank && nr_csirs_observer_confirm(&g_csirs_obs, &key, absolute_slot)) map_changed();
     if (!g_rank && g_disc > 0 && nr_csirs_monitor_add_dynamic) {
@@ -755,18 +869,38 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * per slot gave each of ~767 candidates only 10-16 observations in 240 s OTA (2026-10-06, PCI 421),
    * below the IDSWEEP pin floor of 32, so the scramblingID sweep never started. */
   if (g_disc > 0) {
-    /* U5 already knows each winner's lattice. Score every unconfirmed winner
-     * due now (normally zero or one), instead of spending calls on phases its
-     * seeded confirmation path must reject. */
-    for (int ii = 0; ii < g_st.n && budget > 0; ++ii) {
-      const int i = (int)((rot0 + ii) % (unsigned)g_st.n);
-      if (!nr_csirs_blind_is_confirmed(&g_st, i) && g_st.seed_period[i]
-          && (absolute_slot % g_st.seed_period[i] == g_st.seed_offset[i]
-              || (g_st.seed_n_off[i] == 2 && absolute_slot % g_st.seed_period[i] == g_st.seed_offset2[i])))
-      {
-        score_candidate(ue, slot, absolute_slot, rxdataF, i, false, false);
-        --budget;
+    /* Bound work to due canonical resources. Balance visits PER PHASE and
+     * reverse tie order on alternate rounds; a slot-index rotation or a fixed
+     * candidate order can sample only P, 2P or 4P aliases forever. Settled
+     * confirmations leave this budget until admission adds a new lattice. */
+    while (budget > 0) {
+      int selected = -1, phase = 0;
+      uint32_t least = UINT32_MAX;
+      for (int i = 0; i < g_st.n; ++i) {
+        uint16_t p = g_st.seed_period[i];
+        if (!p || g_disc_scored_slot[i] == absolute_slot) continue;
+        int ph = absolute_slot % p == g_st.seed_offset[i] ? 0
+            : g_st.seed_n_off[i] == 2 && absolute_slot % p == g_st.seed_offset2[i] ? 1 : -1;
+        bool unsettled = true;
+        for (int k = 0; k < g_st.n_conf; ++k)
+          if (g_st.conf_idx[k] == i) {
+            /* A fade during the first three probes must not strand a late
+             * burst phase, or keep a super-period after a denser admission. */
+            unsettled = g_st.conf_n_off[k] < g_st.seed_n_off[i] || g_st.conf_period[k] > p;
+            break;
+          }
+        if (ph >= 0 && (unsettled || g_disc_probe[i][ph])
+            && (g_disc_visits[i][ph] < least
+                || (g_disc_visits[i][ph] == least && (least & 1)))) {
+          selected = i; phase = ph; least = g_disc_visits[i][ph];
+        }
       }
+      if (selected < 0) break;
+      g_disc_scored_slot[selected] = absolute_slot;
+      ++g_disc_visits[selected][phase];
+      if (g_disc_probe[selected][phase]) --g_disc_probe[selected][phase];
+      score_candidate(ue, slot, absolute_slot, rxdataF, selected, false, false);
+      --budget;
     }
   }
   static int s_per_slot = -1;
@@ -1052,10 +1186,11 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     LOG_A(PHY, "SENSING: CSIRS_BLIND SPAN row%u fd%u l%u z=%.2f rho=%.3f n_re=%d epr=%.2f slices[%d]: %s\n",
           c->row, c->freq_domain, c->symb_l0, z, rho, n_used, epr, G, prof);
   }
-  /* ABSOLUTE bar: feed() tests score >= CSIRS_DETECT_MARGIN (3.0) * null, so a fixed null of 2.0
-   * demands z >= 6, i.e. ~6.7x the 0.89 noise level, at ANY candidate size. The measured null median
-   * is still tracked and logged, for visibility only. */
-  const double nullv = 4.0 / 3.0;   /* feed()'s 3x margin => confirm at z >= 4 (noise ~1) */
+  /* Legacy confirmation retains z >= 4. A discovery-qualified row-1 burst
+   * has two independently swept adjacent phases: require three fresh z >= 3
+   * hits on EACH phase. This permits weak TRS without admitting single-phase
+   * coherent distractors (the dump's row-4 ID 418 remains below z=4). */
+  const double nullv = g_disc > 0 && c->row == 1 && g_st.seed_n_off[idx] == 2 ? 1.0 : 4.0 / 3.0;   /* feed() applies its existing 3x margin */
   done = !maintenance && nr_csirs_blind_feed(&g_st, idx, absolute_slot, z, nullv);
   /* Keep the observed z population for the diagnostics. */
   if (!maintenance) {

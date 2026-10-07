@@ -433,3 +433,33 @@ int nr_csirs_blind_rt_test_due_only(void)
   g_disc=0;test_fep_enabled=0;
   return rc;
 }
+
+void nr_csirs_blind_rt_test_discovery_reset(void)
+{
+  g_disc = 1;
+  nr_csirs_blind_rt_discovery_reset();
+}
+int nr_csirs_blind_rt_test_discovery_feed(int idx, uint32_t slot, double z)
+{
+  nr_csirs_blind_feed(&g_st, idx, slot, z, 1.0);
+  return g_st.n_conf;
+}
+
+void nr_csirs_blind_rt_test_dump_bank(void)
+{
+  for (int i = 0; i < g_st.n; ++i)
+    printf("DUMP CAND idx=%d row=%u fd=%u l=%u rb=%u:%u id=%u seed=%u/%u,%u n=%u hits=%u tried=%u P160=%u/%u,%u support=%u,%u conf=%d\n",
+           i,g_st.cand[i].row,g_st.cand[i].freq_domain,g_st.cand[i].symb_l0,g_st.cand[i].start_rb,
+           g_st.cand[i].nr_of_rbs,g_st.cand[i].scramb_id,g_st.seed_period[i],g_st.seed_offset[i],g_st.seed_offset2[i],
+           g_st.seed_n_off[i],g_st.hits[i],g_st.tried[i],g_st.disc_n_phase[i][10],g_st.disc_phase[i][10][0],
+           g_st.disc_phase[i][10][1],g_st.disc_support[i][10][0],g_st.disc_support[i][10][1],nr_csirs_blind_is_confirmed(&g_st,i));
+}
+
+int nr_csirs_blind_rt_test_confirmed_entry(int k, fapi_nr_dl_config_csirs_pdu_rel15_t *p,
+                                         uint16_t *period, uint16_t *phases)
+{
+  if (k < 0 || k >= g_st.n_conf) return -1;
+  fill_pdu(&g_st.cand[g_st.conf_idx[k]], 1, p);
+  *period = g_st.conf_period[k];
+  return nr_csirs_blind_rt_test_phases(k, phases);
+}

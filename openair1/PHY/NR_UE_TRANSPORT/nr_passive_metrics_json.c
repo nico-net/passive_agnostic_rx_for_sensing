@@ -126,6 +126,10 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     if (z < 0 || (size_t)z >= n - (size_t)w) return -1;
     w += z;
   }
-  const int z = snprintf(buf + w, n - (size_t)w, "]}");
+  char discovery[96] = "";
+  if (m->csirs_disc_readmit_skipped)
+    snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
+             m->csirs_disc_readmit_skipped);
+  const int z = snprintf(buf + w, n - (size_t)w, "]%s}", discovery);
   return (z < 0 || (size_t)z >= n - (size_t)w) ? -1 : w + z;
 }

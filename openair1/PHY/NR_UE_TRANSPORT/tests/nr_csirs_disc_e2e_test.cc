@@ -237,3 +237,95 @@ static void calibrate_gate(bool loaded)
 }
 TEST(CsirsDiscE2E, DISABLED_T12NoiseCalibration) {calibrate_gate(false);}
 TEST(CsirsDiscE2E, DISABLED_T12LoadedCalibration) {calibrate_gate(true);}
+
+extern "C" {
+void nr_csirs_blind_rt_test_discovery_reset(void);
+int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *);
+int nr_csirs_blind_rt_test_discovery_feed(int, uint32_t, double);
+int nr_csirs_blind_rt_test_discovered(int, fapi_nr_dl_config_csirs_pdu_rel15_t *, uint16_t *, uint16_t *);
+extern uint64_t csirs_disc_readmit_skipped;
+}
+TEST(CsirsDiscE2E, ReadmissionMergesPeriodExtentAndLatePhase)
+{
+  setenv("ISAC_CSIRS_DISC", "1", 1);
+  nr_csirs_disc_synth_init();
+  nr_csirs_blind_rt_test_discovery_reset();
+  nr_csirs_disc_hyp_t h = {};
+  h.row=1; h.freq_domain=2; h.symb_l0=5; h.density=3;
+  h.rb_start=144; h.n_rb=32; h.period=160; h.offset=16;
+  nr_csirs_disc_win_t w = {}; w.scramb_id=380;
+  ASSERT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  const uint64_t before=csirs_disc_readmit_skipped;
+  for (unsigned slot : {16u,176u,336u}) nr_csirs_blind_rt_test_discovery_feed(0,slot,5);
+  for (int p : {80,160,320,640}) {
+    h.period=p; h.offset=16;
+    for (int repeat=0;repeat<12;++repeat) EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  }
+  h.period=160; h.offset=15; h.rb_start=132; h.n_rb=48;
+  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  h.rb_start=128; h.n_rb=52;
+  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  ASSERT_EQ(nr_csirs_blind_rt_test_candidate_count(),1);
+  EXPECT_EQ(csirs_disc_readmit_skipped-before,50u);
+  fapi_nr_dl_config_csirs_pdu_rel15_t p = {}; uint16_t period=0, phases[2]={};
+  EXPECT_EQ(nr_csirs_blind_rt_test_discovered(0,&p,&period,phases),2);
+  EXPECT_EQ(p.start_rb,128); EXPECT_EQ(p.nr_of_rbs,52); EXPECT_EQ(period,80);
+  // A non-nested two-RB boundary shift and a weaker incompatible burst also
+  // reuse this physical index; neither expands an unverified extent.
+  h.rb_start=130;
+  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  h.rb_start=128; h.offset=20;
+  EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  EXPECT_EQ(nr_csirs_blind_rt_test_discovered(0,&p,&period,phases),2);
+  EXPECT_EQ(p.start_rb,128); EXPECT_EQ(p.nr_of_rbs,52); EXPECT_EQ(period,80);
+  EXPECT_EQ(csirs_disc_readmit_skipped-before,52u);
+  h.offset=15;
+  // Different ID, disjoint extent, slot correction and non-dividing lattice
+  // must remain independent candidates.
+  ++w.scramb_id; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),1);
+  --w.scramb_id; h.rb_start=0; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),2);
+  h.rb_start=128; w.slot_delta=1; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),3);
+  w.slot_delta=0; h.period=64; EXPECT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),4);
+  nr_csirs_blind_rt_test_discovery_reset();
+}
+
+extern "C" {
+#include "nr_csirs_monitor.h"
+}
+TEST(CsirsDiscE2E, RefinementReplacesDynamicMonitorLatticeAndExtent)
+{
+  nr_csirs_blind_rt_test_discovery_reset();
+  nr_csirs_disc_hyp_t h = {};
+  h.row=1; h.freq_domain=4; h.symb_l0=8; h.density=3;
+  h.rb_start=132; h.n_rb=48; h.period=320; h.offset=16;
+  nr_csirs_disc_win_t w = {}; w.scramb_id=713;
+  ASSERT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  for (unsigned slot : {16u,336u,656u}) nr_csirs_blind_rt_test_discovery_feed(0,slot,5);
+  nr_csirs_disc_ring_t ring={}; nr_csirs_disc_slot_meta_t meta={};
+  std::vector<int16_t> iq(14*24*217,0);
+  ring.n_ant=1; ring.n_rb=217; ring.slots_per_frame=20; ring.capacity=1;
+  ring.grid_base=iq.data(); ring.slot_stride=iq.size(); ring.meta=&meta;
+  fapi_nr_dl_config_csirs_pdu_rel15_t out[32]={}; uint16_t periods[32]={};
+  meta.valid=1; meta.abs_slot=1000; meta.slot=0;
+  ASSERT_EQ(nr_csirs_blind_rt_test_confirm_ring(&ring,out,periods,nullptr,nullptr,32,nullptr),1);
+  EXPECT_EQ(periods[0],320); EXPECT_EQ(out[0].nr_of_rbs,48);
+  h.period=80; h.offset=16; h.rb_start=128; h.n_rb=52;
+  ASSERT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  h.offset=15; ASSERT_EQ(nr_csirs_blind_rt_add_discovered(&h,&w),0);
+  for (unsigned k=8;k<12;++k) {
+    nr_csirs_blind_rt_test_discovery_feed(0,k*160+15,5);
+    nr_csirs_blind_rt_test_discovery_feed(0,k*160+16,5);
+  }
+  meta.abs_slot=2000;
+  ASSERT_EQ(nr_csirs_blind_rt_test_confirm_ring(&ring,out,periods,nullptr,nullptr,32,nullptr),1);
+  EXPECT_EQ(periods[0],160); EXPECT_EQ(out[0].nr_of_rbs,52);
+  for (unsigned slot : {2095u,2096u,2255u,2256u}) {
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *due[64]={};
+    int n=nr_csirs_monitor_due_ex(slot/20,slot%20,20,due,nullptr,64), found=0;
+    for (int i=0;i<n;++i) if (due[i]->scramb_id==713 && due[i]->freq_domain==4 && due[i]->symb_l0==8) {
+      ++found; EXPECT_EQ(due[i]->start_rb,128); EXPECT_EQ(due[i]->nr_of_rbs,52);
+    }
+    EXPECT_EQ(found,1);
+  }
+  nr_csirs_blind_rt_test_discovery_reset();
+}
