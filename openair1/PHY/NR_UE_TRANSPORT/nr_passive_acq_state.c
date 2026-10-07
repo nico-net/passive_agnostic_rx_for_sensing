@@ -252,6 +252,13 @@ bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
 }
 void nr_passive_acq_note_carrier_from_rs(const char *evidence)
 {
+  static int s_enabled = -1; /* ISAC_ACQ_CARRIER_FROM_RS=0 disables this SIB1-free path */
+  if (s_enabled < 0) {
+    const char *e = getenv("ISAC_ACQ_CARRIER_FROM_RS");
+    s_enabled = !(e && atoi(e) == 0);
+  }
+  if (!s_enabled)
+    return;
   pthread_mutex_lock(&g_lock);
   if (g_snap.carrier_verified != 0 || !g_phy_geom_set) {
     pthread_mutex_unlock(&g_lock);
