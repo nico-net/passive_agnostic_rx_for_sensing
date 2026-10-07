@@ -329,3 +329,14 @@ TEST(CsirsDiscE2E, RefinementReplacesDynamicMonitorLatticeAndExtent)
   }
   nr_csirs_blind_rt_test_discovery_reset();
 }
+
+extern "C" int nr_csirs_blind_rt_test_async_stress(void);
+TEST(CsirsDiscE2E, AsyncConfirmationFourActors)
+{
+  ::testing::FLAGS_gtest_death_test_style="threadsafe";
+  EXPECT_EXIT(([] {
+    setenv("ISAC_CSIRS_DISC","1",1);setenv("ISAC_CSIRS_DISC_BACKEND","cpu",1);
+    nr_csirs_disc_synth_init();
+    int rc=nr_csirs_blind_rt_test_async_stress();fflush(stdout);_exit(rc?1:0);
+  }()),::testing::ExitedWithCode(0),"");
+}

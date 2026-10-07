@@ -45,6 +45,7 @@ static __thread bool *g_disc_fep_map;
 uint64_t csirs_disc_readmit_skipped;
 uint64_t csirs_disc_confirm_drops;
 uint64_t csirs_disc_confirm_wait_max_us;
+uint64_t csirs_disc_confirm_cpu_scores,csirs_disc_confirm_gpu_scores;
 /* Standalone FD dump fixtures do not link the PHY FEP. */
 #pragma weak nr_slot_fep
 static pthread_mutex_t g_csirs_state_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -61,7 +62,10 @@ void nr_csirs_blind_rt_discovery_init(void)
   }
   pthread_mutexattr_destroy(&attr);
 }
-static void csirs_unlock(pthread_mutex_t **lock) { if (*lock) pthread_mutex_unlock(*lock); }
+static void discovery_publish(void);
+static void discovery_queue_reset(void);
+static void discovery_mark_admitted(int);
+static void csirs_unlock(pthread_mutex_t **lock) { if (*lock) { discovery_publish(); pthread_mutex_unlock(*lock); } }
 static int g_timing = -1;
 static int g_reconf = -1;
 static uint64_t now_us(void)
@@ -336,6 +340,7 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
     g_zp.n++;
     g_st.cand[at] = g_zp.cand[at] = c;
     g_disc_scored_slot[at] = UINT32_MAX;
+    discovery_mark_admitted(at);
     period = h->period; offsets[0] = h->offset; offsets[1] = 0; n = 1;
   }
   if (at >= 0) {
@@ -353,6 +358,7 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
       states[j]->seed_n_off[at] = n;
     }
   }
+  discovery_publish();
   pthread_mutex_unlock(&g_csirs_state_lock);
   return at;
 }
@@ -397,6 +403,8 @@ void nr_csirs_blind_rt_discovery_reset(void)
     g_armed = 1;
     g_conf_logged = 0;
     g_slots = 0;
+    discovery_queue_reset();
+    discovery_publish();
   }
   pthread_mutex_unlock(&g_csirs_state_lock);
 }
@@ -606,6 +614,8 @@ static double discovery_score(const NR_DL_FRAME_PARMS *fp,
   return n_ant && map.ports ? total / (n_ant * map.ports) : -1;
 }
 
+#include "nr_csirs_disc_confirm_internal.h"
+
 static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], int idx,
                             bool maintenance, bool nzp_recheck);
@@ -614,6 +624,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
 void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                                c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], bool map[14])
 {
+  if (nr_csirs_disc_enabled && nr_csirs_disc_enabled() && discovery_enqueue(ue, slot, absolute_slot, rxdataF, map)) return;
   g_disc_fep_map = map;
   nr_csirs_blind_rt_slot(ue, slot, absolute_slot, rxdataF);
   g_disc_fep_map = NULL;
@@ -622,13 +633,16 @@ void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
+  if(discovery_queue_ready && !discovery_consuming) {
+    bool map[14]={0};
+    discovery_enqueue(ue,slot,absolute_slot,rxdataF,map);return;
+  }
   pthread_mutex_t *guard __attribute__((cleanup(csirs_unlock))) = &g_csirs_state_lock;
-  /* Never discard a due confirmation because admission/export is reading the
-   * bank. Worker critical sections only update bounded candidate metadata;
-   * FEP, detection and ID sweeps execute outside this mutex. The buffers remain
-   * owned by this actor until scoring finishes. */
+  /* Production actors enqueue before this point. Only the discovery worker
+   * (or the synchronous offline/legacy entry) owns scoring and mutable state. */
   uint64_t lock_start=g_disc_fep_map?now_us():0;
   pthread_mutex_lock(guard);
+  if(discovery_consuming && discovery_consumed_epoch!=__atomic_load_n(&discovery_epoch,__ATOMIC_ACQUIRE)) return;
   if(g_disc_fep_map) {
     uint64_t wait=now_us()-lock_start;
     if(wait>__atomic_load_n(&csirs_disc_confirm_wait_max_us,__ATOMIC_RELAXED))
@@ -849,10 +863,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * the rate-match bank. At most MAX_CONF scores plus one ordinary discovery. */
   int occurring[NR_CSIRS_BLIND_DISC_MAX_CONF];
   const int n = nr_csirs_blind_zp_due(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
-  /* Discovery mode runs this on a FIFO-97 DL actor under g_csirs_state_lock: bound the scoring work
-   * per slot (ISAC_CSIRS_DISC_CONFIRM_MAX, default 4), rotating the start so every due resource is
-   * served over its occasions. OTA 2026-10-07 acq50_1: confirm_wait_max_us=7498 during a 14-winner
-   * admission burst -> RX ring overrun. */
+  /* Preserve the T14 four-score admission rotation on the worker. */
   static int s_conf_max = -1;
   static unsigned s_conf_rot;
   if (s_conf_max < 0) {
@@ -987,6 +998,8 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     return;
   }
   const nr_csirs_candidate_t *c = &g_st.cand[idx];
+  if (discovery_consuming && discovery_consumed_ticket<discovery_birth[idx]) return;
+  if (discovery_consuming && (discovery_symbols(c) & discovery_copied_symbols) != discovery_symbols(c)) return;
   if (!maintenance && !nzp_recheck) {
     const nr_csirs_resource_t candidate = {.row = c->row, .ports = nr_csirs_blind_row_ports(c->row),
         .density = c->freq_density, .freq_domain = c->freq_domain, .symb_l0 = c->symb_l0,
@@ -1009,6 +1022,14 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     return;   /* row 5 maps l0 and l0+1, NOT the separate symb_l1 parameter */
   }
 
+  int n_used=0;
+  double rho=-1, gpu_scores[5];
+  bool gpu_scored=g_disc>0 && discovery_gpu_score(fp,c,slot,&rxdataF[0][0],gpu_scores)==0;
+  if(discovery_gpu && discovery_gpu->prepare && !gpu_scored) return;
+  c16_t *ref=NULL;
+  int n_planes=0;
+  const uint32_t off_sym=(uint32_t)c->symb_l0*fp->ofdm_symbol_size;
+  if(gpu_scored) {rho=gpu_scores[0];goto have_rho;}
   /* Build the reference with the REAL generator. The RE-to-sequence mapping is row-dependent
    * (k-prime/l-prime, CDM groups, density parity) and a hand-rolled version that is subtly wrong
    * does not look like a weak signal -- it looks like a dead channel, which is the misdiagnosis
@@ -1026,7 +1047,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     return;
   }
   const int plane_limit = g_disc > 0 ? NR_CSIRS_BLIND_RT_MAX_PORTS : NR_CSIRS_BLIND_RT_LEGACY_PORTS;
-  const int n_planes = n_ports < plane_limit ? n_ports : plane_limit;
+  n_planes = n_ports < plane_limit ? n_ports : plane_limit;
 
   /* ---- ALLOCATED ONCE, NOT PER SLOT -----------------------------------------------------------
    * This runs on the PHY receive thread. The first version called calloc()/free() every slot for
@@ -1055,7 +1076,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   for (int p = 0; p < n_planes; p++) {
     memset(t_refbuf[p], 0, (size_t)n_re * sizeof(c16_t));
   }
-  c16_t *ref = t_refbuf[0];
+  ref = t_refbuf[0];
   c16_t *refp[NR_CSIRS_BLIND_RT_ALL_PORTS];
   for (int p = 0; p < NR_CSIRS_BLIND_RT_ALL_PORTS; p++)
     refp[p] = t_refbuf[p < n_planes ? p : n_planes - 1];
@@ -1085,7 +1106,6 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * scored an empty buffer and never fired (OTA 2026-09-14: 15 min, zero progress lines). */
   if (g_disc <= 0)
     nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-  const uint32_t off_sym = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
   /* Footprint evidence for rows 6-18 from the symbol just transformed: one pass over the carrier. */
   if (g_wide < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND_WIDE");
@@ -1103,7 +1123,6 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * noise stays well below a match: noise reads ~1.0, a perfect match sqrt(32)/0.886 = 6.4, and a
    * realistic 10 dB-SNR match with some residual drift lands around 4-5. */
 #define CSIRS_BLIND_SUBBAND_RE 32
-  int n_used = 0;
   double rho_sq = 0.0;
   const int n_ant = g_disc > 0 ? fp->nb_antennas_rx : 1;
   for (int ant = 0; g_disc <= 0 && ant < n_ant; ++ant) {
@@ -1132,9 +1151,11 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   const c16_t *rx_planes[NR_CSIRS_DISC_MAX_ANT];
   for (int ant = 0; ant < n_ant; ++ant)
     rx_planes[ant] = rxdataF[ant];
-  const double rho = g_disc > 0
+  rho = g_disc > 0
       ? discovery_score(fp, c, rx_planes, t_refbuf, n_ant, CSIRS_BLIND_SUBBAND_RE, &n_used)
       : n_ant > 0 ? sqrt(rho_sq / n_ant) : -1.0;
+have_rho:
+  if(g_disc>0) __atomic_fetch_add(gpu_scored?&csirs_disc_confirm_gpu_scores:&csirs_disc_confirm_cpu_scores,1,__ATOMIC_RELAXED);
   if (nzp_observer_score(idx, absolute_slot, rho)) map_changed();
   if ((maintenance || nzp_recheck) && g_timing)
     nr_csirs_observer_add_time(&g_csirs_obs, NR_CSIRS_TIME_CONFIRM, now_us() - confirm_start_us);
@@ -1156,7 +1177,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Sequence-free positional evidence, logged next to z: if z stays at noise while this shows
    * periodic structure, the POSITIONS are right and the SEQUENCE (scramblingID != PCI) is wrong --
    * which the correlation alone cannot distinguish from an empty hypothesis. */
-  epr = nr_csirs_blind_energy_ratio_shift((const int16_t *)&rxdataF_ant0[off_sym],
+  epr = gpu_scored ? gpu_scores[1] : nr_csirs_blind_energy_ratio_shift((const int16_t *)&rxdataF_ant0[off_sym],
                                                  (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
                                                  fp->first_carrier_offset);
   if (!maintenance && epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
@@ -1178,7 +1199,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * SEQUENCE (e.g. scramb_id != PCI) is flat. Slices are FFT-index ranges, so a carrier-contiguous
    * resource shows up as high slices at BOTH ends when it straddles DC. */
   static uint64_t s_span_last;
-  if (!maintenance && g_rank && z > 3.0 && g_slots - s_span_last >= 200) {
+  if (!gpu_scored && !maintenance && g_rank && z > 3.0 && g_slots - s_span_last >= 200) {
     s_span_last = g_slots;
     enum { G = 12 };
     const uint32_t step = (uint32_t)fp->ofdm_symbol_size / G;
@@ -1215,14 +1236,14 @@ score_zero_power:
    * REs dark only beside a pilot (lab G4, one antenna of an 8-port cell) already score ~0 here. */
   if (maintenance || !nr_csirs_blind_is_confirmed(&g_zp, idx)) {
     const int16_t *zp_refs[NR_CSIRS_BLIND_RT_MAX_PORTS];
-    for (int p = 0; p < n_planes; p++)
+    for (int p = 0; !gpu_scored && p < n_planes; p++)
       zp_refs[p] = (const int16_t *)&t_refbuf[p][off_sym];
-    double old_score = -1.0;
-    const double zs = nr_csirs_blind_zero_score_evidence_shift((const int16_t *)&rxdataF_ant0[off_sym], zp_refs, n_planes,
+    double old_score = gpu_scored ? gpu_scores[4] : -1.0;
+    const double zs = gpu_scored ? gpu_scores[2] : nr_csirs_blind_zero_score_evidence_shift((const int16_t *)&rxdataF_ant0[off_sym], zp_refs, n_planes,
                                                             fp->ofdm_symbol_size, fp->first_carrier_offset,
                                                             c->row == 2 ? &old_score : NULL);
-    double zs_other = zs;
-    if (c->row == 5) {
+    double zs_other = gpu_scored ? gpu_scores[3] : zs;
+    if (!gpu_scored && c->row == 5) {
       const unsigned symbol = c->symb_l0 + 1;
       const uint32_t off_other = symbol * fp->ofdm_symbol_size;
       zs_other = -1.0;
@@ -1387,7 +1408,7 @@ score_zero_power:
     const char *e = getenv("ISAC_CSIRS_BLIND_SLOTSWEEP");
     g_slotsweep = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
-  if (g_slotsweep && idx == g_id_pin && epr > 1.5 && g_slot_best_off < 0) {
+  if (g_disc<=0 && g_slotsweep && idx == g_id_pin && epr > 1.5 && g_slot_best_off < 0) {
     const int n_slots = fp->slots_per_frame;
     for (int off = 0; off < n_slots; off++) {
       const int trial_slot = (slot + off) % n_slots;
@@ -1530,6 +1551,13 @@ static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl
 }
 bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
 {
+  if(discovery_queue_ready) {
+    if(!out) return false;
+    fapi_nr_dl_config_csirs_pdu_rel15_t all[2*NR_CSIRS_BLIND_DISC_MAX_CONF];
+    int n=discovery_export(absolute_slot,all,2*NR_CSIRS_BLIND_DISC_MAX_CONF);
+    for(int i=0;i<n;++i) if(all[i].csi_type==1) {*out=all[i];return true;}
+    return false;
+  }
   if (!out || pthread_mutex_trylock(&g_csirs_state_lock) != 0) return false;
   bool found = false;
   if (g_on > 0 && g_armed != 0 && g_rank <= 0) {
@@ -1545,6 +1573,11 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
 }
 int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
+  if(discovery_queue_ready && !discovery_consuming) {
+    int n=discovery_export(absolute_slot,out,max);
+    for(int i=0;i<n;++i) if(out[i].csi_type==2) nr_csirs_observer_export_zp(&g_csirs_obs);
+    return n;
+  }
   pthread_mutex_t *guard __attribute__((cleanup(csirs_unlock))) = &g_csirs_state_lock;
   pthread_mutex_lock(guard);
   /* Ranking is diagnostic only: neither newly confirmed NZP nor retained ZP may alter PDSCH. */

@@ -22,6 +22,7 @@ typedef struct {
 int nr_csirs_disc_sweep_validate(const nr_csirs_disc_ring_t *, const nr_csirs_disc_hyp_t *, int,
                                 const nr_csirs_disc_sweep_cfg_t *, nr_csirs_disc_sweep_cfg_t *);
 int nr_csirs_disc_sweep_map(const nr_csirs_disc_hyp_t *, int, nr_csirs_disc_sweep_map_t *);
+int nr_csirs_disc_sweep_map_into(const nr_csirs_disc_hyp_t *,int,nr_csirs_disc_sweep_map_t *,nr_csirs_disc_re_t *,size_t);
 /* Scores are [id][delta], already averaged over lattice slots. Strict > breaks ties
  * in ascending id/delta order on both backends. No lattice => z=z_second=0. */
 void nr_csirs_disc_sweep_winner(const float *, const nr_csirs_disc_sweep_cfg_t *, int, int, nr_csirs_disc_win_t *);

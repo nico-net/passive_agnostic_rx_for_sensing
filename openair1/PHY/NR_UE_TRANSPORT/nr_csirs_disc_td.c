@@ -272,6 +272,11 @@ int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
       remaining-=n;
       continue;
     }
+    if(ring->device_grid) {
+      /* Host IQ is deliberately stale on a resident ring. Never mix a failed
+       * device batch with CPU FEP; retry discovery on later bounded windows. */
+      __atomic_fetch_add(&csirs_disc_feed_drops,n,__ATOMIC_RELAXED);remaining-=n;continue;
+    }
     static bool warned;
     if(!warned) {
       LOG_W(PHY,"SENSING: CSIRS_DISC CPU FEP fallback (not real-time); GPU chain unavailable or failed\n");

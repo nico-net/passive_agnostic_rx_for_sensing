@@ -50,6 +50,8 @@ static pthread_once_t g_enabled_once = PTHREAD_ONCE_INIT;
 static bool g_enabled;
 
 /* U1's standalone test deliberately links no U5 object. */
+extern const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void) __attribute__((weak));
+extern bool nr_csirs_disc_pipeline_ready(void) __attribute__((weak));
 extern void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp) __attribute__((weak));
 
 extern int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *, int, int) __attribute__((weak));
@@ -58,6 +60,7 @@ extern void nr_csirs_disc_td_reset(void) __attribute__((weak));
 extern int nr_csirs_disc_td_pending(void) __attribute__((weak));
 extern int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *) __attribute__((weak));
 
+extern int nr_csirs_blind_rt_discovery_drain(void) __attribute__((weak));
 static void worker_note_slot(void);
 
 static void read_enabled(void)
@@ -161,6 +164,10 @@ void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r)
     else
       free(r->grid_base);
   }
+  if(r->device_grid) {
+    const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
+    if(gpu && gpu->device_free) gpu->device_free(r->device_grid);
+  }
   free(r->meta);
   if (state != NULL) {
     for (int i=0;i<r->capacity;++i) pthread_mutex_destroy(&state->entry_lock[i]);
@@ -215,9 +222,17 @@ int nr_csirs_disc_ring_snapshot(nr_csirs_disc_ring_t *r, nr_csirs_disc_ring_t *d
 {
   ring_private_t *state = r ? r->private_state : NULL;
   if (!state || !dst || !dst->private_state || dst->capacity != r->capacity || dst->slot_stride != r->slot_stride) return -1;
-  ring_private_t *copy=dst->private_state;
   uint64_t epoch=__atomic_load_n(&state->epoch,__ATOMIC_ACQUIRE);
   uint64_t end = __atomic_load_n(&r->written, __ATOMIC_ACQUIRE);
+  if(r->device_valid) {
+    const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load?nr_csirs_disc_gpu_load():NULL;
+    if(!gpu || !gpu->readback) return -1;
+    pthread_mutex_lock(&state->read_lock);
+    int rc=gpu->readback(r);
+    pthread_mutex_unlock(&state->read_lock);
+    if(rc<0) return -1;
+  }
+  ring_private_t *copy=dst->private_state;
   if (epoch!=copy->epoch || end < dst->written) {dst->written=0;memset(dst->meta,0,dst->capacity*sizeof(*dst->meta));}
   uint64_t first = dst->written;
   if (end-first > (uint64_t)r->capacity) first=end-r->capacity;
@@ -352,12 +367,13 @@ static void *disc_worker_main(void *unused)
       clock_gettime(CLOCK_REALTIME, &until);
       until.tv_nsec += 5000000;
       if (until.tv_nsec >= 1000000000) { ++until.tv_sec; until.tv_nsec -= 1000000000; }
-      pthread_cond_timedwait(&g_worker.wake_cv, &g_worker.wake_lock, &until);
+      if(pthread_cond_timedwait(&g_worker.wake_cv, &g_worker.wake_lock, &until)==ETIMEDOUT) break;
     }
     if (g_worker.stop)
       break;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     pthread_mutex_unlock(&g_worker.wake_lock);
+    if(nr_csirs_blind_rt_discovery_drain) nr_csirs_blind_rt_discovery_drain();
     int drained=nr_csirs_disc_td_drain?nr_csirs_disc_td_drain(&g_worker.ring):0;
     seen = __atomic_load_n(&g_worker.wake_generation, __ATOMIC_ACQUIRE);
     void (*hook)(nr_csirs_disc_ring_t *) = nr_csirs_disc_process_hook;
@@ -365,7 +381,7 @@ static void *disc_worker_main(void *unused)
       /* TD mode has a single FD writer: this worker. The pipeline mutex
        * serializes processing with epoch reset, so no second IQ copy is needed. */
       if(hook) hook(&g_worker.ring);
-    } else if (nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
+    } else if (!nr_csirs_disc_td_drain && g_worker.ring.written!=g_worker.snapshot.written && nr_csirs_disc_ring_snapshot(&g_worker.ring, &g_worker.snapshot) == 0) {
       if(hook) hook(&g_worker.snapshot);
     }
     pthread_mutex_lock(&g_worker.wake_lock);
@@ -387,6 +403,7 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
    * the process hook. The weak edge keeps the U1-only fixture self-contained. */
   if (nr_csirs_disc_pipeline_init)
     nr_csirs_disc_pipeline_init(fp);
+  if(nr_csirs_disc_pipeline_ready && !nr_csirs_disc_pipeline_ready()) return -1;
 
   memset(&g_worker, 0, sizeof(g_worker));
   g_worker.batch = env_positive("ISAC_CSIRS_DISC_BATCH", NR_CSIRS_DISC_DEFAULT_BATCH);
@@ -401,6 +418,11 @@ int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
   const int capacity = env_positive("ISAC_CSIRS_DISC_RING", NR_CSIRS_DISC_DEFAULT_CAPACITY);
   if (nr_csirs_disc_ring_init(&g_worker.ring, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, true) != 0)
     goto fail;
+  const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load?nr_csirs_disc_gpu_load():NULL;
+  if(gpu && gpu->device_alloc) {
+    g_worker.ring.device_grid=gpu->device_alloc((size_t)capacity*g_worker.ring.slot_stride*2);
+    if(!g_worker.ring.device_grid) goto fail;
+  }
   if (nr_csirs_disc_ring_init(&g_worker.snapshot, n_ant, fp->N_RB_DL, fp->slots_per_frame, capacity, false) != 0)
     goto fail;
   if (nr_csirs_disc_td_init && nr_csirs_disc_td_init(fp, n_ant,

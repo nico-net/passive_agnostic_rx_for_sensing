@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc.h"
+#include "PHY/defs_nr_common.h"
 #include "nr_csirs_disc_gate_internal.h"
 
 #include "common/utils/LOG/log.h"
@@ -18,11 +19,15 @@ extern void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn) __attribute__((we
 extern int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *)
     __attribute__((weak));
 extern bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *) __attribute__((weak));
+extern void nr_csirs_blind_rt_discovery_disable(void) __attribute__((weak));
+extern int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_init(void) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_reset(void) __attribute__((weak));
 extern void nr_csirs_monitor_remove_dynamic_all(void) __attribute__((weak));
 
 #define DISC_VIEWS 128
+static bool pipeline_ready=true;
+bool nr_csirs_disc_pipeline_ready(void) {return pipeline_ready;}
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_csirs_disc_metrics_t g_metrics;
@@ -72,6 +77,11 @@ static uint64_t now_us(void)
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
+static uint64_t cpu_us(void)
+{
+  struct timespec t;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;
+}
+
 static int sweep_limit(void)
 {
   const char *s = getenv("ISAC_CSIRS_DISC_SWEEP_HYPS");
@@ -105,6 +115,8 @@ static void init_once(void)
 {
   if(nr_csirs_blind_rt_discovery_init) nr_csirs_blind_rt_discovery_init();
   (void)nr_csirs_disc_gpu_load();
+  nr_csirs_disc_fp_t warm={.sym_mask=1,.sc_mask=0x111,.density=3,.n_rb=4,.period=4};
+  nr_csirs_disc_hyp_t hyp;nr_csirs_disc_hypotheses(&warm,1,&hyp,1);
   nr_csirs_disc_process_hook = nr_csirs_disc_process;
   if (nr_cfg_epoch_subscribe)
     nr_cfg_epoch_subscribe(epoch_listener);
@@ -112,9 +124,20 @@ static void init_once(void)
 
 void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
 {
-  (void)fp;
-  if (nr_csirs_disc_enabled())
+  if (nr_csirs_disc_enabled()) {
     pthread_once(&g_once, init_once);
+    const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
+    if(fp && gpu && gpu->prepare) {
+      const char *e=getenv("ISAC_CSIRS_DISC_RING");int capacity=e?atoi(e):640;
+      if(capacity<1) capacity=640;
+      size_t stride=14*(fp->ofdm_symbol_size+fp->nb_prefix_samples0+fp->nb_prefix_samples);
+      if(!gpu->sweep || !gpu->refine || !gpu->confirm || !gpu->sweep_prepare || gpu->prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity,fp->ofdm_symbol_size,stride)<0
+         || (gpu->sweep_prepare && gpu->sweep_prepare(fp->N_RB_DL,fp->nb_antennas_rx,capacity)<0))
+        {pipeline_ready=false;LOG_E(PHY,"SENSING: CSIRS_DISC GPU preallocation failed; discovery disabled\n");}
+    }
+    if(fp && pipeline_ready && nr_csirs_blind_rt_discovery_prepare && nr_csirs_blind_rt_discovery_prepare(fp)<0) pipeline_ready=false;
+    if(!pipeline_ready && nr_csirs_blind_rt_discovery_disable) nr_csirs_blind_rt_discovery_disable();
+  }
 }
 
 void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
@@ -125,7 +148,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   if(!nr_csirs_disc_ring_snapshot_current(ring)) {pthread_mutex_unlock(&pipeline_lock);return;}
   if(cache_grid!=ring->grid_base || ring->written<cache_written) cache_count=qualified_count=0;
   cache_grid=ring->grid_base;cache_written=ring->written;
-  const uint64_t begin = now_us();
+  const uint64_t begin = now_us(), cpu_begin=cpu_us();
   nr_csirs_disc_fp_t fps[DISC_VIEWS];
   nr_csirs_disc_hyp_t all_hyps[NR_CSIRS_DISC_MAX_HYP];
   nr_csirs_disc_hyp_t hyps[NR_CSIRS_DISC_MAX_HYP];
@@ -133,13 +156,13 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   bool coarse_only[NR_CSIRS_DISC_MAX_HYP] = {false}; /* screened out: never eligible for admission */
   const nr_csirs_disc_fp_cfg_t fp_cfg = {.min_strength = 1.03f};
 
-  /* Incremental GPU local normalization/folding, CPU bounded clustering. */
+  /* Resident GPU normalization, folding and clustering; serial CPU reference. */
   int n_fp = nr_csirs_disc_detect_candidates(ring, &fp_cfg, fps, 64);
   if(n_fp<0) { /* Recover after a full ring overrun; unavailable IQ cannot be folded. */
     nr_csirs_disc_detect_reset();
     n_fp=nr_csirs_disc_detect_candidates(ring,&fp_cfg,fps,64);
   }
-  const uint64_t detected = now_us();
+  const uint64_t detected = now_us(), cpu_detected=cpu_us();
   if (n_fp < 0) {pthread_mutex_unlock(&pipeline_lock);return;}
   for (int i = 0; i < n_fp; ++i)
     LOG_I(PHY,
@@ -214,7 +237,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       hyps[n_hyp++] = all_hyps[i];
   LOG_I(PHY, "SENSING: CSIRS_DISC HYPOTHESES n=%d sweep=%d\n", n_all, n_hyp);
 
-  const uint64_t built = now_us();
+  const uint64_t built = now_us(), cpu_built=cpu_us();
   int n_win = 0;
   bool gpu = false;
   const nr_csirs_disc_sweep_cfg_t sweep_cfg = {
@@ -225,6 +248,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   }
   if (n_hyp > 0 && n_win < 0)
     n_win = 0;
+  if(n_hyp>0 && !gpu && ring->device_valid) {pthread_mutex_unlock(&pipeline_lock);return;}
   if (n_hyp > 0 && !gpu) {
     n_win=0;
     for(int i=0;i<n_hyp;++i) {
@@ -345,7 +369,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       const nr_csirs_disc_win_t *w = &wins[selected[k]];
       const int original_index=w->hyp_index;
       nr_csirs_disc_hyp_t refined = hyps[w->hyp_index];
-      if (nr_csirs_disc_refine_cpu(ring, &refined, w) < 0) continue;
+      if ((gpu && ops->refine ? ops->refine(ring,&refined,w) : nr_csirs_disc_refine_cpu(ring, &refined, w)) < 0) continue;
       /* A weaker burst phase must not create a cropped clone of a wider,
        * already sequence-qualified resource. Reuse that measured geometry and
        * verify the entire extent again on this phase before admission. */
@@ -355,7 +379,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       }
       nr_csirs_disc_win_t verified;
       int checked=gpu && ops->sweep?ops->sweep(ring,&refined,1,&sweep_cfg,&verified):-1;
-      if(checked<0) checked=nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified);
+      if(checked<0 && !ring->device_valid) checked=nr_csirs_disc_sweep_cpu(ring,&refined,1,&sweep_cfg,&verified);
       if (checked == 1 && getenv("ISAC_CSIRS_DISC_DIAG"))
         LOG_I(PHY,
               "SENSING: CSIRS_DISC VERIFY row=%u fd=%u l0=%u l1=%u rb=%u:%u id=%u z=%.6f z2=%.6f mu=%.6f sigma=%.6f P/O=%u/%u accepted=%u\n",
@@ -396,6 +420,9 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   }
 
   pthread_mutex_lock(&g_lock);
+  uint64_t cpu_end=cpu_us();
+  g_metrics.cpu_us+=cpu_end-cpu_begin;g_metrics.detect_cpu_us+=cpu_detected-cpu_begin;
+  g_metrics.hyp_cpu_us+=cpu_built-cpu_detected;g_metrics.sweep_cpu_us+=cpu_end-cpu_built;
   g_metrics.detect_us += detected - begin;
   g_metrics.hyp_us += built - detected;
   g_metrics.sweep_us += now_us() - built;
