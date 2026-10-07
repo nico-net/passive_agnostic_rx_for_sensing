@@ -130,11 +130,26 @@ extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
   static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host};return &ops;
 }
+/* "Unified" buffers (U1 ring, TD staging, histories) are pinned, mapped host memory by default: GB10
+ * memory is physically shared and coherent, so the GPU reads/writes it zero-copy with no page
+ * migration. With cudaMallocManaged the DL actor's per-slot TD copy faulted on GPU-touched pages and
+ * took 47.5 % of the actor's samples live (OTA 2026-10-07 prof11c); pinned: 10 % (prof12).
+ * ISAC_CSIRS_DISC_MANAGED=1 restores managed memory. */
+static bool use_managed(void) { static int m=-1; if(m<0) m=getenv("ISAC_CSIRS_DISC_MANAGED") && atoi(getenv("ISAC_CSIRS_DISC_MANAGED"))?1:0; return m; }
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
-  void *ptr=nullptr;return bytes && cudaMallocManaged(&ptr,bytes)==cudaSuccess?ptr:nullptr;
+  void *ptr=nullptr;
+  if(!bytes) return nullptr;
+  if(use_managed()) return cudaMallocManaged(&ptr,bytes)==cudaSuccess?ptr:nullptr;
+  return cudaHostAlloc(&ptr,bytes,cudaHostAllocMapped|cudaHostAllocPortable)==cudaSuccess?ptr:nullptr;
 }
-extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr) { if(ptr) cudaFree(ptr); }
+extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr)
+{
+  if(!ptr) return;
+  cudaPointerAttributes a{};
+  if(cudaPointerGetAttributes(&a,ptr)==cudaSuccess && a.type==cudaMemoryTypeHost) cudaFreeHost(ptr);
+  else cudaFree(ptr);
+}
 
 /* T8: only the worker calls this entry. Buffers and plans are retained between
  * batches; all FFT staging is unified memory on the DGX. OAI's fixed-point
@@ -346,7 +361,7 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   if(!grid.reserve(gb) || !meta.reserve(r->capacity) || !x.reserve(xb) || !excl.reserve(14*12*r->n_rb)) return -1;
   // Reuse managed input directly, explicit-copy ordinary CPU fixture rings.
   cudaPointerAttributes attr={};
-  bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && attr.type==cudaMemoryTypeManaged;
+  bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && (attr.type==cudaMemoryTypeManaged || attr.type==cudaMemoryTypeHost);
   cudaGetLastError();
   const int16_t *input=managed?r->grid_base:grid.p;
   if((!managed && cudaMemcpy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||
