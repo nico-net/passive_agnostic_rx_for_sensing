@@ -826,7 +826,7 @@ static int nr_pdcch_dci11_stage2_enabled(void)
  *   than ISAC_PDSCH_SNR_GATE_DB (default 3) below the AWGN requirement of the grant's MCS (10 log10(2^(SE/0.75)-1),
  *   SE = Qm R) is skipped and counted skipped_snr (1 in 8 still decoded so the estimate keeps tracking).
  * Every refused variant releases its solver pending entry at once (feedback without credit). */
-static bool pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
+static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
 {
   static int init;
   static double rate, burst, fill, margin;
@@ -851,6 +851,17 @@ static bool pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int 
   }
   bool ok = true;
   pthread_mutex_lock(&mu);
+  if (v == NULL) { /* budget query before planning: whole probes available now (no consumption); -1 = unlimited */
+    int avail = -1;
+    if (rate > 0.0) {
+      if (last_abs >= 0 && abs_slot > last_abs) tokens += rate * (double)(abs_slot - last_abs);
+      if (abs_slot > last_abs) last_abs = abs_slot;
+      if (tokens > burst) tokens = burst;
+      avail = nr_pdsch_passive_queue_fill_pct() < fill ? (int)tokens : 0;
+    }
+    pthread_mutex_unlock(&mu);
+    return avail;
+  }
   if (v->probe && rate > 0.0) {
     if (last_abs >= 0 && abs_slot > last_abs) tokens += rate * (double)(abs_slot - last_abs);
     if (abs_slot > last_abs) last_abs = abs_slot;
@@ -7895,8 +7906,14 @@ constdiag_done:;
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
       const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
-      const int nv = nrd > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs, cfg->dmrs_typeA_position + 2,
-                                                         sv_nrm > 0, rd, nrd, s_budget, var) : 0;
+      const bool sv_alt_scr = cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
+      nr_pdsch_solver_set_alt_scr(sv_alt_scr);
+      /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
+       * cursor never advances over hypotheses that would be throttled untested */
+      const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
+      const int sv_budget = p_avail < 0 ? s_budget : (p_avail < s_budget ? p_avail : s_budget);
+      const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
+                                                    cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
       for (; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
@@ -7914,6 +7931,8 @@ constdiag_done:;
         dl.mcs_table         = var[v].table;
         dl.pduBitmap         = 0;
         dl.numCsiRsForRateMatching = 0;
+        if (var[v].scr && sv_alt_scr) /* T26c: CRC-selected per-RNTI hypothesis -- the CORESET's own run-time nID */
+          dl.dlDmrsScramblingId = dl.dlDataScramblingId = (uint16_t)cfg->coreset_pdcch_dmrs_scrambling_id;
         if (var[v].rm) {
           const fapi_nr_dl_config_csirs_pdu_rel15_t *rm = sv_rm;
           const int n_rm = sv_nrm;

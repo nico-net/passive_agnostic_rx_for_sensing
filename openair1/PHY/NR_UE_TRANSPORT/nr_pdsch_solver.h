@@ -43,6 +43,7 @@ typedef struct {
   uint8_t probe;       ///< 1 = first-code-block probe (search), 0 = full decode (solved parameters)
   uint8_t rm;          ///< 1 = rate-match around the run-time-discovered CSI-RS resources of this slot
   uint32_t token;      ///< hand back to nr_pdsch_solver_feedback()
+  uint8_t scr;         ///< T26c: 1 = PDSCH DM-RS + data scrambling id = the run-time CORESET's PDCCH nID (else the default)
 } nr_pdsch_solver_var_t;
 
 /// tda index the layout reads from the payload (the caller owns the layout offsets)
@@ -73,6 +74,10 @@ void nr_pdsch_solver_set_now(uint64_t abs_slot);
 void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db);
 /** T26c: the RNTI's SNR EMA once >= 3 measurements exist; false otherwise. */
 bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db);
+/** T26c (ISAC_PDSCH_SOLVER_SCR=1): before planning, whether this DCI's CORESET carries a discovered PDCCH nID that
+ * differs from the cell's: the PDSCH scrambling identities (DM-RS scramblingID0 and dataScramblingIdentityPDSCH) are
+ * then a per-RNTI CRC-selected hypothesis {default, CORESET nID}, searched alternately until a candidate fixes it. */
+void nr_pdsch_solver_set_alt_scr(bool available);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 
