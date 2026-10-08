@@ -460,6 +460,184 @@ TEST(CsirsDiscSweep, RecentOccasionsMatchExplicitMaskedRing)
   EXPECT_NEAR(got.z,expected.z,1e-5);EXPECT_NEAR(got.z_second,expected.z_second,1e-5);
 }
 
+
+TEST(CsirsDiscSweep, CumulativeFreshSlotsEpochGeometryAndWindowGaps)
+{
+  Grid grid(12,4); auto h=hyp(1,0,8);
+  nr_csirs_disc_sweep_cfg_t c={0,1024,1,32,4,101};
+  nr_csirs_disc_win_t a={},b={};
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&a),1);
+  EXPECT_EQ(a.n_slots,4); EXPECT_EQ(a.fresh_slots,4);
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,4); EXPECT_EQ(b.fresh_slots,0); EXPECT_FLOAT_EQ(a.z,b.z);
+  // A partially overlapping ring contributes only the two new occasions.
+  for (auto &m:grid.meta) {m.abs_slot+=10;m.slot=m.abs_slot%20;}
+  grid.r.written+=2;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,6); EXPECT_EQ(b.fresh_slots,2);
+  // The same footprint with a different extent cannot inherit evidence.
+  h.n_rb=9;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,4);
+  ++c.evidence_epoch;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,4);
+  grid.r.written=1;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,4);
+  for(auto &m:grid.meta) {m.abs_slot+=3000;m.slot=m.abs_slot%20;}
+  ++grid.r.written;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,4); // expired, not an eight-slot observation
+  for (auto &m:grid.meta) m.valid=0;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,0); EXPECT_FLOAT_EQ(b.z,0); EXPECT_FLOAT_EQ(b.z_second,0);
+  for (auto &m:grid.meta) m.valid=1;
+  c.evidence_epoch=0;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&b),1);
+  EXPECT_EQ(b.n_slots,4); EXPECT_EQ(b.fresh_slots,0);
+}
+
+
+TEST(CsirsDiscSweep, CumulativeEqualsIndependentUnionAndBoundsHistory)
+{
+  Grid grid(12,4), whole(12,8);auto h=hyp(1,0,8);
+  nr_csirs_disc_sweep_cfg_t c={0,1024,1,32,4,103}, all={0,1024,1,32,0};
+  nr_csirs_disc_win_t cumulative={},reference={};
+  for(int batch=0;batch<9;++batch) {
+    for(int t=0;t<4;++t) {unsigned abs=2+batch*20+t*5;
+      grid.meta[t]={abs,uint16_t(abs/20),uint8_t(abs%20),1};}
+    grid.r.written+=4;grid.noise();grid.add(h,415,0,-5);
+    if(batch<2) {
+      std::copy(grid.samples.begin(),grid.samples.end(),whole.samples.begin()+batch*grid.samples.size());
+      std::copy(grid.meta.begin(),grid.meta.end(),whole.meta.begin()+batch*4);
+    }
+    ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&cumulative),1);
+    EXPECT_EQ(cumulative.n_slots,batch<8?4*(batch+1):4);
+    if(batch==1) {
+      ASSERT_EQ(nr_csirs_disc_sweep_cpu(&whole.r,&h,1,&all,&reference),1);
+      EXPECT_EQ(cumulative.scramb_id,reference.scramb_id);
+      EXPECT_NEAR(cumulative.z,reference.z,1e-6);
+      EXPECT_NEAR(cumulative.z_second,reference.z_second,1e-6);
+      EXPECT_NEAR(cumulative.noise_mu,reference.noise_mu,1e-6);
+      EXPECT_NEAR(cumulative.noise_sigma,reference.noise_sigma,1e-6);
+    }
+  }
+}
+
+
+TEST(CsirsDiscSweep, CumulativeRepeatedInterferenceDoesNotInventIndependentCredit)
+{
+  Grid grid(8,4); auto h=hyp(1,0,8);
+  nr_csirs_disc_sweep_cfg_t c={0,1024,1,32,4,104};
+  const nr_csirs_disc_gate_t gate={12,4,2,0};
+  nr_csirs_disc_win_t initial={};
+  for(int batch=0;batch<8;++batch) {
+    // Different absolute times, same slot initializer and identical received IQ.
+    // Independent-slot sqrt(N) shortcuts would inflate this fixed distractor.
+    for(auto &m:grid.meta) m.abs_slot+=20;
+    grid.r.written+=4;
+    nr_csirs_disc_win_t w={};
+    ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),1);
+    if(!batch) initial=w;
+    EXPECT_EQ(w.n_slots,4*(batch+1));
+    EXPECT_NEAR(w.z,initial.z,1e-6);
+    EXPECT_NEAR(w.noise_sigma,initial.noise_sigma,1e-6);
+    EXPECT_FALSE(nr_csirs_disc_gate_accept(&w,&gate));
+  }
+}
+
+
+TEST(CsirsDiscSweep, CumulativeSurvivesInterveningRejectedHypotheses)
+{
+  Grid grid(12,4);auto h=hyp(1,0,8);
+  nr_csirs_disc_sweep_cfg_t c={0,1024,1,32,4,105};
+  nr_csirs_disc_win_t w={};
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),1);
+  ASSERT_EQ(w.n_slots,4);
+  // Revisit after the ordinary cooldown; a 64-entry bank loses all credit here.
+  nr_csirs_disc_hyp_t other[128];nr_csirs_disc_win_t ignored[128];
+  for(int i=0;i<128;++i) {
+    other[i]=h;other[i].rb_start=1+i%4;
+    other[i].symb_l0=i/16;other[i].freq_domain=1<<((i/4)%4);
+  }
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,other,128,&c,ignored),128);
+  for(auto &m:grid.meta) m.abs_slot+=20;
+  grid.r.written+=2000;
+  ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&w),1);
+  EXPECT_EQ(w.n_slots,8);EXPECT_EQ(w.fresh_slots,4);
+}
+
+TEST(CsirsDiscSweep, CumulativeLowSnrAndNoiseSameGate)
+{
+  rng.seed(0x28c515); // Stable calibration regardless of gtest filter/order.
+  const nr_csirs_disc_gate_t gate={12,4,2,0};
+  unsigned base_hits=0, accumulated_hits=0, noise_base=0, noise_accumulated=0;
+  for(int trial=0;trial<4096;++trial) for (bool signal:{false,true}) {
+    if (signal && trial>=32) continue;
+    Grid grid(8,4); auto h=hyp(1,0,8); h.period=160; h.offset=15;
+    nr_csirs_disc_sweep_cfg_t base={0,1024,1,32,4}, cumulative=base;
+    cumulative.evidence_epoch=1000+2*trial+signal;
+    bool seen_base=false, seen_accumulated=false;
+    for(int batch=0;batch<8;++batch) {
+      // Four occurrences per 640-slot feed window, then six skipped windows.
+      for(int s=0;s<4;++s) {unsigned abs=15+batch*4480+s*160;
+        grid.meta[s]={abs,uint16_t(abs/20%1024),uint8_t(abs%20),1};}
+      grid.r.written=(batch+1)*640;
+      grid.noise(); if(signal) grid.add(h,415,0,-5);
+      // Fully correlated receive branches: conservative common interferer/noise.
+      for(int s=0;s<4;++s) for(int a=1;a<4;++a)
+        std::copy_n(nr_csirs_disc_ring_sym(&grid.r,s,0,0),14*24*8,nr_csirs_disc_ring_sym(&grid.r,s,a,0));
+      nr_csirs_disc_win_t a={},b={};
+      ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&base,&a),1);
+      ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&cumulative,&b),1);
+      EXPECT_EQ(b.n_slots,4*(batch+1)); EXPECT_EQ(b.fresh_slots,4);
+      bool ab=nr_csirs_disc_gate_accept(&a,&gate), bb=nr_csirs_disc_gate_accept(&b,&gate);
+      if(signal) {
+        if(ab) { EXPECT_EQ(a.scramb_id,415); }
+        if(bb) { EXPECT_EQ(b.scramb_id,415); }
+        seen_base|=ab; seen_accumulated|=bb;
+      } else {noise_base+=ab;noise_accumulated+=bb;}
+    }
+    if(signal) {base_hits+=seen_base;accumulated_hits+=seen_accumulated;}
+  }
+  printf("T28 -5 dB common-noise 4RX: runs admitted baseline=%u cumulative=%u/32; noise false=%u/%u in 32768 looks each\n",
+         base_hits,accumulated_hits,noise_base,noise_accumulated);
+  EXPECT_GT(accumulated_hits,base_hits);
+  EXPECT_GE(accumulated_hits,30u);
+  EXPECT_EQ(noise_base,0u); EXPECT_EQ(noise_accumulated,0u);
+}
+
+
+TEST(CsirsDiscSweep, CumulativeGpuParity)
+{
+#ifdef NR_CSIRS_DISC_TEST_CUDA
+  int count=0;
+  if(cudaGetDeviceCount(&count)!=cudaSuccess || !count) GTEST_SKIP() << "no CUDA device";
+  void *module=nullptr; Sweep fn=gpu(&module); ASSERT_NE(fn,nullptr) << dlerror();
+  Grid grid(8,4);auto h=hyp(1,0,8);h.period=160;h.offset=15;
+  nr_csirs_disc_sweep_cfg_t c={0,1024,1,32,4,50000};
+  for(int batch=0;batch<12;++batch) {
+    for(int s=0;s<4;++s) {unsigned abs=15+batch*4480+s*160;
+      grid.meta[s]={abs,uint16_t(abs/20%1024),uint8_t(abs%20),1};}
+    grid.r.written+=640;grid.noise();grid.add(h,415,0,-5);
+    if(batch==10) ++c.evidence_epoch;
+    for(int repeat=0;repeat<2;++repeat) {
+      nr_csirs_disc_win_t cpu={},device={};
+      ASSERT_EQ(nr_csirs_disc_sweep_cpu(&grid.r,&h,1,&c,&cpu),1);
+      ASSERT_EQ(fn(&grid.r,&h,1,&c,&device),1);
+      EXPECT_EQ(cpu.scramb_id,device.scramb_id);
+      EXPECT_EQ(cpu.n_slots,device.n_slots);EXPECT_EQ(cpu.fresh_slots,device.fresh_slots);
+      EXPECT_NEAR(cpu.z,device.z,1e-3);EXPECT_NEAR(cpu.z_second,device.z_second,1e-3);
+      EXPECT_NEAR(cpu.noise_mu,device.noise_mu,1e-3);EXPECT_NEAR(cpu.noise_sigma,device.noise_sigma,1e-3);
+    }
+  }
+  dlclose(module);
+#else
+  GTEST_SKIP() << "CPU build; cumulative GPU parity deferred";
+#endif
+}
+
 TEST(CsirsDiscSweep, DISABLED_GpuBudget)
 {
 #ifdef NR_CSIRS_DISC_TEST_CUDA
