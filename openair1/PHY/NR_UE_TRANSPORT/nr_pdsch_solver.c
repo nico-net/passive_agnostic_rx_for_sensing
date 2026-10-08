@@ -35,6 +35,11 @@ typedef struct {
   int8_t S_by_tda[16];
   int8_t rm;               /* CSI-RS rate matching for this RNTI: -1 unknown, 0 no, 1 yes (CRC-selected) */
   uint32_t full_tr, full_ok, cons_fail;
+  /* T26c per-RNTI report: absolute slots (signal time) of the first grant and of the solving CRC pass */
+  uint64_t first_abs, solved_abs;
+  uint32_t grants;
+  float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
+  uint32_t n_snr;
 } solver_rnti_t;
 
 typedef struct {
@@ -48,6 +53,7 @@ typedef struct {
   uint8_t rm;
   int tda;                /* solved: tda index the representative read */
   uint64_t dci;
+  uint64_t abs;           /* T26c: absolute slot of the grant */
   nr_dci_bits_t payload;
   int n_ids;
   uint16_t ids[SOLVER_MAX_IDS];
@@ -56,7 +62,8 @@ typedef struct {
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static solver_rnti_t g_r[SOLVER_RNTIS];
 static pending_t g_p[SOLVER_PENDING];
-static uint32_t g_token = 1;
+static uint32_t g_token = 1; /* sequence part of a token; the low 12 bits are the pending index (O(1) feedback) */
+static uint64_t g_now_abs;    /* T26c: absolute slot of the grant being planned (nr_pdsch_solver_set_now) */
 static uint64_t g_dci_seq;
 static nr_pdsch_solver_tda_fn g_tda_fn;
 static void *g_tda_ctx;
@@ -185,6 +192,34 @@ int nr_pdsch_solver_rep(uint16_t rnti)
   return rep;
 }
 
+void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db)
+{
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r) {
+    r->snr_ema = r->n_snr ? 0.8f * r->snr_ema + 0.2f * snr_db : snr_db;
+    r->n_snr++;
+  }
+  pthread_mutex_unlock(&g_mu);
+}
+
+bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const bool ok = r && r->n_snr >= 3;
+  if (ok) *snr_db = r->snr_ema;
+  pthread_mutex_unlock(&g_mu);
+  return ok;
+}
+
+void nr_pdsch_solver_set_now(uint64_t abs_slot)
+{
+  pthread_mutex_lock(&g_mu);
+  g_now_abs = abs_slot;
+  pthread_mutex_unlock(&g_mu);
+}
+
 bool nr_pdsch_solver_owns(uint16_t rnti)
 {
   return nr_pdsch_solver_enabled();
@@ -219,8 +254,9 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   pending_t *p = pend_new();
   memset(p, 0, offsetof(pending_t, ids));
   p->used = true;
-  p->token = g_token++;
-  if (g_token == 0) g_token = 1;
+  p->token = ((g_token++ & 0xFFFFFu) << 12) | (uint32_t)(p - g_p); /* never 0: g_token starts at 1 and skips 0 mod 2^20 */
+  if ((g_token & 0xFFFFFu) == 0) g_token++;
+  p->abs = g_now_abs;
   p->slot = slot;
   p->phase = phase;
   p->S = (uint8_t)S; p->add_pos = (uint8_t)add_pos; p->table = (uint8_t)table; p->probe = probe;
@@ -303,6 +339,21 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   }
   const uint64_t dci = ++g_dci_seq;
   g_st.planned++;
+  if (!r->first_abs) r->first_abs = g_now_abs ? g_now_abs : 1;
+  r->grants++;
+  if ((g_st.planned % 1000) == 0) { /* T26c per-RNTI report: solve time in signal time (30 kHz: 0.5 ms per slot) */
+    char b[3000];
+    int u = 0;
+    for (int i = 0; i < SOLVER_RNTIS && u < (int)sizeof(b) - 80; i++) {
+      const solver_rnti_t *q = &g_r[i];
+      if (!q->used) continue;
+      u += snprintf(b + u, sizeof(b) - u, " 0x%04x:g%u,%s%.0fms,full%u/%u,snr%.1f", q->rnti, q->grants,
+                    q->solved_abs ? "solve=" : "unsolved_age=",
+                    0.5 * (double)((q->solved_abs ? q->solved_abs : g_now_abs) - q->first_abs), q->full_ok, q->full_tr,
+                    q->n_snr ? q->snr_ema : -99.f);
+    }
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER per-rnti%s\n", b);
+  }
   if ((g_st.planned % 500) == 0)
     LOG_A(PHY, "SENSING: PDSCH_SOLVER stats grants=%llu probes=%llu probe_ok=%llu fulls=%llu full_ok=%llu candidates=%llu "
                "solved=%llu dropped=%llu\n", (unsigned long long)g_st.planned, (unsigned long long)g_st.probes,
@@ -487,8 +538,10 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     return;
   pthread_mutex_lock(&g_mu);
   pending_t *p = NULL;
-  for (int k = 0; k < SOLVER_PENDING; k++)
-    if (g_p[k].used && g_p[k].token == token) { p = &g_p[k]; break; }
+  { /* O(1): the token carries its pending index (was a linear scan of all 4096 entries under g_mu) */
+    pending_t *q = &g_p[token & (SOLVER_PENDING - 1)];
+    if (q->used && q->token == token) p = q;
+  }
   if (p == NULL || !credit) {
     if (p) p->used = false;
     pthread_mutex_unlock(&g_mu);
@@ -573,6 +626,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         r->add_pos = p->add_pos;
         r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
         g_st.solved++;
+        r->solved_abs = p->abs;
         LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by 2 independent CRC passes: layout %d (%d consistent) "
                    "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u\n",
               r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,
