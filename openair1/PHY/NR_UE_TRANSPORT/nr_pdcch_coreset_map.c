@@ -314,6 +314,11 @@ void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb)
   g_css0_first_rb = first_rb;
   g_css0_nrb = n_rb;
 }
+void nr_pdcch_coreset_map_get_css0(int *first_rb, int *n_rb)
+{
+  *first_rb = g_css0_first_rb;
+  *n_rb = g_css0_nrb;
+}
 
 #define IDSW_NID 65536
 #define IDSW_NSYM 14

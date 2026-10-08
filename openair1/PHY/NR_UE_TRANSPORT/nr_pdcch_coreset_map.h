@@ -69,6 +69,7 @@ void nr_pdcch_coreset_map_accept_probe(const c16_t *rxdataF, int ofdm_symbol_siz
 void nr_pdcch_coreset_map_set_phase_hint(int start_rb);
 /** CORESET#0 extent from the MIB, so stage 1 scores it against its own DM-RS reference. */
 void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb);
+void nr_pdcch_coreset_map_get_css0(int *first_rb, int *n_rb); /* grid RB, as set (0/0 before CSS0 autoconf) */
 /** Stage-1 blind nID sweep (ISAC_COREMAP_IDSWEEP=1): want() says whether/where to snapshot this
  * slot (the FIRST of nr_pdcch_coreset_map_idsweep_dur() consecutive symbols to FEP and hand to
  * push(), antenna 0). Heavy work is on a worker thread. */
