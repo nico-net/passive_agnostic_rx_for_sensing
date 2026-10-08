@@ -1577,8 +1577,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
   }
 
-  /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h. */
-  if (nr_pdsch_evm_acc.armed && nl == 1 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
+  /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h.
+   * x = ZF over the combined branches (nl = 1: MRC), per layer; decisions per layer; branch fit uses sum_l h_l s_l. */
+  if (nr_pdsch_evm_acc.armed && nl >= 1 && nl <= 4 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
     nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
     const int qm = dlsch->cw_info.qamModOrder;
     const int lmax = (1 << (qm / 2)) - 1;
@@ -1587,36 +1588,74 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     for (int l = 1; l <= lmax; l += 2) { ms += (double)l * l; nlev++; }
     const double ideal_pow = 2.0 * ms / nlev;
     const int nb = nbRx < NR_PDSCH_EVM_MAX_RX ? nbRx : NR_PDSCH_EVM_MAX_RX;
-    double xr[rx_size_symbol], xi[rx_size_symbol];
-    double pw = 0.0;
+    const int a0 = nl == 1 ? mrc_rx_index : 0, a1 = nl == 1 ? mrc_rx_index + mrc_nb_rx : nbRx;
+    double (*xr)[rx_size_symbol] = malloc(sizeof(double) * 2 * nl * rx_size_symbol);
+    double (*xi)[rx_size_symbol] = xr ? (void *)((double *)xr + nl * rx_size_symbol) : NULL;
+    double pw[4] = {0};
     uint32_t nv = 0;
-    for (uint32_t i = 0; i < nb_re_pdsch; i++) {
-      double nr = 0.0, ni = 0.0, g = 0.0;
-      for (int a = mrc_rx_index; a < mrc_rx_index + mrc_nb_rx; a++) {
-        const c16_t h = chFext[0][a][i], y = rxdataF_ext[a][i];
-        nr += (double)h.r * y.r + (double)h.i * y.i;
-        ni += (double)h.r * y.i - (double)h.i * y.r;
-        g += (double)h.r * h.r + (double)h.i * h.i;
+    for (uint32_t i = 0; xr && i < nb_re_pdsch; i++) {
+      /* G = H^H H (nl x nl), b = H^H y; solve G x = b by Gaussian elimination (complex, nl <= 4) */
+      double complex G[4][5];
+      for (int l = 0; l < nl; l++) {
+        for (int k = 0; k < nl; k++) G[l][k] = 0;
+        G[l][nl] = 0;
       }
-      if (g <= 0.0) { xr[i] = xi[i] = NAN; continue; }
-      xr[i] = nr / g; xi[i] = ni / g;
-      pw += xr[i] * xr[i] + xi[i] * xi[i];
-      nv++;
+      for (int a = a0; a < a1; a++) {
+        const c16_t y = rxdataF_ext[a][i];
+        const double complex yc = y.r + I * y.i;
+        double complex h[4];
+        for (int l = 0; l < nl; l++) { const c16_t hh = chFext[l][a][i]; h[l] = hh.r + I * hh.i; }
+        for (int l = 0; l < nl; l++) {
+          for (int k = 0; k < nl; k++) G[l][k] += conj(h[l]) * h[k];
+          G[l][nl] += conj(h[l]) * yc;
+        }
+      }
+      bool ok = true;
+      for (int c = 0; c < nl && ok; c++) {
+        int piv = c;
+        for (int r = c + 1; r < nl; r++) if (cabs(G[r][c]) > cabs(G[piv][c])) piv = r;
+        if (cabs(G[piv][c]) <= 1e-9) { ok = false; break; }
+        if (piv != c) for (int k = 0; k <= nl; k++) { const double complex t = G[c][k]; G[c][k] = G[piv][k]; G[piv][k] = t; }
+        for (int r = 0; r < nl; r++) {
+          if (r == c) continue;
+          const double complex f = G[r][c] / G[c][c];
+          for (int k = c; k <= nl; k++) G[r][k] -= f * G[c][k];
+        }
+      }
+      for (int l = 0; l < nl; l++) {
+        if (!ok) { xr[l][i] = xi[l][i] = NAN; continue; }
+        const double complex x = G[l][nl] / G[l][l];
+        xr[l][i] = creal(x); xi[l][i] = cimag(x);
+        pw[l] += xr[l][i] * xr[l][i] + xi[l][i] * xi[l][i];
+      }
+      nv += ok;
     }
-    if (nv >= 12 && pw > 0.0) {
-      const double scale = sqrt(ideal_pow / (pw / nv));
+    bool good = xr && nv >= 12;
+    for (int l = 0; l < nl && good; l++) good = pw[l] > 0.0;
+    if (good) {
+      double scale[4];
+      for (int l = 0; l < nl; l++) scale[l] = sqrt(ideal_pow / (pw[l] / nv));
       double cr[NR_PDSCH_EVM_MAX_RX] = {0}, ci[NR_PDSCH_EVM_MAX_RX] = {0}, P[NR_PDSCH_EVM_MAX_RX] = {0}, Y[NR_PDSCH_EVM_MAX_RX] = {0};
       for (uint32_t i = 0; i < nb_re_pdsch; i++) {
-        if (isnan(xr[i])) continue;
-        const double vi = xr[i] * scale, vq = xi[i] * scale;
-        double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
-        si = si > lmax ? lmax : si < -lmax ? -lmax : si;
-        sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
-        ea->err += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
-        ea->ref += ideal_pow;
+        if (isnan(xr[0][i])) continue;
+        double sr[4], sq_[4];
+        for (int l = 0; l < nl; l++) {
+          const double vi = xr[l][i] * scale[l], vq = xi[l][i] * scale[l];
+          double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
+          si = si > lmax ? lmax : si < -lmax ? -lmax : si;
+          sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
+          ea->err += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+          ea->ref += ideal_pow;
+          sr[l] = si / scale[l]; sq_[l] = sq / scale[l]; /* back in the channel's own units: one alpha per branch */
+        }
         for (int a = 0; a < nb; a++) {
-          const c16_t h = chFext[0][a][i], y = rxdataF_ext[a][i];
-          const double hsr = h.r * si - h.i * sq, hsi = h.r * sq + h.i * si; /* h * d (scale cancels in the LS fit) */
+          const c16_t y = rxdataF_ext[a][i];
+          double hsr = 0.0, hsi = 0.0;
+          for (int l = 0; l < nl; l++) {
+            const c16_t h = chFext[l][a][i];
+            hsr += h.r * sr[l] - h.i * sq_[l];
+            hsi += h.r * sq_[l] + h.i * sr[l];
+          }
           cr[a] += y.r * hsr + y.i * hsi;
           ci[a] += y.i * hsr - y.r * hsi;
           P[a] += hsr * hsr + hsi * hsi;
@@ -1634,6 +1673,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       ea->qm = qm;
       ea->nbrx = nb;
     }
+    free(xr);
   }
 
   //----------------------------------------------------------

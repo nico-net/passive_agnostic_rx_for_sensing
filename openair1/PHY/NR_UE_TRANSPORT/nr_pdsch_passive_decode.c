@@ -103,6 +103,8 @@ static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static uint64_t g_pdtim_calls = 0;
+static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
+static __thread uint64_t t_pdtim_cpu0;
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
 
 static inline int pdtim_enabled(void)
@@ -116,6 +118,8 @@ static inline int pdtim_enabled(void)
 static inline uint64_t pdtim_now(void)
 {
   struct timespec t;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+  t_pdtim_cpu0 = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
@@ -125,7 +129,9 @@ static inline void pdtim_add(int k, uint64_t t0)
   if (g_pdtim_on <= 0) {
     return;
   }
+  const uint64_t c0 = t_pdtim_cpu0;
   const uint64_t d = pdtim_now() - t0;
+  g_pdtim_cpu_ns[k] += t_pdtim_cpu0 - c0;
   g_pdtim_ns[k] += d;
   g_pdtim_n[k]++;
   if (d > g_pdtim_max[k]) {
@@ -142,12 +148,13 @@ static void pdtim_report(void)
   if ((g_pdtim_calls % 200) != 0) {
     return;
   }
-  char rep[520];
+  char rep[720];
   int u = 0;
   for (int k = 0; k < PDTIM_N && u < (int)sizeof(rep) - 90; k++) {
-    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus max=%.1fus tot=%.2fs] ", kPdtimName[k],
+    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus cpu=%.1fus max=%.1fus tot=%.2fs] ", kPdtimName[k],
                   (unsigned long)g_pdtim_n[k],
                   g_pdtim_n[k] ? (double)g_pdtim_ns[k] / (double)g_pdtim_n[k] / 1000.0 : 0.0,
+                  g_pdtim_n[k] ? (double)g_pdtim_cpu_ns[k] / (double)g_pdtim_n[k] / 1000.0 : 0.0,
                   (double)g_pdtim_max[k] / 1000.0, (double)g_pdtim_ns[k] / 1e9);
   }
   LOG_I(PHY, "SENSING: PDTIM calls=%lu %s\n", (unsigned long)g_pdtim_calls, rep);
@@ -3646,7 +3653,7 @@ gpu_llr_ready:;
   }
   { /* ISAC_PDSCH_EVM_GRANT (T26c): arm the per-grant EVM accumulator for the CPU demod loop below */
     static int s_evmg = -1;
-    if (s_evmg < 0) s_evmg = getenv("ISAC_PDSCH_EVM_GRANT") ? 1 : 0;
+    if (s_evmg < 0) s_evmg = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE")) ? 1 : 0; /* the SNR gate needs the measurement */
     memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
     nr_pdsch_evm_acc.armed = s_evmg && probe_last_sym < 0 && !gpu_llr && !gw_ready;
   }

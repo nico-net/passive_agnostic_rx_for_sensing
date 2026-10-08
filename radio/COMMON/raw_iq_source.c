@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -17,6 +18,9 @@ void raw_iq_close(raw_iq_source *s)
     if (s->iq[i]) munmap((void *)s->iq[i], (size_t)s->samples * 4);
     s->iq[i] = NULL;
   }
+  free(s->rot);
+  s->rot = NULL;
+  s->rot_cap = 0;
 }
 
 int raw_iq_open(raw_iq_source *s, const char *root, uint64_t samples,
@@ -121,6 +125,43 @@ int raw_iq_read(raw_iq_source *s, void **buffers, int count,
           dst[n] = value >= 0 ? value / divisor : -((-value + divisor - 1) / divisor);
         }
       }
+      continue;
+    }
+    /* Bit-identical fast path (T26c): the phasor recursion is the same for every channel, so it is generated once
+     * per read; ldexp(v, -shift) == v * 2^-shift exactly and rint == lrint in the default rounding mode, both now
+     * inline. The scalar libm ldexp/lrint path was ~60 % of the reader thread and held replays at ~0.1x real time. */
+    if (c == 0 && (count > s->rot_cap || !s->rot)) {
+      free(s->rot);
+      s->rot = malloc(sizeof(double) * 2 * (size_t)count);
+      s->rot_cap = s->rot ? count : 0;
+    }
+    if (s->rot) {
+      if (c == 0) {
+        double re = cos(s->phase), im = sin(s->phase);
+        for (int n = 0; n < count; ++n) {
+          s->rot[2*n] = re; s->rot[2*n+1] = im;
+          double next = re * dr - im * di;
+          im = re * di + im * dr;
+          re = next;
+          if ((n & 1023) == 1023) {
+            double norm = hypot(re, im);
+            re /= norm; im /= norm;
+          }
+        }
+      }
+      const double scale = 1.0 / (double)(1u << s->shift);
+      uint64_t clipped = 0;
+      const double *restrict rot = s->rot;
+      for (int n = 0; n < count; ++n) { /* branch-free so it vectorises; same values as quantize() */
+        const double re = rot[2*n], im = rot[2*n+1];
+        const double v0 = (src[2*n] * re - src[2*n+1] * im) * scale, v1 = (src[2*n] * im + src[2*n+1] * re) * scale;
+        clipped += (v0 > INT16_MAX) + (v0 < INT16_MIN) + (v1 > INT16_MAX) + (v1 < INT16_MIN);
+        const double c0 = v0 > INT16_MAX ? INT16_MAX : v0 < INT16_MIN ? INT16_MIN : v0;
+        const double c1 = v1 > INT16_MAX ? INT16_MAX : v1 < INT16_MIN ? INT16_MIN : v1;
+        dst[2*n] = (int16_t)(int32_t)__builtin_rint(c0);
+        dst[2*n+1] = (int16_t)(int32_t)__builtin_rint(c1);
+      }
+      s->clipped += clipped;
       continue;
     }
     double re = cos(s->phase), im = sin(s->phase);

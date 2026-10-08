@@ -67,6 +67,12 @@ int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uin
  * missing rate match cannot count against the true layout. */
 int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0, bool csirs_slot,
                               const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
+/** T26c: absolute slot (signal time) of the grant about to be planned, for the per-RNTI solve-time report. */
+void nr_pdsch_solver_set_now(uint64_t abs_slot);
+/** T26c: post-equalisation SNR (dB) of one full decode of `rnti` (EVMGRANT); kept as a per-RNTI EMA. */
+void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db);
+/** T26c: the RNTI's SNR EMA once >= 3 measurements exist; false otherwise. */
+bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 

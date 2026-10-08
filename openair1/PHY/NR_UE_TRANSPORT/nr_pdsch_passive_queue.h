@@ -180,6 +180,8 @@ bool nr_pdsch_passive_queue_running(void);
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job);
 /// Push the producer's held-back slot batch (call at each occasion start / before stop).
 void nr_pdsch_passive_queue_flush(void);
+/** T26c: ring occupancy in percent (0 when not running), for producer-side admission of solver probes. */
+int nr_pdsch_passive_queue_fill_pct(void);
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 

@@ -813,6 +813,66 @@ static int nr_pdcch_dci11_stage2_enabled(void)
   return s_on;
 }
 /* T26b solver: the TDA index a layout reads (resolver offsets are immutable once published). */
+/* ---- T26c PDSCH admission (producer side, before the decode queue) -------------------------------------------------
+ * ISAC_PDSCH_SOLVER_PROBE_RATE=<probes per slot> (unset = off): blind-solver PROBES (CB0 of an unsolved/learning
+ *   RNTI's hypotheses) are admitted from a token bucket refilled in SIGNAL time (cap ISAC_PDSCH_SOLVER_PROBE_BURST,
+ *   default 8) and only while the decode ring is below ISAC_PDSCH_SOLVER_PROBE_FILL percent (default 50) -- the
+ *   solver searches at its own bounded rate and never crowds out the full decodes of solved RNTIs.
+ * ISAC_PDSCH_SNR_GATE=1: a FULL decode of a solved RNTI whose measured post-equalisation SNR EMA (EVMGRANT) is more
+ *   than ISAC_PDSCH_SNR_GATE_DB (default 3) below the AWGN requirement of the grant's MCS (10 log10(2^(SE/0.75)-1),
+ *   SE = Qm R) is skipped and counted skipped_snr (1 in 8 still decoded so the estimate keeps tracking).
+ * Every refused variant releases its solver pending entry at once (feedback without credit). */
+static bool pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
+{
+  static int init;
+  static double rate, burst, fill, margin;
+  static bool snr_gate;
+  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+  static double tokens;
+  static long last_abs = -1;
+  static uint64_t n_admit, n_throttle, n_full, n_skip_snr, n_explore;
+  if (!init) {
+    const char *e = getenv("ISAC_PDSCH_SOLVER_PROBE_RATE");
+    rate = e ? atof(e) : 0.0;
+    e = getenv("ISAC_PDSCH_SOLVER_PROBE_BURST");
+    burst = e ? atof(e) : 8.0;
+    e = getenv("ISAC_PDSCH_SOLVER_PROBE_FILL");
+    fill = e ? atof(e) : 50.0;
+    e = getenv("ISAC_PDSCH_SNR_GATE");
+    snr_gate = e && atoi(e) != 0;
+    e = getenv("ISAC_PDSCH_SNR_GATE_DB");
+    margin = e ? atof(e) : 3.0;
+    tokens = burst;
+    init = 1;
+  }
+  bool ok = true;
+  pthread_mutex_lock(&mu);
+  if (v->probe && rate > 0.0) {
+    if (last_abs >= 0 && abs_slot > last_abs) tokens += rate * (double)(abs_slot - last_abs);
+    if (abs_slot > last_abs) last_abs = abs_slot;
+    if (tokens > burst) tokens = burst;
+    if (tokens >= 1.0 && nr_pdsch_passive_queue_fill_pct() < fill) { tokens -= 1.0; n_admit++; }
+    else { ok = false; n_throttle++; }
+  } else if (!v->probe) {
+    n_full++;
+    float snr;
+    int qm, r2;
+    if (snr_gate && nr_pdsch_solver_snr(rnti, &snr) && nr_pdsch_solver_mcs_qr(v->table, mcs, &qm, &r2)) {
+      const double se = qm * r2 / 2048.0, req = 10.0 * log10(pow(2.0, se / 0.75) - 1.0);
+      if (snr + margin < req) {
+        if ((++n_explore % 8) != 0) { ok = false; n_skip_snr++; }
+      }
+    }
+  }
+  if (((n_admit + n_throttle + n_full) % 2000) == 0)
+    LOG_A(PHY, "SENSING: PDSCH_GATE probes admitted=%llu throttled=%llu fulls=%llu skipped_snr=%llu (ring fill %d%%)\n",
+          (unsigned long long)n_admit, (unsigned long long)n_throttle, (unsigned long long)n_full,
+          (unsigned long long)n_skip_snr, nr_pdsch_passive_queue_fill_pct());
+  pthread_mutex_unlock(&mu);
+  if (!ok) nr_pdsch_solver_feedback(v->token, false, false);
+  return ok;
+}
+
 static int solver_tda_of(void *ctx, uint16_t layout, nr_dci_bits_t payload)
 {
   (void)ctx;
@@ -7869,10 +7929,14 @@ constdiag_done:;
       /* run-time-discovered CSI-RS resources of this slot (blind CSI-RS search; nothing configured) */
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
       const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+      nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
       const int nv = nrd > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs, cfg->dmrs_typeA_position + 2,
                                                          sv_nrm > 0, rd, nrd, s_budget, var) : 0;
-      for (int v = 0; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
+      int v = 0;
+      for (; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
+        if (!pdsch_gate_admit(&var[v], out.rnti, o->mcs, source_absolute_slot))
+          continue;
         fapi_nr_dl_config_dlsch_pdu_rel15_t dl = dlsch_pdu;
         dl.dmrsConfigType    = o->dmrs_config_type ? NFAPI_NR_DMRS_TYPE2 : NFAPI_NR_DMRS_TYPE1;
         dl.n_dmrs_cdm_groups = o->n_dmrs_cdm_groups;
@@ -7903,12 +7967,16 @@ constdiag_done:;
         }
         freq_alloc_bitmap_t fa = set_bitmap_from_start_size(o->start_rb, o->num_rb);
         if (o->ra_type0) {
-          if (o->rbg_bwp_start != cfg->bwp_start || dl.BWPSize != cfg->bwp_size)
+          if (o->rbg_bwp_start != cfg->bwp_start || dl.BWPSize != cfg->bwp_size) {
+            nr_pdsch_solver_feedback(var[v].token, false, false);
             continue;
+          }
           fa.n_prb_list = (uint16_t)nr_ra_type0_prbs(o->rbg_bitmap, o->rbg_bwp_start, dl.BWPSize, o->rbg_size,
                                                      fa.prb_list, NR_PRB_SET_MAX);
-          if (fa.n_prb_list == 0 || !nr_pdsch_passive_alloc_normalise(&fa, dl.BWPSize))
+          if (fa.n_prb_list == 0 || !nr_pdsch_passive_alloc_normalise(&fa, dl.BWPSize)) {
+            nr_pdsch_solver_feedback(var[v].token, false, false);
             continue;
+          }
           dl.start_rb = (uint16_t)fa.first_rb;
           dl.number_rbs = (uint16_t)fa.num_rbs;
         } else {
@@ -7943,6 +8011,8 @@ constdiag_done:;
         if (!nr_pdsch_passive_queue_enqueue(&job))
           nr_pdsch_solver_feedback(var[v].token, false, false);
       }
+      for (; v < nv; v++) /* T26c: variants cut by pdsch_max_per_slot release their pending entry now */
+        nr_pdsch_solver_feedback(var[v].token, false, false);
       continue;
     }
     if (g_pdsch_sweep_on && !is_dci10) {
