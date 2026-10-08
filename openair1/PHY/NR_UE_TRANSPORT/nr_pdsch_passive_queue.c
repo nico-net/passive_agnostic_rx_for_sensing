@@ -50,7 +50,8 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
-#include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"         // T26b grant solver feedback
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"         // T26b grant solver feedback
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/LAYER2/NR_MAC_UE
@@ -942,6 +943,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const long slots_per_frame = fp->slots_per_frame;
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
+  {
+    const char *e = getenv("ISAC_PDSCH_INLINE_POOL");
+    nr_passive_tpool_inline = e && atoi(e) != 0;
+    if (nr_passive_tpool_inline)
+      LOG_A(PHY, "SENSING: passive PDSCH consumer %d runs FEP/chest/LDPC tasks inline (ISAC_PDSCH_INLINE_POOL)\n", idx);
+  }
 
   while (1) {
     nr_pdsch_passive_job_t job;
@@ -1497,11 +1504,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (dec.evm_valid && !job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
-                 "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u\n",
+                 "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
-            dec.br_snr_db[3], dec.evm_nbrx, job.solver_token);
+            dec.br_snr_db[3], dec.evm_nbrx, job.solver_token,
+            dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0);
       if (dec.evm_pct > 0.f) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
     }
     if (job.solver_token) {

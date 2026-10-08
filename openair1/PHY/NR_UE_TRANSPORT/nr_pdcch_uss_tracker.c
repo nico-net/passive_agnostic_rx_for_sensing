@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "common/utils/LOG/log.h"
 
 #define USS_TRACK_GEOMETRIES 16
@@ -254,6 +255,12 @@ static void *tracker_worker(void *unused)
     } else {
       affinity_rc = EINVAL;
     }
+  } else {
+    /* T26c: started from the scan consumer, the worker inherited its pinned core and time-shared it (replay top:
+     * pdcchUssHash 72 % + scan consumer 29 % of the one scan core). Default to the process's own affinity. */
+    cpu_set_t set;
+    if (sched_getaffinity(getpid(), sizeof(set), &set) == 0 && CPU_COUNT(&set) > 0)
+      affinity_rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
   pthread_setname_np(pthread_self(), "pdcchUssHash");
   LOG_A(PHY, "SENSING: USS_TRACK worker policy=SCHED_OTHER sched_rc=%d core=%d affinity_rc=%d\n",

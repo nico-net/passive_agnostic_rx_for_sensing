@@ -1636,6 +1636,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       double scale[4];
       for (int l = 0; l < nl; l++) scale[l] = sqrt(ideal_pow / (pw[l] / nv));
       double cr[NR_PDSCH_EVM_MAX_RX] = {0}, ci[NR_PDSCH_EVM_MAX_RX] = {0}, P[NR_PDSCH_EVM_MAX_RX] = {0}, Y[NR_PDSCH_EVM_MAX_RX] = {0};
+      double qr[4] = {0}, qi[4] = {0}, qd[4] = {0}, qx[4] = {0}; /* per-layer LS fit x = beta d (CPE diagnostic) */
       for (uint32_t i = 0; i < nb_re_pdsch; i++) {
         if (isnan(xr[0][i])) continue;
         double sr[4], sq_[4];
@@ -1646,6 +1647,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
           ea->err += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
           ea->ref += ideal_pow;
+          qr[l] += vi * si + vq * sq; qi[l] += vq * si - vi * sq; qd[l] += si * si + sq * sq; qx[l] += vi * vi + vq * vq;
           sr[l] = si / scale[l]; sq_[l] = sq / scale[l]; /* back in the channel's own units: one alpha per branch */
         }
         for (int a = 0; a < nb; a++) {
@@ -1662,6 +1664,11 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           Y[a] += (double)y.r * y.r + (double)y.i * y.i;
         }
       }
+      for (int l = 0; l < nl; l++) /* residual after the best per-symbol complex scale: |x|^2 - |<x,d>|^2/|d|^2 */
+        if (qd[l] > 0.0) {
+          const double r = qx[l] - (qr[l] * qr[l] + qi[l] * qi[l]) / qd[l];
+          ea->err_cpe += r > 0.0 ? r : 0.0;
+        }
       for (int a = 0; a < nb; a++) {
         if (P[a] <= 0.0) continue;
         const double sig = (cr[a] * cr[a] + ci[a] * ci[a]) / P[a];

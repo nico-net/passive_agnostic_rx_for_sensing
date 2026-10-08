@@ -3181,6 +3181,19 @@ with the diagnostic layout filter only; blind PDSCH does not converge inside 12 
 cudaFree in static destructors after CUDA teardown (fixed). Details, flags, OTA command:
 [T26 report](docs/superpowers/reports/csd/T26.md).
 
+### T26c — 64 UEs, PDSCH queue saturation, all CORESETs, EVM verdict (2026-10-08, csd/t26b)
+
+[MEASURED, DGX replay raw_pci415_12s_b at speed 1.0 -- replay runs at 0.05-0.09x real time] Live queue saturation (72 %
+stale) root cause: passive PDSCH consumers pushed FEP/chest/LDPC to the single `--thread-pool -1` worker (chest 85.6 ms
+wall vs 1.6 ms CPU); `ISAC_PDSCH_INLINE_POOL=1` + bounded solver probes (`ISAC_PDSCH_SOLVER_PROBE_RATE`), probe-last
+eviction and pending release -> PDSCHQ drops full/stale/narrow 0, max_lag <= 3, solver dropped 0. GB10 cores 5-9,15-19
+are X925 (big), 0-4,10-14 A725: scan/PDSCH consumers belong on big cores (t26c cfg). Second CORESET population needed
+`ISAC_PDCCH_JANON_ALL_CORESETS=1` + a dwell share under `ISAC_PDCCH_DED_BUDGET_US`. 15/18 RNTIs of nID 62922 solved
+(c9); the nID-10163 population (also 0xb876/0xe01e/0x13ae of the old capture) never passes a PDSCH CRC under default or
+any run-time nID ([HYPOTHESIS] co-channel neighbour cell). EVM: MCS >= 17 failures are SNR-limited (measured 3-10 dB
+below the AWGN need); MRC mode 3 not adopted (0 solves on the new capture). Scan p99 still 2-4 ms. MAX_UE/length
+contexts/solver/HARQ cache = 64. [T26 report §T26c](docs/superpowers/reports/csd/T26.md).
+
 ---
 
 ## 26. Working rules for any agent on this project (carried over from the old setup)

@@ -2,6 +2,8 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
+__thread bool nr_passive_tpool_inline; /* ISAC_PDSCH_INLINE_POOL, nr_passive_tpool.h */
 #include <math.h>
 #include <stdlib.h> // getenv (NVAR probe)
 #include "nr_common.h"
@@ -1538,7 +1540,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                                       .diag_request = nr_dl_chest_diag_request,
                                                       .ans = &chest_ans};
       task_t t = {.func = nr_pdsch_chest_ant_task, .args = &chest_tasks[aarx]};
-      pushTpool(&get_nrUE_params()->Tpool, t);
+      pushTpool(nr_passive_tpool(&get_nrUE_params()->Tpool), t);
     }
     join_task_ans(&chest_ans);
     /* nr_dl_chest_nvar_ant[] is __thread. The task wrote it into the POOL thread's copy; the reader
