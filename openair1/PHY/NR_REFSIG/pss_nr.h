@@ -63,6 +63,8 @@ typedef struct {
   bool fo_flag;
   int target_Nid_cell;
   c16_t *pssTime;
+  int window_center; /* RX recovery only: sample position in this frame */
+  int window_radius; /* zero keeps the original full-frame search */
 } pss_search_t;
 
 typedef struct {
@@ -78,5 +80,4 @@ void generate_pss_nr_time(int ofdm_symbol_size,
                           c16_t pssTime[ofdm_symbol_size]);
 void generate_pss_nr(const int N_ID_2, int16_t *pss);
 #endif /* PSS_NR_H */
-
 

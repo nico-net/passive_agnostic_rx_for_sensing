@@ -240,6 +240,8 @@ typedef struct {
   int numGscn;
   int rx_offset;
   openair0_timestamp_t capture_end;
+  openair0_timestamp_t pss_tick;
+  int fast_pss_position; /* -1 = ordinary full capture search */
 } syncData_t;
 
 extern _Atomic int nr_ue_cfo_resync_request; // set by the CFO trim loop (phy_procedures_nr_ue.c)
@@ -268,10 +270,25 @@ static void UE_synch(void *arg) {
     ret = sl_nr_slss_search(UE, &syncD->proc, SL_NR_SSB_REPETITION_IN_FRAMES);
   } else {
     nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
-    ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
+    if (syncD->fast_pss_position >= 0) {
+      LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d expected_pos=%d radius=%d\n",
+            UE->target_Nid_cell, syncD->gscnInfo[0].ssbFirstSC, syncD->fast_pss_position,
+            2 * fp->ofdm_symbol_size);
+      ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
+                                 syncD->fast_pss_position, 2 * fp->ofdm_symbol_size);
+      if (!ret.cell_detected) {
+        LOG_W(PHY, "SENSING: RX_RECOVER narrow PSS/SSS search missed; searching full capture\n");
+        ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
+      }
+    } else {
+      ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
+    }
   }
 
   if (ret.cell_detected) {
+    syncD->pss_tick = syncD->capture_end - (openair0_timestamp_t)2 * fp->samples_per_frame
+        + (openair0_timestamp_t)ret.frame_id * fp->samples_per_frame
+        + ret.ssb_offset + fp->nb_prefix_samples;
     syncD->rx_offset = ret.rx_offset;
     const int freq_offset = UE->common_vars.freq_offset; // frequency offset computed with pss in initial sync
     const int hw_slot_offset =
@@ -993,6 +1010,13 @@ void *UE_thread(void *arg)
   NR_UE_MAC_INST_t *mac = get_mac_inst(UE->Mod_id);
 
   bool syncRunning = false;
+  const bool rx_recover_on = getenv("ISAC_RX_RECOVER") && atoi(getenv("ISAC_RX_RECOVER")) != 0;
+  uint64_t rx_recover_epoch = 0;
+  long long rx_recover_gap = 0;
+  struct timespec rx_recover_start = {0};
+  int rx_recover_fast_tries = 0;
+  int rx_recover_old_target = -1;
+  openair0_timestamp_t rx_recover_last_pss_tick = 0;
   const int nb_slot_frame = fp->slots_per_frame;
   int absolute_slot = 0, decoded_frame_rx = MAX_FRAME_NUMBER - 1, trashed_frames = 0;
   int tx_wait_for_dlsch[NR_MAX_SLOTS_PER_FRAME];
@@ -1207,6 +1231,18 @@ void *UE_thread(void *arg)
             stream_status = STREAM_STATUS_UNSYNC;
             continue;
           }
+          if (rx_recover_on && rx_recover_start.tv_sec) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            const long long elapsed_ms = (now.tv_sec - rx_recover_start.tv_sec) * 1000LL
+                + (now.tv_nsec - rx_recover_start.tv_nsec) / 1000000LL;
+            LOG_W(PHY, "SENSING: RX_RECOVER epoch=%llu gap_samples=%lld resync_ms=%lld\n",
+                  (unsigned long long)rx_recover_epoch, rx_recover_gap, elapsed_ms);
+            rx_recover_start = (struct timespec){0};
+            UE->target_Nid_cell = rx_recover_old_target;
+          }
+          if (rx_recover_on)
+            rx_recover_last_pss_tick = syncMsg->pss_tick;
         }
         delNotifiedFIFO_elt(res);
         stream_status = STREAM_STATUS_UNSYNC;
@@ -1232,6 +1268,8 @@ void *UE_thread(void *arg)
     AssertFatal(!syncRunning, "At this point synchronization can't be running\n");
 
     if (!UE->is_synchronized) {
+      if (rx_recover_on && rx_recover_start.tv_sec && ++rx_recover_fast_tries > 2)
+        UE->target_Nid_cell = rx_recover_old_target; /* full search fallback */
       /* Acquisition consumes frames outside the slot-read accounting. Never compare
        * a new lock against the final timestamp of the previous lock. */
       nr_rx_continuity_reset(&rx_continuity);
@@ -1258,6 +1296,14 @@ void *UE_thread(void *arg)
       syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(Msg);
       *syncMsg = (syncData_t){0};
       syncMsg->capture_end = sync_timestamp + get_samples_per_slot(fp->slots_per_subframe - 1, fp);
+      syncMsg->fast_pss_position = -1;
+      if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries <= 2
+          && rx_recover_last_pss_tick) {
+        const long long capture_start = (long long)syncMsg->capture_end - (long long)2 * fp->samples_per_frame;
+        const long long period = fp->samples_per_frame;
+        const long long delta = (long long)rx_recover_last_pss_tick - capture_start;
+        syncMsg->fast_pss_position = (int)((delta % period + period) % period);
+      }
       if (auto_timing && auto_anchor_valid) {
         // The second timing observation searches only the SSB just measured OTA.
         syncMsg->gscnInfo[0] = auto_anchor_ssb;
@@ -1616,10 +1662,22 @@ void *UE_thread(void *arg)
     // timestamp is accumulated in rx_samples_consumed and only committed at the end of the reads.
     static long s_rxts_prev_consumed = 0;
     static long s_rxts_discont_total = 0;
+    static uint64_t (*ring_epoch_get)(void) = NULL;
+    static int ring_epoch_checked = 0;
+    static uint64_t ring_epoch_seen = 0;
+    static bool ring_epoch_seen_valid = false;
+    if (rx_recover_on && !ring_epoch_checked) {
+      ring_epoch_get = dlsym(RTLD_DEFAULT, "isac_usrp_ring_epoch");
+      ring_epoch_checked = 1;
+    }
+    const uint64_t ring_epoch_now = ring_epoch_get ? ring_epoch_get() : 0;
+    const bool ring_epoch_changed = rx_recover_on && ring_epoch_seen_valid && ring_epoch_now != ring_epoch_seen;
+    ring_epoch_seen = ring_epoch_now;
+    ring_epoch_seen_valid = true;
     long rx_samples_consumed = 0;
     if (rx_continuity.valid) {
       const openair0_timestamp_t expected = rx_continuity.next_timestamp;
-      if (!nr_rx_continuity_check(&rx_continuity, rx_timestamp)) {
+      if (ring_epoch_changed || !nr_rx_continuity_check(&rx_continuity, rx_timestamp)) {
         // ---- RF DISCONTINUITY => INVALIDATE SYNCHRONISATION (2026-08-06) --------------------
         // Measured root cause: at 4x122.88 MS/s the host periodically fails to consume samples
         // fast enough, UHD overflows and the stream resumes SECONDS later. OAI previously advanced
@@ -1648,6 +1706,14 @@ void *UE_thread(void *arg)
         if (s_disc_invalidate < 0)
           s_disc_invalidate = (getenv("ISAC_DISC_NO_RESYNC") && atoi(getenv("ISAC_DISC_NO_RESYNC"))) ? 0 : 1;
         if (s_disc_invalidate && UE->is_synchronized) {
+          if (rx_recover_on) {
+            rx_recover_epoch++;
+            rx_recover_gap = jump;
+            clock_gettime(CLOCK_MONOTONIC, &rx_recover_start);
+            rx_recover_fast_tries = 0;
+            rx_recover_old_target = UE->target_Nid_cell;
+            UE->target_Nid_cell = UE->frame_parms.Nid_cell;
+          }
           UE->is_synchronized = 0;
           stream_status = STREAM_STATUS_UNSYNC;
           UE->max_pos_acc = 0;
@@ -1662,10 +1728,14 @@ void *UE_thread(void *arg)
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
           /* Legacy fieldbook owns its local epoch; reconf uses only the drained central listener. */
-          if (!nr_cfg_reconf_enabled())
+          if (!nr_cfg_reconf_enabled() && !rx_recover_on)
             nr_pdsch_config_sweep_fieldbook_bump_epoch();
-          if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled())
-            nr_cfg_epoch_note_continuity_loss_samples(jump, fp->samples_per_subframe);
+          if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
+            if (rx_recover_on)
+              nr_cfg_epoch_note_rx_recovery();
+            else
+              nr_cfg_epoch_note_continuity_loss_samples(jump, fp->samples_per_subframe);
+          }
           /* No RX/TX job has been allocated for this slot yet. Dispatching it would
            * feed invalid samples to discovery and overwrite UNSYNC with SYNCED below. */
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()))

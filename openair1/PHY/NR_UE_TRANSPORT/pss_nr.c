@@ -216,7 +216,11 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
     int64_t peak_value = 0;
     int peak_position = 0;
     int64_t avg = 0;
-    for (int n = 0; n < p->rxdata_length; n += 4) { //
+    const int first = p->window_radius > 0 ? max(0, (p->window_center - p->window_radius) & ~3) : 0;
+    const int end = p->window_radius > 0 ? min(p->rxdata_length, p->window_center + p->window_radius + 1) : p->rxdata_length;
+    int positions = 0;
+    for (int n = first; n < end; n += 4) { //
+      positions++;
       int64_t pss_corr_ue = 0;
       /* calculate dot product of primary_synchro_time_nr and rxdata[ar][n]
        * (ar=0..nb_ant_rx) and store the sum in temp[n]; */
@@ -239,7 +243,7 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
       }
     }
 
-    avg /= (p->rxdata_length / 4);
+    avg /= p->window_radius > 0 ? (positions ? positions : 1) : (p->rxdata_length / 4);
     bool pss_not_found = (p->target_Nid_cell == -1 && peak_value < 5 * avg) 
                          || peak_position < p->nb_prefix_samples;
     pss_info.pss_elem_info[pss_count] = (pss_detection_result_t){

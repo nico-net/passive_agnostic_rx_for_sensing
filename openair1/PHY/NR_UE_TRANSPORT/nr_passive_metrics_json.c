@@ -2,6 +2,7 @@
 #include "nr_passive_metrics.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Keys of td_cb0_inadmissible: nr_td_cb0_reason_name order (nr_td_cb0_sched.h, NR_TD_CB0_R_*). */
 static const char *const kCb0Reason[16] = {"not_new_rv0", "gated",      "iq_stale", "lbrm",    "rv_retry", "prg_ptrs",
@@ -176,6 +177,10 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   if (m->csirs_disc_readmit_skipped)
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
-  const int z = snprintf(buf + w, n - (size_t)w, "%s}", discovery);
+  char traffic[128] = "";
+  if (getenv("ISAC_USRP_RING_TRAFFIC_METRICS"))
+    snprintf(traffic, sizeof(traffic), ",\"usrp_ring_copy_bytes\":%" PRIu64 ",\"usrp_ring_direct_bytes\":%" PRIu64,
+             m->usrp_ring_copy_bytes, m->usrp_ring_direct_bytes);
+  const int z = snprintf(buf + w, n - (size_t)w, "%s%s}", discovery, traffic);
   return (z < 0 || (size_t)z >= n - (size_t)w) ? -1 : w + z;
 }

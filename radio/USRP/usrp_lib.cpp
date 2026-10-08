@@ -50,6 +50,8 @@
 #include <algorithm>
 
 #include "openair1/PHY/sse_intrin.h"
+#include "usrp_ring_view.h"
+#include "usrp_ring_recovery.h"
 
 /** @addtogroup _USRP_PHY_RF_INTERFACE_
  * @{
@@ -687,6 +689,9 @@ typedef struct {
   size_t ring_cap = 0;                          // samples per channel
   std::atomic<uint64_t> ring_written{0};        // samples produced (per channel)
   std::atomic<uint64_t> ring_read{0};           // samples consumed
+  std::atomic<uint64_t> ring_epoch_start{0};    // first sample after a recovered stream fault
+  std::atomic<uint64_t> ring_epoch{0};
+  std::atomic<long long> ring_epoch_t0_ticks{0};
   std::atomic<bool> ring_stop{false};
   std::atomic<int> ring_err{0};                 // 0 ok, 1 UHD error, 2 ring overrun, 3 exception
   long long ring_t0_ticks = 0;                  // first hardware timestamp (sample-rate ticks)
@@ -998,6 +1003,27 @@ static int usrp_restart_max(void)
   }
   return m;
 }
+static bool usrp_rx_recover(void)
+{
+  static const bool enabled = [] { const char *e = getenv("ISAC_RX_RECOVER"); return e && atoi(e) != 0; }();
+  return enabled;
+}
+static std::atomic<uint64_t> g_ring_copy_bytes{0}, g_ring_direct_bytes{0};
+static std::atomic<uint64_t> g_ring_discontinuity_epoch{0};
+extern "C" __attribute__((visibility("default"))) uint64_t isac_usrp_ring_epoch(void)
+{
+  return g_ring_discontinuity_epoch.load(std::memory_order_acquire);
+}
+extern "C" __attribute__((visibility("default"))) void isac_usrp_ring_traffic(uint64_t *copied, uint64_t *direct)
+{
+  *copied = g_ring_copy_bytes.load(std::memory_order_relaxed);
+  *direct = g_ring_direct_bytes.load(std::memory_order_relaxed);
+}
+static int usrp_rx_recover_max(void)
+{
+  static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
+  return limit;
+}
 static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
 {
   if (w < (uint64_t)s->sample_rate)
@@ -1038,34 +1064,82 @@ static void usrp_ring_producer(usrp_state_t *s)
   std::vector<void *> ptr(nch);
   uhd::rx_metadata_t md;
   bool started = false;
-  const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  bool recovering = false;
+  usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max());
+  auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (!s->ring_stop.load(std::memory_order_relaxed) && !s->rx_stop_requested.load(std::memory_order_relaxed)) {
-    const uint64_t w = s->ring_written.load(std::memory_order_relaxed);
+    const uint64_t w = recovery.write_index;
     const size_t pos = w % s->ring_cap;
     const size_t n = std::min(chunk, s->ring_cap - pos);
-    if (w + n - s->ring_read.load(std::memory_order_acquire) > s->ring_cap) {
-      s->ring_err_md = md;
-      s->ring_err.store(2);
-      break;
-    }
+    const bool overrun = w + n - std::max(s->ring_read.load(std::memory_order_acquire),
+                                         s->ring_epoch_start.load(std::memory_order_acquire)) > s->ring_cap;
     for (size_t c = 0; c < nch; c++)
       ptr[c] = s->ring[c].data() + pos;
     size_t got = 0;
-    try {
-      got = s->rx_stream->recv(ptr, n, md, 0.1, !started);
-    } catch (const std::exception &ex) {
-      LOG_E(HW, "SENSING: USRP_RING recv exception at sample %llu: %s\n", (unsigned long long)w, ex.what());
-      s->ring_err.store(3);
-      break;
-    } catch (...) {
-      LOG_E(HW, "SENSING: USRP_RING recv exception (non-std) at sample %llu\n", (unsigned long long)w);
-      s->ring_err.store(3);
-      break;
+    int fault = overrun ? 2 : 0;
+    if (!fault) {
+      try {
+        got = s->rx_stream->recv(ptr, n, md, 0.1, !started);
+      } catch (const std::exception &ex) {
+        LOG_E(HW, "SENSING: USRP_RING recv exception at sample %llu: %s\n", (unsigned long long)w, ex.what());
+        fault = 3;
+      } catch (...) {
+        LOG_E(HW, "SENSING: USRP_RING recv exception (non-std) at sample %llu\n", (unsigned long long)w);
+        fault = 3;
+      }
     }
-    if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT && !started
+    if (!fault && md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT && !started
         && std::chrono::steady_clock::now() < start_deadline)
       continue;
-    if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+    if (!fault && md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE)
+      fault = 1;
+    if (!fault && got && !started && !md.has_time_spec)
+      fault = 1;
+    if (fault) {
+      if (usrp_rx_recover()) {
+        /* Keep the logical write index monotonic. The reader skips to this boundary and
+         * gets the new hardware timestamp on the first packet of the restarted stream. */
+        s->ring_restarting.store(true, std::memory_order_release);
+        s->ring_epoch_start.store(w, std::memory_order_release);
+        s->ring_cv.notify_all();
+        if (recovery.fault()) {
+          recovering = true;
+          started = false;
+          bool restarted = false;
+          try {
+            uhd::stream_cmd_t stop(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+            stop.stream_now = true;
+            s->rx_stream->issue_stream_cmd(stop);
+            uhd::rx_metadata_t dmd;
+            for (int k = 0; k < 200 && !s->rx_stop_requested.load() && !s->ring_stop.load(); k++) {
+              if (s->rx_stream->recv(ptr, n, dmd, 0.002, false) == 0)
+                break;
+            }
+            if (!s->rx_stop_requested.load() && !s->ring_stop.load()) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(std::min(640, 10 << std::min(recovery.failures - 1, 6))));
+              if (!s->rx_stop_requested.load() && !s->ring_stop.load()) {
+                uhd::stream_cmd_t again(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+                again.stream_now = true; /* avoids get_time_now() control read after CTRLEP failure */
+                s->rx_stream->issue_stream_cmd(again);
+                restarted = true;
+              }
+            }
+          } catch (const std::exception &ex) {
+            LOG_W(HW, "SENSING: USRP_RING recovery attempt %d failed: %s\n", recovery.failures, ex.what());
+          } catch (...) {
+            LOG_W(HW, "SENSING: USRP_RING recovery attempt %d failed\n", recovery.failures);
+          }
+          if (restarted) {
+            start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            LOG_W(HW, "SENSING: USRP_RING_RECOVER attempt=%d reason=%d epoch=%llu index=%llu\n",
+                  recovery.failures, fault, (unsigned long long)(recovery.epoch + 1), (unsigned long long)w);
+            continue;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(std::min(1000, 10 << std::min(recovery.failures, 6))));
+          continue;
+        }
+        s->ring_restarting.store(false);
+      }
       /* START-UP RESTART. MEASURED 2026-10-06 (X410 34B2AF1, DPDK, 4 x 122.88 MS/s): about half of the
        * stream starts hit ERROR_CODE_OVERFLOW (Out of sequence) within the first few packets, after
        * which RFNoC halts the stream (X3) and the receiver used to give up. Within the first second
@@ -1073,7 +1147,7 @@ static void usrp_ring_producer(usrp_state_t *s)
        * counting so the samples handed downstream stay contiguous in index (the gap lands before
        * any acquisition). After the first second an error still fails loudly. */
       static int s_restarts = 0;
-      if (usrp_restart_allowed(s, w) && s_restarts < usrp_restart_max()
+      if (!usrp_rx_recover() && fault == 1 && usrp_restart_allowed(s, w) && s_restarts < usrp_restart_max()
           && md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) { /* overflow/sequence, late START (EOB) */
         s_restarts++;
         s->ring_restarting.store(true);
@@ -1102,7 +1176,7 @@ static void usrp_ring_producer(usrp_state_t *s)
         continue;
       }
       s->ring_err_md = md;
-      s->ring_err.store(1);
+      s->ring_err.store(fault);
       break;
     }
     if (!got)
@@ -1113,10 +1187,20 @@ static void usrp_ring_producer(usrp_state_t *s)
         s->ring_err.store(1);
         break;
       }
-      s->ring_t0_ticks = md.time_spec.to_ticks(s->sample_rate);
+      if (recovering) {
+        s->ring_epoch_t0_ticks.store(md.time_spec.to_ticks(s->sample_rate) - (long long)w, std::memory_order_relaxed);
+        recovery.first_packet();
+        s->ring_epoch.store(recovery.epoch, std::memory_order_release);
+        g_ring_discontinuity_epoch.fetch_add(1, std::memory_order_release);
+        s->ring_restarting.store(false, std::memory_order_release);
+        recovering = false;
+      } else {
+        s->ring_t0_ticks = md.time_spec.to_ticks(s->sample_rate);
+      }
       started = true;
     }
-    s->ring_written.store(w + got, std::memory_order_release);
+    recovery.samples(got);
+    s->ring_written.store(recovery.write_index, std::memory_order_release);
     s->ring_cv.notify_one();
   }
   s->ring_cv.notify_all();
@@ -1152,6 +1236,9 @@ static void usrp_ring_start(usrp_state_t *s)
   const size_t cap = s->ring_cap;
   s->ring_written.store(0);
   s->ring_read.store(0);
+  s->ring_epoch_start.store(0);
+  s->ring_epoch.store(0);
+  s->ring_restarting.store(false);
   s->ring_err.store(0);
   s->ring_stop.store(false);
   if (nr_core_plan_active()) {
@@ -1794,6 +1881,10 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
       + std::chrono::seconds(first_buffer ? 3 : 1);
   uhd::rx_metadata_t first_metadata;
   std::vector<void *> pointers(cc);
+  const bool ring_active = s->ring_thread.joinable() || s->planned_ring_started;
+  static const bool ring_direct_enabled = [] { const char *e = getenv("ISAC_USRP_RING_ZEROCOPY"); return e && atoi(e) != 0; }();
+  const bool ring_direct = ring_active && ring_direct_enabled && decim == 1;
+  uint64_t ring_r = 0;
   auto receive_failure = [&](const char *reason) {
     s->rx_stop_requested.store(true);
     if (nr_shutdown_request)
@@ -1803,14 +1894,23 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
           s->rx_md.to_pp_string(true).c_str());
     return -1; // never publish a partial/invalid buffer or a fabricated timestamp
   };
-  if (s->ring_thread.joinable() || s->planned_ring_started) {
+ring_read_retry:
+  if (ring_active) {
     /* Decoupled ring (usrp_ring_producer): wait for recv_target samples, copy them out. The
      * timestamp is the first hardware timestamp plus the sample index (contiguity is guaranteed by
      * the producer, which stops on any UHD error or ring overrun). */
-    const uint64_t r = s->ring_read.load(std::memory_order_relaxed);
+    uint64_t r = s->ring_read.load(std::memory_order_relaxed);
     {
       std::unique_lock<std::mutex> lk(s->ring_mu);
-      while (s->ring_written.load(std::memory_order_acquire) - r < (uint64_t)recv_target) {
+      for (;;) {
+        const uint64_t boundary = s->ring_epoch_start.load(std::memory_order_acquire);
+        if (usrp_rx_recover() && r < boundary) {
+          r = boundary;
+          s->ring_read.store(r, std::memory_order_release);
+        }
+        if ((!usrp_rx_recover() || !s->ring_restarting.load(std::memory_order_acquire))
+            && s->ring_written.load(std::memory_order_acquire) - r >= (uint64_t)recv_target)
+          break;
         if (s->ring_restarting.load()) /* a pre-sync stream restart is in progress: wait for it, not the deadline */
           deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         if (s->ring_err.load() || s->rx_stop_requested.load() || std::chrono::steady_clock::now() >= deadline)
@@ -1820,7 +1920,8 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     }
     if (s->rx_stop_requested.load())
       return -1;
-    if (s->ring_written.load(std::memory_order_acquire) - r < (uint64_t)recv_target) {
+    if ((usrp_rx_recover() && s->ring_restarting.load(std::memory_order_acquire))
+        || s->ring_written.load(std::memory_order_acquire) - r < (uint64_t)recv_target) {
       const int e = s->ring_err.load();
       s->rx_md = s->ring_err_md;
       return receive_failure(e == 2   ? "ring overrun (PHY slower than the radio)"
@@ -1852,17 +1953,25 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     const int nch = std::min<int>(cc, (int)s->ring.size());
     const size_t pos = r % s->ring_cap;
     const size_t n1 = std::min<size_t>(recv_target, s->ring_cap - pos);
-    for (int i = 0; i < nch; i++) {
-      memcpy((int32_t *)buff_tmp[i], s->ring[i].data() + pos, n1 * sizeof(int32_t));
-      if ((size_t)recv_target > n1)
-        memcpy((int32_t *)buff_tmp[i] + n1, s->ring[i].data(), (recv_target - n1) * sizeof(int32_t));
+    if (!ring_direct) {
+      for (int i = 0; i < nch; i++) {
+        memcpy((int32_t *)buff_tmp[i], s->ring[i].data() + pos, n1 * sizeof(int32_t));
+        if ((size_t)recv_target > n1)
+          memcpy((int32_t *)buff_tmp[i] + n1, s->ring[i].data(), (recv_target - n1) * sizeof(int32_t));
+      }
+      g_ring_copy_bytes.fetch_add((uint64_t)recv_target * nch * sizeof(int32_t), std::memory_order_relaxed);
     }
     first_metadata = uhd::rx_metadata_t();
     first_metadata.has_time_spec = true;
-    first_metadata.time_spec = uhd::time_spec_t::from_ticks(s->ring_t0_ticks + (long long)r, s->sample_rate);
+    const uint64_t epoch = s->ring_epoch.load(std::memory_order_acquire);
+    const long long t0 = epoch && r >= s->ring_epoch_start.load(std::memory_order_acquire)
+                             ? s->ring_epoch_t0_ticks.load(std::memory_order_relaxed) : s->ring_t0_ticks;
+    first_metadata.time_spec = uhd::time_spec_t::from_ticks(t0 + (long long)r, s->sample_rate);
     first_metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_NONE;
     samples_received = recv_target;
-    s->ring_read.store(r + recv_target, std::memory_order_release);
+    ring_r = r;
+    if (!ring_direct)
+      s->ring_read.store(r + recv_target, std::memory_order_release);
   } else
   while (samples_received < recv_target) {
     if (s->rx_stop_requested.load())
@@ -2032,6 +2141,12 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
   }
   for (int i=0; i<cc; i++) {
     const int src = (s_map[i] >= 0 && s_map[i] < cc) ? s_map[i] : i;
+    if (ring_direct) {
+      const int32_t *ring_src = s->ring[src].data();
+      const size_t start = ring_r % s->ring_cap;
+      usrp_ring_shift_window(ring_src, s->ring_cap, start, (int32_t *)buff[i], nsamps, rxshift);
+      continue;
+    }
     for (int j = 0; j < nsamps2; j++) {
       // bring RX data into 12 LSBs for softmodem RX,
       // this keeps the significant bits of B210 and may loose better ADC results,
@@ -2045,6 +2160,14 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
       }
     }
   }
+  if (ring_active && usrp_rx_recover()
+      && (s->ring_restarting.load(std::memory_order_acquire)
+          || s->ring_epoch_start.load(std::memory_order_acquire) > ring_r))
+    goto ring_read_retry; /* a fault overtook conversion: discard this slot */
+  if (ring_direct) {
+    g_ring_direct_bytes.fetch_add((uint64_t)nsamps * cc * sizeof(int32_t), std::memory_order_relaxed);
+    s->ring_read.store(ring_r + recv_target, std::memory_order_release);
+  }
 
   if (logical_received < nsamps) {
     LOG_E(HW,"[recv] received %d samples out of %d\n",logical_received,nsamps);
@@ -2054,7 +2177,7 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     LOG_E(HW, "%s\n", s->rx_md.to_pp_string(true).c_str());
 
   s->rx_count += nsamps;
-  if (s->rx_ts_frozen) {
+  if (s->rx_ts_frozen && (!ring_active || !usrp_rx_recover())) {
     const double raw_rate = s->sample_rate * decim;
     if (first_buffer || s->rx_ts_next_ticks < 0)
       s->rx_ts_next_ticks = first_metadata.time_spec.to_ticks(raw_rate);

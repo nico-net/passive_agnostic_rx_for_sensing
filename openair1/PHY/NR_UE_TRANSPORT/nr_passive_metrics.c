@@ -49,6 +49,10 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   *m = (nr_passive_metrics_t){0};
+  if (getenv("ISAC_USRP_RING_TRAFFIC_METRICS")) {
+    void (*traffic)(uint64_t *, uint64_t *) = dlsym(RTLD_DEFAULT, "isac_usrp_ring_traffic");
+    if (traffic) traffic(&m->usrp_ring_copy_bytes, &m->usrp_ring_direct_bytes);
+  }
   if (nr_pdcch_nid_capture_metrics) {
     float noise;
     nr_pdcch_nid_capture_metrics(&m->nid_capture_offered, &m->nid_capture_taken, &m->nid_capture_skipped_empty, &noise);

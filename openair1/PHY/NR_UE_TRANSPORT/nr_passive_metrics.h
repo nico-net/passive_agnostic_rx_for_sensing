@@ -74,6 +74,7 @@ typedef struct {
   double gpu_budget_used_pct;
   uint64_t discovery_yields, rt_gpu_wait_max_us, rt_gpu_fallbacks, discovery_overruns;
   uint64_t csirs_disc_readmit_skipped;
+  uint64_t usrp_ring_copy_bytes, usrp_ring_direct_bytes;
   uint64_t csirs_time_to_confirm_slots_last, csirs_time_to_confirm_slots_sum;
   uint32_t csirs_confirm_resource_count;
   uint64_t csirs_confirm_resource_key[NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX];
