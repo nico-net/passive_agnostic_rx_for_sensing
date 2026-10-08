@@ -1,3 +1,8 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* T26c: CPU_SET / sched_getaffinity for the janon worker */
+#endif
+#include <sched.h>
+#include <unistd.h>
 #include "PHY/TOOLS/nr_gpu_platform.h"
 #include "nr_srs_passive.h"
 #include "nr_passive_cfg_epoch.h"
@@ -2228,6 +2233,22 @@ static void *janon_worker(void *arg)
 {
   (void)arg;
   static janon_item_t it;
+  { /* T26c: created from the scan consumer it inherited that thread's core and RT priority, so the background
+     * search time-shared the scan core (live/replay: scan 70 % + janon 25 % on one core). Run it SCHED_OTHER on
+     * ISAC_PDCCH_JOINT_ANON_CORE when set, else on the process's own (main thread) affinity. */
+    struct sched_param sp = {0};
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    const char *ce = getenv("ISAC_PDCCH_JOINT_ANON_CORE");
+    if (ce && *ce && atoi(ce) >= 0 && atoi(ce) < CPU_SETSIZE)
+      CPU_SET(atoi(ce), &set);
+    else if (sched_getaffinity(getpid(), sizeof(set), &set) != 0)
+      CPU_ZERO(&set);
+    if (CPU_COUNT(&set) > 0)
+      pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+    pthread_setname_np(pthread_self(), "pdcchJanon");
+  }
   for (;;) {
     pthread_mutex_lock(&g_janon_mu);
     while (g_janon_n == 0)

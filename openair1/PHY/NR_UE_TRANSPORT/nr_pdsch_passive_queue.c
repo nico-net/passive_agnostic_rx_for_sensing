@@ -50,7 +50,8 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
-#include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"         // T26b grant solver feedback
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"         // T26b grant solver feedback
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/LAYER2/NR_MAC_UE
@@ -942,6 +943,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const long slots_per_frame = fp->slots_per_frame;
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
+  {
+    const char *e = getenv("ISAC_PDSCH_INLINE_POOL");
+    nr_passive_tpool_inline = e && atoi(e) != 0;
+    if (nr_passive_tpool_inline)
+      LOG_A(PHY, "SENSING: passive PDSCH consumer %d runs FEP/chest/LDPC tasks inline (ISAC_PDSCH_INLINE_POOL)\n", idx);
+  }
 
   while (1) {
     nr_pdsch_passive_job_t job;

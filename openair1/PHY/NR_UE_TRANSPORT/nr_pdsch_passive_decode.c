@@ -44,6 +44,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include <math.h>
 #include <pthread.h> // sqrt/floor/log10 (EQDIAG)
 #include "nr_pdsch_evm_acc.h"
+#include "nr_passive_tpool.h"
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
 
@@ -1357,7 +1358,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   nrLDPC_slot_decoding_parameters_t slot_parameters = {.frame = proc->frame_rx,
                                                        .slot = proc->nr_slot_rx,
                                                        .nb_TBs = 1,
-                                                       .threadPool = &get_nrUE_params()->Tpool,
+                                                       .threadPool = nr_passive_tpool(&get_nrUE_params()->Tpool),
                                                        .TBs = &TB_parameters};
 
   h->processedSegments = 0;
@@ -2429,7 +2430,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                   .rxdata = nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata),
                                                   .ans = &fep_ans};
         task_t t = {.func = nr_slot_fep_ant_task, .args = &fep_tasks[ant]};
-        pushTpool(&get_nrUE_params()->Tpool, t);
+        pushTpool(nr_passive_tpool(&get_nrUE_params()->Tpool), t);
       }
       join_task_ans(&fep_ans);
     }
