@@ -109,6 +109,9 @@ int main(int argc,char **argv) {
   const auto *ops=get();if(!ops || ops->abi!=NR_PDCCH_NID_ABI)return 2;
   nr_pdcch_nid_iq_t *staging=nullptr;
   void *ctx=ops->create(b.cfg.nsc/12,b.cfg.dur,1,&staging);if(!ctx)return 2;
+  if(const char *budget=getenv("ISAC_GPU_BUDGET"))if(!strcmp(budget,"1")) {
+   auto seal=(void(*)())dlsym(lib,"nr_gpu_rx_started");if(!seal)return 2;seal();
+  }
   size_t bytes=(size_t)336*b.cfg.dur*b.cfg.nsc*sizeof(*staging);
   memcpy(staging,b.iq,bytes);b.iq=staging;
   auto stats=(void(*)(uint64_t*,uint64_t*))dlsym(lib,"nr_dl_gpu_memory_stats");
