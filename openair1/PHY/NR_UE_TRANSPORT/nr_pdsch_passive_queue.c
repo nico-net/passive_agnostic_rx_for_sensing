@@ -373,6 +373,41 @@ static _Atomic uint64_t g_crc_ok        = 0;
 #define NR_DL_DMRS_NSCID 2
 /* Two windows per nSCID, stage 1 always on, stage 2 throttled and capped: nr_dmrs_id_2stage_t
  * (final review I5; measured 170360 us per stage-2 accumulate vs ~2 ms for stage 1). */
+/* T26c ISAC_PDSCH_DMRS_ID_PER_CORESET: one blind DM-RS identity estimator per discovered CORESET population */
+typedef struct { int key; int decided; bool used; pthread_mutex_t mu; nr_dmrs_id_2stage_t est; } coreset_dmrs_t;
+static coreset_dmrs_t g_cs_dmrs[8];
+static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool per_coreset_dmrs_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET") && atoi(getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET")) ? 1 : 0;
+  return en == 1;
+}
+static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
+{
+  pthread_mutex_lock(&g_cs_dmrs_mu);
+  coreset_dmrs_t *r = NULL;
+  for (int i = 0; i < 8 && !r; i++)
+    if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key) r = &g_cs_dmrs[i];
+  for (int i = 0; i < 8 && !r; i++)
+    if (!g_cs_dmrs[i].used) {
+      r = &g_cs_dmrs[i];
+      r->used = true; r->key = key; r->decided = -1;
+      pthread_mutex_init(&r->mu, NULL);
+      char label[32];
+      snprintf(label, sizeof(label), "PDSCH-cs%d", key);
+      nr_dmrs_id_2stage_init(&r->est, strdup(label), pci);
+      r->est.s1_grants = UINT32_MAX; /* stage 1 (0..1023: every PCI) only -- a stage-2 evaluation stalls a consumer ~170 ms */
+    }
+  pthread_mutex_unlock(&g_cs_dmrs_mu);
+  return r;
+}
+int nr_pdsch_passive_coreset_dmrs_id(int key)
+{
+  for (int i = 0; i < 8; i++)
+    if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key) return __atomic_load_n(&g_cs_dmrs[i].decided, __ATOMIC_ACQUIRE);
+  return -1;
+}
 static nr_dmrs_id_2stage_t g_dl_dmrs_id[NR_DL_DMRS_NSCID];
 static bool g_dl_dmrs_id_init[NR_DL_DMRS_NSCID];
 static pthread_mutex_t g_dl_dmrs_id_lock[NR_DL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
@@ -1706,6 +1741,25 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * estimator's signature change (nr_pdcch_gap_dmrs2 fix), and left inconsistent with type 1
          * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
          * this comment for the full reasoning. */
+        if (credit_ok && job.solver_token && job.coreset_key >= 0 && pr_nrb > 0 && pdu->dlDmrsSymbPos && per_coreset_dmrs_on()) {
+          /* T26c: the same blind DM-RS identity estimator, per discovered CORESET population */
+          coreset_dmrs_t *cd = coreset_dmrs_slot(job.coreset_key, ue->frame_parms.Nid_cell);
+          if (cd && __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) < 0 && pthread_mutex_trylock(&cd->mu) == 0) {
+            const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+            const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+            const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
+            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
+            if (nr_dmrs_id_2stage_accumulate(&cd->est, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                             start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
+                                             job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType)) {
+              const int id = nr_dmrs_id_2stage_decided(&cd->est);
+              __atomic_store_n(&cd->decided, id, __ATOMIC_RELEASE);
+              LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d PDSCH DM-RS id DECIDED %d (cell %d)\n", job.coreset_key, id,
+                    fp->Nid_cell);
+            }
+            pthread_mutex_unlock(&cd->mu);
+          }
+        }
         const int dl_ns = pdu->nscid & 1;
         if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {

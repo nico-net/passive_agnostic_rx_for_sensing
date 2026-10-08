@@ -8019,7 +8019,12 @@ constdiag_done:;
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
       uint16_t sv_alt[16];
       int sv_nalt = 0;
-      if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
+      if (cfg->discovered_coreset) { /* T26c: this CORESET's blind-decided PDSCH DM-RS id first, when it differs from the cell's */
+        const int did = nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id);
+        if (did >= 0 && did != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)did;
+      }
+      if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
+          && (sv_nalt == 0 || sv_alt[0] != cfg->coreset_pdcch_dmrs_scrambling_id))
         sv_alt[sv_nalt++] = (uint16_t)cfg->coreset_pdcch_dmrs_scrambling_id;
       for (int b = 0; b < nr_pdcch_coreset_bank_count() && sv_nalt < 8; b++) { /* the other run-time CORESET nIDs */
         const nr_pdcch_blind_monitor_cfg_t *bc = nr_pdcch_coreset_bank_cfg(b);
@@ -8141,6 +8146,7 @@ constdiag_done:;
         job.dci_abs_slot = abs_slot;
         job.layout_probe = var[v].probe;
         job.solver_token = var[v].token;
+        job.coreset_key = cfg->discovered_coreset ? (int32_t)cfg->coreset_pdcch_dmrs_scrambling_id : -1;
         decodes_this_occasion++;
         if (!nr_pdsch_passive_queue_enqueue(&job))
           nr_pdsch_solver_feedback(var[v].token, false, false);
