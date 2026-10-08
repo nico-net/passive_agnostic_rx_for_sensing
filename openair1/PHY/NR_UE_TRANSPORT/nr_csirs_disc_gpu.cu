@@ -328,7 +328,7 @@ __global__ static void fep_extract(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_di
 
 template<class T> struct Buffer {
   T *p=nullptr;size_t capacity=0;
-  ~Buffer() {cudaFree(p);}
+  ~Buffer() = default; /* static objects: no CUDA call after runtime teardown at exit() (T26, see nr_csirs_disc_gpu_sweep.cu) */
   bool reserve(size_t n) {
     if(n<=capacity) return true;
     cudaFree(p);p=nullptr;capacity=0;

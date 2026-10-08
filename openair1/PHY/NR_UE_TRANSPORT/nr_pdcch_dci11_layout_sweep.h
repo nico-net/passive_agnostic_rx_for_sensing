@@ -148,6 +148,14 @@ typedef struct {
   nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
   uint32_t seen[NR_DCI11_LAYOUT_MAX];   ///< stage-1 payloads examined
   uint32_t pass[NR_DCI11_LAYOUT_MAX];   ///< stage-1 payloads found plausible
+  uint32_t impossible[NR_DCI11_LAYOUT_MAX]; ///< stage-1 payloads NO correct layout can produce (ISAC_DCI11_HARD_REFUTE)
+  /* HARQ-SEQUENCE evidence (ISAC_DCI11_HARQ_SEQ, T26): per layout, consecutive same-RNTI payload pairs and how many
+   * read a HARQ PID (at rv+2, or rv+10 behind a second TB) exactly one above the previous one (mod 16). */
+  uint16_t harq_pairs[NR_DCI11_LAYOUT_MAX];
+  uint16_t harq_inc[NR_DCI11_LAYOUT_MAX];
+#define NR_DCI11_HARQ_RNTIS 8
+  uint16_t harq_rnti[NR_DCI11_HARQ_RNTIS];
+  nr_dci_bits_t harq_prev[NR_DCI11_HARQ_RNTIS];
   uint32_t trials[NR_DCI11_LAYOUT_MAX]; ///< stage-2 decodes attempted
   uint32_t ok[NR_DCI11_LAYOUT_MAX];     ///< stage-2 decodes that passed the TB CRC
   bool     alive[NR_DCI11_LAYOUT_MAX];  ///< still a candidate
@@ -254,6 +262,17 @@ int nr_dci_resolver_append_offsets(nr_dci11_resolver_t *r, const nr_dci11_offset
 int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
                                       const nr_dci11_offsets_t *offsets, int n);
 
+/** As nr_dci11_resolver_observe(), plus the per-RNTI HARQ-sequence test (ISAC_DCI11_HARQ_SEQ=1, default off):
+ * when some layout reads a HARQ PID that increments by one in >= 40 % of >= 16 consecutive same-RNTI payload pairs
+ * (chance 1/16), layouts reading under 3/4 of the best such rate are dropped (never the last one). rnti 0 = observe() only. */
+int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload, uint16_t rnti);
+/** Hard stage-1 test (T26): true when `payload` read under `off` is IMPOSSIBLE for a correct layout -- a type-1
+ * RIV outside the BWP, an empty type-0 bitmap, an undefined antenna-ports row or a TDA index beyond the list. Unlike
+ * nr_dci11_layout_plausible() it ignores MCS 28-31, which retransmissions legitimately use. Pure. */
+bool nr_dci11_layout_impossible(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, uint16_t bwp_size);
+/** ISAC_DCI11_HARD_REFUTE=1 (default off): drop a layout after this many impossible payloads, and arm the next FDRA
+ * mode from stage-1 evidence alone when every live layout is hard-refuted. */
+#define NR_DCI11_HARD_REFUTE_N 3
 /** STAGE 1. Offer one accepted DCI payload. Every live candidate is scored for plausibility; one
  * that has been implausible too often is dropped. Costs no decode. Returns the number still alive.
  * Never drops the last candidate: an empty set can never converge, and a run of unlucky payloads

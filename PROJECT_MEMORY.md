@@ -3133,6 +3133,23 @@ outcomes, model assumptions and limits: [T22 report](docs/superpowers/reports/cs
 
 ---
 
+### T26 — blind C-RNTI DCI 1_1 on configured-nID CORESETs, PDSCH evidence (2026-10-08, csd/t26)
+
+[OFFLINE VERIFIED replay raw_pci415_12s_20261008, DGX aarch64] Root cause of "no C-RNTI on the dedicated CORESETs":
+on a CORESET with pdcch-DMRS-ScramblingID the USS PDCCH is scrambled with the C-RNTI, but the anonymous DCI-length
+sweep descrambled with n_RNTI = 0 and the joint GF(2) solver was unreachable before a C-RNTI existed; plus the
+dedicated CORESET was only scanned on SS#0 slots, with 2 candidates per AL, and the anonymous search exhausted for
+good. `ISAC_PDCCH_JOINT_ANON=1` (+`ISAC_PDCCH_JOINT=1`, `ISAC_PDCCH_SCAN_EVERY_SLOT=1`) locks C-RNTI 0x8f5a (nid
+62922) and 0xb876/0xe01e/0x13ae (nid 10163), DCI 1_1 len 49, AL2, ~3.0 s air time after sync; USS-hash
+consistency 100 % (N_CCE 32/33, p mod 3 = 1). Layout: RA type 0 (14 RBGs) + BWP ind 1 —
+`ISAC_DCI11_HARD_REFUTE=1` / `ISAC_DCI11_HARQ_SEQ=1` / `ISAC_DCI11_STAGE2=1` arm and narrow it (3035 → 224 live).
+PDSCH: data n_ID = PCI, MCS table qam256; offline LDPC on receiver LLRs CRC OK (iters 1); 1 in-receiver TB CRC pass
+with the diagnostic layout filter only; blind PDSCH does not converge inside 12 s. Exit-time heap corruption =
+cudaFree in static destructors after CUDA teardown (fixed). Details, flags, OTA command:
+[T26 report](docs/superpowers/reports/csd/T26.md).
+
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.

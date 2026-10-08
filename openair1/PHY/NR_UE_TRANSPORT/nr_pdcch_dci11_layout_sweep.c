@@ -18,6 +18,7 @@
 
 #include <math.h>    // sqrt, for the Wilson interval
 #include <stddef.h>  // NULL
+#include <stdio.h>   // fprintf (hard-refutation arming note)
 #include <stdlib.h>  // getenv/atoi (ISAC_DCI11_S1_OFF)
 
 /* TS 38.212 7.3.1.2.2, fields at fixed width regardless of any RRC switch:
@@ -263,6 +264,30 @@ bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, nr_dci_bits_t payl
   return true;
 }
 
+
+bool nr_dci11_layout_impossible(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, uint16_t bwp_size)
+{
+  if (off == NULL || bwp_size == 0)
+    return false;
+  uint32_t fdra = peek(payload, off->total, off->riv, (uint8_t)(off->tda - off->riv));
+  bool type0 = off->fdra_mode == NR_FDRA_TYPE0_CFG1 || off->fdra_mode == NR_FDRA_TYPE0_CFG2;
+  if (off->fdra_mode == NR_FDRA_DYN_CFG1 || off->fdra_mode == NR_FDRA_DYN_CFG2)
+    type0 = !nr_fdra_dynamic_split(fdra, off->n_rbg, off->riv_bits, &fdra, &fdra);
+  if (type0 ? fdra == 0 : fdra >= (uint32_t)bwp_size * ((uint32_t)bwp_size + 1u) / 2u)
+    return true;
+  if (off->ap_valid_rows > 0 && off->ant_ports_bits > 0
+      && peek(payload, off->total, off->ant_ports, off->ant_ports_bits) >= off->ap_valid_rows)
+    return true;
+  if (off->tda_valid > 0 && off->tda_bits > 0 && peek(payload, off->total, off->tda, off->tda_bits) >= off->tda_valid)
+    return true;
+  return false;
+}
+
+static bool hard_refute_enabled(void) /* read per observe(): one getenv per accepted DCI, and tests can toggle it */
+{
+  const char *e = getenv("ISAC_DCI11_HARD_REFUTE");
+  return e != NULL && atoi(e) != 0;
+}
 
 /* ---- STATEFUL RESOLVER ------------------------------------------------------------------------ */
 
@@ -698,8 +723,42 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
     if (nr_dci11_layout_plausible(&r->off[i], payload, r->bwp_size)) {
       r->pass[i]++;
     }
+    if (nr_dci11_layout_impossible(&r->off[i], payload, r->bwp_size))
+      r->impossible[i]++;
   }
   r->n_obs++;
+  /* HARD REFUTATION (ISAC_DCI11_HARD_REFUTE, T26). The soft rate rule below keeps a layout whose impossible reads
+   * are rare: OTA PCI 415 (replay raw_pci415_12s_20261008) sends a full-band type-0 bitmap in 13 % of its DCIs,
+   * which every type-1 layout reads as RIV = 0x7fff > N(N+1)/2 -- impossible, yet 87 % plausible, so type 1 was
+   * never refuted and RA type 0 waited for a TB-CRC refutation that 12 s of traffic cannot supply. A CRC-verified
+   * C-RNTI DCI that no correct layout can produce refutes the layout outright; NR_DCI11_HARD_REFUTE_N of them
+   * (guarding against a rare false DCI) remove it, and a stage whose every live layout is hard-refuted arms the
+   * next FDRA mode at once (nr_dci11_resolver_arm_next_mode retires the refuted stage, reversibly). */
+  if (hard_refute_enabled() && r->winner < 0) {
+    bool all_refuted = r->n_alive > 0;
+    for (int i = 0; i < r->n_hyp; i++) {
+      if (!r->alive[i] || layout_has_pass(r, i))
+        continue;
+      if (r->impossible[i] < NR_DCI11_HARD_REFUTE_N) {
+        all_refuted = false;
+        continue;
+      }
+      if (r->n_alive > 1) {
+        r->alive[i] = false;
+        r->n_alive--;
+      }
+    }
+    for (int i = 0; i < r->n_hyp && all_refuted; i++)
+      if (r->alive[i] && (layout_has_pass(r, i) || r->impossible[i] < NR_DCI11_HARD_REFUTE_N))
+        all_refuted = false;
+    if (all_refuted && r->fdra_next < NR_DCI11_FDRA_STAGES) {
+      int added = 0;
+      const int m = nr_dci11_resolver_arm_next_mode(r, &added);
+      fprintf(stderr, "SENSING: DCI11_LAYOUT stage hard-refuted by %d+ impossible CRC-verified payloads per live layout:"
+                      " armed FDRA mode %d (1/2 = RA type 0, 3/4 = dynamicSwitch): %d layouts, %d live of %d\n",
+              NR_DCI11_HARD_REFUTE_N, m, added, r->n_alive, r->n_hyp);
+    }
+  }
   /* ISAC_DCI11_S1_OFF=1: keep every layout alive (probes rotate over the whole set). A/B knob for
    * "did stage 1 delete the true layout" -- the one question a 0 % run cannot answer otherwise. */
   static int s_s1_off = -1;
@@ -729,6 +788,67 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
   }
   if (r->n_obs >= DCI11_S1_DIST_MIN && (r->n_obs % DCI11_S1_DIST_EVERY) == 0)
     prune_by_distribution(r);
+  return r->n_alive;
+}
+
+static bool harq_seq_enabled(void)
+{
+  const char *e = getenv("ISAC_DCI11_HARQ_SEQ");
+  return e != NULL && atoi(e) != 0;
+}
+
+/* One window: does the 4-bit field at `at` read exactly one above its previous value (mod 16)? */
+static int harq_step(nr_dci_bits_t prev, nr_dci_bits_t cur, uint16_t total, int at)
+{
+  if (at < 0 || at + 4 > total)
+    return -1;
+  return ((peek(cur, total, (uint16_t)at, 4) - peek(prev, total, (uint16_t)at, 4)) & 15) == 1;
+}
+
+int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload, uint16_t rnti)
+{
+  if (r == NULL || r->n_hyp <= 0 || rnti == 0 || !harq_seq_enabled() || r->winner >= 0)
+    return nr_dci11_resolver_observe(r, payload);
+  int slot = -1, empty = -1;
+  for (int k = 0; k < NR_DCI11_HARQ_RNTIS; k++) {
+    if (r->harq_rnti[k] == rnti) slot = k;
+    if (r->harq_rnti[k] == 0 && empty < 0) empty = k;
+  }
+  if (slot >= 0) {
+    const nr_dci_bits_t prev = r->harq_prev[slot];
+    for (int i = 0; i < r->n_hyp; i++) {
+      if (!r->alive[i] || r->harq_pairs[i] == UINT16_MAX)
+        continue;
+      const nr_dci11_offsets_t *o = &r->off[i];
+      const int a = harq_step(prev, payload, o->total, o->rv + DCI11_RV_BITS);
+      const int b = harq_step(prev, payload, o->total, o->rv + DCI11_RV_BITS + 8); /* behind TB2 MCS/NDI/RV */
+      r->harq_pairs[i]++;
+      r->harq_inc[i] += (a == 1 || b == 1);
+    }
+    r->harq_prev[slot] = payload;
+  } else {
+    const int k = empty >= 0 ? empty : (int)(rnti % NR_DCI11_HARQ_RNTIS);
+    r->harq_rnti[k] = rnti;
+    r->harq_prev[k] = payload;
+  }
+  const int n_alive = nr_dci11_resolver_observe(r, payload);
+  /* Evidence first: only once SOME live layout shows a HARQ counter far above chance does a layout reading none
+   * lose its place -- a cell with random HARQ PIDs never triggers this and keeps every layout. */
+  double best = 0.0;
+  for (int i = 0; i < r->n_hyp; i++)
+    if (r->alive[i] && r->harq_pairs[i] >= 16 && r->harq_inc[i] >= 12 && 5u * r->harq_inc[i] >= 2u * r->harq_pairs[i]
+        && (double)r->harq_inc[i] / r->harq_pairs[i] > best)
+      best = (double)r->harq_inc[i] / r->harq_pairs[i];
+  if (best <= 0.0)
+    return n_alive;
+  /* Relative bar: a window one bit off the counter still steps by one on ~1/2 of the pairs (RV bit + PID >> 1), two
+   * bits off on ~1/4; the aligned window steps on nearly every pair. 3/4 of the best rate separates them. */
+  for (int i = 0; i < r->n_hyp && r->n_alive > 1; i++)
+    if (r->alive[i] && !layout_has_pass(r, i) && r->harq_pairs[i] >= 16
+        && (double)r->harq_inc[i] / r->harq_pairs[i] < 0.75 * best) {
+      r->alive[i] = false;
+      r->n_alive--;
+    }
   return r->n_alive;
 }
 

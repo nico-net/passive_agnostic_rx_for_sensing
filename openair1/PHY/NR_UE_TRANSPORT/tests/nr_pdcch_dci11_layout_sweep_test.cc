@@ -1058,3 +1058,53 @@ TEST(Dci11Fdra, AType1PassDisarms) {
   refute_live(r);
   EXPECT_EQ(nr_dci11_resolver_arm_next_mode(&r, &added), -1) << "a disarmed resolver must never arm again";
 }
+
+// T26 [OFFLINE VERIFIED replay raw_pci415_12s_20261008]: the first 80 CRC-verified (mismatched_bits <= 1) DCI 1_1
+// payloads of C-RNTI 0x8f5a, length 49, 217-PRB BWP. Field statistics (403 DCIs) fit only: id 1 | BWP ind 1 (=1) |
+// RA type 0 bitmap 14 RBGs (P=16) | 4 | MCS 5 | NDI | RV 2 | HARQ 4 (increments mod 16 in 368/402 consecutive
+// DCIs) | DAI 2 | TPC 2 | PUCCH RI 3 | K1 3 | AP 4 | SRS 2 | DM-RS init 1. 13 % carry the full-band bitmap
+// 0x3fff, which every type-1 layout reads as RIV 0x7fff > 217*218/2: impossible for type 1.
+static const uint64_t kPci415Dci11[] = {0x18201009c2098ULL,0x1ffff149e2080ULL,0x1ffff1400a000ULL,0x1fffe14022380ULL,0x1fe781404a200ULL,0x1800900062098ULL,0x1fdfe94082100ULL,0x1ffff140aa080ULL,0x1ffff140d2000ULL,0x1fffe140e2380ULL,0x1fffe1410a200ULL,0x1ffff15132180ULL,0x184010016a098ULL,0x1801100182098ULL,0x18801001a2098ULL,0x1a001001c20b8ULL,0x18201001e2138ULL,0x18011008020b8ULL,0x18008018223b8ULL,0x1801084842238ULL,0x1808081862138ULL,0x18021008820b8ULL,0x18801008a4138ULL,0x18101008c2138ULL,0x18041008e20b8ULL,0x1820000902238ULL,0x1a001009220b8ULL,0x1804001942238ULL,0x18081009620b8ULL,0x18005009821b8ULL,0x1c001009a20b8ULL,0x18201009c21b8ULL,0x188011cdaa0b8ULL,0x19001009f2038ULL,0x1900510022090ULL,0x18009000620b8ULL,0x1820001082238ULL,0x18801000a21b8ULL,0x18401000c20b8ULL,0x18011010e21b8ULL,0x18011001020b8ULL,0x18201001221b8ULL,0x188010014a0b8ULL,0x18021001621b8ULL,0x1880100182138ULL,0x181010c1a2110ULL,0x1a001001c00b8ULL,0x18081001e21b8ULL,0x180080e802210ULL,0x18011008220b8ULL,0x18201028421b8ULL,0x188010086a0b8ULL,0x1800900882098ULL,0x1fdb5138a2080ULL,0x1fffe168e2380ULL,0x1c00100922098ULL,0x1fdbc16962380ULL,0x190010d9a2000ULL,0x1fffe169c2380ULL,0x1802100012198ULL,0x1810100022098ULL,0x1800500042098ULL,0x1c00100082098ULL,0x18005020aa018ULL,0x18101000c2098ULL,0x18081000e2098ULL,0x1840103100118ULL,0x1802101122198ULL,0x180110018a118ULL,0x18021001b2098ULL,0x18080031c2398ULL,0x1a001011e2198ULL,0x1900100842098ULL,0x1a001008ea098ULL,0x1880101902018ULL,0x1a00003922218ULL,0x1c0010094a198ULL,0x1800504962198ULL,0x1900101982198ULL,0x1a001039aa118ULL};
+
+TEST(Dci11Fdra, HardRefutationArmsType0OnTheLiveCellPayloads) {
+  ASSERT_EQ(setenv("ISAC_DCI11_HARD_REFUTE", "1", 1), 0);
+  static nr_dci11_resolver_t r;
+  const uint16_t rb = riv_bits_for(217);
+  ASSERT_GT(nr_dci11_resolver_init_fdra(&r, 0, 217, rb, NR_DCI11_TDA_UNKNOWN, 49), 0);
+  for (uint64_t p : kPci415Dci11) nr_dci11_resolver_observe(&r, nr_dci_bits_from_u64(p));
+  int truth = -1, live_type1 = 0;
+  for (int i = 0; i < r.n_hyp; i++) {
+    if (!r.alive[i]) continue;
+    live_type1 += r.off[i].fdra_mode == NR_FDRA_TYPE1;
+    if (r.off[i].fdra_mode == NR_FDRA_TYPE0_CFG1 && r.off[i].riv == 2 && r.off[i].tda == 16 && r.off[i].mcs == 20
+        && r.off[i].ant_ports == 42 && r.off[i].ant_ports_bits == 4)
+      truth = i;
+  }
+  EXPECT_EQ(live_type1, 0) << "every type-1 layout reads an impossible RIV on the full-band DCIs";
+  ASSERT_GE(truth, 0) << "the field-statistics layout must be armed and alive";
+  EXPECT_EQ(r.impossible[truth], 0u);
+  std::cerr << "[ MEASURED ] PCI 415 payloads: " << r.n_alive << " live of " << r.n_hyp << " layouts\n";
+  // + HARQ-sequence evidence: the same payloads, consecutive for one RNTI
+  ASSERT_EQ(setenv("ISAC_DCI11_HARQ_SEQ", "1", 1), 0);
+  static nr_dci11_resolver_t h;
+  ASSERT_GT(nr_dci11_resolver_init_fdra(&h, 0, 217, rb, NR_DCI11_TDA_UNKNOWN, 49), 0);
+  for (uint64_t p : kPci415Dci11) nr_dci11_resolver_observe_rnti(&h, nr_dci_bits_from_u64(p), 0x8f5a);
+  int h_truth = -1;
+  for (int i = 0; i < h.n_hyp; i++)
+    if (h.alive[i] && h.off[i].fdra_mode == NR_FDRA_TYPE0_CFG1 && h.off[i].riv == 2 && h.off[i].tda == 16
+        && h.off[i].mcs == 20 && h.off[i].ant_ports == 42 && h.off[i].ant_ports_bits == 4)
+      h_truth = i;
+  ASSERT_GE(h_truth, 0) << "HARQ-sequence pruning must keep the truth";
+  for (int i = 0; i < h.n_hyp; i++)
+    if (h.alive[i]) EXPECT_EQ(h.off[i].mcs, 20) << "every survivor reads MCS where the HARQ counter says it is";
+  std::cerr << "[ MEASURED ] PCI 415 payloads + HARQ sequence: " << h.n_alive << " live of " << h.n_hyp << " layouts\n";
+  ASSERT_EQ(unsetenv("ISAC_DCI11_HARQ_SEQ"), 0);
+  ASSERT_EQ(unsetenv("ISAC_DCI11_HARD_REFUTE"), 0);
+  static nr_dci11_resolver_t off;  // flag off: the soft rule keeps type 1 alive, exactly the replay failure
+  ASSERT_GT(nr_dci11_resolver_init_fdra(&off, 0, 217, rb, NR_DCI11_TDA_UNKNOWN, 49), 0);
+  for (uint64_t p : kPci415Dci11) nr_dci11_resolver_observe(&off, nr_dci_bits_from_u64(p));
+  int off_type1 = 0;
+  for (int i = 0; i < off.n_hyp; i++) off_type1 += off.alive[i] && off.off[i].fdra_mode == NR_FDRA_TYPE1;
+  EXPECT_GT(off_type1, 0);
+  EXPECT_EQ(off.fdra_next, 1) << "without the flag RA type 0 waits for TB-CRC refutation";
+}

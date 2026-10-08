@@ -772,8 +772,20 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
   static __thread int s_rot = 0;
   /* The wide set was already rotated (hot layouts at its head): offer from 0 there. */
   const int start = (no > max && no <= NR_DCI11_STAGE2_MAX_ALIVE) ? (s_rot++ % (no - max + 1)) : 0;
+  /* ISAC_DCI11_DIAG_FILTER="riv,mcs,ap,ap_bits,fdra_mode" (DIAGNOSTIC ONLY, NOT BLIND, default off): offer only the
+   * live layouts with exactly these offsets -- separates "layout search" from "PDSCH parameters" when the layout is
+   * already known from offline field statistics. Never part of an OTA recipe. */
+  static int s_filt = -1, f_riv, f_mcs, f_ap, f_apb, f_mode;
+  if (s_filt < 0) {
+    const char *e = getenv("ISAC_DCI11_DIAG_FILTER");
+    s_filt = e && sscanf(e, "%d,%d,%d,%d,%d", &f_riv, &f_mcs, &f_ap, &f_apb, &f_mode) == 5;
+    if (s_filt) LOG_W(PHY, "SENSING: ISAC_DCI11_DIAG_FILTER %s -- DIAGNOSTIC, not a blind run\n", e);
+  }
   for (int oi = start; oi < no && count < max; oi++) {
     const int i = order[oi];
+    if (s_filt && (r->off[i].riv != f_riv || r->off[i].mcs != f_mcs || r->off[i].ant_ports != f_ap
+                   || r->off[i].ant_ports_bits != f_apb || r->off[i].fdra_mode != f_mode))
+      continue;
     nr_dci11_field_bits_t f;
     if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
       continue;
@@ -1061,7 +1073,7 @@ static bool nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cf
 }
 
 static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
-                                          uint16_t dci_length, nr_dci_bits_t payload)
+                                          uint16_t dci_length, nr_dci_bits_t payload, uint16_t rnti)
 {
   if (!nr_cfg_epoch_work_current()) return;
   if (g_dci11_state < 0 || cfg == NULL || dci_length == 0 || cfg->bwp_size == 0) {
@@ -1105,7 +1117,7 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       LOG_W(PHY, "SENSING: DCI11_LAYOUT initial set truncated at NR_DCI11_LAYOUT_MAX=%d\n", NR_DCI11_LAYOUT_MAX);
     g_dci11_state = 1;
   }
-  nr_dci11_resolver_observe(g_dci11_resolver, payload);
+  nr_dci11_resolver_observe_rnti(g_dci11_resolver, payload, rnti); /* = observe() unless ISAC_DCI11_HARQ_SEQ */
   if ((++g_dci11_seen % 4000) != 0) {
     return;
   }
@@ -2013,6 +2025,20 @@ static int joint_anon_budget(void)
   }
   return v;
 }
+/* JOINT_ANON accept bar on the re-encode mismatch: ISAC_PDCCH_JOINT_ANON_MM bits per 216 coded bits (default 1),
+ * at least 1. Replay raw_pci415_12s_20261008: the genuine C-RNTI 0x8f5a decodes with <= 1 mismatched bit in 391 of
+ * 429 AL2 DCIs, while the same DCIs read through a ghost CORESET (nid 10163, grid_rb 1: 5/6 CCE overlap) give a
+ * stable ALIAS RNTI 0xb876 at a median of 8 (4 of 319 <= 1) -- and that alias locked with mm 7..32 evidence. */
+static unsigned joint_anon_mm_max(int L)
+{
+  static int per216 = -1;
+  if (per216 < 0) {
+    const char *e = getenv("ISAC_PDCCH_JOINT_ANON_MM");
+    per216 = (e && atoi(e) >= 0) ? atoi(e) : 1;
+  }
+  const unsigned m = (unsigned)(per216 * L * 108 / 216);
+  return m > 0 ? m : 1;
+}
 static bool nr_pdcch_joint_anon_enabled(void)
 {
   static int en = -1;
@@ -2692,7 +2718,8 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
     nr_pdcch_unscrambling((c16_t *)c->e_rx, 0, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id, tmp_e);
     nr_pdcch_joint_live_result_t jr;
     if (nr_pdcch_joint_live_decode_11(tmp_e, c->L, (uint16_t)dci_length, ctx->dmrs_scrambling_id, 0,
-                                      ctx->rnti_min, ctx->rnti_max, &jr)) {
+                                      ctx->rnti_min, ctx->rnti_max, &jr)
+        && jr.mismatched_bits <= joint_anon_mm_max(c->L)) {
       out.payload = jr.payload;
       out.rnti = jr.rnti;
       out.mismatched_bits = jr.mismatched_bits;
@@ -4555,14 +4582,21 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      * CORESET bank. It jointly discovers (RNTI,length); it never promotes a hash alias. */
     /* JOINT_ANON: a discovered configured-nID CORESET is dwelt on repeatedly (one nID at a time); each new
      * dwell re-opens its anonymous search (evidence is kept, only the give-up counter restarts). */
-    if (dlc == NULL && n_known_dl == 0 && dl_bank && t_discovered_token && cfg->discovered_coreset
+    const bool joint_anon_cfg = cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
+                                && nr_pdcch_joint_anon_enabled();
+    if (dlc == NULL && (n_known_dl == 0 || joint_anon_cfg) && dl_bank && t_discovered_token && cfg->discovered_coreset
         && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell && nr_pdcch_joint_anon_enabled()
         && dl_bank->anonymous_dwell != t_discovered_token) {
       dl_bank->anonymous_dwell = t_discovered_token;
       dl_bank->anonymous_exhausted = false;
       dl_bank->anonymous.occasions_fed = 0;
     }
-    const bool dl_anonymous = dlc == NULL && n_known_dl == 0 && dl_bank && !dl_bank->anonymous_exhausted;
+    /* JOINT_ANON: an RNTI known from ANOTHER CORESET says nothing about who is scheduled on this configured-nID one
+     * (each UE descrambles with its own C-RNTI), so the anonymous joint search keeps running once every known RNTI's
+     * own length context here is settled (dlc == NULL). Without this a first (or alias) RNTI elsewhere silenced the
+     * search on every later discovered CORESET (replay: nid 62922 rejected after 4000 occasions, 0 hits). */
+    const bool dl_anonymous = dlc == NULL && (n_known_dl == 0 || joint_anon_cfg) && dl_bank
+                              && !dl_bank->anonymous_exhausted;
     nr_pdcch_dci_length_sweep_state_t *dl_state =
         dlc ? &dlc->state : (dl_anonymous ? &dl_bank->anonymous : NULL);
     if (dl_state && (dlc || !dl_bank->anonymous_found)) {
@@ -6371,12 +6405,18 @@ constdiag_done:;
       }
       static uint64_t raw_dl_count;
       char payload_hex[49];
+      static int s_rawlog = -1; /* ISAC_DCI_RAW_LOG=1 (diagnostic, default off): every accepted raw DL DCI */
+      if (s_rawlog < 0) s_rawlog = getenv("ISAC_DCI_RAW_LOG") && atoi(getenv("ISAC_DCI_RAW_LOG")) ? 1 : 0;
+      if (s_rawlog)
+        LOG_A(PHY, "SENSING: DCIRAW %d.%d rnti=0x%04x len=%u cce=%d al=%u mm=%u payload=0x%s\n", cand_task[ti].frame,
+              cand_task[ti].slot, raw->rnti, cand_task[ti].dci_length, cand_task[ti].cce, cand_task[ti].L,
+              raw->mismatched_bits, nr_dci_bits_hex(raw->payload.w, cand_task[ti].dci_length, false, payload_hex));
       if (++raw_dl_count <= 12 || raw_dl_count % 2000 == 0)
         LOG_I(PHY, "SENSING: DL raw evidence n=%lu len=%u rnti=0x%x payload=0x%s mm=%u; "
                    "layout requires TB-CRC evidence\n",
               (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
               nr_dci_bits_hex(raw->payload.w, cand_task[ti].dci_length, false, payload_hex), raw->mismatched_bits);
-      nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
+      nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload, raw->rnti);
       if (!g_pdsch_sweep_on) continue;
       /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
        * consumer's stack, and 512 results there overflowed it on the first DL grant (OTA 2026-09-15). */

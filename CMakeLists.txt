@@ -3124,6 +3124,13 @@ if(ENABLE_TESTS)
                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c)
   target_include_directories(pdcch_anon_offline PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(pdcch_anon_offline PRIVATE nr_common polar crc_byte UTIL)
+  # offline CB0 decode of ISAC_PDSCH_LLR_DUMP records (not a test)
+  add_executable(pdsch_cb_offline ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/pdsch_cb_offline.c
+                                  ${OPENAIR1_DIR}/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
+                                  ${OPENAIR1_DIR}/PHY/CODING/nr_segmentation.c
+                                  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_tbs_tools.c)
+  target_link_libraries(pdsch_cb_offline PRIVATE nr_common crc_byte UTIL ${CMAKE_DL_LIBS})
+  set_target_properties(pdsch_cb_offline PROPERTIES ENABLE_EXPORTS ON) # libldpc.so resolves cpu_meas_enabled here
 
   add_executable(test_nr_pdsch_prb_set ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_prb_set_test.cc
                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c)

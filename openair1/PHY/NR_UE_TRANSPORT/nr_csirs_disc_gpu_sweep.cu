@@ -171,7 +171,11 @@ __global__ void reduce_scores(const float *mean, nr_csirs_disc_sweep_cfg_t c, in
 template<typename T> struct Device {
   T *p = nullptr;
   size_t capacity = 0;
-  ~Device() { if (p) cudaFree(p); }
+  /* No cudaFree here (T26): `workspace` is a static object, so this ran from exit() after the CUDA runtime's own
+   * atexit teardown and while other threads still held CUDA work -- libcuda then freed already-released host state
+   * ("free(): corrupted unsorted chunks" / "malloc(): unsorted double linked list corrupted" at RAW_IQ_EOF in every
+   * PCI 415 replay that reached the end of the capture). Device memory goes with the process. */
+  ~Device() = default;
   bool alloc(size_t n)
   {
     n = std::max(n, size_t(1));

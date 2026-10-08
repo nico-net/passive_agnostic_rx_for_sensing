@@ -3897,6 +3897,35 @@ gpu_llr_ready:;
     }
   }
 
+  /* ISAC_PDSCH_LLR_DUMP=<path> (DIAGNOSTIC, default off; T26): append each dedicated C-RNTI grant's demodulated LLRs
+   * for offline scrambling/coding analysis. Record "PDL1", int32 rnti, frame, slot, Qm, Nl, first_rb, num_rbs,
+   * start_symbol, number_symbols, mcs, dlDataScramblingId, descrambled(0/1 = GrantWork already descrambled), G,
+   * mcs_table, then int16 llr[G]. ISAC_PDSCH_LLR_DUMP_MAX grants (default 400). */
+  static int s_dall = -1; /* ISAC_PDSCH_LLR_DUMP_ALL=1: every RNTI class (SI grants validate the offline harness) */
+  if (s_dall < 0) s_dall = getenv("ISAC_PDSCH_LLR_DUMP_ALL") && atoi(getenv("ISAC_PDSCH_LLR_DUMP_ALL")) ? 1 : 0;
+  if (demod_ok && (grant->rnti_class == 0 || s_dall)) {
+    static FILE *s_df;
+    static int s_dinit, s_dleft;
+    static pthread_mutex_t s_dmu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&s_dmu);
+    if (!s_dinit) {
+      s_dinit = 1;
+      const char *pth = getenv("ISAC_PDSCH_LLR_DUMP"), *mx = getenv("ISAC_PDSCH_LLR_DUMP_MAX");
+      s_dleft = mx ? atoi(mx) : 400;
+      if (pth && *pth) s_df = fopen(pth, "wb");
+    }
+    if (s_df && s_dleft > 0) {
+      --s_dleft;
+      const int32_t h[14] = {grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->qamModOrder, cw->Nl, freq_alloc->first_rb,
+                             freq_alloc->num_rbs, dlsch_config->start_symbol, dlsch_config->number_symbols, grant->mcs,
+                             dlsch_config->dlDataScramblingId, gw_ready ? 1 : 0, (int32_t)G, grant->mcs_table};
+      fwrite("PDL1", 1, 4, s_df);
+      fwrite(h, sizeof(h), 1, s_df);
+      fwrite(llr, sizeof(int16_t), G, s_df);
+      fflush(s_df);
+    }
+    pthread_mutex_unlock(&s_dmu);
+  }
   if (demod_ok) {
     /* Measured BEFORE unscrambling: descrambling only flips signs, so magnitudes are identical
      * either side of it and taking them here keeps this independent of whether the scrambling
