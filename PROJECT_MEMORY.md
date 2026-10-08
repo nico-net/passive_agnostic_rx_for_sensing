@@ -3177,6 +3177,12 @@ are X925 (big), 0-4,10-14 A725: scan/PDSCH consumers belong on big cores (t26c c
 any run-time nID ([HYPOTHESIS] co-channel neighbour cell). EVM: MCS >= 17 failures are SNR-limited (measured 3-10 dB
 below the AWGN need); MRC mode 3 not adopted (0 solves on the new capture). Scan p99 still 2-4 ms. MAX_UE/length
 contexts/solver/HARQ cache = 64. [T26 report §T26c](docs/superpowers/reports/csd/T26.md).
+Round 2 [MEASURED replay with `ISAC_PDSCHQ_SIGNAL_TIME=1` live-rate emulation, which reproduces live stale 57 % vs 61 %]:
+`ISAC_CHEST_DELAY_SHARE=1` (chest 4.2 -> 0.27 ms/job), 5 PDSCH + 2 scan consumers on big cores, probe rate 0.3/slot +
+backoff -> stale 0.5 %. The nID-10163 population is a second cell: per-CORESET blind PDSCH DM-RS id
+(`ISAC_PDSCH_DMRS_ID_PER_CORESET=1`) = 249 (also a discovered CSI-RS id); with it as scrambling hypothesis its RNTIs
+solve (0x5186 57 % full CRC; old capture 0xb876/0xe01e/0x13ae). MRC mode 3 breaks 16QAM soft values (hypothesis), keep
+mode 1. Scan p99 still 2-4 ms.
 
 ---
 
