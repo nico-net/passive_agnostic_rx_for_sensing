@@ -38,7 +38,7 @@ typedef struct {
   /* T26c per-RNTI report: absolute slots (signal time) of the first grant and of the solving CRC pass */
   uint64_t first_abs, solved_abs;
   uint32_t grants;
-  int8_t scr, cand_scr;    /* T26c: PDSCH scrambling hypothesis (0 default, 1 CORESET nID); -1 unknown */
+  int32_t scr, cand_scr;   /* T26c: PDSCH scrambling id hypothesis (-1 = default ids; else the id); solved/candidate */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
 } solver_rnti_t;
@@ -55,7 +55,7 @@ typedef struct {
   int tda;                /* solved: tda index the representative read */
   uint64_t dci;
   uint64_t abs;           /* T26c: absolute slot of the grant */
-  uint8_t scr;
+  int32_t scr;
   nr_dci_bits_t payload;
   int n_ids;
   uint16_t ids[SOLVER_MAX_IDS];
@@ -65,7 +65,8 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static solver_rnti_t g_r[SOLVER_RNTIS];
 static pending_t g_p[SOLVER_PENDING];
 static uint32_t g_token = 1; /* sequence part of a token; the low 12 bits are the pending index (O(1) feedback) */
-static bool g_alt_scr;        /* T26c: the planned DCI's CORESET has its own nID (nr_pdsch_solver_set_alt_scr) */
+static int32_t g_alt_ids[8];  /* T26c: run-time scrambling-id alternatives for the planned DCI (nr_pdsch_solver_set_alt_scr) */
+static int g_n_alt;
 static uint64_t g_now_abs;    /* T26c: absolute slot of the grant being planned (nr_pdsch_solver_set_now) */
 static uint64_t g_dci_seq;
 static nr_pdsch_solver_tda_fn g_tda_fn;
@@ -217,12 +218,13 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db)
   return ok;
 }
 
-void nr_pdsch_solver_set_alt_scr(bool available)
+void nr_pdsch_solver_set_alt_scr(const uint16_t *ids, int n)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_SCR") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR")) ? 1 : 0;
   pthread_mutex_lock(&g_mu);
-  g_alt_scr = en && available;
+  g_n_alt = 0;
+  for (int i = 0; en && i < n && g_n_alt < 8; i++) g_alt_ids[g_n_alt++] = ids[i];
   pthread_mutex_unlock(&g_mu);
 }
 
@@ -253,7 +255,7 @@ static pending_t *pend_new(void)
 }
 
 static int t_rm = 0; static bool t_learn_rm = false; /* set by plan for this grant (under g_mu) */
-static int t_scr = 0; /* T26c scrambling hypothesis for this grant */
+static int32_t t_scr = -1; /* T26c scrambling hypothesis for this grant (-1 default) */
 static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                  const nr_pdsch_solver_reading_t *rd, int l0, int S, int add_pos, int table, bool probe, bool table_disc,
                  bool learn_S, bool learn_table, int tda, uint64_t dci, nr_dci_bits_t payload)
@@ -278,7 +280,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->table_disc = table_disc; p->learn_S = learn_S; p->learn_table = learn_table; p->tda = tda;
   p->dci = dci;
   p->rm = (uint8_t)t_rm;
-  p->scr = (uint8_t)t_scr;
+  p->scr = t_scr;
   p->learn_rm = t_learn_rm;
   p->payload = payload;
   p->n_ids = rd[reading].n_ids < SOLVER_MAX_IDS ? rd[reading].n_ids : SOLVER_MAX_IDS;
@@ -293,7 +295,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   v->probe = probe;
   v->token = p->token;
   v->rm = (uint8_t)t_rm;
-  v->scr = (uint8_t)t_scr;
+  v->scr = t_scr;
   return true;
 }
 
@@ -378,7 +380,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
           (unsigned long long)g_st.candidates, (unsigned long long)g_st.solved, (unsigned long long)g_st.dropped);
   t_rm = 0;
   t_learn_rm = false;
-  t_scr = r->solved ? (r->scr > 0) : 0;
+  t_scr = r->solved ? r->scr : -1;
   if (r->solved) {
     int ri = 0;
     for (int i = 0; i < n_rd; i++)
@@ -418,7 +420,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
   } else {
     /* 1. confirm a candidate: the reading sharing most layouts with it (under the candidate's own scrambling) */
-    t_scr = r->has_cand && r->cand_scr > 0 ? 1 : 0;
+    t_scr = r->has_cand ? r->cand_scr : -1;
     if (r->has_cand) {
       int best = -1, best_ov = 0;
       for (int i = 0; i < n_rd; i++) {
@@ -437,7 +439,10 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       }
     }
     /* T26c: the search alternates the scrambling hypothesis grant by grant when the CORESET has its own nID */
-    t_scr = g_alt_scr ? (int)(r->grants & 1u) : 0;
+    { /* default ids, then each run-time alternative, one per grant */
+      const uint32_t k = r->grants % (uint32_t)(g_n_alt + 1);
+      t_scr = k == 0 ? -1 : g_alt_ids[k - 1];
+    }
     /* 2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best
      * solved RNTI (most full TB CRC passes; layouts refined, S map and MCS table learnt since) instead of the snapshot
      * taken at the first solve -- gNBs configure UEs from one RRC template. Still confirmed by this RNTI's own 2 passes. */
@@ -547,7 +552,7 @@ static void make_cand(solver_rnti_t *r, const pending_t *p)
   r->cand_S = p->S;
   r->cand_payload = p->payload;
   r->cand_dci = p->dci;
-  r->cand_scr = (int8_t)p->scr;
+  r->cand_scr = p->scr;
   r->cand_tries = 0;
   g_st.candidates++;
   LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x CANDIDATE: CRC pass S=%u add_pos=%u table=%d on %d layouts\n",
@@ -631,7 +636,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
           nb[p->ids[i] >> 3] |= (uint8_t)(1u << (p->ids[i] & 7));
           kept++;
         }
-      if (kept == 0 || p->add_pos != r->cand_add_pos || (int8_t)p->scr != r->cand_scr) {
+      if (kept == 0 || p->add_pos != r->cand_add_pos || p->scr != r->cand_scr) {
         /* a pass the candidate cannot explain: after the candidate has had its confirmation chances, the newer
          * evidence takes its place (a chance CRC pass must not block the search) */
         if (r->cand_tries >= 16)
@@ -646,14 +651,14 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         r->rep = choose_rep(r);
         if (r->rep < 0) r->rep = lowest(r->cand_bm);
         r->add_pos = p->add_pos;
-        r->scr = (int8_t)p->scr;
+        r->scr = p->scr;
         r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
         g_st.solved++;
         r->solved_abs = p->abs;
         LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by 2 independent CRC passes: layout %d (%d consistent) "
-                   "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%s\n",
+                   "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%d\n",
               r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,
-              tda_of(r->rep, p->payload), p->S, r->scr > 0 ? "coreset-nid" : "default");
+              tda_of(r->rep, p->payload), p->S, (int)r->scr);
         if (!g_have_prior) {
           g_have_prior = true;
           g_prior_rep = r->rep;

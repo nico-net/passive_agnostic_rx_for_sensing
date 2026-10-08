@@ -2401,6 +2401,17 @@ static int janon_take(uint64_t geom, janon_hit_t *out, int max)
   pthread_mutex_unlock(&g_janon_mu);
   return n;
 }
+/* T26c LEN_HINT: DCI 1_1 lengths locked on ANY CORESET of this cell (most recent first) -- the hint for a CORESET that
+ * has none locked yet (one gNB, one RRC template: the second CORESET's UEs very likely use the same size). */
+static _Atomic int g_cell_lens[4];
+static void janon_note_cell_len(int len)
+{
+  if (len <= 0) return;
+  for (int i = 0; i < 4; i++)
+    if (atomic_load(&g_cell_lens[i]) == len) return;
+  for (int i = 3; i > 0; i--) atomic_store(&g_cell_lens[i], atomic_load(&g_cell_lens[i - 1]));
+  atomic_store(&g_cell_lens[0], len);
+}
 static bool janon_all_coresets(void)
 {
   static int en = -1;
@@ -4067,7 +4078,16 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     static int s_dbud = -1;
     if (s_dbud < 0) s_dbud = getenv("ISAC_PDCCH_DED_BUDGET_US") ? atoi(getenv("ISAC_PDCCH_DED_BUDGET_US")) : 0;
     static _Atomic uint64_t s_dbud_skip;
-    const bool over = s_dbud > 0 && btim_now_ns() - t_scan0 > (uint64_t)s_dbud * 1000ull;
+    bool over = s_dbud > 0 && btim_now_ns() - t_scan0 > (uint64_t)s_dbud * 1000ull;
+    { /* T26c: the budget must not starve discovery -- replay: 12001 of 12001 dedicated-only slots skipped the dwell, so
+       * the second populated CORESET never verified. Over budget, every ISAC_PDCCH_DED_BUDGET_SHARE-th slot (default 4)
+       * still runs the dwell + CORESET#0 passes. */
+      static int s_share = -1;
+      static _Atomic uint32_t s_streak;
+      if (s_share < 0) s_share = getenv("ISAC_PDCCH_DED_BUDGET_SHARE") ? atoi(getenv("ISAC_PDCCH_DED_BUDGET_SHARE")) : 4;
+      if (over && s_share > 0 && (atomic_fetch_add_explicit(&s_streak, 1, memory_order_relaxed) + 1) % (uint32_t)s_share == 0)
+        over = false;
+    }
     if (over && (atomic_fetch_add_explicit(&s_dbud_skip, 1, memory_order_relaxed) % 4000) == 0)
       LOG_A(PHY, "SENSING: DED_BUDGET skipped dwell/CORESET#0 passes on %llu dedicated-only slots\n",
             (unsigned long long)atomic_load(&s_dbud_skip));
@@ -5385,6 +5405,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             for (int q = 0; q < njl && !dup; q++) dup = jl[q] == f;
             if (!dup) jl[njl++] = f;
           }
+          for (int i = 0; s_lh && njl == 0 && i < 4; ++i) { /* nothing locked here yet: the cell's locked lengths */
+            const int f = atomic_load(&g_cell_lens[i]);
+            if (f > 0) jl[njl++] = f;
+          }
           janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx,
                        sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand, jl, njl);
           n_jhits = janon_take(dl_geom, jhits, JANON_MAX_HITS);
@@ -5469,6 +5493,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
               else promoted->found[0] = found_len;
             }
           }
+          janon_note_cell_len(found_len);
           LOG_A(PHY, "SENSING: DCI 1_1 length locked coreset=%llu rnti=0x%x len=%d "
                      "occasions=%d decodes=%llu evidence=distinct_ota\n",
                 (unsigned long long)dl_geom, locked_rnti, found_len,
@@ -7970,8 +7995,18 @@ constdiag_done:;
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
       const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
-      const bool sv_alt_scr = cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
-      nr_pdsch_solver_set_alt_scr(sv_alt_scr);
+      uint16_t sv_alt[8];
+      int sv_nalt = 0;
+      if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
+        sv_alt[sv_nalt++] = (uint16_t)cfg->coreset_pdcch_dmrs_scrambling_id;
+      for (int b = 0; b < nr_pdcch_coreset_bank_count() && sv_nalt < 8; b++) { /* the other run-time CORESET nIDs */
+        const nr_pdcch_blind_monitor_cfg_t *bc = nr_pdcch_coreset_bank_cfg(b);
+        if (!bc || !bc->discovered_coreset || bc->coreset_pdcch_dmrs_scrambling_id == fp->Nid_cell) continue;
+        bool dup = false;
+        for (int q = 0; q < sv_nalt && !dup; q++) dup = sv_alt[q] == bc->coreset_pdcch_dmrs_scrambling_id;
+        if (!dup) sv_alt[sv_nalt++] = (uint16_t)bc->coreset_pdcch_dmrs_scrambling_id;
+      }
+      nr_pdsch_solver_set_alt_scr(sv_alt, sv_nalt);
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
@@ -7995,8 +8030,8 @@ constdiag_done:;
         dl.mcs_table         = var[v].table;
         dl.pduBitmap         = 0;
         dl.numCsiRsForRateMatching = 0;
-        if (var[v].scr && sv_alt_scr) /* T26c: CRC-selected per-RNTI hypothesis -- the CORESET's own run-time nID */
-          dl.dlDmrsScramblingId = dl.dlDataScramblingId = (uint16_t)cfg->coreset_pdcch_dmrs_scrambling_id;
+        if (var[v].scr >= 0) /* T26c: CRC-selected per-RNTI hypothesis -- a run-time discovered nID */
+          dl.dlDmrsScramblingId = dl.dlDataScramblingId = (uint16_t)var[v].scr;
         if (var[v].rm) {
           const fapi_nr_dl_config_csirs_pdu_rel15_t *rm = sv_rm;
           const int n_rm = sv_nrm;
