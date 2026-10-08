@@ -76,6 +76,12 @@ typedef struct {
 /// cap; a caller decoding in-line uses context 0.
 #define NR_PUSCH_PASSIVE_MAX_CTX 6
 
+/* U1: initialized before RX; capture a bounded private raw-IQ window before heavy work. */
+bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue);
+bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot,
+                                     uint64_t absolute_slot);
+void nr_pusch_passive_decode_capture_release(int ctx);
+
 /**
  * @brief Decode one passively-observed PUSCH.
  *

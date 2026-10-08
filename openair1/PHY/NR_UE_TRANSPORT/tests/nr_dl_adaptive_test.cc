@@ -421,6 +421,35 @@ TEST(DlAdaptive, DeferredSamplesExpireDuringFepAndMustNotScore) {
 }
 
 #include "../nr_passive_ul_grant_book.h"
+#include "../nr_pusch_passive_queue_cursor.h"
+#include "../nr_passive_job_epoch.h"
+static uint32_t ul_test_epoch=3;
+static uint32_t ul_current_epoch() {return ul_test_epoch;}
+TEST(UlPipelineAdmission, FullEvictsOldestAcrossWrapAndEpochStaleReject) {
+  nr_pusch_queue_cursor_t q{3,0,0,0};
+  int evicted=-2;
+  EXPECT_EQ(nr_pusch_queue_push(&q,&evicted),0); EXPECT_EQ(evicted,-1);
+  EXPECT_EQ(nr_pusch_queue_push(&q,&evicted),1);
+  EXPECT_EQ(nr_pusch_queue_push(&q,&evicted),2);
+  EXPECT_EQ(nr_pusch_queue_push(&q,&evicted),0); EXPECT_EQ(evicted,0);
+  EXPECT_EQ(nr_pusch_queue_pop(&q),1);
+  EXPECT_EQ(nr_pusch_queue_pop(&q),2);
+  EXPECT_EQ(nr_pusch_queue_pop(&q),0);
+  EXPECT_EQ(nr_pusch_queue_pop(&q),-1);
+  nr_pusch_queue_push(&q,&evicted);
+  nr_pusch_queue_push(&q,&evicted);
+  EXPECT_EQ(nr_pusch_queue_discard_all(&q),2);
+  EXPECT_EQ(nr_pusch_queue_pop(&q),-1);
+  EXPECT_TRUE(nr_passive_samples_valid(20481,20480,20)); // SFN wrapped, absolute slot did not
+  EXPECT_FALSE(nr_passive_samples_valid(20498,20480,20));
+  EXPECT_TRUE(nr_pusch_queue_snapshot_fresh(20494,20480,20));
+  EXPECT_FALSE(nr_pusch_queue_snapshot_fresh(20495,20480,20));
+  const uint32_t stamp=nr_passive_job_epoch_stamp(true,ul_current_epoch);
+  ul_test_epoch=4;
+  EXPECT_TRUE(nr_passive_job_epoch_old(true,stamp,ul_current_epoch));
+  EXPECT_FALSE(nr_passive_job_epoch_old(false,stamp,ul_current_epoch));
+  ul_test_epoch=3;
+}
 TEST(UlGrantBook, KeepsThreeUesInOneSlotAndAcceptsLateDci) {
   nr_passive_ul_book_t book{};
   nr_pdcch_blind_ul_result_t grant{};

@@ -46,18 +46,18 @@
 #include "common/utils/system.h" // threadCreate
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
+#include "nr_pusch_passive_ul_ids.h"
+#include "nr_pusch_passive_queue_cursor.h"
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
  * fills that slot's region of rxdata. */
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 static nr_pusch_passive_job_t g_ring[NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH];
-static int  g_depth = 0;
-static int  g_head  = 0;
-static int  g_tail  = 0;
-static int  g_count = 0;
+static nr_pusch_queue_cursor_t g_cursor;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 
 static _Atomic uint64_t g_queued        = 0;
@@ -66,6 +66,8 @@ static _Atomic uint64_t g_crc_ok        = 0;
 static _Atomic uint64_t g_dropped_full  = 0;
 static _Atomic uint64_t g_dropped_stale = 0;
 static _Atomic uint64_t g_dropped_epoch = 0;
+static _Atomic uint64_t g_dropped_unready = 0;
+static _Atomic uint64_t g_dropped_snapshot = 0;
 static _Atomic uint64_t g_max_lag       = 0;
 
 static _Atomic int g_running  = 0;
@@ -79,6 +81,17 @@ typedef struct {
 } consumer_arg_t;
 static consumer_arg_t g_args[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 
+bool nr_pusch_passive_pipeline_enabled(void)
+{
+  const char *v = getenv("ISAC_UL_PIPELINE");
+  return v && strcmp(v, "1") == 0;
+}
+
+void nr_pusch_passive_queue_note_unready(void)
+{
+  atomic_fetch_add_explicit(&g_dropped_unready, 1, memory_order_relaxed);
+}
+
 static void *nr_pusch_passive_queue_thread(void *arg)
 {
   /* The consumer index IS the decode-context index. That identity is what keeps two consumers off
@@ -87,6 +100,11 @@ static void *nr_pusch_passive_queue_thread(void *arg)
   const int idx = ((consumer_arg_t *)arg)->idx;
   PHY_VARS_NR_UE *ue = g_ue;
   const long slots_per_frame = ue->frame_parms.slots_per_frame;
+  struct timespec wall_start={0},cpu_start={0};
+  if(nr_pusch_passive_pipeline_enabled()) {
+    clock_gettime(CLOCK_MONOTONIC,&wall_start);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&cpu_start);
+  }
 
   LOG_I(PHY, "SENSING: passive PUSCH decode consumer %d started\n", idx);
 
@@ -94,7 +112,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_job_t job;
 
     pthread_mutex_lock(&g_lock);
-    while (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
+    while (g_cursor.count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) == 0) {
       /* Timed wait so a stop cannot be missed if it lands between the predicate and the wait. */
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
@@ -102,13 +120,11 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
       pthread_cond_timedwait(&g_cv, &g_lock, &ts);
     }
-    if (g_count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
+    if (g_cursor.count == 0 && atomic_load_explicit(&g_stop, memory_order_relaxed) != 0) {
       pthread_mutex_unlock(&g_lock);
       break;
     }
-    job    = g_ring[g_tail];
-    g_tail = (g_tail + 1) % g_depth;
-    g_count--;
+    job = g_ring[nr_pusch_queue_pop(&g_cursor)];
     pthread_mutex_unlock(&g_lock);
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
@@ -124,17 +140,36 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
-    if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
+    if (!(nr_pusch_passive_pipeline_enabled() ?
+          nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame) :
+          nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame))) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       continue;
     }
 
+    const bool pipeline = nr_pusch_passive_pipeline_enabled();
+    if (pipeline && !nr_pusch_passive_decode_capture(ue, idx, (uint8_t)job.nr_slot_rx,
+                                                     (uint64_t)job.absolute_slot)) {
+      atomic_fetch_add_explicit(&g_dropped_snapshot, 1, memory_order_relaxed);
+      continue;
+    }
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
+    if (pipeline) nr_pusch_passive_decode_capture_release(idx);
     if (!nr_cfg_epoch_work_current()) {
       continue;
     }
+    if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK) {
+      nr_ue_ul_update_t confirmed=job.ul_update;
+      confirmed.ta_samples=out.ta_applied_samples;
+      nr_ue_ctx_ul_feedback(&job.ul_ticket,&confirmed,true);
+    }
+    if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK)
+      nr_pusch_passive_ul_ids_confirm(&job.ul_ticket,job.grant.nscid,
+                                     job.grant.ul_dmrs_scrambling_id,job.grant.data_scrambling_id);
+    if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_CRC_FAIL)
+      nr_pusch_passive_ul_ids_failed(&job.ul_ticket);
     if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
         out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB)) {
       nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
@@ -150,6 +185,17 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     }
   }
 
+  if(nr_pusch_passive_pipeline_enabled()) {
+    struct timespec wall_end,cpu_end;
+    clock_gettime(CLOCK_MONOTONIC,&wall_end);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&cpu_end);
+    const uint64_t wall_ns=(uint64_t)(wall_end.tv_sec-wall_start.tv_sec)*1000000000ull+
+                           (uint64_t)(wall_end.tv_nsec-wall_start.tv_nsec);
+    const uint64_t cpu_ns=(uint64_t)(cpu_end.tv_sec-cpu_start.tv_sec)*1000000000ull+
+                          (uint64_t)(cpu_end.tv_nsec-cpu_start.tv_nsec);
+    LOG_I(PHY,"SENSING: UL_PIPELINE worker_cpu_ms=%.3f wall_ms=%.3f core_fraction=%.4f\n",
+          cpu_ns/1e6,wall_ns/1e6,wall_ns?(double)cpu_ns/wall_ns:0.0);
+  }
   LOG_I(PHY, "SENSING: passive PUSCH decode consumer %d exiting\n", idx);
   return NULL;
 }
@@ -161,6 +207,10 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   }
   if (ue == NULL) {
     return false;
+  }
+  if (nr_pusch_passive_pipeline_enabled()) {
+    n_consumers = 1;
+    if (!nr_pusch_passive_decode_prewarminit(ue)) return false;
   }
   /* The --cont-fo-comp refusal that used to live here is GONE, and the hazard it named is fixed
    * rather than avoided. It read: a deferred nr_slot_fep() would de-rotate using
@@ -182,10 +232,7 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   if (depth > NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH) depth = NR_PUSCH_PASSIVE_QUEUE_MAX_DEPTH;
 
   g_ue       = ue;
-  g_depth    = depth;
-  g_head     = 0;
-  g_tail     = 0;
-  g_count    = 0;
+  g_cursor   = (nr_pusch_queue_cursor_t){.depth=depth};
   g_nthreads = n_consumers;
   atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
   atomic_store_explicit(&g_running, 1, memory_order_release);
@@ -216,18 +263,16 @@ bool nr_pusch_passive_queue_enqueue(const nr_pusch_passive_job_t *job)
     return false;
   }
   pthread_mutex_lock(&g_lock);
-  if (g_count == g_depth) {
-    /* DROP-OLDEST: the evicted entry is the one whose samples are closest to being overwritten, so
-     * discarding it beats refusing the fresh job. The downlink measured the alternative --
-     * decoded=58384 with crc_ok=0, a queue working hard and producing only stale decodes. */
-    g_tail = (g_tail + 1) % g_depth;
-    g_count--;
-    atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
+  if (atomic_load_explicit(&g_stop, memory_order_relaxed)) {
+    pthread_mutex_unlock(&g_lock);
+    return false;
   }
-  g_ring[g_head] = *job;
-  g_ring[g_head].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
-  g_head         = (g_head + 1) % g_depth;
-  g_count++;
+  int evicted;
+  const int index=nr_pusch_queue_push(&g_cursor,&evicted);
+  /* DROP-OLDEST: the evicted entry is closest to IQ overwrite. */
+  if(evicted>=0) atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
+  g_ring[index] = *job;
+  g_ring[index].config_epoch = nr_passive_job_epoch_stamp(nr_cfg_reconf_enabled(), nr_cfg_epoch_work_stamp);
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_lock);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
@@ -245,20 +290,26 @@ void nr_pusch_passive_queue_get_stats(nr_pusch_passive_queue_stats_t *out)
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
   out->dropped_epoch = atomic_load_explicit(&g_dropped_epoch, memory_order_relaxed);
+  out->dropped_unready = atomic_load_explicit(&g_dropped_unready, memory_order_relaxed);
+  out->dropped_snapshot = atomic_load_explicit(&g_dropped_snapshot, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
 }
 
 void nr_pusch_passive_queue_stop(void)
 {
+  pthread_mutex_lock(&g_lifecycle_lock);
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
+    pthread_mutex_unlock(&g_lifecycle_lock);
     return;
   }
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);
+  atomic_fetch_add_explicit(&g_dropped_unready,nr_pusch_queue_discard_all(&g_cursor),memory_order_relaxed);
   pthread_cond_broadcast(&g_cv);
   pthread_mutex_unlock(&g_lock);
   for (int i = 0; i < g_nthreads; i++) {
     pthread_join(g_threads[i], NULL);
   }
   atomic_store_explicit(&g_running, 0, memory_order_release);
+  pthread_mutex_unlock(&g_lifecycle_lock);
 }

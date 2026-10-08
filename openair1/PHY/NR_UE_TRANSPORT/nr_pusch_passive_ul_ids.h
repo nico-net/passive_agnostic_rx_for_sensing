@@ -47,6 +47,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h" // nr_dmrs_id_state_t (type only; the estimator
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
                                                        // functions themselves are NOT called here)
 
 #ifdef __cplusplus
@@ -55,6 +56,19 @@ extern "C" {
 
 /* scramblingID0/scramblingID1 are independent RRC fields -- one DM-RS estimator state per nSCID. */
 #define NR_UL_DMRS_NSCID 2
+bool nr_pusch_passive_ul_ue_state_enabled(void);
+void nr_pusch_passive_ul_ids_seed(const nr_ue_ul_ticket_t *ticket,
+                                  const nr_ue_ctx_t *dl, uint16_t pci);
+void nr_pusch_passive_ul_ids_confirm(const nr_ue_ul_ticket_t *ticket,
+                                     uint8_t nscid, uint16_t dmrs_id, uint16_t data_id);
+bool nr_pusch_passive_ul_ids_get(const nr_ue_ul_ticket_t *ticket, uint8_t nscid,
+                                 uint16_t *dmrs_id, uint16_t *data_id);
+void nr_pusch_passive_ul_ids_current(uint16_t rnti, uint8_t nscid, uint16_t pci,
+                                     uint16_t *dmrs_id, uint16_t *data_id);
+void nr_pusch_passive_ul_ids_failed(const nr_ue_ul_ticket_t *ticket);
+void nr_pusch_passive_ul_ids_reset(uint16_t rnti);
+void nr_pusch_passive_ul_ids_reset_all(void);
+uint64_t nr_pusch_passive_ul_ids_dropped(void);
 
 /* Read-only view of the UL DM-RS identity estimate for one nSCID (0 or 1). Read the decision with
  * nr_dmrs_id_2stage_decided() (acquire, inline -- no estimator symbol needed); the rest is diagnostic. */

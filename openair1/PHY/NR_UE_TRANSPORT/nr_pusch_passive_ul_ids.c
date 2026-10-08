@@ -28,12 +28,133 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
 #include "common/utils/LOG/log.h"
 
 /* ---- UL DM-RS scrambling identity, one two-window state per nSCID (final review I5) -------- */
 static nr_dmrs_id_2stage_t g_ul_dmrs_id[NR_UL_DMRS_NSCID];
 static bool                g_ul_dmrs_id_init[NR_UL_DMRS_NSCID];
 static pthread_mutex_t     g_ul_dmrs_id_lock[NR_UL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
+
+/* U4: fixed admission table. Tickets make stale CRC feedback from an earlier
+ * incarnation or configuration epoch harmless. ID priors are ranking hints;
+ * only a nonzero TB with a valid CRC confirms the IDs used for that attempt. */
+#define UL_IDS_UE_CAP 64
+typedef struct {
+  nr_ue_ul_ticket_t ticket;
+  uint16_t priors[3], dmrs_id[2], data_id;
+  uint8_t n_priors, confirmed_mask, trial;
+  bool used;
+} ul_ids_ue_t;
+static ul_ids_ue_t g_ue_ids[UL_IDS_UE_CAP];
+static pthread_mutex_t g_ue_ids_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_ue_ids_dropped;
+uint64_t nr_pusch_passive_ul_ids_dropped(void)
+{ return atomic_load_explicit(&g_ue_ids_dropped,memory_order_relaxed); }
+
+bool nr_pusch_passive_ul_ue_state_enabled(void)
+{
+  const char *v=getenv("ISAC_UL_UE_STATE");
+  return v && strcmp(v,"1")==0;
+}
+static bool same_ticket(const nr_ue_ul_ticket_t *a,const nr_ue_ul_ticket_t *b)
+{
+  return a->rnti==b->rnti && a->identity_gen==b->identity_gen &&
+         a->incarnation==b->incarnation && a->epoch==b->epoch;
+}
+static void prior_add(ul_ids_ue_t *s,int64_t value)
+{
+  if(value<0 || value>65535) return;
+  for(int i=0;i<s->n_priors;i++) if(s->priors[i]==value) return;
+  if(s->n_priors<3) s->priors[s->n_priors++]=(uint16_t)value;
+}
+void nr_pusch_passive_ul_ids_seed(const nr_ue_ul_ticket_t *t,const nr_ue_ctx_t *dl,uint16_t pci)
+{
+  if(!nr_pusch_passive_ul_ue_state_enabled() || !t || !dl ||
+     dl->identity_gen!=t->identity_gen || dl->incarnation!=t->incarnation ||
+     dl->cfg[NR_UEP_DCI_LEN_DL].value<0 || dl->cfg[NR_UEP_DCI_LEN_DL].verif!=NR_UEV_TRUSTED) return;
+  if(pthread_mutex_trylock(&g_ue_ids_lock)) {
+    atomic_fetch_add_explicit(&g_ue_ids_dropped,1,memory_order_relaxed); return;
+  }
+  ul_ids_ue_t *s=NULL;
+  for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==t->rnti) {s=&g_ue_ids[i];break;}
+  if(!s) for(int i=0;i<UL_IDS_UE_CAP;i++) if(!g_ue_ids[i].used) {s=&g_ue_ids[i];break;}
+  if(s) {
+    if(!s->used || !same_ticket(&s->ticket,t)) {memset(s,0,sizeof(*s));s->ticket=*t;s->used=true;}
+    prior_add(s,pci);
+    prior_add(s,dl->cfg[NR_UEP_PDSCH_SCR_ID].value);
+    prior_add(s,dl->cfg[NR_UEP_PDCCH_SCR_ID].value);
+  } else atomic_fetch_add_explicit(&g_ue_ids_dropped,1,memory_order_relaxed);
+  pthread_mutex_unlock(&g_ue_ids_lock);
+}
+void nr_pusch_passive_ul_ids_confirm(const nr_ue_ul_ticket_t *t,uint8_t nscid,uint16_t dmrs_id,uint16_t data_id)
+{
+  if(!nr_pusch_passive_ul_ue_state_enabled() || !t) return;
+  pthread_mutex_lock(&g_ue_ids_lock);
+  for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && same_ticket(&g_ue_ids[i].ticket,t)) {
+    g_ue_ids[i].dmrs_id[nscid&1]=dmrs_id;
+    g_ue_ids[i].data_id=data_id;
+    g_ue_ids[i].confirmed_mask|=1u<<(nscid&1);
+    break;
+  }
+  pthread_mutex_unlock(&g_ue_ids_lock);
+}
+bool nr_pusch_passive_ul_ids_get(const nr_ue_ul_ticket_t *t,uint8_t nscid,uint16_t *dmrs_id,uint16_t *data_id)
+{
+  if(!nr_pusch_passive_ul_ue_state_enabled() || !t) return false;
+  if(pthread_mutex_trylock(&g_ue_ids_lock)) return false;
+  bool found=false;
+  for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && same_ticket(&g_ue_ids[i].ticket,t) &&
+                                     (g_ue_ids[i].confirmed_mask & (1u<<(nscid&1)))) {
+    if(dmrs_id) *dmrs_id=g_ue_ids[i].dmrs_id[nscid&1];
+    if(data_id) *data_id=g_ue_ids[i].data_id;
+    found=true;break;
+  }
+  pthread_mutex_unlock(&g_ue_ids_lock);
+  return found;
+}
+void nr_pusch_passive_ul_ids_current(uint16_t rnti,uint8_t nscid,uint16_t pci,
+                                     uint16_t *dmrs_id,uint16_t *data_id)
+{
+  if(dmrs_id) *dmrs_id=pci;
+  if(data_id) *data_id=pci;
+  if(!nr_pusch_passive_ul_ue_state_enabled() || pthread_mutex_trylock(&g_ue_ids_lock)) return;
+  for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==rnti) {
+    ul_ids_ue_t *s=&g_ue_ids[i];
+    if(s->n_priors) {
+      const int ns=nscid&1;
+      if(dmrs_id) *dmrs_id=(s->confirmed_mask&(1u<<ns))?s->dmrs_id[ns]:s->priors[(s->trial/s->n_priors)%s->n_priors];
+      if(data_id) *data_id=s->confirmed_mask?s->data_id:s->priors[s->trial%s->n_priors];
+    }
+    break;
+  }
+  pthread_mutex_unlock(&g_ue_ids_lock);
+}
+void nr_pusch_passive_ul_ids_failed(const nr_ue_ul_ticket_t *t)
+{
+  if(!nr_pusch_passive_ul_ue_state_enabled() || !t) return;
+  pthread_mutex_lock(&g_ue_ids_lock);
+  for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && same_ticket(&g_ue_ids[i].ticket,t)) {
+    if(!g_ue_ids[i].confirmed_mask && g_ue_ids[i].n_priors>1)
+      g_ue_ids[i].trial=(g_ue_ids[i].trial+1)%(g_ue_ids[i].n_priors*g_ue_ids[i].n_priors);
+    break;
+  }
+  pthread_mutex_unlock(&g_ue_ids_lock);
+}
+void nr_pusch_passive_ul_ids_reset(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_ue_ids_lock);
+  for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && g_ue_ids[i].ticket.rnti==rnti)
+    memset(&g_ue_ids[i],0,sizeof(g_ue_ids[i]));
+  pthread_mutex_unlock(&g_ue_ids_lock);
+}
+void nr_pusch_passive_ul_ids_reset_all(void)
+{
+  pthread_mutex_lock(&g_ue_ids_lock);
+  memset(g_ue_ids,0,sizeof(g_ue_ids));
+  pthread_mutex_unlock(&g_ue_ids_lock);
+}
 
 const nr_dmrs_id_2stage_t *nr_pusch_passive_ul_dmrs_id(int nscid)
 {

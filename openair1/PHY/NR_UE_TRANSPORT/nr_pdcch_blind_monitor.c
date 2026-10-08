@@ -5183,6 +5183,18 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
 static void blind_ul_apply_scrambling_ids(const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out)
 {
   const bool dedicated = out->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1;
+  if (dedicated && nr_pusch_passive_ul_ue_state_enabled()) {
+    nr_ue_ul_ticket_t ticket;
+    nr_ue_ctx_t dl;
+    if (nr_ue_ctx_ul_ticket(out->rnti,&ticket) && nr_ue_ctx_try_get(out->rnti,&dl))
+      nr_pusch_passive_ul_ids_seed(&ticket,&dl,(uint16_t)opts->phy_cell_id);
+    uint16_t dmrs=opts->phy_cell_id, data=opts->phy_cell_id;
+    nr_pusch_passive_ul_ids_current(out->rnti,out->nscid,(uint16_t)opts->phy_cell_id,&dmrs,&data);
+    out->ul_dmrs_scrambling_id=opts->ul_dmrs_scrambling_id>=0 ? opts->ul_dmrs_scrambling_id : dmrs;
+    out->data_scrambling_id=opts->data_scrambling_id>=0 ? opts->data_scrambling_id : data;
+    out->data_id_advance=false;
+    return;
+  }
   const int ul_dmrs = dedicated ? nr_dmrs_id_2stage_decided(nr_pusch_passive_ul_dmrs_id(out->nscid)) : -1;
   const uint16_t ul_dmrs_fallback = ul_dmrs >= 0 ? (uint16_t)ul_dmrs : (uint16_t)opts->phy_cell_id;
   out->ul_dmrs_scrambling_id = (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : ul_dmrs_fallback);

@@ -60,12 +60,37 @@ typedef struct {
   double prb_size_mean;
   int64_t last_abs_slot;
 } nr_ue_stats_t;
+typedef enum { NR_UL_EVID_UNKNOWN, NR_UL_EVID_DL_PRIOR, NR_UL_EVID_PROVISIONAL,
+               NR_UL_EVID_TB_CONFIRMED } nr_ue_ul_evidence_t;
+typedef enum { NR_UL_F_DCI_LEN, NR_UL_F_LAYOUT, NR_UL_F_BWP, NR_UL_F_TDA,
+               NR_UL_F_K2, NR_UL_F_DMRS_ID0, NR_UL_F_DMRS_ID1, NR_UL_F_DATA_ID,
+               NR_UL_F_TA, NR_UL_F_CFO, NR_UL_F_COUNT } nr_ue_ul_field_t;
+typedef struct { int64_t value; uint8_t evidence; uint32_t epoch; } nr_ue_ul_value_t;
+typedef struct {
+  nr_ue_ul_value_t field[NR_UL_F_COUNT];
+  int64_t dl_bwp_prior; /* packed DL BWP, never a hard UL constraint; -1 unknown */
+  int32_t dl_cfo_prior_hz;
+  bool dl_cfo_prior_valid;
+  int32_t ta_command_units; /* RAR absolute plus CE deltas, in 16*64/2^mu Tc units */
+  uint8_t ta_mu;
+  bool ta_command_valid;
+  uint16_t id_priors[3]; /* PCI, DL PDSCH ID, PDCCH nID; ranking hints */
+  uint8_t n_id_priors;
+} nr_ue_ul_state_t;
+typedef struct { uint32_t identity_gen, epoch; uint16_t incarnation, rnti; } nr_ue_ul_ticket_t;
+typedef struct {
+  uint16_t dci_len, layout, bwp_start, bwp_size, dmrs_id, data_id;
+  uint8_t nscid, tda, k2;
+  int32_t ta_samples, cfo_hz;
+  uint16_t pci;
+} nr_ue_ul_update_t;
 typedef struct {
   uint32_t identity_gen;
   uint16_t rnti, incarnation;
   nr_ue_state_t state;
   nr_ue_cfg_value_t cfg[NR_UEP_COUNT];
   nr_ue_stats_t st;
+  nr_ue_ul_state_t ul;
   uint32_t n_changes, n_reconfigs;
 } nr_ue_ctx_t;
 typedef struct {
@@ -90,6 +115,10 @@ void nr_ue_ctx_on_dci01_csi(uint16_t rnti, uint8_t request, int64_t trigger_slot
 void nr_ue_ctx_tick(int64_t abs_slot, uint64_t t_mono_ns);
 bool nr_ue_ctx_get(uint16_t rnti, nr_ue_ctx_t *out);
 bool nr_ue_ctx_try_get(uint16_t rnti, nr_ue_ctx_t *out); /* producer: miss on lock contention */
+bool nr_ue_ctx_ul_ticket(uint16_t rnti, nr_ue_ul_ticket_t *out);
+void nr_ue_ctx_ul_grant(const nr_ue_ul_ticket_t *ticket, const nr_ue_ul_update_t *update);
+void nr_ue_ctx_ul_feedback(const nr_ue_ul_ticket_t *ticket, const nr_ue_ul_update_t *update, bool tb_crc_ok);
+void nr_ue_ctx_ul_ta_command(uint16_t rnti, int units, int mu, bool absolute);
 void nr_ue_ctx_stats(uint64_t *events, uint64_t *written, uint64_t *dropped);
 extern bool nr_ue_ctx_fast_open;
 static inline bool nr_ue_ctx_enabled(void)

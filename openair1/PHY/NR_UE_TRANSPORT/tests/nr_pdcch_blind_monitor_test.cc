@@ -5235,3 +5235,39 @@ TEST(EpochFeedback, InFlightJobAcrossBumpNotCredited) {
   EXPECT_FALSE(nr_dci11_pin_is_valid(&pin));
   EXPECT_EQ(dropped, 1u);
 }
+#include "nr_pusch_passive_ul_ids.h"
+
+TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
+  setenv("ISAC_UL_UE_STATE","1",1);
+  nr_pusch_passive_ul_ids_reset_all();
+  nr_ue_ctx_t dl{};
+  dl.identity_gen=1; dl.incarnation=0;
+  dl.cfg[NR_UEP_DCI_LEN_DL].value=52;
+  dl.cfg[NR_UEP_DCI_LEN_DL].verif=NR_UEV_TRUSTED;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].value=512;
+  dl.cfg[NR_UEP_PDCCH_SCR_ID].value=768;
+  nr_ue_ul_ticket_t a{1,4,0,0x101},b{1,4,0,0x102};
+  nr_pusch_passive_ul_ids_seed(&a,&dl,415);
+  nr_pusch_passive_ul_ids_seed(&b,&dl,415);
+  uint16_t dmrs=0,data=0;
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,415);
+  nr_pusch_passive_ul_ids_failed(&a);
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,512);
+  nr_pusch_passive_ul_ids_confirm(&a,0,900,901);
+  nr_pusch_passive_ul_ids_confirm(&b,0,700,701);
+  ASSERT_TRUE(nr_pusch_passive_ul_ids_get(&a,0,&dmrs,&data));
+  EXPECT_EQ(dmrs,900); EXPECT_EQ(data,901);
+  ASSERT_TRUE(nr_pusch_passive_ul_ids_get(&b,0,&dmrs,&data));
+  EXPECT_EQ(dmrs,700); EXPECT_EQ(data,701);
+  nr_ue_ul_ticket_t reused{1,5,1,0x101};
+  dl.incarnation=1;
+  nr_pusch_passive_ul_ids_seed(&reused,&dl,415);
+  EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&a,0,&dmrs,&data));
+  EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
+  nr_pusch_passive_ul_ids_confirm(&a,0,900,901);
+  EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
+  nr_pusch_passive_ul_ids_reset_all();
+  unsetenv("ISAC_UL_UE_STATE");
+}
