@@ -1066,6 +1066,7 @@ static void usrp_ring_producer(usrp_state_t *s)
   bool started = false;
   bool recovering = false;
   long long restart_scheduled_ticks = 0;
+  std::chrono::steady_clock::time_point restart_issued;
   usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max());
   auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (!s->ring_stop.load(std::memory_order_relaxed) && !s->rx_stop_requested.load(std::memory_order_relaxed)) {
@@ -1099,6 +1100,7 @@ static void usrp_ring_producer(usrp_state_t *s)
       fault = 1;
     if (fault) {
       if (usrp_rx_recover()) {
+        const auto fault_at = std::chrono::steady_clock::now();
         /* Keep the logical write index monotonic. The reader skips to this boundary and
          * gets the new hardware timestamp on the first packet of the restarted stream. */
         s->ring_restarting.store(true, std::memory_order_release);
@@ -1108,17 +1110,30 @@ static void usrp_ring_producer(usrp_state_t *s)
           recovering = true;
           started = false;
           bool restarted = false;
+          const char *restart_phase = "stop";
           try {
             uhd::stream_cmd_t stop(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
             stop.stream_now = true;
             s->rx_stream->issue_stream_cmd(stop);
+            const auto stopped_at = std::chrono::steady_clock::now();
+            restart_phase = "drain";
             uhd::rx_metadata_t dmd;
-            for (int k = 0; k < 200 && !s->rx_stop_requested.load() && !s->ring_stop.load(); k++) {
-              if (s->rx_stream->recv(ptr, n, dmd, 0.002, false) == 0)
+            int drained = 0, empty = 0;
+            for (int k = 0; k < 64 && !s->rx_stop_requested.load() && !s->ring_stop.load(); k++) {
+              const size_t old = s->rx_stream->recv(ptr, n, dmd, 0.001, false);
+              drained += old;
+              empty = old ? 0 : empty + 1;
+              if (empty == 2)
                 break;
             }
+            const auto drained_at = std::chrono::steady_clock::now();
             if (!s->rx_stop_requested.load() && !s->ring_stop.load()) {
-              std::this_thread::sleep_for(std::chrono::milliseconds(std::min(640, 10 << std::min(recovery.failures - 1, 6))));
+              restart_phase = "backoff";
+              /* Leave a short retry interval for RFNoC control settling, but
+               * never add hundreds of milliseconds to every air gap. */
+              if (recovery.failures > 1)
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(30, 5 * recovery.failures)));
+              const auto backoff_done_at = std::chrono::steady_clock::now();
               if (!s->rx_stop_requested.load() && !s->ring_stop.load()) {
                 uhd::stream_cmd_t again(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
                 /* RFNoC rejects stream_now on this four-channel X410 streamer. A timed
@@ -1126,18 +1141,31 @@ static void usrp_ring_producer(usrp_state_t *s)
                  * drain, inside the retry catch: a CTRLEP timeout is another recoverable
                  * attempt, not a reason to terminate the receiver. */
                 again.stream_now = false;
-                again.time_spec = s->usrp->get_time_now() + uhd::time_spec_t(0.1);
+                restart_phase = "time_read";
+                again.time_spec = s->usrp->get_time_now() + uhd::time_spec_t(0.02);
+                const auto time_read_at = std::chrono::steady_clock::now();
+                restart_phase = "start_cmd";
                 s->rx_stream->issue_stream_cmd(again);
+                restart_issued = std::chrono::steady_clock::now();
                 restart_scheduled_ticks = again.time_spec.to_ticks(s->sample_rate);
                 restarted = true;
-                LOG_W(HW, "SENSING: USRP_RING timed restart at %.9f (attempt %d)\n",
-                      again.time_spec.get_real_secs(), recovery.failures);
+                const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+                LOG_W(HW, "SENSING: USRP_RING timed restart at %.9f attempt=%d stop_ms=%.2f drain_ms=%.2f "
+                          "drained=%d backoff_ms=%.2f time_read_ms=%.2f start_cmd_ms=%.2f total_ms=%.2f\n",
+                      again.time_spec.get_real_secs(), recovery.failures, ms(fault_at, stopped_at),
+                      ms(stopped_at, drained_at), drained, ms(drained_at, backoff_done_at),
+                      ms(backoff_done_at, time_read_at), ms(time_read_at, restart_issued),
+                      ms(fault_at, restart_issued));
               }
             }
           } catch (const std::exception &ex) {
-            LOG_W(HW, "SENSING: USRP_RING recovery attempt %d failed: %s\n", recovery.failures, ex.what());
+            LOG_W(HW, "SENSING: USRP_RING recovery attempt %d failed phase=%s elapsed_ms=%.2f: %s\n",
+                  recovery.failures, restart_phase,
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fault_at).count(), ex.what());
           } catch (...) {
-            LOG_W(HW, "SENSING: USRP_RING recovery attempt %d failed\n", recovery.failures);
+            LOG_W(HW, "SENSING: USRP_RING recovery attempt %d failed phase=%s elapsed_ms=%.2f\n",
+                  recovery.failures, restart_phase,
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fault_at).count());
           }
           if (restarted) {
             start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -1148,7 +1176,7 @@ static void usrp_ring_producer(usrp_state_t *s)
           /* No START was accepted; retry on the next receive timeout instead
            * of treating the stopped stream as a five-second startup wait. */
           start_deadline = std::chrono::steady_clock::now();
-          std::this_thread::sleep_for(std::chrono::milliseconds(std::min(1000, 10 << std::min(recovery.failures, 6))));
+          std::this_thread::sleep_for(std::chrono::milliseconds(std::min(30, 5 * recovery.failures)));
           continue;
         }
         s->ring_restarting.store(false);
@@ -1201,6 +1229,10 @@ static void usrp_ring_producer(usrp_state_t *s)
         break;
       }
       if (recovering) {
+        if (restart_issued.time_since_epoch().count())
+          LOG_W(HW, "SENSING: USRP_RING first packet wait_ms=%.2f attempt=%d\n",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - restart_issued).count(),
+                recovery.failures);
         const long long raw_ticks = md.time_spec.to_ticks(s->sample_rate);
         /* Some X410 RX packets repeat the stream START timestamp. The new
          * timed command gives an independent lower bound on this epoch's
@@ -1223,7 +1255,7 @@ static void usrp_ring_producer(usrp_state_t *s)
     const int failures_before = recovery.failures;
     recovery.samples(got);
     if (failures_before && !recovery.failures)
-      LOG_I(HW, "SENSING: USRP_RING recovery budget reset after one second of clean streaming\n");
+      LOG_I(HW, "SENSING: USRP_RING failed-start budget reset after 20 ms of clean streaming\n");
     s->ring_written.store(recovery.write_index, std::memory_order_release);
     s->ring_cv.notify_one();
   }

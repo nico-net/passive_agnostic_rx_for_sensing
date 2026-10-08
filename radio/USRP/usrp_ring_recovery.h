@@ -3,6 +3,7 @@
 #define USRP_RING_RECOVERY_H
 #include <stdint.h>
 #include <stddef.h>
+#include <algorithm>
 
 /* A frozen X410 RX timestamp can still name the previous stream start. The
  * accepted timed START is a lower bound for the first sample of the new one. */
@@ -39,7 +40,10 @@ struct usrp_ring_recovery_state {
   {
     write_index += count;
     good_samples += count;
-    if (good_samples >= sample_rate) {
+    /* A start that delivered 20 ms of samples succeeded. Count only a burst
+     * of failed starts toward the fatal budget; do not spend it over several
+     * short, valid streams during a persistent packet-loss episode. */
+    if (good_samples >= std::max<uint64_t>(1, sample_rate / 50)) {
       failures = 0;
       good_samples = 0;
     }

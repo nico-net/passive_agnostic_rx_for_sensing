@@ -306,6 +306,7 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
                                       .pssTime = (c16_t *)pssTime};
   p_pss.window_center = params->pss_window_center;
   p_pss.window_radius = params->pss_window_radius;
+  p_pss.search_stride = params->pss_stride;
   nr_pss_info_t pss_info = pss_search_time_nr(&p_pss);
 
   // This is the frequency offset that will be applied in the compensation,
@@ -460,6 +461,7 @@ static void nr_scan_ssb(void *arg)
         .samples_per_slot_wCP = fp->samples_per_slot_wCP,
         .target_nid_cell = ssbInfo->targetNidCell,
         .pss_antennas = ssbInfo->pssAntennas,
+        .pss_stride = ssbInfo->pssStride,
         .pss_window_center = ssbInfo->pssWindowCenter,
         .pss_window_radius = ssbInfo->pssWindowRadius,
         .exclude_nid_cells = NULL, // No exclusion for initial sync
@@ -556,7 +558,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                   int n_frames,
                                   nr_gscn_info_t gscnInfo[MAX_GSCN_BAND],
                                   int numGscn, int pss_window_center, int pss_window_radius,
-                                  int pss_window_frame, int max_pss_antennas)
+                                  int pss_window_frame, int max_pss_antennas, int pss_stride)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
@@ -646,7 +648,12 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
             scan_src[0], 10.0 * log10((e_ant[scan_src[0]] + 1.0) / (e_ant[0] + 1.0)),
             scan_src[0], fp->nb_antennas_rx > 1 ? scan_src[1] : 0, fp->nb_antennas_rx > 2 ? scan_src[2] : 0, fp->nb_antennas_rx > 3 ? scan_src[3] : 0);
   }
-  const size_t rxdata_len = (size_t)fp->samples_per_frame * n_frames + fp->ofdm_symbol_size;
+  /* A predicted frame needs only that frame's IQ. Keep the returned frame ID
+   * in capture coordinates, but do not copy or scan the other 10 ms here. */
+  const bool one_frame = pss_window_frame >= 0 && pss_window_frame < n_frames;
+  const int scan_nframes = one_frame ? 1 : n_frames;
+  const size_t scan_source_start = one_frame ? (size_t)pss_window_frame * fp->samples_per_frame : 0;
+  const size_t rxdata_len = (size_t)fp->samples_per_frame * scan_nframes + fp->ofdm_symbol_size;
   const size_t bytes_per_gscn = (size_t)scan_fp.nb_antennas_rx * rxdata_len * sizeof(c16_t);
   nr_scan_scratch_parse_t scratch_status;
   const long scratch_mb = nr_initial_sync_scratch_mb(&scratch_status);
@@ -712,14 +719,15 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                     .fp = &scan_fp,
                                     .proc = proc,
                                     .syncRes.cell_detected = false,
-                                    .nFrames = n_frames,
+                                    .nFrames = scan_nframes,
                                     .foFlag = ue->UE_fo_compensation,
                                     .freqOffset = auto_acquire ? coarse_offset : ue->initial_fo,
                                     .targetNidCell = ue->target_Nid_cell};
       ssbInfo->pssWindowCenter = pss_window_center;
       ssbInfo->pssWindowRadius = pss_window_radius;
-      ssbInfo->pssWindowFrame = pss_window_frame;
+      ssbInfo->pssWindowFrame = one_frame ? 0 : pss_window_frame;
       ssbInfo->pssAntennas = max_pss_antennas;
+      ssbInfo->pssStride = pss_stride;
       ready[k] = false;
       ssbInfo->rxdata = malloc16_clear(scan_fp.nb_antennas_rx * sizeof(c16_t *));
       if (!ssbInfo->rxdata) {
@@ -738,8 +746,10 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
           ok = false;
           break; // partial allocation is released by the collection loop below
         }
-        memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[scan_src[ant]], sizeof(c16_t) * fp->samples_per_frame * n_frames);
-        memset(ssbInfo->rxdata[ant] + fp->samples_per_frame * n_frames, 0, fp->ofdm_symbol_size * sizeof(c16_t));
+        memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[scan_src[ant]] + scan_source_start,
+               sizeof(c16_t) * fp->samples_per_frame * scan_nframes);
+        memset(ssbInfo->rxdata[ant] + fp->samples_per_frame * scan_nframes, 0,
+               fp->ofdm_symbol_size * sizeof(c16_t));
         ssbInfo->rxdata_sz = rxdata_len;
       }
       ready[k] = ok;
@@ -761,7 +771,10 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
               ssbInfo->gscnInfo.ssRef);
         ssbInfo->ans = &ans;
         task_t t = {.func = nr_scan_ssb, .args = ssbInfo};
-        pushTpool(&get_nrUE_params()->Tpool, t);
+        if (pushed == 1 && (one_frame || pss_stride > 4))
+          nr_scan_ssb(ssbInfo); /* avoid a queued discovery task ahead of this one-cell recovery */
+        else
+          pushTpool(&get_nrUE_params()->Tpool, t);
       }
       join_task_ans(&ans);
     }
@@ -828,6 +841,8 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   LOG_D(PHY, "nr_initial sync ue RB_DL %d\n", fp->N_RB_DL);
 
   if (res) {
+    if (one_frame)
+      res->syncRes.frame_id += pss_window_frame;
     // sync at symbol ue->symbol_offset
     // computing the offset wrt the beginning of the frame
     int mu = fp->numerology_index;
@@ -922,14 +937,14 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
 nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, int n_frames,
                                   nr_gscn_info_t gscnInfo[MAX_GSCN_BAND], int numGscn)
 {
-  return nr_initial_sync_impl(proc, ue, n_frames, gscnInfo, numGscn, 0, 0, -1, 0);
+  return nr_initial_sync_impl(proc, ue, n_frames, gscnInfo, numGscn, 0, 0, -1, 0, 0);
 }
 
 nr_initial_sync_t nr_initial_sync_fast(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, int n_frames,
                                        nr_gscn_info_t gscnInfo[MAX_GSCN_BAND], int numGscn,
                                        int expected_frame, int expected_pss_position, int radius,
-                                       int max_pss_antennas)
+                                       int max_pss_antennas, int pss_stride)
 {
   return nr_initial_sync_impl(proc, ue, n_frames, gscnInfo, numGscn,
-                              expected_pss_position, radius, expected_frame, max_pss_antennas);
+                              expected_pss_position, radius, expected_frame, max_pss_antennas, pss_stride);
 }

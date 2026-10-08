@@ -136,6 +136,12 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
       s->source.gap_len = (uint64_t)(atof(glen) * s->source.rate);
       fprintf(stderr, "RAW_IQ_GAP armed at_s=%s len_s=%s\n", gat, glen);
     }
+    const char *gat2 = getenv("ISAC_RAW_IQ_GAP2_AT_S"), *glen2 = getenv("ISAC_RAW_IQ_GAP2_S");
+    if (gat2 && glen2 && atof(gat2) > 0 && atof(glen2) > 0) {
+      s->source.gap2_at = (uint64_t)(atof(gat2) * s->source.rate);
+      s->source.gap2_len = (uint64_t)(atof(glen2) * s->source.rate);
+      fprintf(stderr, "RAW_IQ_GAP armed gap=2 at_s=%s len_s=%s\n", gat2, glen2);
+    }
   }
   fprintf(stderr, "RAW_IQ_READY channels=%u samples=%" PRIu64 " first_tick=%" PRIu64
                   " rate=%.0f speed=%g shift=%u hardware_access=NONE memory_locking=disabled_for_offline_replay\n",

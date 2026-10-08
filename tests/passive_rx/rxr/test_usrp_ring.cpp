@@ -41,7 +41,9 @@ static void recovery_test()
   for (int i = 0; i < 3; i++) assert(stuck.fault());
   assert(!stuck.fault());
   assert(stuck.write_index == 0 && stuck.epoch == 0);
-  stuck.samples(1000); /* one clean second resets the consecutive budget */
+  stuck.samples(19);
+  assert(stuck.failures == 4);
+  stuck.samples(1); /* 20 ms of valid streaming resets the failed-start budget */
   assert(stuck.failures == 0);
   for (int i = 0; i < 3; i++) assert(stuck.fault());
   assert(!stuck.fault());

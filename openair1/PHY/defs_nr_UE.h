@@ -499,6 +499,7 @@ typedef struct {
   int pssWindowCenter, pssWindowRadius;
   int pssWindowFrame; /* -1 searches both capture frames */
   int pssAntennas; /* 0 = all configured branches */
+  int pssStride; /* 0 = ordinary four-sample correlation */
   c16_t **rxdata;
   int rxdata_sz;
   NR_DL_FRAME_PARMS *fp;
@@ -557,6 +558,7 @@ typedef struct {
   int samples_per_slot_wCP;
   int target_nid_cell; // -1 for blind search, specific PCI for targeted search
   int pss_antennas; /* 0 = use nb_antennas_rx; fast RX recovery may correlate one branch */
+  int pss_stride;
   int pss_window_center; /* RX recovery only; radius zero means full search */
   int pss_window_radius;
   const uint16_t *exclude_nid_cells; // PCIs to exclude (serving cell + already discovered neighboring cells)

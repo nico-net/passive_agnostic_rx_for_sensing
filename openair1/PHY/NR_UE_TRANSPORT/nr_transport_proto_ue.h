@@ -198,7 +198,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
 nr_initial_sync_t nr_initial_sync_fast(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *phy_vars_ue,
                                        int n_frames, nr_gscn_info_t gscnInfo[MAX_GSCN_BAND], int numGscn,
                                        int expected_frame, int expected_pss_position, int radius,
-                                       int max_pss_antennas);
+                                       int max_pss_antennas, int pss_stride);
 
 /*!
   \brief Common SSB search function shared by initial sync and neighbor cell search
