@@ -20,6 +20,7 @@ typedef struct {
   int qm;
   uint32_t n_re, n_sym;
   double err, ref;
+  double err_cpe; /* same decisions, after a per-symbol per-layer complex LS scale (common phase/amplitude) */
   double sig[NR_PDSCH_EVM_MAX_RX], res[NR_PDSCH_EVM_MAX_RX];
   int nbrx;
 } nr_pdsch_evm_acc_t;

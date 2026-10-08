@@ -135,6 +135,7 @@ typedef struct {
    * stream and per-RX-branch LS SNR, 1-layer CPU-demodulated full decodes only (evm_valid=false otherwise). */
   bool                 evm_valid;
   float                evm_pct;
+  float                evm_cpe_pct; ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
   float                br_snr_db[4];
   uint8_t              evm_nbrx;
   uint16_t             evm_nsym;
