@@ -366,8 +366,24 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
                  r->cand_table >= 0 ? r->cand_table : tl[ti], true, nt > 1, false, false, -1, dci, payload);
       }
     }
-    /* 2. the cell prior (another RNTI's solution), first */
-    if (g_have_prior) {
+    /* 2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best
+     * solved RNTI (most full TB CRC passes; layouts refined, S map and MCS table learnt since) instead of the snapshot
+     * taken at the first solve -- gNBs configure UEs from one RRC template. Still confirmed by this RNTI's own 2 passes. */
+    static int s_reuse = -1;
+    if (s_reuse < 0) s_reuse = getenv("ISAC_PDSCH_SOLVER_REUSE") && atoi(getenv("ISAC_PDSCH_SOLVER_REUSE")) ? 1 : 0;
+    const solver_rnti_t *best = NULL;
+    if (s_reuse)
+      for (int k = 0; k < SOLVER_RNTIS; k++)
+        if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && (!best || g_r[k].full_ok > best->full_ok))
+          best = &g_r[k];
+    if (best) {
+      for (int i = 0; i < n_rd; i++)
+        if (has_id(&rd[i], best->rep)) {
+          plan_known(out, &n, budget, slot, 0, i, rd, l0, best->rep, best->add_pos, best->table, best->S_by_tda, mcs, dci,
+                     payload);
+          break;
+        }
+    } else if (g_have_prior) {
       for (int i = 0; i < n_rd; i++)
         if (has_id(&rd[i], g_prior_rep)) {
           plan_known(out, &n, budget, slot, 0, i, rd, l0, g_prior_rep, g_prior_add_pos, g_prior_table,
