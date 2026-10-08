@@ -31,6 +31,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_qm_oracle.h"
 #include "nr_pdsch_chest_key.h" // K32: complete chest-cache key
 #include "nr_llr_norm.h" // K38: LLR-norm shift over code block 0's span
+#include "nr_pdsch_solver.h"
 #include "nr_scrambling_id_sweep.h" // per-RNTI dataScramblingIdentityPDSCH TB-CRC walk (Task 13)
 #include "nr_td_grantwork.h" // GrantWork-lite: per-grant shared FEP/chest/LLR per geometry signature
 #include "nr_pdsch_adaptive_config.h" // hypothesis -> PDU (start, length, DM-RS mask, MCS table)
@@ -1507,7 +1508,16 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       }
     }
     t_seg_ok_last = seg_ok;
-    if (t_probe_first_seg && C_full > 1) {
+    /* T26b: a probe of a ONE-code-block TB decodes that block with the TB CRC (CRC16/24A), but its outcome was never
+     * recorded (only C > 1 set t_probe_seg_ok), so every single-CB probe read "failed" -- measured on the PCI 415
+     * replay: probes whose dumped LLRs decode offline at LDPC iteration 1 reported CRC fail. ISAC_PDSCH_PROBE_C1=1
+     * (implied by ISAC_PDSCH_SOLVER=1) records it, same all-zero guard, still never a decoded TB. */
+    static int s_probe_c1 = -1;
+    if (s_probe_c1 < 0) {
+      const char *e = getenv("ISAC_PDSCH_PROBE_C1");
+      s_probe_c1 = ((e && atoi(e) != 0) || nr_pdsch_solver_enabled()) ? 1 : 0;
+    }
+    if (t_probe_first_seg && (C_full > 1 || s_probe_c1)) {
       t_probe_seg_ok = (seg_ok == 1);
       /* The all-zero guard the full-TB path applies, on segment 0: an all-zero code block carries a
        * zero CRC24B, so LLRs that are mostly "0" (wrong layout, wrong scrambling, empty grant) pass

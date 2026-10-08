@@ -128,6 +128,8 @@ typedef struct {
   /// sweep (nr_pdsch_passive_data_id_feed), so an attempt that used the PCI never perturbs a sweep
   /// it did not use.
   bool     data_id_advance;
+  /// T26b grant solver (ISAC_PDSCH_SOLVER): nonzero = report this job's CRC to nr_pdsch_solver_feedback()
+  uint32_t solver_token;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in
