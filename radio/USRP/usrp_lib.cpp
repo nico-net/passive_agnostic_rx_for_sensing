@@ -1961,6 +1961,25 @@ ring_read_retry:
       }
       g_ring_copy_bytes.fetch_add((uint64_t)recv_target * nch * sizeof(int32_t), std::memory_order_relaxed);
     }
+    /* PER-ANTENNA POWER (ISAC_USRP_CHPOW_S=N, default 0 = off): every N seconds log each channel's mean power over
+     * this read's first ring segment (dBFS, sc16 full scale 32768). One read per period: negligible cost. */
+    {
+      static int period_s = -1;
+      static std::chrono::steady_clock::time_point next_p{};
+      if (period_s < 0) { const char *e = getenv("ISAC_USRP_CHPOW_S"); period_s = e ? atoi(e) : 0; }
+      const auto now_p = std::chrono::steady_clock::now();
+      if (period_s > 0 && now_p >= next_p) {
+        next_p = now_p + std::chrono::seconds(period_s);
+        char pbuf[256]; int off = 0;
+        for (int i = 0; i < nch && off < (int)sizeof(pbuf) - 32; i++) {
+          const int16_t *xs = (const int16_t *)(s->ring[i].data() + pos); double acc = 0;
+          for (size_t k = 0; k < n1; k++) { const double re = xs[2 * k], im = xs[2 * k + 1]; acc += re * re + im * im; }
+          const double pw = n1 ? acc / n1 / (32768.0 * 32768.0) : 0;
+          off += snprintf(pbuf + off, sizeof(pbuf) - off, " ch%d=%.2f", i, pw > 0 ? 10 * log10(pw) : -200.0);
+        }
+        LOG_I(HW, "SENSING: CHPOW sample=%llu dBFS%s\n", (unsigned long long)r, pbuf);
+      }
+    }
     first_metadata = uhd::rx_metadata_t();
     first_metadata.has_time_spec = true;
     const uint64_t epoch = s->ring_epoch.load(std::memory_order_acquire);
