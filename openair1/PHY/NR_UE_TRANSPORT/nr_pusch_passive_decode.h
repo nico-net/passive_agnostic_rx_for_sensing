@@ -119,6 +119,14 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              double   fo_hz,
                              nr_pusch_passive_out_t *out);
 
+/* One-code-block CRC probe. Caller guarantees a QPSK grant with A <= 3824;
+ * the existing one-CB ULSCH decoder supplies the same CB/TB CRC verdict.
+ * Probe results do not train the ordinary UL ID/HARQ/observation state. */
+bool nr_pusch_passive_decode_probe(PHY_VARS_NR_UE *ue, int ctx, uint32_t frame,
+                                   uint8_t slot, const nr_pdcch_blind_ul_result_t *g,
+                                   int32_t ta_offset_samples, uint64_t abs_slot,
+                                   double fo_hz, nr_pusch_passive_out_t *out);
+
 /* Actual production UL FFT, shared by immutable measurement diagnostics.
  * Positive sample_offset advances the window; fo_hz uses the receiver convention.
  * Output is before the symbol rotation applied by the full PUSCH decoder. */

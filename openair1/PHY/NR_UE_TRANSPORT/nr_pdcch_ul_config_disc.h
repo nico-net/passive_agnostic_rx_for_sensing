@@ -35,6 +35,11 @@ void nr_pdcch_ul_config_disc_stats(nr_pdcch_ul_config_stats_t *out);
 bool nr_pdcch_ul_config_disc_locked(uint16_t rnti, uint16_t length,
                                     const nr_pdcch_ul_config_prior_t *prior,
                                     nr_pdcch_blind_ul_opts_t *out);
+/* Worker-side snapshot of all equal-length interpretations belonging to this
+ * producer ticket. A stale/reused ticket returns zero; no state is advanced. */
+int nr_pdcch_ul_config_disc_options(const nr_pdcch_blind_ul_result_t *grant,
+                                    nr_pdcch_blind_ul_opts_t *out, int capacity,
+                                    int *selected);
 /* Accepted DL DCI occupancy supplies a weak 20-slot TDD prior without SIB1. */
 void nr_pdcch_ul_config_disc_note_dl_slot(uint32_t abs_slot);
 

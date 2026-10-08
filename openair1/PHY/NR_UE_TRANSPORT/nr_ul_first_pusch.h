@@ -10,7 +10,8 @@
 static inline bool nr_ul_chain_on(void)
 {
   const char *v = getenv("ISAC_UL_PUSCH_CHAIN");
-  return v && strcmp(v, "1") == 0;
+  const char *s = getenv("ISAC_UL_PUSCH_SOLVER");
+  return (v && strcmp(v, "1") == 0) || (s && strcmp(s, "1") == 0);
 }
 
 /* Caller serializes access. Bounded per-UE milestone state, never a CRC oracle. */

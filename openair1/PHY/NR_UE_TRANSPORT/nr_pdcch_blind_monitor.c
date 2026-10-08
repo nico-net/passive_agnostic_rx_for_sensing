@@ -3373,7 +3373,9 @@ void nr_pdcch_blind_monitor_init(void)
    * OTA configuration lacks. Full-auto keeps the UL BWP/TDRA unknown until U3
    * proposes a ticket; the flag is the only new default-off activation point. */
   const char *ul_chain = getenv("ISAC_UL_PUSCH_CHAIN");
-  if (ul_chain && strcmp(ul_chain,"1") == 0 && g_cfg.dl_full_auto) {
+  const char *ul_solver = getenv("ISAC_UL_PUSCH_SOLVER");
+  if (((ul_chain && strcmp(ul_chain,"1") == 0) ||
+       (ul_solver && strcmp(ul_solver,"1") == 0)) && g_cfg.dl_full_auto) {
     g_cfg.dci01_scan = 1;
     g_cfg.dci01_length_override = 0;
     g_cfg.ul_pusch_decode = 1;

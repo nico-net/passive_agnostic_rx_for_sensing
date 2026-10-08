@@ -24,6 +24,7 @@
  * nr_pusch_passive_decode.c. */
 
 #include "nr_pusch_passive_ul_ids.h"
+#include "nr_ul_first_pusch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.h"
 
 #include <pthread.h>
@@ -58,7 +59,9 @@ bool nr_pusch_passive_ul_ue_state_enabled(void)
 {
   const char *v=getenv("ISAC_UL_UE_STATE");
   const char *chain=getenv("ISAC_UL_PUSCH_CHAIN");
-  return (chain && strcmp(chain,"1")==0) || (v && strcmp(v,"1")==0);
+  const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
+  return (chain && strcmp(chain,"1")==0) || (solver && strcmp(solver,"1")==0) ||
+         (v && strcmp(v,"1")==0);
 }
 static bool same_ticket(const nr_ue_ul_ticket_t *a,const nr_ue_ul_ticket_t *b)
 {
@@ -129,7 +132,7 @@ void nr_pusch_passive_ul_ids_current(uint16_t rnti,uint8_t nscid,uint16_t pci,
       if(dmrs_id) *dmrs_id=(s->confirmed_mask&(1u<<ns))?s->dmrs_id[ns]:s->priors[(s->trial/s->n_priors)%s->n_priors];
       if(data_id) {
         if (s->confirmed_mask) *data_id=s->data_id;
-        else if (getenv("ISAC_UL_PUSCH_CHAIN") && strcmp(getenv("ISAC_UL_PUSCH_CHAIN"),"1")==0 &&
+        else if (nr_ul_chain_on() &&
                  s->failed_grants>=9 && (s->failed_grants%16)!=0)
           *data_id=(uint16_t)((s->failed_grants-9-(s->failed_grants-1)/16)%1024);
         else *data_id=s->priors[s->trial%s->n_priors];

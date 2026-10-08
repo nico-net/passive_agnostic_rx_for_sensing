@@ -82,7 +82,9 @@ bool nr_pdcch_ul_bank_enabled(void)
   if (on < 0) {
     const char *s = getenv("ISAC_UL_DCI_BANK");
     const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
-    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0);
+    const char *solver = getenv("ISAC_UL_PUSCH_SOLVER");
+    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0) ||
+         (solver && strcmp(solver, "1") == 0);
     atomic_store_explicit(&enabled, on, memory_order_relaxed);
   }
   return on != 0;
@@ -137,7 +139,9 @@ bool nr_pdcch_ul_config_disc_enabled(void)
   if (on < 0) {
     const char *s = getenv("ISAC_UL_CONFIG_DISC");
     const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
-    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0);
+    const char *solver = getenv("ISAC_UL_PUSCH_SOLVER");
+    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0) ||
+         (solver && strcmp(solver, "1") == 0);
     atomic_store_explicit(&enabled, on, memory_order_relaxed);
   }
   return on != 0;
@@ -187,7 +191,9 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
   static const uint8_t width_pairs[][2] = {
     {0,0}, {1,0}, {0,1}, {1,1}, {0,2}, {2,0}, {1,2}, {2,1}, {2,2}
   };
-  for (int pass = 0; pass < 4 && u->n < UL_CFG_HYP; ++pass)
+  const char *solver_flag=getenv("ISAC_UL_PUSCH_SOLVER");
+  const bool solver=solver_flag && strcmp(solver_flag,"1")==0;
+  for (int pass = 0; pass < (solver ? 5 : 4) && u->n < UL_CFG_HYP; ++pass)
   for (int g = 0; g < 10 && u->n < UL_CFG_HYP; ++g) {
     const int start = starts[g], size = sizes[g];
     if (start < 0 || size < 1 || start + size > carrier || size > 275) continue;
@@ -197,6 +203,9 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
       o.bwp_start = start; o.bwp_size = size;
       o.fdra_bwp_start = start;
       o.fdra_mode = mode == 0 ? NR_FDRA_TYPE1 : mode == 1 ? NR_FDRA_TYPE0_CFG1 : NR_FDRA_DYN_CFG1;
+      /* A configured hopping flag consumes one DCI bit. Give its first
+       * equal-length width split an early slot in the catalogue. */
+      if (solver && pass == 1) o.freq_hopping_bits = 1;
       if (td) {
         /* Unknown RRC list: search two small legal tables as alternatives
          * to TS 38.214's 16-row default. The row is intentionally a
@@ -219,7 +228,7 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
         const int bw = width_pairs[w][0], sri = width_pairs[w][1];
         const int csi = csi_total - bw - sri;
         if (csi < 0 || csi > 6) continue;
-        if (nth++ != pass) continue;
+        if (nth++ != (solver ? (pass <= 1 ? 0 : pass - 1) : pass)) continue;
         o.bwp_indicator_bits = bw;
         o.sri_bits = sri;
         o.csi_request_bits = csi;
@@ -232,6 +241,7 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
       for (int k = 0; k < u->n; ++k) {
         const nr_pdcch_blind_ul_opts_t *x = &u->h[k].opts;
         dup |= x->bwp_start == start && x->bwp_size == size && x->fdra_mode == o.fdra_mode
+               && x->freq_hopping_bits == o.freq_hopping_bits
                && x->tda_count == o.tda_count
                && x->bwp_indicator_bits == o.bwp_indicator_bits
                && x->sri_bits == o.sri_bits && x->csi_request_bits == o.csi_request_bits;
@@ -399,4 +409,25 @@ bool nr_pdcch_ul_config_disc_locked(uint16_t rnti, uint16_t length,
     }
   pthread_mutex_unlock(&mu);
   return found;
+}
+
+int nr_pdcch_ul_config_disc_options(const nr_pdcch_blind_ul_result_t *g,
+                                    nr_pdcch_blind_ul_opts_t *out, int capacity,
+                                    int *selected)
+{
+  if (selected) *selected = -1;
+  if (!g || !out || capacity <= 0 || !(g->hyp_generation & UL_CFG_TAG)) return 0;
+  pthread_mutex_lock(&mu);
+  const ticket_t *t = &tickets[g->hyp_generation % UL_CFG_TICKET];
+  int n = 0;
+  if (t->token == g->hyp_generation && t->rnti == g->rnti && t->length == g->dci_length
+      && t->hash == nr_dci_bits_hash(&g->raw_payload, g->dci_length) && t->ue < UL_CFG_UE
+      && ue[t->ue].incarnation == t->incarnation && ue[t->ue].rnti == g->rnti) {
+    const ue_t *u = &ue[t->ue];
+    n = u->n < capacity ? u->n : capacity;
+    if (selected) *selected = t->hyp;
+    for (int i = 0; i < n; ++i) out[i] = u->h[i].opts;
+  }
+  pthread_mutex_unlock(&mu);
+  return n;
 }

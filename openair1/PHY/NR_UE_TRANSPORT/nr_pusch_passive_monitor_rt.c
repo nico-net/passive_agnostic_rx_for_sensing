@@ -10,6 +10,7 @@
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_pusch_passive_queue.h"
 #include "nr_pusch_passive_ul_ids.h"
+#include "nr_pusch_solver.h"
 #include "nr_pusch_data_aided.h"
 #include "nr_ul_first_pusch.h"
 #include <time.h>
@@ -258,6 +259,15 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
 
 void nr_pusch_grant_book_stats_dump(void)
 {
+  if (nr_pusch_solver_enabled()) {
+    nr_pusch_solver_stats_t s={0};
+    nr_pusch_solver_stats(&s);
+    LOG_I(PHY,"SENSING: UL_PUSCH_SOLVER grants=%lu probes=%lu probe_ok=%lu candidates=%lu solved=%lu fulls=%lu full_ok=%lu drops=%lu cpu_us_per_probe=%.1f\n",
+          (unsigned long)s.grants,(unsigned long)s.probes,(unsigned long)s.probe_ok,
+          (unsigned long)s.candidates,(unsigned long)s.solved,(unsigned long)s.fulls,
+          (unsigned long)s.full_ok,(unsigned long)s.drops,
+          s.probes ? (double)s.probe_cpu_us/s.probes : 0.0);
+  }
   if (nr_ul_chain_on())
     LOG_I(PHY,"SENSING: UL_CHAIN_DROP no_dl_lock=%lu no_hyp=%lu not_0_1=%lu skipped_rv=%lu\n",
           (unsigned long)atomic_load_explicit(&g_chain_no_dl_lock,memory_order_relaxed),

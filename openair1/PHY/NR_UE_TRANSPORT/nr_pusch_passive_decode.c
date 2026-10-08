@@ -12,12 +12,14 @@
 #include <time.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <pthread.h>
 
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the DL decoder
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
+#include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
 #include "nr_pusch_passive_decode.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
@@ -125,6 +127,7 @@ typedef struct {
 } passive_ul_scratch_t;
 static passive_ul_scratch_t g_scratch[NR_PUSCH_PASSIVE_MAX_CTX];
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+static __thread bool t_solver_probe;
 void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
 {
   *try_ = atomic_load(&g_try);
@@ -518,6 +521,10 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
 bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue)
 {
   if (!ue || !passive_gnb_prepare(ue, 0)) return false;
+  /* The solver can try DFT-s-OFDM tables. The normal gNB init generates
+   * these low-PAPR pilots before RX; this private context bypasses that init. */
+  const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
+  if (solver && !strcmp(solver,"1")) generate_lowpapr_typ1_refsig_sequences(SHRT_MAX);
   passive_ul_snapshot_t *s = &g_snapshot[0];
   if (g_pipeline_ready) return true;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -842,8 +849,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   const bool timing_disc = nr_ul_chain_on() ||
       (getenv("ISAC_UL_TIMING_DISC") && !strcmp(getenv("ISAC_UL_TIMING_DISC"), "1"));
-  const bool dmrs_disc = nr_ul_chain_on() ||
-      (getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1"));
+  const bool dmrs_disc = !t_solver_probe && (nr_ul_chain_on() ||
+      (getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1")));
   nr_pdcch_blind_ul_result_t discovery_grant;
   if (timing_disc || dmrs_disc) {
     discovery_grant = *g;
@@ -1074,8 +1081,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         if (best_score >= 0.35 && nr_pusch_ul_disc_accept(best_score, best_pairs, &fa)) {
           ul_sample_offset = best_advance;
           out->ta_applied_samples = best_advance;
-          nr_pusch_ul_disc_timing_update(g->rnti, ta_offset_samples, best_advance,
-                                         best_score, (long)abs_slot);
+          if (!t_solver_probe)
+            nr_pusch_ul_disc_timing_update(g->rnti, ta_offset_samples, best_advance,
+                                           best_score, (long)abs_slot);
           LOG_I(PHY, "SENSING: UL_TIMING_DISC rnti=0x%04x slot=%lu nominal=%d advance=%d residual=%d score=%.3f fa<=%.2g\n",
                 g->rnti, (unsigned long)abs_slot, ta_offset_samples, best_advance,
                 best_advance-ta_offset_samples, best_score, fa);
@@ -1100,7 +1108,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->dmrs_id = g->ul_dmrs_scrambling_id;
   out->data_id = g->data_scrambling_id;
   out->nscid = g->nscid;
-  if (!gapped && !fdra_unresolved) ul_dmrs_energy_oracle_observe(g, fp, gnb, slot_off, symsz);
+  if (!t_solver_probe && !gapped && !fdra_unresolved) ul_dmrs_energy_oracle_observe(g, fp, gnb, slot_off, symsz);
   if (abs_slot && !g_snapshot[ctx].valid && !nr_passive_samples_valid(
       atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),
       (long)abs_slot,fp->slots_per_frame)) {
@@ -1266,7 +1274,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * The antennas are kept SEPARATE (nof_ant > 1, ant_stride_re) rather than combined: the whole
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
-  if (!gapped && !fdra_unresolved && (nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS))) {
+  if (!t_solver_probe && !gapped && !fdra_unresolved && (nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS))) {
     const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
@@ -1708,10 +1716,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
-    if (!fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
+    if (!t_solver_probe && !fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
-    if (g->data_id_advance)
+    if (!t_solver_probe && g->data_id_advance)
       nr_pusch_passive_data_id_feed(false);
     return false;
   }
@@ -1740,21 +1748,21 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
-  atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+  if (!t_solver_probe) atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
   // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-verified, non-all-zero TB
   // (this point, past the ZERO_TB guard above) is strong enough evidence to seed/refresh this
   // (rnti, pid)'s record. Every UL grant this receiver decodes is dedicated (0_0/0_1 only ever
   // schedule a C-/TC-RNTI), so there is no SI/RA/P-class table-churn case to guard against here
   // (unlike the DL twin). A grant that itself USED a stored record (have_ul_init_tx) is a
   // retransmission, not a fresh resolvable MCS, so it does not refresh the record either.
-  if (!have_ul_init_tx) {
+  if (!t_solver_probe && !have_ul_init_tx) {
     pthread_mutex_lock(&g_ul_harq_init_lock);
     if (nr_cfg_epoch_work_current()) nr_harq_init_tx_record(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, pdu.qam_mod_order, g->nrOfLayers,
                            pdu.maintenance_parms_v3.ldpcBaseGraph, tbs, pdu.target_code_rate);
     pthread_mutex_unlock(&g_ul_harq_init_lock);
   }
-  if (!fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
-  if (g->data_id_advance)
+  if (!t_solver_probe && !fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
+  if (!t_solver_probe && g->data_id_advance)
     nr_pusch_passive_data_id_feed(true);
   {
     /* dataScramblingIdentityPUSCH, same argument as the DL: a CRC-OK TB under this n_ID is proof. */
@@ -1839,8 +1847,8 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     const int winner = nr_pdcch_blind_ul_fdra_try(g, passive_fdra_attempt, &retry);
     ok = winner >= 0;
     if (!cfr_only && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) {
-      nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, ok);
-      if (g->data_id_advance) nr_pusch_passive_data_id_feed(ok);
+      if (!t_solver_probe) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, ok);
+      if (!t_solver_probe && g->data_id_advance) nr_pusch_passive_data_id_feed(ok);
     }
     if (ok) {
       static _Atomic unsigned long resolved;
@@ -1866,7 +1874,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
           (unsigned)out->qam_mod_order, out->snr_db, out->est_delay, out->segments_ok,
           out->n_segments, (unsigned)out->status, out->reject_reason ? out->reject_reason : "-");
   }
-  if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
+  if (!t_solver_probe && (nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
                     out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {
     /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). cfr_only calls end UNSUPPORTED. */
     struct timespec ts_;
@@ -1906,6 +1914,18 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     if (nr_ue_ctx_enabled()) nr_ue_ctx_on_obs(&o_);
   }
+  return ok;
+}
+
+bool nr_pusch_passive_decode_probe(PHY_VARS_NR_UE *ue, int ctx, uint32_t frame,
+                                   uint8_t slot, const nr_pdcch_blind_ul_result_t *g,
+                                   int32_t ta_offset_samples, uint64_t abs_slot,
+                                   double fo_hz, nr_pusch_passive_out_t *out)
+{
+  t_solver_probe = true;
+  const bool ok = nr_pusch_passive_decode(ue, ctx, frame, slot, g, ta_offset_samples,
+                                          abs_slot, false, fo_hz, out);
+  t_solver_probe = false;
   return ok;
 }
 
