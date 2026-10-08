@@ -1333,7 +1333,7 @@ void *UE_thread(void *arg)
     AssertFatal(!syncRunning, "At this point synchronization can't be running\n");
 
     if (!UE->is_synchronized) {
-      if (rx_recover_on && rx_recover_start.tv_sec && ++rx_recover_fast_tries > 2)
+      if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries >= 2)
         UE->target_Nid_cell = rx_recover_old_target; /* full search fallback */
       /* Acquisition consumes frames outside the slot-read accounting. Never compare
        * a new lock against the final timestamp of the previous lock. */
@@ -1370,8 +1370,9 @@ void *UE_thread(void *arg)
       syncMsg->fast_pss_radius = 0;
       syncMsg->fast_pss_wide_radius = 0;
       syncMsg->recover_epoch = rx_recover_epoch;
-      if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries <= 2
+      if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries < 2
           && rx_recover_last_pss_tick) {
+        rx_recover_fast_tries++; /* only a submitted fast search spends a try */
         const long long capture_start = (long long)syncMsg->capture_end - (long long)2 * fp->samples_per_frame;
         /* The serving SSB repeats every 20 ms. Keep the frame parity: reducing
          * this to a 10 ms frame puts every other expected PSS one frame away. */
@@ -1810,7 +1811,7 @@ void *UE_thread(void *arg)
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
           /* Legacy fieldbook owns its local epoch; reconf uses only the drained central listener. */
-          if (!nr_cfg_reconf_enabled() && !rx_recover_on)
+          if (!nr_cfg_reconf_enabled())
             nr_pdsch_config_sweep_fieldbook_bump_epoch();
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
             if (rx_recover_on)

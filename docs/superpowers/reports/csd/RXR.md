@@ -71,3 +71,11 @@ ISAC_RAW_IQ_GAP_AT_S=5 ISAC_RAW_IQ_GAP_S=0.05
 ## Deferred measurements
 
 - [DEFERRED OTA, orchestrator] Run the existing full DL-dedicated X410/DPDK command, 4 × 122.88 MS/s, three 150 s runs without a relaunch wrapper, with `ISAC_RX_RECOVER=1 ISAC_RX_RECOVER_MAX=20 ISAC_USRP_RING_ZEROCOPY=1 ISAC_USRP_RING_TRAFFIC_METRICS=1 ISAC_METRICS=1`. For every real overflow or CTRLEP exception, record stop, drain, backoff, time-read, START-command, and first-packet phases; verify an air gap under 0.5 s, a positive `gap_samples`, normal-case resync under 1 s, and sustained CSI-RS, CORESET, PDCCH, and PDSCH decoding after every epoch. Check that no later fault exhausts the failed-start budget after a valid 20 ms burst. Record ring traffic counter deltas per second and repeat with `ISAC_USRP_RING_ZEROCOPY=0` for the copy baseline. No radio command was run in this sandbox. The loaded final replay's first resync took 2,230 ms, so the timing target is explicitly unproven and a potential remaining risk.
+
+## Review fixes (REVIEW1 section 1) -- 2026-10-08
+
+- A: `usrp_ring_recovery_state` gains a fault-window budget (`ISAC_RX_RECOVER_MAX_FAULTS`, default 20, per `ISAC_RX_RECOVER_WINDOW_S`, default 60 s; active only with ISAC_RX_RECOVER=1). The 21st fault in the window returns false and takes the existing T29 fatal path (exit 3). The consecutive-failure budget and its 20 ms reset are unchanged.
+- B: new `NR_CAUSE_RX_RECOVERY` (appended to the enum) is what `nr_cfg_epoch_note_rx_recovery()` emits; `nr_csirs_disc` epoch_listener keeps confirmed CSI-RS only on that cause. Short-gap SOFT/CONTINUITY_LOSS (ISAC_RECONF=1, recovery off) purges as in csd/int2.
+- D: `rx_recover_fast_tries` is incremented only when a sync job is submitted with fast-PSS parameters; discarded non-contiguous captures no longer spend a try (two fast tries, then full search).
+- C: the missing-time-spec fault is gated on ISAC_RX_RECOVER (legacy direct-error path otherwise); the legacy fieldbook epoch bump is restored to `!reconf` and so also runs with recovery on.
+- Tests [UNIT, DGX CPU build]: `test_usrp_ring.cpp` fault_window_test (fault every 30 ms -> fatal at the 21st; sparse faults keep recovering; window disabled = legacy), `CfgEpoch.RxRecoveryHasOwnCauseAndShortGapDoesNot`. Not exercised on air.

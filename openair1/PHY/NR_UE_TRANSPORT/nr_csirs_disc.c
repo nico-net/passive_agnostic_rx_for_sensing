@@ -116,7 +116,7 @@ static int delta_limit(const nr_csirs_disc_ring_t *ring)
 static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 {
   const bool rx_recovery = snapshot->last_class == NR_EPOCH_SOFT
-                        && snapshot->last_cause == NR_CAUSE_CONTINUITY_LOSS;
+                        && snapshot->last_cause == NR_CAUSE_RX_RECOVERY;
   pthread_mutex_lock(&pipeline_lock);
   cache_count=qualified_count=evidence_retries=0;cache_grid=NULL;cache_written=0;
   ++evidence_epoch;

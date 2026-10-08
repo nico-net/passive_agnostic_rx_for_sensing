@@ -57,6 +57,38 @@ static void recovery_test()
   assert(usrp_ring_has_samples(11, 10, 1));
 }
 
+static void fault_window_test()
+{
+  /* 48 kS/s: 20 ms = 960 samples. A fault every 30 ms, each preceded by a clean 20 ms, resets
+   * `failures` every time; only the fault-window budget can end it. */
+  usrp_ring_recovery_state s(48000, 20, 20, 60.0);
+  int n = 0;
+  double t = 0;
+  bool ok = true;
+  while (ok && n < 1000) {
+    ok = s.fault(t);
+    n++;
+    s.first_packet();
+    s.samples(960);
+    assert(s.failures == 0);
+    t += 0.030;
+  }
+  assert(!ok && n == 21); /* the 21st fault inside 60 s is fatal */
+  /* Sparse faults (one per 5 s, 12 per window) keep recovering indefinitely. */
+  usrp_ring_recovery_state sparse(48000, 20, 20, 60.0);
+  for (int i = 0; i < 500; i++) {
+    assert(sparse.fault(i * 5.0));
+    sparse.first_packet();
+    sparse.samples(960);
+  }
+  /* Window disabled (flag off): behaviour is the legacy consecutive-failure budget only. */
+  usrp_ring_recovery_state off(48000, 20);
+  for (int i = 0; i < 500; i++) {
+    assert(off.fault(i * 0.030));
+    off.samples(960);
+  }
+}
+
 static void wrap_test()
 {
   const size_t cap = 17;
@@ -78,4 +110,4 @@ static void wrap_test()
     }
 }
 
-int main() { recovery_test(); wrap_test(); }
+int main() { recovery_test(); fault_window_test(); wrap_test(); }

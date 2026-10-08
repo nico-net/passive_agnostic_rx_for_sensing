@@ -1024,6 +1024,16 @@ static int usrp_rx_recover_max(void)
   static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
   return limit;
 }
+static int usrp_rx_recover_window_max(void)
+{
+  static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX_FAULTS"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
+  return limit;
+}
+static double usrp_rx_recover_window_s(void)
+{
+  static const double w = [] { const char *e = getenv("ISAC_RX_RECOVER_WINDOW_S"); return e && atof(e) > 0 ? atof(e) : 60.0; }();
+  return w;
+}
 static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
 {
   if (w < (uint64_t)s->sample_rate)
@@ -1067,7 +1077,8 @@ static void usrp_ring_producer(usrp_state_t *s)
   bool recovering = false;
   long long restart_scheduled_ticks = 0;
   std::chrono::steady_clock::time_point restart_issued;
-  usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max());
+  usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max(),
+                                    usrp_rx_recover() ? usrp_rx_recover_window_max() : 0, usrp_rx_recover_window_s());
   auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (!s->ring_stop.load(std::memory_order_relaxed) && !s->rx_stop_requested.load(std::memory_order_relaxed)) {
     const uint64_t w = recovery.write_index;
@@ -1096,7 +1107,7 @@ static void usrp_ring_producer(usrp_state_t *s)
       continue;
     if (!fault && md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE)
       fault = 1;
-    if (!fault && got && !started && !md.has_time_spec)
+    if (!fault && got && !started && !md.has_time_spec && usrp_rx_recover())
       fault = 1;
     if (fault) {
       if (usrp_rx_recover()) {
@@ -1106,7 +1117,7 @@ static void usrp_ring_producer(usrp_state_t *s)
         s->ring_restarting.store(true, std::memory_order_release);
         s->ring_epoch_start.store(w, std::memory_order_release);
         s->ring_cv.notify_all();
-        if (recovery.fault()) {
+        if (recovery.fault(std::chrono::duration<double>(fault_at.time_since_epoch()).count())) {
           recovering = true;
           started = false;
           bool restarted = false;
