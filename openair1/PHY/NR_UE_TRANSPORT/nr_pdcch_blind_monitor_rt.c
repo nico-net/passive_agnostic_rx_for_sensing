@@ -2421,8 +2421,10 @@ static bool ussh_allows(uint64_t geom, uint16_t rnti, int slot, int cce, int L)
     if (u->geom != geom || !u->n || u->nh == 0) continue;
     allow = false;
     for (int h = 0; h < u->nh && !allow; h++) {
+      /* An AL never seen in the fit (M=0) may still be configured: its m=0 position is independent of M_L,
+       * so it stays admitted (one candidate per unseen AL) instead of being excluded forever (T26c). */
       const int M = u->h[h].M[al_idx(L)];
-      allow = M > 0 && ussh_in(rnti, slot, cce, L, u->h[h].N, kUsshA[u->h[h].a], M);
+      allow = ussh_in(rnti, slot, cce, L, u->h[h].N, kUsshA[u->h[h].a], M > 0 ? M : 1);
     }
     break;
   }
@@ -5169,6 +5171,16 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         disc_cand[disc_n_cand++] = (nr_pdcch_autodiscover_cand_t){
             .e_rx = &pdcch_e_rx[idx], .L = (uint8_t)L, .cce = rel15->CCE[c]};
         idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
+      }
+      /* ISAC_PDCCH_USS_HASH (T26c): a KNOWN RNTI's length sweep on a discovered configured-nID CORESET only needs
+       * that RNTI's own hash positions -- the others cannot carry its DCI. Live PCI 415 with ~15 RNTIs: the sweep
+       * (34 lengths x every candidate, one unresolved RNTI per occasion) was 58 % of the dedicated scan. */
+      if (dlc && bootstrap_rnti && cfg->discovered_coreset && ussh_enabled()) {
+        int kept = 0;
+        for (int c = 0; c < disc_n_cand; ++c)
+          if (ussh_allows(dl_geom, bootstrap_rnti, proc->nr_slot_rx, disc_cand[c].cce, disc_cand[c].L))
+            disc_cand[kept++] = disc_cand[c];
+        disc_n_cand = kept;
       }
       if (disc_n_cand > 0) {
         if (dl_scout) disc_n_cand = 1;

@@ -991,7 +991,7 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
 
 /** Maximum simultaneously tracked UEs. A passive receiver hears every UE on the cell, so this is
  * the ceiling on how many it can follow at once, not a property of the deployment. */
-#define NR_PDCCH_BLIND_MAX_UE 16
+#define NR_PDCCH_BLIND_MAX_UE 64
 
 /* Publish pdsch-ConfigCommon's PDSCH TDRA list, decoded to (S, L, mappingType) triples.
  * SI-RNTI's own SIB1 grants deliberately ignore it (the list travels inside SIB1), but RA-RNTI,

@@ -23,6 +23,8 @@
 #include <stdlib.h> // atoi (ISAC_RX_MRC_MODE)
 #include <math.h>   // log10 (RXBRANCH probe)
 #include <complex.h>
+#include <math.h>
+#include "nr_pdsch_evm_acc.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 
@@ -45,6 +47,7 @@ __thread int nr_dlsch_forced_branch = -1;
  * separate live runs cannot answer whether four branches hurt, because propagation, gain state and
  * this rig's own 5-88 % CRC swing all change between runs. */
 __thread int nr_dlsch_forced_mask = -1;
+__thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
 __thread int nr_dlsch_chest_per_symbol = 0;
 extern __thread uint32_t nr_dl_chest_nvar_ant[]; // per-branch chest noise, published by the chest on this thread // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
 __thread int nr_dlsch_used_branch = -1;
@@ -1571,6 +1574,65 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         hq[k].r = (int16_t)(((int32_t)hq[k].r * w) >> 15); hq[k].i = (int16_t)(((int32_t)hq[k].i * w) >> 15);
         yq[k].r = (int16_t)(((int32_t)yq[k].r * w) >> 15); yq[k].i = (int16_t)(((int32_t)yq[k].i * w) >> 15);
       }
+    }
+  }
+
+  /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h. */
+  if (nr_pdsch_evm_acc.armed && nl == 1 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
+    nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
+    const int qm = dlsch->cw_info.qamModOrder;
+    const int lmax = (1 << (qm / 2)) - 1;
+    double ms = 0.0;
+    int nlev = 0;
+    for (int l = 1; l <= lmax; l += 2) { ms += (double)l * l; nlev++; }
+    const double ideal_pow = 2.0 * ms / nlev;
+    const int nb = nbRx < NR_PDSCH_EVM_MAX_RX ? nbRx : NR_PDSCH_EVM_MAX_RX;
+    double xr[rx_size_symbol], xi[rx_size_symbol];
+    double pw = 0.0;
+    uint32_t nv = 0;
+    for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+      double nr = 0.0, ni = 0.0, g = 0.0;
+      for (int a = mrc_rx_index; a < mrc_rx_index + mrc_nb_rx; a++) {
+        const c16_t h = chFext[0][a][i], y = rxdataF_ext[a][i];
+        nr += (double)h.r * y.r + (double)h.i * y.i;
+        ni += (double)h.r * y.i - (double)h.i * y.r;
+        g += (double)h.r * h.r + (double)h.i * h.i;
+      }
+      if (g <= 0.0) { xr[i] = xi[i] = NAN; continue; }
+      xr[i] = nr / g; xi[i] = ni / g;
+      pw += xr[i] * xr[i] + xi[i] * xi[i];
+      nv++;
+    }
+    if (nv >= 12 && pw > 0.0) {
+      const double scale = sqrt(ideal_pow / (pw / nv));
+      double cr[NR_PDSCH_EVM_MAX_RX] = {0}, ci[NR_PDSCH_EVM_MAX_RX] = {0}, P[NR_PDSCH_EVM_MAX_RX] = {0}, Y[NR_PDSCH_EVM_MAX_RX] = {0};
+      for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+        if (isnan(xr[i])) continue;
+        const double vi = xr[i] * scale, vq = xi[i] * scale;
+        double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
+        si = si > lmax ? lmax : si < -lmax ? -lmax : si;
+        sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
+        ea->err += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+        ea->ref += ideal_pow;
+        for (int a = 0; a < nb; a++) {
+          const c16_t h = chFext[0][a][i], y = rxdataF_ext[a][i];
+          const double hsr = h.r * si - h.i * sq, hsi = h.r * sq + h.i * si; /* h * d (scale cancels in the LS fit) */
+          cr[a] += y.r * hsr + y.i * hsi;
+          ci[a] += y.i * hsr - y.r * hsi;
+          P[a] += hsr * hsr + hsi * hsi;
+          Y[a] += (double)y.r * y.r + (double)y.i * y.i;
+        }
+      }
+      for (int a = 0; a < nb; a++) {
+        if (P[a] <= 0.0) continue;
+        const double sig = (cr[a] * cr[a] + ci[a] * ci[a]) / P[a];
+        ea->sig[a] += sig;
+        ea->res[a] += Y[a] > sig ? Y[a] - sig : 0.0;
+      }
+      ea->n_re += nv;
+      ea->n_sym++;
+      ea->qm = qm;
+      ea->nbrx = nb;
     }
   }
 

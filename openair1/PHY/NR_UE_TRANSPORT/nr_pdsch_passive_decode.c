@@ -43,6 +43,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include <stdatomic.h>
 #include <math.h>
 #include <pthread.h> // sqrt/floor/log10 (EQDIAG)
+#include "nr_pdsch_evm_acc.h"
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
 
@@ -1088,9 +1089,9 @@ static bool passive_harq_prepare(passive_harq_t *h, int n_rb_dl)
  * NDI did not toggle for that process is a retransmission and is decoded INTO the stored buffer with
  * the first transmission's TBS. Only the FIRST decode call per TB uses it (retries must not add the
  * same LLRs twice), and a busy entry is skipped rather than waited on (a consumer must never block
- * behind another's decode). Evicted least-recently-used; 16 entries covers every live HARQ process
- * of two UEs, which is what a lab cell has. */
-#define NR_HARQC_N 16
+ * behind another's decode). Evicted least-recently-used; 64 entries (T26c, was 16) cover the live HARQ processes
+ * of a busy cell (LRU beyond that). */
+#define NR_HARQC_N 64
 #define NR_HARQC_RV0_EVIDENCE 64 /* same-NDI rv-0 grants on undecoded processes before rv-0 combining is admitted */
 typedef struct {
   _Atomic int busy;
@@ -3643,6 +3644,12 @@ gpu_llr_ready:;
     memcpy(llr, gw_view.llr, (size_t)G * sizeof(int16_t));
     memcpy(dl_valid_re, gw_meta->dl_valid_re, sizeof(dl_valid_re));
   }
+  { /* ISAC_PDSCH_EVM_GRANT (T26c): arm the per-grant EVM accumulator for the CPU demod loop below */
+    static int s_evmg = -1;
+    if (s_evmg < 0) s_evmg = getenv("ISAC_PDSCH_EVM_GRANT") ? 1 : 0;
+    memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
+    nr_pdsch_evm_acc.armed = s_evmg && probe_last_sym < 0 && !gpu_llr && !gw_ready;
+  }
   for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)
       continue; /* probe: past the horizon, LLR count stays 0 for this symbol */
@@ -3692,6 +3699,18 @@ gpu_llr_ready:;
   }
 
   pdtim_add(PDTIM_DEMOD, pdt_dem);
+  if (nr_pdsch_evm_acc.armed) {
+    nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
+    ea->armed = 0;
+    if (demod_ok && ea->n_sym > 0 && ea->ref > 0.0) {
+      out->evm_valid = true;
+      out->evm_pct = (float)(sqrt(ea->err / ea->ref) * 100.0);
+      out->evm_nbrx = (uint8_t)ea->nbrx;
+      out->evm_nsym = (uint16_t)ea->n_sym;
+      for (int a = 0; a < ea->nbrx && a < 4; a++)
+        out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
+    }
+  }
 
   /* ---- RE-BUDGET INVARIANT (CPU path, whole allocation demodulated). G above is what rate
    * de-matching will read; the demodulator must have produced exactly that many LLRs. A mismatch --

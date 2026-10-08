@@ -177,7 +177,7 @@ uint64_t nr_pdcch_dci_length_wide_probes(void); /* cumulative probe occasions ac
 
 /* A caller-serialized bank. Interleaved UEs never reset one another; geometry
  * epoch changes invalidate all entries. Eviction discards evidence, never reuses it. */
-#define NR_PDCCH_LENGTH_CONTEXTS 16
+#define NR_PDCCH_LENGTH_CONTEXTS 64
 typedef enum { NR_LEN_SEARCHING = 0, NR_LEN_LOCKED = 1, NR_LEN_SUSPECT = 2 } nr_len_state_t;
 uint32_t nr_pdcch_dci_length_n_suspect_from_env(void);
 typedef struct {
