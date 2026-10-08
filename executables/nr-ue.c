@@ -1,6 +1,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
+/* Set once the first initial sync succeeds; read by the USRP driver (dlsym) to bound its pre-sync stream restarts. */
+int nr_ue_rx_synced_g = 0;
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // field book epoch bump on stream discontinuity
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
@@ -291,6 +293,7 @@ static void UE_synch(void *arg) {
     LOG_I(PHY, "Got synch: hw_slot_offset %d, carrier off %d Hz\n", hw_slot_offset, freq_offset);
 
     UE->is_synchronized = 1;
+    __atomic_store_n(&nr_ue_rx_synced_g, 1, __ATOMIC_RELEASE);
   } else {
     int gain_change = 0;
     if (get_nrUE_params()->agc)

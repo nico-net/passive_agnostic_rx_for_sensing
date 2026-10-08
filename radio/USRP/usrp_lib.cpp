@@ -30,6 +30,7 @@
 #include <time.h>
 #include "common/utils/LOG/log.h"
 #include "common_lib.h"
+#include <dlfcn.h>
 #include "assertions.h"
 #include "system.h"
 #include "common/utils/nr_core_plan.h"
@@ -694,6 +695,8 @@ typedef struct {
   std::mutex ring_mu;
   std::condition_variable ring_cv;
   std::atomic<bool> rx_stop_requested{false};
+  std::atomic<bool> ring_restarting{false};
+  std::chrono::steady_clock::time_point ring_pace_next{};  // reader pacing (ISAC_USRP_CATCHUP_X)   // producer is stopping/draining/re-issuing the stream (pre-sync restart)
   std::mutex rx_mutex;
   bool rx_started = false;
   bool gpio_configured = false;
@@ -978,6 +981,34 @@ static int usrp_ring_ms(void)
   return ms;
 }
 
+/* PRE-SYNC RESTART WINDOW (ISAC_USRP_RESTART_UNTIL_SYNC, default 1; 0 = legacy first-second-only).
+ * MEASURED 2026-10-08 (X410 34B2AF1, DPDK, 4 x 122.88 MS/s, common config): about half the starts dropped packets
+ * (ERROR_CODE_OVERFLOW, out of sequence) 1-2 s into the stream, during the initial cell search, i.e. just past
+ * the first-second restart window -> fatal. Until the PHY reports its first sync nothing depends on sample
+ * continuity (the cell search simply retries), so a restart is safe for as long as the receiver is unsynced. */
+static int usrp_restart_max(void)
+{
+  static int m = -1;
+  if (m < 0) {
+    const char *e = getenv("ISAC_USRP_RESTART_MAX");
+    m = e && atoi(e) > 0 ? atoi(e) : 10;
+  }
+  return m;
+}
+static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
+{
+  if (w < (uint64_t)s->sample_rate)
+    return true;
+  static int until_sync = -1;
+  static const int *synced = NULL;
+  if (until_sync < 0) {
+    const char *e = getenv("ISAC_USRP_RESTART_UNTIL_SYNC");
+    until_sync = (e == NULL || atoi(e) != 0) ? 1 : 0;
+    synced = (const int *)dlsym(RTLD_DEFAULT, "nr_ue_rx_synced_g");
+  }
+  return until_sync && synced != NULL && __atomic_load_n(synced, __ATOMIC_ACQUIRE) == 0;
+}
+
 static void usrp_ring_producer(usrp_state_t *s)
 {
   const char *core = getenv("ISAC_USRP_RING_CORE");
@@ -1034,9 +1065,10 @@ static void usrp_ring_producer(usrp_state_t *s)
        * counting so the samples handed downstream stay contiguous in index (the gap lands before
        * any acquisition). After the first second an error still fails loudly. */
       static int s_restarts = 0;
-      if (w < (uint64_t)s->sample_rate && s_restarts < 5
+      if (usrp_restart_allowed(s, w) && s_restarts < usrp_restart_max()
           && md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) { /* overflow/sequence, late START (EOB) */
         s_restarts++;
+        s->ring_restarting.store(true);
         try {
           uhd::stream_cmd_t stop(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
           stop.stream_now = true;
@@ -1050,9 +1082,11 @@ static void usrp_ring_producer(usrp_state_t *s)
           again.time_spec = s->usrp->get_time_now() + uhd::time_spec_t(0.1);
           s->rx_stream->issue_stream_cmd(again);
         } catch (...) {
+          s->ring_restarting.store(false);
           s->ring_err.store(3);
           break;
         }
+        s->ring_restarting.store(false);
         LOG_W(HW, "SENSING: USRP_RING_RESTART %d after %s at sample %llu (before any sync)\n", s_restarts,
               md.strerror().c_str(), (unsigned long long)w);
         continue;
@@ -1729,7 +1763,7 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
 
   samples_received = 0;
   const bool first_buffer = s->wait_for_first_pps != 0;
-  const auto deadline = std::chrono::steady_clock::now()
+  auto deadline = std::chrono::steady_clock::now()
       + std::chrono::seconds(first_buffer ? 3 : 1);
   uhd::rx_metadata_t first_metadata;
   std::vector<void *> pointers(cc);
@@ -1748,6 +1782,8 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     {
       std::unique_lock<std::mutex> lk(s->ring_mu);
       while (s->ring_written.load(std::memory_order_acquire) - r < (uint64_t)recv_target) {
+        if (s->ring_restarting.load()) /* a pre-sync stream restart is in progress: wait for it, not the deadline */
+          deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         if (s->ring_err.load() || s->rx_stop_requested.load() || std::chrono::steady_clock::now() >= deadline)
           break;
         s->ring_cv.wait_for(lk, std::chrono::milliseconds(2));
@@ -1762,6 +1798,27 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
                              : e == 1 ? "UHD metadata error"
                              : e == 3 ? "exception in ring producer"
                                       : "receive deadline expired");
+    }
+    /* CATCH-UP PACING (ISAC_USRP_CATCHUP_X, default 1.5; 0 = off). After the initial cell search the PHY
+     * drains the ring backlog (up to ISAC_USRP_RING_MS of 4-channel IQ, ~1 GB) with back-to-back memcpy; that
+     * burst exceeds the platform's ~2 GB/s CPU-coherent headroom and the DPDK workers drop packets
+     * (2026-10-08: overflows during/after the cell search; benchmark_rate alone is clean). Cap the copy-out
+     * rate at X times real time; in steady state (1x) this never sleeps. */
+    {
+      static double x = -1;
+      if (x < 0) {
+        const char *e = getenv("ISAC_USRP_CATCHUP_X");
+        x = e ? atof(e) : 1.5;
+        if (!(x > 0)) x = 0;
+      }
+      if (x > 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (s->ring_pace_next.time_since_epoch().count() == 0 || now > s->ring_pace_next + std::chrono::milliseconds(20))
+          s->ring_pace_next = now; /* no credit accumulation */
+        else if (now < s->ring_pace_next)
+          std::this_thread::sleep_until(s->ring_pace_next);
+        s->ring_pace_next += std::chrono::nanoseconds((long long)(1e9 * recv_target / (s->sample_rate * x)));
+      }
     }
     const int nch = std::min<int>(cc, (int)s->ring.size());
     const size_t pos = r % s->ring_cap;
