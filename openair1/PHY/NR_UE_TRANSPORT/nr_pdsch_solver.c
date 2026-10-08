@@ -327,6 +327,24 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       t_rm = csirs_slot ? r->rm : 0;
       plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, mcs, dci, payload);
     }
+    /* REFINEMENT: the solution's layouts can still disagree on fields two passes did not separate (e.g. where the
+     * antenna-ports field sits). Each other reading those layouts give for THIS DCI gets one probe with the same
+     * physical parameters; a pass narrows the layout set to that reading (feedback), and the representative follows. */
+    const int S_here = r->S_by_tda[tda_of(r->rep, payload)];
+    int refine = 0;
+    for (int i = 0; i < n_rd && n < budget && refine < 4; i++) {
+      if (i == ri || rd[i].num_rb > SOLVER_SEARCH_MAX_RB) continue;
+      int ov = 0;
+      for (int k = 0; k < rd[i].n_ids && !ov; k++)
+        ov = (r->cand_bm[rd[i].ids[k] >> 3] >> (rd[i].ids[k] & 7)) & 1;
+      if (!ov) continue;
+      uint8_t tl[3];
+      const int nt = tables_for(mcs, tl);
+      if (nt == 0) break;
+      emit(out, &n, budget, slot, 1, i, rd, l0, S_here >= 0 ? S_here : 1, r->add_pos, r->table >= 0 ? r->table : tl[0],
+           true, nt > 1, false, false, tda_of(r->rep, payload), dci, payload);
+      refine++;
+    }
   } else if (csirs_slot) {
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
   } else {
@@ -348,8 +366,24 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
                  r->cand_table >= 0 ? r->cand_table : tl[ti], true, nt > 1, false, false, -1, dci, payload);
       }
     }
-    /* 2. the cell prior (another RNTI's solution), first */
-    if (g_have_prior) {
+    /* 2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best
+     * solved RNTI (most full TB CRC passes; layouts refined, S map and MCS table learnt since) instead of the snapshot
+     * taken at the first solve -- gNBs configure UEs from one RRC template. Still confirmed by this RNTI's own 2 passes. */
+    static int s_reuse = -1;
+    if (s_reuse < 0) s_reuse = getenv("ISAC_PDSCH_SOLVER_REUSE") && atoi(getenv("ISAC_PDSCH_SOLVER_REUSE")) ? 1 : 0;
+    const solver_rnti_t *best = NULL;
+    if (s_reuse)
+      for (int k = 0; k < SOLVER_RNTIS; k++)
+        if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && (!best || g_r[k].full_ok > best->full_ok))
+          best = &g_r[k];
+    if (best) {
+      for (int i = 0; i < n_rd; i++)
+        if (has_id(&rd[i], best->rep)) {
+          plan_known(out, &n, budget, slot, 0, i, rd, l0, best->rep, best->add_pos, best->table, best->S_by_tda, mcs, dci,
+                     payload);
+          break;
+        }
+    } else if (g_have_prior) {
       for (int i = 0; i < n_rd; i++)
         if (has_id(&rd[i], g_prior_rep)) {
           plan_known(out, &n, budget, slot, 0, i, rd, l0, g_prior_rep, g_prior_add_pos, g_prior_table,
@@ -482,6 +516,19 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
       r->rm = (int8_t)p->rm;
       LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x CSI-RS rate matching %s (CRC-selected per RNTI)\n", r->rnti,
             p->rm ? "APPLIED" : "NOT applied");
+    }
+    if (crc_ok && r->cand_bm) { /* narrow the solution's layouts to those that read this DCI as the passing variant */
+      int kept = 0;
+      for (int i = 0; i < p->n_ids; i++) kept += (r->cand_bm[p->ids[i] >> 3] >> (p->ids[i] & 7)) & 1;
+      if (kept > 0) {
+        uint8_t *nb = calloc(1, BM_BYTES);
+        if (nb) {
+          for (int i = 0; i < p->n_ids; i++)
+            if ((r->cand_bm[p->ids[i] >> 3] >> (p->ids[i] & 7)) & 1) nb[p->ids[i] >> 3] |= (uint8_t)(1u << (p->ids[i] & 7));
+          memcpy(r->cand_bm, nb, BM_BYTES);
+          free(nb);
+        }
+      }
     }
     if (crc_ok) {
       r->cons_fail = 0;
