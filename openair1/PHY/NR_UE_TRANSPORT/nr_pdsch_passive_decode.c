@@ -3660,7 +3660,9 @@ gpu_llr_ready:;
     static int s_evmg = -1;
     if (s_evmg < 0) s_evmg = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE")) ? 1 : 0; /* the SNR gate needs the measurement */
     memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
-    nr_pdsch_evm_acc.armed = s_evmg && probe_last_sym < 0 && !gpu_llr && !gw_ready;
+    static int s_evmp = -1; /* ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too */
+    if (s_evmp < 0) s_evmp = getenv("ISAC_PDSCH_EVM_PROBES") ? 1 : 0;
+    nr_pdsch_evm_acc.armed = s_evmg && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
   }
   for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)

@@ -48,6 +48,7 @@ extern __thread int nr_dl_chest_diag_request;
 static __thread uint32_t t_delay_epoch;
 static __thread delay_t t_delay_val;
 static __thread int t_delay_have;
+static __thread int t_delay_reused; /* this call reused the shared delay: ch_estimates_time was NOT computed */
 static int chest_delay_share(void)
 {
   static int en = -1;
@@ -57,9 +58,12 @@ static int chest_delay_share(void)
 }
 static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_est, c16_t *ch_estimates_time, delay_t *delay)
 {
-  const bool share = chest_delay_share() && nr_dl_chest_delay_epoch != 0 && !nr_dl_chest_diag_request;
+  /* the BRDELAY/PDP diagnostic (requested on every passive decode) is computed only where the IDFT still runs */
+  const bool share = chest_delay_share() && nr_dl_chest_delay_epoch != 0;
+  t_delay_reused = 0;
   if (share && t_delay_have && t_delay_epoch == nr_dl_chest_delay_epoch) {
     *delay = t_delay_val;
+    t_delay_reused = 1;
     return;
   }
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
@@ -980,7 +984,7 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
   }
   c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
   chest_est_delay(frame_parms, dl_ls_est, ch_estimates_time, delay);
-  if (nr_dl_chest_diag_request) {
+  if (nr_dl_chest_diag_request && !t_delay_reused) {
     /* PDP shape: % of IDFT energy within +/-8 samples of the peak, and the strongest secondary peak
      * outside that window (signed position, dB below the main peak). Shape is scale-free. */
     const int N = frame_parms->ofdm_symbol_size;
