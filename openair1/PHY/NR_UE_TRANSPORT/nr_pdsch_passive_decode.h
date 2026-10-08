@@ -131,6 +131,13 @@ typedef struct {
   uint32_t             G;     ///< coded bits available on the allocation
   uint32_t             nvar;  ///< noise variance from channel estimation (fusion weight downstream)
   uint8_t              qm_measured; ///< modulation order from the equalised symbols (nr_pdsch_qm_oracle.h), 0 = abstained
+  /* ISAC_PDSCH_EVM_GRANT (T26c, nr_pdsch_evm_acc.h): decision-directed post-equalisation EVM of the combined
+   * stream and per-RX-branch LS SNR, 1-layer CPU-demodulated full decodes only (evm_valid=false otherwise). */
+  bool                 evm_valid;
+  float                evm_pct;
+  float                br_snr_db[4];
+  uint8_t              evm_nbrx;
+  uint16_t             evm_nsym;
 } nr_pdsch_passive_decode_result_t;
 
 /**

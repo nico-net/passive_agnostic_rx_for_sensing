@@ -6,7 +6,7 @@
 #include <string.h>
 #include "common/utils/LOG/log.h"
 
-#define SOLVER_RNTIS 16
+#define SOLVER_RNTIS 64
 #define SOLVER_PENDING 4096 /* FIFO-overwritten: probes dropped stale in the queue never report back */
 #define SOLVER_MAX_IDS 1024
 #define SOLVER_SEARCH_MAX_RB 48   /* search probes only readings this narrow (cost; the small grants decode best) */

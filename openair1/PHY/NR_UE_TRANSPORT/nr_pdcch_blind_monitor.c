@@ -792,7 +792,7 @@ void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, n
 }
 /* RNTI TAGGING (2026-09-16): before an (extent,mapping) candidate's evidence is wiped by
  * extent_clear_evidence(), log which RNTI(s) backed its votes. This is deliberately just a
- * log line over the existing small per-candidate evidence array (NR_PDCCH_BLIND_MAX_UE=16
+ * log line over the existing small per-candidate evidence array (NR_PDCCH_BLIND_MAX_UE
  * slots) -- NOT a new per-RNTI search state, see memory per-rnti-contexts-deferred.md. Lets a
  * later offline pass check whether accepted-but-unverified evidence is split across RNTIs that
  * imply genuinely different UE configs (one CORESET truth should draw votes from ONE coherent
