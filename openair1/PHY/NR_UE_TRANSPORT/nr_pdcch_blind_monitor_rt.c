@@ -4055,6 +4055,107 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
   return dup;
 }
 
+/* ---- ISAC_PDCCH_PAR_BANKS=1 (T26d): the banked CORESET passes of ONE dedicated-only slot run on two threads ----------
+ * Each pass is ~250 us FEP+LLR + decode on a big core; with two populated CORESETs a slot costs >= 2 passes back to back,
+ * which alone puts the per-slot scan time above 500 us. Phase 1 (FEP/LLR/decode) of different passes is independent by
+ * design (N scan consumers, Task A7) and Phase 2 is serialised by its lock, so banks 1..n-1 run on one helper thread
+ * (own FFT via its own PDCCH FEP cache) while the scan consumer runs bank 0 and the remaining passes; joined before the
+ * slot's SCANTIME is taken. Helper core: ISAC_PDCCH_PAR_CORE (default: the process affinity). */
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  const UE_nr_rxtx_proc_t *proc;
+  bool serial;
+  long src_abs;
+  int first, n, shares, additional;
+  uint64_t vd;
+  uint32_t stamp;
+  _Atomic uint64_t *counter;
+  bool reconf;
+  int state; /* 0 idle, 1 queued/running, 2 done */
+} par_bank_job_t;
+typedef struct { /* one helper per scan consumer thread (TLS), so two consumers never share a job slot */
+  pthread_mutex_t mu;
+  pthread_cond_t cv, done_cv;
+  par_bank_job_t job;
+} par_helper_t;
+static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                                    bool serial_candidates, long source_absolute_slot);
+static void *par_bank_worker(void *arg)
+{
+  par_helper_t *hp = (par_helper_t *)arg;
+  pthread_setname_np(pthread_self(), "pdcchParBank");
+  const char *ce = getenv("ISAC_PDCCH_PAR_CORE"); /* "c0,c1": one core per helper, in creation order */
+  static _Atomic int s_idx;
+  const int my = atomic_fetch_add(&s_idx, 1);
+  for (int k = 0; ce && *ce; k++) {
+    char *end;
+    const long c = strtol(ce, &end, 10);
+    if (end == ce) break;
+    if (k == my) {
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      CPU_SET((int)c, &set);
+      pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+      break;
+    }
+    ce = (*end == ',') ? end + 1 : end;
+  }
+  for (;;) {
+    pthread_mutex_lock(&hp->mu);
+    while (hp->job.state != 1) pthread_cond_wait(&hp->cv, &hp->mu);
+    par_bank_job_t j = hp->job;
+    pthread_mutex_unlock(&hp->mu);
+    {
+      NR_CFG_EPOCH_WORK(j.stamp, j.counter);
+      if (j.reconf) nr_pdcch_coreset_bank_dispatch_enter();
+      t_pass_kind = PASS_BANK;
+      for (int i = j.first; i < j.n; ++i) {
+        if (j.reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED) continue;
+        t_bank_index = i;
+        t_bank_slot = j.src_abs >= 0 ? (uint64_t)j.src_abs : 0;
+        t_candidate_share = j.additional ? nr_pdcch_discovered_candidate_share(j.shares, i, j.vd) : 0;
+        nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
+        const uint64_t pk0 = btim_now_ns();
+        const uint32_t pa0 = t_pass_accepts;
+        nr_pdcch_blind_monitor_run_occasion_one(j.ue, j.proc, j.serial, j.src_abs);
+        pass_note(PK_BANK, btim_now_ns() - pk0, t_pass_accepts - pa0);
+      }
+      t_bank_index = -1;
+      t_candidate_share = 0;
+      t_pass_kind = PASS_OTHER;
+      nr_pdcch_blind_monitor_cfg_override(NULL);
+      if (j.reconf) nr_pdcch_coreset_bank_dispatch_leave();
+    }
+    pthread_mutex_lock(&hp->mu);
+    hp->job.state = 2;
+    pthread_cond_signal(&hp->done_cv);
+    pthread_mutex_unlock(&hp->mu);
+  }
+  return NULL;
+}
+static bool par_banks_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDCCH_PAR_BANKS") && atoi(getenv("ISAC_PDCCH_PAR_BANKS")) ? 1 : 0;
+  return en == 1;
+}
+static par_helper_t *par_helper_get(void)
+{
+  static __thread par_helper_t *t_hp;
+  if (!t_hp) {
+    par_helper_t *hp = calloc(1, sizeof(*hp));
+    if (!hp) return NULL;
+    pthread_mutex_init(&hp->mu, NULL);
+    pthread_cond_init(&hp->cv, NULL);
+    pthread_cond_init(&hp->done_cv, NULL);
+    pthread_t th;
+    if (pthread_create(&th, NULL, par_bank_worker, hp) != 0) { free(hp); return NULL; }
+    pthread_detach(th);
+    t_hp = hp;
+  }
+  return t_hp;
+}
+
 static _Atomic uint64_t g_inline_drop_epoch;
 uint64_t nr_pdcch_blind_inline_drop_epoch(void)
 {
@@ -4141,7 +4242,21 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     const uint64_t vd = additional ? atomic_fetch_add_explicit(&s_visit_d, 1, memory_order_relaxed) : 0;
     const int shares_d = n + discovered;
     t_pass_kind = PASS_BANK;
-    for (int i = 0; i < n; ++i) {
+    /* ISAC_PDCCH_PAR_BANKS: banks 1..n-1 on the helper while this thread runs bank 0 and the remaining passes */
+    bool par = false;
+    par_helper_t *hp = (par_banks_on() && n >= 2) ? par_helper_get() : NULL;
+    if (hp) {
+      pthread_mutex_lock(&hp->mu);
+      hp->job = (par_bank_job_t){.ue = ue, .proc = proc, .serial = serial_candidates, .src_abs = source_absolute_slot,
+                                 .first = 1, .n = n, .shares = shares_d, .additional = additional, .vd = vd,
+                                 .stamp = nr_cfg_epoch_work_stamp(),
+                                 .counter = serial_candidates ? nr_pdcch_passive_queue_epoch_counter() : &g_inline_drop_epoch,
+                                 .reconf = reconf, .state = 1};
+      pthread_cond_signal(&hp->cv);
+      pthread_mutex_unlock(&hp->mu);
+      par = true;
+    }
+    for (int i = 0; i < (par ? 1 : n); ++i) {
       if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
         continue;
       t_bank_index = i;
@@ -4202,6 +4317,12 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         nr_pdcch_blind_monitor_cfg_override(NULL);
         pass_note(PK_CSS0, btim_now_ns() - pk0, t_pass_accepts - pa0);
       }
+    }
+    if (par) { /* join the helper's banks before the slot is done */
+      pthread_mutex_lock(&hp->mu);
+      while (hp->job.state == 1) pthread_cond_wait(&hp->done_cv, &hp->mu);
+      hp->job.state = 0;
+      pthread_mutex_unlock(&hp->mu);
     }
     if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
     scan_timing_note(btim_now_ns() - t_scan0, true);

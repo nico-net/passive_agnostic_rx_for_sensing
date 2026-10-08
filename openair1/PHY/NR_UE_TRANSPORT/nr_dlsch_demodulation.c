@@ -1596,10 +1596,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         }
         if (pw[a] > 0.0 && (ref < 0 || pw[a] > pw[ref])) ref = a;
       }
+      /* ISAC_RX_MRC_ALIGN=2: one phase per chunk of 48 REs (4 RB) instead of per symbol -- follows a phase SLOPE
+       * across frequency (different per-board timing / shared delay estimate) as well as the common rotation. */
+      const uint32_t chunk = s_align >= 2 ? 48u : nb_re_pdsch;
       for (int a = a0; ref >= 0 && a < a1; a++) {
         if (a == ref || pw[a] <= 0.0) continue;
+       for (uint32_t c0 = 0; c0 < nb_re_pdsch; c0 += chunk) {
+        const uint32_t c1 = c0 + chunk < nb_re_pdsch ? c0 + chunk : nb_re_pdsch;
         double cr = 0.0, ci = 0.0;
-        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+        for (uint32_t i = c0; i < c1; i++) {
           const c16_t ha = chFext[0][a][i], ya = rxdataF_ext[a][i], hr = chFext[0][ref][i], yr = rxdataF_ext[ref][i];
           const double uar = (double)ha.r * ya.r + (double)ha.i * ya.i, uai = (double)ha.r * ya.i - (double)ha.i * ya.r;
           const double urr = (double)hr.r * yr.r + (double)hr.i * yr.i, uri = (double)hr.r * yr.i - (double)hr.i * yr.r;
@@ -1610,10 +1615,12 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         if (mag <= 0.0) continue;
         const double c = cr / mag, sn = ci / mag; /* e^{j d}: rotating h_a by +d multiplies u_a by e^{-j d} */
         c16_t *h = chFext[0][a];
-        for (uint32_t i = 0; i < rx_size_symbol; i++) {
+        const uint32_t e1 = (chunk == nb_re_pdsch) ? rx_size_symbol : c1;
+        for (uint32_t i = c0; i < e1; i++) {
           const double hr2 = h[i].r * c - h[i].i * sn, hi2 = h[i].r * sn + h[i].i * c;
           h[i].r = (int16_t)lround(hr2); h[i].i = (int16_t)lround(hi2);
         }
+       }
       }
     }
   }
