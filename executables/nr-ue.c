@@ -242,6 +242,9 @@ typedef struct {
   openair0_timestamp_t capture_end;
   openair0_timestamp_t pss_tick;
   int fast_pss_position; /* -1 = ordinary full capture search */
+  int fast_pss_frame;
+  int fast_pss_radius;
+  int fast_pss_wide_radius;
 } syncData_t;
 
 extern _Atomic int nr_ue_cfo_resync_request; // set by the CFO trim loop (phy_procedures_nr_ue.c)
@@ -271,11 +274,22 @@ static void UE_synch(void *arg) {
   } else {
     nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
     if (syncD->fast_pss_position >= 0) {
-      LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d expected_pos=%d radius=%d\n",
-            UE->target_Nid_cell, syncD->gscnInfo[0].ssbFirstSC, syncD->fast_pss_position,
-            2 * fp->ofdm_symbol_size);
+      LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d frame=%d expected_pos=%d radius=%d\n",
+            UE->target_Nid_cell, syncD->gscnInfo[0].ssbFirstSC, syncD->fast_pss_frame, syncD->fast_pss_position,
+            syncD->fast_pss_radius);
       ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
-                                 syncD->fast_pss_position, 2 * fp->ofdm_symbol_size);
+                                 syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_radius, 1);
+      if (!ret.cell_detected && fp->nb_antennas_rx > 1) {
+        LOG_W(PHY, "SENSING: RX_RECOVER retrying narrow PSS correlation with configured antennas\n");
+        ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
+                                   syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_radius, 0);
+      }
+      if (!ret.cell_detected && syncD->fast_pss_wide_radius > syncD->fast_pss_radius) {
+        LOG_W(PHY, "SENSING: RX_RECOVER widening PSS/SSS radius to %d samples\n",
+              syncD->fast_pss_wide_radius);
+        ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
+                                   syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_wide_radius, 0);
+      }
       if (!ret.cell_detected) {
         LOG_W(PHY, "SENSING: RX_RECOVER narrow PSS/SSS search missed; searching full capture\n");
         ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
@@ -1297,12 +1311,24 @@ void *UE_thread(void *arg)
       *syncMsg = (syncData_t){0};
       syncMsg->capture_end = sync_timestamp + get_samples_per_slot(fp->slots_per_subframe - 1, fp);
       syncMsg->fast_pss_position = -1;
+      syncMsg->fast_pss_frame = -1;
+      syncMsg->fast_pss_radius = 0;
+      syncMsg->fast_pss_wide_radius = 0;
       if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries <= 2
           && rx_recover_last_pss_tick) {
         const long long capture_start = (long long)syncMsg->capture_end - (long long)2 * fp->samples_per_frame;
-        const long long period = fp->samples_per_frame;
+        /* The serving SSB repeats every 20 ms. Keep the frame parity: reducing
+         * this to a 10 ms frame puts every other expected PSS one frame away. */
+        const long long period = 2LL * fp->samples_per_frame;
         const long long delta = (long long)rx_recover_last_pss_tick - capture_start;
-        syncMsg->fast_pss_position = (int)((delta % period + period) % period);
+        const long long phase = (delta % period + period) % period;
+        syncMsg->fast_pss_frame = (int)(phase / fp->samples_per_frame);
+        syncMsg->fast_pss_position = (int)(phase % fp->samples_per_frame);
+        /* A timed X410 START gives a sample-clock anchor. Search two symbols
+         * first; if the timestamp or capture boundary has more uncertainty,
+         * widen to 0.5 ms before falling back to the full capture. */
+        syncMsg->fast_pss_radius = 2 * fp->ofdm_symbol_size;
+        syncMsg->fast_pss_wide_radius = (int)fmax(syncMsg->fast_pss_radius, fp->samples_per_frame / 20);
       }
       if (auto_timing && auto_anchor_valid) {
         // The second timing observation searches only the SSB just measured OTA.
@@ -1695,7 +1721,7 @@ void *UE_thread(void *arg)
         // samples belong to. The anchor remains for ordinary coarse errors and must not conceal
         // stream loss. Event-driven, no line cap.
         s_rxts_discont_total++;
-        const long long jump = (long long)(rx_timestamp - expected);
+        const long long jump = (long long)rx_timestamp - (long long)expected;
         LOG_E(PHY,
               "SENSING: RXDISCONT abs_slot=%d frame=%d slot=%d expected=%llu actual=%llu "
               "delta=%lld prev_consumed=%ld n=%ld -> INVALIDATING SYNC\n",

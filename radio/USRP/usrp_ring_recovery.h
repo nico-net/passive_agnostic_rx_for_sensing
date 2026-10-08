@@ -4,6 +4,18 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* A frozen X410 RX timestamp can still name the previous stream start. The
+ * accepted timed START is a lower bound for the first sample of the new one. */
+static inline int64_t usrp_ring_epoch_first_ticks(int64_t metadata_ticks, int64_t scheduled_ticks)
+{
+  return metadata_ticks > scheduled_ticks ? metadata_ticks : scheduled_ticks;
+}
+
+static inline bool usrp_ring_has_samples(uint64_t written, uint64_t read, uint64_t wanted)
+{
+  return written >= read && written - read >= wanted;
+}
+
 /* Pure index/retry accounting shared by the UHD producer and fault-injection test.
  * A fault never advances write_index; a successful first packet publishes one epoch. */
 struct usrp_ring_recovery_state {

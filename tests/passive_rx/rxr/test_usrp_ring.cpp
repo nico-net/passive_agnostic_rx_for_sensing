@@ -41,6 +41,18 @@ static void recovery_test()
   for (int i = 0; i < 3; i++) assert(stuck.fault());
   assert(!stuck.fault());
   assert(stuck.write_index == 0 && stuck.epoch == 0);
+  stuck.samples(1000); /* one clean second resets the consecutive budget */
+  assert(stuck.failures == 0);
+  for (int i = 0; i < 3; i++) assert(stuck.fault());
+  assert(!stuck.fault());
+  assert(usrp_ring_epoch_first_ticks(368640000, 385000000) == 385000000);
+  assert(usrp_ring_epoch_first_ticks(385000004, 385000000) == 385000004);
+  const int64_t old_origin = 368640000, logical_boundary = 1228800;
+  const int64_t expected_next = old_origin + logical_boundary;
+  const int64_t new_first = usrp_ring_epoch_first_ticks(old_origin, 385000000);
+  assert(new_first - expected_next > 0); /* no negative gap from frozen old origin */
+  assert(!usrp_ring_has_samples(10, 11, 1)); /* no unsigned wrap */
+  assert(usrp_ring_has_samples(11, 10, 1));
 }
 
 static void wrap_test()
