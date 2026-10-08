@@ -18,11 +18,12 @@ static nr_core_machine_t host(int count, int dpdk_first = -1, bool big_little = 
   }
   return m;
 }
-static nr_core_plan_t request(bool ring, int pdsch=3)
+static nr_core_plan_t request(bool ring, int pdsch=3, bool uhd_without_ring=false)
 {
   nr_core_plan_t p = {};
   nr_core_plan_add(&p,NR_CP_UE,1,-1);
-  if(ring) { nr_core_plan_add(&p,NR_CP_RING,1,-1); nr_core_plan_add(&p,NR_CP_UHD,1,-1); }
+  if(ring) nr_core_plan_add(&p,NR_CP_RING,1,-1);
+  if(ring || uhd_without_ring) nr_core_plan_add(&p,NR_CP_UHD,1,-1);
   nr_core_plan_add(&p,NR_CP_DL,1,-1); nr_core_plan_add(&p,NR_CP_UL,1,-1); nr_core_plan_add(&p,NR_CP_SYNC,1,-1);
   nr_core_plan_add(&p,NR_CP_SCAN,1,-1); nr_core_plan_add(&p,NR_CP_USS,1,-1);
   nr_core_plan_add(&p,NR_CP_PDSCH,pdsch,-1); nr_core_plan_add(&p,NR_CP_POOL,4,-1);
@@ -33,6 +34,20 @@ static int cpu(const nr_core_plan_t &p, nr_core_role_t role, int idx=0)
 {
   for(int i=0;i<p.count;i++) if(p.a[i].role==role && p.a[i].index==idx) return p.a[i].core;
   return -1;
+}
+static void pin(nr_core_plan_t &p, nr_core_role_t role, int index, int core)
+{
+  for (int i=0;i<p.count;i++) if (p.a[i].role==role && p.a[i].index==index) {
+    p.a[i].core=core; p.a[i].explicit_core=true; return;
+  }
+  FAIL() << "missing role " << nr_core_role_name(role) << '[' << index << ']';
+}
+static void plan_line(const nr_core_plan_t &p)
+{
+  printf("SENSING: CORE_PLAN fixture ->");
+  for (int i=0;i<p.count;i++) printf(" %s[%d]:%d%s%s",nr_core_role_name(p.a[i].role),p.a[i].index,
+                                      p.a[i].core,p.a[i].explicit_core ? "(user)" : "",p.a[i].shared ? "*" : "");
+  puts("");
 }
 static void invariant(const nr_core_machine_t &m,const nr_core_plan_t &p)
 {
@@ -61,6 +76,48 @@ TEST(CorePlan,DgxCapacityVariation)
   ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
   EXPECT_EQ(5,cpu(p,NR_CP_UE));EXPECT_EQ(15,cpu(p,NR_CP_RING));
 }
+TEST(CorePlan,DgxDedicatedExplicitLayout)
+{
+  // spark-74c3: CPUs 0..19, isolated/nohz 17..19, IRQ 0..16,
+  // UHD DPDK lcores 17..19. The dldedicated cfg has one scan on 6 and
+  // three PDSCH consumers starting at 2. Four explicit pool CPUs: 8,9,0,1.
+  auto m=host(20,17,true);char error[512];
+  for (int c=17;c<20;c++) m.nohz[c]=1;
+  for (bool ring : {false,true}) {
+    SCOPED_TRACE(ring ? "ring enabled" : "exact listed env: ring disabled");
+    auto p=request(ring,3,true);
+    pin(p,NR_CP_UE,0,5);if(ring) pin(p,NR_CP_RING,0,16);pin(p,NR_CP_UHD,0,15);
+    pin(p,NR_CP_SCAN,0,6);pin(p,NR_CP_USS,0,7);
+    for (int i=0;i<3;i++) pin(p,NR_CP_PDSCH,i,2+i);
+    const int pool[]={8,9,0,1};
+    for (int i=0;i<4;i++) pin(p,NR_CP_POOL,i,pool[i]);
+    pin(p,NR_CP_GPU,0,10);pin(p,NR_CP_CSIRS,0,11);pin(p,NR_CP_NID,0,13);
+    // ISAC_CSIRS_DISC_DETECT_CORES=12,13,14 is unused by the T16 single GPU worker.
+    const auto requested=p;
+    ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
+    for (int i=0;i<p.count;i++) {
+      EXPECT_FALSE(m.dpdk[p.a[i].core]);
+      if(p.a[i].explicit_core) { EXPECT_EQ(requested.a[i].core,p.a[i].core); }
+    }
+    EXPECT_NE(cpu(p,NR_CP_DL),cpu(p,NR_CP_UL));
+    EXPECT_EQ(5,cpu(p,NR_CP_UE));EXPECT_EQ(15,cpu(p,NR_CP_UHD));
+    EXPECT_EQ(ring ? 16 : -1,cpu(p,NR_CP_RING));EXPECT_EQ(13,cpu(p,NR_CP_NID));
+    EXPECT_GE(cpu(p,NR_CP_SYNC),0);
+    if (ring) {
+      bool shared_rt=false;
+      for (int i=0;i<p.count;i++) if (p.a[i].role<=NR_CP_SYNC && p.a[i].shared) shared_rt=true;
+      EXPECT_TRUE(shared_rt);
+    }
+    plan_line(p);
+  }
+}
+TEST(CorePlan,DgxDedicatedAutomaticLayout)
+{
+  auto m=host(20,17,true);auto p=request(true);char error[512];
+  for (int c=17;c<20;c++) m.nohz[c]=1;
+  ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
+  invariant(m,p);plan_line(p);
+}
 TEST(CorePlan,Sens6)
 {
   auto m=host(12,9);auto p=request(true);char error[512];
@@ -88,8 +145,9 @@ TEST(CorePlan,RejectUnsafeOverridesAndImpossibleHosts)
   char error[512];auto m=host(12,9); auto p=request(true);
   p.a[0].core=10;p.a[0].explicit_core=true;EXPECT_LT(nr_core_plan_build(&m,&p,error,sizeof(error)),0);
   p=request(true);p.a[0].core=1;p.a[0].explicit_core=true;p.a[1].core=1;p.a[1].explicit_core=true;
-  EXPECT_LT(nr_core_plan_build(&m,&p,error,sizeof(error)),0);
-  p=request(true);m=host(4);EXPECT_LT(nr_core_plan_build(&m,&p,error,sizeof(error)),0);
+  EXPECT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
+  EXPECT_TRUE(p.a[0].shared);EXPECT_TRUE(p.a[1].shared);
+  p=request(true);m=host(4);EXPECT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
 }
 TEST(CorePlan,SparseCpusetAndSmt)
 {
