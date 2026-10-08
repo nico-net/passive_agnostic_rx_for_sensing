@@ -25,6 +25,8 @@ int background_system(char *command);
  ****************************************************/
 
 void start_background_system(void);
+/* Call after all background_system() clients have stopped. */
+void stop_background_system(void);
 
 void lock_memory_to_ram(void);
 

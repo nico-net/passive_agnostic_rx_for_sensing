@@ -9,6 +9,11 @@
 #include <sched.h>
 #include <stdbool.h>
 #include <signal.h>
+#include "common/utils/nr_shutdown.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h"
 #include <errno.h>
 
 #include "T.h"
@@ -118,6 +123,9 @@ int create_tasks_nrue(uint32_t ue_nb) {
 
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
 {
+  /* Arm the deadline before even attempting logging: a failed worker may own
+   * a logger lock. Radio release must not depend on that log completing. */
+  nr_shutdown_request(assert ? EXIT_FAILURE : 0);
   /* main() can reach exit_fun() (e.g. load_configmodule() failing on a missing -O file) BEFORE logInit() has
    * run; LOG_W dereferences g_log, so that error path used to segfault instead of printing the error. */
   if (g_log != NULL)
@@ -126,16 +134,9 @@ void exit_function(const char *file, const char *function, const int line, const
     fprintf(stderr, "called by: %s:%d %s() Exiting OAI softmodem: %s\n", file, line, function, s ? s : "no msg");
 
   oai_exit = 1;
-
-  nrue_ru_stop();
-  nrue_ru_end();
-
-  if (assert) {
-    abort();
-  } else {
-    sleep(1); // allow lte-softmodem threads to exit first
-    exit(EXIT_SUCCESS);
-  }
+  /* A fatal callback can run on an actor or on main during startup. It must
+   * never destroy a radio concurrently with a reader or join itself. */
+  nr_shutdown_finish();
 }
 
 uint64_t get_nrUE_optmask(void) {
@@ -304,28 +305,37 @@ static void set_fp_options(int cell_id, int ru_id)
   LOG_I(PHY, "Set UE nb_rx_antenna %d, nb_tx_antenna %d, threequarter_fs %d, ofdm_offset_divisor %d\n", fp->nb_antennas_rx, fp->nb_antennas_tx, fp->threequarter_fs, fp->ofdm_offset_divisor);
 }
 
-static bool stop_immediately = false;
+static void nrue_shutdown_notify(void)
+{
+  oai_exit = 1;
+  itti_wait_tasks_unblock();
+}
+
+/* Active (non-passive) SA UE only: the first ^C asks NAS to deregister, the
+ * second ^C or a 5 s alarm shuts down unconditionally (no oai_exit guard: after
+ * a radio stall oai_exit is already 1 and the old guard made the alarm a no-op).
+ * Passive RX has nothing to deregister: one SIGINT/SIGTERM stops it. */
 static void trigger_stop(int sig)
 {
-  if (!oai_exit)
-    itti_wait_tasks_unblock();
+  nr_shutdown_signal(SIGINT);
 }
 static void trigger_deregistration(int sig)
 {
-  if (!stop_immediately && IS_SA_MODE(get_softmodem_params())) {
-    for (int ue_inst = 0; ue_inst < NB_UE_INST; ue_inst++) {
-      MessageDef *msg = itti_alloc_new_message(TASK_NAS_NRUE, ue_inst, NAS_DEREGISTRATION_REQ);
-      NAS_DEREGISTRATION_REQ(msg).cause = AS_DETACH;
-      itti_send_msg_to_task(TASK_NAS_NRUE, ue_inst, msg);
-    }
-    stop_immediately = true;
-    static const char m[] = "Press ^C again to trigger immediate shutdown\n";
-    __attribute__((unused)) int unused = write(STDOUT_FILENO, m, sizeof(m) - 1);
-    signal(SIGALRM, trigger_stop);
-    alarm(5);
-  } else {
-    itti_wait_tasks_unblock();
+  static bool deregistration_sent = false;
+  if (deregistration_sent || oai_exit || nr_shutdown_requested()) {
+    nr_shutdown_signal(sig);
+    return;
   }
+  deregistration_sent = true;
+  for (int ue_inst = 0; ue_inst < NB_UE_INST; ue_inst++) {
+    MessageDef *msg = itti_alloc_new_message(TASK_NAS_NRUE, ue_inst, NAS_DEREGISTRATION_REQ);
+    NAS_DEREGISTRATION_REQ(msg).cause = AS_DETACH;
+    itti_send_msg_to_task(TASK_NAS_NRUE, ue_inst, msg);
+  }
+  static const char m[] = "Press ^C again to trigger immediate shutdown\n";
+  __attribute__((unused)) int unused = write(STDOUT_FILENO, m, sizeof(m) - 1);
+  signal(SIGALRM, trigger_stop);
+  alarm(5);
 }
 
 void *nrue_ru_start_thread(void *arg)
@@ -347,11 +357,15 @@ static void gpu_platform_log(int warning, const char *text)
 int main(int argc, char **argv)
 {
   start_background_system();
+  if (nr_shutdown_init(nrue_shutdown_notify, nrue_ru_shutdown_stop, nrue_ru_shutdown) != 0) {
+    fprintf(stderr, "Cannot initialize bounded radio shutdown\n");
+    return EXIT_FAILURE;
+  }
 
   if ((uniqCfg = load_configmodule(argc, argv, CONFIG_ENABLECMDLINEONLY)) == NULL || CONFIG_ISFLAGSET(CONFIG_ABORT)) {
     exit_fun("[SOFTMODEM] Error, configuration module init failed\n");
   }
-  //set_softmodem_sighandler();
+  /* SIGINT/SIGTERM are owned by nr_shutdown from before configuration. */
   CONFIG_SETRTFLAG(CONFIG_NOEXITONHELP);
   // initialize logging
   logInit();
@@ -630,8 +644,12 @@ int main(int argc, char **argv)
 
   if (ru_start_result) {
     LOG_E(HW, "SENSING: radio startup failed; receiver exiting without starting RX workers\n");
-    return EXIT_FAILURE;
+    nr_shutdown_request(EXIT_FAILURE);
+    nr_shutdown_finish();
   }
+
+  if (nr_shutdown_requested())
+    nr_shutdown_finish();
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
   nr_isac_start();
@@ -660,39 +678,60 @@ int main(int argc, char **argv)
   // wait for end of program
   printf("Entering ITTI signals handler\n");
   printf("TYPE <CTRL-C> TO TERMINATE\n");
-  itti_wait_tasks_end(trigger_deregistration);
+  const bool deregister_first = IS_SA_MODE(get_softmodem_params()) && !IS_PASSIVE_RX_MODE(get_softmodem_params());
+  itti_wait_tasks_end(deregister_first ? trigger_deregistration : nr_shutdown_signal);
   LOG_W(NR_PHY, "Returned from ITTI signal handler\n");
   oai_exit = 1;
 
-  nrue_ru_stop();
+  nr_shutdown_request(0);
+  nr_shutdown_wait_radio();
+  nr_shutdown_step("radio_released_before_worker_joins");
 
-  if (nrPHY_vars_UE_g && nrPHY_vars_UE_g[0]) {
-    for (int CC_id = 0; CC_id < MAX_NUM_CCs; CC_id++) {
-      PHY_VARS_NR_UE *phy_vars = nrPHY_vars_UE_g[0][CC_id];
-      if (phy_vars) {
-        for (int i = 0; i < get_nrUE_params()->num_ul_actors; i++) {
-          shutdown_actor(&phy_vars->ul_actors[i]);
-        }
-        for (int i = 0; i < get_nrUE_params()->num_dl_actors; i++) {
+  if (nrPHY_vars_UE_g) {
+    for (int inst = 0; inst < NB_UE_INST; inst++) {
+      for (int CC_id = 0; CC_id < MAX_NUM_CCs; CC_id++) {
+        PHY_VARS_NR_UE *phy_vars = nrPHY_vars_UE_g[inst][CC_id];
+        if (!phy_vars)
+          continue;
+        /* Stop the producer before closing its actors. Actors and the task
+         * pool remain available while an in-flight UE task finishes. */
+        nr_shutdown_step("ue_join_begin");
+        pthread_join(phy_vars->main_thread, NULL);
+        if (!IS_SOFTMODEM_NOSTATS)
+          pthread_join(phy_vars->stat_thread, NULL);
+        nr_shutdown_step("ue_join_complete");
+        shutdown_actor(&phy_vars->sync_actor);
+        for (int i = 0; i < get_nrUE_params()->num_dl_actors; i++)
           shutdown_actor(&phy_vars->dl_actors[i]);
-        }
-        int ret = pthread_join(phy_vars->main_thread, NULL);
-        AssertFatal(ret == 0, "pthread_join error %d, errno %d (%s)\n", ret, errno, strerror(errno));
-        if (!IS_SOFTMODEM_NOSTATS) {
-          ret = pthread_join(phy_vars->stat_thread, NULL);
-          AssertFatal(ret == 0, "pthread_join error %d, errno %d (%s)\n", ret, errno, strerror(errno));
-        }
+        for (int i = 0; i < get_nrUE_params()->num_ul_actors; i++)
+          shutdown_actor(&phy_vars->ul_actors[i]);
+        nr_shutdown_step("actors_joined");
       }
     }
   }
 
+  /* Scan consumers can enqueue PDSCH/PUSCH work. Stop them first; the PDSCH
+   * stop API also wakes and joins gpuFepWorker. Keep Tpool alive until all
+   * consumers and discovery workers have returned. */
+  nr_shutdown_step("passive_pdcch_stop_begin");
+  nr_pdcch_passive_queue_stop();
+  nr_shutdown_step("passive_pdsch_gpu_fep_stop_begin");
+  nr_pdsch_passive_queue_stop();
+  nr_shutdown_step("passive_pusch_stop_begin");
+  nr_pusch_passive_queue_stop();
+  nr_pdcch_uss_tracker_stop();
+  nr_shutdown_step("discovery_stop_begin");
   nr_pdcch_nid_gpu_stop();
   nr_csirs_disc_stop();
+  nr_shutdown_step("discovery_stopped");
+  abortTpool(&nrUE_params.Tpool);
+  nr_shutdown_step("thread_pool_stopped");
 
   // All slot producers have joined. Drain the PRACH worker before closing records.
   nr_prach_passive_flush();
   nr_srs_passive_stop();
   nr_isac_stop();
+  nr_shutdown_step("sensing_stopped");
 
   nr_passive_obs_close(); // drain + flush the per-grant observation file (no-op when not open)
   const bool uectx_was_open = nr_ue_ctx_enabled();
@@ -704,13 +743,17 @@ int main(int argc, char **argv)
           (unsigned long long)events, (unsigned long long)lines, (unsigned long long)dropped);
   }
 
-  nrue_ru_end();
+  nr_shutdown_step("outputs_closed");
 
   free_nrLDPC_coding_interface(&nrLDPC_coding_interface);
 
+  nr_shutdown_step("itti_stop_begin");
+  itti_stop_join_tasks();
   time_manager_finish();
+  nr_pdcp_stop_threads();
+  stop_background_system();
 
   free(pckg);
-  printf("Bye.\n");
-  return 0;
+  nr_shutdown_step("services_stopped");
+  nr_shutdown_finish();
 }

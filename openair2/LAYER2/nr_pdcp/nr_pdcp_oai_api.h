@@ -19,6 +19,7 @@ struct NR_SRB_ToAddMod;
 struct sdap_configuration_s;
 
 void nr_pdcp_layer_init(void);
+void nr_pdcp_stop_threads(void);
 
 bool nr_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
                       const srb_flag_t srb_flagP,

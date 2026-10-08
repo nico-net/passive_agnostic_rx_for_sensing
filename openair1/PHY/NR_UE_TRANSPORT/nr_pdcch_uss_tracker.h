@@ -46,4 +46,7 @@ int nr_pdcch_uss_tracker_peek(const nr_pdcch_uss_geometry_t *geometry,
                               uint16_t *rnti,
                               int max_rnti);
 
+/* Shutdown only, after all observation/shortlist clients have stopped. */
+void nr_pdcch_uss_tracker_stop(void);
+
 #endif

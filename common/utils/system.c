@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <pthread.h>
 #include <string.h>
 #include <stdint.h>
@@ -40,6 +41,7 @@ static int result_pipe_write;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int module_initialized = 0;
+static pid_t background_pid = -1;
 
 /********************************************************************/
 /* util functions                                                   */
@@ -175,6 +177,7 @@ void start_background_system(void) {
   }
 
   if (son) {
+    background_pid = son;
     close(result_pipe_write);
     close(command_pipe_read);
     return;
@@ -183,6 +186,16 @@ void start_background_system(void) {
   close(result_pipe_read);
   close(command_pipe_write);
   background_system_process();
+}
+
+void stop_background_system(void)
+{
+  if (background_pid <= 0)
+    return;
+  close(command_pipe_write); /* EOF makes an idle helper exit. */
+  while (waitpid(background_pid, NULL, 0) < 0 && errno == EINTR) {}
+  close(result_pipe_read);
+  background_pid = -1;
 }
 
 int rt_sleep_ns (uint64_t x)

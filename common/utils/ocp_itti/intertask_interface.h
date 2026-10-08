@@ -508,6 +508,7 @@ MessageDef *itti_alloc_new_message_sized(
  **/
 void itti_wait_tasks_end(void (*handler)(int));
 /** \brif unblocks ITTI waiting in itti_wait_tasks_end(). **/
+void itti_stop_join_tasks(void);
 void itti_wait_tasks_unblock(void);
 void itti_set_task_real_time(task_id_t task_id);
 

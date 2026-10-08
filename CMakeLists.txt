@@ -367,7 +367,7 @@ if (TRACY_ENABLE)
 endif()
 
 set (OCP_ITTI ${OPENAIR_DIR}/common/utils/ocp_itti)
-add_library(ITTI ${OCP_ITTI}/intertask_interface.cpp)
+add_library(ITTI ${OCP_ITTI}/intertask_interface.cpp ${OCP_ITTI}/itti_exit_gate.c)
 target_link_libraries(ITTI PRIVATE asn1_lte_rrc_hdrs asn1_nr_rrc_hdrs)
 
 # asn1c skeletons need this
@@ -2051,6 +2051,7 @@ add_executable(nr-uesoftmodem
   ${OPENAIR_DIR}/executables/position_interface.c
   ${OPENAIR_DIR}/executables/nr-ue.c
   ${OPENAIR_DIR}/executables/nr-ue-ru.c
+  ${OPENAIR_DIR}/common/utils/nr_shutdown.c
   ${OPENAIR1_DIR}/PHY/TOOLS/phy_scope_interface.c
   ${NFAPI_USER_DIR}/nfapi.c
   ${PHY_INTERFACE_DIR}/queue_t.c
@@ -2366,6 +2367,21 @@ if(ENABLE_TESTS)
 endif()
 
 if(ENABLE_TESTS)
+  add_executable(test_nr_shutdown
+    common/utils/tests/nr_shutdown_test.c
+    common/utils/nr_shutdown.c
+    common/utils/ocp_itti/itti_exit_gate.c
+    executables/nr-ue-ru.c)
+  target_compile_definitions(test_nr_shutdown PRIVATE NRUE_RU_SHUTDOWN_TEST)
+  target_compile_options(test_nr_shutdown PRIVATE -ffunction-sections -fdata-sections -UT_TRACER -DT_TRACER=0)
+  target_link_options(test_nr_shutdown PRIVATE -Wl,--gc-sections -Wl,--no-export-dynamic)
+  target_link_libraries(test_nr_shutdown PRIVATE pthread asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  add_dependencies(tests test_nr_shutdown)
+  foreach(shutdown_case injected fork_child direct_exit fatal early_fatal short zero discontinuous sigint sigterm repeated active_read eintr fatal_in_read blocked_main blocked_radio)
+    add_test(NAME nr_shutdown_${shutdown_case}
+      COMMAND python3 ${OPENAIR_DIR}/common/utils/tests/test_nr_shutdown.py $<TARGET_FILE:test_nr_shutdown> ${shutdown_case})
+    set_tests_properties(nr_shutdown_${shutdown_case} PROPERTIES TIMEOUT 8)
+  endforeach()
   add_library(nr_pdcch_nid_reference STATIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c)
   target_include_directories(nr_pdcch_nid_reference PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_compile_options(nr_pdcch_nid_reference PRIVATE -ffp-contract=off -Wno-unknown-pragmas)

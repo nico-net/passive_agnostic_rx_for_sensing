@@ -26,6 +26,7 @@ typedef struct timer_elm_s {
     task_info_t admin;
     ittiTask_parms_t task_parms;
     pthread_t thread;
+    bool thread_started = false;
     pthread_mutex_t queue_cond_lock;
     std::vector<MessageDef *> message_queue;
     std::map<long,timer_elm_t> timer_map;
@@ -312,6 +313,7 @@ typedef struct timer_elm_s {
                  (char *)itti_get_task_name(task_id),
                  -1,
                  OAI_PRIORITY_RT);
+    t->thread_started = true;
     LOG_D(ITTI,"Created Posix thread %s\n",  itti_get_task_name(task_id) );
     return 0;
   }
@@ -426,35 +428,25 @@ typedef struct timer_elm_s {
   }
 
   // void for compatibility
+  // Explicit join API: invoke only after producers/queue creation have stopped.
+  // The legacy itti_wait_tasks_end function is just a semaphore wait.
+  void itti_stop_join_tasks(void)
+  {
+    for (int i = 0; i < nb_queues; i++) {
+      if (!tasks[i]->thread_started)
+        continue;
+      MessageDef *msg = itti_alloc_new_message(TASK_UNKNOWN, 0, TERMINATE_MESSAGE);
+      itti_send_msg_to_task((task_id_t)i, 0, msg);
+    }
+    for (int i = 0; i < nb_queues; i++) {
+      if (tasks[i]->thread_started) {
+        pthread_join(tasks[i]->thread, NULL);
+        tasks[i]->thread_started = false;
+      }
+    }
+  }
+
   void itti_send_terminate_message(task_id_t task_id) {
-  }
-
-  static sem_t itti_sem_block;
-  void itti_wait_tasks_unblock()
-  {
-    int rc = sem_post(&itti_sem_block);
-    AssertFatal(rc == 0, "error in sem_post(): %d %s\n", errno, strerror(errno));
-  }
-
-  static void catch_sigterm(int) {
-    static const char msg[] = "\n** Caught SIGTERM, shutting down\n";
-    __attribute__((unused))
-    int unused = write(STDOUT_FILENO, msg, sizeof(msg) - 1);
-    itti_wait_tasks_unblock();
-  }
-
-  void itti_wait_tasks_end(void (*handler)(int))
-  {
-    int rc = sem_init(&itti_sem_block, 0, 0);
-    AssertFatal(rc == 0, "error in sem_init(): %d %s\n", errno, strerror(errno));
-
-    if (handler == NULL) /* no handler given: install default */
-      handler = catch_sigterm;
-    signal(SIGTERM, handler);
-    signal(SIGINT, handler);
-
-    rc = sem_wait(&itti_sem_block);
-    AssertFatal(rc == 0, "error in sem_wait(): %d %s\n", errno, strerror(errno));
   }
 
   void itti_update_lte_time(uint32_t frame, uint8_t slot) {}

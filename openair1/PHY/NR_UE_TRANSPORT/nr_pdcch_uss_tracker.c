@@ -60,6 +60,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cond = PTHREAD_COND_INITIALIZER;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static pthread_t g_thread;
+static bool g_stop, g_thread_started;
 static uss_geometry_state_t g_state[USS_TRACK_GEOMETRIES];
 static uss_job_t g_queue[USS_TRACK_QUEUE];
 static int g_q_head, g_q_tail, g_q_count;
@@ -259,8 +260,12 @@ static void *tracker_worker(void *unused)
         sched_rc, core, affinity_rc);
   for (;;) {
     pthread_mutex_lock(&g_lock);
-    while (g_q_count == 0)
+    while (g_q_count == 0 && !g_stop)
       pthread_cond_wait(&g_cond, &g_lock);
+    if (g_stop) {
+      pthread_mutex_unlock(&g_lock);
+      break;
+    }
     const uss_job_t job = g_queue[g_q_head];
     g_q_head = (g_q_head + 1) % USS_TRACK_QUEUE;
     --g_q_count;
@@ -300,7 +305,7 @@ static void tracker_init(void)
         }
       }
   if (g_enabled && nr_core_plan_create(&g_thread, NULL, tracker_worker, NULL, nr_core_plan_cpu(NR_CP_USS, 0, -1)) == 0) {
-    pthread_detach(g_thread);
+    g_thread_started = true;
     LOG_A(PHY, "SENSING: USS_TRACK enabled: bounded producer, asynchronous 65535-RNTI hash scorer\n");
   } else {
     g_enabled = false;
@@ -413,4 +418,18 @@ int nr_pdcch_uss_tracker_top(const nr_pdcch_uss_geometry_t *geometry, uint16_t *
 int nr_pdcch_uss_tracker_peek(const nr_pdcch_uss_geometry_t *geometry, uint16_t *rnti, int max_rnti)
 {
   return tracker_copy(geometry, rnti, max_rnti, false);
+}
+
+/* Shutdown only: producers have already joined. Do not start a lazy worker. */
+void nr_pdcch_uss_tracker_stop(void)
+{
+  if (!g_thread_started)
+    return;
+  pthread_mutex_lock(&g_lock);
+  g_stop = true;
+  pthread_cond_broadcast(&g_cond);
+  pthread_mutex_unlock(&g_lock);
+  pthread_join(g_thread, NULL);
+  g_thread_started = false;
+  g_enabled = false;
 }

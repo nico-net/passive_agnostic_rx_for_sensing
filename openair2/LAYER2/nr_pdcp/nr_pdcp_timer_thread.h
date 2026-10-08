@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 void nr_pdcp_init_timer_thread(nr_pdcp_ue_manager_t *nr_pdcp_ue_manager);
+void nr_pdcp_stop_timer_thread(void);
 void nr_pdcp_ms_tick(void);
 
 #endif /* _NR_PDCP_TIMER_THREAD_H_ */

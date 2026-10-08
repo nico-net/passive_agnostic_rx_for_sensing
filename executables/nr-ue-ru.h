@@ -24,6 +24,9 @@ void nrue_init_openair0(void);
 int nrue_ru_start(void);
 void nrue_ru_stop(void);
 void nrue_ru_end(void);
+/* Shutdown coordinator only; called with exclusive device ownership. */
+void nrue_ru_shutdown(void);
+void nrue_ru_shutdown_stop(void);
 int nrue_ru_restart_rx(void);
 int nrue_ru_reinit(void);
 /** Band-wide SSB search (no -C, only --band with --ue-scan-carrier): true when more than one RX

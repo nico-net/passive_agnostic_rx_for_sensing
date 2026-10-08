@@ -55,6 +55,8 @@
  * @{
  */
 extern int usrp_tx_thread;
+/* NR UE exports this signal-safe notification. Other plugin hosts need not. */
+extern "C" void nr_shutdown_request(int status) __attribute__((weak));
 
 /* ---------------------------------------------------------------------------------------------
  * Software RX decimation, for radio images whose FPGA fabric has no DDC/decimation block and can
@@ -697,6 +699,7 @@ typedef struct {
   std::atomic<bool> rx_stop_requested{false};
   std::atomic<bool> ring_restarting{false};
   std::chrono::steady_clock::time_point ring_pace_next{};  // reader pacing (ISAC_USRP_CATCHUP_X)   // producer is stopping/draining/re-issuing the stream (pre-sync restart)
+  bool tx_write_started = false;
   std::mutex rx_mutex;
   bool rx_started = false;
   bool gpio_configured = false;
@@ -1074,9 +1077,11 @@ static void usrp_ring_producer(usrp_state_t *s)
           stop.stream_now = true;
           s->rx_stream->issue_stream_cmd(stop);
           uhd::rx_metadata_t dmd;
-          for (int k = 0; k < 2000; k++)
+          for (int k = 0; k < 2000 && !s->rx_stop_requested.load() && !s->ring_stop.load(); k++)
             if (s->rx_stream->recv(ptr, n, dmd, 0.01, false) == 0)
               break;
+          if (s->rx_stop_requested.load() || s->ring_stop.load())
+            break;
           uhd::stream_cmd_t again(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
           again.stream_now = false;
           again.time_spec = s->usrp->get_time_now() + uhd::time_spec_t(0.1);
@@ -1110,6 +1115,11 @@ static void usrp_ring_producer(usrp_state_t *s)
     s->ring_cv.notify_one();
   }
   s->ring_cv.notify_all();
+  if (s->ring_err.load() && nr_shutdown_request) {
+    /* PHY may be stuck in an actor/GPU wait and never ask for another buffer. */
+    nr_shutdown_request(3);
+    LOG_E(HW, "SENSING: RFSTALL USRP_RING reason_code=%d\n", s->ring_err.load());
+  }
 }
 
 /* Allocate (and, under mlockall, fault in) the ~1 GB ring BEFORE the timed stream start. It used to
@@ -1252,7 +1262,7 @@ static int trx_usrp_start_impl(openair0_device_t *device)
  * aborts the whole receiver with a core dump. MEASURED: recovery attempts died first in
  * set_gpio_src() and then in get_timekeeper_time(). Report the failure instead, and let the
  * caller decide -- a capture that stops cleanly and says why beats one that core-dumps.
- * Init keeps its old strictness: nrue_ru_start() asserts on a negative return. */
+ * NR UE routes a negative startup return through bounded radio cleanup. */
 static int trx_usrp_start(openair0_device_t *device)
 {
   try {
@@ -1326,33 +1336,42 @@ static void trx_usrp_end(openair0_device_t *device)
    * idempotent; asserting here recursively re-enters the shutdown handler. */
   if (s == NULL)
     return;
-  iqrecorder_end(device);
-
-  LOG_I(HW, "releasing USRP\n");
-  if (usrp_tx_thread != 0)
-    trx_usrp_write_reset(&device->write_thread);
+  const auto shutdown_start = std::chrono::steady_clock::now();
+  auto shutdown_step = [&](const char *step) {
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - shutdown_start).count();
+    LOG_I(HW, "USRP_SHUTDOWN elapsed_ms=%.3f step=%s\n", ms, step);
+  };
+  s->rx_stop_requested.store(true);
+  s->ring_stop.store(true);
+  s->ring_cv.notify_all();
+  shutdown_step("rx_stop_requested");
 
   /* finish tx and rx. NOTE: teardown must survive a dead RPC session -- this is reached from the
    * RFSTALL re-init path in nr-ue.c precisely when the MPM claim has been lost, so every call that
    * talks to the device can throw. An uncaught throw here would abort the receiver during the very
    * recovery meant to save it. Dropping the shared_ptrs below is what actually releases the claim,
    * so it must happen even if the graceful stop fails. */
-  s->rx_stop_requested.store(true);
-  try {
-    trx_usrp_send_end_of_burst(s);
-  } catch (...) {
-    LOG_W(HW, "trx_usrp_end: TX stop failed; still stopping RX\n");
-  }
   {
     std::lock_guard<std::mutex> receive_guard(s->rx_mutex);
     try {
+      shutdown_step("ring_join_stream_stop_begin");
       trx_usrp_finish_rx(s);
+      shutdown_step("ring_join_stream_stop_complete");
     } catch (const std::exception &e) {
       LOG_W(HW, "trx_usrp_end: RX stop failed (%s); releasing device anyway\n", e.what());
     } catch (...) {
       LOG_W(HW, "trx_usrp_end: RX stop failed; releasing device anyway\n");
     }
   }
+  if (s->tx_write_started)
+    trx_usrp_write_reset(&device->write_thread);
+  shutdown_step("tx_worker_joined");
+  try {
+    trx_usrp_send_end_of_burst(s);
+  } catch (...) {
+    LOG_W(HW, "trx_usrp_end: TX stop failed; releasing device anyway\n");
+  }
+  shutdown_step("device_release_begin");
   /* set tx_stream, rx_stream, and usrp to NULL to clear/free them */
   try {
     s->tx_stream = NULL;
@@ -1361,6 +1380,8 @@ static void trx_usrp_end(openair0_device_t *device)
   } catch (...) {
     LOG_W(HW, "trx_usrp_end: exception while releasing device handles\n");
   }
+  shutdown_step("device_release_complete");
+  iqrecorder_end(device);
   for (int i = 0; i < USRP_DECIM_MAX_CHANNELS; i++) {
     free(s->decim_raw_buf[i]);
   }
@@ -1645,6 +1666,7 @@ int trx_usrp_write_init(openair0_device_t *device)
                (char*)"trx_usrp_write_thread",
                -1,
                OAI_PRIORITY_RT_MAX);
+  static_cast<usrp_state_t *>(device->priv)->tx_write_started = true;
   return(0);
 }
 
@@ -1768,10 +1790,12 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
   uhd::rx_metadata_t first_metadata;
   std::vector<void *> pointers(cc);
   auto receive_failure = [&](const char *reason) {
+    s->rx_stop_requested.store(true);
+    if (nr_shutdown_request)
+      nr_shutdown_request(3);
     LOG_E(HW, "SENSING: RFSTALL USRP_RX_%s reason=%s received=%d requested=%d metadata=%s\n",
           first_buffer ? "START" : "READ", reason, samples_received, recv_target,
           s->rx_md.to_pp_string(true).c_str());
-    s->rx_stop_requested.store(true);
     return -1; // never publish a partial/invalid buffer or a fabricated timestamp
   };
   if (s->ring_thread.joinable() || s->planned_ring_started) {
@@ -2289,6 +2313,8 @@ int trx_usrp_stop(openair0_device_t *device)
     /* No competing recv() here. Wake the producer via its bounded waits;
      * normal shutdown joins it before end() sends STOP and drains once. */
     s->rx_stop_requested.store(true);
+    s->ring_stop.store(true);
+    s->ring_cv.notify_all();
   }
   return 0;
 }

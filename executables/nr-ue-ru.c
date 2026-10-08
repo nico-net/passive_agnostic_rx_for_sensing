@@ -3,6 +3,8 @@
  */
 
 #include <unistd.h>
+#include <stdatomic.h>
+#include "common/utils/nr_shutdown.h"
 #include "common/utils/nr_core_plan.h"
 #include "nr-ue-ru.h"
 #include "nr-uesoftmodem.h"
@@ -99,6 +101,8 @@ static nrUE_RU_params_t *nrue_rus;
 
 openair0_config_t openair0_cfg_g[MAX_CARDS] = {};
 static openair0_device_t openair0_dev[MAX_CARDS] = {};
+static unsigned long rf_fail_after_reads;
+static atomic_ulong rf_read_count;
 
 int nrue_get_cell_count(void)
 {
@@ -364,30 +368,44 @@ void nrue_init_openair0(void)
   }
 }
 
-int nrue_ru_start(void)
+static void nrue_ru_fault_config(void)
 {
+  /* Independent, default-off fault injection for the orchestrator's shutdown
+   * acceptance test. It uses the same fatal-read path as a driver failure. */
+  const char *fail = getenv("ISAC_RF_FAIL_AFTER_READS");
+  if (fail) {
+    char *end;
+    long value = strtol(fail, &end, 10);
+    if (*fail && !*end && value > 0)
+      rf_fail_after_reads = value;
+  }
+}
+
+static int nrue_ru_start_impl(void)
+{
+  nrue_ru_fault_config();
   for (int ru_id = 0; ru_id < nrue_ru_count; ru_id++) {
     openair0_config_t *cfg = &openair0_cfg_g[ru_id];
     openair0_device_t *dev = &openair0_dev[ru_id];
 
     dev->host_type = RAU_HOST;
     int tmp = openair0_device_load(dev, cfg);
-    if (tmp != 0 && nr_core_plan_active()) {
-      LOG_E(HW, "SENSING: CORE_PLAN radio device %d initialization failed\n", ru_id); return -1;
+    if (tmp != 0) {
+      LOG_E(HW, "SENSING: radio device %d initialization failed\n", ru_id); return -1;
     }
-    AssertFatal(tmp == 0, "Could not load the device %d\n", ru_id);
+    if (nr_shutdown_requested())
+      return -1;
     int tmp2 = dev->trx_start_func(dev);
-    if (tmp2 != 0 && nr_core_plan_active()) {
-      LOG_E(HW, "SENSING: CORE_PLAN radio device %d start failed\n", ru_id); return -1;
+    if (tmp2 != 0) {
+      LOG_E(HW, "SENSING: radio device %d start failed\n", ru_id); return -1;
     }
-    AssertFatal(tmp2 == 0, "Could not start the device %d\n", ru_id);
     if (usrp_tx_thread == 1)
       dev->trx_write_init(dev);
   }
   return 0;
 }
 
-void nrue_ru_stop(void)
+static void nrue_ru_stop_impl(void)
 {
   for (openair0_device_t *ru = openair0_dev; ru < openair0_dev + nrue_ru_count; ru++) {
     if (ru->trx_stop_func)
@@ -401,7 +419,7 @@ void nrue_ru_stop(void)
  * timestamp origin: the device restarts its sample counter at 0, and firstTS was captured on the
  * first read of the previous stream, so keeping it would make every subsequent
  * `tmp_timestamp - dev->firstTS` negative and corrupt all downstream slot arithmetic. */
-int nrue_ru_restart_rx(void)
+static int nrue_ru_restart_rx_impl(void)
 {
   int rc = 0;
   for (openair0_device_t *ru = openair0_dev; ru < openair0_dev + nrue_ru_count; ru++) {
@@ -421,7 +439,7 @@ int nrue_ru_restart_rx(void)
  *
  * Deliberately NOT AssertFatal on failure, unlike nrue_ru_start(): this runs mid-capture, and the
  * caller has a defined fallback (stop the capture cleanly) that is better than aborting. */
-int nrue_ru_reinit(void)
+static int nrue_ru_reinit_impl(void)
 {
   for (int ru_id = 0; ru_id < nrue_ru_count; ru_id++) {
     openair0_device_t *dev = &openair0_dev[ru_id];
@@ -438,7 +456,10 @@ int nrue_ru_reinit(void)
     int loaded = -1;
     for (int attempt = 0; attempt < MPMD_CLAIM_EXPIRY_ATTEMPTS; attempt++) {
       if (attempt)
-        sleep(MPMD_CLAIM_EXPIRY_SLEEP_S);
+        for (int tick = 0; tick < 10 * MPMD_CLAIM_EXPIRY_SLEEP_S && !nr_shutdown_requested(); tick++)
+          usleep(100000);
+      if (nr_shutdown_requested())
+        return -1;
       loaded = openair0_device_load(dev, &openair0_cfg_g[ru_id]);
       if (loaded == 0)
         break;
@@ -449,6 +470,8 @@ int nrue_ru_reinit(void)
       LOG_E(HW, "nrue_ru_reinit: could not re-open device %d\n", ru_id);
       return -1;
     }
+    if (nr_shutdown_requested())
+      return -1;
     dev->firstTS_initialized = false;
     if (dev->trx_start_func == NULL || dev->trx_start_func(dev) < 0) {
       LOG_E(HW, "nrue_ru_reinit: could not restart device %d\n", ru_id);
@@ -460,7 +483,7 @@ int nrue_ru_reinit(void)
   return 0;
 }
 
-void nrue_ru_end(void)
+static void nrue_ru_end_impl(void)
 {
   for (openair0_device_t *ru = openair0_dev; ru < openair0_dev + nrue_ru_count; ru++) {
     if (ru->trx_get_stats_func)
@@ -497,7 +520,7 @@ int nrue_band_scan_next(PHY_VARS_NR_UE *UE)
   return 0;
 }
 
-void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)
+static void nrue_ru_set_freq_impl(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)
 {
   int current_cell_id = nrue_rus[UE->rf_map.card].used_by_cell;
   NR_DL_FRAME_PARMS *fp0 = &nrue_cell_fp[current_cell_id];
@@ -536,7 +559,7 @@ void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carri
   dev->trx_set_freq_func(dev, cfg);
 }
 
-int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
+static int nrue_ru_adjust_rx_gain_impl(PHY_VARS_NR_UE *UE, int gain_change)
 {
   openair0_config_t *cfg = &openair0_cfg_g[UE->rf_map.card];
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
@@ -561,16 +584,19 @@ int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
   return gain_change;
 }
 
-int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
+static int nrue_ru_read_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
 {
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
   openair0_timestamp_t tmp_timestamp = 0;
-  int ret = dev->trx_read_func(dev, &tmp_timestamp, buff, nsamps, num_antennas);
+  bool inject_failure = rf_fail_after_reads && atomic_fetch_add(&rf_read_count, 1) >= rf_fail_after_reads;
+  int ret = inject_failure ? -1 : dev->trx_read_func(dev, &tmp_timestamp, buff, nsamps, num_antennas);
   if (ret < 0) {
     *ptimestamp = 0;
-    if (!oai_exit)
-      LOG_E(HW, "SENSING: RFSTALL radio read failed; refusing invalid IQ\n");
+    bool was_stopping = nr_shutdown_requested();
     oai_exit = 1;
+    nr_shutdown_request(3);
+    if (!was_stopping)
+      LOG_E(HW, "SENSING: RFSTALL radio read failed; refusing invalid IQ\n");
     return ret;
   }
   openair0_timestamp_t first_timestamp = tmp_timestamp;
@@ -578,7 +604,7 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
 
   if (ret >= 0 && ret < nsamps) {
     LOG_W(HW, "Short RX read: got %d of %d samples, retrying\n", ret, nsamps);
-    for (int retry = 0; ret < nsamps && retry < 20; retry++) {
+    for (int retry = 0; ret < nsamps && retry < 20 && !nr_shutdown_requested(); retry++) {
       void *retry_buf[num_antennas];
       for (int ant = 0; ant < num_antennas; ant++)
         retry_buf[ant] = (char *)buff[ant] + (size_t)ret * sizeof(int32_t);
@@ -587,9 +613,11 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
       int got = dev->trx_read_func(dev, &retry_timestamp, retry_buf, nsamps - ret, num_antennas);
       if (got < 0 || (got > 0 && have_timestamp && retry_timestamp != first_timestamp + ret)) {
         *ptimestamp = 0;
-        if (!oai_exit)
-          LOG_E(HW, "SENSING: RFSTALL failed/non-contiguous short-read continuation\n");
+        bool was_stopping = nr_shutdown_requested();
         oai_exit = 1;
+        nr_shutdown_request(3);
+        if (!was_stopping)
+          LOG_E(HW, "SENSING: RFSTALL failed/non-contiguous short-read continuation\n");
         return -1;
       }
       if (got > 0) {
@@ -600,8 +628,13 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
         ret += got;
       }
     }
-    if (ret < nsamps)
-      LOG_W(HW, "Short RX read remains: got %d of %d samples\n", ret, nsamps);
+    if (ret < nsamps) {
+      *ptimestamp = 0;
+      oai_exit = 1;
+      nr_shutdown_request(3);
+      LOG_E(HW, "SENSING: RFSTALL short RX read exhausted: got %d of %d samples\n", ret, nsamps);
+      return -1;
+    }
   }
 
   if (!have_timestamp) {
@@ -634,7 +667,11 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
       continue;
 
     dev = &openair0_dev[ru_id];
-    dev->trx_read_func(dev, &tmp_timestamp, tmp_buf, nsamps, num_antennas);
+    if (dev->trx_read_func(dev, &tmp_timestamp, tmp_buf, nsamps, num_antennas) != nsamps) {
+      oai_exit = 1;
+      nr_shutdown_request(3);
+      return -1;
+    }
     if (!dev->firstTS_initialized) {
       dev->firstTS = tmp_timestamp;
       dev->firstTS_initialized = true;
@@ -644,7 +681,7 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
   return ret;
 }
 
-int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags)
+static int nrue_ru_write_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags)
 {
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
   int ret = dev->trx_write_func(dev, timestamp + dev->firstTS, buff, nsamps, num_antennas, flags);
@@ -674,14 +711,140 @@ int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buf
   return ret;
 }
 
-int nrue_ru_write_reorder(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags)
+static int nrue_ru_write_reorder_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags)
 {
   openair0_device_t *device = &openair0_dev[UE->rf_map.card];
-  return openair0_write_reorder_common(nrue_ru_write, UE, device, timestamp, txp, nsamps, nbAnt, flags);
+  return openair0_write_reorder_common(nrue_ru_write_impl, UE, device, timestamp, txp, nsamps, nbAnt, flags);
 }
 
-void nrue_ru_write_reorder_clear_context(PHY_VARS_NR_UE *UE)
+static void nrue_ru_write_reorder_clear_context_impl(PHY_VARS_NR_UE *UE)
 {
   openair0_device_t *device = &openair0_dev[UE->rf_map.card];
   openair0_write_reorder_clear_context(device);
 }
+
+/* Shared lifetime gate: cancellation may run concurrently with read/write. */
+void nrue_ru_shutdown_stop(void)
+{
+  for (int i = 0; i < MAX_CARDS; i++)
+    if (openair0_dev[i].trx_stop_func)
+      openair0_dev[i].trx_stop_func(&openair0_dev[i]);
+}
+
+/* The shutdown coordinator holds the exclusive device lifetime gate here. */
+void nrue_ru_shutdown(void)
+{
+  for (int i = 0; i < MAX_CARDS; i++)
+    if (openair0_dev[i].trx_end_func)
+      openair0_dev[i].trx_end_func(&openair0_dev[i]);
+}
+
+int nrue_ru_start(void)
+{
+  if (!nr_shutdown_radio_enter(1))
+    return -1;
+  int result = nrue_ru_start_impl();
+  nr_shutdown_radio_leave();
+  return result;
+}
+
+void nrue_ru_stop(void)
+{
+  if (!nr_shutdown_radio_enter(1))
+    return;
+  nrue_ru_stop_impl();
+  nr_shutdown_radio_leave();
+}
+
+void nrue_ru_end(void)
+{
+  if (!nr_shutdown_radio_enter(1))
+    return;
+  nrue_ru_end_impl();
+  nr_shutdown_radio_leave();
+}
+
+int nrue_ru_restart_rx(void)
+{
+  if (!nr_shutdown_radio_enter(1))
+    return -1;
+  int result = nrue_ru_restart_rx_impl();
+  nr_shutdown_radio_leave();
+  return result;
+}
+
+int nrue_ru_reinit(void)
+{
+  if (!nr_shutdown_radio_enter(1))
+    return -1;
+  int result = nrue_ru_reinit_impl();
+  nr_shutdown_radio_leave();
+  return result;
+}
+
+void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)
+{
+  if (!nr_shutdown_radio_enter(0))
+    return;
+  nrue_ru_set_freq_impl(UE, ul_carrier, dl_carrier, freq_offset);
+  nr_shutdown_radio_leave();
+}
+
+int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
+{
+  if (!nr_shutdown_radio_enter(0))
+    return -1;
+  int result = nrue_ru_adjust_rx_gain_impl(UE, gain_change);
+  nr_shutdown_radio_leave();
+  return result;
+}
+
+int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
+{
+  *ptimestamp = 0;
+  if (!nr_shutdown_radio_enter(0))
+    return -1;
+  int result = nrue_ru_read_impl(UE, ptimestamp, buff, nsamps, num_antennas);
+  nr_shutdown_radio_leave();
+  return result;
+}
+
+int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags)
+{
+  if (!nr_shutdown_radio_enter(0))
+    return -1;
+  int result = nrue_ru_write_impl(UE, timestamp, buff, nsamps, num_antennas, flags);
+  nr_shutdown_radio_leave();
+  return result;
+}
+
+int nrue_ru_write_reorder(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags)
+{
+  if (!nr_shutdown_radio_enter(0))
+    return -1;
+  int result = nrue_ru_write_reorder_impl(UE, timestamp, txp, nsamps, nbAnt, flags);
+  nr_shutdown_radio_leave();
+  return result;
+}
+
+void nrue_ru_write_reorder_clear_context(PHY_VARS_NR_UE *UE)
+{
+  if (!nr_shutdown_radio_enter(0))
+    return;
+  nrue_ru_write_reorder_clear_context_impl(UE);
+  nr_shutdown_radio_leave();
+}
+
+#ifdef NRUE_RU_SHUTDOWN_TEST
+/* Hardware-free integration fixture; not present in the receiver binary. */
+void nrue_ru_test_device(openair0_device_t device)
+{
+  static nrUE_RU_params_t ru = {.used_by_cell = 0};
+  static nrUE_cell_params_t cell = {.used_by_ue = 0};
+  nrue_ru_count = nrue_cell_count = 1;
+  nrue_rus = &ru;
+  nrue_cells = &cell;
+  openair0_dev[0] = device;
+  nrue_ru_fault_config();
+}
+#endif

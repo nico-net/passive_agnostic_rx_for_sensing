@@ -20,6 +20,7 @@ int nr_ue_rx_synced_g = 0;
 #include "common/utils/nr_core_plan.h"
 #include <pthread.h>
 #include "executables/nr-ue-ru.h"
+#include "common/utils/nr_shutdown.h"
 #include "executables/nr-uesoftmodem.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/INIT/nr_phy_init.h"
@@ -772,6 +773,7 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
         if (!oai_exit)
           LOG_E(PHY, "SENSING: RFSTALL readFrame got %d of %d RF samples; no acquisition on incomplete IQ\n", tmp, readBlockSize);
         oai_exit = 1;
+        nr_shutdown_request(3);
         if (toTrash)
           free(rxp[0]);
         return;
@@ -2164,15 +2166,9 @@ void *UE_thread(void *arg)
                * silently corrupt the capture -- which is exactly how this fault stayed hidden. A
                * supervisor can restart the run; a contaminated result cannot be fixed afterwards. */
               LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); releasing radio before exit\n");
-              /* This is the RX owner, outside trx_read_func(). Stop accepting
-               * work and release UHD handles before exiting. exit(3) alone
-               * skips destruction of the heap-owned radio and its streamers.
-               * Do not use exit_function(): it converts normal exits to zero. */
               oai_exit = 1;
-              nrue_ru_stop();
-              nrue_ru_end();
-              LOG_I(PHY, "USRP_RFSTALL_CLEANUP_COMPLETE exit=3\n");
-              exit(3);
+              nr_shutdown_request(3);
+              break;
             }
           }
           UE->is_synchronized = 0;
@@ -2278,6 +2274,11 @@ void *UE_thread(void *arg)
       stream_status = STREAM_STATUS_SYNCED;
     tx_wait_for_dlsch[slot] = 0;
   }
+  /* A UE owner must never disappear while main is still waiting for ITTI. */
+  nr_shutdown_request(nr_shutdown_requested() ? nr_shutdown_status() : 3);
+  /* SYNC replies point at the stack-local nf: drain before its lifetime ends. */
+  flush_actor(&UE->sync_actor);
+  abortNotifiedFIFO(&nf);
   LOG_W(NR_PHY, "UE main thread is ending\n");
   return NULL;
 }

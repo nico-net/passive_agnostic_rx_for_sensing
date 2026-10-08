@@ -116,6 +116,8 @@ typedef struct {
   volatile int length;
   pthread_mutex_t m;
   pthread_cond_t c;
+  pthread_t thread;
+  bool stop, started;
 } rlc_data_req_queue;
 
 static rlc_data_req_queue q;
@@ -127,8 +129,12 @@ static void *rlc_data_req_thread(void *_)
   pthread_setname_np(pthread_self(), "RLC queue");
   while (1) {
     if (pthread_mutex_lock(&q.m) != 0) abort();
-    while (q.length == 0)
+    while (q.length == 0 && !q.stop)
       if (pthread_cond_wait(&q.c, &q.m) != 0) abort();
+    if (q.length == 0 && q.stop) {
+      pthread_mutex_unlock(&q.m);
+      return NULL;
+    }
     i = q.start;
     if (pthread_mutex_unlock(&q.m) != 0) abort();
 
@@ -151,15 +157,14 @@ static void *rlc_data_req_thread(void *_)
 
 static void init_nr_rlc_data_req_queue(void)
 {
-  pthread_t t;
-
   pthread_mutex_init(&q.m, NULL);
   pthread_cond_init(&q.c, NULL);
 
-  if (pthread_create(&t, NULL, rlc_data_req_thread, NULL) != 0) {
+  if (pthread_create(&q.thread, NULL, rlc_data_req_thread, NULL) != 0) {
     LOG_E(PDCP, "%s:%d:%s: fatal\n", __FILE__, __LINE__, __FUNCTION__);
     exit(1);
   }
+  q.started = true;
 }
 
 static void enqueue_rlc_data_req(const protocol_ctxt_t *const ctxt_pP,
@@ -221,6 +226,8 @@ typedef struct {
   volatile int length;
   pthread_mutex_t m;
   pthread_cond_t c;
+  pthread_t thread;
+  bool stop, started;
 } pdcp_data_ind_queue;
 
 static pdcp_data_ind_queue pq;
@@ -267,8 +274,12 @@ static void *pdcp_data_ind_thread(void *_)
   pthread_setname_np(pthread_self(), "PDCP data ind");
   while (1) {
     if (pthread_mutex_lock(&pq.m) != 0) abort();
-    while (pq.length == 0)
+    while (pq.length == 0 && !pq.stop)
       if (pthread_cond_wait(&pq.c, &pq.m) != 0) abort();
+    if (pq.length == 0 && pq.stop) {
+      pthread_mutex_unlock(&pq.m);
+      return NULL;
+    }
     i = pq.start;
     if (pthread_mutex_unlock(&pq.m) != 0) abort();
 
@@ -291,15 +302,14 @@ static void *pdcp_data_ind_thread(void *_)
 
 static void init_nr_pdcp_data_ind_queue(void)
 {
-  pthread_t t;
-
   pthread_mutex_init(&pq.m, NULL);
   pthread_cond_init(&pq.c, NULL);
 
-  if (pthread_create(&t, NULL, pdcp_data_ind_thread, NULL) != 0) {
+  if (pthread_create(&pq.thread, NULL, pdcp_data_ind_thread, NULL) != 0) {
     LOG_E(PDCP, "%s:%d:%s: fatal\n", __FILE__, __LINE__, __FUNCTION__);
     exit(1);
   }
+  pq.started = true;
 }
 
 static void enqueue_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
@@ -1059,4 +1069,27 @@ void nr_pdcp_get_drb_count_values(ue_id_t ue_id, rb_id_t rb_id, nr_pdcp_count_t 
   *ul_count = entity->get_pdcp_count_ul(entity);
 
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
+}
+
+/* Called after ITTI, PHY and time-manager producers have stopped. Drain PDCP
+ * before RLC, since a PDCP callback may enqueue an RLC request. */
+void nr_pdcp_stop_threads(void)
+{
+  nr_pdcp_stop_timer_thread();
+  if (pq.started) {
+    pthread_mutex_lock(&pq.m);
+    pq.stop = true;
+    pthread_cond_broadcast(&pq.c);
+    pthread_mutex_unlock(&pq.m);
+    pthread_join(pq.thread, NULL);
+    pq.started = false;
+  }
+  if (q.started) {
+    pthread_mutex_lock(&q.m);
+    q.stop = true;
+    pthread_cond_broadcast(&q.c);
+    pthread_mutex_unlock(&q.m);
+    pthread_join(q.thread, NULL);
+    q.started = false;
+  }
 }
