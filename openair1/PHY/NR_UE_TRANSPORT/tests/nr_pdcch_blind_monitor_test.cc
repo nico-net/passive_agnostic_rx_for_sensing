@@ -3191,6 +3191,41 @@ TEST_F(BlindPdcchTest, UlConfigDiscExploresPastWrongDlBwpWithoutCrcCredit) {
   nr_pdcch_ul_config_disc_reset();
 }
 
+TEST_F(BlindPdcchTest, UlConfigDiscExploresEqualLengthWidthSplits) {
+  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
+  nr_pdcch_ul_config_disc_reset();
+  auto truth = LiveUlOpts();
+  truth.bwp_size = 217;
+  truth.tda_count = 0;
+  truth.bwp_indicator_bits = 1;
+  truth.sri_bits = 0;
+  truth.csi_request_bits = 1;
+  auto base = truth;
+  base.bwp_size = 0;
+  base.bwp_indicator_bits = base.sri_bits = base.csi_request_bits = -1;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&truth);
+  nr_pdcch_ul_config_prior_t prior = {0, 217, 217, 0, 0, 100};
+  bool found = false;
+  for (int i = 0; i < 100; ++i) {
+    UlGroundTruth gt;
+    gt.riv = 1 + i % 16;
+    gt.mcs = 2 + i % 24;
+    gt.harq_pid = i % 16;
+    nr_pdcch_blind_ul_result_t out{};
+    prior.source_abs_slot++;
+    if (!nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+        nr_dci_bits_from_u64(PackUlPayload(gt, truth)), &base, &prior, &out)) continue;
+    if (out.bwp_size == 217 && out.start_rb == gt.riv && out.num_rb == 1
+        && out.mcs == gt.mcs && out.rv == gt.rv && out.harq_pid == gt.harq_pid) {
+      found = true;
+      break;
+    }
+    nr_pdcch_ul_discovery_feedback(&out, false);
+  }
+  EXPECT_TRUE(found) << "a same-length BWP/SRI/CSI width alternative was never proposed";
+  nr_pdcch_ul_config_disc_reset();
+}
+
 TEST_F(BlindPdcchTest, UlConfigDiscFindsHiddenTwoRowTdraWidth) {
   setenv("ISAC_UL_CONFIG_DISC", "1", 1);
   nr_pdcch_ul_config_disc_reset();

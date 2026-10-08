@@ -14,7 +14,7 @@
  * or search over RNTIs happens here. The common candidate scheduler has already
  * established the CRC, payload length, bank nID and C-RNTI. The DL BWP is a
  * prior, never a hard constraint. A failed TB does not delete a candidate. */
-#define UL_CFG_UE 16
+#define UL_CFG_UE NR_PDCCH_BLIND_MAX_UE
 #define UL_CFG_HYP 64
 #define UL_CFG_TICKET 128
 #define UL_CFG_TAG (UINT64_C(1) << 63)
@@ -180,6 +180,14 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
   const int db = p->dl_bwp_size ? p->dl_bwp_start : 0;
   const int starts[] = {db, 0, db - 6, db + 6, db - 12, db + 12, db, db, 0, (carrier - 52) / 2};
   const int sizes[] = {ds, carrier, ds, ds, ds, ds, ds - 12, ds + 12, 52, 52};
+  /* The DCI length constrains the sum of these three widths, not their split.
+   * Retaining only the first split makes every later grant use the same wrong
+   * field offsets when RRC chose, for example, one BWP bit instead of one CSI
+   * bit. Give each geometry its first split before spending slots on more. */
+  static const uint8_t width_pairs[][2] = {
+    {0,0}, {1,0}, {0,1}, {1,1}, {0,2}, {2,0}, {1,2}, {2,1}, {2,2}
+  };
+  for (int pass = 0; pass < 4 && u->n < UL_CFG_HYP; ++pass)
   for (int g = 0; g < 10 && u->n < UL_CFG_HYP; ++g) {
     const int start = starts[g], size = sizes[g];
     if (start < 0 || size < 1 || start + size > carrier || size > 275) continue;
@@ -203,23 +211,30 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
       }
       /* Search only the small field-width neighborhood here. The existing
        * full UL width engine takes over once a BWP has CRC support. */
+      o.bwp_indicator_bits = o.sri_bits = o.csi_request_bits = 0;
+      const int csi_total = (int)length - nr_pdcch_blind_dci01_size(&o);
+      int nth = 0, width_cost = 0;
       bool fit = false;
-      int width_cost = 0;
-      for (int bw = 0; bw <= 2 && !fit; ++bw)
-        for (int sri = 0; sri <= 2 && !fit; ++sri)
-          for (int csi = 0; csi <= 6 && !fit; ++csi) {
-            o.bwp_indicator_bits = bw;
-            o.sri_bits = sri;
-            o.csi_request_bits = csi;
-            fit = nr_pdcch_blind_dci01_size(&o) == length;
-            if (fit) width_cost = bw + sri + csi;
-          }
+      for (unsigned w = 0; w < sizeof(width_pairs)/sizeof(width_pairs[0]); ++w) {
+        const int bw = width_pairs[w][0], sri = width_pairs[w][1];
+        const int csi = csi_total - bw - sri;
+        if (csi < 0 || csi > 6) continue;
+        if (nth++ != pass) continue;
+        o.bwp_indicator_bits = bw;
+        o.sri_bits = sri;
+        o.csi_request_bits = csi;
+        fit = nr_pdcch_blind_dci01_size(&o) == length;
+        width_cost = bw + sri + csi;
+        break;
+      }
       if (!fit) continue;
       bool dup = false;
       for (int k = 0; k < u->n; ++k) {
         const nr_pdcch_blind_ul_opts_t *x = &u->h[k].opts;
         dup |= x->bwp_start == start && x->bwp_size == size && x->fdra_mode == o.fdra_mode
-               && x->tda_count == o.tda_count;
+               && x->tda_count == o.tda_count
+               && x->bwp_indicator_bits == o.bwp_indicator_bits
+               && x->sri_bits == o.sri_bits && x->csi_request_bits == o.csi_request_bits;
       }
       if (dup) continue;
       hypothesis_t *h = &u->h[u->n++];

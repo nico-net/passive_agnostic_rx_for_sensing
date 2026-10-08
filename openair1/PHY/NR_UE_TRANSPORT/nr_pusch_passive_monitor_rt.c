@@ -1,4 +1,5 @@
 #include "nr_pdcch_ul_discovery.h"
+#include "nr_pdcch_ul_config_disc.h"
 #include "nr_srs_passive.h"
 #include <stdatomic.h>
 #include <string.h>
@@ -22,7 +23,7 @@
 static nr_passive_ul_book_t g_book;
 static pthread_mutex_t g_book_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_parked,g_claimed,g_expired,g_overwritten;
-static _Atomic uint64_t g_chain_no_dl_lock,g_chain_no_hyp,g_chain_no_dci01;
+static _Atomic uint64_t g_chain_no_dl_lock,g_chain_no_hyp,g_chain_no_dci01,g_chain_skip_rv;
 static pthread_mutex_t g_first_lock=PTHREAD_MUTEX_INITIALIZER;
 static nr_ul_first_state_t g_first;
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
@@ -49,6 +50,12 @@ void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_ab
             (unsigned long)g->hyp_generation);
     if (!g->hyp_generation) {
       atomic_fetch_add_explicit(&g_chain_no_hyp,1,memory_order_relaxed);
+      return;
+    }
+    /* The first no-HARQ-history decoder rejects RV != 0 before FEP. Keep
+     * those grants out of the bounded IQ queue while U3 rotates hypotheses. */
+    if (g->rv != 0) {
+      atomic_fetch_add_explicit(&g_chain_skip_rv,1,memory_order_relaxed);
       return;
     }
   }
@@ -79,9 +86,10 @@ void nr_pusch_first_crc_result(const nr_pdcch_blind_ul_result_t *g,
       pthread_mutex_unlock(&g_first_lock);
     }
   }
-  LOG_A(PHY,"SENSING: UL_PUSCH_CRC rnti=0x%04x ok=%d mcs=%u prb=%u+%u ta=%d t=%ld cpu_us=%lu status=%u uci_hint=%d uci_re=%u dmrs_id=%u data_id=%u\n",
+  LOG_A(PHY,"SENSING: UL_PUSCH_CRC rnti=0x%04x ok=%d mcs=%u prb=%u+%u ta=%d t=%ld cpu_us=%lu status=%u reason=%s uci_hint=%d uci_re=%u dmrs_id=%u data_id=%u\n",
         g->rnti,ok,g->mcs,g->bwp_start+g->start_rb,g->num_rb,
         out->ta_applied_samples,(long)target_slot,(unsigned long)cpu_us,out->status,
+        out->reject_reason ? out->reject_reason : "-",
         g->csi_request!=0 || g->dai!=0,out->uci_ack_re,out->dmrs_id,out->data_id);
   if (first_ok && slots_per_frame>0)
     LOG_A(PHY,"SENSING: UL_FIRST_TB_OK rnti=0x%04x elapsed_ms=%.3f elapsed_slots=%ld first_dci_to_tb=1\n",
@@ -251,10 +259,21 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
 void nr_pusch_grant_book_stats_dump(void)
 {
   if (nr_ul_chain_on())
-    LOG_I(PHY,"SENSING: UL_CHAIN_DROP no_dl_lock=%lu no_hyp=%lu not_0_1=%lu\n",
+    LOG_I(PHY,"SENSING: UL_CHAIN_DROP no_dl_lock=%lu no_hyp=%lu not_0_1=%lu skipped_rv=%lu\n",
           (unsigned long)atomic_load_explicit(&g_chain_no_dl_lock,memory_order_relaxed),
           (unsigned long)atomic_load_explicit(&g_chain_no_hyp,memory_order_relaxed),
-          (unsigned long)atomic_load_explicit(&g_chain_no_dci01,memory_order_relaxed));
+          (unsigned long)atomic_load_explicit(&g_chain_no_dci01,memory_order_relaxed),
+          (unsigned long)atomic_load_explicit(&g_chain_skip_rv,memory_order_relaxed));
+  if (nr_ul_chain_on()) {
+    nr_pdcch_ul_config_stats_t u3={0};
+    nr_pdcch_ul_config_disc_stats(&u3);
+    LOG_I(PHY,"SENSING: UL_CONFIG_STATS proposals=%lu feedback[ok=%lu bad=%lu] hypotheses=%u locked=%u dropped[busy=%lu capacity=%lu bank_busy=%lu] proposal_us[mean=%.2f max=%.2f]\n",
+          (unsigned long)u3.proposed,(unsigned long)u3.feedback_ok,(unsigned long)u3.feedback_bad,
+          u3.live_hypotheses,u3.locked_hypotheses,(unsigned long)u3.dropped_busy,
+          (unsigned long)u3.dropped_capacity,(unsigned long)u3.bank_note_dropped_busy,
+          u3.proposal_calls ? (double)u3.proposal_ns/u3.proposal_calls/1000.0 : 0.0,
+          (double)u3.proposal_max_ns/1000.0);
+  }
   LOG_I(PHY,
         "SENSING: pusch_book[parked=%lu claimed=%lu expired=%lu overwritten=%lu]\n",
         (unsigned long)atomic_load_explicit(&g_parked, memory_order_relaxed),
