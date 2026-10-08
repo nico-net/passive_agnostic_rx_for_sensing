@@ -153,7 +153,7 @@ typedef struct {
    * read a HARQ PID (at rv+2, or rv+10 behind a second TB) exactly one above the previous one (mod 16). */
   uint16_t harq_pairs[NR_DCI11_LAYOUT_MAX];
   uint16_t harq_inc[NR_DCI11_LAYOUT_MAX];
-#define NR_DCI11_HARQ_RNTIS 8
+#define NR_DCI11_HARQ_RNTIS 64 /* OTA PCI 415: ~19 C-RNTIs live; 8 slots thrashed and the test never proved */
   uint16_t harq_rnti[NR_DCI11_HARQ_RNTIS];
   nr_dci_bits_t harq_prev[NR_DCI11_HARQ_RNTIS];
   uint32_t trials[NR_DCI11_LAYOUT_MAX]; ///< stage-2 decodes attempted
