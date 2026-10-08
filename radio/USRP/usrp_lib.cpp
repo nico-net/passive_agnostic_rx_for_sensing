@@ -1053,7 +1053,12 @@ static void usrp_ring_producer(usrp_state_t *s)
     size_t got = 0;
     try {
       got = s->rx_stream->recv(ptr, n, md, 0.1, !started);
+    } catch (const std::exception &ex) {
+      LOG_E(HW, "SENSING: USRP_RING recv exception at sample %llu: %s\n", (unsigned long long)w, ex.what());
+      s->ring_err.store(3);
+      break;
     } catch (...) {
+      LOG_E(HW, "SENSING: USRP_RING recv exception (non-std) at sample %llu\n", (unsigned long long)w);
       s->ring_err.store(3);
       break;
     }
