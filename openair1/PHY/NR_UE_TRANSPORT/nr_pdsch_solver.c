@@ -33,6 +33,7 @@ typedef struct {
   uint8_t add_pos;
   int8_t table;
   int8_t S_by_tda[16];
+  int8_t rm;               /* CSI-RS rate matching for this RNTI: -1 unknown, 0 no, 1 yes (CRC-selected) */
   uint32_t full_tr, full_ok, cons_fail;
 } solver_rnti_t;
 
@@ -43,7 +44,8 @@ typedef struct {
   uint8_t phase;          /* 0 = search/candidate, 1 = solved */
   uint8_t S, add_pos, table, probe;
   bool table_disc;        /* this MCS's (Qm, R) differ between the tables tried */
-  bool learn_S, learn_table;
+  bool learn_S, learn_table, learn_rm;
+  uint8_t rm;
   int tda;                /* solved: tda index the representative read */
   uint64_t dci;
   nr_dci_bits_t payload;
@@ -166,6 +168,7 @@ static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
       g_r[i].rnti = rnti;
       g_r[i].rep = -1;
       g_r[i].table = -1;
+      g_r[i].rm = -1;
       memset(g_r[i].S_by_tda, -1, sizeof(g_r[i].S_by_tda));
       if (idx) *idx = i;
       return &g_r[i];
@@ -201,6 +204,7 @@ static pending_t *pend_new(void)
   return p;
 }
 
+static int t_rm = 0; static bool t_learn_rm = false; /* set by plan for this grant (under g_mu) */
 static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                  const nr_pdsch_solver_reading_t *rd, int l0, int S, int add_pos, int table, bool probe, bool table_disc,
                  bool learn_S, bool learn_table, int tda, uint64_t dci, nr_dci_bits_t payload)
@@ -210,7 +214,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   if (S > l0) /* type A: the first DM-RS symbol l0 must lie inside the PDSCH (S <= l0); else the demapper overruns */
     return true;
   for (int i = 0; i < *n; i++) /* never the same decode twice for one grant */
-    if (out[i].reading == reading && out[i].S == S && out[i].add_pos == add_pos && out[i].table == table)
+    if (out[i].reading == reading && out[i].S == S && out[i].add_pos == add_pos && out[i].table == table && out[i].rm == t_rm)
       return true;
   pending_t *p = pend_new();
   memset(p, 0, offsetof(pending_t, ids));
@@ -222,6 +226,8 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->S = (uint8_t)S; p->add_pos = (uint8_t)add_pos; p->table = (uint8_t)table; p->probe = probe;
   p->table_disc = table_disc; p->learn_S = learn_S; p->learn_table = learn_table; p->tda = tda;
   p->dci = dci;
+  p->rm = (uint8_t)t_rm;
+  p->learn_rm = t_learn_rm;
   p->payload = payload;
   p->n_ids = rd[reading].n_ids < SOLVER_MAX_IDS ? rd[reading].n_ids : SOLVER_MAX_IDS;
   memcpy(p->ids, rd[reading].ids, (size_t)p->n_ids * sizeof(uint16_t));
@@ -234,6 +240,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   v->dmrs_mask = nr_pdsch_solver_dmrs_mask(l0, S, 14 - S, add_pos);
   v->probe = probe;
   v->token = p->token;
+  v->rm = (uint8_t)t_rm;
   return true;
 }
 
@@ -276,6 +283,12 @@ static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, ui
 int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0,
                          const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out)
 {
+  return nr_pdsch_solver_plan_slot(rnti, payload, len, mcs, l0, false, rd, n_rd, budget, out);
+}
+
+int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0, bool csirs_slot,
+                              const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out)
+{
   (void)len;
   if (!nr_pdsch_solver_enabled() || rd == NULL || n_rd <= 0 || out == NULL || budget <= 0)
     return 0;
@@ -295,11 +308,27 @@ int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uin
                "solved=%llu dropped=%llu\n", (unsigned long long)g_st.planned, (unsigned long long)g_st.probes,
           (unsigned long long)g_st.probe_ok, (unsigned long long)g_st.fulls, (unsigned long long)g_st.full_ok,
           (unsigned long long)g_st.candidates, (unsigned long long)g_st.solved, (unsigned long long)g_st.dropped);
+  t_rm = 0;
+  t_learn_rm = false;
   if (r->solved) {
     int ri = 0;
     for (int i = 0; i < n_rd; i++)
       if (has_id(&rd[i], r->rep)) { ri = i; break; }
-    plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, mcs, dci, payload);
+    if (csirs_slot && r->rm < 0) { /* unknown: probe with and without, learn by CRC */
+      for (int k = 1; k >= 0; k--) {
+        t_rm = k;
+        t_learn_rm = true;
+        const int n0 = n;
+        plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, mcs, dci, payload);
+        for (int q = n0; q < n; q++) out[q].probe = 1; /* a rate-match trial is a probe, never a counted TB */
+      }
+      t_learn_rm = false;
+    } else {
+      t_rm = csirs_slot ? r->rm : 0;
+      plan_known(out, &n, budget, slot, 1, ri, rd, l0, r->rep, r->add_pos, r->table, r->S_by_tda, mcs, dci, payload);
+    }
+  } else if (csirs_slot) {
+    /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
   } else {
     /* 1. confirm a candidate: the reading sharing most layouts with it */
     if (r->has_cand) {
@@ -448,6 +477,11 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x solution never decoded a full TB in 256 grants: reopening\n", r->rnti);
         r->solved = false; r->has_cand = false; g_st.dropped++;
       }
+    }
+    if (crc_ok && p->learn_rm && r->rm < 0) {
+      r->rm = (int8_t)p->rm;
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x CSI-RS rate matching %s (CRC-selected per RNTI)\n", r->rnti,
+            p->rm ? "APPLIED" : "NOT applied");
     }
     if (crc_ok) {
       r->cons_fail = 0;

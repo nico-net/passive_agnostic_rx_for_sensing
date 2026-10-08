@@ -126,6 +126,38 @@ TEST(PdschSolver, TheCellPriorSolvesASecondRntiFaster)
   EXPECT_LE(g2, 4);
 }
 
+TEST(PdschSolver, CsiRsRateMatchingIsAPerRntiCrcHypothesis)
+{
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  std::mt19937 rng(13);
+  ASSERT_GT(RunCell(c, 0x0042, -1, 400, rng), 0);
+  nr_pdsch_solver_reading_t rd[1] = {{c.truth.data(), (int)c.truth.size(), 16}};
+  // a slot with discovered CSI-RS: the solver probes with and without rate matching; truth = rate-matched
+  int learnt_after = -1;
+  for (int k = 0; k < 20 && learnt_after < 0; k++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan_slot(0x0042, p, 49, 0, 2, true, rd, 1, 8, v);
+    bool both = false, any_rm = false, any_no = false;
+    for (int i = 0; i < n; i++) {
+      any_rm |= v[i].rm == 1; any_no |= v[i].rm == 0;
+      const bool ok = v[i].rm == 1 && v[i].S == c.S_true[p.w[0] & 1] && v[i].add_pos == 1;
+      nr_pdsch_solver_feedback(v[i].token, ok, true);
+    }
+    both = any_rm && any_no;
+    if (!both && n > 0) learnt_after = k;
+  }
+  EXPECT_GE(learnt_after, 1) << "after the first CRC pass only the rate-matched variant remains";
+  // a slot without CSI-RS never rate-matches
+  nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  const int n = nr_pdsch_solver_plan_slot(0x0042, p, 49, 0, 2, false, rd, 1, 8, v);
+  for (int i = 0; i < n; i++) EXPECT_EQ(v[i].rm, 0);
+}
+
 int main(int argc, char **argv)
 {
   logInit();

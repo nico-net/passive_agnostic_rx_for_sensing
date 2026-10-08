@@ -41,6 +41,7 @@ typedef struct {
   uint8_t S, L, add_pos, table;
   uint16_t dmrs_mask;  ///< dlDmrsSymbPos encoding (bit l = symbol l)
   uint8_t probe;       ///< 1 = first-code-block probe (search), 0 = full decode (solved parameters)
+  uint8_t rm;          ///< 1 = rate-match around the run-time-discovered CSI-RS resources of this slot
   uint32_t token;      ///< hand back to nr_pdsch_solver_feedback()
 } nr_pdsch_solver_var_t;
 
@@ -60,6 +61,12 @@ bool nr_pdsch_solver_owns(uint16_t rnti);
  * `budget` caps the probes; returns the number written to out[]. */
 int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0,
                          const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
+/** As nr_pdsch_solver_plan(), for a slot that carries run-time-discovered CSI-RS resources (csirs_slot): whether the
+ * gNB rate-matches this RNTI's PDSCH around them (TS 38.214 5.1.4: only resources configured for THIS UE) is a per-RNTI
+ * hypothesis chosen by TB CRC -- both are probed until one passes. The search never starts on such a slot, so a
+ * missing rate match cannot count against the true layout. */
+int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0, bool csirs_slot,
+                              const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 

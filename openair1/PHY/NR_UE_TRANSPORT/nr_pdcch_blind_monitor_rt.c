@@ -2145,7 +2145,7 @@ typedef struct {
   janon_cand_t c[JANON_MAX_CAND];
 } janon_item_t;
 typedef struct { uint64_t geom; int len; uint16_t rnti; uint32_t hash; nr_dci_bits_t payload; uint8_t L; uint16_t cce; int frame, slot; } janon_hit_t;
-typedef struct { const janon_hit_t *h; int n; } janon_feed_ctx_t;
+typedef struct { const janon_hit_t *h; int n; const uint16_t *known; int n_known; } janon_feed_ctx_t;
 static pthread_mutex_t g_janon_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_janon_cv = PTHREAD_COND_INITIALIZER;
 static janon_item_t *g_janon_q;
@@ -2307,6 +2307,9 @@ static bool janon_hit_scorer(int len, int trial, uint16_t *rnti, uint32_t *hash,
   const janon_feed_ctx_t *c = user;
   if (trial >= c->n || c->h[trial].len != len)
     return false;
+  for (int k = 0; k < c->n_known; k++) /* an RNTI already decoded here is not new-UE evidence */
+    if (c->known[k] == c->h[trial].rnti)
+      return false;
   *rnti = c->h[trial].rnti;
   *hash = c->h[trial].hash;
   return true;
@@ -4333,7 +4336,6 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      * were almost never under test. On such a CORESET, until it is banked, fill the budget in ladder order
      * (AL2, AL4, AL8, then AL1): 18+9+4+33 = 64 for 36 CCEs, i.e. every AL2/4/8 position each occasion. */
     if (t_candidate_share > 0 && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
-        && (t_discovered_token != 0 || !janon_async_enabled()) /* async: full ladder only while dwelling */
         && nr_pdcch_joint_anon_enabled())
       for (int idx = 0; idx < 4; idx++)
         if (cfg->ss_al_candidates[idx] == 0)
@@ -5113,7 +5115,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         discovery_scope.before_feed = btim_on ? btim_now() : 0;
         discovery_scope.phase = 1;
         const uint64_t trace_decodes = dl_state->decodes;
-        janon_feed_ctx_t jfc = {jhits, n_jhits};
+        janon_feed_ctx_t jfc = {jhits, n_jhits, dl_known, n_known_dl};
         int found_len = janon_async
             ? nr_pdcch_dci_length_sweep_feed_budget(dl_state, janon_hit_scorer, &jfc, n_jhits > 0 ? n_jhits : 1,
                                                     dci_len_min(), dci_len_max(), 0, 0, 0)
@@ -5165,6 +5167,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           } else {
             dl_bank->anonymous_found = found_len;
             dl_bank->anonymous_rnti = locked_rnti;
+            if (janon_async) { /* async: keep looking for the NEXT UE on this CORESET (was: one anonymous lock ever) */
+              dl_bank->anonymous_found = 0;
+              nr_pdcch_dci_length_sweep_reset(&dl_bank->anonymous);
+            }
             nr_pdcch_blind_rnti_bootstrap_record_corroborated(
                 locked_rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
             nr_pdcch_dci_length_context_t *promoted =
@@ -5184,7 +5190,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             g_length_found = true;
           }
         } else if (!dl_scout && !dl_second && dl_state->occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS
-                   && !(sweep_ctx.joint_anon && dl_state->occasions_fed < joint_anon_budget())) {
+                   && !(sweep_ctx.joint_anon && dl_state->occasions_fed < joint_anon_budget()) && !janon_async) {
           const bool was_suspect = dlc && reconf_lengths_enabled() && dlc->len_state == NR_LEN_SUSPECT;
           if (was_suspect) {
             dlc->found[0] = 0;
@@ -5659,9 +5665,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
        * x 64 candidates every slot (~2 ms p50 on the PCI 415 replay). */
       {
         static int s_kps = -1;
-        if (s_kps < 0) s_kps = getenv("ISAC_PDCCH_KNOWN_PRESCREEN") && atoi(getenv("ISAC_PDCCH_KNOWN_PRESCREEN")) ? 1 : 0;
+        static double s_kmin = 0.66;
+        if (s_kps < 0) {
+          s_kps = getenv("ISAC_PDCCH_KNOWN_PRESCREEN") && atoi(getenv("ISAC_PDCCH_KNOWN_PRESCREEN")) ? 1 : 0;
+          const char *e = getenv("ISAC_PDCCH_KNOWN_PRESCREEN_MIN"); /* amplitude-consistency score; noise mean 2/pi = 0.637 */
+          if (e && atof(e) > 0) s_kmin = atof(e);
+        }
         if (s_kps && cfg->discovered_coreset && !t_discovered_token
-            && !nr_pdcch_joint_prescreen((const int16_t *)&pdcch_e_rx[e_rx_cand_idx], n_re_cand * 2)) {
+            && joint_anon_score((const int16_t *)&pdcch_e_rx[e_rx_cand_idx], n_re_cand * 2) < s_kmin) {
           e_rx_cand_idx += n_re_cand;
           NR_BLIND_CTR_INC(g_held_energy);
           continue;
@@ -7660,8 +7671,11 @@ constdiag_done:;
         }
       }
       nr_pdsch_solver_var_t var[NR_PDSCH_SOLVER_MAX_VAR];
-      const int nv = nrd > 0 ? nr_pdsch_solver_plan(out.rnti, rw->payload, dlen, out.mcs, cfg->dmrs_typeA_position + 2,
-                                                    rd, nrd, s_budget, var) : 0;
+      /* run-time-discovered CSI-RS resources of this slot (blind CSI-RS search; nothing configured) */
+      fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
+      const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+      const int nv = nrd > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs, cfg->dmrs_typeA_position + 2,
+                                                         sv_nrm > 0, rd, nrd, s_budget, var) : 0;
       for (int v = 0; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
         fapi_nr_dl_config_dlsch_pdu_rel15_t dl = dlsch_pdu;
@@ -7676,9 +7690,9 @@ constdiag_done:;
         dl.mcs_table         = var[v].table;
         dl.pduBitmap         = 0;
         dl.numCsiRsForRateMatching = 0;
-        {
-          fapi_nr_dl_config_csirs_pdu_rel15_t rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
-          const int n_rm = nr_csirs_blind_rt_rate_match_all(abs_slot, rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+        if (var[v].rm) {
+          const fapi_nr_dl_config_csirs_pdu_rel15_t *rm = sv_rm;
+          const int n_rm = sv_nrm;
           static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
           for (int k = 0; k < n_rm; k++) {
             const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &rm[k];
