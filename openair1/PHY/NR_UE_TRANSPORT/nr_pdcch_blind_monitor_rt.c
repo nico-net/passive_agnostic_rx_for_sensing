@@ -7591,9 +7591,9 @@ constdiag_done:;
       enum { KEYS = 256 };
       uint64_t kkey[KEYS];
       int kgrp[KEYS], nk = 0;
-      for (int i = (rep >= 0 ? rep : 0); i < (rep >= 0 ? rep + 1 : nh); i++) {
+      for (int i = 0; i < nh; i++) {
         s_gid[i] = 0xff;
-        if (rep < 0 && !R->alive[i])
+        if (!R->alive[i] && i != rep)
           continue;
         const nr_dci11_offsets_t *of = &R->off[i];
         const uint64_t key = (uint64_t)of->riv | (uint64_t)of->mcs << 8 | (uint64_t)of->ant_ports << 16
@@ -7636,7 +7636,7 @@ constdiag_done:;
         rd[k].num_rb = rparsed[k].num_rb;
         off += rcount[k];
       }
-      for (int i = (rep >= 0 ? rep : 0); i < (rep >= 0 ? rep + 1 : nh); i++)
+      for (int i = 0; i < nh; i++)
         if (s_gid[i] != 0xff)
           ((uint16_t *)rd[s_gid[i]].ids)[rd[s_gid[i]].n_ids++] = (uint16_t)i;
       static int s_budget = -1;
