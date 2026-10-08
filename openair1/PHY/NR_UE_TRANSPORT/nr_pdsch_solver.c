@@ -470,8 +470,10 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       int known = 0;
       for (int q = 0; q < g_n_key_scr && !known; q++)
         if (g_key_scr[q].key == g_alt_key) { t_scr = g_key_scr[q].scr; known = 1; }
-      if (!known) {
-        const uint32_t k = r->grants % (uint32_t)(g_n_alt + 1);
+      if (!known) { /* T26d: the default ids alone for the first 48 grants -- cycling 6+ alternatives from the start made
+                     * the serving population's search 6x slower (replay e9/e10: 0x8f5a unsolved) */
+        const uint32_t g = r->grants > 48 ? r->grants - 48 : 0;
+        const uint32_t k = r->grants <= 48 ? 0 : g % (uint32_t)(g_n_alt + 1);
         t_scr = k == 0 ? -1 : g_alt_ids[k - 1];
       }
     }
