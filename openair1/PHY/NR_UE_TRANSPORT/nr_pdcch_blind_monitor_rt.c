@@ -102,6 +102,8 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_discovery_replay.h"
 #include "nr_pdcch_uss_tracker.h"
 #include "nr_pdcch_joint_live.h"
+#include "nr_pdsch_solver.h"
+#include "common/utils/nr_core_plan.h" /* janon worker */
 #include "nr_pdcch_joint_solve.h" /* nr_pdcch_joint_prescreen (JOINT_ANON candidate screen) */
 #include "nr_pdcch_al1_map.h"
 #include "nr_passive_metrics.h"
@@ -138,6 +140,117 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  * the same HARQ process, silently mixing two receivers' contexts. 16 UEs x 16 processes = 3000-3255,
  * which stays clear of the 1000/2000 namespaces this file's header documents. */
 #define NR_PDCCH_BLIND_UE_TAG_STRIDE 16
+static bool nr_pdcch_ded_every_slot(void)
+{
+  static int en = -1;
+  if (en < 0) {
+    const char *e = getenv("ISAC_PDCCH_DED_EVERY_SLOT");
+    en = (e && atoi(e) != 0) ? 1 : 0;
+  }
+  return en == 1;
+}
+/* Is this slot an SS#0 (or SIB1 RA-SS) monitoring occasion -- the gate's own test, without the every-slot flags. */
+static bool nr_pdcch_ss0_occasion(uint32_t gate_slot)
+{
+  int ss_period, ss_offset, ss_duration;
+  nr_pdcch_blind_monitor_occasion_gate(&ss_period, &ss_offset, &ss_duration);
+  if (ss_period <= 0)
+    return false;
+  const uint32_t dur = ss_duration > 0 ? (uint32_t)ss_duration : 1u, rem = gate_slot % (uint32_t)ss_period;
+  if (rem >= (uint32_t)ss_offset && rem < (uint32_t)ss_offset + dur)
+    return true;
+  const nr_pdcch_sib1_prior_t *rp = nr_pdcch_sib1_prior_get();
+  if (rp != NULL && rp->ra_ss_valid && rp->ra_ss_period > 0) {
+    const uint32_t rdur = rp->ra_ss_duration > 0 ? rp->ra_ss_duration : 1u, rrem = gate_slot % (uint32_t)rp->ra_ss_period;
+    return rrem >= (uint32_t)rp->ra_ss_offset && rrem < (uint32_t)rp->ra_ss_offset + rdur;
+  }
+  return false;
+}
+
+static uint64_t btim_now_ns(void);
+/* ISAC_PDCCH_C0_OCC_GATE=1 (T26b, with ISAC_PDCCH_DED_EVERY_SLOT): on a slot outside SS#0/RA-SS, scan CORESET#0 only if
+ * its symbols carry PDCCH-like energy: per 6-RB group mean power on antenna 0 against a tracked noise floor (EMA of the
+ * quietest group), threshold ISAC_PDCCH_C0_OCC_DB (default 6 dB). One antenna-0 FFT per CORESET#0 symbol. */
+static bool nr_pdcch_c0_occ_gate_on(void)
+{
+  static int en = -1;
+  if (en < 0) {
+    const char *e = getenv("ISAC_PDCCH_C0_OCC_GATE");
+    en = (e && atoi(e) != 0) ? 1 : 0;
+  }
+  return en == 1;
+}
+static _Atomic uint64_t g_c0_occ_checks, g_c0_occ_hits;
+static bool nr_pdcch_c0_occ_hit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
+{
+  static float ratio = -1.f;
+  static float floor_e; /* racy across consumers by design: a running estimate */
+  if (ratio < 0) {
+    const char *e = getenv("ISAC_PDCCH_C0_OCC_DB");
+    ratio = powf(10.f, (e ? (float)atof(e) : 6.f) / 10.f);
+  }
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  int first = 0, nrb = 0;
+  nr_pdcch_coreset_map_get_css0(&first, &nrb);
+  const nr_pdcch_blind_monitor_cfg_t *c0 = nr_pdcch_blind_monitor_css0_cfg();
+  if (nrb < 6 || c0 == NULL)
+    return false;
+  const int sym0 = c0->ss_first_symbol, dur = c0->coreset_duration > 0 ? c0->coreset_duration : 1;
+  static __thread c16_t *buf;
+  if (buf == NULL)
+    buf = aligned_alloc(32, ((sizeof(c16_t) * fp->samples_per_slot_wCP + 31) / 32) * 32);
+  if (buf == NULL)
+    return false;
+  float gmax = 0.f, gmin = 1e30f;
+  for (int d = 0; d < dur; d++) {
+    nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, sym0 + d, 0, (c16_t(*)[fp->samples_per_slot_wCP])buf, link_type_dl, 0,
+                    ue->common_vars.rxdata);
+    const c16_t *y = buf + (size_t)(sym0 + d) * fp->ofdm_symbol_size;
+    for (int g = 0; g + 6 <= nrb; g += 6) {
+      double e = 0.0;
+      for (int k = 0; k < 72; k++) {
+        const c16_t v = y[(fp->first_carrier_offset + 12 * (first + g) + k) % fp->ofdm_symbol_size];
+        e += (double)v.r * v.r + (double)v.i * v.i;
+      }
+      const float ge = (float)(e / 72.0);
+      if (ge > gmax) gmax = ge;
+      if (ge < gmin) gmin = ge;
+    }
+  }
+  floor_e = floor_e <= 0.f ? gmin : 0.98f * floor_e + 0.02f * gmin;
+  atomic_fetch_add_explicit(&g_c0_occ_checks, 1, memory_order_relaxed);
+  const bool hit = gmax > floor_e * ratio;
+  if (hit) atomic_fetch_add_explicit(&g_c0_occ_hits, 1, memory_order_relaxed);
+  return hit;
+}
+
+/* ISAC_PDCCH_SCAN_TIMING=1 (T26b): per-occasion scan wall time, p50/p99/max every 4000 occasions (log2 histogram). */
+static void scan_timing_note(uint64_t ns, bool ded_only)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDCCH_SCAN_TIMING") ? 1 : 0;
+  if (!en) return;
+  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+  static uint64_t hist[2][64], n[2], mx[2];
+  pthread_mutex_lock(&mu);
+  const int k = ded_only ? 1 : 0;
+  const int b = ns ? 63 - __builtin_clzll(ns) : 0;
+  hist[k][b]++;
+  if (ns > mx[k]) mx[k] = ns;
+  if ((++n[k] % 4000) == 0) {
+    uint64_t acc = 0, p50 = 0, p99 = 0;
+    for (int i = 0; i < 64; i++) {
+      acc += hist[k][i];
+      if (!p50 && acc * 2 >= n[k]) p50 = 1ull << (i + 1);
+      if (!p99 && acc * 100 >= n[k] * 99) p99 = 1ull << (i + 1);
+    }
+    LOG_A(PHY, "SENSING: SCANTIME %s occasions=%llu p50<=%.0fus p99<=%.0fus max=%.0fus c0_occ=%llu/%llu\n",
+          ded_only ? "ded-only" : "full", (unsigned long long)n[k], p50 / 1e3, p99 / 1e3, mx[k] / 1e3,
+          (unsigned long long)atomic_load(&g_c0_occ_hits), (unsigned long long)atomic_load(&g_c0_occ_checks));
+  }
+  pthread_mutex_unlock(&mu);
+}
+
 static uint32_t blind_harq_tag(uint32_t abs_slot, uint16_t rnti, uint8_t harq_pid)
 {
   uint16_t known[NR_PDCCH_BLIND_MAX_UE];
@@ -698,6 +811,53 @@ static int nr_pdcch_dci11_stage2_enabled(void)
   }
   return s_on;
 }
+/* T26b solver: the TDA index a layout reads (resolver offsets are immutable once published). */
+static int solver_tda_of(void *ctx, uint16_t layout, nr_dci_bits_t payload)
+{
+  (void)ctx;
+  const nr_dci11_resolver_t *r = g_dci11_resolver;
+  if (r == NULL || layout >= __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE) || r->off[layout].tda_bits == 0)
+    return 0;
+  return (int)nr_dci_bits_field(&payload, r->off[layout].total, r->off[layout].tda, r->off[layout].tda_bits);
+}
+
+/* One live layout's reading of a raw DCI 1_1, exactly as the stage-2 hand-over parses it (shared by the stage-2
+ * candidate list and the T26b PDSCH grant solver). False when the layout cannot represent or parse this DCI. */
+static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                               const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed)
+{
+  nr_dci11_field_bits_t f;
+  if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
+    return false;
+  nr_pdcch_blind_extract_opts_t o = {0};
+  o.bwp_indicator_bits = f.bwp_indicator_bits;
+  o.vrb_to_prb_bits    = f.vrb_to_prb_bits;
+  o.prb_bundling_bits  = f.prb_bundling_bits;
+  o.rate_matching_bits = f.rate_matching_bits;
+  o.zp_csirs_bits      = f.zp_csirs_bits;
+  o.tb2_bits           = f.tb2_bits;
+  o.harq_pid_bits      = f.harq_pid_bits;
+  o.dai_bits           = f.dai_bits;
+  o.pdsch_to_harq_bits = f.pdsch_to_harq_bits;
+  o.antenna_ports_bits = f.antenna_ports_bits;
+  o.dmrs_config_type   = f.dmrs_config_type;
+  o.tci_bits           = f.tci_bits;
+  o.srs_request_bits   = f.srs_request_bits;
+  o.cbg_bits           = f.cbg_bits;
+  o.fdra_mode          = f.fdra_mode;
+  o.fdra_bwp_start     = cfg->bwp_start;
+  const uint8_t htb = r->off[i].tda_bits;
+  o.tda_count          = (cfg->extract.tda_count > 0) ? cfg->extract.tda_count : (htb == 0 ? 1 : (1 << htb));
+  o.dmrs_add_pos       = 0;
+  o.dmrs_max_length    = 1;
+  for (int k = 0; k < o.tda_count && k < 16; ++k) {
+    o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0;
+  }
+  if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len)
+    return false;
+  return nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, parsed);
+}
+
 static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                             const nr_pdcch_blind_monitor_cfg_t *cfg,
                                             nr_pdcch_blind_result_t *out, uint16_t *ids, int max)
@@ -1967,6 +2127,191 @@ static bool nr_pdcch_css_nrnti0_enabled(void)
   return en == 1;
 }
 
+/* ---- JOINT_ANON ASYNC WORKER (ISAC_PDCCH_JOINT_ANON_ASYNC=1, T26b) ---------------------------------------------
+ * OTA PCI 415 (2026-10-08, runs i2o1/i2n1): the anonymous joint search on a newly published 36-CCE CORESET, run on
+ * the PDCCH scan path, preceded "RFSTALL ring overrun (PHY slower than the radio)". Here the scan path only copies the
+ * top ISAC_PDCCH_JOINT_ANON_TOPK (default 6) prescreen-passing candidates' soft bits into a bounded queue
+ * (ISAC_PDCCH_JOINT_ANON_Q items, default 64; full = dropped and counted); one SCHED_OTHER worker (core plan) runs the
+ * n_RNTI=0 polar decode + the GF(2) joint solve over every length and posts (CORESET, length, RNTI, payload) hits; the
+ * next occasion of that CORESET feeds them to the unchanged anonymous length-sweep evidence (lock = one RNTI with 5
+ * distinct payloads at one length). */
+#define JANON_MAX_CAND 8
+#define JANON_MAX_HITS 64
+typedef struct { uint8_t L; uint16_t cce; int16_t e[16 * 108]; } janon_cand_t;
+typedef struct {
+  uint64_t geom;
+  uint16_t nid, rnti_min, rnti_max;
+  int frame, slot, n;
+  janon_cand_t c[JANON_MAX_CAND];
+} janon_item_t;
+typedef struct { uint64_t geom; int len; uint16_t rnti; uint32_t hash; nr_dci_bits_t payload; uint8_t L; uint16_t cce; int frame, slot; } janon_hit_t;
+typedef struct { const janon_hit_t *h; int n; } janon_feed_ctx_t;
+static pthread_mutex_t g_janon_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_janon_cv = PTHREAD_COND_INITIALIZER;
+static janon_item_t *g_janon_q;
+static int g_janon_cap, g_janon_head, g_janon_n;
+static janon_hit_t g_janon_hits[256];
+static int g_janon_nhits;
+static _Atomic uint64_t g_janon_sub, g_janon_drop, g_janon_done, g_janon_found, g_janon_busy_ns;
+static uint32_t sweep_payload_hash(const nr_dci_bits_t *payload, int len);
+static bool janon_async_enabled(void)
+{
+  static int en = -1;
+  if (en < 0) {
+    const char *e = getenv("ISAC_PDCCH_JOINT_ANON_ASYNC");
+    en = (e && atoi(e) != 0) ? 1 : 0;
+  }
+  return en == 1;
+}
+static unsigned joint_anon_mm_max(int L);
+static void *janon_worker(void *arg)
+{
+  (void)arg;
+  static janon_item_t it;
+  for (;;) {
+    pthread_mutex_lock(&g_janon_mu);
+    while (g_janon_n == 0)
+      pthread_cond_wait(&g_janon_cv, &g_janon_mu);
+    it = g_janon_q[g_janon_head];
+    g_janon_head = (g_janon_head + 1) % g_janon_cap;
+    g_janon_n--;
+    pthread_mutex_unlock(&g_janon_mu);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int c = 0; c < it.n; c++) {
+      const janon_cand_t *k = &it.c[c];
+      int16_t z[16 * 108];
+      nr_pdcch_unscrambling((c16_t *)k->e, 0, (uint32_t)(k->L * 108), it.nid, z);
+      for (int len = dci_len_min(); len <= dci_len_max() && len <= 64; len++) {
+        if (len + 24 > k->L * 108) break;
+        nr_pdcch_blind_raw_result_t o;
+        janon_hit_t h = {.geom = it.geom, .len = len, .L = k->L, .cce = k->cce, .frame = it.frame, .slot = it.slot};
+        bool ok = nr_pdcch_blind_decode_raw_11(z, k->L, (uint16_t)len, it.rnti_min, it.rnti_max, &o);
+        if (ok) {
+          h.rnti = o.rnti;
+          h.payload = o.payload;
+        } else {
+          nr_pdcch_joint_live_result_t jr;
+          ok = nr_pdcch_joint_live_decode_11(z, k->L, (uint16_t)len, it.nid, 0, it.rnti_min, it.rnti_max, &jr)
+               && jr.mismatched_bits <= joint_anon_mm_max(k->L);
+          if (ok) {
+            h.rnti = jr.rnti;
+            h.payload = jr.payload;
+            static _Atomic unsigned s_n;
+            const unsigned q = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
+            if (q <= 50 || (q % 500) == 0)
+              LOG_A(PHY, "SENSING: JOINT_ANON_HIT #%u (async) nid=%u rnti=0x%04x len=%d AL=%u CCE=%u mismatched_bits=%u frame=%d slot=%d\n",
+                    q, it.nid, jr.rnti, len, k->L, k->cce, jr.mismatched_bits, it.frame, it.slot);
+          }
+        }
+        if (!ok)
+          continue;
+        h.hash = sweep_payload_hash(&h.payload, len);
+        atomic_fetch_add_explicit(&g_janon_found, 1, memory_order_relaxed);
+        pthread_mutex_lock(&g_janon_mu);
+        if (g_janon_nhits < (int)(sizeof(g_janon_hits) / sizeof(g_janon_hits[0])))
+          g_janon_hits[g_janon_nhits++] = h;
+        pthread_mutex_unlock(&g_janon_mu);
+      }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    atomic_fetch_add_explicit(&g_janon_busy_ns, (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ull + (uint64_t)(t1.tv_nsec - t0.tv_nsec),
+                              memory_order_relaxed);
+    const uint64_t d = atomic_fetch_add_explicit(&g_janon_done, 1, memory_order_relaxed) + 1;
+    if ((d % 2000) == 0)
+      LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC items submitted=%llu done=%llu dropped=%llu hits=%llu worker_busy_ms=%llu\n",
+            (unsigned long long)atomic_load(&g_janon_sub), (unsigned long long)d, (unsigned long long)atomic_load(&g_janon_drop),
+            (unsigned long long)atomic_load(&g_janon_found), (unsigned long long)(atomic_load(&g_janon_busy_ns) / 1000000ull));
+  }
+  return NULL;
+}
+static double joint_anon_score(const int16_t *llr, int E);
+static void janon_start(void);
+/* Scan path: copy the energetic candidates (cheap: <= TOPK x L x 216 bytes); never blocks, drops when full. */
+static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, uint16_t rmin, uint16_t rmax,
+                         const nr_pdcch_autodiscover_cand_t *cand, int n_cand)
+{
+  static int topk = -1;
+  static pthread_once_t once = PTHREAD_ONCE_INIT;
+  if (topk < 0) {
+    const char *e = getenv("ISAC_PDCCH_JOINT_ANON_TOPK");
+    topk = (e && atoi(e) > 0) ? atoi(e) : 6;
+    if (topk > JANON_MAX_CAND) topk = JANON_MAX_CAND;
+  }
+
+  pthread_once(&once, janon_start);
+  if (g_janon_q == NULL)
+    return;
+  int idx[JANON_MAX_CAND], m = 0;
+  double sc[JANON_MAX_CAND];
+  for (int c = 0; c < n_cand; c++) {
+    const int E = cand[c].L * 108;
+    if (!nr_pdcch_joint_prescreen((const int16_t *)cand[c].e_rx, E))
+      continue;
+    const double v = joint_anon_score((const int16_t *)cand[c].e_rx, E);
+    int p = m < topk ? m++ : topk - 1;
+    if (p == topk - 1 && m == topk && v <= sc[p])
+      continue;
+    while (p > 0 && sc[p - 1] < v) { sc[p] = sc[p - 1]; idx[p] = idx[p - 1]; p--; }
+    sc[p] = v; idx[p] = c;
+  }
+  if (m == 0)
+    return;
+  atomic_fetch_add_explicit(&g_janon_sub, 1, memory_order_relaxed);
+  pthread_mutex_lock(&g_janon_mu);
+  if (g_janon_n >= g_janon_cap) {
+    pthread_mutex_unlock(&g_janon_mu);
+    atomic_fetch_add_explicit(&g_janon_drop, 1, memory_order_relaxed);
+    return;
+  }
+  janon_item_t *it = &g_janon_q[(g_janon_head + g_janon_n) % g_janon_cap];
+  it->geom = geom; it->nid = nid; it->frame = frame; it->slot = slot; it->rnti_min = rmin; it->rnti_max = rmax; it->n = m;
+  for (int k = 0; k < m; k++) {
+    it->c[k].L = cand[idx[k]].L;
+    it->c[k].cce = cand[idx[k]].cce;
+    memcpy(it->c[k].e, cand[idx[k]].e_rx, (size_t)cand[idx[k]].L * 108 * sizeof(int16_t));
+  }
+  g_janon_n++;
+  pthread_cond_signal(&g_janon_cv);
+  pthread_mutex_unlock(&g_janon_mu);
+}
+static void janon_start(void)
+{
+  const char *e = getenv("ISAC_PDCCH_JOINT_ANON_Q");
+  g_janon_cap = (e && atoi(e) > 0) ? atoi(e) : 64;
+  g_janon_q = calloc((size_t)g_janon_cap, sizeof(janon_item_t));
+  if (g_janon_q == NULL)
+    return;
+  pthread_t th;
+  nr_core_plan_create(&th, NULL, janon_worker, NULL, -1);
+  pthread_detach(th);
+  LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC worker started (queue %d items)\n", g_janon_cap);
+}
+static int janon_take(uint64_t geom, janon_hit_t *out, int max)
+{
+  int n = 0;
+  pthread_mutex_lock(&g_janon_mu);
+  int w = 0;
+  for (int i = 0; i < g_janon_nhits; i++) {
+    if (g_janon_hits[i].geom == geom && n < max)
+      out[n++] = g_janon_hits[i];
+    else
+      g_janon_hits[w++] = g_janon_hits[i];
+  }
+  g_janon_nhits = w;
+  pthread_mutex_unlock(&g_janon_mu);
+  return n;
+}
+static bool janon_hit_scorer(int len, int trial, uint16_t *rnti, uint32_t *hash, void *user)
+{
+  const janon_feed_ctx_t *c = user;
+  if (trial >= c->n || c->h[trial].len != len)
+    return false;
+  *rnti = c->h[trial].rnti;
+  *hash = c->h[trial].hash;
+  return true;
+}
+
 /* ISAC_PDCCH_ANON_DUMP=<path> (default off, diagnostic): append every anonymous configured-nID occasion's
  * equalised candidate symbols (exactly what the length scorer descrambles) for offline solver iteration.
  * Record: "PAD1", int32 frame, slot, nid, rb_offset, n_rb, n_cand; per candidate uint8 L, uint8 0,
@@ -2038,6 +2383,35 @@ static unsigned joint_anon_mm_max(int L)
   }
   const unsigned m = (unsigned)(per216 * L * 108 / 216);
   return m > 0 ? m : 1;
+}
+static __thread uint64_t t_janon_deadline_ns; /* 0 = no budget for this occasion's joint solves */
+static uint64_t g_janon_budget_skips;
+static uint64_t btim_now_ns(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+/* ISAC_PDCCH_JOINT_ANON_BUDGET_US (T26b, default 0 = unbounded): CPU budget per occasion for the anonymous joint
+ * solves. */
+static int joint_anon_budget_us(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDCCH_JOINT_ANON_BUDGET_US");
+    v = (e && atoi(e) > 0) ? atoi(e) : 0;
+  }
+  return v;
+}
+static double joint_anon_score(const int16_t *llr, int E)
+{
+  double a = 0.0, b = 0.0;
+  for (int i = 0; i < E; i++) {
+    const double v = llr[i] < 0 ? -llr[i] : llr[i];
+    a += v;
+    b += v * v;
+  }
+  return b > 0.0 ? a * a / ((double)E * b) : 0.0;
 }
 static bool nr_pdcch_joint_anon_enabled(void)
 {
@@ -2712,7 +3086,11 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
     ok=nr_pdcch_blind_decode_raw_11(tmp_e,c->L,(uint16_t)dci_length,ctx->rnti_min,ctx->rnti_max,&out);
     used_alt = ok;
   }
-  if (!ok && ctx->joint_anon && dci_length <= 64) {
+  if (!ok && ctx->joint_anon && dci_length <= 64 && t_janon_deadline_ns && btim_now_ns() > t_janon_deadline_ns) {
+    static _Atomic uint64_t s_skip;
+    atomic_fetch_add_explicit(&s_skip, 1, memory_order_relaxed);
+    g_janon_budget_skips = atomic_load_explicit(&s_skip, memory_order_relaxed);
+  } else if (!ok && ctx->joint_anon && dci_length <= 64) {
     /* Re-descramble with n_RNTI = 0 so the solver model key (length, AL, nID, pre = 0) is stable whatever
      * rotation hypothesis this occasion carried; the model then holds g(C-RNTI) ^ g(0) as unknowns. */
     nr_pdcch_unscrambling((c16_t *)c->e_rx, 0, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id, tmp_e);
@@ -2902,7 +3280,8 @@ retry_scrambling:
   /* UNKNOWN-RNTI FALLBACK (opt-in, ISAC_PDCCH_JOINT=1; NOT validated on air). Only the raw DL path: the format
    * 1_0 / UL / extract-and-interpret branches are left exactly as they were. tmp_e is what the LAST iteration
    * above descrambled with data_scrambling_rnti, which is what the solver's model must be told. */
-  if (!t->ok && !t->ul_scan && t->format != NR_BLIND_DCI_FORMAT_1_0 && nr_pdcch_joint_live_enabled()) {
+  if (!t->ok && !t->ul_scan && t->format != NR_BLIND_DCI_FORMAT_1_0 && nr_pdcch_joint_live_enabled()
+      && !janon_async_enabled() /* async: no unknown-RNTI solve on the scan path at all */) {
     nr_pdcch_joint_live_result_t jr;
     if (nr_pdcch_joint_live_decode_11(tmp_e, t->L, t->dci_length, t->dmrs_scrambling_id, (int)data_scrambling_rnti,
                                       t->rnti_min, t->rnti_max, &jr)) {
@@ -2922,7 +3301,7 @@ retry_scrambling:
   }
   /* Same fallback for the UL grant (DCI 0_1) raw path: the same solve with the opposite format-indicator admission,
    * filled exactly as nr_pdcch_blind_decode_raw_01() fills its result. */
-  if (!t->ok && t->ul_scan && t->ul_auto && nr_pdcch_joint_live_enabled()) {
+  if (!t->ok && t->ul_scan && t->ul_auto && nr_pdcch_joint_live_enabled() && !janon_async_enabled()) {
     nr_pdcch_joint_live_result_t jr;
     if (nr_pdcch_joint_live_decode(tmp_e, t->L, t->dci_length, t->dmrs_scrambling_id, (int)data_scrambling_rnti,
                                    t->rnti_min, t->rnti_max, /*indicator=*/0, &jr)) {
@@ -3251,6 +3630,13 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
   }
   if (s_every_slot)
     on_occasion = true;
+  /* ISAC_PDCCH_DED_EVERY_SLOT=1 (T26b, default off): every slot reaches the scan consumer once a dedicated CORESET is
+   * banked or a discovered one may be dwelt on, but on a slot that is not an SS#0/RA-SS occasion the consumer runs
+   * ONLY the banked/discovered CORESET passes (nr_pdcch_blind_monitor_run_occasion): CORESET#0, its USS pass and the
+   * discovery walk keep their own occasions. ISAC_PDCCH_SCAN_EVERY_SLOT ran all of them on every slot (~20x load). */
+  if (!on_occasion && nr_pdcch_ded_every_slot()
+      && (nr_pdcch_coreset_bank_count() > 0 || nr_pdcch_discovered_enabled()))
+    on_occasion = true;
   if (!on_occasion) {
     return; // not a monitoring occasion this slot
   }
@@ -3424,6 +3810,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     nr_pdcch_blind_phase2_unlock();
   }
 
+  const uint64_t t_scan0 = btim_now_ns();
   const bool additional = nr_pdcch_discovered_enabled();
   nr_pdcch_blind_monitor_cfg_t discovered_cfg;
   uint64_t discovered_token = 0;
@@ -3433,6 +3820,48 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     nr_pdcch_blind_monitor_discovered_poll();
     discovered = nr_pdcch_discovered_snapshot(&discovered_cfg, &discovered_token, ue->frame_parms.N_RB_DL);
     nr_pdcch_blind_phase2_unlock();
+  }
+  /* ISAC_PDCCH_DED_EVERY_SLOT: a slot admitted only for the dedicated CORESETs runs the banks + the discovered dwell. */
+  if (nr_pdcch_ded_every_slot() && proc != NULL
+      && !nr_pdcch_ss0_occasion((uint32_t)proc->frame_rx * (uint32_t)ue->frame_parms.slots_per_frame + (uint32_t)proc->nr_slot_rx)) {
+    static _Atomic uint64_t s_visit_d;
+    const uint64_t vd = additional ? atomic_fetch_add_explicit(&s_visit_d, 1, memory_order_relaxed) : 0;
+    const int shares_d = n + discovered;
+    t_pass_kind = PASS_BANK;
+    for (int i = 0; i < n; ++i) {
+      if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
+        continue;
+      t_bank_index = i;
+      t_candidate_share = additional ? nr_pdcch_discovered_candidate_share(shares_d, i, vd) : 0;
+      nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
+      nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    }
+    t_bank_index = -1;
+    t_candidate_share = 0;
+    t_pass_kind = PASS_OTHER;
+    nr_pdcch_blind_monitor_cfg_override(NULL);
+    if (discovered)
+      run_discovered_occasion(ue, proc, serial_candidates, source_absolute_slot, &discovered_cfg, discovered_token,
+                              n == 0 ? NR_PDCCH_BANK_CANDIDATE_BUDGET : nr_pdcch_discovered_candidate_share(shares_d, n, vd));
+    if (nr_pdcch_c0_occ_gate_on() && nr_pdcch_c0_occ_hit(ue, (UE_nr_rxtx_proc_t *)proc)) {
+      nr_pdcch_blind_monitor_cfg_t c0u;
+      t_pass_kind = PASS_C0USS;
+      if (nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0u)) {
+        nr_pdcch_blind_monitor_cfg_override(&c0u);
+        nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+        nr_pdcch_blind_monitor_cfg_override(NULL);
+      }
+      t_pass_kind = PASS_OTHER;
+      const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
+      if (css0 != NULL) {
+        nr_pdcch_blind_monitor_cfg_override(css0);
+        nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+        nr_pdcch_blind_monitor_cfg_override(NULL);
+      }
+    }
+    if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
+    scan_timing_note(btim_now_ns() - t_scan0, true);
+    return;
   }
   static _Atomic uint64_t bank_visit;
   const uint64_t visit = additional ? atomic_fetch_add_explicit(&bank_visit, 1, memory_order_relaxed) : 0;
@@ -3544,6 +3973,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
   }
   if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
+  scan_timing_note(btim_now_ns() - t_scan0, false);
 }
 
 /* Scope guard for the Phase-2 lock (Task A7): released on every return path of the occasion. */
@@ -3903,6 +4333,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      * were almost never under test. On such a CORESET, until it is banked, fill the budget in ladder order
      * (AL2, AL4, AL8, then AL1): 18+9+4+33 = 64 for 36 CCEs, i.e. every AL2/4/8 position each occasion. */
     if (t_candidate_share > 0 && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
+        && (t_discovered_token != 0 || !janon_async_enabled()) /* async: full ladder only while dwelling */
         && nr_pdcch_joint_anon_enabled())
       for (int idx = 0; idx < 4; idx++)
         if (cfg->ss_al_candidates[idx] == 0)
@@ -4634,6 +5065,21 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         const bool anon_cfg_nid = dl_anonymous && cfg->discovered_coreset
             && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
         sweep_ctx.joint_anon = anon_cfg_nid && nr_pdcch_joint_anon_enabled();
+        if (sweep_ctx.joint_anon && !dl_scout && joint_anon_budget_us() > 0) {
+          /* ISAC_PDCCH_JOINT_ANON_BUDGET_US: energetic CCEs first (QPSK-amplitude consistency, the solver's own
+           * prescreen statistic), and the joint solves of this occasion stop at the budget -- the known-RNTI tasks
+           * run after the sweep, so they are never starved by it. */
+          double sc[64];
+          for (int c = 0; c < disc_n_cand; c++)
+            sc[c] = joint_anon_score((const int16_t *)disc_cand[c].e_rx, disc_cand[c].L * 108);
+          for (int a = 1; a < disc_n_cand; a++)
+            for (int b = a; b > 0 && sc[b] > sc[b - 1]; b--) {
+              const double t = sc[b]; sc[b] = sc[b - 1]; sc[b - 1] = t;
+              const nr_pdcch_autodiscover_cand_t tc = disc_cand[b]; disc_cand[b] = disc_cand[b - 1]; disc_cand[b - 1] = tc;
+            }
+          t_janon_deadline_ns = btim_now_ns() + (uint64_t)joint_anon_budget_us() * 1000ull;
+        } else
+          t_janon_deadline_ns = 0;
         if (anon_cfg_nid && !dl_scout)
           nr_pdcch_anon_dump(proc->frame_rx, proc->nr_slot_rx, cfg->coreset_pdcch_dmrs_scrambling_id,
                              (int)sweep_ctx.rb_offset, n_rb, disc_cand, disc_n_cand);
@@ -4649,14 +5095,29 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             && cfg->dci_length_override <= dci_len_max())
           dl_state->preferred_len = cfg->dci_length_override;
 
-        if (budget_active)
+        /* ISAC_PDCCH_JOINT_ANON_ASYNC=1 (T26b): the anonymous search of a configured-nID CORESET never runs here.
+         * This path only copies the energetic candidates to the bounded janon worker and feeds back the hits the
+         * worker found since (nr_pdcch_janon_*); the same lock rule then applies to them. */
+        const bool janon_async = sweep_ctx.joint_anon && janon_async_enabled() && dl_anonymous && !dl_scout && !dl_second;
+        janon_hit_t jhits[JANON_MAX_HITS];
+        int n_jhits = 0;
+        if (janon_async) {
+          janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx,
+                       sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand);
+          n_jhits = janon_take(dl_geom, jhits, JANON_MAX_HITS);
+          g_sweep_cache.valid = 0;
+        } else if (budget_active)
           g_sweep_cache.valid = 0;
         else
           sweep_gpu_prefill(&sweep_ctx, dl_state, dci_len_min(), dci_len_max());
         discovery_scope.before_feed = btim_on ? btim_now() : 0;
         discovery_scope.phase = 1;
         const uint64_t trace_decodes = dl_state->decodes;
-        int found_len = (budget_active && budget_owner != 0) ? -1 :
+        janon_feed_ctx_t jfc = {jhits, n_jhits};
+        int found_len = janon_async
+            ? nr_pdcch_dci_length_sweep_feed_budget(dl_state, janon_hit_scorer, &jfc, n_jhits > 0 ? n_jhits : 1,
+                                                    dci_len_min(), dci_len_max(), 0, 0, 0)
+            : (budget_active && budget_owner != 0) ? -1 :
             nr_pdcch_dci_length_sweep_feed_budget(
                 dl_state, nr_pdcch_autodiscover_length_scorer, &sweep_ctx, disc_n_cand,
                 dci_len_min(), dci_len_max(), bootstrap_rnti, sweep_deadline, 0);
@@ -5192,6 +5653,20 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         }
       }
 
+      /* ISAC_PDCCH_KNOWN_PRESCREEN=1 (T26b, default off): on a discovered/banked dedicated CORESET, a candidate whose
+       * soft bits fail the QPSK amplitude-consistency screen (nr_pdcch_joint_prescreen, 3.09 sigma) is an empty CCE:
+       * skip every known-RNTI polar decode of it. A 36-CCE bank with four known RNTIs otherwise pays ~5 polar decodes
+       * x 64 candidates every slot (~2 ms p50 on the PCI 415 replay). */
+      {
+        static int s_kps = -1;
+        if (s_kps < 0) s_kps = getenv("ISAC_PDCCH_KNOWN_PRESCREEN") && atoi(getenv("ISAC_PDCCH_KNOWN_PRESCREEN")) ? 1 : 0;
+        if (s_kps && cfg->discovered_coreset && !t_discovered_token
+            && !nr_pdcch_joint_prescreen((const int16_t *)&pdcch_e_rx[e_rx_cand_idx], n_re_cand * 2)) {
+          e_rx_cand_idx += n_re_cand;
+          NR_BLIND_CTR_INC(g_held_energy);
+          continue;
+        }
+      }
       // ---- Gate 0 (DM-RS coherence, see the setup block above this loop): survivors of the raw
       // energy gate still get checked against the ACTUAL PDCCH DM-RS sequence before a polar decode
       // is attempted for ANY UE or length at this candidate. ----
@@ -7063,6 +7538,204 @@ constdiag_done:;
      * included) to stage-2 layout 0. 0xFFFF = none, which the feedback counts as DL link health. */
     sweep_ticket.layout_index = 0xFFFF;
     int8_t grant_mcs_table_lbrm = (int8_t)cfg->pdsch_mcs_table;
+    /* ---- T26b PDSCH GRANT SOLVER (ISAC_PDSCH_SOLVER=1, nr_pdsch_solver.h). A C-RNTI DCI 1_1 of a full-auto
+     * dedicated CORESET goes to the solver instead of Technique D: group the live DCI 1_1 layouts by what they read
+     * from THIS payload, let the solver choose a few (reading, S, DM-RS add-pos, MCS table) first-code-block probes
+     * (or, once solved, one full decode), and enqueue exactly those. Grants the solver does not want are not
+     * decoded at all while it searches (the hopeless Technique D jobs were what filled the queue). ---- */
+    if (nr_pdsch_solver_enabled() && !is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_C && cand_task[ti].dl_auto
+        && g_dci11_state == 1 && g_dci11_resolver != NULL && cand_task[ti].bwp_entry <= 0) {
+      if (!defer || !want_decode || out.rv != 0 || decodes_this_occasion >= cfg->pdsch_max_per_slot)
+        continue;
+      static _Atomic int s_tda_set;
+      if (!atomic_exchange(&s_tda_set, 1))
+        nr_pdsch_solver_set_tda_fn(solver_tda_of, (void *)cfg);
+      static __thread uint8_t *s_gid;
+      static __thread uint16_t *s_ids;
+      if (s_gid == NULL) {
+        s_gid = malloc(NR_DCI11_LAYOUT_MAX);
+        s_ids = malloc(NR_DCI11_LAYOUT_MAX * sizeof(uint16_t));
+        AssertFatal(s_gid && s_ids, "solver scratch\n");
+      }
+      enum { SOLVER_READINGS = 128 };
+      nr_pdcch_blind_result_t rparsed[SOLVER_READINGS];
+      nr_pdsch_solver_reading_t rd[SOLVER_READINGS];
+      int rcount[SOLVER_READINGS] = {0}, nrd = 0;
+      const nr_pdcch_blind_raw_result_t *rw = &cand_task[ti].dl_raw;
+      const uint16_t dlen = cand_task[ti].dci_length;
+      const int rep = nr_pdsch_solver_rep(out.rnti);
+      const nr_dci11_resolver_t *R = g_dci11_resolver;
+      /* Search only once stage 1 has narrowed the layouts (ISAC_PDSCH_SOLVER_MAX_LIVE, default 512): before the
+       * HARQ-sequence test bites, 1500+ live layouts give > 96 readings per DCI and the true one is cut. */
+      static int s_max_live = -1;
+      if (s_max_live < 0) {
+        const char *e = getenv("ISAC_PDSCH_SOLVER_MAX_LIVE");
+        s_max_live = (e && atoi(e) > 0) ? atoi(e) : 512;
+      }
+      if (rep < 0 && R->n_alive > s_max_live)
+        continue;
+      const int nh = __atomic_load_n(&R->n_hyp, __ATOMIC_ACQUIRE);
+      /* Layouts whose READ fields sit at the same offsets read the same: parse one per offset key, not one per layout
+       * (1534 live -> a few dozen parses; the per-layout parse was ~2 ms per C-RNTI DCI on the scan path). */
+      enum { KEYS = 256 };
+      uint64_t kkey[KEYS];
+      int kgrp[KEYS], nk = 0;
+      for (int i = (rep >= 0 ? rep : 0); i < (rep >= 0 ? rep + 1 : nh); i++) {
+        s_gid[i] = 0xff;
+        if (rep < 0 && !R->alive[i])
+          continue;
+        const nr_dci11_offsets_t *of = &R->off[i];
+        const uint64_t key = (uint64_t)of->riv | (uint64_t)of->mcs << 8 | (uint64_t)of->ant_ports << 16
+                             | (uint64_t)of->ant_ports_bits << 24 | (uint64_t)of->fdra_mode << 28 | (uint64_t)of->n_rbg << 32
+                             | (uint64_t)R->hyp[i].dmrs_type << 40 | (uint64_t)of->tda << 44 | (uint64_t)of->tda_bits << 52;
+        int kk = -1;
+        for (int q = 0; q < nk && kk < 0; q++)
+          if (kkey[q] == key) kk = q;
+        if (kk >= 0) {
+          if (kgrp[kk] >= 0) { s_gid[i] = (uint8_t)kgrp[kk]; rcount[kgrp[kk]]++; }
+          continue;
+        }
+        if (nk < KEYS) { kkey[nk] = key; kgrp[nk] = -1; kk = nk++; }
+        nr_pdcch_blind_result_t pr;
+        if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb)
+          continue;
+        int g = -1;
+        for (int k = 0; k < nrd && g < 0; k++) {
+          const nr_pdcch_blind_result_t *q = &rparsed[k];
+          if (q->ra_type0 == pr.ra_type0 && q->start_rb == pr.start_rb && q->num_rb == pr.num_rb
+              && q->rbg_bitmap == pr.rbg_bitmap && q->rbg_size == pr.rbg_size && q->n_dmrs_cdm_groups == pr.n_dmrs_cdm_groups
+              && q->dmrs_ports == pr.dmrs_ports && q->dmrs_config_type == pr.dmrs_config_type && q->mcs == pr.mcs
+              && q->nscid == pr.nscid)
+            g = k;
+        }
+        if (g < 0 && nrd < SOLVER_READINGS) {
+          g = nrd++;
+          rparsed[g] = pr;
+        }
+        if (g >= 0) {
+          s_gid[i] = (uint8_t)g;
+          rcount[g]++;
+        }
+        if (kk >= 0) kgrp[kk] = g;
+      }
+      int off = 0;
+      for (int k = 0; k < nrd; k++) {
+        rd[k].ids = s_ids + off;
+        rd[k].n_ids = 0;
+        rd[k].num_rb = rparsed[k].num_rb;
+        off += rcount[k];
+      }
+      for (int i = (rep >= 0 ? rep : 0); i < (rep >= 0 ? rep + 1 : nh); i++)
+        if (s_gid[i] != 0xff)
+          ((uint16_t *)rd[s_gid[i]].ids)[rd[s_gid[i]].n_ids++] = (uint16_t)i;
+      static int s_budget = -1;
+      if (s_budget < 0) {
+        const char *e = getenv("ISAC_PDSCH_SOLVER_BUDGET");
+        s_budget = (e && atoi(e) > 0) ? atoi(e) : 8;
+      }
+      {
+        static int s_diag = -1;
+        static _Atomic int s_diag_left = 40;
+        if (s_diag < 0) s_diag = getenv("ISAC_PDSCH_SOLVER_DIAG") ? 1 : 0;
+        if (s_diag && rep < 0 && nrd > 1 && R->fdra_next > 1 && atomic_fetch_sub(&s_diag_left, 1) > 0) {
+          char b[1400];
+          int u = 0;
+          for (int k = 0; k < nrd && u < (int)sizeof(b) - 64; k++)
+            u += snprintf(b + u, sizeof(b) - u, " [%d:n%d rb%u+%u t0=%u bm%x cdm%u p%x mcs%u]", k, rd[k].n_ids, rparsed[k].start_rb,
+                          rparsed[k].num_rb, rparsed[k].ra_type0, rparsed[k].rbg_bitmap, rparsed[k].n_dmrs_cdm_groups,
+                          rparsed[k].dmrs_ports, rparsed[k].mcs);
+          int b1 = 0, b1ok = 0, b1vrb = 0;
+          const char *why = "";
+          for (int i = 0; i < nh; i++) {
+            if (!R->alive[i] || R->off[i].riv != 2 || R->off[i].fdra_mode != NR_FDRA_TYPE0_CFG1) continue;
+            b1++;
+            nr_pdcch_blind_result_t pr;
+            memset(&pr, 0, sizeof(pr));
+            if (dci11_layout_parse(R, i, rw, dlen, cfg, &pr)) { b1ok++; b1vrb += pr.vrb_to_prb; }
+            else if (pr.reject_reason) why = pr.reject_reason;
+            else why = "size/field-bits";
+          }
+          LOG_A(PHY, "SENSING: PDSCH_SOLVER_DIAG %d.%d rnti=0x%04x readings=%d live=%d bwp1_type0=%d parsed=%d vrb=%d why=%s tda_count_cfg=%d:%s\n",
+                proc->frame_rx, proc->nr_slot_rx, out.rnti, nrd, R->n_alive, b1, b1ok, b1vrb, why, cfg->extract.tda_count, b);
+        }
+      }
+      nr_pdsch_solver_var_t var[NR_PDSCH_SOLVER_MAX_VAR];
+      const int nv = nrd > 0 ? nr_pdsch_solver_plan(out.rnti, rw->payload, dlen, out.mcs, cfg->dmrs_typeA_position + 2,
+                                                    rd, nrd, s_budget, var) : 0;
+      for (int v = 0; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
+        const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
+        fapi_nr_dl_config_dlsch_pdu_rel15_t dl = dlsch_pdu;
+        dl.dmrsConfigType    = o->dmrs_config_type ? NFAPI_NR_DMRS_TYPE2 : NFAPI_NR_DMRS_TYPE1;
+        dl.n_dmrs_cdm_groups = o->n_dmrs_cdm_groups;
+        dl.dmrs_ports        = o->dmrs_ports;
+        dl.nscid             = o->nscid;
+        dl.harq_process_nbr  = o->harq_pid;
+        dl.start_symbol      = var[v].S;
+        dl.number_symbols    = var[v].L;
+        dl.dlDmrsSymbPos     = var[v].dmrs_mask;
+        dl.mcs_table         = var[v].table;
+        dl.pduBitmap         = 0;
+        dl.numCsiRsForRateMatching = 0;
+        {
+          fapi_nr_dl_config_csirs_pdu_rel15_t rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
+          const int n_rm = nr_csirs_blind_rt_rate_match_all(abs_slot, rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+          static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
+          for (int k = 0; k < n_rm; k++) {
+            const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &rm[k];
+            bool clash = (c->row < 1 || c->row > 18);
+            for (int q = 0; !clash && q < num_l0[c->row - 1]; q++)
+              clash = (dl.dlDmrsSymbPos >> (c->symb_l0 + q)) & 1;
+            if (!clash && (c->row == 13 || c->row == 14 || c->row == 16 || c->row == 17))
+              for (int q = 0; !clash && q < 2; q++)
+                clash = (dl.dlDmrsSymbPos >> (c->symb_l1 + q)) & 1;
+            if (!clash)
+              dl.csiRsForRateMatching[dl.numCsiRsForRateMatching++] = *c;
+          }
+        }
+        freq_alloc_bitmap_t fa = set_bitmap_from_start_size(o->start_rb, o->num_rb);
+        if (o->ra_type0) {
+          if (o->rbg_bwp_start != cfg->bwp_start || dl.BWPSize != cfg->bwp_size)
+            continue;
+          fa.n_prb_list = (uint16_t)nr_ra_type0_prbs(o->rbg_bitmap, o->rbg_bwp_start, dl.BWPSize, o->rbg_size,
+                                                     fa.prb_list, NR_PRB_SET_MAX);
+          if (fa.n_prb_list == 0 || !nr_pdsch_passive_alloc_normalise(&fa, dl.BWPSize))
+            continue;
+          dl.start_rb = (uint16_t)fa.first_rb;
+          dl.number_rbs = (uint16_t)fa.num_rbs;
+        } else {
+          dl.start_rb = o->start_rb;
+          dl.number_rbs = o->num_rb;
+        }
+        const nr_pdsch_passive_grant_t gq = {.rnti = out.rnti, .mcs = o->mcs, .rv = o->rv, .ndi = o->ndi,
+                                             .harq_pid = o->harq_pid, .mcs_table = var[v].table,
+                                             .nb_rb_oh = (uint16_t)cfg->pdsch_xoverhead, .tb_scaling = 0,
+                                             .bw_tbslbrm = (uint16_t)fp->N_RB_DL, .mcs_table_lbrm = (int8_t)var[v].table,
+                                             .vrb_l = 0, .rnti_class = out.rnti_class, .dci11 = true,
+                                             .scr_dedicated = dl_dedicated};
+        nr_pdsch_passive_job_t job;
+        memset(&job, 0, sizeof(job));
+        job.dlsch_pdu = dl;
+        job.freq_alloc = fa;
+        job.grant = gq;
+        nr_pdsch_k0_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame, 0, &job.frame_rx, &job.nr_slot_rx);
+        job.gNB_id = proc->gNB_id;
+        job.absolute_slot = source_absolute_slot;
+        job.rnti = out.rnti;
+        job.rnti_class = out.rnti_class;
+        job.harq_pid_tag = blind_harq_tag(abs_slot, out.rnti, o->harq_pid);
+        job.want_data = want_data && !var[v].probe;
+        job.fo_hz = isnan(nr_slot_fep_fo_override_hz) ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+                                                      : nr_slot_fep_fo_override_hz;
+        job.sweep_ticket.layout_index = 0xFFFF;
+        job.dci_abs_slot = abs_slot;
+        job.layout_probe = var[v].probe;
+        job.solver_token = var[v].token;
+        decodes_this_occasion++;
+        if (!nr_pdsch_passive_queue_enqueue(&job))
+          nr_pdsch_solver_feedback(var[v].token, false, false);
+      }
+      continue;
+    }
     if (g_pdsch_sweep_on && !is_dci10) {
       /* Rotate only grants eligible for a CRC attempt, not deterministic RV/cap drops. */
       if (!want_decode || (cfg->pdsch_rv0_only && out.rv != 0)

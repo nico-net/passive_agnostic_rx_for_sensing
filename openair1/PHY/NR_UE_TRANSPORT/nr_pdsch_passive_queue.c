@@ -50,6 +50,7 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"         // T26b grant solver feedback
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
 #include "PHY/NR_UE_TRANSPORT/nr_prach_passive.h"
 void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/LAYER2/NR_MAC_UE
@@ -1483,6 +1484,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
         : (probe_outcome ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
     nr_pdsch_passive_probe_mode(false);
+    if (job.solver_token) {
+      const bool sv_credit = owned || nr_passive_credit_allowed(
+          atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
+      /* A CRC pass is evidence even on IQ that expired meanwhile (overwritten samples cannot pass a CRC but by the
+       * same chance any wrong hypothesis can); a FAILURE on expired IQ says nothing and is not credited. */
+      const bool sv_ok = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+      nr_pdsch_solver_feedback(job.solver_token, sv_ok,
+                               (sv_ok || sv_credit) && nr_cfg_epoch_work_current() && st != NR_PDSCH_PASSIVE_DECODE_ERROR
+                                   && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED);
+    }
     if (!nr_cfg_epoch_work_current()) {
       nr_slot_fep_fo_override_hz = saved_fo;
       nr_td_grantwork_job_end(gw);
