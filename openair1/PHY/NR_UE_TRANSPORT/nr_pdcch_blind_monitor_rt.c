@@ -2358,7 +2358,7 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
     static long last = -1;
     static _Atomic uint64_t s_skip;
     if (rate < 0.0) rate = getenv("ISAC_PDCCH_JOINT_ANON_RATE") ? atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE")) : 0.0;
-    if (rate > 0.0) {
+    if (rate > 0.0 && t_pass_kind == PASS_BANK) { /* a discovered CORESET's dwell (verification) is never rate-skipped */
       const long now = (long)frame * slots_per_frame + slot; /* resyncs on the 1024-frame wrap */
       if (last >= 0 && now > last) tokens += rate * (double)(now - last);
       last = now;
