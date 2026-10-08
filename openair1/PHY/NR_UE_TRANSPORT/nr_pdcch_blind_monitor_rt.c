@@ -229,6 +229,11 @@ static bool nr_pdcch_c0_occ_hit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *pro
   return hit;
 }
 
+/* T26d per-pass-kind accounting (see pass_note) */
+enum { PK_BANK = 0, PK_DWELL = 1, PK_C0USS = 2, PK_CSS0 = 3, PK_N = 4 };
+static const char *const kPkName[PK_N] = {"bank", "dwell", "c0uss", "css0"};
+static _Atomic uint64_t g_pk_ns[PK_N], g_pk_runs[PK_N], g_pk_acc[PK_N], g_pk_skip[PK_N];
+static _Atomic uint64_t g_fepc_hit, g_fepc_miss;
 /* ISAC_PDCCH_SCAN_TIMING=1 (T26b): per-occasion scan wall time, p50/p99/max every 4000 occasions (log2 histogram). */
 static void scan_timing_note(uint64_t ns, bool ded_only)
 {
@@ -252,6 +257,18 @@ static void scan_timing_note(uint64_t ns, bool ded_only)
     LOG_A(PHY, "SENSING: SCANTIME %s occasions=%llu p50<=%.0fus p99<=%.0fus max=%.0fus c0_occ=%llu/%llu\n",
           ded_only ? "ded-only" : "full", (unsigned long long)n[k], p50 / 1e3, p99 / 1e3, mx[k] / 1e3,
           (unsigned long long)atomic_load(&g_c0_occ_hits), (unsigned long long)atomic_load(&g_c0_occ_checks));
+    if (ded_only) {
+      char b[400];
+      int u = 0;
+      for (int q = 0; q < PK_N; q++) {
+        const uint64_t r = atomic_load(&g_pk_runs[q]);
+        u += snprintf(b + u, sizeof(b) - u, " %s[runs=%llu mean=%.0fus acc=%llu skip=%llu]", kPkName[q], (unsigned long long)r,
+                      r ? atomic_load(&g_pk_ns[q]) / 1e3 / (double)r : 0.0, (unsigned long long)atomic_load(&g_pk_acc[q]),
+                      (unsigned long long)atomic_load(&g_pk_skip[q]));
+      }
+      LOG_A(PHY, "SENSING: SCANPASS%s fep_cache hit=%llu miss=%llu\n", b, (unsigned long long)atomic_load(&g_fepc_hit),
+            (unsigned long long)atomic_load(&g_fepc_miss));
+    }
   }
   pthread_mutex_unlock(&mu);
 }
@@ -478,6 +495,46 @@ static __thread bool g_pdsch_sweep_on;
  * root cfg). Declared up here because pdsch_sweep_maybe_enable() keys Technique D on it. */
 enum { PASS_OTHER = 0, PASS_C0USS = 1, PASS_BANK = 2 };
 static __thread int t_pass_kind;
+/* T26d: per-pass-kind yield (accepted DCIs) and time on dedicated-only slots (ISAC_PDCCH_PASS_ADAPT, SCANTIME) */
+static __thread uint32_t t_pass_accepts;
+static bool pass_adapt_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDCCH_PASS_ADAPT") && atoi(getenv("ISAC_PDCCH_PASS_ADAPT")) ? 1 : 0;
+  return en == 1;
+}
+/* A pass kind that accepted nothing in its last 2000 runs is run on 1 opportunity in 8 only (still probing). */
+static bool pass_should_run(int k)
+{
+  if (!pass_adapt_on()) return true;
+  extern _Atomic uint32_t g_pass_low_export[PK_N];
+  static _Atomic uint32_t win_runs[PK_N], win_acc[PK_N], opp[PK_N];
+  if (atomic_load(&g_pass_low_export[k]) && (atomic_fetch_add(&opp[k], 1) % 8u) != 0) {
+    atomic_fetch_add_explicit(&g_pk_skip[k], 1, memory_order_relaxed);
+    return false;
+  }
+  (void)win_runs; (void)win_acc;
+  return true;
+}
+static void pass_note(int k, uint64_t ns, uint32_t acc)
+{
+  atomic_fetch_add_explicit(&g_pk_ns[k], ns, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_pk_acc[k], acc, memory_order_relaxed);
+  const uint64_t r = atomic_fetch_add_explicit(&g_pk_runs[k], 1, memory_order_relaxed) + 1;
+  static _Atomic uint64_t w_acc[PK_N];
+  static _Atomic uint32_t lowf[PK_N];
+  atomic_fetch_add_explicit(&w_acc[k], acc, memory_order_relaxed);
+  if ((r % 2000) == 0) {
+    const uint64_t wa = atomic_exchange(&w_acc[k], 0);
+    const uint32_t was = atomic_exchange(&lowf[k], wa == 0 ? 1u : 0u);
+    if (pass_adapt_on() && (was != (wa == 0)))
+      LOG_A(PHY, "SENSING: PASS_ADAPT %s %s (accepts in last 2000 runs: %llu)\n", kPkName[k],
+            wa == 0 ? "LOW-YIELD: 1 in 8" : "back to every slot", (unsigned long long)wa);
+  }
+  extern _Atomic uint32_t g_pass_low_export[PK_N];
+  atomic_store(&g_pass_low_export[k], atomic_load(&lowf[k]));
+}
+_Atomic uint32_t g_pass_low_export[PK_N];
 static _Thread_local uint64_t t_discovered_token;
 static _Thread_local uint64_t t_discovered_slot;
 static _Thread_local bool t_discovered_attempted;
@@ -2336,21 +2393,7 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
   pthread_once(&once, janon_start);
   if (g_janon_q == NULL)
     return;
-  int idx[JANON_MAX_CAND], m = 0;
-  double sc[JANON_MAX_CAND];
-  for (int c = 0; c < n_cand; c++) {
-    const int E = cand[c].L * 108;
-    if (!nr_pdcch_joint_prescreen((const int16_t *)cand[c].e_rx, E))
-      continue;
-    const double v = joint_anon_score((const int16_t *)cand[c].e_rx, E);
-    int p = m < topk ? m++ : topk - 1;
-    if (p == topk - 1 && m == topk && v <= sc[p])
-      continue;
-    while (p > 0 && sc[p - 1] < v) { sc[p] = sc[p - 1]; idx[p] = idx[p - 1]; p--; }
-    sc[p] = v; idx[p] = c;
-  }
-  if (m == 0)
-    return;
+  /* T26d: the rate check runs BEFORE the per-candidate prescreen/scoring, which cost ~100 us per skipped occasion */
   { /* ISAC_PDCCH_JOINT_ANON_RATE=<items per slot> (T26c): admit at most this many items per slot of SIGNAL time
      * (token bucket, burst 8); the rest are SKIPPED (counted), not queued-then-dropped. Live td_4_1: 770 items/s
      * offered, worker served ~120/s, 84 % dropped. */
@@ -2373,6 +2416,21 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
       tokens -= 1.0;
     }
   }
+  int idx[JANON_MAX_CAND], m = 0;
+  double sc[JANON_MAX_CAND];
+  for (int c = 0; c < n_cand; c++) {
+    const int E = cand[c].L * 108;
+    if (!nr_pdcch_joint_prescreen((const int16_t *)cand[c].e_rx, E))
+      continue;
+    const double v = joint_anon_score((const int16_t *)cand[c].e_rx, E);
+    int p = m < topk ? m++ : topk - 1;
+    if (p == topk - 1 && m == topk && v <= sc[p])
+      continue;
+    while (p > 0 && sc[p - 1] < v) { sc[p] = sc[p - 1]; idx[p] = idx[p - 1]; p--; }
+    sc[p] = v; idx[p] = c;
+  }
+  if (m == 0)
+    return;
   atomic_fetch_add_explicit(&g_janon_sub, 1, memory_order_relaxed);
   pthread_mutex_lock(&g_janon_mu);
   if (g_janon_n >= g_janon_cap) {
@@ -4089,7 +4147,10 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       t_bank_index = i;
       t_candidate_share = additional ? nr_pdcch_discovered_candidate_share(shares_d, i, vd) : 0;
       nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
+      const uint64_t pk0 = btim_now_ns();
+      const uint32_t pa0 = t_pass_accepts;
       nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+      pass_note(PK_BANK, btim_now_ns() - pk0, t_pass_accepts - pa0);
     }
     t_bank_index = -1;
     t_candidate_share = 0;
@@ -4113,23 +4174,33 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     if (over && (atomic_fetch_add_explicit(&s_dbud_skip, 1, memory_order_relaxed) % 4000) == 0)
       LOG_A(PHY, "SENSING: DED_BUDGET skipped dwell/CORESET#0 passes on %llu dedicated-only slots\n",
             (unsigned long long)atomic_load(&s_dbud_skip));
-    if (discovered && !over)
+    if (discovered && !over && pass_should_run(PK_DWELL)) {
+      const uint64_t pk0 = btim_now_ns();
+      const uint32_t pa0 = t_pass_accepts;
       run_discovered_occasion(ue, proc, serial_candidates, source_absolute_slot, &discovered_cfg, discovered_token,
                               n == 0 ? NR_PDCCH_BANK_CANDIDATE_BUDGET : nr_pdcch_discovered_candidate_share(shares_d, n, vd));
+      pass_note(PK_DWELL, btim_now_ns() - pk0, t_pass_accepts - pa0);
+    }
     if (!over && nr_pdcch_c0_occ_gate_on() && nr_pdcch_c0_occ_hit(ue, (UE_nr_rxtx_proc_t *)proc)) {
       nr_pdcch_blind_monitor_cfg_t c0u;
       t_pass_kind = PASS_C0USS;
-      if (nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0u)) {
+      if (pass_should_run(PK_C0USS) && nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0u)) {
+        const uint64_t pk0 = btim_now_ns();
+        const uint32_t pa0 = t_pass_accepts;
         nr_pdcch_blind_monitor_cfg_override(&c0u);
         nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
         nr_pdcch_blind_monitor_cfg_override(NULL);
+        pass_note(PK_C0USS, btim_now_ns() - pk0, t_pass_accepts - pa0);
       }
       t_pass_kind = PASS_OTHER;
       const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
-      if (css0 != NULL) {
+      if (css0 != NULL && pass_should_run(PK_CSS0)) {
+        const uint64_t pk0 = btim_now_ns();
+        const uint32_t pa0 = t_pass_accepts;
         nr_pdcch_blind_monitor_cfg_override(css0);
         nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
         nr_pdcch_blind_monitor_cfg_override(NULL);
+        pass_note(PK_CSS0, btim_now_ns() - pk0, t_pass_accepts - pa0);
       }
     }
     if (reconf) nr_pdcch_coreset_bank_dispatch_leave();
@@ -4889,6 +4960,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                         && t_fk.symbol == symbol && t_fk.nant == fp->nb_antennas_rx && t_fk.size == fp->ofdm_symbol_size
                         && t_fk.src == (const void *)ue->common_vars.rxdata
                         && (t_fk.fo == fo_key || (isnan(t_fk.fo) && isnan(fo_key)));
+    atomic_fetch_add_explicit(fc_hit ? &g_fepc_hit : &g_fepc_miss, 1, memory_order_relaxed);
     if (fc_hit) { /* also back into rxdataF: the CSI-RS feed, CORESET map and rank grid below read it */
       for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
         memcpy(rxdataF_symb[ant], t_fc[ant], sizeof(c16_t) * fp->ofdm_symbol_size);
@@ -7755,6 +7827,7 @@ constdiag_done:;
       }
     }
 
+    t_pass_accepts++;
     struct timespec rnti_ts;
     clock_gettime(CLOCK_REALTIME, &rnti_ts);
     const long long rnti_utc_ns = (long long)rnti_ts.tv_sec * 1000000000LL + (long long)rnti_ts.tv_nsec;

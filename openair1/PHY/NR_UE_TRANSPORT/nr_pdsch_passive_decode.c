@@ -3720,6 +3720,7 @@ gpu_llr_ready:;
       out->evm_valid = true;
       out->evm_pct = (float)(sqrt(ea->err / ea->ref) * 100.0);
       out->evm_cpe_pct = (float)(sqrt(ea->err_cpe / ea->ref) * 100.0);
+      out->kappa = ea->kappa_n ? (float)(ea->kappa_sum / ea->kappa_n) : 0.f;
       out->evm_nbrx = (uint8_t)ea->nbrx;
       out->evm_nsym = (uint16_t)ea->n_sym;
       for (int a = 0; a < ea->nbrx && a < 4; a++)

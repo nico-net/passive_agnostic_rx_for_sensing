@@ -1577,6 +1577,47 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
   }
 
+  /* ISAC_RX_MRC_ALIGN=1 (T26d): per-symbol phase alignment of the MRC branches. Each branch is equalised against its
+   * own DM-RS estimate, but on this rig the branches' phases drift DIFFERENTLY between the DM-RS and the data symbols
+   * (independent board LOs), so sum_a h_a* y_a adds partly incoherently. u_a = h_a* y_a ~ |h_a|^2 x e^{j th_a}; the
+   * cross-correlation c_a = sum_i u_a conj(u_ref) ~ e^{j(th_a - th_ref)} needs no decisions. Rotating h_a by arg(c_a)
+   * re-phases branch a onto the strongest live branch before nr_channel_compensation() combines. */
+  if (nl == 1 && mrc_nb_rx > 1 && nb_re_pdsch >= 12) {
+    static int s_align = -1;
+    if (s_align < 0) s_align = getenv("ISAC_RX_MRC_ALIGN") ? atoi(getenv("ISAC_RX_MRC_ALIGN")) : 0;
+    if (s_align) {
+      const int a0 = mrc_rx_index, a1 = mrc_rx_index + mrc_nb_rx;
+      double pw[NR_PDSCH_EVM_MAX_RX * 2] = {0};
+      int ref = -1;
+      for (int a = a0; a < a1 && a < NR_PDSCH_EVM_MAX_RX * 2; a++) {
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          const c16_t h = chFext[0][a][i];
+          pw[a] += (double)h.r * h.r + (double)h.i * h.i;
+        }
+        if (pw[a] > 0.0 && (ref < 0 || pw[a] > pw[ref])) ref = a;
+      }
+      for (int a = a0; ref >= 0 && a < a1; a++) {
+        if (a == ref || pw[a] <= 0.0) continue;
+        double cr = 0.0, ci = 0.0;
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          const c16_t ha = chFext[0][a][i], ya = rxdataF_ext[a][i], hr = chFext[0][ref][i], yr = rxdataF_ext[ref][i];
+          const double uar = (double)ha.r * ya.r + (double)ha.i * ya.i, uai = (double)ha.r * ya.i - (double)ha.i * ya.r;
+          const double urr = (double)hr.r * yr.r + (double)hr.i * yr.i, uri = (double)hr.r * yr.i - (double)hr.i * yr.r;
+          cr += uar * urr + uai * uri; /* u_a conj(u_ref) */
+          ci += uai * urr - uar * uri;
+        }
+        const double mag = sqrt(cr * cr + ci * ci);
+        if (mag <= 0.0) continue;
+        const double c = cr / mag, sn = ci / mag; /* e^{j d}: rotating h_a by +d multiplies u_a by e^{-j d} */
+        c16_t *h = chFext[0][a];
+        for (uint32_t i = 0; i < rx_size_symbol; i++) {
+          const double hr2 = h[i].r * c - h[i].i * sn, hi2 = h[i].r * sn + h[i].i * c;
+          h[i].r = (int16_t)lround(hr2); h[i].i = (int16_t)lround(hi2);
+        }
+      }
+    }
+  }
+
   /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h.
    * x = ZF over the combined branches (nl = 1: MRC), per layer; decisions per layer; branch fit uses sum_l h_l s_l. */
   if (nr_pdsch_evm_acc.armed && nl >= 1 && nl <= 4 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
@@ -1726,6 +1767,48 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   snprintf(filename, 50, "rxdataF_comp00_symb_%d_nr_slot_rx_%d.m", symbol, nr_slot_rx);
   write_output(filename, "rxdataF_comp00", &rxdataF_comp[0][0][symbol * pdsch_buf_size_max], pdsch_buf_size_max, 1, 1);
 #endif
+
+  /* ISAC_RX_QAM_AGC=1 (T26d): amplitude consistency of the QAM soft decisions. nr_channel_compensation() gives
+   * z = sum_a h_a* y_a and the QAM thresholds mag = sum_a |h_a|^2 * n1; for a coherent combination the symbol mean of
+   * |Re z|,|Im z| equals the mean of mag_a (n1 = mean |x| per dimension for 16/64/256QAM). Branches whose phase drifts
+   * differently between the DM-RS and the data symbols (independent X410 board LOs) add partly incoherently in MRC,
+   * shrinking |z| against mag, which biases every amplitude bit toward the inner points: QPSK is immune, QAM is not.
+   * kappa = mean(|Re z|,|Im z|) / mean(mag_a) rescales the thresholds per symbol (kappa also logged via EVMGRANT). */
+  if (nl == 1 && dlsch->cw_info.qamModOrder > 2 && nb_re_pdsch >= 24) {
+    static int s_agc = -1;
+    if (s_agc < 0) s_agc = getenv("ISAC_RX_QAM_AGC") ? atoi(getenv("ISAC_RX_QAM_AGC")) : 0;
+    const c16_t *z = p_rxComp[0];
+    const c16_t *ma = dl_ch_mag[symbol][0];
+    double sz = 0.0, sm = 0.0;
+    for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+      sz += abs(z[i].r) + abs(z[i].i);
+      sm += 2.0 * ma[i].r;
+    }
+    const double kappa = sm > 0.0 ? sz / sm : 1.0;
+    if (nr_pdsch_evm_acc.armed) { nr_pdsch_evm_acc.kappa_sum += kappa; nr_pdsch_evm_acc.kappa_n++; }
+    if (s_agc && kappa > 0.2 && kappa < 1.5) {
+      const int16_t kq = (int16_t)lround(kappa * 32767.0 > 32767.0 ? 32767.0 : kappa * 32767.0);
+      const int qm = dlsch->cw_info.qamModOrder;
+      if (kappa < 1.0)
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          c16_t *a1 = &dl_ch_mag[symbol][0][i], *b1 = &dl_ch_magb[symbol][0][i], *r1 = &dl_ch_magr[symbol][0][i];
+          a1->r = (int16_t)(((int32_t)a1->r * kq) >> 15); a1->i = (int16_t)(((int32_t)a1->i * kq) >> 15);
+          if (qm > 4) { b1->r = (int16_t)(((int32_t)b1->r * kq) >> 15); b1->i = (int16_t)(((int32_t)b1->i * kq) >> 15); }
+          if (qm > 6) { r1->r = (int16_t)(((int32_t)r1->r * kq) >> 15); r1->i = (int16_t)(((int32_t)r1->i * kq) >> 15); }
+        }
+      else if (s_agc >= 2) { /* =2 only: kappa >= 1 scales the thresholds UP (noise inflates mean |z|; off by default) */
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          c16_t *a1 = &dl_ch_mag[symbol][0][i], *b1 = &dl_ch_magb[symbol][0][i], *r1 = &dl_ch_magr[symbol][0][i];
+          const double f = kappa;
+          #define SATK(v) ((int16_t)fmax(-32768.0, fmin(32767.0, (double)(v) * f)))
+          a1->r = SATK(a1->r); a1->i = SATK(a1->i);
+          if (qm > 4) { b1->r = SATK(b1->r); b1->i = SATK(b1->i); }
+          if (qm > 6) { r1->r = SATK(r1->r); r1->i = SATK(r1->i); }
+          #undef SATK
+        }
+      }
+    }
+  }
 
   // MRC is performed inline by nr_channel_compensation; apply MMSE for multi-layer
   start_meas_nr_ue_phy(ue, DLSCH_MRC_MMSE_STATS);
