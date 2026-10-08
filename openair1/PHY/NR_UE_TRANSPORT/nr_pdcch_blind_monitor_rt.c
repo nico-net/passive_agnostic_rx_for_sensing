@@ -2322,7 +2322,7 @@ static void *janon_worker(void *arg)
 static double joint_anon_score(const int16_t *llr, int E);
 static void janon_start(void);
 /* Scan path: copy the energetic candidates (cheap: <= TOPK x L x 216 bytes); never blocks, drops when full. */
-static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, uint16_t rmin, uint16_t rmax,
+static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int slots_per_frame, uint16_t rmin, uint16_t rmax,
                          const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen)
 {
   static int topk = -1;
@@ -2351,6 +2351,28 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, uint1
   }
   if (m == 0)
     return;
+  { /* ISAC_PDCCH_JOINT_ANON_RATE=<items per slot> (T26c): admit at most this many items per slot of SIGNAL time
+     * (token bucket, burst 8); the rest are SKIPPED (counted), not queued-then-dropped. Live td_4_1: 770 items/s
+     * offered, worker served ~120/s, 84 % dropped. */
+    static double rate = -1.0, tokens = 8.0;
+    static long last = -1;
+    static _Atomic uint64_t s_skip;
+    if (rate < 0.0) rate = getenv("ISAC_PDCCH_JOINT_ANON_RATE") ? atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE")) : 0.0;
+    if (rate > 0.0) {
+      const long now = (long)frame * slots_per_frame + slot; /* resyncs on the 1024-frame wrap */
+      if (last >= 0 && now > last) tokens += rate * (double)(now - last);
+      last = now;
+      if (tokens > 8.0) tokens = 8.0;
+      if (tokens < 1.0) {
+        const uint64_t k = atomic_fetch_add_explicit(&s_skip, 1, memory_order_relaxed) + 1;
+        if ((k % 20000) == 1)
+          LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC rate-skipped %llu items (ISAC_PDCCH_JOINT_ANON_RATE=%.2f/slot)\n",
+                (unsigned long long)k, rate);
+        return;
+      }
+      tokens -= 1.0;
+    }
+  }
   atomic_fetch_add_explicit(&g_janon_sub, 1, memory_order_relaxed);
   pthread_mutex_lock(&g_janon_mu);
   if (g_janon_n >= g_janon_cap) {
@@ -5409,7 +5431,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             const int f = atomic_load(&g_cell_lens[i]);
             if (f > 0) jl[njl++] = f;
           }
-          janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx,
+          janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame,
                        sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand, jl, njl);
           n_jhits = janon_take(dl_geom, jhits, JANON_MAX_HITS);
           g_sweep_cache.valid = 0;
@@ -8024,6 +8046,17 @@ constdiag_done:;
           if (!dup) sv_alt[sv_nalt++] = s_ids[q];
         }
       }
+      {
+        static int s_last_n = -1;
+        if (sv_nalt != s_last_n) {
+          char b[160];
+          int u = 0;
+          for (int q = 0; q < sv_nalt && u < (int)sizeof(b) - 8; q++) u += snprintf(b + u, sizeof(b) - u, " %u", sv_alt[q]);
+          LOG_A(PHY, "SENSING: PDSCH_SOLVER scrambling candidates (CORESET nid %d): default%s\n",
+                cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, b);
+          s_last_n = sv_nalt;
+        }
+      }
       nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt);
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
@@ -8926,4 +8959,38 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
   }
   LOG_I(PHY, "SENSING: DL_GPU warm-up complete consumers=%d depth=%d gw_buffers=%zu llr_bytes=%zu (no late CUDA growth)\n",
         consumers, depth, want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0, llr_bytes);
+}
+
+/* ISAC_SEGV_BT=1 (T26c, diagnostic): print the faulting thread's backtrace on SIGSEGV/SIGBUS (replay EOF-exit crash
+ * hunt; no core is kept on this host). Async-signal-safe enough for a dying process: backtrace() is primed at install. */
+#include <execinfo.h>
+#include <signal.h>
+static void isac_segv_bt(int sig, siginfo_t *si, void *uc)
+{
+  (void)uc;
+  void *fr[48];
+  char hdr[160];
+  char name[16] = {0};
+  pthread_getname_np(pthread_self(), name, sizeof(name));
+  const int n = snprintf(hdr, sizeof(hdr), "ISAC_SEGV_BT signal %d addr %p thread %s\n", sig, si ? si->si_addr : NULL, name);
+  if (n > 0) { ssize_t w = write(2, hdr, (size_t)n); (void)w; }
+  const int k = backtrace(fr, 48);
+  backtrace_symbols_fd(fr, k, 2);
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+__attribute__((constructor)) static void isac_segv_bt_install(void)
+{
+  if (!getenv("ISAC_SEGV_BT")) return;
+  void *fr[2];
+  (void)backtrace(fr, 2); /* load libgcc before any fault */
+  static char alt[65536];
+  stack_t ss = {.ss_sp = alt, .ss_size = sizeof(alt), .ss_flags = 0};
+  sigaltstack(&ss, NULL);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_sigaction = isac_segv_bt;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigaction(SIGSEGV, &sa, NULL);
+  sigaction(SIGBUS, &sa, NULL);
 }
