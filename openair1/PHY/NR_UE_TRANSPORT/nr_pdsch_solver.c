@@ -313,6 +313,18 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   return true;
 }
 
+static bool probe_hog(const solver_rnti_t *r)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_FAIR") && atoi(getenv("ISAC_PDSCH_SOLVER_FAIR")) ? 1 : 0;
+  if (!en || r->has_cand) return false;
+  uint64_t tot = 0;
+  int n = 0;
+  for (int i = 0; i < SOLVER_RNTIS; i++)
+    if (g_r[i].used && !g_r[i].solved) { tot += g_r[i].n_probe; n++; }
+  return n > 1 && (uint64_t)r->n_probe * n > 2 * tot + 32u * (uint64_t)n;
+}
+
 static bool search_backoff(const solver_rnti_t *r)
 {
   static int lim = -1;
@@ -380,8 +392,9 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   const uint64_t dci = ++g_dci_seq;
   g_st.planned++;
   if (!r->first_abs) r->first_abs = g_now_abs ? g_now_abs : 1;
+  if (r->key == g_alt_key && r->alt_hash != g_alt_hash) r->n_probe = 0; /* new hypotheses on ITS CORESET: search again */
+  r->alt_hash = g_alt_hash;
   r->key = g_alt_key;
-  if (r->alt_hash != g_alt_hash) { r->alt_hash = g_alt_hash; r->n_probe = 0; } /* new hypotheses: search again */
   r->grants++;
   if ((g_st.planned % 1000) == 0) { /* T26c per-RNTI report: solve time in signal time (30 kHz: 0.5 ms per slot) */
     char b[3000];
@@ -441,6 +454,9 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     }
   } else if (csirs_slot) {
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
+  } else if (probe_hog(r)) {
+    /* T26d: fair share of the probe budget -- an unsolved RNTI that already spent far more probes than the average
+     * unsolved RNTI waits (a busy undecodable population starved the serving cell's RNTIs: replay f3 0x8f5a unsolved) */
   } else if (search_backoff(r)) {
     /* T26c ISAC_PDSCH_SOLVER_BACKOFF=<probes> (default off): an RNTI whose search has spent that many probes without a
      * single CRC pass is searched on 1 grant in 8 only -- the decode pool goes to RNTIs that decode */

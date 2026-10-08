@@ -104,6 +104,14 @@ static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static uint64_t g_pdtim_calls = 0;
+/* ISAC_CHEST_PDP_DIAG=0 (T26d): skip the per-call BRDELAY/PDP diagnostic of the channel estimator (double-precision
+ * pass over the whole IDFT output on every (antenna, DM-RS symbol)); default 1 = unchanged. */
+static int chest_pdp_diag_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 1;
+  return en;
+}
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
 static __thread uint64_t t_pdtim_cpu0;
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
@@ -2664,7 +2672,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
         chest_cfg.number_rbs = seg[s].n_prb;
         chest_cfg.resource_alloc = 1; /* each segment is contiguous */
         uint32_t nvar_tmp = 0;
-        nr_dl_chest_diag_request = 1;
+        nr_dl_chest_diag_request = chest_pdp_diag_on();
         nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                     get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                     pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
@@ -2701,7 +2709,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     dmrs_last = m;
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
-      nr_dl_chest_diag_request = 1; // consumer thread only: BRDELAY/PDP diagnostics
+      nr_dl_chest_diag_request = chest_pdp_diag_on(); // consumer thread only: BRDELAY/PDP diagnostics
       nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
