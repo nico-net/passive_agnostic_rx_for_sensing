@@ -45,15 +45,14 @@ static __thread int nr_dl_chest_cur_ant = 0; // set by the per-antenna task befo
  * the 2-subcarrier pilot interpolation, where a few samples of error are negligible (2 samples -> 0.006 rad per gap). */
 __thread uint32_t nr_dl_chest_delay_epoch;
 extern __thread int nr_dl_chest_diag_request;
-static __thread uint32_t t_delay_epoch;
-static __thread delay_t t_delay_val;
-static __thread int t_delay_have;
+static __thread uint32_t t_delay_epoch_a[8];
+static __thread delay_t t_delay_val_a[8];
+static __thread int t_delay_have_a[8];
 static __thread int t_delay_reused; /* this call reused the shared delay: ch_estimates_time was NOT computed */
 static int chest_delay_share(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_CHEST_DELAY_SHARE") && atoi(getenv("ISAC_CHEST_DELAY_SHARE"))
-                   && !getenv("ISAC_CHEST_DFT_WIN") ? 1 : 0;
+  if (en < 0) en = getenv("ISAC_CHEST_DELAY_SHARE") && !getenv("ISAC_CHEST_DFT_WIN") ? atoi(getenv("ISAC_CHEST_DELAY_SHARE")) : 0;
   return en;
 }
 static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_est, c16_t *ch_estimates_time, delay_t *delay)
@@ -61,8 +60,11 @@ static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_e
   /* the BRDELAY/PDP diagnostic (requested on every passive decode) is computed only where the IDFT still runs */
   const bool share = chest_delay_share() && nr_dl_chest_delay_epoch != 0;
   t_delay_reused = 0;
-  if (share && t_delay_have && t_delay_epoch == nr_dl_chest_delay_epoch) {
-    *delay = t_delay_val;
+  /* ISAC_CHEST_DELAY_SHARE=1: one delay for all antennas of the decode; =2: one per ANTENNA (the boards' timing differs;
+   * sharing antenna 0's delay across boards mis-rotates the others' estimates and breaks MRC) */
+  const int slot_i = chest_delay_share() >= 2 ? (nr_dl_chest_cur_ant & 7) : 0;
+  if (share && t_delay_have_a[slot_i] && t_delay_epoch_a[slot_i] == nr_dl_chest_delay_epoch) {
+    *delay = t_delay_val_a[slot_i];
     t_delay_reused = 1;
     return;
   }
@@ -71,9 +73,9 @@ static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_e
   else
     nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
   if (share) {
-    t_delay_val = *delay;
-    t_delay_epoch = nr_dl_chest_delay_epoch;
-    t_delay_have = 1;
+    t_delay_val_a[slot_i] = *delay;
+    t_delay_epoch_a[slot_i] = nr_dl_chest_delay_epoch;
+    t_delay_have_a[slot_i] = 1;
   }
 }
 static __thread int t_dft_valid = 0;
