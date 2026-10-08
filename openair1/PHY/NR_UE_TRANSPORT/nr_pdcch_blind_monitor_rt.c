@@ -2218,6 +2218,7 @@ typedef struct {
   uint64_t geom;
   uint16_t nid, rnti_min, rnti_max;
   int frame, slot, n;
+  uint8_t nlen, lens[4]; /* T26c ISAC_PDCCH_JOINT_ANON_LEN_HINT: lengths already locked on this CORESET; 0 = all */
   janon_cand_t c[JANON_MAX_CAND];
 } janon_item_t;
 typedef struct { uint64_t geom; int len; uint16_t rnti; uint32_t hash; nr_dci_bits_t payload; uint8_t L; uint16_t cce; int frame, slot; } janon_hit_t;
@@ -2243,7 +2244,7 @@ static unsigned joint_anon_mm_max(int L);
 static void *janon_worker(void *arg)
 {
   (void)arg;
-  static janon_item_t it;
+  static __thread janon_item_t it;
   { /* T26c: created from the scan consumer it inherited that thread's core and RT priority, so the background
      * search time-shared the scan core (live/replay: scan 70 % + janon 25 % on one core). Run it SCHED_OTHER on
      * ISAC_PDCCH_JOINT_ANON_CORE when set, else on the process's own (main thread) affinity. */
@@ -2274,8 +2275,9 @@ static void *janon_worker(void *arg)
       const janon_cand_t *k = &it.c[c];
       int16_t z[16 * 108];
       nr_pdcch_unscrambling((c16_t *)k->e, 0, (uint32_t)(k->L * 108), it.nid, z);
-      for (int len = dci_len_min(); len <= dci_len_max() && len <= 64; len++) {
-        if (len + 24 > k->L * 108) break;
+      for (int li = 0, len = it.nlen ? it.lens[0] : dci_len_min(); it.nlen ? li < it.nlen : (len <= dci_len_max() && len <= 64);
+           li++, len = it.nlen ? (li < it.nlen ? it.lens[li] : 0) : len + 1) {
+        if (len + 24 > k->L * 108) { if (it.nlen) continue; break; }
         nr_pdcch_blind_raw_result_t o;
         janon_hit_t h = {.geom = it.geom, .len = len, .L = k->L, .cce = k->cce, .frame = it.frame, .slot = it.slot};
         bool ok = nr_pdcch_blind_decode_raw_11(z, k->L, (uint16_t)len, it.rnti_min, it.rnti_max, &o);
@@ -2321,7 +2323,7 @@ static double joint_anon_score(const int16_t *llr, int E);
 static void janon_start(void);
 /* Scan path: copy the energetic candidates (cheap: <= TOPK x L x 216 bytes); never blocks, drops when full. */
 static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, uint16_t rmin, uint16_t rmax,
-                         const nr_pdcch_autodiscover_cand_t *cand, int n_cand)
+                         const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen)
 {
   static int topk = -1;
   static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -2358,6 +2360,11 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, uint1
   }
   janon_item_t *it = &g_janon_q[(g_janon_head + g_janon_n) % g_janon_cap];
   it->geom = geom; it->nid = nid; it->frame = frame; it->slot = slot; it->rnti_min = rmin; it->rnti_max = rmax; it->n = m;
+  { /* LEN_HINT: one item in 8 still sweeps every length, so a UE with a different DCI size is found too */
+    static uint32_t s_k;
+    it->nlen = (nlen > 0 && (++s_k % 8u) != 0) ? (uint8_t)(nlen < 4 ? nlen : 4) : 0;
+    for (int q = 0; q < it->nlen; q++) it->lens[q] = (uint8_t)lens[q];
+  }
   for (int k = 0; k < m; k++) {
     it->c[k].L = cand[idx[k]].L;
     it->c[k].cce = cand[idx[k]].cce;
@@ -2393,6 +2400,12 @@ static int janon_take(uint64_t geom, janon_hit_t *out, int max)
   g_janon_nhits = w;
   pthread_mutex_unlock(&g_janon_mu);
   return n;
+}
+static bool janon_all_coresets(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDCCH_JANON_ALL_CORESETS") && atoi(getenv("ISAC_PDCCH_JANON_ALL_CORESETS")) ? 1 : 0;
+  return en == 1;
 }
 static bool janon_hit_scorer(int len, int trial, uint16_t *rnti, uint32_t *hash, void *user)
 {
@@ -4822,10 +4835,38 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   btim_add(BTIM_PRE, btim_occ0);
   const uint64_t btim_t_fep = btim_on ? btim_now() : 0;
   for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + rel15->coreset.duration; symbol++) {
-    nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
     __attribute__((aligned(32))) c16_t rxdataF_symb[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
-    for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
-      memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+    /* ISAC_PDCCH_FEP_CACHE=1 (T26c): a dedicated-only slot runs several passes (each banked CORESET, the dwell, the
+     * CORESET#0 occupancy pass, CSS0) over the SAME OFDM symbol; FFT it once per (slot, symbol, FO) on this thread. */
+    static __thread c16_t *t_fc[NB_ANTENNAS_RX];
+    static __thread struct { int frame, slot, symbol, nant, size; double fo; const void *src; bool valid; } t_fk;
+    static int s_fc = -1;
+    if (s_fc < 0) s_fc = getenv("ISAC_PDCCH_FEP_CACHE") && atoi(getenv("ISAC_PDCCH_FEP_CACHE")) ? 1 : 0;
+    const double fo_key = nr_slot_fep_fo_override_hz;
+    const bool fc_hit = s_fc && t_fk.valid && t_fk.frame == proc->frame_rx && t_fk.slot == proc->nr_slot_rx
+                        && t_fk.symbol == symbol && t_fk.nant == fp->nb_antennas_rx && t_fk.size == fp->ofdm_symbol_size
+                        && t_fk.src == (const void *)ue->common_vars.rxdata
+                        && (t_fk.fo == fo_key || (isnan(t_fk.fo) && isnan(fo_key)));
+    if (fc_hit) { /* also back into rxdataF: the CSI-RS feed, CORESET map and rank grid below read it */
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+        memcpy(rxdataF_symb[ant], t_fc[ant], sizeof(c16_t) * fp->ofdm_symbol_size);
+        memcpy(&rxdataF[ant][symbol * fp->ofdm_symbol_size], t_fc[ant], sizeof(c16_t) * fp->ofdm_symbol_size);
+      }
+    } else {
+      nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+        memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+      }
+      if (s_fc) {
+        bool ok = true;
+        for (int ant = 0; ant < fp->nb_antennas_rx && ok; ant++) {
+          if (!t_fc[ant]) t_fc[ant] = malloc(sizeof(c16_t) * 8192);
+          ok = t_fc[ant] && fp->ofdm_symbol_size <= 8192;
+          if (ok) memcpy(t_fc[ant], rxdataF_symb[ant], sizeof(c16_t) * fp->ofdm_symbol_size);
+        }
+        t_fk.frame = proc->frame_rx; t_fk.slot = proc->nr_slot_rx; t_fk.symbol = symbol; t_fk.nant = fp->nb_antennas_rx;
+        t_fk.size = fp->ofdm_symbol_size; t_fk.fo = fo_key; t_fk.src = ue->common_vars.rxdata; t_fk.valid = ok;
+      }
     }
     nr_pdcch_generate_llr(ue, proc, symbol, &local_phy_data, llr_size_symbol, num_monitoring_occ,
                          rel15->coreset.duration, rxdataF_symb, pdcch_llr);
@@ -5188,8 +5229,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       pick = (pick ^ (pick >> 27)) * UINT64_C(0x94d049bb133111eb);
       pick ^= pick >> 31;
       /* Prefer an unresolved UE, but rotate the starting point so periodic traffic cannot starve
-       * one context. */
-      for (int k = 0; k < n_known_dl; ++k) {
+       * one context. ISAC_PDCCH_JANON_ALL_CORESETS=1 (T26c): on a discovered configured-nID CORESET with the async
+       * anonymous search, NO per-RNTI bootstrap sweep -- RNTIs known from another CORESET (each UE descrambles with its
+       * own C-RNTI here) blocked the anonymous search of every later CORESET until each had exhausted 500 occasions
+       * (replay: the 2nd of two populated CORESETs never verified in 12 s). The async search locks any RNTI it finds
+       * here, known elsewhere or not. */
+      const bool janon_all = janon_all_coresets() && janon_async_enabled() && nr_pdcch_joint_anon_enabled()
+                             && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell;
+      for (int k = 0; k < n_known_dl && !janon_all; ++k) {
         const uint16_t r = dl_known[(pick + (uint64_t)k) % (uint64_t)n_known_dl];
         nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(dl_bank, dl_geom, r);
         if ((!c->found[0] || (reconf_lengths_enabled() && c->len_state == NR_LEN_SUSPECT)) && !c->exhausted) {
@@ -5329,8 +5376,17 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         janon_hit_t jhits[JANON_MAX_HITS];
         int n_jhits = 0;
         if (janon_async) {
+          int jl[4], njl = 0; /* T26c LEN_HINT: the DCI lengths already locked on this CORESET */
+          static int s_lh = -1;
+          if (s_lh < 0) s_lh = getenv("ISAC_PDCCH_JOINT_ANON_LEN_HINT") && atoi(getenv("ISAC_PDCCH_JOINT_ANON_LEN_HINT")) ? 1 : 0;
+          for (int i = 0; s_lh && dl_bank && i < NR_PDCCH_LENGTH_CONTEXTS && njl < 4; ++i) {
+            const int f = dl_bank->ue[i].rnti ? dl_bank->ue[i].found[0] : 0;
+            bool dup = f <= 0;
+            for (int q = 0; q < njl && !dup; q++) dup = jl[q] == f;
+            if (!dup) jl[njl++] = f;
+          }
           janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx,
-                       sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand);
+                       sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand, jl, njl);
           n_jhits = janon_take(dl_geom, jhits, JANON_MAX_HITS);
           g_sweep_cache.valid = 0;
         } else if (budget_active)
@@ -5341,6 +5397,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         discovery_scope.phase = 1;
         const uint64_t trace_decodes = dl_state->decodes;
         janon_feed_ctx_t jfc = {jhits, n_jhits, dl_known, n_known_dl};
+        uint16_t here_known[NR_PDCCH_LENGTH_CONTEXTS];
+        if (janon_all_coresets()) { /* only RNTIs with a length ALREADY locked on this CORESET are "not new" here */
+          int nh = 0;
+          for (int i = 0; i < NR_PDCCH_LENGTH_CONTEXTS; ++i)
+            if (dl_bank->ue[i].rnti && dl_bank->ue[i].found[0] > 0) here_known[nh++] = dl_bank->ue[i].rnti;
+          jfc.known = here_known;
+          jfc.n_known = nh;
+        }
         int found_len = janon_async
             ? nr_pdcch_dci_length_sweep_feed_budget(dl_state, janon_hit_scorer, &jfc, n_jhits > 0 ? n_jhits : 1,
                                                     dci_len_min(), dci_len_max(), 0, 0, 0)
