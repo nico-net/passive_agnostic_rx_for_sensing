@@ -369,6 +369,14 @@ void thread_top_init(char *thread_name)
 /* \brief lock memory to RAM to avoid delays */
 void lock_memory_to_ram(void)
 {
+  /* ISAC_MLOCK=0 skips mlockall (default 1 = upstream behaviour). 2026-10-08, DGX GB10: with a CUDA context the
+   * call keeps the main thread at ~100 % system time for seconds across the radio start (pinning/faulting the
+   * unified-memory mappings), and the DPDK stream drops packets during the cell search. */
+  const char *e = getenv("ISAC_MLOCK");
+  if (e && atoi(e) == 0) {
+    LOG_I(UTIL, "SENSING: mlockall skipped (ISAC_MLOCK=0)\n");
+    return;
+  }
   int rc = mlockall(MCL_CURRENT | MCL_FUTURE);
   if (rc != 0)
     LOG_W(UTIL, "mlockall() failed: %d, %s\n", errno, strerror(errno));
