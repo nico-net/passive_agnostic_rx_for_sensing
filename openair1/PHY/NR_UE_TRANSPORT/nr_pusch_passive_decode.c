@@ -28,6 +28,7 @@
 #include "nr_passive_obs.h" // per-grant observation API (Task A3)
 #include "nr_sense_records.h"
 #include "nr_passive_ue_ctx.h"
+#include "nr_ul_first_pusch.h"
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -839,8 +840,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     out->reject_reason = "no plausible grant";
     return false;
   }
-  const bool timing_disc = getenv("ISAC_UL_TIMING_DISC") && !strcmp(getenv("ISAC_UL_TIMING_DISC"), "1");
-  const bool dmrs_disc = getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1");
+  const bool timing_disc = nr_ul_chain_on() ||
+      (getenv("ISAC_UL_TIMING_DISC") && !strcmp(getenv("ISAC_UL_TIMING_DISC"), "1"));
+  const bool dmrs_disc = nr_ul_chain_on() ||
+      (getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1"));
   nr_pdcch_blind_ul_result_t discovery_grant;
   if (timing_disc || dmrs_disc) {
     discovery_grant = *g;
@@ -1094,6 +1097,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   } else {
     PASSIVE_UL_FEP(ul_sample_offset);
   }
+  out->dmrs_id = g->ul_dmrs_scrambling_id;
+  out->data_id = g->data_scrambling_id;
+  out->nscid = g->nscid;
   if (!gapped && !fdra_unresolved) ul_dmrs_energy_oracle_observe(g, fp, gnb, slot_off, symsz);
   if (abs_slot && !g_snapshot[ctx].valid && !nr_passive_samples_valid(
       atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),

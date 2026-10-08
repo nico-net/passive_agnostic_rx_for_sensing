@@ -5436,3 +5436,48 @@ TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   nr_pusch_passive_ul_ids_reset_all();
   unsetenv("ISAC_UL_UE_STATE");
 }
+#include "nr_ul_first_pusch.h"
+
+TEST(UlFirstPusch, TracksLockedIdentityAndNonzeroCrcOnly)
+{
+  nr_ul_first_state_t state{};
+  const nr_ue_ul_ticket_t first{.identity_gen=7, .epoch=2, .incarnation=3, .rnti=0x1234};
+  const nr_ue_ul_ticket_t reused{.identity_gen=8, .epoch=2, .incarnation=4, .rnti=0x1234};
+  int64_t elapsed=-1;
+  EXPECT_TRUE(nr_ul_first_note(&state,&first,100));
+  EXPECT_FALSE(nr_ul_first_note(&state,&first,105));
+  EXPECT_FALSE(nr_ul_first_crc_ok(&state,&reused,108,&elapsed));
+  EXPECT_FALSE(nr_ul_first_crc_ok(&state,&first,99,&elapsed));
+  EXPECT_TRUE(nr_ul_first_crc_ok(&state,&first,112,&elapsed));
+  EXPECT_EQ(elapsed,12);
+  EXPECT_FALSE(nr_ul_first_crc_ok(&state,&first,113,&elapsed));
+  EXPECT_TRUE(nr_ul_first_note(&state,&reused,200));
+  EXPECT_TRUE(nr_ul_first_crc_ok(&state,&reused,205,&elapsed));
+  EXPECT_EQ(elapsed,5);
+}
+
+TEST(UlFirstPusch, DataIdWalkRetainsDlPriorsAndCoversSkippedPosition)
+{
+  setenv("ISAC_UL_PUSCH_CHAIN","1",1);
+  nr_pusch_passive_ul_ids_reset_all();
+  nr_ue_ctx_t dl{};
+  dl.identity_gen=11;
+  dl.cfg[NR_UEP_DCI_LEN_DL].value=43;
+  dl.cfg[NR_UEP_DCI_LEN_DL].verif=NR_UEV_TRUSTED;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].value=512;
+  dl.cfg[NR_UEP_PDCCH_SCR_ID].value=768;
+  const nr_ue_ul_ticket_t ticket{.identity_gen=11,.epoch=1,.incarnation=0,.rnti=0x2345};
+  nr_pusch_passive_ul_ids_seed(&ticket,&dl,415);
+  for (int i=0;i<9;++i) nr_pusch_passive_ul_ids_failed(&ticket);
+  uint16_t dmrs=0,data=0;
+  nr_pusch_passive_ul_ids_current(ticket.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,0);
+  for (int i=9;i<16;++i) nr_pusch_passive_ul_ids_failed(&ticket);
+  nr_pusch_passive_ul_ids_current(ticket.rnti,0,415,&dmrs,&data);
+  EXPECT_NE(data,7); /* every 16th failed grant retries a DL prior */
+  nr_pusch_passive_ul_ids_failed(&ticket);
+  nr_pusch_passive_ul_ids_current(ticket.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,7); /* the sweep resumes at the skipped position */
+  nr_pusch_passive_ul_ids_reset_all();
+  unsetenv("ISAC_UL_PUSCH_CHAIN");
+}

@@ -47,6 +47,8 @@
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
 #include "nr_pusch_passive_ul_ids.h"
+#include "nr_ul_first_pusch.h"
+#include "nr_pusch_passive_monitor_rt.h"
 #include "nr_pusch_passive_queue_cursor.h"
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
@@ -84,7 +86,7 @@ static consumer_arg_t g_args[NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 bool nr_pusch_passive_pipeline_enabled(void)
 {
   const char *v = getenv("ISAC_UL_PIPELINE");
-  return v && strcmp(v, "1") == 0;
+  return nr_ul_chain_on() || (v && strcmp(v, "1") == 0);
 }
 
 void nr_pusch_passive_queue_note_unready(void)
@@ -148,6 +150,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     }
 
     const bool pipeline = nr_pusch_passive_pipeline_enabled();
+    struct timespec grant_cpu_start={0},grant_cpu_end={0};
+    if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_start);
     if (pipeline && !nr_pusch_passive_decode_capture(ue, idx, (uint8_t)job.nr_slot_rx,
                                                      (uint64_t)job.absolute_slot)) {
       atomic_fetch_add_explicit(&g_dropped_snapshot, 1, memory_order_relaxed);
@@ -156,6 +160,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
+    if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);
     if (pipeline) nr_pusch_passive_decode_capture_release(idx);
     if (!nr_cfg_epoch_work_current()) {
       continue;
@@ -163,17 +168,25 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK) {
       nr_ue_ul_update_t confirmed=job.ul_update;
       confirmed.ta_samples=out.ta_applied_samples;
+      confirmed.dmrs_id=out.dmrs_id;
+      confirmed.data_id=out.data_id;
+      confirmed.nscid=out.nscid;
       nr_ue_ctx_ul_feedback(&job.ul_ticket,&confirmed,true);
     }
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK)
-      nr_pusch_passive_ul_ids_confirm(&job.ul_ticket,job.grant.nscid,
-                                     job.grant.ul_dmrs_scrambling_id,job.grant.data_scrambling_id);
+      nr_pusch_passive_ul_ids_confirm(&job.ul_ticket,out.nscid,out.dmrs_id,out.data_id);
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_CRC_FAIL)
       nr_pusch_passive_ul_ids_failed(&job.ul_ticket);
     if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
         out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB)) {
       nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
       nr_pdcch_dci01_fdra_feedback(&job.grant, out.status==NR_PUSCH_PASSIVE_OK);
+    }
+    if (nr_ul_chain_on()) {
+      const uint64_t cpu_us=(uint64_t)((grant_cpu_end.tv_sec-grant_cpu_start.tv_sec)*1000000L+
+                                      (grant_cpu_end.tv_nsec-grant_cpu_start.tv_nsec)/1000L);
+      nr_pusch_first_crc_result(&job.grant,&job.ul_ticket,job.ul_ticket_valid,&out,
+                                job.absolute_slot,slots_per_frame,cpu_us);
     }
 
 

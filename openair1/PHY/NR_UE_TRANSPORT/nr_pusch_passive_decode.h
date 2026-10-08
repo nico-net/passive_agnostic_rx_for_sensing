@@ -62,6 +62,9 @@ typedef struct {
   /// 0 when no refinement was needed. Kept separate so a refined grant is distinguishable.
   int      est_delay_pre;
   int      ta_applied_samples; ///< signed FFT advance used for this attempt, including sweep selection
+  uint16_t dmrs_id; ///< ID actually used after optional DM-RS discovery
+  uint16_t data_id; ///< data scrambling ID actually used for TB decoding
+  uint8_t  nscid; ///< DM-RS sequence index actually used
   /// HARQ-ACK bit count that made the transport block decode, when the UCI reservation search
   /// found one. 0 = decoded with no reservation (no UCI, or O_ACK <= 2, which punctures instead).
   uint16_t uci_ack_re; ///< inferred ACK RE footprint; does not imply a known O_ACK/beta/alpha

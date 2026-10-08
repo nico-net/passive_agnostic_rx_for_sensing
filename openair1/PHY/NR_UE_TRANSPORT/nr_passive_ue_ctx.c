@@ -550,7 +550,9 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   output=f; ring=r; entries=x; capacity=ring_capacity; head=0;
   period_s=snapshot_period_s; last_period_ns=last_age_ns=0; epoch=identity=0;
   const char *ul_flag=getenv("ISAC_UL_UE_STATE");
-  ul_state_enabled=ul_flag && strcmp(ul_flag,"1")==0;
+  const char *chain_flag=getenv("ISAC_UL_PUSCH_CHAIN");
+  ul_state_enabled=(ul_flag && strcmp(ul_flag,"1")==0) ||
+                   (chain_flag && strcmp(chain_flag,"1")==0);
   for(int i=0;i<=UINT16_MAX;i++) active_index[i]=-1;
   real_time_session=false;
   for(int i=0;i<3;i++) sib1_values[i]=-1;

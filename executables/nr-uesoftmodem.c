@@ -390,9 +390,13 @@ int main(int argc, char **argv)
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && core_feature("ISAC_CORE_PLAN", true))
     nrue_set_ru_params(uniqCfg);
   if (passive_core_plan()) return EXIT_FAILURE;
-  if (nr_cfg_reconf_enabled() || (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
+  const char *ul_chain_flag = getenv("ISAC_UL_PUSCH_CHAIN");
+  const bool ul_chain_on = ul_chain_flag && strcmp(ul_chain_flag, "1") == 0;
+  if (nr_cfg_reconf_enabled() || ul_chain_on ||
+      (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
     const char *uectx_path = getenv("ISAC_UECTX_PATH");
-    if ((uectx_path && *uectx_path) || (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
+    if ((uectx_path && *uectx_path) || ul_chain_on ||
+        (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
       const char *period_env = getenv("ISAC_UECTX_PERIOD_S");
       const double period = period_env && *period_env ? atof(period_env) : 5.0;
       if (nr_ue_ctx_open(uectx_path, 16384, period))

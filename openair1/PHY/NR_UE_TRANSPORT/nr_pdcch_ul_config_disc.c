@@ -81,7 +81,8 @@ bool nr_pdcch_ul_bank_enabled(void)
   int on = atomic_load_explicit(&enabled, memory_order_relaxed);
   if (on < 0) {
     const char *s = getenv("ISAC_UL_DCI_BANK");
-    on = s && strcmp(s, "1") == 0;
+    const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
+    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0);
     atomic_store_explicit(&enabled, on, memory_order_relaxed);
   }
   return on != 0;
@@ -135,7 +136,8 @@ bool nr_pdcch_ul_config_disc_enabled(void)
   int on = atomic_load_explicit(&enabled, memory_order_relaxed);
   if (on < 0) {
     const char *s = getenv("ISAC_UL_CONFIG_DISC");
-    on = s && strcmp(s, "1") == 0;
+    const char *chain = getenv("ISAC_UL_PUSCH_CHAIN");
+    on = (s && strcmp(s, "1") == 0) || (chain && strcmp(chain, "1") == 0);
     atomic_store_explicit(&enabled, on, memory_order_relaxed);
   }
   return on != 0;

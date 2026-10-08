@@ -45,6 +45,7 @@ typedef struct {
   nr_ue_ul_ticket_t ticket;
   uint16_t priors[3], dmrs_id[2], data_id;
   uint8_t n_priors, confirmed_mask, trial;
+  uint32_t failed_grants; /* U7: one bounded data-ID candidate per failed grant */
   bool used;
 } ul_ids_ue_t;
 static ul_ids_ue_t g_ue_ids[UL_IDS_UE_CAP];
@@ -56,7 +57,8 @@ uint64_t nr_pusch_passive_ul_ids_dropped(void)
 bool nr_pusch_passive_ul_ue_state_enabled(void)
 {
   const char *v=getenv("ISAC_UL_UE_STATE");
-  return v && strcmp(v,"1")==0;
+  const char *chain=getenv("ISAC_UL_PUSCH_CHAIN");
+  return (chain && strcmp(chain,"1")==0) || (v && strcmp(v,"1")==0);
 }
 static bool same_ticket(const nr_ue_ul_ticket_t *a,const nr_ue_ul_ticket_t *b)
 {
@@ -125,7 +127,13 @@ void nr_pusch_passive_ul_ids_current(uint16_t rnti,uint8_t nscid,uint16_t pci,
     if(s->n_priors) {
       const int ns=nscid&1;
       if(dmrs_id) *dmrs_id=(s->confirmed_mask&(1u<<ns))?s->dmrs_id[ns]:s->priors[(s->trial/s->n_priors)%s->n_priors];
-      if(data_id) *data_id=s->confirmed_mask?s->data_id:s->priors[s->trial%s->n_priors];
+      if(data_id) {
+        if (s->confirmed_mask) *data_id=s->data_id;
+        else if (getenv("ISAC_UL_PUSCH_CHAIN") && strcmp(getenv("ISAC_UL_PUSCH_CHAIN"),"1")==0 &&
+                 s->failed_grants>=9 && (s->failed_grants%16)!=0)
+          *data_id=(uint16_t)((s->failed_grants-9-(s->failed_grants-1)/16)%1024);
+        else *data_id=s->priors[s->trial%s->n_priors];
+      }
     }
     break;
   }
@@ -138,6 +146,8 @@ void nr_pusch_passive_ul_ids_failed(const nr_ue_ul_ticket_t *t)
   for(int i=0;i<UL_IDS_UE_CAP;i++) if(g_ue_ids[i].used && same_ticket(&g_ue_ids[i].ticket,t)) {
     if(!g_ue_ids[i].confirmed_mask && g_ue_ids[i].n_priors>1)
       g_ue_ids[i].trial=(g_ue_ids[i].trial+1)%(g_ue_ids[i].n_priors*g_ue_ids[i].n_priors);
+    if(!g_ue_ids[i].confirmed_mask && g_ue_ids[i].failed_grants<UINT32_MAX)
+      ++g_ue_ids[i].failed_grants;
     break;
   }
   pthread_mutex_unlock(&g_ue_ids_lock);

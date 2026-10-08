@@ -3369,6 +3369,16 @@ void nr_pdcch_blind_monitor_init(void)
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_pusch '%s'; passive PUSCH decode disabled\n",
           p_ul_pusch);
   }
+  /* The integrated first-PUSCH mode supplies the two config switches the DL-only
+   * OTA configuration lacks. Full-auto keeps the UL BWP/TDRA unknown until U3
+   * proposes a ticket; the flag is the only new default-off activation point. */
+  const char *ul_chain = getenv("ISAC_UL_PUSCH_CHAIN");
+  if (ul_chain && strcmp(ul_chain,"1") == 0 && g_cfg.dl_full_auto) {
+    g_cfg.dci01_scan = 1;
+    g_cfg.dci01_length_override = 0;
+    g_cfg.ul_pusch_decode = 1;
+    if (g_cfg.ul_pusch_max_per_slot < 1) g_cfg.ul_pusch_max_per_slot = 1;
+  }
   if (p_ul_dci_bits != NULL && p_ul_dci_bits[0] != '\0' && !parse_ul_dci_bits(p_ul_dci_bits)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_dci_bits '%s' (need 16 ints); UL widths left "
                "at defaults\n", p_ul_dci_bits);
