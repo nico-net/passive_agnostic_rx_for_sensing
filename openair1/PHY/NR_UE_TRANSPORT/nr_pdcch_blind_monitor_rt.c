@@ -8019,14 +8019,15 @@ constdiag_done:;
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
       uint16_t sv_alt[16];
       int sv_nalt = 0;
+      int sv_did = -1;
       if (cfg->discovered_coreset) { /* T26c: this CORESET's blind-decided PDSCH DM-RS id first, when it differs from the cell's */
-        const int did = nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id);
-        if (did >= 0 && did != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)did;
+        sv_did = nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id);
+        if (sv_did >= 0 && sv_did != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)sv_did;
       }
-      if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
-          && (sv_nalt == 0 || sv_alt[0] != cfg->coreset_pdcch_dmrs_scrambling_id))
+      const bool sv_decided = sv_did >= 0; /* a decided DM-RS id is the hypothesis (default stays as fallback) */
+      if (!sv_decided && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
         sv_alt[sv_nalt++] = (uint16_t)cfg->coreset_pdcch_dmrs_scrambling_id;
-      for (int b = 0; b < nr_pdcch_coreset_bank_count() && sv_nalt < 8; b++) { /* the other run-time CORESET nIDs */
+      for (int b = 0; !sv_decided && b < nr_pdcch_coreset_bank_count() && sv_nalt < 8; b++) { /* the other run-time CORESET nIDs */
         const nr_pdcch_blind_monitor_cfg_t *bc = nr_pdcch_coreset_bank_cfg(b);
         if (!bc || !bc->discovered_coreset || bc->coreset_pdcch_dmrs_scrambling_id == fp->Nid_cell) continue;
         bool dup = false;
@@ -8045,21 +8046,28 @@ constdiag_done:;
           for (int q = 0; q < s_n && !dup; q++) dup = s_ids[q] == sv_rm[k].scramb_id;
           if (!dup && s_n < 8) s_ids[s_n++] = sv_rm[k].scramb_id;
         }
-        for (int q = 0; s_cs && q < s_n && sv_nalt < 16; q++) {
+        for (int q = 0; s_cs && !sv_decided && q < s_n && sv_nalt < 16; q++) {
           bool dup = false;
           for (int z = 0; z < sv_nalt && !dup; z++) dup = sv_alt[z] == s_ids[q];
           if (!dup) sv_alt[sv_nalt++] = s_ids[q];
         }
       }
       {
-        static int s_last_n = -1;
+        static int s_last_key[8] = {-2, -2, -2, -2, -2, -2, -2, -2}, s_last_cnt[8];
+        const int lk = cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1;
+        int slot_i = -1;
+        for (int q = 0; q < 8 && slot_i < 0; q++) if (s_last_key[q] == lk) slot_i = q;
+        for (int q = 0; q < 8 && slot_i < 0; q++) if (s_last_key[q] == -2) { slot_i = q; s_last_key[q] = lk; s_last_cnt[q] = -1; }
+        int s_dummy = -1;
+        int *s_last_n_p = slot_i >= 0 ? &s_last_cnt[slot_i] : &s_dummy;
+        int s_last_n = *s_last_n_p;
         if (sv_nalt != s_last_n) {
           char b[160];
           int u = 0;
           for (int q = 0; q < sv_nalt && u < (int)sizeof(b) - 8; q++) u += snprintf(b + u, sizeof(b) - u, " %u", sv_alt[q]);
           LOG_A(PHY, "SENSING: PDSCH_SOLVER scrambling candidates (CORESET nid %d): default%s\n",
                 cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, b);
-          s_last_n = sv_nalt;
+          *s_last_n_p = sv_nalt;
         }
       }
       nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt);

@@ -41,6 +41,7 @@ typedef struct {
   int32_t scr, cand_scr;   /* T26c: PDSCH scrambling id hypothesis (-1 = default ids; else the id); solved/candidate */
   int32_t key;             /* T26c: CORESET key of this RNTI's last planned DCI */
   uint32_t n_probe;        /* T26c: probes planned while unsolved (search backoff) */
+  uint32_t alt_hash;       /* T26c: g_alt_hash seen at the last plan */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
 } solver_rnti_t;
@@ -69,6 +70,7 @@ static pending_t g_p[SOLVER_PENDING];
 static uint32_t g_token = 1; /* sequence part of a token; the low 12 bits are the pending index (O(1) feedback) */
 static int32_t g_alt_ids[16]; /* T26c: run-time scrambling-id alternatives for the planned DCI (nr_pdsch_solver_set_alt_scr) */
 static int g_n_alt;
+static uint32_t g_alt_hash; /* T26c: content hash of the alternatives -- a change re-opens backed-off searches */
 static int32_t g_alt_key = -1; /* the planned DCI's CORESET key (its PDCCH nID) */
 static struct { int32_t key, scr; } g_key_scr[16]; /* first solved scrambling per CORESET: its other RNTIs try it only */
 static int g_n_key_scr;
@@ -231,7 +233,12 @@ void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n)
   pthread_mutex_lock(&g_mu);
   g_n_alt = 0;
   g_alt_key = key;
-  for (int i = 0; en && i < n && g_n_alt < 16; i++) g_alt_ids[g_n_alt++] = ids[i];
+  uint32_t h = 2166136261u;
+  for (int i = 0; en && i < n && g_n_alt < 16; i++) {
+    g_alt_ids[g_n_alt++] = ids[i];
+    h = (h ^ ids[i]) * 16777619u;
+  }
+  g_alt_hash = h ^ (uint32_t)g_n_alt;
   pthread_mutex_unlock(&g_mu);
 }
 
@@ -374,6 +381,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   g_st.planned++;
   if (!r->first_abs) r->first_abs = g_now_abs ? g_now_abs : 1;
   r->key = g_alt_key;
+  if (r->alt_hash != g_alt_hash) { r->alt_hash = g_alt_hash; r->n_probe = 0; } /* new hypotheses: search again */
   r->grants++;
   if ((g_st.planned % 1000) == 0) { /* T26c per-RNTI report: solve time in signal time (30 kHz: 0.5 ms per slot) */
     char b[3000];
