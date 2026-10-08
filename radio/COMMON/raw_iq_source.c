@@ -105,6 +105,14 @@ int raw_iq_read(raw_iq_source *s, void **buffers, int count,
             (unsigned long long)before, (unsigned long long)(s->position - before),
             (unsigned long long)s->position);
   }
+  if (!s->gap2_done && s->gap2_len && s->position >= s->gap2_at) {
+    const uint64_t before = s->position;
+    s->position = (s->position + s->gap2_len < s->samples) ? s->position + s->gap2_len : s->samples;
+    s->gap2_done = 1;
+    fprintf(stderr, "RAW_IQ_GAP injected gap=2 at_sample=%llu skipped=%llu new_position=%llu\n",
+            (unsigned long long)before, (unsigned long long)(s->position - before),
+            (unsigned long long)s->position);
+  }
   uint64_t left = s->samples - s->position;
   if ((uint64_t)count > left) count = (int)left;
   *timestamp = s->first_tick + s->position;

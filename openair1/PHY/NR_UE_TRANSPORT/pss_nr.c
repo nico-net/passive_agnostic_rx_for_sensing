@@ -218,8 +218,10 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
     int64_t avg = 0;
     const int first = p->window_radius > 0 ? max(0, (p->window_center - p->window_radius) & ~3) : 0;
     const int end = p->window_radius > 0 ? min(p->rxdata_length, p->window_center + p->window_radius + 1) : p->rxdata_length;
+    const int stride = p->window_radius == 0 && p->search_stride >= 4 && p->search_stride <= 256
+                           ? p->search_stride & ~3 : 4;
     int positions = 0;
-    for (int n = first; n < end; n += 4) { //
+    for (int n = first; n < end; n += stride) { //
       positions++;
       int64_t pss_corr_ue = 0;
       /* calculate dot product of primary_synchro_time_nr and rxdata[ar][n]
@@ -243,7 +245,27 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
       }
     }
 
-    avg /= p->window_radius > 0 ? (positions ? positions : 1) : (p->rxdata_length / 4);
+    /* A targeted recovery can survey the whole frame at a coarse stride,
+     * then recover the ordinary four-sample timing precision around its peak.
+     * The PBCH/SSS stages still see the full-rate capture. */
+    if (stride > 4) {
+      const int refine_first = max(first, (peak_position - stride) & ~3);
+      const int refine_end = min(end, peak_position + stride + 1);
+      for (int n = refine_first; n < refine_end; n += 4) {
+        int64_t corr = 0;
+        for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
+          const c32_t v = dot_product(pssTime[pss_index], &p->rxdata[ar][n], p->ofdm_symbol_size, shift);
+          const c64_t v64 = {.r = v.r, .i = v.i};
+          corr += squaredMod(v64);
+        }
+        if (corr > peak_value) {
+          peak_value = corr;
+          peak_position = n;
+        }
+      }
+    }
+
+    avg /= positions ? positions : 1;
     bool pss_not_found = (p->target_Nid_cell == -1 && peak_value < 5 * avg) 
                          || peak_position < p->nb_prefix_samples;
     pss_info.pss_elem_info[pss_count] = (pss_detection_result_t){

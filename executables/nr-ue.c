@@ -245,6 +245,7 @@ typedef struct {
   int fast_pss_frame;
   int fast_pss_radius;
   int fast_pss_wide_radius;
+  uint64_t recover_epoch;
 } syncData_t;
 
 extern _Atomic int nr_ue_cfo_resync_request; // set by the CFO trim loop (phy_procedures_nr_ue.c)
@@ -274,24 +275,43 @@ static void UE_synch(void *arg) {
   } else {
     nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
     if (syncD->fast_pss_position >= 0) {
+      /* Test-only path to exercise the coarse fallback with a replay gap. */
+      const char *force_coarse_env = getenv("ISAC_RX_RECOVER_TEST_COARSE_EPOCH");
+      const bool force_coarse = force_coarse_env && atoll(force_coarse_env) == (long long)syncD->recover_epoch;
       LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d frame=%d expected_pos=%d radius=%d\n",
             UE->target_Nid_cell, syncD->gscnInfo[0].ssbFirstSC, syncD->fast_pss_frame, syncD->fast_pss_position,
             syncD->fast_pss_radius);
-      ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
-                                 syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_radius, 1);
-      if (!ret.cell_detected && fp->nb_antennas_rx > 1) {
-        LOG_W(PHY, "SENSING: RX_RECOVER retrying narrow PSS correlation with configured antennas\n");
+      if (!force_coarse)
         ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
-                                   syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_radius, 0);
+                                   syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_radius, 1, 0);
+      if (!ret.cell_detected && !force_coarse) {
+        const int medium_radius = 2 * fp->ofdm_symbol_size;
+        LOG_W(PHY, "SENSING: RX_RECOVER widening predicted-frame PSS radius to %d samples\n", medium_radius);
+        ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
+                                   syncD->fast_pss_frame, syncD->fast_pss_position, medium_radius, 1, 0);
       }
-      if (!ret.cell_detected && syncD->fast_pss_wide_radius > syncD->fast_pss_radius) {
-        LOG_W(PHY, "SENSING: RX_RECOVER widening PSS/SSS radius to %d samples\n",
-              syncD->fast_pss_wide_radius);
+      if (!ret.cell_detected && !force_coarse) {
+        /* The X410 can report a frozen stream origin across a restart. Keep
+         * the expected local PSS phase but test the other capture frame too. */
+        LOG_W(PHY, "SENSING: RX_RECOVER probing other SSB frame=%d radius=%d\n",
+              1 - syncD->fast_pss_frame, syncD->fast_pss_wide_radius);
         ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
-                                   syncD->fast_pss_frame, syncD->fast_pss_position, syncD->fast_pss_wide_radius, 0);
+                                   1 - syncD->fast_pss_frame, syncD->fast_pss_position,
+                                   syncD->fast_pss_wide_radius, 1, 0);
       }
       if (!ret.cell_detected) {
-        LOG_W(PHY, "SENSING: RX_RECOVER narrow PSS/SSS search missed; searching full capture\n");
+        LOG_W(PHY, "SENSING: RX_RECOVER coarse PSS survey frame=%d stride=64\n", syncD->fast_pss_frame);
+        ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
+                                   syncD->fast_pss_frame, 0, 0, 1, 64);
+        if (!ret.cell_detected) {
+          LOG_W(PHY, "SENSING: RX_RECOVER coarse PSS survey other frame=%d stride=64\n",
+                1 - syncD->fast_pss_frame);
+          ret = nr_initial_sync_fast(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn,
+                                     1 - syncD->fast_pss_frame, 0, 0, 1, 64);
+        }
+      }
+      if (!ret.cell_detected) {
+        LOG_W(PHY, "SENSING: RX_RECOVER coarse PSS survey missed; searching full capture\n");
         ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
       }
     } else {
@@ -300,6 +320,15 @@ static void UE_synch(void *arg) {
   }
 
   if (ret.cell_detected) {
+    if (syncD->fast_pss_position >= 0) {
+      const long long period = 2LL * fp->samples_per_frame;
+      const long long predicted = (long long)syncD->fast_pss_frame * fp->samples_per_frame + syncD->fast_pss_position;
+      const long long found = (long long)ret.frame_id * fp->samples_per_frame + ret.ssb_offset + fp->nb_prefix_samples;
+      const long long delta = (found - predicted + period + period / 2) % period - period / 2;
+      LOG_W(PHY, "SENSING: RX_RECOVER PSS predicted_frame=%d predicted_pos=%d found_frame=%d found_pos=%d error_samples=%lld\n",
+            syncD->fast_pss_frame, syncD->fast_pss_position, ret.frame_id,
+            ret.ssb_offset + fp->nb_prefix_samples, delta);
+    }
     syncD->pss_tick = syncD->capture_end - (openair0_timestamp_t)2 * fp->samples_per_frame
         + (openair0_timestamp_t)ret.frame_id * fp->samples_per_frame
         + ret.ssb_offset + fp->nb_prefix_samples;
@@ -773,7 +802,7 @@ void dummyWrite(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, int writeBlo
   AssertFatal(writeBlockSize == tmp, "write to reorder function failed %d", tmp);
 }
 
-void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, bool toTrash)
+bool readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, bool toTrash)
 {
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
   // two frames for initial sync
@@ -785,6 +814,16 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
   }
 
   c16_t *rxp[fp->nb_antennas_rx];
+  const bool check_capture = getenv("ISAC_RX_RECOVER") && atoi(getenv("ISAC_RX_RECOVER")) != 0;
+  static uint64_t (*ring_epoch_get)(void) = NULL;
+  static bool ring_epoch_checked = false;
+  if (check_capture && !ring_epoch_checked) {
+    ring_epoch_get = dlsym(RTLD_DEFAULT, "isac_usrp_ring_epoch");
+    ring_epoch_checked = true;
+  }
+  const uint64_t capture_epoch = ring_epoch_get ? ring_epoch_get() : 0;
+  openair0_timestamp_t expected = 0;
+  bool have_expected = false, contiguous = true;
   if (toTrash) {
     rxp[0] = malloc16(get_samples_per_slot(0, fp) * sizeof(c16_t));
     for (int i = 1; i < fp->nb_antennas_rx; i++)
@@ -807,8 +846,19 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
         nr_shutdown_request(3);
         if (toTrash)
           free(rxp[0]);
-        return;
+        return false;
       }
+
+      if (check_capture && have_expected && *timestamp != expected) {
+        if (contiguous)
+          LOG_W(PHY, "SENSING: RX_RECOVER discarded mixed acquisition capture expected=%llu actual=%llu\n",
+                (unsigned long long)expected, (unsigned long long)*timestamp);
+        contiguous = false;
+      }
+      if (check_capture && ring_epoch_get && ring_epoch_get() != capture_epoch)
+        contiguous = false;
+      expected = *timestamp + readBlockSize;
+      have_expected = true;
 
       if (IS_SOFTMODEM_RFSIM) {
         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
@@ -823,6 +873,7 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
 
   if (toTrash)
     free(rxp[0]);
+  return contiguous;
 }
 
 
@@ -1282,7 +1333,7 @@ void *UE_thread(void *arg)
     AssertFatal(!syncRunning, "At this point synchronization can't be running\n");
 
     if (!UE->is_synchronized) {
-      if (rx_recover_on && rx_recover_start.tv_sec && ++rx_recover_fast_tries > 2)
+      if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries >= 2)
         UE->target_Nid_cell = rx_recover_old_target; /* full search fallback */
       /* Acquisition consumes frames outside the slot-read accounting. Never compare
        * a new lock against the final timestamp of the previous lock. */
@@ -1303,9 +1354,13 @@ void *UE_thread(void *arg)
         if (nrue_band_scan_active() && s_band_scan_attempts++ > 0)
           nrue_band_scan_next(UE);
       }
-      readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
+      const bool capture_contiguous = readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
       if (oai_exit)
         break;
+      if (rx_recover_on && !capture_contiguous) {
+        LOG_W(PHY, "SENSING: RX_RECOVER retrying acquisition with a contiguous two-frame capture\n");
+        continue;
+      }
       notifiedFIFO_elt_t *Msg = newNotifiedFIFO_elt(sizeof(syncData_t), 0, &nf, UE_synch);
       syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(Msg);
       *syncMsg = (syncData_t){0};
@@ -1314,8 +1369,10 @@ void *UE_thread(void *arg)
       syncMsg->fast_pss_frame = -1;
       syncMsg->fast_pss_radius = 0;
       syncMsg->fast_pss_wide_radius = 0;
-      if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries <= 2
+      syncMsg->recover_epoch = rx_recover_epoch;
+      if (rx_recover_on && rx_recover_start.tv_sec && rx_recover_fast_tries < 2
           && rx_recover_last_pss_tick) {
+        rx_recover_fast_tries++; /* only a submitted fast search spends a try */
         const long long capture_start = (long long)syncMsg->capture_end - (long long)2 * fp->samples_per_frame;
         /* The serving SSB repeats every 20 ms. Keep the frame parity: reducing
          * this to a 10 ms frame puts every other expected PSS one frame away. */
@@ -1324,10 +1381,10 @@ void *UE_thread(void *arg)
         const long long phase = (delta % period + period) % period;
         syncMsg->fast_pss_frame = (int)(phase / fp->samples_per_frame);
         syncMsg->fast_pss_position = (int)(phase % fp->samples_per_frame);
-        /* A timed X410 START gives a sample-clock anchor. Search two symbols
-         * first; if the timestamp or capture boundary has more uncertainty,
-         * widen to 0.5 ms before falling back to the full capture. */
-        syncMsg->fast_pss_radius = 2 * fp->ofdm_symbol_size;
+        /* A timed X410 START gives a sample-clock anchor. A quarter symbol
+         * covers the observed live and replay prediction errors cheaply;
+         * a miss retries two symbols, then a wider frame hypothesis. */
+        syncMsg->fast_pss_radius = fp->ofdm_symbol_size / 4;
         syncMsg->fast_pss_wide_radius = (int)fmax(syncMsg->fast_pss_radius, fp->samples_per_frame / 20);
       }
       if (auto_timing && auto_anchor_valid) {
@@ -1754,7 +1811,7 @@ void *UE_thread(void *arg)
            * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
           nr_passive_acq_note_sync_loss();
           /* Legacy fieldbook owns its local epoch; reconf uses only the drained central listener. */
-          if (!nr_cfg_reconf_enabled() && !rx_recover_on)
+          if (!nr_cfg_reconf_enabled())
             nr_pdsch_config_sweep_fieldbook_bump_epoch();
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
             if (rx_recover_on)

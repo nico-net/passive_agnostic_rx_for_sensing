@@ -125,6 +125,7 @@ static const char *cause_name(nr_epoch_cause_t c)
     case NR_CAUSE_BWP_CHANGE: return "BWP_CHANGE";
     case NR_CAUSE_DEDICATED_CHANGE_SUSPECTED: return "DEDICATED_CHANGE_SUSPECTED";
     case NR_CAUSE_CSIRS_MAP_CHANGE: return "CSIRS_MAP_CHANGE";
+    case NR_CAUSE_RX_RECOVERY: return "RX_RECOVERY";
   }
   return "UNKNOWN";
 }
@@ -425,7 +426,7 @@ static void simple_bump(nr_epoch_class_t cls, nr_epoch_cause_t cause)
 
 }
 void nr_cfg_epoch_note_continuity_loss(void) { simple_bump(NR_EPOCH_HARD_REVERIFY, NR_CAUSE_CONTINUITY_LOSS); }
-void nr_cfg_epoch_note_rx_recovery(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_CONTINUITY_LOSS); }
+void nr_cfg_epoch_note_rx_recovery(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_RX_RECOVERY); }
 void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t samples_per_ms)
 {
   if (!is_enabled()) return;

@@ -13,6 +13,7 @@ typedef struct {
    * sees exactly what a real stream loss looks like. 0 = disabled. */
   uint64_t gap_at, gap_len; int gap_done;
   double *rot; int rot_cap; /* per-read phasor scratch, shared by all channels (raw_iq_read) */
+  uint64_t gap2_at, gap2_len; int gap2_done;
 } raw_iq_source;
 int raw_iq_open(raw_iq_source *s, const char *root, uint64_t samples,
                 uint64_t first_tick, unsigned channels, double rate,

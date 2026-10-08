@@ -202,6 +202,16 @@ TEST_F(CfgEpoch, ShortGapIsSoft) {
   EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
   EXPECT_EQ(last.last_cause, NR_CAUSE_CONTINUITY_LOSS);
 }
+TEST_F(CfgEpoch, RxRecoveryHasOwnCauseAndShortGapDoesNot) {
+  /* Flag off (ISAC_RX_RECOVER unset) only produces CONTINUITY_LOSS, which csirs_disc must treat as a reset. */
+  nr_cfg_epoch_note_continuity_loss_samples(1000, 1000);
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(last.last_cause, NR_CAUSE_CONTINUITY_LOSS);
+  nr_cfg_epoch_note_rx_recovery();
+  nr_cfg_epoch_drain();
+  EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
+  EXPECT_EQ(last.last_cause, NR_CAUSE_RX_RECOVERY);
+}
 TEST_F(CfgEpoch, LongGapIsHardReverify) {
   for (uint64_t ms : {10u, 50u}) {
     nr_cfg_epoch_note_continuity_loss_samples(ms * 1000, 1000);

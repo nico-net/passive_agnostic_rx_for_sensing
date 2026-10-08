@@ -34,6 +34,14 @@ int main(void)
   for (int c = 0; c < 4; ++c) assert(!memcmp(output[c], input[c] + 10, 11 * 4));
   assert(raw_iq_read(&s, b, 1, 4, &ts) == 0 && ts == 12361 && s.position == 16);
   raw_iq_close(&s);
+  assert(raw_iq_open(&s, dir, 16, 0, 4, 7680000, 3500000000, 0) == 0);
+  s.gap_at = 4; s.gap_len = 2;
+  s.gap2_at = 10; s.gap2_len = 3;
+  assert(raw_iq_read(&s, b, 4, 4, &ts) == 4 && ts == 0);
+  assert(raw_iq_read(&s, b, 4, 4, &ts) == 4 && ts == 6);
+  assert(raw_iq_read(&s, b, 4, 4, &ts) == 3 && ts == 13);
+  assert(s.gap_done && s.gap2_done);
+  raw_iq_close(&s);
   assert(raw_iq_open(&s, dir, 15, 0, 4, 7680000, 3500000000, 0) == -1);
   assert(raw_iq_open(&s, dir, 16, UINT64_MAX, 4, 7680000, 3500000000, 0) == -1);
   assert(raw_iq_open(&s, dir, 16, 0, 4, NAN, 3500000000, 0) == -1);

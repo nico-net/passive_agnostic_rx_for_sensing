@@ -115,15 +115,21 @@ static int delta_limit(const nr_csirs_disc_ring_t *ring)
 
 static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 {
-  (void)snapshot;
+  const bool rx_recovery = snapshot->last_class == NR_EPOCH_SOFT
+                        && snapshot->last_cause == NR_CAUSE_RX_RECOVERY;
   pthread_mutex_lock(&pipeline_lock);
   cache_count=qualified_count=evidence_retries=0;cache_grid=NULL;cache_written=0;
   ++evidence_epoch;
   nr_csirs_disc_detect_reset();
-  if (nr_csirs_blind_rt_discovery_reset)
-    nr_csirs_blind_rt_discovery_reset();
-  if (nr_csirs_monitor_remove_dynamic_all)
-    nr_csirs_monitor_remove_dynamic_all();
+  /* The IQ feed and partial hypotheses belong to the old sample epoch, but
+   * confirmed CSI-RS resources are cell configuration. Keep their monitor
+   * exports through a transient RX restart, like the CORESET/RNTI banks. */
+  if (!rx_recovery) {
+    if (nr_csirs_blind_rt_discovery_reset)
+      nr_csirs_blind_rt_discovery_reset();
+    if (nr_csirs_monitor_remove_dynamic_all)
+      nr_csirs_monitor_remove_dynamic_all();
+  }
   nr_csirs_disc_ring_t *ring = nr_csirs_disc_worker_ring();
   nr_csirs_disc_ring_reset(ring);
   pthread_mutex_unlock(&pipeline_lock);
