@@ -340,3 +340,63 @@ TEST(CsirsDiscE2E, AsyncConfirmationFourActors)
     int rc=nr_csirs_blind_rt_test_async_stress();fflush(stdout);_exit(rc?1:0);
   }()),::testing::ExitedWithCode(0),"");
 }
+
+
+TEST(CsirsDiscE2E, CumulativeLowMarginRequiresFreshSequenceConfirmation)
+{
+  setenv("ISAC_CSIRS_DISC","1",1);
+  nr_csirs_disc_synth_init();
+  nr_csirs_blind_rt_test_discovery_reset();
+  nr_csirs_disc_synth_resource_t resources[2]={
+    {1,4,0,0,3,1,0,16,415,160,15,1}, {1,4,0,0,3,1,0,16,415,160,16,1}};
+  auto cfg=config(resources,2);
+  cfg.n_slots=4;cfg.n_rb=16;cfg.load=0;cfg.dmrs=cfg.ssb=false;cfg.snr_db=-3;
+  nr_csirs_disc_hyp_t h[2]={};
+  for(int phase=0;phase<2;++phase) {
+    h[phase].row=1;h[phase].freq_domain=1;h[phase].symb_l0=4;h[phase].density=3;
+    h[phase].n_rb=16;h[phase].period=160;h[phase].offset=15+phase;
+  }
+  nr_csirs_disc_sweep_cfg_t base={0,1024,1,32,4}, cumulative=base;
+  cumulative.evidence_epoch=777;
+  const nr_csirs_disc_gate_t gate={12,4,2,0};
+  bool admitted[2]={}, baseline[2]={};
+  int first[2]={-1,-1};
+  Ring persistent;
+  for(int batch=0;batch<32;++batch) {
+    cfg.first_slot=15+batch*4480;cfg.seed=0x28415+batch;
+    Ring next;ASSERT_EQ(nr_csirs_disc_synth(&next.ring,&cfg),0);
+    if(!persistent.ring.grid_base) { ASSERT_EQ(nr_csirs_disc_synth(&persistent.ring,&cfg),0); }
+    // Shared interference across receive branches, with four actual input planes.
+    for(int slot=0;slot<4;++slot) for(int a=1;a<4;++a)
+      std::copy_n(nr_csirs_disc_ring_sym(&next.ring,slot,0,0),14*24*16,
+                  nr_csirs_disc_ring_sym(&next.ring,slot,a,0));
+    memcpy(persistent.ring.grid_base,next.ring.grid_base,4*next.ring.slot_stride*sizeof(int16_t));
+    memcpy(persistent.ring.meta,next.ring.meta,4*sizeof(*next.ring.meta));
+    persistent.ring.written=640*(batch+1);
+    nr_csirs_disc_win_t a[2]={},b[2]={};
+    ASSERT_EQ(nr_csirs_disc_sweep_cpu(&persistent.ring,h,2,&base,a),2);
+    ASSERT_EQ(nr_csirs_disc_sweep_cpu(&persistent.ring,h,2,&cumulative,b),2);
+    for(int phase=0;phase<2;++phase) {
+      baseline[phase]|=nr_csirs_disc_gate_accept(&a[phase],&gate);
+      if(!admitted[phase] && nr_csirs_disc_gate_accept(&b[phase],&gate)) {
+        ASSERT_EQ(b[phase].scramb_id,415);
+        ASSERT_EQ(nr_csirs_blind_rt_add_discovered(&h[phase],&b[phase]),0);
+        admitted[phase]=true;first[phase]=batch;
+      }
+    }
+  }
+  printf("T28 low-margin admission: cumulative first windows=%d,%d baseline=%d,%d\n",
+         first[0],first[1],baseline[0],baseline[1]);
+  ASSERT_TRUE(admitted[0] && admitted[1]);
+  EXPECT_FALSE(baseline[0] || baseline[1]);
+  // Admission alone must not export anything. Fresh noise cannot confirm it.
+  cfg.first_slot=150000;cfg.n_slots=1280;cfg.resources=nullptr;cfg.n_resources=0;
+  Ring negative;ASSERT_EQ(nr_csirs_disc_synth(&negative.ring,&cfg),0);
+  fapi_nr_dl_config_csirs_pdu_rel15_t out[8]={};
+  EXPECT_EQ(nr_csirs_blind_rt_test_confirm_ring(&negative.ring,out,nullptr,nullptr,nullptr,8,nullptr),0);
+  cfg.first_slot=152000;cfg.resources=resources;cfg.n_resources=2;
+  Ring fresh;ASSERT_EQ(nr_csirs_disc_synth(&fresh.ring,&cfg),0);
+  ASSERT_EQ(nr_csirs_blind_rt_test_confirm_ring(&fresh.ring,out,nullptr,nullptr,nullptr,8,nullptr),1);
+  EXPECT_EQ(out[0].scramb_id,415);EXPECT_EQ(out[0].row,1);EXPECT_EQ(out[0].nr_of_rbs,16);
+  nr_csirs_blind_rt_test_discovery_reset();
+}

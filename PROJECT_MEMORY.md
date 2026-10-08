@@ -1,5 +1,21 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-08 (DGX aarch64 sandbox, `csd/t28`).** [CODE-READ + historical OTA logs]
+> T28 finds that U4 discards sequence evidence after at most four lattice slots and
+> rejects wait 2000 accepted ring writes before retry. The bad t26o9 run had one
+> z=2.418 winner only 0.00334 above its adaptive gate, no adjacent qualified phase,
+> and zero TD queue overflows; successful runs also had slow batches and drops.
+> Load alone is therefore not established as its cause. Default-off
+> `ISAC_CSIRS_DISC_CUMULATIVE=1` retains bounded full-ID vectors over unique row-1
+> occasions; separate `ISAC_CSIRS_DISC_TRS_PRIORITY=1` changes sweep ordering only.
+> [OFFLINE VERIFIED] Low-SNR fixtures improve admission at the unchanged gate and
+> require fresh sequence samples for confirmation. [IMPLEMENTED, NOT VALIDATED LIVE]
+> GPU parity, live false-confirmation rate and timing remain deferred. Feed duty,
+> confirmation thresholds, planner/GPU budget and dedicated decoding are unchanged.
+> Additive CSI-RS struct fields require rebuilding receiver and CUDA modules together.
+> Comparison script, statistical assumptions, complete host test results and exact
+> deferred commands: [T28 report](docs/superpowers/reports/csd/T28.md).
+
 > **Update 2026-10-08 (DGX aarch64 sandbox, `csd/t24b`).** [CODE-READ]
 > T24b restores the pre-T24 CSI-RS flag-off CUDA launch/copy schedule using
 > compile-time specialization, removes redundant nID per-launch waits, bounds

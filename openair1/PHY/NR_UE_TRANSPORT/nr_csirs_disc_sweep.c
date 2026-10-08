@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_sweep_internal.h"
+#include "nr_csirs_disc_evidence_internal.h"
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include <math.h>
 #include "PHY/gold.h"
@@ -188,19 +189,39 @@ int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_h
   if (!out || nr_csirs_disc_sweep_validate(r, hyps, nh, cfg, &c)) return -1;
   float *scores = calloc((size_t)c.id_count*c.delta_max,sizeof(*scores));
   if (!scores) return -1;
+  typedef struct {
+    nr_csirs_disc_evidence_t bank;
+    float scores[NR_CSIRS_EVIDENCE_BANK][NR_CSIRS_EVIDENCE_IDS];
+  } cpu_evidence_t;
+  static _Thread_local cpu_evidence_t *evidence;
+  if (c.evidence_epoch && !evidence) {
+    evidence=calloc(1,sizeof(*evidence));
+    if (!evidence) {free(scores);return -1;}
+  }
+  // Match the GPU scratch-storage invalidation on intervening wide delta calls.
+  if (evidence && c.id_count*c.delta_max>NR_CSIRS_EVIDENCE_IDS)
+    memset(&evidence->bank,0,sizeof(evidence->bank));
   for (int h=0;h<nh;++h) {
     const nr_csirs_disc_hyp_t *hyp=hyps+h;
     nr_csirs_disc_sweep_map_t map;
     if (nr_csirs_disc_sweep_map(hyp,r->n_rb,&map)) {free(scores);return -1;}
+    int bank=c.evidence_epoch?nr_csirs_disc_evidence_begin(&evidence->bank,r,hyp,&c):-1;
+    nr_csirs_disc_evidence_entry_t *entry=bank>=0?&evidence->bank.entry[bank]:NULL;
     int slots=0;
     uint64_t *order=malloc((size_t)r->capacity*sizeof(*order));
     if(!order) {free(map.re);free(scores);return -1;}
     for(int s=0;s<r->capacity;++s)
-      if(r->meta[s].valid && r->meta[s].abs_slot%hyp->period==hyp->offset)
+      if(r->meta[s].valid && r->meta[s].abs_slot%hyp->period==hyp->offset
+          && nr_csirs_disc_evidence_fresh(entry,r->meta[s].abs_slot))
         order[slots++]=((uint64_t)r->meta[s].abs_slot<<32)|(uint32_t)s;
     int first=0;
     if(c.max_slots>0 && slots>c.max_slots) {
       qsort(order,slots,sizeof(*order),slot_order);first=slots-c.max_slots;slots=c.max_slots;
+    }
+    if (entry && !slots) {
+      if (entry->count) nr_csirs_disc_sweep_winner(evidence->scores[bank],&c,h,entry->count,out+h);
+      else out[h]=(nr_csirs_disc_win_t){.hyp_index=h,.scramb_id=c.id_first};
+      free(order);free(map.re);continue;
     }
     int *slot=malloc((size_t)(slots+1)*sizeof(*slot));
     int16_t *rx=malloc((size_t)(slots+1)*r->n_ant*map.n_re*2*sizeof(*rx));
@@ -256,7 +277,22 @@ int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_h
       }
       scores[id*c.delta_max+d]=slots?total/(slots*map.ports*r->n_ant):0;
     }
-    nr_csirs_disc_sweep_winner(scores,&c,h,slots,out+h);
+    int total_slots=slots;
+    if (entry && slots) {
+      int previous=nr_csirs_disc_evidence_previous(entry,slots);
+      total_slots=previous+slots;
+      for (int id=0;id<c.id_count;++id) {
+        scores[id]=(scores[id]*slots+(previous?evidence->scores[bank][id]*previous:0))/total_slots;
+        evidence->scores[bank][id]=scores[id];
+      }
+      for (int k=0;k<slots;++k) {
+        uint32_t abs_slot=order[first+k]>>32;
+        if (abs_slot>entry->last_slot) entry->last_slot=abs_slot;
+      }
+      entry->count=total_slots;
+    }
+    nr_csirs_disc_sweep_winner(scores,&c,h,total_slots,out+h);
+    if (entry) out[h].fresh_slots=slots;
     free(order);free(slot);free(rx);free(inverse);free(ref);free(gold);free(map.re);
   }
   free(scores);return nh;

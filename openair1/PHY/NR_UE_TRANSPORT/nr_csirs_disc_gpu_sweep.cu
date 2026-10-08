@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_sweep_internal.h"
+#include "nr_csirs_disc_evidence_internal.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cstdlib>
@@ -100,13 +101,18 @@ __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int
 }
 
 /* Average occasions before computing the candidate distribution. */
-__global__ void average_scores(const float *scores, int nc, int slots, float *mean)
+template<bool accumulate=false>
+__global__ void average_scores(const float *scores, int nc, int slots, float *mean, float *history=nullptr, int previous=0)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= nc) return;
   double sum = 0;
   for (int s = 0; s < slots; ++s) sum += scores[(size_t)s * nc + i];
-  mean[i] = sum / slots;
+  if (accumulate) {
+    if (previous) sum += (double)history[i]*previous;
+    mean[i] = sum/(slots+previous);
+    history[i] = mean[i];
+  } else mean[i] = sum / slots;
 }
 
 /* One CTA performs the global reduction, with deterministic ascending-ID/delta
@@ -202,6 +208,7 @@ struct Workspace {
   std::vector<nr_csirs_disc_re_t> mapping;
   std::vector<int> slots,indices;
   std::vector<float> mean;
+  nr_csirs_disc_evidence_t evidence={};
   int rb=0,ant=0,capacity=0;
 } workspace;
 static std::mutex workspace_mutex;
@@ -257,15 +264,24 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
   auto &w=workspace;cudaStream_t stream=w.stream;
   const short2 *grid=upload_grid(r);if(!grid) return -1;
   const int nc=c.id_count*c.delta_max;
+  if (nc>1024) memset(&w.evidence,0,sizeof(w.evidence));
   auto &mean=w.mean;auto &dm=w.dm;auto &dx=w.dx;auto &ds=w.ds;
   auto &dz=w.dz;auto &dmean=w.dmean;auto &dw=w.dw;
   for (int h = 0; h < nh; ++h) {
     nr_csirs_disc_sweep_map_t map={};
     if (nr_csirs_disc_sweep_map_into(hyps+h,r->n_rb,&map,w.mapping.data(),w.mapping.size()) || map.words>words_max)
       return -1;
+    int bank=nr_csirs_disc_evidence_begin(&w.evidence,r,hyps+h,&c);
+    auto *entry=bank>=0?&w.evidence.entry[bank]:nullptr;
+    // Reserve the tail of the existing [capacity][160 deltas][1024 IDs]
+    // score allocation. With capacity>=2 it is disjoint from <=4*1024
+    // active scores. Wide delta calls invalidate metadata above before use.
+    float *history=entry?dz.p+dz.capacity-NR_CSIRS_EVIDENCE_BANK*NR_CSIRS_EVIDENCE_IDS
+                              +bank*NR_CSIRS_EVIDENCE_IDS:nullptr;
     auto &slots=w.slots;auto &indices=w.indices;slots.clear();indices.clear();
     for (int i = 0; i < r->capacity; ++i)
-      if (r->meta[i].valid && r->meta[i].abs_slot % hyps[h].period == hyps[h].offset) {
+      if (r->meta[i].valid && r->meta[i].abs_slot % hyps[h].period == hyps[h].offset
+          && nr_csirs_disc_evidence_fresh(entry,r->meta[i].abs_slot)) {
         slots.push_back(r->meta[i].slot);
         indices.push_back(i);
       }
@@ -275,6 +291,12 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
       slots.clear();for(int i:indices) slots.push_back(r->meta[i].slot);
     }
     std::fill(mean.begin(), mean.begin()+nc, 0);
+    if (entry && slots.empty() && entry->count) {
+      reduce_scores<<<1,256,0,stream>>>(history,c,h,entry->count,dw.p);
+      if (cudaGetLastError()!=cudaSuccess || copy(out+h,dw.p,sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess)
+        return -1;
+      continue;
+    }
     if (slots.empty() || !map.n_re) {
       nr_csirs_disc_sweep_winner(mean.data(), &c, h, slots.size(), out + h);
       continue;
@@ -288,13 +310,20 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
     device_map.re = dm.p;
     sweep<<<dim3(nc, slots.size()), 128, 0, stream>>>(device_map, dx.p, ds.p, r->n_ant, r->slots_per_frame, c, dz.p);
     if (cudaGetLastError() != cudaSuccess) return -1;
-    average_scores<<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p);
+    int previous=nr_csirs_disc_evidence_previous(entry,slots.size());
+    if (entry) average_scores<true><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p, history, previous);
+    else average_scores<false><<<(nc + 255) / 256, 256, 0, stream>>>(dz.p, nc, slots.size(), dmean.p);
     if (cudaGetLastError() != cudaSuccess) return -1;
-    reduce_scores<<<1, 256, 0, stream>>>(dmean.p, c, h, slots.size(), dw.p);
+    reduce_scores<<<1, 256, 0, stream>>>(dmean.p, c, h, slots.size()+previous, dw.p);
     if (cudaGetLastError() != cudaSuccess
         || cudaMemcpyAsync(out + h, dw.p, sizeof(*out), cudaMemcpyDeviceToHost, stream) != cudaSuccess
         || complete() != cudaSuccess)
       return -1;
+    if (entry) {
+      for (int i:indices) entry->last_slot=std::max(entry->last_slot,r->meta[i].abs_slot);
+      entry->count=slots.size()+previous;
+      out[h].fresh_slots=slots.size();
+    }
   }
   return nh;
 }
@@ -441,7 +470,9 @@ extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, cons
 {
   try {
     std::lock_guard<std::mutex> guard(workspace_mutex);
-    return run(r, hyps, nh, cfg, out);
+    int rc=run(r, hyps, nh, cfg, out);
+    if (rc<0) memset(&workspace.evidence,0,sizeof(workspace.evidence));
+    return rc;
   } catch (...) {
     return -1; // allocation failures must not escape the C module ABI
   }
@@ -462,7 +493,10 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
     gather<<<1,32,0,w.stream>>>(w.grid.p,(size_t)ant*14*12*rb,w.dm.p,1,w.di.p,1,ant,rb,w.dx.p);
     nr_csirs_disc_sweep_cfg_t cfg={0,1,1,32,1};
     sweep<<<dim3(1,1),128,0,w.stream>>>(map,w.dx.p,w.ds.p,ant,20,cfg,w.dz.p);
-    average_scores<<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p);
+    average_scores<false><<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p);
+    const char *cum=getenv("ISAC_CSIRS_DISC_CUMULATIVE");
+    if(cum && !strcmp(cum,"1"))
+      average_scores<true><<<1,256,0,w.stream>>>(w.dz.p,1,1,w.dmean.p,w.dz.p+w.dz.capacity-1024,0);
     reduce_scores<<<1,256,0,w.stream>>>(w.dmean.p,cfg,0,1,w.dw.p);
     nr_csirs_disc_ring_t ring={};ring.n_ant=ant;ring.n_rb=rb;ring.capacity=1;ring.slots_per_frame=20;
     ring.slot_stride=(size_t)ant*14*24*rb;ring.grid_base=(int16_t *)w.grid.p;ring.meta=w.meta.p;

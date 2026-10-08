@@ -95,6 +95,7 @@ typedef struct {
   float noise_mu;
   float noise_sigma;
   uint32_t noise_count;
+  uint16_t fresh_slots;   /* T28: new unique slots when evidence_epoch is enabled; otherwise zero */
 } nr_csirs_disc_win_t;
 
 /* ---------------- API ---------------- */
@@ -160,6 +161,8 @@ typedef struct {
   int delta_max;                        /* slot-number offsets 0..delta_max-1 tried (1 = none) */
   int block_re;                         /* coherent block length in occupied REs, default 32 */
   int max_slots;                        /* additive: 0 = all; otherwise most recent lattice slots */
+  uint64_t evidence_epoch;              /* T28 opt-in bounded row-1 accumulation; zero preserves legacy semantics.
+                                        * Caller changes epoch on reset. Rebuild core + GPU modules together. */
 } nr_csirs_disc_sweep_cfg_t;
 /* Returns n_hyp on success, 0 while ISAC_CSIRS_DISC is not exactly "1", -1 on error.
  * NULL cfg selects {0,1024,1,32}; explicit cfg values must be positive (id_first may be zero).

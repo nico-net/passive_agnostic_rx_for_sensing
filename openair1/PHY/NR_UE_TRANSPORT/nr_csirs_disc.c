@@ -2,6 +2,7 @@
 #include "nr_csirs_disc.h"
 #include "PHY/defs_nr_common.h"
 #include "nr_csirs_disc_gate_internal.h"
+#include "nr_csirs_disc_evidence_internal.h"
 
 #include "common/utils/LOG/log.h"
 #include "nr_passive_cfg_epoch.h"
@@ -35,6 +36,22 @@ static pthread_mutex_t pipeline_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct {nr_csirs_disc_hyp_t h; uint64_t written; bool accepted;} sweep_cache_t;
 static sweep_cache_t cache[256];
 static int cache_count;
+static uint64_t evidence_epoch=1;
+/* Refinement changes the score population. Retry that exact geometry in place
+ * of ordinary hypotheses; never transfer credit from the coarse extent. */
+static struct {nr_csirs_disc_hyp_t h; uint64_t written;} evidence_retry[16];
+static int evidence_retries;
+static bool feature(const char *name)
+{
+  const char *s=getenv(name); return s && !strcmp(s,"1");
+}
+static void retry_refined(const nr_csirs_disc_hyp_t *h, uint64_t written)
+{
+  for (int i=0;i<evidence_retries;++i)
+    if (nr_csirs_disc_evidence_key(h,&evidence_retry[i].h)) return;
+  int at=evidence_retries<16?evidence_retries++:(int)(written%16);
+  evidence_retry[at].h=*h; evidence_retry[at].written=written;
+}
 static struct {nr_csirs_disc_hyp_t h;uint16_t id;} qualified[256];
 static int qualified_count;
 static const int16_t *cache_grid;
@@ -100,7 +117,8 @@ static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 {
   (void)snapshot;
   pthread_mutex_lock(&pipeline_lock);
-  cache_count=qualified_count=0;cache_grid=NULL;cache_written=0;
+  cache_count=qualified_count=evidence_retries=0;cache_grid=NULL;cache_written=0;
+  ++evidence_epoch;
   nr_csirs_disc_detect_reset();
   if (nr_csirs_blind_rt_discovery_reset)
     nr_csirs_blind_rt_discovery_reset();
@@ -146,7 +164,11 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     return;
   pthread_mutex_lock(&pipeline_lock);
   if(!nr_csirs_disc_ring_snapshot_current(ring)) {pthread_mutex_unlock(&pipeline_lock);return;}
-  if(cache_grid!=ring->grid_base || ring->written<cache_written) cache_count=qualified_count=0;
+  if(cache_grid!=ring->grid_base || ring->written<cache_written) {
+    cache_count=qualified_count=evidence_retries=0; ++evidence_epoch;
+  }
+  const bool cumulative=feature("ISAC_CSIRS_DISC_CUMULATIVE");
+  const bool trs_priority=feature("ISAC_CSIRS_DISC_TRS_PRIORITY");
   cache_grid=ring->grid_base;cache_written=ring->written;
   const uint64_t begin = now_us(), cpu_begin=cpu_us();
   nr_csirs_disc_fp_t fps[DISC_VIEWS];
@@ -231,17 +253,37 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   int budget = sweep_limit();
   const int n_all = nr_csirs_disc_hypotheses(fps, n_fp_hyp, all_hyps, NR_CSIRS_DISC_MAX_HYP);
   int n_hyp = 0;
-  for (int i = 0; i < n_all && n_hyp < budget; ++i)
-    if (!cached(&all_hyps[i],ring->written)
-        && (!nr_csirs_blind_rt_discovery_confirmed || !nr_csirs_blind_rt_discovery_confirmed(&all_hyps[i])))
-      hyps[n_hyp++] = all_hyps[i];
+  if (cumulative) for (int i=0;i<evidence_retries && n_hyp<budget/4;++i) {
+    nr_csirs_disc_hyp_t h=evidence_retry[i].h;
+    if (ring->written-evidence_retry[i].written>10000 || cached(&h,ring->written)) continue;
+    // Keep only currently observed persistent footprints; no blind stale probes.
+    for (int j=0;j<n_all;++j) if (same_seed(&h,&all_hyps[j])) {
+      h.fp_index=all_hyps[j].fp_index;
+      if (!nr_csirs_blind_rt_discovery_confirmed || !nr_csirs_blind_rt_discovery_confirmed(&h))
+        hyps[n_hyp++]=h;
+      break;
+    }
+  }
+  // Priority changes ordering only, not the feed, sweep cap, planner or GPU budget.
+  for (int pass=0;pass<(trs_priority?2:1);++pass)
+    for (int i=0;i<n_all && n_hyp<budget;++i) {
+      const bool trs=all_hyps[i].row==1 && all_hyps[i].period>=80;
+      if (trs_priority && trs!=(pass==0)) continue;
+      bool duplicate=false;
+      if (cumulative) for (int j=0;j<n_hyp;++j)
+        duplicate |= nr_csirs_disc_evidence_key(&hyps[j],&all_hyps[i]);
+      if (!duplicate && !cached(&all_hyps[i],ring->written)
+          && (!nr_csirs_blind_rt_discovery_confirmed || !nr_csirs_blind_rt_discovery_confirmed(&all_hyps[i])))
+        hyps[n_hyp++]=all_hyps[i];
+    }
   LOG_I(PHY, "SENSING: CSIRS_DISC HYPOTHESES n=%d sweep=%d\n", n_all, n_hyp);
 
   const uint64_t built = now_us(), cpu_built=cpu_us();
   int n_win = 0;
   bool gpu = false;
   const nr_csirs_disc_sweep_cfg_t sweep_cfg = {
-      .id_first = 0, .id_count = 1024, .delta_max = delta_limit(ring), .block_re = 32, .max_slots = 4};
+      .id_first = 0, .id_count = 1024, .delta_max = delta_limit(ring), .block_re = 32, .max_slots = 4,
+      .evidence_epoch = cumulative ? evidence_epoch : 0};
   if (n_hyp > 0 && ops && ops->sweep) {
     n_win = ops->sweep(ring, hyps, n_hyp, &sweep_cfg, wins);
     gpu = n_win >= 0;
@@ -299,6 +341,10 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
               w->noise_sigma,
               h->period,
               h->offset);
+      if (cumulative && h->row==1 && getenv("ISAC_CSIRS_DISC_DIAG"))
+        LOG_I(PHY,"SENSING: CSIRS_DISC EVIDENCE row=%u fd=%u l0=%u rb=%u:%u P/O=%u/%u slots=%u fresh=%u epoch=%llu\n",
+              h->row,h->freq_domain,h->symb_l0,h->rb_start,h->n_rb,h->period,h->offset,
+              w->n_slots,w->fresh_slots,(unsigned long long)evidence_epoch);
       const int lead = leader[h->fp_index];
       if (lead < 0 || w->z > wins[lead].z)
         leader[h->fp_index] = i;
@@ -324,6 +370,12 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
         continue;
       const nr_csirs_disc_win_t *w = &wins[i];
       const nr_csirs_disc_hyp_t *h = &hyps[w->hyp_index];
+      const bool accumulated=cumulative && h->row==1 && sweep_cfg.delta_max==1;
+      // Re-verification may read a cached vector, but admission needs new IQ.
+      if (accumulated && !w->fresh_slots) {
+        cache_result(h,ring->written,false);
+        continue;
+      }
       const bool accepted = !coarse_only[w->hyp_index] && nr_csirs_disc_gate_accept(w, &gate);
       if (accepted) {
         int replace = -1;
@@ -388,7 +440,11 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
               verified.noise_mu, verified.noise_sigma, refined.period, refined.offset,
               (unsigned)(nr_csirs_disc_gate_accept(&verified, &gate) && verified.scramb_id == w->scramb_id));
       if(checked!=1
-          || !nr_csirs_disc_gate_accept(&verified, &gate) || verified.scramb_id!=w->scramb_id) continue;
+          || !nr_csirs_disc_gate_accept(&verified, &gate) || verified.scramb_id!=w->scramb_id) {
+        if (cumulative && checked==1 && refined.row==1 && sweep_cfg.delta_max==1)
+          retry_refined(&refined,ring->written);
+        continue;
+      }
       w=&verified;
       const nr_csirs_disc_hyp_t *h = &refined;
       if (nr_csirs_blind_rt_add_discovered && nr_csirs_blind_rt_add_discovered(h, w) >= 0) {
