@@ -2473,6 +2473,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   }
 
   // ---- Channel estimation on the DM-RS symbols. ----
+  {
+    extern __thread uint32_t nr_dl_chest_delay_epoch; /* ISAC_CHEST_DELAY_SHARE: one delay estimate per decode */
+    if (++nr_dl_chest_delay_epoch == 0) nr_dl_chest_delay_epoch = 1;
+  }
   const uint64_t pdt_che = pdtim_on ? pdtim_now() : 0;
   const uint32_t pdsch_est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16;
   /* ---- PERSISTENT SCRATCH, NOT PER-GRANT allocation --------------------------------------------
@@ -3656,7 +3660,9 @@ gpu_llr_ready:;
     static int s_evmg = -1;
     if (s_evmg < 0) s_evmg = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE")) ? 1 : 0; /* the SNR gate needs the measurement */
     memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
-    nr_pdsch_evm_acc.armed = s_evmg && probe_last_sym < 0 && !gpu_llr && !gw_ready;
+    static int s_evmp = -1; /* ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too */
+    if (s_evmp < 0) s_evmp = getenv("ISAC_PDSCH_EVM_PROBES") ? 1 : 0;
+    nr_pdsch_evm_acc.armed = s_evmg && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
   }
   for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)

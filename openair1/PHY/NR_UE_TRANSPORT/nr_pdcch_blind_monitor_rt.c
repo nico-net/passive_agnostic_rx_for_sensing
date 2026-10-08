@@ -2322,7 +2322,7 @@ static void *janon_worker(void *arg)
 static double joint_anon_score(const int16_t *llr, int E);
 static void janon_start(void);
 /* Scan path: copy the energetic candidates (cheap: <= TOPK x L x 216 bytes); never blocks, drops when full. */
-static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, uint16_t rmin, uint16_t rmax,
+static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int slots_per_frame, uint16_t rmin, uint16_t rmax,
                          const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen)
 {
   static int topk = -1;
@@ -2351,6 +2351,28 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, uint1
   }
   if (m == 0)
     return;
+  { /* ISAC_PDCCH_JOINT_ANON_RATE=<items per slot> (T26c): admit at most this many items per slot of SIGNAL time
+     * (token bucket, burst 8); the rest are SKIPPED (counted), not queued-then-dropped. Live td_4_1: 770 items/s
+     * offered, worker served ~120/s, 84 % dropped. */
+    static double rate = -1.0, tokens = 8.0;
+    static long last = -1;
+    static _Atomic uint64_t s_skip;
+    if (rate < 0.0) rate = getenv("ISAC_PDCCH_JOINT_ANON_RATE") ? atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE")) : 0.0;
+    if (rate > 0.0 && t_pass_kind == PASS_BANK) { /* a discovered CORESET's dwell (verification) is never rate-skipped */
+      const long now = (long)frame * slots_per_frame + slot; /* resyncs on the 1024-frame wrap */
+      if (last >= 0 && now > last) tokens += rate * (double)(now - last);
+      last = now;
+      if (tokens > 8.0) tokens = 8.0;
+      if (tokens < 1.0) {
+        const uint64_t k = atomic_fetch_add_explicit(&s_skip, 1, memory_order_relaxed) + 1;
+        if ((k % 20000) == 1)
+          LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC rate-skipped %llu items (ISAC_PDCCH_JOINT_ANON_RATE=%.2f/slot)\n",
+                (unsigned long long)k, rate);
+        return;
+      }
+      tokens -= 1.0;
+    }
+  }
   atomic_fetch_add_explicit(&g_janon_sub, 1, memory_order_relaxed);
   pthread_mutex_lock(&g_janon_mu);
   if (g_janon_n >= g_janon_cap) {
@@ -5409,7 +5431,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             const int f = atomic_load(&g_cell_lens[i]);
             if (f > 0) jl[njl++] = f;
           }
-          janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx,
+          janon_submit(dl_geom, cfg->coreset_pdcch_dmrs_scrambling_id, proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame,
                        sweep_ctx.rnti_min, sweep_ctx.rnti_max, disc_cand, disc_n_cand, jl, njl);
           n_jhits = janon_take(dl_geom, jhits, JANON_MAX_HITS);
           g_sweep_cache.valid = 0;
@@ -7995,18 +8017,60 @@ constdiag_done:;
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
       const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
-      uint16_t sv_alt[8];
+      uint16_t sv_alt[16];
       int sv_nalt = 0;
-      if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
+      int sv_did = -1;
+      if (cfg->discovered_coreset) { /* T26c: this CORESET's blind-decided PDSCH DM-RS id first, when it differs from the cell's */
+        sv_did = nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id);
+        if (sv_did >= 0 && sv_did != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)sv_did;
+      }
+      const bool sv_decided = sv_did >= 0; /* a decided DM-RS id is the hypothesis (default stays as fallback) */
+      if (!sv_decided && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
         sv_alt[sv_nalt++] = (uint16_t)cfg->coreset_pdcch_dmrs_scrambling_id;
-      for (int b = 0; b < nr_pdcch_coreset_bank_count() && sv_nalt < 8; b++) { /* the other run-time CORESET nIDs */
+      for (int b = 0; !sv_decided && b < nr_pdcch_coreset_bank_count() && sv_nalt < 8; b++) { /* the other run-time CORESET nIDs */
         const nr_pdcch_blind_monitor_cfg_t *bc = nr_pdcch_coreset_bank_cfg(b);
         if (!bc || !bc->discovered_coreset || bc->coreset_pdcch_dmrs_scrambling_id == fp->Nid_cell) continue;
         bool dup = false;
         for (int q = 0; q < sv_nalt && !dup; q++) dup = sv_alt[q] == bc->coreset_pdcch_dmrs_scrambling_id;
         if (!dup) sv_alt[sv_nalt++] = (uint16_t)bc->coreset_pdcch_dmrs_scrambling_id;
       }
-      nr_pdsch_solver_set_alt_scr(sv_alt, sv_nalt);
+      { /* ISAC_PDSCH_SOLVER_SCR_CSIRS=1 (T26c): scrambling ids of the run-time discovered NZP CSI-RS (a TRS/CSI-RS
+         * scramblingID is typically the transmitting cell's PCI -- neighbour-cell candidates), as seen so far */
+        static int s_cs = -1;
+        static uint16_t s_ids[8];
+        static int s_n;
+        if (s_cs < 0) s_cs = getenv("ISAC_PDSCH_SOLVER_SCR_CSIRS") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR_CSIRS")) ? 1 : 0;
+        for (int k = 0; s_cs && k < sv_nrm; k++) {
+          if (sv_rm[k].csi_type == 2 || sv_rm[k].scramb_id == fp->Nid_cell) continue;
+          bool dup = false;
+          for (int q = 0; q < s_n && !dup; q++) dup = s_ids[q] == sv_rm[k].scramb_id;
+          if (!dup && s_n < 8) s_ids[s_n++] = sv_rm[k].scramb_id;
+        }
+        for (int q = 0; s_cs && !sv_decided && q < s_n && sv_nalt < 16; q++) {
+          bool dup = false;
+          for (int z = 0; z < sv_nalt && !dup; z++) dup = sv_alt[z] == s_ids[q];
+          if (!dup) sv_alt[sv_nalt++] = s_ids[q];
+        }
+      }
+      {
+        static int s_last_key[8] = {-2, -2, -2, -2, -2, -2, -2, -2}, s_last_cnt[8];
+        const int lk = cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1;
+        int slot_i = -1;
+        for (int q = 0; q < 8 && slot_i < 0; q++) if (s_last_key[q] == lk) slot_i = q;
+        for (int q = 0; q < 8 && slot_i < 0; q++) if (s_last_key[q] == -2) { slot_i = q; s_last_key[q] = lk; s_last_cnt[q] = -1; }
+        int s_dummy = -1;
+        int *s_last_n_p = slot_i >= 0 ? &s_last_cnt[slot_i] : &s_dummy;
+        int s_last_n = *s_last_n_p;
+        if (sv_nalt != s_last_n) {
+          char b[160];
+          int u = 0;
+          for (int q = 0; q < sv_nalt && u < (int)sizeof(b) - 8; q++) u += snprintf(b + u, sizeof(b) - u, " %u", sv_alt[q]);
+          LOG_A(PHY, "SENSING: PDSCH_SOLVER scrambling candidates (CORESET nid %d): default%s\n",
+                cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, b);
+          *s_last_n_p = sv_nalt;
+        }
+      }
+      nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt);
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
@@ -8090,6 +8154,7 @@ constdiag_done:;
         job.dci_abs_slot = abs_slot;
         job.layout_probe = var[v].probe;
         job.solver_token = var[v].token;
+        job.coreset_key = cfg->discovered_coreset ? (int32_t)cfg->coreset_pdcch_dmrs_scrambling_id : -1;
         decodes_this_occasion++;
         if (!nr_pdsch_passive_queue_enqueue(&job))
           nr_pdsch_solver_feedback(var[v].token, false, false);
@@ -8908,4 +8973,38 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
   }
   LOG_I(PHY, "SENSING: DL_GPU warm-up complete consumers=%d depth=%d gw_buffers=%zu llr_bytes=%zu (no late CUDA growth)\n",
         consumers, depth, want_gw ? (size_t)consumers * depth * NR_TD_GW_MAX_SIG : 0, llr_bytes);
+}
+
+/* ISAC_SEGV_BT=1 (T26c, diagnostic): print the faulting thread's backtrace on SIGSEGV/SIGBUS (replay EOF-exit crash
+ * hunt; no core is kept on this host). Async-signal-safe enough for a dying process: backtrace() is primed at install. */
+#include <execinfo.h>
+#include <signal.h>
+static void isac_segv_bt(int sig, siginfo_t *si, void *uc)
+{
+  (void)uc;
+  void *fr[48];
+  char hdr[160];
+  char name[16] = {0};
+  pthread_getname_np(pthread_self(), name, sizeof(name));
+  const int n = snprintf(hdr, sizeof(hdr), "ISAC_SEGV_BT signal %d addr %p thread %s\n", sig, si ? si->si_addr : NULL, name);
+  if (n > 0) { ssize_t w = write(2, hdr, (size_t)n); (void)w; }
+  const int k = backtrace(fr, 48);
+  backtrace_symbols_fd(fr, k, 2);
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+__attribute__((constructor)) static void isac_segv_bt_install(void)
+{
+  if (!getenv("ISAC_SEGV_BT")) return;
+  void *fr[2];
+  (void)backtrace(fr, 2); /* load libgcc before any fault */
+  static char alt[65536];
+  stack_t ss = {.ss_sp = alt, .ss_size = sizeof(alt), .ss_flags = 0};
+  sigaltstack(&ss, NULL);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_sigaction = isac_segv_bt;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigaction(SIGSEGV, &sa, NULL);
+  sigaction(SIGBUS, &sa, NULL);
 }

@@ -39,6 +39,43 @@ __thread int nr_dl_chest_only_ant = -1;
  * thread; the per-antenna pool task inherits it through the task struct. Never set on the RT thread. */
 static __thread c16_t t_dft_est[4096];
 static __thread int nr_dl_chest_cur_ant = 0; // set by the per-antenna task before the interp call
+/* ISAC_CHEST_DELAY_SHARE=1 (T26c): within ONE passive decode (nr_dl_chest_delay_epoch, bumped per decode), the delay
+ * estimate of the first estimated (antenna, DM-RS symbol) is reused by the others instead of a 4096-point IDFT each
+ * (perf: nr_est_delay/idft4096 ~60 % of the PDSCH channel estimation). The delay only de-rotates the LS estimate for
+ * the 2-subcarrier pilot interpolation, where a few samples of error are negligible (2 samples -> 0.006 rad per gap). */
+__thread uint32_t nr_dl_chest_delay_epoch;
+extern __thread int nr_dl_chest_diag_request;
+static __thread uint32_t t_delay_epoch;
+static __thread delay_t t_delay_val;
+static __thread int t_delay_have;
+static __thread int t_delay_reused; /* this call reused the shared delay: ch_estimates_time was NOT computed */
+static int chest_delay_share(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_CHEST_DELAY_SHARE") && atoi(getenv("ISAC_CHEST_DELAY_SHARE"))
+                   && !getenv("ISAC_CHEST_DFT_WIN") ? 1 : 0;
+  return en;
+}
+static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_est, c16_t *ch_estimates_time, delay_t *delay)
+{
+  /* the BRDELAY/PDP diagnostic (requested on every passive decode) is computed only where the IDFT still runs */
+  const bool share = chest_delay_share() && nr_dl_chest_delay_epoch != 0;
+  t_delay_reused = 0;
+  if (share && t_delay_have && t_delay_epoch == nr_dl_chest_delay_epoch) {
+    *delay = t_delay_val;
+    t_delay_reused = 1;
+    return;
+  }
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  else
+    nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  if (share) {
+    t_delay_val = *delay;
+    t_delay_epoch = nr_dl_chest_delay_epoch;
+    t_delay_have = 1;
+  }
+}
 static __thread int t_dft_valid = 0;
 __thread int nr_dl_chest_diag_request = 0;
 __thread int nr_dl_chest_pdp_compact_pct = -1;
@@ -946,11 +983,8 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     last_processed_rb = block_end + 1;
   }
   c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
-    nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
-  else
-    nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
-  if (nr_dl_chest_diag_request) {
+  chest_est_delay(frame_parms, dl_ls_est, ch_estimates_time, delay);
+  if (nr_dl_chest_diag_request && !t_delay_reused) {
     /* PDP shape: % of IDFT energy within +/-8 samples of the peak, and the strongest secondary peak
      * outside that window (signed position, dB below the main peak). Shape is scale-free. */
     const int N = frame_parms->ofdm_symbol_size;
@@ -1234,10 +1268,7 @@ void NFAPI_NR_DMRS_TYPE2_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
   }
 
   c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
-    nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
-  else
-    nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  chest_est_delay(frame_parms, dl_ls_est, ch_estimates_time, delay);
   int delay_idx = get_delay_idx(delay->est_delay, MAX_DELAY_COMP);
   c16_t *dl_delay_table = frame_parms->delay_table[delay_idx];
   // kept the same as before but unclear why  would it be nb_rb_pdsch / 2 and not / 3

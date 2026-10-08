@@ -373,6 +373,41 @@ static _Atomic uint64_t g_crc_ok        = 0;
 #define NR_DL_DMRS_NSCID 2
 /* Two windows per nSCID, stage 1 always on, stage 2 throttled and capped: nr_dmrs_id_2stage_t
  * (final review I5; measured 170360 us per stage-2 accumulate vs ~2 ms for stage 1). */
+/* T26c ISAC_PDSCH_DMRS_ID_PER_CORESET: one blind DM-RS identity estimator per discovered CORESET population */
+typedef struct { int key; int decided; bool used; pthread_mutex_t mu; nr_dmrs_id_2stage_t est; } coreset_dmrs_t;
+static coreset_dmrs_t g_cs_dmrs[8];
+static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool per_coreset_dmrs_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET") && atoi(getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET")) ? 1 : 0;
+  return en == 1;
+}
+static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
+{
+  pthread_mutex_lock(&g_cs_dmrs_mu);
+  coreset_dmrs_t *r = NULL;
+  for (int i = 0; i < 8 && !r; i++)
+    if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key) r = &g_cs_dmrs[i];
+  for (int i = 0; i < 8 && !r; i++)
+    if (!g_cs_dmrs[i].used) {
+      r = &g_cs_dmrs[i];
+      r->used = true; r->key = key; r->decided = -1;
+      pthread_mutex_init(&r->mu, NULL);
+      char label[32];
+      snprintf(label, sizeof(label), "PDSCH-cs%d", key);
+      nr_dmrs_id_2stage_init(&r->est, strdup(label), pci);
+      r->est.s1_grants = UINT32_MAX; /* stage 1 (0..1023: every PCI) only -- a stage-2 evaluation stalls a consumer ~170 ms */
+    }
+  pthread_mutex_unlock(&g_cs_dmrs_mu);
+  return r;
+}
+int nr_pdsch_passive_coreset_dmrs_id(int key)
+{
+  for (int i = 0; i < 8; i++)
+    if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key) return __atomic_load_n(&g_cs_dmrs[i].decided, __ATOMIC_ACQUIRE);
+  return -1;
+}
 static nr_dmrs_id_2stage_t g_dl_dmrs_id[NR_DL_DMRS_NSCID];
 static bool g_dl_dmrs_id_init[NR_DL_DMRS_NSCID];
 static pthread_mutex_t g_dl_dmrs_id_lock[NR_DL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
@@ -950,7 +985,25 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       LOG_A(PHY, "SENSING: passive PDSCH consumer %d runs FEP/chest/LDPC tasks inline (ISAC_PDSCH_INLINE_POOL)\n", idx);
   }
 
+  /* ISAC_PDSCHQ_SIGNAL_TIME=1 (T26c, REPLAY ONLY): an offline replay runs at a fraction of real time, so the decode
+   * pool looks ~1/f times faster than live. After each dequeued group the consumer waits until the producer has
+   * advanced by the group's own wall time in SIGNAL slots -- the pool then serves the queue at its live rate in signal
+   * time, and queue fill / staleness become representative of live load. Never enable on air. */
+  static int s_sigt = -1;
+  if (s_sigt < 0) s_sigt = getenv("ISAC_PDSCHQ_SIGNAL_TIME") && atoi(getenv("ISAC_PDSCHQ_SIGNAL_TIME")) ? 1 : 0;
+  uint64_t sigt_t0 = 0;
+  long sigt_p0 = 0;
+  const double slot_ns = 10e6 / (double)slots_per_frame;
   while (1) {
+    if (s_sigt && sigt_t0) {
+      const long need = sigt_p0 + (long)((double)(now_ns() - sigt_t0) / slot_ns + 0.5);
+      for (int w = 0; w < 200000 && atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) < need
+                      && !atomic_load_explicit(&g_stop, memory_order_relaxed); w++) {
+        struct timespec ts = {0, 50000};
+        nanosleep(&ts, NULL);
+      }
+      sigt_t0 = 0;
+    }
     nr_pdsch_passive_job_t job;
     nr_pdsch_passive_set_owned_iq(NULL, -1);
     const bool owned = nr_csirs_disc_enabled();
@@ -985,6 +1038,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       g_count--;
     }
     pthread_mutex_unlock(&g_lock);
+    if (s_sigt) {
+      sigt_t0 = now_ns();
+      sigt_p0 = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+    }
     if (owned) {
       const uint64_t taken = now_ns();
       latency_note(NR_PDSCH_LAT_QUEUE, enqueue_ns, taken);
@@ -1501,16 +1558,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
         : (probe_outcome ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
     nr_pdsch_passive_probe_mode(false);
-    if (dec.evm_valid && !job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+    if (dec.evm_valid && (!job.layout_probe || getenv("ISAC_PDSCH_EVM_PROBES"))
+        && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
-                 "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f\n",
+                 "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
             dec.br_snr_db[3], dec.evm_nbrx, job.solver_token,
-            dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0);
-      if (dec.evm_pct > 0.f) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
+            dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0, (int)job.layout_probe);
+      if (dec.evm_pct > 0.f && !job.layout_probe) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
     }
     if (job.solver_token) {
       const bool sv_credit = owned || nr_passive_credit_allowed(
@@ -1683,6 +1741,25 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * estimator's signature change (nr_pdcch_gap_dmrs2 fix), and left inconsistent with type 1
          * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
          * this comment for the full reasoning. */
+        if (credit_ok && job.solver_token && job.coreset_key >= 0 && pr_nrb > 0 && pdu->dlDmrsSymbPos && per_coreset_dmrs_on()) {
+          /* T26c: the same blind DM-RS identity estimator, per discovered CORESET population */
+          coreset_dmrs_t *cd = coreset_dmrs_slot(job.coreset_key, ue->frame_parms.Nid_cell);
+          if (cd && __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) < 0 && pthread_mutex_trylock(&cd->mu) == 0) {
+            const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+            const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+            const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
+            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
+            if (nr_dmrs_id_2stage_accumulate(&cd->est, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                             start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
+                                             job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType)) {
+              const int id = nr_dmrs_id_2stage_decided(&cd->est);
+              __atomic_store_n(&cd->decided, id, __ATOMIC_RELEASE);
+              LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d PDSCH DM-RS id DECIDED %d (cell %d)\n", job.coreset_key, id,
+                    fp->Nid_cell);
+            }
+            pthread_mutex_unlock(&cd->mu);
+          }
+        }
         const int dl_ns = pdu->nscid & 1;
         if (credit_ok && job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
@@ -1985,8 +2062,18 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * sync, which is the entire problem this module exists to fix. Also below PREEMPT_RT's threaded
      * IRQs (FIFO 50): at an equal 50, consumers pinned to the NIC IRQ cores (6..11 vs IRQs on 8-13 on
      * the X410 host) held NAPI off until they blocked. One core each from base_core; <0 unpinned. */
-    threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name,
-                 nr_core_plan_cpu(NR_CP_PDSCH, i, (affinity >= 0) ? (affinity + i) : -1), 40);
+    int core = nr_core_plan_cpu(NR_CP_PDSCH, i, (affinity >= 0) ? (affinity + i) : -1);
+    { /* ISAC_PDSCH_CORES="6,7,8,9,15,16" (T26c): explicit, non-contiguous consumer cores (GB10 big cores are 5-9,15-19) */
+      const char *cl = getenv("ISAC_PDSCH_CORES");
+      for (int k = 0; cl && *cl; k++) {
+        char *end;
+        const long c = strtol(cl, &end, 10);
+        if (end == cl) break;
+        if (k == i) { core = (int)c; break; }
+        cl = (*end == ',') ? end + 1 : end;
+      }
+    }
+    threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
