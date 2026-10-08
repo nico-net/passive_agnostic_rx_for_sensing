@@ -1390,9 +1390,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         if (st2 != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
         const bool cpu_ok = job.layout_probe ? nr_pdsch_passive_probe_outcome() : st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
         const int16_t *lc = NULL;
-        const uint32_t G = st2 == NR_PDSCH_PASSIVE_DECODE_ERROR ? 0 : nr_pdsch_passive_last_llr(&lc);
+        uint32_t G = st2 == NR_PDSCH_PASSIVE_DECODE_ERROR ? 0 : nr_pdsch_passive_last_llr(&lc);
+        if (G > (1u << 22) || lc == NULL) G = 0; /* a bogus blind grant can leave an out-of-range G (OTA SIGSEGV 2026-10-08) */
         const uint32_t n = gpu_job->n_llr < G ? gpu_job->n_llr : G;
-        int16_t *lg = malloc((size_t)G * sizeof(int16_t));
+        int16_t *lg = G ? malloc((size_t)G * sizeof(int16_t)) : NULL;
         double sa = NAN, mc = 0, mg = 0, dmax = 0, sab[8] = {0}; /* sign agreement per bit position of the RE */
         if (lc && lg && n && gpu_job->Qm && gpu_job->Nl) {
           memcpy(lg, t_gpu_llr + gpu_job->llr_offset, (size_t)n * sizeof(int16_t));
