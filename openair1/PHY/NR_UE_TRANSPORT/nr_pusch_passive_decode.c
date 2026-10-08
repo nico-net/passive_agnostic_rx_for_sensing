@@ -21,6 +21,8 @@
 
 #include "nr_pusch_passive_decode.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
+#include "nr_pusch_ul_disc.h"
+#include "nr_pdsch_passive_queue.h"
 #include "nr_pusch_data_aided.h"
 #include "nr_pdsch_prb_set.h"
 #include "nr_passive_obs.h" // per-grant observation API (Task A3)
@@ -643,6 +645,28 @@ static uint32_t passive_ul_slow_time_idx(const NR_DL_FRAME_PARMS *fp,
   return (uint32_t)(prod - lag);
 }
 
+static bool passive_ul_apply_dmrs_disc(nr_pdcch_blind_ul_result_t *g,
+                                       const nr_pusch_ul_disc_result_t *result)
+{
+  if (!result->accepted) return false;
+  uint8_t cdm=0;
+  uint16_t ports=0;
+  int front_load=0;
+  const long type2=1;
+  if (decode_dci_antenna_ports_val(1, result->dmrs_type ? &type2 : NULL,
+                                   NR_PUSCH_Config__transformPrecoder_disabled,
+                                   g->antenna_ports_field, &cdm, &ports, &front_load) != 0 ||
+      front_load != result->front_load || ports == 0) return false;
+  if (result->mapping_type >= 0) g->mapping_type=result->mapping_type;
+  g->ul_dmrs_symb_pos=result->mask;
+  g->dmrs_config_type=result->dmrs_type;
+  g->nscid=result->nscid;
+  g->ul_dmrs_scrambling_id=result->id;
+  g->n_dmrs_cdm_groups=cdm;
+  g->dmrs_ports=ports;
+  return true;
+}
+
 /* ---- Gap item 2 (PUSCH TDRA type B): the DM-RS ENERGY oracle's live half ---------------------
  * Accumulates a per-symbol energy profile from what THIS grant's own FEP already computed --
  * [g->start_symbol, g->start_symbol+g->num_symbols), whatever TDA row is currently being guessed --
@@ -715,6 +739,13 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (ue == NULL || g == NULL || !g->plausible) {
     out->reject_reason = "no plausible grant";
     return false;
+  }
+  const bool timing_disc = getenv("ISAC_UL_TIMING_DISC") && !strcmp(getenv("ISAC_UL_TIMING_DISC"), "1");
+  const bool dmrs_disc = getenv("ISAC_UL_DMRS_DISC") && !strcmp(getenv("ISAC_UL_DMRS_DISC"), "1");
+  nr_pdcch_blind_ul_result_t discovery_grant;
+  if (timing_disc || dmrs_disc) {
+    discovery_grant = *g;
+    g = &discovery_grant;
   }
   uint16_t prb[NR_PRB_SET_MAX];
   bool gapped = false;
@@ -802,7 +833,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * two functions take an identically-named argument with inverted meaning. This path used to call
    * nr_slot_fep() and passed the advance straight through, so it read 1600 samples LATE where it
    * needed 1600 EARLY. */
-  const int32_t ul_sample_offset = ta_offset_samples;
+  int32_t ul_sample_offset = ta_offset_samples;
 
   const int slot_off = (slot % RU_RX_SLOT_DEPTH) * sps * symsz;
   /* ---- FEP the grant's symbols, EXACTLY as the gNB does -----------------------------------------
@@ -816,29 +847,122 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * an intermediate layout would need.
    *
    * Factored out because it is run TWICE per grant -- see the delay refinement below. */
-#define PASSIVE_UL_FEP(off_)                                                                       \
+#define PASSIVE_UL_FEP_SYMBOL(off_, sym_)                                                          \
   do {                                                                                             \
-    const double fo_hz_ = fo_hz;                                                                   \
-    const int s0_ = g->start_symbol;                                                               \
-    const int s1_ = g->start_symbol + g->num_symbols;                                              \
     for (int a_ = 0; a_ < nant; a_++) {                                                            \
       const c16_t *rx_ = (const c16_t *)ue->common_vars.rxdata[a_];                                \
-      for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) {                                     \
-        c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + sym_ * symsz];                      \
-        if (fo_hz_ != 0.0) {                                                                       \
-          nr_pusch_passive_fep_symbol(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_), fo_hz_);\
-        } else {                                                                                   \
-          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));       \
-        }                                                                                          \
-        apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,                  \
-                                    fp->timeshift_symbol_rotation, fp->first_carrier_offset,       \
-                                    dst_, fp->symbol_rotation[link_type_ul], fp->N_RB_UL,          \
-                                    slot, sym_);                                                   \
-      }                                                                                            \
+      c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + (sym_) * symsz];                      \
+      if (fo_hz != 0.0)                                                                            \
+        nr_pusch_passive_fep_symbol(fp, rx_, dst_, (unsigned char)(sym_), (unsigned char)slot, (off_), fo_hz); \
+      else nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)(sym_), (unsigned char)slot, (off_));    \
+      apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,                     \
+                                  fp->timeshift_symbol_rotation, fp->first_carrier_offset,          \
+                                  dst_, fp->symbol_rotation[link_type_ul], fp->N_RB_UL, slot, (sym_)); \
     }                                                                                              \
   } while (0)
+#define PASSIVE_UL_FEP(off_)                                                                       \
+  do {                                                                                             \
+    const int s0_ = g->start_symbol;                                                               \
+    const int s1_ = g->start_symbol + g->num_symbols;                                              \
+    for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) PASSIVE_UL_FEP_SYMBOL((off_), sym_);   \
+  } while (0)
 
-  PASSIVE_UL_FEP(ul_sample_offset);
+  if ((timing_disc || dmrs_disc) && !gapped && !fdra_unresolved && !g->transform_precoding &&
+      g->num_rb >= 6 && nant <= 4) {
+    nr_pusch_ul_disc_epoch(nr_cfg_epoch_dedicated_current());
+    const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+    const uint8_t type_a = cfg && cfg->dmrs_typeA_position <= 1 ? cfg->dmrs_typeA_position : 0;
+    const nr_pusch_ul_disc_result_t cached = dmrs_disc ? nr_pusch_ul_disc_cached(g->rnti) :
+        (nr_pusch_ul_disc_result_t){.id=-1};
+    int timing_mask = g->ul_dmrs_symb_pos;
+    int timing_type = g->dmrs_config_type;
+    int timing_nscid = g->nscid;
+    if (cached.accepted) {
+      timing_type = cached.dmrs_type;
+      timing_nscid = cached.nscid;
+      if (cached.mapping_type >= 0 && cached.add_pos >= 0) {
+        const int mask = nr_pdcch_blind_ul_dmrs_mask(g->num_symbols, g->start_symbol,
+            cached.mapping_type, cached.add_pos, cached.front_load, type_a);
+        if (mask > 0) timing_mask = mask;
+      }
+    }
+    nr_pusch_ul_disc_grid_t grid = {.fft=symsz, .n_rb_carrier=fp->N_RB_UL,
+      .first_carrier=fp->first_carrier_offset, .rb_start=g->bwp_start+g->start_rb,
+      .rb_count=g->num_rb, .symbols_per_slot=sps, .slot=slot,
+      .start_symbol=g->start_symbol, .num_symbols=g->num_symbols,
+      .normal_cp=fp->Ncp == NR_NORMAL, .n_rx=nant};
+    for (int a = 0; a < nant; ++a) grid.rx[a] = &gnb->common_vars.rxdataF[a][slot_off];
+    int prior[8], nprior = 0;
+#define UL_ADD_PRIOR(id_) do { int v_=(id_); if (v_ >= 0 && v_ <= 65535) { \
+      bool seen_=false; for (int j_=0;j_<nprior;j_++) seen_ |= prior[j_]==v_; \
+      if (!seen_ && nprior < 8) prior[nprior++]=v_; } } while (0)
+    UL_ADD_PRIOR(fp->Nid_cell);
+    UL_ADD_PRIOR(g->ul_dmrs_scrambling_id);
+    if (cached.accepted) UL_ADD_PRIOR(cached.id);
+    nr_ue_ctx_t ue_ctx;
+    if (nr_ue_ctx_try_get(g->rnti, &ue_ctx)) {
+      if (ue_ctx.cfg[NR_UEP_PDSCH_SCR_ID].source != NR_UES_UNKNOWN)
+        UL_ADD_PRIOR(ue_ctx.cfg[NR_UEP_PDSCH_SCR_ID].value);
+      if (ue_ctx.cfg[NR_UEP_PDCCH_SCR_ID].source != NR_UES_UNKNOWN)
+        UL_ADD_PRIOR(ue_ctx.cfg[NR_UEP_PDCCH_SCR_ID].value);
+    }
+    if (cfg) UL_ADD_PRIOR(cfg->coreset_pdcch_dmrs_scrambling_id);
+    UL_ADD_PRIOR(nr_dmrs_id_2stage_decided(nr_pdsch_passive_dl_dmrs_id(0)));
+    UL_ADD_PRIOR(nr_dmrs_id_2stage_decided(nr_pdsch_passive_dl_dmrs_id(1)));
+#undef UL_ADD_PRIOR
+    if (timing_disc && timing_mask) {
+      bool tracked = false;
+      const int seed = nr_pusch_ul_disc_timing_seed(g->rnti, ta_offset_samples, (long)abs_slot, &tracked);
+      const int first_sym = __builtin_ctz((unsigned)timing_mask);
+      if (first_sym >= g->start_symbol && first_sym < g->start_symbol + g->num_symbols) {
+        const int radius = tracked ? 256 : 2048;
+        const int coarse_step = tracked ? 64 : 128;
+        int best_advance = seed, best_pairs = 0;
+        double best_score = -1;
+        for (int phase = 0; phase < 2; ++phase) {
+          const int center = phase ? best_advance : seed;
+          const int span = phase ? coarse_step : radius;
+          const int step = phase ? 16 : coarse_step;
+          for (int delta = -span; delta <= span; delta += step) {
+            const int advance = center + delta;
+            if (advance - ta_offset_samples < -2048 || advance - ta_offset_samples > 2048) continue;
+            PASSIVE_UL_FEP_SYMBOL(advance, first_sym);
+            const uint16_t mask = 1u << first_sym;
+            for (int i = 0; i < nprior; ++i) {
+              int pairs = 0;
+              const double score = nr_pusch_ul_disc_delay_score(&grid, mask, timing_type,
+                                                                  timing_nscid, prior[i], &pairs);
+              if (score > best_score) { best_score=score; best_pairs=pairs; best_advance=advance; }
+            }
+          }
+        }
+        double fa;
+        if (best_score >= 0.35 && nr_pusch_ul_disc_accept(best_score, best_pairs, &fa)) {
+          ul_sample_offset = best_advance;
+          out->ta_applied_samples = best_advance;
+          nr_pusch_ul_disc_timing_update(g->rnti, ta_offset_samples, best_advance,
+                                         best_score, (long)abs_slot);
+          LOG_I(PHY, "SENSING: UL_TIMING_DISC rnti=0x%04x slot=%lu nominal=%d advance=%d residual=%d score=%.3f fa<=%.2g\n",
+                g->rnti, (unsigned long)abs_slot, ta_offset_samples, best_advance,
+                best_advance-ta_offset_samples, best_score, fa);
+        }
+      }
+    }
+    PASSIVE_UL_FEP(ul_sample_offset);
+    if (dmrs_disc) {
+      const nr_pusch_ul_disc_result_t result = nr_pusch_ul_disc_search(&grid, g->rnti, type_a,
+          prior, nprior, g->dmrs_config_type, g->nscid, g->antenna_ports_field);
+      if (result.accepted) {
+        const bool applied = passive_ul_apply_dmrs_disc(&discovery_grant, &result);
+        if (result.fresh) LOG_I(PHY, "SENSING: UL_DMRS_DISC rnti=0x%04x slot=%lu id=%d nscid=%d type=%d map=%d add=%d front_load=%d max_len=%d mask=0x%x score=%.3f fa<=%.2g applied=%d\n",
+              g->rnti, (unsigned long)abs_slot, result.id, result.nscid, result.dmrs_type+1,
+              result.mapping_type, result.add_pos, result.front_load, result.max_length, result.mask,
+              result.coherence, result.false_alarm_bound, applied);
+      }
+    }
+  } else {
+    PASSIVE_UL_FEP(ul_sample_offset);
+  }
   if (!gapped && !fdra_unresolved) ul_dmrs_energy_oracle_observe(g, fp, gnb, slot_off, symsz);
   if (abs_slot && !nr_passive_samples_valid(
       atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),

@@ -1099,6 +1099,7 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c
@@ -2614,6 +2615,18 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_dmrs_id_estimate PRIVATE UTIL GTest::gtest m)
   add_dependencies(tests test_nr_dmrs_id_estimate)
   add_test(NAME test_nr_dmrs_id_estimate COMMAND ./test_nr_dmrs_id_estimate)
+
+  add_executable(test_nr_pusch_ul_disc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pusch_ul_disc_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_ul_disc.c
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+    ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
+    ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_nr_pusch_ul_disc PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pusch_ul_disc PRIVATE nr_pdcch_blind_monitor MAC_NR_COMMON
+    asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs crc_byte UTIL GTest::gtest m)
+  add_dependencies(tests test_nr_pusch_ul_disc)
+  add_test(NAME test_nr_pusch_ul_disc COMMAND ./test_nr_pusch_ul_disc)
 
   add_executable(test_nr_scrambling_id_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_scrambling_id_sweep_test.cc
                                              ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c)
