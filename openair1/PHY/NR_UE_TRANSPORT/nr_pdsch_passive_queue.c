@@ -950,7 +950,25 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       LOG_A(PHY, "SENSING: passive PDSCH consumer %d runs FEP/chest/LDPC tasks inline (ISAC_PDSCH_INLINE_POOL)\n", idx);
   }
 
+  /* ISAC_PDSCHQ_SIGNAL_TIME=1 (T26c, REPLAY ONLY): an offline replay runs at a fraction of real time, so the decode
+   * pool looks ~1/f times faster than live. After each dequeued group the consumer waits until the producer has
+   * advanced by the group's own wall time in SIGNAL slots -- the pool then serves the queue at its live rate in signal
+   * time, and queue fill / staleness become representative of live load. Never enable on air. */
+  static int s_sigt = -1;
+  if (s_sigt < 0) s_sigt = getenv("ISAC_PDSCHQ_SIGNAL_TIME") && atoi(getenv("ISAC_PDSCHQ_SIGNAL_TIME")) ? 1 : 0;
+  uint64_t sigt_t0 = 0;
+  long sigt_p0 = 0;
+  const double slot_ns = 10e6 / (double)slots_per_frame;
   while (1) {
+    if (s_sigt && sigt_t0) {
+      const long need = sigt_p0 + (long)((double)(now_ns() - sigt_t0) / slot_ns + 0.5);
+      for (int w = 0; w < 200000 && atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) < need
+                      && !atomic_load_explicit(&g_stop, memory_order_relaxed); w++) {
+        struct timespec ts = {0, 50000};
+        nanosleep(&ts, NULL);
+      }
+      sigt_t0 = 0;
+    }
     nr_pdsch_passive_job_t job;
     nr_pdsch_passive_set_owned_iq(NULL, -1);
     const bool owned = nr_csirs_disc_enabled();
@@ -985,6 +1003,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       g_count--;
     }
     pthread_mutex_unlock(&g_lock);
+    if (s_sigt) {
+      sigt_t0 = now_ns();
+      sigt_p0 = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+    }
     if (owned) {
       const uint64_t taken = now_ns();
       latency_note(NR_PDSCH_LAT_QUEUE, enqueue_ns, taken);
@@ -1985,8 +2007,18 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
      * sync, which is the entire problem this module exists to fix. Also below PREEMPT_RT's threaded
      * IRQs (FIFO 50): at an equal 50, consumers pinned to the NIC IRQ cores (6..11 vs IRQs on 8-13 on
      * the X410 host) held NAPI off until they blocked. One core each from base_core; <0 unpinned. */
-    threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name,
-                 nr_core_plan_cpu(NR_CP_PDSCH, i, (affinity >= 0) ? (affinity + i) : -1), 40);
+    int core = nr_core_plan_cpu(NR_CP_PDSCH, i, (affinity >= 0) ? (affinity + i) : -1);
+    { /* ISAC_PDSCH_CORES="6,7,8,9,15,16" (T26c): explicit, non-contiguous consumer cores (GB10 big cores are 5-9,15-19) */
+      const char *cl = getenv("ISAC_PDSCH_CORES");
+      for (int k = 0; cl && *cl; k++) {
+        char *end;
+        const long c = strtol(cl, &end, 10);
+        if (end == cl) break;
+        if (k == i) { core = (int)c; break; }
+        cl = (*end == ',') ? end + 1 : end;
+      }
+    }
+    threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name, core, 40);
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);

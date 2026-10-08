@@ -77,8 +77,10 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db);
 /** T26c (ISAC_PDSCH_SOLVER_SCR=1): before planning, the RUN-TIME discovered identities (this DCI's CORESET PDCCH nID
  * first, then the other discovered CORESETs' nIDs) the PDSCH scrambling (DM-RS scramblingID0 + dataScramblingIdentity-
  * PDSCH) may use: a per-RNTI CRC-selected hypothesis {default, ids...}, searched grant by grant until a candidate fixes
- * it. Nothing configured; n = 0 restores default-only. */
-void nr_pdsch_solver_set_alt_scr(const uint16_t *ids, int n);
+ * it. Nothing configured; n = 0 restores default-only. coreset_key (the CORESET's PDCCH nID, or -1) groups RNTIs: once
+ * one RNTI of a CORESET solved, the others of that CORESET try only its scrambling. The list may also carry the
+ * scrambling ids of run-time discovered NZP CSI-RS (ISAC_PDSCH_SOLVER_SCR_CSIRS=1): neighbour-cell candidates. */
+void nr_pdsch_solver_set_alt_scr(int coreset_key, const uint16_t *ids, int n);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 

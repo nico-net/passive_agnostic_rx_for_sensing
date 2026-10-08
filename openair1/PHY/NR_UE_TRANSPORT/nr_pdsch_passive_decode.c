@@ -2473,6 +2473,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   }
 
   // ---- Channel estimation on the DM-RS symbols. ----
+  {
+    extern __thread uint32_t nr_dl_chest_delay_epoch; /* ISAC_CHEST_DELAY_SHARE: one delay estimate per decode */
+    if (++nr_dl_chest_delay_epoch == 0) nr_dl_chest_delay_epoch = 1;
+  }
   const uint64_t pdt_che = pdtim_on ? pdtim_now() : 0;
   const uint32_t pdsch_est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16;
   /* ---- PERSISTENT SCRATCH, NOT PER-GRANT allocation --------------------------------------------

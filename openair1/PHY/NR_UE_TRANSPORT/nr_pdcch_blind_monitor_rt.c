@@ -7995,7 +7995,7 @@ constdiag_done:;
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
       const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
-      uint16_t sv_alt[8];
+      uint16_t sv_alt[16];
       int sv_nalt = 0;
       if (cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
         sv_alt[sv_nalt++] = (uint16_t)cfg->coreset_pdcch_dmrs_scrambling_id;
@@ -8006,7 +8006,25 @@ constdiag_done:;
         for (int q = 0; q < sv_nalt && !dup; q++) dup = sv_alt[q] == bc->coreset_pdcch_dmrs_scrambling_id;
         if (!dup) sv_alt[sv_nalt++] = (uint16_t)bc->coreset_pdcch_dmrs_scrambling_id;
       }
-      nr_pdsch_solver_set_alt_scr(sv_alt, sv_nalt);
+      { /* ISAC_PDSCH_SOLVER_SCR_CSIRS=1 (T26c): scrambling ids of the run-time discovered NZP CSI-RS (a TRS/CSI-RS
+         * scramblingID is typically the transmitting cell's PCI -- neighbour-cell candidates), as seen so far */
+        static int s_cs = -1;
+        static uint16_t s_ids[8];
+        static int s_n;
+        if (s_cs < 0) s_cs = getenv("ISAC_PDSCH_SOLVER_SCR_CSIRS") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR_CSIRS")) ? 1 : 0;
+        for (int k = 0; s_cs && k < sv_nrm; k++) {
+          if (sv_rm[k].csi_type == 2 || sv_rm[k].scramb_id == fp->Nid_cell) continue;
+          bool dup = false;
+          for (int q = 0; q < s_n && !dup; q++) dup = s_ids[q] == sv_rm[k].scramb_id;
+          if (!dup && s_n < 8) s_ids[s_n++] = sv_rm[k].scramb_id;
+        }
+        for (int q = 0; s_cs && q < s_n && sv_nalt < 16; q++) {
+          bool dup = false;
+          for (int z = 0; z < sv_nalt && !dup; z++) dup = sv_alt[z] == s_ids[q];
+          if (!dup) sv_alt[sv_nalt++] = s_ids[q];
+        }
+      }
+      nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt);
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
