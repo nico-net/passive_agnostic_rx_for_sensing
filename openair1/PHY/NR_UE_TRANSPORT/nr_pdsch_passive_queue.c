@@ -115,6 +115,12 @@ static int16_t *g_consumer_gpu_rxF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 #define GPU_LLR_CAP (16u << 20) /* int16 per consumer: ~13 full-band rank-4 256QAM TBs, or any probe batch */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+/* T26c: a solver variant that is dropped before decoding releases its pending entry (no credit) at once,
+ * instead of lingering until the 4096-entry FIFO overwrites it (counted there as "dropped"). */
+static void release_solver(const nr_pdsch_passive_job_t *j)
+{
+  if (j->solver_token) nr_pdsch_solver_feedback(j->solver_token, false, false);
+}
 
 /* ---- ONE dedicated GPU worker thread (2026-09-16), not "whichever consumer grabs the lock" -------
  * ROOT CAUSE of the live OTA drop spike (r4a_104200: 92 % dropped, GPU_FEP calls measured 13-31 ms
@@ -1071,6 +1077,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       const int count = owned ? n_more + 1 : 1;
       atomic_fetch_add_explicit(&g_dropped_stale, count, memory_order_relaxed);
       if (owned) atomic_fetch_add(&g_drop_reason[prod < job.absolute_slot ? NR_PDSCH_DROP_FUTURE : NR_PDSCH_DROP_QUEUE], count);
+      release_solver(&job);
+      for (int k = 0; owned && k < n_more; k++) release_solver(&more[k]);
       continue;
     }
     if (owned) {
@@ -1092,6 +1100,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                             job.absolute_slot, slots_per_frame, gpu_req_producer, NULL)) {
         atomic_fetch_add(&g_dropped_stale, n_more + 1);
         atomic_fetch_add(&g_drop_reason[NR_PDSCH_DROP_COPY], n_more + 1);
+        release_solver(&job);
+        for (int k = 0; k < n_more; k++) release_solver(&more[k]);
         continue;
       }
       nr_pdsch_passive_set_owned_iq(g_owned_iq[idx], job.nr_slot_rx);
@@ -1484,6 +1494,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
         : (probe_outcome ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
     nr_pdsch_passive_probe_mode(false);
+    if (dec.evm_valid && !job.layout_probe && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+      /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
+      LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
+                 "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u\n",
+            job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
+            dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
+            dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
+            dec.br_snr_db[3], dec.evm_nbrx, job.solver_token);
+      if (dec.evm_pct > 0.f) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
+    }
     if (job.solver_token) {
       const bool sv_credit = owned || nr_passive_credit_allowed(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame);
@@ -2015,6 +2035,12 @@ void nr_pdsch_passive_queue_flush(void)
   pthread_mutex_unlock(&g_pending_mu);
 }
 
+int nr_pdsch_passive_queue_fill_pct(void)
+{
+  if (!atomic_load_explicit(&g_running, memory_order_acquire) || g_depth <= 0) return 0;
+  return (int)(100 * (g_count + g_n_pending) / g_depth); /* racy read: admission hint only */
+}
+
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
@@ -2054,6 +2080,14 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   return true;
 }
 
+static _Atomic uint64_t g_dropped_probe; /* ISAC_PDSCHQ_PROBE_LAST: probes refused/evicted (also in dropped_full) */
+static bool probe_last_enabled(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCHQ_PROBE_LAST") && atoi(getenv("ISAC_PDSCHQ_PROBE_LAST")) ? 1 : 0;
+  return en == 1;
+}
+
 static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) /* g_lock held by the caller */
 {
   /* DECODE BUDGET BY SENSING VALUE (2026-09-15). Under overload the sensing pipeline wants the
@@ -2063,7 +2097,49 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
    * ponytail: fixed 1/8 and 90 %; make them coverage-driven if drops stay high. */
   if (g_count * 10 >= g_depth * 9 && job->freq_alloc.num_rbs * 8 < g_ue->frame_parms.N_RB_DL) {
     atomic_fetch_add_explicit(&g_dropped_narrow, 1, memory_order_relaxed);
+    release_solver(job);
     return false;
+  }
+  if (g_count == g_depth && probe_last_enabled()) {
+    /* ISAC_PDSCHQ_PROBE_LAST=1 (T26c): under overload a layout PROBE (blind solver search, CB0 only) is the cheapest
+     * loss -- a later grant of the same RNTI probes again -- while a full decode of a solved RNTI is that grant's only
+     * chance. Evict the oldest probe of the RNTI holding the most probes; with no probe resident, an incoming probe is
+     * refused instead of evicting a full decode. Full decodes then fall through to the per-RNTI fair rule below. */
+    int top_n = 0, victim = -1;
+    uint16_t top_rnti = 0;
+    for (int i = 0; i < g_count; i++) {
+      const nr_pdsch_passive_job_t *e = &g_ring[(g_tail + i) % g_depth];
+      if (!e->layout_probe) continue;
+      int n = 0;
+      for (int j = 0; j < g_count; j++) {
+        const nr_pdsch_passive_job_t *f = &g_ring[(g_tail + j) % g_depth];
+        n += f->layout_probe && f->rnti == e->rnti;
+      }
+      if (n > top_n) { top_n = n; top_rnti = e->rnti; }
+    }
+    if (top_n > 0)
+      for (int i = 0; i < g_count && victim < 0; i++) {
+        const nr_pdsch_passive_job_t *e = &g_ring[(g_tail + i) % g_depth];
+        if (e->layout_probe && e->rnti == top_rnti) victim = i;
+      }
+    if (victim < 0 && job->layout_probe) {
+      atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
+      if ((atomic_fetch_add_explicit(&g_dropped_probe, 1, memory_order_relaxed) % 500) == 0)
+        LOG_A(PHY, "SENSING: PDSCHQ_PROBE_LAST probes dropped=%llu (no full decode evicted for a probe)\n",
+              (unsigned long long)atomic_load(&g_dropped_probe));
+      return false;
+    }
+    if (victim >= 0) {
+      release_solver(&g_ring[(g_tail + victim) % g_depth]);
+      for (int i = victim; i > 0; i--) {
+        g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];
+        g_ring_ns[(g_tail + i) % g_depth] = g_ring_ns[(g_tail + i - 1) % g_depth];
+      }
+      g_tail = (g_tail + 1) % g_depth;
+      g_count--;
+      atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&g_dropped_probe, 1, memory_order_relaxed);
+    }
   }
   if (g_count == g_depth) {
     /* DROP-OLDEST, PER-RNTI FAIR (2026-09-15). The evicted entry is the oldest job of the RNTI
@@ -2081,6 +2157,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     int victim = 0;
     while (victim < g_count && g_ring[(g_tail + victim) % g_depth].rnti != top_rnti) victim++;
     if (victim >= g_count) victim = 0;
+    release_solver(&g_ring[(g_tail + victim) % g_depth]);
     for (int i = victim; i > 0; i--) { /* shift the entries older than the victim up by one */
       g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];
       g_ring_ns[(g_tail + i) % g_depth] = g_ring_ns[(g_tail + i - 1) % g_depth];
