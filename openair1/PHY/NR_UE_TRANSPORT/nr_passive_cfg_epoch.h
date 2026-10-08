@@ -76,6 +76,8 @@ void nr_cfg_epoch_note_mib(uint32_t mib_hash_without_sfn);
 bool nr_cfg_epoch_note_sib1(uint32_t semantic_hash, uint64_t abs_slot); /* called whenever SIB1 is decoded (SA or NSA), never required */
 void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t modification_period_slots);
 void nr_cfg_epoch_note_continuity_loss(void);
+/* A transient RF stream restart invalidates in-flight IQ without revoking learned dedicated configuration. */
+void nr_cfg_epoch_note_rx_recovery(void);
 /* Signed RF timestamp delta and samples in one millisecond; nonpositive deltas are hard. */
 void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t samples_per_ms);
 void nr_cfg_epoch_note_bwp_change(void);

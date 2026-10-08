@@ -302,6 +302,8 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
                                       .fo_flag = params->fo_flag,
                                       .target_Nid_cell = params->target_nid_cell,
                                       .pssTime = (c16_t *)pssTime};
+  p_pss.window_center = params->pss_window_center;
+  p_pss.window_radius = params->pss_window_radius;
   nr_pss_info_t pss_info = pss_search_time_nr(&p_pss);
 
   // This is the frequency offset that will be applied in the compensation,
@@ -453,6 +455,8 @@ static void nr_scan_ssb(void *arg)
         .subcarrier_spacing = fp->subcarrier_spacing,
         .samples_per_slot_wCP = fp->samples_per_slot_wCP,
         .target_nid_cell = ssbInfo->targetNidCell,
+        .pss_window_center = ssbInfo->pssWindowCenter,
+        .pss_window_radius = ssbInfo->pssWindowRadius,
         .exclude_nid_cells = NULL, // No exclusion for initial sync
         .num_exclude_nid_cells = 0,
         .apply_freq_offset = ssbInfo->foFlag,
@@ -542,11 +546,11 @@ static void nr_scan_ssb(void *arg)
   completed_task_ans(ssbInfo->ans);
 }
 
-nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
+static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                   PHY_VARS_NR_UE *ue,
                                   int n_frames,
                                   nr_gscn_info_t gscnInfo[MAX_GSCN_BAND],
-                                  int numGscn)
+                                  int numGscn, int pss_window_center, int pss_window_radius)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
@@ -706,6 +710,8 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
                                     .foFlag = ue->UE_fo_compensation,
                                     .freqOffset = auto_acquire ? coarse_offset : ue->initial_fo,
                                     .targetNidCell = ue->target_Nid_cell};
+      ssbInfo->pssWindowCenter = pss_window_center;
+      ssbInfo->pssWindowRadius = pss_window_radius;
       ready[k] = false;
       ssbInfo->rxdata = malloc16_clear(scan_fp.nb_antennas_rx * sizeof(c16_t *));
       if (!ssbInfo->rxdata) {
@@ -833,6 +839,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
     } else {
       res->syncRes.rx_offset = res->ssbOffset - sync_pos_frame;
     }
+    res->syncRes.ssb_offset = res->ssbOffset;
 
     // TEMPORARY DIAGNOSTIC (acquisition->tracking handoff root-cause hunt, 2026-08-02).
     // Everything the handoff derives its timing origin from, in one line, so the 273 PRB (broken)
@@ -902,4 +909,17 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
     ue->measurements.rx_power_avg_dB[0] = dB_fixed(ue->measurements.rx_power_avg[0]);
     return (nr_initial_sync_t){.cell_detected = false};
   }
+}
+
+nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, int n_frames,
+                                  nr_gscn_info_t gscnInfo[MAX_GSCN_BAND], int numGscn)
+{
+  return nr_initial_sync_impl(proc, ue, n_frames, gscnInfo, numGscn, 0, 0);
+}
+
+nr_initial_sync_t nr_initial_sync_fast(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, int n_frames,
+                                       nr_gscn_info_t gscnInfo[MAX_GSCN_BAND], int numGscn,
+                                       int expected_pss_position, int radius)
+{
+  return nr_initial_sync_impl(proc, ue, n_frames, gscnInfo, numGscn, expected_pss_position, radius);
 }

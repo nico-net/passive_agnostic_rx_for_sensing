@@ -489,12 +489,14 @@ typedef struct {
   bool cell_detected;
   int rx_offset;
   int frame_id;
+  int ssb_offset; /* position of PSS CP in the successful capture frame */
 } nr_initial_sync_t;
 
 typedef struct {
   nr_gscn_info_t gscnInfo;
   int foFlag;
   int targetNidCell;
+  int pssWindowCenter, pssWindowRadius;
   c16_t **rxdata;
   int rxdata_sz;
   NR_DL_FRAME_PARMS *fp;
@@ -552,6 +554,8 @@ typedef struct {
   int subcarrier_spacing;
   int samples_per_slot_wCP;
   int target_nid_cell; // -1 for blind search, specific PCI for targeted search
+  int pss_window_center; /* RX recovery only; radius zero means full search */
+  int pss_window_radius;
   const uint16_t *exclude_nid_cells; // PCIs to exclude (serving cell + already discovered neighboring cells)
   int num_exclude_nid_cells; // Number of PCIs in exclude_nid_cells array
   bool apply_freq_offset; // whether to compensate frequency offset
