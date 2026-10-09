@@ -21,9 +21,8 @@
  * validate a port of it).
  *
  * Mirrors nr_pdsch_gpu_fep.{h,cu}'s architecture exactly (dedicated GPU worker thread behind a
- * dlopen'd libpdcch_gpu.so, loaded only under NR_GPU_FEP=1 -- reusing the SAME knob and loader as
- * the PDSCH module, since the two never run concurrently on the same resident-slot GPU state and a
- * second env var would just be one more thing to forget to set) -- NOT a second, independently
+ * dlopen'd libpdcch_gpu.so, loaded only under ISAC_PDCCH_GPU_FEP=1, independently of the PDSCH
+ * NR_GPU_FEP switch) -- NOT a second, independently
  * mutex-contended path: commit 002038bd70 already found and fixed the "shared per-consumer mutex"
  * failure mode once for the PDSCH GPU FEP; this module reuses that lesson rather than re-earning it.
  *
@@ -113,8 +112,7 @@ typedef struct {
 #ifndef NR_GPU_FEP_NO_LOADER
 #include <dlfcn.h>
 #include <stdlib.h>
-/** dlopen libpdcch_gpu.so next to the executable when NR_GPU_FEP=1 (the SAME knob as the PDSCH GPU
- * FEP loader -- see this file's top comment for why one knob is deliberate, not an oversight). */
+/** PDCCH has an independent switch. NR_GPU_FEP continues to control PDSCH alone. */
 static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load_impl(int prepare)
 {
   static const nr_gpu_pdcch_fep_api_t *api = NULL;
@@ -123,7 +121,7 @@ static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load_impl(int prepa
     return api;
   if (!prepare) return NULL;
   tried = 1;
-  const char *e = getenv("NR_GPU_FEP");
+  const char *e = getenv("ISAC_PDCCH_GPU_FEP");
   if (e == NULL || atoi(e) == 0)
     return NULL;
   void *h = dlopen("libpdcch_gpu.so", RTLD_NOW | RTLD_LOCAL);
