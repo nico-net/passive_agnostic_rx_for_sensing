@@ -1074,7 +1074,12 @@ static void usrp_ring_producer(usrp_state_t *s)
     CPU_SET(atoi(core), &set);
     pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
   }
-  struct sched_param sp = {.sched_priority = 95};
+  /* ISAC_USRP_RING_PRIO (default 95): SCHED_FIFO priority of the producer. OAI's actors and ru_start_thread
+   * run at FIFO 97 with no CPU pinning; on a core that is not isolated one of them preempts this thread for
+   * as long as it runs, and the stream drops. 98 puts the producer above every OAI thread. */
+  struct sched_param sp = {.sched_priority = usrp_env_int("ISAC_USRP_RING_PRIO", 95, 1)};
+  if (sp.sched_priority > 99)
+    sp.sched_priority = 95;
   pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp); // best effort (needs root)
   pthread_setname_np(pthread_self(), "usrpRing");
   const size_t nch = s->ring.size();
@@ -1088,6 +1093,17 @@ static void usrp_ring_producer(usrp_state_t *s)
       pkts = (size_t)atoi(e);
   }
   const size_t chunk = s->rx_stream->get_max_num_samps() * pkts;
+  /* ISAC_USRP_RING_POLL=1 (default off): once streaming, busy-poll recv() with a zero timeout. The producer
+   * owns an isolated core, so spinning is free, whereas the blocking recv() made the DPDK I/O lcore issue a
+   * futex wake (syscall + IPI) for most packets. ISAC_USRP_RING_POLL_TIMEOUT_MS (default 100) of continuous
+   * silence is still a receive timeout (fault), as with the blocking 0.1 s recv(). */
+  static const bool poll_mode = usrp_env_int("ISAC_USRP_RING_POLL", 0, 0) != 0;
+  const double poll_limit_s = usrp_env_int("ISAC_USRP_RING_POLL_TIMEOUT_MS", 100, 1) * 1e-3;
+  auto poll_last_data = std::chrono::steady_clock::now();
+  uint64_t poll_notified = 0;
+  if (poll_mode)
+    LOG_I(HW, "SENSING: USRP_RING poll mode on (zero-timeout recv once streaming, silence limit %.0f ms)\n",
+          poll_limit_s * 1e3);
   std::vector<void *> ptr(nch);
   uhd::rx_metadata_t md;
   bool started = false;
@@ -1116,13 +1132,26 @@ static void usrp_ring_producer(usrp_state_t *s)
     int fault = overrun ? 2 : 0;
     if (!fault) {
       try {
-        got = s->rx_stream->recv(ptr, n, md, 0.1, !started);
+        got = s->rx_stream->recv(ptr, n, md, poll_mode && started ? 0.0 : 0.1, !started);
       } catch (const std::exception &ex) {
         LOG_E(HW, "SENSING: USRP_RING recv exception at sample %llu: %s\n", (unsigned long long)w, ex.what());
         fault = 3;
       } catch (...) {
         LOG_E(HW, "SENSING: USRP_RING recv exception (non-std) at sample %llu\n", (unsigned long long)w);
         fault = 3;
+      }
+    }
+    if (poll_mode && !fault) {
+      const auto now = std::chrono::steady_clock::now();
+      if (!started || got) {
+        poll_last_data = now;
+      } else {
+        const double idle_s = std::chrono::duration<double>(now - poll_last_data).count();
+        if (usrp_ring_poll_classify(got, md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT, idle_s, poll_limit_s)
+            == USRP_RING_POLL_RETRY) {
+          __asm__ __volatile__("" ::: "memory");
+          continue; /* nothing queued yet: poll again (no condition-variable wait, no lcore wake) */
+        }
       }
     }
     if (!fault && md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT && !started
@@ -1316,7 +1345,12 @@ static void usrp_ring_producer(usrp_state_t *s)
     if (failures_before && !recovery.failures)
       LOG_I(HW, "SENSING: USRP_RING failed-start budget reset after 20 ms of clean streaming\n");
     s->ring_written.store(recovery.write_index, std::memory_order_release);
-    s->ring_cv.notify_one();
+    /* Poll mode returns a packet or two per call: wake the reader once per `chunk` samples as before,
+     * not per call, or the wake storm just moves from the lcore to this thread. */
+    if (!poll_mode || recovery.write_index - poll_notified >= chunk) {
+      poll_notified = recovery.write_index;
+      s->ring_cv.notify_one();
+    }
   }
   s->ring_cv.notify_all();
   if (s->ring_err.load() && nr_shutdown_request) {
@@ -1342,10 +1376,61 @@ static void usrp_ring_alloc(usrp_state_t *s)
   }
 }
 
+/* ISAC_USRP_ISOLATION_CHECK=1 (default off): before streaming, report every RX-critical core (ring producer
+ * ISAC_USRP_RING_CORE, UHD control ISAC_UHD_CTRL_CORES) that the kernel does not isolate (isolcpus) or run
+ * tickless (nohz_full). STARTUP-DROPS 2026-10-09: every failing start of 2026-10-08 ran on a boot that
+ * isolated only 17-19, i.e. with the producer (16) and uhd_ctrl (14/15) on cores shared with IRQs and
+ * unpinned FIFO 97 OAI threads; 8/8 starts on the 15-19 boot were drop-free. Warn only, never refuse. */
+static void usrp_isolation_check(void)
+{
+  if (usrp_env_int("ISAC_USRP_ISOLATION_CHECK", 0, 0) == 0)
+    return;
+  auto read_mask = [](const char *path, bool &ok) -> uint64_t {
+    char buf[256] = {0};
+    FILE *f = fopen(path, "r");
+    ok = f != NULL;
+    if (f) {
+      if (!fgets(buf, sizeof(buf), f))
+        buf[0] = 0;
+      fclose(f);
+    }
+    return usrp_cpulist_mask(buf);
+  };
+  bool ok_iso = false, ok_nohz = false;
+  const uint64_t iso = read_mask("/sys/devices/system/cpu/isolated", ok_iso);
+  const uint64_t nohz = read_mask("/sys/devices/system/cpu/nohz_full", ok_nohz);
+  struct { const char *role; const char *env; } roles[] = {{"ring producer", "ISAC_USRP_RING_CORE"},
+                                                          {"uhd_ctrl", "ISAC_UHD_CTRL_CORES"}};
+  int bad = 0;
+  for (auto &r : roles) {
+    const char *e = getenv(r.env);
+    if (!e || !*e) {
+      LOG_W(HW, "SENSING: USRP_ISOLATION %s has no pinned core (%s unset): it may share a core with IRQs and FIFO 97 threads\n",
+            r.role, r.env);
+      bad++;
+      continue;
+    }
+    const uint64_t want = usrp_cpulist_mask(e);
+    for (int c = 0; c < 64; c++) {
+      if (!(want >> c & 1))
+        continue;
+      const bool ci = iso >> c & 1, cn = nohz >> c & 1;
+      if (!ci || !cn) {
+        LOG_W(HW, "SENSING: USRP_ISOLATION %s core %d isolated=%d nohz_full=%d -- startup drop risk (boot with isolcpus/nohz_full/rcu_nocbs covering it, irqaffinity excluding it)\n",
+              r.role, c, ci, cn);
+        bad++;
+      }
+    }
+  }
+  LOG_I(HW, "SENSING: USRP_ISOLATION check done: %d issue(s) (sysfs isolated %s, nohz_full %s)\n", bad,
+        ok_iso ? "read" : "missing", ok_nohz ? "read" : "missing");
+}
+
 static void usrp_ring_start(usrp_state_t *s)
 {
   if (usrp_ring_ms() == 0 || s->decim_ratio != 1)
     return;
+  usrp_isolation_check();
   usrp_ring_alloc(s); /* no-op when already allocated before the stream command */
   const size_t nch = s->rx_stream->get_num_channels();
   const size_t cap = s->ring_cap;

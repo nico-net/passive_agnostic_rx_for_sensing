@@ -36,6 +36,41 @@ static inline int64_t usrp_ring_local_start_ticks(int64_t last_end_ticks, double
   return last_end_ticks + (int64_t)((std::max(elapsed_s, 0.0) + lead_s * std::max(failures, 1)) * rate);
 }
 
+/* POLL MODE (ISAC_USRP_RING_POLL): once the stream runs, the producer calls recv() with a zero timeout,
+ * so UHD never parks it on a condition variable and the DPDK I/O lcore never has to futex-wake it (with
+ * the blocking recv() that is one wake syscall + IPI for most packets). Classify one zero-timeout result:
+ * data -> consume it; empty -> poll again until limit_s of continuous silence, then it is a real receive
+ * timeout (the same fault the blocking 0.1 s recv() raised). */
+enum usrp_ring_poll_action { USRP_RING_POLL_DATA = 0, USRP_RING_POLL_RETRY = 1, USRP_RING_POLL_TIMEOUT = 2 };
+static inline usrp_ring_poll_action usrp_ring_poll_classify(size_t got, bool timeout_code, double idle_s,
+                                                            double limit_s)
+{
+  if (got || !timeout_code)
+    return USRP_RING_POLL_DATA; /* samples, or an empty result without error: handled by the normal path */
+  return idle_s < limit_s ? USRP_RING_POLL_RETRY : USRP_RING_POLL_TIMEOUT;
+}
+
+/* Kernel cpulist ("15-19", "2,4-6", "" or "\n") -> bitmask of CPUs 0..63. Used by ISAC_USRP_ISOLATION_CHECK
+ * on /sys/devices/system/cpu/{isolated,nohz_full}. Malformed input yields the CPUs parsed so far. */
+static inline uint64_t usrp_cpulist_mask(const char *s)
+{
+  uint64_t m = 0;
+  while (s && *s) {
+    if (*s < '0' || *s > '9') { s++; continue; }
+    int a = 0;
+    while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
+    int b = a;
+    if (*s == '-') {
+      s++;
+      b = 0;
+      while (*s >= '0' && *s <= '9') b = b * 10 + (*s++ - '0');
+    }
+    for (int c = a; c <= b && c < 64; c++)
+      m |= 1ULL << c;
+  }
+  return m;
+}
+
 static inline bool usrp_ring_has_samples(uint64_t written, uint64_t read, uint64_t wanted)
 {
   return written >= read && written - read >= wanted;
