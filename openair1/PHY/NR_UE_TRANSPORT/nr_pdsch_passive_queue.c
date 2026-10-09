@@ -1443,11 +1443,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_dlsch_mrc_mode_override = job.mrc_mode >= 4 ? 1 : (job.mrc_mode > 0 ? job.mrc_mode : -1);
     nr_dlsch_irc_override = job.mrc_mode == 4 ? 3 : job.mrc_mode == 5 ? 2 : job.mrc_mode == 6 ? 4 : (job.mrc_mode > 0 ? 0 : -1);
     extern __thread int nr_dlsch_eq_override;
-    { /* ISAC_RX_EQ_AB=1 (T26d): multi-layer grants rotate the equaliser {fixed MMSE, float MMSE, ML} (paired A/B) */
+    { /* ISAC_RX_EQ_AB=1 (T26d): multi-layer post-solve grants (needs ISAC_RX_MRC_PER_RNTI) rotate the equaliser {fixed MMSE, float MMSE, ML} (paired A/B); the search keeps the default */
       static int s_eqab = -1;
       static _Atomic unsigned s_eqn = 0;
       if (s_eqab < 0) s_eqab = getenv("ISAC_RX_EQ_AB") ? atoi(getenv("ISAC_RX_EQ_AB")) : 0;
-      nr_dlsch_eq_override = (s_eqab && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_eqn, 1) % 3u) : -1;
+      nr_dlsch_eq_override = (s_eqab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_eqn, 1) % 3u) : -1;
     }
     const int eq_used = nr_dlsch_eq_override;
     const nr_pdsch_passive_decode_status_t st_raw =
