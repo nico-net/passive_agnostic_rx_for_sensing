@@ -122,6 +122,7 @@ typedef struct {
 
 static rlc_data_req_queue q;
 
+/* rlc_data_req_thread: worker thread of the RLC data-request queue: takes requests in FIFO order and runs nr_rlc_data_req() for each, outside the queue lock. Exits when the queue is stopped and empty. Started by init_nr_rlc_data_req_queue(). */
 static void *rlc_data_req_thread(void *_)
 {
   int i;
@@ -155,6 +156,7 @@ static void *rlc_data_req_thread(void *_)
   }
 }
 
+/* init_nr_rlc_data_req_queue: creates the RLC data-request queue lock and condition, and starts rlc_data_req_thread(). Exits the process when the thread cannot be created. Called once from the PDCP layer initialisation. */
 static void init_nr_rlc_data_req_queue(void)
 {
   pthread_mutex_init(&q.m, NULL);
@@ -267,6 +269,7 @@ static void do_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
+/* pdcp_data_ind_thread: worker thread of the PDCP data-indication queue: takes each SDU in FIFO order, passes it to do_pdcp_data_ind() and frees the buffer. Exits when the queue is stopped and empty. Started by init_nr_pdcp_data_ind_queue(). */
 static void *pdcp_data_ind_thread(void *_)
 {
   int i;
@@ -300,6 +303,7 @@ static void *pdcp_data_ind_thread(void *_)
   }
 }
 
+/* init_nr_pdcp_data_ind_queue: creates the PDCP data-indication queue lock and condition, and starts pdcp_data_ind_thread(). Exits the process when the thread cannot be created. Called once from the PDCP layer initialisation. */
 static void init_nr_pdcp_data_ind_queue(void)
 {
   pthread_mutex_init(&pq.m, NULL);
