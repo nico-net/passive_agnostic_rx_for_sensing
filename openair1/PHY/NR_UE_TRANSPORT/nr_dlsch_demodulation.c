@@ -1697,6 +1697,25 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         for (uint32_t c0 = 0; c0 < nb_re_pdsch; c0 += 48) {
           const uint32_t c1 = c0 + 48 < nb_re_pdsch ? c0 + 48 : nb_re_pdsch;
           double complex R[4][4] = {{0}};
+          /* ISAC_RX_IRC>=2: first correct each branch's estimate by its chunk LS gain alpha_a = <y_a, h_a s>/|h_a s|^2
+           * (measured |alpha| ~0.5-0.85 < 1: the estimate is inflated by its own noise and its phase drifts), so the
+           * residual does not carry (1-alpha) h s -- which made R see the signal and null it (self-nulling). */
+          double complex alpha[4] = {1, 1, 1, 1};
+          if (s_irc >= 2)
+            for (int a = 0; a < nb; a++) {
+              double complex num = 0; double den = 0;
+              for (uint32_t i = c0; i < c1; i++) {
+                const double complex hs = (chFext[0][a][i].r + I * chFext[0][a][i].i) * xs[i];
+                num += (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) * conj(hs);
+                den += creal(hs) * creal(hs) + cimag(hs) * cimag(hs);
+              }
+              if (den > 0) alpha[a] = num / den;
+              for (uint32_t i = c0; i < c1; i++) {
+                const double complex h2 = (chFext[0][a][i].r + I * chFext[0][a][i].i) * alpha[a];
+                chFext[0][a][i].r = (int16_t)fmax(-32768.0, fmin(32767.0, lround(creal(h2))));
+                chFext[0][a][i].i = (int16_t)fmax(-32768.0, fmin(32767.0, lround(cimag(h2))));
+              }
+            }
           for (uint32_t i = c0; i < c1; i++) {
             double complex e[4];
             for (int a = 0; a < nb; a++)
@@ -1710,7 +1729,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           if (dmean <= 0) continue;
           for (int a = 0; a < nb; a++)
             for (int b = 0; b < nb; b++)
-              R[a][b] = (a == b) ? creal(R[a][a]) + 1e-3 * dmean : (1.0 - s_shrink) * R[a][b];
+              R[a][b] = (a == b) ? creal(R[a][a]) + 1e-3 * dmean : (s_irc == 3 ? 0.0 : (1.0 - s_shrink) * R[a][b]); /* 3: diagonal = noise-weighted MRC */
           /* Cholesky R = L L^H */
           double complex L[4][4] = {{0}};
           bool ok = true;
