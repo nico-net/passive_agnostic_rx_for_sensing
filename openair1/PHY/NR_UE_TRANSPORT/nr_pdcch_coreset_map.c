@@ -314,7 +314,7 @@ void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb)
   g_css0_first_rb = first_rb;
   g_css0_nrb = n_rb;
 }
-/* nr_pdcch_coreset_map_get_css0: returns the first RB and the number of RBs of CORESET#0 (the CSS0 span) as recorded from the MIB; used by the CORESET-0 occupancy gate and the NID capture. */
+/* nr_pdcch_coreset_map_get_css0: returns the first RB and the number of RBs of CORESET#0 (the CSS0 span) as recorded from the MIB; Caller: nr_pdcch_blind_monitor_rt.c (CORESET-0 occupancy gate). */
 void nr_pdcch_coreset_map_get_css0(int *first_rb, int *n_rb)
 {
   *first_rb = g_css0_first_rb;
