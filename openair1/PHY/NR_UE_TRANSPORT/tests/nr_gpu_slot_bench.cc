@@ -78,27 +78,28 @@ int main(int argc, char **argv)
   std::stable_sort(samples.begin(), samples.end(), [](const Sample &a, const Sample &b) {
     return a.h.absolute_slot < b.h.absolute_slot;
   });
-  size_t groups = 0, max_jobs = 0, over9 = 0;
+  size_t groups = 0, max_jobs = 0, over_limit = 0;
   for (size_t i = 0; i < samples.size();) {
     const size_t begin = i;
     const uint32_t slot = samples[i].h.absolute_slot;
     ++groups;
     do { ++i; } while (i < samples.size() && samples[i].h.absolute_slot == slot);
     max_jobs = std::max(max_jobs, i - begin);
-    over9 += i - begin > 9;
+    over_limit += i - begin > 65;
   }
   printf("recorded CPU reference: jobs=%zu slot_groups=%zu max_jobs_per_slot=%zu over_gpu_batch_limit=%zu crc_ok=%zu evm_valid=%zu\n",
-         samples.size(), groups, max_jobs, over9,
+         samples.size(), groups, max_jobs, over_limit,
          std::count_if(samples.begin(), samples.end(), [](const Sample &s) { return s.h.crc_ok; }),
          std::count_if(samples.begin(), samples.end(), [](const Sample &s) { return s.h.evm_valid; }));
   if (!gpu) return 0;
   void *lib = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!lib) { fprintf(stderr, "dlopen libpdsch_gpu.so: %s\n", dlerror()); return 2; }
   auto get = (const nr_gpu_fep_api_t *(*)())dlsym(lib, "nr_gpu_fep_api");
+  auto last_chunks = (int (*)())dlsym(lib, "nr_gpu_fep_last_chunks");
   const nr_gpu_fep_api_t *api = get ? get() : nullptr;
   if (!api || api->init(&samples[0].h.cfg)) { fprintf(stderr, "GPU unavailable or init failed\n"); return 2; }
   std::vector<double> slot_us, fep_us, llr_us;
-  size_t compared = 0, sign_ok = 0, short_llr = 0;
+  size_t compared = 0, sign_ok = 0, short_llr = 0, split_slots = 0;
   double xy = 0, x2 = 0, y2 = 0;
   for (int rep = 0; rep < reps; ++rep) for (size_t i = 0; i < samples.size();) {
     const size_t begin = i;
@@ -128,6 +129,7 @@ int main(int argc, char **argv)
     const int64_t n = rc ? -1 : api->pdsch_llr(jobs.data(), jobs.size(), llr.data(), llr.size());
     const auto t2 = std::chrono::steady_clock::now();
     if (n < 0) { fprintf(stderr, "GPU failure at slot %u\n", slot); return 1; }
+    if (rep == 0 && last_chunks && last_chunks() != 1) ++split_slots;
     slot_us.push_back(us(t0, t2)); fep_us.push_back(us(t0, t1)); llr_us.push_back(us(t1, t2));
     if (rep == 0) for (size_t k = begin; k < i; ++k) {
       const auto &j = jobs[k - begin];
@@ -148,7 +150,7 @@ int main(int argc, char **argv)
          quantile(slot_us, .5), quantile(slot_us, .99), quantile(fep_us, .5), quantile(fep_us, .99),
          quantile(llr_us, .5), quantile(llr_us, .99));
   const double corr = x2 > 0 && y2 > 0 ? xy / std::sqrt(x2 * y2) : 0.;
-  printf("CPU/GPU LLR sign agreement=%zu/%zu (%.6f), corr=%.6f, length_mismatch=%zu; GPU TB CRC and post-EQ SNR: receiver replay required\n",
-         sign_ok, compared, compared ? (double)sign_ok / compared : 0., corr, short_llr);
+  printf("CPU/GPU LLR sign agreement=%zu/%zu (%.6f), corr=%.6f, length_mismatch=%zu, split_slots=%zu; GPU TB CRC and post-EQ SNR: receiver replay required\n",
+         sign_ok, compared, compared ? (double)sign_ok / compared : 0., corr, short_llr, split_slots);
   return short_llr || !compared || (double)sign_ok / compared < .995 || corr < .995 ? 1 : 0;
 }
