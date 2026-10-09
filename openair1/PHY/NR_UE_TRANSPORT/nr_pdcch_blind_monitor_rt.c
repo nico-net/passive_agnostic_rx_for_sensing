@@ -2373,7 +2373,7 @@ static pthread_mutex_t g_janon_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_janon_cv = PTHREAD_COND_INITIALIZER;
 static janon_item_t *g_janon_q;
 static int g_janon_cap, g_janon_head, g_janon_n;
-static janon_hit_t g_janon_hits[256];
+static janon_hit_t g_janon_hits[4096];
 static int g_janon_nhits;
 static _Atomic uint64_t g_janon_sub, g_janon_drop, g_janon_done, g_janon_found, g_janon_busy_ns;
 static uint32_t sweep_payload_hash(const nr_dci_bits_t *payload, int len);
@@ -2385,6 +2385,24 @@ static bool janon_async_enabled(void)
     en = (e && atoi(e) != 0) ? 1 : 0;
   }
   return en == 1;
+}
+static bool janon_stable_enabled(void)
+{
+  static _Atomic int en = -1;
+  int v = atomic_load(&en);
+  if (v < 0) {
+    v = getenv("ISAC_PDCCH_JOINT_ANON_STABLE") && atoi(getenv("ISAC_PDCCH_JOINT_ANON_STABLE")) ? 1 : 0;
+    atomic_store(&en, v);
+  }
+  return v == 1;
+}
+static uint64_t janon_slot_hash(uint16_t nid, int frame, int slot, int slots_per_frame)
+{
+  uint64_t h = (uint64_t)((uint32_t)frame * (uint32_t)slots_per_frame + (uint32_t)slot)
+               ^ ((uint64_t)nid << 32) ^ UINT64_C(0x9e3779b97f4a7c15);
+  h = (h ^ (h >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  h = (h ^ (h >> 27)) * UINT64_C(0x94d049bb133111eb);
+  return h ^ (h >> 31);
 }
 static unsigned joint_anon_mm_max(int L);
 static void *janon_worker(void *arg)
@@ -2449,8 +2467,15 @@ static void *janon_worker(void *arg)
         h.hash = sweep_payload_hash(&h.payload, len);
         atomic_fetch_add_explicit(&g_janon_found, 1, memory_order_relaxed);
         pthread_mutex_lock(&g_janon_mu);
-        if (g_janon_nhits < (int)(sizeof(g_janon_hits) / sizeof(g_janon_hits[0])))
+        const int hit_cap = janon_stable_enabled() ? (int)(sizeof(g_janon_hits) / sizeof(g_janon_hits[0])) : 256;
+        if (g_janon_nhits < hit_cap)
           g_janon_hits[g_janon_nhits++] = h;
+        else {
+          static _Atomic uint64_t s_hit_overflow;
+          const uint64_t lost = atomic_fetch_add(&s_hit_overflow, 1) + 1;
+          if (lost == 1 || lost % 1000 == 0)
+            LOG_W(PHY, "SENSING: JOINT_ANON_ASYNC hit buffer overflow lost=%llu\n", (unsigned long long)lost);
+        }
         pthread_mutex_unlock(&g_janon_mu);
       }
     }
@@ -2471,12 +2496,14 @@ static void janon_start(void);
 static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int slots_per_frame, uint16_t rmin, uint16_t rmax,
                          const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen)
 {
-  static int topk = -1;
+  static _Atomic int s_topk = -1;
   static pthread_once_t once = PTHREAD_ONCE_INIT;
+  int topk = atomic_load(&s_topk);
   if (topk < 0) {
     const char *e = getenv("ISAC_PDCCH_JOINT_ANON_TOPK");
-    topk = (e && atoi(e) > 0) ? atoi(e) : 6;
+    topk = (e && atoi(e) > 0) ? atoi(e) : (janon_stable_enabled() ? 8 : 6);
     if (topk > JANON_MAX_CAND) topk = JANON_MAX_CAND;
+    atomic_store(&s_topk, topk);
   }
 
   pthread_once(&once, janon_start);
@@ -2486,11 +2513,27 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
   { /* ISAC_PDCCH_JOINT_ANON_RATE=<items per slot> (T26c): admit at most this many items per slot of SIGNAL time
      * (token bucket, burst 8); the rest are SKIPPED (counted), not queued-then-dropped. Live td_4_1: 770 items/s
      * offered, worker served ~120/s, 84 % dropped. */
-    static double rate = -1.0, tokens = 8.0;
+    static _Atomic double s_rate = -1.0;
+    static double tokens = 8.0;
     static long last = -1;
     static _Atomic uint64_t s_skip;
-    if (rate < 0.0) rate = getenv("ISAC_PDCCH_JOINT_ANON_RATE") ? atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE")) : 0.0;
-    if (rate > 0.0 && t_pass_kind == PASS_BANK) { /* a discovered CORESET's dwell (verification) is never rate-skipped */
+    double rate = atomic_load(&s_rate);
+    if (rate < 0.0) {
+      rate = getenv("ISAC_PDCCH_JOINT_ANON_RATE") ? atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE")) : 0.0;
+      atomic_store(&s_rate, rate);
+    }
+    if (rate > 0.0 && janon_stable_enabled()) {
+      /* Pick signal slots from (nID, SFN, slot), independently of worker timing and the order in which scan
+       * consumers visit CORESETs. The same capture therefore offers the same anonymous occasions each replay. */
+      const uint64_t h = janon_slot_hash(nid, frame, slot, slots_per_frame);
+      if (rate < 1.0 && (uint32_t)h >= (uint32_t)(rate * (double)UINT32_MAX)) {
+        const uint64_t k = atomic_fetch_add(&s_skip, 1) + 1;
+        if ((k % 20000) == 1)
+          LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC stable rate-skipped %llu items (rate=%.2f/slot)\n",
+                (unsigned long long)k, rate);
+        return;
+      }
+    } else if (rate > 0.0 && t_pass_kind == PASS_BANK) {
       const long now = (long)frame * slots_per_frame + slot; /* resyncs on the 1024-frame wrap */
       if (last >= 0 && now > last) tokens += rate * (double)(now - last);
       last = now;
@@ -2512,8 +2555,11 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
     if (!nr_pdcch_joint_prescreen((const int16_t *)cand[c].e_rx, E))
       continue;
     const double v = joint_anon_score((const int16_t *)cand[c].e_rx, E);
+    const bool full_before = m >= topk;
     int p = m < topk ? m++ : topk - 1;
-    if (p == topk - 1 && m == topk && v <= sc[p])
+    /* On the first fill of topk, sc[topk-1] has not been written yet. The stable path waits until the list was
+     * already full; the legacy arm retains its selection for a byte-for-byte comparison. */
+    if ((janon_stable_enabled() ? full_before : (p == topk - 1 && m == topk)) && v <= sc[p])
       continue;
     while (p > 0 && sc[p - 1] < v) { sc[p] = sc[p - 1]; idx[p] = idx[p - 1]; p--; }
     sc[p] = v; idx[p] = c;
@@ -2531,7 +2577,10 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
   it->geom = geom; it->nid = nid; it->frame = frame; it->slot = slot; it->rnti_min = rmin; it->rnti_max = rmax; it->n = m;
   { /* LEN_HINT: one item in 8 still sweeps every length, so a UE with a different DCI size is found too */
     static uint32_t s_k;
-    it->nlen = (nlen > 0 && (++s_k % 8u) != 0) ? (uint8_t)(nlen < 4 ? nlen : 4) : 0;
+    const bool full_sweep = janon_stable_enabled()
+                                ? (janon_slot_hash(nid, frame, slot, slots_per_frame) % 8u) == 0
+                                : (++s_k % 8u) == 0;
+    it->nlen = (nlen > 0 && !full_sweep) ? (uint8_t)(nlen < 4 ? nlen : 4) : 0;
     for (int q = 0; q < it->nlen; q++) it->lens[q] = (uint8_t)lens[q];
   }
   for (int k = 0; k < m; k++) {
@@ -2546,7 +2595,7 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
 static void janon_start(void)
 {
   const char *e = getenv("ISAC_PDCCH_JOINT_ANON_Q");
-  g_janon_cap = (e && atoi(e) > 0) ? atoi(e) : 64;
+  g_janon_cap = (e && atoi(e) > 0) ? atoi(e) : (janon_stable_enabled() ? 256 : 64);
   g_janon_q = calloc((size_t)g_janon_cap, sizeof(janon_item_t));
   if (g_janon_q == NULL)
     return;
@@ -8531,6 +8580,9 @@ constdiag_done:;
         rd[k].ids = s_ids + off;
         rd[k].n_ids = 0;
         rd[k].num_rb = rparsed[k].num_rb;
+        rd[k].dmrs_ports = rparsed[k].dmrs_ports;
+        rd[k].n_layers = (uint8_t)__builtin_popcount((unsigned)rparsed[k].dmrs_ports);
+        rd[k].mcs = rparsed[k].mcs;
         off += rcount[k];
       }
       for (int i = 0; i < nh; i++)
@@ -8578,7 +8630,13 @@ constdiag_done:;
       if (cfg->discovered_coreset) { /* T26c: this CORESET's blind-decided PDSCH DM-RS id first, when it differs from the cell's */
         sv_did = nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id);
         int top3[3];
-        if (sv_did >= 0 && nr_pdsch_passive_coreset_dmrs_top((int)cfg->coreset_pdcch_dmrs_scrambling_id, top3) == 3) {
+        static int s_clean = -1;
+        if (s_clean < 0) s_clean = getenv("ISAC_PDSCH_SOLVER_SCR_CLEAN") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR_CLEAN")) ? 1 : 0;
+        if (s_clean && sv_did >= 0) {
+          /* A decided PCI already is the default. The lower-ranked IDs have no CRC evidence and, on the serving
+           * CORESET, are near-noise estimates. A non-PCI decision is the sole alternate until CRC proves it. */
+          if (sv_did != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)sv_did;
+        } else if (sv_did >= 0 && nr_pdsch_passive_coreset_dmrs_top((int)cfg->coreset_pdcch_dmrs_scrambling_id, top3) == 3) {
           for (int q = 0; q < 3; q++)
             if (top3[q] >= 0 && top3[q] != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)top3[q];
         } else if (sv_did >= 0 && sv_did != fp->Nid_cell)
