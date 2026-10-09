@@ -121,6 +121,9 @@ int create_tasks_nrue(uint32_t ue_nb) {
   return 0;
 }
 
+/* exit_function: fatal-exit handler of the softmodem (used by the assertion macros and exit_fun()): requests a bounded shutdown with status EXIT_FAILURE for assertions, logs the caller, sets oai_exit and finishes through nr_shutdown_finish().
+ *   Logs with LOG_W when the logger exists, else to stderr. Never returns. Callers: common/utils/assertions.h (AssertFatal and exit paths), exit_fun().
+ */
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
 {
   /* Arm the deadline before even attempting logging: a failed worker may own
@@ -153,6 +156,7 @@ nrUE_params_t *get_nrUE_params(void) {
 }
 /* Read configuration before creating any RT workers. The solver itself is independent of OAI. */
 static bool core_dl_count_explicit, core_ul_count_explicit;
+/* core_env_value: reads a CPU number from the environment variable `name`: -1 when unset, -2 when it is not a valid CPU number (0 to NR_CP_MAX_CPUS-1). Caller: passive_core_plan(). */
 static int core_env_value(const char *name)
 {
   const char *s = getenv(name);
@@ -161,10 +165,14 @@ static int core_env_value(const char *name)
   if (errno || end == s || *end || c < 0 || c >= NR_CP_MAX_CPUS) return -2;
   return c;
 }
+/* core_feature: reads a boolean switch from the environment (atoi != 0), with the default def when unset. Caller: passive_core_plan() and main(). */
 static bool core_feature(const char *name, bool def)
 {
   const char *s = getenv(name); return s ? atoi(s) != 0 : def;
 }
+/* passive_core_plan: builds and activates the CPU core plan for the passive receiver (ISAC_CORE_PLAN, on by default): reads the host topology, sizes the actor counts from the physical core count, and assigns the real-time and pool roles (UE, ring, UHD control, DL/UL actors, sync, scan, USS, PDSCH, PUSCH, pool, GPU, CSI-RS, NID, stats).
+ *   Explicit ISAC_* core variables and the thread pool list are respected as user pins. On success it sets the thread pool specification and activates the plan; on failure it prints the error and returns -1 (radio start-up is then cancelled). Caller: main() (passive-RX mode only).
+ */
 static int passive_core_plan(void)
 {
   if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !core_feature("ISAC_CORE_PLAN", true)) return 0;
@@ -251,6 +259,7 @@ fail:
   return -1;
 }
 
+/* get_options: reads the NR UE command-line parameters (CMDLINE_NRUEPARAMS_DESC) and records whether the actor counts were given explicitly (used by passive_core_plan()); asserts that no extra PDU session was requested. Caller: main(). */
 static void get_options(configmodule_interface_t *cfg)
 {
   paramdef_t cmdline_params[] = CMDLINE_NRUEPARAMS_DESC;
@@ -305,6 +314,7 @@ static void set_fp_options(int cell_id, int ru_id)
   LOG_I(PHY, "Set UE nb_rx_antenna %d, nb_tx_antenna %d, threequarter_fs %d, ofdm_offset_divisor %d\n", fp->nb_antennas_rx, fp->nb_antennas_tx, fp->threequarter_fs, fp->ofdm_offset_divisor);
 }
 
+/* nrue_shutdown_notify: notify callback of the shutdown subsystem: sets oai_exit and unblocks the ITTI tasks waiting on the message queue. Registered in main() through nr_shutdown_init(). */
 static void nrue_shutdown_notify(void)
 {
   oai_exit = 1;
@@ -319,6 +329,9 @@ static void trigger_stop(int sig)
 {
   nr_shutdown_signal(SIGINT);
 }
+/* trigger_deregistration: SIGINT/SIGTERM handler of the active SA UE: the first request sends a NAS deregistration to every UE instance, the second request (or a 5-second alarm) shuts down unconditionally through trigger_stop().
+ *   Passive RX has nothing to deregister and does not use this handler. Installed by main() when deregister_first is set.
+ */
 static void trigger_deregistration(int sig)
 {
   static bool deregistration_sent = false;
@@ -338,6 +351,7 @@ static void trigger_deregistration(int sig)
   alarm(5);
 }
 
+/* nrue_ru_start_thread: thread body that starts the radio (nrue_ru_start) and returns its result; created by main() at real-time priority on the planned UHD core. */
 void *nrue_ru_start_thread(void *arg)
 {
   (void)arg;
@@ -348,12 +362,17 @@ int NB_UE_INST = 1;
 configmodule_interface_t *uniqCfg = NULL;
 nrLDPC_coding_interface_t nrLDPC_coding_interface = {0};
 
+/* gpu_platform_log: logger installed by main() into the GPU platform (nr_gpu_set_logger): forwards its messages to LOG_W or LOG_I with the PHY component. */
 static void gpu_platform_log(int warning, const char *text)
 {
   if (warning) LOG_W(PHY, "%s\n", text);
   else LOG_I(PHY, "%s\n", text);
 }
 
+/* main: softmodem entry point for the NR UE and the passive receiver: starts the shutdown subsystem, loads the configuration, parses the options, and initialises the sensing, monitor, CPU plan, ITTI tasks, PDCP/NAS and cell parameters.
+ *   Then starts the time manager, the GPU warm-up and the discovery pipelines, locks memory, starts the sensing and PRACH services and the radio thread, and waits for the ITTI end signal.
+ *   Shutdown sequence: request, wait for the radio release, stop the passive queues and the discovery pipelines, close the outputs, join the ITTI tasks and services, then nr_shutdown_finish(). Offline replay (ISAC_PASSIVE_REPLAY_INPUT or CAPTURE) exits before any radio start-up.
+ */
 int main(int argc, char **argv)
 {
   start_background_system();
