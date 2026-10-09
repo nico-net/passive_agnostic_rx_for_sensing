@@ -665,7 +665,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     return;
   }
   solver_rnti_t *r = &g_r[p->slot];
-  if (p->comb >= 1) {
+  if (p->comb >= 1 && (!r->solved || !p->probe)) {
     const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb == 5 ? 3 : 0;
     r->comb_try[ci]++;
     if (crc_ok) r->comb_ok[ci]++;
@@ -755,6 +755,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
         g_st.solved++;
         r->solved_abs = p->abs;
+        memset(r->comb_try, 0, sizeof(r->comb_try)); /* receiver choice from post-solve decodes only (pre-solve probes */
+        memset(r->comb_ok, 0, sizeof(r->comb_ok));   /*  fail for every receiver and biased the choice) */
         LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by 2 independent CRC passes: layout %d (%d consistent) "
                    "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%d\n",
               r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,
