@@ -280,8 +280,8 @@ static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint
   if (max_ls > 0)
     k_ls_pdcch<<<dim3((max_ls + 255) / 256, n), 256, 0, g_stream>>>(g_d_jobs, g_d_gold, g_d_rxF, N, MAX_DUR, nant, fco, g_d_ls);
   if (g_cpu_arithmetic)
-    k_pdcch_cpu_arithmetic<<<dim3(n, MAX_DUR), 1, 0, g_stream>>>(g_d_jobs, g_d_gold, g_d_rxF, N, nant, fco,
-                                                             g_d_llr, g_force_mask);
+    k_pdcch_cpu_arithmetic_par<<<dim3(n, MAX_DUR), PDCCH_PAR_THREADS, 0, g_stream>>>(g_d_jobs, g_d_gold, g_d_rxF, N, nant, fco,
+                                                                                  g_d_llr, g_force_mask);
   else if (max_re > 0)
     k_llr_pdcch<<<dim3((max_re + 127) / 128, n), 128, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_rxF, N, MAX_DUR, nant, fco, g_d_llr,
                                                                      g_llr_scale);
