@@ -53,6 +53,9 @@ static int table_cap;
 static int hash_head[HYP_HASH_SIZE];
 static pthread_once_t table_once = PTHREAD_ONCE_INIT;
 
+/* pattern_hash: hash of a footprint pattern (symbol mask, subcarrier mask, density) into the 32768-bucket hyp table index.
+ *   Pure function. Callers: add_entry() (table build) and nr_csirs_disc_hypotheses() (exact lookup).
+ */
 static unsigned pattern_hash(uint16_t sym_mask, uint16_t sc_mask, uint8_t density)
 {
   uint32_t x = (uint32_t)sym_mask * 0x9e3779b1u;
@@ -62,6 +65,9 @@ static unsigned pattern_hash(uint16_t sym_mask, uint16_t sc_mask, uint8_t densit
   return x & (HYP_HASH_SIZE - 1);
 }
 
+/* add_entry: adds one legal (row, bitmap, l0, l1, density) hypothesis with its symbol and subcarrier pattern to the hash table, growing it as needed.
+ *   Called only while building the table (build_table(), once). Caller: build_table().
+ */
 static void add_entry(const nr_csirs_disc_hyp_t *hyp, uint16_t sym_mask, uint16_t sc_mask)
 {
   if (table_n == table_cap) {
@@ -77,6 +83,9 @@ static void add_entry(const nr_csirs_disc_hyp_t *hyp, uint16_t sym_mask, uint16_
   hash_head[bucket] = table_n++;
 }
 
+/* mapping_footprint: derives the time-frequency footprint of one CSI-RS configuration from OAI's mapping table: which symbols and which subcarriers it occupies, and its CDM type.
+ *   Returns false for a mapping that does not fit the 12 x 14 grid or has no RE. Caller: build_table().
+ */
 static bool mapping_footprint(
     int row, int bitmap, int l0, int l1, uint16_t *sym_mask, uint16_t *sc_mask, uint8_t *cdm_type)
 {
@@ -117,6 +126,9 @@ static bool mapping_footprint(
   return true;
 }
 
+/* build_table: one-time build (pthread_once) of the table of all legal CSI-RS hypotheses: rows 1-18, every frequency-domain bitmap with the right number of ones, every start symbol and every density.
+ *   Uses the row rules above; the bitmap popcount test guards the unbounded walk of get_csi_mapping_parms(). Caller: nr_csirs_disc_hypotheses() via pthread_once.
+ */
 static void build_table(void)
 {
   for (int i = 0; i < HYP_HASH_SIZE; i++)
@@ -156,6 +168,7 @@ static void build_table(void)
   }
 }
 
+/* valid_period: true when a period is one of the legal CSI-RS periods (4, 5, 8, 10, 16, 20, 32, 40, 64, 80, 160, 320, 640 slots). */
 static bool valid_period(uint16_t period)
 {
   static const uint16_t legal[NR_CSIRS_DISC_NUM_PERIODS] = {4, 5, 8, 10, 16, 20, 32, 40, 64, 80, 160, 320, 640};
@@ -165,6 +178,9 @@ static bool valid_period(uint16_t period)
   return false;
 }
 
+/* valid_fp: sanity check of a detected footprint: non-empty masks within the 14 x 12 grid, legal density, RB range inside the carrier, legal period and offset below it.
+ *   Caller: nr_csirs_disc_hypotheses() (invalid footprints produce no hypotheses).
+ */
 static bool valid_fp(const nr_csirs_disc_fp_t *fp)
 {
   return fp && fp->sym_mask && !(fp->sym_mask & ~0x3fffu) && fp->sc_mask && !(fp->sc_mask & ~0x0fffu)
@@ -173,6 +189,9 @@ static bool valid_fp(const nr_csirs_disc_fp_t *fp)
          && fp->offset < fp->period;
 }
 
+/* footprint_iou: intersection-over-union of two footprints (symbol x subcarrier REs), in [0, 1]. Used as the fit of a near-match hypothesis.
+ *   Caller: nr_csirs_disc_hypotheses() (near matches, fit >= 0.8).
+ */
 static float footprint_iou(uint16_t a_sym, uint16_t a_sc, uint16_t b_sym, uint16_t b_sc)
 {
   const int a = __builtin_popcount((unsigned)a_sym) * __builtin_popcount((unsigned)a_sc);
@@ -181,6 +200,9 @@ static float footprint_iou(uint16_t a_sym, uint16_t a_sc, uint16_t b_sym, uint16
   return (float)intersection / (float)(a + b - intersection);
 }
 
+/* hyp_order: ranking of hypotheses: higher fit first, then footprint index, row, frequency domain, start symbols. Returns -1 when a sorts before b.
+ *   Used by insert_ranked().
+ */
 static int hyp_order(const nr_csirs_disc_hyp_t *a, const nr_csirs_disc_hyp_t *b)
 {
   if (a->fit != b->fit)
@@ -198,6 +220,9 @@ static int hyp_order(const nr_csirs_disc_hyp_t *a, const nr_csirs_disc_hyp_t *b)
   return 0;
 }
 
+/* insert_ranked: inserts a hypothesis into the output array kept sorted by hyp_order(), dropping the lowest-ranked when the array is full.
+ *   Caller: nr_csirs_disc_hypotheses().
+ */
 static void insert_ranked(nr_csirs_disc_hyp_t *out, int *n, int max_out, const nr_csirs_disc_hyp_t *candidate)
 {
   int pos = *n;
@@ -216,6 +241,9 @@ static void insert_ranked(nr_csirs_disc_hyp_t *out, int *n, int max_out, const n
   out[pos] = *candidate;
 }
 
+/* nr_csirs_disc_hypotheses: turns the detected footprints into CSI-RS hypotheses: exact footprint matches first (fit 1), then near matches with IoU >= 0.8, ranked by fit, into out (at most max_out).
+ *   Each hypothesis takes the footprint's RB extent, period and offset. Returns the count. Callers: nr_csirs_disc.c (batch hypotheses and the warm-up in init_once()) and tests/nr_csirs_disc_hyp_test.cc.
+ */
 int nr_csirs_disc_hypotheses(const nr_csirs_disc_fp_t *fps, int n_fp, nr_csirs_disc_hyp_t *out, int max_out)
 {
   if (!fps || n_fp <= 0 || !out || max_out <= 0)

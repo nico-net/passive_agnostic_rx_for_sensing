@@ -49,6 +49,9 @@ static int                    g_n_monitors = 0;
 static int                    g_parsed     = 0;
 static pthread_mutex_t        g_monitor_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* same_geometry: true when two CSI-RS PDUs describe the same resource: row, frequency domain, symbols, CDM, density, RB extent and scrambling ID.
+ *   Used to find a monitor entry (static or dynamic) before adding or removing one. Callers: nr_csirs_monitor_add_dynamic(), nr_csirs_monitor_remove_dynamic().
+ */
 static bool same_geometry(const fapi_nr_dl_config_csirs_pdu_rel15_t *a,
                           const fapi_nr_dl_config_csirs_pdu_rel15_t *b)
 {
@@ -101,6 +104,9 @@ static int parse_one(const char* item, nr_csirs_monitor_res_t* m)
   return 1;
 }
 
+/* nr_csirs_monitor_init: one-time parse of the [sensing] csirs_monitor option: a comma-separated list of manually configured NZP/ZP resources (row:start_rb:nr_rbs:...:period:offset).
+ *   Malformed entries are logged and skipped; the list is capped at NR_CSIRS_MONITOR_MAX. Runs once (g_parsed). Caller: executables/nr-uesoftmodem.c (start-up).
+ */
 void nr_csirs_monitor_init(void)
 {
   pthread_mutex_lock(&g_monitor_lock);
@@ -165,6 +171,9 @@ void nr_csirs_monitor_init(void)
   pthread_mutex_unlock(&g_monitor_lock);
 }
 
+/* nr_csirs_monitor_enabled: returns 1 when at least one monitor resource (static or dynamic) is configured, else 0.
+ *   Callers: phy_procedures_nr_ue.c (per-slot CSI-RS monitor) and csi_rx.c (CSI-RS receive path).
+ */
 int nr_csirs_monitor_enabled(void)
 {
   pthread_mutex_lock(&g_monitor_lock);
@@ -173,6 +182,7 @@ int nr_csirs_monitor_enabled(void)
   return enabled;
 }
 
+/* nr_csirs_monitor_due: returns the monitor resources due on (frame, slot): thin wrapper of nr_csirs_monitor_due_ex() without slot deltas. */
 int nr_csirs_monitor_due(int                                         frame,
                          int                                         slot,
                          int                                         slots_per_frame,
@@ -182,6 +192,10 @@ int nr_csirs_monitor_due(int                                         frame,
   return nr_csirs_monitor_due_ex(frame, slot, slots_per_frame, out, NULL, max);
 }
 
+/* nr_csirs_monitor_due_ex: lists the monitor resources whose period and offset match the absolute slot frame*slots_per_frame+slot, up to max, with their slot delta.
+ *   Copies each matching PDU into a thread-local snapshot and points out[] at it, so callers can use it after the lock is released. Returns the count.
+ *   Caller: phy_procedures_nr_ue.c (per slot). Takes g_monitor_lock.
+ */
 int nr_csirs_monitor_due_ex(int frame,
                             int slot,
                             int slots_per_frame,
@@ -210,6 +224,10 @@ int nr_csirs_monitor_due_ex(int frame,
   return count;
 }
 
+/* nr_csirs_monitor_add_dynamic: adds a discovered CSI-RS resource (period, offset, slot delta) to the monitor list, or updates its slot delta when it already exists as a dynamic entry.
+ *   A manually configured entry is never converted into a dynamic one. The capacity is larger when ISAC_CSIRS_DISC=1. Returns the entry index, or -1 when full or invalid.
+ *   Logs CSIRS_DISC MONITOR_ADD. Caller: nr_csirs_blind_rt_slot() (confirmed discovery resources).
+ */
 int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
                                  uint16_t period,
                                  uint16_t offset,
@@ -261,6 +279,9 @@ int nr_csirs_monitor_add_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu,
   return index;
 }
 
+/* nr_csirs_monitor_remove_dynamic: removes every dynamic monitor entry whose resource matches the given PDU (same geometry), compacting the list.
+ *   Callers: nr_csirs_blind_rt.c (revocation, reconfiguration and export refresh).
+ */
 void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu)
 {
   if (!pdu)
@@ -277,6 +298,9 @@ void nr_csirs_monitor_remove_dynamic(const fapi_nr_dl_config_csirs_pdu_rel15_t *
   pthread_mutex_unlock(&g_monitor_lock);
 }
 
+/* nr_csirs_monitor_remove_dynamic_all: removes all dynamic monitor entries and keeps the manually configured ones. Called on a full configuration epoch.
+ *   Caller: epoch_listener() in nr_csirs_disc.c (weak symbol).
+ */
 void nr_csirs_monitor_remove_dynamic_all(void)
 {
   pthread_mutex_lock(&g_monitor_lock);

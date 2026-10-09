@@ -95,6 +95,9 @@ bool nr_csirs_observer_due(nr_csirs_observer_t *o, const nr_csirs_resource_t *r,
   return true;
 }
 
+/* nr_csirs_observer_refine: replaces the tracked resource geometry of an observed CSI-RS entry (old -> updated), so that a refined extent keeps its observation history.
+ *   No-op when the old resource is not tracked. Caller: nr_csirs_blind_rt_slot() (export refresh when a confirmed resource's extent changes).
+ */
 void nr_csirs_observer_refine(nr_csirs_observer_t *o, const nr_csirs_resource_t *old, const nr_csirs_resource_t *updated)
 {
   nr_csirs_observer_entry_t *e = find(o, old);
