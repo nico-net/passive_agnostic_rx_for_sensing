@@ -966,7 +966,7 @@ static void *pbch_scan_thread(void *arg)
 }
 
 /* nr_pbch_dmrs_scan_launch: launches the PBCH DM-RS scan once per process, on a detached thread, using a snapshot of the captured PBCH (g_pbch_live) and copies of the frame parameters and the process state.
- *   Does nothing when no capture is valid or a scan was already launched; frees its argument when the thread cannot be created. Caller: the PBCH decode path of the NR UE (nr_pbch.c).
+ *   Does nothing when no capture is valid or a scan was already launched; frees its argument when the thread cannot be created. No caller outside this file was found.
  */
 void nr_pbch_dmrs_scan_launch(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
