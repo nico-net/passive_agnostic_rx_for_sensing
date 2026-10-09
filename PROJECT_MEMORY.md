@@ -1,5 +1,67 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-09 (docs-only session, `csd/docs-1009`; no builds, replays or radio).** Verdicts from the csd
+> reports, each with its report path and branch @ commit. Index of every report: [INDEX](docs/superpowers/reports/csd/INDEX.md).
+> Nothing here is a new measurement; each claim keeps the label of its source report.
+>
+> **PDSCH SNR and multi-layer limit** ([T26 report](docs/superpowers/reports/csd/T26.md), `csd/t26b` @ 3458d912f2, §T26c/§T26d).
+> - `[MEASURED replay raw_pci415_12s_b, DGX]` The loss sits in multi-layer grants: Nl=1 QPSK CRC 82-92 %; Nl=2 QPSK 25-40 % at
+>   4.1-4.6 dB per layer; Nl=3 ~10 % at 2.9 dB.
+> - `[INFERRED]` Multi-layer per-layer SINR is the DL limit at this receiver position. `[MEASURED replay, paired A/B, small n]`
+>   null results: IRC (`ISAC_RX_IRC=4`), ML two-layer equaliser (`ISAC_RX_ML_2L`, `ISAC_RX_EQ_AB`), OCC-aware chest
+>   (`ISAC_CHEST_OCC`), LDPC iterations 8 vs 20 (`ISAC_LDPC_ITERS_AB`), solver preference (`ISAC_PDSCH_SOLVER_PREF=32`).
+> - `[MEASURED replay]` Per-RNTI MRC: `ISAC_RX_MRC_PER_RNTI=3` with `ISAC_RX_MRC_ALIGN=2` raises Nl=1 **QPSK** CRC from 82-87 %
+>   to 86-90 %. The report records no 16QAM gain for this setting. The recommended OTA env uses `ISAC_RX_MRC_PER_RNTI=1`.
+> - `[MEASURED replay, emulated live rate]` T26c round 2 (`ISAC_PDSCHQ_SIGNAL_TIME=1` replay only, never on air): PDSCH
+>   queue stale 61 % -> 0.5 % with the round-2 flag set. Scan p99 still 2-4 ms there.
+> - `[INFERRED, NOT OTA-VALIDATED; X410 unavailable 2026-10-09]` Recommended OTA env: T26c base plus the T26D/T26E sets listed in
+>   the T26 report, §T26d follow-ups. Leave unset: IRC, ML_2L, CHEST_OCC, LDPC_ITERS, SOLVER_PREF, all `*_AB` and PROBELOG
+>   diagnostics, `ISAC_RX_BRANCH_FO`. Never `ISAC_PDSCHQ_SIGNAL_TIME` on air.
+>
+> **Scan and channel-estimation speed** ([SCANFAST](docs/superpowers/reports/csd/SCANFAST.md), `csd/scan-fast` @ af1b85f8da;
+> [CHESTFAST](docs/superpowers/reports/csd/CHESTFAST.md), `csd/chest-fast` @ 1065830474).
+> - `[MEASURED replay]` SCANFAST: dedicated-only scan p99 1,127 us (baseline 1,200) on raw_pci415_12s_b; 1,687 us (baseline
+>   1,397) on raw_pci415_12s_20261008. The <500 us target is **not met**. A 0.66 candidate cutoff is rejected: it discards admitted DCIs.
+> - `[MEASURED replay, DGX]` CHESTFAST: `ISAC_CHEST_STAGE_TIMING=1` profiler added. The FFTW delay shortcut is rejected: estimator
+>   CPU 187 us vs 162 us reference, and a different delay peak. The <250 us full PDSCH job gate is **not met**.
+> - `[ANALYTICAL]` FEP 300-500 us plus LDPC 250-300 us per job (T26c) already exceed 250 us before channel estimation.
+>
+> **Interference and front end** ([SNRAUDIT](docs/superpowers/reports/csd/SNRAUDIT.md), `csd/snr-audit` @ a992b52161).
+> - `[OFFLINE raw_pci415_12s_b]` The 6-14 dB PDSCH post-EQ SNR is co-channel interference from three time-aligned cells,
+>   PCI 415, 380 and 249 (SSB sweep). Beamforming and receiver distortion are ruled out.
+> - `[OFFLINE b]` Front end clean: idle noise floor flat on all four chains. RX2 fault is ahead of the LNA (cable/antenna).
+>   Lever: spatial suppression (IRC measured +2.1 dB on 200 grants), then cancellation.
+>
+> **Uplink at this position** ([ULDBG](docs/superpowers/reports/csd/ULDBG.md), `csd/ul-dbg` @ ce7ce9a877).
+> - `[OFFLINE VERIFIED]` UL slots 8, 9, 18, 19 sit at the guard/noise floor; DL is ~40-45 dB above. PUSCH mapping confirmed by DM-RS positive control.
+> - `[OFFLINE VERIFIED]` First PUSCH CRC is out of reach at this position. Needed: >= 15-20 dB more UL path gain and a working RX2.
+> - UL branches ul-a/ul-b/ul-c/ul-r2 are `[CODE-READ + IMPLEMENTED]`, not validated.
+>
+> **RX recovery** ([RXR](docs/superpowers/reports/csd/RXR.md), `csd/rxr` @ 7296a4d9e3).
+> - `[OFFLINE VERIFIED]` NOCTRL recovery (re-arm without X410 control reads) passes unit tests and a two-gap raw-IQ replay
+>   (resync 413 ms). The producer path has no on-air fault test yet.
+>
+> **Start-up drops** ([STARTUPDROPS](docs/superpowers/reports/csd/STARTUPDROPS.md), `csd/startup-drops` @ 6303219962).
+> - `[INFERRED, strong]` Root cause: missing CPU isolation for RX-critical threads on the 2026-10-08 boot (`isolcpus=17-19`,
+>   producer on core 16, `uhd_ctrl` on a shared core). Every failing start of that boot is listed in the report.
+> - `[OTA LIVE 2026-10-09]` 8/8 zero-drop starts on the 15-19 boot; 8 runs of the 11:50-12:00 window, both arms, 0 drops.
+> - Decisive reproduction (producer on non-isolated core 14, no fix) is **not yet run**. Until it is, the causal claim stays INFERRED.
+>   `ISAC_USRP_RING_PRIO=98` and `ISAC_USRP_RING_POLL=1` are untested on air.
+>
+> **Host rules** (`[HOST-READ 2026-10-09]`, checked on the host and in `rr-orchestration`):
+> - DGX boot must carry `isolcpus=15-19 nohz_full=15-19 rcu_nocbs=15-19 irqaffinity=0-14` (read from `/proc/cmdline`;
+>   `/sys/devices/system/cpu/isolated` = 15-19). `uhd_ctrl` on core 15, USRP ring producer on core 16. Never put `uhd_ctrl`
+>   on a non-isolated core (1 ns sleep loop, ~2 M context switches/s).
+> - Every heavy job (build, ctest, replay, capture, OTA) goes through `rr-orchestration/heavy.sh`: global exclusive lock
+>   `locks/heavy.lock`, thermal gate (80 C), memory gate (48 GB MemAvailable), nice 19, cores 0-4,8-14. `ninja -j6` at most.
+> - The `X410_UNAVAILABLE` marker in `rr-orchestration` blocks `ota/ota.sh` (exit 6). Set by the user 2026-10-09 14:27:22
+>   +02:00: no radio, OTA or capture until the user removes it.
+> - Mgmt alias `192.168.30.1/24` on `enP7s7`: present at inventory time 2026-10-09. Re-check after every reboot.
+>
+> **Hardware, 2026-10-09.** The user replaced the antenna on X410 channel 2 (`[USER REPORT]`). The next OTA must check RX2
+> power and SNR first: `antstats.py` CHPOW per channel and `br_snr` (`rr-orchestration/PENDING_DISPATCH.md`). RX2 was dead in
+> the 2026-10-08 captures (ULDBG, SNRAUDIT). No fix is claimed until the OTA check runs.
+
 > **Update 2026-10-08 (DGX aarch64 sandbox, `csd/t24b`).** [CODE-READ]
 > T24b restores the pre-T24 CSI-RS flag-off CUDA launch/copy schedule using
 > compile-time specialization, removes redundant nID per-launch waits, bounds
