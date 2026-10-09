@@ -100,7 +100,7 @@ int nr_gpu_budget_rt_wait(int (*query)(void *),void *job,uint64_t start,
   return rc;
 }
 /* nr_gpu_budget_discovery_begin: asks for one discovery GPU slice at time now. Returns 1 when the slice may start (the discovery owner is then held), 0 when it must yield (pacing, RT in flight, or the rolling budget is full), -1 after a fault.
- *   Reserves the hard slice ceiling (5 ms) before launch against the pct% budget per second. Counts yields. Caller: the discovery GPU paths (nr_csirs_disc_gpu / nr_pdcch_nid_gpu).
+ *   Reserves the hard slice ceiling (5 ms) before launch against the pct% budget per second. Counts yields. Callers: nr_gpu_budget_cuda.h (the CUDA wrappers) and the discovery GPU code.
  */
 int nr_gpu_budget_discovery_begin(uint64_t now) {
   if(!nr_gpu_budget_enabled())return 1;
