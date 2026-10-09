@@ -373,6 +373,9 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   return false;
 }
 
+/* nr_scan_ssb: worker body of one GSCN of the initial cell search: generates the PSS for the raster point, correlates it with the capture (per antenna, with the energy-ordered antennas), and decodes the SSB candidates it finds.
+ *   Prints the per-channel RMS of the acquisition buffer once per process (CHRMS). The capture is the worker's own copy, since the frequency-offset correction is applied in place. Results are returned through the SSB scan record. Caller: nr_initial_sync_impl() (one thread per GSCN).
+ */
 static void nr_scan_ssb(void *arg)
 {
   /*   Initial synchronisation
@@ -553,6 +556,10 @@ static void nr_scan_ssb(void *arg)
   completed_task_ans(ssbInfo->ans);
 }
 
+/* nr_initial_sync_impl: shared implementation of the initial cell search over the GSCN raster: optionally pre-selects the antennas by energy, sizes the scan batches from the scratch budget (ISAC_SCAN_SCRATCH_MB), and scans the GSCNs in batches on the thread pool, first detected cell wins in GSCN order.
+ *   Automatic acquisition (ISAC_AUTO_ACQUIRE=1, passive only) adds a coarse CFO search bounded by ISAC_ACQ_CFO_MAX_HZ. With pss_window_frame >= 0 only that frame of the capture is scanned.
+ *   Returns the detected cell result (cell_detected false when none). Callers: nr_initial_sync() and nr_initial_sync_fast().
+ */
 static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                   PHY_VARS_NR_UE *ue,
                                   int n_frames,
@@ -934,12 +941,14 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
   }
 }
 
+/* nr_initial_sync: full initial cell search over n_frames frames and the GSCN list (no prior timing). Returns the cell search result. Callers: executables/nr-ue.c (sync thread) and the SIMULATION tools. */
 nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, int n_frames,
                                   nr_gscn_info_t gscnInfo[MAX_GSCN_BAND], int numGscn)
 {
   return nr_initial_sync_impl(proc, ue, n_frames, gscnInfo, numGscn, 0, 0, -1, 0, 0);
 }
 
+/* nr_initial_sync_fast: initial cell search restricted to a predicted frame and PSS position (radius around expected_pss_position and the expected frame), with a limited antenna count and PSS stride. Returns the cell search result. Caller: executables/nr-ue.c (fast re-sync). */
 nr_initial_sync_t nr_initial_sync_fast(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, int n_frames,
                                        nr_gscn_info_t gscnInfo[MAX_GSCN_BAND], int numGscn,
                                        int expected_frame, int expected_pss_position, int radius,
