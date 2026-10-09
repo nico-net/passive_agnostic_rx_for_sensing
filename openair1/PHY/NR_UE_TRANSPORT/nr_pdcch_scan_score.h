@@ -21,11 +21,17 @@ static inline double nr_pdcch_scan_score_scalar_sum(const int16_t *llr, int n, i
   return b ? (double)a * (double)a / ((double)n * (double)b) : 0.0;
 }
 
+/* nr_pdcch_scan_score_scalar: scan score of one candidate's soft bits (the energy-consistency score used to rank candidates): the scalar form of nr_pdcch_scan_score_scalar_sum() with no absolute sum.
+ *   Inline. Callers: joint_anon_score() and the scan path of nr_pdcch_blind_monitor_rt.c.
+ */
 static inline double nr_pdcch_scan_score_scalar(const int16_t *llr, int n)
 {
   return nr_pdcch_scan_score_scalar_sum(llr, n, 0);
 }
 
+/* nr_pdcch_scan_score_neon_sum: NEON form of the scan score: returns (sum |x|)^2 / (n * sum x^2) over n soft bits, and stores sum |x| in *abs_sum when given; falls back to the scalar sum without NEON.
+ *   Processes 8 lanes per step with a scalar tail. Inline. Caller: nr_pdcch_scan_score_neon().
+ */
 static inline double nr_pdcch_scan_score_neon_sum(const int16_t *llr, int n, int64_t *abs_sum)
 {
 #if defined(__aarch64__) && defined(__ARM_NEON)
@@ -54,11 +60,13 @@ static inline double nr_pdcch_scan_score_neon_sum(const int16_t *llr, int n, int
 #endif
 }
 
+/* nr_pdcch_scan_score_neon: NEON scan score of n soft bits (no absolute sum returned). Inline. Callers: joint_anon_score() and nr_pdcch_blind_monitor_rt.c when ISAC_PDCCH_NEON_SCORE is set. */
 static inline double nr_pdcch_scan_score_neon(const int16_t *llr, int n)
 {
   return nr_pdcch_scan_score_neon_sum(llr, n, 0);
 }
 
+/* nr_pdcch_scan_abs_sum_scalar: sum of absolute values of n soft bits (scalar). Inline. Callers: nr_pdcch_scan_score_scalar_sum() users and the tests. */
 static inline int64_t nr_pdcch_scan_abs_sum_scalar(const int16_t *v, int n)
 {
   int64_t sum = 0;
@@ -66,6 +74,7 @@ static inline int64_t nr_pdcch_scan_abs_sum_scalar(const int16_t *v, int n)
   return sum;
 }
 
+/* nr_pdcch_scan_abs_sum_neon: sum of absolute values of n soft bits with NEON (8 lanes per step and a scalar tail); falls back to the scalar sum without NEON. Inline. Callers: nr_pdcch_blind_monitor_rt.c and the tests. */
 static inline int64_t nr_pdcch_scan_abs_sum_neon(const int16_t *v, int n)
 {
 #if defined(__aarch64__) && defined(__ARM_NEON)

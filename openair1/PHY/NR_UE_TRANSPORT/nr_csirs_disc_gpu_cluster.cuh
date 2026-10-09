@@ -4,11 +4,13 @@
 namespace resident {
 constexpr int CAND_CAP=2048, GPU_CAND_CAP=65536;
 struct candidate_t { nr_csirs_disc_fp_t fp; double significance; };
+/* gcd_period: device helper: greatest common divisor of two periods (see the CPU gcd_period() in nr_csirs_disc_fp.c). */
 __device__ static int gcd_period(int a,int b)
 {
   while(b) {int t=a%b;a=b;b=t;}return a;
 }
 
+/* rank_candidate: device comparator of footprint candidates (same order as the CPU rank_candidate()): significance x (strength - 1), then period, offset, symbol mask and RB start. */
 __device__ static int rank_candidate(const void *a, const void *b)
 {
   const candidate_t *x=(const candidate_t *)a,*y=(const candidate_t *)b;
@@ -19,6 +21,7 @@ __device__ static int rank_candidate(const void *a, const void *b)
   if(x->fp.sym_mask!=y->fp.sym_mask) return x->fp.sym_mask-y->fp.sym_mask;
   return x->fp.rb_start-y->fp.rb_start;
 }
+/* add_candidate: device bounded max-heap insert of a candidate (CAND_CAP entries), same policy as the CPU add_candidate(). */
 __device__ static void add_candidate(candidate_t *heap, int *count, candidate_t c)
 {
   int at;
@@ -35,6 +38,7 @@ __device__ static void add_candidate(candidate_t *heap, int *count, candidate_t 
   }
 }
 
+/* rank_strength: device comparator of finished footprints (strength, period, offset, symbol mask); same order as the CPU rank_strength(). */
 __device__ static int rank_strength(const void *a, const void *b)
 {
   const nr_csirs_disc_fp_t *x=(const nr_csirs_disc_fp_t *)a,*y=(const nr_csirs_disc_fp_t *)b;
@@ -65,6 +69,9 @@ template<class T, class Compare> __device__ void device_sort(T *a,int n,Compare 
     }
   }
 }
+/* finish_candidates: device version of finish_candidates(): drops duplicates and harmonics, merges symbol masks, removes contained fragments, and orders the output by strength.
+ *   Uses device_sort() for the ordering. Returns the number of footprints written (at most max_out). Caller: finish().
+ */
 __device__ static int finish_candidates(candidate_t *cand,int nc,nr_csirs_disc_fp_t *out,int max_out)
 {
   device_sort(cand,nc,rank_candidate);
@@ -109,6 +116,9 @@ __device__ static int finish_candidates(candidate_t *cand,int nc,nr_csirs_disc_f
   return n;
 }
 
+/* segment: GPU kernel: the segmentation step of the CPU cluster() for one (period, offset, symbol) per thread, over the masks produced by lattice_screen().
+ *   Builds the per-RB evidence from the history, segments each parity and density, and appends each significant candidate to cand[] through an atomic counter (capped at GPU_CAND_CAP). Launched by detect().
+ */
 __global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
     const uint64_t *sum,const uint64_t *sum80,const uint64_t *sum64,
     const uint64_t *tot,const uint64_t *totq,const uint16_t *masks,
@@ -189,6 +199,7 @@ __global__ void segment(int rb_count,int p,uint64_t nt,const uint64_t *counts,
 
   }
 }
+/* collect: GPU kernel (single thread): merges the raw candidates of one scheduling group into that group's heap (capped at CAND_CAP), clearing it first when requested. Launched by detect(). */
 __global__ void collect(candidate_t *raw,unsigned *count,candidate_t *groups,int *sizes,int group,bool clear)
 {
   if(clear) sizes[group]=0;
@@ -196,6 +207,7 @@ __global__ void collect(candidate_t *raw,unsigned *count,candidate_t *groups,int
   for(unsigned i=0;i<min(*count,(unsigned)GPU_CAND_CAP);++i) add_candidate(groups+group*CAND_CAP,&n,raw[i]);
   sizes[group]=n;
 }
+/* finish: GPU kernel (single thread): merges the four scheduling groups and runs finish_candidates() on the result, writing the footprint count to *nout. Launched by detect(). */
 __global__ void finish(candidate_t *groups,int *sizes,candidate_t *all,nr_csirs_disc_fp_t *out,int *nout,int maxout)
 {
   int n=0;for(int g=0;g<4;++g) for(int i=0;i<sizes[g];++i) add_candidate(all,&n,groups[g*CAND_CAP+i]);
@@ -217,6 +229,9 @@ struct State {
   int rb=0,ant=0,capacity=0,round=0;
   uint16_t symbols=0;uint8_t host_exclude[14*12*NR_CSIRS_DISC_MAX_RB]={};
 } state;
+/* prepare: reserves the resident detector buffers (history sums, pooled sums, totals, grid, metadata, masks, candidate heaps) for a carrier of rb RBs, ant antennas and capacity slots.
+ *   Returns false when any allocation fails. Called by detect() on a configuration change and by prepare_host() in nr_csirs_disc_gpu.cu.
+ */
 static bool prepare(int rb,int ant,int capacity)
 {
   auto &s=state;int pooled=168*((rb+15)/16),nr=14*12*rb+pooled;
@@ -229,7 +244,14 @@ static bool prepare(int rb,int ant,int capacity)
     && s.raw.reserve(GPU_CAND_CAP) && s.groups.reserve(4*CAND_CAP) && s.all.reserve(CAND_CAP)
     && s.count.reserve(1) && s.sizes.reserve(4) && s.nout.reserve(1) && s.out.reserve(128);
 }
+/* reset: forgets the resident history (clears the cached identity of the ring grid) so that the next detect() rebuilds it.
+ *   Called by nr_csirs_disc_gpu.cu (resident reset after the warm-up) and by the detector reset path.
+ */
 static void reset() {state.identity=nullptr;}
+/* detect: resident GPU footprint detector: folds the new slots of the ring into the device history (normalise, pool, accumulate), then runs lattice_pool/lattice_screen/segment per period group and finishes the footprints on the device.
+ *   Rebuilds the history on a change of grid, geometry, symbol mask or exclusion mask. Only the final footprints are copied back to the host. Returns the count, or -1 (with the state reset) on any CUDA error.
+ *   Caller: the GPU footprint entry in nr_csirs_disc_gpu.cu (footprints() / prepare_host()).
+ */
 static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,nr_csirs_disc_fp_t *out,int maxout,bool scheduled)
 {
   if(!nr_disc_fp_valid(r) || maxout<1) return -1;

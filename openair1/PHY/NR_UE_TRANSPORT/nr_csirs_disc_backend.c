@@ -14,6 +14,7 @@ static pthread_mutex_t breaker_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t retry_after_ms;
 static unsigned failures;
 
+/* monotonic_ms: returns CLOCK_MONOTONIC time in milliseconds (clock of the GPU circuit breaker's retry timer). */
 static uint64_t monotonic_ms(void)
 {
   struct timespec ts;
@@ -21,6 +22,9 @@ static uint64_t monotonic_ms(void)
   return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+/* breaker_ready: circuit breaker check: true when the GPU backend may be used now (the retry time after the last failure has passed).
+ *   Takes breaker_lock. Called before every guarded GPU call and by nr_csirs_disc_gpu_load().
+ */
 static bool breaker_ready(void)
 {
   bool ready;
@@ -30,6 +34,9 @@ static bool breaker_ready(void)
   return ready;
 }
 
+/* breaker_result: records the outcome of one GPU call: success (rc >= 0) clears the failure count; a failure doubles the retry delay (100 ms << (failures-1), capped at 3.2 s).
+ *   Takes breaker_lock. Called after every guarded GPU call.
+ */
 static void breaker_result(int rc)
 {
   pthread_mutex_lock(&breaker_lock);
@@ -44,6 +51,9 @@ static void breaker_result(int rc)
   pthread_mutex_unlock(&breaker_lock);
 }
 
+/* guarded_footprints: GPU footprint detection behind the circuit breaker: returns -1 without calling the GPU while the breaker is open.
+ *   Installed as public_ops.footprints by load_module(). Reports its result to breaker_result().
+ */
 static int guarded_footprints(const nr_csirs_disc_ring_t *r,
                               const nr_csirs_disc_fp_cfg_t *cfg,
                               nr_csirs_disc_fp_t *out,
@@ -56,6 +66,9 @@ static int guarded_footprints(const nr_csirs_disc_ring_t *r,
   return rc;
 }
 
+/* guarded_normalize: GPU normalisation of a ring behind the circuit breaker; returns -1 while the breaker is open.
+ *   Installed as public_ops.normalize by load_module(). Reports its result to breaker_result().
+ */
 static int guarded_normalize(const nr_csirs_disc_ring_t *r,
                               const nr_csirs_disc_fp_cfg_t *cfg,
                               uint32_t *out)
@@ -67,6 +80,9 @@ static int guarded_normalize(const nr_csirs_disc_ring_t *r,
   return rc;
 }
 
+/* guarded_sweep: GPU correlation sweep of a set of hypotheses behind the circuit breaker; returns -1 while the breaker is open.
+ *   Installed as public_ops.sweep by load_module(). Reports its result to breaker_result().
+ */
 static int guarded_sweep(const nr_csirs_disc_ring_t *r,
                          const nr_csirs_disc_hyp_t *hyps,
                          int n_hyp,
@@ -80,6 +96,9 @@ static int guarded_sweep(const nr_csirs_disc_ring_t *r,
   return rc;
 }
 
+/* guarded_fft: GPU FFT behind the circuit breaker; returns -1 while the breaker is open.
+ *   Installed as public_ops.fft by load_module(). Reports its result to breaker_result().
+ */
 static int guarded_fft(int fft, int transforms, const int16_t *in, int16_t *out)
 {
   if (!raw_ops.fft || !breaker_ready()) return -1;
@@ -88,12 +107,18 @@ static int guarded_fft(int fft, int transforms, const int16_t *in, int16_t *out)
   return rc;
 }
 
+/* guarded_fep: GPU FEP (symbol extraction into the ring) behind the circuit breaker; returns -1 while the breaker is open.
+ *   Installed as public_ops.fep by load_module(). Reports its result to breaker_result().
+ */
 static int guarded_fep(const nr_csirs_disc_fep_cfg_t *c, const nr_csirs_disc_fep_slot_t *s,
                        int n, nr_csirs_disc_ring_t *r, int first)
 {
   if (!raw_ops.fep || !breaker_ready()) return -1;
   int rc=raw_ops.fep(c,s,n,r,first);breaker_result(rc);return rc;
 }
+/* guarded_accumulate: GPU accumulation of the footprint statistics behind the circuit breaker; returns -1 while the breaker is open.
+ *   Installed as public_ops.accumulate by load_module(). Reports its result to breaker_result().
+ */
 static int guarded_accumulate(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c,
                               uint64_t *s, uint64_t *q, uint64_t *s80, uint64_t *s64,
                               uint64_t *t, uint64_t *tq)
@@ -102,6 +127,9 @@ static int guarded_accumulate(const nr_csirs_disc_ring_t *r, const nr_csirs_disc
   int rc=raw_ops.accumulate(r,c,s,q,s80,s64,t,tq);breaker_result(rc);return rc;
 }
 
+/* guarded_lattice: GPU lattice screen of the accumulated statistics behind the circuit breaker; returns -1 while the breaker is open.
+ *   Installed as public_ops.lattice by load_module(). Reports its result to breaker_result().
+ */
 static int guarded_lattice(int rb,int p,uint64_t nt,const uint64_t *counts,
                            const uint64_t *sum,const uint64_t *sq,const uint64_t *total,
                            const uint64_t *totalq,uint16_t *masks)
@@ -110,6 +138,9 @@ static int guarded_lattice(int rb,int p,uint64_t nt,const uint64_t *counts,
   int rc=raw_ops.lattice(rb,p,nt,counts,sum,sq,total,totalq,masks);breaker_result(rc);return rc;
 }
 
+/* open_sibling: opens a shared library by name, first through the normal loader path and then next to the running executable (/proc/self/exe).
+ *   Returns the dlopen handle or NULL. Used by load_module() for libcsirs_disc_gpu.so and libnr_csirs_disc_gpu_sweep.so.
+ */
 static void *open_sibling(const char *name)
 {
   void *handle = dlopen(name, RTLD_NOW | RTLD_LOCAL);
@@ -127,7 +158,10 @@ static void *open_sibling(const char *name)
   return dlopen(path, RTLD_NOW | RTLD_LOCAL);
 }
 
-/* Keep modules loaded for the lifetime of managed allocations and the worker. */
+/* load_module: one-time (pthread_once) loader of the CSI-RS discovery GPU modules: fills raw_ops from the two shared libraries and installs the guarded public_ops.
+ *   Also takes the unified-memory allocator hooks when both are exported. Modules stay loaded for the process lifetime.
+ *   Called only through pthread_once from nr_csirs_disc_gpu_load().
+ */
 static void load_module(void)
 {
   void *fp_handle = open_sibling("libcsirs_disc_gpu.so");
@@ -172,11 +206,18 @@ static void load_module(void)
   public_ops.sweep = raw_ops.sweep ? guarded_sweep : NULL;
 }
 
+/* nr_csirs_disc_gpu_ops: returns the guarded GPU operations table, or NULL when no GPU module provides footprints or sweep.
+ *   Caller: nr_csirs_disc_gpu_load() (and the GPU module, nr_csirs_disc_gpu.cu, through its own entry).
+ */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
   return (public_ops.footprints || public_ops.sweep) ? &public_ops : NULL;
 }
 
+/* nr_csirs_disc_gpu_load: returns the GPU operations for the discovery pipeline, loading the modules on first use; NULL when disabled or on the CPU backend.
+ *   Enabled only with ISAC_CSIRS_DISC=1 and ISAC_CSIRS_DISC_BACKEND not "cpu" (auto or gpu). Returns NULL while the breaker is open.
+ *   Callers: nr_csirs_disc.c (pipeline init and batches), nr_csirs_disc_feed.c (ring allocation and worker), nr_csirs_disc_td.c and the confirmation internals.
+ */
 const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_load(void)
 {
   const char *enabled = getenv("ISAC_CSIRS_DISC");

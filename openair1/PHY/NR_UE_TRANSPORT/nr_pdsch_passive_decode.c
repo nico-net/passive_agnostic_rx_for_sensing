@@ -105,17 +105,20 @@ static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static uint64_t g_pdtim_calls = 0;
-/* ISAC_CHEST_PDP_DIAG=0 (T26d): skip the per-call BRDELAY/PDP diagnostic of the channel estimator (double-precision
- * pass over the whole IDFT output on every (antenna, DM-RS symbol)); default 1 = unchanged. */
+/* chest_pdp_diag_on: returns ISAC_CHEST_PDP_DIAG (cached, default 1): whether the channel estimator runs its per-call BRDELAY/PDP diagnostic.
+ *   Setting it to 0 skips a double-precision pass over the IDFT output for every (antenna, DM-RS symbol).
+ *   Caller: the passive decode consumer, which copies it to nr_dl_chest_diag_request before each channel estimate.
+ */
 static int chest_pdp_diag_on(void)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 1;
   return en;
 }
-/* ISAC_PDSCH_HARQ_COMBINE=1 (T26d): the passive HARQ soft combining (same RNTI + HARQ id + NDI: a retransmission is
- * LDPC-decoded INTO the stored soft buffer of the failed first transmission; 64 LRU entries) on its own flag -- it
- * existed only inside the ISAC_AGNOSTIC_V2 bundle. */
+/* harq_combine_on: returns ISAC_PDSCH_HARQ_COMBINE (cached): 1 enables passive HARQ soft combining on its own flag.
+ *   With it on, a retransmission is LDPC-decoded into the stored soft buffer of the failed first transmission (64-entry LRU).
+ *   Callers: passive_ldpc_decode(), passive_decode_retry()/qamab(), nr_pdsch_passive_decode() (these skip their retry arms when on).
+ */
 static int harq_combine_on(void)
 {
   static int en = -1;
@@ -134,6 +137,9 @@ static inline int pdtim_enabled(void)
   return g_pdtim_on;
 }
 
+/* pdtim_now: returns the monotonic time in ns and stores the calling thread's CPU time in t_pdtim_cpu0 (used for the stage timers).
+ *   Two clock_gettime calls; only reached when ISAC_PDCCH_TIMING is set. Callers: decode stages in passive_decode_body().
+ */
 static inline uint64_t pdtim_now(void)
 {
   struct timespec t;
@@ -143,6 +149,10 @@ static inline uint64_t pdtim_now(void)
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+/* pdtim_add: adds the wall and thread-CPU time of one decode stage k (since t0 from pdtim_now) to the PDTIM counters.
+ *   No-op unless ISAC_PDCCH_TIMING is set. Updates count, total, max and CPU time of the stage in plain (non-atomic) globals.
+ *   Callers: passive_decode_body() after the FEP, channel estimation, allocation, demodulation and LDPC stages.
+ */
 static inline void pdtim_add(int k, uint64_t t0)
 {
   if (g_pdtim_on <= 0) {
@@ -158,6 +168,9 @@ static inline void pdtim_add(int k, uint64_t t0)
   }
 }
 
+/* pdtim_report: prints the per-stage PDTIM summary (mean, CPU mean, max, total) once every 200 decode calls.
+ *   Runs only with ISAC_PDCCH_TIMING set. Caller: passive_decode_body() at its end.
+ */
 static void pdtim_report(void)
 {
   if (g_pdtim_on <= 0) {
@@ -722,6 +735,9 @@ static __thread char t_decode_cb[4096]; /* E:CRC per CB, '-' means not attempted
 static __thread int t_decode_tdra_attempt;
 extern __thread bool nr_pdsch_decode_wide_mrc;
 extern __thread uint64_t nr_pdsch_decode_signs, nr_pdsch_decode_sign_errors;
+/* decode_diag_on: returns ISAC_PDSCH_DECODE_DIAG != 0 (cached atomically): enables the per-decode diagnostics (EVM accumulators, CB decode map).
+ *   Used to arm the EVM accumulator and to print decode details. Callers: passive_ldpc_decode_core() and passive_decode_body().
+ */
 static int decode_diag_on(void)
 {
   static _Atomic int on = -1;
@@ -802,6 +818,10 @@ static _Atomic uint64_t g_pipe_sum[2][PIPE_N_FIELDS];
 static const char *const kPipeName[PIPE_N_FIELDS] = {
     "G", "llr_have", "valid_re", "re_x_Qm_Nl", "C", "K", "Z", "F", "E", "R", "lbrm", "Qm", "Nl", "nsym"};
 
+/* nr_pdsch_passive_ldpc_stats_dump: prints the passive decoder's accumulated statistics: GPU/CPU FEP job counts, slot-share hit rates, LDPC and LLR diagnostics.
+ *   Output is LOG_I lines tagged SENSING (LLRDIAG, RBHIST, MCSHIST, HARQC, PTRS_SWEEP, PIPEDIAG, SEGIDX, ...) and reads only atomics.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (periodic summary).
+ */
 void nr_pdsch_passive_ldpc_stats_dump(void)
 {
   const uint64_t sf = atomic_load(&g_ldpc_seg_fail), tf = atomic_load(&g_ldpc_tb_fail);
@@ -1204,15 +1224,25 @@ uint32_t nr_pdsch_passive_last_llr(const int16_t **p) { *p = t_last_llr; return 
 static __thread c16_t **t_owned_iq;
 static __thread int t_owned_slot = -1;
 static __thread uint64_t t_fep_done_ns;
+/* nr_pdsch_passive_set_owned_iq: sets the thread-local pointer to the slot IQ buffer that this consumer owns for one slot (rx == NULL clears it).
+ *   Lets the decoder read the samples it already transformed instead of the live RX buffer.
+ *   Callers: nr_pdsch_passive_queue.c (set before a job, clear after) and tests/nr_ssb_rate_match_prod_check.c.
+ */
 void nr_pdsch_passive_set_owned_iq(c16_t **rx, int slot)
 {
   t_owned_iq = rx;
   t_owned_slot = rx ? slot : -1;
 }
+/* nr_pdsch_passive_iq_for_slot: returns the owned IQ buffer when slot matches the one registered by nr_pdsch_passive_set_owned_iq, otherwise the live buffer.
+ *   Used by the passive queue (FEP and debug dump) so that the same samples feed both the FEP and the channel estimate.
+ */
 c16_t **nr_pdsch_passive_iq_for_slot(int slot, c16_t **live)
 {
   return t_owned_iq && slot == t_owned_slot ? t_owned_iq : live;
 }
+/* nr_pdsch_passive_last_fep_ns: returns the time (ns) at which the last FEP of this thread finished, as recorded in t_fep_done_ns.
+ *   Read by the passive queue for CPU-cost accounting. Thread-local, no locking.
+ */
 uint64_t nr_pdsch_passive_last_fep_ns(void) { return t_fep_done_ns; }
 
 static __thread const int16_t *t_llr_ovr = NULL;
@@ -1271,7 +1301,10 @@ typedef struct {
   uint8_t main_decoder_used; /* decoder_used of the job's main decode (0 = not known yet) */
 } gw_ctx_t;
 
-/* Grant-constant inputs of the receive chain: a decode only shares a gw with the grant it was made for. */
+/* gw_fingerprint: hashes the grant-constant inputs of the receive chain (RNTI, slot, scrambling, DM-RS, BWP, allocation, frequency offset, receiver flags) with FNV-1a.
+ *   A decode may share a GrantWork entry only when its fingerprint equals the entry's (env-dependent fields included: MRC/IRC/QAM override, CSI-RS extent).
+ *   Callers: passive_decode_body() (GrantWork lookup) and nr_pdsch_passive_grantwork_begin().
+ */
 static uint64_t gw_fingerprint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *p, const freq_alloc_bitmap_t *fa,
                                const nr_pdsch_passive_grant_t *g, double fo)
 {
@@ -1381,6 +1414,11 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
   return e;
 }
 
+/* passive_ldpc_decode_core: LDPC stage of one passive decode: builds the TB parameters (segmentation, E, rate matching, HARQ buffer) and runs the LDPC decoder.
+ *   Returns true when every segment decodes and passes CRC. A one-code-block probe (ISAC_PDSCH_PROBE_C1) uses the TB CRC of its single block.
+ *   Side effects: updates the per-thread HARQ buffer and decoder-used tag; ISAC_LDPC_ITERS sets the iteration count; ISAC_PDSCH_TBPARM logs the parameter set.
+ *   Caller: passive_ldpc_decode().
+ */
 static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
                                 const UE_nr_rxtx_proc_t *proc,
                                 passive_harq_t *h,
@@ -1871,6 +1909,12 @@ void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
  * this file pulls in PHY_VARS_NR_UE/NFAPI and can't link into the lightweight test_nr_pdsch_prb_set
  * target. Declared via nr_pdsch_passive_decode.h's include of nr_pdsch_prb_set.h. */
 
+/* passive_decode_body: one complete passive PDSCH decode of a grant: FEP, channel estimation, equaliser, demodulation (LLRs) and LDPC, in that order.
+ *   Starts with the PRG hypothesis (ISAC_PRG_SWEEP), the TBS/LBRM derivation and the GrantWork lookup (skips FEP/chest/LLR when a READY entry exists).
+ *   Stages: FEP per symbol with per-antenna parallelism; channel estimate (ISAC_CHEST_*, ISAC_RX_IRC); demodulation (nr_rx_pdsch); LLR fill; LDPC via passive_ldpc_decode().
+ *   Other flags read here: ISAC_PTRS_K, ISAC_XANT, ISAC_DC_FIX, ISAC_RX_NVAR_FIX, ISAC_RX_ML_2L, ISAC_PDSCH_EVM, ISAC_PDSCH_LLR_DUMP, ISAC_LLR_SCALE, ISAC_RV_RETRY.
+ *   Writes the result to *out and its status (CRC_OK / CRC_FAIL / UNSUPPORTED). Caller: passive_decode_retry() only.
+ */
 static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             const UE_nr_rxtx_proc_t *proc,
                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -4744,9 +4788,11 @@ static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
                                                              c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                              nr_pdsch_passive_decode_result_t *out);
 
-/* LOW-MCS ISAC_PDSCH_CSI_EXTENT_AB=1 (diagnostic, default off): every full dedicated decode is first run, quiet and
- * with the DECODE-FIX recovery arms, with ISAC_PDSCH_CSI_RB_EXTENT inverted, then normally; one CSIAB line pairs
- * the two CRCs on identical received samples. */
+/* nr_pdsch_passive_decode: entry point: decodes one dedicated PDSCH grant of the passive receiver and fills *out; returns the decode status.
+ *   Default path: passive_decode_qamab() -> passive_decode_retry() -> passive_decode_body(). With ISAC_PDSCH_CSI_EXTENT_AB=1 (diagnostic) and a DCI 1_1 C-RNTI grant
+ *   it first runs a quiet decode with the CSI extent inverted and logs one SENSING: CSIAB line pairing both CRCs.
+ *   Callers: nr_pdsch_passive_queue.c (consumer threads, probe re-run), nr_pdcch_blind_monitor_rt.c (in-line decode), nr_passive_replay_capture.c.
+ */
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -4786,6 +4832,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   return st;
 }
 
+/* passive_decode_qamab: runs the decode once per ISAC_PDSCH_MMSE_AB mode (comma-separated list of QAM demapper modes), then once with the default mode.
+ *   Only for multi-layer, non-QPSK, C-RNTI DCI 1_1 grants; otherwise delegates to passive_decode_retry() directly.
+ *   Logs one SENSING: QAMAB line with the CRC and kappa of each mode; the final result is the default-mode decode. Caller: nr_pdsch_passive_decode().
+ */
 static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
                                                              const UE_nr_rxtx_proc_t *proc,
                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -4847,6 +4897,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
   return st;
 }
 
+/* passive_decode_retry: runs passive_decode_body() and, on a CRC failure, tries the recovery arms (default off): TDRA start symbol, CSI-RS rate matching, DM-RS CDM groups, wide MRC.
+ *   Arms: ISAC_PDSCH_TDRA_RETRY, ISAC_PDSCH_CSI_RETRY, ISAC_PDSCH_DMRS_CDM_RETRY, ISAC_PDSCH_WIDE_MRC_RETRY, ISAC_PDSCH_CSI_POPULATION_RETRY.
+ *   A recovered decode sets out->config_recovered. Each trial re-demodulates the same samples with quiet mode (t_quiet). Caller: passive_decode_qamab() and nr_pdsch_passive_decode().
+ */
 static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
                                                              const UE_nr_rxtx_proc_t *proc,
                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,

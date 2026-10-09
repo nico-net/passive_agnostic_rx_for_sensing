@@ -63,18 +63,27 @@ extern int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *) __attribute__((weak));
 extern int nr_csirs_blind_rt_discovery_drain(void) __attribute__((weak));
 static void worker_note_slot(void);
 
+/* read_enabled: reads ISAC_CSIRS_DISC once (pthread_once) and stores whether it is exactly "1".
+ *   Caller: nr_csirs_disc_enabled() (the cached switch for the whole discovery pipeline).
+ */
 static void read_enabled(void)
 {
   const char *value = getenv("ISAC_CSIRS_DISC");
   g_enabled = value != NULL && strcmp(value, "1") == 0;
 }
 
+/* nr_csirs_disc_enabled: returns the cached ISAC_CSIRS_DISC switch: true when CSI-RS blind discovery is enabled for this process.
+ *   Thread-safe after the first call. Read by the PHY receive path, the PDSCH queue (owned IQ) and the blind monitor.
+ */
 bool nr_csirs_disc_enabled(void)
 {
   pthread_once(&g_enabled_once, read_enabled);
   return g_enabled;
 }
 
+/* env_positive: reads a positive integer from the environment variable `name`, or returns fallback when unset, malformed, zero or negative.
+ *   Used for ISAC_CSIRS_DISC_BATCH, _RING and _TD_RING. Caller: nr_csirs_disc_start().
+ */
 static int env_positive(const char *name, int fallback)
 {
   const char *text = getenv(name);
@@ -86,6 +95,9 @@ static int env_positive(const char *name, int fallback)
   return errno == 0 && end != text && *end == '\0' && value > 0 && value <= INT32_MAX ? (int)value : fallback;
 }
 
+/* env_core: returns the CPU core for the discovery worker from ISAC_CSIRS_DISC_CORE, or -1 (no pinning) when unset or invalid.
+ *   Caller: nr_csirs_disc_start().
+ */
 static int env_core(void)
 {
   const char *text = getenv("ISAC_CSIRS_DISC_CORE");
@@ -97,6 +109,10 @@ static int env_core(void)
   return errno == 0 && end != text && *end == '\0' && value >= 0 && value <= INT32_MAX ? (int)value : -1;
 }
 
+/* nr_csirs_disc_ring_init: allocates a CSI-RS IQ ring of capacity slots (n_ant antennas, n_rb RBs, 14 symbols each) plus its metadata, locks and serial numbers.
+ *   The grid is zeroed and 64-byte aligned; with unified=true the allocator hook is used for GPU-visible memory. Returns 0, or -1 on bad arguments or allocation failure (everything freed).
+ *   Callers: nr_csirs_disc_start() (worker ring and snapshot ring) and the tests.
+ */
 int nr_csirs_disc_ring_init(nr_csirs_disc_ring_t *r, int n_ant, int n_rb, int slots_per_frame, int capacity, bool unified)
 {
   if (r == NULL || n_ant < 1 || n_ant > NR_CSIRS_DISC_MAX_ANT || n_rb < 1 || n_rb > NR_CSIRS_DISC_MAX_RB
@@ -153,6 +169,9 @@ int nr_csirs_disc_ring_init(nr_csirs_disc_ring_t *r, int n_ant, int n_rb, int sl
   return 0;
 }
 
+/* nr_csirs_disc_ring_free: frees a ring created by nr_csirs_disc_ring_init(): grid (unified or host), device grid, metadata, locks and private state.
+ *   NULL-safe. Callers: nr_csirs_disc_start() (failure path), nr_csirs_disc_stop() and the tests.
+ */
 void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r)
 {
   if (r == NULL)
@@ -178,12 +197,18 @@ void nr_csirs_disc_ring_free(nr_csirs_disc_ring_t *r)
   memset(r, 0, sizeof(*r));
 }
 
+/* nr_csirs_disc_ring_read_lock: takes the ring's read lock (serialises readers against reset and push), returns true on success.
+ *   Pair with nr_csirs_disc_ring_read_unlock(). No production caller; used by tests/nr_csirs_disc_feed_test.cc.
+ */
 bool nr_csirs_disc_ring_read_lock(nr_csirs_disc_ring_t *r)
 {
   ring_private_t *state = r != NULL ? r->private_state : NULL;
   return state != NULL && pthread_mutex_lock(&state->read_lock) == 0;
 }
 
+/* nr_csirs_disc_ring_read_unlock: releases the ring's read lock taken by nr_csirs_disc_ring_read_lock(); a NULL ring or missing state is a no-op.
+ *   No production caller; used by tests/nr_csirs_disc_feed_test.cc.
+ */
 void nr_csirs_disc_ring_read_unlock(nr_csirs_disc_ring_t *r)
 {
   ring_private_t *state = r != NULL ? r->private_state : NULL;
@@ -191,7 +216,9 @@ void nr_csirs_disc_ring_read_unlock(nr_csirs_disc_ring_t *r)
     pthread_mutex_unlock(&state->read_lock);
 }
 
-/* Epoch reset is rare and serializes only with entry copying, never computing. */
+/* nr_csirs_disc_ring_reset: empties the ring for a new sample epoch: clears the metadata, resets the write counter and bumps the epoch, while holding every entry lock.
+ *   Also resets the TD front end when this is the worker ring. Caller: epoch_listener() in nr_csirs_disc.c (under the pipeline lock).
+ */
 void nr_csirs_disc_ring_reset(nr_csirs_disc_ring_t *r)
 {
   ring_private_t *state=r?r->private_state:NULL;
@@ -207,6 +234,9 @@ void nr_csirs_disc_ring_reset(nr_csirs_disc_ring_t *r)
   pthread_mutex_unlock(&state->read_lock);
 }
 
+/* nr_csirs_disc_ring_snapshot_current: true when the snapshot ring was taken in the same epoch as its source ring (no reset happened since), or when it has no source.
+ *   Read-only. Caller: nr_csirs_disc_process() before a batch is processed.
+ */
 bool nr_csirs_disc_ring_snapshot_current(const nr_csirs_disc_ring_t *r)
 {
   const ring_private_t *state=r?r->private_state:NULL;
@@ -215,9 +245,10 @@ bool nr_csirs_disc_ring_snapshot_current(const nr_csirs_disc_ring_t *r)
   return state->epoch==__atomic_load_n(&source->epoch,__ATOMIC_ACQUIRE);
 }
 
-/* Only committed entries behind the producer cursor are copied. Entry locks
- * protect C memory accesses on overwrite; a collision requires a complete ring
- * overrun, never ordinary concurrent production. Keep old snapshot IQ for U4. */
+/* nr_csirs_disc_ring_snapshot: copies the committed slots behind the producer cursor of ring r into snapshot ring dst (incrementally: only slots newer than dst->written).
+ *   On a GPU-resident ring it first reads the device grid back. Each entry is copied under its entry lock; a slot overwritten during the copy makes it fail (-1).
+ *   Returns 0 on success. Caller: disc_worker_main() when the TD drain is not used.
+ */
 int nr_csirs_disc_ring_snapshot(nr_csirs_disc_ring_t *r, nr_csirs_disc_ring_t *dst)
 {
   ring_private_t *state = r ? r->private_state : NULL;
@@ -249,8 +280,10 @@ int nr_csirs_disc_ring_snapshot(nr_csirs_disc_ring_t *r, nr_csirs_disc_ring_t *d
   return 0;
 }
 
-/* Only the TD worker reserves batches. Read/entry locks also serialize epoch
- * reset and public snapshots; the TD producer never touches these locks. */
+/* nr_csirs_disc_ring_write_begin: reserves count consecutive slots of the ring for the TD producer (unified-memory rings only), locking the read lock and the entries.
+ *   Returns the first reserved index, or -1 when the ring is not unified or count is out of range. Must be followed by nr_csirs_disc_ring_write_end().
+ *   Callers: nr_csirs_disc_td.c (TD drain) and the tests.
+ */
 int nr_csirs_disc_ring_write_begin(nr_csirs_disc_ring_t *r, int count)
 {
   ring_private_t *s=r?r->private_state:NULL;
@@ -261,6 +294,9 @@ int nr_csirs_disc_ring_write_begin(nr_csirs_disc_ring_t *r, int count)
   return first;
 }
 
+/* dump_slot: writes one slot (metadata and grid) to the file named by ISAC_CSIRS_DISC_DUMP, with a header record; the file is opened once.
+ *   No-op when the variable is unset. Called from ring_push() and ring_write_end() for every committed slot.
+ */
 static void dump_slot(nr_csirs_disc_ring_t *r, int index)
 {
   static FILE *dump;
@@ -279,6 +315,9 @@ static void dump_slot(nr_csirs_disc_ring_t *r, int index)
     fflush(dump);
   }
 }
+/* nr_csirs_disc_ring_write_end: publishes the slots reserved by nr_csirs_disc_ring_write_begin(): writes their metadata, serial numbers and the dump, then advances the write counter and unlocks.
+ *   With meta == NULL the reservation is released without publishing. Caller: nr_csirs_disc_td.c (TD drain).
+ */
 void nr_csirs_disc_ring_write_end(nr_csirs_disc_ring_t *r, int count, const nr_csirs_disc_slot_meta_t *meta)
 {
   ring_private_t *s=r->private_state;
@@ -294,6 +333,10 @@ void nr_csirs_disc_ring_write_end(nr_csirs_disc_ring_t *r, int count, const nr_c
   pthread_mutex_unlock(&s->read_lock);
 }
 
+/* nr_csirs_disc_ring_push: copies one slot of the 14 symbols of all antennas from the FEP buffers (rxdataF, with the carrier offset wrap) into the next ring entry.
+ *   Non-blocking: uses trylock on the read and entry locks and returns -1 (counted as a feed drop) when busy. Wakes the worker every batch slots when this is the worker ring.
+ *   Callers: nr_csirs_disc_td.c (TD front end) and the tests. Returns the entry index, or -1.
+ */
 int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
                             const int16_t *const *rxdataF,
                             int ofdm_symbol_size,
@@ -347,6 +390,10 @@ int nr_csirs_disc_ring_push(nr_csirs_disc_ring_t *r,
   return index;
 }
 
+/* disc_worker_main: thread body of the CSI-RS discovery worker: waits for a batch of slots, drains the TD front end, and runs nr_csirs_disc_process() (through the hook) on the ring or its snapshot.
+ *   Also drains the blind search's discovery queue (nr_csirs_blind_rt_discovery_drain) each time it wakes. Wakes every 5 ms at least. Runs on core ISAC_CSIRS_DISC_CORE with SCHED_OTHER.
+ *   Started by nr_csirs_disc_start() and stopped by nr_csirs_disc_stop().
+ */
 static void *disc_worker_main(void *unused)
 {
   (void)unused;
@@ -390,6 +437,10 @@ static void *disc_worker_main(void *unused)
   return NULL;
 }
 
+/* nr_csirs_disc_start: starts the discovery pipeline for this UE: sets up the worker ring and snapshot ring (GPU-backed when available), the TD front end, and the worker thread.
+ *   Returns 0 when discovery is off or already running; -1 when the frame parameters are unsupported or any setup step fails (everything is then freed).
+ *   Caller: executables/nr-uesoftmodem.c (receiver set-up, after the discovery UE is built). Calls nr_csirs_disc_pipeline_init() and checks nr_csirs_disc_pipeline_ready().
+ */
 int nr_csirs_disc_start(const NR_DL_FRAME_PARMS *fp, int n_ant)
 {
   if (!nr_csirs_disc_enabled())
@@ -453,6 +504,9 @@ fail:
   return -1;
 }
 
+/* nr_csirs_disc_stop: stops the discovery worker (sets stop, wakes it, joins) and frees the TD front end and both rings; idempotent when not running.
+ *   Callers: executables/nr-uesoftmodem.c (teardown and the start-failure path).
+ */
 void nr_csirs_disc_stop(void)
 {
   if (!atomic_load_explicit(&g_worker.running, memory_order_acquire))
@@ -474,16 +528,25 @@ void nr_csirs_disc_stop(void)
   memset(&g_worker, 0, sizeof(g_worker));
 }
 
+/* nr_csirs_disc_running: true while the discovery worker is running (started and not stopped).
+ *   Callers: phy_procedures_nr_ue.c (PHY receive path, together with nr_csirs_disc_enabled()) and the feed itself.
+ */
 bool nr_csirs_disc_running(void)
 {
   return atomic_load_explicit(&g_worker.running, memory_order_acquire);
 }
 
+/* nr_csirs_disc_worker_ring: returns the worker's IQ ring while discovery runs, or NULL. The discovery pipeline uses it for the epoch reset and the batch processing.
+ *   Caller: epoch_listener() in nr_csirs_disc.c.
+ */
 nr_csirs_disc_ring_t *nr_csirs_disc_worker_ring(void)
 {
   return nr_csirs_disc_running() ? &g_worker.ring : NULL;
 }
 
+/* worker_note_slot: called after each pushed worker-ring slot: when the write counter hits a multiple of the batch size, bumps the wake generation and signals the worker.
+ *   Does nothing when the worker is not running. Caller: nr_csirs_disc_ring_push() on the worker ring.
+ */
 static void worker_note_slot(void)
 {
   if (!nr_csirs_disc_running())

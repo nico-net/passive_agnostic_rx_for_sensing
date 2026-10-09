@@ -155,6 +155,9 @@ static void gpu_failed(void)
   atomic_fetch_add(&s_gpu_failed, 1);
 }
 
+/* nr_td_cb0_exec: runs one batch of CB0 decodes on the selected backend: the GPU when it is picked and not refused, otherwise the CPU. Fills out[] and returns the result (0 or a negative error).
+ *   A GPU batch is checked: a device error, a mixed decoder choice inside one batch, or a bad verdict falls back to the CPU for the whole batch (counted). Optional info reports the backend used, the batch counters and whether the batch was mixed. Caller: nr_td_cb0_wire.c (the CB0 wire worker).
+ */
 int nr_td_cb0_exec(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, nr_td_cb0_exec_t *info)
 {
   nr_td_cb0_exec_t loc;

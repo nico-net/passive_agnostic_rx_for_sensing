@@ -170,6 +170,9 @@ static int cmp_pss_peak(const void *a, const void *b)
 *
 *********************************************************************/
 
+/* pss_search_time_nr: time-domain PSS search: correlates the received capture with the PSS references (one per NID2, or only the target cell's NID2 when target_Nid_cell is set) and returns the best position, NID2, and the correlation peak.
+ *   The correlation shift is derived from the peak magnitude of the time-domain reference (not a fixed constant), so it follows the reference generator. Callers: nr_initial_sync.c (cell search, per branch) and nr_ue_measurements.c.
+ */
 nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
 {
   if (p->rxdata_length == 0) {

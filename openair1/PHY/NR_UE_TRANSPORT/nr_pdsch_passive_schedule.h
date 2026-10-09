@@ -18,6 +18,7 @@ typedef struct {
   uint64_t hist[NR_PDSCH_LAT_STAGES][NR_PDSCH_LAT_BINS];
   uint64_t reason[NR_PDSCH_DROP_REASONS];
 } nr_pdsch_schedule_stats_t;
+/* nr_pdsch_latency_bin: maps a latency in ns to its histogram bin: bins are the upper bounds 100 us, 250 us, 500 us, 1, 2, 4, 8 and 16 ms (the last bin takes the rest). Inline. Callers: latency_note() in the PDSCH queue and the tests. */
 static inline unsigned nr_pdsch_latency_bin(uint64_t ns)
 {
   static const uint64_t us[] = {100, 250, 500, 1000, 2000, 4000, 8000, 16000};

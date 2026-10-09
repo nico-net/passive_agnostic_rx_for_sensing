@@ -368,6 +368,9 @@ void nrue_init_openair0(void)
   }
 }
 
+/* nrue_ru_fault_config: reads the default-off fault-injection switch ISAC_RF_FAIL_AFTER_READS and stores the read count after which nrue_ru_read_impl() fails.
+ *   Used by the orchestrator's shutdown acceptance test; the same fatal-read path as a real driver failure. Callers: nrue_ru_start_impl() and the test fixture nrue_ru_test_device().
+ */
 static void nrue_ru_fault_config(void)
 {
   /* Independent, default-off fault injection for the orchestrator's shutdown
@@ -381,6 +384,9 @@ static void nrue_ru_fault_config(void)
   }
 }
 
+/* nrue_ru_start_impl: loads and starts every radio device (openair0_device_load, then trx_start_func), and initialises the TX write thread when usrp_tx_thread is set.
+ *   Returns 0, or -1 on the first failure or when shutdown was requested. Called only through nrue_ru_start(), which holds the lifetime gate.
+ */
 static int nrue_ru_start_impl(void)
 {
   nrue_ru_fault_config();
@@ -405,6 +411,7 @@ static int nrue_ru_start_impl(void)
   return 0;
 }
 
+/* nrue_ru_stop_impl: stops the RX stream of every radio device that has a stop hook (trx_stop_func). Called only through nrue_ru_stop(). */
 static void nrue_ru_stop_impl(void)
 {
   for (openair0_device_t *ru = openair0_dev; ru < openair0_dev + nrue_ru_count; ru++) {
@@ -413,7 +420,11 @@ static void nrue_ru_stop_impl(void)
   }
 }
 
-/* Runtime RX stream stop/start, for recovering the measured X410 stall where the device keeps
+/**
+ * nrue_ru_restart_rx_impl: restarts the RX stream of every device: stop, clear the cached first-timestamp origin (firstTS_initialized), then start again.
+ *   Dropping the origin is required because the device restarts its sample counter at 0. Returns -1 when any start fails. Called only through nrue_ru_restart_rx().
+ *
+ * Runtime RX stream stop/start, for recovering the measured X410 stall where the device keeps
  * returning full-length reads with continuous timestamps but no signal (see the RFSTALL watchdog
  * in nr-ue.c). Separate from nrue_ru_stop()/nrue_ru_start() because it must ALSO drop the cached
  * timestamp origin: the device restarts its sample counter at 0, and firstTS was captured on the
@@ -432,7 +443,11 @@ static int nrue_ru_restart_rx_impl(void)
   return rc;
 }
 
-/* FULL device teardown + re-open, for the case nrue_ru_restart_rx() cannot fix: the host has lost
+/**
+ * nrue_ru_reinit_impl: full re-open of every radio device: ends it (trx_end_func), re-loads it, and restarts it, retrying the load for about 40 s while the previous MPM claim expires.
+ *   Deliberately does not assert on failure: returns -1 so the caller can stop the capture cleanly. Stops early when shutdown is requested. Called only through nrue_ru_reinit().
+ *
+ * FULL device teardown + re-open, for the case nrue_ru_restart_rx() cannot fix: the host has lost
  * its MPM claim on the X410, so every RPC to the device throws and no stream-level restart can
  * succeed. Releasing the multi_usrp handle (inside trx_end_func) is what drops the stale claim;
  * MPM then lets a fresh openair0_device_load() claim the device again.
@@ -483,6 +498,7 @@ static int nrue_ru_reinit_impl(void)
   return 0;
 }
 
+/* nrue_ru_end_impl: collects the final statistics (trx_get_stats_func) and ends every radio device (trx_end_func). Called only through nrue_ru_end(). */
 static void nrue_ru_end_impl(void)
 {
   for (openair0_device_t *ru = openair0_dev; ru < openair0_dev + nrue_ru_count; ru++) {
@@ -520,6 +536,9 @@ int nrue_band_scan_next(PHY_VARS_NR_UE *UE)
   return 0;
 }
 
+/* nrue_ru_set_freq_impl: retunes the radio card of a UE: picks the RU whose current cell is nearest to the requested DL/UL carriers among cells not used by another UE, then applies the new frequency.
+ *   Updates the cell ownership (used_by_ue) of the old and the new cell. Called only through nrue_ru_set_freq().
+ */
 static void nrue_ru_set_freq_impl(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)
 {
   int current_cell_id = nrue_rus[UE->rf_map.card].used_by_cell;
@@ -559,6 +578,9 @@ static void nrue_ru_set_freq_impl(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint6
   dev->trx_set_freq_func(dev, cfg);
 }
 
+/* nrue_ru_adjust_rx_gain_impl: changes the RX gain of the UE's card by gain_change dB, retrying with the clipped remainder when the device rejects the value.
+ *   Also informs the PRACH passive gain tracker and, with the sensing enabled, emits a session record. Returns the applied change. Called only through nrue_ru_adjust_rx_gain().
+ */
 static int nrue_ru_adjust_rx_gain_impl(PHY_VARS_NR_UE *UE, int gain_change)
 {
   openair0_config_t *cfg = &openair0_cfg_g[UE->rf_map.card];
@@ -584,6 +606,10 @@ static int nrue_ru_adjust_rx_gain_impl(PHY_VARS_NR_UE *UE, int gain_change)
   return gain_change;
 }
 
+/* nrue_ru_read_impl: reads nsamps from the UE's radio card and, for UE 0, also reads (and discards) one block from every RU not used by another UE so that they keep streaming.
+ *   Short reads are continued up to 20 times on contiguous timestamps; any gap or failure sets the RFSTALL shutdown and returns -1 (never invalid IQ). The returned timestamp is relative to the device's first timestamp.
+ *   Called only through nrue_ru_read(). Injected failures (ISAC_RF_FAIL_AFTER_READS) take this path too.
+ */
 static int nrue_ru_read_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
 {
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
@@ -681,6 +707,9 @@ static int nrue_ru_read_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestam
   return ret;
 }
 
+/* nrue_ru_write_impl: sends samples on the UE's radio card and, for UE 0, sends zeros on every RU not used by another UE.
+ *   Timestamps are offset by the device's first timestamp. Called only through nrue_ru_write().
+ */
 static int nrue_ru_write_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags)
 {
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
@@ -711,12 +740,16 @@ static int nrue_ru_write_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp
   return ret;
 }
 
+/* nrue_ru_write_reorder_impl: writes TX samples through openair0_write_reorder_common() on the UE's card, so that out-of-order TX blocks are reordered before nrue_ru_write_impl() sends them.
+ *   Called only through nrue_ru_write_reorder().
+ */
 static int nrue_ru_write_reorder_impl(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags)
 {
   openair0_device_t *device = &openair0_dev[UE->rf_map.card];
   return openair0_write_reorder_common(nrue_ru_write_impl, UE, device, timestamp, txp, nsamps, nbAnt, flags);
 }
 
+/* nrue_ru_write_reorder_clear_context_impl: drops the TX reorder context of the UE's card (openair0_write_reorder_clear_context). Called only through nrue_ru_write_reorder_clear_context(). */
 static void nrue_ru_write_reorder_clear_context_impl(PHY_VARS_NR_UE *UE)
 {
   openair0_device_t *device = &openair0_dev[UE->rf_map.card];
@@ -739,6 +772,9 @@ void nrue_ru_shutdown(void)
       openair0_dev[i].trx_end_func(&openair0_dev[i]);
 }
 
+/* nrue_ru_start: public: starts all radio devices under the exclusive radio lifetime gate (nr_shutdown_radio_enter(1)). Returns the start result, or -1 when shutdown is in progress.
+ *   Caller: executables/nr-uesoftmodem.c (receiver start-up).
+ */
 int nrue_ru_start(void)
 {
   if (!nr_shutdown_radio_enter(1))
@@ -748,6 +784,7 @@ int nrue_ru_start(void)
   return result;
 }
 
+/* nrue_ru_stop: public: stops the RX streams under the exclusive lifetime gate; does nothing when shutdown is already in progress. Caller: nr-ue-ru.h API (receiver stop path). */
 void nrue_ru_stop(void)
 {
   if (!nr_shutdown_radio_enter(1))
@@ -756,6 +793,7 @@ void nrue_ru_stop(void)
   nr_shutdown_radio_leave();
 }
 
+/* nrue_ru_end: public: ends all radio devices under the exclusive lifetime gate; does nothing during shutdown. Caller: nr-ue-ru.h API (receiver teardown). */
 void nrue_ru_end(void)
 {
   if (!nr_shutdown_radio_enter(1))
@@ -764,6 +802,7 @@ void nrue_ru_end(void)
   nr_shutdown_radio_leave();
 }
 
+/* nrue_ru_restart_rx: public: restarts the RX streams (stop, clear origin, start) under the exclusive gate. Used by the RFSTALL recovery in nr-ue.c. Returns -1 on failure. */
 int nrue_ru_restart_rx(void)
 {
   if (!nr_shutdown_radio_enter(1))
@@ -773,6 +812,7 @@ int nrue_ru_restart_rx(void)
   return result;
 }
 
+/* nrue_ru_reinit: public: full device teardown and re-open (nrue_ru_reinit_impl) under the exclusive gate. Used by the RFSTALL recovery and the band-scan re-tune (nrue_band_scan_next) in this file and nr-ue.c. */
 int nrue_ru_reinit(void)
 {
   if (!nr_shutdown_radio_enter(1))
@@ -782,6 +822,7 @@ int nrue_ru_reinit(void)
   return result;
 }
 
+/* nrue_ru_set_freq: public: retunes the UE's card under the shared gate (nr_shutdown_radio_enter(0)). Callers: phy_procedures_nr_ue.c, nr_pdsch_passive_decode.c, nr-ue.c and nrue_band_scan_next(). */
 void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)
 {
   if (!nr_shutdown_radio_enter(0))
@@ -790,6 +831,7 @@ void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carri
   nr_shutdown_radio_leave();
 }
 
+/* nrue_ru_adjust_rx_gain: public: changes the RX gain under the shared gate; returns the applied gain change (or -1 during shutdown). Callers: nr-ue.c (AGC). */
 int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
 {
   if (!nr_shutdown_radio_enter(0))
@@ -799,6 +841,7 @@ int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
   return result;
 }
 
+/* nrue_ru_read: public: reads samples under the shared gate; sets *ptimestamp to 0 first and returns the sample count, or -1 during shutdown or on fault. Callers: nr-ue.c read loop, phy_procedures_nr_ue.c and the passive queues. */
 int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
 {
   *ptimestamp = 0;
@@ -809,6 +852,7 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
   return result;
 }
 
+/* nrue_ru_write: public: writes samples under the shared gate; returns the write result, or -1 during shutdown. Callers: nr-ue.c and radio/COMMON/common_lib.c. */
 int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags)
 {
   if (!nr_shutdown_radio_enter(0))
@@ -818,6 +862,7 @@ int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buf
   return result;
 }
 
+/* nrue_ru_write_reorder: public: writes TX samples through the reorder path under the shared gate; returns -1 during shutdown. Callers: nr-ue.c (TX path). */
 int nrue_ru_write_reorder(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags)
 {
   if (!nr_shutdown_radio_enter(0))
@@ -827,6 +872,7 @@ int nrue_ru_write_reorder(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, vo
   return result;
 }
 
+/* nrue_ru_write_reorder_clear_context: public: clears the TX reorder context under the shared gate; does nothing during shutdown. Callers: nr-ue.c. */
 void nrue_ru_write_reorder_clear_context(PHY_VARS_NR_UE *UE)
 {
   if (!nr_shutdown_radio_enter(0))

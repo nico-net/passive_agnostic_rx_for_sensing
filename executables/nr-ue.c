@@ -251,6 +251,9 @@ typedef struct {
 extern _Atomic int nr_ue_cfo_resync_request; // set by the CFO trim loop (phy_procedures_nr_ue.c)
 extern int         nr_ue_cfo_resync_hz;
 
+/* UE_synch: initial synchronisation job (run on the sync actor): searches the SSB raster for the cell (full search, or the fast PSS search around the predicted position with radius and coarse fallbacks under ISAC_RX_RECOVER), then retunes the radio when not on continuous FO compensation and applies the post-sync gain.
+ *   On success it sets pss_tick, rx_offset, UE->is_synchronized and nr_ue_rx_synced_g. On failure it raises the RX gain (AGC) and reports the failure. Sidelink mode uses the SLSS search. Caller: UE_thread() as the job of the sync notified FIFO.
+ */
 static void UE_synch(void *arg) {
   syncData_t *syncD = (syncData_t *)arg;
   PHY_VARS_NR_UE *UE = syncD->UE;
@@ -802,6 +805,9 @@ void dummyWrite(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, int writeBlo
   AssertFatal(writeBlockSize == tmp, "write to reorder function failed %d", tmp);
 }
 
+/* readFrame: reads the two frames of capture needed for acquisition (or a discard read when toTrash is set) slot by slot from the radio into the UE's rxdata, and emulates the TX side in RFsim.
+ *   Returns false (and requests shutdown) on a short read. With ISAC_RX_RECOVER it also reports whether the capture was contiguous (no timestamp jump and no ring epoch change); a non-contiguous capture is discarded by the caller. Callers: UE_thread() (acquisition and the trash reads after a lock change).
+ */
 bool readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, bool toTrash)
 {
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
@@ -1036,6 +1042,10 @@ void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
   }
 }
 
+/* UE_thread: the PHY receive thread of the NR UE (the real-time loop): acquires the cell with UE_synch() through the sync actor, tracks timing and frequency, reads one slot per iteration, and dispatches each slot's RX/TX processing to the actors and barriers.
+ *   The stream status moves UNSYNC -> SYNCING -> SYNCED and back on loss. Loss is detected by PBCH tracking, the RF stall watchdog (ISAC_RF_STALL_WATCHDOG, with up to ISAC_RF_STALL_MAX_REINIT device re-inits) and the RX recovery path (ISAC_RX_RECOVER). Other flags: ISAC_AUTO_ACQUIRE, ISAC_SCAN_CONFIRM, ISAC_TSYNC_RESET, ISAC_UL_PROBE, ISAC_SHIFT_CENSUS, ISAC_DISC_NO_RESYNC, ISAC_PBCH_SHIFT_CLAMP.
+ *   Exits when shutdown is requested and requests shutdown with the final status. Started by init_NR_UE_threads() (summary; the function is long and this header gives its structure, not every branch).
+ */
 void *UE_thread(void *arg)
 {
   //this thread should be over the processing thread to keep in real time
@@ -2454,6 +2464,9 @@ void init_NR_UE(int nb_inst, char *uecap_file, char *reconfig_file, char *rbconf
   }
 }
 
+/* init_NR_UE_threads: creates the PHY receive thread (UE_thread) at the highest real-time priority, pinned to ISAC_UE_RT_CORE when set (default: unpinned), and the L1 statistics thread when statistics are enabled.
+ *   Caller: executables/nr-uesoftmodem.c (per UE instance, after the radio is up).
+ */
 void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
   char thread_name[16];
   sprintf(thread_name, "UEthread_%d", UE->Mod_id);

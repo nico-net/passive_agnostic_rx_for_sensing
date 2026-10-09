@@ -18,6 +18,7 @@ static volatile uint64_t timer_thread_curtime = 0;
 static bool timer_stop, timer_started;
 static pthread_t timer_thread;
 
+/* nr_pdcp_timer_thread: PDCP timer thread: each time the shared time advances, sets the current time on the SRB and DRB entities of every UE under the manager lock. Exits when stopped. Started by nr_pdcp_init_timer_thread(). */
 static void *nr_pdcp_timer_thread(void *_nr_pdcp_ue_manager)
 {
   pthread_setname_np(pthread_self(),"pdcp_timer");
@@ -60,6 +61,7 @@ static void *nr_pdcp_timer_thread(void *_nr_pdcp_ue_manager)
   return NULL;
 }
 
+/* nr_pdcp_init_timer_thread: starts the PDCP timer thread for the given UE manager; exits the process when the thread cannot be created. Called once from the PDCP layer initialisation. */
 void nr_pdcp_init_timer_thread(nr_pdcp_ue_manager_t *nr_pdcp_ue_manager)
 {
   if (pthread_create(&timer_thread, NULL, nr_pdcp_timer_thread, nr_pdcp_ue_manager) != 0) {
@@ -69,6 +71,7 @@ void nr_pdcp_init_timer_thread(nr_pdcp_ue_manager_t *nr_pdcp_ue_manager)
   timer_started = true;
 }
 
+/* nr_pdcp_stop_timer_thread: stops the PDCP timer thread: sets the stop flag, wakes it and joins it. Does nothing when the thread was never started. Called at shutdown (executables/nr-uesoftmodem.c, nr_pdcp_stop_threads()). */
 void nr_pdcp_stop_timer_thread(void)
 {
   if (!timer_started)

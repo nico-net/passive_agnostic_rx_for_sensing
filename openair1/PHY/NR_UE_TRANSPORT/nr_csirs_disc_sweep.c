@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* valid_hyp: checks one CSI-RS hypothesis against the 38.211 table: row range, CDM type, density (row 1 only at density 3), frequency-domain bits, RB range and period, and that the mapping stays in the 14 x 12 grid.
+ *   Returns 1 when valid. Callers: nr_csirs_disc_sweep_validate() and nr_csirs_disc_sweep_map_into().
+ */
 static int valid_hyp(const nr_csirs_disc_hyp_t *h, int n_rb)
 {
   static const uint8_t bits[] = {0,1,1,1,1,1,4,2,2,6,3,4,4,3,3,3,4,4,4};
@@ -26,6 +29,9 @@ static int valid_hyp(const nr_csirs_disc_hyp_t *h, int n_rb)
   return 1;
 }
 
+/* nr_csirs_disc_sweep_validate: validates a sweep request before scoring: ring geometry, the hypotheses (valid_hyp) and the sweep configuration; fills *c with the effective configuration (default 1024 IDs, delta 1, block 32).
+ *   Returns 0 when the request can be scored, -1 otherwise (including a recorded slot outside the frame). Callers: nr_csirs_disc_sweep_cpu() and nr_csirs_disc_gpu_sweep.cu.
+ */
 int nr_csirs_disc_sweep_validate(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *h, int nh,
                                 const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_sweep_cfg_t *c)
 {
@@ -48,10 +54,12 @@ int nr_csirs_disc_sweep_validate(const nr_csirs_disc_ring_t *r, const nr_csirs_d
   return 0;
 }
 
+/* slot_order: qsort comparator of packed (absolute slot, ring index) keys: orders the selected slots by absolute slot. */
 static int slot_order(const void *a,const void *b)
 {
   uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;return (x>y)-(x<y);
 }
+/* re_sort: in-place shell sort of a hypothesis' RE list by grid index (the mapping is nearly ordered already). */
 static void re_sort(nr_csirs_disc_re_t *a,int n)
 {
   /* Mapping is nearly ordered; in-place shell sort avoids libc scratch allocation. */
@@ -62,6 +70,10 @@ static void re_sort(nr_csirs_disc_re_t *a,int n)
   }
 }
 
+/* nr_csirs_disc_sweep_map_into: builds the resource-element map of one hypothesis over n_rb RBs: for each port, the list of grid indices, scrambling-sequence indices and sign of the RE (per density and CDM weights).
+ *   Writes into the caller's storage (or allocates when storage is NULL), with per-port begin offsets, the symbol mask and the number of 32-bit words of sequence. Returns 0, or -1 for an invalid hypothesis or a too small buffer.
+ *   Callers: nr_csirs_disc_sweep_map() and the GPU sweep (nr_csirs_disc_gpu_sweep.cu).
+ */
 int nr_csirs_disc_sweep_map_into(const nr_csirs_disc_hyp_t *h, int n_rb, nr_csirs_disc_sweep_map_t *out,
                                  nr_csirs_disc_re_t *storage, size_t capacity)
 {
@@ -108,11 +120,18 @@ int nr_csirs_disc_sweep_map_into(const nr_csirs_disc_hyp_t *h, int n_rb, nr_csir
   return 0;
 }
 
+/* nr_csirs_disc_sweep_map: allocating form of nr_csirs_disc_sweep_map_into() for a hypothesis over rb RBs. The caller frees out->re.
+ *   Callers: nr_csirs_blind_rt.c (discovery score), refine_extent() and nr_csirs_disc_refine_cpu() in this file, and nr_csirs_disc_sweep_cpu().
+ */
 int nr_csirs_disc_sweep_map(const nr_csirs_disc_hyp_t *h,int rb,nr_csirs_disc_sweep_map_t *out)
 {
   return nr_csirs_disc_sweep_map_into(h,rb,out,NULL,0);
 }
 
+/* nr_csirs_disc_sweep_winner: picks the best scrambling identity (and slot delta) of a sweep from its score array and derives the noise mean and sigma of the other identities (the null).
+ *   Writes the winner, the runner-up score z_second and the noise statistics to *w. The moments use a shifted sum for numerical stability.
+ *   Callers: nr_csirs_disc_sweep_cpu() (per hypothesis) and nr_csirs_disc_gpu_sweep.cu.
+ */
 void nr_csirs_disc_sweep_winner(const float *z, const nr_csirs_disc_sweep_cfg_t *c, int h, int slots,
                               nr_csirs_disc_win_t *w)
 {
@@ -156,6 +175,9 @@ void nr_csirs_disc_sweep_winner(const float *z, const nr_csirs_disc_sweep_cfg_t 
 /* Same magnitude/energy statistic, block flushing and Rayleigh normalization as
  * nr_csirs_blind_correlate_blocks_shift, on the compact occupied RE list. */
 #if defined(__GNUC__) && !defined(__clang__)
+/* port_score: correlation score of one port on one slot: integer dot products per block of the port's REs, normalised by the inverse energy and combined as a blocks-average.
+ *   Pure function on the compact RE buffers. Caller: nr_csirs_disc_sweep_cpu() (for every slot, antenna and port).
+ */
 __attribute__((optimize("O3")))
 #endif
 static double port_score(const int16_t *rx, const int8_t *ref, int n, int block, const double *inverse)
@@ -180,6 +202,10 @@ static double port_score(const int16_t *rx, const int8_t *ref, int n, int block,
   return blocks ? sum / blocks * sqrt((double)n / blocks) / 0.886 : 0;
 }
 
+/* nr_csirs_disc_sweep_cpu: serial CPU sweep of a list of hypotheses over the ring: for each hypothesis and scrambling identity (and slot delta) it correlates the selected slots against the reference and produces a winner.
+ *   Works on the slots with the hypothesis period and offset that are fresh for the cumulative evidence bank (when evidence_epoch is set), and merges with the previous evidence.
+ *   Returns nh on success, 1 per hypothesis via out, -1 on error; returns 0 when ISAC_CSIRS_DISC is not "1". Callers: nr_csirs_disc.c (admission and verification).
+ */
 int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
                           const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
@@ -298,6 +324,9 @@ int nr_csirs_disc_sweep_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_h
   free(scores);return nh;
 }
 
+/* refine_extent: refines the RB extent of a non-row-1 hypothesis once its scrambling identity is known: per RB it measures the cross-correlation against its neighbours and keeps the strongest contiguous span.
+ *   Scans all slots with the hypothesis period and offset. Updates h->rb_start and h->n_rb and returns 0, or -1 when no span is found. Caller: nr_csirs_disc_refine_cpu().
+ */
 static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
                          const nr_csirs_disc_win_t *win)
 {
@@ -349,10 +378,9 @@ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
   h->rb_start=bs;h->n_rb=be-bs+1;return 0;
 }
 
-/* Sequence-qualified row-1 extent. Energy finds a seed even when beamforming
- * gives pilots and traffic different notches. Once the ID is known, subtract
- * the QPSK null cross terms per RB and locate the connected support around that
- * seed. No configured bandwidth, PCI or symbol is an input to this refinement. */
+/* nr_csirs_disc_refine_cpu: extent refinement of a verified hypothesis on the CPU: row 1 uses the sequence-qualified TRS search (energy-weighted, in 4-RB groups per TS 38.214); other rows use refine_extent().
+ *   Updates h->rb_start and h->n_rb; returns 0, or -1 when there is not enough evidence (fewer than 3 slots or a span shorter than 4 RBs). Callers: nr_csirs_disc.c (verification batch) and the GPU refine fallback.
+ */
 int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
                            const nr_csirs_disc_win_t *win)
 {

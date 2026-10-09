@@ -89,6 +89,10 @@ typedef struct {
 } solver_plan_ctx_t;
 static solver_plan_ctx_t g_plan_ctx = {.key = -1}; /* legacy path: process-global grant context */
 static _Thread_local solver_plan_ctx_t t_plan_ctx = {.key = -1}; /* ISAC_PDSCH_SOLVER_THREAD_CTX: per scan consumer */
+/* solver_thread_ctx_enabled: returns ISAC_PDSCH_SOLVER_THREAD_CTX (cached on first call, atomic): 1 = per-thread plan context instead of the global one.
+ *   Read once from the environment; used by plan_ctx() and by the set_alt_scr/set_now/lock paths to choose the mutex policy.
+ *   Callers: plan_ctx(), nr_pdsch_solver_set_alt_scr(), nr_pdsch_solver_set_now().
+ */
 static bool solver_thread_ctx_enabled(void)
 {
   static _Atomic int en = -1;
@@ -99,6 +103,10 @@ static bool solver_thread_ctx_enabled(void)
   }
   return v == 1;
 }
+/* plan_ctx: returns the plan context (per-thread or process-global) that the grant planner reads its key, hash and slot time from.
+ *   Pure selector, no locking; the caller holds g_mu unless thread-context mode is on.
+ *   Callers: nr_pdsch_solver_set_alt_scr(), nr_pdsch_solver_set_now(), nr_pdsch_solver_plan_slot().
+ */
 static solver_plan_ctx_t *plan_ctx(void) { return solver_thread_ctx_enabled() ? &t_plan_ctx : &g_plan_ctx; }
 static struct { int32_t key, scr; } g_key_scr[16]; /* first solved scrambling per CORESET: its other RNTIs try it only */
 static int g_n_key_scr;
@@ -115,6 +123,7 @@ static int g_prior_rep;
 static uint8_t g_prior_add_pos;
 static int8_t g_prior_table, g_prior_S_by_tda[16];
 
+/* nr_pdsch_solver_enabled: Callers: nr_pdsch_passive_decode.c (probe-c1 switch), nr_pdcch_blind_monitor_rt.c (RNTI routing). */
 bool nr_pdsch_solver_enabled(void)
 {
   static int en = -1;
@@ -125,6 +134,10 @@ bool nr_pdsch_solver_enabled(void)
   return en == 1;
 }
 
+/* nr_pdsch_solver_set_tda_fn: installs the TDRA-to-start-symbol callback and its context used to map a DCI payload to a time-domain allocation index.
+ *   Takes g_mu; the callback is later invoked by tda_of() under the same lock.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (solver_tda_of, per monitor configuration).
+ */
 void nr_pdsch_solver_set_tda_fn(nr_pdsch_solver_tda_fn fn, void *ctx)
 {
   pthread_mutex_lock(&g_mu);
@@ -133,6 +146,9 @@ void nr_pdsch_solver_set_tda_fn(nr_pdsch_solver_tda_fn fn, void *ctx)
   pthread_mutex_unlock(&g_mu);
 }
 
+/* nr_pdsch_solver_reset: Frees per-RNTI candidate bitmaps and coverage tables under g_mu. Resets the NL/coverage/layout-recover settings;
+ *   the other env caches are function-static and are not re-read. Callers: tests/nr_pdsch_solver_test.cc only.
+ */
 void nr_pdsch_solver_reset(void)
 {
   pthread_mutex_lock(&g_mu);
@@ -165,6 +181,10 @@ static const uint16_t kQR[3][32][2] = { /* Qm, R*1024*2 (R x 2048 keeps the .5 e
    {6,1438},{6,1544}}};
 static const int kQRn[3] = {29, 28, 29};
 
+/* nr_pdsch_solver_mcs_qr: looks up modulation order Qm and code rate R x 2048 for an MCS index in one of the three PDSCH MCS tables (0..2).
+ *   Returns false for an out-of-range table or MCS; otherwise writes *qm and *r2 from kQR.
+ *   Callers: solver planning (table filtering), nr_pdcch_blind_monitor_rt.c (SNR gate), tests.
+ */
 bool nr_pdsch_solver_mcs_qr(int table, int mcs, int *qm, int *r2)
 {
   if (table < 0 || table > 2 || mcs < 0 || mcs >= kQRn[table])
@@ -174,6 +194,10 @@ bool nr_pdsch_solver_mcs_qr(int table, int mcs, int *qm, int *r2)
   return true;
 }
 
+/* nr_pdsch_solver_dmrs_mask: returns the DM-RS symbol bitmask (bit per OFDM symbol) for a type-A PDSCH with first DM-RS symbol l0, start S and length L.
+ *   Adds the additional DM-RS positions for add_pos 1..3 from a small table indexed by duration class (8-9, 10-12, 13-14 symbols).
+ *   Pure function. Callers: emit() in this file, nr_pdsch_passive_decode.c (DM-RS mask of a decode).
+ */
 uint16_t nr_pdsch_solver_dmrs_mask(int l0, int S, int L, int add_pos)
 {
   const int ld = S + L; /* type A: duration counted from the slot start */
@@ -190,7 +214,10 @@ uint16_t nr_pdsch_solver_dmrs_mask(int l0, int S, int L, int add_pos)
   return m;
 }
 
-/* tables whose (Qm, R) differ for this MCS, priority 1 (qam256), 0, 2 */
+/* tables_for: lists the MCS tables (priority qam256, then 64QAM, then 16QAM) whose (Qm, R) pair differs for one MCS index.
+ *   Duplicates (same Qm and R) are dropped, so a result of one table means the MCS is unambiguous.
+ *   Writes table ids to t[] and returns their count (0..3). Callers: plan_known(), plan_coverage(), nr_pdsch_solver_plan_slot().
+ */
 static int tables_for(int mcs, uint8_t *t)
 {
   static const uint8_t prio[3] = {1, 0, 2};
@@ -209,6 +236,10 @@ static int tables_for(int mcs, uint8_t *t)
   return n;
 }
 
+/* slot_of: finds the RNTI entry for rnti, optionally allocating a free one (create=true) and initialising its defaults (rep/table/rm/scr = -1).
+ *   Linear scan over SOLVER_RNTIS entries; returns NULL when absent (or table full). idx, if given, receives the entry index.
+ *   Caller: all solver entry points; g_mu must be held.
+ */
 static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
 {
   for (int i = 0; i < SOLVER_RNTIS; i++)
@@ -231,6 +262,10 @@ static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
   return NULL;
 }
 
+/* nr_pdsch_solver_reopen_layouts: returns true once an unsolved RNTI has been reopened to the full layout set after too many failed CRC probes.
+ *   Reads ISAC_PDSCH_SOLVER_LAYOUT_RECOVER (threshold, 0 = off) on first use; sets layouts_reopened and logs the event.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (layout pruning). Takes g_mu.
+ */
 bool nr_pdsch_solver_reopen_layouts(uint16_t rnti)
 {
   pthread_mutex_lock(&g_mu);
@@ -251,6 +286,9 @@ bool nr_pdsch_solver_reopen_layouts(uint16_t rnti)
   return reopened;
 }
 
+/* nr_pdsch_solver_rep: returns the representative layout index of a solved RNTI, or -1 when the RNTI is unknown or unsolved.
+ *   Read-only under g_mu. Callers: nr_pdcch_blind_monitor_rt.c, tests/nr_pdsch_solver_test.cc.
+ */
 int nr_pdsch_solver_rep(uint16_t rnti)
 {
   pthread_mutex_lock(&g_mu);
@@ -260,6 +298,10 @@ int nr_pdsch_solver_rep(uint16_t rnti)
   return rep;
 }
 
+/* nr_pdsch_solver_note_snr: feeds one post-equalisation SNR sample (dB) of a full decode into the RNTI's exponential moving average.
+ *   EMA weight 0.2 for new samples; the first sample initialises it. Ignored for unknown RNTIs.
+ *   Caller: nr_pdsch_passive_queue.c (after a full decode, from its EVM).
+ */
 void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db)
 {
   pthread_mutex_lock(&g_mu);
@@ -271,6 +313,10 @@ void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db)
   pthread_mutex_unlock(&g_mu);
 }
 
+/* nr_pdsch_solver_snr: returns the SNR EMA of an RNTI in *snr_db, valid only after at least 3 full-decode samples.
+ *   Returns false when the RNTI is unknown or has too few samples. Takes g_mu.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (SNR gate on the modulation choice).
+ */
 bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db)
 {
   pthread_mutex_lock(&g_mu);
@@ -281,6 +327,10 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db)
   return ok;
 }
 
+/* nr_pdsch_solver_set_alt_scr: publishes the scrambling-id hypotheses (ids[0..n-1], at most 16) of the CORESET of the next grant, with a hash of them.
+ *   Enabled only with ISAC_PDSCH_SOLVER_SCR=1; otherwise it just records the CORESET key and the decided flag.
+ *   Writes the plan context (per-thread or global, see plan_ctx). Caller: nr_pdcch_blind_monitor_rt.c before planning.
+ */
 void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n, bool first_is_decided)
 {
   static _Atomic int s_en = -1;
@@ -303,6 +353,9 @@ void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n, bool first
   if (!solver_thread_ctx_enabled()) pthread_mutex_unlock(&g_mu);
 }
 
+/* nr_pdsch_solver_set_now: sets the absolute slot time (abs_slot, signal time) of the grant about to be planned, used for solve-time statistics.
+ *   Writes the plan context under g_mu (unless thread-context mode). Caller: nr_pdcch_blind_monitor_rt.c.
+ */
 void nr_pdsch_solver_set_now(uint64_t abs_slot)
 {
   if (!solver_thread_ctx_enabled()) pthread_mutex_lock(&g_mu);
@@ -310,16 +363,25 @@ void nr_pdsch_solver_set_now(uint64_t abs_slot)
   if (!solver_thread_ctx_enabled()) pthread_mutex_unlock(&g_mu);
 }
 
+/* nr_pdsch_solver_owns: reports whether the solver takes over the grants of this RNTI; currently it is simply the global enable flag.
+ *   The rnti argument is not used yet. Caller: declared in the header, no call site outside the header.
+ */
 bool nr_pdsch_solver_owns(uint16_t rnti)
 {
   return nr_pdsch_solver_enabled();
 }
 
+/* tda_of: maps a DCI payload to its TDRA index (0..15) for a given layout, through the registered callback.
+ *   Returns 0 when no callback is registered. Called under g_mu from plan and feedback paths.
+ */
 static int tda_of(int layout, nr_dci_bits_t p)
 {
   return g_tda_fn ? (g_tda_fn(g_tda_ctx, (uint16_t)layout, p) & 15) : 0;
 }
 
+/* pend_new: allocates the next pending-grant slot from a FIFO ring of SOLVER_PENDING entries, overwriting the oldest.
+ *   Counts overwritten live entries in g_st.dropped (their CRC feedback will be lost). Caller: emit(), under g_mu.
+ */
 static pending_t *pend_new(void)
 {
   static uint32_t cur;
@@ -332,6 +394,9 @@ static pending_t *pend_new(void)
 static int t_rm = 0; static bool t_learn_rm = false; /* set by plan for this grant (under g_mu) */
 static int32_t t_scr = -1; /* T26c scrambling hypothesis for this grant (-1 default) */
 static uint8_t t_comb; /* T26d combining mode for this grant's variants (0 = default) */
+/* comb_on: returns the receiver-combining mode ISAC_RX_MRC_PER_RNTI (cached): 0 off, 1 {best, MRC}, 2 adds NW-MRC and IRC, 3 uses IRC with DM-RS covariance.
+ *   Read once from the environment. Used by comb_n(), comb_k(), comb_pick() and the feedback counters.
+ */
 static int comb_on(void)
 {
   static int en = -1;
@@ -341,15 +406,27 @@ static int comb_on(void)
 /* Mode for this grant: unsolved -> alternate 1/3 by grant parity; solved -> the mode with the better CRC rate
  * (Laplace), exploring the other on 1 grant in 8. */
 /* receivers in play: ISAC_RX_MRC_PER_RNTI=1 -> {1,3}; =2 -> {1,3,4,5} (4 = noise-weighted gain-corrected MRC, 5 = IRC) */
-/* =3 -> {1,3,4,6} (6 = IRC with DM-RS residual covariance, ISAC_RX_IRC=4) */
+/* comb_k: maps a receiver index k (0..3) to the receiver id stored in the pending entry: 1 best branch, 3 MRC, 4 NW-MRC, 5 IRC (6 at mode 3).
+ *   Callers: comb_pick().
+ */
 static uint8_t comb_k(int k) { static const uint8_t kComb[4] = {1, 3, 4, 5}; return (k == 3 && comb_on() >= 3) ? 6 : kComb[k]; }
+/* comb_n: returns how many receivers take part in the per-RNTI choice: 4 with ISAC_RX_MRC_PER_RNTI >= 2, otherwise 2.
+ *   Caller: comb_pick().
+ */
 static int comb_n(void) { return comb_on() >= 2 ? 4 : 2; }
+/* comb_ab: returns ISAC_RX_MRC_PER_RNTI_AB (cached): 1 selects a fixed round robin over the receivers instead of exploitation.
+ *   Caller: comb_pick().
+ */
 static int comb_ab(void) /* ISAC_RX_MRC_PER_RNTI_AB=1: post-solve round robin over the receivers (paired A/B, no exploitation) */
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI_AB") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_AB")) : 0;
   return en;
 }
+/* comb_pick: chooses the receiver id for one grant of an RNTI. Unsolved RNTIs always use the configured receiver (0).
+ *   Solved RNTIs: best receiver by Laplace-smoothed CRC rate, exploring another one on 1 grant in 8 (or round robin with _AB).
+ *   Uses r->comb_try/comb_ok counters filled by nr_pdsch_solver_feedback(). Caller: nr_pdsch_solver_plan_slot().
+ */
 static uint8_t comb_pick(const solver_rnti_t *r)
 {
   if (!comb_on()) return 0;
@@ -366,6 +443,10 @@ static uint8_t comb_pick(const solver_rnti_t *r)
   if ((r->grants % 8u) == 7u) return comb_k((int)((best + 1 + (r->grants / 8u) % (uint32_t)(n - 1)) % (uint32_t)n)); /* explore */
   return comb_k(best);
 }
+/* emit: appends one decode variant (reading, S, add_pos, table, probe flag, TDA) to out[] and books a pending entry carrying its feedback token.
+ *   Skips the variant when S > l0 (DM-RS before the PDSCH start), when out[] is full, or when it duplicates an entry already in out[].
+ *   Fills the variant's DM-RS mask and copies the reading's layouts into the pending slot. Caller: the plan functions; g_mu held.
+ */
 static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                  const nr_pdsch_solver_reading_t *rd, int l0, int S, int add_pos, int table, bool probe, bool table_disc,
                  bool learn_S, bool learn_table, int tda, uint64_t dci, nr_dci_bits_t payload)
@@ -414,6 +495,9 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   return true;
 }
 
+/* probe_hog: ISAC_PDSCH_SOLVER_FAIR=1 gate: true when this unsolved RNTI already spent more than twice the mean probe count of
+ *   all unsolved RNTIs (plus slack). An RNTI with a candidate is never throttled. Caller: nr_pdsch_solver_plan_slot().
+ */
 static bool probe_hog(const solver_rnti_t *r)
 {
   static int en = -1;
@@ -426,6 +510,10 @@ static bool probe_hog(const solver_rnti_t *r)
   return n > 1 && (uint64_t)r->n_probe * n > 2 * tot + 32u * (uint64_t)n;
 }
 
+/* leader_ok: ISAC_PDSCH_SOLVER_LEADER gate: whether this unsolved RNTI may search on its CORESET (true when the CORESET already has a solved RNTI).
+ *   Otherwise only the busiest unsolved RNTI of the same CORESET (highest grant count) searches. Off: always true.
+ *   Caller: nr_pdsch_solver_plan_slot().
+ */
 static bool leader_ok(const solver_rnti_t *r)
 {
   static int en = -1;
@@ -439,11 +527,10 @@ static bool leader_ok(const solver_rnti_t *r)
   return lead == NULL || lead == r;
 }
 
-/* ISAC_PDSCH_SOLVER_PREF=<N> (T26d, default 0 = off): an unsolved RNTI searches on its low-MCS grants (MCS <=
- * ISAC_PDSCH_SOLVER_PREF_MCS, default 4: QPSK in every MCS table) and skips the others, unless N grants went by without
- * a preferred one. Measured: probe CRC on the true hypothesis ~4-5 % because most grants are QAM / multi-layer, which
- * almost never pass at this receiver; QPSK grants pass 25-90 %. Layer count is not known at plan time (readings carry
- * no ports), so only the MCS is used. */
+/* search_pref_skip: ISAC_PDSCH_SOLVER_PREF=N: true when this grant should be skipped, so that an unsolved RNTI searches only on low-MCS grants.
+ *   MCS <= ISAC_PDSCH_SOLVER_PREF_MCS (default 4) always searches; others are skipped until N grants have passed (pref_gap counter).
+ *   Legacy MCS-only preference, used only when ISAC_PDSCH_SOLVER_NL_PREF is off. Caller: nr_pdsch_solver_plan_slot().
+ */
 static bool search_pref_skip(solver_rnti_t *r, int mcs)
 {
   static int n_gap = -1, mcs_max = 4;
@@ -457,8 +544,9 @@ static bool search_pref_skip(solver_rnti_t *r, int mcs)
   return true;
 }
 
-/* Prefer readings that can actually decode at the measured receiver SNR: one layer and QPSK. Keep the old
- * MCS-only preference independent, and use its grant-gap fallback when no preferred reading is available. */
+/* nl_pref_gap: returns ISAC_PDSCH_SOLVER_NL_PREF (cached), the grant gap after which the one-layer-QPSK preference is dropped; 0 = off.
+ *   Caller: nr_pdsch_solver_plan_slot() and plan_known().
+ */
 static int nl_pref_gap(void)
 {
   if (g_nl_pref_gap < 0)
@@ -466,6 +554,9 @@ static int nl_pref_gap(void)
   return g_nl_pref_gap;
 }
 
+/* reading_nl_qpsk: true when a reading is single-layer and its MCS is QPSK (Qm = 2) in at least one MCS table.
+ *   Used to prefer readings that can decode at the measured SNR. Callers: nr_pdsch_solver_plan_slot().
+ */
 static bool reading_nl_qpsk(const nr_pdsch_solver_reading_t *rd)
 {
   if (rd->n_layers != 1) return false;
@@ -476,6 +567,9 @@ static bool reading_nl_qpsk(const nr_pdsch_solver_reading_t *rd)
   return false;
 }
 
+/* search_backoff: ISAC_PDSCH_SOLVER_BACKOFF=N: an RNTI with no candidate and at least N probes spent is searched on 1 grant in 8 only.
+ *   Limit is read once; 0 disables it. Caller: nr_pdsch_solver_plan_slot().
+ */
 static bool search_backoff(const solver_rnti_t *r)
 {
   static int lim = -1;
@@ -485,6 +579,9 @@ static bool search_backoff(const solver_rnti_t *r)
 
 static const uint8_t kS[4] = {1, 0, 2, 3};
 
+/* has_id: true when a reading's layout list (ids) contains layout id. Linear scan over at most a few dozen ids.
+ *   Caller: nr_pdsch_solver_plan_slot().
+ */
 static bool has_id(const nr_pdsch_solver_reading_t *r, int id)
 {
   for (int i = 0; i < r->n_ids; i++)
@@ -492,6 +589,9 @@ static bool has_id(const nr_pdsch_solver_reading_t *r, int id)
   return false;
 }
 
+/* coverage_find: returns the hash-table entry for a coverage key (linear probing), new or existing, for the RNTI's trial-count table.
+ *   The caller must ensure room (coverage_room) first. Callers: plan_coverage(), coverage_room().
+ */
 static coverage_entry_t *coverage_find(solver_coverage_t *c, uint64_t key)
 {
   uint64_t h = key * UINT64_C(0x9e3779b97f4a7c15);
@@ -501,6 +601,10 @@ static coverage_entry_t *coverage_find(solver_coverage_t *c, uint64_t key)
   return &c->entries[i];
 }
 
+/* coverage_room: makes sure the RNTI's coverage hash table can take `extra` more keys, growing or resetting it as needed (max 2^18 entries).
+ *   When the table is full at the maximum size it is cleared and a new coverage round starts. Returns false only on allocation failure.
+ *   Caller: plan_coverage().
+ */
 static bool coverage_room(solver_coverage_t *c, size_t extra)
 {
   if (c->cap && (c->used + extra) * 4 < c->cap * 3) return true;
@@ -522,17 +626,19 @@ static bool coverage_room(solver_coverage_t *c, size_t extra)
   return true;
 }
 
+/* coverage_key: builds the 64-bit coverage key for one physical hypothesis: scrambling id, layout id, TDA index and variant.
+ *   variant 63 means the aggregate count over all timing cases. Pure function. Callers: plan_coverage().
+ */
 static uint64_t coverage_key(int id, int variant, nr_dci_bits_t payload)
 {
   const int tda = variant == 63 ? 0 : tda_of(id, payload); /* 63 = all timing cases' trial count */
   return (((((uint64_t)(t_scr + 1) << 15) | (unsigned)id) << 4 | tda) << 6 | variant) + 1;
 }
 
-/* A DCI changes the number/order of readings and which tables are eligible.
- * An index modulo that list can repeatedly skip the same physical hypothesis.
- * Count actual trials by (layout, TDRA, identity, S, add-pos, table). Ineligible
- * combinations remain untested; a high-MCS grant cannot consume a later QPSK
- * grant's table/start trial. Grouping identical readings still shares each probe. */
+/* plan_coverage: ISAC_PDSCH_SOLVER_COVERAGE=1 planner: fills the grant's budget with the least-tried physical hypotheses across readings.
+ *   Scores each (reading, S, add_pos, table) variant by how often it was tried, balances the budget per layout, and emits up to budget variants.
+ *   Records every emitted trial in the RNTI's coverage table. Caller: nr_pdsch_solver_plan_slot() (unsolved RNTIs).
+ */
 static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, int max, int slot,
                           const nr_pdsch_solver_reading_t *rd, const int *order, int no,
                           int l0, bool qpsk, uint64_t dci, nr_dci_bits_t payload)
@@ -599,7 +705,10 @@ static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, 
   }
 }
 
-/* known-parameter variants for one reading (solved RNTI, or the cell prior on an unsolved one) */
+/* plan_known: emits the variants for a known layout (the solution, the reused best solution, or the cell prior) for one reading.
+ *   Uses the learnt S for the TDA index and table when known; otherwise tries the four start symbols and the candidate tables as probes.
+ *   Phase 1 (solved) emits counted decodes; phase 0 emits probes. Callers: nr_pdsch_solver_plan_slot().
+ */
 static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                        const nr_pdsch_solver_reading_t *rd, int l0, int rep, uint8_t add_pos, int8_t table,
                        const int8_t *S_by_tda, int mcs, uint64_t dci, nr_dci_bits_t payload)
@@ -626,12 +735,21 @@ static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, ui
   }
 }
 
+/* nr_pdsch_solver_plan: planning entry point for an ordinary (non-CSI-RS) slot; forwards to nr_pdsch_solver_plan_slot() with csirs_slot = false.
+ *   Arguments and result as in nr_pdsch_solver_plan_slot(). Callers: tests/nr_pdsch_solver_test.cc.
+ */
 int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0,
                          const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out)
 {
   return nr_pdsch_solver_plan_slot(rnti, payload, len, mcs, l0, false, rd, n_rd, budget, out);
 }
 
+/* nr_pdsch_solver_plan_slot: Plans the PDSCH decode variants for one DCI grant of an RNTI, written to out[] (returns the count, at most budget).
+ *   Solved RNTI: known layout plus refinement probes. Unsolved: candidate confirmation, reuse prior, then the search (coverage or round robin).
+ *   Gated by ISAC_PDSCH_SOLVER (returns 0 when off); logs per-RNTI statistics every 500/1000 grants. Takes g_mu itself.
+ *   csirs_slot: solved RNTIs with unknown CSI-RS rate matching probe both rate-match choices; unsolved RNTIs do not search.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (per decoded DCI).
+ */
 int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0, bool csirs_slot,
                               const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out)
 {
@@ -875,6 +993,9 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   return n;
 }
 
+/* lowest: returns the lowest layout index set in a bitmap of BM_BYTES bytes, or -1 when empty.
+ *   Used as the fallback representative when no consistent layout is found. Caller: nr_pdsch_solver_feedback().
+ */
 static int lowest(const uint8_t *bm)
 {
   for (int b = 0; b < BM_BYTES; b++)
@@ -883,9 +1004,10 @@ static int lowest(const uint8_t *bm)
   return -1;
 }
 
-/* Lowest layout of the candidate set whose TDA reading maps every CRC-passed (payload, S) pair consistently; fills
- * S_by_tda from the evidence. Layouts with a different TDA width read the same DCI as different indices, and only the
- * true width makes "S is a function of the TDA index" hold. */
+/* choose_rep: picks the representative layout of a candidate set: the lowest one whose TDA mapping is consistent with all CRC-passed evidence.
+ *   Fills r->S_by_tda with the S value per TDA index from the evidence; -1 entries are unknown. Returns -1 when none is consistent.
+ *   Caller: nr_pdsch_solver_feedback() (candidate confirmation and each new solving pass).
+ */
 static int choose_rep(solver_rnti_t *r)
 {
   for (int b = 0; b < BM_BYTES; b++) {
@@ -911,18 +1033,27 @@ static int choose_rep(solver_rnti_t *r)
   }
   return -1;
 }
+/* add_ev: appends one CRC-passed (payload, S) pair to the RNTI's evidence list, dropping the oldest when 16 are stored.
+ *   Caller: nr_pdsch_solver_feedback().
+ */
 static void add_ev(solver_rnti_t *r, nr_dci_bits_t p, uint8_t S)
 {
   if (r->n_ev < 16) { r->ev_p[r->n_ev] = p; r->ev_S[r->n_ev++] = S; }
   else { memmove(r->ev_p, r->ev_p + 1, 15 * sizeof(r->ev_p[0])); memmove(r->ev_S, r->ev_S + 1, 15); r->ev_p[15] = p; r->ev_S[15] = S; }
 }
 
+/* has_id_p: true when a pending entry's layout list contains id (debug logging only).
+ *   Caller: nr_pdsch_solver_feedback() probe log.
+ */
 static int has_id_p(const pending_t *p, int id)
 {
   for (int i = 0; i < p->n_ids; i++)
     if (p->ids[i] == id) return 1;
   return 0;
 }
+/* make_cand: starts a candidate for an RNTI from a CRC-passing pending entry: its layouts, S, add_pos, table and scrambling id.
+ *   Allocates the layout bitmap on first use and counts the candidate. Caller: nr_pdsch_solver_feedback() under g_mu.
+ */
 static void make_cand(solver_rnti_t *r, const pending_t *p)
 {
   if (r->cand_bm == NULL) r->cand_bm = calloc(1, BM_BYTES);
@@ -943,6 +1074,11 @@ static void make_cand(solver_rnti_t *r, const pending_t *p)
         r->rnti, p->S, p->add_pos, r->cand_table, p->n_ids);
 }
 
+/* nr_pdsch_solver_feedback: consumes the CRC result of one solver decode (identified by its token): updates statistics, candidates, and solved state.
+ *   Two CRC passes with consistent layouts and S solve the RNTI (sets prior and CORESET scrambling); failed candidates are dropped after several tries.
+ *   Solved RNTIs learn rate matching, table, representative and S map; 256 failed full decodes without a pass reopen the search.
+ *   ISAC_PDSCH_SOLVER_PROBELOG=1 logs each credited probe. Called by nr_pdsch_passive_queue.c after each decode. Takes g_mu.
+ */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
 {
   if (token == 0)
@@ -1109,6 +1245,9 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   pthread_mutex_unlock(&g_mu);
 }
 
+/* nr_pdsch_solver_stats: copies the solver's global counters (planned, probes, fulls, CRC passes, candidates, solved, dropped) into *s.
+ *   Takes g_mu. No callers outside the header yet.
+ */
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s)
 {
   pthread_mutex_lock(&g_mu);

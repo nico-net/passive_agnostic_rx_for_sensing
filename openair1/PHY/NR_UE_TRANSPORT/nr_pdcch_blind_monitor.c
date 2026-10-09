@@ -971,6 +971,9 @@ static void discovered_verified(void)
   }
 }
 
+/* discovered_load: loads the discovered-CORESET list into s_disc: from the in-process GPU stage-1/2 records (when nr_pdcch_nid_gpu is enabled) or from a text file (CORESET nid=... lines).
+ *   Keeps only lines inside the legal ranges for the carrier (BWP size, symbol, duration, bundle size). Returns true when at least one CORESET was read. Caller: nr_pdcch_blind_monitor_discovered_poll().
+ */
 static bool discovered_load(const char *path)
 {
   FILE *f;
@@ -1033,12 +1036,14 @@ static struct {
   uint64_t polls;
 } s_add_disc;
 
+/* nr_pdcch_discovered_enabled: returns true when the discovered-CORESET bank is enabled (ISAC_PDCCH_NID_BANK=1). Callers: the discovered-CORESET entry points in this file and nr_pdcch_blind_monitor_rt.c. */
 bool nr_pdcch_discovered_enabled(void)
 {
   const char *v = getenv("ISAC_PDCCH_NID_BANK"); /* own flag; was mistakenly ISAC_CSIRS_DISC */
   return v && strcmp(v, "1") == 0;
 }
 
+/* nr_pdcch_discovered_reset: clears the discovered-CORESET queue and its evidence, keeping the generation counter increasing, and records the current configuration epoch. Caller: nr_pdcch_blind_monitor_autodiscover_reset() and discovered_additional_poll() on an epoch change. */
 void nr_pdcch_discovered_reset(void)
 {
   const uint64_t generation = s_add_disc.generation + 1;
@@ -1048,6 +1053,7 @@ void nr_pdcch_discovered_reset(void)
 }
 
 static bool discovered_load_stream(FILE *f);
+/* nr_pdcch_discovered_load: loads the discovered-CORESET list from a file when the bank is enabled and no dwell is active; returns the result of discovered_load_stream(). Caller: discovered_additional_poll(). */
 bool nr_pdcch_discovered_load(const char *path)
 {
   if (!nr_pdcch_discovered_enabled() || s_add_disc.active)
@@ -1085,6 +1091,9 @@ static bool discovered_load_stream(FILE *f)
   return s_add_disc.n > 0;
 }
 
+/* discovered_additional_poll: polls for new discovered CORESETs at most once every 1024 calls: reads the GPU records (or the discovery file, when it changed), and loads the queue when no dwell is running.
+ *   Also resets the queue on a configuration epoch change. Returns true when a queue was loaded. Caller: nr_pdcch_blind_monitor_discovered_poll().
+ */
 static bool discovered_additional_poll(void)
 {
   if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
@@ -1120,6 +1129,9 @@ static bool discovered_additional_poll(void)
   return nr_pdcch_discovered_load(path);
 }
 
+/* nr_pdcch_discovered_snapshot: starts the next queued discovered CORESET as a dwell: skips the entries outside the carrier or already banked, builds a monitor configuration for the CORESET, and returns it with a token (the dwell generation).
+ *   Returns false when no dwell is active, when the bank is full, or when the bank is disabled. Caller: nr_pdcch_blind_monitor_run_occasion() (discovered pass).
+ */
 bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *token, int carrier_rb)
 {
   if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current()) return false;
@@ -1184,6 +1196,7 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
   return true;
 }
 
+/* nr_pdcch_discovered_step: advances the active dwell by one occasion; after NR_PDCCH_EXTENT_VERIFY_OCC occasions without fresh CRC evidence the CORESET is rejected and the next queued one starts. Ignores stale tokens and repeated slots. Caller: nr_pdcch_blind_monitor_run_occasion() after the discovered pass. */
 void nr_pdcch_discovered_step(uint64_t token, uint64_t slot)
 {
   if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
@@ -1196,6 +1209,9 @@ void nr_pdcch_discovered_step(uint64_t token, uint64_t slot)
   ++s_add_disc.next;
 }
 
+/* nr_pdcch_discovered_observe: records one accepted DCI of the active dwell (RNTI, length, slot, payload); when the same RNTI and length show a different payload at a later slot the CORESET is verified and added to the bank.
+ *   Returns the bank index on success, -1 otherwise (including for stale tokens or the first evidence). Caller: the discovered pass of nr_pdcch_blind_monitor_run_occasion_one().
+ */
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length)
 {
@@ -1230,6 +1246,7 @@ int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
   return -1;
 }
 
+/* nr_pdcch_discovered_candidate_share: returns how many candidates of the per-occasion budget the entry at index gets, when the budget is split between `entries` discovered CORESETs with a rotating start at visit. Pure function. Caller: run_occasion (nr_pdcch_blind_monitor_rt.c). */
 int nr_pdcch_discovered_candidate_share(int entries, int index, uint64_t visit)
 {
   if (entries < 1 || index < 0 || index >= entries) return 0;
@@ -1237,6 +1254,9 @@ int nr_pdcch_discovered_candidate_share(int entries, int index, uint64_t visit)
       + ((index + entries - (int)(visit % entries)) % entries < NR_PDCCH_BANK_CANDIDATE_BUDGET % entries);
 }
 
+/* nr_pdcch_discovered_nrnti: returns the scrambling RNTI (n_RNTI) used by a discovered CORESET in this slot: a deterministic pick among 0 and the confirmed RNTIs of the slot, keyed by slot and nID.
+ *   Keeps exploring the choices so that unresolved identities are served. Caller: nr_pdcch_blind_monitor_rt.c (USS search of discovered CORESETs).
+ */
 uint16_t nr_pdcch_discovered_nrnti(uint32_t slot, uint16_t nid)
 {
   uint16_t h[NR_PDCCH_BLIND_MAX_UE + 1] = {0};
@@ -1265,6 +1285,9 @@ static void nid_budget_feedback(void)
   nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
 }
 
+/* nr_pdcch_blind_monitor_discovered_poll: periodic poll of the discovery sources (GPU records or the discovery file) and of the catalogue walk: loads new CORESETs, banks those already verified, and starts the next unverified CORESET as a dwell (saving and replacing the root configuration geometry).
+ *   Also feeds the node budget (nid_budget_feedback). Returns true when a new dwell was started. Caller: nr_pdcch_blind_monitor_run_occasion() (every occasion).
+ */
 bool nr_pdcch_blind_monitor_discovered_poll(void)
 {
   static unsigned budget_polls;
@@ -1627,6 +1650,9 @@ void nr_pdcch_blind_lookahead_retry(int lane)
   lane_advance(lane);
 }
 
+/* nr_pdcch_blind_monitor_autodiscover_reset: full reset of the Technique A/B/C discovery state: clears the discovered queue, the CSS0 and dedicated flags, the extent lanes and mapping stages, the Technique A dwell, and the long-term dwell statistics.
+ *   Not called by production code (test fixtures only, as of this change), so it cannot change the live receiver. Caller: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h API users and the tests.
+ */
 void nr_pdcch_blind_monitor_autodiscover_reset(void)
 {
   nr_pdcch_discovered_reset();

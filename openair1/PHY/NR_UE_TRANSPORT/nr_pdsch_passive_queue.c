@@ -98,6 +98,9 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 static c16_t *g_owned_iq[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS][NB_ANTENNAS_RX];
 static _Atomic uint64_t g_latency[NR_PDSCH_LAT_STAGES][NR_PDSCH_LAT_BINS];
 static _Atomic uint64_t g_drop_reason[NR_PDSCH_DROP_REASONS];
+/* latency_note: adds one sample (end - start, ns) to the queue-latency histogram of a pipeline stage; ignored when start is 0 or end < start.
+ *   Lock-free atomic increment into g_latency[stage][bin]. Callers: gpu_fep_worker_thread(), nr_pdsch_passive_queue_thread() (queue wait, FEP).
+ */
 static void latency_note(int stage, uint64_t start, uint64_t end)
 {
   if (start && end >= start)
@@ -119,8 +122,9 @@ static int16_t *g_consumer_gpu_rxF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 #define GPU_LLR_CAP (16u << 20) /* int16 per consumer: ~13 full-band rank-4 256QAM TBs, or any probe batch */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
-/* T26c: a solver variant that is dropped before decoding releases its pending entry (no credit) at once,
- * instead of lingering until the 4096-entry FIFO overwrites it (counted there as "dropped"). */
+/* release_solver: drops a queued decode variant without decoding it: returns its pending solver entry with no credit, at once.
+ *   Called when a job is evicted, refused or skipped, so the solver's FIFO does not keep it as a lost CRC. Caller: enqueue_one() and queue_thread().
+ */
 static void release_solver(const nr_pdsch_passive_job_t *j)
 {
   if (j->solver_token) nr_pdsch_solver_feedback(j->solver_token, false, false);
@@ -181,6 +185,10 @@ static void gpu_req_stale(void *ctx, int stage)
   (void)ctx;
   atomic_fetch_add_explicit(stage == 0 ? &g_gpu_stale_pre : &g_gpu_stale_post, 1, memory_order_relaxed);
 }
+/* gpu_req_fep: GPU worker step 1: asks the GPU admission gate whether it can take the request, then runs the FEP for one slot on the device.
+ *   Returns the fep_slot() return code (-1 when not admitted) and stamps r->fep_end_ns. Used directly for owned-IQ requests and as the FEP callback otherwise.
+ *   Callers: gpu_fep_worker_thread(), gpu_fep_submit_and_wait().
+ */
 static int gpu_req_fep(void *ctx)
 {
   gpu_fep_req_t *r = ctx;
@@ -198,6 +206,11 @@ static int64_t gpu_req_llr(void *ctx)
   return rc;
 }
 
+/* gpu_fep_worker_thread: dedicated GPU worker: takes batches of FEP+LLR requests from g_gpu_wq and runs them on the device, one request at a time.
+ *   Waits on g_gpu_wq_work (20 ms timeout) while idle; a request whose config epoch is stale or whose API is gone completes with rc = -1.
+ *   Completion: per-request done flag (with NR_CSIRS_DISC) or a batch-wide done flag, then broadcast on g_gpu_wq_done. Logs GPU_FEP stats every 1000 slots.
+ *   Started by nr_pdsch_passive_gpu_warmup() on its own core (ISAC_GPU_WORKER_CORE, default 3). Stopped by nr_pdsch_passive_queue_stop().
+ */
 static void *gpu_fep_worker_thread(void *arg)
 {
   (void)arg;
@@ -266,8 +279,10 @@ complete:
   return NULL;
 }
 
-/* Hand a request to the dedicated worker and block (condvar, not the queue's own mutex) until it is
- * done. Returns the same rc fep_slot()/pdsch_llr() would have. */
+/* gpu_fep_submit_and_wait: hands one FEP+LLR request to the GPU and blocks until it is done; returns the rc of the FEP/LLR call (-1 when refused).
+ *   With the GPU budget gate (nr_gpu_budget_enabled) it runs the request directly under a nonblocking mutex; otherwise it queues it to the worker (bounded queue).
+ *   Caller: queue_thread() on the GPU front-end path. Takes g_gpu_wq_lock while waiting on g_gpu_wq_done.
+ */
 static int64_t gpu_fep_submit_and_wait(gpu_fep_req_t *req)
 {
   if(nr_gpu_budget_enabled()) {
@@ -314,8 +329,9 @@ static int64_t gpu_fep_submit_and_wait(gpu_fep_req_t *req)
   return req->rc;
 }
 
-/* ISAC_GPU_DUMP=<file>: one record per self-checked job -- the slot's time-domain window per antenna,
- * the job, and both LLR sets -- for offline comparison. */
+/* gpu_dump_record: ISAC_GPU_DUMP=<file>: appends one record per self-checked GPU job to the dump file (slot IQ window, job, CPU and GPU LLRs) for offline comparison.
+ *   Opens the file once (path cached in a static). Writes nothing when the env var is unset. Caller: queue_thread() after the GPU self-check.
+ */
 static void gpu_dump_record(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *job, const nr_gpu_pdsch_job_t *gj,
                             const int16_t *llr_cpu, const int16_t *llr_gpu, uint32_t G)
 {
@@ -387,6 +403,9 @@ typedef struct {
 } coreset_dmrs_t;
 static coreset_dmrs_t g_cs_dmrs[8];
 static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
+/* coreset_dmrs_refresh: returns ISAC_PDSCH_DMRS_ID_REFRESH (cached per thread, default 0): how often the per-CORESET DM-RS identity is re-estimated.
+ *   Nonzero also makes the coreset_dmrs table readers take its mutex. Callers: nr_pdsch_passive_coreset_dmrs_top(), queue_thread().
+ */
 static int coreset_dmrs_refresh(void)
 {
   static _Thread_local int n = -1;
@@ -397,12 +416,19 @@ static int coreset_dmrs_refresh(void)
   }
   return n;
 }
+/* per_coreset_dmrs_on: returns ISAC_PDSCH_DMRS_ID_PER_CORESET (cached): 1 keeps a separate DM-RS identity estimate for each CORESET key.
+ *   Off by default; when off the shared per-grant estimate is used. Caller: queue_thread() (after the solver feedback).
+ */
 static bool per_coreset_dmrs_on(void)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET") && atoi(getenv("ISAC_PDSCH_DMRS_ID_PER_CORESET")) ? 1 : 0;
   return en == 1;
 }
+/* coreset_dmrs_slot: finds or allocates the DM-RS identity estimator of one CORESET key (8 slots, under g_cs_dmrs_mu) and initialises it with the PCI.
+ *   The estimator is a two-stage NID search restricted to stage 1 (s1_grants = UINT32_MAX). Returns NULL when all 8 slots are used.
+ *   Caller: queue_thread() (per-CORESET DM-RS path).
+ */
 static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
 {
   pthread_mutex_lock(&g_cs_dmrs_mu);
@@ -422,6 +448,9 @@ static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
   pthread_mutex_unlock(&g_cs_dmrs_mu);
   return r;
 }
+/* nr_pdsch_passive_coreset_dmrs_top: returns the three best DM-RS identity candidates of a CORESET (out3[0..2]) once that CORESET has a decided identity; returns 3, else 0.
+ *   Reads the table under the per-entry mutex only when ISAC_PDSCH_DMRS_ID_REFRESH is set. Caller: nr_pdcch_blind_monitor_rt.c (scrambling-id hypotheses).
+ */
 int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3)
 {
   for (int i = 0; i < 8; i++)
@@ -433,6 +462,9 @@ int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3)
     }
   return 0;
 }
+/* nr_pdsch_passive_coreset_dmrs_id: returns the decided DM-RS identity of a CORESET key, or -1 when none has been decided yet (or the key is unknown).
+ *   Lock-free acquire load of the decided field. Caller: nr_pdcch_blind_monitor_rt.c (scrambling id of the CORESET).
+ */
 int nr_pdsch_passive_coreset_dmrs_id(int key)
 {
   for (int i = 0; i < 8; i++)
@@ -654,16 +686,10 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
   }
 }
 
-/* DM-RS SYMBOL ORACLE measurement of ONE slot on the PRBs [rb0, rb0+nrb): per-symbol coherence with
- * that symbol's own DM-RS sequence (antenna 0, ~14 symbol FFTs into row 0 of rxdataF). Returns the
- * DM-RS symbol mask (0 = none seen) and, in *last_sym, the last symbol carrying energy on those PRBs
- * (-1 = none). Mapping-type agnostic: a type-B grant's first DM-RS on its first symbol is measured
- * like any other.
- * rb0 is an ABSOLUTE carrier CRB (matches nr_dmrs_prb_coherence()'s coh[] indexing), NOT the grant's
- * BWP-relative PRB index -- callers must convert with nr_dmrs_oracle_crb(BWPStart, rb0) first.
- * nid: the DM-RS identity the job itself decodes with (final review I6) -- the decided identity for the
- * job's nSCID on a dedicated-class grant, N_ID^cell otherwise, i.e. job.dlsch_pdu.dlDmrsScramblingId as
- * the scan thread set it. Scoring with the PCI on a scramblingID0 != PCI cell never fires the oracle. */
+/* dmrs_oracle_measure: DM-RS symbol oracle: measures per-symbol DM-RS coherence over the grant's PRBs and returns the mask of DM-RS symbols and the last data symbol.
+ *   Runs one FEP per symbol (CPU), computes the coherence metric per symbol, the energy profile and the lower median; a symbol is DM-RS when its metric exceeds 0.68 and med + 0.18.
+ *   Outputs: *last_sym (last symbol above 1/4 of peak energy) and *med_out. Callers: nr_pdsch_passive_queue_thread() (grant, k0 and layout probes) and nr_pdsch_passive_bc9_confirm().
+ */
 static uint16_t dmrs_oracle_measure(PHY_VARS_NR_UE *ue, NR_DL_FRAME_PARMS *fp, uint32_t rxdataF_sz,
                                     c16_t rxdataF[][rxdataF_sz], int nr_slot, int rb0, int nrb, int nscid, int nid,
                                     int *last_sym, double prof[14], double *med_out)
@@ -1000,6 +1026,12 @@ void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_tic
     nr_pdsch_config_sweep_observe(ticket, mask, last_sym, 0); /* K39: k0 = 0 is only PLAUSIBLE (mask/last symbol prune; k0 is never pinned by DM-RS presence) */
 }
 
+/* nr_pdsch_passive_queue_thread: consumer thread body of the passive PDSCH decode pool: takes a slot group of grants from the ring, decodes each grant, and feeds the results back.
+ *   Per group: optional signal-time pacing (ISAC_PDSCHQ_SIGNAL_TIME, replay only), owned IQ copy, FEP+channel estimate on CPU or on the GPU (gpu_fep_submit_and_wait),
+ *   DM-RS oracle and k0 hypotheses, GrantWork and CB0 elimination, then nr_pdsch_passive_decode() per grant; solver feedback (nr_pdsch_solver_feedback), RRC and TA harvest, Technique D and Qm-oracle updates.
+ *   Flags read: ISAC_PDSCH_INLINE_POOL, ISAC_PDSCHQ_SIGNAL_TIME, ISAC_PROBE_ALL, ISAC_PDSCH_K0_PROBE, ISAC_TD_GRANTWORK, ISAC_TD_GW_PROBE, ISAC_TD_CB0_ELIM, ISAC_RX_EQ_AB, ISAC_CHEST_OCC_AB, ISAC_LDPC_ITERS_AB, ISAC_GPU_SELFCHECK, ISAC_PDSCH_EVM_GRANT.
+ *   Started by nr_pdsch_passive_queue_start() (one per consumer, priority 40 below RT). Exits when g_stop is set; uses g_lock and g_cv for the ring.
+ */
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -2059,6 +2091,10 @@ static void report_sweep(const nr_pdsch_sweep_report_t *r)
           r->hypothesis.tda_length,r->hypothesis.dmrs_mask,r->hypothesis.mcs_table,r->winner);
 }
 
+/* nr_pdsch_passive_gpu_warmup: prepares the optional GPU front end (NR_GPU_FEP=1): loads libpdsch_gpu.so, initialises it for the carrier and starts the GPU worker thread.
+ *   Reads ISAC_GPU_SELFCHECK (default 32 checks) and ISAC_GPU_SELFCHECK_ENFORCE. Falls back to the CPU path (g_gpu = NULL) when loading or init fails or there are more than 4 RX antennas.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (once, before the consumers start). Must run before nr_pdsch_passive_queue_start().
+ */
 void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
 {
   if (!atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_prepare();
@@ -2099,6 +2135,10 @@ void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
   }
 }
 
+/* nr_pdsch_passive_queue_start: starts the passive PDSCH decode pool: allocates per-consumer rxdataF (and owned-IQ / GPU buffers) and launches n_consumers threads.
+ *   Clamps depth to [2, MAX_DEPTH] and consumers to [1, MAX]; cores come from nr_core_plan_cpu() or ISAC_PDSCH_CORES. Idempotent: returns true when already running.
+ *   Returns false when an allocation fails (partial allocations are freed). Caller: nr_pdcch_blind_monitor_rt.c (receive setup).
+ */
 bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers, int affinity)
 {
   if (atomic_load_explicit(&g_running, memory_order_acquire)) {
@@ -2213,6 +2253,9 @@ static int g_n_pending = 0;
 static pthread_mutex_t g_pending_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_batches = 0, g_batches_multi = 0; ///< producer flushes, and those with >1 grant
 
+/* nr_pdsch_passive_queue_flush_locked: pushes the producer's pending slot batch into the ring under one lock, so that the consumers see the whole slot at once.
+ *   Updates batch counters (logged every 5000 batches). Requires g_pending_mu held; takes g_lock inside. Called by flush(), enqueue() and enqueue-time flushes.
+ */
 static void nr_pdsch_passive_queue_flush_locked(void) /* g_pending_mu held */
 {
   if (g_n_pending == 0) return;
@@ -2241,12 +2284,19 @@ void nr_pdsch_passive_queue_flush(void)
   pthread_mutex_unlock(&g_pending_mu);
 }
 
+/* nr_pdsch_passive_queue_fill_pct: returns the ring fill level in percent (queued plus pending grants over depth), or 0 when the pool is not running.
+ *   Racy read, used only as an admission hint by the blind monitor's rate limiter. Caller: nr_pdcch_blind_monitor_rt.c.
+ */
 int nr_pdsch_passive_queue_fill_pct(void)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire) || g_depth <= 0) return 0;
   return (int)(100 * (g_count + g_n_pending) / g_depth); /* racy read: admission hint only */
 }
 
+/* nr_pdsch_passive_queue_enqueue: producer entry point: adds one passive PDSCH grant to the pending slot batch; the batch is flushed when the slot changes or the batch is full.
+ *   Stamps the config epoch and sensing epoch, normalises the PRB allocation (refuses invalid PRB lists), and flushes at once when CSI-RS discovery is on.
+ *   Returns false when the pool is not running or the grant is refused. Caller: nr_pdcch_blind_monitor_rt.c (per PDCCH grant).
+ */
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
@@ -2287,6 +2337,9 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
 }
 
 static _Atomic uint64_t g_dropped_probe; /* ISAC_PDSCHQ_PROBE_LAST: probes refused/evicted (also in dropped_full) */
+/* probe_last_enabled: returns ISAC_PDSCHQ_PROBE_LAST (cached): when on, under overload layout probes are evicted before full decodes.
+ *   Caller: enqueue_one().
+ */
 static bool probe_last_enabled(void)
 {
   static int en = -1;
@@ -2294,6 +2347,10 @@ static bool probe_last_enabled(void)
   return en == 1;
 }
 
+/* enqueue_one: inserts one job into the consumer ring (g_lock held by the caller), applying the overload rules when the ring is full.
+ *   Narrow grants (< 1/8 of the band) are refused at >= 90 % fill; with ISAC_PDSCHQ_PROBE_LAST a probe may be evicted or refused first.
+ *   Otherwise the oldest job of the RNTI with most entries is dropped (per-RNTI fairness). Counters: dropped_narrow, dropped_full. Caller: nr_pdsch_passive_queue_flush_locked().
+ */
 static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) /* g_lock held by the caller */
 {
   /* DECODE BUDGET BY SENSING VALUE (2026-09-15). Under overload the sensing pipeline wants the
@@ -2380,6 +2437,9 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
   return true;
 }
 
+/* nr_pdsch_passive_queue_get_stats: copies the queue statistics (latency histograms, drop reasons, queued/decoded/CRC counts, batches, GPU counters) into *out.
+ *   Reads atomics only; out == NULL is a no-op. Callers: nr_passive_metrics.c and nr_pdcch_blind_monitor_rt.c (periodic summary).
+ */
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
 {
   if (out == NULL) {
@@ -2409,6 +2469,9 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->gpu_disabled = atomic_load_explicit(&g_gpu_disabled, memory_order_relaxed);
 }
 
+/* nr_pdsch_passive_queue_stop: stops the passive decode pool: sets g_stop, joins the consumer threads, frees their buffers and stops the GPU worker.
+ *   Idempotent when not running. Frees the owned-IQ arenas per consumer. Caller: executables/nr-uesoftmodem.c (teardown). Clears g_running last.
+ */
 void nr_pdsch_passive_queue_stop(void)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {

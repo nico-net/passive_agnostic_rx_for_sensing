@@ -215,6 +215,9 @@ static void *writer(void *arg)
   return NULL;
 }
 
+/* nr_passive_obs_open: opens the per-grant observation file once: allocates a ring of `capacity` records and starts the writer thread. Returns false when already open, when the path or the capacity is invalid, or when the file or the ring cannot be created.
+ *   Records are dropped (counted) when the ring is full. Caller: executables/nr-uesoftmodem.c (passive receiver start-up, when the observation path is set); closed by nr_passive_obs_close().
+ */
 bool nr_passive_obs_open(const char *path, uint32_t capacity)
 {
   pthread_once(&g_mu_once, mu_init);

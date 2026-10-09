@@ -184,6 +184,9 @@ static void *run_writer(void *arg)
   return NULL;
 }
 
+/* nr_sense_open: opens the sensing output channel once: validates the configuration (ring sizes, antenna and RE limits and the size arithmetic), then either sets up the in-memory sink (no file or endpoint) or allocates the CFR frame ring, the record ring and the RS job ring for the file or endpoint sink.
+ *   Returns 0, or -1 when the configuration is invalid or an allocation fails, and when a channel is already open. Callers: nr_isac.cc (sensing start-up) and the SRS tests.
+ */
 int nr_sense_open(const nr_sense_cfg_t *cfg)
 {
   pthread_once(&mu_once, init_mu);

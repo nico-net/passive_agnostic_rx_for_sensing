@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <time.h>
 #ifndef NR_CSIRS_DISC_GPU_MODULE
+/* fp_us: returns CLOCK_MONOTONIC time in microseconds (timing of the footprint detector). */
 static uint64_t fp_us(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;}
 
 #endif
@@ -19,6 +20,9 @@ static const int periods[] = {4,5,8,10,16,20,32,40,64,80,160,320,640};
 
 typedef struct { nr_csirs_disc_fp_t fp; double significance; } candidate_t;
 
+/* nr_disc_fp_valid: sanity check of a ring for footprint detection: pointers set, 1-4 antennas, RB count within limits and a slot stride that covers the 14 symbols.
+ *   Returns true when the ring can be normalised and folded. Callers: nr_csirs_disc_footprints_cpu() and detect().
+ */
 int nr_disc_fp_valid(const nr_csirs_disc_ring_t *r)
 {
   return r && r->grid_base && r->meta && r->capacity > 0 && r->n_ant > 0 && r->n_ant <= 4 &&
@@ -26,8 +30,10 @@ int nr_disc_fp_valid(const nr_csirs_disc_ring_t *r)
          r->slot_stride >= (size_t)r->n_ant * 14 * 24 * r->n_rb;
 }
 
-/* Normalize within the SAME symbol and RB. Scheduling another symbol must not
- * turn a fully occupied data symbol into a pilot comb. */
+/* normalize_local: normalises the power of every valid slot of a ring per symbol and RB, so that a fully occupied data symbol does not look like a pilot comb.
+ *   Per RB the reference is the mean of the lowest third of the 12 RE powers (excluded REs skipped); each RE is scaled to 4096 x power / reference (capped at 8192). A per-tile average is appended.
+ *   Output x holds capacity x (14 x 12 x n_rb + pooled tiles) values. Callers: nr_disc_fp_normalize(), nr_csirs_disc_footprints_cpu(), normalize_job().
+ */
 static void normalize_local(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg, uint32_t *x)
 {
   const int nk = 12*r->n_rb, nr = 14*nk+POOL(r);
@@ -73,7 +79,9 @@ static void normalize_local(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_f
   }
 }
 
-/* Preserve the public GPU batch primitive's original layout. */
+/* nr_disc_fp_normalize: public normalisation primitive of the GPU batch path: writes the normalised symbols of every slot and a per-symbol average over RBs into out.
+ *   Uses normalize_local() internally and keeps the output layout of the GPU module (stride 14 x 12 x n_rb + 168). No production caller; used by tests/nr_csirs_disc_fp_test.cc.
+ */
 void nr_disc_fp_normalize(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg, uint32_t *out)
 {
   int re=14*12*r->n_rb, stride=re+POOL(r);
@@ -93,6 +101,9 @@ void nr_disc_fp_normalize(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_
 }
 
 typedef struct { const nr_csirs_disc_ring_t *r; const uint32_t *x; } fold_ctx_t;
+/* fold_cpu: adds the normalised values of the valid slots of a ring to the per-residue sums and squares (period p) used by the lattice test.
+ *   Residue = abs_slot mod p. Callback of cluster() for the CPU detector (nr_csirs_disc_footprints_cpu).
+ */
 static int fold_cpu(void *opaque, int p, uint64_t *sum, uint64_t *sq)
 {
   const fold_ctx_t *c=opaque;
@@ -105,11 +116,15 @@ static int fold_cpu(void *opaque, int p, uint64_t *sum, uint64_t *sq)
   return 0;
 }
 
+/* gcd_period: greatest common divisor of two sweep periods, used to decide whether two footprints are harmonics of the same lattice. */
 static int gcd_period(int a,int b)
 {
   while(b) {int t=a%b;a=b;b=t;}return a;
 }
 
+/* rank_candidate: qsort/heap comparator of footprint candidates: higher significance x (strength - 1) first, then period, offset, symbol mask and RB start.
+ *   Used by add_candidate() and finish_candidates().
+ */
 static int rank_candidate(const void *a, const void *b)
 {
   const candidate_t *x=a,*y=b;
@@ -120,6 +135,9 @@ static int rank_candidate(const void *a, const void *b)
   if(x->fp.sym_mask!=y->fp.sym_mask) return x->fp.sym_mask-y->fp.sym_mask;
   return x->fp.rb_start-y->fp.rb_start;
 }
+/* add_candidate: inserts a candidate into a bounded max-heap of CAND_CAP entries (ranked by rank_candidate), replacing the weakest when full.
+ *   Callers: cluster() (per candidate) and cluster_parallel() (merge of group results).
+ */
 static void add_candidate(candidate_t *heap, int *count, candidate_t c)
 {
   int at;
@@ -136,6 +154,7 @@ static void add_candidate(candidate_t *heap, int *count, candidate_t c)
   }
 }
 
+/* rank_strength: comparator of finished footprints: strongest first, then period, offset and symbol mask. Used to order the output of finish_candidates(). */
 static int rank_strength(const void *a, const void *b)
 {
   const nr_csirs_disc_fp_t *x=a,*y=b;
@@ -166,6 +185,9 @@ static history_t history;
 uint64_t csirs_disc_gpu_detect_batches, csirs_disc_cpu_detect_batches;
 uint64_t csirs_disc_gpu_lattice_calls, csirs_disc_cpu_lattice_calls;
 static bool history_unified;
+/* history_alloc: allocates a zeroed uint64 array of count entries for the cumulative history, in unified memory when the GPU history is used.
+ *   Caller: detect() (bootstrap of the history).
+ */
 static void *history_alloc(size_t count)
 {
   size_t bytes=count*sizeof(uint64_t);
@@ -173,6 +195,9 @@ static void *history_alloc(size_t count)
   if(p) memset(p,0,bytes);
   return p;
 }
+/* history_free: frees a history array from history_alloc() (unified or host).
+ *   Callers: nr_csirs_disc_detect_reset().
+ */
 static void history_free(void *p)
 {
   if(history_unified) {if(p) nr_csirs_disc_free_unified(p);}
@@ -181,9 +206,9 @@ static void history_free(void *p)
 
 #endif
 
-/* Two short-period bases avoid rereading 640 RE vectors for every short
- * lattice. Only pooled tiles need per-phase squares; extent uses the global
- * per-RE variance, which conservatively includes between-phase variation. */
+/* history_reduce: sums the history of one symbol and sub-carrier range over the residues of a period p: uses the 80- or 64-residue base when p divides it, otherwise the 640 base.
+ *   Writes sum[first..end) for the candidate lattice. Caller: cluster() (reduced path).
+ */
 static void history_reduce(const history_t *h,int p,int o,int first,int end,uint64_t *sum)
 {
   int basis=80%p==0?80:64%p==0?64:640;
@@ -195,6 +220,9 @@ static void history_reduce(const history_t *h,int p,int o,int first,int end,uint
   }
 }
 
+/* finish_candidates: turns the ranked candidate list of one detection into the output footprints: drops duplicates and harmonics, merges symbol masks, removes fragments contained in a complete pattern, and ranks by strength.
+ *   Returns the number written (at most max_out). Frees cand. Caller: cluster() and cluster_parallel().
+ */
 static int finish_candidates(candidate_t *cand,int nc,nr_csirs_disc_fp_t *out,int max_out)
 {
   qsort(cand,nc,sizeof(*cand),rank_candidate);
@@ -238,6 +266,10 @@ static int finish_candidates(candidate_t *cand,int nc,nr_csirs_disc_fp_t *out,in
   qsort(out,n,sizeof(*out),rank_strength);
   free(cand);return n;
 }
+/* cluster: the footprint search over one set of periods: for each period, offset, symbol and sub-carrier comb tests the on-lattice mean against the off-lattice mean, segments the RB axis into runs, and keeps the significant ones.
+ *   Inputs are the folded statistics of the ring (fold callback) or the cumulative history h. Output: candidates to raw (when non-NULL) or ranked footprints via finish_candidates().
+ *   Thresholds: min_strength from cfg (default 2), z >= 8, runs of at least 4 RBs, a peak-relative noise penalty. Callers: nr_disc_fp_cluster(), cluster_job().
+ */
 static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                    nr_csirs_disc_fp_t *out, int max_out, nr_disc_fold_fn fold, void *ctx, const history_t *h,
                    int first_period, int period_step, candidate_t **raw, int *nraw)
@@ -440,12 +472,18 @@ static int cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *
   return finish_candidates(cand,nc,out,max_out);
 }
 
+/* nr_disc_fp_cluster: footprint search over the full period table (all periods) for a ring, using the fold callback and no history.
+ *   Calls cluster() with first period 0 and step 1. Caller: nr_csirs_disc_footprints_cpu() and the GPU module (nr_csirs_disc_gpu.cu).
+ */
 int nr_disc_fp_cluster(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                        nr_csirs_disc_fp_t *out, int max_out, nr_disc_fold_fn fold, void *ctx)
 {
   return cluster(r,cfg,out,max_out,fold,ctx,NULL,0,1,NULL,NULL);
 }
 
+/* nr_csirs_disc_footprints_cpu: serial CPU reference of the footprint detector: normalises the ring, folds it per period and returns the detected footprints in out.
+ *   Returns the count, or -1 for an invalid ring or allocation failure. No production caller; used by tests/nr_csirs_disc_fp_test.cc (the GPU module uses nr_disc_fp_cluster()).
+ */
 int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                                 nr_csirs_disc_fp_t *out, int max_out)
 {
@@ -461,6 +499,9 @@ int nr_csirs_disc_footprints_cpu(const nr_csirs_disc_ring_t *r, const nr_csirs_d
 }
 
 #ifndef NR_CSIRS_DISC_GPU_MODULE
+/* nr_csirs_disc_detect_reset: clears the cumulative footprint history and the GPU detector state (frees the history groups and arrays).
+ *   Called when the ring epoch, geometry or exclusion mask changes, after an overrun, and by the tests.
+ */
 void nr_csirs_disc_detect_reset(void)
 {
   const nr_csirs_disc_gpu_ops_t *gpu=nr_csirs_disc_gpu_load();
@@ -482,10 +523,14 @@ typedef struct {
   candidate_t *candidates;
   int count;
 } fp_job_t;
+/* normalize_job: thread-job body of normalize_parallel(): normalises one contiguous group of slots (its own ring view and output). */
 static void *normalize_job(void *opaque)
 {
   fp_job_t *j=opaque;normalize_local(&j->ring,j->cfg,j->x);return NULL;
 }
+/* normalize_parallel: normalises a batch in four contiguous groups of slots. Runs the groups serially on the calling worker (single discovery worker), in reverse order.
+ *   Caller: detect() (the CPU path of a new batch).
+ */
 static void normalize_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,uint32_t *x)
 {
   fp_job_t jobs[FP_GROUPS];
@@ -497,6 +542,9 @@ static void normalize_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc
     normalize_job(&jobs[i]);
   }
 }
+/* fold_job: folds one worker group (a slice of the history's frequency axis) of a batch of normalised slots into the cumulative history.
+ *   Updates the period-640 sums, the 80- and 64-residue sums, the totals and the pooled tile squares. Caller: fold_parallel().
+ */
 static void *fold_job(void *opaque)
 {
   fp_job_t *job=opaque;history_t *h=&history;const nr_csirs_disc_ring_t *r=&job->ring;
@@ -514,6 +562,9 @@ static void *fold_job(void *opaque)
   }
   return NULL;
 }
+/* fold_parallel: folds a normalised batch into the history using four worker slices (run serially), then counts the valid slots per residue.
+ *   Caller: detect() (CPU path).
+ */
 static void fold_parallel(const nr_csirs_disc_ring_t *r,uint32_t *x)
 {
   fp_job_t jobs[FP_GROUPS];
@@ -524,12 +575,17 @@ static void fold_parallel(const nr_csirs_disc_ring_t *r,uint32_t *x)
   for(int t=0;t<r->capacity;++t) if(r->meta[t].valid) {++history.counts[r->meta[t].abs_slot%640];++history.nt;}
 }
 
+/* cluster_job: thread-job body of cluster_parallel(): runs cluster() over one period group against the cumulative history, writing its candidates to the job. */
 static void *cluster_job(void *opaque)
 {
   fp_job_t *j=opaque;
   j->error=cluster(&j->ring,j->cfg,NULL,0,NULL,NULL,&history,j->worker,j->period_step,&j->candidates,&j->count)<0;
   return NULL;
 }
+/* cluster_parallel: runs the footprint search on the cumulative history for one scheduling group (group < 0: all groups, the stored candidates are refreshed).
+ *   For a single group, its candidates replace the stored group and all stored groups are merged and ranked by finish_candidates().
+ *   Returns the count, or -1 on error. Caller: detect().
+ */
 static int cluster_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                             nr_csirs_disc_fp_t *out,int max_out,int group)
 {
@@ -560,9 +616,11 @@ static int cluster_parallel(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp
   return finish_candidates(all,count,out,max_out);
 }
 
-/* Fold only new writes, including invalid entries in the write cursor but not
- * the statistics. The caller owns a stable snapshot. Missing overwritten IQ
- * cannot be reconstructed: return -1 before mutating history on an overrun. */
+/* detect: incremental footprint detector: folds only the new slots of the ring into the cumulative history, then runs the search (cluster_parallel) for the scheduled group.
+ *   GPU path when the GPU module provides detect or accumulate (resident IQ must be scored on the GPU); otherwise the CPU path (warned once, not real-time).
+ *   Resets the history when the grid, geometry, symbol mask, exclusion mask or write cursor changes; an overrun of more than one ring capacity returns -1 without touching the history.
+ *   Diagnostic: ISAC_CSIRS_DISC_DIAG prints the normalise/fold/cluster times. Callers: nr_csirs_disc_detect() and nr_csirs_disc_detect_candidates().
+ */
 static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *cfg,
                          nr_csirs_disc_fp_t *out, int max_out, bool scheduled, bool force_cpu)
 {
@@ -643,12 +701,18 @@ static int detect(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_fp_cfg_t *c
   return result;
 }
 
+/* nr_csirs_disc_detect: full footprint detection on the cumulative history (no scheduling): returns up to max_out footprints of the ring (capped at NR_CSIRS_DISC_MAX_FP).
+ *   No production caller; used by tests/nr_csirs_disc_fp_test.cc. Thin wrapper of detect().
+ */
 int nr_csirs_disc_detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                           nr_csirs_disc_fp_t *out,int max_out)
 {
   return detect(r,cfg,out,max_out>NR_CSIRS_DISC_MAX_FP?NR_CSIRS_DISC_MAX_FP:max_out,false,false);
 }
 
+/* nr_csirs_disc_detect_candidates: footprint detection used by the discovery batch: like nr_csirs_disc_detect() but with the scheduled group rotation (one of four period groups per batch).
+ *   Caller: nr_csirs_disc_process() in nr_csirs_disc.c.
+ */
 int nr_csirs_disc_detect_candidates(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                                      nr_csirs_disc_fp_t *out,int max_out)
 {

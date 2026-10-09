@@ -33,6 +33,9 @@ typedef struct {
   unsigned next;
 } nr_pdcch_scan_llr_cache_t;
 
+/* nr_pdcch_scan_llr_key_equal: true when two scan LLR cache keys describe the same occasion: slot, sample window, frequency-offset bits, grid, IDs, FFT and CORESET geometry, antenna count and symbol window.
+ *   Inline. Caller: nr_pdcch_scan_llr_get().
+ */
 static inline bool nr_pdcch_scan_llr_key_equal(const nr_pdcch_scan_llr_key_t *a,
                                                 const nr_pdcch_scan_llr_key_t *b)
 {
@@ -46,6 +49,9 @@ static inline bool nr_pdcch_scan_llr_key_equal(const nr_pdcch_scan_llr_key_t *a,
          && a->coreset_type == b->coreset_type;
 }
 
+/* nr_pdcch_scan_llr_get: looks up the cached LLRs of a scan occasion: copies the entry with the same key (exact byte count) into out and returns true, or false when none matches.
+ *   Inline. Caller: nr_pdcch_blind_monitor_rt.c (LLR cache hit path, ISAC_PDCCH_LLR_CACHE) and the scan-fast test.
+ */
 static inline bool nr_pdcch_scan_llr_get(const nr_pdcch_scan_llr_cache_t *cache,
                                          const nr_pdcch_scan_llr_key_t *key, void *out, size_t bytes)
 {

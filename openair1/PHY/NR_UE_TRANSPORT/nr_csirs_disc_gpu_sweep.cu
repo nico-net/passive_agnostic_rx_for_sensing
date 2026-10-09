@@ -13,6 +13,7 @@ namespace {
  * example uses the same recurrence, but its DM-RS c_init MUST NOT be reused. */
 struct Gold {
   uint32_t x1, x2;
+/* step: device member of Gold: advances the two 31-bit LFSR states of the Gold sequence (TS 38.211 5.2.1) by one word of 32 bits. */
   __device__ void step()
   {
     x1 = (x1 >> 1) ^ (x1 >> 4);
@@ -20,6 +21,7 @@ struct Gold {
     x2 = (x2 >> 1) ^ (x2 >> 2) ^ (x2 >> 3) ^ (x2 >> 4);
     x2 ^= (x2 << 31) ^ (x2 << 30) ^ (x2 << 29) ^ (x2 << 28);
   }
+/* reset: device member of Gold: initialises x1 and x2 from the c_init value c and advances them 50 steps (the scrambling-sequence start-up of TS 38.211 5.2.1). */
   __device__ void reset(uint32_t c)
   {
     x1 = 1u | (1u << 31);
@@ -27,9 +29,11 @@ struct Gold {
     for (int i = 1; i < 50; ++i)
       step();
   }
+/* next: device member of Gold: advances the generator by one step and returns the next 32-bit output word x1 XOR x2. */
   __device__ uint32_t next() { step(); return x1 ^ x2; }
 };
 constexpr int words_max = (6 * NR_CSIRS_DISC_MAX_RB + 31) / 32;
+/* warp_sum: device helper: sums a float over the 32 lanes of a warp (shuffle-down reduction); the result is valid in lane 0. */
 __device__ float warp_sum(float x)
 {
   for (int d = 16; d; d /= 2)
@@ -37,8 +41,10 @@ __device__ float warp_sum(float x)
   return x;
 }
 
-/* One CTA per (hypothesis, ID, delta, lattice slot). Each warp scores one
- * port/antenna at a time; its lanes score independent coherent blocks. */
+/* sweep: GPU correlation kernel: one CTA per (hypothesis candidate = scrambling ID and slot delta, slot); scores the slot's CSI-RS resource elements against the Gold-generated reference, per port and antenna.
+ *   Each warp takes port/antenna pairs; each lane scores independent blocks of block_re REs. Writes one score per candidate and slot into scores[] (the CPU port_score() / nr_csirs_disc_sweep_cpu() equivalent).
+ *   Launched by run() and by nr_csirs_disc_gpu_sweep_prepare().
+ */
 __global__ void sweep(nr_csirs_disc_sweep_map_t map, const short2 *rx, const int *slot,
                       int ants, int spf, nr_csirs_disc_sweep_cfg_t cfg, float *scores)
 {
@@ -115,9 +121,9 @@ __global__ void average_scores(const float *scores, int nc, int slots, float *me
   } else mean[i] = sum / slots;
 }
 
-/* One CTA performs the global reduction, with deterministic ascending-ID/delta
- * tie breaking. FP64 sum/square accumulation avoids cancellation in variance.
- * Only the result crosses to the host; no candidate/occasion score download. */
+/* reduce_scores: GPU kernel (one CTA): finds the best candidate (ID and slot delta, ties to the lower ID) from the averaged scores, and writes the window (z, z_second, noise mean and sigma) to *out.
+ *   Noise statistics use FP64 sums over all other candidates. Launched by run() (occurrence and cumulative paths) and by nr_csirs_disc_gpu_sweep_prepare().
+ */
 __global__ void reduce_scores(const float *mean, nr_csirs_disc_sweep_cfg_t c, int hyp, int slots,
                              nr_csirs_disc_win_t *out)
 {
@@ -182,6 +188,9 @@ template<typename T> struct Device {
    * ("free(): corrupted unsorted chunks" / "malloc(): unsorted double linked list corrupted" at RAW_IQ_EOF in every
    * PCI 415 replay that reached the end of the capture). Device memory goes with the process. */
   ~Device() = default;
+/* alloc: Device<T>::alloc: grows the device buffer to at least n elements (freeing the old one first); returns false when the free or the allocation fails.
+ *   Members of the Device template used by Workspace; called by prepare().
+ */
   bool alloc(size_t n)
   {
     n = std::max(n, size_t(1));
@@ -212,6 +221,9 @@ struct Workspace {
   int rb=0,ant=0,capacity=0;
 } workspace;
 static std::mutex workspace_mutex;
+/* prepare: prepares the GPU sweep workspace for a carrier (rb RBs, ant antennas, capacity slots): creates the stream and completion event and grows every device buffer (mapping, packed samples, scores, metadata).
+ *   Grow-only: returns at once when the existing buffers already fit. Returns 0, or -1 on failure. Callers: run(), nr_csirs_disc_gpu_sweep_prepare(), nr_csirs_disc_gpu_refine_entry().
+ */
 static int prepare(int rb,int ant,int capacity)
 {
   auto &w=workspace;
@@ -228,14 +240,21 @@ static int prepare(int rb,int ant,int capacity)
   w.mapping.resize(maps);w.slots.reserve(capacity);w.indices.reserve(capacity);w.mean.resize(1024*160);
   w.rb=rb;w.ant=ant;w.capacity=capacity;return 0;
 }
+/* complete: records the workspace stream's completion event and blocks the calling CPU thread until the queued work finished; returns the CUDA status.
+ *   Callers: copy(), run() and the entry points.
+ */
 static cudaError_t complete() {
   cudaError_t rc=cudaEventRecord(workspace.done,workspace.stream);
   return rc==cudaSuccess?cudaEventSynchronize(workspace.done):rc;
 }
+/* copy: asynchronous memcpy on the workspace stream followed by complete(); returns the CUDA status. */
 static cudaError_t copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,workspace.stream);
   return rc==cudaSuccess?complete():rc;
 }
+/* gather: GPU kernel: packs the mapped resource elements of the selected slots and antennas from the ring grid into the packed sample buffer (one thread per packed element).
+ *   Launched by run() and nr_csirs_disc_gpu_sweep_prepare().
+ */
 __global__ void gather(const short2 *grid,size_t stride,const nr_csirs_disc_re_t *map,int nr,
                       const int *indices,int slots,int ants,int rb,short2 *packed)
 {
@@ -244,6 +263,9 @@ __global__ void gather(const short2 *grid,size_t stride,const nr_csirs_disc_re_t
   int i=id%nr,a=id/nr%ants,t=id/(nr*ants);
   packed[id]=grid[(size_t)indices[t]*stride+(size_t)a*14*12*rb+map[i].grid_index];
 }
+/* upload_grid: returns the device pointer of the ring grid for the sweep: the resident device grid when it is valid, otherwise the workspace copy after an upload of the host grid.
+ *   Returns NULL when the upload fails. Callers: run() and nr_csirs_disc_gpu_refine_entry().
+ */
 static const short2 *upload_grid(const nr_csirs_disc_ring_t *r)
 {
   if(r->device_grid && r->device_valid) return (const short2 *)r->device_grid;
@@ -251,6 +273,9 @@ static const short2 *upload_grid(const nr_csirs_disc_ring_t *r)
   return workspace.grid.p;
 }
 
+/* run: GPU sweep of a list of hypotheses over the ring (the GPU counterpart of nr_csirs_disc_sweep_cpu()): builds the mapping, gathers the slots, runs sweep(), averages with the cumulative evidence and reduces to a window per hypothesis.
+ *   Returns nh on success, 0 when ISAC_CSIRS_DISC is not "1", -1 on error. Serialised by the caller's workspace mutex. Caller: nr_csirs_disc_gpu_sweep_entry().
+ */
 int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
         const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
@@ -327,6 +352,9 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
   }
   return nh;
 }
+/* refine_extent: device version of the CPU refine_extent(): per RB, cross-correlates the scrambled reference with the neighbours and keeps the strongest contiguous span.
+ *   Returns 0 and updates h->rb_start and h->n_rb, or -1 when no span is found. Called from refine_kernel() (through nr_csirs_disc_refine_cpu).
+ */
 __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
                          const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
 {
@@ -375,10 +403,9 @@ __device__ static int refine_extent(const nr_csirs_disc_ring_t *r, nr_csirs_disc
   h->rb_start=bs;h->n_rb=be-bs+1;return 0;
 }
 
-/* Sequence-qualified row-1 extent. Energy finds a seed even when beamforming
- * gives pilots and traffic different notches. Once the ID is known, subtract
- * the QPSK null cross terms per RB and locate the connected support around that
- * seed. No configured bandwidth, PCI or symbol is an input to this refinement. */
+/* nr_csirs_disc_refine_cpu: device version of the CPU extent refinement: sequence-qualified row-1 TRS search (energy-weighted per 4-RB group); other rows use refine_extent().
+ *   Returns 0 and updates h->rb_start and h->n_rb, or -1 when the evidence is too weak. Called from refine_kernel().
+ */
 __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr_csirs_disc_hyp_t *h,
                            const nr_csirs_disc_win_t *win, nr_csirs_disc_sweep_map_t map)
 {
@@ -422,12 +449,16 @@ __device__ static int nr_csirs_disc_refine_cpu(const nr_csirs_disc_ring_t *r, nr
   return 0;
 }
 
+/* refine_kernel: GPU kernel (one thread): runs the device refinement (nr_csirs_disc_refine_cpu) on the ring and stores the refined hypothesis and the result code. */
 __global__ void refine_kernel(nr_csirs_disc_ring_t ring,nr_csirs_disc_hyp_t h,nr_csirs_disc_win_t win,
                              nr_csirs_disc_sweep_map_t map,nr_csirs_disc_hyp_t *out,int *result)
 {
   *result=nr_csirs_disc_refine_cpu(&ring,&h,&win,map);*out=h;
 }
 
+/* energy_score: device energy statistic of one symbol: returns the energy ratio of the occupied REs against the weakest or the mean of the unoccupied subcarrier classes (EPR when epr is set).
+ *   Also reports the old-style score through *old. Returns -1 when the statistic is not defined. Called from energies().
+ */
 __device__ double energy_score(const short2 *rx,int rb_count,int symbol,nr_csirs_disc_sweep_map_t map,
                               bool epr,double *old)
 {
@@ -455,6 +486,9 @@ __device__ double energy_score(const short2 *rx,int rb_count,int symbol,nr_csirs
   if(epr) return non && n && total>0?(on/non)/(total/n):-1.;
   return non && classes>3 && weakest>0?1-fmin(1.,(on/non)/weakest):-1.;
 }
+/* energies: GPU kernel (one thread): computes the energy statistics of a hypothesis's symbol (sequence-free EPR, the energy score and the optional row-5 second symbol) into scores[1..4].
+ *   Called by nr_csirs_disc_gpu_confirm_entry() and by the prepare path.
+ */
 __global__ void energies(const short2 *grid,int rb,nr_csirs_disc_hyp_t h,nr_csirs_disc_sweep_map_t map,double *scores)
 {
   double old=-1;
@@ -465,6 +499,9 @@ __global__ void energies(const short2 *grid,int rb,nr_csirs_disc_hyp_t h,nr_csir
 }
 } // namespace
 
+/* nr_csirs_disc_gpu_sweep_entry: GPU sweep entry point (C ABI) used by the discovery ops table (nr_csirs_disc_gpu_sweep_entry as the sweep op): runs run() under the workspace mutex.
+ *   On failure clears the cumulative evidence bank. Catches C++ exceptions and returns -1 instead of propagating them.
+ */
 extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
                                             const nr_csirs_disc_sweep_cfg_t *cfg, nr_csirs_disc_win_t *out)
 {
@@ -478,6 +515,9 @@ extern "C" int nr_csirs_disc_gpu_sweep_entry(const nr_csirs_disc_ring_t *r, cons
   }
 }
 
+/* nr_csirs_disc_gpu_sweep_prepare: GPU warm-up entry (C ABI): prepares the sweep workspace and runs the sweep, reduction, refinement and energy kernels once on a dummy slot, so that no CUDA allocation happens during RX.
+ *   Returns 0, or -1 on failure. Called by nr_csirs_disc_pipeline_init() through the ops table. Catches C++ exceptions.
+ */
 extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
 {
   try {
@@ -506,6 +546,9 @@ extern "C" int nr_csirs_disc_gpu_sweep_prepare(int rb,int ant,int capacity)
     return cudaGetLastError()==cudaSuccess && complete()==cudaSuccess?0:-1;
   } catch(...) {return -1;}
 }
+/* nr_csirs_disc_gpu_refine_entry: GPU refinement entry (C ABI): refines the extent of a verified hypothesis on the device (refine_kernel) and copies the refined hypothesis back.
+ *   Returns the refinement result (0 ok, -1 not enough evidence or error). Caller: nr_csirs_disc.c (verification batch) through the ops table. Catches C++ exceptions.
+ */
 extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_csirs_disc_hyp_t *h,const nr_csirs_disc_win_t *win)
 {
   try {
@@ -526,6 +569,9 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
   } catch(...) {return -1;}
 }
 
+/* nr_csirs_disc_gpu_confirm_entry: GPU confirmation entry (C ABI): scores one candidate on a slot (run() for its scrambling ID) and the energy statistics of its symbol, returning them in scores[0..4].
+ *   Returns 0, or -1 on failure. Caller: discovery_gpu_score() in nr_csirs_disc_confirm_internal.h through the ops table. Catches C++ exceptions.
+ */
 extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_hyp_t *h,int id,double scores[5])
 {
   try {

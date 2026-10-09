@@ -2330,6 +2330,9 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
                                   1000 + dlsch_config->harq_process_nbr, rxdataF, nvar, G);
 }
 
+/* pdsch_processing: per-slot receive processing of the NR UE physical layer: performs the FEP of the symbols needed by the slot's channels, then runs the CSI-IM, CSI-RS (tracking and CSI) and PDSCH/PDCCH procedures for the C-RNTI and the other RNTIs, reusing each symbol's FEP across channels.
+ *   Also handles the blind CSI-RS sensing capture and the discovery feed (nr_csirs_blind_rt_slot_fep) when enabled. Summary-level header: the function is long and branches per channel. Caller: nr-ue.c (per slot, through the PHY receive job) and dlsim.c.
+ */
 void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data)
 {
   int frame_rx = proc->frame_rx;

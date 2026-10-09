@@ -50,9 +50,10 @@ uint64_t csirs_disc_confirm_cpu_scores,csirs_disc_confirm_gpu_scores;
 /* Standalone FD dump fixtures do not link the PHY FEP. */
 #pragma weak nr_slot_fep
 static pthread_mutex_t g_csirs_state_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Called by discovery initialization before its worker and the DL actors start.
- * Priority inheritance prevents a low-priority admission holder from being
- * starved while a real-time actor waits to preserve a due occasion. */
+/* nr_csirs_blind_rt_discovery_init: one-time setup of the CSI-RS search state lock with priority inheritance, so a low-priority holder cannot starve a real-time actor.
+ *   Re-creates g_csirs_state_lock as PTHREAD_PRIO_INHERIT; falls back to a plain mutex when the attribute is unsupported.
+ *   Called by nr_csirs_disc.c (init_once) before the discovery worker and the DL actors start.
+ */
 void nr_csirs_blind_rt_discovery_init(void)
 {
   pthread_mutexattr_t attr;
@@ -66,6 +67,9 @@ void nr_csirs_blind_rt_discovery_init(void)
 static void discovery_publish(void);
 static void discovery_queue_reset(void);
 static void discovery_mark_admitted(int);
+/* csirs_unlock: cleanup handler for guard-scoped lock holders: publishes the discovery state (discovery_publish) and releases the mutex.
+ *   Used with __attribute__((cleanup)) in nr_csirs_blind_rt_slot() and nr_csirs_blind_rt_rate_match_all(). A NULL lock is a no-op.
+ */
 static void csirs_unlock(pthread_mutex_t **lock) { if (*lock) { discovery_publish(); pthread_mutex_unlock(*lock); } }
 static int g_timing = -1;
 static int g_reconf = -1;
@@ -75,6 +79,9 @@ static uint64_t now_us(void)
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
+/* nr_csirs_blind_rt_metrics: fills the CSI-RS part of the passive metrics: observer counters and the number of discovery re-admissions skipped.
+ *   Reads atomics and the observer's counters. Caller: nr_passive_metrics.c (metrics emission).
+ */
 void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m)
 {
   nr_csirs_observer_metrics(&g_csirs_obs, m);
@@ -117,6 +124,10 @@ static struct {
   uint8_t n_off;
 } g_disc_export[NR_CSIRS_BLIND_MAX_CAND];
 
+/* nzp_observer_score: re-scores one confirmed NZP CSI-RS occasion and reports whether the observer revoked it (reconfiguration detection).
+ *   Only active with reconfiguration (g_reconf). Revocation removes the dynamic CSI-RS from the monitor; inconclusive scores (between the noise and confirmation bars) do not revoke.
+ *   Caller: score_candidate().
+ */
 static bool nzp_observer_score(int idx, uint32_t slot, double rho)
 {
   if (!g_reconf) return false;
@@ -235,6 +246,9 @@ static uint64_t g_zp_geometry_veto_total;
 static int      g_armed;
 static uint64_t g_slots;
 
+/* discovery_empty_state: resets one CSI-RS search state (candidate population, confirmations, counters) to empty; confirmed and pinned indices are set to -1.
+ *   Caller: nr_csirs_blind_rt_add_discovered(), nr_csirs_blind_rt_discovery_reset() and nr_csirs_blind_rt_slot() (first arm, discovery mode).
+ */
 static void discovery_empty_state(nr_csirs_blind_state_t *st)
 {
   memset(st, 0, sizeof(*st));
@@ -242,8 +256,10 @@ static void discovery_empty_state(nr_csirs_blind_state_t *st)
   st->pinned = -1;
 }
 
-/* Nested verified extents and small boundary jitter describe the same resource.
- * Never join disjoint extents, IDs, slot corrections or different RE mappings. */
+/* discovery_same_resource: true when two candidates describe the same physical CSI-RS resource: nested or near-equal RB extents, identical row, symbols, CDM, density, scrambling and slot delta.
+ *   Used when a new discovered hypothesis is merged with an existing candidate. Disjoint extents or different IDs never match.
+ *   Caller: nr_csirs_blind_rt_add_discovered().
+ */
 static bool discovery_same_resource(const nr_csirs_candidate_t *a, const nr_csirs_candidate_t *b)
 {
   int ae = a->start_rb + a->nr_of_rbs, be = b->start_rb + b->nr_of_rbs;
@@ -256,8 +272,10 @@ static bool discovery_same_resource(const nr_csirs_candidate_t *a, const nr_csir
       && a->scramb_id == b->scramb_id && a->slot_delta == b->slot_delta;
 }
 
-/* Union compatible sub/super-lattices into a sampling schedule. The actual
- * export is inferred separately from independent per-slot sequence hits. */
+/* discovery_union_seed: merges a new sweep lattice (period p, offset off) into the seed lattice of candidate i, returning the merged period and up to two phases.
+ *   Fails for incompatible periods or phases (or for a row-1 TRS with non-adjacent phases); the caller then starts a fresh seed.
+ *   Caller: nr_csirs_blind_rt_add_discovered().
+ */
 static bool discovery_union_seed(int i, uint16_t p, uint16_t off, uint16_t *period, uint16_t offsets[2], int *n)
 {
   uint16_t old = g_st.seed_period[i];
@@ -278,6 +296,10 @@ static bool discovery_union_seed(int i, uint16_t p, uint16_t off, uint16_t *peri
       || abs((int)offsets[0] - offsets[1]) == *period - 1;
 }
 
+/* nr_csirs_blind_rt_add_discovered: admits one discovered CSI-RS hypothesis (from the discovery sweep) into the search population and returns its candidate index (-1 when refused).
+ *   Checks the candidate is safe, merges it with an existing resource on the same RBs (union of the seed lattice), or appends it to both banks (g_st and g_zp).
+ *   Incompatible provisional evidence is replaced by the stronger one; confirmed bursts are kept. Publishes the discovery state. Caller: nr_csirs_disc.c (discovery process, nr_csirs_disc_process).
+ */
 int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csirs_disc_win_t *w)
 {
   if (!h || !w)
@@ -373,6 +395,9 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
   return at;
 }
 
+/* nr_csirs_blind_rt_discovery_confirmed: true when a discovered hypothesis matches a confirmed NZP resource of the search (same geometry, period and an offset phase).
+ *   Read-only under g_csirs_state_lock. Caller: nr_csirs_disc.c (skips discovery hypotheses that are already confirmed).
+ */
 bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *h)
 {
   if (!h)
@@ -392,6 +417,9 @@ bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *h)
   return confirmed;
 }
 
+/* nr_csirs_blind_rt_discovery_reset: clears the discovery-fed search state (exports, visits, probes, strengths, both banks, queue) and forgets all confirmations.
+ *   Withdraws each exported NZP resource from the monitor first (nr_csirs_monitor_remove_dynamic). Caller: nr_csirs_disc.c (epoch listener, on a new configuration epoch).
+ */
 void nr_csirs_blind_rt_discovery_reset(void)
 {
   pthread_mutex_lock(&g_csirs_state_lock);
@@ -563,6 +591,10 @@ static double median_of(const double *src, int n)
 }
 static double null_median(void) { return median_of(g_null, g_null_n); }
 
+/* discovery_score: correlation score of one candidate on one slot: mean normalised correlation of the received REs against the reference, per port and antenna, over blocks of the mapped REs.
+ *   Returns the score averaged over antennas and ports (about 1 for a matching resource, noise otherwise), or -1 if the mapping fails; *n_used receives the RE count.
+ *   Pure function on the given buffers. Caller: score_candidate().
+ */
 static double discovery_score(const NR_DL_FRAME_PARMS *fp,
                               const nr_csirs_candidate_t *c,
                               const c16_t *const *rx,
@@ -631,6 +663,9 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                             bool maintenance, bool nzp_recheck);
 
 
+/* nr_csirs_blind_rt_slot_fep: entry point called once per DL slot with the FEP output: hands the slot to the discovery queue when discovery is enabled, otherwise runs the search directly.
+ *   Stores the slot's symbol map (g_disc_fep_map) for the search. Caller: phy_procedures_nr_ue.c (after the FEP of each DL slot); tests/nr_csirs_blind_rt_test_bridge.c.
+ */
 void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                                c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], bool map[14])
 {
@@ -640,6 +675,11 @@ void nr_csirs_blind_rt_slot_fep(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_
   g_disc_fep_map = NULL;
 }
 
+/* nr_csirs_blind_rt_slot: one slot of the CSI-RS blind search: arms the search state on first use, logs confirmations, runs the per-slot scoring rotation and the ZP maintenance.
+ *   Scores the due zero-power candidates, then one ordinary candidate per slot (ISAC_CSIRS_BLIND_PER_SLOT), then the re-scoring of confirmed NZP occasions when reconfiguration detection is on.
+ *   Optional diagnostics: ISAC_CSIRS_BLIND_RANK (ranking mode, which keeps scoring after a confirmation), ISAC_CSIRS_BLIND_EPRDUMP, ISAC_CSIRS_BLIND_IDSWEEP, ISAC_CSIRS_DISC_CONFIRM_MAX, ISAC_PDCCH_TIMING, ISAC_RECONF.
+ *   Writes the shared state under g_csirs_state_lock (cleanup releases it). Enabled by ISAC_CSIRS_BLIND=1 or by discovery. Caller: nr_csirs_blind_rt_slot_fep().
+ */
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
@@ -998,6 +1038,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   }
 }
 
+/* score_candidate: scores one CSI-RS candidate on the current slot: builds the reference signal, correlates it with the received symbol, and feeds the scale-free z score to the search.
+ *   Also computes the zero-power (ZP) occupancy score, the sequence-free energy ratio, and the footprint match for rows 6-18 (ISAC_CSIRS_BLIND_WIDE).
+ *   Optional sweeps: scramblingID (ISAC_CSIRS_BLIND_IDSWEEP) and slot index (ISAC_CSIRS_BLIND_SLOTSWEEP) on a candidate whose positions already look like a pilot.
+ *   maintenance = re-score of an exported resource (no new evidence); nzp_recheck = re-score of a confirmed NZP occasion. Callers: nr_csirs_blind_rt_slot() only.
+ */
 static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], int idx,
                             bool maintenance, bool nzp_recheck)
@@ -1559,6 +1604,10 @@ static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl
   out->freq_density = c->freq_density;
   out->scramb_id = c->scramb_id;
 }
+/* nr_csirs_blind_rt_observed_nzp: returns, in *out, one confirmed NZP CSI-RS resource occurring on this slot (for the observer and the rate matcher), if any.
+ *   Discovery mode reads the exported set; otherwise it uses the search state under a trylock (no wait). Ranking mode (g_rank) reports nothing.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (observed NZP occasion of a slot).
+ */
 bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
 {
   if(discovery_queue_ready) {
@@ -1582,6 +1631,10 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
   return found;
 }
 static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
+/* nr_csirs_blind_rt_rate_match_all: fills out[] with every CSI-RS resource that occurs on this slot for PDSCH rate matching: confirmed NZP (csi_type 1) first, then retained ZP (csi_type 2).
+ *   Returns the count (at most max). Returns 0 when the search is off, not armed, or in ranking mode, so that the diagnostic never changes PDSCH.
+ *   Callers: nr_pdsch_passive_decode.c (CSI-RS rate matching in passive_decode_retry and the CSI population retry).
+ */
 int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
   /* CSI-FULL: NFAPI_MAX_NUM_CSI_RATEMATCH grew 4 -> 32; the existing callers pass NR_CSI_RM_LEGACY_MAX (4) so they

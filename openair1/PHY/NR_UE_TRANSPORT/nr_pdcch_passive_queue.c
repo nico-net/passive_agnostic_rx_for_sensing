@@ -149,6 +149,9 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
   return NULL;
 }
 
+/* nr_pdcch_passive_queue_start: starts the blind PDCCH scan pool: sizes the ring (depth clamped to [2, MAX]) and launches n_consumers consumer threads at SCHED_OTHER priority 50, below the RT receive thread.
+ *   Idempotent: returns true at once when the pool already runs; false when ue is NULL. Consumers take cores from nr_core_plan_cpu(NR_CP_SCAN) or affinity + index (-1 leaves them unpinned). Several consumers are supported. Caller: nr_pdcch_blind_monitor_rt.c (receive start-up).
+ */
 bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers, int affinity)
 {
   if (atomic_load_explicit(&g_running, memory_order_acquire)) {

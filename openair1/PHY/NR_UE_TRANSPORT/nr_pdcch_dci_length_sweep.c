@@ -50,6 +50,10 @@
 #include <stdatomic.h>
 #include <pthread.h>
 
+/* nr_pdcch_dci_length_bank_peer_hint: returns the DCI payload length most common among the other RNTIs of a bank (excluding exclude_rnti), or 0 when none is inside [min_len, max_len].
+ *   Counts the two found lengths of every active context in the bank; ties go to the shorter length. Used as a length prior for a new RNTI.
+ *   Gated at the caller by ISAC_PDCCH_LEN_MEMORY. Caller: nr_pdcch_blind_monitor_rt.c (DL length memory for a fresh RNTI).
+ */
 int nr_pdcch_dci_length_bank_peer_hint(const nr_pdcch_dci_length_bank_t *bank,
                                        uint16_t exclude_rnti, int min_len, int max_len)
 {
@@ -454,6 +458,11 @@ static double measured_null_rate(const nr_pdcch_dci_length_sweep_state_t *state,
   return (n & 1) ? r[n / 2] : 0.5 * (r[n / 2 - 1] + r[n / 2]);
 }
 
+/* nr_pdcch_dci_length_sweep_feed_budget: feeds one occasion's budget of blind-decode trials into the DCI length sweep and returns the winning length (or -1 to keep observing).
+ *   Bounded by n_trials_this_call, max_trials and an absolute CLOCK_MONOTONIC deadline (0 = none); only completed trials count as evidence.
+ *   Each call runs a wide-probe slot first, then rotates through the lengths with a stride; a suspended lap resumes on the next occasion. Rounds can end early once stage one is exhausted.
+ *   Callers: nr_pdcch_dci_length_sweep_feed() (no budget) and nr_pdcch_blind_monitor_rt.c (DL and UL sweeps, with deadline and trial cap).
+ */
 int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* state,
                                    nr_pdcch_dci_length_scorer_fn decode_one_candidate, void* user_ctx,
                                    int n_trials_this_call, int min_len, int max_len,

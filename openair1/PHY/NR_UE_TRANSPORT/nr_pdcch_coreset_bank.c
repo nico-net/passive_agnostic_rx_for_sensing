@@ -254,17 +254,23 @@ static bool bank_footprint(int rb_offset, int groups, int duration, int symbol,
   return false;
 }
 
+/* nr_pdcch_coreset_bank_has_footprint: true when the bank holds a CORESET with this footprint (RB range, groups, duration, symbol, bundle, interleaver, shift and scrambling ID), verified or not. Caller: nr_pdcch_discovered_snapshot() and nr_pdcch_blind_monitor_bank_has_geometry(). */
 bool nr_pdcch_coreset_bank_has_footprint(int rb,int groups,int dur,int sym,int L,int R,int shift,int nid)
 { return bank_footprint(rb,groups,dur,sym,L,R,shift,nid,false); }
+/* nr_pdcch_coreset_bank_verified_footprint: true when the bank holds a verified CORESET with this footprint (same arguments as nr_pdcch_coreset_bank_has_footprint()). Caller: the tests and the discovery path. */
 bool nr_pdcch_coreset_bank_verified_footprint(int rb,int groups,int dur,int sym,int L,int R,int shift,int nid)
 { return bank_footprint(rb,groups,dur,sym,L,R,shift,nid,true); }
 
+/* nr_pdcch_blind_monitor_bank_has_geometry: true when the bank holds a CORESET with this geometry at any symbol (sym = -1). Caller: discovered_poll() in nr_pdcch_blind_monitor.c (already-verified entries are skipped without a dwell). */
 bool nr_pdcch_blind_monitor_bank_has_geometry(int rb, int groups, int duration, int bundle, int interleaver,
                                                int shift, int nid)
 {
   return nr_pdcch_coreset_bank_has_footprint(rb, groups, duration, -1, bundle, interleaver, shift, nid);
 }
 
+/* coreset_same_geometry: true when two monitor configurations describe the same CORESET: same BWP, footprint, first symbol and scrambling ID, and the same length override (ignored for discovered CORESETs).
+ *   Pure function. Caller: nr_pdcch_coreset_bank_add().
+ */
 static bool coreset_same_geometry(const nr_pdcch_blind_monitor_cfg_t *a,
                                   const nr_pdcch_blind_monitor_cfg_t *b)
 {
@@ -372,6 +378,9 @@ int nr_pdcch_coreset_bank_length_hint(void)
   return best;
 }
 
+/* nr_pdcch_coreset_bank_add: adds a verified CORESET (monitor configuration cfg, with the owner RNTI) to the bank: reuses an existing entry with the same geometry (recording the owner), or appends a new entry while the bank has room.
+ *   Refuses requests outside the current configuration epoch, an unset length override, or an alias of an existing owner; a full bank is logged and refused. Returns the entry index, or -1. Callers: nr_pdcch_discovered_observe() and the tests.
+ */
 int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner)
 {
   if (!nr_cfg_epoch_work_current()) return -1;

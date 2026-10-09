@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* raw_iq_close: releases the memory of a raw IQ source: unmaps the eight channel files and frees the phasor scratch. Safe to call twice. Callers: raw_iq.c (close) and the raw baseline test. */
 void raw_iq_close(raw_iq_source *s)
 {
   for (unsigned i = 0; i < 8; ++i) {
@@ -89,6 +90,9 @@ static int16_t quantize(raw_iq_source *s, double value)
   return (int16_t)lrint(value);
 }
 
+/* raw_iq_read: reads `count` samples per channel from the recorded IQ at the current position into the caller's buffers and returns the number delivered (0 at the end of the recording).
+ *   Injects up to two recorded gaps (RAW_IQ_GAP) when the position passes them, applies the optional right shift, and applies the frequency shift between the recording and the centre frequency (a phasor recursion, bit-identical to the fast path). Sets *timestamp to the first tick of the read. Returns -1 with errno EINVAL for bad arguments.
+ */
 int raw_iq_read(raw_iq_source *s, void **buffers, int count,
                 unsigned channels, uint64_t *timestamp)
 {

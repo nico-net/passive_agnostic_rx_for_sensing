@@ -43,6 +43,9 @@ char *get_softmodem_function(void)
   return "???";
 }
 
+/* get_common_options: reads the options shared by all softmodem executables from the command line and the configuration (logging, telnet and web servers, RFsim, imscope, NFAPI index, the memory log file) into the common parameters.
+ *   Summary-level header: the option table is in CMDLINE_PARAMS_DESC. Callers: executables/nr-uesoftmodem.c (main) and the other softmodem and calibration programs.
+ */
 void get_common_options(configmodule_interface_t *cfg)
 {
   int32_t stats_disabled = 0;

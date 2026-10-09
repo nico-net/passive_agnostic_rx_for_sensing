@@ -250,6 +250,9 @@ bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
   pthread_mutex_unlock(&g_lock);
   return t.valid ? nr_tdd_slot_has_downlink(&t, absolute_slot) : true;
 }
+/* nr_passive_acq_note_carrier_from_rs: confirms the carrier grid without SIB1 carrier information, when a CSI-RS sequence has been decoded on the grid: marks the carrier verified with Point A at the grid start and the centre of the started carrier (ISAC_ACQ_CARRIER_FROM_RS=0 disables it).
+ *   Does nothing when the carrier is already verified or the physical geometry is not set. Logs the confirmation with its evidence. Caller: nr_csirs_blind_rt.c (confirmed CSI-RS, discovery path).
+ */
 void nr_passive_acq_note_carrier_from_rs(const char *evidence)
 {
   static int s_enabled = -1; /* ISAC_ACQ_CARRIER_FROM_RS=0 disables this SIB1-free path */

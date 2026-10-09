@@ -154,6 +154,10 @@ static void *nr_pusch_passive_queue_thread(void *arg)
   return NULL;
 }
 
+/* nr_pusch_passive_queue_start: starts the passive PUSCH decode pool: sizes the ring (depth clamped to [2, MAX]) and launches n_consumers consumer threads at SCHED_OTHER priority 50, below the RT receive thread.
+ *   Idempotent: returns true at once when the pool already runs. Consumer cores come from nr_core_plan_cpu(NR_CP_PUSCH) or from affinity + index. The frequency offset is sampled by the producer and carried per job (fo_hz), so no --cont-fo-comp refusal is needed.
+ *   Caller: nr_pusch_passive_monitor_rt.c (UL monitor start-up). Returns false only when ue is NULL.
+ */
 bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers, int affinity)
 {
   if (atomic_load_explicit(&g_running, memory_order_acquire)) {

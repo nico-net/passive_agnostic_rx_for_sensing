@@ -477,6 +477,9 @@ static void get_sib19_schedinfo(NR_UE_RRC_SI_INFO *SI_info, NR_SI_SchedulingInfo
   }
 }
 
+/* nr_rrc_process_sib1: decodes the SIB1 of the serving cell into the NAS and RRC state: the PLMN (MCC and MNC digits), the NR cell identity, and the tracking area; logs the operator identity read from the air (passive mode included).
+ *   Also takes the cell-access parameters and the serving cell configuration needed by the next RRC steps. Callers: rrc_UE.c at two call sites (SIB1 from the SI decode and from the bcch path).
+ */
 static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_info, NR_SIB1_t *sib1)
 {
   if(g_log->log_component[NR_RRC].level >= OAILOG_DEBUG)

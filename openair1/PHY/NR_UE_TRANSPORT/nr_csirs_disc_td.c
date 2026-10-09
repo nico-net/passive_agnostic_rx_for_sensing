@@ -35,6 +35,7 @@ uint64_t csirs_disc_fep_gpu_chunks, csirs_disc_fep_cpu_chunks;
 uint64_t csirs_disc_fep_us, csirs_disc_fep_max_us;
 uint64_t csirs_disc_fft_us, csirs_disc_fft_batches, csirs_disc_td_overflows;
 
+/* usec: returns CLOCK_MONOTONIC time in microseconds (timing of the TD front end). */
 static uint64_t usec(void)
 {
   struct timespec t;
@@ -42,6 +43,9 @@ static uint64_t usec(void)
   return (uint64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000;
 }
 
+/* nr_csirs_disc_fft_cpu: CPU FFT of `transforms` consecutive symbols of size fft from `in` to `out` (the SIMDe DFT of the carrier size); the fallback of the TD front end.
+ *   Caller: nr_csirs_disc_td_drain() (CPU FEP path) and tests/nr_csirs_disc_td_test.cc.
+ */
 void nr_csirs_disc_fft_cpu(int fft, int transforms, const int16_t *in, int16_t *out)
 {
   const dft_size_idx_t size = get_dft(fft);
@@ -49,6 +53,9 @@ void nr_csirs_disc_fft_cpu(int fft, int transforms, const int16_t *in, int16_t *
     dft(size, (int16_t *)in + (size_t)i * 2 * fft, out + (size_t)i * 2 * fft, 1);
 }
 
+/* nr_csirs_disc_td_init: allocates the time-domain front end for a carrier: the slot ring (CP-bearing sample spans per slot, huge-page pool, unified memory when the GPU allocator is loaded) and the FFT input and output buffers for one batch.
+ *   Returns 0, or -1 for unsupported parameters or allocation failure (everything freed). Callers: nr_csirs_disc_start() in nr_csirs_disc_feed.c and tests/nr_csirs_disc_td_fixture.c.
+ */
 int nr_csirs_disc_td_init(const NR_DL_FRAME_PARMS *fp, int n_ant, int capacity)
 {
   if (!fp || n_ant < 1 || n_ant > 4 || !fp->ofdm_symbol_size || !fp->ofdm_offset_divisor || capacity < 1)
@@ -93,6 +100,9 @@ fail:
   return -1;
 }
 
+/* nr_csirs_disc_td_free: releases the time-domain front end (pool, slots, batch buffers, locks). Safe to call when not initialised; resets the state.
+ *   Callers: nr_csirs_disc_stop() and the start failure path in nr_csirs_disc_feed.c, nr_csirs_disc_td_init() on failure, and tests.
+ */
 void nr_csirs_disc_td_free(void)
 {
   if (!td.ready) return;
@@ -109,6 +119,9 @@ void nr_csirs_disc_td_free(void)
   memset(&td, 0, sizeof(td));
 }
 
+/* nr_csirs_disc_td_reset: discards the queued slots of the front end for a new sample epoch (count, head and tail cleared, epoch bumped) under the commit and queue locks.
+ *   Called by nr_csirs_disc_ring_reset() for the worker ring (nr_csirs_disc_feed.c).
+ */
 void nr_csirs_disc_td_reset(void)
 {
   if (!td.ready) return;
@@ -120,6 +133,9 @@ void nr_csirs_disc_td_reset(void)
   pthread_mutex_unlock(&td.commit);
 }
 
+/* nr_csirs_disc_td_pending: returns the number of time-domain slots queued and not yet drained (0 when the front end is not initialised).
+ *   Callers: disc_worker_main() (wake-up decision) and nr_csirs_disc_td_drain().
+ */
 int nr_csirs_disc_td_pending(void)
 {
   if (!td.ready) return 0;
@@ -129,6 +145,10 @@ int nr_csirs_disc_td_pending(void)
   return n;
 }
 
+/* nr_csirs_disc_td_push: producer side of the front end, called from the PHY receive path for each DL slot: copies the slot's CP-bearing sample window of all antennas into the queue.
+ *   Duty-cycled ingest for real-time safety: ISAC_CSIRS_DISC_FEED_WIN (default 640 slots) and ISAC_CSIRS_DISC_FEED_DIV (default 7) skip windows; an acquisition burst (ISAC_CSIRS_DISC_FEED_BURST, default 5120 slots) runs at ISAC_CSIRS_DISC_FEED_ACQ_DIV.
+ *   Returns 0 when queued, 1 when skipped by the duty cycle, -1 when dropped (format change, full queue, lock busy; counted as feed drops). Caller: phy_procedures_nr_ue.c (PHY receive path).
+ */
 int nr_csirs_disc_td_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t frame, uint8_t slot)
 {
   if (!td.ready || !ue) return -1;
@@ -208,8 +228,10 @@ drop:
   return -1;
 }
 
-/* Coalesce the backlog observed at entry; one detection pass follows ALL these
- * chunks, not one expensive detector invocation per 100 queued slots. */
+/* nr_csirs_disc_td_drain: converts the queued time-domain slots into frequency-domain symbols in the ring, in batches: GPU FEP when the GPU chain is loaded, otherwise CPU FFT (with fo compensation and the symbol rotation).
+ *   Each batch is written under the commit lock, dropped when the epoch changed, and pushed (ring write begin/end or nr_csirs_disc_ring_push). A device-resident ring never mixes failed GPU batches with CPU FEP.
+ *   Returns the number of slots written. Logs an FEP summary when slots were written. Callers: disc_worker_main() (nr_csirs_disc_feed.c) and tests/nr_csirs_disc_td_fixture.c.
+ */
 int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
 {
   if (!td.ready || !ring) return 0;

@@ -447,6 +447,7 @@ static void *prach_worker(void *unused)
   return NULL;
 }
 
+/* nr_prach_passive_start: starts the passive PRACH worker thread when ISAC PRACH is enabled and it is not yet running (through the core plan, unpinned). Logs a warning and drops PRACH occasions when the thread cannot start. Caller: executables/nr-uesoftmodem.c (passive receiver start-up). */
 void nr_prach_passive_start(void)
 {
   if (!nr_isac_prach_enabled()) return;

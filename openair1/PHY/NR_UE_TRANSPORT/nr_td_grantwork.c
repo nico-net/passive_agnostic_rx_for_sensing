@@ -29,7 +29,11 @@ static gw_hdr_t *g_pool[GW_POOL_CLASSES];
 static bool g_pool_sealed;
 static _Atomic uint64_t g_alloc_fresh, g_alloc_reused, g_alloc_refused;
 
+/* nr_td_gw_unified: reports whether GrantWork buffers are in unified memory: always false, the pool is ordinary host memory (CUDA never maps GrantWork pages). Callers: nr_pdsch_passive_decode.c and the tests. */
 bool nr_td_gw_unified(void) { return false; }
+/* pool_class: maps a byte count to its pool size class: power-of-two classes from 4 KiB (GW_POOL_CLASSES classes); returns -1 when the size exceeds the largest class.
+ *   Pure function. Callers: nr_td_gw_alloc() and nr_td_gw_free().
+ */
 static int pool_class(size_t bytes)
 {
   size_t c = 4096;
@@ -38,6 +42,9 @@ static int pool_class(size_t bytes)
   return c >= bytes ? k : -1;
 }
 
+/* nr_td_gw_alloc: returns a GrantWork LLR buffer of at least `bytes` bytes: a recycled one from the pool (of the same or a larger class) or a fresh aligned allocation.
+ *   After warm-up the pool is sealed: a miss returns NULL and is counted as a refusal, so no allocation happens during reception. Returns NULL also for an oversized request. Callers: nr_td_grantwork_publish(), nr_pdsch_passive_decode.c and nr_pdsch_passive_queue.c.
+ */
 void *nr_td_gw_alloc(size_t bytes)
 {
   int k = pool_class(bytes ? bytes : 1);
@@ -67,6 +74,7 @@ void *nr_td_gw_alloc(size_t bytes)
   return (char *)h + GW_HDR;
 }
 
+/* nr_td_gw_free: returns a buffer from nr_td_gw_alloc() to its size-class free list (kept for reuse, never released to the system). Aborts on a buffer that does not carry the GrantWork header. Callers: nr_td_grantwork_release() and the passive decode/queue code. */
 void nr_td_gw_free(void *p)
 {
   if (!p) return;
@@ -79,6 +87,9 @@ void nr_td_gw_free(void *p)
   pthread_mutex_unlock(&g_pool_lock);
 }
 
+/* nr_td_gw_warmup: one-time pool warm-up before reception: allocates and touches count buffers of `bytes`, returns them to the pool, and seals the pool against late growth (even after a partial failure).
+ *   Returns 0 when all count buffers were reserved, else -1. Caller: nr_pdcch_blind_monitor_rt.c (nr_dl_gpu_warmup set-up).
+ */
 int nr_td_gw_warmup(size_t bytes, size_t count)
 {
   if (g_pool_sealed) return -1; /* startup only, once */
@@ -94,7 +105,9 @@ int nr_td_gw_warmup(size_t bytes, size_t count)
   g_pool_sealed = true; /* partial failure must also forbid late growth */
   return n == count ? 0 : -1;
 }
+/* nr_td_gw_pool_refused: returns the number of pool allocations refused since start (the pool was sealed or the size did not fit). Caller: nr_passive_metrics.c (metrics emission). */
 uint64_t nr_td_gw_pool_refused(void) { return atomic_load(&g_alloc_refused); }
+/* nr_td_gw_alloc_stats: returns the number of fresh allocations, reused buffers and unified buffers (always 0) since start, for the diagnostics. Caller: nr_td_gw_tim_report(). */
 void nr_td_gw_alloc_stats(uint64_t *fresh, uint64_t *reused, uint64_t *unified)
 {
   *fresh = atomic_load(&g_alloc_fresh);
@@ -333,6 +346,9 @@ static void finish(nr_td_grantwork_t *gw, gw_entry_t *e)
   pthread_cond_broadcast(&gw->cv);
 }
 
+/* nr_td_grantwork_publish: publishes the decoder-input LLRs of a GrantWork entry that the calling thread is computing: copies the G LLRs into a pool buffer, stores the layers, modulation and metadata, marks the entry READY and wakes the waiters.
+ *   Releases the compute lock. Returns NR_TD_GW_OK, NR_TD_GW_E_ARG when the entry is not owned by this thread, or NR_TD_GW_E_NOMEM (the entry is then abandoned). Caller: nr_pdsch_passive_decode.c (publish point of the owner decode).
+ */
 int nr_td_grantwork_publish(nr_td_grantwork_t *gw, uint64_t sig, const int16_t *llr, uint32_t G, uint8_t nl, uint8_t qm,
                             const void *meta, uint32_t meta_len)
 {
@@ -551,6 +567,7 @@ void nr_td_gw_tim_add(int k, uint64_t ns)
     nr_td_gw_tim_report(true);
 }
 
+/* nr_td_gw_tim_report: prints the GrantWork stage timers (mean and max per stage) and the pool allocation counters when timing is enabled and `force` is set (called every 200 CB0 LDPC calls). Caller: the GrantWork timer code in this file. */
 void nr_td_gw_tim_report(bool force)
 {
   if (!nr_td_gw_tim_on() || !force)

@@ -103,6 +103,9 @@ static void *write_capture(void *unused)
     return NULL;
   }
 }
+/* nr_passive_replay_init: arms the replay recorder when ISAC_PASSIVE_REPLAY_CAPTURE names an output file: checks the geometry against the bounded recorder, allocates and pre-faults the IQ buffer and writes the replay header, then starts the writer thread.
+ *   The recorder is void (state RP_VOID) on a geometry or allocation failure. Caller: executables/nr-uesoftmodem.c (receiver start-up, before the radio).
+ */
 void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
 {
   const char *path=getenv("ISAC_PASSIVE_REPLAY_CAPTURE");

@@ -44,6 +44,9 @@ __attribute__((weak)) void nr_passive_obs_stats(uint64_t *pushed, uint64_t *writ
 /* Optional when linking the metrics collector without the capture path. */
 extern void nr_pdcch_nid_capture_metrics(uint64_t *, uint64_t *, uint64_t *, float *) __attribute__((weak));
 
+/* nr_passive_metrics_collect: gathers a snapshot of every passive-receiver counter into *m: the PDCCH/PDSCH/PUSCH queues, the CSI-RS and SRS discovery, the NID capture, the GPU budget, the CB0 path, the RX recovery and the configuration epochs.
+ *   Summary-level header (the function is long: one block per subsystem). Reads the counters through their public getters only. Caller: nr_passive_metrics_emit() in this file.
+ */
 void nr_passive_metrics_collect(nr_passive_metrics_t *m)
 {
   struct timespec ts;

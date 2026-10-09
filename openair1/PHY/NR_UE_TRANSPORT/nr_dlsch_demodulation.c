@@ -154,7 +154,10 @@ static bool overlap_csi_symbol(fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu, int
   return false;
 }
 
-/* 12-bit RE map of one CSI-RS resource inside an RB that carries it (no density / RB-range test). */
+/* csi_resource_re_map: returns the 12-bit RE map of one CSI-RS resource inside one RB that carries it (no density or RB-range test).
+ *   Row of the CSI-RS table selects k0 step, k' count and multiplier; freq_domain bits pick the RB pattern. AssertFatal if the bitmap is malformed.
+ *   Callers: nr_dlsch_csi_overlap_bitmap() and nr_dlsch_csi_rb_mask().
+ */
 static uint32_t csi_resource_re_map(const fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu)
 {
   int num_k[18] = {1, 1, 1, 1, 1, 4, 2, 2, 6, 3, 4, 4, 3, 3, 3, 4, 4, 4};
@@ -204,6 +207,10 @@ static uint32_t csi_resource_re_map(const fapi_nr_dl_config_csirs_pdu_rel15_t *c
   }
 }
 
+/* nr_dlsch_csi_overlap_bitmap: builds the CSI-RS RE exclusion bitmap of one OFDM symbol: low 16 bits = even RBs, high 16 bits = odd RBs (12 bits each).
+ *   Ors the RE map of every rate-matching CSI-RS resource whose symbols include `symbol`, placed by its frequency density.
+ *   No env flag (the RB-extent refinement is in nr_dlsch_csi_rb_mask()). Callers: nr_rx_pdsch(), nr_dlsch_csi_unav_res(), nr_ssb_rate_match.c, nr_pdsch_passive_decode.c.
+ */
 uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol)
 {
   // LS 16 bits for even RBs, MS 16 bits for odd RBs
@@ -229,6 +236,10 @@ uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_
  * extraction stayed consistent with each other but not with the gNB's mapping -> CRC 0/83 at the serving
  * cell's TRS occasions OTA. Returns the 12-bit excluded-RE map of common RB `crb` on `symbol`. */
 __thread int nr_dlsch_csi_extent_override = -1; /* per-decode A/B (ISAC_PDSCH_CSI_EXTENT_AB), -1 = env */
+/* nr_dlsch_csi_rb_extent: returns whether CSI-RS exclusion is limited to each resource's own RB range (ISAC_PDSCH_CSI_RB_EXTENT=1, cached; default 0 = every allocated RB).
+ *   The per-decode override nr_dlsch_csi_extent_override (set by the ISAC_PDSCH_CSI_EXTENT_AB diagnostic) takes precedence when >= 0.
+ *   Callers: nr_dlsch_csi_rb_mask(), nr_dlsch_csi_unav_res(), nr_dlsch_extract_rbs(), nr_rx_pdsch(), and gw_fingerprint() in the passive decoder.
+ */
 int nr_dlsch_csi_rb_extent(void)
 {
   static int s = -1;
@@ -241,6 +252,10 @@ int nr_dlsch_csi_rb_extent(void)
  * the caller sets this map (virtual BWP RB -> physical BWP PRB) so the extent/parity test sees the real CRB. */
 __thread const uint16_t *nr_dlsch_csi_prb_map = NULL;
 __thread int nr_dlsch_csi_prb_map_n = 0;
+/* nr_dlsch_csi_rb_mask: returns the 12-bit CSI-RS RE exclusion mask of one common RB on one symbol, over all rate-matching resources.
+ *   With the RB-extent flag on, a resource only counts for RBs inside its start_rb..start_rb+nr_of_rbs range; RB parity is checked per density.
+ *   Callers: nr_dlsch_csi_unav_res(), nr_dlsch_extract_rbs(), and the CSI-RS rate-match test (tests/nr_csi_rb_extent_check.c).
+ */
 uint32_t nr_dlsch_csi_rb_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol, int crb)
 {
   uint32_t m = 0;
@@ -338,10 +353,10 @@ static void nr_dlsch_channel_level_median(uint32_t rx_size_symbol,
   }
 }
 
-/* CSI-RS REs of this grant that nr_dlsch_extract_rbs() removes: the UNION over every rate-matching
- * resource (the per-symbol bitmap ORs them), by CRB parity, over the allocated BWP RBs. It counts the
- * extractor's own RE set, so G built from it and the extracted RE count agree by construction --
- * unlike nr_ue_csi_rm_unav_res(), which sums resources (an RE two resources share counts twice). */
+/* nr_dlsch_csi_unav_res: counts the CSI-RS REs that nr_dlsch_extract_rbs() removes for this grant, summed over the grant's symbols and allocated RBs.
+ *   Uses the same bitmaps as the extractor, so the rate-matching RE budget G and the extracted RE count agree by construction.
+ *   Callers: nr_pdsch_passive_decode.c (G computation, passive_decode_body and passive_decode_retry); tests/nr_csi_rb_extent_check.c.
+ */
 uint32_t nr_dlsch_csi_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc)
 {
   uint32_t n = 0;
@@ -363,7 +378,10 @@ uint32_t nr_dlsch_csi_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config
 // Extraction functions
 //==============================================================================================
 
-// Returns the number of REs extracted per antenna/layer row.
+/* nr_dlsch_extract_rbs: copies the PDSCH data REs of one symbol from the FEP output into the compensation buffers, skipping DM-RS, CSI-RS and SSB REs.
+ *   Per allocated RB block and antenna: data symbols use a bulk copy; otherwise an RE loop removes the overlap map (DM-RS | CSI-RS | SSB).
+ *   Also fills the channel estimates for the same REs and returns the packed number of REs (offset) written. Caller: nr_rx_pdsch().
+ */
 static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
                                  c16_t rxdataF[][rxdataF_sz],
                                  uint32_t rx_size_symbol,
@@ -757,8 +775,9 @@ void nr_conjch0_mult_ch1(c16_t *ch0, c16_t *ch1, c16_t *ch0conj_ch1, unsigned sh
   mult_cpx_conj_vector(ch0, ch1, ch0conj_ch1, 12 * nb_rb, output_shift0);
 }
 
-/*
- * MMSE Rx function: up to 4 layers
+/* nr_dlsch_mmse: multi-layer MMSE receiver for up to 4 layers: solves (H^H H + noise I) x = H^H y per RE and computes the per-layer LLR thresholds from the determinant.
+ *   Env: ISAC_PDSCH_MMSE_MODE=2 (unbiased ZF with per-layer scale), ISAC_MMSE_FLOAT=1 (float solver), ISAC_MMSE_DIAG=1 (per-layer EVM log).
+ *   Output is the layer-equalised symbols rxdataF_comp and the magnitude thresholds dl_ch_mag*. Caller: nr_rx_pdsch(), used when Nl > 2, or Nl == 2 without the ML LLR (ISAC_RX_ML_2L).
  */
 static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
                           uint32_t rx_size_symbol,
@@ -1115,7 +1134,10 @@ static void nr_dlsch_layer_demapping(const uint8_t Nl,
   }
 }
 
-/* Computes LLRs from compensated PDSCH signal per OFDM symbol for all layers */
+/* nr_dlsch_llr: computes the bit LLRs of one symbol for all layers from the equalised symbols, using the QAM order (QPSK, 16, 64, 256QAM).
+ *   Magnitude thresholds are per layer when mag_per_layer is set (QAM-FIX mode 2), otherwise layer 0's are used for all layers.
+ *   Caller: nr_rx_pdsch(). Layer-to-codeword demapping is done afterwards by nr_layer_demapping().
+ */
 static int nr_dlsch_llr(const NR_UE_DLSCH_t *dlsch,
                         const int len,
                         const int pdsch_buf_size_max,
@@ -1162,6 +1184,12 @@ static int nr_dlsch_llr(const NR_UE_DLSCH_t *dlsch,
 
 /* Main Function */
 
+/* nr_rx_pdsch: demodulates one OFDM symbol of a PDSCH grant: extract data REs, channel compensation (MRC or per-branch), MMSE or ML for multi-layer, LLRs.
+ *   Env flags read here: ISAC_RX_MRC_MODE, ISAC_RX_BRANCH_MIN_DB, ISAC_RX_ML_2L, ISAC_PDSCH_MMSE_MODE, ISAC_RX_BEST_BY_SNR, ISAC_RX_BRANCH, ISAC_L2MAXH_*,
+ *   ISAC_RX_MRC_ALIGN, ISAC_RX_IRC (+ _SHRINK), ISAC_RX_QAM_AGC, ISAC_PDSCH_EVM_GRANT, ISAC_PDSCH_DECODE_DIAG, ISAC_SUBSET_DIAG.
+ *   Writes LLRs into llr and the valid-RE counts into dl_valid_re; the PTRS phase is estimated afterwards on the same symbols.
+ *   Per-branch state (which receiver branch decoded) is kept in thread-locals. Callers: phy_procedures_nr_ue.c (regular PDSCH) and nr_pdsch_passive_decode.c (passive decode, once per symbol).
+ */
 int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 const UE_nr_rxtx_proc_t *proc,
                 NR_UE_DLSCH_t *dlsch,

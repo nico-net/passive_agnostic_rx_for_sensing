@@ -6,14 +6,22 @@
 #include <algorithm>
 #include <deque>
 
-/* A frozen X410 RX timestamp can still name the previous stream start. The
+/**
+ * usrp_ring_epoch_first_ticks: the first sample tick of a restarted stream: the later of the first packet's hardware timestamp and the scheduled START time.
+ *   Pure function. Caller: usrp_ring_producer() when the first packet of a new epoch arrives.
+ *
+ * A frozen X410 RX timestamp can still name the previous stream start. The
  * accepted timed START is a lower bound for the first sample of the new one. */
 static inline int64_t usrp_ring_epoch_first_ticks(int64_t metadata_ticks, int64_t scheduled_ticks)
 {
   return metadata_ticks > scheduled_ticks ? metadata_ticks : scheduled_ticks;
 }
 
-/* Re-arm back-off before a START. Grows with consecutive failures (base, 2*base, 4*base, ... up to
+/**
+ * usrp_ring_backoff_ms: back-off before re-arming the stream: base x 2^(failures-1), capped at 16 x base and at max_ms; at least 4 x base after more than one unsynced fault.
+ *   Pure function. Caller: usrp_ring_producer() (recovery back-off).
+ *
+ * Re-arm back-off before a START. Grows with consecutive failures (base, 2*base, 4*base, ... up to
  * 16*base) and is bounded by max_ms. While acquisition has not synced and this is not the first
  * unsynced fault, it is at least 4*base so a mixed-acquisition fault burst cannot loop rapidly. */
 static inline int usrp_ring_backoff_ms(int base_ms, int failures, int unsynced_faults, int max_ms)
@@ -27,7 +35,11 @@ static inline int usrp_ring_backoff_ms(int base_ms, int failures, int unsynced_f
   return (int)std::min<int64_t>(b, std::max(max_ms, base_ms));
 }
 
-/* Local estimate of the device time (ticks) without a control read: the end of the last good
+/**
+ * usrp_ring_local_start_ticks: estimate of the device time (ticks) for a timed START computed locally: the end of the last good sample plus the host time elapsed since then, plus a lead that grows with failed attempts.
+ *   Pure function; avoids a blocking control read. Caller: usrp_ring_producer() (ISAC_RX_RECOVER_NOCTRL).
+ *
+ * Local estimate of the device time (ticks) without a control read: the end of the last good
  * sample plus the host monotonic time elapsed since that packet, plus a lead that grows with
  * failed attempts (a late command is just another recoverable failure). */
 static inline int64_t usrp_ring_local_start_ticks(int64_t last_end_ticks, double elapsed_s, double rate, double lead_s,
@@ -42,6 +54,9 @@ static inline int64_t usrp_ring_local_start_ticks(int64_t last_end_ticks, double
  * data -> consume it; empty -> poll again until limit_s of continuous silence, then it is a real receive
  * timeout (the same fault the blocking 0.1 s recv() raised). */
 enum usrp_ring_poll_action { USRP_RING_POLL_DATA = 0, USRP_RING_POLL_RETRY = 1, USRP_RING_POLL_TIMEOUT = 2 };
+/* usrp_ring_poll_classify: classifies one zero-timeout recv() result in poll mode: DATA (samples or a non-timeout result, handled normally), RETRY (silence shorter than the limit, poll again) or TIMEOUT (silence longer than the limit).
+ *   Pure function. Caller: usrp_ring_producer() when ISAC_USRP_RING_POLL is on.
+ */
 static inline usrp_ring_poll_action usrp_ring_poll_classify(size_t got, bool timeout_code, double idle_s,
                                                             double limit_s)
 {
@@ -50,7 +65,11 @@ static inline usrp_ring_poll_action usrp_ring_poll_classify(size_t got, bool tim
   return idle_s < limit_s ? USRP_RING_POLL_RETRY : USRP_RING_POLL_TIMEOUT;
 }
 
-/* Kernel cpulist ("15-19", "2,4-6", "" or "\n") -> bitmask of CPUs 0..63. Used by ISAC_USRP_ISOLATION_CHECK
+/**
+ * usrp_cpulist_mask: converts a kernel cpulist string (for example "15-19" or "2,4-6") into a bit mask of CPUs 0..63; malformed input yields the CPUs parsed so far.
+ *   Pure function. Caller: usrp_isolation_check() in usrp_lib.cpp.
+ *
+ * Kernel cpulist ("15-19", "2,4-6", "" or "\n") -> bitmask of CPUs 0..63. Used by ISAC_USRP_ISOLATION_CHECK
  * on /sys/devices/system/cpu/{isolated,nohz_full}. Malformed input yields the CPUs parsed so far. */
 static inline uint64_t usrp_cpulist_mask(const char *s)
 {
@@ -71,6 +90,9 @@ static inline uint64_t usrp_cpulist_mask(const char *s)
   return m;
 }
 
+/* usrp_ring_has_samples: true when at least `wanted` samples are published (written minus read), with no unsigned wrap when the reader is ahead.
+ *   Pure function. Callers: trx_usrp_read() (ring wait) and the recovery tests.
+ */
 static inline bool usrp_ring_has_samples(uint64_t written, uint64_t read, uint64_t wanted)
 {
   return written >= read && written - read >= wanted;
@@ -94,9 +116,17 @@ struct usrp_ring_recovery_state {
   /* Faults seen while the receiver was not synced and no clean sync has been seen since. */
   int unsynced_faults = 0;
 
+/* usrp_ring_recovery_state: constructor of the RX recovery accounting: sample rate, failure limit, fault-window budget (max_in_window faults inside window_seconds; 0 disables it).
+ *   Constructed by usrp_ring_producer() for each producer run.
+ */
   usrp_ring_recovery_state(uint64_t rate, int max_failures, int max_in_window = 0, double window_seconds = 60.0)
       : sample_rate(rate), limit(max_failures), window_max(max_in_window), window_s(window_seconds) {}
-  /* now_s: monotonic seconds; only used by the fault-window budget. */
+/**
+ * fault: records one fault of the stream (failed START, overrun, metadata error): moves the boundary to the write index, counts the failure and the unsynced faults, and applies the failure and window budgets.
+ *   Returns true while the stream may be re-armed. Caller: usrp_ring_producer() (fault branch).
+ *
+ * now_s: monotonic seconds; only used by the fault-window budget.
+ */
   bool fault(double now_s = 0.0, bool synced = true)
   {
     unsynced_faults = synced ? 0 : unsynced_faults + 1;
@@ -112,7 +142,11 @@ struct usrp_ring_recovery_state {
     }
     return ok;
   }
+/* first_packet: records the first packet of a restarted stream: advances the epoch number published to the reader. */
   void first_packet() { ++epoch; }
+/* samples: accounts `count` good samples: advances the write index and, after 20 ms of clean data, clears the failure budget (not while unsynced).
+ *   Caller: usrp_ring_producer() after each successful recv().
+ */
   void samples(size_t count, bool synced = true)
   {
     if (synced)

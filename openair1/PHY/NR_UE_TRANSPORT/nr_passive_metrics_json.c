@@ -9,6 +9,7 @@ static const char *const kCb0Reason[16] = {"not_new_rv0", "gated",      "iq_stal
                                            "member_stale", "llr_scale", "gpu_llr", "ldpc_error", "rank",     "decoder",
                                            "contract",   "budget",     "no_grantwork", "reindexed"};
 
+/* cb0_json: appends the CB0 (TB decoding) and the GPU DL allocation counters to the metrics JSON text in buf (the fragment starts with a comma). Returns the length written, or -1 when buf is too small. Static. Caller: nr_passive_metrics_to_json(). */
 static int cb0_json(const nr_passive_metrics_t *m, char *buf, size_t n)
 {
   int w = snprintf(buf, n,
@@ -63,6 +64,9 @@ static int pdsch_schedule_json(const nr_passive_metrics_t *m, char *buf, size_t 
   return (w < 0 || (size_t)w >= n) ? -1 : w;
 }
 
+/* nr_passive_metrics_to_json: formats a metrics snapshot as one JSON object into buf (at most n bytes) for the machine-readable metrics file; returns the length, or -1 when it does not fit.
+ *   Covers the acquisition, the sensing pipelines, the PDSCH/PUSCH schedulers and the CB0/GPU counters (via cb0_json). Caller: nr_passive_metrics.c (nr_passive_metrics_emit).
+ */
 int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t n)
 {
   const char *st = m->acq_state ? m->acq_state : "UNKNOWN";

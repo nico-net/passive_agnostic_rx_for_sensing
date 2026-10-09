@@ -912,7 +912,12 @@ static void trx_usrp_start_generic_gpio(usrp_state_t *s)
 /*! \brief Called to start the USRP transceiver. Return 0 if OK, < 0 if error
     @param device pointer to the device structure specific to the RF hardware target
 */
-/* ISAC_UHD_CTRL_CORES="a,b,c": move UHD's control-endpoint threads (uhd_ctrl*) to these cores.
+/**
+ * usrp_repin_uhd_threads: Pins the UHD control-endpoint threads (uhd_ctrl*) to the cores in ISAC_UHD_CTRL_CORES.
+ *   Moves each thread whose comm starts with uhd_ctrl (via /proc/self/task). With the core plan active, one reserved CPU per thread; otherwise the listed CPUs as one set.
+ *   Returns false when the core plan cannot provide enough CPUs or the parse fails (the stream start is then cancelled). Callers: trx_usrp_start_impl() before and after the stream start.
+ *
+ * ISAC_UHD_CTRL_CORES="a,b,c": move UHD's control-endpoint threads (uhd_ctrl*) to these cores.
  * MEASURED 2026-10-06 (X410 34B2AF1, DPDK lcores 17-19): the device is created from a SCHED_FIFO 97
  * thread, so uhd_ctrl_ep* busy-polls at FIFO 97 (~64 % CPU) and was placed on core 19, where
  * dpdk-worker19 also runs at FIFO 97; equal FIFO priorities never preempt each other. About half the
@@ -977,6 +982,9 @@ static bool usrp_repin_uhd_threads(const char *when)
   return ok;
 }
 
+/* usrp_ring_ms: returns ISAC_USRP_RING_MS (0..5000, cached): the duration in ms of the decoupled RX ring; 0 disables it.
+ *   Used to size the ring and to decide whether the producer thread runs. Callers: usrp_ring_alloc(), usrp_ring_start(), trx_usrp_start_impl().
+ */
 static int usrp_ring_ms(void)
 {
   static int ms = -1;
@@ -989,7 +997,11 @@ static int usrp_ring_ms(void)
   return ms;
 }
 
-/* PRE-SYNC RESTART WINDOW (ISAC_USRP_RESTART_UNTIL_SYNC, default 1; 0 = legacy first-second-only).
+/**
+ * usrp_restart_max: returns ISAC_USRP_RESTART_MAX (cached, default 10): how many pre-sync restarts of the RX stream are allowed in the legacy (non-recovery) mode.
+ *   Caller: usrp_ring_producer() (legacy overflow restart).
+ *
+ * PRE-SYNC RESTART WINDOW (ISAC_USRP_RESTART_UNTIL_SYNC, default 1; 0 = legacy first-second-only).
  * MEASURED 2026-10-08 (X410 34B2AF1, DPDK, 4 x 122.88 MS/s, common config): about half the starts dropped packets
  * (ERROR_CODE_OVERFLOW, out of sequence) 1-2 s into the stream, during the initial cell search, i.e. just past
  * the first-second restart window -> fatal. Until the PHY reports its first sync nothing depends on sample
@@ -1003,6 +1015,9 @@ static int usrp_restart_max(void)
   }
   return m;
 }
+/* usrp_rx_recover: returns true when ISAC_RX_RECOVER=1 (cached): in-place RX recovery is enabled (the producer re-arms the stream after a fault instead of stopping).
+ *   Callers: usrp_ring_producer(), trx_usrp_read() and the recovery budget set-up.
+ */
 static bool usrp_rx_recover(void)
 {
   static const bool enabled = [] { const char *e = getenv("ISAC_RX_RECOVER"); return e && atoi(e) != 0; }();
@@ -1010,47 +1025,75 @@ static bool usrp_rx_recover(void)
 }
 static std::atomic<uint64_t> g_ring_copy_bytes{0}, g_ring_direct_bytes{0};
 static std::atomic<uint64_t> g_ring_discontinuity_epoch{0};
+/* isac_usrp_ring_epoch: exported counter of RX ring discontinuity epochs (one per successful re-arm after a fault), for diagnostics and external tools.
+ *   Reads g_ring_discontinuity_epoch with acquire ordering. No in-tree caller found.
+ */
 extern "C" __attribute__((visibility("default"))) uint64_t isac_usrp_ring_epoch(void)
 {
   return g_ring_discontinuity_epoch.load(std::memory_order_acquire);
 }
+/* isac_usrp_ring_traffic: exported counters of the bytes the RX ring moved: copied through the ring (*copied) and read zero-copy (*direct).
+ *   Relaxed loads of two atomics. No in-tree caller found.
+ */
 extern "C" __attribute__((visibility("default"))) void isac_usrp_ring_traffic(uint64_t *copied, uint64_t *direct)
 {
   *copied = g_ring_copy_bytes.load(std::memory_order_relaxed);
   *direct = g_ring_direct_bytes.load(std::memory_order_relaxed);
 }
+/* usrp_rx_recover_max: returns ISAC_RX_RECOVER_MAX (cached, default 20): consecutive failed re-arms allowed before the RX gives up.
+ *   Used to build the recovery state in usrp_ring_producer().
+ */
 static int usrp_rx_recover_max(void)
 {
   static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
   return limit;
 }
+/* usrp_rx_recover_window_max: returns ISAC_RX_RECOVER_MAX_FAULTS (cached, default 20): faults allowed inside the fault window before the RX gives up.
+ *   Used with usrp_rx_recover_window_s() by usrp_ring_producer().
+ */
 static int usrp_rx_recover_window_max(void)
 {
   static const int limit = [] { const char *e = getenv("ISAC_RX_RECOVER_MAX_FAULTS"); return e && atoi(e) > 0 ? atoi(e) : 20; }();
   return limit;
 }
+/* usrp_rx_recover_window_s: returns ISAC_RX_RECOVER_WINDOW_S (cached, default 60 s): length of the fault window of the recovery budget.
+ *   Caller: usrp_ring_producer().
+ */
 static double usrp_rx_recover_window_s(void)
 {
   static const double w = [] { const char *e = getenv("ISAC_RX_RECOVER_WINDOW_S"); return e && atof(e) > 0 ? atof(e) : 60.0; }();
   return w;
 }
-/* ISAC_RX_RECOVER_NOCTRL (default 1 when ISAC_RX_RECOVER=1): re-arm from a locally computed time, never a
+/**
+ * usrp_rx_recover_noctrl: returns ISAC_RX_RECOVER_NOCTRL (cached, default on): re-arm the stream from a locally computed device time, without a blocking control read.
+ *   Used by the recovery path of usrp_ring_producer(): STOP errors are then non-fatal and the start time comes from the last good sample.
+ *
+ * ISAC_RX_RECOVER_NOCTRL (default 1 when ISAC_RX_RECOVER=1): re-arm from a locally computed time, never a
  * blocking get_time_now() (the X410 control path is starved by the same DPDK drop burst). */
 static bool usrp_rx_recover_noctrl(void)
 {
   static const bool on = [] { const char *e = getenv("ISAC_RX_RECOVER_NOCTRL"); return !e || atoi(e) != 0; }();
   return on;
 }
+/* usrp_env_int: reads an integer environment variable, returning def when it is unset or below lo.
+ *   Used for the ring and recovery tunables (ISAC_USRP_RING_PRIO, _PKTS, _POLL, ISAC_RX_RECOVER_*).
+ */
 static int usrp_env_int(const char *name, int def, int lo)
 {
   const char *e = getenv(name);
   return e && atoi(e) >= lo ? atoi(e) : def;
 }
+/* usrp_rx_synced_now: returns 1 when the PHY has reached synchronisation (nr_ue_rx_synced_g, looked up with dlsym), else 0; 1 when the symbol is absent.
+ *   Read by the recovery budget (unsynced faults) in usrp_ring_producer() and by usrp_restart_allowed().
+ */
 static int usrp_rx_synced_now(void)
 {
   static const int *synced = (const int *)dlsym(RTLD_DEFAULT, "nr_ue_rx_synced_g");
   return synced ? __atomic_load_n(synced, __ATOMIC_ACQUIRE) != 0 : 1;
 }
+/* usrp_restart_allowed: true when a pre-sync restart of the stream is allowed at sample w: always within the first second, and afterwards only while the receiver is not synchronised (ISAC_USRP_RESTART_UNTIL_SYNC).
+ *   Caller: usrp_ring_producer() (legacy overflow restart).
+ */
 static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
 {
   if (w < (uint64_t)s->sample_rate)
@@ -1065,6 +1108,10 @@ static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
   return until_sync && synced != NULL && __atomic_load_n(synced, __ATOMIC_ACQUIRE) == 0;
 }
 
+/* usrp_ring_producer: producer thread of the decoupled RX ring: receives UHD packets into the ring (one 32-bit complex sample per channel), handles faults and re-arms the stream.
+ *   On a fault it stops, drains, waits a back-off and re-issues a timed START (ISAC_RX_RECOVER=1); without recovery it only restarts before sync. Packets are read with recv() (blocking, or zero-timeout polling with ISAC_USRP_RING_POLL).
+ *   Index accounting (write index, epoch, failure budget) is in usrp_ring_recovery.h. Sets ring_err on a fatal fault and calls nr_shutdown_request. Runs on core ISAC_USRP_RING_CORE at SCHED_FIFO ISAC_USRP_RING_PRIO. Started by usrp_ring_start().
+ */
 static void usrp_ring_producer(usrp_state_t *s)
 {
   const char *core = getenv("ISAC_USRP_RING_CORE");
@@ -1360,7 +1407,11 @@ static void usrp_ring_producer(usrp_state_t *s)
   }
 }
 
-/* Allocate (and, under mlockall, fault in) the ~1 GB ring BEFORE the timed stream start. It used to
+/**
+ * usrp_ring_alloc: allocates the RX ring (one buffer per channel, ISAC_USRP_RING_MS of samples) before the timed stream start, so that zero-filling it cannot delay the first reads.
+ *   No-op when the ring is disabled or the decimation ratio is not 1. Callers: trx_usrp_start_impl() (before the PPS wait) and usrp_ring_start().
+ *
+ * Allocate (and, under mlockall, fault in) the ~1 GB ring BEFORE the timed stream start. It used to
  * be allocated after issue_stream_cmd(): zero-filling it took long enough that intermittently nobody
  * read the stream for > the 65536-mbuf pool (~265 ms at 4 x 122.88 Msps), so every start that lost
  * the race overflowed at exactly sample 32517716 before sync (OTA 2026-10-07, ~half the starts). */
@@ -1376,7 +1427,11 @@ static void usrp_ring_alloc(usrp_state_t *s)
   }
 }
 
-/* ISAC_USRP_ISOLATION_CHECK=1 (default off): before streaming, report every RX-critical core (ring producer
+/**
+ * usrp_isolation_check: diagnostic (ISAC_USRP_ISOLATION_CHECK=1): warns when the ring producer or the UHD control cores are not isolated (isolcpus) or tickless (nohz_full).
+ *   Reads /sys/devices/system/cpu/{isolated,nohz_full}; warns only and never refuses to start. Caller: usrp_ring_start().
+ *
+ * ISAC_USRP_ISOLATION_CHECK=1 (default off): before streaming, report every RX-critical core (ring producer
  * ISAC_USRP_RING_CORE, UHD control ISAC_UHD_CTRL_CORES) that the kernel does not isolate (isolcpus) or run
  * tickless (nohz_full). STARTUP-DROPS 2026-10-09: every failing start of 2026-10-08 ran on a boot that
  * isolated only 17-19, i.e. with the producer (16) and uhd_ctrl (14/15) on cores shared with IRQs and
@@ -1426,6 +1481,9 @@ static void usrp_isolation_check(void)
         ok_iso ? "read" : "missing", ok_nohz ? "read" : "missing");
 }
 
+/* usrp_ring_start: starts the RX ring producer (when ISAC_USRP_RING_MS is set): resets the ring indices and starts the producer on a planned or a plain thread.
+ *   Called by trx_usrp_start_impl() after the timed START. Runs the isolation check and the ring allocation first. The reader (trx_usrp_read) then copies or shifts the samples out of the ring.
+ */
 static void usrp_ring_start(usrp_state_t *s)
 {
   if (usrp_ring_ms() == 0 || s->decim_ratio != 1)
@@ -1451,6 +1509,9 @@ static void usrp_ring_start(usrp_state_t *s)
   LOG_I(HW, "SENSING: USRP_RING on: %zu ch x %zu samples (%d ms)\n", nch, cap, usrp_ring_ms());
 }
 
+/* usrp_ring_join: stops the RX ring producer and waits for it to exit (sets ring_stop and wakes the reader).
+ *   Caller: trx_usrp_finish_rx(). Safe when no producer was started.
+ */
 static void usrp_ring_join(usrp_state_t *s)
 {
   if (!s->ring_thread.joinable() && !s->planned_ring_started)
@@ -1465,6 +1526,9 @@ static void usrp_ring_join(usrp_state_t *s)
 
 static void trx_usrp_finish_rx(usrp_state_t *s);
 
+/* trx_usrp_start_impl: starts the USRP RX stream: one-time GPIO setup, wait for the next PPS, timed START_CONTINUOUS at PPS+1 s, UHD thread re-pinning, and the RX ring.
+ *   Stops a running stream first (trx_usrp_finish_rx). Returns 0, or -1 when the PPS wait is cancelled or expires. Callers: trx_usrp_start() (exception-safe wrapper) and the device start hook.
+ */
 static int trx_usrp_start_impl(openair0_device_t *device)
 {
   usrp_state_t *s = (usrp_state_t *)device->priv;
@@ -1579,6 +1643,9 @@ static void trx_usrp_send_end_of_burst(usrp_state_t *s)
   s->tx_stream->send("", 0, s->tx_md);
 }
 
+/* trx_usrp_finish_rx: stops the RX stream: joins the ring producer, issues STOP and drains the streamer for up to 1 s.
+ *   Logs USRP_RX_STOP with the number of drained samples. Callers: trx_usrp_start_impl(), trx_usrp_end().
+ */
 static void trx_usrp_finish_rx(usrp_state_t *s)
 {
   if (!s->rx_stream)
@@ -1614,7 +1681,11 @@ static void trx_usrp_finish_rx(usrp_state_t *s)
 
 static void trx_usrp_write_reset(openair0_thread_t *wt);
 
-/*! \brief Terminate operation of the USRP transceiver -- free all associated resources
+/**
+ * trx_usrp_end: tears down the USRP device: stops RX and TX, releases the UHD handles and frees the decimation and device buffers.
+ *   Idempotent and exception-tolerant (teardown must work after an RPC failure). Logs the USRP_SHUTDOWN steps. Installed as device->trx_end_func.
+ *
+ * \brief Terminate operation of the USRP transceiver -- free all associated resources
  * \param device the hardware to use
  */
 static void trx_usrp_end(openair0_device_t *device)
@@ -1701,6 +1772,10 @@ static void trx_usrp_end(openair0_device_t *device)
       @param antenna_id index of the antenna if the device has multiple antennas
       @param flags flags must be set to true if timestamp parameter needs to be applied
 */
+/* trx_usrp_write: sends TX samples to the USRP (the device write hook): with no write thread it sends directly; otherwise it queues the package for trx_usrp_write_thread().
+ *   Applies the sample advance, derives the burst flags from flags and the GPIO flags, and aligns the samples (16-bit, 4-bit left shift). Returns the number of samples sent or queued.
+ *   Installed as device->trx_write_func; the queue is bounded (MAX_WRITE_THREAD_PACKAGE) and is reset on overflow.
+ */
 static int trx_usrp_write(openair0_device_t *device,
 			  openair0_timestamp_t timestamp,
 			  void **buff,
@@ -1841,6 +1916,9 @@ static int trx_usrp_write(openair0_device_t *device,
       @param antenna_id index of the antenna if the device has multiple antennas
       @param flags flags must be set to true if timestamp parameter needs to be applied
 */
+/* trx_usrp_write_thread: TX worker thread: takes queued write packages in order, converts their samples and sends them to the UHD TX streamer with their timestamp and burst flags.
+ *   Waits on cond_write while the queue is empty; exits when write_thread_exit is set. Started by trx_usrp_write_init().
+ */
 void *trx_usrp_write_thread(void * arg)
 {
   int ret=0;
@@ -1939,6 +2017,9 @@ void *trx_usrp_write_thread(void * arg)
   return NULL;
 }
 
+/* trx_usrp_write_init: initialises the TX write queue and starts trx_usrp_write_thread() (realtime, OAI_PRIORITY_RT_MAX).
+ *   Marks the device as having a TX worker (tx_write_started). Installed as device->trx_write_init.
+ */
 int trx_usrp_write_init(openair0_device_t *device)
 {
   //uhd::set_thread_priority_safe(1.0);
@@ -2025,7 +2106,12 @@ static void usrp_decim_ensure_scratch(usrp_state_t *s, int ch, int cc, int nsamp
   }
 }
 
-/*! \brief Receive samples from hardware.
+/**
+ * trx_usrp_read: receives RX samples from the USRP (the device read hook): from the ring when it is active, otherwise directly from the UHD streamer.
+ *   Waits for recv_target samples (nsamps times the decimation ratio), applies the optional catch-up pacing (ISAC_USRP_CATCHUP_X), software decimation when the FPGA rate is higher, and the channel map (ISAC_RX_CHAN_MAP).
+ *   Shifts the samples to the 12 LSBs for the softmodem and checks the raw timestamp continuity (RFTSDISC log). A fault returns -1 after RFSTALL logging (never a partial buffer). Installed as device->trx_read_func.
+ *
+ * \brief Receive samples from hardware.
  * Read \ref nsamps samples from each channel to buffers. buff[0] is the array for
  * the first channel. *ptimestamp is the time at which the first sample
  * was received.
@@ -2651,7 +2737,11 @@ int trx_usrp_set_gains(openair0_device_t *device,
   return(0);
 }
 
-/*! \brief Stop USRP
+/**
+ * trx_usrp_stop: requests the RX to stop: sets rx_stop_requested and ring_stop and wakes the producer. No device call is made here.
+ *   Normal shutdown then joins the producer in trx_usrp_end(). Installed as device->trx_stop_func.
+ *
+ * \brief Stop USRP
  * \param card refers to the hardware index to use
  */
 int trx_usrp_stop(openair0_device_t *device)

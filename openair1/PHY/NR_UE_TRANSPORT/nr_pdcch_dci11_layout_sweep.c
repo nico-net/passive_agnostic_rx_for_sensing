@@ -265,6 +265,9 @@ bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, nr_dci_bits_t payl
 }
 
 
+/* nr_dci11_layout_impossible: true when a CRC-verified DCI 1_1 payload cannot come from this layout: the frequency-domain resource assignment is out of range for the BWP (or zero in type 0), or the antenna-ports or TDA field exceeds its valid row count.
+ *   Pure function. Callers: nr_dci11_resolver_observe() (hard refutation) and the tests.
+ */
 bool nr_dci11_layout_impossible(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, uint16_t bwp_size)
 {
   if (off == NULL || bwp_size == 0)
@@ -283,6 +286,7 @@ bool nr_dci11_layout_impossible(const nr_dci11_offsets_t *off, nr_dci_bits_t pay
   return false;
 }
 
+/* hard_refute_enabled: returns ISAC_DCI11_HARD_REFUTE != 0, read at each call (one getenv per accepted DCI). Caller: nr_dci11_resolver_observe(). */
 static bool hard_refute_enabled(void) /* read per observe(): one getenv per accepted DCI, and tests can toggle it */
 {
   const char *e = getenv("ISAC_DCI11_HARD_REFUTE");
@@ -706,6 +710,9 @@ int nr_dci11_thompson_pick(const uint32_t *ok, const uint32_t *trials, const dou
   return arg;
 }
 
+/* nr_dci11_resolver_observe: observes one accepted DCI 1_1 payload: updates the pass and impossible counters of every live layout, optionally hard-refutes layouts that are impossible for enough payloads (ISAC_DCI11_HARD_REFUTE), and drops layouts whose optimistic pass rate is below the bar.
+ *   Drops are applied in a second pass and never remove the last live layout. ISAC_DCI11_S1_OFF=1 keeps every layout alive (A/B control). Returns the number of live layouts. Callers: nr_dci11_resolver_observe_rnti() and nr_pdcch_blind_monitor_rt.c (via nr_pdcch_dci11_layout_observe()).
+ */
 int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
 {
   if (r == NULL || r->n_hyp <= 0) {
@@ -791,6 +798,7 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, nr_dci_bits_t payload)
   return r->n_alive;
 }
 
+/* harq_seq_enabled: returns ISAC_DCI11_HARQ_SEQ != 0 (read per call): enables the HARQ-sequence pruning of layouts in nr_dci11_resolver_observe_rnti(). */
 static bool harq_seq_enabled(void)
 {
   const char *e = getenv("ISAC_DCI11_HARQ_SEQ");
@@ -805,6 +813,9 @@ static int harq_step(nr_dci_bits_t prev, nr_dci_bits_t cur, uint16_t total, int 
   return ((peek(cur, total, (uint16_t)at, 4) - peek(prev, total, (uint16_t)at, 4)) & 15) == 1;
 }
 
+/* nr_dci11_resolver_observe_rnti: observes a DCI 1_1 payload with its RNTI: when HARQ-sequence pruning is on, tracks the previous payload of each RNTI and counts how often a layout's HARQ-process field steps by one; then runs nr_dci11_resolver_observe().
+ *   A layout reading no HARQ step loses its place only after another layout shows a clear rate (3/4 of the best rate). Returns the live count. Caller: nr_pdcch_dci11_layout_observe() in nr_pdcch_blind_monitor_rt.c.
+ */
 int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload, uint16_t rnti)
 {
   if (r == NULL || r->n_hyp <= 0 || rnti == 0 || !harq_seq_enabled() || r->winner >= 0)
