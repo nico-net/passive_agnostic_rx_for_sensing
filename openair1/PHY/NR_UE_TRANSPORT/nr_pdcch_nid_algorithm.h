@@ -326,7 +326,7 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
   }
   return (int)st2_gen(H,NID_HYP_CAP,qlo,qhi);
  }
- /* consistency_vote: per-snapshot vote for hypothesis h: 1 when more of its REG-bundle groups are lit than not, 0 for the opposite, -1 when no group is lit. Does not change state.
+ /* consistency_vote: per-snapshot vote for hypothesis h: 1 when the fully lit groups of its CCE groups are at least as many as the partly lit ones, 0 when fewer, -1 when no group is lit. Does not change state.
   *   Caller: NidStage2::consistent().
   */
  NID_FN int consistency_vote(const st2_hyp_t *h,int k) const {
