@@ -130,6 +130,7 @@ typedef struct {
   bool     data_id_advance;
   /// T26b grant solver (ISAC_PDSCH_SOLVER): nonzero = report this job's CRC to nr_pdsch_solver_feedback()
   uint32_t solver_token;
+  int8_t   mrc_mode;       ///< T26d: per-grant combining mode override (-1/0 = receiver default)
   int32_t  coreset_key;    ///< T26c: PDCCH nID of the discovered CORESET the DCI came from (-1 = none / not set)
 } nr_pdsch_passive_job_t;
 

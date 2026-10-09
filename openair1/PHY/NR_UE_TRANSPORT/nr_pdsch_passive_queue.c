@@ -1429,8 +1429,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_ptrs_sweep_allow(!job.layout_probe && (job.sweep_ticket.generation == 0 || job.sweep_ticket.settled));
     if (gpu_job)
       nr_pdsch_passive_set_llr_override(t_gpu_llr + gpu_job->llr_offset, gpu_job->n_llr);
+    extern __thread int nr_dlsch_mrc_mode_override;
+    nr_dlsch_mrc_mode_override = job.mrc_mode > 0 ? job.mrc_mode : -1; /* T26d ISAC_RX_MRC_PER_RNTI */
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+    nr_dlsch_mrc_mode_override = -1;
     if (owned) {
       const uint64_t done = now_ns();
       const uint64_t cpu_fep = nr_pdsch_passive_last_fep_ns();

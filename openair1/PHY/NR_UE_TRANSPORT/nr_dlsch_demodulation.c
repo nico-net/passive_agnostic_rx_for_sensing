@@ -47,6 +47,7 @@ __thread int nr_dlsch_forced_branch = -1;
  * separate live runs cannot answer whether four branches hurt, because propagation, gain state and
  * this rig's own 5-88 % CRC swing all change between runs. */
 __thread int nr_dlsch_forced_mask = -1;
+__thread int nr_dlsch_mrc_mode_override = -1; /* T26d ISAC_RX_MRC_PER_RNTI: per-grant combining mode (set by the passive decode) */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
 __thread int nr_dlsch_chest_per_symbol = 0;
 extern __thread uint32_t nr_dl_chest_nvar_ant[]; // per-branch chest noise, published by the chest on this thread // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
@@ -1039,7 +1040,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   static __thread int16_t t_mrc_wq15[4] = {32767, 32767, 32767, 32767};
   static __thread double t_mrc_w[4] = {1, 1, 1, 1};
   static __thread int t_mrc_mode = -1;
+  static __thread int t_mrc_env = -1; /* T26d: ISAC_RX_MRC_MODE as configured; t_mrc_mode = per-grant effective mode */
   static __thread double t_mrc_min_db = 12.0;
+  if (t_mrc_env >= 0) /* already resolved: apply the per-grant override (nr_dlsch_mrc_mode_override, -1 = none) */
+    t_mrc_mode = nr_dlsch_mrc_mode_override >= 0 ? nr_dlsch_mrc_mode_override : t_mrc_env;
   if (t_mrc_mode < 0) {
     const char *e = getenv("ISAC_RX_MRC_MODE");
     /* DEFAULT 0 -- MEASURED, not inherited. A 2x4 sweep on the live cell (modes alternated so
@@ -1057,6 +1061,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
      * frequency-aligned or the antennas moved onto one board: hardware, not code. Keep the knob and
      * the RXBRANCH probe for that work; do not re-enable a combining mode by assumption. */
     t_mrc_mode = (e != NULL) ? atoi(e) : 0;
+    t_mrc_env = t_mrc_mode;
+    if (nr_dlsch_mrc_mode_override >= 0) t_mrc_mode = nr_dlsch_mrc_mode_override;
     const char *d = getenv("ISAC_RX_BRANCH_MIN_DB");
     if (d != NULL) {
       t_mrc_min_db = atof(d);

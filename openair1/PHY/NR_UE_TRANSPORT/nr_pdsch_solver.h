@@ -43,6 +43,7 @@ typedef struct {
   uint8_t probe;       ///< 1 = first-code-block probe (search), 0 = full decode (solved parameters)
   uint8_t rm;          ///< 1 = rate-match around the run-time-discovered CSI-RS resources of this slot
   uint32_t token;      ///< hand back to nr_pdsch_solver_feedback()
+  uint8_t comb;        ///< T26d ISAC_RX_MRC_PER_RNTI: combining mode for this variant (1 best branch, 3 MRC; 0 default)
   int32_t scr;         ///< T26c: -1 = default PDSCH scrambling ids; else DM-RS + data scrambling id = this run-time nID
 } nr_pdsch_solver_var_t;
 

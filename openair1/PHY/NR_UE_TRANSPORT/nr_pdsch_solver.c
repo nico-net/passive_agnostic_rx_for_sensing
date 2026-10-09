@@ -42,6 +42,7 @@ typedef struct {
   int32_t key;             /* T26c: CORESET key of this RNTI's last planned DCI */
   uint32_t n_probe;        /* T26c: probes planned while unsolved (search backoff) */
   uint32_t alt_hash;       /* T26c: g_alt_hash seen at the last plan */
+  uint32_t comb_try[2], comb_ok[2]; /* T26d ISAC_RX_MRC_PER_RNTI: full/probe CRC per combining mode {1: best branch, 3: MRC} */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
 } solver_rnti_t;
@@ -59,6 +60,7 @@ typedef struct {
   uint64_t dci;
   uint64_t abs;           /* T26c: absolute slot of the grant */
   int32_t scr;
+  uint8_t comb;           /* T26d: combining mode of this variant (0 = receiver default) */
   nr_dci_bits_t payload;
   int n_ids;
   uint16_t ids[SOLVER_MAX_IDS];
@@ -272,6 +274,23 @@ static pending_t *pend_new(void)
 
 static int t_rm = 0; static bool t_learn_rm = false; /* set by plan for this grant (under g_mu) */
 static int32_t t_scr = -1; /* T26c scrambling hypothesis for this grant (-1 default) */
+static uint8_t t_comb; /* T26d combining mode for this grant's variants (0 = default) */
+static int comb_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI") && atoi(getenv("ISAC_RX_MRC_PER_RNTI")) ? 1 : 0;
+  return en;
+}
+/* Mode for this grant: unsolved -> alternate 1/3 by grant parity; solved -> the mode with the better CRC rate
+ * (Laplace), exploring the other on 1 grant in 8. */
+static uint8_t comb_pick(const solver_rnti_t *r)
+{
+  if (!comb_on()) return 0;
+  if (!r->solved) return (r->grants & 1u) ? 3 : 1;
+  const double p1 = (r->comb_ok[0] + 1.0) / (r->comb_try[0] + 2.0), p3 = (r->comb_ok[1] + 1.0) / (r->comb_try[1] + 2.0);
+  const uint8_t best = p3 > p1 ? 3 : 1;
+  return (r->grants % 8u) == 7u ? (best == 3 ? 1 : 3) : best;
+}
 static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                  const nr_pdsch_solver_reading_t *rd, int l0, int S, int add_pos, int table, bool probe, bool table_disc,
                  bool learn_S, bool learn_table, int tda, uint64_t dci, nr_dci_bits_t payload)
@@ -297,6 +316,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->dci = dci;
   p->rm = (uint8_t)t_rm;
   p->scr = t_scr;
+  p->comb = t_comb;
   p->learn_rm = t_learn_rm;
   p->payload = payload;
   p->n_ids = rd[reading].n_ids < SOLVER_MAX_IDS ? rd[reading].n_ids : SOLVER_MAX_IDS;
@@ -312,6 +332,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   v->token = p->token;
   v->rm = (uint8_t)t_rm;
   v->scr = t_scr;
+  v->comb = t_comb;
   return true;
 }
 
@@ -404,10 +425,10 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     for (int i = 0; i < SOLVER_RNTIS && u < (int)sizeof(b) - 80; i++) {
       const solver_rnti_t *q = &g_r[i];
       if (!q->used) continue;
-      u += snprintf(b + u, sizeof(b) - u, " 0x%04x:g%u,%s%.0fms,full%u/%u,snr%.1f", q->rnti, q->grants,
+      u += snprintf(b + u, sizeof(b) - u, " 0x%04x:g%u,%s%.0fms,full%u/%u,snr%.1f,m1:%u/%u,m3:%u/%u", q->rnti, q->grants,
                     q->solved_abs ? "solve=" : "unsolved_age=",
                     0.5 * (double)((q->solved_abs ? q->solved_abs : g_now_abs) - q->first_abs), q->full_ok, q->full_tr,
-                    q->n_snr ? q->snr_ema : -99.f);
+                    q->n_snr ? q->snr_ema : -99.f, q->comb_ok[0], q->comb_try[0], q->comb_ok[1], q->comb_try[1]);
     }
     LOG_A(PHY, "SENSING: PDSCH_SOLVER per-rnti%s\n", b);
   }
@@ -419,6 +440,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   t_rm = 0;
   t_learn_rm = false;
   t_scr = r->solved ? r->scr : -1;
+  t_comb = comb_pick(r);
   if (r->solved) {
     int ri = 0;
     for (int i = 0; i < n_rd; i++)
@@ -633,6 +655,11 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     return;
   }
   solver_rnti_t *r = &g_r[p->slot];
+  if (p->comb == 1 || p->comb == 3) {
+    const int ci = p->comb == 3 ? 1 : 0;
+    r->comb_try[ci]++;
+    if (crc_ok) r->comb_ok[ci]++;
+  }
   if (p->probe && crc_ok) g_st.probe_ok++;
   if (!p->probe && crc_ok) g_st.full_ok++;
   if (r->used && p->phase == 1 && r->solved) {

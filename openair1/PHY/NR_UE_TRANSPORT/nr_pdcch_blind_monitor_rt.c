@@ -8350,6 +8350,7 @@ constdiag_done:;
         job.layout_probe = var[v].probe;
         job.solver_token = var[v].token;
         job.coreset_key = cfg->discovered_coreset ? (int32_t)cfg->coreset_pdcch_dmrs_scrambling_id : -1;
+        job.mrc_mode = (int8_t)var[v].comb;
         decodes_this_occasion++;
         if (!nr_pdsch_passive_queue_enqueue(&job))
           nr_pdsch_solver_feedback(var[v].token, false, false);
