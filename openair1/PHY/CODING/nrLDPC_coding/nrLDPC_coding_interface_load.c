@@ -25,6 +25,10 @@ int load_nrLDPC_coding_interface(char *version, nrLDPC_coding_interface_t *itf, 
 {
   char *ptr = (char *)config_get_if();
   char libname[64] = "ldpc";
+  /* Opt-in replay selection of the existing CUDA transport-block decoder. */
+  const char *gpu_ldpc = getenv("ISAC_PDSCH_GPU_LDPC");
+  if (version == NULL && gpu_ldpc && atoi(gpu_ldpc) != 0)
+    version = "_cuda";
 
   if (ptr == NULL) { // phy simulators, config module possibly not loaded
     uniqCfg = load_configmodule(1, arguments_phy_simulators, CONFIG_ENABLECMDLINEONLY);

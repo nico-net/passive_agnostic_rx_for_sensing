@@ -116,7 +116,7 @@ static _Atomic int g_gpu_chk_enforce;
 static int (*g_gpu_admit)(const nr_gpu_pdsch_job_t *, int, int);
 static int16_t *g_consumer_gpu_llr[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 static int16_t *g_consumer_gpu_rxF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-#define GPU_LLR_CAP (16u << 20) /* int16 per consumer: ~13 full-band rank-4 256QAM TBs, or any probe batch */
+#define GPU_LLR_CAP (32u << 20) /* int16 per consumer: room for a full recorded multi-grant slot */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 /* T26c: a solver variant that is dropped before decoding releases its pending entry (no credit) at once,
@@ -359,7 +359,7 @@ static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 
 static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
-#define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 8
+#define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 64
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
 void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
@@ -990,6 +990,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const long slots_per_frame = fp->slots_per_frame;
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
+  const char *slot_timing_env = getenv("ISAC_PDSCH_SLOT_TIMING");
+  const bool slot_timing = slot_timing_env && atoi(slot_timing_env) != 0;
   {
     const char *e = getenv("ISAC_PDSCH_INLINE_POOL");
     nr_passive_tpool_inline = e && atoi(e) != 0;
@@ -1042,7 +1044,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_job_t more[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     uint64_t more_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     int n_more = 0;
-    while (g_count > 0 && n_more < NR_PDSCH_PASSIVE_SLOT_GROUP_MAX
+    while (g_count > 0 && n_more < (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)
            && g_ring[g_tail].absolute_slot == job.absolute_slot) {
       more_ns[n_more] = g_ring_ns[g_tail];
       more[n_more++] = g_ring[g_tail];
@@ -1050,6 +1052,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       g_count--;
     }
     pthread_mutex_unlock(&g_lock);
+    const uint64_t slot_t0 = slot_timing ? now_ns() : 0;
     if (s_sigt) {
       sigt_t0 = now_ns();
       sigt_p0 = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
@@ -1190,6 +1193,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     int16_t *t_gpu_rxF = g_consumer_gpu_rxF[idx];
     int16_t *group_rxF = NULL;
     uint64_t group_fep_ns = 0;
+    int group_gpu_jobs = 0;
     nr_gpu_pdsch_job_t gj[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
     int gj_ok[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1] = {0};
     static _Atomic int s_probe_all_g = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
@@ -1237,6 +1241,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           for (int k = 0; k <= n_more; k++) gj_ok[k] = 0;
         } else {
           group_fep_ns = req.fep_end_ns;
+          group_gpu_jobs = np;
           if (req.read_rc == 0) group_rxF = t_gpu_rxF;
           for (int p = 0; p < np; p++) { gj[map[p]] = packed[p]; if (packed[p].n_llr == 0) gj_ok[map[p]] = 0; }
         }
@@ -1968,6 +1973,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_td_grantwork_release(gw);
     }
     } /* slot group */
+    if (slot_timing) {
+      const uint64_t slot_t1 = now_ns();
+      LOG_A(PHY, "SENSING: PDSCH_SLOT_TIME slot=%lu jobs=%d gpu_jobs=%d start_ns=%lu end_ns=%lu us=%.1f\n",
+            (unsigned long)job.absolute_slot, n_more + 1, group_gpu_jobs,
+            (unsigned long)slot_t0, (unsigned long)slot_t1, (double)(slot_t1 - slot_t0) / 1000.0);
+    }
   }
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d exiting\n", idx);
@@ -2209,7 +2220,7 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   }
   pthread_mutex_lock(&g_pending_mu);
   if (g_n_pending > 0 && (g_pending[0].absolute_slot != job->absolute_slot
-                          || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
+                          || g_n_pending == (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)))
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   g_pending_ns[g_n_pending] = nr_csirs_disc_enabled() ? now_ns() : 0;

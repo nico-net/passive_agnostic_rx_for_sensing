@@ -26,7 +26,7 @@ static int g_init_state;
 static const int MAX_ANT = 4, MAX_SYM = 14, MAX_PORTS = 4, MAX_DMRS_SYM = 4;
 static const int GOLD_WORDS = 256; /* 8192 gold bits per (job, DM-RS symbol): m up to 4096 */
 static const int MAX_PILOTS = 3 * 275; /* type-1 pilot pairs across a 275-RB carrier */
-static const int MAX_JOBS = 9; /* passive queue: head + eight same-slot jobs */
+static const int MAX_JOBS = 65; /* passive queue: head + up to 64 same-slot jobs */
 
 static nr_gpu_fep_cfg_t g_cfg;
 static int g_samples_per_slot;
@@ -47,6 +47,7 @@ static float *g_d_sigma;     /* [job][ant] noise variance */
 static int16_t *g_h_llr, *g_d_llr;
 static size_t g_llr_cap;
 static double g_fep_us, g_llr_us;
+static int g_last_chunks;
 static float g_llr_scale = 4.0f;
 
 /* ---------------------------------------------------------------- FEP ---- */
@@ -453,7 +454,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_gold, (size_t)MAX_JOBS * MAX_DMRS_SYM * GOLD_WORDS * sizeof(uint32_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_ls, (size_t)MAX_JOBS * MAX_DMRS_SYM * MAX_PORTS * MAX_ANT * MAX_PILOTS * sizeof(float2)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_sigma, (size_t)MAX_JOBS * MAX_ANT * sizeof(float)));
-  g_llr_cap = (size_t)MAX_JOBS * cfg->n_rb_dl * 12 * MAX_SYM * 4 * 8;
+  g_llr_cap = 32u << 20; /* matches the receiver's per-consumer output capacity */
   CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
   if (const char *e = getenv("NR_GPU_LLR_SCALE"))
@@ -576,6 +577,7 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
   const auto t0 = std::chrono::steady_clock::now();
   int64_t written = 0;
   int i = 0;
+  g_last_chunks = 0;
   while (i < n) {
     /* pack jobs into one launch set: <= MAX_JOBS, <= g_llr_cap LLRs */
     uint32_t total = 0;
@@ -607,6 +609,7 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset -= (uint32_t)written;
     const int64_t r = run_chunk(&jobs[i], m, llr_out + written, total, rt);
+    ++g_last_chunks;
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset += (uint32_t)written;
     if (r < 0)
@@ -617,6 +620,8 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
   g_llr_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return written;
 }
+
+extern "C" int nr_gpu_fep_last_chunks(void) { return g_last_chunks; }
 
 static int api_read_rxdataF(int ant, int16_t *out)
 {
