@@ -237,6 +237,9 @@ static void score_snapshot(int state_index, uint32_t generation,
   pthread_mutex_unlock(&g_lock);
 }
 
+/* tracker_worker: worker thread of the USS hash tracker: takes a geometry job from the bounded queue, copies its sample history under the lock, scores the candidate RNTIs with the USS hash and publishes the result.
+ *   Runs as SCHED_OTHER on ISAC_PDCCH_USS_CORE, or on the process's own affinity by default (not the scan consumer's core). Exits when stopped. Started by tracker_init() through the core plan.
+ */
 static void *tracker_worker(void *unused)
 {
   (void)unused;
@@ -298,6 +301,9 @@ static void *tracker_worker(void *unused)
   return NULL;
 }
 
+/* tracker_init: one-time setup (pthread_once): reads ISAC_PDCCH_USS_TRACKER (on by default), builds the table of allowed USS hash positions per CORESET size and starts the tracker worker.
+ *   Disables the tracker when the worker cannot be started. Callers: the USS tracker entry points in this file.
+ */
 static void tracker_init(void)
 {
   const char *e = getenv("ISAC_PDCCH_USS_TRACKER");
