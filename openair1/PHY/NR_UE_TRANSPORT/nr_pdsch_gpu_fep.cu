@@ -28,6 +28,43 @@ static const int GOLD_WORDS = 256; /* 8192 gold bits per (job, DM-RS symbol): m 
 static const int MAX_PILOTS = 3 * 275; /* type-1 pilot pairs across a 275-RB carrier */
 static const int MAX_JOBS = 65; /* passive queue: head + up to 64 same-slot jobs */
 
+/* Gold is a 31-bit linear recurrence. Jump images let each lane start at its
+ * own 32-bit word instead of serializing every word in one CUDA thread. */
+__constant__ uint32_t g_gold_x1_word[GOLD_WORDS];
+__constant__ uint32_t g_gold_x2_jump[14][31];
+static uint32_t gold_step(uint32_t v, bool x2)
+{
+  const uint32_t b = x2 ? (v ^ (v >> 1) ^ (v >> 2) ^ (v >> 3)) & 1u
+                        : (v ^ (v >> 3)) & 1u;
+  return (v >> 1) | (b << 30);
+}
+static uint32_t gold_apply(const uint32_t image[31], uint32_t state)
+{
+  uint32_t out = 0;
+  while (state) {
+    const int bit = __builtin_ctz(state);
+    out ^= image[bit];
+    state &= state - 1;
+  }
+  return out;
+}
+static cudaError_t gold_init_jumps(void)
+{
+  uint32_t jump[14][31], x1_word[GOLD_WORDS];
+  for (int bit = 0; bit < 31; ++bit) jump[0][bit] = gold_step(1u << bit, true);
+  for (int power = 1; power < 14; ++power)
+    for (int bit = 0; bit < 31; ++bit)
+      jump[power][bit] = gold_apply(jump[power - 1], jump[power - 1][bit]);
+  uint32_t x1 = 1;
+  for (int i = 0; i < 1600; ++i) x1 = gold_step(x1, false);
+  for (int w = 0; w < GOLD_WORDS; ++w) {
+    x1_word[w] = x1;
+    for (int b = 0; b < 32; ++b) x1 = gold_step(x1, false);
+  }
+  cudaError_t e = cudaMemcpyToSymbol(g_gold_x1_word, x1_word, sizeof(x1_word));
+  return e == cudaSuccess ? cudaMemcpyToSymbol(g_gold_x2_jump, jump, sizeof(jump)) : e;
+}
+
 static nr_gpu_fep_cfg_t g_cfg;
 static int g_samples_per_slot;
 static int16_t *g_h_rx;      /* pinned [ant][samples_per_slot + N] */
@@ -50,6 +87,7 @@ static double g_fep_us, g_llr_us;
 static int g_last_chunks;
 static float g_llr_scale = 4.0f;
 static int g_force_ant = -1; /* recorded-input branch isolation; unset in production */
+static bool g_batch_async; /* opt-in: caller follows FEP with LLR on the same stream */
 
 /* ---------------------------------------------------------------- FEP ---- */
 /* Gather one OFDM symbol per (ant, sym): CP removal with the 1/8-CP early window, ring wrap, FO
@@ -104,15 +142,30 @@ __global__ void k_fep_rotate(float2 *__restrict__ rxF, const short2 *__restrict_
 }
 
 /* ----------------------------------------------------------- DM-RS gold ---- */
-/* 38.211 5.2.1, one thread per (job, DM-RS symbol): c_init = (2^17 (14 n_s + l + 1)(2 N_ID + 1) + 2 N_ID + n_SCID) mod 2^31 */
+__device__ inline uint32_t gold_jump_x2(uint32_t state, int steps)
+{
+  for (int power = 0; steps; ++power, steps >>= 1)
+    if (steps & 1) {
+      uint32_t next = 0;
+      while (state) {
+        const int bit = __ffs((int)state) - 1;
+        next ^= g_gold_x2_jump[power][bit];
+        state &= state - 1;
+      }
+      state = next;
+    }
+  return state;
+}
+
+/* 38.211 5.2.1, one block per (job, DM-RS symbol), one lane per Gold word. */
 __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__restrict__ gold, int nsym)
 {
-  const int j = blockIdx.x;
+  const int j = blockIdx.x, target_di = blockIdx.y;
   const nr_gpu_pdsch_job_t job = jobs[j];
   int di = 0, l = -1;
   for (int s = 0, seen = 0; s < nsym; s++)
     if (job.dmrs_mask >> s & 1) {
-      if (seen++ == (int)threadIdx.x) {
+      if (seen++ == target_di) {
         di = seen - 1;
         l = s;
       }
@@ -121,11 +174,6 @@ __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__
     return;
   const uint32_t nid = job.dmrs_scrambling_id;
   uint32_t cinit = ((1u << 17) * (14u * job.slot + l + 1) * (2u * nid + 1) + 2u * nid + job.nscid) & 0x7fffffffu;
-  uint32_t x1 = 1, x2 = cinit;
-  for (int n = 0; n < 1600; n++) {
-    x1 = (x1 >> 1) | (((x1 ^ (x1 >> 3)) & 1u) << 30);
-    x2 = (x2 >> 1) | (((x2 ^ (x2 >> 1) ^ (x2 >> 2) ^ (x2 >> 3)) & 1u) << 30);
-  }
   uint32_t *g = gold + ((size_t)j * MAX_DMRS_SYM + di) * GOLD_WORDS;
   /* The old loop always generated 8192 bits. The largest pilot index this
    * allocation can read needs only 4*ppr bits per RB from dmrs_ref_rb. On the
@@ -134,7 +182,9 @@ __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__
   const int end_rb = job.start_rb + job.nb_rb - job.dmrs_ref_rb;
   const int words = (4 * ppr * end_rb + 31) / 32;
   if (end_rb <= 0 || words > GOLD_WORDS) return;
-  for (int w = 0; w < words; w++) {
+  for (int w = threadIdx.x; w < words; w += blockDim.x) {
+    uint32_t x1 = g_gold_x1_word[w];
+    uint32_t x2 = gold_jump_x2(cinit, 1600 + 32 * w);
     uint32_t word = 0;
     for (int b = 0; b < 32; b++) {
       word |= ((x1 ^ x2) & 1u) << b;
@@ -477,10 +527,12 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     const int a = atoi(e);
     if (a >= 0 && a < cfg->nant) g_force_ant = a;
   }
+  g_batch_async = getenv("ISAC_PDSCH_GPU_BATCH_ASYNC") && !strcmp(getenv("ISAC_PDSCH_GPU_BATCH_ASYNC"), "1");
   cudaFuncAttributes attr;
   CK(cudaFuncGetAttributes(&attr, k_fep_gather));
   CK(cudaFuncGetAttributes(&attr, k_fep_rotate));
   CK(cudaFuncGetAttributes(&attr, k_gold));
+  CK(gold_init_jumps());
   CK(cudaFuncGetAttributes(&attr, k_ls));
   CK(cudaFuncGetAttributes(&attr, k_sigma));
   CK(cudaFuncGetAttributes(&attr, k_llr));
@@ -511,7 +563,14 @@ extern "C" int nr_gpu_fep_admit(const nr_gpu_pdsch_job_t *jobs, int n, int check
     if (jobs[i].max_llr && llr > jobs[i].max_llr) llr = jobs[i].max_llr;
     bytes += 3 * llr * sizeof(int16_t) + 3 * sizeof(jobs[i]);
   }
-  if (check) bytes += (uint64_t)g_cfg.symbols_per_slot * g_cfg.ofdm_symbol_size * (2 * sizeof(float2) + sizeof(short2));
+  if (check) {
+    int first_sym = jobs[0].dmrs_mask ? __builtin_ctz((unsigned)jobs[0].dmrs_mask) : -1;
+    for (int i = 1; i < n; ++i)
+      if (!jobs[i].dmrs_mask || __builtin_ctz((unsigned)jobs[i].dmrs_mask) != first_sym) first_sym = -1;
+    if (first_sym >= g_cfg.symbols_per_slot) first_sym = -1;
+    const int read_symbols = first_sym >= 0 ? 1 : g_cfg.symbols_per_slot;
+    bytes += (uint64_t)read_symbols * g_cfg.ofdm_symbol_size * (2 * sizeof(float2) + sizeof(short2));
+  }
   return !nr_dl_gpu_radio_mode || nr_dl_gpu_budget_take(&g_budget, bytes);
 }
 
@@ -547,7 +606,11 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
     g_init_state=-1;nr_gpu_budget_fault();return -1;
   }
   k_fep_rotate<<<grd, blk, 0, g_stream>>>(g_d_rxF, symbol_rot ? g_d_rot : nullptr, N, ns, early);
-  CK(rt.wait(g_stream));
+  /* The next pdsch_llr() call uses this stream and waits for the full batch.
+   * The queue owns an outer RT budget scope across both calls. This flag is
+   * reserved for that paired call path; default preserves the blocking API. */
+  if (g_batch_async) CK(cudaPeekAtLastError());
+  else CK(rt.wait(g_stream));
   g_fep_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
@@ -568,7 +631,7 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant, fco = g_cfg.first_carrier_offset;
   memcpy(g_h_jobs, jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t));
   CK((cudaError_t)nr_gpu_copy_async(g_d_jobs, g_h_jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t), g_stream));
-  k_gold<<<n, MAX_DMRS_SYM, 0, g_stream>>>(g_d_jobs, g_d_gold, ns);
+  k_gold<<<dim3(n, MAX_DMRS_SYM), 128, 0, g_stream>>>(g_d_jobs, g_d_gold, ns);
   int max_ls = 0, max_re = 0;
   for (int i = 0; i < n; i++) {
     const int npil = jobs[i].nb_rb * (jobs[i].dmrs_type == 1 ? 3 : 2);
@@ -656,11 +719,27 @@ static int api_read_rxdataF(int ant, int16_t *out)
   return 0;
 }
 
+static int api_read_rxdataF_symbol(int ant, int sym, int16_t *out)
+{
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot;
+  if (g_init_state != 1 || ant < 0 || ant >= g_cfg.nant || sym < 0 || sym >= ns) return -1;
+  NrGpuRtScope rt; if (!rt.admitted) return -1;
+  float2 *tmp = g_h_check;
+  CK((cudaError_t)nr_gpu_copy_async(tmp, g_d_rxF + ((size_t)ant * ns + sym) * N, (size_t)N * sizeof(float2), g_stream));
+  CK(rt.wait(g_stream));
+  for (int i = 0; i < N; i++) {
+    out[2 * i] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].x)));
+    out[2 * i + 1] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].y)));
+  }
+  return 0;
+}
+
 static void api_timing(double *fep_us, double *llr_us)
 {
   if (fep_us) *fep_us = g_fep_us;
   if (llr_us) *llr_us = g_llr_us;
 }
 
-static const nr_gpu_fep_api_t g_api = {api_init, api_fep_slot, api_pdsch_llr, api_read_rxdataF, api_timing};
+static const nr_gpu_fep_api_t g_api = {api_init, api_fep_slot, api_pdsch_llr, api_read_rxdataF, api_timing,
+                                      api_read_rxdataF_symbol};
 extern "C" const nr_gpu_fep_api_t *nr_gpu_fep_api(void) { return nr_gpu_module_ready() ? &g_api : nullptr; }

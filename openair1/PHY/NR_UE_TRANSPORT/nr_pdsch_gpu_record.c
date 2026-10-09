@@ -1,10 +1,38 @@
 #include "nr_pdsch_gpu_record.h"
 #include "nr_pdsch_passive_queue.h"
 #include "nr_pdsch_passive_decode.h"
+#include "nr_transport_proto_ue.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Admit a configured CSI-RS list only when the CPU extractor's own geometry
+ * says it removes zero REs from this grant. Opt-in; overlapping CSI stays CPU. */
+bool nr_pdsch_gpu_csi_disjoint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa)
+{
+  if (!pdu->numCsiRsForRateMatching) return true;
+  const char *e = getenv("ISAC_PDSCH_GPU_CSI_DISJOINT");
+  if (!e || strcmp(e, "1") || pdu->numCsiRsForRateMatching > NFAPI_MAX_NUM_CSI_RATEMATCH
+      || pdu->BWPSize < 1 || pdu->BWPSize > 275 || pdu->start_symbol >= 14
+      || pdu->number_symbols < 1 || pdu->number_symbols > 14 - pdu->start_symbol) return false;
+  for (int i = 0; i < pdu->numCsiRsForRateMatching; ++i)
+    if (pdu->csiRsForRateMatching[i].row < 1 || pdu->csiRsForRateMatching[i].row > 18) return false;
+  return nr_dlsch_csi_unav_res((fapi_nr_dl_config_dlsch_pdu_rel15_t *)pdu, fa) == 0;
+}
+
+int nr_pdsch_gpu_readback(const nr_gpu_fep_api_t *api, const nr_gpu_pdsch_job_t *jobs,
+                          int n, int ofdm_symbol_size, int16_t *out)
+{
+  if (!api || !jobs || n < 1 || ofdm_symbol_size < 1 || !out) return -1;
+  int sym = jobs[0].dmrs_mask ? __builtin_ctz((unsigned)jobs[0].dmrs_mask) : -1;
+  for (int i = 1; i < n; i++)
+    if (!jobs[i].dmrs_mask || __builtin_ctz((unsigned)jobs[i].dmrs_mask) != sym) sym = -1;
+  if (sym >= 14) sym = -1;
+  return sym >= 0 && api->read_rxdataF_symbol
+      ? api->read_rxdataF_symbol(0, sym, out + 2 * sym * ofdm_symbol_size)
+      : api->read_rxdataF(0, out);
+}
 
 /* Called after the CPU decode while this consumer still owns its IQ snapshot.
  * Bounded, opt-in I/O belongs to the offline replay only. */

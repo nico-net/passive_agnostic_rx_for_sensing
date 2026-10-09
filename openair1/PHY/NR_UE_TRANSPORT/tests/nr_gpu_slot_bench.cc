@@ -102,6 +102,11 @@ int main(int argc, char **argv)
   if (!api || api->init(&samples[0].h.cfg)) { fprintf(stderr, "GPU unavailable or init failed\n"); return 2; }
   std::vector<double> slot_us, fep_us, llr_us;
   size_t compared = 0, sign_ok = 0, short_llr = 0, split_slots = 0;
+  uint64_t raw_gpu_hash = 1469598103934665603ull;
+  size_t both_nonzero = 0, both_nonzero_ok = 0, cpu_zero = 0, gpu_zero = 0;
+  size_t cpu_zero_gpu_negative = 0, gpu_zero_cpu_negative = 0;
+  const int deadzone[] = {0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024};
+  size_t deadzone_ok[sizeof(deadzone) / sizeof(deadzone[0])] = {};
   double xy = 0, x2 = 0, y2 = 0;
   double fep_ref_pow = 0, fep_gpu_pow = 0, fep_cross_re = 0, fep_cross_im = 0;
   size_t fep_points = 0;
@@ -134,6 +139,10 @@ int main(int argc, char **argv)
     const auto t2 = std::chrono::steady_clock::now();
     if (n < 0) { fprintf(stderr, "GPU failure at slot %u\n", slot); return 1; }
     if (rep == 0 && last_chunks && last_chunks() != 1) ++split_slots;
+    if (rep == 0) for (size_t b = 0; b < (size_t)n; ++b) {
+      raw_gpu_hash ^= (uint16_t)llr[b];
+      raw_gpu_hash *= 1099511628211ull;
+    }
     slot_us.push_back(us(t0, t2)); fep_us.push_back(us(t0, t1)); llr_us.push_back(us(t1, t2));
     if (rep == 0) {
       const int N = s.h.cfg.ofdm_symbol_size;
@@ -165,8 +174,22 @@ int main(int argc, char **argv)
       size_t job_ok = 0;
       for (uint32_t x = 0; x < j.n_llr; ++x) {
         const bool same = (v[x] < 0) == (ref.cpu[x] < 0);
+        for (size_t d = 0; d < sizeof(deadzone) / sizeof(deadzone[0]); ++d)
+          deadzone_ok[d] += (v[x] < -deadzone[d]) == (ref.cpu[x] < 0);
         sign_ok += same;
         job_ok += same;
+        if (ref.cpu[x] == 0) {
+          ++cpu_zero;
+          cpu_zero_gpu_negative += v[x] < 0;
+        }
+        if (v[x] == 0) {
+          ++gpu_zero;
+          gpu_zero_cpu_negative += ref.cpu[x] < 0;
+        }
+        if (ref.cpu[x] != 0 && v[x] != 0) {
+          ++both_nonzero;
+          both_nonzero_ok += same;
+        }
         xy += (double)v[x] * ref.cpu[x];
         x2 += (double)v[x] * v[x];
         y2 += (double)ref.cpu[x] * ref.cpu[x];
@@ -185,6 +208,13 @@ int main(int argc, char **argv)
   const double corr = x2 > 0 && y2 > 0 ? xy / std::sqrt(x2 * y2) : 0.;
   printf("CPU/GPU LLR sign agreement=%zu/%zu (%.6f), corr=%.6f, length_mismatch=%zu, split_slots=%zu; GPU TB CRC and post-EQ SNR: receiver replay required\n",
          sign_ok, compared, compared ? (double)sign_ok / compared : 0., corr, short_llr, split_slots);
+  printf("Raw GPU LLR FNV64=%016llx\n", (unsigned long long)raw_gpu_hash);
+  printf("LLR zero audit: both_nonzero_sign=%zu/%zu (%.6f) cpu_zero=%zu cpu_zero_gpu_negative=%zu gpu_zero=%zu gpu_zero_cpu_negative=%zu\n",
+         both_nonzero_ok, both_nonzero, both_nonzero ? (double)both_nonzero_ok / both_nonzero : 0.,
+         cpu_zero, cpu_zero_gpu_negative, gpu_zero, gpu_zero_cpu_negative);
+  for (size_t d = 0; d < sizeof(deadzone) / sizeof(deadzone[0]); ++d)
+    printf("LLR negative deadzone %d: sign=%zu/%zu (%.6f)\n", deadzone[d], deadzone_ok[d], compared,
+           compared ? (double)deadzone_ok[d] / compared : 0.);
   const double fep_corr = fep_ref_pow > 0 && fep_gpu_pow > 0
       ? std::hypot(fep_cross_re, fep_cross_im) / std::sqrt(fep_ref_pow * fep_gpu_pow) : 0.;
   printf("CPU/GPU FEP first-DMRS: points=%zu corr=%.8f gpu/cpu rms=%.6f fit_error_db=%.2f\n",

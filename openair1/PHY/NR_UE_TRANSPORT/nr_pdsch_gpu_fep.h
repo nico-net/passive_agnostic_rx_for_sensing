@@ -58,7 +58,8 @@ typedef struct {
   /** Upload + FEP one slot: rxdata[ant] is the per-antenna sample ring (ring_len samples); the slot's
    *  symbol 0 CP starts at ring_offset (wraps). abs_sample is that same position as the FO phase
    *  origin (nr_fo_compensation's sample_offset). symbol_rot = fp->symbol_rotation[link] + symb_offset
-   *  (symbols_per_slot entries as OAI c16 {r,i}; NULL = no rotation). Blocks until rxdataF is resident. */
+   *  (symbols_per_slot entries as OAI c16 {r,i}; NULL = no rotation). Blocks until resident by
+   *  default; ISAC_PDSCH_GPU_BATCH_ASYNC=1 queues on the same stream for the following pdsch_llr. */
   int (*fep_slot)(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, uint32_t abs_sample,
                   double fo_hz, const int16_t *symbol_rot);
   /** Chest + MMSE + LLR for n jobs of the resident slot; LLRs land in llr_out (llr_cap int16s) at each
@@ -69,6 +70,9 @@ typedef struct {
   int (*read_rxdataF)(int ant, int16_t *out);
   /** Last timings (us): FEP of the last slot, and the last pdsch_llr launch set. */
   void (*timing)(double *fep_us, double *llr_us);
+  /** Copy one resident OFDM symbol to `out` (N c16 samples). Used when all self-check jobs
+   *  share a first DM-RS symbol, avoiding the full-slot diagnostic readback. */
+  int (*read_rxdataF_symbol)(int ant, int sym, int16_t *out);
 } nr_gpu_fep_api_t;
 
 #ifdef __cplusplus

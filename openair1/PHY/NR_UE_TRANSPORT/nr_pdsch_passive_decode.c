@@ -1304,8 +1304,8 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   /* what the GPU does not model: PT-RS, CSI-RS rate matching (the decode also sweeps PT-RS arms on
    * agnostic runs -- it clears the override itself when it arms one) */
-  if ((pdu->pduBitmap & 0x1) || pdu->numCsiRsForRateMatching > 0)
-    return false;
+  extern bool nr_pdsch_gpu_csi_disjoint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *, const freq_alloc_bitmap_t *);
+  if ((pdu->pduBitmap & 0x1) || !nr_pdsch_gpu_csi_disjoint(pdu, fa)) return false;
   int nl = 0;
   for (int i = 0; i < 12 && nl < 4; i++)
     if ((pdu->dmrs_ports >> i) & 1)

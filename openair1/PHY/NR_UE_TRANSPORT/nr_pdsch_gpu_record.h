@@ -20,4 +20,8 @@ typedef struct {
   /* payload: rotation, IQ, CPU descrambled LLR, then rxdataF[ant][ofdm_symbol_size] c16. */
 } nr_pdsch_gpu_record_t;
 
+/* Self-check readback: one FFT symbol if all jobs share first DM-RS, else the full slot. */
+int nr_pdsch_gpu_readback(const nr_gpu_fep_api_t *api, const nr_gpu_pdsch_job_t *jobs,
+                          int n, int ofdm_symbol_size, int16_t *out);
+
 #endif

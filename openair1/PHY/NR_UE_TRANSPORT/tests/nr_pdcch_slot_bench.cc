@@ -72,6 +72,8 @@ int main(int argc, char **argv)
   std::vector<double> timings;
   size_t words=0, exact=0, sign=0, unsupported=0, batched=0;
   size_t cpu_zero=0, gpu_zero=0, both_nonzero=0, nonzero_sign=0;
+  const int deadzone[] = {0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024};
+  size_t deadzone_ok[sizeof(deadzone) / sizeof(deadzone[0])] = {};
   double xy=0,x2=0,y2=0;
   for (int rep=0;rep<reps;++rep) for (size_t i=0;i<rows.size();) {
     const size_t begin=i;
@@ -99,6 +101,8 @@ int main(int argc, char **argv)
       for (uint32_t b=0;b<j.n_llr;++b) {
         const int16_t x=out[j.llr_offset+b], y=rows[k].cpu[b];
         exact+=x==y; sign+=(x<0)==(y<0); ++words;
+        for (size_t d=0;d<sizeof(deadzone)/sizeof(deadzone[0]);++d)
+          deadzone_ok[d]+=(x < -deadzone[d])==(y < 0);
         cpu_zero+=y==0; gpu_zero+=x==0;
         if (x && y) { ++both_nonzero; nonzero_sign+=(x<0)==(y<0); }
         xy+=(double)x*y; x2+=(double)x*x; y2+=(double)y*y;
@@ -110,5 +114,8 @@ int main(int argc, char **argv)
          pct(timings,.5),pct(timings,.99),batched,exact,words,sign,words,corr,unsupported);
   printf("PDCCH zero/sign split: cpu_zero=%zu/%zu gpu_zero=%zu/%zu nonzero_sign=%zu/%zu\n",
          cpu_zero, words, gpu_zero, words, nonzero_sign, both_nonzero);
+  for (size_t d=0;d<sizeof(deadzone)/sizeof(deadzone[0]);++d)
+    printf("PDCCH negative deadzone %d: sign=%zu/%zu (%.6f)\n",deadzone[d],deadzone_ok[d],words,
+           words?(double)deadzone_ok[d]/words:0.);
   return unsupported || !words || sign!=words || corr<.99995 ? 1 : 0;
 }

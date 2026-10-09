@@ -5,7 +5,7 @@ set -euo pipefail
 root=$(readlink -f "$(dirname "$0")/../../..")
 orch=/home/nicola/NICOLA/wt/rr-orchestration
 build=$root/cmake_targets/ran_build/build
-mode=${1:?mode: cpu_dump, cpu_compare, gpu_compare or gpu_compare_nobudget}
+mode=${1:?mode: cpu_dump, cpu_compare, gpu_compare, gpu_compare_async250, gpu_compare_async250_csi, gpu_compare_async500_csi, gpu_compare_budget1ms, gpu_compare_budget1ms_csi or gpu_compare_nobudget}
 capture=${2:-b}
 case "$capture" in
   b) cap=/home/nicola/NICOLA/ota_runs/raw_pci415_12s_b; tick=208029025 ;;
@@ -24,6 +24,24 @@ case "$mode" in
     extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
             ISAC_GPU_SELFCHECK_ENFORCE=1
             ISAC_GPU_DUMP="$root/replays/gpu_compare_${capture}.bin") ;;
+  gpu_compare_async250)
+    extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
+            ISAC_GPU_SELFCHECK_ENFORCE=1 ISAC_PDSCH_GPU_BATCH_ASYNC=1 ISAC_SEGV_BT=1) ;;
+  gpu_compare_async250_csi)
+    extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
+            ISAC_GPU_SELFCHECK_ENFORCE=1 ISAC_PDSCH_GPU_BATCH_ASYNC=1
+            ISAC_PDSCH_GPU_CSI_DISJOINT=1 ISAC_SEGV_BT=1) ;;
+  gpu_compare_async500_csi)
+    extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
+            ISAC_GPU_SELFCHECK_ENFORCE=1 ISAC_PDSCH_GPU_BATCH_ASYNC=1
+            ISAC_PDSCH_GPU_CSI_DISJOINT=1 ISAC_GPU_RT_DEADLINE_US=500 ISAC_SEGV_BT=1) ;;
+  gpu_compare_budget1ms)
+    extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
+            ISAC_GPU_SELFCHECK_ENFORCE=1 ISAC_GPU_RT_DEADLINE_US=1000 ISAC_SEGV_BT=1) ;;
+  gpu_compare_budget1ms_csi)
+    extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
+            ISAC_GPU_SELFCHECK_ENFORCE=1 ISAC_GPU_RT_DEADLINE_US=1000
+            ISAC_PDSCH_GPU_CSI_DISJOINT=1 ISAC_SEGV_BT=1) ;;
   gpu_compare_nobudget)
     extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
             ISAC_GPU_SELFCHECK_ENFORCE=1 ISAC_GPU_BUDGET=0
@@ -33,7 +51,7 @@ esac
 mkdir -p "$root/replays"
 if [[ $mode == cpu_dump ]]; then
   rm -f "$root/replays/gpu_cpu_${capture}.bin" "$root/replays/pdcch_cpu_${capture}.bin"
-elif [[ $mode == gpu_compare || $mode == gpu_compare_nobudget ]]; then
+elif [[ $mode == gpu_compare || $mode == gpu_compare_async250 || $mode == gpu_compare_async250_csi || $mode == gpu_compare_async500_csi || $mode == gpu_compare_budget1ms || $mode == gpu_compare_budget1ms_csi || $mode == gpu_compare_nobudget ]]; then
   rm -f "$root/replays/gpu_compare_${capture}.bin" "$root/replays/gpu_compare_nobudget_${capture}.bin"
 fi
 env CAP="$cap" CAP_SAMPLES=1474560000 CAP_TICK="$tick" \

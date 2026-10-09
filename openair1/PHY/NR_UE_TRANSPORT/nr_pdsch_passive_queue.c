@@ -155,7 +155,7 @@ typedef struct {
   long source_abs_slot, slots_per_frame;
   const int16_t *rx[4]; uint32_t ring_len, ring_off, abs_sample; double fo_hz; const int16_t *rot;
   int16_t *out; size_t out_cap;
-  int16_t *rxdataF; int read_rc;
+  int16_t *rxdataF; int read_rc, ofdm_symbol_size;
   const nr_gpu_fep_api_t *api;
   uint64_t fep_end_ns, submit_ns;
   bool owned_iq;
@@ -194,7 +194,7 @@ static int64_t gpu_req_llr(void *ctx)
   gpu_fep_req_t *r = ctx;
   const int64_t rc = r->api->pdsch_llr(r->jobs, r->n_jobs, r->out, r->out_cap);
   if (rc >= 0 && r->rxdataF)
-    r->read_rc = r->api->read_rxdataF(0, r->rxdataF);
+    r->read_rc = nr_pdsch_gpu_readback(r->api, r->jobs, r->n_jobs, r->ofdm_symbol_size, r->rxdataF);
   return rc;
 }
 
@@ -1252,7 +1252,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                              .abs_sample = off, .fo_hz = fo, .rot = (const int16_t *)rot,
                              .out = t_gpu_llr, .out_cap = GPU_LLR_CAP,
                              .rxdataF = g_gpu_chk_limit > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)g_gpu_chk_limit ? t_gpu_rxF : NULL,
-                             .read_rc = -1};
+                             .read_rc = -1, .ofdm_symbol_size = fp->ofdm_symbol_size};
         for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) req.rx[a] = rx[a];
         const int64_t rc = gpu_fep_submit_and_wait(&req);
         if (rc < 0 || !atomic_load(&g_gpu)) {
@@ -1544,7 +1544,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         uint32_t G = st2 == NR_PDSCH_PASSIVE_DECODE_ERROR ? 0 : nr_pdsch_passive_last_llr(&lc);
         if (G > (1u << 22) || lc == NULL) G = 0; /* a bogus blind grant can leave an out-of-range G (OTA SIGSEGV 2026-10-08) */
         const uint32_t n = gpu_job->n_llr < G ? gpu_job->n_llr : G;
-        int16_t *lg = G ? malloc((size_t)G * sizeof(int16_t)) : NULL;
+        /* nr_codeword_unscrambling() processes ceil(G/32) full SIMD blocks. */
+        const size_t G_padded = ((size_t)G + 31u) & ~(size_t)31u;
+        int16_t *lg = G ? calloc(G_padded, sizeof(int16_t)) : NULL;
         double sa = NAN, mc = 0, mg = 0, dmax = 0, sab[8] = {0}; /* sign agreement per bit position of the RE */
         if (lc && lg && n && gpu_job->Qm && gpu_job->Nl) {
           memcpy(lg, t_gpu_llr + gpu_job->llr_offset, (size_t)n * sizeof(int16_t));
@@ -1612,8 +1614,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                   LOG_E(PHY, "SENSING: GPU_FEP disabled: 2 self-check tolerance failures; CPU path for remainder of run\n");
               }
             }
-            LOG_A(PHY, "SENSING: GPU_SELFCHECK slot=%ld rnti=0x%x probe=%u nrb=%u Nl=%u Qm=%u crc_gpu=%d crc_cpu=%d sign_agree=%.4f mean|llr| cpu=%.1f gpu=%.1f max|dllr|(scaled)=%.0f over %u | per-bit [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f] | rxdataF corr=%.4f gpu/cpu scale=%.3f\n",
-                  job.absolute_slot, job.rnti, job.layout_probe, job.freq_alloc.num_rbs, gpu_job->Nl, gpu_job->Qm, gpu_ok, cpu_ok, sa, mc, mg, dmax, n,
+            LOG_A(PHY, "SENSING: GPU_SELFCHECK slot=%ld rnti=0x%x probe=%u nrb=%u Nl=%u Qm=%u crc_gpu=%d crc_cpu=%d evm_gpu=%.3f evm_cpu=%.3f sign_agree=%.4f mean|llr| cpu=%.1f gpu=%.1f max|dllr|(scaled)=%.0f over %u | per-bit [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f] | rxdataF corr=%.4f gpu/cpu scale=%.3f\n",
+                  job.absolute_slot, job.rnti, job.layout_probe, job.freq_alloc.num_rbs, gpu_job->Nl, gpu_job->Qm, gpu_ok, cpu_ok,
+                  dec.evm_valid ? dec.evm_pct : -1.0, dec2.evm_valid ? dec2.evm_pct : -1.0, sa, mc, mg, dmax, n,
                   sab[0], sab[1], sab[2], sab[3], sab[4], sab[5], sab[6], sab[7], corr, ratio);
           }
         }
