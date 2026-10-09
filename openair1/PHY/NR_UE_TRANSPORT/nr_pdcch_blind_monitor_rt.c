@@ -149,6 +149,9 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  * the same HARQ process, silently mixing two receivers' contexts. 16 UEs x 16 processes = 3000-3255,
  * which stays clear of the 1000/2000 namespaces this file's header documents. */
 #define NR_PDCCH_BLIND_UE_TAG_STRIDE 16
+/* nr_pdcch_ded_every_slot: returns ISAC_PDCCH_DED_EVERY_SLOT (cached): admit every slot to the dedicated-CORESET passes, not only SS#0 occasions.
+ *   Caller: nr_pdcch_blind_monitor_process_body() (slot gate) and nr_pdcch_blind_monitor_run_occasion() (dedicated-only slots).
+ */
 static bool nr_pdcch_ded_every_slot(void)
 {
   static int en = -1;
@@ -158,7 +161,10 @@ static bool nr_pdcch_ded_every_slot(void)
   }
   return en == 1;
 }
-/* Is this slot an SS#0 (or SIB1 RA-SS) monitoring occasion -- the gate's own test, without the every-slot flags. */
+/* nr_pdcch_ss0_occasion: true when gate_slot is an SS#0 (or SIB1 RA search space) monitoring occasion, ignoring the every-slot flags.
+ *   Uses the configured search-space period, offset and duration, and the SIB1 RA window if it is valid. Pure read of the gate configuration.
+ *   Caller: nr_pdcch_blind_monitor_run_occasion() (dedicated-only slots).
+ */
 static bool nr_pdcch_ss0_occasion(uint32_t gate_slot)
 {
   int ss_period, ss_offset, ss_duration;
@@ -177,9 +183,9 @@ static bool nr_pdcch_ss0_occasion(uint32_t gate_slot)
 }
 
 static uint64_t btim_now_ns(void);
-/* ISAC_PDCCH_C0_OCC_GATE=1 (T26b, with ISAC_PDCCH_DED_EVERY_SLOT): on a slot outside SS#0/RA-SS, scan CORESET#0 only if
- * its symbols carry PDCCH-like energy: per 6-RB group mean power on antenna 0 against a tracked noise floor (EMA of the
- * quietest group), threshold ISAC_PDCCH_C0_OCC_DB (default 6 dB). One antenna-0 FFT per CORESET#0 symbol. */
+/* nr_pdcch_c0_occ_gate_on: returns ISAC_PDCCH_C0_OCC_GATE (cached): on slots outside SS#0, scan CORESET#0 only when its symbols carry energy.
+ *   Used by the slot gate in nr_pdcch_blind_monitor_run_occasion(), together with nr_pdcch_c0_occ_hit().
+ */
 static bool nr_pdcch_c0_occ_gate_on(void)
 {
   static int en = -1;
@@ -190,6 +196,10 @@ static bool nr_pdcch_c0_occ_gate_on(void)
   return en == 1;
 }
 static _Atomic uint64_t g_c0_occ_checks, g_c0_occ_hits;
+/* nr_pdcch_c0_occ_hit: CORESET#0 occupancy test: true when the strongest 6-RB group of CORESET#0 exceeds the tracked noise floor by ISAC_PDCCH_C0_OCC_DB (default 6 dB).
+ *   Runs one antenna-0 FEP per CORESET#0 symbol (thread-local buffer); the floor is an EMA of the quietest group (racy by design).
+ *   Updates g_c0_occ_checks and g_c0_occ_hits. Caller: nr_pdcch_blind_monitor_run_occasion() slot gate.
+ */
 static bool nr_pdcch_c0_occ_hit(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   static float ratio = -1.f;
@@ -247,6 +257,9 @@ static _Atomic uint64_t g_screen_audit_no_dmrs;
 static _Atomic uint64_t g_screen_audit_accepted;
 static _Atomic uint32_t g_screen_audit_min_accepted_score = UINT32_MAX;
 static pthread_mutex_t g_pdcch_gpu_fep_lock = PTHREAD_MUTEX_INITIALIZER;
+/* screen_audit_note_score: records the minimum shared-prescreen score seen (scaled to 1e-6, atomic min) for the SCANPASS audit line.
+ *   Diagnostic only. Callers: the shared prescreen in nr_pdcch_blind_monitor_run_occasion_one() (ISAC_PDCCH_SHARED_PRESCREEN_AUDIT).
+ */
 static void screen_audit_note_score(double score)
 {
   const uint32_t scaled = score <= 0 ? 0 : score >= 1 ? 1000000 : (uint32_t)(score * 1000000.0);
@@ -254,6 +267,9 @@ static void screen_audit_note_score(double score)
   while (scaled < old && !atomic_compare_exchange_weak_explicit(&g_screen_audit_min_score, &old, scaled,
                                                                  memory_order_relaxed, memory_order_relaxed)) {}
 }
+/* screen_audit_dmrs_score: returns the DM-RS rank score of one candidate of the shared prescreen (-1 when the grid has no DM-RS), updating the audit minima.
+ *   Scores the candidate's CCE with nr_pdcch_dmrs_candidate_score(). Callers: nr_pdcch_blind_monitor_run_occasion_one() (shared DM-RS screen and audit).
+ */
 static double screen_audit_dmrs_score(const nr_pdcch_dmrs_rank_grid_t *grid, int rb_offset, int n_rb,
                                       const fapi_nr_dl_config_dci_dl_pdu_rel15_t *pdu, int c)
 {
@@ -272,6 +288,9 @@ static double screen_audit_dmrs_score(const nr_pdcch_dmrs_rank_grid_t *grid, int
   }
   return value;
 }
+/* screen_audit_enabled: returns ISAC_PDCCH_SHARED_PRESCREEN_AUDIT != 0 (cached): run the shared prescreen in audit mode, counting rejects without dropping candidates.
+ *   Callers: nr_pdcch_blind_monitor_run_occasion_one() (two sites).
+ */
 static bool screen_audit_enabled(void)
 {
   static _Atomic int enabled = -1;
@@ -281,6 +300,9 @@ static bool screen_audit_enabled(void)
   }
   return enabled != 0;
 }
+/* screen_dmrs_min: returns the DM-RS screen threshold (ISAC_PDCCH_SHARED_DMRS_MIN, default 0.5) when ISAC_PDCCH_SHARED_DMRS is set; 0 when the screen is off.
+ *   Read once and stored as a fixed-point value. Caller: nr_pdcch_blind_monitor_run_occasion_one() (shared DM-RS screen).
+ */
 static double screen_dmrs_min(void)
 {
   static _Atomic int scaled = -1;
@@ -296,7 +318,10 @@ static double screen_dmrs_min(void)
   }
   return atomic_load(&scaled) / 1000000.0;
 }
-/* ISAC_PDCCH_SCAN_TIMING=1 (T26b): per-occasion scan wall time, p50/p99/max every 4000 occasions (log2 histogram). */
+/* scan_timing_note: records the wall time of one PDCCH scan occasion (ISAC_PDCCH_SCAN_TIMING) in log2 and 1-us histograms, and logs p50/p99/max every 4000 occasions.
+ *   Two streams: full occasions and dedicated-only slots (ded_only). The dedicated stream also prints per-pass-kind yields and the screen audit.
+ *   Callers: nr_pdcch_blind_monitor_run_occasion() (end of occasion and dedicated-only slots). Takes a static mutex.
+ */
 static void scan_timing_note(uint64_t ns, bool ded_only)
 {
   static int en = -1;
@@ -398,7 +423,9 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
  * one printed 204 near-identical lines. Gate them on wall-clock instead: once every 20 s, from the
  * first completed occasion. */
 #define NR_PDCCH_BLIND_SUMMARY_PERIOD_NS 20000000000ull
-/* N scan consumers (Task A7): exactly one caller per period wins the CAS and emits. */
+/* summary_due_now: returns true once per summary period (20 s, 10 s with the GPU budget), so that exactly one scan consumer emits the periodic summary.
+ *   Uses a CAS on a monotonic timestamp; the first caller after the period wins. Caller: nr_pdcch_blind_monitor_run_occasion_one() (sum_due).
+ */
 static bool summary_due_now(void)
 {
   static _Atomic uint64_t s_last_ns = 0;
@@ -587,13 +614,19 @@ enum { PASS_OTHER = 0, PASS_C0USS = 1, PASS_BANK = 2 };
 static __thread int t_pass_kind;
 /* T26d: per-pass-kind yield (accepted DCIs) and time on dedicated-only slots (ISAC_PDCCH_PASS_ADAPT, SCANTIME) */
 static __thread uint32_t t_pass_accepts;
+/* pass_adapt_on: returns ISAC_PDCCH_PASS_ADAPT (cached): adapt the per-pass schedule to the yield of each pass kind.
+ *   Caller: pass_should_run() and pass_note().
+ */
 static bool pass_adapt_on(void)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDCCH_PASS_ADAPT") && atoi(getenv("ISAC_PDCCH_PASS_ADAPT")) ? 1 : 0;
   return en == 1;
 }
-/* A pass kind that accepted nothing in its last 2000 runs is run on 1 opportunity in 8 only (still probing). */
+/* pass_should_run: decides whether pass kind k (bank, dwell, C0USS, CSS0) runs on this opportunity.
+ *   Always true unless ISAC_PDCCH_PASS_ADAPT is on and the pass is flagged low-yield, in which case it runs on 1 opportunity in 8 and counts the skip.
+ *   Caller: nr_pdcch_blind_monitor_run_occasion() (the dwell, C0USS and CSS0 passes).
+ */
 static bool pass_should_run(int k)
 {
   if (!pass_adapt_on()) return true;
@@ -606,6 +639,9 @@ static bool pass_should_run(int k)
   (void)win_runs; (void)win_acc;
   return true;
 }
+/* pass_note: accounts one run of pass kind k: wall time, accepted DCIs, and a 2000-run window that sets the low-yield flag for pass_should_run().
+ *   Publishes g_pass_low_export[k]. Logs PASS_ADAPT transitions when the adaptive schedule is on. Callers: par_bank_worker() and run_occasion().
+ */
 static void pass_note(int k, uint64_t ns, uint32_t acc)
 {
   atomic_fetch_add_explicit(&g_pk_ns[k], ns, memory_order_relaxed);
@@ -705,6 +741,10 @@ static int stage0_slot_of(uint16_t nrnti) /* caller holds s_stage0_mu */
   return -1;
 }
 
+/* nr_pdcch_nrnti_override: returns the n_RNTI (scrambling RNTI) to use for this slot's USS search: 0, the discovered value, or a rotation over confirmed RNTIs.
+ *   Flags: ISAC_PDCCH_NRNTI=0 forces 0 (control). Otherwise a per-slot hypothesis test over {0} and the confirmed RNTIs; once n_RNTI = 0 is decisively the best, the rotation stops.
+ *   Thread-safe via s_stage0_mu. Callers: the USS search in nr_pdcch_blind_monitor_run_occasion_one() (three call sites per slot).
+ */
 static uint16_t nr_pdcch_nrnti_override(uint32_t abs_slot, const nr_pdcch_blind_monitor_cfg_t *cfg)
 {
   static int s_force0 = -1;
@@ -964,15 +1004,10 @@ static int nr_pdcch_dci11_stage2_enabled(void)
   return s_on;
 }
 /* T26b solver: the TDA index a layout reads (resolver offsets are immutable once published). */
-/* ---- T26c PDSCH admission (producer side, before the decode queue) -------------------------------------------------
- * ISAC_PDSCH_SOLVER_PROBE_RATE=<probes per slot> (unset = off): blind-solver PROBES (CB0 of an unsolved/learning
- *   RNTI's hypotheses) are admitted from a token bucket refilled in SIGNAL time (cap ISAC_PDSCH_SOLVER_PROBE_BURST,
- *   default 8) and only while the decode ring is below ISAC_PDSCH_SOLVER_PROBE_FILL percent (default 50) -- the
- *   solver searches at its own bounded rate and never crowds out the full decodes of solved RNTIs.
- * ISAC_PDSCH_SNR_GATE=1: a FULL decode of a solved RNTI whose measured post-equalisation SNR EMA (EVMGRANT) is more
- *   than ISAC_PDSCH_SNR_GATE_DB (default 3) below the AWGN requirement of the grant's MCS (10 log10(2^(SE/0.75)-1),
- *   SE = Qm R) is skipped and counted skipped_snr (1 in 8 still decoded so the estimate keeps tracking).
- * Every refused variant releases its solver pending entry at once (feedback without credit). */
+/* pdsch_gate_admit: producer-side admission for one planned PDSCH variant: a token bucket for blind-solver probes, and the SNR gate for full decodes.
+ *   Flags: ISAC_PDSCH_SOLVER_PROBE_RATE/BURST/FILL, ISAC_PDSCH_SNR_GATE (+_DB). v == NULL returns the number of probes available now (-1 = unlimited).
+ *   A refused variant releases its solver entry with no credit. Caller: nr_pdcch_blind_monitor_run_occasion_one() (solver planning loop).
+ */
 static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
 {
   static int init;
@@ -1035,6 +1070,9 @@ static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int m
   return ok;
 }
 
+/* solver_tda_of: solver callback: the TDRA index a DCI payload reads under one live DCI 1_1 layout (0 when unknown).
+ *   Reads the layout's TDA field from the payload. Registered by run_occasion_one() with nr_pdsch_solver_set_tda_fn(). Thread-safe on the resolver's published count.
+ */
 static int solver_tda_of(void *ctx, uint16_t layout, nr_dci_bits_t payload)
 {
   (void)ctx;
@@ -1044,8 +1082,10 @@ static int solver_tda_of(void *ctx, uint16_t layout, nr_dci_bits_t payload)
   return (int)nr_dci_bits_field(&payload, r->off[layout].total, r->off[layout].tda, r->off[layout].tda_bits);
 }
 
-/* One live layout's reading of a raw DCI 1_1, exactly as the stage-2 hand-over parses it (shared by the stage-2
- * candidate list and the T26b PDSCH grant solver). False when the layout cannot represent or parse this DCI. */
+/* dci11_layout_parse: parses one raw DCI 1_1 with one live layout exactly as the stage-2 hand-over does; false when the layout cannot represent or parse the DCI.
+ *   Builds the extract options from the layout's field widths, checks the DCI length, then extracts the fields into *parsed.
+ *   Callers: nr_pdcch_dci11_stage2_candidates() and the PDSCH solver planning path in run_occasion_one().
+ */
 static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                const nr_pdcch_blind_monitor_cfg_t *cfg, nr_pdcch_blind_result_t *parsed)
 {
@@ -1081,6 +1121,10 @@ static bool dci11_layout_parse(const nr_dci11_resolver_t *r, int i, const nr_pdc
   return nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, parsed);
 }
 
+/* nr_pdcch_dci11_stage2_candidates: stage 2 of the DCI 1_1 layout search: returns up to max parsed candidates from the live layouts for one raw DCI.
+ *   Live sets up to NR_DCI11_STAGE2_MAX_ALIVE are ranked by score; larger sets rotate a window with the most-passed layouts first.
+ *   Optional ISAC_DCI11_DIAG_FILTER restricts to one layout (diagnostic). Records each layout's family key. Caller: run_occasion_one() (stage 2 path).
+ */
 static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                             const nr_pdcch_blind_monitor_cfg_t *cfg,
                                             nr_pdcch_blind_result_t *out, uint16_t *ids, int max)
@@ -1455,6 +1499,11 @@ static bool nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cf
   return retired;
 }
 
+/* nr_pdcch_dci11_layout_observe: stage 1 of the DCI 1_1 layout search: prunes the layout set by the plausibility of each accepted DCI payload, arming the FDRA mode after a full TB-CRC refutation.
+ *   The first call builds the layout set from dci_length and BWP size (the TDA width is searched when no list is configured).
+ *   Every 4000 observations it logs the live set, can disarm or arm RA type 0 / dynamicSwitch modes, and sets g_dci11_cfg_alive. Env: ISAC_DCI11_PRUNELOG, ISAC_DCI11_STAGE2 and ISAC_DCI11_HARQ_SEQ (via the resolver).
+ *   Caller: run_occasion_one() after each accepted DCI 1_1 (stage 1).
+ */
 static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
                                           uint16_t dci_length, nr_dci_bits_t payload, uint16_t rnti)
 {
@@ -2353,6 +2402,9 @@ typedef struct {
   bool joint_anon; /* ISAC_PDCCH_JOINT_ANON: unknown-RNTI joint solve on a configured-nID CORESET */
 } nr_pdcch_autodiscover_sweep_ctx_t;
 
+/* nr_pdcch_css_nrnti0_enabled: returns ISAC_PDCCH_CSS_NRNTI0 != 0 (cached): accept format 1_0 DCIs in a common search space descrambled with n_RNTI = 0.
+ *   Caller: nr_pdcch_blind_cand_worker_body() (the CRC acceptance test).
+ */
 static bool nr_pdcch_css_nrnti0_enabled(void)
 {
   static int en = -1;
@@ -2391,6 +2443,9 @@ static janon_hit_t g_janon_hits[4096];
 static int g_janon_nhits;
 static _Atomic uint64_t g_janon_sub, g_janon_drop, g_janon_done, g_janon_found, g_janon_busy_ns;
 static uint32_t sweep_payload_hash(const nr_dci_bits_t *payload, int len);
+/* janon_async_enabled: returns ISAC_PDCCH_JOINT_ANON_ASYNC (cached): move the joint anonymous solve to the background worker instead of the scan path.
+ *   Caller: nr_pdcch_blind_cand_worker_body() (the inline joint solves are skipped when async is on).
+ */
 static bool janon_async_enabled(void)
 {
   static int en = -1;
@@ -2400,6 +2455,9 @@ static bool janon_async_enabled(void)
   }
   return en == 1;
 }
+/* janon_stable_enabled: returns ISAC_PDCCH_JOINT_ANON_STABLE (cached): deterministic sampling of joint-anon occasions (by hash of nID and slot), larger queue and top-K.
+ *   Callers: janon_submit(), janon_worker() (hit buffer size) and janon_start() (queue size).
+ */
 static bool janon_stable_enabled(void)
 {
   static _Atomic int en = -1;
@@ -2410,6 +2468,9 @@ static bool janon_stable_enabled(void)
   }
   return v == 1;
 }
+/* janon_slot_hash: 64-bit mixing hash of (nID, frame, slot): the deterministic key for the stable joint-anon sampling decisions.
+ *   Pure function. Caller: janon_submit() (stable sampling and LEN_HINT choices).
+ */
 static uint64_t janon_slot_hash(uint16_t nid, int frame, int slot, int slots_per_frame)
 {
   uint64_t h = (uint64_t)((uint32_t)frame * (uint32_t)slots_per_frame + (uint32_t)slot)
@@ -2419,6 +2480,10 @@ static uint64_t janon_slot_hash(uint16_t nid, int frame, int slot, int slots_per
   return h ^ (h >> 31);
 }
 static unsigned joint_anon_mm_max(int L);
+/* janon_worker: background worker of the joint anonymous PDCCH search: for each queued item, tries n_RNTI = 0 polar decode and the GF(2) joint solve over every DCI length.
+ *   Posts each accepted (CORESET, length, RNTI, payload) to g_janon_hits under g_janon_mu; logs JOINT_ANON_ASYNC statistics every 2000 items.
+ *   Started once by janon_start() on a SCHED_OTHER thread (ISAC_PDCCH_JOINT_ANON_CORE). Blocks on g_janon_cv when the queue is empty.
+ */
 static void *janon_worker(void *arg)
 {
   (void)arg;
@@ -2506,7 +2571,10 @@ static void *janon_worker(void *arg)
 }
 static double joint_anon_score(const int16_t *llr, int E);
 static void janon_start(void);
-/* Scan path: copy the energetic candidates (cheap: <= TOPK x L x 216 bytes); never blocks, drops when full. */
+/* janon_submit: scan-path side of the joint anonymous search: copies the top-K prescreen-passing candidates of one occasion into the worker queue.
+ *   Rate control: ISAC_PDCCH_JOINT_ANON_RATE (token bucket in signal time, or a stable hash sample). Never blocks: a full queue drops the item and counts it.
+ *   Flags: ISAC_PDCCH_JOINT_ANON_TOPK, _Q, _DISCOVERY, _LEN_HINT. Caller: run_occasion_one().
+ */
 static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int slots_per_frame, uint16_t rmin, uint16_t rmax,
                          const nr_pdcch_autodiscover_cand_t *cand, int n_cand, const int *lens, int nlen)
 {
@@ -2615,6 +2683,9 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
   pthread_cond_signal(&g_janon_cv);
   pthread_mutex_unlock(&g_janon_mu);
 }
+/* janon_start: one-time setup of the joint-anon queue (size from ISAC_PDCCH_JOINT_ANON_Q) and start of the detached worker thread.
+ *   Called only through pthread_once from janon_submit(); does nothing if the allocation fails.
+ */
 static void janon_start(void)
 {
   const char *e = getenv("ISAC_PDCCH_JOINT_ANON_Q");
@@ -2627,6 +2698,9 @@ static void janon_start(void)
   pthread_detach(th);
   LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC worker started (queue %d items)\n", g_janon_cap);
 }
+/* janon_take: moves the joint-anon hits recorded for one CORESET geometry into out[] (up to max) and removes them from the shared hit list.
+ *   Takes g_janon_mu. Returns the number of hits taken. Caller: run_occasion_one() (feeds the anonymous length sweep).
+ */
 static int janon_take(uint64_t geom, janon_hit_t *out, int max)
 {
   int n = 0;
@@ -2645,6 +2719,9 @@ static int janon_take(uint64_t geom, janon_hit_t *out, int max)
 /* T26c LEN_HINT: DCI 1_1 lengths locked on ANY CORESET of this cell (most recent first) -- the hint for a CORESET that
  * has none locked yet (one gNB, one RRC template: the second CORESET's UEs very likely use the same size). */
 static _Atomic int g_cell_lens[4];
+/* janon_note_cell_len: remembers a DCI 1_1 length locked on any CORESET of this cell (most recent first, 4 entries) as a length hint for other CORESETs.
+ *   Only the ISAC_PDCCH_JOINT_ANON_LEN_HINT path reads the list. Caller: run_occasion_one() after a length lock.
+ */
 static void janon_note_cell_len(int len)
 {
   if (len <= 0) return;
@@ -2653,12 +2730,18 @@ static void janon_note_cell_len(int len)
   for (int i = 3; i > 0; i--) atomic_store(&g_cell_lens[i], atomic_load(&g_cell_lens[i - 1]));
   atomic_store(&g_cell_lens[0], len);
 }
+/* janon_all_coresets: returns ISAC_PDCCH_JANON_ALL_CORESETS (cached): run the joint anonymous search on every CORESET, not only the configured-nID ones.
+ *   Callers: run_occasion_one() (bank and discovered passes).
+ */
 static bool janon_all_coresets(void)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDCCH_JANON_ALL_CORESETS") && atoi(getenv("ISAC_PDCCH_JANON_ALL_CORESETS")) ? 1 : 0;
   return en == 1;
 }
+/* janon_hit_scorer: scorer of the anonymous length sweep for joint-anon hits: accepts trial i only when it is a hit of the requested length and its RNTI is not already known.
+ *   Returns the RNTI and payload hash of the hit. Passed to nr_pdcch_dci_length_sweep_feed_budget() by run_occasion_one() (joint-anon sweep).
+ */
 static bool janon_hit_scorer(int len, int trial, uint16_t *rnti, uint32_t *hash, void *user)
 {
   const janon_feed_ctx_t *c = user;
@@ -2691,18 +2774,27 @@ typedef struct {
 static ussh_t g_ussh[USSH_GEOMS];
 static pthread_mutex_t g_ussh_mu = PTHREAD_MUTEX_INITIALIZER;
 static const uint32_t kUsshA[3] = {39827, 39829, 39839};
+/* ussh_enabled: returns ISAC_PDCCH_USS_HASH != 0 (cached): enable the USS hash filter that restricts each known RNTI to its own CCE positions.
+ *   Callers: ussh_note() and ussh_allows().
+ */
 static bool ussh_enabled(void)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDCCH_USS_HASH") && atoi(getenv("ISAC_PDCCH_USS_HASH")) ? 1 : 0;
   return en == 1;
 }
+/* ussh_Y: the USS hash state Y_p,n for an RNTI at a slot, for one multiplier A (TS 38.213 10.1, iterated modulo 65537).
+ *   Pure function. Caller: ussh_in().
+ */
 static uint32_t ussh_Y(uint16_t rnti, int slot, uint32_t A)
 {
   uint32_t y = rnti;
   for (int k = 0; k <= slot; k++) y = (uint32_t)(((uint64_t)A * y) % 65537u);
   return y;
 }
+/* ussh_in: true when a candidate (cce, L) of an RNTI in slot `slot` lies on the USS hash positions for CORESET size N, multiplier A and M_L = M.
+ *   Pure function. Callers: ussh_fit() (fitting) and ussh_allows() (admission).
+ */
 static bool ussh_in(uint16_t rnti, int slot, int cce, int L, int N, uint32_t A, int M)
 {
   const int nl = N / L;
@@ -2712,7 +2804,14 @@ static bool ussh_in(uint16_t rnti, int slot, int cce, int L, int N, uint32_t A, 
     if (L * (int)((y + (uint32_t)((m * N) / (L * M))) % (uint32_t)nl) == cce) return true;
   return false;
 }
+/* al_idx: maps an aggregation level L (1, 2, 4, 8, 16) to a slot index 0..4 of the USS hash M table.
+ *   Pure function. Callers: ussh_fit() and ussh_allows().
+ */
 static int al_idx(int L) { return L == 1 ? 0 : L == 2 ? 1 : L == 4 ? 2 : L == 8 ? 3 : 4; }
+/* ussh_fit: fits the USS hash parameters (N_CCE, A, M_L per aggregation level) to the accepted known-RNTI DCIs of one CORESET geometry.
+ *   Tries N from ncce_max down to 6 and the three A values, keeps up to 4 hypotheses whose M sums stay <= 12, and logs the first one.
+ *   Caller: ussh_note() (when enough new samples have arrived). Must hold g_ussh_mu.
+ */
 static void ussh_fit(ussh_t *u, int ncce_max)
 {
   u->nh = 0;
@@ -2746,7 +2845,9 @@ static void ussh_fit(ussh_t *u, int ncce_max)
           (unsigned long long)u->geom, u->n, u->nh, u->h[0].N, u->h[0].a, u->h[0].M[0], u->h[0].M[1], u->h[0].M[2],
           u->h[0].M[3], u->h[0].M[4]);
 }
-/* record an accepted known-RNTI DCI 1_1 */
+/* ussh_note: records one accepted known-RNTI DCI 1_1 (RNTI, slot, CCE, L) for the USS hash fit of its CORESET geometry.
+ *   Refits every 16 new samples (8 while no hypothesis exists yet). No-op unless ISAC_PDCCH_USS_HASH is on. Caller: run_occasion_one() (accepted known-RNTI DCIs).
+ */
 static void ussh_note(uint64_t geom, uint16_t rnti, int slot, int cce, int L, int ncce_max)
 {
   if (!ussh_enabled()) return;
@@ -2764,7 +2865,9 @@ static void ussh_note(uint64_t geom, uint16_t rnti, int slot, int cce, int L, in
   }
   pthread_mutex_unlock(&g_ussh_mu);
 }
-/* may this known RNTI sit at (cce, L) in this slot? true when no fit exists yet */
+/* ussh_allows: returns whether a known RNTI may sit at (cce, L) in this slot under the fitted USS hash; true when no fit exists yet.
+ *   An aggregation level never seen in the fit stays admitted at m = 0. Callers: run_occasion_one() (USS candidate pruning, two sites).
+ */
 static bool ussh_allows(uint64_t geom, uint16_t rnti, int slot, int cce, int L)
 {
   if (!ussh_enabled()) return true;
@@ -2786,10 +2889,10 @@ static bool ussh_allows(uint64_t geom, uint16_t rnti, int slot, int cce, int L)
   return allow;
 }
 
-/* ISAC_PDCCH_ANON_DUMP=<path> (default off, diagnostic): append every anonymous configured-nID occasion's
- * equalised candidate symbols (exactly what the length scorer descrambles) for offline solver iteration.
- * Record: "PAD1", int32 frame, slot, nid, rb_offset, n_rb, n_cand; per candidate uint8 L, uint8 0,
- * uint16 cce, int16[L*108]. Bounded by ISAC_PDCCH_ANON_DUMP_MAX occasions (default 20000). */
+/* nr_pdcch_anon_dump: diagnostic: appends the equalised candidate symbols of each anonymous configured-nID occasion to ISAC_PDCCH_ANON_DUMP (binary, PAD1 records).
+ *   Stops after ISAC_PDCCH_ANON_DUMP_MAX occasions (default 20000) and closes the file. Writes nothing when the variable is unset.
+ *   Caller: run_occasion_one() (anonymous CORESET passes).
+ */
 static void nr_pdcch_anon_dump(int frame, int slot, int nid, int rb_offset, int n_rb,
                                const nr_pdcch_autodiscover_cand_t *cand, int n_cand)
 {
@@ -2833,8 +2936,9 @@ static void nr_pdcch_anon_dump(int frame, int slot, int nid, int rb_offset, int 
  * flag lets the anonymous length scorer fall back to the GF(2) joint (RNTI, payload) solver for each failed
  * (length, candidate). Its accepts are ordinary sweep evidence: the length locks only on a recurrent RNTI with
  * distinct payloads (NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_LOCK), which is the false-accept control. */
-/* Occasions the anonymous search may run on a JOINT_ANON CORESET before giving up (default = the 4000-occasion
- * discovered-CORESET dwell; ISAC_PDCCH_JOINT_ANON_OCC overrides). */
+/* joint_anon_budget: returns the number of occasions an anonymous joint-anon CORESET may run before giving up (ISAC_PDCCH_JOINT_ANON_OCC, default 4000).
+ *   Caller: run_occasion_one() (budget check of the anonymous sweep).
+ */
 static int joint_anon_budget(void)
 {
   static int v = -1;
@@ -2844,10 +2948,9 @@ static int joint_anon_budget(void)
   }
   return v;
 }
-/* JOINT_ANON accept bar on the re-encode mismatch: ISAC_PDCCH_JOINT_ANON_MM bits per 216 coded bits (default 1),
- * at least 1. Replay raw_pci415_12s_20261008: the genuine C-RNTI 0x8f5a decodes with <= 1 mismatched bit in 391 of
- * 429 AL2 DCIs, while the same DCIs read through a ghost CORESET (nid 10163, grid_rb 1: 5/6 CCE overlap) give a
- * stable ALIAS RNTI 0xb876 at a median of 8 (4 of 319 <= 1) -- and that alias locked with mm 7..32 evidence. */
+/* joint_anon_mm_max: returns the largest re-encode mismatch count accepted for a joint solve at aggregation level L (ISAC_PDCCH_JOINT_ANON_MM bits per 216 coded bits, at least 1).
+ *   Callers: janon_worker() and nr_pdcch_autodiscover_length_scorer().
+ */
 static unsigned joint_anon_mm_max(int L)
 {
   static int per216 = -1;
@@ -2860,14 +2963,18 @@ static unsigned joint_anon_mm_max(int L)
 }
 static __thread uint64_t t_janon_deadline_ns; /* 0 = no budget for this occasion's joint solves */
 static uint64_t g_janon_budget_skips;
+/* btim_now_ns: returns CLOCK_MONOTONIC time in nanoseconds (the clock used for the scan timers and the joint-anon budget deadline).
+ *   Callers: nr_pdcch_autodiscover_length_scorer(), run_occasion_one() (joint-anon deadline), and the BTIM timers.
+ */
 static uint64_t btim_now_ns(void)
 {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
-/* ISAC_PDCCH_JOINT_ANON_BUDGET_US (T26b, default 0 = unbounded): CPU budget per occasion for the anonymous joint
- * solves. */
+/* joint_anon_budget_us: returns ISAC_PDCCH_JOINT_ANON_BUDGET_US (cached): CPU budget per occasion for the anonymous joint solves; 0 = unbounded.
+ *   Caller: run_occasion_one() (sets the per-occasion deadline t_janon_deadline_ns).
+ */
 static int joint_anon_budget_us(void)
 {
   static int v = -1;
@@ -2877,6 +2984,9 @@ static int joint_anon_budget_us(void)
   }
   return v;
 }
+/* joint_anon_score: amplitude-consistency score of one candidate's soft bits (higher = more energetic), NEON or scalar per ISAC_PDCCH_NEON_SCORE.
+ *   Used to rank candidates for the joint search and the prescreen. Callers: janon_submit() and run_occasion_one().
+ */
 static double joint_anon_score(const int16_t *llr, int E)
 {
   static _Atomic int s_neon = -1;
@@ -2886,6 +2996,9 @@ static double joint_anon_score(const int16_t *llr, int E)
   }
   return s_neon ? nr_pdcch_scan_score_neon(llr, E) : nr_pdcch_scan_score_scalar(llr, E);
 }
+/* nr_pdcch_joint_anon_enabled: returns ISAC_PDCCH_JOINT_ANON (cached) and requires ISAC_PDCCH_JOINT: the anonymous DCI 1_1 length sweep may fall back to the joint (RNTI, payload) solver.
+ *   Logs once whether it is enabled or was requested without its prerequisite. Caller: run_occasion_one().
+ */
 static bool nr_pdcch_joint_anon_enabled(void)
 {
   static int en = -1;
@@ -3469,6 +3582,10 @@ static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, 
   return true;
 }
 
+/* nr_pdcch_autodiscover_length_scorer: scorer of the anonymous DCI length sweep (Technique C): tests one length against one candidate of the occasion and reports the RNTI and payload hash.
+ *   Order: batched GPU result if cached, then CPU polar decode with n_RNTI (or the bootstrap alias), then the joint anonymous solve when enabled and within budget.
+ *   Only CRC-valid DCIs with the DL format bit set are accepted. Evidence is logged with discovery_evidence(). Caller: nr_pdcch_dci_length_sweep_feed_budget() via run_occasion_one().
+ */
 static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, uint16_t *rnti_out,
                                                 uint32_t *payload_hash_out, void *user_ctx)
 {
@@ -3692,9 +3809,10 @@ void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *pr
   pthread_mutex_unlock(&g_pbwp_lock);
 }
 
-/* The candidate body WITHOUT the task_ans handshake, for the serial path. Split rather than passing
- * a flag so the parallel worker keeps exactly its previous shape and the pool contract (every task
- * must signal completion exactly once) cannot be broken by a wrong flag. */
+/* nr_pdcch_blind_cand_worker_body: body of one blind-decode task: descrambles a candidate, runs the 1_0, 0_1 or 1_1 decode (raw, extract or auto-interpret), and fills t->ok and t->out.
+ *   Retries with the alternate scrambling RNTI; the RNTI check uses the recovered CRC value. Joint RNTI fallback (ISAC_PDCCH_JOINT) runs when the async worker is off.
+ *   No locks: each task owns its result slot. Callers: nr_pdcch_blind_cand_worker_serial() and the worker pool (parallel path). Completion is signalled by the caller.
+ */
 static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
 {
   int16_t tmp_e[16 * 108];
@@ -3848,6 +3966,11 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   nr_pdcch_blind_monitor_process_body(ue, proc);
   btim_add(BTIM_RT, t_rt);
 }
+/* nr_pdcch_blind_monitor_process_body: the per-slot entry point of the blind PDCCH monitor (the body of nr_pdcch_blind_monitor_process()), run on the PHY receive thread.
+ *   Order: enable and config checks, start of the deferred PDSCH queue (once), SIB1 cache, the Technique A (dedicated CORESET search) step, then the SS#0/RA occasion gate and dedicated-only slots.
+ *   Accepted occasions are handed to nr_pdcch_blind_monitor_run_occasion(); the deferred PDSCH scan is enqueued from there. Flags: ISAC_DISCOVER_DIAG, ISAC_PDCCH_SCAN_EVERY_SLOT, ISAC_RECONF_DISCOVERY_DUTY, ISAC_COREMAP_IDSWEEP.
+ *   Caller: nr_pdcch_blind_monitor_process() (PHY receive path, once per slot).
+ */
 static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   /* The blind PDCCH monitor is the PASSIVE RECEIVER, not part of the sensing pipeline: it decodes
@@ -4188,6 +4311,10 @@ static _Atomic uint64_t g_c0uss_unique, g_bank_accepts, g_dup_dropped;
 static _Thread_local int t_bank_index = -1;
 /* All health calls for an occasion use the producer clock, never wrapped SFN. */
 static _Thread_local uint64_t t_bank_slot;
+/* accept_dup: de-duplicates accepted DCIs of one slot: returns true when the same (slot, RNTI, direction) was already accepted in the last 256 entries.
+ *   Duplicates still count as traffic for the bank's reconfiguration bookkeeping. Updates the global accept counters per pass kind.
+ *   Callers: nr_pdcch_blind_monitor_run_occasion_one() (accept handling, two sites). Takes s_dedupe_mu.
+ */
 static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
 {
   bool dup = false;
@@ -4242,6 +4369,10 @@ typedef struct { /* one helper per scan consumer thread (TLS), so two consumers 
 } par_helper_t;
 static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                                     bool serial_candidates, long source_absolute_slot);
+/* par_bank_worker: helper thread for ISAC_PDCCH_PAR_BANKS: runs the banked CORESET passes 1..n-1 of a dedicated-only slot while the scan consumer runs bank 0.
+ *   Waits on its job slot (state 1), runs run_occasion_one() for each bank, then sets state 2 and signals done_cv. Core from ISAC_PDCCH_PAR_CORE.
+ *   Started lazily by par_helper_get(), one helper per scan consumer thread.
+ */
 static void *par_bank_worker(void *arg)
 {
   par_helper_t *hp = (par_helper_t *)arg;
@@ -4295,12 +4426,18 @@ static void *par_bank_worker(void *arg)
   }
   return NULL;
 }
+/* par_banks_on: returns ISAC_PDCCH_PAR_BANKS (cached): run the banked CORESET passes of a slot on a helper thread.
+ *   Caller: nr_pdcch_blind_monitor_run_occasion() (dedicated-only slots, when at least two banks exist).
+ */
 static bool par_banks_on(void)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDCCH_PAR_BANKS") && atoi(getenv("ISAC_PDCCH_PAR_BANKS")) ? 1 : 0;
   return en == 1;
 }
+/* par_helper_get: returns this consumer thread's helper (creating it and its worker thread on first use, thread-local), or NULL if creation fails.
+ *   Caller: nr_pdcch_blind_monitor_run_occasion() (only when ISAC_PDCCH_PAR_BANKS is on).
+ */
 static par_helper_t *par_helper_get(void)
 {
   static __thread par_helper_t *t_hp;
@@ -4323,6 +4460,9 @@ uint64_t nr_pdcch_blind_inline_drop_epoch(void)
 {
   return atomic_load_explicit(&g_inline_drop_epoch, memory_order_relaxed);
 }
+/* run_discovered_occasion: runs one occasion of the discovered (dedicated) CORESET geometry: sets the discovery token and share, runs the pass under the Phase-2 lock and feeds the discovery step.
+ *   Caller: nr_pdcch_blind_monitor_run_occasion() (the discovered dwell, in the three slot paths).
+ */
 static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                     bool serial, long slot, const nr_pdcch_blind_monitor_cfg_t *cfg,
                                     uint64_t token, int share)
@@ -4342,6 +4482,11 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   t_candidate_share = 0;
 }
 
+/* nr_pdcch_blind_monitor_run_occasion: runs one PDCCH scan occasion: the CORESET#0 and discovered passes, the bank passes and the dwell, as selected by the configuration.
+ *   With autodiscover off it is a single run_occasion_one(). With it on, it commits any pending Technique A decision, polls the discovered geometry, then runs the bank and dwell passes in order (or on par_bank helpers).
+ *   Handles the reconfiguration epoch (bank ticks, dispatch enter/leave). Flags: ISAC_PDCCH_DED_EVERY_SLOT, ISAC_PDCCH_DED_BUDGET_US, _DED_BUDGET_SHARE, ISAC_PDCCH_PAR_BANKS, ISAC_PDCCH_SCAN_TIMING.
+ *   Caller: nr_pdcch_blind_monitor_process_body(). serial_candidates selects the passive queue's epoch counter for stale-work checks.
+ */
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot)
 {
@@ -4613,6 +4758,12 @@ static void phase2_guard_release(phase2_guard_t *g)
     nr_pdcch_blind_phase2_unlock();
 }
 
+/* nr_pdcch_blind_monitor_run_occasion_one: runs one PDCCH scan pass (one CORESET geometry: CORESET#0, a bank entry, the discovered CORESET or the CSS0 pass) and returns when done.
+ *   Phase 1 (unlocked, may run in parallel across scan consumers): FEP and channel estimate once per occasion, LLR cache, lane candidates, decode of every candidate (workers or serial).
+ *   Phase 2 (under the phase-2 lock, from the marked point to the end): accept handling and dedupe, Technique A/B/C length and geometry evidence, USS hash, joint-anon sweep, PDSCH grant planning and enqueue (via the solver when ISAC_PDSCH_SOLVER is on), periodic summaries.
+ *   A discovery-capable config (autodiscover) runs entirely under the phase-2 lock. Flags read here include ISAC_TDD_SKIP, ISAC_PDCCH_*, ISAC_DCI11_*, ISAC_PDSCH_SOLVER_* and ISAC_CSIRS_BLIND.
+ *   Callers: nr_pdcch_blind_monitor_run_occasion(), run_discovered_occasion(), par_bank_worker().
+ */
 static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                                      bool serial_candidates, long source_absolute_slot)
 {
@@ -9603,6 +9754,10 @@ constdiag_done:;
 
 static void (*dl_gpu_memory[5])(uint64_t *, uint64_t *);
 static void (*dl_gpu_transfers[5])(uint64_t *, uint64_t *);
+/* nr_dl_gpu_get_stats: sums the GPU memory-allocation and transfer counters of the DL GPU modules (libtd_cb0_gpu, libpolar_gpu, libpdsch_gpu, libpdcch_gpu, libldpc_cuda).
+ *   Reads the modules' exported stats functions when they were loaded by nr_dl_gpu_warmup(); zero otherwise. Output: allocs, denied, bytes, refused.
+ *   Caller: nr_passive_metrics.c (metrics emission).
+ */
 void nr_dl_gpu_get_stats(uint64_t *allocs, uint64_t *denied, uint64_t *bytes, uint64_t *refused)
 {
   *allocs = *denied = *bytes = *refused = 0;
@@ -9613,8 +9768,10 @@ void nr_dl_gpu_get_stats(uint64_t *allocs, uint64_t *denied, uint64_t *bytes, ui
   }
 }
 
-/* Called once after PHY geometry/configuration exists, before nrue_init_openair0.
- * Failures are sticky CPU fallback, never retried after the stream starts. */
+/* nr_dl_gpu_warmup: one-time start-up of the DL GPU path before the RF stream starts: probes the platform, prepares the CB0, polar, PDCCH and PDSCH GPU front ends and the GrantWork pool.
+ *   Starts the passive PDSCH queue when the monitor's PDSCH decode is on (nr_pdsch_passive_queue_start). Loads the GPU modules for stats and enables their radio mode.
+ *   Failures are sticky CPU fallback, never retried. Runs once (static guard). Caller: executables/nr-uesoftmodem.c (before nrue_init_openair0).
+ */
 void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
 {
   static bool prepared;
@@ -9667,6 +9824,9 @@ void nr_dl_gpu_warmup(PHY_VARS_NR_UE *ue)
  * hunt; no core is kept on this host). Async-signal-safe enough for a dying process: backtrace() is primed at install. */
 #include <execinfo.h>
 #include <signal.h>
+/* isac_segv_bt: SIGSEGV/SIGBUS handler for the ISAC_SEGV_BT diagnostic: prints the faulting signal, address, thread name and a backtrace to stderr.
+ *   Then restores the default handler and re-raises the signal so the process still dies. Runs on the alternate stack installed by the constructor.
+ */
 static void isac_segv_bt(int sig, siginfo_t *si, void *uc)
 {
   (void)uc;
@@ -9681,6 +9841,9 @@ static void isac_segv_bt(int sig, siginfo_t *si, void *uc)
   signal(sig, SIG_DFL);
   raise(sig);
 }
+/* isac_segv_bt_install: constructor run at load time: when ISAC_SEGV_BT is set, primes backtrace(), installs an alternate signal stack and the SIGSEGV/SIGBUS handler isac_segv_bt().
+ *   Does nothing when the variable is unset. Diagnostic only (replay crash hunt).
+ */
 __attribute__((constructor)) static void isac_segv_bt_install(void)
 {
   if (!getenv("ISAC_SEGV_BT")) return;
