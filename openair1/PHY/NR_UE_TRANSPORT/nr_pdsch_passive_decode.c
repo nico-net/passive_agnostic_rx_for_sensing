@@ -1413,6 +1413,8 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     static _Atomic int s_iters = -1;
     if (s_iters < 0) { const char *e = getenv("ISAC_LDPC_ITERS"); int v = e ? atoi(e) : 8; s_iters = (v >= 1 && v <= 255) ? v : 8; }
     TB_parameters.max_ldpc_iterations = (uint8_t)s_iters;
+    extern __thread int nr_pdsch_ldpc_iters_override;
+    if (nr_pdsch_ldpc_iters_override > 0) TB_parameters.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_iters_override; /* ISAC_LDPC_ITERS_AB */
   }
   TB_parameters.rv_index = cw->rv;
   TB_parameters.tbslbrm = dlsch_config->tbslbrm;

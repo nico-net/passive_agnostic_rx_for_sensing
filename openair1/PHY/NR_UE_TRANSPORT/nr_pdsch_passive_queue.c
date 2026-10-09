@@ -1458,12 +1458,27 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_pdsch_chest_occ_override = (s_ocab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_ocn, 1) % 2u) : -1;
     }
     const int occ_used = nr_pdsch_chest_occ_override;
+    extern __thread int nr_pdsch_ldpc_iters_override;
+    { /* ISAC_LDPC_ITERS_AB=<a>,<b> (T26d): post-solve full decodes alternate the LDPC iteration limit (paired A/B) */
+      static int s_ia = -1, s_ib = -1;
+      static _Atomic unsigned s_in = 0;
+      if (s_ia < 0) {
+        const char *e = getenv("ISAC_LDPC_ITERS_AB");
+        if (e == NULL || sscanf(e, "%d,%d", &s_ia, &s_ib) != 2) { s_ia = 0; s_ib = 0; }
+      }
+      nr_pdsch_ldpc_iters_override = (s_ia > 0 && s_ib > 0 && job.mrc_mode > 0 && !job.layout_probe)
+                                         ? ((atomic_fetch_add(&s_in, 1) & 1u) ? s_ib : s_ia) : -1;
+    }
+    const int it_used = nr_pdsch_ldpc_iters_override;
+    const uint64_t dec_t0 = now_ns();
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     nr_dlsch_mrc_mode_override = -1;
     nr_dlsch_irc_override = -1;
     nr_dlsch_eq_override = -1;
     nr_pdsch_chest_occ_override = -1;
+    nr_pdsch_ldpc_iters_override = -1;
+    const double dec_us = (double)(now_ns() - dec_t0) / 1000.0;
     if (owned) {
       const uint64_t done = now_ns();
       const uint64_t cpu_fep = nr_pdsch_passive_last_fep_ns();
@@ -1596,14 +1611,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
             dec.br_snr_db[3], dec.evm_nbrx, job.solver_token,
             dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0, (int)job.layout_probe, dec.kappa,
             dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
-            dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used);
+            dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used, it_used, dec_us);
       if (dec.evm_pct > 0.f && !job.layout_probe) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
     }
     if (job.solver_token) {
