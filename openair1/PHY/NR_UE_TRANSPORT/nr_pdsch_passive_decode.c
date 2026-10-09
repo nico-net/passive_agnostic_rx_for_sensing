@@ -1405,7 +1405,14 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     return false;
   }
 
-  TB_parameters.max_ldpc_iterations = 8; // same default init_nr_ue_dlsch() gives the real DLSCH
+  /* ISAC_LDPC_ITERS=<n> (cherry-picked from csd/snr-audit 2e63cdb3ee, default off = 8, the init_nr_ue_dlsch() default): the OAI
+   * int8 flooding min-sum decoder stops at 8 iterations; at low SNR (the passive receiver's 6-10 dB grants) that leaves coding
+   * gain on the table. Only the full TB decode uses it (a CB0 probe keeps the batch's own limit). */
+  {
+    static _Atomic int s_iters = -1;
+    if (s_iters < 0) { const char *e = getenv("ISAC_LDPC_ITERS"); int v = e ? atoi(e) : 8; s_iters = (v >= 1 && v <= 255) ? v : 8; }
+    TB_parameters.max_ldpc_iterations = (uint8_t)s_iters;
+  }
   TB_parameters.rv_index = cw->rv;
   TB_parameters.tbslbrm = dlsch_config->tbslbrm;
   TB_parameters.abort_decode = &h->abort_decode;
