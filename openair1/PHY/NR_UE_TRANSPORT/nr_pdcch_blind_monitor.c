@@ -1092,7 +1092,7 @@ static bool discovered_load_stream(FILE *f)
 }
 
 /* discovered_additional_poll: polls for new discovered CORESETs at most once every 1024 calls: reads the GPU records (or the discovery file, when it changed), and loads the queue when no dwell is running.
- *   Also resets the queue on a configuration epoch change. Returns true when a queue was loaded. Caller: nr_pdcch_discovered_snapshot's owner, nr_pdcch_blind_monitor_discovered_poll().
+ *   Also resets the queue on a configuration epoch change. Returns true when a queue was loaded. Caller: nr_pdcch_blind_monitor_discovered_poll().
  */
 static bool discovered_additional_poll(void)
 {
