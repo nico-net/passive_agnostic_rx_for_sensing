@@ -9,6 +9,9 @@
  * spin-wait must not consume the single discovery CPU while kernels execute. */
 struct DiscoveryStream {
   cudaStream_t stream=nullptr;cudaEvent_t done=nullptr;
+/* init: creates the discovery CUDA stream (non-blocking) and its blocking-sync completion event; returns false when either creation fails.
+ *   Member of DiscoveryStream. Called once from nr_csirs_disc_gpu_ops().
+ */
   bool init() {
     if(stream && done) return true;
     return cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking)==cudaSuccess
@@ -16,19 +19,26 @@ struct DiscoveryStream {
   }
 };
 static DiscoveryStream discovery_stream;
+/* disc_stream: returns the discovery worker's CUDA stream (all discovery kernels and copies run on it). */
 static cudaStream_t disc_stream() {return discovery_stream.stream;}
+/* disc_wait: records the completion event on the discovery stream and blocks the calling CPU thread until the queued work has finished.
+ *   Blocking sync (not spin) so that the single discovery CPU is not consumed while kernels run. Returns the CUDA status.
+ */
 static cudaError_t disc_wait() {
   cudaError_t rc=cudaEventRecord(discovery_stream.done,disc_stream());
   return rc==cudaSuccess?cudaEventSynchronize(discovery_stream.done):rc;
 }
+/* disc_copy: asynchronous memcpy on the discovery stream followed by disc_wait(); returns the CUDA status of the copy. */
 static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind kind) {
   cudaError_t rc=cudaMemcpyAsync(dst,src,n,kind,disc_stream());
   return rc==cudaSuccess?disc_wait():rc;
 }
+/* disc_zero: asynchronous memset of n bytes on the discovery stream (no wait); the caller waits before reading the result. */
 static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsync(dst,value,n,disc_stream());}
 
-/* Integer normalization/reduction is bit-identical to the CPU, including
- * quantization and clipping. One block-independent thread per (slot,RB,symbol). */
+/* normalize: GPU kernel: per (slot, RB, symbol) thread, normalises the 12 RE powers against the mean of the lowest third (excluded REs skipped), in the same integer arithmetic as the CPU.
+ *   Output x holds 4096 x power / reference (capped at 8192) per RE, and invalid slots are skipped. Launched by footprints(), normalize_host(), accumulate_host() and prepare_host().
+ */
 __global__ static void normalize(const int16_t *grid,const nr_csirs_disc_slot_meta_t *meta,
                                  size_t stride,int nt,int na,int nb,uint16_t symbols,
                                  const uint8_t *exclude,uint32_t *x,int tiles)
@@ -63,6 +73,9 @@ __global__ static void normalize(const int16_t *grid,const nr_csirs_disc_slot_me
     x[(size_t)t*nr+l*nk+12*rb+sc]=v>8192?8192:v;
   }
 }
+/* pool: GPU kernel: averages the normalised values over each tile of 16 RBs (168 values per tile per slot) into the pooled area of x.
+ *   Launched after normalize() by footprints(), normalize_host(), accumulate_host() and prepare_host().
+ */
 __global__ static void pool(uint32_t *x,int nt,int nb,int tiles)
 {
   int id=blockIdx.x*blockDim.x+threadIdx.x;
@@ -73,7 +86,9 @@ __global__ static void pool(uint32_t *x,int nt,int nb,int tiles)
   for(int rb=first;rb<end;++rb) sum+=x[(size_t)t*nr+l*nk+12*rb+sc];
   x[(size_t)t*nr+14*nk+tile*168+l*12+sc]=sum/(end-first);
 }
-/* Each RE thread folds all slots; no atomics, no floating-point reduction. */
+/* fold_kernel: GPU kernel: adds the normalised values of the valid slots of a batch into the per-residue sums and squares (period p), one thread per statistic.
+ *   Each thread folds all slots of its element (no atomics, no float reduction). Launched by fold_gpu().
+ */
 __global__ static void fold_kernel(const uint32_t *x,const nr_csirs_disc_slot_meta_t *meta,
                                    int nt,int nr,int p,uint64_t *sum,uint64_t *sq)
 {
@@ -85,6 +100,9 @@ __global__ static void fold_kernel(const uint32_t *x,const nr_csirs_disc_slot_me
   }
 }
 struct Fold {uint32_t *x;nr_csirs_disc_slot_meta_t *meta;int nt,nr;};
+/* fold_gpu: fold callback for the GPU footprint search (passed to nr_disc_fp_cluster()): allocates device sums for period p, runs fold_kernel() and copies the statistics back.
+ *   Returns 0, or -1 on any CUDA failure. Caller: footprints() (through nr_disc_fp_cluster).
+ */
 static int fold_gpu(void *opaque,int p,uint64_t *sum,uint64_t *sq)
 {
   Fold *f=(Fold *)opaque;uint64_t *ds=nullptr,*dq=nullptr;
@@ -97,6 +115,9 @@ static int fold_gpu(void *opaque,int p,uint64_t *sum,uint64_t *sq)
   ret=0;
 done: cudaFree(ds);cudaFree(dq);return ret;
 }
+/* footprints: GPU footprint detector for one batch: uploads the ring grid and metadata, normalises and pools it on the device, then runs the CPU cluster search with fold_gpu() for the statistics.
+ *   Returns the footprint count, or -1. Frees its device buffers. Installed in the ops table as the detect-footprints entry (nr_csirs_disc_backend.c calls it through load_module).
+ */
 static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,nr_csirs_disc_fp_t *out,int max_out)
 {
   if(!nr_disc_fp_valid(r) || !out || max_out<=0) return -1;
@@ -121,6 +142,9 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   ret=nr_disc_fp_cluster(r,cfg,out,max_out,fold_gpu,&f);
 done: cudaFree(grid);cudaFree(f.meta);cudaFree(f.x);cudaFree(excl);return ret;
 }
+/* normalize_host: GPU normalisation of a ring into the host output array (the ops table's normalise entry): upload, normalize and pool kernels, then a copy back.
+ *   Returns 0, or -1 on failure. Keeps the output layout of nr_disc_fp_normalize().
+ */
 static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,uint32_t *out)
 {
   if(!nr_disc_fp_valid(r) || !out) return -1;
@@ -149,10 +173,16 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *,const nr_csirs_disc_fep_slot
 static int accumulate_host(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 static int fft_host(int, int, const int16_t *, int16_t *);
 static int prepare_host(int,int,int,int,size_t);
+/* readback: copies the device-resident ring grid back to the host grid (for snapshots and dumps) when the ring is device-valid; returns 0 otherwise.
+ *   Installed as the readback entry of the ops table; called by nr_csirs_disc_ring_snapshot().
+ */
 static int readback(const nr_csirs_disc_ring_t *r) {
   return r->device_valid && r->device_grid
       ? (disc_copy(r->grid_base,r->device_grid,(size_t)r->capacity*r->slot_stride*2,cudaMemcpyDeviceToHost)==cudaSuccess?0:-1):0;
 }
+/* upload_symbols: uploads the selected OFDM symbols of every antenna of a ring from the host grid to its device grid (only the 24 x n_rb values of each symbol), then marks the device copy valid.
+ *   Installed as the upload_symbols entry; called by nr_csirs_blind_rt_discovery_drain() through the ops table.
+ */
 static int upload_symbols(nr_csirs_disc_ring_t *r,uint16_t symbols)
 {
   if(!r->device_grid) return -1;
@@ -163,18 +193,25 @@ static int upload_symbols(nr_csirs_disc_ring_t *r,uint16_t symbols)
   if(disc_wait()!=cudaSuccess) return -1;
   r->device_valid=true;return 0;
 }
+/* device_alloc: allocates n bytes of device memory (cudaMalloc); returns NULL on failure. Installed as the device_alloc entry of the ops table. */
 static void *device_alloc(size_t n) {void *p=nullptr;return cudaMalloc(&p,n)==cudaSuccess?p:nullptr;}
+/* device_free: frees device memory from device_alloc(). Installed as the device_free entry of the ops table. */
 static void device_free(void *p) {cudaFree(p);}
 namespace resident {static int detect(const nr_csirs_disc_ring_t *,const nr_csirs_disc_fp_cfg_t *,nr_csirs_disc_fp_t *,int,bool);static void reset();}
+/* nr_csirs_disc_gpu_ops: returns the GPU operations table of this module (footprints, normalise, FFT, FEP, accumulate, lattice, memory and prepare entries) when a CUDA device is present.
+ *   Returns NULL when the discovery stream cannot be created or no device is found. Exported with C linkage; loaded by nr_csirs_disc_backend.c (load_module).
+ */
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
   if(!discovery_stream.init()) return nullptr;
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
   static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols};return &ops;
 }
-/* Host staging is pinned by default. Managed memory is an explicit diagnostic
- * opt-in; production FFT, history and sequence workspace use cudaMalloc. */
+/* use_managed: returns ISAC_CSIRS_DISC_MANAGED == 1: use CUDA managed memory for unified allocations instead of mapped pinned host memory (diagnostic only). */
 static bool use_managed(void) {const char *e=getenv("ISAC_CSIRS_DISC_MANAGED");return e && atoi(e)==1;}
+/* nr_csirs_disc_gpu_alloc_unified: allocates bytes of unified memory for the discovery buffers: mapped, portable pinned host memory by default, managed memory when ISAC_CSIRS_DISC_MANAGED=1.
+ *   Returns NULL for zero bytes or on failure. Exported C entry; used through the unified-memory hook of the ring and the TD front end.
+ */
 extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
 {
   void *ptr=nullptr;
@@ -182,6 +219,9 @@ extern "C" void *nr_csirs_disc_gpu_alloc_unified(size_t bytes)
   if(use_managed()) return cudaMallocManaged(&ptr,bytes)==cudaSuccess?ptr:nullptr;
   return cudaHostAlloc(&ptr,bytes,cudaHostAllocMapped|cudaHostAllocPortable)==cudaSuccess?ptr:nullptr;
 }
+/* nr_csirs_disc_gpu_free_unified: frees memory from nr_csirs_disc_gpu_alloc_unified(): host pinned memory (cudaFreeHost) or device memory (cudaFree), chosen by the pointer attributes.
+ *   NULL-safe. Exported C entry.
+ */
 extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr)
 {
   if(!ptr) return;
@@ -195,17 +235,22 @@ extern "C" void nr_csirs_disc_gpu_free_unified(void *ptr)
  * butterfly rounding is not reproduced by floating-point cuFFT. */
 #include <cufft.h>
 #include <mutex>
+/* fft_unpack: GPU kernel: converts one batch of 16-bit complex samples to float complex for the cuFFT input. */
 __global__ static void fft_unpack(const short2 *in, cufftComplex *out, size_t n)
 {
   size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x;
   if (i<n) out[i] = make_float2(in[i].x, in[i].y);
 }
+/* fft_pack: GPU kernel: scales the cuFFT output, rounds and saturates it back to 16-bit complex (scale = 1/sqrt(fft)), as the CPU reference does. */
 __global__ static void fft_pack(const cufftComplex *in, short2 *out, size_t n, float scale)
 {
   size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x;
   if (i<n) out[i] = make_short2((short)fminf(32767.f,fmaxf(-32768.f,rintf(in[i].x*scale))),
                                (short)fminf(32767.f,fmaxf(-32768.f,rintf(in[i].y*scale))));
 }
+/* fft_host: batched FFT of `transforms` symbols of size fft on the GPU (cuFFT plan cached per size; unpack, C2C forward, pack), from in to out in 16-bit complex.
+ *   Serialised by a mutex; returns 0, or -1 on failure (the caller falls back to the CPU FFT). Installed as the fft entry of the ops table.
+ */
 static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
 {
   static std::mutex mutex;
@@ -242,7 +287,11 @@ static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
 /* T9: preserve OAI's Q14 LUT/128-sample recurrence, including its quantization
  * drift. One CTA per (slot,symbol), shared ramp across all RX branches. */
 __constant__ short sin_lut[129];
+/* sat16: device helper: saturates a 64-bit integer to the int16 range. */
 __device__ static short sat16(int64_t x) { return (short)max(-32768LL,min(32767LL,(long long)x)); }
+/* lut_phase: device helper: complex phasor (cos, sin) of a phase in turns, from the Q14 sine table with the OAI quadrant mapping.
+ *   Reproduces the fixed-point LUT of the OAI receiver, so the CFO ramp matches the CPU path.
+ */
 __device__ static short2 lut_phase(double phase)
 {
   int index=phase<0?512-((int)(-phase*512+0.5)%512):(int)(phase*512+0.5)%512;
@@ -251,6 +300,7 @@ __device__ static short2 lut_phase(double phase)
   if(index<384) return make_short2(-sin_lut[384-index],-sin_lut[index-256]);
   return make_short2(sin_lut[index-384],-sin_lut[512-index]);
 }
+/* multiply: device helper: fixed-point complex product of two 16-bit values, with the OAI wrap of the 32-bit sum and a right shift; saturates when requested. */
 __device__ static short2 multiply(short2 x,short2 y,int shift,bool saturate)
 {
   // SIMD madd wraps the 32-bit sum; negate y.i in int16 as in OAI.
@@ -259,6 +309,9 @@ __device__ static short2 multiply(short2 x,short2 y,int shift,bool saturate)
   re>>=shift;im>>=shift;
   return make_short2(saturate?sat16(re):(short)re,saturate?sat16(im):(short)im);
 }
+/* fep_unpack: GPU kernel (one block per slot and symbol): unpacks the CP-bearing samples of a slot into float complex, applying the per-symbol frequency-offset ramp when compensation is on.
+ *   The ramp is built once per block (128 values) with the Q14 LUT; the saturating rotation follows the CPU rotate_cpx_vector. Launched by fep_host() and prepare_host().
+ */
 __global__ static void fep_unpack(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_disc_fep_slot_t *slots,
                                   cufftComplex *work)
 {
@@ -282,6 +335,7 @@ __global__ static void fep_unpack(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_dis
     if(s.compensate) rot=multiply(rot,step,14,true); // rotate_cpx_vector saturates
   }
 }
+/* symbol_rotate: device helper: applies the per-symbol rotation of the carrier (SIMD-compatible modes 1 and 2 of the OAI symbol rotation, otherwise a plain saturating multiply). */
 __device__ static short2 symbol_rotate(short2 x,short2 a,int mode)
 {
   if(mode==2) { // vqdmulh followed by vqrdmlsh/vqrdmlah
@@ -296,6 +350,9 @@ __device__ static short2 symbol_rotate(short2 x,short2 a,int mode)
   }
   return multiply(x,a,15,true);
 }
+/* fep_extract: GPU kernel: after the FFT, extracts the carrier's subcarriers of each slot, symbol and antenna into the ring grid (rotation, OAI time-shift and bin wrap as the CPU FEP).
+ *   Writes slot (first + t) mod capacity of the ring. Launched by fep_host() and prepare_host().
+ */
 __global__ static void fep_extract(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_disc_fep_slot_t *slots,
                                    const cufftComplex *work,short2 *grid,int n,int capacity,int first)
 {
@@ -329,6 +386,9 @@ __global__ static void fep_extract(nr_csirs_disc_fep_cfg_t cfg,const nr_csirs_di
 template<class T> struct Buffer {
   T *p=nullptr;size_t capacity=0;
   ~Buffer() = default; /* static objects: no CUDA call after runtime teardown at exit() (T26, see nr_csirs_disc_gpu_sweep.cu) */
+/* reserve: Buffer<T>::reserve: grows the device buffer to at least n elements (freeing the old one); returns false on allocation failure.
+ *   Member of the template Buffer used by the FEP and accumulation workspaces.
+ */
   bool reserve(size_t n) {
     if(n<=capacity) return true;
     cudaFree(p);p=nullptr;capacity=0;
@@ -343,6 +403,9 @@ struct FepWorkspace {
   cufftHandle plan=0,single_plan=0;int last_fft=0,last_ant=0;bool lut_ready=false;
 };
 static FepWorkspace fep_workspace;
+/* fep_prepare: prepares the FEP workspace for a carrier (once per FFT size and antenna count): loads the sine LUT, creates the batch and single-slot cuFFT plans, and reserves the buffers.
+ *   Returns 0, or -1 on failure. Called by fep_host() and prepare_host().
+ */
 static int fep_prepare(int fft,int ant,size_t stride)
 {
   auto &f=fep_workspace;
@@ -363,6 +426,9 @@ static int fep_prepare(int fft,int ant,size_t stride)
       && f.desc.reserve(NR_CSIRS_DISC_DEFAULT_BATCH) && f.shift.reserve(fft)
       && f.td.reserve((size_t)NR_CSIRS_DISC_DEFAULT_BATCH*ant*stride)?0:-1;
 }
+/* fep_host: GPU front end for a batch of up to NR_CSIRS_DISC_DEFAULT_BATCH slots: uploads the samples, runs fep_unpack, a cuFFT, and fep_extract into the ring (device grid when present).
+ *   Serialised by a mutex. With ISAC_CSIRS_DISC_DUMP the device slots are copied back to the host grid. Returns 0, or -1 on failure (the caller then falls back).
+ */
 static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slot_t *slots,
                     int n,nr_csirs_disc_ring_t *ring,int first)
 {
@@ -398,6 +464,9 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   return launch==cudaSuccess && complete==cudaSuccess?0:-1;
 }
 
+/* accumulate_kernel: GPU kernel: adds the normalised values of a batch into the cumulative history (period-640 sums, 80- and 64-residue sums, totals and pooled squares), one thread per statistic.
+ *   Launched by accumulate_host() and prepare_host().
+ */
 __global__ static void accumulate_kernel(const uint32_t *x,const nr_csirs_disc_slot_meta_t *meta,
                                          int nt,int nr,int pooled,uint64_t *sum,uint64_t *sq,
                                          uint64_t *s80,uint64_t *s64,uint64_t *total,uint64_t *totalq)
@@ -412,6 +481,9 @@ __global__ static void accumulate_kernel(const uint32_t *x,const nr_csirs_disc_s
   }
   total[j]=st;totalq[j]=qt;
 }
+/* accumulate_host: GPU accumulation of one batch of the ring into the cumulative history: uploads the grid (or uses managed input directly), normalises, pools and accumulates.
+ *   Serialised by a mutex. Returns 0, or -1 on failure (the caller resets the history and falls back to the CPU fold). Installed as the accumulate entry.
+ */
 static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cfg,
                             uint64_t *sum,uint64_t *sq,uint64_t *s80,uint64_t *s64,uint64_t *total,uint64_t *totalq)
 {
@@ -439,6 +511,7 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   return launch==cudaSuccess && complete==cudaSuccess?0:-1;
 }
 
+/* lattice_pool: GPU kernel: pools the pooled-tile statistics of the history per period residue class (period p) for the lattice screen. */
 __global__ static void lattice_pool(int p,int nr,int pooled,const uint64_t *sum,const uint64_t *sq,
                                     uint64_t *ps,uint64_t *pq)
 {
@@ -447,8 +520,9 @@ __global__ static void lattice_pool(int p,int nr,int pooled,const uint64_t *sum,
   for(int residue=o;residue<640;residue+=p) {s+=sum[(size_t)residue*nr+nr-pooled+j];q+=sq[(size_t)residue*pooled+j];}
   ps[id]=s;pq[id]=q;
 }
-/* Device implementation of the CPU's tiled significance and phase-background
- * screen. Keep tile/component order: a failed first tile still marks tried. */
+/* lattice_screen: GPU kernel: the tiled significance and phase-background screen of the CPU detector (cluster), one thread per (period, offset, symbol).
+ *   Writes the surviving component masks to masks[]; the tried order and the thresholds follow the CPU reference.
+ */
 __global__ static void lattice_screen(int p,int tiles,uint64_t nt,const uint64_t *counts,
                                       const uint64_t *ps,const uint64_t *pq,const uint64_t *total,
                                       const uint64_t *totalq,uint16_t *masks)
@@ -501,6 +575,9 @@ __global__ static void lattice_screen(int p,int tiles,uint64_t nt,const uint64_t
     }
   }
 }
+/* lattice_host: GPU lattice screen for the cumulative history: uploads the per-offset counts, pools the statistics and runs lattice_screen(); copies the masks back.
+ *   Returns 0, or -1 on failure (the caller then uses the CPU screen). Installed as the lattice entry; counted as a GPU lattice call.
+ */
 static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const uint64_t *sum,
                          const uint64_t *sq,const uint64_t *total,const uint64_t *totalq,uint16_t *masks)
 {
@@ -521,6 +598,9 @@ static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const ui
 }
 
 #include "nr_csirs_disc_gpu_cluster.cuh"
+/* prepare_host: one-time GPU preparation before the RX stream starts: allocates the ring state of the resident detector, creates the FEP workspace and runs every kernel once on a dummy slot.
+ *   Warms the plans and the kernel local storage so that no CUDA allocation happens later. Returns 0, or -1 on failure. Installed as the prepare entry; called by nr_csirs_disc_pipeline_init().
+ */
 static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
 {
   if(!resident::prepare(rb,ant,capacity) || fep_prepare(fft,ant,stride)<0) return -1;
