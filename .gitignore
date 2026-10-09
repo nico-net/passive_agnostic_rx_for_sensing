@@ -37,7 +37,11 @@ CMakeUserPresets.json
 # Softmodem runtime artifacts written to the repo root when run from here
 /rbconfig.raw
 /reconfig.raw
+/replays/
 
 # Python bytecode cache (tests/ota_sync_bench/ and any other Python tooling)
 __pycache__/
 *.pyc
+
+# Local raw-IQ replay output (logs and generated receiver config)
+/replays/

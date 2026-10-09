@@ -135,6 +135,33 @@ TEST(DciLengthSweep, ReturnsMinusOneWhenNoLengthClearsSignificanceYet)
   EXPECT_EQ(best, -1);
 }
 
+TEST(DciLengthSweep, PeerLengthMemoryStillProbesEveryOtherWidth)
+{
+  struct Visits {
+    int seen[3] = {0};
+    static bool score(int len, int, uint16_t *, uint32_t *, void *arg)
+    {
+      static_cast<Visits *>(arg)->seen[len - 48]++;
+      return false;
+    }
+  } visits;
+  nr_pdcch_dci_length_sweep_state_t state;
+  nr_pdcch_dci_length_sweep_reset(&state);
+  state.preferred_len = 49;
+  state.preferred_full_every = 4;
+  for (int feed = 0; feed < 3; feed++)
+    EXPECT_EQ(-1, nr_pdcch_dci_length_sweep_feed_budget(
+                      &state, Visits::score, &visits, 1, 48, 50, 0x4601, 0, 0));
+  EXPECT_EQ(visits.seen[0], 0);
+  EXPECT_EQ(visits.seen[1], 3);
+  EXPECT_EQ(visits.seen[2], 0);
+  EXPECT_EQ(-1, nr_pdcch_dci_length_sweep_feed_budget(
+                    &state, Visits::score, &visits, 1, 48, 50, 0x4601, 0, 0));
+  EXPECT_EQ(visits.seen[0], 1);
+  EXPECT_EQ(visits.seen[1], 4);
+  EXPECT_EQ(visits.seen[2], 1);
+}
+
 TEST(DciLengthSweep, AccumulatesAcrossManyOccasionsToFindARealButSparseLength)
 {
   // The scenario this rewrite exists for: length 47 is genuinely real but only decodes on ~8% of
@@ -1075,4 +1102,18 @@ TEST(DciLengthEpoch, LazyLookupCannotMissHardBeforeSoft) {
   EXPECT_EQ(c->len_state, NR_LEN_SUSPECT);
   for (auto &e : store.coreset) free(e.bank);
   nr_cfg_epoch_reset();
+}
+
+TEST(DciLengthSweep, PeerLengthHintIsOnlyFromOtherLockedRntis)
+{
+  auto *bank = static_cast<nr_pdcch_dci_length_bank_t *>(calloc(1, sizeof(nr_pdcch_dci_length_bank_t)));
+  ASSERT_NE(bank, nullptr);
+  bank->ue[0].rnti = 0x1001; bank->ue[0].found[0] = 47;
+  bank->ue[1].rnti = 0x1002; bank->ue[1].found[0] = 47;
+  bank->ue[2].rnti = 0x1003; bank->ue[2].found[0] = 53;
+  bank->ue[3].rnti = 0x1004; bank->ue[3].found[0] = 99; // outside active range
+  EXPECT_EQ(nr_pdcch_dci_length_bank_peer_hint(bank, 0x2000, 30, 63), 47);
+  EXPECT_EQ(nr_pdcch_dci_length_bank_peer_hint(bank, 0x1001, 50, 63), 53);
+  EXPECT_EQ(nr_pdcch_dci_length_bank_peer_hint(bank, 0x1003, 54, 63), 0);
+  free(bank);
 }

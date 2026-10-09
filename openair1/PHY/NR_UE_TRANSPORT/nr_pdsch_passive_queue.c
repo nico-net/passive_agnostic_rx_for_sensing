@@ -374,7 +374,7 @@ static _Atomic uint64_t g_crc_ok        = 0;
 /* Two windows per nSCID, stage 1 always on, stage 2 throttled and capped: nr_dmrs_id_2stage_t
  * (final review I5; measured 170360 us per stage-2 accumulate vs ~2 ms for stage 1). */
 /* T26c ISAC_PDSCH_DMRS_ID_PER_CORESET: one blind DM-RS identity estimator per discovered CORESET population */
-typedef struct { int key; int decided; bool used; pthread_mutex_t mu; nr_dmrs_id_2stage_t est; } coreset_dmrs_t;
+typedef struct { int key; int decided; int top[3]; bool used; pthread_mutex_t mu; nr_dmrs_id_2stage_t est; } coreset_dmrs_t;
 static coreset_dmrs_t g_cs_dmrs[8];
 static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
 static bool per_coreset_dmrs_on(void)
@@ -392,7 +392,7 @@ static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
   for (int i = 0; i < 8 && !r; i++)
     if (!g_cs_dmrs[i].used) {
       r = &g_cs_dmrs[i];
-      r->used = true; r->key = key; r->decided = -1;
+      r->used = true; r->key = key; r->decided = -1; r->top[0] = r->top[1] = r->top[2] = -1;
       pthread_mutex_init(&r->mu, NULL);
       char label[32];
       snprintf(label, sizeof(label), "PDSCH-cs%d", key);
@@ -401,6 +401,15 @@ static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
     }
   pthread_mutex_unlock(&g_cs_dmrs_mu);
   return r;
+}
+int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3)
+{
+  for (int i = 0; i < 8; i++)
+    if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key && __atomic_load_n(&g_cs_dmrs[i].decided, __ATOMIC_ACQUIRE) >= 0) {
+      for (int q = 0; q < 3; q++) out3[q] = g_cs_dmrs[i].top[q];
+      return 3;
+    }
+  return 0;
 }
 int nr_pdsch_passive_coreset_dmrs_id(int key)
 {
@@ -1429,8 +1438,47 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_ptrs_sweep_allow(!job.layout_probe && (job.sweep_ticket.generation == 0 || job.sweep_ticket.settled));
     if (gpu_job)
       nr_pdsch_passive_set_llr_override(t_gpu_llr + gpu_job->llr_offset, gpu_job->n_llr);
+    extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
+    /* T26d ISAC_RX_MRC_PER_RNTI receivers: 1 best branch, 3 MRC (+ALIGN env), 4 noise-weighted MRC (IRC diag), 5 IRC */
+    nr_dlsch_mrc_mode_override = job.mrc_mode >= 4 ? 1 : (job.mrc_mode > 0 ? job.mrc_mode : -1);
+    nr_dlsch_irc_override = job.mrc_mode == 4 ? 3 : job.mrc_mode == 5 ? 2 : job.mrc_mode == 6 ? 4 : (job.mrc_mode > 0 ? 0 : -1);
+    extern __thread int nr_dlsch_eq_override;
+    { /* ISAC_RX_EQ_AB=1 (T26d): multi-layer post-solve grants (needs ISAC_RX_MRC_PER_RNTI) rotate the equaliser {fixed MMSE, float MMSE, ML} (paired A/B); the search keeps the default */
+      static int s_eqab = -1;
+      static _Atomic unsigned s_eqn = 0;
+      if (s_eqab < 0) s_eqab = getenv("ISAC_RX_EQ_AB") ? atoi(getenv("ISAC_RX_EQ_AB")) : 0;
+      nr_dlsch_eq_override = (s_eqab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_eqn, 1) % 3u) : -1;
+    }
+    const int eq_used = nr_dlsch_eq_override;
+    extern __thread int nr_pdsch_chest_occ_override;
+    { /* ISAC_CHEST_OCC_AB=1 (T26d): multi-layer post-solve grants alternate stock / OCC-after-delay chest (paired A/B) */
+      static int s_ocab = -1;
+      static _Atomic unsigned s_ocn = 0;
+      if (s_ocab < 0) s_ocab = getenv("ISAC_CHEST_OCC_AB") ? atoi(getenv("ISAC_CHEST_OCC_AB")) : 0;
+      nr_pdsch_chest_occ_override = (s_ocab && job.mrc_mode > 0 && !job.layout_probe && __builtin_popcount(job.dlsch_pdu.dmrs_ports) >= 2) ? (int)(atomic_fetch_add(&s_ocn, 1) % 2u) : -1;
+    }
+    const int occ_used = nr_pdsch_chest_occ_override;
+    extern __thread int nr_pdsch_ldpc_iters_override;
+    { /* ISAC_LDPC_ITERS_AB=<a>,<b> (T26d): post-solve full decodes alternate the LDPC iteration limit (paired A/B) */
+      static int s_ia = -1, s_ib = -1;
+      static _Atomic unsigned s_in = 0;
+      if (s_ia < 0) {
+        const char *e = getenv("ISAC_LDPC_ITERS_AB");
+        if (e == NULL || sscanf(e, "%d,%d", &s_ia, &s_ib) != 2) { s_ia = 0; s_ib = 0; }
+      }
+      nr_pdsch_ldpc_iters_override = (s_ia > 0 && s_ib > 0 && job.mrc_mode > 0 && !job.layout_probe)
+                                         ? ((atomic_fetch_add(&s_in, 1) & 1u) ? s_ib : s_ia) : -1;
+    }
+    const int it_used = nr_pdsch_ldpc_iters_override;
+    const uint64_t dec_t0 = now_ns();
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+    nr_dlsch_mrc_mode_override = -1;
+    nr_dlsch_irc_override = -1;
+    nr_dlsch_eq_override = -1;
+    nr_pdsch_chest_occ_override = -1;
+    nr_pdsch_ldpc_iters_override = -1;
+    const double dec_us = (double)(now_ns() - dec_t0) / 1000.0;
     if (owned) {
       const uint64_t done = now_ns();
       const uint64_t cpu_fep = nr_pdsch_passive_last_fep_ns();
@@ -1562,12 +1610,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
       /* ISAC_PDSCH_EVM_GRANT (T26c): one line per full decode, decoded AND failed. snr = -20 log10(evm). */
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
-                 "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d\n",
+                 "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d dec_us=%.0f\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
             dec.br_snr_db[3], dec.evm_nbrx, job.solver_token,
-            dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0, (int)job.layout_probe);
+            dec.evm_cpe_pct > 0.f ? -20.0 * log10(dec.evm_cpe_pct / 100.0) : 99.0, (int)job.layout_probe, dec.kappa,
+            dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
+            dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used, it_used, dec_us);
       if (dec.evm_pct > 0.f && !job.layout_probe) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
     }
     if (job.solver_token) {
@@ -1753,7 +1804,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                              start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
                                              job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType)) {
               const int id = nr_dmrs_id_2stage_decided(&cd->est);
+              /* T26d: the population can mix DM-RS identities (replays: 249 or 442 on CORESET 10163): keep the three
+               * best-scoring ids; the solver tries them per RNTI and the CRC decides */
+              double sc[3] = {-1, -1, -1};
+              int tp[3] = {id, -1, -1};
+              for (int c = 0; c < 1024; c++) {
+                const double v = nr_dmrs_id_score(&cd->est.s1, c);
+                for (int q = 0; q < 3; q++)
+                  if (v > sc[q]) { for (int z = 2; z > q; z--) { sc[z] = sc[z - 1]; tp[z] = tp[z - 1]; } sc[q] = v; tp[q] = c; break; }
+              }
+              for (int q = 0; q < 3; q++) cd->top[q] = tp[q];
               __atomic_store_n(&cd->decided, id, __ATOMIC_RELEASE);
+              LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d top3 %d %d %d\n", job.coreset_key, tp[0], tp[1], tp[2]);
               LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d PDSCH DM-RS id DECIDED %d (cell %d)\n", job.coreset_key, id,
                     fp->Nid_cell);
             }

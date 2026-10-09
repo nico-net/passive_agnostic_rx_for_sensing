@@ -135,10 +135,17 @@ typedef struct {
    * stream and per-RX-branch LS SNR, 1-layer CPU-demodulated full decodes only (evm_valid=false otherwise). */
   bool                 evm_valid;
   float                evm_pct;
-  float                evm_cpe_pct; ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
+  float                evm_cpe_pct;
+  float                kappa;
+  float                br_alpha[4];  ///< per-branch |LS gain| y ~ alpha h s (1 = unbiased channel estimate)
+  float                br_nvar_db[4];///< per-branch chest noise variance (dB, chest's own DM-RS estimate)
+  float                rho;          ///< mean |cross-branch residual correlation|       ///< mean QAM amplitude consistency (1 = coherent), 0 = n/a ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
   float                br_snr_db[4];
   uint8_t              evm_nbrx;
   uint16_t             evm_nsym;
+  uint16_t             dmrs_ports;   ///< T26d diag: DM-RS port bitmap the decode used
+  uint8_t              n_cdm;        ///< T26d diag: CDM groups without data
+  uint8_t              dmrs_add;     ///< T26d diag: number of DM-RS symbols
 } nr_pdsch_passive_decode_result_t;
 
 /**

@@ -149,6 +149,7 @@ typedef struct {
   int      preferred_len;
   int      preferred_rounds;
   int      alt_full;  /* 1 = running one full-sweep lap between hypothesis rounds */
+  uint16_t preferred_full_every; /* opt-in peer memory: full-range probe every N feeds */
   /* Total scorer invocations = total polar decodes this sweep has paid for. Paired with BTIM's
    * dlsweep/ulsweep nanoseconds it gives microseconds PER DECODE and the batch actually available
    * per occasion -- the two numbers that decide whether a GPU batch can win here. The failed GPU
@@ -226,6 +227,10 @@ typedef struct {
   bool anonymous_exhausted;
   uint64_t anonymous_dwell; /* JOINT_ANON: discovered-CORESET dwell token the anonymous search last restarted on */
 } nr_pdcch_dci_length_bank_t;
+/* Ordering hint only. A peer's CRC-locked length never supplies acceptance
+ * evidence for another RNTI; the normal sweep still tests and confirms it. */
+int nr_pdcch_dci_length_bank_peer_hint(const nr_pdcch_dci_length_bank_t *bank,
+                                       uint16_t exclude_rnti, int min_len, int max_len);
 /* Caller holds the geometry length lock; independent of SFN/TDD slot phase. */
 bool nr_pdcch_dci_length_scout_due(nr_pdcch_dci_length_bank_t *bank);
 nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(

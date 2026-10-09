@@ -1,6 +1,7 @@
 /* Blind dedicated-PDSCH grant solver (T26b). See nr_pdsch_solver.h. */
 #include "nr_pdsch_solver.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,8 +43,10 @@ typedef struct {
   int32_t key;             /* T26c: CORESET key of this RNTI's last planned DCI */
   uint32_t n_probe;        /* T26c: probes planned while unsolved (search backoff) */
   uint32_t alt_hash;       /* T26c: g_alt_hash seen at the last plan */
+  uint32_t comb_try[4], comb_ok[4]; /* T26d ISAC_RX_MRC_PER_RNTI: CRC per receiver {1 best branch, 3 MRC, 4 NW-MRC, 5 IRC} */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
+  uint32_t pref_gap;       /* T26d ISAC_PDSCH_SOLVER_PREF: grants since the last search-preferred grant */
 } solver_rnti_t;
 
 typedef struct {
@@ -59,6 +62,7 @@ typedef struct {
   uint64_t dci;
   uint64_t abs;           /* T26c: absolute slot of the grant */
   int32_t scr;
+  uint8_t comb;           /* T26d: combining mode of this variant (0 = receiver default) */
   nr_dci_bits_t payload;
   int n_ids;
   uint16_t ids[SOLVER_MAX_IDS];
@@ -226,7 +230,8 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db)
   return ok;
 }
 
-void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n)
+static bool g_alt_decided; /* T26d: g_alt_ids[0] is a blind-decided DM-RS id -- try it first, no default-only phase */
+void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n, bool first_is_decided)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_SCR") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR")) ? 1 : 0;
@@ -239,6 +244,7 @@ void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n)
     h = (h ^ ids[i]) * 16777619u;
   }
   g_alt_hash = h ^ (uint32_t)g_n_alt;
+  g_alt_decided = first_is_decided && g_n_alt > 0;
   pthread_mutex_unlock(&g_mu);
 }
 
@@ -270,6 +276,41 @@ static pending_t *pend_new(void)
 
 static int t_rm = 0; static bool t_learn_rm = false; /* set by plan for this grant (under g_mu) */
 static int32_t t_scr = -1; /* T26c scrambling hypothesis for this grant (-1 default) */
+static uint8_t t_comb; /* T26d combining mode for this grant's variants (0 = default) */
+static int comb_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI")) : 0;
+  return en;
+}
+/* Mode for this grant: unsolved -> alternate 1/3 by grant parity; solved -> the mode with the better CRC rate
+ * (Laplace), exploring the other on 1 grant in 8. */
+/* receivers in play: ISAC_RX_MRC_PER_RNTI=1 -> {1,3}; =2 -> {1,3,4,5} (4 = noise-weighted gain-corrected MRC, 5 = IRC) */
+/* =3 -> {1,3,4,6} (6 = IRC with DM-RS residual covariance, ISAC_RX_IRC=4) */
+static uint8_t comb_k(int k) { static const uint8_t kComb[4] = {1, 3, 4, 5}; return (k == 3 && comb_on() >= 3) ? 6 : kComb[k]; }
+static int comb_n(void) { return comb_on() >= 2 ? 4 : 2; }
+static int comb_ab(void) /* ISAC_RX_MRC_PER_RNTI_AB=1: post-solve round robin over the receivers (paired A/B, no exploitation) */
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI_AB") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_AB")) : 0;
+  return en;
+}
+static uint8_t comb_pick(const solver_rnti_t *r)
+{
+  if (!comb_on()) return 0;
+  const int n = comb_n();
+  if (!r->solved) return 0; /* the layout search runs on the configured receiver only (alternating receivers while
+                            * unsolved multiplied the search space and starved whole populations: replays n3/n4) */
+  if (comb_ab()) return comb_k((int)(r->grants % (uint32_t)n));
+  int best = 0;
+  double bp = -1.0;
+  for (int k = 0; k < n; k++) {
+    const double p = (r->comb_ok[k] + 1.0) / (r->comb_try[k] + 2.0);
+    if (p > bp) { bp = p; best = k; }
+  }
+  if ((r->grants % 8u) == 7u) return comb_k((int)((best + 1 + (r->grants / 8u) % (uint32_t)(n - 1)) % (uint32_t)n)); /* explore */
+  return comb_k(best);
+}
 static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                  const nr_pdsch_solver_reading_t *rd, int l0, int S, int add_pos, int table, bool probe, bool table_disc,
                  bool learn_S, bool learn_table, int tda, uint64_t dci, nr_dci_bits_t payload)
@@ -295,6 +336,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->dci = dci;
   p->rm = (uint8_t)t_rm;
   p->scr = t_scr;
+  p->comb = t_comb;
   p->learn_rm = t_learn_rm;
   p->payload = payload;
   p->n_ids = rd[reading].n_ids < SOLVER_MAX_IDS ? rd[reading].n_ids : SOLVER_MAX_IDS;
@@ -310,6 +352,50 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   v->token = p->token;
   v->rm = (uint8_t)t_rm;
   v->scr = t_scr;
+  v->comb = t_comb;
+  return true;
+}
+
+static bool probe_hog(const solver_rnti_t *r)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_FAIR") && atoi(getenv("ISAC_PDSCH_SOLVER_FAIR")) ? 1 : 0;
+  if (!en || r->has_cand) return false;
+  uint64_t tot = 0;
+  int n = 0;
+  for (int i = 0; i < SOLVER_RNTIS; i++)
+    if (g_r[i].used && !g_r[i].solved) { tot += g_r[i].n_probe; n++; }
+  return n > 1 && (uint64_t)r->n_probe * n > 2 * tot + 32u * (uint64_t)n;
+}
+
+static bool leader_ok(const solver_rnti_t *r)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_LEADER") && atoi(getenv("ISAC_PDSCH_SOLVER_LEADER")) ? 1 : 0;
+  if (!en) return true;
+  for (int i = 0; i < SOLVER_RNTIS; i++) /* any solved RNTI on the same CORESET: everybody searches (with the prior) */
+    if (g_r[i].used && g_r[i].solved && g_r[i].key == r->key) return true;
+  const solver_rnti_t *lead = NULL;
+  for (int i = 0; i < SOLVER_RNTIS; i++)
+    if (g_r[i].used && !g_r[i].solved && g_r[i].key == r->key && (!lead || g_r[i].grants > lead->grants)) lead = &g_r[i];
+  return lead == NULL || lead == r;
+}
+
+/* ISAC_PDSCH_SOLVER_PREF=<N> (T26d, default 0 = off): an unsolved RNTI searches on its low-MCS grants (MCS <=
+ * ISAC_PDSCH_SOLVER_PREF_MCS, default 4: QPSK in every MCS table) and skips the others, unless N grants went by without
+ * a preferred one. Measured: probe CRC on the true hypothesis ~4-5 % because most grants are QAM / multi-layer, which
+ * almost never pass at this receiver; QPSK grants pass 25-90 %. Layer count is not known at plan time (readings carry
+ * no ports), so only the MCS is used. */
+static bool search_pref_skip(solver_rnti_t *r, int mcs)
+{
+  static int n_gap = -1, mcs_max = 4;
+  if (n_gap < 0) {
+    n_gap = getenv("ISAC_PDSCH_SOLVER_PREF") ? atoi(getenv("ISAC_PDSCH_SOLVER_PREF")) : 0;
+    if (getenv("ISAC_PDSCH_SOLVER_PREF_MCS")) mcs_max = atoi(getenv("ISAC_PDSCH_SOLVER_PREF_MCS"));
+  }
+  if (n_gap <= 0 || r->has_cand) return false;
+  if (mcs <= mcs_max) { r->pref_gap = 0; return false; }
+  if (++r->pref_gap >= (uint32_t)n_gap) { r->pref_gap = 0; return false; }
   return true;
 }
 
@@ -380,8 +466,9 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   const uint64_t dci = ++g_dci_seq;
   g_st.planned++;
   if (!r->first_abs) r->first_abs = g_now_abs ? g_now_abs : 1;
+  if (r->key == g_alt_key && r->alt_hash != g_alt_hash) r->n_probe = 0; /* new hypotheses on ITS CORESET: search again */
+  r->alt_hash = g_alt_hash;
   r->key = g_alt_key;
-  if (r->alt_hash != g_alt_hash) { r->alt_hash = g_alt_hash; r->n_probe = 0; } /* new hypotheses: search again */
   r->grants++;
   if ((g_st.planned % 1000) == 0) { /* T26c per-RNTI report: solve time in signal time (30 kHz: 0.5 ms per slot) */
     char b[3000];
@@ -389,10 +476,11 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     for (int i = 0; i < SOLVER_RNTIS && u < (int)sizeof(b) - 80; i++) {
       const solver_rnti_t *q = &g_r[i];
       if (!q->used) continue;
-      u += snprintf(b + u, sizeof(b) - u, " 0x%04x:g%u,%s%.0fms,full%u/%u,snr%.1f", q->rnti, q->grants,
+      u += snprintf(b + u, sizeof(b) - u, " 0x%04x:g%u,%s%.0fms,full%u/%u,snr%.1f,m1:%u/%u,m3:%u/%u,nw:%u/%u,irc:%u/%u", q->rnti, q->grants,
                     q->solved_abs ? "solve=" : "unsolved_age=",
                     0.5 * (double)((q->solved_abs ? q->solved_abs : g_now_abs) - q->first_abs), q->full_ok, q->full_tr,
-                    q->n_snr ? q->snr_ema : -99.f);
+                    q->n_snr ? q->snr_ema : -99.f, q->comb_ok[0], q->comb_try[0], q->comb_ok[1], q->comb_try[1],
+                    q->comb_ok[2], q->comb_try[2], q->comb_ok[3], q->comb_try[3]);
     }
     LOG_A(PHY, "SENSING: PDSCH_SOLVER per-rnti%s\n", b);
   }
@@ -404,6 +492,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   t_rm = 0;
   t_learn_rm = false;
   t_scr = r->solved ? r->scr : -1;
+  t_comb = comb_pick(r);
   if (r->solved) {
     int ri = 0;
     for (int i = 0; i < n_rd; i++)
@@ -441,6 +530,15 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     }
   } else if (csirs_slot) {
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
+  } else if (!r->has_cand && !leader_ok(r)) {
+    /* T26d ISAC_PDSCH_SOLVER_LEADER=1: until some RNTI of this CORESET solved, only its busiest unsolved RNTI searches --
+     * spreading the probe budget over ~15 RNTIs left whole runs without a first solve (replays: ~40 % of runs); the
+     * first solution then seeds every other RNTI through the reuse prior. */
+  } else if (probe_hog(r)) {
+    /* T26d: fair share of the probe budget -- an unsolved RNTI that already spent far more probes than the average
+     * unsolved RNTI waits (a busy undecodable population starved the serving cell's RNTIs: replay f3 0x8f5a unsolved) */
+  } else if (search_pref_skip(r, mcs)) {
+    /* T26d ISAC_PDSCH_SOLVER_PREF: this grant is not search-preferred (QAM) -- wait for a low-MCS grant */
   } else if (search_backoff(r)) {
     /* T26c ISAC_PDSCH_SOLVER_BACKOFF=<probes> (default off): an RNTI whose search has spent that many probes without a
      * single CRC pass is searched on 1 grant in 8 only -- the decode pool goes to RNTIs that decode */
@@ -468,11 +566,18 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     { /* default ids, then each run-time alternative, one per grant -- unless another RNTI of this CORESET already
        * solved: then only that RNTI's scrambling (one RRC template per CORESET) */
       int known = 0;
-      for (int q = 0; q < g_n_key_scr && !known; q++)
-        if (g_key_scr[q].key == g_alt_key) { t_scr = g_key_scr[q].scr; known = 1; }
-      if (!known) {
-        const uint32_t k = r->grants % (uint32_t)(g_n_alt + 1);
-        t_scr = k == 0 ? -1 : g_alt_ids[k - 1];
+      for (int q = 0; q < g_n_key_scr && !known; q++) /* preference, not exclusive: 1 block in 4 still explores */
+        if (g_key_scr[q].key == g_alt_key && ((r->grants / 16u) % 4u) != 3u) { t_scr = g_key_scr[q].scr; known = 1; }
+      if (!known) { /* T26d: the default ids alone for the first 48 grants -- cycling 6+ alternatives from the start made
+                     * the serving population's search 6x slower (replay e9/e10: 0x8f5a unsolved) */
+        if (g_alt_decided) { /* the decided id on 3 grants of 4, the default on the 4th */
+          const uint32_t blk = r->grants / 16u, nd = (uint32_t)(g_n_alt < 3 ? g_n_alt : 3);
+          t_scr = (blk % 4u) == 3u ? -1 : g_alt_ids[(blk / 4u + blk) % nd]; /* top ids by block, default 1 block in 4 */
+        } else {
+          const uint32_t g = r->grants > 48 ? r->grants - 48 : 0;
+          const uint32_t k = r->grants <= 48 ? 0 : (g / 16u) % (uint32_t)(g_n_alt + 1);
+          t_scr = k == 0 ? -1 : g_alt_ids[k - 1];
+        }
       }
     }
     /* 2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best
@@ -573,6 +678,12 @@ static void add_ev(solver_rnti_t *r, nr_dci_bits_t p, uint8_t S)
   else { memmove(r->ev_p, r->ev_p + 1, 15 * sizeof(r->ev_p[0])); memmove(r->ev_S, r->ev_S + 1, 15); r->ev_p[15] = p; r->ev_S[15] = S; }
 }
 
+static int has_id_p(const pending_t *p, int id)
+{
+  for (int i = 0; i < p->n_ids; i++)
+    if (p->ids[i] == id) return 1;
+  return 0;
+}
 static void make_cand(solver_rnti_t *r, const pending_t *p)
 {
   if (r->cand_bm == NULL) r->cand_bm = calloc(1, BM_BYTES);
@@ -603,12 +714,36 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     pending_t *q = &g_p[token & (SOLVER_PENDING - 1)];
     if (q->used && q->token == token) p = q;
   }
+  if (crc_ok && (p == NULL || !credit)) { /* T26d diagnostic: a CRC pass the solver could not use */
+    static _Atomic uint64_t s_lost[2];
+    const uint64_t k = atomic_fetch_add(&s_lost[p == NULL ? 0 : 1], 1) + 1;
+    if (k <= 5 || (k % 100) == 0)
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER lost CRC pass #%llu (%s) token=0x%08x\n", (unsigned long long)k,
+            p == NULL ? "pending entry gone" : "no credit", token);
+  }
+  { /* ISAC_PDSCH_SOLVER_PROBELOG=1 (T26d diagnostic): one line per credited search probe -- which hypothesis was tried */
+    static int s_pl = -1;
+    if (s_pl < 0) s_pl = getenv("ISAC_PDSCH_SOLVER_PROBELOG") ? atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG")) : 0;
+    if (s_pl && p != NULL && credit && p->phase == 0) {
+      int lo = 65535, hi = -1;
+      for (int i = 0; i < p->n_ids; i++) { if (p->ids[i] < lo) lo = p->ids[i]; if (p->ids[i] > hi) hi = p->ids[i]; }
+      const solver_rnti_t *rr = (p->slot >= 0 && p->slot < SOLVER_RNTIS) ? &g_r[p->slot] : NULL;
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER probe rnti=0x%04x key=%d crc=%d probe=%u S=%u add_pos=%u table=%u scr=%d n_ids=%d ids=%d..%d "
+                 "has1662=%d has1664=%d has2102=%d has2104=%d\n", rr ? rr->rnti : 0, rr ? rr->key : -1, (int)crc_ok, p->probe, p->S, p->add_pos,
+            p->table, p->scr, p->n_ids, lo, hi, has_id_p(p, 1662), has_id_p(p, 1664), has_id_p(p, 2102), has_id_p(p, 2104));
+    }
+  }
   if (p == NULL || !credit) {
     if (p) p->used = false;
     pthread_mutex_unlock(&g_mu);
     return;
   }
   solver_rnti_t *r = &g_r[p->slot];
+  if (p->comb >= 1 && (!r->solved || !p->probe)) {
+    const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb >= 5 ? 3 : 0;
+    r->comb_try[ci]++;
+    if (crc_ok) r->comb_ok[ci]++;
+  }
   if (p->probe && crc_ok) g_st.probe_ok++;
   if (!p->probe && crc_ok) g_st.full_ok++;
   if (r->used && p->phase == 1 && r->solved) {
@@ -694,6 +829,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
         g_st.solved++;
         r->solved_abs = p->abs;
+        memset(r->comb_try, 0, sizeof(r->comb_try)); /* receiver choice from post-solve decodes only (pre-solve probes */
+        memset(r->comb_ok, 0, sizeof(r->comb_ok));   /*  fail for every receiver and biased the choice) */
         LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by 2 independent CRC passes: layout %d (%d consistent) "
                    "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%d\n",
               r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,

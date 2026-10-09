@@ -25,6 +25,7 @@
 #include <complex.h>
 #include <math.h>
 #include "nr_pdsch_evm_acc.h"
+#include "nr_irc_cov.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 
@@ -47,6 +48,12 @@ __thread int nr_dlsch_forced_branch = -1;
  * separate live runs cannot answer whether four branches hurt, because propagation, gain state and
  * this rig's own 5-88 % CRC swing all change between runs. */
 __thread int nr_dlsch_forced_mask = -1;
+__thread int nr_dlsch_mrc_mode_override = -1;
+__thread int nr_dlsch_irc_override = -1; /* T26d: per-grant ISAC_RX_IRC value (-1 = env) */ /* T26d ISAC_RX_MRC_PER_RNTI: per-grant combining mode (set by the passive decode) */
+__thread nr_irc_cov_t nr_irc_dmrs_cov; /* ISAC_RX_IRC=4, nr_irc_cov.h */
+__thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c */
+__thread int nr_pdsch_ldpc_iters_override = -1; /* T26d ISAC_LDPC_ITERS_AB (set by the PDSCH queue, read by the passive decode) */
+__thread int nr_dlsch_eq_override = -1; /* T26d ISAC_RX_EQ_AB: multi-layer equaliser per grant, 0 fixed MMSE, 1 float MMSE, 2 ML (nl 2, Qm<=6) */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
 __thread int nr_dlsch_chest_per_symbol = 0;
 extern __thread uint32_t nr_dl_chest_nvar_ant[]; // per-branch chest noise, published by the chest on this thread // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
@@ -721,7 +728,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
   static int s_mmse_float = -1;
   if (s_mmse_float < 0)
     s_mmse_float = (getenv("ISAC_MMSE_FLOAT") != NULL) ? atoi(getenv("ISAC_MMSE_FLOAT")) : 0;
-  if (s_mmse_float > 0) {
+  if (nr_dlsch_eq_override >= 0 ? nr_dlsch_eq_override == 1 : s_mmse_float > 0) {
     const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
     const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
     const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
@@ -1039,7 +1046,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   static __thread int16_t t_mrc_wq15[4] = {32767, 32767, 32767, 32767};
   static __thread double t_mrc_w[4] = {1, 1, 1, 1};
   static __thread int t_mrc_mode = -1;
+  static __thread int t_mrc_env = -1; /* T26d: ISAC_RX_MRC_MODE as configured; t_mrc_mode = per-grant effective mode */
   static __thread double t_mrc_min_db = 12.0;
+  if (t_mrc_env >= 0) /* already resolved: apply the per-grant override (nr_dlsch_mrc_mode_override, -1 = none) */
+    t_mrc_mode = nr_dlsch_mrc_mode_override >= 0 ? nr_dlsch_mrc_mode_override : t_mrc_env;
   if (t_mrc_mode < 0) {
     const char *e = getenv("ISAC_RX_MRC_MODE");
     /* DEFAULT 0 -- MEASURED, not inherited. A 2x4 sweep on the live cell (modes alternated so
@@ -1057,6 +1067,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
      * frequency-aligned or the antennas moved onto one board: hardware, not code. Keep the knob and
      * the RXBRANCH probe for that work; do not re-enable a combining mode by assumption. */
     t_mrc_mode = (e != NULL) ? atoi(e) : 0;
+    t_mrc_env = t_mrc_mode;
+    if (nr_dlsch_mrc_mode_override >= 0) t_mrc_mode = nr_dlsch_mrc_mode_override;
     const char *d = getenv("ISAC_RX_BRANCH_MIN_DB");
     if (d != NULL) {
       t_mrc_min_db = atof(d);
@@ -1079,6 +1091,13 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   // Controlled by ue->do_ml (set via -E flag in dlsim, or ue->do_ml in the UE struct).
   // When false (default), MMSE equalization is used for all configurations.
   bool do_ml = ue->do_ml;
+  { /* ISAC_RX_ML_2L=1 (T26d): joint ML LLRs for 2 layers (Qm <= 6) instead of MMSE; per grant via ISAC_RX_EQ_AB */
+    static int s_ml = -1;
+    if (s_ml < 0) s_ml = getenv("ISAC_RX_ML_2L") ? atoi(getenv("ISAC_RX_ML_2L")) : 0;
+    if (nr_dlsch_eq_override >= 0) do_ml = nr_dlsch_eq_override == 2;
+    else if (s_ml) do_ml = true;
+  }
+  if (rho_dl == NULL) do_ml = false; /* no inter-layer correlation buffer (passive decode allocates it on request) */
 
   // Reinterpret flat dl_ch_estimates_ext as [nl][nbRx][rx_size_symbol]
   c16_t(*chFext)[nbRx][rx_size_symbol] = (void *)dl_ch_estimates_ext;
@@ -1281,6 +1300,19 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         t_mrc_rx_index = 0;
         avgs = avg[0];
       } else if (t_mrc_mode == 1) {
+        /* ISAC_RX_BEST_BY_SNR=1 (T26d): pick the branch with the best |h|^2 / chest noise, not the highest |h|^2 --
+         * a noisy branch has a large |h|^2 estimate (noise included) and was being selected, which also shows up as
+         * a QAM amplitude ratio kappa << 1 (signal part of h* y small against the noise-inflated |h|^2). */
+        static int s_bsnr = -1;
+        if (s_bsnr < 0) s_bsnr = getenv("ISAC_RX_BEST_BY_SNR") && atoi(getenv("ISAC_RX_BEST_BY_SNR")) ? 1 : 0;
+        if (s_bsnr) {
+          double bq = -1.0;
+          for (int aarx = 0; aarx < nbRx && aarx < 4; aarx++) {
+            const double nv = nr_dl_chest_nvar_ant[aarx] > 0 ? (double)nr_dl_chest_nvar_ant[aarx] : 1.0;
+            const double q = (double)avg[aarx] / nv;
+            if (q > bq) { bq = q; best = aarx; }
+          }
+        }
         t_mrc_nb_rx = 1;
         t_mrc_rx_index = best;
         avgs = avg[best];
@@ -1577,6 +1609,199 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
   }
 
+  /* ISAC_RX_MRC_ALIGN=1 (T26d): per-symbol phase alignment of the MRC branches. Each branch is equalised against its
+   * own DM-RS estimate, but on this rig the branches' phases drift DIFFERENTLY between the DM-RS and the data symbols
+   * (independent board LOs), so sum_a h_a* y_a adds partly incoherently. u_a = h_a* y_a ~ |h_a|^2 x e^{j th_a}; the
+   * cross-correlation c_a = sum_i u_a conj(u_ref) ~ e^{j(th_a - th_ref)} needs no decisions. Rotating h_a by arg(c_a)
+   * re-phases branch a onto the strongest live branch before nr_channel_compensation() combines. */
+  if (nl == 1 && mrc_nb_rx > 1 && nb_re_pdsch >= 12) {
+    static int s_align = -1;
+    if (s_align < 0) s_align = getenv("ISAC_RX_MRC_ALIGN") ? atoi(getenv("ISAC_RX_MRC_ALIGN")) : 0;
+    if (s_align) {
+      const int a0 = mrc_rx_index, a1 = mrc_rx_index + mrc_nb_rx;
+      double pw[NR_PDSCH_EVM_MAX_RX * 2] = {0};
+      int ref = -1;
+      for (int a = a0; a < a1 && a < NR_PDSCH_EVM_MAX_RX * 2; a++) {
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          const c16_t h = chFext[0][a][i];
+          pw[a] += (double)h.r * h.r + (double)h.i * h.i;
+        }
+        if (pw[a] > 0.0 && (ref < 0 || pw[a] > pw[ref])) ref = a;
+      }
+      /* ISAC_RX_MRC_ALIGN=2: one phase per chunk of 48 REs (4 RB) instead of per symbol -- follows a phase SLOPE
+       * across frequency (different per-board timing / shared delay estimate) as well as the common rotation. */
+      const uint32_t chunk = s_align >= 2 ? 48u : nb_re_pdsch;
+      for (int a = a0; ref >= 0 && a < a1; a++) {
+        if (a == ref || pw[a] <= 0.0) continue;
+       for (uint32_t c0 = 0; c0 < nb_re_pdsch; c0 += chunk) {
+        const uint32_t c1 = c0 + chunk < nb_re_pdsch ? c0 + chunk : nb_re_pdsch;
+        double cr = 0.0, ci = 0.0;
+        for (uint32_t i = c0; i < c1; i++) {
+          const c16_t ha = chFext[0][a][i], ya = rxdataF_ext[a][i], hr = chFext[0][ref][i], yr = rxdataF_ext[ref][i];
+          const double uar = (double)ha.r * ya.r + (double)ha.i * ya.i, uai = (double)ha.r * ya.i - (double)ha.i * ya.r;
+          const double urr = (double)hr.r * yr.r + (double)hr.i * yr.i, uri = (double)hr.r * yr.i - (double)hr.i * yr.r;
+          cr += uar * urr + uai * uri; /* u_a conj(u_ref) */
+          ci += uai * urr - uar * uri;
+        }
+        const double mag = sqrt(cr * cr + ci * ci);
+        if (mag <= 0.0) continue;
+        const double c = cr / mag, sn = ci / mag; /* e^{j d}: rotating h_a by +d multiplies u_a by e^{-j d} */
+        c16_t *h = chFext[0][a];
+        const uint32_t e1 = (chunk == nb_re_pdsch) ? rx_size_symbol : c1;
+        for (uint32_t i = c0; i < e1; i++) {
+          const double hr2 = h[i].r * c - h[i].i * sn, hi2 = h[i].r * sn + h[i].i * c;
+          h[i].r = (int16_t)lround(hr2); h[i].i = (int16_t)lround(hi2);
+        }
+       }
+      }
+    }
+  }
+
+  /* ISAC_RX_IRC=1 (T26d prototype): MMSE-IRC for 1 layer by spatial whitening. Per chunk of 48 REs (4 RB) of this
+   * symbol the interference+noise covariance R (nbRx x nbRx) is estimated from decision-directed residuals
+   * e = y - h s_hat (s_hat: MRC decision over all branches), shrunk toward its diagonal (ISAC_RX_IRC_SHRINK, default
+   * 0.3) and loaded; with R = L L^H, y' = L^-1 y and h' = L^-1 h make the stock MRC combiner compute h^H R^-1 y and
+   * the QAM thresholds h^H R^-1 h, i.e. IRC, with no change to the LLR code. All branches combine (mode-independent);
+   * the whitened pair is rescaled so its combined power equals the original combined power of this mode's slice
+   * (log2_maxh stays valid). Decision-directed: self-nulling at high symbol-error rates is the known risk. */
+  if (nl >= 1 && nl <= 4 && nbRx >= 2 && nbRx <= 4 && nb_re_pdsch >= 48) {
+    static int s_irc = -1;
+    static double s_shrink = 0.3;
+    if (s_irc < 0) {
+      s_irc = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
+      if (getenv("ISAC_RX_IRC_SHRINK")) s_shrink = atof(getenv("ISAC_RX_IRC_SHRINK"));
+    }
+    const int s_irc_env = s_irc;
+    if (nr_dlsch_irc_override >= 0) s_irc = nr_dlsch_irc_override; /* per-grant (ISAC_RX_MRC_PER_RNTI) */
+    if (s_irc && (nl == 1 || s_irc == 4)) { /* N layers: only the DM-RS covariance (4) -- no data decisions */
+      const int qm = dlsch->cw_info.qamModOrder;
+      const int lmax = (1 << (qm / 2)) - 1;
+      double ms = 0.0; int nlev = 0;
+      for (int l = 1; l <= lmax; l += 2) { ms += (double)l * l; nlev++; }
+      const double ideal_pow = 2.0 * ms / nlev;
+      const int nb = nbRx;
+      /* combined power of the mode's original slice, for the rescale */
+      double pslice = 0.0, pall = 0.0;
+      for (uint32_t i = 0; i < nb_re_pdsch; i++)
+        for (int a = 0; a < nb; a++) {
+          const double p2 = (double)chFext[0][a][i].r * chFext[0][a][i].r + (double)chFext[0][a][i].i * chFext[0][a][i].i;
+          pall += p2;
+          if (a >= mrc_rx_index && a < mrc_rx_index + mrc_nb_rx) pslice += p2;
+        }
+      /* MRC decisions over all branches, symbol RMS scale */
+      double complex *xs = s_irc == 4 ? NULL : malloc(sizeof(double complex) * nb_re_pdsch);
+      double pw = 0.0; uint32_t nv = 0;
+      for (uint32_t i = 0; xs && i < nb_re_pdsch; i++) {
+        double complex num = 0; double g = 0;
+        for (int a = 0; a < nb; a++) {
+          const double complex h = chFext[0][a][i].r + I * chFext[0][a][i].i, y = rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i;
+          num += conj(h) * y; g += creal(h) * creal(h) + cimag(h) * cimag(h);
+        }
+        xs[i] = g > 0 ? num / g : 0;
+        if (g > 0) { pw += creal(xs[i]) * creal(xs[i]) + cimag(xs[i]) * cimag(xs[i]); nv++; }
+      }
+      if (((xs && nv >= 24 && pw > 0) || s_irc == 4) && pall > 0) {
+        const double scale = xs ? sqrt(ideal_pow / (pw / nv)) : 1.0;
+        for (uint32_t i = 0; xs && i < nb_re_pdsch; i++) { /* sliced decision back in channel units */
+          double vi = creal(xs[i]) * scale, vq = cimag(xs[i]) * scale;
+          double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
+          si = si > lmax ? lmax : si < -lmax ? -lmax : si; sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
+          xs[i] = (si + I * sq) / scale;
+        }
+        const double resc = sqrt(pslice / pall); /* applied together with the whitening normaliser below */
+        for (uint32_t c0 = 0; c0 < nb_re_pdsch; c0 += 48) {
+          const uint32_t c1 = c0 + 48 < nb_re_pdsch ? c0 + 48 : nb_re_pdsch;
+          double complex R[4][4] = {{0}};
+          /* ISAC_RX_IRC>=2: first correct each branch's estimate by its chunk LS gain alpha_a = <y_a, h_a s>/|h_a s|^2
+           * (measured |alpha| ~0.5-0.85 < 1: the estimate is inflated by its own noise and its phase drifts), so the
+           * residual does not carry (1-alpha) h s -- which made R see the signal and null it (self-nulling). */
+          double complex alpha[4] = {1, 1, 1, 1};
+          if (s_irc == 2 || s_irc == 3)
+            for (int a = 0; a < nb; a++) {
+              double complex num = 0; double den = 0;
+              for (uint32_t i = c0; i < c1; i++) {
+                const double complex hs = (chFext[0][a][i].r + I * chFext[0][a][i].i) * xs[i];
+                num += (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) * conj(hs);
+                den += creal(hs) * creal(hs) + cimag(hs) * cimag(hs);
+              }
+              if (den > 0) alpha[a] = num / den;
+              for (uint32_t i = c0; i < c1; i++) {
+                const double complex h2 = (chFext[0][a][i].r + I * chFext[0][a][i].i) * alpha[a];
+                chFext[0][a][i].r = (int16_t)fmax(-32768.0, fmin(32767.0, lround(creal(h2))));
+                chFext[0][a][i].i = (int16_t)fmax(-32768.0, fmin(32767.0, lround(cimag(h2))));
+              }
+            }
+          for (uint32_t i = c0; xs && i < c1; i++) {
+            double complex e[4];
+            for (int a = 0; a < nb; a++)
+              e[a] = (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) - (chFext[0][a][i].r + I * chFext[0][a][i].i) * xs[i];
+            for (int a = 0; a < nb; a++)
+              for (int b = 0; b < nb; b++) R[a][b] += e[a] * conj(e[b]);
+          }
+          if (s_irc == 4) { /* DM-RS residual covariance of this 4-RB group (chunks of 48 data REs ~ 4 RB) */
+            const int g = (int)(c0 / 48u);
+            if (!nr_irc_dmrs_cov.valid || g >= nr_irc_dmrs_cov.ng || nr_irc_dmrs_cov.n[g] < 8 || nr_irc_dmrs_cov.nb != nb)
+              continue;
+            for (int a = 0; a < nb; a++)
+              for (int b = 0; b < nb; b++) R[a][b] = nr_irc_dmrs_cov.R[g][a][b] * (double)(c1 - c0) / (double)nr_irc_dmrs_cov.n[g];
+          }
+          double dmean = 0.0;
+          for (int a = 0; a < nb; a++) { for (int b = 0; b < nb; b++) R[a][b] /= (double)(c1 - c0); dmean += creal(R[a][a]); }
+          dmean /= nb;
+          if (dmean <= 0) continue;
+          for (int a = 0; a < nb; a++)
+            for (int b = 0; b < nb; b++)
+              R[a][b] = (a == b) ? creal(R[a][a]) + 1e-3 * dmean : (s_irc == 3 ? 0.0 : (1.0 - s_shrink) * R[a][b]); /* 3: diagonal = noise-weighted MRC */
+          /* Cholesky R = L L^H */
+          double complex L[4][4] = {{0}};
+          bool ok = true;
+          for (int j = 0; j < nb && ok; j++) {
+            double d = creal(R[j][j]);
+            for (int k = 0; k < j; k++) d -= creal(L[j][k] * conj(L[j][k]));
+            if (d <= 0) { ok = false; break; }
+            L[j][j] = sqrt(d);
+            for (int i2 = j + 1; i2 < nb; i2++) {
+              double complex v = R[i2][j];
+              for (int k = 0; k < j; k++) v -= L[i2][k] * conj(L[j][k]);
+              L[i2][j] = v / L[j][j];
+            }
+          }
+          if (!ok) continue;
+          /* forward substitution L z = v, normalised by sqrt(dmean) so the whitened noise has the mean branch level,
+           * then scaled by resc (this mode's slice power / all-branch power) */
+          const double nrm = sqrt(dmean) * resc;
+          for (uint32_t i = c0; i < c1; i++) {
+            double complex vy[4], vh[4][4], zy[4], zh[4][4];
+            for (int a = 0; a < nb; a++) {
+              vy[a] = rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i;
+              for (int l = 0; l < nl; l++) vh[l][a] = chFext[l][a][i].r + I * chFext[l][a][i].i;
+            }
+            for (int a = 0; a < nb; a++) {
+              double complex ty = vy[a];
+              for (int k = 0; k < a; k++) ty -= L[a][k] * zy[k];
+              zy[a] = ty / L[a][a];
+              for (int l = 0; l < nl; l++) {
+                double complex th = vh[l][a];
+                for (int k = 0; k < a; k++) th -= L[a][k] * zh[l][k];
+                zh[l][a] = th / L[a][a];
+              }
+            }
+            for (int a = 0; a < nb; a++) {
+              #define S16(v) ((int16_t)fmax(-32768.0, fmin(32767.0, lround(v))))
+              rxdataF_ext[a][i].r = S16(creal(zy[a]) * nrm); rxdataF_ext[a][i].i = S16(cimag(zy[a]) * nrm);
+              for (int l = 0; l < nl; l++) { chFext[l][a][i].r = S16(creal(zh[l][a]) * nrm); chFext[l][a][i].i = S16(cimag(zh[l][a]) * nrm); }
+              #undef S16
+            }
+          }
+        }
+        mrc_rx_index = 0;
+        mrc_nb_rx = nbRx;
+      }
+      free(xs);
+    }
+    s_irc = s_irc_env;
+  }
+
   /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h.
    * x = ZF over the combined branches (nl = 1: MRC), per layer; decisions per layer; branch fit uses sum_l h_l s_l. */
   if (nr_pdsch_evm_acc.armed && nl >= 1 && nl <= 4 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
@@ -1674,6 +1899,36 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         const double sig = (cr[a] * cr[a] + ci[a] * ci[a]) / P[a];
         ea->sig[a] += sig;
         ea->res[a] += Y[a] > sig ? Y[a] - sig : 0.0;
+        ea->alpha_abs[a] += sqrt(cr[a] * cr[a] + ci[a] * ci[a]) / P[a]; /* |alpha_a|: 1 = unbiased channel estimate */
+        ea->alpha_n[a]++;
+      }
+      { /* T26d: cross-branch correlation of the LS residuals e_a = y_a - alpha_a h_a s (white noise: ~0) */
+        double complex ar[NR_PDSCH_EVM_MAX_RX];
+        for (int a = 0; a < nb; a++) ar[a] = P[a] > 0.0 ? (cr[a] + I * ci[a]) / P[a] : 0;
+        double complex C[NR_PDSCH_EVM_MAX_RX][NR_PDSCH_EVM_MAX_RX] = {{0}};
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          if (isnan(xr[0][i])) continue;
+          double sr0[4], sq0[4];
+          for (int l = 0; l < nl; l++) {
+            const double vi = xr[l][i] * scale[l], vq = xi[l][i] * scale[l];
+            double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
+            si = si > lmax ? lmax : si < -lmax ? -lmax : si; sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
+            sr0[l] = si / scale[l]; sq0[l] = sq / scale[l];
+          }
+          double complex e[NR_PDSCH_EVM_MAX_RX];
+          for (int a = 0; a < nb; a++) {
+            double complex hs = 0;
+            for (int l = 0; l < nl; l++) hs += (chFext[l][a][i].r + I * chFext[l][a][i].i) * (sr0[l] + I * sq0[l]);
+            e[a] = (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) - ar[a] * hs;
+          }
+          for (int a = 0; a < nb; a++)
+            for (int b = a; b < nb; b++) C[a][b] += e[a] * conj(e[b]);
+        }
+        double rs = 0.0; int rn = 0;
+        for (int a = 0; a < nb; a++)
+          for (int b = a + 1; b < nb; b++)
+            if (creal(C[a][a]) > 0 && creal(C[b][b]) > 0) { rs += cabs(C[a][b]) / sqrt(creal(C[a][a]) * creal(C[b][b])); rn++; }
+        if (rn) { ea->rho_sum += rs / rn; ea->rho_n++; }
       }
       ea->n_re += nv;
       ea->n_sym++;
@@ -1726,6 +1981,48 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   snprintf(filename, 50, "rxdataF_comp00_symb_%d_nr_slot_rx_%d.m", symbol, nr_slot_rx);
   write_output(filename, "rxdataF_comp00", &rxdataF_comp[0][0][symbol * pdsch_buf_size_max], pdsch_buf_size_max, 1, 1);
 #endif
+
+  /* ISAC_RX_QAM_AGC=1 (T26d): amplitude consistency of the QAM soft decisions. nr_channel_compensation() gives
+   * z = sum_a h_a* y_a and the QAM thresholds mag = sum_a |h_a|^2 * n1; for a coherent combination the symbol mean of
+   * |Re z|,|Im z| equals the mean of mag_a (n1 = mean |x| per dimension for 16/64/256QAM). Branches whose phase drifts
+   * differently between the DM-RS and the data symbols (independent X410 board LOs) add partly incoherently in MRC,
+   * shrinking |z| against mag, which biases every amplitude bit toward the inner points: QPSK is immune, QAM is not.
+   * kappa = mean(|Re z|,|Im z|) / mean(mag_a) rescales the thresholds per symbol (kappa also logged via EVMGRANT). */
+  if (nl == 1 && dlsch->cw_info.qamModOrder > 2 && nb_re_pdsch >= 24) {
+    static int s_agc = -1;
+    if (s_agc < 0) s_agc = getenv("ISAC_RX_QAM_AGC") ? atoi(getenv("ISAC_RX_QAM_AGC")) : 0;
+    const c16_t *z = p_rxComp[0];
+    const c16_t *ma = dl_ch_mag[symbol][0];
+    double sz = 0.0, sm = 0.0;
+    for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+      sz += abs(z[i].r) + abs(z[i].i);
+      sm += 2.0 * ma[i].r;
+    }
+    const double kappa = sm > 0.0 ? sz / sm : 1.0;
+    if (nr_pdsch_evm_acc.armed) { nr_pdsch_evm_acc.kappa_sum += kappa; nr_pdsch_evm_acc.kappa_n++; }
+    if (s_agc && kappa > 0.2 && kappa < 1.5) {
+      const int16_t kq = (int16_t)lround(kappa * 32767.0 > 32767.0 ? 32767.0 : kappa * 32767.0);
+      const int qm = dlsch->cw_info.qamModOrder;
+      if (kappa < 1.0)
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          c16_t *a1 = &dl_ch_mag[symbol][0][i], *b1 = &dl_ch_magb[symbol][0][i], *r1 = &dl_ch_magr[symbol][0][i];
+          a1->r = (int16_t)(((int32_t)a1->r * kq) >> 15); a1->i = (int16_t)(((int32_t)a1->i * kq) >> 15);
+          if (qm > 4) { b1->r = (int16_t)(((int32_t)b1->r * kq) >> 15); b1->i = (int16_t)(((int32_t)b1->i * kq) >> 15); }
+          if (qm > 6) { r1->r = (int16_t)(((int32_t)r1->r * kq) >> 15); r1->i = (int16_t)(((int32_t)r1->i * kq) >> 15); }
+        }
+      else if (s_agc >= 2) { /* =2 only: kappa >= 1 scales the thresholds UP (noise inflates mean |z|; off by default) */
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          c16_t *a1 = &dl_ch_mag[symbol][0][i], *b1 = &dl_ch_magb[symbol][0][i], *r1 = &dl_ch_magr[symbol][0][i];
+          const double f = kappa;
+          #define SATK(v) ((int16_t)fmax(-32768.0, fmin(32767.0, (double)(v) * f)))
+          a1->r = SATK(a1->r); a1->i = SATK(a1->i);
+          if (qm > 4) { b1->r = SATK(b1->r); b1->i = SATK(b1->i); }
+          if (qm > 6) { r1->r = SATK(r1->r); r1->i = SATK(r1->i); }
+          #undef SATK
+        }
+      }
+    }
+  }
 
   // MRC is performed inline by nr_channel_compensation; apply MMSE for multi-layer
   start_meas_nr_ue_phy(ue, DLSCH_MRC_MMSE_STATS);

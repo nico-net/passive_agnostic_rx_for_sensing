@@ -43,6 +43,7 @@ typedef struct {
   uint8_t probe;       ///< 1 = first-code-block probe (search), 0 = full decode (solved parameters)
   uint8_t rm;          ///< 1 = rate-match around the run-time-discovered CSI-RS resources of this slot
   uint32_t token;      ///< hand back to nr_pdsch_solver_feedback()
+  uint8_t comb;        ///< T26d ISAC_RX_MRC_PER_RNTI: combining mode for this variant (1 best branch, 3 MRC; 0 default)
   int32_t scr;         ///< T26c: -1 = default PDSCH scrambling ids; else DM-RS + data scrambling id = this run-time nID
 } nr_pdsch_solver_var_t;
 
@@ -80,7 +81,7 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db);
  * it. Nothing configured; n = 0 restores default-only. coreset_key (the CORESET's PDCCH nID, or -1) groups RNTIs: once
  * one RNTI of a CORESET solved, the others of that CORESET try only its scrambling. The list may also carry the
  * scrambling ids of run-time discovered NZP CSI-RS (ISAC_PDSCH_SOLVER_SCR_CSIRS=1): neighbour-cell candidates. */
-void nr_pdsch_solver_set_alt_scr(int coreset_key, const uint16_t *ids, int n);
+void nr_pdsch_solver_set_alt_scr(int coreset_key, const uint16_t *ids, int n, bool first_is_decided);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 

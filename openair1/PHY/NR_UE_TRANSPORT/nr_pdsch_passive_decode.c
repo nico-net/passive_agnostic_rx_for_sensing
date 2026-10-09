@@ -44,6 +44,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include <math.h>
 #include <pthread.h> // sqrt/floor/log10 (EQDIAG)
 #include "nr_pdsch_evm_acc.h"
+#include "nr_irc_cov.h"
 #include "nr_passive_tpool.h"
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
@@ -104,6 +105,23 @@ static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static uint64_t g_pdtim_calls = 0;
+/* ISAC_CHEST_PDP_DIAG=0 (T26d): skip the per-call BRDELAY/PDP diagnostic of the channel estimator (double-precision
+ * pass over the whole IDFT output on every (antenna, DM-RS symbol)); default 1 = unchanged. */
+static int chest_pdp_diag_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 1;
+  return en;
+}
+/* ISAC_PDSCH_HARQ_COMBINE=1 (T26d): the passive HARQ soft combining (same RNTI + HARQ id + NDI: a retransmission is
+ * LDPC-decoded INTO the stored soft buffer of the failed first transmission; 64 LRU entries) on its own flag -- it
+ * existed only inside the ISAC_AGNOSTIC_V2 bundle. */
+static int harq_combine_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_HARQ_COMBINE") && atoi(getenv("ISAC_PDSCH_HARQ_COMBINE")) ? 1 : 0;
+  return en;
+}
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
 static __thread uint64_t t_pdtim_cpu0;
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
@@ -903,7 +921,7 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     if (u > 0)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
-  if (nr_agnostic_v2()) {
+  if (nr_agnostic_v2() || harq_combine_on()) {
     uint64_t init_tx_hits, init_tx_evicts;
     pthread_mutex_lock(&g_harqc_lock);
     init_tx_hits   = g_dl_harq_init.hits;
@@ -1249,6 +1267,8 @@ static uint64_t gw_fingerprint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *p, con
   GWFP(p->dmrs_ports); GWFP(p->nscid); GWFP(p->n_dmrs_cdm_groups); GWFP(p->dmrsConfigType); GWFP(p->refPoint);
   GWFP(p->BWPStart); GWFP(p->BWPSize); GWFP(fa->first_rb); GWFP(fa->num_rbs); GWFP(fa->n_prb_list); GWFP(fa->prg);
   uint64_t fob; memcpy(&fob, &fo, sizeof(fob)); GWFP(fob);
+  { extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
+    GWFP(nr_dlsch_mrc_mode_override + 1); GWFP(nr_dlsch_irc_override + 1); } /* T26d: LLRs depend on the receiver */
 #undef GWFP
   return h;
 }
@@ -1386,7 +1406,16 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     return false;
   }
 
-  TB_parameters.max_ldpc_iterations = 8; // same default init_nr_ue_dlsch() gives the real DLSCH
+  /* ISAC_LDPC_ITERS=<n> (cherry-picked from csd/snr-audit 2e63cdb3ee, default off = 8, the init_nr_ue_dlsch() default): the OAI
+   * int8 flooding min-sum decoder stops at 8 iterations; at low SNR (the passive receiver's 6-10 dB grants) that leaves coding
+   * gain on the table. Only the full TB decode uses it (a CB0 probe keeps the batch's own limit). */
+  {
+    static _Atomic int s_iters = -1;
+    if (s_iters < 0) { const char *e = getenv("ISAC_LDPC_ITERS"); int v = e ? atoi(e) : 8; s_iters = (v >= 1 && v <= 255) ? v : 8; }
+    TB_parameters.max_ldpc_iterations = (uint8_t)s_iters;
+    extern __thread int nr_pdsch_ldpc_iters_override;
+    if (nr_pdsch_ldpc_iters_override > 0) TB_parameters.max_ldpc_iterations = (uint8_t)nr_pdsch_ldpc_iters_override; /* ISAC_LDPC_ITERS_AB */
+  }
   TB_parameters.rv_index = cw->rv;
   TB_parameters.tbslbrm = dlsch_config->tbslbrm;
   TB_parameters.abort_decode = &h->abort_decode;
@@ -2664,7 +2693,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
         chest_cfg.number_rbs = seg[s].n_prb;
         chest_cfg.resource_alloc = 1; /* each segment is contiguous */
         uint32_t nvar_tmp = 0;
-        nr_dl_chest_diag_request = 1;
+        nr_dl_chest_diag_request = chest_pdp_diag_on();
         nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                     get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                     pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
@@ -2701,7 +2730,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     dmrs_last = m;
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
-      nr_dl_chest_diag_request = 1; // consumer thread only: BRDELAY/PDP diagnostics
+      nr_dl_chest_diag_request = chest_pdp_diag_on(); // consumer thread only: BRDELAY/PDP diagnostics
       nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
@@ -2748,6 +2777,155 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     n_dmrs_sym++;
   }
   nr_dl_chest_only_ant = -1;
+  /* ISAC_CHEST_OCC=1 (T26d): multi-layer DM-RS estimate with the delay removed BEFORE the FD-OCC despreading.
+   * The stock type-1 estimator averages each OCC pair (2 comb REs, 4 subcarriers apart) first and compensates the
+   * delay afterwards; a delay tau rotates the pair by 2 pi 4 df tau, so the pair average leaks the other port
+   * (1 us: ~-9 dB; 2 us: ~-3 dB) -- a per-layer SINR cap that only multi-layer grants see. Here, per branch and CDM
+   * group: LS z_j = p_ref(j) y(k_j); delay phase slope from lag-2 products (same OCC sign); derotate; per RB a 2-unknown
+   * LS (orthogonal OCC: mean(z) and mean(w z)); linear interpolation between RB centres; rerotate. Nl >= 2,
+   * type 1, contiguous, single-symbol ports < 4 only. ISAC_CHEST_OCC_AB=1: per grant via nr_pdsch_chest_occ_override. */
+  {
+    extern __thread int nr_pdsch_chest_occ_override;
+    static int s_occ = -1;
+    if (s_occ < 0) s_occ = getenv("ISAC_CHEST_OCC") ? atoi(getenv("ISAC_CHEST_OCC")) : 0;
+    const int occ_on = nr_pdsch_chest_occ_override >= 0 ? nr_pdsch_chest_occ_override : s_occ;
+    const int nlay = cw->Nl;
+    if (occ_on && nlay >= 2 && nlay <= 4 && !seg_path && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1
+        && freq_alloc->n_prb_list == 0 && fp->nb_antennas_rx <= 4 && freq_alloc->num_rbs >= 2) {
+      int port[4], okp = 1;
+      for (int l = 0; l < nlay; l++) {
+        port[l] = get_dmrs_port(l, dlsch_config->dmrs_ports);
+        if (port[l] < 0 || port[l] >= 4) okp = 0;
+      }
+      const int nb = fp->nb_antennas_rx, N = fp->ofdm_symbol_size, nrb = freq_alloc->num_rbs;
+      const int rb_offset = freq_alloc->first_rb + (dlsch_config->refPoint ? 0 : dlsch_config->BWPStart);
+      const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * 12;
+      const float beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, false);
+      const int16_t dmrs_scaling = (int16_t)((1 / beta) * (1 << 14));
+      for (int m = 0; okp && m < fp->symbols_per_slot; m++) {
+        if (!((dmrs_full >> m) & 1)) continue;
+        c16_t pilot[4][3280] __attribute__((aligned(16)));
+        const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch_config->dlDmrsScramblingId,
+                                             dlsch_config->nscid, proc->nr_slot_rx, m);
+        for (int l = 0; l < nlay; l++)
+          nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot[l], 1000 + port[l], 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
+        for (int cg = 0; cg < 2; cg++) {
+          int lay[4], nlg = 0;
+          for (int l = 0; l < nlay; l++)
+            if (port[l] / 2 == cg) lay[nlg++] = l;
+          if (nlg == 0) continue;
+          const int nj = nrb * 6;
+          for (int a = 0; a < nb; a++) {
+            static __thread double complex z[3280];
+            double complex sl = 0;
+            for (int j = 0; j < nj; j++) {
+              const c16_t pl = pilot[lay[0]][6 * rb_offset + j];
+              const c16_t y = rxdataF[a][m * N + (sc0 + 2 * j + cg) % N];
+              z[j] = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
+              if (j >= 2) sl += z[j] * conj(z[j - 2]);
+            }
+            const double phi = carg(sl) / 4.0; /* phase per subcarrier */
+            double complex hrb[4][275];
+            for (int rb = 0; rb < nrb; rb++) {
+              double complex acc[4] = {0};
+              for (int q = 0; q < 6; q++) {
+                const int j = rb * 6 + q, k = 2 * j + cg;
+                const double complex zd = z[j] * cexp(-I * phi * k);
+                for (int g = 0; g < nlg; g++) {
+                  const c16_t pq = pilot[lay[g]][6 * rb_offset + j], pr = pilot[lay[0]][6 * rb_offset + j];
+                  const double w = ((double)pq.r * pr.r + (double)pq.i * pr.i) >= 0 ? 1.0 : -1.0;
+                  acc[g] += w * zd;
+                }
+              }
+              for (int g = 0; g < nlg; g++) hrb[g][rb] = acc[g] / 6.0;
+            }
+            for (int g = 0; g < nlg; g++) {
+              c16_t *h = (c16_t *)&pdsch_dl_ch_estimates[lay[g] * nb + a][N * m];
+              for (int k = 0; k < nrb * 12; k++) {
+                const double x = ((double)k - 5.5) / 12.0; /* RB-centre coordinate */
+                int r0 = (int)floor(x);
+                if (r0 < 0) r0 = 0;
+                if (r0 > nrb - 2) r0 = nrb - 2;
+                double t = x - r0;
+                if (t < 0) t = 0;
+                if (t > 1) t = 1;
+                const double complex v = ((1 - t) * hrb[g][r0] + t * hrb[g][r0 + 1]) * cexp(I * phi * k);
+                h[k].r = (int16_t)fmax(-32768.0, fmin(32767.0, lround(creal(v))));
+                h[k].i = (int16_t)fmax(-32768.0, fmin(32767.0, lround(cimag(v))));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  /* ISAC_RX_IRC=4 (T26d): interference+noise covariance from the DM-RS residuals h_ls - h_est per 4-RB group, on every
+   * DM-RS symbol of the grant (port 1000 comb, type 1, layer 0), for the whitening IRC in nr_rx_pdsch(). */
+  {
+    extern __thread int nr_dlsch_irc_override;
+    static int s_ircenv = -1;
+    if (s_ircenv < 0) s_ircenv = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
+    const int irc_mode = nr_dlsch_irc_override >= 0 ? nr_dlsch_irc_override : s_ircenv;
+    nr_irc_dmrs_cov.valid = 0;
+    if (irc_mode == 4 && !seg_path && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 && fp->nb_antennas_rx <= 4
+        && freq_alloc->n_prb_list == 0) {
+      const int nb = fp->nb_antennas_rx, N = fp->ofdm_symbol_size;
+      const int nrb = freq_alloc->num_rbs, ng = (nrb + 3) / 4;
+      if (ng <= NR_IRC_MAX_GROUPS) {
+        memset(&nr_irc_dmrs_cov, 0, sizeof(nr_irc_dmrs_cov));
+        const int rb_offset = freq_alloc->first_rb + (dlsch_config->refPoint ? 0 : dlsch_config->BWPStart);
+        const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * 12;
+        float beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, false);
+        const int16_t dmrs_scaling = (int16_t)((1 / beta) * (1 << 14));
+        /* N layers (T26d): ports of CDM group 0/1 (type 1, single-symbol: port index < 4). On a comb RE of group g the
+         * LS product with the group's first port pilot is sum_{l in g} w_l h_l + n (w_l = +-1, FD-OCC), so the residual
+         * removes every layer of that group. */
+        const int nlay = cw->Nl;
+        int port[4], ok_ports = nlay >= 1 && nlay <= 4;
+        for (int l = 0; ok_ports && l < nlay; l++) {
+          port[l] = get_dmrs_port(l, dlsch_config->dmrs_ports);
+          if (port[l] < 0 || port[l] >= 4) ok_ports = 0;
+        }
+        for (int m = 0; ok_ports && m < fp->symbols_per_slot; m++) {
+          if (!((dmrs_full >> m) & 1)) continue;
+          c16_t pilot[4][3280] __attribute__((aligned(16)));
+          const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch_config->dlDmrsScramblingId,
+                                               dlsch_config->nscid, proc->nr_slot_rx, m);
+          for (int l = 0; l < nlay; l++)
+            nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot[l], 1000 + port[l], 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
+          for (int cg = 0; cg < 2; cg++) {
+            int lref = -1;
+            for (int l = 0; l < nlay; l++)
+              if (port[l] / 2 == cg) { lref = l; break; }
+            if (lref < 0) continue;
+            for (int k = cg; k < nrb * 12; k += 2) {
+              const int pi = 6 * rb_offset + k / 2;
+              const c16_t pl = pilot[lref][pi];
+              double complex e[4];
+              for (int a = 0; a < nb; a++) {
+                const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
+                e[a] = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
+                for (int l = 0; l < nlay; l++) {
+                  if (port[l] / 2 != cg) continue;
+                  const c16_t pq = pilot[l][pi];
+                  const double w = ((double)pq.r * pl.r + (double)pq.i * pl.i) >= 0 ? 1.0 : -1.0; /* OCC sign vs ref */
+                  const c16_t he = ((c16_t *)&pdsch_dl_ch_estimates[l * nb + a][N * m])[k];
+                  e[a] -= w * (he.r + I * he.i);
+                }
+              }
+              const int g = k / 48;
+              for (int a = 0; a < nb; a++)
+                for (int b = 0; b < nb; b++) nr_irc_dmrs_cov.R[g][a][b] += e[a] * conj(e[b]);
+              nr_irc_dmrs_cov.n[g]++;
+            }
+          }
+        }
+        nr_irc_dmrs_cov.ng = ng;
+        nr_irc_dmrs_cov.nb = nb;
+        nr_irc_dmrs_cov.valid = ok_ports;
+      }
+    }
+  }
   if (n_dmrs_sym == 0) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
@@ -3495,6 +3673,18 @@ gpu_llr_ready:;
   allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
   static __thread fourDimArray_t *toFree5 = NULL;
   allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  /* T26d ISAC_RX_ML_2L / ISAC_RX_EQ_AB: the 2-layer ML LLR needs the inter-layer correlation buffer (stock decode
+   * passes NULL); allocated per thread on first use only. */
+  c16_t(*rho_dl_p)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][rx_size_symbol] = NULL;
+  {
+    static int s_mlw = -1;
+    if (s_mlw < 0) s_mlw = (getenv("ISAC_RX_ML_2L") && atoi(getenv("ISAC_RX_ML_2L"))) || (getenv("ISAC_RX_EQ_AB") && atoi(getenv("ISAC_RX_EQ_AB")));
+    if (s_mlw && cw->Nl == 2) {
+      static __thread fourDimArray_t *toFree6 = NULL;
+      allocCast3D(rho_dl, c16_t, toFree6, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS, rx_size_symbol, true);
+      rho_dl_p = rho_dl;
+    }
+  }
 
   c16_t ptrs_phase_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
   memset(ptrs_phase_per_slot, 0, sizeof(ptrs_phase_per_slot));
@@ -3704,7 +3894,7 @@ gpu_llr_ready:;
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF_dem, &log2_maxh, rx_size_symbol,
                     fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
-                    ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */,
+                    ptrs_re_per_slot, nvar, &scope_req, rho_dl_p /* NULL unless 2-layer ML may run */,
                     ssb_unav ? &ssb.dem : &no_ssb)
         < 0) {
       demod_ok = false;
@@ -3720,8 +3910,17 @@ gpu_llr_ready:;
       out->evm_valid = true;
       out->evm_pct = (float)(sqrt(ea->err / ea->ref) * 100.0);
       out->evm_cpe_pct = (float)(sqrt(ea->err_cpe / ea->ref) * 100.0);
+      out->kappa = ea->kappa_n ? (float)(ea->kappa_sum / ea->kappa_n) : 0.f;
+      out->rho = ea->rho_n ? (float)(ea->rho_sum / ea->rho_n) : 0.f;
+      for (int a = 0; a < 4; a++) {
+        out->br_alpha[a] = ea->alpha_n[a] ? (float)(ea->alpha_abs[a] / ea->alpha_n[a]) : 0.f;
+        out->br_nvar_db[a] = nr_dl_chest_nvar_ant[a] > 0 ? (float)(10.0 * log10((double)nr_dl_chest_nvar_ant[a])) : -99.f;
+      }
       out->evm_nbrx = (uint8_t)ea->nbrx;
       out->evm_nsym = (uint16_t)ea->n_sym;
+      out->dmrs_ports = (uint16_t)dlsch_config->dmrs_ports;
+      out->n_cdm = (uint8_t)dlsch_config->n_dmrs_cdm_groups;
+      out->dmrs_add = (uint8_t)__builtin_popcount(dlsch_config->dlDmrsSymbPos);
       for (int a = 0; a < ea->nbrx && a < 4; a++)
         out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
     }
@@ -4112,7 +4311,7 @@ gpu_llr_ready:;
         }
       }
     }
-    if (nr_agnostic_v2() && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
+    if ((nr_agnostic_v2() || harq_combine_on()) && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
       t_hq.pid = grant->harq_pid;
