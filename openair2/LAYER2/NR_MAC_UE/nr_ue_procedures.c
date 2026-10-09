@@ -149,6 +149,9 @@ int get_rnti_type(const NR_UE_MAC_INST_t *mac, const uint16_t rnti)
   return rnti_type;
 }
 
+/* nr_ue_decode_mib: MAC handling of a decoded MIB: keeps a barred cell when the passive receiver is running (a passive receiver never camps), otherwise asks the PHY to go back to sync; then derives the system frame number and the SSB subcarrier offset from the MIB and the extra PBCH bits.
+ *   Caller: config_ue.c (MIB handling of the cell configuration).
+ */
 void nr_ue_decode_mib(NR_UE_MAC_INST_t *mac, int cc_id)
 {
   LOG_D(MAC,"[L2][MAC] decode mib\n");
