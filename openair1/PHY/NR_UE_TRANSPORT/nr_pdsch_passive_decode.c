@@ -44,6 +44,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include <math.h>
 #include <pthread.h> // sqrt/floor/log10 (EQDIAG)
 #include "nr_pdsch_evm_acc.h"
+#include "nr_irc_cov.h"
 #include "nr_passive_tpool.h"
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
@@ -2774,6 +2775,51 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     n_dmrs_sym++;
   }
   nr_dl_chest_only_ant = -1;
+  /* ISAC_RX_IRC=4 (T26d): interference+noise covariance from the DM-RS residuals h_ls - h_est per 4-RB group, on every
+   * DM-RS symbol of the grant (port 1000 comb, type 1, layer 0), for the whitening IRC in nr_rx_pdsch(). */
+  {
+    extern __thread int nr_dlsch_irc_override;
+    static int s_ircenv = -1;
+    if (s_ircenv < 0) s_ircenv = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
+    const int irc_mode = nr_dlsch_irc_override >= 0 ? nr_dlsch_irc_override : s_ircenv;
+    nr_irc_dmrs_cov.valid = 0;
+    if (irc_mode == 4 && !seg_path && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 && fp->nb_antennas_rx <= 4
+        && freq_alloc->n_prb_list == 0) {
+      const int nb = fp->nb_antennas_rx, N = fp->ofdm_symbol_size;
+      const int nrb = freq_alloc->num_rbs, ng = (nrb + 3) / 4;
+      if (ng <= NR_IRC_MAX_GROUPS) {
+        memset(&nr_irc_dmrs_cov, 0, sizeof(nr_irc_dmrs_cov));
+        const int rb_offset = freq_alloc->first_rb + (dlsch_config->refPoint ? 0 : dlsch_config->BWPStart);
+        const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * 12;
+        float beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, false);
+        const int16_t dmrs_scaling = (int16_t)((1 / beta) * (1 << 14));
+        for (int m = 0; m < fp->symbols_per_slot; m++) {
+          if (!((dmrs_full >> m) & 1)) continue;
+          c16_t pilot[3280] __attribute__((aligned(16)));
+          const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch_config->dlDmrsScramblingId,
+                                               dlsch_config->nscid, proc->nr_slot_rx, m);
+          nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot, 1000, 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
+          for (int k = 0; k < nrb * 12; k += 2) { /* CDM group 0 comb, delta 0 */
+            const c16_t pl = pilot[6 * rb_offset + k / 2];
+            double complex e[4];
+            for (int a = 0; a < nb; a++) {
+              const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
+              const double complex hls = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
+              const c16_t he = ((c16_t *)&pdsch_dl_ch_estimates[a][N * m])[k];
+              e[a] = hls - (he.r + I * he.i);
+            }
+            const int g = k / 48;
+            for (int a = 0; a < nb; a++)
+              for (int b = 0; b < nb; b++) nr_irc_dmrs_cov.R[g][a][b] += e[a] * conj(e[b]);
+            nr_irc_dmrs_cov.n[g]++;
+          }
+        }
+        nr_irc_dmrs_cov.ng = ng;
+        nr_irc_dmrs_cov.nb = nb;
+        nr_irc_dmrs_cov.valid = 1;
+      }
+    }
+  }
   if (n_dmrs_sym == 0) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;

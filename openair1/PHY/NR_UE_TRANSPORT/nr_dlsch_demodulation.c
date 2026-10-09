@@ -25,6 +25,7 @@
 #include <complex.h>
 #include <math.h>
 #include "nr_pdsch_evm_acc.h"
+#include "nr_irc_cov.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 
@@ -49,6 +50,7 @@ __thread int nr_dlsch_forced_branch = -1;
 __thread int nr_dlsch_forced_mask = -1;
 __thread int nr_dlsch_mrc_mode_override = -1;
 __thread int nr_dlsch_irc_override = -1; /* T26d: per-grant ISAC_RX_IRC value (-1 = env) */ /* T26d ISAC_RX_MRC_PER_RNTI: per-grant combining mode (set by the passive decode) */
+__thread nr_irc_cov_t nr_irc_dmrs_cov; /* ISAC_RX_IRC=4, nr_irc_cov.h */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
 __thread int nr_dlsch_chest_per_symbol = 0;
 extern __thread uint32_t nr_dl_chest_nvar_ant[]; // per-branch chest noise, published by the chest on this thread // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
@@ -1725,6 +1727,13 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
               e[a] = (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) - (chFext[0][a][i].r + I * chFext[0][a][i].i) * xs[i];
             for (int a = 0; a < nb; a++)
               for (int b = 0; b < nb; b++) R[a][b] += e[a] * conj(e[b]);
+          }
+          if (s_irc == 4) { /* DM-RS residual covariance of this 4-RB group (chunks of 48 data REs ~ 4 RB) */
+            const int g = (int)(c0 / 48u);
+            if (!nr_irc_dmrs_cov.valid || g >= nr_irc_dmrs_cov.ng || nr_irc_dmrs_cov.n[g] < 8 || nr_irc_dmrs_cov.nb != nb)
+              continue;
+            for (int a = 0; a < nb; a++)
+              for (int b = 0; b < nb; b++) R[a][b] = nr_irc_dmrs_cov.R[g][a][b] * (double)(c1 - c0) / (double)nr_irc_dmrs_cov.n[g];
           }
           double dmean = 0.0;
           for (int a = 0; a < nb; a++) { for (int b = 0; b < nb; b++) R[a][b] /= (double)(c1 - c0); dmean += creal(R[a][a]); }
