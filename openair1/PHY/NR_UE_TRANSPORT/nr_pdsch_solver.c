@@ -1,6 +1,7 @@
 /* Blind dedicated-PDSCH grant solver (T26b). See nr_pdsch_solver.h. */
 #include "nr_pdsch_solver.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -358,6 +359,19 @@ static bool probe_hog(const solver_rnti_t *r)
   return n > 1 && (uint64_t)r->n_probe * n > 2 * tot + 32u * (uint64_t)n;
 }
 
+static bool leader_ok(const solver_rnti_t *r)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_LEADER") && atoi(getenv("ISAC_PDSCH_SOLVER_LEADER")) ? 1 : 0;
+  if (!en) return true;
+  for (int i = 0; i < SOLVER_RNTIS; i++) /* any solved RNTI on the same CORESET: everybody searches (with the prior) */
+    if (g_r[i].used && g_r[i].solved && g_r[i].key == r->key) return true;
+  const solver_rnti_t *lead = NULL;
+  for (int i = 0; i < SOLVER_RNTIS; i++)
+    if (g_r[i].used && !g_r[i].solved && g_r[i].key == r->key && (!lead || g_r[i].grants > lead->grants)) lead = &g_r[i];
+  return lead == NULL || lead == r;
+}
+
 static bool search_backoff(const solver_rnti_t *r)
 {
   static int lim = -1;
@@ -489,6 +503,10 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     }
   } else if (csirs_slot) {
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
+  } else if (!r->has_cand && !leader_ok(r)) {
+    /* T26d ISAC_PDSCH_SOLVER_LEADER=1: until some RNTI of this CORESET solved, only its busiest unsolved RNTI searches --
+     * spreading the probe budget over ~15 RNTIs left whole runs without a first solve (replays: ~40 % of runs); the
+     * first solution then seeds every other RNTI through the reuse prior. */
   } else if (probe_hog(r)) {
     /* T26d: fair share of the probe budget -- an unsolved RNTI that already spent far more probes than the average
      * unsolved RNTI waits (a busy undecodable population starved the serving cell's RNTIs: replay f3 0x8f5a unsolved) */
@@ -660,6 +678,13 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   { /* O(1): the token carries its pending index (was a linear scan of all 4096 entries under g_mu) */
     pending_t *q = &g_p[token & (SOLVER_PENDING - 1)];
     if (q->used && q->token == token) p = q;
+  }
+  if (crc_ok && (p == NULL || !credit)) { /* T26d diagnostic: a CRC pass the solver could not use */
+    static _Atomic uint64_t s_lost[2];
+    const uint64_t k = atomic_fetch_add(&s_lost[p == NULL ? 0 : 1], 1) + 1;
+    if (k <= 5 || (k % 100) == 0)
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER lost CRC pass #%llu (%s) token=0x%08x\n", (unsigned long long)k,
+            p == NULL ? "pending entry gone" : "no credit", token);
   }
   if (p == NULL || !credit) {
     if (p) p->used = false;
