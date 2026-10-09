@@ -286,7 +286,8 @@ static int comb_on(void)
 static uint8_t comb_pick(const solver_rnti_t *r)
 {
   if (!comb_on()) return 0;
-  if (!r->solved) return (r->grants & 1u) ? 3 : 1;
+  if (!r->solved) return ((r->grants / 64u) & 1u) ? 3 : 1; /* BLOCKS of grants: a per-grant parity aliased with the search
+                                                           * cursor, so some hypotheses were only ever tried in one mode */
   const double p1 = (r->comb_ok[0] + 1.0) / (r->comb_try[0] + 2.0), p3 = (r->comb_ok[1] + 1.0) / (r->comb_try[1] + 2.0);
   const uint8_t best = p3 > p1 ? 3 : 1;
   return (r->grants % 8u) == 7u ? (best == 3 ? 1 : 3) : best;
@@ -513,10 +514,10 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       if (!known) { /* T26d: the default ids alone for the first 48 grants -- cycling 6+ alternatives from the start made
                      * the serving population's search 6x slower (replay e9/e10: 0x8f5a unsolved) */
         if (g_alt_decided) { /* the decided id on 3 grants of 4, the default on the 4th */
-          t_scr = (r->grants % 4u) == 3u ? -1 : g_alt_ids[0];
+          t_scr = ((r->grants / 16u) % 4u) == 3u ? -1 : g_alt_ids[0]; /* blocks, not parity (cursor aliasing) */
         } else {
           const uint32_t g = r->grants > 48 ? r->grants - 48 : 0;
-          const uint32_t k = r->grants <= 48 ? 0 : g % (uint32_t)(g_n_alt + 1);
+          const uint32_t k = r->grants <= 48 ? 0 : (g / 16u) % (uint32_t)(g_n_alt + 1);
           t_scr = k == 0 ? -1 : g_alt_ids[k - 1];
         }
       }
