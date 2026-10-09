@@ -86,7 +86,8 @@ bool nr_ssb_rm_plan(const nr_ssb_rm_event_t *e,
     for (int rb = 0; rb < cfg->BWPSize; ++rb) {
       if (!((fa->bitmap[rb / 32] >> (rb % 32)) & 1))
         continue;
-      const uint32_t csi_rb = ((rb + cfg->BWPStart) & 1) ? (csi >> 16) & 0xfff : csi & 0xfff;
+      const uint32_t csi_rb = nr_dlsch_csi_rb_extent() ? nr_dlsch_csi_rb_mask(cfg, m, rb + cfg->BWPStart)
+                              : ((rb + cfg->BWPStart) & 1) ? (csi >> 16) & 0xfff : csi & 0xfff;
       n += __builtin_popcount(nr_ssb_rm_excluded(&p->physical, m, rb) & ~csi_rb); // CSI-RS already in csi_unav
     }
     // SI-RNTI lacks its SI indicator here; a DM-RS or PT-RS RE on an SSB RE is not a valid PDSCH.

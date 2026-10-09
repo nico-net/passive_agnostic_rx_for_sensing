@@ -26,6 +26,11 @@ typedef struct {
   double rho_sum; uint32_t rho_n;     /* mean |cross-branch residual correlation| */ /* ISAC_RX_QAM_AGC diagnostic: combined-amplitude / threshold ratio */ /* same decisions, after a per-symbol per-layer complex LS scale (common phase/amplitude) */
   double sig[NR_PDSCH_EVM_MAX_RX], res[NR_PDSCH_EVM_MAX_RX];
   int nbrx;
+  /* QAM-FIX/low-MCS diagnostic: decision-directed error per OFDM symbol and per (symbol, data-RE index mod 12) */
+  double err_sym[14], ref_sym[14];
+  float err_k[14][12];
+  uint16_t n_k[14][12];
+  double err_layer[4], ref_layer[4]; /* per-layer decision-directed error */
 } nr_pdsch_evm_acc_t;
 extern __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc;
 #endif

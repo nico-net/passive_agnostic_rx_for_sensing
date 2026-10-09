@@ -1282,6 +1282,8 @@ static uint64_t gw_fingerprint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *p, con
   uint64_t fob; memcpy(&fob, &fo, sizeof(fob)); GWFP(fob);
   { extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
     GWFP(nr_dlsch_mrc_mode_override + 1); GWFP(nr_dlsch_irc_override + 1); } /* T26d: LLRs depend on the receiver */
+  { extern __thread int nr_dlsch_qam_mode_override; GWFP(nr_dlsch_qam_mode_override + 1); } /* QAM-FIX A/B arm */
+  GWFP(nr_dlsch_csi_rb_extent()); /* LOW-MCS: CSI-RS exclusion extent changes the RE set */
 #undef GWFP
   return h;
 }
@@ -4512,6 +4514,26 @@ gpu_llr_ready:;
                 t_seg_lbrm, cw->TBS, grant->nb_rb_oh, grant->tb_scaling, freq_alloc->first_rb,
                 freq_alloc->num_rbs, t_decoder_used_last, nr_pdsch_decode_sign_errors, nr_pdsch_decode_signs,
                 t_last_fep_fo, t_decode_tdra_attempt);
+          { /* per-symbol decision-directed SNR (dB) and, for the worst symbol, per data-RE index mod 12 */
+            const nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
+            char sb[260], kb[200];
+            int su = 0, ku = 0, worst = -1;
+            double wsnr = 1e9;
+            for (int m = 0; m < 14 && su < 240; m++) {
+              if (ea->ref_sym[m] <= 0.0) continue;
+              const double snr = ea->err_sym[m] > 0.0 ? 10.0 * log10(ea->ref_sym[m] / ea->err_sym[m]) : 60.0;
+              su += snprintf(sb + su, sizeof(sb) - su, "%s%d:%.1f", su ? "," : "", m, snr);
+              if (snr < wsnr) { wsnr = snr; worst = m; }
+            }
+            kb[0] = 0;
+            for (int k = 0; worst >= 0 && k < 12 && ku < 180; k++)
+              ku += snprintf(kb + ku, sizeof(kb) - ku, "%s%.1f", k ? "," : "",
+                             ea->n_k[worst][k] && ea->err_k[worst][k] > 0 ? 10.0 * log10(ea->n_k[worst][k] / ea->err_k[worst][k]) : 60.0);
+            if (su)
+              LOG_I(PHY, "SENSING: DECODEEVM rnti=0x%04x fs=%d.%d abs=%ld crc=%d attempt=%d sym=[%s] worst=%d k12=[%s]\n",
+                    grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, ldpc_ok,
+                    t_decode_tdra_attempt, sb, worst, kb);
+          }
           for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
             const fapi_nr_dl_config_csirs_pdu_rel15_t *p = &dlsch_config->csiRsForRateMatching[i];
             LOG_I(PHY, "SENSING: DECODECSI rnti=0x%04x abs=%ld attempt=%d index=%d id=%u type=%u row=%u "
@@ -4690,6 +4712,30 @@ gpu_llr_ready:;
   return out->status;
 }
 
+static __thread bool t_qam_ab_alt = false; /* QAM-FIX: an A/B alternate is running (quiet, but recovery arms allowed) */
+static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
+                                                             const UE_nr_rxtx_proc_t *proc,
+                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                             const freq_alloc_bitmap_t *freq_alloc,
+                                                             const nr_pdsch_passive_grant_t *grant,
+                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                             nr_pdsch_passive_decode_result_t *out);
+
+/* QAM-FIX ISAC_PDSCH_MMSE_AB=<modes> (diagnostic, default off), e.g. "1,2": on every full dedicated decode with
+ * >= 2 layers and Qm > 2, first decode the SAME samples with each listed ISAC_PDSCH_MMSE_MODE arm (quiet: no
+ * learning; the DECODE-FIX recovery arms still apply), then the normal decode, which alone is returned and fed
+ * back. One QAMAB line per grant with every arm's CRC and kappa: a paired A/B on identical received inputs. */
+static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
+                                                             const UE_nr_rxtx_proc_t *proc,
+                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                             const freq_alloc_bitmap_t *freq_alloc,
+                                                             const nr_pdsch_passive_grant_t *grant,
+                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                             nr_pdsch_passive_decode_result_t *out);
+
+/* LOW-MCS ISAC_PDSCH_CSI_EXTENT_AB=1 (diagnostic, default off): every full dedicated decode is first run, quiet and
+ * with the DECODE-FIX recovery arms, with ISAC_PDSCH_CSI_RB_EXTENT inverted, then normally; one CSIAB line pairs
+ * the two CRCs on identical received samples. */
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -4697,6 +4743,102 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const nr_pdsch_passive_grant_t *grant,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out)
+{
+  static _Atomic int s_xab = -1;
+  if (s_xab < 0) s_xab = getenv("ISAC_PDSCH_CSI_EXTENT_AB") && atoi(getenv("ISAC_PDSCH_CSI_EXTENT_AB")) ? 1 : 0;
+  extern __thread int nr_dlsch_csi_extent_override;
+  if (!s_xab || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_quiet || t_llr_ovr
+      || nr_agnostic_v2() || harq_combine_on())
+    return passive_decode_qamab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+  nr_dlsch_csi_extent_override = !nr_dlsch_csi_rb_extent();
+  t_quiet = true;
+  t_qam_ab_alt = true;
+  const nr_pdsch_passive_decode_status_t sa = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  const int alt_csi = (int)dlsch_config->numCsiRsForRateMatching;
+  t_qam_ab_alt = false;
+  t_quiet = false;
+  nr_dlsch_csi_extent_override = -1;
+  *dlsch_config = original;
+  const nr_pdsch_passive_decode_status_t st = passive_decode_qamab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  LOG_I(PHY, "SENSING: CSIAB rnti=0x%04x fs=%d.%d abs=%ld nl=%d mcs=%u rb=%u+%u snr=%.2f extent=%d crc=%d alt_crc=%d "
+        "csi0=%u csi_alt=%d rec=%d\n",
+        grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot,
+        __builtin_popcount(original.dmrs_ports), grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs,
+        out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0, nr_dlsch_csi_rb_extent(),
+        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, sa == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? 1 : sa == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? 0 : -1,
+        original.numCsiRsForRateMatching, alt_csi, (int)out->config_recovered);
+  return st;
+}
+
+static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
+                                                             const UE_nr_rxtx_proc_t *proc,
+                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                             const freq_alloc_bitmap_t *freq_alloc,
+                                                             const nr_pdsch_passive_grant_t *grant,
+                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                             nr_pdsch_passive_decode_result_t *out)
+{
+  static _Atomic int s_ab_n = -1;
+  static int s_ab_modes[4];
+  if (s_ab_n < 0) {
+    int n = 0;
+    const char *e = getenv("ISAC_PDSCH_MMSE_AB");
+    for (const char *q = e; q && *q && n < 4;) {
+      s_ab_modes[n++] = atoi(q);
+      q = strchr(q, ',');
+      if (q) q++;
+    }
+    s_ab_n = n;
+  }
+  extern __thread int nr_dlsch_qam_mode_override;
+  const int ab_nl = __builtin_popcount(dlsch_config->dmrs_ports);
+  const int ab_qm = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
+  static _Atomic int s_ab_qpsk = -1; /* ISAC_PDSCH_MMSE_AB_QPSK=1: also pair the QPSK grants (regression check) */
+  if (s_ab_qpsk < 0) s_ab_qpsk = getenv("ISAC_PDSCH_MMSE_AB_QPSK") && atoi(getenv("ISAC_PDSCH_MMSE_AB_QPSK")) ? 1 : 0;
+  if (s_ab_n == 0 || ab_nl < 2 || (ab_qm <= 2 && !s_ab_qpsk) || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg
+      || t_gw_capture || t_quiet || t_llr_ovr || nr_agnostic_v2() || harq_combine_on())
+    return passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+  int crc[4];
+  float kap[4], snr[4];
+  for (int k = 0; k < s_ab_n; k++) {
+    *dlsch_config = original;
+    nr_dlsch_qam_mode_override = s_ab_modes[k];
+    t_quiet = true;
+    t_qam_ab_alt = true;
+    const nr_pdsch_passive_decode_status_t sk = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+    t_qam_ab_alt = false;
+    t_quiet = false;
+    crc[k] = sk == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? 1 : sk == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? 0 : -1;
+    kap[k] = out->kappa;
+    snr[k] = out->evm_valid && out->evm_pct > 0 ? (float)(-20.0 * log10(out->evm_pct / 100.0)) : -99.f;
+  }
+  nr_dlsch_qam_mode_override = -1;
+  *dlsch_config = original;
+  const nr_pdsch_passive_decode_status_t st = passive_decode_retry(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  char b[160];
+  int u = 0;
+  for (int k = 0; k < s_ab_n && u < 140; k++)
+    u += snprintf(b + u, sizeof(b) - u, " m%d=%d/%.2f", s_ab_modes[k], crc[k], kap[k]);
+  LOG_I(PHY, "SENSING: QAMAB rnti=0x%04x fs=%d.%d abs=%ld nl=%d qm=%d mcs=%u tbl=%u rb=%u+%u snr=%.2f snr_alt=%.2f "
+        "crc=%d kappa=%.2f%s rec=%d snr_l=%.1f,%.1f\n",
+        grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, ab_nl, ab_qm, grant->mcs,
+        grant->mcs_table, freq_alloc->first_rb, freq_alloc->num_rbs,
+        out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0, snr[0],
+        st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, out->kappa, b, (int)out->config_recovered,
+        nr_pdsch_evm_acc.err_layer[0] > 0 ? 10.0 * log10(nr_pdsch_evm_acc.ref_layer[0] / nr_pdsch_evm_acc.err_layer[0]) : -99.0,
+        nr_pdsch_evm_acc.err_layer[1] > 0 ? 10.0 * log10(nr_pdsch_evm_acc.ref_layer[1] / nr_pdsch_evm_acc.err_layer[1]) : -99.0);
+  return st;
+}
+
+static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
+                                                             const UE_nr_rxtx_proc_t *proc,
+                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                             const freq_alloc_bitmap_t *freq_alloc,
+                                                             const nr_pdsch_passive_grant_t *grant,
+                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                             nr_pdsch_passive_decode_result_t *out)
 {
   nr_pdsch_passive_decode_status_t st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   if (t_gw_owner) { /* left before the publish point: the same inputs fail the same way, make it sticky */
@@ -4729,7 +4871,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     csi_population_retry = e && atoi(e) != 0;
   }
   if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
-      || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || t_quiet || t_llr_ovr
+      || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr
       || nr_agnostic_v2() || harq_combine_on())
     return st;
   const bool try_start = tdra_retry && dlsch_config->start_symbol <= 1
