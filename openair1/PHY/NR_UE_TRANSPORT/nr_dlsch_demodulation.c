@@ -1644,6 +1644,117 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
   }
 
+  /* ISAC_RX_IRC=1 (T26d prototype): MMSE-IRC for 1 layer by spatial whitening. Per chunk of 48 REs (4 RB) of this
+   * symbol the interference+noise covariance R (nbRx x nbRx) is estimated from decision-directed residuals
+   * e = y - h s_hat (s_hat: MRC decision over all branches), shrunk toward its diagonal (ISAC_RX_IRC_SHRINK, default
+   * 0.3) and loaded; with R = L L^H, y' = L^-1 y and h' = L^-1 h make the stock MRC combiner compute h^H R^-1 y and
+   * the QAM thresholds h^H R^-1 h, i.e. IRC, with no change to the LLR code. All branches combine (mode-independent);
+   * the whitened pair is rescaled so its combined power equals the original combined power of this mode's slice
+   * (log2_maxh stays valid). Decision-directed: self-nulling at high symbol-error rates is the known risk. */
+  if (nl == 1 && nbRx >= 2 && nbRx <= 4 && nb_re_pdsch >= 48) {
+    static int s_irc = -1;
+    static double s_shrink = 0.3;
+    if (s_irc < 0) {
+      s_irc = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
+      if (getenv("ISAC_RX_IRC_SHRINK")) s_shrink = atof(getenv("ISAC_RX_IRC_SHRINK"));
+    }
+    if (s_irc) {
+      const int qm = dlsch->cw_info.qamModOrder;
+      const int lmax = (1 << (qm / 2)) - 1;
+      double ms = 0.0; int nlev = 0;
+      for (int l = 1; l <= lmax; l += 2) { ms += (double)l * l; nlev++; }
+      const double ideal_pow = 2.0 * ms / nlev;
+      const int nb = nbRx;
+      /* combined power of the mode's original slice, for the rescale */
+      double pslice = 0.0, pall = 0.0;
+      for (uint32_t i = 0; i < nb_re_pdsch; i++)
+        for (int a = 0; a < nb; a++) {
+          const double p2 = (double)chFext[0][a][i].r * chFext[0][a][i].r + (double)chFext[0][a][i].i * chFext[0][a][i].i;
+          pall += p2;
+          if (a >= mrc_rx_index && a < mrc_rx_index + mrc_nb_rx) pslice += p2;
+        }
+      /* MRC decisions over all branches, symbol RMS scale */
+      double complex *xs = malloc(sizeof(double complex) * nb_re_pdsch);
+      double pw = 0.0; uint32_t nv = 0;
+      for (uint32_t i = 0; xs && i < nb_re_pdsch; i++) {
+        double complex num = 0; double g = 0;
+        for (int a = 0; a < nb; a++) {
+          const double complex h = chFext[0][a][i].r + I * chFext[0][a][i].i, y = rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i;
+          num += conj(h) * y; g += creal(h) * creal(h) + cimag(h) * cimag(h);
+        }
+        xs[i] = g > 0 ? num / g : 0;
+        if (g > 0) { pw += creal(xs[i]) * creal(xs[i]) + cimag(xs[i]) * cimag(xs[i]); nv++; }
+      }
+      if (xs && nv >= 24 && pw > 0 && pall > 0) {
+        const double scale = sqrt(ideal_pow / (pw / nv));
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) { /* sliced decision back in channel units */
+          double vi = creal(xs[i]) * scale, vq = cimag(xs[i]) * scale;
+          double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
+          si = si > lmax ? lmax : si < -lmax ? -lmax : si; sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
+          xs[i] = (si + I * sq) / scale;
+        }
+        const double resc = sqrt(pslice / pall); /* applied together with the whitening normaliser below */
+        for (uint32_t c0 = 0; c0 < nb_re_pdsch; c0 += 48) {
+          const uint32_t c1 = c0 + 48 < nb_re_pdsch ? c0 + 48 : nb_re_pdsch;
+          double complex R[4][4] = {{0}};
+          for (uint32_t i = c0; i < c1; i++) {
+            double complex e[4];
+            for (int a = 0; a < nb; a++)
+              e[a] = (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) - (chFext[0][a][i].r + I * chFext[0][a][i].i) * xs[i];
+            for (int a = 0; a < nb; a++)
+              for (int b = 0; b < nb; b++) R[a][b] += e[a] * conj(e[b]);
+          }
+          double dmean = 0.0;
+          for (int a = 0; a < nb; a++) { for (int b = 0; b < nb; b++) R[a][b] /= (double)(c1 - c0); dmean += creal(R[a][a]); }
+          dmean /= nb;
+          if (dmean <= 0) continue;
+          for (int a = 0; a < nb; a++)
+            for (int b = 0; b < nb; b++)
+              R[a][b] = (a == b) ? creal(R[a][a]) + 1e-3 * dmean : (1.0 - s_shrink) * R[a][b];
+          /* Cholesky R = L L^H */
+          double complex L[4][4] = {{0}};
+          bool ok = true;
+          for (int j = 0; j < nb && ok; j++) {
+            double d = creal(R[j][j]);
+            for (int k = 0; k < j; k++) d -= creal(L[j][k] * conj(L[j][k]));
+            if (d <= 0) { ok = false; break; }
+            L[j][j] = sqrt(d);
+            for (int i2 = j + 1; i2 < nb; i2++) {
+              double complex v = R[i2][j];
+              for (int k = 0; k < j; k++) v -= L[i2][k] * conj(L[j][k]);
+              L[i2][j] = v / L[j][j];
+            }
+          }
+          if (!ok) continue;
+          /* forward substitution L z = v, normalised by sqrt(dmean) so the whitened noise has the mean branch level,
+           * then scaled by resc (this mode's slice power / all-branch power) */
+          const double nrm = sqrt(dmean) * resc;
+          for (uint32_t i = c0; i < c1; i++) {
+            double complex vy[4], vh[4], zy[4], zh[4];
+            for (int a = 0; a < nb; a++) {
+              vy[a] = rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i;
+              vh[a] = chFext[0][a][i].r + I * chFext[0][a][i].i;
+            }
+            for (int a = 0; a < nb; a++) {
+              double complex ty = vy[a], th = vh[a];
+              for (int k = 0; k < a; k++) { ty -= L[a][k] * zy[k]; th -= L[a][k] * zh[k]; }
+              zy[a] = ty / L[a][a]; zh[a] = th / L[a][a];
+            }
+            for (int a = 0; a < nb; a++) {
+              #define S16(v) ((int16_t)fmax(-32768.0, fmin(32767.0, lround(v))))
+              rxdataF_ext[a][i].r = S16(creal(zy[a]) * nrm); rxdataF_ext[a][i].i = S16(cimag(zy[a]) * nrm);
+              chFext[0][a][i].r = S16(creal(zh[a]) * nrm); chFext[0][a][i].i = S16(cimag(zh[a]) * nrm);
+              #undef S16
+            }
+          }
+        }
+        mrc_rx_index = 0;
+        mrc_nb_rx = nbRx;
+      }
+      free(xs);
+    }
+  }
+
   /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h.
    * x = ZF over the combined branches (nl = 1: MRC), per layer; decisions per layer; branch fit uses sum_l h_l s_l. */
   if (nr_pdsch_evm_acc.armed && nl >= 1 && nl <= 4 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
