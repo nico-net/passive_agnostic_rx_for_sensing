@@ -26,11 +26,18 @@ struct NidView {
  int begin, capacity, stride;
  const int *slot, *sym;
  const c16_t *re;
+ /* NidView::index: maps a relative index k (0..n-1) of the view to its slot in the circular capture buffer (begin + k) mod capacity.
+  *   Used by grid() and by the stage-2 build loops.
+  */
  NID_FN int index(int k) const { return (begin+k)%capacity; }
+ /* NidView::grid: returns the sample block of relative index k and duration offset d: the capture's FFT grid at that slot and symbol, stride apart. Callers: st2_build() and the stage-1 code. */
  NID_FN const c16_t *grid(int k, int d=0) const {
    return re + ((size_t)index(k)*dur+d)*stride;
  }
 };
+/* nid_gold: advances the length-31 Gold sequence generator (TS 38.211 5.2.1) by one 32-bit word; with reset set it first initialises x1 and x2 from the seed in x2 and runs 50 warm-up steps.
+ *   Returns x1 XOR x2. Same arithmetic as the frozen offline tool. Callers: st2_build() and the stage-1 scrambling code.
+ */
 NID_FN inline uint32_t nid_gold(uint32_t *x1, uint32_t *x2, int reset) {
  if (reset) {
   *x1=1+(1U<<31);
@@ -42,6 +49,9 @@ NID_FN inline uint32_t nid_gold(uint32_t *x1, uint32_t *x2, int reset) {
  *x2=*x2^(*x2<<31)^(*x2<<30)^(*x2<<29)^(*x2<<28);
  return *x1^*x2;
 }
+/* idsw_pilot: returns the DM-RS-like pilot value (xr, xi) at position m of a Gold-derived byte array (the QPSK pattern of the scrambling sequence, index swapped as in the offline tool).
+ *   Pure function. Caller: st2_build().
+ */
 NID_FN void idsw_pilot(const uint32_t *gold, int m, float *xr, float *xi)
 {
   const float tab[4][2] = {{1, -1}, {1, 1}, {-1, -1}, {-1, 1}};
@@ -60,6 +70,9 @@ struct NidStage2 {
  double *vr, *vd;
  int nact, nid, sym0, nh, alive;
  unsigned lit_hist[276];
+/* idsw_cinit: c_init of the DM-RS sequence of one symbol l in slot `slot` for identity nid: (sps * slot + l + 1) * (2 nid + 1) * 2^17 + 2 nid, modulo 2^31.
+ *   Uses the slots-per-subframe value of the view. Caller: st2_build().
+ */
 NID_FN uint32_t idsw_cinit(int nid, int slot, int l)
 {
   uint64_t x = ((uint64_t)g_idsw.sps * slot + l + 1) * ((uint64_t)(nid << 1) + 1);
@@ -67,6 +80,9 @@ NID_FN uint32_t idsw_cinit(int nid, int slot, int l)
   x += (uint64_t)(nid << 1);
   return (uint32_t)(x % (1U << 31));
 }
+/* st2_exc: excess correlation of the window [b, b+B) of a snapshot: the normalised energy of the summed pilot correlation over the window, minus its noise expectation, scaled to 1 for a perfect match and 0 for noise.
+ *   Returns 0 outside the valid CRB range or when the window has no energy. Callers: st2_cand(), st2_remove() and consistency_vote() (same arithmetic).
+ */
 NID_FN double st2_exc(const st2_snap_t *s, int b, int B)
 {
   if (b < g_st2_clo || b + B > g_st2_chi)
@@ -77,6 +93,9 @@ NID_FN double st2_exc(const st2_snap_t *s, int b, int B)
   const double n = 3.0 * B * g_st2_D, rho2 = (re * re + im * im) / (p * 2.0 * n);
   return (rho2 - 1.0 / n) / (1.0 - 1.0 / n);
 }
+/* st2_cand: mean excess correlation of one candidate (CCE index cce, aggregation level al) under hypothesis h on snapshot s.
+ *   Maps the CCEs to their REG bundles (time-first REG numbering of TS 38.211 7.3.2.2, with the hypothesis' interleaver R and shift when L is set), and averages st2_exc() over those bundles. Caller: st2_score(), st2_per_snap(), st2_remove().
+ */
 NID_FN double st2_cand(const st2_snap_t *s, const st2_hyp_t *h, int cce, int al)
 {
   /* TS 38.211 7.3.2.2: REGs are numbered time-first (REG n = RB n/D, symbol n%D), a REG bundle is L consecutive
@@ -91,6 +110,9 @@ NID_FN double st2_cand(const st2_snap_t *s, const st2_hyp_t *h, int cce, int al)
   }
   return cnt ? sum / cnt : 0.0;
 }
+/* st2_score: scores hypothesis h over nact snapshots: for each snapshot takes the best candidate of every aggregation level (1 to 16 CCEs) and sums the best values; the winning level of each snapshot is counted in al_win.
+ *   Writes h->score and h->al_win. Caller: NidStage2::score().
+ */
 NID_FN void st2_score(st2_hyp_t *h, const st2_snap_t *sn, int nact)
 {
   const int als[5] = {1, 2, 4, 8, 16};
@@ -113,6 +135,7 @@ NID_FN void st2_score(st2_hyp_t *h, const st2_snap_t *sn, int nact)
     }
   }
 }
+/* st2_prefix_body: rebuilds the prefix sums (re, im, p) of a snapshot from its per-CRB terms (rr, ri, rp). Same body as st2_prefix(); used by st2_build(). */
 NID_FN void st2_prefix_body(st2_snap_t *s)
 {
   s->re[0] = s->im[0] = s->p[0] = 0.0;
@@ -122,6 +145,9 @@ NID_FN void st2_prefix_body(st2_snap_t *s)
     s->p[c + 1] = s->p[c] + s->rp[c];
   }
 }
+/* st2_build: builds one snapshot for capture slot k and identity nid: the pilot-derotated correlation of every CRB, summed over the D symbols of the window, then the prefix sums.
+ *   The DM-RS sequence of each symbol uses its own c_init (idsw_cinit). Callers: NidStage2::prepare() (candidate and decoy identities).
+ */
 NID_FN void st2_build(int k, int nid, st2_snap_t *s)
 {
   const int pa = g_idsw.point_a_sc, words = (2 * 3 * g_st2_chi) / 32 + 2;
@@ -158,6 +184,7 @@ NID_FN void st2_build(int k, int nid, st2_snap_t *s)
   st2_prefix_body(s);
   s->k = k;
 }
+/* st2_prefix: rebuilds the prefix sums of a snapshot from its per-CRB terms (rr, ri, rp). Called after a removal in st2_remove(). */
 NID_FN void st2_prefix(st2_snap_t *s)
 {
   s->re[0] = s->im[0] = s->p[0] = 0.0;
@@ -167,6 +194,7 @@ NID_FN void st2_prefix(st2_snap_t *s)
     s->p[c + 1] = s->p[c] + s->rp[c];
   }
 }
+/* st2_per_snap: best candidate value of each snapshot under hypothesis h (aggregation levels 2 to 16), written to out[0..nact-1]. Used for the paired test in NidStage2::finish(). */
 NID_FN void st2_per_snap(const st2_hyp_t *h, const st2_snap_t *sn, int nact, double *out)
 {
   const int als[4] = {2, 4, 8, 16};
@@ -180,6 +208,9 @@ NID_FN void st2_per_snap(const st2_hyp_t *h, const st2_snap_t *sn, int nact, dou
     out[k] = best;
   }
 }
+/* st2_paired_t: paired t-statistic of the per-snapshot differences a[i] - b[i] over n snapshots (zero when the variance is zero).
+ *   Pure function. Caller: NidStage2::finish() (real vs decoy identities).
+ */
 NID_FN double st2_paired_t(const double *a, const double *b, int n)
 {
   double m = 0, v = 0;
@@ -189,6 +220,9 @@ NID_FN double st2_paired_t(const double *a, const double *b, int n)
   v = n > 1 ? v / (n - 1) : 0;
   return v > 0 ? m / sqrt(v / n) : 0.0;
 }
+/* st2_remove: removes the energy of the lit candidates of hypothesis h from snapshot s, so that a second CORESET of the same identity is not claimed twice; returns the number of removed candidates.
+ *   Only aggregation levels 2 to 16 are removed, and a candidate is removed only when every one of its bundles is above 2 sigma. Caller: NidStage2::finish().
+ */
 NID_FN int st2_remove(st2_snap_t *s, const st2_hyp_t *h)
 {
   const int als[5] = {1, 2, 4, 8, 16};
@@ -222,6 +256,9 @@ NID_FN int st2_remove(st2_snap_t *s, const st2_hyp_t *h)
     }
   return removed;
 }
+/* st2_gen: generates hypotheses (phase, group start, group count, bundle length L, interleaver R, shift) for the CRB window [qlo, qhi) of one phase range, into H (up to cap).
+ *   Also emits the non-interleaved geometry for every phase. Returns the number generated. Caller: hull_gen().
+ */
 NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, int phhi=6)
 {
   size_t nh = 0;
@@ -258,6 +295,9 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
   return nh;
 }
 
+ /* st2_lit: true when any 6-CRB window of snapshot s carries energy above the lit threshold (1e-4 false-alarm rate). With histogram set it also counts the lit windows per CRB in lit_hist.
+  *   Caller: prepare() (lit symbol selection) and hull_gen().
+  */
  NID_FN bool st2_lit(const st2_snap_t *s, bool histogram=false) {
   const double t=1.0-pow(1e-4,1.0/(18.0*g_st2_D-1.0));
   bool any=false;
@@ -269,6 +309,9 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
   }
   return any;
  }
+ /* hull_gen: generates the hypothesis set from the histogram of lit CRBs over all snapshots: the central 96 % of the lit CRB range is the window the hypotheses are generated for.
+  *   Returns the number of hypotheses (0 when nothing is lit). Caller: NidStage2::prepare() and NidStage2::finish() (after removals).
+  */
  NID_FN int hull_gen() {
   memset(lit_hist,0,sizeof(lit_hist));
   for(int k=0;k<nact;k++) st2_lit(sn+k,true);
@@ -283,6 +326,9 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
   }
   return (int)st2_gen(H,NID_HYP_CAP,qlo,qhi);
  }
+ /* consistency_vote: per-snapshot vote for hypothesis h: 1 when more of its REG-bundle groups are lit than not, 0 for the opposite, -1 when no group is lit. Does not change state.
+  *   Caller: NidStage2::consistent().
+  */
  NID_FN int consistency_vote(const st2_hyp_t *h,int k) const {
   const int D=g_st2_D,L=h->L?h->L:6,R=h->L?h->R:1,b=L/D;
   const int nb=6*h->ng*D/L,cs=h->phase+6*h->g0,per=6/L;
@@ -303,6 +349,7 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
    }
    return full+partial ? (full<partial?0:1) : -1;
  }
+ /* consistent: true when a majority of the snapshots that vote do not vote against hypothesis h (at least half of the voting snapshots are not below). Caller: NidStage2::score(). */
  NID_FN bool consistent(const st2_hyp_t *h) const {
   int nf=0,below=0;
   for(int k=0;k<nact;k++) {
@@ -311,6 +358,9 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
   // sorted frac[nf/2] >= .5, without malloc or sort.
   return nf && below<=nf/2;
  }
+ /* prepare: loads one stage-2 identity: builds the lit snapshots of the symbol group at sym (choosing the window duration D from the lit ratio of the next symbols when duration is 0), the decoy snapshots, and the hypothesis set.
+  *   Sets alive when at least one hypothesis exists. Entry point of the stage-2 search for one identity nid. Callers: the CPU reference and the CUDA stage-2 kernel (nr_pdcch_nid_gpu.cu).
+  */
  NID_FN void prepare(int id,int sym,int duration=0) {
   nid=id; sym0=sym; nact=0; alive=0;
   const int pa=g_idsw.point_a_sc;
@@ -340,10 +390,14 @@ NID_FN size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi, int phlo=0, in
   }
   if(nact) {nh=hull_gen();alive=nh>0;}
  }
+ /* score: scores hypothesis i (the score is zeroed when it is not consistent). Caller: the stage-2 search loop (CPU reference and nr_pdcch_nid_gpu.cu). */
  NID_FN void score(int i) {
   st2_score(H+i,sn,nact);
   if(!consistent(H+i)) H[i].score=0;
  }
+ /* finish: decides the identity: picks the best-scoring hypothesis, checks it against the decoy identities with a paired t-test (threshold 5), and records the result (up to NR_PDCCH_NID_MAX_RECORDS) with its tie count.
+  *   Then removes its energy from the snapshots and regenerates the hypotheses for the next CORESET. Returns true when a record was produced. Caller: the stage-2 search loop.
+  */
  NID_FN bool finish(nr_pdcch_nid_result_t *out) {
   if(!alive) return false;
   int best=0;
