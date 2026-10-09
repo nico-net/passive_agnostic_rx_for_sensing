@@ -46,6 +46,7 @@ typedef struct {
   uint32_t comb_try[4], comb_ok[4]; /* T26d ISAC_RX_MRC_PER_RNTI: CRC per receiver {1 best branch, 3 MRC, 4 NW-MRC, 5 IRC} */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
+  uint32_t pref_gap;       /* T26d ISAC_PDSCH_SOLVER_PREF: grants since the last search-preferred grant */
 } solver_rnti_t;
 
 typedef struct {
@@ -380,6 +381,24 @@ static bool leader_ok(const solver_rnti_t *r)
   return lead == NULL || lead == r;
 }
 
+/* ISAC_PDSCH_SOLVER_PREF=<N> (T26d, default 0 = off): an unsolved RNTI searches on its low-MCS grants (MCS <=
+ * ISAC_PDSCH_SOLVER_PREF_MCS, default 4: QPSK in every MCS table) and skips the others, unless N grants went by without
+ * a preferred one. Measured: probe CRC on the true hypothesis ~4-5 % because most grants are QAM / multi-layer, which
+ * almost never pass at this receiver; QPSK grants pass 25-90 %. Layer count is not known at plan time (readings carry
+ * no ports), so only the MCS is used. */
+static bool search_pref_skip(solver_rnti_t *r, int mcs)
+{
+  static int n_gap = -1, mcs_max = 4;
+  if (n_gap < 0) {
+    n_gap = getenv("ISAC_PDSCH_SOLVER_PREF") ? atoi(getenv("ISAC_PDSCH_SOLVER_PREF")) : 0;
+    if (getenv("ISAC_PDSCH_SOLVER_PREF_MCS")) mcs_max = atoi(getenv("ISAC_PDSCH_SOLVER_PREF_MCS"));
+  }
+  if (n_gap <= 0 || r->has_cand) return false;
+  if (mcs <= mcs_max) { r->pref_gap = 0; return false; }
+  if (++r->pref_gap >= (uint32_t)n_gap) { r->pref_gap = 0; return false; }
+  return true;
+}
+
 static bool search_backoff(const solver_rnti_t *r)
 {
   static int lim = -1;
@@ -518,6 +537,8 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   } else if (probe_hog(r)) {
     /* T26d: fair share of the probe budget -- an unsolved RNTI that already spent far more probes than the average
      * unsolved RNTI waits (a busy undecodable population starved the serving cell's RNTIs: replay f3 0x8f5a unsolved) */
+  } else if (search_pref_skip(r, mcs)) {
+    /* T26d ISAC_PDSCH_SOLVER_PREF: this grant is not search-preferred (QAM) -- wait for a low-MCS grant */
   } else if (search_backoff(r)) {
     /* T26c ISAC_PDSCH_SOLVER_BACKOFF=<probes> (default off): an RNTI whose search has spent that many probes without a
      * single CRC pass is searched on 1 grant in 8 only -- the decode pool goes to RNTIs that decode */
