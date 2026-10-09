@@ -15,12 +15,16 @@ typedef struct {
   uint64_t offered[14];
 } nr_nid_occupancy_t;
 
+/* nr_nid_sample_power: power |y|^2 of one complex 16-bit sample (wraps in 32 bits, as the stage-1 occupancy sum expects). Inline. Caller: nr_nid_occupancy_take(). */
 static inline uint32_t nr_nid_sample_power(nr_pdcch_nid_iq_t y)
 {
   int r = y.r, i = y.i;
   return (uint32_t)(r * r) + (uint32_t)(i * i);
 }
 
+/* nr_nid_occupancy_take: occupancy gate of the NID capture: sums the power of each 6-RB group of the CORESET#0-free part of the carrier for one symbol, and decides whether the symbol is worth capturing.
+ *   A symbol is taken when its strongest group is above ratio times the noise estimate (the weakest groups), or on the deterministic floor probes (floor_pct per 100 offers per symbol). Updates the offer counters. Inline. Caller: nr_pdcch_coreset_map_idsweep_push() (CSS0 occupancy gate).
+ */
 static inline bool nr_nid_occupancy_take(nr_nid_occupancy_t *s, const void *samples,
                                         int fft, int fco, int nsc, int pa,
                                         int css_lo, int css_nrb, int sym,
