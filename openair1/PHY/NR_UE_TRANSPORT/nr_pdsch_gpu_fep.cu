@@ -88,6 +88,12 @@ static int g_last_chunks;
 static float g_llr_scale = 4.0f;
 static int g_force_ant = -1; /* recorded-input branch isolation; unset in production */
 static bool g_batch_async; /* opt-in: caller follows FEP with LLR on the same stream */
+/* GPU6 bit-exact FEP (nr_pdsch_gpu_exact_fep.cuh): tables + per-slot int16 rxdataF */
+static uint16_t *g_d_perm, *g_d_symlist, *g_h_symlist;
+static short *g_d_tw1024, *g_d_tw4096;
+static short2 *g_d_ts, *g_d_exact, *g_h_exact;
+static bool g_exact_ok;
+static double g_exact_us;
 
 /* ---------------------------------------------------------------- FEP ---- */
 /* Gather one OFDM symbol per (ant, sym): CP removal with the 1/8-CP early window, ring wrap, FO
@@ -481,6 +487,8 @@ __global__ void k_llr(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 
   }
 }
 
+#include "nr_pdsch_gpu_exact_fep.cuh"
+
 /* ------------------------------------------------------------- host API ---- */
 static nr_dl_gpu_budget_t g_budget;
 extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
@@ -521,14 +529,44 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   g_llr_cap = 32u << 20; /* matches the receiver's per-consumer output capacity */
   CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
+  cudaFuncAttributes attr;
   if (const char *e = getenv("NR_GPU_LLR_SCALE"))
     g_llr_scale = (float)atof(e);
   if (const char *e = getenv("NR_GPU_FORCE_ANT")) {
     const int a = atoi(e);
     if (a >= 0 && a < cfg->nant) g_force_ant = a;
   }
+  if (N == nr_exact::N && cfg->nant <= MAX_ANT) {
+    /* Bit-exact FEP working set: allocated with the rest before the RX fence. The timeshift table is
+     * computed exactly as init_timeshift_rotation() does (same libm, same formula). */
+    const size_t exact = (size_t)cfg->nant * MAX_SYM * N * sizeof(short2);
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_perm, N * sizeof(uint16_t)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_symlist, MAX_SYM * sizeof(uint16_t)));
+    CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_symlist, MAX_SYM * sizeof(uint16_t)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw1024, 3 * 512 * sizeof(short)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw4096, 3 * 2048 * sizeof(short)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_ts, N * sizeof(short2)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_exact, exact));
+    CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_exact, exact));
+    std::vector<uint16_t> perm(N);
+    std::vector<short> tw1(3 * 512), tw4(3 * 2048), ts(2 * N);
+    nr_exact::build_perm(perm.data());
+    nr_exact::init_rad4_host(1024, tw1.data());
+    nr_exact::init_rad4_host(4096, tw4.data());
+    const int so = cfg->nb_prefix_samples / cfg->ofdm_offset_divisor;
+    for (int i = 0; i < N; i++) {
+      const double poff = -i * 2.0 * M_PI * so / N;
+      ts[2 * i] = (int16_t)round(cos(poff) * 32767);
+      ts[2 * i + 1] = (int16_t)round(sin(-poff) * 32767);
+    }
+    CK(cudaMemcpy(g_d_perm, perm.data(), N * sizeof(uint16_t), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(g_d_tw1024, tw1.data(), tw1.size() * sizeof(short), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(g_d_tw4096, tw4.data(), tw4.size() * sizeof(short), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(g_d_ts, ts.data(), ts.size() * sizeof(short), cudaMemcpyHostToDevice));
+    CK(cudaFuncGetAttributes(&attr, nr_exact::k_fep_exact));
+    g_exact_ok = true;
+  }
   g_batch_async = getenv("ISAC_PDSCH_GPU_BATCH_ASYNC") && !strcmp(getenv("ISAC_PDSCH_GPU_BATCH_ASYNC"), "1");
-  cudaFuncAttributes attr;
   CK(cudaFuncGetAttributes(&attr, k_fep_gather));
   CK(cudaFuncGetAttributes(&attr, k_fep_rotate));
   CK(cudaFuncGetAttributes(&attr, k_gold));
@@ -574,13 +612,10 @@ extern "C" int nr_gpu_fep_admit(const nr_gpu_pdsch_job_t *jobs, int n, int check
   return !nr_dl_gpu_radio_mode || nr_dl_gpu_budget_take(&g_budget, bytes);
 }
 
-static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, uint32_t abs_sample,
-                        double fo_hz, const int16_t *symbol_rot)
+/* Copy the slot window (from `early` samples before the slot's CP, ring wrap) to the device. */
+static cudaError_t upload_window(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset)
 {
-  if (g_init_state != 1) return -1;
-  NrGpuRtScope rt; if(!rt.admitted)return -1;
-  const auto t0 = std::chrono::steady_clock::now();
-  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  const int N = g_cfg.ofdm_symbol_size, nant = g_cfg.nant;
   const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
   const size_t len = (size_t)g_samples_per_slot + N; /* the last symbol + slack */
   /* the window starts `early` samples before the slot's CP: origin = ring_offset - early */
@@ -593,7 +628,18 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
     if (first < len)
       memcpy(dst + first, src, (len - first) * sizeof(short2));
   }
-  CK((cudaError_t)nr_gpu_copy_async(g_d_rx, g_h_rx, (size_t)nant * len * sizeof(short2), g_stream));
+  return (cudaError_t)nr_gpu_copy_async(g_d_rx, g_h_rx, (size_t)nant * len * sizeof(short2), g_stream);
+}
+
+static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, uint32_t abs_sample,
+                        double fo_hz, const int16_t *symbol_rot)
+{
+  if (g_init_state != 1) return -1;
+  NrGpuRtScope rt; if(!rt.admitted)return -1;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
+  CK(upload_window(rxdata, ring_len, ring_offset));
   if (symbol_rot) {
     memcpy(g_h_rot, symbol_rot, (size_t)ns * sizeof(short2));
     CK((cudaError_t)nr_gpu_copy_async(g_d_rot, g_h_rot, (size_t)ns * sizeof(short2), g_stream));
@@ -766,3 +812,46 @@ extern "C" int nr_pdsch_gpu_debug_cpu_fep(const int16_t *rx)
   }
   return 0;
 }
+
+/* GPU6: bit-exact CPU FEP (nr_pdsch_gpu_exact_fep.cuh) of the symbols in sym_mask, written as OAI rxdataF
+ * into out[a * ant_stride + sym * N] (host c16). Same window arguments as fep_slot. fo_hz must be 0: the
+ * CPU FO compensation is not reproduced. Returns 0, or -1 when the caller must run the CPU FEP. */
+extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
+                                      const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
+{
+  if (g_init_state != 1 || !g_exact_ok || fo_hz != 0.0 || !rxdata || !symbol_rot || !out) return -1;
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  sym_mask &= (uint16_t)((1u << ns) - 1u);
+  if (!sym_mask) return -1;
+  NrGpuRtScope rt;
+  if (!rt.admitted) return -1;
+  const auto t0 = std::chrono::steady_clock::now();
+  CK(upload_window(rxdata, ring_len, ring_offset));
+  memcpy(g_h_rot, symbol_rot, (size_t)ns * sizeof(short2));
+  CK((cudaError_t)nr_gpu_copy_async(g_d_rot, g_h_rot, (size_t)ns * sizeof(short2), g_stream));
+  int nsym = 0, lo = ns, hi = -1;
+  for (int l = 0; l < ns; l++)
+    if (sym_mask >> l & 1) {
+      g_h_symlist[nsym++] = (uint16_t)l;
+      lo = std::min(lo, l);
+      hi = l;
+    }
+  CK((cudaError_t)nr_gpu_copy_async(g_d_symlist, g_h_symlist, nsym * sizeof(uint16_t), g_stream));
+  nr_exact::k_fep_exact<<<dim3(nsym, nant), nr_exact::THREADS, 0, g_stream>>>(
+      g_d_rx, g_samples_per_slot, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_symlist, g_d_perm, g_d_tw1024,
+      g_d_tw4096, g_d_rot, g_d_ts, g_cfg.n_rb_dl, g_cfg.first_carrier_offset, g_d_exact);
+  CK(cudaPeekAtLastError());
+  for (int a = 0; a < nant; a++) {
+    const size_t off = ((size_t)a * MAX_SYM + lo) * N;
+    CK((cudaError_t)nr_gpu_copy_async(g_h_exact + off, g_d_exact + off, (size_t)(hi - lo + 1) * N * sizeof(short2), g_stream));
+  }
+  CK(rt.wait(g_stream));
+  for (int a = 0; a < nant; a++)
+    for (int l = lo; l <= hi; l++)
+      if (sym_mask >> l & 1)
+        memcpy(out + 2 * ((size_t)a * ant_stride + (size_t)l * N), g_h_exact + ((size_t)a * MAX_SYM + l) * N,
+               (size_t)N * sizeof(short2));
+  g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+  return 0;
+}
+extern "C" double nr_pdsch_gpu_exact_last_us(void) { return g_exact_us; }

@@ -82,8 +82,9 @@ static void descramble(int16_t *v, size_t n, uint16_t rnti, uint16_t nid)
 int main(int argc, char **argv)
 {
   if (argc < 2) { fprintf(stderr, "usage: nr_gpu_slot_bench dump.bin [--cpu-only|--gpu] [repetitions]\n"); return 2; }
-  if (argc > 2 && strcmp(argv[2], "--gpu") && strcmp(argv[2], "--cpu-only")) return 2;
-  const bool gpu = argc > 2 && !strcmp(argv[2], "--gpu");
+  if (argc > 2 && strcmp(argv[2], "--gpu") && strcmp(argv[2], "--cpu-only") && strcmp(argv[2], "--exact")) return 2;
+  const bool exact = argc > 2 && !strcmp(argv[2], "--exact");
+  const bool gpu = argc > 2 && (!strcmp(argv[2], "--gpu") || exact);
   const int reps = argc > 3 ? std::max(1, atoi(argv[3])) : 1;
   FILE *f = fopen(argv[1], "rb");
   if (!f) { perror(argv[1]); return 2; }
@@ -125,6 +126,55 @@ int main(int argc, char **argv)
   auto last_chunks = (int (*)())dlsym(lib, "nr_gpu_fep_last_chunks");
   const nr_gpu_fep_api_t *api = get ? get() : nullptr;
   if (!api || api->init(&samples[0].h.cfg)) { fprintf(stderr, "GPU unavailable or init failed\n"); return 2; }
+  if (exact) {
+    /* GPU6 gate: the GPU FEP must reproduce the CPU rxdataF bit for bit on every recorded symbol. */
+    auto xfep = (int (*)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t))
+        dlsym(lib, "nr_pdsch_gpu_exact_fep");
+    auto xus = (double (*)(void))dlsym(lib, "nr_pdsch_gpu_exact_last_us");
+    if (!xfep || !xus) { fprintf(stderr, "no exact FEP symbol\n"); return 2; }
+    size_t points = 0, diff = 0, max_abs = 0, shown = 0, symbols = 0;
+    std::vector<double> t_us;
+    for (int rep = 0; rep < reps; ++rep) for (const Sample &s : samples) {
+      const int N = s.h.cfg.ofdm_symbol_size, na = s.h.cfg.nant;
+      const int16_t *rx[4] = {};
+      for (int a = 0; a < na; ++a) rx[a] = s.iq.data() + (size_t)2 * a * s.h.iq_samples_per_ant;
+      uint16_t mask = 0;
+      if (s.h.version == 3) {
+        for (int l = s.h.job.start_symbol; l < s.h.job.start_symbol + s.h.job.nb_symbols; ++l) mask |= 1u << l;
+        mask |= s.h.job.dmrs_mask;
+      } else {
+        mask = 1u << s.h.rxF_symbol;
+      }
+      std::vector<int16_t> out((size_t)2 * na * 14 * N);
+      if (xfep(rx, s.h.iq_samples_per_ant, s.h.early, s.h.fo_hz, s.rot.data(), mask, out.data(), (size_t)14 * N)) {
+        fprintf(stderr, "exact FEP refused slot %u (fo=%.1f)\n", s.h.absolute_slot, s.h.fo_hz); return 1;
+      }
+      t_us.push_back(xus());
+      if (rep) continue;
+      for (int a = 0; a < na; ++a) for (int l = 0; l < 14; ++l) {
+        if (!(mask >> l & 1)) continue;
+        ++symbols;
+        const int16_t *g = out.data() + 2 * ((size_t)a * 14 * N + (size_t)l * N);
+        const int16_t *c = s.h.version == 3 ? s.rxF.data() + 2 * ((size_t)a * 14 * N + (size_t)l * N)
+                                            : s.rxF.data() + 2 * (size_t)a * N;
+        for (int k = 0; k < N; ++k) {
+          ++points;
+          const int dr = std::abs(g[2 * k] - c[2 * k]), di = std::abs(g[2 * k + 1] - c[2 * k + 1]);
+          if (dr || di) {
+            ++diff;
+            max_abs = std::max<size_t>(max_abs, std::max(dr, di));
+            if (shown++ < 12)
+              printf("EXACT_DIFF slot=%u ant=%d sym=%d k=%d gpu=(%d,%d) cpu=(%d,%d)\n", s.h.absolute_slot, a, l, k, g[2 * k],
+                     g[2 * k + 1], c[2 * k], c[2 * k + 1]);
+          }
+        }
+      }
+    }
+    printf("EXACT FEP: records=%zu symbols=%zu points=%zu mismatching=%zu max_abs_diff=%zu; exact_fep_us p50=%.1f p99=%.1f "
+           "(nant x masked symbols incl. upload/readback)\n",
+           samples.size(), symbols, points, diff, max_abs, quantile(t_us, .5), quantile(t_us, .99));
+    return diff || !points ? 1 : 0;
+  }
   std::vector<double> slot_us, fep_us, llr_us;
   size_t compared = 0, sign_ok = 0, short_llr = 0, split_slots = 0;
   uint64_t raw_gpu_hash = 1469598103934665603ull;
