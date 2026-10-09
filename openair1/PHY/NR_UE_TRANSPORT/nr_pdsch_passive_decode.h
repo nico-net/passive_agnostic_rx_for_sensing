@@ -126,6 +126,7 @@ typedef enum {
 /// Everything the data-aided submit needs afterwards, so the caller never has to recompute it.
 typedef struct {
   nr_pdsch_passive_decode_status_t status;
+  bool config_recovered; ///< CRC passed on a recovery arm; original solver token is not parameter evidence
   const uint8_t       *tb;    ///< decoded payload, B = A + TB-CRC bits; NULL unless status is CRC_OK
   fapi_nr_dl_cw_info_t cw;    ///< codeword parameters this decode derived from the grant
   uint32_t             G;     ///< coded bits available on the allocation

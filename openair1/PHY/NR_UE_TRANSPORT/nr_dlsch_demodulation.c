@@ -53,8 +53,12 @@ __thread int nr_dlsch_irc_override = -1; /* T26d: per-grant ISAC_RX_IRC value (-
 __thread nr_irc_cov_t nr_irc_dmrs_cov; /* ISAC_RX_IRC=4, nr_irc_cov.h */
 __thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c */
 __thread int nr_pdsch_ldpc_iters_override = -1; /* T26d ISAC_LDPC_ITERS_AB (set by the PDSCH queue, read by the passive decode) */
+__thread bool nr_pdsch_decode_wide_mrc; /* CRC-validated passive recovery only */
 __thread int nr_dlsch_eq_override = -1; /* T26d ISAC_RX_EQ_AB: multi-layer equaliser per grant, 0 fixed MMSE, 1 float MMSE, 2 ML (nl 2, Qm<=6) */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
+/* DECODE-FIX: compare the diagnostic float ZF's QPSK signs with the actual
+ * fixed-point soft path. The EVM measurement precedes channel compensation. */
+__thread uint64_t nr_pdsch_decode_signs, nr_pdsch_decode_sign_errors;
 __thread int nr_dlsch_chest_per_symbol = 0;
 extern __thread uint32_t nr_dl_chest_nvar_ant[]; // per-branch chest noise, published by the chest on this thread // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
 __thread int nr_dlsch_used_branch = -1;
@@ -1804,6 +1808,12 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
 
   /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h.
    * x = ZF over the combined branches (nl = 1: MRC), per layer; decisions per layer; branch fit uses sum_l h_l s_l. */
+  int8_t *decode_ref_sign = NULL;
+  static _Atomic int decode_diag = -1;
+  if (decode_diag < 0) {
+    const char *e = getenv("ISAC_PDSCH_DECODE_DIAG");
+    decode_diag = e && atoi(e) != 0;
+  }
   if (nr_pdsch_evm_acc.armed && nl >= 1 && nl <= 4 && nb_re_pdsch >= 12 && nb_re_pdsch <= rx_size_symbol) {
     nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
     const int qm = dlsch->cw_info.qamModOrder;
@@ -1858,6 +1868,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     bool good = xr && nv >= 12;
     for (int l = 0; l < nl && good; l++) good = pw[l] > 0.0;
     if (good) {
+      if (decode_diag && qm == 2)
+        decode_ref_sign = calloc((size_t)nl * nb_re_pdsch * 2, sizeof(*decode_ref_sign));
       double scale[4];
       for (int l = 0; l < nl; l++) scale[l] = sqrt(ideal_pow / (pw[l] / nv));
       double cr[NR_PDSCH_EVM_MAX_RX] = {0}, ci[NR_PDSCH_EVM_MAX_RX] = {0}, P[NR_PDSCH_EVM_MAX_RX] = {0}, Y[NR_PDSCH_EVM_MAX_RX] = {0};
@@ -1867,6 +1879,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         double sr[4], sq_[4];
         for (int l = 0; l < nl; l++) {
           const double vi = xr[l][i] * scale[l], vq = xi[l][i] * scale[l];
+          if (decode_ref_sign) {
+            decode_ref_sign[2 * (l * nb_re_pdsch + i)] = vi < 0 ? -1 : 1;
+            decode_ref_sign[2 * (l * nb_re_pdsch + i) + 1] = vq < 0 ? -1 : 1;
+          }
           double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
           si = si > lmax ? lmax : si < -lmax ? -lmax : si;
           sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
@@ -1956,6 +1972,23 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                           dlsch->cw_info.qamModOrder,
                           0, // symbol already baked into p_rxComp
                           *log2_maxh);
+  /* Clamping every branch and partial sum can change the final sign when
+   * branches cancel. Preserve the complete matched-filter sum before the
+   * single output clamp. QPSK needs no corresponding magnitude thresholds. */
+  if (nr_pdsch_decode_wide_mrc && nl == 1 && dlsch->cw_info.qamModOrder == 2) {
+    for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+      int64_t re = 0, im = 0;
+      for (int a = mrc_rx_index; a < mrc_rx_index + mrc_nb_rx; a++) {
+        const c16_t h = chFext[0][a][i], y = rxdataF_ext[a][i];
+        re += (int64_t)h.r * y.r + (int64_t)h.i * y.i;
+        im += (int64_t)h.r * y.i - (int64_t)h.i * y.r;
+      }
+      re >>= *log2_maxh;
+      im >>= *log2_maxh;
+      p_rxComp[0][i].r = re > INT16_MAX ? INT16_MAX : re < INT16_MIN ? INT16_MIN : re;
+      p_rxComp[0][i].i = im > INT16_MAX ? INT16_MAX : im < INT16_MIN ? INT16_MIN : im;
+    }
+  }
   stop_meas_nr_ue_phy(ue, DLSCH_CHANNEL_COMPENSATION_STATS);
   if (meas_enabled) {
     LOG_D(PHY,
@@ -2062,6 +2095,19 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
   }
   stop_meas_nr_ue_phy(ue, DLSCH_MRC_MMSE_STATS);
+  if (decode_ref_sign) {
+    for (int l = 0; l < nl; l++)
+      for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+        const int16_t v[2] = {rxdataF_comp[symbol][l][i].r, rxdataF_comp[symbol][l][i].i};
+        for (int q = 0; q < 2; q++) {
+          const int ref = decode_ref_sign[2 * (l * nb_re_pdsch + i) + q];
+          if (!ref) continue;
+          nr_pdsch_decode_signs++;
+          nr_pdsch_decode_sign_errors += (v[q] < 0 ? -1 : 1) != ref;
+        }
+      }
+    free(decode_ref_sign);
+  }
 
   if (meas_enabled) {
     LOG_D(PHY,

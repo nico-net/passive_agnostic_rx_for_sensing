@@ -718,6 +718,19 @@ static __thread uint32_t t_seg_K = 0, t_seg_F = 0, t_seg_C = 0, t_seg_Z = 0;
  * them has now been eliminated by measurement (EVM identical at 9.9 % and 78.1 % CRC), so if the
  * fault is a stream-offset problem it must show as one of these differing by outcome. */
 static __thread uint32_t t_seg_E = 0, t_seg_R = 0, t_seg_lbrm = 0, t_seg_BG = 0;
+static __thread char t_decode_cb[4096]; /* E:CRC per CB, '-' means not attempted */
+static __thread int t_decode_tdra_attempt;
+extern __thread bool nr_pdsch_decode_wide_mrc;
+extern __thread uint64_t nr_pdsch_decode_signs, nr_pdsch_decode_sign_errors;
+static int decode_diag_on(void)
+{
+  static _Atomic int on = -1;
+  if (on < 0) {
+    const char *e = getenv("ISAC_PDSCH_DECODE_DIAG");
+    on = e && atoi(e) != 0;
+  }
+  return on;
+}
 
 static _Atomic int64_t  g_llr_sgnsum[2] = {0, 0};
 static _Atomic uint64_t g_llr_pos[2]    = {0, 0};
@@ -1510,6 +1523,14 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     return false;
   }
   t_decoder_used_last = TB_parameters.decoder_used;
+  if (decode_diag_on()) {
+    size_t used = 0;
+    t_decode_cb[0] = 0;
+    for (uint32_t r = 0; r < C_full && used + 32 < sizeof(t_decode_cb); r++)
+      used += snprintf(t_decode_cb + used, sizeof(t_decode_cb) - used, "%s%u:%c", r ? "," : "",
+                       nr_get_E(G, C_full, cw->qamModOrder, cw->Nl, r),
+                       r < C_dec ? (TB_parameters.decodeSuccess[r] ? '1' : '0') : '-');
+  }
   atomic_fetch_add(&g_ldpc_tb_dec[TB_parameters.decoder_used < 3 ? TB_parameters.decoder_used : 0], 1);
   LOG_D(NR_PHY, "SENSING: passive PDSCH decode decoder_used=%u (1=CPU min-sum, 2=CUDA normalised min-sum x2 iterations)\n", TB_parameters.decoder_used);
   if (t_cap_req) { /* GrantWork equivalence checks: code block 0 as the segment decoder de-matched it */
@@ -1863,6 +1884,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
   t_last_sk = -1;
   t_last_llr_have = t_last_data_bits = 0;
+  nr_pdsch_decode_signs = nr_pdsch_decode_sign_errors = 0;
+  t_decode_cb[0] = 0;
   t_last_llr = NULL; t_last_G = 0; t_seg_E = 0; /* never read a previous decode's LLRs as this one's */
   t_last_probe_horizon = -1; t_last_chest_hit = 0;
   t_brfo_pending = false; /* the GPU path jumps past the BRANCHFO measurement */
@@ -3852,7 +3875,7 @@ gpu_llr_ready:;
     memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
     static int s_evmp = -1; /* ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too */
     if (s_evmp < 0) s_evmp = getenv("ISAC_PDSCH_EVM_PROBES") ? 1 : 0;
-    nr_pdsch_evm_acc.armed = s_evmg && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
+    nr_pdsch_evm_acc.armed = (s_evmg || decode_diag_on()) && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
   }
   for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)
@@ -4145,8 +4168,10 @@ gpu_llr_ready:;
    * start_symbol, number_symbols, mcs, dlDataScramblingId, descrambled(0/1 = GrantWork already descrambled), G,
    * mcs_table, then int16 llr[G]. ISAC_PDSCH_LLR_DUMP_MAX grants (default 400). */
   static int s_dall = -1; /* ISAC_PDSCH_LLR_DUMP_ALL=1: every RNTI class (SI grants validate the offline harness) */
+  static _Atomic int s_dfull = -1; /* ISAC_PDSCH_LLR_DUMP_FULL=1: exclude partial CB0 probes */
+  if (s_dfull < 0) s_dfull = getenv("ISAC_PDSCH_LLR_DUMP_FULL") && atoi(getenv("ISAC_PDSCH_LLR_DUMP_FULL")) != 0;
   if (s_dall < 0) s_dall = getenv("ISAC_PDSCH_LLR_DUMP_ALL") && atoi(getenv("ISAC_PDSCH_LLR_DUMP_ALL")) ? 1 : 0;
-  if (demod_ok && (grant->rnti_class == 0 || s_dall)) {
+  if (demod_ok && (grant->rnti_class == 0 || s_dall) && !(s_dfull && t_probe_first_seg)) {
     static FILE *s_df;
     static int s_dinit, s_dleft;
     static pthread_mutex_t s_dmu = PTHREAD_MUTEX_INITIALIZER;
@@ -4425,10 +4450,9 @@ gpu_llr_ready:;
       const int sk = ldpc_ok ? 1 : ((atomic_load(&g_ldpc_zero_tb) != zero_before) ? 0 : 2);
       t_last_sk = sk;
       {
-        /* llr_have: index one past the last NON-ZERO LLR. An exactly-zero LLR is possible but
-         * vanishingly rare in real soft output, so the last nonzero is a good proxy for how far
-         * nr_rx_pdsch() actually filled the buffer -- and a shortfall against G is the thing being
-         * hunted. Scanned backwards so a full buffer costs one comparison. */
+        /* llr_have is one past the last NON-ZERO LLR, not the produced length:
+         * quantization and erasures can legitimately make the tail zero. Compare
+         * G with the sum of dl_valid_re * Qm * Nl below to check the RE budget. */
         uint32_t llr_have = 0;
         for (int i = (int)G - 1; i >= 0; i--) {
           if (llr[i] != 0) { llr_have = (uint32_t)i + 1; break; }
@@ -4456,6 +4480,47 @@ gpu_llr_ready:;
         }
         const int pk = (sk == 1) ? 1 : 0;  // 1 = decoded, 0 = did not decode (zero_tb or seg_fail)
         t_last_data_bits = vre * cw->qamModOrder * cw->Nl;
+        if (decode_diag_on()) {
+          const uint32_t N = (t_seg_BG == 1 ? 66u : 50u) * t_seg_Z;
+          const uint32_t nref = t_seg_C ? 3u * t_seg_lbrm / (2u * t_seg_C) : 0;
+          /* The queued PDU carries the symbol mask, not the solver's add_pos.
+           * Report its compatible type-A values; short allocations can alias. */
+          unsigned add_mask = 0;
+          const unsigned dm = dlsch_config->dlDmrsSymbPos;
+          if (dm)
+            for (int ap = 0; ap < 4; ap++)
+              if (nr_pdsch_solver_dmrs_mask(__builtin_ctz(dm), dlsch_config->start_symbol,
+                                            dlsch_config->number_symbols, ap) == dm)
+                add_mask |= 1u << ap;
+          const int add_pos = __builtin_popcount(add_mask) == 1 ? __builtin_ctz(add_mask) : -1;
+          LOG_I(PHY, "SENSING: DECODEDIAG rnti=0x%04x fs=%d.%d abs=%ld probe=%d crc=%d "
+                "nl=%u mcs=%u tbl=%u qm=%u snr=%.2f G=%u llr_have=%u produced=%u "
+                "C=%u K=%u Zc=%u F=%u BG=%u cb=[%s] rv=%u ndi=%u pid=%u combined=%d "
+                "S=%u L=%u dmrs=0x%x ndmrs=%u add_pos=%d add_mask=0x%x ports=0x%x cdm=%u dmrs_type=%u nscid=%u dmrsid=%u dataid=%u "
+                "ptrs_arm=%d ptrs_re=%u ptrs_k=%u ptrs_log2l=%u csi_re=%u ssb_re=%u "
+                "Ncb=%u lbrm=%u tbs=%u xoh=%u scaling=%u rb=%u+%u decoder=%u sign_errors=%lu signs=%lu fep_fo=%.6f attempt=%d\n",
+                grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot,
+                t_probe_first_seg, ldpc_ok, cw->Nl, grant->mcs, grant->mcs_table, cw->qamModOrder,
+                out->evm_valid && out->evm_pct > 0 ? -20.0 * log10(out->evm_pct / 100.0) : -99.0,
+                G, llr_have, t_last_data_bits, t_seg_C, t_seg_K, t_seg_Z, t_seg_F, t_seg_BG, t_decode_cb,
+                cw->rv, grant->ndi, grant->harq_pid, t_last_hq_retx, dlsch_config->start_symbol,
+                dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos, dmrs_len, add_pos, add_mask,
+                dlsch_config->dmrs_ports, dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType,
+                dlsch_config->nscid, dlsch_config->dlDmrsScramblingId,
+                dlsch_config->dlDataScramblingId, ptrs_arm, ptrs_unav, dlsch_config->PTRSFreqDensity,
+                dlsch_config->PTRSTimeDensity, csi_unav, ssb_unav, t_seg_lbrm && nref < N ? nref : N,
+                t_seg_lbrm, cw->TBS, grant->nb_rb_oh, grant->tb_scaling, freq_alloc->first_rb,
+                freq_alloc->num_rbs, t_decoder_used_last, nr_pdsch_decode_sign_errors, nr_pdsch_decode_signs,
+                t_last_fep_fo, t_decode_tdra_attempt);
+          for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
+            const fapi_nr_dl_config_csirs_pdu_rel15_t *p = &dlsch_config->csiRsForRateMatching[i];
+            LOG_I(PHY, "SENSING: DECODECSI rnti=0x%04x abs=%ld attempt=%d index=%d id=%u type=%u row=%u "
+                  "rb=%u+%u l0=%u l1=%u fd=0x%x density=%u cdm=%u\n",
+                  grant->rnti, grant->source_absolute_slot, t_decode_tdra_attempt, i, p->scramb_id,
+                  p->csi_type, p->row, p->start_rb, p->nr_of_rbs, p->symb_l0, p->symb_l1,
+                  p->freq_domain, p->freq_density, p->cdm_type);
+          }
+        }
         const uint64_t v[PIPE_N_FIELDS] = {
             G, llr_have, vre, (uint64_t)vre * cw->qamModOrder * cw->Nl,
             t_seg_C, t_seg_K, t_seg_Z, t_seg_F, t_seg_E, t_seg_R, t_seg_lbrm,
@@ -4633,10 +4698,147 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out)
 {
-  const nr_pdsch_passive_decode_status_t st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  nr_pdsch_passive_decode_status_t st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   if (t_gw_owner) { /* left before the publish point: the same inputs fail the same way, make it sticky */
     t_gw_owner = false;
     nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
+  }
+  /* DECODE-FIX: CRC success for one DCI does not establish the TDRA or
+   * CSI-RS exclusions for every later DCI. These default-off recovery arms
+   * re-demodulate the SAME samples and accept only a full, nonzero TB CRC.
+   * A successful PDU is retained for data-aided reconstruction. */
+  static _Atomic int tdra_retry = -1, csi_retry = -1, cdm_retry = -1, wide_retry = -1, csi_population_retry = -1;
+  if (tdra_retry < 0) {
+    const char *e = getenv("ISAC_PDSCH_TDRA_RETRY");
+    tdra_retry = e && atoi(e) != 0;
+  }
+  if (csi_retry < 0) {
+    const char *e = getenv("ISAC_PDSCH_CSI_RETRY");
+    csi_retry = e && atoi(e) != 0;
+  }
+  if (cdm_retry < 0) {
+    const char *e = getenv("ISAC_PDSCH_DMRS_CDM_RETRY");
+    cdm_retry = e && atoi(e) != 0;
+  }
+  if (wide_retry < 0) {
+    const char *e = getenv("ISAC_PDSCH_WIDE_MRC_RETRY");
+    wide_retry = e && atoi(e) != 0;
+  }
+  if (csi_population_retry < 0) {
+    const char *e = getenv("ISAC_PDSCH_CSI_POPULATION_RETRY");
+    csi_population_retry = e && atoi(e) != 0;
+  }
+  if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
+      || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || t_quiet || t_llr_ovr
+      || nr_agnostic_v2() || harq_combine_on())
+    return st;
+  const bool try_start = tdra_retry && dlsch_config->start_symbol <= 1
+                         && dlsch_config->start_symbol + dlsch_config->number_symbols == 14;
+  const bool try_cdm = cdm_retry && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1
+                       && dlsch_config->dmrs_ports && !(dlsch_config->dmrs_ports & ~3u)
+                       && (dlsch_config->n_dmrs_cdm_groups == 1 || dlsch_config->n_dmrs_cdm_groups == 2);
+  fapi_nr_dl_config_dlsch_pdu_rel15_t alternate_csi = *dlsch_config;
+  bool try_csi = false;
+  if (csi_retry && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !t_probe_first_seg && !t_quiet) {
+    if (alternate_csi.numCsiRsForRateMatching > 0) {
+      alternate_csi.numCsiRsForRateMatching = 0;
+      try_csi = true;
+    } else {
+      const uint32_t slot = (uint32_t)proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
+      alternate_csi.numCsiRsForRateMatching = nr_csirs_blind_rt_rate_match_all(
+          slot, alternate_csi.csiRsForRateMatching, NFAPI_MAX_NUM_CSI_RATEMATCH);
+      try_csi = alternate_csi.numCsiRsForRateMatching > 0 && nr_dlsch_csi_unav_res(&alternate_csi, freq_alloc) > 0;
+    }
+  }
+  fapi_nr_dl_config_dlsch_pdu_rel15_t csi_variants[3];
+  csi_variants[0] = alternate_csi;
+  int n_csi_variants = 1;
+  if (csi_population_retry) {
+    /* Discovery sees several cells. A union of their resources is not this
+     * UE's rate-matching configuration. Try a same-ID subset independently.
+     * Its detected bandwidth can also stop before the configured edge: a
+     * separate 16-RB extent hypothesis recovered a measured two-CB TB. */
+    fapi_nr_dl_config_csirs_pdu_rel15_t resources[64];
+    const uint32_t slot = (uint32_t)proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
+    const int n = nr_csirs_blind_rt_rate_match_all(slot, resources, 64);
+    csi_variants[1] = *dlsch_config;
+    csi_variants[1].numCsiRsForRateMatching = 0;
+    for (int i = 0; i < n && csi_variants[1].numCsiRsForRateMatching < NFAPI_MAX_NUM_CSI_RATEMATCH; i++) {
+      if (resources[i].scramb_id != dlsch_config->dlDmrsScramblingId) continue;
+      csi_variants[1].csiRsForRateMatching[csi_variants[1].numCsiRsForRateMatching++] = resources[i];
+    }
+    if (csi_variants[1].numCsiRsForRateMatching && nr_dlsch_csi_unav_res(&csi_variants[1], freq_alloc)) {
+      n_csi_variants = 2;
+      csi_variants[2] = csi_variants[1];
+      bool changed = false;
+      for (int i = 0; i < csi_variants[2].numCsiRsForRateMatching; i++) {
+        fapi_nr_dl_config_csirs_pdu_rel15_t *p = &csi_variants[2].csiRsForRateMatching[i];
+        const int start = p->start_rb & ~15;
+        const int end = ((p->start_rb + p->nr_of_rbs + 15) / 16) * 16;
+        if (end > 276) continue;
+        changed |= start != p->start_rb || end - start != p->nr_of_rbs;
+        p->start_rb = start;
+        p->nr_of_rbs = end - start;
+      }
+      if (changed) n_csi_variants = 3;
+    }
+  }
+  const bool try_wide = wide_retry && dlsch_config->cw_info[0].Nl == 1
+                        && dlsch_config->cw_info[0].qamModOrder == 2;
+  if (try_start || try_csi || try_cdm || try_wide || n_csi_variants > 1) {
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+    const bool saved_quiet = t_quiet;
+    const double saved_fo_override = nr_slot_fep_fo_override_hz;
+    nr_slot_fep_fo_override_hz = t_last_fep_fo; /* same frequency compensation for paired trials */
+    t_quiet = true; /* do not teach unrelated parameter sweeps from these trials */
+    bool recovered = false;
+    /* Bits 0..3 select CSI-RS, S=0/1, CDM groups, and wide MRC.
+     * Type-1 ports 0/1 occupy CDM group 0; either one or two groups is legal. */
+    for (int cv = 0; cv < n_csi_variants && !recovered; cv++) {
+      for (int arm = 1; arm <= 15 && !recovered; arm++) {
+        if (cv > 0 && !(arm & 1)) continue;
+        if (((arm & 1) && cv == 0 && !try_csi) || ((arm & 2) && !try_start)
+            || ((arm & 4) && !try_cdm) || ((arm & 8) && !try_wide))
+          continue;
+        *dlsch_config = original;
+        if (arm & 1) *dlsch_config = csi_variants[cv];
+        if (arm & 2) {
+          /* Type-A DM-RS positions at end symbol 14 agree for S=0 and S=1. */
+          dlsch_config->start_symbol = 1 - original.start_symbol;
+          dlsch_config->number_symbols = 14 - dlsch_config->start_symbol;
+        }
+        if (arm & 4) dlsch_config->n_dmrs_cdm_groups = 3 - original.n_dmrs_cdm_groups;
+        nr_pdsch_decode_wide_mrc = (arm & 8) != 0;
+        t_decode_tdra_attempt = arm + 64 * cv;
+        st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+        if (t_gw_owner) {
+          t_gw_owner = false;
+          nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
+        }
+        recovered = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+      }
+    }
+    LOG_I(PHY, "SENSING: DECODETDRA rnti=0x%04x fs=%d.%d abs=%ld before=0 after=%d S=%u L=%u csi=%u altS=%u altL=%u alt_csi=%u cdm=%u alt_cdm=%u arm=%d\n",
+          grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, recovered,
+          original.start_symbol, original.number_symbols, original.numCsiRsForRateMatching,
+          dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->numCsiRsForRateMatching, original.n_dmrs_cdm_groups, dlsch_config->n_dmrs_cdm_groups,
+          t_decode_tdra_attempt);
+    nr_pdsch_decode_wide_mrc = false;
+    if (!recovered) {
+      /* Restore the public result AND the thread-local decoder/LLR view
+       * used by the queue's diagnostics and equivalence checks. */
+      *dlsch_config = original;
+      t_decode_tdra_attempt = 32;
+      st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+      if (t_gw_owner) {
+        t_gw_owner = false;
+        nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
+      }
+    }
+    out->config_recovered = recovered;
+    nr_slot_fep_fo_override_hz = saved_fo_override;
+    t_quiet = saved_quiet;
+    t_decode_tdra_attempt = 0;
   }
   return st;
 }
