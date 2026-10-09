@@ -3589,6 +3589,18 @@ gpu_llr_ready:;
   allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
   static __thread fourDimArray_t *toFree5 = NULL;
   allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  /* T26d ISAC_RX_ML_2L / ISAC_RX_EQ_AB: the 2-layer ML LLR needs the inter-layer correlation buffer (stock decode
+   * passes NULL); allocated per thread on first use only. */
+  c16_t(*rho_dl_p)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][rx_size_symbol] = NULL;
+  {
+    static int s_mlw = -1;
+    if (s_mlw < 0) s_mlw = (getenv("ISAC_RX_ML_2L") && atoi(getenv("ISAC_RX_ML_2L"))) || (getenv("ISAC_RX_EQ_AB") && atoi(getenv("ISAC_RX_EQ_AB")));
+    if (s_mlw && cw->Nl == 2) {
+      static __thread fourDimArray_t *toFree6 = NULL;
+      allocCast3D(rho_dl, c16_t, toFree6, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS, rx_size_symbol, true);
+      rho_dl_p = rho_dl;
+    }
+  }
 
   c16_t ptrs_phase_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
   memset(ptrs_phase_per_slot, 0, sizeof(ptrs_phase_per_slot));
@@ -3798,7 +3810,7 @@ gpu_llr_ready:;
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF_dem, &log2_maxh, rx_size_symbol,
                     fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
-                    ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */,
+                    ptrs_re_per_slot, nvar, &scope_req, rho_dl_p /* NULL unless 2-layer ML may run */,
                     ssb_unav ? &ssb.dem : &no_ssb)
         < 0) {
       demod_ok = false;

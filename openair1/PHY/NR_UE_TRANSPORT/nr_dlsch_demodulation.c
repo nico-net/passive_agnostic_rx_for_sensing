@@ -1095,6 +1095,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     if (nr_dlsch_eq_override >= 0) do_ml = nr_dlsch_eq_override == 2;
     else if (s_ml) do_ml = true;
   }
+  if (rho_dl == NULL) do_ml = false; /* no inter-layer correlation buffer (passive decode allocates it on request) */
 
   // Reinterpret flat dl_ch_estimates_ext as [nl][nbRx][rx_size_symbol]
   c16_t(*chFext)[nbRx][rx_size_symbol] = (void *)dl_ch_estimates_ext;
