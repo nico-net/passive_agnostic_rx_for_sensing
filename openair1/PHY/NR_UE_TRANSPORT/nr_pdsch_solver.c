@@ -226,7 +226,8 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db)
   return ok;
 }
 
-void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n)
+static bool g_alt_decided; /* T26d: g_alt_ids[0] is a blind-decided DM-RS id -- try it first, no default-only phase */
+void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n, bool first_is_decided)
 {
   static int en = -1;
   if (en < 0) en = getenv("ISAC_PDSCH_SOLVER_SCR") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR")) ? 1 : 0;
@@ -239,6 +240,7 @@ void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n)
     h = (h ^ ids[i]) * 16777619u;
   }
   g_alt_hash = h ^ (uint32_t)g_n_alt;
+  g_alt_decided = first_is_decided && g_n_alt > 0;
   pthread_mutex_unlock(&g_mu);
 }
 
@@ -488,9 +490,13 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
         if (g_key_scr[q].key == g_alt_key) { t_scr = g_key_scr[q].scr; known = 1; }
       if (!known) { /* T26d: the default ids alone for the first 48 grants -- cycling 6+ alternatives from the start made
                      * the serving population's search 6x slower (replay e9/e10: 0x8f5a unsolved) */
-        const uint32_t g = r->grants > 48 ? r->grants - 48 : 0;
-        const uint32_t k = r->grants <= 48 ? 0 : g % (uint32_t)(g_n_alt + 1);
-        t_scr = k == 0 ? -1 : g_alt_ids[k - 1];
+        if (g_alt_decided) { /* the decided id on 3 grants of 4, the default on the 4th */
+          t_scr = (r->grants % 4u) == 3u ? -1 : g_alt_ids[0];
+        } else {
+          const uint32_t g = r->grants > 48 ? r->grants - 48 : 0;
+          const uint32_t k = r->grants <= 48 ? 0 : g % (uint32_t)(g_n_alt + 1);
+          t_scr = k == 0 ? -1 : g_alt_ids[k - 1];
+        }
       }
     }
     /* 2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best
