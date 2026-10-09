@@ -10,6 +10,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <vector>
+#include <string>
 
 struct Stage { nr_pdsch_gpu_stage_row_t h; std::vector<int16_t> ls, fir; };
 struct Sample {
@@ -82,9 +83,11 @@ static void descramble(int16_t *v, size_t n, uint16_t rnti, uint16_t nid)
 int main(int argc, char **argv)
 {
   if (argc < 2) { fprintf(stderr, "usage: nr_gpu_slot_bench dump.bin [--cpu-only|--gpu] [repetitions]\n"); return 2; }
-  if (argc > 2 && strcmp(argv[2], "--gpu") && strcmp(argv[2], "--cpu-only") && strcmp(argv[2], "--exact")) return 2;
+  if (argc > 2 && strcmp(argv[2], "--gpu") && strcmp(argv[2], "--cpu-only") && strcmp(argv[2], "--exact")
+      && strcmp(argv[2], "--delay") && strcmp(argv[2], "--pair")) return 2;
   const bool exact = argc > 2 && !strcmp(argv[2], "--exact");
-  const bool gpu = argc > 2 && (!strcmp(argv[2], "--gpu") || exact);
+  const bool delay = argc > 2 && !strcmp(argv[2], "--delay");
+  const bool gpu = argc > 2 && (!strcmp(argv[2], "--gpu") || exact || delay);
   const int reps = argc > 3 ? std::max(1, atoi(argv[3])) : 1;
   FILE *f = fopen(argv[1], "rb");
   if (!f) { perror(argv[1]); return 2; }
@@ -116,6 +119,76 @@ int main(int argc, char **argv)
          samples.size(), groups, max_jobs, over_limit,
          std::count_if(samples.begin(), samples.end(), [](const Sample &s) { return s.h.crc_ok; }),
          std::count_if(samples.begin(), samples.end(), [](const Sample &s) { return s.h.evm_valid; }));
+  if (argc > 3 && !strcmp(argv[2], "--pair")) {
+    /* GPU6: the same grant recorded by two replays (e.g. CPU FEP vs exact GPU FEP): is the input of the
+     * CPU chain identical, and where does its output start to differ? */
+    FILE *g = fopen(argv[3], "rb");
+    if (!g) { perror(argv[3]); return 2; }
+    std::vector<Sample> other;
+    for (;;) {
+      const int lead = fgetc(g);
+      if (lead == EOF) break;
+      ungetc(lead, g);
+      Sample o;
+      if (!read_one(g, o)) break;
+      other.push_back(std::move(o));
+    }
+    fclose(g);
+    size_t iq_same = 0, iq_diff_shown = 0;
+    size_t matched = 0, rxf_same = 0, rows_same_count = 0, ls_same = 0, fir_same = 0, delay_same = 0, llr_same = 0, crc_same = 0;
+    for (const Sample &a : samples) {
+      const Sample *b = nullptr;
+      for (const Sample &o : other) {
+        nr_gpu_pdsch_job_t ja = a.h.job, jb = o.h.job;
+        ja.llr_offset = jb.llr_offset = 0;
+        ja.n_llr = jb.n_llr = 0;
+        if (o.h.absolute_slot == a.h.absolute_slot && o.h.rnti == a.h.rnti && !memcmp(&ja, &jb, sizeof(ja))
+            && o.h.version == 3 && a.h.version == 3) { b = &o; break; }
+      }
+      if (!b) continue;
+      ++matched;
+      const int N = a.h.cfg.ofdm_symbol_size;
+      uint16_t mask = a.h.job.dmrs_mask;
+      for (int l = a.h.job.start_symbol; l < a.h.job.start_symbol + a.h.job.nb_symbols; ++l) mask |= 1u << l;
+      bool same = true;
+      for (int ant = 0; ant < a.h.cfg.nant && same; ++ant)
+        for (int l = 0; l < 14 && same; ++l)
+          if (mask >> l & 1)
+            same = !memcmp(&a.rxF[2 * ((size_t)ant * 14 * N + (size_t)l * N)], &b->rxF[2 * ((size_t)ant * 14 * N + (size_t)l * N)],
+                           (size_t)N * 4);
+      rxf_same += same;
+      iq_same += a.iq == b->iq && a.h.abs_sample == b->h.abs_sample && a.h.fo_hz == b->h.fo_hz;
+      if (a.iq != b->iq && iq_diff_shown++ < 3) {
+        size_t first = 0;
+        while (first < a.iq.size() && first < b->iq.size() && a.iq[first] == b->iq[first]) ++first;
+        printf("IQ_DIFF slot=%u abs_sample=%u/%u fo=%.1f/%.1f first_diff_int16=%zu of %zu a=%d b=%d\n", a.h.absolute_slot,
+               a.h.abs_sample, b->h.abs_sample, a.h.fo_hz, b->h.fo_hz, first, a.iq.size(),
+               first < a.iq.size() ? a.iq[first] : 0, first < b->iq.size() ? b->iq[first] : 0);
+      }
+      bool cnt = a.stages.size() == b->stages.size(), ls = cnt, fir = cnt, dly = cnt;
+      for (size_t r = 0; cnt && r < a.stages.size(); ++r) {
+        const auto &x = a.stages[r], &y = b->stages[r];
+        if (x.h.count != y.h.count || x.h.symbol != y.h.symbol || x.h.antenna != y.h.antenna) { cnt = ls = fir = dly = false; break; }
+        ls = ls && x.ls == y.ls;
+        fir = fir && x.fir == y.fir;
+        dly = dly && x.h.delay == y.h.delay && x.h.noise == y.h.noise;
+      }
+      rows_same_count += cnt; ls_same += ls; fir_same += fir; delay_same += dly;
+      const bool llr = a.cpu == b->cpu;
+      llr_same += llr;
+      crc_same += a.h.crc_ok == b->h.crc_ok;
+      if (!(same && cnt && ls && fir && dly && llr))
+        printf("PAIR_DIFF slot=%u rnti=0x%04x rb=%u+%u rxF=%d rows=%zu/%zu count_eq=%d ls=%d fir=%d delay_noise=%d llr=%d crc=%u/%u evm=%.1f/%.1f%s\n",
+               a.h.absolute_slot, a.h.rnti, a.h.job.start_rb, a.h.job.nb_rb, same, a.stages.size(), b->stages.size(), cnt, ls, fir, dly,
+               llr, a.h.crc_ok, b->h.crc_ok, a.h.cpu_evm_pct, b->h.cpu_evm_pct,
+               cnt || a.stages.empty() || b->stages.empty() ? "" : (" ls_count " + std::to_string(a.stages[0].h.count) + "/" + std::to_string(b->stages[0].h.count)).c_str());
+    }
+    printf("PAIR: iq_identical=%zu\n", iq_same);
+    printf("PAIR: A=%zu B=%zu matched=%zu rxF_identical=%zu stage_rows_same_shape=%zu ls_identical=%zu fir_identical=%zu "
+           "delay_noise_identical=%zu cpu_llr_identical=%zu crc_same=%zu\n",
+           samples.size(), other.size(), matched, rxf_same, rows_same_count, ls_same, fir_same, delay_same, llr_same, crc_same);
+    return 0;
+  }
   if (!gpu) return 0;
   void *lib = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!lib) { fprintf(stderr, "dlopen libpdsch_gpu.so: %s\n", dlerror()); return 2; }
@@ -126,6 +199,40 @@ int main(int argc, char **argv)
   auto last_chunks = (int (*)())dlsym(lib, "nr_gpu_fep_last_chunks");
   const nr_gpu_fep_api_t *api = get ? get() : nullptr;
   if (!api || api->init(&samples[0].h.cfg)) { fprintf(stderr, "GPU unavailable or init failed\n"); return 2; }
+  if (delay) {
+    /* GPU6 gate: GPU nr_passive_est_delay() equals the CPU delay recorded in every v3 stage row. */
+    auto xdel = (int (*)(const int16_t *const *, int, int *))dlsym(lib, "nr_pdsch_gpu_exact_delay");
+    if (!xdel) { fprintf(stderr, "no exact delay symbol\n"); return 2; }
+    const int N = samples[0].h.cfg.ofdm_symbol_size;
+    size_t rows = 0, same = 0;
+    std::vector<double> t_us;
+    for (int rep = 0; rep < reps; ++rep) for (const Sample &s : samples) {
+      for (size_t r0 = 0; r0 < s.stages.size(); r0 += 16) {
+        const int n = (int)std::min<size_t>(16, s.stages.size() - r0);
+        std::vector<std::vector<int16_t>> buf(n, std::vector<int16_t>((size_t)2 * N, 0));
+        const int16_t *ptr[16];
+        for (int r = 0; r < n; ++r) {
+          std::copy(s.stages[r0 + r].ls.begin(), s.stages[r0 + r].ls.end(), buf[r].begin());
+          ptr[r] = buf[r].data();
+        }
+        int out[48];
+        const auto t0 = std::chrono::steady_clock::now();
+        if (xdel(ptr, n, out)) { fprintf(stderr, "exact delay refused\n"); return 1; }
+        t_us.push_back(us(t0, std::chrono::steady_clock::now()));
+        if (rep) continue;
+        for (int r = 0; r < n; ++r) {
+          ++rows;
+          const auto &st = s.stages[r0 + r].h;
+          if (out[3 * r] == st.delay) ++same;
+          else if (rows - same <= 12)
+            printf("DELAY_DIFF slot=%u sym=%u ant=%u cpu=%d gpu=%d pos=%d val=%d\n", s.h.absolute_slot, st.symbol, st.antenna,
+                   st.delay, out[3 * r], out[3 * r + 1], out[3 * r + 2]);
+        }
+      }
+    }
+    printf("EXACT DELAY: rows=%zu equal=%zu; batch us p50=%.1f p99=%.1f\n", rows, same, quantile(t_us, .5), quantile(t_us, .99));
+    return rows == same && rows ? 0 : 1;
+  }
   if (exact) {
     /* GPU6 gate: the GPU FEP must reproduce the CPU rxdataF bit for bit on every recorded symbol. */
     auto xfep = (int (*)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t))

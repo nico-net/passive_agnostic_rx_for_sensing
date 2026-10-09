@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 static int g_init_state;
 
@@ -89,11 +92,46 @@ static float g_llr_scale = 4.0f;
 static int g_force_ant = -1; /* recorded-input branch isolation; unset in production */
 static bool g_batch_async; /* opt-in: caller follows FEP with LLR on the same stream */
 /* GPU6 bit-exact FEP (nr_pdsch_gpu_exact_fep.cuh): tables + per-slot int16 rxdataF */
-static uint16_t *g_d_perm, *g_d_symlist, *g_h_symlist;
+static uint16_t *g_d_perm;
 static short *g_d_tw1024, *g_d_tw4096;
 static short2 *g_d_ts, *g_d_exact, *g_h_exact;
-static bool g_exact_ok;
-static double g_exact_us;
+static bool g_exact_ok, g_exact_direct, g_exact_pending;
+static double g_exact_us, g_exact_deadline_us = 2000;
+static std::atomic<uint64_t> g_exact_late, g_exact_busy;
+/* Exact-path contexts: one stream and one small mapped output each. Rotation and symbol list ride in the kernel
+ * argument and the kernels read/write the caller's memory, so concurrent consumers never share a mutable buffer
+ * and never serialize on a lock (direct mode). The staged mode reuses the module's single upload buffers and
+ * keeps a lock. */
+static const int EXACT_CTX = 8;
+static cudaStream_t g_ctx_stream[EXACT_CTX];
+static int *g_ctx_delay[EXACT_CTX];
+static std::atomic<unsigned> g_ctx_busy{0};
+static std::mutex g_exact_staged_lock;
+static int ctx_acquire(bool try_only)
+{
+  for (;;) {
+    unsigned m = g_ctx_busy.load();
+    for (int i = 0; i < EXACT_CTX; i++)
+      if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) return i;
+    if (try_only) return -1;
+    std::this_thread::yield();
+  }
+}
+static void ctx_release(int i) { g_ctx_busy.fetch_and(~(1u << i)); }
+/* Wait for a context's stream; returns 0, or a CUDA error. Counts calls past the deadline. */
+static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
+{
+  bool late = false;
+  for (;;) {
+    const cudaError_t q = cudaStreamQuery(g_ctx_stream[c]);
+    if (q == cudaSuccess) return 0;
+    if (q != cudaErrorNotReady) return (int)q;
+    if (!late && std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
+      late = true;
+      ++g_exact_late;
+    }
+  }
+}
 
 /* ---------------------------------------------------------------- FEP ---- */
 /* Gather one OFDM symbol per (ant, sym): CP removal with the 1/8-CP early window, ring wrap, FO
@@ -541,8 +579,6 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
      * computed exactly as init_timeshift_rotation() does (same libm, same formula). */
     const size_t exact = (size_t)cfg->nant * MAX_SYM * N * sizeof(short2);
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_perm, N * sizeof(uint16_t)));
-    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_symlist, MAX_SYM * sizeof(uint16_t)));
-    CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_symlist, MAX_SYM * sizeof(uint16_t)));
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw1024, 3 * 512 * sizeof(short)));
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw4096, 3 * 2048 * sizeof(short)));
     CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_ts, N * sizeof(short2)));
@@ -564,6 +600,23 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     CK(cudaMemcpy(g_d_tw4096, tw4.data(), tw4.size() * sizeof(short), cudaMemcpyHostToDevice));
     CK(cudaMemcpy(g_d_ts, ts.data(), ts.size() * sizeof(short), cudaMemcpyHostToDevice));
     CK(cudaFuncGetAttributes(&attr, nr_exact::k_fep_exact));
+    CK(cudaFuncGetAttributes(&attr, nr_exact::k_delay_exact));
+    {
+      int least = 0, greatest = 0;
+      CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+      for (int c = 0; c < EXACT_CTX; c++) {
+        CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
+        CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));
+      }
+    }
+    /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
+     * coherent shared-memory platform (GB10: pageable access through the host page tables). */
+    const nr_gpu_caps_t *caps = nr_gpu_platform_probe();
+    const char *d = getenv("ISAC_PDSCH_GPU_EXACT_DIRECT");
+    g_exact_direct = caps && caps->model == NR_GPU_SHARED && caps->pageable_memory_access && caps->host_page_tables
+                     && !(d && atoi(d) == 0);
+    if (const char *e = getenv("ISAC_PDSCH_GPU_EXACT_DEADLINE_US"))
+      g_exact_deadline_us = std::max(50.0, atof(e));
     g_exact_ok = true;
   }
   g_batch_async = getenv("ISAC_PDSCH_GPU_BATCH_ASYNC") && !strcmp(getenv("ISAC_PDSCH_GPU_BATCH_ASYNC"), "1");
@@ -815,37 +868,89 @@ extern "C" int nr_pdsch_gpu_debug_cpu_fep(const int16_t *rx)
 
 /* GPU6: bit-exact CPU FEP (nr_pdsch_gpu_exact_fep.cuh) of the symbols in sym_mask, written as OAI rxdataF
  * into out[a * ant_stride + sym * N] (host c16). Same window arguments as fep_slot. fo_hz must be 0: the
- * CPU FO compensation is not reproduced. Returns 0, or -1 when the caller must run the CPU FEP. */
-extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
-                                      const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
+ * CPU FO compensation is not reproduced. try_only: no free context -> -1 at once (the PDCCH scan never waits).
+ * Returns 0, or -1 when the caller must run the CPU FEP.
+ * Direct mode never returns while the kernel can still write the caller's rxdataF (a late kernel would
+ * otherwise overwrite the CPU fallback or the next slot); it only counts deadline misses. Staged mode
+ * returns -1 on a miss and refuses the next calls until its stream has drained. */
+extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
+                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride, int try_only)
 {
   if (g_init_state != 1 || !g_exact_ok || fo_hz != 0.0 || !rxdata || !symbol_rot || !out) return -1;
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
   sym_mask &= (uint16_t)((1u << ns) - 1u);
   if (!sym_mask) return -1;
+  nr_exact::ExactIO io = {};
+  memcpy(io.rot, symbol_rot, (size_t)ns * sizeof(short2));
+  int nsym = 0, lo = ns, hi = -1;
+  for (int l = 0; l < ns; l++)
+    if (sym_mask >> l & 1) {
+      io.sym_list[nsym++] = (uint16_t)l;
+      lo = std::min(lo, l);
+      hi = l;
+    }
+  const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
+  if (g_exact_direct) {
+    const int c = ctx_acquire(try_only);
+    if (c < 0) { ++g_exact_busy; return -1; }
+    NrGpuRtScope rt;
+    if (!rt.admitted) { ctx_release(c); return -1; }
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int a = 0; a < nant; a++) io.rx[a] = (const short2 *)rxdata[a];
+    io.ring_len = ring_len;
+    io.origin = (ring_offset + ring_len - early) % ring_len;
+    io.out = (short2 *)out;
+    io.ant_stride = ant_stride;
+    nr_exact::k_fep_exact<<<dim3(nsym, nant), nr_exact::THREADS, 0, g_ctx_stream[c]>>>(
+        io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
+        g_cfg.first_carrier_offset);
+    cudaError_t e = cudaPeekAtLastError();
+    if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+    ctx_release(c);
+    if (e != cudaSuccess) {
+      g_init_state = -1;
+      fprintf(stderr, "nr_pdsch_gpu_exact_fep: %s\n", cudaGetErrorString(e));
+      return -1;
+    }
+    g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    return 0;
+  }
+  if (try_only) {
+    if (!g_exact_staged_lock.try_lock()) { ++g_exact_busy; return -1; }
+  } else
+    g_exact_staged_lock.lock();
+  std::lock_guard<std::mutex> hold(g_exact_staged_lock, std::adopt_lock);
+  if (g_exact_pending) {
+    if (cudaStreamQuery(g_stream) == cudaErrorNotReady) { ++g_exact_busy; return -1; }
+    g_exact_pending = false;
+  }
   NrGpuRtScope rt;
   if (!rt.admitted) return -1;
   const auto t0 = std::chrono::steady_clock::now();
   CK(upload_window(rxdata, ring_len, ring_offset));
-  memcpy(g_h_rot, symbol_rot, (size_t)ns * sizeof(short2));
-  CK((cudaError_t)nr_gpu_copy_async(g_d_rot, g_h_rot, (size_t)ns * sizeof(short2), g_stream));
-  int nsym = 0, lo = ns, hi = -1;
-  for (int l = 0; l < ns; l++)
-    if (sym_mask >> l & 1) {
-      g_h_symlist[nsym++] = (uint16_t)l;
-      lo = std::min(lo, l);
-      hi = l;
-    }
-  CK((cudaError_t)nr_gpu_copy_async(g_d_symlist, g_h_symlist, nsym * sizeof(uint16_t), g_stream));
+  for (int a = 0; a < nant; a++) io.rx[a] = g_d_rx + (size_t)a * (g_samples_per_slot + N);
+  io.ring_len = 0xffffffffu;
+  io.origin = 0;
+  io.out = g_d_exact;
+  io.ant_stride = (size_t)MAX_SYM * N;
   nr_exact::k_fep_exact<<<dim3(nsym, nant), nr_exact::THREADS, 0, g_stream>>>(
-      g_d_rx, g_samples_per_slot, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_symlist, g_d_perm, g_d_tw1024,
-      g_d_tw4096, g_d_rot, g_d_ts, g_cfg.n_rb_dl, g_cfg.first_carrier_offset, g_d_exact);
+      io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
+      g_cfg.first_carrier_offset);
   CK(cudaPeekAtLastError());
   for (int a = 0; a < nant; a++) {
     const size_t off = ((size_t)a * MAX_SYM + lo) * N;
     CK((cudaError_t)nr_gpu_copy_async(g_h_exact + off, g_d_exact + off, (size_t)(hi - lo + 1) * N * sizeof(short2), g_stream));
   }
-  CK(rt.wait(g_stream));
+  for (;;) {
+    const cudaError_t q = cudaStreamQuery(g_stream);
+    if (q == cudaSuccess) break;
+    if (q != cudaErrorNotReady) CK(q);
+    if (std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
+      g_exact_pending = true;
+      ++g_exact_late;
+      return -1;
+    }
+  }
   for (int a = 0; a < nant; a++)
     for (int l = lo; l <= hi; l++)
       if (sym_mask >> l & 1)
@@ -853,5 +958,43 @@ extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t rin
                (size_t)N * sizeof(short2));
   g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
+}
+extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
+                                      const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
+{
+  return nr_pdsch_gpu_exact_fep2(rxdata, ring_len, ring_offset, fo_hz, symbol_rot, sym_mask, out, ant_stride, 0);
+}
+
+/* GPU6: nr_passive_est_delay() of up to 16 LS rows (N c16 each, host memory; shared-memory platforms only).
+ * out[3 r] = {est_delay, delay_max_pos, delay_max_val} of the candidate. 0, or -1 (caller computes on the CPU). */
+extern "C" int nr_pdsch_gpu_exact_delay(const int16_t *const *rows, int nrows, int *out)
+{
+  if (g_init_state != 1 || !g_exact_ok || !g_exact_direct || nrows < 1 || nrows > nr_exact::DELAY_MAX_ROWS || !rows || !out)
+    return -1;
+  const int c = ctx_acquire(false);
+  NrGpuRtScope rt;
+  if (!rt.admitted) { ctx_release(c); return -1; }
+  const auto t0 = std::chrono::steady_clock::now();
+  nr_exact::DelayIO io = {};
+  for (int r = 0; r < nrows; r++) io.ls[r] = (const short2 *)rows[r];
+  nr_exact::k_delay_exact<<<nrows, nr_exact::THREADS, 0, g_ctx_stream[c]>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096,
+                                                                           (int *)nr_gpu_device_ptr(g_ctx_delay[c]));
+  cudaError_t e = cudaPeekAtLastError();
+  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+  if (e == cudaSuccess) memcpy(out, g_ctx_delay[c], 3 * nrows * sizeof(int));
+  ctx_release(c);
+  if (e != cudaSuccess) {
+    g_init_state = -1;
+    fprintf(stderr, "nr_pdsch_gpu_exact_delay: %s\n", cudaGetErrorString(e));
+    return -1;
+  }
+  return 0;
+}
+
+extern "C" void nr_pdsch_gpu_exact_stats(int *direct, uint64_t *late, uint64_t *busy)
+{
+  *direct = g_exact_direct;
+  *late = g_exact_late;
+  *busy = g_exact_busy;
 }
 extern "C" double nr_pdsch_gpu_exact_last_us(void) { return g_exact_us; }
