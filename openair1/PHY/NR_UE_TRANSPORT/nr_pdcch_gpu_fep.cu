@@ -54,6 +54,8 @@ static int16_t *g_h_llr, *g_d_llr;
 static size_t g_llr_cap;
 static cudaStream_t g_stream;
 static double g_upload_us, g_llr_us;
+static bool g_cpu_arithmetic;
+static int g_force_mask;
 static float g_llr_scale = 6.0f; /* int16 LLR headroom; same order as nr_pdsch_gpu_fep's g_llr_scale */
 
 /* ---------------------------------------------------------------- Gold sequence (38.211 5.2.1) --
@@ -177,6 +179,8 @@ __global__ void k_llr_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, const f
   o[1] = (int16_t)fmaxf(-32000.f, fminf(32000.f, z.y * g));
 }
 
+#include "nr_pdcch_gpu_parity.cuh"
+
 static nr_dl_gpu_budget_t g_budget;
 extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
 { *bytes = __atomic_load_n(&g_budget.bytes, __ATOMIC_RELAXED); *refused = __atomic_load_n(&g_budget.refused, __ATOMIC_RELAXED); }
@@ -186,6 +190,10 @@ static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
   if (!nr_gpu_module_ready()) return -1;
   if (cfg->nant < 1 || cfg->nant > MAX_ANT || cfg->ofdm_symbol_size <= 0 || cfg->n_rb_dl < 1 || cfg->n_rb_dl > 275) return -1;
   g_cfg = *cfg;
+  const char *parity = getenv("ISAC_PDCCH_GPU_CPU_ARITH");
+  g_cpu_arithmetic = parity && atoi(parity) == 1;
+  const char *mask = getenv("ISAC_PDCCH_ANT_MASK");
+  g_force_mask = mask ? strtol(mask, nullptr, 0) : 0;
   const int N = cfg->ofdm_symbol_size, nant = cfg->nant;
   if(nr_gpu_budget_enabled()) {
     int least=0,greatest=0;
@@ -271,7 +279,10 @@ static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint
   k_gold_pdcch<<<n, MAX_DUR, 0, g_stream>>>(g_d_jobs, n, g_d_gold);
   if (max_ls > 0)
     k_ls_pdcch<<<dim3((max_ls + 255) / 256, n), 256, 0, g_stream>>>(g_d_jobs, g_d_gold, g_d_rxF, N, MAX_DUR, nant, fco, g_d_ls);
-  if (max_re > 0)
+  if (g_cpu_arithmetic)
+    k_pdcch_cpu_arithmetic<<<dim3(n, MAX_DUR), 1, 0, g_stream>>>(g_d_jobs, g_d_gold, g_d_rxF, N, nant, fco,
+                                                             g_d_llr, g_force_mask);
+  else if (max_re > 0)
     k_llr_pdcch<<<dim3((max_re + 127) / 128, n), 128, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_rxF, N, MAX_DUR, nant, fco, g_d_llr,
                                                                      g_llr_scale);
   CK((cudaError_t)nr_gpu_copy_async(g_h_llr, g_d_llr, (size_t)total * sizeof(int16_t), g_stream));
