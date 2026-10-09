@@ -110,4 +110,31 @@ static void wrap_test()
     }
 }
 
-int main() { recovery_test(); fault_window_test(); wrap_test(); }
+static void poll_classify_test()
+{
+  /* Data always wins, even with a timeout code from a later fragment. */
+  assert(usrp_ring_poll_classify(1988, false, 0.0, 0.1) == USRP_RING_POLL_DATA);
+  assert(usrp_ring_poll_classify(1988, true, 5.0, 0.1) == USRP_RING_POLL_DATA);
+  /* An empty result without an error is not a timeout. */
+  assert(usrp_ring_poll_classify(0, false, 5.0, 0.1) == USRP_RING_POLL_DATA);
+  /* Empty zero-timeout polls retry until the silence limit, then become a timeout fault. */
+  assert(usrp_ring_poll_classify(0, true, 0.0, 0.1) == USRP_RING_POLL_RETRY);
+  assert(usrp_ring_poll_classify(0, true, 0.0999, 0.1) == USRP_RING_POLL_RETRY);
+  assert(usrp_ring_poll_classify(0, true, 0.1, 0.1) == USRP_RING_POLL_TIMEOUT);
+  assert(usrp_ring_poll_classify(0, true, 3.0, 0.1) == USRP_RING_POLL_TIMEOUT);
+}
+
+static void cpulist_test()
+{
+  assert(usrp_cpulist_mask("15-19\n") == 0xF8000ULL);
+  assert(usrp_cpulist_mask("17-19") == 0xE0000ULL);
+  assert(usrp_cpulist_mask("2,4-6") == ((1ULL << 2) | (1ULL << 4) | (1ULL << 5) | (1ULL << 6)));
+  assert(usrp_cpulist_mask("") == 0 && usrp_cpulist_mask("\n") == 0 && usrp_cpulist_mask(NULL) == 0);
+  assert(usrp_cpulist_mask("16") == (1ULL << 16));
+  assert(usrp_cpulist_mask("62-70") == ((1ULL << 62) | (1ULL << 63)));
+  /* the 2026-10-08 boot (17-19) leaves the ring core 16 and uhd_ctrl 15 exposed */
+  const uint64_t old_boot = usrp_cpulist_mask("17-19"), new_boot = usrp_cpulist_mask("15-19");
+  assert(!(old_boot >> 16 & 1) && !(old_boot >> 15 & 1) && (new_boot >> 16 & 1) && (new_boot >> 15 & 1));
+}
+
+int main() { recovery_test(); fault_window_test(); wrap_test(); poll_classify_test(); cpulist_test(); }
