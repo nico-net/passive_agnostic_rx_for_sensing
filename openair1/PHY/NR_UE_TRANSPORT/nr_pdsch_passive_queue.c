@@ -1429,11 +1429,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_ptrs_sweep_allow(!job.layout_probe && (job.sweep_ticket.generation == 0 || job.sweep_ticket.settled));
     if (gpu_job)
       nr_pdsch_passive_set_llr_override(t_gpu_llr + gpu_job->llr_offset, gpu_job->n_llr);
-    extern __thread int nr_dlsch_mrc_mode_override;
-    nr_dlsch_mrc_mode_override = job.mrc_mode > 0 ? job.mrc_mode : -1; /* T26d ISAC_RX_MRC_PER_RNTI */
+    extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
+    /* T26d ISAC_RX_MRC_PER_RNTI receivers: 1 best branch, 3 MRC (+ALIGN env), 4 noise-weighted MRC (IRC diag), 5 IRC */
+    nr_dlsch_mrc_mode_override = job.mrc_mode == 4 || job.mrc_mode == 5 ? 1 : (job.mrc_mode > 0 ? job.mrc_mode : -1);
+    nr_dlsch_irc_override = job.mrc_mode == 4 ? 3 : job.mrc_mode == 5 ? 2 : (job.mrc_mode > 0 ? 0 : -1);
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     nr_dlsch_mrc_mode_override = -1;
+    nr_dlsch_irc_override = -1;
     if (owned) {
       const uint64_t done = now_ns();
       const uint64_t cpu_fep = nr_pdsch_passive_last_fep_ns();

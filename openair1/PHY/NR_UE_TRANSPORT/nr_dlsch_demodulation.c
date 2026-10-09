@@ -47,7 +47,8 @@ __thread int nr_dlsch_forced_branch = -1;
  * separate live runs cannot answer whether four branches hurt, because propagation, gain state and
  * this rig's own 5-88 % CRC swing all change between runs. */
 __thread int nr_dlsch_forced_mask = -1;
-__thread int nr_dlsch_mrc_mode_override = -1; /* T26d ISAC_RX_MRC_PER_RNTI: per-grant combining mode (set by the passive decode) */
+__thread int nr_dlsch_mrc_mode_override = -1;
+__thread int nr_dlsch_irc_override = -1; /* T26d: per-grant ISAC_RX_IRC value (-1 = env) */ /* T26d ISAC_RX_MRC_PER_RNTI: per-grant combining mode (set by the passive decode) */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
 __thread int nr_dlsch_chest_per_symbol = 0;
 extern __thread uint32_t nr_dl_chest_nvar_ant[]; // per-branch chest noise, published by the chest on this thread // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
@@ -1658,6 +1659,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       s_irc = getenv("ISAC_RX_IRC") ? atoi(getenv("ISAC_RX_IRC")) : 0;
       if (getenv("ISAC_RX_IRC_SHRINK")) s_shrink = atof(getenv("ISAC_RX_IRC_SHRINK"));
     }
+    const int s_irc_env = s_irc;
+    if (nr_dlsch_irc_override >= 0) s_irc = nr_dlsch_irc_override; /* per-grant (ISAC_RX_MRC_PER_RNTI) */
     if (s_irc) {
       const int qm = dlsch->cw_info.qamModOrder;
       const int lmax = (1 << (qm / 2)) - 1;
@@ -1772,6 +1775,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       }
       free(xs);
     }
+    s_irc = s_irc_env;
   }
 
   /* ISAC_PDSCH_EVM_GRANT (T26c): per-grant decision-directed EVM + per-branch LS SNR, nr_pdsch_evm_acc.h.

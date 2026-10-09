@@ -1266,7 +1266,8 @@ static uint64_t gw_fingerprint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *p, con
   GWFP(p->dmrs_ports); GWFP(p->nscid); GWFP(p->n_dmrs_cdm_groups); GWFP(p->dmrsConfigType); GWFP(p->refPoint);
   GWFP(p->BWPStart); GWFP(p->BWPSize); GWFP(fa->first_rb); GWFP(fa->num_rbs); GWFP(fa->n_prb_list); GWFP(fa->prg);
   uint64_t fob; memcpy(&fob, &fo, sizeof(fob)); GWFP(fob);
-  { extern __thread int nr_dlsch_mrc_mode_override; GWFP(nr_dlsch_mrc_mode_override + 1); } /* T26d: LLRs depend on the combining mode */
+  { extern __thread int nr_dlsch_mrc_mode_override, nr_dlsch_irc_override;
+    GWFP(nr_dlsch_mrc_mode_override + 1); GWFP(nr_dlsch_irc_override + 1); } /* T26d: LLRs depend on the receiver */
 #undef GWFP
   return h;
 }

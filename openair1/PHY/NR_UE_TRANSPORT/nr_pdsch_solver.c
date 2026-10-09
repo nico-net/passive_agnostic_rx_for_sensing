@@ -42,7 +42,7 @@ typedef struct {
   int32_t key;             /* T26c: CORESET key of this RNTI's last planned DCI */
   uint32_t n_probe;        /* T26c: probes planned while unsolved (search backoff) */
   uint32_t alt_hash;       /* T26c: g_alt_hash seen at the last plan */
-  uint32_t comb_try[2], comb_ok[2]; /* T26d ISAC_RX_MRC_PER_RNTI: full/probe CRC per combining mode {1: best branch, 3: MRC} */
+  uint32_t comb_try[4], comb_ok[4]; /* T26d ISAC_RX_MRC_PER_RNTI: CRC per receiver {1 best branch, 3 MRC, 4 NW-MRC, 5 IRC} */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
 } solver_rnti_t;
@@ -278,19 +278,27 @@ static uint8_t t_comb; /* T26d combining mode for this grant's variants (0 = def
 static int comb_on(void)
 {
   static int en = -1;
-  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI") && atoi(getenv("ISAC_RX_MRC_PER_RNTI")) ? 1 : 0;
+  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI")) : 0;
   return en;
 }
 /* Mode for this grant: unsolved -> alternate 1/3 by grant parity; solved -> the mode with the better CRC rate
  * (Laplace), exploring the other on 1 grant in 8. */
+/* receivers in play: ISAC_RX_MRC_PER_RNTI=1 -> {1,3}; =2 -> {1,3,4,5} (4 = noise-weighted gain-corrected MRC, 5 = IRC) */
+static const uint8_t kComb[4] = {1, 3, 4, 5};
+static int comb_n(void) { return comb_on() >= 2 ? 4 : 2; }
 static uint8_t comb_pick(const solver_rnti_t *r)
 {
   if (!comb_on()) return 0;
-  if (!r->solved) return ((r->grants / 64u) & 1u) ? 3 : 1; /* BLOCKS of grants: a per-grant parity aliased with the search
-                                                           * cursor, so some hypotheses were only ever tried in one mode */
-  const double p1 = (r->comb_ok[0] + 1.0) / (r->comb_try[0] + 2.0), p3 = (r->comb_ok[1] + 1.0) / (r->comb_try[1] + 2.0);
-  const uint8_t best = p3 > p1 ? 3 : 1;
-  return (r->grants % 8u) == 7u ? (best == 3 ? 1 : 3) : best;
+  const int n = comb_n();
+  if (!r->solved) return kComb[(r->grants / 64u) % (uint32_t)n]; /* blocks: no aliasing with the search cursor */
+  int best = 0;
+  double bp = -1.0;
+  for (int k = 0; k < n; k++) {
+    const double p = (r->comb_ok[k] + 1.0) / (r->comb_try[k] + 2.0);
+    if (p > bp) { bp = p; best = k; }
+  }
+  if ((r->grants % 8u) == 7u) return kComb[(best + 1 + (r->grants / 8u) % (uint32_t)(n - 1)) % (uint32_t)n]; /* explore */
+  return kComb[best];
 }
 static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                  const nr_pdsch_solver_reading_t *rd, int l0, int S, int add_pos, int table, bool probe, bool table_disc,
@@ -426,10 +434,11 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     for (int i = 0; i < SOLVER_RNTIS && u < (int)sizeof(b) - 80; i++) {
       const solver_rnti_t *q = &g_r[i];
       if (!q->used) continue;
-      u += snprintf(b + u, sizeof(b) - u, " 0x%04x:g%u,%s%.0fms,full%u/%u,snr%.1f,m1:%u/%u,m3:%u/%u", q->rnti, q->grants,
+      u += snprintf(b + u, sizeof(b) - u, " 0x%04x:g%u,%s%.0fms,full%u/%u,snr%.1f,m1:%u/%u,m3:%u/%u,nw:%u/%u,irc:%u/%u", q->rnti, q->grants,
                     q->solved_abs ? "solve=" : "unsolved_age=",
                     0.5 * (double)((q->solved_abs ? q->solved_abs : g_now_abs) - q->first_abs), q->full_ok, q->full_tr,
-                    q->n_snr ? q->snr_ema : -99.f, q->comb_ok[0], q->comb_try[0], q->comb_ok[1], q->comb_try[1]);
+                    q->n_snr ? q->snr_ema : -99.f, q->comb_ok[0], q->comb_try[0], q->comb_ok[1], q->comb_try[1],
+                    q->comb_ok[2], q->comb_try[2], q->comb_ok[3], q->comb_try[3]);
     }
     LOG_A(PHY, "SENSING: PDSCH_SOLVER per-rnti%s\n", b);
   }
@@ -656,8 +665,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     return;
   }
   solver_rnti_t *r = &g_r[p->slot];
-  if (p->comb == 1 || p->comb == 3) {
-    const int ci = p->comb == 3 ? 1 : 0;
+  if (p->comb >= 1) {
+    const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb == 5 ? 3 : 0;
     r->comb_try[ci]++;
     if (crc_ok) r->comb_ok[ci]++;
   }
