@@ -314,6 +314,7 @@ void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb)
   g_css0_first_rb = first_rb;
   g_css0_nrb = n_rb;
 }
+/* nr_pdcch_coreset_map_get_css0: returns the first RB and the number of RBs of CORESET#0 (the CSS0 span) as recorded from the MIB; used by the CORESET-0 occupancy gate and the NID capture. */
 void nr_pdcch_coreset_map_get_css0(int *first_rb, int *n_rb)
 {
   *first_rb = g_css0_first_rb;
@@ -417,6 +418,7 @@ static void *idsw_worker(void *arg)
 /* Capture metrics have one producer; readers use relaxed atomic snapshots. */
 static _Atomic uint64_t nid_capture_offered, nid_capture_taken, nid_capture_skipped_empty;
 static _Atomic float nid_capture_noise;
+/* nr_pdcch_nid_capture_metrics: returns the NID capture counters: slots offered to the capture, captures taken, captures skipped as empty, and the latest noise level of the occupancy gate. Reads atomics. Caller: nr_passive_metrics.c (metrics emission). */
 void nr_pdcch_nid_capture_metrics(uint64_t *offered, uint64_t *taken, uint64_t *empty, float *noise)
 {
   *offered = atomic_load_explicit(&nid_capture_offered, memory_order_relaxed);
@@ -425,6 +427,9 @@ void nr_pdcch_nid_capture_metrics(uint64_t *offered, uint64_t *taken, uint64_t *
   *noise = atomic_load_explicit(&nid_capture_noise, memory_order_relaxed);
 }
 
+/* nr_pdcch_coreset_map_idsweep_want: decides whether this DL slot should feed the scrambling-ID sweep capture, and at which start symbol: the GPU capture rotates the start over the first ISAC_PDCCH_NID_GPU_SYMBOLS symbols (default 3) on every ISAC_PDCCH_NID_GPU_CAPTURE_EVERY slot.
+ *   The CPU diagnostic dump runs only when ISAC_COREMAP_IDSWEEP is set and keeps its every-tenth-slot cadence. Requires the carrier to be verified and CORESET#0 known. Returns the start symbol, or -1 to skip. Caller: the scan path of nr_pdcch_blind_monitor_rt.c.
+ */
 int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
 {
   const bool gpu = nr_pdcch_nid_gpu_enabled();
@@ -474,6 +479,9 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   return start;
 }
 
+/* nr_pdcch_coreset_map_idsweep_push: hands one FFT'd symbol of a DL slot to the NID capture: with the GPU NID path it applies the CSS0 occupancy gate (ISAC_PDCCH_NID_GPU_OCC_GATE, _OCC_DB, _OCC_FLOOR_PCT) and pushes the symbol to the GPU ring; otherwise it feeds the CPU diagnostic dump.
+ *   Keeps the occupancy history per configuration and resets it on a sync loss or configuration change. Caller: the blind PDCCH monitor scan path.
+ */
 void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, int n_rb, int slot, int sym, uint16_t pci, int sps)
 {
   const nr_passive_acq_snapshot_t snap = nr_passive_acq_snapshot();
