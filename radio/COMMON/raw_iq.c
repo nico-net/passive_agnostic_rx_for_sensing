@@ -100,7 +100,7 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
 }
 
 /* device_init: replay device constructor (RAW_IQ): opens the saved IQ recording named by ISAC_RAW_IQ_* (directory, sample count, first tick, channels 1-8, rate, centre, shift), sets the pacing speed (ISAC_RAW_IQ_SPEED, 0 < speed <= 1), and installs the replay hooks (read_iq, tune, gain, finish).
- *   Optional single or double stream gaps (ISAC_RAW_IQ_GAP_AT_S/_S and _GAP2_*) are armed for replay only. Fails with an assertion on bad settings. Called by the device loader when the RAW_IQ device is selected.
+ *   Optional single or double stream gaps (ISAC_RAW_IQ_GAP_AT_S/_S and _GAP2_*) are armed for replay only. Fails with an assertion on bad settings. Called by the openair0 device loader and the tests.
  */
 int device_init(openair0_device_t *d, openair0_config_t *cfg)
 {
