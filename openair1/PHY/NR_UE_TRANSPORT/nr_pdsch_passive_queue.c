@@ -374,7 +374,7 @@ static _Atomic uint64_t g_crc_ok        = 0;
 /* Two windows per nSCID, stage 1 always on, stage 2 throttled and capped: nr_dmrs_id_2stage_t
  * (final review I5; measured 170360 us per stage-2 accumulate vs ~2 ms for stage 1). */
 /* T26c ISAC_PDSCH_DMRS_ID_PER_CORESET: one blind DM-RS identity estimator per discovered CORESET population */
-typedef struct { int key; int decided; bool used; pthread_mutex_t mu; nr_dmrs_id_2stage_t est; } coreset_dmrs_t;
+typedef struct { int key; int decided; int top[3]; bool used; pthread_mutex_t mu; nr_dmrs_id_2stage_t est; } coreset_dmrs_t;
 static coreset_dmrs_t g_cs_dmrs[8];
 static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
 static bool per_coreset_dmrs_on(void)
@@ -392,7 +392,7 @@ static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
   for (int i = 0; i < 8 && !r; i++)
     if (!g_cs_dmrs[i].used) {
       r = &g_cs_dmrs[i];
-      r->used = true; r->key = key; r->decided = -1;
+      r->used = true; r->key = key; r->decided = -1; r->top[0] = r->top[1] = r->top[2] = -1;
       pthread_mutex_init(&r->mu, NULL);
       char label[32];
       snprintf(label, sizeof(label), "PDSCH-cs%d", key);
@@ -401,6 +401,15 @@ static coreset_dmrs_t *coreset_dmrs_slot(int key, int pci)
     }
   pthread_mutex_unlock(&g_cs_dmrs_mu);
   return r;
+}
+int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3)
+{
+  for (int i = 0; i < 8; i++)
+    if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key && __atomic_load_n(&g_cs_dmrs[i].decided, __ATOMIC_ACQUIRE) >= 0) {
+      for (int q = 0; q < 3; q++) out3[q] = g_cs_dmrs[i].top[q];
+      return 3;
+    }
+  return 0;
 }
 int nr_pdsch_passive_coreset_dmrs_id(int key)
 {
@@ -1762,7 +1771,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                              start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
                                              job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType)) {
               const int id = nr_dmrs_id_2stage_decided(&cd->est);
+              /* T26d: the population can mix DM-RS identities (replays: 249 or 442 on CORESET 10163): keep the three
+               * best-scoring ids; the solver tries them per RNTI and the CRC decides */
+              double sc[3] = {-1, -1, -1};
+              int tp[3] = {id, -1, -1};
+              for (int c = 0; c < 1024; c++) {
+                const double v = nr_dmrs_id_score(&cd->est.s1, c);
+                for (int q = 0; q < 3; q++)
+                  if (v > sc[q]) { for (int z = 2; z > q; z--) { sc[z] = sc[z - 1]; tp[z] = tp[z - 1]; } sc[q] = v; tp[q] = c; break; }
+              }
+              for (int q = 0; q < 3; q++) cd->top[q] = tp[q];
               __atomic_store_n(&cd->decided, id, __ATOMIC_RELEASE);
+              LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d top3 %d %d %d\n", job.coreset_key, tp[0], tp[1], tp[2]);
               LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d PDSCH DM-RS id DECIDED %d (cell %d)\n", job.coreset_key, id,
                     fp->Nid_cell);
             }

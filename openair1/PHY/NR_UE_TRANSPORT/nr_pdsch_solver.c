@@ -290,7 +290,8 @@ static uint8_t comb_pick(const solver_rnti_t *r)
 {
   if (!comb_on()) return 0;
   const int n = comb_n();
-  if (!r->solved) return kComb[(r->grants / 64u) % (uint32_t)n]; /* blocks: no aliasing with the search cursor */
+  if (!r->solved) return 0; /* the layout search runs on the configured receiver only (alternating receivers while
+                            * unsolved multiplied the search space and starved whole populations: replays n3/n4) */
   int best = 0;
   double bp = -1.0;
   for (int k = 0; k < n; k++) {
@@ -518,12 +519,13 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     { /* default ids, then each run-time alternative, one per grant -- unless another RNTI of this CORESET already
        * solved: then only that RNTI's scrambling (one RRC template per CORESET) */
       int known = 0;
-      for (int q = 0; q < g_n_key_scr && !known; q++)
-        if (g_key_scr[q].key == g_alt_key) { t_scr = g_key_scr[q].scr; known = 1; }
+      for (int q = 0; q < g_n_key_scr && !known; q++) /* preference, not exclusive: 1 block in 4 still explores */
+        if (g_key_scr[q].key == g_alt_key && ((r->grants / 16u) % 4u) != 3u) { t_scr = g_key_scr[q].scr; known = 1; }
       if (!known) { /* T26d: the default ids alone for the first 48 grants -- cycling 6+ alternatives from the start made
                      * the serving population's search 6x slower (replay e9/e10: 0x8f5a unsolved) */
         if (g_alt_decided) { /* the decided id on 3 grants of 4, the default on the 4th */
-          t_scr = ((r->grants / 16u) % 4u) == 3u ? -1 : g_alt_ids[0]; /* blocks, not parity (cursor aliasing) */
+          const uint32_t blk = r->grants / 16u, nd = (uint32_t)(g_n_alt < 3 ? g_n_alt : 3);
+          t_scr = (blk % 4u) == 3u ? -1 : g_alt_ids[(blk / 4u + blk) % nd]; /* top ids by block, default 1 block in 4 */
         } else {
           const uint32_t g = r->grants > 48 ? r->grants - 48 : 0;
           const uint32_t k = r->grants <= 48 ? 0 : (g / 16u) % (uint32_t)(g_n_alt + 1);

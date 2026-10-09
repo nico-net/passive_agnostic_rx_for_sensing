@@ -187,6 +187,8 @@ int nr_pdsch_passive_queue_fill_pct(void);
 /** T26c ISAC_PDSCH_DMRS_ID_PER_CORESET=1: PDSCH DM-RS identity decided blind (DM-RS correlation over 0..1023, then
  *  1024..65535) from the grants of ONE discovered CORESET's UEs (key = its PDCCH nID); -1 while undecided. */
 int nr_pdsch_passive_coreset_dmrs_id(int key);
+/** T26d: the three best-scoring DM-RS ids of that CORESET once decided (returns 3), else 0. */
+int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3);
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 

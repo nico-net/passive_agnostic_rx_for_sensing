@@ -8216,7 +8216,12 @@ constdiag_done:;
       int sv_did = -1;
       if (cfg->discovered_coreset) { /* T26c: this CORESET's blind-decided PDSCH DM-RS id first, when it differs from the cell's */
         sv_did = nr_pdsch_passive_coreset_dmrs_id((int)cfg->coreset_pdcch_dmrs_scrambling_id);
-        if (sv_did >= 0 && sv_did != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)sv_did;
+        int top3[3];
+        if (sv_did >= 0 && nr_pdsch_passive_coreset_dmrs_top((int)cfg->coreset_pdcch_dmrs_scrambling_id, top3) == 3) {
+          for (int q = 0; q < 3; q++)
+            if (top3[q] >= 0 && top3[q] != fp->Nid_cell) sv_alt[sv_nalt++] = (uint16_t)top3[q];
+        } else if (sv_did >= 0 && sv_did != fp->Nid_cell)
+          sv_alt[sv_nalt++] = (uint16_t)sv_did;
       }
       const bool sv_decided = sv_did >= 0; /* a decided DM-RS id is the hypothesis (default stays as fallback) */
       if (!sv_decided && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell)
