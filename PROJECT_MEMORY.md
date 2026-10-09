@@ -11,7 +11,8 @@
 >   null results: IRC (`ISAC_RX_IRC=4`), ML two-layer equaliser (`ISAC_RX_ML_2L`, `ISAC_RX_EQ_AB`), OCC-aware chest
 >   (`ISAC_CHEST_OCC`), LDPC iterations 8 vs 20 (`ISAC_LDPC_ITERS_AB`), solver preference (`ISAC_PDSCH_SOLVER_PREF=32`).
 > - `[MEASURED replay]` Per-RNTI MRC: `ISAC_RX_MRC_PER_RNTI=3` with `ISAC_RX_MRC_ALIGN=2` raises Nl=1 **QPSK** CRC from 82-87 %
->   to 86-90 %. The report records no 16QAM gain for this setting. The recommended OTA env uses `ISAC_RX_MRC_PER_RNTI=1`.
+>   to 86-90 %. 1-layer **16QAM**: mode 1 54-75 % vs mode 3 + ALIGN=2 83-87 % (n 13-23 per arm; T26d interim report to the
+>   orchestrator 2026-10-09, not in the T26.md table). The recommended OTA env uses `ISAC_RX_MRC_PER_RNTI=1`.
 > - `[MEASURED replay, emulated live rate]` T26c round 2 (`ISAC_PDSCHQ_SIGNAL_TIME=1` replay only, never on air): PDSCH
 >   queue stale 61 % -> 0.5 % with the round-2 flag set. Scan p99 still 2-4 ms there.
 > - `[INFERRED, NOT OTA-VALIDATED; X410 unavailable 2026-10-09]` Recommended OTA env: T26c base plus the T26D/T26E sets listed in
@@ -45,8 +46,11 @@
 > - `[INFERRED, strong]` Root cause: missing CPU isolation for RX-critical threads on the 2026-10-08 boot (`isolcpus=17-19`,
 >   producer on core 16, `uhd_ctrl` on a shared core). Every failing start of that boot is listed in the report.
 > - `[OTA LIVE 2026-10-09]` 8/8 zero-drop starts on the 15-19 boot; 8 runs of the 11:50-12:00 window, both arms, 0 drops.
-> - Decisive reproduction (producer on non-isolated core 14, no fix) is **not yet run**. Until it is, the causal claim stays INFERRED.
->   `ISAC_USRP_RING_PRIO=98` and `ISAC_USRP_RING_POLL=1` are untested on air.
+> - `[OTA LIVE 2026-10-09 12:29, orchestrator, ota_runs/startup_drops_1009_1229]` 7 more starts: 3 with PRIO=98+POLL+ISOLATION_CHECK,
+>   2 with the producer on non-isolated core 14 (no fix), 2 with core 14 + PRIO=98: all 7 synced, 0 stream drops, 0 RFSTALL,
+>   NIC rx_out_of_buffer/rx_discards_phy 0. Total 15/15 clean on the 15-19 boot. The decisive reproduction did NOT reproduce:
+>   producer-core isolation alone is **not** the trigger. Remaining suspects for the 10-08 regime: `uhd_ctrl` on a shared
+>   core with IRQs (irqaffinity=0-16), host state (heat, frozen mlocked replays, 8x slower cell search). Keep the 15-19 boot.
 >
 > **Host rules** (`[HOST-READ 2026-10-09]`, checked on the host and in `rr-orchestration`):
 > - DGX boot must carry `isolcpus=15-19 nohz_full=15-19 rcu_nocbs=15-19 irqaffinity=0-14` (read from `/proc/cmdline`;
