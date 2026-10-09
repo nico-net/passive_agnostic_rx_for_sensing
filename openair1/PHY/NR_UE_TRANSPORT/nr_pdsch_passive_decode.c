@@ -112,6 +112,15 @@ static int chest_pdp_diag_on(void)
   if (en < 0) en = getenv("ISAC_CHEST_PDP_DIAG") ? atoi(getenv("ISAC_CHEST_PDP_DIAG")) : 1;
   return en;
 }
+/* ISAC_PDSCH_HARQ_COMBINE=1 (T26d): the passive HARQ soft combining (same RNTI + HARQ id + NDI: a retransmission is
+ * LDPC-decoded INTO the stored soft buffer of the failed first transmission; 64 LRU entries) on its own flag -- it
+ * existed only inside the ISAC_AGNOSTIC_V2 bundle. */
+static int harq_combine_on(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDSCH_HARQ_COMBINE") && atoi(getenv("ISAC_PDSCH_HARQ_COMBINE")) ? 1 : 0;
+  return en;
+}
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
 static __thread uint64_t t_pdtim_cpu0;
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
@@ -911,7 +920,7 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     if (u > 0)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
-  if (nr_agnostic_v2()) {
+  if (nr_agnostic_v2() || harq_combine_on()) {
     uint64_t init_tx_hits, init_tx_evicts;
     pthread_mutex_lock(&g_harqc_lock);
     init_tx_hits   = g_dl_harq_init.hits;
@@ -4121,7 +4130,7 @@ gpu_llr_ready:;
         }
       }
     }
-    if (nr_agnostic_v2() && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
+    if ((nr_agnostic_v2() || harq_combine_on()) && atomic_load(&g_ldpc_ok) >= 100 && !t_quiet) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
       t_hq.pid = grant->harq_pid;
