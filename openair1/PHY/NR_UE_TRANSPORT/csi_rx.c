@@ -1283,7 +1283,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
 }
 
 /* nr_ue_csi_rs_sensing_capture_shifted: UE-agnostic passive-sensing capture of one NZP CSI-RS resource that is not the UE's own: runs the CSI-RS channel estimate (up to the LS estimate, no RI/PMI/CQI and no report to MAC) for the resources of the [sensing] csirs_monitor list and feeds them to the ISAC engine.
- *   Only when the monitor is configured (nr_csirs_monitor_enabled). slot_delta shifts the resource's slot. Diagnostics: ISAC_CSI_DIAG, ISAC_PDCCH_TIMING. Caller: nr_ue_csi_rs_sensing_capture() (slot_delta 0) and the monitor's per-slot path.
+ *   Only when the monitor is configured (nr_csirs_monitor_enabled). slot_delta shifts the resource's slot. Diagnostics: ISAC_CSI_DIAG, ISAC_PDCCH_TIMING. Caller: phy_procedures_nr_ue.c (the monitor's per-slot path, with the resource's slot delta).
  */
 void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
                                           const UE_nr_rxtx_proc_t *proc,
