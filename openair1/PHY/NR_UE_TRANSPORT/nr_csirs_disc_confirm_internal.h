@@ -21,6 +21,9 @@ static uint64_t discovery_birth[NR_CSIRS_BLIND_MAX_CAND];
 static __thread uint64_t discovery_consumed_ticket;
 static NR_DL_FRAME_PARMS discovery_frame;
 static bool discovery_queue_ready,discovery_disabled;
+/* nr_csirs_blind_rt_discovery_disable: disables the discovery path for the process (discovery_disabled) and marks the queue ready so that producers stop enqueuing.
+ *   Called by nr_csirs_disc_pipeline_init() through a weak symbol when the GPU pipeline could not be prepared.
+ */
 void nr_csirs_blind_rt_discovery_disable(void) {discovery_disabled=true;discovery_queue_ready=true;}
 static __thread bool discovery_consuming;
 static __thread uint64_t discovery_consumed_epoch;
@@ -37,6 +40,9 @@ static nr_csirs_disc_ring_t discovery_fep_ring;
 static int16_t discovery_compact_fallback[NR_CSIRS_DISC_MAX_ANT*14*24*NR_CSIRS_DISC_MAX_RB] __attribute__((aligned(64)));
 static int16_t *discovery_compact=discovery_compact_fallback;
 static bool discovery_device_scoring;
+/* discovery_symbols: returns the 14-bit mask of OFDM symbols that a CSI-RS candidate's mapping occupies (its symbol set from get_csi_mapping_parms).
+ *   Pure function. Callers: discovery_publish(), discovery_enqueue(), discovery_gpu_score() and nr_csirs_blind_rt.c (score_candidate).
+ */
 static uint16_t discovery_symbols(const nr_csirs_candidate_t *c)
 {
   csi_mapping_parms_t m=get_csi_mapping_parms(c->row,c->freq_domain,c->symb_l0,c->symb_l1);
@@ -52,6 +58,10 @@ static struct {
   struct { fapi_nr_dl_config_csirs_pdu_rel15_t p; uint16_t period, phase[2]; int nphase; } resource[2*NR_CSIRS_BLIND_DISC_MAX_CONF];
 } discovery_exports[3];
 static unsigned discovery_active;
+/* discovery_export: copies the exported CSI-RS resources that occur on `slot` (up to max) from the active immutable export snapshot.
+ *   Readers reserve the snapshot with a user count and never block the publisher; the writer switches the active buffer. Returns the count.
+ *   Callers: nr_csirs_blind_rt_observed_nzp() and nr_csirs_blind_rt_rate_match_all() when discovery is queued.
+ */
 static int discovery_export(uint32_t slot,fapi_nr_dl_config_csirs_pdu_rel15_t *out,int max)
 {
   if(discovery_disabled || !out || max<=0) return 0;
@@ -74,6 +84,10 @@ static int discovery_export(uint32_t slot,fapi_nr_dl_config_csirs_pdu_rel15_t *o
   __atomic_fetch_sub(&discovery_exports[b].users,1,__ATOMIC_RELEASE);
   return n;
 }
+/* discovery_publish: recomputes the due and pending slot tables (per absolute slot mod 640) from the search state and publishes a new export snapshot into an idle buffer.
+ *   Due = occasions that must be scored (seeds not yet settled, confirmed resources when reconfiguration detection is on, ZP probation and divisor probes); pending = unsettled ones.
+ *   Caller: the search code under g_csirs_state_lock (nr_csirs_blind_rt_discovery_*, csirs_unlock).
+ */
 static void discovery_publish(void)
 {
   if(discovery_disabled || !discovery_queue_ready) return;
@@ -137,11 +151,19 @@ static void discovery_publish(void)
     break;
   }
 }
+/* discovery_mark_admitted: stamps a newly admitted candidate with the current ticket, so that only slots enqueued after its admission are scored for it. */
 static void discovery_mark_admitted(int i) {discovery_birth[i]=__atomic_load_n(&discovery_ticket,__ATOMIC_RELAXED);}
+/* discovery_queue_reset: advances the discovery epoch so that all queued slots of the old epoch are discarded by the consumer.
+ *   Caller: nr_csirs_blind_rt_discovery_reset().
+ */
 static void discovery_queue_reset(void)
 {
   __atomic_add_fetch(&discovery_epoch,1,__ATOMIC_ACQ_REL);
 }
+/* nr_csirs_blind_rt_discovery_prepare: sizes and allocates the discovery queue for a frame configuration (IQ storage per slot, compact symbol buffer and, with a GPU, the device FEP ring) and publishes the initial due tables.
+ *   Returns 0, or -1 for unsupported frame parameters or allocation failure. Idempotent for the same frame parameters (-1 when they differ).
+ *   Caller: nr_csirs_disc_pipeline_init() through a weak symbol (nr_csirs_disc.c).
+ */
 int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *fp)
 {
   if(!fp || !fp->ofdm_symbol_size || fp->nb_antennas_rx<1 || fp->nb_antennas_rx>4) return -1;
@@ -178,6 +200,10 @@ int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *fp)
   discovery_publish();
   return 0;
 }
+/* discovery_enqueue: producer side of the discovery queue: for a slot with due symbols, takes a free queue entry and copies or FFTs the due symbols into it (raw IQ on the GPU path, FEP per symbol otherwise).
+ *   Non-blocking: a full queue counts a confirm drop. Returns true when the slot was handled by the queue (or dropped), false when the caller must run the search directly.
+ *   Caller: nr_csirs_blind_rt_slot_fep() and nr_csirs_blind_rt_slot() (when not consuming).
+ */
 static bool discovery_enqueue(PHY_VARS_NR_UE *ue,int slot,uint32_t absolute_slot,
                               c16_t rx[][ue->frame_parms.samples_per_slot_wCP],bool map[14])
 {
@@ -235,6 +261,9 @@ static bool discovery_enqueue(PHY_VARS_NR_UE *ue,int slot,uint32_t absolute_slot
   __atomic_store_n(&discovery_queue[at].state,2,__ATOMIC_RELEASE);
   return true;
 }
+/* discovery_pack: packs the due OFDM symbols of one slot (all antennas) from the FEP output into the compact staging buffer, removing the carrier offset wrap.
+ *   Used before a GPU upload or GPU scoring. Callers: nr_csirs_blind_rt_discovery_drain() and discovery_gpu_score().
+ */
 static void discovery_pack(const NR_DL_FRAME_PARMS *fp,const c16_t *rx,uint16_t symbols)
 {
   int nk=12*fp->N_RB_DL,first=nk<fp->ofdm_symbol_size-fp->first_carrier_offset?nk:fp->ofdm_symbol_size-fp->first_carrier_offset;
@@ -245,6 +274,10 @@ static void discovery_pack(const NR_DL_FRAME_PARMS *fp,const c16_t *rx,uint16_t 
     if(first<nk) memcpy(dst+2*first,src,(nk-first)*sizeof(c16_t));
   }
 }
+/* nr_csirs_blind_rt_discovery_drain: consumer side of the discovery queue (the csirsDisc worker): processes up to 32 queued slots in ticket order, running the search for each one under the discovery flags.
+ *   Slots of an old epoch are dropped. GPU raw entries run their FEP first; otherwise the due symbols are packed and uploaded. Each slot is scored by nr_csirs_blind_rt_slot().
+ *   Returns the number of entries completed. Caller: disc_worker_main() in nr_csirs_disc_feed.c (weak symbol) and the test bridge.
+ */
 int nr_csirs_blind_rt_discovery_drain(void)
 {
   if(discovery_disabled || !discovery_queue_ready) return 0;
@@ -286,7 +319,10 @@ int nr_csirs_blind_rt_discovery_drain(void)
   return done;
 }
 
-/* Worker-owned compact staging, also used by the synchronous dump bridge. */
+/* discovery_gpu_score: scores one CSI-RS candidate on the GPU (the confirm entry of the sweep module) on the compact symbol buffer and writes five scores.
+ *   Returns the GPU rc, or -1 when no confirm entry exists. Packs the symbols unless the device copy of this slot is already valid.
+ *   Caller: score_candidate() in nr_csirs_blind_rt.c.
+ */
 static int discovery_gpu_score(const NR_DL_FRAME_PARMS *fp,const nr_csirs_candidate_t *c,int slot,
                               const c16_t *rx,double scores[5])
 {

@@ -25,6 +25,9 @@ typedef struct {
   int rb, ant, spf;
 } nr_csirs_disc_evidence_t;
 
+/* nr_csirs_disc_evidence_key: true when two hypotheses name the same evidence key: row, symbols, CDM, density, RB extent, period and offset.
+ *   Pure function. Callers: nr_csirs_disc_evidence_begin() and nr_csirs_disc.c (duplicate check of cumulative hypotheses).
+ */
 static inline bool nr_csirs_disc_evidence_key(const nr_csirs_disc_hyp_t *a, const nr_csirs_disc_hyp_t *b)
 {
   return a->row==b->row && a->freq_domain==b->freq_domain && a->symb_l0==b->symb_l0
@@ -32,6 +35,10 @@ static inline bool nr_csirs_disc_evidence_key(const nr_csirs_disc_hyp_t *a, cons
       && a->rb_start==b->rb_start && a->n_rb==b->n_rb && a->period==b->period && a->offset==b->offset;
 }
 
+/* nr_csirs_disc_evidence_begin: looks up (or creates, replacing the least recently used entry) the cumulative evidence entry of a row-1 hypothesis for this sweep.
+ *   Only row-1 sweeps with the default ID range, 32-RE blocks and up to 4 slots use the bank; other searches return -1 and keep their original path.
+ *   Resets the bank when the grid, epoch or dimensions change, and expires entries older than 512 periods. Returns the entry index. Callers: nr_csirs_disc_sweep.c and nr_csirs_disc_gpu_sweep.cu.
+ */
 static inline int nr_csirs_disc_evidence_begin(nr_csirs_disc_evidence_t *bank,
     const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *h, const nr_csirs_disc_sweep_cfg_t *c)
 {
@@ -68,13 +75,17 @@ static inline int nr_csirs_disc_evidence_begin(nr_csirs_disc_evidence_t *bank,
   return at;
 }
 
+/* nr_csirs_disc_evidence_fresh: true when the slot is newer than the last slot credited to this entry (or the entry is empty), so it may be counted once.
+ *   Caller: nr_csirs_disc_sweep.c and nr_csirs_disc_gpu_sweep.cu (selection of fresh slots).
+ */
 static inline bool nr_csirs_disc_evidence_fresh(const nr_csirs_disc_evidence_entry_t *e, uint32_t slot)
 {
   return !e || !e->count || slot>e->last_slot;
 }
 
-/* Called only after fresh slots were selected. Full blocks restart rather than
- * giving an arbitrarily old signal an unbounded lifetime. Never reread old IQ. */
+/* nr_csirs_disc_evidence_previous: returns the number of slots already credited to this entry when adding `fresh` slots keeps the total within the 32-slot window, else 0 (restart).
+ *   Callers: nr_csirs_disc_sweep.c and nr_csirs_disc_gpu_sweep.cu.
+ */
 static inline int nr_csirs_disc_evidence_previous(nr_csirs_disc_evidence_entry_t *e, int fresh)
 {
   return e && e->count+fresh<=NR_CSIRS_EVIDENCE_SLOTS ? e->count : 0;
