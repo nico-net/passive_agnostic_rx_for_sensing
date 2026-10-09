@@ -2417,6 +2417,9 @@ static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfig
   return probe;
 }
 
+/* nr_passive_sib1_semantic_hash: 32-bit hash of the semantic content of a SIB1 that the passive receiver uses to detect a configuration change: the PLMN list, cell identity, tracking area, and (when present) the serving cell common configuration.
+ *   A SIB1 without servingCellConfigCommon (NSA cells) hashes only the identity part. Callers: config_ue.c (SIB1 check) and nr_rrc_process_sib1-related code in rrc_UE.c.
+ */
 uint32_t nr_passive_sib1_semantic_hash(const NR_SIB1_t *sib1, uint16_t pci)
 {
   uint32_t h = nr_cfg_semantic_start();
