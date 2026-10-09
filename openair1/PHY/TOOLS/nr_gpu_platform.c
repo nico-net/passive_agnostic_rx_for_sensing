@@ -26,6 +26,9 @@ typedef struct allocation {
 } allocation;
 static allocation *live;
 
+/* report: formats a message (printf style) and sends it to the registered logger, or to stderr with a WARNING prefix when none is set.
+ *   Callers: probe_locked(), nr_gpu_module_check(), allowed_locked() and the platform log lines.
+ */
 static void report(int warning, const char *fmt, ...)
 {
   char text[1024];
@@ -36,12 +39,18 @@ static void report(int warning, const char *fmt, ...)
   if (logger) logger(warning, text);
   else fprintf(stderr, "%s%s\n", warning ? "WARNING: " : "", text);
 }
+/* nr_gpu_set_logger: installs the logging callback used by the platform for its status and warning messages (NULL restores stderr).
+ *   Takes the platform mutex. Called by executables/nr-uesoftmodem.c at start-up.
+ */
 void nr_gpu_set_logger(void (*fn)(int, const char *))
 {
   pthread_mutex_lock(&mu);
   logger = fn;
   pthread_mutex_unlock(&mu);
 }
+/* nr_gpu_choose_model: selects the memory model from the probed capabilities and an override string ("auto", "shared" or "discrete"; unknown values give NONE).
+ *   Auto chooses SHARED for integrated devices or devices with pageable memory access and host page tables, else DISCRETE. Returns NR_GPU_NONE when the device is unavailable.
+ */
 nr_gpu_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c, const char *override)
 {
   if (!c || !c->available) return NR_GPU_NONE;
@@ -51,6 +60,9 @@ nr_gpu_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c, const char *override)
   if (!strcmp(override, "discrete")) return NR_GPU_DISCRETE;
   return NR_GPU_NONE;
 }
+/* nr_gpu_storage: maps a buffer kind (device, staging or shared read-write) to the allocation type for the model: device memory, mapped host memory, or managed memory when use_managed is set.
+ *   Only the SHARED model allocates; any other model returns NR_GPU_ALLOC_UNAVAILABLE. Used by nr_gpu_alloc().
+ */
 nr_gpu_storage_t nr_gpu_storage(nr_gpu_model_t model, nr_gpu_kind_t kind, int use_managed)
 {
   if (model != NR_GPU_SHARED) return NR_GPU_ALLOC_UNAVAILABLE;
@@ -61,6 +73,9 @@ nr_gpu_storage_t nr_gpu_storage(nr_gpu_model_t model, nr_gpu_kind_t kind, int us
   }
   return NR_GPU_ALLOC_UNAVAILABLE;
 }
+/* nr_gpu_arch_compatible: true when a CUDA module built for the architecture list archs (for example "80,89-virtual") can run on the device with compute capability major.minor.
+ *   A real (cubin) entry must match the major version and not exceed the device; a virtual (PTX) entry is forward compatible. Pure function. Caller: nr_gpu_module_check().
+ */
 int nr_gpu_arch_compatible(int major, int minor, const char *archs)
 {
   if (!archs || major <= 0 || minor < 0) return 0;
@@ -79,6 +94,9 @@ int nr_gpu_arch_compatible(int major, int minor, const char *archs)
   }
   return 0;
 }
+/* load_runtime: loads libcudart (several SONAME fallbacks) and resolves every runtime entry point used by the platform into rt; returns 0 when any symbol is missing.
+ *   The library stays resident for the life of the module. Called once from probe_locked().
+ */
 static int load_runtime(void)
 {
   const char *names[] = {"libcudart.so", "libcudart.so.13", "libcudart.so.12", "libcudart.so.11.0"};
@@ -96,6 +114,7 @@ static int load_runtime(void)
 #undef LOAD
   return 1; /* runtime remains resident for module lifetime */
 }
+/* attribute: reads one device attribute (cudaDeviceGetAttribute) and returns it, or 0 when the attribute is missing on this driver (the error is cleared). */
 static int attribute(int attr)
 {
   int value=0;
@@ -105,6 +124,9 @@ static int attribute(int attr)
   }
   return value;
 }
+/* probe_locked: probes the GPU once (caller holds mu): loads the runtime, selects device 0, reads its capabilities, chooses the memory model (ISAC_GPU_MEMORY_MODEL) and the managed-memory option (ISAC_GPU_SHARED_MANAGED).
+ *   Logs the device summary, a warning for DISCRETE (not implemented) and for an unusable shared model. Sets caps.available = 0 when the probe fails.
+ */
 static void probe_locked(void)
 {
   if (probed) return;
@@ -146,15 +168,22 @@ finish:
   else if (caps.model!=NR_GPU_SHARED || !caps.can_map_host_memory || !caps.unified_addressing)
     report(1,"SENSING: GPU_PLATFORM unavailable/invalid model or mapped-memory capability; CPU fallback");
 }
+/* nr_gpu_platform_probe: returns the GPU capabilities (probing on first use, under mu). Callers: nr_gpu_platform_ready(), nr_gpu_module_check() and the GPU module start-up code. */
 const nr_gpu_caps_t *nr_gpu_platform_probe(void)
 {
   pthread_mutex_lock(&mu); probe_locked(); pthread_mutex_unlock(&mu); return &caps;
 }
+/* nr_gpu_platform_ready: true when a device is available with the SHARED model, mapped host memory and unified addressing: the condition for any GPU path to run.
+ *   Callers: nr_gpu_module_check(), nr_gpu_copy_async(), nr_gpu_sync(), nr_gpu_sync_all().
+ */
 int nr_gpu_platform_ready(void)
 {
   const nr_gpu_caps_t *c=nr_gpu_platform_probe();
   return c->available && c->model==NR_GPU_SHARED && c->can_map_host_memory && c->unified_addressing;
 }
+/* nr_gpu_module_check: checks that a GPU module built for `archs` can run on the device; logs a warning and returns 0 otherwise (the caller then uses the CPU path).
+ *   Returns 0 when the platform itself is not ready. Callers: the GPU module wrappers (nr_gpu_module.c) and the tests.
+ */
 int nr_gpu_module_check(const char *module, const char *archs)
 {
   if (!nr_gpu_platform_ready()) return 0;
@@ -162,11 +191,16 @@ int nr_gpu_module_check(const char *module, const char *archs)
   report(1,"SENSING: GPU_PLATFORM module=%s built=%s device=sm_%d%d incompatible; CPU fallback",module,archs,caps.major,caps.minor);
   return 0;
 }
+/* nr_gpu_rx_started: seals the allocation gate: after this, allocations, registrations and frees are denied (counted and warned once).
+ *   Called once when the RX stream starts, so that no GPU memory is allocated during reception.
+ */
 void nr_gpu_rx_started(void)
 {
   pthread_mutex_lock(&mu); __atomic_store_n(&sealed,1,__ATOMIC_RELEASE); pthread_mutex_unlock(&mu);
 }
+/* nr_gpu_allocations_allowed: returns 1 while the allocation gate is open (before nr_gpu_rx_started()), else 0. Lock-free acquire read. */
 int nr_gpu_allocations_allowed(void) { return !__atomic_load_n(&sealed,__ATOMIC_ACQUIRE); }
+/* allowed_locked: checks the allocation gate with mu held: returns 1 before the seal; after it, counts the denial, warns once, and returns 0. */
 static int allowed_locked(void)
 {
   if (!sealed) return 1;
@@ -174,6 +208,9 @@ static int allowed_locked(void)
   if (!warned_late++) report(1,"SENSING: GPU_PLATFORM allocation/registration/free after RX start denied; CPU fallback");
   return 0;
 }
+/* nr_gpu_allocation_guard: takes mu and returns the allocation gate state (1 allowed, 0 sealed). Used by the GPU modules to guard their own allocations.
+ *   Callers: GPU module sources and the hygiene test.
+ */
 int nr_gpu_allocation_guard(void)
 {
   pthread_mutex_lock(&mu);
@@ -181,15 +218,20 @@ int nr_gpu_allocation_guard(void)
   pthread_mutex_unlock(&mu);
   return ok;
 }
+/* nr_gpu_memory_stats: returns the number of successful allocations (*a) and of denied operations (*d) since start-up. */
 void nr_gpu_memory_stats(uint64_t *a,uint64_t *d)
 {
   pthread_mutex_lock(&mu); *a=allocations; *d=denied; pthread_mutex_unlock(&mu);
 }
+/* lookup: finds the live allocation whose host address is ptr (linear walk of the list; caller holds mu). Returns NULL when absent. */
 static allocation *lookup(void *ptr)
 {
   for (allocation *a=live;a;a=a->next) if (a->host==ptr) return a;
   return NULL;
 }
+/* nr_gpu_alloc: allocates a buffer of the given kind and size for the platform's model: device memory, mapped pinned host memory (with its device pointer) or managed memory.
+ *   Returns the host pointer (use nr_gpu_device_ptr() for the device side), or NULL when denied, unavailable or out of memory. Tracked in the live list for nr_gpu_free().
+ */
 void *nr_gpu_alloc(nr_gpu_kind_t kind,size_t bytes)
 {
   pthread_mutex_lock(&mu);
@@ -212,6 +254,7 @@ void *nr_gpu_alloc(nr_gpu_kind_t kind,size_t bytes)
 done:
   pthread_mutex_unlock(&mu); return p;
 }
+/* nr_gpu_device_ptr: returns the device pointer of a buffer from nr_gpu_alloc() or nr_gpu_register_host(), or NULL when ptr is not tracked. */
 void *nr_gpu_device_ptr(void *ptr)
 {
   pthread_mutex_lock(&mu);
@@ -219,6 +262,9 @@ void *nr_gpu_device_ptr(void *ptr)
   void *p=a ? a->device : NULL;
   pthread_mutex_unlock(&mu); return p;
 }
+/* release: frees a tracked allocation (host-registered or allocated) after checking the gate, the kind and the pointer; removes it from the live list only on success.
+ *   Returns the CUDA status, or GPU_NOT_READY/GPU_ERROR. Used by nr_gpu_free() (registered = 0) and nr_gpu_unregister_host() (registered = 1).
+ */
 static int release(void *ptr,int registered)
 {
   if (!ptr) return 0;
@@ -234,8 +280,13 @@ static int release(void *ptr,int registered)
 done:
   pthread_mutex_unlock(&mu); return rc;
 }
+/* nr_gpu_free: frees a buffer from nr_gpu_alloc(). Returns 0 on success, or an error code. Callers: GPU modules and tests. */
 int nr_gpu_free(void *ptr) { return release(ptr,0); }
+/* nr_gpu_unregister_host: unregisters a host buffer registered with nr_gpu_register_host(). Returns 0 on success, or an error code. */
 int nr_gpu_unregister_host(void *ptr) { return release(ptr,1); }
+/* nr_gpu_register_host: registers an existing host buffer as mapped and portable, and records its device pointer; a second registration of the same buffer returns 0 when the size matches.
+ *   Denied after the seal. Returns 0, or an error code (GPU_NO_MEMORY, GPU_ERROR). Callers: GPU modules and tests.
+ */
 int nr_gpu_register_host(void *ptr,size_t bytes)
 {
   pthread_mutex_lock(&mu);
@@ -257,22 +308,28 @@ int nr_gpu_register_host(void *ptr,size_t bytes)
 done:
   pthread_mutex_unlock(&mu); return rc;
 }
+/* nr_gpu_copy_async: asynchronous copy (cudaMemcpyDefault) of bytes on stream; returns GPU_NOT_READY when the platform is not ready. */
 int nr_gpu_copy_async(void *dst,const void *src,size_t bytes,void *stream)
 {
   if (!nr_gpu_platform_ready()) return GPU_NOT_READY;
   return rt.copy_async(dst,src,bytes,4,stream); /* cudaMemcpyDefault */
 }
+/* nr_gpu_sync: waits for a stream to finish (cudaStreamSynchronize); returns GPU_NOT_READY when the platform is not ready. */
 int nr_gpu_sync(void *stream)
 {
   if (!nr_gpu_platform_ready()) return GPU_NOT_READY;
   return rt.stream_sync(stream);
 }
+/* nr_gpu_sync_all: waits for all device work (cudaDeviceSynchronize); returns GPU_NOT_READY when the platform is not ready. */
 int nr_gpu_sync_all(void)
 {
   if (!nr_gpu_platform_ready()) return GPU_NOT_READY;
   return rt.device_sync();
 }
 #ifdef NR_GPU_PLATFORM_TEST
+/* nr_gpu_test_reset: test-only (NR_GPU_PLATFORM_TEST): frees the tracked allocations, installs the given runtime table and clears the probe, seal and counters.
+ *   The caller must have joined all GPU users first. Caller: openair1/PHY/TOOLS/tests/nr_gpu_platform_test.cc.
+ */
 void nr_gpu_test_reset(const nr_gpu_runtime_t *runtime)
 {
   /* Test-only; caller has joined all users and released allocations first. */
