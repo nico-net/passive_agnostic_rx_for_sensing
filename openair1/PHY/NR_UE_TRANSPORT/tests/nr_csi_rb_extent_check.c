@@ -109,6 +109,20 @@ int main(void)
   n = nr_dlsch_csi_unav_res(&cfg, &fa);
   CHECK(n == 12, "density 0.5: %u REs (want 12)", n);
 
+  /* CSI-FULL: a segmented grant demodulated as a virtual allocation. Virtual RB v holds physical PRB map[v];
+   * the extent and parity must follow the physical PRB (here virtual 0..3 = physical 25,26,60,61). */
+  {
+    static const uint16_t map[4] = {25, 26, 60, 61};
+    nr_dlsch_csi_prb_map = map;
+    nr_dlsch_csi_prb_map_n = 4;
+    CHECK(nr_dlsch_csi_rb_mask(&cfg, 6, 0) == 0x1 && nr_dlsch_csi_rb_mask(&cfg, 6, 1) == 0
+              && nr_dlsch_csi_rb_mask(&cfg, 6, 2) == 0 && nr_dlsch_csi_rb_mask(&cfg, 6, 3) == 0,
+          "virtual->physical PRB map (extent + parity)");
+    CHECK(nr_dlsch_csi_rb_mask(&cfg, 6, 27) == 0x1, "beyond the map: identity CRB");
+    nr_dlsch_csi_prb_map = NULL;
+    nr_dlsch_csi_prb_map_n = 0;
+  }
+
   /* Legacy (flag off): every allocated RB of the right parity, as before. */
   nr_dlsch_csi_extent_override = 0;
   n = nr_dlsch_csi_unav_res(&cfg, &fa);

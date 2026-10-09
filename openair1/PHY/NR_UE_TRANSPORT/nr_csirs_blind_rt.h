@@ -66,6 +66,19 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
  *  which owns the search state. Entries that match no exported ZP geometry are dropped there. */
 void nr_csirs_blind_rt_zp_grant_evidence(uint32_t pdsch_absolute_slot, const fapi_nr_dl_config_csirs_pdu_rel15_t *zp,
                                          double score);
+/** CSI-FULL (ISAC_CSIRS_FULL=1): every confirmed resource of population (scramblingID) @p population_id occurring in
+ *  @p pdsch_absolute_slot, deduplicated, without DM-RS-symbol clashes. Returns the count written (<= max). */
+int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_id, uint16_t dmrs_mask,
+                             fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
+/** CSI-FULL: replace @p cfg's CSI-RS rate-matching list with nr_csirs_full_rate_match() for its own DM-RS
+ *  scrambling ID. No-op unless ISAC_CSIRS_FULL=1. */
+void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot);
+int nr_csirs_full_enabled(void);
+#include "nr_pdsch_passive_decode.h"
+/** CSI-FULL diagnostic ISAC_CSIRS_FULL_AB=1: decode the grant under fixed CSI-RS rate-matching hypotheses, log CSIFULLAB. */
+void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                      const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                      c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 void nr_csirs_blind_rt_cfr_time_us(uint64_t us);
 #endif /* __NR_CSIRS_BLIND_RT_H__ */

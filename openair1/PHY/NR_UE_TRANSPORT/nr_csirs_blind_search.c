@@ -406,7 +406,7 @@ int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
   }
   /* Silence does not prove completeness: legal periods extend to 640 slots, and the caller may
    * skip slots. Keep the one-candidate work bound and stop only when no search capacity remains. */
-  if (st->n_conf >= (st->discovery_bank ? NR_CSIRS_BLIND_DISC_MAX_CONF : NR_CSIRS_BLIND_MAX_CONF) || st->n_conf >= st->n) {
+  if (st->n_conf >= (st->discovery_bank ? nr_csirs_blind_disc_cap() : NR_CSIRS_BLIND_MAX_CONF) || st->n_conf >= st->n) {
     return -1;
   }
   if (st->pin_left > 0 && st->pinned >= 0 && st->pinned < st->n && !nr_csirs_blind_is_confirmed(st, st->pinned)) {
@@ -448,6 +448,20 @@ bool nr_csirs_blind_is_confirmed(const nr_csirs_blind_state_t *st, int idx)
       return true;
   return false;
 }
+
+int nr_csirs_full_enabled(void)
+{
+  static int s = -1;
+  if (s < 0) s = getenv("ISAC_CSIRS_FULL") && atoi(getenv("ISAC_CSIRS_FULL")) ? 1 : 0;
+  return s;
+}
+int nr_csirs_full_bursts_enabled(void)
+{
+  static int s = -1;
+  if (s < 0) s = getenv("ISAC_CSIRS_FULL_BURSTS") && atoi(getenv("ISAC_CSIRS_FULL_BURSTS")) ? 1 : 0;
+  return s;
+}
+int nr_csirs_blind_disc_cap(void) { return nr_csirs_full_bursts_enabled() ? NR_CSIRS_BLIND_DISC_MAX_CONF : 32; }
 
 int nr_csirs_blind_occurring(const nr_csirs_blind_state_t *st, uint32_t absolute_slot, int *idx_out, int max)
 {
@@ -708,7 +722,7 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   }
   if (st->pin_left == 0 && st->pinned != idx)
     nr_csirs_blind_pin(st, idx, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
-  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS || structural || st->n_conf >= (st->discovery_bank ? NR_CSIRS_BLIND_DISC_MAX_CONF : NR_CSIRS_BLIND_MAX_CONF)) {
+  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS || structural || st->n_conf >= (st->discovery_bank ? nr_csirs_blind_disc_cap() : NR_CSIRS_BLIND_MAX_CONF)) {
     return false;
   }
   uint16_t p = 0, off[2] = {0, 0};
@@ -843,7 +857,7 @@ static bool discovery_hit(nr_csirs_blind_state_t *st, int idx, uint32_t slot)
     }
     if (!covered) continue;
     if (k == st->n_conf) {
-      if (k == NR_CSIRS_BLIND_DISC_MAX_CONF) return false;
+      if (k >= nr_csirs_blind_disc_cap()) return false;
       st->conf_idx[st->n_conf++] = idx;
     }
     uint16_t a = st->disc_phase[idx][pi][0], b = st->disc_phase[idx][pi][1];

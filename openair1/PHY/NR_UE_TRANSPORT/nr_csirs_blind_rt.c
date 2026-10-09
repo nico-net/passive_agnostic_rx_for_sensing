@@ -13,6 +13,7 @@
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c */
 
 #include "nr_csirs_blind_rt.h"
+#include "nr_pdsch_passive_decode.h" /* CSIFULLAB */
 /* Weak: unit-test targets link this file without the acquisition state. */
 extern void nr_passive_acq_note_carrier_from_rs(const char *evidence) __attribute__((weak));
 #include "PHY/MODULATION/modulation_UE.h"
@@ -316,6 +317,15 @@ int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *h, const nr_csir
     uint16_t old = g_st.seed_period[i];
     if (!old || (old % h->period && h->period % old)) continue;
     if (!discovery_union_seed(i, h->period, h->offset, &period, offsets, &n)) {
+      /* CSI-FULL (ISAC_CSIRS_FULL_BURSTS=1): a cell sends the same row-1 TRS geometry in more than one burst per period
+       * (OTA PCI 415, captures 2026-10-08: ID 415 k0=0 l=4/8 and k0=1 l=5/9, RB 0-51, at abs%160 in {15,16} AND
+       * {20,21}). An entry holds one burst (<= 2 adjacent phases), so a second burst is its own entry; it is
+       * confirmed independently on its own occasions by the unchanged per-slot confirm path. Keep scanning for an
+       * existing entry of that burst; none -> a new entry below. */
+      if (nr_csirs_full_bursts_enabled() && h->row == 1) { /* ISAC_CSIRS_FULL_BURSTS */
+        period = h->period; offsets[0] = h->offset; offsets[1] = 0; n = 1;
+        continue;
+      }
       /* Incompatible sweep phases can come from sequence leakage. Retain one
        * physical resource and the strongest provisional burst, never clones. */
       if (nr_csirs_blind_is_confirmed(&g_st, i) || w->z <= g_disc_strength[i]) {
@@ -1571,7 +1581,15 @@ bool nr_csirs_blind_rt_observed_nzp(uint32_t absolute_slot, fapi_nr_dl_config_cs
   pthread_mutex_unlock(&g_csirs_state_lock);
   return found;
 }
+static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
 int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
+{
+  /* CSI-FULL: NFAPI_MAX_NUM_CSI_RATEMATCH grew 4 -> 32; the existing callers pass NR_CSI_RM_LEGACY_MAX (4) so they
+   * keep exactly the old first-4 view (the PDSCH solver also harvests scrambling-ID candidates from it). The
+   * per-population set is nr_csirs_full_rate_match(), applied at decode time only. */
+  return rate_match_all_n(absolute_slot, out, max);
+}
+static int rate_match_all_n(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
   if(discovery_queue_ready && !discovery_consuming) {
     int n=discovery_export(absolute_slot,out,max);
@@ -1594,4 +1612,307 @@ int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_c
     nr_csirs_observer_export_zp(&g_csirs_obs);
   }
   return n;
+}
+
+/* CSI-FULL (ISAC_CSIRS_FULL=1, default off). The complete CSI-RS set a grant's cell transmits in the PDSCH slot,
+ * for the PDSCH rate matching of TS 38.214 5.1.4.1. Measured ground truth (tools/csirs_capture_map.py on both
+ * PCI-415 captures, docs/superpowers/reports/csd/CSIFULL.md): six TRS scrambling IDs on one carrier, one per cell,
+ * each a 52-RB row-1 density-3 TRS pair in its own RB third; a grant of DM-RS/data scrambling ID X decodes only
+ * when the PDSCH skips cell X's resources and NOT the other cells' (their REs carry cell X's data). So the subset
+ * is "scramblingID == the grant's DM-RS scrambling ID" (NZP and the ZP geometries the search attached to that ID),
+ * deduplicated by RE geometry, without resources that would land on the grant's DM-RS symbols (the standard
+ * forbids the overlap; nr_dlsch_extract_rbs() asserts on it). The CSI-RS-to-cell association by scramblingID is a
+ * measured property of this network, not a TS requirement, hence the flag. RB extent: nr_dlsch_csi_rb_extent()
+ * is on with this flag (TS 38.211 7.4.1.5.3). */
+extern void nr_dlsch_csi_erase_set(const fapi_nr_dl_config_csirs_pdu_rel15_t *list, int n) __attribute__((weak));
+static __thread int t_full_ab_depth; /* CSIFULLAB recursion guard */
+static bool csirs_full_same_geometry(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b)
+{
+  return a->row == b->row && a->freq_domain == b->freq_domain && a->symb_l0 == b->symb_l0 && a->symb_l1 == b->symb_l1
+         && a->cdm_type == b->cdm_type && a->freq_density == b->freq_density && a->start_rb == b->start_rb
+         && a->nr_of_rbs == b->nr_of_rbs;
+}
+static bool csirs_full_dmrs_clash(const fapi_nr_dl_config_csirs_pdu_rel15_t *c, uint16_t dmrs_mask)
+{
+  static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
+  if (c->row < 1 || c->row > 18)
+    return true;
+  for (int k = 0; k < num_l0[c->row - 1]; k++)
+    if ((dmrs_mask >> (c->symb_l0 + k)) & 1)
+      return true;
+  if (c->row == 13 || c->row == 14 || c->row == 16 || c->row == 17)
+    for (int k = 0; k < 2; k++)
+      if ((dmrs_mask >> (c->symb_l1 + k)) & 1)
+        return true;
+  return false;
+}
+/* Every confirmed resource (any slot), NZP then ZP: the population's TRS RB blocks. */
+static int full_all_confirmed(fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
+{
+  int n = 0;
+  if (discovery_queue_ready && !discovery_consuming) {
+    if (discovery_disabled)
+      return 0;
+    unsigned b;
+    for (;;) {
+      b = __atomic_load_n(&discovery_active, __ATOMIC_ACQUIRE);
+      unsigned users = __atomic_load_n(&discovery_exports[b].users, __ATOMIC_RELAXED);
+      if (users == UINT32_MAX) continue;
+      if (!__atomic_compare_exchange_n(&discovery_exports[b].users, &users, users + 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) continue;
+      if (b == __atomic_load_n(&discovery_active, __ATOMIC_ACQUIRE)) break;
+      __atomic_fetch_sub(&discovery_exports[b].users, 1, __ATOMIC_RELEASE);
+    }
+    for (int i = 0; i < discovery_exports[b].n && n < max; ++i)
+      out[n++] = discovery_exports[b].resource[i].p;
+    __atomic_fetch_sub(&discovery_exports[b].users, 1, __ATOMIC_RELEASE);
+    return n;
+  }
+  pthread_mutex_lock(&g_csirs_state_lock);
+  if (g_on > 0 && g_armed != 0 && g_rank <= 0)
+    for (int bank = 0; bank < 2; ++bank) {
+      nr_csirs_blind_state_t *st = bank ? &g_zp : &g_st;
+      for (int k = 0; k < st->n_conf && n < max; ++k)
+        fill_pdu(&st->cand[st->conf_idx[k]], bank ? 2 : 1, &out[n++]);
+    }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  return n;
+}
+static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b)
+{
+  const int lo = a->start_rb > b->start_rb ? a->start_rb : b->start_rb;
+  const int hi = a->start_rb + a->nr_of_rbs < b->start_rb + b->nr_of_rbs ? a->start_rb + a->nr_of_rbs : b->start_rb + b->nr_of_rbs;
+  const int m = a->nr_of_rbs < b->nr_of_rbs ? a->nr_of_rbs : b->nr_of_rbs;
+  return hi - lo > 0 && 2 * (hi - lo) >= m;
+}
+/* ISAC_CSIRS_FULL_TRS_PAIR=1 (default off). TS 38.214 5.1.6.1.1: a TRS (NZP-CSI-RS-ResourceSet with trs-Info) is
+ * row 1, density 3, and its resources come in pairs in one slot at symbols l and l+4 (l in {4,5,6}) with one
+ * frequency allocation, period and slot. Discovery confirms the members independently, so in a short run one
+ * member of a pair, or one of its two slot phases, is often missing. Occurrence of either member in this slot
+ * implies both. */
+static int full_trs_pair_enabled(void)
+{
+  static int s = -1;
+  if (s < 0) s = getenv("ISAC_CSIRS_FULL_TRS_PAIR") && atoi(getenv("ISAC_CSIRS_FULL_TRS_PAIR")) ? 1 : 0;
+  return s;
+}
+static bool full_trs_partner(const fapi_nr_dl_config_csirs_pdu_rel15_t *c, fapi_nr_dl_config_csirs_pdu_rel15_t *p)
+{
+  if (c->row != 1 || c->freq_density != 3 || c->csi_type == 2)
+    return false;
+  *p = *c;
+  if (c->symb_l0 >= 4 && c->symb_l0 <= 6) p->symb_l0 = c->symb_l0 + 4;
+  else if (c->symb_l0 >= 8 && c->symb_l0 <= 10) p->symb_l0 = c->symb_l0 - 4;
+  else return false;
+  return true;
+}
+static int full_add_trs_pairs(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n_conf, fapi_nr_dl_config_csirs_pdu_rel15_t *all,
+                              int n_all, int max)
+{
+  for (int j = 0; j < n_conf; j++) {
+    fapi_nr_dl_config_csirs_pdu_rel15_t p;
+    if (!full_trs_partner(&conf[j], &p))
+      continue;
+    bool c_in = false, p_in = false;
+    for (int i = 0; i < n_all; i++) {
+      c_in |= csirs_full_same_geometry(&all[i], &conf[j]) && all[i].scramb_id == conf[j].scramb_id;
+      p_in |= csirs_full_same_geometry(&all[i], &p) && all[i].scramb_id == p.scramb_id;
+    }
+    if (c_in && !p_in && n_all < max) all[n_all++] = p;
+    if (p_in && !c_in && n_all < max) all[n_all++] = conf[j];
+  }
+  return n_all;
+}
+/* ISAC_CSIRS_FULL_BLOCK_INFER=1 (default off; a measured network property, not a TS rule). On the PCI-415 carrier
+ * every TRS RB block carries all its row-1 TRS resources (both cells' pairs) in both bursts of the period
+ * (tools/csirs_capture_map.py, both captures). Discovery confirms each (resource, burst) separately and a 12 s
+ * run misses many. When any row-1 density-3 resource of a block occurs in this slot, every confirmed row-1
+ * density-3 geometry of that block is taken to occur too. */
+static int full_block_infer_enabled(void)
+{
+  static int s = -1;
+  if (s < 0) s = getenv("ISAC_CSIRS_FULL_BLOCK_INFER") && atoi(getenv("ISAC_CSIRS_FULL_BLOCK_INFER")) ? 1 : 0;
+  return s;
+}
+static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b);
+static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n_conf, fapi_nr_dl_config_csirs_pdu_rel15_t *all,
+                          int n_all, int max)
+{
+  const int n0 = n_all;
+  for (int j = 0; j < n_conf && n_all < max; j++) {
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &conf[j];
+    if (c->row != 1 || c->freq_density != 3 || c->csi_type == 2)
+      continue;
+    bool present = false, block = false;
+    for (int i = 0; i < n_all && !present; i++)
+      present = csirs_full_same_geometry(&all[i], c) && all[i].scramb_id == c->scramb_id;
+    for (int i = 0; i < n0 && !block; i++)
+      block = all[i].row == 1 && all[i].freq_density == 3 && all[i].csi_type != 2 && full_rb_overlap_half(&all[i], c);
+    if (!present && block)
+      all[n_all++] = *c;
+  }
+  return n_all;
+}
+/* The population's rate-matching set in this slot: its own resources (scramblingID == population) AND every other
+ * resource in the RB block of one of its own confirmed resources (any slot). Measured with CSIFULLAB on the PCI-415
+ * capture: grant 0x37f3 512.16 (176 RB from RB 0) passes CRC only with own 415 + co-block 748 removed, not with
+ * own only, not with nothing, not with every resource; population-249 grants fail when the 415/748 block (not
+ * theirs) is removed. I.e. each cell rate-matches its own TRS and the co-channel neighbour's TRS in its RB block
+ * (ZP protection), and transmits data on the other blocks' TRS REs. Everything else in the slot -> erase list. */
+static void full_select(uint32_t slot, uint16_t pop, uint16_t dmrs_mask, fapi_nr_dl_config_csirs_pdu_rel15_t *sel, int *nsel,
+                        int max_sel, fapi_nr_dl_config_csirs_pdu_rel15_t *er, int *ner, int max_er)
+{
+  fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF], all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
+  const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  if (full_trs_pair_enabled())
+    n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  if (full_block_infer_enabled())
+    n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  *nsel = 0;
+  if (ner) *ner = 0;
+  for (int i = 0; i < n_all; i++) {
+    if (csirs_full_dmrs_clash(&all[i], dmrs_mask))
+      continue;
+    bool in = all[i].scramb_id == pop;
+    for (int j = 0; j < n_conf && !in; j++)
+      in = conf[j].scramb_id == pop && conf[j].csi_type != 2 && full_rb_overlap_half(&conf[j], &all[i]);
+    fapi_nr_dl_config_csirs_pdu_rel15_t *list = in ? sel : er;
+    int *nl = in ? nsel : ner;
+    const int mx = in ? max_sel : max_er;
+    if (!list || !nl || (!in && all[i].csi_type == 2))
+      continue;
+    bool dup = false;
+    for (int j = 0; j < *nl && !dup; j++)
+      dup = csirs_full_same_geometry(&list[j], &all[i]);
+    if (!dup && *nl < mx)
+      list[(*nl)++] = all[i];
+  }
+}
+int nr_csirs_full_rate_match(uint32_t pdsch_absolute_slot, uint16_t population_id, uint16_t dmrs_mask,
+                             fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
+{
+  int n = 0;
+  full_select(pdsch_absolute_slot, population_id, dmrs_mask, out, &n, max, NULL, NULL, 0);
+  return n;
+}
+void nr_csirs_full_apply(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, uint32_t pdsch_absolute_slot)
+{
+  if (!nr_csirs_full_enabled() || !cfg || t_full_ab_depth > 0) /* inside a CSIFULLAB hypothesis: keep its list */
+    return;
+  /* ISAC_CSIRS_FULL_ERASE=1 (default off): the resources NOT selected for this population (other RB blocks' TRS)
+   * become LLR erasures in nr_dlsch_extract_rbs() (their REs carry this grant's data under a foreign TRS). */
+  static int s_erase = -1;
+  if (s_erase < 0)
+    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
+  fapi_nr_dl_config_csirs_pdu_rel15_t erase[NFAPI_MAX_NUM_CSI_RATEMATCH];
+  int n_sel = 0, n_erase = 0;
+  full_select(pdsch_absolute_slot, cfg->dlDmrsScramblingId, cfg->dlDmrsSymbPos, cfg->csiRsForRateMatching, &n_sel,
+              NFAPI_MAX_NUM_CSI_RATEMATCH, s_erase ? erase : NULL, s_erase ? &n_erase : NULL, NFAPI_MAX_NUM_CSI_RATEMATCH);
+  cfg->numCsiRsForRateMatching = (uint8_t)n_sel;
+  if (nr_dlsch_csi_erase_set) /* weak: fixtures link this file without the demodulator */
+    nr_dlsch_csi_erase_set(erase, n_erase);
+}
+
+/* ISAC_CSIRS_FULL_AB=1 (diagnostic, default off; needs ISAC_CSIRS_FULL=1). Every eligible dedicated full decode in a
+ * slot carrying discovered CSI-RS is first decoded under a fixed set of rate-matching hypotheses on the SAME
+ * samples, and one CSIFULLAB line reports each hypothesis' CRC (1 = CRC on the hypothesis itself, r = only a
+ * DECODE-FIX recovery arm passed, 0 = fail): none / own population / own + every resource sharing an own
+ * resource's RB block (= the ISAC_CSIRS_FULL rule) / every resource in the slot / own with extents rounded out to 16 RBs; each with the
+ * grant's S and, when legal (S<=1, end 14), with S toggled. With ISAC_CSIRS_FULL_ERASE=1 every resource NOT in the
+ * hypothesis is erased. The caller then decodes normally; the AB results are never fed back. */
+extern nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                                                fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                                const freq_alloc_bitmap_t *freq_alloc,
+                                                                const nr_pdsch_passive_grant_t *grant,
+                                                                c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                                nr_pdsch_passive_decode_result_t *out) __attribute__((weak));
+void nr_csirs_full_ab(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                      const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                      c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
+{
+  static int s_ab = -1;
+  if (s_ab < 0)
+    s_ab = getenv("ISAC_CSIRS_FULL_AB") && atoi(getenv("ISAC_CSIRS_FULL_AB")) ? 1 : 0;
+  if (!s_ab || !nr_csirs_full_enabled() || t_full_ab_depth > 0 || !nr_pdsch_passive_decode || !cfg)
+    return;
+  const uint32_t slot = (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx);
+  fapi_nr_dl_config_csirs_pdu_rel15_t all[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
+  int n_all = rate_match_all_n(slot, all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  fapi_nr_dl_config_csirs_pdu_rel15_t conf[2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
+  const int n_conf = full_all_confirmed(conf, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  if (full_trs_pair_enabled())
+    n_all = full_add_trs_pairs(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  if (full_block_infer_enabled())
+    n_all = full_add_block(conf, n_conf, all, n_all, 2 * NR_CSIRS_BLIND_DISC_MAX_CONF);
+  if (n_all <= 0)
+    return;
+  static int s_erase = -1;
+  if (s_erase < 0)
+    s_erase = getenv("ISAC_CSIRS_FULL_ERASE") && atoi(getenv("ISAC_CSIRS_FULL_ERASE")) ? 1 : 0;
+  const uint16_t pop = cfg->dlDmrsScramblingId;
+  bool in_h[6][2 * NR_CSIRS_BLIND_DISC_MAX_CONF];
+  memset(in_h, 0, sizeof(in_h));
+  int n_own = 0, n_range = 0;
+  for (int i = 0; i < n_all; i++) {
+    const bool own = all[i].scramb_id == pop;
+    bool range = own; /* = the ISAC_CSIRS_FULL rule (full_select): own + own confirmed RB blocks */
+    for (int j = 0; j < n_conf && !range; j++)
+      range = conf[j].scramb_id == pop && conf[j].csi_type != 2 && full_rb_overlap_half(&conf[j], &all[i]);
+    in_h[1][i] = in_h[4][i] = own;
+    in_h[2][i] = in_h[5][i] = range;
+    n_own += own;
+    n_range += range;
+    in_h[3][i] = true;
+  }
+  const bool can_toggle = cfg->start_symbol <= 1 && cfg->start_symbol + cfg->number_symbols == 14;
+  char res[6][3];
+  memset(res, '-', sizeof(res));
+  t_full_ab_depth++;
+  for (int h = 0; h < 6; h++) {
+    for (int t = 0; t < (can_toggle ? 2 : 1); t++) {
+      fapi_nr_dl_config_dlsch_pdu_rel15_t c = *cfg;
+      c.numCsiRsForRateMatching = 0;
+      fapi_nr_dl_config_csirs_pdu_rel15_t er[NFAPI_MAX_NUM_CSI_RATEMATCH];
+      int ne = 0;
+      for (int i = 0; i < n_all; i++) {
+        if (csirs_full_dmrs_clash(&all[i], c.dlDmrsSymbPos))
+          continue;
+        fapi_nr_dl_config_csirs_pdu_rel15_t r = all[i];
+        if (h == 4) {
+          const int st = r.start_rb & ~15, en = ((r.start_rb + r.nr_of_rbs + 15) / 16) * 16;
+          r.start_rb = st;
+          r.nr_of_rbs = en - st;
+        }
+        bool dup = false;
+        if (in_h[h][i]) {
+          for (int j = 0; j < c.numCsiRsForRateMatching && !dup; j++)
+            dup = csirs_full_same_geometry(&c.csiRsForRateMatching[j], &r);
+          if (!dup && c.numCsiRsForRateMatching < NFAPI_MAX_NUM_CSI_RATEMATCH)
+            c.csiRsForRateMatching[c.numCsiRsForRateMatching++] = r;
+        } else if (s_erase && h != 5 && r.csi_type != 2) { /* h 5 = the rule without erasure */
+          for (int j = 0; j < ne && !dup; j++)
+            dup = csirs_full_same_geometry(&er[j], &r);
+          if (!dup && ne < NFAPI_MAX_NUM_CSI_RATEMATCH)
+            er[ne++] = r;
+        }
+      }
+      if (t) {
+        c.start_symbol = 1 - cfg->start_symbol;
+        c.number_symbols = 14 - c.start_symbol;
+      }
+      if (nr_dlsch_csi_erase_set)
+        nr_dlsch_csi_erase_set(er, ne);
+      nr_pdsch_passive_decode_result_t o;
+      memset(&o, 0, sizeof(o));
+      const nr_pdsch_passive_decode_status_t st = nr_pdsch_passive_decode(ue, proc, &c, fa, grant, rxdataF, &o);
+      res[h][t] = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? (o.config_recovered ? 'r' : '1') : '0';
+    }
+    res[h][2] = 0;
+  }
+  t_full_ab_depth--;
+  LOG_I(PHY, "SENSING: CSIFULLAB rnti=0x%04x fs=%d.%d ph=%u nl=%d mcs=%u rb=%u+%u S=%u L=%u pop=%u n_all=%d n_own=%d n_range=%d "
+        "none=%s own=%s range=%s all=%s own16=%s range_noerase=%s\n",
+        grant->rnti, proc->frame_rx, proc->nr_slot_rx, slot % 160, __builtin_popcount(cfg->dmrs_ports), grant->mcs,
+        fa->first_rb, fa->num_rbs, cfg->start_symbol, cfg->number_symbols, pop, n_all, n_own, n_range, res[0], res[1], res[2], res[3],
+        res[4], res[5]);
 }

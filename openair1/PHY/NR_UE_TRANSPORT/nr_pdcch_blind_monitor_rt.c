@@ -8680,7 +8680,7 @@ constdiag_done:;
       nr_pdsch_solver_var_t var[NR_PDSCH_SOLVER_MAX_VAR];
       /* run-time-discovered CSI-RS resources of this slot (blind CSI-RS search; nothing configured) */
       fapi_nr_dl_config_csirs_pdu_rel15_t sv_rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
-      const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+      const int sv_nrm = nr_csirs_blind_rt_rate_match_all(abs_slot, sv_rm, NR_CSI_RM_LEGACY_MAX);
       nr_pdsch_solver_set_now(source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot : 0);
       uint16_t sv_alt[16];
       int sv_nalt = 0;
@@ -8879,7 +8879,7 @@ constdiag_done:;
      * pair (two NZP resources in one slot) and an NZP + a ZP in another. Its failed MCS-10 grants
      * align with those slots; live validation must establish the CRC impact of this correction. */
     fapi_nr_dl_config_csirs_pdu_rel15_t rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
-    const int n_rm = nr_csirs_blind_rt_rate_match_all(abs_slot + hy_k0 /* the PDSCH slot */, rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+    const int n_rm = nr_csirs_blind_rt_rate_match_all(abs_slot + hy_k0 /* the PDSCH slot */, rm, NR_CSI_RM_LEGACY_MAX);
     for (int i = 0; i < n_rm; i++) {
       fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_pdu.csiRsForRateMatching[dlsch_pdu.numCsiRsForRateMatching];
       *c = rm[i];

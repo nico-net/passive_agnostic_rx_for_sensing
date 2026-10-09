@@ -1179,6 +1179,7 @@ static void brfo_commit(void)
   }
   pthread_mutex_unlock(&s_brfo_lock);
 }
+static __thread uint16_t t_csi_prb_map[NR_PRB_SET_MAX]; /* CSI-FULL: virtual -> physical PRB of a segmented grant */
 static __thread bool t_probe_first_seg = false; /* decode segment 0 only; outcome in t_probe_seg_ok */
 static __thread bool t_probe_seg_ok = false;
 void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_ok = false; }
@@ -2140,7 +2141,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
      * on even/odd RBs). The virtual layout moves segment s from PRB prb_start to PRB data_index, so it
      * is only exact when both have the same parity. ponytail: refused otherwise; a per-segment parity
      * swap of the overlap bitmap is the upgrade if such grants turn up. */
-    for (int s = 0; seg_path && s < nseg; s++) {
+    for (int s = 0; seg_path && !nr_csirs_full_enabled() && s < nseg; s++) { /* CSI-FULL: per-PRB map instead */
       if ((seg[s].data_index ^ seg[s].prb_start) & 1) {
         { static _Atomic unsigned long c_ = 0;
           const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
@@ -2341,7 +2342,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   bool gw_ready = false;
   t_gw_owner = false;
   if (t_gw != NULL && t_llr_ovr == NULL && !seg_path && !(dlsch_config->pduBitmap & 0x1) && csi_unav == 0
-      && dlsch_config->numCsiRsForRateMatching == 0 && (!t_probe_first_seg || t_gw_probe_ok || t_gw_capture)) {
+      && dlsch_config->numCsiRsForRateMatching == 0 && nr_dlsch_csi_erase_n == 0 /* CSI-FULL erasure */
+      && (!t_probe_first_seg || t_gw_probe_ok || t_gw_capture)) {
     const gw_ctx_t *gc = (const gw_ctx_t *)nr_td_grantwork_ctx(t_gw);
     const double fo_now = isnan(nr_slot_fep_fo_override_hz) ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                                                             : nr_slot_fep_fo_override_hz;
@@ -2404,7 +2406,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   /* GPU LLRs in hand: everything from here to the LLR buffer (FEP, channel estimation, equaliser,
    * demodulator) is what the GPU already did for this slot. A PT-RS arm or CSI-RS rate matching
    * armed above changes the RE budget the GPU did not model, so that job stays on the CPU path. */
-  const int16_t *gpu_llr = ((dlsch_config->pduBitmap & 0x1) || csi_unav || ssb_unav) ? NULL : t_llr_ovr;
+  const int16_t *gpu_llr = ((dlsch_config->pduBitmap & 0x1) || csi_unav || ssb_unav || nr_dlsch_csi_erase_n) ? NULL : t_llr_ovr;
   const uint32_t gpu_llr_n = gpu_llr ? t_llr_ovr_n : 0;
   atomic_fetch_add(gpu_llr ? &g_gpu_llr_jobs : &g_gpu_cpu_jobs, 1);
 
@@ -3854,6 +3856,13 @@ gpu_llr_ready:;
       }
     fa_virt = set_bitmap_from_start_size(0, freq_alloc->num_rbs);
     rxdataF_dem = (c16_t(*)[fp->samples_per_slot_wCP])virt;
+    if (nr_csirs_full_enabled() && dlsch_config->numCsiRsForRateMatching) { /* CSI-FULL: real CRB per virtual RB */
+      for (int s = 0; s < nseg; s++)
+        for (int r = 0; r < seg[s].n_prb && seg[s].data_index + r < NR_PRB_SET_MAX; r++)
+          t_csi_prb_map[seg[s].data_index + r] = seg[s].prb_start + r;
+      nr_dlsch_csi_prb_map = t_csi_prb_map;
+      nr_dlsch_csi_prb_map_n = freq_alloc->num_rbs;
+    }
   }
 
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
@@ -3927,6 +3936,8 @@ gpu_llr_ready:;
     }
   }
 
+  nr_dlsch_csi_prb_map = NULL; /* CSI-FULL */
+  nr_dlsch_csi_prb_map_n = 0;
   pdtim_add(PDTIM_DEMOD, pdt_dem);
   if (nr_pdsch_evm_acc.armed) {
     nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
@@ -4744,6 +4755,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out)
 {
+  /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
+  if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) /* ISAC_CSIRS_FULL_AB diagnostic */
+    nr_csirs_full_ab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
+  nr_csirs_full_apply(dlsch_config, (uint32_t)(proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx));
   static _Atomic int s_xab = -1;
   if (s_xab < 0) s_xab = getenv("ISAC_PDSCH_CSI_EXTENT_AB") && atoi(getenv("ISAC_PDSCH_CSI_EXTENT_AB")) ? 1 : 0;
   extern __thread int nr_dlsch_csi_extent_override;
@@ -4888,7 +4903,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     } else {
       const uint32_t slot = (uint32_t)proc->frame_rx * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
       alternate_csi.numCsiRsForRateMatching = nr_csirs_blind_rt_rate_match_all(
-          slot, alternate_csi.csiRsForRateMatching, NFAPI_MAX_NUM_CSI_RATEMATCH);
+          slot, alternate_csi.csiRsForRateMatching, NR_CSI_RM_LEGACY_MAX);
       try_csi = alternate_csi.numCsiRsForRateMatching > 0 && nr_dlsch_csi_unav_res(&alternate_csi, freq_alloc) > 0;
     }
   }
@@ -4905,7 +4920,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     const int n = nr_csirs_blind_rt_rate_match_all(slot, resources, 64);
     csi_variants[1] = *dlsch_config;
     csi_variants[1].numCsiRsForRateMatching = 0;
-    for (int i = 0; i < n && csi_variants[1].numCsiRsForRateMatching < NFAPI_MAX_NUM_CSI_RATEMATCH; i++) {
+    for (int i = 0; i < n && csi_variants[1].numCsiRsForRateMatching < NR_CSI_RM_LEGACY_MAX; i++) {
       if (resources[i].scramb_id != dlsch_config->dlDmrsScramblingId) continue;
       csi_variants[1].csiRsForRateMatching[csi_variants[1].numCsiRsForRateMatching++] = resources[i];
     }

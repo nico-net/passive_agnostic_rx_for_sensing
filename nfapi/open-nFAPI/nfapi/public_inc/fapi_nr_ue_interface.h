@@ -16,7 +16,11 @@
 
 #define NFAPI_UE_MAX_NUM_CB 8
 #define NFAPI_MAX_NUM_UL_PDU 255
-#define NFAPI_MAX_NUM_CSI_RATEMATCH 4
+/* CSI-FULL: capacity 32 (was 4). A passive receiver sees every cell's TRS in one slot (OTA PCI 415: up to 8 same-cell
+ * row-1 resources per occasion). The blind CSI-RS export keeps returning at most 4 unless ISAC_CSIRS_FULL=1. */
+#define NFAPI_MAX_NUM_CSI_RATEMATCH 32
+/* The pre-CSI-FULL per-slot count every existing passive caller keeps (DCI monitor, PDSCH solver, DECODE-FIX arms). */
+#define NR_CSI_RM_LEGACY_MAX 4
 // Maximum number of neighboring cells that can be tracked simultaneously
 #define NUMBER_OF_NEIGHBORING_CELLS_MAX 8
 

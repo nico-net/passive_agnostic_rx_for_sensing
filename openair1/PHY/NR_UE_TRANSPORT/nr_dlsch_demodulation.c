@@ -232,12 +232,23 @@ __thread int nr_dlsch_csi_extent_override = -1; /* per-decode A/B (ISAC_PDSCH_CS
 int nr_dlsch_csi_rb_extent(void)
 {
   static int s = -1;
-  if (s < 0) s = getenv("ISAC_PDSCH_CSI_RB_EXTENT") && atoi(getenv("ISAC_PDSCH_CSI_RB_EXTENT")) ? 1 : 0;
+  if (s < 0) /* CSI-FULL: ISAC_CSIRS_FULL=1 exports per-cell 52-RB TRS sets, which need their extent */
+    s = (getenv("ISAC_PDSCH_CSI_RB_EXTENT") && atoi(getenv("ISAC_PDSCH_CSI_RB_EXTENT")))
+        || (getenv("ISAC_CSIRS_FULL") && atoi(getenv("ISAC_CSIRS_FULL"))) ? 1 : 0;
   return nr_dlsch_csi_extent_override >= 0 ? nr_dlsch_csi_extent_override : s;
 }
+/* CSI-FULL: a segmented/interleaved grant is demodulated as a VIRTUAL allocation (BWP RB v = data-order PRB v);
+ * the caller sets this map (virtual BWP RB -> physical BWP PRB) so the extent/parity test sees the real CRB. */
+__thread const uint16_t *nr_dlsch_csi_prb_map = NULL;
+__thread int nr_dlsch_csi_prb_map_n = 0;
 uint32_t nr_dlsch_csi_rb_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol, int crb)
 {
   uint32_t m = 0;
+  if (nr_dlsch_csi_prb_map) {
+    const int v = crb - dlsch_config->BWPStart;
+    if (v >= 0 && v < nr_dlsch_csi_prb_map_n)
+      crb = nr_dlsch_csi_prb_map[v] + dlsch_config->BWPStart;
+  }
   for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
     const fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &dlsch_config->csiRsForRateMatching[i];
     if (!overlap_csi_symbol((fapi_nr_dl_config_csirs_pdu_rel15_t *)csi_pdu, symbol))
@@ -249,6 +260,44 @@ uint32_t nr_dlsch_csi_rb_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_c
     m |= csi_resource_re_map(csi_pdu);
   }
   return m;
+}
+/* CSI-FULL erasure (ISAC_CSIRS_FULL_ERASE=1, filled by nr_csirs_full_apply()): OTHER cells' TRS/CSI-RS in this
+ * slot. Their REs carry this grant's data (no rate matching), under a power-boosted foreign reference signal;
+ * the extractor zeroes those received REs so their LLRs are erasures (0) instead of confident wrong bits. */
+__thread fapi_nr_dl_config_csirs_pdu_rel15_t nr_dlsch_csi_erase[NFAPI_MAX_NUM_CSI_RATEMATCH];
+__thread int nr_dlsch_csi_erase_n = 0;
+void nr_dlsch_csi_erase_set(const fapi_nr_dl_config_csirs_pdu_rel15_t *list, int n)
+{
+  nr_dlsch_csi_erase_n = 0;
+  for (int i = 0; list && i < n && i < NFAPI_MAX_NUM_CSI_RATEMATCH; i++)
+    nr_dlsch_csi_erase[nr_dlsch_csi_erase_n++] = list[i];
+}
+uint32_t nr_dlsch_csi_erase_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol, int crb)
+{
+  if (nr_dlsch_csi_erase_n <= 0)
+    return 0;
+  if (nr_dlsch_csi_prb_map) {
+    const int v = crb - dlsch_config->BWPStart;
+    if (v >= 0 && v < nr_dlsch_csi_prb_map_n)
+      crb = nr_dlsch_csi_prb_map[v] + dlsch_config->BWPStart;
+  }
+  uint32_t m = 0;
+  for (int i = 0; i < nr_dlsch_csi_erase_n; i++) {
+    fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &nr_dlsch_csi_erase[i];
+    if (!overlap_csi_symbol(csi_pdu, symbol) || crb < csi_pdu->start_rb || crb >= csi_pdu->start_rb + csi_pdu->nr_of_rbs)
+      continue;
+    if (csi_pdu->freq_density < 2 && (crb & 1) != csi_pdu->freq_density)
+      continue;
+    m |= csi_resource_re_map(csi_pdu);
+  }
+  return m;
+}
+static bool csi_erase_symbol(int symbol)
+{
+  for (int i = 0; i < nr_dlsch_csi_erase_n; i++)
+    if (overlap_csi_symbol(&nr_dlsch_csi_erase[i], symbol))
+      return true;
+  return false;
 }
 
 //==============================================================================================
@@ -385,7 +434,8 @@ static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
       for (int l = 0; l < Nl; l++) {
         int32_t *dl_ch0 = &dl_ch_estimates[(l * fp->nb_antennas_rx) + aarx][validDmrsEst * fp->ofdm_symbol_size];
         int32_t *dl_ch0_ext = dl_ch_estimates_ext[(l * fp->nb_antennas_rx) + aarx] + offset;
-        if (pilots == 0 && csi_res_bitmap == 0 && (!ssb_rm || !((ssb_rm->symbols >> symbol) & 1))) { // data symbol only
+        if (pilots == 0 && csi_res_bitmap == 0 && (!ssb_rm || !((ssb_rm->symbols >> symbol) & 1))
+            && !csi_erase_symbol(symbol)) { // data symbol only
           if (l == 0) {
             if (start_re + nb_rb * NR_NB_SC_PER_RB <= fp->ofdm_symbol_size) {
               memcpy(rxF_ext, &rxF[start_re], nb_rb * NR_NB_SC_PER_RB * sizeof(int32_t));
@@ -405,11 +455,12 @@ static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
             if (csi_res_bitmap && nr_dlsch_csi_rb_extent())
               overlap_map = dmrs_rb_bitmap | nr_dlsch_csi_rb_mask(dlsch_config, symbol, rb);
             overlap_map |= nr_ssb_rm_excluded(ssb_rm, symbol, rb - dlsch_config->BWPStart);
+            const uint32_t erase_map = nr_dlsch_csi_erase_mask(dlsch_config, symbol, rb) & ~overlap_map; /* CSI-FULL */
             for (int re = 0; re < NR_NB_SC_PER_RB; re++) {
               if (((overlap_map >> re) & 0x01) == 0) {
                 // DATA RE
                 if (l == 0)
-                  rxF_ext[j] = rxF[k];
+                  rxF_ext[j] = ((erase_map >> re) & 1) ? (c16_t){0, 0} : rxF[k];
                 dl_ch0_ext[j] = dl_ch0[re];
                 j++;
               }
@@ -1329,10 +1380,16 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     uint32_t count_odd  = count_bits(&csi_res_odd, 1);
     int start = freq_alloc->first_rb + dlsch_config->BWPStart;
     int end = freq_alloc->last_rb + 1;
+    if (nr_dlsch_csi_rb_extent()) {
+      /* bitmap index is BWP-relative, the mask takes the CRB (the legacy loop below mixes both when BWPStart > 0) */
+      for (int rb = freq_alloc->first_rb; rb <= freq_alloc->last_rb; rb++)
+        if ((freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 0x01)
+          csi_re_count += __builtin_popcount(nr_dlsch_csi_rb_mask(dlsch_config, symbol, rb + dlsch_config->BWPStart));
+    } else {
     for (int rb = start; rb < end; rb++) {
       if ((freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 0x01)
-        csi_re_count += nr_dlsch_csi_rb_extent() ? __builtin_popcount(nr_dlsch_csi_rb_mask(dlsch_config, symbol, rb))
-                                                 : (rb % 2 == 0) ? count_even : count_odd;
+        csi_re_count += (rb % 2 == 0) ? count_even : count_odd;
+    }
     }
     nb_re_pdsch = (nb_re_pdsch > csi_re_count) ? (nb_re_pdsch - csi_re_count) : 0;
     if (csi_re_count > 0) {
@@ -1978,6 +2035,11 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         }
       }
       bool ok = true;
+      if (nr_dlsch_csi_erase_n > 0) { /* CSI-FULL: an erased RE (all antennas zeroed) is not EVM evidence */
+        bool z = true;
+        for (int a = a0; a < a1 && z; a++) z = rxdataF_ext[a][i].r == 0 && rxdataF_ext[a][i].i == 0;
+        ok = !z;
+      }
       for (int c = 0; c < nl && ok; c++) {
         int piv = c;
         for (int r = c + 1; r < nl; r++) if (cabs(G[r][c]) > cabs(G[piv][c])) piv = r;

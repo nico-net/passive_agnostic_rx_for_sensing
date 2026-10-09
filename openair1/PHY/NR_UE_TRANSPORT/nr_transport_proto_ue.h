@@ -261,6 +261,14 @@ void nr_sl_rf_card_config_freq(PHY_VARS_NR_UE *ue,
 uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol);
 int nr_dlsch_csi_rb_extent(void);
 uint32_t nr_dlsch_csi_rb_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol, int crb);
+/* CSI-FULL: virtual BWP RB -> physical BWP PRB of a segmented grant (NULL = identity). */
+extern __thread const uint16_t *nr_dlsch_csi_prb_map;
+extern __thread int nr_dlsch_csi_prb_map_n;
+/* CSI-FULL erasure list (other cells' CSI-RS in the slot) and its per-RB RE mask. */
+extern __thread fapi_nr_dl_config_csirs_pdu_rel15_t nr_dlsch_csi_erase[NFAPI_MAX_NUM_CSI_RATEMATCH];
+extern __thread int nr_dlsch_csi_erase_n;
+void nr_dlsch_csi_erase_set(const fapi_nr_dl_config_csirs_pdu_rel15_t *list, int n);
+uint32_t nr_dlsch_csi_erase_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol, int crb);
 /** CSI-RS REs nr_dlsch_extract_rbs() removes from this grant (union over the rate-matching resources). */
 uint32_t nr_dlsch_csi_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc);
 

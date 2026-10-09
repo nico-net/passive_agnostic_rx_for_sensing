@@ -166,7 +166,16 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
 /* Confirmed resources kept per search (NZP and ZP each). A PDSCH carries at most
  * NFAPI_MAX_NUM_CSI_RATEMATCH (4) of them per slot; 8 covers a TRS pair + CQI + CSI-IM with room. */
 #define NR_CSIRS_BLIND_MAX_CONF 8
-#define NR_CSIRS_BLIND_DISC_MAX_CONF 32
+/* Array capacity of the discovery bank. CSI-FULL (ISAC_CSIRS_FULL_BURSTS=1): one OTA carrier carries ~40 confirmed row-1
+ * resources (6 TRS IDs x 4 symbols x up to 2 bursts), so the effective cap nr_csirs_blind_disc_cap() is 64 with the
+ * flag and the historical 32 without it (flag-off behaviour unchanged). */
+#define NR_CSIRS_BLIND_DISC_MAX_CONF 64
+int nr_csirs_blind_disc_cap(void);
+/** ISAC_CSIRS_FULL=1 (CSI-FULL, default off): complete per-population CSI-RS export for PDSCH rate matching. */
+int nr_csirs_full_enabled(void);
+/** ISAC_CSIRS_FULL_BURSTS=1 (CSI-FULL, default off): a row-1 resource seen in a second burst per period is its own
+ *  bank entry (instead of being refused), and the discovery bank holds 64 confirmed resources instead of 32. */
+int nr_csirs_full_bursts_enabled(void);
 /* Distinct predicted occasions with decoded-grant evidence kept per ZP (nr_csirs_blind_zp_grant_feed);
  * revocation counts the contradictions among them. A false ZP contradicts on EVERY decoded grant that
  * crosses it, so it is revoked at its second one for any window >= 2; the window only bounds how far
