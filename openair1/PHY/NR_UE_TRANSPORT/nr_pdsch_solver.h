@@ -42,6 +42,8 @@ typedef struct {
 /* ISAC_PDSCH_SOLVER_NL_PREF=N (default off) probes one-layer QPSK readings first and waits up to N grants before
  * falling back when none is available. ISAC_PDSCH_SOLVER_THREAD_CTX=1 (default off) keeps each scan consumer's grant
  * scrambling/CORESET/slot context separate so concurrent plans cannot use another consumer's hypotheses. */
+/* ISAC_PDSCH_SOLVER_COVERAGE=1 (default off) tracks search progress per stable layout, TDRA and scrambling identity,
+ * so changes in the order/number of readings between grants cannot repeatedly skip a physical hypothesis. */
 
 typedef struct {
   int reading;         ///< index into the caller's readings[]
@@ -63,6 +65,9 @@ void nr_pdsch_solver_set_tda_fn(nr_pdsch_solver_tda_fn fn, void *ctx);
 
 /** Solved RNTI: its representative layout (>= 0), else -1. A solved caller parses only that layout. */
 int nr_pdsch_solver_rep(uint16_t rnti);
+/** ISAC_PDSCH_SOLVER_LAYOUT_RECOVER=N (default off): after N credited failed search probes,
+ * reopen the active FDRA families' pruned layouts for this RNTI, including post-solve refinement. */
+bool nr_pdsch_solver_reopen_layouts(uint16_t rnti);
 /** True while an RNTI is unsolved: the caller sends this RNTI's grants to the solver instead of Technique D. */
 bool nr_pdsch_solver_owns(uint16_t rnti);
 

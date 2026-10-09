@@ -14,10 +14,16 @@
 #define SOLVER_CAND_TRIES 96      /* confirmation probes before an unconfirmed candidate is dropped */
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
 
+typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
+typedef struct { coverage_entry_t *entries; size_t cap, used; } solver_coverage_t;
+
 typedef struct {
   bool used, solved, has_cand;
   uint16_t rnti;
   uint32_t cursor;
+  solver_coverage_t *coverage;
+  uint32_t layout_failures;
+  bool layouts_reopened;
   /* candidate (one CRC pass) */
   uint8_t *cand_bm;
   uint8_t cand_add_pos;
@@ -101,6 +107,8 @@ static nr_pdsch_solver_tda_fn g_tda_fn;
 static void *g_tda_ctx;
 static nr_pdsch_solver_stats_t g_st;
 static int g_nl_pref_gap = -1;
+static int g_coverage = -1;
+static int g_layout_recover = -1;
 /* cell prior: the first solution, offered first to other RNTIs */
 static bool g_have_prior;
 static int g_prior_rep;
@@ -129,8 +137,12 @@ void nr_pdsch_solver_reset(void)
 {
   pthread_mutex_lock(&g_mu);
   g_nl_pref_gap = -1;
+  g_coverage = -1;
+  g_layout_recover = -1;
   for (int i = 0; i < SOLVER_RNTIS; i++) {
     free(g_r[i].cand_bm);
+    if (g_r[i].coverage) free(g_r[i].coverage->entries);
+    free(g_r[i].coverage);
     memset(&g_r[i], 0, sizeof(g_r[i]));
   }
   memset(g_p, 0, sizeof(g_p));
@@ -217,6 +229,26 @@ static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
       return &g_r[i];
     }
   return NULL;
+}
+
+bool nr_pdsch_solver_reopen_layouts(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  if (g_layout_recover < 0) {
+    const char *e = getenv("ISAC_PDSCH_SOLVER_LAYOUT_RECOVER");
+    g_layout_recover = e ? atoi(e) : 0;
+    if (g_layout_recover < 0) g_layout_recover = 0;
+  }
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (g_layout_recover > 0 && r && !r->solved && !r->layouts_reopened
+      && r->layout_failures >= (uint32_t)g_layout_recover) {
+    r->layouts_reopened = true;
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x reopening pruned layouts after %u failed CRC probes\n",
+          rnti, r->layout_failures);
+  }
+  const bool reopened = g_layout_recover > 0 && r && r->layouts_reopened;
+  pthread_mutex_unlock(&g_mu);
+  return reopened;
 }
 
 int nr_pdsch_solver_rep(uint16_t rnti)
@@ -460,6 +492,113 @@ static bool has_id(const nr_pdsch_solver_reading_t *r, int id)
   return false;
 }
 
+static coverage_entry_t *coverage_find(solver_coverage_t *c, uint64_t key)
+{
+  uint64_t h = key * UINT64_C(0x9e3779b97f4a7c15);
+  h = (h ^ (h >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  size_t i = (h ^ (h >> 27)) & (c->cap - 1);
+  while (c->entries[i].key && c->entries[i].key != key) i = (i + 1) & (c->cap - 1);
+  return &c->entries[i];
+}
+
+static bool coverage_room(solver_coverage_t *c, size_t extra)
+{
+  if (c->cap && (c->used + extra) * 4 < c->cap * 3) return true;
+  /* Bounded history: at most 4 MiB/RNTI, allocated only for visited hypotheses.
+   * Exhaustion starts a new coverage round instead of making a hypothesis final. */
+  if (c->cap == (1u << 18)) {
+    memset(c->entries, 0, c->cap * sizeof(*c->entries));
+    c->used = 0;
+    return true;
+  }
+  solver_coverage_t grown = {.cap = c->cap ? c->cap * 2 : 4096, .used = c->used};
+  while ((c->used + extra) * 4 >= grown.cap * 3 && grown.cap < (1u << 18)) grown.cap *= 2;
+  grown.entries = calloc(grown.cap, sizeof(*grown.entries));
+  if (!grown.entries) return false;
+  for (size_t i = 0; i < c->cap; i++)
+    if (c->entries[i].key) *coverage_find(&grown, c->entries[i].key) = c->entries[i];
+  free(c->entries);
+  *c = grown;
+  return true;
+}
+
+static uint64_t coverage_key(int id, int variant, nr_dci_bits_t payload)
+{
+  const int tda = variant == 63 ? 0 : tda_of(id, payload); /* 63 = all timing cases' trial count */
+  return (((((uint64_t)(t_scr + 1) << 15) | (unsigned)id) << 4 | tda) << 6 | variant) + 1;
+}
+
+/* A DCI changes the number/order of readings and which tables are eligible.
+ * An index modulo that list can repeatedly skip the same physical hypothesis.
+ * Count actual trials by (layout, TDRA, identity, S, add-pos, table). Ineligible
+ * combinations remain untested; a high-MCS grant cannot consume a later QPSK
+ * grant's table/start trial. Grouping identical readings still shares each probe. */
+static void plan_coverage(solver_rnti_t *r, nr_pdsch_solver_var_t *out, int *n, int max, int slot,
+                          const nr_pdsch_solver_reading_t *rd, const int *order, int no,
+                          int l0, bool qpsk, uint64_t dci, nr_dci_bits_t payload)
+{
+  if (!r->coverage) r->coverage = calloc(1, sizeof(*r->coverage));
+  if (!r->coverage || !coverage_room(r->coverage, 2 * SOLVER_MAX_IDS)) return;
+  solver_coverage_t *c = r->coverage;
+  static const uint8_t starts[4] = {1, 0, 2, 3}, adds[4] = {1, 2, 0, 3}, tables[3] = {1, 0, 2};
+  uint32_t score[128][48];
+  uint32_t load[128];
+  int nt[128];
+  for (int k = 0; k < no; k++) {
+    load[k] = UINT32_MAX;
+    for (int j = 0; j < rd[order[k]].n_ids; j++) {
+      const int id = rd[order[k]].ids[j];
+      if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
+      const uint32_t count = coverage_find(c, coverage_key(id, 63, payload))->count;
+      if (count < load[k]) load[k] = count;
+    }
+    uint8_t available[3];
+    nt[k] = tables_for(rd[order[k]].mcs, available);
+    for (int v = 0; v < 48; v++) {
+      score[k][v] = UINT32_MAX;
+      const int table = tables[(v / 4) % 3];
+      bool valid = false;
+      for (int t = 0; t < nt[k]; t++) valid |= available[t] == table;
+      int qm, r2;
+      if (!valid || starts[v % 4] > l0
+          || (qpsk && nr_pdsch_solver_mcs_qr(table, rd[order[k]].mcs, &qm, &r2) && qm != 2)) continue;
+      for (int j = 0; j < rd[order[k]].n_ids; j++) {
+        const int id = rd[order[k]].ids[j];
+        if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
+        const uint32_t count = coverage_find(c, coverage_key(id, v, payload))->count;
+        if (count < score[k][v]) score[k][v] = count;
+      }
+    }
+  }
+  for (int step = 0; step < no * 48 && *n < max; step++) {
+    int best = -1, variant = -1;
+    uint32_t count = UINT32_MAX, total = UINT32_MAX;
+    /* Fairness is per layout, not per TDRA: a wrong wide TDRA field must not get
+     * sixteen times the budget of a narrow one merely by producing new indices.
+     * Within that share choose the least-tried eligible physical hypothesis. */
+    for (int v = 0; v < 48; v++)
+      for (int k = 0; k < no; k++)
+        if (score[k][v] != UINT32_MAX && (load[k] < total || (load[k] == total && score[k][v] < count))) {
+          best = k; variant = v; count = score[k][v]; total = load[k];
+        }
+    if (best < 0 || !coverage_room(c, 2 * rd[order[best]].n_ids)) break;
+    if (load[best] < UINT32_MAX - 1) load[best]++;
+    score[best][variant] = UINT32_MAX; /* no duplicate physical decode in this DCI */
+    const int S = starts[variant % 4], table = tables[(variant / 4) % 3], add = adds[variant / 12];
+    emit(out, n, max, slot, 0, order[best], rd, l0, S, add, table, true, nt[best] > 1, false, false, -1, dci, payload);
+    for (int j = 0; j < rd[order[best]].n_ids; j++) {
+      const int id = rd[order[best]].ids[j];
+      if (id >= NR_PDSCH_SOLVER_MAX_LAYOUTS) continue;
+      for (int q = 0; q < 2; q++) {
+        const uint64_t key = coverage_key(id, q ? 63 : variant, payload);
+        coverage_entry_t *e = coverage_find(c, key);
+        if (!e->key) { e->key = key; c->used++; }
+        if (e->count < UINT32_MAX - 1) e->count++;
+      }
+    }
+  }
+}
+
 /* known-parameter variants for one reading (solved RNTI, or the cell prior on an unsolved one) */
 static void plan_known(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                        const nr_pdsch_solver_reading_t *rd, int l0, int rep, uint8_t add_pos, int8_t table,
@@ -693,7 +832,11 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       /* add_pos tier outer (1, 2, 0, 3); inside a tier every reading gets all S in one go, because the true S
        * changes from grant to grant with the TDA index while the true reading is there on every grant */
       static const uint8_t kA[4] = {1, 2, 0, 3};
-      if (nl_gap > 0) {
+      if (g_coverage < 0)
+        g_coverage = getenv("ISAC_PDSCH_SOLVER_COVERAGE") && atoi(getenv("ISAC_PDSCH_SOLVER_COVERAGE"));
+      if (g_coverage) {
+        plan_coverage(r, out, &n, budget, slot, rd, order, no, l0, nl_preferred, dci, payload);
+      } else if (nl_gap > 0) {
         int pair_rd[128 * 3], np = 0;
         uint8_t pair_t[128 * 3], pair_disc[128 * 3];
         for (int i = 0; i < no; i++) {
@@ -825,10 +968,19 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
       for (int i = 0; i < p->n_ids; i++) { if (p->ids[i] < lo) lo = p->ids[i]; if (p->ids[i] > hi) hi = p->ids[i]; }
       const solver_rnti_t *rr = (p->slot >= 0 && p->slot < SOLVER_RNTIS) ? &g_r[p->slot] : NULL;
       LOG_A(PHY, "SENSING: PDSCH_SOLVER probe rnti=0x%04x key=%d dci=%llu abs=%llu crc=%d probe=%u S=%u add_pos=%u table=%u scr=%d Nl=%u mcs=%u ports=0x%x n_ids=%d ids=%d..%d "
-                 "has1662=%d has1664=%d has2102=%d has2104=%d\n", rr ? rr->rnti : 0, rr ? rr->key : -1,
+                 "has1662=%d has1664=%d has2102=%d has2104=%d tok=%u\n", rr ? rr->rnti : 0, rr ? rr->key : -1,
             (unsigned long long)p->dci, (unsigned long long)p->abs, (int)crc_ok, p->probe, p->S, p->add_pos,
             p->table, p->scr, p->n_layers, p->mcs, p->dmrs_ports, p->n_ids, lo, hi,
-            has_id_p(p, 1662), has_id_p(p, 1664), has_id_p(p, 2102), has_id_p(p, 2104));
+            has_id_p(p, 1662), has_id_p(p, 1664), has_id_p(p, 2102), has_id_p(p, 2104), token);
+      if (crc_ok) {
+        char ids[8192];
+        int used = 0;
+        for (int i = 0; i < p->n_ids && used < (int)sizeof(ids) - 8; i++)
+          used += snprintf(ids + used, sizeof(ids) - used, "%s%u", i ? "," : "", p->ids[i]);
+        ids[used] = 0;
+        LOG_A(PHY, "SENSING: PDSCH_SOLVER evidence tok=%u dci=%llu layouts=%s\n",
+              token, (unsigned long long)p->dci, ids);
+      }
     }
   }
   if (p == NULL || !credit) {
@@ -837,6 +989,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     return;
   }
   solver_rnti_t *r = &g_r[p->slot];
+  if (r->used && p->phase == 0 && !r->solved && !crc_ok && r->layout_failures < UINT32_MAX)
+    r->layout_failures++;
   if (p->comb >= 1 && (!r->solved || !p->probe)) {
     const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb >= 5 ? 3 : 0;
     r->comb_try[ci]++;

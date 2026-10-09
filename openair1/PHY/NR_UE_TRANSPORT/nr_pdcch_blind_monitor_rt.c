@@ -1500,7 +1500,20 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       LOG_W(PHY, "SENSING: DCI11_LAYOUT initial set truncated at NR_DCI11_LAYOUT_MAX=%d\n", NR_DCI11_LAYOUT_MAX);
     g_dci11_state = 1;
   }
+  static _Thread_local int prune_log = -1;
+  static _Thread_local bool prior_alive[NR_DCI11_LAYOUT_MAX];
+  if (prune_log < 0) prune_log = getenv("ISAC_DCI11_PRUNELOG") && atoi(getenv("ISAC_DCI11_PRUNELOG"));
+  const int prior_n = g_dci11_resolver->n_hyp;
+  if (prune_log) memcpy(prior_alive, g_dci11_resolver->alive, prior_n * sizeof(*prior_alive));
   nr_dci11_resolver_observe_rnti(g_dci11_resolver, payload, rnti); /* = observe() unless ISAC_DCI11_HARQ_SEQ */
+  if (prune_log) {
+    const nr_dci11_resolver_t *r = g_dci11_resolver;
+    for (int i = 0; i < prior_n; i++)
+      if (prior_alive[i] && !r->alive[i])
+        LOG_A(PHY, "SENSING: DCI11_PRUNE rnti=0x%04x obs=%u layout=%d fdra=%u tda=%u ant=%u seen=%u pass=%u impossible=%u harq=%u/%u\n",
+              rnti, r->n_obs, i, r->off[i].fdra_mode, r->off[i].tda_bits, r->off[i].ant_ports_bits,
+              r->seen[i], r->pass[i], r->impossible[i], r->harq_inc[i], r->harq_pairs[i]);
+  }
   if ((++g_dci11_seen % 4000) != 0) {
     return;
   }
@@ -2515,6 +2528,7 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
      * (token bucket, burst 8); the rest are SKIPPED (counted), not queued-then-dropped. Live td_4_1: 770 items/s
      * offered, worker served ~120/s, 84 % dropped. */
     static _Atomic double s_rate = -1.0;
+    static _Atomic int s_discovery = -1;
     static double tokens = 8.0;
     static long last = -1;
     static _Atomic uint64_t s_skip;
@@ -2523,7 +2537,15 @@ static void janon_submit(uint64_t geom, uint16_t nid, int frame, int slot, int s
       rate = getenv("ISAC_PDCCH_JOINT_ANON_RATE") ? atof(getenv("ISAC_PDCCH_JOINT_ANON_RATE")) : 0.0;
       atomic_store(&s_rate, rate);
     }
-    if (rate > 0.0 && janon_stable_enabled()) {
+    int discovery = atomic_load(&s_discovery);
+    if (discovery < 0) {
+      discovery = getenv("ISAC_PDCCH_JOINT_ANON_DISCOVERY") && atoi(getenv("ISAC_PDCCH_JOINT_ANON_DISCOVERY"));
+      atomic_store(&s_discovery, discovery);
+    }
+    /* Stable sampling must not stretch an unverified geometry's finite dwell by
+     * 1/rate. The legacy rate limit applied only to banked CORESETs; preserve
+     * those discovery opportunities while keeping bank sampling deterministic. */
+    if (rate > 0.0 && janon_stable_enabled() && !(discovery && t_pass_kind != PASS_BANK)) {
       /* Pick signal slots from (nID, SFN, slot), independently of worker timing and the order in which scan
        * consumers visit CORESETs. The same capture therefore offers the same anonymous occasions each replay. */
       const uint64_t h = janon_slot_hash(nid, frame, slot, slots_per_frame);
@@ -7850,7 +7872,21 @@ constdiag_done:;
                    "layout requires TB-CRC evidence\n",
               (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
               nr_dci_bits_hex(raw->payload.w, cand_task[ti].dci_length, false, payload_hex), raw->mismatched_bits);
-      nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload, raw->rnti);
+      /* A known-RNTI joint decode can admit many re-encoding mismatches. Such
+       * payloads must not irreversibly prune a GLOBAL layout set: their apparent
+       * HARQ sequence can beat the correct field before clean DCIs arrive.
+       * Use the anonymous evidence bar for layout statistics only; the raw grant
+       * remains available to the per-RNTI CRC solver. */
+      static _Thread_local int s_observe_mm = -1;
+      static _Thread_local unsigned s_observe_skipped;
+      if (s_observe_mm < 0)
+        s_observe_mm = getenv("ISAC_DCI11_OBSERVE_MM") && atoi(getenv("ISAC_DCI11_OBSERVE_MM"));
+      const unsigned observe_mm_max = s_observe_mm ? joint_anon_mm_max(cand_task[ti].L) : UINT_MAX;
+      if (raw->mismatched_bits <= observe_mm_max)
+        nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload, raw->rnti);
+      else if (++s_observe_skipped <= 8 || s_observe_skipped % 1000 == 0)
+        LOG_A(PHY, "SENSING: DCI11_OBSERVE_SKIP rnti=0x%04x mm=%u max=%u AL=%d skipped=%u\n",
+              raw->rnti, raw->mismatched_bits, observe_mm_max, cand_task[ti].L, s_observe_skipped);
       if (!g_pdsch_sweep_on) continue;
       /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
        * consumer's stack, and 512 results there overflowed it on the first DL grant (OTA 2026-09-15). */
@@ -8524,6 +8560,7 @@ constdiag_done:;
       const nr_pdcch_blind_raw_result_t *rw = &cand_task[ti].dl_raw;
       const uint16_t dlen = cand_task[ti].dci_length;
       const int rep = nr_pdsch_solver_rep(out.rnti);
+      const bool reopen_layouts = nr_pdsch_solver_reopen_layouts(out.rnti);
       const nr_dci11_resolver_t *R = g_dci11_resolver;
       /* Search only once stage 1 has narrowed the layouts (ISAC_PDSCH_SOLVER_MAX_LIVE, default 512): before the
        * HARQ-sequence test bites, 1500+ live layouts give > 96 readings per DCI and the true one is cut. */
@@ -8535,6 +8572,13 @@ constdiag_done:;
       if (rep < 0 && R->n_alive > s_max_live)
         continue;
       const int nh = __atomic_load_n(&R->n_hyp, __ATOMIC_ACQUIRE);
+      unsigned live_fdra = 0;
+      if (reopen_layouts)
+        for (int i = 0; i < nh; i++)
+          if (R->alive[i] && R->off[i].fdra_mode < 8) live_fdra |= 1u << R->off[i].fdra_mode;
+      static _Thread_local int s_dmrs_domain = -1;
+      if (s_dmrs_domain < 0)
+        s_dmrs_domain = getenv("ISAC_PDSCH_SOLVER_DMRS_DOMAIN") && atoi(getenv("ISAC_PDSCH_SOLVER_DMRS_DOMAIN"));
       /* Layouts whose READ fields sit at the same offsets read the same: parse one per offset key, not one per layout
        * (1534 live -> a few dozen parses; the per-layout parse was ~2 ms per C-RNTI DCI on the scan path). */
       enum { KEYS = 256 };
@@ -8542,9 +8586,20 @@ constdiag_done:;
       int kgrp[KEYS], nk = 0;
       for (int i = 0; i < nh; i++) {
         s_gid[i] = 0xff;
-        if (!R->alive[i] && i != rep)
+        if (!R->alive[i] && i != rep
+            && !(reopen_layouts && R->off[i].fdra_mode < 8 && (live_fdra & (1u << R->off[i].fdra_mode))))
           continue;
         const nr_dci11_offsets_t *of = &R->off[i];
+        if (s_dmrs_domain) {
+          /* This solver emits single-symbol DM-RS masks only. The maxLength-2
+           * antenna-port tables also contain double-symbol rows; interpreting
+           * those with a single-symbol mask aliases ports (e.g. 1004 to 1000)
+           * on some grants and can seed a permanently wrong layout prior. */
+          const unsigned ap = nr_dci_bits_field(&rw->payload, of->total, of->ant_ports, of->ant_ports_bits);
+          if ((of->ant_ports_bits == 5 && !R->hyp[i].dmrs_type && ap >= 12)
+              || (of->ant_ports_bits == 6 && R->hyp[i].dmrs_type && ap >= 24))
+            continue;
+        }
         const uint64_t key = (uint64_t)of->riv | (uint64_t)of->mcs << 8 | (uint64_t)of->ant_ports << 16
                              | (uint64_t)of->ant_ports_bits << 24 | (uint64_t)of->fdra_mode << 28 | (uint64_t)of->n_rbg << 32
                              | (uint64_t)R->hyp[i].dmrs_type << 40 | (uint64_t)of->tda << 44 | (uint64_t)of->tda_bits << 52;
@@ -8683,7 +8738,7 @@ constdiag_done:;
         int *s_last_n_p = slot_i >= 0 ? &s_last_cnt[slot_i] : &s_dummy;
         int s_last_n = *s_last_n_p;
         if (sv_nalt != s_last_n) {
-          char b[160];
+          char b[160] = "";
           int u = 0;
           for (int q = 0; q < sv_nalt && u < (int)sizeof(b) - 8; q++) u += snprintf(b + u, sizeof(b) - u, " %u", sv_alt[q]);
           LOG_A(PHY, "SENSING: PDSCH_SOLVER scrambling candidates (CORESET nid %d): default%s\n",
@@ -8716,6 +8771,14 @@ constdiag_done:;
         dl.mcs_table         = var[v].table;
         dl.pduBitmap         = 0;
         dl.numCsiRsForRateMatching = 0;
+        /* The solver's -1 hypothesis means PCI for BOTH sequences. Do not inherit the
+         * process-wide DM-RS estimate/data walk: those mix other CORESET populations
+         * and unconfirmed layout probes, and can latch a different identity forever. */
+        static _Thread_local int s_scr_explicit = -1;
+        if (s_scr_explicit < 0)
+          s_scr_explicit = getenv("ISAC_PDSCH_SOLVER_SCR_EXPLICIT") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR_EXPLICIT"));
+        if (s_scr_explicit)
+          dl.dlDmrsScramblingId = dl.dlDataScramblingId = fp->Nid_cell;
         if (var[v].scr >= 0) /* T26c: CRC-selected per-RNTI hypothesis -- a run-time discovered nID */
           dl.dlDmrsScramblingId = dl.dlDataScramblingId = (uint16_t)var[v].scr;
         if (var[v].rm) {

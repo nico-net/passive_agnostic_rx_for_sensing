@@ -377,9 +377,26 @@ static _Atomic uint64_t g_crc_ok        = 0;
 /* Two windows per nSCID, stage 1 always on, stage 2 throttled and capped: nr_dmrs_id_2stage_t
  * (final review I5; measured 170360 us per stage-2 accumulate vs ~2 ms for stage 1). */
 /* T26c ISAC_PDSCH_DMRS_ID_PER_CORESET: one blind DM-RS identity estimator per discovered CORESET population */
-typedef struct { int key; int decided; int top[3]; bool used; pthread_mutex_t mu; nr_dmrs_id_2stage_t est; } coreset_dmrs_t;
+typedef struct {
+  int key, decided, top[3];
+  bool used;
+  pthread_mutex_t mu;
+  nr_dmrs_id_2stage_t est;
+  uint64_t last_slot;
+  uint32_t failed_slots;
+} coreset_dmrs_t;
 static coreset_dmrs_t g_cs_dmrs[8];
 static pthread_mutex_t g_cs_dmrs_mu = PTHREAD_MUTEX_INITIALIZER;
+static int coreset_dmrs_refresh(void)
+{
+  static _Thread_local int n = -1;
+  if (n < 0) {
+    const char *e = getenv("ISAC_PDSCH_DMRS_ID_REFRESH");
+    n = e ? atoi(e) : 0;
+    if (n < 0) n = 0;
+  }
+  return n;
+}
 static bool per_coreset_dmrs_on(void)
 {
   static int en = -1;
@@ -409,7 +426,9 @@ int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3)
 {
   for (int i = 0; i < 8; i++)
     if (g_cs_dmrs[i].used && g_cs_dmrs[i].key == key && __atomic_load_n(&g_cs_dmrs[i].decided, __ATOMIC_ACQUIRE) >= 0) {
+      if (coreset_dmrs_refresh()) pthread_mutex_lock(&g_cs_dmrs[i].mu);
       for (int q = 0; q < 3; q++) out3[q] = g_cs_dmrs[i].top[q];
+      if (coreset_dmrs_refresh()) pthread_mutex_unlock(&g_cs_dmrs[i].mu);
       return 3;
     }
   return 0;
@@ -1631,6 +1650,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* A CRC pass is evidence even on IQ that expired meanwhile (overwritten samples cannot pass a CRC but by the
        * same chance any wrong hypothesis can); a FAILURE on expired IQ says nothing and is not credited. */
       const bool sv_ok = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+      if (getenv("ISAC_PDSCH_SOLVER_PROBELOG") && atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG")))
+        LOG_A(PHY, "SENSING: PDSCH_SOLVER identity tok=%u rnti=0x%04x key=%d abs=%ld dmrs=%u data=%u nscid=%u crc=%d probe=%d\n",
+              job.solver_token, job.rnti, job.coreset_key, (long)job.absolute_slot,
+              job.dlsch_pdu.dlDmrsScramblingId, job.dlsch_pdu.dlDataScramblingId,
+              job.dlsch_pdu.nscid, sv_ok, (int)job.layout_probe);
       static int s_sdiag = -1;
       static _Atomic int s_sdiag_left = 400;
       if (s_sdiag < 0) s_sdiag = getenv("ISAC_PDSCH_SOLVER_DIAG") ? 1 : 0;
@@ -1799,12 +1823,32 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         if (credit_ok && job.solver_token && job.coreset_key >= 0 && pr_nrb > 0 && pdu->dlDmrsSymbPos && per_coreset_dmrs_on()) {
           /* T26c: the same blind DM-RS identity estimator, per discovered CORESET population */
           coreset_dmrs_t *cd = coreset_dmrs_slot(job.coreset_key, ue->frame_parms.Nid_cell);
-          if (cd && __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) < 0 && pthread_mutex_trylock(&cd->mu) == 0) {
+          const int refresh = coreset_dmrs_refresh();
+          if (cd && (refresh || __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) < 0)
+              && pthread_mutex_trylock(&cd->mu) == 0) {
             const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
             const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
             const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
             const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
-            if (nr_dmrs_id_2stage_accumulate(&cd->est, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+            /* A batch of layout variants observes the SAME pilots, not independent
+             * grants. Count at most one observation per signal slot. A frozen
+             * coherence winner without CRC support must eventually be reconsidered. */
+            const bool fresh = !refresh || (job.absolute_slot >= 0 && (uint64_t)job.absolute_slot > cd->last_slot);
+            if (refresh && crc) cd->failed_slots = 0;
+            if (refresh && fresh) {
+              cd->last_slot = (uint64_t)job.absolute_slot;
+              if (!crc && __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE) >= 0
+                  && ++cd->failed_slots >= (uint32_t)refresh) {
+                const int old = __atomic_load_n(&cd->decided, __ATOMIC_ACQUIRE);
+                nr_dmrs_id_set_range(&cd->est.s1, 0, NR_DMRS_ID_CANDIDATES);
+                __atomic_store_n(&cd->est.decided_p1, 0, __ATOMIC_RELEASE);
+                __atomic_store_n(&cd->decided, -1, __ATOMIC_RELEASE);
+                cd->failed_slots = 0;
+                LOG_A(PHY, "SENSING: DMRS_ID REFRESH nid=%d old=%d abs=%ld after %d independent failed slots\n",
+                      job.coreset_key, old, (long)job.absolute_slot, refresh);
+              }
+            }
+            if (fresh && nr_dmrs_id_2stage_accumulate(&cd->est, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
                                              start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
                                              job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType)) {
               const int id = nr_dmrs_id_2stage_decided(&cd->est);
@@ -1818,6 +1862,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                   if (v > sc[q]) { for (int z = 2; z > q; z--) { sc[z] = sc[z - 1]; tp[z] = tp[z - 1]; } sc[q] = v; tp[q] = c; break; }
               }
               for (int q = 0; q < 3; q++) cd->top[q] = tp[q];
+              if (refresh) cd->failed_slots = 0;
               __atomic_store_n(&cd->decided, id, __ATOMIC_RELEASE);
               LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d top3 %d %d %d\n", job.coreset_key, tp[0], tp[1], tp[2]);
               LOG_A(PHY, "SENSING: DMRS_ID per-CORESET nid=%d PDSCH DM-RS id DECIDED %d (cell %d)\n", job.coreset_key, id,

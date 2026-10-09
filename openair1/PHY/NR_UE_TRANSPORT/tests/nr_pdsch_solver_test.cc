@@ -162,6 +162,108 @@ TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
   nr_pdsch_solver_reset();
 }
 
+TEST(PdschSolver, CoverageSurvivesReorderedReadingsAndIdentityChanges)
+{
+  setenv("ISAC_PDSCH_SOLVER_COVERAGE", "1", 1);
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "32", 1);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(nullptr, nullptr);
+  uint16_t ids[9];
+  bool seen[2][9] = {};
+  for (int i = 0; i < 9; i++) ids[i] = 100 + i;
+  for (int g = 0; g < 18; g++) {
+    // Identical physical hypotheses move between reading indices with each DCI.
+    nr_pdsch_solver_reading_t rd[9];
+    for (int i = 0; i < 9; i++) rd[i] = {&ids[(i + g) % 9], 1, 16, 1, 1, 2};
+    const uint16_t scr = 200 + (g % 2);
+    nr_pdsch_solver_set_alt_scr(77, &scr, 1, true);
+    nr_dci_bits_t p = {{(uint64_t)(1000 + g), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, rd, 9, 1, v);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(v[0].scr, scr);
+    const int id = *rd[v[0].reading].ids - 100;
+    EXPECT_FALSE(seen[g % 2][id]) << "a shifted reading must not consume another layout's search progress";
+    seen[g % 2][id] = true;
+    nr_pdsch_solver_feedback(v[0].token, false, true);
+  }
+  for (auto &lane : seen) for (bool tested : lane) EXPECT_TRUE(tested);
+  unsetenv("ISAC_PDSCH_SOLVER_COVERAGE");
+  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  nr_pdsch_solver_reset();
+}
+
+TEST(PdschSolver, CoverageKeepsStartSymbolSearchSeparateForEachTdra)
+{
+  setenv("ISAC_PDSCH_SOLVER_COVERAGE", "1", 1);
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "1", 1);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  const uint16_t id = 100;
+  nr_pdsch_solver_reading_t rd = {&id, 1, 16, 1, 1, 2};
+  for (int g = 0; g < 4; g++) {
+    nr_dci_bits_t p = {{(uint64_t)(g % 2), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 1, v), 1);
+    EXPECT_EQ(v[0].S, g < 2 ? 1 : 0) << "both TDRA indices need their own start-symbol trials";
+    nr_pdsch_solver_feedback(v[0].token, false, true);
+  }
+  EXPECT_EQ(nr_pdsch_solver_rep(0x7788), -1);
+  unsetenv("ISAC_PDSCH_SOLVER_COVERAGE");
+  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  nr_pdsch_solver_reset();
+}
+
+TEST(PdschSolver, IneligibleTablesDoNotConsumeLaterQpskTrials)
+{
+  setenv("ISAC_PDSCH_SOLVER_COVERAGE", "1", 1);
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "1", 1);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  const uint16_t id = 100;
+  nr_pdsch_solver_reading_t rd = {&id, 1, 16, 1, 1, 14};
+  nr_dci_bits_t p = {{42, 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 14, 2, &rd, 1, 1, v), 1);
+  EXPECT_EQ(v[0].table, 2); // only the low-rate table is QPSK at this MCS
+  nr_pdsch_solver_feedback(v[0].token, false, true);
+  rd.mcs = 1;
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 1, 2, &rd, 1, 1, v), 1);
+  EXPECT_EQ(v[0].table, 1);
+  EXPECT_EQ(v[0].S, 1); // this physical hypothesis has not been tried yet
+  nr_pdsch_solver_feedback(v[0].token, false, true);
+  unsetenv("ISAC_PDSCH_SOLVER_COVERAGE");
+  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  nr_pdsch_solver_reset();
+}
+
+TEST(PdschSolver, LayoutRecoveryNeedsCreditedCrcFailures)
+{
+  setenv("ISAC_PDSCH_SOLVER_LAYOUT_RECOVER", "3", 1);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_alt_scr(-1, nullptr, 0, false);
+  const uint16_t id = 100;
+  nr_pdsch_solver_reading_t rd = {&id, 1, 16, 1, 1, 2};
+  nr_dci_bits_t p = {{42, 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  EXPECT_FALSE(nr_pdsch_solver_reopen_layouts(0x7788));
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 3, v), 3);
+  nr_pdsch_solver_feedback(v[0].token, false, false); // expired IQ is not refutation
+  nr_pdsch_solver_feedback(v[1].token, false, true);
+  nr_pdsch_solver_feedback(v[2].token, true, true);
+  EXPECT_FALSE(nr_pdsch_solver_reopen_layouts(0x7788));
+  ASSERT_EQ(nr_pdsch_solver_plan(0x7788, p, 49, 2, 2, &rd, 1, 3, v), 3);
+  for (int i = 0; i < 3; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+  EXPECT_TRUE(nr_pdsch_solver_reopen_layouts(0x7788));
+  EXPECT_EQ(nr_pdsch_solver_rep(0x7788), -1); // reopening is not a lock
+  unsetenv("ISAC_PDSCH_SOLVER_LAYOUT_RECOVER");
+  nr_pdsch_solver_reset();
+  EXPECT_FALSE(nr_pdsch_solver_reopen_layouts(0x7788));
+}
+
 TEST(PdschSolver, SolvesTheSimulatedCellWithTwoIndependentPasses)
 {
   ASSERT_EQ(kEnable, 0);
