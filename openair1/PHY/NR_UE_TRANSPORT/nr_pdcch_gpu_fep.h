@@ -26,15 +26,14 @@
  * mutex-contended path: commit 002038bd70 already found and fixed the "shared per-consumer mutex"
  * failure mode once for the PDSCH GPU FEP; this module reuses that lesson rather than re-earning it.
  *
- * STATUS (2026-09-16): written with no CUDA toolkit and no NVIDIA GPU available in this environment
- * (checked: no nvcc, no /usr/local/cuda, no nvidia-smi) -- the math is mirrored faithfully from
+ * STATUS (2026-10-09): compiled with the CUDA toolkit on the GB10 build host, but this sandbox has
+ * no accessible GPU device; device execution and LLR equivalence are still deferred. The math follows
  * openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c's nr_pdcch_channel_estimation()
  * (non-CH_INTERP branch) and dci_nr.c's nr_gold_pdcch()/nr_pdcch_dmrs_ref()/nr_rx_pdcch_symbol(),
  * and self-checked only by inspection, NOT by running it. UNTESTED ON REAL GPU HARDWARE. Before
  * trusting it live: build on sens6 (same libldpc_cuda.so toolchain, CUDA 12.4 + g++-13, sm_89),
- * run the self-check (ISAC_GPU_PDCCH_SELFCHECK, mirroring nr_pdsch_gpu_fep's ISAC_GPU_SELFCHECK) on
- * a live capture, and do NOT flip the caller over to trusting its LLRs until that agrees with the
- * CPU path on a real occasion.
+ * run nr_pdcch_slot_bench on the recorded CPU-reference inputs, and do NOT flip the caller over to
+ * trusting its LLRs until that agrees with the CPU path on the same replay inputs.
  *
  * KNOWN SIMPLIFICATION (ponytail: flagged, not silently dropped): multi-antenna combining here is
  * plain power-weighted MRC, not the branch-roughness gate nr_rx_pdcch_symbol() grew on 2026-09-15

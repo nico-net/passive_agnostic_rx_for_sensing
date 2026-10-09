@@ -229,7 +229,7 @@ static int passive_core_plan(void)
     int workers = ru->nb_rx > 2 ? ru->nb_rx : 2;
     ADD(NR_CP_POOL, workers < 8 ? workers : 8, -1);
   }
-  if (core_feature("NR_GPU_FEP", false)) ADD(NR_CP_GPU, 1, core_env_value("ISAC_GPU_WORKER_CORE"));
+  if (core_feature("ISAC_PDSCH_GPU", false) || core_feature("NR_GPU_FEP", false)) ADD(NR_CP_GPU, 1, core_env_value("ISAC_GPU_WORKER_CORE"));
   if (core_feature("ISAC_CSIRS_DISC", false)) ADD(NR_CP_CSIRS, 1, core_env_value("ISAC_CSIRS_DISC_CORE"));
   if (core_feature("ISAC_PDCCH_NID_GPU", false)) ADD(NR_CP_NID, 1, core_env_value("ISAC_PDCCH_NID_GPU_CORE"));
   ADD(NR_CP_STATS, 1, -1);

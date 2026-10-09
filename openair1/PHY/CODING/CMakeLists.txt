@@ -112,9 +112,14 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_DL_LIBS})
   set_target_properties(nr_pdsch_gpu_fep_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_pdsch_gpu_fep_test pdsch_gpu)
+  add_executable(nr_gpu_slot_bench ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc)
+  target_include_directories(nr_gpu_slot_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
+  target_link_libraries(nr_gpu_slot_bench PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(nr_gpu_slot_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(nr_gpu_slot_bench pdsch_gpu)
   add_dependencies(nr-uesoftmodem pdsch_gpu)
-  # GPU DM-RS chest + QPSK LLR for the blind PDCCH CORESET-extent search (libpdcch_gpu.so, same
-  # NR_GPU_FEP=1 loader knob as pdsch_gpu above -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on
+  # GPU DM-RS chest + QPSK LLR for the blind PDCCH CORESET-extent search (libpdcch_gpu.so,
+  # independent ISAC_PDCCH_GPU_FEP=1 loader knob -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on
   # the CPU (nr_slot_fep), already shared across every extent candidate -- see that file's top
   # comment for why.
   add_executable(nr_gpu_budget_benchmark ${OPENAIR1_DIR}/PHY/TOOLS/tests/nr_gpu_budget_benchmark.cu)
@@ -138,6 +143,11 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(nr_pdcch_gpu_fep_test PRIVATE ${CMAKE_DL_LIBS})
   set_target_properties(nr_pdcch_gpu_fep_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_pdcch_gpu_fep_test pdcch_gpu)
+  add_executable(nr_pdcch_slot_bench ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdcch_slot_bench.cc)
+  target_include_directories(nr_pdcch_slot_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
+  target_link_libraries(nr_pdcch_slot_bench PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(nr_pdcch_slot_bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(nr_pdcch_slot_bench pdcch_gpu)
   add_dependencies(nr-uesoftmodem pdcch_gpu)
   # U4 CSI-RS ID/slot sweep; separate from U2's footprint module until orchestration merge.
   # Host mapping/validation services come from nr_csirs_disc_sweep.c in the executable.
