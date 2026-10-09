@@ -1407,7 +1407,7 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
   }
 }
 
-/* nr_ue_csi_rs_sensing_capture: sensing capture of a CSI-RS resource with no slot shift (slot_delta 0): thin wrapper of nr_ue_csi_rs_sensing_capture_shifted(). Caller: phy_procedures_nr_ue.c (the monitored CSI-RS of the slot). */
+/* nr_ue_csi_rs_sensing_capture: sensing capture of a CSI-RS resource with no slot shift (slot_delta 0): thin wrapper of nr_ue_csi_rs_sensing_capture_shifted(). No caller outside this file was found (the monitor path calls the shifted form). */
 void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
                                   const UE_nr_rxtx_proc_t *proc,
                                   const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
