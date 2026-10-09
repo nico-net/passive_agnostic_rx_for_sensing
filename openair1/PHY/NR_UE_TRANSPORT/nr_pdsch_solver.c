@@ -657,6 +657,12 @@ static void add_ev(solver_rnti_t *r, nr_dci_bits_t p, uint8_t S)
   else { memmove(r->ev_p, r->ev_p + 1, 15 * sizeof(r->ev_p[0])); memmove(r->ev_S, r->ev_S + 1, 15); r->ev_p[15] = p; r->ev_S[15] = S; }
 }
 
+static int has_id_p(const pending_t *p, int id)
+{
+  for (int i = 0; i < p->n_ids; i++)
+    if (p->ids[i] == id) return 1;
+  return 0;
+}
 static void make_cand(solver_rnti_t *r, const pending_t *p)
 {
   if (r->cand_bm == NULL) r->cand_bm = calloc(1, BM_BYTES);
@@ -693,6 +699,18 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     if (k <= 5 || (k % 100) == 0)
       LOG_A(PHY, "SENSING: PDSCH_SOLVER lost CRC pass #%llu (%s) token=0x%08x\n", (unsigned long long)k,
             p == NULL ? "pending entry gone" : "no credit", token);
+  }
+  { /* ISAC_PDSCH_SOLVER_PROBELOG=1 (T26d diagnostic): one line per credited search probe -- which hypothesis was tried */
+    static int s_pl = -1;
+    if (s_pl < 0) s_pl = getenv("ISAC_PDSCH_SOLVER_PROBELOG") ? atoi(getenv("ISAC_PDSCH_SOLVER_PROBELOG")) : 0;
+    if (s_pl && p != NULL && credit && p->phase == 0) {
+      int lo = 65535, hi = -1;
+      for (int i = 0; i < p->n_ids; i++) { if (p->ids[i] < lo) lo = p->ids[i]; if (p->ids[i] > hi) hi = p->ids[i]; }
+      const solver_rnti_t *rr = (p->slot >= 0 && p->slot < SOLVER_RNTIS) ? &g_r[p->slot] : NULL;
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER probe rnti=0x%04x key=%d crc=%d probe=%u S=%u add_pos=%u table=%u scr=%d n_ids=%d ids=%d..%d "
+                 "has1662=%d has1664=%d\n", rr ? rr->rnti : 0, rr ? rr->key : -1, (int)crc_ok, p->probe, p->S, p->add_pos, p->table,
+            p->scr, p->n_ids, lo, hi, has_id_p(p, 1662), has_id_p(p, 1664));
+    }
   }
   if (p == NULL || !credit) {
     if (p) p->used = false;

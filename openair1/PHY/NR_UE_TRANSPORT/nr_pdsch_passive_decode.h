@@ -143,6 +143,9 @@ typedef struct {
   float                br_snr_db[4];
   uint8_t              evm_nbrx;
   uint16_t             evm_nsym;
+  uint16_t             dmrs_ports;   ///< T26d diag: DM-RS port bitmap the decode used
+  uint8_t              n_cdm;        ///< T26d diag: CDM groups without data
+  uint8_t              dmrs_add;     ///< T26d diag: number of DM-RS symbols
 } nr_pdsch_passive_decode_result_t;
 
 /**

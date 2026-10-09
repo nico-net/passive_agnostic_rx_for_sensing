@@ -1654,7 +1654,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
    * the QAM thresholds h^H R^-1 h, i.e. IRC, with no change to the LLR code. All branches combine (mode-independent);
    * the whitened pair is rescaled so its combined power equals the original combined power of this mode's slice
    * (log2_maxh stays valid). Decision-directed: self-nulling at high symbol-error rates is the known risk. */
-  if (nl == 1 && nbRx >= 2 && nbRx <= 4 && nb_re_pdsch >= 48) {
+  if (nl >= 1 && nl <= 4 && nbRx >= 2 && nbRx <= 4 && nb_re_pdsch >= 48) {
     static int s_irc = -1;
     static double s_shrink = 0.3;
     if (s_irc < 0) {
@@ -1663,7 +1663,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
     const int s_irc_env = s_irc;
     if (nr_dlsch_irc_override >= 0) s_irc = nr_dlsch_irc_override; /* per-grant (ISAC_RX_MRC_PER_RNTI) */
-    if (s_irc) {
+    if (s_irc && (nl == 1 || s_irc == 4)) { /* N layers: only the DM-RS covariance (4) -- no data decisions */
       const int qm = dlsch->cw_info.qamModOrder;
       const int lmax = (1 << (qm / 2)) - 1;
       double ms = 0.0; int nlev = 0;
@@ -1679,7 +1679,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           if (a >= mrc_rx_index && a < mrc_rx_index + mrc_nb_rx) pslice += p2;
         }
       /* MRC decisions over all branches, symbol RMS scale */
-      double complex *xs = malloc(sizeof(double complex) * nb_re_pdsch);
+      double complex *xs = s_irc == 4 ? NULL : malloc(sizeof(double complex) * nb_re_pdsch);
       double pw = 0.0; uint32_t nv = 0;
       for (uint32_t i = 0; xs && i < nb_re_pdsch; i++) {
         double complex num = 0; double g = 0;
@@ -1690,9 +1690,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         xs[i] = g > 0 ? num / g : 0;
         if (g > 0) { pw += creal(xs[i]) * creal(xs[i]) + cimag(xs[i]) * cimag(xs[i]); nv++; }
       }
-      if (xs && nv >= 24 && pw > 0 && pall > 0) {
-        const double scale = sqrt(ideal_pow / (pw / nv));
-        for (uint32_t i = 0; i < nb_re_pdsch; i++) { /* sliced decision back in channel units */
+      if (((xs && nv >= 24 && pw > 0) || s_irc == 4) && pall > 0) {
+        const double scale = xs ? sqrt(ideal_pow / (pw / nv)) : 1.0;
+        for (uint32_t i = 0; xs && i < nb_re_pdsch; i++) { /* sliced decision back in channel units */
           double vi = creal(xs[i]) * scale, vq = cimag(xs[i]) * scale;
           double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
           si = si > lmax ? lmax : si < -lmax ? -lmax : si; sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
@@ -1706,7 +1706,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
            * (measured |alpha| ~0.5-0.85 < 1: the estimate is inflated by its own noise and its phase drifts), so the
            * residual does not carry (1-alpha) h s -- which made R see the signal and null it (self-nulling). */
           double complex alpha[4] = {1, 1, 1, 1};
-          if (s_irc >= 2)
+          if (s_irc == 2 || s_irc == 3)
             for (int a = 0; a < nb; a++) {
               double complex num = 0; double den = 0;
               for (uint32_t i = c0; i < c1; i++) {
@@ -1721,7 +1721,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 chFext[0][a][i].i = (int16_t)fmax(-32768.0, fmin(32767.0, lround(cimag(h2))));
               }
             }
-          for (uint32_t i = c0; i < c1; i++) {
+          for (uint32_t i = c0; xs && i < c1; i++) {
             double complex e[4];
             for (int a = 0; a < nb; a++)
               e[a] = (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) - (chFext[0][a][i].r + I * chFext[0][a][i].i) * xs[i];
@@ -1761,20 +1761,25 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
            * then scaled by resc (this mode's slice power / all-branch power) */
           const double nrm = sqrt(dmean) * resc;
           for (uint32_t i = c0; i < c1; i++) {
-            double complex vy[4], vh[4], zy[4], zh[4];
+            double complex vy[4], vh[4][4], zy[4], zh[4][4];
             for (int a = 0; a < nb; a++) {
               vy[a] = rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i;
-              vh[a] = chFext[0][a][i].r + I * chFext[0][a][i].i;
+              for (int l = 0; l < nl; l++) vh[l][a] = chFext[l][a][i].r + I * chFext[l][a][i].i;
             }
             for (int a = 0; a < nb; a++) {
-              double complex ty = vy[a], th = vh[a];
-              for (int k = 0; k < a; k++) { ty -= L[a][k] * zy[k]; th -= L[a][k] * zh[k]; }
-              zy[a] = ty / L[a][a]; zh[a] = th / L[a][a];
+              double complex ty = vy[a];
+              for (int k = 0; k < a; k++) ty -= L[a][k] * zy[k];
+              zy[a] = ty / L[a][a];
+              for (int l = 0; l < nl; l++) {
+                double complex th = vh[l][a];
+                for (int k = 0; k < a; k++) th -= L[a][k] * zh[l][k];
+                zh[l][a] = th / L[a][a];
+              }
             }
             for (int a = 0; a < nb; a++) {
               #define S16(v) ((int16_t)fmax(-32768.0, fmin(32767.0, lround(v))))
               rxdataF_ext[a][i].r = S16(creal(zy[a]) * nrm); rxdataF_ext[a][i].i = S16(cimag(zy[a]) * nrm);
-              chFext[0][a][i].r = S16(creal(zh[a]) * nrm); chFext[0][a][i].i = S16(cimag(zh[a]) * nrm);
+              for (int l = 0; l < nl; l++) { chFext[l][a][i].r = S16(creal(zh[l][a]) * nrm); chFext[l][a][i].i = S16(cimag(zh[l][a]) * nrm); }
               #undef S16
             }
           }

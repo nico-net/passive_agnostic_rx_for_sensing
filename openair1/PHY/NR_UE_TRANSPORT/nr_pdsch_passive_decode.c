@@ -2793,30 +2793,52 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
         const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * 12;
         float beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, false);
         const int16_t dmrs_scaling = (int16_t)((1 / beta) * (1 << 14));
-        for (int m = 0; m < fp->symbols_per_slot; m++) {
+        /* N layers (T26d): ports of CDM group 0/1 (type 1, single-symbol: port index < 4). On a comb RE of group g the
+         * LS product with the group's first port pilot is sum_{l in g} w_l h_l + n (w_l = +-1, FD-OCC), so the residual
+         * removes every layer of that group. */
+        const int nlay = cw->Nl;
+        int port[4], ok_ports = nlay >= 1 && nlay <= 4;
+        for (int l = 0; ok_ports && l < nlay; l++) {
+          port[l] = get_dmrs_port(l, dlsch_config->dmrs_ports);
+          if (port[l] < 0 || port[l] >= 4) ok_ports = 0;
+        }
+        for (int m = 0; ok_ports && m < fp->symbols_per_slot; m++) {
           if (!((dmrs_full >> m) & 1)) continue;
-          c16_t pilot[3280] __attribute__((aligned(16)));
+          c16_t pilot[4][3280] __attribute__((aligned(16)));
           const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch_config->dlDmrsScramblingId,
                                                dlsch_config->nscid, proc->nr_slot_rx, m);
-          nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot, 1000, 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
-          for (int k = 0; k < nrb * 12; k += 2) { /* CDM group 0 comb, delta 0 */
-            const c16_t pl = pilot[6 * rb_offset + k / 2];
-            double complex e[4];
-            for (int a = 0; a < nb; a++) {
-              const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
-              const double complex hls = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
-              const c16_t he = ((c16_t *)&pdsch_dl_ch_estimates[a][N * m])[k];
-              e[a] = hls - (he.r + I * he.i);
+          for (int l = 0; l < nlay; l++)
+            nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot[l], 1000 + port[l], 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
+          for (int cg = 0; cg < 2; cg++) {
+            int lref = -1;
+            for (int l = 0; l < nlay; l++)
+              if (port[l] / 2 == cg) { lref = l; break; }
+            if (lref < 0) continue;
+            for (int k = cg; k < nrb * 12; k += 2) {
+              const int pi = 6 * rb_offset + k / 2;
+              const c16_t pl = pilot[lref][pi];
+              double complex e[4];
+              for (int a = 0; a < nb; a++) {
+                const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
+                e[a] = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
+                for (int l = 0; l < nlay; l++) {
+                  if (port[l] / 2 != cg) continue;
+                  const c16_t pq = pilot[l][pi];
+                  const double w = ((double)pq.r * pl.r + (double)pq.i * pl.i) >= 0 ? 1.0 : -1.0; /* OCC sign vs ref */
+                  const c16_t he = ((c16_t *)&pdsch_dl_ch_estimates[l * nb + a][N * m])[k];
+                  e[a] -= w * (he.r + I * he.i);
+                }
+              }
+              const int g = k / 48;
+              for (int a = 0; a < nb; a++)
+                for (int b = 0; b < nb; b++) nr_irc_dmrs_cov.R[g][a][b] += e[a] * conj(e[b]);
+              nr_irc_dmrs_cov.n[g]++;
             }
-            const int g = k / 48;
-            for (int a = 0; a < nb; a++)
-              for (int b = 0; b < nb; b++) nr_irc_dmrs_cov.R[g][a][b] += e[a] * conj(e[b]);
-            nr_irc_dmrs_cov.n[g]++;
           }
         }
         nr_irc_dmrs_cov.ng = ng;
         nr_irc_dmrs_cov.nb = nb;
-        nr_irc_dmrs_cov.valid = 1;
+        nr_irc_dmrs_cov.valid = ok_ports;
       }
     }
   }
@@ -3800,6 +3822,9 @@ gpu_llr_ready:;
       }
       out->evm_nbrx = (uint8_t)ea->nbrx;
       out->evm_nsym = (uint16_t)ea->n_sym;
+      out->dmrs_ports = (uint16_t)dlsch_config->dmrs_ports;
+      out->n_cdm = (uint8_t)dlsch_config->n_dmrs_cdm_groups;
+      out->dmrs_add = (uint8_t)__builtin_popcount(dlsch_config->dlDmrsSymbPos);
       for (int a = 0; a < ea->nbrx && a < 4; a++)
         out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
     }
