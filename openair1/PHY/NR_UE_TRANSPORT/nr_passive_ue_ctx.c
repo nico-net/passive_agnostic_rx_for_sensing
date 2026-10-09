@@ -414,6 +414,9 @@ static void *run(void *unused)
   pthread_mutex_unlock(&ctx_lock);
   return NULL;
 }
+/* nr_ue_ctx_open: opens the UE context output file (ISAC_UECTX_PATH) and starts its writer: allocates the slot ring (at least two slots) and the per-UE table, initialises the sequence and the SIB1 values, and starts the worker thread.
+ *   Returns false when the context is already enabled, the path or capacity is invalid, an allocation fails, or the worker cannot start (everything is then released). Caller: executables/nr-uesoftmodem.c (passive start-up).
+ */
 bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_period_s)
 {
   if(!path || !*path || !ring_capacity || nr_ue_ctx_enabled()) return false;
