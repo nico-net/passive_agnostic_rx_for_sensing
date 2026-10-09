@@ -260,6 +260,10 @@ static const uint8_t kDensities[][3] = {{3, 0xFF, 0xFF}, {2, 0, 1}, {2, 0, 1},
 #define CSIRS_DETECT_MARGIN 3.0   /* a hit must beat the null MEDIAN by this factor */
 #define CSIRS_MIN_HITS      3
 
+/* nr_csirs_blind_enumerate: builds the candidate list of single-bit CSI-RS resources (rows, one-hot frequency domain, density, start symbol) for a carrier of n_rb RBs.
+ *   Loops over the supported rows and densities and every legal l0; a candidate spans the whole grid unless ISAC_CSIRS_BLIND_RB=start:nrb restricts it. ISAC_CSIRS_BLIND_ROWS selects rows (replay).
+ *   Returns the number of candidates written (at most max), or -1 on bad arguments. Caller: nr_csirs_blind_init() in this file; tests/nr_csirs_blind_synth_*.
+ */
 int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, uint16_t scramb_id)
 {
   if (out == NULL || max <= 0 || n_rb == 0) {
@@ -385,6 +389,9 @@ void nr_csirs_blind_pin(nr_csirs_blind_state_t *st, int idx, uint32_t budget)
   st->pin_left = budget;
 }
 
+/* nr_csirs_blind_seed: gives candidate idx a known period and offset (a seed schedule) and its slot delta, so that scoring visits it on the right slots.
+ *   Ignored for an invalid index, a zero period or an offset outside the period. Used by discovery (the seed of a hypothesis from the sweep) and by tests.
+ */
 void nr_csirs_blind_seed(nr_csirs_blind_state_t *st,
                          int idx,
                          uint16_t period,
@@ -399,6 +406,10 @@ void nr_csirs_blind_seed(nr_csirs_blind_state_t *st,
   st->cand[idx].slot_delta = slot_delta;
 }
 
+/* nr_csirs_blind_next: picks the next candidate to score from the search state, in a round-robin with a coprime stride so that every period phase is visited.
+ *   A pinned candidate is returned for its pin budget first; confirmed candidates leave the rotation; returns -1 when the confirmation capacity is full or nothing is left.
+ *   Caller: nr_csirs_blind_rt_slot() (both banks); tests.
+ */
 int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
 {
   if (st == NULL || st->n <= 0) {
@@ -680,10 +691,10 @@ static bool zp_phase_rejected(const nr_csirs_blind_state_t *st, int idx, uint16_
   return true; /* an unknown period has no checked phase evidence */
 }
 
-/* Record hit slot + test periodicity; on success add idx to the confirmed list. Shared by the NZP and
- * ZP feeds. A hit on a still-unpinned search pins the candidate: round-robin revisits it every n
- * slots, which is a FIXED phase of the period whenever n shares a factor with it, so the repeats a
- * lucky first hit needs might otherwise never be looked at. */
+/* record_hit: records one above-bar observation (hit) of candidate idx and tests whether the hits are periodic; on success adds it to the confirmed list (NZP) or to the ZP probation bank (zp).
+ *   Hits are kept per slot (up to 8). A confirmation needs CSIRS_MIN_HITS supporting slots on each phase of a period found from the seed or by nr_csirs_blind_infer_period2().
+ *   Also pins a first-hit candidate so that its repeats are visited. Discovery banks never confirm here. Callers: nr_csirs_blind_feed() (NZP) and the ZP feed (zp = true).
+ */
 static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot, bool structural, bool zp)
 {
   nr_csirs_zp_probation_t *bank = zp ? zp_bank(st, idx) : NULL;
@@ -789,8 +800,10 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   return true;
 }
 
-/* U5 seeds schedule observations, never dictate the exported period. Keep cumulative
- * phase evidence so an old contradiction cannot roll out and resurrect a 2P alias. */
+/* discovery_hit: hit handling for the discovery bank: accumulates per-period phase support and confirms the largest lattice that explains every hit.
+ *   Candidates with two phases (row-1 TRS) need adjacent phases; a second phase needs its own support. Confirmation capacity is NR_CSIRS_BLIND_DISC_MAX_CONF.
+ *   Caller: nr_csirs_blind_feed() when the state is a discovery bank.
+ */
 static bool discovery_hit(nr_csirs_blind_state_t *st, int idx, uint32_t slot)
 {
   if (st->seed_period[idx] && slot % st->seed_period[idx] != st->seed_offset[idx]
@@ -860,6 +873,10 @@ static bool discovery_hit(nr_csirs_blind_state_t *st, int idx, uint32_t slot)
   return false;
 }
 
+/* nr_csirs_blind_feed: feeds one correlation score z of candidate idx on this slot to the search. A score counts as a hit when it exceeds CSIRS_DETECT_MARGIN times the null median rho_null.
+ *   Keeps the best score and the number of tries per candidate. Hits go to discovery_hit() (discovery bank) or record_hit() (search bank). Returns true when the candidate was confirmed.
+ *   Caller: score_candidate() in nr_csirs_blind_rt.c; tests/nr_csirs_blind_rt_test_bridge.c.
+ */
 bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                          double rho, double rho_null)
 {

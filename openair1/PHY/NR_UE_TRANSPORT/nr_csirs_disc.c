@@ -28,6 +28,9 @@ extern void nr_csirs_monitor_remove_dynamic_all(void) __attribute__((weak));
 
 #define DISC_VIEWS 128
 static bool pipeline_ready=true;
+/* nr_csirs_disc_pipeline_ready: returns whether the CSI-RS discovery pipeline is usable (false after a failed GPU preallocation or discovery prepare).
+ *   Read by nr_csirs_disc_start() in nr_csirs_disc_feed.c (refuses to start when the pipeline is down).
+ */
 bool nr_csirs_disc_pipeline_ready(void) {return pipeline_ready;}
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -41,10 +44,16 @@ static uint64_t evidence_epoch=1;
  * of ordinary hypotheses; never transfer credit from the coarse extent. */
 static struct {nr_csirs_disc_hyp_t h; uint64_t written;} evidence_retry[16];
 static int evidence_retries;
+/* feature: returns true when the environment variable `name` is exactly "1" (feature flag reader for the ISAC_CSIRS_DISC_* switches).
+ *   Read on every batch; callers are nr_csirs_disc_process() (CUMULATIVE, TRS_PRIORITY).
+ */
 static bool feature(const char *name)
 {
   const char *s=getenv(name); return s && !strcmp(s,"1");
 }
+/* retry_refined: remembers a refined (extent-refined) hypothesis whose verification failed, so that the next batch re-verifies that exact geometry.
+ *   Keeps up to 16 entries (oldest overwritten); a duplicate of an entry already stored is ignored. Caller: nr_csirs_disc_process() (CUMULATIVE).
+ */
 static void retry_refined(const nr_csirs_disc_hyp_t *h, uint64_t written)
 {
   for (int i=0;i<evidence_retries;++i)
@@ -56,6 +65,9 @@ static struct {nr_csirs_disc_hyp_t h;uint16_t id;} qualified[256];
 static int qualified_count;
 static const int16_t *cache_grid;
 static uint64_t cache_written;
+/* same_seed: true when two hypotheses describe the same CSI-RS seed: same row, symbols, CDM, density, period and offset, with at least 80 % overlap of their RB extents.
+ *   Used for the sweep cache and for matching cumulative evidence. Pure function. Callers: cached(), cache_result(), nr_csirs_disc_process().
+ */
 static bool same_seed(const nr_csirs_disc_hyp_t *a, const nr_csirs_disc_hyp_t *b)
 {
   int lo=a->rb_start>b->rb_start?a->rb_start:b->rb_start;
@@ -64,6 +76,9 @@ static bool same_seed(const nr_csirs_disc_hyp_t *a, const nr_csirs_disc_hyp_t *b
       && a->cdm_type==b->cdm_type && a->density==b->density && a->period==b->period && a->offset==b->offset
       && a->rb_start < b->rb_start+b->n_rb && b->rb_start < a->rb_start+a->n_rb;
 }
+/* cached: true when this hypothesis's seed was already swept recently and need not be swept again (accepted, or rejected less than a delay ago).
+ *   The delay is max(3 x period, 2000) written samples. Caller: nr_csirs_disc_process() when building the hypothesis list.
+ */
 static bool cached(const nr_csirs_disc_hyp_t *h, uint64_t written)
 {
   for(int i=0;i<cache_count;++i) if(same_seed(h,&cache[i].h)) {
@@ -72,6 +87,9 @@ static bool cached(const nr_csirs_disc_hyp_t *h, uint64_t written)
   }
   return false;
 }
+/* cache_result: stores the outcome (accepted or not) of a swept seed in the 256-entry sweep cache, at the write position of the ring.
+ *   Overwrites an entry with the same seed if present. Caller: nr_csirs_disc_process().
+ */
 static void cache_result(const nr_csirs_disc_hyp_t *h, uint64_t written, bool accepted)
 {
   int at=-1;
@@ -80,6 +98,9 @@ static void cache_result(const nr_csirs_disc_hyp_t *h, uint64_t written, bool ac
   cache[at]=(sweep_cache_t){*h,written,accepted};
 }
 
+/* same_extent: true when two footprints cover the same RB extent (overlap of at least 80 % of the larger one).
+ *   Used to merge footprints of different symbol masks into union views. Caller: nr_csirs_disc_process().
+ */
 static bool same_extent(const nr_csirs_disc_fp_t *a,const nr_csirs_disc_fp_t *b)
 {
   int lo=a->rb_start>b->rb_start?a->rb_start:b->rb_start;
@@ -87,6 +108,7 @@ static bool same_extent(const nr_csirs_disc_fp_t *a,const nr_csirs_disc_fp_t *b)
   return hi>lo && 5*(hi-lo)>=4*(a->n_rb>b->n_rb?a->n_rb:b->n_rb);
 }
 
+/* now_us: returns CLOCK_MONOTONIC time in microseconds (batch timing for the discovery metrics). */
 static uint64_t now_us(void)
 {
   struct timespec ts;
@@ -94,11 +116,15 @@ static uint64_t now_us(void)
   return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
+/* cpu_us: returns the calling thread's CPU time in microseconds (CPU-cost metrics of a discovery batch). */
 static uint64_t cpu_us(void)
 {
   struct timespec t;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);return (uint64_t)t.tv_sec*1000000+t.tv_nsec/1000;
 }
 
+/* sweep_limit: returns ISAC_CSIRS_DISC_SWEEP_HYPS (default 32, max NR_CSIRS_DISC_MAX_HYP): the number of hypotheses swept per batch.
+ *   Invalid values fall back to 32. Caller: nr_csirs_disc_process().
+ */
 static int sweep_limit(void)
 {
   const char *s = getenv("ISAC_CSIRS_DISC_SWEEP_HYPS");
@@ -106,6 +132,9 @@ static int sweep_limit(void)
   return value > 0 && value <= NR_CSIRS_DISC_MAX_HYP ? (int)value : 32;
 }
 
+/* delta_limit: returns ISAC_CSIRS_DISC_DELTA_MAX (default 1): the largest slot-delta searched by the sweep, clipped to the slots per frame.
+ *   Caller: nr_csirs_disc_process() (sweep configuration).
+ */
 static int delta_limit(const nr_csirs_disc_ring_t *ring)
 {
   const char *s = getenv("ISAC_CSIRS_DISC_DELTA_MAX");
@@ -113,6 +142,10 @@ static int delta_limit(const nr_csirs_disc_ring_t *ring)
   return value > 0 && value <= ring->slots_per_frame ? (int)value : 1;
 }
 
+/* epoch_listener: configuration-epoch listener: clears the sweep cache, evidence and the ring, and withdraws discovered CSI-RS resources unless the epoch was a soft RX recovery.
+ *   Runs under pipeline_lock. A soft RX recovery keeps the monitor exports (cell configuration), a full reconfiguration removes them via nr_csirs_blind_rt_discovery_reset() and nr_csirs_monitor_remove_dynamic_all().
+ *   Registered by init_once() through nr_cfg_epoch_subscribe().
+ */
 static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
 {
   const bool rx_recovery = snapshot->last_class == NR_EPOCH_SOFT
@@ -135,6 +168,9 @@ static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
   pthread_mutex_unlock(&pipeline_lock);
 }
 
+/* init_once: one-time setup run through pthread_once from nr_csirs_disc_pipeline_init(): initialises the search lock, loads the GPU ops, warms the hypothesis builder and installs the processing hook.
+ *   Subscribes epoch_listener() to configuration epochs when the epoch service is present.
+ */
 static void init_once(void)
 {
   if(nr_csirs_blind_rt_discovery_init) nr_csirs_blind_rt_discovery_init();
@@ -146,6 +182,9 @@ static void init_once(void)
     nr_cfg_epoch_subscribe(epoch_listener);
 }
 
+/* nr_csirs_disc_pipeline_init: prepares the discovery pipeline for a carrier: runs init_once(), preallocates the GPU ring and buffers for the frame parameters, and runs the discovery prepare of the search.
+ *   On failure sets pipeline_ready = false and disables discovery. Enabled only when ISAC_CSIRS_DISC is on. Caller: nr_csirs_disc_start() in nr_csirs_disc_feed.c.
+ */
 void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
 {
   if (nr_csirs_disc_enabled()) {
@@ -164,6 +203,11 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
   }
 }
 
+/* nr_csirs_disc_process: one discovery batch on a snapshot of the IQ ring: detects footprints, builds hypotheses, sweeps them (GPU or CPU), gates the winners, refines and verifies them, and admits the survivors to the CSI-RS search.
+ *   Steps: footprints (nr_csirs_disc_detect_candidates) -> union views -> hypotheses (cache and confirmed-skip filters, ISAC_CSIRS_DISC_CUMULATIVE/_TRS_PRIORITY) -> sweep -> per-footprint best -> gate -> refine -> verify -> nr_csirs_blind_rt_add_discovered().
+ *   Flags: ISAC_CSIRS_DISC_DIAG, ISAC_CSIRS_DISC_SWEEP_HYPS, ISAC_CSIRS_DISC_DELTA_MAX, ISAC_CSIRS_DISC_CUMULATIVE, ISAC_CSIRS_DISC_TRS_PRIORITY. Logs WINNER, AMBIGUOUS and BATCH lines.
+ *   Takes pipeline_lock for the batch and g_lock for the metrics. Caller: the discovery worker through nr_csirs_disc_process_hook (nr_csirs_disc_feed.c); tests.
+ */
 void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
 {
   if (!ring || !nr_csirs_disc_enabled())
@@ -510,6 +554,9 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   pthread_mutex_unlock(&pipeline_lock);
 }
 
+/* nr_csirs_disc_get_metrics: copies the discovery pipeline metrics (batches, footprints, hypotheses, winners, CPU and GPU times, feed drops) into *out.
+ *   Takes g_lock. Callers: nr_passive_metrics.c (metrics emission) and tests.
+ */
 void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *out)
 {
   if (!out)
