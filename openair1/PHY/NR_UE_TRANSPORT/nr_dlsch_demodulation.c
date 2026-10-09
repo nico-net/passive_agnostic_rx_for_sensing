@@ -55,6 +55,7 @@ __thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pds
 __thread int nr_pdsch_ldpc_iters_override = -1; /* T26d ISAC_LDPC_ITERS_AB (set by the PDSCH queue, read by the passive decode) */
 __thread bool nr_pdsch_decode_wide_mrc; /* CRC-validated passive recovery only */
 __thread int nr_dlsch_eq_override = -1; /* T26d ISAC_RX_EQ_AB: multi-layer equaliser per grant, 0 fixed MMSE, 1 float MMSE, 2 ML (nl 2, Qm<=6) */
+__thread int nr_dlsch_qam_mode_override = -1; /* QAM-FIX: per-decode ISAC_PDSCH_MMSE_MODE (-1 = env), set by the passive decode A/B */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
 /* DECODE-FIX: compare the diagnostic float ZF's QPSK signs with the actual
  * fixed-point soft path. The EVM measurement precedes channel compensation. */
@@ -153,16 +154,11 @@ static bool overlap_csi_symbol(fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu, int
   return false;
 }
 
-uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol)
+/* 12-bit RE map of one CSI-RS resource inside an RB that carries it (no density / RB-range test). */
+static uint32_t csi_resource_re_map(const fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu)
 {
-  // LS 16 bits for even RBs, MS 16 bits for odd RBs
-  uint32_t csi_res_bitmap = 0;
   int num_k[18] = {1, 1, 1, 1, 1, 4, 2, 2, 6, 3, 4, 4, 3, 3, 3, 4, 4, 4};
-  for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
-    fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &dlsch_config->csiRsForRateMatching[i];
-
-    if (!overlap_csi_symbol(csi_pdu, symbol))
-      continue;
+  {
 
     int num_kp = 1;
     int mult = 1;
@@ -204,12 +200,55 @@ uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_
                   num_k[csi_pdu->row - 1],
                   csi_pdu->freq_domain);
     }
+    return temp_res_map;
+  }
+}
+
+uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol)
+{
+  // LS 16 bits for even RBs, MS 16 bits for odd RBs
+  uint32_t csi_res_bitmap = 0;
+  for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
+    fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &dlsch_config->csiRsForRateMatching[i];
+    if (!overlap_csi_symbol(csi_pdu, symbol))
+      continue;
+    const uint32_t temp_res_map = csi_resource_re_map(csi_pdu);
     if (csi_pdu->freq_density < 2)
       csi_res_bitmap |= (temp_res_map << (16 * csi_pdu->freq_density));
     else
       csi_res_bitmap |= (temp_res_map + (temp_res_map << 16));
   }
   return csi_res_bitmap;
+}
+
+/* LOW-MCS FIX ISAC_PDSCH_CSI_RB_EXTENT=1 (default off = the bitmap above applied to EVERY allocated RB).
+ * TS 38.211 7.4.1.5.3: a CSI-RS resource occupies only the RBs of its CSI-FrequencyOccupation
+ * (startingRB / nrofRBs, FAPI start_rb / nr_of_rbs relative to CRB 0) with RB parity per its density;
+ * TS 38.214 5.1.4.1 rate-matches the PDSCH around those REs only. The legacy bitmap dropped REs in every
+ * allocated RB, e.g. a 52-RB TRS (RB 0-51) removed 12 REs/RB from RB 52-175 of a 176-RB grant: G and the
+ * extraction stayed consistent with each other but not with the gNB's mapping -> CRC 0/83 at the serving
+ * cell's TRS occasions OTA. Returns the 12-bit excluded-RE map of common RB `crb` on `symbol`. */
+__thread int nr_dlsch_csi_extent_override = -1; /* per-decode A/B (ISAC_PDSCH_CSI_EXTENT_AB), -1 = env */
+int nr_dlsch_csi_rb_extent(void)
+{
+  static int s = -1;
+  if (s < 0) s = getenv("ISAC_PDSCH_CSI_RB_EXTENT") && atoi(getenv("ISAC_PDSCH_CSI_RB_EXTENT")) ? 1 : 0;
+  return nr_dlsch_csi_extent_override >= 0 ? nr_dlsch_csi_extent_override : s;
+}
+uint32_t nr_dlsch_csi_rb_mask(const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol, int crb)
+{
+  uint32_t m = 0;
+  for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &dlsch_config->csiRsForRateMatching[i];
+    if (!overlap_csi_symbol((fapi_nr_dl_config_csirs_pdu_rel15_t *)csi_pdu, symbol))
+      continue;
+    if (nr_dlsch_csi_rb_extent() && (crb < csi_pdu->start_rb || crb >= csi_pdu->start_rb + csi_pdu->nr_of_rbs))
+      continue;
+    if (csi_pdu->freq_density < 2 && (crb & 1) != csi_pdu->freq_density)
+      continue;
+    m |= csi_resource_re_map(csi_pdu);
+  }
+  return m;
 }
 
 //==============================================================================================
@@ -264,7 +303,8 @@ uint32_t nr_dlsch_csi_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config
     const int even = __builtin_popcount(csi & 0xfff), odd = __builtin_popcount((csi >> 16) & 0xfff);
     for (int rb = 0; rb < dlsch_config->BWPSize; rb++) {
       if ((freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 1)
-        n += ((rb + dlsch_config->BWPStart) & 1) ? odd : even;
+        n += nr_dlsch_csi_rb_extent() ? __builtin_popcount(nr_dlsch_csi_rb_mask(dlsch_config, m, rb + dlsch_config->BWPStart))
+                                      : ((rb + dlsch_config->BWPStart) & 1) ? odd : even;
     }
   }
   return n;
@@ -362,6 +402,8 @@ static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
           int k = start_re;
           for (int rb = start_rb; rb < start_rb + nb_rb; rb++) {
             uint32_t overlap_map = rb % 2 ?  dmrs_csi_overlap_odd : dmrs_csi_overlap_even;
+            if (csi_res_bitmap && nr_dlsch_csi_rb_extent())
+              overlap_map = dmrs_rb_bitmap | nr_dlsch_csi_rb_mask(dlsch_config, symbol, rb);
             overlap_map |= nr_ssb_rm_excluded(ssb_rm, symbol, rb - dlsch_config->BWPStart);
             for (int re = 0; re < NR_NB_SC_PER_RB; re++) {
               if (((overlap_map >> re) & 0x01) == 0) {
@@ -383,7 +425,9 @@ static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
     if (ssb_rm) {
       /* Pack across allocation blocks as well as within each block. */
       for (int rb = start_rb; rb < start_rb + nb_rb; ++rb) {
-        uint32_t excluded = (rb % 2 ? dmrs_csi_overlap_odd : dmrs_csi_overlap_even)
+        uint32_t excluded = ((csi_res_bitmap && nr_dlsch_csi_rb_extent())
+                                 ? (dmrs_rb_bitmap | nr_dlsch_csi_rb_mask(dlsch_config, symbol, rb))
+                                 : (rb % 2 ? dmrs_csi_overlap_odd : dmrs_csi_overlap_even))
                           | nr_ssb_rm_excluded(ssb_rm, symbol, rb - dlsch_config->BWPStart);
         offset += 12 - __builtin_popcount(excluded);
       }
@@ -677,7 +721,8 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
                           unsigned char mod_order,
                           int shift,
                           int length,
-                          uint32_t noise_var)
+                          uint32_t noise_var,
+                          int qam_mode)
 {
   uint32_t nb_rb_0 = (length + 11) / 12;
   c16_t determ_fin[12 * nb_rb_0] __attribute__((aligned(32)));
@@ -718,6 +763,73 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
         conjH_H_128i++;
       }
     }
+  }
+
+  /* QAM-FIX ISAC_PDSCH_MMSE_MODE=2: unbiased ZF per RE with PER-LAYER soft scale.
+   * x_l = [G^-1 H^H y]_l is unit gain (E[x_l | x] = x_l, no MMSE shrinkage), its noise variance is
+   * sigma^2 [G^-1]_ll, so the max-log LLR of layer l scales with w_l = 1/[G^-1]_ll (post-ZF SNR of
+   * that layer). Output z_l = w_l x_l and thresholds w_l * n1/n2/n3 per layer (dl_ch_mag[l]), the
+   * same form nr_channel_compensation() gives one layer (z = |h|^2 x, mag = |h|^2 n1). G and H^H y
+   * carry the same 2^-shift, so x_l is in constellation units and w_l in the 1-layer |h|^2 units. */
+  if (qam_mode == 2) {
+    const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
+    const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
+    const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
+    for (int i = 0; i < length; i++) {
+      double complex M[4][9]; /* [G | b | I] */
+      const int nc = 2 * nl + 1;
+      for (int r = 0; r < nl; r++) {
+        for (int c = 0; c < nl; c++) {
+          const c16_t g = conjH_H_elements[0][c][r][i]; /* (H^H H)[r][c] is stored at [c][r] */
+          M[r][c] = (double)g.r + I * (double)g.i;
+          M[r][nl + 1 + c] = (r == c) ? 1.0 : 0.0;
+        }
+        M[r][nl] = (double)rxdataF_comp[r][i].r + I * (double)rxdataF_comp[r][i].i;
+      }
+      bool singular = false;
+      for (int k = 0; k < nl && !singular; k++) {
+        int piv = k;
+        for (int r = k + 1; r < nl; r++)
+          if (cabs(M[r][k]) > cabs(M[piv][k]))
+            piv = r;
+        if (cabs(M[piv][k]) < 1e-9) {
+          singular = true;
+          break;
+        }
+        if (piv != k)
+          for (int c = 0; c < nc; c++) {
+            const double complex t = M[k][c];
+            M[k][c] = M[piv][c];
+            M[piv][c] = t;
+          }
+        const double complex inv = 1.0 / M[k][k];
+        for (int c = 0; c < nc; c++)
+          M[k][c] *= inv;
+        for (int r = 0; r < nl; r++) {
+          if (r == k)
+            continue;
+          const double complex f = M[r][k];
+          if (f == 0.0)
+            continue;
+          for (int c = 0; c < nc; c++)
+            M[r][c] -= f * M[k][c];
+        }
+      }
+      for (int r = 0; r < nl; r++) {
+        const double dinv = singular ? 0.0 : creal(M[r][nl + 1 + r]);
+        const double w = dinv > 1e-12 ? 1.0 / dinv : 0.0;
+        const double complex o = w > 0.0 ? M[r][nl] * w : 0.0;
+#define QF_S16(v) ((int16_t)((v) > 32767.0 ? 32767 : (v) < -32768.0 ? -32768 : lround(v)))
+        rxdataF_comp[r][i].r = QF_S16(creal(o));
+        rxdataF_comp[r][i].i = QF_S16(cimag(o));
+        const double ma = w * qa / 32768.0, mb = w * qb / 32768.0, mr = w * qr / 32768.0;
+        dl_ch_mag[r][i].r = dl_ch_mag[r][i].i = QF_S16(ma);
+        dl_ch_magb[r][i].r = dl_ch_magb[r][i].i = QF_S16(mb);
+        dl_ch_magr[r][i].r = dl_ch_magr[r][i].i = QF_S16(mr);
+#undef QF_S16
+      }
+    }
+    return;
   }
 
   /* ISAC_MMSE_FLOAT=1 (default off = stock fixed-point path): solve (H^H H + nvar I) x = H^H y
@@ -956,14 +1068,16 @@ static void nr_dlsch_layer_demapping(const uint8_t Nl,
 static int nr_dlsch_llr(const NR_UE_DLSCH_t *dlsch,
                         const int len,
                         const int pdsch_buf_size_max,
-                        const c16_t dl_ch_mag[pdsch_buf_size_max],
-                        const c16_t dl_ch_magb[pdsch_buf_size_max],
-                        const c16_t dl_ch_magr[pdsch_buf_size_max],
+                        const c16_t dl_ch_mag_l[][pdsch_buf_size_max],
+                        const c16_t dl_ch_magb_l[][pdsch_buf_size_max],
+                        const c16_t dl_ch_magr_l[][pdsch_buf_size_max],
+                        const bool mag_per_layer, /* QAM-FIX mode 2: thresholds per layer, else layer 0's for all */
                         const int nb_antennas_rx,
                         const c16_t rxdataF_comp[dlsch->cw_info.Nl][pdsch_buf_size_max],
                         const int llrSize,
                         int16_t layer_llr[dlsch->cw_info.Nl][llrSize])
 {
+#define MAG_L(a, l) ((a)[mag_per_layer ? (l) : 0])
   switch (dlsch->cw_info.qamModOrder) {
     case 2 :
       for (int l = 0; l < dlsch->cw_info.Nl; l++)
@@ -972,18 +1086,19 @@ static int nr_dlsch_llr(const NR_UE_DLSCH_t *dlsch,
 
     case 4 :
       for (int l = 0; l < dlsch->cw_info.Nl; l++)
-        nr_16qam_llr(rxdataF_comp[l], dl_ch_mag, layer_llr[l], len);
+        nr_16qam_llr(rxdataF_comp[l], MAG_L(dl_ch_mag_l, l), layer_llr[l], len);
       break;
 
     case 6 :
       for(int l=0; l < dlsch->cw_info.Nl; l++)
-        nr_64qam_llr(rxdataF_comp[l], dl_ch_mag, dl_ch_magb, layer_llr[l], len);
+        nr_64qam_llr(rxdataF_comp[l], MAG_L(dl_ch_mag_l, l), MAG_L(dl_ch_magb_l, l), layer_llr[l], len);
       break;
 
     case 8:
       for(int l=0; l < dlsch->cw_info.Nl; l++)
-        nr_256qam_llr(rxdataF_comp[l], dl_ch_mag, dl_ch_magb, dl_ch_magr, layer_llr[l], len);
+        nr_256qam_llr(rxdataF_comp[l], MAG_L(dl_ch_mag_l, l), MAG_L(dl_ch_magb_l, l), MAG_L(dl_ch_magr_l, l), layer_llr[l], len);
       break;
+#undef MAG_L
 
     default:
       AssertFatal(false, "Unknown mod_order!!!!\n");
@@ -1102,6 +1217,22 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     else if (s_ml) do_ml = true;
   }
   if (rho_dl == NULL) do_ml = false; /* no inter-layer correlation buffer (passive decode allocates it on request) */
+  /* QAM-FIX ISAC_PDSCH_MMSE_MODE (multi-layer MMSE path only; default 0 = stock):
+   *   0 stock fixed-point MMSE: adj(G + nvar/8 I) H^H y against det(G + nvar/8 I) thresholds (biased for QAM)
+   *   1 fixed-point ZF: same adjugate arithmetic without the diagonal loading (unbiased: z = det(G) x)
+   *   2 float ZF with per-layer soft scale (see nr_dlsch_mmse) */
+  int qam_mode = 0;
+  {
+    static int s_qm = -1;
+    if (s_qm < 0) s_qm = getenv("ISAC_PDSCH_MMSE_MODE") ? atoi(getenv("ISAC_PDSCH_MMSE_MODE")) : 0;
+    qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
+    if (qam_mode < 0 || qam_mode > 2) qam_mode = 0;
+    /* Measured (QAMFIX.md): at 3-4 layers ZF noise enhancement costs low-SNR QPSK (16 -> 9 of 227 paired) and
+     * the fixed-point ZF determinant underflows (kappa 0); keep the stock MMSE there. QAM at any rank and 2-layer
+     * QPSK (1046 -> 1079 of 2110 paired) use the selected mode. */
+    if (nl >= 3 && (qam_mode == 1 || dlsch->cw_info.qamModOrder == 2)) qam_mode = 0;
+    if (nr_dlsch_eq_override == 1) qam_mode = 0; /* the ISAC_RX_EQ_AB float arm keeps its own path */
+  }
 
   // Reinterpret flat dl_ch_estimates_ext as [nl][nbRx][rx_size_symbol]
   c16_t(*chFext)[nbRx][rx_size_symbol] = (void *)dl_ch_estimates_ext;
@@ -1200,7 +1331,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     int end = freq_alloc->last_rb + 1;
     for (int rb = start; rb < end; rb++) {
       if ((freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 0x01)
-        csi_re_count += (rb % 2 == 0) ? count_even : count_odd;
+        csi_re_count += nr_dlsch_csi_rb_extent() ? __builtin_popcount(nr_dlsch_csi_rb_mask(dlsch_config, symbol, rb))
+                                                 : (rb % 2 == 0) ? count_even : count_odd;
     }
     nb_re_pdsch = (nb_re_pdsch > csi_re_count) ? (nb_re_pdsch - csi_re_count) : 0;
     if (csi_re_count > 0) {
@@ -1888,6 +2020,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
           ea->err += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
           ea->ref += ideal_pow;
+          ea->err_layer[l] += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+          ea->ref_layer[l] += ideal_pow;
+          if (symbol < 14) {
+            const double e2 = (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+            ea->err_sym[symbol] += e2;
+            ea->ref_sym[symbol] += ideal_pow;
+            ea->err_k[symbol][i % 12] += (float)(e2 / ideal_pow);
+            ea->n_k[symbol][i % 12]++;
+          }
           qr[l] += vi * si + vq * sq; qi[l] += vq * si - vi * sq; qd[l] += si * si + sq * sq; qx[l] += vi * vi + vq * vq;
           sr[l] = si / scale[l]; sq_[l] = sq / scale[l]; /* back in the channel's own units: one alpha per branch */
         }
@@ -2075,7 +2216,25 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                     qamModOrder,
                     *log2_maxh,
                     nb_re_pdsch,
-                    nvar);
+                    qam_mode == 0 ? nvar : 0, /* modes 1/2: unbiased ZF, no diagonal loading */
+                    qam_mode);
+      /* QAM-FIX diagnostic: amplitude ratio of the multi-layer soft output against its own thresholds.
+       * For an unbiased equaliser E|Re z| = mag (n1 = mean |x| per dimension of 16/64/256QAM), so
+       * kappa ~ 1 at high SNR; a shrunk (biased) output reads kappa < 1. Logged by EVMGRANT. */
+      if (nr_pdsch_evm_acc.armed && qamModOrder > 2 && nb_re_pdsch >= 24) {
+        for (int l = 0; l < nl; l++) {
+          const c16_t *z = rxdataF_comp[symbol][l], *ma = dl_ch_mag[symbol][qam_mode == 2 ? l : 0];
+          double sz = 0.0, sm = 0.0;
+          for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+            sz += abs(z[i].r) + abs(z[i].i);
+            sm += 2.0 * ma[i].r;
+          }
+          if (sm > 0.0) {
+            nr_pdsch_evm_acc.kappa_sum += sz / sm;
+            nr_pdsch_evm_acc.kappa_n++;
+          }
+        }
+      }
     } else if ((nl == 2) && (qamModOrder > 6) && do_ml) {
       nr_mmse_2layers(p_rxComp,
                       rx_size_symbol,
@@ -2205,9 +2364,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         nr_dlsch_llr(dlsch,
                      dl_valid_re[llr_sym],
                      pdsch_buf_size_max,
-                     dl_ch_mag[llr_sym][0],
-                     dl_ch_magb[llr_sym][0],
-                     dl_ch_magr[llr_sym][0],
+                     dl_ch_mag[llr_sym],
+                     dl_ch_magb[llr_sym],
+                     dl_ch_magr[llr_sym],
+                     qam_mode == 2 && nl >= 2,
                      nbRx,
                      rxdataF_comp[llr_sym],
                      llr_per_symbol,

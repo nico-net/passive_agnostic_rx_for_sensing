@@ -3182,6 +3182,14 @@ if(ENABLE_TESTS)
   add_dependencies(test_nr_ssb_rate_match_prod dfts) # the decoder's FEP loads libdfts at run time
   add_dependencies(tests test_nr_ssb_rate_match_prod)
   add_test(NAME test_nr_ssb_rate_match_prod COMMAND ./test_nr_ssb_rate_match_prod)
+  # CSI-RS rate-matching RB extent (TS 38.211 7.4.1.5.3), production nr_dlsch_csi_rb_mask()/nr_dlsch_csi_unav_res().
+  add_executable(test_nr_csi_rb_extent ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c)
+  target_link_libraries(test_nr_csi_rb_extent PRIVATE
+    -Wl,--start-group PHY_NR_UE PHY_NR_COMMON PHY_COMMON nr_phy_common nr_common nr_pdcch_blind_monitor NR_UE_ISAC
+    SCHED_NR_UE_LIB MAC_NR_COMMON CONFIG_LIB shlib_loader UTIL ds -Wl,--end-group
+    ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  add_dependencies(tests test_nr_csi_rb_extent)
+  add_test(NAME test_nr_csi_rb_extent COMMAND ./test_nr_csi_rb_extent)
   add_executable(test_nr_pdcch_al1_map ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_al1_map_test.cc
                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c)
   target_include_directories(test_nr_pdcch_al1_map PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
