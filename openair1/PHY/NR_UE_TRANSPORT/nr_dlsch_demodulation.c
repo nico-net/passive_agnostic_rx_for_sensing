@@ -1287,6 +1287,19 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         t_mrc_rx_index = 0;
         avgs = avg[0];
       } else if (t_mrc_mode == 1) {
+        /* ISAC_RX_BEST_BY_SNR=1 (T26d): pick the branch with the best |h|^2 / chest noise, not the highest |h|^2 --
+         * a noisy branch has a large |h|^2 estimate (noise included) and was being selected, which also shows up as
+         * a QAM amplitude ratio kappa << 1 (signal part of h* y small against the noise-inflated |h|^2). */
+        static int s_bsnr = -1;
+        if (s_bsnr < 0) s_bsnr = getenv("ISAC_RX_BEST_BY_SNR") && atoi(getenv("ISAC_RX_BEST_BY_SNR")) ? 1 : 0;
+        if (s_bsnr) {
+          double bq = -1.0;
+          for (int aarx = 0; aarx < nbRx && aarx < 4; aarx++) {
+            const double nv = nr_dl_chest_nvar_ant[aarx] > 0 ? (double)nr_dl_chest_nvar_ant[aarx] : 1.0;
+            const double q = (double)avg[aarx] / nv;
+            if (q > bq) { bq = q; best = aarx; }
+          }
+        }
         t_mrc_nb_rx = 1;
         t_mrc_rx_index = best;
         avgs = avg[best];
