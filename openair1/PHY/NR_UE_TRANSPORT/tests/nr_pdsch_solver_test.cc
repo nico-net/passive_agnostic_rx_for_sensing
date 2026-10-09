@@ -1,7 +1,9 @@
 // T26b grant solver (nr_pdsch_solver.c): spec helpers and the search -> candidate -> solved state machine against a
 // simulated cell whose CRC oracle passes only the true (reading, S per TDA index, add_pos, table).
 #include <cstdlib>
+#include <atomic>
 #include <random>
+#include <thread>
 #include <vector>
 #include <gtest/gtest.h>
 extern "C" {
@@ -70,6 +72,95 @@ int RunCell(const Cell &c, uint16_t rnti, int false_pass_at, int max_grants, std
   return -1;
 }
 } // namespace
+
+TEST(PdschSolver, ConcurrentScanConsumersKeepTheirOwnGrantContext)
+{
+  setenv("ISAC_PDSCH_SOLVER_THREAD_CTX", "1", 1);
+  setenv("ISAC_PDSCH_SOLVER_SCR", "1", 1);
+  nr_pdsch_solver_reset();
+  std::atomic<int> ready{0};
+  std::atomic<bool> go{false};
+  struct Result { int n; bool own_scr; } result[2] = {};
+  auto work = [&](int k) {
+    const uint16_t id = (uint16_t)(249 + k * 166);
+    const uint16_t layout = (uint16_t)(10 + k);
+    nr_pdsch_solver_reading_t rd = {&layout, 1, 16, 1, 1, 2};
+    nr_dci_bits_t p = {{(uint64_t)(42 + k), 0, 0}};
+    nr_pdsch_solver_set_now((uint64_t)(100 + k));
+    nr_pdsch_solver_set_alt_scr(1000 + k, &id, 1, true);
+    ready.fetch_add(1);
+    while (!go.load()) std::this_thread::yield();
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan((uint16_t)(0x1100 + k), p, 49, 2, 2, &rd, 1, 8, v);
+    bool own = n > 0;
+    for (int i = 0; i < n; i++) {
+      own &= v[i].scr == id;
+      nr_pdsch_solver_feedback(v[i].token, false, true);
+    }
+    result[k] = {n, own};
+  };
+  std::thread a(work, 0), b(work, 1);
+  while (ready.load() != 2) std::this_thread::yield();
+  go.store(true);
+  a.join(); b.join();
+  EXPECT_GT(result[0].n, 0);
+  EXPECT_GT(result[1].n, 0);
+  EXPECT_TRUE(result[0].own_scr);
+  EXPECT_TRUE(result[1].own_scr);
+}
+
+TEST(PdschSolver, OneLayerQpskReadingsGetFirstProbesAndBoundedFallback)
+{
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "3", 1);
+  nr_pdsch_solver_reset();
+  uint16_t two_ids[] = {1, 2}, one_ids[] = {3, 4};
+  nr_pdsch_solver_reading_t rd[] = {
+      {two_ids, 2, 16, 0x3, 2, 2}, {one_ids, 2, 16, 0x1, 1, 9}};
+  nr_dci_bits_t p = {{42, 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  int n = nr_pdsch_solver_plan(0x1111, p, 49, 2, 2, rd, 2, 8, v);
+  ASSERT_GT(n, 0);
+  for (int i = 0; i < n; i++) {
+    EXPECT_EQ(v[i].reading, 1);
+    int qm, r2;
+    ASSERT_TRUE(nr_pdsch_solver_mcs_qr(v[i].table, rd[1].mcs, &qm, &r2));
+    EXPECT_EQ(qm, 2);
+    nr_pdsch_solver_feedback(v[i].token, false, true);
+  }
+  rd[1].n_layers = 2;
+  EXPECT_EQ(nr_pdsch_solver_plan(0x2222, p, 49, 2, 2, rd, 2, 8, v), 0);
+  EXPECT_EQ(nr_pdsch_solver_plan(0x2222, p, 49, 2, 2, rd, 2, 8, v), 0);
+  n = nr_pdsch_solver_plan(0x2222, p, 49, 2, 2, rd, 2, 8, v);
+  EXPECT_GT(n, 0);
+  for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  nr_pdsch_solver_reset();
+}
+
+TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
+{
+  setenv("ISAC_PDSCH_SOLVER_NL_PREF", "3", 1);
+  nr_pdsch_solver_reset();
+  const uint16_t layout = 42;
+  nr_pdsch_solver_reading_t rd = {&layout, 1, 16, 1, 1, 2};
+  bool first = false, second = false;
+  for (int g = 0; g < 12 && !second; g++) {
+    nr_dci_bits_t p = {{(uint64_t)(100 + g), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x3344, p, 49, 2, 2, &rd, 1, 8, v);
+    for (int i = 0; i < n; i++) {
+      const bool ok = v[i].S == 1 && v[i].add_pos == 1
+                      && ((!first && v[i].table == 1) || (first && !second && g > 0 && v[i].table == 0));
+      nr_pdsch_solver_feedback(v[i].token, ok, true);
+      if (ok) { if (!first) first = true; else second = true; }
+    }
+  }
+  EXPECT_TRUE(first);
+  EXPECT_TRUE(second);
+  EXPECT_EQ(nr_pdsch_solver_rep(0x3344), -1);
+  unsetenv("ISAC_PDSCH_SOLVER_NL_PREF");
+  nr_pdsch_solver_reset();
+}
 
 TEST(PdschSolver, SolvesTheSimulatedCellWithTwoIndependentPasses)
 {

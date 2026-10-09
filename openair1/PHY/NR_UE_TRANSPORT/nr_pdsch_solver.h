@@ -34,7 +34,14 @@ typedef struct {
   const uint16_t *ids; ///< layout (resolver) indices reading this DCI identically
   int n_ids;
   uint16_t num_rb;     ///< PRB count of this reading (cost and search eligibility)
+  uint16_t dmrs_ports; ///< parsed DCI 1_1 antenna-ports bitmap
+  uint8_t n_layers;    ///< number of DM-RS ports / PDSCH layers in this reading
+  uint8_t mcs;         ///< MCS parsed by this reading
 } nr_pdsch_solver_reading_t;
+
+/* ISAC_PDSCH_SOLVER_NL_PREF=N (default off) probes one-layer QPSK readings first and waits up to N grants before
+ * falling back when none is available. ISAC_PDSCH_SOLVER_THREAD_CTX=1 (default off) keeps each scan consumer's grant
+ * scrambling/CORESET/slot context separate so concurrent plans cannot use another consumer's hypotheses. */
 
 typedef struct {
   int reading;         ///< index into the caller's readings[]
