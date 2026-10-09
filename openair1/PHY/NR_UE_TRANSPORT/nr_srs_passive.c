@@ -232,6 +232,9 @@ static void *srs_worker(void *unused)
   }
   return NULL;
 }
+/* nr_srs_passive_start: starts the passive SRS (uplink sounding) worker when the build enables it (NR_SRS_EXPORT_ON), the sensing and the SRS source are on, and the frame is TDD: reads cfr_max_re and cfr_antennas from [sensing], allocates the frequency and CFR buffers and the job ring, and starts the worker.
+ *   Does nothing when any requirement is missing or an allocation fails. Caller: executables/nr-uesoftmodem.c (passive receiver start-up).
+ */
 void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
 {
 #ifndef NR_SRS_EXPORT_ON
