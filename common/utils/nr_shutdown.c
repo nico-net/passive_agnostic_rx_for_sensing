@@ -30,6 +30,10 @@ static pthread_rwlock_t radio_lifetime = PTHREAD_RWLOCK_INITIALIZER;
  * waiting for the release thread, which needs the exclusive gate. */
 static __thread int radio_gate_depth;
 
+/* nr_shutdown_radio_enter: takes the radio lifetime gate (read-write lock): exclusive for the start, release and re-init paths, shared for the per-call device operations.
+ *   Returns 0 without taking the gate when a shutdown was already requested (the caller must then skip the device call); otherwise 1 and counts the hold for this thread.
+ *   Callers: executables/nr-ue-ru.c (every public nrue_ru_* wrapper). Must be paired with nr_shutdown_radio_leave().
+ */
 int nr_shutdown_radio_enter(int exclusive)
 {
   if (nr_shutdown_requested())
@@ -46,13 +50,16 @@ int nr_shutdown_radio_enter(int exclusive)
   return 1;
 }
 
+/* nr_shutdown_radio_leave: releases one hold of the radio lifetime gate taken by nr_shutdown_radio_enter() on this thread. Caller: executables/nr-ue-ru.c. */
 void nr_shutdown_radio_leave(void)
 {
   radio_gate_depth--;
   pthread_rwlock_unlock(&radio_lifetime);
 }
 
-/* Only on a path that never returns into the device call it interrupts. */
+/* drop_own_radio_gate: releases every radio gate hold of the calling thread. Used only on a fatal path that never returns into the device call, so that the release thread can take the exclusive gate.
+ *   Called from exit_cleanup() and nr_shutdown_finish().
+ */
 static void drop_own_radio_gate(void)
 {
   while (radio_gate_depth > 0) {
@@ -61,6 +68,7 @@ static void drop_own_radio_gate(void)
   }
 }
 
+/* monotonic_ns: returns CLOCK_MONOTONIC time in nanoseconds (shutdown timestamps and deadlines). */
 static unsigned long monotonic_ns(void)
 {
   struct timespec ts;
@@ -68,6 +76,9 @@ static unsigned long monotonic_ns(void)
   return (unsigned long)ts.tv_sec * 1000000000UL + ts.tv_nsec;
 }
 
+/* nr_shutdown_step: writes one line `SENSING: SHUTDOWN elapsed_ms=... step=... status=...` to the log descriptor with a non-blocking write, timed from the first request.
+ *   Async-safe in the sense of the header: no stdio, no locks, so it can run from the release and watchdog threads even when the logger is stuck. Callers: nr_shutdown_finish(), the release/watchdog threads and executables/nr-uesoftmodem.c.
+ */
 void nr_shutdown_step(const char *step)
 {
   char line[320];
@@ -82,6 +93,9 @@ void nr_shutdown_step(const char *step)
   }
 }
 
+/* nr_shutdown_request: requests shutdown with status (the first request wins; an error after a normal end replaces status 0). Starts the timer and wakes the release and watchdog threads.
+ *   Async-signal-safe: only atomics, clock_gettime and sem_post. errno is preserved. Callers: nr_shutdown_signal(), nr-ue-ru.c, usrp_lib.cpp and the start-up code.
+ */
 void nr_shutdown_request(int status)
 {
   int saved_errno = errno;
@@ -97,14 +111,18 @@ void nr_shutdown_request(int status)
   errno = saved_errno;
 }
 
+/* nr_shutdown_signal: signal handler for SIGINT and SIGTERM: requests shutdown with status 128 + signal number. */
 void nr_shutdown_signal(int sig) { nr_shutdown_request(128 + sig); }
+/* nr_shutdown_requested: returns 1 once shutdown has been requested, else 0. Lock-free atomic read; safe in any thread and in signal context. */
 int nr_shutdown_requested(void) { return atomic_load(&requested) != 0; }
+/* nr_shutdown_status: returns the exit status of the shutdown request (0 when none or a normal end was requested). */
 int nr_shutdown_status(void)
 {
   int value = atomic_load(&requested);
   return value ? value - 1 : 0;
 }
 
+/* wait_event: waits on a semaphore, retrying on EINTR; exits the process if the semaphore fails for any other reason. */
 static void wait_event(sem_t *event)
 {
   while (sem_wait(event) != 0)
@@ -112,6 +130,9 @@ static void wait_event(sem_t *event)
       _exit(EXIT_FAILURE);
 }
 
+/* release_thread: the radio release thread: after the first request it calls the notify callback, stops the radio under the shared gate (cancelling blocking I/O), and then releases it under the exclusive gate.
+ *   Logs each step and sets radio_released when the release completes. Started by nr_shutdown_init().
+ */
 static void *release_thread(void *unused)
 {
   (void)unused;
@@ -135,6 +156,9 @@ static void *release_thread(void *unused)
   return NULL;
 }
 
+/* watchdog_thread: the shutdown watchdog: once shutdown is requested it waits until `timeout_s` seconds after the first request (ISAC_SHUTDOWN_TIMEOUT_S, default 15) and then exits the process with the shutdown status.
+ *   The timer starts at the first request, so the radio cleanup gets the whole budget. Started by nr_shutdown_init().
+ */
 static void *watchdog_thread(void *unused)
 {
   (void)unused;
@@ -151,6 +175,9 @@ static void *watchdog_thread(void *unused)
   _exit(nr_shutdown_status() ? nr_shutdown_status() : EXIT_FAILURE);
 }
 
+/* exit_cleanup: atexit handler: in the owning process, requests a clean shutdown, drops this thread's gate holds and waits for the radio release. Does nothing in a forked child.
+ *   Registered by nr_shutdown_init().
+ */
 static void exit_cleanup(void)
 {
   /* T tracer can fork after initialization; its child has no shutdown threads
@@ -162,6 +189,7 @@ static void exit_cleanup(void)
   nr_shutdown_wait_radio();
 }
 
+/* fork_child: pthread_atfork child handler: restores the default SIGINT and SIGTERM handlers in the child process. */
 static void fork_child(void)
 {
   struct sigaction action = {.sa_handler = SIG_DFL};
@@ -170,6 +198,9 @@ static void fork_child(void)
   sigaction(SIGTERM, &action, NULL);
 }
 
+/* nr_shutdown_init: starts the shutdown subsystem: stores the three callbacks (notify, stop and release the radio), reads ISAC_SHUTDOWN_TIMEOUT_S, opens the log descriptor, starts the release and watchdog threads, installs the SIGINT/SIGTERM handlers, and registers the fork and exit hooks.
+ *   Returns 0, or -1 when a semaphore, thread or handler could not be set up. Caller: executables/nr-uesoftmodem.c (start-up).
+ */
 int nr_shutdown_init(void (*notify_main)(void), void (*stop_radio)(void), void (*release_radio)(void))
 {
   owner_pid = getpid();
@@ -208,6 +239,7 @@ int nr_shutdown_init(void (*notify_main)(void), void (*stop_radio)(void), void (
   return 0;
 }
 
+/* nr_shutdown_wait_radio: blocks until the radio release has completed (radio_released). Callers: exit_cleanup(), nr_shutdown_finish() and executables/nr-uesoftmodem.c. */
 void nr_shutdown_wait_radio(void)
 {
   const struct timespec pause = {.tv_nsec = 10000000};
@@ -215,6 +247,9 @@ void nr_shutdown_wait_radio(void)
     nanosleep(&pause, NULL);
 }
 
+/* nr_shutdown_finish: final exit path of the receiver: drops the thread's gate holds, waits for the radio release, flushes stdio and exits with the shutdown status (_exit, so no stdio teardown).
+ *   The watchdog still bounds a stuck flush. Declared noreturn. Caller: executables/nr-uesoftmodem.c (main exit).
+ */
 _Noreturn void nr_shutdown_finish(void)
 {
   drop_own_radio_gate();
