@@ -97,6 +97,31 @@ def grants(cap, log, out):
             ' '.join('%.1f' % (10 * np.log10(v)) for v in R[i, 10:14]), ctl[i]))
 
 
+def energy(cap, log, out):
+    """ID- and waveform-agnostic check: mean RE power (4 RX, symbols 0-13) on each grant's predicted PRBs,
+    relative to the same PRBs/slot two frames later (control)."""
+    F0 = CAPS[cap][1]
+    D, ts = parse_dcis(log); OFF = frame_offset(ts, F0)
+    rows = []
+    for d in D:
+        g = decode(d)
+        if not g or g['p0'] + g['L'] > NPRB: continue
+        fr = g['target'] // 20 - OFF; sl = g['target'] % 20
+        if sl not in UL or fr < 0 or fr + 2 >= 1199: continue
+        e = []
+        for f in (fr, fr + 2):
+            xs = slot_iq(cap, f, sl)
+            e.append(sum(np.mean([np.mean(np.abs(grid(x, l)[g['p0'] * 12:(g['p0'] + g['L']) * 12]) ** 2) for l in range(14)]) for x in xs))
+        rows.append((g['abs'], g['rnti'], g['p0'], g['L'], g['mcs'], fr, sl, e[0], e[1]))
+    R = np.array(rows, float); np.save(out, R)
+    r = 10 * np.log10(R[:, 7] / R[:, 8])
+    print('grants %d; energy grant/control dB: median %.2f' % (len(R), np.median(r)))
+    for name, s in (('L<=3', R[:, 3] <= 3), ('L4-9', (R[:, 3] > 3) & (R[:, 3] < 10)), ('L>=10', R[:, 3] >= 10),
+                    ('MCS<=4', R[:, 4] <= 4), ('MCS>=17', R[:, 4] >= 17)):
+        if s.any():
+            print('  %-8s n=%4d median %+.2f dB  >+3 dB %4d  <-3 dB %4d' % (name, s.sum(), np.median(r[s]), (r[s] > 3).sum(), (r[s] < -3).sum()))
+
+
 if __name__ == '__main__':
     c = sys.argv[1]
     if c == 'tdd': tdd(sys.argv[2], int(sys.argv[3]))
@@ -105,3 +130,4 @@ if __name__ == '__main__':
         a, b = map(int, sys.argv[3].split(':')); R = pairs(sys.argv[2], a, b)
         if len(sys.argv) > 4: np.save(sys.argv[4], R)
     elif c == 'grants': grants(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif c == 'energy': energy(sys.argv[2], sys.argv[3], sys.argv[4])
