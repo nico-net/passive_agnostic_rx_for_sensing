@@ -77,6 +77,9 @@ static void backends_locked(void)
   }
 }
 
+/* nr_td_cb0_wire_warmup: one-time warm-up of the CB0 wire: enables the GPU backend (unless the backend mode is CPU or ISAC_TD_CB0_GPU_AUTOREG=0) and loads the configuration and the backends under the lock.
+ *   Caller: nr_pdcch_blind_monitor_rt.c (start-up, nr_dl_gpu_warmup path).
+ */
 void nr_td_cb0_wire_warmup(void)
 {
   const char *ar = getenv("ISAC_TD_CB0_GPU_AUTOREG");
