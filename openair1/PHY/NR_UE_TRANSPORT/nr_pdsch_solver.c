@@ -285,22 +285,30 @@ static int comb_on(void)
 /* Mode for this grant: unsolved -> alternate 1/3 by grant parity; solved -> the mode with the better CRC rate
  * (Laplace), exploring the other on 1 grant in 8. */
 /* receivers in play: ISAC_RX_MRC_PER_RNTI=1 -> {1,3}; =2 -> {1,3,4,5} (4 = noise-weighted gain-corrected MRC, 5 = IRC) */
-static const uint8_t kComb[4] = {1, 3, 4, 5};
+/* =3 -> {1,3,4,6} (6 = IRC with DM-RS residual covariance, ISAC_RX_IRC=4) */
+static uint8_t comb_k(int k) { static const uint8_t kComb[4] = {1, 3, 4, 5}; return (k == 3 && comb_on() >= 3) ? 6 : kComb[k]; }
 static int comb_n(void) { return comb_on() >= 2 ? 4 : 2; }
+static int comb_ab(void) /* ISAC_RX_MRC_PER_RNTI_AB=1: post-solve round robin over the receivers (paired A/B, no exploitation) */
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI_AB") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_AB")) : 0;
+  return en;
+}
 static uint8_t comb_pick(const solver_rnti_t *r)
 {
   if (!comb_on()) return 0;
   const int n = comb_n();
   if (!r->solved) return 0; /* the layout search runs on the configured receiver only (alternating receivers while
                             * unsolved multiplied the search space and starved whole populations: replays n3/n4) */
+  if (comb_ab()) return comb_k((int)(r->grants % (uint32_t)n));
   int best = 0;
   double bp = -1.0;
   for (int k = 0; k < n; k++) {
     const double p = (r->comb_ok[k] + 1.0) / (r->comb_try[k] + 2.0);
     if (p > bp) { bp = p; best = k; }
   }
-  if ((r->grants % 8u) == 7u) return kComb[(best + 1 + (r->grants / 8u) % (uint32_t)(n - 1)) % (uint32_t)n]; /* explore */
-  return kComb[best];
+  if ((r->grants % 8u) == 7u) return comb_k((int)((best + 1 + (r->grants / 8u) % (uint32_t)(n - 1)) % (uint32_t)n)); /* explore */
+  return comb_k(best);
 }
 static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t phase, int reading,
                  const nr_pdsch_solver_reading_t *rd, int l0, int S, int add_pos, int table, bool probe, bool table_disc,
@@ -693,7 +701,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   }
   solver_rnti_t *r = &g_r[p->slot];
   if (p->comb >= 1 && (!r->solved || !p->probe)) {
-    const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb == 5 ? 3 : 0;
+    const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb >= 5 ? 3 : 0;
     r->comb_try[ci]++;
     if (crc_ok) r->comb_ok[ci]++;
   }
