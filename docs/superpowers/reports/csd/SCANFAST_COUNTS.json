@@ -1,0 +1,646 @@
+{
+  "b_baseline": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x65d3"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xce76"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x3383": 8,
+      "0x37f3": 542,
+      "0x4e0a": 40,
+      "0x59ab": 175,
+      "0x5aea": 59,
+      "0x5d93": 255,
+      "0x65d3": 156,
+      "0xb3d3": 149,
+      "0xce76": 3800,
+      "0xe513": 28,
+      "0xe6aa": 521
+    },
+    "dci_total": 5733,
+    "log": "replays/replay_scanfast_baseline_b_135253/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 7263.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 20000,
+      "over500": 7120,
+      "p50_us": 459,
+      "p99_us": 1200
+    }
+  },
+  "b_baseline_earlier_binary": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x65d3"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xce76"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x101b": 16,
+      "0x2152": 63,
+      "0x3383": 68,
+      "0x37f3": 532,
+      "0x4433": 34,
+      "0x4e0a": 140,
+      "0x59ab": 48,
+      "0x5aea": 92,
+      "0x5d93": 248,
+      "0x65d3": 155,
+      "0xa07a": 280,
+      "0xb3bb": 69,
+      "0xb3d3": 146,
+      "0xc57a": 2,
+      "0xce76": 3804,
+      "0xdbc2": 57,
+      "0xe113": 8,
+      "0xe513": 95,
+      "0xe6aa": 524
+    },
+    "dci_total": 6381,
+    "log": "replays/replay_scanfast_baseline_b_125151/run.log",
+    "scanpass": {
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 7433.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": null
+  },
+  "b_cache_earlier_binary": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x65d3"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xce76"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x37f3": 455,
+      "0x59ab": 121,
+      "0x5d93": 241,
+      "0x65d3": 156,
+      "0xa07a": 332,
+      "0xb3d3": 135,
+      "0xce76": 3801,
+      "0xe513": 302,
+      "0xe6aa": 547
+    },
+    "dci_total": 6090,
+    "log": "replays/replay_scanfast_cache_b_125331/run.log",
+    "scanpass": {
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 48820
+    },
+    "scantime": {
+      "max_us": 9933.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": null
+  },
+  "b_combined_parallel_cap64": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0xe513"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xce76"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x37f3": 622,
+      "0x5186": 1313,
+      "0xce76": 4158,
+      "0xe513": 337
+    },
+    "dci_total": 6430,
+    "log": "replays/replay_scanfast_combined_par_cap_b_135928/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 48599
+    },
+    "scantime": {
+      "max_us": 8253.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 20000,
+      "over500": 6693,
+      "p50_us": 469,
+      "p99_us": 1127
+    }
+  },
+  "b_length": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0xe513"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xacd6"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x37f3": 583,
+      "0x4ce3": 34,
+      "0x4e0a": 43,
+      "0x59ab": 143,
+      "0x5aea": 45,
+      "0x5d93": 260,
+      "0x65d3": 62,
+      "0xa07a": 304,
+      "0xacd6": 122,
+      "0xb3d3": 123,
+      "0xdbc2": 7,
+      "0xe513": 345,
+      "0xe6aa": 406
+    },
+    "dci_total": 2477,
+    "log": "replays/replay_scanfast_length_b_135659/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 10570.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 20000,
+      "over500": 7892,
+      "p50_us": 472,
+      "p99_us": 1384
+    }
+  },
+  "b_neon_earlier_binary": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x65d3"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xce76"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x2152": 3,
+      "0x37f3": 547,
+      "0x4ce3": 12,
+      "0x59ab": 138,
+      "0x5aea": 99,
+      "0x5d93": 255,
+      "0x65d3": 155,
+      "0xb3d3": 146,
+      "0xce76": 3822,
+      "0xe513": 285,
+      "0xe6aa": 530
+    },
+    "dci_total": 5992,
+    "log": "replays/replay_scanfast_neon_b_130220/run.log",
+    "scanpass": {
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 8460.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": null
+  },
+  "b_prescreen_safe": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x65d3"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xce76"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x37f3": 162,
+      "0x65d3": 201,
+      "0xce76": 4174,
+      "0xe6aa": 143
+    },
+    "dci_total": 4680,
+    "log": "replays/replay_scanfast_prescreen_b_135428/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 7303.0,
+      "occasions": 20000,
+      "p50_us": 1049.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 20000,
+      "over500": 18490,
+      "p50_us": 688,
+      "p99_us": 1525
+    }
+  },
+  "old_baseline": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x8f5a"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xe01e"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x8f5a": 554,
+      "0xe01e": 788
+    },
+    "dci_total": 1342,
+    "log": "replays/replay_scanfast_baseline_old_140159/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 8862.0,
+      "occasions": 16000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 16000,
+      "over500": 2151,
+      "p50_us": 373,
+      "p99_us": 1397
+    }
+  },
+  "old_baseline_earlier_binary": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x8f5a"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xe01e"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x8f5a": 547,
+      "0xe01e": 793
+    },
+    "dci_total": 1340,
+    "log": "replays/replay_scanfast_baseline_old_130857/run.log",
+    "scanpass": {
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 9145.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": null
+  },
+  "old_cache_earlier_binary": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x8f5a"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xe01e"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x8f5a": 564,
+      "0xe01e": 810
+    },
+    "dci_total": 1374,
+    "log": "replays/replay_scanfast_cache_old_131259/run.log",
+    "scanpass": {
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 44644
+    },
+    "scantime": {
+      "max_us": 7770.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": null
+  },
+  "old_combined_parallel_cap64": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x8f5a"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xe01e"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x8f5a": 564,
+      "0xb876": 205,
+      "0xe01e": 893
+    },
+    "dci_total": 1662,
+    "log": "replays/replay_scanfast_combined_par_cap_old_140741/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 43846
+    },
+    "scantime": {
+      "max_us": 7136.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 20000,
+      "over500": 4498,
+      "p50_us": 430,
+      "p99_us": 1687
+    }
+  },
+  "old_length": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x8f5a"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xe01e"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x8f5a": 554,
+      "0xe01e": 795
+    },
+    "dci_total": 1349,
+    "log": "replays/replay_scanfast_length_old_140509/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 7956.0,
+      "occasions": 16000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 16000,
+      "over500": 2687,
+      "p50_us": 397,
+      "p99_us": 1338
+    }
+  },
+  "old_neon_earlier_binary": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x8f5a"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xe01e"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x8f5a": 564,
+      "0xe01e": 816
+    },
+    "dci_total": 1380,
+    "log": "replays/replay_scanfast_neon_old_132206/run.log",
+    "scanpass": {
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 8711.0,
+      "occasions": 20000,
+      "p50_us": 524.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": null
+  },
+  "old_prescreen_safe": {
+    "banks": [
+      {
+        "index": 0,
+        "nid": 62922,
+        "owner": "0x8f5a"
+      },
+      {
+        "index": 1,
+        "nid": 10163,
+        "owner": "0xe01e"
+      }
+    ],
+    "dci_by_rnti": {
+      "0x8f5a": 547,
+      "0xe01e": 892
+    },
+    "dci_total": 1439,
+    "log": "replays/replay_scanfast_prescreen_old_140329/run.log",
+    "scanpass": {
+      "audit_accepted": 0,
+      "audit_hit": 0,
+      "audit_min_accepted_score": -1.0,
+      "audit_min_dmrs": -1.0,
+      "audit_min_score": -1.0,
+      "audit_no_dmrs": 0,
+      "audit_reject": 0,
+      "gpu_equal": 0,
+      "gpu_error": 0,
+      "gpu_mismatch": 0,
+      "llr_bad": 0,
+      "llr_hit": 0,
+      "llr_miss": 0
+    },
+    "scantime": {
+      "max_us": 8774.0,
+      "occasions": 20000,
+      "p50_us": 1049.0,
+      "p99_us": 2097.0
+    },
+    "scantime_fine": {
+      "occasions": 20000,
+      "over500": 17828,
+      "p50_us": 655,
+      "p99_us": 1605
+    }
+  }
+}

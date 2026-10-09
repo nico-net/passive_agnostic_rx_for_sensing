@@ -50,6 +50,25 @@
 #include <stdatomic.h>
 #include <pthread.h>
 
+int nr_pdcch_dci_length_bank_peer_hint(const nr_pdcch_dci_length_bank_t *bank,
+                                       uint16_t exclude_rnti, int min_len, int max_len)
+{
+  if (!bank || min_len < 1 || max_len > NR_DCI_MAX_PAYLOAD || min_len > max_len) return 0;
+  int counts[NR_DCI_MAX_PAYLOAD + 1] = {0};
+  for (int i = 0; i < NR_PDCCH_LENGTH_CONTEXTS; i++) {
+    const nr_pdcch_dci_length_context_t *c = &bank->ue[i];
+    if (!c->rnti || c->rnti == exclude_rnti) continue;
+    for (int j = 0; j < 2; j++) {
+      const int len = c->found[j];
+      if (len >= min_len && len <= max_len) counts[len]++;
+    }
+  }
+  int best = 0;
+  for (int len = min_len; len <= max_len; len++)
+    if (counts[len] > counts[best]) best = len;
+  return counts[best] ? best : 0;
+}
+
 // Empirically measured false-accept rate of nr_pdcch_blind_decode_and_extract_ex()'s "plausible"
 // gate on this project's own prior data (42k/10.9M candidates -- see this file's header and
 // TOTAL_PASSIVE_UE_HANDOVER.md). NOT a theoretical CRC-24 rate: "plausible" is a field-sanity
@@ -475,7 +494,14 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
       && state->preferred_len != state->excluded_len
       && state->preferred_len != state->secondary_excluded_len
       && state->preferred_len != state->tertiary_excluded_len) {
-    if (state->preferred_rounds < NR_PDCCH_LENGTH_PREFERRED_ROUNDS) {
+    if (state->preferred_full_every >= 2) {
+      /* A confirmed peer length is a cheap first hypothesis. Probe all
+       * lengths periodically, and finish a suspended full lap before returning
+       * to the hint, so a different UE-specific width remains discoverable. */
+      if (!state->resume_len && state->rot_phase == 0
+          && (state->feed_serial + 1) % state->preferred_full_every != 0)
+        prefer = state->preferred_len;
+    } else if (state->preferred_rounds < NR_PDCCH_LENGTH_PREFERRED_ROUNDS) {
       prefer = state->preferred_len;
     } else if (state->preferred_len && !state->alt_full) {
       /* Alternate instead of dropping: one full lap, then the hypothesis again. Dropping it for good made a
