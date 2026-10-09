@@ -6,6 +6,7 @@
 __thread bool nr_passive_tpool_inline; /* ISAC_PDSCH_INLINE_POOL, nr_passive_tpool.h */
 #include <math.h>
 #include <stdlib.h> // getenv (NVAR probe)
+#include <time.h>
 #include "nr_common.h"
 #include <string.h>
 #include "SCHED_NR_UE/defs.h"
@@ -49,6 +50,23 @@ static __thread uint32_t t_delay_epoch_a[8];
 static __thread delay_t t_delay_val_a[8];
 static __thread int t_delay_have_a[8];
 static __thread int t_delay_reused; /* this call reused the shared delay: ch_estimates_time was NOT computed */
+/* Opt-in CPU profiling. Inline passive pool tasks run on the decode consumer, so
+ * these counters separate the delay transform from pilot generation, FIR and
+ * dispatch without changing the default estimator path. */
+static __thread uint64_t t_chest_delay_ns;
+static int chest_stage_timing(void)
+{
+  static __thread int enabled = -1;
+  if (enabled < 0)
+    enabled = getenv("ISAC_CHEST_STAGE_TIMING") && atoi(getenv("ISAC_CHEST_STAGE_TIMING")) == 1;
+  return enabled;
+}
+static uint64_t chest_cpu_ns(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
 static int chest_delay_share(void)
 {
   static int en = -1;
@@ -57,6 +75,7 @@ static int chest_delay_share(void)
 }
 static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_est, c16_t *ch_estimates_time, delay_t *delay)
 {
+  const uint64_t start_ns = chest_stage_timing() ? chest_cpu_ns() : 0;
   /* the BRDELAY/PDP diagnostic (requested on every passive decode) is computed only where the IDFT still runs */
   const bool share = chest_delay_share() && nr_dl_chest_delay_epoch != 0;
   t_delay_reused = 0;
@@ -72,6 +91,8 @@ static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_e
     nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
   else
     nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  if (start_ns)
+    t_chest_delay_ns += chest_cpu_ns() - start_ns;
   if (share) {
     t_delay_val_a[slot_i] = *delay;
     t_delay_epoch_a[slot_i] = nr_dl_chest_delay_epoch;
@@ -1492,6 +1513,9 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                  c16_t rxdataF[][rxdataFsize],
                                  uint32_t *nvar)
 {
+  const int profile = chest_stage_timing();
+  const uint64_t profile_start = profile ? chest_cpu_ns() : 0;
+  const uint64_t delay_before = t_chest_delay_ns;
   // int gNB_id = proc->gNB_id;
   int slot = proc->nr_slot_rx;
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -1523,6 +1547,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
   int16_t dmrs_scaling = (int16_t)((1 / beta_dmrs_pdsch) * (1 << 14));
   const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch->dlDmrsScramblingId, dlsch->nscid, slot, symbol);
   nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot, 1000 + p, 0, nb_rb_pdsch + rb_offset, config_type, dmrs_scaling);
+  const uint64_t pilot_end = profile ? chest_cpu_ns() : 0;
 
   delay_t delay = {0};
 
@@ -1682,6 +1707,18 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
       s_nv = (getenv("ISAC_RX_BRANCH") != NULL) ? 1 : 0;
     if (s_nv && (s_nv_n++ % 500) == 0)
       LOG_I(PHY, "SENSING: NVAR nvar=%u ants=%d nl=%d\n", *nvar, nvar_ant_count, nl);
+  }
+  if (profile) {
+    static __thread uint64_t calls, total_ns, pilot_ns, delay_ns;
+    calls++;
+    total_ns += chest_cpu_ns() - profile_start;
+    pilot_ns += pilot_end - profile_start;
+    delay_ns += t_chest_delay_ns - delay_before;
+    if (calls % 16 == 0) {
+      LOG_A(PHY, "SENSING: CHESTSTAGE calls=%lu mean_cpu_us=%.1f pilot_us=%.1f delay_us=%.1f other_us=%.1f\n",
+            (unsigned long)calls, total_ns / (1000.0 * calls), pilot_ns / (1000.0 * calls),
+            delay_ns / (1000.0 * calls), (total_ns - pilot_ns - delay_ns) / (1000.0 * calls));
+    }
   }
 }
 

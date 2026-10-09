@@ -42,3 +42,6 @@ CMakeUserPresets.json
 # Python bytecode cache (tests/ota_sync_bench/ and any other Python tooling)
 __pycache__/
 *.pyc
+
+# Local raw-IQ replay output (logs and generated receiver config)
+/replays/
