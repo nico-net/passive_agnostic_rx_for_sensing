@@ -708,8 +708,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
       for (int i = 0; i < p->n_ids; i++) { if (p->ids[i] < lo) lo = p->ids[i]; if (p->ids[i] > hi) hi = p->ids[i]; }
       const solver_rnti_t *rr = (p->slot >= 0 && p->slot < SOLVER_RNTIS) ? &g_r[p->slot] : NULL;
       LOG_A(PHY, "SENSING: PDSCH_SOLVER probe rnti=0x%04x key=%d crc=%d probe=%u S=%u add_pos=%u table=%u scr=%d n_ids=%d ids=%d..%d "
-                 "has1662=%d has1664=%d\n", rr ? rr->rnti : 0, rr ? rr->key : -1, (int)crc_ok, p->probe, p->S, p->add_pos, p->table,
-            p->scr, p->n_ids, lo, hi, has_id_p(p, 1662), has_id_p(p, 1664));
+                 "has1662=%d has1664=%d has2102=%d has2104=%d\n", rr ? rr->rnti : 0, rr ? rr->key : -1, (int)crc_ok, p->probe, p->S, p->add_pos,
+            p->table, p->scr, p->n_ids, lo, hi, has_id_p(p, 1662), has_id_p(p, 1664), has_id_p(p, 2102), has_id_p(p, 2104));
     }
   }
   if (p == NULL || !credit) {

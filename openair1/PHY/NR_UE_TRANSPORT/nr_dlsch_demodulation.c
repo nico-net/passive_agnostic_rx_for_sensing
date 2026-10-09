@@ -51,6 +51,7 @@ __thread int nr_dlsch_forced_mask = -1;
 __thread int nr_dlsch_mrc_mode_override = -1;
 __thread int nr_dlsch_irc_override = -1; /* T26d: per-grant ISAC_RX_IRC value (-1 = env) */ /* T26d ISAC_RX_MRC_PER_RNTI: per-grant combining mode (set by the passive decode) */
 __thread nr_irc_cov_t nr_irc_dmrs_cov; /* ISAC_RX_IRC=4, nr_irc_cov.h */
+__thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c */
 __thread int nr_dlsch_eq_override = -1; /* T26d ISAC_RX_EQ_AB: multi-layer equaliser per grant, 0 fixed MMSE, 1 float MMSE, 2 ML (nl 2, Qm<=6) */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
 __thread int nr_dlsch_chest_per_symbol = 0;

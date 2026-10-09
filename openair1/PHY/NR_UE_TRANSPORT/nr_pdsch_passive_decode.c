@@ -2775,6 +2775,88 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     n_dmrs_sym++;
   }
   nr_dl_chest_only_ant = -1;
+  /* ISAC_CHEST_OCC=1 (T26d): multi-layer DM-RS estimate with the delay removed BEFORE the FD-OCC despreading.
+   * The stock type-1 estimator averages each OCC pair (2 comb REs, 4 subcarriers apart) first and compensates the
+   * delay afterwards; a delay tau rotates the pair by 2 pi 4 df tau, so the pair average leaks the other port
+   * (1 us: ~-9 dB; 2 us: ~-3 dB) -- a per-layer SINR cap that only multi-layer grants see. Here, per branch and CDM
+   * group: LS z_j = p_ref(j) y(k_j); delay phase slope from lag-2 products (same OCC sign); derotate; per RB a 2-unknown
+   * LS (orthogonal OCC: mean(z) and mean(w z)); linear interpolation between RB centres; rerotate. Nl >= 2,
+   * type 1, contiguous, single-symbol ports < 4 only. ISAC_CHEST_OCC_AB=1: per grant via nr_pdsch_chest_occ_override. */
+  {
+    extern __thread int nr_pdsch_chest_occ_override;
+    static int s_occ = -1;
+    if (s_occ < 0) s_occ = getenv("ISAC_CHEST_OCC") ? atoi(getenv("ISAC_CHEST_OCC")) : 0;
+    const int occ_on = nr_pdsch_chest_occ_override >= 0 ? nr_pdsch_chest_occ_override : s_occ;
+    const int nlay = cw->Nl;
+    if (occ_on && nlay >= 2 && nlay <= 4 && !seg_path && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1
+        && freq_alloc->n_prb_list == 0 && fp->nb_antennas_rx <= 4 && freq_alloc->num_rbs >= 2) {
+      int port[4], okp = 1;
+      for (int l = 0; l < nlay; l++) {
+        port[l] = get_dmrs_port(l, dlsch_config->dmrs_ports);
+        if (port[l] < 0 || port[l] >= 4) okp = 0;
+      }
+      const int nb = fp->nb_antennas_rx, N = fp->ofdm_symbol_size, nrb = freq_alloc->num_rbs;
+      const int rb_offset = freq_alloc->first_rb + (dlsch_config->refPoint ? 0 : dlsch_config->BWPStart);
+      const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * 12;
+      const float beta = get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, false);
+      const int16_t dmrs_scaling = (int16_t)((1 / beta) * (1 << 14));
+      for (int m = 0; okp && m < fp->symbols_per_slot; m++) {
+        if (!((dmrs_full >> m) & 1)) continue;
+        c16_t pilot[4][3280] __attribute__((aligned(16)));
+        const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch_config->dlDmrsScramblingId,
+                                             dlsch_config->nscid, proc->nr_slot_rx, m);
+        for (int l = 0; l < nlay; l++)
+          nr_pdsch_dmrs_rx(fp->Ncp, gold, pilot[l], 1000 + port[l], 0, nrb + rb_offset, NFAPI_NR_DMRS_TYPE1, dmrs_scaling);
+        for (int cg = 0; cg < 2; cg++) {
+          int lay[4], nlg = 0;
+          for (int l = 0; l < nlay; l++)
+            if (port[l] / 2 == cg) lay[nlg++] = l;
+          if (nlg == 0) continue;
+          const int nj = nrb * 6;
+          for (int a = 0; a < nb; a++) {
+            static __thread double complex z[3280];
+            double complex sl = 0;
+            for (int j = 0; j < nj; j++) {
+              const c16_t pl = pilot[lay[0]][6 * rb_offset + j];
+              const c16_t y = rxdataF[a][m * N + (sc0 + 2 * j + cg) % N];
+              z[j] = ((double)pl.r * y.r - (double)pl.i * y.i + I * ((double)pl.r * y.i + (double)pl.i * y.r)) / 32768.0;
+              if (j >= 2) sl += z[j] * conj(z[j - 2]);
+            }
+            const double phi = carg(sl) / 4.0; /* phase per subcarrier */
+            double complex hrb[4][275];
+            for (int rb = 0; rb < nrb; rb++) {
+              double complex acc[4] = {0};
+              for (int q = 0; q < 6; q++) {
+                const int j = rb * 6 + q, k = 2 * j + cg;
+                const double complex zd = z[j] * cexp(-I * phi * k);
+                for (int g = 0; g < nlg; g++) {
+                  const c16_t pq = pilot[lay[g]][6 * rb_offset + j], pr = pilot[lay[0]][6 * rb_offset + j];
+                  const double w = ((double)pq.r * pr.r + (double)pq.i * pr.i) >= 0 ? 1.0 : -1.0;
+                  acc[g] += w * zd;
+                }
+              }
+              for (int g = 0; g < nlg; g++) hrb[g][rb] = acc[g] / 6.0;
+            }
+            for (int g = 0; g < nlg; g++) {
+              c16_t *h = (c16_t *)&pdsch_dl_ch_estimates[lay[g] * nb + a][N * m];
+              for (int k = 0; k < nrb * 12; k++) {
+                const double x = ((double)k - 5.5) / 12.0; /* RB-centre coordinate */
+                int r0 = (int)floor(x);
+                if (r0 < 0) r0 = 0;
+                if (r0 > nrb - 2) r0 = nrb - 2;
+                double t = x - r0;
+                if (t < 0) t = 0;
+                if (t > 1) t = 1;
+                const double complex v = ((1 - t) * hrb[g][r0] + t * hrb[g][r0 + 1]) * cexp(I * phi * k);
+                h[k].r = (int16_t)fmax(-32768.0, fmin(32767.0, lround(creal(v))));
+                h[k].i = (int16_t)fmax(-32768.0, fmin(32767.0, lround(cimag(v))));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   /* ISAC_RX_IRC=4 (T26d): interference+noise covariance from the DM-RS residuals h_ls - h_est per 4-RB group, on every
    * DM-RS symbol of the grant (port 1000 comb, type 1, layer 0), for the whitening IRC in nr_rx_pdsch(). */
   {
