@@ -1852,6 +1852,36 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         const double sig = (cr[a] * cr[a] + ci[a] * ci[a]) / P[a];
         ea->sig[a] += sig;
         ea->res[a] += Y[a] > sig ? Y[a] - sig : 0.0;
+        ea->alpha_abs[a] += sqrt(cr[a] * cr[a] + ci[a] * ci[a]) / P[a]; /* |alpha_a|: 1 = unbiased channel estimate */
+        ea->alpha_n[a]++;
+      }
+      { /* T26d: cross-branch correlation of the LS residuals e_a = y_a - alpha_a h_a s (white noise: ~0) */
+        double complex ar[NR_PDSCH_EVM_MAX_RX];
+        for (int a = 0; a < nb; a++) ar[a] = P[a] > 0.0 ? (cr[a] + I * ci[a]) / P[a] : 0;
+        double complex C[NR_PDSCH_EVM_MAX_RX][NR_PDSCH_EVM_MAX_RX] = {{0}};
+        for (uint32_t i = 0; i < nb_re_pdsch; i++) {
+          if (isnan(xr[0][i])) continue;
+          double sr0[4], sq0[4];
+          for (int l = 0; l < nl; l++) {
+            const double vi = xr[l][i] * scale[l], vq = xi[l][i] * scale[l];
+            double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
+            si = si > lmax ? lmax : si < -lmax ? -lmax : si; sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
+            sr0[l] = si / scale[l]; sq0[l] = sq / scale[l];
+          }
+          double complex e[NR_PDSCH_EVM_MAX_RX];
+          for (int a = 0; a < nb; a++) {
+            double complex hs = 0;
+            for (int l = 0; l < nl; l++) hs += (chFext[l][a][i].r + I * chFext[l][a][i].i) * (sr0[l] + I * sq0[l]);
+            e[a] = (rxdataF_ext[a][i].r + I * rxdataF_ext[a][i].i) - ar[a] * hs;
+          }
+          for (int a = 0; a < nb; a++)
+            for (int b = a; b < nb; b++) C[a][b] += e[a] * conj(e[b]);
+        }
+        double rs = 0.0; int rn = 0;
+        for (int a = 0; a < nb; a++)
+          for (int b = a + 1; b < nb; b++)
+            if (creal(C[a][a]) > 0 && creal(C[b][b]) > 0) { rs += cabs(C[a][b]) / sqrt(creal(C[a][a]) * creal(C[b][b])); rn++; }
+        if (rn) { ea->rho_sum += rs / rn; ea->rho_n++; }
       }
       ea->n_re += nv;
       ea->n_sym++;

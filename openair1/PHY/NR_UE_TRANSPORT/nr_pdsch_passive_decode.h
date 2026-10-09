@@ -136,7 +136,10 @@ typedef struct {
   bool                 evm_valid;
   float                evm_pct;
   float                evm_cpe_pct;
-  float                kappa;       ///< mean QAM amplitude consistency (1 = coherent), 0 = n/a ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
+  float                kappa;
+  float                br_alpha[4];  ///< per-branch |LS gain| y ~ alpha h s (1 = unbiased channel estimate)
+  float                br_nvar_db[4];///< per-branch chest noise variance (dB, chest's own DM-RS estimate)
+  float                rho;          ///< mean |cross-branch residual correlation|       ///< mean QAM amplitude consistency (1 = coherent), 0 = n/a ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
   float                br_snr_db[4];
   uint8_t              evm_nbrx;
   uint16_t             evm_nsym;

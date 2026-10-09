@@ -21,7 +21,9 @@ typedef struct {
   uint32_t n_re, n_sym;
   double err, ref;
   double err_cpe;
-  double kappa_sum; uint32_t kappa_n; /* ISAC_RX_QAM_AGC diagnostic: combined-amplitude / threshold ratio */ /* same decisions, after a per-symbol per-layer complex LS scale (common phase/amplitude) */
+  double kappa_sum; uint32_t kappa_n;
+  double alpha_abs[NR_PDSCH_EVM_MAX_RX]; uint32_t alpha_n[NR_PDSCH_EVM_MAX_RX]; /* per-branch |LS gain| (estimate bias) */
+  double rho_sum; uint32_t rho_n;     /* mean |cross-branch residual correlation| */ /* ISAC_RX_QAM_AGC diagnostic: combined-amplitude / threshold ratio */ /* same decisions, after a per-symbol per-layer complex LS scale (common phase/amplitude) */
   double sig[NR_PDSCH_EVM_MAX_RX], res[NR_PDSCH_EVM_MAX_RX];
   int nbrx;
 } nr_pdsch_evm_acc_t;

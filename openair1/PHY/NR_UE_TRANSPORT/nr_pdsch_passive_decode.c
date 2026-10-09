@@ -3739,6 +3739,11 @@ gpu_llr_ready:;
       out->evm_pct = (float)(sqrt(ea->err / ea->ref) * 100.0);
       out->evm_cpe_pct = (float)(sqrt(ea->err_cpe / ea->ref) * 100.0);
       out->kappa = ea->kappa_n ? (float)(ea->kappa_sum / ea->kappa_n) : 0.f;
+      out->rho = ea->rho_n ? (float)(ea->rho_sum / ea->rho_n) : 0.f;
+      for (int a = 0; a < 4; a++) {
+        out->br_alpha[a] = ea->alpha_n[a] ? (float)(ea->alpha_abs[a] / ea->alpha_n[a]) : 0.f;
+        out->br_nvar_db[a] = nr_dl_chest_nvar_ant[a] > 0 ? (float)(10.0 * log10((double)nr_dl_chest_nvar_ant[a])) : -99.f;
+      }
       out->evm_nbrx = (uint8_t)ea->nbrx;
       out->evm_nsym = (uint16_t)ea->n_sym;
       for (int a = 0; a < ea->nbrx && a < 4; a++)
