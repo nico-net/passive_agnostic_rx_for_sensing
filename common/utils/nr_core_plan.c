@@ -15,17 +15,23 @@
 _Static_assert(NR_CP_MAX_CPUS == CPU_SETSIZE, "CPU mask size mismatch");
 static nr_core_plan_t current;
 static bool active;
+/* fail: formats an error message into out (at most n bytes) and returns -1; used by the plan builder and the machine reader to report why a core plan cannot be built. */
 static int fail(char *out, size_t n, const char *fmt, ...)
 {
   va_list ap; va_start(ap, fmt); vsnprintf(out, n, fmt, ap); va_end(ap); return -1;
 }
+/* rt: true for the real-time roles (role <= NR_CP_SYNC): the roles that need an exclusive core and must not share with lower-priority work. */
 static bool rt(nr_core_role_t r) { return r <= NR_CP_SYNC; }
+/* nr_core_role_name: returns the short name of a core role (for example "ring" or "pdsch") for logs and environment messages, or "invalid". */
 const char *nr_core_role_name(nr_core_role_t r)
 {
   static const char *names[] = {"ue", "ring", "uhd_ctrl", "dl", "ul", "sync", "scan", "uss", "pdsch", "pusch",
                                 "pool", "gpu_fep", "csirs", "nid", "stats"};
   return r >= 0 && r < NR_CP_ROLE_COUNT ? names[r] : "invalid";
 }
+/* nr_core_parse_list: parses a CPU list such as "6,7,8-9" into a bit mask (up to NR_CP_MAX_CPUS), returns -1 on a syntax error, an out-of-range CPU or a reversed range. Leading and trailing spaces are allowed.
+ *   Callers: nr_core_machine_read() (online and isolated lists), nr_core_parse_uhd(), executables/nr-uesoftmodem.c and radio/USRP/usrp_lib.cpp (ISAC_UHD_CTRL_CORES).
+ */
 int nr_core_parse_list(const char *s, unsigned char mask[NR_CP_MAX_CPUS])
 {
   unsigned char tmp[NR_CP_MAX_CPUS] = {0};
@@ -51,6 +57,7 @@ int nr_core_parse_list(const char *s, unsigned char mask[NR_CP_MAX_CPUS])
   }
   memcpy(mask, tmp, sizeof(tmp)); return 0;
 }
+/* nr_core_parse_hex: parses a hexadecimal CPU mask (the kernel's IRQ affinity format, comma separated groups allowed) into a bit mask. Returns -1 on an invalid digit or when the mask is too wide. Caller: nr_core_machine_read(). */
 int nr_core_parse_hex(const char *s, unsigned char mask[NR_CP_MAX_CPUS])
 {
   unsigned char tmp[NR_CP_MAX_CPUS] = {0};
@@ -86,6 +93,9 @@ int nr_core_parse_uhd(const char *text, unsigned char mask[NR_CP_MAX_CPUS])
   }
   free(copy); return result < 0 ? result : found;
 }
+/* nr_core_plan_add: appends `count` assignments of one role to the plan. With first >= 0 the assignments take consecutive CPUs starting at `first` (explicit, user-pinned); with first = -1 they are chosen later by nr_core_plan_build().
+ *   Each assignment gets the next index of its role. Returns -1 for an invalid role, a count beyond the plan capacity, or a bad CPU. Callers: executables/nr-uesoftmodem.c and the tests.
+ */
 int nr_core_plan_add(nr_core_plan_t *p, nr_core_role_t role, int count, int first)
 {
   if (role < 0 || role >= NR_CP_ROLE_COUNT || count < 0 || count > NR_CP_MAX_ROLES - p->count || first < -1
@@ -95,10 +105,15 @@ int nr_core_plan_add(nr_core_plan_t *p, nr_core_role_t role, int count, int firs
   for (int j = 0; j < count; j++) p->a[p->count++] = (nr_core_assignment_t){role, index++, first < 0 ? -1 : first + j, first >= 0, false};
   return 0;
 }
+/* same_core: true when two CPUs are SMT siblings of the same physical core (same package and same core id). */
 static bool same_core(const nr_core_machine_t *m, int a, int b)
 {
   return m->package[a] == m->package[b] && m->sibling[a] == m->sibling[b];
 }
+/* nr_core_plan_build: chooses a CPU for every role assignment that has none and records which CPUs are real-time and which are background, excluding the DPDK CPUs and their SMT siblings.
+ *   Order: validate the DPDK CPUs; reserve every explicit (user) pin; then place the automatic roles in role order, preferring an exclusive core and, for real-time roles, a large capacity without an IRQ and an isolated or nohz_full CPU; then mark the background CPUs.
+ *   The result sets shared on each assignment when two roles land on the same physical core. Returns 0, or -1 with a message in error. Callers: executables/nr-uesoftmodem.c and the tests.
+ */
 int nr_core_plan_build(const nr_core_machine_t *m, nr_core_plan_t *p, char *error, size_t n)
 {
   int used[NR_CP_MAX_CPUS] = {0};
@@ -184,17 +199,22 @@ int nr_core_plan_build(const nr_core_machine_t *m, nr_core_plan_t *p, char *erro
   }
   return 0;
 }
+/* read_text: reads a small text file into buf (at most n-1 bytes); returns 0 only when the whole file fit, else -1. */
 static int read_text(const char *path, char *buf, size_t n)
 {
   FILE *f = fopen(path,"r"); if (!f) return -1;
   size_t got = fread(buf,1,n-1,f); int extra = fgetc(f); fclose(f); buf[got] = 0;
   return extra == EOF ? 0 : -1;
 }
+/* cpu_int: reads an integer sysfs attribute of one CPU (for example topology/core_id), or returns fallback when it cannot be read. */
 static int cpu_int(int c, const char *leaf, int fallback)
 {
   char path[256], value[128]; snprintf(path,sizeof(path),"/sys/devices/system/cpu/cpu%d/%s",c,leaf);
   return read_text(path,value,sizeof(value)) ? fallback : atoi(value);
 }
+/* nr_core_machine_read: reads the host topology into *m: online, allowed (process cpuset), package, cluster, SMT sibling, capacity, isolated and nohz_full CPUs, IRQ affinity and the DPDK lcores.
+ *   With use_dpdk=1 in args it reads the UHD configuration files (system, home, root and UHD_CONFIG_FILE) and fails when no dpdk_corelist is readable, so that DPDK cores are never used. Returns 0, or -1 with a message. Caller: executables/nr-uesoftmodem.c.
+ */
 int nr_core_machine_read(nr_core_machine_t *m, const char *args, char *error, size_t n)
 {
   memset(m,0,sizeof(*m)); gethostname(m->host,sizeof(m->host)-1);
@@ -233,6 +253,7 @@ int nr_core_machine_read(nr_core_machine_t *m, const char *args, char *error, si
   }
   return 0;
 }
+/* print_mask: prints a CPU mask to stderr as ranges (for example "6-9,12"), or "none" when it is empty. Used by the core-plan log line. */
 static void print_mask(const unsigned char mask[NR_CP_MAX_CPUS])
 {
   bool first=true;
@@ -243,6 +264,7 @@ static void print_mask(const unsigned char mask[NR_CP_MAX_CPUS])
   }
   if(first) fprintf(stderr,"none");
 }
+/* env_for: returns the environment variable that overrides the core of a role (ISAC_UE_RT_CORE, ISAC_USRP_RING_CORE, ISAC_UHD_CTRL_CORES, ...), or NULL for roles without one. Caller: nr_core_plan_activate(). */
 static const char *env_for(nr_core_role_t role)
 {
   switch(role) {
@@ -252,6 +274,9 @@ static const char *env_for(nr_core_role_t role)
     case NR_CP_NID:return "ISAC_PDCCH_NID_GPU_CORE"; default:return NULL;
   }
 }
+/* nr_core_plan_activate: makes a built plan active: moves the process and every existing thread (/proc/self/task) to the background CPUs with SCHED_OTHER, stores the plan, exports the role overrides (only when unset), and logs the plan.
+ *   Logs warnings for shared physical CPUs. Returns 0, or -1 when an affinity or scheduler call fails. Caller: executables/nr-uesoftmodem.c (start-up).
+ */
 int nr_core_plan_activate(const nr_core_machine_t *m, const nr_core_plan_t *p)
 {
   cpu_set_t set; CPU_ZERO(&set);
@@ -294,12 +319,17 @@ int nr_core_plan_activate(const nr_core_machine_t *m, const nr_core_plan_t *p)
             rt(p->a[i].role) ? " (RT role)" : "");
   return 0;
 }
+/* nr_core_plan_active: returns true once a plan has been activated by nr_core_plan_activate(). Callers: usrp_lib.cpp and the thread helpers. */
 bool nr_core_plan_active(void) { return active; }
+/* nr_core_plan_cpu: returns the planned CPU of role `role` with index `index`, or the fallback when no plan is active or the role is not in it. Callers: passive queues, the USRP ring and the PDCCH workers. */
 int nr_core_plan_cpu(nr_core_role_t role, int index, int fallback)
 {
   if(active) for(int i=0;i<current.count;i++) if(current.a[i].role==role && current.a[i].index==index) return current.a[i].core;
   return fallback;
 }
+/* nr_core_plan_thread_attr: sets the affinity and priority of a thread attribute object from the plan: one CPU when affinity >= 0 (must be a background or real-time CPU), else every background CPU.
+ *   Priority is cleared (set to 0) unless the CPU is a real-time one. Returns 0, or an error code. Caller: nr_core_plan_create().
+ */
 int nr_core_plan_thread_attr(pthread_attr_t *attr, int affinity, int *priority)
 {
   if(!active) return 0;
@@ -312,6 +342,9 @@ int nr_core_plan_thread_attr(pthread_attr_t *attr, int affinity, int *priority)
   return pthread_attr_setaffinity_np(attr,sizeof(set),&set);
 }
 
+/* nr_core_plan_create: creates a thread with the plan's affinity: an active plan gives the thread the CPU in `core` (or the background set) at SCHED_OTHER with explicit inheritance; with no plan it is a plain pthread_create().
+ *   Uses the given attribute object or a local one. Returns the pthread_create() result.
+ */
 int nr_core_plan_create(pthread_t *thread, pthread_attr_t *attr, void *(*fn)(void *), void *arg, int core)
 {
   if (!active) return pthread_create(thread, attr, fn, arg);
