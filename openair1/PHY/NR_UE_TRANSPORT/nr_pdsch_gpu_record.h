@@ -16,8 +16,8 @@ typedef struct {
   float cpu_evm_pct;
   double fo_hz;
   uint32_t abs_sample, early;
-  /* payload: rotation[2*symbols_per_slot] int16, IQ[ant][iq_samples_per_ant] c16,
-   * then CPU descrambled LLR[llr_count] int16. IQ starts early samples before CP0. */
+  uint32_t rxF_symbol; /* version 2: first DM-RS symbol, CPU c16 rxdataF for every antenna */
+  /* payload: rotation, IQ, CPU descrambled LLR, then rxdataF[ant][ofdm_symbol_size] c16. */
 } nr_pdsch_gpu_record_t;
 
 #endif

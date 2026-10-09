@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Recorded CPU reference and paired GPU comparison, never radio. heavy.sh owns
-# the machine-wide lock. On the sandbox, run cpu_dump only (no GPU device).
+# the machine-wide lock. This host has the GB10 GPU for the GPU modes.
 root=$(readlink -f "$(dirname "$0")/../../..")
 orch=/home/nicola/NICOLA/wt/rr-orchestration
 build=$root/cmake_targets/ran_build/build
-mode=${1:?mode: cpu_dump, cpu_compare or gpu_compare}
+mode=${1:?mode: cpu_dump, cpu_compare, gpu_compare or gpu_compare_nobudget}
 capture=${2:-b}
 case "$capture" in
   b) cap=/home/nicola/NICOLA/ota_runs/raw_pci415_12s_b; tick=208029025 ;;
@@ -24,13 +24,17 @@ case "$mode" in
     extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
             ISAC_GPU_SELFCHECK_ENFORCE=1
             ISAC_GPU_DUMP="$root/replays/gpu_compare_${capture}.bin") ;;
+  gpu_compare_nobudget)
+    extra+=(ISAC_PDCCH_GPU_FEP=1 ISAC_PDSCH_GPU=1 ISAC_GPU_SELFCHECK=128
+            ISAC_GPU_SELFCHECK_ENFORCE=1 ISAC_GPU_BUDGET=0
+            ISAC_GPU_DUMP="$root/replays/gpu_compare_nobudget_${capture}.bin") ;;
   *) echo "unknown mode $mode" >&2; exit 2 ;;
 esac
 mkdir -p "$root/replays"
 if [[ $mode == cpu_dump ]]; then
   rm -f "$root/replays/gpu_cpu_${capture}.bin" "$root/replays/pdcch_cpu_${capture}.bin"
-elif [[ $mode == gpu_compare ]]; then
-  rm -f "$root/replays/gpu_compare_${capture}.bin"
+elif [[ $mode == gpu_compare || $mode == gpu_compare_nobudget ]]; then
+  rm -f "$root/replays/gpu_compare_${capture}.bin" "$root/replays/gpu_compare_nobudget_${capture}.bin"
 fi
 env CAP="$cap" CAP_SAMPLES=1474560000 CAP_TICK="$tick" \
   BASECFG="$root/tests/passive_rx/dgx/ue.passive.ota.scanfast.dgx.cfg" \
@@ -59,6 +63,17 @@ env CAP="$cap" CAP_SAMPLES=1474560000 CAP_TICK="$tick" \
   ISAC_PDCCH_JOINT_ANON_RATE=0.1 ISAC_PDCCH_DED_BUDGET_SHARE=2 \
   ISAC_PDSCH_CORES=10,11,12,13,14 ISAC_PDCCH_TIMING=1 ISAC_DCI_RAW_LOG=1 \
   ISAC_PDSCH_SLOT_TIMING=1 ISAC_TD_CB0_BACKEND=gpu ISAC_PDSCH_GPU_LDPC=1 \
+  ISAC_GPU_BUDGET=1 ISAC_GPU_DISCOVERY_BUDGET_PCT=30 ISAC_GPU_WORKER_CORE=10 \
+  ISAC_PDCCH_NID_GPU_CAPTURE_EVERY=2 \
+  ISAC_CSIRS_DISC_CUMULATIVE=1 ISAC_CSIRS_DISC_TRS_PRIORITY=1 \
+  ISAC_PDSCH_SOLVER_SCR_EXPLICIT=1 ISAC_PDSCH_DMRS_ID_REFRESH=64 \
+  ISAC_PDSCH_SOLVER_DMRS_DOMAIN=1 ISAC_PDSCH_SOLVER_COVERAGE=1 \
+  ISAC_PDSCH_SOLVER_LAYOUT_RECOVER=32 ISAC_PDSCH_SOLVER_SCR_CLEAN=0 \
+  ISAC_PDSCH_SOLVER_NL_PREF=1 ISAC_PDCCH_JOINT_ANON_DISCOVERY=1 \
+  ISAC_PDCCH_JOINT_ANON_RATE=1 ISAC_PDCCH_NID_GPU_RECHECK_MS=250 \
+  ISAC_PDSCH_TDRA_RETRY=1 ISAC_PDSCH_CSI_RETRY=1 \
+  ISAC_PDSCH_DMRS_CDM_RETRY=1 ISAC_PDSCH_CSI_POPULATION_RETRY=1 \
+  ISAC_PDSCH_WIDE_MRC_RETRY=1 \
   "${extra[@]}"
 run=$(cat "$root/replays/last")
 if ! rg -q 'SCANTIME' "$run/run.log"; then echo "no SCANTIME: $run/run.log" >&2; exit 1; fi

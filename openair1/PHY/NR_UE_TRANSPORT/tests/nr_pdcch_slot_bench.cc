@@ -71,6 +71,7 @@ int main(int argc, char **argv)
   if (!api || api->init(&rows[0].h.cfg)) { fprintf(stderr,"PDCCH GPU init failed\n"); return 2; }
   std::vector<double> timings;
   size_t words=0, exact=0, sign=0, unsupported=0, batched=0;
+  size_t cpu_zero=0, gpu_zero=0, both_nonzero=0, nonzero_sign=0;
   double xy=0,x2=0,y2=0;
   for (int rep=0;rep<reps;++rep) for (size_t i=0;i<rows.size();) {
     const size_t begin=i;
@@ -98,6 +99,8 @@ int main(int argc, char **argv)
       for (uint32_t b=0;b<j.n_llr;++b) {
         const int16_t x=out[j.llr_offset+b], y=rows[k].cpu[b];
         exact+=x==y; sign+=(x<0)==(y<0); ++words;
+        cpu_zero+=y==0; gpu_zero+=x==0;
+        if (x && y) { ++both_nonzero; nonzero_sign+=(x<0)==(y<0); }
         xy+=(double)x*y; x2+=(double)x*x; y2+=(double)y*y;
       }
     }
@@ -105,5 +108,7 @@ int main(int argc, char **argv)
   const double corr=x2>0 && y2>0?xy/std::sqrt(x2*y2):0;
   printf("PDCCH GPU scan window us p50=%.1f p99=%.1f, batched_windows=%zu; CPU LLR exact=%zu/%zu sign=%zu/%zu corr=%.6f unsupported=%zu\n",
          pct(timings,.5),pct(timings,.99),batched,exact,words,sign,words,corr,unsupported);
+  printf("PDCCH zero/sign split: cpu_zero=%zu/%zu gpu_zero=%zu/%zu nonzero_sign=%zu/%zu\n",
+         cpu_zero, words, gpu_zero, words, nonzero_sign, both_nonzero);
   return unsupported || !words || sign!=words || corr<.99995 ? 1 : 0;
 }

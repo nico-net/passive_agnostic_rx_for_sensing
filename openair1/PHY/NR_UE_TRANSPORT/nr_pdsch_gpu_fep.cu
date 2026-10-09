@@ -49,6 +49,7 @@ static size_t g_llr_cap;
 static double g_fep_us, g_llr_us;
 static int g_last_chunks;
 static float g_llr_scale = 4.0f;
+static int g_force_ant = -1; /* recorded-input branch isolation; unset in production */
 
 /* ---------------------------------------------------------------- FEP ---- */
 /* Gather one OFDM symbol per (ant, sym): CP removal with the 1/8-CP early window, ring wrap, FO
@@ -94,7 +95,12 @@ __global__ void k_fep_rotate(float2 *__restrict__ rxF, const short2 *__restrict_
   }
   float sn, cs;
   sincosf(2.f * (float)M_PI * (float)k * (float)early / (float)N, &sn, &cs);
-  *p = make_float2(v.x * cs - v.y * sn, v.x * sn + v.y * cs);
+  /* OAI's ARM dft(..., scale=1) scales each radix stage, for a net 1/sqrt(N).
+   * cuFFT is unnormalised. Keep the FFT output in the same dynamic range as the
+   * CPU rxdataF before LS estimation and diagnostic int16 readback. */
+  const float fft_scale = rsqrtf((float)N);
+  *p = make_float2((v.x * cs - v.y * sn) * fft_scale,
+                   (v.x * sn + v.y * cs) * fft_scale);
 }
 
 /* ----------------------------------------------------------- DM-RS gold ---- */
@@ -121,7 +127,14 @@ __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__
     x2 = (x2 >> 1) | (((x2 ^ (x2 >> 1) ^ (x2 >> 2) ^ (x2 >> 3)) & 1u) << 30);
   }
   uint32_t *g = gold + ((size_t)j * MAX_DMRS_SYM + di) * GOLD_WORDS;
-  for (int w = 0; w < GOLD_WORDS; w++) {
+  /* The old loop always generated 8192 bits. The largest pilot index this
+   * allocation can read needs only 4*ppr bits per RB from dmrs_ref_rb. On the
+   * recorded 5/48-RB jobs this removes most of the serial Gold work. */
+  const int ppr = job.dmrs_type == 1 ? 3 : 2;
+  const int end_rb = job.start_rb + job.nb_rb - job.dmrs_ref_rb;
+  const int words = (4 * ppr * end_rb + 31) / 32;
+  if (end_rb <= 0 || words > GOLD_WORDS) return;
+  for (int w = 0; w < words; w++) {
     uint32_t word = 0;
     for (int b = 0; b < 32; b++) {
       word |= ((x1 ^ x2) & 1u) << b;
@@ -280,7 +293,8 @@ __device__ inline float pam_level(int qm, int code)
 
 /* One thread per (job, data RE). */
 __global__ void k_llr(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 *__restrict__ ls, const float *__restrict__ sigma,
-                      const float2 *__restrict__ rxF, int N, int nsym, int nant, int fco, int16_t *__restrict__ llr, float scale)
+                      const float2 *__restrict__ rxF, int N, int nsym, int nant, int fco, int16_t *__restrict__ llr, float scale,
+                      int force_ant)
 {
   const int j = blockIdx.y;
   const nr_gpu_pdsch_job_t job = jobs[j];
@@ -328,7 +342,7 @@ __global__ void k_llr(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 
   const float2 *symp = rxF + (size_t)sym * N;
   const int kk = (fco + 12 * job.start_rb + k) % N;
   for (int a = 0; a < nant; a++) {
-    const float inv = rsqrtf(sigma[j * MAX_ANT + a]);
+    const float inv = force_ant >= 0 && a != force_ant ? 0.f : rsqrtf(sigma[j * MAX_ANT + a]);
     const float2 ya = symp[(size_t)a * nsym * N + kk];
     y[a] = make_float2(ya.x * inv, ya.y * inv);
     for (int l = 0; l < Nl; l++) {
@@ -459,6 +473,10 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
   if (const char *e = getenv("NR_GPU_LLR_SCALE"))
     g_llr_scale = (float)atof(e);
+  if (const char *e = getenv("NR_GPU_FORCE_ANT")) {
+    const int a = atoi(e);
+    if (a >= 0 && a < cfg->nant) g_force_ant = a;
+  }
   cudaFuncAttributes attr;
   CK(cudaFuncGetAttributes(&attr, k_fep_gather));
   CK(cudaFuncGetAttributes(&attr, k_fep_rotate));
@@ -562,7 +580,7 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
   k_sigma<<<dim3(n, nant), 256, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_sigma);
   if (max_re > 0)
     k_llr<<<dim3((max_re + 127) / 128, n), 128, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_sigma, g_d_rxF, N, ns, nant, fco, g_d_llr,
-                                                             g_llr_scale);
+                                                             g_llr_scale, g_force_ant);
   CK((cudaError_t)nr_gpu_copy_async(g_h_llr, g_d_llr, (size_t)total * sizeof(int16_t), g_stream));
   CK(rt.wait(g_stream));
   CK(cudaGetLastError());

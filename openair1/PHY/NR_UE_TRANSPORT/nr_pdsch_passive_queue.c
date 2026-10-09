@@ -75,7 +75,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "nr_gpu_fep_hygiene.h"
 #include "nr_pdsch_gpu_record.h"
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
-                             const nr_pdsch_passive_decode_result_t *dec);
+                             const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride);
 #include "nr_csirs_disc.h"
 
 #include <limits.h>
@@ -1500,7 +1500,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const uint64_t dec_t0 = now_ns();
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
-    if (!gpu_job) nr_pdsch_gpu_record_cpu(ue, &job, &dec);
+    if (!gpu_job) nr_pdsch_gpu_record_cpu(ue, &job, &dec, &rxdataF[0][0], rxdataF_sz);
     nr_dlsch_mrc_mode_override = -1;
     nr_dlsch_irc_override = -1;
     nr_dlsch_eq_override = -1;

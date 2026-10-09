@@ -12,7 +12,7 @@
 
 struct Sample {
   nr_pdsch_gpu_record_t h;
-  std::vector<int16_t> rot, iq, cpu;
+  std::vector<int16_t> rot, iq, cpu, rxF;
 };
 static double us(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
 { return std::chrono::duration<double, std::micro>(b - a).count(); }
@@ -26,18 +26,20 @@ static bool read_one(FILE *f, Sample &s)
 {
   if (fread(&s.h, sizeof(s.h), 1, f) != 1) return false;
   const auto &h = s.h;
-  if (h.magic != NR_PDSCH_GPU_RECORD_MAGIC || h.version != 1 || h.cfg.nant < 1 || h.cfg.nant > 4
+  if (h.magic != NR_PDSCH_GPU_RECORD_MAGIC || h.version != 2 || h.cfg.nant < 1 || h.cfg.nant > 4
       || h.cfg.symbols_per_slot != 14 || h.cfg.ofdm_symbol_size < 128 || h.cfg.ofdm_symbol_size > 8192
       || h.iq_samples_per_ant < 14u * h.cfg.ofdm_symbol_size || h.iq_samples_per_ant > 200000
       || h.llr_count == 0 || h.llr_count > (1u << 22)) return false;
   s.rot.resize(2 * h.cfg.symbols_per_slot);
   s.iq.resize((size_t)2 * h.cfg.nant * h.iq_samples_per_ant);
   s.cpu.resize(h.llr_count);
-  const size_t expected = sizeof(h) + (s.rot.size() + s.iq.size() + s.cpu.size()) * sizeof(int16_t);
+  s.rxF.resize((size_t)2 * h.cfg.nant * h.cfg.ofdm_symbol_size);
+  const size_t expected = sizeof(h) + (s.rot.size() + s.iq.size() + s.cpu.size() + s.rxF.size()) * sizeof(int16_t);
   if (h.bytes != expected) return false;
   return fread(s.rot.data(), sizeof(int16_t), s.rot.size(), f) == s.rot.size()
       && fread(s.iq.data(), sizeof(int16_t), s.iq.size(), f) == s.iq.size()
-      && fread(s.cpu.data(), sizeof(int16_t), s.cpu.size(), f) == s.cpu.size();
+      && fread(s.cpu.data(), sizeof(int16_t), s.cpu.size(), f) == s.cpu.size()
+      && fread(s.rxF.data(), sizeof(int16_t), s.rxF.size(), f) == s.rxF.size();
 }
 
 /* 38.211 Gold scrambling bits. CPU LLRs in the dump have already been descrambled. */
@@ -101,6 +103,8 @@ int main(int argc, char **argv)
   std::vector<double> slot_us, fep_us, llr_us;
   size_t compared = 0, sign_ok = 0, short_llr = 0, split_slots = 0;
   double xy = 0, x2 = 0, y2 = 0;
+  double fep_ref_pow = 0, fep_gpu_pow = 0, fep_cross_re = 0, fep_cross_im = 0;
+  size_t fep_points = 0;
   for (int rep = 0; rep < reps; ++rep) for (size_t i = 0; i < samples.size();) {
     const size_t begin = i;
     const uint32_t slot = samples[i].h.absolute_slot;
@@ -131,19 +135,48 @@ int main(int argc, char **argv)
     if (n < 0) { fprintf(stderr, "GPU failure at slot %u\n", slot); return 1; }
     if (rep == 0 && last_chunks && last_chunks() != 1) ++split_slots;
     slot_us.push_back(us(t0, t2)); fep_us.push_back(us(t0, t1)); llr_us.push_back(us(t1, t2));
+    if (rep == 0) {
+      const int N = s.h.cfg.ofdm_symbol_size;
+      std::vector<int16_t> gpu_rxF((size_t)2 * 14 * N);
+      for (int a = 0; a < s.h.cfg.nant; ++a) {
+        if (api->read_rxdataF(a, gpu_rxF.data())) { fprintf(stderr, "GPU FEP read failed\n"); return 1; }
+        for (size_t k = begin; k < i; ++k) {
+          const auto &ref = samples[k];
+          const int sym = ref.h.rxF_symbol;
+          for (int cr = 0; cr < 12 * ref.h.job.nb_rb; ++cr) {
+            const int sc = (s.h.cfg.first_carrier_offset + 12 * ref.h.job.start_rb + cr) % N;
+            const size_t ci = ((size_t)a * N + sc) * 2, gi = ((size_t)sym * N + sc) * 2;
+            const double ar = ref.rxF[ci], ai = ref.rxF[ci + 1], br = gpu_rxF[gi], bi = gpu_rxF[gi + 1];
+            fep_ref_pow += ar * ar + ai * ai;
+            fep_gpu_pow += br * br + bi * bi;
+            fep_cross_re += ar * br + ai * bi;
+            fep_cross_im += ai * br - ar * bi;
+            ++fep_points;
+          }
+        }
+      }
+    }
     if (rep == 0) for (size_t k = begin; k < i; ++k) {
       const auto &j = jobs[k - begin];
       const auto &ref = samples[k];
       if (!j.n_llr || j.n_llr != ref.h.llr_count) { ++short_llr; continue; }
       int16_t *v = llr.data() + j.llr_offset;
       descramble(v, j.n_llr, ref.h.rnti, ref.h.data_scrambling_id);
+      size_t job_ok = 0;
       for (uint32_t x = 0; x < j.n_llr; ++x) {
-        sign_ok += (v[x] < 0) == (ref.cpu[x] < 0);
+        const bool same = (v[x] < 0) == (ref.cpu[x] < 0);
+        sign_ok += same;
+        job_ok += same;
         xy += (double)v[x] * ref.cpu[x];
         x2 += (double)v[x] * v[x];
         y2 += (double)ref.cpu[x] * ref.cpu[x];
         ++compared;
       }
+      if (job_ok * 1000 < (size_t)j.n_llr * 999)
+        printf("PDSCH grant slot=%u rnti=0x%04x rb=%u+%u sym=%u+%u dmrs=0x%04x cdm=%u Nl=%u Qm=%u sign=%zu/%u (%.4f) cpu_crc=%u evm=%.1f%%\n",
+               ref.h.absolute_slot, ref.h.rnti, j.start_rb, j.nb_rb, j.start_symbol, j.nb_symbols,
+               j.dmrs_mask, j.n_cdm_groups_no_data, j.Nl, j.Qm, job_ok, j.n_llr,
+               (double)job_ok / j.n_llr, ref.h.crc_ok, ref.h.cpu_evm_pct);
     }
   }
   printf("GPU slot wall us: p50=%.1f p99=%.1f; FEP p50=%.1f p99=%.1f; chest+LLR p50=%.1f p99=%.1f\n",
@@ -152,5 +185,10 @@ int main(int argc, char **argv)
   const double corr = x2 > 0 && y2 > 0 ? xy / std::sqrt(x2 * y2) : 0.;
   printf("CPU/GPU LLR sign agreement=%zu/%zu (%.6f), corr=%.6f, length_mismatch=%zu, split_slots=%zu; GPU TB CRC and post-EQ SNR: receiver replay required\n",
          sign_ok, compared, compared ? (double)sign_ok / compared : 0., corr, short_llr, split_slots);
+  const double fep_corr = fep_ref_pow > 0 && fep_gpu_pow > 0
+      ? std::hypot(fep_cross_re, fep_cross_im) / std::sqrt(fep_ref_pow * fep_gpu_pow) : 0.;
+  printf("CPU/GPU FEP first-DMRS: points=%zu corr=%.8f gpu/cpu rms=%.6f fit_error_db=%.2f\n",
+         fep_points, fep_corr, fep_ref_pow > 0 ? std::sqrt(fep_gpu_pow / fep_ref_pow) : NAN,
+         fep_corr > 0 && fep_corr < 1 ? 10 * std::log10(1 - fep_corr * fep_corr) : NAN);
   return short_llr || !compared || (double)sign_ok / compared < .995 || corr < .995 ? 1 : 0;
 }

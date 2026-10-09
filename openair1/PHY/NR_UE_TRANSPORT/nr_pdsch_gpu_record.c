@@ -9,7 +9,7 @@
 /* Called after the CPU decode while this consumer still owns its IQ snapshot.
  * Bounded, opt-in I/O belongs to the offline replay only. */
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
-                             const nr_pdsch_passive_decode_result_t *dec)
+                             const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride)
 {
   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
   static const char *path;
@@ -22,7 +22,7 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
     left = limit ? atoi(limit) : 128;
     __atomic_store_n(&enabled, path && *path, __ATOMIC_RELAXED);
   }
-  if (!enabled || left <= 0 || dec->status == NR_PDSCH_PASSIVE_DECODE_ERROR
+  if (!enabled || left <= 0 || dec->config_recovered || !rxdataF || dec->status == NR_PDSCH_PASSIVE_DECODE_ERROR
       || dec->status == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) goto out;
   nr_pdsch_passive_grant_t grant = src->grant;
   grant.source_absolute_slot = src->absolute_slot;
@@ -42,7 +42,7 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
   if (window >= ring_len || fp->nb_antennas_rx > 4 || fp->symbols_per_slot > 14) goto out;
   nr_pdsch_gpu_record_t h = {0};
   h.magic = NR_PDSCH_GPU_RECORD_MAGIC;
-  h.version = 1;
+  h.version = 2;
   h.absolute_slot = src->absolute_slot;
   h.cfg = (nr_gpu_fep_cfg_t){.nant = fp->nb_antennas_rx, .ofdm_symbol_size = fp->ofdm_symbol_size,
     .nb_prefix_samples = fp->nb_prefix_samples, .nb_prefix_samples0 = fp->nb_prefix_samples0,
@@ -60,10 +60,12 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
   h.fo_hz = ue->cont_fo_comp ? src->fo_hz : 0.0;
   h.abs_sample = off;
   h.early = early;
+  h.rxF_symbol = __builtin_ctz((unsigned)job.dmrs_mask);
   const size_t rot_bytes = (size_t)fp->symbols_per_slot * 2 * sizeof(int16_t);
   const size_t iq_bytes = (size_t)fp->nb_antennas_rx * window * 2 * sizeof(int16_t);
   const size_t llr_bytes = (size_t)G * sizeof(int16_t);
-  h.bytes = sizeof(h) + rot_bytes + iq_bytes + llr_bytes;
+  const size_t rxF_bytes = (size_t)fp->nb_antennas_rx * fp->ofdm_symbol_size * sizeof(c16_t);
+  h.bytes = sizeof(h) + rot_bytes + iq_bytes + llr_bytes + rxF_bytes;
   FILE *f = fopen(path, "ab");
   if (!f) goto out;
   const c16_t *rot = fp->symbol_rotation[link_type_dl]
@@ -78,6 +80,9 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
       ok = fwrite(rx[a], sizeof(c16_t), window - first, f) == window - first;
   }
   if (ok) ok = fwrite(cpu_llr, llr_bytes, 1, f) == 1;
+  for (int a = 0; a < fp->nb_antennas_rx && ok; ++a)
+    ok = fwrite(rxdataF + (size_t)a * rxF_stride + (size_t)h.rxF_symbol * fp->ofdm_symbol_size,
+                sizeof(c16_t), fp->ofdm_symbol_size, f) == (size_t)fp->ofdm_symbol_size;
   if (ok) --left;
   fclose(f);
 out:
