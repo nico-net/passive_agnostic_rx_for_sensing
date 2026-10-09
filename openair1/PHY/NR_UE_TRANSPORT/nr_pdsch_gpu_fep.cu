@@ -743,3 +743,26 @@ static void api_timing(double *fep_us, double *llr_us)
 static const nr_gpu_fep_api_t g_api = {api_init, api_fep_slot, api_pdsch_llr, api_read_rxdataF, api_timing,
                                       api_read_rxdataF_symbol};
 extern "C" const nr_gpu_fep_api_t *nr_gpu_fep_api(void) { return nr_gpu_module_ready() ? &g_api : nullptr; }
+
+/* Offline stage isolation only. Deliberately separate from the receiver API. */
+extern "C" int nr_pdsch_gpu_debug_ls(int job, int di, int layer, int ant, float *out, float *noise)
+{
+  if (g_init_state != 1 || job < 0 || job >= MAX_JOBS || di < 0 || di >= MAX_DMRS_SYM
+      || layer < 0 || layer >= MAX_PORTS || ant < 0 || ant >= g_cfg.nant) return -1;
+  CK(cudaMemcpy(out, g_d_ls + (((size_t)job * MAX_DMRS_SYM + di) * MAX_PORTS + layer) * MAX_ANT * MAX_PILOTS
+                              + (size_t)ant * MAX_PILOTS, MAX_PILOTS * sizeof(float2), cudaMemcpyDeviceToHost));
+  CK(cudaMemcpy(noise, g_d_sigma + job * MAX_ANT + ant, sizeof(float), cudaMemcpyDeviceToHost));
+  return 0;
+}
+extern "C" int nr_pdsch_gpu_debug_cpu_fep(const int16_t *rx)
+{
+  if (g_init_state != 1 || !rx) return -1;
+  CK(cudaStreamSynchronize(g_stream));
+  const size_t count = (size_t)g_cfg.symbols_per_slot * g_cfg.ofdm_symbol_size;
+  for (int a = 0; a < g_cfg.nant; ++a) {
+    for (size_t i = 0; i < count; ++i)
+      g_h_check[i] = make_float2(rx[2*(a*count+i)], rx[2*(a*count+i)+1]);
+    CK(cudaMemcpy(g_d_rxF + a*count, g_h_check, count*sizeof(float2), cudaMemcpyHostToDevice));
+  }
+  return 0;
+}

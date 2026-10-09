@@ -1,6 +1,7 @@
 /* Recorded-slot GPU benchmark. The CPU-only mode validates a replay dump without
  * a CUDA device; GPU mode reports one FEP + one batched LLR call per slot. */
 #include "nr_pdsch_gpu_record.h"
+#include "nr_pdsch_gpu_stage.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -10,9 +11,12 @@
 #include <dlfcn.h>
 #include <vector>
 
+struct Stage { nr_pdsch_gpu_stage_row_t h; std::vector<int16_t> ls, fir; };
 struct Sample {
   nr_pdsch_gpu_record_t h;
   std::vector<int16_t> rot, iq, cpu, rxF;
+  std::vector<Stage> stages;
+  nr_pdsch_gpu_stage_meta_t meta = {};
 };
 static double us(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
 { return std::chrono::duration<double, std::micro>(b - a).count(); }
@@ -26,20 +30,38 @@ static bool read_one(FILE *f, Sample &s)
 {
   if (fread(&s.h, sizeof(s.h), 1, f) != 1) return false;
   const auto &h = s.h;
-  if (h.magic != NR_PDSCH_GPU_RECORD_MAGIC || h.version != 2 || h.cfg.nant < 1 || h.cfg.nant > 4
+  if (h.magic != NR_PDSCH_GPU_RECORD_MAGIC || (h.version != 2 && h.version != 3) || h.cfg.nant < 1 || h.cfg.nant > 4
       || h.cfg.symbols_per_slot != 14 || h.cfg.ofdm_symbol_size < 128 || h.cfg.ofdm_symbol_size > 8192
       || h.iq_samples_per_ant < 14u * h.cfg.ofdm_symbol_size || h.iq_samples_per_ant > 200000
       || h.llr_count == 0 || h.llr_count > (1u << 22)) return false;
   s.rot.resize(2 * h.cfg.symbols_per_slot);
   s.iq.resize((size_t)2 * h.cfg.nant * h.iq_samples_per_ant);
   s.cpu.resize(h.llr_count);
-  s.rxF.resize((size_t)2 * h.cfg.nant * h.cfg.ofdm_symbol_size);
+  s.rxF.resize((size_t)2 * h.cfg.nant * h.cfg.ofdm_symbol_size * (h.version == 3 ? 14 : 1));
   const size_t expected = sizeof(h) + (s.rot.size() + s.iq.size() + s.cpu.size() + s.rxF.size()) * sizeof(int16_t);
-  if (h.bytes != expected) return false;
-  return fread(s.rot.data(), sizeof(int16_t), s.rot.size(), f) == s.rot.size()
+  if ((h.version == 2 && h.bytes != expected) || h.bytes < expected) return false;
+  bool ok = fread(s.rot.data(), sizeof(int16_t), s.rot.size(), f) == s.rot.size()
       && fread(s.iq.data(), sizeof(int16_t), s.iq.size(), f) == s.iq.size()
       && fread(s.cpu.data(), sizeof(int16_t), s.cpu.size(), f) == s.cpu.size()
       && fread(s.rxF.data(), sizeof(int16_t), s.rxF.size(), f) == s.rxF.size();
+  size_t bytes = expected;
+  if (ok && h.version == 3) {
+    uint32_t rows;
+    if (fread(&rows, sizeof(rows), 1, f) != 1 || rows > 224) return false;
+    if (fread(&s.meta, sizeof(s.meta), 1, f) != 1) return false;
+    bytes += sizeof(rows) + sizeof(s.meta);
+    for (uint32_t i = 0; i < rows; ++i) {
+      Stage r;
+      if (fread(&r.h, sizeof(r.h), 1, f) != 1 || r.h.count > 3300 || !r.h.count
+          || r.h.symbol >= 14 || r.h.layer >= h.job.Nl || r.h.antenna >= (unsigned)h.cfg.nant) return false;
+      r.ls.resize(r.h.count*2); r.fir.resize(r.h.count*2);
+      if (fread(r.ls.data(), 4, r.h.count, f) != r.h.count
+          || fread(r.fir.data(), 4, r.h.count, f) != r.h.count) return false;
+      bytes += sizeof(r.h) + r.h.count*8;
+      s.stages.push_back(std::move(r));
+    }
+  }
+  return ok && bytes == h.bytes;
 }
 
 /* 38.211 Gold scrambling bits. CPU LLRs in the dump have already been descrambled. */
@@ -97,6 +119,9 @@ int main(int argc, char **argv)
   void *lib = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   if (!lib) { fprintf(stderr, "dlopen libpdsch_gpu.so: %s\n", dlerror()); return 2; }
   auto get = (const nr_gpu_fep_api_t *(*)())dlsym(lib, "nr_gpu_fep_api");
+  auto debug_ls = (int (*)(int,int,int,int,float *,float *))dlsym(lib,"nr_pdsch_gpu_debug_ls");
+  auto cpu_fep = (int (*)(const int16_t *))dlsym(lib,"nr_pdsch_gpu_debug_cpu_fep");
+  const bool inject_cpu_fep = getenv("ISAC_GPU_BENCH_CPU_FEP") && atoi(getenv("ISAC_GPU_BENCH_CPU_FEP"));
   auto last_chunks = (int (*)())dlsym(lib, "nr_gpu_fep_last_chunks");
   const nr_gpu_fep_api_t *api = get ? get() : nullptr;
   if (!api || api->init(&samples[0].h.cfg)) { fprintf(stderr, "GPU unavailable or init failed\n"); return 2; }
@@ -134,6 +159,9 @@ int main(int argc, char **argv)
     const auto t0 = std::chrono::steady_clock::now();
     const int rc = api->fep_slot(rx, s.h.iq_samples_per_ant, s.h.early, s.h.abs_sample,
                                  s.h.fo_hz, s.rot.data());
+    if (inject_cpu_fep && (s.h.version != 3 || !cpu_fep || cpu_fep(s.rxF.data()))) {
+      fprintf(stderr,"CPU FEP isolation needs v3 full-symbol records\n"); return 2;
+    }
     const auto t1 = std::chrono::steady_clock::now();
     const int64_t n = rc ? -1 : api->pdsch_llr(jobs.data(), jobs.size(), llr.data(), llr.size());
     const auto t2 = std::chrono::steady_clock::now();
@@ -154,7 +182,7 @@ int main(int argc, char **argv)
           const int sym = ref.h.rxF_symbol;
           for (int cr = 0; cr < 12 * ref.h.job.nb_rb; ++cr) {
             const int sc = (s.h.cfg.first_carrier_offset + 12 * ref.h.job.start_rb + cr) % N;
-            const size_t ci = ((size_t)a * N + sc) * 2, gi = ((size_t)sym * N + sc) * 2;
+            const size_t ci = ((size_t)a * N * (ref.h.version == 3 ? 14 : 1) + (ref.h.version == 3 ? sym*N : 0) + sc) * 2, gi = ((size_t)sym * N + sc) * 2;
             const double ar = ref.rxF[ci], ai = ref.rxF[ci + 1], br = gpu_rxF[gi], bi = gpu_rxF[gi + 1];
             fep_ref_pow += ar * ar + ai * ai;
             fep_gpu_pow += br * br + bi * bi;
@@ -171,6 +199,28 @@ int main(int argc, char **argv)
       if (!j.n_llr || j.n_llr != ref.h.llr_count) { ++short_llr; continue; }
       int16_t *v = llr.data() + j.llr_offset;
       descramble(v, j.n_llr, ref.h.rnti, ref.h.data_scrambling_id);
+      if (debug_ls) for (const auto &st : ref.stages) {
+        int di = __builtin_popcount((unsigned)j.dmrs_mask & ((1u<<st.h.symbol)-1));
+        float ls[1650], noise;
+        if (debug_ls(k-begin, di, st.h.layer, st.h.antenna, ls, &noise)) return 2;
+        double e_ls=0, e_fir=0, p_ls=0, p_fir=0;
+        const int type=j.dmrs_type, per=type==1?4:6, delta=type==1?(j.ports[st.h.layer]>>1)&1:2*((j.ports[st.h.layer]>>1)%3);
+        const int npil=j.nb_rb*(type==1?3:2);
+        for (unsigned x=0;x<st.h.count;++x) {
+          float t=std::max(0.f,std::min((float)(npil-1),(x-delta-(type==1?1.f:.5f))/per));
+          int n=(int)t; float w=t-n;
+          for (int ax=0;ax<2;++ax) {
+            double a=st.ls[2*x+ax], b=ls[2*(x/per)+ax];
+            e_ls+=(a-b)*(a-b); p_ls+=a*a;
+            double c=st.fir[2*x+ax], d=ls[2*n+ax];
+            if(n+1<npil) d+=w*(ls[2*(n+1)+ax]-d);
+            e_fir+=(c-d)*(c-d); p_fir+=c*c;
+          }
+        }
+        printf("STAGE slot=%u rnti=%04x sym=%u layer=%u ant=%u delay_cpu=%d noise_cpu=%u noise_gpu=%.3f ls_db=%.2f fir_db=%.2f cpu_fep=%d\n",
+               ref.h.absolute_slot, ref.h.rnti, st.h.symbol, st.h.layer, st.h.antenna, st.h.delay, st.h.noise, noise,
+               10*log10(e_ls/std::max(1.,p_ls)),10*log10(e_fir/std::max(1.,p_fir)), inject_cpu_fep);
+      }
       size_t job_ok = 0;
       for (uint32_t x = 0; x < j.n_llr; ++x) {
         const bool same = (v[x] < 0) == (ref.cpu[x] < 0);
@@ -195,6 +245,10 @@ int main(int argc, char **argv)
         y2 += (double)ref.cpu[x] * ref.cpu[x];
         ++compared;
       }
+      if (ref.h.version == 3)
+        printf("PROVENANCE slot=%u rnti=%04x recovered=%u mrc=%u mmse=%u decoder=%u csi=%u ptrs=%u sign=%zu/%u\n",
+               ref.h.absolute_slot, ref.h.rnti, ref.meta.recovered, ref.meta.mrc_mode, ref.meta.mmse_mode,
+               ref.meta.decoder, ref.meta.csi_count, ref.meta.ptrs, job_ok, j.n_llr);
       if (job_ok * 1000 < (size_t)j.n_llr * 999)
         printf("PDSCH grant slot=%u rnti=0x%04x rb=%u+%u sym=%u+%u dmrs=0x%04x cdm=%u Nl=%u Qm=%u sign=%zu/%u (%.4f) cpu_crc=%u evm=%.1f%%\n",
                ref.h.absolute_slot, ref.h.rnti, j.start_rb, j.nb_rb, j.start_symbol, j.nb_symbols,
@@ -220,5 +274,5 @@ int main(int argc, char **argv)
   printf("CPU/GPU FEP first-DMRS: points=%zu corr=%.8f gpu/cpu rms=%.6f fit_error_db=%.2f\n",
          fep_points, fep_corr, fep_ref_pow > 0 ? std::sqrt(fep_gpu_pow / fep_ref_pow) : NAN,
          fep_corr > 0 && fep_corr < 1 ? 10 * std::log10(1 - fep_corr * fep_corr) : NAN);
-  return short_llr || !compared || (double)sign_ok / compared < .995 || corr < .995 ? 1 : 0;
+  return short_llr || !compared || (double)sign_ok / compared < .999 || corr < .995 ? 1 : 0;
 }

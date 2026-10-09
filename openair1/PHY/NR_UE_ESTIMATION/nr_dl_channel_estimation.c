@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_stage.h" /* GPU parity stage snapshots (weak, default off) */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
 __thread bool nr_passive_tpool_inline; /* ISAC_PDSCH_INLINE_POOL, nr_passive_tpool.h */
 #include <math.h>
@@ -1149,6 +1150,9 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
             (e_f > 0.0 && e_d > 0.0) ? hypot(xr, xi) / sqrt(e_f * e_d) : 0.0, atan2(xi, xr) * 180.0 / M_PI,
             e_f > 0.0 ? sqrt(e_d / e_f) : 0.0, (unsigned long long)(nest_count ? noise_amp2 / nest_count : 0), idx);
   }
+  if (nr_pdsch_gpu_stage_chest)
+    nr_pdsch_gpu_stage_chest(dl_ls_est, dl_ch, idx, delay->est_delay,
+                             nest_count ? noise_amp2 / nest_count : 0);
   if (nvar && nest_count > 0) {
     /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
      * this helper is called once per receive antenna and never sums across them, so dividing by the
@@ -1324,6 +1328,9 @@ void NFAPI_NR_DMRS_TYPE2_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     nest_count++;
   }
 
+  if (nr_pdsch_gpu_stage_chest)
+    nr_pdsch_gpu_stage_chest(dl_ls_est, dl_ch, idx, delay->est_delay,
+                             nest_count ? noise_amp2 / nest_count : 0);
   if (nvar && nest_count > 0) {
     /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
      * this helper is called once per receive antenna and never sums across them, so dividing by the
@@ -1471,6 +1478,8 @@ static void nr_pdsch_chest_ant_task(void *arg)
   c16_t *dl_ch = (c16_t *)&dl_ch_estimates[a->nl * fp->nb_antennas_rx + aarx][ch_offset];
   memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
 
+  if (nr_pdsch_gpu_stage_context)
+    nr_pdsch_gpu_stage_context(nr_dl_chest_delay_epoch, a->symbol, a->nl, aarx);
   delay_t delay = {0};
   nr_dl_chest_diag_request = a->diag_request;
   nr_dl_chest_cur_ant = a->aarx;
@@ -1646,6 +1655,8 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
       if (only_ant >= 0 && aarx != only_ant)
         continue;
 
+      if (nr_pdsch_gpu_stage_context)
+        nr_pdsch_gpu_stage_context(nr_dl_chest_delay_epoch, symbol, nl, aarx);
       if (config_type == NFAPI_NR_DMRS_TYPE1 && ue->chest_freq == 0) {
         NFAPI_NR_DMRS_TYPE1_linear_interp(fp,
                                           rxF,
