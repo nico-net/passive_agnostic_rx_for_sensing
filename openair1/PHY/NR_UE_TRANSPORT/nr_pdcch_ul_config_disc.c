@@ -191,8 +191,12 @@ static void geometry(ue_t *u, const nr_pdcch_blind_ul_opts_t *base,
   static const uint8_t width_pairs[][2] = {
     {0,0}, {1,0}, {0,1}, {1,1}, {0,2}, {2,0}, {1,2}, {2,1}, {2,2}
   };
-  const char *solver_flag=getenv("ISAC_UL_PUSCH_SOLVER");
-  const bool solver=solver_flag && strcmp(solver_flag,"1")==0;
+  static int solver_cached=-1; /* read once (review fix: no per-proposal getenv) */
+  if (__atomic_load_n(&solver_cached,__ATOMIC_RELAXED)<0) {
+    const char *solver_flag=getenv("ISAC_UL_PUSCH_SOLVER");
+    __atomic_store_n(&solver_cached,(solver_flag && strcmp(solver_flag,"1")==0)?1:0,__ATOMIC_RELAXED);
+  }
+  const bool solver=__atomic_load_n(&solver_cached,__ATOMIC_RELAXED)==1;
   for (int pass = 0; pass < (solver ? 5 : 4) && u->n < UL_CFG_HYP; ++pass)
   for (int g = 0; g < 10 && u->n < UL_CFG_HYP; ++g) {
     const int start = starts[g], size = sizes[g];

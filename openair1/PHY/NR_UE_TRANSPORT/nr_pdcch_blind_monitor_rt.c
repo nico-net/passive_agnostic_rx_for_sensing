@@ -6921,6 +6921,17 @@ constdiag_done:;
           nr_srs_passive_trigger(u->rnti,source_absolute_slot,u->srs_request);
         discovery_evidence("ul_admitted", "UL", cand_task[ti].frame, cand_task[ti].slot,
                             u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
+        { /* ISAC_UL_DBG_LOG=1 (diagnostic, default off): every admitted UL DCI with its raw payload */
+          static int s_uldbg = -1;
+          if (s_uldbg < 0) s_uldbg = getenv("ISAC_UL_DBG_LOG") && atoi(getenv("ISAC_UL_DBG_LOG")) ? 1 : 0;
+          if (s_uldbg) {
+            char hx[49];
+            LOG_A(PHY, "SENSING: ULDBG_DCI abs=%ld f=%d s=%d rnti=0x%04x fmt=%d len=%u cce=%d al=%d k2=%u prb=%u+%u mcs=%u payload=0x%s\n",
+                  source_absolute_slot, cand_task[ti].frame, cand_task[ti].slot, u->rnti, (int)u->ul_dci_format,
+                  u->dci_length, cand_task[ti].cce, (int)cand_task[ti].L, u->k2, u->bwp_start + u->start_rb, u->num_rb,
+                  u->mcs, nr_dci_bits_hex(u->raw_payload.w, u->dci_length, false, hx));
+          }
+        }
         nr_pdcch_dci01_layout_observe(ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length,
                                       u->raw_payload);
         { /* grant-loss SCORING only: matchable to the gNB scheduler log */

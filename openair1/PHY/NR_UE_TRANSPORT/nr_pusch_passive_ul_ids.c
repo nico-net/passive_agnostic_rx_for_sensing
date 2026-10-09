@@ -57,11 +57,17 @@ uint64_t nr_pusch_passive_ul_ids_dropped(void)
 
 bool nr_pusch_passive_ul_ue_state_enabled(void)
 {
-  const char *v=getenv("ISAC_UL_UE_STATE");
-  const char *chain=getenv("ISAC_UL_PUSCH_CHAIN");
-  const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
-  return (chain && strcmp(chain,"1")==0) || (solver && strcmp(solver,"1")==0) ||
-         (v && strcmp(v,"1")==0);
+  static int cached=-1; /* read once (review fix: no per-call getenv) */
+  int on=__atomic_load_n(&cached,__ATOMIC_RELAXED);
+  if (on<0) {
+    const char *v=getenv("ISAC_UL_UE_STATE");
+    const char *chain=getenv("ISAC_UL_PUSCH_CHAIN");
+    const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
+    on=(chain && strcmp(chain,"1")==0) || (solver && strcmp(solver,"1")==0) ||
+       (v && strcmp(v,"1")==0);
+    __atomic_store_n(&cached,on,__ATOMIC_RELAXED);
+  }
+  return on!=0;
 }
 static bool same_ticket(const nr_ue_ul_ticket_t *a,const nr_ue_ul_ticket_t *b)
 {

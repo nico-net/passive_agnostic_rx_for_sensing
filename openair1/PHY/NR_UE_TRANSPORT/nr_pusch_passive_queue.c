@@ -209,11 +209,16 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       continue;
     }
     if (nr_pusch_solver_enabled() && job.ul_ticket_valid && !job.cfr_only) {
-      static uint32_t solver_epoch;
-      if (solver_epoch != job.config_epoch) {
+      /* Review fix (REVIEW1 s2 defects 1+2): reset the solver once per broad invalidation
+       * (HARD epoch / identity change / dedicated-change-suspected), not on every SOFT epoch
+       * such as an RX-recovery restart, and only from the one consumer that wins the CAS. */
+      static _Atomic uint64_t solver_gen;
+      const uint64_t gen = ((uint64_t)nr_cfg_epoch_identity_gen() << 32) | nr_cfg_epoch_dedicated_current();
+      uint64_t prev_gen = atomic_load_explicit(&solver_gen, memory_order_acquire);
+      if (prev_gen != gen &&
+          atomic_compare_exchange_strong_explicit(&solver_gen, &prev_gen, gen, memory_order_acq_rel,
+                                                  memory_order_acquire))
         nr_pusch_solver_reset();
-        solver_epoch = job.config_epoch;
-      }
       nr_pusch_solver_reading_t rd[64];
       const int nrd=solver_readings(&job,rd,64);
       nr_pusch_solver_var_t var[2];

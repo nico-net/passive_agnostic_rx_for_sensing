@@ -7,11 +7,20 @@
 #include <string.h>
 #include "nr_passive_ue_ctx.h"
 
+/* ISAC_UL_PUSCH_SOLVER=1 deliberately IMPLIES the whole UL chain (ISAC_UL_PUSCH_CHAIN=1: DCI bank,
+ * config discovery, UE state, DCI 0_1 scan, PUSCH decode): the solver has nothing to probe without it.
+ * Read once per translation unit (review fix: no getenv on the per-grant path). */
 static inline bool nr_ul_chain_on(void)
 {
-  const char *v = getenv("ISAC_UL_PUSCH_CHAIN");
-  const char *s = getenv("ISAC_UL_PUSCH_SOLVER");
-  return (v && strcmp(v, "1") == 0) || (s && strcmp(s, "1") == 0);
+  static int cached = -1;
+  int on = __atomic_load_n(&cached, __ATOMIC_RELAXED);
+  if (on < 0) {
+    const char *v = getenv("ISAC_UL_PUSCH_CHAIN");
+    const char *s = getenv("ISAC_UL_PUSCH_SOLVER");
+    on = (v && strcmp(v, "1") == 0) || (s && strcmp(s, "1") == 0);
+    __atomic_store_n(&cached, on, __ATOMIC_RELAXED);
+  }
+  return on != 0;
 }
 
 /* Caller serializes access. Bounded per-UE milestone state, never a CRC oracle. */

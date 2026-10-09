@@ -1600,6 +1600,13 @@ void *UE_thread(void *arg)
       struct timespec diag_ts;
       clock_gettime(CLOCK_REALTIME, &diag_ts);
       atomic_store_explicit(&nr_ue_diag_producer_absolute_slot, absolute_slot, memory_order_relaxed);
+      /* ISAC_UL_DBG_LOG=1 (diagnostic, default off): absolute slot -> radio timestamp once per frame,
+       * so offline tools can map a DCI's source slot onto raw IQ sample indices. */
+      static int s_uldbg_ts = -1;
+      if (s_uldbg_ts < 0) s_uldbg_ts = getenv("ISAC_UL_DBG_LOG") && atoi(getenv("ISAC_UL_DBG_LOG")) ? 1 : 0;
+      if (s_uldbg_ts && slot_nr == 0)
+        LOG_A(PHY, "SENSING: ULDBG_TS abs_slot=%d ts=%lld read=%d shift=%d\n", absolute_slot,
+              (long long)rx_timestamp, readBlockSize, iq_shift_to_apply);
       atomic_store_explicit(&nr_ue_diag_producer_wall_ns,
                             (long)diag_ts.tv_sec * 1000000000L + diag_ts.tv_nsec, memory_order_relaxed);
     }
