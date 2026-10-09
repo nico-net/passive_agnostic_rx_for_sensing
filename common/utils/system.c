@@ -145,6 +145,9 @@ int background_system(char *command) {
 /*     to be called very early by the main processing               */
 /********************************************************************/
 
+/* start_background_system: starts the background helper process (forked before the main work starts): creates the command and result pipes and forks; the child runs background_system_process(), the parent keeps the pipe ends it needs.
+ *   Idempotent. Exits the process on a pipe or fork failure. Called very early by the main processing (executables/nr-uesoftmodem.c).
+ */
 void start_background_system(void) {
   int p[2];
   pid_t son;
@@ -188,6 +191,7 @@ void start_background_system(void) {
   background_system_process();
 }
 
+/* stop_background_system: stops the background helper process: closes the command pipe (EOF makes an idle helper exit), waits for it, and closes the result pipe. Does nothing when no helper runs. */
 void stop_background_system(void)
 {
   if (background_pid <= 0)
@@ -246,6 +250,10 @@ bool has_cap_sys_nice(void)
 }
 #endif
 
+/* threadCreate: creates a named thread with the requested affinity and priority, applying the core plan when one is active.
+ *   With SYS_NICE capability it uses SCHED_OAI at the given priority (0 means SCHED_OTHER); without it the thread uses SCHED_OTHER and is pinned only through the plan. The name is set best-effort (a vanished thread is a warning, not a fatal error).
+ *   Callers: about 48 thread start sites across the PHY, the PDCCH/PUSCH/PDSCH queues, the USRP ring and the shutdown code.
+ */
 void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name, int affinity, int priority)
 {
   int ret;
