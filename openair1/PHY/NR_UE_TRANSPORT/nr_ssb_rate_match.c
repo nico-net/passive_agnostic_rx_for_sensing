@@ -65,6 +65,9 @@ nr_ssb_rm_event_t nr_ssb_rm_observe(const NR_DL_FRAME_PARMS *fp,
   return e;
 }
 
+/* nr_ssb_rm_plan: plans the rate matching of a PDSCH grant around the SSB: computes the SSB's physical REs, counts the RBs of the grant that would lose REs to the SSB (and to CSI-RS only where it is not already counted), and fills the plan p with the unavailable count and the demapping mask.
+ *   Returns false when the grant cannot be decoded with the SSB overlap (SI-RNTI, or DM-RS/PT-RS on an SSB RE). Caller: nr_pdsch_passive_decode.c (grant admission) and the SSB rate-match production check.
+ */
 bool nr_ssb_rm_plan(const nr_ssb_rm_event_t *e,
                     int frame,
                     int slot,
