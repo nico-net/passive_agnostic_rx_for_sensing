@@ -1,0 +1,85 @@
+#include "nr_pdsch_gpu_record.h"
+#include "nr_pdsch_passive_queue.h"
+#include "nr_pdsch_passive_decode.h"
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Called after the CPU decode while this consumer still owns its IQ snapshot.
+ * Bounded, opt-in I/O belongs to the offline replay only. */
+void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
+                             const nr_pdsch_passive_decode_result_t *dec)
+{
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  static const char *path;
+  static int enabled = -1, left;
+  if (__atomic_load_n(&enabled, __ATOMIC_RELAXED) == 0) return;
+  pthread_mutex_lock(&lock);
+  if (enabled < 0) {
+    path = getenv("ISAC_PDSCH_GPU_DUMP");
+    const char *limit = getenv("ISAC_PDSCH_GPU_DUMP_MAX");
+    left = limit ? atoi(limit) : 128;
+    __atomic_store_n(&enabled, path && *path, __ATOMIC_RELAXED);
+  }
+  if (!enabled || left <= 0 || dec->status == NR_PDSCH_PASSIVE_DECODE_ERROR
+      || dec->status == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) goto out;
+  nr_pdsch_passive_grant_t grant = src->grant;
+  grant.source_absolute_slot = src->absolute_slot;
+  nr_gpu_pdsch_job_t job;
+  if (!nr_pdsch_passive_gpu_job(ue, &src->dlsch_pdu, &src->freq_alloc, &grant,
+                                src->nr_slot_rx, src->layout_probe != 0, &job)) goto out;
+  const int16_t *cpu_llr = NULL;
+  const uint32_t G = nr_pdsch_passive_last_llr(&cpu_llr);
+  if (!cpu_llr || !G || G > (1u << 22)) goto out;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const uint32_t ring_len = 2u * fp->samples_per_frame;
+  const uint32_t off = get_samples_slot_timestamp(fp, src->nr_slot_rx);
+  const uint32_t early = fp->nb_prefix_samples / 8;
+  const uint32_t window = fp->nb_prefix_samples0 + fp->ofdm_symbol_size
+      + (fp->symbols_per_slot - 1) * (fp->ofdm_symbol_size + fp->nb_prefix_samples)
+      + fp->ofdm_symbol_size;
+  if (window >= ring_len || fp->nb_antennas_rx > 4 || fp->symbols_per_slot > 14) goto out;
+  nr_pdsch_gpu_record_t h = {0};
+  h.magic = NR_PDSCH_GPU_RECORD_MAGIC;
+  h.version = 1;
+  h.absolute_slot = src->absolute_slot;
+  h.cfg = (nr_gpu_fep_cfg_t){.nant = fp->nb_antennas_rx, .ofdm_symbol_size = fp->ofdm_symbol_size,
+    .nb_prefix_samples = fp->nb_prefix_samples, .nb_prefix_samples0 = fp->nb_prefix_samples0,
+    .symbols_per_slot = fp->symbols_per_slot, .first_carrier_offset = fp->first_carrier_offset,
+    .n_rb_dl = fp->N_RB_DL, .samples_per_ms = fp->samples_per_subframe,
+    .ofdm_offset_divisor = fp->ofdm_offset_divisor};
+  h.job = job;
+  h.iq_samples_per_ant = window;
+  h.llr_count = G;
+  h.rnti = grant.rnti;
+  h.data_scrambling_id = src->dlsch_pdu.dlDataScramblingId;
+  h.crc_ok = dec->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+  h.evm_valid = dec->evm_valid;
+  h.cpu_evm_pct = dec->evm_pct;
+  h.fo_hz = ue->cont_fo_comp ? src->fo_hz : 0.0;
+  h.abs_sample = off;
+  h.early = early;
+  const size_t rot_bytes = (size_t)fp->symbols_per_slot * 2 * sizeof(int16_t);
+  const size_t iq_bytes = (size_t)fp->nb_antennas_rx * window * 2 * sizeof(int16_t);
+  const size_t llr_bytes = (size_t)G * sizeof(int16_t);
+  h.bytes = sizeof(h) + rot_bytes + iq_bytes + llr_bytes;
+  FILE *f = fopen(path, "ab");
+  if (!f) goto out;
+  const c16_t *rot = fp->symbol_rotation[link_type_dl]
+      + (src->nr_slot_rx % fp->slots_per_subframe) * fp->symbols_per_slot;
+  bool ok = fwrite(&h, sizeof(h), 1, f) == 1 && fwrite(rot, rot_bytes, 1, f) == 1;
+  c16_t **rx = nr_pdsch_passive_iq_for_slot(src->nr_slot_rx, ue->common_vars.rxdata);
+  const uint32_t origin = (off + ring_len - early) % ring_len;
+  for (int a = 0; a < fp->nb_antennas_rx && ok; ++a) {
+    const uint32_t first = window < ring_len - origin ? window : ring_len - origin;
+    ok = fwrite(rx[a] + origin, sizeof(c16_t), first, f) == first;
+    if (ok && first < window)
+      ok = fwrite(rx[a], sizeof(c16_t), window - first, f) == window - first;
+  }
+  if (ok) ok = fwrite(cpu_llr, llr_bytes, 1, f) == 1;
+  if (ok) --left;
+  fclose(f);
+out:
+  pthread_mutex_unlock(&lock);
+}

@@ -98,7 +98,7 @@ int main(int argc, char **argv)
       double re, im;
       qpsk_ref(c, 3 * rb + p, re, im);
       sym[2 * k] = (int16_t)lround(re * 8192.0);
-      sym[2 * k + 1] = (int16_t)lround(im * 8192.0);
+      sym[2 * k + 1] = (int16_t)lround(-im * 8192.0); /* transmit X; reference above is conj(X) */
     }
   static const int DATA_KR[9] = {0, 2, 3, 4, 6, 7, 8, 10, 11};
   for (int rb = 0; rb < NRB; rb++)

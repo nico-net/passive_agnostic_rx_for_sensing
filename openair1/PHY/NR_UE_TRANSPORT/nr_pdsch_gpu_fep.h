@@ -7,7 +7,7 @@
  * nr_rx_pdsch()'s order (RE-major, layer, bit; positive = bit 0).
  *
  * Built as libpdsch_gpu.so (ENABLE_LDPC_CUDA); loaded at run time by nr_gpu_fep_load() when
- * NR_GPU_FEP=1, so a build without CUDA -- or a run without the knob -- is the CPU path exactly as
+ * ISAC_PDSCH_GPU=1 (NR_GPU_FEP remains a legacy alias), so a build without CUDA -- or a run without either knob -- is the CPU path exactly as
  * before. Measured numbers and the reason LDPC was NOT the part to offload: memory gpu-ldpc-on-sens6.
  */
 #ifndef NR_PDSCH_GPU_FEP_H
@@ -79,7 +79,7 @@ typedef struct {
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <string.h>
-/** dlopen libpdsch_gpu.so next to the executable when NR_GPU_FEP=1; NULL = CPU path. */
+/** dlopen libpdsch_gpu.so next to the executable when ISAC_PDSCH_GPU=1; NULL = CPU path. */
 static inline const nr_gpu_fep_api_t *nr_gpu_fep_load_impl(int prepare)
 {
   static const nr_gpu_fep_api_t *api = NULL;
@@ -88,7 +88,8 @@ static inline const nr_gpu_fep_api_t *nr_gpu_fep_load_impl(int prepare)
     return api;
   if (!prepare) return NULL;
   tried = 1;
-  const char *e = getenv("NR_GPU_FEP");
+  const char *e = getenv("ISAC_PDSCH_GPU");
+  if (e == NULL) e = getenv("NR_GPU_FEP");
   if (e == NULL || atoi(e) == 0)
     return NULL;
   void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);

@@ -73,6 +73,9 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_job_epoch.h"
 #include "nr_gpu_fep_hygiene.h"
+#include "nr_pdsch_gpu_record.h"
+void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
+                             const nr_pdsch_passive_decode_result_t *dec);
 #include "nr_csirs_disc.h"
 
 #include <limits.h>
@@ -1473,6 +1476,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const uint64_t dec_t0 = now_ns();
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+    if (!gpu_job) nr_pdsch_gpu_record_cpu(ue, &job, &dec);
     nr_dlsch_mrc_mode_override = -1;
     nr_dlsch_irc_override = -1;
     nr_dlsch_eq_override = -1;
@@ -2031,7 +2035,7 @@ void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
                                   .samples_per_ms = fp->samples_per_subframe,
                                   .ofdm_offset_divisor = (int)fp->ofdm_offset_divisor};
     if (fp->nb_antennas_rx > 4 || g_gpu->init(&cfg) != 0) {
-      LOG_W(PHY, "SENSING: GPU_FEP requested (NR_GPU_FEP=1) but libpdsch_gpu.so init failed -- CPU path\n");
+      LOG_W(PHY, "SENSING: PDSCH_GPU requested but libpdsch_gpu.so init failed -- CPU path\n");
       g_gpu = NULL;
     } else {
       LOG_A(PHY, "SENSING: GPU_FEP enabled: %d RX, N=%d, per-slot FEP + chest + MMSE + LLR on the GPU\n", cfg.nant, cfg.ofdm_symbol_size);

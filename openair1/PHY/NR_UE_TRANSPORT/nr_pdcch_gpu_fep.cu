@@ -94,6 +94,7 @@ __device__ inline float2 gold_qpsk(const uint32_t *g, int m)
   const uint32_t c0 = (g[(2 * m) >> 5] >> ((2 * m) & 31)) & 1u, c1 = (g[(2 * m + 1) >> 5] >> ((2 * m + 1) & 31)) & 1u;
   return make_float2((1.f - 2.f * c0) * 0.70710678f, -(1.f - 2.f * c1) * 0.70710678f);
 }
+__device__ inline float2 cmul(float2 a, float2 b) { return make_float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 __device__ inline float2 cmulc(float2 a, float2 b) { return make_float2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y); } /* a * conj(b) */
 
 /* ---------------------------------------------------------------- LS chest ----
@@ -118,7 +119,8 @@ __global__ void k_ls_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, const ui
   const uint32_t *g = gold + ((size_t)j * MAX_DUR + s) * GOLD_WORDS;
   const float2 y = rxF[(((size_t)ant * max_dur) + s) * N + k]; /* CORESET-relative row: see upload_slot()'s contract */
   const float2 x = gold_qpsk(g, m);
-  ls[(((size_t)j * MAX_DUR + s) * nant + ant) * MAX_PILOTS_PER_JOB + n] = cmulc(y, x); /* LS: y * conj(x) */
+  /* gold_qpsk() is already conj(X), as in nr_pdcch_dmrs_ref(). */
+  ls[(((size_t)j * MAX_DUR + s) * nant + ant) * MAX_PILOTS_PER_JOB + n] = cmul(y, x);
 }
 
 /* ---------------------------------------------------------------- Equalise + QPSK LLR ----

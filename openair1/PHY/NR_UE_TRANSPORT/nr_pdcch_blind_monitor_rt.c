@@ -118,6 +118,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_dci_history.h"       // BC9: DL DCI history ring, DCI-adjacency k0 evidence
 #include <stdio.h>
 #include "nr_pdcch_gpu_fep.h"
+#include "nr_pdcch_gpu_record.h"
 #include "nr_pdcch_scan_llr_cache.h"
 #include "nr_pdcch_scan_score.h"
 #include "nr_pdcch_scan_gpu_ref.h"
@@ -5296,6 +5297,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   }
   if (llrc_on && !llrc_hit)
     nr_pdcch_scan_llr_put(&t_llrc, &llrc_key, pdcch_llr[0][0], llrc_bytes, sizeof(pdcch_llr[0][0]));
+  nr_pdcch_gpu_record_cpu(ue, proc, rel15, cfg->ss_first_symbol, n_rb, cset_start,
+                          &rxdataF[0][0], rxdataF_sz, pdcch_llr[0][0], llrc_bytes / sizeof(c16_t), source_absolute_slot);
   /* The existing CUDA kernel uses a different equaliser and MRC rule. It is
    * admitted only when its output matches the CPU reference byte for byte;
    * mismatches retain the CPU LLRs. Device timing is deferred to the host. */
