@@ -58,6 +58,9 @@ void nr_td_cb0_set_threads(int n)
 
 static bool g_gpu_loading_allowed = true;
 static bool g_gpu_quarantined;
+/* gpu_load: loads the CUDA CB0 backend (libtd_cb0_gpu.so, once) and returns its API table when the ABI matches; NULL when the library is absent, not allowed or quarantined.
+ *   Quarantine after a device failure makes every later call return NULL. Callers: use_gpu_locked(), nr_td_cb0_dematch_warmup(), nr_td_cb0_dematch_device_begin() and nr_td_cb0_dematch_device_end().
+ */
 static const nr_td_cb0_gpu_api_t *gpu_load(void)
 {
   static int tried;
@@ -96,6 +99,9 @@ int nr_td_cb0_use_gpu(int on)
   return r;
 }
 
+/* nr_td_cb0_dematch_warmup: start-up load of the CUDA CB0 backend: with enable set, loads the GPU library once while loading is allowed, then forbids further loading.
+ *   Called by the GPU backend's warm-up (nr_td_cb0_gpu_backend.c). Takes g_lock.
+ */
 void nr_td_cb0_dematch_warmup(int enable)
 {
   pthread_mutex_lock(&g_lock);
@@ -480,6 +486,9 @@ static int gpu_dematch(const nr_td_cb0_gpu_api_t *api, const nr_td_cb0_item_t *i
   return rc;
 }
 
+/* nr_td_cb0_dematch_device_begin: starts a device-side dematching batch: copies the items' metadata into the GPU scratch, runs the device dematch on the inputs and returns the device LLR pointer in *l.
+ *   Holds g_lock until nr_td_cb0_dematch_device_end(). Returns 0, or -1 when the GPU is unavailable or the device call failed. Caller: nr_td_cb0_gpu_backend.c.
+ */
 int nr_td_cb0_dematch_device_begin(const nr_td_cb0_item_t *items, const nr_td_cb0_meta_t *meta, int n, const int8_t **l)
 {
   pthread_mutex_lock(&g_lock);
@@ -500,6 +509,7 @@ int nr_td_cb0_dematch_device_begin(const nr_td_cb0_item_t *items, const nr_td_cb
   if (api->dematch_device(input, n, l)) { pthread_mutex_unlock(&g_lock); return -1; }
   return 0;
 }
+/* nr_td_cb0_dematch_device_end: ends a device dematching batch started by nr_td_cb0_dematch_device_begin(): when quarantine is set and the device output cannot be retired, the GPU path is quarantined for the rest of the run. Releases g_lock. Caller: nr_td_cb0_gpu_backend.c. */
 void nr_td_cb0_dematch_device_end(int quarantine)
 {
   const nr_td_cb0_gpu_api_t *api = gpu_load();
@@ -754,6 +764,10 @@ int nr_td_cb0_get_threads(void)
   return t;
 }
 
+/* cb0_batch_impl: core of the CB0 batch decoder: computes the metadata of each item, removes exact duplicates (same key after sorting), decodes the unique items through the CUDA LDPC, the GPU dematch or the CPU worker pool, and copies the verdicts back to every item.
+ *   Device errors make the whole CUDA batch inconclusive. The CPU path releases g_lock while decoding (the decoder is reentrant). Environment: NR_GPU_CB0 and NR_TD_CB0_CUDA_LDPC select the backends when not forced. Returns the number of items that passed.
+ *   Callers: nr_td_cb0_batch() (default backends) and nr_td_cb0_batch_cpu() (forced CPU).
+ */
 static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, bool force_cpu)
 {
   if (n <= 0)
