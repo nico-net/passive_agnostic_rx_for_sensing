@@ -1034,6 +1034,23 @@ static double usrp_rx_recover_window_s(void)
   static const double w = [] { const char *e = getenv("ISAC_RX_RECOVER_WINDOW_S"); return e && atof(e) > 0 ? atof(e) : 60.0; }();
   return w;
 }
+/* ISAC_RX_RECOVER_NOCTRL (default 1 when ISAC_RX_RECOVER=1): re-arm from a locally computed time, never a
+ * blocking get_time_now() (the X410 control path is starved by the same DPDK drop burst). */
+static bool usrp_rx_recover_noctrl(void)
+{
+  static const bool on = [] { const char *e = getenv("ISAC_RX_RECOVER_NOCTRL"); return !e || atoi(e) != 0; }();
+  return on;
+}
+static int usrp_env_int(const char *name, int def, int lo)
+{
+  const char *e = getenv(name);
+  return e && atoi(e) >= lo ? atoi(e) : def;
+}
+static int usrp_rx_synced_now(void)
+{
+  static const int *synced = (const int *)dlsym(RTLD_DEFAULT, "nr_ue_rx_synced_g");
+  return synced ? __atomic_load_n(synced, __ATOMIC_ACQUIRE) != 0 : 1;
+}
 static bool usrp_restart_allowed(const usrp_state_t *s, uint64_t w)
 {
   if (w < (uint64_t)s->sample_rate)
@@ -1076,6 +1093,12 @@ static void usrp_ring_producer(usrp_state_t *s)
   bool started = false;
   bool recovering = false;
   long long restart_scheduled_ticks = 0;
+  long long ref_end_ticks = 0; /* device ticks at the end of the last good sample (local reference) */
+  std::chrono::steady_clock::time_point ref_wall;
+  bool ref_valid = false;
+  const int backoff_base_ms = usrp_env_int("ISAC_RX_RECOVER_BACKOFF_MS", 300, 0);
+  const int backoff_max_ms = usrp_env_int("ISAC_RX_RECOVER_BACKOFF_MAX_MS", 3000, 1);
+  const double lead_s = usrp_env_int("ISAC_RX_RECOVER_LEAD_MS", 80, 1) * 1e-3;
   std::chrono::steady_clock::time_point restart_issued;
   usrp_ring_recovery_state recovery((uint64_t)s->sample_rate, usrp_rx_recover_max(),
                                     usrp_rx_recover() ? usrp_rx_recover_window_max() : 0, usrp_rx_recover_window_s());
@@ -1117,7 +1140,7 @@ static void usrp_ring_producer(usrp_state_t *s)
         s->ring_restarting.store(true, std::memory_order_release);
         s->ring_epoch_start.store(w, std::memory_order_release);
         s->ring_cv.notify_all();
-        if (recovery.fault(std::chrono::duration<double>(fault_at.time_since_epoch()).count())) {
+        if (recovery.fault(std::chrono::duration<double>(fault_at.time_since_epoch()).count(), usrp_rx_synced_now() != 0)) {
           recovering = true;
           started = false;
           bool restarted = false;
@@ -1125,7 +1148,14 @@ static void usrp_ring_producer(usrp_state_t *s)
           try {
             uhd::stream_cmd_t stop(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
             stop.stream_now = true;
-            s->rx_stream->issue_stream_cmd(stop);
+            if (usrp_rx_recover_noctrl()) {
+              /* A STOP that times out on the starved control path is not fatal: the stream is
+               * already halted by the fault; carry on to drain and re-arm. */
+              try { s->rx_stream->issue_stream_cmd(stop); }
+              catch (const std::exception &ex) { LOG_W(HW, "SENSING: USRP_RING STOP failed (non-fatal): %s\n", ex.what()); }
+              catch (...) { LOG_W(HW, "SENSING: USRP_RING STOP failed (non-fatal)\n"); }
+            } else
+              s->rx_stream->issue_stream_cmd(stop);
             const auto stopped_at = std::chrono::steady_clock::now();
             restart_phase = "drain";
             uhd::rx_metadata_t dmd;
@@ -1140,10 +1170,16 @@ static void usrp_ring_producer(usrp_state_t *s)
             const auto drained_at = std::chrono::steady_clock::now();
             if (!s->rx_stop_requested.load() && !s->ring_stop.load()) {
               restart_phase = "backoff";
-              /* Leave a short retry interval for RFNoC control settling, but
-               * never add hundreds of milliseconds to every air gap. */
-              if (recovery.failures > 1)
-                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(30, 5 * recovery.failures)));
+              /* Back off (grows with consecutive failures, bounded) so the DPDK burst and the
+               * RFNoC control path settle before re-arming; longer while acquisition is unsynced. */
+              {
+                const int bo = usrp_ring_backoff_ms(backoff_base_ms, recovery.failures, recovery.unsynced_faults,
+                                                    backoff_max_ms);
+                for (int t = 0; t < bo && !s->rx_stop_requested.load() && !s->ring_stop.load(); t += 10)
+                  std::this_thread::sleep_for(std::chrono::milliseconds(std::min(10, bo - t)));
+                if (recovery.unsynced_faults > 1)
+                  LOG_W(HW, "SENSING: USRP_RING fault while unsynced (n=%d): back-off %d ms\n", recovery.unsynced_faults, bo);
+              }
               const auto backoff_done_at = std::chrono::steady_clock::now();
               if (!s->rx_stop_requested.load() && !s->ring_stop.load()) {
                 uhd::stream_cmd_t again(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
@@ -1153,7 +1189,13 @@ static void usrp_ring_producer(usrp_state_t *s)
                  * attempt, not a reason to terminate the receiver. */
                 again.stream_now = false;
                 restart_phase = "time_read";
-                again.time_spec = s->usrp->get_time_now() + uhd::time_spec_t(0.02);
+                if (usrp_rx_recover_noctrl() && ref_valid) {
+                  const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - ref_wall).count();
+                  const int64_t t = usrp_ring_local_start_ticks(ref_end_ticks, el, s->sample_rate, lead_s, recovery.failures);
+                  again.time_spec = uhd::time_spec_t::from_ticks(t, s->sample_rate);
+                  restart_phase = "local_time";
+                } else
+                  again.time_spec = s->usrp->get_time_now() + uhd::time_spec_t(0.02); /* no local reference yet */
                 const auto time_read_at = std::chrono::steady_clock::now();
                 restart_phase = "start_cmd";
                 s->rx_stream->issue_stream_cmd(again);
@@ -1264,7 +1306,13 @@ static void usrp_ring_producer(usrp_state_t *s)
       started = true;
     }
     const int failures_before = recovery.failures;
-    recovery.samples(got);
+    recovery.samples(got, usrp_rx_synced_now() != 0);
+    if (usrp_rx_recover_noctrl()) {
+      ref_end_ticks = (recovery.epoch ? s->ring_epoch_t0_ticks.load(std::memory_order_relaxed) : s->ring_t0_ticks)
+                      + (long long)recovery.write_index;
+      ref_wall = std::chrono::steady_clock::now();
+      ref_valid = true;
+    }
     if (failures_before && !recovery.failures)
       LOG_I(HW, "SENSING: USRP_RING failed-start budget reset after 20 ms of clean streaming\n");
     s->ring_written.store(recovery.write_index, std::memory_order_release);
