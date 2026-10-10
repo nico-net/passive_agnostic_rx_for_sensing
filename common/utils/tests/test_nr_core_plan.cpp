@@ -239,4 +239,15 @@ TEST(CorePlan,ApplyBeforeThreadEntry)
   },::testing::ExitedWithCode(0),"CORE_PLAN");
 }
 
+TEST(EnvList,Nth){
+  unsetenv("DTQ_L");
+  EXPECT_EQ(nr_env_list_nth("DTQ_L",0,-1),-1);
+  setenv("DTQ_L","17,18",1);
+  EXPECT_EQ(nr_env_list_nth("DTQ_L",0,-1),17);
+  EXPECT_EQ(nr_env_list_nth("DTQ_L",1,-1),18);
+  EXPECT_EQ(nr_env_list_nth("DTQ_L",2,-1),-1);
+  setenv("DTQ_L","x",1);
+  EXPECT_EQ(nr_env_list_nth("DTQ_L",0,5),5);
+}
+
 int main(int argc,char **argv){::testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();}

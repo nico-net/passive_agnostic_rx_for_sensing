@@ -509,8 +509,13 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     /* Priority BELOW the RT receive thread's 97: if a consumer ever competes with the receive path
      * it must lose. Losing here costs one deferred decode; losing there costs time sync, which is
      * the whole problem this module exists to fix. */
-    threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name,
-                 nr_core_plan_cpu(NR_CP_PUSCH, i, (affinity >= 0) ? (affinity + i) : -1), 50);
+    int core = nr_core_plan_cpu(NR_CP_PUSCH, i, (affinity >= 0) ? (affinity + i) : -1);
+    int prio = 50;
+    /* ISAC_PUSCH_CORES="17,18" / ISAC_PUSCH_PRIO=<0..49> (default off): the UL trial decodes (ISAC_UL_LOCK_CRC_FIRST) ran unpinned at
+     * FIFO 50, above the PDSCH consumers (40), and inflated every PDSCH stage (DECQUEUE report). Pin them off the PDSCH cores, lower. */
+    core = nr_env_list_nth("ISAC_PUSCH_CORES", i, core);
+    if (getenv("ISAC_PUSCH_PRIO")) prio = atoi(getenv("ISAC_PUSCH_PRIO"));
+    threadCreate(&g_threads[i], nr_pusch_passive_queue_thread, &g_args[i], name, core, prio);
   }
   LOG_I(PHY, "SENSING: passive PUSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);

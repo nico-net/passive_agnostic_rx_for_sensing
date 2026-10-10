@@ -419,6 +419,103 @@ static void dmrs_scan_vote_log(uint16_t rnti, int64_t abs_slot, const nr_dmrs_sc
     LOG_A(PHY, "SENSING: DMRS_SCAN ids rnti=0x%04x abs=%ld ids=%d (%d %d) slots=%d\n", rnti, (long)abs_slot, nb,
           nb > 0 ? b[0] : -1, nb > 1 ? b[1] : -1, nr_dmrs_scan_rnti_slots(rnti));
 }
+/* ISAC_PDSCH_DMRS_SCAN_ASYNC=1 (default off, DECQUEUE): a full scan costs ~65 ms and ran inline on a PDSCH consumer, i.e. one of the
+ * decode cores was gone for 16 scans/s. With the flag the scan job (a copy of the DM-RS symbol) goes to ONE worker thread, pinned to
+ * ISAC_DMRS_SCAN_CORE and run at SCHED_OTHER; the consumer returns at once. The votes then arrive a few slots later. A full queue drops the job. */
+#define DSCAN_Q 4
+#define DSCAN_MAXN 8192
+typedef struct {
+  uint16_t rnti; int64_t abs_slot; int nr_slot, sym, nant, N, fco, n_rb, sps; bool full;
+  int16_t *buf; /* nant * N * 2 */
+} dscan_job_t;
+static dscan_job_t g_dq[DSCAN_Q];
+static int g_dq_head, g_dq_n;
+static bool g_dq_started;
+static pthread_mutex_t g_dq_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_dq_cv = PTHREAD_COND_INITIALIZER;
+static pthread_t g_dq_thr;
+static _Atomic uint64_t g_dscan_dropped;
+static bool dmrs_scan_async(void)
+{
+  static _Atomic int v = -1;
+  int r = atomic_load(&v);
+  if (r < 0) { const char *e = getenv("ISAC_PDSCH_DMRS_SCAN_ASYNC"); r = e && atoi(e) != 0; atomic_store(&v, r); }
+  return r;
+}
+/* dmrs_scan_run: the scan itself (cache fill, votes, log); rx = the DM-RS symbol per antenna. */
+static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, int nr_slot, int sym, bool full, int nant, int N, int fco,
+                          int n_rb, int sps, const int16_t *const *rx)
+{
+  int ids[2];
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS];
+  const int n = (full ? nr_dmrs_scan_slot : nr_dmrs_scan_slot_pool)(rx, nant, N, fco, n_rb, nr_slot, sym, sps, 6, h, NR_DMRS_SCAN_MAX_HITS);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  pthread_mutex_lock(&g_scan_mu);
+  if (c->abs == abs_slot) { c->n = n; memcpy(c->h, h, sizeof(h)); }
+  const uint64_t us = (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
+  if (full) { g_scan_n++; g_scan_hits += (uint64_t)n; g_scan_us += us; }
+  else { g_pool_n++; g_pool_us += us; }
+  const uint64_t sn = g_scan_n, sh = g_scan_hits, su = g_scan_us, pn = g_pool_n, pu = g_pool_us;
+  pthread_mutex_unlock(&g_scan_mu);
+  dmrs_scan_vote_log(rnti, abs_slot, h, n);
+  if (!full && (n == 0 || (pn % 50) != 1)) return; /* pool checks: log 1 in 50 */
+  char b[256] = "";
+  int u = 0;
+  for (int i = 0; i < n && u < (int)sizeof(b) - 40; i++)
+    u += snprintf(b + u, sizeof(b) - u, " %d/%d@%d+%d:%.2f(%.2f)", h[i].nid, h[i].nscid, h[i].rb0, h[i].nrb, h[i].score, h[i].second);
+  const int nd = nr_dmrs_scan_rnti_ids(rnti, ids, 2);
+  LOG_A(PHY, "SENSING: DMRS_SCAN %s abs=%ld rnti=0x%04x hits=%d%s | rnti ids=%d (%d %d) slots=%d | full scans=%lu hits=%lu "
+             "mean=%lu us | pool checks=%lu mean=%lu us\n",
+        full ? "full" : "pool", (long)abs_slot, rnti, n, b, nd, nd > 0 ? ids[0] : -1, nd > 1 ? ids[1] : -1,
+        nr_dmrs_scan_rnti_slots(rnti), (unsigned long)sn, (unsigned long)sh, (unsigned long)(sn ? su / sn : 0),
+        (unsigned long)pn, (unsigned long)(pn ? pu / pn : 0));
+}
+static void *dmrs_scan_worker(void *arg)
+{
+  (void)arg;
+  for (;;) {
+    pthread_mutex_lock(&g_dq_mu);
+    while (g_dq_n == 0) pthread_cond_wait(&g_dq_cv, &g_dq_mu);
+    dscan_job_t j = g_dq[g_dq_head];
+    pthread_mutex_unlock(&g_dq_mu);
+    const int16_t *rx[8];
+    for (int a = 0; a < j.nant; a++) rx[a] = j.buf + (size_t)a * j.N * 2;
+    pthread_mutex_lock(&g_scan_mu);
+    dmrs_scan_slot_t *c = &g_scan_cache[j.abs_slot & 31];
+    pthread_mutex_unlock(&g_scan_mu);
+    dmrs_scan_run(c, j.rnti, j.abs_slot, j.nr_slot, j.sym, j.full, j.nant, j.N, j.fco, j.n_rb, j.sps, rx);
+    pthread_mutex_lock(&g_dq_mu); /* the slot stays ours until the scan is done: the producer cannot overwrite the copy */
+    g_dq_head = (g_dq_head + 1) % DSCAN_Q;
+    g_dq_n--;
+    pthread_mutex_unlock(&g_dq_mu);
+  }
+  return NULL;
+}
+/* dmrs_scan_submit: copy the symbol into the worker ring. false = not queued (ring full, size out of range, no memory): caller runs inline or drops. */
+static bool dmrs_scan_submit(uint16_t rnti, int64_t abs_slot, int nr_slot, int sym, bool full, int nant, int N, int fco, int n_rb, int sps,
+                             const int16_t *const *rx)
+{
+  if (nant <= 0 || nant > 8 || N <= 0 || N > DSCAN_MAXN) return false;
+  pthread_mutex_lock(&g_dq_mu);
+  if (!g_dq_started) {
+    for (int i = 0; i < DSCAN_Q; i++) g_dq[i].buf = malloc((size_t)8 * DSCAN_MAXN * 2 * sizeof(int16_t));
+    for (int i = 0; i < DSCAN_Q; i++) if (!g_dq[i].buf) { pthread_mutex_unlock(&g_dq_mu); return false; }
+    threadCreate(&g_dq_thr, dmrs_scan_worker, NULL, "dmrsScan", nr_env_list_nth("ISAC_DMRS_SCAN_CORE", 0, -1), 0);
+    g_dq_started = true;
+  }
+  if (g_dq_n >= DSCAN_Q) { pthread_mutex_unlock(&g_dq_mu); atomic_fetch_add(&g_dscan_dropped, 1); return true; }
+  const int idx = (g_dq_head + g_dq_n) % DSCAN_Q;
+  dscan_job_t *j = &g_dq[idx];
+  for (int a = 0; a < nant; a++) memcpy(j->buf + (size_t)a * N * 2, rx[a], (size_t)N * 2 * sizeof(int16_t));
+  j->rnti = rnti; j->abs_slot = abs_slot; j->nr_slot = nr_slot; j->sym = sym; j->full = full; j->nant = nant; j->N = N; j->fco = fco;
+  j->n_rb = n_rb; j->sps = sps;
+  g_dq_n++;
+  pthread_cond_signal(&g_dq_cv);
+  pthread_mutex_unlock(&g_dq_mu);
+  return true;
+}
 /* dmrs_scan_job: scan (rate-limited, once per slot) and vote for this job's RNTI. rx = the DM-RS symbol per antenna. */
 static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t abs_slot, int nr_slot, int sym,
                           const int16_t *const *rx)
@@ -444,32 +541,11 @@ static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t ab
   if (full) g_scan_last_abs = abs_slot;
   c->abs = abs_slot; c->n = -1; /* in progress: concurrent consumers of this slot do not vote */
   pthread_mutex_unlock(&g_scan_mu);
-  struct timespec t0, t1;
-  clock_gettime(CLOCK_MONOTONIC, &t0);
-  nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS];
-  const int n = (full ? nr_dmrs_scan_slot : nr_dmrs_scan_slot_pool)(rx, fp->nb_antennas_rx, fp->ofdm_symbol_size,
-                                                                  fp->first_carrier_offset, fp->N_RB_DL, nr_slot, sym,
-                                                                  fp->symbols_per_slot, 6, h, NR_DMRS_SCAN_MAX_HITS);
-  clock_gettime(CLOCK_MONOTONIC, &t1);
-  pthread_mutex_lock(&g_scan_mu);
-  if (c->abs == abs_slot) { c->n = n; memcpy(c->h, h, sizeof(h)); }
-  const uint64_t us = (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
-  if (full) { g_scan_n++; g_scan_hits += (uint64_t)n; g_scan_us += us; }
-  else { g_pool_n++; g_pool_us += us; }
-  const uint64_t sn = g_scan_n, sh = g_scan_hits, su = g_scan_us, pn = g_pool_n, pu = g_pool_us;
-  pthread_mutex_unlock(&g_scan_mu);
-  dmrs_scan_vote_log(rnti, abs_slot, h, n);
-  if (!full && (n == 0 || (pn % 50) != 1)) return; /* pool checks: log 1 in 50 */
-  char b[256] = "";
-  int u = 0;
-  for (int i = 0; i < n && u < (int)sizeof(b) - 40; i++)
-    u += snprintf(b + u, sizeof(b) - u, " %d/%d@%d+%d:%.2f(%.2f)", h[i].nid, h[i].nscid, h[i].rb0, h[i].nrb, h[i].score, h[i].second);
-  const int nd = nr_dmrs_scan_rnti_ids(rnti, ids, 2);
-  LOG_A(PHY, "SENSING: DMRS_SCAN %s abs=%ld rnti=0x%04x hits=%d%s | rnti ids=%d (%d %d) slots=%d | full scans=%lu hits=%lu "
-             "mean=%lu us | pool checks=%lu mean=%lu us\n",
-        full ? "full" : "pool", (long)abs_slot, rnti, n, b, nd, nd > 0 ? ids[0] : -1, nd > 1 ? ids[1] : -1,
-        nr_dmrs_scan_rnti_slots(rnti), (unsigned long)sn, (unsigned long)sh, (unsigned long)(sn ? su / sn : 0),
-        (unsigned long)pn, (unsigned long)(pn ? pu / pn : 0));
+  if (dmrs_scan_async() && dmrs_scan_submit(rnti, abs_slot, nr_slot, sym, full, fp->nb_antennas_rx, fp->ofdm_symbol_size,
+                                            fp->first_carrier_offset, fp->N_RB_DL, fp->symbols_per_slot, rx))
+    return;
+  dmrs_scan_run(c, rnti, abs_slot, nr_slot, sym, full, fp->nb_antennas_rx, fp->ofdm_symbol_size, fp->first_carrier_offset, fp->N_RB_DL,
+                fp->symbols_per_slot, rx);
 }
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
 static _Atomic uint64_t g_decoded       = 0;

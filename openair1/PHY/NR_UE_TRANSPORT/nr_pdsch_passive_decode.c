@@ -48,6 +48,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_evm_acc.h"
 #include "nr_irc_cov.h"
 #include "nr_passive_tpool.h"
+#include "nr_pdsch_retry_pred.h"
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
 
@@ -108,6 +109,8 @@ static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static uint64_t g_pdtim_calls = 0;
+static uint32_t g_pdtim_hist[PDTIM_N][512]; /* wall-time histogram per stage (percentiles), ISAC_PDTIM_PCT */
+static int g_pdtim_pct = -1;
 /* chest_pdp_diag_on: returns ISAC_CHEST_PDP_DIAG (cached, default 1): whether the channel estimator runs its per-call BRDELAY/PDP diagnostic.
  *   Setting it to 0 skips a double-precision pass over the IDFT output for every (antenna, DM-RS symbol).
  *   Caller: the passive decode consumer, which copies it to nr_dl_chest_diag_request before each channel estimate.
@@ -136,6 +139,7 @@ static inline int pdtim_enabled(void)
 {
   if (g_pdtim_on < 0) {
     g_pdtim_on = (getenv("ISAC_PDCCH_TIMING") != NULL) ? 1 : 0;
+    g_pdtim_pct = getenv("ISAC_PDTIM_PCT") && atoi(getenv("ISAC_PDTIM_PCT")) ? 1 : 0;
   }
   return g_pdtim_on;
 }
@@ -166,6 +170,7 @@ static inline void pdtim_add(int k, uint64_t t0)
   g_pdtim_cpu_ns[k] += t_pdtim_cpu0 - c0;
   g_pdtim_ns[k] += d;
   g_pdtim_n[k]++;
+  if (g_pdtim_pct) g_pdtim_hist[k][d / 16000 < 511 ? d / 16000 : 511]++; /* ISAC_PDTIM_PCT=1: 16 us buckets, last = overflow */
   if (d > g_pdtim_max[k]) {
     g_pdtim_max[k] = d;
   }
@@ -193,6 +198,22 @@ static void pdtim_report(void)
                   (double)g_pdtim_max[k] / 1000.0, (double)g_pdtim_ns[k] / 1e9);
   }
   LOG_I(PHY, "SENSING: PDTIM calls=%lu %s\n", (unsigned long)g_pdtim_calls, rep);
+  if (g_pdtim_pct > 0) {
+    char pc[400];
+    int w = 0;
+    for (int k = 0; k < PDTIM_N; k++) {
+      uint64_t tot = 0, acc = 0;
+      for (int b = 0; b < 512; b++) tot += g_pdtim_hist[k][b];
+      int p50 = -1, p99 = -1;
+      for (int b = 0; b < 512 && tot; b++) {
+        acc += g_pdtim_hist[k][b];
+        if (p50 < 0 && acc * 2 >= tot) p50 = b;
+        if (p99 < 0 && acc * 100 >= tot * 99) p99 = b;
+      }
+      w += snprintf(pc + w, sizeof(pc) - w, "%s[p50=%dus p99=%dus] ", kPdtimName[k], (p50 < 0 ? 0 : p50) * 16 + 8, (p99 < 0 ? 0 : p99) * 16 + 8);
+    }
+    LOG_I(PHY, "SENSING: PDTIMPCT calls=%lu %s\n", (unsigned long)g_pdtim_calls, pc);
+  }
 }
 
 /* ---- PARMSET: distinct decode-parameter census (always on, printed at teardown) ---------------
@@ -5280,11 +5301,46 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
                                                              c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                              nr_pdsch_passive_decode_result_t *out)
 {
-  nr_pdsch_passive_decode_status_t st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  /* ISAC_PDSCH_RETRY_PREDICT=1 / ISAC_PDSCH_RETRY_NORESTORE=1 (default off, DECQUEUE): see nr_pdsch_retry_pred.h; and skip the final re-decode
+   * of the plain reading after every arm failed (it repeats the first body bit for bit; its only effect was to restore *out). */
+  static _Atomic int rp_on = -1, rn_on = -1;
+  if (rp_on < 0) { const char *e = getenv("ISAC_PDSCH_RETRY_PREDICT"); rp_on = e && atoi(e) != 0; }
+  if (rn_on < 0) { const char *e = getenv("ISAC_PDSCH_RETRY_NORESTORE"); rn_on = e && atoi(e) != 0; }
+  nr_pdsch_passive_decode_status_t st;
+  if (rp_on && getenv("ISAC_PDSCH_TDRA_RETRY") && atoi(getenv("ISAC_PDSCH_TDRA_RETRY")) && grant->dci11 && grant->rnti_class == 0
+      && !t_probe_first_seg && !t_gw_capture && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()
+      && dlsch_config->start_symbol <= 1 && dlsch_config->start_symbol + dlsch_config->number_symbols == 14
+      && nr_retry_pred_try_first(grant->rnti)) {
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t plain = *dlsch_config;
+    const bool saved_quiet = t_quiet;
+    t_quiet = true;
+    dlsch_config->start_symbol = 1 - plain.start_symbol;
+    dlsch_config->number_symbols = 14 - dlsch_config->start_symbol;
+    t_decode_tdra_attempt = 2;
+    st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+    if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+    t_quiet = saved_quiet;
+    t_decode_tdra_attempt = 0;
+    if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
+      out->config_recovered = true;
+      nr_retry_pred_hit(grant->rnti);
+      LOG_I(PHY, "SENSING: DECODETDRA rnti=0x%04x fs=%d.%d abs=%ld before=0 after=1 S=%u L=%u csi=%u altS=%u altL=%u alt_csi=%u cdm=%u alt_cdm=%u arm=2 pred=1\n",
+            grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, plain.start_symbol, plain.number_symbols,
+            plain.numCsiRsForRateMatching, dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->numCsiRsForRateMatching,
+            plain.n_dmrs_cdm_groups, dlsch_config->n_dmrs_cdm_groups);
+      return st;
+    }
+    nr_retry_pred_miss(grant->rnti);
+    *dlsch_config = plain;
+  }
+  st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   if (t_gw_owner) { /* left before the publish point: the same inputs fail the same way, make it sticky */
     t_gw_owner = false;
     nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
   }
+  if (rp_on && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
+  const nr_pdsch_passive_decode_result_t out_plain = *out; /* only read with rn_on */
+  const nr_pdsch_passive_decode_status_t st_plain = st;
   /* DECODE-FIX: CRC success for one DCI does not establish the TDRA or
    * CSI-RS exclusions for every later DCI. These default-off recovery arms
    * re-demodulate the SAME samples and accept only a full, nonzero TB CRC.
@@ -5409,6 +5465,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
           nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
         }
         recovered = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+        if (rp_on && recovered) {
+          if (arm == 2 && cv == 0) nr_retry_pred_hit(grant->rnti);
+          else nr_retry_pred_miss(grant->rnti);
+        }
       }
     }
     LOG_I(PHY, "SENSING: DECODETDRA rnti=0x%04x fs=%d.%d abs=%ld before=0 after=%d S=%u L=%u csi=%u altS=%u altL=%u alt_csi=%u cdm=%u alt_cdm=%u arm=%d\n",
@@ -5422,11 +5482,16 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
       /* Restore the public result AND the thread-local decoder/LLR view
        * used by the queue's diagnostics and equivalence checks. */
       *dlsch_config = original;
-      t_decode_tdra_attempt = 32;
-      st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-      if (t_gw_owner) {
-        t_gw_owner = false;
-        nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
+      if (rn_on) {
+        *out = out_plain;
+        st = st_plain;
+      } else {
+        t_decode_tdra_attempt = 32;
+        st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+        if (t_gw_owner) {
+          t_gw_owner = false;
+          nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
+        }
       }
     }
     out->config_recovered = recovered;

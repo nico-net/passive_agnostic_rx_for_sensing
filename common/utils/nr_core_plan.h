@@ -46,6 +46,20 @@ int nr_core_plan_cpu(nr_core_role_t, int index, int fallback);
 int nr_core_plan_thread_attr(pthread_attr_t *, int affinity, int *priority);
 /* For raw pthread background helpers, including those spawned by RT actors. */
 int nr_core_plan_create(pthread_t *, pthread_attr_t *, void *(*)(void *), void *, int core);
+/* nr_env_list_nth: the k-th entry (0-based) of the comma list in env `name` ("17,18"), or `dflt` when unset/short/malformed. */
+#include <stdlib.h>
+static inline int nr_env_list_nth(const char *name, int k, int dflt)
+{
+  const char *cl = getenv(name);
+  for (int j = 0; cl && *cl; j++) {
+    char *end;
+    const long c = strtol(cl, &end, 10);
+    if (end == cl) break;
+    if (j == k) return (int)c;
+    cl = (*end == ',') ? end + 1 : end;
+  }
+  return dflt;
+}
 #ifdef __cplusplus
 }
 #endif
