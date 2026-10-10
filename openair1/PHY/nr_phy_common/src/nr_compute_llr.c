@@ -3,6 +3,7 @@
  */
 
 #include "nr_compute_llr.h"
+#include <math.h> // ldexpf (nr_mmse_2layers_unbiased)
 #include "nr_phy_common.h"
 #include "bits.h"
 #include <complex.h>
@@ -3068,4 +3069,75 @@ uint8_t nr_mmse_2layers(c16_t **rxdataF_comp,
     after_mf_d_128 += 1;
   }
   return (0);
+}
+
+/* ISAC passive receiver, ISAC_PUSCH_MMSE_MODE=2 (UL twin of QAM-FIX's ISAC_PDSCH_MMSE_MODE=2). New function; the stock
+ * nr_mmse_2layers() above is untouched and still serves the gNB and the DL.
+ *
+ * Stock nr_mmse_2layers() outputs adj(G + sI) H^H y but compares it against det(G + sI) * QAM_n: the coefficient of the
+ * wanted symbol is det(G + sI) - s (G_ll + s), so QAM amplitudes shrink against their own thresholds (worst for
+ * correlated layers, small det G), and both layers share one threshold. Here, per RE in float:
+ *   x = G^-1 z  (zero forcing, unbiased; z = H^H y and G = H^H H carry the same 2^-shift),
+ *   w_l = 1 / [G^-1]_ll  (post-ZF gain of layer l; equals |h|^2 >> shift for a single layer),
+ *   output w_l x_l = z_l - (G_lm / G_mm) z_m, thresholds w_l * QAM_n1/n2/n3 in ch_mag[l]/ch_magb[l]/ch_magc[l].
+ * The output is on the 1-layer |h|^2 scale, with per-layer reliability, so nr_compute_llr() needs no change. */
+static inline int16_t mmse_sat16(float v)
+{
+  const float r = v >= 0.f ? v + 0.5f : v - 0.5f;
+  return r > 32767.f ? 32767 : r < -32768.f ? -32768 : (int16_t)r;
+}
+
+void nr_mmse_2layers_unbiased(c16_t **rxdataF_comp,
+                              uint32_t buffer_length,
+                              uint32_t pdsch_buf_size_max,
+                              int nb_rx_ant,
+                              int nb_layers,
+                              c16_t ch_mag[nb_layers][pdsch_buf_size_max],
+                              c16_t ch_magb[nb_layers][pdsch_buf_size_max],
+                              c16_t ch_magc[nb_layers][pdsch_buf_size_max],
+                              c16_t ch_estimates_ext[][nb_rx_ant][buffer_length],
+                              unsigned char mod_order,
+                              int shift,
+                              unsigned char symbol,
+                              int length)
+{
+  if (nb_layers != 2 || length <= 0) return;
+  const float n1 = (mod_order == 4 ? QAM16_n1 : mod_order == 6 ? QAM64_n1 : mod_order == 8 ? QAM256_n1 : 0) / 32768.f;
+  const float n2 = (mod_order == 6 ? QAM64_n2 : mod_order == 8 ? QAM256_n2 : 0) / 32768.f;
+  const float n3 = (mod_order == 8 ? QAM256_n3 : 0) / 32768.f;
+  const float sc = ldexpf(1.f, -shift);
+  c16_t *z0p = &rxdataF_comp[0][symbol * buffer_length], *z1p = &rxdataF_comp[1][symbol * buffer_length];
+  for (int i = 0; i < length; i++) {
+    float g00 = 0.f, g11 = 0.f, g01r = 0.f, g01i = 0.f; /* G = H^H H, G01 = sum conj(h0) h1 */
+    for (int r = 0; r < nb_rx_ant; r++) {
+      const float a_r = ch_estimates_ext[0][r][i].r, a_i = ch_estimates_ext[0][r][i].i;
+      const float b_r = ch_estimates_ext[1][r][i].r, b_i = ch_estimates_ext[1][r][i].i;
+      g00 += a_r * a_r + a_i * a_i;
+      g11 += b_r * b_r + b_i * b_i;
+      g01r += a_r * b_r + a_i * b_i;
+      g01i += a_r * b_i - a_i * b_r;
+    }
+    g00 *= sc; g11 *= sc; g01r *= sc; g01i *= sc;
+    const float det = g00 * g11 - (g01r * g01r + g01i * g01i);
+    float o0r = 0.f, o0i = 0.f, o1r = 0.f, o1i = 0.f, w0 = 0.f, w1 = 0.f;
+    if (det > 1e-6f * g00 * g11 && g00 > 0.f && g11 > 0.f) {
+      const float z0r = z0p[i].r, z0i = z0p[i].i, z1r = z1p[i].r, z1i = z1p[i].i;
+      /* w0 x0 = z0 - (G01 / G11) z1 ; w1 x1 = z1 - (conj(G01) / G00) z0 */
+      o0r = z0r - (g01r * z1r - g01i * z1i) / g11;
+      o0i = z0i - (g01r * z1i + g01i * z1r) / g11;
+      o1r = z1r - (g01r * z0r + g01i * z0i) / g00;
+      o1i = z1i - (g01r * z0i - g01i * z0r) / g00;
+      w0 = det / g11;
+      w1 = det / g00;
+    }
+    z0p[i] = (c16_t){mmse_sat16(o0r), mmse_sat16(o0i)};
+    z1p[i] = (c16_t){mmse_sat16(o1r), mmse_sat16(o1i)};
+    const float w[2] = {w0, w1};
+    for (int l = 0; l < 2; l++) {
+      const int16_t m1 = mmse_sat16(w[l] * n1), m2 = mmse_sat16(w[l] * n2), m3 = mmse_sat16(w[l] * n3);
+      ch_mag[l][i] = (c16_t){m1, m1};
+      ch_magb[l][i] = (c16_t){m2, m2};
+      ch_magc[l][i] = (c16_t){m3, m3};
+    }
+  }
 }
