@@ -630,9 +630,9 @@ void nr_ul_layout_eval_once(void)
         ls->fitted = true;
         ls->fit_slot = snap[n - 1].slot;
         build_hyps_locked();
-        char pr[160];
+        char pr[512];
         int u = 0;
-        for (int k = 0; k < npre; k++)
+        for (int k = 0; k < npre && u < (int)sizeof(pr); k++) /* snprintf returns the untruncated length: stop at full */
           u += snprintf(pr + u, sizeof(pr) - u, "%s{bwp_ind=%u riv=%u tda=%u fh=%u Nmax=%u}", k ? "," : "",
                         pre[k].bwp_ind, pre[k].riv, pre[k].tda, pre[k].fh, pre[k].n_max);
         char t0[160], t1[160] = "-";

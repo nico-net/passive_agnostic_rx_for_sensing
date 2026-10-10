@@ -10329,4 +10329,5 @@ __attribute__((constructor)) static void isac_segv_bt_install(void)
   sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
   sigaction(SIGSEGV, &sa, NULL);
   sigaction(SIGBUS, &sa, NULL);
+  sigaction(SIGABRT, &sa, NULL); /* glibc fortify '*** buffer overflow detected ***' aborts in the faulting thread */
 }
