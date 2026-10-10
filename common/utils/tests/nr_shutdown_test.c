@@ -18,6 +18,11 @@ void itti_wait_tasks_unblock(void);
 int oai_exit;
 static log_t test_log;
 log_t *g_log = &test_log;
+/* logRecord_mt: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/LOG/log.c:588, common/utils/LOG/log.c:874, common/utils/LOG/log.h:243, common/utils/LOG/log.h:346 (+12 more).
+ */
 void logRecord_mt(const char *file, const char *func, int line, int comp, int level, const char *format, ...)
 {
   va_list args;
@@ -30,6 +35,11 @@ static const char *mode;
 static atomic_int reads, reading, stopped, released, reader_entered;
 static PHY_VARS_NR_UE ue;
 
+/* fake_read: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int fake_read(openair0_device_t *dev, openair0_timestamp_t *ts, void **buf, int n, int antennas)
 {
   if (atomic_load(&released))
@@ -60,6 +70,11 @@ static int fake_read(openair0_device_t *dev, openair0_timestamp_t *ts, void **bu
   return !strcmp(mode, "injected") || read < 3 ? n : -1;
 }
 
+/* fake_stop: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int fake_stop(openair0_device_t *dev)
 {
   if (atomic_fetch_add(&stopped, 1))
@@ -68,6 +83,11 @@ static int fake_stop(openair0_device_t *dev)
   return 0;
 }
 
+/* fake_end: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void fake_end(openair0_device_t *dev)
 {
   if (!atomic_load(&stopped) || atomic_load(&reading) || atomic_fetch_add(&released, 1))
@@ -81,12 +101,22 @@ static void fake_end(openair0_device_t *dev)
   fprintf(stderr, "FAKE_CLAIM_RELEASED\n");
 }
 
+/* notify_main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void notify_main(void)
 {
   oai_exit = 1; /* Reproduce the already-set exit flag, without suppressing the post. */
   itti_wait_tasks_unblock();
 }
 
+/* reader: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void *reader(void *unused)
 {
   int32_t iq[4][16];
@@ -98,8 +128,18 @@ static void *reader(void *unused)
   return NULL;
 }
 
+/* harmless_signal: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void harmless_signal(int sig) {}
 
+/* interrupt_wait: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void *interrupt_wait(void *unused)
 {
   usleep(30000);
@@ -109,6 +149,11 @@ static void *interrupt_wait(void *unused)
   return NULL;
 }
 
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char **argv)
 {
   if (argc != 2)

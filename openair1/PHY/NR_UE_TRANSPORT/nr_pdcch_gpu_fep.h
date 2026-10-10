@@ -108,6 +108,11 @@ typedef struct {
 #include <dlfcn.h>
 #include <stdlib.h>
 /** PDCCH has an independent switch. NR_GPU_FEP continues to control PDSCH alone. */
+/* nr_gpu_pdcch_fep_load_impl: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PDCCH_GPU_FEP.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.h:131, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.h:132.
+ */
 static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load_impl(int prepare)
 {
   static const nr_gpu_pdcch_fep_api_t *api = NULL;
@@ -128,7 +133,17 @@ static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load_impl(int prepa
   api = get ? get() : NULL;
   return api;
 }
+/* nr_gpu_pdcch_fep_load: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_load(void) { return nr_gpu_pdcch_fep_load_impl(0); }
+/* nr_gpu_pdcch_fep_prepare: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static inline const nr_gpu_pdcch_fep_api_t *nr_gpu_pdcch_fep_prepare(void) { return nr_gpu_pdcch_fep_load_impl(1); }
 #endif
 

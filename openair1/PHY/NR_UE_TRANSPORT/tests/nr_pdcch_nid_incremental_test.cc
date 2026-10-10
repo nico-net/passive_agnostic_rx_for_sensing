@@ -7,6 +7,11 @@
 #include <dlfcn.h>
 #include <vector>
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;}} while(0)
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PDCCH_NID_GPU_INCREMENTAL, ISAC_PDCCH_NID_MULTISYMBOL.
+ *   Callers: none (program entry point).
+ */
 int main(int argc,char **argv) {
  // Check bit-jump arithmetic against the independent 50-step recurrence.
  uint32_t random=2207;

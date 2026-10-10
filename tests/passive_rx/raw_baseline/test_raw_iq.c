@@ -10,6 +10,11 @@
 #include <string.h>
 #include <unistd.h>
 
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(void)
 {
   char dir[] = "/tmp/raw-iq-test.XXXXXX";

@@ -32,6 +32,11 @@ extern "C" void exit_function(const char *file, const char *function, const int 
 
 namespace {
 struct Enc { uint16_t A; uint8_t L; };
+/* enc_cb: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 int enc_cb(void *vctx, nr_dci_bits_t payload, uint16_t crc_mask, uint8_t *coded, int E)
 {
   const Enc *c = (const Enc *)vctx;
@@ -41,6 +46,11 @@ int enc_cb(void *vctx, nr_dci_bits_t payload, uint16_t crc_mask, uint8_t *coded,
   return 0;
 }
 std::map<std::tuple<int, int, int>, std::pair<Enc *, nr_pdcch_joint_model_t *>> g_models;
+/* model: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h:95, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:896, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_sim.cc:77, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_sim.cc:146 (+11 more).
+ */
 nr_pdcch_joint_model_t *model(int A, int L, int nid)
 {
   auto k = std::make_tuple(A, L, nid);
@@ -51,6 +61,11 @@ nr_pdcch_joint_model_t *model(int A, int L, int nid)
   g_models[k] = {e, m};
   return m;
 }
+/* descramble: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:69, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:358, openair1/PHY/NR_UE_TRANSPORT/tests/pdcch_anon_offline.cc:96, openair1/PHY/NR_UE_TRANSPORT/tests/pdsch_cb_offline.c:27 (+3 more).
+ */
 void descramble(const int16_t *in, int n, uint32_t rnti, uint16_t nid, int16_t *out)
 {
   uint32_t x1 = 0, x2 = (uint32_t)((((uint64_t)rnti << 16) + nid) % (1ULL << 31));
@@ -63,6 +78,11 @@ void descramble(const int16_t *in, int n, uint32_t rnti, uint16_t nid, int16_t *
 struct Ev { std::set<uint32_t> occ; std::set<uint64_t> pay; int hits = 0; int dl = 0; std::set<int> al; std::multiset<int> mm; };
 }  // namespace
 
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char **argv)
 {
   if (argc < 2) { fprintf(stderr, "usage: %s dump [lmin lmax max_occ]\n", argv[0]); return 2; }

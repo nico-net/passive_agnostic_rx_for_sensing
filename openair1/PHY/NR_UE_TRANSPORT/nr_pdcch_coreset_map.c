@@ -71,6 +71,11 @@ extern void nr_pdcch_dmrs_ref(const unsigned int *nr_gold_pdcch, c16_t *output, 
  * nothing on air either -- CORESET#0 control mean Z 1.36 vs the 1.42 noise expectation), so it
  * stays available for a genuinely dispersive bed but must not be the default.
  * ISAC_COREMAP_SUBBAND=1 opts in. */
+/* coherent_mode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_COREMAP_SUBBAND.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:631, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:781, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:843, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:857.
+ */
 static int coherent_mode(void)
 {
   static int s_coh = -1;
@@ -84,6 +89,11 @@ static int coherent_mode(void)
 /* Per-RB coherent correlation, magnitudes combined non-coherently across `n_rb` RBs starting at
  * `rb_start`, returned as a noise-normalised Z score. See this file's header note for why the
  * coherent span must be one RB on a dispersive channel. */
+/* nr_pdcch_subband_z: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:649, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:708, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:730.
+ */
 static double nr_pdcch_subband_z(const c16_t *rxdataF, const c16_t *pilot, int ofdm_symbol_size,
                                  int first_carrier_offset, int rb_start, int n_rb)
 {
@@ -119,6 +129,11 @@ static double nr_pdcch_subband_z(const c16_t *rxdataF, const c16_t *pilot, int o
 
 /* See nr_pdcch_coreset_map.h. Correlates the KNOWN CORESET in a buffer that has just produced a
  * CRC-verified DCI, so occupancy is not assumed -- it is proven by the decode. */
+/* nr_pdcch_coreset_map_accept_probe: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_COREMAP_ONACCEPT.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8582, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:63.
+ */
 void nr_pdcch_coreset_map_accept_probe(const c16_t *rxdataF, int ofdm_symbol_size, int n_rb_carrier,
                                        int first_carrier_offset, uint16_t scrambling_id, int slot,
                                        int symbol, int cs_start, int cs_nrb)
@@ -270,14 +285,29 @@ void nr_pdcch_coreset_map_accept_probe(const c16_t *rxdataF, int ofdm_symbol_siz
 /* Set by the caller that knows the cell's CORESET#0 start (autoconf derives it from the SSB
  * offset). The scan aligns its 6-RB window grid to `start % 6`. Defaults to 0 = CRB-0 aligned. */
 static int g_coreset_map_phase_hint;
+/* nr_pdcch_coreset_map_set_phase_hint: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:367, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:69.
+ */
 void nr_pdcch_coreset_map_set_phase_hint(int start_rb)
 {
   g_coreset_map_phase_hint = (start_rb > 0) ? (start_rb % 6) : 0;
 }
+/* nr_pdcch_coreset_map_phase_hint: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:599.
+ */
 static int nr_pdcch_coreset_map_phase_hint(void)
 {
   return g_coreset_map_phase_hint;
 }
+/* nr_pdcch_coreset_map_get_phase: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:695, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:84.
+ */
 int nr_pdcch_coreset_map_get_phase(void)
 {
   return g_coreset_map_phase_hint;
@@ -309,6 +339,11 @@ int nr_pdcch_coreset_map_get_phase(void)
 #include <sys/stat.h>
 
 static int g_css0_first_rb = -1, g_css0_nrb = 0;
+/* nr_pdcch_coreset_map_set_css0: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:368, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:71.
+ */
 void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb)
 {
   g_css0_first_rb = first_rb;
@@ -359,6 +394,11 @@ static struct {
 /** How many consecutive symbols this run captures per snapshot (ISAC_COREMAP_IDSWEEP_DUR, default 1,
  *  clamped to [1, IDSW_DUR_MAX]). Read once; callers query it to know how many FEP calls to make
  *  before nr_pdcch_coreset_map_idsweep_push(). */
+/* nr_pdcch_coreset_map_idsweep_dur: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_COREMAP_IDSWEEP_DUR.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4077, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4089, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:461, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:489 (+2 more).
+ */
 int nr_pdcch_coreset_map_idsweep_dur(void)
 {
   /* <= 0: the static struct zero-initialises dur, so `< 0` never fired and every snapshot carried
@@ -376,6 +416,11 @@ int nr_pdcch_coreset_map_idsweep_dur(void)
 /* Dump one batch for the offline sweep (idsweep_offline). The sweep itself must NOT run in the
  * receiver: in-process, even at SCHED_IDLE, it starved the receive path and the X410 stream died on an
  * overflow the moment the first batch started processing (runs s01d/s01e, 2026-09-22). */
+/* idsw_worker: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void *idsw_worker(void *arg)
 {
   (void)arg;
@@ -905,6 +950,11 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
  * CORESET on an OAI cell only correlates when ref_rb is that BWP's first RB. `pilot` is the
  * conjugated reference for n_pilot_rb RBs from nr_pdcch_coreset_pilot(), indexed from ref_rb.
  * Returns |corr| in [0,1], or -1 when the window starts below ref_rb or runs past the pilots. */
+/* nr_pdcch_coreset_window_corr: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5534, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5538, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:100.
+ */
 double nr_pdcch_coreset_window_corr(const c16_t *rxdataF, int ofdm_symbol_size, int first_carrier_offset,
                                     const c16_t *pilot, int n_pilot_rb, int rb_offset, int ref_rb)
 {
@@ -927,6 +977,11 @@ double nr_pdcch_coreset_window_corr(const c16_t *rxdataF, int ofdm_symbol_size, 
 }
 
 /* Conjugated PDCCH DM-RS for n_rb RBs of one (slot, symbol), sequence index 0 at the reference RB. */
+/* nr_pdcch_coreset_pilot: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5531, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:950, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:97, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_map_test.cc:195 (+1 more).
+ */
 void nr_pdcch_coreset_pilot(uint16_t scrambling_id, int slot, int symbol, int n_rb, c16_t *pilot)
 {
   uint32_t *gold = nr_gold_pdcch(n_rb, 14, scrambling_id, slot, symbol);
@@ -934,6 +989,11 @@ void nr_pdcch_coreset_pilot(uint16_t scrambling_id, int slot, int symbol, int n_
 }
 
 
+/* nr_pdcch_dmrs_rank_grid: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5659, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:113, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4453, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:5030 (+4 more).
+ */
 bool nr_pdcch_dmrs_rank_grid(nr_pdcch_dmrs_rank_grid_t *g, const c16_t *rx,
                              int fft, int carrier, int n_rb, uint16_t id,
                              int slot, int first_symbol, int duration, int reference_rb)
@@ -972,6 +1032,11 @@ bool nr_pdcch_dmrs_rank_grid(nr_pdcch_dmrs_rank_grid_t *g, const c16_t *rx,
   return true;
 }
 
+/* nr_pdcch_candidate_rbs: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:1003, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:118, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4841.
+ */
 int nr_pdcch_candidate_rbs(int span, int duration, int bundle, int interleaver, int shift,
                             int cce, int al, uint16_t *rbs, int capacity)
 {
@@ -995,6 +1060,11 @@ int nr_pdcch_candidate_rbs(int span, int duration, int bundle, int interleaver, 
   return n;
 }
 
+/* nr_pdcch_dmrs_candidate_score: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:272, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:281, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3079, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5748 (+11 more).
+ */
 double nr_pdcch_dmrs_candidate_score(const nr_pdcch_dmrs_rank_grid_t *g, int offset,
                                        int span, int bundle, int interleaver, int shift, int cce, int al)
 {
@@ -1021,6 +1091,11 @@ double nr_pdcch_dmrs_candidate_score(const nr_pdcch_dmrs_rank_grid_t *g, int off
   return sum / count;
 }
 
+/* nr_pdcch_dmrs_candidate_order: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3113, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:125, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:5034, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_map_test.cc:235 (+2 more).
+ */
 int nr_pdcch_dmrs_candidate_order(const double *score, const uint8_t *al, int n,
                                     uint64_t visit, bool full, uint8_t *order)
 {
@@ -1077,6 +1152,11 @@ int nr_pdcch_dmrs_candidate_order(const double *score, const uint8_t *al, int n,
 }
 
 
+/* nr_pdcch_uss_candidate_supports: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3075, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7280, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h:132, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_map_test.cc:149 (+2 more).
+ */
 void nr_pdcch_uss_candidate_supports(int n_cces, int slot, const uint16_t *rntis, int n_rntis,
                                      const uint16_t *cce, const uint8_t *al, int n_candidates,
                                      uint16_t *support)

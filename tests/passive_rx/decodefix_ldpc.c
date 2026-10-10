@@ -10,6 +10,11 @@
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char **argv)
 {
   if (argc != 3) return 2;

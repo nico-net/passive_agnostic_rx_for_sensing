@@ -100,11 +100,21 @@ static unsigned job_read, job_write;
 static _Atomic uint64_t prach_us, prach_occasions, prach_drops, prach_skipped;
 static _Atomic int observed_gain_db = INT32_MIN;
 
+/* nr_prach_passive_gain_changed: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.c:602, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:31.
+ */
 void nr_prach_passive_gain_changed(int gain_db)
 {
   atomic_store_explicit(&observed_gain_db, gain_db, memory_order_release);
 }
 
+/* nr_prach_passive_metrics: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:30, openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:201, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:30, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:133.
+ */
 void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped)
 {
   const uint64_t count = atomic_load_explicit(&prach_occasions, memory_order_relaxed);
@@ -113,6 +123,11 @@ void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped)
   *skipped = atomic_load_explicit(&prach_skipped, memory_order_relaxed);
 }
 
+/* floor_margin_db10: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PRACH_MARGIN_DB10.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:142.
+ */
 static int floor_margin_db10(void)
 {
   const char *v = getenv("ISAC_PRACH_MARGIN_DB10");
@@ -122,12 +137,22 @@ static int floor_margin_db10(void)
   return *end || margin < 1 || margin > 300 ? 80 : (int)margin;
 }
 
+/* floor_compare: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int floor_compare(const void *a, const void *b)
 {
   const int x = *(const int *)a, y = *(const int *)b;
   return (x > y) - (x < y);
 }
 
+/* floor_detect: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:323, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:406.
+ */
 static bool floor_detect(int fdm, int gain_db, int energy)
 {
   if (fdm < 0 || fdm >= 8) return false;
@@ -148,12 +173,22 @@ static bool floor_detect(int fdm, int gain_db, int energy)
 
 /* The gNB scheduler owns this helper in normal PHY_NR builds. The passive UE
  * links only the receive half of nr_prach.c, so provide its identical table. */
+/* get_nr_prach_duration: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_TRANSPORT/nr_prach.c:218, openair1/PHY/NR_TRANSPORT/nr_prach.c:302, openair1/PHY/NR_TRANSPORT/nr_prach.c:403, openair1/PHY/NR_TRANSPORT/nr_prach.c:416 (+4 more).
+ */
 int get_nr_prach_duration(uint8_t format)
 {
   static const int duration[] = {0, 0, 0, 0, 2, 4, 6, 2, 12, 2, 6, 2, 4, 6};
   return format < sizeof(duration) / sizeof(duration[0]) ? duration[format] : 0;
 }
 
+/* fapi_format: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:190, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:545.
+ */
 static int fapi_format(unsigned fmt)
 {
   switch (fmt) {
@@ -169,6 +204,11 @@ static int fapi_format(unsigned fmt)
   }
 }
 
+/* nr_prach_passive_occasion: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:553, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:566, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:17, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:48.
+ */
 bool nr_prach_passive_occasion(int config_index, int frame, int slot, int mu, frequency_range_t range,
                                nr_prach_passive_occasion_t *out)
 {
@@ -194,6 +234,11 @@ bool nr_prach_passive_occasion(int config_index, int frame, int slot, int mu, fr
   return true;
 }
 
+/* nr_prach_passive_rar_relation: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:286, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:340, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:20, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:55.
+ */
 int nr_prach_passive_rar_relation(int frame, int slot, int start_symbol, int fdm,
                                   int preamble, uint16_t ra_rnti, uint8_t rapid)
 {
@@ -205,6 +250,11 @@ int nr_prach_passive_rar_relation(int frame, int slot, int start_symbol, int fdm
   return ra_rnti != expected ? -1 : (preamble == rapid ? 1 : 0);
 }
 
+/* rar_slot_age: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:284, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:304, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:338.
+ */
 static uint32_t rar_slot_age(uint64_t detection_abs, uint32_t rar_abs, int slots_per_frame)
 {
   /* The PDSCH/RAR path provides frame*slots_per_frame+slot, whereas the
@@ -213,12 +263,22 @@ static uint32_t rar_slot_age(uint64_t detection_abs, uint32_t rar_abs, int slots
   return ((rar_abs % wrap) + wrap - (detection_abs % wrap)) % wrap;
 }
 
+/* ra_slot: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:308, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:417.
+ */
 static int ra_slot(int slot, int mu, int format)
 {
   /* 38.211 long preambles use the subframe index for RA-RNTI t_id. */
   return format < 4 ? slot >> mu : slot;
 }
 
+/* nr_prach_passive_rar: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:259, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:24.
+ */
 void nr_prach_passive_rar(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t abs_slot)
 {
   if (!nr_isac_prach_enabled()) return;
@@ -228,6 +288,11 @@ void nr_prach_passive_rar(uint16_t ra_rnti, uint8_t rapid, uint16_t ta, uint64_t
   atomic_store_explicit(&rar_events[pos % PRACH_RAR_RING], packed, memory_order_release);
 }
 
+/* nr_prach_passive_rar_entries: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:257, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:26, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:70.
+ */
 int nr_prach_passive_rar_entries(const uint8_t *tb, uint32_t len, nr_prach_rar_entry_t *out, int capacity)
 {
   if (!tb || !out || capacity <= 0) return 0;
@@ -250,6 +315,11 @@ int nr_prach_passive_rar_entries(const uint8_t *tb, uint32_t len, nr_prach_rar_e
   return count;
 }
 
+/* nr_prach_passive_rar_pdu: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:645, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:28.
+ */
 void nr_prach_passive_rar_pdu(uint16_t ra_rnti, uint64_t abs_slot, const uint8_t *tb, uint32_t len)
 {
   if (!nr_isac_prach_enabled()) return;
@@ -259,6 +329,11 @@ void nr_prach_passive_rar_pdu(uint16_t ra_rnti, uint64_t abs_slot, const uint8_t
     nr_prach_passive_rar(ra_rnti, entries[i].rapid, entries[i].ta, abs_slot);
 }
 
+/* detection_meta: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:294, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:317.
+ */
 static nr_sense_rs_meta_t detection_meta(const prach_detection_t *d, int relation, int rapid, int ta)
 {
   return (nr_sense_rs_meta_t){
@@ -274,6 +349,11 @@ static nr_sense_rs_meta_t detection_meta(const prach_detection_t *d, int relatio
     .prach_rar_match=relation, .prach_rar_rapid=rapid, .prach_rar_ta=ta};
 }
 
+/* emit_detection: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:347, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:408, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:483.
+ */
 static void emit_detection(const prach_detection_t *d, uint64_t now)
 {
   int relation = -1, rapid = -1, ta = -1;
@@ -299,14 +379,29 @@ static void emit_detection(const prach_detection_t *d, uint64_t now)
 }
 
 #ifdef NR_PASSIVE_PRACH_TEST
+/* nr_prach_passive_rar_age_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:33, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:60.
+ */
 int nr_prach_passive_rar_age_test(uint64_t detection_abs, uint64_t rar_abs, int slots_per_frame)
 {
   return rar_slot_age(detection_abs, rar_abs, slots_per_frame);
 }
+/* nr_prach_passive_ra_slot_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:34, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:65.
+ */
 int nr_prach_passive_ra_slot_test(int slot, int mu, int format)
 {
   return ra_slot(slot, mu, format);
 }
+/* nr_prach_passive_format_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:35, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:95.
+ */
 void nr_prach_passive_format_test(int relation, char *line, uint32_t capacity)
 {
   const prach_detection_t d = {.valid = true, .abs_slot = 1234, .mono_ns = 987654321,
@@ -317,13 +412,28 @@ void nr_prach_passive_format_test(int relation, char *line, uint32_t capacity)
   const nr_sense_rs_meta_t meta=detection_meta(&d,relation,relation<0?-1:17,relation<0?-1:20);
   nr_sense_rs_to_json(NR_SENSE_SRC_PRACH,&meta,0,line,capacity);
 }
+/* nr_prach_passive_floor_reset_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:36, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:98.
+ */
 void nr_prach_passive_floor_reset_test(void) { memset(floors, 0, sizeof(floors)); }
+/* nr_prach_passive_floor_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:101.
+ */
 int nr_prach_passive_floor_test(int fdm, int gain_db, int energy)
 {
   return floor_detect(fdm, gain_db, energy);
 }
 #endif
 
+/* flush_pending: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:367.
+ */
 static void flush_pending(uint64_t now)
 {
   for (int i = 0; i < PRACH_PENDING; ++i) {
@@ -350,6 +460,11 @@ static void flush_pending(uint64_t now)
   }
 }
 
+/* mono_ns: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:366, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:426, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:618.
+ */
 static uint64_t mono_ns(void)
 {
   struct timespec ts;
@@ -357,6 +472,11 @@ static uint64_t mono_ns(void)
   return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+/* process_job: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:441.
+ */
 static void process_job(const prach_job_t *job)
 {
 #ifdef NR_PASSIVE_PRACH_TEST
@@ -429,6 +549,11 @@ static void process_job(const prach_job_t *job)
   atomic_fetch_add_explicit(&prach_occasions, processed, memory_order_relaxed);
 }
 
+/* prach_worker: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void *prach_worker(void *unused)
 {
   (void)unused;
@@ -467,6 +592,11 @@ void nr_prach_passive_start(void)
 
 /* The caller has stopped the UE slot thread before this function. The worker
  * drains queued jobs, is joined, then pending[] is flushed on this thread. */
+/* nr_prach_passive_flush: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-uesoftmodem.c:750, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:652, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:29, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:118.
+ */
 void nr_prach_passive_flush(void)
 {
   if (!nr_isac_prach_enabled()) return;
@@ -486,6 +616,11 @@ void nr_prach_passive_flush(void)
   }
 }
 
+/* symbols_allow_prach: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:568.
+ */
 static bool symbols_allow_prach(const fapi_nr_config_request_t *cfg, int start_slot,
                                 int final_slot, nr_prach_passive_occasion_t o)
 {
@@ -505,6 +640,11 @@ static bool symbols_allow_prach(const fapi_nr_config_request_t *cfg, int start_s
   return true;
 }
 
+/* process_slot: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:645.
+ */
 static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   if (!nr_isac_prach_enabled() || !ue || !proc) return;
@@ -635,6 +775,11 @@ static void process_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
   pthread_mutex_unlock(&job_mu);
 }
 
+/* nr_prach_passive_process: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue.c:770, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:22, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:199, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:258 (+1 more).
+ */
 void nr_prach_passive_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   if (!nr_isac_prach_enabled()) return;
@@ -647,6 +792,11 @@ void nr_prach_passive_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 }
 
 #ifdef NR_PASSIVE_PRACH_TEST
+/* nr_prach_passive_test_reset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:38, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:113.
+ */
 void nr_prach_passive_test_reset(void)
 {
   if (worker_started) nr_prach_passive_flush();
@@ -668,28 +818,53 @@ void nr_prach_passive_test_reset(void)
   atomic_store(&prach_skipped, 0);
   nr_prach_passive_start();
 }
+/* nr_prach_passive_test_prior: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:39, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:170, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:231.
+ */
 void nr_prach_passive_test_prior(int index, bool valid, bool ignore)
 {
   test_prior = (nr_pdcch_sib1_prior_t){.valid = true, .rach_valid = valid, .prach_config_index = index};
   test_ignore_sib1 = ignore;
 }
+/* nr_prach_passive_test_drain: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:40, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:117.
+ */
 void nr_prach_passive_test_drain(void)
 {
   pthread_mutex_lock(&job_mu);
   while (job_read != job_write) pthread_cond_wait(&job_cv, &job_mu);
   pthread_mutex_unlock(&job_mu);
 }
+/* nr_prach_passive_test_threads: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:41, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:122.
+ */
 void nr_prach_passive_test_threads(unsigned *slot_calls, unsigned *worker_calls, bool *same_thread)
 {
   *slot_calls = atomic_load(&test_slot_calls);
   *worker_calls = atomic_load(&test_worker_calls);
   *same_thread = *worker_calls && pthread_equal(test_slot_tid, test_worker_tid);
 }
+/* nr_prach_passive_test_heavy_calls: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:42, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:127.
+ */
 void nr_prach_passive_test_heavy_calls(unsigned *ru, unsigned *correlator, unsigned *exported)
 {
   *ru = atomic_load(&test_ru_calls);
   *correlator = atomic_load(&test_correlator_calls);
   *exported = atomic_load(&test_export_calls);
 }
+/* nr_prach_passive_test_start_calls: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.h:43, openair1/PHY/NR_UE_TRANSPORT/tests/nr_prach_passive_test_bridge.c:129.
+ */
 unsigned nr_prach_passive_test_start_calls(void) { return atomic_load(&test_start_calls); }
 #endif

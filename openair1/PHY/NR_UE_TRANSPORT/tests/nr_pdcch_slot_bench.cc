@@ -13,11 +13,26 @@
 #include <string>
 
 struct Sample { nr_pdcch_gpu_record_t h; std::vector<int16_t> iq, cpu; };
+/* elapsed: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_slot_bench.cc:99.
+ */
 static double elapsed(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
 { return std::chrono::duration<double, std::micro>(b-a).count(); }
+/* pct: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_slot_bench.cc:127.
+ */
 static double pct(std::vector<double> v, double q)
 { if (v.empty()) return NAN; std::sort(v.begin(),v.end()); return v[(size_t)std::ceil(q*v.size())-1]; }
 
+/* main: PDCCH slot benchmark: loads a PDCCH dump and runs the CPU or GPU reference over it.
+ *   How it works: Reads and validates the records, sorts by absolute slot and reports passes, slots, max passes per slot, the batch-limit count and the distinct DMRS scrambling IDs. Then runs the chosen mode (--cpu-only or --gpu).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char **argv)
 {
   if (argc < 2) { fprintf(stderr,"usage: nr_pdcch_slot_bench dump.bin [--cpu-only|--gpu] [repetitions]\n"); return 2; }

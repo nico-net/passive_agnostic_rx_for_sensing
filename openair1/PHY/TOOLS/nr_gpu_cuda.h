@@ -10,11 +10,21 @@ template<typename T> static inline cudaError_t nr_gpu_allocate(nr_gpu_kind_t kin
   *ptr = static_cast<T *>(nr_gpu_alloc(kind, bytes));
   return *ptr ? cudaSuccess : cudaErrorMemoryAllocation;
 }
+/* nr_gpu_copy: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static inline cudaError_t nr_gpu_copy(void *dst, const void *src, size_t bytes)
 {
   int rc = nr_gpu_copy_async(dst, src, bytes, nullptr);
   return static_cast<cudaError_t>(rc ? rc : nr_gpu_sync(nullptr));
 }
+/* nr_gpu_copy_2d_async: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static inline cudaError_t nr_gpu_copy_2d_async(void *dst, size_t dp, const void *src, size_t sp,
                                              size_t width, size_t height, void *stream)
 {

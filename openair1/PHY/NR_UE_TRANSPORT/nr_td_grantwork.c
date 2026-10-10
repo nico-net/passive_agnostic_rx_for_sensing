@@ -154,6 +154,11 @@ struct nr_td_grantwork_s {
   gw_entry_t e[NR_TD_GW_MAX_SIG];
 };
 
+/* nr_td_grantwork_begin: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5165, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:98, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:136, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:82 (+3 more).
+ */
 nr_td_grantwork_t *nr_td_grantwork_begin(const nr_td_gw_job_t *job)
 {
   if (job == NULL || job->slots_per_frame <= 0 || (job->ctx_len > 0 && job->ctx == NULL))
@@ -187,6 +192,11 @@ nr_td_grantwork_t *nr_td_grantwork_begin(const nr_td_gw_job_t *job)
   return gw;
 }
 
+/* nr_td_grantwork_retain: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:396, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:99, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:94, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:213.
+ */
 nr_td_grantwork_t *nr_td_grantwork_retain(nr_td_grantwork_t *gw)
 {
   if (gw)
@@ -194,6 +204,11 @@ nr_td_grantwork_t *nr_td_grantwork_retain(nr_td_grantwork_t *gw)
   return gw;
 }
 
+/* nr_td_grantwork_release: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1715, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2054, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:420, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:471 (+18 more).
+ */
 void nr_td_grantwork_release(nr_td_grantwork_t *gw)
 {
   if (gw == NULL || atomic_fetch_sub(&gw->refcount, 1) != 1)
@@ -207,19 +222,59 @@ void nr_td_grantwork_release(nr_td_grantwork_t *gw)
   free(gw);
 }
 
+/* nr_td_grantwork_refcount: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:102, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:994, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:93, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:95 (+2 more).
+ */
 int nr_td_grantwork_refcount(const nr_td_grantwork_t *gw) { return gw ? atomic_load(&gw->refcount) : 0; }
+/* nr_td_grantwork_fep: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2396, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5126, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5485, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:122 (+1 more).
+ */
 void *nr_td_grantwork_fep(const nr_td_grantwork_t *gw) { return gw->fep; }
+/* nr_td_grantwork_abs_slot: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:136, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:96.
+ */
 long nr_td_grantwork_abs_slot(const nr_td_grantwork_t *gw) { return gw->abs_slot; }
+/* nr_td_grantwork_slots_per_frame: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:137, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:97.
+ */
 int nr_td_grantwork_slots_per_frame(const nr_td_grantwork_t *gw) { return gw->spf; }
+/* nr_td_grantwork_ctx: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2392, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4359, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4704, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5229 (+6 more).
+ */
 const void *nr_td_grantwork_ctx(const nr_td_grantwork_t *gw) { return gw->ctx; }
+/* nr_td_grantwork_fep_alive: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:221, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:325, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:326, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:431 (+4 more).
+ */
 bool nr_td_grantwork_fep_alive(const nr_td_grantwork_t *gw)
 {
   return gw->fep_gen_src == NULL || __atomic_load_n(gw->fep_gen_src, __ATOMIC_ACQUIRE) == gw->fep_gen;
 }
+/* nr_td_grantwork_fep_mask: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2497, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:123, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:181, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:184 (+2 more).
+ */
 uint16_t nr_td_grantwork_fep_mask(const nr_td_grantwork_t *gw, double fo_hz)
 {
   return (gw->fep_fo == fo_hz && nr_td_grantwork_fep_alive(gw)) ? gw->fep_mask : 0;
 }
+/* nr_td_grantwork_fep_done: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2550, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:124, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:182, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:183 (+1 more).
+ */
 void nr_td_grantwork_fep_done(nr_td_grantwork_t *gw, double fo_hz, uint16_t mask)
 {
   if (gw->fep_fo != fo_hz)
@@ -227,27 +282,57 @@ void nr_td_grantwork_fep_done(nr_td_grantwork_t *gw, double fo_hz, uint16_t mask
   gw->fep_fo = fo_hz;
   gw->fep_mask |= mask;
 }
+/* nr_td_grantwork_flag: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4703, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:126, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:290.
+ */
 void nr_td_grantwork_flag(nr_td_grantwork_t *gw, uint32_t bits)
 {
   if (gw)
     atomic_fetch_or(&gw->flags, bits);
 }
+/* nr_td_grantwork_flags: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5240, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5314, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:127, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:260 (+3 more).
+ */
 uint32_t nr_td_grantwork_flags(const nr_td_grantwork_t *gw)
 {
   return gw ? atomic_load(&((nr_td_grantwork_t *)gw)->flags) : 0;
 }
 static _Atomic uint64_t g_refused;
+/* nr_td_grantwork_job_end: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1714, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2053, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:15, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:129 (+2 more).
+ */
 void nr_td_grantwork_job_end(nr_td_grantwork_t *gw)
 {
   if (gw)
     atomic_store(&gw->job_ended, true);
 }
+/* nr_td_grantwork_refused_count: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:133, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:244, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:257.
+ */
 uint64_t nr_td_grantwork_refused_count(void) { return atomic_load(&g_refused); }
+/* may_compute: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:325, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:431.
+ */
 static bool may_compute(const nr_td_grantwork_t *gw)
 {
   return pthread_equal(gw->job_thread, pthread_self()) && !atomic_load(&((nr_td_grantwork_t *)gw)->job_ended);
 }
 
+/* find: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:279, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:364, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:390, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:456 (+1 more).
+ */
 static gw_entry_t *find(nr_td_grantwork_t *gw, uint64_t sig)
 {
   for (int i = 0; i < gw->n; i++)
@@ -256,6 +341,11 @@ static gw_entry_t *find(nr_td_grantwork_t *gw, uint64_t sig)
   return NULL;
 }
 
+/* fill_view: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:318, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:321, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:421, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:457.
+ */
 static void fill_view(const gw_entry_t *e, nr_td_gw_llr_view_t *out)
 {
   if (out == NULL)
@@ -273,6 +363,11 @@ static void fill_view(const gw_entry_t *e, nr_td_gw_llr_view_t *out)
 
 /* Under gw->lock. Waits out another thread's computation. Returns the entry (created EMPTY when absent)
  * or NULL (table full; *err set). */
+/* lookup_wait: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:311, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:414.
+ */
 static gw_entry_t *lookup_wait(nr_td_grantwork_t *gw, uint64_t sig, int *err)
 {
   for (;;) {
@@ -294,6 +389,11 @@ static gw_entry_t *lookup_wait(nr_td_grantwork_t *gw, uint64_t sig, int *err)
   }
 }
 
+/* claim: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:333, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:444.
+ */
 static void claim(gw_entry_t *e)
 {
   e->state = E_COMPUTING;
@@ -302,6 +402,11 @@ static void claim(gw_entry_t *e)
   e->t0_ns = nr_td_gw_now_ns();
 }
 
+/* nr_td_grantwork_acquire: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2398, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:112, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:48, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:151 (+6 more).
+ */
 nr_td_gw_acq_t nr_td_grantwork_acquire(nr_td_grantwork_t *gw, uint64_t sig, nr_td_gw_llr_view_t *out)
 {
   if (gw == NULL)
@@ -340,6 +445,11 @@ nr_td_gw_acq_t nr_td_grantwork_acquire(nr_td_grantwork_t *gw, uint64_t sig, nr_t
   return r;
 }
 
+/* finish: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:378, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:395.
+ */
 static void finish(nr_td_grantwork_t *gw, gw_entry_t *e)
 {
   e->compute_ns = nr_td_gw_now_ns() - e->t0_ns;
@@ -384,6 +494,11 @@ int nr_td_grantwork_publish(nr_td_grantwork_t *gw, uint64_t sig, const int16_t *
 }
 
 /* Marks a still-COMPUTING entry owned by this thread FAILED. Returns true when it did. */
+/* fail_owned: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:403, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:452.
+ */
 static bool fail_owned(nr_td_grantwork_t *gw, uint64_t sig, int status)
 {
   pthread_mutex_lock(&gw->lock);
@@ -398,12 +513,22 @@ static bool fail_owned(nr_td_grantwork_t *gw, uint64_t sig, int status)
   return mine;
 }
 
+/* nr_td_grantwork_abandon: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4368, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4919, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5031, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5050 (+3 more).
+ */
 void nr_td_grantwork_abandon(nr_td_grantwork_t *gw, uint64_t sig, int status)
 {
   if (gw && fail_owned(gw, sig, status))
     pthread_mutex_unlock(&gw->compute_lock);
 }
 
+/* nr_td_grantwork_get_llr: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5239, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5312, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:81, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:106 (+23 more).
+ */
 int nr_td_grantwork_get_llr(nr_td_grantwork_t *gw, uint64_t sig, const void *hint, nr_td_gw_llr_view_t *out)
 {
   if (gw == NULL || out == NULL)
@@ -460,6 +585,11 @@ int nr_td_grantwork_get_llr(nr_td_grantwork_t *gw, uint64_t sig, const void *hin
   return st == E_READY ? NR_TD_GW_OK : NR_TD_GW_E_FAILED;
 }
 
+/* nr_td_grantwork_compute_count: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:140, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:142, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:229.
+ */
 int nr_td_grantwork_compute_count(const nr_td_grantwork_t *gw, uint64_t sig)
 {
   nr_td_grantwork_t *g = (nr_td_grantwork_t *)gw;
@@ -470,6 +600,11 @@ int nr_td_grantwork_compute_count(const nr_td_grantwork_t *gw, uint64_t sig)
   return c;
 }
 
+/* nr_td_grantwork_n_entries: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:397, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:414, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:141, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:146.
+ */
 int nr_td_grantwork_n_entries(const nr_td_grantwork_t *gw)
 {
   nr_td_grantwork_t *g = (nr_td_grantwork_t *)gw;
@@ -479,6 +614,11 @@ int nr_td_grantwork_n_entries(const nr_td_grantwork_t *gw)
   return n;
 }
 
+/* nr_td_grantwork_key: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1333, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5239, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5312, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:10 (+8 more).
+ */
 uint64_t nr_td_grantwork_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm)
 {
   nr_pdsch_cfg_hypothesis_t c = *h;
@@ -493,6 +633,11 @@ uint64_t nr_td_grantwork_key(const nr_pdsch_cfg_hypothesis_t *h, int nl, int qm)
 
 /* ---------------------------------------------------------------------------------------------
  * CB0 extraction: the r = 0 work of nrLDPC_coding_segment_decoder.c (nr_process_decode_segment). */
+/* nr_td_gw_cb0_extract: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:534, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:158, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:164, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:368 (+4 more).
+ */
 int nr_td_gw_cb0_extract(const int16_t *llr, uint32_t n_llr, const nr_td_cb0_params_t *p, int16_t *d)
 {
   if (llr == NULL || p == NULL || d == NULL || p->C < 1 || p->C > 255 || (p->BG != 1 && p->BG != 2) || p->Z <= 0
@@ -516,6 +661,11 @@ int nr_td_gw_cb0_extract(const int16_t *llr, uint32_t n_llr, const nr_td_cb0_par
   return NR_TD_GW_OK;
 }
 
+/* nr_td_gw_cb0_input: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_LLR_NORM.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5275, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h:301, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:70, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.h:160 (+2 more).
+ */
 int nr_td_gw_cb0_input(const int16_t *llr, uint32_t G, const nr_td_cb0_params_t *p, bool norm, int16_t *e0, int16_t *d,
                        int *k_out)
 {
@@ -540,6 +690,11 @@ static const char *const kGwTimName[NR_TD_GWTIM_N] = {"shared", "fep", "chest", 
 static _Atomic uint64_t g_tim_ns[NR_TD_GWTIM_N], g_tim_n[NR_TD_GWTIM_N], g_tim_max[NR_TD_GWTIM_N];
 static _Atomic int g_tim_on = -1;
 
+/* nr_td_gw_tim_on: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PDCCH_TIMING.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2413, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5283, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5431, openair1/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c:381 (+3 more).
+ */
 bool nr_td_gw_tim_on(void)
 {
   if (g_tim_on < 0)
@@ -547,6 +702,11 @@ bool nr_td_gw_tim_on(void)
   return g_tim_on > 0;
 }
 
+/* nr_td_gw_now_ns: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2474, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2552, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2557, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3183 (+9 more).
+ */
 uint64_t nr_td_gw_now_ns(void)
 {
   struct timespec t;
@@ -554,6 +714,11 @@ uint64_t nr_td_gw_now_ns(void)
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+/* nr_td_gw_tim_add: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2553, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3184, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4358, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5284 (+4 more).
+ */
 void nr_td_gw_tim_add(int k, uint64_t ns)
 {
   if (k < 0 || k >= NR_TD_GWTIM_N)

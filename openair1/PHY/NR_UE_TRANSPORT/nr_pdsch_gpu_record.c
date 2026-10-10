@@ -16,6 +16,11 @@ static __thread struct gpu_stage {
 } *stage;
 static __thread uint32_t stage_epoch;
 static __thread int stage_symbol, stage_layer, stage_ant, stage_enabled = -1;
+/* nr_pdsch_gpu_stage_context: sets the context (epoch, symbol, layer, antenna) for the next channel-estimate stage record.
+ *   How it works: Staging is enabled only when ISAC_PDSCH_GPU_STAGE_DUMP == 1 and ISAC_PDSCH_INLINE_POOL == 1 (read once). A new epoch clears the stage table.
+ *   ISAC_* flags read: ISAC_PDSCH_GPU_STAGE_DUMP, ISAC_PDSCH_INLINE_POOL.
+ *   Callers: openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1527, openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1748, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_stage.h:17.
+ */
 void nr_pdsch_gpu_stage_context(uint32_t epoch, int symbol, int layer, int ant)
 {
   if (stage_enabled < 0) {
@@ -30,6 +35,11 @@ void nr_pdsch_gpu_stage_context(uint32_t epoch, int symbol, int layer, int ant)
   stage_epoch = epoch;
   stage_symbol = symbol; stage_layer = layer; stage_ant = ant;
 }
+/* nr_pdsch_gpu_stage_chest: records one pilot LS vector and one final-channel-estimate vector into the stage at the current context.
+ *   How it works: Ignored unless a context is set and the indices are in range (count <= 3300). Copies count entries of ls and fir and stores the delay and noise values.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1229, openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1375, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_stage.h:18.
+ */
 void nr_pdsch_gpu_stage_chest(const void *ls, const void *fir, int count, int delay, uint32_t noise)
 {
   if (!stage || count < 1 || count > 3300 || stage_symbol < 0 || stage_symbol >= 14
@@ -42,6 +52,11 @@ void nr_pdsch_gpu_stage_chest(const void *ls, const void *fir, int count, int de
 
 /* Admit a configured CSI-RS list only when the CPU extractor's own geometry
  * says it removes zero REs from this grant. Opt-in; overlapping CSI stays CPU. */
+/* nr_pdsch_gpu_csi_disjoint: decides whether a PDSCH with CSI-RS rate matching may take the GPU path.
+ *   How it works: Returns true when there is no rate matching. Otherwise requires ISAC_PDSCH_GPU_CSI_DISJOINT == "1", valid CSI-RS rows (1..18) and valid symbol geometry, and that nr_dlsch_csi_unav_res finds no overlap with the allocation.
+ *   ISAC_* flags read: ISAC_PDSCH_GPU_CSI_DISJOINT.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1344, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1345.
+ */
 bool nr_pdsch_gpu_csi_disjoint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa)
 {
   if (!pdu->numCsiRsForRateMatching) return true;
@@ -54,6 +69,11 @@ bool nr_pdsch_gpu_csi_disjoint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, c
   return nr_dlsch_csi_unav_res((fapi_nr_dl_config_dlsch_pdu_rel15_t *)pdu, fa) == 0;
 }
 
+/* nr_pdsch_gpu_readback: reads the GPU rxdataF back for the record.
+ *   How it works: Reads one symbol when all jobs share the same first DM-RS symbol, otherwise the whole grid (api->read_rxdataF).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.h:24, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:206.
+ */
 int nr_pdsch_gpu_readback(const nr_gpu_fep_api_t *api, const nr_gpu_pdsch_job_t *jobs,
                           int n, int ofdm_symbol_size, int16_t *out)
 {
@@ -69,6 +89,11 @@ int nr_pdsch_gpu_readback(const nr_gpu_fep_api_t *api, const nr_gpu_pdsch_job_t 
 
 /* Called after the CPU decode while this consumer still owns its IQ snapshot.
  * Bounded, opt-in I/O belongs to the offline replay only. */
+/* nr_pdsch_gpu_record_cpu: writes one recorded grant (the GPU job, the CPU LLRs and rxdataF) to the ISAC_PDSCH_GPU_DUMP file for offline replay.
+ *   How it works: Lock-protected. Reads ISAC_PDSCH_GPU_DUMP (path), ISAC_PDSCH_GPU_DUMP_MAX (default 128 records) and ISAC_PDSCH_GPU_DUMP_FULL == 1 (skip layout probes). Skips errored or unsupported decodes and oversized LLR sets. Builds a record (version 3 when stage data exists). TODO(doc): the write of the record after the header was not reviewed.
+ *   ISAC_* flags read: ISAC_PDSCH_GPU_DUMP, ISAC_PDSCH_GPU_DUMP_FULL, ISAC_PDSCH_GPU_DUMP_MAX, ISAC_PDSCH_MMSE_MODE.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:78, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1536.
+ */
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
                              const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride)
 {

@@ -26,6 +26,11 @@ static int g_backoff_len = -1;
 static bool g_warned_fallback;
 static _Atomic uint64_t s_batches_cpu, s_batches_gpu, s_gpu_failed, s_gpu_skipped;
 
+/* now_ns: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:173, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:211.
+ */
 static uint64_t now_ns(void)
 {
   struct timespec ts;
@@ -33,6 +38,11 @@ static uint64_t now_ns(void)
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* mode_from_env: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_TD_CB0_BACKEND.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:53, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:62, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:105, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:140.
+ */
 static int mode_from_env(void)
 {
   const char *e = getenv("ISAC_TD_CB0_BACKEND");
@@ -46,6 +56,11 @@ static int mode_from_env(void)
   return NR_TD_CB0_BE_AUTO;
 }
 
+/* nr_td_cb0_backend_mode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:205, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:56, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:73, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:76 (+1 more).
+ */
 int nr_td_cb0_backend_mode(void)
 {
   pthread_mutex_lock(&g_be_lock);
@@ -56,6 +71,11 @@ int nr_td_cb0_backend_mode(void)
   return m;
 }
 
+/* nr_td_cb0_backend_mode_set: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:207, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:274, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:322, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:337 (+8 more).
+ */
 void nr_td_cb0_backend_mode_set(int mode)
 {
   pthread_mutex_lock(&g_be_lock);
@@ -65,6 +85,11 @@ void nr_td_cb0_backend_mode_set(int mode)
   pthread_mutex_unlock(&g_be_lock);
 }
 
+/* nr_td_cb0_register_gpu_backend: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:181, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:201, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:273, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:336 (+12 more).
+ */
 void nr_td_cb0_register_gpu_backend(const nr_td_cb0_backend_t *be)
 {
   pthread_mutex_lock(&g_be_lock);
@@ -79,6 +104,11 @@ void nr_td_cb0_register_gpu_backend(const nr_td_cb0_backend_t *be)
   pthread_mutex_unlock(&g_be_lock);
 }
 
+/* nr_td_cb0_gpu_backend_registered: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:203, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:73.
+ */
 int nr_td_cb0_gpu_backend_registered(void)
 {
   pthread_mutex_lock(&g_be_lock);
@@ -87,6 +117,11 @@ int nr_td_cb0_gpu_backend_registered(void)
   return r;
 }
 
+/* nr_td_cb0_backend_get_stats: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:241, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:601, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:282, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:329 (+3 more).
+ */
 void nr_td_cb0_backend_get_stats(nr_td_cb0_backend_stats_t *s)
 {
   if (s == NULL)
@@ -98,6 +133,11 @@ void nr_td_cb0_backend_get_stats(nr_td_cb0_backend_stats_t *s)
 }
 
 /* Decide the backend for one batch (before any outcome). Returns true for the GPU with a copy of its descriptor. */
+/* pick_gpu: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_TD_CB0_BACKEND, ISAC_TD_CB0_GPU_BACKOFF.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:172.
+ */
 static bool pick_gpu(nr_td_cb0_backend_t *be)
 {
   pthread_mutex_lock(&g_be_lock);
@@ -132,6 +172,11 @@ static bool pick_gpu(nr_td_cb0_backend_t *be)
   return gpu;
 }
 
+/* nr_td_cb0_backend_peek: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:213, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:371.
+ */
 int nr_td_cb0_backend_peek(void)
 {
   nr_td_cb0_backend_t be;
@@ -147,6 +192,11 @@ int nr_td_cb0_backend_peek(void)
   return NR_TD_CB0_BE_GPU;
 }
 
+/* gpu_failed: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:201.
+ */
 static void gpu_failed(void)
 {
   pthread_mutex_lock(&g_be_lock);

@@ -41,12 +41,27 @@ static struct {
  _Atomic bool running;
 } g = {.mu=PTHREAD_MUTEX_INITIALIZER,.cv=PTHREAD_COND_INITIALIZER,.producer=-1};
 
+/* nr_pdcch_nid_gpu_enabled: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PDCCH_NID_GPU.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:983, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1166, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1422, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1423 (+8 more).
+ */
 bool nr_pdcch_nid_gpu_enabled(void)
 {
  const char *e=getenv("ISAC_PDCCH_NID_GPU");
  return e && strcmp(e,"1")==0;
 }
+/* nr_pdcch_nid_gpu_running: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1394, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:436, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:207, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:289 (+4 more).
+ */
 bool nr_pdcch_nid_gpu_running(void) {return atomic_load_explicit(&g.running,memory_order_acquire);}
+/* env_int: reads an integer environment variable, returning def when unset, empty, non-numeric or outside [lo, hi].
+ *   How it works: strtol with end-pointer check and range test.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:212, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:213, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:215, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:221 (+3 more).
+ */
 static int env_int(const char *key,int def,int lo,int hi)
 {
  const char *s=getenv(key);if(!s || !*s)return def;
@@ -63,6 +78,11 @@ static uint64_t duty_clock_us(uint64_t batch_clock)
  if(!g.nodrop)return nr_gpu_budget_now_us();
  return batch_clock;
 }
+/* slot_clock_us: no-drop mode clock: the slot tick counter converted to microseconds.
+ *   How it works: (slot_ticks + 1) * NODROP_SLOT_US, relaxed atomic load.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:60, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:326, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:362.
+ */
 static uint64_t slot_clock_us(void)
 {
  return (atomic_load_explicit(&g.slot_ticks,memory_order_relaxed)+1)*NODROP_SLOT_US;
@@ -94,6 +114,11 @@ static bool nodrop_acquire(void)
   timed_out=pthread_cond_timedwait(&g.cv_free,&g.mu,&dl)==ETIMEDOUT;
  }
 }
+/* worker: the PDCCH NID GPU worker thread: takes a filled batch and decides whether to run it.
+ *   How it works: Waits on g.cv for a batch in state 2 (lowest sequence). With ISAC_PDCCH_NID_GPU_DUTY=1 it runs the ACQUIRE/MAINTAIN/PAUSED duty state machine (nr_gpu_discovery_due) and frees skipped batches. A geometry change resets the duty and the published result. TODO(doc): the device-run and publish tail (after line 308) was not reviewed.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:60, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:70.
+ */
 static void *worker(void *unused)
 {
  (void)unused;
@@ -201,6 +226,11 @@ failed:
  }
  return NULL;
 }
+/* nr_pdcch_nid_gpu_start: starts the PDCCH NID GPU discovery: reads the ISAC_PDCCH_NID_GPU_* policy flags, loads the device module and starts the worker thread.
+ *   How it works: Returns 0 when the feature is off. Reads DUTY, ACQUIRE_MS, MAINTAIN_MS, NODROP, RECHECK_MS, the ISAC_COREMAP_IDSWEEP_DUR duration (clamped 1..3), INCREMENTAL (default on), BATCH, EVERY and WINDOW. In no-drop mode it sets a monotonic condvar and resets the slot ticks. dlopen libpdcch_nid_gpu.so, check the ABI, create the device and set the worker to SCHED_OTHER with an explicit schedule.
+ *   ISAC_* flags read: ISAC_COREMAP_IDSWEEP_DUR, ISAC_CSIRS_DISC, ISAC_PDCCH_NID_GPU_ACQUIRE_MS, ISAC_PDCCH_NID_GPU_BATCH, ISAC_PDCCH_NID_GPU_CORE, ISAC_PDCCH_NID_GPU_DUTY, ISAC_PDCCH_NID_GPU_EVERY, ISAC_PDCCH_NID_GPU_INCREMENTAL, ISAC_PDCCH_NID_GPU_MAINTAIN_MS, ISAC_PDCCH_NID_GPU_NODROP, ISAC_PDCCH_NID_GPU_RECHECK_MS, ISAC_PDCCH_NID_GPU_WINDOW.
+ *   Callers: executables/nr-uesoftmodem.c:620, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:59, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:32, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:39.
+ */
 int nr_pdcch_nid_gpu_start(int max_rb)
 {
  if(!nr_pdcch_nid_gpu_enabled())return 0;
@@ -266,6 +296,11 @@ fail:
  LOG_E(PHY,"SENSING: PDCCH_NID_GPU init failed; capture disabled\n");
  return -1;
 }
+/* nr_pdcch_nid_gpu_stop: stops the worker and releases the device.
+ *   How it works: Clears running, sets stop and joins the thread, destroys the device, dlcloses the module and resets the batch state and result.
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-uesoftmodem.c:631, executables/nr-uesoftmodem.c:743, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:60, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:92 (+2 more).
+ */
 void nr_pdcch_nid_gpu_stop(void)
 {
  if(!g.device)return;
@@ -280,10 +315,20 @@ void nr_pdcch_nid_gpu_stop(void)
  g.result.count=0;g.generation++;
  pthread_mutex_unlock(&g.mu);
 }
+/* nr_pdcch_nid_gpu_dropped_snapshots: returns the number of no-drop snapshots refused so far.
+ *   How it works: Relaxed atomic load of dropped_snapshots.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:274, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:62, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:65, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:71 (+3 more).
+ */
 uint64_t nr_pdcch_nid_gpu_dropped_snapshots(void)
 {
  return atomic_load_explicit(&g.dropped_snapshots,memory_order_relaxed);
 }
+/* nr_pdcch_nid_gpu_push: producer entry, called per RX symbol: validates the geometry and copies the symbol IQ into the current batch.
+ *   How it works: Rejects bad geometry (nsc, sps, slot, FFT offset, RB count). No-drop mode accepts a slot atomically: the first symbol decides, and later symbols of a refused slot are counted as partial drops. Otherwise it takes the mutex and a free batch. Copies dur symbols per candidate with the cyclic FFT offset, zero-fills past sps, and marks the batch ready (state 2) at batch_size.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:526, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:77, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:65, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:52 (+1 more).
+ */
 int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const nr_pdcch_nid_config_t *cfg)
 {
  if(!nr_pdcch_nid_gpu_running() || !rx || !cfg || cfg->dur!=g.dur || cfg->nsc<72
@@ -328,6 +373,11 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
  }
  pthread_mutex_unlock(&g.mu);return 0;
 }
+/* nr_pdcch_nid_gpu_records: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:988, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1170, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:50, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:33 (+7 more).
+ */
 int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *generation)
 {
  if(!nr_pdcch_nid_gpu_enabled() || !out || capacity<1 || !generation || pthread_mutex_trylock(&g.mu))return -1;
@@ -339,6 +389,11 @@ int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *g
  pthread_mutex_unlock(&g.mu);return n;
 }
 
+/* nr_pdcch_nid_gpu_snapshot: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1396, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:53, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:112, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:121.
+ */
 int nr_pdcch_nid_gpu_snapshot(nr_pdcch_nid_record_t *out,int cap,uint64_t *generation)
 {
  if(!out || cap<1 || !generation || pthread_mutex_trylock(&g.mu))return -1;
@@ -346,6 +401,11 @@ int nr_pdcch_nid_gpu_snapshot(nr_pdcch_nid_record_t *out,int cap,uint64_t *gener
  memcpy(out,g.result.records,n*sizeof(*out));*generation=g.generation;
  pthread_mutex_unlock(&g.mu);return n;
 }
+/* nr_pdcch_nid_gpu_feedback: consumer feedback from the PDCCH monitor: epoch, generation, verified and unexplained-occupancy flags.
+ *   How it works: Ignored unless DUTY is on. A new epoch clears the published result and the queued snapshots. The verified flag is applied only for the current generation. For unexplained occupancy it bumps the wake edge once per episode (rearmed after a quiet MAINTAIN interval or an epoch change).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1405, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4518, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.h:54, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:101 (+6 more).
+ */
 void nr_pdcch_nid_gpu_feedback(uint32_t epoch,uint64_t generation,bool verified,bool unexplained)
 {
  if(!g.duty_enabled)return;

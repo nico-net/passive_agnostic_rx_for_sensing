@@ -198,6 +198,11 @@ static int gpu_req_fep(void *ctx)
   r->fep_end_ns = now_ns();
   return rc;
 }
+/* gpu_req_llr: GPU request callback run by the PDSCH queue: computes the LLRs for the jobs and reads back the rxdataF.
+ *   How it works: Calls the GPU PDSCH LLR API. On success and when an rxdataF buffer is given, calls nr_pdsch_gpu_readback and keeps its result in read_rc.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:245, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:302.
+ */
 static int64_t gpu_req_llr(void *ctx)
 {
   gpu_fep_req_t *r = ctx;

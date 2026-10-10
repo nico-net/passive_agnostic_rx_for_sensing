@@ -72,6 +72,11 @@ __device__ __forceinline__ int16_t f_op(int16_t a, int16_t b, int sz)
 }
 /* G when the left child's beta IS initialised: subs(alpha_v[sz+i], sign(alpha_v[i], betal[i])).
  * Fused for the same reason as above -- a separate sign16() would hand subs16() a +32768. */
+/* g_sub: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.cu:168.
+ */
 __device__ __forceinline__ int16_t g_sub(int16_t x, int16_t v, int8_t bl)
 {
   int t = (bl == 0) ? 0 : (int)v;
@@ -83,6 +88,11 @@ __device__ __forceinline__ int16_t g_sub(int16_t x, int16_t v, int8_t bl)
  * simde_mm256/mm_adds_epi16 when sz is a multiple of 8, and its own scalar loop otherwise --
  * and that loop clamps the low side at -SHRT_MAX, not -32768. The two disagree by one LSB at
  * the negative rail, which flips hard decisions, so the width has to be honoured. */
+/* adds16: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.cu:166.
+ */
 __device__ __forceinline__ int16_t adds16(int16_t a, int16_t b, int sz)
 {
   const int r = (int)a + (int)b;
@@ -105,6 +115,11 @@ __device__ __forceinline__ int16_t adds16(int16_t a, int16_t b, int sz)
 __device__ int *npc_dbg_params_out = NULL;
 __device__ int16_t *npc_dbg_alpha_out = NULL;
 __device__ int16_t *npc_dbg_trace = NULL; /* [nops][2]: value written at (L-1,fli) and (L-1,fli+sz) */
+/* sc_decode_kernel: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 __global__ void __launch_bounds__(NPC_THREADS)
 sc_decode_kernel(const npc_dev_params_t *P, const int *pid, const int16_t *llr, const int *vidx, int estride,
                  uint8_t *u_out, int nstride, int ln, int nmax)
@@ -199,6 +214,11 @@ sc_decode_kernel(const npc_dev_params_t *P, const int *pid, const int16_t *llr, 
   }
 }
 
+/* now_us: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.cu:281, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.cu:290, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.cu:293, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.cu:296.
+ */
 static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
 
 extern "C" int npc_gpu_dbg_device_params(int *out10)

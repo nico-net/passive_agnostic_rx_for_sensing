@@ -12,6 +12,11 @@ struct fake_streamer {
   int recv() { ++calls; return calls % 997 == 0 ? 1 : calls % 1093 == 0 ? 2 : calls % 1319 == 0 ? 3 : (rng() % 3000 == 0 ? 1 : 0); }
 };
 
+/* recovery_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: tests/passive_rx/rxr/test_usrp_ring.cpp:140.
+ */
 static void recovery_test()
 {
   usrp_ring_recovery_state state(1000, 20);
@@ -57,6 +62,11 @@ static void recovery_test()
   assert(usrp_ring_has_samples(11, 10, 1));
 }
 
+/* fault_window_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: tests/passive_rx/rxr/test_usrp_ring.cpp:140.
+ */
 static void fault_window_test()
 {
   /* 48 kS/s: 20 ms = 960 samples. A fault every 30 ms, each preceded by a clean 20 ms, resets
@@ -89,6 +99,11 @@ static void fault_window_test()
   }
 }
 
+/* wrap_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: tests/passive_rx/rxr/test_usrp_ring.cpp:140.
+ */
 static void wrap_test()
 {
   const size_t cap = 17;
@@ -110,6 +125,11 @@ static void wrap_test()
     }
 }
 
+/* poll_classify_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: tests/passive_rx/rxr/test_usrp_ring.cpp:140.
+ */
 static void poll_classify_test()
 {
   /* Data always wins, even with a timeout code from a later fragment. */
@@ -124,6 +144,11 @@ static void poll_classify_test()
   assert(usrp_ring_poll_classify(0, true, 3.0, 0.1) == USRP_RING_POLL_TIMEOUT);
 }
 
+/* cpulist_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: tests/passive_rx/rxr/test_usrp_ring.cpp:140.
+ */
 static void cpulist_test()
 {
   assert(usrp_cpulist_mask("15-19\n") == 0xF8000ULL);
@@ -137,4 +162,9 @@ static void cpulist_test()
   assert(!(old_boot >> 16 & 1) && !(old_boot >> 15 & 1) && (new_boot >> 16 & 1) && (new_boot >> 15 & 1));
 }
 
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main() { recovery_test(); fault_window_test(); wrap_test(); poll_classify_test(); cpulist_test(); }

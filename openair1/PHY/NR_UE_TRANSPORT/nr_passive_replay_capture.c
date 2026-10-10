@@ -58,12 +58,22 @@ static pthread_cond_t writer_cv = PTHREAD_COND_INITIALIZER;
 static pthread_t writer;
 static long next_source;
 
+/* hash_tb: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:226, openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:305.
+ */
 static uint64_t hash_tb(const uint8_t *p, size_t n)
 {
   uint64_t h = UINT64_C(14695981039346656037);
   for (size_t i=0; i<n; ++i) h = (h ^ p[i]) * UINT64_C(1099511628211);
   return h;
 }
+/* write_all: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:98.
+ */
 static bool write_all(int fd, const void *data, size_t bytes)
 {
   const unsigned char *p=data;
@@ -74,6 +84,11 @@ static bool write_all(int fd, const void *data, size_t bytes)
   }
   return true;
 }
+/* write_capture: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void *write_capture(void *unused)
 {
   (void)unused;
@@ -139,6 +154,11 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   if (err) { atomic_store(&state,RP_VOID); LOG_E(PHY,"REPLAY VOID: writer creation failed %d\n",err); }
   else pthread_detach(writer);
 }
+/* nr_passive_replay_slot: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue.c:768, openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h:7.
+ */
 void nr_passive_replay_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   int s=atomic_load_explicit(&state,memory_order_acquire);
@@ -182,6 +202,11 @@ void nr_passive_replay_slot(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
   }
   if (index+1==header->slots) atomic_store(&state,RP_DRAINING);
 }
+/* recordable: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:198, openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:219.
+ */
 static bool recordable(long source)
 {
   int s=atomic_load(&state);
@@ -190,6 +215,11 @@ static bool recordable(long source)
   /* One full preceding frame for negative UL TA; three following frames for k2. */
   return relative>=header->fp.slots_per_frame && relative<(REPLAY_FRAMES-3)*header->fp.slots_per_frame;
 }
+/* nr_passive_replay_ul: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h:8, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7738.
+ */
 void nr_passive_replay_ul(long source, uint16_t rnti, unsigned length, nr_dci_bits_t payload)
 {
   if (atomic_load(&state)==RP_DISABLED) return;
@@ -201,6 +231,11 @@ void nr_passive_replay_ul(long source, uint16_t rnti, unsigned length, nr_dci_bi
   }
   pthread_mutex_unlock(&record_lock);
 }
+/* nr_passive_replay_dl: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h:9, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1726.
+ */
 void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
                           const nr_pdsch_passive_decode_result_t *result)
 {
@@ -228,6 +263,11 @@ void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
   pthread_mutex_unlock(&record_lock);
 }
 
+/* nr_passive_replay_read: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PASSIVE_REPLAY_UL_CONFIG, ISAC_PASSIVE_REPLAY_UL_PROBE.
+ *   Callers: executables/nr-uesoftmodem.c:630, openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h:11.
+ */
 int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
 {
   /* Replay bypasses UE_thread(), which normally initializes the CFO LUT.

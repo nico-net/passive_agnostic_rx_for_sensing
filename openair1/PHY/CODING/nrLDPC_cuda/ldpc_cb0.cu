@@ -47,6 +47,11 @@ constexpr int FIN_THREADS = 256;
 constexpr int MAX_SLOTS = 4;
 constexpr int MAX_LLR = 127;
 
+/* blocks_for: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:633, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:634, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:653, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:654 (+17 more).
+ */
 inline uint32_t blocks_for(uint32_t n, uint32_t b) { return (n + b - 1) / b; }
 
 /* per item, sorted order: what prep / finish need */
@@ -70,6 +75,11 @@ struct DMeta {
 /* NCW codewords per thread (blockIdx.y * NCW + c): the same (row, i) of NCW codewords share the table loads and the
  * index arithmetic, and their loads are independent (more in flight per thread). Each codeword's arithmetic is the
  * single-codeword one above, unchanged. */
+/* cb0_cn_kernel: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 template <int NCW>
 __launch_bounds__(CB0_CN_THREADS)
 __global__ void cb0_cn_kernel(const int8_t* __restrict__ chan, const int8_t* __restrict__ total, int8_t* __restrict__ msg,
@@ -186,6 +196,11 @@ __global__ void cb0_cn_kernel(const int8_t* __restrict__ chan, const int8_t* __r
  * sum of the partials) are reproduced in registers. A codeword whose posterior of iteration iter - 1 satisfied every
  * check (unsat == 0, from this iteration's check-node kernel) stops here, before writing: its posterior stays the one
  * G1 stops with, iters_out = iter. Shifts pre-reduced mod Z (vn = row | (s mod Z) << 16). NCW as the CN kernel. */
+/* cb0_vn_kernel: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 template <int NCW>
 __launch_bounds__(CB0_CN_THREADS)
 __global__ void cb0_vn_kernel(const int8_t* __restrict__ msg, const int8_t* __restrict__ chan, int8_t* __restrict__ total,
@@ -258,6 +273,11 @@ __global__ void cb0_vn_kernel(const int8_t* __restrict__ msg, const int8_t* __re
 }
 
 /* (BG, Z) copy of the base-graph edge tables with the shifts reduced mod Z (raw V up to 383 > Z for small Z). */
+/* cb0_modz_kernel: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 __global__ void cb0_modz_kernel(const uint32_t* __restrict__ in, uint32_t* __restrict__ out, uint32_t n, uint32_t Z)
 {
   const uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -266,6 +286,11 @@ __global__ void cb0_modz_kernel(const uint32_t* __restrict__ in, uint32_t* __res
 }
 
 /* Gather the chunk's inputs into the fixed work buffer and reset its early-termination state. grid (x, nb). */
+/* cb0_prep_kernel: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 __global__ void cb0_prep_kernel(const int8_t* __restrict__ src, size_t src_stride, const DMeta* __restrict__ meta,
                                 uint32_t n, uint32_t nb, uint32_t KcZ, int8_t* __restrict__ chan, uint32_t* __restrict__ done,
                                 uint32_t* __restrict__ unsat, uint8_t* __restrict__ iters_out, uint32_t num_iter)
@@ -294,6 +319,11 @@ __global__ void cb0_prep_kernel(const int8_t* __restrict__ src, size_t src_strid
 
 /* Hard decision of K bits (MSB first, as pack_bits_kernel), CRC (OAI check_crc: remainder of the K' bits, data then
  * CRC, divided by the generator is 0), all-zero guard. One block per codeword. */
+/* cb0_finish_kernel: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 __global__ void cb0_finish_kernel(const int8_t* __restrict__ post, const DMeta* __restrict__ meta, uint32_t n,
                                   const uint8_t* __restrict__ iters_in, uint32_t num_iter,
                                   const uint32_t* __restrict__ crc_pow, ldpc_cb0_result_t* __restrict__ res,
@@ -350,6 +380,11 @@ __global__ void cb0_finish_kernel(const int8_t* __restrict__ post, const DMeta* 
   }
 }
 
+/* cb0_stall_kernel: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 __global__ void cb0_stall_kernel(unsigned long long ns) /* test hook: keeps the stream busy */
 {
   unsigned long long t0;
@@ -419,6 +454,11 @@ uint64_t c_submits, c_items, c_ok, c_err, c_tmo, c_busy, c_byp, c_sticky, c_trip
 #define CADD(v, x) __atomic_fetch_add(&(v), (x), __ATOMIC_RELAXED)
 #define CLD(v) __atomic_load_n(&(v), __ATOMIC_RELAXED)
 
+/* mono_ns: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:722, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:736, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:1002, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:353 (+7 more).
+ */
 long long mono_ns()
 {
   struct timespec t;
@@ -426,6 +466,11 @@ long long mono_ns()
   return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+/* env_int: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:518, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:520, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:522, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:524 (+15 more).
+ */
 int env_int(const char* a, const char* b, int def)
 {
   const char* e = getenv(a);
@@ -435,6 +480,11 @@ int env_int(const char* a, const char* b, int def)
 }
 
 /* x^k mod g for k < CRC_MAX_BITS; g = x^L + low (OAI's top-aligned 32-bit polynomials, crc_byte.c) */
+/* crc_pow_table: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:565, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:566, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:567.
+ */
 void crc_pow_table(uint32_t poly_top, int L, uint32_t* out)
 {
   const uint32_t low = poly_top >> (32 - L), mask = (L == 32) ? 0xffffffffu : ((1u << L) - 1);
@@ -446,6 +496,11 @@ void crc_pow_table(uint32_t poly_top, int L, uint32_t* out)
   }
 }
 
+/* slot_free_buffers: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:474.
+ */
 void slot_free_buffers(Slot& s)
 {
   if (s.meta_h) (cudaError_t)nr_gpu_free(s.meta_h);
@@ -468,6 +523,11 @@ void slot_free_buffers(Slot& s)
 }
 
 /* (Re)allocate every slot's buffers for `mode`. Idle only (init, or the test switch). */
+/* slots_alloc: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:572, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:1179.
+ */
 int slots_alloc(int mode)
 {
   for (int k = 0; k < g.nslots; k++)
@@ -503,6 +563,11 @@ int slots_alloc(int mode)
   return 0;
 }
 
+/* init_locked: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:811.
+ */
 int init_locked()
 {
   if (g.state >= 0)
@@ -577,6 +642,11 @@ int init_locked()
 
 /* Codewords per chunk for (BG, Z): the chunk's working set (messages + posterior + input) about one L2,
  * a power of two, at most what the work buffers hold. LDPC_CB0_CHUNK overrides. */
+/* chunk_for: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:835, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:966.
+ */
 uint32_t chunk_for(uint32_t rows, uint32_t cols, uint32_t edges, uint32_t Z)
 {
   const uint32_t room = (uint32_t)std::min<size_t>(g.msg_bytes / ((size_t)rows * cols * Z), (size_t)g.chunk_max * 8);
@@ -600,6 +670,11 @@ uint32_t chunk_for(uint32_t rows, uint32_t cols, uint32_t edges, uint32_t Z)
 }
 
 /* codewords per thread for a chunk of nb (a power of two): LDPC_CB0_NCW (1, 2, 4), default 2, at most nb */
+/* ncw_for: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:651.
+ */
 uint32_t ncw_for(uint32_t nb)
 {
   static const int cfg = [] {
@@ -615,6 +690,11 @@ struct ModZ {
   uint32_t *cn = nullptr, *vn = nullptr;
 };
 std::map<uint32_t, ModZ> g_modz; /* under g_submit_mu */
+/* modz_tables: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:649, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:832.
+ */
 int modz_tables(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, ModZ* out)
 {
   const uint32_t key = BG << 16 | Z;
@@ -642,6 +722,11 @@ int modz_tables(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, ModZ* out)
 }
 
 /* The iteration loop of one chunk: captured once per key, replayed. On error: rc != 0, capture aborted. */
+/* launch_iterations: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:836, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:978.
+ */
 int launch_iterations(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, uint32_t nb, uint32_t iters)
 {
   const uint32_t msg_stride = bg.num_rows * bg.num_cols * Z;
@@ -702,6 +787,11 @@ int launch_iterations(const ldpc_cuda_bg_t& bg, uint32_t BG, uint32_t Z, uint32_
   return (int)cudaGraphLaunch(ge, g.s);
 }
 
+/* host_done: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 void CUDART_CB host_done(void* arg)
 {
   Slot* s = (Slot*)arg;
@@ -715,12 +805,22 @@ void CUDART_CB host_done(void* arg)
 }
 
 /* breaker (g_state_mu held) */
+/* breaker_state_locked: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:883, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:1125, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:1144.
+ */
 int breaker_state_locked()
 {
   if (g_perm_off)
     return 2;
   return mono_ns() < g_bypass_until_ns ? 1 : 0;
 }
+/* breaker_fail_locked: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:1019, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:1097.
+ */
 void breaker_fail_locked(bool sticky)
 {
   if (sticky) {
@@ -740,6 +840,11 @@ void breaker_fail_locked(bool sticky)
 }
 
 /* after a failed enqueue: abort a capture, drain the stream, decide sticky (as G1's pool fail path) */
+/* recover_stream: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:996.
+ */
 bool recover_stream()
 {
   cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
@@ -759,6 +864,11 @@ bool recover_stream()
 
 /* input pointer classification for the EXPLICIT path */
 enum { SRC_DEVICE, SRC_PINNED, SRC_PAGEABLE };
+/* classify: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:936.
+ */
 int classify(const void* p)
 {
   cudaPointerAttributes a;
@@ -784,6 +894,11 @@ struct Key {
   }
 };
 
+/* item_ok: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:909.
+ */
 bool item_ok(const ldpc_cb0_item_t& it, size_t stride)
 {
   ldpc_cuda_bg_t bg;

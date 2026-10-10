@@ -72,6 +72,11 @@ int nr_core_parse_hex(const char *s, unsigned char mask[NR_CP_MAX_CPUS])
   memcpy(mask, tmp, sizeof(tmp)); return 0;
 }
 /* INI section selection is deliberate: never interpret another device's core list. */
+/* nr_core_parse_uhd: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/nr_core_plan.c:33, common/utils/nr_core_plan.c:249, common/utils/nr_core_plan.h:34, common/utils/tests/test_nr_core_plan.cpp:173.
+ */
 int nr_core_parse_uhd(const char *text, unsigned char mask[NR_CP_MAX_CPUS])
 {
   char *copy = strdup(text), *save = NULL; if (!copy) return -1;

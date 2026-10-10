@@ -1,6 +1,16 @@
 /* Fixed-point PDCCH path matching dci_nr.c. Parity first: one CUDA thread per
  * CORESET symbol; parallel reductions can follow once the recorded gate passes. */
+/* gpu_sat16: device helper: saturates an int to the int16 range.
+ *   How it works: Clamp to [-32768, 32767].
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh:67, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh:68, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh:162, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_parity.cuh:163.
+ */
 __device__ static int gpu_sat16(int x) { return max(-32768, min(32767, x)); }
+/* k_pdcch_cpu_arithmetic: GPU kernel (one block per job and symbol, thread 0 only) reproducing the CPU fixed-point PDCCH channel estimate, used for bit-exact parity.
+ *   How it works: Per antenna and RB: 3 DM-RS REs are de-scrambled from the Gold words and averaged in the CPU's Q15 arithmetic (truncate before multiply by four). Computes a roughness ratio dp/pw per antenna and the best value, then selects the antenna mask. TODO(doc): the LLR and mask tail after the best-antenna search was not reviewed.
+ *   ISAC_* flags read: none.
+ *   Callers: run_chunk (<<<>>> launch).
+ */
 __global__ static void k_pdcch_cpu_arithmetic(const nr_gpu_pdcch_job_t *jobs, const uint32_t *gold,
                                             const float2 *rx, int N, int nant, int fco,
                                             int16_t *out, int force_mask)
@@ -86,6 +96,11 @@ __global__ static void k_pdcch_cpu_arithmetic(const nr_gpu_pdcch_job_t *jobs, co
  * integer sum (the CPU's double accumulations of integer terms are exact below 2^53, its uint32 lane sums
  * wrap identically in any order), so the result does not depend on thread order. */
 static const int PDCCH_PAR_THREADS = 256, PDCCH_PAR_MAX_RB = 276;
+/* k_pdcch_cpu_arithmetic_par: parallel version of k_pdcch_cpu_arithmetic (one block per job and symbol, PDCCH_PAR_THREADS threads), with the same arithmetic.
+ *   How it works: Threads stride over (antenna, RB) to fill the shared h[][] table, then over (antenna, sample) to accumulate lane sums, dp and pw with atomicAdd on shared memory, plus a 256-bin shared histogram. TODO(doc): the final mask and LLR write (after the first thread-0 block) was not reviewed.
+ *   ISAC_* flags read: none.
+ *   Callers: run_chunk (<<<>>> launch).
+ */
 __global__ static void __launch_bounds__(PDCCH_PAR_THREADS)
 k_pdcch_cpu_arithmetic_par(const nr_gpu_pdcch_job_t *jobs, const uint32_t *gold, const float2 *rx, int N, int nant, int fco,
                            int16_t *out, int force_mask)

@@ -47,6 +47,11 @@ struct HostBG {
   uint32_t rows, cols, cn_stride, vn_stride;
   const uint32_t *cn_deg, *vn_deg, *cn, *vn;
 };
+/* host_bg: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:88.
+ */
 HostBG host_bg(int BG, int Z)
 {
   static const uint32_t s_val[8][8] = {{2, 4, 8, 16, 32, 64, 128, 256}, {3, 6, 12, 24, 48, 96, 192, 384},
@@ -83,6 +88,11 @@ struct ModelOut {
   int iters;
   bool converged;
 };
+/* model_decode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:320, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:474.
+ */
 ModelOut model_decode(int BG, int Z, const int8_t *ch, int num_iter, int K)
 {
   const HostBG g = host_bg(BG, Z);
@@ -198,6 +208,11 @@ struct Shape {
 const Shape SHAPES[] = {{1, 384, 0}, {1, 208, 0}, {1, 64, 2}, {1, 36, 2}, {0, 384, 0}, {0, 96, 2}, {0, 52, 2}, {0, 16, 2},
                         {1, 384, 1}, {0, 176, 1}};
 
+/* add_item: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:236, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:356, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:381.
+ */
 void add_item(Batch &b, const Shape &s, int kind, double ebn0, int iters, int guard)
 {
   const int Kc = s.bg1 ? 68 : 52, K = (s.bg1 ? 22 : 10) * s.Z;
@@ -224,6 +239,11 @@ void add_item(Batch &b, const Shape &s, int kind, double ebn0, int iters, int gu
 }
 
 /* mixed shapes / iterations / kinds; truths at an SNR where some need many iterations and a few fail */
+/* mixed_batch: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:314, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:454, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:485, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:507 (+5 more).
+ */
 Batch mixed_batch(int n, long seed, bool small_only = false)
 {
   srand48(seed);
@@ -251,6 +271,11 @@ std::vector<ldpc_cb0_result_t> run(const Batch &b, std::vector<uint8_t> *bits = 
   return r;
 }
 
+/* expect_crc_matches_oai: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:384, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:478.
+ */
 void expect_crc_matches_oai(const Batch &b, const std::vector<ldpc_cb0_result_t> &r, const std::vector<uint8_t> &bits)
 {
   for (int i = 0; i < b.n(); i++) {
@@ -263,6 +288,11 @@ void expect_crc_matches_oai(const Batch &b, const std::vector<ldpc_cb0_result_t>
 struct Ctr {
   uint64_t err, fb, poi, dis, trips;
 };
+/* tb_ctr: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:528, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:550, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:566, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:586 (+1 more).
+ */
 Ctr tb_ctr()
 {
   Ctr c;
@@ -303,12 +333,22 @@ class Cb0Test : public ::testing::Test {
   }
 };
 
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+494 more).
+ */
 TEST_F(Cb0Test, ReportsMemoryMode)
 {
   EXPECT_EQ(A.mode(), 2); // explicit copies are now the safe default on coherent GPUs too
 }
 
 /* GPU decoder == CPU model, item by item: bits, iterations, early termination; CRC == OAI check_crc; guard. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+493 more).
+ */
 TEST_F(Cb0Test, BitExactAgainstCpuModelMixedZ)
 {
   const Batch b = mixed_batch(60, 11);
@@ -345,6 +385,11 @@ TEST_F(Cb0Test, BitExactAgainstCpuModelMixedZ)
 }
 
 /* Same inputs through G1's TB pool (ldpc_pool_decode): identical bits. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+492 more).
+ */
 TEST_F(Cb0Test, BitsEqualG1Pool)
 {
   srand48(5);
@@ -373,6 +418,11 @@ TEST_F(Cb0Test, BitsEqualG1Pool)
 }
 
 /* CRC verdict == OAI check_crc on the returned bits, all three CRC types, valid and corrupted CRCs. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+491 more).
+ */
 TEST_F(Cb0Test, CrcVerdictEqualsCheckCrc)
 {
   srand48(7);
@@ -387,6 +437,11 @@ TEST_F(Cb0Test, CrcVerdictEqualsCheckCrc)
 }
 
 /* Verdicts against OAI's CPU TB decoder (libldpc.so) on clean codewords: same verdict, bits = source. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+490 more).
+ */
 TEST_F(Cb0Test, VerdictEqualsCpuTbDecoderOnCleanCodewords)
 {
   srand48(9);
@@ -448,6 +503,11 @@ TEST_F(Cb0Test, VerdictEqualsCpuTbDecoderOnCleanCodewords)
 
 /* N = 1, 64, 600, 2000 mixed Z: each item's result equals its single-item decode (batch invariance), truths pass,
  * noise fails; a sample is also checked against the CPU model. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+489 more).
+ */
 TEST_F(Cb0Test, BatchSizesAreInvariant)
 {
   for (int n : {1, 64, 600, 2000}) {
@@ -480,6 +540,11 @@ TEST_F(Cb0Test, BatchSizesAreInvariant)
 }
 
 /* Asynchronous API: three submissions in flight, collected later, equal the synchronous results; a fourth is BUSY. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+488 more).
+ */
 TEST_F(Cb0Test, AsyncSubmitCollectPipelines)
 {
   Batch b[4] = {mixed_batch(64, 1), mixed_batch(64, 2), mixed_batch(64, 3), mixed_batch(8, 4)};
@@ -502,6 +567,11 @@ TEST_F(Cb0Test, AsyncSubmitCollectPipelines)
 }
 
 /* Bad items are reported per item; the rest of the batch decodes. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+487 more).
+ */
 TEST_F(Cb0Test, BadItemsAreInconclusiveOthersDecode)
 {
   Batch b = mixed_batch(10, 21);
@@ -523,6 +593,11 @@ TEST_F(Cb0Test, BadItemsAreInconclusiveOthersDecode)
 }
 
 /* ---- fault injection: the batch is inadmissible, the TB path's breaker / counters / pool are untouched ---- */
+/* expect_tb_path_untouched: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:558, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:574, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:600, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:625.
+ */
 void expect_tb_path_untouched(const Ctr &before)
 {
   const Ctr a = tb_ctr();
@@ -537,6 +612,11 @@ void expect_tb_path_untouched(const Ctr &before)
   EXPECT_TRUE(ok[0]);
 }
 
+/* expect_all_inconclusive: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:556, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:572, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:592, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:599.
+ */
 void expect_all_inconclusive(const std::vector<ldpc_cb0_result_t> &r, int err)
 {
   for (size_t i = 0; i < r.size(); i++) {
@@ -545,6 +625,11 @@ void expect_all_inconclusive(const std::vector<ldpc_cb0_result_t> &r, int err)
   }
 }
 
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+486 more).
+ */
 TEST_F(Cb0Test, InjectedErrorMakesBatchInadmissible)
 {
   const Ctr before = tb_ctr();
@@ -561,6 +646,11 @@ TEST_F(Cb0Test, InjectedErrorMakesBatchInadmissible)
     EXPECT_EQ(x.decoder_used, 2);
 }
 
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+485 more).
+ */
 TEST_F(Cb0Test, TimeoutMakesBatchInadmissible)
 {
   const Ctr before = tb_ctr();
@@ -581,6 +671,11 @@ TEST_F(Cb0Test, TimeoutMakesBatchInadmissible)
     EXPECT_EQ(x.decoder_used, 2);
 }
 
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+484 more).
+ */
 TEST_F(Cb0Test, StickyErrorDisablesCb0OnlyAndBatchIsInadmissible)
 {
   const Ctr before = tb_ctr();
@@ -604,6 +699,11 @@ TEST_F(Cb0Test, StickyErrorDisablesCb0OnlyAndBatchIsInadmissible)
     EXPECT_EQ(x.decoder_used, 2);
 }
 
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+483 more).
+ */
 TEST_F(Cb0Test, ConsecutiveErrorsTripCb0BreakerOnly)
 {
   const Ctr before = tb_ctr();
@@ -626,6 +726,11 @@ TEST_F(Cb0Test, ConsecutiveErrorsTripCb0BreakerOnly)
 }
 
 /* The discrete-GPU path, forced on this host: pageable, pinned, managed and device inputs give the unified results. */
+/* TEST_F: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+482 more).
+ */
 TEST_F(Cb0Test, ForcedExplicitCopyPathMatches)
 {
   const int mode0 = A.mode();

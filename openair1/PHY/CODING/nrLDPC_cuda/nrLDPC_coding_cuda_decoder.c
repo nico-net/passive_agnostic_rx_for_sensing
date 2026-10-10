@@ -34,6 +34,11 @@ extern int nr_gpu_module_ready(void);
  * segment tasks are included), averaged and printed every 200 calls. For comparing libldpc (CPU) and
  * libldpc_cuda (GPU) on the same workload; off by default. */
 #include <sys/resource.h>
+/* ldpc_bench_on: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:464, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:546, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:617, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:684 (+1 more).
+ */
 static int ldpc_bench_on(void)
 {
   static int on = -1;
@@ -43,18 +48,33 @@ static int ldpc_bench_on(void)
   }
   return on;
 }
+/* ldpc_bench_cpu_s: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:696, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:698.
+ */
 static double ldpc_bench_cpu_s(void)
 {
   struct rusage u;
   getrusage(RUSAGE_SELF, &u);
   return u.ru_utime.tv_sec + u.ru_stime.tv_sec + 1e-6 * (u.ru_utime.tv_usec + u.ru_stime.tv_usec);
 }
+/* ldpc_bench_wall_s: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:464, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:546, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:618, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:696 (+1 more).
+ */
 static double ldpc_bench_wall_s(void)
 {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return t.tv_sec + 1e-9 * t.tv_nsec;
 }
+/* ldpc_bench_add: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:698.
+ */
 static void ldpc_bench_add(const char *who, double wall, double cpu, int segs)
 {
   static __thread double sw, sc;
@@ -92,6 +112,11 @@ typedef struct {
 } nrLDPC_cuda_seg_t;
 
 /* De-interleave, rate de-match, fill and pack one segment into its pool slot. */
+/* cuda_prepare_segment: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void cuda_prepare_segment(void *arg)
 {
   nrLDPC_cuda_seg_t *s = (nrLDPC_cuda_seg_t *)arg;
@@ -139,6 +164,11 @@ typedef struct {
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv_work, g_cv_done; /* CLOCK_MONOTONIC conds, set up by cond_setup() */
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+/* cond_setup: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:140.
+ */
 static void cond_setup(void)
 {
   pthread_condattr_t at;
@@ -164,6 +194,11 @@ uint32_t ldpc_pool_capture_epoch(void);
 
 /* ---- tunables / test hooks: environment read ONCE, tests override through ldpc_cuda_test_hooks() ---- */
 static volatile int g_timeout_ms = 200, g_queue_cap = QUEUE_CAP, g_breaker_n = 4, g_breaker_ms = 5000;
+/* tunables_init: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void tunables_init(void)
 {
   const char *e;
@@ -172,6 +207,11 @@ static void tunables_init(void)
   if ((e = getenv("LDPC_CUDA_BREAKER_N")) && atoi(e) > 0) g_breaker_n = atoi(e);
   if ((e = getenv("LDPC_CUDA_BREAKER_S")) && atoi(e) > 0) g_breaker_ms = atoi(e) * 1000;
 }
+/* tunables_env_once: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:250, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:275, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:366.
+ */
 static void tunables_env_once(void)
 {
   static pthread_once_t o = PTHREAD_ONCE_INIT;
@@ -183,12 +223,22 @@ static void tunables_env_once(void)
 static _Atomic int g_consec_err, g_perm_off;
 static _Atomic uint64_t g_trips; /* monotonic: how many times the breaker opened (ldpc_cuda_breaker_trips) */
 static _Atomic long long g_bypass_until_ms;
+/* mono_ms: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:196, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:211.
+ */
 static long long mono_ms(void)
 {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
+/* breaker_state: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:238, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:483.
+ */
 static int breaker_state(void)
 {
   if (atomic_load(&g_perm_off))
@@ -196,12 +246,22 @@ static int breaker_state(void)
   return mono_ms() < atomic_load(&g_bypass_until_ms) ? 1 : 0;
 }
 enum { W_FULL, W_QUEUE, W_TIMEOUT, W_ERRORS, W_STICKY, W_WARMUP, W_CAPTURE, W_NREASON };
+/* warn_once: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:213, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:508, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:564, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:612.
+ */
 static void warn_once(int reason, const char *what) /* one-shot per reason */
 {
   static atomic_int done[W_NREASON];
   if (!atomic_exchange(&done[reason], 1))
     LOG_W(PHY, "CUDA LDPC: %s -> CPU fallback (one-shot warning per reason; see ldpc_cuda_fallbacks/disabled)\n", what);
 }
+/* breaker_trip: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:220, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:222, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:397.
+ */
 static void breaker_trip(int reason, const char *what, bool permanent)
 {
   atomic_fetch_add(&g_trips, 1);
@@ -214,6 +274,11 @@ static void breaker_trip(int reason, const char *what, bool permanent)
 }
 /* Consecutive failures (launch errors AND wait timeouts) are counted together; N of them open the bypass. A single
  * error or timeout only sends that TB to the CPU. A sticky CUDA error disables the GPU for good. */
+/* breaker_note_fail: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:229, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:614.
+ */
 static void breaker_note_fail(int reason, const char *what)
 {
   if (ldpc_pool_sticky())
@@ -221,6 +286,11 @@ static void breaker_note_fail(int reason, const char *what)
   else if (atomic_fetch_add(&g_consec_err, 1) + 1 >= g_breaker_n)
     breaker_trip(reason, what, false);
 }
+/* breaker_note_launch: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:335.
+ */
 static void breaker_note_launch(bool err)
 {
   if (!err)
@@ -231,13 +301,28 @@ static void breaker_note_launch(bool err)
 
 /* ISAC_METRICS export (dlsym'd by nr_passive_metrics.c): errors = launch/CUDA errors, fallbacks = TBs sent
  * to the CPU decoder, poisoned = slots filled with the poison pattern, disabled = breaker state. */
+/* ldpc_cuda_get_counters4: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:244.
+ */
 void ldpc_cuda_get_counters4(uint64_t *errors, uint64_t *fallbacks, uint64_t *poisoned, uint64_t *disabled)
 {
   ldpc_pool_counters(errors, poisoned);
   *fallbacks = atomic_load(&g_fallbacks);
   *disabled = (uint64_t)breaker_state();
 }
+/* ldpc_cuda_breaker_trips: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 uint64_t ldpc_cuda_breaker_trips(void) { return atomic_load(&g_trips); }
+/* ldpc_cuda_get_counters: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 void ldpc_cuda_get_counters(uint64_t *errors, uint64_t *fallbacks, uint64_t *poisoned)
 {
   uint64_t d;
@@ -245,6 +330,11 @@ void ldpc_cuda_get_counters(uint64_t *errors, uint64_t *fallbacks, uint64_t *poi
 }
 
 /* Test API (K34 tests only). queue_cap < 0, timeout/breaker <= 0 leave a value. */
+/* ldpc_cuda_test_hooks: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:165, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cuda_pool_test.cc:6.
+ */
 void ldpc_cuda_test_hooks(int skip, int stall_ms, int inject, int queue_cap, int timeout_ms, int breaker_n, int breaker_ms)
 {
   tunables_env_once();
@@ -254,12 +344,22 @@ void ldpc_cuda_test_hooks(int skip, int stall_ms, int inject, int queue_cap, int
   if (breaker_n > 0) g_breaker_n = breaker_n;
   if (breaker_ms > 0) g_breaker_ms = breaker_ms;
 }
+/* ldpc_cuda_test_reset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 void ldpc_cuda_test_reset(void) /* close the breaker */
 {
   atomic_store(&g_consec_err, 0);
   atomic_store(&g_bypass_until_ms, 0);
   atomic_store(&g_perm_off, 0);
 }
+/* ldpc_cuda_test_slots_used: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 int ldpc_cuda_test_slots_used(void)
 {
   int n = 0;
@@ -270,11 +370,21 @@ int ldpc_cuda_test_slots_used(void)
   return n;
 }
 
+/* pool_timeout_ms: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:476.
+ */
 static int pool_timeout_ms(void)
 {
   tunables_env_once();
   return g_timeout_ms;
 }
+/* deadline_after_ms: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:487, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:557, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:584.
+ */
 static void deadline_after_ms(struct timespec *ts, int ms)
 {
   clock_gettime(CLOCK_MONOTONIC, ts);
@@ -287,6 +397,11 @@ static void deadline_after_ms(struct timespec *ts, int ms)
 }
 
 /* first-fit contiguous run of n free slots; caller holds g_mu */
+/* slots_reserve: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:492.
+ */
 static int slots_reserve(uint32_t n)
 {
   for (uint32_t i = 0, run = 0; i < POOL_CAP; i++) {
@@ -299,6 +414,11 @@ static int slots_reserve(uint32_t n)
   return -1;
 }
 
+/* gpu_worker: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void *gpu_worker(void *arg)
 {
   (void)arg;
@@ -353,6 +473,11 @@ static void *gpu_worker(void *arg)
   return NULL;
 }
 
+/* nrLDPC_coding_init: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_aal/nrLDPC_coding_aal.c:1064, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface_load.c:53, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:333.
+ */
 int32_t nrLDPC_coding_init(void)
 {
   static pthread_mutex_t init_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -410,6 +535,11 @@ int32_t nrLDPC_coding_init(void)
   return 0;
 }
 
+/* nrLDPC_coding_shutdown: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_aal/nrLDPC_coding_aal.c:1169, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface_load.c:61, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:338.
+ */
 int32_t nrLDPC_coding_shutdown(void)
 {
   return 0;
@@ -418,6 +548,11 @@ int32_t nrLDPC_coding_shutdown(void)
 /* CPU fallback: the renamed nrLDPC_decoder.c (see CMakeLists). Input = the int8 LLR block in the
  * layout the GPU got. Returns true and fills c (K/8 bytes) on CRC pass. */
 int32_t ldpc_cpu_LDPCdecoder(t_nrLDPC_dec_params *p, int8_t *p_llr, uint8_t *p_out, t_nrLDPC_time_stats *ts, decode_abort_t *ab);
+/* cpu_decode_segment: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:667.
+ */
 static bool cpu_decode_segment(const nrLDPC_TB_decoding_parameters_t *tb, int r, const int8_t *llr, uint8_t *c)
 {
   t_nrLDPC_dec_params dp = {.check_crc = check_crc};
@@ -454,11 +589,21 @@ static bool cpu_decode_segment(const nrLDPC_TB_decoding_parameters_t *tb, int r,
 static __thread double t_prep_s, t_gpu_s; /* LDPC_BENCH phase split */
 /* Segments to decode for a TB: nb_segments_to_decode (0 = all C) -- a layout probe wants code
  * block 0 alone, with the CRC type / K' / offsets of the full C. */
+/* tb_ndec: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:470, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:492, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:497, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:521 (+5 more).
+ */
 static inline int tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
 {
   return (tb->nb_segments_to_decode > 0 && tb->nb_segments_to_decode < tb->C) ? (int)tb->nb_segments_to_decode : (int)tb->C;
 }
 
+/* nrLDPC_coding_decoder_impl: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:343, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:384, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:389, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:692 (+2 more).
+ */
 int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
 {
   const double t_start = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
@@ -686,6 +831,11 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   return 0;
 }
 
+/* nrLDPC_coding_decoder: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_aal/nrLDPC_coding_aal.c:1263, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:381, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cuda_pool_bler.c:2, openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:267 (+5 more).
+ */
 int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *p)
 {
   if (!ldpc_bench_on())

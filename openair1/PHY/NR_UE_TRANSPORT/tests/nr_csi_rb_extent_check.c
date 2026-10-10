@@ -17,11 +17,21 @@ double cpuf;
 configmodule_interface_t *uniqCfg = NULL;
 openair0_config_t openair0_cfg_g[MAX_CARDS] = {};
 static softmodem_params_t softmodem_params;
+/* get_softmodem_params: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/ocp_itti/intertask_interface.cpp:305, common/utils/telnetsrv/telnetsrv_o1.c:302, common/utils/telnetsrv/telnetsrv_o1.c:311, common/utils/telnetsrv/telnetsrv_o1.c:320 (+248 more).
+ */
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;
 }
 static nrUE_params_t nrUE_params;
+/* get_nrUE_params: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.c:151, executables/nr-ue-ru.c:153, executables/nr-ue-ru.c:167, executables/nr-ue-ru.c:174 (+90 more).
+ */
 nrUE_params_t *get_nrUE_params(void)
 {
   return &nrUE_params;
@@ -30,9 +40,19 @@ _Atomic long nr_ue_diag_producer_absolute_slot = -1;
 _Atomic long nr_ue_diag_producer_wall_ns = 0;
 _Atomic int nr_ue_pending_rebase_valid = 0;
 _Atomic long nr_ue_pending_rebase_delta = 0;
+/* trs_freq_correction: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue.c:1033, openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:1251, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:44, openair1/SCHED_NR_UE/defs.h:131 (+1 more).
+ */
 void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
 {
 }
+/* exit_function: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:9, common/config/yaml/tests/test_yaml_config.cpp:14, common/platform_types.h:302, common/platform_types.h:306 (+94 more).
+ */
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
 {
   fprintf(stderr, "exit_function %s:%d %s: %s\n", file, line, function, s);
@@ -51,6 +71,11 @@ static int failures;
     }                                                             \
   } while (0)
 
+/* trs: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:85, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:86, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:103.
+ */
 static void trs(fapi_nr_dl_config_csirs_pdu_rel15_t *p, int start, int n, int l0, int fd, int density)
 {
   memset(p, 0, sizeof(*p));
@@ -62,6 +87,11 @@ static void trs(fapi_nr_dl_config_csirs_pdu_rel15_t *p, int start, int n, int l0
   p->freq_density = density;
 }
 
+/* alloc: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:88, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:97, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:105.
+ */
 static void alloc(freq_alloc_bitmap_t *fa, int first, int n)
 {
   memset(fa, 0, sizeof(*fa));
@@ -72,6 +102,11 @@ static void alloc(freq_alloc_bitmap_t *fa, int first, int n)
     fa->bitmap[rb / 32] |= 1u << (rb % 32);
 }
 
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(void)
 {
   fapi_nr_dl_config_dlsch_pdu_rel15_t cfg;

@@ -104,35 +104,65 @@ static openair0_device_t openair0_dev[MAX_CARDS] = {};
 static unsigned long rf_fail_after_reads;
 static atomic_ulong rf_read_count;
 
+/* nrue_get_cell_count: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:11, executables/nr-uesoftmodem.c:508, executables/nr-uesoftmodem.c:535, executables/nr-uesoftmodem.c:539.
+ */
 int nrue_get_cell_count(void)
 {
   return nrue_cell_count;
 }
 
+/* nrue_get_band: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:16, executables/nr-ue.c:1413.
+ */
 int nrue_get_band(const PHY_VARS_NR_UE *UE)
 {
   int cell_id = nrue_rus[UE->rf_map.card].used_by_cell;
   return nrue_cells[cell_id].band;
 }
 
+/* nrue_get_cell: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:12, executables/nr-uesoftmodem.c:490, executables/nr-uesoftmodem.c:509, executables/nr-uesoftmodem.c:525 (+1 more).
+ */
 const nrUE_cell_params_t *nrue_get_cell(int cell_id)
 {
   AssertFatal(cell_id >= 0 && cell_id < nrue_cell_count, "Invalid cell ID %d! Cell count = %d\n", cell_id, nrue_cell_count);
   return &nrue_cells[cell_id];
 }
 
+/* nrue_get_cell_fp: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:13, executables/nr-uesoftmodem.c:304, executables/nr-uesoftmodem.c:523, executables/nr-uesoftmodem.c:525 (+1 more).
+ */
 NR_DL_FRAME_PARMS *nrue_get_cell_fp(int cell_id)
 {
   AssertFatal(cell_id >= 0 && cell_id < nrue_cell_count, "Invalid cell ID %d! Cell count = %d\n", cell_id, nrue_cell_count);
   return &nrue_cell_fp[cell_id];
 }
 
+/* nrue_set_cell: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:14, executables/nr-uesoftmodem.c:572.
+ */
 void nrue_set_cell(int cell_id, const nrUE_cell_params_t *cell)
 {
   AssertFatal(cell_id >= 0 && cell_id < nrue_cell_count, "Invalid cell ID %d! Cell count = %d\n", cell_id, nrue_cell_count);
   nrue_cells[cell_id] = *cell;
 }
 
+/* nrue_set_cell_params: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_BANDSCAN_FIRST_HZ.
+ *   Callers: executables/nr-ue-ru.h:15, executables/nr-uesoftmodem.c:484.
+ */
 void nrue_set_cell_params(configmodule_interface_t *cfg)
 {
   paramdef_t cellParams[] = NRUE_CELL_PARAMS_DESC;
@@ -206,17 +236,32 @@ void nrue_set_cell_params(configmodule_interface_t *cfg)
   }
 }
 
+/* nrue_get_ru_count: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:17, executables/nr-uesoftmodem.c:183, executables/nr-uesoftmodem.c:510, executables/nr-uesoftmodem.c:514.
+ */
 int nrue_get_ru_count(void)
 {
   return nrue_ru_count;
 }
 
+/* nrue_get_ru: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:18, executables/nr-uesoftmodem.c:186, executables/nr-uesoftmodem.c:277, executables/nr-uesoftmodem.c:305 (+2 more).
+ */
 const nrUE_RU_params_t *nrue_get_ru(int ru_id)
 {
   AssertFatal(ru_id >= 0 && ru_id < nrue_ru_count, "Invalid RU ID %d! RU count = %d\n", ru_id, nrue_ru_count);
   return &nrue_rus[ru_id];
 }
 
+/* nrue_set_ru_cell_id: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:19, executables/nr-uesoftmodem.c:520.
+ */
 void nrue_set_ru_cell_id(int ru_id, int cell_id)
 {
   AssertFatal(ru_id >= 0 && ru_id < nrue_ru_count, "Invalid RU ID %d! RU count = %d\n", ru_id, nrue_ru_count);
@@ -224,6 +269,11 @@ void nrue_set_ru_cell_id(int ru_id, int cell_id)
   nrue_rus[ru_id].used_by_cell = cell_id;
 }
 
+/* nrue_set_ru_params: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:20, executables/nr-uesoftmodem.c:406, executables/nr-uesoftmodem.c:483.
+ */
 void nrue_set_ru_params(configmodule_interface_t *cfg)
 {
   paramdef_t RUParams[] = NRUE_RU_PARAMS_DESC;
@@ -298,6 +348,11 @@ void nrue_set_ru_params(configmodule_interface_t *cfg)
   }
 }
 
+/* nrue_init_openair0: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:22, executables/nr-uesoftmodem.c:639.
+ */
 void nrue_init_openair0(void)
 {
   int freq_off = 0;
@@ -509,10 +564,20 @@ static void nrue_ru_end_impl(void)
   }
 }
 
+/* nrue_band_scan_active: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:35, executables/nr-ue.c:1364.
+ */
 bool nrue_band_scan_active(void)
 {
   return s_band_scan_n > 1;
 }
+/* nrue_band_scan_next: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.c:825, executables/nr-ue-ru.h:33, executables/nr-ue-ru.h:36, executables/nr-ue.c:1365.
+ */
 int nrue_band_scan_next(PHY_VARS_NR_UE *UE)
 {
   if (s_band_scan_n <= 1)
@@ -757,6 +822,11 @@ static void nrue_ru_write_reorder_clear_context_impl(PHY_VARS_NR_UE *UE)
 }
 
 /* Shared lifetime gate: cancellation may run concurrently with read/write. */
+/* nrue_ru_shutdown_stop: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:29.
+ */
 void nrue_ru_shutdown_stop(void)
 {
   for (int i = 0; i < MAX_CARDS; i++)
@@ -765,6 +835,11 @@ void nrue_ru_shutdown_stop(void)
 }
 
 /* The shutdown coordinator holds the exclusive device lifetime gate here. */
+/* nrue_ru_shutdown: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue-ru.h:28.
+ */
 void nrue_ru_shutdown(void)
 {
   for (int i = 0; i < MAX_CARDS; i++)
@@ -883,6 +958,11 @@ void nrue_ru_write_reorder_clear_context(PHY_VARS_NR_UE *UE)
 
 #ifdef NRUE_RU_SHUTDOWN_TEST
 /* Hardware-free integration fixture; not present in the receiver binary. */
+/* nrue_ru_test_device: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/tests/nr_shutdown_test.c:15, common/utils/tests/nr_shutdown_test.c:117, executables/nr-ue-ru.c:372.
+ */
 void nrue_ru_test_device(openair0_device_t device)
 {
   static nrUE_RU_params_t ru = {.used_by_cell = 0};

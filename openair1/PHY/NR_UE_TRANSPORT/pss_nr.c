@@ -83,6 +83,11 @@ void generate_pss_nr(const int N_ID_2, int16_t *pss)
   *
   * sample 0 is for continuous frequency which is used here
   */
+/* generate_pss_nr_time: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_REFSIG/pss_nr.h:77, openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c:469, openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c:524, openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:426 (+2 more).
+ */
 void generate_pss_nr_time(int ofdm_symbol_size,
                           int first_carrier_offset,
                           const int N_ID_2,
@@ -109,6 +114,11 @@ void generate_pss_nr_time(int ofdm_symbol_size,
        1); /* scaling factor */
 }
 
+/* cmp_pss_peak: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int cmp_pss_peak(const void *a, const void *b)
 {
   const pss_detection_result_t *pa = (const pss_detection_result_t *)a;
@@ -337,6 +347,11 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
   return pss_info;
 }
 
+/* sl_generate_pss: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/INIT/nr_init_ue.c:560, openair1/PHY/INIT/nr_init_ue.c:561, openair1/PHY/NR_REFSIG/sl_refsig_defs.h:10.
+ */
 void sl_generate_pss(SL_NR_UE_INIT_PARAMS_t *sl_init_params, uint8_t n_sl_id2, uint16_t scaling)
 {
   int i = 0, m = 0;
@@ -376,6 +391,11 @@ void sl_generate_pss(SL_NR_UE_INIT_PARAMS_t *sl_init_params, uint8_t n_sl_id2, u
 
 // This cannot be done at init time as ofdm symbol size, ssb start subcarrier depends on configuration
 // done at SLSS read time.
+/* sl_generate_pss_ifft_samples: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/INIT/nr_init_ue.c:571, openair1/PHY/NR_REFSIG/sl_refsig_defs.h:11.
+ */
 void sl_generate_pss_ifft_samples(sl_nr_ue_phy_params_t *sl_ue_params, SL_NR_UE_INIT_PARAMS_t *sl_init_params)
 {
   uint8_t id2 = 0;

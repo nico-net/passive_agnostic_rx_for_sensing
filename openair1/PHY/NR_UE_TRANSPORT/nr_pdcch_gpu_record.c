@@ -3,6 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* nr_pdcch_gpu_record_cpu: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PDCCH_GPU_DUMP, ISAC_PDCCH_GPU_DUMP_MAX.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5477, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_record.h:18.
+ */
 void nr_pdcch_gpu_record_cpu(const PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                               const fapi_nr_dl_config_dci_dl_pdu_rel15_t *pdcch, int first_symbol,
                               int n_rb, int cset_start, const c16_t *rxF, int rxF_stride,

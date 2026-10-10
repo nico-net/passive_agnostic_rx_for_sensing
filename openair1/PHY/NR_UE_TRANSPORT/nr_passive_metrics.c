@@ -215,6 +215,11 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   }
 }
 
+/* nr_passive_metrics_emit: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_METRICS, ISAC_METRICS_PATH.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:48, openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.h:93, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9758.
+ */
 void nr_passive_metrics_emit(void)
 {
   /* The file handle is opened lazily by whichever scan consumer first wins summary_due_now(); with N

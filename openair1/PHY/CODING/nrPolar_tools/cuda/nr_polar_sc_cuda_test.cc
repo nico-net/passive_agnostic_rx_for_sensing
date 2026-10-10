@@ -23,6 +23,11 @@ void polar_encoder_fast(uint64_t *A, void *out, int32_t crcmask, uint8_t ones_fl
                         uint16_t messageLength, uint8_t aggregation_level);
 /* the same two stubs every standalone test in NR_UE_TRANSPORT/tests carries */
 struct configmodule_interface_s *uniqCfg = NULL;
+/* exit_function: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:9, common/config/yaml/tests/test_yaml_config.cpp:14, common/platform_types.h:302, common/platform_types.h:306 (+94 more).
+ */
 void exit_function(const char *, const char *, int, const char *, int) { abort(); }
 const uint8_t *npc_dbg_last_u(int i);
 int npc_dbg_params(int pid, int *N, int *K, const uint8_t **info, const uint16_t **il);
@@ -39,18 +44,43 @@ uint32_t crc24c(unsigned char *inptr, int bitlen);
 void crcTableInit(void);
 }
 
+/* now_us: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:255, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:257, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:267, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:269 (+2 more).
+ */
 static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
 static uint64_t rng = 0x9E3779B97F4A7C15ull;
+/* rnd: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:45, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:67, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:126, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:189 (+4 more).
+ */
 static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (uint32_t)rng; }
+/* gauss: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:74.
+ */
 static double gauss(void) { double u = (rnd() + 1.0) / 4294967297.0, v = (rnd() + 1.0) / 4294967297.0; return sqrt(-2 * log(u)) * cos(6.283185307 * v); }
 
 struct pset { uint16_t len; uint8_t al; };
 static const pset P[] = {{39, 1}, {44, 2}, {47, 2}, {49, 2}, {58, 2}, {47, 4}, {58, 4}, {47, 8}, {58, 8}, {39, 8}, {47, 16}, {58, 16}, {80, 2}, {128, 2}, {129, 4}, {140, 4}, {140, 16}};
 #define NP ((int)(sizeof(P) / sizeof(P[0])))
 
+/* E_of: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:57, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:71, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:122, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:182 (+1 more).
+ */
 static int E_of(const pset &p) { return p.al * 108; }
 
 /* One CPU decode of the exact vector the GPU gets; the CPU path must be warmed first (see .h). */
+/* cpu_decode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:89, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:123, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:129, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:185 (+2 more).
+ */
 static uint32_t cpu_decode(const pset &p, const int16_t *llr, nr_dci_bits_t *payload)
 {
   int16_t tmp[NPC_MAX_E];
@@ -61,6 +91,11 @@ static uint32_t cpu_decode(const pset &p, const int16_t *llr, nr_dci_bits_t *pay
   return crc;
 }
 
+/* encode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:211.
+ */
 static void encode(const pset &p, uint64_t payload, uint16_t rnti, double amp, double sigma, int16_t *llr)
 {
   uint8_t out[NPC_MAX_E / 8 + 16] = {0};
@@ -77,6 +112,11 @@ static void encode(const pset &p, uint64_t payload, uint16_t rnti, double amp, d
   }
 }
 
+/* compare: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:191, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:212.
+ */
 static int compare(const char *what, const pset &p, int pid, const std::vector<std::vector<int16_t>> &vecs, int *crc_pass)
 {
   const int n = (int)vecs.size();
@@ -100,6 +140,11 @@ static int compare(const char *what, const pset &p, int pid, const std::vector<s
 
 /* Reconstruct the CPU decoder's u at the information positions from (payload, returned crc):
  * returned = crc24c(ones||A) ^ rxcrc, so rxcrc = returned ^ crc24c(ones||A); B = A<<24 | rxcrc. */
+/* cpu_u_from_outputs: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:131.
+ */
 static void cpu_u_from_outputs(int pid, int len, uint64_t Ar, uint32_t ret, uint8_t *u)
 {
   int N, K; const uint8_t *info; const uint16_t *il;
@@ -115,6 +160,11 @@ static void cpu_u_from_outputs(int pid, int len, uint64_t Ar, uint32_t ret, uint
     if (info[n] == 1) { const int t = K - 1 - il[k]; u[n] = (B >> t) & 1; k++; }
 }
 
+/* debug_one: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:175.
+ */
 static int debug_one(void)
 {
   npc_gpu_dbg_device_params(NULL);
@@ -168,6 +218,11 @@ static int debug_one(void)
 }
 
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char **argv)
 {
   crcTableInit();

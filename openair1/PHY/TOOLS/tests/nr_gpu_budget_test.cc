@@ -6,6 +6,11 @@
 #include <thread>
 #include <vector>
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
+ */
 TEST(GpuBudget, HeavyDiscoveryAndEverySlotRT) {
   nr_gpu_budget_test_reset(30);
   uint64_t discovery=0, done=0, rt_done=0, rt_jobs=0, cpu_jobs=0;
@@ -42,8 +47,23 @@ TEST(GpuBudget, HeavyDiscoveryAndEverySlotRT) {
   EXPECT_EQ(m.rt_gpu_fallbacks,cpu_jobs);
 }
 struct Job {uint64_t now=0, ready=0;};
+/* query: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int query(void *p) {auto *j=(Job *)p;j->now+=5;return j->now>=j->ready?0:600;}
+/* clock_us: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static uint64_t clock_us(void *p) {return ((Job *)p)->now;}
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
+ */
 TEST(GpuBudget, StalledRTUsesProductionDeadlineLoop) {
   nr_gpu_budget_test_reset(30);
   Job j{0,1000000};ASSERT_TRUE(nr_gpu_budget_rt_begin());
@@ -56,6 +76,11 @@ TEST(GpuBudget, StalledRTUsesProductionDeadlineLoop) {
   EXPECT_EQ(m.rt_gpu_fallbacks,1u);
   EXPECT_EQ(m.rt_gpu_wait_max_us,250u);
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
+ */
 TEST(GpuBudget, AbsoluteDeadlineIncludesSubmissionTime) {
   nr_gpu_budget_test_reset(30);
   Job j{245,249};
@@ -64,6 +89,11 @@ TEST(GpuBudget, AbsoluteDeadlineIncludesSubmissionTime) {
   EXPECT_EQ(nr_gpu_budget_rt_wait(query,&j,0,clock_us,&j),0);
   EXPECT_EQ(j.now,50u);
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
+ */
 TEST(GpuBudget, NoCatchupBurstAndOverrunChargesDebt) {
   nr_gpu_budget_test_reset(30);
   ASSERT_EQ(nr_gpu_budget_discovery_begin(100000000),1);
@@ -79,6 +109,11 @@ TEST(GpuBudget, NoCatchupBurstAndOverrunChargesDebt) {
   nr_gpu_budget_fault();EXPECT_EQ(nr_gpu_budget_discovery_begin(200000001),-1);
   ASSERT_TRUE(nr_gpu_budget_rt_begin());nr_gpu_budget_rt_end();
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
+ */
 TEST(GpuBudget, RTEntersInflightSliceAndBlocksTheNextOne) {
   nr_gpu_budget_test_reset(100);
   ASSERT_EQ(nr_gpu_budget_discovery_begin(0),1);
@@ -94,6 +129,11 @@ TEST(GpuBudget, RTEntersInflightSliceAndBlocksTheNextOne) {
   nr_gpu_budget_metrics_t m;nr_gpu_budget_metrics(&m);
   EXPECT_EQ(m.rt_gpu_fallbacks,0u);
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
+ */
 TEST(GpuBudget, ConcurrentRTDoesNotLoseDiscoveryOwnership) {
   nr_gpu_budget_test_reset(100);
   ASSERT_EQ(nr_gpu_budget_discovery_begin(0),1);
@@ -111,6 +151,11 @@ TEST(GpuBudget, ConcurrentRTDoesNotLoseDiscoveryOwnership) {
   ASSERT_EQ(nr_gpu_budget_discovery_begin(0),1);
   nr_gpu_budget_discovery_end(0,0);
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
+ */
 TEST(GpuBudget, HostCompletionDelayAlreadyPaysPacingDebt) {
   nr_gpu_budget_test_reset(30);
   ASSERT_EQ(nr_gpu_budget_discovery_begin(1000),1);
@@ -121,6 +166,11 @@ TEST(GpuBudget, HostCompletionDelayAlreadyPaysPacingDebt) {
   ASSERT_EQ(nr_gpu_budget_discovery_begin(1200),1);
   nr_gpu_budget_discovery_end(1230,30);
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1248 more).
+ */
 TEST(GpuBudget, ChunkPlansCoverTailsAndAdversarialSurvivors) {
   for(int total: {1,31,32,33,64,336,3360,65536}) {
     for(int limit: {NR_NID_SWEEP_SNAPSHOTS,NR_NID_SECONDARY_IDS,
@@ -134,6 +184,11 @@ TEST(GpuBudget, ChunkPlansCoverTailsAndAdversarialSurvivors) {
     }
   }
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1247 more).
+ */
 TEST(GpuBudget, AcquireMaintainPauseEpochOccupancyAndRecheck) {
   nr_gpu_discovery_duty_t s={};
   auto due=[&](uint64_t now,int epoch,int published,int verified,int unexplained) {
@@ -151,6 +206,11 @@ TEST(GpuBudget, AcquireMaintainPauseEpochOccupancyAndRecheck) {
   EXPECT_FALSE(due(16000100,2,0,0,0));
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1246 more).
+ */
 TEST(GpuBudget, RepeatedOutsideOccupancyCannotResetMaintain) {
   nr_gpu_discovery_duty_t s={};
   auto due=[&](uint64_t now,int verified,int outside) {

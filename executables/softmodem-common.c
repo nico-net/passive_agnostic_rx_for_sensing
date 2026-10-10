@@ -25,10 +25,20 @@ uint8_t nfapi_mode=0;
 static struct timespec start;
 
 static softmodem_params_t softmodem_params;
+/* get_softmodem_params: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/ocp_itti/intertask_interface.cpp:305, common/utils/telnetsrv/telnetsrv_o1.c:302, common/utils/telnetsrv/telnetsrv_o1.c:311, common/utils/telnetsrv/telnetsrv_o1.c:320 (+248 more).
+ */
 softmodem_params_t *get_softmodem_params(void) {
   return &softmodem_params;
 }
 
+/* get_softmodem_function: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/utils/telnetsrv/telnetsrv.c:664, common/utils/telnetsrv/telnetsrv.c:753, common/utils/telnetsrv/telnetsrv.c:890, common/utils/websrv/websrv.c:710 (+1 more).
+ */
 char *get_softmodem_function(void)
 {
   optmask_t fmask = *get_softmodem_optmask();
@@ -142,6 +152,11 @@ void get_common_options(configmodule_interface_t *cfg)
               "Use uicc0.pdu_sessions.[0].id to change the requested PDU session ID (is %d)\n", get_softmodem_params()->default_pdu_session_id);
 }
 
+/* softmodem_verify_mode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-softmodem.c:520, executables/nr-uesoftmodem.c:441, executables/softmodem-common.h:312.
+ */
 void softmodem_verify_mode(const softmodem_params_t *p)
 {
   if (IS_PASSIVE_RX_MODE(p)) {
@@ -165,6 +180,11 @@ void softmodem_verify_mode(const softmodem_params_t *p)
   AssertFatal(num_modes == 1, "--phy-test, --do-ra, and --nsa are mutually exclusive\n");
 }
 
+/* softmodem_printresources: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/softmodem-common.c:208.
+ */
 static void softmodem_printresources(telnet_printfunc_t pf)
 {
   struct rusage usage;
@@ -189,6 +209,11 @@ static void softmodem_printresources(telnet_printfunc_t pf)
   }
 }
 
+/* signal_handler: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 void signal_handler(int sig) {
   //void *array[10];
   //size_t size;
@@ -215,6 +240,11 @@ void signal_handler(int sig) {
 
 
 
+/* set_softmodem_sighandler: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/lte-softmodem.c:404, executables/lte-uesoftmodem.c:485, executables/nr-cuup.c:138, executables/nr-softmodem.c:507 (+4 more).
+ */
 void set_softmodem_sighandler(void) {
   struct sigaction  act,oldact;
   clock_gettime(CLOCK_BOOTTIME, &start);

@@ -6,6 +6,11 @@
 #include <vector>
 #include <dlfcn.h>
 
+/* same: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:125, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:192.
+ */
 static bool same(const nr_pdcch_nid_result_t &a,const nr_pdcch_nid_result_t &b,bool stage1) {
  if(a.count!=b.count || memcmp(a.records,b.records,a.count*sizeof(a.records[0])))return false;
  if(memcmp(a.al_win,b.al_win,a.count*sizeof(a.al_win[0])))return false;
@@ -16,11 +21,21 @@ static bool same(const nr_pdcch_nid_result_t &a,const nr_pdcch_nid_result_t &b,b
     || memcmp(a.lambda,b.lambda,sizeof(a.lambda)) || memcmp(a.threshold,b.threshold,sizeof(a.threshold))))return false;
  return true;
 }
+/* dump: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:192, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:193, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:207, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:209 (+1 more).
+ */
 static void dump(const char *name,const nr_pdcch_nid_result_t &r) {
  fprintf(stderr,"%s: count=%d top=%d/%d %d/%d\n",name,r.count,r.top_id[0],r.top_sym[0],r.top_id[1],r.top_sym[1]);
  for(int i=0;i<r.count;i++) {const auto &a=r.records[i];fprintf(stderr,"%d %d %d %d %d %d %d %d %d\n",a.nid,a.sym,a.dur,a.grid_rb,a.groups,a.L,a.R,a.shift,a.ties);}
 }
 // Independent full-array oracle for the streamed-word/six-prefix representation.
+/* symbol_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:73.
+ */
 static int symbol_test() {
  std::vector<c16_t> iq(3*12*273);uint32_t random=0x71f938;
  for(auto &v:iq) {
@@ -69,6 +84,11 @@ static int symbol_test() {
  return 0;
 }
 // Validate stable phase concatenation, including cap truncation inside a phase.
+/* structure_test: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:95.
+ */
 static int structure_test() {
  if(int rc=symbol_test())return rc;
  NidStage2 s={};
@@ -91,6 +111,11 @@ static int structure_test() {
  }
  puts("PASS stable parallel hypothesis generation: phases, clipping, caps, durations 1/2/3");return 0;
 }
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_GPU_BUDGET, ISAC_PDCCH_NID_GPU_INCREMENTAL, ISAC_PDCCH_NID_MULTISYMBOL.
+ *   Callers: none (program entry point).
+ */
 int main(int argc,char **argv) {
  if(argc>1 && !strcmp(argv[1],"--structure"))return structure_test();
  if(argc>2 && !strcmp(argv[1],"--frozen"))return nid_reference_original_main(argc-1,argv+1);

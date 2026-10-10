@@ -49,6 +49,11 @@ static double period_s;
 static bool real_time_session;
 extern void nr_cfg_epoch_note_rnti_reopened(uint16_t, bool, uint64_t) __attribute__((weak));
 
+/* now_ns: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:341, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:342, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:393, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:399 (+6 more).
+ */
 static uint64_t now_ns(void)
 {
   struct timespec t;
@@ -83,6 +88,11 @@ static bool enqueue(const event_t *e)
     } else pos = atomic_load_explicit(&tail, memory_order_relaxed);
   }
 }
+/* dequeue: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:397.
+ */
 static bool dequeue(event_t *e)
 {
   ring_slot_t *s = &ring[head % capacity];
@@ -104,6 +114,11 @@ static const char *cause_name[] = {
   "FIRST_LEARNED","CONVERGED","RELOCK","REOPENED_NEW_WINNER","BWP_CHANGE",
   "CORESET_CHANGE","EPOCH_REVERIFIED","EPOCH_DISCARDED","HARD_RESET"
 };
+/* source_for_param: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:291.
+ */
 static uint8_t source_for_param(nr_ue_param_t p)
 {
   if(p>=NR_UEP_SIB1_HASH && p<=NR_UEP_SIB1_TDRA_HASH) return NR_UES_SIB1;
@@ -114,9 +129,29 @@ static uint8_t source_for_param(nr_ue_param_t p)
   if(p==NR_UEP_PDSCH_SCR_ID || p==NR_UEP_MAX_LAYERS) return NR_UES_OBSERVATION;
   return NR_UES_PDCCH;
 }
+/* json_int: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:133, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:134, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:151, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:152 (+7 more).
+ */
 static void json_int(int64_t v) { if (v < 0) fputs("null", output); else fprintf(output, "%" PRId64, v); }
+/* json_float: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:147, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:148, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:149, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:150 (+1 more).
+ */
 static void json_float(double v) { if (isfinite(v)) fprintf(output, "%.8g", v); else fputs("null", output); }
+/* line_done: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:158, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:185, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:212.
+ */
 static void line_done(void) { if (!ferror(output)) atomic_fetch_add_explicit(&written, 1, memory_order_relaxed); }
+/* snapshot: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:234, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:298, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:334, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:335 (+4 more).
+ */
 static void snapshot(entry_t *e, uint64_t ns)
 {
   nr_ue_ctx_t *c = &e->ctx;
@@ -157,6 +192,11 @@ static void snapshot(entry_t *e, uint64_t ns)
   fprintf(output, "},\"n_changes\":%u,\"n_reconfigs\":%u}\n",c->n_changes,c->n_reconfigs);
   line_done();
 }
+/* reconfig_class: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:184.
+ */
 static const char *reconfig_class(uint64_t mask)
 {
   if (__builtin_popcountll(mask) != 1) return "MIXED";
@@ -168,6 +208,11 @@ static const char *reconfig_class(uint64_t mask)
   if (mask & (1ull<<NR_UEP_CORESET)) return "CORESET";
   return "MIXED";
 }
+/* flush_reconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:256, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:278, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:331, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:334 (+2 more).
+ */
 static void flush_reconfig(entry_t *e)
 {
   if (!e->pending_params) return;
@@ -191,6 +236,11 @@ static void flush_reconfig(entry_t *e)
     nr_cfg_epoch_note_rnti_reopened(c->rnti,true,(uint64_t)e->pending_slot);
   e->pending_params=0;
 }
+/* change: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:271, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:285, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:287, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:378.
+ */
 static void change(entry_t *e,nr_ue_param_t p,int64_t old,int64_t value,int cause,
                    int64_t slot,uint64_t ns,int64_t evidence)
 {
@@ -211,6 +261,11 @@ static void change(entry_t *e,nr_ue_param_t p,int64_t old,int64_t value,int caus
   } else json_int(evidence);
   fputs("}\n",output); line_done(); c->n_changes++;
 }
+/* init_entry: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:258.
+ */
 static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns)
 {
   memset(e,0,sizeof(*e));
@@ -233,6 +288,11 @@ static void init_entry(entry_t *e,uint16_t rnti,uint16_t incarnation,uint64_t ns
   }
   snapshot(e,ns);
 }
+/* find_entry: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:366, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:374.
+ */
 static entry_t *find_entry(uint16_t rnti,uint64_t ns,bool create)
 {
   const int16_t active=active_index[rnti];
@@ -259,6 +319,11 @@ static entry_t *find_entry(uint16_t rnti,uint64_t ns,bool create)
   active_index[rnti]=(int16_t)(e-entries);
   return e;
 }
+/* param: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:324, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:363, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:370, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:376.
+ */
 static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
                   int cause,int64_t slot,uint64_t ns,int64_t evidence)
 {
@@ -290,8 +355,18 @@ static void param(entry_t *e,nr_ue_param_t p,int64_t value,nr_ue_verif_t verif,
   if(verif==NR_UEV_TRUSTED) v->last_confirmed_abs_slot=slot;
   v->source=source_for_param(p);
 }
+/* ema: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:310, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:311.
+ */
 static float ema(float old,float v)
 { return isfinite(v)?(isfinite(old)?old*0.875f+v*0.125f:v):old; }
+/* observe: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:369.
+ */
 static void observe(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
 {
   nr_ue_ctx_t *c=&e->ctx; nr_ue_stats_t *s=&c->st;
@@ -323,6 +398,11 @@ static void observe(entry_t *e,const nr_passive_obs_t *o,uint64_t ns)
   if(o->rnti_class>=0 && c->cfg[NR_UEP_RNTI_CLASS].value<0)
     param(e,NR_UEP_RNTI_CLASS,o->rnti_class,NR_UEV_TRUSTED,NR_UEC_FIRST_LEARNED,o->abs_slot,ns,-1);
 }
+/* age: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:344.
+ */
 static void age(uint64_t ns)
 {
   for(int i=0;i<NR_UECTX_MAX_UE;i++) {
@@ -335,6 +415,11 @@ static void age(uint64_t ns)
     else if(delta>=10000000000ull && e->ctx.state==NR_UE_ACTIVE) {e->ctx.state=NR_UE_IDLE; snapshot(e,ns);}
   }
 }
+/* handle: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:397, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:402.
+ */
 static void handle(const event_t *v)
 {
   pthread_mutex_lock(&ctx_lock);
@@ -384,6 +469,11 @@ static void handle(const event_t *v)
   }
   pthread_mutex_unlock(&ctx_lock);
 }
+/* run: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_UECTX_TEST_WRITER_PAUSE_MS.
+ *   Callers: none found in tree.
+ */
 static void *run(void *unused)
 {
   (void)unused;
@@ -446,6 +536,11 @@ bool nr_ue_ctx_open(const char *path,uint32_t ring_capacity,double snapshot_peri
   }
   return true;
 }
+/* nr_ue_ctx_close: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-uesoftmodem.c:757, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:77, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:252, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:268 (+4 more).
+ */
 void nr_ue_ctx_close(void)
 {
   if(!nr_ue_ctx_enabled()) return;
@@ -454,10 +549,25 @@ void nr_ue_ctx_close(void)
   pthread_join(worker,NULL);
   fclose(output);free(ring);output=NULL;ring=NULL;
 }
+/* nr_ue_ctx_on_obs: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:78, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2019, openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1639, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:51 (+11 more).
+ */
 void nr_ue_ctx_on_obs(const nr_passive_obs_t *o)
 { if(o && nr_ue_ctx_enabled()) {event_t e={.kind=EV_OBS,.ns=o->t_mono_ns,.slot=o->abs_slot,.rnti=o->rnti,.obs=*o};enqueue(&e);} }
+/* nr_ue_ctx_on_param: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:465, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:468, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:469, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:79 (+51 more).
+ */
 void nr_ue_ctx_on_param(uint16_t rnti,nr_ue_param_t p,int64_t value,nr_ue_verif_t v,int cause,int64_t slot)
 { if(nr_ue_ctx_enabled()) {event_t e={.kind=EV_PARAM,.ns=now_ns(),.slot=slot,.rnti=rnti,.p=p,.value=value,.verif=v,.cause=cause};enqueue(&e);} }
+/* nr_ue_ctx_on_dci_accept: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:81, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7752, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8256, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:137 (+2 more).
+ */
 void nr_ue_ctx_on_dci_accept(uint16_t rnti,bool dedicated_format,bool is_ul,bool dedicated_uss,
                              int dci_length,int64_t coreset,int pdcch_scr_id,int64_t slot)
 {
@@ -469,17 +579,47 @@ void nr_ue_ctx_on_dci_accept(uint16_t rnti,bool dedicated_format,bool is_ul,bool
     nr_ue_ctx_on_param(rnti,NR_UEP_PDCCH_SCR_ID,pdcch_scr_id,NR_UEV_TRUSTED,NR_UEC_CONVERGED,slot);
   }
 }
+/* nr_ue_ctx_on_anchor: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:83, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:663, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:67.
+ */
 void nr_ue_ctx_on_anchor(uint16_t rnti,int kind,int64_t slot)
 { if(nr_ue_ctx_enabled()) {event_t e={.kind=EV_ANCHOR,.ns=now_ns(),.slot=slot,.rnti=rnti,.value=kind};enqueue(&e);} }
+/* nr_ue_ctx_on_sib1: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:84, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:220, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:235, openair2/RRC/NR_UE/rrc_UE.c:2300.
+ */
 void nr_ue_ctx_on_sib1(uint32_t hash,int64_t slot)
 { nr_ue_ctx_on_sib1_param(NR_UEP_SIB1_HASH,hash,slot); }
+/* nr_ue_ctx_on_sib1_param: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:475, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:85, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:221, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:222 (+4 more).
+ */
 void nr_ue_ctx_on_sib1_param(nr_ue_param_t p,int64_t value,int64_t slot)
 { if(nr_ue_ctx_enabled() && !nr_cfg_ignore_sib1() && p>=NR_UEP_SIB1_HASH && p<=NR_UEP_SIB1_TDRA_HASH)
     {event_t e={.kind=EV_SIB1,.ns=now_ns(),.slot=slot,.p=p,.value=value};enqueue(&e);} }
+/* nr_ue_ctx_on_epoch: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:86, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:103, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:111, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:119 (+1 more).
+ */
 void nr_ue_ctx_on_epoch(const nr_cfg_epoch_snapshot_t *s)
 { if(s && nr_ue_ctx_enabled()) {event_t e={.kind=EV_EPOCH,.ns=now_ns(),.epoch=*s};enqueue(&e);} }
+/* nr_ue_ctx_on_aperiodic_csi: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:497, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:87, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:166.
+ */
 void nr_ue_ctx_on_aperiodic_csi(uint16_t rnti,uint8_t request,int64_t slot,int64_t resource)
 { if(request && nr_ue_ctx_enabled()) {event_t e={.kind=EV_CSI,.ns=now_ns(),.slot=slot,.rnti=rnti,.value=request,.extra=resource};enqueue(&e);} }
+/* nr_ue_ctx_on_dci01_csi: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:88, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7765, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:258, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:259 (+1 more).
+ */
 void nr_ue_ctx_on_dci01_csi(uint16_t rnti,uint8_t request,int64_t slot,
                             const nr_ue_csi_resource_t *observed)
 {
@@ -496,8 +636,18 @@ void nr_ue_ctx_on_dci01_csi(uint16_t rnti,uint8_t request,int64_t slot,
   }
   nr_ue_ctx_on_aperiodic_csi(rnti,request,slot,resource);
 }
+/* nr_ue_ctx_tick: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:90, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:60, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:67, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:72 (+2 more).
+ */
 void nr_ue_ctx_tick(int64_t slot,uint64_t ns)
 { if(nr_ue_ctx_enabled()) {event_t e={.kind=EV_TICK,.ns=ns,.slot=slot};enqueue(&e);} }
+/* nr_ue_ctx_get: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:91, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:53, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:97, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:123 (+4 more).
+ */
 bool nr_ue_ctx_get(uint16_t rnti,nr_ue_ctx_t *out)
 {
   if(!out || !entries) return false;
@@ -508,6 +658,11 @@ bool nr_ue_ctx_get(uint16_t rnti,nr_ue_ctx_t *out)
   pthread_mutex_unlock(&ctx_lock);
   return found;
 }
+/* nr_ue_ctx_try_get: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:92, openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c:191, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_records_test.cc:21.
+ */
 bool nr_ue_ctx_try_get(uint16_t rnti,nr_ue_ctx_t *out)
 {
   if (!out || !entries || pthread_mutex_trylock(&ctx_lock)) return false;
@@ -517,5 +672,10 @@ bool nr_ue_ctx_try_get(uint16_t rnti,nr_ue_ctx_t *out)
   pthread_mutex_unlock(&ctx_lock);
   return found;
 }
+/* nr_ue_ctx_stats: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-uesoftmodem.c:760, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h:93, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:280, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:297.
+ */
 void nr_ue_ctx_stats(uint64_t *events,uint64_t *lines,uint64_t *drops)
 {if(events)*events=atomic_load(&pushed);if(lines)*lines=atomic_load(&written);if(drops)*drops=atomic_load(&dropped);}

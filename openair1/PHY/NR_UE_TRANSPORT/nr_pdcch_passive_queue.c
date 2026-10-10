@@ -81,6 +81,11 @@ typedef struct {
 } consumer_arg_t;
 static consumer_arg_t g_args[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 
+/* nr_pdcch_passive_queue_thread: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void *nr_pdcch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -202,11 +207,21 @@ bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   return true;
 }
 
+/* nr_pdcch_passive_queue_running: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4274, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4285, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h:115.
+ */
 bool nr_pdcch_passive_queue_running(void)
 {
   return atomic_load_explicit(&g_running, memory_order_acquire) != 0;
 }
 
+/* nr_pdcch_passive_queue_enqueue: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4292, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h:110, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h:118.
+ */
 bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
@@ -231,6 +246,11 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
   return true;
 }
 
+/* nr_pdcch_passive_queue_backlog: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4728, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h:123.
+ */
 int nr_pdcch_passive_queue_backlog(void)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire))
@@ -241,6 +261,11 @@ int nr_pdcch_passive_queue_backlog(void)
   return n;
 }
 
+/* nr_pdcch_passive_queue_get_stats: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:77, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9557, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h:120.
+ */
 void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out)
 {
   if (out == NULL) {
@@ -254,6 +279,11 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out)
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
 }
 
+/* nr_pdcch_passive_queue_stop: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-uesoftmodem.c:736, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h:125.
+ */
 void nr_pdcch_passive_queue_stop(void)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
@@ -269,4 +299,9 @@ void nr_pdcch_passive_queue_stop(void)
   atomic_store_explicit(&g_running, 0, memory_order_release);
 }
 
+/* nr_pdcch_passive_queue_epoch_counter: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4499, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4563, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h:126.
+ */
 void *nr_pdcch_passive_queue_epoch_counter(void) { return &g_dropped_epoch; }

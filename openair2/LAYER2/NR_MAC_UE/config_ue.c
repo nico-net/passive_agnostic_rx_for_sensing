@@ -35,6 +35,11 @@
   } while (0)
 
 // Build the list of all the valid/transmitted SSBs according to the config
+/* build_ssb_list: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2657, openair2/LAYER2/NR_MAC_UE/config_ue.c:2807.
+ */
 static void build_ssb_list(NR_UE_MAC_INST_t *mac)
 {
   // Create the list of transmitted SSBs
@@ -54,6 +59,11 @@ static void build_ssb_list(NR_UE_MAC_INST_t *mac)
   }
 }
 
+/* get_ta_offset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:207, openair2/LAYER2/NR_MAC_UE/config_ue.c:517.
+ */
 static int get_ta_offset(long *n_TimingAdvanceOffset)
 {
   if (!n_TimingAdvanceOffset)
@@ -72,6 +82,11 @@ static int get_ta_offset(long *n_TimingAdvanceOffset)
   return -1;
 }
 
+/* set_tdd_config_nr_ue: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:239, openair2/LAYER2/NR_MAC_UE/config_ue.c:567.
+ */
 static void set_tdd_config_nr_ue(fapi_nr_tdd_table_t *tdd_table, const frame_structure_t *fs)
 {
   tdd_table->tdd_period_in_slots = fs->numb_slots_period;
@@ -109,6 +124,11 @@ static void set_tdd_config_nr_ue(fapi_nr_tdd_table_t *tdd_table, const frame_str
   }
 }
 
+/* config_common_ue_sa: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2653.
+ */
 static void config_common_ue_sa(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommonSIB_t *scc, int cc_idP)
 {
   fapi_nr_config_request_t *cfg = &mac->phy_config.config_req;
@@ -283,6 +303,11 @@ static void config_common_ue_sa(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommo
 }
 
 // prepare data for orbit propagation based on SIB19 ephemeris data to be able to compute the round-trip-time between ue and sat
+/* prepare_ue_sat_ta: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:412.
+ */
 static void prepare_ue_sat_ta(const NR_PositionVelocity_r17_t *sat_pos, fapi_nr_ntn_config_t *ntn_ta)
 {
   // get sat position coordinates
@@ -347,6 +372,11 @@ static void prepare_ue_sat_ta(const NR_PositionVelocity_r17_t *sat_pos, fapi_nr_
 }
 
 // populate ntn_ta structure from mac
+/* configure_ntn_ta: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:628, openair2/LAYER2/NR_MAC_UE/config_ue.c:2760.
+ */
 static void configure_ntn_ta(fapi_nr_ntn_config_t *ntn_ta,
                              const NR_NTN_Config_r17_t *ntn_Config_r17,
                              int hfn,
@@ -430,6 +460,11 @@ static void configure_ntn_ta(fapi_nr_ntn_config_t *ntn_ta,
   ntn_ta->params_changed = true;
 }
 
+/* config_common_ue: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2804.
+ */
 static void config_common_ue(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommon_t *scc, int cc_idP, int hfn, int frame)
 {
   fapi_nr_config_request_t *cfg = &mac->phy_config.config_req;
@@ -631,6 +666,11 @@ static void config_common_ue(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommon_t
   }
 }
 
+/* release_common_ss_cset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1854, openair2/LAYER2/NR_MAC_UE/config_ue.c:3476.
+ */
 static void release_common_ss_cset(NR_BWP_PDCCH_t *pdcch)
 {
   pdcch->otherSI_SS_id = -1;
@@ -640,6 +680,11 @@ static void release_common_ss_cset(NR_BWP_PDCCH_t *pdcch)
   asn1cFreeStruc(asn_DEF_NR_ControlResourceSet, pdcch->commonControlResourceSet);
 }
 
+/* modlist_ss: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:700.
+ */
 static void modlist_ss(NR_SearchSpace_t *source, NR_SearchSpace_t *target)
 {
   target->searchSpaceId = source->searchSpaceId;
@@ -658,6 +703,11 @@ static void modlist_ss(NR_SearchSpace_t *source, NR_SearchSpace_t *target)
     UPDATE_IE(target->searchSpaceType, source->searchSpaceType, struct NR_SearchSpace__searchSpaceType);
 }
 
+/* get_common_search_space: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:353, openair2/LAYER2/NR_MAC_UE/nr_ue_dci_configuration.c:658, openair2/LAYER2/NR_MAC_UE/nr_ue_dci_configuration.c:667, openair2/LAYER2/NR_MAC_UE/nr_ue_dci_configuration.c:712 (+6 more).
+ */
 NR_SearchSpace_t *get_common_search_space(const NR_UE_MAC_INST_t *mac, const NR_SearchSpaceId_t ss_id)
 {
   if (ss_id == 0)
@@ -676,6 +726,11 @@ NR_SearchSpace_t *get_common_search_space(const NR_UE_MAC_INST_t *mac, const NR_
   return css;
 }
 
+/* update_ss: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:710, openair2/LAYER2/NR_MAC_UE/config_ue.c:819.
+ */
 static void update_ss(void *ue_ss_in, void *nw_ss_in)
 {
   if (!nw_ss_in || !ue_ss_in)
@@ -701,6 +756,11 @@ static void update_ss(void *ue_ss_in, void *nw_ss_in)
   }
 }
 
+/* configure_common_ss_coreset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1852.
+ */
 static void configure_common_ss_coreset(NR_BWP_PDCCH_t *pdcch, NR_PDCCH_ConfigCommon_t *pdcch_ConfigCommon)
 {
   if (!pdcch_ConfigCommon)
@@ -716,6 +776,11 @@ static void configure_common_ss_coreset(NR_BWP_PDCCH_t *pdcch, NR_PDCCH_ConfigCo
   UPDATE_IE(pdcch->commonControlResourceSet, pdcch_ConfigCommon->commonControlResourceSet, NR_ControlResourceSet_t);
 }
 
+/* modlist_coreset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:803.
+ */
 static void modlist_coreset(NR_ControlResourceSet_t *source, NR_ControlResourceSet_t *target)
 {
   target->controlResourceSetId = source->controlResourceSetId;
@@ -782,6 +847,11 @@ static void modlist_coreset(NR_ControlResourceSet_t *source, NR_ControlResourceS
   // end TCI States
 }
 
+/* configure_ss_coreset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1705.
+ */
 static void configure_ss_coreset(NR_BWP_PDCCH_t *pdcch, NR_PDCCH_Config_t *pdcch_Config)
 {
   if (!pdcch_Config)
@@ -831,6 +901,11 @@ static void configure_ss_coreset(NR_BWP_PDCCH_t *pdcch, NR_PDCCH_Config_t *pdcch
   }
 }
 
+/* lcid_cmp: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int lcid_cmp(const void *a, const void *b)
 {
   long priority_a = (*((nr_lcordered_info_t**)a))->priority;
@@ -840,6 +915,11 @@ static int lcid_cmp(const void *a, const void *b)
   return priority_a - priority_b;
 }
 
+/* nr_get_ms_bucketsizeduration: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:937.
+ */
 static int nr_get_ms_bucketsizeduration(long bucketsizeduration)
 {
   switch (bucketsizeduration) {
@@ -866,6 +946,11 @@ static int nr_get_ms_bucketsizeduration(long bucketsizeduration)
   }
 }
 
+/* nr_get_pbr: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:931, openair2/LAYER2/NR_MAC_UE/config_ue.c:973.
+ */
 static uint32_t nr_get_pbr(long prioritizedbitrate)  // returns Bps
 {
   uint32_t pbr = 0;
@@ -926,6 +1011,11 @@ static uint32_t nr_get_pbr(long prioritizedbitrate)  // returns Bps
   return pbr_bytes;
 }
 
+/* get_lc_bucket_size: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:976.
+ */
 static uint32_t get_lc_bucket_size(long prioritisedBitRate, long bucketSizeDuration)
 {
   uint32_t pbr = nr_get_pbr(prioritisedBitRate);
@@ -940,6 +1030,11 @@ static uint32_t get_lc_bucket_size(long prioritisedBitRate, long bucketSizeDurat
 }
 
 // default configuration as per 38.331 section 9.2.1
+/* set_default_logicalchannelconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:962, openair2/LAYER2/NR_MAC_UE/config_ue.c:1053.
+ */
 static void set_default_logicalchannelconfig(nr_lcordered_info_t *lc_info, int srb_id)
 {
   lc_info->lcid = srb_id;
@@ -948,6 +1043,11 @@ static void set_default_logicalchannelconfig(nr_lcordered_info_t *lc_info, int s
   lc_info->bucket_size = UINT_MAX;
 }
 
+/* nr_configure_lc_config: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1041, openair2/LAYER2/NR_MAC_UE/config_ue.c:1051, openair2/LAYER2/NR_MAC_UE/config_ue.c:1056.
+ */
 static void nr_configure_lc_config(NR_UE_MAC_INST_t *mac,
                                    nr_lcordered_info_t *lc_info,
                                    NR_LogicalChannelConfig_t *mac_lc_config,
@@ -980,6 +1080,11 @@ static void nr_configure_lc_config(NR_UE_MAC_INST_t *mac,
   nr_timer_start(bjt);
 }
 
+/* configure_lcid_rb: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1030.
+ */
 static nr_lcid_rb_t configure_lcid_rb(NR_RLC_BearerConfig_t *rlc_bearer)
 {
   nr_lcid_rb_t rb;
@@ -1005,6 +1110,11 @@ static nr_lcid_rb_t configure_lcid_rb(NR_RLC_BearerConfig_t *rlc_bearer)
   return rb;
 }
 
+/* configure_logicalChannelBearer: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3622.
+ */
 static void configure_logicalChannelBearer(NR_UE_MAC_INST_t *mac,
                                            struct NR_CellGroupConfig__rlc_BearerToAddModList *rlc_toadd_list,
                                            struct NR_CellGroupConfig__rlc_BearerToReleaseList *rlc_torelease_list)
@@ -1064,6 +1174,11 @@ static void configure_logicalChannelBearer(NR_UE_MAC_INST_t *mac,
   }
 }
 
+/* ue_init_config_request: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SIMULATION/NR_PHY/dlsim.c:1009, openair1/SIMULATION/NR_PHY/ulsim.c:929, openair1/SIMULATION/NR_PHY/ulsim_mu_mimo.c:733, openair2/LAYER2/NR_MAC_UE/config_ue.c:3628 (+2 more).
+ */
 void ue_init_config_request(NR_UE_MAC_INST_t *mac, int slots_per_frame)
 {
   LOG_I(NR_MAC, "Initializing dl and ul config_request. num_slots = %d\n", slots_per_frame);
@@ -1073,6 +1188,11 @@ void ue_init_config_request(NR_UE_MAC_INST_t *mac, int slots_per_frame)
     pthread_mutex_init(&(mac->ul_config_request[i].mutex_ul_config), NULL);
 }
 
+/* update_mib_conf: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1136.
+ */
 static void update_mib_conf(NR_MIB_t *target, NR_MIB_t *source)
 {
   target->systemFrameNumber.size = source->systemFrameNumber.size;
@@ -1089,12 +1209,22 @@ static void update_mib_conf(NR_MIB_t *target, NR_MIB_t *source)
   target->intraFreqReselection = source->intraFreqReselection;
 }
 
+/* is_cset0_present: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1102.
+ */
 static bool is_cset0_present(frequency_range_t const fr, uint8_t const kssb)
 {
   // TS 38.213 4.1 defines if CORESET 0 is present or not based on Kssb
   return (fr == FR1) ? (kssb < 24) : (kssb < 12);
 }
 
+/* nr_rrc_mac_sched_sib: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:67, openair2/LAYER2/NR_MAC_UE/tests/test_nr_ue_mib_blind_handoff.cpp:11, openair2/LAYER2/NR_MAC_UE/tests/test_nr_ue_mib_blind_handoff.cpp:270, openair2/RRC/NR_UE/L2_interface_ue.c:151.
+ */
 void nr_rrc_mac_sched_sib(module_id_t module_id, int sched_sib)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -1118,6 +1248,11 @@ void nr_rrc_mac_sched_sib(module_id_t module_id, int sched_sib)
     mac->state = UE_RECEIVING_SIB;
 }
 
+/* nr_rrc_mac_config_req_mib: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SIMULATION/NR_PHY/dlsim.c:1036, openair2/LAYER2/NR_MAC_UE/mac_proto.h:66, openair2/LAYER2/NR_MAC_UE/tests/test_nr_ue_mib_blind_handoff.cpp:11, openair2/LAYER2/NR_MAC_UE/tests/test_nr_ue_mib_blind_handoff.cpp:269 (+1 more).
+ */
 void nr_rrc_mac_config_req_mib(module_id_t module_id, int cc_idP, NR_MIB_t *mib, bool barred)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -1147,6 +1282,11 @@ void nr_rrc_mac_config_req_mib(module_id_t module_id, int cc_idP, NR_MIB_t *mib,
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* setup_puschpowercontrol: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1213.
+ */
 static void setup_puschpowercontrol(NR_UE_MAC_INST_t *mac, NR_PUSCH_PowerControl_t *source, NR_PUSCH_PowerControl_t *target)
 {
   UPDATE_IE(target->tpc_Accumulation, source->tpc_Accumulation, long);
@@ -1193,6 +1333,11 @@ static void setup_puschpowercontrol(NR_UE_MAC_INST_t *mac, NR_PUSCH_PowerControl
   }
 }
 
+/* setup_puschconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1731.
+ */
 static void setup_puschconfig(NR_UE_MAC_INST_t *mac, NR_PUSCH_Config_t *source, NR_PUSCH_Config_t *target)
 {
   UPDATE_IE(target->dataScramblingIdentityPUSCH, source->dataScramblingIdentityPUSCH, long);
@@ -1255,6 +1400,11 @@ static void setup_puschconfig(NR_UE_MAC_INST_t *mac, NR_PUSCH_Config_t *source, 
   }
 }
 
+/* configure_csi_resourcemapping: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1318, openair2/LAYER2/NR_MAC_UE/config_ue.c:3153.
+ */
 static void configure_csi_resourcemapping(NR_CSI_RS_ResourceMapping_t *target, NR_CSI_RS_ResourceMapping_t *source)
 {
   if (target->frequencyDomainAllocation.present != source->frequencyDomainAllocation.present) {
@@ -1312,6 +1462,11 @@ static void configure_csi_resourcemapping(NR_CSI_RS_ResourceMapping_t *target, N
   target->freqBand = source->freqBand;
 }
 
+/* config_zp_CSI_RS_Resource: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void config_zp_CSI_RS_Resource(NR_ZP_CSI_RS_Resource_t *target, NR_ZP_CSI_RS_Resource_t *source)
 {
   target->zp_CSI_RS_ResourceId = source->zp_CSI_RS_ResourceId;
@@ -1322,6 +1477,11 @@ static void config_zp_CSI_RS_Resource(NR_ZP_CSI_RS_Resource_t *target, NR_ZP_CSI
               NR_CSI_ResourcePeriodicityAndOffset_t);
 }
 
+/* setup_pdschconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1694.
+ */
 static void setup_pdschconfig(NR_PDSCH_Config_t *source, NR_PDSCH_Config_t *target)
 {
   UPDATE_IE(target->dataScramblingIdentityPDSCH, source->dataScramblingIdentityPDSCH, long);
@@ -1409,6 +1569,11 @@ static void setup_pdschconfig(NR_PDSCH_Config_t *source, NR_PDSCH_Config_t *targ
   }
 }
 
+/* setup_sr_resource: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void setup_sr_resource(NR_SchedulingRequestResourceConfig_t *target, NR_SchedulingRequestResourceConfig_t *source)
 {
   target->schedulingRequestResourceId = source->schedulingRequestResourceId;
@@ -1421,6 +1586,11 @@ static void setup_sr_resource(NR_SchedulingRequestResourceConfig_t *target, NR_S
     UPDATE_IE(target->resource, source->resource, NR_PUCCH_ResourceId_t);
 }
 
+/* setup_pucchconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1722.
+ */
 static void setup_pucchconfig(NR_PUCCH_Config_t *source, NR_PUCCH_Config_t *target)
 {
   // PUCCH-ResourceSet
@@ -1529,6 +1699,11 @@ static void setup_pucchconfig(NR_PUCCH_Config_t *source, NR_PUCCH_Config_t *targ
   }
 }
 
+/* handle_aperiodic_srs_type: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1557.
+ */
 static void handle_aperiodic_srs_type(struct NR_SRS_ResourceSet__resourceType__aperiodic *source,
                                       struct NR_SRS_ResourceSet__resourceType__aperiodic *target)
 {
@@ -1542,6 +1717,11 @@ static void handle_aperiodic_srs_type(struct NR_SRS_ResourceSet__resourceType__a
               struct NR_SRS_ResourceSet__resourceType__aperiodic__ext1__aperiodicSRS_ResourceTriggerList);
 }
 
+/* setup_srsresourceset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1624.
+ */
 static void setup_srsresourceset(NR_UE_UL_BWP_t *bwp, NR_SRS_ResourceSet_t *target, NR_SRS_ResourceSet_t *source)
 {
   target->srs_ResourceSetId = source->srs_ResourceSetId;
@@ -1586,6 +1766,11 @@ static void setup_srsresourceset(NR_UE_UL_BWP_t *bwp, NR_SRS_ResourceSet_t *targ
   UPDATE_IE(target->srs_PowerControlAdjustmentStates, source->srs_PowerControlAdjustmentStates, long);
 }
 
+/* setup_srsconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1740.
+ */
 static void setup_srsconfig(NR_UE_UL_BWP_t *bwp, NR_SRS_Config_t *source, NR_SRS_Config_t *target)
 {
   UPDATE_IE(target->tpc_Accumulation, source->tpc_Accumulation, long);
@@ -1631,6 +1816,11 @@ static void setup_srsconfig(NR_UE_UL_BWP_t *bwp, NR_SRS_Config_t *source, NR_SRS
   }
 }
 
+/* get_dl_bwp_structure: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1685, openair2/LAYER2/NR_MAC_UE/config_ue.c:1750, openair2/LAYER2/NR_MAC_UE/config_ue.c:2667, openair2/LAYER2/NR_MAC_UE/config_ue.c:2736 (+4 more).
+ */
 NR_UE_DL_BWP_t *get_dl_bwp_structure(NR_UE_MAC_INST_t *mac, int bwp_id, bool setup)
 {
   NR_UE_DL_BWP_t *bwp = NULL;
@@ -1655,6 +1845,11 @@ NR_UE_DL_BWP_t *get_dl_bwp_structure(NR_UE_MAC_INST_t *mac, int bwp_id, bool set
   return bwp;
 }
 
+/* get_ul_bwp_structure: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:1714, openair2/LAYER2/NR_MAC_UE/config_ue.c:1862, openair2/LAYER2/NR_MAC_UE/config_ue.c:2668, openair2/LAYER2/NR_MAC_UE/config_ue.c:2738 (+3 more).
+ */
 NR_UE_UL_BWP_t *get_ul_bwp_structure(NR_UE_MAC_INST_t *mac, int bwp_id, bool setup)
 {
   NR_UE_UL_BWP_t *bwp = NULL;
@@ -1679,6 +1874,11 @@ NR_UE_UL_BWP_t *get_ul_bwp_structure(NR_UE_MAC_INST_t *mac, int bwp_id, bool set
   return bwp;
 }
 
+/* configure_dedicated_BWP_dl: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3503, openair2/LAYER2/NR_MAC_UE/config_ue.c:3516.
+ */
 static void configure_dedicated_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_DownlinkDedicated_t *dl_dedicated)
 {
   if (dl_dedicated) {
@@ -1708,6 +1908,11 @@ static void configure_dedicated_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP
   }
 }
 
+/* configure_dedicated_BWP_ul: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3525, openair2/LAYER2/NR_MAC_UE/config_ue.c:3538.
+ */
 static void configure_dedicated_BWP_ul(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_UplinkDedicated_t *ul_dedicated)
 {
   if (ul_dedicated) {
@@ -1744,6 +1949,11 @@ static void configure_dedicated_BWP_ul(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP
   }
 }
 
+/* configure_common_BWP_dl: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_OTA_CFG.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2660, openair2/LAYER2/NR_MAC_UE/config_ue.c:2811, openair2/LAYER2/NR_MAC_UE/config_ue.c:3515.
+ */
 static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_DownlinkCommon_t *dl_common)
 {
   if (dl_common) {
@@ -1856,6 +2066,11 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
   }
 }
 
+/* configure_common_BWP_ul: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2663, openair2/LAYER2/NR_MAC_UE/config_ue.c:2813, openair2/LAYER2/NR_MAC_UE/config_ue.c:3537.
+ */
 static void configure_common_BWP_ul(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_UplinkCommon_t *ul_common)
 {
   if (ul_common) {
@@ -1913,6 +2128,11 @@ static void configure_common_BWP_ul(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Up
   }
 }
 
+/* configure_timeAlignmentTimer: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2161, openair2/LAYER2/NR_MAC_UE/config_ue.c:2740, openair2/LAYER2/NR_MAC_UE/config_ue.c:3619.
+ */
 static void configure_timeAlignmentTimer(NR_timer_t *time_alignment_timer, NR_TimeAlignmentTimer_t timer_config, int scs)
 {
   uint32_t timer_ms = 0;
@@ -1952,6 +2172,11 @@ static void configure_timeAlignmentTimer(NR_timer_t *time_alignment_timer, NR_Ti
     nr_timer_start(time_alignment_timer);
 }
 
+/* nr_rrc_mac_config_req_reset: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:79, openair2/RRC/NR_UE/L2_interface_ue.c:116.
+ */
 void nr_rrc_mac_config_req_reset(module_id_t module_id, NR_UE_MAC_reset_cause_t cause)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2018,6 +2243,11 @@ void nr_rrc_mac_config_req_reset(module_id_t module_id, NR_UE_MAC_reset_cause_t 
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* is_lcid_suspended: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:238, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4243, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:2294.
+ */
 bool is_lcid_suspended(NR_UE_MAC_INST_t *mac, int lcid)
 {
   for (int j = 0; j < mac->lc_ordered_list.count; j++) {
@@ -2029,6 +2259,11 @@ bool is_lcid_suspended(NR_UE_MAC_INST_t *mac, int lcid)
   return false;
 }
 
+/* nr_rrc_mac_resume_rb: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:78, openair2/RRC/NR_UE/L2_interface_ue.c:154.
+ */
 void nr_rrc_mac_resume_rb(module_id_t module_id, bool is_srb, int rb_id)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2041,6 +2276,11 @@ void nr_rrc_mac_resume_rb(module_id_t module_id, bool is_srb, int rb_id)
   }
 }
 
+/* configure_si_schedulingInfo: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2650.
+ */
 static void configure_si_schedulingInfo(NR_UE_MAC_INST_t *mac,
                                         NR_SI_SchedulingInfo_t *si_SchedulingInfo,
                                         NR_SI_SchedulingInfo_v1700_t *si_SchedulingInfo_v1700)
@@ -2069,6 +2309,11 @@ static void configure_si_schedulingInfo(NR_UE_MAC_INST_t *mac,
 
 /** @brief Parse SIB1 PCCH-Config (TS 38.331) into UE MAC paging_cfg (T, N, PF_offset, Ns, X and the
  *  per-PO start-MO list). */
+/* configure_pcch_config: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2651.
+ */
 static void configure_pcch_config(NR_UE_MAC_INST_t *mac, const NR_ServingCellConfigCommonSIB_t *scc)
 {
   DevAssert(mac);
@@ -2125,6 +2370,11 @@ static void configure_pcch_config(NR_UE_MAC_INST_t *mac, const NR_ServingCellCon
  * The "no 5G-S-TMSI" window between MIB/SIB1 reception and NAS_5GMM_IND is legitimate per spec,
  * the UE must still monitor PF/PO with UE_ID = 0 for broadcast-style notifications.
  * @note Pass UINT64_MAX to invalidate (no 5G-S-TMSI). */
+/* nr_rrc_mac_config_req_paging_ue_id: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:73, openair2/RRC/NR_UE/rrc_UE.c:3575.
+ */
 void nr_rrc_mac_config_req_paging_ue_id(module_id_t module_id, uint64_t fiveG_S_TMSI)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2136,6 +2386,11 @@ void nr_rrc_mac_config_req_paging_ue_id(module_id_t module_id, uint64_t fiveG_S_
   pthread_mutex_unlock(&mac->if_mutex);
 }
 
+/* nr_mac_start_ra: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2177.
+ */
 static void nr_mac_start_ra(NR_UE_MAC_INST_t *mac, module_id_t module_id, nr_mac_ra_start_cause_t cause)
 {
   switch (cause) {
@@ -2168,6 +2423,11 @@ static void nr_mac_start_ra(NR_UE_MAC_INST_t *mac, module_id_t module_id, nr_mac
 }
 
 /** @brief All RRC-initiated RA entry points */
+/* nr_rrc_mac_start_ra: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:74, openair2/RRC/NR_UE/L2_interface_ue.c:148.
+ */
 void nr_rrc_mac_start_ra(module_id_t module_id, nr_mac_ra_start_cause_t cause)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2181,6 +2441,11 @@ void nr_rrc_mac_start_ra(module_id_t module_id, nr_mac_ra_start_cause_t cause)
 }
 
 /* Log every broadcast SearchSpace separately: timing and type remain attached to its candidates. */
+/* log_sib1_pdcch_search_spaces: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2270.
+ */
 static void log_sib1_pdcch_search_spaces(const NR_PDCCH_ConfigCommon_t *pcc)
 {
   static unsigned seq;
@@ -2247,6 +2512,11 @@ static void log_sib1_pdcch_search_spaces(const NR_PDCCH_ConfigCommon_t *pcc)
  * Every conversion below mirrors nr_ue_dci_configuration.c's own CORESET decoding (the canonical
  * one) so a consumer can use these values directly as fapi_nr_coreset_t fields. This is the COMMON
  * CORESET, so it is a prioritised HYPOTHESIS for the dedicated one, never an answer. */
+/* publish_sib1_pdcch_prior: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2620.
+ */
 static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_ServingCellConfigCommonSIB_t *scc)
 {
   if (scc == NULL) {
@@ -2384,6 +2654,11 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
  * would incorrectly promote the scan center to the actual carrier center.
  * The supervisor derives Point A and restarts with the broadcast geometry.
  * In capture mode the same event revalidates the handoff before declaring LIVE. */
+/* passive_acquisition_sib1: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_ACQ_PROBE, ISAC_ACQ_SIB1, ISAC_ACQ_UNSUPPORTED, ISAC_AUTO_ACQUIRE.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:2643.
+ */
 static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommonSIB_t *scc)
 {
   const char *automatic = getenv("ISAC_AUTO_ACQUIRE");
@@ -2562,6 +2837,11 @@ uint32_t nr_passive_sib1_semantic_hash(const NR_SIB1_t *sib1, uint16_t pci)
   return h;
 }
 
+/* nr_rrc_mac_config_req_sib1: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h:11, openair2/LAYER2/NR_MAC_UE/mac_proto.h:72, openair2/RRC/NR_UE/L2_interface_ue.c:137.
+ */
 void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *sib1, bool can_start_ra)
 {
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_ignore_sib1()) return;
@@ -2748,6 +3028,11 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* nr_rrc_mac_config_other_sib: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:77, openair2/RRC/NR_UE/L2_interface_ue.c:141.
+ */
 void nr_rrc_mac_config_other_sib(module_id_t module_id, NR_SIB19_r17_t *sib19, int hfn, int frame, bool can_start_ra)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2767,6 +3052,11 @@ void nr_rrc_mac_config_other_sib(module_id_t module_id, NR_SIB19_r17_t *sib19, i
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* handle_reconfiguration_with_sync: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3604.
+ */
 static void handle_reconfiguration_with_sync(NR_UE_MAC_INST_t *mac,
                                              int cc_idP,
                                              int hfn,
@@ -2831,6 +3121,11 @@ static void handle_reconfiguration_with_sync(NR_UE_MAC_INST_t *mac,
   mac->if_module->synch_request(&mac->synch_request);
 }
 
+/* configure_physicalcellgroup: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3596.
+ */
 static void configure_physicalcellgroup(NR_UE_MAC_INST_t *mac,
                                         const NR_PhysicalCellGroupConfig_t *phyConfig)
 {
@@ -2846,6 +3141,11 @@ static void configure_physicalcellgroup(NR_UE_MAC_INST_t *mac,
     mac->p_Max_alt = p_UE_FR1 == NULL ? *p_NR_FR1 : (*p_UE_FR1 < *p_NR_FR1 ? *p_UE_FR1 : *p_NR_FR1);
 }
 
+/* get_sr_DelayTimer: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3089.
+ */
 static uint32_t get_sr_DelayTimer(long logicalChannelSR_DelayTimer)
 {
   uint32_t timer = 0;
@@ -2877,6 +3177,11 @@ static uint32_t get_sr_DelayTimer(long logicalChannelSR_DelayTimer)
   return timer;
 }
 
+/* nr_get_sf_retxBSRTimer: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3086.
+ */
 static uint32_t nr_get_sf_retxBSRTimer(long retxBSR_Timer)
 {
   uint32_t timer = 0;
@@ -2920,6 +3225,11 @@ static uint32_t nr_get_sf_retxBSRTimer(long retxBSR_Timer)
   return timer;
 }
 
+/* nr_get_sf_periodicBSRTimer: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3082.
+ */
 static uint32_t nr_get_sf_periodicBSRTimer(long periodicBSR)
 {
   uint32_t timer = 0;
@@ -2978,6 +3288,11 @@ static uint32_t nr_get_sf_periodicBSRTimer(long periodicBSR)
   return timer;
 }
 
+/* get_data_inactivity_timer: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3144.
+ */
 static uint32_t get_data_inactivity_timer(long setup)
 {
   uint32_t timer_s = 0;
@@ -3036,6 +3351,11 @@ static uint32_t get_data_inactivity_timer(long setup)
   return timer_s;
 }
 
+/* configure_maccellgroup: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3614.
+ */
 static void configure_maccellgroup(NR_UE_MAC_INST_t *mac, const NR_MAC_CellGroupConfig_t *mcg)
 {
   NR_UE_SCHEDULING_INFO *si = &mac->scheduling_info;
@@ -3148,6 +3468,11 @@ static void configure_maccellgroup(NR_UE_MAC_INST_t *mac, const NR_MAC_CellGroup
   }
 }
 
+/* configure_csirs_resource: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void configure_csirs_resource(NR_NZP_CSI_RS_Resource_t *target, NR_NZP_CSI_RS_Resource_t *source)
 {
   configure_csi_resourcemapping(&target->resourceMapping, &source->resourceMapping);
@@ -3160,6 +3485,11 @@ static void configure_csirs_resource(NR_NZP_CSI_RS_Resource_t *target, NR_NZP_CS
     UPDATE_IE(target->qcl_InfoPeriodicCSI_RS, source->qcl_InfoPeriodicCSI_RS, NR_TCI_StateId_t);
 }
 
+/* configure_csiim_resource: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void configure_csiim_resource(NR_CSI_IM_Resource_t *target, NR_CSI_IM_Resource_t *source)
 {
   if (source->csi_IM_ResourceElementPattern)
@@ -3172,6 +3502,11 @@ static void configure_csiim_resource(NR_CSI_IM_Resource_t *target, NR_CSI_IM_Res
     UPDATE_IE(target->periodicityAndOffset, source->periodicityAndOffset, NR_CSI_ResourcePeriodicityAndOffset_t);
 }
 
+/* modify_csi_measconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3308.
+ */
 static void modify_csi_measconfig(NR_CSI_MeasConfig_t *source, NR_CSI_MeasConfig_t *target)
 {
   if (source->reportTriggerSize)
@@ -3283,6 +3618,11 @@ static void modify_csi_measconfig(NR_CSI_MeasConfig_t *source, NR_CSI_MeasConfig
   }
 }
 
+/* configure_csiconfig: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3323.
+ */
 static void configure_csiconfig(NR_UE_ServingCell_Info_t *sc_info,
                                 struct NR_SetupRelease_CSI_MeasConfig *csi_MeasConfig_sr,
                                 module_id_t ue_id)
@@ -3316,6 +3656,11 @@ static void configure_csiconfig(NR_UE_ServingCell_Info_t *sc_info,
   }
 }
 
+/* configure_servingcell_info: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3608.
+ */
 static void configure_servingcell_info(NR_UE_MAC_INST_t *mac, NR_ServingCellConfig_t *scd)
 {
   NR_UE_ServingCell_Info_t *sc_info = &mac->sc_info;
@@ -3419,6 +3764,11 @@ static void configure_servingcell_info(NR_UE_MAC_INST_t *mac, NR_ServingCellConf
 }
 
 /// This function implements 38.331 Section 5.3.12: UE actions upon PUCCH/SRS release request
+/* release_PUCCH_SRS: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:245, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:137, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:1370.
+ */
 void release_PUCCH_SRS(NR_UE_MAC_INST_t *mac)
 {
   // release PUCCH-CSI-Resources configured in CSI-ReportConfig
@@ -3461,6 +3811,11 @@ void release_PUCCH_SRS(NR_UE_MAC_INST_t *mac)
   }
 }
 
+/* release_dl_BWP: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3508, openair2/LAYER2/NR_MAC_UE/mac_proto.h:55, openair2/LAYER2/NR_MAC_UE/main_ue_nr.c:266, openair2/LAYER2/NR_MAC_UE/main_ue_nr.c:332.
+ */
 void release_dl_BWP(NR_UE_MAC_INST_t *mac, int index)
 {
   NR_UE_DL_BWP_t *bwp = mac->dl_BWPs.array[index];
@@ -3480,6 +3835,11 @@ void release_dl_BWP(NR_UE_MAC_INST_t *mac, int index)
     asn_sequence_del(&pdcch->list_SS, i - 1, 1);
 }
 
+/* release_ul_BWP: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3530, openair2/LAYER2/NR_MAC_UE/mac_proto.h:56, openair2/LAYER2/NR_MAC_UE/main_ue_nr.c:268, openair2/LAYER2/NR_MAC_UE/main_ue_nr.c:334.
+ */
 void release_ul_BWP(NR_UE_MAC_INST_t *mac, int index)
 {
   NR_UE_UL_BWP_t *bwp = mac->ul_BWPs.array[index];
@@ -3498,6 +3858,11 @@ void release_ul_BWP(NR_UE_MAC_INST_t *mac, int index)
   free(bwp);
 }
 
+/* configure_BWPs: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3609.
+ */
 static void configure_BWPs(NR_UE_MAC_INST_t *mac, NR_ServingCellConfig_t *scd)
 {
   configure_dedicated_BWP_dl(mac, 0, scd->initialDownlinkBWP);
@@ -3545,6 +3910,11 @@ static void configure_BWPs(NR_UE_MAC_INST_t *mac, NR_ServingCellConfig_t *scd)
   }
 }
 
+/* handle_mac_uecap_info: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/config_ue.c:3625.
+ */
 static void handle_mac_uecap_info(NR_UE_MAC_INST_t *mac, NR_UE_NR_Capability_t *ue_Capability)
 {
   if (!ue_Capability->featureSets)
@@ -3630,6 +4000,11 @@ void nr_rrc_mac_config_req_cg(module_id_t module_id,
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* nr_rrc_mac_config_req_meas: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:87, openair2/RRC/NR_UE/rrc_UE.c:1779.
+ */
 void nr_rrc_mac_config_req_meas(module_id_t module_id, const nr_neighbor_cell_info_t *neighbor_cells, int num_neighbors)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);

@@ -10,6 +10,11 @@ struct FakeGpu {
   int copies = 0, decodes = 0;
 };
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
+ */
 TEST(GpuFepHygiene, ExpiresWhileWaitingForWorker)
 {
   FakeGpu g;
@@ -45,6 +50,11 @@ TEST(GpuFepHygiene, ExpiresWhileWaitingForWorker)
   EXPECT_EQ(0, g.decodes);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
+ */
 TEST(GpuFepHygiene, ExpiresDuringSynchronousCopy)
 {
   FakeGpu g;
@@ -58,6 +68,11 @@ TEST(GpuFepHygiene, ExpiresDuringSynchronousCopy)
   EXPECT_EQ(0, g.decodes);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
+ */
 TEST(GpuFepHygiene, ToleranceGate)
 {
   EXPECT_TRUE(nr_gpu_fep_health_pass(0.9999, 0.99, 0.999, true));
@@ -70,6 +85,11 @@ TEST(GpuFepHygiene, ToleranceGate)
   EXPECT_TRUE(nr_gpu_fep_failure_disables(1));
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
+ */
 TEST(GpuFepHygiene, NotComparableIsSkipped)
 {
   for (bool llr : {false, true})
@@ -86,18 +106,33 @@ TEST(GpuFepHygiene, NotComparableIsSkipped)
   EXPECT_DOUBLE_EQ(1.0, nr_gpu_fep_sign_agreement(cpu2, weak, 3));
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
+ */
 TEST(GpuFepHygiene, ExpiredReferenceIsSkipped)
 {
   EXPECT_EQ(NR_GPU_FEP_SKIPPED, nr_gpu_fep_reference_result(108, 100, 10, true, 1, 1, 1, true));
   EXPECT_EQ(NR_GPU_FEP_FAIL, nr_gpu_fep_reference_result(107, 100, 10, true, 0, 1, 1, true));
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
+ */
 TEST(GpuFepHygiene, ObserveModeNeverDisables)
 {
   for (uint64_t failures = 0; failures < 10; ++failures)
     EXPECT_FALSE(nr_gpu_fep_should_disable(false, failures));
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
+ */
 TEST(GpuFepHygiene, EnforceModeDisablesAfterTwo)
 {
   EXPECT_FALSE(nr_gpu_fep_should_disable(true, 0));
@@ -106,6 +141,11 @@ TEST(GpuFepHygiene, EnforceModeDisablesAfterTwo)
 
 
 #include "nr_dl_gpu_budget.h"
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1248 more).
+ */
 TEST(GpuFepHygiene, CoherentTrafficBudgetHasNoCatchupBurst)
 {
   nr_dl_gpu_budget_t b{};
@@ -121,10 +161,25 @@ TEST(GpuFepHygiene, CoherentTrafficBudgetHasNoCatchupBurst)
 // Counting CUDA shim: the production fence must reject before invoking CUDA.
 enum { cudaSuccess = 0, cudaErrorNotReady = 34 };
 static int shim_calls;
+/* nr_gpu_allocate: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_fep_hygiene_test.cc:132, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_fep_hygiene_test.cc:136.
+ */
 static int nr_gpu_allocate(int, void **, size_t) { ++shim_calls; return cudaSuccess; }
 extern "C" int nr_gpu_allocation_guard() { return 1; }
+/* cudaStreamCreate: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_fep_hygiene_test.cc:133, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_fep_hygiene_test.cc:137.
+ */
 static int cudaStreamCreate(void **) { ++shim_calls; return cudaSuccess; }
 #include "nr_dl_gpu_memory.h"
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1247 more).
+ */
 TEST(GpuFepHygiene, SealedCudaFenceRejectsAllocationAndStreams)
 {
   void *p = nullptr;

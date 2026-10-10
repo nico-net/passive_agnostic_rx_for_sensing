@@ -32,6 +32,11 @@
 #define DCI11_RV_BITS     2
 #define DCI11_DMRS_INIT   1
 
+/* nr_dci11_layout_offsets: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:156, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:364, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:496, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:985 (+22 more).
+ */
 bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits,
                              nr_dci11_offsets_t *out)
 {
@@ -100,6 +105,11 @@ static const uint8_t kCbgFlush[]= {0, 1};                /* codeBlockGroupFlushI
  * distinct by construction (no O(n^2) search -- it cost 551 ms at 26.8k layouts), and in exactly the
  * order the per-switch nesting emitted (groups are independent and nested in the same order, and the
  * DM-RS type stays innermost). */
+/* push_distinct: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:124, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:129, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:138.
+ */
 static int push_distinct(uint8_t *v, int n, int cap, int x)
 {
   for (int i = 0; i < n; i++)
@@ -112,6 +122,11 @@ static int push_distinct(uint8_t *v, int n, int cap, int x)
 }
 
 /* Appends one FDRA mode's layouts to out[n..max). */
+/* enumerate_mode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:171, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:193.
+ */
 static int enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint8_t fdra_mode,
                           uint8_t n_rbg, nr_dci11_layout_t *out, int n, int max)
 {
@@ -162,6 +177,11 @@ static int enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed
   return n;
 }
 
+/* nr_dci11_layout_enumerate: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:362, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:120, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:49, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:68 (+7 more).
+ */
 int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
                               nr_dci11_layout_t *out, int max)
 {
@@ -173,6 +193,11 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
 
 /* N_RBG of a mode on this BWP, or -1 when the mode is not searched there: no RBG table entry, or
  * rbg-Size config2 with config1's RBG size (it reads exactly the same bits the same way). */
+/* mode_n_rbg: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:192.
+ */
 static int mode_n_rbg(int m, uint16_t bwp_start, uint16_t bwp_size)
 {
   if (m == NR_FDRA_TYPE1)
@@ -183,6 +208,11 @@ static int mode_n_rbg(int m, uint16_t bwp_start, uint16_t bwp_size)
   return nr_rbg_count(bwp_start, bwp_size, P);
 }
 
+/* nr_dci11_layout_enumerate_mode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.h:63, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:201, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:493, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:127 (+1 more).
+ */
 int nr_dci11_layout_enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
                                    uint16_t bwp_size, uint8_t fdra_mode, nr_dci11_layout_t *out, int max)
 {
@@ -193,6 +223,11 @@ int nr_dci11_layout_enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t
   return n_rbg < 0 ? 0 : enumerate_mode(riv_bits, tda_bits, observed_len, fdra_mode, (uint8_t)n_rbg, out, 0, max);
 }
 
+/* nr_dci11_layout_enumerate_fdra: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:117, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:130, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:932.
+ */
 int nr_dci11_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
                                    uint16_t bwp_start, uint16_t bwp_size, nr_dci11_layout_t *out, int max)
 {
@@ -208,6 +243,11 @@ int nr_dci11_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t
 }
 
 /* MSB-first field read, mirroring nr_pdcch_blind_monitor.c's read_field(). */
+/* peek: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:227, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:238, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:251, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:259 (+8 more).
+ */
 static uint32_t peek(nr_dci_bits_t payload, uint16_t total, uint16_t off, uint8_t nbits)
 {
   if (nbits == 0 || off + nbits > total) {
@@ -216,6 +256,11 @@ static uint32_t peek(nr_dci_bits_t payload, uint16_t total, uint16_t off, uint8_
   return nr_dci_bits_field(&payload, total, off, nbits);
 }
 
+/* nr_dci11_layout_plausible: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:730, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:136, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:271, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:103 (+16 more).
+ */
 bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, nr_dci_bits_t payload, uint16_t bwp_size)
 {
   if (off == NULL || bwp_size == 0) {
@@ -319,6 +364,11 @@ static bool hard_refute_enabled(void) /* read per observe(): one getenv per acce
 #define DCI11_S2_MIN_RATE   0.02
 
 /* Wilson score interval, same form nr_crc_interval uses, kept local so this file stays pure. */
+/* wilson: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:790, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:926, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:935.
+ */
 static void wilson(uint32_t ok, uint32_t n, double *lo, double *hi)
 {
   if (n == 0) {
@@ -336,6 +386,11 @@ static void wilson(uint32_t ok, uint32_t n, double *lo, double *hi)
   if (*hi > 1.0) *hi = 1.0;
 }
 
+/* nr_dci11_resolver_init_fdra: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1532, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:383, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:195, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:208 (+10 more).
+ */
 int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint16_t bwp_size, uint16_t riv_bits,
                                 uint8_t tda_bits, uint16_t observed_len)
 {
@@ -377,6 +432,11 @@ int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint
   return r->n_hyp;
 }
 
+/* nr_dci11_resolver_init: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:199, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:201, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:308, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:317 (+10 more).
+ */
 int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
                            uint8_t tda_bits, uint16_t observed_len)
 {
@@ -385,11 +445,21 @@ int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t r
 
 /* ANY pass -- its own feed(), a code-block probe, or its interpretation family's (a layout reading
  * identical fields decodes identically) -- means a layout is not refuted. */
+/* layout_has_pass: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:407, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:524, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:747, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:759 (+1 more).
+ */
 static bool layout_has_pass(const nr_dci11_resolver_t *r, int i)
 {
   return r->ok[i] || r->probe_ok[i] || r->fam_ok[r->layout_fam[i] % NR_DCI11_FAM_N];
 }
 
+/* nr_dci11_resolver_all_refuted: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1586, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:207, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:237, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:241 (+9 more).
+ */
 bool nr_dci11_resolver_all_refuted(const nr_dci11_resolver_t *r, uint32_t min_trials)
 {
   if (r == NULL || r->n_alive <= 0 || r->winner >= 0)
@@ -411,12 +481,22 @@ bool nr_dci11_resolver_all_refuted(const nr_dci11_resolver_t *r, uint32_t min_tr
   return tr >= (uint64_t)min_trials * (uint64_t)r->n_alive;
 }
 
+/* nr_dci11_fdra_stage: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:214, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:749, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:758, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:764 (+3 more).
+ */
 int nr_dci11_fdra_stage(uint8_t fdra_mode)
 {
   static const int8_t stage[5] = {0, 1, 4, 2, 3}; /* see kArmOrder */
   return fdra_mode <= NR_FDRA_DYN_CFG2 ? stage[fdra_mode] : -1;
 }
 
+/* nr_dci11_resolver_disarm: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1575, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:508, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:219, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:1015 (+1 more).
+ */
 int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx)
 {
   if (r == NULL)
@@ -441,6 +521,11 @@ int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx)
 
 /* Append entries at n_hyp and publish them with one release store: readers on other threads walk
  * [0, n_hyp) and must never see a half-written entry. */
+/* append_offsets: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:467, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:501.
+ */
 static int append_offsets(nr_dci11_resolver_t *r, const nr_dci11_layout_t *hyp, const nr_dci11_offsets_t *off, int n)
 {
   const int base = r->n_hyp;
@@ -460,6 +545,11 @@ static int append_offsets(nr_dci11_resolver_t *r, const nr_dci11_layout_t *hyp, 
   return k;
 }
 
+/* nr_dci_resolver_append_offsets: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1329, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:255, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci01_layout_sweep_test.cc:210.
+ */
 int nr_dci_resolver_append_offsets(nr_dci11_resolver_t *r, const nr_dci11_offsets_t *offsets, int n)
 {
   if (r == NULL || offsets == NULL || n <= 0 || r->n_hyp <= 0)
@@ -473,6 +563,11 @@ int nr_dci_resolver_append_offsets(nr_dci11_resolver_t *r, const nr_dci11_offset
 static const uint8_t kArmOrder[NR_DCI11_FDRA_STAGES] = {NR_FDRA_TYPE1, NR_FDRA_TYPE0_CFG1, NR_FDRA_DYN_CFG1,
                                                         NR_FDRA_DYN_CFG2, NR_FDRA_TYPE0_CFG2};
 
+/* nr_dci11_resolver_arm_next_mode: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1588, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:352, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:375, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:763 (+13 more).
+ */
 int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added)
 {
   if (added)
@@ -530,6 +625,11 @@ int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added)
   return armed;
 }
 
+/* nr_dci_resolver_init_from_offsets: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1382, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.h:59, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:252, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:262 (+7 more).
+ */
 int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
                                       const nr_dci11_offsets_t *offsets, int n)
 {
@@ -565,6 +665,11 @@ int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
 #define DCI11_S1_DIST_GAP   0.5    /* bits per payload behind the best */
 #define DCI11_S1_KEEP_MIN   4
 
+/* hist_field: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:592, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:593, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:595, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:598.
+ */
 static void hist_field(const uint32_t *h, int k, uint32_t n, double *bits)
 {
   if (k <= 1 || n == 0)
@@ -582,6 +687,11 @@ static void hist_field(const uint32_t *h, int k, uint32_t n, double *bits)
   *bits += (double)n * (log2((double)k) - H);
 }
 
+/* nr_dci11_resolver_score: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1158, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:637, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:289, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:547 (+1 more).
+ */
 double nr_dci11_resolver_score(const nr_dci11_resolver_t *r, int i)
 {
   if (r == NULL || i < 0 || i >= r->n_hyp)
@@ -599,6 +709,11 @@ double nr_dci11_resolver_score(const nr_dci11_resolver_t *r, int i)
   return bits;
 }
 
+/* nr_dci11_resolver_set_tda_count: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1396, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1545, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:181, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:284 (+2 more).
+ */
 void nr_dci11_resolver_set_tda_count(nr_dci11_resolver_t *r, uint8_t tda_count)
 {
   if (r == NULL)
@@ -609,6 +724,11 @@ void nr_dci11_resolver_set_tda_count(nr_dci11_resolver_t *r, uint8_t tda_count)
                               ? tda_count : 0;
 }
 
+/* hist_observe: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:729.
+ */
 static void hist_observe(nr_dci11_resolver_t *r, int i, nr_dci_bits_t payload)
 {
   const nr_dci11_offsets_t *o = &r->off[i];
@@ -621,12 +741,22 @@ static void hist_observe(nr_dci11_resolver_t *r, int i, nr_dci_bits_t payload)
     r->hist[i][52 + (peek(payload, o->total, o->ant_ports, (uint8_t)apb) & 63)]++;
 }
 
+/* cmp_desc: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int cmp_desc(const void *a, const void *b)
 {
   const double x = *(const double *)a, y = *(const double *)b;
   return (x < y) - (x > y);
 }
 
+/* prune_by_distribution: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:797.
+ */
 static void prune_by_distribution(nr_dci11_resolver_t *r)
 {
   static double score[NR_DCI11_LAYOUT_MAX];
@@ -664,16 +794,31 @@ static void prune_by_distribution(nr_dci11_resolver_t *r)
 }
 
 /* ---- Thompson sampling ------------------------------------------------------------------------ */
+/* ts_u: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:674, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:684.
+ */
 static double ts_u(uint64_t *s)
 {
   *s ^= *s >> 12; *s ^= *s << 25; *s ^= *s >> 27;
   return (double)((*s * 2685821657736338717ULL) >> 11) * (1.0 / 9007199254740992.0);
 }
+/* ts_n: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:682.
+ */
 static double ts_n(uint64_t *s)
 {
   const double u1 = ts_u(s) + 1e-300, u2 = ts_u(s);
   return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
 }
+/* ts_gamma: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:703.
+ */
 static double ts_gamma(double a, uint64_t *s)   /* Marsaglia-Tsang, a >= 1 */
 {
   const double d = a - 1.0 / 3.0, c = 1.0 / sqrt(9.0 * d);
@@ -688,6 +833,11 @@ static double ts_gamma(double a, uint64_t *s)   /* Marsaglia-Tsang, a >= 1 */
       return d * v;
   }
 }
+/* nr_dci11_thompson_pick: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8182, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:297, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:579, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:595.
+ */
 int nr_dci11_thompson_pick(const uint32_t *ok, const uint32_t *trials, const double *prior, int n,
                            uint64_t *rng)
 {
@@ -806,6 +956,11 @@ static bool harq_seq_enabled(void)
 }
 
 /* One window: does the 4-bit field at `at` read exactly one above its previous value (mod 16)? */
+/* harq_step: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:834, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:835.
+ */
 static int harq_step(nr_dci_bits_t prev, nr_dci_bits_t cur, uint16_t total, int at)
 {
   if (at < 0 || at + 4 > total)
@@ -863,6 +1018,11 @@ int nr_dci11_resolver_observe_rnti(nr_dci11_resolver_t *r, nr_dci_bits_t payload
   return r->n_alive;
 }
 
+/* nr_dci11_resolver_next: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:302, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci01_layout_sweep_test.cc:121, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci01_layout_sweep_test.cc:250, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:294 (+4 more).
+ */
 int nr_dci11_resolver_next(nr_dci11_resolver_t *r, nr_dci11_offsets_t *out)
 {
   if (r == NULL || out == NULL || r->n_hyp <= 0 || r->n_alive <= 0) {
@@ -885,6 +1045,11 @@ int nr_dci11_resolver_next(nr_dci11_resolver_t *r, nr_dci11_offsets_t *out)
   return -1;
 }
 
+/* nr_dci11_resolver_feed: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:306, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci01_layout_sweep_test.cc:124, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci01_layout_sweep_test.cc:252, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:297 (+3 more).
+ */
 int nr_dci11_resolver_feed(nr_dci11_resolver_t *r, int idx, bool tb_crc_ok)
 {
   if (r == NULL || idx < 0 || idx >= r->n_hyp) {
@@ -941,6 +1106,11 @@ int nr_dci11_resolver_feed(nr_dci11_resolver_t *r, int idx, bool tb_crc_ok)
   return leader;
 }
 
+/* nr_dci11_resolver_winner: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:309, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:300, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:398.
+ */
 int nr_dci11_resolver_winner(const nr_dci11_resolver_t *r)
 {
   return (r != NULL) ? r->winner : -1;
@@ -949,6 +1119,11 @@ int nr_dci11_resolver_winner(const nr_dci11_resolver_t *r)
 
 /* ---- handing a resolved layout back to the extractor ------------------------------------------ */
 
+/* nr_dci11_layout_to_field_bits: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1095, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1219, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1608, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1630 (+4 more).
+ */
 bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bits_t *out)
 {
   if (l == NULL || out == NULL) {
@@ -979,6 +1154,11 @@ bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bi
   return true;
 }
 
+/* nr_dci11_layout_apply_roundtrip: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:316, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h:336, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:431, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:451 (+2 more).
+ */
 bool nr_dci11_layout_apply_roundtrip(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits)
 {
   nr_dci11_offsets_t want;

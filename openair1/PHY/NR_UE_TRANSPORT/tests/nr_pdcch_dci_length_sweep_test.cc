@@ -44,6 +44,11 @@ extern "C" {
 // Standalone LOG/CONFIG_LIB linkage, matching the other PHY decoder tests.
 extern "C" {
 configmodule_interface_t *uniqCfg=nullptr;
+/* exit_function: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:9, common/config/yaml/tests/test_yaml_config.cpp:14, common/platform_types.h:302, common/platform_types.h:306 (+94 more).
+ */
 void exit_function(const char *file,const char *fn,int line,const char *message,int fatal) {
   if(message) fprintf(stderr,"%s:%d %s: %s\n",file,line,fn,message);
   if(fatal) abort();
@@ -55,12 +60,22 @@ namespace {
 // Deterministic, reproducible "1-in-256 chance pass" -- same formula the original test used, now
 // applied to a GLOBAL index (call count folded in) so repeated feed() calls don't replay the
 // identical trial_idx pattern and silently fail to accumulate anything new.
+/* chance_pass: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc:75, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc:84, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc:111, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc:129 (+2 more).
+ */
 bool chance_pass(uint32_t global_idx)
 {
   return (global_idx * 2654435761u) % 256 == 0;
 }
 } // namespace
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
+ */
 TEST(DciLengthSweep, PicksTheLengthWithVaryingPayloadsAndBootstrapHits)
 {
   // Single occasion, generous trial count: length 47 varies and hits the bootstrap RNTI on 1/5
@@ -92,6 +107,11 @@ TEST(DciLengthSweep, PicksTheLengthWithVaryingPayloadsAndBootstrapHits)
   EXPECT_EQ(best, 47);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
+ */
 TEST(DciLengthSweep, RejectsAnInvariantPayloadDespiteMatchingTheBootstrapRnti)
 {
   // Regression guard for the exact trap this project has already hit: length 39 matches the
@@ -118,6 +138,11 @@ TEST(DciLengthSweep, RejectsAnInvariantPayloadDespiteMatchingTheBootstrapRnti)
   EXPECT_NE(best, 39);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
+ */
 TEST(DciLengthSweep, ReturnsMinusOneWhenNoLengthClearsSignificanceYet)
 {
   // A scorer where NOTHING is ever real -- every length is pure chance noise, and only a handful
@@ -135,6 +160,11 @@ TEST(DciLengthSweep, ReturnsMinusOneWhenNoLengthClearsSignificanceYet)
   EXPECT_EQ(best, -1);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
+ */
 TEST(DciLengthSweep, PeerLengthMemoryStillProbesEveryOtherWidth)
 {
   struct Visits {
@@ -162,6 +192,11 @@ TEST(DciLengthSweep, PeerLengthMemoryStillProbesEveryOtherWidth)
   EXPECT_EQ(visits.seen[2], 1);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
+ */
 TEST(DciLengthSweep, AccumulatesAcrossManyOccasionsToFindARealButSparseLength)
 {
   // The scenario this rewrite exists for: length 47 is genuinely real but only decodes on ~8% of
@@ -202,6 +237,11 @@ TEST(DciLengthSweep, AccumulatesAcrossManyOccasionsToFindARealButSparseLength)
   EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&one_shot, &Fixture::decode, &one_call, 20, 30, 70, 0), -1);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
+ */
 TEST(DciLengthSweep, RejectsTheMeasuredSingleOccasionFalseLock)
 {
   // MEASURED 2026-09-19, Salt macro: length 42 locked from ONE occasion (~56 trials) with no
@@ -220,6 +260,11 @@ TEST(DciLengthSweep, RejectsTheMeasuredSingleOccasionFalseLock)
   EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, structured, nullptr, 56, 30, 63, 0), -1);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
+ */
 TEST(DciLengthSweep, ASingleBootstrapHitIsNotEnough)
 {
   // A chance match on a known 16-bit value is 2^-24 per trial, but a CORESET walk runs ~29k
@@ -235,6 +280,11 @@ TEST(DciLengthSweep, ASingleBootstrapHitIsNotEnough)
   EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, one_hit, nullptr, 56, 30, 63, 0x4601), -1);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1248 more).
+ */
 TEST(DciLengthSweep, FixedFloorWouldFalseTriggerButScaledTestDoesNot)
 {
   // The regression this rewrite specifically guards: at this project's own measured ~1/256
@@ -264,6 +314,11 @@ TEST(DciLengthSweep, FixedFloorWouldFalseTriggerButScaledTestDoesNot)
   EXPECT_EQ(best, -1);
 }
 
+/* main: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char** argv)
 {
   testing::InitGoogleTest(&argc, argv);
@@ -273,10 +328,20 @@ int main(int argc, char** argv)
   return rc;
 }
 
+/* independent_length: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static bool independent_length(int len,int trial,uint16_t *rnti,uint32_t *hash,void *ctx) {
   if(len!=*static_cast<int*>(ctx)) return false;
   *rnti=0x1234; *hash=trial; return true;
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1247 more).
+ */
 TEST(NrPdcchDciLengthSweep, IndependentStatesAndReset) {
   nr_pdcch_dci_length_sweep_state_t dl{},ul{};
   int dl_length=47,ul_length=43;
@@ -291,6 +356,11 @@ TEST(NrPdcchDciLengthSweep, IndependentStatesAndReset) {
   EXPECT_EQ(dl.passes[43],0);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1246 more).
+ */
 TEST(DciLengthBank, InterleavedUesKeepDifferentLengthsAndBudgets) {
   nr_pdcch_dci_length_bank_t bank{};
   for(int occasion=0;occasion<20;++occasion)
@@ -312,6 +382,11 @@ TEST(DciLengthBank, InterleavedUesKeepDifferentLengthsAndBudgets) {
   EXPECT_EQ(nr_pdcch_dci_length_context(&bank,102,0x3002)->found[0],0);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_RECONF_N_SUSPECT.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1245 more).
+ */
 TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
   unsetenv("ISAC_RECONF_N_SUSPECT");
   EXPECT_EQ(nr_pdcch_dci_length_n_suspect_from_env(),200u);
@@ -331,6 +406,11 @@ TEST(DciLengthBank, LockedToSuspectAfterNMisses) {
   unsetenv("ISAC_RECONF_N_SUSPECT");
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1244 more).
+ */
 TEST(DciLengthBank, InactiveRntiNeverSuspect) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_lock(&c,47);
@@ -340,6 +420,11 @@ TEST(DciLengthBank, InactiveRntiNeverSuspect) {
   EXPECT_EQ(c.miss_occasions,0u);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1243 more).
+ */
 TEST(DciLengthBank, SuspectWithoutCoreset0Evidence) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_lock(&c,47);
@@ -348,6 +433,11 @@ TEST(DciLengthBank, SuspectWithoutCoreset0Evidence) {
   EXPECT_EQ(c.len_state,NR_LEN_SUSPECT);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1242 more).
+ */
 TEST(DciLengthBank, Coreset0AcceptCountsWhenAvailable) {
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
   constexpr uint16_t rnti = 0x4601;
@@ -367,6 +457,11 @@ TEST(DciLengthBank, Coreset0AcceptCountsWhenAvailable) {
   EXPECT_EQ(c.len_state, NR_LEN_SUSPECT);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1241 more).
+ */
 TEST(DciLengthBank, RelockSameLengthReturnsLocked) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_lock(&c,47);
@@ -383,6 +478,11 @@ TEST(DciLengthBank, RelockSameLengthReturnsLocked) {
   EXPECT_EQ(c.miss_occasions,0u);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1240 more).
+ */
 TEST(DciLengthBank, RelockDifferentLengthReplaces) {
   nr_pdcch_dci_length_context_t c{};
   c.rnti=0x1234;
@@ -402,6 +502,11 @@ TEST(DciLengthBank, RelockDifferentLengthReplaces) {
   EXPECT_EQ(c.len_state,NR_LEN_LOCKED);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1239 more).
+ */
 TEST(DciLengthBank, RelockOrderOldFirst) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_lock(&c,47);
@@ -416,6 +521,11 @@ TEST(DciLengthBank, RelockOrderOldFirst) {
   EXPECT_EQ(order[3],30);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1238 more).
+ */
 TEST(DciLengthBank, SecondLengthAdded) {
   nr_pdcch_dci_length_context_t c{};
   EXPECT_EQ(nr_pdcch_dci_length_context_add(&c,47,1),0);
@@ -424,6 +534,11 @@ TEST(DciLengthBank, SecondLengthAdded) {
   EXPECT_EQ(c.found[1],52);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1237 more).
+ */
 TEST(DciLengthBank, ThirdLengthReplacesLeastRecent) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_add(&c,47,1);
@@ -434,6 +549,11 @@ TEST(DciLengthBank, ThirdLengthReplacesLeastRecent) {
   EXPECT_EQ(c.found[1],58);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1236 more).
+ */
 TEST(DciLengthBank, LayoutPinPerLength) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_add(&c,47,1);
@@ -452,6 +572,11 @@ TEST(DciLengthBank, LayoutPinPerLength) {
   EXPECT_EQ(nr_pdcch_dci_length_context_pin(&c,52),nullptr);
   EXPECT_FALSE(nr_dci11_pin_is_valid(nr_pdcch_dci_length_context_pin(&c,58)));
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1235 more).
+ */
 TEST(DciLengthBank, FirstConvergenceSeedsExistingAndNewPeersWithoutPublishing) {
   nr_pdcch_dci_length_bank_t bank{};
   auto *first=nr_pdcch_dci_length_context(&bank,8,0x1001);
@@ -470,6 +595,11 @@ TEST(DciLengthBank, FirstConvergenceSeedsExistingAndNewPeersWithoutPublishing) {
   EXPECT_EQ(new_peer->state.preferred_len,39);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1234 more).
+ */
 TEST(DciLengthBank, EvictionAndInvalidKeysDoNotInventEvidence) {
   nr_pdcch_dci_length_bank_t bank{};
   for(int u=1;u<=NR_PDCCH_LENGTH_CONTEXTS+1;++u)
@@ -500,6 +630,11 @@ struct RotProbe {
 int RotProbe::visits[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
 } // namespace
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1233 more).
+ */
 TEST(DciLengthSweepRotation, EveryLengthIsVisitedOncePerRoundAndNoneIsStarved)
 {
   for (int stride : {1, 8, 34}) {
@@ -520,6 +655,11 @@ TEST(DciLengthSweepRotation, EveryLengthIsVisitedOncePerRoundAndNoneIsStarved)
   }
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1232 more).
+ */
 TEST(DciLengthSweepRotation, PerLengthTrialBudgetIsIdenticalToTheUnrotatedSweep)
 {
   // The invariant the give-up cap depends on: at the moment occasions_fed hits the caller's cap,
@@ -569,6 +709,11 @@ struct RecurrentFixture {
 };
 } // namespace
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1231 more).
+ */
 TEST(DciLengthSweepRntiRecurrence, FiveDistinctPayloadsLockWithoutBootstrapOrStatisticalFloor)
 {
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -582,6 +727,11 @@ TEST(DciLengthSweepRntiRecurrence, FiveDistinctPayloadsLockWithoutBootstrapOrSta
   EXPECT_EQ(state.max_rnti_distinct[46], 5);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1230 more).
+ */
 TEST(DciLengthSweepRntiRecurrence, InvariantPayloadNeverLocks)
 {
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -591,6 +741,11 @@ TEST(DciLengthSweepRntiRecurrence, InvariantPayloadNeverLocks)
   EXPECT_EQ(state.max_rnti_distinct[46], 1);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1229 more).
+ */
 TEST(DciLengthSweepRntiRecurrence, FourDistinctPayloadsAreInsufficient)
 {
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -600,6 +755,11 @@ TEST(DciLengthSweepRntiRecurrence, FourDistinctPayloadsAreInsufficient)
   EXPECT_EQ(state.max_rnti_distinct[46], 4);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1228 more).
+ */
 TEST(DciLengthSweepRntiRecurrence, ManyOneOffRntisDoNotLock)
 {
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -611,6 +771,11 @@ TEST(DciLengthSweepRntiRecurrence, ManyOneOffRntisDoNotLock)
 }
 
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1227 more).
+ */
 TEST(DciLengthStore, InterleavedCoresetsAndRntisKeepIndependentEvidence)
 {
   nr_pdcch_dci_length_store_t store{};
@@ -636,6 +801,11 @@ TEST(DciLengthStore, InterleavedCoresetsAndRntisKeepIndependentEvidence)
 }
 
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1226 more).
+ */
 TEST(DciLengthStore, PrimaryPlusSixteenLookaheadGeometriesRetainEvidence)
 {
   nr_pdcch_dci_length_store_t store{};
@@ -655,6 +825,11 @@ TEST(DciLengthStore, PrimaryPlusSixteenLookaheadGeometriesRetainEvidence)
   }
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1225 more).
+ */
 TEST(DciLengthStore, LruEvictionClearsRatherThanAliasesEvidence)
 {
   nr_pdcch_dci_length_store_t store{};
@@ -675,6 +850,11 @@ TEST(DciLengthStore, LruEvictionClearsRatherThanAliasesEvidence)
             1u);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1224 more).
+ */
 TEST(DciLengthSweep, LocksLength100) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(100);
@@ -693,6 +873,11 @@ TEST(DciLengthSweep, LocksLength100) {
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_RECONF.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1223 more).
+ */
 TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
@@ -715,6 +900,11 @@ TEST(DciLengthSweep, SeenLengthFirstOutwardOrder) {
   }()), ::testing::ExitedWithCode(0), "");
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_RECONF.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1222 more).
+ */
 TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
@@ -758,6 +948,11 @@ TEST(DciLengthSweep, SeenOrderSurvivesBudgetResumeAndNewHints) {
   }()), ::testing::ExitedWithCode(0), "");
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_RECONF.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1221 more).
+ */
 TEST(DciLengthSweep, DefaultOrderIsAscending) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
@@ -770,6 +965,11 @@ TEST(DciLengthSweep, DefaultOrderIsAscending) {
   }()), ::testing::ExitedWithCode(0), "");
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1220 more).
+ */
 TEST(DciLengthSweep, ColdRoundStaysNarrowAcrossStrideAndBudget) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -788,6 +988,11 @@ TEST(DciLengthSweep, ColdRoundStaysNarrowAcrossStrideAndBudget) {
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1219 more).
+ */
 TEST(DciLengthSweep, ColdRangeEnablesProbesAfterEveryStageOneLengthHasEnoughTrials) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -806,6 +1011,11 @@ TEST(DciLengthSweep, ColdRangeEnablesProbesAfterEveryStageOneLengthHasEnoughTria
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1218 more).
+ */
 TEST(DciLengthSweep, ExhaustedStage1ProbesWideAtLowDuty) {
   nr_pdcch_dci_length_seen_reset();
   for (int stride : {1, 8, 34}) {
@@ -826,6 +1036,11 @@ TEST(DciLengthSweep, ExhaustedStage1ProbesWideAtLowDuty) {
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1217 more).
+ */
 TEST(DciLengthSweep, WideProbeFindsLength100) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -851,6 +1066,11 @@ TEST(DciLengthSweep, WideProbeFindsLength100) {
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1216 more).
+ */
 TEST(DciLengthSweep, LanesNeverBatchFullWideRangeWithoutEvidence) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -879,6 +1099,11 @@ TEST(DciLengthSweep, LanesNeverBatchFullWideRangeWithoutEvidence) {
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_DCI_LEN_MAX, ISAC_DCI_WIDE_PROBE_EVERY.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1215 more).
+ */
 TEST(DciLengthSweep, WideProbeCadenceFromEnv) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
@@ -902,6 +1127,11 @@ TEST(DciLengthSweep, WideProbeCadenceFromEnv) {
   }()), ::testing::ExitedWithCode(0), "");
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1214 more).
+ */
 TEST(DciLengthSweep, WideProbesRespectBudgetAndNarrowResume) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_sweep_state_t state{};
@@ -920,6 +1150,11 @@ TEST(DciLengthSweep, WideProbesRespectBudgetAndNarrowResume) {
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1213 more).
+ */
 TEST(DciLengthSweep, SeenWideLengthWidensImmediately) {
   nr_pdcch_dci_length_seen_reset();
   nr_pdcch_dci_length_note_seen(100);
@@ -930,6 +1165,11 @@ TEST(DciLengthSweep, SeenWideLengthWidensImmediately) {
   nr_pdcch_dci_length_seen_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_DCI_LEN_MAX.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1212 more).
+ */
 TEST(DciLengthSweep, ExplicitMaximumEnablesColdWideRound) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   EXPECT_EXIT(([]{
@@ -943,6 +1183,11 @@ TEST(DciLengthSweep, ExplicitMaximumEnablesColdWideRound) {
   }()), ::testing::ExitedWithCode(0), "");
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1211 more).
+ */
 TEST(DciLengthBank, IdleThenUlResumeStaysLocked) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_lock(&c,47);
@@ -955,6 +1200,11 @@ TEST(DciLengthBank, IdleThenUlResumeStaysLocked) {
   EXPECT_EQ(c.miss_occasions,0u);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1210 more).
+ */
 TEST(DciLengthBank, RelockPreservesSamePinAndClearsReplacedPin) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_add(&c,47,1);
@@ -973,6 +1223,11 @@ TEST(DciLengthBank, RelockPreservesSamePinAndClearsReplacedPin) {
   EXPECT_EQ(c.layout_pin[1].layout,9);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1209 more).
+ */
 TEST(DciLengthBank, RelockToSecondLengthDeduplicatesAndKeepsItsPin) {
   nr_pdcch_dci_length_context_t c{};
   nr_pdcch_dci_length_context_add(&c,47,1);
@@ -989,6 +1244,11 @@ TEST(DciLengthBank, RelockToSecondLengthDeduplicatesAndKeepsItsPin) {
   EXPECT_FALSE(nr_dci11_pin_is_valid(&c.layout_pin[1]));
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1208 more).
+ */
 TEST(DciLengthSweep, SecondLengthExcludesFallback) {
   nr_pdcch_dci_length_sweep_state_t state{};
   state.excluded_len=47;
@@ -1010,6 +1270,11 @@ TEST(DciLengthSweep, SecondLengthExcludesFallback) {
   EXPECT_EQ(found,58);
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1207 more).
+ */
 TEST(DciLengthBank, ScoutDutyUsesOccasionsNotSlotPhase) {
   nr_pdcch_dci_length_bank_t bank{};
   int due=0;
@@ -1019,9 +1284,19 @@ TEST(DciLengthBank, ScoutDutyUsesOccasionsNotSlotPhase) {
 }
 
 static nr_pdcch_dci_length_store_t *epoch_store;
+/* length_epoch_test_listener: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void length_epoch_test_listener(const nr_cfg_epoch_snapshot_t *s) {
   nr_pdcch_dci_length_store_epoch(epoch_store, s);
 }
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1206 more).
+ */
 TEST(DciLengthEpoch, DedicatedChangeReverifiesLengthsAndTd) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
   nr_cfg_epoch_reset();
@@ -1049,6 +1324,11 @@ TEST(DciLengthEpoch, DedicatedChangeReverifiesLengthsAndTd) {
   nr_cfg_epoch_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1205 more).
+ */
 TEST(DciLengthEpoch, HardResetNeverReusesOldIdentityState) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
   nr_cfg_epoch_reset();
@@ -1066,6 +1346,11 @@ TEST(DciLengthEpoch, HardResetNeverReusesOldIdentityState) {
   nr_cfg_epoch_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1204 more).
+ */
 TEST(DciLengthEpoch, ShortGapSoftDoesNotReverifyAll) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
   nr_cfg_epoch_reset();
@@ -1089,6 +1374,11 @@ TEST(DciLengthEpoch, ShortGapSoftDoesNotReverifyAll) {
   nr_cfg_epoch_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1203 more).
+ */
 TEST(DciLengthEpoch, LazyLookupCannotMissHardBeforeSoft) {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP();
   nr_cfg_epoch_reset();
@@ -1104,6 +1394,11 @@ TEST(DciLengthEpoch, LazyLookupCannotMissHardBeforeSoft) {
   nr_cfg_epoch_reset();
 }
 
+/* TEST: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1202 more).
+ */
 TEST(DciLengthSweep, PeerLengthHintIsOnlyFromOtherLockedRntis)
 {
   auto *bank = static_cast<nr_pdcch_dci_length_bank_t *>(calloc(1, sizeof(nr_pdcch_dci_length_bank_t)));

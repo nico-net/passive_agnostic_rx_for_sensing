@@ -78,6 +78,11 @@ static const unsigned int gain_table[31] = {100,  112,  126,  141,  158,  178,  
 
 static void nr_ue_prach_procedures(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, c16_t **txData);
 
+/* get_ssb_arfcn: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:147, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:811.
+ */
 static uint32_t get_ssb_arfcn(NR_DL_FRAME_PARMS *frame_parms)
 {
   uint32_t band_size_hz = frame_parms->N_RB_DL * 12 * frame_parms->subcarrier_spacing;
@@ -186,6 +191,11 @@ void nr_fill_rx_indication(fapi_nr_rx_indication_t *rx_ind,
   }
 }
 
+/* get_tx_amp_prach: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 int get_tx_amp_prach(int power_dBm, int power_max_dBm, int N_RB_UL){
 
   int gain_dB = power_dBm - power_max_dBm, amp_x_100 = -1;
@@ -229,6 +239,11 @@ int get_tx_amp_prach(int power_dBm, int power_max_dBm, int N_RB_UL){
 //   then timing advance is processed and set to be applied in the next UL transmission
 // - Application of timing adjustment according to TS 38.213 p4.2
 // - handle RAR TA application as per ch 4.2 TS 38.213
+/* ue_ta_procedures: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue.c:764, openair1/SCHED_NR_UE/defs.h:80, openair1/SCHED_NR_UE/fapi_nr_ue_l1.c:111.
+ */
 void ue_ta_procedures(PHY_VARS_NR_UE *ue, int slot_tx, int frame_tx)
 {
   if (frame_tx == ue->ta_frame && slot_tx == ue->ta_slot) {
@@ -258,6 +273,11 @@ void ue_ta_procedures(PHY_VARS_NR_UE *ue, int slot_tx, int frame_tx)
   }
 }
 
+/* configure_srs_info: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:337.
+ */
 static void configure_srs_info(const fapi_nr_ul_config_srs_pdu *srs_config_pdu, nr_srs_info_t *nr_srs_info)
 {
   nr_srs_info->B_SRS = srs_config_pdu->bandwidth_index;
@@ -349,6 +369,11 @@ void ue_srs_procedures_nr(PHY_VARS_NR_UE *ue,
                         // is a problem
 }
 
+/* phy_procedures_nrUE_TX: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue.c:576, openair1/SCHED_NR_UE/defs.h:66, openair1/SIMULATION/NR_PHY/ulsim.c:1434, openair1/SIMULATION/NR_PHY/ulsim_mu_mimo.c:1073.
+ */
 void phy_procedures_nrUE_TX(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_tx_t *phy_data, c16_t **txp)
 {
   const int slot_tx = proc->nr_slot_tx;
@@ -638,6 +663,11 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
   return 0;
 }
 
+/* nr_ue_csi_rm_unav_res: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2183, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2473.
+ */
 uint32_t nr_ue_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc)
 {
   uint32_t unav_res = 0;
@@ -801,6 +831,11 @@ static void nr_ue_dlsch_procedures(PHY_VARS_NR_UE *ue,
     memcpy(ue->phy_sim_dlsch_b, output, sizeof(output));
 }
 
+/* check_neighboring_cells_task: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2258, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2271.
+ */
 static bool check_neighboring_cells_task(PHY_VARS_NR_UE *ue, bool task_pending)
 {
   if (task_pending == true) {
@@ -823,6 +858,11 @@ static bool check_neighboring_cells_task(PHY_VARS_NR_UE *ue, bool task_pending)
   return has_intra_freq_neighbors;
 }
 
+/* is_ssb_index_transmitted: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:911.
+ */
 static bool is_ssb_index_transmitted(const PHY_VARS_NR_UE *ue, const int index)
 {
   if (ue->received_config_request) {
@@ -833,6 +873,11 @@ static bool is_ssb_index_transmitted(const PHY_VARS_NR_UE *ue, const int index)
     return ue->frame_parms.ssb_index == index;
 }
 
+/* get_pdcch_max_rbs: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:872.
+ */
 static int get_pdcch_max_rbs(NR_UE_PDCCH_CONFIG *phy_pdcch_config)
 {
   int nb_rb = 0;
@@ -846,6 +891,11 @@ static int get_pdcch_max_rbs(NR_UE_PDCCH_CONFIG *phy_pdcch_config)
   return nb_rb;
 }
 
+/* get_max_pdcch_symb: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:871.
+ */
 static int get_max_pdcch_symb(const NR_UE_PDCCH_CONFIG *phy_pdcch_config)
 {
   int max_pdcch_symb = 0;
@@ -856,6 +906,11 @@ static int get_max_pdcch_symb(const NR_UE_PDCCH_CONFIG *phy_pdcch_config)
   return max_pdcch_symb;
 }
 
+/* pdcch_processing: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: executables/nr-ue.c:717, openair1/SCHED_NR_UE/defs.h:69, openair1/SIMULATION/NR_PHY/dlsim.c:1384.
+ */
 void pdcch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data)
 {
   NR_UE_PDCCH_CONFIG *phy_pdcch_config = &phy_data->phy_pdcch_config;
@@ -925,6 +980,11 @@ int is_ssb_in_symbol(const PHY_VARS_NR_UE *ue,
   return false;
 }
 
+/* get_ssb_index_in_symbol: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:967.
+ */
 int get_ssb_index_in_symbol(const PHY_VARS_NR_UE *ue, const int symbIdxInFrame, const int slot, const int frame)
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -2109,6 +2169,11 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
   return sampleShift;
 }
 
+/* create_meas_task_args: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2260, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2274.
+ */
 static nr_meas_task_args_t *create_meas_task_args(const UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -2128,6 +2193,11 @@ static nr_meas_task_args_t *create_meas_task_args(const UE_nr_rxtx_proc_t *proc,
   return args;
 }
 
+/* pbch_processing: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: ISAC_PBCH_NO_TRACK, ISAC_PBCH_TRACK, ISAC_PHY_DIAG.
+ *   Callers: executables/nr-ue.c:716, openair1/SCHED_NR_UE/defs.h:68, openair1/SIMULATION/NR_PHY/dlsim.c:1383.
+ */
 int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data)
 {
   TracyCZone(ctx, true);
@@ -2547,6 +2617,11 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
 
 // todo:
 // - power control as per 38.213 ch 7.4
+/* nr_ue_prach_procedures: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:79, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:399.
+ */
 static void nr_ue_prach_procedures(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, c16_t **txData)
 {
   int gNB_id = proc->gNB_id;

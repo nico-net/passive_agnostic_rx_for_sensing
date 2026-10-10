@@ -8,6 +8,11 @@
 #include "PHY/INIT/nr_phy_init.h"
 #include "nr_transport_proto_ue.h"
 
+/* nr_ssb_rm_candidates: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2112, openair1/PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h:282, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:276.
+ */
 uint16_t nr_ssb_rm_candidates(const NR_DL_FRAME_PARMS *fp, int slot, int start_symbol, int nb_symbols)
 {
   // Only same-SCS, slot-contained SSB candidates are represented by this PHY.
@@ -34,6 +39,11 @@ uint16_t nr_ssb_rm_candidates(const NR_DL_FRAME_PARMS *fp, int slot, int start_s
   return candidates;
 }
 
+/* nr_ssb_rm_observe: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2145, openair1/PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h:284, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:277, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:499 (+1 more).
+ */
 nr_ssb_rm_event_t nr_ssb_rm_observe(const NR_DL_FRAME_PARMS *fp,
                                     int frame,
                                     int slot,
@@ -113,6 +123,11 @@ bool nr_ssb_rm_plan(const nr_ssb_rm_event_t *e,
   return true;
 }
 
+/* nr_ssb_rm_first_data_symbol: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3777, openair1/PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h:302, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:284.
+ */
 int nr_ssb_rm_first_data_symbol(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
                                 const freq_alloc_bitmap_t *fa,
                                 const nr_ssb_rm_plan_t *p)

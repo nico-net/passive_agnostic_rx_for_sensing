@@ -35,6 +35,11 @@
 //#define NR_CSIRS_DEBUG
 //#define NR_CSIIM_DEBUG
 
+/* nr_det_A_MF_2x2: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:505.
+ */
 void nr_det_A_MF_2x2(int32_t *a_mf_00,
                      int32_t *a_mf_01,
                      int32_t *a_mf_10,
@@ -73,6 +78,11 @@ void nr_det_A_MF_2x2(int32_t *a_mf_00,
   }
 }
 
+/* nr_squared_matrix_element: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:513, openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:514, openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:515, openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:516.
+ */
 void nr_squared_matrix_element(int32_t *a,
                                int32_t *a_sq,
                                const unsigned short nb_rb) {
@@ -85,6 +95,11 @@ void nr_squared_matrix_element(int32_t *a,
   }
 }
 
+/* nr_numer_2x2: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:517.
+ */
 void nr_numer_2x2(int32_t *a_00_sq,
                   int32_t *a_01_sq,
                   int32_t *a_10_sq,
@@ -108,6 +123,11 @@ void nr_numer_2x2(int32_t *a_00_sq,
   }
 }
 
+/* is_csi_rs_in_symbol: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:332, openair1/SCHED_NR_UE/defs.h:87, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2371, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2412.
+ */
 bool is_csi_rs_in_symbol(const fapi_nr_dl_config_csirs_pdu_rel15_t csirs_config_pdu, const int symbol) {
 
   bool ret = false;
@@ -240,6 +260,11 @@ static int nr_get_csi_rs_signal(const PHY_VARS_NR_UE *ue,
   return 0;
 }
 
+/* calc_power_csirs: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:403.
+ */
 uint32_t calc_power_csirs(const uint16_t *x, const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu)
 {
   uint64_t sum_x = 0;
@@ -750,6 +775,11 @@ static int nr_csi_rs_pmi_estimation(const PHY_VARS_NR_UE *ue,
   return 0;
 }
 
+/* nr_csi_rs_cqi_estimation: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:1206.
+ */
 int nr_csi_rs_cqi_estimation(const uint32_t precoded_sinr,
                              uint8_t *cqi) {
 
@@ -785,6 +815,11 @@ int nr_csi_rs_cqi_estimation(const uint32_t precoded_sinr,
   return 0;
 }
 
+/* nr_csi_im_power_estimation: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:936.
+ */
 static void nr_csi_im_power_estimation(const PHY_VARS_NR_UE *ue,
                                        const fapi_nr_dl_config_csiim_pdu_rel15_t *csiim_config_pdu,
                                        uint32_t *interference_plus_noise_power,
@@ -861,6 +896,11 @@ static void nr_csi_im_power_estimation(const PHY_VARS_NR_UE *ue,
 #endif
 }
 
+/* get_cfo: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:910.
+ */
 static double get_cfo(const double phase_diff, const int sym0, const int sym1, const NR_DL_FRAME_PARMS *fp)
 {
   const double one_fs = 1.0 / (fp->samples_per_frame * 100);
@@ -918,6 +958,11 @@ static void nr_ue_trs_processing(PHY_VARS_NR_UE *ue,
   }
 }
 
+/* nr_ue_csi_im_procedures: TODO(doc).
+ *   How it works: TODO(doc).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/SCHED_NR_UE/defs.h:119, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2357.
+ */
 void nr_ue_csi_im_procedures(PHY_VARS_NR_UE *ue,
                              const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                              const fapi_nr_dl_config_csiim_pdu_rel15_t *csiim_config_pdu)
