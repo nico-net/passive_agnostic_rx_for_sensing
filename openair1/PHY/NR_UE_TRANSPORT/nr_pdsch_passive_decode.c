@@ -741,7 +741,7 @@ static __thread int t_tinterp_override = -1;
  * on a CORESET of duration 1 loses the whole PRBs (12 REs, DM-RS included) of its own CCEs on symbol 0. Set only by the retry arm that
  * tries a hypothesised contiguous CRB range; consumed in passive_decode_body() through the SSB rate-matching plan (same per-symbol per-PRB
  * exclusion semantics). first_crb/last_crb are common RB indices. */
-static __thread struct { int on; int first_crb, last_crb; uint16_t symbols; } t_own_pdcch = {0, 0, 0, 0};
+static __thread struct { int on; int first_crb, last_crb; uint16_t symbols; uint8_t crb[275]; } t_own_pdcch = {0, 0, 0, 0, {0}};
 /* chest_tinterp_global: ISAC_CHEST_TINTERP != 0 (cached). The unflipped state of the time interpolation. */
 static int chest_tinterp_global(void)
 {
@@ -1337,7 +1337,7 @@ static uint64_t gw_fingerprint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *p, con
     GWFP(nr_dlsch_mrc_mode_override + 1); GWFP(nr_dlsch_irc_override + 1); } /* T26d: LLRs depend on the receiver */
   { extern __thread int nr_dlsch_qam_mode_override; GWFP(nr_dlsch_qam_mode_override + 1); } /* QAM-FIX A/B arm */
   GWFP(t_tinterp_override + 1); /* DECODE-RES: TINT A/B / retry arm changes the channel estimate */
-  GWFP(t_own_pdcch.on ? (uint64_t)(t_own_pdcch.first_crb + 1) * 4096u + (uint64_t)t_own_pdcch.last_crb + 1u : 0u); /* DECODE-RES own-PDCCH exclusion */
+  { uint64_t hh_ = 0; if (t_own_pdcch.on) for (int i_ = 0; i_ < 275; i_++) hh_ = hh_ * 1099511628211ull + t_own_pdcch.crb[i_] + 1; GWFP(hh_); } /* DECODE-RES own-PDCCH exclusion */
   GWFP(nr_dlsch_csi_rb_extent()); /* LOW-MCS: CSI-RS exclusion extent changes the RE set */
 #undef GWFP
   return h;
@@ -4990,13 +4990,47 @@ static nr_pdsch_passive_decode_status_t passive_decode_qamab(PHY_VARS_NR_UE *ue,
   return st;
 }
 
+static int s_scsi_on(void)
+{
+  static _Atomic int s = -1;
+  if (s < 0) s = getenv("ISAC_PDSCH_STATIC_CSI_RETRY") && atoi(getenv("ISAC_PDSCH_STATIC_CSI_RETRY")) ? 1 : 0;
+  return s;
+}
+/* static_csi_resources: DECODE-RES item 2. The full-band non-TRS CSI-RS measured on the PCI-415 carrier (tools/csirs_capture_map.py, CSIFULL.md section 1;
+ *   a network property, NOT a TS rule): at abs_slot % 160 == 24 symbols 10-13 subcarriers {0-3, 8-11}; == 63 symbols 10-13 subcarriers 4-11; == 105 symbols
+ *   10, 12, 13 subcarriers 0-3; == 135 symbol 7 subcarriers 4-7; all RBs. Expressed as row-4 (four contiguous REs, one symbol) zero-power resources, one per
+ *   (symbol, 4-RE block). Appends them to cfg->csiRsForRateMatching (up to the array capacity) and returns the number added; 0 for any other phase.
+ *   Caller: passive_decode_retry() (ISAC_PDSCH_STATIC_CSI_RETRY).
+ */
+static int static_csi_resources(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, long abs_slot)
+{
+  static const struct { int phase; uint16_t syms; uint8_t blocks; } pat[4] = {
+    {24, 0x3c00, 0x5}, {63, 0x3c00, 0x6}, {105, 0x3400, 0x1}, {135, 0x0080, 0x2}};
+  const int ph = (int)(((abs_slot % 160) + 160) % 160);
+  int added = 0;
+  for (int i = 0; i < 4; i++) {
+    if (pat[i].phase != ph) continue;
+    for (int sym = 0; sym < 14; sym++)
+      for (int b = 0; b < 3; b++) {
+        if (!((pat[i].syms >> sym) & 1) || !((pat[i].blocks >> b) & 1)) continue;
+        if (cfg->numCsiRsForRateMatching >= NFAPI_MAX_NUM_CSI_RATEMATCH) return added;
+        fapi_nr_dl_config_csirs_pdu_rel15_t *r = &cfg->csiRsForRateMatching[cfg->numCsiRsForRateMatching++];
+        memset(r, 0, sizeof(*r));
+        r->row = 4; r->freq_domain = (uint16_t)(1u << b); r->symb_l0 = (uint8_t)sym; r->symb_l1 = (uint8_t)sym;
+        r->freq_density = 2; r->start_rb = 0; r->nr_of_rbs = 273; r->csi_type = 2; r->cdm_type = 0;
+        added++;
+      }
+  }
+  return added;
+}
+
 /* own_pdcch_hypotheses: DECODE-RES. From the per-RB decision-directed error of one finished S=0 decode (nr_pdsch_evm_acc.err_rb: symbols 0, 1, 3),
  *   finds the PRBs of the allocation whose symbol 0 is worse than symbols 1/3 by more than ISAC_PDSCH_OWN_PDCCH_DB (default 4 dB): these carry the
  *   grant's own PDCCH (CCEs of a duration-1 CORESET map to 6 contiguous PRBs each, so the part inside a contiguous grant is one run).
  *   Writes up to `max` allocation-relative [first,last] hypotheses (the longest run, merged over 1-PRB gaps, with its edges moved by +-1 PRB) and returns the
  *   count; 0 when the grant is clean, too noisy (mean reference SNR < 6 dB) or without symbol-0 samples. Caller: passive_decode_retry().
  */
-static int own_pdcch_hypotheses(const nr_pdsch_evm_acc_t *ea, int nrb, int hyp[][2], int max, int *run_first, int *run_last)
+static int own_pdcch_hypotheses(const nr_pdsch_evm_acc_t *ea, int nrb, uint8_t hyp[][276], int max, int *run_first, int *run_last)
 {
   static _Atomic double s_db = -1.0;
   if (s_db < 0.0) { const char *e = getenv("ISAC_PDSCH_OWN_PDCCH_DB"); s_db = e && atof(e) > 0.0 ? atof(e) : 4.0; }
@@ -5020,33 +5054,48 @@ static int own_pdcch_hypotheses(const nr_pdsch_evm_acc_t *ea, int nrb, int hyp[]
     dirty[r] = s0 < ref - s_db ? 1 : 0;
   }
   if (ref_n < 1 || ref_sum / ref_n < 6.0) return 0;
-  int best_len = 0, best_a = -1, best_b = -1;
-  for (int r = 0; r < nrb;) {
+  /* runs of dirty PRBs, single-PRB gaps bridged; runs shorter than 2 PRBs are noise (a CCE is 6 PRBs) unless the only one */
+  int ra[64], rb_[64], nr = 0;
+  for (int r = 0; r < nrb && nr < 64;) {
     if (dirty[r] != 1) { r++; continue; }
     int a = r, b = r, q = r + 1;
-    while (q < nrb) { /* extend over dirty PRBs and single-PRB gaps */
+    while (q < nrb) {
       if (dirty[q] == 1) { b = q; q++; }
       else if (q + 1 < nrb && dirty[q + 1] == 1) q++;
       else break;
     }
-    if (b - a + 1 > best_len) { best_len = b - a + 1; best_a = a; best_b = b; }
+    ra[nr] = a; rb_[nr] = b; nr++;
     r = b + 1;
   }
-  if (best_len < 1) return 0;
-  *run_first = best_a;
-  *run_last = best_b;
+  int keep[64], nk = 0, longest = -1;
+  for (int i = 0; i < nr; i++) {
+    if (longest < 0 || rb_[i] - ra[i] > rb_[longest] - ra[longest]) longest = i;
+    if (rb_[i] - ra[i] + 1 >= 2) keep[nk++] = i;
+  }
+  if (nr == 0) return 0;
+  if (nk == 0) keep[nk++] = longest;
+  *run_first = ra[longest];
+  *run_last = rb_[longest];
   int n = 0;
-  const int s_lo = best_a == 0 ? 0 : best_a - 1, s_hi = best_a == 0 ? 0 : best_a + 1;
-  const int e_lo = best_b == nrb - 1 ? nrb - 1 : best_b - 1, e_hi = best_b == nrb - 1 ? nrb - 1 : best_b + 1;
-  for (int pass = 0; pass < 2; pass++) /* the detected run first, then its +-1 neighbours */
-    for (int a = s_lo; a <= s_hi; a++)
-      for (int b = e_lo; b <= e_hi; b++) {
-        const bool exact = a == best_a && b == best_b;
-        if ((pass == 0) != exact || a > b || n >= max) continue;
-        hyp[n][0] = a;
-        hyp[n][1] = b;
-        n++;
-      }
+  /* mode 0 exact runs; 1 grown by 1 PRB each side; 2 shrunk by 1; 3 longest run only; 4/5 longest run grown/shrunk; 6 snapped out to 6-PRB (CRB) multiples */
+  for (int mode = 0; mode < 7 && n < max; mode++) {
+    uint8_t *h = hyp[n];
+    memset(h, 0, 276);
+    bool any = false;
+    const bool one = mode == 3 || mode == 4 || mode == 5;
+    for (int j = 0; j < (one ? 1 : nk); j++) {
+      const int i = one ? longest : keep[j];
+      int a = ra[i], b = rb_[i];
+      if (mode == 1 || mode == 4) { a--; b++; }
+      if (mode == 2 || mode == 5) { a++; b--; }
+      if (mode == 6) { a -= a % 6; b = b - b % 6 + 5; }
+      for (int r = a < 0 ? 0 : a; r <= b && r < nrb; r++) { h[r] = 1; any = true; }
+    }
+    if (!any) continue;
+    bool dup = false;
+    for (int m = 0; m < n && !dup; m++) dup = memcmp(hyp[m], h, 276) == 0;
+    if (!dup) n++;
+  }
   return n;
 }
 
@@ -5100,7 +5149,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     const char *e = getenv("ISAC_PDSCH_CSI_POPULATION_RETRY");
     csi_population_retry = e && atoi(e) != 0;
   }
-  if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry && !tint_retry && !opr_retry) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
+  if ((!tdra_retry && !csi_retry && !cdm_retry && !wide_retry && !csi_population_retry && !tint_retry && !opr_retry && !s_scsi_on()) || st != NR_PDSCH_PASSIVE_DECODE_CRC_FAIL
       || !grant->dci11 || grant->rnti_class != 0 || t_probe_first_seg || t_gw_capture || t_gw_used || (t_quiet && !t_qam_ab_alt) || t_llr_ovr
       || nr_agnostic_v2() || harq_combine_on())
     return st;
@@ -5216,6 +5265,46 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     t_quiet = saved_quiet;
     t_decode_tdra_attempt = 0;
   }
+  /* DECODE-RES item 2: the full-band non-TRS CSI-RS of this network (static_csi_resources) rate-matched on a failed grant of those four slot phases. Tried with the
+   * grant's S and, when legal, the toggled S; the first CRC pass is kept. Logs STATICCSI. */
+  static _Atomic int s_scsi = -1;
+  if (s_scsi < 0) s_scsi = getenv("ISAC_PDSCH_STATIC_CSI_RETRY") && atoi(getenv("ISAC_PDSCH_STATIC_CSI_RETRY")) ? 1 : 0;
+  if (s_scsi && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture && !t_gw_used
+      && (!t_quiet || t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on() && grant->source_absolute_slot >= 0) {
+    fapi_nr_dl_config_dlsch_pdu_rel15_t probe_cfg = *dlsch_config;
+    if (static_csi_resources(&probe_cfg, grant->source_absolute_slot) > 0) {
+      const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+      const bool saved_quiet = t_quiet;
+      const double saved_fo_override = nr_slot_fep_fo_override_hz;
+      nr_slot_fep_fo_override_hz = t_last_fep_fo;
+      t_quiet = true;
+      bool ok = false;
+      const bool toggle = original.start_symbol <= 1 && original.start_symbol + original.number_symbols == 14;
+      for (int v = 0; v < (toggle ? 2 : 1) && !ok; v++) {
+        fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
+        if (v) { cfg.start_symbol = 1 - original.start_symbol; cfg.number_symbols = 14 - cfg.start_symbol; }
+        static_csi_resources(&cfg, grant->source_absolute_slot);
+        t_decode_tdra_attempt = 5 + 64 * (60 + v);
+        st = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+        if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+        if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) { ok = true; *dlsch_config = cfg; }
+      }
+      LOG_I(PHY, "SENSING: STATICCSI rnti=0x%04x fs=%d.%d abs=%ld phase=%ld S=%u L=%u rb=%u+%u ok=%d\n", grant->rnti, proc->frame_rx, proc->nr_slot_rx,
+            grant->source_absolute_slot, grant->source_absolute_slot % 160, original.start_symbol, original.number_symbols, freq_alloc->first_rb,
+            freq_alloc->num_rbs, ok);
+      if (!ok) {
+        *dlsch_config = original;
+        t_decode_tdra_attempt = 32;
+        st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+        if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+      } else {
+        out->config_recovered = true;
+      }
+      nr_slot_fep_fo_override_hz = saved_fo_override;
+      t_quiet = saved_quiet;
+      t_decode_tdra_attempt = 0;
+    }
+  }
   /* DECODE-RES own-PDCCH rate matching, strictly after every other arm (so a pass here is a gain over them on identical samples). Only for a grant that can be
    * S=0/L=14 (S=0 as parsed, or the S=1/L=13 alias of it), contiguous, with no SSB event in the slot (the exclusion reuses the SSB plan). Decode the S=0 reading
    * plainly, read its per-RB symbol-0 error map, then try the detected PRB run (and its +-1 PRB edges) as excluded PRBs. */
@@ -5229,7 +5318,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     nr_slot_fep_fo_override_hz = t_last_fep_fo;
     t_quiet = true;
     bool recovered = false;
-    int hyp[9][2], run_a = -1, run_b = -1, nh = 0, n_try = 0, won = -1;
+    static __thread uint8_t hyp[8][276];
+    int run_a = -1, run_b = -1, nh = 0, n_try = 0, won = -1;
     fapi_nr_dl_config_dlsch_pdu_rel15_t s0cfg = original;
     s0cfg.start_symbol = 0;
     s0cfg.number_symbols = 14;
@@ -5240,17 +5330,27 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
       recovered = true;
       *dlsch_config = s0cfg;
     } else {
-      nh = own_pdcch_hypotheses(&nr_pdsch_evm_acc, (int)freq_alloc->num_rbs, hyp, 9, &run_a, &run_b);
+      nh = own_pdcch_hypotheses(&nr_pdsch_evm_acc, (int)freq_alloc->num_rbs, hyp, 8, &run_a, &run_b);
     }
     for (int h = 0; h < nh && !recovered; h++) {
       fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = s0cfg;
       t_own_pdcch.on = 1;
       t_own_pdcch.symbols = 1; /* symbol 0 (duration-1 CORESET) */
-      t_own_pdcch.first_crb = (int)cfg.BWPStart + (int)freq_alloc->first_rb + hyp[h][0];
-      t_own_pdcch.last_crb = (int)cfg.BWPStart + (int)freq_alloc->first_rb + hyp[h][1];
+      memset(t_own_pdcch.crb, 0, sizeof(t_own_pdcch.crb));
+      t_own_pdcch.first_crb = 274; t_own_pdcch.last_crb = 0;
+      for (int r = 0; r < (int)freq_alloc->num_rbs; r++) {
+        const int crb = (int)cfg.BWPStart + (int)freq_alloc->first_rb + r;
+        if (hyp[h][r] && crb < 275) {
+          t_own_pdcch.crb[crb] = 1;
+          if (crb < t_own_pdcch.first_crb) t_own_pdcch.first_crb = crb;
+          if (crb > t_own_pdcch.last_crb) t_own_pdcch.last_crb = crb;
+        }
+      }
+      nr_ssb_rm_only_crb = t_own_pdcch.crb;
       t_decode_tdra_attempt = 3 + 64 * (41 + h);
       n_try++;
       st = passive_decode_body(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+      nr_ssb_rm_only_crb = NULL;
       t_own_pdcch.on = 0;
       if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
@@ -5261,18 +5361,14 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     }
     t_own_pdcch.on = 0;
     if (nh > 0 || recovered)
-      LOG_I(PHY, "SENSING: OWNPDCCH rnti=0x%04x fs=%d.%d abs=%ld S0=%u rb=%u+%u run=[%d,%d] hyp=%d tried=%d ok=%d win=[%d,%d] crb_win=[%d,%d] crb_win_mod6=%d\n",
-            grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, original.start_symbol, freq_alloc->first_rb, freq_alloc->num_rbs,
-            run_a, run_b, nh, n_try, recovered, won >= 0 ? hyp[won][0] : -1, won >= 0 ? hyp[won][1] : -1,
-            won >= 0 ? (int)original.BWPStart + (int)freq_alloc->first_rb + hyp[won][0] : -1,
-            won >= 0 ? (int)original.BWPStart + (int)freq_alloc->first_rb + hyp[won][1] : -1,
-            won >= 0 ? ((int)original.BWPStart + (int)freq_alloc->first_rb + hyp[won][0]) % 6 : -1);
-    if (!recovered) { /* restore the public result and the thread-local decoder/LLR view, as the other arms do */
-      *dlsch_config = original;
-      t_decode_tdra_attempt = 32;
-      st = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
-      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
-    }
+      {
+        char wb[300]; int u = 0;
+        for (int r = 0; won >= 0 && r < (int)freq_alloc->num_rbs && u < 280; r++) wb[u++] = hyp[won][r] ? '1' : '0';
+        wb[u] = 0;
+        LOG_I(PHY, "SENSING: OWNPDCCH rnti=0x%04x fs=%d.%d abs=%ld S0=%u rb=%u+%u run=[%d,%d] hyp=%d tried=%d ok=%d win=%d first_crb=%u map=%s\n",
+              grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, original.start_symbol, freq_alloc->first_rb, freq_alloc->num_rbs,
+              run_a, run_b, nh, n_try, recovered, won >= 0 ? won : -1, (unsigned)(original.BWPStart + freq_alloc->first_rb), wb);
+      }
     nr_slot_fep_fo_override_hz = saved_fo_override;
     t_quiet = saved_quiet;
     t_decode_tdra_attempt = 0;
