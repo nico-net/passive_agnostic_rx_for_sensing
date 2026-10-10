@@ -52,6 +52,7 @@
 #include "nr_pusch_passive_queue_cursor.h"
 #include "nr_pusch_solver.h"
 #include "nr_pdcch_ul_config_disc.h"
+#include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
  * fills that slot's region of rxdata. */
@@ -132,6 +133,54 @@ static int solver_readings(const nr_pusch_passive_job_t *job,
       rd[n++]=(nr_pusch_solver_reading_t){.grant=g,.layouts=UINT64_C(1)<<i};
   }
   return n;
+}
+
+/* ISAC_UL_SOLVER_FALLTHROUGH=1 (default off): with ISAC_UL_PUSCH_SOLVER=1 every ticketed grant used to be
+ * consumed by the solver branch, whose unsolved state only probes one-CB QPSK grants of <= 48 PRB
+ * (one_cb_qpsk()). A grant outside that class (64/256QAM, e.g. the 3-PRB MCS 17-27 grants that are the only
+ * detectable PUSCH at the DGX position) was therefore never decoded. With the flag such a grant also takes the
+ * ordinary full-decode path below when the solver issued no full decode for it. */
+static bool ul_solver_fallthrough(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("ISAC_UL_SOLVER_FALLTHROUGH");
+    on = (v && !strcmp(v, "1")) ? 1 : 0;
+  }
+  return on == 1;
+}
+
+/* ISAC_UL_RETRY=1 (default off): UL twin of ISAC_PDSCH_DMRS_CDM_RETRY / ISAC_PDSCH_TDRA_RETRY. The DCI antenna-ports code
+ * point fixes the number of CDM groups without data, but its field width is a hypothesis (U3 width splits), so the group
+ * count can be wrong while everything else is right; likewise S=0/L=14 can alias S=1/L=13. A CRC-failed full decode whose
+ * allocation is at most ISAC_UL_RETRY_MAX_RB PRB (default 12) and, if ISAC_UL_RETRY_SNR_DB is set, whose post-estimation SNR reaches it, is retried with each alternative. */
+static bool ul_retry_enabled(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("ISAC_UL_RETRY");
+    on = (v && !strcmp(v, "1")) ? 1 : 0;
+  }
+  return on == 1;
+}
+static float ul_retry_snr_db(void)
+{
+  static float t = -1000.0f;
+  if (t < -999.0f) {
+    const char *v = getenv("ISAC_UL_RETRY_SNR_DB");
+    t = v ? (float)atof(v) : -500.0f; /* post-estimation snr_db is not populated by the PUSCH path (0.0): gate off by default */
+  }
+  return t;
+}
+/* Default size gate instead: only small allocations (the detectable class at this position) are retried. */
+static int ul_retry_max_rb(void)
+{
+  static int m = -1;
+  if (m < 0) {
+    const char *v = getenv("ISAC_UL_RETRY_MAX_RB");
+    m = v ? atoi(v) : 12;
+  }
+  return m;
 }
 
 bool nr_pusch_passive_pipeline_enabled(void)
@@ -246,6 +295,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       const int nv=nr_pusch_solver_plan(&job.ul_ticket,rd,nrd,
           (uint64_t)job.absolute_slot-job.grant.k2,(uint64_t)job.absolute_slot,
           l0,ids,nids,var,2);
+      bool ran_full = false;
       for (int k=0;k<nv;++k) {
         struct timespec p0,p1;
         clock_gettime(CLOCK_THREAD_CPUTIME_ID,&p0);
@@ -253,9 +303,11 @@ static void *nr_pusch_passive_queue_thread(void *arg)
         if (var[k].probe)
           nr_pusch_passive_decode_probe(ue,idx,(uint32_t)job.frame_rx,(uint8_t)job.nr_slot_rx,
                 &var[k].grant,job.ta_offset_samples,(uint64_t)job.absolute_slot,job.fo_hz,&probe_out);
-        else
+        else {
+          ran_full = true;
           nr_pusch_passive_decode(ue,idx,(uint32_t)job.frame_rx,(uint8_t)job.nr_slot_rx,
                 &var[k].grant,job.ta_offset_samples,(uint64_t)job.absolute_slot,false,job.fo_hz,&probe_out);
+        }
         clock_gettime(CLOCK_THREAD_CPUTIME_ID,&p1);
         const uint64_t us=(uint64_t)(p1.tv_sec-p0.tv_sec)*1000000u+
                           (p1.tv_nsec-p0.tv_nsec)/1000;
@@ -298,12 +350,47 @@ static void *nr_pusch_passive_queue_thread(void *arg)
           }
         }
       }
-      if (pipeline) nr_pusch_passive_decode_capture_release(idx);
-      continue;
+      const bool not_probe_class = nr_get_Qm_ul(job.grant.mcs, job.grant.mcs_table) != 2 || job.grant.num_rb > 48;
+      if (!(ul_solver_fallthrough() && !ran_full && not_probe_class)) {
+        if (pipeline) nr_pusch_passive_decode_capture_release(idx);
+        continue;
+      }
+      /* fall through to the ordinary full decode of the DCI's own reading */
     }
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
+    if (ul_retry_enabled() && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= ul_retry_snr_db() &&
+        job.grant.num_rb <= ul_retry_max_rb()) {
+      /* Only grants with a measurable signal are retried (the extra LDPC runs cost CPU). Alternates, in order:
+       * the other CDM-group count (data-RE set and G change), then the S=1/L=13 alias of S=0/L=14 (the DL TDRA
+       * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */
+      nr_pdcch_blind_ul_result_t alts[2];
+      int na = 0;
+      if (job.grant.n_dmrs_cdm_groups == 1 || job.grant.n_dmrs_cdm_groups == 2) {
+        alts[na] = job.grant;
+        alts[na].n_dmrs_cdm_groups = (uint8_t)(3 - job.grant.n_dmrs_cdm_groups);
+        na++;
+      }
+      if (job.grant.start_symbol == 0 && job.grant.num_symbols == 14) {
+        alts[na] = job.grant;
+        alts[na].start_symbol = 1;
+        alts[na].num_symbols = 13;
+        na++;
+      }
+      for (int a = 0; a < na; ++a) {
+        nr_pusch_passive_out_t out2;
+        nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &alts[a],
+                                job.ta_offset_samples, (uint64_t)job.absolute_slot, false, job.fo_hz, &out2);
+        if (out2.status == NR_PUSCH_PASSIVE_OK) {
+          out = out2;
+          LOG_A(PHY, "SENSING: UL_RETRY rnti=0x%04x CRC OK with cdm_groups=%u S=%u L=%u (reading said cdm=%u S=%u L=%u)\n",
+                alts[a].rnti, alts[a].n_dmrs_cdm_groups, alts[a].start_symbol, alts[a].num_symbols,
+                job.grant.n_dmrs_cdm_groups, job.grant.start_symbol, job.grant.num_symbols);
+          break;
+        }
+      }
+    }
     if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_end);
     if (pipeline) nr_pusch_passive_decode_capture_release(idx);
     if (!nr_cfg_epoch_work_current()) {
