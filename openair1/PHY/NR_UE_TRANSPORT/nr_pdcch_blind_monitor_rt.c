@@ -4953,10 +4953,23 @@ static void phase2_guard_release(phase2_guard_t *g)
  *   A discovery-capable config (autodiscover) runs entirely under the phase-2 lock. Flags read here include ISAC_TDD_SKIP, ISAC_PDCCH_*, ISAC_DCI11_*, ISAC_PDSCH_SOLVER_* and ISAC_CSIRS_BLIND.
  *   Callers: nr_pdcch_blind_monitor_run_occasion(), run_discovered_occasion(), par_bank_worker().
  */
+/* crb0_guard_release: cleanup of run_occasion_one()'s ISAC_PDCCH_POINTA_REF guard: restores the per-thread CRB-0
+ *   grid RB that was in force before the occasion (dci_nr.c nr_pdcch_set_crb0_grid_rb()). */
+typedef struct { int prev; } crb0_guard_t;
+static void crb0_guard_release(crb0_guard_t *g)
+{
+  nr_pdcch_set_crb0_grid_rb(g->prev);
+}
+
 static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                                      bool serial_candidates, long source_absolute_slot)
 {
   phase2_guard_t phase2 __attribute__((cleanup(phase2_guard_release))) = {.held = false};
+  /* ISAC_PDCCH_POINTA_REF (TIM-ACQ): PDCCH-Config DM-RS from Point A for every decode of this occasion; the previous
+   * per-thread value is restored on every return. Flag off -> 0 -> legacy indexing. */
+  const int crb0_rb = nr_pdcch_crb0_grid_rb();
+  crb0_guard_t crb0_guard __attribute__((cleanup(crb0_guard_release))) = {.prev = nr_pdcch_set_crb0_grid_rb(crb0_rb)};
+  (void)crb0_guard;
   discovery_evidence_frame = proc ? proc->frame_rx : -1;
   discovery_evidence_slot = proc ? proc->nr_slot_rx : -1;
   /* ISAC_TDD_SKIP=1: do not scan slots SIB1 says carry no downlink. Unknown pattern -> scan. */
@@ -5673,7 +5686,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   /* The existing CUDA kernel uses a different equaliser and MRC rule. It is
    * admitted only when its output matches the CPU reference byte for byte;
    * mismatches retain the CPU LLRs. Device timing is deferred to the host. */
-  if (!llrc_hit && rel15->coreset.duration == 1) {
+  /* ISAC_PDCCH_POINTA_REF: the GPU job carries the legacy DM-RS reference, so with a Point-A offset on a PDCCH-Config
+   * CORESET it would only ever mismatch the CPU reference; keep the CPU LLRs. */
+  if (!llrc_hit && rel15->coreset.duration == 1
+      && !(crb0_rb && rel15->coreset.CoreSetType == NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG)) {
     const nr_gpu_pdcch_fep_api_t *api = nr_gpu_pdcch_fep_load();
     if (api) {
       const int16_t *rows[NB_ANTENNAS_RX] = {0};

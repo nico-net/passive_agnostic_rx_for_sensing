@@ -4888,6 +4888,15 @@ TEST_F(DiscoveredCover, QueueOrderCoversFirstThenPublishedLines) {
   EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
 }
 
+// TIM-ACQ (ISAC_PDCCH_POINTA_REF): the cover starts at CRB 0 = Point A in grid RBs (PCI 923 live: grid RB 78).
+TEST(PdcchPointA, CoverStartFollowsCrb0) {
+  EXPECT_EQ(nr_pdcch_cover_start_rb(0, 217), 0);    // grid starts at Point A (PCI 415): legacy cover
+  EXPECT_EQ(nr_pdcch_cover_start_rb(78, 217), 78);  // PCI 923 with -C 3731.91 MHz: CRB 0 at grid RB 78
+  EXPECT_EQ(nr_pdcch_cover_start_rb(-5, 217), 1);   // Point A below the grid: first CRB multiple of 6 (CRB 6)
+  EXPECT_EQ(nr_pdcch_cover_start_rb(-12, 217), 0);  // CRB 12 at grid RB 0
+  EXPECT_EQ(nr_pdcch_cover_start_rb(214, 217), 0);  // no full group above Point A: legacy
+}
+
 // ACQ-ROBUST: ISAC_PDCCH_DWELL_ADAPTIVE and ISAC_PDCCH_NO_FAKE_FOOTPRINT.
 struct DiscoveredRobust : DiscoveredCoresets {
   static constexpr const char *kLine = "CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n";

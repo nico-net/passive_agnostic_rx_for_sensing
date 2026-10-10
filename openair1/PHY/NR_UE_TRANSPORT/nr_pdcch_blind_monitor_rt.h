@@ -317,6 +317,20 @@ void nr_pdcch_discovered_reset(void);
 bool nr_pdcch_discovered_cover_enabled(void);
 /* Bank holds a verified entry of this nID/symbol/duration whose RB range overlaps [rb, rb + 6 groups). */
 bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int groups);
+/* ISAC_PDCCH_POINTA_REF=1 (TIM-ACQ, default off): dedicated (PDCCH-Config) CORESETs take CRB 0 = Point A from SIB1
+ * instead of assuming that the receive grid starts at Point A. TS 38.211 7.4.1.3.2: their DM-RS index counts from
+ * CRB 0; TS 38.213 10.1: their 6-RB groups are aligned to CRB 0. GPU nID discovery already indexes from Point A and
+ * publishes grid RBs; without this the dwell/bank decode used grid RB 0 as CRB 0, so on a cell whose carrier does not
+ * start at the grid start (PCI 923: Point A at grid RB 78) no DCI could pass CRC. */
+bool nr_pdcch_pointa_ref_enabled(void);
+/* Grid RB of CRB 0 (Point A, SIB1 + MIB k_SSB, nr_passive_acq_verify_carrier()); 0 when the flag is off, the carrier
+ * is not yet checked, or Point A is not on an RB boundary of the grid. Cached, refreshed every 256 calls. */
+int nr_pdcch_crb0_grid_rb(void);
+/* First grid RB of the ACQ-FIX cover dwell: CRB 0 when inside the grid, else the first CRB multiple of 6 inside it;
+ * crb0_grid_rb 0 (flag off) -> 0 (legacy). Pure. */
+int nr_pdcch_cover_start_rb(int crb0_grid_rb, int carrier_rb);
+/* dci_nr.c: per-thread CRB-0 grid RB for PDCCH-Config DM-RS indexing (0 = legacy); returns the previous value. */
+int nr_pdcch_set_crb0_grid_rb(int crb0_grid_rb);
 /* dci_nr.c: first RB (BWP-relative) of every extracted 6-RB CORESET group; fixed = ISAC_PDCCH_RBOFFSET_FIX
  * (TS 38.213 10.1 positions, rb_offset % 6 and rb_offset >= 6 honoured). Pure. */
 int nr_pdcch_coreset_group_rbs(const uint8_t *bitmap, int rb_offset_total, int n_rb, bool fixed, int *group_rb,

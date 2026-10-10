@@ -217,6 +217,20 @@ static void nr_pdcch_llr(uint32_t sz, c16_t *rxF, c16_t *llr)
   }
 }
 
+/* t_pdcch_crb0_grid_rb: grid RB of CRB 0 (Point A) for the PDCCH-Config DM-RS reference of THIS thread's decodes;
+ *   0 = legacy (grid RB 0 is CRB 0). Only the blind monitor sets it (ISAC_PDCCH_POINTA_REF), around its own occasion,
+ *   and restores it afterwards, so the MAC-driven path never sees a non-zero value. */
+static __thread int t_pdcch_crb0_grid_rb;
+
+/* nr_pdcch_set_crb0_grid_rb: sets t_pdcch_crb0_grid_rb and returns the previous value.
+ *   Caller: nr_pdcch_blind_monitor_run_occasion_one() (set at entry, restored by its cleanup). */
+int nr_pdcch_set_crb0_grid_rb(int crb0_grid_rb)
+{
+  const int old = t_pdcch_crb0_grid_rb;
+  t_pdcch_crb0_grid_rb = crb0_grid_rb;
+  return old;
+}
+
 /* nr_pdcch_rboffset_fix_enabled: ISAC_PDCCH_RBOFFSET_FIX=1 (default off) selects the TS 38.213 10.1 group positions in
  *   nr_pdcch_coreset_group_rbs(). Read once. Caller: nr_pdcch_extract_rbs_single(). */
 static bool nr_pdcch_rboffset_fix_enabled(void)
@@ -423,8 +437,15 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   int rb_offset = cset_start + coreset->rb_offset;
   unsigned short scrambling_id = coreset->pdcch_dmrs_scrambling_id;
   int dmrs_ref = 0;
-  if (coreset->CoreSetType == NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG)
+  if (coreset->CoreSetType == NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG) {
     dmrs_ref = phy_pdcch_config->pdcch_config[ss_idx].BWPStart;
+    /* ISAC_PDCCH_POINTA_REF (set by the blind monitor only; 0 = legacy): the DM-RS index counts from CRB 0, which sits
+     * at grid RB t_pdcch_crb0_grid_rb when the receive grid does not start at Point A. Kept inside the generated
+     * sequence (N_RB_DL RBs); a CORESET reaching below Point A is not a PDCCH-Config CORESET of this cell -> legacy. */
+    const int crb0 = t_pdcch_crb0_grid_rb;
+    if (crb0 && dmrs_ref - crb0 + rb_offset >= 0 && dmrs_ref - crb0 + rb_offset + n_rb <= fp->N_RB_DL)
+      dmrs_ref -= crb0;
+  }
   /* CFGTRACE (ISAC_PDCCH_CFGTRACE=1): dump every DERIVED PDCCH parameter for each invocation.
    * The blind monitor and the normal MAC-driven path both call this function, so with an attached
    * UE both appear in one log and can be diffed line-by-line for the SAME slot -- which is the only
