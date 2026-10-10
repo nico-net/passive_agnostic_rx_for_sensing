@@ -48,6 +48,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_evm_acc.h"
 #include "nr_irc_cov.h"
 #include "nr_passive_tpool.h"
+#include "nr_pdsch_gpu_ldpc_host.h"
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
 
@@ -156,6 +157,42 @@ static inline uint64_t pdtim_now(void)
  *   No-op unless ISAC_PDCCH_TIMING is set. Updates count, total, max and CPU time of the stage in plain (non-atomic) globals.
  *   Callers: passive_decode_body() after the FEP, channel estimation, allocation, demodulation and LDPC stages.
  */
+/* ISAC_PDTIM_PCT=1 (DECGPU, default off; needs ISAC_PDCCH_TIMING): 10-us histograms per stage and of the per-decode
+ * sum fep+chest+demod+ldpc, printed as PDTIMPCT p50/p90/p99 next to every PDTIM line. */
+#define PDTIM_HB 2000 /* 10 us bins, last bin = >= 19.99 ms */
+static _Atomic uint32_t g_pdtim_hist[PDTIM_N + 1][PDTIM_HB];
+static int g_pdtim_pct = -1;
+static _Atomic uint64_t g_pdtim_ldpc_tb, g_pdtim_ldpc_cb; /* passive_ldpc_decode_core() calls and code blocks decoded */
+static __thread uint64_t t_pdtim_sum, t_pdtim_sum_n;
+static inline void pdtim_hist(int k, uint64_t d)
+{
+  const uint64_t b = d / 10000;
+  atomic_fetch_add_explicit(&g_pdtim_hist[k][b < PDTIM_HB ? b : PDTIM_HB - 1], 1, memory_order_relaxed);
+}
+static void pdtim_pct_report(void)
+{
+  char rep[400];
+  int u = 0;
+  for (int k = 0; k <= PDTIM_N && u < (int)sizeof(rep) - 60; k++) {
+    if (k == PDTIM_ALLOC)
+      continue;
+    uint64_t n = 0, c = 0;
+    for (int b = 0; b < PDTIM_HB; b++)
+      n += g_pdtim_hist[k][b];
+    const double q[3] = {0.5, 0.9, 0.99};
+    int p[3] = {0, 0, 0}, i = 0;
+    for (int b = 0; b < PDTIM_HB && i < 3; b++) {
+      c += g_pdtim_hist[k][b];
+      while (i < 3 && n && (double)c >= q[i] * (double)n)
+        p[i++] = b * 10 + 5;
+    }
+    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu p50=%d p90=%d p99=%d] ", k == PDTIM_N ? "sum" : kPdtimName[k], (unsigned long)n, p[0], p[1],
+                  p[2]);
+  }
+  LOG_I(PHY, "SENSING: PDTIMPCT us %sldpc_tb=%lu ldpc_cb=%lu\n", rep, (unsigned long)atomic_load(&g_pdtim_ldpc_tb),
+        (unsigned long)atomic_load(&g_pdtim_ldpc_cb));
+}
+
 static inline void pdtim_add(int k, uint64_t t0)
 {
   if (g_pdtim_on <= 0) {
@@ -163,6 +200,15 @@ static inline void pdtim_add(int k, uint64_t t0)
   }
   const uint64_t c0 = t_pdtim_cpu0;
   const uint64_t d = pdtim_now() - t0;
+  if (g_pdtim_pct < 0)
+    g_pdtim_pct = getenv("ISAC_PDTIM_PCT") && atoi(getenv("ISAC_PDTIM_PCT")) ? 1 : 0;
+  if (g_pdtim_pct && k != PDTIM_ALLOC) {
+    pdtim_hist(k, d);
+    if (k == PDTIM_FEP)
+      t_pdtim_sum = t_pdtim_sum_n = 0; /* a decode that returned early left a partial sum */
+    t_pdtim_sum += d;
+    t_pdtim_sum_n++;
+  }
   g_pdtim_cpu_ns[k] += t_pdtim_cpu0 - c0;
   g_pdtim_ns[k] += d;
   g_pdtim_n[k]++;
@@ -180,9 +226,15 @@ static void pdtim_report(void)
     return;
   }
   g_pdtim_calls++;
+  if (g_pdtim_pct > 0 && t_pdtim_sum_n) {
+    pdtim_hist(PDTIM_N, t_pdtim_sum);
+    t_pdtim_sum = t_pdtim_sum_n = 0;
+  }
   if ((g_pdtim_calls % 200) != 0) {
     return;
   }
+  if (g_pdtim_pct > 0)
+    pdtim_pct_report();
   char rep[720];
   int u = 0;
   for (int k = 0; k < PDTIM_N && u < (int)sizeof(rep) - 90; k++) {
@@ -1567,6 +1619,10 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   const uint32_t C_full = TB_parameters.C;
   TB_parameters.nb_segments_to_decode = (t_probe_first_seg && C_full > 1) ? 1 : 0;
   const uint32_t C_dec = TB_parameters.nb_segments_to_decode ? 1 : C_full;
+  if (g_pdtim_pct > 0) {
+    atomic_fetch_add_explicit(&g_pdtim_ldpc_tb, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_pdtim_ldpc_cb, C_dec, memory_order_relaxed);
+  }
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
     TB_parameters.decodeSuccess[r] = false;
   }
@@ -1581,7 +1637,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     if (cpu != NULL)
       tb_dec = cpu;
   }
-  if (tb_dec(&slot_parameters) != 0) {
+  if (nr_pdsch_gpu_ldpc_decode(&slot_parameters, tb_dec) != 0) { /* DECGPU: tb_dec itself unless ISAC_PDSCH_GPU_EXACT_LDPC=1 */
     LOG_W(NR_PHY, "SENSING: passive PDSCH decode -- nrLDPC_coding_decoder failed\n");
     atomic_fetch_add(&g_ldpc_iface_err, 1);
     t_decoder_used_last = 0; /* no valid result: do not leave the previous TB's decoder */
