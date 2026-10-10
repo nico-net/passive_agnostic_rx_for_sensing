@@ -452,7 +452,7 @@ static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
       for (int l = 0; l < Nl; l++) {
         int32_t *dl_ch0 = &dl_ch_estimates[(l * fp->nb_antennas_rx) + aarx][validDmrsEst * fp->ofdm_symbol_size];
         int32_t *dl_ch0_ext = dl_ch_estimates_ext[(l * fp->nb_antennas_rx) + aarx] + offset;
-        if (pilots == 0 && csi_res_bitmap == 0 && (!ssb_rm || !((ssb_rm->symbols >> symbol) & 1))
+        if (pilots == 0 && csi_res_bitmap == 0 && (!ssb_rm || !(((ssb_rm->symbols | ssb_rm->symbols2) >> symbol) & 1))
             && !csi_erase_symbol(symbol)) { // data symbol only
           if (l == 0) {
             if (start_re + nb_rb * NR_NB_SC_PER_RB <= fp->ofdm_symbol_size) {

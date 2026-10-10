@@ -105,6 +105,12 @@ typedef struct {
                        ///< (TS 38.214 5.1.2.3 fixes it for 1_0).
   bool     scr_dedicated; ///< decoded with the RRC-dedicated scrambling identities
                           ///< (nr_scrambling_dedicated(), final review I2)
+  /// WIDE-S0: the scheduling PDCCH (TS 38.214 5.1.4.1: its REs and DM-RS are not available for the
+  /// PDSCH it schedules). pdcch_nsym = number of CORESET symbols from pdcch_sym0 (0 = unknown: no
+  /// exclusion, the previous behaviour for every caller that never sets it); pdcch_crb = bitmap of the
+  /// common RBs its REG bundles occupy (bit c%8 of byte c/8). Filled by the blind monitor's DCI 1_1 path.
+  uint8_t  pdcch_sym0, pdcch_nsym;
+  uint8_t  pdcch_crb[35];
 } nr_pdsch_passive_grant_t;
 
 /// Pick this RNTI's current DCI 1_1 interleaved VRB-to-PRB bundle-size hypothesis (2 or 4). The

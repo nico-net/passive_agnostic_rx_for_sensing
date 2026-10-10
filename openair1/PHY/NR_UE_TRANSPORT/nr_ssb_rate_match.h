@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
+#include <string.h>
 
 enum { NR_SSB_RM_MAX_RB = 275 };
 typedef struct {
@@ -13,16 +14,24 @@ typedef struct {
 typedef struct {
   uint16_t symbols;
   uint8_t prb[NR_SSB_RM_MAX_RB];
+  /* WIDE-S0: a second, independent exclusion (the scheduling PDCCH, TS 38.214 5.1.4.1): symbols2 x prb2. All-zero = none. */
+  uint16_t symbols2;
+  uint8_t prb2[NR_SSB_RM_MAX_RB];
 } nr_ssb_rm_mask_t;
 /* DECODE-RES (ISAC_PDSCH_OWN_PDCCH_RM): when non-NULL, the excluded PRBs of nr_ssb_rm_map() are exactly this per-common-RB flag array (not the event's
  * first..last range). Thread-local, set only around one trial decode by nr_pdsch_passive_decode.c; NULL everywhere else (unchanged behaviour). */
 extern __thread const uint8_t *nr_ssb_rm_only_crb;
+/* WIDE-S0 (ISAC_PDSCH_PDCCH_RM): when crb is non-NULL, nr_ssb_rm_map() also fills the mask's second layer: symbols x the common RBs flagged in
+ * crb[] (per-CRB 0/1 array), independently of the SSB event (which keeps the first layer). Thread-local, set only around one decode by
+ * nr_pdsch_passive_decode.c; {0, NULL} everywhere else (unchanged behaviour). */
+typedef struct { uint16_t symbols; const uint8_t *crb; } nr_ssb_rm_extra_t;
+extern __thread nr_ssb_rm_extra_t nr_ssb_rm_extra;
 
 /* TS 38.214 5.1.4: the entire containing PRB, including partial edge PRBs. */
 static inline uint16_t nr_ssb_rm_excluded(const nr_ssb_rm_mask_t *mask, int symbol, int bwp_rb)
 {
   return mask && symbol >= 0 && symbol < 14 && bwp_rb >= 0 && bwp_rb < NR_SSB_RM_MAX_RB
-      && ((mask->symbols >> symbol) & 1) && mask->prb[bwp_rb] ? 0xfff : 0;
+      && ((((mask->symbols >> symbol) & 1) && mask->prb[bwp_rb]) || (((mask->symbols2 >> symbol) & 1) && mask->prb2[bwp_rb])) ? 0xfff : 0;
 }
 static inline bool nr_ssb_rm_event_valid(const nr_ssb_rm_event_t *e, int frame, int slot, int pci)
 {
@@ -47,8 +56,18 @@ static inline nr_ssb_rm_event_t nr_ssb_rm_event(int frame, int slot, int pci, in
 static inline nr_ssb_rm_mask_t nr_ssb_rm_map(const nr_ssb_rm_event_t *e, int frame, int slot, int pci,
                                             int bwp_start, int nrb, const uint16_t *physical)
 {
-  nr_ssb_rm_mask_t m = {0, {0}};
-  if (!nr_ssb_rm_event_valid(e, frame, slot, pci) || nrb < 0 || nrb > NR_SSB_RM_MAX_RB)
+  nr_ssb_rm_mask_t m;
+  memset(&m, 0, sizeof(m));
+  if (nrb < 0 || nrb > NR_SSB_RM_MAX_RB)
+    return m;
+  if (nr_ssb_rm_extra.crb && nr_ssb_rm_extra.symbols) {
+    m.symbols2 = nr_ssb_rm_extra.symbols;
+    for (int rb = 0; rb < nrb; ++rb) {
+      const int crb = bwp_start + (physical ? physical[rb] : rb);
+      m.prb2[rb] = crb >= 0 && crb < NR_SSB_RM_MAX_RB && nr_ssb_rm_extra.crb[crb];
+    }
+  }
+  if (!nr_ssb_rm_event_valid(e, frame, slot, pci))
     return m;
   m.symbols = e->symbols;
   for (int rb = 0; rb < nrb; ++rb) {

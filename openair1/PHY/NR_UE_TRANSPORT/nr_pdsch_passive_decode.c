@@ -83,6 +83,7 @@ _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * 
 #include "PHY/TOOLS/tools_defs.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h" /* WIDE-S0: nr_pdcch_dmrs_rank_grid() for the PDCCH occupancy diagnostic */
 
 /* ---- INNER COST BREAKDOWN (ISAC_PDCCH_TIMING=1, shares the blind monitor's switch) -------------
  * The outer probe in nr_pdcch_blind_monitor_rt.c measures this whole function as ONE ~774 us stage,
@@ -1338,6 +1339,7 @@ static uint64_t gw_fingerprint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *p, con
   { extern __thread int nr_dlsch_qam_mode_override; GWFP(nr_dlsch_qam_mode_override + 1); } /* QAM-FIX A/B arm */
   GWFP(t_tinterp_override + 1); /* DECODE-RES: TINT A/B / retry arm changes the channel estimate */
   { uint64_t hh_ = 0; if (t_own_pdcch.on) for (int i_ = 0; i_ < 275; i_++) hh_ = hh_ * 1099511628211ull + t_own_pdcch.crb[i_] + 1; GWFP(hh_); } /* DECODE-RES own-PDCCH exclusion */
+  { uint64_t hh_ = 0; if (nr_ssb_rm_extra.crb) { hh_ = nr_ssb_rm_extra.symbols; for (int i_ = 0; i_ < 275; i_++) hh_ = hh_ * 1099511628211ull + nr_ssb_rm_extra.crb[i_] + 1; } GWFP(hh_); } /* WIDE-S0 PDCCH exclusion */
   GWFP(nr_dlsch_csi_rb_extent()); /* LOW-MCS: CSI-RS exclusion extent changes the RE set */
 #undef GWFP
   return h;
@@ -1930,13 +1932,97 @@ void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
  * this file pulls in PHY_VARS_NR_UE/NFAPI and can't link into the lightweight test_nr_pdsch_prb_set
  * target. Declared via nr_pdsch_passive_decode.h's include of nr_pdsch_prb_set.h. */
 
+/* pdcch_occ_diag: WIDE-S0 diagnostic (ISAC_PDSCH_PDCCH_OCC_DIAG=1, default off; needs ISAC_PDSCH_DECODE_DIAG=1 ISAC_PDSCH_EVM_RB=1).
+ *   For an S<=1 grant, per RB of the allocation on symbols 0 and 1: the coherence of the received REs at the PDCCH DM-RS positions
+ *   (subcarriers 1, 5, 9; TS 38.211 7.4.1.3) with the PDCCH DM-RS sequence of each nID in ISAC_PDSCH_PDCCH_OCC_IDS (comma list; the PCI
+ *   is always tried), reference point CRB 0. |sum y p*|^2 / (sum|y|^2 sum|p|^2) summed over the receive antennas: ~1 on a PDCCH REG of that
+ *   nID, ~1/3 on PDSCH data. Printed per RB as coherence x 10 (o0/o1), the same over 4-RB blocks (b0), and e0 = symbol-0 over symbol-1 power
+ *   (5 + dB/2). Line DECODEPDCCHOCC. Reads rxdataF only. */
+static void pdcch_occ_diag(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                           const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant,
+                           c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
+{
+  static _Atomic int s_on = -1;
+  static int s_ids[8], s_nid = 0;
+  if (s_on < 0) {
+    const char *e = getenv("ISAC_PDSCH_PDCCH_OCC_IDS");
+    for (const char *p = e; p && *p && s_nid < 7;) {
+      s_ids[s_nid++] = atoi(p);
+      p = strchr(p, ',');
+      if (p) p++;
+    }
+    s_on = getenv("ISAC_PDSCH_PDCCH_OCC_DIAG") && atoi(getenv("ISAC_PDSCH_PDCCH_OCC_DIAG")) ? 1 : 0;
+  }
+  if (!s_on || cfg->start_symbol > 1 || fa->num_rbs < 1 || fa->num_rbs > 275)
+    return;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  int ids[8], n = 0;
+  ids[n++] = fp->Nid_cell;
+  for (int i = 0; i < s_nid; i++)
+    if (s_ids[i] != fp->Nid_cell) ids[n++] = s_ids[i];
+  const int nrb_grid = fp->N_RB_DL < NR_PDCCH_RANK_MAX_RB ? fp->N_RB_DL : NR_PDCCH_RANK_MAX_RB;
+  for (int i = 0; i < n; i++) {
+    char m[2][280], b4[2][280];
+    for (int s = 0; s < 2; s++) {
+      static __thread nr_pdcch_dmrs_rank_grid_t g[4];
+      double num[276] = {0}, den[276] = {0};
+      for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) {
+        if (!nr_pdcch_dmrs_rank_grid(&g[a], rxdataF[a], fp->ofdm_symbol_size, fp->first_carrier_offset, nrb_grid, (uint16_t)ids[i],
+                                     proc->nr_slot_rx, s, 1, 0))
+          continue;
+        for (int r = 0; r < fa->num_rbs; r++) {
+          const int crb = cfg->BWPStart + fa->first_rb + r;
+          if (crb < 0 || crb >= nrb_grid) continue;
+          const double re = g[a].re[0][crb + 1] - g[a].re[0][crb], im = g[a].im[0][crb + 1] - g[a].im[0][crb];
+          num[r] += re * re + im * im;
+          den[r] += (g[a].py[0][crb + 1] - g[a].py[0][crb]) * (g[a].px[0][crb + 1] - g[a].px[0][crb]);
+        }
+      }
+      /* per RB (o) and per 4-RB block aligned on CRB multiples of 4 (b): coherent per RB, power-summed over the block's RBs and antennas */
+      double gn[70] = {0}, gd[70] = {0};
+      for (int r = 0; r < fa->num_rbs; r++) {
+        const int q = (cfg->BWPStart + fa->first_rb + r) / 4;
+        if (q < 70) { gn[q] += num[r]; gd[q] += den[r]; }
+      }
+      for (int r = 0; r < fa->num_rbs; r++) {
+        const int q = (cfg->BWPStart + fa->first_rb + r) / 4;
+        const double c = den[r] > 0 ? num[r] / den[r] : 0, cb = q < 70 && gd[q] > 0 ? gn[q] / gd[q] : 0;
+        m[s][r] = (char)('0' + (c >= 0.9 ? 9 : (int)(c * 10)));
+        b4[s][r] = (char)('0' + (cb >= 0.9 ? 9 : (int)(cb * 10)));
+      }
+      b4[s][fa->num_rbs] = 0;
+      m[s][fa->num_rbs] = 0;
+    }
+    /* e0: symbol-0 power over symbol-1 power per RB, all 12 subcarriers and all antennas, as 5 + dB/2 (5 = equal, 0 = >= 10 dB weaker) */
+    char e0[280];
+    for (int r = 0; r < fa->num_rbs; r++) {
+      double p0 = 0, p1 = 0;
+      const int crb = cfg->BWPStart + fa->first_rb + r;
+      for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++)
+        for (int k = 0; k < 12; k++) {
+          const int sc = (fp->first_carrier_offset + crb * 12 + k) % fp->ofdm_symbol_size;
+          const c16_t y0 = rxdataF[a][sc], y1 = rxdataF[a][fp->ofdm_symbol_size + sc];
+          p0 += (double)y0.r * y0.r + (double)y0.i * y0.i;
+          p1 += (double)y1.r * y1.r + (double)y1.i * y1.i;
+        }
+      const double db = p0 > 0 && p1 > 0 ? 10.0 * log10(p0 / p1) : -99.0;
+      const int v = 5 + (int)lrint(db / 2.0);
+      e0[r] = (char)('0' + (v < 0 ? 0 : v > 9 ? 9 : v));
+    }
+    e0[fa->num_rbs] = 0;
+    LOG_I(PHY, "SENSING: DECODEPDCCHOCC rnti=0x%04x fs=%d.%d abs=%ld S=%u attempt=%d nid=%d rb=%u+%u o0=%s o1=%s b0=%s e0=%s\n", grant->rnti,
+          proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, cfg->start_symbol, t_decode_tdra_attempt, ids[i], fa->first_rb,
+          fa->num_rbs, m[0], m[1], b4[0], e0);
+  }
+}
+
 /* passive_decode_body: one complete passive PDSCH decode of a grant: FEP, channel estimation, equaliser, demodulation (LLRs) and LDPC, in that order.
  *   Starts with the PRG hypothesis (ISAC_PRG_SWEEP), the TBS/LBRM derivation and the GrantWork lookup (skips FEP/chest/LLR when a READY entry exists).
  *   Stages: FEP per symbol with per-antenna parallelism; channel estimate (ISAC_CHEST_*, ISAC_RX_IRC); demodulation (nr_rx_pdsch); LLR fill; LDPC via passive_ldpc_decode().
  *   Other flags read here: ISAC_PTRS_K, ISAC_XANT, ISAC_DC_FIX, ISAC_RX_NVAR_FIX, ISAC_RX_ML_2L, ISAC_PDSCH_EVM, ISAC_PDSCH_LLR_DUMP, ISAC_LLR_SCALE, ISAC_RV_RETRY.
  *   Writes the result to *out and its status (CRC_OK / CRC_FAIL / UNSUPPORTED). Caller: passive_decode_retry() only.
  */
-static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
+static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE *ue,
                                                             const UE_nr_rxtx_proc_t *proc,
                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
                                                             const freq_alloc_bitmap_t *freq_alloc,
@@ -4628,6 +4714,7 @@ gpu_llr_ready:;
               LOG_I(PHY, "SENSING: DECODEEVMRB rnti=0x%04x fs=%d.%d abs=%ld crc=%d attempt=%d rb=%u+%u S=%u s0=%s s1=%s s3=%s\n",
                     grant->rnti, proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, ldpc_ok, t_decode_tdra_attempt,
                     freq_alloc->first_rb, freq_alloc->num_rbs, dlsch_config->start_symbol, rb[0], rb[1], rb[2]);
+              pdcch_occ_diag(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
             }
             if (su)
               LOG_I(PHY, "SENSING: DECODEEVM rnti=0x%04x fs=%d.%d abs=%ld crc=%d attempt=%d sym=[%s] worst=%d k12=[%s]\n",
@@ -5099,6 +5186,66 @@ static int own_pdcch_hypotheses(const nr_pdsch_evm_acc_t *ea, int nrb, uint8_t h
   return n;
 }
 
+static __thread uint8_t t_pdcch_rm_crb[275]; /* WIDE-S0: per-CRB exclusion handed to nr_ssb_rm_extra by pdcch_rm_arm() */
+/* rm_disarm: clears the WIDE-S0 exclusion (nr_ssb_rm_extra). */
+static void rm_disarm(void) { nr_ssb_rm_extra = (nr_ssb_rm_extra_t){0, NULL}; }
+
+/* pdcch_rm_mode: ISAC_PDSCH_PDCCH_RM (WIDE-S0, default 0 = off): 1 = every decode excludes the scheduling PDCCH's REs (grant->pdcch_*) on the
+ *   CORESET symbols the PDSCH spans, as TS 38.214 5.1.4.1 requires; 2 = paired diagnostic: decode as before and, on a CRC failure of a grant that
+ *   overlaps its PDCCH, re-decode the same samples with the exclusion (PDCCHRM line). Cached. Callers: passive_decode_body(), passive_decode_retry(). */
+static int pdcch_rm_mode(void)
+{
+  static _Atomic int s_m = -1;
+  if (s_m < 0) {
+    const char *e = getenv("ISAC_PDSCH_PDCCH_RM");
+    s_m = e ? atoi(e) : 0;
+  }
+  return s_m;
+}
+
+/* pdcch_rm_arm: if the grant carries its scheduling PDCCH and the PDSCH allocation [start_symbol, +number_symbols) overlaps the PDCCH's CORESET
+ *   symbols on at least one of the PDCCH's common RBs, loads that exclusion into nr_ssb_rm_extra (the SSB rate-matching plan's per-CRB/per-symbol
+ *   mask's second layer, nr_ssb_rm_extra) and returns true. The PRB set compared is the allocation's own (contiguous or segmented). */
+static bool pdcch_rm_arm(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant)
+{
+  if (!grant->pdcch_nsym || t_own_pdcch.on || nr_ssb_rm_extra.crb)
+    return false;
+  uint16_t symbols = 0;
+  for (int l = grant->pdcch_sym0; l < grant->pdcch_sym0 + grant->pdcch_nsym && l < 14; l++)
+    if (l >= cfg->start_symbol && l < cfg->start_symbol + cfg->number_symbols)
+      symbols |= (uint16_t)(1u << l);
+  if (!symbols)
+    return false;
+  bool hit = false;
+  for (int rb = 0; rb < cfg->BWPSize && rb < 275 && !hit; rb++) {
+    const int crb = cfg->BWPStart + rb;
+    hit = ((fa->bitmap[rb / 32] >> (rb % 32)) & 1) && crb < 275 && ((grant->pdcch_crb[crb >> 3] >> (crb & 7)) & 1);
+  }
+  if (!hit)
+    return false;
+  for (int c = 0; c < 275; c++)
+    t_pdcch_rm_crb[c] = (grant->pdcch_crb[c >> 3] >> (c & 7)) & 1;
+  nr_ssb_rm_extra = (nr_ssb_rm_extra_t){symbols, t_pdcch_rm_crb};
+  return true;
+}
+
+/* passive_decode_body: passive_decode_body_core() with, under ISAC_PDSCH_PDCCH_RM=1, the scheduling PDCCH's REs excluded (pdcch_rm_arm()).
+ *   Flag unset or the grant without a PDCCH overlap: exactly passive_decode_body_core(). */
+static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
+                                                            const UE_nr_rxtx_proc_t *proc,
+                                                            fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                            const freq_alloc_bitmap_t *freq_alloc,
+                                                            const nr_pdsch_passive_grant_t *grant,
+                                                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                            nr_pdsch_passive_decode_result_t *out)
+{
+  if (pdcch_rm_mode() != 1 || !pdcch_rm_arm(dlsch_config, freq_alloc, grant))
+    return passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  const nr_pdsch_passive_decode_status_t st = passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  rm_disarm();
+  return st;
+}
+
 /* passive_decode_retry: runs passive_decode_body() and, on a CRC failure, tries the recovery arms (default off): TDRA start symbol, CSI-RS rate matching, DM-RS CDM groups, wide MRC.
  *   Arms: ISAC_PDSCH_TDRA_RETRY, ISAC_PDSCH_CSI_RETRY, ISAC_PDSCH_DMRS_CDM_RETRY, ISAC_PDSCH_WIDE_MRC_RETRY, ISAC_PDSCH_CSI_POPULATION_RETRY.
  *   A recovered decode sets out->config_recovered. Each trial re-demodulates the same samples with quiet mode (t_quiet). Caller: passive_decode_qamab() and nr_pdsch_passive_decode().
@@ -5373,6 +5520,51 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     t_quiet = saved_quiet;
     t_decode_tdra_attempt = 0;
     if (recovered)
+      out->config_recovered = true;
+  }
+  /* WIDE-S0 ISAC_PDSCH_PDCCH_RM=2 (paired diagnostic/recovery arm): strictly after every other arm, re-decode the same samples with the scheduling
+   * PDCCH's REs excluded (TS 38.214 5.1.4.1), as parsed and, for an S=1/L=13 parse, as the S=0/L=14 TDRA alias. A pass is a gain on identical
+   * samples over every other arm. Logged as PDCCHRM. The exclusion is the SSB plan's second layer (nr_ssb_rm_extra), so SSB slots are covered. */
+  if (pdcch_rm_mode() == 2 && st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && grant->pdcch_nsym && !t_own_pdcch.on) {
+    const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+    const bool saved_quiet = t_quiet;
+    const double saved_fo_override = nr_slot_fep_fo_override_hz;
+    nr_slot_fep_fo_override_hz = t_last_fep_fo;
+    t_quiet = true;
+    int tried = 0, won = -1;
+    for (int h = 0; h < 2 && won < 0; h++) {
+      fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = original;
+      if (h == 1) {
+        if (!(original.start_symbol == 1 && original.number_symbols == 13))
+          break;
+        cfg.start_symbol = 0;
+        cfg.number_symbols = 14;
+      }
+      if (!pdcch_rm_arm(&cfg, freq_alloc, grant))
+        continue;
+      tried++;
+      t_decode_tdra_attempt = 4 + 64 * (60 + h);
+      st = passive_decode_body_core(ue, proc, &cfg, freq_alloc, grant, rxdataF, out);
+      rm_disarm();
+      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st); }
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
+        won = h;
+        *dlsch_config = cfg;
+      }
+    }
+    if (tried) {
+      if (won < 0) st = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
+      int pf = -1, pl = -1, pn = 0; /* the scheduling PDCCH's common RBs (whole carrier) for the log */
+      for (int c = 0; c < 275; c++)
+        if ((grant->pdcch_crb[c >> 3] >> (c & 7)) & 1) { if (pf < 0) pf = c; pl = c; pn++; }
+      LOG_I(PHY, "SENSING: PDCCHRM rnti=0x%04x fs=%d.%d abs=%ld S=%u L=%u rb=%u+%u tried=%d ok=%d win=%d pdcch=%d-%d/%d sym=%u+%u\n", grant->rnti,
+            proc->frame_rx, proc->nr_slot_rx, grant->source_absolute_slot, original.start_symbol, original.number_symbols, freq_alloc->first_rb,
+            freq_alloc->num_rbs, tried, won >= 0, won, pf, pl, pn, grant->pdcch_sym0, grant->pdcch_nsym);
+    }
+    nr_slot_fep_fo_override_hz = saved_fo_override;
+    t_quiet = saved_quiet;
+    t_decode_tdra_attempt = 0;
+    if (won >= 0)
       out->config_recovered = true;
   }
   return st;
