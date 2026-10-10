@@ -1322,6 +1322,19 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     t_stage = utim_now();
   }
   PUSCH_STAGE(3, "FEP done");
+  if (g->transform_precoding) {
+    /* TS 38.211 6.3.1.4: DFT-s-OFDM needs N_RB = 2^a 3^b 5^c. A wrong layout hypothesis (UL CRC-first trials, e.g.
+     * 70 PRB) would trip the estimator's assert and kill the receiver; it is simply refuted here. */
+    int n = g->num_rb;
+    while (n > 1 && n % 2 == 0) n /= 2;
+    while (n > 1 && n % 3 == 0) n /= 3;
+    while (n > 1 && n % 5 == 0) n /= 5;
+    if (n != 1) {
+      out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+      out->reject_reason = "transform precoding with an N_RB that is not 2^a 3^b 5^c";
+      return false;
+    }
+  }
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, fp, &pdu);
   static atomic_bool tp_scope_logged = false;
