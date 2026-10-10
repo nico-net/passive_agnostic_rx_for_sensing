@@ -111,6 +111,76 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_uss_tracker.h"
 #include "nr_pdcch_joint_live.h"
 #include "nr_pdsch_solver.h"
+#include "nr_pdsch_dmrs_scan.h"
+#include "nr_pdsch_prb_set.h" /* nr_ra_type0_prbs */
+/* TIM-PDSCH: ISAC_PDSCH_DMRS_ID_SCAN (nr_pdsch_passive_queue.c runs the scan; here: per-RNTI hypotheses + reading filter) */
+static bool nr_pdsch_dmrs_scan_on(void)
+{
+  static _Atomic int on = -1;
+  int v = atomic_load(&on);
+  if (v < 0) {
+    v = getenv("ISAC_PDSCH_DMRS_ID_SCAN") && atoi(getenv("ISAC_PDSCH_DMRS_ID_SCAN")) > 0 ? 1 : 0;
+    atomic_store(&on, v);
+  }
+  return v == 1;
+}
+/* dmrs_scan_filter_readings: keep the solver readings whose PRB set carries one of this RNTI's blind DM-RS identities
+ * (same-k' coherence >= 0.5 on the type-A DM-RS symbol of this slot, k0 = 0). Readings of a wrong layout read PRBs that
+ * carry no -- or another UE's -- DM-RS. When none passes (UE too weak, or k0 != 0) the readings are left untouched.
+ * One FEP of the DM-RS symbol per antenna and slot (per-thread cache). Returns the new reading count. */
+static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg,
+                                     uint16_t rnti, const int *ids, int n_ids, nr_pdcch_blind_result_t *rp,
+                                     nr_pdsch_solver_reading_t *rd, int nrd)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int sym = cfg->dmrs_typeA_position + 2, nant = fp->nb_antennas_rx;
+  if (nant > 8 || sym >= fp->symbols_per_slot || cfg->bwp_size == 0) return nrd;
+  static __thread c16_t *buf;
+  static __thread int64_t buf_key = -1;
+  if (buf == NULL) {
+    buf = aligned_alloc(64, ((sizeof(c16_t) * (size_t)nant * fp->samples_per_slot_wCP + 63) / 64) * 64);
+    if (buf == NULL) return nrd;
+  }
+  const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
+  if (buf_key != key) {
+    for (int a = 0; a < nant; a++)
+      nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, sym, a, (c16_t(*)[fp->samples_per_slot_wCP])buf, link_type_dl, 0,
+                      nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
+    buf_key = key;
+  }
+  const int16_t *rx[8];
+  for (int a = 0; a < nant; a++) rx[a] = (const int16_t *)&buf[(size_t)a * fp->samples_per_slot_wCP + (size_t)sym * fp->ofdm_symbol_size];
+  float sc[128];
+  int kept = 0;
+  for (int k = 0; k < nrd && k < 128; k++) {
+    uint16_t crb[275];
+    int n = 0;
+    if (rp[k].ra_type0) {
+      n = nr_ra_type0_prbs(rp[k].rbg_bitmap, rp[k].rbg_bwp_start, cfg->bwp_size, rp[k].rbg_size, crb, 275);
+    } else {
+      for (int q = 0; q < rp[k].num_rb && n < 275; q++) crb[n++] = (uint16_t)(rp[k].start_rb + q);
+    }
+    int m = 0;
+    for (int q = 0; q < n; q++)
+      if (cfg->bwp_start + crb[q] < fp->N_RB_DL) crb[m++] = (uint16_t)(cfg->bwp_start + crb[q]);
+    sc[k] = 0.f;
+    for (int i = 0; i < n_ids && m > 0; i++) {
+      const float v = nr_dmrs_scan_prb_score(rx, nant, fp->ofdm_symbol_size, fp->first_carrier_offset, proc->nr_slot_rx, sym,
+                                             fp->symbols_per_slot, ids[i], rp[k].nscid, crb, m);
+      if (v > sc[k]) sc[k] = v;
+    }
+    kept += sc[k] >= 0.5f;
+  }
+  static _Atomic int s_log = 60;
+  if (atomic_fetch_sub(&s_log, 1) > 0)
+    LOG_A(PHY, "SENSING: DMRS_SCAN filter rnti=0x%04x %d.%d id=%d readings %d -> %d\n", rnti, proc->frame_rx, proc->nr_slot_rx,
+          ids[0], nrd, kept ? kept : nrd);
+  if (kept == 0) return nrd;
+  int w = 0;
+  for (int k = 0; k < nrd && k < 128; k++)
+    if (sc[k] >= 0.5f) { rp[w] = rp[k]; rd[w] = rd[k]; w++; }
+  return w;
+}
 #include "common/utils/nr_core_plan.h" /* janon worker */
 #include "nr_pdcch_joint_solve.h" /* nr_pdcch_joint_prescreen (JOINT_ANON candidate screen) */
 #include "nr_pdcch_al1_map.h"
@@ -9254,8 +9324,25 @@ constdiag_done:;
           *s_last_n_p = sv_nalt;
         }
       }
-      nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt,
-                                  sv_did >= 0 && sv_did != fp->Nid_cell);
+      /* TIM-PDSCH ISAC_PDSCH_DMRS_ID_SCAN: this RNTI's own blind DM-RS identities (nr_pdsch_dmrs_scan.h, voted over its
+       * slots) replace the CORESET's: each as (DM-RS = id, data = PCI) first -- dataScramblingIdentityPDSCH is often
+       * absent while scramblingID0 is per UE (PCI 923) -- then (id, id). Pairs are encoded id | (data + 1) << 16. */
+      int sv_own[2], sv_nown = 0;
+      int32_t sv_pair[4];
+      int sv_npair = 0;
+      if (nr_pdsch_dmrs_scan_on() && rep < 0) { /* solved: its CRC-selected hypothesis stands, no filter */
+        sv_nown = nr_dmrs_scan_rnti_ids(out.rnti, sv_own, 2);
+        for (int q = 0; q < sv_nown; q++) sv_pair[sv_npair++] = sv_own[q] | (int32_t)((fp->Nid_cell + 1) << 16);
+        for (int q = 0; q < sv_nown; q++) sv_pair[sv_npair++] = sv_own[q];
+      }
+      if (sv_npair > 0)
+        nr_pdsch_solver_set_alt_scr32(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_pair,
+                                      sv_npair, true, true);
+      else
+        nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt,
+                                    sv_did >= 0 && sv_did != fp->Nid_cell);
+      if (sv_nown > 0 && nrd > 1)
+        nrd = dmrs_scan_filter_readings(ue, proc, cfg, out.rnti, sv_own, sv_nown, rparsed, rd, nrd);
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
@@ -9287,8 +9374,11 @@ constdiag_done:;
           s_scr_explicit = getenv("ISAC_PDSCH_SOLVER_SCR_EXPLICIT") && atoi(getenv("ISAC_PDSCH_SOLVER_SCR_EXPLICIT"));
         if (s_scr_explicit)
           dl.dlDmrsScramblingId = dl.dlDataScramblingId = fp->Nid_cell;
-        if (var[v].scr >= 0) /* T26c: CRC-selected per-RNTI hypothesis -- a run-time discovered nID */
-          dl.dlDmrsScramblingId = dl.dlDataScramblingId = (uint16_t)var[v].scr;
+        if (var[v].scr >= 0) { /* T26c: CRC-selected per-RNTI hypothesis -- a run-time discovered nID */
+          dl.dlDmrsScramblingId = dl.dlDataScramblingId = (uint16_t)(var[v].scr & 0xffff);
+          if (var[v].scr >> 16) /* TIM-PDSCH pair: data scrambling id + 1 in the upper half (ISAC_PDSCH_DMRS_ID_SCAN only) */
+            dl.dlDataScramblingId = (uint16_t)((var[v].scr >> 16) - 1);
+        }
         if (var[v].rm) {
           const fapi_nr_dl_config_csirs_pdu_rel15_t *rm = sv_rm;
           const int n_rm = sv_nrm;
