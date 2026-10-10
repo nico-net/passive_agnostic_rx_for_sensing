@@ -8,20 +8,10 @@
 #include <sched.h>
 static std::atomic<int> uploaded{0},runs{0},paused{0},errors{0};
 struct Fake { nr_pdcch_nid_iq_t *memory;int rb,dur; };
-/* create: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void *create(int rb,int dur,int,nr_pdcch_nid_iq_t **staging) {
  auto *f=new Fake{(nr_pdcch_nid_iq_t*)calloc((size_t)3*336*dur*12*rb,sizeof(nr_pdcch_nid_iq_t)),rb,dur};
  *staging=f->memory;return f;
 }
-/* upload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int upload(void *p,const nr_pdcch_nid_batch_t *b) {
  auto *f=(Fake*)p;
  while(paused.load())std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -34,20 +24,10 @@ static int upload(void *p,const nr_pdcch_nid_batch_t *b) {
  }
  uploaded++;return 0;
 }
-/* run: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int run(void *,nr_pdcch_nid_result_t *out) {
  runs++;*out={};out->count=1;
  out->records[0]={12000+uploaded.load(),3,1,12,2,0,0,0,1};return 0;
 }
-/* destroy: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void destroy(void *p) {auto *f=(Fake*)p;free(f->memory);delete f;}
 extern "C" void nid_fake_pause(int on) {paused=on;}
 extern "C" int nid_fake_uploaded() {return uploaded.load();}

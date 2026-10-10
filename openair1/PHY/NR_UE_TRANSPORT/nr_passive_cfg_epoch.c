@@ -66,68 +66,33 @@ static pthread_once_t si_options_once = PTHREAD_ONCE_INIT;
 static unsigned si_grace_ms;
 static bool si_bump_without_sib1;
 
-/* read_enable: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_RECONF.
- *   Callers: none found in tree.
- */
 static void read_enable(void)
 {
   const char *s = getenv("ISAC_RECONF");
   enabled = s && strcmp(s, "1") == 0;
 }
-/* is_enabled: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:79, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:207, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:277, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:302 (+9 more).
- */
 static bool is_enabled(void)
 {
   pthread_once(&enable_once, read_enable);
   return enabled;
 }
-/* nr_cfg_reconf_enabled: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1173, executables/nr-ue.c:1824, executables/nr-ue.c:1826, executables/nr-uesoftmodem.c:408 (+106 more).
- */
 bool nr_cfg_reconf_enabled(void) { return is_enabled(); }
-/* read_ignore_sib1: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_IGNORE_SIB1.
- *   Callers: none found in tree.
- */
 static void read_ignore_sib1(void)
 {
   const char *value = getenv("ISAC_TD_IGNORE_SIB1");
   ignore_sib1 = value && strcmp(value, "1") == 0;
 }
-/* nr_cfg_ignore_sib1: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:276, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:281, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:286, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:294 (+25 more).
- */
 bool nr_cfg_ignore_sib1(void)
 {
   pthread_once(&ignore_sib1_once, read_ignore_sib1);
   return ignore_sib1;
 }
-/* nr_cfg_ignore_sib1_reset_for_test: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:68, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:26, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:109, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:128 (+14 more).
- */
 void nr_cfg_ignore_sib1_reset_for_test(void)
 {
   /* Test harnesses call this only between receiver operations, never concurrently. */
   ignore_sib1_once = PTHREAD_ONCE_INIT;
   ignore_sib1 = false;
 }
-/* read_si_options: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_RECONF_SI_BUMP_WITHOUT_SIB1, ISAC_RECONF_SI_GRACE_MS.
- *   Callers: none found in tree.
- */
 static void read_si_options(void)
 {
   const char *grace = getenv("ISAC_RECONF_SI_GRACE_MS");
@@ -135,21 +100,11 @@ static void read_si_options(void)
   const char *setting = getenv("ISAC_RECONF_SI_BUMP_WITHOUT_SIB1");
   si_bump_without_sib1 = !setting || strcmp(setting, "0") != 0;
 }
-/* nr_cfg_si_options_reset_for_test: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:69, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:168, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:175 (+2 more).
- */
 void nr_cfg_si_options_reset_for_test(void)
 {
   /* Test harnesses call this only between receiver operations. */
   si_options_once = PTHREAD_ONCE_INIT;
 }
-/* class_name: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:162.
- */
 static const char *class_name(nr_epoch_class_t c)
 {
   switch (c) {
@@ -175,11 +130,6 @@ static const char *cause_name(nr_epoch_cause_t c)
   }
   return "UNKNOWN";
 }
-/* bump_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:334, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:351, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:362, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:377 (+4 more).
- */
 static void bump_locked(epoch_event_t *event, nr_epoch_class_t cls, nr_epoch_cause_t cause)
 {
   state.epoch++;
@@ -204,11 +154,6 @@ static void bump_locked(epoch_event_t *event, nr_epoch_class_t cls, nr_epoch_cau
   else event_head = queued;
   event_tail = queued;
 }
-/* dispatch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:186.
- */
 static void dispatch(const epoch_event_t *event)
 {
   if (!event->bumped) return;
@@ -224,11 +169,6 @@ static void dispatch(const epoch_event_t *event)
 
 /* Only call from a point with no receiver locks held. One drainer preserves bump order;
  * callbacks may themselves enqueue bumps or attempt a recursive drain. */
-/* nr_cfg_epoch_drain: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:88, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4497, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:69, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:71 (+56 more).
- */
 void nr_cfg_epoch_drain(void)
 {
   if (atomic_flag_test_and_set_explicit(&draining, memory_order_acquire)) return;
@@ -250,11 +190,6 @@ void nr_cfg_epoch_drain(void)
   atomic_flag_clear_explicit(&draining, memory_order_release);
 }
 
-/* nr_cfg_epoch_work_begin: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:57, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:63, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:374, openair1/PHY/NR_UE_TRANSPORT/tests/nr_reconfig_replay_test.cc:207.
- */
 void nr_cfg_epoch_work_begin(nr_cfg_epoch_work_t *work, uint32_t stamp, void *counter)
 {
   *work = (nr_cfg_epoch_work_t){.parent = current_work, .epoch = stamp, .dropped_counter = counter};
@@ -262,26 +197,11 @@ void nr_cfg_epoch_work_begin(nr_cfg_epoch_work_t *work, uint32_t stamp, void *co
       && (!counter || counter == current_work->owner->dropped_counter) ? current_work->owner : work;
   current_work = work;
 }
-/* nr_cfg_epoch_work_end: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:58, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:380, openair1/PHY/NR_UE_TRANSPORT/tests/nr_reconfig_replay_test.cc:209.
- */
 void nr_cfg_epoch_work_end(nr_cfg_epoch_work_t *work) { current_work = work->parent; }
-/* nr_cfg_epoch_work_stamp: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c:75, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:59, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4498, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4562 (+8 more).
- */
 uint32_t nr_cfg_epoch_work_stamp(void)
 {
   return current_work ? current_work->epoch : nr_cfg_epoch_current();
 }
-/* nr_cfg_epoch_work_current: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c:35, openair1/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c:72, openair1/PHY/NR_UE_TRANSPORT/nr_dci_history.c:69, openair1/PHY/NR_UE_TRANSPORT/nr_dci_history.c:73 (+113 more).
- */
 bool nr_cfg_epoch_work_current(void)
 {
   if (!is_enabled() || !current_work || current_work->epoch == nr_cfg_epoch_current()) return true;
@@ -293,41 +213,11 @@ bool nr_cfg_epoch_work_current(void)
   return false;
 }
 
-/* nr_cfg_epoch_current: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:203, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:207, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:65, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1055 (+49 more).
- */
 uint32_t nr_cfg_epoch_current(void) { return atomic_load_explicit(&epoch, memory_order_acquire); }
-/* nr_cfg_epoch_identity_gen: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:70, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:209, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:395, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:1821 (+5 more).
- */
 uint32_t nr_cfg_epoch_identity_gen(void) { return atomic_load_explicit(&identity_gen, memory_order_acquire); }
-/* nr_cfg_epoch_dedicated_current: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ISAC/nr_isac.cc:360, openair1/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c:42, openair1/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c:94, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:46 (+6 more).
- */
 uint32_t nr_cfg_epoch_dedicated_current(void) { return atomic_load_explicit(&dedicated_epoch, memory_order_acquire); }
-/* nr_cfg_epoch_current_slot: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:47, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:2136, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:116.
- */
 uint64_t nr_cfg_epoch_current_slot(void) { return atomic_load_explicit(&current_slot, memory_order_acquire); }
-/* nr_cfg_epoch_cfr_stamp: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ISAC/nr_isac.cc:359, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:73, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2331, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:619 (+8 more).
- */
 uint64_t nr_cfg_epoch_cfr_stamp(void) { return atomic_load_explicit(&cfr_stamp, memory_order_acquire); }
-/* nr_cfg_epoch_snapshot: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:71, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:95, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c:713, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:1813 (+4 more).
- */
 nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void)
 {
   pthread_mutex_lock(&lock);
@@ -335,11 +225,6 @@ nr_cfg_epoch_snapshot_t nr_cfg_epoch_snapshot(void)
   pthread_mutex_unlock(&lock);
   return result;
 }
-/* nr_cfg_epoch_reset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:102, openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc:195, openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc:209, openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci_history_test.cc:504 (+34 more).
- */
 void nr_cfg_epoch_reset(void)
 {
   pthread_mutex_lock(&lock);
@@ -368,11 +253,6 @@ void nr_cfg_epoch_reset(void)
   atomic_store_explicit(&identity_gen, 0, memory_order_release);
   pthread_mutex_unlock(&lock);
 }
-/* nr_cfg_epoch_subscribe: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:414, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:17, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:147, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:182 (+8 more).
- */
 void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn)
 {
   if (!fn) return;
@@ -383,11 +263,6 @@ void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn)
   else LOG_W(PHY, "SENSING: CONFIG_EPOCH listener capacity exhausted\n");
   pthread_mutex_unlock(&lock);
 }
-/* nr_cfg_epoch_set_slots_per_second: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1182, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:94, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:384, openair1/PHY/NR_UE_TRANSPORT/tests/nr_reconfig_replay_test.cc:133.
- */
 void nr_cfg_epoch_set_slots_per_second(uint32_t value)
 {
   if (!value) return;
@@ -396,31 +271,16 @@ void nr_cfg_epoch_set_slots_per_second(uint32_t value)
   reopened.valid = false;
   pthread_mutex_unlock(&lock);
 }
-/* nr_cfg_epoch_set_si_period: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:95, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:113, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:346, openair2/LAYER2/NR_MAC_UE/config_ue.c:2589.
- */
 void nr_cfg_epoch_set_si_period(uint32_t value)
 {
   if (nr_cfg_ignore_sib1()) return;
   if (is_enabled()) atomic_store_explicit(&si_period_slots, value, memory_order_release);
 }
-/* nr_cfg_epoch_si_period: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:96, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8216, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8250, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:119 (+2 more).
- */
 uint32_t nr_cfg_epoch_si_period(void)
 {
   if (nr_cfg_ignore_sib1()) return 0;
   return atomic_load_explicit(&si_period_slots, memory_order_acquire);
 }
-/* nr_cfg_epoch_si_boundary: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:97, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:120, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:386, openair2/LAYER2/NR_MAC_UE/nr_ue_dci_configuration.c:629.
- */
 uint64_t nr_cfg_epoch_si_boundary(void)
 {
   if (nr_cfg_ignore_sib1()) return 0;
@@ -429,11 +289,6 @@ uint64_t nr_cfg_epoch_si_boundary(void)
   pthread_mutex_unlock(&lock);
   return boundary;
 }
-/* nr_cfg_epoch_sib1_request_allowed: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:98, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:121, openair2/LAYER2/NR_MAC_UE/nr_ue_dci_configuration.c:631.
- */
 bool nr_cfg_epoch_sib1_request_allowed(uint64_t abs_slot)
 {
   if (nr_cfg_ignore_sib1()) return false;
@@ -442,11 +297,6 @@ bool nr_cfg_epoch_sib1_request_allowed(uint64_t abs_slot)
   pthread_mutex_unlock(&lock);
   return allowed;
 }
-/* nr_cfg_epoch_si_redecode_pending: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:99, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:122, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:323, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:356 (+1 more).
- */
 bool nr_cfg_epoch_si_redecode_pending(uint64_t abs_slot)
 {
   if (!is_enabled() || nr_cfg_ignore_sib1()) return false;
@@ -455,11 +305,6 @@ bool nr_cfg_epoch_si_redecode_pending(uint64_t abs_slot)
   pthread_mutex_unlock(&lock);
   return needed;
 }
-/* nr_cfg_epoch_observe_slot: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:100, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4474, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4957, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:448 (+4 more).
- */
 uint64_t nr_cfg_epoch_observe_slot(uint16_t sfn, uint8_t slot, uint8_t slots_per_frame)
 {
   if (!slots_per_frame || sfn >= 1024 || slot >= slots_per_frame) return 0;
@@ -473,11 +318,6 @@ uint64_t nr_cfg_epoch_observe_slot(uint16_t sfn, uint8_t slot, uint8_t slots_per
   pthread_mutex_unlock(&lock);
   return absolute;
 }
-/* nr_cfg_epoch_note_identity: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1180, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:74, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:40, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:48 (+17 more).
- */
 void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point_a)
 {
   if (!is_enabled()) return;
@@ -497,11 +337,6 @@ void nr_cfg_epoch_note_identity(uint16_t pci, uint64_t ssb_arfcn, uint64_t point
   pthread_mutex_unlock(&lock);
 
 }
-/* nr_cfg_epoch_refine_point_a: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:75, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:117, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:432, openair2/LAYER2/NR_MAC_UE/config_ue.c:2582.
- */
 void nr_cfg_epoch_refine_point_a(uint64_t point_a)
 {
   if (!is_enabled() || nr_cfg_ignore_sib1() || !point_a) return;
@@ -519,11 +354,6 @@ void nr_cfg_epoch_refine_point_a(uint64_t point_a)
   pthread_mutex_unlock(&lock);
 
 }
-/* nr_cfg_epoch_note_mib: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:76, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:84, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:85, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:123 (+3 more).
- */
 void nr_cfg_epoch_note_mib(uint32_t hash)
 {
   if (!is_enabled()) return;
@@ -534,11 +364,6 @@ void nr_cfg_epoch_note_mib(uint32_t hash)
   pthread_mutex_unlock(&lock);
 
 }
-/* nr_cfg_epoch_note_sib1: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:77, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:93, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:94, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:101 (+21 more).
- */
 bool nr_cfg_epoch_note_sib1(uint32_t hash, uint64_t abs_slot)
 {
   if (nr_cfg_ignore_sib1()) return false;
@@ -555,11 +380,6 @@ bool nr_cfg_epoch_note_sib1(uint32_t hash, uint64_t abs_slot)
   pthread_mutex_unlock(&lock);
   return true;
 }
-/* nr_cfg_epoch_note_si_modification: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:78, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8216, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8250, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:114 (+10 more).
- */
 void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t period)
 {
   if (!is_enabled() || nr_cfg_ignore_sib1() || !period) return;
@@ -580,11 +400,6 @@ void nr_cfg_epoch_note_si_modification(uint64_t abs_slot, uint32_t period)
   LOG_I(PHY, "SENSING: CONFIG_EPOCH pending cause=SI_MODIFICATION_ANNOUNCED boundary=%lu\n",
         (unsigned long)boundary);
 }
-/* nr_cfg_epoch_tick: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:87, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4958, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:115, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:137 (+13 more).
- */
 void nr_cfg_epoch_tick(uint64_t abs_slot)
 {
   if (!is_enabled()) return;
@@ -602,11 +417,6 @@ void nr_cfg_epoch_tick(uint64_t abs_slot)
   pthread_mutex_unlock(&lock);
 
 }
-/* simple_bump: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:429, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:431, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:451, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:452.
- */
 static void simple_bump(nr_epoch_class_t cls, nr_epoch_cause_t cause)
 {
   if (!is_enabled()) return;
@@ -616,19 +426,9 @@ static void simple_bump(nr_epoch_class_t cls, nr_epoch_cause_t cause)
   pthread_mutex_unlock(&lock);
 
 }
-/* nr_cfg_epoch_note_continuity_loss: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:79, openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc:220, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:337, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:443 (+7 more).
- */
 void nr_cfg_epoch_note_continuity_loss(void) { simple_bump(NR_EPOCH_HARD_REVERIFY, NR_CAUSE_CONTINUITY_LOSS); }
 /* nr_cfg_epoch_note_rx_recovery: records a soft configuration epoch caused by an RX recovery (the samples were restarted, the configuration is kept). Caller: executables/nr-ue.c (RX recovery after a stream restart). */
 void nr_cfg_epoch_note_rx_recovery(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_RX_RECOVERY); }
-/* nr_cfg_epoch_note_continuity_loss_samples: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_RECONF_GAP_HARD_MS.
- *   Callers: executables/nr-ue.c:1830, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:83, openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc:214, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_cfg_epoch_test.cc:193 (+8 more).
- */
 void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t samples_per_ms)
 {
   if (!is_enabled()) return;
@@ -648,23 +448,8 @@ void nr_cfg_epoch_note_continuity_loss_samples(int64_t gap_samples, uint64_t sam
   bump_locked(&event, hard ? NR_EPOCH_HARD_REVERIFY : NR_EPOCH_SOFT, NR_CAUSE_CONTINUITY_LOSS);
   pthread_mutex_unlock(&lock);
 }
-/* nr_cfg_epoch_note_bwp_change: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:84, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8279, openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc:216, openair1/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc:221 (+20 more).
- */
 void nr_cfg_epoch_note_bwp_change(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_BWP_CHANGE); }
-/* nr_cfg_epoch_note_csirs_map_change: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:42, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:102, openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:85, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c:469 (+6 more).
- */
 void nr_cfg_epoch_note_csirs_map_change(void) { simple_bump(NR_EPOCH_SOFT, NR_CAUSE_CSIRS_MAP_CHANGE); }
-/* nr_cfg_epoch_note_rnti_reopened: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h:86, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:50, openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:191, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5909 (+20 more).
- */
 void nr_cfg_epoch_note_rnti_reopened(uint16_t rnti, bool was_converged, uint64_t abs_slot)
 {
   if (!is_enabled() || !was_converged) return;

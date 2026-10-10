@@ -195,11 +195,6 @@ void nr_pbch_channel_compensation(const struct complex16 rxdataF_ext[][PBCH_MAX_
   }
 }
 
-/* nr_pbch_detection_mrc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1703.
- */
 static void nr_pbch_detection_mrc(struct complex16 rxdataF_comp[][PBCH_MAX_RE_PER_SYMBOL], uint8_t nb_antennas_rx, int nb_re)
 {
   /* Four channel-compensated branches are combined in a wide accumulator before scaling.
@@ -296,11 +291,6 @@ static __thread int g_pbch_have_good;
 static pbch_sym_diag_t g_pbch_ref[4];
 static volatile int g_pbch_have_ref;
 
-/* nr_pbch_diag_snapshot_reference: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:175, openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:176.
- */
 void nr_pbch_diag_snapshot_reference(void)
 {
   memcpy(g_pbch_ref, g_pbch_diag, sizeof(g_pbch_ref));
@@ -316,11 +306,6 @@ void nr_pbch_diag_snapshot_reference(void)
 unsigned long g_nr_pbch_ok;
 unsigned long g_nr_pbch_fail;
 
-/* nr_pbch_diag_counts: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:2053, executables/nr-ue.c:2055.
- */
 void nr_pbch_diag_counts(unsigned long *ok, unsigned long *fail)
 {
   *ok = g_nr_pbch_ok;
@@ -329,11 +314,6 @@ void nr_pbch_diag_counts(unsigned long *ok, unsigned long *fail)
   g_nr_pbch_fail = 0;
 }
 
-/* nr_pbch_diag_report: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1721, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1722.
- */
 void nr_pbch_diag_report(int success, int frame, int slot, int ssbIndex)
 {
   static __thread int nfail;
@@ -579,11 +559,6 @@ void nr_pbch_live_capture(int nb_ant,
         ssb_start_subcarrier, ofdm_symbol_size, nb_prefix_samples);
 }
 
-/* fnv1a_c16: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:633, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:635, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:637.
- */
 static uint32_t fnv1a_c16(const c16_t *v, int n)
 {
   uint32_t h = 2166136261u;
@@ -597,11 +572,6 @@ static uint32_t fnv1a_c16(const c16_t *v, int n)
   return h;
 }
 
-/* rms_c16: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:634, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:636, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:638, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:725 (+1 more).
- */
 static double rms_c16(const c16_t *v, int n)
 {
   double s = 0.0;
@@ -623,11 +593,6 @@ static double rms_c16(const c16_t *v, int n)
  * If the last one PASSES offline while the online occasion failed, the fault is not in samples or
  * parameters at all but in something only the live path has: a race, buffer reuse/aliasing, or
  * shared scratch state.
- */
-/* pbch_replay_one: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1312, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1313, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1314, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1315.
  */
 static void pbch_replay_one(const NR_DL_FRAME_PARMS *fp,
                             const UE_nr_rxtx_proc_t *proc,
@@ -712,11 +677,6 @@ static void pbch_replay_one(const NR_DL_FRAME_PARMS *fp,
  * antenna set rather than zeroed branches -- zeroing would still be accumulated and would test a
  * different thing.
  */
-/* pbch_replay_mask: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1261, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1268, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1289, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1293.
- */
 static int pbch_replay_mask(const NR_DL_FRAME_PARMS *fp,
                             const UE_nr_rxtx_proc_t *proc,
                             const pbch_snapshot_t *snap,
@@ -793,11 +753,6 @@ static int pbch_replay_mask(const NR_DL_FRAME_PARMS *fp,
  * either way. This measures whether the resulting channel is SMOOTH across subcarriers -- the
  * defining property of a real channel estimate, and what collapses when X is the wrong sequence.
  * |sum conj(H[k])H[k+1]| / sum |H[k]||H[k+1]| in [0,1]; ~1 = coherent, ~0 = random phase. */
-/* chest_coherence: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:820, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:899, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1145.
- */
 static double chest_coherence(const c16_t *h, int n)
 {
   double lr = 0.0, li = 0.0, den = 0.0;
@@ -815,11 +770,6 @@ static double chest_coherence(const c16_t *h, int n)
  * log2_maxh/scaling, equalisation, LLRs, descrambling, polar decode, CRC mask. It deliberately does
  * NOT reuse one i_ssb=0 channel estimate and vary only the descrambling: PBCH DMRS generation is
  * itself a function of the SSB index, so reusing an estimate would test nothing.
- */
-/* pbch_sweep_issb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1299, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1301.
  */
 static void pbch_sweep_issb(const NR_DL_FRAME_PARMS *fp,
                             const UE_nr_rxtx_proc_t *proc,
@@ -916,11 +866,6 @@ typedef struct {
   UE_nr_rxtx_proc_t proc;
 } pbch_scan_arg_t;
 
-/* pbch_cand_score: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:928, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:947, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1074, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1219 (+2 more).
- */
 static double pbch_cand_score(const pbch_scan_arg_t *A, long off, int i_ssb, double cfo_hz, int ant,
                               double *per_sym)
 {
@@ -960,11 +905,6 @@ static double pbch_cand_score(const pbch_scan_arg_t *A, long off, int i_ssb, dou
   return worst;
 }
 
-/* pbch_scan_thread: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void *pbch_scan_thread(void *arg)
 {
   pbch_scan_arg_t *A = (pbch_scan_arg_t *)arg;
@@ -1066,11 +1006,6 @@ typedef struct {
   int i_ssb, ant;
 } occ_delta_t;
 
-/* nr_pbch_measure_delta: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_DELTA_SCAN.
- *   Callers: openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1029, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1031.
- */
 void nr_pbch_measure_delta(const NR_DL_FRAME_PARMS *fp,
                            const UE_nr_rxtx_proc_t *proc,
                            c16_t *const *rxdata,
@@ -1171,11 +1106,6 @@ void nr_pbch_measure_delta(const NR_DL_FRAME_PARMS *fp,
  * index mapping) but touches no filter state, so it is a pure read of the estimator's convention.
  * Also reports the full-symbol peak, so a peak sitting outside the +-CP window is visible rather
  * than silently clipped.
- */
-/* nr_pbch_cir_convention_test: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_CIR_TEST.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1090.
  */
 void nr_pbch_cir_convention_test(const NR_DL_FRAME_PARMS *fp,
                                  const UE_nr_rxtx_proc_t *proc,
@@ -1310,11 +1240,6 @@ int nr_pbch_dmrs_anchor(const NR_DL_FRAME_PARMS *fp,
   return (boff >= 0);
 }
 
-/* nr_pbch_replay_masks: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   static int done = 0;
@@ -1376,11 +1301,6 @@ void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *
     pbch_sweep_issb(fp, proc, &g_pbch_live, 0x4, "LIVE");
 }
 
-/* nr_pbch_replay_2x2: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 void nr_pbch_replay_2x2(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   static int done = 0;
@@ -1396,11 +1316,6 @@ void nr_pbch_replay_2x2(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *pr
   LOG_W(PHY, "SENSING: PBCH2X2 end\n");
 }
 
-/* nr_pbch_replay_golden: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:533, openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:550.
- */
 void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   if (!g_pbch_golden.valid)
@@ -1493,11 +1408,6 @@ void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t 
   LOG_W(PHY, "SENSING: PBCHREPLAY end\n");
 }
 
-/* nr_pbch_quantize: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1657, openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1774, openair1/PHY/NR_UE_TRANSPORT/nr_psbch_rx.c:130, openair1/PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h:385.
- */
 void nr_pbch_quantize(int16_t *pbch_llr8, const int16_t *pbch_llr, const uint16_t len)
 {
   for (int i=0; i<len; i++) {
@@ -1510,11 +1420,6 @@ void nr_pbch_quantize(int16_t *pbch_llr8, const int16_t *pbch_llr, const uint16_
   }
 }
 /*
-/* sign: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.cu:73.
- */
 unsigned char sign(int8_t x) {
   return (unsigned char)x >> 7;
 }
@@ -2000,11 +1905,6 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
   return 0;
 }
 
-/* nr_ue_pbch_freq_offset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h:175, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1315, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1365, openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1745 (+3 more).
- */
 double nr_ue_pbch_freq_offset(const NR_DL_FRAME_PARMS *frame_parms,
                               const c16_t dl_ch_est_symb1[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB],
                               const c16_t dl_ch_est_symb3[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB])

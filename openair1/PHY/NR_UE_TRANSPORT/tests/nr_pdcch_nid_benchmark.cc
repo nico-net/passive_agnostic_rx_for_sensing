@@ -7,11 +7,6 @@
 #include <dlfcn.h>
 #include <vector>
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDCCH_NID_GPU_INCREMENTAL, ISAC_PDCCH_NID_MULTISYMBOL.
- *   Callers: none (program entry point).
- */
 int main(int argc,char **argv) {
  setvbuf(stdout,nullptr,_IOLBF,0);setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL","1",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL","1",1);
  const int rb=argc>1?atoi(argv[1]):217,dur=argc>2?atoi(argv[2]):1,repeats=argc>3?atoi(argv[3]):3;

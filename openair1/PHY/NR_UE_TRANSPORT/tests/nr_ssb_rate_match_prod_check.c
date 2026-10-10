@@ -28,21 +28,11 @@ double cpuf;
 configmodule_interface_t *uniqCfg = NULL;
 openair0_config_t openair0_cfg_g[MAX_CARDS] = {};
 static softmodem_params_t softmodem_params;
-/* get_softmodem_params: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/ocp_itti/intertask_interface.cpp:305, common/utils/telnetsrv/telnetsrv_o1.c:302, common/utils/telnetsrv/telnetsrv_o1.c:311, common/utils/telnetsrv/telnetsrv_o1.c:320 (+248 more).
- */
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;
 }
 static nrUE_params_t nrUE_params;
-/* get_nrUE_params: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue-ru.c:151, executables/nr-ue-ru.c:153, executables/nr-ue-ru.c:167, executables/nr-ue-ru.c:174 (+90 more).
- */
 nrUE_params_t *get_nrUE_params(void)
 {
   return &nrUE_params;
@@ -51,19 +41,9 @@ _Atomic long nr_ue_diag_producer_absolute_slot = -1; // no device timing produce
 _Atomic long nr_ue_diag_producer_wall_ns = 0;
 _Atomic int nr_ue_pending_rebase_valid = 0;
 _Atomic long nr_ue_pending_rebase_delta = 0;
-/* trs_freq_correction: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1033, openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:1251, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:33, openair1/SCHED_NR_UE/defs.h:131 (+1 more).
- */
 void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
 {
 }
-/* exit_function: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:9, common/config/yaml/tests/test_yaml_config.cpp:14, common/platform_types.h:302, common/platform_types.h:306 (+94 more).
- */
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
 {
   fprintf(stderr, "exit_function %s:%d %s: %s\n", file, line, function, s);
@@ -87,11 +67,6 @@ enum { EST = 14 * FFT, CP = FFT / 128 * 9, CP0 = FFT / 128 * 11, MAX_RX = 2 };
 /* Numerology 1, 106 PRBs, 2048-point FFT, case C. The timing fields are the ones nr_slot_fep() reads
  * (nr_init_frame_parms_ue_sa() arithmetic), with an identity symbol/timeshift rotation and the FFT
  * window at the CP end, so the test transmitter below is a plain IDFT + CP. */
-/* make_fp: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:260, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:408, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:509, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:648 (+1 more).
- */
 static void make_fp(NR_DL_FRAME_PARMS *fp, int pci, int ssb_sc, int nb_rx)
 {
   memset(fp, 0, sizeof(*fp));
@@ -124,11 +99,6 @@ static void make_fp(NR_DL_FRAME_PARMS *fp, int pci, int ssb_sc, int nb_rx)
 }
 
 /* TS 38.211 7.4.2.2 / 7.4.2.3, written independently of nr_ssb_rate_match.h. */
-/* sync_seq: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:188, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:512.
- */
 static void sync_seq(int pci, int *pss, int *sss)
 {
   int x[127] = {0, 1, 1, 0, 1, 1, 1}, a[127] = {1}, b[127] = {1};
@@ -145,11 +115,6 @@ static void sync_seq(int pci, int *pss, int *sss)
 }
 
 static uint32_t rng = 1;
-/* bit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:203, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:211, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:582, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:596 (+1 more).
- */
 static int bit(void)
 {
   rng = rng * 1103515245u + 12345u;
@@ -158,11 +123,6 @@ static int bit(void)
 
 /* Seeded, platform-independent Gaussian (xorshift64* + Box-Muller) for the detection-rate check. */
 static uint64_t grng = 0x9e3779b97f4a7c15ull;
-/* uniform01: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:135, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:517, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:518.
- */
 static double uniform01(void)
 {
   grng ^= grng >> 12;
@@ -170,11 +130,6 @@ static double uniform01(void)
   grng ^= grng >> 27;
   return ((grng * 2685821657736338717ull) >> 11) * (1.0 / 9007199254740992.0);
 }
-/* gauss: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:525, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:526.
- */
 static double gauss(void)
 {
   const double u = uniform01() + 1e-300, v = uniform01();
@@ -206,31 +161,16 @@ typedef struct {
   int sign_errors;
 } result_t;
 
-/* scene_ssb_sc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:176, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:184, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:260, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:408.
- */
 static int scene_ssb_sc(const scene_t *sc)
 {
   return sc->ssb_sc ? sc->ssb_sc : SSB_SC;
 }
-/* scene_nb_rx: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:184, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:260.
- */
 static int scene_nb_rx(const scene_t *sc)
 {
   return sc->nb_rx ? sc->nb_rx : 1;
 }
 
 // TS 38.214 5.1.4: every PRB the SSB touches, partial edge PRBs included, is unavailable.
-/* ssb_re: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:195.
- */
 static bool ssb_re(const scene_t *sc, int m, int crb)
 {
   const int sc0 = scene_ssb_sc(sc);
@@ -239,11 +179,6 @@ static bool ssb_re(const scene_t *sc, int m, int crb)
 
 /* Transmitter: SSB (PSS/SSS + PBCH-like fill), DM-RS, and a known QPSK stream in data order, on one
  * frequency grid copied to every live receive antenna. Returns the number of data REs. */
-/* transmit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:272, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:417.
- */
 static uint32_t transmit(const scene_t *sc, const NR_DL_FRAME_PARMS *fp, c16_t grid[][14 * FFT], c16_t *tx)
 {
   const int nb_rx = scene_nb_rx(sc), ssb_sc = scene_ssb_sc(sc);
@@ -286,11 +221,6 @@ static uint32_t transmit(const scene_t *sc, const NR_DL_FRAME_PARMS *fp, c16_t g
   return ntx;
 }
 
-/* grant_config: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:266, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:414.
- */
 static void grant_config(const scene_t *sc, fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *fa)
 {
   memset(cfg, 0, sizeof(*cfg));
@@ -323,11 +253,6 @@ static void grant_config(const scene_t *sc, fapi_nr_dl_config_dlsch_pdu_rel15_t 
   }
 }
 
-/* run: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:770, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:779, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:786, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:799 (+7 more).
- */
 static result_t run(const scene_t *sc)
 {
   result_t r = {0};
@@ -427,11 +352,6 @@ static result_t run(const scene_t *sc)
   return r;
 }
 
-/* contiguous: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:769, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:785, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:806, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:809 (+1 more).
- */
 static scene_t contiguous(int bwp_start, int bwp_size, int prb0, int n, int start, int nsym, int dmrs)
 {
   scene_t sc = {.bwp_start = bwp_start, .bwp_size = bwp_size, .start = start, .nsym = nsym, .dmrs_sym = dmrs,
@@ -442,11 +362,6 @@ static scene_t contiguous(int bwp_start, int bwp_size, int prb0, int n, int star
 }
 
 // Every data RE of the grant, in order, with sum(dl_valid_re)*Qm == G == the transmitter's count.
-/* expect_decodable: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:774, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:782, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:792, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:802 (+4 more).
- */
 static void expect_decodable(const char *name, const result_t *r)
 {
   CHECK(r->planned, "%s: refused", name);
@@ -464,11 +379,6 @@ void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n); // nr_pdsch_p
 
 static uint32_t ldpc_seen_G;
 static int ldpc_calls;
-/* ldpc_recorder: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int32_t ldpc_recorder(nrLDPC_slot_decoding_parameters_t *p)
 {
   ldpc_calls++;
@@ -487,20 +397,10 @@ typedef struct {
   fapi_nr_dl_cw_info_t cw;
 } decode_result_t;
 
-/* snapshot_producer: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static long snapshot_producer(void *unused) { return atomic_load(&nr_ue_diag_producer_absolute_slot); }
 
 /* mode 1: expired borrowed ring; 2: copy before expiry, overwrite live ring;
  * mode 3: same ownership with injected GPU LLRs (host-only GPU handoff test). */
-/* run_decoder_mode: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:488, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:856, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:859, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:861 (+1 more).
- */
 static decode_result_t run_decoder_mode(const scene_t *sc, int nant, int mode)
 {
   decode_result_t d = {0};
@@ -585,18 +485,8 @@ static decode_result_t run_decoder_mode(const scene_t *sc, int nant, int mode)
   return d;
 }
 
-/* run_decoder: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:849, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:851, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:853, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:888 (+1 more).
- */
 static decode_result_t run_decoder(const scene_t *sc) { return run_decoder_mode(sc, 1, 0); }
 
-/* expect_decoder: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:850, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:852, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:854, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:860 (+3 more).
- */
 static void expect_decoder(const char *name, const decode_result_t *d)
 {
   CHECK(d->G == 2 * d->n_tx, "%s: decoder G %u, transmitted %u bits", name, d->G, 2 * d->n_tx);
@@ -613,11 +503,6 @@ static void expect_decoder(const char *name, const decode_result_t *d)
  * across the 127 PSS/SSS subcarriers -- frequency-selective, never a flat fade of the whole band,
  * which is an SNR outage rather than a detector property), one random common phase, and a random
  * CFO-like phase step between the PSS and SSS symbols. Seeded: the count is deterministic. */
-/* observe_trials: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:917, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:918, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:920, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:922.
- */
 static int observe_trials(double snr_db, int trials, bool present, int pci_offset)
 {
   NR_DL_FRAME_PARMS fp;
@@ -661,11 +546,6 @@ static uint32_t zstride;
  * nr_pdsch_dmrs_rx(): c_init = (2^17 (14 n_s + l + 1)(2 N_ID + 1) + 2 N_ID + n_SCID) mod 2^31 (lambda = 0),
  * r(m) = ((1 - 2c(2m)) + j(1 - 2c(2m+1))) / sqrt(2), type 1: DM-RS m on subcarrier 2m + delta counted from
  * CRB 0 (refPoint 0), weighted by w_f(k') = (-1)^k' for odd ports. */
-/* zdmrs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:573.
- */
 static void zdmrs(int slot, int sym, int nid, int m_max, int *re, int *im)
 {
   static uint8_t x1[31 + 1600 + 2 * 6 * 275], x2[31 + 1600 + 2 * 6 * 275];
@@ -687,11 +567,6 @@ static void zdmrs(int slot, int sym, int nid, int m_max, int *re, int *im)
 /* This cell's DM-RS (slot @p slot, symbol @p sym) on antenna mask @p ants, CRBs [crb0, crb1): ports 1000 (and 1001
  * when @p two), data on the other subcarriers (one CDM group). Type 1: m = 2n + k' on k = 4n + 2k'; type 2:
  * m = 2n + k' on k = 6n + k' (TS 38.211 7.4.1.1.2, delta 0). */
-/* zset_dmrs_at: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:591, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:736, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:748, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:751.
- */
 static void zset_dmrs_at(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool two, int slot, int sym, bool type2)
 {
   static int re[6 * 275], im[6 * 275];
@@ -711,20 +586,10 @@ static void zset_dmrs_at(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int cr
         *y = (c16_t){(int16_t)(ZD * (re[m] + w1 * re[m])), (int16_t)(ZD * (im[m] + w1 * im[m]))};
       }
 }
-/* zset_dmrs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:613, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:730.
- */
 static void zset_dmrs(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool two)
 {
   zset_dmrs_at(fp, ants, crb0, crb1, two, 0, 2, false);
 }
-/* zset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:611, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:669, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:694, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:709 (+1 more).
- */
 static void zset(const NR_DL_FRAME_PARMS *fp, int a, int sym, int crb, int k, int amp)
 {
   const int j = (fp->first_carrier_offset + crb * 12 + k) % fp->ofdm_symbol_size;
@@ -732,11 +597,6 @@ static void zset(const NR_DL_FRAME_PARMS *fp, int a, int sym, int crb, int k, in
 }
 /* Noise everywhere (guard bins included); data on every RE of CRBs [crb0, crb1) on symbols 1..13 of the antennas in
  * @p ants, except k8..11 of symbol 13 when @p hole (only on RBs of parity hole_parity, -1 = all). */
-/* zscene: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:656, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:658, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:662, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:666 (+11 more).
- */
 static void zscene(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool hole, int hole_parity)
 {
   for (int a = 0; a < fp->nb_antennas_rx; a++)
@@ -752,11 +612,6 @@ static void zscene(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bo
         }
   zset_dmrs(fp, ants, crb0, crb1, false);
 }
-/* zcfg: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:655, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:661, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:665, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:681 (+3 more).
- */
 static void zcfg(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *fa, int bwp_start, int bwp_size, int rb0,
                  int nrb, int density)
 {
@@ -782,21 +637,11 @@ static void zcfg(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *
   for (int rb = rb0; rb < rb0 + nrb; rb++)
     fa->bitmap[rb / 32] |= 1u << (rb % 32);
 }
-/* zscore: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:657, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:659, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:663, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:678 (+12 more).
- */
 static double zscore(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa,
                      int fep_n, uint16_t skip)
 {
   return nr_pdsch_passive_zp_grant_score(fp, cfg, fa, zgrid, zstride, 0, 1, fep_n, skip, true, 0);
 }
-/* check_zp_grant_evidence: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:925.
- */
 static void check_zp_grant_evidence(void)
 {
   NR_DL_FRAME_PARMS fp;
@@ -910,11 +755,6 @@ static void check_zp_grant_evidence(void)
   printf("ZPGRANT production scorer: Z1-Z15 done\n");
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(void)
 {
   // nr_rx_pdsch()'s LOG macros dereference global state that only logInit() sets up.

@@ -18,11 +18,6 @@ struct Clock {
   }
 };
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(PdschSnapshot, FourAntennasWrapAndSurviveOverwrite) {
   std::array<std::array<uint32_t, 80>, 4> ring{}, copy{};
   const void *src[4]; void *dst[4];
@@ -38,11 +33,6 @@ TEST(PdschSnapshot, FourAntennasWrapAndSurviveOverwrite) {
       EXPECT_EQ(copy[a][i], i < 5 || i >= 75 ? a * 1000 + i + 1 : 0u);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(PdschSnapshot, RejectsFutureExpiredAndOverwriteDuringCopy) {
   uint32_t ring[80] = {}, copy[80] = {};
   const void *src[] = {ring}; void *dst[] = {copy};
@@ -54,11 +44,6 @@ TEST(PdschSnapshot, RejectsFutureExpiredAndOverwriteDuringCopy) {
   EXPECT_TRUE(nr_pdsch_copy_iq(dst, src, 1, sizeof(ring), 0, 40, 100, 20, Clock::read, &clk));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(PdschLatency, InclusiveBoundsAndOverflow) {
   EXPECT_EQ(nr_pdsch_latency_bin(0), 0u);
   EXPECT_EQ(nr_pdsch_latency_bin(100000), 0u);
@@ -73,11 +58,6 @@ TEST(PdschLatency, InclusiveBoundsAndOverflow) {
  * production copy/guard helper above. Injected service times are independent of
  * wall clock, so load assertions do not depend on the host scheduler. */
 struct LoadResult { int offered = 0, decoded = 0, stale = 0, full = 0, peak = 0; };
-/* load: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_passive_schedule_test.cc:102, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_passive_schedule_test.cc:109, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_passive_schedule_test.cc:110, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_passive_schedule_test.cc:116 (+1 more).
- */
 static LoadResult load(int rate, int gpu_us, int cpu_us, bool owned) {
   constexpr int64_t duration = 2000000, base = 100000;
   constexpr int depth = 20;
@@ -117,11 +97,6 @@ static LoadResult load(int rate, int gpu_us, int cpu_us, bool owned) {
   return out;
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
- */
 TEST(PdschLoad, NoStaleThrough200GrantsPerSecond) {
   for (int rate : {20, 50, 100, 200}) {
     const auto r = load(rate, 4000, 1000, true);
@@ -130,11 +105,6 @@ TEST(PdschLoad, NoStaleThrough200GrantsPerSecond) {
     EXPECT_EQ(r.full, 0) << rate;
   }
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
- */
 TEST(PdschLoad, LowLagGpuRoundTripRegression) {
   const auto old = load(50, 4920, 1000, false);
   const auto fixed = load(50, 4920, 1000, true);
@@ -142,21 +112,11 @@ TEST(PdschLoad, LowLagGpuRoundTripRegression) {
   EXPECT_EQ(fixed.decoded, fixed.offered);
   EXPECT_EQ(fixed.stale, 0);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
- */
 TEST(PdschLoad, LongGpuInjectionDoesNotExpireOwnedSamples) {
   const auto r = load(20, 25000, 2000, true);
   EXPECT_EQ(r.decoded, r.offered);
   EXPECT_EQ(r.stale, 0);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
- */
 TEST(PdschLoad, OverloadIsBoundedAndAccounted) {
   for (int rate : {500, 2000, 10000}) {
     const auto r = load(rate, 4000, 1000, true);

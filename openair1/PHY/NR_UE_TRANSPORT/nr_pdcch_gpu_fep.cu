@@ -63,11 +63,6 @@ static float g_llr_scale = 6.0f; /* int16 LLR headroom; same order as nr_pdsch_g
  * (that is a PDSCH DM-RS-only quantity; PDCCH's sequence has none). One thread per (job, symbol);
  * each runs the length-31 Gold LFSR to bit GOLD_WORDS*32, identical recurrence to nr_pdsch_gpu_fep's
  * k_gold (that recurrence is 3GPP-fixed, not PDSCH-specific, so it is copied verbatim on purpose). */
-/* k_gold_pdcch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void k_gold_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, int n, uint32_t *__restrict__ gold)
 {
   const int j = blockIdx.x, s = threadIdx.x;
@@ -94,11 +89,6 @@ __global__ void k_gold_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, int n,
   }
 }
 
-/* gold_qpsk: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:123, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:124, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:250, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:294.
- */
 __device__ inline float2 gold_qpsk(const uint32_t *g, int m)
 {
   /* nr_pdcch_dmrs_ref() returns conj(X) already (dci_nr.c comment); mirrored here directly rather
@@ -106,28 +96,13 @@ __device__ inline float2 gold_qpsk(const uint32_t *g, int m)
   const uint32_t c0 = (g[(2 * m) >> 5] >> ((2 * m) & 31)) & 1u, c1 = (g[(2 * m + 1) >> 5] >> ((2 * m + 1) & 31)) & 1u;
   return make_float2((1.f - 2.f * c0) * 0.70710678f, -(1.f - 2.f * c1) * 0.70710678f);
 }
-/* cmul: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:125, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:255, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:480, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:481 (+2 more).
- */
 __device__ inline float2 cmul(float2 a, float2 b) { return make_float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
-/* cmulc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:164, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:256, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:295, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:459 (+1 more).
- */
 __device__ inline float2 cmulc(float2 a, float2 b) { return make_float2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y); } /* a * conj(b) */
 
 /* ---------------------------------------------------------------- LS chest ----
  * Mirrors nr_dl_channel_estimation.c's nr_pdcch_channel_estimation() non-CH_INTERP branch: LS at
  * each of the 3 pilot REs/RB (k = 1 + 4*p within the RB), no fd-OCC despread (PDCCH has none). One
  * thread per (job, symbol, ant, pilot index n = 0..3*n_rb-1). */
-/* k_ls_pdcch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void k_ls_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, const uint32_t *__restrict__ gold,
                            const float2 *__restrict__ rxF, int N, int max_dur, int nant, int fco,
                            float2 *__restrict__ ls)
@@ -252,11 +227,6 @@ static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
   return 0;
 }
 
-/* api_init: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int api_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
 {
   if (!cfg) return -1;
@@ -280,11 +250,6 @@ static int api_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
  * symbol number is a real input to the 38.211 c_init formula, not a buffer offset -- conflating
  * those two uses was an actual bug caught while writing this (buffer index and c_init's `l` differ
  * by start_symbol and must not share one variable). */
-/* api_upload_slot: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int api_upload_slot(const int16_t *const *rxdataF_symb, int max_duration)
 {
   const auto t0 = std::chrono::steady_clock::now();
@@ -307,11 +272,6 @@ static int api_upload_slot(const int16_t *const *rxdataF_symb, int max_duration)
   return 0;
 }
 
-/* job_total_llr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:277, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:311.
- */
 static inline uint32_t job_total_llr(const nr_gpu_pdcch_job_t *j) { return 2u * j->n_rb * RE_PER_RB_OUT_DMRS * j->duration; }
 
 /* run_chunk: runs one chunk of PDCCH jobs on the GPU and returns the number of LLRs written to llr_out.
@@ -347,11 +307,6 @@ static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint
   return total;
 }
 
-/* api_pdcch_llr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int64_t api_pdcch_llr(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, size_t llr_cap)
 {
   if (g_init_state != 1 || !jobs || !llr_out || n < 0) return -1;
@@ -392,11 +347,6 @@ static int64_t api_pdcch_llr(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, 
   return written;
 }
 
-/* api_timing: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void api_timing(double *upload_us, double *llr_us)
 {
   if (upload_us) *upload_us = g_upload_us;

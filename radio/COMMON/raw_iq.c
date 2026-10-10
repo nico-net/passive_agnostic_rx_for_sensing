@@ -19,11 +19,6 @@ typedef struct {
   double gain[8];
 } replay_state;
 
-/* integer_env: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: radio/COMMON/raw_iq.c:109, radio/COMMON/raw_iq.c:110, radio/COMMON/raw_iq.c:113, radio/COMMON/raw_iq.c:114.
- */
 static uint64_t integer_env(const char *name)
 {
   const char *v = getenv(name);
@@ -35,17 +30,7 @@ static uint64_t integer_env(const char *name)
   return n;
 }
 
-/* idle: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int idle(openair0_device_t *d) { (void)d; return 0; }
-/* finish: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void finish(openair0_device_t *d)
 {
   replay_state *s = d->priv;
@@ -57,11 +42,6 @@ static void finish(openair0_device_t *d)
   free(s); d->priv = NULL;
 }
 
-/* tune: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: radio/COMMON/raw_iq.c:132.
- */
 static int tune(openair0_device_t *d, openair0_config_t *cfg)
 {
   replay_state *s = d->priv;
@@ -78,11 +58,6 @@ static int tune(openair0_device_t *d, openair0_config_t *cfg)
   return 0;
 }
 
-/* gain: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int gain(openair0_device_t *d, openair0_config_t *cfg)
 {
   replay_state *s = d->priv;
@@ -91,11 +66,6 @@ static int gain(openair0_device_t *d, openair0_config_t *cfg)
   return 0;
 }
 
-/* no_tx: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int no_tx(openair0_device_t *d, openair0_timestamp_t t, void **b, int n, int c, int f)
 {
   (void)d; (void)t; (void)b; (void)n; (void)c; (void)f;
@@ -103,11 +73,6 @@ static int no_tx(openair0_device_t *d, openair0_timestamp_t t, void **b, int n, 
   return -1;
 }
 
-/* read_iq: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int n, int c)
 {
   replay_state *s = d->priv;

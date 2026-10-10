@@ -39,44 +39,19 @@ static uint8_t g_ref_u[NPC_MAX_N];
 static int16_t *g_ref_alpha;
 static int16_t g_ref_trace[4 * NPC_MAX_OPS];
 const int16_t *npc_ref_last_trace(void);
-/* npc_ref_last_trace: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:41, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:36, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:147.
- */
 const int16_t *npc_ref_last_trace(void) { return g_ref_trace; }
 int npc_ref_op(int pid, int k, int *code, int *level, int *fli);
-/* npc_ref_op: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:43, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:37, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:149, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:152.
- */
 int npc_ref_op(int pid, int k, int *code, int *level, int *fli)
 { const npc_op_t o = g_dev_copy[pid].ops[k]; *code = o.code; *level = o.level; *fli = o.fli; return g_dev_copy[pid].nops; }
 const int16_t *npc_ref_last_alpha(void);
-/* npc_ref_last_alpha: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:46, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:34, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:141.
- */
 const int16_t *npc_ref_last_alpha(void) { return g_ref_alpha; }
 
-/* all_frozen: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:58.
- */
 static bool all_frozen(const uint8_t *info, int fli, int sz)
 {
   for (int i = 0; i < sz; i++)
     if (info[fli + i]) return false;
   return true;
 }
-/* emit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:61, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:63, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:82.
- */
 static void emit(npc_dev_params_t *p, const uint8_t *info, int level, int fli)
 {
   const int sz = 1 << (level - 1);
@@ -89,11 +64,6 @@ static void emit(npc_dev_params_t *p, const uint8_t *info, int level, int fli)
   p->ops[p->nops++] = (npc_op_t){NPC_OP_B, (uint8_t)level, lf, rf, (uint16_t)fli};
 }
 
-/* npc_register: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.h:37, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:218, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:122, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:183 (+6 more).
- */
 int npc_register(uint16_t dci_length, uint8_t al)
 {
   if (!dci_length || dci_length > NR_DCI_MAX_PAYLOAD || dci_length + 24 > al * 108
@@ -130,11 +100,6 @@ int npc_register(uint16_t dci_length, uint8_t al)
 }
 
 /* The tail of polar_decoder_int16(), same operations in the same order (ones_flag = 1, n_pc = 0). */
-/* finish: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:172, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:201, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:303.
- */
 static void finish(const npc_host_params_t *h, const uint8_t *u, uint32_t *crc_out, nr_dci_bits_t *payload)
 {
   uint64_t B[4] = {0};
@@ -181,18 +146,8 @@ static void finish(const npc_host_params_t *h, const uint8_t *u, uint32_t *crc_o
   *crc_out = crc ^ (uint32_t)rxcrc;
 }
 
-/* now_us: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:170, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:173, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:199, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:202.
- */
 static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
 
-/* npc_decode_batch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.h:49, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:226, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:86, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:128 (+9 more).
- */
 int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload)
 {
   if (n <= 0 || n > g_capacity || !h_pid || !h_llr || !h_u) return -1;
@@ -223,11 +178,6 @@ int npc_decode_batch(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_
  * params pid[i]. Only the n_vec distinct vectors are staged and uploaded -- a dci_length sweep
  * decodes each candidate at ~34 lengths, so this removes ~97 % of the copying. Each vector is
  * staged at the widest E any of its items needs (items sharing a vector share its AL, so all equal). */
-/* npc_decode_batch_vec: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.h:53, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:237, openair1/PHY/NR_UE_TRANSPORT/nr_polar_gpu_mod.c:103.
- */
 int npc_decode_batch_vec(const int16_t *vec, int vstride, int n_vec, const int *vidx, const int *pid, int n,
                          uint32_t *crc, nr_dci_bits_t *payload)
 {
@@ -253,11 +203,6 @@ int npc_decode_batch_vec(const int16_t *vec, int vstride, int n_vec, const int *
   return 0;
 }
 
-/* npc_warmup: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.h:39, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:121, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:176, openair1/PHY/NR_UE_TRANSPORT/nr_polar_gpu_mod.c:129.
- */
 int npc_warmup(int max_items)
 {
   if (g_sealed) return g_capacity >= max_items ? 0 : -1;
@@ -286,26 +231,11 @@ int npc_warmup(int max_items)
   return rc;
 }
 
-/* npc_last_timing: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda.h:58, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:268, openair1/PHY/NR_UE_TRANSPORT/nr_polar_gpu_mod.c:107.
- */
 npc_timing_t npc_last_timing(void) { return g_t; }
 
 /* debug helpers for the test: last batch's u vector of item i, and the pattern tables */
 const uint8_t *npc_dbg_last_u(int i);
-/* npc_dbg_last_u: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:237, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:27, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:132, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:135.
- */
 const uint8_t *npc_dbg_last_u(int i) { return g_last_u + (size_t)i * g_nstride; }
-/* npc_dbg_params: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:28, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:106, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:124.
- */
 int npc_dbg_params(int pid, int *N, int *K, const uint8_t **info, const uint16_t **il)
 {
   *N = g_hp[pid].N; *K = g_hp[pid].K; *info = g_hp[pid].info; *il = g_hp[pid].il; return 0;
@@ -314,49 +244,14 @@ int npc_dbg_params(int pid, int *N, int *K, const uint8_t **info, const uint16_t
 /* Reference walk of the SAME op list with the SAME formulas, in plain sequential C. If this
  * agrees with the GPU but not with polar_decoder_int16(), the formulas are wrong; if it agrees
  * with polar_decoder_int16() but not the GPU, the kernel has a race or a memory bug. */
-/* r_neg: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:248, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:249, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:252.
- */
 static int16_t r_neg(int16_t x) { return x == -32768 ? x : (int16_t)-x; }
-/* r_abs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:252.
- */
 static int16_t r_abs(int16_t x) { return x < 0 ? r_neg(x) : x; }
-/* r_sign: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:252, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:289.
- */
 static int16_t r_sign(int16_t x, int16_t s) { return s < 0 ? r_neg(x) : (s == 0 ? (int16_t)0 : x); }
-/* r_subs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:289.
- */
 static int16_t r_subs(int16_t a, int16_t b) { const int r = (int)a - b; return r > 32767 ? 32767 : (r < -32768 ? -32768 : (int16_t)r); }
-/* r_adds: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:288.
- */
 static int16_t r_adds(int16_t a, int16_t b, int sz) { const int r = (int)a + b; const int lo = (sz & 7) ? -32767 : -32768; return r > 32767 ? 32767 : (r < lo ? (int16_t)lo : (int16_t)r); }
-/* r_f: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:283.
- */
 static int16_t r_f(int16_t a, int16_t b, int sz) { const int16_t aa = r_abs(a), ab = r_abs(b); const int16_t m = aa < ab ? aa : ab; if (sz & 3) return ((a < 0) == (b < 0)) ? m : r_neg(m); return r_sign(m, r_sign(a, b)); }
 
 int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload);
-/* npc_ref_decode: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:254, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:29, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:133, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:196.
- */
 int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t *payload)
 {
   static int16_t alpha[10 * NPC_MAX_N];
@@ -410,9 +305,4 @@ int npc_ref_decode(const npc_item_t *items, int n, uint32_t *crc, nr_dci_bits_t 
   return 0;
 }
 const uint8_t *npc_ref_last_u(void);
-/* npc_ref_last_u: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:307, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:30, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_test.cc:134.
- */
 const uint8_t *npc_ref_last_u(void) { return g_ref_u; }

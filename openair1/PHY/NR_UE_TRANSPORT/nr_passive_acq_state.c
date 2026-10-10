@@ -33,11 +33,6 @@ static const char *state_names[NR_ACQ_NUM_STATES] = {
   "SEARCHING", "PBCH_LOCKED", "SIB1_DECODED", "PDCCH_LOCKED", "CORESET_VERIFIED",
   "CELL_CONFIGURED", "DL_CONVERGED", "UL_CONVERGED", "TRACKING", "LOST",
 };
-/* nr_passive_acq_state_name: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:106, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:134, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:144, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:157 (+4 more).
- */
 const char *nr_passive_acq_state_name(nr_passive_acq_state_t s)
 {
   return (s >= 0 && s < NR_ACQ_NUM_STATES) ? state_names[s] : "INVALID";
@@ -70,11 +65,6 @@ static int ordinal(nr_passive_acq_state_t s)
 }
 /* The state the CURRENT evidence alone supports, with no memory of history. Hysteresis (in
  * nr_passive_acq_update) decides whether a WORSE target is believed yet. */
-/* target_of: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:85.
- */
 static nr_passive_acq_state_t target_of(const nr_passive_acq_inputs_t *in)
 {
   const bool ul_converged = in->ul_width_winners > 0 || in->ul_interp_winners > 0;
@@ -89,11 +79,6 @@ static nr_passive_acq_state_t target_of(const nr_passive_acq_inputs_t *in)
   if (g_pbch_locked)                return NR_ACQ_PBCH_LOCKED;
   return NR_ACQ_SEARCHING;
 }
-/* update_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:125, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:135, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:145.
- */
 static void update_locked(const nr_passive_acq_inputs_t *in)
 {
   const nr_passive_acq_state_t prev = g_snap.state;
@@ -132,11 +117,6 @@ static void update_locked(const nr_passive_acq_inputs_t *in)
     ++g_snap.time_in_state;
   }
 }
-/* nr_passive_acq_update: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:98, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:145, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9668, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9702 (+20 more).
- */
 void nr_passive_acq_update(const nr_passive_acq_inputs_t *in)
 {
   if (!in) return;
@@ -145,11 +125,6 @@ void nr_passive_acq_update(const nr_passive_acq_inputs_t *in)
   update_locked(in);
   pthread_mutex_unlock(&g_lock);
 }
-/* nr_passive_acq_note_pbch_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1172, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:102, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:128, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:139 (+1 more).
- */
 void nr_passive_acq_note_pbch_locked(void)
 {
   pthread_mutex_lock(&g_lock);
@@ -160,11 +135,6 @@ void nr_passive_acq_note_pbch_locked(void)
   update_locked(&g_last_in);
   pthread_mutex_unlock(&g_lock);
 }
-/* nr_passive_acq_note_sib1: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:103, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:130, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:140, openair2/LAYER2/NR_MAC_UE/config_ue.c:2698 (+1 more).
- */
 void nr_passive_acq_note_sib1(void)
 {
   pthread_mutex_lock(&g_lock);
@@ -175,11 +145,6 @@ void nr_passive_acq_note_sib1(void)
   update_locked(&g_last_in);
   pthread_mutex_unlock(&g_lock);
 }
-/* nr_passive_acq_note_sync_loss: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1822, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:152, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:111, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:118 (+2 more).
- */
 void nr_passive_acq_note_sync_loss(void)
 {
   pthread_mutex_lock(&g_lock);
@@ -198,11 +163,6 @@ void nr_passive_acq_note_sync_loss(void)
   }
   pthread_mutex_unlock(&g_lock);
 }
-/* nr_passive_acq_verify_carrier: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:293, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:117, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:155, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:163 (+2 more).
- */
 nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_acq_carrier_t *c)
 {
   nr_passive_acq_carrier_verdict_t v = {0};
@@ -230,11 +190,6 @@ nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_
   }
   return v;
 }
-/* nr_passive_acq_set_phy_geometry: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1170, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:122, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:177.
- */
 void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier, double dl_carrier_hz)
 {
   pthread_mutex_lock(&g_lock);
@@ -244,11 +199,6 @@ void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier,
   pthread_mutex_unlock(&g_lock);
 }
 static nr_tdd_config_t g_tdd;
-/* nr_passive_acq_note_sib1_tdd: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:132, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:202, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:218, openair2/LAYER2/NR_MAC_UE/config_ue.c:2719 (+1 more).
- */
 void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_pattern_t *p2)
 {
   nr_tdd_config_t t;
@@ -263,29 +213,14 @@ void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_patte
           ok ? "DERIVED" : "REJECTED", p1->period_slots, p1->dl_slots, p1->dl_symbols, p1->ul_slots, p1->ul_symbols,
           p2 ? p2->period_slots : 0, p2 ? p2->dl_slots : 0, p2 ? p2->dl_symbols : 0, p2 ? p2->ul_slots : 0, p2 ? p2->ul_symbols : 0);
 }
-/* nr_passive_acq_tdd_known: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:134, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:895, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:995.
- */
 bool nr_passive_acq_tdd_known(void) { return g_tdd.valid; }
 static int g_tdd_ref_mu = -1; /* BC9: SIB1 referenceSubcarrierSpacing; -1 = unknown */
-/* nr_passive_acq_note_sib1_tdd_ref_mu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:136, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:204, openair2/LAYER2/NR_MAC_UE/config_ue.c:2718, openair2/LAYER2/NR_MAC_UE/tests/test_nr_ue_ra_procedures.cpp:55.
- */
 void nr_passive_acq_note_sib1_tdd_ref_mu(int mu)
 {
   pthread_mutex_lock(&g_lock);
   g_tdd_ref_mu = mu;
   pthread_mutex_unlock(&g_lock);
 }
-/* nr_passive_acq_tdd_pdsch_last_symbols: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:140, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:908, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:199, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:203 (+3 more).
- */
 bool nr_passive_acq_tdd_pdsch_last_symbols(uint32_t dci_abs_slot, int mu, int n, int8_t *last)
 {
   pthread_mutex_lock(&g_lock);
@@ -298,11 +233,6 @@ bool nr_passive_acq_tdd_pdsch_last_symbols(uint32_t dci_abs_slot, int mu, int n,
     last[k] = (int8_t)nr_tdd_pdsch_last_symbol(&t, dci_abs_slot + (uint32_t)k);
   return true;
 }
-/* nr_passive_acq_tdd_period_slots: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:142, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:971.
- */
 uint32_t nr_passive_acq_tdd_period_slots(int mu)
 {
   pthread_mutex_lock(&g_lock);
@@ -313,11 +243,6 @@ uint32_t nr_passive_acq_tdd_period_slots(int mu)
     return 0;
   return (uint32_t)t.p1.period_slots + (uint32_t)t.p2.period_slots;
 }
-/* nr_passive_acq_tdd_slot_has_downlink: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:133, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4787, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:447, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:220 (+2 more).
- */
 bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
 {
   pthread_mutex_lock(&g_lock); /* g_tdd is replaced by the SIB1 path: copy it consistently */
@@ -355,11 +280,6 @@ void nr_passive_acq_note_carrier_from_rs(const char *evidence)
   pthread_mutex_unlock(&g_lock);
 }
 
-/* nr_passive_acq_note_sib1_carrier: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_ACQ_RETUNE.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:123, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:175, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:178, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:180 (+2 more).
- */
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {
   pthread_mutex_lock(&g_lock);
@@ -410,11 +330,6 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
   g_snap.carrier = v;
   pthread_mutex_unlock(&g_lock);
 }
-/* nr_passive_acq_snapshot: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:97, openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:153, openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:69, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9704 (+43 more).
- */
 nr_passive_acq_snapshot_t nr_passive_acq_snapshot(void)
 {
   pthread_mutex_lock(&g_lock);
@@ -422,11 +337,6 @@ nr_passive_acq_snapshot_t nr_passive_acq_snapshot(void)
   pthread_mutex_unlock(&g_lock);
   return s;
 }
-/* nr_passive_acq_reset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h:154, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:29, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc:186.
- */
 void nr_passive_acq_reset(void)
 {
   pthread_mutex_lock(&g_lock);

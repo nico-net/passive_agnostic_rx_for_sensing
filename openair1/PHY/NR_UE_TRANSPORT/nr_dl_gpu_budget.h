@@ -7,11 +7,6 @@
  * 400 MB/s of charged coherent traffic. Charge CPU reads+writes as well as DMA.
  * A refused item follows the existing CPU fallback. Caller serializes access. */
 typedef struct { uint64_t next_ns, bytes, refused; } nr_dl_gpu_budget_t;
-/* nr_dl_gpu_budget_take_at: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_dl_gpu_budget.h:21.
- */
 static inline int nr_dl_gpu_budget_take_at(nr_dl_gpu_budget_t *b, uint64_t bytes, uint64_t now)
 {
   if (now < b->next_ns) { __atomic_add_fetch(&b->refused, 1, __ATOMIC_RELAXED); return 0; }
@@ -19,11 +14,6 @@ static inline int nr_dl_gpu_budget_take_at(nr_dl_gpu_budget_t *b, uint64_t bytes
   __atomic_add_fetch(&b->bytes, bytes, __ATOMIC_RELAXED);
   return 1;
 }
-/* nr_dl_gpu_budget_take: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static inline int nr_dl_gpu_budget_take(nr_dl_gpu_budget_t *b, uint64_t bytes)
 {
   struct timespec ts;

@@ -84,11 +84,6 @@ typedef struct {
 #include <stdlib.h>
 #include <string.h>
 /** dlopen libpdsch_gpu.so next to the executable when ISAC_PDSCH_GPU=1; NULL = CPU path. */
-/* nr_gpu_fep_load_impl: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_GPU.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.h:108, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.h:109.
- */
 static inline const nr_gpu_fep_api_t *nr_gpu_fep_load_impl(int prepare)
 {
   static const nr_gpu_fep_api_t *api = NULL;
@@ -110,17 +105,7 @@ static inline const nr_gpu_fep_api_t *nr_gpu_fep_load_impl(int prepare)
   api = get ? get() : NULL;
   return api;
 }
-/* nr_gpu_fep_load: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.h:9.
- */
 static inline const nr_gpu_fep_api_t *nr_gpu_fep_load(void) { return nr_gpu_fep_load_impl(0); }
-/* nr_gpu_fep_prepare: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static inline const nr_gpu_fep_api_t *nr_gpu_fep_prepare(void) { return nr_gpu_fep_load_impl(1); }
 #endif
 

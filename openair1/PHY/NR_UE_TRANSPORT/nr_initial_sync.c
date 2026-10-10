@@ -36,11 +36,6 @@ typedef struct NR_UE_SSB {
   double metric; // metric to order SSB hypothesis
 } NR_UE_SSB;
 
-/* ssb_sort: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int ssb_sort(const void *a, const void *b)
 {
   return ((NR_UE_SSB *)b)->metric - ((NR_UE_SSB *)a)->metric;
@@ -188,11 +183,6 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
   return false;
 }
 
-/* compensate_freq_offset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:343, openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:437.
- */
 static void compensate_freq_offset(c16_t **x, const int nb_antennas_rx, const int x_len, const int offset, const int sampling_rate)
 {
   double s_time = 1.0 / sampling_rate; // sampling time
@@ -209,11 +199,6 @@ static void compensate_freq_offset(c16_t **x, const int nb_antennas_rx, const in
 }
 
 /* rxdataF should be 16 bytes aligned */
-/* generate_table: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:220.
- */
 static void generate_table(nr_ssb_search_params_t *params,
                            c16_t timeshift_symbol_rotation[params->ofdm_symbol_size],
                            c16_t symbol_rotation[224])
@@ -228,11 +213,6 @@ static void generate_table(nr_ssb_search_params_t *params,
                           symbol_rotation);
 }
 
-/* do_time_to_freq: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:238, openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:349.
- */
 static void do_time_to_freq(nr_ssb_search_params_t *params, uint32_t sample_offset)
 {
   c16_t timeshift_symbol_rotation[params->ofdm_symbol_size];
@@ -306,11 +286,6 @@ static void do_time_to_freq(nr_ssb_search_params_t *params, uint32_t sample_offs
 
 /*
  * Common SSB search function used by both initial sync and neighbor cell search
- */
-/* nr_search_ssb_common: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c:289, openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:479, openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:603, openair1/PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h:208.
  */
 bool nr_search_ssb_common(nr_ssb_search_params_t *params)
 {

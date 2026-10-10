@@ -35,11 +35,6 @@ static std::vector<uint8_t> gold(uint32_t cinit, int nbits)
     c[n] = x1[n + 1600] ^ x2[n + 1600];
   return c;
 }
-/* pam: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:128.
- */
 static double pam(int qm, int code)
 {
   /* 38.211 5.1.x written out per level so the GPU's recursion is checked against a different form */
@@ -53,17 +48,7 @@ static double pam(int qm, int code)
   a *= 1 - 2 * b[0];
   return a / sqrt(qm == 2 ? 2 : qm == 4 ? 10 : qm == 6 ? 42 : 170);
 }
-/* dmrs_delta: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:98.
- */
 static int dmrs_delta(int type, int port) { return type == 1 ? ((port >> 1) & 1) : 2 * ((port >> 1) % 3); }
-/* is_data: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:118.
- */
 static int is_data(int type, int ngrp, int kr) { return type == 1 ? (ngrp >= 2 ? 0 : (kr & 1)) : ((kr % 6) >= 2 * ngrp); }
 
 struct Scene {
@@ -76,11 +61,6 @@ struct Scene {
 
 /* Build the slot for one job; returns TX bits in nr_rx_pdsch LLR order. */
 static double g_cross = 1.0; static int g_maxdly = 19; /* gain of the a != l channel entries: 1 = iid (ill-conditioned at rank 4), 0.3 = well conditioned */
-/* make_scene: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:208, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:277.
- */
 static Scene make_scene(const nr_gpu_pdsch_job_t &j, double snr_db, double fo_hz, std::mt19937 &rng)
 {
   Scene sc;
@@ -221,18 +201,8 @@ static Scene make_scene(const nr_gpu_pdsch_job_t &j, double snr_db, double fo_hz
 }
 
 static const nr_gpu_fep_api_t *api;
-/* us_since: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:291, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:300.
- */
 static double us_since(std::chrono::steady_clock::time_point t) { return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count(); }
 
-/* run_case: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:259, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:262, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:264, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:266 (+4 more).
- */
 static int run_case(const char *name, nr_gpu_pdsch_job_t j, double snr_db, double fo_hz, double max_ber, std::mt19937 &rng)
 {
   Scene sc = make_scene(j, snr_db, fo_hz, rng);
@@ -262,11 +232,6 @@ static int run_case(const char *name, nr_gpu_pdsch_job_t j, double snr_db, doubl
   return ber <= max_ber ? 0 : 1;
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(int argc, char **argv)
 {
   void *h = dlopen(argc > 1 ? argv[1] : "./libpdsch_gpu.so", RTLD_NOW);

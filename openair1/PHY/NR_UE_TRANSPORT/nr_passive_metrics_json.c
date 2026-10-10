@@ -42,11 +42,6 @@ static int cb0_json(const nr_passive_metrics_t *m, char *buf, size_t n)
 }
 
 /* Appended only with T21 enabled: the flag-off JSON remains byte-identical. */
-/* pdsch_schedule_json: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c:168.
- */
 static int pdsch_schedule_json(const nr_passive_metrics_t *m, char *buf, size_t n)
 {
   static const char *const stage[] = {"enqueue_dequeue", "enqueue_fep", "fep_ldpc", "enqueue_ldpc", "gpu_wait"};

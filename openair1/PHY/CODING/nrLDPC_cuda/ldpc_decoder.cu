@@ -21,11 +21,6 @@ SPDX-License-Identifier: Apache-2.0
 #define TIMESTAMP_CLOCK_SOURCE CLOCK_MONOTONIC
 
 // START marker-grid-blocks-util
-/* blocks_for: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:50, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:633, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:634, openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:653 (+17 more).
- */
 inline __host__ __device__ uint32_t blocks_for(uint32_t elements, int block_size) {
     return int( uint32_t(elements + (block_size-1)) / uint32_t(block_size) );
 }
@@ -104,11 +99,6 @@ static __thread struct TimeMeasurements input_copy_time = {};
 static __thread struct TimeMeasurements output_copy_time = {};
 static __thread struct TimeMeasurements decoding_time = {};
 
-/* add_measurement: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:578, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:667, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:700.
- */
 static unsigned add_measurement(struct TimeMeasurements* time, unsigned long long time_ns, size_t max_samples) {
     size_t samples = ++time->count;
     if (samples > max_samples)
@@ -140,11 +130,6 @@ struct BaseGraph {
     uint32_t vn_stride;
 };
 
-/* get_basegraph: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:546, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:775, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:873, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1152.
- */
 static BaseGraph get_basegraph(uint32_t BG, uint32_t Z) {
     BaseGraph bg;
     uint32_t num_nnz;
@@ -209,11 +194,6 @@ static BaseGraph get_basegraph(uint32_t BG, uint32_t Z) {
 #define UNROLL_NODES 4
 
 // START marker-cnp-kernel
-/* update_cn_kernel: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __launch_bounds__(UNROLL_NODES*NODE_KERNEL_BLOCK, 3)
 static __global__ void update_cn_kernel(llr_accumulator_t const* __restrict__ llr_total, llr_msg_t* __restrict__ llr_msg,
                                         uint32_t Z, uint32_t const* __restrict__ bg_cn, uint32_t const* __restrict__ bg_cn_degree, uint32_t max_degree, uint32_t num_rows,
@@ -370,11 +350,6 @@ static __global__ void update_cn_kernel(llr_accumulator_t const* __restrict__ ll
 // END marker-cnp-kernel
 
 // START marker-vnp-kernel
-/* update_vn_kernel: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __launch_bounds__(UNROLL_NODES*NODE_KERNEL_BLOCK, 3)
 static __global__ void update_vn_kernel(llr_msg_t const* __restrict__ llr_msg, int8_t const* __restrict__ llr_ch, llr_accumulator_t* __restrict__ llr_total,
                                         uint32_t Z, uint32_t const* __restrict__ bg_vn, uint32_t const* __restrict__ bg_vn_degree, uint32_t max_degree, uint32_t num_cols, uint32_t num_rows,
@@ -459,11 +434,6 @@ static __global__ void update_vn_kernel(llr_msg_t const* __restrict__ llr_msg, i
 }
 // END marker-vnp-kernel
 
-/* compute_syndrome_kernel: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __launch_bounds__(512, 3)
 static __global__ void compute_syndrome_kernel(llr_accumulator_t const* __restrict__ llr_total, uint32_t* __restrict__ syndrome,
                                                uint32_t Z, uint32_t const* __restrict__ bg_cn, uint32_t const* __restrict__ bg_cn_degree, uint32_t max_degree, uint32_t num_rows) {
@@ -500,11 +470,6 @@ static __global__ void compute_syndrome_kernel(llr_accumulator_t const* __restri
 }
 
 /* Batched syndrome for early termination: unsat[b] |= any unsatisfied check of codeword b. */
-/* batch_syndrome_kernel: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __launch_bounds__(512, 3)
 static __global__ void batch_syndrome_kernel(llr_accumulator_t const* __restrict__ llr_total, uint32_t* __restrict__ unsat,
                                              uint32_t const* __restrict__ done, uint32_t Z,
@@ -527,11 +492,6 @@ static __global__ void batch_syndrome_kernel(llr_accumulator_t const* __restrict
     if (__any_sync(0xffffffff, sign) && (threadIdx.x % 32) == 0)
         atomicOr(&unsat[b], 1u);
 }
-/* batch_done_kernel: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static __global__ void batch_done_kernel(uint32_t* __restrict__ unsat, uint32_t* __restrict__ done, uint32_t n) {
     const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b < n) {
@@ -544,11 +504,6 @@ static __global__ void batch_done_kernel(uint32_t* __restrict__ unsat, uint32_t*
 static const uint32_t PACK_BITS_KERNEL_THREADS = 256;
 
 // START marker-pack-bits
-/* pack_bits_kernel: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __launch_bounds__(PACK_BITS_KERNEL_THREADS, 6)
 static __global__ void pack_bits_kernel(llr_accumulator_t const* __restrict__ llr_total, uint8_t* __restrict__ bits, uint32_t block_length,
                                         uint32_t total_stride, uint32_t bits_stride) {
@@ -791,11 +746,6 @@ ThreadContext& ldpc_decoder_init_context(int make_stream) {
  * the old unlocked "if (bg_cn[0][0])" check could allocate twice). Re-initialised after ldpc_decoder_shutdown. */
 static pthread_mutex_t g_tables_mu = PTHREAD_MUTEX_INITIALIZER;
 static void ldpc_tables_init_locked();
-/* ldpc_tables_init: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:760, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:773.
- */
 static int ldpc_tables_init() {
     if (!nr_gpu_module_ready()) return -1;
     pthread_mutex_lock(&g_tables_mu);
@@ -828,11 +778,6 @@ extern "C" int ldpc_cuda_basegraph(uint32_t BG, uint32_t Z, ldpc_cuda_bg_t* out)
     return 0;
 }
 
-/* ldpc_tables_init_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:748, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:753.
- */
 static void ldpc_tables_init_locked() {
     printf("Initializing LDPC runtime %d\n", (int) gettid());
     /* The platform probe sets blocking synchronization and host mapping before context creation. */
@@ -872,11 +817,6 @@ static const uint32_t BATCH_LLR_STRIDE  = MAX_BG_COLS * MAX_Z;
 static const uint32_t BATCH_BITS_STRIDE = (MAX_BLOCK_LENGTH + 7) / 8;
 static const uint32_t BATCH_MSG_STRIDE  = MAX_BG_ROWS * MAX_BG_COLS * MAX_Z;
 
-/* ldpc_batch_free: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:840, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:941, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:954, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:970 (+1 more).
- */
 static void ldpc_batch_free(ThreadContext& c) {
     if (!c.b_cap)
         return;
@@ -891,11 +831,6 @@ static void ldpc_batch_free(ThreadContext& c) {
     c.b_cap = 0;
 }
 
-/* ldpc_batch_reserve: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:857, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1095.
- */
 static void ldpc_batch_reserve(ThreadContext& c, uint32_t n) {
     if (n <= c.b_cap || !nr_gpu_allocations_allowed())
         return;
@@ -1062,11 +997,6 @@ extern "C" void ldpc_decoder_shutdown() {
 
 namespace nb = nanobind;
 
-/* NB_MODULE: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 NB_MODULE(ldpc_decoder, m) {
     m.def("decode", [](uint32_t BG, uint32_t Z,
                        const nb::ndarray<int8_t, nb::shape<-1>, nb::device::cpu>& llrs,
@@ -1111,11 +1041,6 @@ static int g_pool_capturing;   /* the worker is capturing a graph (first use of 
 static uint32_t g_pool_capture_epoch; /* ++ at every capture start: a timeout that overlapped a capture is not a GPU fault */
 #define AST(v, x) __atomic_store_n(&(v), (x), __ATOMIC_SEQ_CST)
 #define ALD(v) __atomic_load_n(&(v), __ATOMIC_SEQ_CST)
-/* pool_hooks_env_once: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1053, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1137.
- */
 static void pool_hooks_env_once() {
     static bool done;
     if (done) return;
@@ -1139,11 +1064,6 @@ extern "C" uint32_t ldpc_pool_capture_epoch(void) { return ALD(g_pool_capture_ep
         if (e_) { rc = (int)e_; pool_log_error(e_, __LINE__); goto fail; } \
     } while (false)
 
-/* pool_log_error: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1064, openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1096.
- */
 static void pool_log_error(cudaError_t e, int line) {
     __atomic_fetch_add(&g_pool_errors, 1, __ATOMIC_RELAXED);
     static uint64_t logged;
@@ -1194,11 +1114,6 @@ extern "C" void ldpc_pool_counters(uint64_t* errors, uint64_t* poisoned) {
 /* Output pattern of a slot that was not decoded. Not all-zero: zero data with a zero CRC would PASS. */
 #define LDPC_POOL_POISON 0xA5
 
-/* pool_poison: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1262.
- */
 static void pool_poison(uint32_t first, uint32_t count) {
     if (!g_pool_bits_host) return; /* after shutdown */
     memset(g_pool_bits_host + (size_t)first * BATCH_BITS_STRIDE, LDPC_POOL_POISON, (size_t)count * BATCH_BITS_STRIDE);
@@ -1207,11 +1122,6 @@ static void pool_poison(uint32_t first, uint32_t count) {
 
 /* One launch of up to POOL_MAX_LAUNCH code blocks; chunk i = host slots [first[i], first[i]+count[i]),
  * block length K[i]. Returns 0 or a cudaError_t / negative code; on non-zero the caller poisons. */
-/* pool_launch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_decoder.cu:1258.
- */
 static int pool_launch(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_chunk, const uint32_t* first, const uint32_t* count,
                        const uint32_t* K) {
     ThreadContext& c = g_pool_ctx;

@@ -27,11 +27,6 @@
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* npg_decode: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const uint8_t *al, int n,
                       uint32_t *crc, nr_dci_bits_t *payload, uint8_t *ok)
 {
@@ -77,11 +72,6 @@ static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const
   return (rc != 0) ? -1 : m;
 }
 
-/* npg_decode_vec: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int npg_decode_vec(const int16_t *vec, int vstride, int n_vec, const uint16_t *vidx, const uint16_t *len,
                           const uint8_t *al, int n, uint32_t *crc, nr_dci_bits_t *payload, uint8_t *ok)
 {
@@ -134,11 +124,6 @@ static int npg_decode_vec(const int16_t *vec, int vstride, int n_vec, const uint
 static const nr_gpu_polar_api_t g_api = {.decode = npg_decode, .decode_vec = npg_decode_vec};
 
 const nr_gpu_polar_api_t *nr_gpu_polar_api_v2(void);
-/* nr_gpu_polar_api_v2: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_polar_gpu_mod.c:126.
- */
 const nr_gpu_polar_api_t *nr_gpu_polar_api_v2(void)
 {
   return npc_warmup(NPG_MAX_ITEMS) == 0 ? &g_api : NULL;

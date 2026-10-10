@@ -121,11 +121,6 @@ _Atomic long nr_ue_diag_producer_wall_ns = 0;
  *
  */
 
-/* start_process_slot_tx: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void start_process_slot_tx(void* arg) {
   notifiedFIFO_elt_t *newTx = arg;
   nr_rxtx_thread_data_t *curMsgTx = NotifiedFifoData(newTx);
@@ -137,11 +132,6 @@ static void start_process_slot_tx(void* arg) {
   }
 }
 
-/* dump_L1_UE_meas_stats: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:163.
- */
 static size_t dump_L1_UE_meas_stats(PHY_VARS_NR_UE *ue, char *output, size_t max_len)
 {
   const char *begin = output;
@@ -157,11 +147,6 @@ static size_t dump_L1_UE_meas_stats(PHY_VARS_NR_UE *ue, char *output, size_t max
   return output - begin;
 }
 
-/* nrL1_UE_stats_thread: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void *nrL1_UE_stats_thread(void *param)
 {
   PHY_VARS_NR_UE *ue = (PHY_VARS_NR_UE *) param;
@@ -186,11 +171,6 @@ static void *nrL1_UE_stats_thread(void *param)
   return NULL;
 }
 
-/* determine_N_TA_offset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1084, executables/nr-ue.c:1967.
- */
 static int determine_N_TA_offset(PHY_VARS_NR_UE *ue) {
   if (ue->sl_mode == 2)
     return 0;
@@ -209,11 +189,6 @@ static int determine_N_TA_offset(PHY_VARS_NR_UE *ue) {
   }
 }
 
-/* init_nr_ue_vars: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TARGET_PCI.
- *   Callers: executables/nr-uesoftmodem.c:595, executables/nr-uesoftmodem.h:145.
- */
 void init_nr_ue_vars(PHY_VARS_NR_UE *ue, uint8_t UE_id)
 {
   int nb_connected_gNB = 1;
@@ -394,11 +369,6 @@ static void UE_synch(void *arg) {
   }
 }
 
-/* nr_ue_slot_select: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:439, executables/nr-ue.c:441, executables/nr-ue.c:442, executables/nr-ue.c:972 (+4 more).
- */
 static int nr_ue_slot_select(const fapi_nr_config_request_t *cfg, int nr_slot)
 {
   if (cfg->cell_config.frame_duplex_type == FDD)
@@ -431,11 +401,6 @@ static int nr_ue_slot_select(const fapi_nr_config_request_t *cfg, int nr_slot)
   return NR_DOWNLINK_SLOT;
 }
 
-/* RU_write: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:581.
- */
 static void RU_write(nr_rxtx_thread_data_t *rxtxD, bool sl_tx_action, c16_t **txp)
 {
   int writeBlockSize = rxtxD->writeBlockSize;
@@ -539,11 +504,6 @@ static void RU_write(nr_rxtx_thread_data_t *rxtxD, bool sl_tx_action, c16_t **tx
   AssertFatal(tmp == writeBlockSize, "write to reorder function failed %d", tmp);
 }
 
-/* processSlotTX: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/SCHED_NR_UE/defs.h:73, openair1/SIMULATION/NR_PHY/dlsim.c:167, openair1/SIMULATION/NR_PHY/prachsim.c:103, openair1/SIMULATION/NR_PHY/ulsim.c:129 (+1 more).
- */
 void processSlotTX(void *arg)
 {
   TracyCZone(ctx, true);
@@ -622,11 +582,6 @@ void processSlotTX(void *arg)
   TracyCZoneEnd(ctx);
 }
 
-/* get_carrier_frequency: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:607, executables/nr-ue.c:608, executables/nr-ue.c:610.
- */
 static uint64_t get_carrier_frequency(const int N_RB, const int mu, const uint32_t pointA_freq_khz)
 {
   const uint64_t bw = (NR_NB_SC_PER_RB * N_RB) * MU_SCS(mu);
@@ -634,11 +589,6 @@ static uint64_t get_carrier_frequency(const int N_RB, const int mu, const uint32
   return carrier_freq;
 }
 
-/* handle_sync_req_from_mac: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1590.
- */
 static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
 {
   NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
@@ -722,11 +672,6 @@ static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
   return 1;
 }
 
-/* UE_dl_preprocessing: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1986, executables/nr-ue.c:2024.
- */
 static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
                                const UE_nr_rxtx_proc_t *proc,
                                int *tx_wait_for_dlsch,
@@ -831,11 +776,6 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
   return sampleShift;
 }
 
-/* UE_dl_processing: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 void UE_dl_processing(void *arg) {
   TracyCZone(ctx, true);;
   nr_rxtx_thread_data_t *rxtxD = (nr_rxtx_thread_data_t *) arg;
@@ -849,11 +789,6 @@ void UE_dl_processing(void *arg) {
   TracyCZoneEnd(ctx);
 }
 
-/* dummyWrite: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:413, executables/nr-ue.c:875, executables/nr-ue.c:1013.
- */
 void dummyWrite(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, int writeBlockSize)
 {
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
@@ -969,11 +904,6 @@ _Atomic long nr_ue_diag_rf_timestamp = 0;
 _Atomic long nr_ue_diag_samples_consumed = 0;
 /* Every mutation of the global timing state, with its call site, so the one that coincides with
  * the coherence collapse is identifiable rather than inferred. */
-/* nr_ue_timing_mutation_log: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:918.
- */
 void nr_ue_timing_mutation_log(const char *what, long before, long after, const char *file, int line)
 {
   static int left = 200;
@@ -1029,11 +959,6 @@ static uint64_t g_census_pw2_n;
  * simply means a non-USRP radio or an older driver, in which case only dBFS is reported. */
 static double (*g_pwr_ref_fn)(int) = NULL;
 static int g_pwr_ref_looked_up = 0;
-/* nr_ue_rx_power_reference_dbm: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:2135.
- */
 static double nr_ue_rx_power_reference_dbm(int ch)
 {
   if (!g_pwr_ref_looked_up) {
@@ -1060,11 +985,6 @@ static long g_census_pow_ant_n;
 static long g_census_ssb_slots;
 static long g_census_slots;
 
-/* syncInFrame: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1475, executables/nr-ue.c:1481, executables/nr-ue.c:1484, executables/nr-ue.c:1493 (+2 more).
- */
 static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, openair0_timestamp_t rx_offset)
 {
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
@@ -1096,21 +1016,11 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
   }
 }
 
-/* get_firstSymSamp: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1026, executables/nr-ue.c:1029, executables/nr-ue.c:1676.
- */
 static inline int get_firstSymSamp(uint16_t slot, const NR_DL_FRAME_PARMS *fp)
 {
   return get_samples_symbol_duration(fp, slot, 0, 1);
 }
 
-/* get_readBlockSize: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:1731.
- */
 static inline int get_readBlockSize(uint16_t slot, const NR_DL_FRAME_PARMS *fp)
 {
   int rem_samples = get_samples_per_slot(slot, fp) - get_firstSymSamp(slot, fp);
@@ -1120,11 +1030,6 @@ static inline int get_readBlockSize(uint16_t slot, const NR_DL_FRAME_PARMS *fp)
   return rem_samples + next_slot_first_symbol;
 }
 
-/* trs_freq_correction: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:1251, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c:33, openair1/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c:44, openair1/SCHED_NR_UE/defs.h:131 (+1 more).
- */
 void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
 {
   if (abs(cfo) > TRS_CFO_THRESH) {
@@ -2541,11 +2446,6 @@ void *UE_thread(void *arg)
   return NULL;
 }
 
-/* init_NR_UE: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:486, executables/nr-uesoftmodem.h:142.
- */
 void init_NR_UE(int nb_inst, char *uecap_file, char *reconfig_file, char *rbconfig_file, int numerology)
 {
   for (int instance_id = 0; instance_id < nb_inst; instance_id++) {

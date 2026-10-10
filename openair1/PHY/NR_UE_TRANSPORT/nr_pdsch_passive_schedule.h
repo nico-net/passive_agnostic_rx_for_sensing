@@ -31,11 +31,6 @@ static inline unsigned nr_pdsch_latency_bin(uint64_t ns)
  * and the GPU API can read the same snapshot. Copy only the slot window, including
  * early-FFT prefix and final-symbol slack. The rest of this private arena is never read.
  * Both guards are essential: a copy straddling overwrite must not gain ownership. */
-/* nr_pdsch_copy_iq: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static inline bool nr_pdsch_copy_iq(void *const dst[], const void *const src[], unsigned nant,
                                    size_t ring_bytes, size_t origin, size_t bytes,
                                    long source, long spf, long (*producer)(void *), void *ctx)

@@ -18,22 +18,12 @@
 
 configmodule_interface_t *uniqCfg = NULL;
 int cpu_meas_enabled = 0; /* referenced by libldpc.so */
-/* exit_function: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:9, common/config/yaml/tests/test_yaml_config.cpp:14, common/platform_types.h:302, common/platform_types.h:306 (+94 more).
- */
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
 {
   fprintf(stderr, "%s:%d %s() %s\n", file, line, function, s ? s : "");
   exit(1);
 }
 
-/* descramble: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/pdsch_cb_offline.c:63, openair1/PHY/NR_UE_TRANSPORT/tests/pdsch_cb_offline.c:64, openair1/PHY/NR_UE_TRANSPORT/tests/pdsch_cb_offline.c:66.
- */
 static void descramble(int16_t *l, uint32_t n, uint32_t c_init)
 {
   uint32_t x1 = 0, x2 = c_init;
@@ -44,11 +34,6 @@ static void descramble(int16_t *l, uint32_t n, uint32_t c_init)
   }
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(int argc, char **argv)
 {
   if (argc < 9) { fprintf(stderr, "usage: %s dump rec A rv tbslbrm nid shift libldpc.so\n", argv[0]); return 2; }

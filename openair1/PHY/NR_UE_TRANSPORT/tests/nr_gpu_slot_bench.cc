@@ -19,18 +19,8 @@ struct Sample {
   std::vector<Stage> stages;
   nr_pdsch_gpu_stage_meta_t meta = {};
 };
-/* us: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:221, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:331.
- */
 static double us(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
 { return std::chrono::duration<double, std::micro>(b - a).count(); }
-/* quantile: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:233, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:282, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:417, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:418.
- */
 static double quantile(std::vector<double> v, double q)
 {
   if (v.empty()) return NAN;

@@ -47,8 +47,13 @@
 > - **ACQ-ROBUST** ([ACQROBUST](docs/superpowers/reports/csd/ACQROBUST.md), `csd/acq-robust` @ 656c623dac = otatest HEAD, merged).
 >   Three flags, all default off (flag off = unchanged behaviour): `ISAC_PDCCH_DWELL_ADAPTIVE=1` (an occasion counts toward the
 >   4000 cap only when its prescreen passed; hard cap 40000), `ISAC_PDCCH_NO_FAKE_FOOTPRINT=1`, `ISAC_PDCCH_NID_GPU_NODROP=1`.
->   `[NOT MEASURED]` Daytime-neutral: no OTA run with these flags is recorded in the report or the OTA log. `ota/t26k.env`
->   (created 2026-10-10 10:36) = t26j + the three flags; not OTA-validated.
+>   `[OTA LIVE 2026-10-10 10:37-10:48]` A/B ab_J1_1_103713 / ab_K1_1_103953 / ab_J2_1_104234 / ab_K2_1_104515; J = `ota/t26j.env`,
+>   K = `ota/t26k.env` = J + `ISAC_PDCCH_DWELL_ADAPTIVE=1 ISAC_PDCCH_NO_FAKE_FOOTPRINT=1 ISAC_PDCCH_NID_GPU_NODROP=1`.
+>   Both arms acquired early; 52-58 RNTIs solved; MCS0-4 >= 10 dB 91-93 %; 0 stalls; GPU check_bad=0.
+>   Neutral in daytime: the adaptive dwell is inactive because the prescreen passes every occasion (energy gate off in our cfg).
+>   NODROP dropped whole snapshots heavily on air (5144 / 9536 per run) and published more noise CORESETs (nid 9020, 41-43
+>   wasted dwells). No-fake-footprint never triggered.
+>   Decision: t26j stays the default; the K flags stay off.
 >
 > **Recommended OTA env: `ota/t26j.env`** (rr-orchestration, 93 settings; `[OTA 2026-10-10 08:16]` daytime run above).
 > It contains the ACQ-FIX flags, MMSE_MODE=2, the CSIRS_FULL set, GPU exact FEP and MRC per-RNTI mode 1. It does not contain the
@@ -79,10 +84,11 @@
 > PID 3245417, worktree `rr-csd-b`) was marked running early in the session and had ended by the later check. Not signalled.
 >
 > **This session (HOUSEKEEPING-2, `csd/doc-comments2`, comment-only).**
-> - Function headers (`/* name: purpose / How it works / ISAC_* flags read / Callers */`) added to 1,539 functions in 105
->   files: the files skipped by the previous round (`remaining.txt`) and the files changed since `80cae1d872`. 67 functions
->   changed in the GPU6, ACQ-FIX, ACQ-ROBUST and CSI-FULL commits were read and given hand-written purpose and how-it-works
->   text. The other headers carry the grep-verified flags and callers, with `TODO(doc)` for purpose and how-it-works.
+> - Function headers kept: 69, all in the GPU/CUDA files (`nr_pdcch_gpu_fep.cu`, `nr_pdsch_gpu_*`, `nr_pdcch_nid_gpu.c`,
+>   the `.cuh` helpers, the bench/test mains). Each was read from its body and given a real purpose and how-it-works text
+>   (a few keep a `TODO(doc)` for an unread tail). Functions changed by GPU6, ACQ-FIX, ACQ-ROBUST and CSI-FULL are covered.
+>   The first commit added 1,470 skeleton headers with `TODO(doc)` purpose and how-it-works; the follow-up commit removed them
+>   as noise. Skeleton-only functions in the remaining files are undocumented.
 > - Deferred (other agents are editing them): `nr_pdsch_passive_decode.c`, `nr_dlsch_demodulation.c`,
 >   `nr_dl_channel_estimation.c`, the `csirs*` files, and `nr_pdcch_blind_monitor*`.
 > - Check: each file's diff is comment-only (no code line changed).

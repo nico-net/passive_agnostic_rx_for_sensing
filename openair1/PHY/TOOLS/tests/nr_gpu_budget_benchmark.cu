@@ -5,19 +5,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-/* load: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:415, openair1/PHY/NR_UE_ISAC/nr_isac.cc:324, openair1/PHY/NR_UE_ISAC/nr_isac.cc:327, openair1/PHY/NR_UE_ISAC/nr_isac.cc:332 (+91 more).
- */
 __global__ void load(unsigned long long cycles) {
   auto start=clock64();while(clock64()-start<cycles) {asm volatile("");}
 }
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_GPU_BUDGET, ISAC_GPU_DISCOVERY_BUDGET_PCT.
- *   Callers: none (program entry point).
- */
 int main() {
   setenv("ISAC_GPU_BUDGET","1",1);
   if(!nr_gpu_platform_probe()->available)return 77;

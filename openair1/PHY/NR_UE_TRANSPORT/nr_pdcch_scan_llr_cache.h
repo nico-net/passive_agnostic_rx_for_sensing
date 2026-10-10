@@ -67,11 +67,6 @@ static inline bool nr_pdcch_scan_llr_get(const nr_pdcch_scan_llr_cache_t *cache,
 
 /* Storage is reserved once per scan thread. Failed allocation leaves the CPU
  * path unchanged. Caller owns the allocated blocks for the thread lifetime. */
-/* nr_pdcch_scan_llr_put: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static inline bool nr_pdcch_scan_llr_put(nr_pdcch_scan_llr_cache_t *cache,
                                          const nr_pdcch_scan_llr_key_t *key, const void *src,
                                          size_t bytes, size_t capacity)

@@ -63,11 +63,6 @@ static struct {
   uint64_t stamp; bool stamp_valid;
 } sr={.lock=PTHREAD_MUTEX_INITIALIZER};
 
-/* srs_budget_checkpoint: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:116, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:121, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:152, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:206.
- */
 static bool srs_budget_checkpoint(struct timespec *cpu_begin)
 {
   struct timespec end,wall;
@@ -80,18 +75,8 @@ static bool srs_budget_checkpoint(struct timespec *cpu_begin)
   return nr_srs_cpu_allow(&sr.idle,now,1000000);
 }
 
-/* nr_srs_passive_enabled: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7783, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8244, openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1008, openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1139 (+8 more).
- */
 bool nr_srs_passive_enabled(void) { return atomic_load_explicit(&sr.active,memory_order_relaxed); }
 
-/* process_srs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:223.
- */
 static void process_srs(srs_job_t *job)
 {
   nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
@@ -225,11 +210,6 @@ static void process_srs(srs_job_t *job)
   }
   if(tracking && !budget_exhausted) nr_srs_confirmed_miss(sr.search,job->meta.abs_slot,seen,nseen);
 }
-/* srs_worker: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void *srs_worker(void *unused)
 {
   for(;;) {
@@ -297,11 +277,6 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   }
   atomic_store_explicit(&sr.active,true,memory_order_release);
 }
-/* nr_srs_passive_stop: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:751, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.h:12.
- */
 void nr_srs_passive_stop(void)
 {
   if(!atomic_exchange_explicit(&sr.active,false,memory_order_acq_rel)) return;
@@ -313,11 +288,6 @@ void nr_srs_passive_stop(void)
   pthread_mutex_unlock(&sr.lock);
   LOG_I(PHY,"SENSING: SRS queue dropped=%lu\n",(unsigned long)atomic_load(&sr.dropped));
 }
-/* nr_srs_passive_capture: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:771, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.h:13.
- */
 void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_slot)
 {
   if(!nr_srs_passive_enabled()) return;
@@ -370,11 +340,6 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
   sr.head=(sr.head+1)%SRS_DEPTH;sr.count++;pthread_mutex_unlock(&sr.lock);
 }
 
-/* post_event: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:358, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:370, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:375, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:382.
- */
 static void post_event(const srs_event_t *event)
 {
   if(!nr_srs_passive_enabled()) return;
@@ -387,21 +352,11 @@ static void post_event(const srs_event_t *event)
   }
   pthread_mutex_unlock(&sr.lock);
 }
-/* nr_srs_passive_trigger: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7784, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8245, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.h:14.
- */
 void nr_srs_passive_trigger(uint16_t rnti,uint64_t slot,unsigned request)
 {
   if(!nr_srs_passive_enabled() || !rnti || !request) return;
   srs_event_t e={.type=0,.rnti=rnti,.slot=slot,.request=request};post_event(&e);
 }
-/* nr_srs_passive_pusch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1140, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.h:18.
- */
 void nr_srs_passive_pusch(uint16_t rnti,uint64_t slot,int ta_est_samples,const float *cfr,const uint32_t *k,int n_re)
 {
   if(!nr_srs_passive_enabled() || !rnti || !cfr || !k || n_re<=0) return;
@@ -414,33 +369,18 @@ void nr_srs_passive_pusch(uint16_t rnti,uint64_t slot,int ta_est_samples,const f
   }
   post_event(&e);
 }
-/* nr_srs_passive_hint: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.h:20, openair2/LAYER2/NR_MAC_UE/nr_passive_rrc_harvest.c:50, openair2/LAYER2/NR_MAC_UE/nr_passive_rrc_harvest.c:61, openair2/LAYER2/NR_MAC_UE/nr_passive_rrc_harvest.c:64.
- */
 void nr_srs_passive_hint(int comb,int offset,int group,int cs)
 {
   if(!nr_srs_passive_enabled()) return;
   srs_event_t e={.type=2,.hint={.comb=comb,.comb_offset=offset,.group=group,.cs=cs}};post_event(&e);
 }
 
-/* nr_srs_passive_grant: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c:32, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.h:21.
- */
 void nr_srs_passive_grant(uint64_t slot,uint16_t mask,int start_rb,int nb_rb)
 {
   if(!nr_srs_passive_enabled()) return;
   srs_event_t e={.type=3,.slot=slot,.request=mask,.hint={.start_rb=start_rb,.nb_rb=nb_rb}};
   post_event(&e);
 }
-/* nr_srs_passive_metrics: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:33, openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:66, openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.h:22.
- */
 void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uint64_t *backoff,
                             uint64_t *budget,uint64_t *resets)
 {

@@ -24,11 +24,6 @@ void raw_iq_close(raw_iq_source *s)
   s->rot_cap = 0;
 }
 
-/* raw_iq_open: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: radio/COMMON/raw_iq.c:112, radio/COMMON/raw_iq_source.h:18, tests/passive_rx/raw_baseline/test_raw_iq.c:29, tests/passive_rx/raw_baseline/test_raw_iq.c:37 (+6 more).
- */
 int raw_iq_open(raw_iq_source *s, const char *root, uint64_t samples,
                 uint64_t first_tick, unsigned channels, double rate,
                 double center, unsigned shift)
@@ -77,11 +72,6 @@ fail:;
   return -1;
 }
 
-/* raw_iq_tune: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: radio/COMMON/raw_iq.c:53, radio/COMMON/raw_iq_source.h:22, tests/passive_rx/raw_baseline/test_raw_iq.c:49, tests/passive_rx/raw_baseline/test_raw_iq.c:50.
- */
 int raw_iq_tune(raw_iq_source *s, double frequency)
 {
   if (!isfinite(frequency) || fabs(frequency - s->center) >= s->rate / 2) {
@@ -92,11 +82,6 @@ int raw_iq_tune(raw_iq_source *s, double frequency)
   return 0;
 }
 
-/* quantize: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: radio/COMMON/raw_iq_source.c:167, radio/COMMON/raw_iq_source.c:181, radio/COMMON/raw_iq_source.c:182.
- */
 static int16_t quantize(raw_iq_source *s, double value)
 {
   value = ldexp(value, -(int)s->shift);

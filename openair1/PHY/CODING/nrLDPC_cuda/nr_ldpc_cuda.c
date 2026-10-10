@@ -48,11 +48,6 @@ struct TimeMeasurements {
 };
 static __thread struct TimeMeasurements trt_time;
 
-/* add_measurement: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static unsigned add_measurement(struct TimeMeasurements* time, unsigned long long time_ns) {
     time->total_ns += time_ns;
     if (time_ns > time->max_ns)
@@ -61,11 +56,6 @@ static unsigned add_measurement(struct TimeMeasurements* time, unsigned long lon
 }
 #endif
 
-/* LDPCinit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/TESTBENCH/ldpctest.c:329, openair1/PHY/CODING/nrLDPC_decoder/nrLDPC_decoder.c:48, openair1/PHY/CODING/nrLDPC_load.c:44.
- */
 int32_t LDPCinit( void )
 {
     context = nr_gpu_module_ready() ? ldpc_decoder_init(1) : NULL;
@@ -78,11 +68,6 @@ int32_t LDPCinit( void )
         return 0; /* CPU implementation remains available */
 }
 
-/* LDPCthreadinit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/nr_ldpc_cuda.c:130.
- */
 int32_t LDPCthreadinit( void ) {
     if (!context) { // only run initialization for new threads
         context = ldpc_decoder_init(1);
@@ -96,11 +81,6 @@ int32_t LDPCthreadinit( void ) {
     return 0;
 }
 
-/* LDPCshutdown: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_decoder/nrLDPC_decoder.c:53, openair1/PHY/CODING/nrLDPC_load.c:51.
- */
 int32_t LDPCshutdown( void )
 {
     printf("Shutting down CUDA LDPC decoder\n");
@@ -109,11 +89,6 @@ int32_t LDPCshutdown( void )
     return 0;
 }
 
-/* LDPCdecoder: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/TESTBENCH/ldpctest.c:335, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_decoder.c:240, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c:10, openair1/PHY/CODING/nrLDPC_cuda/nrLDPC_cpu_fallback.c:3 (+3 more).
- */
 int32_t LDPCdecoder(t_nrLDPC_dec_params *p_decParams,
                     int8_t *p_llr,
                     uint8_t *p_out,
@@ -150,11 +125,6 @@ int32_t LDPCdecoder(t_nrLDPC_dec_params *p_decParams,
     return num_iter;
 }
 
-/* nrLDPC_coding_threadinit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 int32_t nrLDPC_coding_threadinit(void)
 {
   return LDPCthreadinit();

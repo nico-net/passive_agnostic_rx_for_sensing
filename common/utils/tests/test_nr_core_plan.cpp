@@ -7,11 +7,6 @@
 #include <climits>
 #include <unistd.h>
 
-/* host: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/tests/test_nr_core_plan.cpp:65, common/utils/tests/test_nr_core_plan.cpp:74, common/utils/tests/test_nr_core_plan.cpp:84, common/utils/tests/test_nr_core_plan.cpp:116 (+7 more).
- */
 static nr_core_machine_t host(int count, int dpdk_first = -1, bool big_little = false)
 {
   nr_core_machine_t m = {};
@@ -23,11 +18,6 @@ static nr_core_machine_t host(int count, int dpdk_first = -1, bool big_little = 
   }
   return m;
 }
-/* request: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/tests/test_nr_core_plan.cpp:65, common/utils/tests/test_nr_core_plan.cpp:75, common/utils/tests/test_nr_core_plan.cpp:88, common/utils/tests/test_nr_core_plan.cpp:116 (+8 more).
- */
 static nr_core_plan_t request(bool ring, int pdsch=3, bool uhd_without_ring=false)
 {
   nr_core_plan_t p = {};
@@ -40,21 +30,11 @@ static nr_core_plan_t request(bool ring, int pdsch=3, bool uhd_without_ring=fals
   nr_core_plan_add(&p,NR_CP_GPU,1,-1);nr_core_plan_add(&p,NR_CP_CSIRS,1,-1);nr_core_plan_add(&p,NR_CP_NID,1,-1);
   nr_core_plan_add(&p,NR_CP_STATS,1,-1);return p;
 }
-/* cpu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/tests/test_nr_core_plan.cpp:67, common/utils/tests/test_nr_core_plan.cpp:68, common/utils/tests/test_nr_core_plan.cpp:77, common/utils/tests/test_nr_core_plan.cpp:102 (+14 more).
- */
 static int cpu(const nr_core_plan_t &p, nr_core_role_t role, int idx=0)
 {
   for(int i=0;i<p.count;i++) if(p.a[i].role==role && p.a[i].index==idx) return p.a[i].core;
   return -1;
 }
-/* pin: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/tests/test_nr_core_plan.cpp:89, common/utils/tests/test_nr_core_plan.cpp:90, common/utils/tests/test_nr_core_plan.cpp:91, common/utils/tests/test_nr_core_plan.cpp:93 (+1 more).
- */
 static void pin(nr_core_plan_t &p, nr_core_role_t role, int index, int core)
 {
   for (int i=0;i<p.count;i++) if (p.a[i].role==role && p.a[i].index==index) {
@@ -62,11 +42,6 @@ static void pin(nr_core_plan_t &p, nr_core_role_t role, int index, int core)
   }
   FAIL() << "missing role " << nr_core_role_name(role) << '[' << index << ']';
 }
-/* plan_line: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/tests/test_nr_core_plan.cpp:111, common/utils/tests/test_nr_core_plan.cpp:119.
- */
 static void plan_line(const nr_core_plan_t &p)
 {
   printf("SENSING: CORE_PLAN fixture ->");
@@ -74,11 +49,6 @@ static void plan_line(const nr_core_plan_t &p)
                                       p.a[i].core,p.a[i].explicit_core ? "(user)" : "",p.a[i].shared ? "*" : "");
   puts("");
 }
-/* invariant: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/tests/test_nr_core_plan.cpp:66, common/utils/tests/test_nr_core_plan.cpp:119, common/utils/tests/test_nr_core_plan.cpp:124, common/utils/tests/test_nr_core_plan.cpp:133 (+1 more).
- */
 static void invariant(const nr_core_machine_t &m,const nr_core_plan_t &p)
 {
   for(int i=0;i<p.count;i++) {
@@ -90,11 +60,6 @@ static void invariant(const nr_core_machine_t &m,const nr_core_plan_t &p)
     } else EXPECT_TRUE(p.background[c]);
   }
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(CorePlan,Dgx)
 {
   auto m=host(20,17,true);auto p=request(true);char error[512];
@@ -104,11 +69,6 @@ TEST(CorePlan,Dgx)
   for(int i=0;i<p.count;i++) printf("%s[%d]:%d%s ",nr_core_role_name(p.a[i].role),p.a[i].index,p.a[i].core,p.a[i].shared ? "*" : "");
   puts("");
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(CorePlan,DgxCapacityVariation)
 {
   auto m=host(20,17,true); m.capacity[5]=997; m.capacity[15]=1017;
@@ -116,11 +76,6 @@ TEST(CorePlan,DgxCapacityVariation)
   ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
   EXPECT_EQ(5,cpu(p,NR_CP_UE));EXPECT_EQ(15,cpu(p,NR_CP_RING));
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_CSIRS_DISC_DETECT_CORES.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(CorePlan,DgxDedicatedExplicitLayout)
 {
   // spark-74c3: CPUs 0..19, isolated/nohz 17..19, IRQ 0..16,
@@ -156,11 +111,6 @@ TEST(CorePlan,DgxDedicatedExplicitLayout)
     plan_line(p);
   }
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
- */
 TEST(CorePlan,DgxDedicatedAutomaticLayout)
 {
   auto m=host(20,17,true);auto p=request(true);char error[512];
@@ -168,11 +118,6 @@ TEST(CorePlan,DgxDedicatedAutomaticLayout)
   ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
   invariant(m,p);plan_line(p);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
- */
 TEST(CorePlan,Sens6)
 {
   auto m=host(12,9);auto p=request(true);char error[512];
@@ -182,22 +127,12 @@ TEST(CorePlan,Sens6)
   for(int i=0;i<p.count;i++) printf("%s[%d]:%d%s ",nr_core_role_name(p.a[i].role),p.a[i].index,p.a[i].core,p.a[i].shared ? "*" : "");
   puts("");
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
- */
 TEST(CorePlan,EightNoDpdk)
 {
   auto m=host(8);auto p=request(false);char error[512];
   ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;invariant(m,p);
   EXPECT_EQ(0,cpu(p,NR_CP_UE));EXPECT_EQ(4,cpu(p,NR_CP_SCAN));
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
- */
 TEST(CorePlan,OverridesReservedBeforeAutomatic)
 {
   auto m=host(20,17,true);auto p=request(true);char error[512];
@@ -205,11 +140,6 @@ TEST(CorePlan,OverridesReservedBeforeAutomatic)
   ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;invariant(m,p);
   EXPECT_EQ(8,cpu(p,NR_CP_UE));EXPECT_EQ(5,cpu(p,NR_CP_PDSCH));
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1248 more).
- */
 TEST(CorePlan,RejectUnsafeOverridesAndImpossibleHosts)
 {
   char error[512];auto m=host(12,9); auto p=request(true);
@@ -219,11 +149,6 @@ TEST(CorePlan,RejectUnsafeOverridesAndImpossibleHosts)
   EXPECT_TRUE(p.a[0].shared);EXPECT_TRUE(p.a[1].shared);
   p=request(true);m=host(4);EXPECT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1247 more).
- */
 TEST(CorePlan,SparseCpusetAndSmt)
 {
   auto m=host(32,30);for(int i=0;i<16;i++) {m.sibling[i+16]=i;m.cluster[i+16]=m.cluster[i];}
@@ -234,21 +159,11 @@ TEST(CorePlan,SparseCpusetAndSmt)
     if(p.a[i].role<=NR_CP_SYNC) for(int j=0;j<p.count;j++) if(i!=j) { EXPECT_NE(p.a[i].core%16,p.a[j].core%16); }
   }
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1246 more).
- */
 TEST(CorePlan,IrqAndIsolationPreference)
 {
   auto m=host(12);m.irq[7]=0;m.isolated[7]=1;m.nohz[7]=1;auto p=request(false);char error[512];
   ASSERT_EQ(0,nr_core_plan_build(&m,&p,error,sizeof(error)))<<error;EXPECT_EQ(7,cpu(p,NR_CP_UE));
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1245 more).
- */
 TEST(CorePlan,ParsersAndBounds)
 {
   unsigned char mask[NR_CP_MAX_CPUS]={};
@@ -259,11 +174,6 @@ TEST(CorePlan,ParsersAndBounds)
   EXPECT_FALSE(mask[2]);EXPECT_TRUE(mask[17]);EXPECT_TRUE(mask[19]);
   nr_core_plan_t p={};EXPECT_LT(nr_core_plan_add(&p,NR_CP_POOL,INT_MAX,-1),0);EXPECT_LT(nr_core_plan_add(&p,NR_CP_POOL,2,1023),0);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1244 more).
- */
 TEST(CorePlan,DisabledHooksAreInert)
 {
   EXPECT_FALSE(nr_core_plan_active());EXPECT_EQ(-1,nr_core_plan_cpu(NR_CP_UE,0,-1));
@@ -271,11 +181,6 @@ TEST(CorePlan,DisabledHooksAreInert)
 }
 
 /* Actual Linux affinity, in a child so neither the test runner nor other tests inherit it. */
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_UE_RT_CORE.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1243 more).
- */
 TEST(CorePlan,ApplyBeforeThreadEntry)
 {
   nr_core_machine_t probe_machine; nr_core_plan_t probe_plan={}; char probe_error[512];
@@ -334,9 +239,4 @@ TEST(CorePlan,ApplyBeforeThreadEntry)
   },::testing::ExitedWithCode(0),"CORE_PLAN");
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(int argc,char **argv){::testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();}

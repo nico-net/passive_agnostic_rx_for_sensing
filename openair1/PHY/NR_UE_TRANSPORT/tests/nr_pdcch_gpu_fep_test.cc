@@ -43,22 +43,12 @@ static std::vector<uint8_t> gold_bits(uint32_t cinit, int nbits)
     c[n] = x1[n + 1600] ^ x2[n + 1600];
   return c;
 }
-/* qpsk_ref: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_gpu_fep_test.cc:99.
- */
 static void qpsk_ref(const std::vector<uint8_t> &c, int m, double &re, double &im)
 {
   re = (1.0 - 2.0 * c[2 * m]) * M_SQRT1_2;
   im = -(1.0 - 2.0 * c[2 * m + 1]) * M_SQRT1_2; /* nr_pdcch_dmrs_ref() returns conj(X); mirrored here */
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(int argc, char **argv)
 {
   const char *path = argc > 1 ? argv[1] : "./libpdcch_gpu.so";

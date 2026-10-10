@@ -82,11 +82,6 @@ extern "C" void *nr_pdsch_passive_cb0_cpu_ldpc(void) { return nullptr; /* the fi
 extern "C" void nr_pdsch_passive_force_cpu_tb(bool) {}
 
 namespace {
-/* legal_a: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 int32_t legal_a(int, int length, int start, int mapping_b, int add, int maxlen)
 {
   return mapping_b ? 0 : 1 + start * 1000 + length * 40 + add * 3 + maxlen;
@@ -181,11 +176,6 @@ class Cb0Wire : public ::testing::Test {
 
 /* ======================= pure scheduler ======================= */
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(Cb0Sched, HashSubsetUnbiasedAcrossSlotTypes)
 {
   /* 600 hypotheses over 60 geometries; m1 = 3, m2 = 4 -> rate 1/12 on every slot. TDD DDDSU (period 5) and a
@@ -237,11 +227,6 @@ TEST(Cb0Sched, HashSubsetUnbiasedAcrossSlotTypes)
   EXPECT_GT(starved, 0) << "the rotation must alias with DDDSU (test discrimination)";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(Cb0Sched, SelectKeepsForcedAndIsOutcomeFree)
 {
   std::vector<uint64_t> key(200), gkey(200);
@@ -267,11 +252,6 @@ TEST(Cb0Sched, SelectKeepsForcedAndIsOutcomeFree)
   EXPECT_EQ(va, vc);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(Cb0Sched, CostEstimateIgnoresPassPattern)
 {
   /* Same per-iteration cost, different outcomes (passing items stop early: fewer iterations AND less time) ->
@@ -297,11 +277,6 @@ TEST(Cb0Sched, CostEstimateIgnoresPassPattern)
   EXPECT_EQ(za.b_items, zb.b_items);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
- */
 TEST(Cb0Sched, BudgetSizesAndTokenBucket)
 {
   nr_td_cb0_sched_t s;
@@ -342,11 +317,6 @@ TEST(Cb0Sched, BudgetSizesAndTokenBucket)
   EXPECT_TRUE(nr_td_cb0_sched_admit(&s, 2000 + 61000, 1, 0, &planned)); /* +61 us: 6 + 366 */
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
- */
 TEST(Cb0Sched, AdmissibilityTable)
 {
   nr_td_cb0_adm_in_t ok{};
@@ -401,17 +371,7 @@ struct FakeGpu {
   bool healthy = true, mix = false, bump_epoch = false;
 };
 FakeGpu g_fake;
-/* fake_healthy: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 int fake_healthy(void *) { return g_fake.healthy ? 1 : 0; }
-/* fake_decode: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 int fake_decode(void *, const nr_td_cb0_item_t *it, int n, nr_td_cb0_result_t *out)
 {
   const int call = g_fake.calls++;
@@ -422,11 +382,6 @@ int fake_decode(void *, const nr_td_cb0_item_t *it, int n, nr_td_cb0_result_t *o
   return call == g_fake.fail_on ? -5 : 0;
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+494 more).
- */
 TEST_F(Cb0Wire, PoolRefusalRunsSameItemsOnCpu)
 {
   const nr_td_cb0_backend_t be{"exhausted", nullptr,
@@ -450,11 +405,6 @@ TEST_F(Cb0Wire, PoolRefusalRunsSameItemsOnCpu)
   nr_td_cb0_backend_mode_set(NR_TD_CB0_BE_AUTO);
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+493 more).
- */
 TEST_F(Cb0Wire, BackendFallbackOnInjectedGpuFailure)
 {
   std::vector<nr_td_cb0_item_t> it = {g_tb->pass_item(), g_tb->fail_item(), g_tb->pass_item()};
@@ -518,11 +468,6 @@ TEST_F(Cb0Wire, BackendFallbackOnInjectedGpuFailure)
   nr_td_cb0_register_gpu_backend(nullptr);
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+492 more).
- */
 TEST_F(Cb0Wire, GpuFailureMakesTheGrantInadmissibleAndNextGrantRunsOnCpu)
 {
   g_fake = FakeGpu{};
@@ -545,11 +490,6 @@ TEST_F(Cb0Wire, GpuFailureMakesTheGrantInadmissibleAndNextGrantRunsOnCpu)
 
 /* ======================= per-grant glue ======================= */
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+491 more).
- */
 TEST_F(Cb0Wire, FlagOffDoesNothing)
 {
   nr_pdsch_config_sweep_cb0_elim_env_set(0);
@@ -577,11 +517,6 @@ TEST_F(Cb0Wire, FlagOffDoesNothing)
   free(b);
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+490 more).
- */
 TEST_F(Cb0Wire, SetIsFixedBeforeOutcomes)
 {
   /* Two runs over the same grants with OPPOSITE CB0 outcome patterns: the requested set of every grant is identical
@@ -609,11 +544,6 @@ TEST_F(Cb0Wire, SetIsFixedBeforeOutcomes)
   EXPECT_NE(passes[0], passes[1]) << "the two runs really saw different outcomes";
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+489 more).
- */
 TEST_F(Cb0Wire, ScheduledHypothesisAlwaysTestedAndPremiseAlarm)
 {
   const auto t = ticket();
@@ -641,11 +571,6 @@ TEST_F(Cb0Wire, ScheduledHypothesisAlwaysTestedAndPremiseAlarm)
   EXPECT_EQ(stats().inadmissible[NR_TD_CB0_R_DECODER], 1u);
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+488 more).
- */
 TEST_F(Cb0Wire, AdmissibilityGatingAtRuntime)
 {
   const auto t = ticket();
@@ -701,11 +626,6 @@ TEST_F(Cb0Wire, AdmissibilityGatingAtRuntime)
   EXPECT_FALSE(nr_td_cb0_wire_pre(&none, gw, &j, &tb_cpu));
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_CPU_PCT.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+487 more).
- */
 TEST_F(Cb0Wire, BudgetSkipIsWholeGrant)
 {
   setenv("ISAC_TD_CB0_CPU_PCT", "0.0001", 1); /* the bucket barely refills */
@@ -738,11 +658,6 @@ TEST_F(Cb0Wire, BudgetSkipIsWholeGrant)
   unsetenv("ISAC_TD_CB0_CPU_PCT");
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+486 more).
- */
 TEST_F(Cb0Wire, ReindexedContextCreditsNothing)
 {
   const auto t = ticket();
@@ -778,11 +693,6 @@ namespace {
 /* End to end through the merged engine (ELIM fix round 1): a truth whose TB and CB0 pass, every other hypothesis
  * failing both. The engine must eliminate wrong hypotheses through the CB0 channel, never the truth, with 0 premise
  * alarms; the CONVERGED suffix carries the counts. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_ELIM.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+485 more).
- */
 TEST_F(Cb0Wire, EngineEliminatesWrongNeverTruth)
 {
   ASSERT_TRUE(nr_td_cb0a_engine_wired());
@@ -837,11 +747,6 @@ TEST_F(Cb0Wire, EngineEliminatesWrongNeverTruth)
 
 /* A CUDA full-TB outcome noted WITHOUT a batch (budget skip) must make later CPU CB0 batches inadmissible in the engine
  * (dominance), and the engine counts the rejection. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_CPU_PCT.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+484 more).
- */
 TEST_F(Cb0Wire, TbDecoderNotedWithoutBatchBlocksCpuBatches)
 {
   nr_pdsch_config_sweep_cb0_stats_reset();
@@ -863,11 +768,6 @@ TEST_F(Cb0Wire, TbDecoderNotedWithoutBatchBlocksCpuBatches)
 namespace {
 /* Round 2: the CPU backend's persistent pool. Concurrent callers (PDSCH consumers) get exactly the sequential verdicts,
  * and the pool does not grow per batch. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+483 more).
- */
 TEST_F(Cb0Wire, PersistentPoolConcurrentCallersMatchSequential)
 {
   nr_td_cb0_set_threads(8);
@@ -902,11 +802,6 @@ TEST_F(Cb0Wire, PersistentPoolConcurrentCallersMatchSequential)
 namespace {
 /* ======================= TB-decoder forcing (2026-10-04 review) ======================= */
 /* pre's TB-decoder decision for one acquiring grant (no run / feed) */
-/* pre_tb_cpu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:830, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:832, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:833, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:835 (+8 more).
- */
 bool pre_tb_cpu(nr_td_grantwork_t *gw, const nr_pdsch_sweep_ticket_t &t, int64_t slot, bool gw_on = true, bool gpu_job = false,
                 int k0 = -1)
 {
@@ -928,11 +823,6 @@ bool pre_tb_cpu(nr_td_grantwork_t *gw, const nr_pdsch_sweep_ticket_t &t, int64_t
 }
 
 /* The CPU TB decoder is forced ONLY for a grant whose CB0 batch will run on the CPU backend and has no pre-decode reason. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_BACKEND, ISAC_TD_CB0_CPU_PCT, ISAC_TD_CB0_GPU_ITERS, ISAC_TD_GRANTWORK, ISAC_TD_TB_CPU_WHILE_ACQ.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+482 more).
- */
 TEST_F(Cb0Wire, TbForcedOnlyForCpuBackendBatches)
 {
   const auto t = ticket();
@@ -987,11 +877,6 @@ TEST_F(Cb0Wire, TbForcedOnlyForCpuBackendBatches)
 /* Safety net: the TB was NOT forced (GPU predicted) and decoded on CUDA, then the batch falls back to the CPU backend (the GPU
  * became unhealthy / backed off between pre and run): the grant is inadmissible (DECODER), the engine credits nothing, and the
  * engine's epoch rule then rejects the next CPU batch too (the epoch saw a CUDA TB). */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+481 more).
- */
 TEST_F(Cb0Wire, CpuFallbackAfterCudaTbIsInadmissible)
 {
   nr_pdsch_config_sweep_cb0_stats_reset();
@@ -1042,11 +927,6 @@ TEST_F(Cb0Wire, CpuFallbackAfterCudaTbIsInadmissible)
 }
 
 /* ISAC_LLR_SCALE: the decode rescales iff atoi() > 0 (1 included); every such value makes the grant inadmissible, others do not. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_LLR_SCALE.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+480 more).
- */
 TEST_F(Cb0Wire, LlrScaleFollowsTheDecodeRule)
 {
   const auto t = ticket();
@@ -1082,11 +962,6 @@ TEST_F(Cb0Wire, LlrScaleFollowsTheDecodeRule)
 }  // namespace
 
 namespace {
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_RECONF.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+479 more).
- */
 TEST_F(Cb0Wire, EpochStraddleDuringGpuBatchCreditsNothing)
 {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";
@@ -1124,11 +999,6 @@ TEST_F(Cb0Wire, EpochStraddleDuringGpuBatchCreditsNothing)
   EXPECT_EQ(stats().admissible, 1u);
 }
 
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_RECONF.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+478 more).
- */
 TEST_F(Cb0Wire, EpochBumpBeforeBatchDoesNotDecode)
 {
   if (!nr_cfg_reconf_enabled()) GTEST_SKIP() << "ISAC_RECONF=1 fixture";

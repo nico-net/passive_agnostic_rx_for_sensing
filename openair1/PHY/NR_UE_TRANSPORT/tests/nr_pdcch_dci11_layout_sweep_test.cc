@@ -10,21 +10,11 @@ extern "C" {
 }
 
 // RIV width for a BWP, as nr_pdcch_blind_dci_size() computes it.
-/* riv_bits_for: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:47, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:64, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:79, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:176 (+21 more).
- */
 static uint16_t riv_bits_for(uint16_t n_rb)
 {
   return (uint16_t)std::ceil(std::log2((double)n_rb * (double)(n_rb + 1) / 2.0));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(Dci11Layout, OffsetsFollowTheSpecFieldOrder) {
   // Fields must come out in TS 38.212 7.3.1.2.2 order and be contiguous.
   nr_dci11_layout_t l{};
@@ -40,11 +30,6 @@ TEST(Dci11Layout, OffsetsFollowTheSpecFieldOrder) {
   EXPECT_EQ(o.total, o.dmrs_init + 1);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(Dci11Layout, RejectsImpossibleLayouts) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 3; l.ant_ports = 4;                       // n_dl_bwp gives at most 2 bits
@@ -55,11 +40,6 @@ TEST(Dci11Layout, RejectsImpossibleLayouts) {
   EXPECT_FALSE(nr_dci11_layout_offsets(&l, 0, 2, &o));  // a zero-width RIV is not a BWP
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(Dci11Layout, TheLabCellsKnownGoodLayoutIsEnumerated) {
   // 273 PRB, 47-bit payload, 3-entry TDRA list -> tda = ceil(log2(3)) = 2. This is the
   // configuration the hand-written pdcch_blind_monitor_bwp "0:273:0:47" encodes and that
@@ -79,11 +59,6 @@ TEST(Dci11Layout, TheLabCellsKnownGoodLayoutIsEnumerated) {
             << " distinct layouts survive the length constraint\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
- */
 TEST(Dci11Layout, TheLengthConstraintIsWhatMakesThisTractable) {
   // Without the observed length the switch space is thousands of combinations; with it, a list.
   const uint16_t rb = riv_bits_for(273);
@@ -100,11 +75,6 @@ TEST(Dci11Layout, TheLengthConstraintIsWhatMakesThisTractable) {
             << "  (" << (double)total / (double)one << "x pruning)\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
- */
 TEST(Dci11Layout, EveryCandidateIsADistinctLayout) {
   const uint16_t rb = riv_bits_for(106);
   std::vector<nr_dci11_layout_t> c(NR_DCI11_LAYOUT_MAX);
@@ -121,11 +91,6 @@ TEST(Dci11Layout, EveryCandidateIsADistinctLayout) {
   }
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
- */
 TEST(Dci11Layout, PlausibilityRejectsAReservedMcs) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 4; l.post_ant = 4;
@@ -142,11 +107,6 @@ TEST(Dci11Layout, PlausibilityRejectsAReservedMcs) {
   EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), 273));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
- */
 TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeRiv) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 4; l.post_ant = 4;
@@ -165,11 +125,6 @@ TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeRiv) {
 // disagreement here would silently mis-prune the layout search). Width 4 is always DM-RS type 1
 // maxLength 1; width 5 is type 1 maxLength 2 OR type 2 maxLength 1, told apart by dmrs_type; width 6
 // is always type 2 maxLength 2.
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1248 more).
- */
 TEST(Dci11Layout, ApValidRowsCoversAllFourAntennaPortsTables) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.post_ant = 4;
@@ -196,11 +151,6 @@ TEST(Dci11Layout, ApValidRowsCoversAllFourAntennaPortsTables) {
 // point on a DM-RS-type-2 (or maxLength-2 type-1) layout was NOT rejected by this "free" plausibility
 // signal -- it just meant the search converged slower, not that it converged wrong, but the whole
 // point of this check is to speed up exactly this. Table 7.3.1.2.2-3 (width 5, type 2) has 24 rows.
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1247 more).
- */
 TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeType2AntennaPorts) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 5; l.dmrs_type = 1; l.post_ant = 4;
@@ -218,11 +168,6 @@ TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeType2AntennaPorts) {
   EXPECT_FALSE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( build(24)), 273));  // one past it
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1246 more).
- */
 TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
   // The confusion the sweep actually faces is between layouts of the SAME total length -- the
   // length is already derived, so every candidate agrees on it and differs only internally.
@@ -325,11 +270,6 @@ TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
 
 // Drive the resolver end to end against a known truth: stage-1 payloads, then stage-2 TB outcomes
 // where only the true layout decodes. Returns the winner index, or -1.
-/* drive_resolver: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:380, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:409.
- */
 static int drive_resolver(nr_dci11_resolver_t &r, int truth, double p_true, int n_obs, int n_dec,
                           uint16_t riv_bits, unsigned seed = 5)
 {
@@ -360,11 +300,6 @@ static int drive_resolver(nr_dci11_resolver_t &r, int truth, double p_true, int 
   return nr_dci11_resolver_winner(&r);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1245 more).
- */
 TEST(Dci11Resolver, InitRefusesWhenNoLayoutFitsTheLength) {
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
   nr_dci11_resolver_t &r = *r_heap;
@@ -375,11 +310,6 @@ TEST(Dci11Resolver, InitRefusesWhenNoLayoutFitsTheLength) {
   EXPECT_EQ(nr_dci11_resolver_next(&r, &o), -1);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1244 more).
- */
 TEST(Dci11Resolver, Stage1NarrowsButNeverEmptiesTheSet) {
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
   nr_dci11_resolver_t &r = *r_heap;
@@ -409,11 +339,6 @@ TEST(Dci11Resolver, Stage1NarrowsButNeverEmptiesTheSet) {
   std::cerr << "[ MEASURED ] resolver stage 1: " << n << " -> " << r.n_alive << " live\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1243 more).
- */
 TEST(Dci11Resolver, ARetransmittingCellDoesNotDeleteTheTruth) {
   // MCS 28-31 are reserved retransmission rows. On a cell that retransmits, the TRUE layout emits
   // them legitimately and the reserved-MCS test flags it. If stage 1 treated that as an invariant
@@ -445,11 +370,6 @@ TEST(Dci11Resolver, ARetransmittingCellDoesNotDeleteTheTruth) {
             << " live, truth survived\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1242 more).
- */
 TEST(Dci11Resolver, FindsTheTruthEndToEnd) {
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
   nr_dci11_resolver_t &r = *r_heap;
@@ -462,11 +382,6 @@ TEST(Dci11Resolver, FindsTheTruthEndToEnd) {
   std::cerr << "[ MEASURED ] resolver converged on candidate " << w << " of " << n << "\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1241 more).
- */
 TEST(Dci11Resolver, DoesNotConvergeWhenNothingDecodes) {
   // A dead link must not let elimination promote a layout that never decoded anything.
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
@@ -484,11 +399,6 @@ TEST(Dci11Resolver, DoesNotConvergeWhenNothingDecodes) {
   (void)seed;
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1240 more).
- */
 TEST(Dci11Resolver, PinsTheWinnerOnceDecided) {
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
   nr_dci11_resolver_t &r = *r_heap;
@@ -507,11 +417,6 @@ TEST(Dci11Resolver, PinsTheWinnerOnceDecided) {
 
 // ---- handover to the extractor ----------------------------------------------------------------
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1239 more).
- */
 TEST(Dci11Handover, EveryEnumeratedLayoutRoundTripsToFieldBits) {
   // The mapping carries group TOTALS on one member each, so it is exactly the kind of arithmetic
   // that shifts a field by a few bits and produces a decode that fails with no diagnostic -- how
@@ -534,11 +439,6 @@ TEST(Dci11Handover, EveryEnumeratedLayoutRoundTripsToFieldBits) {
   }
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1238 more).
- */
 TEST(Dci11Handover, TheConstantTpcAndPucchFieldsAreNotDoubleCounted) {
   // pre_ant includes TPC(2) + PUCCH-RI(3), but nr_pdcch_blind_dci_size_ex() counts those itself.
   // Handing the raw pre_ant over would grow the payload by 5 bits and shift everything after the
@@ -551,11 +451,6 @@ TEST(Dci11Handover, TheConstantTpcAndPucchFieldsAreNotDoubleCounted) {
   EXPECT_TRUE(nr_dci11_layout_apply_roundtrip(&l, 16, 2));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1237 more).
- */
 TEST(Dci11Handover, RefusesALayoutItCannotRepresent) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 3; l.ant_ports = 4; l.post_ant = 0;  // below TPC+RI
@@ -564,11 +459,6 @@ TEST(Dci11Handover, RefusesALayoutItCannotRepresent) {
   EXPECT_FALSE(nr_dci11_layout_apply_roundtrip(&l, 16, 2));
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);
@@ -582,11 +472,6 @@ int main(int argc, char **argv)
 // retransmissions, one or two TDA rows, RV 0 except retransmissions, and a constant antenna-ports
 // codepoint for a single-layer UE. Everything the DCI does not constrain (HARQ PID, DAI, TPC, PUCCH
 // RI, ...) is left random, which is what a misaligned read would pick up.
-/* cell_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:514, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:533, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:546, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:561.
- */
 static uint64_t cell_payload(const nr_dci11_offsets_t &t, uint16_t rb, unsigned &seed, int retx_pct)
 {
   uint64_t p = 0;
@@ -608,11 +493,6 @@ static uint64_t cell_payload(const nr_dci11_offsets_t &t, uint16_t rb, unsigned 
   return p;
 }
 
-/* pick_truth: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:512, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:531, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:544.
- */
 static int pick_truth(const nr_dci11_resolver_t &r)
 {
   for (int i = 0; i < r.n_hyp; i++)
@@ -620,11 +500,6 @@ static int pick_truth(const nr_dci11_resolver_t &r)
   return 0;
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1236 more).
- */
 TEST(Dci11Stage1, TheDistributionalTestRanksButNeverDeletes) {
   // OTA 2026-09-15 (v2l): with deletion on, the layout that decodes at 72 % by TB CRC was NOT in
   // the top 4 by payload statistics and stage 2 drove the sweep with four wrong layouts (0 % CRC).
@@ -645,11 +520,6 @@ TEST(Dci11Stage1, TheDistributionalTestRanksButNeverDeletes) {
             << " live after 20000 payloads (" << r.dropped_dist << " by distribution)\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1235 more).
- */
 TEST(Dci11Stage1, AHeavilyRetransmittingCellStillKeepsTheTruth) {
   // A commercial cell with weak UEs retransmits far more than the lab: 35 % retx, so MCS 28-31 and
   // RV 2/3 are common in the TRUE fields and their histograms are much less peaked.
@@ -666,11 +536,6 @@ TEST(Dci11Stage1, AHeavilyRetransmittingCellStillKeepsTheTruth) {
   std::cerr << "[ MEASURED ] 35% retransmissions: " << n << " -> " << r.n_alive << " live\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1234 more).
- */
 TEST(Dci11Stage1, TheTruthScoresAboveEveryPrunedLayout) {
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
   nr_dci11_resolver_t &r = *r_heap;
@@ -686,11 +551,6 @@ TEST(Dci11Stage1, TheTruthScoresAboveEveryPrunedLayout) {
   EXPECT_LT(better, 4) << "under the MODEL the truth ranks top-4; on air it did not, hence rank-only";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1233 more).
- */
 TEST(Dci11Stage1, ATdaIndexBeyondTheListIsImpossible) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 1; l.ant_ports = 4; l.pre_ant = 11;
@@ -707,11 +567,6 @@ TEST(Dci11Stage1, ATdaIndexBeyondTheListIsImpossible) {
   EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p | (3ULL << sh)), 273)) << "the test must stay off when unknown";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1232 more).
- */
 TEST(Dci11Thompson, TrialsConcentrateOnTheArmThatDecodes) {
   // The dilution Thompson replaces: round-robin over N candidates gives the right one 1/N of the
   // grants. Here the right arm must end up with the large majority, and no arm may be starved of a
@@ -732,11 +587,6 @@ TEST(Dci11Thompson, TrialsConcentrateOnTheArmThatDecodes) {
             << tr[3] << " " << tr[4] << " " << tr[5] << " (round-robin would give 500 each)\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1231 more).
- */
 TEST(Dci11Thompson, AStage1PriorSteersTheFirstGrants) {
   uint32_t ok[4] = {0}, tr[4] = {0};
   const double prior[4] = {0.0, 0.0, 4.0, 0.0};
@@ -747,11 +597,6 @@ TEST(Dci11Thompson, AStage1PriorSteersTheFirstGrants) {
   EXPECT_LT(hits, 1000) << "a prior must bias, not exclude";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1230 more).
- */
 TEST(Dci11Layout, UnknownTdaWidthEnumeratesEveryWidthAndContainsBothRealCells) {
   // The TDRA list size is an RRC switch the receiver cannot read. Two real cells, one payload length:
   // the OAI rfsim cell has 3 entries (2-bit TDA), the srsRAN OTA cell has 2 (1-bit); a layout with
@@ -777,11 +622,6 @@ TEST(Dci11Layout, UnknownTdaWidthEnumeratesEveryWidthAndContainsBothRealCells) {
   std::cerr << "[ MEASURED ] searched TDA width: " << n << " hypotheses at len 47\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1229 more).
- */
 TEST(Dci11Layout, AFiveBitAntennaPortsFieldIsTwoLayouts) {
   // Table 7.3.1.2.2-2 (type 1, maxLength 2) and -3 (type 2, maxLength 1) are both 5 bits wide: the
   // same offsets, different port sets, so the DM-RS type is a layout dimension at that width only.
@@ -805,11 +645,6 @@ TEST(Dci11Layout, AFiveBitAntennaPortsFieldIsTwoLayouts) {
 // five modes have distinct widths (13 / 14 / 7 / 15 / 14).
 static const uint16_t kFdraBwpStart = 0, kFdraBwp = 106;
 
-/* put_bits: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:680, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:681, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:682, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:683 (+11 more).
- */
 static void put_bits(uint64_t &p, uint16_t total, uint16_t off, uint8_t nb, uint64_t v)
 {
   const int sh = total - off - nb;
@@ -817,22 +652,12 @@ static void put_bits(uint64_t &p, uint16_t total, uint16_t off, uint8_t nb, uint
   p |= (v & ((1ULL << nb) - 1ULL)) << sh;
 }
 
-/* riv_of: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:710, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:945.
- */
 static uint32_t riv_of(int start, int len, int N)
 {
   return (len - 1 <= N / 2) ? (uint32_t)(N * (len - 1) + start) : (uint32_t)(N * (N - len + 1) + (N - 1 - start));
 }
 
 // A valid FDRA field for this layout's mode; dynamicSwitch alternates the two branches via want_type0.
-/* fdra_field: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:756.
- */
 static uint32_t fdra_field(const nr_dci11_offsets_t &t, unsigned &seed, bool want_type0)
 {
   const int N = kFdraBwp;
@@ -848,11 +673,6 @@ static uint32_t fdra_field(const nr_dci11_offsets_t &t, unsigned &seed, bool wan
   }
 }
 
-/* fdra_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:713, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:756.
- */
 static uint64_t fdra_payload(const nr_dci11_offsets_t &t, unsigned &seed, uint32_t field)
 {
   uint64_t p = 0;
@@ -864,11 +684,6 @@ static uint64_t fdra_payload(const nr_dci11_offsets_t &t, unsigned &seed, uint32
   return p;
 }
 
-/* read_fdra: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:715.
- */
 static uint32_t read_fdra(const nr_dci11_offsets_t &t, uint64_t p)
 {
   const uint8_t nb = (uint8_t)(t.tda - t.riv);
@@ -877,11 +692,6 @@ static uint32_t read_fdra(const nr_dci11_offsets_t &t, uint64_t p)
 
 // (c): the decoded PRB list of the resolved layout equals nr_ra_type0_prbs() of the constructed bitmap
 // (type 0, and dynamicSwitch's type-0 branch) or the constructed RIV's contiguous range (type 1).
-/* expect_prbs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:786, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:787.
- */
 static void expect_prbs(const nr_dci11_offsets_t &resolved, const nr_dci11_offsets_t &truth, bool type0,
                         unsigned &seed)
 {
@@ -909,11 +719,6 @@ static void expect_prbs(const nr_dci11_offsets_t &resolved, const nr_dci11_offse
   for (int i = 0; i < nw; i++) EXPECT_EQ(got[i], want[i]) << "PRB " << i;
 }
 
-/* find_layout: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:757, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:768.
- */
 static int find_layout(const nr_dci11_resolver_t &r, const nr_dci11_layout_t &l)
 {
   for (int i = 0; i < r.n_hyp; i++)
@@ -924,11 +729,6 @@ static int find_layout(const nr_dci11_resolver_t &r, const nr_dci11_layout_t &l)
 // FDRA MODE STAGING end to end: the resolver starts type-1-only; stage 2 (only the truth decodes) refutes
 // the live set, which arms the next mode, until the truth's mode is in and wins. Modes after the truth's
 // must never be armed, and a type-1 truth must arm nothing.
-/* resolve_fdra_mode: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:793, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:794, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:795, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:796 (+1 more).
- */
 static void resolve_fdra_mode(uint8_t mode)
 {
   const uint16_t rb = riv_bits_for(kFdraBwp);
@@ -990,42 +790,12 @@ static void resolve_fdra_mode(uint8_t mode)
             << r.n_hyp << " total, converged on " << w << "\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1228 more).
- */
 TEST(Dci11Fdra, ResolvesType1) { resolve_fdra_mode(NR_FDRA_TYPE1); }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1228 more).
- */
 TEST(Dci11Fdra, ResolvesType0Config1) { resolve_fdra_mode(NR_FDRA_TYPE0_CFG1); }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1228 more).
- */
 TEST(Dci11Fdra, ResolvesType0Config2) { resolve_fdra_mode(NR_FDRA_TYPE0_CFG2); }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1228 more).
- */
 TEST(Dci11Fdra, ResolvesDynamicSwitchConfig1) { resolve_fdra_mode(NR_FDRA_DYN_CFG1); }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1227 more).
- */
 TEST(Dci11Fdra, ResolvesDynamicSwitchConfig2) { resolve_fdra_mode(NR_FDRA_DYN_CFG2); }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1228 more).
- */
 TEST(Dci11Fdra, PlausibilityFollowsTheMode) {
   const uint16_t rb = riv_bits_for(kFdraBwp);
   nr_dci11_layout_t l{};
@@ -1049,11 +819,6 @@ TEST(Dci11Fdra, PlausibilityFollowsTheMode) {
   EXPECT_TRUE(nr_dci11_layout_plausible(&o,nr_dci_bits_from_u64( p), kFdraBwp));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1227 more).
- */
 TEST(Dci11Fdra, EveryStageFitsTheCap) {
   // Bounded sweep: every BWP size 6..273 (N_RBG at an aligned and a worst-misaligned CRB start), DCI
   // lengths 28..62, TDA width searched 0..4. One STAGE = one FDRA mode's layouts summed over the TDA
@@ -1097,11 +862,6 @@ TEST(Dci11Fdra, EveryStageFitsTheCap) {
   std::cerr << "[ MEASURED ] cumulative (every mode armed) max " << worst_cum << " (cap " << NR_DCI11_LAYOUT_MAX << ")\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1226 more).
- */
 TEST(Dci11Fdra, StagingStartsType1OnlyAndArmsOnlyOnTbCrcRefutation) {
   const uint16_t rb = riv_bits_for(106);
   static nr_dci11_resolver_t a, b;
@@ -1152,11 +912,6 @@ TEST(Dci11Fdra, StagingStartsType1OnlyAndArmsOnlyOnTbCrcRefutation) {
   std::cerr << "[ MEASURED ] 106 PRB len 45 TDA 0..4: type-1 stage " << na << ", every mode armed " << b.n_hyp << "\n";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1225 more).
- */
 TEST(Dci11Fdra, TypeOneCellStage1SurvivorsUnchangedByStaging) {
   // Reviewer's I2 scene: a type-1 truth, 20000 realistic payloads. Staged = the type-1-only resolver, exactly;
   // arming every mode up front (the pre-staging behaviour) is measured for comparison.
@@ -1202,22 +957,12 @@ TEST(Dci11Fdra, TypeOneCellStage1SurvivorsUnchangedByStaging) {
 }
 
 // Refute the live set the way stage 2 does: trials over the aggregate budget, no pass.
-/* refute_live: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:976, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:998, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:1003, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:1032 (+2 more).
- */
 static void refute_live(nr_dci11_resolver_t &r)
 {
   for (int i = 0; i < r.n_hyp; i++)
     if (r.alive[i]) r.trials[i] = NR_DCI11_FDRA_ARM_MIN_TRIALS;
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1224 more).
- */
 TEST(Dci11Fdra, DynamicSwitchFitsAt106PrbLength49) {
   // Review round 2: with type-0 cfg2 armed first the cumulative cut left dynamicSwitch 0 of 1329 here.
   const uint16_t rb = riv_bits_for(106);
@@ -1241,11 +986,6 @@ TEST(Dci11Fdra, DynamicSwitchFitsAt106PrbLength49) {
   }
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1223 more).
- */
 TEST(Dci11Fdra, ALaterRefutationRevivesTheRetiredStage) {
   // Final review I3: 1_1 grants failing for a non-FDRA reason (MCS/rank/LBRM/scrambling) while SIB1 keeps
   // the link "healthy" refute EVERY stage alike. The first refutation retires type 1; the second must bring
@@ -1281,11 +1021,6 @@ TEST(Dci11Fdra, ALaterRefutationRevivesTheRetiredStage) {
   }
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1222 more).
- */
 TEST(Dci11Fdra, EveryStageArmedStillRevives) {
   // Once every stage is armed a refutation arms nothing (-1) but must still revive what was retired.
   const uint16_t rb = riv_bits_for(106);
@@ -1301,11 +1036,6 @@ TEST(Dci11Fdra, EveryStageArmedStillRevives) {
   for (int i = 0; i < r.n_hyp; i++) EXPECT_FALSE(r.retired[i]) << "layout " << i << " left retired at the end";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1221 more).
- */
 TEST(Dci11Fdra, AType1PassDisarms) {
   const uint16_t rb = riv_bits_for(106);
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();
@@ -1336,11 +1066,6 @@ TEST(Dci11Fdra, AType1PassDisarms) {
 // 0x3fff, which every type-1 layout reads as RIV 0x7fff > 217*218/2: impossible for type 1.
 static const uint64_t kPci415Dci11[] = {0x18201009c2098ULL,0x1ffff149e2080ULL,0x1ffff1400a000ULL,0x1fffe14022380ULL,0x1fe781404a200ULL,0x1800900062098ULL,0x1fdfe94082100ULL,0x1ffff140aa080ULL,0x1ffff140d2000ULL,0x1fffe140e2380ULL,0x1fffe1410a200ULL,0x1ffff15132180ULL,0x184010016a098ULL,0x1801100182098ULL,0x18801001a2098ULL,0x1a001001c20b8ULL,0x18201001e2138ULL,0x18011008020b8ULL,0x18008018223b8ULL,0x1801084842238ULL,0x1808081862138ULL,0x18021008820b8ULL,0x18801008a4138ULL,0x18101008c2138ULL,0x18041008e20b8ULL,0x1820000902238ULL,0x1a001009220b8ULL,0x1804001942238ULL,0x18081009620b8ULL,0x18005009821b8ULL,0x1c001009a20b8ULL,0x18201009c21b8ULL,0x188011cdaa0b8ULL,0x19001009f2038ULL,0x1900510022090ULL,0x18009000620b8ULL,0x1820001082238ULL,0x18801000a21b8ULL,0x18401000c20b8ULL,0x18011010e21b8ULL,0x18011001020b8ULL,0x18201001221b8ULL,0x188010014a0b8ULL,0x18021001621b8ULL,0x1880100182138ULL,0x181010c1a2110ULL,0x1a001001c00b8ULL,0x18081001e21b8ULL,0x180080e802210ULL,0x18011008220b8ULL,0x18201028421b8ULL,0x188010086a0b8ULL,0x1800900882098ULL,0x1fdb5138a2080ULL,0x1fffe168e2380ULL,0x1c00100922098ULL,0x1fdbc16962380ULL,0x190010d9a2000ULL,0x1fffe169c2380ULL,0x1802100012198ULL,0x1810100022098ULL,0x1800500042098ULL,0x1c00100082098ULL,0x18005020aa018ULL,0x18101000c2098ULL,0x18081000e2098ULL,0x1840103100118ULL,0x1802101122198ULL,0x180110018a118ULL,0x18021001b2098ULL,0x18080031c2398ULL,0x1a001011e2198ULL,0x1900100842098ULL,0x1a001008ea098ULL,0x1880101902018ULL,0x1a00003922218ULL,0x1c0010094a198ULL,0x1800504962198ULL,0x1900101982198ULL,0x1a001039aa118ULL};
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_DCI11_HARD_REFUTE, ISAC_DCI11_HARQ_SEQ.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1220 more).
- */
 TEST(Dci11Fdra, HardRefutationArmsType0OnTheLiveCellPayloads) {
   ASSERT_EQ(setenv("ISAC_DCI11_HARD_REFUTE", "1", 1), 0);
   static nr_dci11_resolver_t r;

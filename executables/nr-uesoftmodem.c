@@ -86,11 +86,6 @@ unsigned short config_frames[4] = {2,9,11,13};
 THREAD_STRUCT thread_struct;
 nrUE_params_t nrUE_params = {0};
 
-/* get_node_type: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-cuup.c:83, executables/nr-cuup.c:164, executables/nr-softmodem.c:558, openair2/GNB_APP/gnb_app.c:94 (+9 more).
- */
 int get_node_type() {return -1;}
 
 RAN_CONTEXT_t RC;
@@ -103,11 +98,6 @@ uint64_t        sidelink_frequency[MAX_NUM_CCs][4];
 // UE and OAI config variables
 double            cpuf;
 
-/* create_tasks_nrue: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:475.
- */
 int create_tasks_nrue(uint32_t ue_nb) {
   LOG_D(NR_RRC, "%s(ue_nb:%d)\n", __FUNCTION__, ue_nb);
   itti_wait_ready(1);
@@ -152,30 +142,15 @@ void exit_function(const char *file, const char *function, const int line, const
   nr_shutdown_finish();
 }
 
-/* get_nrUE_optmask: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.h:136.
- */
 uint64_t get_nrUE_optmask(void) {
   return nrUE_params.optmask;
 }
 
-/* set_nrUE_optmask: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.h:137.
- */
 uint64_t set_nrUE_optmask(uint64_t bitmask) {
   nrUE_params.optmask = nrUE_params.optmask | bitmask;
   return nrUE_params.optmask;
 }
 
-/* get_nrUE_params: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue-ru.c:151, executables/nr-ue-ru.c:153, executables/nr-ue-ru.c:167, executables/nr-ue-ru.c:174 (+90 more).
- */
 nrUE_params_t *get_nrUE_params(void) {
   return &nrUE_params;
 }
@@ -297,11 +272,6 @@ static void get_options(configmodule_interface_t *cfg)
 }
 
 // set PHY vars from command line
-/* set_UE_options: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:549.
- */
 static void set_UE_options(int CC_id, PHY_VARS_NR_UE *UE, int ru_id)
 {
   const nrUE_RU_params_t *RU = nrue_get_ru(ru_id);
@@ -329,11 +299,6 @@ static void set_UE_options(int CC_id, PHY_VARS_NR_UE *UE, int ru_id)
         UE->UE_fo_compensation, UE->UE_scan_carrier, UE->no_timing_correction, UE->chest_freq, UE->chest_time);
 }
 
-/* set_fp_options: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:522.
- */
 static void set_fp_options(int cell_id, int ru_id)
 {
   NR_DL_FRAME_PARMS *fp = nrue_get_cell_fp(cell_id);
@@ -360,11 +325,6 @@ static void nrue_shutdown_notify(void)
  * second ^C or a 5 s alarm shuts down unconditionally (no oai_exit guard: after
  * a radio stall oai_exit is already 1 and the old guard made the alarm a no-op).
  * Passive RX has nothing to deregister: one SIGINT/SIGTERM stops it. */
-/* trigger_stop: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:332.
- */
 static void trigger_stop(int sig)
 {
   nr_shutdown_signal(SIGINT);

@@ -24,11 +24,6 @@
 #include <unistd.h>
 #include "nr_td_cb0_fixture.h"
 
-/* now: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:152, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:153, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:158, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:159 (+7 more).
- */
 static double now(void)
 {
   struct timespec t;
@@ -38,11 +33,6 @@ static double now(void)
 
 static atomic_int g_window;
 static atomic_long g_usum, g_ucnt;
-/* sampler: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:229.
- */
 static void *sampler(void *arg)
 {
   (void)arg;
@@ -62,11 +52,6 @@ static void *sampler(void *arg)
 enum { SET_MIXED, SET_WRONG, SET_TRUTH };
 static const char *set_name[] = {"mixed", "wrong", "truth"};
 
-/* make_items: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:144.
- */
 static void make_items(const cb0_fx_t *fx, uint16_t nrb, int n, int set, int max_it, int16_t *shifted_base,
                        int16_t **truth_copies, nr_td_cb0_item_t *it)
 {
@@ -92,11 +77,6 @@ static void make_items(const cb0_fx_t *fx, uint16_t nrb, int n, int set, int max
   }
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_GPU_ITERS.
- *   Callers: none (program entry point).
- */
 int main(int argc, char **argv)
 {
   const int T = argc > 1 ? atoi(argv[1]) : 8;

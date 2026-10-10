@@ -47,11 +47,6 @@ static pid_t background_pid = -1;
 /* util functions                                                   */
 /********************************************************************/
 
-/* lock_system: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:131.
- */
 static void lock_system(void) {
   if (pthread_mutex_lock(&lock) != 0) {
     printf("pthread_mutex_lock fails\n");
@@ -59,11 +54,6 @@ static void lock_system(void) {
   }
 }
 
-/* unlock_system: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:135.
- */
 static void unlock_system(void) {
   if (pthread_mutex_unlock(&lock) != 0) {
     printf("pthread_mutex_unlock fails\n");
@@ -71,11 +61,6 @@ static void unlock_system(void) {
   }
 }
 
-/* write_pipe: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:104, common/utils/system.c:132, common/utils/system.c:133.
- */
 static void write_pipe(int p, char *b, int size) {
   while (size) {
     int ret = write(p, b, size);
@@ -87,11 +72,6 @@ static void write_pipe(int p, char *b, int size) {
   }
 }
 
-/* read_pipe: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:101, common/utils/system.c:102, common/utils/system.c:134.
- */
 static void read_pipe(int p, char *b, int size) {
   while (size) {
     int ret = read(p, b, size);
@@ -112,11 +92,6 @@ static void read_pipe(int p, char *b, int size) {
  * when the main process exits, because then a "read" on the pipe
  * will return 0, in which case "read_pipe" exits.
  */
-/* background_system_process: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:148, common/utils/system.c:191.
- */
 static void background_system_process(void) {
   int len;
   int ret;
@@ -135,11 +110,6 @@ static void background_system_process(void) {
 /*     return -1 on error, 0 on success                             */
 /********************************************************************/
 
-/* background_system: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:109, common/utils/system.h:20, common/utils/system.h:28, common/utils/tuntap_if.c:283.
- */
 int background_system(char *command) {
   int res;
   int len;
@@ -232,11 +202,6 @@ void stop_background_system(void)
   background_pid = -1;
 }
 
-/* rt_sleep_ns: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.h:47, executables/lte-softmodem.c:450, executables/lte-uesoftmodem.c:525.
- */
 int rt_sleep_ns (uint64_t x)
 {
   struct timespec myTime;
@@ -254,11 +219,6 @@ int rt_sleep_ns (uint64_t x)
 #ifdef HAVE_LIB_CAP
 #include <sys/capability.h>
 /* \brief reports if the current thread has capability CAP_SYS_NICE, i.e. */
-/* has_cap_sys_nice: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:243, common/utils/system.c:260, common/utils/system.h:33, executables/nr-softmodem.c:516 (+1 more).
- */
 bool has_cap_sys_nice(void)
 {
   /* get capabilities of calling PID */
@@ -280,11 +240,6 @@ bool has_cap_sys_nice(void)
 #include <sys/syscall.h>      /* Definition of SYS_* constants */
 #include <linux/capability.h> /* capabilities used below */
 /* \brief reports if the current thread has capability CAP_SYS_NICE, i.e. */
-/* has_cap_sys_nice: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:260, common/utils/system.h:33, executables/nr-softmodem.c:516, executables/nr-uesoftmodem.c:449.
- */
 bool has_cap_sys_nice(void)
 {
   struct __user_cap_header_struct hdr = {.version = _LINUX_CAPABILITY_VERSION_3};
@@ -372,11 +327,6 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
 
 // Legacy, pthread_create + thread_top_init() should be replaced by threadCreate
 // threadCreate encapsulates the posix pthread api
-/* thread_top_init: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/system.c:328, common/utils/system.h:41, executables/lte-enb.c:261, executables/lte-enb.c:344 (+15 more).
- */
 void thread_top_init(char *thread_name)
 {
   int policy, s, j;
@@ -438,11 +388,6 @@ void thread_top_init(char *thread_name)
 }
 
 /* \brief lock memory to RAM to avoid delays */
-/* lock_memory_to_ram: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_MLOCK.
- *   Callers: common/utils/system.h:31, executables/lte-softmodem.c:383, executables/lte-uesoftmodem.c:443, executables/main_nr_ru.c:181 (+4 more).
- */
 void lock_memory_to_ram(void)
 {
   /* ISAC_MLOCK=0 skips mlockall (default 1 = upstream behaviour). 2026-10-08, DGX GB10: with a CUDA context the

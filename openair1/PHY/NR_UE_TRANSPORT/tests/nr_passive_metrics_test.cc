@@ -7,11 +7,6 @@ extern "C" {
 #include "nr_passive_metrics.h"
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   nr_passive_metrics_t m = {};
   m.t_mono_ns = 123; m.abs_slot = 456; m.pci = 64; m.acq_state = "TRACKING";
@@ -48,11 +43,6 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"ldpc_cuda_errors\":0,\"ldpc_cuda_fallbacks\":0,\"ldpc_cuda_poisoned\":0,\"ldpc_cuda_disabled\":0,\"ldpc_cuda_breaker_trips\":0,\"ldpc_tb_cpu\":0,\"ldpc_tb_cuda\":0"), std::string::npos);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(PassiveMetrics, ReturnsMinusOneWhenBufferTooSmall) {
   nr_passive_metrics_t m = {};
   m.acq_state = "SEARCHING";
@@ -60,11 +50,6 @@ TEST(PassiveMetrics, ReturnsMinusOneWhenBufferTooSmall) {
   EXPECT_EQ(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), -1);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(PassiveMetrics, NullStateNameIsReportedAsUnknown) {
   nr_passive_metrics_t m = {};
   char buf[8192];
@@ -72,11 +57,6 @@ TEST(PassiveMetrics, NullStateNameIsReportedAsUnknown) {
   EXPECT_NE(std::string(buf).find("\"acq_state\":\"UNKNOWN\""), std::string::npos);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
- */
 TEST(PassiveMetrics, UnknownSlotAndPciSerializeAsMinusOne) {
   nr_passive_metrics_t m = {};
   m.abs_slot = -1; m.pci = -1; m.acq_state = "SEARCHING";
@@ -87,11 +67,6 @@ TEST(PassiveMetrics, UnknownSlotAndPciSerializeAsMinusOne) {
   EXPECT_NE(s.find("\"pci\":-1"), std::string::npos);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
- */
 TEST(PassiveMetrics, ExactSizeBufferBoundary) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
@@ -103,11 +78,6 @@ TEST(PassiveMetrics, ExactSizeBufferBoundary) {
   EXPECT_EQ(nr_passive_metrics_to_json(&m, &b[0], w), -1);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
- */
 TEST(PassiveMetrics, TdExclRestartKeysPresent) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
@@ -118,11 +88,6 @@ TEST(PassiveMetrics, TdExclRestartKeysPresent) {
   for (const char *k : {"\"td_excl_restarts\":3", "\"td_excl_truncs\":4", "\"td_excl_restart_alarms\":5"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
- */
 TEST(PassiveMetrics, FieldBookKeysPresent) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
@@ -133,11 +98,6 @@ TEST(PassiveMetrics, FieldBookKeysPresent) {
   for (const char *k : {"\"td_fb_promotions\":1", "\"td_fb_withdrawals\":2", "\"td_fb_failopens\":3", "\"td_fb_pruned_contexts\":4", "\"td_fb_untrusted_ctx\":5"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1248 more).
- */
 TEST(PassiveMetrics, Bc12aSib1CensusKeysPresentPerDciFormat) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
@@ -153,11 +113,6 @@ TEST(PassiveMetrics, Bc12aSib1CensusKeysPresentPerDciFormat) {
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1247 more).
- */
 TEST(PassiveMetrics, Cb0EliminationKeysPresent) {
   nr_passive_metrics_t m = {};
   m.acq_state = "TRACKING";
@@ -175,11 +130,6 @@ TEST(PassiveMetrics, Cb0EliminationKeysPresent) {
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1246 more).
- */
 TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
   nr_passive_metrics_t m;
   // Maximum integer widths exercise both parents' keys and all CSI-RS records together.
@@ -196,11 +146,6 @@ TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
                            "csirs_time_to_confirm_resources"})
     EXPECT_NE(s.find(std::string("\"") + key + "\":"), std::string::npos) << key;
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1245 more).
- */
 TEST(PassiveMetrics,SrsCountersPresent) {
   nr_passive_metrics_t m={};char buf[6144];
   ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
@@ -211,11 +156,6 @@ TEST(PassiveMetrics,SrsCountersPresent) {
   EXPECT_NE(std::string(buf).find("\"srs_budget_skip\":0"),std::string::npos);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1244 more).
- */
 TEST(PassiveMetrics, PdschStageHistogramsAndReasons) {
   nr_passive_metrics_t m = {};
   char buf[16384];
@@ -237,11 +177,6 @@ TEST(PassiveMetrics, PdschStageHistogramsAndReasons) {
   EXPECT_EQ(nr_passive_metrics_to_json(&m, shortbuf.data(), shortbuf.size()), -1);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1243 more).
- */
 TEST(PassiveMetrics, NidCapturePolicyCounters) {
   nr_passive_metrics_t m={};char buf[16384];
   ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);

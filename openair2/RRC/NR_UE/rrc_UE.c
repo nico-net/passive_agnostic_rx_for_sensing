@@ -123,11 +123,6 @@ static const char nr_nas_attach_req_imsi_dummy_NSA_case[] = {
  * @param rrc UE RRC instance structure
  * @param msg RRC message to be sent to MAC
  */
-/* nr_rrc_send_msg_to_mac: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:143, openair2/RRC/NR_UE/rrc_UE.c:380, openair2/RRC/NR_UE/rrc_UE.c:583, openair2/RRC/NR_UE/rrc_UE.c:1162 (+11 more).
- */
 static void nr_rrc_send_msg_to_mac(NR_UE_RRC_INST_t *rrc, nr_mac_rrc_message_t *msg)
 {
   AssertFatal(rrc->mac_input_nf != NULL, "MAC input NF is NULL for UE %ld\n", rrc->ue_id);
@@ -140,11 +135,6 @@ static void nr_rrc_send_msg_to_mac(NR_UE_RRC_INST_t *rrc, nr_mac_rrc_message_t *
 /** @brief Ask MAC to start or restart random access
  * @param rrc   UE RRC instance
  * @param cause Why RA is started (setup, T300, post-SIB, re-establishment) */
-/* nr_rrc_trigger_mac_ra: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3552, openair2/RRC/NR_UE/rrc_UE.c:3650, openair2/RRC/NR_UE/rrc_UE.c:3889.
- */
 static void nr_rrc_trigger_mac_ra(NR_UE_RRC_INST_t *rrc, nr_mac_ra_start_cause_t cause)
 {
   nr_mac_rrc_message_t rrc_msg = {0};
@@ -153,11 +143,6 @@ static void nr_rrc_trigger_mac_ra(NR_UE_RRC_INST_t *rrc, nr_mac_ra_start_cause_t
   nr_rrc_send_msg_to_mac(rrc, &rrc_msg);
 }
 
-/* get_NR_UE_rrc_inst: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/telnetsrv/telnetsrv_ciUE.c:38, common/utils/telnetsrv/telnetsrv_ciUE.c:77, common/utils/telnetsrv/telnetsrv_ciUE.c:90, openair2/RRC/NR_UE/rrc_UE.c:3381 (+3 more).
- */
 NR_UE_RRC_INST_t *get_NR_UE_rrc_inst(int instance)
 {
   AssertFatal(instance >= 0 && instance < MAX_NUM_NR_UE_INST, "RRC instance %d out of bounds\n", instance);
@@ -168,33 +153,18 @@ NR_UE_RRC_INST_t *get_NR_UE_rrc_inst(int instance)
   return rrc;
 }
 
-/* get_DRB_status: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:876, openair2/RRC/NR_UE/rrc_UE.c:2407, openair2/RRC/NR_UE/rrc_UE.c:2933, openair2/RRC/NR_UE/rrc_UE.c:3632 (+1 more).
- */
 static NR_RB_status_t get_DRB_status(const NR_UE_RRC_INST_t *rrc, NR_DRB_Identity_t drb_id)
 {
   AssertFatal(drb_id > 0 && drb_id < 33, "Invalid DRB ID %ld\n", drb_id);
   return rrc->status_DRBs[drb_id - 1];
 }
 
-/* set_DRB_status: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:863, openair2/RRC/NR_UE/rrc_UE.c:878, openair2/RRC/NR_UE/rrc_UE.c:904, openair2/RRC/NR_UE/rrc_UE.c:1908 (+4 more).
- */
 static void set_DRB_status(NR_UE_RRC_INST_t *rrc, NR_DRB_Identity_t drb_id, NR_RB_status_t status)
 {
   AssertFatal(drb_id > 0 && drb_id < 33, "Invalid DRB ID %ld\n", drb_id);
   rrc->status_DRBs[drb_id - 1] = status;
 }
 
-/* get_ulsyncvalidityduration_timer_value: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:244.
- */
 static int get_ulsyncvalidityduration_timer_value(NR_NTN_Config_r17_t *ntncfg)
 {
   int retval = 0;
@@ -208,11 +178,6 @@ static int get_ulsyncvalidityduration_timer_value(NR_NTN_Config_r17_t *ntncfg)
   return retval;
 }
 
-/* get_epochtime_from_sib19scheduling: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:220.
- */
 static void get_epochtime_from_sib19scheduling(NR_UE_RRC_SI_INFO *SI_info, int *frame, int *subframe)
 {
   // TS 38.331 section 5.2.2.3.2
@@ -239,11 +204,6 @@ static void get_epochtime_from_sib19scheduling(NR_UE_RRC_SI_INFO *SI_info, int *
         slot);
 }
 
-/* eval_epoch_time: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:266.
- */
 static int eval_epoch_time(NR_UE_RRC_SI_INFO *SI_info, NR_NTN_Config_r17_t *ntncfg, int frame, bool is_targetcell)
 {
   int epoch_frame = 0, epoch_subframe = 0;
@@ -279,11 +239,6 @@ static int eval_epoch_time(NR_UE_RRC_SI_INFO *SI_info, NR_NTN_Config_r17_t *ntnc
   return diff_frames;
 }
 
-/* get_ntn_timervalues: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:270.
- */
 static int get_ntn_timervalues(NR_UE_RRC_SI_INFO *SI_info, NR_NTN_Config_r17_t *ntncfg, int diff_frames, int *val430_ms)
 {
   int val430 = get_ulsyncvalidityduration_timer_value(ntncfg);
@@ -304,11 +259,6 @@ static int get_ntn_timervalues(NR_UE_RRC_SI_INFO *SI_info, NR_NTN_Config_r17_t *
   return sib19_timer_ms;
 }
 
-/* nr_rrc_process_ntnconfig: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:364, openair2/RRC/NR_UE/rrc_UE.c:3409.
- */
 static void nr_rrc_process_ntnconfig(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_info, NR_NTN_Config_r17_t *ntncfg, int frame, bool is_targetcell)
 {
   SI_info->SInfo_r17.sib19_validity = true;
@@ -336,11 +286,6 @@ static void nr_rrc_process_ntnconfig(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *S
     nr_timer_start(&SI_info->SInfo_r17.sib19_timer);
 }
 
-/* nr_decode_SI: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1217, openair2/RRC/NR_UE/rrc_UE.c:2312.
- */
 static void nr_decode_SI(NR_UE_RRC_SI_INFO *SI_info, NR_SystemInformation_t *si, NR_UE_RRC_INST_t *rrc, int hfn, int frame)
 {
   // Dump contents
@@ -436,11 +381,6 @@ static void nr_decode_SI(NR_UE_RRC_SI_INFO *SI_info, NR_SystemInformation_t *si,
   }
 }
 
-/* nr_rrc_ue_prepare_RRCSetupRequest: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2193, openair2/RRC/NR_UE/rrc_UE.c:3551, openair2/RRC/NR_UE/rrc_UE.c:3887.
- */
 static void nr_rrc_ue_prepare_RRCSetupRequest(NR_UE_RRC_INST_t *rrc)
 {
   LOG_D(NR_RRC, "Generation of RRCSetupRequest\n");
@@ -462,11 +402,6 @@ static void nr_rrc_ue_prepare_RRCSetupRequest(NR_UE_RRC_INST_t *rrc)
   nr_rlc_srb_recv_sdu(rrc->ue_id, 0, buf, len);
 }
 
-/* nr_rrc_configure_default_SI: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:565.
- */
 static void nr_rrc_configure_default_SI(NR_UE_RRC_SI_INFO *SI_info,
                                         NR_SI_SchedulingInfo_t *si_SchedulingInfo,
                                         NR_SI_SchedulingInfo_v1700_t *si_SchedulingInfo_v1700)
@@ -502,11 +437,6 @@ static void nr_rrc_configure_default_SI(NR_UE_RRC_SI_INFO *SI_info,
   }
 }
 
-/* verify_NTN_access: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:566.
- */
 static bool verify_NTN_access(const NR_UE_RRC_SI_INFO *SI_info, const NR_SIB1_v1700_IEs_t *sib1_v1700)
 {
   // SIB1 indicates if NTN access is present in the cell
@@ -526,11 +456,6 @@ static bool verify_NTN_access(const NR_UE_RRC_SI_INFO *SI_info, const NR_SIB1_v1
   return ntn_access && sib19_present;
 }
 
-/* get_sib19_schedinfo: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:568.
- */
 static void get_sib19_schedinfo(NR_UE_RRC_SI_INFO *SI_info, NR_SI_SchedulingInfo_v1700_t *si_SchedInfo_v1700)
 {
   // Find the SIB19 periodicity configured in the scheduling info
@@ -671,11 +596,6 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
  * @param nh Current NH parameter (input/output)
  * @param nhcc Pointer to current nextHopChainingCount (input/output)
  * @param target_ncc Target nextHopChainingCount value to synchronize to */
-/* nr_sync_nh_chain: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:712.
- */
 static void nr_sync_nh_chain(const uint8_t kamf[SECURITY_KEY_LEN],
                              uint8_t kgnb[SECURITY_KEY_LEN],
                              uint8_t nh[SECURITY_KEY_LEN],
@@ -720,11 +640,6 @@ static void nr_sync_nh_chain(const uint8_t kamf[SECURITY_KEY_LEN],
  * @param nr_arfcn_dl NR ARFCN-DL
  * @param kgnb Current KgNB key (input/output)
  */
-/* nr_derive_kgnb_horizontal: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:702.
- */
 static void nr_derive_kgnb_horizontal(const uint16_t pci, const uint64_t nr_arfcn_dl, uint8_t kgnb[SECURITY_KEY_LEN])
 {
   // When the NCC values match, the UE shall derive the KNG-RAN* from the currently active
@@ -743,11 +658,6 @@ static void nr_derive_kgnb_horizontal(const uint16_t pci, const uint64_t nr_arfc
  * @param nr_arfcn_dl NR ARFCN-DL
  * @param kgnb Current KgNB key (input/output)
  * @param nh Synchronized NH parameter (input)
- */
-/* nr_derive_kgnb_vertical: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:719.
  */
 static void nr_derive_kgnb_vertical(const uint16_t pci,
                                     const uint64_t nr_arfcn_dl,
@@ -779,11 +689,6 @@ static void nr_derive_kgnb_vertical(const uint16_t pci,
  * @param rrc RRC instance pointer
  * @param kamf K_AMF key from NAS
  * @param received_ncc Received nextHopChainingCount value */
-/* nr_update_kgnb_from_ncc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:742, openair2/RRC/NR_UE/rrc_UE.c:2785.
- */
 static void nr_update_kgnb_from_ncc(NR_UE_RRC_INST_t *rrc, const uint8_t kamf[SECURITY_KEY_LEN], int8_t received_ncc)
 {
   const uint64_t original_nhcc = rrc->nhcc;
@@ -816,11 +721,6 @@ static void nr_update_kgnb_from_ncc(NR_UE_RRC_INST_t *rrc, const uint8_t kamf[SE
 }
 
 /** @brief AS security key update procedure (5.3.5.7 3GPP TS 38.331) */
-/* as_security_key_update: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1178.
- */
 void as_security_key_update(NR_UE_RRC_INST_t *rrc, NR_MasterKeyUpdate_t *mku)
 {
   if (mku->nas_Container) {
@@ -843,11 +743,6 @@ void as_security_key_update(NR_UE_RRC_INST_t *rrc, NR_MasterKeyUpdate_t *mku)
   }
 }
 
-/* get_security_rrc_parameters: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:829, openair2/RRC/NR_UE/rrc_UE.c:830, openair2/RRC/NR_UE/rrc_UE.c:1179.
- */
 static nr_pdcp_entity_security_keys_and_algos_t get_security_rrc_parameters(NR_UE_RRC_INST_t *ue, bool cp)
 {
   nr_pdcp_entity_security_keys_and_algos_t out = {0};
@@ -859,11 +754,6 @@ static nr_pdcp_entity_security_keys_and_algos_t get_security_rrc_parameters(NR_U
 }
 
 /** @brief Check if there is dedicated NAS information to forward to NAS */
-/* nr_rrc_process_dedicatedNAS_MessageList: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1734.
- */
 static void nr_rrc_process_dedicatedNAS_MessageList(NR_UE_RRC_INST_t *rrc, NR_RRCReconfiguration_v1530_IEs_t *rec_1530)
 {
   if (rec_1530->dedicatedNAS_MessageList) {
@@ -881,11 +771,6 @@ static void nr_rrc_process_dedicatedNAS_MessageList(NR_UE_RRC_INST_t *rrc, NR_RR
 }
 
 /** @brief Add bearer in PDCP/SDAP for 5GC association (SA) */
-/* rrc_ue_add_bearer: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:905.
- */
 static void rrc_ue_add_bearer(const int ue_id, const NR_DRB_ToAddMod_t *drb, const nr_pdcp_entity_security_keys_and_algos_t *sp)
 {
   DevAssert(drb->cnAssociation);
@@ -913,11 +798,6 @@ static void rrc_ue_add_bearer(const int ue_id, const NR_DRB_ToAddMod_t *drb, con
 /**
  * @brief add, modify and release SRBs and/or DRBs
  * @ref   3GPP TS 38.331
- */
-/* nr_rrc_ue_process_RadioBearerConfig: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1249, openair2/RRC/NR_UE/rrc_UE.c:1725, openair2/RRC/NR_UE/rrc_UE.c:1828, openair2/RRC/NR_UE/rrc_UE.c:1833 (+1 more).
  */
 static void nr_rrc_ue_process_RadioBearerConfig(NR_UE_RRC_INST_t *ue_rrc, NR_RadioBearerConfig_t *const radioBearerConfig)
 {
@@ -1031,11 +911,6 @@ static void nr_rrc_ue_process_RadioBearerConfig(NR_UE_RRC_INST_t *ue_rrc, NR_Rad
   LOG_I(NR_RRC, "State = NR_RRC_CONNECTED\n");
 }
 
-/* nr_rrc_signal_maxrtxindication: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void nr_rrc_signal_maxrtxindication(int ue_id)
 {
   MessageDef *msg = itti_alloc_new_message(TASK_RLC_UE, ue_id, NR_RRC_RLC_MAXRTX);
@@ -1048,11 +923,6 @@ static void nr_rrc_signal_maxrtxindication(int ue_id)
  * such as after a PDU session release or full reconfiguration.
  * @param rrc Pointer to NR_UE_RRC_INST_t structure
  * @param id Logical Channel ID (must be in range [0, NR_MAX_NUM_LCID-1]) */
-/* nr_rrc_release_rlc_entity: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:943, openair2/RRC/NR_UE/rrc_UE.c:2419, openair2/RRC/NR_UE/rrc_UE.c:3805.
- */
 static void nr_rrc_release_rlc_entity(NR_UE_RRC_INST_t *rrc, int id)
 {
   DevAssert(rrc);
@@ -1064,11 +934,6 @@ static void nr_rrc_release_rlc_entity(NR_UE_RRC_INST_t *rrc, int id)
   }
 }
 
-/* nr_rrc_manage_rlc_bearers: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1123.
- */
 static void nr_rrc_manage_rlc_bearers(NR_UE_RRC_INST_t *rrc, const NR_CellGroupConfig_t *cellGroupConfig)
 {
   if (cellGroupConfig->rlc_BearerToReleaseList != NULL) {
@@ -1112,11 +977,6 @@ static void nr_rrc_manage_rlc_bearers(NR_UE_RRC_INST_t *rrc, const NR_CellGroupC
   }
 }
 
-/* nr_ue_meas_reset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1015, openair2/RRC/NR_UE/rrc_UE.c:1016, openair2/RRC/NR_UE/rrc_UE.c:3350.
- */
 static void nr_ue_meas_reset(meas_t *meas_cell, bool csi_meas)
 {
   if (csi_meas)
@@ -1125,11 +985,6 @@ static void nr_ue_meas_reset(meas_t *meas_cell, bool csi_meas)
     meas_cell->ss_rsrp_dBm.init = false;
 }
 
-/* nr_rrc_process_reconfigurationWithSync: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1085.
- */
 static void nr_rrc_process_reconfigurationWithSync(NR_UE_RRC_INST_t *rrc,
                                                    NR_ReconfigurationWithSync_t *reconfigurationWithSync,
                                                    int gNB_index)
@@ -1207,11 +1062,6 @@ static void nr_rrc_process_reconfigurationWithSync(NR_UE_RRC_INST_t *rrc,
   }
 }
 
-/* nr_rrc_cellgroup_configuration: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1150, openair2/RRC/NR_UE/rrc_UE.c:1760.
- */
 static bool nr_rrc_cellgroup_configuration(NR_UE_RRC_INST_t *rrc, NR_CellGroupConfig_t *cgConfig, int gNB_index, bool dedicatedsib1)
 {
   if (!check_cellgroup_config(cgConfig)) {
@@ -1274,11 +1124,6 @@ static bool nr_rrc_cellgroup_configuration(NR_UE_RRC_INST_t *rrc, NR_CellGroupCo
   return true;
 }
 
-/* nr_rrc_ue_process_masterCellGroup: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1173, openair2/RRC/NR_UE/rrc_UE.c:2438.
- */
 static bool nr_rrc_ue_process_masterCellGroup(NR_UE_RRC_INST_t *rrc,
                                               OCTET_STRING_t *masterCellGroup,
                                               long *fullConfig,
@@ -1318,11 +1163,6 @@ static bool nr_rrc_ue_process_masterCellGroup(NR_UE_RRC_INST_t *rrc,
   return true;
 }
 
-/* nr_rrc_process_reconfiguration_v1530: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1721.
- */
 static bool nr_rrc_process_reconfiguration_v1530(NR_UE_RRC_INST_t *rrc, NR_RRCReconfiguration_v1530_IEs_t *rec_1530, int gNB_index)
 {
   if (rec_1530->fullConfig) {
@@ -1413,11 +1253,6 @@ static bool nr_rrc_process_reconfiguration_v1530(NR_UE_RRC_INST_t *rrc, NR_RRCRe
   return dedicatedsib1;
 }
 
-/* handle_meas_reporting_remove: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1288, openair2/RRC/NR_UE/rrc_UE.c:1387, openair2/RRC/NR_UE/rrc_UE.c:1408, openair2/RRC/NR_UE/rrc_UE.c:1438 (+2 more).
- */
 static void handle_meas_reporting_remove(rrcPerNB_t *rrc, int id, NR_UE_Timers_Constants_t *timers)
 {
   // remove the measurement reporting entry for this measId if included
@@ -1436,11 +1271,6 @@ static void handle_meas_reporting_remove(rrcPerNB_t *rrc, int id, NR_UE_Timers_C
   memset(params, 0, sizeof(*params));
 }
 
-/* handle_measobj_remove: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1680.
- */
 static void handle_measobj_remove(rrcPerNB_t *rrc, struct NR_MeasObjectToRemoveList *remove_list, NR_UE_Timers_Constants_t *timers)
 {
   // section 5.5.2.4 in 38.331
@@ -1462,11 +1292,6 @@ static void handle_measobj_remove(rrcPerNB_t *rrc, struct NR_MeasObjectToRemoveL
   }
 }
 
-/* update_ssb_configmob: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1318.
- */
 static void update_ssb_configmob(NR_SSB_ConfigMobility_t *source, NR_SSB_ConfigMobility_t *target)
 {
   if (source->ssb_ToMeasure)
@@ -1476,11 +1301,6 @@ static void update_ssb_configmob(NR_SSB_ConfigMobility_t *source, NR_SSB_ConfigM
     UPDATE_IE(target->ss_RSSI_Measurement, source->ss_RSSI_Measurement, NR_SS_RSSI_Measurement_t);
 }
 
-/* update_nr_measobj: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1366.
- */
 static void update_nr_measobj(NR_MeasObjectNR_t *source, NR_MeasObjectNR_t *target)
 {
   UPDATE_IE(target->ssbFrequency, source->ssbFrequency, NR_ARFCN_ValueNR_t);
@@ -1532,11 +1352,6 @@ static void update_nr_measobj(NR_MeasObjectNR_t *source, NR_MeasObjectNR_t *targ
   }
 }
 
-/* handle_measobj_addmod: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1683.
- */
 static void handle_measobj_addmod(rrcPerNB_t *rrc, struct NR_MeasObjectToAddModList *addmod_list)
 {
   // section 5.5.2.5 in 38.331
@@ -1557,11 +1372,6 @@ static void handle_measobj_addmod(rrcPerNB_t *rrc, struct NR_MeasObjectToAddModL
   }
 }
 
-/* handle_reportconfig_remove: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1686.
- */
 static void handle_reportconfig_remove(rrcPerNB_t *rrc,
                                        struct NR_ReportConfigToRemoveList *remove_list,
                                        NR_UE_Timers_Constants_t *timers)
@@ -1580,11 +1390,6 @@ static void handle_reportconfig_remove(rrcPerNB_t *rrc,
   }
 }
 
-/* handle_reportconfig_addmod: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1689.
- */
 static void handle_reportconfig_addmod(rrcPerNB_t *rrc,
                                        struct NR_ReportConfigToAddModList *addmod_list,
                                        NR_UE_Timers_Constants_t *timers)
@@ -1607,11 +1412,6 @@ static void handle_reportconfig_addmod(rrcPerNB_t *rrc,
   }
 }
 
-/* handle_quantityconfig: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1692.
- */
 static void handle_quantityconfig(rrcPerNB_t *rrc, NR_QuantityConfig_t *quantityConfig, NR_UE_Timers_Constants_t *timers)
 {
   if (quantityConfig->quantityConfigNR_List) {
@@ -1639,11 +1439,6 @@ static void handle_quantityconfig(rrcPerNB_t *rrc, NR_QuantityConfig_t *quantity
   }
 }
 
-/* handle_measid_remove: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1695.
- */
 static void handle_measid_remove(rrcPerNB_t *rrc, struct NR_MeasIdToRemoveList *remove_list, NR_UE_Timers_Constants_t *timers)
 {
   for (int i = 0; i < remove_list->list.count; i++) {
@@ -1655,11 +1450,6 @@ static void handle_measid_remove(rrcPerNB_t *rrc, struct NR_MeasIdToRemoveList *
   }
 }
 
-/* get_measurement_report_interval_ms: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1507.
- */
 static long get_measurement_report_interval_ms(NR_ReportInterval_t interval)
 {
   switch (interval) {
@@ -1692,11 +1482,6 @@ static long get_measurement_report_interval_ms(NR_ReportInterval_t interval)
   }
 }
 
-/* get_meas_id: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3099, openair2/RRC/NR_UE/rrc_UE.c:3121, openair2/RRC/NR_UE/rrc_UE.c:3167.
- */
 static int get_meas_id(rrcPerNB_t *rrcNB, int report_config_id)
 {
   for (int j = 0; j < MAX_MEAS_ID; j++) {
@@ -1724,11 +1509,6 @@ static void setup_meas_params(meas_report_params_t *params,
   params->report_rsrp = false;
 }
 
-/* start_periodical_report: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1664.
- */
 static void start_periodical_report(rrcPerNB_t *rrc, NR_PeriodicalReportConfig_t *periodical_config, int meas_id)
 {
   l3_measurements_t *l3_measurements = &rrc->l3_measurements;
@@ -1753,11 +1533,6 @@ static void start_periodical_report(rrcPerNB_t *rrc, NR_PeriodicalReportConfig_t
   }
 }
 
-/* extract_neighbor_cells_from_measObject: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1652, openair2/RRC/NR_UE/rrc_UE.c:1662.
- */
 static void extract_neighbor_cells_from_measObject(NR_MeasObjectNR_t *obj_nr,
                                                    nr_neighbor_cell_info_t *neighbor_cells,
                                                    int *num_neighbors,
@@ -1933,11 +1708,6 @@ static void nr_rrc_ue_process_measConfig(rrcPerNB_t *rrc,
   }
 }
 
-/* nr_rrc_ue_process_rrcReconfiguration: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1810, openair2/RRC/NR_UE/rrc_UE.c:2944.
- */
 static void nr_rrc_ue_process_rrcReconfiguration(NR_UE_RRC_INST_t *rrc, int gNB_index, NR_RRCReconfiguration_t *reconfiguration)
 {
   rrcPerNB_t *rrcNB = rrc->perNB + gNB_index;
@@ -2021,11 +1791,6 @@ static void nr_rrc_ue_process_rrcReconfiguration(NR_UE_RRC_INST_t *rrc, int gNB_
   return;
 }
 
-/* process_nsa_message: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/main_ue.c:29, openair2/RRC/NR_UE/main_ue.c:40, openair2/RRC/NR_UE/rrc_proto.h:24.
- */
 void process_nsa_message(NR_UE_RRC_INST_t *rrc, nsa_message_t nsa_message_type, void *message, int msg_len)
 {
   switch (nsa_message_type) {
@@ -2082,11 +1847,6 @@ void process_nsa_message(NR_UE_RRC_INST_t *rrc, nsa_message_t nsa_message_type, 
  * @brief Verify UE capabilities parameters against CL-fed params
  *        (e.g. number of physical TX antennas)
  */
-/* verify_ue_cap: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:1899.
- */
 static bool verify_ue_cap(NR_UE_NR_Capability_t *UE_NR_Capability, int nb_antennas_tx)
 {
   NR_FeatureSetUplink_t *ul_feature_setup = UE_NR_Capability->featureSets->featureSetsUplink->list.array[0];
@@ -2095,11 +1855,6 @@ static bool verify_ue_cap(NR_UE_NR_Capability_t *UE_NR_Capability, int nb_antenn
   return true;
 }
 
-/* nr_rrc_init_ue: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:2452, openair2/RRC/NR_UE/rrc_proto.h:20.
- */
 NR_UE_RRC_INST_t* nr_rrc_init_ue(char* uecap_file, int instance_id, int num_ant_tx)
 {
   AssertFatal(instance_id < MAX_NUM_NR_UE_INST, "RRC instance %d out of bounds\n", instance_id);
@@ -2169,11 +1924,6 @@ NR_UE_RRC_INST_t* nr_rrc_init_ue(char* uecap_file, int instance_id, int num_ant_
   return rrc;
 }
 
-/* check_si_validity: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2042.
- */
 bool check_si_validity(NR_UE_RRC_SI_INFO *SI_info, int si_type)
 {
   switch (si_type) {
@@ -2235,11 +1985,6 @@ bool check_si_validity(NR_UE_RRC_SI_INFO *SI_info, int si_type)
   return true;
 }
 
-/* check_si_validity_r17: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2045.
- */
 bool check_si_validity_r17(NR_UE_RRC_SI_INFO_r17 *SI_info, int si_type)
 {
   switch (si_type) {
@@ -2277,11 +2022,6 @@ bool check_si_validity_r17(NR_UE_RRC_SI_INFO_r17 *SI_info, int si_type)
   return true;
 }
 
-/* check_si_status: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2119.
- */
 static int check_si_status(NR_UE_RRC_SI_INFO *SI_info)
 {
   // schedule reception of SIB1 if RRC doesn't have it
@@ -2399,11 +2139,6 @@ static void nr_rrc_ue_decode_NR_BCCH_BCH_Message(NR_UE_RRC_INST_t *rrc,
   return;
 }
 
-/* nr_rrc_ue_prepare_RRCReestablishmentRequest: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2197.
- */
 static void nr_rrc_ue_prepare_RRCReestablishmentRequest(NR_UE_RRC_INST_t *rrc)
 {
   uint8_t buffer[1024];
@@ -2448,11 +2183,6 @@ static void nr_rrc_ue_prepare_RRCReestablishmentRequest(NR_UE_RRC_INST_t *rrc)
   nr_rlc_srb_recv_sdu(rrc->ue_id, 0, buffer, buf_size);
 }
 
-/* nr_rrc_prepare_msg3_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3438.
- */
 static void nr_rrc_prepare_msg3_payload(NR_UE_RRC_INST_t *rrc)
 {
   if (!IS_SA_MODE(get_softmodem_params()))
@@ -2471,11 +2201,6 @@ static void nr_rrc_prepare_msg3_payload(NR_UE_RRC_INST_t *rrc)
   }
 }
 
-/* nr_rrc_handle_msg3_indication: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3440.
- */
 static void nr_rrc_handle_msg3_indication(NR_UE_RRC_INST_t *rrc, rnti_t rnti)
 {
   NR_UE_Timers_Constants_t *tac = &rrc->timers_and_constants;
@@ -2594,11 +2319,6 @@ static void nr_rrc_ue_decode_NR_BCCH_DL_SCH_Message(NR_UE_RRC_INST_t *rrc,
   SEQUENCE_free(&asn_DEF_NR_BCCH_DL_SCH_Message, bcch_message, ASFM_FREE_EVERYTHING);
 }
 
-/* rrc_ue_generate_RRCSetupComplete: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2473.
- */
 static void rrc_ue_generate_RRCSetupComplete(NR_UE_RRC_INST_t *rrc, const uint8_t Transaction_id)
 {
   uint8_t buffer[100];
@@ -2659,11 +2379,6 @@ static void rrc_ue_generate_RRCSetupComplete(NR_UE_RRC_INST_t *rrc, const uint8_
   nr_pdcp_data_req_srb(rrc->ue_id, srb_id, 0, size, buffer, deliver_pdu_srb_rlc, NULL);
 }
 
-/* nr_rrc_rrcsetup_fallback: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2435.
- */
 static void nr_rrc_rrcsetup_fallback(NR_UE_RRC_INST_t *rrc)
 {
   LOG_W(NR_RRC,
@@ -2712,11 +2427,6 @@ static void nr_rrc_rrcsetup_fallback(NR_UE_RRC_INST_t *rrc)
   // TODO not implemented yet
 }
 
-/* nr_rrc_process_rrcsetup: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2547.
- */
 static void nr_rrc_process_rrcsetup(NR_UE_RRC_INST_t *rrc, const NR_RRCSetup_t *rrcSetup)
 {
   // if the RRCSetup is received in response to an RRCReestablishmentRequest
@@ -2763,11 +2473,6 @@ static void nr_rrc_process_rrcsetup(NR_UE_RRC_INST_t *rrc, const NR_RRCSetup_t *
   rrc_ue_generate_RRCSetupComplete(rrc, rrcSetup->rrc_TransactionIdentifier);
 }
 
-/* nr_rrc_process_rrcreject: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2541.
- */
 static void nr_rrc_process_rrcreject(NR_UE_RRC_INST_t *rrc, const NR_RRCReject_t *rrcReject)
 {
   // stop timer T300, T302, T319 if running;
@@ -2807,11 +2512,6 @@ static void nr_rrc_process_rrcreject(NR_UE_RRC_INST_t *rrc, const NR_RRCReject_t
   //      Resume not implemented yet
 }
 
-/* nr_rrc_ue_decode_ccch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3473.
- */
 static int8_t nr_rrc_ue_decode_ccch(NR_UE_RRC_INST_t *rrc, const NRRrcMacCcchDataInd *ind)
 {
   NR_DL_CCCH_Message_t *dl_ccch_msg = NULL;
@@ -2861,11 +2561,6 @@ static int8_t nr_rrc_ue_decode_ccch(NR_UE_RRC_INST_t *rrc, const NRRrcMacCcchDat
 
 /** @brief Decode a PCCH paging message and scan its paging records (TS 38.331 §5.3.2.3).
  * @return -1 on decode error, 0 if no match is found, 1 if a record matches the UE */
-/* nr_rrc_ue_decode_pcch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3479.
- */
 static int8_t nr_rrc_ue_decode_pcch(NR_UE_RRC_INST_t *rrc, const byte_array_t pcch)
 {
   // Paging is only relevant in RRC_IDLE and RRC_INACTIVE.
@@ -3040,11 +2735,6 @@ static void nr_rrc_ue_process_securityModeCommand(NR_UE_RRC_INST_t *ue_rrc,
   }
 }
 
-/* nr_rrc_ue_generate_RRCReconfigurationComplete: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2945.
- */
 static void nr_rrc_ue_generate_RRCReconfigurationComplete(NR_UE_RRC_INST_t *rrc, const int srb_id, const uint8_t Transaction_id)
 {
   uint8_t buffer[32];
@@ -3059,11 +2749,6 @@ static void nr_rrc_ue_generate_RRCReconfigurationComplete(NR_UE_RRC_INST_t *rrc,
   nr_pdcp_data_req_srb(rrc->ue_id, srb_id, 0, size, buffer, deliver_pdu_srb_rlc, NULL);
 }
 
-/* nr_rrc_ue_generate_rrcReestablishmentComplete: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2823.
- */
 static void nr_rrc_ue_generate_rrcReestablishmentComplete(const NR_UE_RRC_INST_t *rrc,
                                                           const NR_RRCReestablishment_t *rrcReestablishment)
 {
@@ -3138,11 +2823,6 @@ static void nr_rrc_ue_process_rrcReestablishment(NR_UE_RRC_INST_t *rrc,
   nr_rrc_ue_generate_rrcReestablishmentComplete(rrc, rrcReestablishment);
 }
 
-/* nr_rrc_ue_process_ueCapabilityEnquiry: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2961.
- */
 static void nr_rrc_ue_process_ueCapabilityEnquiry(NR_UE_RRC_INST_t *rrc, NR_UECapabilityEnquiry_t *UECapabilityEnquiry)
 {
   NR_UL_DCCH_Message_t ul_dcch_msg = {0};
@@ -3335,11 +3015,6 @@ static int nr_rrc_ue_decode_dcch(NR_UE_RRC_INST_t *rrc,
 }
 
 /** @brief Encode NAS in ULInformationTransfer, submit to PDCP on SRB2 if established else SRB1. */
-/* nr_rrc_ue_send_ul_information_transfer_nas: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3530.
- */
 static void nr_rrc_ue_send_ul_information_transfer_nas(NR_UE_RRC_INST_t *rrc, uint32_t nas_length, uint8_t *nas_pdu)
 {
   uint8_t *buffer = NULL;
@@ -3355,11 +3030,6 @@ static void nr_rrc_ue_send_ul_information_transfer_nas(NR_UE_RRC_INST_t *rrc, ui
   free(buffer);
 }
 
-/* apply_ema: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3053, openair2/RRC/NR_UE/rrc_UE.c:3055.
- */
 static void apply_ema(val_init_t *vi_rsrp_dBm, float filter_coeff_rsrp, int rsrp_dBm)
 {
   int *quant = &vi_rsrp_dBm->val;
@@ -3369,11 +3039,6 @@ static void apply_ema(val_init_t *vi_rsrp_dBm, float filter_coeff_rsrp, int rsrp
   *meas_init = true;
 }
 
-/* nr_ue_meas_filtering: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3359.
- */
 void nr_ue_meas_filtering(rrcPerNB_t *rrc, meas_t *meas_cell, uint16_t Nid_cell, bool csi_meas, int rsrp_dBm)
 {
   l3_measurements_t *l3_measurements = &rrc->l3_measurements;
@@ -3390,11 +3055,6 @@ void nr_ue_meas_filtering(rrcPerNB_t *rrc, meas_t *meas_cell, uint16_t Nid_cell,
     apply_ema(&meas_cell->ss_rsrp_dBm, l3_measurements->ssb_filter_coeff_rsrp, rsrp_dBm);
 }
 
-/* get_rsrp_value: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3126, openair2/RRC/NR_UE/rrc_UE.c:3173, openair2/RRC/NR_UE/rrc_UE.c:3189.
- */
 static int get_rsrp_value(const meas_t *cell)
 {
   if (cell->ss_rsrp_dBm.init)
@@ -3404,11 +3064,6 @@ static int get_rsrp_value(const meas_t *cell)
   return INT_MAX;
 }
 
-/* setup_meas_trigger: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3102.
- */
 static void setup_meas_trigger(l3_measurements_t *l3_measurements,
                                NR_EventTriggerConfig_t *event_config,
                                int meas_id,
@@ -3447,11 +3102,6 @@ static void start_meas_event(l3_measurements_t *l3_measurements,
   setup_meas_trigger(l3_measurements, event_config, meas_id, trigger_quantity, neighbor_cell_valid);
 }
 
-/* stop_meas_event: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3153, openair2/RRC/NR_UE/rrc_UE.c:3228.
- */
 static void stop_meas_event(meas_report_params_t *params, NR_timer_t *event_timer)
 {
   nr_timer_stop(event_timer);
@@ -3459,11 +3109,6 @@ static void stop_meas_event(meas_report_params_t *params, NR_timer_t *event_time
 }
 
 // TS 38.331 - 5.5.4.3 Event A2 (Serving becomes worse than threshold)
-/* handle_event_a2: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3253.
- */
 static void handle_event_a2(l3_measurements_t *l3_measurements,
                             rrcPerNB_t *rrcNB,
                             struct NR_EventTriggerConfig__eventId__eventA2 *event_A2,
@@ -3510,11 +3155,6 @@ static void handle_event_a2(l3_measurements_t *l3_measurements,
 }
 
 // TS 38.331 - 5.5.4.4 Event A3 (Neighbour becomes offset better than SpCell)
-/* handle_event_a3: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3260.
- */
 static void handle_event_a3(l3_measurements_t *l3_measurements,
                             rrcPerNB_t *rrcNB,
                             struct NR_EventTriggerConfig__eventId__eventA3 *event_A3,
@@ -3589,11 +3229,6 @@ static void handle_event_a3(l3_measurements_t *l3_measurements,
   }
 }
 
-/* nr_ue_check_meas_report: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3360.
- */
 static void nr_ue_check_meas_report(NR_UE_RRC_INST_t *rrc, const uint8_t gnb_index)
 {
   rrcPerNB_t *rrcNB = rrc->perNB + gnb_index;
@@ -3634,11 +3269,6 @@ static void nr_ue_check_meas_report(NR_UE_RRC_INST_t *rrc, const uint8_t gnb_ind
   }
 }
 
-/* nr_rrc_handle_ra_indication: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3449.
- */
 static void nr_rrc_handle_ra_indication(NR_UE_RRC_INST_t *rrc, bool ra_succeeded, int gNB_index)
 {
   NR_UE_Timers_Constants_t *timers = &rrc->timers_and_constants;
@@ -3683,11 +3313,6 @@ static void nr_rrc_handle_ra_indication(NR_UE_RRC_INST_t *rrc, bool ra_succeeded
   }
 }
 
-/* nr_rrc_handle_meas_indication: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3468.
- */
 static void nr_rrc_handle_meas_indication(NR_UE_RRC_INST_t *rrc, NRRrcMacMeasDataInd *meas_ind)
 {
   rrcPerNB_t *rrcNB = rrc->perNB + meas_ind->gnb_index;
@@ -3736,11 +3361,6 @@ static void nr_rrc_handle_meas_indication(NR_UE_RRC_INST_t *rrc, NRRrcMacMeasDat
   }
 }
 
-/* rrc_nrue_task: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_proto.h:37.
- */
 void *rrc_nrue_task(void *args_p)
 {
   UNUSED(args_p);
@@ -3750,11 +3370,6 @@ void *rrc_nrue_task(void *args_p)
   }
 }
 
-/* rrc_nrue: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3369, openair2/RRC/NR_UE/rrc_proto.h:38.
- */
 void *rrc_nrue(void *notUsed)
 {
   UNUSED(notUsed);
@@ -3971,11 +3586,6 @@ void *rrc_nrue(void *notUsed)
   return NULL;
 }
 
-/* nr_rrc_ue_process_sidelink_radioResourceConfig: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 void nr_rrc_ue_process_sidelink_radioResourceConfig(NR_SetupRelease_SL_ConfigDedicatedNR_r16_t *sl_ConfigDedicatedNR)
 {
   //process sl_CommConfig, configure MAC/PHY for transmitting SL communication (RRC_CONNECTED)
@@ -3994,11 +3604,6 @@ void nr_rrc_ue_process_sidelink_radioResourceConfig(NR_SetupRelease_SL_ConfigDed
   }
 }
 
-/* nr_rrc_initiate_rrcReestablishment: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:3706.
- */
 static void nr_rrc_initiate_rrcReestablishment(NR_UE_RRC_INST_t *rrc, NR_ReestablishmentCause_t cause)
 {
   rrc->reestablishment_cause = cause;
@@ -4045,11 +3650,6 @@ static void nr_rrc_initiate_rrcReestablishment(NR_UE_RRC_INST_t *rrc, NR_Reestab
   nr_rrc_trigger_mac_ra(rrc, NR_MAC_RA_START_REESTABLISHMENT);
 }
 
-/* handle_RRCRelease: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_proto.h:29, openair2/RRC/NR_UE/rrc_timers_and_constants.c:172.
- */
 void handle_RRCRelease(NR_UE_RRC_INST_t *rrc)
 {
   NR_UE_Timers_Constants_t *tac = &rrc->timers_and_constants;
@@ -4090,11 +3690,6 @@ void handle_RRCRelease(NR_UE_RRC_INST_t *rrc)
   asn1cFreeStruc(asn_DEF_NR_RRCRelease, rrc->RRCRelease);
 }
 
-/* handle_rlf_detection: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/telnetsrv/telnetsrv_ciUE.c:78, openair2/RRC/NR_UE/rrc_UE.c:1070, openair2/RRC/NR_UE/rrc_UE.c:1143, openair2/RRC/NR_UE/rrc_UE.c:1755 (+5 more).
- */
 void handle_rlf_detection(NR_UE_RRC_INST_t *rrc)
 {
   // 5.3.10.3 in 38.331
@@ -4115,11 +3710,6 @@ void handle_rlf_detection(NR_UE_RRC_INST_t *rrc)
   }
 }
 
-/* nr_rrc_going_to_IDLE: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/telnetsrv/telnetsrv_ciUE.c:91, openair2/RRC/NR_UE/rrc_UE.c:997, openair2/RRC/NR_UE/rrc_UE.c:2809, openair2/RRC/NR_UE/rrc_UE.c:3424 (+7 more).
- */
 void nr_rrc_going_to_IDLE(NR_UE_RRC_INST_t *rrc,
                           NR_Release_Cause_t release_cause,
                           NR_RRCRelease_t *RRCRelease)
@@ -4284,11 +3874,6 @@ void nr_rrc_going_to_IDLE(NR_UE_RRC_INST_t *rrc,
   itti_send_msg_to_task(TASK_NAS_NRUE, rrc->ue_id, msg_p);
 }
 
-/* handle_302_expired_stopped: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_UE.c:2458, openair2/RRC/NR_UE/rrc_UE.c:3743, openair2/RRC/NR_UE/rrc_proto.h:42, openair2/RRC/NR_UE/rrc_timers_and_constants.c:193.
- */
 void handle_302_expired_stopped(NR_UE_RRC_INST_t *rrc)
 {
   // for each Access Category for which T390 (TODO not implemented) is not running
@@ -4296,11 +3881,6 @@ void handle_302_expired_stopped(NR_UE_RRC_INST_t *rrc)
   rrc->access_barred = false;
 }
 
-/* handle_t300_expiry: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_proto.h:50, openair2/RRC/NR_UE/rrc_timers_and_constants.c:177.
- */
 void handle_t300_expiry(NR_UE_RRC_INST_t *rrc)
 {
   rrc->ra_trigger = RRC_CONNECTION_SETUP;
@@ -4312,11 +3892,6 @@ void handle_t300_expiry(NR_UE_RRC_INST_t *rrc)
   // TODO inform upper layers about the failure to establish the RRC connection
 }
 
-/* handle_t430_expiry: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_proto.h:51, openair2/RRC/NR_UE/rrc_timers_and_constants.c:227.
- */
 void handle_t430_expiry(NR_UE_RRC_INST_t *rrc)
 {
   // SPEC 38.331 section 5.2.2.6
@@ -4335,11 +3910,6 @@ void handle_t430_expiry(NR_UE_RRC_INST_t *rrc)
 }
 
 //This calls the sidelink preconf message after RRC, MAC instances are created.
-/* start_sidelink: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:2463, openair2/RRC/NR_UE/rrc_proto.h:65.
- */
 void start_sidelink(int instance)
 {
 
@@ -4353,22 +3923,12 @@ void start_sidelink(int instance)
   }
 }
 
-/* nr_rrc_set_mac_queue: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue.c:2455, openair2/RRC/NR_UE/rrc_proto.h:74.
- */
 void nr_rrc_set_mac_queue(instance_t instance, notifiedFIFO_t *mac_input_nf)
 {
   NR_UE_RRC_INST_t *rrc = get_NR_UE_rrc_inst(instance);
   rrc->mac_input_nf = mac_input_nf;
 }
 
-/* rrc_ue_generate_measurementReport: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/RRC/NR_UE/rrc_proto.h:31, openair2/RRC/NR_UE/rrc_timers_and_constants.c:124, openair2/RRC/NR_UE/rrc_timers_and_constants.c:136, openair2/RRC/NR_UE/rrc_timers_and_constants.c:156.
- */
 void rrc_ue_generate_measurementReport(rrcPerNB_t *rrc, instance_t ue_id, int meas_id)
 {
   uint8_t buffer[NR_RRC_BUF_SIZE];

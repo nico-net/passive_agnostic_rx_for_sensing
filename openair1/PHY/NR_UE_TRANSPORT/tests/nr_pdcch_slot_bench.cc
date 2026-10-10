@@ -13,18 +13,8 @@
 #include <string>
 
 struct Sample { nr_pdcch_gpu_record_t h; std::vector<int16_t> iq, cpu; };
-/* elapsed: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_slot_bench.cc:99.
- */
 static double elapsed(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
 { return std::chrono::duration<double, std::micro>(b-a).count(); }
-/* pct: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_slot_bench.cc:127.
- */
 static double pct(std::vector<double> v, double q)
 { if (v.empty()) return NAN; std::sort(v.begin(),v.end()); return v[(size_t)std::ceil(q*v.size())-1]; }
 

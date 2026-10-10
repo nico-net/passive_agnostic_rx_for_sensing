@@ -51,11 +51,6 @@ static _Atomic uint64_t cost_ns[4][NR_SENSE_SRC_COUNT], cost_count[4][NR_SENSE_S
 static void *zmq_context, *zmq_pub;
 #endif
 
-/* init_mu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void init_mu(void)
 {
   pthread_mutexattr_t attr;
@@ -65,37 +60,12 @@ static void init_mu(void)
     pthread_mutexattr_destroy(&attr);
   }
 }
-/* put16: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:320, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:321, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:327, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:334.
- */
 static void put16(uint8_t *p, uint16_t x) { p[0]=x; p[1]=x>>8; }
-/* put32: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:66, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:321, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:322.
- */
 static void put32(uint8_t *p, uint32_t x) { for(int i=0;i<4;i++) p[i]=x>>(8*i); }
-/* put64: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:321, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:349.
- */
 static void put64(uint8_t *p, uint64_t x) { for(int i=0;i<8;i++) p[i]=x>>(8*i); }
-/* putf: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:322, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:345.
- */
 static void putf(uint8_t *p, float x) { uint32_t bits; memcpy(&bits,&x,4); put32(p,bits); }
 static bool write_item(int fd, const void *buf, size_t len);
 
-/* nr_sense_cost_add: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:997, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9233, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9272, openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:428 (+13 more).
- */
 void nr_sense_cost_add(nr_sense_cost_t kind, nr_sense_src_t src, uint64_t ns)
 {
   if (kind < NR_SENSE_COST_PROD || kind > NR_SENSE_COST_WRITE || src < 0 || src >= NR_SENSE_SRC_COUNT) return;
@@ -104,11 +74,6 @@ void nr_sense_cost_add(nr_sense_cost_t kind, nr_sense_src_t src, uint64_t ns)
 }
 
 /* A single writev for several adjacent ring slots; retry short writes without copying. */
-/* write_batch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:159.
- */
 static bool write_batch(int fd, struct iovec *iov, int count)
 {
   if (fd < 0) return true;
@@ -135,11 +100,6 @@ static bool write_batch(int fd, struct iovec *iov, int count)
   return true;
 }
 
-/* write_item: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:67, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:83.
- */
 static bool write_item(int fd, const void *buf, size_t len)
 {
   if (fd < 0) return true;
@@ -156,11 +116,6 @@ static bool write_item(int fd, const void *buf, size_t len)
   }
   return true;
 }
-/* run_writer: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void *run_writer(void *arg)
 {
   (void)arg;
@@ -308,11 +263,6 @@ fail:
   return -1;
 }
 
-/* nr_sense_close: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ISAC/nr_isac.cc:320, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:29, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:49 (+22 more).
- */
 void nr_sense_close(void)
 {
   pthread_mutex_lock(&mu);
@@ -335,29 +285,14 @@ void nr_sense_close(void)
   frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; record_binary=NULL;
   pthread_mutex_unlock(&mu);
 }
-/* nr_sense_enabled: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-ue-ru.c:604, executables/nr-ue.c:1185, executables/nr-uesoftmodem.c:675, openair1/PHY/NR_UE_ISAC/nr_isac.cc:299 (+18 more).
- */
 bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire); }
 
-/* nr_sense_reject_cfr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ISAC/nr_isac.cc:357, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:303, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:40.
- */
 void nr_sense_reject_cfr(void)
 {
   if (!nr_sense_enabled()) return;
   pthread_mutex_lock(&mu); stats.cfr_rejected++; pthread_mutex_unlock(&mu);
 }
 
-/* push_cfr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:361, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c:367.
- */
 static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                          const void *k_abs, const void *l_sym, bool wide, uint64_t abs_slot, float slot_frac,
                          float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
@@ -419,33 +354,18 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
   pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return id;
 }
-/* nr_sense_push_cfr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:33, openair1/PHY/NR_UE_TRANSPORT/nr_srs_export.c:34, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:47, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:91 (+17 more).
- */
 uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                            const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,
                            float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
 {
   return push_cfr(src,n_ant,iq,ant_stride,n_re,k_abs,l_sym,false,abs_slot,slot_frac,noise_var,epoch,identity_gen,truncated);
 }
-/* nr_sense_push_cfr_u32: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ISAC/nr_isac.cc:363, openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:37.
- */
 uint64_t nr_sense_push_cfr_u32(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                                const uint32_t *k_abs, const uint32_t *l_sym, uint64_t abs_slot, float slot_frac,
                                float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
 {
   return push_cfr(src,n_ant,iq,ant_stride,n_re,k_abs,l_sym,true,abs_slot,slot_frac,noise_var,epoch,identity_gen,truncated);
 }
-/* nr_sense_push_record: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:41, openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c:172, openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c:197, openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c:217 (+8 more).
- */
 bool nr_sense_push_record(const char *json_line)
 {
   if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&after_close,1); return false; }
@@ -462,11 +382,6 @@ bool nr_sense_push_record(const char *json_line)
   record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return true;
 }
-/* nr_sense_push_rs_binary: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c:213, openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.h:73.
- */
 int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *meta, uint64_t frame_id)
 {
   if (!nr_sense_enabled() || !nr_sense_rs_to_json || !meta || src<0 || src>=NR_SENSE_SRC_COUNT) return -1;
@@ -492,11 +407,6 @@ int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *meta, 
   record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return 1;
 }
-/* nr_sense_stats: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_ISAC/tests/nr_isac_adapter_test.cc:243, openair1/PHY/NR_UE_ISAC/tests/nr_isac_adapter_test.cc:259, openair1/PHY/NR_UE_ISAC/tests/nr_isac_adapter_test.cc:307, openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:29 (+14 more).
- */
 void nr_sense_stats(nr_sense_stats_t *out)
 {
   if (!out) return;
@@ -513,49 +423,19 @@ void nr_sense_stats(nr_sense_stats_t *out)
     out->write_count+=atomic_load(&cost_count[NR_SENSE_COST_WRITE][s]);
   }
 }
-/* nr_sense_test_pause_writer: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:68, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:87, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:92 (+12 more).
- */
 void nr_sense_test_pause_writer(bool pause)
 {
   atomic_store(&pause_writer,pause);
   pthread_mutex_lock(&mu); pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
 }
-/* nr_sense_test_fail_writes: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:69, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:189.
- */
 void nr_sense_test_fail_writes(bool fail) { atomic_store(&fail_writes,fail); }
-/* nr_sense_test_write_chunk: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:70, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:126.
- */
 void nr_sense_test_write_chunk(uint32_t bytes) { atomic_store(&write_chunk,bytes); }
-/* nr_sense_test_writer_limit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:71, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:153.
- */
 void nr_sense_test_writer_limit(uint32_t items)
 {
   atomic_store(&writer_limit,items);
   pthread_mutex_lock(&mu); pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
 }
-/* nr_sense_test_written_items: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:72, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:160, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:162, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:173 (+1 more).
- */
 uint32_t nr_sense_test_written_items(void) { return atomic_load(&written_items); }
 #ifdef NR_SENSE_HAVE_ZMQ
-/* nr_sense_test_zmq_context: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.h:74, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_api_test.cc:220.
- */
 void *nr_sense_test_zmq_context(void) { return zmq_context; }
 #endif

@@ -23,22 +23,12 @@ static bool g_dec_registered;
 static bool g_freeze; /* test hook: the cost estimates stay at their initial values */
 static bool g_unlimited; /* test hook: the token bucket admits every grant */
 
-/* env_d: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:37, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:40, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:41, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:50 (+1 more).
- */
 static double env_d(const char *n, double dflt)
 {
   const char *e = getenv(n);
   return (e && *e) ? atof(e) : dflt;
 }
 
-/* cfg_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_LLR_SCALE, ISAC_TD_CB0_B, ISAC_TD_CB0_BUDGET_US, ISAC_TD_CB0_CPU_PCT, ISAC_TD_CB0_GPU_ITERS, ISAC_TD_CB0_RANK_MAX, ISAC_TD_CB0_THREADS, ISAC_TD_TB_CPU_WHILE_ACQ.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:89, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:220, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:389, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:661.
- */
 static void cfg_locked(void)
 {
   if (g_cfg_done)
@@ -68,11 +58,6 @@ static void cfg_locked(void)
 
 /* Backends: the CPU decoder, the worker threads and (unless ISAC_TD_CB0_BACKEND=cpu) the CUDA CB0 adapter, once. Done
  * BEFORE the first grant's TB-decoder decision (nr_td_cb0_wire_pre peeks at the backend the batch will use). */
-/* backends_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_BACKEND, ISAC_TD_CB0_GPU_AUTOREG.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:90, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:221, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:390.
- */
 static void backends_locked(void)
 {
   if (g_dec_registered)
@@ -117,11 +102,6 @@ typedef struct {
   uint32_t grants, adm, items, elim, alarms;
 } ctx_row_t;
 static ctx_row_t g_ctx[CTX_TAB];
-/* ctx_row_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:547, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:564.
- */
 static ctx_row_t *ctx_row_locked(uint64_t seed)
 {
   const uint32_t h = (uint32_t)(seed % CTX_TAB);
@@ -173,11 +153,6 @@ typedef struct {
   int n_sigs_est;
 } plan_t;
 static __thread plan_t *t_plan;
-/* plan: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:124, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:211.
- */
 static plan_t *plan(void)
 {
   if (t_plan == NULL) {
@@ -204,21 +179,11 @@ static plan_t *plan(void)
   return t_plan;
 }
 
-/* cmp_u64: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int cmp_u64(const void *a, const void *b)
 {
   const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
   return x < y ? -1 : (x > y ? 1 : 0);
 }
-/* count_distinct: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:261.
- */
 static int count_distinct(uint64_t *v, int n)
 {
   if (n <= 0)
@@ -230,11 +195,6 @@ static int count_distinct(uint64_t *v, int n)
   return d;
 }
 
-/* now_ns: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:355, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:398, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:413.
- */
 static uint64_t now_ns(void)
 {
   struct timespec ts;
@@ -242,11 +202,6 @@ static uint64_t now_ns(void)
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-/* nr_td_cb0_wire_pre: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_GPU_ITERS, ISAC_TD_GRANTWORK, ISAC_TD_TB_CPU_WHILE_ACQ.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1492, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:8, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:55, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:154 (+12 more).
- */
 bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw, const nr_td_cb0_job_t *job, bool *tb_cpu)
 {
   if (tb_cpu)
@@ -417,11 +372,6 @@ bool nr_td_cb0_wire_pre(const nr_pdsch_sweep_ticket_t *t, nr_td_grantwork_t *gw,
   return true;
 }
 
-/* nr_td_cb0_wire_run: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1560, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:15, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:56, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:156 (+10 more).
- */
 void nr_td_cb0_wire_run(nr_td_grantwork_t *gw)
 {
   plan_t *p = t_plan;
@@ -521,11 +471,6 @@ void nr_td_cb0_wire_run(nr_td_grantwork_t *gw)
   nr_td_grantwork_release(gw);
 }
 
-/* count_reasons: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:493, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:528.
- */
 static void count_reasons(uint32_t r)
 {
   for (int b = 0; b < NR_TD_CB0_R_COUNT; b++)
@@ -533,11 +478,6 @@ static void count_reasons(uint32_t r)
       atomic_fetch_add(&s_inadm[b], 1);
 }
 
-/* nr_td_cb0_wire_feed: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1956, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2041, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:17, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:66 (+10 more).
- */
 void nr_td_cb0_wire_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0_tb_t *tb)
 {
   plan_t *p = t_plan;
@@ -613,11 +553,6 @@ void nr_td_cb0_wire_feed(const nr_pdsch_sweep_ticket_t *t, const nr_td_cb0_tb_t 
   pthread_mutex_unlock(&g_lock);
 }
 
-/* nr_td_cb0_wire_converged_suffix: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1949, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:68, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:511, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:564 (+1 more).
- */
 const char *nr_td_cb0_wire_converged_suffix(const nr_pdsch_sweep_ticket_t *t)
 {
   static __thread char buf[160];
@@ -633,11 +568,6 @@ const char *nr_td_cb0_wire_converged_suffix(const nr_pdsch_sweep_ticket_t *t)
   return buf;
 }
 
-/* nr_td_cb0_wire_stats: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:132, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:88, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:171.
- */
 void nr_td_cb0_wire_stats(nr_td_cb0_wire_stats_t *s)
 {
   if (s == NULL)
@@ -673,11 +603,6 @@ void nr_td_cb0_wire_stats(nr_td_cb0_wire_stats_t *s)
   s->gpu_skipped = b.gpu_skipped;
 }
 
-/* nr_td_cb0_wire_reset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:90, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:118, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:632, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:865 (+4 more).
- */
 void nr_td_cb0_wire_reset(void)
 {
   pthread_mutex_lock(&g_lock);
@@ -699,11 +624,6 @@ void nr_td_cb0_wire_reset(void)
   nr_td_cb0a_stats_reset();
 }
 
-/* nr_td_cb0_wire_test_freeze: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:93, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:119.
- */
 void nr_td_cb0_wire_test_freeze(bool on)
 {
   pthread_mutex_lock(&g_lock);
@@ -711,11 +631,6 @@ void nr_td_cb0_wire_test_freeze(bool on)
   pthread_mutex_unlock(&g_lock);
 }
 
-/* nr_td_cb0_wire_test_last_set: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:94, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:642.
- */
 int nr_td_cb0_wire_test_last_set(int *idx, int max)
 {
   const plan_t *p = t_plan;
@@ -727,22 +642,12 @@ int nr_td_cb0_wire_test_last_set(int *idx, int max)
   return n;
 }
 
-/* nr_td_cb0_wire_test_last_reasons: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:95, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:640, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:836, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:842 (+1 more).
- */
 uint32_t nr_td_cb0_wire_test_last_reasons(void)
 {
   const plan_t *p = t_plan;
   return p ? p->pre_reasons : 0;
 }
 
-/* nr_td_cb0_wire_test_unlimited: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:97, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:120, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:633, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:753 (+3 more).
- */
 void nr_td_cb0_wire_test_unlimited(bool on)
 {
   pthread_mutex_lock(&g_lock);
@@ -750,11 +655,6 @@ void nr_td_cb0_wire_test_unlimited(bool on)
   pthread_mutex_unlock(&g_lock);
 }
 
-/* nr_td_cb0_wire_test_set_tokens: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.h:98, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:637, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:755, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:839.
- */
 void nr_td_cb0_wire_test_set_tokens(double us)
 {
   pthread_mutex_lock(&g_lock);

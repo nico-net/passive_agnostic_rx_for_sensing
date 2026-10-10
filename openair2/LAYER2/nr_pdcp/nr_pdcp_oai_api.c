@@ -59,11 +59,6 @@ static uint64_t pdcp_optmask;
 
 static ngran_node_t node_type;
 
-/* nr_pdcp_get_rb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:261, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:544, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:602, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:694 (+11 more).
- */
 nr_pdcp_entity_t *nr_pdcp_get_rb(nr_pdcp_ue_t *ue, int rb_id, bool srb_flag)
 {
   nr_pdcp_entity_t *rb;
@@ -239,11 +234,6 @@ typedef struct {
 
 static pdcp_data_ind_queue pq;
 
-/* do_pdcp_data_ind: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:272, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:289, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:978.
- */
 static void do_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
                              const srb_flag_t srb_flagP,
                              const rb_id_t rb_id,
@@ -326,11 +316,6 @@ static void init_nr_pdcp_data_ind_queue(void)
   pq.started = true;
 }
 
-/* enqueue_pdcp_data_ind: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:356.
- */
 static void enqueue_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
                                   const srb_flag_t srb_flagP,
                                   const rb_id_t rb_id,
@@ -362,11 +347,6 @@ static void enqueue_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
   if (pthread_mutex_unlock(&pq.m) != 0) abort();
 }
 
-/* nr_pdcp_data_ind: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/F1AP/f1ap_cu_rrc_message_transfer.c:124, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:24, openair2/LAYER2/nr_rlc/nr_rlc_oai_api.c:504.
- */
 bool nr_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
                       const srb_flag_t srb_flagP,
                       const rb_id_t rb_id,
@@ -381,30 +361,15 @@ bool nr_pdcp_data_ind(const protocol_ctxt_t *const ctxt_pP,
 /* pdcp_data_ind thread - end                                               */
 /****************************************************************************/
 
-/* pdcp_fifo_flush_sdus: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/PDCP_v10.1.0/pdcp.c:1010, openair2/LAYER2/PDCP_v10.1.0/pdcp.c:1252, openair2/LAYER2/PDCP_v10.1.0/pdcp.h:325, openair2/LAYER2/PDCP_v10.1.0/pdcp_fifo.c:58 (+5 more).
- */
 int pdcp_fifo_flush_sdus(const protocol_ctxt_t *const ctxt_pP)
 {
   return 0;
 }
 
-/* set_node_type: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:388.
- */
 static void set_node_type() {
   node_type = get_node_type();
 }
 
-/* nr_pdcp_layer_init: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-cuup.c:147, executables/nr-softmodem.c:196, executables/nr-uesoftmodem.c:480, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:21.
- */
 void nr_pdcp_layer_init(void)
 {
   /* hack: be sure to initialize only once */
@@ -437,11 +402,6 @@ void nr_pdcp_layer_init(void)
 #include "common/utils/tuntap_if.h"
 #include "openair2/SDAP/nr_sdap/nr_sdap.h"
 
-/* deliver_sdu_drb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void deliver_sdu_drb(void *_ue, nr_pdcp_entity_t *entity,
                             char *buf, int size,
                             const nr_pdcp_integrity_data_t *msg_integrity)
@@ -475,11 +435,6 @@ static void deliver_sdu_drb(void *_ue, nr_pdcp_entity_t *entity,
   }
 }
 
-/* deliver_pdu_drb_ue: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void deliver_pdu_drb_ue(void *deliver_pdu_data, ue_id_t ue_id, int rb_id,
                                char *buf, int size, int sdu_id)
 {
@@ -492,11 +447,6 @@ static void deliver_pdu_drb_ue(void *deliver_pdu_data, ue_id_t ue_id, int rb_id,
   enqueue_rlc_data_req(&ctxt, 0, rb_id, sdu_id, 0, size, memblock);
 }
 
-/* deliver_pdu_drb_gnb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void deliver_pdu_drb_gnb(void *deliver_pdu_data, ue_id_t ue_id, int rb_id,
                                 char *buf, int size, int sdu_id)
 {
@@ -517,11 +467,6 @@ static void deliver_pdu_drb_gnb(void *deliver_pdu_data, ue_id_t ue_id, int rb_id
   }
 }
 
-/* deliver_sdu_srb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void deliver_sdu_srb(void *_ue, nr_pdcp_entity_t *entity,
                             char *buf, int size,
                             const nr_pdcp_integrity_data_t *msg_integrity)
@@ -572,11 +517,6 @@ srb_found:
   }
 }
 
-/* deliver_pdu_srb_rlc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:85.
- */
 void deliver_pdu_srb_rlc(void *deliver_pdu_data, ue_id_t ue_id, int srb_id,
                          char *buf, int size, int sdu_id)
 {
@@ -586,11 +526,6 @@ void deliver_pdu_srb_rlc(void *deliver_pdu_data, ue_id_t ue_id, int srb_id,
   enqueue_rlc_data_req(&ctxt, 1, srb_id, sdu_id, 0, size, memblock);
 }
 
-/* add_srb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:640, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:55, openair2/LAYER2/rlc_v2/rlc_oai_api.c:514, openair2/LAYER2/rlc_v2/rlc_oai_api.c:884 (+1 more).
- */
 void add_srb(int is_gnb,
              ue_id_t UEid,
              struct NR_SRB_ToAddMod *s,
@@ -630,11 +565,6 @@ void add_srb(int is_gnb,
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_add_drb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:161, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:35, openair2/RRC/NR/rrc_gNB_nsa.c:161, openair2/RRC/NR_UE/rrc_UE.c:795.
- */
 void nr_pdcp_add_drb(int is_gnb,
                      const ue_id_t UEid,
                      const NR_PDCP_Config_t *pdcp,
@@ -700,11 +630,6 @@ void nr_pdcp_add_drb(int is_gnb,
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_add_srbs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.c:643, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:30, openair2/RRC/NR/rrc_gNB.c:518, openair2/RRC/NR/rrc_gNB.c:526.
- */
 void nr_pdcp_add_srbs(eNB_flag_t enb_flag,
                       ue_id_t UEid,
                       NR_SRB_ToAddModList_t *const srb2add_list,
@@ -719,11 +644,6 @@ void nr_pdcp_add_srbs(eNB_flag_t enb_flag,
 }
 
 /** @brief Get DRB IDs for a specific PDU session */
-/* nr_pdcp_get_drb_ids_for_pdusession: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:324, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:53.
- */
 int nr_pdcp_get_drb_ids_for_pdusession(ue_id_t ue_id, long pdusession_id, int *drb_ids)
 {
   int num_found = 0;
@@ -747,21 +667,11 @@ int nr_pdcp_get_drb_ids_for_pdusession(ue_id_t ue_id, long pdusession_id, int *d
   return num_found;
 }
 
-/* get_pdcp_optmask: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/lte-softmodem.h:111, openair2/LAYER2/PDCP_v10.1.0/pdcp.c:177, openair2/LAYER2/PDCP_v10.1.0/pdcp.h:41, openair2/LAYER2/PDCP_v10.1.0/pdcp.h:42 (+2 more).
- */
 uint64_t get_pdcp_optmask(void)
 {
   return pdcp_optmask;
 }
 
-/* nr_pdcp_remove_UE: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:526, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:41, openair2/RRC/NR/rrc_gNB.c:2772, openair2/RRC/NR/rrc_gNB.c:2775.
- */
 void nr_pdcp_remove_UE(ue_id_t ue_id)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -769,11 +679,6 @@ void nr_pdcp_remove_UE(ue_id_t ue_id)
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_config_set_security: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:60, openair2/RRC/NR/rrc_gNB.c:1221, openair2/RRC/NR/rrc_gNB_NGAP.c:162, openair2/RRC/NR_UE/rrc_UE.c:1180 (+4 more).
- */
 void nr_pdcp_config_set_security(ue_id_t ue_id,
                                  rb_id_t rb_id,
                                  bool is_srb,
@@ -799,11 +704,6 @@ void nr_pdcp_config_set_security(ue_id_t ue_id,
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_check_integrity_srb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:65, openair2/RRC/NR_UE/rrc_UE.c:2662, openair2/RRC/NR_UE/rrc_UE.c:2802.
- */
 bool nr_pdcp_check_integrity_srb(ue_id_t ue_id,
                                  int srb_id,
                                  const uint8_t *msg,
@@ -871,11 +771,6 @@ bool nr_pdcp_data_req_srb(ue_id_t ue_id,
   return 1;
 }
 
-/* nr_pdcp_suspend_srb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:47.
- */
 void nr_pdcp_suspend_srb(ue_id_t ue_id, int srb_id)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -891,11 +786,6 @@ void nr_pdcp_suspend_srb(ue_id_t ue_id, int srb_id)
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_suspend_drb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:48.
- */
 void nr_pdcp_suspend_drb(ue_id_t ue_id, int drb_id)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -911,11 +801,6 @@ void nr_pdcp_suspend_drb(ue_id_t ue_id, int drb_id)
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_reconfigure_srb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:49, openair2/RRC/NR_UE/rrc_UE.c:853.
- */
 void nr_pdcp_reconfigure_srb(ue_id_t ue_id, int srb_id, long t_Reordering)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -931,11 +816,6 @@ void nr_pdcp_reconfigure_srb(ue_id_t ue_id, int srb_id, long t_Reordering)
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_reconfigure_drb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:50, openair2/RRC/NR_UE/rrc_UE.c:899.
- */
 void nr_pdcp_reconfigure_drb(ue_id_t ue_id, int drb_id, NR_PDCP_Config_t *pdcp_config)
 {
   // The enabling/disabling of ciphering or integrity protection
@@ -975,11 +855,6 @@ void nr_pdcp_reconfigure_drb(ue_id_t ue_id, int drb_id, NR_PDCP_Config_t *pdcp_c
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_release_srb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:51, openair2/RRC/NR_UE/rrc_UE.c:808, openair2/RRC/NR_UE/rrc_UE.c:2415, openair2/RRC/NR_UE/rrc_UE.c:3801.
- */
 void nr_pdcp_release_srb(ue_id_t ue_id, int srb_id)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -993,11 +868,6 @@ void nr_pdcp_release_srb(ue_id_t ue_id, int srb_id)
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_release_drb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:317, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:52, openair2/RRC/NR_UE/rrc_UE.c:862, openair2/RRC/NR_UE/rrc_UE.c:2409 (+1 more).
- */
 void nr_pdcp_release_drb(ue_id_t ue_id, int drb_id)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -1015,11 +885,6 @@ void nr_pdcp_release_drb(ue_id_t ue_id, int drb_id)
   nr_pdcp_manager_unlock(nr_pdcp_ue_manager);
 }
 
-/* nr_pdcp_reestablishment: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:451, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:42, openair2/RRC/NR/rrc_gNB.c:1011, openair2/RRC/NR/rrc_gNB.c:1199 (+4 more).
- */
 void nr_pdcp_reestablishment(ue_id_t ue_id,
                              int rb_id,
                              bool srb_flag,
@@ -1117,21 +982,11 @@ bool cu_f1u_data_req(protocol_ctxt_t  *ctxt_pP,
 /*
  * For the SDAP API
  */
-/* nr_pdcp_sdap_get_ue_manager: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:104.
- */
 nr_pdcp_ue_manager_t *nr_pdcp_sdap_get_ue_manager() {
   return nr_pdcp_ue_manager;
 }
 
 /* returns false in case of error, true if everything ok */
-/* nr_pdcp_get_statistics: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_pdcp.c:36, openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_pdcp.c:89, openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_pdcp.c:103, openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_kpm_subs.c:40 (+1 more).
- */
 bool nr_pdcp_get_statistics(ue_id_t ue_id, int srb_flag, int rb_id, nr_pdcp_statistics_t *out)
 {
   nr_pdcp_ue_t     *ue;
@@ -1154,11 +1009,6 @@ bool nr_pdcp_get_statistics(ue_id_t ue_id, int srb_flag, int rb_id, nr_pdcp_stat
   return ret;
 }
 
-/* nr_pdcp_get_num_ues: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_gtp.c:30, openair2/E2AP/RAN_FUNCTION/CUSTOMIZED/ran_func_pdcp.c:98, openair2/E2AP/RAN_FUNCTION/O-RAN/ran_func_kpm.c:252, openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:549 (+1 more).
- */
 int nr_pdcp_get_num_ues(ue_id_t *ue_list, int len)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -1171,11 +1021,6 @@ int nr_pdcp_get_num_ues(ue_id_t *ue_list, int len)
   return num_ues;
 }
 
-/* nr_pdcp_count_update: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:476, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:110.
- */
 void nr_pdcp_count_update(ue_id_t ue_id,
                           rb_id_t drb_id,
                           nr_pdcp_count_t dl_count,
@@ -1210,11 +1055,6 @@ void nr_pdcp_count_update(ue_id_t ue_id,
  * @param[out] ul_count       UL PDCP count (SN, HFN)
  * @param[out] dl_count       DL PDCP count (SN, HFN)
  */
-/* nr_pdcp_get_drb_count_values: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/nr_pdcp/cucp_cuup_handler.c:462, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:116.
- */
 void nr_pdcp_get_drb_count_values(ue_id_t ue_id, rb_id_t rb_id, nr_pdcp_count_t *ul_count, nr_pdcp_count_t *dl_count)
 {
   nr_pdcp_manager_lock(nr_pdcp_ue_manager);
@@ -1237,11 +1077,6 @@ void nr_pdcp_get_drb_count_values(ue_id_t ue_id, rb_id_t rb_id, nr_pdcp_count_t 
 
 /* Called after ITTI, PHY and time-manager producers have stopped. Drain PDCP
  * before RLC, since a PDCP callback may enqueue an RLC request. */
-/* nr_pdcp_stop_threads: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:772, openair2/LAYER2/nr_pdcp/nr_pdcp_oai_api.h:22, openair2/LAYER2/nr_pdcp/nr_pdcp_timer_thread.c:74.
- */
 void nr_pdcp_stop_threads(void)
 {
   nr_pdcp_stop_timer_thread();

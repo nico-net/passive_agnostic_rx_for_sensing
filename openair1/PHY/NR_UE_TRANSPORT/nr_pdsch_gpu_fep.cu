@@ -169,11 +169,6 @@ static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
 /* rx[ant] holds the slot window starting `early` samples BEFORE the slot's CP, so symbol l's FFT window
  * (OAI: its data start minus early) is at buffer index ncp0 + l * (N + ncp); abs_sample0 is the
  * absolute index of buffer index 0. */
-/* k_fep_gather: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void k_fep_gather(const short2 *__restrict__ rx, long long abs_sample0, float phase_inc, int N, int ncp,
                              int ncp0, int nsym, int slot_len, float2 *__restrict__ out)
 {
@@ -290,72 +285,22 @@ __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__
 }
 
 /* ------------------------------------------------------------- LS chest ---- */
-/* dmrs_delta: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:281, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:443, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:51, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc:98.
- */
 __device__ inline int dmrs_delta(int type, int port) { return type == 1 ? ((port >> 1) & 1) : 2 * ((port >> 1) % 3); }
-/* dmrs_wf: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:281.
- */
 __device__ inline int dmrs_wf(int type, int port) { return (port & 1) ? -1 : 1; }
-/* dmrs_double: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:284.
- */
 __device__ inline int dmrs_double(int type, int port) { return type == 1 ? port >= 4 : port >= 6; }
-/* pilots_per_rb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:264, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:309, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:432.
- */
 __device__ inline int pilots_per_rb(int type) { return type == 1 ? 3 : 2; }
 /* pilot pair n of a port: REs (rb-relative to start of the carrier grid) k0 = base and k1 = k0 + gap */
-/* pilot_k0: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:290.
- */
 __device__ inline int pilot_k0(int type, int n, int delta) { return type == 1 ? 4 * n + delta : 6 * n + delta; }
-/* pilot_gap: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:291, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:363.
- */
 __device__ inline int pilot_gap(int type) { return type == 1 ? 2 : 1; }
-/* gold_qpsk: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:92, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:123, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:124, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:294.
- */
 __device__ inline float2 gold_qpsk(const uint32_t *g, int m)
 {
   const uint32_t c0 = (g[(2 * m) >> 5] >> ((2 * m) & 31)) & 1u, c1 = (g[(2 * m + 1) >> 5] >> ((2 * m + 1) & 31)) & 1u;
   return make_float2((1.f - 2.f * c0) * 0.70710678f, (1.f - 2.f * c1) * 0.70710678f);
 }
-/* cmul: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:99, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:125, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:480, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:481 (+2 more).
- */
 __device__ inline float2 cmul(float2 a, float2 b) { return make_float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
-/* cmulc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:100, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:164, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:295, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:459 (+1 more).
- */
 __device__ inline float2 cmulc(float2 a, float2 b) { return make_float2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y); } /* a * conj(b) */
 
 /* One thread per (job, dmrs symbol, port, ant, pilot pair): despread the fd-OCC pair to one LS estimate. */
-/* k_ls: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void k_ls(const nr_gpu_pdsch_job_t *__restrict__ jobs, const uint32_t *__restrict__ gold,
                      const float2 *__restrict__ rxF, int N, int nsym, int nant, int fco, float2 *__restrict__ ls)
 {
@@ -402,11 +347,6 @@ __global__ void k_ls(const nr_gpu_pdsch_job_t *__restrict__ jobs, const uint32_t
 }
 
 /* Per (job, ant): noise variance from adjacent-pilot differences of layer 0 on the first DM-RS symbol. */
-/* k_sigma: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void k_sigma(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 *__restrict__ ls, float *__restrict__ sigma)
 {
   const int j = blockIdx.x, ant = blockIdx.y;
@@ -440,22 +380,12 @@ __global__ void k_sigma(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float
 /* --------------------------------------------------------- MMSE + LLR ---- */
 /* Data-RE bookkeeping in nr_rx_pdsch()'s order: symbols in order, REs in increasing k, DM-RS REs of
  * the CDM groups without data skipped. */
-/* dmrs_re_is_data: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __device__ inline int dmrs_re_is_data(int type, int ngrp, int kr /* k within RB */)
 {
   if (type == 1)
     return ngrp >= 2 ? 0 : (kr & 1);
   return (kr % 6) >= 2 * ngrp;
 }
-/* data_re_per_rb: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:405.
- */
 __device__ inline int data_re_per_rb(int type, int ngrp, int is_dmrs)
 {
   if (!is_dmrs)
@@ -463,11 +393,6 @@ __device__ inline int data_re_per_rb(int type, int ngrp, int is_dmrs)
   return type == 1 ? (ngrp >= 2 ? 0 : 6) : 12 - 4 * ngrp;
 }
 /* index of data RE kr in a DM-RS symbol's RB, given it is data */
-/* dmrs_data_index: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __device__ inline int dmrs_data_index(int type, int ngrp, int kr)
 {
   if (type == 1)
@@ -477,11 +402,6 @@ __device__ inline int dmrs_data_index(int type, int ngrp, int kr)
 }
 
 /* linear frequency interpolation of a port/ant LS row at RE k (RB-relative to the allocation) */
-/* interp_f: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:445, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:448.
- */
 __device__ inline float2 interp_f(const float2 *row, int type, int delta, int npil, float k)
 {
   /* pilot pair n sits at k_c(n) = pilot_k0 + gap/2 */
@@ -496,11 +416,6 @@ __device__ inline float2 interp_f(const float2 *row, int type, int delta, int np
   return make_float2(row[n].x + w * (row[n + 1].x - row[n].x), row[n].y + w * (row[n + 1].y - row[n].y));
 }
 
-/* pam_level: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:512.
- */
 __device__ inline float pam_level(int qm, int code)
 {
   /* 38.211 5.1: I = (1-2b0)[2^(h-1) - (1-2b2)[... - (1-2b_{2h-2})]] / sqrt(norm); bits of the axis packed
@@ -869,11 +784,6 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
   return 0;
 }
 
-/* job_total_llr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:773.
- */
 static uint32_t job_total_llr(const nr_gpu_pdsch_job_t *j)
 {
   uint32_t nre = 0;
@@ -973,11 +883,6 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
 
 extern "C" int nr_gpu_fep_last_chunks(void) { return g_last_chunks; }
 
-/* api_read_rxdataF: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int api_read_rxdataF(int ant, int16_t *out)
 {
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot;

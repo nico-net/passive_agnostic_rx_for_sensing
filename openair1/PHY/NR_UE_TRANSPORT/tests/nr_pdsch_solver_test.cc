@@ -19,11 +19,6 @@ extern "C" void exit_function(const char *file, const char *function, const int 
 }
 static const int kEnable = setenv("ISAC_PDSCH_SOLVER", "1", 1);
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(PdschSolver, DmrsMaskFollowsTable7411_2_3)
 {
   EXPECT_EQ(nr_pdsch_solver_dmrs_mask(2, 1, 13, 1), 0x804);       // {2, 11}: the PCI 415 grants
@@ -34,11 +29,6 @@ TEST(PdschSolver, DmrsMaskFollowsTable7411_2_3)
   EXPECT_EQ(nr_pdsch_solver_dmrs_mask(3, 0, 12, 1), (1 << 3) | (1 << 9));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(PdschSolver, McsTables)
 {
   int qm, r2;
@@ -51,11 +41,6 @@ TEST(PdschSolver, McsTables)
 }
 
 namespace {
-/* tda_fn: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 int tda_fn(void *, uint16_t, nr_dci_bits_t p) { return (int)(p.w[0] & 1); }
 struct Cell {
   std::vector<uint16_t> wrong, truth;
@@ -63,11 +48,6 @@ struct Cell {
   int add_pos = 1, table = 1;
 };
 // returns grants needed to solve (or -1)
-/* RunCell: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_solver_test.cc:275, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_solver_test.cc:302, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_solver_test.cc:314, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_solver_test.cc:315 (+1 more).
- */
 int RunCell(const Cell &c, uint16_t rnti, int false_pass_at, int max_grants, std::mt19937 &rng)
 {
   nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 16}, {c.truth.data(), (int)c.truth.size(), 16}};
@@ -93,11 +73,6 @@ int RunCell(const Cell &c, uint16_t rnti, int false_pass_at, int max_grants, std
 }
 } // namespace
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_SOLVER_SCR, ISAC_PDSCH_SOLVER_THREAD_CTX.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(PdschSolver, ConcurrentScanConsumersKeepTheirOwnGrantContext)
 {
   setenv("ISAC_PDSCH_SOLVER_THREAD_CTX", "1", 1);
@@ -134,11 +109,6 @@ TEST(PdschSolver, ConcurrentScanConsumersKeepTheirOwnGrantContext)
   EXPECT_TRUE(result[1].own_scr);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_SOLVER_NL_PREF.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
- */
 TEST(PdschSolver, OneLayerQpskReadingsGetFirstProbesAndBoundedFallback)
 {
   setenv("ISAC_PDSCH_SOLVER_NL_PREF", "3", 1);
@@ -167,11 +137,6 @@ TEST(PdschSolver, OneLayerQpskReadingsGetFirstProbesAndBoundedFallback)
   nr_pdsch_solver_reset();
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_SOLVER_NL_PREF.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
- */
 TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
 {
   setenv("ISAC_PDSCH_SOLVER_NL_PREF", "3", 1);
@@ -197,11 +162,6 @@ TEST(PdschSolver, ConfirmationRejectsIncompatibleMcsTables)
   nr_pdsch_solver_reset();
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_SOLVER_COVERAGE, ISAC_PDSCH_SOLVER_NL_PREF.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
- */
 TEST(PdschSolver, CoverageSurvivesReorderedReadingsAndIdentityChanges)
 {
   setenv("ISAC_PDSCH_SOLVER_COVERAGE", "1", 1);
@@ -234,11 +194,6 @@ TEST(PdschSolver, CoverageSurvivesReorderedReadingsAndIdentityChanges)
   nr_pdsch_solver_reset();
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_SOLVER_COVERAGE, ISAC_PDSCH_SOLVER_NL_PREF.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
- */
 TEST(PdschSolver, CoverageKeepsStartSymbolSearchSeparateForEachTdra)
 {
   setenv("ISAC_PDSCH_SOLVER_COVERAGE", "1", 1);
@@ -261,11 +216,6 @@ TEST(PdschSolver, CoverageKeepsStartSymbolSearchSeparateForEachTdra)
   nr_pdsch_solver_reset();
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_SOLVER_COVERAGE, ISAC_PDSCH_SOLVER_NL_PREF.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1248 more).
- */
 TEST(PdschSolver, IneligibleTablesDoNotConsumeLaterQpskTrials)
 {
   setenv("ISAC_PDSCH_SOLVER_COVERAGE", "1", 1);
@@ -290,11 +240,6 @@ TEST(PdschSolver, IneligibleTablesDoNotConsumeLaterQpskTrials)
   nr_pdsch_solver_reset();
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_PDSCH_SOLVER_LAYOUT_RECOVER.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1247 more).
- */
 TEST(PdschSolver, LayoutRecoveryNeedsCreditedCrcFailures)
 {
   setenv("ISAC_PDSCH_SOLVER_LAYOUT_RECOVER", "3", 1);
@@ -319,11 +264,6 @@ TEST(PdschSolver, LayoutRecoveryNeedsCreditedCrcFailures)
   EXPECT_FALSE(nr_pdsch_solver_reopen_layouts(0x7788));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1246 more).
- */
 TEST(PdschSolver, SolvesTheSimulatedCellWithTwoIndependentPasses)
 {
   ASSERT_EQ(kEnable, 0);
@@ -352,11 +292,6 @@ TEST(PdschSolver, SolvesTheSimulatedCellWithTwoIndependentPasses)
   EXPECT_GE(fulls, 30) << "once solved (S and table learnt) every grant is one full decode";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1245 more).
- */
 TEST(PdschSolver, AChanceCrcPassDoesNotSolveTheWrongLayouts)
 {
   nr_pdsch_solver_reset();
@@ -369,11 +304,6 @@ TEST(PdschSolver, AChanceCrcPassDoesNotSolveTheWrongLayouts)
   EXPECT_GT(g, 0) << "-2 = solved on the wrong layouts, -1 = never";
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1244 more).
- */
 TEST(PdschSolver, TheCellPriorSolvesASecondRntiFaster)
 {
   nr_pdsch_solver_reset();
@@ -389,11 +319,6 @@ TEST(PdschSolver, TheCellPriorSolvesASecondRntiFaster)
   EXPECT_LE(g2, 4);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1243 more).
- */
 TEST(PdschSolver, CsiRsRateMatchingIsAPerRntiCrcHypothesis)
 {
   nr_pdsch_solver_reset();
@@ -426,11 +351,6 @@ TEST(PdschSolver, CsiRsRateMatchingIsAPerRntiCrcHypothesis)
   for (int i = 0; i < n; i++) EXPECT_EQ(v[i].rm, 0);
 }
 
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(int argc, char **argv)
 {
   logInit();

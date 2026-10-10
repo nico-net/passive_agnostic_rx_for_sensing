@@ -11,19 +11,9 @@ extern "C" {
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 configmodule_interface_t *uniqCfg=nullptr;
-/* exit_function: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:9, common/config/yaml/tests/test_yaml_config.cpp:14, common/platform_types.h:302, common/platform_types.h:306 (+94 more).
- */
 void exit_function(const char *,const char *,int,const char *,int) {abort();}
 }
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;}} while(0)
-/* wait_ms: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:53, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:67, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:70, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:86 (+19 more).
- */
 static void wait_ms(int n) {std::this_thread::sleep_for(std::chrono::milliseconds(n));}
 /* main: test driver for the PDCCH NID GPU worker: runs the worker in --device, --duty, --nodrop or incremental mode and checks the published records.
  *   How it works: Sets the ISAC_PDCCH_NID_GPU_* test environment, starts the worker and checks the records with CHECK. Pushes synthetic or device-reference batches and uses the fake module hooks (nid_fake_*) when not in device mode.

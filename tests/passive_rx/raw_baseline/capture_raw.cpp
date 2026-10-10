@@ -42,19 +42,9 @@ struct Continuity {
     return true;
   }
 };
-/* require: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: tests/passive_rx/raw_baseline/capture_raw.cpp:50, tests/passive_rx/raw_baseline/capture_raw.cpp:60, tests/passive_rx/raw_baseline/capture_raw.cpp:76, tests/passive_rx/raw_baseline/capture_raw.cpp:77 (+19 more).
- */
 static void require(bool ok, const std::string &why) {
   if (!ok) throw std::runtime_error(why);
 }
-/* save: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: tests/passive_rx/raw_baseline/capture_raw.cpp:62, tests/passive_rx/raw_baseline/capture_raw.cpp:184.
- */
 static void save(const std::filesystem::path &path, const void *data, size_t bytes) {
   int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
   require(fd >= 0, "cannot create " + path.string());
@@ -69,11 +59,6 @@ static void save(const std::filesystem::path &path, const void *data, size_t byt
   int close_rc = ::close(fd);
   require(sync_rc == 0 && close_rc == 0, "flush failed: " + path.string());
 }
-/* save_text: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: tests/passive_rx/raw_baseline/capture_raw.cpp:182, tests/passive_rx/raw_baseline/capture_raw.cpp:191.
- */
 static void save_text(const std::filesystem::path &p, const std::string &s) { save(p, s.data(), s.size()); }
 struct StopStream {
   uhd::rx_streamer::sptr stream;
@@ -86,11 +71,6 @@ struct StopStream {
   }
   ~StopStream() { try { stop(); } catch (...) {} }
 };
-/* self_test: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: tests/passive_rx/raw_baseline/capture_raw.cpp:88.
- */
 static int self_test() {
   Continuity c;
   require(c.accept(10, 100, true), "first block");
@@ -103,11 +83,6 @@ static int self_test() {
   std::cout << "PASS: continuity, gap, overlap, metadata, empty-block, state invariants; no device opened\n";
   return 0;
 }
-/* main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none (program entry point).
- */
 int main(int argc, char **argv) {
   try {
     if (argc == 2 && std::string(argv[1]) == "--self-test") return self_test();

@@ -28,11 +28,6 @@ static pthread_t g_thr;
 static _Atomic uint64_t g_pushed, g_written, g_dropped, g_io_errors, g_after_close;
 static _Atomic bool g_closed_seen; /* a session was closed (and not re-opened) */
 
-/* mu_init: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void mu_init(void)
 {
   pthread_mutexattr_t a;
@@ -53,11 +48,6 @@ typedef struct {
 } jb_t;
 
 static void jb_put(jb_t *j, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-/* jb_put: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:50, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:69, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:71, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:76 (+16 more).
- */
 static void jb_put(jb_t *j, const char *fmt, ...)
 {
   if (j->ovf)
@@ -73,11 +63,6 @@ static void jb_put(jb_t *j, const char *fmt, ...)
   j->w += (size_t)k;
 }
 
-/* jb_int: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:94, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:96, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:97, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:98 (+25 more).
- */
 static void jb_int(jb_t *j, const char *key, int64_t v)
 {
   if (v < 0)
@@ -86,22 +71,12 @@ static void jb_int(jb_t *j, const char *key, int64_t v)
     jb_put(j, ",\"%s\":%" PRId64, key, v);
 }
 
-/* jb_signed_optional: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:159.
- */
 static void jb_signed_optional(jb_t *j, const char *key, int64_t v, bool valid)
 {
   if (valid) jb_put(j, ",\"%s\":%" PRId64, key, v);
   else jb_put(j, ",\"%s\":null", key);
 }
 
-/* jb_flt: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:116, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:117, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:118, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:119 (+1 more).
- */
 static void jb_flt(jb_t *j, const char *key, float v)
 {
   if (!isfinite(v))
@@ -110,11 +85,6 @@ static void jb_flt(jb_t *j, const char *key, float v)
     jb_put(j, ",\"%s\":%.7g", key, (double)v);
 }
 
-/* nr_passive_obs_to_json: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:145, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:206, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h:111, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:25 (+3 more).
- */
 int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n)
 {
   if (!o || !buf || n == 0)
@@ -156,11 +126,6 @@ int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n)
 
 /* Schema 2 extends the exact v1 field/value spelling. The legacy writer above
  * remains the only serializer used by ISAC_OBS_PATH. */
-/* jb_str: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:152, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:153, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:161.
- */
 static void jb_str(jb_t *j, const char *key, const char *v)
 {
   if (!v) { jb_put(j, ",\"%s\":null", key); return; }
@@ -173,11 +138,6 @@ static void jb_str(jb_t *j, const char *key, const char *v)
   }
   jb_put(j,"\"");
 }
-/* nr_sense_grant_to_json: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c:197, openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.h:65, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_records_test.cc:34, openair1/PHY/NR_UE_TRANSPORT/tests/nr_sense_records_test.cc:54 (+5 more).
- */
 int nr_sense_grant_to_json(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *m, char *buf, size_t n)
 {
   if (!o || !m || !buf || !n) return -1;
@@ -204,11 +164,6 @@ int nr_sense_grant_to_json(const nr_passive_obs_t *o, const nr_sense_grant_meta_
 }
 
 /* Flush the stdio buffer; the `pending` lines become `written` on success, io_errors on failure. Returns 0. */
-/* obs_flush: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:193, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:209, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:214.
- */
 static uint64_t obs_flush(uint64_t pending)
 {
   const bool bad = fflush(g_f) != 0 || ferror(g_f);
@@ -221,11 +176,6 @@ static uint64_t obs_flush(uint64_t pending)
   return 0;
 }
 
-/* writer: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_OBS_TEST_WRITER_PAUSE_MS.
- *   Callers: none found in tree.
- */
 static void *writer(void *arg)
 {
   (void)arg;
@@ -314,11 +264,6 @@ bool nr_passive_obs_open(const char *path, uint32_t capacity)
   return true;
 }
 
-/* nr_passive_obs_push: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h:129, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2007, openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1624, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:52 (+6 more).
- */
 bool nr_passive_obs_push(const nr_passive_obs_t *o)
 {
   if (!__atomic_load_n(&nr_passive_obs_fast_open, __ATOMIC_RELAXED)) { /* off / closed: no lock */
@@ -345,11 +290,6 @@ bool nr_passive_obs_push(const nr_passive_obs_t *o)
   return true;
 }
 
-/* nr_passive_obs_close: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:755, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:219, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h:124, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:62 (+3 more).
- */
 void nr_passive_obs_close(void)
 {
   pthread_mutex_lock(&g_mu);
@@ -370,11 +310,6 @@ void nr_passive_obs_close(void)
   g_f = NULL;
 }
 
-/* nr_passive_obs_stats: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:39, openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:181, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h:140, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:64 (+3 more).
- */
 void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped)
 {
   if (pushed)
@@ -385,21 +320,11 @@ void nr_passive_obs_stats(uint64_t *pushed, uint64_t *written, uint64_t *dropped
     *dropped = atomic_load(&g_dropped);
 }
 
-/* nr_passive_obs_io_errors: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h:144, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:88, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:103.
- */
 uint64_t nr_passive_obs_io_errors(void)
 {
   return atomic_load(&g_io_errors);
 }
 
-/* nr_passive_obs_after_close: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h:123, openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.h:145, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:99, openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_obs_test.cc:101.
- */
 uint64_t nr_passive_obs_after_close(void)
 {
   return atomic_load(&g_after_close);

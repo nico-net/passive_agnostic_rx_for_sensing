@@ -84,11 +84,6 @@ void nr_pdcp_stop_timer_thread(void)
   timer_started = false;
 }
 
-/* nr_pdcp_ms_tick: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/time_manager/tests/test_auto.c:36, executables/nr-cuup.c:128, executables/nr-softmodem.c:576, executables/nr-uesoftmodem.c:494 (+1 more).
- */
 void nr_pdcp_ms_tick(void)
 {
   if (pthread_mutex_lock(&timer_thread_mutex)) abort();

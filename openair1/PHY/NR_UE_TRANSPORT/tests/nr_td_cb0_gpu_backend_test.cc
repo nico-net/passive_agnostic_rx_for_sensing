@@ -24,31 +24,16 @@ struct Fx {
   ~Fx() { cb0_fx_free(&fx); }
   nr_td_cb0_item_t item() const { return cb0_fx_item(&fx); }
 };
-/* big: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-gnb.c:72, nfapi/oai_integration/nfapi_vnf.c:915, openair1/PHY/NR_TRANSPORT/nr_dlsch_coding.c:154, openair1/PHY/NR_TRANSPORT/nr_dlsch_coding.c:164 (+28 more).
- */
 Fx *big(uint8_t rv = 0) /* 106 PRB 64QAM R 0.505 rank 1: C = 11, BG1 Z = 384 */
 {
   const uint32_t A = cb0_fx_tbs(6, 5170, 106, 12, 6, 1), G = cb0_fx_G(106, 12, 6, 1, 6, 1);
   return new Fx(A, 5170, 6, 1, rv, G);
 }
-/* small: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: fronthaul/core/tests/test_fh_timer_drift.c:145, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:889, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h:37, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:32 (+11 more).
- */
 Fx *small(uint8_t rv = 0) /* 6 PRB 16QAM R 0.12: C = 1, BG2 */
 {
   const uint32_t A = cb0_fx_tbs(4, 1200, 6, 12, 6, 1), G = cb0_fx_G(6, 12, 6, 1, 4, 1);
   return new Fx(A, 1200, 4, 1, rv, G);
 }
-/* mid: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:147.
- */
 Fx *mid() /* 24 PRB QPSK R 0.3: C = 1, a third Z */
 {
   const uint32_t A = cb0_fx_tbs(2, 3080, 24, 12, 6, 1), G = cb0_fx_G(24, 12, 6, 1, 2, 1);
@@ -96,11 +81,6 @@ struct GpuRun {
   std::vector<nr_td_cb0_result_t> out;
   int rc = 0;
 };
-/* gpu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_sweep_test.cc:367, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_sweep_test.cc:379, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_sweep_test.cc:445, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_sweep_test.cc:617 (+7 more).
- */
 GpuRun gpu(const std::vector<nr_td_cb0_item_t> &it)
 {
   GpuRun r;
@@ -130,11 +110,6 @@ struct Set {
   std::vector<int> truth; /* 1 true, 0 wrong rv, 2 TBS twin */
   std::vector<std::vector<int16_t>> copies;
 };
-/* build: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c:129, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:167, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc:168, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:149 (+5 more).
- */
 void build(Set &s, std::initializer_list<Fx *> fxs, int replicas)
 {
   for (Fx *f : fxs) {
@@ -167,11 +142,6 @@ void build(Set &s, std::initializer_list<Fx *> fxs, int replicas)
 
 /* GPU backend == G1-TB-entry CUDA path (same decoder and iterations), == CPU backend on these clean hypotheses;
  * true hypotheses pass, wrong rv fail; mixed BG / Z in one submission. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+494 more).
- */
 TEST_F(Cb0Gpu, VerdictsEqualRoundTwoCudaAndCpu)
 {
   Fx *b = big(), *s = small(), *m = mid(), *b2 = big(2);
@@ -204,11 +174,6 @@ TEST_F(Cb0Gpu, VerdictsEqualRoundTwoCudaAndCpu)
 }
 
 /* all-zero codeword: the decoder converges, the guard rejects it (as cb0_guard / the receiver) */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+493 more).
- */
 TEST_F(Cb0Gpu, AllZeroCodewordIsRejected)
 {
   for (int which = 0; which < 2; which++) {
@@ -225,11 +190,6 @@ TEST_F(Cb0Gpu, AllZeroCodewordIsRejected)
 }
 
 /* async submit / collect == sync; invalid meta items keep the caller's verdict */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+492 more).
- */
 TEST_F(Cb0Gpu, AsyncAndInvalidItems)
 {
   Fx *b = big(), *s = small();
@@ -257,11 +217,6 @@ TEST_F(Cb0Gpu, AsyncAndInvalidItems)
 }
 
 /* a GPU failure makes the whole batch inadmissible (every valid item -1 / ERR_GPU), the call returns < 0 */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+491 more).
- */
 TEST_F(Cb0Gpu, GpuFailureMakesBatchInadmissible)
 {
   void *h = dlopen("libldpc_cuda.so", RTLD_NOW | RTLD_NOLOAD);
@@ -310,11 +265,6 @@ struct Hooks {
 /* auto: the registered adapter runs the batch on the GPU (decoder CUDA, verdicts = CPU backend's on these clean items);
  * an injected GPU failure voids THAT batch only (every item -1 / ERR_GPU, info.failed), and the NEXT grant runs on the
  * CPU backend (back-off); after the back-off the GPU is used again. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_GPU_BACKOFF.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+490 more).
- */
 TEST_F(Cb0Gpu, ExecUsesGpuAndFallsBackToCpuAfterFailure)
 {
   Hooks hk;
@@ -394,11 +344,6 @@ TEST_F(Cb0Gpu, ExecUsesGpuAndFallsBackToCpuAfterFailure)
  * ABANDONS its thread-local input buffer -- the GPU may still read it -- instead of reusing / freeing it: the next batch gets a
  * preallocated spare buffer (a different address: the old one is retired, never freed), and its verdicts are right. A failure the GPU never
  * saw (CB0 breaker open: rejected before any enqueue) keeps the buffer. */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+489 more).
- */
 TEST_F(Cb0Gpu, AdapterAbandonsInputBufferAfterTimeoutOrCudaError)
 {
   Hooks hk;
@@ -464,11 +409,6 @@ TEST_F(Cb0Gpu, AdapterAbandonsInputBufferAfterTimeoutOrCudaError)
 
 /* Dominance: a CUDA CB0 batch is admissible against the CPU TB decoder the wiring forces while acquiring, and against a
  * CUDA TB; a CPU CB0 against a CUDA TB is not (decoder reason). */
-/* TEST_F: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:31, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:45, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:58, common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:69 (+488 more).
- */
 TEST_F(Cb0Gpu, DominanceRuleAdmitsCudaCb0OverCpuTb)
 {
   nr_td_cb0_adm_in_t in;

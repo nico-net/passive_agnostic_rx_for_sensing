@@ -29,11 +29,6 @@
 namespace {
 
 /* d[j] after nr_rate_matching_ldpc_rx(clear = 1), as a uint16 (modular) sum */
-/* ring_sum: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu:64, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu:67.
- */
 __device__ __forceinline__ uint16_t ring_sum(const nr_td_cb0_gpu_item_t &m, uint32_t j)
 {
   const uint32_t F = m.F, Fo = m.Foffset;
@@ -51,11 +46,6 @@ __device__ __forceinline__ uint16_t ring_sum(const nr_td_cb0_gpu_item_t &m, uint
   return (uint16_t)acc;
 }
 
-/* cb0_dematch_kernel: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void cb0_dematch_kernel(const nr_td_cb0_gpu_item_t *items, int8_t *l, uint32_t l_stride, int16_t *d)
 {
   const nr_td_cb0_gpu_item_t m = items[blockIdx.y];
@@ -89,11 +79,6 @@ struct Ctx {
 Ctx g;
 nr_dl_gpu_budget_t budget;
 
-/* init: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/config_load_configmodule.c:64, executables/nr-ue.c:2325, nfapi/open-nFAPI/sim_common/inc/pool.h:30, nfapi/open-nFAPI/sim_common/inc/pool.h:53 (+57 more).
- */
 int init()
 {
   if (!nr_gpu_module_ready()) return 0;
@@ -124,34 +109,14 @@ int init()
   return 1;
 }
 
-/* scratch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:807, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:496, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:548, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:549 (+6 more).
- */
 void *scratch(int which, size_t bytes)
 {
   return g.ok == 1 && which >= 0 && which < 3 && bytes <= g.cap[which] ? g.host[which] : nullptr;
 }
 // API legacy name: host pointers are accepted via explicit staging, never dereferenced by a kernel.
-/* pageable_ok: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:545.
- */
 int pageable_ok() { return g.ok == 1; }
-/* ptr_ok: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:473.
- */
 int ptr_ok(const void *p) { return g.ok == 1 && p != nullptr; }
 
-/* dematch_impl: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu:175, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.cu:177.
- */
 int dematch_impl(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d, const int8_t **device)
 {
   if (g.ok != 1 || n <= 0 || n > g.max_items || !items || (!l && !device)) return -1;
@@ -206,28 +171,13 @@ failed:
   return -2;
 }
 
-/* dematch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:482, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:274, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:4.
- */
 int dematch(const nr_td_cb0_gpu_item_t *items, int n, int8_t *l, int16_t *d)
 { return dematch_impl(items, n, l, d, nullptr); }
-/* dematch_device: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:509.
- */
 int dematch_device(const nr_td_cb0_gpu_item_t *items, int n, const int8_t **l)
 { return dematch_impl(items, n, nullptr, nullptr, l); }
 extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
 { *bytes = __atomic_load_n(&budget.bytes, __ATOMIC_RELAXED); *refused = __atomic_load_n(&budget.refused, __ATOMIC_RELAXED); }
 
-/* retire_output: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:516.
- */
 int retire_output()
 {
   // Timed-out LDPC may still read this output on another stream. Eight buffers

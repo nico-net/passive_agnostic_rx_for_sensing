@@ -70,11 +70,6 @@ struct Context {
  uint64_t last_seen[NR_PDCCH_NID_MAX_RECORDS];
  void *alloc[28]; size_t bytes[28]; int nalloc;
 };
-/* reset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/LOG/log.c:116, executables/nr-ue.c:1626, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:295, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:302 (+34 more).
- */
 __global__ void reset(Device *p, NidView v) {
  if(threadIdx.x || blockIdx.x) return;
  p->view=v; p->stage2.g_idsw=v;
@@ -83,11 +78,6 @@ __global__ void reset(Device *p, NidView v) {
 // Tile two snapshots across 128 IDs. Cooperative pilot loads are contiguous
 // in DM-RS order; every warp then broadcasts shared REs. Power prefixes and
 // square roots are no longer redundantly calculated for each ID/window.
-/* sweep: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_arm_sweep.h:24, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:481, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:338, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:483 (+20 more).
- */
 __global__ void sweep(Device *p,int first,int count,int id_base=0) {
  __shared__ NidSigns signs[2][3*275];
  __shared__ float denominator[2][2][275];
@@ -121,11 +111,6 @@ __global__ void sweep(Device *p,int first,int count,int id_base=0) {
  p->values[(2*k)*IDS+id]=css?nid_best_prepared(seed,v.css0_crb,v.css0_crb+v.css0_nrb,v.css0_crb,
                                            signs[tile],denominator[tile][1],x1words):0;
 }
-/* secondary: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: nfapi/oai_integration/aerial/fapi_nvIPC.c:393, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:124, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:191.
- */
 __device__ float secondary(const NidView &v,int k,int id,int d) {
  int idx=v.index(k),hi=(v.nsc-v.point_a_sc)/12,lo=v.point_a_sc>=0?0:(-v.point_a_sc+11)/12;
  uint64_t x=((uint64_t)v.sps*v.slot[idx]+v.sym[idx]+d+1)*((uint64_t)(id*2)+1);
@@ -133,30 +118,15 @@ __device__ float secondary(const NidView &v,int k,int id,int d) {
  bool css=v.css0_nrb>=6 && v.css0_crb>=lo && v.css0_crb+v.css0_nrb<=hi;
  return nid_best_symbol(v,k,seed,lo,hi,css?v.css0_crb:0,css?v.css0_crb+v.css0_nrb:0,0,d);
 }
-/* calibrate: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void calibrate(Device *p,int first,int count,int base=0) {
  int j=base+blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y,d=blockIdx.z+1;
  if(j>=NID_CAL || k>=count || d>=p->view.dur)return;
  p->values[(2*CHUNK+2*k+d-1)*IDS+j]=secondary(p->view,first+k,j*64,d);
 }
-/* histogram_add: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:137, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:148, radio/vrtsim/vrtsim.c:178, radio/vrtsim/vrtsim.c:709 (+1 more).
- */
 __device__ void histogram_add(unsigned *h,int bin) {
  unsigned peers=__match_any_sync(__activemask(),bin);
  if((threadIdx.x&31)==__ffs(peers)-1)atomicAdd(h+bin,__popc(peers));
 }
-/* standardize: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void standardize(Device *p,int base=0,int size=IDS) {
  __shared__ unsigned h[4096];
  int k=base+blockIdx.x,tid=threadIdx.x;
@@ -183,11 +153,6 @@ __global__ void standardize(Device *p,int base=0,int size=IDS) {
   p->sigma[k]=fmaxf(1.4826f*((b+0.5f)/4095),1e-6f);
  }
 }
-/* accumulate: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c:127, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c:620, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_fp.c:672, openair1/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h:85 (+3 more).
- */
 __global__ void accumulate(Device *p,int first,int count) {
  int id=blockIdx.x*blockDim.x+threadIdx.x;
  if(id>=IDS) return;
@@ -206,11 +171,6 @@ __global__ void accumulate(Device *p,int first,int count) {
 }
 // Compact before secondary Gold generation, so sparse surviving IDs occupy
 // full warps instead of forcing almost every warp through expensive branches.
-/* screen: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3663, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6739.
- */
 __global__ void screen(Device *p,int count) {
  int id=blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
  if(id>=IDS || k>=count)return;
@@ -220,11 +180,6 @@ __global__ void screen(Device *p,int count) {
   p->candidates[k*IDS+j]=id;
  }
 }
-/* combine: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1885.
- */
 __global__ void combine(Device *p,int first,int count,int base=0) {
  int j=base+blockIdx.x*blockDim.x+threadIdx.x,k=blockIdx.y;
  if(k>=count || j>=p->selected_count[k])return;
@@ -241,11 +196,6 @@ __global__ void combine(Device *p,int first,int count,int base=0) {
   p->multi[(2*k+d-1)*IDS+id]=combined>bound?combined:0;
  }
 }
-/* collect: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:496, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_cluster.cuh:203, openair1/PHY/NR_UE_TRANSPORT/nr_dci_history.c:100, openair1/PHY/NR_UE_TRANSPORT/nr_dci_history.c:120 (+4 more).
- */
 __global__ void collect(Device *p,int first,int count) {
  int id=blockIdx.x*blockDim.x+threadIdx.x;
  if(id>=IDS)return;
@@ -260,11 +210,6 @@ __global__ void collect(Device *p,int first,int count) {
  }
 }
 // Integer totals and stable (value, lowest cell) argmax per 256 cells.
-/* summarize: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void summarize(Device *p) {
  __shared__ Summary v[256];
  int tid=threadIdx.x,j=blockIdx.x*256+tid;
@@ -280,11 +225,6 @@ __global__ void summarize(Device *p) {
  }
  if(tid==0)p->summary[blockIdx.x]=v[0];
 }
-/* shortlist: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:805.
- */
 void shortlist(HostTransfer *p) {
  for(int r=0;r<2;r++) {
   double total=0;float bv=-1;int bi=0;uint64_t hash=1469598103934665603ULL;
@@ -318,11 +258,6 @@ void shortlist(HostTransfer *p) {
 }
 // Each new batch is scored once. Subtract the evicted batch, add the new one.
 // IQ and sufficient statistics share the same batch ring position.
-/* slide: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void slide(Device *p,int ring,bool empty,bool evict) {
  int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=STAT)return;
  size_t h=(size_t)ring*STAT+j;
@@ -333,20 +268,10 @@ __global__ void slide(Device *p,int ring,bool empty,bool evict) {
  p->history_hits[h]=p->hits[j];p->history_z[h]=p->zsum[j];
 }
 // Explicit diagnostic only; production never copies the statistics to the CPU.
-/* diagnostic_stats: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void diagnostic_stats(Device *p) {
  int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=STAT)return;
  p->hits[j]=p->total_hits[j];p->zsum[j]=(float)p->total_z[j];
 }
-/* family_totals: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void family_totals(Device *p) {
  __shared__ unsigned sums[256];
  int j=blockIdx.x*256+threadIdx.x;
@@ -354,11 +279,6 @@ __global__ void family_totals(Device *p) {
  for(int n=128;n;n/=2){if(threadIdx.x<n)sums[threadIdx.x]+=sums[threadIdx.x+n];__syncthreads();}
  if(!threadIdx.x)p->summary[blockIdx.x].total=sums[0];
 }
-/* thresholds: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1300, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_sim.cc:39.
- */
 __global__ void thresholds(Device *p,double alpha) {
  int j=blockIdx.x*blockDim.x+threadIdx.x;
  if(j==0)p->compact.count=0;
@@ -373,11 +293,6 @@ __global__ void thresholds(Device *p,double alpha) {
  p->threshold[d][s]=nid_threshold_alpha(lambda,families,alpha);
  p->lambda[d][s]=lambda;
 }
-/* compact_list: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void compact_list(Device *p) {
  int j=blockIdx.x*blockDim.x+threadIdx.x;
  if(j>=3*CELLS)return;
@@ -389,11 +304,6 @@ __global__ void compact_list(Device *p) {
  if(n<CAND_CAP)p->compact.item[n]={j,(float)p->total_z[cell]};
 }
 // Scan order is independent of CUDA atomic append order. Overflow fails closed.
-/* incremental_shortlist: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:793.
- */
 void incremental_shortlist(HostTransfer *t) {
  auto &out=t->result;out={};
  if(t->compact.count>CAND_CAP){out.shortlist_overflow=1;return;}
@@ -407,11 +317,6 @@ void incremental_shortlist(HostTransfer *t) {
 }
 // Parallel work is separate from NidStage2's scalar, reference-order arithmetic.
 // Control lanes only scan bounded metadata; each snapshot keeps its own sums.
-/* prepare_init: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void prepare_init(Device *p,int list) {
  auto &s=p->stage2;
  if(threadIdx.x==0) {
@@ -426,11 +331,6 @@ __global__ void prepare_init(Device *p,int list) {
   s.g_st2_D=p->result.list_dur[list]>0?p->result.list_dur[list]:1;s.alive=1;
  }
 }
-/* prepare_probe: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void prepare_probe(Device *p,bool active) {
  auto &s=p->stage2;int k=blockIdx.x*blockDim.x+threadIdx.x;
  if(k>=s.g_idsw.n)return;
@@ -441,11 +341,6 @@ __global__ void prepare_probe(Device *p,bool active) {
  if(active?sym!=s.sym0:(sym<s.sym0 || sym>s.sym0+2))return;
  s.st2_build(k,s.nid,s.sn+k);p->lit[k]=s.st2_lit(s.sn+k);
 }
-/* prepare_control: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void prepare_control(Device *p,bool active) {
  auto &s=p->stage2;
  if(threadIdx.x || !s.alive)return;
@@ -464,22 +359,12 @@ __global__ void prepare_control(Device *p,bool active) {
   s.g_st2_D=d;s.alive=d<=s.g_idsw.dur;
  }
 }
-/* prepare_snapshots: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 __global__ void prepare_snapshots(Device *p) {
  auto &s=p->stage2;int k=blockIdx.x*blockDim.x+threadIdx.x,d=blockIdx.y;
  if(!s.alive || k>=s.nact)return;
  int ids[4]={s.nid,(s.nid+7919)&65535,(s.nid+30011)&65535,(s.nid^0x5a5a)&65535};
  s.st2_build(p->active[k],ids[d],d?s.dec[d-1]+k:s.sn+k);
 }
-/* hull: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:744, tests/passive_rx/sens6_host_snapshot_2026-09-30/discovery_tool/idsweep_offline.c:844.
- */
 __global__ void hull(Device *p) {
  auto &s=p->stage2;int c=blockIdx.x*blockDim.x+threadIdx.x;
  if(c>=276)return;
@@ -494,11 +379,6 @@ __global__ void hull(Device *p) {
  }
  s.lit_hist[c]=n;
 }
-/* generate: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_synth_check.c:92, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_synth_check.c:724, openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_synth_check.c:748, openair1/PHY/NR_UE_TRANSPORT/tests/nr_srs_blind_test.cc:19 (+12 more).
- */
 __global__ void generate(Device *p) {
  auto &s=p->stage2;
  __shared__ int qlo,qhi,counts[6],offset[6];
@@ -523,11 +403,6 @@ __global__ void generate(Device *p) {
 }
 // One block per hypothesis; warps score snapshots. Control adds snapshot
 // results in original order; warp reductions select maxima, never sum scores.
-/* score: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:855, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.h:88, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_algorithm.h:114, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_algorithm.h:352 (+6 more).
- */
 __global__ void score(Device *p,int base,int count,int snapshot=0,int snapshots=100000) {
  auto &s=p->stage2;int i=base+blockIdx.x,tid=threadIdx.x;
  if(!s.alive || i>=s.nh || i>=base+count || (snapshot && snapshot>=s.nact))return;
@@ -587,11 +462,6 @@ __global__ void score(Device *p,int base,int count,int snapshot=0,int snapshots=
   if(snapshot+snapshots>=s.nact && (!nf || below>nf/2))s.H[i].score=0;
  }
 }
-/* finish: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/ldpc_cb0.cu:12, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:103, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:172, openair1/PHY/CODING/nrPolar_tools/cuda/nr_polar_sc_cuda_host.c:201 (+17 more).
- */
 __global__ void finish(Device *p) {
  auto &s=p->stage2;int tid=threadIdx.x;
  if(!s.alive)return;
@@ -669,11 +539,6 @@ __global__ void finish(Device *p) {
  for(int step=128;step;step/=2) {if(tid<step)removed[tid]+=removed[tid+step];__syncthreads();}
  if(tid==0)s.alive=removed[0]>0;
 }
-/* destroy: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:263, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:277, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:650, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:127 (+5 more).
- */
 void destroy(void *ptr) {
  Context *c=(Context*)ptr;if(!c)return;
  nr_dl_gpu_sealed=false; // destroy is called only after producer and worker stop
@@ -691,11 +556,6 @@ template<typename T> bool allocate(Context *c,T **p,size_t n) {
  if(cudaMalloc(p,n*sizeof(T))!=cudaSuccess)return false;
  c->alloc[c->nalloc]=*p;c->bytes[c->nalloc++]=n*sizeof(T);return true;
 }
-/* create: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_CSIRS_DISC, ISAC_PDCCH_NID_GPU_BUDGET_MS, ISAC_PDCCH_NID_MULTISYMBOL.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:239, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:111, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_benchmark.cc:21, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_fake.cc:11 (+2 more).
- */
 void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  if(nr_dl_gpu_sealed)return nullptr; // one pre-RX context per module lifetime
  if(rb<6 || rb>275 || dur<1 || dur>3 || window<1 || window>NR_PDCCH_NID_MAX_WINDOW)return nullptr;
@@ -791,11 +651,6 @@ fail: destroy(c);return nullptr;
 }
 // Bound transfers and history clears as well as kernels. Metadata uses the
 // same accounting, so no work is queued behind the arbiter's back.
-/* budget_copy: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:693, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:695, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:696, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:776 (+11 more).
- */
 static cudaError_t budget_copy(Context *c,void *dst,const void *src,size_t n,cudaMemcpyKind kind,cudaStream_t stream) {
  const size_t chunk=nr_gpu_budget_enabled()?1024*1024:n;
  for(size_t at=0;at<n;at+=chunk) {
@@ -806,11 +661,6 @@ static cudaError_t budget_copy(Context *c,void *dst,const void *src,size_t n,cud
  }
  return cudaSuccess;
 }
-/* budget_zero: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:754, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:755, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:770, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:771.
- */
 static cudaError_t budget_zero(Context *c,void *dst,int value,size_t n,cudaStream_t stream) {
  const size_t chunk=nr_gpu_budget_enabled()?1024*1024:n;
  for(size_t at=0;at<n;at+=chunk) {
@@ -821,11 +671,6 @@ static cudaError_t budget_zero(Context *c,void *dst,int value,size_t n,cudaStrea
  }
  return cudaSuccess;
 }
-/* upload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.h:89, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:144, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:122, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:125 (+4 more).
- */
 int upload(void *ptr,const nr_pdcch_nid_batch_t *b) {
  Context *c=(Context*)ptr;
  if(b->cfg.sps<1 || b->cfg.sps>14 || b->cfg.nsc<72 || b->cfg.nsc>12*c->rb || b->cfg.dur!=c->dur
@@ -858,30 +703,15 @@ int upload(void *ptr,const nr_pdcch_nid_batch_t *b) {
  return cudaStreamSynchronize(stream)==cudaSuccess?0:-1;
 }
 // Events are allocated/touched before RX. No CUDA allocation or chunk wait here.
-/* timing_begin: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:729.
- */
 bool timing_begin(Context *c,int kind,const char *operation) {
  if(c->ntimer==TIMERS)return false;
  c->kind[c->ntimer]=kind;c->operation[c->ntimer]=operation;
  return cudaEventRecord(c->timer[c->ntimer][0],c->stream)==cudaSuccess;
 }
-/* timing_end: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:730.
- */
 bool timing_end(Context *c) {
  return cudaGetLastError()==cudaSuccess && cudaEventRecord(c->timer[c->ntimer++][1],c->stream)==cudaSuccess;
 }
 // Slice completion already retired these events; never enqueue/wait another event.
-/* collect_timing: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:731, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:745.
- */
 bool collect_timing(Context *c) {
  for(int i=0;i<c->ntimer;i++) {
   float ms=0;if(cudaEventElapsedTime(&ms,c->timer[i][0],c->timer[i][1])!=cudaSuccess)return false;
@@ -900,11 +730,6 @@ bool collect_timing(Context *c) {
  __VA_ARGS__;return timing_end(c)?cudaSuccess:cudaErrorUnknown;},#__VA_ARGS__)!=cudaSuccess)return -1; \
  if(nr_gpu_budget_enabled() && !nr_gpu_allocations_allowed() && !collect_timing(c))return -1; \
 } while(0)
-/* complete: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/utils/symbol_reorder/tests/test_symbol_reorder.cpp:84, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu:246, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu:250, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu:253 (+8 more).
- */
 bool complete(Context *c,const std::chrono::steady_clock::time_point &start) {
  if(cudaEventRecord(c->done,c->stream)!=cudaSuccess)return false;
  for(;;) {
@@ -920,11 +745,6 @@ bool complete(Context *c,const std::chrono::steady_clock::time_point &start) {
  return collect_timing(c);
 }
 
-/* run_impl: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:877, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:886.
- */
 int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *seed) {
  Context *c=(Context*)ptr;auto stream=c->stream;Device *p=c->dev;
  if(!c->batches || (!c->incremental && c->batches<c->window))return 1;
@@ -1054,11 +874,6 @@ int run_impl(void *ptr,nr_pdcch_nid_result_t *out,const nr_pdcch_nid_result_t *s
  return 0;
 }
 #undef LAUNCH
-/* run: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:241, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:316, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:358, openair1/PHY/CODING/nrLDPC_cuda/tests/ldpc_cb0_cuda_test.cc:383 (+86 more).
- */
 int run(void *ptr,nr_pdcch_nid_result_t *out) {return run_impl(ptr,out,nullptr);}
 const nr_pdcch_nid_ops_t ops={NR_PDCCH_NID_ABI,create,upload,run,destroy};
 }

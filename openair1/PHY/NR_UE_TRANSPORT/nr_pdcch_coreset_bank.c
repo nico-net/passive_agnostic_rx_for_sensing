@@ -58,11 +58,6 @@ static void *g_remove_hook_arg;
 
 /* Caller holds the bank lock. Physical compaction waits for all RT dispatchers to leave: their
  * cfg and AL1 pointers are borrowed for an entire pass, including its unlocked decode phase. */
-/* compact_removed: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:108, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:130, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:203, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:458.
- */
 static void compact_removed(void)
 {
   if (g_dispatch_readers)
@@ -93,11 +88,6 @@ static void compact_removed(void)
   pthread_cond_broadcast(&g_coreset_bank_quiescent);
 }
 
-/* nr_pdcch_coreset_bank_dispatch_enter: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4405, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4521, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:116, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:123 (+1 more).
- */
 void nr_pdcch_coreset_bank_dispatch_enter(void)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
@@ -111,11 +101,6 @@ void nr_pdcch_coreset_bank_dispatch_enter(void)
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
 
-/* nr_pdcch_coreset_bank_dispatch_leave: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4422, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4526, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4637, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4670 (+4 more).
- */
 void nr_pdcch_coreset_bank_dispatch_leave(void)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
@@ -124,11 +109,6 @@ void nr_pdcch_coreset_bank_dispatch_leave(void)
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
 
-/* nr_pdcch_coreset_bank_set_remove_hook: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1745, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:118, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:30, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:102 (+1 more).
- */
 void nr_pdcch_coreset_bank_set_remove_hook(void (*hook)(const nr_pdcch_blind_monitor_cfg_t *, void *), void *arg)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
@@ -137,11 +117,6 @@ void nr_pdcch_coreset_bank_set_remove_hook(void (*hook)(const nr_pdcch_blind_mon
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
 
-/* nr_pdcch_coreset_bank_remove: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:111, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4407, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4414, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:32 (+4 more).
- */
 int nr_pdcch_coreset_bank_remove(int index)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
@@ -157,11 +132,6 @@ int nr_pdcch_coreset_bank_remove(int index)
   return 0;
 }
 
-/* nr_pdcch_coreset_bank_note_accept: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1346, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4336, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4344, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:112 (+14 more).
- */
 void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot)
 {
   if (!nr_cfg_epoch_work_current()) return;
@@ -178,11 +148,6 @@ void nr_pdcch_coreset_bank_note_accept(int index, uint64_t slot)
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
 
-/* nr_pdcch_coreset_bank_note_dci: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7770, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7948, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7957, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:113 (+7 more).
- */
 void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uint32_t payload_hash)
 {
   if (!nr_cfg_epoch_work_current()) return;
@@ -207,11 +172,6 @@ void nr_pdcch_coreset_bank_note_dci(int index, uint64_t slot, uint16_t rnti, uin
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
 
-/* nr_pdcch_coreset_bank_tick: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4519, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:114, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4568, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:4569 (+17 more).
- */
 void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
                                 uint32_t t_stale_slots, uint32_t t_remove_slots)
 {
@@ -244,42 +204,22 @@ void nr_pdcch_coreset_bank_tick(uint64_t slot, bool traffic_elsewhere,
   pthread_mutex_unlock(&g_coreset_bank_lock);
 }
 
-/* nr_pdcch_coreset_bank_count: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1084, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1226, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4108, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4173 (+28 more).
- */
 int nr_pdcch_coreset_bank_count(void)
 {
   if (nr_cfg_reconf_enabled() && (g_identity_reset_pending || g_bank_identity != nr_cfg_epoch_identity_gen())) return 0;
   return atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
 }
 
-/* nr_pdcch_coreset_bank_cfg: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1088, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4412, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4574, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4679 (+6 more).
- */
 const nr_pdcch_blind_monitor_cfg_t *nr_pdcch_coreset_bank_cfg(int index)
 {
   return &g_coreset_bank[index].cfg;
 }
 
-/* nr_pdcch_coreset_bank_entry: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:485, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:513, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:526, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:532 (+15 more).
- */
 nr_pdcch_discovered_coreset_t *nr_pdcch_coreset_bank_entry(int index)
 {
   return &g_coreset_bank[index];
 }
 
-/* nr_pdcch_coreset_bank_state: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1086, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4408, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4570, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4675 (+14 more).
- */
 nr_coreset_state_t nr_pdcch_coreset_bank_state(int index)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
@@ -293,11 +233,6 @@ nr_coreset_state_t nr_pdcch_coreset_bank_state(int index)
 /* Is this geometry already a verified bank entry? (stage 1-2 hand-off: a discovered CORESET the walk found
  * first must not be re-dwelled -- run s3live5 re-tested it, the alias rule retired it as "not verified",
  * and the walk resumed instead of pausing.) */
-/* bank_footprint: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:259, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:262.
- */
 static bool bank_footprint(int rb_offset, int groups, int duration, int symbol,
                            int bundle, int interleaver, int shift, int nid, bool verified)
 {
@@ -356,11 +291,6 @@ static bool coreset_same_geometry(const nr_pdcch_blind_monitor_cfg_t *a,
  * and CCE-to-REG mapping agree. Skipping such hypotheses prevents discovery from repeatedly
  * rediscovering its first archived CORESET while still allowing a different mapping in the same
  * RBs to become a separate bank entry. */
-/* nr_pdcch_coreset_bank_covers: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4808, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7156, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:91.
- */
 bool nr_pdcch_coreset_bank_covers(int rb_offset, int span_rb, int duration, int symbol,
                                   int bundle, int interleaver, int shift, int dmrs_id)
 {
@@ -384,11 +314,6 @@ bool nr_pdcch_coreset_bank_covers(int rb_offset, int span_rb, int duration, int 
   return false;
 }
 
-/* nr_pdcch_coreset_bank_occupancy_outside: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2155, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:94, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:53, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:54 (+1 more).
- */
 bool nr_pdcch_coreset_bank_occupancy_outside(int rb_offset, int symbol)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
@@ -409,11 +334,6 @@ bool nr_pdcch_coreset_bank_occupancy_outside(int rb_offset, int symbol)
   return outside;
 }
 
-/* nr_pdcch_coreset_bank_has_owner: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7669, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7972, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:99, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:211.
- */
 bool nr_pdcch_coreset_bank_has_owner(uint16_t rnti)
 {
   if (!rnti)
@@ -434,11 +354,6 @@ bool nr_pdcch_coreset_bank_has_owner(uint16_t rnti)
 /* A verified dedicated DCI length is a high-value cell prior for another CORESET, but not ground
  * truth: different UEs may have different BWPs/configurations. The fast catalog tests the modal
  * bank length for a bounded eight rounds; the exhaustive lap still tries every legal length. */
-/* nr_pdcch_coreset_bank_length_hint: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7172, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:102.
- */
 int nr_pdcch_coreset_bank_length_hint(void)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);
@@ -521,11 +436,6 @@ int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t 
   return at;
 }
 
-/* nr_pdcch_coreset_bank_occupancy_sample: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2159, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h:96, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:155, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_bank_test.cc:166 (+5 more).
- */
 bool nr_pdcch_coreset_bank_occupancy_sample(uint8_t *history, bool hit)
 {
   *history = (uint8_t)((*history << 1) | hit);
@@ -533,11 +443,6 @@ bool nr_pdcch_coreset_bank_occupancy_sample(uint8_t *history, bool hit)
   return hit && __builtin_popcount((unsigned)*history) >= 3;
 }
 
-/* bank_epoch_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:55, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:96, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:475.
- */
 static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
 {
   if (s->epoch <= g_bank_epoch) return;
@@ -564,11 +469,6 @@ static void bank_epoch_locked(const nr_cfg_epoch_snapshot_t *s)
     }
   }
 }
-/* bank_epoch_listener: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c:54.
- */
 static void bank_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
 {
   pthread_mutex_lock(&g_coreset_bank_lock);

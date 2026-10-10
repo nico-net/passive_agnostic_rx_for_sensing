@@ -42,11 +42,6 @@ static pthread_once_t g_crc_once = PTHREAD_ONCE_INIT;
 static const nr_td_cb0_gpu_api_t *g_gpu; /* loaded module, NULL = not loaded */
 static int g_gpu_on = -1;                /* -1: decide from NR_GPU_CB0 at the first batch */
 
-/* nr_td_cb0_set_ldpc_decoder: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:98, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:68, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:460, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_fixture.c:38 (+1 more).
- */
 void nr_td_cb0_set_ldpc_decoder(void *ldpc_decoder_fn)
 {
   pthread_mutex_lock(&g_lock);
@@ -54,11 +49,6 @@ void nr_td_cb0_set_ldpc_decoder(void *ldpc_decoder_fn)
   pthread_mutex_unlock(&g_lock);
 }
 
-/* nr_td_cb0_set_threads: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:100, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:69, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:55, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:206 (+6 more).
- */
 void nr_td_cb0_set_threads(int n)
 {
   pthread_mutex_lock(&g_lock);
@@ -92,11 +82,6 @@ static const nr_td_cb0_gpu_api_t *gpu_load(void)
   return api;
 }
 
-/* use_gpu_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:62, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:97, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:845.
- */
 static int use_gpu_locked(int on)
 {
   g_gpu_on = on ? 1 : 0;
@@ -106,11 +91,6 @@ static int use_gpu_locked(int on)
   return g_gpu != NULL;
 }
 
-/* nr_td_cb0_use_gpu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:103, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:53, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:114, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:204 (+6 more).
- */
 int nr_td_cb0_use_gpu(int on)
 {
   pthread_mutex_lock(&g_lock);
@@ -133,11 +113,6 @@ void nr_td_cb0_dematch_warmup(int enable)
 }
 
 /* ---- metadata: passive_ldpc_decode_core's parameter derivation for segment 0 ---- */
-/* nr_td_cb0_meta: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:535, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:794, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:132, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:229 (+5 more).
- */
 int nr_td_cb0_meta(const nr_td_cb0_item_t *it, nr_td_cb0_meta_t *m)
 {
   memset(m, 0, sizeof(*m));
@@ -201,11 +176,6 @@ typedef struct {
   int8_t *l;  /* NR_TD_CB0_L_STRIDE */
 } cb0_scratch_t;
 
-/* scratch_alloc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:299, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:561.
- */
 static int scratch_alloc(cb0_scratch_t *s, uint32_t Emax)
 {
   s->e = aligned_alloc(64, ((size_t)Emax * sizeof(int16_t) + 63) & ~(size_t)63);
@@ -216,11 +186,6 @@ static int scratch_alloc(cb0_scratch_t *s, uint32_t Emax)
   return (s->e && s->sh && s->d && s->z && s->l) ? 0 : -1;
 }
 
-/* scratch_free: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:296, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:300, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:569.
- */
 static void scratch_free(cb0_scratch_t *s)
 {
   free(s->e);
@@ -231,11 +196,6 @@ static void scratch_free(cb0_scratch_t *s)
 }
 
 /* l: NR_TD_CB0_L_STRIDE bytes (Kc*Z valid, the rest 0); d_out: N values (may be NULL). */
-/* cpu_dematch_one: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:325, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:566.
- */
 static void cpu_dematch_one(const nr_td_cb0_item_t *it, const nr_td_cb0_meta_t *m, cb0_scratch_t *s, int8_t *l,
                             int16_t *d_out)
 {
@@ -265,11 +225,6 @@ static void cpu_dematch_one(const nr_td_cb0_item_t *it, const nr_td_cb0_meta_t *
 }
 
 /* The receiver's all-zero guards on a converged CB0 (bits = decoded K/8 bytes). */
-/* cb0_guard: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:269, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:713.
- */
 static int cb0_guard(const nr_td_cb0_meta_t *m, const uint8_t *out, int pass)
 {
   if (pass && m->C > 1) {
@@ -295,11 +250,6 @@ static int cb0_guard(const nr_td_cb0_meta_t *m, const uint8_t *out, int pass)
 }
 
 /* ---- CPU layered LDPC decode of one dematched CB0, as nr_process_decode_segment + the probe guards ---- */
-/* cpu_decode_one: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:330.
- */
 static void cpu_decode_one(LDPC_decoderfunc_t *dec, const nr_td_cb0_meta_t *m, const int8_t *l, nr_td_cb0_result_t *r)
 {
   t_nrLDPC_dec_params p = {.check_crc = check_crc};
@@ -339,11 +289,6 @@ typedef struct {
 /* Per-thread scratch, grown on demand and kept (pool workers and callers reuse it: no allocation per batch). */
 static __thread cb0_scratch_t t_scr;
 static __thread uint32_t t_scr_emax;
-/* scratch_get: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:312.
- */
 static cb0_scratch_t *scratch_get(uint32_t Emax)
 {
   if (t_scr.l != NULL && t_scr_emax >= Emax)
@@ -361,11 +306,6 @@ static cb0_scratch_t *scratch_get(uint32_t Emax)
 }
 
 /* Take items of j until none is left; returns the number this thread finished. */
-/* cb0_work: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:373, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:426.
- */
 static int cb0_work(cb0_job_t *j)
 {
   const bool need_cpu = j->items != NULL;
@@ -405,11 +345,6 @@ static struct {
   int nq, nthreads;
 } g_pool = {.m = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .done = PTHREAD_COND_INITIALIZER};
 
-/* pool_drop_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:430.
- */
 static void pool_drop_locked(cb0_job_t *j)
 {
   for (int k = 0; k < g_pool.nq; k++)
@@ -420,11 +355,6 @@ static void pool_drop_locked(cb0_job_t *j)
     }
 }
 
-/* cb0_pool_main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void *cb0_pool_main(void *arg)
 {
   (void)arg;
@@ -450,11 +380,6 @@ static void *cb0_pool_main(void *arg)
 }
 
 /* Grow the pool to `want` workers (never shrinks). */
-/* pool_ensure: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:417.
- */
 static void pool_ensure(int want)
 {
   pthread_mutex_lock(&g_pool.m);
@@ -473,11 +398,6 @@ static void pool_ensure(int want)
   pthread_mutex_unlock(&g_pool.m);
 }
 
-/* nr_td_cb0_pool_threads: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:234, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:779, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_wire_test.cc:797.
- */
 int nr_td_cb0_pool_threads(void)
 {
   pthread_mutex_lock(&g_pool.m);
@@ -486,11 +406,6 @@ int nr_td_cb0_pool_threads(void)
   return n;
 }
 
-/* cb0_run: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:460, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:890, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:892.
- */
 static void cb0_run(cb0_job_t *j, int threads)
 {
   atomic_init(&j->next, 0);
@@ -529,11 +444,6 @@ static void cb0_run(cb0_job_t *j, int threads)
  * The CUDA decoder (normalised flooding min-sum, 2x iterations) is NOT the CPU layered decoder: its CB0 outcomes may
  * feed the elimination channel only under the section 9.3 same-decoder / dominance rule. Results say decoder_used
  * per item; never mix them within one hypothesis's evidence. */
-/* cb0_ldpc_decode_batch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:148.
- */
 void cb0_ldpc_decode_batch(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, nr_td_cb0_result_t *out)
 {
   LDPC_decoderfunc_t *dec = g_dec;
@@ -551,11 +461,6 @@ void cb0_ldpc_decode_batch(const nr_td_cb0_meta_t *meta, const int8_t *l, int n,
 }
 
 /* ---- GPU dematch of the valid, device-readable items; have_l[i] = 1 for those done ---- */
-/* gpu_dematch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:546, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:550, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:879.
- */
 static int gpu_dematch(const nr_td_cb0_gpu_api_t *api, const nr_td_cb0_item_t *items, const nr_td_cb0_meta_t *meta,
                        int n, int8_t *l, int16_t *d, int8_t *have_l)
 {
@@ -614,11 +519,6 @@ void nr_td_cb0_dematch_device_end(int quarantine)
   pthread_mutex_unlock(&g_lock);
 }
 
-/* nr_td_cb0_dematch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:143, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:159, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:160, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:291 (+9 more).
- */
 int nr_td_cb0_dematch(const nr_td_cb0_item_t *items, int n, int use_gpu, int8_t *l, int16_t *d, int8_t *status)
 {
   if (n <= 0)
@@ -676,11 +576,6 @@ int nr_td_cb0_dematch(const nr_td_cb0_item_t *items, int n, int use_gpu, int8_t 
 /* ---- counters ---- */
 static _Atomic uint64_t st_items, st_decoded, st_cuda_chunks, st_cuda_errors, st_cuda_fb;
 
-/* nr_td_cb0_get_stats: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:117, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:323, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:325, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_bench.c:115 (+1 more).
- */
 void nr_td_cb0_get_stats(nr_td_cb0_stats_t *s)
 {
   s->items = atomic_load(&st_items);
@@ -695,11 +590,6 @@ static int32_t (*g_cuda_dec)(nrLDPC_slot_decoding_parameters_t *);
 static int g_cuda_on = -1; /* -1: decide from NR_TD_CB0_CUDA_LDPC at the first batch */
 static tpool_t g_inline_pool; /* no worker threads: the plugin's per-segment prep runs inline in our worker */
 
-/* cuda_load: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:622.
- */
 static int cuda_load(void)
 {
   static int tried, ok;
@@ -727,22 +617,12 @@ static int cuda_load(void)
   return ok;
 }
 
-/* use_cuda_locked: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:629, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:849.
- */
 static int use_cuda_locked(int on)
 {
   g_cuda_on = (on && cuda_load()) ? 1 : 0;
   return g_cuda_on;
 }
 
-/* nr_td_cb0_use_cuda_ldpc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:112, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:54, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:353, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_batch_test.cc:380 (+10 more).
- */
 int nr_td_cb0_use_cuda_ldpc(int on)
 {
   pthread_mutex_lock(&g_lock);
@@ -761,11 +641,6 @@ typedef struct {
   atomic_int next;
 } cb0_cuda_job_t;
 
-/* cb0_cuda_worker: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:860.
- */
 static void *cb0_cuda_worker(void *arg)
 {
   cb0_cuda_job_t *j = arg;
@@ -855,11 +730,6 @@ typedef struct {
   uint32_t shift, BG, Z, K, F, E, Qm, rv, Ncb, max_iter, crc_type, Kprime_crc;
 } cb0_key_t;
 
-/* key_cmp: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int key_cmp(const void *a, const void *b, void *keys)
 {
   const cb0_key_t *k = keys;
@@ -870,11 +740,6 @@ static int key_cmp(const void *a, const void *b, void *keys)
 static int cb0_batch_impl(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out, bool force_cpu);
 static __thread uint64_t t_last_compute_ns;
 static __thread int t_last_decoded;
-/* nr_td_cb0_last_compute: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:206, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:232.
- */
 void nr_td_cb0_last_compute(uint64_t *ns, int *decoded)
 {
   if (ns)
@@ -882,30 +747,15 @@ void nr_td_cb0_last_compute(uint64_t *ns, int *decoded)
   if (decoded)
     *decoded = t_last_decoded;
 }
-/* nr_td_cb0_batch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:769, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:92, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:178, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:228 (+10 more).
- */
 int nr_td_cb0_batch(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
 {
   return cb0_batch_impl(items, n, out, false);
 }
 /* The CPU backend (nr_td_cb0_batch.h): no CUDA LDPC, no GPU de-matching, whatever NR_TD_CB0_CUDA_LDPC / NR_GPU_CB0 say. */
-/* nr_td_cb0_batch_cpu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:7, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:205, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.c:769, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:178 (+6 more).
- */
 int nr_td_cb0_batch_cpu(const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
 {
   return cb0_batch_impl(items, n, out, true);
 }
-/* nr_td_cb0_get_threads: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:208, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:236.
- */
 int nr_td_cb0_get_threads(void)
 {
   pthread_mutex_lock(&g_lock);

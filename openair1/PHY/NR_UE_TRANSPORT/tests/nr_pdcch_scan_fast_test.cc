@@ -7,11 +7,6 @@
 #include <cstdint>
 #include <cstring>
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(PdcchScanFast, ExactExtentCacheCopiesBitsAndRejectsDifferentDemodulation)
 {
   nr_pdcch_scan_llr_cache_t cache{};
@@ -46,11 +41,6 @@ TEST(PdcchScanFast, ExactExtentCacheCopiesBitsAndRejectsDifferentDemodulation)
   for (auto &e : cache.entry) free(e.data);
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(PdcchScanFast, NeonScoreMatchesScalarForPdcchLengthsAndClipExtremes)
 {
   std::array<int16_t, 1728> llr{};
@@ -83,11 +73,6 @@ TEST(PdcchScanFast, NeonScoreMatchesScalarForPdcchLengthsAndClipExtremes)
   EXPECT_EQ(0.0, nr_pdcch_scan_score_neon(llr.data(), 108));
 }
 
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(PdcchScanFast, GpuReferenceRequiresEverySoftBit)
 {
   std::array<int16_t, 108> cpu{}, gpu{};

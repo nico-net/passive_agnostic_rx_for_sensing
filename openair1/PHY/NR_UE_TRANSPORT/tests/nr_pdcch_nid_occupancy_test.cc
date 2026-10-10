@@ -8,28 +8,13 @@
 namespace {
 constexpr int fft=4096, rb=273, fco=3900;
 using Grid=std::array<nr_pdcch_nid_iq_t,fft>;
-/* take: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1242, openair1/PHY/NR_UE_TRANSPORT/nr_polar_gpu.h:29, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_occupancy_test.cc:23, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_occupancy_test.cc:30 (+5 more).
- */
 bool take(nr_nid_occupancy_t &s,const Grid &v,int sym=0,unsigned floor=10) {
  return nr_nid_occupancy_take(&s,v.data(),fft,fco,12*rb,0,0,48,sym,3.981071706f,floor);
 }
-/* fill: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_TRANSPORT/tests/test_llr.cpp:123, openair1/PHY/NR_TRANSPORT/tests/test_llr.cpp:128, openair1/PHY/NR_TRANSPORT/tests/test_llr.cpp:150, openair1/PHY/NR_TRANSPORT/tests/test_llr.cpp:159 (+27 more).
- */
 void fill(Grid &v,int first,int count,int amplitude) {
  for(int sc=12*first;sc<12*(first+count);sc++)v[(fco+sc)%fft]={(int16_t)amplitude,(int16_t)-amplitude};
 }
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1255 more).
- */
 TEST(NidOccupancy, EmptyAndCssOnlyKeepExactlyFloorPerSymbol) {
  for(int css:{0,48}) {
   nr_nid_occupancy_t s={};Grid v={};fill(v,0,css,12000);
@@ -40,21 +25,11 @@ TEST(NidOccupancy, EmptyAndCssOnlyKeepExactlyFloorPerSymbol) {
   }
  }
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1254 more).
- */
 TEST(NidOccupancy, DedicatedAndFftWrap) {
  nr_nid_occupancy_t s={};Grid v={};fill(v,0,rb,100);fill(v,66,12,1000);
  for(int n=0;n<100;n++)EXPECT_TRUE(take(s,v));
  EXPECT_FLOAT_EQ(s.noise[0],20000.f);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1253 more).
- */
 TEST(NidOccupancy, NoiseFloorTracksBothDirections) {
  nr_nid_occupancy_t s={};Grid v={};fill(v,0,rb,100);
  for(int n=0;n<100;n++)take(s,v);
@@ -65,11 +40,6 @@ TEST(NidOccupancy, NoiseFloorTracksBothDirections) {
   EXPECT_NEAR(s.noise[0],2.f*amplitude*amplitude,2.f*amplitude*amplitude*.0001f);
  }
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1252 more).
- */
 TEST(NidOccupancy, NeverConditionsOnDmrsNoiseOrGoldSigns) {
  Grid a={},b={};std::mt19937 rng(25);std::normal_distribution<float> noise(0,400);
  nr_nid_occupancy_t sa={},sb={};
@@ -83,11 +53,6 @@ TEST(NidOccupancy, NeverConditionsOnDmrsNoiseOrGoldSigns) {
  }
  EXPECT_EQ(accepted,100);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1251 more).
- */
 TEST(NidOccupancy, PartialPointAAndCssBoundary) {
  nr_nid_occupancy_t s={};Grid v={};fill(v,0,rb,100);
  // A CSS interval crossing the 6-RB boundary must not inflate the floor/peak.
@@ -96,21 +61,11 @@ TEST(NidOccupancy, PartialPointAAndCssBoundary) {
  for(int n=0;n<100;n++)count+=nr_nid_occupancy_take(&s,v.data(),fft,fco,12*rb,-7,4,13,2,4.f,10);
  EXPECT_EQ(count,10);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1250 more).
- */
 TEST(NidOccupancy, FullScalePowerDoesNotOverflow) {
  Grid v;for(auto &y:v)y={-32768,-32768};nr_nid_occupancy_t s={};int count=0;
  for(int n=0;n<100;n++)count+=take(s,v);
  EXPECT_EQ(count,10);EXPECT_FLOAT_EQ(s.noise[0],2147483648.f);
 }
-/* TEST: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: common/config/tests/test_config_cmdline.cpp:38, common/config/tests/test_config_cmdline.cpp:47, common/config/tests/test_config_cmdline.cpp:56, common/config/tests/test_config_cmdline.cpp:65 (+1249 more).
- */
 TEST(NidOccupancy, CostDiagnostic) {
  Grid v={};fill(v,0,rb,100);nr_nid_occupancy_t s={};
  auto start=std::chrono::steady_clock::now();int count=0;

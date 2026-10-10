@@ -34,11 +34,6 @@ static struct {
 } g_idsw;
 /* Conjugated PDCCH DM-RS symbol m, bit-identical to nr_dmrs_rx.c's get_modulated(.., true), scaled
  * to +-1 +-j. */
-/* idsw_pilot: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:96, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:303, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:442, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:885 (+5 more).
- */
 static inline void idsw_pilot(const uint32_t *gold, int m, float *xr, float *xi)
 {
   static const float tab[4][2] = {{1, -1}, {1, 1}, {-1, -1}, {-1, 1}};
@@ -49,11 +44,6 @@ static inline void idsw_pilot(const uint32_t *gold, int m, float *xr, float *xi)
   *xi = tab[idx][1];
 }
 
-/* idsw_cinit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:218, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:297, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:430, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:876 (+5 more).
- */
 static uint32_t idsw_cinit(int nid, int slot, int l)
 {
   uint64_t x = ((uint64_t)g_idsw.sps * slot + l + 1) * ((uint64_t)(nid << 1) + 1);
@@ -63,11 +53,6 @@ static uint32_t idsw_cinit(int nid, int slot, int l)
 }
 
 /* Robust median and sigma of v[0..n) in [0,1] via a histogram (O(n)). */
-/* idsw_med_sig: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:227, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:228.
- */
 static void idsw_med_sig(const float *v, int n, float *med, float *sig)
 {
   static uint32_t h[IDSW_BINS];
@@ -95,11 +80,6 @@ static void idsw_med_sig(const float *v, int n, float *med, float *sig)
 
 /* Best coherent 6-CRB |corr| over every start CRB in [c_lo, c_hi), skipping windows overlapping
  * [ex_lo, ex_hi). y/py are per-CRB DM-RS REs and power; m0 = CRB whose sequence index is 0. */
-/* idsw_best: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:220, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:221.
- */
 static float idsw_best(const float (*yr)[3], const float (*yi)[3], const float *py, int c_lo, int c_hi,
                        int ex_lo, int ex_hi, const uint32_t *gold, int m0)
 {
@@ -134,11 +114,6 @@ static float idsw_best(const float (*yr)[3], const float (*yi)[3], const float *
   return best;
 }
 
-/* idsw_report: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:248.
- */
 static void idsw_report(void)
 {
   const float zmax_null = sqrtf(2.0f * logf((float)IDSW_NID)) + 2.0f;
@@ -197,11 +172,6 @@ static int g_list_id[40], g_list_sym[40], g_list_dur[40], g_list_n;
 static uint16_t *multi_hits;
 static float *multi_zs;
 static nr_pdcch_nid_result_t stage1_result;
-/* idsw_list: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1103, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1208, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1228, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1339.
- */
 static void idsw_list(void)
 {
   nid_shortlist(multi_hits, multi_zs, g_idsw.dur, &stage1_result);
@@ -214,11 +184,6 @@ static void idsw_list(void)
            g_list_id[i],s,d+1,stage1_result.threshold[d][s],stage1_result.lambda[d][s]);
   }
 }
-/* idsw_process: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1102, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1207, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1227, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1339 (+1 more).
- */
 static void idsw_process(void)
 {
   const int nsc=g_idsw.nsc,pa=g_idsw.point_a_sc;
@@ -285,11 +250,6 @@ static void idsw_process(void)
 }
 
 
-/* load: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1150, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1226.
- */
 static int load(const char *path)
 {
   FILE *f = fopen(path, "rb");
@@ -316,11 +276,6 @@ static int load(const char *path)
 /* Synthetic capture: Point A at grid sc 7 (NOT 0), CORESET#0 at CRB 10+48 carrying PCI-2 DM-RS on
  * symbol 0 (CORESET#0 reference), a dedicated CORESET carrying ID 12345 on symbol 3 at CRBs 100..111
  * (CRB-0 reference), unit-power noise everywhere, DM-RS amplitude 1.5 (~3.5 dB), 1 in 3 slots. */
-/* selftest_make: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:871, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1206, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1291.
- */
 static void selftest_make(void)
 {
   g_idsw.nsc = 3276; g_idsw.point_a_sc = 7; g_idsw.css0_crb = 10; g_idsw.css0_nrb = 48; g_idsw.pci = 2;
@@ -383,11 +338,6 @@ static int g_found_dur[16];
 static st2_hyp_t g_found[16], g_found_tie[16][64];
 static int g_found_nid[16], g_found_nties[16], g_found_sym[16], g_nfound;
 
-/* st2_exc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:362, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:548, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:647, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:727.
- */
 static inline double st2_exc(const st2_snap_t *s, int b, int B)
 {
   if (b < g_st2_clo || b + B > g_st2_chi)
@@ -400,11 +350,6 @@ static inline double st2_exc(const st2_snap_t *s, int b, int B)
 }
 
 /* mean bundle excess of one candidate; bundles per TS 38.211 7.3.2.2 (duration 1) */
-/* st2_cand: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:378, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:508, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:543.
- */
 static double st2_cand(const st2_snap_t *s, const st2_hyp_t *h, int cce, int al)
 {
   /* TS 38.211 7.3.2.2: REGs are numbered time-first (REG n = RB n/D, symbol n%D), a REG bundle is L consecutive
@@ -420,11 +365,6 @@ static double st2_cand(const st2_snap_t *s, const st2_hyp_t *h, int cce, int al)
   return cnt ? sum / cnt : 0.0;
 }
 
-/* st2_score: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:776, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:783.
- */
 static void st2_score(st2_hyp_t *h, const st2_snap_t *sn, int nact)
 {
   static const int als[5] = {1, 2, 4, 8, 16};
@@ -448,22 +388,12 @@ static void st2_score(st2_hyp_t *h, const st2_snap_t *sn, int nact)
   }
 }
 
-/* st2_cmp: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int st2_cmp(const void *a, const void *b)
 {
   const double x = ((const st2_hyp_t *)a)->score, y = ((const st2_hyp_t *)b)->score;
   return (x < y) - (x > y);
 }
 
-/* st2_fmt: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:795, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:804, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:805, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:839 (+1 more).
- */
 static void st2_fmt(const st2_hyp_t *h, int nact, char *o, size_t n)
 {
   if (h->L)
@@ -477,11 +407,6 @@ static void st2_fmt(const st2_hyp_t *h, int nact, char *o, size_t n)
 }
 
 /* Build prefix sums of the nID's DM-RS correlation for snapshot k (CORESET#0 CRBs masked). */
-/* st2_prefix_body: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:453.
- */
 static void st2_prefix_body(st2_snap_t *s)
 {
   s->re[0] = s->im[0] = s->p[0] = 0.0;
@@ -492,11 +417,6 @@ static void st2_prefix_body(st2_snap_t *s)
   }
 }
 
-/* st2_build: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:686, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:708, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:756.
- */
 static void st2_build(int k, int nid, st2_snap_t *s)
 {
   const int nsc = g_idsw.nsc, pa = g_idsw.point_a_sc, words = (2 * 3 * g_st2_chi) / 32 + 2;
@@ -534,11 +454,6 @@ static void st2_build(int k, int nid, st2_snap_t *s)
   s->k = k;
 }
 
-/* st2_prefix: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:556, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:718.
- */
 static void st2_prefix(st2_snap_t *s)
 {
   s->re[0] = s->im[0] = s->p[0] = 0.0;
@@ -549,11 +464,6 @@ static void st2_prefix(st2_snap_t *s)
   }
 }
 
-/* st2_alloc: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:426, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:676, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:713, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:755.
- */
 static st2_snap_t st2_alloc(void)
 {
   st2_snap_t s;
@@ -588,11 +498,6 @@ static bool st2_lit(const st2_snap_t *s, int *lo, int *hi)
 /* Runs on the snapshots currently loaded in g_idsw (one or more files concatenated by the caller). */
 
 /* per-snapshot best AL>=2 candidate score of one hypothesis */
-/* st2_per_snap: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:814, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:817.
- */
 static void st2_per_snap(const st2_hyp_t *h, const st2_snap_t *sn, int nact, double *out)
 {
   static const int als[4] = {2, 4, 8, 16};
@@ -608,11 +513,6 @@ static void st2_per_snap(const st2_hyp_t *h, const st2_snap_t *sn, int nact, dou
 }
 
 /* paired t of real vs decoy per-snapshot scores */
-/* st2_paired_t: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:818.
- */
 static double st2_paired_t(const double *a, const double *b, int n)
 {
   double m = 0, v = 0;
@@ -625,11 +525,6 @@ static double st2_paired_t(const double *a, const double *b, int n)
 
 /* Remove every AL>=2 candidate of h that is significantly lit (candidate-level test below).
  * Zeroes the raw arrays over its bundles and rebuilds the prefix sums. */
-/* st2_remove: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:856.
- */
 static int st2_remove(st2_snap_t *s, const st2_hyp_t *h)
 {
   static const int als[5] = {1, 2, 4, 8, 16};
@@ -667,11 +562,6 @@ static int st2_remove(st2_snap_t *s, const st2_hyp_t *h)
 
 /* Robust hull of lit window starts (2 %/98 % quantiles) over the CURRENT (residual) snapshots. min/max
  * is set by one false-alarm window: on run s01f it pushed every phase-0 extent off the grid. */
-/* st2_hull: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:743, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:764.
- */
 static bool st2_hull(st2_snap_t *sn, int nact, int *qlo, int *qhi)
 {
   g_st2_nlit = 0;
@@ -691,11 +581,6 @@ static bool st2_hull(st2_snap_t *sn, int nact, int *qlo, int *qhi)
 /* Hypothesis set. Non-interleaved: every start CRB on every phase, extent to the grid edge (extent only
  * bounds containment). Interleaved: the extent sets N_REG, so +-2 groups around the (residual) robust
  * hull, clipped to the grid; L in {2,6}, R in {2,3,6}, every shift. */
-/* st2_gen: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:747, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:768.
- */
 static size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi)
 {
   size_t nh = 0;
@@ -742,11 +627,6 @@ static size_t st2_gen(st2_hyp_t *H, size_t cap, int qlo, int qhi)
  * map has no reason to land on whole CCEs; a right one's does, because that IS what a real scheduler transmits.
  * Independent of st2_score's ranking (which stays as-is, since it is what finds a good CANDIDATE region/L/R to
  * test in the first place) -- this runs ONCE on the winning hypothesis, as an extra accept/reject gate. */
-/* st2_consistency: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:790.
- */
 static double st2_consistency(const st2_snap_t *sn, int nact, const st2_hyp_t *h)
 {
   /* PER-SNAPSHOT, not OR-aggregated across snapshots: a real scheduler can use a DIFFERENT CCE on every
@@ -787,11 +667,6 @@ static double st2_consistency(const st2_snap_t *sn, int nact, const st2_hyp_t *h
   return med;
 }
 
-/* stage2_duration: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_ST2_DEBUG_HYP.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:867, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1349.
- */
 static int stage2_duration(int nid, int sym0, bool quiet, int duration)
 {
   const int pa = g_idsw.point_a_sc;
@@ -989,18 +864,8 @@ static int stage2_duration(int nid, int sym0, bool quiet, int duration)
 /* Synthetic stage-2 capture: Point A at grid sc 7; dedicated CORESET at CRB 60, 30 groups, duration 1,
  * mapping = non-interleaved ("ni") or interleaved L=6 R=2 shift=7 ("il"); one AL2 PDCCH (random even
  * CCE) in every 2nd symbol-0 snapshot, nID 12345, amplitude 1.5 over unit noise. */
-/* stage2: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1072, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1081, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1091, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1107 (+1 more).
- */
 static int stage2(int nid,int sym,bool quiet) {return stage2_duration(nid,sym,quiet,0);}
 
-/* selftest2_make: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1071, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1292.
- */
 static void selftest2_make(bool il)
 {
   selftest_make(); /* noise + stage-1 plants; its symbol-3 ID-12345 plant is harmless here */
@@ -1034,11 +899,6 @@ static void selftest2_make(bool il)
  * The DM-RS is planted from the SPEC's REG numbering, written out REG by REG (time-first: REG n = RB n/D, symbol
  * n%D), NOT from the analysis code's bundle-extent shortcut -- so the two are independent and their agreement is
  * evidence the shortcut is right. */
-/* selftest4_make: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1080, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1293.
- */
 static void selftest4_make(bool il)
 {
   const int D = 2, nid = 12345, cs = 60, ng = 30, Lb = 6, R = 2, sh = 7, nreg = 6 * ng * D, nb = nreg / Lb;
@@ -1092,11 +952,6 @@ static void selftest4_make(bool il)
  * interleaved (L,R) pairing, since interleaving is just a permutation. Ground truth: non-interleaved, CRB 60,
  * 30 groups (= 30 possible CCEs), a different random CCE each occasion (matching real AL1-heavy scheduling,
  * which reuses the SS's CCE candidates rather than always the same one). */
-/* selftest5_make: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1090, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1294.
- */
 static void selftest5_make(void)
 {
   const int nid = 12345, cs = 60, ng = 30;
@@ -1132,11 +987,6 @@ static void selftest5_make(void)
 }
 
 /* Plant one AL2 PDCCH of hypothesis h (CRB-0 referenced DM-RS of nid) into snapshot k. */
-/* st3_plant: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1032, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1033.
- */
 static void st3_plant(int k, int nid, const st2_hyp_t *h)
 {
   c16_t *re = g_idsw.re + (size_t)k * g_idsw.nsc;
@@ -1164,11 +1014,6 @@ static void st3_plant(int k, int nid, const st2_hyp_t *h)
  * One AL2 PDCCH per CORESET in every 2nd capture of its symbol. */
 static const st2_hyp_t ST3_A = {0, 10, 15, 0, 0, 0, 0.0, {0}}, ST3_C = {0, 27, 16, 6, 2, 3, 0.0, {0}},
                        ST3_B = {0, 10, 20, 0, 0, 0, 0.0, {0}};
-/* selftest3_make: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1101, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1295.
- */
 static void selftest3_make(void)
 {
   g_idsw.nsc = 3276; g_idsw.point_a_sc = 7; g_idsw.css0_crb = 10; g_idsw.css0_nrb = 48; g_idsw.pci = 2;
@@ -1191,11 +1036,6 @@ static void selftest3_make(void)
 
 
 /* sorted CRB set of one candidate */
-/* st3_rbset: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1055, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1058.
- */
 static int st3_rbset(const st2_hyp_t *h, int cce, int al, int *out)
 {
   const int b = h->L ? h->L : 6, nb = 6 * h->ng / b, cs = h->phase + 6 * h->g0;
@@ -1208,11 +1048,6 @@ static int st3_rbset(const st2_hyp_t *h, int cce, int al, int *out)
   return n;
 }
 /* every AL2 candidate RB set of truth t is an AL2 candidate RB set of found geometry f */
-/* st3_equiv: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1120.
- */
 static bool st3_equiv(const st2_hyp_t *t, const st2_hyp_t *f)
 {
   int a[64], b2[64];
@@ -1228,11 +1063,6 @@ static bool st3_equiv(const st2_hyp_t *t, const st2_hyp_t *f)
   return true;
 }
 
-/* nid_reference_original_main: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:96, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.h:12.
- */
 int nid_reference_original_main(int argc, char **argv)
 {
   if (argc < 2) { fprintf(stderr, "usage: %s files... | --selftest\n", argv[0]); return 2; }
@@ -1404,11 +1234,6 @@ int nid_reference_original_main(int argc, char **argv)
 static int reference_fixture;
 /* Independent time-first REG mapper for T19 fixtures. Different from the
  * scorer: enumerate REG indices, then map each to (RB, symbol). */
-/* plant: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1283, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1284.
- */
 static void plant(c16_t *re,int slot,int symbol,int occasion,int nid,int first,int D,int cs,int ng,int L,int R)
 {
   if(symbol<first || symbol>=first+D || occasion%3==2)return;
@@ -1429,11 +1254,6 @@ static void plant(c16_t *re,int slot,int symbol,int occasion,int nid,int first,i
     }
   }
 }
-/* multi_make: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:1296.
- */
 static void multi_make(int fixture)
 {
   g_idsw.nsc=12*42;g_idsw.point_a_sc=0;g_idsw.css0_crb=0;g_idsw.css0_nrb=0;g_idsw.pci=2;
@@ -1465,11 +1285,6 @@ static void multi_make(int fixture)
     }
   }
 }
-/* nid_reference_make: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:100, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_benchmark.cc:22, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_incremental_test.cc:38, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.h:13 (+1 more).
- */
 void nid_reference_make(int fixture, nr_pdcch_nid_batch_t *batch)
 {
  reference_fixture=fixture;
@@ -1516,11 +1331,6 @@ void nid_reference_make(int fixture, nr_pdcch_nid_batch_t *batch)
  memcpy(batch->slot,g_idsw.slot,sizeof(batch->slot));memcpy(batch->sym,g_idsw.sym,sizeof(batch->sym));
  batch->iq=(nr_pdcch_nid_iq_t*)g_idsw.re;
 }
-/* nid_reference_run: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_algorithm_test.cc:102, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.h:15, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:35.
- */
 void nid_reference_run(int stage1,nr_pdcch_nid_result_t *out)
 {
  memset(out,0,sizeof(*out));g_nfound=0;
@@ -1551,11 +1361,6 @@ void nid_reference_run(int stage1,nr_pdcch_nid_result_t *out)
 }
 
 /* Independent fresh-batch sufficient statistics for the streaming parity test. */
-/* nid_reference_batch_stats: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_incremental_test.cc:53, openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.h:14.
- */
 void nid_reference_batch_stats(const nr_pdcch_nid_batch_t *b,uint16_t *hits,float *zs)
 {
  __typeof__(g_idsw) saved=g_idsw;

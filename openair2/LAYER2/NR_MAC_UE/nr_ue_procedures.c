@@ -83,11 +83,6 @@ static const int sequence_cyclic_shift_2_harq_ack_bits[4]
 /*        HARQ-ACK Value       (0,0)  (0,1)  (1,0)  (1,1) */
 /* Sequence cyclic shift */ = {   0,     3,     9,     6 };
 
-/* get_pucch0_mcs: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:1765, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:1816.
- */
 static int get_pucch0_mcs(const int O_ACK, const int O_SR, const int ack_payload, const int sr_payload)
 {
   int mcs = 0;
@@ -130,11 +125,6 @@ const initial_pucch_resource_t initial_pucch_resource[16] = {
 /* 15  */ {  1,       0,                 14,                   0,            4,       {    0,   3,    6,    9  }   },
 };
 
-/* get_rnti_type: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:299, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:569, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:660, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:917 (+4 more).
- */
 int get_rnti_type(const NR_UE_MAC_INST_t *mac, const uint16_t rnti)
 {
   const RA_config_t *ra = &mac->ra;
@@ -350,11 +340,6 @@ void nr_ue_decode_BCCH_DL_SCH(NR_UE_MAC_INST_t *mac,
  * These tables and functions are going to be called by function nr_ue_process_dci
  */
 
-/* writeBit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:408, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:414, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:422.
- */
 static inline int writeBit(uint8_t *bitmap, int offset, int value, int size)
 {
   for (int i = offset; i < offset + size; i++)
@@ -549,11 +534,6 @@ static void set_harq_status(NR_UE_MAC_INST_t *mac,
         current_harq->dai_cumul);
 }
 
-/* nr_ue_process_dci_ul_00: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:1649.
- */
 static int nr_ue_process_dci_ul_00(NR_UE_MAC_INST_t *mac,
                                    frame_t frame,
                                    int slot,
@@ -619,11 +599,6 @@ static int nr_ue_process_dci_ul_00(NR_UE_MAC_INST_t *mac,
   return ret;
 }
 
-/* nr_ue_process_dci_ul_01: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:1653.
- */
 static int nr_ue_process_dci_ul_01(NR_UE_MAC_INST_t *mac,
                                    frame_t frame,
                                    int slot,
@@ -730,11 +705,6 @@ static int nr_ue_process_dci_ul_01(NR_UE_MAC_INST_t *mac,
 }
 
 // Table 7.3.1.3-1 of 38.211
-/* get_nl_for_cw: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:765.
- */
 static int get_nl_for_cw(int Nl, int cw_idx)
 {
   AssertFatal(Nl >= 0 && Nl <= 8, "Invalid number of layers %d\n", Nl);
@@ -879,11 +849,6 @@ static int nr_ue_process_dci_dl_10_p_rnti(NR_UE_MAC_INST_t *mac,
   return 0;
 }
 
-/* nr_ue_process_dci_dl_10: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:1657.
- */
 static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
                                    frame_t frame,
                                    int slot,
@@ -1278,11 +1243,6 @@ static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
   return 0;
 }
 
-/* nr_ue_process_dci_dl_11: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:1661.
- */
 static int nr_ue_process_dci_dl_11(NR_UE_MAC_INST_t *mac,
                                    frame_t frame,
                                    int slot,
@@ -1723,11 +1683,6 @@ static int8_t nr_ue_process_dci(NR_UE_MAC_INST_t *mac,
   return -1;
 }
 
-/* nr_ue_process_l1_measurements: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:112, openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c:193.
- */
 void nr_ue_process_l1_measurements(NR_UE_MAC_INST_t *mac, frame_t frame, int slot, fapi_nr_l1_measurements_t *l1_measurements)
 {
   LOG_D(NR_MAC, "(%d.%d) Received measurements from L1\n", frame, slot);
@@ -1751,11 +1706,6 @@ void nr_ue_process_l1_measurements(NR_UE_MAC_INST_t *mac, frame_t frame, int slo
                          l1_measurements->rsrp_dBm);
 }
 
-/* get_initial_pucch_resource: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:159, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:1734, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:1719.
- */
 initial_pucch_resource_t get_initial_pucch_resource(const int idx)
 {
   return initial_pucch_resource[idx];
@@ -2010,11 +1960,6 @@ int nr_ue_configure_pucch(NR_UE_MAC_INST_t *mac,
   return 0;
 }
 
-/* find_pucch_resource_set: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2208, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2586.
- */
 static int find_pucch_resource_set(NR_PUCCH_Config_t *pucch_Config, int size)
 {
   // Procedure described in 38.213 Section 9.2.1
@@ -2049,11 +1994,6 @@ static int find_pucch_resource_set(NR_PUCCH_Config_t *pucch_Config, int size)
   return 3;
 }
 
-/* find_pucch_resource_from_list: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2213, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2594, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2685, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2765.
- */
 NR_PUCCH_Resource_t *find_pucch_resource_from_list(struct NR_PUCCH_Config__resourceToAddModList *resourceToAddModList,
                                                    long resource_id)
 {
@@ -2066,11 +2006,6 @@ NR_PUCCH_Resource_t *find_pucch_resource_from_list(struct NR_PUCCH_Config__resou
   return pucch_resource;
 }
 
-/* check_mux_acknack_csi: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2199.
- */
 static bool check_mux_acknack_csi(NR_PUCCH_Resource_t *csi_res, NR_PUCCH_Config_t *pucch_Config)
 {
   bool ret;
@@ -2090,11 +2025,6 @@ static bool check_mux_acknack_csi(NR_PUCCH_Resource_t *csi_res, NR_PUCCH_Config_
   return ret;
 }
 
-/* get_pucch_start_symbol_length: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2065, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2068, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2087, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2090.
- */
 void get_pucch_start_symbol_length(NR_PUCCH_Resource_t *pucch_resource, int *start, int *length)
 {
   switch (pucch_resource->format.present) {
@@ -2124,11 +2054,6 @@ void get_pucch_start_symbol_length(NR_PUCCH_Resource_t *pucch_resource, int *sta
 }
 
 // Ref. 38.213 section 9.2.5 order(Q)
-/* order_resources: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2358, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2378.
- */
 void order_resources(PUCCH_sched_t *pucch, int num_res)
 {
   int k = 0;
@@ -2153,11 +2078,6 @@ void order_resources(PUCCH_sched_t *pucch, int num_res)
   }
 }
 
-/* check_overlapping_resources: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2363.
- */
 bool check_overlapping_resources(PUCCH_sched_t *pucch, int j, int o)
 {
   // assuming overlapping means if two resources overlaps in time,
@@ -2179,31 +2099,16 @@ bool check_overlapping_resources(PUCCH_sched_t *pucch, int j, int o)
 
 /* Helpers for PUCCH resource multiplexing. */
 
-/* is_f0_or_f1: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2267, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2268.
- */
 static bool is_f0_or_f1(const NR_PUCCH_Resource_t *r)
 {
   return r->format.present == NR_PUCCH_Resource__format_PR_format0 || r->format.present == NR_PUCCH_Resource__format_PR_format1;
 }
 
-/* is_f1: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2222, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2283, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2284.
- */
 static bool is_f1(const NR_PUCCH_Resource_t *r)
 {
   return r->format.present == NR_PUCCH_Resource__format_PR_format1;
 }
 
-/* is_f2_or_above: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2203, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2269, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2270.
- */
 static bool is_f2_or_above(const NR_PUCCH_Resource_t *r)
 {
   return r->format.present == NR_PUCCH_Resource__format_PR_format2 || r->format.present == NR_PUCCH_Resource__format_PR_format3
@@ -2213,11 +2118,6 @@ static bool is_f2_or_above(const NR_PUCCH_Resource_t *r)
 /*
  * Move the payload fields of src into dst, then zero src.
  * Does NOT touch pucch_resource pointers.
- */
-/* absorb_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2201.
  */
 static void absorb_payload(PUCCH_sched_t *dst, PUCCH_sched_t *src)
 {
@@ -2243,11 +2143,6 @@ static void absorb_payload(PUCCH_sched_t *dst, PUCCH_sched_t *src)
  * Keep 'winner', place it in index i+1, clear index i.
  * winner must point to either res[i] or res[i+1].
  */
-/* keep: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2166, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2178, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2216, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2228 (+3 more).
- */
 static void keep(PUCCH_sched_t *res, int i, PUCCH_sched_t *winner)
 {
   static const PUCCH_sched_t empty = {0};
@@ -2263,11 +2158,6 @@ static void keep(PUCCH_sched_t *res, int i, PUCCH_sched_t *winner)
  * For F0 (and when F0 holds HARQ and the other index holds SR):
  * the HARQ resource wins; copy SR into it.
  */
-/* merge_sr_harq_into_harq_resource: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2291, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2297.
- */
 static void merge_sr_harq_into_harq_resource(PUCCH_sched_t *res, int i, PUCCH_sched_t *harq_sch, PUCCH_sched_t *sr_sch)
 {
   AssertFatal(harq_sch->n_harq > 0 && sr_sch->n_sr > 0, "Expected one HARQ-only and one SR-only resource\n");
@@ -2278,11 +2168,6 @@ static void merge_sr_harq_into_harq_resource(PUCCH_sched_t *res, int i, PUCCH_sc
 
 /*
  * Positive-SR rule for F1+F1: HARQ goes into the SR resource.
- */
-/* merge_f1_f1_positive_sr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2305.
  */
 static void merge_f1_f1_positive_sr(PUCCH_sched_t *res, int i, PUCCH_sched_t *harq_sch, PUCCH_sched_t *sr_sch)
 {
@@ -2348,11 +2233,6 @@ static void merge_harq_with_csi(PUCCH_sched_t *res,
  *
  * One carries CSI, the other carries HARQ (enforced by AssertFatal).
  */
-/* merge_f2p_f2p: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2341.
- */
 static void merge_f2p_f2p(PUCCH_sched_t *res, int i, NR_PUCCH_Config_t *pucch_Config)
 {
   PUCCH_sched_t *harq_sch, *csi_sch;
@@ -2377,11 +2257,6 @@ static void merge_f2p_f2p(PUCCH_sched_t *res, int i, NR_PUCCH_Config_t *pucch_Co
 
 /* Top-level pair merger */
 
-/* merge_pair: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2352.
- */
 static void merge_pair(PUCCH_sched_t *res, int i, NR_PUCCH_Config_t *pucch_Config)
 {
   static const PUCCH_sched_t empty = {0};
@@ -2471,22 +2346,12 @@ static void merge_pair(PUCCH_sched_t *res, int i, NR_PUCCH_Config_t *pucch_Confi
 }
 
 // 38.213 section 9.2.5
-/* merge_resources: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2368.
- */
 static void merge_resources(PUCCH_sched_t *res, int num_res, NR_PUCCH_Config_t *pucch_Config)
 {
   for (int i = 0; i < num_res - 1; i++)
     merge_pair(res, i, pucch_Config);
 }
 
-/* multiplex_pucch_resource: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:160, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:1863.
- */
 void multiplex_pucch_resource(NR_UE_MAC_INST_t *mac, PUCCH_sched_t *pucch, int num_res)
 {
   NR_PUCCH_Config_t *pucch_Config = mac->current_UL_BWP->pucch_Config;
@@ -2517,11 +2382,6 @@ void multiplex_pucch_resource(NR_UE_MAC_INST_t *mac, PUCCH_sched_t *pucch, int n
   }
 }
 
-/* configure_initial_pucch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:244, openair2/LAYER2/NR_MAC_UE/nr_ra_procedures.c:1210, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2584.
- */
 void configure_initial_pucch(PUCCH_sched_t *pucch, int res_ind, long *pucch_ResourceCommon)
 {
   /* see TS 38.213 9.2.1  PUCCH Resource Sets */
@@ -2796,11 +2656,6 @@ static int nr_ue_get_SR(NR_UE_MAC_INST_t *mac, frame_t frame, slot_t slot, NR_Sc
   return -1;
 }
 
-/* trigger_periodic_scheduling_request: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:116, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:1838.
- */
 bool trigger_periodic_scheduling_request(NR_UE_MAC_INST_t *mac, PUCCH_sched_t *pucch, frame_t frame, int slot)
 {
   NR_UE_UL_BWP_t *current_UL_BWP = mac->current_UL_BWP;
@@ -2846,11 +2701,6 @@ bool trigger_periodic_scheduling_request(NR_UE_MAC_INST_t *mac, PUCCH_sched_t *p
 }
 
 // section 5.2.5 of 38.214
-/* compute_csi_priority: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2768.
- */
 int compute_csi_priority(NR_UE_MAC_INST_t *mac, NR_CSI_ReportConfig_t *csirep)
 {
   int y = 4 - csirep->reportConfigType.present;
@@ -2866,11 +2716,6 @@ int compute_csi_priority(NR_UE_MAC_INST_t *mac, NR_CSI_ReportConfig_t *csirep)
   return 2 * Ncells * Ms * y + Ncells * Ms * k + Ms * c + s;
 }
 
-/* nr_get_csi_measurements: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:121, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:1806, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:1846.
- */
 int nr_get_csi_measurements(NR_UE_MAC_INST_t *mac,
                             frame_t frame,
                             int slot,
@@ -2946,11 +2791,6 @@ int nr_get_csi_measurements(NR_UE_MAC_INST_t *mac,
 }
 
 // Referred - Table 10.1.16.1-1 in 38.133 V16.7.0.
-/* get_sinr_index: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2887.
- */
 static uint8_t get_sinr_index(float sinr)
 {
   int index = sinr * 2 + 47;
@@ -2963,11 +2803,6 @@ static uint8_t get_sinr_index(float sinr)
 }
 
 // Reffered Table 10.1.16.1-2 in 38.133 V16.7.0. Differential value is reported.
-/* get_sinr_diff_index: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2892.
- */
 static uint8_t get_sinr_diff_index(float best_sinr, float current_sinr)
 {
   int diff = best_sinr - current_sinr;
@@ -2980,11 +2815,6 @@ static uint8_t get_sinr_diff_index(float best_sinr, float current_sinr)
 }
 
 // Comparison function for sorting SSB SINR measurements in descending order
-/* compare_ssb_sinr: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int compare_ssb_sinr(const void *a, const void *b)
 {
   const NR_RSRP_meas_t *ma = (const NR_RSRP_meas_t *)a;
@@ -2992,11 +2822,6 @@ static int compare_ssb_sinr(const void *a, const void *b)
   return mb->ssb_sinr_dB - ma->ssb_sinr_dB;
 }
 
-/* get_ssb_sinr_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3147.
- */
 static nfapi_nr_ue_csi_payload_t get_ssb_sinr_payload(NR_UE_MAC_INST_t *mac,
                                                       const struct NR_CSI_ReportConfig *csi_reportconfig,
                                                       const NR_CSI_ResourceConfigId_t csi_ResourceConfigId,
@@ -3078,11 +2903,6 @@ static nfapi_nr_ue_csi_payload_t get_ssb_sinr_payload(NR_UE_MAC_INST_t *mac,
 }
 
 // Comparison function for sorting SSB RSRP measurements in descending order
-/* compare_ssb_rsrp: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int compare_ssb_rsrp(const void *a, const void *b)
 {
   const NR_RSRP_meas_t *ma = (const NR_RSRP_meas_t *)a;
@@ -3092,11 +2912,6 @@ static int compare_ssb_rsrp(const void *a, const void *b)
 
 // returns index from differential RSRP
 // according to Table 10.1.6.1-2 in 38.133
-/* get_rsrp_diff_index: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2992.
- */
 static uint8_t get_rsrp_diff_index(int best_rsrp, int current_rsrp)
 {
   int diff = best_rsrp-current_rsrp;
@@ -3106,11 +2921,6 @@ static uint8_t get_rsrp_diff_index(int best_rsrp, int current_rsrp)
     return (diff>>1);
 }
 
-/* get_ssb_rsrp_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3160.
- */
 static nfapi_nr_ue_csi_payload_t get_ssb_rsrp_payload(NR_UE_MAC_INST_t *mac,
                                           const struct NR_CSI_ReportConfig *csi_reportconfig,
                                           const NR_CSI_ResourceConfigId_t csi_ResourceConfigId,
@@ -3193,11 +3003,6 @@ static nfapi_nr_ue_csi_payload_t get_ssb_rsrp_payload(NR_UE_MAC_INST_t *mac,
   return csi;
 }
 
-/* get_csirs_RI_PMI_CQI_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3163.
- */
 static nfapi_nr_ue_csi_payload_t get_csirs_RI_PMI_CQI_payload(NR_UE_MAC_INST_t *mac,
                                                   const struct NR_CSI_ReportConfig *csi_reportconfig,
                                                   const NR_CSI_ResourceConfigId_t csi_ResourceConfigId,
@@ -3274,11 +3079,6 @@ static nfapi_nr_ue_csi_payload_t get_csirs_RI_PMI_CQI_payload(NR_UE_MAC_INST_t *
   return csi;
 }
 
-/* get_csirs_RSRP_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3166.
- */
 static nfapi_nr_ue_csi_payload_t get_csirs_RSRP_payload(NR_UE_MAC_INST_t *mac,
                                             const struct NR_CSI_ReportConfig *csi_reportconfig,
                                             const NR_CSI_ResourceConfigId_t csi_ResourceConfigId,
@@ -3332,11 +3132,6 @@ static nfapi_nr_ue_csi_payload_t get_csirs_RSRP_payload(NR_UE_MAC_INST_t *mac,
   return csi;
 }
 
-/* nr_get_csi_payload: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:127, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2781, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:2787, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:897.
- */
 nfapi_nr_ue_csi_payload_t nr_get_csi_payload(NR_UE_MAC_INST_t *mac,
                                              int csi_report_id,
                                              CSI_mapping_t mapping_type,
@@ -3383,11 +3178,6 @@ nfapi_nr_ue_csi_payload_t nr_get_csi_payload(NR_UE_MAC_INST_t *mac,
   return csi;
 }
 
-/* set_time_alignment: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3241, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4020, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4193.
- */
 static void set_time_alignment(NR_UE_MAC_INST_t *mac, int ta, ta_type_t type, int frame, int slot)
 {
   NR_UL_TIME_ALIGNMENT_t *ul_time_alignment = &mac->ul_time_alignment;
@@ -3401,11 +3191,6 @@ static void set_time_alignment(NR_UE_MAC_INST_t *mac, int ta, ta_type_t type, in
   nr_timer_start(&mac->time_alignment_timer);
 }
 
-/* handle_rar_reception: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3389.
- */
 static void handle_rar_reception(NR_UE_MAC_INST_t *mac, NR_MAC_RAR *rar, frame_t frame, int slot)
 {
   RAR_grant_t rar_grant;
@@ -3551,11 +3336,6 @@ static void handle_rar_reception(NR_UE_MAC_INST_t *mac, NR_MAC_RAR *rar, frame_t
 // - b buffer
 // - ulsch power offset
 // - optimize: mu_pusch, j and table_6_1_2_1_1_2_time_dom_res_alloc_A are already defined in nr_ue_procedures
-/* nr_ue_process_rar: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4388.
- */
 static void nr_ue_process_rar(NR_UE_MAC_INST_t *mac, nr_downlink_indication_t *dl_info, int pdu_id)
 {
   frame_t frame = dl_info->frame;
@@ -3654,11 +3434,6 @@ static void nr_ue_process_rar(NR_UE_MAC_INST_t *mac, nr_downlink_indication_t *d
   LOG_D(NR_MAC_DCI, "     " #val ": %d\n", val);
 
 // Fixme: Intel Endianess only procedure
-/* readBits: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3431, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3433, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3576.
- */
 static inline int readBits(const uint8_t *dci, int *start, int length)
 {
   uint32_t mask = (1U << length) - 1;
@@ -3667,11 +3442,6 @@ static inline int readBits(const uint8_t *dci, int *start, int length)
   return *tmp >> *start & mask;
 }
 
-/* extract_10_ra_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3789.
- */
 static void extract_10_ra_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos, const int N_RB)
 {
   LOG_D(NR_MAC_DCI, "Received dci 1_0 RA rnti\n");
@@ -3688,11 +3458,6 @@ static void extract_10_ra_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dc
   EXTRACT_DCI_ITEM(dci_pdu_rel15->tb_scaling, 2);
 }
 
-/* extract_10_si_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3807.
- */
 static uint8_t extract_10_si_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos, const int N_RB)
 {
   LOG_D(NR_MAC_DCI, "Received dci 1_0 SI rnti\n");
@@ -3712,11 +3477,6 @@ static uint8_t extract_10_si_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t 
   return dci_pdu_rel15->system_info_indicator;
 }
 
-/* extract_10_p_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3799.
- */
 static void extract_10_p_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos, const int N_RB)
 {
   LOG_D(NR_MAC_DCI, "Received dci 1_0 P-RNTI\n");
@@ -3736,11 +3496,6 @@ static void extract_10_p_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci
   EXTRACT_DCI_ITEM(dci_pdu_rel15->tb_scaling, 2);
 }
 
-/* extract_10_c_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3824.
- */
 static bool extract_10_c_rnti(NR_UE_MAC_INST_t *mac,
                               dci_pdu_rel15_t *dci_pdu_rel15,
                               const uint8_t *dci_pdu,
@@ -3795,11 +3550,6 @@ static bool extract_10_c_rnti(NR_UE_MAC_INST_t *mac,
   return false;
 }
 
-/* extract_00_c_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3831.
- */
 static void extract_00_c_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos)
 {
   LOG_D(NR_MAC_DCI, "Received dci 0_0 C rnti\n");
@@ -3827,11 +3577,6 @@ static void extract_00_c_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci
   */
 }
 
-/* extract_10_tc_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3845.
- */
 static void extract_10_tc_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos, const int N_RB)
 {
   LOG_D(NR_MAC_DCI, "Received dci 1_0 TC rnti\n");
@@ -3860,11 +3605,6 @@ static void extract_10_tc_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dc
   EXTRACT_DCI_ITEM(dci_pdu_rel15->pdsch_to_harq_feedback_timing_indicator.val, 3);
 }
 
-/* extract_00_tc_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3850.
- */
 static void extract_00_tc_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos)
 {
   LOG_D(NR_MAC_DCI, "Received dci 0_0 TC rnti\n");
@@ -3887,11 +3627,6 @@ static void extract_00_tc_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dc
   EXTRACT_DCI_ITEM(dci_pdu_rel15->tpc, 2);
 }
 
-/* extract_11_c_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3886.
- */
 static void extract_11_c_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos)
 {
   LOG_D(NR_MAC_DCI, "Received dci 1_1 C rnti\n");
@@ -3952,11 +3687,6 @@ static void extract_11_c_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci
   EXTRACT_DCI_ITEM(dci_pdu_rel15->dmrs_sequence_initialization.val, 1);
 }
 
-/* extract_01_c_rnti: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3895.
- */
 static void extract_01_c_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci_pdu, int pos, const int N_RB)
 {
   LOG_D(NR_MAC_DCI, "Received dci 0_1 C rnti\n");
@@ -4015,11 +3745,6 @@ static void extract_01_c_rnti(dci_pdu_rel15_t *dci_pdu_rel15, const uint8_t *dci
   */
 }
 
-/* get_nrb_for_dci: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3786, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3794, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3804, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:3821 (+2 more).
- */
 static int get_nrb_for_dci(NR_UE_MAC_INST_t *mac, nr_dci_format_t dci_format, int ss_type)
 {
   NR_UE_DL_BWP_t *current_DL_BWP = mac->current_DL_BWP;
@@ -4181,11 +3906,6 @@ static nr_dci_format_t nr_extract_dci_info(NR_UE_MAC_INST_t *mac,
   return format;
 }
 
-/* nr_ue_process_dci_indication_pdu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:110, openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c:138.
- */
 nr_dci_format_t nr_ue_process_dci_indication_pdu(NR_UE_MAC_INST_t *mac, frame_t frame, int slot, fapi_nr_dci_indication_pdu_t *dci)
 {
   const nr_rnti_type_t rnti_type = get_rnti_type(mac, dci->rnti);
@@ -4209,11 +3929,6 @@ nr_dci_format_t nr_ue_process_dci_indication_pdu(NR_UE_MAC_INST_t *mac, frame_t 
   return format;
 }
 
-/* check_ra_contention_resolution: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4002, openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4219.
- */
 static bool check_ra_contention_resolution(const uint8_t *pdu, const uint8_t *cont_res)
 {
   if (IS_SOFTMODEM_IQPLAYER) // Control is bypassed when replaying IQs (BMC)
@@ -4226,11 +3941,6 @@ static bool check_ra_contention_resolution(const uint8_t *pdu, const uint8_t *co
   return true;
 }
 
-/* nr_ue_validate_successrar: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4085.
- */
 static int nr_ue_validate_successrar(uint8_t *pduP, int32_t pdu_len, NR_UE_MAC_INST_t *mac, frame_t frameP, int slot)
 {
   // TS 38.321 - Figure 6.1.5a-1: BI MAC subheader
@@ -4346,11 +4056,6 @@ static int nr_ue_validate_successrar(uint8_t *pduP, int32_t pdu_len, NR_UE_MAC_I
 //  F:    lenght of L is 0:8 or 1:16 bits wide
 //  R:    Reserved bit, set to zero.
 ////////////////////////////////
-/* nr_ue_process_mac_pdu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:4385.
- */
 static void nr_ue_process_mac_pdu(NR_UE_MAC_INST_t *mac, nr_downlink_indication_t *dl_info, int pdu_id)
 {
   frame_t frameP = dl_info->frame;
@@ -4565,11 +4270,6 @@ static void nr_ue_process_mac_pdu(NR_UE_MAC_INST_t *mac, nr_downlink_indication_
  * @mac_ce        pointer to the MAC sub-PDUs including the MAC CEs
  * Return:        number of written bytes
  */
-/* nr_write_ce_ulsch_pdu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:149, openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c:2173.
- */
 int nr_write_ce_ulsch_pdu(uint8_t *mac_ce, NR_SINGLE_ENTRY_PHR_MAC_CE *power_headroom, const type_bsr_t *bsr, uint8_t *mac_ce_end)
 {
   uint8_t *pdu = mac_ce;
@@ -4661,11 +4361,6 @@ int nr_write_ce_ulsch_pdu(uint8_t *mac_ce, NR_SINGLE_ENTRY_PHR_MAC_CE *power_hea
   return mac_ce - pdu;
 }
 
-/* nr_ue_send_sdu: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair2/LAYER2/NR_MAC_UE/mac_proto.h:138, openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c:177.
- */
 void nr_ue_send_sdu(NR_UE_MAC_INST_t *mac, nr_downlink_indication_t *dl_info, int pdu_id)
 {
   LOG_D(NR_MAC,

@@ -20,11 +20,6 @@ static int (*f_collect)(ldpc_cb0_ticket_t *, ldpc_cb0_result_t *, uint8_t *, siz
 static int (*f_healthy)(void);
 static void (*f_counters)(ldpc_cb0_counters_t *);
 
-/* nr_td_cb0_gpu_iters: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: ISAC_TD_CB0_GPU_ITERS, ISAC_TD_TB_CPU_WHILE_ACQ.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:246, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:270, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:275, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:98 (+5 more).
- */
 uint8_t nr_td_cb0_gpu_iters(uint8_t max_iter)
 {
   static int over = -1;
@@ -59,11 +54,6 @@ typedef struct {
   ldpc_cb0_result_t *res;
 } gpu_ticket_t;
 
-/* fail_all: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:161.
- */
 static void fail_all(const nr_td_cb0_meta_t *meta, int n, nr_td_cb0_result_t *out)
 {
   for (int i = 0; i < n; i++)
@@ -75,11 +65,6 @@ static void fail_all(const nr_td_cb0_meta_t *meta, int n, nr_td_cb0_result_t *ou
     }
 }
 
-/* gpu_submit: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:159.
- */
 static int gpu_submit(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, void **ticket)
 {
   *ticket = NULL;
@@ -128,11 +113,6 @@ static int gpu_submit(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, void
   return 0;
 }
 
-/* gpu_collect: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:164.
- */
 static int gpu_collect(void *ticket, nr_td_cb0_result_t *out)
 {
   gpu_ticket_t *t = ticket;
@@ -171,11 +151,6 @@ static int gpu_collect(void *ticket, nr_td_cb0_result_t *out)
   return bad ? (rc != LDPC_CB0_OK ? rc : -1) : 0;
 }
 
-/* gpu_decode: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:244.
- */
 static int gpu_decode(const nr_td_cb0_meta_t *meta, const int8_t *l, int n, nr_td_cb0_result_t *out)
 {
   if (n <= 0)
@@ -193,11 +168,6 @@ static const nr_td_cb0_gpu_entry_t g_backend = {"cuda-cb0", NR_TD_CB0_DEC_CUDA_F
 static const nr_td_cb0_gpu_entry_t *g_ptr;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
-/* load: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:196.
- */
 static void load(void)
 {
   void *h = dlopen("libldpc_cuda.so", RTLD_NOW | RTLD_NOLOAD); /* the receiver's TB plugin instance, if loaded */
@@ -217,28 +187,13 @@ static void load(void)
   g_ptr = &g_backend;
 }
 
-/* nr_td_cb0_gpu_backend: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:266, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:208, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:223, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:265 (+2 more).
- */
 const nr_td_cb0_gpu_entry_t *nr_td_cb0_gpu_backend(void)
 {
   return g_ptr;
 }
 
 static int g_warm_allowed;
-/* warm_load: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static void warm_load(void) { if (g_warm_allowed) load(); }
-/* nr_td_cb0_gpu_warmup: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:285, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:87, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:54, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_bench.c:94.
- */
 void nr_td_cb0_gpu_warmup(int enable)
 {
   g_warm_allowed = enable;
@@ -247,11 +202,6 @@ void nr_td_cb0_gpu_warmup(int enable)
 }
 
 /* ---- adapter: the GPU entry behind the CPU wiring's nr_td_cb0_backend_t (nr_td_cb0_exec) ---- */
-/* ad_healthy: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int ad_healthy(void *ctx)
 {
   (void)ctx;
@@ -265,11 +215,6 @@ static nr_td_cb0_meta_t t_meta[65536];
 static __thread const int8_t *t_l;
 static _Atomic unsigned long s_l_abandoned;
 
-/* ad_decode: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: none found in tree.
- */
 static int ad_decode(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_result_t *out)
 {
   (void)ctx;
@@ -305,11 +250,6 @@ static int ad_decode(void *ctx, const nr_td_cb0_item_t *items, int n, nr_td_cb0_
   return rc;
 }
 
-/* nr_td_cb0_gpu_adapter_test_scratch: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:296, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:363, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:369, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:377 (+3 more).
- */
 void nr_td_cb0_gpu_adapter_test_scratch(const void **l, unsigned long *abandoned)
 {
   if (l)
@@ -320,21 +260,11 @@ void nr_td_cb0_gpu_adapter_test_scratch(const void **l, unsigned long *abandoned
 
 static const nr_td_cb0_backend_t g_adapter = {"cuda-cb0", ad_healthy, ad_decode, NULL};
 
-/* nr_td_cb0_gpu_backend_adapter: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:293, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_gpu_backend.c:270, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:351.
- */
 const nr_td_cb0_backend_t *nr_td_cb0_gpu_backend_adapter(void)
 {
   return nr_td_cb0_gpu_backend() ? &g_adapter : NULL;
 }
 
-/* nr_td_cb0_gpu_register: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:252, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:284, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:292, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:74 (+1 more).
- */
 int nr_td_cb0_gpu_register(void)
 {
   const nr_td_cb0_backend_t *a = nr_td_cb0_gpu_backend_adapter();
@@ -344,11 +274,6 @@ int nr_td_cb0_gpu_register(void)
   return 1;
 }
 
-/* nr_td_cb0_gpu_get_counters: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_batch.h:303, openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:589, openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_cb0_gpu_backend_test.cc:333.
- */
 void nr_td_cb0_gpu_get_counters(nr_td_cb0_gpu_counters_t *c)
 {
   memset(c, 0, sizeof(*c));

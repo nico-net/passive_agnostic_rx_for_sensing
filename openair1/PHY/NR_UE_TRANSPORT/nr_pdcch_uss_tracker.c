@@ -74,21 +74,11 @@ static const uint32_t k_a[3] = {39827, 39829, 39839};
 static uint8_t g_allowed[136][7][136];
 static uint8_t g_count[136][7];
 
-/* same_geometry: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:195, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:332.
- */
 static bool same_geometry(const nr_pdcch_uss_geometry_t *a, const nr_pdcch_uss_geometry_t *b)
 {
   return memcmp(a, b, sizeof(*a)) == 0;
 }
 
-/* mod_pow: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:140.
- */
 static uint32_t mod_pow(uint32_t a, uint32_t e)
 {
   uint64_t r = 1;
@@ -101,11 +91,6 @@ static uint32_t mod_pow(uint32_t a, uint32_t e)
   return (uint32_t)r;
 }
 
-/* al_index: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:153.
- */
 static int al_index(int al)
 {
   switch (al) {
@@ -138,11 +123,6 @@ static void insert_top(uint16_t rnti, float score, uint16_t hits, uint8_t hash, 
   out_hash[at] = hash; out_m[at] = m;
 }
 
-/* score_snapshot: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:299.
- */
 static void score_snapshot(int state_index, uint32_t generation,
                            const nr_pdcch_uss_geometry_t *geometry,
                            const uss_sample_t *sample, int n)
@@ -345,11 +325,6 @@ static void tracker_init(void)
   }
 }
 
-/* find_state: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:352, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:398.
- */
 static int find_state(const nr_pdcch_uss_geometry_t *geometry, bool create)
 {
   int victim = -1;
@@ -366,11 +341,6 @@ static int find_state(const nr_pdcch_uss_geometry_t *geometry, bool create)
   return victim;
 }
 
-/* nr_pdcch_uss_tracker_observe: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3106, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.h:31.
- */
 void nr_pdcch_uss_tracker_observe(const nr_pdcch_uss_geometry_t *geometry,
                                   uint32_t absolute_slot, uint16_t slot_in_frame, uint16_t n_cces,
                                   const nr_pdcch_uss_observation_t *observation, int n_observation)
@@ -419,11 +389,6 @@ void nr_pdcch_uss_tracker_observe(const nr_pdcch_uss_geometry_t *geometry,
   pthread_mutex_unlock(&g_lock);
 }
 
-/* tracker_copy: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:428, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:433.
- */
 static int tracker_copy(const nr_pdcch_uss_geometry_t *geometry, uint16_t *rnti,
                         int max_rnti, bool stable_only)
 {
@@ -458,32 +423,17 @@ static int tracker_copy(const nr_pdcch_uss_geometry_t *geometry, uint16_t *rnti,
   return n;
 }
 
-/* nr_pdcch_uss_tracker_top: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.h:40.
- */
 int nr_pdcch_uss_tracker_top(const nr_pdcch_uss_geometry_t *geometry, uint16_t *rnti, int max_rnti)
 {
   return tracker_copy(geometry, rnti, max_rnti, true);
 }
 
-/* nr_pdcch_uss_tracker_peek: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3068, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.h:45.
- */
 int nr_pdcch_uss_tracker_peek(const nr_pdcch_uss_geometry_t *geometry, uint16_t *rnti, int max_rnti)
 {
   return tracker_copy(geometry, rnti, max_rnti, false);
 }
 
 /* Shutdown only: producers have already joined. Do not start a lazy worker. */
-/* nr_pdcch_uss_tracker_stop: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: executables/nr-uesoftmodem.c:741, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.h:50.
- */
 void nr_pdcch_uss_tracker_stop(void)
 {
   if (!g_thread_started)

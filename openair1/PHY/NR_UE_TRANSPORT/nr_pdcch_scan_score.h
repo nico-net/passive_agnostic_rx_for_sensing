@@ -8,11 +8,6 @@
 
 /* QPSK amplitude consistency. Integer accumulation is exact for the PDCCH
  * maximum E; conversion to double happens once, as in the scalar reference. */
-/* nr_pdcch_scan_score_scalar_sum: TODO(doc).
- *   How it works: TODO(doc).
- *   ISAC_* flags read: none.
- *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_scan_score.h:24, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_scan_score.h:29, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_scan_score.h:59, openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_scan_score.h:69.
- */
 static inline double nr_pdcch_scan_score_scalar_sum(const int16_t *llr, int n, int64_t *abs_sum)
 {
   int64_t a = 0, b = 0;
