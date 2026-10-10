@@ -669,6 +669,164 @@ static _Thread_local bool t_discovered_attempted;
 static _Thread_local bool t_discovered_prescreen_passed; /* ISAC_PDCCH_DWELL_ADAPTIVE: a candidate of this dwell pass cleared the prescreen */
 static _Thread_local int t_candidate_share; /* zero = legacy per-pass budget */
 
+/* ---- ACQ-NIGHT: calibrated amplitude-consistency prescreen for the discovered-CORESET dwell, diagnostics, sparse-traffic simulation ----
+ * Why: the dwell pass (t_discovered_token != 0) skipped the T26b known-prescreen and, after CSS0 autoconf zeroes the energy gate (g_cfg.energy_adapt_factor = 0),
+ * every candidate passed, so ISAC_PDCCH_DWELL_ADAPTIVE counted every occasion (4000 of 4000) and a quiet cell still rejected the correct geometry.
+ * ISAC_PDCCH_DWELL_PRESCREEN=1: in the dwell pass only, a candidate counts as "prescreen-passing" for ISAC_PDCCH_DWELL_ADAPTIVE only if its equalised soft bits have amplitude-consistency score
+ *   (sum|x|)^2 / (E sum x^2) >= 2/pi + z * 0.339 / sqrt(E) (E = 108 L real values; empty CCEs score far below the Gaussian-noise mean 2/pi because the equalised noise is heavy tailed), or if a DCI passed CRC.
+ *   Every candidate is still decoded exactly as before, so the gate cannot lose a DCI: it only decides which occasions count toward the 4000 rule.
+ *   z = ISAC_PDCCH_DWELL_PRESCREEN_Z (default NR_PDCCH_DWELL_PS_Z_DEFAULT, calibrated in docs/superpowers/reports/csd/ACQNIGHT.md).
+ * ISAC_PDCCH_PRESCREEN_DIAG=1 (diagnostic): all rejecting gates of the candidate loop are disabled and per-candidate statistics (score, energy/floor, DM-RS correlation) are histogrammed per AL for all candidates and for candidates that later pass CRC with a known RNTI
+ *   (PSDIAG lines; per dwell token and cumulative for the bank passes).
+ * ISAC_PDCCH_SIM_SPARSE=N (test only): in dedicated passes (cfg->discovered_coreset) the received PDCCH OFDM symbol of every slot with abs_slot % N != 0 is replaced by Gaussian noise at the empty-CCE level, i.e. an almost silent cell (only 1 slot in N carries traffic). */
+#define NR_PDCCH_DWELL_PS_Z_DEFAULT 3.09
+static bool dwell_prescreen_enabled(void)
+{
+  static _Atomic int s_v = -1;
+  int v = atomic_load_explicit(&s_v, memory_order_relaxed);
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDCCH_DWELL_PRESCREEN");
+    v = (e && atoi(e) != 0) ? 1 : 0;
+    atomic_store_explicit(&s_v, v, memory_order_relaxed);
+  }
+  return v == 1;
+}
+static double dwell_prescreen_z(void)
+{
+  static double s_z = -1.0; /* idempotent init: benign race */
+  if (s_z < 0.0) {
+    const char *e = getenv("ISAC_PDCCH_DWELL_PRESCREEN_Z");
+    s_z = (e && atof(e) > 0.0) ? atof(e) : NR_PDCCH_DWELL_PS_Z_DEFAULT;
+  }
+  return s_z;
+}
+/* dwell_prescreen_threshold: score threshold for a candidate of E real soft-bit values. Caller: run_occasion_one() candidate loop. */
+static double dwell_prescreen_threshold(int E)
+{
+  return 2.0 / M_PI + dwell_prescreen_z() * 0.339 / sqrt((double)E);
+}
+static bool prescreen_diag_enabled(void)
+{
+  static _Atomic int s_v = -1;
+  int v = atomic_load_explicit(&s_v, memory_order_relaxed);
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDCCH_PRESCREEN_DIAG");
+    v = (e && atoi(e) != 0) ? 1 : 0;
+    atomic_store_explicit(&s_v, v, memory_order_relaxed);
+  }
+  return v == 1;
+}
+static int sim_sparse_period(void)
+{
+  static _Atomic int s_v = -1;
+  int v = atomic_load_explicit(&s_v, memory_order_relaxed);
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDCCH_SIM_SPARSE");
+    v = (e && atoi(e) > 1) ? atoi(e) : 0;
+    atomic_store_explicit(&s_v, v, memory_order_relaxed);
+  }
+  return v;
+}
+/* sim_sparse_blank_symbol: replaces one received OFDM symbol (size complex bins, after the FFT) by complex Gaussian noise whose power is the median bin power / ln 2
+ *   (the exponential-distribution median), i.e. the level of the many empty CCEs of this symbol; deterministic in seed. Everything downstream (DM-RS channel estimation, equalisation, decode) then sees a silent PDCCH.
+ *   Caller: run_occasion_one() symbol loop (ISAC_PDCCH_SIM_SPARSE, dedicated passes only). */
+static int sim_cmp_u64(const void *a, const void *b)
+{
+  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+  return x < y ? -1 : x > y;
+}
+static void sim_sparse_blank_symbol(c16_t *x, int size, uint64_t seed)
+{
+  uint64_t *p = malloc(sizeof(uint64_t) * (size_t)size);
+  if (!p) return;
+  int n = 0;
+  for (int i = 0; i < size; i++) {
+    const uint64_t pw = (uint64_t)((int64_t)x[i].r * x[i].r) + (uint64_t)((int64_t)x[i].i * x[i].i);
+    if (pw) p[n++] = pw;
+  }
+  if (n < 16) { free(p); return; }
+  qsort(p, (size_t)n, sizeof(uint64_t), sim_cmp_u64);
+  const double sigma = sqrt((double)p[n / 2] / M_LN2 / 2.0); /* per real component */
+  free(p);
+  uint64_t st = seed * UINT64_C(0x9E3779B97F4A7C15) + UINT64_C(0x1234567);
+  for (int i = 0; i < size; i++) {
+    double g[2];
+    for (int k = 0; k < 2; k++) {
+      double acc = -6.0; /* Irwin-Hall(12) - 6 ~ N(0,1) */
+      for (int j = 0; j < 12; j++) {
+        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+        acc += (double)(st >> 11) * (1.0 / 9007199254740992.0);
+      }
+      g[k] = acc * sigma;
+    }
+    x[i].r = (int16_t)lrint(g[0]);
+    x[i].i = (int16_t)lrint(g[1]);
+  }
+}
+
+/* PSDIAG histograms. metric 0 = amplitude-consistency score, 1 = mean_abs / energy floor, 2 = DM-RS correlation score.
+ * Context: 0 = bank/other passes (cumulative), 1 = current discovered dwell (dumped and reset when the dwell token changes). */
+#define PSD_BINS 200
+#define PSD_NMET 3
+typedef struct {
+  uint64_t cnt[2][4][PSD_NMET][PSD_BINS + 1]; /* [kind 0=all 1=ok][AL index 0..3][metric][bin], last bin = overflow */
+  uint64_t n[2][4];
+} psd_hist_t;
+static const double kPsdLo[PSD_NMET] = {0.4, 0.0, -0.5};
+static const double kPsdStep[PSD_NMET] = {0.005, 0.1, 0.01};
+static pthread_mutex_t g_psd_mu = PTHREAD_MUTEX_INITIALIZER;
+static psd_hist_t g_psd[2];
+static uint64_t g_psd_tok, g_psd_calls;
+static int g_psd_nid = -1, g_psd_rbo = -1, g_psd_atexit;
+static void psd_dump_locked(int ctx, const char *name, uint64_t tok, int nid, int rbo)
+{
+  for (int kind = 0; kind < 2; kind++)
+    for (int al = 0; al < 4; al++) {
+      if (!g_psd[ctx].n[kind][al]) continue;
+      for (int m = 0; m < PSD_NMET; m++) {
+        char buf[PSD_BINS * 14 + 1];
+        int len = 0;
+        for (int b = 0; b <= PSD_BINS && len < (int)sizeof(buf) - 16; b++)
+          if (g_psd[ctx].cnt[kind][al][m][b]) len += snprintf(buf + len, sizeof(buf) - len, "%d:%llu,", b, (unsigned long long)g_psd[ctx].cnt[kind][al][m][b]);
+        fprintf(stderr, "PSDIAG %s tok=%llu nid=%d rbo=%d kind=%s AL=%d metric=%d lo=%.3f step=%.4f n=%llu bins=%s\n", name,
+                (unsigned long long)tok, nid, rbo, kind ? "ok" : "all", 1 << al, m, kPsdLo[m], kPsdStep[m],
+                (unsigned long long)g_psd[ctx].n[kind][al], buf);
+      }
+    }
+}
+static void psd_atexit(void)
+{
+  pthread_mutex_lock(&g_psd_mu);
+  psd_dump_locked(0, "bank", 0, -1, -1);
+  if (g_psd_tok) psd_dump_locked(1, "dwell", g_psd_tok, g_psd_nid, g_psd_rbo);
+  pthread_mutex_unlock(&g_psd_mu);
+}
+/* psd_note: records one candidate (kind 0 = every candidate seen, 1 = candidate that passed CRC with a known RNTI). tok = discovered dwell token (0 = not a dwell pass).
+ *   Callers: run_occasion_one() candidate loop (kind 0) and its CRC-OK result loops (kind 1); ISAC_PDCCH_PRESCREEN_DIAG only. */
+static void psd_note(uint64_t tok, int nid, int rbo, int L, int kind, const double v[PSD_NMET])
+{
+  const int al = (L == 1) ? 0 : (L == 2) ? 1 : (L == 4) ? 2 : 3;
+  pthread_mutex_lock(&g_psd_mu);
+  if (!g_psd_atexit) { g_psd_atexit = 1; atexit(psd_atexit); }
+  if (tok && tok != g_psd_tok) {
+    if (g_psd_tok) psd_dump_locked(1, "dwell", g_psd_tok, g_psd_nid, g_psd_rbo);
+    memset(&g_psd[1], 0, sizeof(g_psd[1]));
+    g_psd_tok = tok; g_psd_nid = nid; g_psd_rbo = rbo;
+  }
+  psd_hist_t *h = &g_psd[tok ? 1 : 0];
+  for (int m = 0; m < PSD_NMET; m++) {
+    uint64_t vb; memcpy(&vb, &v[m], sizeof vb);
+    if (((vb >> 52) & 0x7ff) == 0x7ff) continue; /* NaN / inf (bit test: robust under -ffast-math) */
+    int b = (int)floor((v[m] - kPsdLo[m]) / kPsdStep[m]);
+    if (b < 0) b = 0;
+    if (b > PSD_BINS) b = PSD_BINS;
+    h->cnt[kind][al][m][b]++;
+  }
+  h->n[kind][al]++;
+  if (!tok && kind == 0 && (++g_psd_calls % 200000) == 0) psd_dump_locked(0, "bank", 0, -1, -1);
+  pthread_mutex_unlock(&g_psd_mu);
+}
+
 /* ---- DCI 1_1 LAYOUT CONSISTENCY (stage 1 of nr_pdcch_dci11_layout_sweep) ---------------------
  * The configured field layout is a set of ASSUMPTIONS. A wrong one still yields CRC-valid DCIs
  * with plausible-looking allocations -- the RNTI comes from the CRC and not the payload, and the
@@ -3771,6 +3929,9 @@ typedef struct {
   bool         ok;             // OUTPUT
   bool         audit_rescued;  // offline score audit found an exact CRC below its threshold
   double       audit_score;
+  float        ps_score, ps_ratio, ps_dmrs; /* ACQ-NIGHT PSDIAG: prescreen statistics of this candidate (ISAC_PDCCH_PRESCREEN_DIAG) */
+  uint64_t     ps_tok;         /* discovered dwell token of the pass that built the task */
+  int          ps_nid, ps_rbo;
   int8_t       bwp_entry;      // passive BWP entry this length belongs to (0 = the configured BWP)
   uint8_t      bwp_probe;      // 1 = raw decode only: BWP discovery / DM-RS scoring probe
   uint8_t      open_rnti;      // 1 = open RNTI range at a known length: finds UEs not yet resolved
@@ -3778,6 +3939,14 @@ typedef struct {
   int8_t       lookahead_lane; // which lane; valid only when is_lookahead
   task_ans_t  *ans;
 } nr_pdcch_blind_cand_task_t;
+
+/* psd_note_ok: PSDIAG "ok" histogram entry for a candidate task that passed CRC. Callers: the DL result loops of run_occasion_one() (ISAC_PDCCH_PRESCREEN_DIAG only). */
+static void psd_note_ok(const nr_pdcch_blind_cand_task_t *t)
+{
+  if (!prescreen_diag_enabled()) return;
+  const double pv[PSD_NMET] = {t->ps_score, t->ps_ratio, t->ps_dmrs};
+  psd_note(t->ps_tok, t->ps_nid, t->ps_rbo, t->L, 1, pv);
+}
 
 /* ---- Passive DL BWP tracking (nr_passive_bwp.h). ISAC_BWP_TRACK=1, or on under V2. The RT thread
  * registers entries and tracks RNTIs; decode consumers resolve (size, start) from the DM-RS, so every
@@ -5469,6 +5638,14 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         t_fk.size = fp->ofdm_symbol_size; t_fk.fo = fo_key; t_fk.src = ue->common_vars.rxdata; t_fk.valid = ok;
       }
     }
+    if (sim_sparse_period() && cfg->discovered_coreset && (abs_slot % (uint32_t)sim_sparse_period()) != 0) {
+      /* ISAC_PDCCH_SIM_SPARSE (test only): silent slot, the PDCCH symbol of every antenna is noise at the empty-CCE level */
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+        sim_sparse_blank_symbol(&rxdataF[ant][symbol * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                ((uint64_t)abs_slot << 8) ^ ((uint64_t)symbol << 4) ^ (uint64_t)ant);
+        memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+      }
+    }
     if (!llrc_hit)
       nr_pdcch_generate_llr(ue, proc, symbol, &local_phy_data, llr_size_symbol, num_monitoring_occ,
                            rel15->coreset.duration, rxdataF_symb, pdcch_llr);
@@ -5661,7 +5838,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   /* Keep the measurement grid available after extent verification while UL length is unresolved.
    * The regular candidate list remains exhaustive; only the UL length sweep uses its top candidate. */
   const bool build_rank_grid = (blind_dmrs_rank_mode() != 0 && (rank_discovery || scan_01))
-                               || screen_audit_enabled() || screen_dmrs_min() > 0.0;
+                               || screen_audit_enabled() || screen_dmrs_min() > 0.0 || prescreen_diag_enabled();
   static __thread uint64_t rank_visit;
   static __thread uint64_t rank_lane_visit[NR_PDCCH_LOOKAHEAD_MAX];
   if (build_rank_grid && nr_pdcch_dmrs_rank_grid(&rank_grid, rxdataF[0], fp->ofdm_symbol_size,
@@ -6691,6 +6868,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       // like "no energy", which is indistinguishable from "no measurement". Same trap as
       // FULLCRC living downstream of the gate. Cost of always computing it is a sum over 108-216
       // REs, negligible beside the polar decode it guards. ----
+      const bool ps_diag = prescreen_diag_enabled();
       const c16_t *e_raw   = &pdcch_e_rx[e_rx_cand_idx];
       double       sum_abs = 0;
       static _Atomic int s_neon_energy = -1;
@@ -6710,6 +6888,20 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       // would let it collapse -- so it is updated before any thresholding, gate enabled or not.
       uint64_t e_nseen;
       const float e_floor = nr_pdcch_blind_energy_floor_update(mean_abs, &e_nseen); /* this sample included */
+      /* ACQ-NIGHT: amplitude-consistency score (dwell prescreen / diagnostics) and DM-RS correlation (diagnostics) */
+      const bool ps_dwell = t_discovered_token && dwell_prescreen_enabled();
+      double ps_score = -1.0, ps_dmrs = NAN;
+      if (ps_dwell || ps_diag) {
+        ps_score = joint_anon_score((const int16_t *)&pdcch_e_rx[e_rx_cand_idx], n_re_cand * 2);
+        if (ps_diag && rank_grid.n_rb > 0)
+          ps_dmrs = nr_pdcch_dmrs_candidate_score(&rank_grid, rel15->BWPStart + cset_start + rel15->coreset.rb_offset, n_rb,
+                                                  rel15->coreset.RegBundleSize, rel15->coreset.InterleaverSize,
+                                                  rel15->coreset.ShiftIndex, rel15->CCE[c], L);
+      }
+      if (ps_diag && cfg->discovered_coreset) {
+        const double pv[PSD_NMET] = {ps_score, e_floor > 0.0f ? (double)(mean_abs / e_floor) : NAN, ps_dmrs};
+        psd_note(t_discovered_token, cfg->coreset_pdcch_dmrs_scrambling_id, rel15->coreset.rb_offset, L, 0, pv);
+      }
 
       /* ENERGYPROBE (ISAC_PDCCH_ENERGY=1): strongest candidate of this occasion PER AGGREGATION
        * LEVEL, as a ratio to the measured noise floor. Per-AL because that is the open question on
@@ -6754,7 +6946,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         } else {
           thresh = cfg->energy_min;
         }
-        if (mean_abs < thresh) {
+        if (mean_abs < thresh && !ps_diag) {
           e_rx_cand_idx += n_re_cand;
           NR_BLIND_CTR_INC(g_held_energy);
           continue;
@@ -6803,6 +6995,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             }
           }
         }
+        if (ps_diag) rejected = false; /* diagnostics measure every candidate, nothing is dropped */
         if (rejected) {
           e_rx_cand_idx += n_re_cand;
           NR_BLIND_CTR_INC(g_held_energy);
@@ -6812,7 +7005,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       // ---- Gate 0 (DM-RS coherence, see the setup block above this loop): survivors of the raw
       // energy gate still get checked against the ACTUAL PDCCH DM-RS sequence before a polar decode
       // is attempted for ANY UE or length at this candidate. ----
-      if (dmrs_gate_active) {
+      if (dmrs_gate_active && !ps_diag) {
         const int ai = (L == 1) ? 0 : (L == 2) ? 1 : (L == 4) ? 2 : (L == 8) ? 3 : 4;
         if (isfinite(cand_al_thresh[ai]) && cand_dmrs_score[c] < cand_al_thresh[ai]) {
           e_rx_cand_idx += n_re_cand;
@@ -6822,7 +7015,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       }
 
       /* This candidate cleared the energy / known-prescreen / DM-RS gates: the occasion counts for the adaptive dwell. */
-      if (t_discovered_token) t_discovered_prescreen_passed = true;
+      /* ISAC_PDCCH_DWELL_PRESCREEN: the candidate is still decoded (no DCI is ever lost), but it only counts as prescreen-passing when its soft bits are
+       * amplitude-consistent (a real PDCCH); empty CCEs and noise do not. A CRC-OK DCI always counts (psd/observe sites below). */
+      if (t_discovered_token && (!ps_dwell || ps_score >= dwell_prescreen_threshold(n_re_cand * 2))) t_discovered_prescreen_passed = true;
 
       /* TEMPORARY DIAGNOSTIC (2026-08-04): separate "channel estimation/equalisation is wrong" from
        * "descrambling/decode is wrong". At this point pdcch_e_rx holds the EQUALISED symbols for this
@@ -6896,6 +7091,12 @@ constdiag_done:;
           .dl_auto             = cfg->dl_full_auto != 0,
           .audit_rescued       = screen_rescued[c],
           .audit_score         = shared_screen ? shared_screen_score[c] : -1.0,
+          .ps_score            = (float)ps_score,
+          .ps_ratio            = e_floor > 0.0f ? mean_abs / e_floor : 0.0f,
+          .ps_dmrs             = (float)ps_dmrs,
+          .ps_tok              = t_discovered_token,
+          .ps_nid              = cfg->coreset_pdcch_dmrs_scrambling_id,
+          .ps_rbo              = rel15->coreset.rb_offset,
       };
       if (scan_11 && !cfg->dl_full_auto
           && nof_tasks < cand_task_cap) {
@@ -7993,6 +8194,7 @@ constdiag_done:;
       if (!cand_task[ti].ok || (cfg->autodiscover && !g_length_found))
         continue;
       const nr_pdcch_blind_raw_result_t *raw = &cand_task[ti].dl_raw;
+      if (!cand_task[ti].open_rnti) psd_note_ok(&cand_task[ti]); /* exact known-RNTI task with CRC OK = a real DCI */
       if (cand_task[ti].open_rnti) { /* resolved UEs are decoded by their own exact task */
         bool known = false;
         for (int ri = 0; ri < n_dl_ready && !known; ++ri) known = dl_ready_rnti[ri] == raw->rnti;
@@ -8014,6 +8216,7 @@ constdiag_done:;
                                        nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
       if (!t_discovered_token && accept_dup(abs_slot, raw->rnti, 0))
         continue;
+      if (t_discovered_token) t_discovered_prescreen_passed = true; /* CRC-OK DCI = fresh evidence */
       if (t_discovered_token)
         nr_pdcch_discovered_observe(t_discovered_token, raw->rnti,
             t_discovered_slot,
@@ -8659,6 +8862,8 @@ constdiag_done:;
     // own real DLSCH config. ----
     /* Accepted DCI may still be discovery evidence. Do not emit PDSCH/CFR from
      * unverified geometry or silently use manual interpretation while full-auto is waiting. */
+    if (!cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C) psd_note_ok(&cand_task[ti]);
+    if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C) t_discovered_prescreen_passed = true;
     if (t_discovered_token && !cand_task[ti].ul_scan && out.rnti_class == NR_BLIND_RNTI_CLASS_C)
       nr_pdcch_discovered_observe(t_discovered_token, out.rnti,
           t_discovered_slot,
