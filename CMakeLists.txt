@@ -1014,6 +1014,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_record.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c
@@ -2473,6 +2474,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_dlsch_fixed_point PRIVATE nr_phy_common UTIL GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_dlsch_fixed_point)
   add_test(NAME test_dlsch_fixed_point COMMAND ./test_dlsch_fixed_point)
+
+  # GPU-DEMOD S1: scalar models of the demodulation primitives vs the real CPU functions (host only)
+  add_executable(test_nr_pdsch_gpu_demod ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_demod_test.cc)
+  target_include_directories(test_nr_pdsch_gpu_demod PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_gpu_demod PRIVATE nr_phy_common UTIL)
+  add_dependencies(tests test_nr_pdsch_gpu_demod)
+  add_test(NAME test_nr_pdsch_gpu_demod COMMAND ./test_nr_pdsch_gpu_demod)
 
   add_executable(test_nr_isac_ssb_source ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/nr_isac_ssb_source_test.cc)
   target_include_directories(test_nr_isac_ssb_source PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)

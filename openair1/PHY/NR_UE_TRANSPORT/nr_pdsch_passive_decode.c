@@ -1,4 +1,5 @@
 #include "nr_pdsch_gpu_exact.h"
+#include "nr_pdsch_gpu_demod_host.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
@@ -2863,13 +2864,26 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       return out->status;
     }
   }
+  uint32_t gch_nv[14][4], gch_nva[14][4][NR_DL_CHEST_MAX_ANT]; /* GPU-DEMOD stage 2 (ISAC_PDSCH_GPU_EXACT_CHEST) */
+  const int gseg = seg_path ? nr_pdsch_gpu_chest_grant(ue, proc, dlsch_config, freq_alloc, seg, nseg, cw->Nl, dmrs_full, pdsch_est_size,
+                                                       pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, chest_pdp_diag_on(), gch_nv, gch_nva) : -1;
+  if (gseg == 0) { /* what the loop below leaves in its locals */
+    chest_alloc = set_bitmap_from_start_size(seg[nseg - 1].prb_start, seg[nseg - 1].n_prb);
+    chest_cfg.start_rb = seg[nseg - 1].prb_start;
+    chest_cfg.number_rbs = seg[nseg - 1].n_prb;
+    chest_cfg.resource_alloc = 1;
+  }
   for (int m = 0; seg_path && m < fp->symbols_per_slot; m++) { /* K32: every DM-RS symbol of the slot */
     if (!((dmrs_full >> m) & 1))
       continue;
     if (dmrs_first < 0)
       dmrs_first = m;
     dmrs_last = m;
-    for (int nl = 0; nl < cw->Nl; nl++) {
+    for (int nl = 0; nl < cw->Nl && gseg == 0; nl++) {
+      nvar += gch_nv[m][nl];
+      memcpy(nr_dl_chest_nvar_ant, gch_nva[m][nl], sizeof(gch_nva[m][nl]));
+    }
+    for (int nl = 0; nl < cw->Nl && gseg != 0; nl++) {
       uint64_t nv = 0;
       uint64_t nv_ant[NR_DL_CHEST_MAX_ANT] = {0}; /* per-branch, width-weighted: see the publication below */
       for (int s = 0; s < nseg; s++) {
@@ -2905,6 +2919,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     n_dmrs_sym++;
   }
   nr_dl_chest_only_ant = chest_only; /* P39: non-segmented path only; reset after the loop */
+  const int gch = (!seg_path && !chest_hit && chest_only < 0) ? nr_pdsch_gpu_chest_grant(ue, proc, &chest_cfg, &chest_alloc, NULL, 0, cw->Nl,
+      dmrs_full, pdsch_est_size, pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, chest_pdp_diag_on(), gch_nv, gch_nva) : -1;
   for (int m = 0; !seg_path && !chest_hit && m < fp->symbols_per_slot; m++) { /* K32: every DM-RS symbol of the slot */
     if (!((dmrs_full >> m) & 1)) {
       continue;
@@ -2916,6 +2932,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
       nr_dl_chest_diag_request = chest_pdp_diag_on(); // consumer thread only: BRDELAY/PDP diagnostics
+      if (gch == 0) { nvar_tmp = gch_nv[m][nl]; memcpy(nr_dl_chest_nvar_ant, gch_nva[m][nl], sizeof(gch_nva[m][nl])); } else
       nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
@@ -4048,7 +4065,12 @@ gpu_llr_ready:;
     if (s_opr < 0) s_opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
     nr_pdsch_evm_acc.armed = (s_evmg || s_opr || decode_diag_on()) && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
   }
-  for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready; m++) {
+  const int gdem = (gpu_llr || gw_ready || sfo_eps != 0.0) ? -1 /* GPU-DEMOD (ISAC_PDSCH_GPU_EXACT_DEMOD): 0 = demodulated */
+      : nr_pdsch_gpu_demod_grant(&(nr_pdsch_gpu_demod_call_t){ue, proc, &dlsch, seg_path ? &fa_virt : freq_alloc, dlsch_config, &harq,
+          first_symbol_with_data, probe_last_sym, pdsch_est_size, (int32_t *)pdsch_dl_ch_estimates, llr, rx_llr_buf_sz, dl_valid_re,
+          (c16_t *)rxdataF_dem, &log2_maxh, rx_size_symbol, (c16_t *)rxdataF_comp, (c16_t *)dl_ch_mag, (c16_t *)dl_ch_magb,
+          (c16_t *)dl_ch_magr, (c16_t *)ptrs_phase_per_slot, (int32_t *)ptrs_re_per_slot, nvar, &scope_req, rho_dl_p, ssb_unav ? &ssb.dem : &no_ssb});
+  for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready && gdem != 0; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)
       continue; /* probe: past the horizon, LLR count stays 0 for this symbol */
     if (sfo_eps != 0.0) {

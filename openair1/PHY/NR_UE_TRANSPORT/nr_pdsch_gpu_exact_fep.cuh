@@ -304,6 +304,7 @@ __global__ void __launch_bounds__(THREADS) k_fep_exact(const ExactIO io, int ncp
 static const int DELAY_MAX_ROWS = 16;
 struct DelayIO {
   const short2 *ls[DELAY_MAX_ROWS];
+  const short2 *base; /* GPU-DEMOD chest: non-null = row r at base + r * N (any number of rows, one launch) */
 };
 __global__ void __launch_bounds__(THREADS) k_delay_exact(DelayIO io, const uint16_t *__restrict__ perm,
                                                          const short *__restrict__ tw1024, const short *__restrict__ tw4096,
@@ -313,7 +314,7 @@ __global__ void __launch_bounds__(THREADS) k_delay_exact(DelayIO io, const uint1
   __shared__ int peak_l1, shift;
   __shared__ unsigned long long sum, best;
   const int t = threadIdx.x;
-  const short2 *ls = io.ls[blockIdx.x];
+  const short2 *ls = io.base ? io.base + (size_t)blockIdx.x * N : io.ls[blockIdx.x];
   if (t == 0) { peak_l1 = 0; sum = 0; best = 0; }
   __syncthreads();
   int pk = 0;

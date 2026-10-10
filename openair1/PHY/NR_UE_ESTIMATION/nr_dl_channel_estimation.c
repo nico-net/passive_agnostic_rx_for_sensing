@@ -1952,3 +1952,268 @@ void nr_pdsch_ptrs_processing(int nbRx,
     }// last symbol check
   } // Antenna loop
 }//main function
+
+/* ---- GPU-DEMOD stage 2: ISAC_PDSCH_GPU_EXACT_CHEST=1 (default off) ----------------------------------------------
+ * The passive decoder's per-(DM-RS symbol, layer) nr_pdsch_channel_estimation() calls of one grant as ONE GPU batch
+ * (nr_pdsch_gpu_chest.h): same pilots (computed here exactly as above), LS, bit-exact delay, FIR, inverse delay and
+ * per-antenna noise. Only the default path is taken (DMRS_TYPE1/2_linear_interp, contiguous allocation, every
+ * antenna, GPU delay on, no PDP diagnostic / delay share / DFT window / GPU5 stage hooks); else -1 and the caller
+ * runs the CPU estimator. ISAC_PDSCH_GPU_EXACT_CHEST_CHECK=1 re-runs the CPU estimator on every grant (N: every
+ * N-th), compares every estimate row and noise value, and disables the GPU path on the first difference. */
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_chest.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
+nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void) __attribute__((weak));
+static _Atomic int g_gch_on = -1;
+static int g_gch_check;
+static _Atomic uint64_t g_gch_calls, g_gch_ok, g_gch_bad, g_gch_ns, g_gch_refused;
+
+/* segs != NULL: the passive decoder's PRG/VRB segmented path. Each segment is estimated on its own (as the CPU
+ * loop does, chest_alloc = that segment) into a scratch row, then the data-ordered row is assembled exactly as
+ * nr_pdsch_passive_decode.c does (zeroed row, segment s at data_index * 12), and nvar is the width-weighted mean. */
+int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
+                             const UE_nr_rxtx_proc_t *proc,
+                             const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
+                             const freq_alloc_bitmap_t *freq_alloc,
+                             const nr_prb_seg_t *segs,
+                             int nseg,
+                             int Nl,
+                             uint16_t dmrs_mask,
+                             uint32_t pdsch_est_size,
+                             int32_t dl_ch_estimates[][pdsch_est_size],
+                             int rxdataFsize,
+                             c16_t rxdataF[][rxdataFsize],
+                             int diag,
+                             uint32_t nvar_out[14][4],
+                             uint32_t nvar_ant_out[14][4][NR_DL_CHEST_MAX_ANT])
+{
+  if (atomic_load_explicit(&g_gch_on, memory_order_relaxed) < 0) {
+    const char *e = getenv("ISAC_PDSCH_GPU_EXACT_CHEST"), *c = getenv("ISAC_PDSCH_GPU_EXACT_CHEST_CHECK");
+    g_gch_check = c ? atoi(c) : 0;
+    const int on = e && atoi(e) == 1 && nr_pdsch_gpu_exact_chest_entry && nr_pdsch_gpu_exact_chest_entry();
+    atomic_store(&g_gch_on, on);
+    if (on)
+      LOG_A(PHY, "SENSING: GPU_EXACT_CHEST enabled: bit-exact passive PDSCH channel estimation on the GPU; check=%d\n", g_gch_check);
+  }
+  if (!atomic_load_explicit(&g_gch_on, memory_order_relaxed))
+    return -1;
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int config_type = dlsch->dmrsConfigType;
+  if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) { /* the estimator's own lazy switch */
+    const char *e = getenv("ISAC_CHEST_GPU_DELAY"), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
+    g_chest_gpu_delay_check = c ? atoi(c) : 64;
+    atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
+  }
+  /* the estimator calls this replaces: one per (DM-RS symbol, layer, segment) */
+  nr_prb_seg_t one = {.prb_start = freq_alloc->first_rb, .n_prb = freq_alloc->num_rbs, .data_index = 0};
+  const nr_prb_seg_t *sg = segs ? segs : &one;
+  const int ns = segs ? nseg : 1;
+  const int nrx = fp->nb_antennas_rx;
+  int nrows = 0;
+  for (int m = 0; m < fp->symbols_per_slot && m < 14; m++)
+    nrows += ((dmrs_mask >> m) & 1) * Nl * nrx * ns;
+  static int s_stage_dump = -1; /* GPU5 stage records (nr_pdsch_gpu_record.c) need the CPU estimator */
+  if (s_stage_dump < 0)
+    s_stage_dump = getenv("ISAC_PDSCH_GPU_STAGE_DUMP") != NULL;
+  int contiguous = freq_alloc->num_rbs == freq_alloc->last_rb - freq_alloc->first_rb + 1 && freq_alloc->num_rbs >= 1;
+  for (int rb = freq_alloc->first_rb; !segs && contiguous && rb <= freq_alloc->last_rb; rb++)
+    contiguous = (freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 1;
+  const int why = atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) != 1 ? 1
+                  : !IS_PASSIVE_RX_MODE(get_softmodem_params()) || ue->chest_freq != 0 ? 2
+                  : (config_type != NFAPI_NR_DMRS_TYPE1 && config_type != NFAPI_NR_DMRS_TYPE2) ? 3
+                  : fp->ofdm_symbol_size != 4096 || nrx > 4 || Nl > 4 || ns < 1 ? 4
+                  : diag ? 5
+                  : chest_delay_share() || getenv("ISAC_CHEST_DFT_WIN") || s_stage_dump ? 6
+                  : nr_dl_chest_only_ant >= 0 ? 7
+                  : nrows < 1 || nrows > NR_GPU_CHEST_MAX_ROWS ? 8
+                  : !segs && !contiguous ? 9 : 0;
+  if (why) {
+    static _Atomic int logged;
+    if (!(atomic_fetch_or(&logged, 1 << why) & (1 << why)))
+      LOG_A(PHY, "SENSING: GPU_EXACT_CHEST refused (reason %d: 1 gpu delay off, 2 mode, 3 dmrs type, 4 size, 5 pdp diag, "
+                 "6 share/dft/dump, 7 single branch, 8 rows, 9 non-contiguous)\n", why);
+    atomic_fetch_add_explicit(&g_gch_refused, 1, memory_order_relaxed);
+    return -1;
+  }
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  const int slot = proc->nr_slot_rx;
+  int max_end = 0;
+  for (int s = 0; s < ns; s++) {
+    const int ro = sg[s].prb_start + (dlsch->refPoint ? 0 : dlsch->BWPStart);
+    max_end = max(max_end, sg[s].n_prb + ro);
+  }
+  if (max_end * (config_type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4) > 3280)
+    return -1;
+  static __thread c16_t (*pil)[3280];
+  static __thread c16_t *scratch; /* segmented rows */
+  if (!pil && !(pil = aligned_alloc(64, sizeof(c16_t) * 3280 * 16)))
+    return -1;
+  if (segs && !scratch && !(scratch = aligned_alloc(64, sizeof(c16_t) * 4096 * NR_GPU_CHEST_MAX_ROWS)))
+    return -1;
+  static __thread nr_gpu_chest_job_t job;
+  nr_gpu_chest_job_t *j = &job;
+  j->type = config_type == NFAPI_NR_DMRS_TYPE1 ? 1 : 2;
+  j->N = fp->ofdm_symbol_size;
+  j->delay_table = (const int16_t *)fp->delay_table[0];
+  j->dt_stride = NR_MAX_OFDM_SYMBOL_SIZE;
+  j->max_delay_comp = MAX_DELAY_COMP;
+  memcpy(j->filt[0], filt16_ul_p0, sizeof(j->filt[0]));
+  memcpy(j->filt[1], filt16_ul_p1p2, sizeof(j->filt[1]));
+  memcpy(j->filt[2], filt16_ul_middle, sizeof(j->filt[2]));
+  memcpy(j->filt[3], filt16_ul_last, sizeof(j->filt[3]));
+  int r = 0, np = 0, sym_of[16], nl_of[16];
+  for (int m = 0; m < fp->symbols_per_slot && m < 14; m++) {
+    if (!((dmrs_mask >> m) & 1))
+      continue;
+    for (int nl = 0; nl < Nl; nl++) {
+      const int p = get_dmrs_port(nl, dlsch->dmrs_ports);
+      const int8_t delta = get_delta(p, config_type);
+      const float beta_dmrs_pdsch = get_beta_dmrs(dlsch->n_dmrs_cdm_groups, config_type == NFAPI_NR_DMRS_TYPE2);
+      const int16_t dmrs_scaling = (int16_t)((1 / beta_dmrs_pdsch) * (1 << 14));
+      const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, dlsch->dlDmrsScramblingId, dlsch->nscid, slot, m);
+      nr_pdsch_dmrs_rx(fp->Ncp, gold, pil[np], 1000 + p, 0, max_end, config_type, dmrs_scaling);
+      sym_of[np] = m;
+      nl_of[np] = nl;
+      for (int s = 0; s < ns; s++) {
+        const int rb_offset = sg[s].prb_start + (dlsch->refPoint ? 0 : dlsch->BWPStart);
+        const int bwp_start_subcarrier = fp->first_carrier_offset + (dlsch->BWPStart + sg[s].prb_start) * 12;
+        for (int a = 0; a < nrx; a++, r++) {
+          j->rows[r].rxF = (const int16_t *)&rxdataF[a][fp->ofdm_symbol_size * m + delta];
+          j->rows[r].pil = (const int16_t *)&pil[np][(config_type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4) * rb_offset];
+          j->rows[r].out = segs ? (int16_t *)(scratch + (size_t)r * 4096) : (int16_t *)&dl_ch_estimates[nl * nrx + a][fp->ofdm_symbol_size * m];
+          j->rows[r].k0 = (unsigned short)bwp_start_subcarrier % fp->ofdm_symbol_size;
+          j->rows[r].nb_rb = sg[s].n_prb;
+        }
+      }
+      np++;
+    }
+  }
+  j->n_rows = r;
+  if (nr_pdsch_gpu_exact_chest_entry()(j) != 0) {
+    atomic_fetch_add_explicit(&g_gch_refused, 1, memory_order_relaxed);
+    return -1;
+  }
+  /* nvar as the estimator (mean over antennas with an estimate) and, segmented, as the passive loop (width-weighted) */
+  for (int k = 0; k < np; k++) {
+    uint64_t nv = 0, nv_ant[NR_DL_CHEST_MAX_ANT] = {0};
+    for (int s = 0; s < ns; s++) {
+      const uint32_t *q = &j->nvar[(k * ns + s) * nrx];
+      uint64_t acc = 0;
+      int cnt = 0;
+      for (int a = 0; a < nrx; a++)
+        if (q[a] > 0) {
+          acc += q[a];
+          cnt++;
+        }
+      const uint32_t nvar_tmp = cnt > 0 ? (uint32_t)(acc / (uint64_t)cnt) : 0;
+      if (!segs) {
+        nvar_out[sym_of[k]][nl_of[k]] = nvar_tmp;
+        for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
+          nvar_ant_out[sym_of[k]][nl_of[k]][a] = a < nrx ? q[a] : 0;
+      } else {
+        nv += (uint64_t)nvar_tmp * sg[s].n_prb;
+        for (int a = 0; a < nrx && a < NR_DL_CHEST_MAX_ANT; a++)
+          nv_ant[a] += (uint64_t)q[a] * sg[s].n_prb;
+      }
+    }
+    if (segs) {
+      nvar_out[sym_of[k]][nl_of[k]] = (uint32_t)(nv / (uint64_t)freq_alloc->num_rbs);
+      for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
+        nvar_ant_out[sym_of[k]][nl_of[k]][a] = (uint32_t)(nv_ant[a] / (uint64_t)freq_alloc->num_rbs);
+      const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+      for (int a = 0; a < nrx; a++) {
+        c16_t *row = (c16_t *)&dl_ch_estimates[nl_of[k] * nrx + a][fp->ofdm_symbol_size * sym_of[k]];
+        memset(row, 0, sizeof(c16_t) * fp->ofdm_symbol_size);
+        for (int s = 0; s < ns; s++)
+          memcpy(&row[sg[s].data_index * NR_NB_SC_PER_RB], scratch + (size_t)((k * ns + s) * nrx + a) * 4096,
+                 (size_t)sg[s].n_prb * NR_NB_SC_PER_RB * sizeof(c16_t));
+        (void)nsc;
+      }
+    }
+  }
+  const uint64_t n = atomic_fetch_add_explicit(&g_gch_calls, 1, memory_order_relaxed) + 1;
+  if (g_gch_check == 1 || (g_gch_check > 1 && n % (uint64_t)g_gch_check == 0)) {
+    /* the CPU path the caller would have run (the passive loop's own code for the segmented case) */
+    static __thread c16_t *gpu_rows, *seg_h;
+    if (!gpu_rows && !(gpu_rows = malloc(sizeof(c16_t) * 4096 * 16 * NR_MAX_NB_LAYERS)))
+      return 0;
+    if (!seg_h && !(seg_h = malloc(sizeof(c16_t) * 4 * 276 * 12)))
+      return 0;
+    for (int k = 0; k < np; k++)
+      for (int a = 0; a < nrx; a++)
+        memcpy(gpu_rows + (size_t)(k * nrx + a) * 4096, &dl_ch_estimates[nl_of[k] * nrx + a][fp->ofdm_symbol_size * sym_of[k]],
+               sizeof(c16_t) * 4096);
+    int bad = -1;
+    char why_s[200] = "";
+    const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+    for (int k = 0; k < np; k++) {
+      uint32_t nvc = 0, nvac[NR_DL_CHEST_MAX_ANT] = {0};
+      if (!segs) {
+        nr_pdsch_channel_estimation(ue, proc, dlsch, freq_alloc, nl_of[k], get_dmrs_port(nl_of[k], dlsch->dmrs_ports), sym_of[k],
+                                    pdsch_est_size, dl_ch_estimates, rxdataFsize, rxdataF, &nvc);
+        memcpy(nvac, nr_dl_chest_nvar_ant, sizeof(nvac));
+      } else {
+        fapi_nr_dl_config_dlsch_pdu_rel15_t cfg = *dlsch;
+        uint64_t nv = 0, nv_ant[NR_DL_CHEST_MAX_ANT] = {0};
+        for (int s = 0; s < ns; s++) {
+          const freq_alloc_bitmap_t fa = set_bitmap_from_start_size(sg[s].prb_start, sg[s].n_prb);
+          cfg.start_rb = sg[s].prb_start;
+          cfg.number_rbs = sg[s].n_prb;
+          cfg.resource_alloc = 1;
+          uint32_t nvar_tmp = 0;
+          nr_pdsch_channel_estimation(ue, proc, &cfg, &fa, nl_of[k], get_dmrs_port(nl_of[k], dlsch->dmrs_ports), sym_of[k],
+                                      pdsch_est_size, dl_ch_estimates, rxdataFsize, rxdataF, &nvar_tmp);
+          nv += (uint64_t)nvar_tmp * sg[s].n_prb;
+          for (int a = 0; a < nrx && a < NR_DL_CHEST_MAX_ANT; a++)
+            nv_ant[a] += (uint64_t)nr_dl_chest_nvar_ant[a] * sg[s].n_prb;
+          for (int a = 0; a < nrx; a++)
+            memcpy(&seg_h[a * nsc + sg[s].data_index * NR_NB_SC_PER_RB],
+                   &dl_ch_estimates[nl_of[k] * nrx + a][fp->ofdm_symbol_size * sym_of[k]],
+                   (size_t)sg[s].n_prb * NR_NB_SC_PER_RB * sizeof(c16_t));
+        }
+        nvc = (uint32_t)(nv / (uint64_t)freq_alloc->num_rbs);
+        for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
+          nvac[a] = (uint32_t)(nv_ant[a] / (uint64_t)freq_alloc->num_rbs);
+        for (int a = 0; a < nrx; a++) {
+          c16_t *row = (c16_t *)&dl_ch_estimates[nl_of[k] * nrx + a][fp->ofdm_symbol_size * sym_of[k]];
+          memset(row, 0, sizeof(c16_t) * fp->ofdm_symbol_size);
+          memcpy(row, &seg_h[a * nsc], (size_t)nsc * sizeof(c16_t));
+        }
+      }
+      if (bad < 0 && nvc != nvar_out[sym_of[k]][nl_of[k]]) {
+        bad = k;
+        snprintf(why_s, sizeof(why_s), "nvar sym %d layer %d gpu %u cpu %u", sym_of[k], nl_of[k], nvar_out[sym_of[k]][nl_of[k]], nvc);
+      }
+      for (int a = 0; a < nrx; a++) {
+        const c16_t *cpu = (const c16_t *)&dl_ch_estimates[nl_of[k] * nrx + a][fp->ofdm_symbol_size * sym_of[k]];
+        const c16_t *gpu = gpu_rows + (size_t)(k * nrx + a) * 4096;
+        if (bad < 0 && nvac[a] != nvar_ant_out[sym_of[k]][nl_of[k]][a]) {
+          bad = k;
+          snprintf(why_s, sizeof(why_s), "nvar_ant sym %d layer %d ant %d gpu %u cpu %u", sym_of[k], nl_of[k], a,
+                   nvar_ant_out[sym_of[k]][nl_of[k]][a], nvac[a]);
+        }
+        for (int i = 0; bad < 0 && i < 4096; i++)
+          if (cpu[i].r != gpu[i].r || cpu[i].i != gpu[i].i) {
+            bad = k;
+            snprintf(why_s, sizeof(why_s), "row sym %d layer %d ant %d re %d gpu (%d,%d) cpu (%d,%d) nseg %d", sym_of[k], nl_of[k], a, i,
+                     gpu[i].r, gpu[i].i, cpu[i].r, cpu[i].i, ns);
+          }
+      }
+      nvar_out[sym_of[k]][nl_of[k]] = nvc; /* the CPU's values stand */
+      memcpy(nvar_ant_out[sym_of[k]][nl_of[k]], nvac, sizeof(nvac));
+    }
+    atomic_fetch_add_explicit(bad < 0 ? &g_gch_ok : &g_gch_bad, 1, memory_order_relaxed);
+    if (bad >= 0) {
+      atomic_store(&g_gch_on, 0);
+      LOG_E(PHY, "SENSING: GPU_EXACT_CHEST MISMATCH rb %d+%d type %d: %s -- GPU channel estimation disabled\n", freq_alloc->first_rb,
+            freq_alloc->num_rbs, j->type, why_s);
+    }
+  }
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  atomic_fetch_add_explicit(&g_gch_ns, (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec)), memory_order_relaxed);
+  if (n == 1 || n == 10 || n == 100 || n == 1000 || n % 2000 == 0)
+    LOG_A(PHY, "SENSING: GPU_EXACT_CHEST calls=%lu check_ok=%lu check_bad=%lu refused=%lu mean=%.0f us (incl. check)\n", (unsigned long)n,
+          (unsigned long)atomic_load(&g_gch_ok), (unsigned long)atomic_load(&g_gch_bad), (unsigned long)atomic_load(&g_gch_refused),
+          atomic_load(&g_gch_ns) / 1e3 / n);
+  return 0;
+}

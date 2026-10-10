@@ -102,7 +102,10 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(nr-uesoftmodem csirs_disc_gpu)
   # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
-  add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu)
+  add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu)
+  # GPU-DEMOD: no automatic FMA contraction; the kernels spell out the CPU's (GCC's) fused operations themselves
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
   set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(pdsch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})

@@ -2,6 +2,8 @@
 /* GPU6: bit-exact GPU FEP for the passive PDSCH decoder -- see nr_pdsch_gpu_exact.h. */
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_fep.h"
+#include "nr_pdsch_gpu_demod_host.h"
+#include "nr_pdsch_gpu_chest.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
 #include <dlfcn.h>
@@ -15,6 +17,7 @@ typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, co
 static exact_fn_t g_fn;
 static void (*g_stats)(int *, uint64_t *, uint64_t *);
 static int (*g_delay_fn)(const int16_t *const *, int, int *);
+static nr_gpu_chest_fn g_chest_fn; /* GPU-DEMOD stage 2 */
 static _Atomic uint64_t g_delay_rows, g_delay_calls, g_delay_cpu, g_delay_checked, g_delay_bad;
 static _Atomic int g_on;
 static int g_check = 1;
@@ -41,6 +44,8 @@ static uint64_t now_ns(void)
  */
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
+  if (ue)
+    nr_pdsch_gpu_demod_warmup(&ue->frame_parms); /* GPU-DEMOD: independent knob, same module and warm-up point */
   const char *e = getenv("ISAC_PDSCH_GPU_EXACT_FEP");
   if (!e || atoi(e) != 1 || !ue)
     return 0;
@@ -57,6 +62,7 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
   g_fn = h ? (exact_fn_t)dlsym(h, "nr_pdsch_gpu_exact_fep2") : NULL;
   g_stats = h ? (void (*)(int *, uint64_t *, uint64_t *))dlsym(h, "nr_pdsch_gpu_exact_stats") : NULL;
   g_delay_fn = h ? (int (*)(const int16_t *const *, int, int *))dlsym(h, "nr_pdsch_gpu_exact_delay") : NULL;
+  g_chest_fn = h ? (nr_gpu_chest_fn)dlsym(h, "nr_pdsch_gpu_exact_chest") : NULL;
   const nr_gpu_fep_cfg_t cfg = {.nant = fp->nb_antennas_rx,
                                 .ofdm_symbol_size = fp->ofdm_symbol_size,
                                 .nb_prefix_samples = fp->nb_prefix_samples,
@@ -258,4 +264,10 @@ void nr_pdsch_gpu_exact_delay_note(int gpu_rows, int checked, int bad)
   }
   atomic_fetch_add_explicit(&g_delay_checked, (uint64_t)checked, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_delay_bad, (uint64_t)bad, memory_order_relaxed);
+}
+
+/* GPU-DEMOD stage 2: the module's chest entry once the exact path is on (NULL otherwise). */
+nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void)
+{
+  return atomic_load_explicit(&g_on, memory_order_relaxed) ? g_chest_fn : NULL;
 }
