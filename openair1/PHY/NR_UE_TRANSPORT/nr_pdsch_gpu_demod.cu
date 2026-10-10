@@ -416,7 +416,9 @@ __global__ void k_mmse2(const nr_gpu_demod_job_t j, const nrd_c16 *h, const Shar
   const uint32_t nre = j.nre[m];
   for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < nre; i += gridDim.x * blockDim.x) {
     dcx M[2][5];
+#pragma unroll
     for (int r = 0; r < 2; r++) {
+#pragma unroll
       for (int c = 0; c < 2; c++) {
         nrd_c16 g = {0, 0};
         for (int a = 0; a < nb; a++) {
@@ -430,37 +432,53 @@ __global__ void k_mmse2(const nr_gpu_demod_job_t j, const nrd_c16 *h, const Shar
       const nrd_c16 b = ((const nrd_c16 *)j.comp)[((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i];
       M[r][2] = dcx{(double)b.r, (double)b.i};
     }
+    /* the CPU's Gauss-Jordan for nl = 2, unrolled with static indices (no local-memory spills): k = 0 pivots between
+     * the two rows, k = 1 has a single candidate; same operations, same order */
     bool singular = false;
-    for (int k = 0; k < 2 && !singular; k++) {
-      int piv = k;
-      for (int r = k + 1; r < 2; r++)
-        if (cabs_c(M[r][k]) > cabs_c(M[piv][k]))
-          piv = r;
-      if (cabs_c(M[piv][k]) < 1e-9) {
+    {
+      const bool sw = cabs_c(M[1][0]) > cabs_c(M[0][0]);
+      if (cabs_c(sw ? M[1][0] : M[0][0]) < 1e-9)
         singular = true;
-        break;
-      }
-      if (piv != k)
-        for (int c = 0; c < 5; c++) {
-          const dcx t = M[k][c];
-          M[k][c] = M[piv][c];
-          M[piv][c] = t;
+      if (!singular) {
+        if (sw) {
+#pragma unroll
+          for (int c = 0; c < 5; c++) {
+            const dcx t = M[0][c];
+            M[0][c] = M[1][c];
+            M[1][c] = t;
+          }
         }
-      const dcx inv = divdc3(1.0, 0.0, M[k][k].r, M[k][k].i);
-      for (int c = 0; c < 5; c++)
-        M[k][c] = cmul(M[k][c], inv);
-      for (int r = 0; r < 2; r++) {
-        if (r == k)
-          continue;
-        const dcx f = M[r][k];
-        if (f.r == 0.0 && f.i == 0.0)
-          continue;
-        for (int c = 0; c < 5; c++) {
-          const dcx t = cmul(M[k][c], f);
-          M[r][c] = dcx{__dsub_rn(M[r][c].r, t.r), __dsub_rn(M[r][c].i, t.i)};
+        const dcx inv = divdc3(1.0, 0.0, M[0][0].r, M[0][0].i);
+#pragma unroll
+        for (int c = 0; c < 5; c++)
+          M[0][c] = cmul(M[0][c], inv);
+        const dcx f = M[1][0];
+        if (!(f.r == 0.0 && f.i == 0.0)) {
+#pragma unroll
+          for (int c = 0; c < 5; c++) {
+            const dcx t = cmul(M[0][c], f);
+            M[1][c] = dcx{__dsub_rn(M[1][c].r, t.r), __dsub_rn(M[1][c].i, t.i)};
+          }
+        }
+        if (cabs_c(M[1][1]) < 1e-9)
+          singular = true;
+        if (!singular) {
+          const dcx inv1 = divdc3(1.0, 0.0, M[1][1].r, M[1][1].i);
+#pragma unroll
+          for (int c = 0; c < 5; c++)
+            M[1][c] = cmul(M[1][c], inv1);
+          const dcx f1 = M[0][1];
+          if (!(f1.r == 0.0 && f1.i == 0.0)) {
+#pragma unroll
+            for (int c = 0; c < 5; c++) {
+              const dcx t = cmul(M[1][c], f1);
+              M[0][c] = dcx{__dsub_rn(M[0][c].r, t.r), __dsub_rn(M[0][c].i, t.i)};
+            }
+          }
         }
       }
     }
+#pragma unroll
     for (int r = 0; r < 2; r++) {
       const double dinv = singular ? 0.0 : M[r][3 + r].r;
       const double w = dinv > 1e-12 ? __ddiv_rn(1.0, dinv) : 0.0;
