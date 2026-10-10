@@ -4,6 +4,7 @@
 #define NR_PDSCH_GPU_DEMOD_HOST_H
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
 
 /* Every argument the passive decoder's symbol loop hands nr_rx_pdsch(), plus the loop's own controls. */
 typedef struct {
@@ -36,4 +37,12 @@ typedef struct {
 int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp);
 /* 0: the grant is demodulated (exactly what the CPU loop would have produced); -1: the caller runs its CPU loop. */
 int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c);
+/* GPU-DEMOD stage 2 (nr_dl_channel_estimation.c): every (DM-RS symbol in dmrs_mask, layer) estimate of a grant on the
+ * GPU; nvar_out / nvar_ant_out = what each nr_pdsch_channel_estimation() call would return / publish. segs != NULL: the
+ * PRG/VRB segmented path (estimate rows assembled in data order, width-weighted nvar). 0 = done. */
+int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
+                             const freq_alloc_bitmap_t *freq_alloc, const nr_prb_seg_t *segs, int nseg, int Nl, uint16_t dmrs_mask,
+                             uint32_t pdsch_est_size,
+                             int32_t dl_ch_estimates[][pdsch_est_size], int rxdataFsize, c16_t rxdataF[][rxdataFsize], int diag,
+                             uint32_t nvar_out[14][4], uint32_t nvar_ant_out[14][4][8]);
 #endif

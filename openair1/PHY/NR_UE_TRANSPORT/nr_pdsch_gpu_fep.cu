@@ -1,6 +1,7 @@
 /* GPU FEP + DM-RS channel estimation + MMSE + LLR for the passive PDSCH decoder. See the header. */
 #define NR_GPU_FEP_NO_LOADER
 #include "nr_pdsch_gpu_fep.h"
+#include "nr_pdsch_gpu_chest.h"
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
@@ -120,6 +121,8 @@ static std::atomic<uint64_t> g_exact_late, g_exact_busy;
 static const int EXACT_CTX = 8;
 static cudaStream_t g_ctx_stream[EXACT_CTX];
 static int *g_ctx_delay[EXACT_CTX];
+static short2 *g_ctx_ls[EXACT_CTX];    /* GPU-DEMOD chest: LS rows [64][4096] */
+static int *g_ctx_cout[EXACT_CTX];     /* GPU-DEMOD chest: delay triples + nvar (staging) */
 static std::atomic<unsigned> g_ctx_busy{0};
 static std::mutex g_exact_staged_lock;
 /* ctx_acquire: claims a free bit-exact FEP context (bitmask compare-and-swap over EXACT_CTX).
@@ -662,6 +665,8 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       for (int c = 0; c < EXACT_CTX; c++) {
         CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
         CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));
+        CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_ctx_ls[c], NR_GPU_CHEST_MAX_ROWS * 4096 * sizeof(short2)));
+        CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_cout[c], 4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)));
       }
     }
     /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
@@ -1088,3 +1093,115 @@ extern "C" void nr_pdsch_gpu_exact_stats(int *direct, uint64_t *late, uint64_t *
   *busy = g_exact_busy;
 }
 extern "C" double nr_pdsch_gpu_exact_last_us(void) { return g_exact_us; }
+
+/* ---- GPU-DEMOD stage 2: bit-exact passive PDSCH channel estimation of one grant (nr_pdsch_gpu_chest.h) ------- */
+namespace nrch {
+__device__ __forceinline__ short2 mulshift(short2 a, short2 b, int s) /* c16mulShift (int arithmetic, wraps) */
+{
+  const int r = (int)((unsigned)((int)a.x * b.x) - (unsigned)((int)a.y * b.y));
+  const int i = (int)((unsigned)((int)a.x * b.y) + (unsigned)((int)a.y * b.x));
+  return make_short2((short)(r >> s), (short)(i >> s));
+}
+__device__ __forceinline__ short sat16(int v) { return (short)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
+__device__ __forceinline__ short mulhrs(short a, short b) { return (short)(((int)a * b + 0x4000) >> 15); }
+__global__ void k_ls(const nr_gpu_chest_job_t j, short2 *ls)
+{
+  const nr_gpu_chest_row_t R = j.rows[blockIdx.x];
+  short2 *o = ls + (size_t)blockIdx.x * 4096;
+  const short2 *rx = (const short2 *)R.rxF, *pil = (const short2 *)R.pil;
+  const int N = j.N, idx = 12 * R.nb_rb;
+  for (int k = threadIdx.x; k < N; k += blockDim.x) {
+    short2 v = make_short2(0, 0);
+    if (k < idx) {
+      int q, a, b;
+      if (j.type == 1) { q = k >> 2; a = R.k0 + 4 * q; b = a + 2; }
+      else { q = k / 6; a = R.k0 + 6 * q; b = a + 1; }
+      const short2 l = mulshift(pil[2 * q], rx[a % N], 15), r = mulshift(pil[2 * q + 1], rx[b % N], 15);
+      v = make_short2((short)(((int)l.x + r.x) >> 1), (short)(((int)l.y + r.y) >> 1));
+    }
+    o[k] = v;
+  }
+}
+__device__ __forceinline__ int fir_base(int p) { return p < 3 ? 0 : 4 * max(0, (p - 1) / 2 - 1); }
+__global__ void k_fir(const nr_gpu_chest_job_t j, const short2 *ls, const int *dly, unsigned *nvar)
+{
+  __shared__ unsigned long long red[256];
+  const nr_gpu_chest_row_t R = j.rows[blockIdx.x];
+  const short2 *L = ls + (size_t)blockIdx.x * 4096;
+  short2 *out = (short2 *)R.out;
+  const int N = j.N, idx = 12 * R.nb_rb, np = idx >> 1;
+  const int d = dly[3 * blockIdx.x];
+  int di = j.max_delay_comp + d, ii = j.max_delay_comp - d;
+  di = min(max(di, 0), 2 * j.max_delay_comp);
+  ii = min(max(ii, 0), 2 * j.max_delay_comp);
+  const short2 *dt = (const short2 *)j.delay_table + (size_t)di * j.dt_stride;
+  const short2 *it = (const short2 *)j.delay_table + (size_t)ii * j.dt_stride;
+  unsigned long long acc = 0;
+  for (int k = threadIdx.x; k < N; k += blockDim.x) {
+    short yr = 0, yi = 0;
+    const int p0 = max(0, (k - 16) / 2 - 1), p1 = min(np - 1, k / 2 + 6);
+    for (int p = p0; p <= p1; p++) {
+      const int b = fir_base(p);
+      if (k < b || k >= b + 16)
+        continue;
+      const int f = p == 0 ? 0 : (p == 1 || p == 2) ? 1 : p == np - 1 ? 3 : 2;
+      const short tap = j.filt[f][k - b];
+      const short2 ch = mulshift(L[2 * p], dt[2 * p], 8);
+      const short mr = mulhrs(ch.x, tap), mi = mulhrs(ch.y, tap);
+      yr = sat16((int)yr + sat16((int)mr + mr));
+      yi = sat16((int)yi + sat16((int)mi + mi));
+    }
+    short2 v = make_short2(yr, yi);
+    if (k < idx) {
+      v = mulshift(v, it[k], 8);
+      const short er = (short)(L[k].x - v.x), ei = (short)(L[k].y - v.y);
+      acc += (unsigned)((int)er * er) + (unsigned)((int)ei * ei);
+    }
+    out[k] = v;
+  }
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s)
+      red[threadIdx.x] += red[threadIdx.x + s];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+    nvar[blockIdx.x] = idx > 0 ? (unsigned)(red[0] / (unsigned long long)idx) : 0u;
+}
+} // namespace nrch
+
+extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
+{
+  if (g_init_state != 1 || !g_exact_ok || !g_exact_direct || j->n_rows < 1 || j->n_rows > NR_GPU_CHEST_MAX_ROWS || j->N != 4096)
+    return -1;
+  for (int r = 0; r < j->n_rows; r++)
+    if (j->rows[r].nb_rb < 1 || 12 * j->rows[r].nb_rb > 4096)
+      return -1;
+  const int c = ctx_acquire(false);
+  NrGpuRtScope rt;
+  if (!rt.admitted) { ctx_release(c); return -1; }
+  const auto t0 = std::chrono::steady_clock::now();
+  int *dout = (int *)nr_gpu_device_ptr(g_ctx_cout[c]);
+  nrch::k_ls<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(*j, g_ctx_ls[c]);
+  for (int r0 = 0; r0 < j->n_rows; r0 += nr_exact::DELAY_MAX_ROWS) {
+    const int n = std::min(nr_exact::DELAY_MAX_ROWS, j->n_rows - r0);
+    nr_exact::DelayIO io = {};
+    for (int r = 0; r < n; r++) io.ls[r] = g_ctx_ls[c] + (size_t)(r0 + r) * 4096;
+    nr_exact::k_delay_exact<<<n, nr_exact::THREADS, 0, g_ctx_stream[c]>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096, dout + 3 * r0);
+  }
+  nrch::k_fir<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(*j, g_ctx_ls[c], dout, (unsigned *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS));
+  cudaError_t e = cudaPeekAtLastError();
+  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+  if (e == cudaSuccess) {
+    memcpy(j->delay, g_ctx_cout[c], 3 * j->n_rows * sizeof(int));
+    memcpy(j->nvar, g_ctx_cout[c] + 3 * NR_GPU_CHEST_MAX_ROWS, j->n_rows * sizeof(int));
+  }
+  ctx_release(c);
+  if (e != cudaSuccess) {
+    g_init_state = -1;
+    fprintf(stderr, "nr_pdsch_gpu_exact_chest: %s\n", cudaGetErrorString(e));
+    return -1;
+  }
+  return 0;
+}
