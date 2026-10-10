@@ -14,6 +14,10 @@ LAYOUTS = {  # len -> list of (name, width)
     42: [('id', 1), ('bwp', 1), ('riv', 15), ('tda', 4), ('mcs', 5), ('ndi', 1), ('rv', 2), ('harq', 4),
          ('dai1', 2), ('tpc', 2), ('ant', 2), ('srs', 2), ('ulsch', 1)],   # transform-precoded reading (no DM-RS init bit)
 }
+DL_LAYOUTS = {  # DCI 1_1 (TS 38.212 7.3.1.2.2) fitted on the DCIRAW lines (ISAC_DCI_RAW_LOG=1) of the same capture
+    49: [('id', 1), ('bwp', 1), ('riv', 15), ('tda', 3), ('mcs', 5), ('ndi', 1), ('rv', 2), ('harq', 4), ('dai1', 2),
+         ('tpc', 2), ('pucch_res', 3), ('k1', 3), ('ant', 4), ('srs', 2), ('dmrs_init', 1)],
+}
 UL_SLOTS = {8, 9, 18, 19}   # DDDDDDDSUU x2, mu=1
 
 
@@ -39,19 +43,28 @@ def main():
     path = sys.argv[1]
     nbwp = int(sys.argv[sys.argv.index('--bwp-size') + 1]) if '--bwp-size' in sys.argv else 217
     rows = []
-    for l in open(path, errors='ignore'):
+    dl = '--dl' in sys.argv
+    if dl:
+        for l in open(path, errors='ignore'):
+            m = re.search(r'DCIRAW (\d+)\.(\d+) rnti=0x(\w+) len=(\d+) cce=\d+ al=\d+ mm=(\d+) payload=0x(\w+)', l)
+            if m and int(m[5]) == 0:
+                rows.append(dict(abs=int(m[1]) * 20 + int(m[2]), s=int(m[2]), rnti=m[3], len=int(m[4]), pl=int(m[6], 16)))
+        LAY = DL_LAYOUTS
+    else:
+        LAY = LAYOUTS
+    for l in ([] if dl else open(path, errors='ignore')):
         if 'ULDBG_DCI' not in l:
             continue
         l = re.sub(r'\x1b\[[0-9;]*m', '', l)
         d = dict(x.split('=', 1) for x in l.split() if '=' in x)
         rows.append(dict(abs=int(d['abs']), s=int(d['s']), rnti=d['rnti'], len=int(d['len']), pl=int(d['payload'], 16)))
-    for L, lay in sorted(LAYOUTS.items()):
+    for L, lay in sorted(LAY.items()):
         R = sorted((r for r in rows if r['len'] == L), key=lambda r: r['abs'])
         if not R:
             continue
-        print(f'== DCI 0_1 length {L}: {len(R)} grants, {len(set(r["rnti"] for r in R))} RNTIs')
+        print(f'== DCI {"1_1" if dl else "0_1"} length {L}: {len(R)} grants, {len(set(r["rnti"] for r in R))} RNTIs')
         F = [fields(r['pl'], L, lay) for r in R]
-        for k in ('id', 'bwp', 'tda', 'rv', 'dai1', 'tpc', 'ant', 'srs', 'dmrs_init', 'ulsch'):
+        for k in ('id', 'bwp', 'tda', 'rv', 'dai1', 'tpc', 'pucch_res', 'k1', 'ant', 'srs', 'dmrs_init', 'ulsch'):
             if k in F[0]:
                 print(f'  {k:9s}', dict(collections.Counter(f[k] for f in F).most_common(6)))
         bad = sum(riv_decode(f['riv'], nbwp) is None for f in F)

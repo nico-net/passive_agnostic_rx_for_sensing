@@ -155,7 +155,16 @@ static _Atomic uint64_t g_seg_fail, g_zero_tb;
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
 #define PASSIVE_UL_DELAY_TOL 6
 static _Atomic uint64_t g_ta_refined;
-static _Atomic uint64_t g_uci_trials, g_uci_rescued;
+static _Atomic uint64_t g_uci_trials, g_uci_rescued, g_uci_unconfirmed;
+static bool ul_uci_safe(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("ISAC_UL_UCI_SAFE");
+    on = (v && !strcmp(v, "1")) ? 1 : 0;
+  }
+  return on == 1;
+}
 
 /* The per-segment CRC verdict, the same expression nr_ulsch_decoding.c:289 calls `crcok`. Kept as a
  * helper because the UCI search needs it mid-function, not only at the end. */
@@ -1642,12 +1651,30 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     for (int i = 0; i < n_known && !rescued; i++) UCI_ATTEMPT(known[i].re, known[i].csi != 0);
 
     /* 2. Otherwise explore, rate-limited, within a bounded RE budget. */
+    bool explore_win = false;
     if (!rescued && nr_passive_uci_learn_should_explore(g->rnti, (unsigned)ucfg->ul_uci_explore_every)) {
-      const unsigned cap = (unsigned)ucfg->ul_uci_search;
+      unsigned cap = (unsigned)ucfg->ul_uci_search;
+      /* ISAC_UL_UCI_SAFE=1 (default off). A TB of <= 3824 bits carries a 16-bit CRC, and this sweep runs up to
+       * 2 x cap decodes: at cap 1024 that is a ~3 % false-pass probability per exploring grant (measured: 1-2 CRC passes
+       * per 12 s replay, all with an all-zero TB prefix and noise-level DM-RS). Safe mode (a) never lets the footprint
+       * exceed 25 % of the coded bits' RE count and (b) treats a sweep win as a footprint LEARNING event only: the
+       * footprint is recorded, the grant stays CRC_FAIL, and only a later grant that passes at a LEARNED footprint
+       * (one trial, not thousands) is reported. */
+      if (ul_uci_safe()) {
+        const unsigned qm = pdu.qam_mod_order ? pdu.qam_mod_order : 2;
+        const unsigned lim = (unsigned)(full_bits / qm / 4);
+        if (cap > lim) cap = lim;
+      }
       for (int csi = 0; csi < 2 && !rescued; ++csi)
         for (unsigned re = 1; re <= cap && !rescued; ++re) UCI_ATTEMPT(re, csi);
+      explore_win = rescued;
     }
     #undef UCI_ATTEMPT
+    if (rescued && explore_win && ul_uci_safe()) {
+      if (nr_cfg_epoch_work_current()) nr_passive_uci_learn_record(g->rnti, (uint16_t)won_re, won_csi != 0);
+      atomic_fetch_add_explicit(&g_uci_unconfirmed, 1, memory_order_relaxed);
+      rescued = false; /* learning event only */
+    }
 
     if (rescued) {
       atomic_fetch_add_explicit(&g_uci_rescued, 1, memory_order_relaxed);
@@ -1958,13 +1985,14 @@ void nr_pusch_passive_stats_dump(void)
   pthread_mutex_unlock(&g_ul_harq_init_lock);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
-        "ta_refined=%lu uci[trials=%lu rescued=%lu] "
+        "ta_refined=%lu uci[trials=%lu rescued=%lu unconfirmed=%lu] "
         "health=%.1f%% unsup=%lu setup_fail=%lu] init_tx[hit=%lu evict=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
         (unsigned long)atomic_load_explicit(&g_ta_refined, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_uci_trials, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_uci_rescued, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_uci_unconfirmed, memory_order_relaxed),
         (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),

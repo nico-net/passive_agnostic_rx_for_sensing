@@ -153,7 +153,7 @@ static bool ul_solver_fallthrough(void)
 /* ISAC_UL_RETRY=1 (default off): UL twin of ISAC_PDSCH_DMRS_CDM_RETRY / ISAC_PDSCH_TDRA_RETRY. The DCI antenna-ports code
  * point fixes the number of CDM groups without data, but its field width is a hypothesis (U3 width splits), so the group
  * count can be wrong while everything else is right; likewise S=0/L=14 can alias S=1/L=13. A CRC-failed full decode whose
- * post-estimation SNR is at least ISAC_UL_RETRY_SNR_DB (default 5) is retried with each alternative. */
+ * allocation is at most ISAC_UL_RETRY_MAX_RB PRB (default 12) and, if ISAC_UL_RETRY_SNR_DB is set, whose post-estimation SNR reaches it, is retried with each alternative. */
 static bool ul_retry_enabled(void)
 {
   static int on = -1;
@@ -168,9 +168,19 @@ static float ul_retry_snr_db(void)
   static float t = -1000.0f;
   if (t < -999.0f) {
     const char *v = getenv("ISAC_UL_RETRY_SNR_DB");
-    t = v ? (float)atof(v) : 5.0f;
+    t = v ? (float)atof(v) : -500.0f; /* post-estimation snr_db is not populated by the PUSCH path (0.0): gate off by default */
   }
   return t;
+}
+/* Default size gate instead: only small allocations (the detectable class at this position) are retried. */
+static int ul_retry_max_rb(void)
+{
+  static int m = -1;
+  if (m < 0) {
+    const char *v = getenv("ISAC_UL_RETRY_MAX_RB");
+    m = v ? atoi(v) : 12;
+  }
+  return m;
 }
 
 bool nr_pusch_passive_pipeline_enabled(void)
@@ -350,7 +360,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
-    if (ul_retry_enabled() && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= ul_retry_snr_db()) {
+    if (ul_retry_enabled() && !job.cfr_only && out.status == NR_PUSCH_PASSIVE_CRC_FAIL && out.snr_db >= ul_retry_snr_db() &&
+        job.grant.num_rb <= ul_retry_max_rb()) {
       /* Only grants with a measurable signal are retried (the extra LDPC runs cost CPU). Alternates, in order:
        * the other CDM-group count (data-RE set and G change), then the S=1/L=13 alias of S=0/L=14 (the DL TDRA
        * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */

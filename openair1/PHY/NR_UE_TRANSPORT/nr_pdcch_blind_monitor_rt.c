@@ -1456,6 +1456,15 @@ static uint16_t g_dci01_riv_bits, g_dci01_bwp_start, g_dci01_bwp_size;
 static uint8_t g_dci01_tda_bits;
 static nr_dci01_layout_t g_dci01_hyp[NR_DCI01_LAYOUT_MAX];
 static nr_dci11_offsets_t g_dci01_off[NR_DCI01_LAYOUT_MAX];
+static bool ul_force_opts_enabled(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("ISAC_UL_FORCE_OPTS");
+    on = (v && !strcmp(v, "1")) ? 1 : 0;
+  }
+  return on == 1;
+}
 static inline bool dci01_oracle_grant(const nr_pdcch_blind_ul_result_t *g)
 {
   return nr_dci01_fdra_oracle_grant(g->ul_dci_format, g->width_hyp_class, g->interp_hyp_class);
@@ -7991,6 +8000,16 @@ constdiag_done:;
             cand_task[ti].ok=nr_pdcch_ul_config_disc_grant(cand_task[ti].rnti_min,
                 cand_task[ti].dci_length, cand_task[ti].ul_out.raw_payload,
                 &ul_opts, &prior, &discovered);
+        } else if (ul_force_opts_enabled() && ul_opts.bwp_size > 0 && ul_opts.tda_count > 0) {
+          /* ISAC_UL_FORCE_OPTS=1 (default off, EXPERIMENT): read the CRC-verified payload with exactly the explicitly
+           * configured UL layout (pdcch_blind_monitor_ul_* keys) instead of the width/interpretation sweeps.
+           * The layout is then an operator hypothesis (for this cell: derived from the receiver's own UL physics census,
+           * never from a gNB log), so any TB CRC it yields is "explicit-layout assisted", not blind. */
+          cand_task[ti].ok = nr_pdcch_blind_dci01_size(&ul_opts) == cand_task[ti].dci_length
+              && nr_pdcch_blind_extract_01(cand_task[ti].ul_out.raw_payload, cand_task[ti].dci_length,
+                                           cand_task[ti].rnti_min, &ul_opts, &discovered);
+          if (cand_task[ti].ok)
+            discovered.hyp_generation = 1; /* non-zero sentinel: explicit layout, admitted by the chain (no U3 ticket) */
         } else {
           cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,cand_task[ti].dci_length,cand_task[ti].rnti_min,
                                                       cand_task[ti].ul_out.raw_payload,&discovered);
