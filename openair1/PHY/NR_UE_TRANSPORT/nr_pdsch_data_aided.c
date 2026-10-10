@@ -52,6 +52,15 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
 static _Atomic uint64_t g_data_aided_g_refused = 0;
+/* Large per-thread scratch lives on the heap, not in static TLS: every thread's static TLS is carved out of its
+ * 8 MB stack, and 5.6 MB of it left the SYNC actor too little stack for the fast re-sync (OTA SIGSEGV in
+ * nr_pbch_detection, 2026-10-11). Allocated once per thread on first use, kept for the thread's lifetime. */
+static void *da_tls_buf(void **p, size_t n)
+{
+  if (!*p) *p = aligned_alloc(64, (n + 63) / 64 * 64);
+  return *p;
+}
+
 uint64_t nr_isac_pdsch_data_aided_g_refused(void)
 {
   return atomic_load_explicit(&g_data_aided_g_refused, memory_order_relaxed);
@@ -131,7 +140,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
 
   // --- Segment into code blocks (must run again here to fill actual per-segment bytes: the decode
   // path only sized C/K/Z/F, passing NULL/NULL for input/output). ---
-  static __thread uint8_t seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
+  static __thread uint8_t (*seg_storage)[8448];
+  if (!da_tls_buf((void **)&seg_storage, sizeof(*seg_storage) * MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER)) return;
   static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
   for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++)
     c_segs[r] = seg_storage[r];
@@ -166,8 +176,10 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // i.e. on every other __thread object in this file. That made the alignment ACCIDENTAL: adding the
   // sub-slot bookkeeping arrays below shifted the layout and produced an immediate GP fault inside
   // nr_modulation's `out128[i] = ...` store. Pin it explicitly so the layout can never break it again.
-  static __thread uint8_t coded_bits[(273 * 12 * 14 * 8 + 63) / 64 * 64 + 64] __attribute__((aligned(32)));
-  memset(coded_bits, 0, sizeof(coded_bits));
+  static __thread uint8_t *coded_bits;
+  const size_t coded_sz = (273 * 12 * 14 * 8 + 63) / 64 * 64 + 64;
+  if (!da_tls_buf((void **)&coded_bits, coded_sz)) return;
+  memset(coded_bits, 0, coded_sz);
   TB_parameters.output = coded_bits;
 
   static __thread nrLDPC_segment_encoding_parameters_t segments[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
@@ -202,7 +214,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   nr_codeword_scrambling(coded_bits, TB_parameters.G, 0 /* codeword index */, dlsch_config->dlDataScramblingId,
                         rnti, scrambled);
 
-  static __thread c16_t mod_syms[273 * 12 * 14] __attribute__((aligned(32)));
+  static __thread c16_t *mod_syms;
+  if (!da_tls_buf((void **)&mod_syms, sizeof(c16_t) * 273 * 12 * 14)) return;
   nr_modulation(scrambled, TB_parameters.G, cw->qamModOrder, (int16_t *)mod_syms);
 
   // --- RE mapping: sweep the allocation symbol by symbol, increasing frequency within each, taking

@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include "nr_sense_ul.h"
 /* Passive uplink data-aided CFR -- see nr_pusch_data_aided.h.
  *
@@ -35,6 +36,15 @@
 #define UL_DA_MAX_RE (273 * 12 * 14)
 
 static _Atomic uint64_t g_da_try, g_da_ok, g_da_rej_seg, g_da_rej_enc, g_da_rej_modidx, g_da_re;
+
+/* Large per-thread scratch lives on the heap, not in static TLS: every thread's static TLS is carved out of its
+ * 8 MB stack, and 5.6 MB of it left the SYNC actor too little stack for the fast re-sync (OTA SIGSEGV in
+ * nr_pbch_detection, 2026-10-11). Allocated once per thread on first use, kept for the thread's lifetime. */
+static void *da_tls_buf(void **p, size_t n)
+{
+  if (!*p) *p = aligned_alloc(64, (n + 63) / 64 * 64);
+  return *p;
+}
 
 void nr_isac_pusch_data_aided_stats_dump(void)
 {
@@ -84,7 +94,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const uint32_t           Qm    = pdu->qam_mod_order;
 
   /* ---- Segment + LDPC encode. Re-segmented here because the decode path only sized C/K/Z/F. ---- */
-  static __thread uint8_t  seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
+  static __thread uint8_t (*seg_storage)[8448];
+  if (!da_tls_buf((void **)&seg_storage, sizeof(*seg_storage) * MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER)) return;
   static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
   for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++) {
     c_segs[r] = seg_storage[r];
@@ -121,8 +132,10 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   /* 32-byte aligned for the same reason the downlink twin documents: nr_modulation() and the LDPC
    * encoder store through AVX2 intrinsics that fault on a misaligned buffer, and a __thread buffer's
    * address depends on the whole TLS layout, which makes natural alignment accidental. */
-  static __thread uint8_t coded_bits[(UL_DA_MAX_RE * 8 + 63) / 64 * 64 + 64] __attribute__((aligned(32)));
-  memset(coded_bits, 0, sizeof(coded_bits));
+  static __thread uint8_t *coded_bits;
+  const size_t coded_sz = (UL_DA_MAX_RE * 8 + 63) / 64 * 64 + 64;
+  if (!da_tls_buf((void **)&coded_bits, coded_sz)) return;
+  memset(coded_bits, 0, coded_sz);
   TB.output = coded_bits;
 
   static __thread nrLDPC_segment_encoding_parameters_t segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
@@ -155,11 +168,13 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   static __thread uint32_t scrambled[(UL_DA_MAX_RE * 8 + 31) / 32 + 1] __attribute__((aligned(32)));
   nr_codeword_scrambling(coded_bits, TB.G, 0, pdu->data_scrambling_id, g->rnti, scrambled);
 
-  static __thread c16_t mod_syms[UL_DA_MAX_RE] __attribute__((aligned(32)));
+  static __thread c16_t *mod_syms;
+  if (!da_tls_buf((void **)&mod_syms, sizeof(c16_t) * UL_DA_MAX_RE)) return;
   nr_modulation(scrambled, TB.G, Qm, (int16_t *)mod_syms);
 
   /* ---- Map REs and form H = Y/X. ---- */
-  static __thread float    h_buf[4 * 2 * UL_DA_MAX_RE];
+  static __thread float   *h_buf;
+  if (!da_tls_buf((void **)&h_buf, sizeof(float) * 4 * 2 * UL_DA_MAX_RE)) return;
   static __thread uint32_t k_buf[UL_DA_MAX_RE];
   static __thread uint32_t l_buf[UL_DA_MAX_RE];
 
