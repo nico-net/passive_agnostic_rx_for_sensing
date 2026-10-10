@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* T26c: CPU_SET / sched_getaffinity for the janon worker */
 #endif
+#include "nr_pdsch_gpu_exact.h"
 #include <sched.h>
 #include <unistd.h>
 #include "PHY/TOOLS/nr_gpu_platform.h"
@@ -5291,7 +5292,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
         memcpy(&rxdataF[ant][symbol * fp->ofdm_symbol_size], t_fc[ant], sizeof(c16_t) * fp->ofdm_symbol_size);
       }
     } else {
-      nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      if (nr_pdcch_gpu_exact_fep_symbol(ue, fp, proc->nr_slot_rx, symbol, &rxdataF[0][0], ue->common_vars.rxdata)) /* GPU6 */
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
       for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
         memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
       }

@@ -74,6 +74,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "nr_passive_job_epoch.h"
 #include "nr_gpu_fep_hygiene.h"
 #include "nr_pdsch_gpu_record.h"
+#include "nr_pdsch_gpu_exact.h"
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
                              const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride);
 #include "nr_csirs_disc.h"
@@ -2075,7 +2076,8 @@ static void report_sweep(const nr_pdsch_sweep_report_t *r)
 
 void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
 {
-  if (!atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_prepare();
+  /* GPU6: the bit-exact FEP path replaces the (non CPU-equivalent) GPU LLR path */
+  if (!nr_pdsch_gpu_exact_warmup(ue) && !atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_prepare();
   { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 32; }
   { const char *e = getenv("ISAC_GPU_SELFCHECK_ENFORCE"); g_gpu_chk_enforce = e && !strcmp(e, "1"); }
   if (g_gpu) {
