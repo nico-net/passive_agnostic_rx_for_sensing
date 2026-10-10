@@ -61,4 +61,20 @@ uint8_t nr_mmse_2layers(c16_t **rxdataF_comp,
                         int length,
                         uint32_t noise_var);
 
+/* ISAC_PUSCH_MMSE_MODE=2: unbiased 2-layer ZF with per-layer thresholds (see nr_compute_llr.c). Same buffers as
+ * nr_mmse_2layers(); the stock function is unchanged. */
+void nr_mmse_2layers_unbiased(c16_t **rxdataF_comp,
+                              uint32_t buffer_length,
+                              uint32_t pdsch_buf_size_max,
+                              int nb_rx_ant,
+                              int nb_layers,
+                              c16_t ch_mag[nb_layers][pdsch_buf_size_max],
+                              c16_t ch_magb[nb_layers][pdsch_buf_size_max],
+                              c16_t ch_magc[nb_layers][pdsch_buf_size_max],
+                              c16_t ch_estimates_ext[][nb_rx_ant][buffer_length],
+                              unsigned char mod_order,
+                              int shift,
+                              unsigned char symbol,
+                              int length);
+
 #endif /* __NR_COMPUTE_LLR__H__ */

@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <stdlib.h> // getenv (ISAC_PUSCH_MMSE_MODE)
 #include "PHY/defs_gNB.h"
 #include "PHY/phy_extern.h"
 #include "nr_transport_proto.h"
@@ -269,6 +270,18 @@ static int get_nb_re_pusch (NR_DL_FRAME_PARMS *frame_parms, const nfapi_nr_pusch
     return (rel15_ul->rb_size * NR_NB_SC_PER_RB);
 }
 
+/* ISAC_PUSCH_MMSE_MODE (default 0 = stock): 2 = unbiased 2-layer ZF with per-layer thresholds for the 2-layer QAM path
+ * that uses nr_mmse_2layers() (Qm > 6; Qm <= 6 keeps the max-log ML detector). Read once. */
+static int nr_pusch_mmse_mode(void)
+{
+  static int mode = -1;
+  if (mode < 0) {
+    const char *v = getenv("ISAC_PUSCH_MMSE_MODE");
+    mode = v ? atoi(v) : 0;
+  }
+  return mode;
+}
+
 static void inner_rx(PHY_VARS_gNB *gNB,
                      int slot,
                      NR_DL_FRAME_PARMS *frame_parms,
@@ -413,7 +426,22 @@ static void inner_rx(PHY_VARS_gNB *gNB,
                         pusch_vars->ul_valid_re_per_slot[symbol],
                         rel15_ul->qam_mod_order);
     }
-    else {
+    else if (nr_pusch_mmse_mode() == 2) {
+      /* ISAC_PUSCH_MMSE_MODE=2 (default off; unset = the stock gNB path below, unchanged) */
+      nr_mmse_2layers_unbiased(pusch_vars->rxdataF_comp,
+                               buffer_length,
+                               buffer_length,
+                               nb_rx_ant,
+                               nb_layer,
+                               rxF_ch_maga,
+                               rxF_ch_magb,
+                               rxF_ch_magc,
+                               chFext,
+                               rel15_ul->qam_mod_order,
+                               pusch_vars->log2_maxh,
+                               symbol,
+                               pusch_vars->ul_valid_re_per_slot[symbol]);
+    } else {
       nr_mmse_2layers(pusch_vars->rxdataF_comp,
                       buffer_length,
                       buffer_length,
