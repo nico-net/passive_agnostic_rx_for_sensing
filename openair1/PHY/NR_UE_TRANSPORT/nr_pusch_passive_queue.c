@@ -410,6 +410,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if (!nr_cfg_epoch_work_current()) {
       continue;
     }
+    if (nr_ul_layout_is_tagged(&job.grant) && (out.status==NR_PUSCH_PASSIVE_OK || out.status==NR_PUSCH_PASSIVE_CRC_FAIL))
+      nr_ul_layout_crc_result(&job.grant, out.status==NR_PUSCH_PASSIVE_OK); /* no-op without ISAC_UL_LOCK_CRC_FIRST */
     if (job.ul_ticket_valid && out.status==NR_PUSCH_PASSIVE_OK) {
       nr_ue_ul_update_t confirmed=job.ul_update;
       confirmed.ta_samples=out.ta_applied_samples;

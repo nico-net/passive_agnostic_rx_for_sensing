@@ -35,7 +35,8 @@ static ul_sample_history_t g_history[HISTORY_SLOTS];
 void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_absolute_slot)
 {
   const bool layout_probe = nr_ul_layout_is_probe(g); /* UL-LAYOUT DM-RS probe: no decode, no UE state */
-  if (nr_ul_chain_on() && !layout_probe) {
+  const bool layout_trial = nr_ul_layout_is_trial(g); /* CRC-first trial: decoded without a DL ticket */
+  if (nr_ul_chain_on() && !layout_probe && !layout_trial) {
     if (g->ul_dci_format != NR_BLIND_UL_DCI_FORMAT_0_1) {
       atomic_fetch_add_explicit(&g_chain_no_dci01,1,memory_order_relaxed);
       return;
@@ -68,7 +69,7 @@ void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_ab
   pthread_mutex_unlock(&g_book_lock);
   if(status>0) {
     atomic_fetch_add_explicit(&g_parked,1,memory_order_relaxed);
-    if (!layout_probe) nr_srs_passive_grant(source_absolute_slot+g->k2,g->ul_dmrs_symb_pos,g->bwp_start+g->start_rb,g->num_rb);
+    if (!layout_probe && !layout_trial) nr_srs_passive_grant(source_absolute_slot+g->k2,g->ul_dmrs_symb_pos,g->bwp_start+g->start_rb,g->num_rb);
   }
   if(status<0) atomic_fetch_add_explicit(&g_overwritten,1,memory_order_relaxed);
 }
@@ -131,7 +132,7 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
   /* U4 admission is tied to the DL lock. A C-RNTI-shaped blind hit alone
    * cannot create UL state or consume a decode slot. */
   const bool layout_probe = nr_ul_layout_is_probe(&g);
-  if (nr_pusch_passive_ul_ue_state_enabled() && !ul_ticket_valid && !layout_probe) {
+  if (nr_pusch_passive_ul_ue_state_enabled() && !ul_ticket_valid && !layout_probe && !nr_ul_layout_is_trial(&g)) {
     nr_pusch_passive_queue_note_unready();
     return;
   }

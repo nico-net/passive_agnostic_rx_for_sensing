@@ -2374,6 +2374,13 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
     pr.msg1_fdm = (uint8_t)(1u << (unsigned)(rg->msg1_FDM & 3));
     pr.rach_valid = true;
   }
+  /* initialUplinkBWP location (UL layout lock, ISAC_UL_LOCK_SIB1_FIRST): a HYPOTHESIS for the dedicated UL BWP. */
+  if (scc->uplinkConfigCommon != NULL) {
+    const long ulab = scc->uplinkConfigCommon->initialUplinkBWP.genericParameters.locationAndBandwidth;
+    pr.ul_bwp_size = (uint16_t)NRRIV2BW(ulab, MAX_BWP_SIZE);
+    pr.ul_bwp_start = (uint16_t)NRRIV2PRBOFFSET(ulab, MAX_BWP_SIZE);
+    pr.ul_bwp_valid = (pr.ul_bwp_size > 0);
+  }
   /* Supplementary uplink is what would allow ul_carrier_id = 1 in an RA-RNTI. */
   pr.sul_present = (scc->supplementaryUplink != NULL);
 
