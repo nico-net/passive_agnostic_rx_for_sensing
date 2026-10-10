@@ -4,6 +4,8 @@
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "common/utils/LOG/log.h"
 #include <dlfcn.h>
+#include <errno.h>
+#include <time.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -15,6 +17,7 @@
 static struct {
  pthread_mutex_t mu;
  pthread_cond_t cv;
+ pthread_cond_t cv_free; /* ISAC_PDCCH_NID_GPU_NODROP: a staging batch was freed; CLOCK_MONOTONIC (initialised in start()) */
  pthread_t thread;
  void *module, *device;
  const nr_pdcch_nid_ops_t *ops;
@@ -25,6 +28,12 @@ static struct {
  int producer, n, rb, dur, every, window, batch_size;
  bool incremental;
  bool duty_enabled, all_verified;
+ /* ISAC_PDCCH_NID_GPU_NODROP state. nodrop is set in start(). The push-side fields below are touched by the single producer thread only;
+  * slot_ticks is read by the worker and the feedback caller. */
+ bool nodrop, snap_started, snap_refused;
+ int snap_slot;
+ _Atomic uint64_t slot_ticks, dropped_snapshots, dropped_partial;
+ uint64_t clock_us[3]; /* duty clock stamped on each batch when it is queued */
  uint32_t epoch;
  uint64_t wake, last_outside_us;
  unsigned acquire_ms, maintain_ms, recheck_ms;
@@ -43,6 +52,47 @@ static int env_int(const char *key,int def,int lo,int hi)
  const char *s=getenv(key);if(!s || !*s)return def;
  char *end;long n=strtol(s,&end,10);
  return *end || n<lo || n>hi?def:(int)n;
+}
+/* NODROP_WAIT_NS: the longest the real-time producer may wait for a free staging batch or the mutex: one slot at 30 kHz SCS. */
+#define NODROP_WAIT_NS 500000L
+#define NODROP_SLOT_US 500ull
+/* duty_clock_us: the duty-cycle clock. Flag off: wall-clock budget time. NODROP: 500 us per pushed slot, so identical input gives an identical
+ *   duty schedule. batch_clock is the value stamped on the batch being handled (nodrop only). Caller: worker(); feedback reads slot_clock_us() directly. */
+static uint64_t duty_clock_us(uint64_t batch_clock)
+{
+ if(!g.nodrop)return nr_gpu_budget_now_us();
+ return batch_clock;
+}
+static uint64_t slot_clock_us(void)
+{
+ return (atomic_load_explicit(&g.slot_ticks,memory_order_relaxed)+1)*NODROP_SLOT_US;
+}
+/* batch_freed: called with g.mu held after a staging batch returned to state 0; wakes a producer waiting in nodrop_acquire(). Callers: worker(), feedback. */
+static void batch_freed(void)
+{
+ if(g.nodrop)pthread_cond_signal(&g.cv_free);
+}
+/* nodrop_acquire: bounded (<= NODROP_WAIT_NS in total) replacement for trylock + "all batches busy" drop. Takes g.mu with trylock polling
+ *   (never a blocking lock), then, if no producer batch is open, waits on cv_free with a CLOCK_MONOTONIC deadline for the worker to free one.
+ *   Returns true with g.mu held and g.producer >= 0; false with g.mu released. Caller: nr_pdcch_nid_gpu_push() (real-time path). */
+static bool nodrop_acquire(void)
+{
+ struct timespec dl,nap={0,10000};
+ clock_gettime(CLOCK_MONOTONIC,&dl);
+ dl.tv_nsec+=NODROP_WAIT_NS;
+ if(dl.tv_nsec>=1000000000L) {dl.tv_sec++;dl.tv_nsec-=1000000000L;}
+ while(pthread_mutex_trylock(&g.mu)) {
+  struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
+  if(now.tv_sec>dl.tv_sec || (now.tv_sec==dl.tv_sec && now.tv_nsec>=dl.tv_nsec))return false;
+  nanosleep(&nap,NULL);
+ }
+ bool timed_out=false;
+ for(;;) {
+  if(g.producer<0)for(int j=0;j<3;j++)if(g.state[j]==0){g.producer=j;g.state[j]=1;g.n=0;break;}
+  if(g.producer>=0)return true;
+  if(timed_out) {pthread_mutex_unlock(&g.mu);return false;}
+  timed_out=pthread_cond_timedwait(&g.cv_free,&g.mu,&dl)==ETIMEDOUT;
+ }
 }
 static void *worker(void *unused)
 {
@@ -63,13 +113,14 @@ static void *worker(void *unused)
   }
   if(g.stop) {pthread_mutex_unlock(&g.mu);break;}
   g.state[b]=3;
+  const uint64_t batch_clock=g.clock_us[b];
   const uint32_t epoch=g.epoch;
   const bool geometry_changed=have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous));
   const bool unexplained=wake!=g.wake;
   if(geometry_changed)duty=(nr_gpu_discovery_duty_t){0};
   wake=g.wake;
   if(g.duty_enabled) {
-   int due=nr_gpu_discovery_due(&duty,nr_gpu_budget_now_us(),epoch,
+   int due=nr_gpu_discovery_due(&duty,duty_clock_us(batch_clock),epoch,
        !geometry_changed && g.result.count>0,!geometry_changed && g.all_verified,unexplained,1000ull*g.acquire_ms,
        1000ull*g.maintain_ms,1000ull*g.recheck_ms);
    if(logged_mode!=duty.mode) {
@@ -78,7 +129,7 @@ static void *worker(void *unused)
           logged_mode<0?"START":names[logged_mode],names[duty.mode],epoch,g.result.count,g.all_verified,unexplained);
     logged_mode=duty.mode;
    }
-   if(!due) {g.state[b]=0;pthread_mutex_unlock(&g.mu);continue;}
+   if(!due) {g.state[b]=0;batch_freed();pthread_mutex_unlock(&g.mu);continue;}
   }
   pthread_mutex_unlock(&g.mu);
   bool changed=have_config && memcmp(&previous,&g.batch[b].cfg,sizeof(previous));
@@ -93,6 +144,7 @@ static void *worker(void *unused)
   int rc=g.ops->upload(g.device,&g.batch[b]);
   pthread_mutex_lock(&g.mu);
   g.state[b]=0;
+  batch_freed();
   pthread_mutex_unlock(&g.mu);
   if(rc<0)goto failed;
   batches++;
@@ -118,7 +170,7 @@ static void *worker(void *unused)
   g.result=result;if(!same || !g.duty_enabled) {g.generation++;g.all_verified=false;}g.passes++;
   if(g.duty_enabled && result.count && duty.mode==NR_GPU_DISC_ACQUIRE) {
    duty.published=1;duty.mode=NR_GPU_DISC_MAINTAIN;
-   duty.next_us=nr_gpu_budget_now_us()+1000ull*g.maintain_ms;
+   duty.next_us=duty_clock_us(batch_clock)+1000ull*g.maintain_ms;
    LOG_A(PHY,"SENSING: PDCCH_NID_GPU mode ACQUIRE -> MAINTAIN epoch=%u published=%d reason=publication\n",epoch,result.count);
    logged_mode=duty.mode;
   }
@@ -133,6 +185,12 @@ static void *worker(void *unused)
    if(n<0 || (size_t)n>=sizeof(records)-used)break;
    used+=n;
   }
+  if(g.nodrop)
+   LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms (kernels max %.3f ms) dropped_snapshots=%llu dropped_partial=%llu -> %d CORESETs:%s\n",
+         (unsigned long long)pass,result.stage1_ms,result.stage2_ms,result.kernel_max_ms,
+         (unsigned long long)atomic_load_explicit(&g.dropped_snapshots,memory_order_relaxed),
+         (unsigned long long)atomic_load_explicit(&g.dropped_partial,memory_order_relaxed),result.count,records);
+  else
   LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms (kernels max %.3f ms) -> %d CORESETs:%s\n",
         (unsigned long long)pass,result.stage1_ms,result.stage2_ms,result.kernel_max_ms,result.count,records);
   continue;
@@ -153,6 +211,7 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  g.duty_enabled=duty && !strcmp(duty,"1");
  g.acquire_ms=env_int("ISAC_PDCCH_NID_GPU_ACQUIRE_MS",5000,1,60000);
  g.maintain_ms=env_int("ISAC_PDCCH_NID_GPU_MAINTAIN_MS",500,1,60000);
+ {const char *nd=getenv("ISAC_PDCCH_NID_GPU_NODROP");g.nodrop=nd && !strcmp(nd,"1");}
  g.recheck_ms=env_int("ISAC_PDCCH_NID_GPU_RECHECK_MS",10000,1,600000);
  const char *duration=getenv("ISAC_COREMAP_IDSWEEP_DUR");
  g.dur=duration?atoi(duration):3;
@@ -162,6 +221,16 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  g.batch_size=g.incremental?env_int("ISAC_PDCCH_NID_GPU_BATCH",64,1,NR_PDCCH_NID_BATCH):NR_PDCCH_NID_BATCH;
  g.every=g.incremental?1:env_int("ISAC_PDCCH_NID_GPU_EVERY",2,1,1000);
  g.window=env_int("ISAC_PDCCH_NID_GPU_WINDOW",10,1,NR_PDCCH_NID_MAX_WINDOW);
+ if(g.nodrop) {
+  pthread_condattr_t ca;
+  pthread_condattr_init(&ca);
+  pthread_condattr_setclock(&ca,CLOCK_MONOTONIC);
+  pthread_cond_destroy(&g.cv_free);
+  pthread_cond_init(&g.cv_free,&ca);
+  pthread_condattr_destroy(&ca);
+  g.snap_started=g.snap_refused=false;
+  atomic_store_explicit(&g.slot_ticks,0,memory_order_relaxed);
+ }
  g.module=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);
  if(!g.module)goto fail;
  const nr_pdcch_nid_ops_t *(*get_ops)(void)=dlsym(g.module,"nr_pdcch_nid_gpu_ops");
@@ -201,6 +270,8 @@ void nr_pdcch_nid_gpu_stop(void)
 {
  if(!g.device)return;
  atomic_store_explicit(&g.running,false,memory_order_release);
+ if(g.nodrop)LOG_A(PHY,"SENSING: PDCCH_NID_GPU stop: dropped_snapshots=%llu dropped_partial=%llu\n",
+   (unsigned long long)nr_pdcch_nid_gpu_dropped_snapshots(),(unsigned long long)atomic_load_explicit(&g.dropped_partial,memory_order_relaxed));
  pthread_mutex_lock(&g.mu);g.stop=true;pthread_cond_signal(&g.cv);pthread_mutex_unlock(&g.mu);
  pthread_join(g.thread,NULL);
  g.ops->destroy(g.device);dlclose(g.module);g.device=g.module=NULL;g.ops=NULL;
@@ -209,6 +280,10 @@ void nr_pdcch_nid_gpu_stop(void)
  g.result.count=0;g.generation++;
  pthread_mutex_unlock(&g.mu);
 }
+uint64_t nr_pdcch_nid_gpu_dropped_snapshots(void)
+{
+ return atomic_load_explicit(&g.dropped_snapshots,memory_order_relaxed);
+}
 int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const nr_pdcch_nid_config_t *cfg)
 {
  if(!nr_pdcch_nid_gpu_running() || !rx || !cfg || cfg->dur!=g.dur || cfg->nsc<72
@@ -216,11 +291,25 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
     || sym<0 || (g.incremental?sym>=cfg->sps:sym+cfg->dur>cfg->sps) || slot<0 || slot>=160
     || (cfg->nsc-cfg->point_a_sc)/12>275
     || (cfg->nsc-cfg->point_a_sc)/12-(cfg->point_a_sc<0?(-cfg->point_a_sc+11)/12:0)<6)return -1;
+ if(g.nodrop) {
+  /* A snapshot is one slot's push sequence. Its first symbol decides: if that cannot be accepted the rest is refused, so the GPU never sees a partial snapshot. */
+  const bool first=!g.snap_started || slot!=g.snap_slot;
+  if(first) {
+   if(g.snap_started)atomic_fetch_add_explicit(&g.slot_ticks,(uint64_t)((slot-g.snap_slot+160)%160),memory_order_relaxed);
+   g.snap_started=true;g.snap_slot=slot;g.snap_refused=false;
+  } else if(g.snap_refused)return -1;
+  if(!nodrop_acquire()) {
+   if(first) {g.snap_refused=true;atomic_fetch_add_explicit(&g.dropped_snapshots,1,memory_order_relaxed);}
+   else atomic_fetch_add_explicit(&g.dropped_partial,1,memory_order_relaxed);
+   return -1;
+  }
+ } else {
  if(pthread_mutex_trylock(&g.mu))return -1;
  if(g.producer<0) {
   for(int j=0;j<3;j++)if(g.state[j]==0){g.producer=j;g.state[j]=1;g.n=0;break;}
  }
  if(g.producer<0) {g.dropped++;pthread_mutex_unlock(&g.mu);return -1;}
+ }
  nr_pdcch_nid_batch_t *b=&g.batch[g.producer];
  nr_pdcch_nid_config_t current=*cfg;current.epoch=g.epoch;
  if(g.n && memcmp(&b->cfg,&current,sizeof(current)))g.n=0;
@@ -234,7 +323,7 @@ int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const 
  b->slot[g.n]=slot;b->sym[g.n]=sym;
  if(++g.n==g.batch_size) {
   b->count=g.incremental?g.batch_size:0;
-  g.state[g.producer]=2;g.sequence[g.producer]=++g.produced;g.producer=-1;g.n=0;
+  g.state[g.producer]=2;g.sequence[g.producer]=++g.produced;g.clock_us[g.producer]=slot_clock_us();g.producer=-1;g.n=0;
   pthread_cond_signal(&g.cv);
  }
  pthread_mutex_unlock(&g.mu);return 0;
@@ -265,11 +354,12 @@ void nr_pdcch_nid_gpu_feedback(uint32_t epoch,uint64_t generation,bool verified,
   g.epoch=epoch;g.result.count=0;g.generation++;g.all_verified=false;g.last_outside_us=0;
   /* Drop queued old-epoch snapshots, but never reclaim the worker's buffer. */
   for(int i=0;i<3;++i)if(g.state[i]==2)g.state[i]=0;
+  batch_freed();
   if(g.producer>=0)g.n=0;
  }
  if(generation==g.generation)g.all_verified=verified;
  if(unexplained) {
-  uint64_t now=nr_gpu_budget_now_us();
+  uint64_t now=g.nodrop?slot_clock_us():nr_gpu_budget_now_us();
   // The monitor reports a level on each occupied occasion. Reopen once per
   // episode, then permit bank acknowledgement to pause again. A quiet
   // MAINTAIN interval rearms the edge; a changed epoch always rearms it.

@@ -665,6 +665,7 @@ _Atomic uint32_t g_pass_low_export[PK_N];
 static _Thread_local uint64_t t_discovered_token;
 static _Thread_local uint64_t t_discovered_slot;
 static _Thread_local bool t_discovered_attempted;
+static _Thread_local bool t_discovered_prescreen_passed; /* ISAC_PDCCH_DWELL_ADAPTIVE: a candidate of this dwell pass cleared the prescreen */
 static _Thread_local int t_candidate_share; /* zero = legacy per-pass budget */
 
 /* ---- DCI 1_1 LAYOUT CONSISTENCY (stage 1 of nr_pdcch_dci11_layout_sweep) ---------------------
@@ -4472,12 +4473,13 @@ static void run_discovered_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   t_discovered_slot = slot >= 0 ? (uint64_t)slot
       : nr_cfg_epoch_observe_slot(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame);
   t_discovered_attempted = false;
+  t_discovered_prescreen_passed = false;
   t_candidate_share = share;
   nr_pdcch_blind_monitor_cfg_override(cfg);
   nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial, slot);
   nr_pdcch_blind_monitor_cfg_override(NULL);
   nr_pdcch_blind_phase2_lock();
-  if (t_discovered_attempted) nr_pdcch_discovered_step(token, t_discovered_slot);
+  if (t_discovered_attempted) nr_pdcch_discovered_step_ex(token, t_discovered_slot, t_discovered_prescreen_passed);
   nr_pdcch_blind_phase2_unlock();
   t_discovered_token = 0;
   t_candidate_share = 0;
@@ -6792,6 +6794,9 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
           continue;
         }
       }
+
+      /* This candidate cleared the energy / known-prescreen / DM-RS gates: the occasion counts for the adaptive dwell. */
+      if (t_discovered_token) t_discovered_prescreen_passed = true;
 
       /* TEMPORARY DIAGNOSTIC (2026-08-04): separate "channel estimation/equalisation is wrong" from
        * "descrambling/decode is wrong". At this point pdcch_e_rx holds the EQUALISED symbols for this

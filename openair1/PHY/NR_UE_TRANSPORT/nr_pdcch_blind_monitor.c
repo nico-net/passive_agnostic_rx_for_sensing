@@ -679,6 +679,8 @@ bool nr_pdcch_blind_monitor_autodiscover_apply_pending(void)
  * from this cell's own measured accept rate (~700 accepts/s at ~2000 occasions/s, and a
  * confirmation needs two sightings of the same RNTI), with a wide margin for a quieter cell. */
 #define NR_PDCCH_EXTENT_VERIFY_OCC 4000
+/* ISAC_PDCCH_DWELL_ADAPTIVE: hard cap on stepped occasions of one discovered dwell, counted whether or not the prescreen passed */
+#define NR_PDCCH_DWELL_ADAPTIVE_CAP 40000
 
 static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
 static int  s_ext_n        = 0;
@@ -1027,6 +1029,7 @@ static bool discovered_load(const char *path)
 static struct {
   disc_coreset_t line[128]; /* candidate queue may exceed the eight verified bank slots */
   int n, next, occasions;
+  uint64_t total_occ; /* every stepped occasion of the dwell (ISAC_PDCCH_DWELL_ADAPTIVE hard cap) */
   uint64_t generation, last_slot;
   uint32_t epoch;
   bool active;
@@ -1254,6 +1257,7 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     memset(s_add_disc.evidence, 0, sizeof(s_add_disc.evidence));
     s_add_disc.active = true;
     s_add_disc.occasions = 0;
+    s_add_disc.total_occ = 0;
     s_add_disc.last_slot = UINT64_MAX;
     ++s_add_disc.generation;
     LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d dwell start sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d\n",
@@ -1268,17 +1272,59 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
   return true;
 }
 
-/* nr_pdcch_discovered_step: advances the active dwell by one occasion; after NR_PDCCH_EXTENT_VERIFY_OCC occasions without fresh CRC evidence the CORESET is rejected and the next queued one starts. Ignores stale tokens and repeated slots. Caller: nr_pdcch_blind_monitor_run_occasion() after the discovered pass. */
-void nr_pdcch_discovered_step(uint64_t token, uint64_t slot)
+/* nr_pdcch_dwell_adaptive_enabled: ISAC_PDCCH_DWELL_ADAPTIVE=1 (ACQ-ROBUST, default off); read per call like the other discovered-queue flags.
+ *   Caller: nr_pdcch_discovered_step_ex(). */
+bool nr_pdcch_dwell_adaptive_enabled(void)
+{
+  const char *e = getenv("ISAC_PDCCH_DWELL_ADAPTIVE");
+  return e && strcmp(e, "1") == 0;
+}
+
+/* nr_pdcch_discovered_step_ex: advances the active dwell by one occasion; prescreen_passed says whether at least one candidate of THIS dwell pass in THIS occasion passed the prescreen (energy / DM-RS gates) and reached decoding.
+ *   Flag off (ISAC_PDCCH_DWELL_ADAPTIVE unset): prescreen_passed is ignored; after NR_PDCCH_EXTENT_VERIFY_OCC occasions without fresh CRC evidence the CORESET is rejected and the next queued one starts.
+ *   Flag on: only occasions with prescreen_passed count toward NR_PDCCH_EXTENT_VERIFY_OCC (a quiet cell sends almost no DCI, so the correct geometry must not be rejected for silence); every occasion counts toward the hard cap NR_PDCCH_DWELL_ADAPTIVE_CAP, which rejects anyway.
+ *   Ignores stale tokens and repeated slots. Callers: nr_pdcch_discovered_step(), run_discovered_occasion() in nr_pdcch_blind_monitor_rt.c. */
+void nr_pdcch_discovered_step_ex(uint64_t token, uint64_t slot, bool prescreen_passed)
 {
   if (!nr_pdcch_discovered_enabled() || !nr_cfg_epoch_work_current() || !s_add_disc.active || token != s_add_disc.generation
       || (s_add_disc.last_slot != UINT64_MAX && slot <= s_add_disc.last_slot)) return;
   s_add_disc.last_slot = slot;
+  if (nr_pdcch_dwell_adaptive_enabled()) {
+    ++s_add_disc.total_occ;
+    if (prescreen_passed) ++s_add_disc.occasions;
+    if (s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC && s_add_disc.total_occ < NR_PDCCH_DWELL_ADAPTIVE_CAP) return;
+    LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence: %d prescreen-passing occasions, %llu total, ISAC_PDCCH_DWELL_ADAPTIVE)\n",
+          s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions,
+          (unsigned long long)s_add_disc.total_occ);
+    s_add_disc.active = false;
+    ++s_add_disc.next;
+    return;
+  }
   if (++s_add_disc.occasions < NR_PDCCH_EXTENT_VERIFY_OCC) return;
   LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (no fresh CRC evidence in %d occasions)\n",
         s_add_disc.next + 1, s_add_disc.n, s_add_disc.cfg.coreset_pdcch_dmrs_scrambling_id, s_add_disc.occasions);
   s_add_disc.active = false;
   ++s_add_disc.next;
+}
+
+/* nr_pdcch_discovered_step: the pre-ACQ-ROBUST entry point (every occasion counts as prescreen-passing). Callers: unit tests. */
+void nr_pdcch_discovered_step(uint64_t token, uint64_t slot)
+{
+  nr_pdcch_discovered_step_ex(token, slot, true);
+}
+
+/* nr_pdcch_no_fake_footprint_enabled: ISAC_PDCCH_NO_FAKE_FOOTPRINT=1 (ACQ-ROBUST, default off). Caller: techA_commit_apply(). */
+bool nr_pdcch_no_fake_footprint_enabled(void)
+{
+  const char *e = getenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
+  return e && strcmp(e, "1") == 0;
+}
+
+/* nr_pdcch_discovered_unverified_pending: true while the discovered-CORESET queue is on (ISAC_PDCCH_NID_BANK) and has an active dwell or queued entries not yet verified or rejected.
+ *   Racy read of queue counters (benign: a decision made one slot late). Callers: techA_commit_apply(), unit tests. */
+bool nr_pdcch_discovered_unverified_pending(void)
+{
+  return nr_pdcch_discovered_enabled() && (s_add_disc.active || s_add_disc.next < s_add_disc.n);
 }
 
 /* nr_pdcch_discovered_observe: records one accepted DCI of the active dwell (RNTI, length, slot, payload); when the same RNTI and length show a different payload at a later slot the CORESET is verified and added to the bank.
@@ -2638,9 +2684,13 @@ static void techA_commit_apply(const techA_commit_t *c)
    * hypotheses follow, each with the same dwell, when the non-interleaved one collects no
    * dedicated-DCI evidence (nr_pdcch_map_candidates, extent_advance). */
   map_restart(span_rb, g_cfg.coreset_duration, pci);
-  g_cfg.ss_monitoring_slot_periodicity   = 1;
-  g_cfg.ss_monitoring_slot_offset        = 0;
-  g_cfg.ss_duration                      = 1;
+  /* ISAC_PDCCH_NO_FAKE_FOOTPRINT: while the discovered-CORESET queue still has unverified entries the root period/offset/duration
+   * stays as is; forcing 1/0/1 makes nr_pdcch_ss0_occasion() true every slot and the dedicated-only scan path never runs again. */
+  if (!(nr_pdcch_no_fake_footprint_enabled() && nr_pdcch_discovered_unverified_pending())) {
+    g_cfg.ss_monitoring_slot_periodicity   = 1;
+    g_cfg.ss_monitoring_slot_offset        = 0;
+    g_cfg.ss_duration                      = 1;
+  }
   gate_publish();
   g_cfg.ss_first_symbol                  = symbol;
   /* dmrs_typeA_position is the ASN.1 ENUM (NR_MIB__dmrs_TypeA_Position_pos2 = 0, pos3 = 1), NOT a

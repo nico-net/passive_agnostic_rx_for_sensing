@@ -18,13 +18,15 @@ static void wait_ms(int n) {std::this_thread::sleep_for(std::chrono::millisecond
 int main(int argc,char **argv) {
  bool device=argc>1 && !strcmp(argv[1],"--device");
  bool duty=argc>1 && !strcmp(argv[1],"--duty");
- bool incremental=duty || (argc>1 && !strcmp(argv[1],"--incremental"));
+ bool nodrop=argc>1 && !strcmp(argv[1],"--nodrop");
+ bool incremental=duty || nodrop || (argc>1 && !strcmp(argv[1],"--incremental"));
  if(duty) {unsetenv("ISAC_GPU_BUDGET");setenv("ISAC_PDCCH_NID_GPU_DUTY","1",1);setenv("ISAC_PDCCH_NID_GPU_RECHECK_MS","120",1);setenv("ISAC_PDCCH_NID_GPU_MAINTAIN_MS","100",1);}
  int batch_size=incremental?64:336;
  int dur=incremental?3:device?1:(argc>1?atoi(argv[1]):1);
  logInit();
  setenv("ISAC_PDCCH_NID_GPU_INCREMENTAL",incremental?"1":"0",1);setenv("ISAC_PDCCH_NID_MULTISYMBOL",incremental?"1":"0",1);
  unsetenv("ISAC_PDCCH_NID_GPU");
+ if(nodrop)setenv("ISAC_PDCCH_NID_GPU_NODROP","1",1);
  nr_pdcch_nid_record_t records[16],sentinel[16];memset(records,0xa5,sizeof(records));memcpy(sentinel,records,sizeof(records));
  uint64_t generation=0;
  CHECK(nr_pdcch_nid_gpu_start(36)==0 && !nr_pdcch_nid_gpu_running());
@@ -54,6 +56,42 @@ int main(int argc,char **argv) {
   }
   return true;
  };
+
+ if(nodrop) {
+  auto push_one=[&](int k) {
+   for(int d=0;d<dur;d++)for(int i=0;i<432;i++)fft[d*512+(499+i)%512]=nr_pdcch_nid_iq_t{(int16_t)(k+d+i),(int16_t)(-k-d-i)};
+   return nr_pdcch_nid_gpu_push(fft.data(),512,499,k/14,k%14,&b.cfg);
+  };
+  CHECK(nr_pdcch_nid_gpu_dropped_snapshots()==0);
+  CHECK(push_batch(true));
+  int n=-1;for(int i=0;i<2000 && n<0;++i) {wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);}
+  CHECK(n==1);
+  // Worker blocked in upload holding one batch, two more queued: no staging batch is free.
+  pause(1);CHECK(push_batch(true));wait_ms(30);CHECK(push_batch(true));CHECK(push_batch(true));
+  CHECK(nr_pdcch_nid_gpu_dropped_snapshots()==0);
+  // Snapshot of slot 0 (14 symbols): the first symbol waits <= ~500 us and is refused; the other 13 are refused at once without waiting.
+  auto t0=std::chrono::steady_clock::now();
+  CHECK(push_one(0)!=0);
+  auto t1=std::chrono::steady_clock::now();
+  long us=std::chrono::duration_cast<std::chrono::microseconds>(t1-t0).count();
+  CHECK(us>=300 && us<20000);
+  for(int k=1;k<14;++k)CHECK(push_one(k)!=0);
+  auto t2=std::chrono::steady_clock::now();
+  CHECK(std::chrono::duration_cast<std::chrono::microseconds>(t2-t1).count()<4000);
+  CHECK(nr_pdcch_nid_gpu_dropped_snapshots()==1);
+  CHECK(push_one(14)!=0);  // slot 1, first symbol: a second whole snapshot
+  for(int k=15;k<28;++k)CHECK(push_one(k)!=0);
+  CHECK(nr_pdcch_nid_gpu_dropped_snapshots()==2);
+  pause(0);
+  for(int t=0;t<2000 && uploaded()<4;t++)wait_ms(1);
+  CHECK(uploaded()>=4);
+  // After the worker frees a batch the next snapshot is accepted in full and the counter stays.
+  CHECK(push_one(0)==0);
+  for(int k=1;k<14;++k)CHECK(push_one(k)==0);
+  CHECK(nr_pdcch_nid_gpu_dropped_snapshots()==2 && errors()==0);
+  nr_pdcch_nid_gpu_stop();dlclose(lib);
+  puts("PASS worker nodrop: bounded wait, whole-snapshot refusal, counter, recovery");return 0;
+ }
  if(duty) {
   CHECK(push_batch(true));
   int n=-1;for(int i=0;i<2000 && n<0;++i) {wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);}

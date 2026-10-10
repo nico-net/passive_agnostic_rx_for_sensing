@@ -2441,6 +2441,9 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_pdcch_nid_worker_duty COMMAND test_nr_pdcch_nid_worker --duty)
   set_tests_properties(test_nr_pdcch_nid_worker_duty PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
+  add_test(NAME test_nr_pdcch_nid_worker_nodrop COMMAND test_nr_pdcch_nid_worker --nodrop)
+  set_tests_properties(test_nr_pdcch_nid_worker_nodrop PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
   add_test(NAME test_nr_pdcch_nid_worker_incremental COMMAND test_nr_pdcch_nid_worker --incremental)
   set_tests_properties(test_nr_pdcch_nid_worker_incremental PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)

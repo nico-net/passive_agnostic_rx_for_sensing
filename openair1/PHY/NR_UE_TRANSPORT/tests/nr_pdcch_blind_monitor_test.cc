@@ -4688,6 +4688,94 @@ TEST_F(DiscoveredCover, QueueOrderCoversFirstThenPublishedLines) {
   EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
 }
 
+// ACQ-ROBUST: ISAC_PDCCH_DWELL_ADAPTIVE and ISAC_PDCCH_NO_FAKE_FOOTPRINT.
+struct DiscoveredRobust : DiscoveredCoresets {
+  static constexpr const char *kLine = "CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n";
+  void SetUp() override {
+    DiscoveredCoresets::SetUp();
+    unsetenv("ISAC_PDCCH_DWELL_ADAPTIVE"); unsetenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
+  }
+  void TearDown() override {
+    unsetenv("ISAC_PDCCH_DWELL_ADAPTIVE"); unsetenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
+    DiscoveredCoresets::TearDown();
+  }
+};
+
+TEST_F(DiscoveredRobust, FlagOffRejectsAt4000RegardlessOfPrescreen) {
+  lines(kLine);
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  for (int i = 0; i < 3999; ++i) nr_pdcch_discovered_step_ex(token, i, false);
+  EXPECT_TRUE(nr_pdcch_discovered_unverified_pending()); // still active
+  nr_pdcch_discovered_step_ex(token, 3999, false);       // 4000th occasion: rejected as before
+  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
+}
+
+TEST_F(DiscoveredRobust, AdaptiveNoPrescreenSurvivesUntilCap) {
+  setenv("ISAC_PDCCH_DWELL_ADAPTIVE", "1", 1);
+  lines(kLine);
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  for (int i = 0; i < 39999; ++i) nr_pdcch_discovered_step_ex(token, i, false);
+  EXPECT_TRUE(nr_pdcch_discovered_unverified_pending());  // 40000 - 1 occasions, none prescreened: alive
+  nr_pdcch_discovered_step_ex(token, 39999, false);        // the cap
+  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
+}
+
+TEST_F(DiscoveredRobust, AdaptivePrescreenWithoutCrcRejectsAt4000) {
+  setenv("ISAC_PDCCH_DWELL_ADAPTIVE", "1", 1);
+  lines(kLine);
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  for (int i = 0; i < 3999; ++i) nr_pdcch_discovered_step_ex(token, i, true);
+  EXPECT_TRUE(nr_pdcch_discovered_unverified_pending());
+  nr_pdcch_discovered_step_ex(token, 3999, true);
+  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
+}
+
+TEST_F(DiscoveredRobust, AdaptiveCountsOnlyPrescreenedOccasions) {
+  setenv("ISAC_PDCCH_DWELL_ADAPTIVE", "1", 1);
+  lines(kLine);
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  uint64_t slot = 0;
+  for (int i = 0; i < 3999; ++i) { nr_pdcch_discovered_step_ex(token, slot++, true); nr_pdcch_discovered_step_ex(token, slot++, false); }
+  EXPECT_TRUE(nr_pdcch_discovered_unverified_pending()); // 7998 occasions, 3999 prescreened
+  nr_pdcch_discovered_step_ex(token, slot++, true);
+  EXPECT_FALSE(nr_pdcch_discovered_unverified_pending());
+}
+
+TEST_F(DiscoveredRobust, NoFakeFootprintKeepsRootPeriodWhilePending) {
+  // Technique A fallback commit with the discovered queue holding an unverified entry: flag off overwrites the root SS period with 1/0/1,
+  // flag on keeps it; with nothing pending the flag changes nothing.
+  for (int mode = 0; mode < 3; ++mode) {  // 0 flag off + pending, 1 flag on + pending, 2 flag on + nothing pending
+    SCOPED_TRACE(mode);
+    ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(6, 1, 42, 0, 40, 0, 2, 0, 1, 2, 0, 0));
+    nr_pdcch_blind_monitor_autodiscover_reset();
+    nr_pdcch_discovered_reset();
+    if (mode == 1 || mode == 2) setenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT", "1", 1); else unsetenv("ISAC_PDCCH_NO_FAKE_FOOTPRINT");
+    if (mode != 2) lines(kLine);
+    EXPECT_EQ(nr_pdcch_discovered_unverified_pending(), mode != 2);
+    const int period0 = nr_pdcch_blind_monitor_get_cfg()->ss_monitoring_slot_periodicity;
+    const int offset0 = nr_pdcch_blind_monitor_get_cfg()->ss_monitoring_slot_offset;
+    const int dur0 = nr_pdcch_blind_monitor_get_cfg()->ss_duration;
+    ASSERT_NE(period0, 1) << "precondition: the parked CSS0 period must differ from the forced 1";
+    const int calls = RunSparseDiscoveryToConvergence(18, kGate2MaxCalls);
+    ASSERT_GT(calls, 0);
+    const auto *g = nr_pdcch_blind_monitor_get_cfg();
+    EXPECT_EQ(g->coreset_rb_offset, 18); // the footprint itself is committed either way
+    if (mode == 1) {
+      EXPECT_EQ(g->ss_monitoring_slot_periodicity, period0);
+      EXPECT_EQ(g->ss_monitoring_slot_offset, offset0);
+      EXPECT_EQ(g->ss_duration, dur0);
+    } else {
+      EXPECT_EQ(g->ss_monitoring_slot_periodicity, 1);
+      EXPECT_EQ(g->ss_monitoring_slot_offset, 0);
+      EXPECT_EQ(g->ss_duration, 1);
+    }
+  }
+}
+
 // ISAC_PDCCH_RBOFFSET_FIX: CPU PDCCH extraction group positions (TS 38.213 10.1, TS 38.211 7.3.2.2).
 TEST(PdcchRbOffset, GroupPositionsFollowBitmapAndOffset) {
   auto bitmap = [](int first, int n) {

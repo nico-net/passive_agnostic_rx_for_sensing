@@ -303,6 +303,10 @@ bool nr_pdcch_discovered_enabled(void);
 bool nr_pdcch_discovered_load(const char *path);
 bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *token, int carrier_rb);
 void nr_pdcch_discovered_step(uint64_t token, uint64_t slot);
+void nr_pdcch_discovered_step_ex(uint64_t token, uint64_t slot, bool prescreen_passed);
+bool nr_pdcch_dwell_adaptive_enabled(void);
+bool nr_pdcch_no_fake_footprint_enabled(void);
+bool nr_pdcch_discovered_unverified_pending(void);
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length);
 void nr_pdcch_discovered_reset(void);
