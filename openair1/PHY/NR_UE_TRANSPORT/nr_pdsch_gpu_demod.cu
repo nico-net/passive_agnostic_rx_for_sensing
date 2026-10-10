@@ -33,6 +33,7 @@ struct Ctx {
   cudaStream_t s;
   nrd_c16 *y, *h; /* device memory, [14][4][EXT] and [14][16][EXT] */
   double2 *cs;       /* ALIGN: per (symbol, branch, chunk) rotation, nan = none */
+  double2 *tm;       /* ALIGN: per (symbol, branch, RE) correlation terms */
   double2 *xs, *sd; /* EVM: per-RE zero-forcing solution and decisions [14][2][EXT] */
   double *part, *sum; /* EVM block partials [14][EVM_NCH][EVM_P] and per-symbol sums [14][EVM_P] */
   nrd_c16 *hy, *hh;   /* pinned host copies of y/h for the CPU EVM fallback (ISAC_PDSCH_GPU_EXACT_DEMOD_EVM=0) */
@@ -189,7 +190,35 @@ __global__ void k_mask_pw(const nr_gpu_demod_job_t j, nrd_c16 *h, Shared *sh)
 
 /* ---- ISAC_RX_MRC_ALIGN, phase 1: one thread per (symbol, chunk, branch) forms the chunk's cross-correlation sequentially in
  * RE order with GCC's FMA pattern (exactly the CPU's sums) and the rotation (cos, sin); phase 2 rotates every RE. --------- */
-__global__ void k_align_cs(const nr_gpu_demod_job_t j, const nrd_c16 *y, const nrd_c16 *h, const Shared *sh, double2 *cs)
+__global__ void k_align_terms(const nr_gpu_demod_job_t j, const nrd_c16 *y, const nrd_c16 *h, const Shared *sh, double2 *tm)
+{
+  /* the per-RE terms of the CPU's cr/ci sums, one thread per (RE, branch): t_r = fma(uar, urr, uai*uri), t_i = fma(uai, urr, -(uar*uri)) */
+  const int m = blockIdx.y;
+  if (!(j.sym_mask >> m & 1))
+    return;
+  const int ref = sh->ref[m];
+  if (ref < 0)
+    return;
+  const nrd_decision d = sh->d;
+  const uint32_t nre = j.nre[m];
+  const nrd_c16 *hr_row = h + ((size_t)m * 16 + ref) * EXT;
+  const nrd_c16 *yr_row = y + ((size_t)m * NR_GPU_DEMOD_MAX_RX + ref) * EXT;
+  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < nre; i += gridDim.x * blockDim.x) {
+    const nrd_c16 hr = hr_row[i], yr = yr_row[i];
+    const double urr = (double)hr.r * yr.r + (double)hr.i * yr.i, uri = (double)hr.r * yr.i - (double)hr.i * yr.r;
+    for (int w = 0; w < d.mrc_nb_rx && w < 4; w++) {
+      const int a = d.mrc_rx_index + w;
+      if (a == ref)
+        continue;
+      const nrd_c16 ha = h[((size_t)m * 16 + a) * EXT + i], ya = y[((size_t)m * NR_GPU_DEMOD_MAX_RX + a) * EXT + i];
+      /* products of int16 are exact in double, and so are these sums (|.| < 2^31) */
+      const double uar = (double)ha.r * ya.r + (double)ha.i * ya.i, uai = (double)ha.r * ya.i - (double)ha.i * ya.r;
+      tm[((size_t)m * 4 + w) * EXT + i] = make_double2(__fma_rn(uar, urr, __dmul_rn(uai, uri)),   /* fmadd d, uar, urr, (uai*uri) */
+                                                       __fma_rn(uai, urr, -__dmul_rn(uar, uri))); /* fnmsub d, uai, urr, (uar*uri) */
+    }
+  }
+}
+__global__ void k_align_cs(const nr_gpu_demod_job_t j, const Shared *sh, const double2 *tm, double2 *cs)
 {
   const int m = blockIdx.y;
   if (!(j.sym_mask >> m & 1))
@@ -212,18 +241,12 @@ __global__ void k_align_cs(const nr_gpu_demod_job_t j, const nrd_c16 *y, const n
   if (c0 >= nre)
     return;
   const uint32_t c1 = c0 + chunk < nre ? c0 + chunk : nre;
-  const nrd_c16 *ha_row = h + ((size_t)m * 16 + a) * EXT;
-  const nrd_c16 *hr_row = h + ((size_t)m * 16 + ref) * EXT;
-  const nrd_c16 *ya_row = y + ((size_t)m * NR_GPU_DEMOD_MAX_RX + a) * EXT;
-  const nrd_c16 *yr_row = y + ((size_t)m * NR_GPU_DEMOD_MAX_RX + ref) * EXT;
+  const double2 *T = tm + ((size_t)m * 4 + (idx & 3)) * EXT;
   double cr = 0.0, ci = 0.0;
-  for (uint32_t i = c0; i < c1; i++) {
-    const nrd_c16 ha = ha_row[i], ya = ya_row[i], hr = hr_row[i], yr = yr_row[i];
-    /* products of int16 are exact in double, and so are these sums (|.| < 2^31) */
-    const double uar = (double)ha.r * ya.r + (double)ha.i * ya.i, uai = (double)ha.r * ya.i - (double)ha.i * ya.r;
-    const double urr = (double)hr.r * yr.r + (double)hr.i * yr.i, uri = (double)hr.r * yr.i - (double)hr.i * yr.r;
-    cr = __dadd_rn(cr, __fma_rn(uar, urr, __dmul_rn(uai, uri)));  /* fmadd d, uar, urr, (uai*uri); fadd */
-    ci = __dadd_rn(ci, __fma_rn(uai, urr, -__dmul_rn(uar, uri))); /* fnmsub d, uai, urr, (uar*uri); fadd */
+  for (uint32_t i = c0; i < c1; i++) { /* the CPU's sequential fadd, RE order */
+    const double2 q = T[i];
+    cr = __dadd_rn(cr, q.x);
+    ci = __dadd_rn(ci, q.y);
   }
   const double mag = __dsqrt_rn(__fma_rn(cr, cr, __dmul_rn(ci, ci))); /* fmul ci*ci; fmadd cr,cr; fsqrt */
   if (mag > 0.0)
@@ -529,17 +552,27 @@ template <typename T> __device__ __forceinline__ void evm_slice(T x, T scale, in
 /* Per-RE math type of the GPU EVM: T = float (default, ISAC_PDSCH_GPU_EXACT_DEMOD_EVM=1; the GB10 has ~1/64-rate FP64)
  * or double (=2, the CPU's formulas in double). Sums are always accumulated in double. Diagnostic only: the decoder's
  * LLRs never depend on it. */
-/* block column sums of K float terms per thread, in double, thread order (deterministic): out[k] = sum_t v_t[k] */
-template <int K> __device__ void block_colsum(const float (&v)[K], float *col, double *out)
+/* block sums of K float terms per thread: float warp shuffles, then the 8 warp partials in double (fixed order) */
+template <int K> __device__ void block_colsum(const float (&v0)[K], float *col, double *out)
 {
-  const int t = threadIdx.x, nt = blockDim.x;
-  for (int k = 0; k < K; k++)
-    col[k * nt + t] = v[k];
+  const int t = threadIdx.x, lane = t & 31, w = t >> 5, nw = blockDim.x >> 5;
+  float v[K];
+#pragma unroll
+  for (int k = 0; k < K; k++) {
+    v[k] = v0[k];
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+      v[k] += __shfl_down_sync(0xffffffffu, v[k], off);
+  }
+  if (lane == 0)
+#pragma unroll
+    for (int k = 0; k < K; k++)
+      col[w * K + k] = v[k];
   __syncthreads();
   if (t < K) {
     double a = 0.0;
-    for (int q = 0; q < nt; q++)
-      a += (double)col[t * nt + q];
+    for (int q = 0; q < nw; q++)
+      a += (double)col[q * K + t];
     out[t] = a;
   }
   __syncthreads();
@@ -688,7 +721,7 @@ __global__ void k_evm2(const nr_gpu_demod_job_t j, const nrd_c16 *y, const nrd_c
                        double *part, const double *sum)
 {
   __shared__ double shd[8 * 27];
-  __shared__ float colf[27 * 256];
+  __shared__ float colf[8 * 27];
   __shared__ float s_e[2][EVM_CH];  /* e2 / ideal per (layer, RE of the block), -1 = no term */
   __shared__ double s_sc[2];
   const int m = blockIdx.y, t = threadIdx.x;
@@ -815,7 +848,7 @@ __global__ void k_evm3(const nr_gpu_demod_job_t j, const nrd_c16 *y, const nrd_c
                        const Shared *sh, double *part, const double *sum)
 {
   __shared__ double shd[8 * 20];
-  __shared__ float colf[20 * 256];
+  __shared__ float colf[8 * 20];
   __shared__ double s_ar[4][2];
   const int m = blockIdx.y, t = threadIdx.x;
   EvmCtx c;
@@ -982,6 +1015,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
         || cudaMallocHost((void **)&x.hy, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
         || cudaMallocHost((void **)&x.hh, sizeof(nrd_c16) * NSYM * 16 * EXT) != cudaSuccess
         || cudaMalloc((void **)&x.cs, sizeof(double2) * NSYM * 4 * MAXCH) != cudaSuccess
+        || cudaMalloc((void **)&x.tm, sizeof(double2) * NSYM * 4 * EXT) != cudaSuccess
         || cudaMalloc((void **)&x.sd, sizeof(double2) * NSYM * 2 * EXT) != cudaSuccess
         || cudaMalloc((void **)&x.part, sizeof(double) * NSYM * EVM_NCH * EVM_P) != cudaSuccess
         || cudaMalloc((void **)&x.sum, sizeof(double) * NSYM * EVM_P) != cudaSuccess
@@ -1009,7 +1043,8 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   j.ext = 16;
   k_gather<<<dim3(1, NSYM), 32, 0, g_ctx[0].s>>>(j, g_ctx[0].y, g_ctx[0].h);
   k_mask_pw<<<NSYM, 256, 0, g_ctx[0].s>>>(j, g_ctx[0].h, g_ctx[0].dsh);
-  k_align_cs<<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(j, g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh, g_ctx[0].cs);
+  k_align_terms<<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(j, g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh, g_ctx[0].tm);
+  k_align_cs<<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(j, g_ctx[0].dsh, g_ctx[0].tm, g_ctx[0].cs);
   k_align_rot<<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(j, g_ctx[0].h, g_ctx[0].dsh, g_ctx[0].cs);
   k_comp<<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(j, g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_kappa<<<NSYM, 256, 0, g_ctx[0].s>>>(j, g_ctx[0].dsh);
@@ -1064,7 +1099,8 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   if (g_prof) cudaEventRecord(x.ev[3], x.s);
   if (jj.nl == 1 && jj.align)
   {
-    k_align_cs<<<dim3((MAXCH * 4 + 127) / 128, NSYM), 128, 0, x.s>>>(jj, x.y, x.h, x.dsh, x.cs);
+    k_align_terms<<<dim3(gx, NSYM), 128, 0, x.s>>>(jj, x.y, x.h, x.dsh, x.tm);
+    k_align_cs<<<dim3((MAXCH * 4 + 127) / 128, NSYM), 128, 0, x.s>>>(jj, x.dsh, x.tm, x.cs);
     k_align_rot<<<dim3(gx, NSYM), 128, 0, x.s>>>(jj, x.h, x.dsh, x.cs);
   }
   if (g_prof) cudaEventRecord(x.ev[4], x.s);
