@@ -1996,6 +1996,14 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   }
   if (!atomic_load_explicit(&g_gch_on, memory_order_relaxed))
     return -1;
+  /* TIM-PDSCH crash fix: the entry is NULL again once the GPU exact FEP disables itself (its self-check MISMATCH sets
+   * the module's g_on = 0), while g_gch_on stays latched at 1: calling it then jumped to address 0 (live 2026-10-10
+   * 20:23, SIGSEGV in passivePdsch1). Read it once per grant and fall back to the CPU estimator when it is gone. */
+  const nr_gpu_chest_fn chest_fn = nr_pdsch_gpu_exact_chest_entry ? nr_pdsch_gpu_exact_chest_entry() : NULL;
+  if (!chest_fn) {
+    atomic_fetch_add_explicit(&g_gch_refused, 1, memory_order_relaxed);
+    return -1;
+  }
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int config_type = dlsch->dmrsConfigType;
   if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) { /* the estimator's own lazy switch */
@@ -2089,7 +2097,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
     }
   }
   j->n_rows = r;
-  if (nr_pdsch_gpu_exact_chest_entry()(j) != 0) {
+  if (chest_fn(j) != 0) {
     atomic_fetch_add_explicit(&g_gch_refused, 1, memory_order_relaxed);
     return -1;
   }
