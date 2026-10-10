@@ -1184,11 +1184,10 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   const auto t0 = std::chrono::steady_clock::now();
   int *dout = (int *)nr_gpu_device_ptr(g_ctx_cout[c]);
   nrch::k_ls<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(*j, g_ctx_ls[c]);
-  for (int r0 = 0; r0 < j->n_rows; r0 += nr_exact::DELAY_MAX_ROWS) {
-    const int n = std::min(nr_exact::DELAY_MAX_ROWS, j->n_rows - r0);
+  {
     nr_exact::DelayIO io = {};
-    for (int r = 0; r < n; r++) io.ls[r] = g_ctx_ls[c] + (size_t)(r0 + r) * 4096;
-    nr_exact::k_delay_exact<<<n, nr_exact::THREADS, 0, g_ctx_stream[c]>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096, dout + 3 * r0);
+    io.base = g_ctx_ls[c]; /* every row in one launch */
+    nr_exact::k_delay_exact<<<j->n_rows, nr_exact::THREADS, 0, g_ctx_stream[c]>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096, dout);
   }
   nrch::k_fir<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(*j, g_ctx_ls[c], dout, (unsigned *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS));
   cudaError_t e = cudaPeekAtLastError();

@@ -52,9 +52,11 @@ typedef struct {
   int l2_delta;    /* ISAC_L2MAXH_DELTA */
   int align;       /* ISAC_RX_MRC_ALIGN */
   int mag_per_layer;
+  int wide_mrc;    /* nr_pdsch_decode_wide_mrc (1-layer QPSK recovery arm) */
   int want_kappa;  /* EVM armed: per-symbol kappa sums */
   int want_evm;    /* EVM armed: GPU EVM partial sums (else the host runs its CPU copy of the EVM block) */
   int evm_erase;   /* nr_dlsch_csi_erase_n > 0 */
+  int evm_fp64;    /* GPU EVM per-RE math in double (else float; sums always double) */
   /* outputs */
   int32_t log2_maxh;
   int used_branch_set, used_branch, mrc_rx_index, mrc_nb_rx;

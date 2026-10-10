@@ -323,7 +323,7 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     return RF_PTRS;
   if (nr_dlsch_forced_mask >= 0 || nr_dlsch_forced_branch >= 0)
     return RF_FORCED;
-  if (nr_dlsch_irc_override > 0 || nr_dlsch_eq_override >= 0 || nr_pdsch_decode_wide_mrc || c->rho || !c->ssb_rm
+  if (nr_dlsch_irc_override > 0 || nr_dlsch_eq_override >= 0 || c->rho || !c->ssb_rm
       || c->scope->copy_chanest_to_scope || c->scope->copy_rxdataF_to_scope || c->ue->phy_sim_pdsch_rxdataF_ext
       || c->ue->phy_sim_pdsch_rxdataF_comp || c->ue->phy_sim_pdsch_dl_ch_estimates_ext || c->ue->do_ml)
     return RF_OVERRIDE;
@@ -512,10 +512,12 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j.l2_delta = l2d;
   j.align = align;
   j.mag_per_layer = nl >= 2; /* mode 2 only: per-layer thresholds */
+  j.wide_mrc = nr_pdsch_decode_wide_mrc;
   j.want_kappa = nr_pdsch_evm_acc.armed;
   if (g_gpu_evm < 0)
-    g_gpu_evm = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM", 1); /* 0: the CPU copy of the EVM block (exact, slow) */
+    g_gpu_evm = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM", 1); /* 1: GPU float, 2: GPU double, 0: CPU copy (exact, slow) */
   j.want_evm = nr_pdsch_evm_acc.armed && g_gpu_evm && nl <= 2;
+  j.evm_fp64 = g_gpu_evm == 2;
   j.evm_erase = nr_dlsch_csi_erase_n > 0;
   const uint64_t t0 = now_ns();
   if (g_run(&j) != 0)
@@ -604,9 +606,10 @@ static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const
   }
   if (g_gpu_evm > 0) { /* GPU EVM: block-reduced sums, compared to rounding; counted, never disables the path */
     const double rel = acc_c->err > 0 ? fabs(acc_g->err - acc_c->err) / acc_c->err : fabs(acc_g->err);
+    const double tol = g_gpu_evm == 2 ? 1e-9 : 1e-4; /* float per-RE math: relative error of the sums ~1e-6 */
     const int same = acc_g->n_re == acc_c->n_re && acc_g->n_sym == acc_c->n_sym && acc_g->kappa_n == acc_c->kappa_n
                      && acc_g->kappa_sum == acc_c->kappa_sum && memcmp(acc_g->n_rb, acc_c->n_rb, sizeof(acc_g->n_rb)) == 0
-                     && memcmp(acc_g->n_k, acc_c->n_k, sizeof(acc_g->n_k)) == 0 && rel < 1e-9;
+                     && memcmp(acc_g->n_k, acc_c->n_k, sizeof(acc_g->n_k)) == 0 && rel < tol;
     atomic_fetch_add_explicit(same ? &g_evm_close : &g_evm_far, 1, memory_order_relaxed);
     uint64_t q = (uint64_t)(rel * 1e18), mx = atomic_load(&g_evm_maxrel);
     while (q > mx && !atomic_compare_exchange_weak(&g_evm_maxrel, &mx, q)) {}

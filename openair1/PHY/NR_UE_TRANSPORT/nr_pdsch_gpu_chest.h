@@ -6,7 +6,7 @@
 #ifndef NR_PDSCH_GPU_CHEST_H
 #define NR_PDSCH_GPU_CHEST_H
 #include <stdint.h>
-#define NR_GPU_CHEST_MAX_ROWS 128
+#define NR_GPU_CHEST_MAX_ROWS 256
 typedef struct {
   const int16_t *rxF;  /* c16: &rxdataF[a][symbol * N + delta] */
   const int16_t *pil;  /* c16: &pilot[(6 or 4) * rb_offset] of this (symbol, layer) */

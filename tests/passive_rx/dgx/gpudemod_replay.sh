@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# GPU-DEMOD offline A/B on recorded raw IQ (never radio): ota/t26l.env minus radio-only knobs, host-safe cores.
+# GPU-DEMOD offline A/B on recorded raw IQ (never radio): ota/${GD_ENV:-t26m}.env minus radio-only knobs, host-safe cores.
 #   gpudemod_replay.sh <b|old> <name> [ENV=...]
-# The base already carries t26l's GPU6 front end (ISAC_PDSCH_GPU_EXACT_FEP=1, ISAC_CHEST_GPU_DELAY=1); add
+# The base already carries t26l/t26m's GPU6 front end (ISAC_PDSCH_GPU_EXACT_FEP=1, ISAC_CHEST_GPU_DELAY=1); add
 # ISAC_PDSCH_GPU_EXACT_DEMOD=1 [ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK=1] etc. as extra arguments.
 set -euo pipefail
 root=$(readlink -f "$(dirname "$0")/../../..")
@@ -12,7 +12,7 @@ case "$capture" in
   old) cap=/home/nicola/NICOLA/ota_runs/raw_pci415_12s_20261008; tick=210036277 ;;
   *) exit 2 ;;
 esac
-read -r -a envs < "$orch/ota/t26l.env"
+read -r -a envs < "$orch/ota/${GD_ENV:-t26m}.env"
 base=()
 for kv in "${envs[@]}"; do
   case "$kv" in
