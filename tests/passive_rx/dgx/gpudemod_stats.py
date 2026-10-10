@@ -16,19 +16,23 @@ def pct(v, q):
 
 
 for path in sys.argv[1:]:
-    pdtim, demod, chest = "", "", ""
+    pdtim, demod, chest, pctl, ldpc = "", "", "", "", ""
     span, jobs = [], []
     crc = collections.Counter()
     tot = collections.Counter()
     with open(path, errors="replace") as f:
         for raw in f:
             line = ANSI.sub("", raw)
-            if "SENSING: PDTIM" in line:
+            if "SENSING: PDTIMPCT" in line:
+                pctl = line
+            elif "SENSING: PDTIM" in line:
                 pdtim = line
             elif "GPU_EXACT_DEMOD calls" in line:
                 demod = line
             elif "GPU_EXACT_CHEST calls" in line:
                 chest = line
+            elif "GPU_EXACT_LDPC tbs" in line:
+                ldpc = line
             elif "PDSCH_SLOT_TIME" in line:
                 m = re.search(r"jobs=(\d+).* us=([\d.]+)", line)
                 if m:
@@ -51,7 +55,9 @@ for path in sys.argv[1:]:
           f" (jobs/slot p50={pct(jobs, 0.5)})")
     one = [s for s, j in zip(span, jobs) if j == 1]
     print(f"slot span us, 1-job slots: n={len(one)} p50={pct(one, 0.5):.0f} p99={pct(one, 0.99):.0f}")
-    for l in (demod, chest):
+    if pctl:
+        print("PDTIMPCT", pctl.strip().split("PDTIMPCT ")[-1])
+    for l in (demod, chest, ldpc):
         if l:
             print(l.strip().split("SENSING: ")[-1][:260])
     print("EVMGRANT crc-ok/total:", sum(crc.values()), "/", sum(tot.values()))

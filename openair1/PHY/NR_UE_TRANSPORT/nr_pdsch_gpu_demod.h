@@ -57,6 +57,8 @@ typedef struct {
   int want_evm;    /* EVM armed: GPU EVM partial sums (else the host runs its CPU copy of the EVM block) */
   int evm_erase;   /* nr_dlsch_csi_erase_n > 0 */
   int evm_fp64;    /* GPU EVM per-RE math in double (else float; sums always double) */
+  int qam_mode;    /* nl >= 2: nr_rx_pdsch()'s resolved ISAC_PDSCH_MMSE_MODE, 2 (float ZF) or 0 (stock fixed-point MMSE, nl >= 3) */
+  uint32_t nvar;   /* nr_rx_pdsch()'s nvar (stock MMSE diagonal loading nvar >> 3) */
   /* outputs */
   int32_t log2_maxh;
   int used_branch_set, used_branch, mrc_rx_index, mrc_nb_rx;
