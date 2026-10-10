@@ -2118,6 +2118,11 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
             ea->ref_sym[symbol] += ideal_pow;
             ea->err_k[symbol][i % 12] += (float)(e2 / ideal_pow);
             ea->n_k[symbol][i % 12]++;
+            if ((symbol == 0 || symbol == 1 || symbol == 3) && l == 0 && i / 12 < 276) { /* DECODE-RES per-RB map */
+              const int row = symbol == 0 ? 0 : symbol == 1 ? 1 : 2;
+              ea->err_rb[row][i / 12] += (float)(e2 / ideal_pow);
+              ea->n_rb[row][i / 12]++;
+            }
           }
           qr[l] += vi * si + vq * sq; qi[l] += vq * si - vi * sq; qd[l] += si * si + sq * sq; qx[l] += vi * vi + vq * vq;
           sr[l] = si / scale[l]; sq_[l] = sq / scale[l]; /* back in the channel's own units: one alpha per branch */

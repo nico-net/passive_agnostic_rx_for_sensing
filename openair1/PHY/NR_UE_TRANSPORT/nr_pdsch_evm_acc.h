@@ -31,6 +31,9 @@ typedef struct {
   float err_k[14][12];
   uint16_t n_k[14][12];
   double err_layer[4], ref_layer[4]; /* per-layer decision-directed error */
+  /* DECODE-RES: decision-directed error per allocation-relative RB on symbols 0, 1 and 3 (row 0/1/2), layer 0, no DM-RS on those symbols */
+  float err_rb[3][276];
+  uint16_t n_rb[3][276];
 } nr_pdsch_evm_acc_t;
 extern __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc;
 #endif
