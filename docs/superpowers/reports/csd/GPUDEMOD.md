@@ -12,9 +12,9 @@ demod module on a synthetic grant.
 * **Parity: met.** Every stage moved to the GPU reproduces the CPU outputs bit for bit, proved inside the receiver by
   CHECK flags that recompute every grant on the CPU and compare.
   - Demod (LLRs, `rxdataF_comp`, mags, `dl_valid_re`, `log2_maxh`, used branch): **0 mismatches** in every CHECK
-    run, one per build: 10 runs on b (10,000-24,000 grants each, 14,000 on the final build) and 5 on old (1,000-2,002
+    run, one per build: 11 runs on b (10,000-24,000 grants each, 14,000 on the final build) and 4 on old (1,000-2,002
     each, 2,000 on the final build). LLRs equal ⇒ LDPC input equal ⇒ CRC identical per grant by construction.
-  - Chest (every estimate row, all 4,096 entries, and every noise value): **0 mismatches** in 7 runs on b (6,000-
+  - Chest (every estimate row, all 4,096 entries, and every noise value): **0 mismatches** in 10 runs on b (6,000-
     26,000 grants each, 14,000 on the final build) and 4 on old (1,000-2,000 each), including PRG/VRB-segmented grants
     with up to 2,048 rows since `9b80863850`.
   - With `ISAC_PDSCH_PDCCH_RM=1` (t26m) on, the GPU path consumes WIDE-S0's combined rate-matching mask unchanged:
