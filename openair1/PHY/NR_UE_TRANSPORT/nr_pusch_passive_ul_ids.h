@@ -68,6 +68,8 @@ void nr_pusch_passive_ul_ids_current(uint16_t rnti, uint8_t nscid, uint16_t pci,
 void nr_pusch_passive_ul_ids_failed(const nr_ue_ul_ticket_t *ticket);
 void nr_pusch_passive_ul_ids_reset(uint16_t rnti);
 void nr_pusch_passive_ul_ids_reset_all(void);
+/* Test hook: the ISAC_UL_UE_STATE/ISAC_UL_PUSCH_CHAIN flags are cached on first use; tests that setenv must re-read. */
+void nr_pusch_passive_ul_ids_flags_reset_for_test(void);
 uint64_t nr_pusch_passive_ul_ids_dropped(void);
 
 /* Read-only view of the UL DM-RS identity estimate for one nSCID (0 or 1). Read the decision with

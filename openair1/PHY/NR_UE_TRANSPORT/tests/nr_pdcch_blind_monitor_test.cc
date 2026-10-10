@@ -5633,6 +5633,7 @@ TEST(EpochFeedback, InFlightJobAcrossBumpNotCredited) {
 
 TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   setenv("ISAC_UL_UE_STATE","1",1);
+  nr_pusch_passive_ul_ids_flags_reset_for_test(); /* flags are cached on first use by earlier tests */
   nr_pusch_passive_ul_ids_reset_all();
   nr_ue_ctx_t dl{};
   dl.identity_gen=1; dl.incarnation=0;
@@ -5664,6 +5665,7 @@ TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
   EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
   nr_pusch_passive_ul_ids_reset_all();
   unsetenv("ISAC_UL_UE_STATE");
+  nr_pusch_passive_ul_ids_flags_reset_for_test();
 }
 #include "nr_ul_first_pusch.h"
 
@@ -5688,6 +5690,7 @@ TEST(UlFirstPusch, TracksLockedIdentityAndNonzeroCrcOnly)
 TEST(UlFirstPusch, DataIdWalkRetainsDlPriorsAndCoversSkippedPosition)
 {
   setenv("ISAC_UL_PUSCH_CHAIN","1",1);
+  nr_pusch_passive_ul_ids_flags_reset_for_test();
   nr_pusch_passive_ul_ids_reset_all();
   nr_ue_ctx_t dl{};
   dl.identity_gen=11;
@@ -5709,4 +5712,5 @@ TEST(UlFirstPusch, DataIdWalkRetainsDlPriorsAndCoversSkippedPosition)
   EXPECT_EQ(data,7); /* the sweep resumes at the skipped position */
   nr_pusch_passive_ul_ids_reset_all();
   unsetenv("ISAC_UL_PUSCH_CHAIN");
+  nr_pusch_passive_ul_ids_flags_reset_for_test();
 }
