@@ -386,6 +386,91 @@ void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
 void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
 #include "nr_dmrs_id_estimate.h"
+#include "nr_pdsch_dmrs_scan.h"
+/* TIM-PDSCH ISAC_PDSCH_DMRS_ID_SCAN=<scans per second of signal time> (default off; 1 = 8/s): blind per-UE PDSCH DM-RS
+ * identity scan over 0..65535 (nr_pdsch_dmrs_scan.h) on the DM-RS symbol of slots carrying an unsolved dedicated
+ * grant; the identities found are voted for every C-RNTI whose PDSCH is in that slot. A slot is scanned once (cache). */
+static int dmrs_scan_rate(void)
+{
+  static _Atomic int r = -1;
+  int v = atomic_load(&r);
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDSCH_DMRS_ID_SCAN");
+    v = e ? atoi(e) : 0;
+    if (v == 1) v = 8;
+    if (v < 0) v = 0;
+    atomic_store(&r, v);
+  }
+  return v;
+}
+typedef struct { int64_t abs; int n; nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS]; } dmrs_scan_slot_t;
+static dmrs_scan_slot_t g_scan_cache[32];
+static int64_t g_scan_last_abs = -1000000;
+static uint64_t g_scan_n, g_scan_hits, g_scan_us, g_pool_n, g_pool_us;
+static pthread_mutex_t g_scan_mu = PTHREAD_MUTEX_INITIALIZER;
+/* vote, and log the RNTI's ranked identities whenever they change (the per-scan lines are rate limited) */
+static void dmrs_scan_vote_log(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t *h, int n)
+{
+  int a[2], b[2];
+  const int na = nr_dmrs_scan_rnti_ids(rnti, a, 2);
+  nr_dmrs_scan_vote(rnti, abs_slot, h, n);
+  const int nb = nr_dmrs_scan_rnti_ids(rnti, b, 2);
+  if (nb != na || (nb > 0 && a[0] != b[0]) || (nb > 1 && a[1] != b[1]))
+    LOG_A(PHY, "SENSING: DMRS_SCAN ids rnti=0x%04x abs=%ld ids=%d (%d %d) slots=%d\n", rnti, (long)abs_slot, nb,
+          nb > 0 ? b[0] : -1, nb > 1 ? b[1] : -1, nr_dmrs_scan_rnti_slots(rnti));
+}
+/* dmrs_scan_job: scan (rate-limited, once per slot) and vote for this job's RNTI. rx = the DM-RS symbol per antenna. */
+static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t abs_slot, int nr_slot, int sym,
+                          const int16_t *const *rx)
+{
+  const int rate = dmrs_scan_rate();
+  if (rate <= 0 || abs_slot < 0) return;
+  int ids[2];
+  if (nr_pdsch_solver_rep(rnti) >= 0) return; /* solved: nothing left to learn */
+  /* decided: no more full scans for it, but the cached/pool results keep voting, so an early wrong lead can be overtaken */
+  const bool decided = nr_dmrs_scan_rnti_ids(rnti, ids, 2) >= 1 && nr_dmrs_scan_rnti_slots(rnti) >= 4;
+  pthread_mutex_lock(&g_scan_mu);
+  dmrs_scan_slot_t *c = &g_scan_cache[abs_slot & 31];
+  if (c->abs == abs_slot) {
+    dmrs_scan_slot_t copy = *c;
+    pthread_mutex_unlock(&g_scan_mu);
+    if (copy.n >= 0) dmrs_scan_vote_log(rnti, abs_slot, copy.h, copy.n);
+    return;
+  }
+  /* a full 16-bit scan at most `rate` times per second of signal time; between them, only the identities full scans
+   * already found (cell-wide pool) are re-tested, which costs a few ms and lets every slot of the RNTI vote */
+  const int64_t gap = (int64_t)(1000 * fp->slots_per_subframe) / rate;
+  const bool full = !decided && abs_slot - g_scan_last_abs >= gap;
+  if (full) g_scan_last_abs = abs_slot;
+  c->abs = abs_slot; c->n = -1; /* in progress: concurrent consumers of this slot do not vote */
+  pthread_mutex_unlock(&g_scan_mu);
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS];
+  const int n = (full ? nr_dmrs_scan_slot : nr_dmrs_scan_slot_pool)(rx, fp->nb_antennas_rx, fp->ofdm_symbol_size,
+                                                                  fp->first_carrier_offset, fp->N_RB_DL, nr_slot, sym,
+                                                                  fp->symbols_per_slot, 6, h, NR_DMRS_SCAN_MAX_HITS);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  pthread_mutex_lock(&g_scan_mu);
+  if (c->abs == abs_slot) { c->n = n; memcpy(c->h, h, sizeof(h)); }
+  const uint64_t us = (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
+  if (full) { g_scan_n++; g_scan_hits += (uint64_t)n; g_scan_us += us; }
+  else { g_pool_n++; g_pool_us += us; }
+  const uint64_t sn = g_scan_n, sh = g_scan_hits, su = g_scan_us, pn = g_pool_n, pu = g_pool_us;
+  pthread_mutex_unlock(&g_scan_mu);
+  dmrs_scan_vote_log(rnti, abs_slot, h, n);
+  if (!full && (n == 0 || (pn % 50) != 1)) return; /* pool checks: log 1 in 50 */
+  char b[256] = "";
+  int u = 0;
+  for (int i = 0; i < n && u < (int)sizeof(b) - 40; i++)
+    u += snprintf(b + u, sizeof(b) - u, " %d/%d@%d+%d:%.2f(%.2f)", h[i].nid, h[i].nscid, h[i].rb0, h[i].nrb, h[i].score, h[i].second);
+  const int nd = nr_dmrs_scan_rnti_ids(rnti, ids, 2);
+  LOG_A(PHY, "SENSING: DMRS_SCAN %s abs=%ld rnti=0x%04x hits=%d%s | rnti ids=%d (%d %d) slots=%d | full scans=%lu hits=%lu "
+             "mean=%lu us | pool checks=%lu mean=%lu us\n",
+        full ? "full" : "pool", (long)abs_slot, rnti, n, b, nd, nd > 0 ? ids[0] : -1, nd > 1 ? ids[1] : -1,
+        nr_dmrs_scan_rnti_slots(rnti), (unsigned long)sn, (unsigned long)sh, (unsigned long)(sn ? su / sn : 0),
+        (unsigned long)pn, (unsigned long)(pn ? pu / pn : 0));
+}
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
 static _Atomic uint64_t g_decoded       = 0;
 static _Atomic uint64_t g_crc_ok        = 0;
@@ -1868,6 +1953,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * estimator's signature change (nr_pdcch_gap_dmrs2 fix), and left inconsistent with type 1
          * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
          * this comment for the full reasoning. */
+        if (credit_ok && job.solver_token && job.rnti_class == NR_BLIND_RNTI_CLASS_C && pdu->dlDmrsSymbPos && dmrs_scan_rate() > 0) {
+          const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+          const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+          const int16_t *rx[8];
+          for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) rx[a] = (const int16_t *)&rxdataF[a][sym * fp->ofdm_symbol_size];
+          if (fp->nb_antennas_rx <= 8) dmrs_scan_job(fp, job.rnti, job.absolute_slot, job.nr_slot_rx, sym, rx);
+        }
         if (credit_ok && job.solver_token && job.coreset_key >= 0 && pr_nrb > 0 && pdu->dlDmrsSymbPos && per_coreset_dmrs_on()) {
           /* T26c: the same blind DM-RS identity estimator, per discovered CORESET population */
           coreset_dmrs_t *cd = coreset_dmrs_slot(job.coreset_key, ue->frame_parms.Nid_cell);

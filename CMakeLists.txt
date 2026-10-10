@@ -1009,6 +1009,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_disc_hyp.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
@@ -2628,6 +2629,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_initial_sync_budget PRIVATE GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_initial_sync_budget)
   add_test(NAME test_nr_initial_sync_budget COMMAND ./test_nr_initial_sync_budget)
+
+  add_executable(test_nr_pdsch_dmrs_scan ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_dmrs_scan_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c)
+  target_include_directories(test_nr_pdsch_dmrs_scan PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_dmrs_scan PRIVATE GTest::gtest GTest::gtest_main m pthread)
+  add_dependencies(tests test_nr_pdsch_dmrs_scan)
+  add_test(NAME test_nr_pdsch_dmrs_scan COMMAND ./test_nr_pdsch_dmrs_scan)
 
   add_executable(test_nr_dmrs_id_estimate ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dmrs_id_estimate_test.cc
                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c

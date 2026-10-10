@@ -94,6 +94,10 @@ bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db);
  * one RNTI of a CORESET solved, the others of that CORESET try only its scrambling. The list may also carry the
  * scrambling ids of run-time discovered NZP CSI-RS (ISAC_PDSCH_SOLVER_SCR_CSIRS=1): neighbour-cell candidates. */
 void nr_pdsch_solver_set_alt_scr(int coreset_key, const uint16_t *ids, int n, bool first_is_decided);
+/** TIM-PDSCH (ISAC_PDSCH_DMRS_ID_SCAN): as nr_pdsch_solver_set_alt_scr() with 32-bit hypotheses (id | (data id + 1) << 16
+ * = DM-RS id and a different data scrambling id). own = the hypotheses are this RNTI's own (per-UE identities): the
+ * CORESET's first solved scrambling is then NOT preferred over them. Not gated by ISAC_PDSCH_SOLVER_SCR. */
+void nr_pdsch_solver_set_alt_scr32(int coreset_key, const int32_t *ids, int n, bool first_is_decided, bool own);
 /** Outcome of a variant: CRC of code block 0 (probe) or of the TB (full decode). credit=false: IQ expired, ignored. */
 void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit);
 

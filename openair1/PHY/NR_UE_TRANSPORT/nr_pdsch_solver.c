@@ -86,6 +86,7 @@ typedef struct {
   uint32_t hash;
   uint64_t now_abs;
   bool decided;
+  bool own; /* TIM-PDSCH: ids are this RNTI's own (nr_pdsch_solver_set_alt_scr32) */
 } solver_plan_ctx_t;
 static solver_plan_ctx_t g_plan_ctx = {.key = -1}; /* legacy path: process-global grant context */
 static _Thread_local solver_plan_ctx_t t_plan_ctx = {.key = -1}; /* ISAC_PDSCH_SOLVER_THREAD_CTX: per scan consumer */
@@ -350,6 +351,24 @@ void nr_pdsch_solver_set_alt_scr(int key, const uint16_t *ids, int n, bool first
   }
   ctx->hash = h ^ (uint32_t)ctx->n;
   ctx->decided = first_is_decided && ctx->n > 0;
+  ctx->own = false;
+  if (!solver_thread_ctx_enabled()) pthread_mutex_unlock(&g_mu);
+}
+
+void nr_pdsch_solver_set_alt_scr32(int key, const int32_t *ids, int n, bool first_is_decided, bool own)
+{
+  if (!solver_thread_ctx_enabled()) pthread_mutex_lock(&g_mu);
+  solver_plan_ctx_t *ctx = plan_ctx();
+  ctx->n = 0;
+  ctx->key = key;
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < n && ctx->n < 16; i++) {
+    ctx->ids[ctx->n++] = ids[i];
+    h = (h ^ (uint32_t)ids[i]) * 16777619u;
+  }
+  ctx->hash = h ^ (uint32_t)ctx->n;
+  ctx->decided = first_is_decided && ctx->n > 0;
+  ctx->own = own && ctx->n > 0;
   if (!solver_thread_ctx_enabled()) pthread_mutex_unlock(&g_mu);
 }
 
@@ -896,11 +915,13 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     { /* default ids, then each run-time alternative, one per grant -- unless another RNTI of this CORESET already
        * solved: then only that RNTI's scrambling (one RRC template per CORESET) */
       int known = 0;
-      for (int q = 0; q < g_n_key_scr && !known; q++) /* preference, not exclusive: 1 block in 4 still explores */
+      for (int q = 0; q < g_n_key_scr && !known && !ctx->own; q++) /* preference, not exclusive: 1 block in 4 still explores */
         if (g_key_scr[q].key == ctx->key && ((r->grants / 16u) % 4u) != 3u) { t_scr = g_key_scr[q].scr; known = 1; }
       if (!known) { /* T26d: the default ids alone for the first 48 grants -- cycling 6+ alternatives from the start made
                      * the serving population's search 6x slower (replay e9/e10: 0x8f5a unsolved) */
-        if (ctx->decided) { /* the decided id on 3 grants of 4, the default on the 4th */
+        if (ctx->own) { /* TIM-PDSCH: this RNTI's own blind identities, cycled grant by grant (no PCI default) */
+          t_scr = ctx->ids[r->grants % (uint32_t)ctx->n];
+        } else if (ctx->decided) { /* the decided id on 3 grants of 4, the default on the 4th */
           const uint32_t blk = r->grants / 16u, nd = (uint32_t)(ctx->n < 3 ? ctx->n : 3);
           t_scr = (blk % 4u) == 3u ? -1 : ctx->ids[(blk / 4u + blk) % nd]; /* top ids by block, default 1 block in 4 */
         } else {
