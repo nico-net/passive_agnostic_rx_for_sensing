@@ -28,6 +28,26 @@
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
 #include <time.h>
+#include <stdlib.h>
+
+/* Per-thread, grow-on-demand scratch for the CSI-RS estimation buffers. They scale with
+ * ports x ofdm_symbol_size x rx antennas (and rx antennas x samples_per_slot), about 2 MB for an 8-port
+ * resource with 4 RX, which overflowed the worker stack when kept as VLAs. Allocated once per thread,
+ * reused on every call (contents are uninitialised, like the VLAs they replace). */
+static c16_t *csirs_scratch(int slot, size_t n)
+{
+  static __thread struct {
+    c16_t *p;
+    size_t n;
+  } buf[3];
+  if (buf[slot].n < n) {
+    free(buf[slot].p);
+    buf[slot].p = aligned_alloc(64, ((n * sizeof(c16_t) + 63) / 64) * 64);
+    AssertFatal(buf[slot].p != NULL, "CSI-RS scratch alloc of %zu samples failed\n", n);
+    buf[slot].n = n;
+  }
+  return buf[slot].p;
+}
 
 /// Max rx antennas the CSI-RS sensing tap will extract for the receive-array AoA path.
 #define NR_ISAC_CSIRS_MAX_ANT 8
@@ -1126,11 +1146,15 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   /* OFDM symbol size \times sizeof(c16_t) is always multiple of 64. Since the
   estimates have first RB at start of buffer we don't need padding for 32 or 64
   byte alignment. */
-  c16_t csi_rs_ls_estimated_channel[frame_parms->nb_antennas_rx][mapping_parms.ports][frame_parms->ofdm_symbol_size];
-  c16_t csi_rs_estimated_channel_freq[frame_parms->nb_antennas_rx][mapping_parms.ports][frame_parms->ofdm_symbol_size];
+  const size_t csirs_est_n = (size_t)frame_parms->nb_antennas_rx * mapping_parms.ports * frame_parms->ofdm_symbol_size;
+  c16_t(*csi_rs_ls_estimated_channel)[mapping_parms.ports][frame_parms->ofdm_symbol_size] =
+      (void *)csirs_scratch(0, csirs_est_n);
+  c16_t(*csi_rs_estimated_channel_freq)[mapping_parms.ports][frame_parms->ofdm_symbol_size] =
+      (void *)csirs_scratch(1, csirs_est_n);
 
   int CDM_group_size = get_cdm_group_size(csirs_config_pdu->cdm_type);
-  c16_t csi_rs_received_signal[frame_parms->nb_antennas_rx][frame_parms->samples_per_slot_wCP];
+  c16_t(*csi_rs_received_signal)[frame_parms->samples_per_slot_wCP] =
+      (void *)csirs_scratch(2, (size_t)frame_parms->nb_antennas_rx * frame_parms->samples_per_slot_wCP);
   uint32_t rsrp = 0;
   int rsrp_dBm = 0;
   nr_get_csi_rs_signal(ue,
@@ -1318,6 +1342,15 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
       get_csi_mapping_parms(csirs_config_pdu->row, csirs_config_pdu->freq_domain, csirs_config_pdu->symb_l0,
                             csirs_config_pdu->symb_l1);
   nr_csi_info_t *csi_info = ue->nr_csi_info;
+  /* ue->nr_csi_info->csi_rs_generated_signal holds NR_MAX_CSI_PORTS buffers: a 16/24/32-port row (rows 11-18) written past it
+   * (heap overrun in nr_generate_csi_rs, TIM replay with row 12). Not estimable here: skip. */
+  if (mapping_parms.ports > NR_MAX_CSI_PORTS) {
+    static __thread int warned;
+    if (!warned++)
+      LOG_W(NR_PHY, "SENSING: csirs_monitor row %d has %d ports > %d; skipped\n", (int)csirs_config_pdu->row, (int)mapping_parms.ports,
+            NR_MAX_CSI_PORTS);
+    return;
+  }
 
   int reference_slot = (proc->nr_slot_rx + slot_delta) % frame_parms->slots_per_frame;
   if (reference_slot < 0)
@@ -1338,10 +1371,14 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
                      csi_info->csi_rs_generated_signal);
   csi_info->csi_rs_generated_signal_bits = log2_approx(AMP);
 
-  c16_t csi_rs_ls_estimated_channel[frame_parms->nb_antennas_rx][mapping_parms.ports][frame_parms->ofdm_symbol_size];
-  c16_t csi_rs_estimated_channel_freq[frame_parms->nb_antennas_rx][mapping_parms.ports][frame_parms->ofdm_symbol_size];
+  const size_t csirs_est_n = (size_t)frame_parms->nb_antennas_rx * mapping_parms.ports * frame_parms->ofdm_symbol_size;
+  c16_t(*csi_rs_ls_estimated_channel)[mapping_parms.ports][frame_parms->ofdm_symbol_size] =
+      (void *)csirs_scratch(0, csirs_est_n);
+  c16_t(*csi_rs_estimated_channel_freq)[mapping_parms.ports][frame_parms->ofdm_symbol_size] =
+      (void *)csirs_scratch(1, csirs_est_n);
   int   CDM_group_size = get_cdm_group_size(csirs_config_pdu->cdm_type);
-  c16_t csi_rs_received_signal[frame_parms->nb_antennas_rx][frame_parms->samples_per_slot_wCP];
+  c16_t(*csi_rs_received_signal)[frame_parms->samples_per_slot_wCP] =
+      (void *)csirs_scratch(2, (size_t)frame_parms->nb_antennas_rx * frame_parms->samples_per_slot_wCP);
   uint32_t rsrp     = 0;
   int      rsrp_dBm = 0;
   nr_get_csi_rs_signal(ue, proc, csirs_config_pdu, csi_info, &mapping_parms, CDM_group_size, csi_rs_received_signal,
