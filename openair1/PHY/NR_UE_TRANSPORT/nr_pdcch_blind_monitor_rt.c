@@ -9256,6 +9256,21 @@ constdiag_done:;
         job.dlsch_pdu = dl;
         job.freq_alloc = fa;
         job.grant = gq;
+        { /* WIDE-S0: the common RBs of THIS DCI's PDCCH (its CCEs' REG bundles, same CCE-to-REG mapping as the demapper),
+           * for the TS 38.214 5.1.4.1 exclusion the decoder applies under ISAC_PDSCH_PDCCH_RM. Unset (nsym 0) if unmappable. */
+          uint16_t prb[96];
+          const int np = nr_pdcch_candidate_rbs(n_rb, rel15->coreset.duration, cfg->coreset_reg_bundle_size,
+                                                cfg->coreset_interleaver_size, cfg->coreset_shift_index,
+                                                cand_task[ti].cce, cand_task[ti].L, prb, 96);
+          const int crb0 = rel15->BWPStart + cset_start + rel15->coreset.rb_offset;
+          for (int q = 0; q < np; q++)
+            if (crb0 + prb[q] >= 0 && crb0 + prb[q] < 280)
+              job.grant.pdcch_crb[(crb0 + prb[q]) >> 3] |= (uint8_t)(1u << ((crb0 + prb[q]) & 7));
+          if (np > 0) {
+            job.grant.pdcch_sym0 = (uint8_t)cfg->ss_first_symbol;
+            job.grant.pdcch_nsym = (uint8_t)rel15->coreset.duration;
+          }
+        }
         nr_pdsch_k0_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame, 0, &job.frame_rx, &job.nr_slot_rx);
         job.gNB_id = proc->gNB_id;
         job.absolute_slot = source_absolute_slot;

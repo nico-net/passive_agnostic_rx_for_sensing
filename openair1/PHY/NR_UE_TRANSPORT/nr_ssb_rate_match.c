@@ -8,6 +8,7 @@
 #include "PHY/INIT/nr_phy_init.h"
 #include "nr_transport_proto_ue.h"
 __thread const uint8_t *nr_ssb_rm_only_crb = NULL; /* see nr_ssb_rate_match.h */
+__thread nr_ssb_rm_extra_t nr_ssb_rm_extra = {0, NULL}; /* see nr_ssb_rate_match.h */
 
 uint16_t nr_ssb_rm_candidates(const NR_DL_FRAME_PARMS *fp, int slot, int start_symbol, int nb_symbols)
 {
@@ -83,7 +84,7 @@ bool nr_ssb_rm_plan(const nr_ssb_rm_event_t *e,
   memset(p, 0, sizeof(*p));
   p->physical = nr_ssb_rm_map(e, frame, slot, pci, cfg->BWPStart, cfg->BWPSize, NULL);
   for (int m = cfg->start_symbol; m < cfg->start_symbol + cfg->number_symbols; ++m) {
-    if (!((p->physical.symbols >> m) & 1))
+    if (!(((p->physical.symbols | p->physical.symbols2) >> m) & 1))
       continue;
     const uint32_t csi = nr_dlsch_csi_overlap_bitmap(cfg, m);
     uint32_t n = 0;
@@ -95,7 +96,8 @@ bool nr_ssb_rm_plan(const nr_ssb_rm_event_t *e,
       n += __builtin_popcount(nr_ssb_rm_excluded(&p->physical, m, rb) & ~csi_rb); // CSI-RS already in csi_unav
     }
     // SI-RNTI lacks its SI indicator here; a DM-RS or PT-RS RE on an SSB RE is not a valid PDSCH.
-    if (n && (rnti == 0xffff || ((cfg->dlDmrsSymbPos >> m) & 1) || (cfg->pduBitmap & 1)))
+    // The SSB layer only: the second (PDCCH) layer never meets a DM-RS symbol of a type-A PDSCH and is not an SI-RNTI exclusion.
+    if (n && ((p->physical.symbols >> m) & 1) && (rnti == 0xffff || ((cfg->dlDmrsSymbPos >> m) & 1) || (cfg->pduBitmap & 1)))
       return false;
     p->unav += n;
   }
@@ -121,13 +123,16 @@ int nr_ssb_rm_first_data_symbol(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
   // Same "first symbol carrying data" rule as nr_ue_pdsch_procedures(), plus symbols the SSB empties.
   const int dmrs_data_re = cfg->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 ? 12 - 6 * cfg->n_dmrs_cdm_groups
                                                                       : 12 - 4 * cfg->n_dmrs_cdm_groups;
-  bool ssb_all_prbs = p->unav > 0;
-  for (int rb = 0; ssb_all_prbs && rb < cfg->BWPSize; ++rb)
-    if (((fa->bitmap[rb / 32] >> (rb % 32)) & 1) && !p->physical.prb[rb])
-      ssb_all_prbs = false;
+  bool ssb_all_prbs = p->unav > 0, extra_all_prbs = p->unav > 0 && p->physical.symbols2;
+  for (int rb = 0; (ssb_all_prbs || extra_all_prbs) && rb < cfg->BWPSize; ++rb)
+    if ((fa->bitmap[rb / 32] >> (rb % 32)) & 1) {
+      if (!p->physical.prb[rb]) ssb_all_prbs = false;
+      if (!p->physical.prb2[rb]) extra_all_prbs = false;
+    }
   int m = cfg->start_symbol;
   while (m < cfg->start_symbol + cfg->number_symbols
-         && ((dmrs_data_re == 0 && ((cfg->dlDmrsSymbPos >> m) & 1)) || (ssb_all_prbs && ((p->physical.symbols >> m) & 1))))
+         && ((dmrs_data_re == 0 && ((cfg->dlDmrsSymbPos >> m) & 1)) || (ssb_all_prbs && ((p->physical.symbols >> m) & 1))
+             || (extra_all_prbs && ((p->physical.symbols2 >> m) & 1))))
     m++;
   return m;
 }
