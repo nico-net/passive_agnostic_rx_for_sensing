@@ -5,6 +5,10 @@
 #include <random>
 #include <vector>
 
+/* The header-only test links no nr_ssb_rate_match.c: the two thread-local switches it declares live here. */
+__thread const uint8_t *nr_ssb_rm_only_crb = nullptr;
+__thread nr_ssb_rm_extra_t nr_ssb_rm_extra = {0, nullptr};
+
 TEST(SsbRateMatch, WholeEdgePrbsAndFourSymbols)
 {
   auto e = nr_ssb_rm_event(123, 0, 42, 66, 0x3c);
@@ -28,6 +32,31 @@ TEST(SsbRateMatch, PhysicalPrbsFollowInterleavedDataOrderAndBwpOffset)
   }
   m = nr_ssb_rm_map(&e, 124, 0, 42, 3, 5, physical);
   EXPECT_EQ(m.symbols, 0);
+}
+
+/* WIDE-S0: the scheduling PDCCH's CRBs as the mask's second layer, with and without an SSB event, and unset = unchanged. */
+TEST(SsbRateMatch, PdcchLayerIsIndependentOfTheSsbEvent)
+{
+  uint8_t crb[NR_SSB_RM_MAX_RB] = {0};
+  for (int c = 24; c < 36; ++c) crb[c] = 1;
+  nr_ssb_rm_extra = {0x1, crb};
+  nr_ssb_rm_event_t none = {0, 0, 0, 0, 0, 0};
+  auto m = nr_ssb_rm_map(&none, 123, 0, 42, 0, 52, nullptr); /* no SSB in the slot */
+  EXPECT_EQ(m.symbols, 0);
+  for (int rb = 0; rb < 52; ++rb) {
+    EXPECT_EQ(nr_ssb_rm_excluded(&m, 0, rb), rb >= 24 && rb < 36 ? 0xfff : 0);
+    EXPECT_EQ(nr_ssb_rm_excluded(&m, 1, rb), 0);
+  }
+  auto e = nr_ssb_rm_event(123, 0, 42, 66, 0x3c); /* SSB on CRB 5..25, symbols 2-5 */
+  m = nr_ssb_rm_map(&e, 123, 0, 42, 0, 52, nullptr);
+  EXPECT_EQ(nr_ssb_rm_excluded(&m, 0, 30), 0xfff);
+  EXPECT_EQ(nr_ssb_rm_excluded(&m, 0, 10), 0);
+  EXPECT_EQ(nr_ssb_rm_excluded(&m, 3, 10), 0xfff);
+  EXPECT_EQ(nr_ssb_rm_excluded(&m, 3, 30), 0);
+  nr_ssb_rm_extra = {0, nullptr};
+  m = nr_ssb_rm_map(&none, 123, 0, 42, 0, 52, nullptr);
+  EXPECT_EQ(nr_ssb_rm_excluded(&m, 0, 30), 0);
+  EXPECT_EQ(m.symbols2, 0);
 }
 
 TEST(SsbRateMatch, NullAndBoundsAreUnchanged)
