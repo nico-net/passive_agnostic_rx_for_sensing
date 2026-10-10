@@ -5714,3 +5714,103 @@ TEST(UlFirstPusch, DataIdWalkRetainsDlPriorsAndCoversSkippedPosition)
   unsetenv("ISAC_UL_PUSCH_CHAIN");
   nr_pusch_passive_ul_ids_flags_reset_for_test();
 }
+
+// ---- UL-READY: DCI 0_1 field order pinned independently of the test packer above ---------------------------------
+// The payloads below are written out field by field from TS 38.212 7.3.1.1.2 (identifier, [carrier], [UL/SUL], BWP
+// indicator, FDRA, TDRA, [freq. hopping], MCS, NDI, RV, HARQ, DAI, TPC, [SRI], [precoding], antenna ports, SRS request,
+// [CSI request, CBG, PTRS-DMRS, beta offset], [DM-RS init], UL-SCH indicator) and do not use PackUlPayload(). The two
+// layouts are the ones fitted on raw_pci415_12s_b (docs/superpowers/reports/csd/ULREADY.md): length 44 = CP-OFDM,
+// length 42 = transform precoded (2-bit antenna ports, no DM-RS init bit).
+namespace {
+struct BitString {
+  uint64_t v = 0;
+  int n = 0;
+  BitString& put(uint32_t val, int w) { v = (v << w) | (val & ((1u << w) - 1u)); n += w; return *this; }
+};
+nr_pdcch_blind_ul_opts_t UlReadyOpts(bool tp)
+{
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.bwp_size = 217;
+  o.numerology = 1;
+  o.tda_count = 9;  // 4 TDRA bits
+  for (int i = 0; i < 9; i++) { o.tda_start[i] = 0; o.tda_length[i] = 14; o.tda_mapping[i] = 0; o.tda_k2[i] = 2; }
+  o.bwp_indicator_bits = 1;
+  o.dai1_bits = 2;
+  o.antenna_ports_bits = tp ? 2 : 3;
+  o.dmrs_seq_init_bits = tp ? 0 : 1;
+  o.transform_precoding = tp ? 1 : 0;
+  o.dmrs_config_type = 0;
+  o.dmrs_max_length = 1;
+  return o;
+}
+}  // namespace
+
+TEST(UlReadyDci01, Length44CpOfdmFieldsAreReadInSpecOrder)
+{
+  const uint32_t riv = 217u * (3 - 1) + 1;  // 3 PRB at BWP-relative PRB 1 (type-1 RIV, N=217)
+  BitString b;
+  b.put(0, 1).put(1, 1).put(riv, 15).put(0, 4).put(23, 5).put(1, 1).put(2, 2).put(5, 4).put(3, 2).put(1, 2)
+   .put(0, 3).put(0, 2).put(0, 1).put(1, 1);
+  ASSERT_EQ(b.n, 44);
+  const nr_pdcch_blind_ul_opts_t o = UlReadyOpts(false);
+  ASSERT_EQ(nr_pdcch_blind_dci01_size(&o), 44);
+  nr_dci_bits_t payload = {{b.v, 0, 0}};
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(payload, 44, 0x1234, &o, &out)) << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.bwp_indicator, 1);
+  EXPECT_EQ(out.start_rb, 1);
+  EXPECT_EQ(out.num_rb, 3);
+  EXPECT_EQ(out.tda_index, 0);
+  EXPECT_EQ(out.k2, 2);
+  EXPECT_EQ(out.mcs, 23);
+  EXPECT_EQ(out.ndi, 1);
+  EXPECT_EQ(out.rv, 2);
+  EXPECT_EQ(out.harq_pid, 5);
+  EXPECT_EQ(out.dai, 3);
+  EXPECT_EQ(out.tpc, 1);
+  EXPECT_EQ(out.antenna_ports_field, 0);
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 1);  // Table 7.3.1.1.2-8 row 0: one CDM group without data, port 0
+  EXPECT_EQ(out.dmrs_ports, 1);
+  EXPECT_EQ(out.nscid, 0);
+  EXPECT_EQ(out.ulsch_indicator, 1);
+  EXPECT_EQ(out.start_symbol, 0);
+  EXPECT_EQ(out.num_symbols, 14);
+}
+
+TEST(UlReadyDci01, Length42TransformPrecodedFieldsAreReadInSpecOrder)
+{
+  const uint32_t riv = 217u * (3 - 1) + 1;
+  BitString b;
+  b.put(0, 1).put(1, 1).put(riv, 15).put(0, 4).put(25, 5).put(0, 1).put(0, 2).put(9, 4).put(3, 2).put(1, 2)
+   .put(0, 2).put(0, 2).put(1, 1);
+  ASSERT_EQ(b.n, 42);
+  const nr_pdcch_blind_ul_opts_t o = UlReadyOpts(true);
+  ASSERT_EQ(nr_pdcch_blind_dci01_size(&o), 42);
+  nr_dci_bits_t payload = {{b.v, 0, 0}};
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(payload, 42, 0x1234, &o, &out)) << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.mcs, 25);
+  EXPECT_EQ(out.ndi, 0);
+  EXPECT_EQ(out.harq_pid, 9);
+  EXPECT_EQ(out.transform_precoding, 1);
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 2);  // Table 7.3.1.1.2-6 row 0
+  EXPECT_EQ(out.dmrs_ports, 1);
+  EXPECT_EQ(out.ulsch_indicator, 1);
+}
+
+TEST(UlReadyDci01, UlSchIndicatorZeroAndFormat1AreRejected)
+{
+  const uint32_t riv = 217u * 2u + 1;
+  const nr_pdcch_blind_ul_opts_t o = UlReadyOpts(false);
+  BitString b;  // UL-SCH indicator 0: CSI-only grant, no PUSCH data
+  b.put(0, 1).put(1, 1).put(riv, 15).put(0, 4).put(23, 5).put(1, 1).put(0, 2).put(5, 4).put(3, 2).put(1, 2)
+   .put(0, 3).put(0, 2).put(0, 1).put(0, 1);
+  nr_dci_bits_t payload = {{b.v, 0, 0}};
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_extract_01(payload, 44, 0x1234, &o, &out));
+  BitString d;  // identifier bit 1 = downlink format
+  d.put(1, 1).put(1, 1).put(riv, 15).put(0, 4).put(23, 5).put(1, 1).put(0, 2).put(5, 4).put(3, 2).put(1, 2)
+   .put(0, 3).put(0, 2).put(0, 1).put(1, 1);
+  nr_dci_bits_t p2 = {{d.v, 0, 0}};
+  EXPECT_FALSE(nr_pdcch_blind_extract_01(p2, 44, 0x1234, &o, &out));
+}
