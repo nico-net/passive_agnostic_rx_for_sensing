@@ -7,6 +7,7 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "nr_transport_proto_ue.h"
+__thread const uint8_t *nr_ssb_rm_only_crb = NULL; /* see nr_ssb_rate_match.h */
 
 uint16_t nr_ssb_rm_candidates(const NR_DL_FRAME_PARMS *fp, int slot, int start_symbol, int nb_symbols)
 {

@@ -14,6 +14,9 @@ typedef struct {
   uint16_t symbols;
   uint8_t prb[NR_SSB_RM_MAX_RB];
 } nr_ssb_rm_mask_t;
+/* DECODE-RES (ISAC_PDSCH_OWN_PDCCH_RM): when non-NULL, the excluded PRBs of nr_ssb_rm_map() are exactly this per-common-RB flag array (not the event's
+ * first..last range). Thread-local, set only around one trial decode by nr_pdsch_passive_decode.c; NULL everywhere else (unchanged behaviour). */
+extern __thread const uint8_t *nr_ssb_rm_only_crb;
 
 /* TS 38.214 5.1.4: the entire containing PRB, including partial edge PRBs. */
 static inline uint16_t nr_ssb_rm_excluded(const nr_ssb_rm_mask_t *mask, int symbol, int bwp_rb)
@@ -50,7 +53,7 @@ static inline nr_ssb_rm_mask_t nr_ssb_rm_map(const nr_ssb_rm_event_t *e, int fra
   m.symbols = e->symbols;
   for (int rb = 0; rb < nrb; ++rb) {
     const int crb = bwp_start + (physical ? physical[rb] : rb);
-    m.prb[rb] = crb >= e->first_crb && crb <= e->last_crb;
+    m.prb[rb] = nr_ssb_rm_only_crb ? (crb >= 0 && crb < NR_SSB_RM_MAX_RB && nr_ssb_rm_only_crb[crb]) : (crb >= e->first_crb && crb <= e->last_crb);
   }
   return m;
 }
