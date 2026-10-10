@@ -17,6 +17,7 @@
 
 #include "executables/softmodem-common.h"
 #include "nr_transport_proto_ue.h"
+#include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_coreset_group_rbs()
 #include <math.h>
 #include "PHY/CODING/nrPolar_tools/nr_polar_dci_defs.h"
 #include "PHY/phy_extern.h"
@@ -211,6 +212,51 @@ static void nr_pdcch_llr(uint32_t sz, c16_t *rxF, c16_t *llr)
   }
 }
 
+/* nr_pdcch_rboffset_fix_enabled: ISAC_PDCCH_RBOFFSET_FIX=1 (default off) selects the TS 38.213 10.1 group positions in
+ *   nr_pdcch_coreset_group_rbs(). Read once. Caller: nr_pdcch_extract_rbs_single(). */
+static bool nr_pdcch_rboffset_fix_enabled(void)
+{
+  static _Atomic int en = -1;
+  if (en < 0) {
+    const char *e = getenv("ISAC_PDCCH_RBOFFSET_FIX");
+    en = (e && strcmp(e, "1") == 0) ? 1 : 0;
+  }
+  return en == 1;
+}
+
+/* nr_pdcch_coreset_group_rbs: first RB (relative to the BWP start) of every 6-RB CORESET group whose data REs the
+ *   extraction reads, in demapping order; returns the group count (at most max_groups).
+ *   rb_offset_total = cset_start + coreset.rb_offset (as nr_rx_pdcch_symbol() derives it), n_rb = 6 x set bits.
+ *   Legacy (fixed=false): group bit g in [rb_offset_total/6, rb_offset_total/6 + n_rb/6) at RB 6g. This ignores
+ *   rb_offset % 6, and with rb_offset >= 6 (the blind monitor's own frame: bitmap from bit 0, absolute start in
+ *   rb_offset) it tests the wrong bits, dropping the last rb_offset/6 groups.
+ *   Fixed (TS 38.213 10.1 / 38.211 7.3.2.2: bit i <-> i-th group of 6 RBs counted from the CORESET reference RB,
+ *   shifted by rb-Offset): set bit g at RB rb_offset_total + 6 (g - first set bit) -- the same RBs
+ *   nr_pdcch_channel_estimation() estimates (contiguous from rb_offset_total). Identical to legacy when
+ *   rb_offset == 0. Pure. Callers: nr_pdcch_extract_rbs_single(), unit tests. */
+int nr_pdcch_coreset_group_rbs(const uint8_t *bitmap, int rb_offset_total, int n_rb, bool fixed, int *group_rb,
+                               int max_groups)
+{
+  int n = 0;
+  const int size = n_rb / 6;
+  if (!fixed) {
+    const int start = rb_offset_total / 6;
+    for (int g = start; g < start + size && g < 45 && n < max_groups; g++)
+      if (bitmap[g / 8] & (1 << (7 - (g & 7))))
+        group_rb[n++] = g * 6;
+    return n;
+  }
+  int first = -1;
+  for (int g = 0; g < 45 && n < size && n < max_groups; g++) {
+    if (!(bitmap[g / 8] & (1 << (7 - (g & 7)))))
+      continue;
+    if (first < 0)
+      first = g;
+    group_rb[n++] = rb_offset_total + 6 * (g - first);
+  }
+  return n;
+}
+
 // This function will extract the mapped DM-RS PDCCH REs as per 38.211 Section 7.4.1.3.2 (Mapping to physical resources)
 static void nr_pdcch_extract_rbs_single(uint32_t rxdataF_sz,
                                         c16_t rxdataF[][rxdataF_sz],
@@ -263,14 +309,12 @@ static void nr_pdcch_extract_rbs_single(uint32_t rxdataF_sz,
      */
 
     c16_t middle_prb_buffer[RE_PER_RB];
-    int start = rb_offset / 6;
-    int size = coreset_nbr_rb / 6;
-    for (int rb_group = start; rb_group < start + size; rb_group++) {
-      if ((coreset_freq_dom[rb_group / 8] & (1 << (7 - (rb_group & 7)))) == 0) {
-        continue;
-      }
+    int group_rb[45];
+    const int ngroups = nr_pdcch_coreset_group_rbs(coreset_freq_dom, rb_offset, coreset_nbr_rb,
+                                                   nr_pdcch_rboffset_fix_enabled(), group_rb, 45);
+    for (int gi = 0; gi < ngroups; gi++) {
       for (int rb = 0; rb < 6; rb++) {
-        int c_rb = rb_group * 6 + rb;
+        int c_rb = group_rb[gi] + rb;
         c16_t *rxF = NULL;
         if ((frame_parms->N_RB_DL & 1) == 0) {
           if ((c_rb + n_BWP_start) < frame_parms->N_RB_DL / 2)

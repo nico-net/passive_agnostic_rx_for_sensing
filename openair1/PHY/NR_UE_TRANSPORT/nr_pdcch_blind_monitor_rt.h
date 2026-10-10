@@ -306,6 +306,17 @@ void nr_pdcch_discovered_step(uint64_t token, uint64_t slot);
 int nr_pdcch_discovered_observe(uint64_t token, uint16_t rnti, uint64_t slot,
                                 nr_dci_bits_t payload, int length);
 void nr_pdcch_discovered_reset(void);
+/* ISAC_PDCCH_DISC_COVER=1 (ACQ-FIX, default off): every discovered nID/symbol/duration is first verified on the
+ * canonical non-interleaved full-carrier cover (grid RB 0, floor(carrier/6) groups), then on the published geometry.
+ * DM-RS correlation is invariant to whole-RB shifts of a CORESET, so a published start/span/mapping is a guess;
+ * the cover decodes every non-interleaved CORESET whose 6-RB grid starts at RB 0. */
+bool nr_pdcch_discovered_cover_enabled(void);
+/* Bank holds a verified entry of this nID/symbol/duration whose RB range overlaps [rb, rb + 6 groups). */
+bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int groups);
+/* dci_nr.c: first RB (BWP-relative) of every extracted 6-RB CORESET group; fixed = ISAC_PDCCH_RBOFFSET_FIX
+ * (TS 38.213 10.1 positions, rb_offset % 6 and rb_offset >= 6 honoured). Pure. */
+int nr_pdcch_coreset_group_rbs(const uint8_t *bitmap, int rb_offset_total, int n_rb, bool fixed, int *group_rb,
+                               int max_groups);
 /* Fixed total across bank entries and the additional dwell pass; remainder rotates. */
 #define NR_PDCCH_BANK_CANDIDATE_BUDGET 64
 int nr_pdcch_discovered_candidate_share(int entries, int index, uint64_t visit);

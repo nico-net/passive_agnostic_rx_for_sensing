@@ -1063,6 +1063,64 @@ bool nr_pdcch_discovered_load(const char *path)
   return discovered_load_stream(f);
 }
 
+/* nr_pdcch_discovered_cover_enabled: ISAC_PDCCH_DISC_COVER=1 (ACQ-FIX, default off); read per call like
+ *   nr_pdcch_discovered_enabled(). Callers: the discovered queue (load/snapshot) and nid_budget_feedback(). */
+bool nr_pdcch_discovered_cover_enabled(void)
+{
+  const char *e = getenv("ISAC_PDCCH_DISC_COVER");
+  return e && strcmp(e, "1") == 0;
+}
+
+/* nr_pdcch_discovered_cover_banked: true when a VERIFIED bank entry has this nID, first symbol and duration and its
+ *   RB range overlaps [rb, rb + 6 groups). One pdcch-DMRS-ScramblingID never names two overlapping CORESETs of one
+ *   symbol, so such a published geometry is the banked CORESET again (typically a shifted or partial estimate of it).
+ *   Bank entries are immutable once published: lock-free read. Callers: nr_pdcch_discovered_snapshot(),
+ *   nid_budget_feedback(), unit tests. */
+bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int groups)
+{
+  const int n = nr_pdcch_coreset_bank_count();
+  for (int i = 0; i < n; ++i) {
+    if (nr_pdcch_coreset_bank_state(i) != NR_CORESET_VERIFIED)
+      continue;
+    const nr_pdcch_blind_monitor_cfg_t *c = nr_pdcch_coreset_bank_cfg(i);
+    if (!c || c->coreset_pdcch_dmrs_scrambling_id != nid || c->ss_first_symbol != sym || c->coreset_duration != dur)
+      continue;
+    const int lo = c->bwp_start + c->coreset_rb_offset, hi = lo + 6 * c->coreset_freq_domain;
+    if (rb < hi && rb + 6 * groups > lo)
+      return true;
+  }
+  return false;
+}
+
+/* discovered_cover_queue: ACQ-FIX. Rewrites the freshly parsed queue as [one cover entry per distinct
+ *   (nID, symbol, duration), in publication order] + [the published lines]. A cover entry is non-interleaved, starts
+ *   at grid RB 0 and is marked ng = 0 ("whole carrier", resolved by nr_pdcch_discovered_snapshot()).
+ *   Why: the published start/span/mapping comes from an occupancy hull over a handful of snapshots; PDCCH DM-RS is
+ *   indexed from CRB 0, so its correlation cannot tell a CORESET from the same CORESET shifted by whole RBs. Live
+ *   2026-10-10 every rejected dwell ("no fresh CRC evidence") was a shifted/partial/interleaved estimate (grid_rb
+ *   2/5/11/179) of nID 62922 whose true geometry (grid RB 0, 36 groups, non-interleaved) verified at once when it
+ *   finally got published. Non-interleaved CCE j occupies RBs [start + 6j, start + 6j + 6), so the cover decodes
+ *   every non-interleaved CORESET on the RB-0 six-RB grid; the published lines stay queued for rb-Offset (phase
+ *   != 0) and interleaved CORESETs. Caller: discovered_load_stream(). */
+static void discovered_cover_queue(void)
+{
+  const int max = (int)(sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0]));
+  disc_coreset_t raw[sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0])];
+  const int nraw = s_add_disc.n;
+  memcpy(raw, s_add_disc.line, sizeof(raw[0]) * nraw);
+  int n = 0;
+  for (int i = 0; i < nraw && n < max; ++i) {
+    bool seen = false;
+    for (int j = 0; j < i && !seen; ++j)
+      seen = raw[j].nid == raw[i].nid && raw[j].sym == raw[i].sym && raw[j].dur == raw[i].dur;
+    if (!seen)
+      s_add_disc.line[n++] = (disc_coreset_t){.nid = raw[i].nid, .sym = raw[i].sym, .dur = raw[i].dur};
+  }
+  for (int i = 0; i < nraw && n < max; ++i)
+    s_add_disc.line[n++] = raw[i];
+  s_add_disc.n = n;
+}
+
 /* Parses discovered-CORESET lines from any stream (file or the in-process GPU records) and closes it. */
 static bool discovered_load_stream(FILE *f)
 {
@@ -1088,6 +1146,8 @@ static bool discovered_load_stream(FILE *f)
     s_add_disc.line[s_add_disc.n++] = d;
   }
   fclose(f);
+  if (nr_pdcch_discovered_cover_enabled() && s_add_disc.n > 0)
+    discovered_cover_queue();
   return s_add_disc.n > 0;
 }
 
@@ -1138,7 +1198,16 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
   if (nr_cfg_reconf_enabled() && s_add_disc.epoch != nr_cfg_epoch_current())
     nr_pdcch_discovered_reset();
   while (!s_add_disc.active && s_add_disc.next < s_add_disc.n) {
-    const disc_coreset_t *d = &s_add_disc.line[s_add_disc.next];
+    disc_coreset_t dd = s_add_disc.line[s_add_disc.next];
+    const disc_coreset_t *d = &dd;
+    const bool cover = nr_pdcch_discovered_cover_enabled();
+    if (cover && dd.ng == 0) {
+      dd.ng = carrier_rb / 6; /* cover entry: whole carrier on the RB-0 grid (see discovered_cover_queue()) */
+    } else if (cover && ((!dd.L && !dd.rb && dd.ng == carrier_rb / 6) /* this queue's cover already tried it */
+                         || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng))) {
+      ++s_add_disc.next;
+      continue;
+    }
     if (d->rb + d->ng * 6 > carrier_rb) {
       LOG_W(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (outside carrier)\n",
             s_add_disc.next + 1, s_add_disc.n, d->nid);
@@ -1189,6 +1258,9 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     ++s_add_disc.generation;
     LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d dwell start sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d\n",
           s_add_disc.next + 1, s_add_disc.n, d->nid, d->sym, d->dur, d->rb, d->ng, d->L, d->R, d->sh);
+    if (cover && s_add_disc.line[s_add_disc.next].ng == 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d is the ACQ-FIX cover dwell (ISAC_PDCCH_DISC_COVER)\n",
+            s_add_disc.next + 1, s_add_disc.n, d->nid);
   }
   if (!s_add_disc.active) return false;
   *cfg = s_add_disc.cfg;
@@ -1280,7 +1352,9 @@ static void nid_budget_feedback(void)
   bool verified=n>0;
   for(int i=0;i<n && verified;++i) {
     const nr_pdcch_nid_record_t *r=records+i;
-    verified=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid);
+    verified=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid)
+        || (nr_pdcch_discovered_cover_enabled()
+            && nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups));
   }
   nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
 }

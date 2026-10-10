@@ -4617,6 +4617,112 @@ TEST_F(DiscoveredCoresets, NrntiRotationVisitsAllConfirmedOwnersPerId) {
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
 }
 
+// ACQ-FIX (ISAC_PDCCH_DISC_COVER). Live 2026-10-10 (ab_C1/ab_H2/ab_C2) the GPU published the RB-0 CORESET of
+// nID 62922 as grid_rb=2/5 groups=35, grid_rb=11 groups=34 and grid_rb=179 groups=2 L=2 R=2; each dwell was
+// rejected after 4000 occasions without a CRC pass. The synthetic grid() places 62922 at RBs 0..23 (AL4, CCE 0).
+struct DiscoveredCover : DiscoveredCoresets {
+  void SetUp() override { DiscoveredCoresets::SetUp(); unsetenv("ISAC_PDCCH_DISC_COVER"); }
+  void TearDown() override { unsetenv("ISAC_PDCCH_DISC_COVER"); DiscoveredCoresets::TearDown(); }
+  static constexpr const char *kShifted = "CORESET nid=62922 sym=0 dur=1 grid_rb=2 groups=35 L=0 R=0 shift=0\n"
+                                          "CORESET nid=62922 sym=0 dur=1 grid_rb=5 groups=35 L=0 R=0 shift=0\n";
+};
+
+TEST_F(DiscoveredCover, FlagOffDwellsOnShiftedPublicationAndCannotDecode) {
+  lines(kShifted);
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_rb_offset, 2); EXPECT_EQ(c.coreset_freq_domain, 35);
+  for (int j = 0; j < 2; ++j) {
+    auto fft = grid(3 + j, 0x400000002345 + j * 16);
+    nr_pdcch_blind_raw_result_t raw{};
+    EXPECT_FALSE(decode(c, fft, 3 + j, 0x1234, &raw)); // a 2-RB shift breaks every CCE: the live rejection
+  }
+}
+
+TEST_F(DiscoveredCover, CoverDwellFirstVerifiesAndSkipsSubsumedPublications) {
+  setenv("ISAC_PDCCH_DISC_COVER", "1", 1);
+  lines(kShifted);
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, 62922);
+  EXPECT_EQ(c.coreset_rb_offset, 0); EXPECT_EQ(c.coreset_freq_domain, 36);
+  EXPECT_EQ(c.coreset_reg_bundle_size, 0); EXPECT_EQ(c.coreset_duration, 1); EXPECT_EQ(c.ss_first_symbol, 0);
+  for (int j = 0; j < 2; ++j) {
+    const int slot = 3 + j;
+    auto fft = grid(slot, 0x400000002345 + j * 16);
+    nr_pdcch_blind_raw_result_t raw{};
+    ASSERT_TRUE(decode(c, fft, slot, 0x1234, &raw));
+    EXPECT_EQ(nr_pdcch_discovered_observe(token, raw.rnti, slot, raw.payload, 47), j ? 0 : -1);
+    nr_pdcch_discovered_step(token, slot);
+  }
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  EXPECT_TRUE(nr_pdcch_discovered_cover_banked(62922, 0, 1, 2, 35));
+  EXPECT_TRUE(nr_pdcch_discovered_cover_banked(62922, 0, 1, 179, 2));
+  EXPECT_FALSE(nr_pdcch_discovered_cover_banked(10163, 0, 1, 0, 36));
+  EXPECT_FALSE(nr_pdcch_discovered_cover_banked(62922, 1, 1, 0, 36));
+  EXPECT_FALSE(nr_pdcch_discovered_cover_banked(62922, 0, 2, 0, 36));
+  // Both published (shifted) lines are the banked CORESET again: no further dwell, now or after a refresh.
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  ASSERT_TRUE(nr_pdcch_discovered_load(path));
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+}
+
+TEST_F(DiscoveredCover, QueueOrderCoversFirstThenPublishedLines) {
+  setenv("ISAC_PDCCH_DISC_COVER", "1", 1);
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=179 groups=2 L=2 R=2 shift=0\n"
+        "CORESET nid=9020 sym=0 dur=1 grid_rb=0 groups=36 L=6 R=6 shift=0\n"
+        "CORESET nid=9020 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  struct { int nid, rb, ng, L; } want[] = {{62922, 0, 36, 0}, {9020, 0, 36, 0}, {62922, 179, 2, 2}, {9020, 0, 36, 6}};
+  uint64_t slot = 0;
+  for (auto w : want) {
+    nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+    ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+    EXPECT_EQ(c.coreset_pdcch_dmrs_scrambling_id, w.nid);
+    EXPECT_EQ(c.coreset_rb_offset, w.rb); EXPECT_EQ(c.coreset_freq_domain, w.ng);
+    EXPECT_EQ(c.coreset_reg_bundle_size, w.L);
+    for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, slot++); // no evidence: rejected
+  }
+  // The published non-interleaved full-carrier line equals 9020's cover, already tried: skipped.
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(nr_pdcch_coreset_bank_count(), 0);
+}
+
+// ISAC_PDCCH_RBOFFSET_FIX: CPU PDCCH extraction group positions (TS 38.213 10.1, TS 38.211 7.3.2.2).
+TEST(PdcchRbOffset, GroupPositionsFollowBitmapAndOffset) {
+  auto bitmap = [](int first, int n) {
+    std::vector<uint8_t> b(6, 0);
+    for (int g = first; g < first + n; ++g) b[g / 8] |= (uint8_t)(0x80 >> (g % 8));
+    return b;
+  };
+  int legacy[45], fixed[45];
+  // rb_offset 0: both identical (all existing configurations).
+  auto b = bitmap(0, 36);
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 0, 216, false, legacy, 45), 36);
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 0, 216, true, fixed, 45), 36);
+  for (int i = 0; i < 36; ++i) { EXPECT_EQ(legacy[i], 6 * i); EXPECT_EQ(fixed[i], 6 * i); }
+  // MAC frame: bitmap from group 2, rb-Offset 0 -> RBs 12.. in both.
+  b = bitmap(2, 4);
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 12, 24, false, legacy, 45), 4);
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 12, 24, true, fixed, 45), 4);
+  for (int i = 0; i < 4; ++i) { EXPECT_EQ(legacy[i], 12 + 6 * i); EXPECT_EQ(fixed[i], 12 + 6 * i); }
+  // Blind-monitor frame, nID 7684-like: 26 groups from bit 0 at absolute RB 36. Legacy tests bits 6..31 and loses
+  // the last six groups (CORESET RBs 120..155); fixed keeps all 26 at RBs 36..191 (= the channel-estimate RBs).
+  b = bitmap(0, 26);
+  EXPECT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 36, 156, false, legacy, 45), 20);
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 36, 156, true, fixed, 45), 26);
+  for (int i = 0; i < 26; ++i) EXPECT_EQ(fixed[i], 36 + 6 * i);
+  // rb-Offset 2 (not a multiple of 6): legacy reads data at RBs 0,6,.. while the estimate starts at RB 2.
+  b = bitmap(0, 35);
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 2, 210, false, legacy, 45), 35);
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 2, 210, true, fixed, 45), 35);
+  EXPECT_EQ(legacy[0], 0); EXPECT_EQ(fixed[0], 2); EXPECT_EQ(fixed[34], 2 + 6 * 34);
+  // Non-contiguous bitmap (MAC frame): gaps are kept, positions relative to the first set group.
+  b = bitmap(1, 2); b[0] |= 0x80 >> 5;
+  ASSERT_EQ(nr_pdcch_coreset_group_rbs(b.data(), 6, 18, true, fixed, 45), 3);
+  EXPECT_EQ(fixed[0], 6); EXPECT_EQ(fixed[1], 12); EXPECT_EQ(fixed[2], 30);
+}
+
 TEST(DiscoveredBudget, EqualSharesAndRotatingRemainder) {
   for (int n = 1; n <= 9; ++n) {
     int totals[9]{};
