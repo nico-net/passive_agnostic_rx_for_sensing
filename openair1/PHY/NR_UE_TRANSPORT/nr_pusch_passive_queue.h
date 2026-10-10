@@ -68,6 +68,7 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"  // nr_pdcch_blind_ul_result_t
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h" // NR_PUSCH_PASSIVE_MAX_CTX
+#include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,6 +105,9 @@ typedef struct {
   /// dl_Doppler_shift and ue->freq_offset are mutated by the receive thread, so a consumer reading
   /// them later would de-rotate with a value newer than its own samples. 0.0 = no de-rotation.
   double   fo_hz;
+  nr_ue_ul_ticket_t ul_ticket;
+  nr_ue_ul_update_t ul_update;
+  bool ul_ticket_valid;
 } nr_pusch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in
@@ -115,6 +119,8 @@ typedef struct {
   uint64_t dropped_full;  ///< producer evicted the oldest to admit a newer job
   uint64_t dropped_stale; ///< dequeued too late; rxdata for that slot was already overwritten
   uint64_t dropped_epoch; ///< dequeued after a configuration epoch change
+  uint64_t dropped_unready; ///< pipeline admission refused before start
+  uint64_t dropped_snapshot; ///< raw IQ expired or capture failed
   uint64_t max_lag_slots; ///< worst observed producer-minus-job lag, in slots
 } nr_pusch_passive_queue_stats_t;
 
@@ -132,6 +138,8 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
 /// True once a consumer is running. Callers use this to choose enqueue vs in-line decode, so a
 /// refused start degrades to the previous behaviour rather than dropping every grant.
 bool nr_pusch_passive_queue_running(void);
+bool nr_pusch_passive_pipeline_enabled(void);
+void nr_pusch_passive_queue_note_unready(void);
 
 /**
  * @brief Producer side. Copies the job into the ring and returns immediately.

@@ -3519,6 +3519,18 @@ void nr_pdcch_blind_monitor_init(void)
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_pusch '%s'; passive PUSCH decode disabled\n",
           p_ul_pusch);
   }
+  /* The integrated first-PUSCH mode supplies the two config switches the DL-only
+   * OTA configuration lacks. Full-auto keeps the UL BWP/TDRA unknown until U3
+   * proposes a ticket; the flag is the only new default-off activation point. */
+  const char *ul_chain = getenv("ISAC_UL_PUSCH_CHAIN");
+  const char *ul_solver = getenv("ISAC_UL_PUSCH_SOLVER");
+  if (((ul_chain && strcmp(ul_chain,"1") == 0) ||
+       (ul_solver && strcmp(ul_solver,"1") == 0)) && g_cfg.dl_full_auto) {
+    g_cfg.dci01_scan = 1;
+    g_cfg.dci01_length_override = 0;
+    g_cfg.ul_pusch_decode = 1;
+    if (g_cfg.ul_pusch_max_per_slot < 1) g_cfg.ul_pusch_max_per_slot = 1;
+  }
   if (p_ul_dci_bits != NULL && p_ul_dci_bits[0] != '\0' && !parse_ul_dci_bits(p_ul_dci_bits)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_dci_bits '%s' (need 16 ints); UL widths left "
                "at defaults\n", p_ul_dci_bits);
@@ -5333,6 +5345,18 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
 static void blind_ul_apply_scrambling_ids(const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out)
 {
   const bool dedicated = out->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1;
+  if (dedicated && nr_pusch_passive_ul_ue_state_enabled()) {
+    nr_ue_ul_ticket_t ticket;
+    nr_ue_ctx_t dl;
+    if (nr_ue_ctx_ul_ticket(out->rnti,&ticket) && nr_ue_ctx_try_get(out->rnti,&dl))
+      nr_pusch_passive_ul_ids_seed(&ticket,&dl,(uint16_t)opts->phy_cell_id);
+    uint16_t dmrs=opts->phy_cell_id, data=opts->phy_cell_id;
+    nr_pusch_passive_ul_ids_current(out->rnti,out->nscid,(uint16_t)opts->phy_cell_id,&dmrs,&data);
+    out->ul_dmrs_scrambling_id=opts->ul_dmrs_scrambling_id>=0 ? opts->ul_dmrs_scrambling_id : dmrs;
+    out->data_scrambling_id=opts->data_scrambling_id>=0 ? opts->data_scrambling_id : data;
+    out->data_id_advance=false;
+    return;
+  }
   const int ul_dmrs = dedicated ? nr_dmrs_id_2stage_decided(nr_pusch_passive_ul_dmrs_id(out->nscid)) : -1;
   const uint16_t ul_dmrs_fallback = ul_dmrs >= 0 ? (uint16_t)ul_dmrs : (uint16_t)opts->phy_cell_id;
   out->ul_dmrs_scrambling_id = (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : ul_dmrs_fallback);

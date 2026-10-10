@@ -53,6 +53,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
@@ -1660,6 +1661,8 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
   pthread_mutex_lock(&ul_length_lock);
   nr_pdcch_dci_length_store_epoch(&g_ul_length_store, s);
   pthread_mutex_unlock(&ul_length_lock);
+  if (nr_pdcch_ul_bank_enabled() || nr_pdcch_ul_config_disc_enabled())
+    nr_pdcch_ul_config_disc_reset();
 }
 
 static bool reconf_lengths_enabled(void)
@@ -3529,6 +3532,8 @@ typedef struct {
   const nr_pdcch_autodiscover_cand_t *cand;
   int count;
   uint16_t rnti, scrambling_rnti, dmrs_id;
+  uint64_t bank_key;
+  uint32_t abs_slot;
   const nr_pdcch_autodiscover_sweep_ctx_t *gpu_ctx;  /* sweep_gpu_prefill()'d for these cands, or NULL */
 } ul_length_ctx_t;
 /* Preserve legacy evidence identities for narrow DCI; include every bit above 64. */
@@ -3551,6 +3556,7 @@ static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, 
     const uint32_t crc=g_sweep_cache.crc[ci][len];
     const nr_dci_bits_t pl=g_sweep_cache.payload[ci][len];
     if ((crc>>16)==0 && (uint16_t)crc==ctx->rnti && nr_dci_bits_field(&pl, len, 0, 1)==0) {
+      nr_pdcch_ul_bank_note(ctx->bank_key, ctx->rnti, len, ctx->abs_slot, false);
       *rnti=(uint16_t)crc;
       *hash=sweep_payload_hash(&pl, len);
       discovery_evidence("sweep_crc", "UL", discovery_evidence_frame, discovery_evidence_slot,
@@ -3574,6 +3580,7 @@ static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, 
     used_alt = ok;
   }
   if(!ok) return false;
+  nr_pdcch_ul_bank_note(ctx->bank_key, ctx->rnti, len, ctx->abs_slot, false);
   if (used_alt)
     LOG_A(PHY, "SENSING: RNTI_SCRAMBLE_HIT direction=UL rnti=0x%04x len=%d AL=%u CCE=%u\n",
           ctx->rnti, len, c->L, c->cce);
@@ -3896,7 +3903,8 @@ retry_scrambling:
   }
   /* Same fallback for the UL grant (DCI 0_1) raw path: the same solve with the opposite format-indicator admission,
    * filled exactly as nr_pdcch_blind_decode_raw_01() fills its result. */
-  if (!t->ok && t->ul_scan && t->ul_auto && nr_pdcch_joint_live_enabled() && !janon_async_enabled()) {
+  if (!t->ok && t->ul_scan && t->ul_auto && nr_pdcch_joint_live_enabled() && !janon_async_enabled()
+      && !nr_pdcch_ul_bank_enabled()) {
     nr_pdcch_joint_live_result_t jr;
     if (nr_pdcch_joint_live_decode(tmp_e, t->L, t->dci_length, t->dmrs_scrambling_id, (int)data_scrambling_rnti,
                                    t->rnti_min, t->rnti_max, /*indicator=*/0, &jr)) {
@@ -6475,17 +6483,34 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
          * retains the exhaustive control. The batch itself must use the same bound: pre-decoding all
          * offered CCEs before a one-candidate feed merely moved the old cost outside the timer. */
         const int sweep_trials = count; /* ranked mode already compacted to <=4 candidates per AL */
+        const uint16_t ul_scrambling_rnti = nr_pdcch_ul_bank_enabled()
+            && cfg->discovered_coreset && cfg->coreset_pdcch_dmrs_scrambling_id != fp->Nid_cell
+            ? boot_rnti : rel15->coreset.scrambling_rnti;
         const nr_pdcch_autodiscover_sweep_ctx_t gctx={.cand=candidates,.n_cand=sweep_trials,
-                            .scrambling_rnti=rel15->coreset.scrambling_rnti,
+                            .scrambling_rnti=ul_scrambling_rnti,
                             .dmrs_scrambling_id=rel15->coreset.pdcch_dmrs_scrambling_id};
         ulc->state.stride = dci_sweep_stride();
+        if (nr_pdcch_ul_bank_enabled() && !ul_second && !ulc->state.preferred_len)
+          for (int q = 0; q < n_dl_ready; ++q)
+            if (dl_ready_rnti[q] == boot_rnti) {
+              ulc->state.preferred_len = dl_ready_len[q];
+              /* The exact 1_1 width gets the preferred round; nearby 0_1
+               * widths lead the later full sweep. These are order hints only.
+               * CRC evidence remains per RNTI and per bank. */
+              for (int d = 1; d <= 3; ++d) {
+                nr_pdcch_dci_length_note_seen(dl_ready_len[q] - d);
+                nr_pdcch_dci_length_note_seen(dl_ready_len[q] + d);
+              }
+              break;
+            }
         ulc->state.excluded_len = ul_second ? ulc->found[0] : 0;
         if (ul_second && ulc->hint_secondary) ulc->state.preferred_len = ulc->hint_secondary;
         ulc->state.secondary_excluded_len = ul_second ? ulc->found[1] : 0;
         const bool gpu=sweep_gpu_prefill(&gctx, &ulc->state, dci_len_min(), dci_len_max());
         ul_length_ctx_t ctx={.cand=candidates,.count=sweep_trials,.rnti=boot_rnti,
-                            .scrambling_rnti=rel15->coreset.scrambling_rnti,
+                            .scrambling_rnti=ul_scrambling_rnti,
                             .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id,
+                            .bank_key=geom,.abs_slot=abs_slot,
                             .gpu_ctx=gpu?&gctx:NULL};
         const uint64_t ul_feed_start = btim_now();
         const uint64_t ul_deadline = discovery_budget_us() > 0
@@ -6526,6 +6551,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             if (old_len > 0 && old_len != found) reconf_length_reopened(boot_rnti, true, old_len, found);
             LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x (occasions=%d polar_decodes=%llu)\n",
                   found,boot_rnti,ulc->state.occasions_fed,(unsigned long long)ulc->state.decodes);
+            nr_pdcch_ul_bank_note(geom, boot_rnti, found, abs_slot, true);
             /* Publish to the bank. On agreement between two distinct RNTIs this becomes the cell-wide
              * prior and every later RNTI skips its own 34-length sweep -- the discovery cost stops
              * scaling with the number of UEs, which is what breaks the consumer at high grant rates. */
@@ -7735,11 +7761,39 @@ constdiag_done:;
       if (cand_task[ti].ul_out.rnti != 0) NR_BLIND_CTR_INC(g_ul_crc_hit);
       if(cand_task[ti].ok && cand_task[ti].ul_auto) {
         NR_BLIND_CTR_INC(g_ul_disc_call);
+        nr_pdcch_ul_bank_note(geom, cand_task[ti].rnti_min, cand_task[ti].dci_length,
+                              abs_slot, false);
         nr_passive_replay_ul(source_absolute_slot, cand_task[ti].rnti_min, cand_task[ti].dci_length,
                              cand_task[ti].ul_out.raw_payload);
         nr_pdcch_blind_ul_result_t discovered;
-        cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,cand_task[ti].dci_length,cand_task[ti].rnti_min,
-                                                    cand_task[ti].ul_out.raw_payload,&discovered);
+        if (nr_pdcch_ul_config_disc_enabled() && ul_opts.bwp_size == 0) {
+          nr_pdcch_blind_ul_opts_t confirmed;
+          nr_pdcch_ul_config_prior_t prior = {.dl_bwp_start=cfg->bwp_start,
+              .dl_bwp_size=cfg->bwp_size, .carrier_rb=fp->N_RB_DL,
+              .source_abs_slot=source_absolute_slot, .bank_key=geom};
+          nr_ue_ctx_t uc;
+          if (nr_ue_ctx_try_get(cand_task[ti].rnti_min, &uc)) {
+            const int64_t packed = uc.cfg[NR_UEP_BWP].value;
+            const uint16_t sz = (uint16_t)((uint64_t)packed >> 16);
+            const uint16_t st = (uint16_t)packed;
+            if (sz > 0 && sz <= fp->N_RB_DL && st + sz <= fp->N_RB_DL) {
+              prior.dl_bwp_start = st;
+              prior.dl_bwp_size = sz;
+            }
+          }
+          const bool have_confirmed = nr_pdcch_ul_config_disc_locked(
+              cand_task[ti].rnti_min, cand_task[ti].dci_length, &prior, &confirmed);
+          cand_task[ti].ok = have_confirmed && nr_pdcch_ul_discovery_grant(
+              &confirmed, cand_task[ti].dci_length, cand_task[ti].rnti_min,
+              cand_task[ti].ul_out.raw_payload, &discovered);
+          if (!cand_task[ti].ok)
+            cand_task[ti].ok=nr_pdcch_ul_config_disc_grant(cand_task[ti].rnti_min,
+                cand_task[ti].dci_length, cand_task[ti].ul_out.raw_payload,
+                &ul_opts, &prior, &discovered);
+        } else {
+          cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,cand_task[ti].dci_length,cand_task[ti].rnti_min,
+                                                      cand_task[ti].ul_out.raw_payload,&discovered);
+        }
         if(cand_task[ti].ok) cand_task[ti].ul_out=discovered;
       }
       const nr_pdcch_blind_ul_result_t *u = &cand_task[ti].ul_out;
@@ -7784,6 +7838,17 @@ constdiag_done:;
           nr_srs_passive_trigger(u->rnti,source_absolute_slot,u->srs_request);
         discovery_evidence("ul_admitted", "UL", cand_task[ti].frame, cand_task[ti].slot,
                             u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
+        { /* ISAC_UL_DBG_LOG=1 (diagnostic, default off): every admitted UL DCI with its raw payload */
+          static int s_uldbg = -1;
+          if (s_uldbg < 0) s_uldbg = getenv("ISAC_UL_DBG_LOG") && atoi(getenv("ISAC_UL_DBG_LOG")) ? 1 : 0;
+          if (s_uldbg) {
+            char hx[49];
+            LOG_A(PHY, "SENSING: ULDBG_DCI abs=%ld f=%d s=%d rnti=0x%04x fmt=%d len=%u cce=%d al=%d k2=%u prb=%u+%u mcs=%u payload=0x%s\n",
+                  source_absolute_slot, cand_task[ti].frame, cand_task[ti].slot, u->rnti, (int)u->ul_dci_format,
+                  u->dci_length, cand_task[ti].cce, (int)cand_task[ti].L, u->k2, u->bwp_start + u->start_rb, u->num_rb,
+                  u->mcs, nr_dci_bits_hex(u->raw_payload.w, u->dci_length, false, hx));
+          }
+        }
         nr_pdcch_dci01_layout_observe(ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length,
                                       u->raw_payload);
         { /* grant-loss SCORING only: matchable to the gNB scheduler log */
@@ -8512,6 +8577,8 @@ constdiag_done:;
          "SENSING: blind PDCCH accept (%d.%d) rnti=0x%x prb=[%u..%u) sym=[%u..%u) dmrs_mask=0x%x\n",
          proc->frame_rx, proc->nr_slot_rx, out.rnti, out.start_rb, out.start_rb + out.num_rb, out.start_symbol,
          out.start_symbol + out.num_symbols, out.dl_dmrs_symb_pos);
+    if (out.rnti_class == NR_BLIND_RNTI_CLASS_C)
+      nr_pdcch_ul_config_disc_note_dl_slot(abs_slot);
 
     /* Do NOT let an unresolved DCI length seed the C-RNTI bootstrap: at the formula-default length
      * the accepts are noise, two of them agreeing is enough to CONFIRM, and the consumer below then

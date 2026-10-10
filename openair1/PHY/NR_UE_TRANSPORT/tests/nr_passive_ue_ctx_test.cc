@@ -18,6 +18,8 @@ extern "C" bool nr_cfg_ignore_sib1(void) {
   const char *value=getenv("ISAC_TD_IGNORE_SIB1");
   return value && std::string(value)=="1";
 }
+extern "C" bool nr_cfg_reconf_enabled(void) { return false; }
+extern "C" uint32_t nr_cfg_epoch_work_stamp(void) { return 0; }
 extern "C" void nr_cfg_ignore_sib1_reset_for_test(void) {}
 
 class UeContext : public ::testing::Test {
@@ -52,8 +54,104 @@ TEST_F(UeContext, FirstGrantCreatesFirstSeenThenActive) {
   auto s=contents(); nr_ue_ctx_t c{};
   ASSERT_TRUE(nr_ue_ctx_get(o.rnti,&c)); EXPECT_EQ(c.state,NR_UE_ACTIVE);
   EXPECT_EQ(c.st.grants_dl,1);
+  EXPECT_EQ(s.find("\"ul\":"),std::string::npos);
   EXPECT_NE(s.find("\"state\":\"FIRST_SEEN\""),std::string::npos);
   EXPECT_NE(s.find("\"state\":\"ACTIVE\""),std::string::npos);
+}
+TEST_F(UeContext, UlStateUsesDlLockAndRejectsOldIncarnationFeedback) {
+  nr_ue_ctx_close();
+  setenv("ISAC_UL_UE_STATE","1",1);
+  ASSERT_TRUE(nr_ue_ctx_open(path.c_str(),128,0));
+  nr_ue_ctx_on_param(0x101,NR_UEP_DCI_LEN_DL,52,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  nr_ue_ctx_on_param(0x101,NR_UEP_BWP,100,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  nr_ue_ctx_on_param(0x102,NR_UEP_DCI_LEN_DL,54,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  nr_ue_ul_ticket_t a{},b{};
+  for(int i=0;i<200 && (!nr_ue_ctx_ul_ticket(0x101,&a) || !nr_ue_ctx_ul_ticket(0x102,&b));i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(nr_ue_ctx_ul_ticket(0x101,&a));
+  ASSERT_TRUE(nr_ue_ctx_ul_ticket(0x102,&b));
+  nr_ue_ctx_t prior{};
+  for(int i=0;i<200;i++) {
+    if(nr_ue_ctx_try_get(0x101,&prior) && prior.ul.field[NR_UL_F_BWP].evidence==NR_UL_EVID_DL_PRIOR)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(prior.ul.field[NR_UL_F_DCI_LEN].value,52);
+  EXPECT_EQ(prior.ul.field[NR_UL_F_DCI_LEN].evidence,NR_UL_EVID_DL_PRIOR);
+  EXPECT_EQ(prior.ul.field[NR_UL_F_BWP].value,100);
+  EXPECT_EQ(prior.ul.field[NR_UL_F_BWP].evidence,NR_UL_EVID_DL_PRIOR);
+  nr_ue_ctx_ul_ta_command(0x101,7,1,true);
+  nr_ue_ctx_ul_ta_command(0x101,3,1,false);
+  nr_ue_ul_update_t ua{}; ua.dci_len=49; ua.layout=3; ua.bwp_start=1; ua.bwp_size=100;
+  ua.dmrs_id=71; ua.data_id=81; ua.tda=2; ua.k2=4; ua.pci=415;
+  nr_ue_ul_update_t ub=ua; ub.dmrs_id=72; ub.data_id=82;
+  nr_ue_ctx_ul_grant(&a,&ua); nr_ue_ctx_ul_grant(&b,&ub);
+  nr_ue_ctx_ul_feedback(&a,&ua,true);
+  nr_ue_ctx_t before{};
+  for(int i=0;i<200;i++) {
+    if(nr_ue_ctx_try_get(0x102,&before) && before.ul.field[NR_UL_F_DATA_ID].evidence==NR_UL_EVID_PROVISIONAL)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(before.ul.field[NR_UL_F_DATA_ID].evidence,NR_UL_EVID_PROVISIONAL);
+  nr_ue_ctx_t before_a{};
+  ASSERT_TRUE(nr_ue_ctx_try_get(0x101,&before_a));
+  EXPECT_TRUE(before_a.ul.ta_command_valid);
+  EXPECT_EQ(before_a.ul.ta_command_units,10);
+  nr_cfg_epoch_snapshot_t bump{3,1,NR_EPOCH_HARD_RESET,NR_CAUSE_SIB1_CHANGE};
+  nr_ue_ctx_on_epoch(&bump);
+  nr_ue_ctx_on_param(0x101,NR_UEP_DCI_LEN_DL,56,NR_UEV_TRUSTED,NR_UEC_CONVERGED,100);
+  nr_ue_ctx_ul_feedback(&a,&ua,true); // delayed verdict must not confirm the reused RNTI
+  nr_ue_ctx_close();
+  nr_ue_ctx_t reused{},other{};
+  ASSERT_TRUE(nr_ue_ctx_get(0x101,&reused));
+  ASSERT_TRUE(nr_ue_ctx_get(0x102,&other));
+  EXPECT_EQ(reused.identity_gen,1u);
+  EXPECT_EQ(reused.ul.field[NR_UL_F_DATA_ID].evidence,NR_UL_EVID_UNKNOWN);
+  EXPECT_EQ(other.ul.field[NR_UL_F_DATA_ID].evidence,NR_UL_EVID_UNKNOWN);
+  std::ifstream json(path);
+  std::ostringstream records; records<<json.rdbuf();
+  EXPECT_NE(records.str().find("\"ul\":"),std::string::npos);
+  unsetenv("ISAC_UL_UE_STATE");
+}
+TEST_F(UeContext, UlStateClearsOnDedicatedBankReverify) {
+  nr_ue_ctx_close();
+  setenv("ISAC_UL_UE_STATE","1",1);
+  ASSERT_TRUE(nr_ue_ctx_open(path.c_str(),128,0));
+  nr_ue_ctx_on_param(0x103,NR_UEP_DCI_LEN_DL,52,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  nr_ue_ul_ticket_t ticket{};
+  for(int i=0;i<200 && !nr_ue_ctx_ul_ticket(0x103,&ticket);i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(nr_ue_ctx_ul_ticket(0x103,&ticket));
+  nr_ue_ul_update_t update{}; update.dci_len=49; update.data_id=721;
+  nr_ue_ctx_ul_feedback(&ticket,&update,true);
+  nr_ue_ctx_t before{};
+  for(int i=0;i<200;i++) {
+    if(nr_ue_ctx_try_get(0x103,&before) && before.ul.field[NR_UL_F_DATA_ID].evidence==NR_UL_EVID_TB_CONFIRMED)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_EQ(before.ul.field[NR_UL_F_DATA_ID].evidence,NR_UL_EVID_TB_CONFIRMED);
+  nr_cfg_epoch_snapshot_t reverify{2,0,NR_EPOCH_HARD_REVERIFY,NR_CAUSE_DEDICATED_CHANGE_SUSPECTED};
+  nr_ue_ctx_on_epoch(&reverify);
+  nr_ue_ctx_ul_feedback(&ticket,&update,true);
+  nr_ue_ctx_close();
+  nr_ue_ctx_t state{};
+  ASSERT_TRUE(nr_ue_ctx_get(0x103,&state));
+  EXPECT_EQ(state.ul.field[NR_UL_F_DATA_ID].evidence,NR_UL_EVID_UNKNOWN);
+  EXPECT_EQ(state.cfg[NR_UEP_DCI_LEN_DL].verif,NR_UEV_HINT);
+  unsetenv("ISAC_UL_UE_STATE");
+}
+TEST_F(UeContext, UlStateRunsWithoutJsonDestination) {
+  nr_ue_ctx_close();
+  setenv("ISAC_UL_UE_STATE","1",1);
+  ASSERT_TRUE(nr_ue_ctx_open(nullptr,128,0));
+  nr_ue_ctx_on_param(0x104,NR_UEP_DCI_LEN_DL,51,NR_UEV_TRUSTED,NR_UEC_CONVERGED,10);
+  nr_ue_ctx_close();
+  nr_ue_ctx_t state{};
+  ASSERT_TRUE(nr_ue_ctx_get(0x104,&state));
+  EXPECT_EQ(state.ul.field[NR_UL_F_DCI_LEN].evidence,NR_UL_EVID_DL_PRIOR);
+  unsetenv("ISAC_UL_UE_STATE");
 }
 TEST_F(UeContext, IdleAfterTidleGoneAfterTgone) {
   auto o=grant(1,1000000000,1); nr_ue_ctx_on_obs(&o);

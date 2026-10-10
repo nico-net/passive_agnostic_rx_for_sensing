@@ -661,6 +661,7 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
          * three independent checks passed before this line, and a TC-RNTI cannot repeat. */
         nr_pdcch_blind_rnti_bootstrap_record_verified(tc_rnti, NR_BLIND_RNTI_CLASS_TC, abs_slot);
         if (nr_ue_ctx_enabled()) nr_ue_ctx_on_anchor(tc_rnti, NR_BLIND_RNTI_CLASS_TC, abs_slot);
+        nr_ue_ctx_ul_ta_command(tc_rnti, ta, mu, true);
         /* FRAME-DERIVED, to match what the accept path asks with. slots_per_frame = 10 << mu,
          * never a hardcoded 10 (valid only at 15 kHz, and it has broken a slow-time axis here
          * before). */
@@ -684,6 +685,7 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
                            * (step < 0 ? -1.0 : 1.0);
     LOG_A(PHY, "SENSING: MAC_TA CE (%d.%d) rnti=0x%x tag=%u ta_cmd=%u -> %+.1f m range delta\n",
           frame, slot, rnti, tag, cmd, delta_m);
+    nr_ue_ctx_ul_ta_command(rnti, step, mu, false);
   }
 }
 

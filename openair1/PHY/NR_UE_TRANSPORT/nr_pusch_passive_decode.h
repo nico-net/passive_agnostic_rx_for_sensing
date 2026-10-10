@@ -62,6 +62,9 @@ typedef struct {
   /// 0 when no refinement was needed. Kept separate so a refined grant is distinguishable.
   int      est_delay_pre;
   int      ta_applied_samples; ///< signed FFT advance used for this attempt, including sweep selection
+  uint16_t dmrs_id; ///< ID actually used after optional DM-RS discovery
+  uint16_t data_id; ///< data scrambling ID actually used for TB decoding
+  uint8_t  nscid; ///< DM-RS sequence index actually used
   /// HARQ-ACK bit count that made the transport block decode, when the UCI reservation search
   /// found one. 0 = decoded with no reservation (no UCI, or O_ACK <= 2, which punctures instead).
   uint16_t uci_ack_re; ///< inferred ACK RE footprint; does not imply a known O_ACK/beta/alpha
@@ -75,6 +78,12 @@ typedef struct {
 /// ULSCH HARQ and thread pool -- so two consumers never share one. Sized to the queue's consumer
 /// cap; a caller decoding in-line uses context 0.
 #define NR_PUSCH_PASSIVE_MAX_CTX 6
+
+/* U1: initialized before RX; capture a bounded private raw-IQ window before heavy work. */
+bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue);
+bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot,
+                                     uint64_t absolute_slot);
+void nr_pusch_passive_decode_capture_release(int ctx);
 
 /**
  * @brief Decode one passively-observed PUSCH.
@@ -109,6 +118,14 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              bool     cfr_only,
                              double   fo_hz,
                              nr_pusch_passive_out_t *out);
+
+/* One-code-block CRC probe. Caller guarantees a QPSK grant with A <= 3824;
+ * the existing one-CB ULSCH decoder supplies the same CB/TB CRC verdict.
+ * Probe results do not train the ordinary UL ID/HARQ/observation state. */
+bool nr_pusch_passive_decode_probe(PHY_VARS_NR_UE *ue, int ctx, uint32_t frame,
+                                   uint8_t slot, const nr_pdcch_blind_ul_result_t *g,
+                                   int32_t ta_offset_samples, uint64_t abs_slot,
+                                   double fo_hz, nr_pusch_passive_out_t *out);
 
 /* Actual production UL FFT, shared by immutable measurement diagnostics.
  * Positive sample_offset advances the window; fo_hz uses the receiver convention.

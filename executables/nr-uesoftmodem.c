@@ -222,7 +222,8 @@ static int passive_core_plan(void)
   ADD(NR_CP_SCAN, cfg->scan_thread < 4 ? cfg->scan_thread : 4, cfg->scan_thread_core);
   if (core_feature("ISAC_PDCCH_USS_TRACKER", true)) ADD(NR_CP_USS, 1, core_env_value("ISAC_PDCCH_USS_CORE"));
   ADD(NR_CP_PDSCH, cfg->pdsch_thread < 6 ? cfg->pdsch_thread : 6, cfg->pdsch_thread_core);
-  ADD(NR_CP_PUSCH, cfg->ul_thread < 6 ? cfg->ul_thread : 6, cfg->ul_thread_core);
+  ADD(NR_CP_PUSCH, nr_pusch_passive_pipeline_enabled() && cfg->ul_pusch_decode ? 1 :
+      (cfg->ul_thread < 6 ? cfg->ul_thread : 6), cfg->ul_thread_core);
   if (get_softmodem_params()->threadPoolConfigExplicit) {
     char *text = strdup(get_softmodem_params()->threadPoolConfig), *save = NULL;
     if (!text) goto fail;
@@ -318,6 +319,9 @@ static void set_fp_options(int cell_id, int ru_id)
 static void nrue_shutdown_notify(void)
 {
   oai_exit = 1;
+  /* raw-IQ EOF takes nr_shutdown_finish()'s _exit path, so main's normal
+   * consumer teardown is not reached. Join the prewarmed UL worker here. */
+  if (nr_pusch_passive_pipeline_enabled()) nr_pusch_passive_queue_stop();
   itti_wait_tasks_unblock();
 }
 
@@ -405,15 +409,21 @@ int main(int argc, char **argv)
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && core_feature("ISAC_CORE_PLAN", true))
     nrue_set_ru_params(uniqCfg);
   if (passive_core_plan()) return EXIT_FAILURE;
-  if (nr_cfg_reconf_enabled()) {
+  const char *ul_chain_flag = getenv("ISAC_UL_PUSCH_CHAIN");
+  const char *ul_solver_flag = getenv("ISAC_UL_PUSCH_SOLVER");
+  const bool ul_chain_on = (ul_chain_flag && strcmp(ul_chain_flag, "1") == 0) ||
+                           (ul_solver_flag && strcmp(ul_solver_flag, "1") == 0);
+  if (nr_cfg_reconf_enabled() || ul_chain_on ||
+      (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
     const char *uectx_path = getenv("ISAC_UECTX_PATH");
-    if (uectx_path && *uectx_path) {
+    if ((uectx_path && *uectx_path) || ul_chain_on ||
+        (getenv("ISAC_UL_UE_STATE") && strcmp(getenv("ISAC_UL_UE_STATE"), "1") == 0)) {
       const char *period_env = getenv("ISAC_UECTX_PERIOD_S");
       const double period = period_env && *period_env ? atof(period_env) : 5.0;
       if (nr_ue_ctx_open(uectx_path, 16384, period))
         nr_cfg_epoch_subscribe(nr_ue_ctx_on_epoch);
       else
-        LOG_W(PHY, "SENSING: ISAC_UECTX_PATH set but writer could not be opened\n");
+        LOG_W(PHY, "SENSING: UE context writer/state could not be opened\n");
     }
   }
   // Per-grant observation API (Task A3): JSONL of every decoded PDSCH/PUSCH grant; off unless ISAC_OBS_PATH is set.
@@ -621,6 +631,16 @@ int main(int argc, char **argv)
   nr_csirs_disc_pipeline_init(&disc_ue->frame_parms);
   if (nr_csirs_disc_start(&disc_ue->frame_parms, disc_ue->frame_parms.nb_antennas_rx) != 0)
     LOG_W(PHY, "SENSING: CSIRS_DISC worker could not start; slot discovery feed disabled\n");
+  /* U1 owns exactly one bounded consumer/context, warmed before the RX seal.
+   * A failed start leaves admission closed; the RT path only counts drops. */
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_pusch_passive_pipeline_enabled()) {
+    const nr_pdcch_blind_monitor_cfg_t *ul_cfg = nr_pdcch_blind_monitor_get_cfg();
+    if (ul_cfg && ul_cfg->ul_pusch_decode) {
+      if (!nr_pusch_passive_queue_start(disc_ue, ul_cfg->ul_queue_depth > 0 ? ul_cfg->ul_queue_depth : 8,
+                                        1, ul_cfg->ul_thread_core))
+        LOG_W(PHY, "SENSING: UL pipeline prewarm failed; grants will be dropped and counted\n");
+    }
+  }
 
   /* Offline replay exits before any radio initialization. */
   const char *replay_input = getenv("ISAC_PASSIVE_REPLAY_INPUT");
@@ -628,6 +648,7 @@ int main(int argc, char **argv)
     AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Replay requires --passive-rx\n");
     if (replay_input) {
       const int replay_result = nr_passive_replay_read(nrPHY_vars_UE_g[0][0], replay_input);
+      nr_pusch_passive_queue_stop();
       nr_pdcch_nid_gpu_stop();
       nr_csirs_disc_stop();
       return replay_result;

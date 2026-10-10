@@ -64,6 +64,7 @@ void crcTableInit(void);
 #include "nr_pdcch_dci_length_sweep.h"
 #include "nr_pdcch_ul_field_sweep.h"
 #include "nr_pdcch_ul_discovery.h"
+#include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdsch_prb_set.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pdcch_blind_monitor_rt.h"
@@ -3133,6 +3134,205 @@ TEST_F(BlindPdcchTest, UlDefaultTdaTableArmsTheWidthSearch) {
   nr_pdcch_ul_discovery_reset();
 }
 
+TEST_F(BlindPdcchTest, UlConfigDiscKeepsTwoHiddenBwpUesAndTicketsSeparate) {
+  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
+  nr_pdcch_ul_config_disc_reset();
+  auto base = LiveUlOpts(); base.bwp_size = 0; base.tda_count = 0;
+  for (int k = 0; k < 2; ++k) {
+    auto truth = base;
+    truth.bwp_start = k ? 48 : 0;
+    truth.bwp_size = k ? 52 : 106;
+    const uint16_t len = nr_pdcch_blind_dci01_size(&truth);
+    const nr_pdcch_ul_config_prior_t prior = {(uint16_t)truth.bwp_start, (uint16_t)truth.bwp_size,
+                                               217, 0, 0, 100};
+    UlGroundTruth gt; gt.rnti = k ? 0x4631 : 0x4630; gt.riv = 0;
+    nr_pdcch_blind_ul_result_t out{};
+    ASSERT_TRUE(nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+        nr_dci_bits_from_u64(PackUlPayload(gt,truth)), &base, &prior, &out));
+    EXPECT_EQ(out.rnti, gt.rnti);
+    EXPECT_EQ(out.bwp_start, truth.bwp_start);
+    EXPECT_EQ(out.bwp_size, truth.bwp_size);
+    EXPECT_NE(out.hyp_generation, 0u);
+    nr_pdcch_ul_discovery_feedback(&out, true);
+    nr_pdcch_ul_discovery_feedback(&out, true); // duplicate feedback gets no second credit
+  }
+  nr_pdcch_ul_config_stats_t st{};
+  nr_pdcch_ul_config_disc_stats(&st);
+  EXPECT_EQ(st.feedback_ok, 2u);
+  EXPECT_EQ(st.proposed, 2u);
+  nr_pdcch_ul_config_disc_reset();
+}
+
+TEST_F(BlindPdcchTest, UlConfigDiscExploresPastWrongDlBwpWithoutCrcCredit) {
+  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
+  nr_pdcch_ul_config_disc_reset();
+  auto truth = LiveUlOpts(); truth.bwp_size = 217; truth.tda_count = 0;
+  auto base = truth; base.bwp_size = 0;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&truth);
+  nr_pdcch_ul_config_prior_t prior = {0, 52, 217, 0, 0, 100};
+  bool saw_truth = false;
+  for (int i = 0; i < 100; ++i) {
+    UlGroundTruth gt; gt.riv = i % 10; gt.mcs = 2 + i % 20; gt.harq_pid = i % 16;
+    nr_pdcch_blind_ul_result_t out{};
+    prior.source_abs_slot++;
+    if (!nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+        nr_dci_bits_from_u64(PackUlPayload(gt,truth)), &base, &prior, &out)) continue;
+    if (out.bwp_size == truth.bwp_size) { saw_truth = true; break; }
+    nr_pdcch_ul_discovery_feedback(&out, false);
+  }
+  EXPECT_TRUE(saw_truth);
+  nr_pdcch_ul_config_stats_t st{};
+  nr_pdcch_ul_config_disc_stats(&st);
+  if (st.proposal_calls)
+    printf("UL_CONFIG_DISC fixture proposal calls=%llu mean_us=%.2f max_us=%.2f\n",
+           (unsigned long long)st.proposal_calls,
+           (double)st.proposal_ns / st.proposal_calls / 1000.0,
+           (double)st.proposal_max_ns / 1000.0);
+  nr_pdcch_ul_config_disc_reset();
+}
+
+TEST_F(BlindPdcchTest, UlConfigDiscExploresEqualLengthWidthSplits) {
+  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
+  nr_pdcch_ul_config_disc_reset();
+  auto truth = LiveUlOpts();
+  truth.bwp_size = 217;
+  truth.tda_count = 0;
+  truth.bwp_indicator_bits = 1;
+  truth.sri_bits = 0;
+  truth.csi_request_bits = 1;
+  auto base = truth;
+  base.bwp_size = 0;
+  base.bwp_indicator_bits = base.sri_bits = base.csi_request_bits = -1;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&truth);
+  nr_pdcch_ul_config_prior_t prior = {0, 217, 217, 0, 0, 100};
+  bool found = false;
+  for (int i = 0; i < 100; ++i) {
+    UlGroundTruth gt;
+    gt.riv = 1 + i % 16;
+    gt.mcs = 2 + i % 24;
+    gt.harq_pid = i % 16;
+    nr_pdcch_blind_ul_result_t out{};
+    prior.source_abs_slot++;
+    if (!nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+        nr_dci_bits_from_u64(PackUlPayload(gt, truth)), &base, &prior, &out)) continue;
+    if (out.bwp_size == 217 && out.start_rb == gt.riv && out.num_rb == 1
+        && out.mcs == gt.mcs && out.rv == gt.rv && out.harq_pid == gt.harq_pid) {
+      found = true;
+      break;
+    }
+    nr_pdcch_ul_discovery_feedback(&out, false);
+  }
+  EXPECT_TRUE(found) << "a same-length BWP/SRI/CSI width alternative was never proposed";
+  nr_pdcch_ul_config_disc_reset();
+}
+
+TEST_F(BlindPdcchTest, UlConfigDiscFindsHiddenTwoRowTdraWidth) {
+  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
+  nr_pdcch_ul_config_disc_reset();
+  auto truth = LiveUlOpts(); truth.bwp_size = 106; truth.bwp_start = 6;
+  auto base = truth; base.bwp_size = 0; base.tda_count = 0;
+  const auto len = nr_pdcch_blind_dci01_size(&truth);
+  const nr_pdcch_ul_config_prior_t prior = {6, 106, 217, 0, 0, 120};
+  UlGroundTruth gt; gt.riv = 0; gt.tda_index = 0;
+  nr_pdcch_blind_ul_result_t out{};
+  ASSERT_TRUE(nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+      nr_dci_bits_from_u64(PackUlPayload(gt,truth)), &base, &prior, &out));
+  EXPECT_EQ(out.bwp_size, 106);
+  EXPECT_EQ(out.k2, 4);
+  EXPECT_EQ(out.start_symbol, 0);
+  EXPECT_EQ(out.num_symbols, 14);
+  nr_pdcch_ul_config_disc_reset();
+}
+
+TEST_F(BlindPdcchTest, BankedUlRawDecodeUsesKnownRntisWithDifferentDlAndUlLengths) {
+  for (int k = 0; k < 2; ++k) {
+    GroundTruth dl; dl.rnti = k ? 0x4631 : 0x4630; dl.bwp_size = 273;
+    const uint16_t dl_len = nr_pdcch_blind_dci_size(dl.bwp_size);
+    auto ul = LiveUlOpts(); ul.bwp_size = k ? 52 : 106; ul.tda_count = 2;
+    if (nr_pdcch_blind_dci01_size(&ul) == dl_len) ul.csi_request_bits = 1;
+    const uint16_t ul_len = nr_pdcch_blind_dci01_size(&ul);
+    ASSERT_NE(dl_len, ul_len);
+    UlGroundTruth gt; gt.rnti = dl.rnti; gt.riv = k + 1;
+    auto ul_llr = EncodeToLLR(PackUlPayload(gt, ul), gt.rnti, ul_len,
+                              kAggregationLevel, 40.0, rng_);
+    nr_pdcch_blind_ul_result_t out{};
+    ASSERT_TRUE(nr_pdcch_blind_decode_raw_01(ul_llr.data(), kAggregationLevel,
+        ul_len, gt.rnti, gt.rnti, &out));
+    EXPECT_EQ(out.rnti, gt.rnti);
+    EXPECT_EQ(out.dci_length, ul_len);
+    EXPECT_FALSE(nr_pdcch_blind_decode_raw_01(ul_llr.data(), kAggregationLevel,
+        ul_len, gt.rnti + 2, gt.rnti + 2, &out));
+    auto dl_llr = EncodeToLLR(PackPayload(dl, RivBitsFor(dl.bwp_size)),
+                              dl.rnti, dl_len, kAggregationLevel, 40.0, rng_);
+    EXPECT_FALSE(nr_pdcch_blind_decode_raw_01(dl_llr.data(), kAggregationLevel,
+        dl_len, dl.rnti, dl.rnti, &out));
+  }
+}
+
+TEST_F(BlindPdcchTest, UlConfigDiscNoTruthAndStaleTicketDoNotEarnCrcEvidence) {
+  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
+  nr_pdcch_ul_config_disc_reset();
+  auto truth = LiveUlOpts(); truth.bwp_size = 52; truth.tda_count = 0;
+  auto base = truth; base.bwp_size = 0;
+  const nr_pdcch_ul_config_prior_t prior = {0, 52, 217, 0, 0, 150};
+  UlGroundTruth gt; gt.riv = 0;
+  nr_pdcch_blind_ul_result_t grant{};
+  EXPECT_FALSE(nr_pdcch_ul_config_disc_grant(gt.rnti, 5,
+      nr_dci_bits_from_u64(1), &base, &prior, &grant));
+  ASSERT_TRUE(nr_pdcch_ul_config_disc_grant(gt.rnti,
+      nr_pdcch_blind_dci01_size(&truth),
+      nr_dci_bits_from_u64(PackUlPayload(gt,truth)), &base, &prior, &grant));
+  nr_pdcch_ul_config_disc_reset();
+  nr_pdcch_ul_discovery_feedback(&grant, true);
+  nr_pdcch_ul_config_stats_t st{};
+  nr_pdcch_ul_config_disc_stats(&st);
+  EXPECT_EQ(st.feedback_ok, 0u);
+  EXPECT_EQ(st.locked_hypotheses, 0u);
+}
+
+TEST_F(BlindPdcchTest, BankedUlKnownRntiNoiseDoesNotLockAFalseLength) {
+  auto opts = LiveUlOpts(); opts.bwp_size = 52; opts.tda_count = 0;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&opts);
+  std::normal_distribution<double> noise(0.0, 30.0);
+  int accepted = 0;
+  for (int t = 0; t < 5000; ++t) {
+    std::vector<int16_t> llr(kAggregationLevel * 108);
+    for (auto& x : llr) x = (int16_t)noise(rng_);
+    nr_pdcch_blind_ul_result_t out{};
+    accepted += nr_pdcch_blind_decode_raw_01(llr.data(), kAggregationLevel,
+                                               len, 0x4630, 0x4630, &out);
+  }
+  printf("UL known-RNTI noise accepts=%d/5000\n", accepted);
+  EXPECT_LE(accepted, 1);
+}
+
+TEST_F(BlindPdcchTest, UlConfigDiscSameRntiDifferentBanksDoNotShareTbEvidence) {
+  setenv("ISAC_UL_CONFIG_DISC", "1", 1);
+  nr_pdcch_ul_config_disc_reset();
+  auto truth = LiveUlOpts(); truth.bwp_size = 52; truth.tda_count = 0;
+  auto base = truth; base.bwp_size = 0;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&truth);
+  nr_pdcch_ul_config_prior_t a = {0, 52, 217, 0, 0, 100, 111};
+  nr_pdcch_ul_config_prior_t b = a; b.bank_key = 222;
+  UlGroundTruth gt; gt.riv = 0;
+  nr_pdcch_blind_ul_result_t ga{}, gb{};
+  ASSERT_TRUE(nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+      nr_dci_bits_from_u64(PackUlPayload(gt,truth)), &base, &a, &ga));
+  ASSERT_TRUE(nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+      nr_dci_bits_from_u64(PackUlPayload(gt,truth)), &base, &b, &gb));
+  EXPECT_NE(ga.hyp_generation, gb.hyp_generation);
+  nr_pdcch_ul_discovery_feedback(&ga, true);
+  gt.mcs++;
+  a.source_abs_slot++;
+  ASSERT_TRUE(nr_pdcch_ul_config_disc_grant(gt.rnti, len,
+      nr_dci_bits_from_u64(PackUlPayload(gt,truth)), &base, &a, &ga));
+  nr_pdcch_ul_discovery_feedback(&ga, true);
+  nr_pdcch_blind_ul_opts_t pinned{};
+  EXPECT_TRUE(nr_pdcch_ul_config_disc_locked(gt.rnti, len, &a, &pinned));
+  EXPECT_FALSE(nr_pdcch_ul_config_disc_locked(gt.rnti, len, &b, &pinned));
+  nr_pdcch_ul_config_disc_reset();
+}
+
 /* DCI 0_0 is size-aligned with 1_0 (TS 38.212 7.3.1.0), so the SAME polar decode yields both. The
  * 1_0 path rejects identifier=0 -- and those rejects are UL grants. This pins the contract the RT
  * path now relies on: the rejected 1_0 result still carries its decoded payload, and that payload
@@ -5428,4 +5628,85 @@ TEST(EpochFeedback, InFlightJobAcrossBumpNotCredited) {
   nr_dci11_pin_seed(&pin, 1, 2);
   EXPECT_FALSE(nr_dci11_pin_is_valid(&pin));
   EXPECT_EQ(dropped, 1u);
+}
+#include "nr_pusch_passive_ul_ids.h"
+
+TEST(UlUeIds, TwoUesAndRntiReuseKeepConfirmedIdsSeparate) {
+  setenv("ISAC_UL_UE_STATE","1",1);
+  nr_pusch_passive_ul_ids_reset_all();
+  nr_ue_ctx_t dl{};
+  dl.identity_gen=1; dl.incarnation=0;
+  dl.cfg[NR_UEP_DCI_LEN_DL].value=52;
+  dl.cfg[NR_UEP_DCI_LEN_DL].verif=NR_UEV_TRUSTED;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].value=512;
+  dl.cfg[NR_UEP_PDCCH_SCR_ID].value=768;
+  nr_ue_ul_ticket_t a{1,4,0,0x101},b{1,4,0,0x102};
+  nr_pusch_passive_ul_ids_seed(&a,&dl,415);
+  nr_pusch_passive_ul_ids_seed(&b,&dl,415);
+  uint16_t dmrs=0,data=0;
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,415);
+  nr_pusch_passive_ul_ids_failed(&a);
+  nr_pusch_passive_ul_ids_current(a.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(dmrs,415); EXPECT_EQ(data,512);
+  nr_pusch_passive_ul_ids_confirm(&a,0,900,901);
+  nr_pusch_passive_ul_ids_confirm(&b,0,700,701);
+  ASSERT_TRUE(nr_pusch_passive_ul_ids_get(&a,0,&dmrs,&data));
+  EXPECT_EQ(dmrs,900); EXPECT_EQ(data,901);
+  ASSERT_TRUE(nr_pusch_passive_ul_ids_get(&b,0,&dmrs,&data));
+  EXPECT_EQ(dmrs,700); EXPECT_EQ(data,701);
+  nr_ue_ul_ticket_t reused{1,5,1,0x101};
+  dl.incarnation=1;
+  nr_pusch_passive_ul_ids_seed(&reused,&dl,415);
+  EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&a,0,&dmrs,&data));
+  EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
+  nr_pusch_passive_ul_ids_confirm(&a,0,900,901);
+  EXPECT_FALSE(nr_pusch_passive_ul_ids_get(&reused,0,&dmrs,&data));
+  nr_pusch_passive_ul_ids_reset_all();
+  unsetenv("ISAC_UL_UE_STATE");
+}
+#include "nr_ul_first_pusch.h"
+
+TEST(UlFirstPusch, TracksLockedIdentityAndNonzeroCrcOnly)
+{
+  nr_ul_first_state_t state{};
+  const nr_ue_ul_ticket_t first{.identity_gen=7, .epoch=2, .incarnation=3, .rnti=0x1234};
+  const nr_ue_ul_ticket_t reused{.identity_gen=8, .epoch=2, .incarnation=4, .rnti=0x1234};
+  int64_t elapsed=-1;
+  EXPECT_TRUE(nr_ul_first_note(&state,&first,100));
+  EXPECT_FALSE(nr_ul_first_note(&state,&first,105));
+  EXPECT_FALSE(nr_ul_first_crc_ok(&state,&reused,108,&elapsed));
+  EXPECT_FALSE(nr_ul_first_crc_ok(&state,&first,99,&elapsed));
+  EXPECT_TRUE(nr_ul_first_crc_ok(&state,&first,112,&elapsed));
+  EXPECT_EQ(elapsed,12);
+  EXPECT_FALSE(nr_ul_first_crc_ok(&state,&first,113,&elapsed));
+  EXPECT_TRUE(nr_ul_first_note(&state,&reused,200));
+  EXPECT_TRUE(nr_ul_first_crc_ok(&state,&reused,205,&elapsed));
+  EXPECT_EQ(elapsed,5);
+}
+
+TEST(UlFirstPusch, DataIdWalkRetainsDlPriorsAndCoversSkippedPosition)
+{
+  setenv("ISAC_UL_PUSCH_CHAIN","1",1);
+  nr_pusch_passive_ul_ids_reset_all();
+  nr_ue_ctx_t dl{};
+  dl.identity_gen=11;
+  dl.cfg[NR_UEP_DCI_LEN_DL].value=43;
+  dl.cfg[NR_UEP_DCI_LEN_DL].verif=NR_UEV_TRUSTED;
+  dl.cfg[NR_UEP_PDSCH_SCR_ID].value=512;
+  dl.cfg[NR_UEP_PDCCH_SCR_ID].value=768;
+  const nr_ue_ul_ticket_t ticket{.identity_gen=11,.epoch=1,.incarnation=0,.rnti=0x2345};
+  nr_pusch_passive_ul_ids_seed(&ticket,&dl,415);
+  for (int i=0;i<9;++i) nr_pusch_passive_ul_ids_failed(&ticket);
+  uint16_t dmrs=0,data=0;
+  nr_pusch_passive_ul_ids_current(ticket.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,0);
+  for (int i=9;i<16;++i) nr_pusch_passive_ul_ids_failed(&ticket);
+  nr_pusch_passive_ul_ids_current(ticket.rnti,0,415,&dmrs,&data);
+  EXPECT_NE(data,7); /* every 16th failed grant retries a DL prior */
+  nr_pusch_passive_ul_ids_failed(&ticket);
+  nr_pusch_passive_ul_ids_current(ticket.rnti,0,415,&dmrs,&data);
+  EXPECT_EQ(data,7); /* the sweep resumes at the skipped position */
+  nr_pusch_passive_ul_ids_reset_all();
+  unsetenv("ISAC_UL_PUSCH_CHAIN");
 }

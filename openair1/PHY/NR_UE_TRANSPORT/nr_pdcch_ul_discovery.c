@@ -24,6 +24,7 @@
 #include "nr_crc_evidence.h"
 #include "nr_pdcch_ul_field_sweep.h"
 #include "nr_pdcch_ul_interp_sweep.h"
+#include "nr_pdcch_ul_config_disc.h"
 #include "common/utils/LOG/log.h"
 #include <pthread.h>
 #include <stdlib.h>
@@ -99,6 +100,7 @@ static void reset_locked(ul_context_t *c)
 }
 void nr_pdcch_ul_discovery_reset(void)
 {
+  nr_pdcch_ul_config_disc_reset();
   pthread_mutex_lock(&lock);
   if (s_discovery_dirty) {
     for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) reset_locked(&contexts[i]);
@@ -546,6 +548,7 @@ static void log_progress_locked(const search_t *s, const char *what, uint16_t rn
 
 void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok)
 {
+  if (nr_pdcch_ul_config_disc_feedback(g, ok)) return;
   if (!nr_cfg_epoch_work_current()) return;
   if (!g || !g->hyp_generation) return;
   pthread_mutex_lock(&lock);

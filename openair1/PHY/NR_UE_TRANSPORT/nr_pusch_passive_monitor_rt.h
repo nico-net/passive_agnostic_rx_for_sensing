@@ -20,6 +20,8 @@
 
 #include "PHY/defs_nr_UE.h"
 #include "nr_pdcch_blind_monitor.h"
+#include "nr_passive_ue_ctx.h"
+#include "nr_pusch_passive_decode.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +37,12 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
 
 /// Periodic census: grants parked, matched to a slot, expired unclaimed.
 void nr_pusch_grant_book_stats_dump(void);
+
+/* U9 milestone output, called only after the decoder and U3/U4 feedback. */
+void nr_pusch_first_crc_result(const nr_pdcch_blind_ul_result_t *grant,
+                               const nr_ue_ul_ticket_t *ticket, bool ticket_valid,
+                               const nr_pusch_passive_out_t *out, int64_t target_slot,
+                               int slots_per_frame, uint64_t cpu_us);
 
 #ifdef __cplusplus
 }
