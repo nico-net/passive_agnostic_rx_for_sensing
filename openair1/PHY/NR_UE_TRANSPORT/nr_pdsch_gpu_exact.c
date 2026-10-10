@@ -22,6 +22,11 @@ static _Atomic uint64_t g_calls, g_fallback, g_chk_ok, g_chk_bad, g_ns_sum, g_ns
 static _Atomic uint64_t g_hist[16];
 static _Atomic uint64_t g_pdcch_gpu, g_pdcch_cpu; /* ISAC_PDCCH_GPU_EXACT_FEP: CORESET symbols on the GPU / CPU */ /* wall time incl. lock wait, 64 us buckets */
 
+/* now_ns: monotonic clock in nanoseconds (timing of GPU calls).
+ *   How it works: clock_gettime(CLOCK_MONOTONIC).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:139, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:143.
+ */
 static uint64_t now_ns(void)
 {
   struct timespec ts;
@@ -29,6 +34,11 @@ static uint64_t now_ns(void)
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* nr_pdsch_gpu_exact_warmup: one-time setup of the bit-exact GPU FEP: enables it only when ISAC_PDSCH_GPU_EXACT_FEP == 1 and the cell matches.
+ *   How it works: Requires N=4096, <= 4 RX and 14 symbols, else logs and returns 0 (CPU FEP). dlopens libpdsch_gpu.so (cwd fallback), resolves nr_gpu_fep_api, nr_pdsch_gpu_exact_fep2, _stats and _delay, calls api->init. ISAC_PDSCH_GPU_EXACT_CHECK sets g_check (default 1) and g_on is set. Returns 1 when enabled.
+ *   ISAC_* flags read: ISAC_PDSCH_GPU_EXACT_CHECK, ISAC_PDSCH_GPU_EXACT_FEP.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:14, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2116.
+ */
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
   const char *e = getenv("ISAC_PDSCH_GPU_EXACT_FEP");
@@ -69,6 +79,11 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 }
 
 /* CPU reference for the self-check: nr_slot_fep_ant() of (ant, sym) into a thread-local slot buffer. */
+/* check_symbol: self-check: recomputes one (antenna, symbol) FEP on the CPU and compares it bit-exactly with the GPU output.
+ *   How it works: Uses a thread-local reference buffer; if it cannot be allocated the check counts as a pass. Returns 1 on an exact match.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:164.
+ */
 static int check_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, int ant, int sym, const c16_t *gpu,
                         c16_t **rxdata)
 {
@@ -90,6 +105,11 @@ static int check_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slo
 static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, uint16_t mask, c16_t *rxdataF, size_t stride,
                      c16_t **rxdata, int try_only);
 
+/* nr_pdsch_gpu_exact_fep_ranges: GPU exact FEP for PDSCH symbol ranges.
+ *   How it works: Returns -1 when the GPU path is off. Builds a 14-bit symbol mask from the ranges and calls exact_run with try_only = 0.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:17, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2517.
+ */
 int nr_pdsch_gpu_exact_fep_ranges(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, const int (*rng)[2], int n_rng,
                                   c16_t *rxdataF, size_t stride, c16_t **rxdata)
 {
@@ -102,6 +122,11 @@ int nr_pdsch_gpu_exact_fep_ranges(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *f
   return exact_run(ue, fp, slot, mask, rxdataF, stride, rxdata, 0);
 }
 
+/* nr_pdcch_gpu_exact_fep_symbol: GPU exact FEP for one PDCCH symbol.
+ *   How it works: ISAC_PDCCH_GPU_EXACT_FEP == 1 enables it (read once). Calls exact_run with try_only = 1, so the scan falls back to CPU when the GPU is busy. Counts GPU and CPU uses.
+ *   ISAC_* flags read: ISAC_PDCCH_GPU_EXACT_FEP.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5448, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:21.
+ */
 int nr_pdcch_gpu_exact_fep_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, int symbol, c16_t *rxdataF,
                                   c16_t **rxdata)
 {
@@ -118,6 +143,11 @@ int nr_pdcch_gpu_exact_fep_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *f
   return rc;
 }
 
+/* exact_run: core of the GPU exact FEP: runs the masked symbols on the GPU and self-checks them.
+ *   How it works: Refuses slots with a frequency offset (cont_fo_comp, not synchronized, or a branch FO) and returns -1 with a one-time log. Calls the GPU entry, times it, and records the histogram. Self-check follows g_check: 1 checks a rotating symbol every 16 calls (or on every try-only call), 2 checks all symbols.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:102, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:116.
+ */
 static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, uint16_t mask, c16_t *rxdataF, size_t stride,
                      c16_t **rxdata, int try_only)
 {
@@ -201,6 +231,11 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
 
 /* GPU6 ISAC_CHEST_GPU_DELAY: the channel estimator's delay transform for up to 16 LS rows (see
  * nr_dl_channel_estimation.c). Shares the module lock with the FEP. -1 -> the estimator runs the CPU IDFT. */
+/* nr_pdsch_gpu_exact_delay_rows: GPU delay estimation for n rows of the channel estimate.
+ *   How it works: Returns -1 when the GPU path or the delay entry is missing. On a GPU error it counts the rows as CPU fallback.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:83, openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1640, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:25.
+ */
 int nr_pdsch_gpu_exact_delay_rows(const c16_t *const *rows, int n, int *out)
 {
   if (!atomic_load_explicit(&g_on, memory_order_relaxed) || !g_delay_fn)
@@ -210,6 +245,11 @@ int nr_pdsch_gpu_exact_delay_rows(const c16_t *const *rows, int n, int *out)
     atomic_fetch_add_explicit(&g_delay_cpu, (uint64_t)n, memory_order_relaxed);
   return rc;
 }
+/* nr_pdsch_gpu_exact_delay_note: accumulates the delay-check counters.
+ *   How it works: Adds gpu_rows, checked and bad to the atomic counters (calls and rows only when gpu_rows > 0).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:84, openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:101, openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1646, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:26.
+ */
 void nr_pdsch_gpu_exact_delay_note(int gpu_rows, int checked, int bad)
 {
   if (gpu_rows) {

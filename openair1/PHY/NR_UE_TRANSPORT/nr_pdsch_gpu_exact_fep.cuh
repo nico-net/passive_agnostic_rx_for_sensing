@@ -22,18 +22,58 @@
 namespace nr_exact {
 static const int N = 4096, THREADS = 256;
 
+/* sat16: device helper: saturating int to int16.
+ *   How it works: Clamp to [-32768, 32767].
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:291, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:310, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:342, openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:343 (+11 more).
+ */
 __device__ __forceinline__ short sat16(int x) { return (short)max(-32768, min(32767, x)); }
+/* sat32: device helper: saturating 64-bit to int32.
+ *   How it works: Clamp to the int32 range.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:48, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:49.
+ */
 __device__ __forceinline__ int sat32(long long x) { return (int)max((long long)INT_MIN, min((long long)INT_MAX, x)); }
+/* qadd: device helper: saturating add of two complex int16 pairs.
+ *   How it works: Component-wise sat16 add.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:57, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:58, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:62, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:88 (+3 more).
+ */
 __device__ __forceinline__ short2 qadd(short2 a, short2 b) { return make_short2(sat16(a.x + b.x), sat16(a.y + b.y)); }
+/* qsub: device helper: saturating subtract of two complex int16 pairs.
+ *   How it works: Component-wise sat16 subtract.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:59, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:60, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:61, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:63.
+ */
 __device__ __forceinline__ short2 qsub(short2 a, short2 b) { return make_short2(sat16(a.x - b.x), sat16(a.y - b.y)); }
+/* shr: device helper: arithmetic right shift of both components.
+ *   How it works: a >> s on real and imaginary parts.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:133, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:134, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:135, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:136 (+8 more).
+ */
 __device__ __forceinline__ short2 shr(short2 a, int s) { return make_short2((short)(a.x >> s), (short)(a.y >> s)); }
 /* vrev32q_s16(vmulq_s16(x, {-1,1})): (re, im) -> (im, -re), int16 wrap */
+/* flip: device helper: multiply a complex int16 by -j.
+ *   How it works: (re, im) -> (im, -re).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:61.
+ */
 __device__ __forceinline__ short2 flip(short2 a) { return make_short2(a.y, (short)(-(int)a.x)); }
 /* vpadd_s32 of two vmull_s16 products: non-saturating int32 sum (wraps only for 2 x (-32768)^2) */
 __device__ __forceinline__ int padd(int p, int q) { return (int)((unsigned)p + (unsigned)q); }
 /* cpack: vqshrn_n_s32(x, 15) */
+/* pk: device helper: Q15 narrowing of a 32-bit product to int16 (round shift by 15, saturate).
+ *   How it works: sat16(v >> 15).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:39, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:88, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:89, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:90 (+1 more).
+ */
 __device__ __forceinline__ short pk(int v) { return sat16(v >> 15); }
 /* packed_cmult2(a, b, b2): re = a.r b[0] + a.i b[1], im = a.r b2[0] + a.i b2[1] */
+/* pcm2: device helper: two complex products of a with b and with b2, each Q15-narrowed.
+ *   How it works: Uses pk on the real and imaginary sums.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:109, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:110, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:111, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:129 (+5 more).
+ */
 __device__ __forceinline__ short2 pcm2(short2 a, short2 b, short2 b2)
 {
   return make_short2(pk(padd(a.x * b.x, a.y * b.y)), pk(padd(a.x * b2.x, a.y * b2.y)));
@@ -45,11 +85,26 @@ __device__ __forceinline__ void cmult(short2 a, short2 b, int &re, int &im)
   re = padd(a.x * b.x, a.y * bi);
   im = padd(a.x * b.y, a.y * b.x);
 }
+/* qa: device helper: saturating int32 add.
+ *   How it works: sat32 of the 64-bit sum.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:88, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:89, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:91.
+ */
 __device__ __forceinline__ int qa(int a, int b) { return sat32((long long)a + b); }
+/* qs: device helper: saturating int32 subtract.
+ *   How it works: sat32 of the 64-bit difference.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:89, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:90, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:91.
+ */
 __device__ __forceinline__ int qs(int a, int b) { return sat32((long long)a - b); }
 
 /* radix-4 kernel with 16-bit twiddled inputs (bfly4_16 and the second dft16 stage); the inverse
  * (ibfly4_16, idft16) differs only in swapping outputs 1 and 3 */
+/* r4_16: radix-4 butterfly stage of the 16-point DFT (INV selects the inverse output order).
+ *   How it works: Pairwise qadd/qsub of the inputs, with flip for the odd pair.
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 template <bool INV>
 __device__ __forceinline__ void r4_16(short2 x0, short2 x1t, short2 x2t, short2 x3t, short2 &y0, short2 &y1, short2 &y2,
                                       short2 &y3)
@@ -71,6 +126,11 @@ __device__ __forceinline__ void cmultc(short2 a, short2 b, int &re, int &im)
 }
 
 /* bfly4 (32-bit accumulation); ibfly4 = cmultc twiddles and outputs 1/3 swapped */
+/* bfly4: radix-4 butterfly with twiddles (conjugate twiddles when INV).
+ *   How it works: Twiddle multiply (cmult or cmultc), then the four outputs from qa/qs and pk.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:73, openair1/PHY/TOOLS/oai_dfts.c:3720, openair1/PHY/TOOLS/oai_dfts_neon.c:371, openair1/PHY/TOOLS/oai_dfts_neon.c:375 (+17 more).
+ */
 template <bool INV>
 __device__ __forceinline__ void bfly4(short2 x0, short2 x1, short2 x2, short2 x3, short2 t1, short2 t2, short2 t3, short2 &y0,
                                       short2 &y1, short2 &y2, short2 &y3)
@@ -91,9 +151,19 @@ __device__ __forceinline__ void bfly4(short2 x0, short2 x1, short2 x2, short2 x3
   (INV ? y1 : y3) = qadd(x0, make_short2(pk(qs(qs(x3i, x2r), x1i)), pk(qs(x1r, qa(x2i, x3r)))));
 }
 
+/* twc: device helper: loads the complex twiddle k from an interleaved int16 table.
+ *   How it works: (t[2k], t[2k+1]).
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:109, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:110, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:111, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact_fep.cuh:129 (+8 more).
+ */
 __device__ __forceinline__ short2 twc(const short *t, int k) { return make_short2(t[2 * k], t[2 * k + 1]); }
 
 /* dft16 / idft16 of oai_dfts_neon.c on 16 consecutive complex values */
+/* dft16: 16-point DFT done in place on 16 short2 values, in two stages with twiddles.
+ *   How it works: First stage: four r4_16 across the lanes. Then twiddle products (pcm2, tables ta/tb) and a second r4_16 per lane.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/TOOLS/oai_dfts.c:1786, openair1/PHY/TOOLS/oai_dfts_neon.c:688, openair1/PHY/TOOLS/oai_dfts_neon.c:690, openair1/PHY/TOOLS/oai_dfts_neon.c:957 (+3 more).
+ */
 template <bool INV>
 __device__ __forceinline__ void dft16(short2 *s)
 {
@@ -116,6 +186,11 @@ __device__ __forceinline__ void dft16(short2 *s)
 /* The in-place transform after the permuted load (s[n] = x[perm[n]]): dft4096() (INV=false) or
  * idft4096() (INV=true) of oai_dfts_neon.c. Level 64: (i)bfly4_16, >> 3. Level 256: bfly4_16 forward
  * but 32-bit ibfly4 with tw256 inverse, >> 1. Levels 1024 and 4096: (i)bfly4, >> 1 each. */
+/* fft4096: 4096-point FFT of one thread block, in place in shared memory.
+ *   How it works: Levels: dft16 on each group of 16, then a radix-4 level with a >> 3 shift, then a radix-4 level with a >> 1 shift (256-level). Uses the tw1024 and tw4096 tables; INV selects the inverse tables.
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 template <bool INV>
 __device__ __forceinline__ void fft4096(short2 *s, int t, const short *__restrict__ tw1024, const short *__restrict__ tw4096)
 {
@@ -289,6 +364,11 @@ __global__ void __launch_bounds__(THREADS) k_delay_exact(DelayIO io, const uint1
 
 /* Host: composed input permutation of the recursive transposes (xtmp[N/4 l + m] = x[4m + l] at each
  * level down to 16) and the init_rad4() twiddles exactly as oai_dfts_neon.c computes them. */
+/* build_perm: host side: builds the permutation table that orders the 4096-point FFT input for the radix-4 stages.
+ *   How it works: Starts from the identity and applies one radix-4 digit-reversal pass per level L, from N down to 16, ping-ponging between two static arrays. The result is copied to perm.
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void build_perm(uint16_t *perm)
 {
   static uint16_t a[N], b[N];
@@ -301,6 +381,11 @@ static void build_perm(uint16_t *perm)
   }
   memcpy(perm, a, sizeof(a));
 }
+/* init_rad4_host: host side: fills the radix-4 twiddle table (cos and -sin of k, 2k and 3k, scaled to Q15) for length n.
+ *   How it works: Three interleaved int16 pairs per index i in [0, n/4), written into the three consecutive sub-tables of tw.
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static void init_rad4_host(int n, short *tw)
 {
   short *twa = tw, *twb = twa + n / 2, *twc_ = twb + n / 2;

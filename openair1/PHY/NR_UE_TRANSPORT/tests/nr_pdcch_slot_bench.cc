@@ -18,6 +18,11 @@ static double elapsed(std::chrono::steady_clock::time_point a, std::chrono::stea
 static double pct(std::vector<double> v, double q)
 { if (v.empty()) return NAN; std::sort(v.begin(),v.end()); return v[(size_t)std::ceil(q*v.size())-1]; }
 
+/* main: PDCCH slot benchmark: loads a PDCCH dump and runs the CPU or GPU reference over it.
+ *   How it works: Reads and validates the records, sorts by absolute slot and reports passes, slots, max passes per slot, the batch-limit count and the distinct DMRS scrambling IDs. Then runs the chosen mode (--cpu-only or --gpu).
+ *   ISAC_* flags read: none.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char **argv)
 {
   if (argc < 2) { fprintf(stderr,"usage: nr_pdcch_slot_bench dump.bin [--cpu-only|--gpu] [repetitions]\n"); return 2; }

@@ -15,6 +15,11 @@ void exit_function(const char *,const char *,int,const char *,int) {abort();}
 }
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;}} while(0)
 static void wait_ms(int n) {std::this_thread::sleep_for(std::chrono::milliseconds(n));}
+/* main: test driver for the PDCCH NID GPU worker: runs the worker in --device, --duty, --nodrop or incremental mode and checks the published records.
+ *   How it works: Sets the ISAC_PDCCH_NID_GPU_* test environment, starts the worker and checks the records with CHECK. Pushes synthetic or device-reference batches and uses the fake module hooks (nid_fake_*) when not in device mode.
+ *   ISAC_* flags read: ISAC_COREMAP_IDSWEEP_DUR, ISAC_GPU_BUDGET, ISAC_PDCCH_NID_GPU, ISAC_PDCCH_NID_GPU_BATCH, ISAC_PDCCH_NID_GPU_DUTY, ISAC_PDCCH_NID_GPU_EVERY, ISAC_PDCCH_NID_GPU_INCREMENTAL, ISAC_PDCCH_NID_GPU_MAINTAIN_MS, ISAC_PDCCH_NID_GPU_NODROP, ISAC_PDCCH_NID_GPU_RECHECK_MS, ISAC_PDCCH_NID_GPU_WINDOW, ISAC_PDCCH_NID_MULTISYMBOL.
+ *   Callers: none (program entry point).
+ */
 int main(int argc,char **argv) {
  bool device=argc>1 && !strcmp(argv[1],"--device");
  bool duty=argc>1 && !strcmp(argv[1],"--duty");

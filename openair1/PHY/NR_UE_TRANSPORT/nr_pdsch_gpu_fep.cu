@@ -35,12 +35,22 @@ static const int MAX_JOBS = 65; /* passive queue: head + up to 64 same-slot jobs
  * own 32-bit word instead of serializing every word in one CUDA thread. */
 __constant__ uint32_t g_gold_x1_word[GOLD_WORDS];
 __constant__ uint32_t g_gold_x2_jump[14][31];
+/* gold_step: one step of the 31-bit Gold LFSR (x2 polynomial when x2 is set).
+ *   How it works: Feedback bit is inserted at bit 30 while the state shifts right.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:57, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:62, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:65.
+ */
 static uint32_t gold_step(uint32_t v, bool x2)
 {
   const uint32_t b = x2 ? (v ^ (v >> 1) ^ (v >> 2) ^ (v >> 3)) & 1u
                         : (v ^ (v >> 3)) & 1u;
   return (v >> 1) | (b << 30);
 }
+/* gold_apply: applies a 31x31 GF(2) jump matrix to a state.
+ *   How it works: XOR of the matrix rows selected by the set state bits.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:60.
+ */
 static uint32_t gold_apply(const uint32_t image[31], uint32_t state)
 {
   uint32_t out = 0;
@@ -51,6 +61,11 @@ static uint32_t gold_apply(const uint32_t image[31], uint32_t state)
   }
   return out;
 }
+/* gold_init_jumps: precomputes the Gold sequence jump tables and the x1 word starts, uploads them to the device.
+ *   How it works: jump[p] is the x2 matrix for 2^p steps. The x1 state is advanced 1600 steps, then 32 per word. Both tables are copied with cudaMemcpyToSymbol; returns the first error.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:626.
+ */
 static cudaError_t gold_init_jumps(void)
 {
   uint32_t jump[14][31], x1_word[GOLD_WORDS];
@@ -107,6 +122,11 @@ static cudaStream_t g_ctx_stream[EXACT_CTX];
 static int *g_ctx_delay[EXACT_CTX];
 static std::atomic<unsigned> g_ctx_busy{0};
 static std::mutex g_exact_staged_lock;
+/* ctx_acquire: claims a free bit-exact FEP context (bitmask compare-and-swap over EXACT_CTX).
+ *   How it works: try_only returns -1 when all are busy; otherwise it spins with yield.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:894, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:974.
+ */
 static int ctx_acquire(bool try_only)
 {
   for (;;) {
@@ -117,8 +137,18 @@ static int ctx_acquire(bool try_only)
     std::this_thread::yield();
   }
 }
+/* ctx_release: releases FEP context i.
+ *   How it works: Clears bit i of g_ctx_busy.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:897, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:909, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:976, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:985.
+ */
 static void ctx_release(int i) { g_ctx_busy.fetch_and(~(1u << i)); }
 /* Wait for a context's stream; returns 0, or a CUDA error. Counts calls past the deadline. */
+/* ctx_wait: waits for the stream of context c to finish, polling cudaStreamQuery.
+ *   How it works: Counts a late completion once when the wait passes g_exact_deadline_us. Returns 0 or the CUDA error.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:908, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:983.
+ */
 static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
 {
   bool late = false;
@@ -163,6 +193,11 @@ __global__ void k_fep_gather(const short2 *__restrict__ rx, long long abs_sample
 
 /* OAI's apply_nr_rotation_symbol_RX: multiply by conj(symbol_rotation[sym]) and the timeshift ramp
  * exp(+j 2 pi k early / N) (index k of the FFT output, as OAI applies it). */
+/* k_fep_rotate: GPU kernel: applies the per-symbol rotation and the early-CP phase ramp to the FFT output, then scales it.
+ *   How it works: One thread per (subcarrier, symbol, antenna). Optional rot[sym] multiply, then exp(-j 2 pi k early / N), then a 1/sqrt(N) scale to match the CPU dft scaling.
+ *   ISAC_* flags read: none.
+ *   Callers: api_fep_slot (<<<>>> launch).
+ */
 __global__ void k_fep_rotate(float2 *__restrict__ rxF, const short2 *__restrict__ rot, int N, int nsym, int early)
 {
   const int sym = blockIdx.y, ant = blockIdx.z;
@@ -186,6 +221,11 @@ __global__ void k_fep_rotate(float2 *__restrict__ rxF, const short2 *__restrict_
 }
 
 /* ----------------------------------------------------------- DM-RS gold ---- */
+/* gold_jump_x2: device helper: advances the x2 Gold state by steps using the jump tables.
+ *   How it works: Binary decomposition of steps; each set bit XORs the matching jump matrix applied to the state.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:231.
+ */
 __device__ inline uint32_t gold_jump_x2(uint32_t state, int steps)
 {
   for (int power = 0; steps; ++power, steps >>= 1)
@@ -202,6 +242,11 @@ __device__ inline uint32_t gold_jump_x2(uint32_t state, int steps)
 }
 
 /* 38.211 5.2.1, one block per (job, DM-RS symbol), one lane per Gold word. */
+/* k_gold: GPU kernel: generates the DM-RS Gold words for one (job, DM-RS symbol).
+ *   How it works: Finds the target DM-RS symbol in dmrs_mask. cinit comes from slot, symbol, dmrs_scrambling_id and nscid. Words needed = 4*ppr per RB up to end_rb. Each thread builds one 32-bit word with the x1 and x2 streams.
+ *   ISAC_* flags read: none.
+ *   Callers: run_chunk (<<<>>> launch).
+ */
 __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__restrict__ gold, int nsym)
 {
   const int j = blockIdx.x, target_di = blockIdx.y;
@@ -386,6 +431,11 @@ __device__ inline float pam_level(int qm, int code)
 }
 
 /* One thread per (job, data RE). */
+/* k_llr: GPU kernel: PDSCH soft LLRs, one thread per data RE.
+ *   How it works: Locates (symbol, subcarrier) of the RE from the job layout. Uses the DM-RS symbols bracketing it for time interpolation of the LS estimate, and the per-antenna sigma. force_ant (NR_GPU_FORCE_ANT) restricts it to one antenna. TODO(doc): the demapping tail after the time-interpolation setup was not reviewed.
+ *   ISAC_* flags read: none.
+ *   Callers: run_chunk (<<<>>> launch).
+ */
 __global__ void k_llr(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 *__restrict__ ls, const float *__restrict__ sigma,
                       const float2 *__restrict__ rxF, int N, int nsym, int nant, int fco, int16_t *__restrict__ llr, float scale,
                       int force_ant)
@@ -532,6 +582,11 @@ static nr_dl_gpu_budget_t g_budget;
 extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
 { *bytes = __atomic_load_n(&g_budget.bytes, __ATOMIC_RELAXED); *refused = __atomic_load_n(&g_budget.refused, __ATOMIC_RELAXED); }
 
+/* allocate_init: sets up the PDSCH GPU front end: config check, highest-priority stream, buffers, cuFFT plan and the bit-exact working set.
+ *   How it works: Validates the config, then creates the stream with the top priority. Allocates staging, device and shared buffers for rx, rotation, FFT input and output, jobs, Gold, LS, sigma and LLRs (32 Mi LLRs). Creates the cuFFT C2C plan for N with nant*ns batches. NR_GPU_LLR_SCALE and NR_GPU_FORCE_ANT are read here. The bit-exact working set (N = 4096) is set up at the end. TODO(doc): the tail after the bit-exact setup was not reviewed.
+ *   ISAC_* flags read: ISAC_PDSCH_GPU_BATCH_ASYNC, ISAC_PDSCH_GPU_EXACT_DEADLINE_US, ISAC_PDSCH_GPU_EXACT_DIRECT.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:641.
+ */
 static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
 {
   if (!nr_gpu_module_ready()) return -1;
@@ -633,6 +688,11 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   return 0;
 }
 
+/* api_init: API entry: initialises the PDSCH GPU front end once.
+ *   How it works: Returns 0 when already initialised with the same cfg. A failed attempt cannot retry while RX runs (g_init_state = -1). Calls allocate_init and seals the DL GPU memory (nr_dl_gpu_sealed).
+ *   ISAC_* flags read: none.
+ *   Callers: none found in tree.
+ */
 static int api_init(const nr_gpu_fep_cfg_t *cfg)
 {
   if (!cfg) return -1;
@@ -666,6 +726,11 @@ extern "C" int nr_gpu_fep_admit(const nr_gpu_pdsch_job_t *jobs, int n, int check
 }
 
 /* Copy the slot window (from `early` samples before the slot's CP, ring wrap) to the device. */
+/* upload_window: copies the rxdata ring window for all antennas to the device.
+ *   How it works: The window starts early samples before the slot's CP and wraps at ring_len. Copies in one or two pieces into g_h_rx, then starts an async H2D copy.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:695, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:930.
+ */
 static cudaError_t upload_window(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset)
 {
   const int N = g_cfg.ofdm_symbol_size, nant = g_cfg.nant;
@@ -684,6 +749,11 @@ static cudaError_t upload_window(const int16_t *const *rxdata, uint32_t ring_len
   return (cudaError_t)nr_gpu_copy_async(g_d_rx, g_h_rx, (size_t)nant * len * sizeof(short2), g_stream);
 }
 
+/* api_fep_slot: API entry: runs the FEP for one slot on the GPU.
+ *   How it works: Admits the RT budget scope. Uploads the window and the optional symbol rotation. k_fep_gather applies the sample gather and the frequency-offset phase. cuFFT forward, then k_fep_rotate. Waits for the stream unless g_batch_async is set. Records g_fep_us.
+ *   ISAC_* flags read: none.
+ *   Callers: PDSCH GPU API table (function pointer).
+ */
 static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, uint32_t abs_sample,
                         double fo_hz, const int16_t *symbol_rot)
 {
@@ -725,6 +795,11 @@ static uint32_t job_total_llr(const nr_gpu_pdsch_job_t *j)
   return nre * j->Nl * j->Qm;
 }
 
+/* run_chunk: runs one chunk of PDSCH jobs on the GPU and returns the number of LLRs written to llr_out.
+ *   How it works: Copies the jobs to the device, then launches k_gold, k_ls, k_sigma and, when max_re > 0, k_llr. Copies the LLRs back, waits on rt and checks the last CUDA error.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:791.
+ */
 static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint32_t total, NrGpuRtScope &rt)
 {
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant, fco = g_cfg.first_carrier_offset;
@@ -750,6 +825,11 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
   return total;
 }
 
+/* api_pdsch_llr: API entry: computes PDSCH LLRs for n jobs on the GPU.
+ *   How it works: Admits the RT budget scope. Packs jobs into launch chunks of at most MAX_JOBS jobs and g_llr_cap LLRs. Each job is validated (layers, RBs, DM-RS type, Qm, symbols, pilots). Its LLR count is capped by max_llr and the caller's capacity, and rounded to whole REs. Calls run_chunk per chunk and returns the total LLRs written, or a negative error.
+ *   ISAC_* flags read: none.
+ *   Callers: PDSCH GPU API table (function pointer).
+ */
 static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, size_t llr_cap)
 {
   if (g_init_state != 1 || !jobs || !llr_out || n < 0) return -1;
@@ -818,6 +898,11 @@ static int api_read_rxdataF(int ant, int16_t *out)
   return 0;
 }
 
+/* api_read_rxdataF_symbol: reads one rxdataF symbol (antenna, symbol) back from the device as saturated int16.
+ *   How it works: Copies N float2 from g_d_rxF to the check buffer, waits, then rounds and saturates each component.
+ *   ISAC_* flags read: none.
+ *   Callers: PDSCH GPU API table (function pointer).
+ */
 static int api_read_rxdataF_symbol(int ant, int sym, int16_t *out)
 {
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot;
@@ -833,6 +918,11 @@ static int api_read_rxdataF_symbol(int ant, int sym, int16_t *out)
   return 0;
 }
 
+/* api_timing: returns the durations of the last FEP and LLR calls in microseconds.
+ *   How it works: Copies g_fep_us and g_llr_us into the non-NULL output pointers.
+ *   ISAC_* flags read: none.
+ *   Callers: PDSCH GPU API table (function pointer).
+ */
 static void api_timing(double *fep_us, double *llr_us)
 {
   if (fep_us) *fep_us = g_fep_us;

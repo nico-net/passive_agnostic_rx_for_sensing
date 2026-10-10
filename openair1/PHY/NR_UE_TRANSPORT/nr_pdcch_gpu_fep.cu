@@ -132,6 +132,11 @@ __global__ void k_ls_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, const ui
  * skips). MRC combine over antennas (power-weighted, i.e. matched-filter sum h*conj(y)/sum|h|^2 --
  * equivalent to per-branch SNR-weighted combining, the textbook substitute for the CPU's
  * roughness-based branch zeroing). One thread per (job, symbol, data RE). */
+/* k_llr_pdcch: GPU PDCCH LLR kernel: QPSK soft LLRs from the CORESET matched filter.
+ *   How it works: One thread per RE of a job (blockIdx.y = job). Averages the pilot LS over the 3 DM-RS REs of each RB, matched-filters the 9 data REs per RB (DATA_KR) against conj(h_mean) summed over antennas, normalises by channel power and writes two int16 LLRs at job.llr_offset + 2*re. The bit polarity is only confirmed by the STATUS self-check described in the .h file.
+ *   ISAC_* flags read: none.
+ *   Callers: run_chunk (<<<>>> launch).
+ */
 __global__ void k_llr_pdcch(const nr_gpu_pdcch_job_t *__restrict__ jobs, const float2 *__restrict__ ls,
                             const float2 *__restrict__ rxF, int N, int max_dur, int nant, int fco,
                             int16_t *__restrict__ llr, float scale)
@@ -185,6 +190,11 @@ static nr_dl_gpu_budget_t g_budget;
 extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
 { *bytes = __atomic_load_n(&g_budget.bytes, __ATOMIC_RELAXED); *refused = __atomic_load_n(&g_budget.refused, __ATOMIC_RELAXED); }
 
+/* allocate_init: sets up the PDCCH GPU front end: validates the config, reads the env flags, creates the stream and allocates the device and staging buffers.
+ *   How it works: Checks nant, N and n_rb_dl <= 275. ISAC_PDCCH_GPU_CPU_ARITH == 1 selects the CPU-arithmetic parity kernel; ISAC_PDCCH_ANT_MASK sets the forced antenna mask. Creates the stream (priority range when the GPU budget is enabled), allocates rxF, jobs, Gold, LS and LLR buffers, and queries the kernel attributes.
+ *   ISAC_* flags read: ISAC_PDCCH_ANT_MASK, ISAC_PDCCH_GPU_CPU_ARITH.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:225.
+ */
 static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
 {
   if (!nr_gpu_module_ready()) return -1;
@@ -264,6 +274,11 @@ static int api_upload_slot(const int16_t *const *rxdataF_symb, int max_duration)
 
 static inline uint32_t job_total_llr(const nr_gpu_pdcch_job_t *j) { return 2u * j->n_rb * RE_PER_RB_OUT_DMRS * j->duration; }
 
+/* run_chunk: runs one chunk of PDCCH jobs on the GPU and returns the number of LLRs written to llr_out.
+ *   How it works: Copies the jobs to the device, launches the Gold kernel, the LS kernel and then either the CPU-arithmetic parity kernel (g_cpu_arithmetic) or the LLR kernel, copies the LLRs back and waits on rt.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:323.
+ */
 static int64_t run_chunk(nr_gpu_pdcch_job_t *jobs, int n, int16_t *llr_out, uint32_t total, NrGpuRtScope &rt)
 {
   if (n == 0)

@@ -21,6 +21,11 @@
 /* arg is used to initialize the config module so that the loader works as expected */
 char *arguments_phy_simulators[64]={"ldpctest",NULL};
 
+/* load_nrLDPC_coding_interface: loads the LDPC coding shared library (CPU "ldpc" or the "_cuda" variant) and binds its init, shutdown, decoder and encoder entry points.
+ *   How it works: Initialises the config module if needed. ISAC_PDSCH_GPU_LDPC (non-zero) selects version "_cuda" when version is NULL. Loads via load_module_version_shlib, copies the four function pointers into itf and calls nrLDPC_coding_init(max_num_pxsch).
+ *   ISAC_* flags read: ISAC_PDSCH_GPU_LDPC.
+ *   Callers: executables/nr-uesoftmodem.c:458, openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h:238, openair1/PHY/INIT/nr_init.c:142.
+ */
 int load_nrLDPC_coding_interface(char *version, nrLDPC_coding_interface_t *itf, int max_num_pxsch)
 {
   char *ptr = (char *)config_get_if();

@@ -197,6 +197,11 @@ static FILE  *g_cap_fp = NULL;          /* under g_cap_mu */
 static _Atomic int g_cap_left = 400;
 static __thread double g_dmrs_hot_nc = 0.0; /* TEMPORARY stage-split probe, see DMRSPROBE below */
 
+/* nr_pdcch_llr: CPU PDCCH LLR preparation: clips each received RE to [-32, 31] per component and writes it as a c16 LLR.
+ *   How it works: Loop over sz REs: clamp real and imaginary parts to [-32, 31], store to llr, LOG_DDD trace, advance rxF.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:379, openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:809, openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:979, openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:987 (+1 more).
+ */
 static void nr_pdcch_llr(uint32_t sz, c16_t *rxF, c16_t *llr)
 {
   for (int i = 0; i < sz; i++) {

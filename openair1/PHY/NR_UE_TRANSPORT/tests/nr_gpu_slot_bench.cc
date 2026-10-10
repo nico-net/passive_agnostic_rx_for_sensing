@@ -27,6 +27,11 @@ static double quantile(std::vector<double> v, double q)
   std::sort(v.begin(), v.end());
   return v[(size_t)std::ceil(q * v.size()) - 1];
 }
+/* read_one: reads one recorded PDSCH grant (header, IQ, CPU LLRs, rxF and v3 stage rows) from a dump, with field and size validation.
+ *   How it works: Returns false on bad magic, version, geometry, sizes or a short read. Version 3 adds the stage rows, each validated before its arrays are read.
+ *   ISAC_* flags read: none.
+ *   Callers: openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:101, openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:133.
+ */
 static bool read_one(FILE *f, Sample &s)
 {
   if (fread(&s.h, sizeof(s.h), 1, f) != 1) return false;
@@ -80,6 +85,11 @@ static void descramble(int16_t *v, size_t n, uint16_t rnti, uint16_t nid)
   }
 }
 
+/* main: PDSCH GPU slot benchmark: replays a dump grouped by slot and reports the recorded CPU reference counts.
+ *   How it works: Reads all records, sorts by absolute slot and reports slot groups, max jobs per slot and jobs over the GPU batch limit. Then runs the mode: --cpu-only, --gpu, --exact, --delay or --pair (compares two dumps, GPU6).
+ *   ISAC_* flags read: ISAC_GPU_BENCH_CPU_FEP.
+ *   Callers: none (program entry point).
+ */
 int main(int argc, char **argv)
 {
   if (argc < 2) { fprintf(stderr, "usage: nr_gpu_slot_bench dump.bin [--cpu-only|--gpu] [repetitions]\n"); return 2; }

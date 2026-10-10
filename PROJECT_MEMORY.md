@@ -1,5 +1,98 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-10 (docs and headers session, `csd/doc-comments2` = `csd/otatest` @ 656c623dac; no builds, replays or radio).**
+> Summary of the 2026-10-09/10 csd work that is now merged into `csd/otatest`. Every claim keeps the label of its report or
+> OTA log. Index of reports: [INDEX](docs/superpowers/reports/csd/INDEX.md). Nothing here is a new measurement.
+>
+> **Decoder fixes (offline, DGX GB10, replays of `raw_pci415_12s_b` and `raw_pci415_12s_20261008`).**
+> - **DECODE-FIX** ([DECODEFIX](docs/superpowers/reports/csd/DECODEFIX.md), `csd/decode-fix` @ 97c7a9c491, merged).
+>   `[MEASURED replay b]` A solved layout aliased the TDRA bit. CDM-group overhead and CSI-RS exclusion budgets were wrong.
+>   CRC-verified TDRA and CSI alternatives (default off) lift the Nl1/MCS0-4/SNR>=6 cohort from 91/207 to 197/207.
+>   The requested runtime gate is **not met** (report verdict).
+> - **SOLVE2** ([SOLVE2](docs/superpowers/reports/csd/SOLVE2.md), `csd/solve2` @ 173d2fb565, merged, flags default off).
+>   `[MEASURED replay]` Capture b 10/10 runs with >= 5 RNTIs carrying full-TB CRC support (raw solves 29-36); capture
+>   20261008 4/5. Audit of 357 confirmations: 0 unpaired, 0 wrong default-probe identities, 0 deleted working layouts.
+>   Strict best-run CRC parity is **not** met (e2de mean 5.4 full TBs vs 7 for A4).
+> - **QAM-FIX** ([QAMFIX](docs/superpowers/reports/csd/QAMFIX.md), `csd/qam-fix` @ bc227efdd8, merged).
+>   `[CODE-READ + MEASURED replay, paired]` The stock multi-layer MMSE (`nr_dlsch_mmse`) shrinks QAM amplitudes (kappa 0.66-0.88).
+>   `ISAC_PDSCH_MMSE_MODE=2` (float unbiased ZF with per-layer SNR thresholds): 2-layer 16QAM at 10-15 dB 18 % -> 38 %.
+>   `[OTA 2026-10-09 21:56, F vs G]` 2-layer 16QAM 10-15 dB 23-57 % -> 46-68 %; 64QAM >= 15 dB 0-17 % -> 3-35 %; 2-layer
+>   QPSK >= 10 dB 87-100 %; 0 stalls.
+> - **CSI-FULL** ([CSIFULL](docs/superpowers/reports/csd/CSIFULL.md), `csd/csi-full` @ f1099a2573, merged aceb607496).
+>   `[MEASURED replay, class A paired]` 0/34 -> 26/34. Rule: each cell rate-matches its own TRS AND the neighbour's TRS in the
+>   same 52-RB block (six TRS sets: 415+748, 249+582, 380+713; row 1, period 160). Causes: export capped at 4 per slot (one TRS
+>   occasion carries 24 resources), a solver latch on "no rate matching", the second burst never cloned, bank of 32.
+>   Not handled: the full-band non-TRS CSI-RS at abs%160 = 24/63/105/135.
+>   `[OTA 2026-10-10 01:34, G vs H]` class A (TRS slots, RB < 52, MCS0-4 >= 10 dB) 0/22 -> 18/21 (86 %); B/C unchanged.
+>   One of ~5 runs (H2) acquired no dedicated CORESET: an acquisition failure, cause open.
+>
+> **GPU front end (GPU6, [GPU6](docs/superpowers/reports/csd/GPU6.md), `csd/gpu3` @ 7d9964f051, merged 80cae1d872).**
+> - `[MEASURED, DGX GB10 bench + replay]` Bit-exact by construction: 0 differing samples in 6,324,224 FEP outputs; 228/228
+>   delays equal; in-receiver check 21,000 FEP calls and 1,113,760 delay rows with 0 mismatches. The PDCCH CPU-arithmetic
+>   kernel is exact on 26,000/26,000 passes at rb_offset 0; the CORESET at rb_offset 36 differs in its last 36 RBs (CPU-side defect).
+> - `[MEASURED]` Timing **not met**: per decode the GPU removes FEP 858 -> 84 us (b) and the delay IDFT 1,572 -> 881 us. The floor
+>   is still ~1.6-2.0 ms per decode on shared replay cores; the largest remaining cost is CPU demodulation (`nr_dlsch_demodulation.c`, ~0.8 ms).
+> - `[OTA 2026-10-10 02:21, C vs I]` GPU exact FEP on air: 38k checks, 0 bad, 0 fallback (~520 late -> CPU). FEP mean 91-115 us
+>   (GPU) vs 218-278 us (CPU).
+>
+> **Acquisition (ACQ-FIX and ACQ-ROBUST).**
+> - **ACQ-FIX** ([ACQFIX](docs/superpowers/reports/csd/ACQFIX.md), `csd/acq-fix` @ bfba6aebb3, merged).
+>   `[MEASURED OTA LIVE + replays]` GPU stage 2 publishes the dedicated CORESET shifted by whole RBs. Verification tried only the
+>   published geometry and was rejected after 4000 occasions. Fix: `ISAC_PDCCH_DISC_COVER=1` (full-carrier non-interleaved RB-0
+>   cover) and `ISAC_PDCCH_RBOFFSET_FIX=1` (a real `dci_nr.c` bug: groups mapped wrong when rb_offset != 0). Replay: capture b
+>   10/10 banks within 1.5 s; old capture 11/11 (baseline 5/20).
+>   `[OTA 2026-10-10 03:50, night]` INCONCLUSIVE: 3/6 failed under low traffic (0-6 solved vs 15-58 in the evening).
+>   `[OTA 2026-10-10 08:16, daytime, J1-J6, t26j.env]` 6/6 acquired early; 24-58 RNTIs solved; MCS0-4 >= 10 dB 90-93 %;
+>   MCS5+ >= 10 dB 23-56 %; 0 stalls; GPU exact check_bad 0. Open: with no bank, Technique A commits a fake 6-RB footprint.
+> - **ACQ-ROBUST** ([ACQROBUST](docs/superpowers/reports/csd/ACQROBUST.md), `csd/acq-robust` @ 656c623dac = otatest HEAD, merged).
+>   Three flags, all default off (flag off = unchanged behaviour): `ISAC_PDCCH_DWELL_ADAPTIVE=1` (an occasion counts toward the
+>   4000 cap only when its prescreen passed; hard cap 40000), `ISAC_PDCCH_NO_FAKE_FOOTPRINT=1`, `ISAC_PDCCH_NID_GPU_NODROP=1`.
+>   `[OTA LIVE 2026-10-10 10:37-10:48]` A/B ab_J1_1_103713 / ab_K1_1_103953 / ab_J2_1_104234 / ab_K2_1_104515; J = `ota/t26j.env`,
+>   K = `ota/t26k.env` = J + `ISAC_PDCCH_DWELL_ADAPTIVE=1 ISAC_PDCCH_NO_FAKE_FOOTPRINT=1 ISAC_PDCCH_NID_GPU_NODROP=1`.
+>   Both arms acquired early; 52-58 RNTIs solved; MCS0-4 >= 10 dB 91-93 %; 0 stalls; GPU check_bad=0.
+>   Neutral in daytime: the adaptive dwell is inactive because the prescreen passes every occasion (energy gate off in our cfg).
+>   NODROP dropped whole snapshots heavily on air (5144 / 9536 per run) and published more noise CORESETs (nid 9020, 41-43
+>   wasted dwells). No-fake-footprint never triggered.
+>   Decision: t26j stays the default; the K flags stay off.
+>
+> **Recommended OTA env: `ota/t26j.env`** (rr-orchestration, 93 settings; `[OTA 2026-10-10 08:16]` daytime run above).
+> It contains the ACQ-FIX flags, MMSE_MODE=2, the CSIRS_FULL set, GPU exact FEP and MRC per-RNTI mode 1. It does not contain the
+> ACQ-ROBUST flags. Never set `ISAC_RX_BRANCH_FO`. Keep `ISAC_PDSCH_CSI_RB_EXTENT` off. `ISAC_PDSCHQ_SIGNAL_TIME` is replay-only.
+>
+> **RX2 antenna fix (hardware, `[OTA VERIFIED 2026-10-09 20:29]`).** The user replaced the X410 channel 2 antenna at about 15:00
+> on 2026-10-09. RX2 power is back to the level of ch0/1/3: ch2 -42.8 to -44.8 dBFS (was -60.7); br2 SNR 10.6-14 dB. The 2026-10-08
+> RX2 fault (ULDBG, SNRAUDIT) was therefore a cable/antenna fault, not code. No code change.
+>
+> **OTA log, 2026-10-09 evening to 2026-10-10 (`[OTA]` lines of `x410-34b2af1-ota-calibration.md`).**
+> - 20:29 A/B (t26e vs t26f = + SOLVE2 + DECODEFIX): Nl1 MCS0-4 post-solve CRC 40-54 % -> 75-82 %; solved RNTIs 19-32 -> 27-58; 0 stalls.
+> - 21:56 MMSE A/B (t26f vs t26g): see QAM-FIX above. Recommended then: t26g.
+> - 01:34 CSI-FULL A/B (G vs H): see CSI-FULL above. Recommended then: t26h.
+> - 02:21 GPU A/B (C vs I): see GPU6 above.
+> - 03:50 ACQ-FIX night (J1-J6): inconclusive, low traffic. 08:16 daytime (J1-J6): 6/6 acquired. Recommended now: t26j.
+>
+> **Local LLM integration (rr-orchestration, `[HOST-READ 2026-10-10]`, `rr-orchestration/llm/README.md`).**
+> - Roles (user policy): gpt-oss:120b (`run_local.sh gptoss`) for debugging, root cause and review; qwen3-coder-next
+>   (`run_local.sh qwen`) for coding; `review.sh` runs mistral-debug on a diff plus pasted excerpts (it cannot read files).
+>   Claude orchestrates, verifies on the DGX (replays, OTA, tests), and alone applies, commits and merges. Two agreeing models
+>   are not validation. Local models gave analysis but no real-time C (one gpt-oss ACQ-ROBUST attempt was rejected; the fix was redone by Sonnet, `codex-orchestration.md`).
+> - Resource guardian: `guardian.sh`. `ota/ota.sh` runs `enter-ota` first (cancel the task, unload models, stop ollama, check
+>   MemAvailable >= 48 GB); failure exits 7 with no radio action. `OTA_MODE` and `HOLD` files refuse every local task.
+> - `run_local.sh` takes the global `heavy.lock`, one model at a time, 100 % GPU check, `ro` or `rw` (scratch worktree only).
+>   `review.sh` takes the same lock. Output: `llm/out/<task>.md`.
+> - RAM floor: MemAvailable < 16 GB aborts the task and unloads the model; nested builds need >= 24 GB.
+> - Hold: `llm/HOLD` blocks all local tasks. It was absent at inventory time. A gpt-oss read-only task (`ul_pusch_review`,
+> PID 3245417, worktree `rr-csd-b`) was marked running early in the session and had ended by the later check. Not signalled.
+>
+> **This session (HOUSEKEEPING-2, `csd/doc-comments2`, comment-only).**
+> - Function headers kept: 69, all in the GPU/CUDA files (`nr_pdcch_gpu_fep.cu`, `nr_pdsch_gpu_*`, `nr_pdcch_nid_gpu.c`,
+>   the `.cuh` helpers, the bench/test mains). Each was read from its body and given a real purpose and how-it-works text
+>   (a few keep a `TODO(doc)` for an unread tail). Functions changed by GPU6, ACQ-FIX, ACQ-ROBUST and CSI-FULL are covered.
+>   The first commit added 1,470 skeleton headers with `TODO(doc)` purpose and how-it-works; the follow-up commit removed them
+>   as noise. Skeleton-only functions in the remaining files are undocumented.
+> - Deferred (other agents are editing them): `nr_pdsch_passive_decode.c`, `nr_dlsch_demodulation.c`,
+>   `nr_dl_channel_estimation.c`, the `csirs*` files, and `nr_pdcch_blind_monitor*`.
+> - Check: each file's diff is comment-only (no code line changed).
+>
 > **Update 2026-10-09 (docs-only session, `csd/docs-1009`; no builds, replays or radio).** Verdicts from the csd
 > reports, each with its report path and branch @ commit. Index of every report: [INDEX](docs/superpowers/reports/csd/INDEX.md).
 > Nothing here is a new measurement; each claim keeps the label of its source report.
