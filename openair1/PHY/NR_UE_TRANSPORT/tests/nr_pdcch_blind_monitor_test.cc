@@ -5814,3 +5814,189 @@ TEST(UlReadyDci01, UlSchIndicatorZeroAndFormat1AreRejected)
   nr_dci_bits_t p2 = {{d.v, 0, 0}};
   EXPECT_FALSE(nr_pdcch_blind_extract_01(p2, 44, 0x1234, &o, &out));
 }
+
+// ---- UL-LAYOUT: blind UL BWP / DCI 0_1 layout lock (nr_pdcch_ul_layout_lock.c) -------------------------------------
+// Synthetic bank in the PCI 415 shape (docs/superpowers/reports/csd/ULLAYOUT.md): length 44 = id 0 | BWP ind 1 (=1) |
+// RIV 15 (N=216) | TDRA 4 (=0) | MCS | NDI | RV | HARQ | DAI 2 | TPC 2 | ant 3 | SRS 2 | DM-RS init 1 | UL-SCH 1, DCIs in
+// slots 6, 7, 16, 17 of a DDDDDDDSUU x2 frame. Written field by field, not through any receiver packer.
+#include "nr_pdcch_ul_layout_lock.h"
+namespace {
+uint32_t UllRiv(int n, int s, int l)
+{
+  return (l - 1) <= n / 2 ? (uint32_t)(n * (l - 1) + s) : (uint32_t)(n * (n - l + 1) + (n - 1 - s));
+}
+struct UllGen {
+  std::mt19937 rng{12345};
+  uint8_t pid[8] = {0}, ndi[8] = {0};
+  long slot = 1000;
+  int k = 0;
+  nr_ul_layout_dci_t next(int n_bwp = 216)
+  {
+    static const int dci_slots[4] = {6, 7, 16, 17};
+    const int u = (int)(rng() % 8);
+    const int adv = 1 + (int)(rng() % 3);
+    pid[u] = (uint8_t)((pid[u] + adv) % 16);
+    if (pid[u] < adv) ndi[u] ^= 1;
+    const int L = (rng() % 10) ? 3 : 1 + (int)(rng() % 120);
+    const int S = (int)(rng() % (n_bwp - L + 1));
+    const int rv = (rng() % 12) ? 0 : 2;
+    uint64_t v = 0;
+    auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
+    put(0, 1); put(1, 1); put(UllRiv(n_bwp, S, L), 15); put(0, 4); put(rng() % 28, 5); put(ndi[u], 1); put(rv, 2);
+    put(pid[u], 4); put(3, 2); put(1, 2); put(0, 3); put(0, 2); put(0, 1); put(1, 1);
+    const int fr = 50 + k / 4;
+    slot = (long)fr * 20 + dci_slots[k % 4];
+    k++;
+    nr_ul_layout_dci_t d;
+    d.rnti = (uint16_t)(0x4000 + u);
+    d.slot = slot;
+    d.p = nr_dci_bits_from_u64(v);
+    return d;
+  }
+};
+}  // namespace
+
+TEST(UlLayoutLock, RivWidthsAndDecode)
+{
+  EXPECT_EQ(nr_ul_layout_riv_bits(216), 15);
+  EXPECT_EQ(nr_ul_layout_riv_bits(217), 15);
+  EXPECT_EQ(nr_ul_layout_riv_bits(273), 16);
+  EXPECT_EQ(nr_ul_layout_riv_bits(106), 13);
+  EXPECT_EQ(nr_ul_layout_riv_bits(52), 11);
+  uint16_t s = 0, l = 0;
+  ASSERT_TRUE(nr_ul_layout_riv(439, 216, &s, &l));  // the most frequent RIV of capture b
+  EXPECT_EQ(s, 7);
+  EXPECT_EQ(l, 3);
+  ASSERT_TRUE(nr_ul_layout_riv(439, 217, &s, &l));  // the DL-BWP reading moves it by 2 PRB
+  EXPECT_EQ(s, 5);
+  EXPECT_EQ(l, 3);
+  for (int L : {1, 3, 100, 120, 216}) {
+    ASSERT_TRUE(nr_ul_layout_riv(UllRiv(216, 216 - L, L), 216, &s, &l));
+    EXPECT_EQ(s, 216 - L);
+    EXPECT_EQ(l, L);
+  }
+  EXPECT_FALSE(nr_ul_layout_riv(23436, 216, &s, &l));  // >= N(N+1)/2
+}
+
+TEST(UlLayoutLock, BitStatisticsFitThePci415Layout)
+{
+  UllGen g;
+  std::vector<nr_ul_layout_dci_t> b;
+  for (int i = 0; i < 400; i++) b.push_back(g.next());
+  float sc = 0, sec = 0;
+  const int mo = nr_ul_layout_fit_mcs(b.data(), (int)b.size(), 44, &sc, &sec);
+  EXPECT_EQ(mo, 21);
+  EXPECT_GT(sc - sec, 0.3f);
+  const uint16_t cand[] = {217, 216, 215, 214, 213, 212, 189, 106, 273, 52};
+  nr_ul_layout_prefix_t pre[3];
+  const int np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 10, pre, 3);
+  ASSERT_GE(np, 1);
+  EXPECT_EQ(pre[0].bwp_ind, 1);
+  EXPECT_EQ(pre[0].riv, 15);
+  EXPECT_EQ(pre[0].tda, 4);
+  EXPECT_EQ(pre[0].fh, 0);
+  EXPECT_EQ(pre[0].n_max, 217);
+  nr_ul_layout_tail_t t[4];
+  const int nt = nr_ul_layout_fit_tail(b.data(), (int)b.size(), 44, &pre[0], t, 4);
+  ASSERT_GE(nt, 2);  // the equal-length readings survive as runner-ups
+  EXPECT_EQ(t[0].dai1, 2);
+  EXPECT_EQ(t[0].ant, 3);
+  EXPECT_EQ(t[0].init, 1);
+  EXPECT_EQ(t[0].tp, 0);
+  EXPECT_EQ(t[0].cdm, 1);
+  // k2: the PDCCH-free slots are 8, 9, 18, 19
+  uint32_t occ[20] = {0}, hist[20] = {0};
+  for (int s2 = 0; s2 < 20; s2++) occ[s2] = (s2 % 10 < 8) ? 500 : 0;
+  hist[6] = hist[7] = hist[16] = hist[17] = 100;
+  EXPECT_EQ(nr_ul_layout_infer_k2(occ, hist, 20), 2);
+  occ[8] = 400;  // a busy slot 8 forbids k2 = 2 for slot 6
+  EXPECT_NE(nr_ul_layout_infer_k2(occ, hist, 20), 2);
+  // raw_pci415_12s_20261008 shape: the special slots 7/17 carry only a few UL DCIs against many DL accepts elsewhere;
+  // they still have DL symbols, so k2 = 1 (6 -> 7) is not free
+  for (int s2 = 0; s2 < 20; s2++) occ[s2] = (s2 % 10 < 7) ? 20000 : 0;
+  occ[7] = occ[17] = 173;
+  EXPECT_EQ(nr_ul_layout_infer_k2(occ, hist, 20), 2);
+}
+
+TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  ASSERT_TRUE(nr_ul_layout_lock_enabled());
+  nr_ul_layout_lock_reset();
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                                    .slots_per_frame = 20};
+  UllGen g;
+  nr_pdcch_blind_ul_result_t out;
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next();
+    EXPECT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out), 0);
+  }
+  nr_ul_layout_eval_once();
+  // probes now; noise first: random hypotheses detected >= 6 dB at a 5 % rate (far above the measured control) -> no lock
+  std::mt19937 rng(7);
+  int probes = 0;
+  for (int i = 0; i < 200; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+    if (rc == 0) continue;  // no hypothesis gives a probe-able (<= 16 PRB) allocation
+    ASSERT_EQ(rc, 2);
+    EXPECT_TRUE(nr_ul_layout_is_probe(&out));
+    EXPECT_EQ(out.k2, 2);
+    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP], nid = 0;
+    uint8_t l0 = 0;
+    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, &nid, &l0);
+    ASSERT_GT(n, 6);
+    EXPECT_EQ(nid, 415);
+    EXPECT_EQ(l0, 2);
+    nr_ul_layout_probe_res_t r = {};
+    r.n = n;
+    for (int h = 0; h < n; h++) { r.snr_db[h] = -5.f; r.set[h] = 1; }
+    if (rng() % 20 == 0) r.snr_db[rng() % n] = 9.f;  // false detections at 5 % of probes (replay control: 0 of 4287)
+    r.ctl_db = -6.f;
+    r.comb1_db = NAN;
+    nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
+    probes++;
+  }
+  // the PCI 415 truth: only (216, 1) shows DM-RS, with data on comb 1 (one CDM group without data)
+  bool locked = false;
+  for (int i = 0; i < 300 && !locked; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+    if (rc == 1) { locked = true; break; }
+    if (rc == 0) continue;
+    ASSERT_EQ(rc, 2);
+    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP];
+    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, nullptr, nullptr);
+    nr_ul_layout_probe_res_t r = {};
+    r.n = n;
+    // truth PRBs from the generator's N = 216, start 1
+    uint16_t s = 0, l = 0;
+    ASSERT_TRUE(nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l));
+    for (int h = 0; h < n; h++) {
+      r.set[h] = 1;
+      r.snr_db[h] = (np[h] && p0[h] == 1 + s && np[h] == l) ? 12.f : -5.f;
+    }
+    r.ctl_db = -6.f;
+    r.comb1_db = -0.5f;
+    if (i % 4 == 0) nr_ul_layout_probe_feed(&out, d.slot + 2, &r);  // a quarter of the grants are detectable
+  }
+  ASSERT_TRUE(locked);
+  // the grant is now read with the locked layout: N = 216 at CRB 1
+  const nr_ul_layout_dci_t d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out), 1);
+  EXPECT_TRUE(nr_ul_layout_is_tagged(&out));
+  EXPECT_FALSE(nr_ul_layout_is_probe(&out));
+  uint16_t s = 0, l = 0;
+  ASSERT_TRUE(nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l));
+  EXPECT_EQ(out.bwp_start, 1);
+  EXPECT_EQ(out.bwp_size, 216);
+  EXPECT_EQ(out.start_rb, s);
+  EXPECT_EQ(out.num_rb, l);
+  EXPECT_EQ(out.k2, 2);
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 1);
+  EXPECT_EQ(out.transform_precoding, 0);
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}

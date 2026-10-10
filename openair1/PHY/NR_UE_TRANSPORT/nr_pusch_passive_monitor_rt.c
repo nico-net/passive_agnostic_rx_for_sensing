@@ -1,5 +1,6 @@
 #include "nr_pdcch_ul_discovery.h"
 #include "nr_pdcch_ul_config_disc.h"
+#include "nr_pdcch_ul_layout_lock.h"
 #include "nr_srs_passive.h"
 #include <stdatomic.h>
 #include <string.h>
@@ -33,7 +34,8 @@ typedef struct {long source;double fo_hz;bool valid;} ul_sample_history_t;
 static ul_sample_history_t g_history[HISTORY_SLOTS];
 void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_absolute_slot)
 {
-  if (nr_ul_chain_on()) {
+  const bool layout_probe = nr_ul_layout_is_probe(g); /* UL-LAYOUT DM-RS probe: no decode, no UE state */
+  if (nr_ul_chain_on() && !layout_probe) {
     if (g->ul_dci_format != NR_BLIND_UL_DCI_FORMAT_0_1) {
       atomic_fetch_add_explicit(&g_chain_no_dci01,1,memory_order_relaxed);
       return;
@@ -66,7 +68,7 @@ void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_ab
   pthread_mutex_unlock(&g_book_lock);
   if(status>0) {
     atomic_fetch_add_explicit(&g_parked,1,memory_order_relaxed);
-    nr_srs_passive_grant(source_absolute_slot+g->k2,g->ul_dmrs_symb_pos,g->bwp_start+g->start_rb,g->num_rb);
+    if (!layout_probe) nr_srs_passive_grant(source_absolute_slot+g->k2,g->ul_dmrs_symb_pos,g->bwp_start+g->start_rb,g->num_rb);
   }
   if(status<0) atomic_fetch_add_explicit(&g_overwritten,1,memory_order_relaxed);
 }
@@ -128,7 +130,8 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
   const bool ul_ticket_valid=nr_ue_ctx_ul_ticket(g.rnti,&ul_ticket);
   /* U4 admission is tied to the DL lock. A C-RNTI-shaped blind hit alone
    * cannot create UL state or consume a decode slot. */
-  if (nr_pusch_passive_ul_ue_state_enabled() && !ul_ticket_valid) {
+  const bool layout_probe = nr_ul_layout_is_probe(&g);
+  if (nr_pusch_passive_ul_ue_state_enabled() && !ul_ticket_valid && !layout_probe) {
     nr_pusch_passive_queue_note_unready();
     return;
   }
@@ -147,7 +150,7 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
     .bwp_start=g.bwp_start,.bwp_size=g.bwp_size,.dmrs_id=g.ul_dmrs_scrambling_id,
     .data_id=g.data_scrambling_id,.nscid=g.nscid,.tda=g.tda_index,.k2=g.k2,
     .ta_samples=ta,.cfo_hz=(int32_t)fo_hz,.pci=ue->frame_parms.Nid_cell};
-  if (ul_ticket_valid) nr_ue_ctx_ul_grant(&ul_ticket,&ul_update);
+  if (ul_ticket_valid && !layout_probe) nr_ue_ctx_ul_grant(&ul_ticket,&ul_update);
   /* A one-shot marker on ENTRY, so that "the decode hung" and "the decode was never called" are
    * distinguishable from the log alone. Without it, a blocked receive thread and a hook that never
    * fires look identical: both simply stop producing output. */
@@ -196,6 +199,7 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
     nr_pusch_passive_queue_note_unready();
     return;
   }
+  if (layout_probe) return; /* probes are measured by the queue worker only (never decoded in-line) */
   struct timespec grant_cpu_start={0},grant_cpu_end={0};
   if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_start);
   nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot,
@@ -283,6 +287,7 @@ void nr_pusch_grant_book_stats_dump(void)
           (unsigned long)atomic_load_explicit(&g_chain_no_hyp,memory_order_relaxed),
           (unsigned long)atomic_load_explicit(&g_chain_no_dci01,memory_order_relaxed),
           (unsigned long)atomic_load_explicit(&g_chain_skip_rv,memory_order_relaxed));
+  nr_ul_layout_stats_dump();
   if (nr_ul_chain_on()) {
     nr_pdcch_ul_config_stats_t u3={0};
     nr_pdcch_ul_config_disc_stats(&u3);

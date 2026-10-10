@@ -54,6 +54,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.h" // UL-LAYOUT (ISAC_UL_LAYOUT_LOCK=1)
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
@@ -1830,6 +1831,16 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
   pthread_mutex_unlock(&ul_length_lock);
   if (nr_pdcch_ul_bank_enabled() || nr_pdcch_ul_config_disc_enabled())
     nr_pdcch_ul_config_disc_reset();
+  if (nr_ul_layout_lock_enabled()) {
+    /* UL-LAYOUT: the lock is a property of the cell's dedicated configuration. Keep it across SOFT epochs (RX
+     * recovery, CSI-RS map), drop it on a new identity or a suspected dedicated change. */
+    static uint32_t last_id = UINT32_MAX, last_ded = UINT32_MAX;
+    if (s->identity_gen != last_id || s->dedicated_epoch != last_ded) {
+      if (last_id != UINT32_MAX) nr_ul_layout_lock_reset();
+      last_id = s->identity_gen;
+      last_ded = s->dedicated_epoch;
+    }
+  }
 }
 
 static bool reconf_lengths_enabled(void)
@@ -7976,7 +7987,24 @@ constdiag_done:;
         nr_passive_replay_ul(source_absolute_slot, cand_task[ti].rnti_min, cand_task[ti].dci_length,
                              cand_task[ti].ul_out.raw_payload);
         nr_pdcch_blind_ul_result_t discovered;
-        if (nr_pdcch_ul_config_disc_enabled() && ul_opts.bwp_size == 0) {
+        /* UL-LAYOUT (ISAC_UL_LAYOUT_LOCK=1, default off): bank the CRC-verified payload; once the cell's UL BWP and
+         * this length's layout are locked the grant is read with them (ull == 1), before that a DM-RS probe is
+         * booked for the PUSCH slot (ull == 2). Without the flag nothing here runs. */
+        int ull = 0;
+        nr_pdcch_blind_ul_result_t ull_g;
+        if (nr_ul_layout_lock_enabled() && source_absolute_slot >= 0) {
+          const nr_ul_layout_cell_t ull_cell = {.carrier_rb = (uint16_t)fp->N_RB_DL, .dl_bwp_size = (uint16_t)cfg->bwp_size,
+                                                .pci = (uint16_t)fp->Nid_cell, .mu = (uint8_t)fp->numerology_index,
+                                                .typeA_pos = (uint8_t)cfg->dmrs_typeA_position,
+                                                .slots_per_frame = (uint8_t)fp->slots_per_frame};
+          ull = nr_ul_layout_on_dci(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
+                                    cand_task[ti].ul_out.raw_payload, &ull_cell, &ull_g);
+          if (ull == 2 && nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ull_g, source_absolute_slot);
+        }
+        if (ull == 1) {
+          cand_task[ti].ok = true;
+          discovered = ull_g;
+        } else if (nr_pdcch_ul_config_disc_enabled() && ul_opts.bwp_size == 0) {
           nr_pdcch_blind_ul_opts_t confirmed;
           nr_pdcch_ul_config_prior_t prior = {.dl_bwp_start=cfg->bwp_start,
               .dl_bwp_size=cfg->bwp_size, .carrier_rb=fp->N_RB_DL,
@@ -8107,7 +8135,10 @@ constdiag_done:;
                   ul_enforce ? "0_1 grant not booked (1 in 64 still booked as a probe)"
                              : "booked anyway (ISAC_UL_FDRA_REFUSE=1 to refuse; a 0_1-only scrambling/MCS cause looks identical)");
         }
-        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce)) {
+        if (nr_ul_layout_lock_enabled() && !nr_ul_layout_is_tagged(u)) {
+          /* UL-LAYOUT: until this length is locked only its DM-RS probe (booked above) reaches the PUSCH worker; the
+           * width/U3 readings of an unlocked layout are logged but not decoded. */
+        } else if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce)) {
           if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(u, source_absolute_slot);
         } else if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
           /* Gap item 1 (PUSCH RA type 0 / dynamicSwitch). Type 1 is refuted for this class; rather than
@@ -8810,6 +8841,7 @@ constdiag_done:;
          "SENSING: blind PDCCH accept (%d.%d) rnti=0x%x prb=[%u..%u) sym=[%u..%u) dmrs_mask=0x%x\n",
          proc->frame_rx, proc->nr_slot_rx, out.rnti, out.start_rb, out.start_rb + out.num_rb, out.start_symbol,
          out.start_symbol + out.num_symbols, out.dl_dmrs_symb_pos);
+    nr_ul_layout_note_pdcch_slot((long)abs_slot); /* UL-LAYOUT: a PDCCH here = DL symbols (no-op without the flag) */
     if (out.rnti_class == NR_BLIND_RNTI_CLASS_C)
       nr_pdcch_ul_config_disc_note_dl_slot(abs_slot);
 

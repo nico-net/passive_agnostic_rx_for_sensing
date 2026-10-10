@@ -31,6 +31,8 @@
 #include "nr_sense_records.h"
 #include "nr_passive_ue_ctx.h"
 #include "nr_ul_first_pusch.h"
+#include "nr_pdcch_ul_layout_lock.h"
+#include "PHY/NR_REFSIG/nr_refsig.h" // nr_gold_pusch (UL-LAYOUT probe)
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -737,6 +739,193 @@ static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, 
     c16_t rot[fp->ofdm_symbol_size] __attribute__((aligned(32)));
     nr_fo_compensation(fo_hz, fp->samples_per_subframe, (int)off, src, rot, fp->ofdm_symbol_size);
     dft(get_dft(fp->ofdm_symbol_size), (int16_t *)rot, (int16_t *)dst, 1);
+  }
+  return true;
+}
+
+/* ---- UL-LAYOUT probe (ISAC_UL_LAYOUT_LOCK=1). For one booked DCI 0_1 it correlates the CP-OFDM DM-RS (port 0,
+ * type 1 comb 0, Gold sequence of PCI scrambling, n_SCID 0, TS 38.211 6.4.1.1.1.1 referenced to CRB 0) on the PRBs that
+ * each UL BWP hypothesis predicts, with the same per-PRB coherent / delay-searched SNR estimate as tools/uldbg/ulphys.py
+ * dmrs_est(). No decode, no CRC. Symbols: l0, 7, 11 (DM-RS candidates), l0+1 and 12 (always data for one-symbol
+ * DM-RS), so the second comb of the DM-RS symbols can be compared with the data symbols (CDM groups without data). */
+#define LP_NSYM 5
+#define LP_NTAU 33 /* -256..256 samples in steps of 16: <= 0.25 rad phase slope error across one PRB */
+static c16_t *g_lp_f[NR_PUSCH_PASSIVE_MAX_CTX][LP_NSYM][PASSIVE_UL_MAX_ANT];
+
+static inline float lp_c(const uint32_t *gold, int i) { return (gold[i >> 5] >> (i & 31)) & 1 ? -1.f : 1.f; }
+
+/* Z[s][a][prb*6+j] = Y * conj(r): DM-RS-stripped comb-0 REs of PRBs [p0, p0+L) for the given symbol rows. */
+static void lp_strip(c16_t *const F[LP_NSYM][PASSIVE_UL_MAX_ANT], int nant, const int *rows, int nr,
+                     const uint32_t *const *gold, int fco, int N, int p0, int L, float *zr, float *zi)
+{
+  for (int s = 0; s < nr; s++)
+    for (int a = 0; a < nant; a++)
+      for (int q = 0; q < L; q++)
+        for (int j = 0; j < 6; j++) {
+          const int prb = p0 + q, k = 12 * prb + 2 * j, m = 6 * prb + j;
+          const c16_t y = F[rows[s]][a][(fco + k) % N];
+          const float rr = lp_c(gold[s], 2 * m) * (float)M_SQRT1_2, ri = lp_c(gold[s], 2 * m + 1) * (float)M_SQRT1_2;
+          const int o = ((s * nant + a) * L + q) * 6 + j;
+          zr[o] = (float)y.r * rr + (float)y.i * ri;
+          zi[o] = (float)y.i * rr - (float)y.r * ri;
+        }
+}
+
+/* MRC SNR (linear, summed over antennas, averaged over the symbols) of the stripped REs, delay-searched. */
+static float lp_snr(const float *zr, const float *zi, int nr, int nant, int L, int N)
+{
+  static __thread float pc[LP_NTAU][6], ps[LP_NTAU][6];
+  static __thread int pn = 0;
+  if (pn != N) {
+    for (int t = 0; t < LP_NTAU; t++)
+      for (int j = 0; j < 6; j++) {
+        const double ph = 2.0 * M_PI * (2.0 * j) * (double)(-256 + 16 * t) / (double)N;
+        pc[t][j] = (float)cos(ph);
+        ps[t][j] = (float)sin(ph);
+      }
+    pn = N;
+  }
+  const int nb = nr * nant * L;
+  int bt = 0;
+  float be = -1.f;
+  for (int t = 0; t < LP_NTAU; t++) {
+    float e = 0.f;
+    for (int b = 0; b < nb; b++) {
+      float sr = 0.f, si = 0.f;
+      for (int j = 0; j < 6; j++) {
+        const float xr = zr[b * 6 + j], xi = zi[b * 6 + j];
+        sr += xr * pc[t][j] - xi * ps[t][j];
+        si += xr * ps[t][j] + xi * pc[t][j];
+      }
+      e += sr * sr + si * si;
+    }
+    if (e > be) { be = e; bt = t; }
+  }
+  float snr = 0.f;
+  for (int a = 0; a < nant; a++) {
+    float acc = 0.f;
+    for (int s = 0; s < nr; s++) {
+      float nv = 0.f, hp = 0.f;
+      for (int q = 0; q < L; q++) {
+        const int b = (s * nant + a) * L + q;
+        float cr[6], ci[6], hr = 0.f, hi = 0.f;
+        for (int j = 0; j < 6; j++) {
+          const float xr = zr[b * 6 + j], xi = zi[b * 6 + j];
+          cr[j] = xr * pc[bt][j] - xi * ps[bt][j];
+          ci[j] = xr * ps[bt][j] + xi * pc[bt][j];
+          hr += cr[j] / 6.f;
+          hi += ci[j] / 6.f;
+        }
+        for (int j = 0; j < 6; j++) nv += (cr[j] - hr) * (cr[j] - hr) + (ci[j] - hi) * (ci[j] - hi);
+        hp += hr * hr + hi * hi;
+      }
+      nv /= (float)(L * 5);
+      const float sp = hp / (float)L - nv / 6.f;
+      acc += nv > 0.f ? (sp > 1e-6f * nv ? sp : 1e-6f * nv) / nv : 0.f;
+    }
+    snr += acc / (float)nr;
+  }
+  return snr;
+}
+
+bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, int32_t ta, double fo_hz, int n,
+                                   const uint16_t *prb0, const uint16_t *nprb, uint16_t nid, uint8_t l0,
+                                   nr_ul_layout_probe_res_t *res)
+{
+  if (!ue || !res || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || n <= 0) return false;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int N = fp->ofdm_symbol_size, fco = fp->first_carrier_offset;
+  int nant = g_gnb_nant > 0 ? g_gnb_nant : fp->nb_antennas_rx;
+  if (nant > PASSIVE_UL_MAX_ANT) nant = PASSIVE_UL_MAX_ANT;
+  const int syms[LP_NSYM] = {l0, 7, 11, l0 + 1, 12};
+  for (int s = 0; s < LP_NSYM; s++)
+    for (int a = 0; a < nant; a++) {
+      if (!g_lp_f[ctx][s][a]) g_lp_f[ctx][s][a] = malloc16_clear(sizeof(c16_t) * N);
+      if (!g_lp_f[ctx][s][a]) return false;
+      if (g_snapshot[ctx].valid) {
+        if (!passive_snapshot_fep(fp, ctx, a, g_lp_f[ctx][s][a], (unsigned char)syms[s], slot, ta, fo_hz)) return false;
+      } else {
+        const c16_t *rx = (const c16_t *)ue->common_vars.rxdata[a];
+        if (!rx) return false;
+        nr_pusch_passive_fep_symbol(fp, rx, g_lp_f[ctx][s][a], (unsigned char)syms[s], slot, ta, fo_hz);
+      }
+    }
+  const int nrb_ref = 275;
+  const uint32_t *gold[3], *gctl[3];
+  /* ISAC_UL_LAYOUT_CONTROL=1 (validation only, default off): score every hypothesis with the DM-RS of the wrong slot
+   * number, i.e. a receiver that sees no PUSCH at all -- the false-lock experiment. */
+  static int control = -1;
+  if (control < 0) control = getenv("ISAC_UL_LAYOUT_CONTROL") && atoi(getenv("ISAC_UL_LAYOUT_CONTROL")) ? 1 : 0;
+  const uint8_t sl_true = control ? (uint8_t)((slot + 1) % fp->slots_per_frame) : slot;
+  for (int s = 0; s < 3; s++) {
+    gold[s] = nr_gold_pusch(nrb_ref, fp->symbols_per_slot, nid, 0, sl_true, syms[s]);
+    gctl[s] = nr_gold_pusch(nrb_ref, fp->symbols_per_slot, nid, 0, (sl_true + 1) % fp->slots_per_frame, syms[s]);
+  }
+  static const int set_rows[3][3] = {{0}, {0, 2}, {0, 1, 2}};
+  static const int set_n[3] = {1, 2, 3};
+  float zr[3 * PASSIVE_UL_MAX_ANT * 16 * 6], zi[3 * PASSIVE_UL_MAX_ANT * 16 * 6];
+  memset(res, 0, sizeof(*res));
+  res->n = n < NR_UL_LAYOUT_MAX_HYP ? n : NR_UL_LAYOUT_MAX_HYP;
+  int best = -1;
+  for (int h = 0; h < res->n; h++) {
+    res->snr_db[h] = -99.f;
+    res->set[h] = -1;
+    if (nprb[h] == 0 || nprb[h] > 16 || prb0[h] + nprb[h] > nrb_ref) continue;
+    float bs = -1.f;
+    for (int st = 0; st < 3; st++) {
+      const uint32_t *g[3] = {gold[set_rows[st][0]], gold[set_rows[st][1]], gold[set_rows[st][2]]};
+      lp_strip(g_lp_f[ctx], nant, set_rows[st], set_n[st], g, fco, N, prb0[h], nprb[h], zr, zi);
+      const float v = lp_snr(zr, zi, set_n[st], nant, nprb[h], N);
+      if (v > bs) { bs = v; res->set[h] = (int8_t)st; }
+    }
+    res->snr_db[h] = 10.f * log10f(bs > 1e-9f ? bs : 1e-9f);
+    if (best < 0 || res->snr_db[h] > res->snr_db[best]) best = h;
+  }
+  res->ctl_db = -99.f;
+  res->comb1_db = NAN;
+  if (best < 0) return true;
+  { /* DM-RS symbol set at the best hypothesis from per-symbol SNRs (the set-averaged SNR cannot tell {l0} from {l0,11}:
+     * both average per-symbol SNRs): symbol 11 / 7 count as DM-RS when they alone show >= 3 dB and within 6 dB of l0 */
+    float sym_db[3];
+    for (int r = 0; r < 3; r++) {
+      const int rows[1] = {r};
+      const uint32_t *g[1] = {gold[r]};
+      lp_strip(g_lp_f[ctx], nant, rows, 1, g, fco, N, prb0[best], nprb[best], zr, zi);
+      const float v = lp_snr(zr, zi, 1, nant, nprb[best], N);
+      sym_db[r] = 10.f * log10f(v > 1e-9f ? v : 1e-9f);
+    }
+    const bool has11 = sym_db[2] >= 3.f && sym_db[2] >= sym_db[0] - 6.f;
+    const bool has7 = sym_db[1] >= 3.f && sym_db[1] >= sym_db[0] - 6.f;
+    res->set[best] = (int8_t)(has11 ? (has7 ? 2 : 1) : 0);
+  }
+  {
+    const int st = res->set[best];
+    const uint32_t *g[3] = {gctl[set_rows[st][0]], gctl[set_rows[st][1]], gctl[set_rows[st][2]]};
+    lp_strip(g_lp_f[ctx], nant, set_rows[st], set_n[st], g, fco, N, prb0[best], nprb[best], zr, zi);
+    const float v = lp_snr(zr, zi, set_n[st], nant, nprb[best], N);
+    res->ctl_db = 10.f * log10f(v > 1e-9f ? v : 1e-9f);
+  }
+  if (res->snr_db[best] >= 8.f) {
+    double ec1 = 0.0, ed = 0.0;
+    int nc1 = 0, nd = 0;
+    const int st = res->set[best];
+    for (int a = 0; a < nant; a++)
+      for (int q = 0; q < nprb[best]; q++)
+        for (int k = 0; k < 12; k++) {
+          const int bin = (fco + 12 * (prb0[best] + q) + k) % N;
+          if (k & 1)
+            for (int r = 0; r < set_n[st]; r++) {
+              const c16_t y = g_lp_f[ctx][set_rows[st][r]][a][bin];
+              ec1 += (double)y.r * y.r + (double)y.i * y.i;
+              nc1++;
+            }
+          for (int r = 3; r < 5; r++) {
+            const c16_t y = g_lp_f[ctx][r][a][bin];
+            ed += (double)y.r * y.r + (double)y.i * y.i;
+            nd++;
+          }
+        }
+    if (nc1 && nd && ed > 0.0 && ec1 > 0.0) res->comb1_db = (float)(10.0 * log10((ec1 / nc1) / (ed / nd)));
   }
   return true;
 }
@@ -1860,6 +2049,14 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              double   fo_hz,
                              nr_pusch_passive_out_t *out)
 {
+  if (g && out && g->transform_precoding && g->n_dmrs_cdm_groups == 1) {
+    /* TS 38.214 6.2.2: with transform precoding the DM-RS symbols never carry data. A one-CDM-group reading (e.g. the
+     * ISAC_UL_RETRY CDM alternate) would hand the gNB IDFT a half-symbol size (18 for 3 PRB) that asserts. */
+    memset(out, 0, sizeof(*out));
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "transform precoding with data in the DM-RS symbols";
+    return false;
+  }
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   nr_sense_grant_meta_t captured_stamp = {0};
   if (nr_sense_enabled()) nr_sense_capture_grant_stamp(&captured_stamp);

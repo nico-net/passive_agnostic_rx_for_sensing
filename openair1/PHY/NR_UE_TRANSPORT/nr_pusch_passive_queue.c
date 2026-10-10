@@ -52,6 +52,8 @@
 #include "nr_pusch_passive_queue_cursor.h"
 #include "nr_pusch_solver.h"
 #include "nr_pdcch_ul_config_disc.h"
+#include "nr_pdcch_ul_layout_lock.h"
+#include "nr_pusch_passive_decode.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // nr_get_Qm_ul
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
@@ -257,6 +259,18 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       atomic_fetch_add_explicit(&g_dropped_snapshot, 1, memory_order_relaxed);
       continue;
     }
+    if (nr_ul_layout_is_probe(&job.grant)) {
+      /* UL-LAYOUT probe (ISAC_UL_LAYOUT_LOCK=1): DM-RS evidence for every UL BWP hypothesis, never a decode. */
+      uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP], nid = 0;
+      uint8_t l0 = 2;
+      const int nh = nr_ul_layout_probe_plan(&job.grant, p0, np, NR_UL_LAYOUT_MAX_HYP, &nid, &l0);
+      nr_ul_layout_probe_res_t r;
+      if (nh > 0 && nr_pusch_passive_layout_probe(ue, idx, (uint8_t)job.nr_slot_rx, job.ta_offset_samples, job.fo_hz, nh,
+                                                  p0, np, nid, l0, &r))
+        nr_ul_layout_probe_feed(&job.grant, job.absolute_slot, &r);
+      if (pipeline) nr_pusch_passive_decode_capture_release(idx);
+      continue;
+    }
     if (nr_pusch_solver_enabled() && job.ul_ticket_valid && !job.cfr_only) {
       /* Review fix (REVIEW1 s2 defects 1+2): reset the solver once per broad invalidation
        * (HARD epoch / identity change / dedicated-change-suspected), not on every SOFT epoch
@@ -367,7 +381,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
        * aliasing class: a symbol-0 mismatch leaves one wrong data symbol that LDPC cannot absorb at high MCS). */
       nr_pdcch_blind_ul_result_t alts[2];
       int na = 0;
-      if (job.grant.n_dmrs_cdm_groups == 1 || job.grant.n_dmrs_cdm_groups == 2) {
+      if ((job.grant.n_dmrs_cdm_groups == 1 || job.grant.n_dmrs_cdm_groups == 2) && !job.grant.transform_precoding) {
         alts[na] = job.grant;
         alts[na].n_dmrs_cdm_groups = (uint8_t)(3 - job.grant.n_dmrs_cdm_groups);
         na++;
@@ -410,7 +424,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
       nr_pusch_passive_ul_ids_failed(&job.ul_ticket);
     if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
         out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB)) {
-      nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
+      if (!nr_ul_layout_is_tagged(&job.grant)) /* UL-LAYOUT grants belong to no width/U3 search */
+        nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
       nr_pdcch_dci01_fdra_feedback(&job.grant, out.status==NR_PUSCH_PASSIVE_OK);
     }
     if (nr_ul_chain_on()) {

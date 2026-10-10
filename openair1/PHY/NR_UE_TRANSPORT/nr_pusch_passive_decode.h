@@ -133,6 +133,12 @@ bool nr_pusch_passive_decode_probe(PHY_VARS_NR_UE *ue, int ctx, uint32_t frame,
 void nr_pusch_passive_fep_symbol(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
                                 unsigned char symbol, unsigned char slot, int sample_offset, double fo_hz);
 
+/* UL-LAYOUT probe (ISAC_UL_LAYOUT_LOCK=1): DM-RS SNR per BWP hypothesis PRB range, no decode. See the .c. */
+#include "nr_pdcch_ul_layout_lock.h"
+bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, int32_t ta, double fo_hz, int n,
+                                   const uint16_t *prb0, const uint16_t *nprb, uint16_t nid, uint8_t l0,
+                                   nr_ul_layout_probe_res_t *res);
+
 /// Release the minimal gNB context. Safe to call when it was never built.
 void nr_pusch_passive_decode_free(void);
 
