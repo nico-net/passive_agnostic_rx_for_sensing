@@ -2,6 +2,7 @@
 /* GPU6: bit-exact GPU FEP for the passive PDSCH decoder -- see nr_pdsch_gpu_exact.h. */
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_fep.h"
+#include "nr_pdsch_gpu_demod_host.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
 #include <dlfcn.h>
@@ -41,6 +42,8 @@ static uint64_t now_ns(void)
  */
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
+  if (ue)
+    nr_pdsch_gpu_demod_warmup(&ue->frame_parms); /* GPU-DEMOD: independent knob, same module and warm-up point */
   const char *e = getenv("ISAC_PDSCH_GPU_EXACT_FEP");
   if (!e || atoi(e) != 1 || !ue)
     return 0;

@@ -507,6 +507,23 @@ static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
   return offset;
 }
 
+/* GPU-DEMOD (nr_pdsch_gpu_demod_host.c): the RE geometry nr_dlsch_extract_rbs() packs for one symbol, from index-coded
+ * inputs (rx[s * N + k] = {k, 1}, est[s * N + j] = {j, s + 1}) on one antenna and one layer. */
+uint32_t nr_dlsch_extract_geometry(const NR_DL_FRAME_PARMS *fp, int chest_time, c16_t *rx_idx, uint32_t est_sz, int32_t *est_idx,
+                                   uint32_t ext_sz, c16_t *out_y, int32_t *out_h, unsigned char symbol,
+                                   fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa, const nr_ssb_rm_mask_t *ssb_rm)
+{
+  static __thread NR_DL_FRAME_PARMS *f1; /* the extractor reads only these three fields (the full copy is ~700 kB) */
+  if (!f1 && !(f1 = calloc(1, sizeof(*f1))))
+    return UINT32_MAX;
+  f1->first_carrier_offset = fp->first_carrier_offset;
+  f1->ofdm_symbol_size = fp->ofdm_symbol_size;
+  f1->nb_antennas_rx = 1;
+  return nr_dlsch_extract_rbs(fp->samples_per_slot_wCP, (c16_t(*)[fp->samples_per_slot_wCP])rx_idx, ext_sz, est_sz, (int32_t(*)[est_sz])est_idx,
+                              (c16_t(*)[ext_sz])out_y, (int32_t(*)[ext_sz])out_h, symbol, (cfg->dlDmrsSymbPos >> symbol) & 1, cfg, fa, 1, f1,
+                              nr_dlsch_csi_overlap_bitmap(cfg, symbol), chest_time, ssb_rm);
+}
+
 /* Zero Forcing Rx function: nr_a_sum_b()
  * Compute the complex addition x=x+y
  *

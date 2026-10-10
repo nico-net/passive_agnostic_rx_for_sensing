@@ -1,4 +1,5 @@
 #include "nr_pdsch_gpu_exact.h"
+#include "nr_pdsch_gpu_demod_host.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
@@ -3962,7 +3963,12 @@ gpu_llr_ready:;
     if (s_opr < 0) s_opr = getenv("ISAC_PDSCH_OWN_PDCCH_RM") && atoi(getenv("ISAC_PDSCH_OWN_PDCCH_RM")) ? 1 : 0;
     nr_pdsch_evm_acc.armed = (s_evmg || s_opr || decode_diag_on()) && (probe_last_sym < 0 || s_evmp) && !gpu_llr && !gw_ready;
   }
-  for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready; m++) {
+  const int gdem = (gpu_llr || gw_ready || sfo_eps != 0.0) ? -1 /* GPU-DEMOD (ISAC_PDSCH_GPU_EXACT_DEMOD): 0 = demodulated */
+      : nr_pdsch_gpu_demod_grant(&(nr_pdsch_gpu_demod_call_t){ue, proc, &dlsch, seg_path ? &fa_virt : freq_alloc, dlsch_config, &harq,
+          first_symbol_with_data, probe_last_sym, pdsch_est_size, (int32_t *)pdsch_dl_ch_estimates, llr, rx_llr_buf_sz, dl_valid_re,
+          (c16_t *)rxdataF_dem, &log2_maxh, rx_size_symbol, (c16_t *)rxdataF_comp, (c16_t *)dl_ch_mag, (c16_t *)dl_ch_magb,
+          (c16_t *)dl_ch_magr, (c16_t *)ptrs_phase_per_slot, (int32_t *)ptrs_re_per_slot, nvar, &scope_req, rho_dl_p, ssb_unav ? &ssb.dem : &no_ssb});
+  for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr && !gw_ready && gdem != 0; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)
       continue; /* probe: past the horizon, LLR count stays 0 for this symbol */
     if (sfo_eps != 0.0) {
