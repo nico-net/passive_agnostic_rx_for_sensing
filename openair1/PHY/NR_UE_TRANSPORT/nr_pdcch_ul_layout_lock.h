@@ -29,6 +29,10 @@ extern "C" {
 
 #define NR_UL_LAYOUT_TAG   (UINT64_C(1) << 62) /* hyp_generation of a grant read with the locked layout */
 #define NR_UL_LAYOUT_PROBE (UINT64_C(1) << 61) /* ... of a DM-RS probe (never decoded) */
+#define NR_UL_LAYOUT_TRIAL (UINT64_C(1) << 60) /* ... of a CRC-first trial: a real PUSCH decode under one layout hypothesis;
+                                                  bits 40..51 = hypothesis (bwp hyp | prefix<<6 | tail<<9), low 40 = gen */
+#define NR_UL_LAYOUT_GEN_MASK ((UINT64_C(1) << 40) - 1)
+#define NR_UL_LAYOUT_MAX_TRIALS 4
 #define NR_UL_LAYOUT_MAX_HYP 64
 #define NR_UL_LAYOUT_MAX_LEN 4
 #define NR_UL_LAYOUT_MAX_PRE 8
@@ -42,6 +46,7 @@ typedef struct {
   uint8_t mu;
   uint8_t typeA_pos; /* MIB enum: 0 = pos2, 1 = pos3 */
   uint8_t slots_per_frame;
+  uint16_t sib1_ul_start, sib1_ul_size; /* SIB1 initialUplinkBWP (0 size = unknown); a hypothesis, ISAC_UL_LOCK_SIB1_FIRST */
 } nr_ul_layout_cell_t;
 
 typedef struct {
@@ -97,6 +102,21 @@ int nr_ul_layout_probe_plan(const nr_pdcch_blind_ul_result_t *g, uint16_t *prb0,
                             uint16_t *nid, uint8_t *l0);
 void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target_slot, const nr_ul_layout_probe_res_t *r);
 void nr_ul_layout_stats_dump(void);
+/* ISAC_UL_LOCK_SIB1_FIRST=1: the SIB1 UL BWP is hypothesis 0. ISAC_UL_LOCK_CRC_FIRST=1: real PUSCH decode jobs under the
+ * top-K (ISAC_UL_LOCK_CRC_K, default 3) layout hypotheses before the lock (and, once locked, after a run of CRC failures);
+ * a PUSCH TB CRC pass locks/re-locks that hypothesis at once. Both default off. */
+bool nr_ul_layout_sib1_first_enabled(void);
+bool nr_ul_layout_crc_first_enabled(void);
+/* Call after nr_ul_layout_on_dci for the same DCI. Fills out[0..n) with CRC trial grants (hyp_generation TAG|TRIAL|..) to
+ * book as ordinary PUSCH jobs; returns n (0 = none; at most one DCI per slot, small MCS only). */
+int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
+                            const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out, int cap);
+/* PUSCH worker: TB CRC verdict of a tagged (locked or trial) grant. */
+void nr_ul_layout_crc_result(const nr_pdcch_blind_ul_result_t *g, bool ok);
+static inline bool nr_ul_layout_is_trial(const nr_pdcch_blind_ul_result_t *g)
+{
+  return g && (g->hyp_generation & NR_UL_LAYOUT_TAG) && (g->hyp_generation & NR_UL_LAYOUT_TRIAL);
+}
 /* One fit pass over every length's bank: the eval thread runs it every 100 ms; unit tests call it directly. */
 void nr_ul_layout_eval_once(void);
 

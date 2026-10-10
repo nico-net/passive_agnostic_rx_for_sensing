@@ -5829,6 +5829,9 @@ TEST(UlReadyDci01, UlSchIndicatorZeroAndFormat1AreRejected)
 // RIV 15 (N=216) | TDRA 4 (=0) | MCS | NDI | RV | HARQ | DAI 2 | TPC 2 | ant 3 | SRS 2 | DM-RS init 1 | UL-SCH 1, DCIs in
 // slots 6, 7, 16, 17 of a DDDDDDDSUU x2 frame. Written field by field, not through any receiver packer.
 #include "nr_pdcch_ul_layout_lock.h"
+extern "C" {
+#include "nr_pdcch_sib1_prior.h"
+}
 namespace {
 uint32_t UllRiv(int n, int s, int l)
 {
@@ -6007,5 +6010,106 @@ TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
   EXPECT_EQ(out.n_dmrs_cdm_groups, 1);
   EXPECT_EQ(out.transform_precoding, 0);
   nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}
+
+// ---- UL layout lock: SIB1-first hypothesis and CRC-first locking (ISAC_UL_LOCK_SIB1_FIRST / ISAC_UL_LOCK_CRC_FIRST) ----
+TEST(UlLayoutLock, Sib1PriorCarriesTheUplinkBwp)
+{
+  nr_pdcch_sib1_prior_t p = {};
+  p.ul_bwp_start = 3;
+  p.ul_bwp_size = 216;
+  p.ul_bwp_valid = true;
+  nr_pdcch_sib1_prior_set(&p);
+  const nr_pdcch_sib1_prior_t *g = nr_pdcch_sib1_prior_get();
+  ASSERT_NE(g, nullptr);
+  EXPECT_TRUE(g->ul_bwp_valid);
+  EXPECT_EQ(g->ul_bwp_start, 3);
+  EXPECT_EQ(g->ul_bwp_size, 216);
+}
+
+namespace {
+// fits the 44-bit layout of the generator (carrier 217) so that trials are possible
+void UllFit(UllGen &g, const nr_ul_layout_cell_t &cell)
+{
+  nr_pdcch_blind_ul_result_t out;
+  nr_ul_layout_lock_reset();
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+}
+// next DCI that yields trials
+int UllTrials(UllGen &g, const nr_ul_layout_cell_t &cell, nr_pdcch_blind_ul_result_t *t, nr_ul_layout_dci_t *dd)
+{
+  for (int i = 0; i < 200; i++) {
+    nr_pdcch_blind_ul_result_t o;
+    const nr_ul_layout_dci_t d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o);
+    const int n = nr_ul_layout_crc_trials(d.rnti, 44, d.slot, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS);
+    if (n) { *dd = d; return n; }
+  }
+  return 0;
+}
+}  // namespace
+
+TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
+  nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
+  nr_ul_layout_dci_t d;
+  UllGen g;
+  // flags off: nothing is requested (existing behaviour)
+  UllFit(g, cell);
+  EXPECT_EQ(nr_ul_layout_crc_trials(0x4000, 44, 5000, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS), 0);
+  setenv("ISAC_UL_LOCK_CRC_FIRST", "1", 1);
+  setenv("ISAC_UL_LOCK_SIB1_FIRST", "1", 1);
+  unsetenv("ISAC_UL_LOCK_CRC_K");
+  nr_ul_layout_lock_reset();
+  UllGen g2;
+  UllFit(g2, cell);
+  int n = UllTrials(g2, cell, t, &d);
+  ASSERT_GE(n, 2);
+  ASSERT_LE(n, 3);
+  EXPECT_TRUE(nr_ul_layout_is_trial(&t[0]));
+  EXPECT_FALSE(nr_ul_layout_is_probe(&t[0]));
+  EXPECT_EQ(t[0].bwp_size, 216);  // hypothesis 0 = SIB1 UL BWP, no vote or probe needed
+  EXPECT_EQ(t[0].bwp_start, 1);
+  // a CRC pass under the SECOND hypothesis overrides the SIB1 ranking and locks immediately (no DM-RS votes at all)
+  ASSERT_TRUE(t[1].bwp_size != 216 || t[1].bwp_start != 1);
+  const uint16_t b1_start = t[1].bwp_start, b1_size = t[1].bwp_size;
+  nr_ul_layout_crc_result(&t[1], true);
+  d = g2.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_TRUE(nr_ul_layout_is_tagged(&o));
+  EXPECT_EQ(o.bwp_start, b1_start);
+  EXPECT_EQ(o.bwp_size, b1_size);
+  // locked: no further trials until a run of CRC failures
+  for (int i = 0; i < 20; i++) {
+    d = g2.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o);
+    EXPECT_EQ(nr_ul_layout_crc_trials(d.rnti, 44, d.slot, d.p, &cell, t, NR_UL_LAYOUT_MAX_TRIALS), 0);
+  }
+  nr_ul_layout_crc_result(&o, true);  // confirmations keep the lock
+  for (int i = 0; i < 8; i++) nr_ul_layout_crc_result(&o, false);
+  n = UllTrials(g2, cell, t, &d);
+  ASSERT_GE(n, 1);
+  // the failing layout is not retried; the SIB1 BWP passes -> re-lock
+  int pick = -1;
+  for (int i = 0; i < n; i++) if (t[i].bwp_size == 216 && t[i].bwp_start == 1) pick = i;
+  ASSERT_GE(pick, 0);
+  nr_ul_layout_crc_result(&t[pick], true);
+  d = g2.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_EQ(o.bwp_start, 1);
+  EXPECT_EQ(o.bwp_size, 216);
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
+  unsetenv("ISAC_UL_LOCK_SIB1_FIRST");
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }

@@ -41,6 +41,13 @@ typedef struct {
   uint16_t dl_bwp_size;
   bool     dl_bwp_valid;
 
+  /* ---- uplinkConfigCommon.initialUplinkBWP.genericParameters.locationAndBandwidth ----------
+   * First-evidence HYPOTHESIS for the UL BWP (the dedicated BWP may differ). The UL msg3/pusch-ConfigCommon
+   * TDRA list is not stored (not needed by the layout lock). */
+  uint16_t ul_bwp_start;
+  uint16_t ul_bwp_size;
+  bool     ul_bwp_valid;
+
   /* ---- pdcch-ConfigCommon.commonControlResourceSet -------------------------------------------
    * Field semantics match nr_ue_dci_configuration.c's own conversion (the canonical one), so a
    * consumer can use these directly as fapi_nr_coreset_t values with no further decoding. */

@@ -8013,9 +8013,18 @@ constdiag_done:;
                                                 .pci = (uint16_t)fp->Nid_cell, .mu = (uint8_t)fp->numerology_index,
                                                 .typeA_pos = (uint8_t)cfg->dmrs_typeA_position,
                                                 .slots_per_frame = (uint8_t)fp->slots_per_frame};
+          nr_ul_layout_cell_t ull_cell2 = ull_cell; /* + SIB1 initialUplinkBWP (hypothesis; used only with ISAC_UL_LOCK_SIB1_FIRST) */
+          { const nr_pdcch_sib1_prior_t *sp = nr_pdcch_sib1_prior_get();
+            if (sp && sp->ul_bwp_valid) { ull_cell2.sib1_ul_start = sp->ul_bwp_start; ull_cell2.sib1_ul_size = sp->ul_bwp_size; } }
           ull = nr_ul_layout_on_dci(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
-                                    cand_task[ti].ul_out.raw_payload, &ull_cell, &ull_g);
+                                    cand_task[ti].ul_out.raw_payload, &ull_cell2, &ull_g);
           if (ull == 2 && nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ull_g, source_absolute_slot);
+          /* ISAC_UL_LOCK_CRC_FIRST=1: real PUSCH decode jobs under the top-K layout hypotheses (CRC pass = lock) */
+          nr_pdcch_blind_ul_result_t ull_t[NR_UL_LAYOUT_MAX_TRIALS];
+          const int nt = nr_ul_layout_crc_trials(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
+                                                 cand_task[ti].ul_out.raw_payload, &ull_cell2, ull_t,
+                                                 NR_UL_LAYOUT_MAX_TRIALS);
+          for (int q = 0; q < nt && nr_cfg_epoch_work_current(); q++) nr_pusch_grant_book_add(&ull_t[q], source_absolute_slot);
         }
         if (ull == 1) {
           cand_task[ti].ok = true;
