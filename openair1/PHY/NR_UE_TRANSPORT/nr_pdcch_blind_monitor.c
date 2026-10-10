@@ -61,6 +61,7 @@
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
 #include "nr_pdcch_coreset_bank.h"
+#include "nr_passive_acq_state.h" // nr_pdcch_crb0_grid_rb(): Point A from SIB1 (ISAC_PDCCH_POINTA_REF)
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_cfg_sources.h"
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_cfg_t + get_cfg() accessor (implemented
@@ -1074,6 +1075,48 @@ bool nr_pdcch_discovered_cover_enabled(void)
   return e && strcmp(e, "1") == 0;
 }
 
+/* nr_pdcch_pointa_ref_enabled: ISAC_PDCCH_POINTA_REF=1 (TIM-ACQ, default off). Read once.
+ *   Caller: nr_pdcch_crb0_grid_rb(). */
+bool nr_pdcch_pointa_ref_enabled(void)
+{
+  static _Atomic int en = -1;
+  if (en < 0) {
+    const char *e = getenv("ISAC_PDCCH_POINTA_REF");
+    en = (e && strcmp(e, "1") == 0) ? 1 : 0;
+  }
+  return en == 1;
+}
+
+/* nr_pdcch_crb0_grid_rb: grid RB of CRB 0 (Point A) as derived from SIB1 offsetToPointA and the MIB k_SSB against
+ *   the SSB position in the started grid (nr_passive_acq_verify_carrier()). 0 = legacy (flag off, SIB1 not yet
+ *   checked, or Point A between RBs). The acquisition snapshot takes a mutex, so the value is cached and refreshed
+ *   every 256 calls. Callers: nr_pdcch_discovered_snapshot() (cover start), run_occasion_one() in
+ *   nr_pdcch_blind_monitor_rt.c (DM-RS reference of the PDCCH-Config decode). */
+int nr_pdcch_crb0_grid_rb(void)
+{
+  if (!nr_pdcch_pointa_ref_enabled())
+    return 0;
+  static _Atomic int cached = 0;
+  static _Atomic unsigned calls = 0;
+  if ((atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) & 255u) == 0) {
+    const nr_passive_acq_snapshot_t s = nr_passive_acq_snapshot();
+    const int pa = s.carrier_verified ? s.carrier.point_a_subcarrier : 0;
+    atomic_store_explicit(&cached, pa % 12 == 0 ? pa / 12 : 0, memory_order_relaxed);
+  }
+  return atomic_load_explicit(&cached, memory_order_relaxed);
+}
+
+/* nr_pdcch_cover_start_rb: first grid RB of the cover dwell. TS 38.213 10.1: a PDCCH-Config CORESET's 6-RB groups are
+ *   aligned to CRB 0, and the commonest CORESET starts at the BWP start = CRB 0. Anchoring the cover there also keeps
+ *   its CCE indices equal to the CORESET's (candidate starts are multiples of the aggregation level). Point A inside
+ *   the grid -> Point A itself; Point A below the grid -> the first CRB multiple of 6 inside it. Pure; with the flag
+ *   off nr_pdcch_crb0_grid_rb() is 0, so the start is 0 (legacy). Caller: nr_pdcch_discovered_snapshot(). */
+int nr_pdcch_cover_start_rb(int crb0_grid_rb, int carrier_rb)
+{
+  const int start = crb0_grid_rb >= 0 ? crb0_grid_rb : crb0_grid_rb + 6 * ((-crb0_grid_rb + 5) / 6);
+  return start + 6 <= carrier_rb ? start : 0;
+}
+
 /* nr_pdcch_discovered_cover_banked: true when a VERIFIED bank entry has this nID, first symbol and duration and its
  *   RB range overlaps [rb, rb + 6 groups). One pdcch-DMRS-ScramblingID never names two overlapping CORESETs of one
  *   symbol, so such a published geometry is the banked CORESET again (typically a shifted or partial estimate of it).
@@ -1204,9 +1247,12 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     disc_coreset_t dd = s_add_disc.line[s_add_disc.next];
     const disc_coreset_t *d = &dd;
     const bool cover = nr_pdcch_discovered_cover_enabled();
+    /* ISAC_PDCCH_POINTA_REF: the cover starts at CRB 0 (Point A), not at grid RB 0; flag off -> 0 (legacy). */
+    const int cover_rb = cover ? nr_pdcch_cover_start_rb(nr_pdcch_crb0_grid_rb(), carrier_rb) : 0;
     if (cover && dd.ng == 0) {
-      dd.ng = carrier_rb / 6; /* cover entry: whole carrier on the RB-0 grid (see discovered_cover_queue()) */
-    } else if (cover && ((!dd.L && !dd.rb && dd.ng == carrier_rb / 6) /* this queue's cover already tried it */
+      dd.rb = cover_rb;
+      dd.ng = (carrier_rb - cover_rb) / 6; /* cover entry: whole carrier on the CRB-0 grid (see discovered_cover_queue()) */
+    } else if (cover && ((!dd.L && dd.rb == cover_rb && dd.ng == (carrier_rb - cover_rb) / 6) /* this queue's cover already tried it */
                          || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng))) {
       ++s_add_disc.next;
       continue;
