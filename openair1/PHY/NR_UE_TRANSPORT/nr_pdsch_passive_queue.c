@@ -74,8 +74,9 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "nr_passive_job_epoch.h"
 #include "nr_gpu_fep_hygiene.h"
 #include "nr_pdsch_gpu_record.h"
+#include "nr_pdsch_gpu_exact.h"
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
-                             const nr_pdsch_passive_decode_result_t *dec);
+                             const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride);
 #include "nr_csirs_disc.h"
 
 #include <limits.h>
@@ -119,7 +120,7 @@ static _Atomic int g_gpu_chk_enforce;
 static int (*g_gpu_admit)(const nr_gpu_pdsch_job_t *, int, int);
 static int16_t *g_consumer_gpu_llr[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 static int16_t *g_consumer_gpu_rxF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
-#define GPU_LLR_CAP (16u << 20) /* int16 per consumer: ~13 full-band rank-4 256QAM TBs, or any probe batch */
+#define GPU_LLR_CAP (32u << 20) /* int16 per consumer: room for a full recorded multi-grant slot */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 /* release_solver: drops a queued decode variant without decoding it: returns its pending solver entry with no credit, at once.
@@ -159,7 +160,7 @@ typedef struct {
   long source_abs_slot, slots_per_frame;
   const int16_t *rx[4]; uint32_t ring_len, ring_off, abs_sample; double fo_hz; const int16_t *rot;
   int16_t *out; size_t out_cap;
-  int16_t *rxdataF; int read_rc;
+  int16_t *rxdataF; int read_rc, ofdm_symbol_size;
   const nr_gpu_fep_api_t *api;
   uint64_t fep_end_ns, submit_ns;
   bool owned_iq;
@@ -202,7 +203,7 @@ static int64_t gpu_req_llr(void *ctx)
   gpu_fep_req_t *r = ctx;
   const int64_t rc = r->api->pdsch_llr(r->jobs, r->n_jobs, r->out, r->out_cap);
   if (rc >= 0 && r->rxdataF)
-    r->read_rc = r->api->read_rxdataF(0, r->rxdataF);
+    r->read_rc = nr_pdsch_gpu_readback(r->api, r->jobs, r->n_jobs, r->ofdm_symbol_size, r->rxdataF);
   return rc;
 }
 
@@ -375,7 +376,7 @@ static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 
 static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
-#define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 8
+#define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 64
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
 void nr_pdcch_bwp_probe_result(int entry, nr_dci_bits_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
 void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
@@ -1041,6 +1042,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const long slots_per_frame = fp->slots_per_frame;
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
+  const char *slot_timing_env = getenv("ISAC_PDSCH_SLOT_TIMING");
+  const bool slot_timing = slot_timing_env && atoi(slot_timing_env) != 0;
   {
     const char *e = getenv("ISAC_PDSCH_INLINE_POOL");
     nr_passive_tpool_inline = e && atoi(e) != 0;
@@ -1093,7 +1096,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_job_t more[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     uint64_t more_ns[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
     int n_more = 0;
-    while (g_count > 0 && n_more < NR_PDSCH_PASSIVE_SLOT_GROUP_MAX
+    while (g_count > 0 && n_more < (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)
            && g_ring[g_tail].absolute_slot == job.absolute_slot) {
       more_ns[n_more] = g_ring_ns[g_tail];
       more[n_more++] = g_ring[g_tail];
@@ -1101,6 +1104,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       g_count--;
     }
     pthread_mutex_unlock(&g_lock);
+    const uint64_t slot_t0 = slot_timing ? now_ns() : 0;
     if (s_sigt) {
       sigt_t0 = now_ns();
       sigt_p0 = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
@@ -1241,6 +1245,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     int16_t *t_gpu_rxF = g_consumer_gpu_rxF[idx];
     int16_t *group_rxF = NULL;
     uint64_t group_fep_ns = 0;
+    int group_gpu_jobs = 0;
     nr_gpu_pdsch_job_t gj[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
     int gj_ok[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1] = {0};
     static _Atomic int s_probe_all_g = -1; /* _Atomic: every passivePdsch consumer resolves it (TSAN) */
@@ -1280,7 +1285,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                              .abs_sample = off, .fo_hz = fo, .rot = (const int16_t *)rot,
                              .out = t_gpu_llr, .out_cap = GPU_LLR_CAP,
                              .rxdataF = g_gpu_chk_limit > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)g_gpu_chk_limit ? t_gpu_rxF : NULL,
-                             .read_rc = -1};
+                             .read_rc = -1, .ofdm_symbol_size = fp->ofdm_symbol_size};
         for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) req.rx[a] = rx[a];
         const int64_t rc = gpu_fep_submit_and_wait(&req);
         if (rc < 0 || !atomic_load(&g_gpu)) {
@@ -1288,6 +1293,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           for (int k = 0; k <= n_more; k++) gj_ok[k] = 0;
         } else {
           group_fep_ns = req.fep_end_ns;
+          group_gpu_jobs = np;
           if (req.read_rc == 0) group_rxF = t_gpu_rxF;
           for (int p = 0; p < np; p++) { gj[map[p]] = packed[p]; if (packed[p].n_llr == 0) gj_ok[map[p]] = 0; }
         }
@@ -1527,7 +1533,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const uint64_t dec_t0 = now_ns();
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
-    if (!gpu_job) nr_pdsch_gpu_record_cpu(ue, &job, &dec);
+    if (!gpu_job) nr_pdsch_gpu_record_cpu(ue, &job, &dec, &rxdataF[0][0], rxdataF_sz);
     nr_dlsch_mrc_mode_override = -1;
     nr_dlsch_irc_override = -1;
     nr_dlsch_eq_override = -1;
@@ -1571,7 +1577,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         uint32_t G = st2 == NR_PDSCH_PASSIVE_DECODE_ERROR ? 0 : nr_pdsch_passive_last_llr(&lc);
         if (G > (1u << 22) || lc == NULL) G = 0; /* a bogus blind grant can leave an out-of-range G (OTA SIGSEGV 2026-10-08) */
         const uint32_t n = gpu_job->n_llr < G ? gpu_job->n_llr : G;
-        int16_t *lg = G ? malloc((size_t)G * sizeof(int16_t)) : NULL;
+        /* nr_codeword_unscrambling() processes ceil(G/32) full SIMD blocks. */
+        const size_t G_padded = ((size_t)G + 31u) & ~(size_t)31u;
+        int16_t *lg = G ? calloc(G_padded, sizeof(int16_t)) : NULL;
         double sa = NAN, mc = 0, mg = 0, dmax = 0, sab[8] = {0}; /* sign agreement per bit position of the RE */
         if (lc && lg && n && gpu_job->Qm && gpu_job->Nl) {
           memcpy(lg, t_gpu_llr + gpu_job->llr_offset, (size_t)n * sizeof(int16_t));
@@ -1639,8 +1647,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                   LOG_E(PHY, "SENSING: GPU_FEP disabled: 2 self-check tolerance failures; CPU path for remainder of run\n");
               }
             }
-            LOG_A(PHY, "SENSING: GPU_SELFCHECK slot=%ld rnti=0x%x probe=%u nrb=%u Nl=%u Qm=%u crc_gpu=%d crc_cpu=%d sign_agree=%.4f mean|llr| cpu=%.1f gpu=%.1f max|dllr|(scaled)=%.0f over %u | per-bit [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f] | rxdataF corr=%.4f gpu/cpu scale=%.3f\n",
-                  job.absolute_slot, job.rnti, job.layout_probe, job.freq_alloc.num_rbs, gpu_job->Nl, gpu_job->Qm, gpu_ok, cpu_ok, sa, mc, mg, dmax, n,
+            LOG_A(PHY, "SENSING: GPU_SELFCHECK slot=%ld rnti=0x%x probe=%u nrb=%u Nl=%u Qm=%u crc_gpu=%d crc_cpu=%d evm_gpu=%.3f evm_cpu=%.3f sign_agree=%.4f mean|llr| cpu=%.1f gpu=%.1f max|dllr|(scaled)=%.0f over %u | per-bit [%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f] | rxdataF corr=%.4f gpu/cpu scale=%.3f\n",
+                  job.absolute_slot, job.rnti, job.layout_probe, job.freq_alloc.num_rbs, gpu_job->Nl, gpu_job->Qm, gpu_ok, cpu_ok,
+                  dec.evm_valid ? dec.evm_pct : -1.0, dec2.evm_valid ? dec2.evm_pct : -1.0, sa, mc, mg, dmax, n,
                   sab[0], sab[1], sab[2], sab[3], sab[4], sab[5], sab[6], sab[7], corr, ratio);
           }
         }
@@ -2045,6 +2054,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_td_grantwork_release(gw);
     }
     } /* slot group */
+    if (slot_timing) {
+      const uint64_t slot_t1 = now_ns();
+      LOG_A(PHY, "SENSING: PDSCH_SLOT_TIME slot=%lu jobs=%d gpu_jobs=%d start_ns=%lu end_ns=%lu us=%.1f\n",
+            (unsigned long)job.absolute_slot, n_more + 1, group_gpu_jobs,
+            (unsigned long)slot_t0, (unsigned long)slot_t1, (double)(slot_t1 - slot_t0) / 1000.0);
+    }
   }
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d exiting\n", idx);
@@ -2097,7 +2112,8 @@ static void report_sweep(const nr_pdsch_sweep_report_t *r)
  */
 void nr_pdsch_passive_gpu_warmup(PHY_VARS_NR_UE *ue)
 {
-  if (!atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_prepare();
+  /* GPU6: the bit-exact FEP path replaces the (non CPU-equivalent) GPU LLR path */
+  if (!nr_pdsch_gpu_exact_warmup(ue) && !atomic_load(&g_gpu_disabled)) g_gpu = nr_gpu_fep_prepare();
   { const char *e = getenv("ISAC_GPU_SELFCHECK"); g_gpu_chk_limit = e ? atoi(e) : 32; }
   { const char *e = getenv("ISAC_GPU_SELFCHECK_ENFORCE"); g_gpu_chk_enforce = e && !strcmp(e, "1"); }
   if (g_gpu) {
@@ -2304,7 +2320,7 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   }
   pthread_mutex_lock(&g_pending_mu);
   if (g_n_pending > 0 && (g_pending[0].absolute_slot != job->absolute_slot
-                          || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
+                          || g_n_pending == (atomic_load(&g_gpu) ? NR_PDSCH_PASSIVE_SLOT_GROUP_MAX : 8)))
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   g_pending_ns[g_n_pending] = nr_csirs_disc_enabled() ? now_ns() : 0;

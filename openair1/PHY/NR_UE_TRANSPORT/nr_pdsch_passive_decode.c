@@ -1,3 +1,4 @@
+#include "nr_pdsch_gpu_exact.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
@@ -1340,8 +1341,8 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   /* what the GPU does not model: PT-RS, CSI-RS rate matching (the decode also sweeps PT-RS arms on
    * agnostic runs -- it clears the override itself when it arms one) */
-  if ((pdu->pduBitmap & 0x1) || pdu->numCsiRsForRateMatching > 0)
-    return false;
+  extern bool nr_pdsch_gpu_csi_disjoint(const fapi_nr_dl_config_dlsch_pdu_rel15_t *, const freq_alloc_bitmap_t *);
+  if ((pdu->pduBitmap & 0x1) || !nr_pdsch_gpu_csi_disjoint(pdu, fa)) return false;
   int nl = 0;
   for (int i = 0; i < 12 && nl < 4; i++)
     if ((pdu->dmrs_ports >> i) & 1)
@@ -2513,6 +2514,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     /* the GPU transformed this slot / the GrantWork entry already holds this geometry's LLRs */
   } else if (fep_hit || gw_fep_hit) {
     /* same slot, same offset: this thread transformed it for the previous grant of the group */
+  } else if (nr_pdsch_gpu_exact_fep_ranges(ue, fp, proc->nr_slot_rx, fep_rng, n_fep_rng, &rxdataF[0][0], fp->samples_per_slot_wCP,
+                                           nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata)) == 0) {
+    /* GPU6: bit-exact GPU FEP (ISAC_PDSCH_GPU_EXACT_FEP) -- identical rxdataF for the CPU chain below */
   } else if (fp->nb_antennas_rx > 1) {
     for (int g = 0; g < n_fep_rng; g++) {
       nr_slot_fep_ant_task_t fep_tasks[fp->nb_antennas_rx];

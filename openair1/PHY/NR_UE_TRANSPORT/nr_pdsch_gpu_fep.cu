@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 static int g_init_state;
 
@@ -26,7 +29,44 @@ static int g_init_state;
 static const int MAX_ANT = 4, MAX_SYM = 14, MAX_PORTS = 4, MAX_DMRS_SYM = 4;
 static const int GOLD_WORDS = 256; /* 8192 gold bits per (job, DM-RS symbol): m up to 4096 */
 static const int MAX_PILOTS = 3 * 275; /* type-1 pilot pairs across a 275-RB carrier */
-static const int MAX_JOBS = 9; /* passive queue: head + eight same-slot jobs */
+static const int MAX_JOBS = 65; /* passive queue: head + up to 64 same-slot jobs */
+
+/* Gold is a 31-bit linear recurrence. Jump images let each lane start at its
+ * own 32-bit word instead of serializing every word in one CUDA thread. */
+__constant__ uint32_t g_gold_x1_word[GOLD_WORDS];
+__constant__ uint32_t g_gold_x2_jump[14][31];
+static uint32_t gold_step(uint32_t v, bool x2)
+{
+  const uint32_t b = x2 ? (v ^ (v >> 1) ^ (v >> 2) ^ (v >> 3)) & 1u
+                        : (v ^ (v >> 3)) & 1u;
+  return (v >> 1) | (b << 30);
+}
+static uint32_t gold_apply(const uint32_t image[31], uint32_t state)
+{
+  uint32_t out = 0;
+  while (state) {
+    const int bit = __builtin_ctz(state);
+    out ^= image[bit];
+    state &= state - 1;
+  }
+  return out;
+}
+static cudaError_t gold_init_jumps(void)
+{
+  uint32_t jump[14][31], x1_word[GOLD_WORDS];
+  for (int bit = 0; bit < 31; ++bit) jump[0][bit] = gold_step(1u << bit, true);
+  for (int power = 1; power < 14; ++power)
+    for (int bit = 0; bit < 31; ++bit)
+      jump[power][bit] = gold_apply(jump[power - 1], jump[power - 1][bit]);
+  uint32_t x1 = 1;
+  for (int i = 0; i < 1600; ++i) x1 = gold_step(x1, false);
+  for (int w = 0; w < GOLD_WORDS; ++w) {
+    x1_word[w] = x1;
+    for (int b = 0; b < 32; ++b) x1 = gold_step(x1, false);
+  }
+  cudaError_t e = cudaMemcpyToSymbol(g_gold_x1_word, x1_word, sizeof(x1_word));
+  return e == cudaSuccess ? cudaMemcpyToSymbol(g_gold_x2_jump, jump, sizeof(jump)) : e;
+}
 
 static nr_gpu_fep_cfg_t g_cfg;
 static int g_samples_per_slot;
@@ -47,7 +87,51 @@ static float *g_d_sigma;     /* [job][ant] noise variance */
 static int16_t *g_h_llr, *g_d_llr;
 static size_t g_llr_cap;
 static double g_fep_us, g_llr_us;
+static int g_last_chunks;
 static float g_llr_scale = 4.0f;
+static int g_force_ant = -1; /* recorded-input branch isolation; unset in production */
+static bool g_batch_async; /* opt-in: caller follows FEP with LLR on the same stream */
+/* GPU6 bit-exact FEP (nr_pdsch_gpu_exact_fep.cuh): tables + per-slot int16 rxdataF */
+static uint16_t *g_d_perm;
+static short *g_d_tw1024, *g_d_tw4096;
+static short2 *g_d_ts, *g_d_exact, *g_h_exact;
+static bool g_exact_ok, g_exact_direct, g_exact_pending;
+static double g_exact_us, g_exact_deadline_us = 2000;
+static std::atomic<uint64_t> g_exact_late, g_exact_busy;
+/* Exact-path contexts: one stream and one small mapped output each. Rotation and symbol list ride in the kernel
+ * argument and the kernels read/write the caller's memory, so concurrent consumers never share a mutable buffer
+ * and never serialize on a lock (direct mode). The staged mode reuses the module's single upload buffers and
+ * keeps a lock. */
+static const int EXACT_CTX = 8;
+static cudaStream_t g_ctx_stream[EXACT_CTX];
+static int *g_ctx_delay[EXACT_CTX];
+static std::atomic<unsigned> g_ctx_busy{0};
+static std::mutex g_exact_staged_lock;
+static int ctx_acquire(bool try_only)
+{
+  for (;;) {
+    unsigned m = g_ctx_busy.load();
+    for (int i = 0; i < EXACT_CTX; i++)
+      if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) return i;
+    if (try_only) return -1;
+    std::this_thread::yield();
+  }
+}
+static void ctx_release(int i) { g_ctx_busy.fetch_and(~(1u << i)); }
+/* Wait for a context's stream; returns 0, or a CUDA error. Counts calls past the deadline. */
+static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
+{
+  bool late = false;
+  for (;;) {
+    const cudaError_t q = cudaStreamQuery(g_ctx_stream[c]);
+    if (q == cudaSuccess) return 0;
+    if (q != cudaErrorNotReady) return (int)q;
+    if (!late && std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
+      late = true;
+      ++g_exact_late;
+    }
+  }
+}
 
 /* ---------------------------------------------------------------- FEP ---- */
 /* Gather one OFDM symbol per (ant, sym): CP removal with the 1/8-CP early window, ring wrap, FO
@@ -93,19 +177,39 @@ __global__ void k_fep_rotate(float2 *__restrict__ rxF, const short2 *__restrict_
   }
   float sn, cs;
   sincosf(2.f * (float)M_PI * (float)k * (float)early / (float)N, &sn, &cs);
-  *p = make_float2(v.x * cs - v.y * sn, v.x * sn + v.y * cs);
+  /* OAI's ARM dft(..., scale=1) scales each radix stage, for a net 1/sqrt(N).
+   * cuFFT is unnormalised. Keep the FFT output in the same dynamic range as the
+   * CPU rxdataF before LS estimation and diagnostic int16 readback. */
+  const float fft_scale = rsqrtf((float)N);
+  *p = make_float2((v.x * cs - v.y * sn) * fft_scale,
+                   (v.x * sn + v.y * cs) * fft_scale);
 }
 
 /* ----------------------------------------------------------- DM-RS gold ---- */
-/* 38.211 5.2.1, one thread per (job, DM-RS symbol): c_init = (2^17 (14 n_s + l + 1)(2 N_ID + 1) + 2 N_ID + n_SCID) mod 2^31 */
+__device__ inline uint32_t gold_jump_x2(uint32_t state, int steps)
+{
+  for (int power = 0; steps; ++power, steps >>= 1)
+    if (steps & 1) {
+      uint32_t next = 0;
+      while (state) {
+        const int bit = __ffs((int)state) - 1;
+        next ^= g_gold_x2_jump[power][bit];
+        state &= state - 1;
+      }
+      state = next;
+    }
+  return state;
+}
+
+/* 38.211 5.2.1, one block per (job, DM-RS symbol), one lane per Gold word. */
 __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__restrict__ gold, int nsym)
 {
-  const int j = blockIdx.x;
+  const int j = blockIdx.x, target_di = blockIdx.y;
   const nr_gpu_pdsch_job_t job = jobs[j];
   int di = 0, l = -1;
   for (int s = 0, seen = 0; s < nsym; s++)
     if (job.dmrs_mask >> s & 1) {
-      if (seen++ == (int)threadIdx.x) {
+      if (seen++ == target_di) {
         di = seen - 1;
         l = s;
       }
@@ -114,13 +218,17 @@ __global__ void k_gold(const nr_gpu_pdsch_job_t *__restrict__ jobs, uint32_t *__
     return;
   const uint32_t nid = job.dmrs_scrambling_id;
   uint32_t cinit = ((1u << 17) * (14u * job.slot + l + 1) * (2u * nid + 1) + 2u * nid + job.nscid) & 0x7fffffffu;
-  uint32_t x1 = 1, x2 = cinit;
-  for (int n = 0; n < 1600; n++) {
-    x1 = (x1 >> 1) | (((x1 ^ (x1 >> 3)) & 1u) << 30);
-    x2 = (x2 >> 1) | (((x2 ^ (x2 >> 1) ^ (x2 >> 2) ^ (x2 >> 3)) & 1u) << 30);
-  }
   uint32_t *g = gold + ((size_t)j * MAX_DMRS_SYM + di) * GOLD_WORDS;
-  for (int w = 0; w < GOLD_WORDS; w++) {
+  /* The old loop always generated 8192 bits. The largest pilot index this
+   * allocation can read needs only 4*ppr bits per RB from dmrs_ref_rb. On the
+   * recorded 5/48-RB jobs this removes most of the serial Gold work. */
+  const int ppr = job.dmrs_type == 1 ? 3 : 2;
+  const int end_rb = job.start_rb + job.nb_rb - job.dmrs_ref_rb;
+  const int words = (4 * ppr * end_rb + 31) / 32;
+  if (end_rb <= 0 || words > GOLD_WORDS) return;
+  for (int w = threadIdx.x; w < words; w += blockDim.x) {
+    uint32_t x1 = g_gold_x1_word[w];
+    uint32_t x2 = gold_jump_x2(cinit, 1600 + 32 * w);
     uint32_t word = 0;
     for (int b = 0; b < 32; b++) {
       word |= ((x1 ^ x2) & 1u) << b;
@@ -279,7 +387,8 @@ __device__ inline float pam_level(int qm, int code)
 
 /* One thread per (job, data RE). */
 __global__ void k_llr(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 *__restrict__ ls, const float *__restrict__ sigma,
-                      const float2 *__restrict__ rxF, int N, int nsym, int nant, int fco, int16_t *__restrict__ llr, float scale)
+                      const float2 *__restrict__ rxF, int N, int nsym, int nant, int fco, int16_t *__restrict__ llr, float scale,
+                      int force_ant)
 {
   const int j = blockIdx.y;
   const nr_gpu_pdsch_job_t job = jobs[j];
@@ -327,7 +436,7 @@ __global__ void k_llr(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 
   const float2 *symp = rxF + (size_t)sym * N;
   const int kk = (fco + 12 * job.start_rb + k) % N;
   for (int a = 0; a < nant; a++) {
-    const float inv = rsqrtf(sigma[j * MAX_ANT + a]);
+    const float inv = force_ant >= 0 && a != force_ant ? 0.f : rsqrtf(sigma[j * MAX_ANT + a]);
     const float2 ya = symp[(size_t)a * nsym * N + kk];
     y[a] = make_float2(ya.x * inv, ya.y * inv);
     for (int l = 0; l < Nl; l++) {
@@ -416,6 +525,8 @@ __global__ void k_llr(const nr_gpu_pdsch_job_t *__restrict__ jobs, const float2 
   }
 }
 
+#include "nr_pdsch_gpu_exact_fep.cuh"
+
 /* ------------------------------------------------------------- host API ---- */
 static nr_dl_gpu_budget_t g_budget;
 extern "C" void nr_dl_gpu_transfer_stats(uint64_t *bytes, uint64_t *refused)
@@ -453,15 +564,66 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_gold, (size_t)MAX_JOBS * MAX_DMRS_SYM * GOLD_WORDS * sizeof(uint32_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_ls, (size_t)MAX_JOBS * MAX_DMRS_SYM * MAX_PORTS * MAX_ANT * MAX_PILOTS * sizeof(float2)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_sigma, (size_t)MAX_JOBS * MAX_ANT * sizeof(float)));
-  g_llr_cap = (size_t)MAX_JOBS * cfg->n_rb_dl * 12 * MAX_SYM * 4 * 8;
+  g_llr_cap = 32u << 20; /* matches the receiver's per-consumer output capacity */
   CK(nr_gpu_allocate(NR_GPU_SHARED_RW, (void **)&g_h_llr, g_llr_cap * sizeof(int16_t)));
   CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_llr, g_llr_cap * sizeof(int16_t)));
+  cudaFuncAttributes attr;
   if (const char *e = getenv("NR_GPU_LLR_SCALE"))
     g_llr_scale = (float)atof(e);
-  cudaFuncAttributes attr;
+  if (const char *e = getenv("NR_GPU_FORCE_ANT")) {
+    const int a = atoi(e);
+    if (a >= 0 && a < cfg->nant) g_force_ant = a;
+  }
+  if (N == nr_exact::N && cfg->nant <= MAX_ANT) {
+    /* Bit-exact FEP working set: allocated with the rest before the RX fence. The timeshift table is
+     * computed exactly as init_timeshift_rotation() does (same libm, same formula). */
+    const size_t exact = (size_t)cfg->nant * MAX_SYM * N * sizeof(short2);
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_perm, N * sizeof(uint16_t)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw1024, 3 * 512 * sizeof(short)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_tw4096, 3 * 2048 * sizeof(short)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_ts, N * sizeof(short2)));
+    CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_d_exact, exact));
+    CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_exact, exact));
+    std::vector<uint16_t> perm(N);
+    std::vector<short> tw1(3 * 512), tw4(3 * 2048), ts(2 * N);
+    nr_exact::build_perm(perm.data());
+    nr_exact::init_rad4_host(1024, tw1.data());
+    nr_exact::init_rad4_host(4096, tw4.data());
+    const int so = cfg->nb_prefix_samples / cfg->ofdm_offset_divisor;
+    for (int i = 0; i < N; i++) {
+      const double poff = -i * 2.0 * M_PI * so / N;
+      ts[2 * i] = (int16_t)round(cos(poff) * 32767);
+      ts[2 * i + 1] = (int16_t)round(sin(-poff) * 32767);
+    }
+    CK(cudaMemcpy(g_d_perm, perm.data(), N * sizeof(uint16_t), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(g_d_tw1024, tw1.data(), tw1.size() * sizeof(short), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(g_d_tw4096, tw4.data(), tw4.size() * sizeof(short), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(g_d_ts, ts.data(), ts.size() * sizeof(short), cudaMemcpyHostToDevice));
+    CK(cudaFuncGetAttributes(&attr, nr_exact::k_fep_exact));
+    CK(cudaFuncGetAttributes(&attr, nr_exact::k_delay_exact));
+    {
+      int least = 0, greatest = 0;
+      CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+      for (int c = 0; c < EXACT_CTX; c++) {
+        CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
+        CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));
+      }
+    }
+    /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
+     * coherent shared-memory platform (GB10: pageable access through the host page tables). */
+    const nr_gpu_caps_t *caps = nr_gpu_platform_probe();
+    const char *d = getenv("ISAC_PDSCH_GPU_EXACT_DIRECT");
+    g_exact_direct = caps && caps->model == NR_GPU_SHARED && caps->pageable_memory_access && caps->host_page_tables
+                     && !(d && atoi(d) == 0);
+    if (const char *e = getenv("ISAC_PDSCH_GPU_EXACT_DEADLINE_US"))
+      g_exact_deadline_us = std::max(50.0, atof(e));
+    g_exact_ok = true;
+  }
+  g_batch_async = getenv("ISAC_PDSCH_GPU_BATCH_ASYNC") && !strcmp(getenv("ISAC_PDSCH_GPU_BATCH_ASYNC"), "1");
   CK(cudaFuncGetAttributes(&attr, k_fep_gather));
   CK(cudaFuncGetAttributes(&attr, k_fep_rotate));
   CK(cudaFuncGetAttributes(&attr, k_gold));
+  CK(gold_init_jumps());
   CK(cudaFuncGetAttributes(&attr, k_ls));
   CK(cudaFuncGetAttributes(&attr, k_sigma));
   CK(cudaFuncGetAttributes(&attr, k_llr));
@@ -492,17 +654,21 @@ extern "C" int nr_gpu_fep_admit(const nr_gpu_pdsch_job_t *jobs, int n, int check
     if (jobs[i].max_llr && llr > jobs[i].max_llr) llr = jobs[i].max_llr;
     bytes += 3 * llr * sizeof(int16_t) + 3 * sizeof(jobs[i]);
   }
-  if (check) bytes += (uint64_t)g_cfg.symbols_per_slot * g_cfg.ofdm_symbol_size * (2 * sizeof(float2) + sizeof(short2));
+  if (check) {
+    int first_sym = jobs[0].dmrs_mask ? __builtin_ctz((unsigned)jobs[0].dmrs_mask) : -1;
+    for (int i = 1; i < n; ++i)
+      if (!jobs[i].dmrs_mask || __builtin_ctz((unsigned)jobs[i].dmrs_mask) != first_sym) first_sym = -1;
+    if (first_sym >= g_cfg.symbols_per_slot) first_sym = -1;
+    const int read_symbols = first_sym >= 0 ? 1 : g_cfg.symbols_per_slot;
+    bytes += (uint64_t)read_symbols * g_cfg.ofdm_symbol_size * (2 * sizeof(float2) + sizeof(short2));
+  }
   return !nr_dl_gpu_radio_mode || nr_dl_gpu_budget_take(&g_budget, bytes);
 }
 
-static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, uint32_t abs_sample,
-                        double fo_hz, const int16_t *symbol_rot)
+/* Copy the slot window (from `early` samples before the slot's CP, ring wrap) to the device. */
+static cudaError_t upload_window(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset)
 {
-  if (g_init_state != 1) return -1;
-  NrGpuRtScope rt; if(!rt.admitted)return -1;
-  const auto t0 = std::chrono::steady_clock::now();
-  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  const int N = g_cfg.ofdm_symbol_size, nant = g_cfg.nant;
   const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
   const size_t len = (size_t)g_samples_per_slot + N; /* the last symbol + slack */
   /* the window starts `early` samples before the slot's CP: origin = ring_offset - early */
@@ -515,7 +681,18 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
     if (first < len)
       memcpy(dst + first, src, (len - first) * sizeof(short2));
   }
-  CK((cudaError_t)nr_gpu_copy_async(g_d_rx, g_h_rx, (size_t)nant * len * sizeof(short2), g_stream));
+  return (cudaError_t)nr_gpu_copy_async(g_d_rx, g_h_rx, (size_t)nant * len * sizeof(short2), g_stream);
+}
+
+static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, uint32_t abs_sample,
+                        double fo_hz, const int16_t *symbol_rot)
+{
+  if (g_init_state != 1) return -1;
+  NrGpuRtScope rt; if(!rt.admitted)return -1;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
+  CK(upload_window(rxdata, ring_len, ring_offset));
   if (symbol_rot) {
     memcpy(g_h_rot, symbol_rot, (size_t)ns * sizeof(short2));
     CK((cudaError_t)nr_gpu_copy_async(g_d_rot, g_h_rot, (size_t)ns * sizeof(short2), g_stream));
@@ -528,7 +705,11 @@ static int api_fep_slot(const int16_t *const *rxdata, uint32_t ring_len, uint32_
     g_init_state=-1;nr_gpu_budget_fault();return -1;
   }
   k_fep_rotate<<<grd, blk, 0, g_stream>>>(g_d_rxF, symbol_rot ? g_d_rot : nullptr, N, ns, early);
-  CK(rt.wait(g_stream));
+  /* The next pdsch_llr() call uses this stream and waits for the full batch.
+   * The queue owns an outer RT budget scope across both calls. This flag is
+   * reserved for that paired call path; default preserves the blocking API. */
+  if (g_batch_async) CK(cudaPeekAtLastError());
+  else CK(rt.wait(g_stream));
   g_fep_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return 0;
 }
@@ -549,7 +730,7 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant, fco = g_cfg.first_carrier_offset;
   memcpy(g_h_jobs, jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t));
   CK((cudaError_t)nr_gpu_copy_async(g_d_jobs, g_h_jobs, (size_t)n * sizeof(nr_gpu_pdsch_job_t), g_stream));
-  k_gold<<<n, MAX_DMRS_SYM, 0, g_stream>>>(g_d_jobs, g_d_gold, ns);
+  k_gold<<<dim3(n, MAX_DMRS_SYM), 128, 0, g_stream>>>(g_d_jobs, g_d_gold, ns);
   int max_ls = 0, max_re = 0;
   for (int i = 0; i < n; i++) {
     const int npil = jobs[i].nb_rb * (jobs[i].dmrs_type == 1 ? 3 : 2);
@@ -561,7 +742,7 @@ static int64_t run_chunk(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, uint
   k_sigma<<<dim3(n, nant), 256, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_sigma);
   if (max_re > 0)
     k_llr<<<dim3((max_re + 127) / 128, n), 128, 0, g_stream>>>(g_d_jobs, g_d_ls, g_d_sigma, g_d_rxF, N, ns, nant, fco, g_d_llr,
-                                                             g_llr_scale);
+                                                             g_llr_scale, g_force_ant);
   CK((cudaError_t)nr_gpu_copy_async(g_h_llr, g_d_llr, (size_t)total * sizeof(int16_t), g_stream));
   CK(rt.wait(g_stream));
   CK(cudaGetLastError());
@@ -576,6 +757,7 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
   const auto t0 = std::chrono::steady_clock::now();
   int64_t written = 0;
   int i = 0;
+  g_last_chunks = 0;
   while (i < n) {
     /* pack jobs into one launch set: <= MAX_JOBS, <= g_llr_cap LLRs */
     uint32_t total = 0;
@@ -607,6 +789,7 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset -= (uint32_t)written;
     const int64_t r = run_chunk(&jobs[i], m, llr_out + written, total, rt);
+    ++g_last_chunks;
     for (int k = 0; k < m; k++)
       jobs[i + k].llr_offset += (uint32_t)written;
     if (r < 0)
@@ -617,6 +800,8 @@ static int64_t api_pdsch_llr(nr_gpu_pdsch_job_t *jobs, int n, int16_t *llr_out, 
   g_llr_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   return written;
 }
+
+extern "C" int nr_gpu_fep_last_chunks(void) { return g_last_chunks; }
 
 static int api_read_rxdataF(int ant, int16_t *out)
 {
@@ -633,11 +818,183 @@ static int api_read_rxdataF(int ant, int16_t *out)
   return 0;
 }
 
+static int api_read_rxdataF_symbol(int ant, int sym, int16_t *out)
+{
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot;
+  if (g_init_state != 1 || ant < 0 || ant >= g_cfg.nant || sym < 0 || sym >= ns) return -1;
+  NrGpuRtScope rt; if (!rt.admitted) return -1;
+  float2 *tmp = g_h_check;
+  CK((cudaError_t)nr_gpu_copy_async(tmp, g_d_rxF + ((size_t)ant * ns + sym) * N, (size_t)N * sizeof(float2), g_stream));
+  CK(rt.wait(g_stream));
+  for (int i = 0; i < N; i++) {
+    out[2 * i] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].x)));
+    out[2 * i + 1] = (int16_t)std::max(-32768.f, std::min(32767.f, rintf(tmp[i].y)));
+  }
+  return 0;
+}
+
 static void api_timing(double *fep_us, double *llr_us)
 {
   if (fep_us) *fep_us = g_fep_us;
   if (llr_us) *llr_us = g_llr_us;
 }
 
-static const nr_gpu_fep_api_t g_api = {api_init, api_fep_slot, api_pdsch_llr, api_read_rxdataF, api_timing};
+static const nr_gpu_fep_api_t g_api = {api_init, api_fep_slot, api_pdsch_llr, api_read_rxdataF, api_timing,
+                                      api_read_rxdataF_symbol};
 extern "C" const nr_gpu_fep_api_t *nr_gpu_fep_api(void) { return nr_gpu_module_ready() ? &g_api : nullptr; }
+
+/* Offline stage isolation only. Deliberately separate from the receiver API. */
+extern "C" int nr_pdsch_gpu_debug_ls(int job, int di, int layer, int ant, float *out, float *noise)
+{
+  if (g_init_state != 1 || job < 0 || job >= MAX_JOBS || di < 0 || di >= MAX_DMRS_SYM
+      || layer < 0 || layer >= MAX_PORTS || ant < 0 || ant >= g_cfg.nant) return -1;
+  CK(cudaMemcpy(out, g_d_ls + (((size_t)job * MAX_DMRS_SYM + di) * MAX_PORTS + layer) * MAX_ANT * MAX_PILOTS
+                              + (size_t)ant * MAX_PILOTS, MAX_PILOTS * sizeof(float2), cudaMemcpyDeviceToHost));
+  CK(cudaMemcpy(noise, g_d_sigma + job * MAX_ANT + ant, sizeof(float), cudaMemcpyDeviceToHost));
+  return 0;
+}
+extern "C" int nr_pdsch_gpu_debug_cpu_fep(const int16_t *rx)
+{
+  if (g_init_state != 1 || !rx) return -1;
+  CK(cudaStreamSynchronize(g_stream));
+  const size_t count = (size_t)g_cfg.symbols_per_slot * g_cfg.ofdm_symbol_size;
+  for (int a = 0; a < g_cfg.nant; ++a) {
+    for (size_t i = 0; i < count; ++i)
+      g_h_check[i] = make_float2(rx[2*(a*count+i)], rx[2*(a*count+i)+1]);
+    CK(cudaMemcpy(g_d_rxF + a*count, g_h_check, count*sizeof(float2), cudaMemcpyHostToDevice));
+  }
+  return 0;
+}
+
+/* GPU6: bit-exact CPU FEP (nr_pdsch_gpu_exact_fep.cuh) of the symbols in sym_mask, written as OAI rxdataF
+ * into out[a * ant_stride + sym * N] (host c16). Same window arguments as fep_slot. fo_hz must be 0: the
+ * CPU FO compensation is not reproduced. try_only: no free context -> -1 at once (the PDCCH scan never waits).
+ * Returns 0, or -1 when the caller must run the CPU FEP.
+ * Direct mode never returns while the kernel can still write the caller's rxdataF (a late kernel would
+ * otherwise overwrite the CPU fallback or the next slot); it only counts deadline misses. Staged mode
+ * returns -1 on a miss and refuses the next calls until its stream has drained. */
+extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
+                                       const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride, int try_only)
+{
+  if (g_init_state != 1 || !g_exact_ok || fo_hz != 0.0 || !rxdata || !symbol_rot || !out) return -1;
+  const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
+  sym_mask &= (uint16_t)((1u << ns) - 1u);
+  if (!sym_mask) return -1;
+  nr_exact::ExactIO io = {};
+  memcpy(io.rot, symbol_rot, (size_t)ns * sizeof(short2));
+  int nsym = 0, lo = ns, hi = -1;
+  for (int l = 0; l < ns; l++)
+    if (sym_mask >> l & 1) {
+      io.sym_list[nsym++] = (uint16_t)l;
+      lo = std::min(lo, l);
+      hi = l;
+    }
+  const int early = g_cfg.nb_prefix_samples / g_cfg.ofdm_offset_divisor;
+  if (g_exact_direct) {
+    const int c = ctx_acquire(try_only);
+    if (c < 0) { ++g_exact_busy; return -1; }
+    NrGpuRtScope rt;
+    if (!rt.admitted) { ctx_release(c); return -1; }
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int a = 0; a < nant; a++) io.rx[a] = (const short2 *)rxdata[a];
+    io.ring_len = ring_len;
+    io.origin = (ring_offset + ring_len - early) % ring_len;
+    io.out = (short2 *)out;
+    io.ant_stride = ant_stride;
+    nr_exact::k_fep_exact<<<dim3(nsym, nant), nr_exact::THREADS, 0, g_ctx_stream[c]>>>(
+        io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
+        g_cfg.first_carrier_offset);
+    cudaError_t e = cudaPeekAtLastError();
+    if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+    ctx_release(c);
+    if (e != cudaSuccess) {
+      g_init_state = -1;
+      fprintf(stderr, "nr_pdsch_gpu_exact_fep: %s\n", cudaGetErrorString(e));
+      return -1;
+    }
+    g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+    return 0;
+  }
+  if (try_only) {
+    if (!g_exact_staged_lock.try_lock()) { ++g_exact_busy; return -1; }
+  } else
+    g_exact_staged_lock.lock();
+  std::lock_guard<std::mutex> hold(g_exact_staged_lock, std::adopt_lock);
+  if (g_exact_pending) {
+    if (cudaStreamQuery(g_stream) == cudaErrorNotReady) { ++g_exact_busy; return -1; }
+    g_exact_pending = false;
+  }
+  NrGpuRtScope rt;
+  if (!rt.admitted) return -1;
+  const auto t0 = std::chrono::steady_clock::now();
+  CK(upload_window(rxdata, ring_len, ring_offset));
+  for (int a = 0; a < nant; a++) io.rx[a] = g_d_rx + (size_t)a * (g_samples_per_slot + N);
+  io.ring_len = 0xffffffffu;
+  io.origin = 0;
+  io.out = g_d_exact;
+  io.ant_stride = (size_t)MAX_SYM * N;
+  nr_exact::k_fep_exact<<<dim3(nsym, nant), nr_exact::THREADS, 0, g_stream>>>(
+      io, g_cfg.nb_prefix_samples, g_cfg.nb_prefix_samples0, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts, g_cfg.n_rb_dl,
+      g_cfg.first_carrier_offset);
+  CK(cudaPeekAtLastError());
+  for (int a = 0; a < nant; a++) {
+    const size_t off = ((size_t)a * MAX_SYM + lo) * N;
+    CK((cudaError_t)nr_gpu_copy_async(g_h_exact + off, g_d_exact + off, (size_t)(hi - lo + 1) * N * sizeof(short2), g_stream));
+  }
+  for (;;) {
+    const cudaError_t q = cudaStreamQuery(g_stream);
+    if (q == cudaSuccess) break;
+    if (q != cudaErrorNotReady) CK(q);
+    if (std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
+      g_exact_pending = true;
+      ++g_exact_late;
+      return -1;
+    }
+  }
+  for (int a = 0; a < nant; a++)
+    for (int l = lo; l <= hi; l++)
+      if (sym_mask >> l & 1)
+        memcpy(out + 2 * ((size_t)a * ant_stride + (size_t)l * N), g_h_exact + ((size_t)a * MAX_SYM + l) * N,
+               (size_t)N * sizeof(short2));
+  g_exact_us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+  return 0;
+}
+extern "C" int nr_pdsch_gpu_exact_fep(const int16_t *const *rxdata, uint32_t ring_len, uint32_t ring_offset, double fo_hz,
+                                      const int16_t *symbol_rot, uint16_t sym_mask, int16_t *out, size_t ant_stride)
+{
+  return nr_pdsch_gpu_exact_fep2(rxdata, ring_len, ring_offset, fo_hz, symbol_rot, sym_mask, out, ant_stride, 0);
+}
+
+/* GPU6: nr_passive_est_delay() of up to 16 LS rows (N c16 each, host memory; shared-memory platforms only).
+ * out[3 r] = {est_delay, delay_max_pos, delay_max_val} of the candidate. 0, or -1 (caller computes on the CPU). */
+extern "C" int nr_pdsch_gpu_exact_delay(const int16_t *const *rows, int nrows, int *out)
+{
+  if (g_init_state != 1 || !g_exact_ok || !g_exact_direct || nrows < 1 || nrows > nr_exact::DELAY_MAX_ROWS || !rows || !out)
+    return -1;
+  const int c = ctx_acquire(false);
+  NrGpuRtScope rt;
+  if (!rt.admitted) { ctx_release(c); return -1; }
+  const auto t0 = std::chrono::steady_clock::now();
+  nr_exact::DelayIO io = {};
+  for (int r = 0; r < nrows; r++) io.ls[r] = (const short2 *)rows[r];
+  nr_exact::k_delay_exact<<<nrows, nr_exact::THREADS, 0, g_ctx_stream[c]>>>(io, g_d_perm, g_d_tw1024, g_d_tw4096,
+                                                                           (int *)nr_gpu_device_ptr(g_ctx_delay[c]));
+  cudaError_t e = cudaPeekAtLastError();
+  if (e == cudaSuccess) e = (cudaError_t)ctx_wait(c, t0);
+  if (e == cudaSuccess) memcpy(out, g_ctx_delay[c], 3 * nrows * sizeof(int));
+  ctx_release(c);
+  if (e != cudaSuccess) {
+    g_init_state = -1;
+    fprintf(stderr, "nr_pdsch_gpu_exact_delay: %s\n", cudaGetErrorString(e));
+    return -1;
+  }
+  return 0;
+}
+
+extern "C" void nr_pdsch_gpu_exact_stats(int *direct, uint64_t *late, uint64_t *busy)
+{
+  *direct = g_exact_direct;
+  *late = g_exact_late;
+  *busy = g_exact_busy;
+}
+extern "C" double nr_pdsch_gpu_exact_last_us(void) { return g_exact_us; }

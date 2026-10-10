@@ -2,9 +2,11 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_stage.h" /* GPU parity stage snapshots (weak, default off) */
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
 __thread bool nr_passive_tpool_inline; /* ISAC_PDSCH_INLINE_POOL, nr_passive_tpool.h */
 #include <math.h>
+#include <stdatomic.h> /* GPU6 delay switch */
 #include <stdlib.h> // getenv (NVAR probe)
 #include <time.h>
 #include "nr_common.h"
@@ -73,8 +75,45 @@ static int chest_delay_share(void)
   if (en < 0) en = getenv("ISAC_CHEST_DELAY_SHARE") && !getenv("ISAC_CHEST_DFT_WIN") ? atoi(getenv("ISAC_CHEST_DELAY_SHARE")) : 0;
   return en;
 }
+/* GPU6 ISAC_CHEST_GPU_DELAY=1 (default off; needs ISAC_PDSCH_GPU_EXACT_FEP): nr_passive_est_delay() of all
+ * antennas of one (DM-RS symbol, layer) in one bit-exact GPU batch (nr_pdsch_gpu_exact_fep.cuh, k_delay_exact),
+ * computed by the pre-pass in nr_pdsch_channel_estimation() and consumed here in place of the CPU idft4096.
+ * ISAC_CHEST_GPU_DELAY_CHECK=N (default 64): every Nth GPU delay is recomputed on the CPU; any difference
+ * disables the GPU delay for the rest of the run. The GPU entry point is weak: absent -> CPU. */
+int nr_pdsch_gpu_exact_delay_rows(const c16_t *const *rows, int n, int *out) __attribute__((weak));
+void nr_pdsch_gpu_exact_delay_note(int gpu_rows, int checked, int bad) __attribute__((weak));
+static __thread int t_gpu_delay_pending;
+static __thread delay_t t_gpu_delay_val;
+static _Atomic int g_chest_gpu_delay = -1;
+static int g_chest_gpu_delay_check = 64;
+static _Atomic unsigned long g_chest_gpu_delay_n;
 static void chest_est_delay(const NR_DL_FRAME_PARMS *frame_parms, c16_t *dl_ls_est, c16_t *ch_estimates_time, delay_t *delay)
 {
+  if (t_gpu_delay_pending) {
+    t_gpu_delay_pending = 0;
+    const delay_t gpu = t_gpu_delay_val;
+    const unsigned long n = atomic_fetch_add_explicit(&g_chest_gpu_delay_n, 1, memory_order_relaxed);
+    if (g_chest_gpu_delay_check > 0 && n % (unsigned long)g_chest_gpu_delay_check == 0) {
+      delay_t cpu = {0};
+      nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, &cpu);
+      const int bad = cpu.est_delay != gpu.est_delay || cpu.delay_max_pos != gpu.delay_max_pos || cpu.delay_max_val != gpu.delay_max_val;
+      if (nr_pdsch_gpu_exact_delay_note)
+        nr_pdsch_gpu_exact_delay_note(0, 1, bad);
+      if (bad) {
+        atomic_store(&g_chest_gpu_delay, 0);
+        LOG_E(PHY, "SENSING: CHEST_GPU_DELAY self-check MISMATCH cpu=(%d,%d,%d) gpu=(%d,%d,%d) -- GPU delay disabled\n",
+              cpu.est_delay, cpu.delay_max_pos, cpu.delay_max_val, gpu.est_delay, gpu.delay_max_pos, gpu.delay_max_val);
+      }
+      if (cpu.delay_max_val >= delay->delay_max_val)
+        *delay = cpu;
+      t_delay_reused = 0;
+      return;
+    }
+    if (gpu.delay_max_val >= delay->delay_max_val) /* nr_passive_est_delay()'s keep-the-stronger rule */
+      *delay = gpu;
+    t_delay_reused = 1; /* ch_estimates_time was not computed (the pre-pass excludes the PDP diagnostic) */
+    return;
+  }
   const uint64_t start_ns = chest_stage_timing() ? chest_cpu_ns() : 0;
   /* the BRDELAY/PDP diagnostic (requested on every passive decode) is computed only where the IDFT still runs */
   const bool share = chest_delay_share() && nr_dl_chest_delay_epoch != 0;
@@ -960,20 +999,14 @@ void nr_pdcch_channel_estimation(const PHY_VARS_NR_UE *ue,
   }
 }
 
-static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
-                                              c16_t *rxF,
-                                              c16_t *pil,
-                                              c16_t *dl_ch,
-                                              unsigned short bwp_start_subcarrier,
-                                              const freq_alloc_bitmap_t *freq_alloc,
-                                              int bwpsize,
-                                              delay_t *delay,
-                                              uint32_t *nvar)
+/* LS estimate of the DM-RS comb, one value repeated over the 4 (type 1) / 6 (type 2) subcarriers it
+ * represents, zero beyond `idx` (returned). Shared by the linear interpolators and the GPU delay pre-pass. */
+static int chest_ls_type1(const NR_DL_FRAME_PARMS *frame_parms, const c16_t *rxF, const c16_t *pil,
+                          unsigned short bwp_start_subcarrier, const freq_alloc_bitmap_t *freq_alloc, int bwpsize,
+                          c16_t *dl_ls_est)
 {
-  c16_t *dl_ch0 = dl_ch;
   int re_offset = bwp_start_subcarrier % frame_parms->ofdm_symbol_size;
-  c16_t dl_ls_est[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-  memset(dl_ls_est, 0, sizeof(dl_ls_est));
+  memset(dl_ls_est, 0, sizeof(*dl_ls_est) * frame_parms->ofdm_symbol_size);
   int idx = 0;
   int pos = freq_alloc->first_rb;
   int last_processed_rb = freq_alloc->first_rb;
@@ -985,15 +1018,9 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     for (int rb = block_start; rb <= block_end; rb++) {
       for (int pilot_cnt = 0; pilot_cnt < 6; pilot_cnt += 2) {
         c16_t ch_l = c16mulShift(*pil, rxF[re_offset], 15);
-#ifdef DEBUG_PDSCH
-        printf("pilot %3d: pil -> (%6d,%6d), rxF -> (%4d,%4d), ch -> (%4d,%4d) \n", pilot_cnt, pil->r, pil->i, rxF[re_offset].r, rxF[re_offset].i, ch_l.r, ch_l.i);
-#endif
         pil++;
         re_offset = (re_offset + 2) % frame_parms->ofdm_symbol_size;
         c16_t ch_r = c16mulShift(*pil, rxF[re_offset], 15);
-#ifdef DEBUG_PDSCH
-        printf("pilot %3d: pil -> (%6d,%6d), rxF -> (%4d,%4d), ch -> (%4d,%4d) \n", pilot_cnt + 1, pil->r, pil->i, rxF[re_offset].r, rxF[re_offset].i, ch_r.r, ch_r.i);
-#endif
         c16_t ch = c16addShift(ch_l, ch_r, 1);
         pil++;
         re_offset = (re_offset + 2) % frame_parms->ofdm_symbol_size;
@@ -1005,6 +1032,55 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     }
     last_processed_rb = block_end + 1;
   }
+  return idx;
+}
+static int chest_ls_type2(const NR_DL_FRAME_PARMS *frame_parms, const c16_t *rxF, const c16_t *pil,
+                          unsigned short bwp_start_subcarrier, const freq_alloc_bitmap_t *freq_alloc, int bwpsize,
+                          c16_t *dl_ls_est)
+{
+  int re_offset = bwp_start_subcarrier % frame_parms->ofdm_symbol_size;
+  memset(dl_ls_est, 0, sizeof(*dl_ls_est) * frame_parms->ofdm_symbol_size);
+  int idx = 0;
+  int pos = freq_alloc->first_rb;
+  int last_processed_rb = freq_alloc->first_rb;
+  int block_start, block_end;
+  while (find_next_rb_block(freq_alloc->bitmap, bwpsize, &pos, &block_start, &block_end)) {
+    int skipped_rbs = block_start - last_processed_rb;
+    pil += skipped_rbs * 4;
+    re_offset = (re_offset + skipped_rbs * 12) % frame_parms->ofdm_symbol_size;
+    for (int rb = block_start; rb <= block_end; rb++) {
+      for (int pilot_cnt = 0; pilot_cnt < 4; pilot_cnt += 2) {
+        c16_t ch_l = c16mulShift(*pil, rxF[re_offset], 15);
+        pil++;
+        re_offset = (re_offset + 1) % frame_parms->ofdm_symbol_size;
+        c16_t ch_r = c16mulShift(*pil, rxF[re_offset], 15);
+        c16_t ch = c16addShift(ch_l, ch_r, 1);
+        pil++;
+        re_offset = (re_offset + 5) % frame_parms->ofdm_symbol_size;
+        for (int k = 0; k < 6; k++) {
+          dl_ls_est[idx] = ch;
+          idx++;
+        }
+      }
+    }
+    last_processed_rb = block_end + 1;
+  }
+  return idx;
+}
+
+static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
+                                              c16_t *rxF,
+                                              c16_t *pil,
+                                              c16_t *dl_ch,
+                                              unsigned short bwp_start_subcarrier,
+                                              const freq_alloc_bitmap_t *freq_alloc,
+                                              int bwpsize,
+                                              delay_t *delay,
+                                              uint32_t *nvar)
+{
+  c16_t *dl_ch0 = dl_ch;
+  c16_t dl_ls_est[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
+  const int idx = chest_ls_type1(frame_parms, rxF, pil, bwp_start_subcarrier, freq_alloc, bwpsize, dl_ls_est);
   c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
   chest_est_delay(frame_parms, dl_ls_est, ch_estimates_time, delay);
   if (nr_dl_chest_diag_request && !t_delay_reused) {
@@ -1149,6 +1225,9 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
             (e_f > 0.0 && e_d > 0.0) ? hypot(xr, xi) / sqrt(e_f * e_d) : 0.0, atan2(xi, xr) * 180.0 / M_PI,
             e_f > 0.0 ? sqrt(e_d / e_f) : 0.0, (unsigned long long)(nest_count ? noise_amp2 / nest_count : 0), idx);
   }
+  if (nr_pdsch_gpu_stage_chest)
+    nr_pdsch_gpu_stage_chest(dl_ls_est, dl_ch, idx, delay->est_delay,
+                             nest_count ? noise_amp2 / nest_count : 0);
   if (nvar && nest_count > 0) {
     /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
      * this helper is called once per receive antenna and never sums across them, so dividing by the
@@ -1254,41 +1333,9 @@ void NFAPI_NR_DMRS_TYPE2_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
                                        delay_t *delay,
                                        uint32_t *nvar)
 {
-  int re_offset = bwp_start_subcarrier % frame_parms->ofdm_symbol_size;
   c16_t *dl_ch0 = dl_ch;
   c16_t dl_ls_est[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-  memset(dl_ls_est, 0, sizeof(dl_ls_est));
-  int idx = 0;
-  int pos = freq_alloc->first_rb;
-  int last_processed_rb = freq_alloc->first_rb;
-  int block_start, block_end;
-  while (find_next_rb_block(freq_alloc->bitmap, bwpsize, &pos, &block_start, &block_end)) {
-    int skipped_rbs = block_start - last_processed_rb;
-    pil += skipped_rbs * 4;
-    re_offset = (re_offset + skipped_rbs * 12) % frame_parms->ofdm_symbol_size;
-    for (int rb = block_start; rb <= block_end; rb++) {
-      for (int pilot_cnt = 0; pilot_cnt < 4; pilot_cnt += 2) {
-        c16_t ch_l = c16mulShift(*pil, rxF[re_offset], 15);
-#ifdef DEBUG_PDSCH
-        printf("pilot %3d: pil -> (%6d,%6d), rxF -> (%4d,%4d), ch -> (%4d,%4d) \n", pilot_cnt, pil->r, pil->i, rxF[re_offset].r, rxF[re_offset].i, ch_l.r, ch_l.i);
-#endif
-        pil++;
-        re_offset = (re_offset + 1) % frame_parms->ofdm_symbol_size;
-        c16_t ch_r = c16mulShift(*pil, rxF[re_offset], 15);
-#ifdef DEBUG_PDSCH
-        printf("pilot %3d: pil -> (%6d,%6d), rxF -> (%4d,%4d), ch -> (%4d,%4d) \n", pilot_cnt + 1, pil->r, pil->i, rxF[re_offset].r, rxF[re_offset].i, ch_r.r, ch_r.i);
-#endif
-        c16_t ch = c16addShift(ch_l, ch_r, 1);
-        pil++;
-        re_offset = (re_offset + 5) % frame_parms->ofdm_symbol_size;
-        for (int k = 0; k < 6; k++) {
-          dl_ls_est[idx] = ch;
-          idx++;
-        }
-      }
-    }
-    last_processed_rb = block_end + 1;
-  }
+  const int idx = chest_ls_type2(frame_parms, rxF, pil, bwp_start_subcarrier, freq_alloc, bwpsize, dl_ls_est);
 
   c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
   chest_est_delay(frame_parms, dl_ls_est, ch_estimates_time, delay);
@@ -1324,6 +1371,9 @@ void NFAPI_NR_DMRS_TYPE2_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     nest_count++;
   }
 
+  if (nr_pdsch_gpu_stage_chest)
+    nr_pdsch_gpu_stage_chest(dl_ls_est, dl_ch, idx, delay->est_delay,
+                             nest_count ? noise_amp2 / nest_count : 0);
   if (nvar && nest_count > 0) {
     /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
      * this helper is called once per receive antenna and never sums across them, so dividing by the
@@ -1451,6 +1501,8 @@ typedef struct {
   uint32_t nvar_out;
   int diag_request;
   int delay_pos_out, delay_val_out, pdp_compact_out, pdp_sec_pos_out, pdp_sec_db_out;
+  int gpu_delay_ok; /* GPU6: gpu_delay replaces this antenna's CPU delay transform */
+  delay_t gpu_delay;
   task_ans_t *ans;
 } nr_pdsch_chest_ant_task_t;
 
@@ -1471,9 +1523,13 @@ static void nr_pdsch_chest_ant_task(void *arg)
   c16_t *dl_ch = (c16_t *)&dl_ch_estimates[a->nl * fp->nb_antennas_rx + aarx][ch_offset];
   memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
 
+  if (nr_pdsch_gpu_stage_context)
+    nr_pdsch_gpu_stage_context(nr_dl_chest_delay_epoch, a->symbol, a->nl, aarx);
   delay_t delay = {0};
   nr_dl_chest_diag_request = a->diag_request;
   nr_dl_chest_cur_ant = a->aarx;
+  t_gpu_delay_pending = a->gpu_delay_ok;
+  t_gpu_delay_val = a->gpu_delay;
   if (a->config_type == NFAPI_NR_DMRS_TYPE1 && a->ue->chest_freq == 0) {
     NFAPI_NR_DMRS_TYPE1_linear_interp(fp, rxF, &a->pilot[6 * a->rb_offset], dl_ch, a->bwp_start_subcarrier,
                                       a->freq_alloc, a->dlsch->BWPSize, &delay, nvar_p);
@@ -1487,6 +1543,7 @@ static void nr_pdsch_chest_ant_task(void *arg)
     AssertFatal(a->dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
     NFAPI_NR_DMRS_TYPE2_average_prb(fp, rxF, &a->pilot[4 * a->rb_offset], dl_ch, a->bwp_start_subcarrier, a->nb_rb_pdsch);
   }
+  t_gpu_delay_pending = 0;
 
   a->nvar_out = nvar_ant;
   a->delay_pos_out = delay.delay_max_pos;
@@ -1550,6 +1607,45 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
   const uint64_t pilot_end = profile ? chest_cpu_ns() : 0;
 
   delay_t delay = {0};
+  const int only_ant_ = (nr_dl_chest_only_ant >= 0 && nr_dl_chest_only_ant < fp->nb_antennas_rx) ? nr_dl_chest_only_ant : -1;
+  /* GPU6 pre-pass: one GPU batch for this (symbol, layer)'s antennas; see chest_est_delay() */
+  delay_t gpu_delay[NR_DL_CHEST_MAX_ANT];
+  int gpu_delay_mask = 0;
+  if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) < 0) {
+    const char *e = getenv("ISAC_CHEST_GPU_DELAY"), *c = getenv("ISAC_CHEST_GPU_DELAY_CHECK");
+    g_chest_gpu_delay_check = c ? atoi(c) : 64;
+    atomic_store(&g_chest_gpu_delay, e && atoi(e) == 1 && nr_pdsch_gpu_exact_delay_rows ? 1 : 0);
+  }
+  if (atomic_load_explicit(&g_chest_gpu_delay, memory_order_relaxed) == 1 && IS_PASSIVE_RX_MODE(get_softmodem_params())
+      && ue->chest_freq == 0 && (config_type == NFAPI_NR_DMRS_TYPE1 || config_type == NFAPI_NR_DMRS_TYPE2)
+      && fp->ofdm_symbol_size == 4096 && fp->nb_antennas_rx <= NR_DL_CHEST_MAX_ANT && !nr_dl_chest_diag_request
+      && !chest_delay_share() && !getenv("ISAC_CHEST_DFT_WIN")) {
+    static __thread c16_t *ls_rows;
+    if (!ls_rows)
+      ls_rows = aligned_alloc(64, sizeof(c16_t) * 4096 * NR_DL_CHEST_MAX_ANT);
+    const c16_t *rows[NR_DL_CHEST_MAX_ANT];
+    int ants[NR_DL_CHEST_MAX_ANT], n = 0, out[3 * NR_DL_CHEST_MAX_ANT];
+    for (int aarx = 0; ls_rows && aarx < fp->nb_antennas_rx; aarx++) {
+      if (only_ant_ >= 0 && aarx != only_ant_)
+        continue;
+      c16_t *row = ls_rows + (size_t)4096 * n;
+      const c16_t *rxF = &rxdataF[aarx][symbol_offset + delta];
+      if (config_type == NFAPI_NR_DMRS_TYPE1)
+        chest_ls_type1(fp, rxF, &pilot[6 * rb_offset], bwp_start_subcarrier, freq_alloc, dlsch->BWPSize, row);
+      else
+        chest_ls_type2(fp, rxF, &pilot[4 * rb_offset], bwp_start_subcarrier, freq_alloc, dlsch->BWPSize, row);
+      rows[n] = row;
+      ants[n++] = aarx;
+    }
+    if (n > 0 && nr_pdsch_gpu_exact_delay_rows(rows, n, out) == 0) {
+      for (int k = 0; k < n; k++) {
+        gpu_delay[ants[k]] = (delay_t){.est_delay = out[3 * k], .delay_max_pos = out[3 * k + 1], .delay_max_val = out[3 * k + 2]};
+        gpu_delay_mask |= 1 << ants[k];
+      }
+      if (nr_pdsch_gpu_exact_delay_note)
+        nr_pdsch_gpu_exact_delay_note(n, 0, 0);
+    }
+  }
 
   /* nvar sets the equaliser's confidence, so getting it wrong degrades decoding without touching the
    * constellation -- a failure with perfectly healthy EVM, which is exactly the signature this
@@ -1596,6 +1692,8 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                                       .bwp_start_subcarrier = bwp_start_subcarrier,
                                                       .want_nvar = (nvar != NULL),
                                                       .diag_request = nr_dl_chest_diag_request,
+                                                      .gpu_delay_ok = (gpu_delay_mask >> aarx) & 1,
+                                                      .gpu_delay = gpu_delay[aarx],
                                                       .ans = &chest_ans};
       task_t t = {.func = nr_pdsch_chest_ant_task, .args = &chest_tasks[aarx]};
       pushTpool(nr_passive_tpool(&get_nrUE_params()->Tpool), t);
@@ -1646,6 +1744,10 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
       if (only_ant >= 0 && aarx != only_ant)
         continue;
 
+      if (nr_pdsch_gpu_stage_context)
+        nr_pdsch_gpu_stage_context(nr_dl_chest_delay_epoch, symbol, nl, aarx);
+      t_gpu_delay_pending = (gpu_delay_mask >> aarx) & 1;
+      t_gpu_delay_val = gpu_delay[aarx];
       if (config_type == NFAPI_NR_DMRS_TYPE1 && ue->chest_freq == 0) {
         NFAPI_NR_DMRS_TYPE1_linear_interp(fp,
                                           rxF,
@@ -1676,6 +1778,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
         AssertFatal(dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
         NFAPI_NR_DMRS_TYPE2_average_prb(fp, rxF, &pilot[4 * rb_offset], dl_ch, bwp_start_subcarrier, nb_rb_pdsch);
       }
+      t_gpu_delay_pending = 0;
 
 #ifdef DEBUG_PDSCH
       dl_ch = (c16_t *)&dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][ch_offset];

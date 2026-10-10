@@ -9,6 +9,8 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <vector>
+#include <map>
+#include <string>
 
 struct Sample { nr_pdcch_gpu_record_t h; std::vector<int16_t> iq, cpu; };
 static double elapsed(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
@@ -70,7 +72,11 @@ int main(int argc, char **argv)
   const auto *api=get?get():nullptr;
   if (!api || api->init(&rows[0].h.cfg)) { fprintf(stderr,"PDCCH GPU init failed\n"); return 2; }
   std::vector<double> timings;
-  size_t words=0, exact=0, sign=0, unsupported=0, batched=0;
+  size_t words=0, exact=0, sign=0, unsupported=0, batched=0, passes=0, passes_exact=0, shown=0;
+  std::map<std::string, std::pair<size_t, size_t>> by_cfg; /* passes, exact passes per CORESET geometry */
+  size_t cpu_zero=0, gpu_zero=0, both_nonzero=0, nonzero_sign=0;
+  const int deadzone[] = {0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024};
+  size_t deadzone_ok[sizeof(deadzone) / sizeof(deadzone[0])] = {};
   double xy=0,x2=0,y2=0;
   for (int rep=0;rep<reps;++rep) for (size_t i=0;i<rows.size();) {
     const size_t begin=i;
@@ -95,9 +101,23 @@ int main(int argc, char **argv)
     if (rep==0) for (size_t k=begin;k<i;++k) {
       const auto &j=jobs[k-begin];
       if (j.n_llr!=rows[k].h.llr_count) {++unsupported;continue;}
+      size_t pass_diff=0; int rb_lo=-1, rb_hi=-1;
+      for (uint32_t b=0;b<j.n_llr;++b)
+        if (out[j.llr_offset+b]!=rows[k].cpu[b]) { ++pass_diff; const int rb=(int)(b/18%j.n_rb); if (rb_lo<0||rb<rb_lo) rb_lo=rb; rb_hi=std::max(rb_hi,rb); }
+      ++passes; passes_exact+=pass_diff==0;
+      { char key[96]; snprintf(key,sizeof key,"nid=%u n_rb=%u rb_off=%u sym=%u dur=%u",j.dmrs_scrambling_id,j.n_rb,j.rb_offset,j.start_symbol,j.duration);
+        auto &cnt=by_cfg[key]; cnt.first++; cnt.second+=pass_diff==0; }
+      if (pass_diff && shown++<12)
+        printf("PDCCH_PASS_DIFF slot=%u nid=%u rb_offset=%u bwp_start=%u dmrs_ref=%u n_rb=%u sym=%u dur=%u words=%zu/%u diff_rb=%d..%d\n",
+               rows[k].h.absolute_slot,j.dmrs_scrambling_id,j.rb_offset,j.bwp_start_rb,j.dmrs_ref_rb,j.n_rb,j.start_symbol,
+               j.duration,pass_diff,j.n_llr,rb_lo,rb_hi);
       for (uint32_t b=0;b<j.n_llr;++b) {
         const int16_t x=out[j.llr_offset+b], y=rows[k].cpu[b];
         exact+=x==y; sign+=(x<0)==(y<0); ++words;
+        for (size_t d=0;d<sizeof(deadzone)/sizeof(deadzone[0]);++d)
+          deadzone_ok[d]+=(x < -deadzone[d])==(y < 0);
+        cpu_zero+=y==0; gpu_zero+=x==0;
+        if (x && y) { ++both_nonzero; nonzero_sign+=(x<0)==(y<0); }
         xy+=(double)x*y; x2+=(double)x*x; y2+=(double)y*y;
       }
     }
@@ -105,5 +125,12 @@ int main(int argc, char **argv)
   const double corr=x2>0 && y2>0?xy/std::sqrt(x2*y2):0;
   printf("PDCCH GPU scan window us p50=%.1f p99=%.1f, batched_windows=%zu; CPU LLR exact=%zu/%zu sign=%zu/%zu corr=%.6f unsupported=%zu\n",
          pct(timings,.5),pct(timings,.99),batched,exact,words,sign,words,corr,unsupported);
+  printf("PDCCH passes exact=%zu/%zu\n", passes_exact, passes);
+  for (const auto &kv : by_cfg) printf("PDCCH_CFG %s exact=%zu/%zu\n", kv.first.c_str(), kv.second.second, kv.second.first);
+  printf("PDCCH zero/sign split: cpu_zero=%zu/%zu gpu_zero=%zu/%zu nonzero_sign=%zu/%zu\n",
+         cpu_zero, words, gpu_zero, words, nonzero_sign, both_nonzero);
+  for (size_t d=0;d<sizeof(deadzone)/sizeof(deadzone[0]);++d)
+    printf("PDCCH negative deadzone %d: sign=%zu/%zu (%.6f)\n",deadzone[d],deadzone_ok[d],words,
+           words?(double)deadzone_ok[d]/words:0.);
   return unsupported || !words || sign!=words || corr<.99995 ? 1 : 0;
 }
