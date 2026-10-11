@@ -103,13 +103,25 @@ if(ENABLE_LDPC_CUDA)
   # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
   add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu
-              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu)
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu)
   # GPU-DEMOD: no automatic FMA contraction; the kernels spell out the CPU's (GCC's) fused operations themselves
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
   set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
                         CUDA_ARCHITECTURES "${NR_GPU_MODULE_ARCHS}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(pdsch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_link_libraries(pdsch_gpu PRIVATE CUDA::cudart CUDA::cufft)
+  # DECGPU: GPU port of OAI's LDPC decoder vs ./libldpc.so LDPCdecoder, snapshot by snapshot (needs a CUDA device)
+  add_executable(test_nr_pdsch_gpu_ldpc ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_ldpc_test.c)
+  target_include_directories(test_nr_pdsch_gpu_ldpc PRIVATE ${OPENAIR_DIR} ${OPENAIR1_DIR})
+  target_link_libraries(test_nr_pdsch_gpu_ldpc PRIVATE thread-pool LOG minimal_lib crc_byte UTIL ${CMAKE_DL_LIBS} pthread m)
+  set_target_properties(test_nr_pdsch_gpu_ldpc PROPERTIES ENABLE_EXPORTS ON RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  foreach(sym check_crc crc24a crc24b crc16 crcTableInit completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_pdsch_gpu_ldpc PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
+  add_dependencies(test_nr_pdsch_gpu_ldpc pdsch_gpu ldpc)
+  add_dependencies(tests test_nr_pdsch_gpu_ldpc)
+  add_test(NAME test_nr_pdsch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   add_executable(nr_pdsch_gpu_fep_test ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc)
   target_include_directories(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
   target_link_libraries(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_DL_LIBS})

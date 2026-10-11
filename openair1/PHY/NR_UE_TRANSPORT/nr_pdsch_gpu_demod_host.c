@@ -36,9 +36,18 @@ extern __thread bool nr_pdsch_decode_wide_mrc;
 static nr_gpu_demod_init_fn g_init;
 static nr_gpu_demod_run_fn g_run;
 static nr_gpu_demod_release_fn g_release;
+static nr_gpu_demod_evm_wait_fn g_evm_wait;
+static int g_defer; /* ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER */
+/* DECGPU EVM deferral: the job whose EVM chain is still running (context held), per consumer thread, lazily on the heap */
+typedef struct {
+  nr_gpu_demod_job_t j;
+  int pending, nl, qm, nbrx, start, last;
+} defer_t;
+static __thread defer_t *t_def;
+static __thread int t_defer_ok;
 static _Atomic int g_on;
 static int g_check;
-static _Atomic uint64_t g_calls, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max, g_ns_gpu;
+static _Atomic uint64_t g_calls, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max, g_ns_gpu, g_ns_geo; /* geo: host geometry (index-coded extractor) */
 static _Atomic uint64_t g_refuse[16];
 static _Atomic uint64_t g_evm_close, g_evm_far, g_evm_maxrel; /* CHECK with the GPU EVM (rel. err of err x 1e18) */
 
@@ -70,6 +79,8 @@ int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp)
   g_init = h ? (nr_gpu_demod_init_fn)dlsym(h, "nr_pdsch_gpu_demod_init") : NULL;
   g_run = h ? (nr_gpu_demod_run_fn)dlsym(h, "nr_pdsch_gpu_demod_run") : NULL;
   g_release = h ? (nr_gpu_demod_release_fn)dlsym(h, "nr_pdsch_gpu_demod_release") : NULL;
+  g_evm_wait = h ? (nr_gpu_demod_evm_wait_fn)dlsym(h, "nr_pdsch_gpu_demod_evm_wait") : NULL;
+  g_defer = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER", 0) && g_evm_wait;
   if (!g_init || !g_run || !g_release || g_init(fp->nb_antennas_rx) != 0) {
     LOG_W(PHY, "SENSING: GPU_EXACT_DEMOD requested but libpdsch_gpu.so has no usable demod entry -- CPU demodulation\n");
     return 0;
@@ -276,6 +287,7 @@ static int cpu_loop(const nr_pdsch_gpu_demod_call_t *c, int16_t *llr, uint32_t *
 /* Reasons the GPU path is refused (index into g_refuse, logged with the stats). */
 enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, RF_MASK, RF_GEOM, RF_NRE0, RF_CAP, RF_BUSY, RF_N };
 
+static __thread int t_qmode; /* refuse() -> gpu_grant(): the resolved multi-layer qam_mode */
 static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coef, int *align, int *l2d)
 {
   static int s_env = -1, s_mode = 0, s_align = 0, s_l2d = 0;
@@ -304,17 +316,21 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
   if (s_env)
     return RF_ENV;
   const int nl = c->dlsch->cw_info.Nl, qm = c->dlsch->cw_info.qamModOrder;
-  if (nl == 2) { /* only the QAM-FIX mode-2 ZF (nr_rx_pdsch()'s qam_mode resolution) */
-    static int s_qm = -1;
-    if (s_qm < 0)
+  if (nl >= 2) { /* nr_rx_pdsch()'s qam_mode resolution */
+    static int s_qm = -1, s_nl34 = -1;
+    if (s_qm < 0) {
       s_qm = env_int("ISAC_PDSCH_MMSE_MODE", 0);
+      s_nl34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_NL34", 0); /* DECGPU: 3 and 4 layers (mode 2, and the stock MMSE) */
+    }
     int qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
     if (qam_mode < 0 || qam_mode > 2)
       qam_mode = 0;
-    if (qam_mode != 2)
+    if (nl >= 3 && (qam_mode == 1 || qm == 2))
+      qam_mode = 0;
+    if (nl == 2 ? qam_mode != 2 : (nl > 4 || !s_nl34 || qam_mode == 1))
       return RF_NL;
-  } else if (nl != 1)
-    return RF_NL;
+    t_qmode = qam_mode;
+  }
   if (qm != 2 && qm != 4 && qm != 6 && qm != 8)
     return RF_QM;
   if (c->harq->status != NR_ACTIVE)
@@ -385,11 +401,11 @@ static void stats_log(uint64_t n)
   int u = 0;
   for (int k = 0; k < RF_N; k++)
     u += snprintf(rf + u, sizeof(rf) - u, "%s%lu", k ? "," : "", (unsigned long)atomic_load(&g_refuse[k]));
-  LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD calls=%lu check_ok=%lu check_bad=%lu evm_close=%lu evm_far=%lu evm_maxrel=%.2e mean=%.0f us (gpu %.0f) max=%.0f us refused[off,nl,qm,ptrs,"
+  LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD calls=%lu check_ok=%lu check_bad=%lu evm_close=%lu evm_far=%lu evm_maxrel=%.2e mean=%.0f us (gpu %.0f geo %.0f) max=%.0f us refused[off,nl,qm,ptrs,"
         "forced,env,override,mode,mask,geom,nre0,cap,busy]=[%s]\n",
         (unsigned long)n, (unsigned long)atomic_load(&g_chk_ok), (unsigned long)atomic_load(&g_chk_bad),
         (unsigned long)atomic_load(&g_evm_close), (unsigned long)atomic_load(&g_evm_far), atomic_load(&g_evm_maxrel) / 1e18,
-        atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf);
+        atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_geo) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf);
 }
 
 /* Folds one symbol's GPU EVM partial sums into nr_pdsch_evm_acc, in the field order of nr_rx_pdsch()'s block. */
@@ -451,6 +467,35 @@ static void evm_fold(const nr_gpu_evm_sym_t *E, int nl, int qm, int m)
 
 static int g_gpu_evm = -1;
 
+/* EVM partial sums and kappa of every demodulated symbol into nr_pdsch_evm_acc, in nr_rx_pdsch()'s symbol order */
+static void post_fold(const nr_gpu_demod_job_t *jp, const NR_UE_DLSCH_t *dlsch, int nl, int qm, int nbRx, int start, int last, uint32_t rx_size_symbol)
+{
+  for (int m = start; m <= last; m++) {
+    if (!(jp->sym_mask >> m & 1))
+      continue;
+    c16_t(*y)[NR_GPU_DEMOD_MAX_EXT] = (c16_t(*)[NR_GPU_DEMOD_MAX_EXT])((c16_t *)jp->y_ext + (size_t)m * NR_GPU_DEMOD_MAX_RX * NR_GPU_DEMOD_MAX_EXT);
+    c16_t(*h)[nbRx][NR_GPU_DEMOD_MAX_EXT] = (c16_t(*)[nbRx][NR_GPU_DEMOD_MAX_EXT])((c16_t *)jp->h_ext + (size_t)m * 16 * NR_GPU_DEMOD_MAX_EXT);
+    if (jp->want_evm)
+      evm_fold(&jp->evm[m], nl, qm, m);
+    else
+      evm_symbol(dlsch, nl, nbRx, jp->nre[m], rx_size_symbol, NR_GPU_DEMOD_MAX_EXT, jp->mrc_rx_index, jp->mrc_nb_rx, (unsigned char)m, y, h);
+    if (nl == 1 && qm > 2 && jp->nre[m] >= 24) { /* nr_rx_pdsch(): ISAC_RX_QAM_AGC block, 1 layer */
+      const double sz = (double)jp->kappa_sz[m][0], sm = (double)jp->kappa_sm[m][0];
+      const double kappa = sm > 0.0 ? sz / sm : 1.0;
+      nr_pdsch_evm_acc.kappa_sum += kappa;
+      nr_pdsch_evm_acc.kappa_n++;
+    }
+    if (nl >= 2 && qm > 2 && jp->nre[m] >= 24) /* nr_rx_pdsch(): QAM-FIX multi-layer kappa */
+      for (int l = 0; l < nl; l++) {
+        const double sz = (double)jp->kappa_sz[m][l], sm = (double)jp->kappa_sm[m][l];
+        if (sm > 0.0) {
+          nr_pdsch_evm_acc.kappa_sum += sz / sm;
+          nr_pdsch_evm_acc.kappa_n++;
+        }
+      }
+  }
+}
+
 /* GPU demodulation of the grant into the given buffers; 0 = done. EVM accumulates into nr_pdsch_evm_acc (if armed). */
 static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_coef, int align, int l2d, int16_t *llr, uint32_t llr_cap,
                      uint32_t *dvr, int32_t *l2, c16_t *comp, c16_t *mag, c16_t *magb, c16_t *magr, uint64_t *gpu_ns)
@@ -479,6 +524,7 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   if (last >= NR_GPU_DEMOD_NSYM || c->first_symbol < cfg->start_symbol || c->first_symbol > last || !(j.sym_mask >> c->first_symbol & 1))
     return RF_MASK;
   uint32_t off = 0;
+  const uint64_t tg = now_ns();
   for (int m = cfg->start_symbol; m <= last; m++) {
     j.llr_off[m] = off;
     if (!(j.sym_mask >> m & 1))
@@ -490,6 +536,7 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
     j.nre[m] = (uint16_t)n;
     off += n * (uint32_t)qm * (uint32_t)nl;
   }
+  atomic_fetch_add_explicit(&g_ns_geo, now_ns() - tg, memory_order_relaxed);
   if (j.nre[c->first_symbol] == 0)
     return RF_NRE0;
   if (off > llr_cap)
@@ -511,7 +558,9 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j.thr_coef = thr_coef;
   j.l2_delta = l2d;
   j.align = align;
-  j.mag_per_layer = nl >= 2; /* mode 2 only: per-layer thresholds */
+  j.qam_mode = nl >= 2 ? t_qmode : 0;
+  j.nvar = c->nvar;
+  j.mag_per_layer = nl >= 2 && j.qam_mode == 2; /* mode 2 only: per-layer thresholds */
   j.wide_mrc = nr_pdsch_decode_wide_mrc;
   j.want_kappa = nr_pdsch_evm_acc.armed;
   if (g_gpu_evm < 0)
@@ -519,6 +568,7 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j.want_evm = nr_pdsch_evm_acc.armed && g_gpu_evm && nl <= 2;
   j.evm_fp64 = g_gpu_evm == 2;
   j.evm_erase = nr_dlsch_csi_erase_n > 0;
+  j.evm_defer = t_defer_ok && j.want_evm && t_def;
   const uint64_t t0 = now_ns();
   if (g_run(&j) != 0)
     return RF_BUSY;
@@ -530,31 +580,19 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   if (j.used_branch_set)
     nr_dlsch_used_branch = j.used_branch;
   if (nr_pdsch_evm_acc.armed) {
-    const uint32_t rx_size_symbol = (c->freq_alloc->num_rbs * NR_NB_SC_PER_RB + 15) & ~15;
-    for (int m = cfg->start_symbol; m <= last; m++) {
-      if (!(j.sym_mask >> m & 1))
-        continue;
-      c16_t(*y)[NR_GPU_DEMOD_MAX_EXT] = (c16_t(*)[NR_GPU_DEMOD_MAX_EXT])((c16_t *)j.y_ext + (size_t)m * NR_GPU_DEMOD_MAX_RX * NR_GPU_DEMOD_MAX_EXT);
-      c16_t(*h)[nbRx][NR_GPU_DEMOD_MAX_EXT] = (c16_t(*)[nbRx][NR_GPU_DEMOD_MAX_EXT])((c16_t *)j.h_ext + (size_t)m * 16 * NR_GPU_DEMOD_MAX_EXT);
-      if (j.want_evm)
-        evm_fold(&j.evm[m], nl, qm, m);
-      else
-        evm_symbol(c->dlsch, nl, nbRx, j.nre[m], rx_size_symbol, NR_GPU_DEMOD_MAX_EXT, j.mrc_rx_index, j.mrc_nb_rx, (unsigned char)m, y, h);
-      if (nl == 1 && qm > 2 && j.nre[m] >= 24) { /* nr_rx_pdsch(): ISAC_RX_QAM_AGC block, 1 layer */
-        const double sz = (double)j.kappa_sz[m][0], sm = (double)j.kappa_sm[m][0];
-        const double kappa = sm > 0.0 ? sz / sm : 1.0;
-        nr_pdsch_evm_acc.kappa_sum += kappa;
-        nr_pdsch_evm_acc.kappa_n++;
-      }
-      if (nl >= 2 && qm > 2 && j.nre[m] >= 24) /* nr_rx_pdsch(): QAM-FIX multi-layer kappa */
-        for (int l = 0; l < nl; l++) {
-          const double sz = (double)j.kappa_sz[m][l], sm = (double)j.kappa_sm[m][l];
-          if (sm > 0.0) {
-            nr_pdsch_evm_acc.kappa_sum += sz / sm;
-            nr_pdsch_evm_acc.kappa_n++;
-          }
-        }
+    if (j.evm_pending && t_def) { /* DECGPU: fold after the EVM chain (nr_pdsch_gpu_demod_evm_finish) */
+      memcpy(&t_def->j, &j, offsetof(nr_gpu_demod_job_t, evm));
+      t_def->j.ctx = j.ctx;
+      t_def->j.evm_pending = 1;
+      t_def->nl = nl;
+      t_def->qm = qm;
+      t_def->nbrx = nbRx;
+      t_def->start = cfg->start_symbol;
+      t_def->last = last;
+      t_def->pending = 1;
+      return -1;
     }
+    post_fold(&j, c->dlsch, nl, qm, nbRx, cfg->start_symbol, last, (c->freq_alloc->num_rbs * NR_NB_SC_PER_RB + 15) & ~15);
   }
   g_release(j.ctx);
   return -1;
@@ -626,8 +664,29 @@ static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const
   return 1;
 }
 
+int nr_pdsch_gpu_demod_evm_deferred(void)
+{
+  return t_def && t_def->pending;
+}
+
+int nr_pdsch_gpu_demod_evm_finish(int fold)
+{
+  if (!t_def || !t_def->pending)
+    return -1;
+  const int ok = g_evm_wait(&t_def->j) == 0;
+  if (ok && fold) /* want_evm is set on every deferred job: the CPU EVM copy (dlsch, rx_size) is not used */
+    post_fold(&t_def->j, NULL, t_def->nl, t_def->qm, t_def->nbrx, t_def->start, t_def->last, 0);
+  g_release(t_def->j.ctx);
+  t_def->pending = 0;
+  return ok ? 0 : -1;
+}
+
 int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
 {
+  if (t_def && t_def->pending) /* a decode that returned before its deferred EVM was folded: drop it, free the context */
+    nr_pdsch_gpu_demod_evm_finish(0);
+  if (g_defer && !t_def)
+    t_def = calloc(1, sizeof(*t_def));
   int mode = 0, align = 0, l2d = 0;
   double thr_coef = 0.0;
   const int rf = refuse(c, &mode, &thr_coef, &align, &l2d);
@@ -641,8 +700,10 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   const uint64_t n = atomic_fetch_add_explicit(&g_calls, 1, memory_order_relaxed) + 1;
   const int check = g_check == 1 || (g_check > 1 && n % (uint64_t)g_check == 0);
   if (!check) {
+    t_defer_ok = g_defer;
     const int r = gpu_grant(c, mode, thr_coef, align, l2d, c->llr, c->llr_cap, c->dl_valid_re, c->log2_maxh, c->comp, c->mag, c->magb,
                             c->magr, &gns);
+    t_defer_ok = 0;
     if (r >= 0) {
       atomic_fetch_add_explicit(&g_refuse[r], 1, memory_order_relaxed);
       atomic_fetch_sub_explicit(&g_calls, 1, memory_order_relaxed);

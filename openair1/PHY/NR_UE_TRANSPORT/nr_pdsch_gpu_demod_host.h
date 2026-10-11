@@ -37,6 +37,10 @@ typedef struct {
 int nr_pdsch_gpu_demod_warmup(const NR_DL_FRAME_PARMS *fp);
 /* 0: the grant is demodulated (exactly what the CPU loop would have produced); -1: the caller runs its CPU loop. */
 int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c);
+/* DECGPU ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER=1: the last grant's EVM sums are still on the GPU (its LLRs are final) */
+int nr_pdsch_gpu_demod_evm_deferred(void);
+/* waits for them and (fold != 0) adds them to nr_pdsch_evm_acc as the non-deferred path would have; 0 = done */
+int nr_pdsch_gpu_demod_evm_finish(int fold);
 /* GPU-DEMOD stage 2 (nr_dl_channel_estimation.c): every (DM-RS symbol in dmrs_mask, layer) estimate of a grant on the
  * GPU; nvar_out / nvar_ant_out = what each nr_pdsch_channel_estimation() call would return / publish. segs != NULL: the
  * PRG/VRB segmented path (estimate rows assembled in data order, width-weighted nvar). 0 = done. */

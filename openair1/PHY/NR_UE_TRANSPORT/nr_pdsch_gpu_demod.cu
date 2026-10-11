@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <thread>
 
@@ -495,6 +496,180 @@ __global__ void k_mmse2(const nr_gpu_demod_job_t j, const nrd_c16 *h, const Shar
   }
 }
 
+
+/* ---- DECGPU: nr_dlsch_mmse() for Nl = 3, 4 (ISAC_PDSCH_GPU_EXACT_DEMOD_NL34=1). One thread per RE. --------------- */
+/* QAM-FIX mode 2: the generic Gauss-Jordan of the CPU source with the operation order of the Nl = 2 kernel above
+ * (same compiled loop): pivot by cabs, complex scaling cmul(M[k][c], inv), elimination M[r][c] - cmul(M[k][c], f). */
+template <int NL> __global__ void k_mmse2n(const nr_gpu_demod_job_t j, const nrd_c16 *h, const Shared *sh)
+{
+  const int m = blockIdx.y;
+  if (!(j.sym_mask >> m & 1))
+    return;
+  constexpr int NC = 2 * NL + 1;
+  const int shift = sh->d.log2_maxh, nb = j.nbRx;
+  const int16_t qa = j.qm == 4 ? NRD_QAM16_n1 : j.qm == 6 ? NRD_QAM64_n1 : j.qm == 8 ? NRD_QAM256_n1 : 0;
+  const int16_t qb = j.qm == 6 ? NRD_QAM64_n2 : j.qm == 8 ? NRD_QAM256_n2 : 0;
+  const int16_t qr = j.qm == 8 ? NRD_QAM256_n3 : 0;
+  const uint32_t nre = j.nre[m];
+  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < nre; i += gridDim.x * blockDim.x) {
+    dcx M[NL][NC];
+    for (int r = 0; r < NL; r++) {
+      for (int c = 0; c < NL; c++) {
+        nrd_c16 g = {0, 0};
+        for (int a = 0; a < nb; a++) {
+          const nrd_c16 hr = h[((size_t)m * 16 + r * nb + a) * EXT + i], hc = h[((size_t)m * 16 + c * nb + a) * EXT + i];
+          const nrd_c16 p = nrd_cpx_mult_conj(hr, hc, shift);
+          g = a == 0 ? p : nrd_c16{nrd_adds(g.r, p.r), nrd_adds(g.i, p.i)};
+        }
+        M[r][c] = dcx{(double)g.r, (double)g.i};
+        M[r][NL + 1 + c] = dcx{r == c ? 1.0 : 0.0, 0.0};
+      }
+      const nrd_c16 b = ((const nrd_c16 *)j.comp)[((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i];
+      M[r][NL] = dcx{(double)b.r, (double)b.i};
+    }
+    bool singular = false;
+    for (int k = 0; k < NL && !singular; k++) {
+      int piv = k;
+      for (int r = k + 1; r < NL; r++)
+        if (cabs_c(M[r][k]) > cabs_c(M[piv][k]))
+          piv = r;
+      if (cabs_c(M[piv][k]) < 1e-9) {
+        singular = true;
+        break;
+      }
+      if (piv != k)
+        for (int c = 0; c < NC; c++) {
+          const dcx t = M[k][c];
+          M[k][c] = M[piv][c];
+          M[piv][c] = t;
+        }
+      const dcx inv = divdc3(1.0, 0.0, M[k][k].r, M[k][k].i);
+      for (int c = 0; c < NC; c++)
+        M[k][c] = cmul(M[k][c], inv);
+      for (int r = 0; r < NL; r++) {
+        if (r == k)
+          continue;
+        const dcx f = M[r][k];
+        if (f.r == 0.0 && f.i == 0.0)
+          continue;
+        for (int c = 0; c < NC; c++) {
+          const dcx t = cmul(M[k][c], f);
+          M[r][c] = dcx{__dsub_rn(M[r][c].r, t.r), __dsub_rn(M[r][c].i, t.i)};
+        }
+      }
+    }
+    for (int r = 0; r < NL; r++) {
+      const double dinv = singular ? 0.0 : M[r][NL + 1 + r].r;
+      const double w = dinv > 1e-12 ? __ddiv_rn(1.0, dinv) : 0.0;
+      const double orr = w > 0.0 ? __dmul_rn(M[r][NL].r, w) : 0.0, oi = w > 0.0 ? __dmul_rn(M[r][NL].i, w) : 0.0;
+      const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i;
+      ((nrd_c16 *)j.comp)[row] = nrd_c16{qf_s16(orr), qf_s16(oi)};
+      const int16_t ma = qf_s16(__dmul_rn(__dmul_rn(w, (double)qa), 1.0 / 32768.0));
+      const int16_t mb = qf_s16(__dmul_rn(__dmul_rn(w, (double)qb), 1.0 / 32768.0));
+      const int16_t mr = qf_s16(__dmul_rn(__dmul_rn(w, (double)qr), 1.0 / 32768.0));
+      ((nrd_c16 *)j.mag)[row] = nrd_c16{ma, ma};
+      ((nrd_c16 *)j.magb)[row] = nrd_c16{mb, mb};
+      ((nrd_c16 *)j.magr)[row] = nrd_c16{mr, mr};
+    }
+  }
+}
+
+/* stock fixed-point MMSE (mode 0): mult_complex_vectors(in1, in2, s) = conj-free complex product, madd lanes, low 16
+ * bits of re >> s and im >> s (srai / slli + blend, no saturation); nr_determin()'s cofactor recursion along index 0;
+ * adds_epi16 sums; sign_epi16 negation. A[x][y] is the CPU's conjH_H_elements[0][x][y]. */
+__device__ __forceinline__ nrd_c16 mcv(nrd_c16 a, nrd_c16 b, int s)
+{
+  const int32_t re = nrd_madd(a.r, b.r, a.i, nrd_neg_wrap(b.i)), im = nrd_madd(a.r, b.i, a.i, b.r);
+  const int16_t ore = (int16_t)nrd_srai32(re, s);
+  const int16_t oim = 16 - s >= 32 || 16 - s < 0 ? 0 : (int16_t)(((uint32_t)im << (16 - s)) >> 16);
+  return nrd_c16{ore, oim};
+}
+template <int S> struct Det {
+  /* a[x][y] for x, y < S given as index lists into the full matrix */
+  __device__ static nrd_c16 run(const nrd_c16 (&A)[4][4], const int *xs, const int *ys, int sign, int s0)
+  {
+    nrd_c16 acc = {0, 0};
+    for (int rtx = 0; rtx < S; rtx++) {
+      int sx[S - 1 > 0 ? S - 1 : 1], sy[S - 1 > 0 ? S - 1 : 1], k = 0;
+      for (int c = 1; c < S; c++) /* sub_matrix[cidx][ridx] = a44[cc[cidx]][rr[ridx]], cc skips ctx = 0, rr skips rtx */
+        sx[c - 1] = xs[c];
+      for (int r = 0; r < S; r++)
+        if (r != rtx)
+          sy[k++] = ys[r];
+      const nrd_c16 t = Det<S - 1>::run(A, sx, sy, ((rtx & 1) ? -1 : 1) * sign, s0);
+      const nrd_c16 p = mcv(A[xs[0]][ys[rtx]], t, s0);
+      acc = rtx == 0 ? p : nrd_c16{nrd_adds(acc.r, p.r), nrd_adds(acc.i, p.i)};
+    }
+    return acc;
+  }
+};
+template <> struct Det<1> {
+  __device__ static nrd_c16 run(const nrd_c16 (&A)[4][4], const int *xs, const int *ys, int sign, int)
+  {
+    const nrd_c16 a = A[xs[0]][ys[0]];
+    return sign < 0 ? nrd_c16{nrd_neg_wrap(a.r), nrd_neg_wrap(a.i)} : a;
+  }
+};
+template <int NL> __global__ void k_mmse0n(const nr_gpu_demod_job_t j, const nrd_c16 *h, const Shared *sh)
+{
+  const int m = blockIdx.y;
+  if (!(j.sym_mask >> m & 1))
+    return;
+  const int shift = sh->d.log2_maxh, s0 = shift - 1, nb = j.nbRx;
+  const uint32_t nre = j.nre[m];
+  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < nre; i += gridDim.x * blockDim.x) {
+    nrd_c16 A[4][4];
+    for (int r = 0; r < NL; r++)
+      for (int c = 0; c < NL; c++) { /* conjH_H_elements[a][c][r] = conj(h_r) h_c >> shift, summed over a */
+        nrd_c16 g = {0, 0};
+        for (int a = 0; a < nb; a++) {
+          const nrd_c16 p = nrd_cpx_mult_conj(h[((size_t)m * 16 + r * nb + a) * EXT + i], h[((size_t)m * 16 + c * nb + a) * EXT + i], shift);
+          g = a == 0 ? p : nrd_c16{nrd_adds(g.r, p.r), nrd_adds(g.i, p.i)};
+        }
+        A[c][r] = g;
+      }
+    if (j.nvar != 0)
+      for (int p = 0; p < NL; p++) { /* add_epi32 of nvar >> 3 on the (re | im << 16) word */
+        const uint32_t w = ((uint32_t)(uint16_t)A[p][p].r | (uint32_t)(uint16_t)A[p][p].i << 16) + (j.nvar >> 3);
+        A[p][p] = nrd_c16{(int16_t)(uint16_t)(w & 0xffff), (int16_t)(uint16_t)(w >> 16)};
+      }
+    int all[4] = {0, 1, 2, 3};
+    const nrd_c16 det = Det<NL>::run(A, all, all, 1, s0);
+    nrd_c16 inv[NL][NL]; /* inv_H_h_H[rtx][ctx] */
+    for (int rtx = 0; rtx < NL; rtx++)
+      for (int ctx = 0; ctx < NL; ctx++) {
+        int cc[NL - 1], rr[NL - 1], k = 0, q = 0;
+        for (int x = 0; x < NL; x++)
+          if (x != ctx)
+            cc[k++] = x;
+        for (int y = 0; y < NL; y++)
+          if (y != rtx)
+            rr[q++] = y;
+        inv[rtx][ctx] = Det<NL - 1>::run(A, cc, rr, ((rtx & 1) ? -1 : 1) * ((ctx & 1) ? -1 : 1), s0);
+      }
+    nrd_c16 y[NL];
+    for (int l = 0; l < NL; l++)
+      y[l] = ((const nrd_c16 *)j.comp)[((size_t)m * NR_GPU_DEMOD_MAX_NL + l) * j.buf + i];
+    for (int rtx = 0; rtx < NL; rtx++) {
+      nrd_c16 z = {0, 0};
+      for (int ctx = 0; ctx < NL; ctx++) {
+        const nrd_c16 p = mcv(inv[ctx][rtx], y[ctx], s0);
+        z = nrd_c16{nrd_adds(z.r, p.r), nrd_adds(z.i, p.i)};
+      }
+      ((nrd_c16 *)j.comp)[((size_t)m * NR_GPU_DEMOD_MAX_NL + rtx) * j.buf + i] = z;
+    }
+    if (j.qm > 2) { /* thresholds from det: (det.r, det.r) * QAM amplitude, mulhrs, layer 0's rows */
+      const int16_t qa = j.qm == 4 ? NRD_QAM16_n1 : j.qm == 6 ? NRD_QAM64_n1 : NRD_QAM256_n1;
+      const int16_t qb = j.qm == 6 ? NRD_QAM64_n2 : j.qm == 8 ? NRD_QAM256_n2 : 0;
+      const int16_t qr = j.qm == 8 ? NRD_QAM256_n3 : 0;
+      const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL) * j.buf + i;
+      const int16_t a = nrd_mulhrs(det.r, qa), b = nrd_mulhrs(det.r, qb), c = nrd_mulhrs(det.r, qr);
+      ((nrd_c16 *)j.mag)[row] = nrd_c16{a, a};
+      ((nrd_c16 *)j.magb)[row] = nrd_c16{b, b};
+      ((nrd_c16 *)j.magr)[row] = nrd_c16{c, c};
+    }
+  }
+}
 
 /* ---- ISAC_PDSCH_EVM_GRANT on the GPU (nr_rx_pdsch()'s EVM block, Nl <= 2): one block per symbol. Per-RE terms
  * follow the CPU formulas (the 1-layer solve x = b / G is the CPU's exact IEEE division); the sums are block
@@ -1091,6 +1266,20 @@ extern "C" void nr_pdsch_gpu_demod_release(int c)
     g_busy.fetch_and(~(1u << c));
 }
 
+extern "C" int nr_pdsch_gpu_demod_evm_wait(nr_gpu_demod_job_t *j)
+{
+  if (j->ctx < 0 || j->ctx >= CTX)
+    return -1;
+  Ctx &x = g_ctx[j->ctx];
+  cudaError_t e;
+  while ((e = cudaStreamQuery(x.s2)) == cudaErrorNotReady) {}
+  if (e != cudaSuccess)
+    return -1;
+  memcpy(j->evm, x.sh->evm, sizeof(j->evm));
+  j->evm_pending = 0;
+  return 0;
+}
+
 extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
 {
   if (!g_ok || j->nbRx > NR_GPU_DEMOD_MAX_RX || j->nl > NR_GPU_DEMOD_MAX_NL || j->ext > (uint32_t)EXT
@@ -1156,6 +1345,14 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   if (g_prof) cudaEventRecord(x.ev[6], x.s);
   if (jj.nl == 2)
     k_mmse2<<<dim3((maxre + 127) / 128, NSYM), 128, 0, x.s>>>(jj, x.h, x.dsh);
+  else if (jj.nl == 3 && jj.qam_mode == 2)
+    k_mmse2n<3><<<dim3((maxre + 127) / 128, NSYM), 128, 0, x.s>>>(jj, x.h, x.dsh);
+  else if (jj.nl == 4 && jj.qam_mode == 2)
+    k_mmse2n<4><<<dim3((maxre + 127) / 128, NSYM), 128, 0, x.s>>>(jj, x.h, x.dsh);
+  else if (jj.nl == 3)
+    k_mmse0n<3><<<dim3((maxre + 127) / 128, NSYM), 128, 0, x.s>>>(jj, x.h, x.dsh);
+  else if (jj.nl == 4)
+    k_mmse0n<4><<<dim3((maxre + 127) / 128, NSYM), 128, 0, x.s>>>(jj, x.h, x.dsh);
   if (g_prof) cudaEventRecord(x.ev[7], x.s);
   if (jj.want_kappa && jj.qm > 2)
     k_kappa<<<NSYM, 256, 0, x.s>>>(jj, x.dsh);
@@ -1166,9 +1363,15 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     cudaMemcpyAsync(x.hy, x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT, cudaMemcpyDeviceToHost, x.s);
     cudaMemcpyAsync(x.hh, x.h, sizeof(nrd_c16) * NSYM * 16 * EXT, cudaMemcpyDeviceToHost, x.s);
   }
-  if (jj.want_evm && !g_prof)
-    cudaStreamWaitEvent(x.s, x.join, 0);
-  cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, x.s);
+  const bool defer = jj.want_evm && jj.evm_defer && !g_prof;
+  if (defer) { /* the LLRs need only the main stream; the EVM sums follow on s2 (nr_pdsch_gpu_demod_evm_wait) */
+    cudaMemcpyAsync(x.sh, x.dsh, offsetof(Shared, evm), cudaMemcpyDeviceToHost, x.s);
+    cudaMemcpyAsync(x.sh->evm, x.dsh->evm, sizeof(x.sh->evm), cudaMemcpyDeviceToHost, x.s2);
+  } else {
+    if (jj.want_evm && !g_prof)
+      cudaStreamWaitEvent(x.s, x.join, 0);
+    cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, x.s);
+  }
   cudaError_t e = cudaPeekAtLastError();
   while (e == cudaSuccess) {
     e = cudaStreamQuery(x.s);
@@ -1213,8 +1416,9 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   j->mrc_nb_rx = d.mrc_nb_rx;
   memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
   memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
-  if (jj.want_evm)
+  if (jj.want_evm && !defer)
     memcpy(j->evm, x.sh->evm, sizeof(j->evm));
+  j->evm_pending = defer;
   j->y_ext = (const int16_t *)x.hy;
   j->h_ext = (const int16_t *)x.hh;
   j->ctx = c;
