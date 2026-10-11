@@ -9,6 +9,7 @@
 #include <thread>
 #include <algorithm>
 #include "nr_dl_gpu_memory.h"
+#include "nr_gpu_green.h"
 #define NID_FN __device__
 #include "nr_pdcch_nid_stage1.h"
 #include "nr_pdcch_nid_chunks.h"
@@ -572,7 +573,8 @@ void *create(int rb,int dur,int window,nr_pdcch_nid_iq_t **staging) {
  int *slots=nullptr; c16_t *iq=nullptr;double *scratch=nullptr;st2_snap_t *sn=nullptr;
  int least_priority=0,greatest_priority=0;
  if(cudaDeviceGetStreamPriorityRange(&least_priority,&greatest_priority)!=cudaSuccess
-    || cudaStreamCreateWithPriority(&c->stream,cudaStreamNonBlocking,least_priority)!=cudaSuccess)goto fail;
+    || (!nr_gpu_green_stream(&c->stream,least_priority,false)
+        && cudaStreamCreateWithPriority(&c->stream,cudaStreamNonBlocking,least_priority)!=cudaSuccess))goto fail;
  if(!c->slice.init())goto fail;
  for(auto &e:c->event)if(cudaEventCreateWithFlags(&e,cudaEventDefault)!=cudaSuccess)goto fail;
  if(cudaEventCreateWithFlags(&c->done,cudaEventDisableTiming)!=cudaSuccess)goto fail;

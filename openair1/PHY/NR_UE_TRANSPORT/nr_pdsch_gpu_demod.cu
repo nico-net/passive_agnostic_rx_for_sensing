@@ -8,6 +8,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_gpu_demod.cuh"
 #include <cuda_runtime.h>
+#include "nr_gpu_green.h"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <atomic>
 #include <chrono>
@@ -1202,7 +1203,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     return -1;
   for (int c = 0; c < CTX; c++) {
     Ctx &x = g_ctx[c];
-    if (cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess
+    if ((!nr_gpu_green_stream(&x.s, hi, true) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaMalloc((void **)&x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
         || cudaMalloc((void **)&x.h, sizeof(nrd_c16) * NSYM * 16 * EXT) != cudaSuccess
         || cudaMallocHost((void **)&x.hy, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
@@ -1224,7 +1225,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     for (int k = 0; k < 13; k++)
       if (cudaEventCreate(&x.ev[k]) != cudaSuccess)
         return -1;
-    if (cudaStreamCreateWithPriority(&x.s2, cudaStreamNonBlocking, hi) != cudaSuccess
+    if ((!nr_gpu_green_stream(&x.s2, hi, true) && cudaStreamCreateWithPriority(&x.s2, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaEventCreateWithFlags(&x.fork, cudaEventDisableTiming) != cudaSuccess
         || cudaEventCreateWithFlags(&x.join, cudaEventDisableTiming) != cudaSuccess)
       return -1;

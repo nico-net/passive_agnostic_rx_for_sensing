@@ -2,6 +2,7 @@
 #include "nr_csirs_disc_sweep_internal.h"
 #include "nr_csirs_disc_evidence_internal.h"
 #include <cuda_runtime.h>
+#include "nr_gpu_green.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -228,7 +229,7 @@ static int prepare(int rb,int ant,int capacity)
 {
   auto &w=workspace;
   if(w.rb>=rb && w.ant>=ant && w.capacity>=capacity) return 0;
-  if(!w.stream && cudaStreamCreateWithFlags(&w.stream,cudaStreamNonBlocking)!=cudaSuccess) return -1;
+  if(!w.stream && !nr_gpu_green_stream(&w.stream,0,false) && cudaStreamCreateWithFlags(&w.stream,cudaStreamNonBlocking)!=cudaSuccess) return -1;
   if(!w.done && cudaEventCreateWithFlags(&w.done,cudaEventBlockingSync|cudaEventDisableTiming)!=cudaSuccess) return -1;
   size_t maps=(size_t)rb*16*8*2*4; // conservative mapping capacity for all rows
   // Occupied REs <= 32 ports * 8 RE/RB (row 18).

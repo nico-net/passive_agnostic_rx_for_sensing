@@ -6,6 +6,7 @@
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
+#include "nr_gpu_green.h"
 #include <cufft.h>
 #include <chrono>
 #include <cmath>
@@ -606,7 +607,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   {
     int least = 0, greatest = 0;
     CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
-    CK(cudaStreamCreateWithPriority(&g_stream, cudaStreamNonBlocking, greatest));
+    if (!nr_gpu_green_stream(&g_stream, greatest, true)) CK(cudaStreamCreateWithPriority(&g_stream, cudaStreamNonBlocking, greatest));
   }
   CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_rx, (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2)));
   CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_h_rot, MAX_SYM * sizeof(short2)));
@@ -664,7 +665,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       int least = 0, greatest = 0;
       CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
       for (int c = 0; c < EXACT_CTX; c++) {
-        CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
+        if (!nr_gpu_green_stream(&g_ctx_stream[c], greatest, true)) CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
         CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_ctx_ls[c], NR_GPU_CHEST_MAX_ROWS * 4096 * sizeof(short2)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_cout[c], 4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)));

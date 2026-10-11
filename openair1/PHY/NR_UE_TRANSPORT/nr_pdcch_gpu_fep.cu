@@ -20,6 +20,7 @@
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
+#include "nr_gpu_green.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -208,7 +209,7 @@ static int allocate_init(const nr_gpu_pdcch_fep_cfg_t *cfg)
   if(nr_gpu_budget_enabled()) {
     int least=0,greatest=0;
     CK(cudaDeviceGetStreamPriorityRange(&least,&greatest));
-    CK(cudaStreamCreateWithPriority(&g_stream,cudaStreamNonBlocking,greatest));
+    if(!nr_gpu_green_stream(&g_stream,greatest,true)) CK(cudaStreamCreateWithPriority(&g_stream,cudaStreamNonBlocking,greatest));
   } else {CK(cudaStreamCreate(&g_stream));}
   CK(nr_gpu_allocate(NR_GPU_DEVICE, &g_d_rxF, (size_t)nant * MAX_DUR * N * sizeof(float2)));
   CK(nr_gpu_allocate(NR_GPU_STAGING, &g_h_rxF_stage, (size_t)nant * MAX_DUR * N * sizeof(float2)));

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
+#include "nr_gpu_green.h"
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -14,7 +15,7 @@ struct DiscoveryStream {
  */
   bool init() {
     if(stream && done) return true;
-    return cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking)==cudaSuccess
+    return (nr_gpu_green_stream(&stream,0,false) || cudaStreamCreateWithFlags(&stream,cudaStreamNonBlocking)==cudaSuccess)
         && cudaEventCreateWithFlags(&done,cudaEventBlockingSync|cudaEventDisableTiming)==cudaSuccess;
   }
 };
