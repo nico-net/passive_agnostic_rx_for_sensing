@@ -351,6 +351,57 @@ TEST(PdschSolver, CsiRsRateMatchingIsAPerRntiCrcHypothesis)
   for (int i = 0; i < n; i++) EXPECT_EQ(v[i].rm, 0);
 }
 
+// TIMBIMODAL ISAC_PDSCH_SOLVER_PRIOR_CRC=1: a solution seeds other RNTIs (cell prior, REUSE) only once it decoded a full
+// TB. RNTI 0x00a1 is "solved" on add_pos 2 by two CRC passes (as by two chance CRC-16 passes OTA, ab_Tr2_1_094729), but no
+// full TB ever decodes. With one probe per grant, RNTI 0x00b2's probe goes to that layout while it is the prior.
+static int FirstAddPos(uint16_t rnti, const Cell &c, std::mt19937 &rng)
+{
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 16}, {c.truth.data(), (int)c.truth.size(), 16}};
+  nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  const int n = nr_pdsch_solver_plan(rnti, p, 49, 0, 2, rd, 2, 1, v);
+  for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+  return n > 0 ? v[0].add_pos : -1;
+}
+static void FullDecodes(uint16_t rnti, const Cell &c, int k, bool ok, std::mt19937 &rng)
+{
+  nr_pdsch_solver_reading_t rd[1] = {{c.truth.data(), (int)c.truth.size(), 16}};
+  for (int g = 0; g < k; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(rnti, p, 49, 0, 2, rd, 1, 8, v);
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, ok && !v[i].probe, true);
+  }
+}
+TEST(PdschSolver, OnlyACrcProvenSolutionSeedsTheCell)
+{
+  setenv("ISAC_PDSCH_SOLVER_REUSE", "1", 1);
+  Cell fake;
+  fake.add_pos = 2;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? fake.truth : fake.wrong).push_back((uint16_t)i);
+  for (int on = 0; on < 2; on++) {
+    on ? setenv("ISAC_PDSCH_SOLVER_PRIOR_CRC", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_PRIOR_CRC");
+    nr_pdsch_solver_reset();
+    nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+    std::mt19937 rng(21);
+    ASSERT_GT(RunCell(fake, 0x00a1, -1, 400, rng), 0);
+    EXPECT_EQ(FirstAddPos(0x00b2, fake, rng), on ? 1 : 2) << "solved, no full TB yet (REUSE)";
+    FullDecodes(0x00a1, fake, 700, false, rng); // never decodes: reopened after 256 fulls
+    EXPECT_LT(nr_pdsch_solver_rep(0x00a1), 0);
+    EXPECT_EQ(FirstAddPos(0x00b2, fake, rng), on ? 1 : 2) << "reopened: flag off keeps the stale cell prior forever";
+  }
+  // control: a solution that decodes a full TB seeds the cell with the flag on
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(22);
+  ASSERT_GT(RunCell(fake, 0x00a1, -1, 400, rng), 0);
+  FullDecodes(0x00a1, fake, 20, true, rng);
+  EXPECT_EQ(FirstAddPos(0x00b2, fake, rng), 2);
+  unsetenv("ISAC_PDSCH_SOLVER_PRIOR_CRC");
+  unsetenv("ISAC_PDSCH_SOLVER_REUSE");
+  nr_pdsch_solver_reset();
+}
+
 int main(int argc, char **argv)
 {
   logInit();
