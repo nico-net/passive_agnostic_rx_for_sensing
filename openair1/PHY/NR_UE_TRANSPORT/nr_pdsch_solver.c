@@ -128,6 +128,8 @@ static int g_nl_pref_gap = -1;
 static int g_coverage = -1;
 static int g_layout_recover = -1;
 static int g_fairshare = -1; /* ISAC_PDSCH_SOLVER_FAIRSHARE, re-read after nr_pdsch_solver_reset() */
+static int g_reuse = -1; /* ISAC_PDSCH_SOLVER_REUSE, re-read after nr_pdsch_solver_reset() */
+static int g_prior_crc = -1; /* ISAC_PDSCH_SOLVER_PRIOR_CRC, re-read after nr_pdsch_solver_reset() */
 /* cell prior: the first solution, offered first to other RNTIs */
 static bool g_have_prior;
 static int g_prior_rep;
@@ -167,6 +169,8 @@ void nr_pdsch_solver_reset(void)
   g_coverage = -1;
   g_layout_recover = -1;
   g_fairshare = -1;
+  g_reuse = -1;
+  g_prior_crc = -1;
   for (int i = 0; i < SOLVER_RNTIS; i++) {
     free(g_r[i].cand_bm);
     if (g_r[i].coverage) free(g_r[i].coverage->entries);
@@ -331,6 +335,30 @@ bool nr_pdsch_solver_fairshare_on(void)
 {
   if (g_fairshare < 0) g_fairshare = getenv("ISAC_PDSCH_SOLVER_FAIRSHARE") && atoi(getenv("ISAC_PDSCH_SOLVER_FAIRSHARE")) ? 1 : 0;
   return g_fairshare == 1;
+}
+
+/* prior_crc_on: TIMBIMODAL ISAC_PDSCH_SOLVER_PRIOR_CRC=1 (default off): an RNTI's solution seeds the other RNTIs (cell prior,
+ *   CORESET scrambling, REUSE) only after it decoded a full TB with CRC OK. Two chance CRC-16 probe passes (tiny low-rate TBs)
+ *   once "solved" OTA TIM run ab_Tr2_1_094729 on a wrong layout, and that prior and scrambling stayed for the whole run. */
+static bool prior_crc_on(void)
+{
+  if (g_prior_crc < 0) g_prior_crc = getenv("ISAC_PDSCH_SOLVER_PRIOR_CRC") && atoi(getenv("ISAC_PDSCH_SOLVER_PRIOR_CRC")) ? 1 : 0;
+  return g_prior_crc == 1;
+}
+
+/* promote: makes a solved RNTI's solution the cell prior (if none yet) and its scrambling its CORESET's (if none yet). Under g_mu. */
+static void promote(const solver_rnti_t *r)
+{
+  int have = 0;
+  for (int q = 0; q < g_n_key_scr && !have; q++) have = g_key_scr[q].key == r->key;
+  if (!have && g_n_key_scr < 16) { g_key_scr[g_n_key_scr].key = r->key; g_key_scr[g_n_key_scr++].scr = r->scr; }
+  if (!g_have_prior) {
+    g_have_prior = true;
+    g_prior_rep = r->rep;
+    g_prior_add_pos = r->add_pos;
+    g_prior_table = r->table;
+    memcpy(g_prior_S_by_tda, r->S_by_tda, sizeof(g_prior_S_by_tda));
+  }
 }
 
 /* nr_pdsch_solver_fair_budget: ISAC_PDSCH_SOLVER_FAIRSHARE=1: the probe rate is divided equally among the unsolved RNTIs
@@ -1027,12 +1055,12 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     /* 2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best
      * solved RNTI (most full TB CRC passes; layouts refined, S map and MCS table learnt since) instead of the snapshot
      * taken at the first solve -- gNBs configure UEs from one RRC template. Still confirmed by this RNTI's own 2 passes. */
-    static int s_reuse = -1;
-    if (s_reuse < 0) s_reuse = getenv("ISAC_PDSCH_SOLVER_REUSE") && atoi(getenv("ISAC_PDSCH_SOLVER_REUSE")) ? 1 : 0;
+    if (g_reuse < 0) g_reuse = getenv("ISAC_PDSCH_SOLVER_REUSE") && atoi(getenv("ISAC_PDSCH_SOLVER_REUSE")) ? 1 : 0;
     const solver_rnti_t *best = NULL;
-    if (s_reuse)
+    const uint32_t min_ok = prior_crc_on() ? 1 : 0;
+    if (g_reuse)
       for (int k = 0; k < SOLVER_RNTIS; k++)
-        if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && (!best || g_r[k].full_ok > best->full_ok))
+        if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && g_r[k].full_ok >= min_ok && (!best || g_r[k].full_ok > best->full_ok))
           best = &g_r[k];
     if (best) {
       for (int i = 0; i < n_rd; i++)
@@ -1259,6 +1287,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
       if (crc_ok) {
         r->full_ok++;
         r->cons_fail = 0;
+        if (r->full_ok == 1 && prior_crc_on()) promote(r); /* first CRC-proven full TB: now it may seed the cell */
         if (r->full_ok <= 20 || (r->full_ok % 100) == 0)
           LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x full TB CRC OK #%u of %u full decodes (S=%u table=%u layout %d)\n",
                 r->rnti, r->full_ok, r->full_tr, p->S, p->table, r->rep);
@@ -1329,11 +1358,6 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         if (r->rep < 0) r->rep = lowest(r->cand_bm);
         r->add_pos = p->add_pos;
         r->scr = p->scr;
-        { /* T26c: remember this CORESET's scrambling for its other RNTIs */
-          int have = 0;
-          for (int q = 0; q < g_n_key_scr && !have; q++) have = g_key_scr[q].key == r->key;
-          if (!have && g_n_key_scr < 16) { g_key_scr[g_n_key_scr].key = r->key; g_key_scr[g_n_key_scr++].scr = r->scr; }
-        }
         r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
         g_st.solved++;
         r->solved_abs = p->abs;
@@ -1343,13 +1367,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
                    "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%d\n",
               r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,
               tda_of(r->rep, p->payload), p->S, (int)r->scr);
-        if (!g_have_prior) {
-          g_have_prior = true;
-          g_prior_rep = r->rep;
-          g_prior_add_pos = r->add_pos;
-          g_prior_table = r->table;
-          memcpy(g_prior_S_by_tda, r->S_by_tda, sizeof(g_prior_S_by_tda));
-        }
+        if (!prior_crc_on()) promote(r); /* T26c: the CORESET's scrambling and the cell prior for the other RNTIs */
       }
       free(nb);
     }
