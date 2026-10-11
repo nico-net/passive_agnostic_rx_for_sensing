@@ -122,9 +122,9 @@ void nr_pdsch_solver_note_skip(uint16_t rnti, int why);
 /** ISAC_PDSCH_SOLVER_FAIRSHARE=1 (default off): fair per-RNTI share of the probe rate for unsolved RNTIs, and reuse of
  * the least recently active solver entry (idle >= 2 s) when the 64-RNTI table is full. */
 bool nr_pdsch_solver_fairshare_on(void);
-/** Probes an unsolved RNTI may plan now: its share rate_per_slot / n_active of the probe rate (capped at budget).
- * Returns budget unchanged with the flag off. */
-int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, int budget);
+/** Probes an unsolved RNTI may plan now: its share rate_per_slot / n_active of the probe rate (capped at budget), applied
+ * only while the global bucket is below its burst or the ring above its fill (contended); budget unchanged with the flag off. */
+int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool contended, int budget);
 
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);

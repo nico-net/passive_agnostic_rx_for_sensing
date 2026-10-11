@@ -337,8 +337,10 @@ bool nr_pdsch_solver_fairshare_on(void)
  * active in the last 0.2 s (a per-RNTI token bucket of rate/n_active, capped at `budget`), so a busy RNTI whose search
  * keeps failing cannot take the whole probe budget from the others (replay TIM 12 s: one RNTI planned 65 % of all probes,
  * the others got no budget on up to half of their grants: its probes kept the decode ring above the admission fill). A
- * new RNTI starts with a full budget (prompt cold start). Returns the probes this grant may plan (<= budget). */
-int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, int budget)
+ * new RNTI starts with a full budget (prompt cold start). Work-conserving: the share caps only when the bucket cannot
+ * refill to its burst now (contended); with spare capacity every RNTI plans its full budget (replay TIM 12 s
+ * at 0.25x: an always-on cap left capacity unused and solved fewer RNTIs). Returns the probes this grant may plan. */
+int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool contended, int budget)
 {
   if (!nr_pdsch_solver_fairshare_on() || budget <= 0 || rate_per_slot <= 0.0)
     return budget;
@@ -356,7 +358,7 @@ int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, int budget)
     else if (now > r->fc_abs) r->fcredit += rate_per_slot / n_active * (double)(now - r->fc_abs);
     if (r->fcredit > budget) r->fcredit = budget;
     r->fc_abs = now ? now : 1;
-    out = r->fcredit >= 1.0 ? (int)r->fcredit : 0;
+    if (contended) out = r->fcredit >= 1.0 ? (int)r->fcredit : 0; /* work-conserving: cap only under contention */
     if (out > budget) out = budget;
   }
   pthread_mutex_unlock(&g_mu);
@@ -1100,7 +1102,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   }
   for (int i = 0; i < n; i++) {
     out[i].probe ? g_st.probes++ : g_st.fulls++;
-    if (out[i].probe && !r->solved) { r->n_probe++; r->why[W_PROBES]++; r->fcredit -= 1.0; }
+    if (out[i].probe && !r->solved) { r->n_probe++; r->why[W_PROBES]++; r->fcredit = r->fcredit >= 1.0 ? r->fcredit - 1.0 : 0.0; } /* no debt from uncapped grants */
   }
   r->last_abs = ctx->now_abs;
   if (!r->solved) r->why[W_PLAN]++;

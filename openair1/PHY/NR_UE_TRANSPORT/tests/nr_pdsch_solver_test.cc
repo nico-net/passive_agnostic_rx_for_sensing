@@ -378,10 +378,10 @@ TEST(PdschSolver, FairShareSplitsTheProbeRateBetweenActiveRntis)
     int busy = 0, quiet = 0;
     for (uint64_t s = 1000; s < 3000; s++) {
       nr_pdsch_solver_set_now(s);
-      int b = nr_pdsch_solver_fair_budget(0x5114, 0.5, 24);
+      int b = nr_pdsch_solver_fair_budget(0x5114, 0.5, true, 24);
       if (b > 0) busy += PlanProbes(0x5114, b);
       if (s % 10 == 0) {
-        b = nr_pdsch_solver_fair_budget(0x5098, 0.5, 24);
+        b = nr_pdsch_solver_fair_budget(0x5098, 0.5, true, 24);
         if (b > 0) quiet += PlanProbes(0x5098, b);
       }
     }
@@ -391,6 +391,7 @@ TEST(PdschSolver, FairShareSplitsTheProbeRateBetweenActiveRntis)
       EXPECT_LE(busy, 0.25 * 2000 + 48); /* half of 0.5 probes/slot, plus the cold-start budget */
       EXPECT_GE(quiet, 0.25 * 2000 - 48);
       EXPECT_LE(quiet, 0.25 * 2000 + 48);
+      EXPECT_EQ(nr_pdsch_solver_fair_budget(0x5114, 0.5, false, 24), 24); /* work-conserving: no cap without contention */
     }
   }
   unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");

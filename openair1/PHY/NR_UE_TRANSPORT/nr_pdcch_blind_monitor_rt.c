@@ -1240,7 +1240,7 @@ static int nr_pdcch_dci11_stage2_enabled(void)
  *   Flags: ISAC_PDSCH_SOLVER_PROBE_RATE/BURST/FILL, ISAC_PDSCH_SNR_GATE (+_DB). v == NULL returns the number of probes available now (-1 = unlimited).
  *   A refused variant releases its solver entry with no credit. Caller: nr_pdcch_blind_monitor_run_occasion_one() (solver planning loop).
  */
-static double g_gate_rate; /* published copy of the bucket rate (SOLVERCOVER fair share) */
+static double g_gate_rate, g_gate_burst; /* published copies of the bucket rate/burst (SOLVERCOVER fair share) */
 static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
 {
   static int init;
@@ -1263,6 +1263,7 @@ static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int m
     margin = e ? atof(e) : 3.0;
     tokens = burst;
     g_gate_rate = rate;
+    g_gate_burst = burst;
     init = 1;
   }
   bool ok = true;
@@ -9363,7 +9364,7 @@ constdiag_done:;
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
       int sv_budget = p_avail < 0 ? s_budget : (p_avail < s_budget ? p_avail : s_budget);
       if (rep < 0 && p_avail >= 0) /* ISAC_PDSCH_SOLVER_FAIRSHARE: this RNTI's share of the probe rate (no-op when off) */
-        sv_budget = nr_pdsch_solver_fair_budget(out.rnti, g_gate_rate, sv_budget);
+        sv_budget = nr_pdsch_solver_fair_budget(out.rnti, g_gate_rate, p_avail < (int)g_gate_burst, sv_budget);
       if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
       else if (sv_budget <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
