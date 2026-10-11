@@ -124,3 +124,54 @@ TEST(PdschDmrsScan, VotesIsolateTheUesOwnIdentity)
   EXPECT_EQ(nr_dmrs_scan_rnti_slots(0x5954), 3);
   EXPECT_EQ(nr_dmrs_scan_rnti_ids(0x1234, ids, 2), 0);
 }
+
+/* SOLVERCOVER: a background identity in every slot (65) and a busy co-scheduled UE's identity (1337, 60 % of the slots)
+ * outvote a quiet UE's own identity (638, detected on half of its slots). Raw votes rank 65/1337 first; the contrast
+ * ranking (ISAC_PDSCH_DMRS_ID_CONTRAST=1) puts 638 first and never drops an identity. A UE alone in the cell keeps its id. */
+static void VoteCell(void)
+{
+  std::mt19937 rng(7);
+  for (int64_t s = 0; s < 2000; s++) {
+    const bool busy = rng() % 10 < 6, quiet = rng() % 10 < 3, seen = rng() % 2 == 0;
+    nr_dmrs_scan_hit_t h[3];
+    int n = 0;
+    h[n++] = {65, 0, 0, 16, 0.9f, 0.4f};
+    if (busy) h[n++] = {1337, 0, 32, 16, 0.9f, 0.4f};
+    if (quiet && seen) h[n++] = {638, 0, 64, 16, 0.9f, 0.4f};
+    if (busy) nr_dmrs_scan_vote(0x5114, s, h, n);
+    if (quiet) nr_dmrs_scan_vote(0x5098, s, h, n);
+    if (!busy && !quiet) nr_dmrs_scan_vote(0x4000 + (int)(s % 5), s, h, n);
+  }
+}
+TEST(PdschDmrsScan, ContrastRanksTheUesOwnIdentityAboveCellWideOnes)
+{
+  int ids[2];
+  unsetenv("ISAC_PDSCH_DMRS_ID_CONTRAST");
+  nr_dmrs_scan_reset();
+  VoteCell();
+  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x5098, ids, 2), 2);
+  EXPECT_EQ(ids[0], 65); /* raw votes: the background id wins */
+  EXPECT_NE(ids[1], 638);
+  EXPECT_TRUE(nr_dmrs_scan_rnti_decided(0x4000)); /* raw rule: any id with 2 votes over 4 slots */
+  setenv("ISAC_PDSCH_DMRS_ID_CONTRAST", "1", 1);
+  nr_dmrs_scan_reset();
+  VoteCell();
+  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x5098, ids, 2), 2);
+  EXPECT_EQ(ids[0], 638);
+  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x5114, ids, 1), 1);
+  EXPECT_EQ(ids[0], 1337); /* the busy UE keeps its own id first too */
+  int all[8];
+  EXPECT_EQ(nr_dmrs_scan_rnti_ids(0x5098, all, 8), 3); /* reordered, nothing dropped */
+  EXPECT_TRUE(nr_dmrs_scan_rnti_decided(0x5098));
+  EXPECT_FALSE(nr_dmrs_scan_rnti_decided(0x4000)); /* only the cell-wide id: keep full-scanning for its own */
+  /* a single UE in every slot: no other slots, contrast = its own share, its id stays first */
+  nr_dmrs_scan_reset();
+  for (int64_t s = 0; s < 50; s++) {
+    nr_dmrs_scan_hit_t h[2] = {{415, 0, 0, 16, 0.9f, 0.4f}, {442, 0, 16, 16, 0.9f, 0.4f}};
+    nr_dmrs_scan_vote(0x7683, s, h, s % 3 ? 1 : 2);
+  }
+  ASSERT_EQ(nr_dmrs_scan_rnti_ids(0x7683, ids, 2), 2);
+  EXPECT_EQ(ids[0], 415);
+  unsetenv("ISAC_PDSCH_DMRS_ID_CONTRAST");
+  nr_dmrs_scan_reset();
+}

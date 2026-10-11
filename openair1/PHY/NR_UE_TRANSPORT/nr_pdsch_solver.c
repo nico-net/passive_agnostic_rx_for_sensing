@@ -15,6 +15,11 @@
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
 
 typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
+/* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
+enum { W_PLAN = NR_PDSCH_SOLVER_WHY_CALLER_N, W_CSIRS, W_LEADER, W_HOG, W_NLSKIP, W_BACKOFF, W_WIDE, W_PROBES, W_POK, W_PFAIL,
+       W_PNOCRED, W_N };
+static const char *const kWhy[W_N] = {"gate", "live", "budget0", "noread", "throttle", "cap", "plan", "csirs", "leader", "hog",
+                                      "nlskip", "backoff", "wide", "probes", "p_ok", "p_fail", "p_nocred"};
 typedef struct { coverage_entry_t *entries; size_t cap, used; } solver_coverage_t;
 
 typedef struct {
@@ -53,6 +58,10 @@ typedef struct {
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
   uint32_t pref_gap;       /* T26d ISAC_PDSCH_SOLVER_PREF: grants since the last search-preferred grant */
+  uint32_t why[W_N];       /* SOLVERCOVER diagnostics (see NR_PDSCH_SOLVER_WHY_*) */
+  uint64_t last_abs;       /* SOLVERCOVER: signal time of the last grant (activity, eviction) */
+  double fcredit;          /* SOLVERCOVER ISAC_PDSCH_SOLVER_FAIRSHARE: this RNTI's share of the probe rate, in probes */
+  uint64_t fc_abs;         /*   time of the last accrual (0 = never: cold start gets a full budget) */
 } solver_rnti_t;
 
 typedef struct {
@@ -118,6 +127,7 @@ static nr_pdsch_solver_stats_t g_st;
 static int g_nl_pref_gap = -1;
 static int g_coverage = -1;
 static int g_layout_recover = -1;
+static int g_fairshare = -1; /* ISAC_PDSCH_SOLVER_FAIRSHARE, re-read after nr_pdsch_solver_reset() */
 /* cell prior: the first solution, offered first to other RNTIs */
 static bool g_have_prior;
 static int g_prior_rep;
@@ -156,6 +166,7 @@ void nr_pdsch_solver_reset(void)
   g_nl_pref_gap = -1;
   g_coverage = -1;
   g_layout_recover = -1;
+  g_fairshare = -1;
   for (int i = 0; i < SOLVER_RNTIS; i++) {
     free(g_r[i].cand_bm);
     if (g_r[i].coverage) free(g_r[i].coverage->entries);
@@ -260,7 +271,24 @@ static solver_rnti_t *slot_of(uint16_t rnti, bool create, int *idx)
       if (idx) *idx = i;
       return &g_r[i];
     }
-  return NULL;
+  /* SOLVERCOVER ISAC_PDSCH_SOLVER_FAIRSHARE: a full table used to refuse every new RNTI for the rest of the run (no entry
+   * is ever freed: RNTI churn over minutes exceeds 64). Reuse the least recently active entry idle for >= 2 s of signal. */
+  int lru = -1;
+  const uint64_t now = plan_ctx()->now_abs;
+  for (int i = 0; nr_pdsch_solver_fairshare_on() && i < SOLVER_RNTIS; i++)
+    if (now >= g_r[i].last_abs + 4000 && (lru < 0 || g_r[i].last_abs < g_r[lru].last_abs)) lru = i;
+  if (lru < 0)
+    return NULL;
+  for (int k = 0; k < SOLVER_PENDING; k++) /* its in-flight variants must not credit the new RNTI */
+    if (g_p[k].used && g_p[k].slot == lru) g_p[k].used = false;
+  LOG_A(PHY, "SENSING: PDSCH_SOLVER table full: evicting rnti=0x%04x (idle %.1f s, solved=%d) for rnti=0x%04x\n", g_r[lru].rnti,
+        0.0005 * (double)(now - g_r[lru].last_abs), (int)g_r[lru].solved, rnti);
+  free(g_r[lru].cand_bm);
+  if (g_r[lru].coverage) free(g_r[lru].coverage->entries);
+  free(g_r[lru].coverage);
+  memset(&g_r[lru], 0, sizeof(g_r[lru]));
+  g_r[lru].used = false;
+  return slot_of(rnti, true, idx);
 }
 
 /* nr_pdsch_solver_reopen_layouts: returns true once an unsolved RNTI has been reopened to the full layout set after too many failed CRC probes.
@@ -297,6 +325,56 @@ int nr_pdsch_solver_rep(uint16_t rnti)
   const int rep = (r && r->solved) ? r->rep : -1;
   pthread_mutex_unlock(&g_mu);
   return rep;
+}
+
+bool nr_pdsch_solver_fairshare_on(void)
+{
+  if (g_fairshare < 0) g_fairshare = getenv("ISAC_PDSCH_SOLVER_FAIRSHARE") && atoi(getenv("ISAC_PDSCH_SOLVER_FAIRSHARE")) ? 1 : 0;
+  return g_fairshare == 1;
+}
+
+/* nr_pdsch_solver_fair_budget: ISAC_PDSCH_SOLVER_FAIRSHARE=1: the probe rate is divided equally among the unsolved RNTIs
+ * active in the last 0.2 s (a per-RNTI token bucket of rate/n_active, capped at `budget`), so a busy RNTI whose search
+ * keeps failing cannot take the whole probe budget from the others (replay TIM 12 s: one RNTI planned 65 % of all probes,
+ * the others got no budget on up to half of their grants: its probes kept the decode ring above the admission fill). A
+ * new RNTI starts with a full budget (prompt cold start). Work-conserving: the share caps only when the bucket cannot
+ * refill to its burst now (contended); with spare capacity every RNTI plans its full budget (replay TIM 12 s
+ * at 0.25x: an always-on cap left capacity unused and solved fewer RNTIs). Returns the probes this grant may plan. */
+int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool contended, int budget)
+{
+  if (!nr_pdsch_solver_fairshare_on() || budget <= 0 || rate_per_slot <= 0.0)
+    return budget;
+  pthread_mutex_lock(&g_mu);
+  const uint64_t now = plan_ctx()->now_abs;
+  solver_rnti_t *r = slot_of(rnti, true, NULL);
+  int out = budget;
+  if (r && !r->solved) {
+    r->last_abs = now;
+    int n_active = 0;
+    for (int i = 0; i < SOLVER_RNTIS; i++)
+      if (g_r[i].used && !g_r[i].solved && now <= g_r[i].last_abs + 400) n_active++;
+    if (n_active < 1) n_active = 1;
+    if (r->fc_abs == 0) r->fcredit = budget;
+    else if (now > r->fc_abs) r->fcredit += rate_per_slot / n_active * (double)(now - r->fc_abs);
+    if (r->fcredit > budget) r->fcredit = budget;
+    r->fc_abs = now ? now : 1;
+    if (contended) out = r->fcredit >= 1.0 ? (int)r->fcredit : 0; /* work-conserving: cap only under contention */
+    if (out > budget) out = budget;
+  }
+  pthread_mutex_unlock(&g_mu);
+  return out;
+}
+
+/* nr_pdsch_solver_note_skip: counts one caller-side reason why a grant of rnti was not planned / a variant not decoded. */
+void nr_pdsch_solver_note_skip(uint16_t rnti, int why)
+{
+  if (why < 0 || why >= NR_PDSCH_SOLVER_WHY_CALLER_N) return;
+  static int s_why = -1; /* only ISAC_PDSCH_SOLVER_WHY=1 lets a never-planned RNTI take a table entry (flag off = unchanged) */
+  if (s_why < 0) s_why = getenv("ISAC_PDSCH_SOLVER_WHY") && atoi(getenv("ISAC_PDSCH_SOLVER_WHY")) ? 1 : 0;
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, s_why == 1, NULL);
+  if (r) r->why[why]++;
+  pthread_mutex_unlock(&g_mu);
 }
 
 /* nr_pdsch_solver_note_snr: feeds one post-equalisation SNR sample (dB) of a full decode into the RNTI's exponential moving average.
@@ -827,6 +905,16 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
                     q->comb_ok[2], q->comb_try[2], q->comb_ok[3], q->comb_try[3]);
     }
     LOG_A(PHY, "SENSING: PDSCH_SOLVER per-rnti%s\n", b);
+    static int s_why = -1;
+    if (s_why < 0) s_why = getenv("ISAC_PDSCH_SOLVER_WHY") && atoi(getenv("ISAC_PDSCH_SOLVER_WHY")) ? 1 : 0;
+    for (int i = 0; s_why && i < SOLVER_RNTIS; i++) {
+      const solver_rnti_t *q = &g_r[i];
+      if (!q->used) continue;
+      u = 0;
+      for (int w = 0; w < W_N && u < (int)sizeof(b) - 32; w++)
+        if (q->why[w]) u += snprintf(b + u, sizeof(b) - u, " %s=%u", kWhy[w], q->why[w]);
+      LOG_A(PHY, "SENSING: PDSCH_SOLVER why rnti=0x%04x solved=%d grants=%u%s\n", q->rnti, (int)q->solved, q->grants, u ? b : "");
+    }
   }
   if ((g_st.planned % 500) == 0)
     LOG_A(PHY, "SENSING: PDSCH_SOLVER stats grants=%llu probes=%llu probe_ok=%llu fulls=%llu full_ok=%llu candidates=%llu "
@@ -873,17 +961,22 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       refine++;
     }
   } else if (csirs_slot) {
+    r->why[W_CSIRS]++;
     /* no search on a slot carrying discovered CSI-RS: its rate matching is unknown, a miss would be false evidence */
   } else if (!r->has_cand && !leader_ok(r)) {
+    r->why[W_LEADER]++;
     /* T26d ISAC_PDSCH_SOLVER_LEADER=1: until some RNTI of this CORESET solved, only its busiest unsolved RNTI searches --
      * spreading the probe budget over ~15 RNTIs left whole runs without a first solve (replays: ~40 % of runs); the
      * first solution then seeds every other RNTI through the reuse prior. */
   } else if (probe_hog(r)) {
+    r->why[W_HOG]++;
     /* T26d: fair share of the probe budget -- an unsolved RNTI that already spent far more probes than the average
      * unsolved RNTI waits (a busy undecodable population starved the serving cell's RNTIs: replay f3 0x8f5a unsolved) */
   } else if (nl_skip || (nl_gap <= 0 && search_pref_skip(r, mcs))) {
+    r->why[W_NLSKIP]++;
     /* Wait for a one-layer QPSK reading (NL_PREF), or a low-MCS grant under the legacy MCS-only preference. */
   } else if (!(nl_gap > 0 && nl_preferred) && search_backoff(r)) {
+    r->why[W_BACKOFF]++;
     /* T26c ISAC_PDSCH_SOLVER_BACKOFF=<probes> (default off): an RNTI whose search has spent that many probes without a
      * single CRC pass is searched on 1 grant in 8 only -- the decode pool goes to RNTIs that decode */
   } else {
@@ -967,6 +1060,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       }
     uint8_t tl[3];
     const int nt = tables_for(mcs, tl);
+    if (no == 0) r->why[W_WIDE]++;
     if (no > 0 && (nl_gap > 0 || nt > 0)) {
       /* add_pos tier outer (1, 2, 0, 3); inside a tier every reading gets all S in one go, because the true S
        * changes from grant to grant with the TDA index while the true reading is there on every grant */
@@ -1008,8 +1102,10 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   }
   for (int i = 0; i < n; i++) {
     out[i].probe ? g_st.probes++ : g_st.fulls++;
-    if (out[i].probe && !r->solved) r->n_probe++;
+    if (out[i].probe && !r->solved) { r->n_probe++; r->why[W_PROBES]++; r->fcredit = r->fcredit >= 1.0 ? r->fcredit - 1.0 : 0.0; } /* no debt from uncapped grants */
   }
+  r->last_abs = ctx->now_abs;
+  if (!r->solved) r->why[W_PLAN]++;
   pthread_mutex_unlock(&g_mu);
   return n;
 }
@@ -1140,6 +1236,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
       }
     }
   }
+  if (p != NULL && p->phase == 0 && p->probe && g_r[p->slot].used && !g_r[p->slot].solved)
+    g_r[p->slot].why[!credit ? W_PNOCRED : crc_ok ? W_POK : W_PFAIL]++;
   if (p == NULL || !credit) {
     if (p) p->used = false;
     pthread_mutex_unlock(&g_mu);

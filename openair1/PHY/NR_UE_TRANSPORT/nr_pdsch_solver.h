@@ -106,6 +106,26 @@ uint16_t nr_pdsch_solver_dmrs_mask(int l0, int S, int L, int add_pos);
 /** (Qm, R x 1024 x 2) of MCS `mcs` in table 0/1/2; false if the index is reserved/out of range. */
 bool nr_pdsch_solver_mcs_qr(int table, int mcs, int *qm, int *r2);
 
+/* Per-RNTI search diagnostics (SOLVERCOVER 2026-10-11): why an unsolved RNTI's grant produced no credited probe. The counters
+ * are always kept (a few increments under the existing mutex); ISAC_PDSCH_SOLVER_WHY=1 logs them with the per-rnti report.
+ * Caller-side reasons (before nr_pdsch_solver_plan_slot()) are noted with nr_pdsch_solver_note_skip(). */
+enum {
+  NR_PDSCH_SOLVER_WHY_GATE,     ///< rv != 0 / no defer / no decode wanted / per-occasion cap reached before planning
+  NR_PDSCH_SOLVER_WHY_LIVE,     ///< too many live DCI layouts (ISAC_PDSCH_SOLVER_MAX_LIVE)
+  NR_PDSCH_SOLVER_WHY_BUDGET0,  ///< probe token bucket empty / ring too full: not planned
+  NR_PDSCH_SOLVER_WHY_NOREAD,   ///< no layout parsed this DCI
+  NR_PDSCH_SOLVER_WHY_THROTTLE, ///< a planned probe refused by the token bucket
+  NR_PDSCH_SOLVER_WHY_CAP,      ///< a planned variant cut by the per-occasion decode cap
+  NR_PDSCH_SOLVER_WHY_CALLER_N
+};
+void nr_pdsch_solver_note_skip(uint16_t rnti, int why);
+/** ISAC_PDSCH_SOLVER_FAIRSHARE=1 (default off): fair per-RNTI share of the probe rate for unsolved RNTIs, and reuse of
+ * the least recently active solver entry (idle >= 2 s) when the 64-RNTI table is full. */
+bool nr_pdsch_solver_fairshare_on(void);
+/** Probes an unsolved RNTI may plan now: its share rate_per_slot / n_active of the probe rate (capped at budget), applied
+ * only while the global bucket is below its burst or the ring above its fill (contended); budget unchanged with the flag off. */
+int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool contended, int budget);
+
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
 

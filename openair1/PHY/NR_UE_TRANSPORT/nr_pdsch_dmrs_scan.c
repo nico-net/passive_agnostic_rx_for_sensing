@@ -254,6 +254,52 @@ typedef struct {
 } vote_t;
 static vote_t g_v[VOTE_RNTIS];
 static pthread_mutex_t g_vmu = PTHREAD_MUTEX_INITIALIZER;
+/* SOLVERCOVER ISAC_PDSCH_DMRS_ID_CONTRAST=1: cell-wide base rate of every identity, over the distinct voted slots. A slot
+ * votes its hits for every RNTI scheduled in it, so an identity present in most slots of the cell (a background/always-on
+ * PDSCH, or a heavily scheduled co-scheduled UE) collects as many votes as a UE's own identity. Measured on TIM PCI 923
+ * (OTA 2026-10-10 23:19 and replay of raw_pci923_tim_12s_tile3): one such id (65, 928 or 1280) sat in the top-2 of almost
+ * every RNTI, and the busiest UE's id took the other slot, so a UE's own id often never became a hypothesis. */
+#define BASE_IDS 512
+#define BASE_SEEN 64
+static struct { int nid, slots; } g_base[BASE_IDS];
+static int g_nbase, g_base_slots;
+static int64_t g_base_seen[BASE_SEEN];
+static int g_base_seen_n;
+static int g_contrast = -1; /* re-read by nr_dmrs_scan_reset() (tests) */
+bool nr_dmrs_scan_contrast_on(void)
+{
+  if (g_contrast < 0) g_contrast = getenv("ISAC_PDSCH_DMRS_ID_CONTRAST") && atoi(getenv("ISAC_PDSCH_DMRS_ID_CONTRAST")) ? 1 : 0;
+  return g_contrast == 1;
+}
+/* base_count: counts the hits of one slot cell-wide, once per distinct slot (g_vmu held) */
+static void base_count(int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n)
+{
+  for (int k = 0; k < BASE_SEEN && k < g_base_seen_n; k++)
+    if (g_base_seen[k] == abs_slot) return;
+  g_base_seen[g_base_seen_n++ % BASE_SEEN] = abs_slot;
+  if (g_base_seen_n >= 2 * BASE_SEEN) g_base_seen_n -= BASE_SEEN; /* keep the modulo position, bounded counter */
+  g_base_slots++;
+  for (int h = 0; h < n; h++) {
+    bool dup = false;
+    for (int q = 0; q < h && !dup; q++) dup = hits[q].nid == hits[h].nid;
+    if (dup) continue;
+    int k = -1;
+    for (int q = 0; q < g_nbase && k < 0; q++) if (g_base[q].nid == hits[h].nid) k = q;
+    if (k < 0 && g_nbase < BASE_IDS) { k = g_nbase++; g_base[k].nid = hits[h].nid; g_base[k].slots = 0; }
+    if (k >= 0) g_base[k].slots++;
+  }
+}
+/* contrast of one identity for one RNTI: share of the RNTI's slots carrying it minus share of the OTHER voted slots carrying it */
+static double id_contrast(const vote_t *v, int q)
+{
+  int g = 0;
+  for (int k = 0; k < g_nbase; k++) if (g_base[k].nid == v->nid[q]) { g = g_base[k].slots; break; }
+  const int own = v->votes[q] < v->slots ? v->votes[q] : v->slots;
+  const int other_slots = g_base_slots - v->slots, other = g - own;
+  const double p = v->slots > 0 ? (double)own / v->slots : 0.0;
+  const double qq = other_slots > 0 && other > 0 ? (double)other / other_slots : 0.0;
+  return p - qq;
+}
 
 static vote_t *vote_of(uint16_t rnti, bool create)
 {
@@ -278,6 +324,7 @@ void nr_dmrs_scan_vote(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t
   if (v && !dup) {
     v->seen[v->slots % VOTE_SEEN] = abs_slot;
     v->slots++;
+    if (nr_dmrs_scan_contrast_on()) base_count(abs_slot, hits, n);
     for (int h = 0; h < n; h++) {
       int k = -1;
       for (int q = 0; q < VOTE_IDS && k < 0; q++) if (v->votes[q] && v->nid[q] == hits[h].nid) k = q;
@@ -301,14 +348,30 @@ int nr_dmrs_scan_rnti_ids(uint16_t rnti, int *ids, int max)
   bool taken[VOTE_IDS] = {false};
   while (v && n < max) {
     int k = -1;
+    const bool ct = nr_dmrs_scan_contrast_on(); /* reorder only: an id is never dropped, the TB CRC still decides */
     for (int q = 0; q < VOTE_IDS; q++)
-      if (!taken[q] && v->votes[q] >= NR_DMRS_SCAN_MIN_VOTES && (k < 0 || v->votes[q] > v->votes[k])) k = q;
+      if (!taken[q] && v->votes[q] >= NR_DMRS_SCAN_MIN_VOTES
+          && (k < 0 || (ct ? id_contrast(v, q) > id_contrast(v, k) : v->votes[q] > v->votes[k]))) k = q;
     if (k < 0) break;
     taken[k] = true;
     ids[n++] = v->nid[k];
   }
   pthread_mutex_unlock(&g_vmu);
   return n;
+}
+
+bool nr_dmrs_scan_rnti_decided(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_vmu);
+  const vote_t *v = vote_of(rnti, false);
+  int k = -1;
+  const bool ct = nr_dmrs_scan_contrast_on();
+  for (int q = 0; v && q < VOTE_IDS; q++)
+    if (v->votes[q] >= NR_DMRS_SCAN_MIN_VOTES
+        && (k < 0 || (ct ? id_contrast(v, q) > id_contrast(v, k) : v->votes[q] > v->votes[k]))) k = q;
+  const bool d = k >= 0 && v->slots >= 4 && (!ct || id_contrast(v, k) >= NR_DMRS_SCAN_DECIDED_CONTRAST);
+  pthread_mutex_unlock(&g_vmu);
+  return d;
 }
 
 int nr_dmrs_scan_rnti_slots(uint16_t rnti)
@@ -324,6 +387,8 @@ void nr_dmrs_scan_reset(void)
 {
   pthread_mutex_lock(&g_vmu);
   memset(g_v, 0, sizeof(g_v));
+  g_nbase = g_base_slots = g_base_seen_n = 0;
+  g_contrast = -1;
   pthread_mutex_unlock(&g_vmu);
   pthread_mutex_lock(&g_pmu);
   g_npool = 0;
