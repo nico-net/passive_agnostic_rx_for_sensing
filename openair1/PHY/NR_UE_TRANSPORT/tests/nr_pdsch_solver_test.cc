@@ -402,6 +402,99 @@ TEST(PdschSolver, OnlyACrcProvenSolutionSeedsTheCell)
   nr_pdsch_solver_reset();
 }
 
+/* TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF=1. A busy RNTI that already spent 20000 credited search probes (CRC16 code blocks: chance
+ * passes Poisson with mean 20000 x 2^-16 = 0.31) is not solved by two consistent CRC16 passes (P = 0.037); a quiet RNTI is; one
+ * CRC24 pass (TBS > 3824) solves at once. Flag off: two passes always solve. */
+static int SolveGrants(uint16_t rnti, const Cell &c, int mcs, int nrb, int max_grants, std::mt19937 &rng)
+{
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), (uint16_t)nrb, 1, 1, (uint8_t)mcs},
+                                     {c.truth.data(), (int)c.truth.size(), (uint16_t)nrb, 1, 1, (uint8_t)mcs}};
+  for (int g = 0; g < max_grants; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(rnti, p, 49, (uint8_t)mcs, 2, rd, 2, 8, v);
+    for (int i = 0; i < n; i++)
+      nr_pdsch_solver_feedback(v[i].token, v[i].reading == 1 && v[i].S == c.S_true[p.w[0] & 1] && v[i].add_pos == c.add_pos
+                                               && v[i].table == c.table, true);
+    if (nr_pdsch_solver_rep(rnti) >= 0) return g + 1;
+  }
+  return -1;
+}
+static void BurnProbes(uint16_t rnti, const Cell &c, int n_probes, std::mt19937 &rng)
+{
+  nr_pdsch_solver_reading_t rd[1] = {{c.wrong.data(), (int)c.wrong.size(), 16}};
+  for (int k = 0; k < n_probes;) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(rnti, p, 49, 0, 2, rd, 1, 8, v);
+    for (int i = 0; i < n; i++, k++) nr_pdsch_solver_feedback(v[i].token, false, true);
+    if (n == 0) break;
+  }
+}
+TEST(PdschSolver, SignificanceRuleScalesTheSolveEvidenceWithTheProbesSpent)
+{
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  int grants[2][3];
+  for (int on = 0; on < 2; on++) {
+    on ? setenv("ISAC_PDSCH_SOLVER_SIGNIF", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_SIGNIF");
+    nr_pdsch_solver_reset();
+    nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+    std::mt19937 rng(31);
+    grants[on][0] = SolveGrants(0x0101, c, 0, 16, 400, rng);  /* quiet, CRC16 (MCS 0 on 16 PRBs) */
+    BurnProbes(0x0202, c, 20000, rng);
+    grants[on][1] = SolveGrants(0x0202, c, 0, 16, 400, rng);  /* busy, CRC16 */
+    grants[on][2] = SolveGrants(0x0303, c, 20, 16, 400, rng); /* CRC24: 64QAM/256QAM-class MCS 20 on 16 PRBs */
+    printf("[solver] signif=%d grants to solve: quiet %d, busy %d, crc24 %d\n", on, grants[on][0], grants[on][1], grants[on][2]);
+    for (int k = 0; k < 3; k++) ASSERT_GT(grants[on][k], 0);
+  }
+  EXPECT_EQ(grants[1][0], grants[0][0]) << "two CRC16 passes still solve a quiet RNTI";
+  EXPECT_GT(grants[1][1], grants[0][1]) << "a busy RNTI needs more passes";
+  EXPECT_LT(grants[1][2], grants[0][2]) << "one CRC24 pass solves";
+  unsetenv("ISAC_PDSCH_SOLVER_SIGNIF");
+  nr_pdsch_solver_reset();
+}
+
+/* TIMSOLVE2 ISAC_PDSCH_SOLVER_PRIOR_IDS=1: once a solution is CRC-proven, an unsolved RNTI tries the proven layout dims with
+ * EACH of its own identities in the proven form (here DM-RS id + data id 923) on one grant; flag off: one identity per grant. */
+TEST(PdschSolver, ProvenDimsAreTriedWithEveryOwnIdentity)
+{
+  setenv("ISAC_PDSCH_SOLVER_REUSE", "1", 1);
+  setenv("ISAC_PDSCH_SOLVER_PRIOR_CRC", "1", 1);
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  const int32_t kForm = (923 + 1) << 16;
+  for (int on = 0; on < 2; on++) {
+    on ? setenv("ISAC_PDSCH_SOLVER_PRIOR_IDS", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_PRIOR_IDS");
+    nr_pdsch_solver_reset();
+    nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+    std::mt19937 rng(41);
+    const int32_t a_ids[1] = {101 | kForm};
+    nr_pdsch_solver_set_alt_scr32(7, a_ids, 1, true, true);
+    ASSERT_GT(RunCell(c, 0x0a0a, -1, 400, rng), 0);
+    FullDecodes(0x0a0a, c, 4, true, rng); /* CRC-proven */
+    const int32_t b_ids[4] = {202 | kForm, 303 | kForm, 202, 303};
+    nr_pdsch_solver_set_alt_scr32(7, b_ids, 4, true, true);
+    nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 16}, {c.truth.data(), (int)c.truth.size(), 16}};
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(0x0b0b, p, 49, 0, 2, rd, 2, 8, v);
+    bool id202 = false, id303 = false;
+    for (int i = 0; i < n; i++) {
+      if (v[i].reading == 1 && v[i].add_pos == c.add_pos && v[i].S == c.S_true[p.w[0] & 1]) {
+        id202 |= v[i].scr == (202 | kForm);
+        id303 |= v[i].scr == (303 | kForm);
+      }
+      nr_pdsch_solver_feedback(v[i].token, false, true);
+    }
+    EXPECT_EQ(id202 && id303, on == 1) << "on: both own identities on the proven dims in one grant; off: one per grant";
+  }
+  unsetenv("ISAC_PDSCH_SOLVER_PRIOR_IDS");
+  unsetenv("ISAC_PDSCH_SOLVER_PRIOR_CRC");
+  unsetenv("ISAC_PDSCH_SOLVER_REUSE");
+  nr_pdsch_solver_reset();
+}
+
 int main(int argc, char **argv)
 {
   logInit();

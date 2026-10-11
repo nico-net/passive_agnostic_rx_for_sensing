@@ -124,14 +124,27 @@ static bool nr_pdsch_dmrs_scan_on(void)
   }
   return v == 1;
 }
+/* dmrs_prio_on: TIMSOLVE2 ISAC_PDSCH_SOLVER_DMRS_PRIO=1 (default off), see its use in the solver planning block. */
+static bool dmrs_prio_on(void)
+{
+  static _Atomic int on = -1;
+  int v = atomic_load(&on);
+  if (v < 0) {
+    v = getenv("ISAC_PDSCH_SOLVER_DMRS_PRIO") && atoi(getenv("ISAC_PDSCH_SOLVER_DMRS_PRIO")) ? 1 : 0;
+    atomic_store(&on, v);
+  }
+  return v == 1;
+}
 /* dmrs_scan_filter_readings: keep the solver readings whose PRB set carries one of this RNTI's blind DM-RS identities
  * (same-k' coherence >= 0.5 on the type-A DM-RS symbol of this slot, k0 = 0). Readings of a wrong layout read PRBs that
  * carry no -- or another UE's -- DM-RS. When none passes (UE too weak, or k0 != 0) the readings are left untouched.
- * One FEP of the DM-RS symbol per antenna and slot (per-thread cache). Returns the new reading count. */
+ * One FEP of the DM-RS symbol per antenna and slot (per-thread cache). Returns the new reading count; *n_kept = how many
+ * readings carried an own identity (-1 = not scored). */
 static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg,
                                      uint16_t rnti, const int *ids, int n_ids, nr_pdcch_blind_result_t *rp,
-                                     nr_pdsch_solver_reading_t *rd, int nrd)
+                                     nr_pdsch_solver_reading_t *rd, int nrd, int *n_kept)
 {
+  *n_kept = -1;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int sym = cfg->dmrs_typeA_position + 2, nant = fp->nb_antennas_rx;
   if (nant > 8 || sym >= fp->symbols_per_slot || cfg->bwp_size == 0) return nrd;
@@ -175,6 +188,7 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
   if (atomic_fetch_sub(&s_log, 1) > 0)
     LOG_A(PHY, "SENSING: DMRS_SCAN filter rnti=0x%04x %d.%d id=%d readings %d -> %d\n", rnti, proc->frame_rx, proc->nr_slot_rx,
           ids[0], nrd, kept ? kept : nrd);
+  *n_kept = kept;
   if (kept == 0) return nrd;
   int w = 0;
   for (int k = 0; k < nrd && k < 128; k++)
@@ -9364,16 +9378,28 @@ constdiag_done:;
       else
         nr_pdsch_solver_set_alt_scr(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_alt, sv_nalt,
                                     sv_did >= 0 && sv_did != fp->Nid_cell);
-      if (sv_nown > 0 && nrd > 1)
-        nrd = dmrs_scan_filter_readings(ue, proc, cfg, out.rnti, sv_own, sv_nown, rparsed, rd, nrd);
+      int sv_kept = -1;
+      if (sv_nown > 0 && (nrd > 1 || dmrs_prio_on()))
+        nrd = dmrs_scan_filter_readings(ue, proc, cfg, out.rnti, sv_own, sv_nown, rparsed, rd, nrd, &sv_kept);
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
       int sv_budget = p_avail < 0 ? s_budget : (p_avail < s_budget ? p_avail : s_budget);
       if (rep < 0 && p_avail >= 0) /* ISAC_PDSCH_SOLVER_FAIRSHARE: this RNTI's share of the probe rate (no-op when off) */
         sv_budget = nr_pdsch_solver_fair_budget(out.rnti, g_gate_rate, p_avail < (int)g_gate_burst, sv_budget);
+      bool sv_weak = false;
+      if (dmrs_prio_on() && rep < 0 && sv_kept == 0 && p_avail >= 0 && p_avail < (int)g_gate_burst && sv_budget > 0) {
+        /* TIMSOLVE2 ISAC_PDSCH_SOLVER_DMRS_PRIO=1: under contention the probes go to grants whose PRBs carry the RNTI's own
+         * DM-RS (a strong-enough link with a right identity); a grant where no reading does is probed 1 time in 8 */
+        static _Atomic uint32_t s_weak;
+        if ((atomic_fetch_add(&s_weak, 1) % 8u) != 0u) {
+          sv_budget = 0;
+          sv_weak = true;
+          nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_WEAK);
+        }
+      }
       if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
-      else if (sv_budget <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
+      else if (sv_budget <= 0 && !sv_weak) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
                                                     cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
