@@ -1257,6 +1257,12 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   k_llr<<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(j);
   if (cudaStreamSynchronize(g_ctx[0].s) != cudaSuccess)
     return -1;
+  /* GPUSHARE: load the Nl = 3, 4 kernels now. Under CUDA lazy loading their first launch (first Nl >= 3 grant) loaded
+   * the module function inside the decode and blocked that launch for ~44 ms [nsys, replay b]. */
+  cudaFuncAttributes fa;
+  if (cudaFuncGetAttributes(&fa, k_mmse2n<3>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_mmse2n<4>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_mmse0n<3>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_mmse0n<4>) != cudaSuccess)
+    return -1;
   g_ok = 1;
   return 0;
 }

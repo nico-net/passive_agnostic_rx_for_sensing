@@ -3,6 +3,7 @@
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_fep.h"
 #include "nr_pdsch_gpu_demod_host.h"
+#include "nr_pdsch_gpu_ldpc_host.h"
 #include "nr_pdsch_gpu_chest.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "common/utils/LOG/log.h"
@@ -46,6 +47,7 @@ int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
   if (ue)
     nr_pdsch_gpu_demod_warmup(&ue->frame_parms); /* GPU-DEMOD: independent knob, same module and warm-up point */
+  nr_pdsch_gpu_ldpc_enabled(); /* GPUSHARE: GPU LDPC contexts and graphs before RX, not at the first TB (no-op when off) */
   const char *e = getenv("ISAC_PDSCH_GPU_EXACT_FEP");
   if (!e || atoi(e) != 1 || !ue)
     return 0;

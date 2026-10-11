@@ -517,6 +517,16 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
           || cudaMalloc(&x.c2v, (size_t)NJ * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * NJ * NIT) != cudaSuccess)
         return;
     }
+    /* GPUSHARE: build every (BG, Z, R) graph now. Built lazily, each first use ran cudaMalloc + a synchronous
+     * cudaMemcpy on a decode thread: up to 69 ms each behind a busy GPU (~110 of them in a 12 s replay). */
+    for (int BG = 1; BG <= 2; BG++)
+      for (int R : {13, 15, 23, 89})
+        for (int a : {2, 3, 5, 7, 9, 11, 13, 15})
+          for (int Z = a; Z <= ZMAX; Z *= 2)
+            graph(BG, Z, R); /* nullptr for the (BG, R) pairs that do not exist: nothing cached */
+    cudaFuncAttributes fa; /* and load both kernels now, not at the first TB (CUDA lazy loading) */
+    if (cudaFuncGetAttributes(&fa, k_ldpc) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4) != cudaSuccess)
+      return;
     g_ok = 1;
   });
   return g_ok ? 0 : -1;
@@ -564,8 +574,10 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   for (int k = 0; k < n; k++)
     z4 = z4 && !(jobs[k].Z & 3);
   cudaError_t e = cudaLaunchKernelEx(&cfg, z4 ? k_ldpc4 : k_ldpc, (const DJob *)ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
+  /* GPUSHARE: poll like the demod/FEP waits. cudaStreamSynchronize under cudaDeviceScheduleBlockingSync (set by
+   * nr_gpu_platform) sleeps on the completion interrupt; the TB waited far longer than its kernel. */
   if (e == cudaSuccess)
-    e = cudaStreamSynchronize(x.s);
+    while ((e = cudaStreamQuery(x.s)) == cudaErrorNotReady) {}
   if (e != cudaSuccess) {
     fprintf(stderr, "nr_pdsch_gpu_ldpc_run: %s\n", cudaGetErrorString(e));
     g_busy.fetch_and(~(1u << c));
