@@ -110,8 +110,6 @@ static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
 static uint64_t g_pdtim_calls = 0;
-static uint32_t g_pdtim_hist[PDTIM_N][512]; /* wall-time histogram per stage (percentiles), ISAC_PDTIM_PCT */
-static int g_pdtim_pct = -1;
 /* chest_pdp_diag_on: returns ISAC_CHEST_PDP_DIAG (cached, default 1): whether the channel estimator runs its per-call BRDELAY/PDP diagnostic.
  *   Setting it to 0 skips a double-precision pass over the IDFT output for every (antenna, DM-RS symbol).
  *   Caller: the passive decode consumer, which copies it to nr_dl_chest_diag_request before each channel estimate.
@@ -134,6 +132,7 @@ static int harq_combine_on(void)
 }
 static uint64_t g_pdtim_cpu_ns[PDTIM_N] = {0}; /* T26c: thread CPU time per stage -- wall >> cpu means preempted/blocked */
 static __thread uint64_t t_pdtim_cpu0;
+static int g_pdtim_pct = -1; /* ISAC_PDTIM_PCT */
 static _Atomic int g_pdtim_on = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
 
 static inline int pdtim_enabled(void)
@@ -165,7 +164,6 @@ static inline uint64_t pdtim_now(void)
  * sum fep+chest+demod+ldpc, printed as PDTIMPCT p50/p90/p99 next to every PDTIM line. */
 #define PDTIM_HB 2000 /* 10 us bins, last bin = >= 19.99 ms */
 static _Atomic uint32_t g_pdtim_hist[PDTIM_N + 1][PDTIM_HB];
-static int g_pdtim_pct = -1;
 static _Atomic uint64_t g_pdtim_ldpc_tb, g_pdtim_ldpc_cb; /* passive_ldpc_decode_core() calls and code blocks decoded */
 static __thread uint64_t t_pdtim_sum, t_pdtim_sum_n;
 static inline void pdtim_hist(int k, uint64_t d)
@@ -216,7 +214,6 @@ static inline void pdtim_add(int k, uint64_t t0)
   g_pdtim_cpu_ns[k] += t_pdtim_cpu0 - c0;
   g_pdtim_ns[k] += d;
   g_pdtim_n[k]++;
-  if (g_pdtim_pct) g_pdtim_hist[k][d / 16000 < 511 ? d / 16000 : 511]++; /* ISAC_PDTIM_PCT=1: 16 us buckets, last = overflow */
   if (d > g_pdtim_max[k]) {
     g_pdtim_max[k] = d;
   }
@@ -250,22 +247,6 @@ static void pdtim_report(void)
                   (double)g_pdtim_max[k] / 1000.0, (double)g_pdtim_ns[k] / 1e9);
   }
   LOG_I(PHY, "SENSING: PDTIM calls=%lu %s\n", (unsigned long)g_pdtim_calls, rep);
-  if (g_pdtim_pct > 0) {
-    char pc[400];
-    int w = 0;
-    for (int k = 0; k < PDTIM_N; k++) {
-      uint64_t tot = 0, acc = 0;
-      for (int b = 0; b < 512; b++) tot += g_pdtim_hist[k][b];
-      int p50 = -1, p99 = -1;
-      for (int b = 0; b < 512 && tot; b++) {
-        acc += g_pdtim_hist[k][b];
-        if (p50 < 0 && acc * 2 >= tot) p50 = b;
-        if (p99 < 0 && acc * 100 >= tot * 99) p99 = b;
-      }
-      w += snprintf(pc + w, sizeof(pc) - w, "%s[p50=%dus p99=%dus] ", kPdtimName[k], (p50 < 0 ? 0 : p50) * 16 + 8, (p99 < 0 ? 0 : p99) * 16 + 8);
-    }
-    LOG_I(PHY, "SENSING: PDTIMPCT calls=%lu %s\n", (unsigned long)g_pdtim_calls, pc);
-  }
 }
 
 /* evm_fill: the decode's EVM / kappa / branch outputs from nr_pdsch_evm_acc (disarms it). Caller: the decode, right after the
