@@ -6113,3 +6113,68 @@ TEST(UlLayoutLock, CrcFirstLocksAtOnceSib1RankedFirstAndRelocks)
   unsetenv("ISAC_UL_LOCK_SIB1_FIRST");
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
+
+TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  setenv("ISAC_UL_LOCK_CRC_FIRST", "1", 1);
+  setenv("ISAC_UL_LOCK_CRC_GUARD", "1", 1);
+  unsetenv("ISAC_UL_LOCK_CRC_K");
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20};
+  nr_pdcch_blind_ul_result_t t[NR_UL_LAYOUT_MAX_TRIALS], o;
+  nr_ul_layout_dci_t d;
+  UllGen g;
+  UllFit(g, cell);
+  int n = UllTrials(g, cell, t, &d);
+  ASSERT_GE(n, 2);
+  // one CRC16 pass (TBS 63 bits) is a likely false pass: no lock
+  nr_ul_layout_crc_verdict(&t[0], true, 63, 1, 1, 100);
+  d = g.next();
+  EXPECT_NE(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  // a second pass of the same hypothesis in the SAME slot is not independent
+  nr_ul_layout_crc_verdict(&t[0], true, 63, 1, 1, 100);
+  d = g.next();
+  EXPECT_NE(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  // a pass of another hypothesis does not add to it
+  nr_ul_layout_crc_verdict(&t[1], true, 201, 1, 1, 101);
+  d = g.next();
+  EXPECT_NE(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  // second independent pass (other slot) of the same hypothesis: lock
+  nr_ul_layout_crc_verdict(&t[0], true, 32, 1, 1, 102);
+  d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_EQ(o.bwp_start, t[0].bwp_start);
+  EXPECT_EQ(o.bwp_size, t[0].bwp_size);
+  // re-lock follows the same rule: a failure run opens trials again; one CRC16 pass keeps the lock, one CRC24A pass moves it
+  for (int i = 0; i < 8; i++) nr_ul_layout_crc_result(&o, false);
+  n = UllTrials(g, cell, t, &d);
+  ASSERT_GE(n, 1);
+  const uint64_t used0 = t[0].hyp_generation >> 40 & 0xfff, used1 = t[1].hyp_generation >> 40 & 0xfff;
+  int pk = -1;
+  for (int i = 0; i < n; i++) { const uint64_t e = t[i].hyp_generation >> 40 & 0xfff; if (e != used0 && e != used1) pk = i; }
+  ASSERT_GE(pk, 0);
+  const nr_pdcch_blind_ul_result_t fresh = t[pk];
+  nr_ul_layout_crc_verdict(&fresh, true, 63, 1, 1, 200);
+  d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_TRUE(o.bwp_start != fresh.bwp_start || o.bwp_size != fresh.bwp_size);
+  nr_ul_layout_crc_verdict(&fresh, true, 6000, 1, 1, 201);
+  d = g.next();
+  ASSERT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  EXPECT_EQ(o.bwp_start, fresh.bwp_start);
+  EXPECT_EQ(o.bwp_size, fresh.bwp_size);
+  // CRC24A pass locks at once from a fresh state
+  nr_ul_layout_lock_reset();
+  UllGen g3;
+  UllFit(g3, cell);
+  n = UllTrials(g3, cell, t, &d);
+  ASSERT_GE(n, 1);
+  nr_ul_layout_crc_verdict(&t[0], true, 4000, 1, 1, 300);
+  d = g3.next();
+  EXPECT_EQ(nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o), 1);
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
+  unsetenv("ISAC_UL_LOCK_CRC_GUARD");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}

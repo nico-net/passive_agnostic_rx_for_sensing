@@ -256,6 +256,7 @@ int nr_ul_layout_infer_k2(const uint32_t *occ, const uint32_t *hist, int spf)
 }
 
 /* ------------------------------------------------------------------ live state */
+#define CRC_EV_MAX 16
 typedef struct {
   uint16_t len;
   uint32_t count; /* DCIs seen (ring index = count % BANK) */
@@ -275,6 +276,8 @@ typedef struct {
   bool locked;
   nr_pdcch_blind_ul_opts_t opts;
   int chosen_tail;
+  struct { uint16_t e; uint32_t trials, passes; uint16_t rnti[4]; long slot[4]; uint8_t nr, ns; } ev[CRC_EV_MAX];
+  uint32_t ev_susp, ev_dec, ev_lock; /* CRC guard stats: suppressed passes, decisive passes, evidence locks */
 } len_state_t;
 
 typedef struct { uint16_t n, start; uint32_t votes; uint16_t rntis[8]; uint8_t nrnti; } hyp_state_t;
@@ -312,6 +315,7 @@ static bool env_on(const char *name)
   return s && !strcmp(s, "1");
 }
 bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_SIB1_FIRST"); }
+bool nr_ul_layout_crc_guard_enabled(void) { return nr_ul_layout_crc_first_enabled() && env_on("ISAC_UL_LOCK_CRC_GUARD"); }
 bool nr_ul_layout_crc_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_CRC_FIRST"); }
 
 bool nr_ul_layout_lock_enabled(void)
@@ -855,6 +859,27 @@ static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, nr_pdc
   return nr_pdcch_blind_dci01_size(o) == ls->len;
 }
 
+/* caller holds mu: evidence slot of hypothesis e (created; the entry with the fewest passes is evicted when full) */
+static typeof(((len_state_t *)0)->ev[0]) *ev_slot_locked(len_state_t *ls, uint16_t e)
+{
+  int v = 0;
+  for (int i = 0; i < CRC_EV_MAX; i++) {
+    if (ls->ev[i].e == e + 1u) return &ls->ev[i];
+    if (ls->ev[i].passes < ls->ev[v].passes) v = i;
+  }
+  memset(&ls->ev[v], 0, sizeof(ls->ev[v]));
+  ls->ev[v].e = (uint16_t)(e + 1u); /* 0 = empty */
+  return &ls->ev[v];
+}
+
+/* P(Poisson(lam) >= m) */
+static double pois_tail(double lam, int m)
+{
+  double term = exp(-lam), cdf = 0;
+  for (int i = 0; i < m; i++) { cdf += term; term *= lam / (i + 1); }
+  return cdf >= 1 ? 0 : 1 - cdf;
+}
+
 int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
                             const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out, int cap)
 {
@@ -894,6 +919,7 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
       nr_pdcch_blind_ul_opts_t o;
       if (!trial_opts_locked(ls, h, k, t, &o) || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
       out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)(h | k << 6 | t << 9) << 40) | gen;
+      ev_slot_locked(ls, (uint16_t)(h | k << 6 | t << 9))->trials++;
       n++;
     }
   if (n) { g_trial_slot = abs_slot; ls->trials += (uint32_t)n; }
@@ -928,7 +954,41 @@ static void crc_lock_locked(int li, int h, int k, int t, long slot)
         ls->k2row[0], ls->pre[k].fh, tl, ls->crc_ok, ls->trials, slot);
 }
 
+/* ISAC_UL_LOCK_CRC_GUARD=1: may this TB CRC pass lock layout (h,k,t)? Caller holds mu.
+ * Decisive: CRC24A (TBS > 3824 bits, TS 38.212 7.2.1) or a multi-segment TB whose CB CRCs all pass.
+ * Otherwise CRC16: a trial passes by chance with p = 2^-16. With n_h trials of hypothesis h and H hypotheses tracked,
+ * the pass count m is accepted when H * P(Poisson(n_h * 2^-16) >= m) < ALPHA (Bonferroni) and the passes come from
+ * >= 2 distinct slots. The DM-RS-SNR plausibility rule is skipped: the verdict only carries the decoder's own SNR scale. */
+#define CRC_GUARD_ALPHA 0.01
+static bool crc_guard_accept_locked(len_state_t *ls, int h, int k, int t, uint16_t rnti, long slot, uint32_t tbs_bits,
+                                    int nseg, int seg_ok)
+{
+  const uint16_t e = (uint16_t)(h | k << 6 | t << 9);
+  const bool decisive = tbs_bits > 3824 || (nseg > 1 && seg_ok == nseg);
+  typeof(ls->ev[0]) *v = ev_slot_locked(ls, e);
+  v->passes++;
+  int i;
+  for (i = 0; i < v->nr; i++) if (v->rnti[i] == rnti) break;
+  if (i == v->nr && v->nr < 4) v->rnti[v->nr++] = rnti;
+  for (i = 0; i < v->ns; i++) if (v->slot[i] == slot) break;
+  if (i == v->ns && v->ns < 4) v->slot[v->ns++] = slot;
+  int H = 0;
+  for (i = 0; i < CRC_EV_MAX; i++) if (ls->ev[i].e) H++;
+  const double pf = H * pois_tail(v->trials / 65536.0, (int)v->passes);
+  const bool acc = decisive || (v->passes >= 2 && v->ns >= 2 && pf < CRC_GUARD_ALPHA);
+  if (decisive) ls->ev_dec++; else if (!acc) ls->ev_susp++; else ls->ev_lock++;
+  LOG_A(PHY, "SENSING: ULLAYOUT_CRC_EVIDENCE len=%u hyp=%u/%u/%u tbs=%u nseg=%d decisive=%d passes=%u trials=%u rntis=%u slots=%u"
+             " p_false=%.3g -> %s\n",
+        ls->len, h, k, t, tbs_bits, nseg, decisive, v->passes, v->trials, v->nr, v->ns, pf, acc ? "LOCK" : "SUSPECT");
+  return acc;
+}
+
 void nr_ul_layout_crc_result(const nr_pdcch_blind_ul_result_t *g, bool ok)
+{
+  nr_ul_layout_crc_verdict(g, ok, 0, 0, 0, 0);
+}
+
+void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint32_t tbs_bits, int nseg, int seg_ok, long slot)
 {
   if (!nr_ul_layout_is_tagged(g) || nr_ul_layout_is_probe(g) || !nr_ul_layout_crc_first_enabled()) return;
   pthread_mutex_lock(&mu);
@@ -941,7 +1001,8 @@ void nr_ul_layout_crc_result(const nr_pdcch_blind_ul_result_t *g, bool ok)
       const int h = e & 63, k = (e >> 6) & 7, t = (e >> 9) & 3;
       if (ok) {
         if (ls->locked && g_locked_hyp == h && ls->chosen_tail == t) { ls->crc_ok++; ls->crc_fail_run = 0; }
-        else crc_lock_locked(li, h, k, t, ls->bank[(ls->count - 1) % NR_UL_LAYOUT_BANK].slot);
+        else if (!nr_ul_layout_crc_guard_enabled() || crc_guard_accept_locked(ls, h, k, t, g->rnti, slot, tbs_bits, nseg, seg_ok))
+          crc_lock_locked(li, h, k, t, ls->bank[(ls->count - 1) % NR_UL_LAYOUT_BANK].slot);
       }
     } else if (ls->locked) {
       if (ok) { ls->crc_ok++; ls->crc_fail_run = 0; }
@@ -963,9 +1024,9 @@ void nr_ul_layout_stats_dump(void)
   char ls[256];
   int w = 0;
   for (int l = 0; l < g_nlen && w < (int)sizeof(ls) - 64; l++)
-    w += snprintf(ls + w, sizeof(ls) - w, " len%u[dcis=%u fit=%d lock=%d probes=%u gold=%u cdm1=%u cdm2=%u trials=%u crc_ok=%u crc_locks=%u]",
+    w += snprintf(ls + w, sizeof(ls) - w, " len%u[dcis=%u fit=%d lock=%d probes=%u gold=%u cdm1=%u cdm2=%u trials=%u crc_ok=%u crc_locks=%u susp=%u dec=%u evlock=%u]",
                   g_len[l].len, g_len[l].count, g_len[l].fitted, g_len[l].locked, g_len[l].probes, g_len[l].gold,
-                  g_len[l].cdm1, g_len[l].cdm2, g_len[l].trials, g_len[l].crc_ok, g_len[l].crc_locks);
+                  g_len[l].cdm1, g_len[l].cdm2, g_len[l].trials, g_len[l].crc_ok, g_len[l].crc_locks, g_len[l].ev_susp, g_len[l].ev_dec, g_len[l].ev_lock);
   LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
              " tally[%s ]%s\n",
         g_locked_hyp >= 0 ? "LOCKED " : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,

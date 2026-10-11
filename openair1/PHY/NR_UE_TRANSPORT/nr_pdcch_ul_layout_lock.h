@@ -113,6 +113,11 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
                             const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out, int cap);
 /* PUSCH worker: TB CRC verdict of a tagged (locked or trial) grant. */
 void nr_ul_layout_crc_result(const nr_pdcch_blind_ul_result_t *g, bool ok);
+/* ISAC_UL_LOCK_CRC_GUARD=1 (default off, needs CRC_FIRST): a CRC16 pass (TBS <= 3824 bits) is a false pass with p = 2^-16, so it only
+ * counts as evidence (see crc_guard_accept_locked); CRC24A / all-CB-CRC passes lock at once. crc_result() = verdict with unknown TB
+ * (treated as CRC16 under the guard). */
+bool nr_ul_layout_crc_guard_enabled(void);
+void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint32_t tbs_bits, int nseg, int seg_ok, long slot);
 static inline bool nr_ul_layout_is_trial(const nr_pdcch_blind_ul_result_t *g)
 {
   return g && (g->hyp_generation & NR_UL_LAYOUT_TAG) && (g->hyp_generation & NR_UL_LAYOUT_TRIAL);
