@@ -23,7 +23,7 @@ typedef struct {
   int valid, nb, rbmap, row;
   uint32_t nv, nterm;
   double ideal_pow;
-  double err_l[2], qr[2], qi[2], qd[2], qx[2];
+  double err_l[4], qr[4], qi[4], qd[4], qx[4]; /* per layer (Nl <= 4) */
   double cr[4], ci[4], P[4], Y[4];
   double Cr[4][4], Ci[4][4];
   float err_k[12];
