@@ -218,6 +218,12 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
 
   // now do the SSS detection based on the precomputed sequences in PHY/LTE_TRANSPORT/sss.h
   sss_detection_result_t res = {.metric = -INT_MAX};
+  /* ISAC_SSS_REL_RATIO=R (default off): also accept when the best Nid1 beats the best OTHER Nid1 by R. The absolute
+   * floor is in ADC counts squared, so it rejects any cell received below ~Vodafone/TIM level (2026-10-11: PCI 4/403/675
+   * at 11-13k vs 30000). PBCH's CRC24 still verifies every accept. */
+  static double s_rel = -1;
+  if (s_rel < 0) s_rel = getenv("ISAC_SSS_REL_RATIO") ? atof(getenv("ISAC_SSS_REL_RATIO")) : 0;
+  int64_t second = 0; /* best metric of a Nid1 other than res.nid_cell's, over all phases tried */
 
   /* for phase evaluation, one uses an array of possible phase shifts */
   /* then a correlation is done between received signal with a shift pĥase and the reference signal */
@@ -251,6 +257,13 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
         metric += d[i] * (rot.r * sss_comp[i].r - rot.i * sss_comp[i].i);
       }
       metric >>= SCALING_METRIC_SSS_NR;
+      if (s_rel > 0) {
+        if (metric > res.metric) {
+          if (res.metric > second && GET_NID1(res.nid_cell) != n1) second = res.metric;
+        } else if (metric > second && GET_NID1(res.nid_cell) != n1) {
+          second = metric;
+        }
+      }
       // if the current metric is better than the last save it
       if (metric > res.metric) {
         res.metric = metric;
@@ -274,8 +287,9 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
     if (res.metric >= SSS_METRIC_FLOOR_NR)
       break;
   }
+  const bool rel_ok = s_rel > 0 && res.metric > 0 && (double)res.metric >= s_rel * (double)(second > 1 ? second : 1);
 
-  if (res.metric < SSS_METRIC_FLOOR_NR) {
+  if (res.metric < SSS_METRIC_FLOOR_NR && !rel_ok) {
     LOG_D(PHY,
           "Failed to detect SSS after PSS, metric of SSS %d, threshold to consider SSS valid %d, detected PCI: %d\n",
           res.metric,
