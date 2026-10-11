@@ -59,6 +59,8 @@ typedef struct {
   int evm_fp64;    /* GPU EVM per-RE math in double (else float; sums always double) */
   int qam_mode;    /* nl >= 2: nr_rx_pdsch()'s resolved ISAC_PDSCH_MMSE_MODE, 2 (float ZF) or 0 (stock fixed-point MMSE, nl >= 3) */
   uint32_t nvar;   /* nr_rx_pdsch()'s nvar (stock MMSE diagonal loading nvar >> 3) */
+  int evm_defer;   /* DECGPU: return once the LLRs are done; the EVM chain completes later (nr_gpu_demod_evm_wait_fn) */
+  int evm_pending; /* out: 1 = the EVM partial sums are not in evm[] yet, the context stays held until the wait */
   /* outputs */
   int32_t log2_maxh;
   int used_branch_set, used_branch, mrc_rx_index, mrc_nb_rx;
@@ -75,6 +77,8 @@ typedef int (*nr_gpu_demod_init_fn)(int nant);
 /* 0: done, outputs written, context held (call release); < 0: nothing written, the caller runs the CPU path. */
 typedef int (*nr_gpu_demod_run_fn)(nr_gpu_demod_job_t *job);
 typedef void (*nr_gpu_demod_release_fn)(int ctx);
+/* evm_pending jobs: waits for the context's EVM chain and fills job->evm (the context stays held). 0 = ok. */
+typedef int (*nr_gpu_demod_evm_wait_fn)(nr_gpu_demod_job_t *job);
 
 #ifdef __cplusplus
 }

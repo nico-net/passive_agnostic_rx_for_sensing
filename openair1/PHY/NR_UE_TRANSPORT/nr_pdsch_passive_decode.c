@@ -247,6 +247,34 @@ static void pdtim_report(void)
   LOG_I(PHY, "SENSING: PDTIM calls=%lu %s\n", (unsigned long)g_pdtim_calls, rep);
 }
 
+/* evm_fill: the decode's EVM / kappa / branch outputs from nr_pdsch_evm_acc (disarms it). Caller: the decode, right after the
+ * demodulation, or after the LDPC stage when the GPU demodulation deferred its EVM sums (ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER). */
+static void evm_fill(nr_pdsch_passive_decode_result_t *out, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, bool demod_ok)
+{
+  if (nr_pdsch_evm_acc.armed) {
+    nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
+    ea->armed = 0;
+    if (demod_ok && ea->n_sym > 0 && ea->ref > 0.0) {
+      out->evm_valid = true;
+      out->evm_pct = (float)(sqrt(ea->err / ea->ref) * 100.0);
+      out->evm_cpe_pct = (float)(sqrt(ea->err_cpe / ea->ref) * 100.0);
+      out->kappa = ea->kappa_n ? (float)(ea->kappa_sum / ea->kappa_n) : 0.f;
+      out->rho = ea->rho_n ? (float)(ea->rho_sum / ea->rho_n) : 0.f;
+      for (int a = 0; a < 4; a++) {
+        out->br_alpha[a] = ea->alpha_n[a] ? (float)(ea->alpha_abs[a] / ea->alpha_n[a]) : 0.f;
+        out->br_nvar_db[a] = nr_dl_chest_nvar_ant[a] > 0 ? (float)(10.0 * log10((double)nr_dl_chest_nvar_ant[a])) : -99.f;
+      }
+      out->evm_nbrx = (uint8_t)ea->nbrx;
+      out->evm_nsym = (uint16_t)ea->n_sym;
+      out->dmrs_ports = (uint16_t)dlsch_config->dmrs_ports;
+      out->n_cdm = (uint8_t)dlsch_config->n_dmrs_cdm_groups;
+      out->dmrs_add = (uint8_t)__builtin_popcount(dlsch_config->dlDmrsSymbPos);
+      for (int a = 0; a < ea->nbrx && a < 4; a++)
+        out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
+    }
+  }
+}
+
 /* ---- PARMSET: distinct decode-parameter census (always on, printed at teardown) ---------------
  * PASSIVE_RX_ONLY_HANDOVER.md section 23.3: this receiver decodes 0 of 104,143 transport blocks on
  * some runs and 90 % on others, at matched load, dwell and receiver health. A hard zero over five
@@ -4177,28 +4205,9 @@ gpu_llr_ready:;
   nr_dlsch_csi_prb_map = NULL; /* CSI-FULL */
   nr_dlsch_csi_prb_map_n = 0;
   pdtim_add(PDTIM_DEMOD, pdt_dem);
-  if (nr_pdsch_evm_acc.armed) {
-    nr_pdsch_evm_acc_t *ea = &nr_pdsch_evm_acc;
-    ea->armed = 0;
-    if (demod_ok && ea->n_sym > 0 && ea->ref > 0.0) {
-      out->evm_valid = true;
-      out->evm_pct = (float)(sqrt(ea->err / ea->ref) * 100.0);
-      out->evm_cpe_pct = (float)(sqrt(ea->err_cpe / ea->ref) * 100.0);
-      out->kappa = ea->kappa_n ? (float)(ea->kappa_sum / ea->kappa_n) : 0.f;
-      out->rho = ea->rho_n ? (float)(ea->rho_sum / ea->rho_n) : 0.f;
-      for (int a = 0; a < 4; a++) {
-        out->br_alpha[a] = ea->alpha_n[a] ? (float)(ea->alpha_abs[a] / ea->alpha_n[a]) : 0.f;
-        out->br_nvar_db[a] = nr_dl_chest_nvar_ant[a] > 0 ? (float)(10.0 * log10((double)nr_dl_chest_nvar_ant[a])) : -99.f;
-      }
-      out->evm_nbrx = (uint8_t)ea->nbrx;
-      out->evm_nsym = (uint16_t)ea->n_sym;
-      out->dmrs_ports = (uint16_t)dlsch_config->dmrs_ports;
-      out->n_cdm = (uint8_t)dlsch_config->n_dmrs_cdm_groups;
-      out->dmrs_add = (uint8_t)__builtin_popcount(dlsch_config->dlDmrsSymbPos);
-      for (int a = 0; a < ea->nbrx && a < 4; a++)
-        out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
-    }
-  }
+  const bool evm_deferred = nr_pdsch_gpu_demod_evm_deferred(); /* DECGPU: the GPU EVM chain overlaps the LDPC stage */
+  if (!evm_deferred)
+    evm_fill(out, dlsch_config, demod_ok);
 
   /* ---- RE-BUDGET INVARIANT (CPU path, whole allocation demodulated). G above is what rate
    * de-matching will read; the demodulator must have produced exactly that many LLRs. A mismatch --
@@ -4665,6 +4674,8 @@ gpu_llr_ready:;
       }
     }
     pdtim_add(PDTIM_LDPC, pdt_ldp);
+    if (evm_deferred && nr_pdsch_gpu_demod_evm_finish(1) == 0)
+      evm_fill(out, dlsch_config, demod_ok);
 
     if (ptrs_arm >= 0 && !t_quiet) {
       const int latched = rnti_ptrs_feed(grant->rnti, ptrs_arm, ldpc_ok);

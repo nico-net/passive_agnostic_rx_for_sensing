@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <thread>
 
@@ -1265,6 +1266,20 @@ extern "C" void nr_pdsch_gpu_demod_release(int c)
     g_busy.fetch_and(~(1u << c));
 }
 
+extern "C" int nr_pdsch_gpu_demod_evm_wait(nr_gpu_demod_job_t *j)
+{
+  if (j->ctx < 0 || j->ctx >= CTX)
+    return -1;
+  Ctx &x = g_ctx[j->ctx];
+  cudaError_t e;
+  while ((e = cudaStreamQuery(x.s2)) == cudaErrorNotReady) {}
+  if (e != cudaSuccess)
+    return -1;
+  memcpy(j->evm, x.sh->evm, sizeof(j->evm));
+  j->evm_pending = 0;
+  return 0;
+}
+
 extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
 {
   if (!g_ok || j->nbRx > NR_GPU_DEMOD_MAX_RX || j->nl > NR_GPU_DEMOD_MAX_NL || j->ext > (uint32_t)EXT
@@ -1348,9 +1363,15 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     cudaMemcpyAsync(x.hy, x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT, cudaMemcpyDeviceToHost, x.s);
     cudaMemcpyAsync(x.hh, x.h, sizeof(nrd_c16) * NSYM * 16 * EXT, cudaMemcpyDeviceToHost, x.s);
   }
-  if (jj.want_evm && !g_prof)
-    cudaStreamWaitEvent(x.s, x.join, 0);
-  cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, x.s);
+  const bool defer = jj.want_evm && jj.evm_defer && !g_prof;
+  if (defer) { /* the LLRs need only the main stream; the EVM sums follow on s2 (nr_pdsch_gpu_demod_evm_wait) */
+    cudaMemcpyAsync(x.sh, x.dsh, offsetof(Shared, evm), cudaMemcpyDeviceToHost, x.s);
+    cudaMemcpyAsync(x.sh->evm, x.dsh->evm, sizeof(x.sh->evm), cudaMemcpyDeviceToHost, x.s2);
+  } else {
+    if (jj.want_evm && !g_prof)
+      cudaStreamWaitEvent(x.s, x.join, 0);
+    cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, x.s);
+  }
   cudaError_t e = cudaPeekAtLastError();
   while (e == cudaSuccess) {
     e = cudaStreamQuery(x.s);
@@ -1395,8 +1416,9 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   j->mrc_nb_rx = d.mrc_nb_rx;
   memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
   memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
-  if (jj.want_evm)
+  if (jj.want_evm && !defer)
     memcpy(j->evm, x.sh->evm, sizeof(j->evm));
+  j->evm_pending = defer;
   j->y_ext = (const int16_t *)x.hy;
   j->h_ext = (const int16_t *)x.hh;
   j->ctx = c;
