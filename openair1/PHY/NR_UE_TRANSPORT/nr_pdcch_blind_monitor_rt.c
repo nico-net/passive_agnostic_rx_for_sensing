@@ -9344,12 +9344,19 @@ constdiag_done:;
        * slots) replace the CORESET's: each as (DM-RS = id, data = PCI) first -- dataScramblingIdentityPDSCH is often
        * absent while scramblingID0 is per UE (PCI 923) -- then (id, id). Pairs are encoded id | (data + 1) << 16. */
       int sv_own[2], sv_nown = 0;
-      int32_t sv_pair[4];
+      int32_t sv_pair[5];
       int sv_npair = 0;
       if (nr_pdsch_dmrs_scan_on() && rep < 0) { /* solved: its CRC-selected hypothesis stands, no filter */
         sv_nown = nr_dmrs_scan_rnti_ids(out.rnti, sv_own, 2);
         for (int q = 0; q < sv_nown; q++) sv_pair[sv_npair++] = sv_own[q] | (int32_t)((fp->Nid_cell + 1) << 16);
         for (int q = 0; q < sv_nown; q++) sv_pair[sv_npair++] = sv_own[q];
+        /* SOLVERCOVER (ISAC_PDSCH_DMRS_ID_CONTRAST): while no identity specific to this RNTI is known (all its ids are
+         * cell-wide, e.g. every UE on the PCI), keep the cell default (PCI, PCI) as a hypothesis: a cell-wide neighbour or
+         * background id may otherwise push the PCI out of the top-2 (replays of raw_pci421_aligned_20261006: 249/442). */
+        bool has_pci = false;
+        for (int q = 0; q < sv_nown; q++) has_pci |= sv_own[q] == fp->Nid_cell;
+        if (sv_nown > 0 && !has_pci && nr_dmrs_scan_contrast_on() && !nr_dmrs_scan_rnti_decided(out.rnti))
+          sv_pair[sv_npair++] = -1;
       }
       if (sv_npair > 0)
         nr_pdsch_solver_set_alt_scr32(cfg->discovered_coreset ? (int)cfg->coreset_pdcch_dmrs_scrambling_id : -1, sv_pair,
