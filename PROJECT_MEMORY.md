@@ -1,5 +1,7 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-11 (csd/otatest, OTA 10-10/11 and offline reports): see §25, block 2026-10-10/11.** Recommended OTA env is now t26s; the t26j recommendation below is superseded. Merge gate NOT MET (TIM bimodal, decode mean > 0.5 ms).
+>
 > **Update 2026-10-10 (docs and headers session, `csd/doc-comments2` = `csd/otatest` @ 656c623dac; no builds, replays or radio).**
 > Summary of the 2026-10-09/10 csd work that is now merged into `csd/otatest`. Every claim keeps the label of its report or
 > OTA log. Index of reports: [INDEX](docs/superpowers/reports/csd/INDEX.md). Nothing here is a new measurement.
@@ -53,9 +55,9 @@
 >   Neutral in daytime: the adaptive dwell is inactive because the prescreen passes every occasion (energy gate off in our cfg).
 >   NODROP dropped whole snapshots heavily on air (5144 / 9536 per run) and published more noise CORESETs (nid 9020, 41-43
 >   wasted dwells). No-fake-footprint never triggered.
->   Decision: t26j stays the default; the K flags stay off.
+>   Decision: t26j stays the default; the K flags stay off. [SUPERSEDED 2026-10-11: default is now t26s, see §25 block 2026-10-10/11.]
 >
-> **Recommended OTA env: `ota/t26j.env`** (rr-orchestration, 93 settings; `[OTA 2026-10-10 08:16]` daytime run above).
+> **Recommended OTA env: `ota/t26j.env`** (rr-orchestration, 93 settings; `[OTA 2026-10-10 08:16]` daytime run above). **[SUPERSEDED 2026-10-11 by t26s, see §25 block 2026-10-10/11.]**
 > It contains the ACQ-FIX flags, MMSE_MODE=2, the CSIRS_FULL set, GPU exact FEP and MRC per-RNTI mode 1. It does not contain the
 > ACQ-ROBUST flags. Never set `ISAC_RX_BRANCH_FO`. Keep `ISAC_PDSCH_CSI_RB_EXTENT` off. `ISAC_PDSCHQ_SIGNAL_TIME` is replay-only.
 >
@@ -68,7 +70,7 @@
 > - 21:56 MMSE A/B (t26f vs t26g): see QAM-FIX above. Recommended then: t26g.
 > - 01:34 CSI-FULL A/B (G vs H): see CSI-FULL above. Recommended then: t26h.
 > - 02:21 GPU A/B (C vs I): see GPU6 above.
-> - 03:50 ACQ-FIX night (J1-J6): inconclusive, low traffic. 08:16 daytime (J1-J6): 6/6 acquired. Recommended now: t26j.
+> - 03:50 ACQ-FIX night (J1-J6): inconclusive, low traffic. 08:16 daytime (J1-J6): 6/6 acquired. Recommended then: t26j. [SUPERSEDED 2026-10-11 by t26s.]
 >
 > **Local LLM integration (rr-orchestration, `[HOST-READ 2026-10-10]`, `rr-orchestration/llm/README.md`).**
 > - Roles (user policy): gpt-oss:120b (`run_local.sh gptoss`) for debugging, root cause and review; qwen3-coder-next
@@ -108,7 +110,7 @@
 >   orchestrator 2026-10-09, not in the T26.md table). The recommended OTA env uses `ISAC_RX_MRC_PER_RNTI=1`.
 > - `[MEASURED replay, emulated live rate]` T26c round 2 (`ISAC_PDSCHQ_SIGNAL_TIME=1` replay only, never on air): PDSCH
 >   queue stale 61 % -> 0.5 % with the round-2 flag set. Scan p99 still 2-4 ms there.
-> - `[INFERRED, NOT OTA-VALIDATED; X410 unavailable 2026-10-09]` Recommended OTA env: T26c base plus the T26D/T26E sets listed in
+> - `[INFERRED, NOT OTA-VALIDATED; X410 unavailable 2026-10-09]` Recommended OTA env [SUPERSEDED 2026-10-11 by t26s]: T26c base plus the T26D/T26E sets listed in
 >   the T26 report, §T26d follow-ups. Leave unset: IRC, ML_2L, CHEST_OCC, LDPC_ITERS, SOLVER_PREF, all `*_AB` and PROBELOG
 >   diagnostics, `ISAC_RX_BRANCH_FO`. Never `ISAC_PDSCHQ_SIGNAL_TIME` on air.
 >
@@ -3357,6 +3359,124 @@ backoff -> stale 0.5 %. The nID-10163 population is a second cell: per-CORESET b
 (`ISAC_PDSCH_DMRS_ID_PER_CORESET=1`) = 249 (also a discovered CSI-RS id); with it as scrambling hypothesis its RNTIs
 solve (0x5186 57 % full CRC; old capture 0xb876/0xe01e/0x13ae). MRC mode 3 breaks 16QAM soft values (hypothesis), keep
 mode 1. Scan p99 still 2-4 ms.
+
+---
+
+### 2026-10-10/11 block (`csd/otatest`, worktree `rr-csd-b`; OTA 10-10/11, DGX GB10 replays, offline)
+
+Sources: the reports under `docs/superpowers/reports/csd/` named per row, plus orchestrator facts of 2026-10-11. Cells are never
+merged: **PCI 415** (Vodafone), **PCI 923** (TIM) and **PCI 421** (lab, aligned grid) are separate, and so are replays and OTA.
+`n=2` means two runs: indicative only. Everything below is default off unless stated. Every commit cited is an ancestor of
+`csd/otatest` HEAD `953e219b71` `[GIT]`. Index: [INDEX](docs/superpowers/reports/csd/INDEX.md).
+
+**1. Status and merge gate**
+
+| item | status | label |
+|---|---|---|
+| Merge gate `csd/otatest` -> `adaptive-rx-UL-DL` (user, 2026-10-10): DL works OTA on Vodafone, TIM and other carriers; UL pipeline works (CRC not required); decode time < 0.5 ms; rfsim 4-RX gate passes | **NOT MET** at 2026-10-11 10:00: TIM bimodal (section 3); decode mean > 0.5 ms (p50 met) | `[USER]`, `[MEASURED, DGX OTA 2026-10-11]` |
+| rfsim 4-RX gate | reported passing by the user; not re-run in this session | `[USER]` |
+| Validation rule: fully blind, no per-cell tuning; each fix validated on all five captures `raw_pci415_12s_b`, `raw_pci415_12s_20261008`, `raw_pci923_tim_12s_tile3`, `raw_pci923_tim_4s_1010_1853`, `raw_pci421_aligned_20261006`. No OTA validation at low (night) load | rule | `[USER]` |
+
+**2. Recommended OTA env: t26s (supersedes t26j)**
+
+- `t26s` = `t26r` + `ISAC_PDSCH_DMRS_ID_CONTRAST=1 ISAC_PDSCH_SOLVER_FAIRSHARE=1` (current best `[MEASURED, DGX OTA 2026-10-11]`, section 3).
+- `t26r` = `t26q` + `ISAC_PUSCH_CORES=6 ISAC_PUSCH_PRIO=30 ISAC_PDSCH_DMRS_SCAN_ASYNC=1 ISAC_DMRS_SCAN_CORE=2 ISAC_PDTIM_PCT=1 ISAC_UL_LOCK_CRC_GUARD=1 ISAC_PDSCH_GPU_EXACT_DEMOD_NL34=1 ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER=1 ISAC_PDSCH_GPU_EXACT_LDPC=1 ISAC_GPU_DISC_SMS=8 ISAC_GPU_RT_ISOLATE=1 ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34=1 ISAC_GPU_LMEM_PRERESERVE=1`.
+- `t26q` = `t26p_ul` + `ISAC_PDSCH_DMRS_ID_SCAN=16 ISAC_UL_LOCK_SIB1_FIRST=1 ISAC_UL_LOCK_CRC_FIRST=1 ISAC_UL_LOCK_CRC_K=3`.
+- Not verified in this lineage `[NOT VERIFIED]`: `ISAC_PDCCH_POINTA_REF=1` (needed for TIM, section 4). Check the env file before any TIM run. TIM CSI-RS workaround `ISAC_CSIRS_DISC=0 ISAC_CSIRS_FULL=0` (section 6).
+- Never set `ISAC_RX_BRANCH_FO`. Keep the K flags (`ISAC_PDCCH_DWELL_ADAPTIVE`, `ISAC_PDCCH_NO_FAKE_FOOTPRINT`, `ISAC_PDCCH_NID_GPU_NODROP`) off.
+- Cores: never pin receiver work on 17-19. `/etc/uhd/uhd.conf` has `dpdk_corelist=17,18,19`, `dpdk_lcore=18`; pinning there caused 27-30 USRP ring overflows per run `[CODE-READ, MEASURED DGX OTA]`. OTA isolation cores are `ISAC_PUSCH_CORES=6`, `ISAC_DMRS_SCAN_CORE=2`. DECQUEUE's alternatives "PUSCH core 17" and "scan core 18" must not be used.
+- Env files are single-line: `tests/passive_rx/timacq_replay.sh` reads only the first line `[CODE-READ]`.
+
+**3. OTA results 2026-10-10/11**
+
+PCI 415 (Vodafone), 2026-10-11 09:28-09:50, 150 s, n=2 per arm `[MEASURED, DGX OTA 2026-10-11]`:
+
+| metric | t26r | t26s |
+|---|---|---|
+| CRC-OK RNTIs (of DCI RNTIs), two runs | 32 (of 40), 34 (of 47) | 27 (of 37), 59 (of 75) |
+| CRC-OK % at SNR >= 10 dB, MCS 0-4 / 5-9 / 10-16 / 17+ | 99.3 / 85.1 / 44.7 / 0.5 | 98.3 / 87.9 / 71.0 / 36.8 |
+| per-decode time p50 | 785-795 us | 355-365 us |
+| per-decode time mean | 1.75 ms | 0.65 ms |
+| per-decode time p90 / p99 | not reported | 1.1 ms / 4.5 ms |
+
+p50 < 0.5 ms is met by t26s, not by t26r. The mean is not met by either arm.
+
+PCI 923 (TIM), same window `[MEASURED, DGX OTA 2026-10-11]`, 67-70 DCI RNTIs per run. CRC-OK RNTIs: t26s 28 and 9; t26r 26 and 0.
+- In the 0-RNTI run: 47,834 LDPC TBs, none CRC-OK; EVMGRANT SNR p50 0.9 dB (good run 7.7 dB); a completely different DM-RS ID set.
+- TIM decode p50 265-495 us (both arms).
+- Root cause open (agent TIMBIMODAL). `[HYPOTHESIS: wrong learned state never revoked]`.
+
+PCI 923 (TIM), UL, 2026-10-10 23:xx, t26q `[MEASURED, DGX OTA]`:
+- UL BWP locked 107@5 in 3/3 runs (8.7-16 s).
+- UL CRC16 passes 3/0/1 on tiny TBs (32-201 bits, one at MCS 26). Treated as false positives: `ISAC_UL_LOCK_CRC_GUARD=1` added (section 4).
+- PUSCH TB CRC is not expected at this site: UL data sits at the noise floor (interference-limited position). DCI 0_1 decoding and UL layout extraction work `[OFFLINE VERIFIED ULDBG, ULLAYOUT; OTA]`.
+
+**4. Fixes and offline evidence** (all default off unless stated)
+
+| item (report, branch / commit) | flag | evidence and label | status |
+|---|---|---|---|
+| TIM Point A reference (TIMACQ, `csd/tim-acq`) | `ISAC_PDCCH_POINTA_REF=1` | Cause: the receiver assumed grid RB 0 = CRB 0. TIM's Point A is at grid RB 78, so the DM-RS reference was 78 RBs off. `[MEASURED replay TIM 0.25x]` 4218 CRC-OK DCI 1_1 (12 C-RNTIs, len 47), bank add 0.63 s after sync, against 0 CRC-OK in the untuned flag-off arm. With the retuned grid, flag off: 1364 (11 RNTIs) before a CSI-RS crash. Flag on, CSI-RS discovery off: 2053 (12) and 1486 (11). A matched no-crash flag-off arm was not run `[NOT MEASURED]`. Vodafone: no-op by construction (Point A = grid RB 0). | Offline. No OTA run of the retuned TIM recipe is recorded `[NOT MEASURED]`. |
+| TIM PDSCH DM-RS identity scan (TIMPDSCH, `csd/tim-pdsch`, `d0c6c0bc8e`) | `ISAC_PDSCH_DMRS_ID_SCAN=16` | TIM gives each UE its own DM-RS scrambling ID (above 1023 in most cases); data ID = PCI 923. Decode-free full 16-bit scan; top-2 identities become hypotheses. `[OFFLINE VERIFIED]` test_nr_pdsch_dmrs_scan 4/4, test_nr_pdsch_solver 13/13. `[MEASURED replay TIM]` solved 0 (off) -> 4-6 (on). `[MEASURED replay, Vodafone b]` off 26 / 36 solved, on 19 / 29 (ranges overlap, n=2). Capture 8: 4 / 4 in both arms. | In t26q lineage. |
+| Solver cover: contrast ranking and fair share (SOLVERCOVER, `csd/solver-cover`, `6293f54932`, `fc93702433`, `13d9afd4fd`) | `ISAC_PDSCH_DMRS_ID_CONTRAST=1 ISAC_PDSCH_SOLVER_FAIRSHARE=1` | Root cause `[MEASURED OTA DGX 2026-10-10, TIM, ab_Tq1_1_230208 / ab_Tq1_1_231425 / ab_Tq2_1_231945]`: 26-44 DCI RNTIs never got an EVMGRANT. One cell-wide ID (65 or 928) held a hypothesis slot of almost every RNTI. 22-34 % of PDSCH queue jobs were stale (Vodafone 7 %). The solver also capped the table at 64 RNTIs with no reuse. `[MEASURED replay 0.25x, base n=4 vs fix4 n=4]` Vodafone b: CRC-OK 1410 -> 1783, median lag 2.86 -> 0.78 s. TIM 12 s: CRC-OK 235 -> 307 (run min 67 -> 182); solved 5.5 -> 5.8. Capture 8: 2 of 4 fix4 runs halved CRC-OK (340, 286 vs 658-694), traced upstream (fewer DCIs), unexplained. `[OFFLINE VERIFIED]` test_nr_pdsch_solver 15/15, test_nr_pdsch_dmrs_scan 5/5. | In t26s. Starvation effect `[HYPOTHESIS]` until the t26r vs t26s OTA result is read against it (section 3). |
+| UL layout lock, SIB1 BWP first, CRC first (ULCRCFIRST, `csd/ul-crc-first`) | `ISAC_UL_LOCK_SIB1_FIRST=1 ISAC_UL_LOCK_CRC_FIRST=1 ISAC_UL_LOCK_CRC_K=3` (+ `ISAC_UL_LAYOUT_LOCK=1`) | `[OFFLINE VERIFIED]` test_nr_pdcch_blind_monitor 249 passed. Baseline (pre-change, Vodafone OTA `ab_V1_1_202044`): PUSCHQ queued 19532, decoded 0, crc_ok 0. | In t26q. OTA result: TIM lock above. |
+| UL CRC16 guard (ULCRCGUARD, 2026-10-11) | `ISAC_UL_LOCK_CRC_GUARD=1` | CRC16 TBs (<= 3824 bits): lock only on >= 2 passes from >= 2 slots with Bonferroni p < 0.01. Single-pass CRC24A or segmented TBs lock at once. `[OFFLINE VERIFIED]` UlLayoutLock.CrcGuard* unit test. Motivation: TIM passes on TBS 32/63/201 bits. | In t26r. No replay or OTA of the guard `[NOT MEASURED]`. |
+| UL blind layout lock without PUSCH CRC (ULLAYOUT, `csd/ul-layout`) | `ISAC_UL_LAYOUT_LOCK=1` (+ UL chain flags) | Stage 1 bit fit per DCI length; stage 2 DM-RS MRC probes vote BWP hypotheses. `[MEASURED replay capture b (PCI 415), 3/3 final-binary runs]` lock 216 PRB @ CRB 1 at 7.7-8.4 s after first DCI 0_1, never the DL BWP 217@0. No false lock (control 0 votes; old capture no lock in 2 runs). Post-lock ULDCI matched the locked reading 713/713, 354/354, 751/751. PUSCH TB CRC 0 (link budget). | Replay only. Not in t26q/t26r/t26s and no OTA run recorded `[NOT MEASURED]`. |
+| UL 2-layer unbiased MMSE (ULLAYOUT section 6) | `ISAC_PUSCH_MMSE_MODE=2` | `[MEASURED, DGX unit test_nr_pusch_mmse2]` kappa 0.857 (stock) vs 1.003 (mode 2), correlated layers 0.8. Stock path byte-identical when unset. Multi-layer UL still rejected at DCI parse (precoding tables need SRS/codebook config not on air). | Unit only. |
+| Wide S=0 grants rate-matched around own PDCCH (WIDES0, `csd/wide-s0`, base `95fa2728e1`) | `ISAC_PDSCH_PDCCH_RM=1` (paired diagnostic `=2`) | Root cause `[CODE, TS 38.214 5.1.4.1]`: the scheduling PDCCH's REs on symbol 0 were not excluded, so a wide S=0 grant lost 12 x 6L REs and every code block failed together. Layout-verified RNTI 0x37f3, wide >= 96 PRB from RB 0 `[MEASURED replay capture b]`: 0/21 -> 18/21 (85.7 %, paired); narrow <= 32 PRB 88.6 % -> 98-99 %. All-RNTI wide Qm >= 4: 0/27 -> 18/27 (66.7 %). Capture 8 wide: 0/10 -> 1/10 (256QAM). Gate met only for 0x37f3. | OTA A/B not run (no radio by order). Not in t26s. Supersedes `ISAC_PDSCH_OWN_PDCCH_RM` (guesses PRBs). |
+
+**5. Decode time per PDSCH grant (PDTIM)**
+
+Target: mean < 0.5 ms per decode. Not met in any replay or OTA run. p50 met in the final arms.
+
+| report | capture / arm | before | after | label |
+|---|---|---|---|---|
+| DECQUEUE (`csd/dec-queue`) | Vodafone OTA 2026-10-10 23:1x, t26q vs t26p_ul: stage means fep/chest/demod/ldpc | 140/170/532/341 us (sum 1183) | 288/222/636/532 us (sum 1678) | `[MEASURED OTA]` (sums derived) |
+| DECQUEUE | b, SPEED=1, PUSCH cores 6 prio 30 + scan async core 2 (arm B) vs t26q (arm A), n=3 | sum 1047 us (runs 897-1231) | sum 888 us (runs 868-898) | `[MEASURED replay GB10]` suggestive only |
+| DECGPU (`csd/dec-gpu`, `c41570ddc2`, `18726ef96f`, `2bdfdcdf31`) | b, 0.25x, t26q env | sum of means 954 us; demod 397 us | 828 us; demod 291 us; p50 455-475 us (465-495 before) | `[MEASURED replay GB10]`, n=2 |
+| GPUSHARE (`csd/gpu-share`, `6f13062d4b`, `41f1196135`, `a11383e94b`) | b, SPEED=1, t26r | sum 842-888 us; p99 6.8-7.8 ms | 603-741 us; p99 2.2-4.6 ms; p50 415-445 us | `[MEASURED replay GB10]`, n=2 |
+| GPUFUSE (`csd/gpu-fuse`, `4199ad784b`, `245b20988a`, `c7f4b83e21`) | b, SPEED=1, t26r | sum 653-797 us | 588-627 us (F2), 592-687 us (F3); p50 355-375 us | `[MEASURED replay GB10]`, n=2 |
+| GPUFUSE | TIM 12 s | sum 1425-1773 us; demod 668-726 us | 574-966 us; demod 143-235 us | same |
+| GPUFUSE | capture 8 | sum 969-1974 us | 772-1348 us | same, one slow window per run |
+
+- GPUFUSE baseline (A) is the GPUSHARE binary `3c68c65006`. Replay runs are not comparable to OTA or to each other across binaries.
+- Bit-exactness is by CHECK mode, not by CRC counts: demod TIM 10,000/10,000 and 8,003/8,003, b 18,000/18,000; GPU LDPC 22,000/22,000 (DECGPU); Nl 3-4 demod 16,000/16,000 (DECGPU). `[MEASURED replay, check_bad 0]`.
+- GPU LDPC: DECGPU left it off (slower behind discovery kernels). **Superseded by GPUSHARE**: the SM partition (`ISAC_GPU_DISC_SMS=8 ISAC_GPU_RT_ISOLATE=1`) makes it 102-122 us per TB, now in t26r.
+- Open tails: 40-560 ms GPU demod maxima in about half the GPUFUSE F3 runs, not attributed (candidates `[HYPOTHESIS]`: runtime cudaMalloc/cudaHostAlloc of the discovery path; demod context pool of 8).
+- DECQUEUE finding `[CODE-READ]`: 86 % of solver-era decodes are probes (unsolved RNTIs). Retry-prediction and retry-no-restore flags (`ISAC_PDSCH_RETRY_PREDICT`, `ISAC_PDSCH_RETRY_NORESTORE`) gave no measured per-body gain; keep off.
+
+**6. Crashes and host findings**
+
+- **OTA SIGSEGV with no backtrace** `[MEASURED, DGX OTA 2026-10-10 root cause; fix verified on replay]`: static TLS reached 5.6 MB (per-thread scratch in `nr_pdsch_data_aided.c` / `nr_pusch_data_aided.c`) and is carved from each thread's 8 MB stack. Fast re-sync after a USRP ring gap (`nr_initial_sync_impl` + `nr_pbch_detection`, about 2.8 MB with 4 RX) overflowed the SYNC actor stack. Fix `84c702792f` moves the buffers to lazy per-thread heap: TLS 5.65 -> 2.45 MB. Replay `ISAC_RAW_IQ_GAP_AT_S=6 ISAC_RAW_IQ_GAP_S=1.1 ISAC_RX_RECOVER=1`: re-sync 137 ms. **Rule:** no large static `__thread` buffers. Check `readelf -lW nr-uesoftmodem | awk '$1=="TLS"'` < 3 MB.
+- **glibc fortify abort on TIM** `[MEASURED, DGX OTA]`: snprintf accumulation overflow in the UL layout FIT log (`nr_pdcch_ul_layout_lock.c`), fixed `2181f7506f`. `ISAC_SEGV_BT` now also catches SIGABRT. Transform-precoding grants with N_RB not of the form 2^a 3^b 5^c are refuted instead of asserting (`ed264b11ec`).
+- **CSI-RS sensing stack overflow on TIM** `[MEASURED replay, gdb, TIMACQ]`: the VLA `csi_rs_received_signal` (983 KB) in `nr_ue_csi_rs_sensing_capture_shifted` (csi_rx.c:1344) on `DL__actor`; multi-port CSI-RS adds about 1 MB. Crash about 5 s in, 2/2 runs. Workaround `ISAC_CSIRS_DISC=0 ISAC_CSIRS_FULL=0`. Fix not stated in the reports: `84c702792f` is the TLS fix, and whether it covers this path is `[NOT MEASURED]`.
+
+**7. Carriers and TIM recipe** (survey, TIMACQ)
+
+- Survey 2026-10-10 (CARRIERS, 0.3 s x 4 ch, 7 captures, RX1 for detection) `[MEASURED, OTA air survey + replay]`: PCI 415 at GSCN 7971 (3679.68 MHz), SSS ratio 3.8 (control); PCI 923 (TIM) at GSCN 8007 (3731.52 MHz), PSS 24.9 dB. PCI 403, 518, 675 and 347 are detections only (not synced).
+- TIM SIB1 gives an 80 MHz, 217-PRB carrier, offsetToPointA = 38, k_SSB = 10 `[MEASURED, OTA LIVE + replay]`. The "~50 MHz" width in the survey is an occupancy estimate and is superseded by SIB1.
+- **Superseded:** CARRIERS' TIM recipe `-C 3731.91 --ssb 1169`. Its rule `-C = GSCN + (1182 - ssb) * 0.03` holds only for offsetToPointA = 194 (Vodafone). **TIM now:** `-C 3759990000 -r 217 --numerology 1 --band 78 --ssb 233 --initial-fo -4800` with `ISAC_PDCCH_POINTA_REF=1`. `--ssb` = (k_SSB + 12 x offsetToPointA) / 2 = (10 + 456) / 2 = 233. Both FO seeds -4800 (T1) and +6900 (T2) synced live; keep the one that syncs.
+- Vodafone recipe unchanged: `-C 3680010000 -r 217 --numerology 1 --band 78 --ssb 1171 --initial-fo 6900`.
+- New 1 s 4-channel survey captures `/home/nicola/NICOLA/ota_runs/survey_1s_1011/{c3330,c3430,c3550,c3610}`: analysis pending (CARRIERS2) `[NOT MEASURED]`.
+
+**8. Open, not measured**
+
+- TIM bimodal OTA (section 3): root cause open.
+- Decode mean > 0.5 ms (best: t26s 0.65 ms on PCI 415); GPU demod stalls (section 5).
+- TIM high-MCS UEs: SNR-limited `[HYPOTHESIS]` (0x4e32, TIMPDSCH). TIM RANK "pair-coherence low 77 %" flag (TIMACQ) points at a multi-layer or DM-RS configuration difference `[INFERRED]`.
+- Capture 8 CRC-OK halving in 2 of 4 fix4 runs: unexplained (SOLVERCOVER).
+- UL layout lock: residual false-lock risk on a cell where other UEs' PUSCH lands on a wrong hypothesis `[INFERENCE]`; no OTA run.
+- WIDES0 OTA A/B; non-solver DCI paths (format 1_0, config-sweep) do not fill the PDCCH RM fields `[CODE-READ]`.
+- t26s vs t26r OTA: n=2 per arm on PCI 415 and one TIM pair; no effect size is established beyond that.
+
+**9. Superseded by this block** (old text kept and marked in place):
+- "Recommended OTA env: t26j" (header 2026-10-10 block, §25 2026-10-10 lines) -> t26s, section 2.
+- CARRIERS' TIM recipe `-C 3731.91 --ssb 1169` -> section 7.
+- DECGPU "GPU LDPC off, keep `ISAC_PDSCH_GPU_EXACT_LDPC` unset" -> GPUSHARE (SM partition, LDPC on in t26r).
+- TLS 5.6 MB on the DECGPU base -> 2.45 MB after `84c702792f`.
+- `ISAC_PDSCH_OWN_PDCCH_RM` (WIDES0) -> `ISAC_PDSCH_PDCCH_RM`.
+- DECQUEUE alternative cores 17 / 18 -> not used (section 2).
+
+**10. Reports used:** TIMACQ, TIMPDSCH-20261010, CARRIERS, ULCRCFIRST-20261010, ULCRCGUARD-20261011, DECQUEUE-20261010, DECGPU-20261010, GPUSHARE-20261011, GPUFUSE-20261011, SOLVERCOVER-20261011, WIDES0, ULLAYOUT, OTASTATS-20261010 (`docs/superpowers/reports/csd/`). OTASTATS 2026-10-10 (three comparisons, n=2 per set, t26j/t26k and A/B) is the receiver-log statistics source for the 10-10 OTA runs: t26j vs t26k CRC-OK, SNR >= 10 dB, all MCS: 83.0 % vs 81.3 % (CI excludes 0, n=2 per set); the t26k DWELL/NODROP flags stay off.
 
 ---
 
