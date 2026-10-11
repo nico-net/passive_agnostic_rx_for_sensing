@@ -2,6 +2,7 @@
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -202,9 +203,11 @@ namespace resident {static int detect(const nr_csirs_disc_ring_t *,const nr_csir
 /* nr_csirs_disc_gpu_ops: returns the GPU operations table of this module (footprints, normalise, FFT, FEP, accumulate, lattice, memory and prepare entries) when a CUDA device is present.
  *   Returns NULL when the discovery stream cannot be created or no device is found. Exported with C linkage; loaded by nr_csirs_disc_backend.c (load_module).
  */
+static void lmem_prereserve(void);
 extern "C" const nr_csirs_disc_gpu_ops_t *nr_csirs_disc_gpu_ops(void)
 {
   if(!discovery_stream.init()) return nullptr;
+  lmem_prereserve();
   int devices=0;if(cudaGetDeviceCount(&devices)!=cudaSuccess || devices<1) return nullptr;
   static const nr_csirs_disc_gpu_ops_t ops={footprints,nullptr,normalize_host,fft_host,fep_host,accumulate_host,lattice_host,device_alloc,device_free,prepare_host,resident::detect,resident::reset,nullptr,nullptr,nullptr,readback,upload_symbols};return &ops;
 }
@@ -634,4 +637,22 @@ static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
   accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(h.x.p,h.meta.p,1,nr,168*tiles,h.sum.p,h.sq.p,h.s80.p,h.s64.p,h.total.p,h.totalq.p);
   resident::reset();
   return cudaGetLastError()==cudaSuccess && disc_wait()==cudaSuccess?0:-1;
+}
+
+/* GPUFUSE: ISAC_GPU_LMEM_PRERESERVE=1 (default off). resident::segment needs ~21 KB of local memory per thread: its
+ * first launch made the driver grow the device's local-memory reservation (~2 GB), a device-wide synchronisation that
+ * blocked every kernel launch, PDSCH included, for 218 ms [nsys, replay b] -- the "one stall per run". Reserving
+ * the largest frame of this module's kernels before RX moves that growth to start-up. */
+static void lmem_prereserve(void)
+{
+  static bool done=false;
+  const char *e=getenv("ISAC_GPU_LMEM_PRERESERVE");
+  if(done || !e || atoi(e)!=1) return;
+  done=true;
+  size_t need=0,cur=0;cudaFuncAttributes fa;
+  if(cudaFuncGetAttributes(&fa,resident::segment)==cudaSuccess) need=std::max(need,fa.localSizeBytes);
+  if(cudaFuncGetAttributes(&fa,resident::finish)==cudaSuccess) need=std::max(need,fa.localSizeBytes);
+  if(cudaDeviceGetLimit(&cur,cudaLimitStackSize)!=cudaSuccess) return;
+  const cudaError_t r=need>cur?cudaDeviceSetLimit(cudaLimitStackSize,need):cudaSuccess;
+  fprintf(stderr,"[GPU] ISAC_GPU_LMEM_PRERESERVE=1: per-thread local memory %zu -> %zu bytes (%s)\n",cur,std::max(cur,need),cudaGetErrorString(r));
 }
