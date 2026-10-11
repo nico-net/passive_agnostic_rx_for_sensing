@@ -50,6 +50,10 @@ static int g_check;
 static _Atomic uint64_t g_calls, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max, g_ns_gpu, g_ns_geo; /* geo: host geometry (index-coded extractor) */
 static _Atomic uint64_t g_refuse[16];
 static _Atomic uint64_t g_evm_close, g_evm_far, g_evm_maxrel; /* CHECK with the GPU EVM (rel. err of err x 1e18) */
+/* GPUFUSE diagnostic ISAC_PDSCH_GPU_EXACT_DEMOD_SHAPES=1 (default off): per (Nl, Qm, RB class) count, wall and GPU ns */
+static int g_shapes = -1;
+static _Atomic uint64_t g_shape[4][4][4][3];
+static int rb_class(int nrb) { return nrb <= 52 ? 0 : nrb <= 106 ? 1 : nrb <= 200 ? 2 : 3; }
 
 static uint64_t now_ns(void)
 {
@@ -406,6 +410,20 @@ static void stats_log(uint64_t n)
         (unsigned long)n, (unsigned long)atomic_load(&g_chk_ok), (unsigned long)atomic_load(&g_chk_bad),
         (unsigned long)atomic_load(&g_evm_close), (unsigned long)atomic_load(&g_evm_far), atomic_load(&g_evm_maxrel) / 1e18,
         atomic_load(&g_ns_sum) / 1e3 / n, atomic_load(&g_ns_gpu) / 1e3 / n, atomic_load(&g_ns_geo) / 1e3 / n, atomic_load(&g_ns_max) / 1e3, rf);
+  if (g_shapes == 1) {
+    char sh[2048];
+    int v = 0;
+    static const char *rbn[4] = {"<=52", "<=106", "<=200", ">200"};
+    for (int l = 0; l < 4; l++)
+      for (int q = 0; q < 4; q++)
+        for (int r = 0; r < 4; r++) {
+          const uint64_t c = atomic_load(&g_shape[l][q][r][0]);
+          if (c && v < (int)sizeof(sh) - 64)
+            v += snprintf(sh + v, sizeof(sh) - v, " nl%d/qm%d/rb%s:n=%lu,mean=%.0f,gpu=%.0f", l + 1, 2 * (q + 1), rbn[r], (unsigned long)c,
+                          atomic_load(&g_shape[l][q][r][1]) / 1e3 / c, atomic_load(&g_shape[l][q][r][2]) / 1e3 / c);
+        }
+    LOG_A(PHY, "SENSING: GPU_EXACT_DEMOD_SHAPES%s\n", sh);
+  }
 }
 
 /* Folds one symbol's GPU EVM partial sums into nr_pdsch_evm_acc, in the field order of nr_rx_pdsch()'s block. */
@@ -565,7 +583,10 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j.want_kappa = nr_pdsch_evm_acc.armed;
   if (g_gpu_evm < 0)
     g_gpu_evm = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM", 1); /* 1: GPU float, 2: GPU double, 0: CPU copy (exact, slow) */
-  j.want_evm = nr_pdsch_evm_acc.armed && g_gpu_evm && nl <= 2;
+  static int s_evm34 = -1; /* GPUFUSE: ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34=1 (default off): GPU EVM for Nl = 3, 4 too (else the CPU copy) */
+  if (s_evm34 < 0)
+    s_evm34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34", 0);
+  j.want_evm = nr_pdsch_evm_acc.armed && g_gpu_evm && (nl <= 2 || s_evm34 == 1);
   j.evm_fp64 = g_gpu_evm == 2;
   j.evm_erase = nr_dlsch_csi_erase_n > 0;
   j.evm_defer = t_defer_ok && j.want_evm && t_def;
@@ -767,6 +788,14 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     }
   }
   const uint64_t dt = now_ns() - t0;
+  if (g_shapes < 0)
+    g_shapes = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_SHAPES", 0);
+  if (g_shapes == 1) {
+    const int l = (c->dlsch->cw_info.Nl - 1) & 3, q = (c->dlsch->cw_info.qamModOrder / 2 - 1) & 3, r = rb_class(c->freq_alloc->num_rbs);
+    atomic_fetch_add_explicit(&g_shape[l][q][r][0], 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_shape[l][q][r][1], dt, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_shape[l][q][r][2], gns, memory_order_relaxed);
+  }
   atomic_fetch_add_explicit(&g_ns_sum, dt, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_ns_gpu, gns, memory_order_relaxed);
   uint64_t mx = atomic_load(&g_ns_max);
