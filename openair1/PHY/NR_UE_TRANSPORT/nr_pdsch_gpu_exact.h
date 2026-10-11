@@ -12,6 +12,8 @@
 
 /* Warm-up (before the RX allocation fence): returns 1 when the exact path is active. */
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue);
+/* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: the calling thread's next GPU launches use the low-priority streams (low != 0); no-op when off. */
+void nr_pdsch_gpu_exact_set_lowprio(int low);
 /* FEP of every symbol in the ranges (rng[g] = {first symbol, count}) into rxdataF[ant * stride + sym * N].
  * 0 = done (bit-exact with nr_slot_fep_ant), -1 = caller runs the CPU FEP. */
 int nr_pdsch_gpu_exact_fep_ranges(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, const int (*rng)[2], int n_rng,

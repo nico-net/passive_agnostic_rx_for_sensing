@@ -14,6 +14,7 @@
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "nr_pdsch_gpu_prio.cuh"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,7 @@ struct DJob { /* device view of one code block */
 
 struct Ctx {
   cudaStream_t s;
+  cudaStream_t sh, sl; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority streams */
   DJob *dj;            /* pinned mapped [NJ] */
   int8_t *in;          /* pinned [NJ][MAXC*ZMAX] */
   uint8_t *snap;       /* pinned mapped [NJ][NR_GPU_LDPC_MAX_SNAP][KB_MAX] */
@@ -59,7 +61,7 @@ struct Ctx {
 };
 static Ctx g_ctx[CTX];
 static std::atomic<unsigned> g_busy{0};
-static int g_ok;
+static int g_ok, g_prio;
 static std::mutex g_gm;
 static std::map<int, Graph *> g_graphs; /* (BG, Z, R) -> device graph */
 
@@ -516,7 +518,11 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
           || cudaMalloc(&x.llr, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.llrRes, (size_t)NJ * MAXC * ZMAX + 16) != cudaSuccess
           || cudaMalloc(&x.c2v, (size_t)NJ * MAXE * ZMAX + 16) != cudaSuccess || cudaMalloc(&x.unsat, sizeof(int) * NJ * NIT) != cudaSuccess)
         return;
+      x.sh = x.sl = x.s;
+      if (nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&x.sl, lo, hi))
+        return;
     }
+    g_prio = nr_pdsch_gpu_prio_on();
     /* GPUSHARE: build every (BG, Z, R) graph now. Built lazily, each first use ran cudaMalloc + a synchronous
      * cudaMemcpy on a decode thread: up to 69 ms each behind a busy GPU (~110 of them in a 12 s replay). */
     for (int BG = 1; BG <= 2; BG++)
@@ -545,6 +551,8 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   }
   const int c = acquire();
   Ctx &x = g_ctx[c];
+  if (g_prio) /* the context is ours and idle: this body's class picks the stream */
+    x.s = nr_pdsch_gpu_low ? x.sl : x.sh;
   int8_t *din = nullptr;
   cudaHostGetDevicePointer((void **)&din, x.in, 0);
   for (int k = 0; k < n; k++) {

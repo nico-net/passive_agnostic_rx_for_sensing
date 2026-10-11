@@ -7,6 +7,7 @@
 #include "nr_dl_gpu_memory.h"
 #include "nr_dl_gpu_budget.h"
 #include "nr_gpu_green.h"
+#include "nr_pdsch_gpu_prio.cuh"
 #include <cufft.h>
 #include <chrono>
 #include <cmath>
@@ -121,6 +122,10 @@ static std::atomic<uint64_t> g_exact_late, g_exact_busy;
  * keeps a lock. */
 static const int EXACT_CTX = 8;
 static cudaStream_t g_ctx_stream[EXACT_CTX];
+static cudaStream_t g_ctx_hi[EXACT_CTX], g_ctx_lo[EXACT_CTX]; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: the two streams of a context */
+static bool g_ctx_prio;
+__thread int nr_pdsch_gpu_low;
+extern "C" void nr_pdsch_gpu_set_lowprio(int low) { nr_pdsch_gpu_low = low; }
 static int *g_ctx_delay[EXACT_CTX];
 static short2 *g_ctx_ls[EXACT_CTX];    /* GPU-DEMOD chest: LS rows [64][4096] */
 static int *g_ctx_cout[EXACT_CTX];     /* GPU-DEMOD chest: delay triples + nvar (staging) */
@@ -137,7 +142,11 @@ static int ctx_acquire(bool try_only)
   for (;;) {
     unsigned m = g_ctx_busy.load();
     for (int i = 0; i < EXACT_CTX; i++)
-      if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) return i;
+      if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) {
+        if (g_ctx_prio) /* the context is ours and idle: point it at the stream of this body's class */
+          g_ctx_stream[i] = nr_pdsch_gpu_low ? g_ctx_lo[i] : g_ctx_hi[i];
+        return i;
+      }
     if (try_only) return -1;
     std::this_thread::yield();
   }
@@ -666,11 +675,14 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
       for (int c = 0; c < EXACT_CTX; c++) {
         if (!nr_gpu_green_stream(&g_ctx_stream[c], greatest, true)) CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
+        g_ctx_hi[c] = g_ctx_lo[c] = g_ctx_stream[c];
+        if (nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&g_ctx_lo[c], least, greatest)) g_ctx_lo[c] = g_ctx_stream[c];
         CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_ctx_ls[c], NR_GPU_CHEST_MAX_ROWS * 4096 * sizeof(short2)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_cout[c], 4 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_ctx_rows[c], NR_GPU_CHEST_MAX_ROWS * sizeof(nr_gpu_chest_row_t)));
       }
+      g_ctx_prio = nr_pdsch_gpu_prio_on();
     }
     /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
      * coherent shared-memory platform (GB10: pageable access through the host page tables). */
