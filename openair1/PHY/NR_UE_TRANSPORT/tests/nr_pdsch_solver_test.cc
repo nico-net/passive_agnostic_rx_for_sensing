@@ -357,3 +357,60 @@ int main(int argc, char **argv)
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+/* SOLVERCOVER ISAC_PDSCH_SOLVER_FAIRSHARE=1: an RNTI with a grant in every slot and one with a grant every 10 slots share the
+ * probe rate equally; without the share the busy one plans ~24 probes per grant. */
+static int PlanProbes(uint16_t rnti, int budget)
+{
+  static const uint16_t a[1] = {3}, b[1] = {9};
+  nr_pdsch_solver_reading_t rd[2] = {{a, 1, 16, 1, 1, 0}, {b, 1, 16, 1, 1, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  nr_dci_bits_t p = {{0, 0, 0}};
+  const int n = nr_pdsch_solver_plan(rnti, p, 49, 0, 2, rd, 2, budget, v);
+  for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, true);
+  return n;
+}
+TEST(PdschSolver, FairShareSplitsTheProbeRateBetweenActiveRntis)
+{
+  for (int on = 0; on < 2; on++) {
+    on ? setenv("ISAC_PDSCH_SOLVER_FAIRSHARE", "1", 1) : unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");
+    nr_pdsch_solver_reset();
+    int busy = 0, quiet = 0;
+    for (uint64_t s = 1000; s < 3000; s++) {
+      nr_pdsch_solver_set_now(s);
+      int b = nr_pdsch_solver_fair_budget(0x5114, 0.5, 24);
+      if (b > 0) busy += PlanProbes(0x5114, b);
+      if (s % 10 == 0) {
+        b = nr_pdsch_solver_fair_budget(0x5098, 0.5, 24);
+        if (b > 0) quiet += PlanProbes(0x5098, b);
+      }
+    }
+    if (!on) {
+      EXPECT_GT(busy, 20 * 2000); /* no share: every grant takes its full budget */
+    } else {
+      EXPECT_LE(busy, 0.25 * 2000 + 48); /* half of 0.5 probes/slot, plus the cold-start budget */
+      EXPECT_GE(quiet, 0.25 * 2000 - 48);
+      EXPECT_LE(quiet, 0.25 * 2000 + 48);
+    }
+  }
+  unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");
+  nr_pdsch_solver_reset();
+}
+
+/* SOLVERCOVER: the 64-entry RNTI table used to refuse every RNTI after the 64th forever. With FAIRSHARE the least recently
+ * active entry idle for >= 2 s of signal (4000 slots) is reused; an entry active within 2 s is never evicted. */
+TEST(PdschSolver, FullTableReusesOnlyIdleEntries)
+{
+  setenv("ISAC_PDSCH_SOLVER_FAIRSHARE", "1", 1);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_now(10000);
+  for (int i = 0; i < 64; i++) EXPECT_GT(PlanProbes((uint16_t)(0x4000 + i), 8), 0);
+  nr_pdsch_solver_set_now(12000);
+  EXPECT_EQ(PlanProbes(0x5000, 8), 0); /* all active within 2 s: refused */
+  nr_pdsch_solver_set_now(14500);
+  for (int i = 1; i < 64; i++) PlanProbes((uint16_t)(0x4000 + i), 8); /* 0x4000 stays idle */
+  EXPECT_GT(PlanProbes(0x5000, 8), 0); /* reuses 0x4000's entry */
+  EXPECT_EQ(PlanProbes(0x5001, 8), 0); /* nothing else idle */
+  unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");
+  nr_pdsch_solver_reset();
+}

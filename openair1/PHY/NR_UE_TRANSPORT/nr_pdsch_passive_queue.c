@@ -403,7 +403,8 @@ static int dmrs_scan_rate(void)
   }
   return v;
 }
-typedef struct { int64_t abs; int n; nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS]; } dmrs_scan_slot_t;
+/* wait[]: RNTIs of this slot that arrived while its scan was in progress (ISAC_PDSCH_DMRS_ID_CONTRAST): voted when it ends */
+typedef struct { int64_t abs; int n; nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS]; int nwait; uint16_t wait[8]; } dmrs_scan_slot_t;
 static dmrs_scan_slot_t g_scan_cache[32];
 static int64_t g_scan_last_abs = -1000000;
 static uint64_t g_scan_n, g_scan_hits, g_scan_us, g_pool_n, g_pool_us;
@@ -452,14 +453,21 @@ static void dmrs_scan_run(dmrs_scan_slot_t *c, uint16_t rnti, int64_t abs_slot, 
   nr_dmrs_scan_hit_t h[NR_DMRS_SCAN_MAX_HITS];
   const int n = (full ? nr_dmrs_scan_slot : nr_dmrs_scan_slot_pool)(rx, nant, N, fco, n_rb, nr_slot, sym, sps, 6, h, NR_DMRS_SCAN_MAX_HITS);
   clock_gettime(CLOCK_MONOTONIC, &t1);
+  uint16_t wait[8];
+  int nwait = 0;
   pthread_mutex_lock(&g_scan_mu);
-  if (c->abs == abs_slot) { c->n = n; memcpy(c->h, h, sizeof(h)); }
+  if (c->abs == abs_slot) {
+    c->n = n; memcpy(c->h, h, sizeof(h));
+    nwait = c->nwait; memcpy(wait, c->wait, sizeof(wait)); c->nwait = 0;
+  }
   const uint64_t us = (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000);
   if (full) { g_scan_n++; g_scan_hits += (uint64_t)n; g_scan_us += us; }
   else { g_pool_n++; g_pool_us += us; }
   const uint64_t sn = g_scan_n, sh = g_scan_hits, su = g_scan_us, pn = g_pool_n, pu = g_pool_us;
   pthread_mutex_unlock(&g_scan_mu);
   dmrs_scan_vote_log(rnti, abs_slot, h, n);
+  for (int i = 0; i < nwait; i++) /* the slot's other RNTIs (co-scheduled grants seen while the scan ran) */
+    if (wait[i] != rnti) dmrs_scan_vote_log(wait[i], abs_slot, h, n);
   if (!full && (n == 0 || (pn % 50) != 1)) return; /* pool checks: log 1 in 50 */
   char b[256] = "";
   int u = 0;
@@ -522,13 +530,17 @@ static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t ab
 {
   const int rate = dmrs_scan_rate();
   if (rate <= 0 || abs_slot < 0) return;
-  int ids[2];
   if (nr_pdsch_solver_rep(rnti) >= 0) return; /* solved: nothing left to learn */
   /* decided: no more full scans for it, but the cached/pool results keep voting, so an early wrong lead can be overtaken */
-  const bool decided = nr_dmrs_scan_rnti_ids(rnti, ids, 2) >= 1 && nr_dmrs_scan_rnti_slots(rnti) >= 4;
+  const bool decided = nr_dmrs_scan_rnti_decided(rnti);
   pthread_mutex_lock(&g_scan_mu);
   dmrs_scan_slot_t *c = &g_scan_cache[abs_slot & 31];
   if (c->abs == abs_slot) {
+    if (c->n < 0 && nr_dmrs_scan_contrast_on()) { /* scan in progress: vote this RNTI when it completes */
+      bool dup = false;
+      for (int i = 0; i < c->nwait && !dup; i++) dup = c->wait[i] == rnti;
+      if (!dup && c->nwait < 8) c->wait[c->nwait++] = rnti;
+    }
     dmrs_scan_slot_t copy = *c;
     pthread_mutex_unlock(&g_scan_mu);
     if (copy.n >= 0) dmrs_scan_vote_log(rnti, abs_slot, copy.h, copy.n);
@@ -539,7 +551,7 @@ static void dmrs_scan_job(const NR_DL_FRAME_PARMS *fp, uint16_t rnti, int64_t ab
   const int64_t gap = (int64_t)(1000 * fp->slots_per_subframe) / rate;
   const bool full = !decided && abs_slot - g_scan_last_abs >= gap;
   if (full) g_scan_last_abs = abs_slot;
-  c->abs = abs_slot; c->n = -1; /* in progress: concurrent consumers of this slot do not vote */
+  c->abs = abs_slot; c->n = -1; c->nwait = 0; /* in progress: concurrent consumers of this slot do not vote (unless CONTRAST) */
   pthread_mutex_unlock(&g_scan_mu);
   if (dmrs_scan_async() && dmrs_scan_submit(rnti, abs_slot, nr_slot, sym, full, fp->nb_antennas_rx, fp->ofdm_symbol_size,
                                             fp->first_carrier_offset, fp->N_RB_DL, fp->symbols_per_slot, rx))

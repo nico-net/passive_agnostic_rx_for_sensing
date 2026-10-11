@@ -59,6 +59,15 @@ float nr_dmrs_scan_prb_score(const int16_t *const *rx, int nant, int N, int fco,
 void nr_dmrs_scan_vote(uint16_t rnti, int64_t abs_slot, const nr_dmrs_scan_hit_t *hits, int n);
 /** Up to max identities of rnti with >= NR_DMRS_SCAN_MIN_VOTES votes, most voted first. */
 int nr_dmrs_scan_rnti_ids(uint16_t rnti, int *ids, int max);
+/** ISAC_PDSCH_DMRS_ID_CONTRAST=1 (default off): nr_dmrs_scan_rnti_ids() ranks an RNTI's identities by contrast = share of
+ * its voted slots carrying the id minus share of the cell's other voted slots carrying it (an id common to the whole cell
+ * scores ~0, the UE's own id ~its detection rate) instead of by raw votes. Ids are only reordered, never dropped. */
+bool nr_dmrs_scan_contrast_on(void);
+/** An RNTI is "decided" (no more full scans for it, pool re-tests only) once its best identity has >= NR_DMRS_SCAN_MIN_VOTES
+ * votes over >= 4 slots; with ISAC_PDSCH_DMRS_ID_CONTRAST=1 that identity must also be specific to the RNTI (contrast >=
+ * NR_DMRS_SCAN_DECIDED_CONTRAST): a cell-wide identity in every slot used to stop the search for the UE's own one. */
+#define NR_DMRS_SCAN_DECIDED_CONTRAST 0.25
+bool nr_dmrs_scan_rnti_decided(uint16_t rnti);
 /** Slots voted for rnti so far (0 = unknown RNTI). */
 int nr_dmrs_scan_rnti_slots(uint16_t rnti);
 void nr_dmrs_scan_reset(void);

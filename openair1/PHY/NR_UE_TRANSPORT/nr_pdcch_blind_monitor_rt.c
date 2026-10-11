@@ -1240,6 +1240,7 @@ static int nr_pdcch_dci11_stage2_enabled(void)
  *   Flags: ISAC_PDSCH_SOLVER_PROBE_RATE/BURST/FILL, ISAC_PDSCH_SNR_GATE (+_DB). v == NULL returns the number of probes available now (-1 = unlimited).
  *   A refused variant releases its solver entry with no credit. Caller: nr_pdcch_blind_monitor_run_occasion_one() (solver planning loop).
  */
+static double g_gate_rate; /* published copy of the bucket rate (SOLVERCOVER fair share) */
 static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int mcs, long abs_slot)
 {
   static int init;
@@ -1261,6 +1262,7 @@ static int pdsch_gate_admit(const nr_pdsch_solver_var_t *v, uint16_t rnti, int m
     e = getenv("ISAC_PDSCH_SNR_GATE_DB");
     margin = e ? atof(e) : 3.0;
     tokens = burst;
+    g_gate_rate = rate;
     init = 1;
   }
   bool ok = true;
@@ -9128,8 +9130,10 @@ constdiag_done:;
      * decoded at all while it searches (the hopeless Technique D jobs were what filled the queue). ---- */
     if (nr_pdsch_solver_enabled() && !is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_C && cand_task[ti].dl_auto
         && g_dci11_state == 1 && g_dci11_resolver != NULL && cand_task[ti].bwp_entry <= 0) {
-      if (!defer || !want_decode || out.rv != 0 || decodes_this_occasion >= cfg->pdsch_max_per_slot)
+      if (!defer || !want_decode || out.rv != 0 || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
+        nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_GATE);
         continue;
+      }
       static _Atomic int s_tda_set;
       if (!atomic_exchange(&s_tda_set, 1))
         nr_pdsch_solver_set_tda_fn(solver_tda_of, (void *)cfg);
@@ -9156,8 +9160,10 @@ constdiag_done:;
         const char *e = getenv("ISAC_PDSCH_SOLVER_MAX_LIVE");
         s_max_live = (e && atoi(e) > 0) ? atoi(e) : 1024;
       }
-      if (rep < 0 && R->n_alive > s_max_live)
+      if (rep < 0 && R->n_alive > s_max_live) {
+        nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_LIVE);
         continue;
+      }
       const int nh = __atomic_load_n(&R->n_hyp, __ATOMIC_ACQUIRE);
       unsigned live_fdra = 0;
       if (reopen_layouts)
@@ -9355,14 +9361,20 @@ constdiag_done:;
       /* T26c: an unsolved RNTI is planned only with the probes the admission bucket can take NOW, so the search
        * cursor never advances over hypotheses that would be throttled untested */
       const int p_avail = rep < 0 ? pdsch_gate_admit(NULL, out.rnti, out.mcs, source_absolute_slot) : -1;
-      const int sv_budget = p_avail < 0 ? s_budget : (p_avail < s_budget ? p_avail : s_budget);
+      int sv_budget = p_avail < 0 ? s_budget : (p_avail < s_budget ? p_avail : s_budget);
+      if (rep < 0 && p_avail >= 0) /* ISAC_PDSCH_SOLVER_FAIRSHARE: this RNTI's share of the probe rate (no-op when off) */
+        sv_budget = nr_pdsch_solver_fair_budget(out.rnti, g_gate_rate, sv_budget);
+      if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
+      else if (sv_budget <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
                                                     cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
       for (; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
-        if (!pdsch_gate_admit(&var[v], out.rnti, o->mcs, source_absolute_slot))
+        if (!pdsch_gate_admit(&var[v], out.rnti, o->mcs, source_absolute_slot)) {
+          if (var[v].probe) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_THROTTLE);
           continue;
+        }
         fapi_nr_dl_config_dlsch_pdu_rel15_t dl = dlsch_pdu;
         dl.dmrsConfigType    = o->dmrs_config_type ? NFAPI_NR_DMRS_TYPE2 : NFAPI_NR_DMRS_TYPE1;
         dl.n_dmrs_cdm_groups = o->n_dmrs_cdm_groups;
@@ -9467,8 +9479,10 @@ constdiag_done:;
         if (!nr_pdsch_passive_queue_enqueue(&job))
           nr_pdsch_solver_feedback(var[v].token, false, false);
       }
-      for (; v < nv; v++) /* T26c: variants cut by pdsch_max_per_slot release their pending entry now */
+      for (; v < nv; v++) { /* T26c: variants cut by pdsch_max_per_slot release their pending entry now */
+        nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_CAP);
         nr_pdsch_solver_feedback(var[v].token, false, false);
+      }
       continue;
     }
     if (g_pdsch_sweep_on && !is_dci10) {
