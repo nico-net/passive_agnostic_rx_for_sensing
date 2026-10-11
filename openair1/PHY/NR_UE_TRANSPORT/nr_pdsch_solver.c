@@ -1,5 +1,6 @@
 /* Blind dedicated-PDSCH grant solver (T26b). See nr_pdsch_solver.h. */
 #include "nr_pdsch_solver.h"
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -18,7 +19,7 @@ typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
 /* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
 enum { W_PLAN = NR_PDSCH_SOLVER_WHY_CALLER_N, W_CSIRS, W_LEADER, W_HOG, W_NLSKIP, W_BACKOFF, W_WIDE, W_PROBES, W_POK, W_PFAIL,
        W_PNOCRED, W_N };
-static const char *const kWhy[W_N] = {"gate", "live", "budget0", "noread", "throttle", "cap", "plan", "csirs", "leader", "hog",
+static const char *const kWhy[W_N] = {"gate", "live", "budget0", "noread", "throttle", "cap", "weak", "plan", "csirs", "leader", "hog",
                                       "nlskip", "backoff", "wide", "probes", "p_ok", "p_fail", "p_nocred"};
 typedef struct { coverage_entry_t *entries; size_t cap, used; } solver_coverage_t;
 
@@ -62,6 +63,8 @@ typedef struct {
   uint64_t last_abs;       /* SOLVERCOVER: signal time of the last grant (activity, eviction) */
   double fcredit;          /* SOLVERCOVER ISAC_PDSCH_SOLVER_FAIRSHARE: this RNTI's share of the probe rate, in probes */
   uint64_t fc_abs;         /*   time of the last accrual (0 = never: cold start gets a full budget) */
+  uint32_t cred16, cred24; /* TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF: credited search probes while unsolved, by CRC length */
+  uint8_t k16, k24;        /*   consistent CRC passes of the current candidate, by CRC length */
 } solver_rnti_t;
 
 typedef struct {
@@ -79,6 +82,7 @@ typedef struct {
   int32_t scr;
   uint8_t comb;           /* T26d: combining mode of this variant (0 = receiver default) */
   uint8_t n_layers, mcs;
+  bool crc24;             /* TIMSOLVE2: the probed code block carries a 24-bit CRC (TBS > 3824), else CRC16 */
   uint16_t dmrs_ports;
   nr_dci_bits_t payload;
   int n_ids;
@@ -130,6 +134,8 @@ static int g_layout_recover = -1;
 static int g_fairshare = -1; /* ISAC_PDSCH_SOLVER_FAIRSHARE, re-read after nr_pdsch_solver_reset() */
 static int g_reuse = -1; /* ISAC_PDSCH_SOLVER_REUSE, re-read after nr_pdsch_solver_reset() */
 static int g_prior_crc = -1; /* ISAC_PDSCH_SOLVER_PRIOR_CRC, re-read after nr_pdsch_solver_reset() */
+static int g_signif = -1;    /* TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF, re-read after nr_pdsch_solver_reset() */
+static int g_prior_ids = -1; /* TIMSOLVE2 ISAC_PDSCH_SOLVER_PRIOR_IDS, re-read after nr_pdsch_solver_reset() */
 /* cell prior: the first solution, offered first to other RNTIs */
 static bool g_have_prior;
 static int g_prior_rep;
@@ -171,6 +177,8 @@ void nr_pdsch_solver_reset(void)
   g_fairshare = -1;
   g_reuse = -1;
   g_prior_crc = -1;
+  g_signif = -1;
+  g_prior_ids = -1;
   for (int i = 0; i < SOLVER_RNTIS; i++) {
     free(g_r[i].cand_bm);
     if (g_r[i].coverage) free(g_r[i].coverage->entries);
@@ -360,6 +368,66 @@ static void promote(const solver_rnti_t *r)
     memcpy(g_prior_S_by_tda, r->S_by_tda, sizeof(g_prior_S_by_tda));
   }
 }
+
+/* TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF=1 (default off): an RNTI solves only on statistically significant CRC evidence. A wrong
+ * hypothesis passes a CRC16 code block (TBS <= 3824, TS 38.212 7.2.1) with probability 2^-16 and a CRC24 one with 2^-24.
+ * Bonferroni over every hypothesis tried: under "all wrong" the passes of an RNTI are Poisson with mean cred16 2^-16 (CRC16)
+ * and cred24 2^-24 (CRC24), cred = its credited search probes so far. The candidate's consistent passes (distinct DCIs)
+ * solve when P(at least that many chance passes) < SIGNIF_ALPHA. So one CRC24 pass solves at once, two CRC16 passes solve
+ * a quiet RNTI, and a busy one (thousands of probes: OTA ab_Tr2_1_094729 0x47f0, solved on 2 chance passes) needs a third.
+ * SIGNIF_ALPHA is a false-solve rate per RNTI, not a cell parameter. */
+#define SIGNIF_ALPHA 1e-3
+static bool signif_on(void)
+{
+  if (g_signif < 0) g_signif = getenv("ISAC_PDSCH_SOLVER_SIGNIF") && atoi(getenv("ISAC_PDSCH_SOLVER_SIGNIF")) ? 1 : 0;
+  return g_signif == 1;
+}
+/* poisson_tail: P(X >= k), X ~ Poisson(lam); summed upwards (no 1 - small cancellation). */
+static double poisson_tail(int k, double lam)
+{
+  if (k <= 0) return 1.0;
+  double t = exp(-lam), s = 0.0;
+  for (int j = 0; j < k + 40; j++) {
+    if (j >= k) s += t;
+    t *= lam / (j + 1);
+  }
+  return s;
+}
+/* chance_p: probability that an RNTI with all hypotheses wrong shows the candidate's passes by chance (see signif_on). */
+static double chance_p(const solver_rnti_t *r)
+{
+  return poisson_tail(r->k16, r->cred16 * 0x1p-16) * poisson_tail(r->k24, r->cred24 * 0x1p-24);
+}
+/* significant: CRC16-only evidence needs >= 2 passes on distinct DCIs (and the Poisson bound); one CRC24 pass may suffice. */
+static bool significant(const solver_rnti_t *r)
+{
+  return (r->k24 >= 1 || r->k16 >= 2) && chance_p(r) < SIGNIF_ALPHA;
+}
+/* tb_crc24: TS 38.214 5.1.3.2: TBS > 3824 (CRC24A, or code block 0 with CRC24B) iff N_info > 3824. The DM-RS overhead is
+ * taken as 12 REs per DM-RS symbol and PRB (2 CDM groups): over-counting it can only under-estimate N_info, so an unsure
+ * TB counts as CRC16 (the stricter rule). */
+static bool tb_crc24(int table, int mcs, int nrb, int S, int l0, int add_pos, int nl)
+{
+  int qm, r2;
+  if (nrb <= 0 || !nr_pdsch_solver_mcs_qr(table, mcs, &qm, &r2)) return false;
+  const int L = 14 - S, nd = __builtin_popcount(nr_pdsch_solver_dmrs_mask(l0, S, L, add_pos));
+  int nre = 12 * L - 12 * nd;
+  if (nre > 156) nre = 156;
+  return (double)nre * nrb * (r2 / 2048.0) * qm * (nl > 0 ? nl : 1) > 3824.0;
+}
+
+/* TIMSOLVE2 ISAC_PDSCH_SOLVER_PRIOR_IDS=1 (default off): reuse the CRC-proven solutions' layout dimensions (reading, S map,
+ * add_pos, MCS table) on every grant of an unsolved RNTI with each of ITS OWN blind identities, in the identity form
+ * (data scrambling = fixed id / = DM-RS id / default) the proven solutions use. Replaces the single per-grant scrambling
+ * hypothesis of the cell prior. OTA TIM (ab_Tt1/Tt3, 2026-10-11): after the first solve, 73-78 % of the probes of RNTIs
+ * that never decoded went to identity forms or dimensions no solved RNTI of the cell uses. */
+static bool prior_ids_on(void)
+{
+  if (g_prior_ids < 0) g_prior_ids = getenv("ISAC_PDSCH_SOLVER_PRIOR_IDS") && atoi(getenv("ISAC_PDSCH_SOLVER_PRIOR_IDS")) ? 1 : 0;
+  return g_prior_ids == 1;
+}
+/* scr_form: identity form of a scrambling hypothesis: -1 default ids, 0 data id = DM-RS id, D + 1 data id = D. */
+static int scr_form(int32_t scr) { return scr < 0 ? -1 : (scr >> 16); }
 
 /* nr_pdsch_solver_fair_budget: ISAC_PDSCH_SOLVER_FAIRSHARE=1: the probe rate is divided equally among the unsolved RNTIs
  * active in the last 0.2 s (a per-RNTI token bucket of rate/n_active, capped at `budget`), so a busy RNTI whose search
@@ -600,6 +668,7 @@ static bool emit(nr_pdsch_solver_var_t *out, int *n, int max, int slot, uint8_t 
   p->comb = t_comb;
   p->n_layers = rd[reading].n_layers;
   p->mcs = rd[reading].mcs;
+  p->crc24 = tb_crc24(table, rd[reading].mcs, rd[reading].num_rb, S, l0, add_pos, rd[reading].n_layers);
   p->dmrs_ports = rd[reading].dmrs_ports;
   p->learn_rm = t_learn_rm;
   p->payload = payload;
@@ -1062,7 +1131,50 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       for (int k = 0; k < SOLVER_RNTIS; k++)
         if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && g_r[k].full_ok >= min_ok && (!best || g_r[k].full_ok > best->full_ok))
           best = &g_r[k];
-    if (best) {
+    bool ids_done = false;
+    if (prior_ids_on() && ctx->own) { /* TIMSOLVE2: proven dims x each own identity in the proven form */
+      const solver_rnti_t *src[3];
+      int ns = 0;
+      for (int k = 0; k < SOLVER_RNTIS; k++) { /* CRC-proven solutions, most full CRC passes first, distinct reps */
+        const solver_rnti_t *q = &g_r[k];
+        if (!q->used || !q->solved || q->rep < 0 || q->full_ok < 1) continue;
+        int pos = ns;
+        bool dup = false;
+        for (int j = 0; j < ns; j++) dup |= src[j]->rep == q->rep;
+        if (dup) continue;
+        while (pos > 0 && src[pos - 1]->full_ok < q->full_ok) pos--;
+        if (pos >= 3) continue;
+        for (int j = (ns < 3 ? ns : 2); j > pos; j--) src[j] = src[j - 1];
+        src[pos] = q;
+        if (ns < 3) ns++;
+      }
+      int32_t hyp[16];
+      int nh = 0;
+      for (int q = 0; ns > 0 && q < ctx->n; q++)
+        if (scr_form(ctx->ids[q]) == scr_form(src[0]->scr)) hyp[nh++] = ctx->ids[q];
+      const int32_t saved = t_scr;
+      for (int h = 0; h < nh; h++) {
+        t_scr = hyp[(h + r->grants) % (uint32_t)nh]; /* rotate: a budget of 1 still covers every identity */
+        int used[3], nu = 0;
+        for (int j = 0; j < ns; j++)
+          for (int i = 0; i < n_rd; i++)
+            if (has_id(&rd[i], src[j]->rep)) {
+              bool seen = false;
+              for (int u = 0; u < nu; u++) seen |= used[u] == i;
+              if (!seen) {
+                used[nu++] = i;
+                plan_known(out, &n, budget, slot, 0, i, rd, l0, src[j]->rep, src[j]->add_pos, src[j]->table, src[j]->S_by_tda,
+                           mcs, dci, payload);
+              }
+              break;
+            }
+      }
+      t_scr = saved;
+      ids_done = nh > 0;
+    }
+    if (ids_done) {
+      /* the proven dims were planned with the RNTI's own identities above */
+    } else if (best) {
       for (int i = 0; i < n_rd; i++)
         if (has_id(&rd[i], best->rep)) {
           plan_known(out, &n, budget, slot, 0, i, rd, l0, best->rep, best->add_pos, best->table, best->S_by_tda, mcs, dci,
@@ -1214,9 +1326,39 @@ static void make_cand(solver_rnti_t *r, const pending_t *p)
   r->cand_dci = p->dci;
   r->cand_scr = p->scr;
   r->cand_tries = 0;
+  r->k16 = !p->crc24;
+  r->k24 = p->crc24;
+  if (signif_on()) { r->n_ev = 0; add_ev(r, p->payload, p->S); }
   g_st.candidates++;
   LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x CANDIDATE: CRC pass S=%u add_pos=%u table=%d on %d layouts\n",
         r->rnti, p->S, p->add_pos, r->cand_table, p->n_ids);
+}
+
+/* solve_now: the candidate becomes the RNTI's solution (layouts cand_bm, evidence ev_*), p = the deciding pass. Under g_mu. */
+static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
+{
+  r->solved = true;
+  memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
+  r->rep = choose_rep(r);
+  if (r->rep < 0) r->rep = lowest(r->cand_bm);
+  r->add_pos = p->add_pos;
+  r->scr = p->scr;
+  r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
+  g_st.solved++;
+  r->solved_abs = p->abs;
+  memset(r->comb_try, 0, sizeof(r->comb_try)); /* receiver choice from post-solve decodes only (pre-solve probes */
+  memset(r->comb_ok, 0, sizeof(r->comb_ok));   /*  fail for every receiver and biased the choice) */
+  if (signif_on())
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by %u CRC16 + %u CRC24 passes, P(chance)=%.1e over %u+%u probes: layout %d "
+               "(%d consistent) add_pos=%u table=%d S[tda %d]=%u scr=%d\n",
+          r->rnti, r->k16, r->k24, chance_p(r), r->cred16, r->cred24, r->rep, kept, r->add_pos, r->table,
+          tda_of(r->rep, p->payload), p->S, (int)r->scr);
+  else
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by 2 independent CRC passes: layout %d (%d consistent) "
+               "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%d\n",
+          r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,
+          tda_of(r->rep, p->payload), p->S, (int)r->scr);
+  if (!prior_crc_on()) promote(r); /* T26c: the CORESET's scrambling and the cell prior for the other RNTIs */
 }
 
 /* nr_pdsch_solver_feedback: consumes the CRC result of one solver decode (identified by its token): updates statistics, candidates, and solved state.
@@ -1274,6 +1416,8 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   solver_rnti_t *r = &g_r[p->slot];
   if (r->used && p->phase == 0 && !r->solved && !crc_ok && r->layout_failures < UINT32_MAX)
     r->layout_failures++;
+  if (r->used && p->phase == 0 && p->probe && !r->solved) /* the Bonferroni count of ISAC_PDSCH_SOLVER_SIGNIF */
+    p->crc24 ? r->cred24++ : r->cred16++;
   if (p->comb >= 1 && (!r->solved || !p->probe)) {
     const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb >= 5 ? 3 : 0;
     r->comb_try[ci]++;
@@ -1333,6 +1477,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   } else if (r->used && p->phase == 0 && !r->solved && crc_ok) {
     if (!r->has_cand) {
       make_cand(r, p);
+      if (signif_on() && r->has_cand && significant(r)) solve_now(r, p, p->n_ids); /* one CRC24 pass */
     } else if (p->dci != r->cand_dci) {
       uint8_t *nb = calloc(1, BM_BYTES);
       int kept = 0;
@@ -1345,29 +1490,25 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
           || (nl_pref_gap() > 0 && r->cand_table >= 0 && p->table_disc && p->table != r->cand_table)) {
         /* a pass the candidate cannot explain: after the candidate has had its confirmation chances, the newer
          * evidence takes its place (a chance CRC pass must not block the search) */
-        if (r->cand_tries >= 16)
+        if (r->cand_tries >= 16) {
           make_cand(r, p);
+          if (signif_on() && r->has_cand && significant(r)) solve_now(r, p, p->n_ids);
+        }
+      } else if (signif_on()) { /* a consistent pass on another DCI: count it, solve once significant */
+        memcpy(r->cand_bm, nb, BM_BYTES);
+        p->crc24 ? r->k24++ : r->k16++;
+        add_ev(r, p->payload, p->S);
+        r->cand_dci = p->dci; /* the next pass must come from yet another DCI */
+        if (significant(r)) solve_now(r, p, kept);
+        else
+          LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x candidate pass %u+%u not yet significant: P(chance)=%.1e over %u+%u probes\n",
+                r->rnti, r->k16, r->k24, chance_p(r), r->cred16, r->cred24);
       } else {
         memcpy(r->cand_bm, nb, BM_BYTES);
-        r->solved = true;
         r->n_ev = 0;
         add_ev(r, r->cand_payload, r->cand_S);
         add_ev(r, p->payload, p->S);
-        memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
-        r->rep = choose_rep(r);
-        if (r->rep < 0) r->rep = lowest(r->cand_bm);
-        r->add_pos = p->add_pos;
-        r->scr = p->scr;
-        r->table = r->cand_table >= 0 ? r->cand_table : (p->table_disc ? (int8_t)p->table : -1);
-        g_st.solved++;
-        r->solved_abs = p->abs;
-        memset(r->comb_try, 0, sizeof(r->comb_try)); /* receiver choice from post-solve decodes only (pre-solve probes */
-        memset(r->comb_ok, 0, sizeof(r->comb_ok));   /*  fail for every receiver and biased the choice) */
-        LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by 2 independent CRC passes: layout %d (%d consistent) "
-                   "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%d\n",
-              r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,
-              tda_of(r->rep, p->payload), p->S, (int)r->scr);
-        if (!prior_crc_on()) promote(r); /* T26c: the CORESET's scrambling and the cell prior for the other RNTIs */
+        solve_now(r, p, kept);
       }
       free(nb);
     }

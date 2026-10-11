@@ -116,6 +116,7 @@ enum {
   NR_PDSCH_SOLVER_WHY_NOREAD,   ///< no layout parsed this DCI
   NR_PDSCH_SOLVER_WHY_THROTTLE, ///< a planned probe refused by the token bucket
   NR_PDSCH_SOLVER_WHY_CAP,      ///< a planned variant cut by the per-occasion decode cap
+  NR_PDSCH_SOLVER_WHY_WEAK,     ///< ISAC_PDSCH_SOLVER_DMRS_PRIO: contended, and no reading carries the RNTI's own DM-RS
   NR_PDSCH_SOLVER_WHY_CALLER_N
 };
 void nr_pdsch_solver_note_skip(uint16_t rnti, int why);
@@ -126,6 +127,12 @@ bool nr_pdsch_solver_fairshare_on(void);
  * only while the global bucket is below its burst or the ring above its fill (contended); budget unchanged with the flag off. */
 int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool contended, int budget);
 
+/* TIMSOLVE2 (2026-10-11, default off): ISAC_PDSCH_SOLVER_SIGNIF=1 solves an RNTI only on significant CRC evidence: the
+ * candidate's consistent passes must have P(chance) < 1e-3 under a Poisson bound over all its credited probes (CRC16 code
+ * blocks 2^-16, CRC24 2^-24; CRC16-only evidence needs >= 2 passes on distinct DCIs, one CRC24 pass can suffice).
+ * ISAC_PDSCH_SOLVER_PRIOR_IDS=1 tries the CRC-proven solutions' layout dims with every own blind identity of an unsolved
+ * RNTI (in the proven identity form) on each grant. ISAC_PDSCH_SOLVER_DMRS_PRIO=1 (nr_pdcch_blind_monitor_rt.c): under
+ * probe contention, grants on which no reading carries the RNTI's own DM-RS are probed 1 time in 8. */
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
 
