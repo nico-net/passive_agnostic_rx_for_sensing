@@ -1115,6 +1115,7 @@ struct Par { /* the job without its rows (kernel argument size) */
   int type, N, dt_stride, max_delay_comp;
   const int16_t *delay_table;
   int16_t filt[4][16];
+  int trim; /* DECTAIL: ISAC_PDSCH_GPU_CHEST_TRIM=1, k_fir computes only k < 12 nb_rb + 16 and zero-fills the rest */
 };
 __device__ __forceinline__ short2 mulshift(short2 a, short2 b, int s) /* c16mulShift (int arithmetic, wraps) */
 {
@@ -1157,7 +1158,11 @@ __global__ void k_fir(const Par j, const nr_gpu_chest_row_t *rows, const short2 
   const short2 *dt = (const short2 *)j.delay_table + (size_t)di * j.dt_stride;
   const short2 *it = (const short2 *)j.delay_table + (size_t)ii * j.dt_stride;
   unsigned long long acc = 0;
-  for (int k = threadIdx.x; k < N; k += blockDim.x) {
+  /* the last pilot's 16-tap window ends at fir_base(np - 1) + 15 = idx + 7 < idx + 16: every output beyond is exactly zero */
+  const int kend = j.trim ? min(N, idx + 16) : N;
+  for (int k = kend + threadIdx.x; k < N; k += blockDim.x)
+    out[k] = make_short2(0, 0);
+  for (int k = threadIdx.x; k < kend; k += blockDim.x) {
     short yr = 0, yi = 0;
     const int p0 = max(0, (k - 16) / 2 - 1), p1 = min(np - 1, k / 2 + 6);
     for (int p = p0; p <= p1; p++) {
@@ -1212,6 +1217,11 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   par.max_delay_comp = j->max_delay_comp;
   par.delay_table = j->delay_table;
   memcpy(par.filt, j->filt, sizeof(par.filt));
+  {
+    static int trim = -1;
+    if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
+    par.trim = trim;
+  }
   nrch::k_ls<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(par, rows, g_ctx_ls[c]);
   {
     nr_exact::DelayIO io = {};

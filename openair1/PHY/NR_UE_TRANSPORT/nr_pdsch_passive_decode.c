@@ -179,6 +179,7 @@ static const char *const kPdtimCls[PDTIM_NCLS] = {"real", "retry", "probe"};
 static int g_pdtim_cls = -1;
 static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
 static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
+static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20[PDTIM_NCLS]; /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
 static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
 static _Atomic int g_pdtim_slow_left = 200;
@@ -199,6 +200,9 @@ static void pdtim_cls_note(uint64_t d)
   atomic_fetch_add_explicit(&g_cls_ns[c], d, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_cls_gt5[c], d > 5000000, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_cls_gt20[c], d > 20000000, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_ns1[c], d > 1000000 ? d : 0, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_ns5[c], d > 5000000 ? d : 0, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_ns20[c], d > 20000000 ? d : 0, memory_order_relaxed);
   uint64_t mx = atomic_load_explicit(&g_cls_max[c], memory_order_relaxed);
   while (d > mx && !atomic_compare_exchange_weak(&g_cls_max[c], &mx, d)) {}
 }
@@ -220,15 +224,17 @@ static uint64_t pdtim_q3(_Atomic uint32_t *h, int p[3])
 }
 static void pdtim_cls_report(void)
 {
-  char rep[600];
+  char rep[900];
   int u = 0;
   for (int k = 0; k < PDTIM_NCLS; k++) {
     int p[3];
     const uint64_t n = pdtim_q3(g_cls_hist[k], p);
-    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1f p50=%d p90=%d p99=%d max=%.1f gt5ms=%lu gt20ms=%lu] ", kPdtimCls[k],
+    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1f p50=%d p90=%d p99=%d max=%.1f gt5ms=%lu gt20ms=%lu share_gt1/5/20ms=%.2f/%.2f/%.2f] ", kPdtimCls[k],
                   (unsigned long)n, n ? (double)atomic_load(&g_cls_ns[k]) / (double)n / 1000.0 : 0.0, p[0], p[1], p[2],
                   (double)atomic_load(&g_cls_max[k]) / 1000.0, (unsigned long)atomic_load(&g_cls_gt5[k]),
-                  (unsigned long)atomic_load(&g_cls_gt20[k]));
+                  (unsigned long)atomic_load(&g_cls_gt20[k]), (double)atomic_load(&g_cls_ns1[k]) / (double)(atomic_load(&g_cls_ns[k]) + 1),
+                  (double)atomic_load(&g_cls_ns5[k]) / (double)(atomic_load(&g_cls_ns[k]) + 1),
+                  (double)atomic_load(&g_cls_ns20[k]) / (double)(atomic_load(&g_cls_ns[k]) + 1));
   }
   LOG_I(PHY, "SENSING: PDTIMCLS us %s\n", rep);
 }

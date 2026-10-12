@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
+#include <ctime>
 #include <thread>
 #include <type_traits>
 
@@ -58,13 +59,30 @@ static std::atomic<unsigned> g_busy{0};
 static int g_ok, g_prof, g_prio;
 static std::atomic<unsigned long long> g_prof_ns[13], g_prof_n;
 
+/* DECTAIL: pool exhaustion is counted (DEMOD_POOL_WAIT lines, first 30 waits above 1 ms, and the waits/total in the first line). */
+static std::atomic<unsigned> g_pool_waits{0}, g_pool_log{0};
 static int acquire()
 {
+  struct timespec t0 = {};
+  bool waited = false;
   for (;;) {
     unsigned m = g_busy.load();
     for (int i = 0; i < CTX; i++)
-      if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i))
+      if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i)) {
+        if (waited) {
+          struct timespec t1;
+          clock_gettime(CLOCK_MONOTONIC, &t1);
+          const long us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000;
+          const unsigned n = ++g_pool_waits;
+          if (us > 1000 && g_pool_log.fetch_add(1) < 30)
+            fprintf(stderr, "DEMOD_POOL_WAIT us=%ld waits=%u\n", us, n);
+        }
         return i;
+      }
+    if (!waited) {
+      waited = true;
+      clock_gettime(CLOCK_MONOTONIC, &t0);
+    }
     std::this_thread::yield();
   }
 }
