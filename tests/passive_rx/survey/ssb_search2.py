@@ -81,7 +81,7 @@ def dmrs(pci, ib):
 def pass2(cap, c0, nchunks, D, off_hz, n2, k, sp, n, scs):
     """SSS->PCI and PBCH DMRS i_ssb on the folded occurrences of one 30 kHz-numerology candidate."""
     L = CH//D; idx = bandidx(off_hz, D); sc_tot = np.zeros((3, 336)) ; dsum = np.zeros(3)
-    sss_sc = {dp: np.zeros(336) for dp in (-1, 0, 1)}; occ = []
+    sss_sc = {dp: np.zeros(336) for dp in (-1, 0, 1)}; occ = []; hz = {dp: [] for dp in (-1, 0, 1)}
     ys = {}
     for c in range(nchunks):
         if c % k != sp: continue
@@ -92,13 +92,16 @@ def pass2(cap, c0, nchunks, D, off_hz, n2, k, sp, n, scs):
         for dp in (-1, 0, 1):
             for yy in y:
                 q = n+dp; Hp = fsym(yy[q:q+NF])*np.conj(pss(n2)); Z = fsym(yy[q+2*(NF+CP):q+2*(NF+CP)+NF])
-                sss_sc[dp] += np.abs(SS[n2] @ np.conj(Z*np.conj(Hp)))**2
+                sss_sc[dp] += np.abs(SS[n2] @ np.conj(Z*np.conj(Hp)))**2; hz[dp].append((Hp, Z))
     if not occ: return None
     tot = sum(sss_sc.values()); dpb = max(sss_sc, key=lambda d: sss_sc[d].max()); sc = sss_sc[dpb]
     o = np.sort(sc); pci = 3*int(sc.argmax())+n2; ratio = float(np.sqrt(o[-1]/(o[-2]+1e-30)))
     # DMRS: SSB subcarrier j -> bin j-119
     k240 = np.arange(240); v = pci % 4
     pos1 = k240[(k240 % 4) == v]; pos2 = pos1[(pos1 < 48) | (pos1 >= 192)]
+    # CFO (Hz, signal above the cut-out centre): PSS->SSS channel-phase slope, symbols 0 and 2 = 2*(NF+CP) samples apart, unambiguous +-fs/(2*2*(NF+CP))
+    acc = sum(np.sum(Z*np.conj(SS[n2][pci//3])*np.conj(Hp)) for Hp, Z in hz[dpb])
+    cfo = float(np.angle(acc)/(2*np.pi*2*(NF+CP)/(FS/D)))
     best_tau = None; sc_i = None
     for tau in np.arange(-1, 1.01, 0.25):
         s = np.zeros(8)
@@ -114,7 +117,7 @@ def pass2(cap, c0, nchunks, D, off_hz, n2, k, sp, n, scs):
         if best_tau is None or s.max() > sc_i.max(): best_tau, sc_i = tau, s
     so = np.sort(sc_i)
     return dict(pci=pci, sss_ratio=ratio, n_occ=len(occ), i_ssb=int(sc_i.argmax()), dmrs_ratio=float(np.sqrt(so[-1]/(so[-2]+1e-30))),
-                dmrs_vs_med=float(np.sqrt(so[-1]/(np.median(so)+1e-30))), tau=best_tau)
+                dmrs_vs_med=float(np.sqrt(so[-1]/(np.median(so)+1e-30))), tau=best_tau, cfo_hz=cfo)
 def ssb(d, dur=1.0, start=0.0, scs='both', nch=4, top=10):
     cap = Cap(d, nch); c0 = int(start/0.02); nchunks = min(int(round(dur/0.02)), cap.n//CH-c0)
     print(f'## {cap.d} centre {cap.c} MHz  {nchunks*20} ms x {nch} ch')
