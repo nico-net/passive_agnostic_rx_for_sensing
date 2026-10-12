@@ -1,0 +1,9 @@
+b K 1
+b B 1
+b C 1
+b P 7
+b B 2
+b C 2
+b P 8
+b B 3
+b C 3
