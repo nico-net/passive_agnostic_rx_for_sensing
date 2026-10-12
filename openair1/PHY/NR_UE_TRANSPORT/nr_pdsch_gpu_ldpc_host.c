@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 
 static nr_gpu_ldpc_run_fn g_run;
 static _Atomic int g_on = -1; /* -1 unresolved, 0 off, 1 on */
@@ -206,7 +207,7 @@ static void stats(uint64_t n)
 
 int32_t nr_pdsch_gpu_ldpc_decode(nrLDPC_slot_decoding_parameters_t *p, nrLDPC_coding_decoder_t *cpu)
 {
-  if (!nr_pdsch_gpu_ldpc_enabled() || p->nb_TBs != 1)
+  if (!nr_pdsch_gpu_ldpc_enabled() || p->nb_TBs != 1 || nr_pdsch_route_cpu()) /* BATCHCPU */
     return cpu(p);
   nrLDPC_TB_decoding_parameters_t *tb = &p->TBs[0];
   if (!tb->d_to_be_cleared || tb->max_ldpc_iterations < 1 || tb->max_ldpc_iterations > NR_GPU_LDPC_MAX_SNAP + 1

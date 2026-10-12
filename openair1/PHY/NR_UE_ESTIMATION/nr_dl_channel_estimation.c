@@ -1962,6 +1962,7 @@ void nr_pdsch_ptrs_processing(int nbRx,
  * N-th), compares every estimate row and noise value, and disables the GPU path on the first difference. */
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_chest.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void) __attribute__((weak));
 static _Atomic int g_gch_on = -1;
 static int g_gch_check;
@@ -1986,6 +1987,8 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
                              uint32_t nvar_out[14][4],
                              uint32_t nvar_ant_out[14][4][NR_DL_CHEST_MAX_ANT])
 {
+  if (nr_pdsch_route_cpu()) /* BATCHCPU */
+    return -1;
   if (atomic_load_explicit(&g_gch_on, memory_order_relaxed) < 0) {
     const char *e = getenv("ISAC_PDSCH_GPU_EXACT_CHEST"), *c = getenv("ISAC_PDSCH_GPU_EXACT_CHEST_CHECK");
     g_gch_check = c ? atoi(c) : 0;

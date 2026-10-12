@@ -1,6 +1,8 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
-> **Update 2026-10-11 (csd/otatest, OTA 10-10/11 and offline reports): see §25, block 2026-10-10/11.** Recommended OTA env is now t26s; the t26j recommendation below is superseded. Merge gate NOT MET (TIM bimodal, decode mean > 0.5 ms).
+> **Update 2026-10-12 (csd/otatest, OTA at DEIB 10-12 and 22 offline reports): see §25, block 2026-10-12.** Recommended OTA env is now t26z (t26s superseded); four operators seen live (PCI 415, 923, 675, 403, 508; PCI 4 co-channel with 508); merge gate still NOT MET.
+>
+> **Update 2026-10-11 (csd/otatest, OTA 10-10/11 and offline reports): see §25, block 2026-10-10/11.** Recommended OTA env was t26s [SUPERSEDED 2026-10-12 by t26z]; the t26j recommendation below is superseded. Merge gate NOT MET (TIM bimodal, decode mean > 0.5 ms).
 >
 > **Update 2026-10-10 (docs and headers session, `csd/doc-comments2` = `csd/otatest` @ 656c623dac; no builds, replays or radio).**
 > Summary of the 2026-10-09/10 csd work that is now merged into `csd/otatest`. Every claim keeps the label of its report or
@@ -3377,7 +3379,7 @@ merged: **PCI 415** (Vodafone), **PCI 923** (TIM) and **PCI 421** (lab, aligned 
 | rfsim 4-RX gate | reported passing by the user; not re-run in this session | `[USER]` |
 | Validation rule: fully blind, no per-cell tuning; each fix validated on all five captures `raw_pci415_12s_b`, `raw_pci415_12s_20261008`, `raw_pci923_tim_12s_tile3`, `raw_pci923_tim_4s_1010_1853`, `raw_pci421_aligned_20261006`. No OTA validation at low (night) load | rule | `[USER]` |
 
-**2. Recommended OTA env: t26s (supersedes t26j)**
+**2. Recommended OTA env: t26s (supersedes t26j)** [SUPERSEDED 2026-10-12 by t26z, see block 2026-10-12, section 3]
 
 - `t26s` = `t26r` + `ISAC_PDSCH_DMRS_ID_CONTRAST=1 ISAC_PDSCH_SOLVER_FAIRSHARE=1` (current best `[MEASURED, DGX OTA 2026-10-11]`, section 3).
 - `t26r` = `t26q` + `ISAC_PUSCH_CORES=6 ISAC_PUSCH_PRIO=30 ISAC_PDSCH_DMRS_SCAN_ASYNC=1 ISAC_DMRS_SCAN_CORE=2 ISAC_PDTIM_PCT=1 ISAC_UL_LOCK_CRC_GUARD=1 ISAC_PDSCH_GPU_EXACT_DEMOD_NL34=1 ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER=1 ISAC_PDSCH_GPU_EXACT_LDPC=1 ISAC_GPU_DISC_SMS=8 ISAC_GPU_RT_ISOLATE=1 ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34=1 ISAC_GPU_LMEM_PRERESERVE=1`.
@@ -3404,7 +3406,7 @@ p50 < 0.5 ms is met by t26s, not by t26r. The mean is not met by either arm.
 PCI 923 (TIM), same window `[MEASURED, DGX OTA 2026-10-11]`, 67-70 DCI RNTIs per run. CRC-OK RNTIs: t26s 28 and 9; t26r 26 and 0.
 - In the 0-RNTI run: 47,834 LDPC TBs, none CRC-OK; EVMGRANT SNR p50 0.9 dB (good run 7.7 dB); a completely different DM-RS ID set.
 - TIM decode p50 265-495 us (both arms).
-- Root cause open (agent TIMBIMODAL). `[HYPOTHESIS: wrong learned state never revoked]`.
+- Root cause open (agent TIMBIMODAL). `[HYPOTHESIS: wrong learned state never revoked]`. [PARTLY SUPERSEDED 2026-10-12: the MCS-0 CRC component is the NDI-read-as-rv misread, TIMRM, block 2026-10-12 section 4; the rest is open.]
 
 PCI 923 (TIM), UL, 2026-10-10 23:xx, t26q `[MEASURED, DGX OTA]`:
 - UL BWP locked 107@5 in 3/3 runs (8.7-16 s).
@@ -3441,7 +3443,7 @@ Target: mean < 0.5 ms per decode. Not met in any replay or OTA run. p50 met in t
 - GPUFUSE baseline (A) is the GPUSHARE binary `3c68c65006`. Replay runs are not comparable to OTA or to each other across binaries.
 - Bit-exactness is by CHECK mode, not by CRC counts: demod TIM 10,000/10,000 and 8,003/8,003, b 18,000/18,000; GPU LDPC 22,000/22,000 (DECGPU); Nl 3-4 demod 16,000/16,000 (DECGPU). `[MEASURED replay, check_bad 0]`.
 - GPU LDPC: DECGPU left it off (slower behind discovery kernels). **Superseded by GPUSHARE**: the SM partition (`ISAC_GPU_DISC_SMS=8 ISAC_GPU_RT_ISOLATE=1`) makes it 102-122 us per TB, now in t26r.
-- Open tails: 40-560 ms GPU demod maxima in about half the GPUFUSE F3 runs, not attributed (candidates `[HYPOTHESIS]`: runtime cudaMalloc/cudaHostAlloc of the discovery path; demod context pool of 8).
+- [PARTLY SUPERSEDED 2026-10-12: allocation suspects rejected for replays, STALLS class C; see block 2026-10-12 section 8.] Open tails: 40-560 ms GPU demod maxima in about half the GPUFUSE F3 runs, not attributed (candidates `[HYPOTHESIS]`: runtime cudaMalloc/cudaHostAlloc of the discovery path; demod context pool of 8).
 - DECQUEUE finding `[CODE-READ]`: 86 % of solver-era decodes are probes (unsolved RNTIs). Retry-prediction and retry-no-restore flags (`ISAC_PDSCH_RETRY_PREDICT`, `ISAC_PDSCH_RETRY_NORESTORE`) gave no measured per-body gain; keep off.
 
 **6. Crashes and host findings**
@@ -3452,11 +3454,11 @@ Target: mean < 0.5 ms per decode. Not met in any replay or OTA run. p50 met in t
 
 **7. Carriers and TIM recipe** (survey, TIMACQ)
 
-- Survey 2026-10-10 (CARRIERS, 0.3 s x 4 ch, 7 captures, RX1 for detection) `[MEASURED, OTA air survey + replay]`: PCI 415 at GSCN 7971 (3679.68 MHz), SSS ratio 3.8 (control); PCI 923 (TIM) at GSCN 8007 (3731.52 MHz), PSS 24.9 dB. PCI 403, 518, 675 and 347 are detections only (not synced).
+- Survey 2026-10-10 (CARRIERS, 0.3 s x 4 ch, 7 captures, RX1 for detection) `[MEASURED, OTA air survey + replay]`: PCI 415 at GSCN 7971 (3679.68 MHz), SSS ratio 3.8 (control); PCI 923 (TIM) at GSCN 8007 (3731.52 MHz), PSS 24.9 dB. PCI 403, 518, 675 and 347 are detections only (not synced). [SUPERSEDED 2026-10-11/12: CARRIERS2 confirms 403 and 675 with SSS and PBCH DMRS; 675 syncs live 2026-10-12 and 403 SIB1 is decoded live; see block 2026-10-12 section 7.]
 - TIM SIB1 gives an 80 MHz, 217-PRB carrier, offsetToPointA = 38, k_SSB = 10 `[MEASURED, OTA LIVE + replay]`. The "~50 MHz" width in the survey is an occupancy estimate and is superseded by SIB1.
 - **Superseded:** CARRIERS' TIM recipe `-C 3731.91 --ssb 1169`. Its rule `-C = GSCN + (1182 - ssb) * 0.03` holds only for offsetToPointA = 194 (Vodafone). **TIM now:** `-C 3759990000 -r 217 --numerology 1 --band 78 --ssb 233 --initial-fo -4800` with `ISAC_PDCCH_POINTA_REF=1`. `--ssb` = (k_SSB + 12 x offsetToPointA) / 2 = (10 + 456) / 2 = 233. Both FO seeds -4800 (T1) and +6900 (T2) synced live; keep the one that syncs.
 - Vodafone recipe unchanged: `-C 3680010000 -r 217 --numerology 1 --band 78 --ssb 1171 --initial-fo 6900`.
-- New 1 s 4-channel survey captures `/home/nicola/NICOLA/ota_runs/survey_1s_1011/{c3330,c3430,c3550,c3610}`: analysis pending (CARRIERS2) `[NOT MEASURED]`.
+- New 1 s 4-channel survey captures `/home/nicola/NICOLA/ota_runs/survey_1s_1011/{c3330,c3430,c3550,c3610}`: analysis pending (CARRIERS2) `[NOT MEASURED]` [DONE 2026-10-11, CARRIERS2 report: see block 2026-10-12 section 7].
 
 **8. Open, not measured**
 
@@ -3477,6 +3479,236 @@ Target: mean < 0.5 ms per decode. Not met in any replay or OTA run. p50 met in t
 - DECQUEUE alternative cores 17 / 18 -> not used (section 2).
 
 **10. Reports used:** TIMACQ, TIMPDSCH-20261010, CARRIERS, ULCRCFIRST-20261010, ULCRCGUARD-20261011, DECQUEUE-20261010, DECGPU-20261010, GPUSHARE-20261011, GPUFUSE-20261011, SOLVERCOVER-20261011, WIDES0, ULLAYOUT, OTASTATS-20261010 (`docs/superpowers/reports/csd/`). OTASTATS 2026-10-10 (three comparisons, n=2 per set, t26j/t26k and A/B) is the receiver-log statistics source for the 10-10 OTA runs: t26j vs t26k CRC-OK, SNR >= 10 dB, all MCS: 83.0 % vs 81.3 % (CI excludes 0, n=2 per set); the t26k DWELL/NODROP flags stay off.
+
+
+### 2026-10-12 block (`csd/otatest`, worktree `rr-csd-b`; OTA 10-12 (DEIB, DGX GB10), DGX replays, offline reports)
+
+Sources: the reports under `docs/superpowers/reports/csd/` named per row (suffix 20261012 unless shown), plus orchestrator facts
+of 2026-10-12 (labelled `[ORCH]` where the fact is not in a report). Index: [INDEX](docs/superpowers/reports/csd/INDEX.md).
+Cells are never merged: each PCI, each capture and each OTA window stays separate. Replays are `[MEASURED, DGX replay <capture>]`,
+OTA is `[MEASURED, DGX OTA <date time>]`, unit tests `[OFFLINE VERIFIED]`, source reading `[CODE-READ]`, survey analysis of
+captures `[MEASURED, offline]`. Everything below is default off unless stated. `n=2` or `n=3` runs per arm: indicative only.
+RATEFIX-20261012 is not on this branch and is not used. STALLS-20261012 is on this branch and is used.
+
+**1. Status and merge gate**
+
+| item | status | label |
+|---|---|---|
+| Merge gate `csd/otatest` -> `adaptive-rx-UL-DL` (user, 2026-10-10): DL works OTA on Vodafone, TIM and other carriers; UL pipeline works; decode time < 0.5 ms; rfsim 4-RX gate passes | **NOT MET** at 2026-10-12: decode mean > 0.5 ms (p50 met); TIM MCS-0 fixed in replay only (section 4); 508 dedicated CORESET not verified; 2-layer NL2 slowdown | `[ORCH]`, `[MEASURED, DGX OTA 2026-10-12]` |
+| Validation rule (user, 2026-10-10): fully blind, no per-cell tuning; each fix validated on all five captures | unchanged; not all five captures were used in the 2026-10-12 replays (each report names its own set) | `[USER]` |
+
+**2. Cells and operators at DEIB (four operators seen live)**
+
+| operator (MNC) | PCI | -C | --ssb | FO | live state 2026-10-12 | label |
+|---|---|---|---|---|---|---|
+| Vodafone (222-10) | 415 | 3680010000 | 1171 | +6900 | CRC-OK RNTIs in OTA (section 3) | `[MEASURED, DGX OTA 2026-10-12]` `[ORCH]` |
+| TIM (222-01) | 923 | 3759990000 | 233 | -4800 | syncs live (orchestrator); MCS-0 fix in section 4 | `[ORCH]`, recipe as in section 7 of the 10-10/11 block |
+| TIM (222-01) | 675 | (auto front end) | (auto) | -4881 | syncs live; SIB1 status given by the orchestrator as "1347x" (not expanded) | `[MEASURED, DGX OTA 2026-10-12]` `[ORCH]` |
+| Iliad (222-50) | 403 | 3625290000 | 1171 | -2400 | barred, NSA-style SIB1 (no servingCellConfigCommon), SIB1 decoded live | `[ORCH]`, `[UECORESET]` (offline SIB1 read) |
+| WindTre (222-88) | 508 | 3590190000 | 517 | -4842 | SIB1 decoded live; carrier 162 PRB, 3560.85-3619.17 MHz (Point A 3560.85 MHz) | `[ORCH]`, `[UECORESET]`, `[CARRIERGEOM]` |
+| co-channel with 508 (same SSB) | 4 | as 508 | as 508 | as 508 | real cell: PBCH CRC and CSS0 RA DCIs; SIB1 not decoded; operator unknown | `[ORCH]` |
+
+- Iliad 403 and TIM 675 are no longer "detections only" (10-10/11 section 7 superseded). Their SIB1 is decoded live; 403 has no
+  carrier geometry to search (`[UECORESET]`, barred cell, no dedicated CORESET expected `[INFERRED]`).
+- Carrier geometry, PCI 675 and PCI 508 at GSCN 7895 are discussed in section 6.
+
+**3. Default OTA env: t26z (supersedes t26s)**
+
+- `[ORCH]` Default OTA env = `ota/t26z.env` (symlink `ota/default.env`) = t26y + `SWEEP_SIGNIF`, `PDCCH_GATE_CFAR`, `MCS_TABLE_EVID`,
+  `CSIRS_FULL_BLOCK_INFER=2`, `UL_LOCK_BWP_ALL`, `UL_LOCK_MCS_STAT`, `SLOT_SCALE`, `CSIRS_DISC_RATELIMIT`, `NORM_COALESCE`,
+  `ISAC_DCI11_HARQPID=1`, `ISAC_PDSCH_REP_FIELDS=1`. Env files are single-line (`[CODE-READ]`, 10-10/11 section 2).
+- **Open, must be checked before relying on t26z:** the reports behind several of these flags do not contain an OTA result for the flag
+  as it is now set. `CSIRS_DISC_RATELIMIT` (CSIRSRATE): unit test only, replay denied, `NOT MEASURED`. The BLINDFIX flags (`SWEEP_SIGNIF`,
+  `PDCCH_GATE_CFAR`, `MCS_TABLE_EVID`, `UL_LOCK_BWP_ALL`, `UL_LOCK_MCS_STAT`, `CSIRS_FULL_BLOCK_INFER=2`): offline replay, n=2, no
+  per-flag attribution, and BLINDFIX itself recommends one flag at a time on a cell other than PCI 415. `NORM_COALESCE` (DECTAIL):
+  replay within noise, `NOT claimed as a win`. The orchestrator set them as the default; the per-flag attribution is not in the reports.
+- `ISAC_RV_RETRY` is diagnostic only: it costs 3.7x LDPC load `[ORCH]`. Do not put it in the default env.
+- `ISAC_PDSCH_READING_RV` must NOT be used (TIMRM: Vodafone 20261008 replay 110/185 CRC-OK, no MCS > 0 TB at all).
+- `ISAC_RX_BRANCH_FO` stays unset. `ISAC_UL_LOCK_SPRT` stays unset (ULLOCKSPEED, negative). `ISAC_CSIRS_PORTS_GT8` is not in the
+  default env (CSIRSPORTS: optional for TIM PCI 923 row 12, +3.9 MB heap).
+
+**4. TIM MCS-0 CRC: root cause found and fixed in replay (superseded hypotheses marked in the 10-10/11 block)**
+
+- `[MEASURED, DGX OTA 2026-10-12 logs ab_NT1_1_152707 / ab_Tz1_1_135834, SNR >= 10, probe=0]` MCS 0 with rv 0: 450/451 and 153/162
+  pass. MCS 0 with rv 1 or 2: 0 of ~450 pass and 0/40 pass. MCS 1-4 are always rv 0 (TIMRM).
+- `[MEASURED, DGX replay raw_pci923_tim_12s_tile3, RMDCI log]` Every MCS-0 failure with parsed "ndi 0, rv 1" has raw DCI bit 23 = 1.
+  Read with the layout whose MCS sits at bit 18, that is NDI = 1 and rv = 0 (a NEW transport block at rv 0). The solver's merged
+  reading took the fields of whichever layout parsed first; that layout reads (bit 22, bit 23) as rv, so rv = 1 whenever NDI = 1.
+  The coin flip is therefore NDI toggling per new TB, independent of every logged field (TIMMCS0's observation) (TIMRM).
+- `[MEASURED, DGX replay tile3, genie ISAC_PDSCH_RM_GENIE=2]` 49 of 49 recovered grants were rv 0 with the same TBS; the rescued TBs
+  are new data, not copies of earlier TBs (52/53). Rate matching and TBS are sound: re-encoded CRC-passing TBs give 0.0-0.3 % bit
+  errors `[MEASURED]`.
+- **Fix (default off, orchestrator default-on): `ISAC_PDSCH_REP_FIELDS=1`.** The group containing the RNTI's representative layout takes
+  NDI, rv and HARQ pid from the representative's own parse. Unit test `Dci11Reading.TimRealMcs0PayloadNdiReadAsRv` `[OFFLINE VERIFIED]`.
+  Replay (MCS 0, SNR >= 10, probe 0), pass/total pooled per capture `[MEASURED, DGX replay]`: tile3 (PCI 923) off 93/146 (64 %) ->
+  68/69 (99 %); Vodafone b (PCI 415) 97 % -> 98 %; Vodafone 20261008 96 % -> 99.4 %. Other buckets unchanged.
+  Expected OTA check: MCS-0 rows with rv 1 or 2 vanish; MCS-0 CRC at SNR >= 10 on TIM near 100 % (was ~50 %). `[NOT MEASURED ON AIR]`.
+- `ISAC_PDSCH_READING_RV=1` (TIMMCS0 proposal) is the same mechanism in a split-reading form: it fixes tile3 and b in replay but
+  drops Vodafone 20261008 to 59 % (no MCS > 0 TB at all) and is not used.
+- `ISAC_RV_RETRY=1` alone: no change in replay (TIMMCS0: 323/379 vs 328/379 base).
+- **TIMMCS0 "rv misread explains <= 3 % of MCS-0 failures" is superseded** for the TIM OTA case by TIMRM (the mechanism is confirmed
+  there; TIMMCS0's replay numbers stand as measured for its own arms).
+- `[MEASURED, DGX replay tile3, DCIRV]` `ISAC_DCI11_RV_CONSISTENCY=1` (HQSCORE violation scorer, default off): no regression on Vodafone
+  (CRC 97-99.5 % both arms), but no effect on RVRESCUE. In on5 RNTI 0x4ac6 had 20 rescues while its layout had 0 HARQ violations
+  in 49 grants: the rv=1 readings obey HARQ rules. The DCIRV one-bit-shift hypothesis is NOT the mechanism of the replay rescues;
+  this does not refute TIMRM (NDI read as rv is a different mechanism). `[HYPOTHESIS]` for the OTA.
+- `[MEASURED, DGX replay tile3, HARQPID]` Real bug: `nr_dci11_layout_to_field_bits()` handed the harq pid over with 0 bits, so every
+  stage-2 and solver grant had `harq_pid = 0` (EVMGRANT pid=0 on all 4378 grants). Fix `ISAC_DCI11_HARQPID=1` (4-bit pid,
+  total width unchanged), `[OFFLINE VERIFIED]` test_nr_pdcch_dci11_layout_sweep 42/42. Replay: no change in RVRESCUE or MCS-0 CRC (off
+  93.3 %, hp 90.7 %, hpr 91.4 %; n=3). Kept on for the OTA as a correctness fix (soft combining keyed by the true pid), not as a lever.
+
+**5. 2-layer LLRs and the NL2 delta**
+
+- `[CODE-READ + MEASURED, DGX replay, LLRZERO]` The 2-layer exact-zero LLRs (17-42 % in the MMSE mode-2 path) are a real int16
+  resolution effect of the weak layer: the weak layer's w is 2-3x smaller, and the LLR stage rounds small |z| to 0. Not a GPU
+  artefact (GPU and CPU zero% identical) and not CSI-RS erasure (FULL_ERASE 0 vs 1 identical). Singular or w==0 is < 1 %.
+- Fix `ISAC_L2MAXH_DELTA_NL2=N` (default off; adds N to log2_maxh for nl >= 2 only). GPU CHECK=1 bit-exact (check_bad 0).
+  Replay, pooled, n=2 `[MEASURED, DGX replay]`: CPU baseline 2L CRC tile3 37 %, b 38 %; with NL2=-3 46 % and 41 %. GPU run with
+  CHECK=1 (slower, fewer grants): 35 % vs 33 % (tile3) and 35 % vs 38 % (b). Spread between runs is similar. Not claimed.
+  `ISAC_MMSE2_GAIN` is CPU-only and is not recommended.
+- **OTA A/B `[MEASURED, DGX OTA 2026-10-12 20:15-20:26, TIM, 2 runs/arm]` (t26zL = t26z + `ISAC_L2MAXH_DELTA_NL2=-3`):** 2-layer
+  CRC at SNR >= 10 dB: MCS 5-9 54.0 % vs 30.1 %; MCS 10-16 16.3 % vs 5.5 %. All-Nl MCS 0-4 96.1 % vs 95.4 %. CRC-OK RNTIs 53, 67
+  vs 51, 67. **But** demod mean 1096 us vs 155 us, per-decode p50 665-685 vs 325-345 us, p99 15-16 ms vs 4 ms.
+  **Not adopted** until the slowdown is fixed. This OTA result is the first OTA evidence for the CRC gain; the replay gain was small.
+
+**6. Carrier geometry, dedicated CORESET and WindTre 508**
+
+- `[MEASURED, DGX OTA 2026-10-12 ab_P508/X508/Wz1]` 508 with a 217-PRB grid: `ACQ carrier MISMATCH: SIB1 says 162 PRB (Point A at grid
+  subcarrier 972, carrier end 2916) but PHY started with 217 PRB, grid end 2604`. The top 26 RB (9.4 MHz) of the carrier are never
+  received. Also `KSSB_GRID k_ssb=2 ... off the CRB grid by 6 subcarriers` without `ISAC_KSSB_ALIGN` (UECORESET).
+- Retune from SIB1 only: `tests/passive_rx/survey/retune_args.py RUN.LOG` gives `-C 3590190000 -r 217 --ssb 517` (`[OFFLINE]` log
+  parser, no receiver change). FO scales to -4842; -4816 kept as alternative.
+- `[MEASURED, DGX OTA 2026-10-12 ab_U508a_1_164111]` The retune works (Point A at grid sc 324, carrier end 2268 < 2604).
+  The discovered-CORESET dwell still used the grid (`groups=31`, 24 RB past the carrier end).
+- `ISAC_CARRIER_FROM_SIB1=1` (CARRIERGEOM, default off): dwell BWP, DCI sizing, CORESET start and cover follow the SIB1 carrier;
+  an interleaved cover (L=6, R=3, shift = PCI) is added only when carrier != grid. `[OFFLINE VERIFIED]` test_nr_pdcch_blind_monitor
+  256/256. Replay on 415 and 923 (carrier == grid): identity, verdict CONFIRMED (`[MEASURED, DGX replay, 12 s, one run/arm]`).
+- `[MEASURED, DGX OTA 2026-10-12 20:07-20:15, WindTre 508, ISAC_CARRIER_FROM_SIB1=1]` groups=27 dwells appear (11-16 of them),
+  but still no `VERIFIED -> bank add`, 5-6 DCI RNTIs, 0 CRC-OK RNTIs.
+- **Open:** 508 dedicated CORESET still not verified. The interleaved shift and R=3 are untested on air beyond this run.
+- Iliad 403: no carrier geometry; SI and TC DCIs only; no dedicated CORESET expected `[INFERRED]`.
+- PCI 4: SIB1 not decoded (open).
+
+**7. Initial sync, PCI 675 and the survey (superseded facts marked in the 10-10/11 and 10-11 text)**
+
+- `[MEASURED, offline survey captures 2026-10-11, CARRIERS2]` 30 kHz CP-OFDM TDD cells at 3561-3639 MHz (508 at 3570.24 MHz with
+  SSS ratio 4.0 and DMRS ratio 4.25; 403 at 3624.96 MHz, 3.9 / 4.7); 675 at 3426.24 MHz (3.4 / 3.1) is promoted to PSS+SSS+PBCH-DMRS
+  confirmed. PCI 518 and 347 stay unconfirmed. 15 kHz LTE-like carriers at 3293-3309, 3395-3413, 3509-3527 MHz (LTE FDD inferred
+  `[INFERRED]`). No 15 kHz NR found.
+- `[CODE-READ + OFFLINE VERIFIED]` AUTOFRONT (`tests/passive_rx/autofront/autofront.py`): automatic blind front end (discovery over GSCN
+  raster, CFO grid, two-pass tuning from the MIB). Offline discovery found 415, 923, 675, 508, 403 on the survey and cell captures; CFO of
+  the X410 clock is about -4.8 kHz on 4 of 5 cells; 403 returns +2177 Hz (sign alias of -4863 + 7040). Replay: pass 1 and pass 2
+  syncs on 415 and 923 (`[MEASURED, DGX replay]`), not live.
+- `[ORCH, MEASURED DGX OTA 2026-10-12]` PCI 675 syncs live with FO -4881 (the auto front-end seed). **This supersedes WEAKLIVE:**
+  `[MEASURED, DGX OTA 2026-10-11 ab_X675_1_115134]` 217 "synch Failed" with FO -2400 (SYNC_SCAN 566-576 ms, detected 0). The
+  cause of the 10-11 failure is still not established (WEAKLIVE hypotheses 1, 2 and 4 are excluded or partial; the PSS_DECIM log
+  and `ISAC_PSS_PEAK_RATIO` in WEAKLIVE are described as UNBUILT in that report). Do not generalise the -4881 seed to other cells.
+- `[MEASURED, DGX replay]` WEAKSYNC (`ISAC_PSS_DECIM=1 ISAC_PSS_ACC=8 ISAC_SSS_MULTI=2.5 ISAC_KSSB_ALIGN=1 ISAC_SI_RV_ANY=1`, default
+  off): PSS SYNC_SCAN 6.2 s -> 0.54 s; PSS_ACC 6.5 dB; multi-PCI at one SSB (508 and 4 both PBCH-CRC decode on c3550); no sync
+  regression on 415 and 923 (replay). Not in the t26z list; OTA result not recorded.
+- `[MEASURED, DGX replay, 2026-10-11]` NEWCELLS root cause of "synch Failed": SSS metric floor 30000 (absolute, `sss_nr.h:44`).
+  Not re-measured on 10-12. `ISAC_SSS_REL_RATIO=2.5` remains the workaround (default off, BLINDAUDIT F4).
+- `[ORCH]` The live PCI 4 / 508 question is no longer "508 never decoded": 508 SIB1 decodes live (section 2). NEWCELLS "PCI at
+  GSCN 7895 is 4, not 508" is superseded as a statement about 508; 4 remains a real co-channel cell.
+- `[MEASURED, DGX replay]` ISAC_SI_RV_ANY=1 (WEAKSYNC): SI-RNTI grants with rv != 0 pass the autodiscover gate (BLINDAUDIT F2).
+
+**8. Decode time per PDSCH grant (PDTIM), stalls and the OTA stale drops**
+
+Target: mean < 0.5 ms per decode. Not met in any replay or OTA run (best replay arm 679 us, `[MEASURED, DGX replay b, NORM_COALESCE N arm]`).
+
+| report | arm / capture | result | label |
+|---|---|---|---|
+| DECTAIL | b, merged defaults, ISAC_PDTIM_CLASS=1, 2 runs | about one quarter of all decode time is in the ~0.3 % of decodes > 20 ms; mean 0.78-0.87 ms vs p50 0.40 ms is tail. GPU-side excess: RT kernels queued behind other PDSCH contexts 0.45, discovery `normalize` 0.30, other discovery/NID 0.23 `[M-nsys]`. Host sync, allocation, locks: none visible | `[MEASURED, DGX replay b + nsys]` |
+| DECTAIL | `ISAC_PDSCH_GPU_PRIO=1 ISAC_PDSCHQ_REAL_FIRST=1` | no effect beyond spread (real mean 869/778 base vs 1046/791 P) | `[MEASURED, DGX replay b]` |
+| DECTAIL | `ISAC_CSIRS_DISC_NORM_COALESCE=1` | real mean 679/834 vs 869/778; p99 3305/9335 vs 7775/6515. Within noise; kept default-on by the orchestrator, `NOT claimed as a win` | `[MEASURED, DGX replay b]` |
+| GPUALLOC | `ISAC_GPU_RT_PARTS=2` (RT SMs in two green contexts of 16) | b real mean 821 us (RL 997, base 863); b p99 4.9-6.0 ms (RL 6.3-15.5); tim 1.2/3.3/1.1 ms (RL 2.0/3.1/2.7). Within spread, `NOT claimed`; candidate only | `[MEASURED, DGX replay, 3 runs/arm]` |
+| GPUALLOC | `ISAC_PDSCH_GPU_CTX_LIMIT=4` | no benefit | `[MEASURED, DGX replay]` |
+| GPUALLOC | demod Nl=3 GPU mismatch | pre-existing, not from CHEST_TRIM. Cause: CUDA `hypot()` for `cabs()` differs 1 ulp from glibc; a pivot tie (-16.5) flips. Fix: port glibc 2.35+ FMA hypot. Offline 0 mismatches in 1,000,808 RE; replay DEMOD_CHECK 20000 and 12000 grants check_bad 0. Bug fix, not flag-gated. Changes GPU results for ties (to match CPU) | `[MEASURED, DGX GB10 offline + replay]` |
+| GPUALLOC | `ISAC_PDSCH_GPU_CHEST_TRIM=1` | control clean (the mismatch was not from trim): may be enabled; speed unmeasured. Supersedes DECTAIL's "do not enable" | `[MEASURED, DGX replay]` |
+| BATCHCPU | `ISAC_PDSCH_CPU_SMALL` | harmful or neutral (CPU body of 16-64 PRB grant 1.8-3.7 ms vs GPU 0.4-1.0 ms); routes 0.1-3 % to CPU in v2. Not used | `[MEASURED, DGX replay]` |
+| BATCHCPU | `ISAC_PDSCH_GPU_BATCH=1` (admission gate, not batching) | possible tail reduction on b, not significant (n=3); not used | `[MEASURED, DGX replay]` |
+| STALLS | OTA stale drops 39-47 % (Vodafone, 15:0x-15:35 window) | PDSCH queue is not overloaded: ring fill 0-1 %, 5 consumers busy 9-26 %; 63-92 % of stale drops were stale within < 8 ms of enqueue (born late). The scan pool is the saturated stage (2 consumers, cores 6-7). | `[MEASURED, DGX OTA 2026-10-12 15:0x-15:35, ab_Vz*/VA*/VB*/VY*/SV*/NV* runs]`, `[INFERRED]` for the scan cause |
+| STALLS | class A: whole-consumer freeze 0.86-0.92 s, early, once | cause OPEN (lock or config-epoch suspected) | `[MEASURED, DGX OTA]`, `[INFERRED]` |
+| STALLS | class B: GPU-stage freezes 0.37-0.95 s mid-run | consistent with long CSI-RS discovery kernels (`sweep` up to 390 ms, `refine` 726 ms) | `[INFERRED]` |
+| STALLS | class C: 20-300 ms CPU-bound bodies in replays | cudaMalloc, cudaHostAlloc, cuFFT plan and green-context creation all at t < 1 s (<= 39 ms): REJECTED as causes | `[MEASURED, nsys replays]` |
+| STALLS | wall vs CPU on air | 11-17 % of each stage's time off CPU on air (preemption by FIFO threads, IRQs on PDSCH cores 3, 4, 8, 9); replays show wall == CPU. Cause not separated | `[MEASURED, DGX OTA]` |
+| STALLS S1 (orch) | scan pool of 3 consumers (`stl_scan3`, `t26zS`: PDSCH cores 9,3,4,11,14; PUSCH core 2) vs 2 (t26z) | PDSCH stale 10/23/18 % vs 19/22/8 %; scan-queue stale 1513/3745/1186 vs 4793/4120/2148; CRC-OK RNTIs 117/94/96 vs 96/99/95; decode p50 355-365 vs 315-425 us. **No clear win; not adopted** | `[MEASURED, DGX OTA 2026-10-12 20:26-20:42, Vodafone, 3 runs/arm]` (orch) |
+| Sensing API (orch) | enabled, afternoon | ~1 % writer time, 0.03 % CFR drops, no decode-time change | `[MEASURED, DGX OTA 2026-10-12 afternoon]` |
+| Orch | PDSCH queue, afternoon | stale drops 39-47 % at ~170 DCI RNTIs per 150 s on Vodafone | `[MEASURED, DGX OTA 2026-10-12 afternoon]` |
+
+- **Superseded (STALLS and DECTAIL vs 10-10/11 section 5):** "Open tails: 40-560 ms GPU demod maxima ... candidates: runtime
+  cudaMalloc/cudaHostAlloc of the discovery path" is partly superseded: those allocation suspects are rejected for replays (class C).
+  The OTA tails are attributed to scan-pool load and discovery kernels `[INFERRED]`.
+- The S1 candidate of STALLS is tested and does not clear its own success criterion (stale < 20 % steady state).
+- Lag-at-enqueue histogram (STALLS, not built): still missing.
+
+**9. Blind-audit flags and the UL lock**
+
+- `[CODE-READ]` BLINDAUDIT (2026-10-12, `csd/blind-audit`): all `#define` thresholds of pdcch/csirs/solver/dmrs/ul classified A-E;
+  F1..F25 listed with cell risk. F12 (slot-count windows) fixed behind `ISAC_SLOT_SCALE=1` (in default env). Top risks: F1 (block
+  co-occurrence), F2 (`rv0_only` drops rv != 0 SI-RNTI grants), F3 (adaptive energy gate `noise_gates` 3.0 x median), F4 (SSS floor),
+  F5/F6 (UL BWP and MCS-offset fits), F7 (mcs_table 1 in cfg), F8 (2 % CRC rate floor), F18 (SNR skip gate on per-RNTI SNR, not per layer).
+- `[OFFLINE VERIFIED + OFFLINE REPLAY, BLINDFIX]` F1, F3, F5, F6, F7, F8 implemented behind default-off flags with unit tests
+  (test_nr_blind_fix 7 tests). Replay (n=2, one flag set, no per-flag attribution): no regression detected, no proven gain
+  (415 b OFF 41.3/40.7 % vs ON 34.2/40.3 %; TIM tile3 OFF 65.6/64.3 % vs ON 26.7/70.2 %: attempt-count variance). `[NOT OTA-VALIDATED]`.
+- `[MEASURED, DGX OTA 2026-10-12, ab_VA1 / VB1 / VY1 / VB2 / Trv, ULLOCKSPEED]` Vodafone UL lock: VA1 no lock in 150 s (216@0:9, 216@1:6,
+  215@1:7); VB1 none; VY1 216@1 at 78.8 s; VB2 216@1 at 18.5 s; TIM Trv 107@5. Only ~0.3-0.6 % of probes reach 6 dB (PUSCH at the
+  noise floor).
+- `[MEASURED, DGX replay, ULLOCKSPEED]` `ISAC_UL_LOCK_SPRT=1` (sequential test, default off): statistically sound, no lock faster than the
+  legacy rule on any of three captures (415 b: no lock, twin 216@0 z 5.18 vs 216@1 z 5.36). **Negative; keep unset.**
+- `[MEASURED, DGX replay]` 216@0 vs 216@1 twin hypotheses cannot be separated by DM-RS energy (per-probe zn 0.20 vs 0.25; 216@1 beats
+  213@2 298 vs 242 times at |dz| >= 3). Open.
+- `[MEASURED, DGX replay]` 15-16 % of simultaneous-RNTI grant pairs overlap under every hypothesis, so disjointness does not
+  discriminate. Dead end.
+
+**10. Host and process lessons (2026-10-12)**
+
+- `[ORCH]` `agents_freeze.sh` must list full worktree paths. It now never freezes a root-owned `nr-uesoftmodem`.
+- `[ORCH]` A docker OAI stack (`/opt/oai-nr-ue`, container `oai-nr-ue`, rfsim) blocked all builds through the `pgrep -x nr-uesoftmodem`
+  rule (PIDs 3228228/3228248 at 15:46 onward). Container stopped 2026-10-12. Several 10-12 reports (STALLS, UECORESET, CSIRSRATE,
+  DECTAIL) could not build or replay for this reason; their results are offline or partial as labelled.
+- `[ORCH]` Env files must be single-line. `[MEASURED]` static TLS must stay < 3 MB: nr-uesoftmodem TLS 0x256498 B = 2.4 MB with
+  CSIRSPORTS (under the limit).
+- `[MEASURED, DGX replay]` CSIRSPORTS: the noise VLA of channel estimation moved to heap (140 kB stack); 32-port `csi_rs_generated_signal`
+  fixed behind `ISAC_CSIRS_PORTS_GT8=1`.
+- `[HYPOTHESIS]` The 983 KB VLA `csi_rs_received_signal` (section 6 of the 10-10/11 block, TIM CSI-RS stack overflow) is not covered by
+  CSIRSPORTS (it audits other buffers). The TIM CSI-RS workaround `ISAC_CSIRS_DISC=0 ISAC_CSIRS_FULL=0` is not stated for t26z:
+  check before a TIM run.
+- Heavy-lock contention: replays and rfsim runs were denied or queued behind the OTA chain on the DGX during this session
+  (CSIRSRATE, DECTAIL, WEAKLIVE, STALLS). Results marked NOT RUN are not evidence.
+
+**11. Open items (not measured, carried forward)**
+
+- Decode mean > 0.5 ms (p50 met): tail from GPU sharing and the scan pool.
+- UL lock twin hypotheses 216@0 / 216@1: not separable by DM-RS energy; no OTA lock speed fix.
+- 2-layer NL2 delta slowdown (demod 1096 vs 155 us): fix before adoption.
+- 508 dedicated CORESET not verified (section 6); PCI 4 SIB1 not decoded.
+- PCI 675 10-11 failure cause not established (section 7).
+- t26z default-env flags without OTA attribution (section 3).
+- TIM MCS-0 fix (`ISAC_PDSCH_REP_FIELDS=1`): OTA check pending.
+- OTA stale drops 39-47 % (STALLS): the scan-pool lever did not clear the bar; lag-at-enqueue histogram not built; class A freeze cause open.
+- Merge gate NOT MET.
+
+**12. Superseded by this block.** Old text is kept. Where the text exists in this file it is marked in place (top banner, 2026-10-10/11 block sections 2, 3, 5 and 7). Report-only items are listed here only:
+- "Recommended OTA env: t26s" (2026-10-11 banner, 10-10/11 section 2) -> t26z, section 3.
+- TIMMCS0 "rv misread <= 3 %" -> TIMRM (`ISAC_PDSCH_REP_FIELDS=1`), section 4.
+- `ISAC_PDSCH_READING_RV` as the TIM MCS-0 fix -> not used (TIMRM), section 4.
+- DECTAIL "CHEST_TRIM: do not enable" -> GPUALLOC control clean, section 8.
+- DECTAIL "2-layer exact zeros: not claimed" -> LLRZERO root cause, OTA A/B section 5.
+- "PCI 403 and 675 detections only (not synced)" (10-10/11 section 7) -> CARRIERS2 and section 2 of this block (403 SIB1 live, 675 live sync at -4881).
+- WEAKLIVE "PCI 675 does not sync live" -> superseded by the 2026-10-12 live sync (section 7); its 10-11 failure cause remains open.
+- NEWCELLS "508 SIB1 not decoded / PCI 508 never decoded" -> 508 SIB1 decoded live (section 2).
+- NEWCELLS and AUTOFRONT "403 SIB1 not verified" -> 403 SIB1 decoded live, barred NSA-style (section 2).
+- STALLS S1 as the candidate to fix OTA stale drops -> tested, no clear win (section 8).
+- BLINDFIX "one flag at a time on PCI != 415" -> the t26z default contains all six at once (section 3, open).
+- "TIM bimodal: wrong learned state never revoked" (10-10/11 section 3 hypothesis) -> partly superseded: the MCS-0 CRC component is the NDI-as-rv misread (TIMRM); the rest of the bimodality is still open.
+- "Open tails ... cudaMalloc/cudaHostAlloc suspects" (10-10/11 section 5) -> rejected for replays (STALLS class C).
+
+**13. Reports used:** TIMMCS0-20261012, DCIRV-20261012, HARQPID-20261012, TIMRM-20261012, LLRZERO-20261012, CSIRSPORTS-20261012,
+CSIRSRATE-20261012, DECTAIL-20261012, GPUALLOC-20261012, BATCHCPU-20261012, STALLS-20261012, BLINDAUDIT-20261012, BLINDFIX-20261012,
+WEAKSYNC-20261012, WEAKLIVE-20261012, AUTOFRONT-20261012, UECORESET-20261012, CARRIERGEOM-20261012, ULLOCKSPEED-20261012,
+CARRIERS2-20261011, NEWCELLS-20261011 (`docs/superpowers/reports/csd/`); RATEFIX-20261012 not present on this branch (skipped).
+Orchestrator facts of 2026-10-12 are marked `[ORCH]`. Raw logs are untracked under `/home/nicola/NICOLA/wt/*/replays` and `ota_runs`.
 
 ---
 

@@ -4859,6 +4859,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   if (additional) {
     nr_pdcch_blind_phase2_lock();
     nr_pdcch_blind_monitor_discovered_poll();
+    nr_pdcch_discovered_note_pci(ue->frame_parms.Nid_cell);
     discovered = nr_pdcch_discovered_snapshot(&discovered_cfg, &discovered_token, ue->frame_parms.N_RB_DL);
     nr_pdcch_blind_phase2_unlock();
   }
@@ -5223,7 +5224,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      *
      * Only in full_auto, and only where the operator configured nothing. */
     if (cfg->dl_full_auto && ul_opts.bwp_size == 0) {
-      ul_opts.bwp_start = common.ul_bwp_start;
+      /* ISAC_CARRIER_FROM_SIB1: SIB1's UL BWP start is a CRB; the grid RB is CRB + (grid RB of CRB 0). */
+      ul_opts.bwp_start = common.ul_bwp_start + (nr_carrier_from_sib1_enabled() ? nr_pdcch_crb0_grid_rb() : 0);
       ul_opts.bwp_size  = common.ul_bwp_size;
       /* tda_count == 0 is NOT "unknown": nr_pdcch_blind_dci01_size() reads it as the TS 38.214
        * Table 6.1.2.1.1-2 default 16-entry table, i.e. a 4-bit field and a complete interpretation.
@@ -9323,6 +9325,24 @@ constdiag_done:;
         }
         if (kk >= 0) kgrp[kk] = g;
       }
+      { /* ISAC_PDSCH_REP_FIELDS=1 (TIMRM, default off): a solved RNTI's grant is decoded with the NDI / rv / HARQ pid its representative layout
+         * reads, not those of whichever layout of the same reading (same MCS, allocation, ports) parsed first. Layouts whose MCS fields sit 2 bits
+         * apart read the same MCS 0 when the bits before it are zero, but read the rv from different bits: the earlier one takes the NDI as the
+         * rv LSB, so every new MCS-0 TB (NDI = 1) was decoded with rv 1 and failed (TIM, PCI 923: 98 of 98 failures in the RMDCI bit dump).
+         * Readings, their ids and the refinement probes are untouched (unlike ISAC_PDSCH_READING_RV, which splits readings and starves the
+         * refinement budget: the Vodafone 20261008 replay lost every MCS > 0 TB). */
+        static int s_repf = -1;
+        if (s_repf < 0) s_repf = getenv("ISAC_PDSCH_REP_FIELDS") && atoi(getenv("ISAC_PDSCH_REP_FIELDS")) ? 1 : 0;
+        if (s_repf && rep >= 0 && rep < nh && s_gid[rep] != 0xff) {
+          nr_pdcch_blind_result_t rp;
+          const int g = s_gid[rep];
+          if (dci11_layout_parse(R, rep, rw, dlen, cfg, &rp) && !rp.vrb_to_prb && nr_dci11_same_reading(&rparsed[g], &rp, false)) {
+            rparsed[g].rv = rp.rv;
+            rparsed[g].ndi = rp.ndi;
+            rparsed[g].harq_pid = rp.harq_pid;
+          }
+        }
+      }
       int off = 0;
       for (int k = 0; k < nrd; k++) {
         rd[k].ids = s_ids + off;
@@ -9555,7 +9575,8 @@ constdiag_done:;
                                              .nb_rb_oh = (uint16_t)cfg->pdsch_xoverhead, .tb_scaling = 0,
                                              .bw_tbslbrm = (uint16_t)fp->N_RB_DL, .mcs_table_lbrm = (int8_t)var[v].table,
                                              .vrb_l = 0, .rnti_class = out.rnti_class, .dci11 = true,
-                                             .scr_dedicated = dl_dedicated};
+                                             .scr_dedicated = dl_dedicated, .dci_len = o->dci_len,
+                                             .dci_w = {o->payload.w[0], o->payload.w[1]}};
         nr_pdsch_passive_job_t job;
         memset(&job, 0, sizeof(job));
         job.dlsch_pdu = dl;

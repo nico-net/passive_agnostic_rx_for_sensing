@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 
 uint32_t nr_dlsch_extract_geometry(const NR_DL_FRAME_PARMS *fp, int chest_time, c16_t *rx_idx, uint32_t est_sz, int32_t *est_idx,
                                    uint32_t ext_sz, c16_t *out_y, int32_t *out_h, unsigned char symbol,
@@ -294,7 +295,7 @@ enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, R
 static __thread int t_qmode; /* refuse() -> gpu_grant(): the resolved multi-layer qam_mode */
 static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coef, int *align, int *l2d)
 {
-  static int s_env = -1, s_mode = 0, s_align = 0, s_l2d = 0;
+  static int s_env = -1, s_mode = 0, s_align = 0, s_l2d = 0, s_l2d2 = 0;
   static double s_min_db = 12.0;
   if (s_env < 0) {
     /* every knob nr_rx_pdsch() reads whose path the GPU does not reproduce */
@@ -313,6 +314,7 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
       s_min_db = atof(getenv("ISAC_RX_BRANCH_MIN_DB"));
     s_align = env_int("ISAC_RX_MRC_ALIGN", 0);
     s_l2d = env_int("ISAC_L2MAXH_DELTA", 0);
+    s_l2d2 = env_int("ISAC_L2MAXH_DELTA_NL2", 0); /* nl >= 2 only, as the CPU path */
     s_env = any;
   }
   if (!atomic_load_explicit(&g_on, memory_order_relaxed))
@@ -352,7 +354,7 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     return RF_MODE;
   *thr_coef = pow(10.0, -s_min_db / 10.0);
   *align = s_align;
-  *l2d = s_l2d;
+  *l2d = s_l2d + (nl >= 2 ? s_l2d2 : 0);
   return -1;
 }
 
@@ -710,6 +712,8 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     t_def = calloc(1, sizeof(*t_def));
   int mode = 0, align = 0, l2d = 0;
   double thr_coef = 0.0;
+  if (nr_pdsch_route_cpu()) /* BATCHCPU */
+    return -1;
   const int rf = refuse(c, &mode, &thr_coef, &align, &l2d);
   if (rf >= 0) {
     if (rf != RF_OFF)

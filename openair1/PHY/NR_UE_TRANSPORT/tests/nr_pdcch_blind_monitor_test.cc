@@ -67,6 +67,7 @@ void crcTableInit(void);
 #include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdsch_prb_set.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
+#include "nr_passive_acq_state.h"
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_pdcch_coreset_bank.h"
 #include <unistd.h>
@@ -4897,6 +4898,75 @@ TEST(PdcchPointA, CoverStartFollowsCrb0) {
   EXPECT_EQ(nr_pdcch_cover_start_rb(214, 217), 0);  // no full group above Point A: legacy
 }
 
+// CARRIERGEOM (ISAC_CARRIER_FROM_SIB1): carrier vs grid mapping, pure.
+TEST(CarrierGeom, CarrierInsideGrid) {
+  auto g = nr_carrier_geom(324, 324, 162, 217);  // WindTre 508 on -C 3590190000 --ssb 517: Point A at grid RB 27
+  EXPECT_TRUE(g.valid); EXPECT_EQ(g.start_rb, 27); EXPECT_EQ(g.crb0_rb, 27); EXPECT_EQ(g.n_rb, 162);
+  g = nr_carrier_geom(0, 0, 217, 217);         // grid == carrier (415, retuned 923): identity
+  EXPECT_TRUE(g.valid); EXPECT_EQ(g.start_rb, 0); EXPECT_EQ(g.n_rb, 217);
+  g = nr_carrier_geom(0, 12 * 5, 100, 273);    // offsetToCarrier 5 included in the start
+  EXPECT_TRUE(g.valid); EXPECT_EQ(g.start_rb, 5);
+}
+TEST(CarrierGeom, CarrierNotContainedOrMisaligned) {
+  EXPECT_FALSE(nr_carrier_geom(972, 972, 162, 217).valid);  // 508 on the old grid: ends at RB 243 > 217
+  EXPECT_FALSE(nr_carrier_geom(936, 936, 217, 217).valid);  // 923 on -C 3731.91: Point A at RB 78, carrier sticks out
+  EXPECT_FALSE(nr_carrier_geom(-12, -12, 100, 217).valid);  // starts below the grid
+  EXPECT_FALSE(nr_carrier_geom(318, 318, 162, 217).valid);  // half an RB off the grid
+}
+
+class DiscoveredCarrier : public DiscoveredCover {
+ protected:
+  void SetUp() override {
+    DiscoveredCover::SetUp();
+    setenv("ISAC_CARRIER_FROM_SIB1", "1", 1);
+    setenv("ISAC_PDCCH_DISC_COVER", "1", 1);
+    nr_passive_acq_reset();
+    nr_passive_acq_set_phy_geometry(217, 1, 517, 3590190000.0);
+    nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2); // Point A at grid subcarrier 517 - 193 = 324
+  }
+  void TearDown() override {
+    unsetenv("ISAC_CARRIER_FROM_SIB1"); nr_passive_acq_reset();
+    DiscoveredCover::TearDown();
+  }
+};
+
+TEST_F(DiscoveredCarrier, DwellUsesSib1CarrierAndAddsInterleavedCover) {
+  nr_pdcch_discovered_note_pci(508);
+  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.bwp_start, 27); EXPECT_EQ(c.bwp_size, 162); EXPECT_EQ(c.dci10_n_rb_riv, 162); EXPECT_EQ(c.dci10_rb_offset, 27);
+  EXPECT_EQ(c.coreset_rb_offset, 0); EXPECT_EQ(c.coreset_freq_domain, 27); EXPECT_EQ(c.coreset_reg_bundle_size, 0);
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 100 + i); // rejected: next is the interleaved cover
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_freq_domain, 27); EXPECT_EQ(c.coreset_reg_bundle_size, 6); EXPECT_EQ(c.coreset_interleaver_size, 3);
+  EXPECT_EQ(c.coreset_shift_index, 508); EXPECT_EQ(c.bwp_size, 162);
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 5000 + i);
+  // the published line (clipped to the carrier: 33 + 30 groups would end at RB 213 > 189) is the last dwell
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_rb_offset, 6); EXPECT_EQ(c.coreset_freq_domain, 26);
+}
+
+TEST_F(DiscoveredCarrier, GridEqualsCarrierIsIdentityNoInterleavedCover) {
+  nr_passive_acq_reset();
+  nr_passive_acq_set_phy_geometry(162, 1, 193, 3590010000.0);
+  nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2); // Point A at grid subcarrier 0
+  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=0 groups=27 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 162));
+  EXPECT_EQ(c.bwp_start, 0); EXPECT_EQ(c.bwp_size, 162); EXPECT_EQ(c.coreset_freq_domain, 27);
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 100 + i);
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 162)); // no interleaved dwell; the published line = the cover
+}
+
+TEST_F(DiscoveredCarrier, FlagOffKeepsGridGeometry) {
+  unsetenv("ISAC_CARRIER_FROM_SIB1");
+  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.bwp_start, 0); EXPECT_EQ(c.bwp_size, 217); EXPECT_EQ(c.coreset_rb_offset, 0); EXPECT_EQ(c.coreset_freq_domain, 36); // legacy grid cover (POINTA_REF off)
+}
+
 // ACQ-ROBUST: ISAC_PDCCH_DWELL_ADAPTIVE and ISAC_PDCCH_NO_FAKE_FOOTPRINT.
 struct DiscoveredRobust : DiscoveredCoresets {
   static constexpr const char *kLine = "CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n";
@@ -6013,6 +6083,100 @@ TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
+// ---- ISAC_UL_LOCK_SPRT (ULLOCKSPEED): sequential test on sub-threshold DM-RS evidence of every probe, any grant width.
+namespace {
+struct SprtRun {
+  int locked_n = 0, locked_start = 0;  // 0 = no lock
+  int probes = 0;
+  int wide = 0;  // probes with an L > 16 PRB hypothesis range
+};
+// mu = per-PRB mean of the DM-RS statistic on the true allocation (216 @ CRB 1).
+// heavy = noise drawn from a symmetric heavy-tailed mixture (the exchangeable-null shape is symmetric, not Gaussian).
+SprtRun UllSprtRun(unsigned seed, double mu, int max_probes, bool heavy)
+{
+  nr_ul_layout_lock_reset();
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                                    .slots_per_frame = 20};
+  UllGen g;
+  g.rng.seed(seed);
+  nr_pdcch_blind_ul_result_t out;
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+  std::mt19937 rng(seed * 7919u + 1);
+  std::normal_distribution<double> nd(0.0, 1.0);
+  std::uniform_real_distribution<double> ud(0.0, 1.0);
+  SprtRun run;
+  for (int i = 0; i < max_probes; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+    if (rc == 1) {
+      run.locked_n = out.bwp_size;
+      run.locked_start = out.bwp_start;
+      return run;
+    }
+    if (rc != 2) continue;
+    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP];
+    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, nullptr, nullptr);
+    uint16_t s = 0, l = 0;
+    nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l);
+    const int t0 = 1 + s, t1 = 1 + s + l;  // truth: N = 216 at CRB 1
+    nr_ul_layout_probe_res_t r = {};
+    r.n = n;
+    r.zn_valid = true;
+    r.ctl_db = -6.f;
+    r.comb1_db = NAN;
+    // per-PRB statistic u_q ~ noise (+ mu on the true allocation); a hypothesis' zn is the normalised sum over its range, so
+    // neighbouring hypotheses share noise and signal exactly as overlapping PRB ranges do
+    std::vector<double> u(276), cu(277, 0.0);
+    for (int q = 0; q < 276; q++) {
+      double z = nd(rng);
+      if (heavy && ud(rng) < 0.1) z *= 3.0;
+      u[q] = z + ((q >= t0 && q < t1) ? mu : 0.0);
+      cu[q + 1] = cu[q] + u[q];
+    }
+    for (int h = 0; h < n; h++) {
+      r.snr_db[h] = np[h] ? -5.f : -99.f;
+      r.set[h] = 1;
+      if (!np[h]) continue;
+      if (np[h] > 16) run.wide++;
+      r.zn[h] = (float)((cu[p0[h] + np[h]] - cu[p0[h]]) / std::sqrt((double)np[h]));
+    }
+    nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
+    run.probes++;
+  }
+  return run;
+}
+}  // namespace
+
+TEST(UlLayoutLock, SprtLocksOnWeakEvidenceAndNeverOnNoise)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  setenv("ISAC_UL_LOCK_SPRT", "1", 1);
+  ASSERT_TRUE(nr_ul_layout_sprt_enabled());
+  // weak but present DM-RS: every vote-threshold rule (6 dB per probe) sees nothing; the accumulated evidence must lock the
+  // true BWP (216 @ CRB 1) and never a neighbour, for several seeds
+  for (unsigned seed = 1; seed <= 6; seed++) {
+    const SprtRun r = UllSprtRun(seed, 0.35, 4000, false);
+    EXPECT_EQ(r.locked_n, 216) << "seed " << seed << " probes " << r.probes;
+    EXPECT_EQ(r.locked_start, 1) << "seed " << seed;
+    EXPECT_LT(r.probes, 3000) << "seed " << seed;
+    EXPECT_GT(r.wide, 0);  // wide grants are probed
+  }
+  // no DM-RS anywhere (mu = 0), heavy-tailed symmetric noise: 150 independent sessions of 1500 probes, none may lock
+  // (bound alpha = 1e-3 per session)
+  int false_locks = 0;
+  for (unsigned seed = 100; seed < 250; seed++) false_locks += UllSprtRun(seed, 0.0, 1500, true).locked_n != 0;
+  EXPECT_EQ(false_locks, 0);
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_SPRT");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}
+
 // ---- UL layout lock: SIB1-first hypothesis and CRC-first locking (ISAC_UL_LOCK_SIB1_FIRST / ISAC_UL_LOCK_CRC_FIRST) ----
 TEST(UlLayoutLock, Sib1PriorCarriesTheUplinkBwp)
 {
@@ -6222,4 +6386,41 @@ TEST(Dci11Reading, LayoutsCollidingOnMcs0DisagreeOnRv) {
   EXPECT_TRUE(nr_dci11_same_reading(&ra, &rb, false));  // the old dedup merged them
   EXPECT_FALSE(nr_dci11_same_reading(&ra, &rb, true));  // the fix keeps two readings
   EXPECT_TRUE(nr_dci11_same_reading(&rb, &rb, true));
+}
+
+// TIMRM (2026-10-12): a REAL TIM (PCI 923) MCS-0 DCI as the receiver printed it (RMDCI, replay of raw_pci923_tim_12s_tile3, 217 PRB BWP,
+// 47 bits, rnti 0x4ac6). The two layouts the solver keeps alive for that RNTI (MCS offset 16 and 18, same total) read the same MCS 0 and the same
+// allocation; the one that reads the MCS 2 bits early takes "(MCS LSB side, NDI)" as the rv: NDI = 1 (a new transport block, transmitted with
+// rv 0) reads rv 1, and the TB fails its CRC at rv 1 (50 % of TIM's MCS-0 grants). The reading dedup must keep them apart.
+TEST(Dci11Reading, TimRealMcs0PayloadNdiReadAsRv) {
+  const char *bits = "11000010000000000000000100000100010101000010000";
+  const uint16_t bwp = 217, len = 47;
+  ASSERT_EQ(strlen(bits), len);
+  auto opts = [](int vrb, int tb2) {
+    nr_pdcch_blind_extract_opts_t o{};
+    o.bwp_indicator_bits = 0; o.vrb_to_prb_bits = vrb; o.prb_bundling_bits = 0; o.rate_matching_bits = 0;
+    o.zp_csirs_bits = 0; o.tb2_bits = tb2; o.harq_pid_bits = 4; o.dai_bits = 2; o.pdsch_to_harq_bits = 3;
+    o.antenna_ports_bits = 4; o.tci_bits = 0; o.srs_request_bits = 2; o.cbg_bits = 0; o.fdra_mode = NR_FDRA_TYPE1;
+    o.tda_count = 1; o.tda_start[0] = 1; o.tda_length[0] = 13; o.tda_mapping[0] = 0; o.dmrs_add_pos = 0; o.dmrs_max_length = 1;
+    return o;
+  };
+  const auto a = opts(0, 2), b = opts(2, 0); // A: MCS at bit 16 (the wrong one); B: MCS at bit 18 (the CRC-proven one)
+  ASSERT_EQ(nr_pdcch_blind_dci_size_ex(bwp, &a), len);
+  ASSERT_EQ(nr_pdcch_blind_dci_size_ex(bwp, &b), len);
+  nr_pdcch_blind_raw_result_t raw{};
+  raw.rnti = 0x4ac6;
+  for (unsigned i = 0; i < len; i++)
+    if (bits[i] == '1') {
+      const unsigned bit = len - 1 - i;
+      raw.payload.w[bit / 64] |= 1ULL << (bit % 64);
+    }
+  nr_pdcch_blind_result_t ra{}, rb{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_11(&raw, len, bwp, 0, &a, &ra)) << ra.reject_reason;
+  ASSERT_TRUE(nr_pdcch_blind_extract_11(&raw, len, bwp, 0, &b, &rb)) << rb.reject_reason;
+  EXPECT_EQ(ra.mcs, 0); EXPECT_EQ(rb.mcs, 0);
+  EXPECT_EQ(ra.start_rb, rb.start_rb); EXPECT_EQ(ra.num_rb, rb.num_rb); EXPECT_EQ(ra.dmrs_ports, rb.dmrs_ports);
+  EXPECT_EQ(rb.ndi, 1); EXPECT_EQ(rb.rv, 0);   // B: a new TB, rv 0
+  EXPECT_EQ(ra.ndi, 0); EXPECT_EQ(ra.rv, 1);   // A: the same NDI bit read as the rv LSB
+  EXPECT_TRUE(nr_dci11_same_reading(&ra, &rb, false));
+  EXPECT_FALSE(nr_dci11_same_reading(&ra, &rb, true));
 }

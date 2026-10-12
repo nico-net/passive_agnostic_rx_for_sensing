@@ -36,4 +36,11 @@ typedef struct {
   uint16_t n_rb[3][276];
 } nr_pdsch_evm_acc_t;
 extern __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc;
+/* LLRZERO ISAC_MMSE2_DIAG=1: per-grant, per-layer statistics of nr_dlsch_mmse mode 2 (CPU path only). Zeroed per decode, printed as MMSE2DIAG. */
+typedef struct {
+  int on, shift, nl, qm, gain_k;
+  uint32_t n[4], w0[4], z0[4], mag0[4], sing[4], sat[4];
+  double sumw[4], sumabsz[4];
+} nr_mmse2_diag_t;
+extern __thread nr_mmse2_diag_t nr_mmse2_diag;
 #endif

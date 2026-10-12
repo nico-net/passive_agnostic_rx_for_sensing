@@ -74,6 +74,8 @@ typedef struct {
   uint8_t  rv;        ///< redundancy version from the DCI
   uint8_t  ndi;       ///< new-data indicator: unchanged for a HARQ process = retransmission
   uint8_t  harq_pid;  ///< HARQ process number: keys the soft-combining buffer
+  uint16_t dci_len;    ///< TIMRM diagnostic: DCI payload width the fields were read from (0 = not recorded)
+  uint64_t dci_w[2];   ///< TIMRM diagnostic: right-aligned DCI payload words (bit 0 = LSB of the payload)
   uint8_t  mcs_table; ///< 0 = qam64, 1 = qam256, 2 = qam64LowSE (the gNB's PDSCH-Config mcs-Table)
   uint16_t nb_rb_oh;  ///< xOverhead_PDSCH in REs per PRB (0/6/12/18); 0 when not configured
   int8_t   mcs_table_lbrm; ///< MCS table whose MAXIMUM modulation order sizes TBS_LBRM. TS 38.214
