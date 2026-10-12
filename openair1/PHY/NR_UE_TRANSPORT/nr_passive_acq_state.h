@@ -72,6 +72,8 @@ typedef struct {
   bool bw_match, mu_match, grid_match;
   int  point_a_subcarrier;   // derived Point A position in the started grid (0 = grid start)
   int  carrier_end_subcarrier;
+  int  carrier_start_subcarrier; // Point A + 12*offsetToCarrier, in grid subcarriers (ISAC_CARRIER_FROM_SIB1)
+  int  carrier_n_rb;          // SIB1 carrierBandwidth (PRB at the SIB1 numerology)
   double derived_centre_hz;   // absolute carrier centre implied by SIB1, 0 if PHY frequency unknown
   double started_centre_hz;
 } nr_passive_acq_carrier_verdict_t;
