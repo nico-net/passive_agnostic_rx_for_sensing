@@ -885,7 +885,7 @@ static bool extent_advance(void)
  * says nothing else is significant, so the catalog walk PAUSES -- one whole decode pass per occasion
  * saved -- until the file changes. If any line failed, the walk resumes as the fallback. */
 #define DISC_MAX 8
-typedef struct { int nid, sym, dur, rb, ng, L, R, sh; } disc_coreset_t;
+typedef struct { int nid, sym, dur, rb, ng, L, R, sh, ex; } disc_coreset_t; /* ex = 1: ISAC_PDCCH_DISC_ENUM hypothesis, R is explicit */
 static disc_coreset_t s_disc[DISC_MAX];
 static int s_disc_n, s_disc_next, s_disc_failed;
 static bool s_disc_active, s_disc_pending;
@@ -1011,7 +1011,7 @@ static bool discovered_load(const char *path)
   char line[256];
   s_disc_n = 0;
   while (s_disc_n < DISC_MAX && fgets(line, sizeof(line), f)) {
-    disc_coreset_t d;
+    disc_coreset_t d = {0};
     if (sscanf(line, "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d", &d.nid, &d.sym, &d.dur,
                &d.rb, &d.ng, &d.L, &d.R, &d.sh) != 8)
       continue;
@@ -1028,7 +1028,7 @@ static bool discovered_load(const char *path)
 /* Independent stage-1/2 queue. The legacy handoff below remains the feature-off
  * control. File refreshes wait for the current dwell; they never erase its evidence. */
 static struct {
-  disc_coreset_t line[128]; /* candidate queue may exceed the eight verified bank slots */
+  disc_coreset_t line[256]; /* candidate queue may exceed the eight verified bank slots */
   int n, next, occasions;
   uint64_t total_occ; /* every stepped occasion of the dwell (ISAC_PDCCH_DWELL_ADAPTIVE hard cap) */
   uint64_t generation, last_slot;
@@ -1117,7 +1117,7 @@ int nr_pdcch_cover_start_rb(int crb0_grid_rb, int carrier_rb)
   return start + 6 <= carrier_rb ? start : 0;
 }
 
-static int s_disc_pci; /* PHY cell ID, for the default shiftIndex of the interleaved cover */
+static int s_disc_pci = -1; /* PHY cell ID, for the default shiftIndex of the interleaved cover */
 void nr_pdcch_discovered_note_pci(int pci) { s_disc_pci = pci; }
 
 /* nr_carrier_from_sib1_enabled: ISAC_CARRIER_FROM_SIB1=1 (CARRIERGEOM, default off); read per call (dwell start only). */
@@ -1173,6 +1173,76 @@ bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int gro
   return false;
 }
 
+/* ISAC_PDCCH_DISC_ENUM=1 (CORESETALL, default off; needs ISAC_PDCCH_DISC_COVER): bounded enumeration of the CORESET
+ *   geometries TS 38.211 7.3.2 / 38.213 10.1 permit, for every nID the GPU stage reports (first ISAC_PDCCH_DISC_ENUM_NIDS,
+ *   default 4) and for nID = PCI (pdcch-DMRS-ScramblingID absent). The GPU sweep runs with ISAC_COREMAP_IDSWEEP_DUR=1, so
+ *   it can only report duration 1; the interleaver is not recoverable from DM-RS occupancy. Each extra is a cover dwell
+ *   (whole carrier on the CRB-0 grid) verified like every dwell: TB CRC recovers an RNTI that recurs with a fresh payload.
+ *   Entry order, cut at ISAC_PDCCH_DISC_ENUM_MAX (default 24) per nID: A other durations non-interleaved; B bundle 6, R 3/2/6
+ *   x size {full, largest even, largest multiple of 6} (ng code 0 / -1 / -2), shift = PCI; C shift 0; D bundle 2; E other
+ *   durations interleaved. Combinations the group count cannot satisfy are skipped at dwell start (needs the carrier width). */
+static bool nr_disc_enum_enabled(void)
+{
+  const char *e = getenv("ISAC_PDCCH_DISC_ENUM");
+  return e && strcmp(e, "1") == 0;
+}
+static int disc_env_int(const char *name, int def, int lo, int hi)
+{
+  const char *e = getenv(name);
+  char *end = NULL;
+  const long v = e ? strtol(e, &end, 10) : def;
+  return e && end != e && !*end && v >= lo && v <= hi ? (int)v : def;
+}
+static int disc_enum_one(disc_coreset_t *line, int n, int max, int nid, int sym, int dur0, int cap)
+{
+  static const int Rs[3] = {3, 2, 6};
+  const int n0 = n;
+#define DISC_ADD(...) do { if (n - n0 < cap && n < max) line[n++] = (disc_coreset_t){.nid = nid, .sym = sym, .ex = 1, __VA_ARGS__}; } while (0)
+  for (int d = 1; d <= 3; ++d)
+    if (d != dur0 && sym + d <= 14) DISC_ADD(.dur = d);
+  for (int g = 0; g >= -2; --g)
+    for (int k = 0; k < 3; ++k) DISC_ADD(.dur = dur0, .ng = g, .L = 6, .R = Rs[k], .sh = -1);
+  for (int k = 0; k < 3; ++k) DISC_ADD(.dur = dur0, .L = 6, .R = Rs[k], .sh = 0);
+  if (dur0 < 3)
+    for (int k = 0; k < 3; ++k) DISC_ADD(.dur = dur0, .L = 2, .R = Rs[k], .sh = -1);
+  for (int d = 1; d <= 3; ++d)
+    if (d != dur0 && sym + d <= 14)
+      for (int k = 0; k < 3; ++k) DISC_ADD(.dur = d, .L = 6, .R = Rs[k], .sh = -1);
+#undef DISC_ADD
+  return n;
+}
+static int disc_enum_append_all(disc_coreset_t *line, int n, int max, int ncov)
+{
+  const int cap = disc_env_int("ISAC_PDCCH_DISC_ENUM_MAX", 24, 1, 64), nids = disc_env_int("ISAC_PDCCH_DISC_ENUM_NIDS", 4, 1, 16);
+  int seen[16], ns = 0;
+  bool have_pci = false, pci_done = false;
+  for (int i = 0; i < ncov; ++i) {
+    have_pci |= line[i].nid == s_disc_pci;
+    bool dup = false;
+    for (int j = 0; j < ns; ++j) dup |= seen[j] == line[i].nid;
+    if (dup || ns >= nids) continue;
+    seen[ns++] = line[i].nid;
+    pci_done |= line[i].nid == s_disc_pci;
+    n = disc_enum_one(line, n, max, line[i].nid, line[i].sym, line[i].dur, cap);
+  }
+  if (s_disc_pci >= 0 && n < max) { /* the default DM-RS identity: nID = PCI. Also its own non-interleaved cover. */
+    if (!have_pci) line[n++] = (disc_coreset_t){.nid = s_disc_pci, .dur = 1, .ex = 1};
+    if (!pci_done) n = disc_enum_one(line, n, max, s_disc_pci, 0, 1, cap);
+  }
+  return n;
+}
+/* disc_bank_verified: any VERIFIED bank entry. The enumeration is for a cell where nothing is verified yet: an active dwell
+ *   costs the verified CORESET most of its decoded DCIs (923 replay, 4 runs each: C-RNTI 0x4e32 seen 477/641 times per 3000
+ *   slots without a dwell, 13/18 with one; PDSCH crc_ok 16-187 with the extras queued vs 231-269 without). */
+static bool disc_bank_verified(void)
+{
+  for (int i = 0, n = nr_pdcch_coreset_bank_count(); i < n; ++i)
+    if (nr_pdcch_coreset_bank_state(i) == NR_CORESET_VERIFIED) return true;
+  return false;
+}
+static struct { int nid, sym, dur, ng, L, R, sh; } s_enum_tried[96]; /* interleaved dwells started for this queue */
+static int s_enum_tried_n;
+
 /* discovered_cover_queue: ACQ-FIX. Rewrites the freshly parsed queue as [one cover entry per distinct
  *   (nID, symbol, duration), in publication order] + [the published lines]. A cover entry is non-interleaved, starts
  *   at grid RB 0 and is marked ng = 0 ("whole carrier", resolved by nr_pdcch_discovered_snapshot()).
@@ -1185,6 +1255,7 @@ bool nr_pdcch_discovered_cover_banked(int nid, int sym, int dur, int rb, int gro
  *   != 0) and interleaved CORESETs. Caller: discovered_load_stream(). */
 static void discovered_cover_queue(void)
 {
+  s_enum_tried_n = 0;
   const int max = (int)(sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0]));
   disc_coreset_t raw[sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0])];
   const int nraw = s_add_disc.n;
@@ -1201,18 +1272,17 @@ static void discovered_cover_queue(void)
    * nr_pdcch_discovered_snapshot(), shift = PCI (sh -1 = resolve there), the TS 38.331 default shiftIndex). ng = 0 && L != 0 marks it.
    * HYPOTHESIS: on 508 the GPU stage found bundle-6 CORESETs (R 2/3/6) whose window-truncated ranges cannot be
    * de-interleaved, and 162 PRB = 27 groups only divides by R = 3. */
+  const int ncov0 = n; /* distinct (nID, symbol, duration) covers; ISAC_PDCCH_DISC_ENUM extras refer to them */
   if (nr_carrier_from_sib1_enabled()) {
     const int ncov = n;
     for (int i = 0; i < ncov && n < max; ++i)
       s_add_disc.line[n++] = (disc_coreset_t){.nid = s_add_disc.line[i].nid, .sym = s_add_disc.line[i].sym,
                                               .dur = s_add_disc.line[i].dur, .L = 6, .R = 3, .sh = -1};
-    for (int i = 0; i < nraw && n < max; ++i)
-      s_add_disc.line[n++] = raw[i];
-    s_add_disc.n = n;
-    return;
   }
   for (int i = 0; i < nraw && n < max; ++i)
     s_add_disc.line[n++] = raw[i];
+  if (nr_disc_enum_enabled()) /* lowest priority: the published lines and the legacy covers keep their time-to-bank */
+    n = disc_enum_append_all(s_add_disc.line, n, max, ncov0);
   s_add_disc.n = n;
 }
 
@@ -1223,7 +1293,7 @@ static bool discovered_load_stream(FILE *f)
   char line[256];
   while (s_add_disc.n < (int)(sizeof(s_add_disc.line) / sizeof(s_add_disc.line[0]))
          && fgets(line, sizeof(line), f)) {
-    disc_coreset_t d;
+    disc_coreset_t d = {0};
     if (sscanf(line, "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d",
                &d.nid, &d.sym, &d.dur, &d.rb, &d.ng, &d.L, &d.R, &d.sh) != 8)
       continue;
@@ -1306,21 +1376,40 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
       cover_rb += 6 * ((lo - cover_rb + 5) / 6); /* CRB-0 grid of 6 RBs, first group inside the carrier */
     if (geom.valid && !dd.L && dd.ng > 0 && dd.rb >= lo && dd.rb + dd.ng * 6 > hi)
       dd.ng = (hi - dd.rb) / 6; /* published hull wider than the carrier: noise beyond it, clip (non-interleaved only) */
-    if (cover && dd.ng == 0) {
+    if (cover && dd.ex && disc_bank_verified()) {
+      ++s_add_disc.next;
+      continue;
+    }
+    if (cover && dd.ng <= 0) {
       dd.rb = cover_rb;
-      dd.ng = (hi - cover_rb) / 6; /* cover entry: whole carrier on the CRB-0 grid (see discovered_cover_queue()) */
+      const int gfull = (hi - cover_rb) / 6;
+      /* ng code (ISAC_PDCCH_DISC_ENUM only): 0 = whole carrier, -1 = largest even size, -2 = largest multiple of 6 */
+      dd.ng = dd.ng == -1 ? gfull & ~1 : dd.ng == -2 ? gfull / 6 * 6 : gfull; /* cover entry: whole carrier on the CRB-0 grid (see discovered_cover_queue()) */
+      if (dd.ng < 1 || dd.sym + dd.dur > 14 || (dd.ex && s_add_disc.line[s_add_disc.next].ng < 0 && dd.ng == gfull)) {
+        ++s_add_disc.next;
+        continue;
+      }
       if (dd.L) { /* carrier-wide interleaved cover: first R in {3, 2, 6} that divides the REG count */
-        if (dd.sh < 0) dd.sh = s_disc_pci;
+        if (dd.sh < 0) dd.sh = s_disc_pci >= 0 ? s_disc_pci : 0;
         const int R0[3] = {3, 2, 6};
+        const int R1 = dd.ex ? dd.R : 0;
         dd.R = 0;
         for (int k = 0; k < 3 && !dd.R; ++k)
-          if (dd.ng > 0 && !((dd.ng * 6 * dd.dur) % (dd.L * R0[k])) && !(dd.L % dd.dur) && !(dd.dur < 3 && dd.L == 3))
+          if (dd.ng > 0 && (!R1 || R1 == R0[k]) && !((dd.ng * 6 * dd.dur) % (dd.L * R0[k])) && !(dd.L % dd.dur) && !(dd.dur < 3 && dd.L == 3))
             dd.R = R0[k];
-        /* grid == carrier (415, retuned 923): the interleaved cover is a dwell the cell does not need; skip it */
-        if (!geom.valid || (lo == 0 && hi == carrier_rb) || !dd.R || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng)) {
+        bool tried = false;
+        for (int k = 0; k < s_enum_tried_n && dd.ex; ++k)
+          tried |= s_enum_tried[k].nid == dd.nid && s_enum_tried[k].sym == dd.sym && s_enum_tried[k].dur == dd.dur
+                   && s_enum_tried[k].ng == dd.ng && s_enum_tried[k].L == dd.L && s_enum_tried[k].R == dd.R && s_enum_tried[k].sh == dd.sh;
+        /* grid == carrier (415, retuned 923): the legacy interleaved cover is a dwell the cell does not need; skip it.
+         * Enumerated hypotheses (ex) are by design for such cells and are only deduplicated against dwells already run. */
+        if ((!dd.ex && (!geom.valid || (lo == 0 && hi == carrier_rb))) || !dd.R || tried
+            || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng)) {
           ++s_add_disc.next;
           continue;
         }
+        if (s_enum_tried_n < (int)(sizeof(s_enum_tried) / sizeof(s_enum_tried[0])))
+          s_enum_tried[s_enum_tried_n++] = (typeof(s_enum_tried[0])){dd.nid, dd.sym, dd.dur, dd.ng, dd.L, dd.R, dd.sh};
       }
     } else if (cover && ((!dd.L && dd.rb == cover_rb && dd.ng == (hi - cover_rb) / 6) /* this queue's cover already tried it */
                          || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng))) {
@@ -1378,9 +1467,9 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     ++s_add_disc.generation;
     LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d dwell start sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d\n",
           s_add_disc.next + 1, s_add_disc.n, d->nid, d->sym, d->dur, d->rb, d->ng, d->L, d->R, d->sh);
-    if (cover && s_add_disc.line[s_add_disc.next].ng == 0)
-      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d is the ACQ-FIX cover dwell (ISAC_PDCCH_DISC_COVER)\n",
-            s_add_disc.next + 1, s_add_disc.n, d->nid);
+    if (cover && s_add_disc.line[s_add_disc.next].ng <= 0)
+      LOG_A(PHY, "SENSING: discovered CORESET %d/%d nid=%d is the %s dwell (ISAC_PDCCH_DISC_COVER)\n",
+            s_add_disc.next + 1, s_add_disc.n, d->nid, d->ex ? "ISAC_PDCCH_DISC_ENUM hypothesis" : "ACQ-FIX cover");
   }
   if (!s_add_disc.active) return false;
   *cfg = s_add_disc.cfg;

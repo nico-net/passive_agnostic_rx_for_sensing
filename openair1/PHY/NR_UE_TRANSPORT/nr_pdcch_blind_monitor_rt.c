@@ -4858,8 +4858,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   bool discovered = false;
   if (additional) {
     nr_pdcch_blind_phase2_lock();
+    nr_pdcch_discovered_note_pci(ue->frame_parms.Nid_cell); /* before the poll: ISAC_PDCCH_DISC_ENUM queues nID = PCI */
     nr_pdcch_blind_monitor_discovered_poll();
-    nr_pdcch_discovered_note_pci(ue->frame_parms.Nid_cell);
     discovered = nr_pdcch_discovered_snapshot(&discovered_cfg, &discovered_token, ue->frame_parms.N_RB_DL);
     nr_pdcch_blind_phase2_unlock();
   }

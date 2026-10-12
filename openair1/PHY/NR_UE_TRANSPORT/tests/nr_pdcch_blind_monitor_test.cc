@@ -4967,6 +4967,96 @@ TEST_F(DiscoveredCarrier, FlagOffKeepsGridGeometry) {
   EXPECT_EQ(c.bwp_start, 0); EXPECT_EQ(c.bwp_size, 217); EXPECT_EQ(c.coreset_rb_offset, 0); EXPECT_EQ(c.coreset_freq_domain, 36); // legacy grid cover (POINTA_REF off)
 }
 
+// CORESETALL (ISAC_PDCCH_DISC_ENUM): bounded enumeration of the CORESET geometries TS 38.211 7.3.2 permits.
+struct DwellKey { int nid, dur, ng, L, R, sh; bool operator==(const DwellKey &o) const { return nid == o.nid && dur == o.dur && ng == o.ng && L == o.L && R == o.R && sh == o.sh; } };
+static std::vector<DwellKey> DrainDwells(int carrier_rb) {
+  std::vector<DwellKey> v; uint64_t slot = 0;
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  while (v.size() < 400 && nr_pdcch_discovered_snapshot(&c, &token, carrier_rb)) {
+    v.push_back({c.coreset_pdcch_dmrs_scrambling_id, c.coreset_duration, c.coreset_freq_domain, c.coreset_reg_bundle_size,
+                 c.coreset_interleaver_size, c.coreset_shift_index});
+    for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, slot++); // no evidence: rejected
+  }
+  return v;
+}
+static bool Has(const std::vector<DwellKey> &v, DwellKey k) { for (auto &x : v) if (x == k) return true; return false; }
+static int Count(const std::vector<DwellKey> &v, DwellKey k) { int n = 0; for (auto &x : v) n += x == k; return n; }
+
+struct DiscoveredEnum : DiscoveredCover {
+  void SetUp() override {
+    DiscoveredCover::SetUp();
+    setenv("ISAC_PDCCH_DISC_COVER", "1", 1); setenv("ISAC_PDCCH_DISC_ENUM", "1", 1);
+    unsetenv("ISAC_PDCCH_DISC_ENUM_MAX"); unsetenv("ISAC_PDCCH_DISC_ENUM_NIDS");
+    nr_pdcch_discovered_note_pci(508);
+  }
+  void TearDown() override {
+    unsetenv("ISAC_PDCCH_DISC_ENUM"); unsetenv("ISAC_PDCCH_DISC_ENUM_MAX"); unsetenv("ISAC_PDCCH_DISC_ENUM_NIDS");
+    DiscoveredCover::TearDown();
+  }
+};
+
+TEST_F(DiscoveredEnum, DurationsInterleaverShiftBundleAndPciAreEnumerated) {
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  const auto v = DrainDwells(217);
+  ASSERT_GE(v.size(), 20u);
+  EXPECT_TRUE(v[0] == (DwellKey{62922, 1, 36, 0, 0, 0}));            // the ACQ-FIX cover stays first
+  EXPECT_TRUE(Has(v, {62922, 2, 36, 0, 0, 0})); EXPECT_TRUE(Has(v, {62922, 3, 36, 0, 0, 0}));   // GPU sweep runs at dur 1 only
+  for (int R : {3, 2, 6}) {
+    EXPECT_TRUE(Has(v, {62922, 1, 36, 6, R, 508}));                   // default shiftIndex = PCI
+    EXPECT_TRUE(Has(v, {62922, 1, 36, 6, R, 0}));                     // shiftIndex 0
+    EXPECT_TRUE(Has(v, {62922, 1, 36, 2, R, 508}));                   // bundle 2
+    EXPECT_TRUE(Has(v, {62922, 2, 36, 6, R, 508}));                   // other duration, interleaved
+  }
+  EXPECT_FALSE(Has(v, {62922, 1, 36, 3, 3, 508}));                    // bundle 3 needs duration 3
+  EXPECT_TRUE(Has(v, {508, 1, 36, 0, 0, 0}));                         // nID = PCI hypothesis (cover + extras)
+  EXPECT_TRUE(Has(v, {508, 1, 36, 6, 3, 508}));
+  for (auto &k : v) EXPECT_EQ(Count(v, k), 1);                         // no dwell repeated
+}
+
+TEST_F(DiscoveredEnum, FlagOffAndCapAreRespected) {
+  setenv("ISAC_PDCCH_DISC_ENUM_MAX", "3", 1); setenv("ISAC_PDCCH_DISC_ENUM_NIDS", "1", 1);
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  auto v = DrainDwells(217);
+  // cover + 3 extras (durations 2, 3, first interleaved) + PCI cover + 3 PCI extras
+  EXPECT_EQ(v.size(), 8u);
+  nr_pdcch_discovered_reset();
+  unsetenv("ISAC_PDCCH_DISC_ENUM");
+  lines("CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n");
+  v = DrainDwells(217);
+  EXPECT_EQ(v.size(), 1u);
+}
+
+TEST_F(DiscoveredEnum, AnyVerifiedCoresetEndsTheEnumeration) {
+  lines(kShifted);
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  for (int j = 0; j < 2; ++j) {
+    const int slot = 3 + j;
+    auto fft = grid(slot, 0x400000002345 + j * 16);
+    nr_pdcch_blind_raw_result_t raw{};
+    ASSERT_TRUE(decode(c, fft, slot, 0x1234, &raw));
+    nr_pdcch_discovered_observe(token, raw.rnti, slot, raw.payload, 47);
+    nr_pdcch_discovered_step(token, slot);
+  }
+  ASSERT_EQ(nr_pdcch_coreset_bank_count(), 1);
+  EXPECT_TRUE(DrainDwells(217).empty());           // a dwell costs the verified CORESET most of its DCIs: no extras
+}
+
+TEST_F(DiscoveredEnum, CarrierSubsizesAndNoDuplicateOfLegacyInterleavedCover) {
+  setenv("ISAC_CARRIER_FROM_SIB1", "1", 1);
+  nr_passive_acq_reset();
+  nr_passive_acq_set_phy_geometry(217, 1, 517, 3590190000.0);
+  nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2); // 508: Point A at grid RB 27, 162 PRB = 27 groups
+  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
+  const auto v = DrainDwells(217);
+  EXPECT_EQ(Count(v, {36098, 1, 27, 6, 3, 508}), 1);                  // legacy interleaved cover, not repeated by the enumeration
+  EXPECT_FALSE(Has(v, {36098, 1, 27, 6, 2, 508}));                    // 27 groups: only R = 3 divides
+  EXPECT_TRUE(Has(v, {36098, 1, 26, 6, 2, 508}));                     // largest even size
+  EXPECT_TRUE(Has(v, {36098, 1, 24, 6, 6, 508})); EXPECT_TRUE(Has(v, {36098, 1, 24, 6, 3, 508}));  // largest multiple of 6
+  EXPECT_TRUE(Has(v, {36098, 2, 27, 0, 0, 0}));
+  unsetenv("ISAC_CARRIER_FROM_SIB1"); nr_passive_acq_reset();
+}
+
 // ACQ-ROBUST: ISAC_PDCCH_DWELL_ADAPTIVE and ISAC_PDCCH_NO_FAKE_FOOTPRINT.
 struct DiscoveredRobust : DiscoveredCoresets {
   static constexpr const char *kLine = "CORESET nid=62922 sym=0 dur=1 grid_rb=0 groups=36 L=0 R=0 shift=0\n";
