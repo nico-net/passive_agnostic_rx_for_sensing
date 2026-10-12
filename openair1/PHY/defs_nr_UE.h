@@ -231,6 +231,8 @@ typedef struct {
 typedef struct {
   uint8_t csi_rs_generated_signal_bits;
   c16_t **csi_rs_generated_signal;
+  /// Number of port buffers behind csi_rs_generated_signal: NR_MAX_CSI_PORTS (12), or 32 with ISAC_CSIRS_PORTS_GT8=1 (rows 11-18).
+  int csi_rs_generated_ports;
   bool csi_im_meas_computed;
   uint32_t interference_plus_noise_power;
 } nr_csi_info_t;

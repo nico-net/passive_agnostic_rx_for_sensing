@@ -3094,6 +3094,17 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_csirs_blind_synth)
   add_test(NAME test_nr_csirs_blind_synth COMMAND ./test_nr_csirs_blind_synth)
 
+  # All 18 rows of table 7.4.1.5.3-1 (16/24/32 ports, CDM4/CDM8): port planes, canaries, orthogonality.
+  add_executable(test_nr_csirs_ports ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_ports_check.c
+                                     ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
+                                     ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+                                     ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_gen_mod_table.c
+                                     ${OPENAIR1_DIR}/PHY/MODULATION/nr_modulation.c
+                                     ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_link_libraries(test_nr_csirs_ports PRIVATE nr_phy_common nr_common UTIL m)
+  add_dependencies(tests test_nr_csirs_ports)
+  add_test(NAME test_nr_csirs_ports COMMAND ./test_nr_csirs_ports)
+
   add_executable(test_nr_csirs_disc_td
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_td_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_td_fixture.c
