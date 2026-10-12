@@ -30,6 +30,7 @@ typedef struct {
 
 bool nr_pusch_solver_enabled(void); /* ISAC_UL_PUSCH_SOLVER=1, default off */
 void nr_pusch_solver_reset(void);
+void nr_pusch_solver_set_mu(int mu); /* ISAC_SLOT_SCALE=1 (default off): refill period 20 ms at any numerology */
 /* Signal-time token bucket; at most max_out variants from one grant. Only a
  * DL-locked ticket may enter. The caller supplies readings from U3, with the
  * original grant as fallback, and PCI/DL-derived scrambling-ID priors. */

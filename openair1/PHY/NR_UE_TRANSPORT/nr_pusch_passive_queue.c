@@ -302,6 +302,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
           if (!seen && nids<4) ids[nids++]=id;
         }
       }
+      nr_pusch_solver_set_mu((int)ue->frame_parms.numerology_index);
       const nr_pdcch_blind_monitor_cfg_t *cfg=nr_pdcch_blind_monitor_get_cfg();
       /* nr_pdcch_blind_ul_dmrs_mask takes the RRC enum (pos2=0, pos3=1),
        * not the corresponding OFDM symbol number (2 or 3). */

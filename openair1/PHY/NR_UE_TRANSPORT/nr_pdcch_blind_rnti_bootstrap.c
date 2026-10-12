@@ -32,6 +32,7 @@
 #include <stdio.h>   // snprintf, for the BOOTTABLE diagnostic dump
 #include <stdlib.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 // ---- Phase 3 Technique B: C-RNTI bootstrap, MULTI-UE ----------------------------------------
 // A cell carries many UEs and a passive receiver hears all of them, so tracking ONE C-RNTI threw
@@ -44,7 +45,15 @@
 // land consecutively, and the run then collected roughly half the grants it should have. With a
 // table, a newcomer takes a FREE slot instead of the incumbent's, and eviction (when full) removes
 // the weakest-evidenced entry rather than the oldest arrival.
-#define RNTI_BOOTSTRAP_STALE_SLOTS 20000u  // ~10 s at this deployment's ~2000 slots/s
+#define RNTI_BOOTSTRAP_STALE_SLOTS 20000u  // ~10 s at this deployment's ~2000 slots/s (mu=1); other mu: see set_mu
+/* ISAC_SLOT_SCALE=1 (default off): the window is ~10 s at ANY numerology (10000 << mu slots; mu=1 gives the constant above). */
+static _Atomic uint32_t g_stale_slots = RNTI_BOOTSTRAP_STALE_SLOTS;
+void nr_pdcch_blind_rnti_bootstrap_set_mu(int mu)
+{
+  const char *e = getenv("ISAC_SLOT_SCALE");
+  if (e && atoi(e) == 1 && mu >= 0 && mu <= 4)
+    atomic_store_explicit(&g_stale_slots, 10000u << mu, memory_order_relaxed);
+}
 
 typedef struct {
   uint16_t rnti;
@@ -209,7 +218,7 @@ static bool boot_entry_live(const nr_boot_entry_t *e, uint32_t now)
     return false;  // pending, not confirmed
   }
   const uint32_t age = (now >= e->last_slot) ? (now - e->last_slot) : 0;
-  return age <= RNTI_BOOTSTRAP_STALE_SLOTS;
+  return age <= atomic_load_explicit(&g_stale_slots, memory_order_relaxed);
 }
 
 bool nr_pdcch_blind_rnti_bootstrap_recent(uint16_t rnti, uint32_t now_abs_slot, uint32_t max_age)
@@ -466,5 +475,6 @@ void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void)
 {
   pthread_mutex_lock(&g_boot_mu);
   memset(g_boot, 0, sizeof(g_boot));
+  atomic_store_explicit(&g_stale_slots, RNTI_BOOTSTRAP_STALE_SLOTS, memory_order_relaxed);
   pthread_mutex_unlock(&g_boot_mu);
 }
