@@ -9,12 +9,14 @@
 #include "nr_pdsch_gpu_demod.cuh"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "nr_pdsch_gpu_prio.cuh"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
+#include <ctime>
 #include <thread>
 #include <type_traits>
 
@@ -44,6 +46,7 @@ struct Ctx {
   cudaEvent_t fork, join; /* ISAC_PDSCH_GPU_EXACT_DEMOD_PROF=1: per-kernel GPU time */
   Shared *sh;  /* pinned host copy, filled by one DMA at the end */
   Shared *dsh; /* device copy the kernels use (host-pinned memory is uncached for the GPU) */
+  cudaStream_t s_rt, s2_rt, s_lo, s2_lo; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority stream pairs */
 };
 static Ctx g_ctx[CTX];
 /* The kernels' job parameter: the job up to evm[] (outputs only, never read by a kernel). The whole job exceeds the
@@ -53,16 +56,33 @@ struct JobK {
 };
 static inline const JobK &K(const nr_gpu_demod_job_t &j) { return *reinterpret_cast<const JobK *>(&j); }
 static std::atomic<unsigned> g_busy{0};
-static int g_ok, g_prof;
+static int g_ok, g_prof, g_prio;
 static std::atomic<unsigned long long> g_prof_ns[13], g_prof_n;
 
+/* DECTAIL: pool exhaustion is counted (DEMOD_POOL_WAIT lines, first 30 waits above 1 ms, and the waits/total in the first line). */
+static std::atomic<unsigned> g_pool_waits{0}, g_pool_log{0};
 static int acquire()
 {
+  struct timespec t0 = {};
+  bool waited = false;
   for (;;) {
     unsigned m = g_busy.load();
     for (int i = 0; i < CTX; i++)
-      if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i))
+      if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i)) {
+        if (waited) {
+          struct timespec t1;
+          clock_gettime(CLOCK_MONOTONIC, &t1);
+          const long us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000;
+          const unsigned n = ++g_pool_waits;
+          if (us > 1000 && g_pool_log.fetch_add(1) < 30)
+            fprintf(stderr, "DEMOD_POOL_WAIT us=%ld waits=%u\n", us, n);
+        }
         return i;
+      }
+    if (!waited) {
+      waited = true;
+      clock_gettime(CLOCK_MONOTONIC, &t0);
+    }
     std::this_thread::yield();
   }
 }
@@ -1253,7 +1273,12 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
         || cudaEventCreateWithFlags(&x.fork, cudaEventDisableTiming) != cudaSuccess
         || cudaEventCreateWithFlags(&x.join, cudaEventDisableTiming) != cudaSuccess)
       return -1;
+    x.s_rt = x.s_lo = x.s;
+    x.s2_rt = x.s2_lo = x.s2;
+    if (nr_pdsch_gpu_prio_on() && (!nr_pdsch_gpu_low_stream(&x.s_lo, lo, hi) || !nr_pdsch_gpu_low_stream(&x.s2_lo, lo, hi)))
+      return -1;
   }
+  g_prio = nr_pdsch_gpu_prio_on();
   g_prof = getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF") && atoi(getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF")) == 1;
   /* first launches before the RX fence (module load, kernel images) */
   nr_gpu_demod_job_t j = {};
@@ -1317,6 +1342,10 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     return -1;
   const int c = acquire();
   Ctx &x = g_ctx[c];
+  if (g_prio) { /* the context is ours and idle: this body's class picks the stream pair */
+    x.s = nr_pdsch_gpu_low ? x.s_lo : x.s_rt;
+    x.s2 = nr_pdsch_gpu_low ? x.s2_lo : x.s2_rt;
+  }
   const nr_gpu_demod_job_t jj = *j;
   const int gx = (int)((jj.ext + 127) / 128);
   if (g_prof) cudaEventRecord(x.ev[0], x.s);

@@ -43,8 +43,24 @@ static uint64_t now_ns(void)
  *   ISAC_* flags read: ISAC_PDSCH_GPU_EXACT_CHECK, ISAC_PDSCH_GPU_EXACT_FEP.
  *   Callers: openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.h:14, openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2116.
  */
+static void (*g_lowprio_fn)(int); /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: libpdsch_gpu.so nr_pdsch_gpu_set_lowprio */
+void nr_pdsch_gpu_exact_set_lowprio(int low)
+{
+  if (g_lowprio_fn)
+    g_lowprio_fn(low);
+}
+
 int nr_pdsch_gpu_exact_warmup(PHY_VARS_NR_UE *ue)
 {
+  const char *pr = getenv("ISAC_PDSCH_GPU_PRIO");
+  if (pr && atoi(pr) == 1) {
+    void *hp = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+    if (!hp)
+      hp = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+    g_lowprio_fn = hp ? (void (*)(int))dlsym(hp, "nr_pdsch_gpu_set_lowprio") : NULL;
+    LOG_A(PHY, "SENSING: ISAC_PDSCH_GPU_PRIO=1: probes and retry bodies on low-priority PDSCH GPU streams (%s)\n",
+          g_lowprio_fn ? "ok" : "module unavailable, off");
+  }
   if (ue)
     nr_pdsch_gpu_demod_warmup(&ue->frame_parms); /* GPU-DEMOD: independent knob, same module and warm-up point */
   nr_pdsch_gpu_ldpc_enabled(); /* GPUSHARE: GPU LDPC contexts and graphs before RX, not at the first TB (no-op when off) */

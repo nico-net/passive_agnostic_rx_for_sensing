@@ -279,7 +279,7 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
     const int16_t *grid=r->device_valid && r->device_grid?r->device_grid+(size_t)first*r->slot_stride:s.grid.p;
     if(!(r->device_valid && r->device_grid) && disc_copy(s.grid.p,r->grid_base+(size_t)first*r->slot_stride,n*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     if(disc_copy(s.meta.p,r->meta+first,n*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess || disc_zero(s.x.p,0,(size_t)n*nr*4)!=cudaSuccess) return -1;
-    normalize<<<(n*rb*14+127)/128,128,0,disc_stream()>>>(grid,s.meta.p,r->slot_stride,n,r->n_ant,rb,symbols,s.exclude.p,s.x.p,tiles);
+    normalize<<<(n*rb*14+127)/128,128,0,disc_stream()>>>(grid,s.meta.p,r->slot_stride,n,r->n_ant,rb,symbols,s.exclude.p,s.x.p,tiles,norm_rbfast());
     pool<<<(n*pooled+127)/128,128,0,disc_stream()>>>(s.x.p,n,rb,tiles);
     accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(s.x.p,s.meta.p,n,nr,pooled,s.sum.p,s.sq.p,s.s80.p,s.s64.p,s.total.p,s.totalq.p);
     if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) {reset();return -1;}

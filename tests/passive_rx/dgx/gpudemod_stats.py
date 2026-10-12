@@ -16,7 +16,7 @@ def pct(v, q):
 
 
 for path in sys.argv[1:]:
-    pdtim, demod, chest, pctl, ldpc = "", "", "", "", ""
+    pdtim, demod, chest, pctl, ldpc, cls = "", "", "", "", "", ""
     span, jobs = [], []
     crc = collections.Counter()
     tot = collections.Counter()
@@ -25,6 +25,8 @@ for path in sys.argv[1:]:
             line = ANSI.sub("", raw)
             if "SENSING: PDTIMPCT" in line:
                 pctl = line
+            elif "SENSING: PDTIMCLS" in line:
+                cls = line
             elif "SENSING: PDTIM" in line:
                 pdtim = line
             elif "GPU_EXACT_DEMOD calls" in line:
@@ -57,6 +59,8 @@ for path in sys.argv[1:]:
     print(f"slot span us, 1-job slots: n={len(one)} p50={pct(one, 0.5):.0f} p99={pct(one, 0.99):.0f}")
     if pctl:
         print("PDTIMPCT", pctl.strip().split("PDTIMPCT ")[-1])
+    if cls:
+        print("PDTIMCLS", cls.strip().split("PDTIMCLS ")[-1])
     for l in (demod, chest, ldpc):
         if l:
             print(l.strip().split("SENSING: ")[-1][:260])

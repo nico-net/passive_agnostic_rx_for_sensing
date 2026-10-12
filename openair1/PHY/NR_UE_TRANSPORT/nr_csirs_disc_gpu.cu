@@ -38,16 +38,22 @@ static cudaError_t disc_copy(void *dst,const void *src,size_t n,cudaMemcpyKind k
 /* disc_zero: asynchronous memset of n bytes on the discovery stream (no wait); the caller waits before reading the result. */
 static cudaError_t disc_zero(void *dst,int value,size_t n) {return cudaMemsetAsync(dst,value,n,disc_stream());}
 
+/* norm_rbfast: ISAC_CSIRS_DISC_NORM_COALESCE=1 (default off, DECTAIL): coalesced thread order of normalize(). */
+static int norm_rbfast(void) {static int v=-1;if(v<0){const char *e=getenv("ISAC_CSIRS_DISC_NORM_COALESCE");v=e && atoi(e)==1;}return v;}
 /* normalize: GPU kernel: per (slot, RB, symbol) thread, normalises the 12 RE powers against the mean of the lowest third (excluded REs skipped), in the same integer arithmetic as the CPU.
  *   Output x holds 4096 x power / reference (capped at 8192) per RE, and invalid slots are skipped. Launched by footprints(), normalize_host(), accumulate_host() and prepare_host().
  */
 __global__ static void normalize(const int16_t *grid,const nr_csirs_disc_slot_meta_t *meta,
                                  size_t stride,int nt,int na,int nb,uint16_t symbols,
-                                 const uint8_t *exclude,uint32_t *x,int tiles)
+                                 const uint8_t *exclude,uint32_t *x,int tiles,int rbfast)
 {
   int id=blockIdx.x*blockDim.x+threadIdx.x;
   if(id>=nt*nb*14) return;
-  int l=id%14,rb=(id/14)%nb,t=id/(14*nb),nk=12*nb,nr=14*nk+168*tiles;
+  /* DECTAIL: rbfast=1 makes adjacent threads adjacent RBs (contiguous 48-byte runs) instead of adjacent symbols (10 KB apart);
+   * every thread is independent and writes the same x index, so the result is bit-identical. */
+  int l,rb,t=id/(14*nb);
+  if(rbfast) {rb=id%nb;l=(id/nb)%14;} else {l=id%14;rb=(id/14)%nb;}
+  int nk=12*nb,nr=14*nk+168*tiles;
   if(!meta[t].valid) return;
   uint64_t power[12]={0},total=0;int count=0;
   for(int sc=0;sc<12;++sc) {
@@ -137,7 +143,7 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
     if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles);
+                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,norm_rbfast());
   if(cudaGetLastError()!=cudaSuccess) goto done;
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
@@ -163,7 +169,7 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
     if(cudaMalloc(&excl,14*12*r->n_rb)!=cudaSuccess || disc_copy(excl,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) goto done;
   }
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(grid,f.meta,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles);
+                                                cfg?cfg->excl_sym_mask_any:0,excl,f.x,tiles,norm_rbfast());
   if(cudaGetLastError()!=cudaSuccess) goto done;
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(f.x,r->capacity,r->n_rb,tiles);
   if(cudaGetLastError()!=cudaSuccess || disc_wait()!=cudaSuccess) goto done;
@@ -508,7 +514,7 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
      disc_zero(x.p,0,xb*sizeof(uint32_t))!=cudaSuccess) return -1;
   if(cfg && cfg->excl_re && disc_copy(excl.p,cfg->excl_re,14*12*r->n_rb,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
   normalize<<<(r->capacity*r->n_rb*14+127)/128,128,0,disc_stream()>>>(input,meta.p,r->slot_stride,r->capacity,r->n_ant,r->n_rb,
-      cfg?cfg->excl_sym_mask_any:0,cfg && cfg->excl_re?excl.p:nullptr,x.p,tiles);
+      cfg?cfg->excl_sym_mask_any:0,cfg && cfg->excl_re?excl.p:nullptr,x.p,tiles,norm_rbfast());
   pool<<<(r->capacity*168*tiles+127)/128,128,0,disc_stream()>>>(x.p,r->capacity,r->n_rb,tiles);
   accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(x.p,meta.p,r->capacity,nr,168*tiles,sum,sq,s80,s64,total,totalq);
   cudaError_t launch=cudaGetLastError(),complete=disc_wait();
@@ -632,7 +638,7 @@ static int prepare_host(int rb,int ant,int capacity,int fft,size_t stride)
   if(resident::detect(&ring,nullptr,out,128,false)<0) return -1;
   auto &h=resident::state;int tiles=(rb+15)/16,nr=14*12*rb+168*tiles;
   if(disc_zero(h.meta.p,0,sizeof(meta))!=cudaSuccess || disc_zero(h.x.p,0,nr*4)!=cudaSuccess) return -1;
-  normalize<<<(rb*14+127)/128,128,0,disc_stream()>>>(h.grid.p,h.meta.p,ring.slot_stride,1,ant,rb,0,nullptr,h.x.p,tiles);
+  normalize<<<(rb*14+127)/128,128,0,disc_stream()>>>(h.grid.p,h.meta.p,ring.slot_stride,1,ant,rb,0,nullptr,h.x.p,tiles,norm_rbfast());
   pool<<<(168*tiles+127)/128,128,0,disc_stream()>>>(h.x.p,1,rb,tiles);
   accumulate_kernel<<<(nr+127)/128,128,0,disc_stream()>>>(h.x.p,h.meta.p,1,nr,168*tiles,h.sum.p,h.sq.p,h.s80.p,h.s64.p,h.total.p,h.totalq.p);
   resident::reset();

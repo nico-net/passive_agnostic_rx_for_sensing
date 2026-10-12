@@ -75,6 +75,8 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "nr_gpu_fep_hygiene.h"
 #include "nr_pdsch_gpu_record.h"
 #include "nr_pdsch_gpu_exact.h"
+#include "nr_pdsch_gpu_demod_host.h"
+#include "nr_pdsch_real_first.h"
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
                              const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride);
 #include "nr_csirs_disc.h"
@@ -1213,6 +1215,22 @@ void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_tic
  *   Flags read: ISAC_PDSCH_INLINE_POOL, ISAC_PDSCHQ_SIGNAL_TIME, ISAC_PROBE_ALL, ISAC_PDSCH_K0_PROBE, ISAC_TD_GRANTWORK, ISAC_TD_GW_PROBE, ISAC_TD_CB0_ELIM, ISAC_RX_EQ_AB, ISAC_CHEST_OCC_AB, ISAC_LDPC_ITERS_AB, ISAC_GPU_SELFCHECK, ISAC_PDSCH_EVM_GRANT.
  *   Started by nr_pdsch_passive_queue_start() (one per consumer, priority 40 below RT). Exits when g_stop is set; uses g_lock and g_cv for the ring.
  */
+/* ISAC_PDSCHQ_REAL_FIRST=1 (GPUSCHED, default off): full decodes before older solver probes, see nr_pdsch_real_first.h. */
+static _Atomic uint64_t g_real_first; /* slots promoted */
+static nr_pdsch_passive_job_t g_rf_scratch; /* g_lock held */
+static bool rf_probe(const void *e) { return ((const nr_pdsch_passive_job_t *)e)->layout_probe != 0; }
+static long rf_slot(const void *e) { return ((const nr_pdsch_passive_job_t *)e)->absolute_slot; }
+static void real_first_locked(void)
+{
+  static int on = -1;
+  if (on < 0) on = getenv("ISAC_PDSCHQ_REAL_FIRST") && atoi(getenv("ISAC_PDSCHQ_REAL_FIRST")) ? 1 : 0;
+  if (!on || !nr_real_first_promote(g_ring, sizeof(g_ring[0]), g_ring_ns, g_tail, g_count, g_depth, rf_probe, rf_slot, &g_rf_scratch))
+    return;
+  if ((atomic_fetch_add_explicit(&g_real_first, 1, memory_order_relaxed) % 2000) == 0)
+    LOG_A(PHY, "SENSING: PDSCHQ_REAL_FIRST promoted=%llu (full-decode slots served before older probes)\n",
+          (unsigned long long)atomic_load(&g_real_first));
+}
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -1267,6 +1285,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       pthread_mutex_unlock(&g_lock);
       break;
     }
+    real_first_locked();
     job    = g_ring[g_tail];
     uint64_t enqueue_ns = g_ring_ns[g_tail];
     g_tail = (g_tail + 1) % g_depth;
@@ -1713,6 +1732,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const uint64_t dec_t0 = now_ns();
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+    { /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: back to real-time streams; a demod context still held for a deferred EVM of a
+       * decode that returned before its LDPC stage is freed now, not at this thread's next grant (8-context pool, 5+ consumers) */
+      static _Atomic int s_prio = -1;
+      if (s_prio < 0) s_prio = getenv("ISAC_PDSCH_GPU_PRIO") && atoi(getenv("ISAC_PDSCH_GPU_PRIO")) == 1;
+      if (s_prio) {
+        nr_pdsch_gpu_exact_set_lowprio(0);
+        if (nr_pdsch_gpu_demod_evm_deferred())
+          nr_pdsch_gpu_demod_evm_finish(0);
+      }
+    }
     if (!gpu_job) nr_pdsch_gpu_record_cpu(ue, &job, &dec, &rxdataF[0][0], rxdataF_sz);
     nr_dlsch_mrc_mode_override = -1;
     nr_dlsch_irc_override = -1;

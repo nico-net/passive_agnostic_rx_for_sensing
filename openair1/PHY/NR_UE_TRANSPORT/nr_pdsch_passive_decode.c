@@ -171,6 +171,73 @@ static inline void pdtim_hist(int k, uint64_t d)
   const uint64_t b = d / 10000;
   atomic_fetch_add_explicit(&g_pdtim_hist[k][b < PDTIM_HB ? b : PDTIM_HB - 1], 1, memory_order_relaxed);
 }
+/* ISAC_PDTIM_CLASS=1 (GPUSCHED, default off; needs ISAC_PDTIM_PCT): the per-body sum split by class -- real = first body of
+ * a full decode, retry = later bodies of the same nr_pdsch_passive_decode() call (recovery arms), probe = first-code-block
+ * solver probe -- with exact mean, p50/p90/p99, max and the bodies above 5 / 20 ms, printed as PDTIMCLS after PDTIMPCT. */
+#define PDTIM_NCLS 3
+static const char *const kPdtimCls[PDTIM_NCLS] = {"real", "retry", "probe"};
+static int g_pdtim_cls = -1;
+static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
+static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
+static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20[PDTIM_NCLS]; /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
+static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
+static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
+static _Atomic int g_pdtim_slow_left = 200;
+static bool pdtim_is_probe(void);
+static void pdtim_cls_note(uint64_t d)
+{
+  const int c = pdtim_is_probe() ? 2 : t_pdtim_body > 1 ? 1 : 0;
+  if (d > 20000000 && atomic_fetch_sub(&g_pdtim_slow_left, 1) > 0) { /* a body above 20 ms: when, and which stage */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    LOG_I(PHY, "SENSING: PDTIMSLOW t=%ld.%03ld class=%s us=%lu fep=%u/%u chest=%u/%u demod=%u/%u ldpc=%u/%u (wall/cpu us)\n", (long)ts.tv_sec,
+          ts.tv_nsec / 1000000, kPdtimCls[c], (unsigned long)(d / 1000), t_pdtim_stage_us[PDTIM_FEP], t_pdtim_stage_cpu_us[PDTIM_FEP],
+          t_pdtim_stage_us[PDTIM_CHEST], t_pdtim_stage_cpu_us[PDTIM_CHEST], t_pdtim_stage_us[PDTIM_DEMOD], t_pdtim_stage_cpu_us[PDTIM_DEMOD],
+          t_pdtim_stage_us[PDTIM_LDPC], t_pdtim_stage_cpu_us[PDTIM_LDPC]);
+  }
+  const uint64_t b = d / 10000;
+  atomic_fetch_add_explicit(&g_cls_hist[c][b < PDTIM_HB ? b : PDTIM_HB - 1], 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_ns[c], d, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_gt5[c], d > 5000000, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_gt20[c], d > 20000000, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_ns1[c], d > 1000000 ? d : 0, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_ns5[c], d > 5000000 ? d : 0, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_cls_ns20[c], d > 20000000 ? d : 0, memory_order_relaxed);
+  uint64_t mx = atomic_load_explicit(&g_cls_max[c], memory_order_relaxed);
+  while (d > mx && !atomic_compare_exchange_weak(&g_cls_max[c], &mx, d)) {}
+}
+/* pdtim_q3: p50/p90/p99 (bin centres, us) of a 10-us histogram; returns the count. */
+static uint64_t pdtim_q3(_Atomic uint32_t *h, int p[3])
+{
+  uint64_t n = 0, c = 0;
+  for (int b = 0; b < PDTIM_HB; b++)
+    n += h[b];
+  const double q[3] = {0.5, 0.9, 0.99};
+  int i = 0;
+  p[0] = p[1] = p[2] = 0;
+  for (int b = 0; b < PDTIM_HB && i < 3; b++) {
+    c += h[b];
+    while (i < 3 && n && (double)c >= q[i] * (double)n)
+      p[i++] = b * 10 + 5;
+  }
+  return n;
+}
+static void pdtim_cls_report(void)
+{
+  char rep[900];
+  int u = 0;
+  for (int k = 0; k < PDTIM_NCLS; k++) {
+    int p[3];
+    const uint64_t n = pdtim_q3(g_cls_hist[k], p);
+    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1f p50=%d p90=%d p99=%d max=%.1f gt5ms=%lu gt20ms=%lu share_gt1/5/20ms=%.2f/%.2f/%.2f] ", kPdtimCls[k],
+                  (unsigned long)n, n ? (double)atomic_load(&g_cls_ns[k]) / (double)n / 1000.0 : 0.0, p[0], p[1], p[2],
+                  (double)atomic_load(&g_cls_max[k]) / 1000.0, (unsigned long)atomic_load(&g_cls_gt5[k]),
+                  (unsigned long)atomic_load(&g_cls_gt20[k]), (double)atomic_load(&g_cls_ns1[k]) / (double)(atomic_load(&g_cls_ns[k]) + 1),
+                  (double)atomic_load(&g_cls_ns5[k]) / (double)(atomic_load(&g_cls_ns[k]) + 1),
+                  (double)atomic_load(&g_cls_ns20[k]) / (double)(atomic_load(&g_cls_ns[k]) + 1));
+  }
+  LOG_I(PHY, "SENSING: PDTIMCLS us %s\n", rep);
+}
 static void pdtim_pct_report(void)
 {
   char rep[400];
@@ -206,8 +273,13 @@ static inline void pdtim_add(int k, uint64_t t0)
     g_pdtim_pct = getenv("ISAC_PDTIM_PCT") && atoi(getenv("ISAC_PDTIM_PCT")) ? 1 : 0;
   if (g_pdtim_pct && k != PDTIM_ALLOC) {
     pdtim_hist(k, d);
-    if (k == PDTIM_FEP)
+    if (k == PDTIM_FEP) {
       t_pdtim_sum = t_pdtim_sum_n = 0; /* a decode that returned early left a partial sum */
+      memset(t_pdtim_stage_us, 0, sizeof(t_pdtim_stage_us));
+      memset(t_pdtim_stage_cpu_us, 0, sizeof(t_pdtim_stage_cpu_us));
+    }
+    t_pdtim_stage_us[k] = (uint32_t)(d / 1000);
+    t_pdtim_stage_cpu_us[k] = (uint32_t)((t_pdtim_cpu0 - c0) / 1000);
     t_pdtim_sum += d;
     t_pdtim_sum_n++;
   }
@@ -230,6 +302,10 @@ static void pdtim_report(void)
   g_pdtim_calls++;
   if (g_pdtim_pct > 0 && t_pdtim_sum_n) {
     pdtim_hist(PDTIM_N, t_pdtim_sum);
+    if (g_pdtim_cls < 0)
+      g_pdtim_cls = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
+    if (g_pdtim_cls)
+      pdtim_cls_note(t_pdtim_sum);
     t_pdtim_sum = t_pdtim_sum_n = 0;
   }
   if ((g_pdtim_calls % 200) != 0) {
@@ -237,6 +313,8 @@ static void pdtim_report(void)
   }
   if (g_pdtim_pct > 0)
     pdtim_pct_report();
+  if (g_pdtim_cls > 0)
+    pdtim_cls_report();
   char rep[720];
   int u = 0;
   for (int k = 0; k < PDTIM_N && u < (int)sizeof(rep) - 90; k++) {
@@ -1306,6 +1384,7 @@ static __thread uint16_t t_csi_prb_map[NR_PRB_SET_MAX]; /* CSI-FULL: virtual -> 
 static __thread bool t_probe_first_seg = false; /* decode segment 0 only; outcome in t_probe_seg_ok */
 static __thread bool t_probe_seg_ok = false;
 void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_ok = false; }
+static bool pdtim_is_probe(void) { return t_probe_first_seg; }
 static __thread bool t_ptrs_sweep_allow = true;
 void nr_pdsch_passive_ptrs_sweep_allow(bool on) { t_ptrs_sweep_allow = on; }
 bool nr_pdsch_passive_probe_outcome(void) { return t_probe_seg_ok; }
@@ -5036,6 +5115,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out)
 {
+  t_pdtim_body = 0; /* ISAC_PDTIM_CLASS: the next body is this call's first (real), later ones are retries */
   /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
   if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) /* ISAC_CSIRS_FULL_AB diagnostic */
     nr_csirs_full_ab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
@@ -5334,6 +5414,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                             nr_pdsch_passive_decode_result_t *out)
 {
+  t_pdtim_body++;
+  static int s_prio = -1; /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: probes and retry bodies on the low-priority GPU streams */
+  if (s_prio < 0)
+    s_prio = getenv("ISAC_PDSCH_GPU_PRIO") && atoi(getenv("ISAC_PDSCH_GPU_PRIO")) == 1;
+  if (s_prio)
+    nr_pdsch_gpu_exact_set_lowprio(t_probe_first_seg || t_pdtim_body > 1);
   if (pdcch_rm_mode() != 1 || !pdcch_rm_arm(dlsch_config, freq_alloc, grant))
     return passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   const nr_pdsch_passive_decode_status_t st = passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
