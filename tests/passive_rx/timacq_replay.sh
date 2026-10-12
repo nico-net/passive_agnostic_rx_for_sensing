@@ -28,6 +28,6 @@ echo "CAP=$CAP CAPC=$CAPC RXC=$RXC SSB=$SSB FO=$FO SPEED=$SPEED extra: $*" > arg
 exec "$O/heavy.sh" env ISAC_MLOCK=0 ISAC_RAW_IQ_DIRECTORY="$CAP" ISAC_RAW_IQ_SAMPLES="$CAP_SAMPLES" ISAC_RAW_IQ_FIRST_TICK="$CAP_TICK" \
   ISAC_RAW_IQ_CHANNELS=4 ISAC_RAW_IQ_RATE=122880000 ISAC_RAW_IQ_CENTER="$CAPC" ISAC_RAW_IQ_SPEED="$SPEED" ISAC_RAW_IQ_SHIFT=2 \
   LD_LIBRARY_PATH="$B:/usr/local/lib" ISAC_RX_MRC_MODE=1 ISAC_SCAN_ANT=1 "${base[@]}" ISAC_PDSCH_CORES=8,9,12,13,14 ISAC_MLOCK=0 "$@" \
-  timeout --signal=INT -k 60 3600 ${PREFIX:-} "$B/nr-uesoftmodem" -O "$R/replay.cfg" --passive-rx -r $RB --numerology 1 --band 78 \
+  timeout --signal=INT -k 60 ${TMO:-3600} ${PREFIX:-} "$B/nr-uesoftmodem" -O "$R/replay.cfg" --passive-rx -r $RB --numerology 1 --band 78 \
   -C "$RXC" --ssb "$SSB" --ue-rxgain 38 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --initial-fo "$FO" --ue-fo-compensation \
   --thread-pool -1 --time-sync-I 0.01 --ntn-initial-time-drift 0 -A 90 < /dev/null > "$R/run.log" 2>&1

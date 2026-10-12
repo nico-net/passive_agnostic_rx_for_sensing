@@ -4258,6 +4258,12 @@ gpu_llr_ready:;
     static int s_evmg = -1;
     if (s_evmg < 0) s_evmg = (getenv("ISAC_PDSCH_EVM_GRANT") || getenv("ISAC_PDSCH_SNR_GATE")) ? 1 : 0; /* the SNR gate needs the measurement */
     memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc));
+    { /* LLRZERO ISAC_MMSE2_DIAG=1 */
+      static int s_m2d = -1;
+      if (s_m2d < 0) s_m2d = getenv("ISAC_MMSE2_DIAG") ? atoi(getenv("ISAC_MMSE2_DIAG")) : 0;
+      memset(&nr_mmse2_diag, 0, sizeof(nr_mmse2_diag));
+      nr_mmse2_diag.on = s_m2d;
+    }
     static int s_evmp = -1; /* ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too */
     if (s_evmp < 0) s_evmp = getenv("ISAC_PDSCH_EVM_PROBES") ? 1 : 0;
     static int s_opr = -1; /* the own-PDCCH detector reads the per-RB error map */
@@ -4805,6 +4811,17 @@ gpu_llr_ready:;
         LOG_A(PHY, "SENSING: RMDCI rnti=0x%04x fs=%d.%d crc=%d mcs=%u ndi=%u rv=%u pid=%u nl=%u A=%u dci=%s\n", grant->rnti, proc->frame_rx,
               proc->nr_slot_rx, ldpc_ok ? 1 : 0, (unsigned)grant->mcs, (unsigned)grant->ndi, (unsigned)grant->rv, (unsigned)grant->harq_pid,
               (unsigned)cw->Nl, cw->TBS, bits);
+      }
+      if (nr_mmse2_diag.on && nr_mmse2_diag.n[0] > 0) {
+        const nr_mmse2_diag_t *d = &nr_mmse2_diag;
+        char b[512]; int o = 0;
+        for (int l = 0; l < d->nl && l < 4; l++) {
+          const double n = d->n[l] ? d->n[l] : 1;
+          o += snprintf(b + o, sizeof(b) - o, "%s[w=%.1f z=%.0f w0=%.1f z0=%.1f mag0=%.1f sing=%.1f sat=%.2f]", l ? " " : "", d->sumw[l] / n, d->sumabsz[l] / n,
+                        100.0 * d->w0[l] / n, 100.0 * d->z0[l] / n, 100.0 * d->mag0[l] / n, 100.0 * d->sing[l] / n, 100.0 * d->sat[l] / n);
+        }
+        LOG_A(PHY, "SENSING: MMSE2DIAG rnti=0x%04x fs=%d.%d crc=%d mcs=%u nl=%d Qm=%d shift=%d gain_k=%d layers: %s\n", grant->rnti, proc->frame_rx,
+              proc->nr_slot_rx, ldpc_ok ? 1 : 0, (unsigned)grant->mcs, d->nl, d->qm, d->shift, d->gain_k, b);
       }
       if (ldpc_ok)
         nr_pdsch_rm_genie_note(grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->TBS, g_harq.b, cw->ldpcBaseGraph, cw->qamModOrder,
