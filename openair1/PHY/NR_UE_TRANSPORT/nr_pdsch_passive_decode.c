@@ -74,6 +74,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_agnostic_v2.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
 #include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
+#include "nr_pdsch_rm_genie.h" // TIMRM bit-level genie (ISAC_PDSCH_RM_GENIE)
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
 #include "nr_csirs_blind_search.h" // nr_csirs_blind_re_energy / nr_csirs_blind_zp_grant_score
 #include "nr_csirs_blind_rt.h" // nr_csirs_blind_rt_zp_grant_evidence
@@ -4785,6 +4786,67 @@ gpu_llr_ready:;
         } else {
           dlsch_config->tbslbrm = tbs_now;
         }
+      }
+    }
+    /* TIMRM bit-level genie (ISAC_PDSCH_RM_GENIE=1, diagnostic): codeword-vs-LLR error map on passes, retransmission match on fails. */
+    if (nr_pdsch_rm_genie_on() && !t_quiet && !t_probe_first_seg && !t_last_hq_retx && cw->TBS <= 8424 && G > 0) {
+      if (grant->dci_len > 0 && grant->dci_len <= 128 && nr_pdsch_rm_genie_dci_budget()) {
+        char bits[130];
+        for (unsigned i = 0; i < grant->dci_len; i++) {
+          const unsigned b = grant->dci_len - 1 - i; /* MSB-first, field offsets as SOLVEDLAYOUT */
+          bits[i] = ((grant->dci_w[b >> 6] >> (b & 63)) & 1) ? '1' : '0';
+        }
+        bits[grant->dci_len] = 0;
+        LOG_A(PHY, "SENSING: RMDCI rnti=0x%04x fs=%d.%d crc=%d mcs=%u ndi=%u rv=%u pid=%u nl=%u A=%u dci=%s\n", grant->rnti, proc->frame_rx,
+              proc->nr_slot_rx, ldpc_ok ? 1 : 0, (unsigned)grant->mcs, (unsigned)grant->ndi, (unsigned)grant->rv, (unsigned)grant->harq_pid,
+              (unsigned)cw->Nl, cw->TBS, bits);
+      }
+      if (ldpc_ok)
+        nr_pdsch_rm_genie_note(grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->TBS, g_harq.b, cw->ldpcBaseGraph, cw->qamModOrder,
+                               cw->Nl, cw->rv, dlsch_config->tbslbrm, G, llr, (uint8_t)grant->mcs);
+      else {
+        nr_pdsch_rm_genie_fail(grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->TBS, cw->ldpcBaseGraph, cw->qamModOrder, cw->Nl,
+                               cw->rv, dlsch_config->tbslbrm, G, llr, (uint8_t)grant->mcs);
+      if (!ldpc_ok && nr_pdsch_rm_genie_level() >= 2) {
+        /* TBS sweep: the LLRs are fixed (E = G whatever the TBS), so any transport-block size and rv the transmitter could have used
+         * is a pure LDPC re-decode. A hit names the true (A, rv) of a grant whose DCI-derived (A, rv) fails. */
+        static _Atomic int s_sweeps;
+        if (atomic_load(&s_sweeps) < 120 && cw->TBS <= 4000) {
+          atomic_fetch_add(&s_sweeps, 1);
+          const uint32_t A0 = cw->TBS, R0 = cw->targetCodeRate;
+          const uint8_t rv0s = cw->rv, bg0 = cw->ldpcBaseGraph;
+          uint32_t seen[512]; int ns = 0, hit = 0;
+          for (int tb = 0; tb < 3 && !hit; tb++)
+            for (int m = 0; m < 28 && !hit; m++)
+              for (int nl = 1; nl <= 4 && !hit; nl++) {
+                const uint8_t Q = nr_get_Qm_dl(m, (uint8_t)tb);
+                const uint32_t R = nr_get_code_rate_dl(m, (uint8_t)tb);
+                if (Q == 0 || R == 0) continue;
+                const uint32_t A = nr_compute_tbs(Q, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs * dmrs_len,
+                                                  grant->nb_rb_oh, grant->tb_scaling, (uint8_t)nl);
+                if (A == 0 || A > 4000) continue;
+                int dup = 0;
+                for (int i = 0; i < ns; i++) dup |= (seen[i] == A * 16 + (uint32_t)nl);
+                if (dup || ns >= 512) continue;
+                seen[ns++] = A * 16 + (uint32_t)nl;
+                cw->TBS = A; cw->targetCodeRate = (uint16_t)R; cw->ldpcBaseGraph = get_BG(A, (uint16_t)R);
+                for (int r = 0; r < 4 && !hit; r++) {
+                  cw->rv = (uint8_t)r;
+                  if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
+                    hit = 1;
+                    int sf = -1, ss = -1;
+                    const int same = nr_pdsch_rm_genie_same_as(grant->rnti, A, g_harq.b, &sf, &ss);
+                    LOG_A(PHY, "SENSING: RMTBS rnti=0x%04x fs=%d.%d mcs=%u dci_rv=%u dci_A=%u nl=%u G=%u HIT A=%u (table %d mcs %d nl %d) rv=%d same_tb_as=%d.%d\n",
+                          grant->rnti, proc->frame_rx, proc->nr_slot_rx, (unsigned)grant->mcs, rv0s, A0, (unsigned)cw->Nl, G, A, tb, m, nl, r, sf, ss);
+                  }
+                }
+              }
+          if (!hit)
+            LOG_A(PHY, "SENSING: RMTBS rnti=0x%04x fs=%d.%d mcs=%u dci_rv=%u dci_A=%u nl=%u G=%u NOHIT over %d sizes\n", grant->rnti,
+                  proc->frame_rx, proc->nr_slot_rx, (unsigned)grant->mcs, rv0s, A0, (unsigned)cw->Nl, G, ns);
+          cw->TBS = A0; cw->targetCodeRate = (uint16_t)R0; cw->ldpcBaseGraph = bg0; cw->rv = rv0s;
+        }
+      }
       }
     }
     pdtim_add(PDTIM_LDPC, pdt_ldp);

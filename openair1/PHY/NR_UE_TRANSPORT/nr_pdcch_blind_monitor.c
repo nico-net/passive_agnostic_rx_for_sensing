@@ -4661,6 +4661,11 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   }
   out->rnti = raw->rnti;
   out->mismatched_bits = raw->mismatched_bits;
+  { /* TIMRM diagnostic (ISAC_PDSCH_RM_GENIE): hand the payload bits to the grant so RMDCI can print them; off = untouched */
+    static int s_keep = -1;
+    if (s_keep < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE"); s_keep = (e && atoi(e) > 0) ? 1 : 0; }
+    if (s_keep) { out->payload = raw->payload; out->dci_len = dci_length; }
+  }
   // ---- Step 3: field extraction, in TS 38.212 spec order (MSB-first, matches
   // nr_mac_common.c's nr_dci_size() accumulation order and nr_ue_procedures.c's readBits()).
   // NOTE: this does NOT re-check dci_length against nr_pdcch_blind_dci_size(bwp_size) -- it used to,
