@@ -175,6 +175,8 @@ nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_
   v.point_a_subcarrier = c->phy_ssb_start_subcarrier
                          - (c->sib1_k_ssb + 12 * c->sib1_offset_to_point_a) / sc15_per_sc;
   v.carrier_end_subcarrier = v.point_a_subcarrier + 12 * (c->sib1_offset_to_carrier + c->sib1_n_rb);
+  v.carrier_start_subcarrier = v.point_a_subcarrier + 12 * c->sib1_offset_to_carrier;
+  v.carrier_n_rb = c->sib1_n_rb;
   /* The started grid covers exactly [0, 12*N_RB_DL). The carrier is consistent with it when its
    * first subcarrier (Point A + offsetToCarrier) is the grid's first and its last is the grid's
    * last -- the receiver was tuned to the cell's carrier, not merely somewhere that contains it. */
@@ -271,6 +273,7 @@ void nr_passive_acq_note_carrier_from_rs(const char *evidence)
   v.bw_match = v.mu_match = v.grid_match = true;
   v.point_a_subcarrier = 0;
   v.carrier_end_subcarrier = 12 * g_carrier.phy_n_rb;
+  v.carrier_n_rb = g_carrier.phy_n_rb;
   v.derived_centre_hz = v.started_centre_hz = g_carrier.phy_dl_carrier_hz;
   g_snap.carrier_verified = 1;
   g_snap.carrier = v;

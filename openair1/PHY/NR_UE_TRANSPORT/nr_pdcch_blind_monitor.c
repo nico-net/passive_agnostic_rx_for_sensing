@@ -1094,7 +1094,7 @@ bool nr_pdcch_pointa_ref_enabled(void)
  *   nr_pdcch_blind_monitor_rt.c (DM-RS reference of the PDCCH-Config decode). */
 int nr_pdcch_crb0_grid_rb(void)
 {
-  if (!nr_pdcch_pointa_ref_enabled())
+  if (!nr_pdcch_pointa_ref_enabled() && !nr_carrier_from_sib1_enabled()) /* the carrier flag implies Point A as CRB 0 */
     return 0;
   static _Atomic int cached = 0;
   static _Atomic unsigned calls = 0;
@@ -1115,6 +1115,41 @@ int nr_pdcch_cover_start_rb(int crb0_grid_rb, int carrier_rb)
 {
   const int start = crb0_grid_rb >= 0 ? crb0_grid_rb : crb0_grid_rb + 6 * ((-crb0_grid_rb + 5) / 6);
   return start + 6 <= carrier_rb ? start : 0;
+}
+
+static int s_disc_pci; /* PHY cell ID, for the default shiftIndex of the interleaved cover */
+void nr_pdcch_discovered_note_pci(int pci) { s_disc_pci = pci; }
+
+/* nr_carrier_from_sib1_enabled: ISAC_CARRIER_FROM_SIB1=1 (CARRIERGEOM, default off); read per call (dwell start only). */
+bool nr_carrier_from_sib1_enabled(void)
+{
+  const char *e = getenv("ISAC_CARRIER_FROM_SIB1");
+  return e && strcmp(e, "1") == 0;
+}
+
+/* nr_carrier_geom: see header. shortcut: a carrier starting below the grid or ending above it is reported invalid
+ *   (legacy grid geometry); the in-process fix for that case is a retune (ISAC_ACQ_RETUNE), not a mapping. */
+nr_carrier_geom_t nr_carrier_geom(int point_a_sc, int carrier_start_sc, int carrier_n_rb, int grid_n_rb)
+{
+  nr_carrier_geom_t g = {0};
+  if (point_a_sc % 12 || carrier_start_sc < 0 || carrier_start_sc % 12 || carrier_n_rb < 6 || grid_n_rb < 1)
+    return g;
+  g.crb0_rb = point_a_sc / 12;
+  g.start_rb = carrier_start_sc / 12;
+  g.n_rb = carrier_n_rb;
+  g.valid = g.start_rb + g.n_rb <= grid_n_rb;
+  return g;
+}
+
+nr_carrier_geom_t nr_carrier_geom_now(int grid_n_rb)
+{
+  nr_carrier_geom_t none = {0};
+  if (!nr_carrier_from_sib1_enabled())
+    return none;
+  const nr_passive_acq_snapshot_t s = nr_passive_acq_snapshot();
+  if (!s.carrier_verified || !s.carrier.mu_match)
+    return none;
+  return nr_carrier_geom(s.carrier.point_a_subcarrier, s.carrier.carrier_start_subcarrier, s.carrier.carrier_n_rb, grid_n_rb);
 }
 
 /* nr_pdcch_discovered_cover_banked: true when a VERIFIED bank entry has this nID, first symbol and duration and its
@@ -1161,6 +1196,20 @@ static void discovered_cover_queue(void)
       seen = raw[j].nid == raw[i].nid && raw[j].sym == raw[i].sym && raw[j].dur == raw[i].dur;
     if (!seen)
       s_add_disc.line[n++] = (disc_coreset_t){.nid = raw[i].nid, .sym = raw[i].sym, .dur = raw[i].dur};
+  }
+  /* ISAC_CARRIER_FROM_SIB1: second cover per distinct nID = the whole carrier INTERLEAVED (bundle 6, R resolved in
+   * nr_pdcch_discovered_snapshot(), shift = PCI (sh -1 = resolve there), the TS 38.331 default shiftIndex). ng = 0 && L != 0 marks it.
+   * HYPOTHESIS: on 508 the GPU stage found bundle-6 CORESETs (R 2/3/6) whose window-truncated ranges cannot be
+   * de-interleaved, and 162 PRB = 27 groups only divides by R = 3. */
+  if (nr_carrier_from_sib1_enabled()) {
+    const int ncov = n;
+    for (int i = 0; i < ncov && n < max; ++i)
+      s_add_disc.line[n++] = (disc_coreset_t){.nid = s_add_disc.line[i].nid, .sym = s_add_disc.line[i].sym,
+                                              .dur = s_add_disc.line[i].dur, .L = 6, .R = 3, .sh = -1};
+    for (int i = 0; i < nraw && n < max; ++i)
+      s_add_disc.line[n++] = raw[i];
+    s_add_disc.n = n;
+    return;
   }
   for (int i = 0; i < nraw && n < max; ++i)
     s_add_disc.line[n++] = raw[i];
@@ -1248,16 +1297,37 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     const disc_coreset_t *d = &dd;
     const bool cover = nr_pdcch_discovered_cover_enabled();
     /* ISAC_PDCCH_POINTA_REF: the cover starts at CRB 0 (Point A), not at grid RB 0; flag off -> 0 (legacy). */
-    const int cover_rb = cover ? nr_pdcch_cover_start_rb(nr_pdcch_crb0_grid_rb(), carrier_rb) : 0;
+    /* ISAC_CARRIER_FROM_SIB1: the SIB1 carrier [geom.start_rb, +n_rb) inside the grid replaces the grid as the BWP and
+     * as the extent of the cover; geom invalid (flag off, unchecked, carrier not inside the grid) = legacy grid. */
+    const nr_carrier_geom_t geom = nr_carrier_geom_now(carrier_rb);
+    const int lo = geom.valid ? geom.start_rb : 0, hi = geom.valid ? geom.start_rb + geom.n_rb : carrier_rb;
+    int cover_rb = cover ? nr_pdcch_cover_start_rb(geom.valid ? geom.crb0_rb : nr_pdcch_crb0_grid_rb(), hi) : 0;
+    if (geom.valid && cover_rb < lo)
+      cover_rb += 6 * ((lo - cover_rb + 5) / 6); /* CRB-0 grid of 6 RBs, first group inside the carrier */
+    if (geom.valid && !dd.L && dd.ng > 0 && dd.rb >= lo && dd.rb + dd.ng * 6 > hi)
+      dd.ng = (hi - dd.rb) / 6; /* published hull wider than the carrier: noise beyond it, clip (non-interleaved only) */
     if (cover && dd.ng == 0) {
       dd.rb = cover_rb;
-      dd.ng = (carrier_rb - cover_rb) / 6; /* cover entry: whole carrier on the CRB-0 grid (see discovered_cover_queue()) */
-    } else if (cover && ((!dd.L && dd.rb == cover_rb && dd.ng == (carrier_rb - cover_rb) / 6) /* this queue's cover already tried it */
+      dd.ng = (hi - cover_rb) / 6; /* cover entry: whole carrier on the CRB-0 grid (see discovered_cover_queue()) */
+      if (dd.L) { /* carrier-wide interleaved cover: first R in {3, 2, 6} that divides the REG count */
+        if (dd.sh < 0) dd.sh = s_disc_pci;
+        const int R0[3] = {3, 2, 6};
+        dd.R = 0;
+        for (int k = 0; k < 3 && !dd.R; ++k)
+          if (dd.ng > 0 && !((dd.ng * 6 * dd.dur) % (dd.L * R0[k])) && !(dd.L % dd.dur) && !(dd.dur < 3 && dd.L == 3))
+            dd.R = R0[k];
+        /* grid == carrier (415, retuned 923): the interleaved cover is a dwell the cell does not need; skip it */
+        if (!geom.valid || (lo == 0 && hi == carrier_rb) || !dd.R || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng)) {
+          ++s_add_disc.next;
+          continue;
+        }
+      }
+    } else if (cover && ((!dd.L && dd.rb == cover_rb && dd.ng == (hi - cover_rb) / 6) /* this queue's cover already tried it */
                          || nr_pdcch_discovered_cover_banked(dd.nid, dd.sym, dd.dur, dd.rb, dd.ng))) {
       ++s_add_disc.next;
       continue;
     }
-    if (d->rb + d->ng * 6 > carrier_rb) {
+    if (d->rb < lo || d->rb + d->ng * 6 > hi) {
       LOG_W(PHY, "SENSING: discovered CORESET %d/%d nid=%d rejected (outside carrier)\n",
             s_add_disc.next + 1, s_add_disc.n, d->nid);
       ++s_add_disc.next;
@@ -1274,22 +1344,22 @@ bool nr_pdcch_discovered_snapshot(nr_pdcch_blind_monitor_cfg_t *cfg, uint64_t *t
     s_add_disc.cfg = g_cfg;
     nr_pdcch_blind_monitor_cfg_t *c = &s_add_disc.cfg;
     /* grid_rb is absolute in the carrier grid, not relative to CSS0's BWP. */
-    c->bwp_size = carrier_rb;
-    c->bwp_start = 0;
+    c->bwp_size = geom.valid ? geom.n_rb : carrier_rb;
+    c->bwp_start = lo;
     c->autodiscover = 0;
     c->discovered_coreset = true;
     c->coreset_type = 0;
     c->dci10_ss_type = NR_BLIND_SS_UE_SPECIFIC;
     c->dl_full_auto = 1;
     c->dci10_scan = 1;
-    c->dci10_n_rb_riv = carrier_rb;
-    c->dci10_rb_offset = 0;
+    c->dci10_n_rb_riv = c->bwp_size;
+    c->dci10_rb_offset = lo;
     c->dci10_class_mask = 1u << NR_BLIND_RNTI_CLASS_C;
     c->dci10_mux_pattern = c->dci10_sib1 = 0;
     c->rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;
     c->rnti_max = NR_PDCCH_BLIND_RNTI_MAX_DEFAULT;
     c->dci_length_override = 0;
-    c->coreset_rb_offset = d->rb;
+    c->coreset_rb_offset = d->rb - lo; /* relative to the BWP start (= grid RB 0 when the flag is off) */
     c->coreset_freq_domain = d->ng;
     c->coreset_duration = d->dur;
     c->coreset_reg_bundle_size = d->L;

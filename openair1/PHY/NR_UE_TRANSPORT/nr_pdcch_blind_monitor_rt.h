@@ -326,6 +326,17 @@ bool nr_pdcch_pointa_ref_enabled(void);
 /* Grid RB of CRB 0 (Point A, SIB1 + MIB k_SSB, nr_passive_acq_verify_carrier()); 0 when the flag is off, the carrier
  * is not yet checked, or Point A is not on an RB boundary of the grid. Cached, refreshed every 256 calls. */
 int nr_pdcch_crb0_grid_rb(void);
+/* ISAC_CARRIER_FROM_SIB1=1 (CARRIERGEOM, default off): the dedicated-CORESET dwell/bank use the cell's SIB1 carrier
+ * (first grid RB, size) instead of the started grid (BWP start 0, N_RB_DL): cover width, DCI 1_0/1_1 FDRA sizing,
+ * PDSCH RB origin / DM-RS reference, plus a carrier-wide interleaved cover hypothesis. Implies ISAC_PDCCH_POINTA_REF=1. */
+bool nr_carrier_from_sib1_enabled(void);
+void nr_pdcch_discovered_note_pci(int pci); /* caller: run_occasion_one() before nr_pdcch_discovered_snapshot() */
+typedef struct { bool valid; int crb0_rb, start_rb, n_rb; } nr_carrier_geom_t; /* grid RB of CRB 0, of the carrier's first RB, carrier size */
+/* Pure: carrier first subcarrier / size (SIB1) against a grid of grid_n_rb RBs. valid only when the carrier is on an RB
+ * boundary and lies fully inside the grid (a carrier sticking out needs a retune; see ISAC_ACQ_RETUNE). */
+nr_carrier_geom_t nr_carrier_geom(int point_a_sc, int carrier_start_sc, int carrier_n_rb, int grid_n_rb);
+/* Same from the acquisition snapshot; valid = false when the flag is off, SIB1 carrier unchecked or numerology differs. */
+nr_carrier_geom_t nr_carrier_geom_now(int grid_n_rb);
 /* First grid RB of the ACQ-FIX cover dwell: CRB 0 when inside the grid, else the first CRB multiple of 6 inside it;
  * crb0_grid_rb 0 (flag off) -> 0 (legacy). Pure. */
 int nr_pdcch_cover_start_rb(int crb0_grid_rb, int carrier_rb);

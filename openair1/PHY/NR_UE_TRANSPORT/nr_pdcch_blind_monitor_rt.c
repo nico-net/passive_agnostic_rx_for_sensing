@@ -4859,6 +4859,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   if (additional) {
     nr_pdcch_blind_phase2_lock();
     nr_pdcch_blind_monitor_discovered_poll();
+    nr_pdcch_discovered_note_pci(ue->frame_parms.Nid_cell);
     discovered = nr_pdcch_discovered_snapshot(&discovered_cfg, &discovered_token, ue->frame_parms.N_RB_DL);
     nr_pdcch_blind_phase2_unlock();
   }
@@ -5223,7 +5224,8 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
      *
      * Only in full_auto, and only where the operator configured nothing. */
     if (cfg->dl_full_auto && ul_opts.bwp_size == 0) {
-      ul_opts.bwp_start = common.ul_bwp_start;
+      /* ISAC_CARRIER_FROM_SIB1: SIB1's UL BWP start is a CRB; the grid RB is CRB + (grid RB of CRB 0). */
+      ul_opts.bwp_start = common.ul_bwp_start + (nr_carrier_from_sib1_enabled() ? nr_pdcch_crb0_grid_rb() : 0);
       ul_opts.bwp_size  = common.ul_bwp_size;
       /* tda_count == 0 is NOT "unknown": nr_pdcch_blind_dci01_size() reads it as the TS 38.214
        * Table 6.1.2.1.1-2 default 16-entry table, i.e. a 4-bit field and a complete interpretation.

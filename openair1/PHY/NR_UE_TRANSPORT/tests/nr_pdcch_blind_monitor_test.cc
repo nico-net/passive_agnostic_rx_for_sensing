@@ -67,6 +67,7 @@ void crcTableInit(void);
 #include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdsch_prb_set.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
+#include "nr_passive_acq_state.h"
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_pdcch_coreset_bank.h"
 #include <unistd.h>
@@ -4895,6 +4896,75 @@ TEST(PdcchPointA, CoverStartFollowsCrb0) {
   EXPECT_EQ(nr_pdcch_cover_start_rb(-5, 217), 1);   // Point A below the grid: first CRB multiple of 6 (CRB 6)
   EXPECT_EQ(nr_pdcch_cover_start_rb(-12, 217), 0);  // CRB 12 at grid RB 0
   EXPECT_EQ(nr_pdcch_cover_start_rb(214, 217), 0);  // no full group above Point A: legacy
+}
+
+// CARRIERGEOM (ISAC_CARRIER_FROM_SIB1): carrier vs grid mapping, pure.
+TEST(CarrierGeom, CarrierInsideGrid) {
+  auto g = nr_carrier_geom(324, 324, 162, 217);  // WindTre 508 on -C 3590190000 --ssb 517: Point A at grid RB 27
+  EXPECT_TRUE(g.valid); EXPECT_EQ(g.start_rb, 27); EXPECT_EQ(g.crb0_rb, 27); EXPECT_EQ(g.n_rb, 162);
+  g = nr_carrier_geom(0, 0, 217, 217);         // grid == carrier (415, retuned 923): identity
+  EXPECT_TRUE(g.valid); EXPECT_EQ(g.start_rb, 0); EXPECT_EQ(g.n_rb, 217);
+  g = nr_carrier_geom(0, 12 * 5, 100, 273);    // offsetToCarrier 5 included in the start
+  EXPECT_TRUE(g.valid); EXPECT_EQ(g.start_rb, 5);
+}
+TEST(CarrierGeom, CarrierNotContainedOrMisaligned) {
+  EXPECT_FALSE(nr_carrier_geom(972, 972, 162, 217).valid);  // 508 on the old grid: ends at RB 243 > 217
+  EXPECT_FALSE(nr_carrier_geom(936, 936, 217, 217).valid);  // 923 on -C 3731.91: Point A at RB 78, carrier sticks out
+  EXPECT_FALSE(nr_carrier_geom(-12, -12, 100, 217).valid);  // starts below the grid
+  EXPECT_FALSE(nr_carrier_geom(318, 318, 162, 217).valid);  // half an RB off the grid
+}
+
+class DiscoveredCarrier : public DiscoveredCover {
+ protected:
+  void SetUp() override {
+    DiscoveredCover::SetUp();
+    setenv("ISAC_CARRIER_FROM_SIB1", "1", 1);
+    setenv("ISAC_PDCCH_DISC_COVER", "1", 1);
+    nr_passive_acq_reset();
+    nr_passive_acq_set_phy_geometry(217, 1, 517, 3590190000.0);
+    nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2); // Point A at grid subcarrier 517 - 193 = 324
+  }
+  void TearDown() override {
+    unsetenv("ISAC_CARRIER_FROM_SIB1"); nr_passive_acq_reset();
+    DiscoveredCover::TearDown();
+  }
+};
+
+TEST_F(DiscoveredCarrier, DwellUsesSib1CarrierAndAddsInterleavedCover) {
+  nr_pdcch_discovered_note_pci(508);
+  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.bwp_start, 27); EXPECT_EQ(c.bwp_size, 162); EXPECT_EQ(c.dci10_n_rb_riv, 162); EXPECT_EQ(c.dci10_rb_offset, 27);
+  EXPECT_EQ(c.coreset_rb_offset, 0); EXPECT_EQ(c.coreset_freq_domain, 27); EXPECT_EQ(c.coreset_reg_bundle_size, 0);
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 100 + i); // rejected: next is the interleaved cover
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_freq_domain, 27); EXPECT_EQ(c.coreset_reg_bundle_size, 6); EXPECT_EQ(c.coreset_interleaver_size, 3);
+  EXPECT_EQ(c.coreset_shift_index, 508); EXPECT_EQ(c.bwp_size, 162);
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 5000 + i);
+  // the published line (clipped to the carrier: 33 + 30 groups would end at RB 213 > 189) is the last dwell
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.coreset_rb_offset, 6); EXPECT_EQ(c.coreset_freq_domain, 26);
+}
+
+TEST_F(DiscoveredCarrier, GridEqualsCarrierIsIdentityNoInterleavedCover) {
+  nr_passive_acq_reset();
+  nr_passive_acq_set_phy_geometry(162, 1, 193, 3590010000.0);
+  nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2); // Point A at grid subcarrier 0
+  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=0 groups=27 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 162));
+  EXPECT_EQ(c.bwp_start, 0); EXPECT_EQ(c.bwp_size, 162); EXPECT_EQ(c.coreset_freq_domain, 27);
+  for (int i = 0; i < 4000; ++i) nr_pdcch_discovered_step(token, 100 + i);
+  EXPECT_FALSE(nr_pdcch_discovered_snapshot(&c, &token, 162)); // no interleaved dwell; the published line = the cover
+}
+
+TEST_F(DiscoveredCarrier, FlagOffKeepsGridGeometry) {
+  unsetenv("ISAC_CARRIER_FROM_SIB1");
+  lines("CORESET nid=36098 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0\n");
+  nr_pdcch_blind_monitor_cfg_t c{}; uint64_t token;
+  ASSERT_TRUE(nr_pdcch_discovered_snapshot(&c, &token, 217));
+  EXPECT_EQ(c.bwp_start, 0); EXPECT_EQ(c.bwp_size, 217); EXPECT_EQ(c.coreset_rb_offset, 0); EXPECT_EQ(c.coreset_freq_domain, 36); // legacy grid cover (POINTA_REF off)
 }
 
 // ACQ-ROBUST: ISAC_PDCCH_DWELL_ADAPTIVE and ISAC_PDCCH_NO_FAKE_FOOTPRINT.
