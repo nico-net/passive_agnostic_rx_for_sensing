@@ -30,6 +30,7 @@
 #include "PHY/NR_REFSIG/sss_nr.h"
 #include "PHY/NR_UE_TRANSPORT/cic_filter_nr.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pss_decim.h"
+#include <string.h>
 
 // #define DBG_PSS_NR
 
@@ -209,10 +210,23 @@ static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_inde
   }
   free(xd);
   const bool fold = p->abs_valid && K > 1;
+  /* ISAC_PSS_PEAK_RATIO (default 5 = 7 dB): lowering it passes weaker PSS candidates to SSS and the PBCH CRC24, which decide anyway */
+  static double s_ratio = -1;
+  if (s_ratio < 0) {
+    const char *e = getenv("ISAC_PSS_PEAK_RATIO");
+    s_ratio = e && atof(e) >= 1 ? atof(e) : 5;
+  }
+  const double ratio_min = s_ratio;
   nr_pss_info_t info = {0};
   int count = 0;
   for (int s = pss_index_start; s < pss_index_end; s++) {
     float *pr = prof + (size_t)s * npos;
+    /* The fold assumes the cell's 20 ms grid is fixed in the capture's sample clock. A reference/clock offset of e ppm moves
+     * the peak by e*dt per attempt (1.4 ppm, 0.6 s: ~100 samples) and smears the fold below the single-capture ratio
+     * (WEAKLIVE 2026-10-12), so the unfolded profile is kept and the better peak/avg of the two decides. */
+    float *raw = NULL;
+    if (fold && (raw = malloc(sizeof(float) * (npos ? npos : 1))))
+      memcpy(raw, pr, sizeof(float) * npos);
     if (fold)
       nr_pss_fold_update(&s_pss_fold, s, (p->abs_start + s0) / D, pr, npos, 2 * npos, K, kc * 65536 + N);
     int mbest = 0;
@@ -222,7 +236,27 @@ static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_inde
       if (pr[m] > pr[mbest])
         mbest = m;
     }
-    const double avg = sum / (npos ? npos : 1), peak = pr[mbest];
+    double avg = sum / (npos ? npos : 1), peak = pr[mbest];
+    if (raw) {
+      int rbest = 0;
+      double rsum = 0;
+      for (int m = 0; m < npos; m++) {
+        rsum += raw[m];
+        if (raw[m] > raw[rbest])
+          rbest = m;
+      }
+      const double ravg = rsum / (npos ? npos : 1), rpeak = raw[rbest];
+      LOG_I(PHY, "SENSING: PSS_DECIM nid2=%d folded peak/avg=%.1f dB raw peak/avg=%.1f dB\n", s,
+            10 * log10((peak + 1e-30) / (avg + 1e-30)), 10 * log10((rpeak + 1e-30) / (ravg + 1e-30)));
+      if (rpeak * avg > peak * ravg) { /* raw ratio better */
+        mbest = rbest;
+        peak = rpeak;
+        avg = ravg;
+      }
+      free(raw);
+    } else {
+      LOG_I(PHY, "SENSING: PSS_DECIM nid2=%d peak/avg=%.1f dB\n", s, 10 * log10((peak + 1e-30) / (avg + 1e-30)));
+    }
     /* full-rate float refinement around the decimated peak, 4-sample grid as the stock search */
     int pos = 0;
     double best = -1;
@@ -243,7 +277,7 @@ static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_inde
                                   .pos = pos,
                                   .peak = (int)lround(10 * log10(peak + 1e-30)),
                                   .avg = (int)lround(10 * log10(avg + 1e-30)),
-                                  .success = !((p->target_Nid_cell == -1 && peak < 5 * avg) || pos < p->nb_prefix_samples)};
+                                  .success = !((p->target_Nid_cell == -1 && peak < ratio_min * avg) || pos < p->nb_prefix_samples)};
     if (p->fo_flag && r->success) { /* same estimator as the stock path, float, summed over the branches */
       double xr = 0, xi = 0;
       for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
