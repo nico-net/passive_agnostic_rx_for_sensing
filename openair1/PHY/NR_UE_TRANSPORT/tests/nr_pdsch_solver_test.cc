@@ -559,3 +559,106 @@ TEST(PdschSolver, FullTableReusesOnlyIdleEntries)
   unsetenv("ISAC_PDSCH_SOLVER_FAIRSHARE");
   nr_pdsch_solver_reset();
 }
+
+/* DCIRV ISAC_DCI11_RV_CONSISTENCY=1: layout 10 reads the NDI/RV/pid fields one bit off layout 11 (the true one). The gNB sends only
+ * new transmissions (rv 0, NDI toggling each pid cycle), so the shifted reading shows rv != 0 on about half of the grants. */
+namespace {
+// MSB-first 16-bit word (bit 0 is the TDA selector of tda_fn): ndi, rv (2), pid (4); layout 10 reads every field one bit early,
+// i.e. rv = [true rv LSB, pid MSB] as on the OTA TIM cell.
+bool hq_fn(void *, uint16_t layout, nr_dci_bits_t p, uint8_t *ndi, uint8_t *rv, uint8_t *pid)
+{
+  const int o = layout == 10 ? 1 : 0;
+  auto fld = [&](int pos, int w) { return (unsigned)(p.w[0] >> (16 - pos - w)) & ((1u << w) - 1); };
+  *ndi = (uint8_t)fld(o, 1);
+  *rv = (uint8_t)fld(o + 1, 2);
+  *pid = (uint8_t)fld(o + 3, 4);
+  return true;
+}
+nr_dci_bits_t Dci(int g, uint64_t tda) { return {{tda | (uint64_t)((g / 16) & 1) << 15 | (uint64_t)(g % 16) << 9, 0, 0}}; }
+void NoteDcis(uint16_t rnti, int from, int to)
+{
+  for (int g = from; g < to; g++) nr_pdsch_solver_note_dci(rnti, Dci(g, 0), (uint64_t)g + 1);
+}
+void RvcSetup(bool on)
+{
+  on ? setenv("ISAC_DCI11_RV_CONSISTENCY", "1", 1) : unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  nr_pdsch_solver_set_hq_fn(hq_fn, nullptr);
+}
+Cell RvcCell()
+{
+  Cell c;
+  c.truth = {10, 11};
+  for (int i = 20; i < 60; i++) c.wrong.push_back((uint16_t)i);
+  return c;
+}
+} // namespace
+
+TEST(PdschSolverRvc, BinomialBounds)
+{
+  EXPECT_FALSE(nr_pdsch_solver_hq_refuted(10, 0));
+  EXPECT_FALSE(nr_pdsch_solver_hq_refuted(3, 3)); // too few grants to refute anything
+  EXPECT_TRUE(nr_pdsch_solver_hq_refuted(48, 20));
+  EXPECT_FALSE(nr_pdsch_solver_hq_refuted(48, 8));
+  EXPECT_FALSE(nr_pdsch_solver_hq_verified(8, 0));
+  EXPECT_TRUE(nr_pdsch_solver_hq_verified(12, 0));
+  EXPECT_FALSE(nr_pdsch_solver_hq_verified(48, 20));
+}
+
+TEST(PdschSolverRvc, ShiftedLayoutLosesTheRepresentative)
+{
+  for (int on = 0; on < 2; on++) {
+    RvcSetup(on);
+    std::mt19937 rng(3);
+    const Cell c = RvcCell();
+    NoteDcis(0x5264, 0, 64);
+    ASSERT_GT(SolveGrants(0x5264, c, 0, 16, 400, rng), 0);
+    EXPECT_EQ(nr_pdsch_solver_rep(0x5264), on ? 11 : 10) << "flag " << on;
+  }
+  unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  nr_pdsch_solver_reset();
+}
+
+TEST(PdschSolverRvc, SolvedRntiIsReselectedByLaterHarqEvidenceAndRescueNotes)
+{
+  RvcSetup(true);
+  std::mt19937 rng(4);
+  const Cell c = RvcCell();
+  ASSERT_GT(SolveGrants(0x5264, c, 0, 16, 400, rng), 0);
+  ASSERT_EQ(nr_pdsch_solver_rep(0x5264), 10) << "no HARQ evidence yet: lowest id";
+  NoteDcis(0x5264, 0, 12); // too few to refute, so only the rescue notes may move it
+  EXPECT_EQ(nr_pdsch_solver_rep(0x5264), 10);
+  nr_pdsch_solver_note_rv_mismatch(0x5264);
+  nr_pdsch_solver_note_rv_mismatch(0x5264);
+  EXPECT_EQ(nr_pdsch_solver_rep(0x5264), 10);
+  nr_pdsch_solver_note_rv_mismatch(0x5264);
+  EXPECT_EQ(nr_pdsch_solver_rep(0x5264), 11) << "3 RV rescues re-select";
+  // a second RNTI: enough evidence alone moves it
+  ASSERT_GT(SolveGrants(0x5265, c, 0, 16, 400, rng), 0);
+  ASSERT_EQ(nr_pdsch_solver_rep(0x5265), 10);
+  NoteDcis(0x5265, 0, 64);
+  EXPECT_EQ(nr_pdsch_solver_rep(0x5265), 11);
+  unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  nr_pdsch_solver_reset();
+}
+
+TEST(PdschSolverRvc, McsZeroSolutionSeedsTheCellOnlyOnceHarqVerified)
+{
+  setenv("ISAC_PDSCH_SOLVER_REUSE", "1", 1);
+  for (int on = 0; on < 2; on++) {
+    RvcSetup(on);
+    std::mt19937 rng(5);
+    Cell c;
+    c.add_pos = 2;
+    c.truth = {11};
+    for (int i = 20; i < 60; i++) c.wrong.push_back((uint16_t)i);
+    ASSERT_GT(SolveGrants(0x00a1, c, 0, 16, 400, rng), 0);
+    EXPECT_EQ(FirstAddPos(0x00b2, c, rng), on ? 1 : 2) << "MCS-0-only evidence" << (on ? ": no seeding" : "");
+    NoteDcis(0x00a1, 0, 64);
+    EXPECT_EQ(FirstAddPos(0x00b3, c, rng), 2) << "HARQ readings of the representative verify it";
+  }
+  unsetenv("ISAC_DCI11_RV_CONSISTENCY");
+  unsetenv("ISAC_PDSCH_SOLVER_REUSE");
+  nr_pdsch_solver_reset();
+}

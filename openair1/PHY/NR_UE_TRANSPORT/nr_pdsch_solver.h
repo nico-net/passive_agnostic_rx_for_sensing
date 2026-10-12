@@ -133,6 +133,26 @@ int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool conten
  * ISAC_PDSCH_SOLVER_PRIOR_IDS=1 tries the CRC-proven solutions' layout dims with every own blind identity of an unsolved
  * RNTI (in the proven identity form) on each grant. ISAC_PDSCH_SOLVER_DMRS_PRIO=1 (nr_pdcch_blind_monitor_rt.c): under
  * probe contention, grants on which no reading carries the RNTI's own DM-RS are probed 1 time in 8. */
+
+/* DCIRV (2026-10-12, ISAC_DCI11_RV_CONSISTENCY=1, default off). Layouts a few bits apart all read MCS 0 when those bits are zero,
+ * so an RNTI whose CRC passes were all MCS 0 can solve to a layout whose NDI/RV/HARQ fields sit one bit off (OTA TIM PCI 923:
+ * 255 + 473 RVRESCUE lines, all dci_rv=1 ok_rv=0). The caller reads (NDI, RV, HARQ pid) of a layout from a payload; the solver
+ * keeps each RNTI's last 64 DCI payloads and scores a layout by TS 38.214 HARQ rules per pid: a new transmission (NDI toggled)
+ * has rv 0, a retransmission follows rv 0,2,3,1 (<= 1 step missed). A layout is refuted when its violations exceed a binomial
+ * bound (P(X >= bad | n, 0.15) < 1e-3) and VERIFIED when they refute a 0.5 violation rate. The representative is the best
+ * unrefuted consistent layout; a solution seeds the cell/other RNTIs only after a CRC pass at MCS > 0 or HARQ verification;
+ * >= 3 notes of an RV rescue (CRC only with another rv than the DCI's) re-select the RNTI's layout, or reopen its search. */
+typedef bool (*nr_pdsch_solver_hq_fn)(void *ctx, uint16_t layout, nr_dci_bits_t payload, uint8_t *ndi, uint8_t *rv, uint8_t *pid);
+void nr_pdsch_solver_set_hq_fn(nr_pdsch_solver_hq_fn fn, void *ctx);
+bool nr_pdsch_solver_rvc_on(void);
+/** One DCI 1_1 payload of this C-RNTI at signal slot abs_slot (same slot twice is ignored). Call before any gate. */
+void nr_pdsch_solver_note_dci(uint16_t rnti, nr_dci_bits_t payload, uint64_t abs_slot);
+/** The full decode of `rnti` passed only with an rv other than its DCI's (RVRESCUE). */
+void nr_pdsch_solver_note_rv_mismatch(uint16_t rnti);
+/** The binomial bounds (exposed for tests): n evaluable grants, bad violations. */
+bool nr_pdsch_solver_hq_refuted(int n, int bad);
+bool nr_pdsch_solver_hq_verified(int n, int bad);
+
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
 

@@ -4714,6 +4714,7 @@ gpu_llr_ready:;
           if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
             ldpc_ok = true;
             atomic_fetch_add(&g_rv_ok[rvs[i]][grant->mcs & 31], 1);
+            nr_pdsch_solver_note_rv_mismatch(grant->rnti); /* DCIRV: >= 3 re-select the RNTI's DCI layout */
             if (!t_quiet)
               LOG_A(PHY, "SENSING: RVRESCUE rnti=0x%04x fs=%d.%d probe=%d mcs=%u nl=%u dci_rv=%u ok_rv=%u ndi=%u tbs=%u\n", grant->rnti,
                     proc->frame_rx, proc->nr_slot_rx, (int)t_probe_first_seg, grant->mcs, cw->Nl, rv0, rvs[i], grant->ndi, cw->TBS);

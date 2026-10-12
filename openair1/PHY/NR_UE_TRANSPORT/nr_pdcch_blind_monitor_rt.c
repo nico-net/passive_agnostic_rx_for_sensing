@@ -1348,6 +1348,20 @@ static int solver_tda_of(void *ctx, uint16_t layout, nr_dci_bits_t payload)
   return (int)nr_dci_bits_field(&payload, r->off[layout].total, r->off[layout].tda, r->off[layout].tda_bits);
 }
 
+/* solver_hq_of: solver callback (DCIRV): the NDI, RV and HARQ pid (4 bits behind the RV) a DCI payload reads under one live layout. */
+static bool solver_hq_of(void *ctx, uint16_t layout, nr_dci_bits_t payload, uint8_t *ndi, uint8_t *rv, uint8_t *pid)
+{
+  (void)ctx;
+  const nr_dci11_resolver_t *r = g_dci11_resolver;
+  if (r == NULL || layout >= __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE)) return false;
+  const nr_dci11_offsets_t *o = &r->off[layout];
+  if (o->rv < 1 || o->rv + 6 > o->total) return false;
+  *ndi = (uint8_t)nr_dci_bits_field(&payload, o->total, o->rv - 1, 1);
+  *rv = (uint8_t)nr_dci_bits_field(&payload, o->total, o->rv, 2);
+  *pid = (uint8_t)nr_dci_bits_field(&payload, o->total, o->rv + 2, 4);
+  return true;
+}
+
 /* dci11_layout_parse: parses one raw DCI 1_1 with one live layout exactly as the stage-2 hand-over does; false when the layout cannot represent or parse the DCI.
  *   Builds the extract options from the layout's field widths, checks the DCI length, then extracts the fields into *parsed.
  *   Callers: nr_pdcch_dci11_stage2_candidates() and the PDSCH solver planning path in run_occasion_one().
@@ -9164,6 +9178,11 @@ constdiag_done:;
      * decoded at all while it searches (the hopeless Technique D jobs were what filled the queue). ---- */
     if (nr_pdsch_solver_enabled() && !is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_C && cand_task[ti].dl_auto
         && g_dci11_state == 1 && g_dci11_resolver != NULL && cand_task[ti].bwp_entry <= 0) {
+      if (nr_pdsch_solver_rvc_on()) { /* DCIRV: every DCI of the RNTI, before the rv/defer gates drop retransmissions */
+        static _Atomic int s_hq_set;
+        if (!atomic_exchange(&s_hq_set, 1)) nr_pdsch_solver_set_hq_fn(solver_hq_of, NULL);
+        nr_pdsch_solver_note_dci(out.rnti, cand_task[ti].dl_raw.payload, source_absolute_slot >= 0 ? (uint64_t)source_absolute_slot + 1 : 0);
+      }
       if (!defer || !want_decode || out.rv != 0 || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
         nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_GATE);
         continue;
