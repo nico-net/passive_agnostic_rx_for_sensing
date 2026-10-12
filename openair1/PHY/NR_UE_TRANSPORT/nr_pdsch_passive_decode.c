@@ -180,7 +180,7 @@ static int g_pdtim_cls = -1;
 static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
 static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
-static __thread uint32_t t_pdtim_stage_us[PDTIM_N]; /* this body's stage times (PDTIMSLOW) */
+static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
 static _Atomic int g_pdtim_slow_left = 200;
 static bool pdtim_is_probe(void);
 static void pdtim_cls_note(uint64_t d)
@@ -189,9 +189,10 @@ static void pdtim_cls_note(uint64_t d)
   if (d > 20000000 && atomic_fetch_sub(&g_pdtim_slow_left, 1) > 0) { /* a body above 20 ms: when, and which stage */
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    LOG_I(PHY, "SENSING: PDTIMSLOW t=%ld.%03ld class=%s us=%lu fep=%u chest=%u demod=%u ldpc=%u\n", (long)ts.tv_sec, ts.tv_nsec / 1000000,
-          kPdtimCls[c], (unsigned long)(d / 1000), t_pdtim_stage_us[PDTIM_FEP], t_pdtim_stage_us[PDTIM_CHEST],
-          t_pdtim_stage_us[PDTIM_DEMOD], t_pdtim_stage_us[PDTIM_LDPC]);
+    LOG_I(PHY, "SENSING: PDTIMSLOW t=%ld.%03ld class=%s us=%lu fep=%u/%u chest=%u/%u demod=%u/%u ldpc=%u/%u (wall/cpu us)\n", (long)ts.tv_sec,
+          ts.tv_nsec / 1000000, kPdtimCls[c], (unsigned long)(d / 1000), t_pdtim_stage_us[PDTIM_FEP], t_pdtim_stage_cpu_us[PDTIM_FEP],
+          t_pdtim_stage_us[PDTIM_CHEST], t_pdtim_stage_cpu_us[PDTIM_CHEST], t_pdtim_stage_us[PDTIM_DEMOD], t_pdtim_stage_cpu_us[PDTIM_DEMOD],
+          t_pdtim_stage_us[PDTIM_LDPC], t_pdtim_stage_cpu_us[PDTIM_LDPC]);
   }
   const uint64_t b = d / 10000;
   atomic_fetch_add_explicit(&g_cls_hist[c][b < PDTIM_HB ? b : PDTIM_HB - 1], 1, memory_order_relaxed);
@@ -269,8 +270,10 @@ static inline void pdtim_add(int k, uint64_t t0)
     if (k == PDTIM_FEP) {
       t_pdtim_sum = t_pdtim_sum_n = 0; /* a decode that returned early left a partial sum */
       memset(t_pdtim_stage_us, 0, sizeof(t_pdtim_stage_us));
+      memset(t_pdtim_stage_cpu_us, 0, sizeof(t_pdtim_stage_cpu_us));
     }
     t_pdtim_stage_us[k] = (uint32_t)(d / 1000);
+    t_pdtim_stage_cpu_us[k] = (uint32_t)((t_pdtim_cpu0 - c0) / 1000);
     t_pdtim_sum += d;
     t_pdtim_sum_n++;
   }
