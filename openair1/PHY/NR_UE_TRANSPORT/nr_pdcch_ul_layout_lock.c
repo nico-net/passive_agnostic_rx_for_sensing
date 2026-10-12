@@ -335,6 +335,26 @@ static bool env_on(const char *name)
   const char *s = getenv(name);
   return s && !strcmp(s, "1");
 }
+/* ISAC_UL_LOCK_SPRT state (caller holds mu). X[h] of one PUSCH slot = sum over that slot probes of clip(zn_h). */
+#define SPRT_ALPHA 1e-3      /* P(lock | no DM-RS at any hypothesis) <= this: derivation in ULLOCKSPEED-20261012.md */
+#define SPRT_PAIR_ALPHA 1e-2 /* the leader must beat each of the SPRT_CMP best competitors at this level (shared among them) */
+#define SPRT_RHO 30.0        /* mixture prior variance (only the log term depends on it) */
+#define SPRT_CLIP 50.0       /* numerical guard only: a strong wide grant must keep its edge PRBs discriminating */
+#define SPRT_HIST 4096       /* slots of evidence kept for the pairwise test */
+#define SPRT_CMP 8
+static double g_S[NR_UL_LAYOUT_MAX_HYP], g_W[NR_UL_LAYOUT_MAX_HYP];
+static float g_acc[NR_UL_LAYOUT_MAX_HYP];
+static float *g_hist;
+static uint32_t g_hist_n, g_sprt_slots;
+static int g_acc_probes;
+static long g_acc_target = -1;
+/* slot-level disjointness: PUSCH grants of different UEs in one slot do not overlap in frequency under the true BWP reading */
+#define OV_GRANTS 24
+static struct { long target; int n; uint16_t rnti[OV_GRANTS]; uint16_t r0[OV_GRANTS][NR_UL_LAYOUT_MAX_HYP], r1[OV_GRANTS][NR_UL_LAYOUT_MAX_HYP]; } g_ov;
+static uint32_t g_ov_pairs[NR_UL_LAYOUT_MAX_HYP], g_ov_hit[NR_UL_LAYOUT_MAX_HYP];
+static const float WV_THR[4] = {6.f, 10.f, 15.f, 25.f};
+static int g_wv[4][NR_UL_LAYOUT_MAX_HYP][2]; /* winner votes per threshold {2,3,4,5}: [+ (argmax), - (argmin)] */
+bool nr_ul_layout_sprt_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_SPRT"); }
 bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_SIB1_FIRST"); }
 bool nr_ul_layout_crc_guard_enabled(void) { return nr_ul_layout_crc_first_enabled() && env_on("ISAC_UL_LOCK_CRC_GUARD"); }
 bool nr_ul_layout_crc_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_CRC_FIRST"); }
@@ -364,6 +384,17 @@ static void reset_locked(void)
   g_npend = 0;
   g_first_slot = g_lock_slot = g_trial_slot = -1;
   g_have_cell = false;
+  memset(g_S, 0, sizeof(g_S));
+  memset(g_W, 0, sizeof(g_W));
+  memset(g_acc, 0, sizeof(g_acc));
+  g_hist_n = 0;
+  g_acc_probes = 0;
+  g_acc_target = -1;
+  g_sprt_slots = 0;
+  memset(&g_ov, 0, sizeof(g_ov));
+  memset(g_wv, 0, sizeof(g_wv));
+  memset(g_ov_pairs, 0, sizeof(g_ov_pairs));
+  memset(g_ov_hit, 0, sizeof(g_ov_hit));
   g_gen++;
 }
 
@@ -778,11 +809,34 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
     const nr_ul_layout_prefix_t *p0 = &ls->pre[0];
     const uint32_t idx = fld(&payload, len, 1 + p0->bwp_ind + p0->riv, p0->tda);
     const uint8_t k2 = idx < 16 && ls->k2row[idx] ? ls->k2row[idx] : ls->k2row[0];
+    if (nr_ul_layout_sprt_enabled()) { /* disjointness of simultaneous grants, per BWP hypothesis (no DM-RS needed) */
+      const long tg = abs_slot + k2;
+      if (g_ov.target != tg || g_ov.n == OV_GRANTS) { g_ov.target = tg; g_ov.n = 0; }
+      uint16_t a[NR_UL_LAYOUT_MAX_HYP], b[NR_UL_LAYOUT_MAX_HYP];
+      for (int h = 0; h < g_nhyp; h++) {
+        uint16_t x = 0, y = 0;
+        if (hyp_range(ls, &payload, h, &x, &y) && y) { a[h] = x; b[h] = (uint16_t)(x + y); } else a[h] = b[h] = 0;
+      }
+      bool dup = false;
+      for (int j = 0; j < g_ov.n; j++) dup |= g_ov.rnti[j] == rnti;
+      if (!dup) {
+        for (int j = 0; j < g_ov.n; j++)
+          for (int h = 0; h < g_nhyp; h++) {
+            if (!b[h] || !g_ov.r1[j][h]) continue;
+            g_ov_pairs[h]++;
+            g_ov_hit[h] += a[h] < g_ov.r1[j][h] && g_ov.r0[j][h] < b[h];
+          }
+        const int j = g_ov.n++;
+        g_ov.rnti[j] = rnti;
+        for (int h = 0; h < g_nhyp; h++) { g_ov.r0[j][h] = a[h]; g_ov.r1[j][h] = b[h]; }
+      }
+    }
     int testable = 0;
     uint16_t r0 = 0, nr = 0;
+    const int cap_rb = nr_ul_layout_sprt_enabled() ? 275 : PROBE_MAX_RB; /* SPRT weighs wide grants by their RE count */
     for (int h = 0; h < g_nhyp; h++) {
       uint16_t a, b;
-      if (hyp_range(ls, &payload, h, &a, &b) && b <= PROBE_MAX_RB) { if (!testable) { r0 = a; nr = b; } testable++; }
+      if (hyp_range(ls, &payload, h, &a, &b) && b <= cap_rb && a + b <= 275) { if (!testable) { r0 = a; nr = b; } testable++; }
     }
     if (k2 && testable) {
       memset(out, 0, sizeof(*out));
@@ -834,9 +888,10 @@ int nr_ul_layout_probe_plan(const nr_pdcch_blind_ul_result_t *g, uint16_t *prb0,
     for (int l = 0; l < g_nlen; l++) {
       if (g_len[l].len != g->dci_length || !g_len[l].fitted) continue;
       n = g_nhyp < cap ? g_nhyp : cap;
+      const int cap_rb = nr_ul_layout_sprt_enabled() ? 275 : PROBE_MAX_RB;
       for (int h = 0; h < n; h++) {
         uint16_t a = 0, b = 0;
-        if (!hyp_range(&g_len[l], &g->raw_payload, h, &a, &b) || b > PROBE_MAX_RB) b = 0;
+        if (!hyp_range(&g_len[l], &g->raw_payload, h, &a, &b) || b > cap_rb || a + b > 275) b = 0;
         prb0[h] = a;
         nprb[h] = b;
       }
@@ -847,6 +902,155 @@ int nr_ul_layout_probe_plan(const nr_pdcch_blind_ul_result_t *g, uint16_t *prb0,
   }
   pthread_mutex_unlock(&mu);
   return n;
+}
+
+
+/* ------------------------------------------------------------------ ISAC_UL_LOCK_SPRT=1 (ULLOCKSPEED)
+ * Each probe gives, for every BWP hypothesis h, zn_h = (SNR_est(true DM-RS) - SNR_est(wrong-slot DM-RS)) / sigma0 on the PRB
+ * range h predicts for this grant. With no DM-RS on the range, the true and the control sequence are exchangeable: zn_h is
+ * symmetric about 0 (any grant width, no 6-dB threshold, no noise model). One PUSCH slot's probes are summed per hypothesis,
+ * X_h = sum_i clip(zn_h,i): the sign swap (true <-> control sequence of the slot) flips all X_h of the slot together,
+ * so X_h is conditionally symmetric given the past. Then M_t = sqrt(rho/(W+rho)) exp(S^2 / (2 (W+rho))), S = sum X, W = sum X^2,
+ * is a nonnegative supermartingale (E exp(l X - l^2 X^2 / 2) = E cosh(lX) exp(-l^2 X^2/2) <= 1), and Ville's inequality gives
+ *   P(exists t: S_t^2 >= (W_t+rho) (2 ln(1/alpha) + ln((W_t+rho)/rho))) <= alpha        (any stopping rule, any signal-free X).
+ * No variance, no Gaussian assumption. alpha_h is split over the H hypotheses (Bonferroni; the SIB1 UL BWP takes half of it
+ * when ISAC_UL_LOCK_SIB1_FIRST is on). A leader that clears its bound must also beat each of the SPRT_CMP best competitors in
+ * the paired statistic X_a - X_b (the same bound, so twins and neighbours whose ranges share most PRBs do not win by overlap). */
+static double sprt_bound2(double W, double alpha)
+{
+  const double v = W + SPRT_RHO;
+  return v * (2.0 * log(1.0 / alpha) + log(v / SPRT_RHO));
+}
+
+static double sprt_alpha_h(int h)
+{
+  int sib = -1;
+  if (nr_ul_layout_sib1_first_enabled() && g_cell.sib1_ul_size > 0)
+    for (int i = 0; i < g_nhyp; i++)
+      if (g_hyp[i].n == g_cell.sib1_ul_size && g_hyp[i].start == g_cell.sib1_ul_start) sib = i;
+  if (sib < 0 || g_nhyp < 2) return SPRT_ALPHA / (g_nhyp > 0 ? g_nhyp : 1);
+  return h == sib ? SPRT_ALPHA / 2 : SPRT_ALPHA / (2.0 * (g_nhyp - 1));
+}
+
+static void sprt_try_lock_locked(long now)
+{
+  if (g_locked_hyp >= 0 || g_nhyp < 1 || !g_hist) return;
+  int a = -1;
+  for (int h = 0; h < g_nhyp; h++) if (g_S[h] > 0 && (a < 0 || g_S[h] > g_S[a])) a = h;
+  if (a < 0 || g_S[a] * g_S[a] < sprt_bound2(g_W[a], sprt_alpha_h(a))) return;
+  int cmp[SPRT_CMP], nc = 0;
+  for (int h = 0; h < g_nhyp; h++) {
+    if (h == a) continue;
+    int j = nc < SPRT_CMP ? nc++ : (g_S[h] > g_S[cmp[SPRT_CMP - 1]] ? SPRT_CMP - 1 : -1);
+    if (j < 0) continue;
+    for (; j > 0 && g_S[h] > g_S[cmp[j - 1]]; j--) cmp[j] = cmp[j - 1];
+    cmp[j] = h;
+  }
+  const uint32_t n = g_hist_n < SPRT_HIST ? g_hist_n : SPRT_HIST;
+  double pair_z = 1e9;
+  for (int c = 0; c < nc; c++) {
+    double d = 0, wd = 0;
+    for (uint32_t i = 0; i < n; i++) {
+      const float *row = g_hist + (size_t)i * NR_UL_LAYOUT_MAX_HYP;
+      const double x = (double)row[a] - (double)row[cmp[c]];
+      d += x;
+      wd += x * x;
+    }
+    if (!(d > 0 && d * d >= sprt_bound2(wd, SPRT_PAIR_ALPHA / SPRT_CMP))) return;
+    if (d / sqrt(wd + SPRT_RHO) < pair_z) pair_z = d / sqrt(wd + SPRT_RHO);
+  }
+  g_locked_hyp = a;
+  g_lock_slot = now;
+  const int spf = g_cell.slots_per_frame ? g_cell.slots_per_frame : 20;
+  char rest[256];
+  int u = 0;
+  for (int c = 0; c < nc && u < (int)sizeof(rest) - 40; c++)
+    u += snprintf(rest + u, sizeof(rest) - u, " %u@%u:%.1f", g_hyp[cmp[c]].n, g_hyp[cmp[c]].start, g_S[cmp[c]]);
+  if (!u) snprintf(rest, sizeof(rest), " -");
+  const int b = nc ? cmp[0] : -1;
+  LOG_A(PHY, "SENSING: ULLAYOUT BWP_LOCK bwp=%u@%u votes=%.0f runner=%u@%u:%.0f rntis=0 others[%s ] ctl_votes=%u"
+             " discarded=0 tied=0 probes=%u hyps=%d addpos_votes=%u/%u/%u first_abs=%ld lock_abs=%ld t_conv_ms=%.0f"
+             " confidence=%.2f mode=sprt S=%.1f W=%.1f z=%.2f pair_z=%.2f slots=%u\n",
+        g_hyp[a].n, g_hyp[a].start, g_S[a], b >= 0 ? g_hyp[b].n : 0, b >= 0 ? g_hyp[b].start : 0, b >= 0 ? g_S[b] : 0.0, rest,
+        g_ctl_votes, g_probes_fed, g_nhyp, g_addpos[0], g_addpos[1], g_addpos[2], g_first_slot, now,
+        10.0 * (double)(now - g_first_slot) / spf, pair_z / (pair_z + 3.0), g_S[a], g_W[a], g_S[a] / sqrt(g_W[a] + SPRT_RHO),
+        pair_z, g_sprt_slots);
+  for (int l = 0; l < g_nlen; l++) lock_length_locked(&g_len[l], now);
+}
+
+static void sprt_close_slot_locked(void)
+{
+  if (g_acc_probes == 0) return;
+  if (!g_hist) g_hist = calloc((size_t)SPRT_HIST * NR_UL_LAYOUT_MAX_HYP, sizeof(float));
+  float *row = g_hist ? g_hist + (size_t)(g_hist_n % SPRT_HIST) * NR_UL_LAYOUT_MAX_HYP : NULL;
+  for (int h = 0; h < NR_UL_LAYOUT_MAX_HYP; h++) {
+    const double X = g_acc[h];
+    g_S[h] += X;
+    g_W[h] += X * X;
+    if (row) row[h] = g_acc[h];
+    g_acc[h] = 0.f;
+  }
+  g_hist_n++;
+  g_sprt_slots++;
+  g_acc_probes = 0;
+  sprt_try_lock_locked(g_acc_target);
+}
+
+static void sprt_feed_locked(const nr_pdcch_blind_ul_result_t *g, int li, long target, const nr_ul_layout_probe_res_t *r)
+{
+  if (g_acc_probes > 0 && target != g_acc_target) sprt_close_slot_locked();
+  if (g_locked_hyp >= 0) return;
+  g_acc_target = target;
+  len_state_t *ls = &g_len[li];
+  const int n = r->n < g_nhyp ? r->n : g_nhyp;
+  int k = -1;
+  for (int h = 0; h < n; h++) {
+    if (r->snr_db[h] <= -90.f) continue;
+    if (k < 0 || r->snr_db[h] > r->snr_db[k]) k = h;
+    uint16_t a = 0, b = 0;
+    if (!hyp_range(ls, &g->raw_payload, h, &a, &b) || b == 0 || !isfinite(r->zn[h])) continue;
+    double z = r->zn[h];
+    z = z > SPRT_CLIP ? SPRT_CLIP : (z < -SPRT_CLIP ? -SPRT_CLIP : z);
+    g_acc[h] += (float)z; /* weight 1: per-PRB SNR of a power-limited UE falls with L, so sqrt(L) would overweight wide grants */
+  }
+  g_acc_probes++;
+  { /* winner votes: argmax of zn (+) and argmin (-) are exchangeable under the null */
+    int mx = -1, mn = -1;
+    for (int h = 0; h < n; h++) {
+      if (r->snr_db[h] <= -90.f) continue;
+      if (mx < 0 || r->zn[h] > r->zn[mx]) mx = h;
+      if (mn < 0 || r->zn[h] < r->zn[mn]) mn = h;
+    }
+    for (int t = 0; t < 4 && mx >= 0; t++) {
+      if (r->zn[mx] >= WV_THR[t]) g_wv[t][mx][0]++;
+      if (r->zn[mn] <= -WV_THR[t]) g_wv[t][mn][1]++;
+    }
+  }
+  if (env_on("ISAC_UL_SPRT_DUMP")) { /* diagnostic: zn of three fixed hypotheses and of the best one */
+    char t[200]; int u = 0, bz = -1;
+    for (int h = 0; h < n; h++) if (r->snr_db[h] > -90.f && (bz < 0 || r->zn[h] > r->zn[bz])) bz = h;
+    static const uint16_t pn[3] = {216, 216, 213}, ps[3] = {1, 0, 2};
+    for (int q = 0; q < 3; q++)
+      for (int h = 0; h < n; h++)
+        if (g_hyp[h].n == pn[q] && g_hyp[h].start == ps[q]) {
+          uint16_t a = 0, b = 0;
+          hyp_range(ls, &g->raw_payload, h, &a, &b);
+          u += snprintf(t + u, sizeof(t) - u, " %u@%u[%u+%u]=%.1f", pn[q], ps[q], a, b, r->zn[h]);
+        }
+    LOG_A(PHY, "SENSING: SPRT_DUMP tgt=%ld rnti=0x%04x%s best=%u@%u:%.1f snr=%.1f\n", target, g->rnti, u ? t : "", bz >= 0 ? g_hyp[bz].n : 0,
+          bz >= 0 ? g_hyp[bz].start : 0, bz >= 0 ? r->zn[bz] : 0.f, k >= 0 ? r->snr_db[k] : -99.f);
+  }
+  if (k < 0) return;
+  /* strong detections still feed the CDM-group / DM-RS-position / waveform evidence of the tail choice */
+  if (r->ctl_db >= VOTE_DB) { g_ctl_votes++; ls->gctl++; }
+  if (r->snr_db[k] >= VOTE_DB) {
+    ls->gold++;
+    if (r->set[k] >= 0 && r->set[k] < 3) g_addpos[r->set[k]]++;
+    if (!isnan(r->comb1_db)) {
+      if (r->comb1_db > -1.5f) ls->cdm1++;
+      else if (r->comb1_db < -3.f) ls->cdm2++;
+    }
+  }
 }
 
 void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target, const nr_ul_layout_probe_res_t *r)
@@ -879,6 +1083,11 @@ void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target, c
               b2 >= 0 ? g_hyp[b2].n : 0, b2 >= 0 ? g_hyp[b2].start : 0, b2 >= 0 ? r->snr_db[b2] : -99.f, r->ctl_db,
               r->comb1_db);
     }
+  }
+  if (r->zn_valid && nr_ul_layout_sprt_enabled()) {
+    sprt_feed_locked(g, li, target, r);
+    pthread_mutex_unlock(&mu);
+    return;
   }
   if (g_npend > 0 && (target != g_pend[0].target || g_npend == PENDING_MAX)) finalize_pending_locked();
   if (g_locked_hyp < 0) {
@@ -1094,10 +1303,63 @@ void nr_ul_layout_stats_dump(void)
     w += snprintf(ls + w, sizeof(ls) - w, " len%u[dcis=%u fit=%d lock=%d probes=%u gold=%u cdm1=%u cdm2=%u trials=%u crc_ok=%u crc_locks=%u susp=%u dec=%u evlock=%u]",
                   g_len[l].len, g_len[l].count, g_len[l].fitted, g_len[l].locked, g_len[l].probes, g_len[l].gold,
                   g_len[l].cdm1, g_len[l].cdm2, g_len[l].trials, g_len[l].crc_ok, g_len[l].crc_locks, g_len[l].ev_susp, g_len[l].ev_dec, g_len[l].ev_lock);
+  char wvs[600] = "";
+  if (nr_ul_layout_sprt_enabled()) {
+    int o = 0;
+    for (int t = 0; t < 4; t++) {
+      int used[5], nu = 0;
+      o += snprintf(wvs + o, sizeof(wvs) - o, " wv%.0f[", WV_THR[t]);
+      for (int k = 0; k < 4; k++) {
+        int bh = -1;
+        for (int h = 0; h < g_nhyp; h++) {
+          bool u = false;
+          for (int q = 0; q < nu; q++) u |= used[q] == h;
+          if (!u && (bh < 0 || g_wv[t][h][0] - g_wv[t][h][1] > g_wv[t][bh][0] - g_wv[t][bh][1])) bh = h;
+        }
+        if (bh < 0) break;
+        used[nu++] = bh;
+        o += snprintf(wvs + o, sizeof(wvs) - o, " %u@%u:+%d-%d", g_hyp[bh].n, g_hyp[bh].start, g_wv[t][bh][0], g_wv[t][bh][1]);
+      }
+      o += snprintf(wvs + o, sizeof(wvs) - o, " ]");
+    }
+  }
+  char ovs[360] = "";
+  if (nr_ul_layout_sprt_enabled()) { /* the 6 hypotheses with the lowest overlap rate among simultaneous grants */
+    int o = 0, used[6], nu = 0;
+    o += snprintf(ovs, sizeof(ovs), " overlap[");
+    for (int k = 0; k < 6; k++) {
+      int bh = -1;
+      for (int h = 0; h < g_nhyp; h++) {
+        bool u = false;
+        for (int q = 0; q < nu; q++) u |= used[q] == h;
+        if (u || g_ov_pairs[h] < 20) continue;
+        if (bh < 0 || (double)g_ov_hit[h] / g_ov_pairs[h] < (double)g_ov_hit[bh] / g_ov_pairs[bh]) bh = h;
+      }
+      if (bh < 0) break;
+      used[nu++] = bh;
+      o += snprintf(ovs + o, sizeof(ovs) - o, " %u@%u:%u/%u", g_hyp[bh].n, g_hyp[bh].start, g_ov_hit[bh], g_ov_pairs[bh]);
+    }
+    snprintf(ovs + o, sizeof(ovs) - o, " ]");
+  }
+  char sp[520] = "";
+  if (nr_ul_layout_sprt_enabled()) { /* top-5 hypotheses by accumulated evidence: S, W, z = S / sqrt(W + rho) */
+    int top[8], nt = 0, q = 0;
+    for (int h = 0; h < g_nhyp; h++) {
+      int j = nt < 8 ? nt++ : (g_S[h] > g_S[top[7]] ? 7 : -1);
+      if (j < 0) continue;
+      for (; j > 0 && g_S[h] > g_S[top[j - 1]]; j--) top[j] = top[j - 1];
+      top[j] = h;
+    }
+    q += snprintf(sp, sizeof(sp), " sprt[slots=%u", g_sprt_slots);
+    for (int i = 0; i < nt && q < (int)sizeof(sp) - 60; i++)
+      q += snprintf(sp + q, sizeof(sp) - q, " %u@%u:S=%.1f,W=%.0f,z=%.2f", g_hyp[top[i]].n, g_hyp[top[i]].start, g_S[top[i]],
+                    g_W[top[i]], g_S[top[i]] / sqrt(g_W[top[i]] + SPRT_RHO));
+    snprintf(sp + q, sizeof(sp) - q, " ]");
+  }
   LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
-             " tally[%s ]%s\n",
+             " tally[%s ]%s%s%s%s\n",
         g_locked_hyp >= 0 ? "LOCKED " : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
         g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_votes_total, g_ctl_votes,
-        g_discarded, g_tied, g_nhyp, v, w ? ls : "");
+        g_discarded, g_tied, g_nhyp, v, w ? ls : "", sp, ovs, wvs);
   pthread_mutex_unlock(&mu);
 }

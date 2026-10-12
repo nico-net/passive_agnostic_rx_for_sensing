@@ -76,9 +76,16 @@ typedef struct {
   float ctl_db;                       /* argmax hypothesis, DM-RS of the wrong slot number (false-detection control) */
   float comb1_db;                     /* argmax: comb-1 RE energy of the DM-RS symbols / data-symbol RE energy (dB);
                                          NAN when not measured (argmax SNR < 8 dB) */
+  /* ISAC_UL_LOCK_SPRT=1 (ULLOCKSPEED): zn_valid = the worker filled zn[]. zn[h] = (SNR_est(true DM-RS) - SNR_est(wrong-slot
+   * control DM-RS)) / sigma0 of the same PRB range, linear and unclamped: symmetric about 0 when the range holds no DM-RS. */
+  bool zn_valid;
+  float zn[NR_UL_LAYOUT_MAX_HYP];
 } nr_ul_layout_probe_res_t;
 
 bool nr_ul_layout_lock_enabled(void); /* ISAC_UL_LAYOUT_LOCK=1 */
+/* ISAC_UL_LOCK_SPRT=1 (default off, needs the lock): the BWP lock is a sequential test on the accumulated DM-RS evidence of
+ * EVERY probe (any grant width) instead of 6-dB votes. See docs/superpowers/reports/csd/ULLOCKSPEED-20261012.md. */
+bool nr_ul_layout_sprt_enabled(void);
 /* BLINDFIX F6 (ISAC_UL_LOCK_BWP_ALL=1, default off): every legal (N_BWP, start) of the carrier whose RIV needs `w` bits and for
  * which N(N+1)/2 > maxriv (the largest RIV observed), N descending, start ascending. count = size; at(idx) = the idx-th. */
 uint32_t nr_ul_layout_enum_count(int carrier_rb, int w, uint32_t maxriv);
