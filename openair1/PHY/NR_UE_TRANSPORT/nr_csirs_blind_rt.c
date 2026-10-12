@@ -656,6 +656,7 @@ static double discovery_score(const NR_DL_FRAME_PARMS *fp,
   return n_ant && map.ports ? total / (n_ant * map.ports) : -1;
 }
 
+#include "nr_blind_stats.h"
 #include "nr_csirs_disc_confirm_internal.h"
 
 static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
@@ -1780,10 +1781,14 @@ static int full_add_trs_pairs(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, i
  * (tools/csirs_capture_map.py, both captures). Discovery confirms each (resource, burst) separately and a 12 s
  * run misses many. When any row-1 density-3 resource of a block occurs in this slot, every confirmed row-1
  * density-3 geometry of that block is taken to occur too. */
+/* BLINDFIX F1: ISAC_CSIRS_FULL_BLOCK_INFER=2 infers a block member c into this slot only from a resource a that occurs in it
+ * AND was measured co-scheduled with c in >= 2 slots of the 640-slot window (a network that never co-schedules its TRS
+ * resources, or whose co-occurrence discovery has not seen, gets no inference: only measured resources rate-match).
+ * =1 keeps the unconditional PCI-415 rule. */
 static int full_block_infer_enabled(void)
 {
   static int s = -1;
-  if (s < 0) s = getenv("ISAC_CSIRS_FULL_BLOCK_INFER") && atoi(getenv("ISAC_CSIRS_FULL_BLOCK_INFER")) ? 1 : 0;
+  if (s < 0) s = getenv("ISAC_CSIRS_FULL_BLOCK_INFER") ? atoi(getenv("ISAC_CSIRS_FULL_BLOCK_INFER")) : 0;
   return s;
 }
 static bool full_rb_overlap_half(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *b);
@@ -1798,8 +1803,11 @@ static int full_add_block(const fapi_nr_dl_config_csirs_pdu_rel15_t *conf, int n
     bool present = false, block = false;
     for (int i = 0; i < n_all && !present; i++)
       present = csirs_full_same_geometry(&all[i], c) && all[i].scramb_id == c->scramb_id;
-    for (int i = 0; i < n0 && !block; i++)
+    for (int i = 0; i < n0 && !block; i++) {
       block = all[i].row == 1 && all[i].freq_density == 3 && all[i].csi_type != 2 && full_rb_overlap_half(&all[i], c);
+      if (block && full_block_infer_enabled() == 2 && discovery_cooccur(&all[i], c) < 2)
+        block = false;
+    }
     if (!present && block)
       all[n_all++] = *c;
   }

@@ -33,7 +33,7 @@ extern "C" {
                                                   bits 40..51 = hypothesis (bwp hyp | prefix<<6 | tail<<9), low 40 = gen */
 #define NR_UL_LAYOUT_GEN_MASK ((UINT64_C(1) << 40) - 1)
 #define NR_UL_LAYOUT_MAX_TRIALS 4
-#define NR_UL_LAYOUT_MAX_HYP 64
+#define NR_UL_LAYOUT_MAX_HYP 192 /* 64 until BLINDFIX F6: the hypothesis index is 8 bits in a trial tag */
 #define NR_UL_LAYOUT_MAX_LEN 4
 #define NR_UL_LAYOUT_MAX_PRE 8
 #define NR_UL_LAYOUT_MAX_TAIL 4
@@ -79,6 +79,10 @@ typedef struct {
 } nr_ul_layout_probe_res_t;
 
 bool nr_ul_layout_lock_enabled(void); /* ISAC_UL_LAYOUT_LOCK=1 */
+/* BLINDFIX F6 (ISAC_UL_LOCK_BWP_ALL=1, default off): every legal (N_BWP, start) of the carrier whose RIV needs `w` bits and for
+ * which N(N+1)/2 > maxriv (the largest RIV observed), N descending, start ascending. count = size; at(idx) = the idx-th. */
+uint32_t nr_ul_layout_enum_count(int carrier_rb, int w, uint32_t maxriv);
+bool nr_ul_layout_enum_at(int carrier_rb, int w, uint32_t maxriv, uint32_t idx, uint16_t *n, uint16_t *start);
 void nr_ul_layout_lock_reset(void);
 /* Any accepted PDCCH (DL or UL format) in this slot: the slot has DL symbols, so no full-slot PUSCH lands there. */
 void nr_ul_layout_note_pdcch_slot(long abs_slot);

@@ -84,6 +84,34 @@ static int discovery_export(uint32_t slot,fapi_nr_dl_config_csirs_pdu_rel15_t *o
   __atomic_fetch_sub(&discovery_exports[b].users,1,__ATOMIC_RELEASE);
   return n;
 }
+/* discovery_cooccur: BLINDFIX F1. Slots (of 640) in which the exported resources a and c both occur, 0 when either is not in
+ * the active snapshot. Resources match on geometry and scrambling ID. Caller: nr_csirs_blind_rt.c full_add_block(). */
+static int discovery_cooccur(const fapi_nr_dl_config_csirs_pdu_rel15_t *a, const fapi_nr_dl_config_csirs_pdu_rel15_t *c)
+{
+  if(discovery_disabled || !discovery_queue_ready) return 0;
+  unsigned b;
+  for(;;) {
+    b=__atomic_load_n(&discovery_active,__ATOMIC_ACQUIRE);
+    unsigned users=__atomic_load_n(&discovery_exports[b].users,__ATOMIC_RELAXED);
+    if(users==UINT32_MAX) continue;
+    if(!__atomic_compare_exchange_n(&discovery_exports[b].users,&users,users+1,false,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED)) continue;
+    if(b==__atomic_load_n(&discovery_active,__ATOMIC_ACQUIRE)) break;
+    __atomic_fetch_sub(&discovery_exports[b].users,1,__ATOMIC_RELEASE);
+  }
+  const __typeof__(discovery_exports[0].resource[0]) *ra=NULL,*rc=NULL;
+  for(int i=0;i<discovery_exports[b].n;++i) {
+    const __typeof__(discovery_exports[0].resource[0]) *r=&discovery_exports[b].resource[i];
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *p=&r->p;
+    #define SAME(x) (p->row==(x)->row && p->freq_domain==(x)->freq_domain && p->symb_l0==(x)->symb_l0 && p->symb_l1==(x)->symb_l1 && p->cdm_type==(x)->cdm_type \
+                     && p->freq_density==(x)->freq_density && p->start_rb==(x)->start_rb && p->nr_of_rbs==(x)->nr_of_rbs && p->scramb_id==(x)->scramb_id)
+    if(!ra && SAME(a)) ra=r;
+    if(!rc && SAME(c)) rc=r;
+    #undef SAME
+  }
+  const int j=(ra && rc) ? nbs_joint_slots(ra->period,ra->phase,ra->nphase,rc->period,rc->phase,rc->nphase) : 0;
+  __atomic_fetch_sub(&discovery_exports[b].users,1,__ATOMIC_RELEASE);
+  return j;
+}
 /* discovery_publish: recomputes the due and pending slot tables (per absolute slot mod 640) from the search state and publishes a new export snapshot into an idle buffer.
  *   Due = occasions that must be scored (seeds not yet settled, confirmed resources when reconfiguration detection is on, ZP probation and divisor probes); pending = unsettled ones.
  *   Caller: the search code under g_csirs_state_lock (nr_csirs_blind_rt_discovery_*, csirs_unlock).

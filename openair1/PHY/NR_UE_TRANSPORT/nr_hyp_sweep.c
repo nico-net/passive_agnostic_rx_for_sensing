@@ -20,6 +20,7 @@
  */
 
 #include "nr_hyp_sweep.h"
+#include "nr_blind_stats.h"
 #include "nr_crc_evidence.h"
 #include "common/utils/LOG/log.h"
 #include <string.h>
@@ -179,9 +180,21 @@ int nr_hyp_sweep_feed(nr_hyp_sweep_state_t *st, int idx, bool ok)
   }
   if (best < 0) return -1; // every class retired: nothing interpreted anything, stay unresolved
   double second = 0.0;
-  for (int c = 0; c < st->n_classes; ++c)
-    if (c != best && !eliminated(&st->classes[c]) && rate(&st->classes[c]) > second)
+  int runner = -1, n_act = 0;
+  for (int c = 0; c < st->n_classes; ++c) {
+    if (eliminated(&st->classes[c])) continue;
+    n_act++;
+    if (c != best && rate(&st->classes[c]) > second) {
       second = rate(&st->classes[c]);
+      runner = c;
+    }
+  }
+  if (nbs_sweep_signif_enabled()) { /* BLINDFIX F8 (ISAC_SWEEP_SIGNIF=1): binomial tests instead of 2 % / 3x */
+    const nr_hyp_class_t *b = &st->classes[best], *r = runner >= 0 ? &st->classes[runner] : NULL;
+    if (nbs_sweep_winner(b->passes, b->trials, r ? r->passes : 0, r ? r->trials : 0, n_act))
+      st->winner = best;
+    return st->winner;
+  }
   if (rate(&st->classes[best]) >= NR_HYP_SWEEP_MIN_RATE &&
       rate(&st->classes[best]) >= NR_HYP_SWEEP_WIN_RATIO * second)
     st->winner = best;

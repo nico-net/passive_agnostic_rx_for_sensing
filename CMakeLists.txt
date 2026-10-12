@@ -2535,6 +2535,13 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
   add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)
 
+  # BLINDFIX 2026-10-12: statistical replacements for cell-fitted thresholds (F1 F3 F6 F7 F8)
+  add_executable(test_nr_blind_fix ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_blind_fix_test.cc)
+  target_include_directories(test_nr_blind_fix PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_blind_fix PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
+  add_dependencies(tests test_nr_blind_fix)
+  add_test(NAME test_nr_blind_fix COMMAND ./test_nr_blind_fix)
+
   # Phase 3 Technique A (roadmap artifact "Cell-Agnostic Passive Receiver"): full-carrier PDCCH
   # DM-RS correlation mapping. Closed-loop synthetic test (regenerates its own known-good DM-RS to
   # verify against) plus a pure-noise negative control. Needs the REAL nr_gold_pdcch (refsig.c) and

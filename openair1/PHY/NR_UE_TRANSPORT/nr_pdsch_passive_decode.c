@@ -31,6 +31,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_qm_oracle.h"
+#include "nr_blind_stats.h"
 #include "nr_pdsch_chest_key.h" // K32: complete chest-cache key
 #include "nr_llr_norm.h" // K38: LLR-norm shift over code block 0's span
 #include "nr_pdsch_solver.h"
@@ -583,6 +584,33 @@ typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; 
 static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
 static uint64_t g_rnti_dec_clock;
 /* rnti_class is nr_blind_rnti_class_t: 2 = SI, 3 = RA, 4 = P. */
+/* BLINDFIX F7 (ISAC_MCS_TABLE_EVID=1, default off): the MCS table of the cell from TB-CRC evidence instead of the config value.
+ * A full-TB CRC pass under a DCI 1_1 grant supports every table that reads this MCS to the same (Qm, R) as the table the
+ * decode used, and only counts when at least one table reads it differently (nbs_table_ev_*, sign test at alpha 1e-3). */
+static _Atomic uint32_t g_mcs_tbl_pass[3];
+static void mcs_table_evidence_feed(uint8_t mcs, uint8_t used)
+{
+  static int s_on = -1;
+  if (s_on < 0)
+    s_on = getenv("ISAC_MCS_TABLE_EVID") && atoi(getenv("ISAC_MCS_TABLE_EVID")) ? 1 : 0;
+  if (!s_on || used > 2)
+    return;
+  bool same[3], differs = false;
+  for (int t = 0; t < 3; t++) {
+    same[t] = nr_get_Qm_dl(mcs, (uint8_t)t) == nr_get_Qm_dl(mcs, used) && nr_get_code_rate_dl(mcs, (uint8_t)t) == nr_get_code_rate_dl(mcs, used);
+    differs |= !same[t];
+  }
+  for (int t = 0; t < 3 && differs; t++)
+    if (same[t])
+      atomic_fetch_add(&g_mcs_tbl_pass[t], 1);
+}
+int nr_pdsch_passive_mcs_table_evidence(void)
+{
+  nbs_table_ev_t e;
+  for (int t = 0; t < 3; t++)
+    e.pass[t] = atomic_load(&g_mcs_tbl_pass[t]);
+  return nbs_table_ev_best(&e);
+}
 static bool rnti_sweepable(uint16_t rnti, uint8_t rnti_class)
 {
   return rnti != 0 && rnti < 0xFFFE && rnti_class != 2 && rnti_class != 3 && rnti_class != 4;
@@ -4966,6 +4994,8 @@ gpu_llr_ready:;
     if (ldpc_ok) {
       if (!t_probe_first_seg && !t_quiet)
         brfo_commit();
+      if (!t_probe_first_seg && !t_quiet && grant->dci11 && rnti_sweepable(grant->rnti, grant->rnti_class))
+        mcs_table_evidence_feed(grant->mcs, grant->mcs_table);
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
       out->tb     = g_harq.b;
       // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-VERIFIED TB is strong

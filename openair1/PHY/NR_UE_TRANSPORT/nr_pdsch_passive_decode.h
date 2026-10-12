@@ -255,6 +255,8 @@ void nr_pdsch_passive_ptrs_sweep_allow(bool on);
  *  `feed()` reports whether that decode's TB CRC passed; call it ONLY when `advance_ok` was true for
  *  that same grant. Every start/step/wrap/latch is logged. */
 uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok);
+/* BLINDFIX F7: MCS table the cell's DCI 1_1 CRC passes support (0..2), or -1 while undecided / ISAC_MCS_TABLE_EVID unset. */
+int nr_pdsch_passive_mcs_table_evidence(void);
 void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok);
 /** One TB outcome from ANY decode path (deferred consumer and in-line), layout probes excluded: feeds
  *  the DL link-health tracker and, for dedicated-class grants, this RNTI's resettable fail window. */
