@@ -224,6 +224,13 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
   static double s_rel = -1;
   if (s_rel < 0) s_rel = getenv("ISAC_SSS_REL_RATIO") ? atof(getenv("ISAC_SSS_REL_RATIO")) : 0;
   int64_t second = 0; /* best metric of a Nid1 other than res.nid_cell's, over all phases tried */
+  /* ISAC_SSS_MULTI=R (default off): keep each Nid1's best metric; when the best beats the 4th-best Nid1 by R, the top 3
+   * PCIs are candidates, each verified by its own PBCH CRC in nr_scan_ssb(). Unlike ISAC_SSS_REL_RATIO (best vs second)
+   * this does not reject the strongest cell when a second cell shares the N_ID_2 and the SSB frequency. */
+  static double s_multi = -1;
+  if (s_multi < 0) s_multi = getenv("ISAC_SSS_MULTI") ? atof(getenv("ISAC_SSS_MULTI")) : 0;
+  int64_t best_n1[N_ID_1_NUMBER];
+  for (int i = 0; i < N_ID_1_NUMBER; i++) best_n1[i] = INT64_MIN;
 
   /* for phase evaluation, one uses an array of possible phase shifts */
   /* then a correlation is done between received signal with a shift pĥase and the reference signal */
@@ -257,6 +264,7 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
         metric += d[i] * (rot.r * sss_comp[i].r - rot.i * sss_comp[i].i);
       }
       metric >>= SCALING_METRIC_SSS_NR;
+      if (metric > best_n1[n1]) best_n1[n1] = metric;
       if (s_rel > 0) {
         if (metric > res.metric) {
           if (res.metric > second && GET_NID1(res.nid_cell) != n1) second = res.metric;
@@ -288,8 +296,31 @@ sss_detection_result_t rx_sss_nr(nr_sss_params_t *params,
       break;
   }
   const bool rel_ok = s_rel > 0 && res.metric > 0 && (double)res.metric >= s_rel * (double)(second > 1 ? second : 1);
+  res.ncand = 0;
+  if (s_multi > 0) {
+    int top[4] = {-1, -1, -1, -1}; /* Nid1 of the 4 best per-Nid1 metrics */
+    for (int n1 = Nid1_start; n1 < Nid1_end; n1++) {
+      if (best_n1[n1] == INT64_MIN) continue;
+      for (int k = 0; k < 4; k++)
+        if (top[k] < 0 || best_n1[n1] > best_n1[top[k]]) {
+          for (int j = 3; j > k; j--) top[j] = top[j - 1];
+          top[k] = n1;
+          break;
+        }
+    }
+    const double floor4 = top[3] >= 0 && best_n1[top[3]] > 1 ? (double)best_n1[top[3]] : 1.0;
+    /* the leader must beat the 4th-best by R; runners-up 2 and 3 are only PBCH-tried (CRC24 decides): 2026-10-11 c3550,
+     * PCI 4 decodes when pinned but its SSS sits below the 508 leader's ratio band */
+    for (int k = 0; k < 3 && top[k] >= 0; k++)
+      if (best_n1[top[k]] > 0 && (k > 0 || (double)best_n1[top[k]] >= s_multi * floor4)) {
+        res.cand_pci[res.ncand] = Nid2 + 3 * top[k];
+        res.cand_metric[res.ncand++] = (int32_t)best_n1[top[k]];
+      }
+    if (res.ncand > 0 && res.cand_pci[0] != res.nid_cell) res.ncand = 0; /* best-of-phase winner must lead the list */
+    if (res.ncand > 0 && (double)res.cand_metric[0] < s_multi * floor4) res.ncand = 0; /* leader failed the ratio */
+  }
 
-  if (res.metric < SSS_METRIC_FLOOR_NR && !rel_ok) {
+  if (res.metric < SSS_METRIC_FLOOR_NR && !rel_ok && res.ncand == 0) {
     LOG_D(PHY,
           "Failed to detect SSS after PSS, metric of SSS %d, threshold to consider SSS valid %d, detected PCI: %d\n",
           res.metric,

@@ -1127,6 +1127,23 @@ static void bc9_dci_accept(const nr_pdcch_blind_result_t *o, uint64_t cfg, uint3
   }
 }
 
+/* rv0-only drop rule. ISAC_SI_RV_ANY=1 (default off): SI-RNTI (SIB1) grants are exempt -- SIB1 is repeated with the RV
+ * cycle 0,2,3,1 and a passive receiver that sees the rv!=0 occasions first would never decode it (WEAKSYNC 2026-10-12:
+ * PCI 508 replay, SI-RNTI DCIs found, every one dropped "rv!=0", acq_sib1_decodes 0). Its code rate is low enough to be
+ * self-decodable. Also exempts SI-RNTI from the autodiscover-unverified drop. */
+static bool si_rv_any(void)
+{
+  static int s_any = -1;
+  if (s_any < 0)
+    s_any = getenv("ISAC_SI_RV_ANY") && atoi(getenv("ISAC_SI_RV_ANY")) > 0;
+  return s_any;
+}
+
+static bool rv0_drop(const nr_pdcch_blind_monitor_cfg_t *cfg, const nr_pdcch_blind_result_t *out)
+{
+  return cfg->pdsch_rv0_only && out->rv != 0 && !(si_rv_any() && out->rnti == 0xffff);
+}
+
 static void grantdrop(const nr_pdcch_blind_result_t *out, int frame, int slot, const char *why)
 {
   if (out->rnti_class != NR_BLIND_RNTI_CLASS_SI && out->rnti_class != NR_BLIND_RNTI_CLASS_RA
@@ -9029,7 +9046,8 @@ constdiag_done:;
           t_discovered_slot,
           out.payload, cand_task[ti].dci_length);
     if (t_discovered_token) continue;
-    if (cfg->autodiscover && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
+    /* SI-RNTI DCI 1_0 sizes come from CORESET#0, not from the C-RNTI length discovery (ISAC_SI_RV_ANY) */
+    if (cfg->autodiscover && !(si_rv_any() && out.rnti == 0xffff) && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "autodiscover-unverified");
       continue;
     }
@@ -9495,7 +9513,7 @@ constdiag_done:;
     }
     if (g_pdsch_sweep_on && !is_dci10) {
       /* Rotate only grants eligible for a CRC attempt, not deterministic RV/cap drops. */
-      if (!want_decode || (cfg->pdsch_rv0_only && out.rv != 0)
+      if (!want_decode || (rv0_drop(cfg, &out))
           || decodes_this_occasion >= cfg->pdsch_max_per_slot)
         continue;
       nr_pdsch_cfg_hypothesis_t hy;
@@ -9621,13 +9639,13 @@ constdiag_done:;
      * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
      * SNR gate off, so on the sensing config this skips the whole block. */
     const bool need_chest = nr_sense_blind_need_chest(dmrs_source, cfg->min_snr_lin);
-    if (want_decode && (cfg->pdsch_rv0_only && out.rv != 0))
+    if (want_decode && (rv0_drop(cfg, &out)))
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "rv!=0");
     if (want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot)
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "max-per-slot");
     if (!want_decode)
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "pdsch_decode=0");
-    if (!need_chest && defer && want_decode && !(cfg->pdsch_rv0_only && out.rv != 0)
+    if (!need_chest && defer && want_decode && !(rv0_drop(cfg, &out))
         && decodes_this_occasion < cfg->pdsch_max_per_slot) {
       /* Nothing on this thread needs the estimate, and the consumer makes its own -- so enqueue
        * straight from the decoded DCI and skip the FEP + channel estimation entirely. Mirrors the
@@ -9800,7 +9818,7 @@ constdiag_done:;
           s_no_pdsch = (getenv("ISAC_PDCCH_NO_PDSCH_DECODE") != NULL) ? 1 : 0;
         }
         if (want_decode && !s_no_pdsch && decodes_this_occasion < cfg->pdsch_max_per_slot) {
-          if (cfg->pdsch_rv0_only && out.rv != 0) {
+          if (rv0_drop(cfg, &out)) {
             // A retransmission carries only an incremental-redundancy slice of the codeword and is
             // not self-decodable without the earlier round's soft bits -- which a receiver that
             // never saw the first grant does not have. Counted, not attempted.

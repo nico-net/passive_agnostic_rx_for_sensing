@@ -318,7 +318,10 @@ static void UE_synch(void *arg) {
         ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
       }
     } else {
+      extern int64_t nr_initial_sync_capture_start;
+      nr_initial_sync_capture_start = (int64_t)syncD->capture_end - 2LL * fp->samples_per_frame;
       ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
+      nr_initial_sync_capture_start = -1;
     }
   }
 
@@ -342,6 +345,7 @@ static void UE_synch(void *arg) {
         + round((float)((ret.rx_offset << 1) % fp->samples_per_subframe) / fp->samples_per_slot0);
 
     UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
+    nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier); /* ISAC_KSSB_ALIGN may have moved the carrier */
     if (!get_nrUE_params()->cont_fo_comp) {
       // rerun with new cell parameters and frequency-offset
       nrue_ru_set_freq(UE, ul_carrier, dl_carrier, freq_offset);

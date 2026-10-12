@@ -7,6 +7,7 @@
  */
 #include "PHY/defs_nr_UE.h"
 #include "PHY/MODULATION/modulation_UE.h"
+#include "PHY/MODULATION/nr_modulation.h" // init_symbol_rotation (ISAC_KSSB_ALIGN)
 #include "nr_transport_proto_ue.h"
 #include "nr_initial_sync_budget.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
@@ -14,6 +15,7 @@
 #include "common/utils/nr/nr_common.h"
 
 #include <math.h>
+#include <time.h>
 
 #include "PHY/NR_REFSIG/pss_nr.h"
 #include "PHY/NR_REFSIG/sss_nr.h"
@@ -307,6 +309,13 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   p_pss.window_center = params->pss_window_center;
   p_pss.window_radius = params->pss_window_radius;
   p_pss.search_stride = params->pss_stride;
+  p_pss.decim = params->pss_decim;
+  { /* PSS occupies sc first_carrier_offset + ssb_start + 56 .. +126 of the FFT grid (generate_pss_nr_time) */
+    const int N = params->ofdm_symbol_size, c = (params->first_carrier_offset + params->ssb_start_subcarrier + 56 + 63) % N;
+    p_pss.centre_bin = c >= N / 2 ? c - N : c;
+  }
+  p_pss.abs_valid = params->abs_valid;
+  p_pss.abs_start = params->abs_start;
   nr_pss_info_t pss_info = pss_search_time_nr(&p_pss);
 
   // This is the frequency offset that will be applied in the compensation,
@@ -360,7 +369,11 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
 
     c16_t(*rxdataF)[params->nb_antennas_rx][params->ofdm_symbol_size] =
         (c16_t(*)[params->nb_antennas_rx][params->ofdm_symbol_size])params->rxdataF;
-    params->sss_res = rx_sss_nr(&p_sss, pss_res, -1, rxdataF);
+    /* ISAC_SSS_MULTI also makes ISAC_TARGET_PCI an operator choice of ONE PCI (N_ID_1 pinned too); unset: N_ID_2 only */
+    static int s_multi = -1;
+    if (s_multi < 0)
+      s_multi = getenv("ISAC_SSS_MULTI") && atof(getenv("ISAC_SSS_MULTI")) > 0;
+    params->sss_res = rx_sss_nr(&p_sss, pss_res, s_multi && params->target_nid_cell >= 0 ? params->target_nid_cell : -1, rxdataF);
 
     if (!params->sss_res.success || params->sss_res.nid_cell < 0) {
       continue;
@@ -473,6 +486,9 @@ static void nr_scan_ssb(void *arg)
         .fo_flag = ssbInfo->foFlag,
         .rxdataF = rxdataF,
         .pssTime = pssTime,
+        .pss_decim = true,
+        .abs_valid = ssbInfo->absValid,
+        .abs_start = ssbInfo->absStart + (int64_t)fp->samples_per_frame * frame_id,
     };
 
     ssbInfo->syncRes.frame_id = frame_id;
@@ -509,6 +525,31 @@ static void nr_scan_ssb(void *arg)
                                                          &ssbInfo->symbolOffset,
                                                          &ssbInfo->pbchResult,
                                                          rxdataF); // start pbch detection at first symbol after pss
+      /* ISAC_SSS_MULTI: every SSS candidate PCI gets its own PBCH CRC; all are reported, the first that decodes in SSS
+       * order is kept (strongest verified cell). ISAC_TARGET_PCI pins the search to one PCI instead. */
+      const sss_detection_result_t *sr = &search_params.sss_res;
+      if (sr->ncand > 1) {
+        char cb[192];
+        int o = snprintf(cb, sizeof(cb), "%d:%d:%s", sr->cand_pci[0], sr->cand_metric[0],
+                         ssbInfo->syncRes.cell_detected ? "crc_ok" : "crc_fail");
+        for (int c = 1; c < sr->ncand && c < 3; c++) {
+          int hfb = 0, ssbi = 0, symo = 0;
+          fapiPbch_t pr = {0};
+          const bool ok = nr_pbch_detection(ssbInfo->proc, ssbInfo->fp, sr->cand_pci[c], 1, ssbInfo->gscnInfo.ssbFirstSC,
+                                            &hfb, &ssbi, &symo, &pr, rxdataF);
+          o += snprintf(cb + o, sizeof(cb) - o, " %d:%d:%s", sr->cand_pci[c], sr->cand_metric[c], ok ? "crc_ok" : "crc_fail");
+          if (ok && !ssbInfo->syncRes.cell_detected) {
+            ssbInfo->syncRes.cell_detected = true;
+            ssbInfo->nidCell = sr->cand_pci[c];
+            ssbInfo->halfFrameBit = hfb;
+            ssbInfo->ssbIndex = ssbi;
+            ssbInfo->symbolOffset = symo;
+            ssbInfo->pbchResult = pr;
+          }
+        }
+        LOG_I(NR_PHY, "SENSING: SSB_MULTI_PCI gscn=%d frame=%d cand(pci:sss:pbch)=[%s] chosen=%d\n", ssbInfo->gscnInfo.gscn,
+              frame_id, cb, ssbInfo->syncRes.cell_detected ? ssbInfo->nidCell : -1);
+      }
       if (!ssbInfo->syncRes.cell_detected)
         LOG_I(NR_PHY,
               "SENSING: SCAN_PBCH_FAIL gscn=%d ssb_sc=%d ssb_ref=%.0f frame=%d pci=%d pss_peak=%d pss_avg=%d "
@@ -554,6 +595,45 @@ static void nr_scan_ssb(void *arg)
   }
 
   completed_task_ans(ssbInfo->ans);
+}
+
+/* Absolute sample index of the first sample of the capture being scanned (UE_synch sets it before each search, -1 when
+ * unknown). Lets ISAC_PSS_ACC fold PSS profiles of successive captures on the cell's 20 ms grid. */
+int64_t nr_initial_sync_capture_start = -1;
+
+/* ISAC_KSSB_ALIGN=1 (default off, WEAKSYNC 2026-10-11): align the receiver RB grid to the cell's CRB grid. CORESET#0, PDCCH
+ * and PDSCH REs sit on 12-subcarrier RBs counted from the receiver grid, while the cell's CRB boundary lies k_SSB (in
+ * 15 kHz units in FR1, MIB + PBCH bit a_{A+5}) below the SSB. If (--ssb - k_SSB/2^mu) is not a multiple of 12 every RB is
+ * off by s subcarriers and no CSS0 DCI decodes ([MEASURED replay c3610 PCI 403]: --ssb 1171 SI-RNTI hits 0, --ssb 1170
+ * SIB1 decoded). Fix: move the SSB by -s subcarriers and the nominal carrier by +s*SCS (UE_synch retunes to it), exactly
+ * what an operator does with --ssb/-C. Without the flag only the advisory line is printed.
+ * shortcut: not combined with --ue-scan-carrier/ISAC_AUTO_ACQUIRE confirm passes (they match gscnInfo by the old SSB). */
+static void nr_kssb_grid_align(PHY_VARS_NR_UE *ue, nr_ue_ssb_scan_t *res)
+{
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int k_ssb = ((res->pbchResult.decoded_output[1] >> 4) & 0xF) | (((res->pbchResult.xtra_byte >> 5) & 1) << 4);
+  if (fp->freq_range != FR1 || k_ssb >= 24)
+    return; /* no CORESET#0 on this SSB */
+  const int k_norm = k_ssb >> fp->numerology_index;
+  int sh = ((fp->ssb_start_subcarrier - k_norm) % 12 + 12) % 12;
+  if (sh > 6)
+    sh -= 12;
+  if (sh == 0)
+    return;
+  static int s_on = -1;
+  if (s_on < 0)
+    s_on = getenv("ISAC_KSSB_ALIGN") && atoi(getenv("ISAC_KSSB_ALIGN")) > 0;
+  LOG_W(NR_PHY, "SENSING: KSSB_GRID k_ssb=%d ssb_sc=%d: receiver RB grid off the CRB grid by %d subcarriers (aligned: --ssb %d -C %lu)%s\n",
+        k_ssb, fp->ssb_start_subcarrier, sh, fp->ssb_start_subcarrier - sh,
+        (unsigned long)(fp->dl_CarrierFreq + (int64_t)sh * fp->subcarrier_spacing), s_on ? "; ISAC_KSSB_ALIGN retunes" : "");
+  if (!s_on)
+    return;
+  /* move the nominal carrier (as -C would) so the symbol-rotation tables follow; UE_synch retunes to the new carrier.
+   * Shifting only the CFO left PDSCH dead (per-symbol phase error): replay c3610, SI-RNTI DCIs 161 but SIB1 0. */
+  fp->ssb_start_subcarrier -= sh;
+  fp->dl_CarrierFreq += (int64_t)sh * fp->subcarrier_spacing;
+  fp->ul_CarrierFreq += (int64_t)sh * fp->subcarrier_spacing;
+  init_symbol_rotation(fp);
 }
 
 /* nr_initial_sync_impl: shared implementation of the initial cell search over the GSCN raster: optionally pre-selects the antennas by energy, sizes the scan batches from the scratch budget (ISAC_SCAN_SCRATCH_MB), and scans the GSCNs in batches on the thread pool, first detected cell wins in GSCN order.
@@ -686,6 +766,8 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
         numGscn,
         batch);
 
+  struct timespec scan_t0, scan_t1;
+  clock_gettime(CLOCK_MONOTONIC, &scan_t0);
   nr_ue_ssb_scan_t ssb_info[numGscn];
   for (int s = 0; s < numGscn; s++)
     ssb_info[s] = (nr_ue_ssb_scan_t){.syncRes.cell_detected = false, .rxdata = NULL};
@@ -735,6 +817,8 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
       ssbInfo->pssWindowFrame = one_frame ? 0 : pss_window_frame;
       ssbInfo->pssAntennas = max_pss_antennas;
       ssbInfo->pssStride = pss_stride;
+      ssbInfo->absValid = numGscn == 1 && nr_initial_sync_capture_start >= 0;
+      ssbInfo->absStart = nr_initial_sync_capture_start + (int64_t)scan_source_start;
       ready[k] = false;
       ssbInfo->rxdata = malloc16_clear(scan_fp.nb_antennas_rx * sizeof(c16_t *));
       if (!ssbInfo->rxdata) {
@@ -817,6 +901,10 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
 
   } // coarse CFO hypotheses
 
+  clock_gettime(CLOCK_MONOTONIC, &scan_t1);
+  LOG_I(NR_PHY, "SENSING: SYNC_SCAN ms=%.1f gscn=%d ant=%d frames=%d decim=%s detected=%d\n",
+        (scan_t1.tv_sec - scan_t0.tv_sec) * 1e3 + (scan_t1.tv_nsec - scan_t0.tv_nsec) / 1e6, numGscn, scan_fp.nb_antennas_rx,
+        scan_nframes, getenv("ISAC_PSS_DECIM") ? getenv("ISAC_PSS_DECIM") : "0", res != NULL);
   // Set globals based on detected cell
   if (res) {
     fp->Nid_cell = res->nidCell;
@@ -826,6 +914,8 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     ue->symbol_offset = res->symbolOffset;
     ue->common_vars.freq_offset = res->freqOffset;
     ue->adjust_rxgain = res->adjust_rxgain;
+    nr_kssb_grid_align(ue, res);
+    nr_pss_fold_forget();
   }
 
   // In initial sync, we indicate PBCH to MAC after the scan is complete.
