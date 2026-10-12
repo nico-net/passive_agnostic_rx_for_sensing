@@ -141,7 +141,7 @@ static int ctx_acquire(bool try_only)
 {
   for (;;) {
     unsigned m = g_ctx_busy.load();
-    for (int i = 0; i < EXACT_CTX; i++)
+    for (int i = 0; i < nr_gpu_ctx_limit(EXACT_CTX); i++)
       if (!(m >> i & 1u) && g_ctx_busy.compare_exchange_strong(m, m | 1u << i)) {
         if (g_ctx_prio) /* the context is ours and idle: point it at the stream of this body's class */
           g_ctx_stream[i] = nr_pdsch_gpu_low ? g_ctx_lo[i] : g_ctx_hi[i];
@@ -674,7 +674,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       int least = 0, greatest = 0;
       CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
       for (int c = 0; c < EXACT_CTX; c++) {
-        if (!nr_gpu_green_stream(&g_ctx_stream[c], greatest, true)) CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
+        if (!nr_gpu_green_stream(&g_ctx_stream[c], greatest, true, c)) CK(cudaStreamCreateWithPriority(&g_ctx_stream[c], cudaStreamNonBlocking, greatest));
         g_ctx_hi[c] = g_ctx_lo[c] = g_ctx_stream[c];
         if (nr_pdsch_gpu_prio_on() && !nr_pdsch_gpu_low_stream(&g_ctx_lo[c], least, greatest)) g_ctx_lo[c] = g_ctx_stream[c];
         CK(nr_gpu_allocate(NR_GPU_STAGING, &g_ctx_delay[c], 3 * nr_exact::DELAY_MAX_ROWS * sizeof(int)));

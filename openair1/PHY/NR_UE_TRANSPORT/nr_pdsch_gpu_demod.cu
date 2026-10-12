@@ -67,7 +67,7 @@ static int acquire()
   bool waited = false;
   for (;;) {
     unsigned m = g_busy.load();
-    for (int i = 0; i < CTX; i++)
+    for (int i = 0; i < nr_gpu_ctx_limit(CTX); i++)
       if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i)) {
         if (waited) {
           struct timespec t1;
@@ -343,7 +343,12 @@ __device__ __forceinline__ double cabs_c(dcx x)
   const double lim = 67108864.0; /* 2^26: the squares and their sum are exact */
   if (x.r == trunc(x.r) && x.i == trunc(x.i) && fabs(x.r) < lim && fabs(x.i) < lim)
     return __dsqrt_rn(__dadd_rn(__dmul_rn(x.r, x.r), __dmul_rn(x.i, x.i)));
-  return hypot(x.r, x.i);
+  /* GPUALLOC: glibc >= 2.35 __ieee754_hypot, FMA kernel (what the CPU's cabs() runs on aarch64). CUDA's hypot() differs
+   * by 1 ulp on some inputs, which flipped a pivot tie and moved an exact .5 result by one LSB (Nl = 3, rare). */
+  double ax = fabs(x.r), ay = fabs(x.i);
+  if (ay > ax) { const double t = ax; ax = ay; ay = t; }
+  const double t1 = __dadd_rn(ay, ay), t2 = __dadd_rn(ax, -ay);
+  return t1 >= ax ? __dsqrt_rn(__fma_rn(t1, ax, __dmul_rn(t2, t2))) : __dsqrt_rn(__fma_rn(ax, ax, __dmul_rn(ay, ay)));
 }
 __device__ dcx divdc3(double a, double b, double c, double d)
 {
@@ -1248,7 +1253,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     return -1;
   for (int c = 0; c < CTX; c++) {
     Ctx &x = g_ctx[c];
-    if ((!nr_gpu_green_stream(&x.s, hi, true) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
+    if ((!nr_gpu_green_stream(&x.s, hi, true, c) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaMalloc((void **)&x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
         || cudaMalloc((void **)&x.h, sizeof(nrd_c16) * NSYM * 16 * EXT) != cudaSuccess
         || cudaMallocHost((void **)&x.hy, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
@@ -1269,7 +1274,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     for (int k = 0; k < 13; k++)
       if (cudaEventCreate(&x.ev[k]) != cudaSuccess)
         return -1;
-    if ((!nr_gpu_green_stream(&x.s2, hi, true) && cudaStreamCreateWithPriority(&x.s2, cudaStreamNonBlocking, hi) != cudaSuccess)
+    if ((!nr_gpu_green_stream(&x.s2, hi, true, c) && cudaStreamCreateWithPriority(&x.s2, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaEventCreateWithFlags(&x.fork, cudaEventDisableTiming) != cudaSuccess
         || cudaEventCreateWithFlags(&x.join, cudaEventDisableTiming) != cudaSuccess)
       return -1;

@@ -8,7 +8,11 @@
  *                        context on the remaining SMs, so discovery blocks never share an SM with them.
  * Header-only, CUDA sources only; driver entry points come from cudaGetDriverEntryPointByVersion (no -lcuda). Each
  * translation unit makes its own green contexts over the same split. Green-context streams share the primary context's
- * memory, events and modules. On any failure the caller creates its stream the usual way. */
+ * memory, events and modules. On any failure the caller creates its stream the usual way.
+ *  ISAC_GPU_RT_PARTS=P   (GPUALLOC, needs RT_ISOLATE; default off) the real-time SMs are split into up to P disjoint
+ *                        green contexts of at least floor(rt_sms / P) SMs (the driver rounds to its granularity) and stream idx
+ *                        goes to group idx % groups, so concurrent PDSCH consumers (one pool context each) do not
+ *                        share SMs. Off, or if the driver yields < 2 groups: one RT context exactly as before. */
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <cstdio>
@@ -17,14 +21,15 @@
 /* nr_gpu_green_stream: creates *s (non-blocking, given priority) in this translation unit's discovery (rt = false) or
  * real-time (rt = true) green context when the flags above ask for it; returns true on success, false when off or
  * unavailable. The contexts are created once, on first use, and never destroyed. */
-static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt)
+static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt, int idx = 0)
 {
 #if CUDART_VERSION >= 12050
   static int state = -1; /* -1 not read, 0 off, 1 on */
   static int sms, isolate;
-  static CUgreenCtx green[2];
-  static bool made[2];
-  static CUdevResource part[2];
+  static CUgreenCtx green[2], rgreen[8];
+  static bool made[2], rmade[8];
+  static CUdevResource part[2], rpart[8];
+  static unsigned ngrp;
   static CUdevice dev;
   static CUresult (*desc_gen)(CUdevResourceDesc *, CUdevResource *, unsigned);
   static CUresult (*ctx_create)(CUgreenCtx *, CUdevResourceDesc, CUdevice, unsigned);
@@ -61,10 +66,37 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt)
     stream_create = (CUresult(*)(CUstream *, CUgreenCtx, unsigned, int))f[5];
     fprintf(stderr, "[GPU] ISAC_GPU_DISC_SMS=%d: discovery on %u SMs, real-time on %s (%u of %u SMs)\n", sms,
             part[0].sm.smCount, isolate ? "the other SMs" : "all SMs", isolate ? part[1].sm.smCount : all.sm.smCount, all.sm.smCount);
+    if (isolate) {
+      const char *pe = getenv("ISAC_GPU_RT_PARTS");
+      const int want = pe ? atoi(pe) : 0;
+      const unsigned per = want > 1 ? (unsigned)(part[1].sm.smCount / (unsigned)want) : 0;
+      if (want > 1 && want <= 8 && per >= 8) {
+        CUdevResource rem;
+        unsigned g = (unsigned)want;
+        const CUresult rc = ((CUresult(*)(CUdevResource *, unsigned *, const CUdevResource *, CUdevResource *, unsigned, unsigned))f[2])(
+            rpart, &g, &part[1], &rem, 0, per);
+        if (rc == CUDA_SUCCESS && g >= 2) ngrp = g;
+        else fprintf(stderr, "[GPU] ISAC_GPU_RT_PARTS: split of %u SMs by %u failed (rc=%d groups=%u)\n", part[1].sm.smCount, per, (int)rc, g);
+        cudaGetLastError();
+      }
+      if (want > 1)
+        fprintf(stderr, "[GPU] ISAC_GPU_RT_PARTS=%d: %u real-time SM groups of %u SMs\n", want, ngrp ? ngrp : 1u,
+                ngrp ? rpart[0].sm.smCount : part[1].sm.smCount);
+    }
     state = 1;
   }
-  const int k = rt ? 1 : 0;
   if (state != 1 || (rt && !isolate)) return false;
+  if (rt && ngrp) {
+    const int q = (idx < 0 ? 0 : idx) % (int)ngrp;
+    if (!rmade[q]) {
+      CUdevResourceDesc desc;
+      if (desc_gen(&desc, &rpart[q], 1) != CUDA_SUCCESS || ctx_create(&rgreen[q], desc, dev, CU_GREEN_CTX_DEFAULT_STREAM) != CUDA_SUCCESS)
+        return false;
+      rmade[q] = true;
+    }
+    return stream_create((CUstream *)s, rgreen[q], CU_STREAM_NON_BLOCKING, priority) == CUDA_SUCCESS;
+  }
+  const int k = rt ? 1 : 0;
   if (!made[k]) {
     CUdevResourceDesc desc;
     if (desc_gen(&desc, &part[k], 1) != CUDA_SUCCESS || ctx_create(&green[k], desc, dev, CU_GREEN_CTX_DEFAULT_STREAM) != CUDA_SUCCESS)
@@ -73,8 +105,16 @@ static inline bool nr_gpu_green_stream(cudaStream_t *s, int priority, bool rt)
   }
   return stream_create((CUstream *)s, green[k], CU_STREAM_NON_BLOCKING, priority) == CUDA_SUCCESS;
 #else
-  (void)s; (void)priority; (void)rt;
+  (void)s; (void)priority; (void)rt; (void)idx;
   return false;
 #endif
+}
+/* GPUALLOC ISAC_PDSCH_GPU_CTX_LIMIT=N (default off): PDSCH FEP/demod/LDPC pool contexts handed out are limited to the
+ * first N (>= 1), so at most N consumers have GPU work in flight and the others wait on the CPU side. */
+static inline int nr_gpu_ctx_limit(int pool)
+{
+  static int n = -1;
+  if (n < 0) { const char *e = getenv("ISAC_PDSCH_GPU_CTX_LIMIT"); n = e ? atoi(e) : 0; }
+  return n >= 1 && n < pool ? n : pool;
 }
 #endif

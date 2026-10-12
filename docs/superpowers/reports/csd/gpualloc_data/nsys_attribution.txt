@@ -1,0 +1,21 @@
+== base
+[3347155, 3347156, 3347157, 3347158, 3347159]
+other discovery/NID kernel       kernels=1154 excess_ms=  5256.8 share=0.58
+RT-vs-RT                         kernels= 346 excess_ms=  3066.1 share=0.34
+GPU idle (host/driver)           kernels= 311 excess_ms=   671.8 share=0.07
+csirs normalize                  kernels=   2 excess_ms=     2.4 share=0.00
+total excess ms 8997.1 RT kernels 421736
+== RL
+[3350417, 3350418, 3350419, 3350420, 3350421]
+other discovery/NID kernel       kernels= 914 excess_ms=  3906.0 share=0.49
+RT-vs-RT                         kernels= 348 excess_ms=  3338.5 share=0.42
+csirs normalize                  kernels=  43 excess_ms=   511.9 share=0.06
+GPU idle (host/driver)           kernels=  42 excess_ms=   148.8 share=0.02
+total excess ms 7905.2 RT kernels 409259
+== P2
+[3353495, 3353496, 3353497, 3353498, 3353499]
+other discovery/NID kernel       kernels= 625 excess_ms=  3063.6 share=0.79
+RT-vs-RT                         kernels= 123 excess_ms=   676.1 share=0.18
+GPU idle (host/driver)           kernels=  28 excess_ms=   122.3 share=0.03
+total excess ms 3862.1 RT kernels 153561
+NSDONE
