@@ -6367,6 +6367,78 @@ TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
+namespace {
+// feeds `n` decoded grants (locked layout reads) with the verdict `ok(start)`; returns the start of the last grant
+int UllPriorRun(UllGen &g, const nr_ul_layout_cell_t &cell, int n, int true_start, float snr, float se)
+{
+  int last = -1;
+  nr_pdcch_blind_ul_result_t o;
+  for (int i = 0; i < n; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    if (nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o) != 1) continue;
+    last = o.bwp_start;
+    nr_ul_layout_prior_note(&o, o.bwp_start == true_start, 800, 1, 1, d.slot, snr, se);
+  }
+  return last;
+}
+}  // namespace
+
+// ULPRIOR: provisional adoption of the top prior-ranked UL BWP start; demoted only by CRC-expected failures.
+TEST(UlLayoutLock, PriorSearchStaysMovesAndIgnoresLowSnr)
+{
+  EXPECT_TRUE(nr_ul_layout_prior_expected(20.f, 1.f));
+  EXPECT_FALSE(nr_ul_layout_prior_expected(-10.f, 2.f));
+  EXPECT_FALSE(nr_ul_layout_prior_expected(0.f, 2.f));  // Shannon(2 bit/RE) = 4.8 dB
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  setenv("ISAC_UL_LOCK_PRIOR_SEARCH", "1", 1);
+  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
+  unsetenv("ISAC_UL_LOCK_CRC_GUARD");
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 216, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216, .dl_bwp_start = 0};
+  uint16_t st = 0, sz = 0;
+  uint32_t ex = 0, okn = 0, dem = 0;
+  {  // prior right (SIB1 start 1): adopted at the fit, confirmed by the CRC pass, never moves afterwards
+    UllGen g;
+    UllFit(g, cell);
+    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_EQ(st, 1); EXPECT_EQ(sz, 216);
+    EXPECT_EQ(UllPriorRun(g, cell, 30, 1, 20.f, 0.5f), 1);
+    EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));  // confirmed
+    EXPECT_EQ(dem, 0u);
+    // later CRC-expected failures (a bad stretch) do not move a confirmed lock
+    EXPECT_EQ(UllPriorRun(g, cell, 300, -1, 20.f, 0.5f), 1);
+  }
+  {  // prior wrong (truth 0, SIB1 says 1, the DL-consistent start is 0): the DL prior is the 2nd hypothesis: two demotions, then the right start, confirmed
+    UllGen g;
+    UllFit(g, cell);
+    EXPECT_EQ(UllPriorRun(g, cell, 200, 0, 20.f, 0.5f), 0);
+    EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_EQ(st, 0); EXPECT_EQ(sz, 216);
+    EXPECT_EQ(dem, 1u);
+  }
+  {  // low SNR: every grant fails on every hypothesis, none predicts a pass: no demotion, stays on the prior
+    UllGen g;
+    UllFit(g, cell);
+    EXPECT_EQ(UllPriorRun(g, cell, 800, 0, -5.f, 1.5f), 1);
+    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_EQ(dem, 0u); EXPECT_EQ(ex, 0u); EXPECT_EQ(st, 1);
+  }
+  {  // nothing ever passes although every grant predicts a pass: bounded, back to the top prior, then stops
+    UllGen g;
+    UllFit(g, cell);
+    UllPriorRun(g, cell, 3000, -1, 20.f, 0.5f);
+    nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem);
+    EXPECT_EQ(dem, 16u);
+    EXPECT_EQ(st, 1);
+    EXPECT_EQ(UllPriorRun(g, cell, 400, -1, 20.f, 0.5f), 1);
+    nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem);
+    EXPECT_EQ(dem, 16u);
+  }
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_PRIOR_SEARCH");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}
+
 // TIMMCS0 (2026-10-11): two DCI 1_1 layouts whose MCS fields sit 2 bits apart both read MCS 0 when the bits before it
 // are zero, with the same allocation and ports, yet read the rv from different bits (layout A reads "MCS LSB, NDI" of
 // layout B). The PDSCH solver's reading dedup must keep them apart (ISAC_PDSCH_READING_RV), or the solved layout's grant

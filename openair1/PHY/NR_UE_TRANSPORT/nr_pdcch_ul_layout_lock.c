@@ -327,6 +327,18 @@ static uint32_t g_addpos[3], g_ctl_votes, g_discarded, g_tied, g_votes_total, g_
 static pending_t g_pend[PENDING_MAX];
 static int g_npend;
 static long g_first_slot = -1, g_lock_slot = -1, g_trial_slot = -1;
+/* ISAC_UL_LOCK_PRIOR_SEARCH (ULPRIOR): provisional adoption of the top prior-ranked (N, start); see nr_ul_layout_prior_note() */
+#define PRIOR_D 4           /* start offsets +-0..PRIOR_D around each prior start are enumerated */
+#define PRIOR_MAXH 96       /* hypotheses the prior enumeration may add */
+#define PRIOR_SEARCH_MAX 16 /* hypotheses tried before the search returns to the top prior and stops */
+static bool g_prov, g_search_done;
+static uint8_t g_dem[NR_UL_LAYOUT_MAX_HYP];
+static uint32_t g_p_exp, g_p_ok, g_p_dec, g_ndem, g_prov_ctr;
+static int g_p_src; /* 0 none, 1 SIB1 start, 2 DL-consistent start, 3 neighbour of a prior start */
+static long g_prov_slot = -1;
+static void append_prior_locked(void);
+static void lock_length_locked(len_state_t *ls, long now_slot);
+static int pre_for_hyp(const len_state_t *ls, int h);
 
 #define RELOCK_FAILS 8    /* consecutive CRC failures of a locked layout before alternatives are tried again */
 #define TRIAL_MCS_MAX 10  /* trials only on robust (small-MCS) grants */
@@ -395,6 +407,11 @@ static void reset_locked(void)
   g_ctl_votes = g_discarded = g_tied = g_votes_total = g_probes_fed = g_probes_booked = 0;
   g_npend = 0;
   g_first_slot = g_lock_slot = g_trial_slot = -1;
+  g_prov = g_search_done = false;
+  memset(g_dem, 0, sizeof(g_dem));
+  g_p_exp = g_p_ok = g_p_dec = g_ndem = g_prov_ctr = 0;
+  g_p_src = 0;
+  g_prov_slot = -1;
   g_have_cell = false;
   memset(g_S, 0, sizeof(g_S));
   memset(g_W, 0, sizeof(g_W));
@@ -519,6 +536,7 @@ static void build_hyps_locked(void)
       g_hyp[g_nhyp++] = (hyp_state_t){.n = g_cell.sib1_ul_size, .start = g_cell.sib1_ul_start};
     }
   }
+  append_prior_locked();
   for (int i = 0; i < nc; i++) {
     bool width_used = false;
     for (int l = 0; l < g_nlen; l++)
@@ -532,6 +550,7 @@ static void build_hyps_locked(void)
   }
   if (bwp_all_enabled()) append_all_locked();
 }
+
 
 /* caller holds mu: PRB range of grant p (length state ls) under hypothesis h. */
 static bool hyp_range(const len_state_t *ls, const nr_dci_bits_t *p, int h, uint16_t *r0, uint16_t *nprb)
@@ -652,7 +671,7 @@ static void finalize_pending_locked(void)
   }
   const long now = g_pend[g_npend - 1].target;
   g_npend = 0;
-  if (g_locked_hyp >= 0) return;
+  if (g_locked_hyp >= 0 && !g_prov) return;
   int a = -1, b = -1;
   for (int h = 0; h < g_nhyp; h++) {
     if (a < 0 || g_hyp[h].votes > g_hyp[a].votes) { b = a; a = h; }
@@ -661,6 +680,10 @@ static void finalize_pending_locked(void)
   if (a < 0) return;
   const uint32_t va = g_hyp[a].votes, vb = b >= 0 ? g_hyp[b].votes : 0;
   if (va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS) {
+    if (g_prov) { /* DM-RS votes confirm (or move) the provisional adoption */
+      g_prov = false;
+      if (g_locked_hyp != a) for (int l = 0; l < g_nlen; l++) g_len[l].locked = false;
+    }
     g_locked_hyp = a;
     g_lock_slot = now;
     const int spf = g_cell.slots_per_frame ? g_cell.slots_per_frame : 20;
@@ -679,6 +702,7 @@ static void finalize_pending_locked(void)
   }
 }
 
+static void prior_adopt_locked(long slot);
 static pthread_mutex_t eval_mu = PTHREAD_MUTEX_INITIALIZER; /* serializes eval passes (static scratch below) */
 void nr_ul_layout_eval_once(void)
 {
@@ -758,6 +782,7 @@ void nr_ul_layout_eval_once(void)
         LOG_A(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d mcs_off=%d score=%.2f second=%.2f prefixes=[%s] k2_row0=%u"
                    " tails=%d best[%s] next[%s] bwp_hyps=%d first_abs=%ld fit_abs=%ld\n",
               len, n, mo, sc, sec, pr, k2row[0], ntail, t0, t1, g_nhyp, ls->first_slot, ls->fit_slot);
+        prior_adopt_locked(ls->fit_slot);
         lock_length_locked(ls, ls->fit_slot);
       } else {
         LOG_I(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d not yet: mcs_off=%d (%.2f/%.2f) prefixes=%d tails=%d k2=%d\n", len,
@@ -796,6 +821,10 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
     reset_locked();
   }
   if (!g_have_cell) { g_cell = *cell; g_have_cell = true; }
+  else { /* priors that were not known at the first DCI */
+    if (!g_cell.sib1_ul_size && cell->sib1_ul_size) { g_cell.sib1_ul_start = cell->sib1_ul_start; g_cell.sib1_ul_size = cell->sib1_ul_size; }
+    if (!g_cell.dl_bwp_size && cell->dl_bwp_size) { g_cell.dl_bwp_start = cell->dl_bwp_start; g_cell.dl_bwp_size = cell->dl_bwp_size; }
+  }
   if (g_first_slot < 0) g_first_slot = abs_slot;
   g_occ[abs_slot % g_cell.slots_per_frame]++; /* a DCI 0_1 was here: the slot has DL symbols */
   int li = -1;
@@ -812,7 +841,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
   ls->bank[ls->count % NR_UL_LAYOUT_BANK] = (nr_ul_layout_dci_t){.rnti = rnti, .slot = abs_slot, .p = payload};
   ls->count++;
   int ret = 0;
-  if (ls->locked) {
+  if (ls->locked && !(g_prov && (g_prov_ctr++ & 3) == 3)) { /* provisional: every 4th DCI is a DM-RS probe instead */
     const nr_pdcch_blind_ul_opts_t o = ls->opts;
     const uint64_t gen = g_gen;
     pthread_mutex_unlock(&mu);
@@ -820,7 +849,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
     out->hyp_generation = NR_UL_LAYOUT_TAG | gen;
     return 1;
   }
-  if (ls->fitted && g_locked_hyp < 0 && g_nhyp > 0) {
+  if (ls->fitted && (g_locked_hyp < 0 || g_prov) && g_nhyp > 0) {
     const nr_ul_layout_prefix_t *p0 = &ls->pre[0];
     const uint32_t idx = fld(&payload, len, 1 + p0->bwp_ind + p0->riv, p0->tda);
     const uint8_t k2 = idx < 16 && ls->k2row[idx] ? ls->k2row[idx] : ls->k2row[0];
@@ -916,7 +945,7 @@ int nr_ul_layout_probe_plan(const nr_pdcch_blind_ul_result_t *g, uint16_t *prb0,
   if (!nr_ul_layout_is_probe(g)) return 0;
   pthread_mutex_lock(&mu);
   int n = 0;
-  if ((g->hyp_generation & ~(NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_PROBE)) == g_gen && g_locked_hyp < 0) {
+  if ((g->hyp_generation & ~(NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_PROBE)) == g_gen && (g_locked_hyp < 0 || g_prov)) {
     for (int l = 0; l < g_nlen; l++) {
       if (g_len[l].len != g->dci_length || !g_len[l].fitted) continue;
       n = g_nhyp < cap ? g_nhyp : cap;
@@ -1119,7 +1148,7 @@ void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target, c
 {
   if (!nr_ul_layout_is_probe(g) || !r) return;
   pthread_mutex_lock(&mu);
-  if ((g->hyp_generation & ~(NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_PROBE)) != g_gen || g_locked_hyp >= 0) {
+  if ((g->hyp_generation & ~(NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_PROBE)) != g_gen || (g_locked_hyp >= 0 && !g_prov)) {
     pthread_mutex_unlock(&mu);
     return;
   }
@@ -1152,7 +1181,7 @@ void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target, c
     return;
   }
   if (g_npend > 0 && (target != g_pend[0].target || g_npend == PENDING_MAX)) finalize_pending_locked();
-  if (g_locked_hyp < 0) {
+  if (g_locked_hyp < 0 || g_prov) {
     pending_t *p = &g_pend[g_npend++];
     memset(p, 0, sizeof(*p));
     p->target = target;
@@ -1273,6 +1302,7 @@ static void crc_lock_locked(int li, int h, int k, int t, long slot)
   nr_pdcch_blind_ul_opts_t o;
   if (!trial_opts_locked(ls, h, k, t, &o)) return;
   const bool relock = ls->locked;
+  g_prov = false; /* a CRC pass confirms whatever it names */
   ls->opts = o;
   ls->chosen_tail = t;
   ls->locked = true;
@@ -1351,6 +1381,184 @@ void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint
   pthread_mutex_unlock(&mu);
 }
 
+/* ------------------------------------------------------------------ ISAC_UL_LOCK_PRIOR_SEARCH=1 (ULPRIOR)
+ * The UL BWP SIZE comes from the RIV statistics; the START shifts every grant equally, so only physics or a CRC can tell it.
+ * Two priors rank the start hypotheses: (a) SIB1 initialUplinkBWP, (b) the DL BWP start (solved from PDSCH CRCs) mapped to the
+ * UL. Both are only the STARTING POINT: the top hypothesis is adopted provisionally at the fit (the layout is locked, PUSCH decodes
+ * run at once), DM-RS votes keep accumulating (every 4th DCI is a probe) and a leading vote lock overrides it, a TB CRC pass
+ * under it confirms it (CRC16 passes under the CRC_GUARD rule when that flag is on, else one pass), and a run of
+ * "CRC-expected" failures demotes it to the next hypothesis of the ranking.
+ * CRC-expected: a decode counts against the hypothesis only when the decoder's own post-estimation SNR predicts a pass for that
+ * grant: snr_db >= 10 log10(2^SE - 1) + PRIOR_GAP_DB, SE = TB bits per coded RE (code rate x Qm). Grants below that line fail on
+ * any hypothesis (SNR, not layout), so they are not evidence and never advance the search. The decoder measures the SNR under the
+ * hypothesis it decodes: a far-wrong start reads noise and is not demoted by CRC (the DM-RS votes address that case).
+ * Dwell: PRIOR_DWELL (10) CRC-expected failures with 0 passes demote (a true hypothesis at BLER < 50 % per expected grant
+ * fails 10 in a row with p < 1e-3); 4x dwell with < 2 passes also demotes. At most PRIOR_SEARCH_MAX hypotheses are tried; then
+ * the search returns to the top prior and stops (no more demotions). */
+#define PRIOR_GAP_DB 2.0 /* [INF] LDPC short-block BLER ~50 % sits ~2 dB above the Shannon SNR of the grant's SE */
+static bool prior_on(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_PRIOR_SEARCH"); }
+bool nr_ul_layout_prior_enabled(void) { return prior_on(); }
+bool nr_ul_layout_prior_expected(float snr_db, float se)
+{
+  return se > 0.f && snr_db >= 10.0 * log10(pow(2.0, se) - 1.0) + PRIOR_GAP_DB;
+}
+static uint32_t prior_dwell(void)
+{
+  const char *e = getenv("ISAC_UL_LOCK_PRIOR_DWELL");
+  return e && atoi(e) > 0 ? (uint32_t)atoi(e) : 10u;
+}
+/* nearest prior start (distance, 1 = SIB1, 2 = DL); -1 when no prior is known */
+static int prior_dist(int start, int *src)
+{
+  int best = -1;
+  *src = 0;
+  if (g_cell.sib1_ul_size > 0) { best = abs(start - (int)g_cell.sib1_ul_start); *src = 1; }
+  if (g_cell.dl_bwp_size > 0 && (best < 0 || abs(start - (int)g_cell.dl_bwp_start) < best)) { best = abs(start - (int)g_cell.dl_bwp_start); *src = 2; }
+  return best;
+}
+/* ranking key of hypothesis h (smaller is better): size class first (SIB1 size, DL size, any other consistent size: the size is the
+ * well-determined part), then start distance to a prior (the START is what is searched), prior order, larger N */
+static double prior_key(int h, int *src)
+{
+  const int d = prior_dist(g_hyp[h].start, src);
+  if (d < 0) return 1e18;
+  const int sp = g_cell.sib1_ul_size && g_hyp[h].n == g_cell.sib1_ul_size ? 0 : (g_cell.dl_bwp_size && g_hyp[h].n == g_cell.dl_bwp_size ? 1 : 2);
+  return sp * 1e7 + d * 1e4 + (*src - 1) * 1e3 + (300 - g_hyp[h].n);
+}
+static int prior_best_locked(int *src_out)
+{
+  int best = -1, bs = 0;
+  double bk = 1e18;
+  for (int h = 0; h < g_nhyp; h++) {
+    if (g_dem[h]) continue;
+    bool ok = false;
+    for (int l = 0; l < g_nlen && !ok; l++) ok = g_len[l].fitted && pre_for_hyp(&g_len[l], h) >= 0;
+    int src;
+    const double k = ok ? prior_key(h, &src) : 1e18;
+    if (k < bk) { bk = k; best = h; bs = src; }
+  }
+  if (best >= 0 && bk < 1e17) {
+    *src_out = fmod(bk, 1e7) < 1e4 ? bs : 3; /* distance 0 = the prior itself (its source), else a neighbour */
+    return best;
+  }
+  return -1;
+}
+/* every (N, start) around the prior starts that the fitted RIV fields can express (width, N(N+1)/2 > max RIV observed) */
+static void append_prior_locked(void)
+{
+  if (!prior_on() || !g_have_cell || (g_cell.sib1_ul_size == 0 && g_cell.dl_bwp_size == 0)) return;
+  int added = 0;
+  for (int l = 0; l < g_nlen; l++)
+    for (int p = 0; g_len[l].fitted && p < g_len[l].npre; p++) {
+      const len_state_t *ls = &g_len[l];
+      const int w = ls->pre[p].riv;
+      uint32_t maxriv = 0;
+      const int nb = ls->count < NR_UL_LAYOUT_BANK ? (int)ls->count : NR_UL_LAYOUT_BANK;
+      for (int i = 0; i < nb; i++) {
+        const uint32_t r = fld(&ls->bank[i].p, ls->len, 1 + ls->pre[p].bwp_ind, w);
+        if (r > maxriv) maxriv = r;
+      }
+      uint16_t sz[8];
+      int ns = 0;
+      const uint16_t cand[2] = {g_cell.sib1_ul_size, g_cell.dl_bwp_size};
+      for (int c = 0; c < 2; c++) if (cand[c]) sz[ns++] = cand[c];
+      for (int n = g_cell.carrier_rb, k = 0; n >= 1 && k < 3; n--)
+        if (nr_ul_layout_riv_bits(n) == w && (uint64_t)n * (n + 1) / 2 > maxriv) { sz[ns++] = (uint16_t)n; k++; }
+      for (int d = 0; d <= PRIOR_D; d++)
+        for (int pr = 0; pr < 2; pr++)
+          for (int sg = 0; sg < (d ? 2 : 1); sg++) {
+            if (!(pr ? g_cell.dl_bwp_size : g_cell.sib1_ul_size)) continue;
+            const int st = (pr ? g_cell.dl_bwp_start : g_cell.sib1_ul_start) + (sg ? -d : d);
+            for (int i = 0; i < ns; i++) {
+              const int n = sz[i];
+              if (st < 0 || st + n > g_cell.carrier_rb || nr_ul_layout_riv_bits(n) != w || (uint64_t)n * (n + 1) / 2 <= maxriv) continue;
+              bool have = false;
+              for (int h = 0; h < g_nhyp && !have; h++) have = g_hyp[h].n == n && g_hyp[h].start == st;
+              if (!have && g_nhyp < NR_UL_LAYOUT_MAX_HYP && added < PRIOR_MAXH) { g_hyp[g_nhyp++] = (hyp_state_t){.n = (uint16_t)n, .start = (uint16_t)st}; added++; }
+            }
+          }
+    }
+}
+/* caller holds mu: adopt the best non-demoted hypothesis provisionally (the layout is locked under it at once) */
+static void prior_adopt_locked(long slot)
+{
+  if (!prior_on() || g_locked_hyp >= 0) return;
+  int src = 0;
+  const int h = prior_best_locked(&src);
+  if (h < 0) return;
+  g_locked_hyp = h;
+  g_prov = true;
+  g_p_exp = g_p_ok = g_p_dec = 0;
+  g_p_src = src;
+  g_prov_slot = slot;
+  for (int l = 0; l < g_nlen; l++) { g_len[l].locked = false; g_len[l].crc_fail_run = 0; }
+  for (int l = 0; l < g_nlen; l++) lock_length_locked(&g_len[l], slot);
+  const int spf = g_cell.slots_per_frame ? g_cell.slots_per_frame : 20;
+  LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_ADOPT bwp=%u@%u src=%s demotions=%u sib1=%u@%u dl=%u@%u hyps=%d slot=%ld t_conv_ms=%.0f\n",
+        g_hyp[h].n, g_hyp[h].start, src == 1 ? "sib1" : src == 2 ? "dl" : "neighbour", g_ndem, g_cell.sib1_ul_start,
+        g_cell.sib1_ul_size, g_cell.dl_bwp_start, g_cell.dl_bwp_size, g_nhyp, slot, 10.0 * (double)(slot - g_first_slot) / spf);
+}
+static void prior_demote_locked(long slot)
+{
+  const int cur = g_locked_hyp;
+  g_dem[cur] = 1;
+  g_ndem++;
+  LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_DEMOTE bwp=%u@%u crc_expected_n=%u crc_ok=%u dec=%u demotions=%u slot=%ld\n", g_hyp[cur].n,
+        g_hyp[cur].start, g_p_exp, g_p_ok, g_p_dec, g_ndem, slot);
+  g_locked_hyp = -1;
+  append_prior_locked(); /* priors that arrived late */
+  if (g_ndem >= PRIOR_SEARCH_MAX) { /* bounded: back to the top prior, then no more demotions */
+    memset(g_dem, 0, sizeof(g_dem));
+    g_search_done = true;
+    LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_EXHAUSTED tried=%u: back to the top prior, search stops\n", g_ndem);
+  }
+  prior_adopt_locked(slot);
+}
+
+bool nr_ul_layout_prior_state(uint16_t *start, uint16_t *size, uint32_t *crc_expected_n, uint32_t *crc_ok, uint32_t *demotions)
+{
+  pthread_mutex_lock(&mu);
+  const bool prov = g_prov;
+  if (start) *start = g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0;
+  if (size) *size = g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0;
+  if (crc_expected_n) *crc_expected_n = g_p_exp;
+  if (crc_ok) *crc_ok = g_p_ok;
+  if (demotions) *demotions = g_ndem;
+  pthread_mutex_unlock(&mu);
+  return prov;
+}
+/* PUSCH worker: TB CRC verdict of a grant read with the locked layout, with the decoder's SNR and the grant's spectral efficiency
+ * (TB bits per coded RE). Only provisional adoptions use it. */
+void nr_ul_layout_prior_note(const nr_pdcch_blind_ul_result_t *g, bool ok, uint32_t tbs_bits, int nseg, int seg_ok, long slot,
+                             float snr_db, float se)
+{
+  if (!g || !nr_ul_layout_is_tagged(g) || nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g) || !prior_on()) return;
+  pthread_mutex_lock(&mu);
+  int li = -1;
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
+  if (li >= 0 && g_prov && g_locked_hyp >= 0 && (g->hyp_generation & NR_UL_LAYOUT_GEN_MASK) == (g_gen & NR_UL_LAYOUT_GEN_MASK)
+      && g->bwp_start == g_hyp[g_locked_hyp].start && g->bwp_size == g_hyp[g_locked_hyp].n) {
+    len_state_t *ls = &g_len[li];
+    const int h = g_locked_hyp, k = pre_for_hyp(ls, h), t = ls->chosen_tail;
+    g_p_dec++;
+    if (k >= 0 && t >= 0) ev_slot_locked(ls, (uint16_t)(h | k << 8 | t << 11))->trials++;
+    const bool expected = nr_ul_layout_prior_expected(snr_db, se);
+    if (expected) g_p_exp++;
+    if (ok) {
+      g_p_ok++;
+      if (k >= 0 && t >= 0 && (!nr_ul_layout_crc_guard_enabled() || crc_guard_accept_locked(ls, h, k, t, g->rnti, slot, tbs_bits, nseg, seg_ok))) {
+        g_prov = false;
+        LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_CONFIRM bwp=%u@%u by=crc crc_expected_n=%u crc_ok=%u dec=%u demotions=%u slot=%ld\n",
+              g_hyp[h].n, g_hyp[h].start, g_p_exp, g_p_ok, g_p_dec, g_ndem, slot);
+      }
+    } else if (!g_search_done) {
+      const uint32_t D = prior_dwell();
+      if ((g_p_exp >= D && g_p_ok == 0) || (g_p_exp >= 4 * D && g_p_ok < 2)) prior_demote_locked(slot);
+    }
+  }
+  pthread_mutex_unlock(&mu);
+}
+
 void nr_ul_layout_stats_dump(void)
 {
   if (!nr_ul_layout_lock_enabled()) return;
@@ -1419,10 +1627,16 @@ void nr_ul_layout_stats_dump(void)
                     g_W[top[i]], g_S[top[i]] / sqrt(g_W[top[i]] + SPRT_RHO));
     snprintf(sp + q, sizeof(sp) - q, " ]");
   }
+  char pst[220] = "";
+  if (prior_on())
+    snprintf(pst, sizeof(pst), " prior[prov=%d src=%s hyp=%u@%u crc_expected_n=%u crc_ok=%u dec=%u demotions=%u done=%d]", g_prov,
+             g_p_src == 1 ? "sib1" : g_p_src == 2 ? "dl" : g_p_src == 3 ? "neighbour" : "-",
+             g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0, g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_p_exp, g_p_ok,
+             g_p_dec, g_ndem, g_search_done);
   LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
-             " tally[%s ]%s%s%s%s\n",
-        g_locked_hyp >= 0 ? "LOCKED " : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
+             " tally[%s ]%s%s%s%s%s\n",
+        g_locked_hyp >= 0 ? (g_prov ? "PROVISIONAL " : "LOCKED ") : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
         g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_votes_total, g_ctl_votes,
-        g_discarded, g_tied, g_nhyp, v, w ? ls : "", sp, ovs, wvs);
+        g_discarded, g_tied, g_nhyp, v, w ? ls : "", sp, ovs, wvs, pst);
   pthread_mutex_unlock(&mu);
 }

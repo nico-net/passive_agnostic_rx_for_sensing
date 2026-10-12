@@ -47,6 +47,7 @@ typedef struct {
   uint8_t typeA_pos; /* MIB enum: 0 = pos2, 1 = pos3 */
   uint8_t slots_per_frame;
   uint16_t sib1_ul_start, sib1_ul_size; /* SIB1 initialUplinkBWP (0 size = unknown); a hypothesis, ISAC_UL_LOCK_SIB1_FIRST */
+  uint16_t dl_bwp_start; /* solved DL BWP start (valid with dl_bwp_size > 0): ISAC_UL_LOCK_PRIOR_SEARCH prior, never fixed truth */
 } nr_ul_layout_cell_t;
 
 typedef struct {
@@ -145,6 +146,15 @@ static inline bool nr_ul_layout_is_trial(const nr_pdcch_blind_ul_result_t *g)
 {
   return g && (g->hyp_generation & NR_UL_LAYOUT_TAG) && (g->hyp_generation & NR_UL_LAYOUT_TRIAL);
 }
+/* ISAC_UL_LOCK_PRIOR_SEARCH=1 (default off, needs the lock; ULPRIOR report): provisional adoption of the top (SIB1 start, DL-consistent
+ * start, neighbours) hypothesis at the fit, demoted by a run of CRC-EXPECTED failures, confirmed by a CRC pass or by DM-RS votes.
+ * prior_note: verdict of a grant read with the locked layout + decoder SNR and TB bits per coded RE. */
+bool nr_ul_layout_prior_enabled(void);
+bool nr_ul_layout_prior_expected(float snr_db, float se); /* pure: snr_db >= Shannon(se) + 2 dB */
+/* returns true while the adoption is provisional */
+bool nr_ul_layout_prior_state(uint16_t *start, uint16_t *size, uint32_t *crc_expected_n, uint32_t *crc_ok, uint32_t *demotions);
+void nr_ul_layout_prior_note(const nr_pdcch_blind_ul_result_t *g, bool ok, uint32_t tbs_bits, int nseg, int seg_ok, long slot,
+                             float snr_db, float se);
 /* One fit pass over every length's bank: the eval thread runs it every 100 ms; unit tests call it directly. */
 void nr_ul_layout_eval_once(void);
 

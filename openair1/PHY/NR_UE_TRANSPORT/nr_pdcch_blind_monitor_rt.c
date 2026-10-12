@@ -8154,6 +8154,7 @@ constdiag_done:;
           nr_ul_layout_cell_t ull_cell2 = ull_cell; /* + SIB1 initialUplinkBWP (hypothesis; used only with ISAC_UL_LOCK_SIB1_FIRST) */
           { const nr_pdcch_sib1_prior_t *sp = nr_pdcch_sib1_prior_get();
             if (sp && sp->ul_bwp_valid) { ull_cell2.sib1_ul_start = sp->ul_bwp_start; ull_cell2.sib1_ul_size = sp->ul_bwp_size; } }
+          ull_cell2.dl_bwp_start = (uint16_t)cfg->bwp_start;
           ull = nr_ul_layout_on_dci(cand_task[ti].rnti_min, cand_task[ti].dci_length, source_absolute_slot,
                                     cand_task[ti].ul_out.raw_payload, &ull_cell2, &ull_g);
           if (ull == 2 && nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ull_g, source_absolute_slot);
