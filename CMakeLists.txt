@@ -3119,6 +3119,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_csirs_ports)
   add_test(NAME test_nr_csirs_ports COMMAND ./test_nr_csirs_ports)
 
+  add_executable(test_nr_csirs_disc_rate ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_rate_test.cc)
+  target_include_directories(test_nr_csirs_disc_rate PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_disc_rate PRIVATE GTest::gtest_main m)
+  add_dependencies(tests test_nr_csirs_disc_rate)
+  add_test(NAME test_nr_csirs_disc_rate COMMAND test_nr_csirs_disc_rate)
+
   add_executable(test_nr_csirs_disc_td
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_td_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_td_fixture.c

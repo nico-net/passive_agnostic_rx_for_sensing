@@ -14,6 +14,10 @@ int nr_csirs_disc_td_pending(void);
 int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring);
 /* CPU reference used by the worker and parity fixture: packed FFT windows. */
 void nr_csirs_disc_fft_cpu(int fft, int transforms, const int16_t *in, int16_t *out);
+/* ISAC_CSIRS_DISC_RATELIMIT (nr_csirs_disc_rate_internal.h): steady ingest = G windows per div_s; rearm restarts the burst. */
+void nr_csirs_disc_td_feed_params(uint32_t *win, uint32_t *div);
+void nr_csirs_disc_td_set_duty(bool steady, uint32_t G, uint32_t div_s, bool rearm);
+extern uint64_t csirs_disc_rl_skipped;
 extern uint64_t csirs_disc_fep_gpu_chunks, csirs_disc_fep_cpu_chunks;
 extern uint64_t csirs_disc_fep_us, csirs_disc_fep_max_us;
 extern uint64_t csirs_disc_fft_us, csirs_disc_fft_batches, csirs_disc_td_overflows;

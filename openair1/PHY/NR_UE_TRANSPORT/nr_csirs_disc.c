@@ -3,6 +3,8 @@
 #include "PHY/defs_nr_common.h"
 #include "nr_csirs_disc_gate_internal.h"
 #include "nr_csirs_disc_evidence_internal.h"
+#include "nr_csirs_disc_rate_internal.h"
+#include "nr_pdsch_passive_queue.h"
 
 #include "common/utils/LOG/log.h"
 #include "nr_passive_cfg_epoch.h"
@@ -25,6 +27,10 @@ extern int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *) __attr
 extern void nr_csirs_blind_rt_discovery_init(void) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_reset(void) __attribute__((weak));
 extern void nr_csirs_monitor_remove_dynamic_all(void) __attribute__((weak));
+extern void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *) __attribute__((weak));
+extern void nr_csirs_disc_td_feed_params(uint32_t *, uint32_t *) __attribute__((weak));
+extern void nr_csirs_disc_td_set_duty(bool, uint32_t, uint32_t, bool) __attribute__((weak));
+extern uint64_t csirs_disc_rl_skipped __attribute__((weak));
 
 #define DISC_VIEWS 128
 static bool pipeline_ready=true;
@@ -63,6 +69,11 @@ static void retry_refined(const nr_csirs_disc_hyp_t *h, uint64_t written)
 }
 static struct {nr_csirs_disc_hyp_t h;uint16_t id;} qualified[256];
 static int qualified_count;
+/* ISAC_CSIRS_DISC_RATELIMIT bookkeeping (nr_csirs_disc_rate_internal.h); all under pipeline_lock. */
+static float q_strength[256];
+static bool q_was[256], rl_epoch;
+static nr_csirs_disc_fp_t rl_known[128];
+static int rl_known_n;
 static const int16_t *cache_grid;
 static uint64_t cache_written;
 /* same_seed: true when two hypotheses describe the same CSI-RS seed: same row, symbols, CDM, density, period and offset, with at least 80 % overlap of their RB extents.
@@ -152,6 +163,7 @@ static void epoch_listener(const nr_cfg_epoch_snapshot_t *snapshot)
                         && snapshot->last_cause == NR_CAUSE_RX_RECOVERY;
   pthread_mutex_lock(&pipeline_lock);
   cache_count=qualified_count=evidence_retries=0;cache_grid=NULL;cache_written=0;
+  rl_epoch=true;rl_known_n=0;
   ++evidence_epoch;
   nr_csirs_disc_detect_reset();
   /* The IQ feed and partial hypotheses belong to the old sample epoch, but
@@ -203,6 +215,66 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
   }
 }
 
+
+/* rl_update: ISAC_CSIRS_DISC_RATELIMIT. Builds the observation (confirmed set of this module's winners, footprint novelty, CRC counters),
+ *   steps the state machine and applies the ingest duty to the TD front end. Caller: nr_csirs_disc_process() under pipeline_lock, flag on only.
+ */
+static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t *fps, int n_fp)
+{
+  static nr_csirs_rl_t st;
+  static nr_csirs_rl_cfg_t cfg;
+  static bool init;
+  if (!init) {
+    uint32_t win = 640, div = 7;
+    if (nr_csirs_disc_td_feed_params) nr_csirs_disc_td_feed_params(&win, &div);
+    const char *e;
+    const double notice_s = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_NOTICE_S")) && atof(e) > 0 ? atof(e) : 60.0;
+    const double miss = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_MISS")) && atof(e) > 0 && atof(e) < 1 ? atof(e) : 0.01;
+    const double pdet = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_PDET")) && atof(e) > 0 && atof(e) < 1 ? atof(e) : 0.5;
+    const int cyc = (e=getenv("ISAC_CSIRS_DISC_RATELIMIT_CYCLES")) && atoi(e) > 0 ? atoi(e) : 2;
+    cfg = (nr_csirs_rl_cfg_t){win, div, (uint64_t)(notice_s * ring->slots_per_frame * 100), miss, pdet, cyc};
+    init = true;
+    LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT cfg win=%u div=%u notice_slots=%llu checks=%u cycles=%d\n", win, div,
+          (unsigned long long)cfg.notice_slots, nr_csirs_rl_checks(&cfg), cyc);
+  }
+  nr_csirs_rl_obs_t o = {.epoch = rl_epoch};
+  rl_epoch = false;
+  if (ring->written) o.slot = ring->meta[(ring->written - 1) % ring->capacity].abs_slot;
+  float min_strength = 1e30f;
+  for (int i = 0; i < qualified_count; ++i) {
+    const bool c = nr_csirs_blind_rt_discovery_confirmed && nr_csirs_blind_rt_discovery_confirmed(&qualified[i].h);
+    o.lost += q_was[i] && !c;
+    q_was[i] = c;
+    if (!c) continue;
+    ++o.n_conf;
+    if (qualified[i].h.period > o.max_period) o.max_period = qualified[i].h.period;
+    if (q_strength[i] < min_strength) min_strength = q_strength[i];
+  }
+  for (int i = 0; i < n_fp; ++i) {
+    bool known = false;
+    for (int k = 0; k < rl_known_n && !known; ++k)
+      known = rl_known[k].period == fps[i].period && rl_known[k].offset == fps[i].offset
+           && rl_known[k].density == fps[i].density && (rl_known[k].sym_mask & fps[i].sym_mask)
+           && same_extent(&rl_known[k], &fps[i]);
+    if (known) continue;
+    if (!st.stable) { if (rl_known_n < 128) rl_known[rl_known_n++] = fps[i]; }
+    else if (o.n_conf && fps[i].strength >= min_strength) o.new_pattern = true;
+  }
+  if (nr_pdsch_passive_queue_get_stats) {
+    nr_pdsch_passive_queue_stats_t pq;
+    nr_pdsch_passive_queue_get_stats(&pq);
+    o.crc_ok = pq.crc_ok; o.crc_dec = pq.decoded;
+  }
+  const bool was = st.stable;
+  if (nr_csirs_rl_step(&st, &cfg, &o) || was != st.stable) {
+    if (nr_csirs_disc_td_set_duty) nr_csirs_disc_td_set_duty(st.stable, st.G, st.div_s, st.rearm);
+    LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT %s reason=%s n_conf=%d slot=%llu G=%u div_s=%u p0=%.3f skipped=%llu\n",
+          st.stable ? "STABLE" : "SEARCH", st.reason, o.n_conf, (unsigned long long)o.slot, st.G, st.div_s, st.p0,
+          &csirs_disc_rl_skipped ? (unsigned long long)csirs_disc_rl_skipped : 0ull);
+    st.rearm = false;
+  }
+}
+
 /* nr_csirs_disc_process: one discovery batch on a snapshot of the IQ ring: detects footprints, builds hypotheses, sweeps them (GPU or CPU), gates the winners, refines and verifies them, and admits the survivors to the CSI-RS search.
  *   Steps: footprints (nr_csirs_disc_detect_candidates) -> union views -> hypotheses (cache and confirmed-skip filters, ISAC_CSIRS_DISC_CUMULATIVE/_TRS_PRIORITY) -> sweep -> per-footprint best -> gate -> refine -> verify -> nr_csirs_blind_rt_add_discovered().
  *   Flags: ISAC_CSIRS_DISC_DIAG, ISAC_CSIRS_DISC_SWEEP_HYPS, ISAC_CSIRS_DISC_DELTA_MAX, ISAC_CSIRS_DISC_CUMULATIVE, ISAC_CSIRS_DISC_TRS_PRIORITY. Logs WINNER, AMBIGUOUS and BATCH lines.
@@ -216,6 +288,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
   if(!nr_csirs_disc_ring_snapshot_current(ring)) {pthread_mutex_unlock(&pipeline_lock);return;}
   if(cache_grid!=ring->grid_base || ring->written<cache_written) {
     cache_count=qualified_count=evidence_retries=0; ++evidence_epoch;
+    rl_epoch=true;rl_known_n=0;
   }
   const bool cumulative=feature("ISAC_CSIRS_DISC_CUMULATIVE");
   const bool trs_priority=feature("ISAC_CSIRS_DISC_TRS_PRIORITY");
@@ -500,6 +573,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
       if (nr_csirs_blind_rt_add_discovered && nr_csirs_blind_rt_add_discovered(h, w) >= 0) {
         winners++;
         if(qualified_count<256) {
+          q_strength[qualified_count]=h->fp_index<DISC_VIEWS?fps[h->fp_index].strength:0;q_was[qualified_count]=false;
           qualified[qualified_count].h=*h;qualified[qualified_count++].id=w->scramb_id;
         }
         cache_result(&hyps[original_index],ring->written,true);
@@ -525,6 +599,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     }
   }
 
+  if (feature("ISAC_CSIRS_DISC_RATELIMIT")) rl_update(ring, fps, n_fp);
   pthread_mutex_lock(&g_lock);
   uint64_t cpu_end=cpu_us();
   g_metrics.cpu_us+=cpu_end-cpu_begin;g_metrics.detect_cpu_us+=cpu_detected-cpu_begin;
