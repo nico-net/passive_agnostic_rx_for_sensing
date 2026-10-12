@@ -79,11 +79,10 @@ typedef struct {
 } nr_ul_layout_probe_res_t;
 
 bool nr_ul_layout_lock_enabled(void); /* ISAC_UL_LAYOUT_LOCK=1 */
-/* BLINDFIX F6 (ISAC_UL_LOCK_BWP_ALL=1, default off): every legal (N_BWP, start) of the carrier whose RIV needs one of the
- * widths in width_mask (bit w = riv_bits(N) == w), in priority order (N descending from the carrier, start ascending).
- * Returns the number of hypotheses; *n / *start are filled for the idx-th one (idx < count). */
-uint32_t nr_ul_layout_enum_count(int carrier_rb, uint32_t width_mask);
-bool nr_ul_layout_enum_at(int carrier_rb, uint32_t width_mask, uint32_t idx, uint16_t *n, uint16_t *start);
+/* BLINDFIX F6 (ISAC_UL_LOCK_BWP_ALL=1, default off): every legal (N_BWP, start) of the carrier whose RIV needs `w` bits and for
+ * which N(N+1)/2 > maxriv (the largest RIV observed), N descending, start ascending. count = size; at(idx) = the idx-th. */
+uint32_t nr_ul_layout_enum_count(int carrier_rb, int w, uint32_t maxriv);
+bool nr_ul_layout_enum_at(int carrier_rb, int w, uint32_t maxriv, uint32_t idx, uint16_t *n, uint16_t *start);
 void nr_ul_layout_lock_reset(void);
 /* Any accepted PDCCH (DL or UL format) in this slot: the slot has DL symbols, so no full-slot PUSCH lands there. */
 void nr_ul_layout_note_pdcch_slot(long abs_slot);

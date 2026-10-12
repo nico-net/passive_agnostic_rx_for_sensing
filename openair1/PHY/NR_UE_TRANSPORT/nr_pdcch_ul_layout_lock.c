@@ -324,7 +324,6 @@ static hyp_state_t g_hyp[NR_UL_LAYOUT_MAX_HYP];
 static int g_nhyp;
 static int g_locked_hyp = -1;
 static uint32_t g_addpos[3], g_ctl_votes, g_discarded, g_tied, g_votes_total, g_probes_fed, g_probes_booked;
-static uint32_t g_enum_next, g_widen_mark; /* F6 widening cursor / probe mark */
 static pending_t g_pend[PENDING_MAX];
 static int g_npend;
 static long g_first_slot = -1, g_lock_slot = -1, g_trial_slot = -1;
@@ -363,7 +362,6 @@ static void reset_locked(void)
   memset(g_addpos, 0, sizeof(g_addpos));
   g_ctl_votes = g_discarded = g_tied = g_votes_total = g_probes_fed = g_probes_booked = 0;
   g_npend = 0;
-  g_enum_next = g_widen_mark = 0;
   g_first_slot = g_lock_slot = g_trial_slot = -1;
   g_have_cell = false;
   g_gen++;
@@ -409,18 +407,18 @@ static int cand_list(uint16_t *c, int cap)
   return m;
 }
 
-uint32_t nr_ul_layout_enum_count(int car, uint32_t wm)
+uint32_t nr_ul_layout_enum_count(int car, int w, uint32_t maxriv)
 {
   uint32_t c = 0;
   for (int n = car; n >= 1; n--)
-    if ((wm >> nr_ul_layout_riv_bits(n)) & 1) c += (uint32_t)(car - n + 1);
+    if (nr_ul_layout_riv_bits(n) == w && (uint64_t)n * (n + 1) / 2 > maxriv) c += (uint32_t)(car - n + 1);
   return c;
 }
 
-bool nr_ul_layout_enum_at(int car, uint32_t wm, uint32_t idx, uint16_t *n_out, uint16_t *start_out)
+bool nr_ul_layout_enum_at(int car, int w, uint32_t maxriv, uint32_t idx, uint16_t *n_out, uint16_t *start_out)
 {
   for (int n = car; n >= 1; n--) {
-    if (!((wm >> nr_ul_layout_riv_bits(n)) & 1)) continue;
+    if (nr_ul_layout_riv_bits(n) != w || (uint64_t)n * (n + 1) / 2 <= maxriv) continue;
     const uint32_t m = (uint32_t)(car - n + 1);
     if (idx < m) { *n_out = (uint16_t)n; *start_out = (uint16_t)idx; return true; }
     idx -= m;
@@ -428,45 +426,30 @@ bool nr_ul_layout_enum_at(int car, uint32_t wm, uint32_t idx, uint16_t *n_out, u
   return false;
 }
 
-/* ISAC_UL_LOCK_BWP_ALL=1: the 64 legacy hypotheses cover the usual sizes and starts <= 5; when they produce no lock the search
- * widens to every legal (N, start) of the carrier, in WIDEN_CAP-sized steps. */
-#define WIDEN_PROBES 48 /* probes fed since the last widening before a zero-vote hypothesis counts as refuted (each probe tests all) */
-#define WIDEN_CAP 128   /* table size while widening (voted + SIB1 hypotheses are kept, the rest is refilled from the enumeration) */
 static bool bwp_all_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_BWP_ALL"); }
-static uint32_t used_width_mask_locked(void)
+/* ISAC_UL_LOCK_BWP_ALL=1 (F6): after the legacy hypotheses, every (N, start) of the carrier that the RIV field can express
+ * (riv_bits(N) == the fitted width) and that is consistent with the DCI bank: N(N+1)/2 must exceed the largest RIV observed
+ * at that field (a smaller N would make an observed RIV illegal). The observed maximum only grows, so the filter never excludes
+ * the true N. Appended in priority order (N descending, start ascending) up to the table size. */
+static void append_all_locked(void)
 {
-  uint32_t m = 0;
   for (int l = 0; l < g_nlen; l++)
-    for (int p = 0; g_len[l].fitted && p < g_len[l].npre; p++)
-      if (g_len[l].pre[p].riv < 31) m |= 1u << g_len[l].pre[p].riv;
-  return m;
-}
-/* caller holds mu, no probe pending, no lock: drop hypotheses that got WIDEN_PROBES probes and no vote, refill from the full
- * enumeration. The generation changes (in-flight probes carry the old hypothesis order). */
-static void widen_locked(void)
-{
-  const uint32_t wm = used_width_mask_locked(), total = nr_ul_layout_enum_count(g_cell.carrier_rb, wm);
-  if (g_enum_next >= total) return;
-  int keep = 0;
-  for (int h = 0; h < g_nhyp; h++) {
-    const bool sib1 = nr_ul_layout_sib1_first_enabled() && g_hyp[h].n == g_cell.sib1_ul_size && g_hyp[h].start == g_cell.sib1_ul_start;
-    if (g_hyp[h].votes || sib1) g_hyp[keep++] = g_hyp[h];
-  }
-  const int dropped = g_nhyp - keep;
-  g_nhyp = keep;
-  const uint32_t first = g_enum_next;
-  while (g_enum_next < total && g_nhyp < WIDEN_CAP) {
-    uint16_t n, s;
-    if (!nr_ul_layout_enum_at(g_cell.carrier_rb, wm, g_enum_next++, &n, &s)) break;
-    bool have = false;
-    for (int h = 0; h < g_nhyp && !have; h++) have = g_hyp[h].n == n && g_hyp[h].start == s;
-    if (!have) g_hyp[g_nhyp++] = (hyp_state_t){.n = n, .start = s};
-  }
-  for (int l = 0; l < g_nlen; l++) memset(g_len[l].ev, 0, sizeof(g_len[l].ev)); /* evidence is keyed by hypothesis index */
-  g_gen++;
-  g_widen_mark = g_probes_fed;
-  LOG_A(PHY, "SENSING: ULLAYOUT WIDEN dropped=%d kept=%d enumerated=%u..%u of %u hyps=%d probes=%u\n", dropped, keep, first,
-        g_enum_next, total, g_nhyp, g_probes_fed);
+    for (int p = 0; g_len[l].fitted && p < g_len[l].npre; p++) {
+      const len_state_t *ls = &g_len[l];
+      const int w = ls->pre[p].riv;
+      uint32_t maxriv = 0;
+      const int nb = ls->count < NR_UL_LAYOUT_BANK ? (int)ls->count : NR_UL_LAYOUT_BANK;
+      for (int i = 0; i < nb; i++) {
+        const uint32_t r = fld(&ls->bank[i].p, ls->len, 1 + ls->pre[p].bwp_ind, w);
+        if (r > maxriv) maxriv = r;
+      }
+      uint16_t n, st;
+      for (uint32_t i = 0; g_nhyp < NR_UL_LAYOUT_MAX_HYP && nr_ul_layout_enum_at(g_cell.carrier_rb, w, maxriv, i, &n, &st); i++) {
+        bool have = false;
+        for (int h = 0; h < g_nhyp && !have; h++) have = g_hyp[h].n == n && g_hyp[h].start == st;
+        if (!have) g_hyp[g_nhyp++] = (hyp_state_t){.n = n, .start = st};
+      }
+    }
 }
 
 /* caller holds mu. Adds the (N, start) hypotheses for every RIV width used by a fitted length. */
@@ -501,6 +484,7 @@ static void build_hyps_locked(void)
       if (!have && g_nhyp < NR_UL_LAYOUT_MAX_HYP) g_hyp[g_nhyp++] = (hyp_state_t){.n = cn[i], .start = (uint16_t)s};
     }
   }
+  if (bwp_all_enabled()) append_all_locked();
 }
 
 /* caller holds mu: PRB range of grant p (length state ls) under hypothesis h. */
@@ -630,11 +614,6 @@ static void finalize_pending_locked(void)
   }
   if (a < 0) return;
   const uint32_t va = g_hyp[a].votes, vb = b >= 0 ? g_hyp[b].votes : 0;
-  if (g_locked_hyp < 0 && bwp_all_enabled() && g_probes_fed - g_widen_mark >= WIDEN_PROBES
-      && !(va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS)) {
-    widen_locked();
-    return;
-  }
   if (va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS) {
     g_locked_hyp = a;
     g_lock_slot = now;

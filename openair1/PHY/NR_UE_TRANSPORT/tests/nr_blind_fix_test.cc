@@ -75,20 +75,19 @@ TEST(BlindFix, UlBwpEnumerationIsComplete)
 {
   const int car = 106;
   const int w = nr_ul_layout_riv_bits(100); /* 13 */
-  const uint32_t wm = 1u << w;
-  const uint32_t cnt = nr_ul_layout_enum_count(car, wm);
+  const uint32_t cnt = nr_ul_layout_enum_count(car, w, 0);
   uint32_t brute = 0;
   bool has_95_at_10 = false, beyond_legacy = false;
   for (int n = 1; n <= car; n++)
     if (nr_ul_layout_riv_bits(n) == w) brute += car - n + 1;
   EXPECT_EQ(cnt, brute);
   uint16_t n0, s0;
-  ASSERT_TRUE(nr_ul_layout_enum_at(car, wm, 0, &n0, &s0));
+  ASSERT_TRUE(nr_ul_layout_enum_at(car, w, 0, 0, &n0, &s0));
   EXPECT_EQ(n0, car); /* full carrier first */
   EXPECT_EQ(s0, 0);
   for (uint32_t i = 0; i < cnt; i++) {
     uint16_t n, s;
-    ASSERT_TRUE(nr_ul_layout_enum_at(car, wm, i, &n, &s));
+    ASSERT_TRUE(nr_ul_layout_enum_at(car, w, 0, i, &n, &s));
     EXPECT_EQ(nr_ul_layout_riv_bits(n), w);
     EXPECT_LE(s + n, car);
     has_95_at_10 |= n == 95 && s == 10;
@@ -97,7 +96,9 @@ TEST(BlindFix, UlBwpEnumerationIsComplete)
   EXPECT_TRUE(has_95_at_10);
   EXPECT_TRUE(beyond_legacy);
   uint16_t n, s;
-  EXPECT_FALSE(nr_ul_layout_enum_at(car, wm, cnt, &n, &s));
+  EXPECT_FALSE(nr_ul_layout_enum_at(car, w, 0, cnt, &n, &s));
+  /* evidence prune: an observed RIV of 7000 makes every N with N(N+1)/2 <= 7000 (N <= 101) illegal; 100 PRB hypotheses go */
+  EXPECT_EQ(nr_ul_layout_enum_count(car, w, 5200), 15u); /* N = 102..106 only */
 }
 
 static void nr_dci_bits_set(nr_dci_bits_t *b, int len, int i, int v)
