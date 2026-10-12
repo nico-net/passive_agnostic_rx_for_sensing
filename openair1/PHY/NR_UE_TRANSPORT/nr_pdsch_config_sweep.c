@@ -17,6 +17,7 @@
  */
 
 #include "nr_pdsch_config_sweep.h"
+#include "nr_blind_stats.h"
 #include "nr_td_fieldbook.h"
 #include "nr_crc_evidence.h"
 #include "nr_pdsch_qm_oracle.h"
@@ -1107,6 +1108,13 @@ static int sweep_decide(nr_pdsch_config_sweep_state_t *st, bool check_separation
   }
   const double rb = rate_of(st, best);
   const double rs = (second >= 0) ? rate_of(st, second) : 0.0;
+  if (nbs_sweep_signif_enabled()) { /* BLINDFIX F8 (ISAC_SWEEP_SIGNIF=1): binomial tests instead of 2 % / 3x */
+    int n_act = 0;
+    for (int i = 0; i < st->n_hyp; i++) n_act += active(st, i);
+    if (nbs_sweep_winner(st->ok[best], st->trials[best], second >= 0 ? st->ok[second] : 0, second >= 0 ? st->trials[second] : 0, n_act))
+      st->winner = best;
+    return st->winner;
+  }
   if (rb >= SWEEP_MIN_RATE && (rs <= 0.0 || rb >= SWEEP_WIN_RATIO * rs)) {
     st->winner = best;
   }

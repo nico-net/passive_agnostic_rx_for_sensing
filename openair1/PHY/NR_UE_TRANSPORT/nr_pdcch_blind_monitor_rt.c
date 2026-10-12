@@ -208,6 +208,7 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
 #include "nr_pdcch_gpu_record.h"
 #include "nr_pdcch_scan_llr_cache.h"
 #include "nr_pdcch_scan_score.h"
+#include "nr_blind_stats.h"
 #include "nr_pdcch_scan_gpu_ref.h"
 #include "nr_td_cb0_wire.h"
 #include "nr_td_grantwork.h"
@@ -7060,7 +7061,23 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       // exactly (0,0) live 2026-07-28; skips the polar decode entirely for those, not just the CFR
       // submission -- a real CPU saving alongside the false-accept reduction. Only the REJECTION is
       // conditional now; the measurement above always runs. ----
-      if (cfg->energy_adapt_factor > 0.0f || cfg->energy_min > 0.0f) {
+      /* BLINDFIX F3 (ISAC_PDCCH_GATE_CFAR=1, default off): when the operator enabled the adaptive energy gate, replace its
+       * 3 x running-median test (which rejected 100 % of a dense CORESET's candidates) by the amplitude-consistency score
+       * against its pure-noise distribution, a fixed false-alarm probability for the candidate's RE count. */
+      static int s_cfar = -1;
+      static double s_cfar_z = 3.09; /* Q(3.09) = 1e-3: the same level as the known-RNTI prescreen */
+      if (s_cfar < 0) {
+        s_cfar = getenv("ISAC_PDCCH_GATE_CFAR") && atoi(getenv("ISAC_PDCCH_GATE_CFAR")) ? 1 : 0;
+        if (getenv("ISAC_PDCCH_GATE_CFAR_Z") && atof(getenv("ISAC_PDCCH_GATE_CFAR_Z")) > 0) s_cfar_z = atof(getenv("ISAC_PDCCH_GATE_CFAR_Z"));
+      }
+      if (s_cfar && cfg->energy_adapt_factor > 0.0f) {
+        const double sc = ps_score >= 0.0 ? ps_score : joint_anon_score((const int16_t *)e_raw, n_re_cand * 2);
+        if (sc < nbs_cfar_score_min(n_re_cand * 2, s_cfar_z) && !ps_diag) {
+          e_rx_cand_idx += n_re_cand;
+          NR_BLIND_CTR_INC(g_held_energy);
+          continue;
+        }
+      } else if (cfg->energy_adapt_factor > 0.0f || cfg->energy_min > 0.0f) {
         float thresh;
         if (cfg->energy_adapt_factor > 0.0f) {
           // Until the estimate has converged, reject nothing: a not-yet-settled floor can sit far
@@ -8753,6 +8770,18 @@ constdiag_done:;
     const int     rb_origin       = is_dci10 ? dci10_rb_base
                                   : (cand_task[ti].bwp_entry > 0 ? pbwp_snap[cand_task[ti].bwp_entry].start : cfg->bwp_start);
     uint8_t grant_mcs_table = is_dci10 ? out.mcs_table : (uint8_t)cfg->pdsch_mcs_table;
+    int8_t  cell_mcs_table_lbrm = (int8_t)cfg->pdsch_mcs_table;
+    {
+      /* BLINDFIX F7 (ISAC_MCS_TABLE_EVID=1): the table the cell's CRC passes support overrides the config value */
+      static int s_ev = -1;
+      if (s_ev < 0)
+        s_ev = getenv("ISAC_MCS_TABLE_EVID") && atoi(getenv("ISAC_MCS_TABLE_EVID")) ? 1 : 0;
+      const int ev = s_ev ? nr_pdsch_passive_mcs_table_evidence() : -1;
+      if (ev >= 0) {
+        if (!is_dci10) grant_mcs_table = (uint8_t)ev;
+        cell_mcs_table_lbrm = (int8_t)ev;
+      }
+    }
     if (is_dci10) {
       NR_BLIND_CTR_INC(g_accepts_10);
       if (out.rnti_class < NR_BLIND_RNTI_CLASS_COUNT) {
@@ -9138,7 +9167,7 @@ constdiag_done:;
     /* 0 is layout 0, not "none": a format 1_0 / manual-layout decode used to credit its CRC (SIB1 passes
      * included) to stage-2 layout 0. 0xFFFF = none, which the feedback counts as DL link health. */
     sweep_ticket.layout_index = 0xFFFF;
-    int8_t grant_mcs_table_lbrm = (int8_t)cfg->pdsch_mcs_table;
+    int8_t grant_mcs_table_lbrm = cell_mcs_table_lbrm;
     /* ---- T26b PDSCH GRANT SOLVER (ISAC_PDSCH_SOLVER=1, nr_pdsch_solver.h). A C-RNTI DCI 1_1 of a full-auto
      * dedicated CORESET goes to the solver instead of Technique D: group the live DCI 1_1 layouts by what they read
      * from THIS payload, let the solver choose a few (reading, S, DM-RS add-pos, MCS table) first-code-block probes
