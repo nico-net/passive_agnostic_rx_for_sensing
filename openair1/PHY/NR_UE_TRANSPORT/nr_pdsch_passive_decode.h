@@ -198,6 +198,8 @@ typedef struct {
  * @param[out] out     Decode outcome; always written
  * @return             out->status
  */
+/* DECODETIME ISAC_PDSCH_GPU_HOST_PIN=1: allocate and pin the calling consumer thread's GPU-touched buffers (no-op when off). */
+void nr_pdsch_passive_decode_pin_prewarm(PHY_VARS_NR_UE *ue);
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,

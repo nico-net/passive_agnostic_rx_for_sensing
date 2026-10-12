@@ -1108,6 +1108,10 @@ extern "C" void nr_pdsch_gpu_exact_stats(int *direct, uint64_t *late, uint64_t *
   *busy = g_exact_busy;
 }
 extern "C" double nr_pdsch_gpu_exact_last_us(void) { return g_exact_us; }
+/* DECODETIME: pins a pageable host buffer the kernels read or write (cudaHostRegister), so the GPU never page-faults on
+ * its first touch of it (nsys: every new 4 KB page cost ~12 us of device-wide stall in k_fir). 0 or the CUDA error. */
+extern "C" int nr_pdsch_gpu_exact_pin(void *p, size_t bytes) { return (int)cudaHostRegister(p, bytes, cudaHostRegisterPortable); }
+extern "C" int nr_pdsch_gpu_exact_unpin(void *p) { return (int)cudaHostUnregister(p); }
 
 /* ---- GPU-DEMOD stage 2: bit-exact passive PDSCH channel estimation of one grant (nr_pdsch_gpu_chest.h) ------- */
 namespace nrch {

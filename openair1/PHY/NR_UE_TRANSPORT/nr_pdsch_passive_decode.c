@@ -187,10 +187,77 @@ static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
 static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
 static _Atomic int g_pdtim_slow_left = 200;
+/* DECODETIME: per class x stage, the stage wall time (us) held by bodies of duration band <1 / 1-5 / 5-20 / >20 ms (PDTIMCLSST) */
+static _Atomic uint64_t g_cls_stg[PDTIM_NCLS][PDTIM_N][4];
 static bool pdtim_is_probe(void);
+
+/* ---- DECODETIME: per-thread persistent decode buffers that the GPU kernels touch -----------------------------------
+ * Heap-backed TLS handles (see the PERSISTENT SCRATCH note in passive_decode_body); file scope so that
+ * nr_pdsch_passive_decode_pin_prewarm() can allocate and pin them at consumer start, off the decode path. */
+static __thread fourDimArray_t *toFree, *toFree2, *toFree3, *toFree4, *toFree5; /* estimates, comp, mag, magb, magr */
+static __thread int16_t *llr_tls;      /* LLRs: grow-only (at the maximum once when pinning is on) */
+static __thread uint32_t llr_cap_tls;
+static __thread bool bufs_pinned;
+void nr_pdsch_gpu_chest_pin_prewarm(void) __attribute__((weak)); /* nr_dl_channel_estimation.c */
+/* decode_bufs_prepare: allocates the five constant-shape buffers (idempotent) and, with ISAC_PDSCH_GPU_HOST_PIN=1, pins
+ * them once per thread. shortcut: a later reallocation (shape change, never seen: the shapes are frame-parm constants)
+ * would leave the registration stale; add an unpin if a shape ever becomes grant-dependent. */
+static void decode_bufs_prepare(const NR_DL_FRAME_PARMS *fp)
+{
+  const uint32_t pdsch_est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16;
+  const uint32_t rx_size_symbol = (fp->N_RB_DL * NR_NB_SC_PER_RB + 15) & ~15;
+  allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx * NR_MAX_NB_LAYERS, pdsch_est_size, true);
+  allocCast3D(rxdataF_comp, c16_t, toFree2, fp->symbols_per_slot, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  allocCast3D(dl_ch_mag, c16_t, toFree3, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  if (bufs_pinned || !nr_pdsch_gpu_host_pin_enabled())
+    return;
+  bufs_pinned = true;
+  const size_t mb = (size_t)NR_SYMBOLS_PER_SLOT * NR_MAX_NB_LAYERS * rx_size_symbol * sizeof(c16_t);
+  nr_pdsch_gpu_host_pin(pdsch_dl_ch_estimates, (size_t)fp->nb_antennas_rx * NR_MAX_NB_LAYERS * pdsch_est_size * sizeof(int32_t));
+  nr_pdsch_gpu_host_pin(rxdataF_comp, (size_t)fp->symbols_per_slot * NR_MAX_NB_LAYERS * rx_size_symbol * sizeof(c16_t));
+  nr_pdsch_gpu_host_pin(dl_ch_mag, mb);
+  nr_pdsch_gpu_host_pin(dl_ch_magb, mb);
+  nr_pdsch_gpu_host_pin(dl_ch_magr, mb);
+}
+/* llr_prepare: the per-thread LLR buffer with at least `need` int16 entries (grow-only; cleared by the caller). With pinning
+ * on it is allocated once at the largest G of the carrier, so no later growth has to unpin/re-pin (cudaHostUnregister
+ * measured 22 ms mean, 186 ms max). */
+static int16_t *llr_prepare(const NR_DL_FRAME_PARMS *fp, uint32_t need)
+{
+  if (llr_cap_tls >= need)
+    return llr_tls;
+  if (nr_pdsch_gpu_host_pin_enabled()) {
+    const uint32_t llr_max = ALIGNARRAYSIZE((uint32_t)fp->N_RB_DL * NR_NB_SC_PER_RB * NR_SYMBOLS_PER_SLOT * 8 * NR_MAX_NB_LAYERS, 32);
+    if (need < llr_max)
+      need = llr_max;
+    nr_pdsch_gpu_host_unpin(llr_tls);
+  }
+  free(llr_tls);
+  llr_tls = (int16_t *)malloc16_clear(need * sizeof(int16_t));
+  llr_cap_tls = llr_tls ? need : 0;
+  if (llr_tls)
+    nr_pdsch_gpu_host_pin(llr_tls, (size_t)need * sizeof(int16_t));
+  return llr_tls;
+}
+/* nr_pdsch_passive_decode_pin_prewarm: ISAC_PDSCH_GPU_HOST_PIN=1 only -- allocate and pin this consumer thread's GPU-touched
+ * buffers before its first grant (flag off: no-op, buffers appear lazily as before). Caller: the PDSCH queue consumer. */
+void nr_pdsch_passive_decode_pin_prewarm(PHY_VARS_NR_UE *ue)
+{
+  if (!nr_pdsch_gpu_host_pin_enabled())
+    return;
+  decode_bufs_prepare(&ue->frame_parms);
+  llr_prepare(&ue->frame_parms, 1);
+  if (nr_pdsch_gpu_chest_pin_prewarm)
+    nr_pdsch_gpu_chest_pin_prewarm();
+}
 static void pdtim_cls_note(uint64_t d)
 {
   const int c = pdtim_is_probe() ? 2 : t_pdtim_body > 1 ? 1 : 0;
+  const int band = d > 20000000 ? 3 : d > 5000000 ? 2 : d > 1000000 ? 1 : 0;
+  for (int k = 0; k < PDTIM_N; k++)
+    atomic_fetch_add_explicit(&g_cls_stg[c][k][band], t_pdtim_stage_us[k], memory_order_relaxed);
   if (d > 20000000 && atomic_fetch_sub(&g_pdtim_slow_left, 1) > 0) { /* a body above 20 ms: when, and which stage */
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -241,6 +308,19 @@ static void pdtim_cls_report(void)
                   (double)atomic_load(&g_cls_ns20[k]) / (double)(atomic_load(&g_cls_ns[k]) + 1));
   }
   LOG_I(PHY, "SENSING: PDTIMCLS us %s\n", rep);
+  /* stage x duration band: per class, per stage, ms of stage wall time in bodies <1 / 1-5 / 5-20 / >20 ms */
+  u = 0;
+  for (int c = 0; c < PDTIM_NCLS; c++) {
+    u += snprintf(rep + u, sizeof(rep) - u, "%s[", kPdtimCls[c]);
+    for (int k = 0; k < PDTIM_N; k++) {
+      if (k == PDTIM_ALLOC)
+        continue;
+      u += snprintf(rep + u, sizeof(rep) - u, "%s=%.0f/%.0f/%.0f/%.0f ", kPdtimName[k], atomic_load(&g_cls_stg[c][k][0]) / 1000.0,
+                    atomic_load(&g_cls_stg[c][k][1]) / 1000.0, atomic_load(&g_cls_stg[c][k][2]) / 1000.0, atomic_load(&g_cls_stg[c][k][3]) / 1000.0);
+    }
+    u += snprintf(rep + u, sizeof(rep) - u, "] ");
+  }
+  LOG_I(PHY, "SENSING: PDTIMCLSST ms(<1/1-5/5-20/>20ms bodies) %s\n", rep);
 }
 static void pdtim_pct_report(void)
 {
@@ -2909,7 +2989,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * its own. Heap-backed via the existing allocator rather than a __thread array -- the AoA work
    * records a shifted TLS layout producing an AVX alignment fault, and these are far larger than
    * the buffer that did it. */
-  static __thread fourDimArray_t *toFree = NULL;
+  decode_bufs_prepare(fp); /* DECODETIME: allocates (idempotent) and, with ISAC_PDSCH_GPU_HOST_PIN=1, pins the GPU-touched buffers */
   // One estimate per (layer, rx antenna) -- nr_rx_pdsch() indexes this as nl*nb_antennas_rx + aarx,
   // matching nr_ue_pdsch_procedures()'s own allocation. Estimating only layer 0 (as this used to)
   // gives the equaliser nothing to separate the other layers with.
@@ -4033,15 +4113,10 @@ gpu_llr_ready:;
   /* Grow-only, and cleared each call: nr_rx_pdsch writes one symbol's worth at a time and the
    * decoder reads G of them, so stale bytes past this grant's G must not be visible. Clearing is
    * the 75 us the measurement above already accounts for; the allocation is what is being removed. */
-  static __thread int16_t  *llr     = NULL;
-  static __thread uint32_t  llr_cap = 0;
-  if (llr_cap < rx_llr_buf_sz) {
-    free(llr);
-    llr = (int16_t *)malloc16_clear(rx_llr_buf_sz * sizeof(int16_t));
-    llr_cap = llr ? rx_llr_buf_sz : 0;
-  } else {
+  const bool llr_fresh = llr_cap_tls < rx_llr_buf_sz; /* a fresh malloc16_clear buffer is already zero */
+  int16_t *llr = llr_prepare(fp, rx_llr_buf_sz);
+  if (llr && !llr_fresh)
     memset(llr, 0, (size_t)rx_llr_buf_sz * sizeof(int16_t));
-  }
   if (llr == NULL) {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
     { static _Atomic unsigned long c_ = 0;
@@ -4066,13 +4141,9 @@ gpu_llr_ready:;
    * be equal. The moment the gNB was reconfigured to max_rank = 1 it segfaulted on the first
    * full-band (273 PRB) grant -- big enough for the overrun to leave the mapping. */
 
-  static __thread fourDimArray_t *toFree2 = NULL;
   allocCast3D(rxdataF_comp, c16_t, toFree2, fp->symbols_per_slot, NR_MAX_NB_LAYERS, rx_size_symbol, true);
-  static __thread fourDimArray_t *toFree3 = NULL;
   allocCast3D(dl_ch_mag, c16_t, toFree3, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
-  static __thread fourDimArray_t *toFree4 = NULL;
   allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
-  static __thread fourDimArray_t *toFree5 = NULL;
   allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
   /* T26d ISAC_RX_ML_2L / ISAC_RX_EQ_AB: the 2-layer ML LLR needs the inter-layer correlation buffer (stock decode
    * passes NULL); allocated per thread on first use only. */
@@ -4208,9 +4279,11 @@ gpu_llr_ready:;
     static __thread size_t virt_cap = 0;
     const size_t need = (size_t)fp->nb_antennas_rx * fp->samples_per_slot_wCP;
     if (virt_cap < need) {
+      nr_pdsch_gpu_host_unpin(virt); /* DECODETIME: read by the GPU demod */
       free(virt);
       virt = (c16_t *)malloc16(need * sizeof(c16_t));
       virt_cap = virt ? need : 0;
+      nr_pdsch_gpu_host_pin(virt, need * sizeof(c16_t));
     }
     static __thread int *gidx = NULL; /* heap, not a 13 kB frame on every decode's stack */
     if (gidx == NULL)
