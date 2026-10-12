@@ -1651,6 +1651,8 @@ static void hq_reselect(solver_rnti_t *r, bool force)
   int n, bad;
   hq_score(r, r->rep, &n, &bad);
   const bool refuted = nr_pdsch_solver_hq_refuted(n, bad);
+  LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x HQSCORE layout %d: %d violations in %d grants (%s)%s\n", r->rnti, r->rep, bad, n,
+        refuted ? "refuted" : "kept", force ? " [rv rescues]" : "");
   if (!refuted && !(force && bad > 0)) return;
   const int old = r->rep;
   bool all_refuted = false;
