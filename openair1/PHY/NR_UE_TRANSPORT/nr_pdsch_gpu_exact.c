@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 
 typedef int (*exact_fn_t)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t, int);
 static exact_fn_t g_fn;
@@ -137,7 +138,7 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
 int nr_pdsch_gpu_exact_fep_ranges(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, const int (*rng)[2], int n_rng,
                                   c16_t *rxdataF, size_t stride, c16_t **rxdata)
 {
-  if (!atomic_load_explicit(&g_on, memory_order_relaxed))
+  if (!atomic_load_explicit(&g_on, memory_order_relaxed) || nr_pdsch_route_cpu()) /* BATCHCPU */
     return -1;
   uint16_t mask = 0;
   for (int g = 0; g < n_rng; g++)

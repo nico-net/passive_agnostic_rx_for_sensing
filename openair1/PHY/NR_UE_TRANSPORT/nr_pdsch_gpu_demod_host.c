@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 
 uint32_t nr_dlsch_extract_geometry(const NR_DL_FRAME_PARMS *fp, int chest_time, c16_t *rx_idx, uint32_t est_sz, int32_t *est_idx,
                                    uint32_t ext_sz, c16_t *out_y, int32_t *out_h, unsigned char symbol,
@@ -710,6 +711,8 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
     t_def = calloc(1, sizeof(*t_def));
   int mode = 0, align = 0, l2d = 0;
   double thr_coef = 0.0;
+  if (nr_pdsch_route_cpu()) /* BATCHCPU */
+    return -1;
   const int rf = refuse(c, &mode, &thr_coef, &align, &l2d);
   if (rf >= 0) {
     if (rf != RF_OFF)

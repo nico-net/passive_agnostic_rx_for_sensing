@@ -51,6 +51,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_passive_tpool.h"
 #include "nr_pdsch_retry_pred.h"
 #include "nr_pdsch_gpu_ldpc_host.h"
+#include "nr_pdsch_cpu_route.h" /* BATCHCPU */
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
 
@@ -5437,7 +5438,7 @@ static bool pdcch_rm_arm(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const f
 
 /* passive_decode_body: passive_decode_body_core() with, under ISAC_PDSCH_PDCCH_RM=1, the scheduling PDCCH's REs excluded (pdcch_rm_arm()).
  *   Flag unset or the grant without a PDCCH overlap: exactly passive_decode_body_core(). */
-static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
+static nr_pdsch_passive_decode_status_t passive_decode_body_gated(PHY_VARS_NR_UE *ue,
                                                             const UE_nr_rxtx_proc_t *proc,
                                                             fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
                                                             const freq_alloc_bitmap_t *freq_alloc,
@@ -5455,6 +5456,21 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
     return passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   const nr_pdsch_passive_decode_status_t st = passive_decode_body_core(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   rm_disarm();
+  return st;
+}
+
+/* BATCHCPU: route (CPU vs GPU chain) and gate one decode body; see nr_pdsch_cpu_route.h. Flags off: a plain call. */
+static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
+                                                            const UE_nr_rxtx_proc_t *proc,
+                                                            fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                                            const freq_alloc_bitmap_t *freq_alloc,
+                                                            const nr_pdsch_passive_grant_t *grant,
+                                                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                                            nr_pdsch_passive_decode_result_t *out)
+{
+  nr_pdsch_route_t rt = nr_pdsch_route_begin((int)freq_alloc->num_rbs, __builtin_popcount(dlsch_config->dmrs_ports), t_probe_first_seg);
+  const nr_pdsch_passive_decode_status_t st = passive_decode_body_gated(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+  nr_pdsch_route_end(&rt);
   return st;
 }
 
