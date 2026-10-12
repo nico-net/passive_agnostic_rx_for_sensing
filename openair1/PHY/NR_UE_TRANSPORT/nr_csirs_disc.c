@@ -10,6 +10,7 @@
 #include "nr_passive_cfg_epoch.h"
 
 #include <pthread.h>
+#include <string.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <math.h>
@@ -22,6 +23,7 @@ extern void nr_cfg_epoch_subscribe(nr_cfg_epoch_listener_t fn) __attribute__((we
 extern int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *, const nr_csirs_disc_win_t *)
     __attribute__((weak));
 extern bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *) __attribute__((weak));
+extern int nr_csirs_blind_rt_discovery_match(const nr_csirs_disc_hyp_t *) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_disable(void) __attribute__((weak));
 extern int nr_csirs_blind_rt_discovery_prepare(const NR_DL_FRAME_PARMS *) __attribute__((weak));
 extern void nr_csirs_blind_rt_discovery_init(void) __attribute__((weak));
@@ -72,8 +74,8 @@ static int qualified_count;
 /* ISAC_CSIRS_DISC_RATELIMIT bookkeeping (nr_csirs_disc_rate_internal.h); all under pipeline_lock. */
 static float q_strength[256];
 static bool q_was[256], rl_epoch;
-static nr_csirs_disc_fp_t rl_known[128];
-static int rl_known_n;
+static nr_csirs_disc_fp_t rl_known[128], rl_pending[8];
+static int rl_known_n, rl_pending_n;
 static const int16_t *cache_grid;
 static uint64_t cache_written;
 /* same_seed: true when two hypotheses describe the same CSI-RS seed: same row, symbols, CDM, density, period and offset, with at least 80 % overlap of their RB extents.
@@ -216,6 +218,14 @@ void nr_csirs_disc_pipeline_init(const NR_DL_FRAME_PARMS *fp)
 }
 
 
+/* off_near: true when two occasion offsets of period p are equal or adjacent slots (a TRS pair / two-offset resource shows either). */
+static bool off_near(unsigned a, unsigned b, unsigned p)
+{
+  if (!p) return a == b;
+  const unsigned d = (a + p - b) % p;
+  return d <= 1 || d == p - 1;
+}
+
 /* rl_update: ISAC_CSIRS_DISC_RATELIMIT. Builds the observation (confirmed set of this module's winners, footprint novelty, CRC counters),
  *   steps the state machine and applies the ingest duty to the TD front end. Caller: nr_csirs_disc_process() under pipeline_lock, flag on only.
  */
@@ -241,32 +251,53 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
   rl_epoch = false;
   if (ring->written) o.slot = ring->meta[(ring->written - 1) % ring->capacity].abs_slot;
   float min_strength = 1e30f;
+  uint64_t seen = 0; /* distinct confirmed blind_rt resources matched (tolerant to widening/merging; two hypotheses of one resource count once) */
   for (int i = 0; i < qualified_count; ++i) {
-    const bool c = nr_csirs_blind_rt_discovery_confirmed && nr_csirs_blind_rt_discovery_confirmed(&qualified[i].h);
+    const int k = nr_csirs_blind_rt_discovery_match ? nr_csirs_blind_rt_discovery_match(&qualified[i].h) : -1;
+    const bool c = k >= 0;
     o.lost += q_was[i] && !c;
-    q_was[i] = c;
+    if (c) { q_was[i] = true; seen |= 1ull << k; }
+    else if (!st.stable) q_was[i] = false; /* in SEARCH a loss is an edge; in STABLE it persists and is debounced by the state machine */
     if (!c) continue;
-    ++o.n_conf;
     if (qualified[i].h.period > o.max_period) o.max_period = qualified[i].h.period;
     if (q_strength[i] < min_strength) min_strength = q_strength[i];
   }
+  o.n_conf = __builtin_popcountll(seen);
+  /* new pattern: a footprint outside the learned baseline (period, density, symbols, extent, offset within +-1 slot = TRS pair), as strong as the
+   * weakest confirmed one, AND seen again in the next observation (noise footprints do not recur at the same place) */
+  nr_csirs_disc_fp_t pend[8]; int pend_n = 0;
   for (int i = 0; i < n_fp; ++i) {
     bool known = false;
     for (int k = 0; k < rl_known_n && !known; ++k)
-      known = rl_known[k].period == fps[i].period && rl_known[k].offset == fps[i].offset
+      known = rl_known[k].period == fps[i].period && off_near(rl_known[k].offset, fps[i].offset, fps[i].period)
            && rl_known[k].density == fps[i].density && (rl_known[k].sym_mask & fps[i].sym_mask)
            && same_extent(&rl_known[k], &fps[i]);
     if (known) continue;
     if (!st.stable) { if (rl_known_n < 128) rl_known[rl_known_n++] = fps[i]; }
-    else if (o.n_conf && fps[i].strength >= min_strength) o.new_pattern = true;
+    else if (o.n_conf && fps[i].strength >= min_strength) {
+      bool again = false;
+      for (int k = 0; k < rl_pending_n && !again; ++k)
+        again = rl_pending[k].period == fps[i].period && rl_pending[k].offset == fps[i].offset
+             && rl_pending[k].density == fps[i].density && (rl_pending[k].sym_mask & fps[i].sym_mask) && same_extent(&rl_pending[k], &fps[i]);
+      if (again) o.new_pattern = true;
+      if (pend_n < 8) pend[pend_n++] = fps[i];
+    }
   }
+  memcpy(rl_pending, pend, sizeof(pend)); rl_pending_n = pend_n;
   if (nr_pdsch_passive_queue_get_stats) {
     nr_pdsch_passive_queue_stats_t pq;
     nr_pdsch_passive_queue_get_stats(&pq);
     o.crc_ok = pq.crc_ok; o.crc_dec = pq.decoded;
   }
   const bool was = st.stable;
-  if (nr_csirs_rl_step(&st, &cfg, &o) || was != st.stable) {
+  const bool changed = nr_csirs_rl_step(&st, &cfg, &o);
+  static uint64_t wait_log; /* why STABLE is not reached, every 30 s of stream time */
+  if (!st.stable && o.slot >= wait_log + (uint64_t)ring->slots_per_frame * 100 * 30) {
+    wait_log = o.slot;
+    LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT WAIT n_conf=%d lost=%d slot=%llu since_change=%llu need=%llu\n", o.n_conf, o.lost,
+          (unsigned long long)o.slot, (unsigned long long)(o.slot - st.last_change), (unsigned long long)st.need);
+  }
+  if (changed || was != st.stable) {
     if (nr_csirs_disc_td_set_duty) nr_csirs_disc_td_set_duty(st.stable, st.G, st.div_s, st.rearm);
     LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT %s reason=%s n_conf=%d slot=%llu G=%u div_s=%u p0=%.3f skipped=%llu\n",
           st.stable ? "STABLE" : "SEARCH", st.reason, o.n_conf, (unsigned long long)o.slot, st.G, st.div_s, st.p0,

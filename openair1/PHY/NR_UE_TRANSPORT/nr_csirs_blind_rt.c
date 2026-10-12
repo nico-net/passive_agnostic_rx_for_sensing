@@ -417,6 +417,31 @@ bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *h)
   return confirmed;
 }
 
+/* nr_csirs_blind_rt_discovery_match: index (0..63) of the confirmed NZP resource that is the same physical resource as `h`, or -1.
+ *   Tolerant version of discovery_confirmed for the rate-limit bookkeeping: blind_rt may widen/merge a resource after admission (e.g. rb 0:208 -> 0:217),
+ *   so identity = first symbol, density, period, an offset phase, RB spans overlapping by >= half of the narrower one, and (same row) overlapping freq_domain.
+ *   Read-only under g_csirs_state_lock. Caller: nr_csirs_disc.c rl_update().
+ */
+int nr_csirs_blind_rt_discovery_match(const nr_csirs_disc_hyp_t *h)
+{
+  if (!h)
+    return -1;
+  int found = -1;
+  pthread_mutex_lock(&g_csirs_state_lock);
+  for (int k = 0; k < g_st.n_conf && k < 64 && found < 0; ++k) {
+    const nr_csirs_candidate_t *c = &g_st.cand[g_st.conf_idx[k]];
+    const int lo = c->start_rb > h->rb_start ? c->start_rb : h->rb_start;
+    const int hi = c->start_rb + c->nr_of_rbs < h->rb_start + h->n_rb ? c->start_rb + c->nr_of_rbs : h->rb_start + h->n_rb;
+    const int narrow = c->nr_of_rbs < h->n_rb ? c->nr_of_rbs : h->n_rb;
+    if (c->symb_l0 == h->symb_l0 && c->freq_density == h->density && g_st.conf_period[k] == h->period
+        && (g_st.conf_off[k][0] == h->offset || (g_st.conf_n_off[k] == 2 && g_st.conf_off[k][1] == h->offset))
+        && hi > lo && 2 * (hi - lo) >= narrow && (c->row != h->row || (c->freq_domain & h->freq_domain)))
+      found = k;
+  }
+  pthread_mutex_unlock(&g_csirs_state_lock);
+  return found;
+}
+
 /* nr_csirs_blind_rt_discovery_reset: clears the discovery-fed search state (exports, visits, probes, strengths, both banks, queue) and forgets all confirmations.
  *   Withdraws each exported NZP resource from the monitor first (nr_csirs_monitor_remove_dynamic). Caller: nr_csirs_disc.c (epoch listener, on a new configuration epoch).
  */

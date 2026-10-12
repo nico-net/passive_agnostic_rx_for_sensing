@@ -49,6 +49,8 @@ extern uint64_t csirs_disc_readmit_skipped;
 int nr_csirs_blind_rt_add_discovered(const nr_csirs_disc_hyp_t *hyp, const nr_csirs_disc_win_t *win);
 /** True when this exact U5 geometry is already in the confirmed NZP bank. */
 bool nr_csirs_blind_rt_discovery_confirmed(const nr_csirs_disc_hyp_t *hyp);
+/** Index of the confirmed NZP resource that is the same physical resource as hyp (tolerant to widening/merging), or -1. */
+int nr_csirs_blind_rt_discovery_match(const nr_csirs_disc_hyp_t *hyp);
 /** Withdraw discovery-owned runtime state on cell epoch/synchronisation loss. */
 /* Startup only, before discovery worker/DL actors. */
 void nr_csirs_blind_rt_discovery_init(void);
