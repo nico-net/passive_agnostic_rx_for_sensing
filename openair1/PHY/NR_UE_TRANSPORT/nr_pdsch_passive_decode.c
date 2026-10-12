@@ -110,6 +110,7 @@ static const char *const kPdtimName[PDTIM_N] = {"fep", "chest", "alloc", "demod"
 static uint64_t g_pdtim_ns[PDTIM_N] = {0};
 static uint64_t g_pdtim_n[PDTIM_N]  = {0};
 static uint64_t g_pdtim_max[PDTIM_N] = {0};
+static double g_pdtim_ss[PDTIM_N] = {0}; /* sum of squared stage times (us^2): per-decode std in PDTIM */
 static uint64_t g_pdtim_calls = 0;
 /* chest_pdp_diag_on: returns ISAC_CHEST_PDP_DIAG (cached, default 1): whether the channel estimator runs its per-call BRDELAY/PDP diagnostic.
  *   Setting it to 0 skips a double-precision pass over the IDFT output for every (antenna, DM-RS symbol).
@@ -286,6 +287,7 @@ static inline void pdtim_add(int k, uint64_t t0)
   }
   g_pdtim_cpu_ns[k] += t_pdtim_cpu0 - c0;
   g_pdtim_ns[k] += d;
+  g_pdtim_ss[k] += ((double)d / 1000.0) * ((double)d / 1000.0);
   g_pdtim_n[k]++;
   if (d > g_pdtim_max[k]) {
     g_pdtim_max[k] = d;
@@ -316,14 +318,16 @@ static void pdtim_report(void)
     pdtim_pct_report();
   if (g_pdtim_cls > 0)
     pdtim_cls_report();
-  char rep[720];
+  char rep[900];
   int u = 0;
-  for (int k = 0; k < PDTIM_N && u < (int)sizeof(rep) - 90; k++) {
-    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus cpu=%.1fus max=%.1fus tot=%.2fs] ", kPdtimName[k],
+  for (int k = 0; k < PDTIM_N && u < (int)sizeof(rep) - 110; k++) {
+    const double mu = g_pdtim_n[k] ? (double)g_pdtim_ns[k] / (double)g_pdtim_n[k] / 1000.0 : 0.0;
+    const double var = g_pdtim_n[k] > 1 ? (g_pdtim_ss[k] - (double)g_pdtim_n[k] * mu * mu) / (double)(g_pdtim_n[k] - 1) : 0.0;
+    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus cpu=%.1fus max=%.1fus tot=%.2fs sd=%.1fus] ", kPdtimName[k],
                   (unsigned long)g_pdtim_n[k],
                   g_pdtim_n[k] ? (double)g_pdtim_ns[k] / (double)g_pdtim_n[k] / 1000.0 : 0.0,
                   g_pdtim_n[k] ? (double)g_pdtim_cpu_ns[k] / (double)g_pdtim_n[k] / 1000.0 : 0.0,
-                  (double)g_pdtim_max[k] / 1000.0, (double)g_pdtim_ns[k] / 1e9);
+                  (double)g_pdtim_max[k] / 1000.0, (double)g_pdtim_ns[k] / 1e9, var > 0 ? sqrt(var) : 0.0);
   }
   LOG_I(PHY, "SENSING: PDTIM calls=%lu %s\n", (unsigned long)g_pdtim_calls, rep);
 }
