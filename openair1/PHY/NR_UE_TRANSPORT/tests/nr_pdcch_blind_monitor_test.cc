@@ -6223,3 +6223,40 @@ TEST(Dci11Reading, LayoutsCollidingOnMcs0DisagreeOnRv) {
   EXPECT_FALSE(nr_dci11_same_reading(&ra, &rb, true));  // the fix keeps two readings
   EXPECT_TRUE(nr_dci11_same_reading(&rb, &rb, true));
 }
+
+// TIMRM (2026-10-12): a REAL TIM (PCI 923) MCS-0 DCI as the receiver printed it (RMDCI, replay of raw_pci923_tim_12s_tile3, 217 PRB BWP,
+// 47 bits, rnti 0x4ac6). The two layouts the solver keeps alive for that RNTI (MCS offset 16 and 18, same total) read the same MCS 0 and the same
+// allocation; the one that reads the MCS 2 bits early takes "(MCS LSB side, NDI)" as the rv: NDI = 1 (a new transport block, transmitted with
+// rv 0) reads rv 1, and the TB fails its CRC at rv 1 (50 % of TIM's MCS-0 grants). The reading dedup must keep them apart.
+TEST(Dci11Reading, TimRealMcs0PayloadNdiReadAsRv) {
+  const char *bits = "11000010000000000000000100000100010101000010000";
+  const uint16_t bwp = 217, len = 47;
+  ASSERT_EQ(strlen(bits), len);
+  auto opts = [](int vrb, int tb2) {
+    nr_pdcch_blind_extract_opts_t o{};
+    o.bwp_indicator_bits = 0; o.vrb_to_prb_bits = vrb; o.prb_bundling_bits = 0; o.rate_matching_bits = 0;
+    o.zp_csirs_bits = 0; o.tb2_bits = tb2; o.harq_pid_bits = 4; o.dai_bits = 2; o.pdsch_to_harq_bits = 3;
+    o.antenna_ports_bits = 4; o.tci_bits = 0; o.srs_request_bits = 2; o.cbg_bits = 0; o.fdra_mode = NR_FDRA_TYPE1;
+    o.tda_count = 1; o.tda_start[0] = 1; o.tda_length[0] = 13; o.tda_mapping[0] = 0; o.dmrs_add_pos = 0; o.dmrs_max_length = 1;
+    return o;
+  };
+  const auto a = opts(0, 2), b = opts(2, 0); // A: MCS at bit 16 (the wrong one); B: MCS at bit 18 (the CRC-proven one)
+  ASSERT_EQ(nr_pdcch_blind_dci_size_ex(bwp, &a), len);
+  ASSERT_EQ(nr_pdcch_blind_dci_size_ex(bwp, &b), len);
+  nr_pdcch_blind_raw_result_t raw{};
+  raw.rnti = 0x4ac6;
+  for (unsigned i = 0; i < len; i++)
+    if (bits[i] == '1') {
+      const unsigned bit = len - 1 - i;
+      raw.payload.w[bit / 64] |= 1ULL << (bit % 64);
+    }
+  nr_pdcch_blind_result_t ra{}, rb{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_11(&raw, len, bwp, 0, &a, &ra)) << ra.reject_reason;
+  ASSERT_TRUE(nr_pdcch_blind_extract_11(&raw, len, bwp, 0, &b, &rb)) << rb.reject_reason;
+  EXPECT_EQ(ra.mcs, 0); EXPECT_EQ(rb.mcs, 0);
+  EXPECT_EQ(ra.start_rb, rb.start_rb); EXPECT_EQ(ra.num_rb, rb.num_rb); EXPECT_EQ(ra.dmrs_ports, rb.dmrs_ports);
+  EXPECT_EQ(rb.ndi, 1); EXPECT_EQ(rb.rv, 0);   // B: a new TB, rv 0
+  EXPECT_EQ(ra.ndi, 0); EXPECT_EQ(ra.rv, 1);   // A: the same NDI bit read as the rv LSB
+  EXPECT_TRUE(nr_dci11_same_reading(&ra, &rb, false));
+  EXPECT_FALSE(nr_dci11_same_reading(&ra, &rb, true));
+}
