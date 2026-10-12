@@ -6013,6 +6013,100 @@ TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
+// ---- ISAC_UL_LOCK_SPRT (ULLOCKSPEED): sequential test on sub-threshold DM-RS evidence of every probe, any grant width.
+namespace {
+struct SprtRun {
+  int locked_n = 0, locked_start = 0;  // 0 = no lock
+  int probes = 0;
+  int wide = 0;  // probes with an L > 16 PRB hypothesis range
+};
+// mu = per-PRB mean of the DM-RS statistic on the true allocation (216 @ CRB 1).
+// heavy = noise drawn from a symmetric heavy-tailed mixture (the exchangeable-null shape is symmetric, not Gaussian).
+SprtRun UllSprtRun(unsigned seed, double mu, int max_probes, bool heavy)
+{
+  nr_ul_layout_lock_reset();
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                                    .slots_per_frame = 20};
+  UllGen g;
+  g.rng.seed(seed);
+  nr_pdcch_blind_ul_result_t out;
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+  std::mt19937 rng(seed * 7919u + 1);
+  std::normal_distribution<double> nd(0.0, 1.0);
+  std::uniform_real_distribution<double> ud(0.0, 1.0);
+  SprtRun run;
+  for (int i = 0; i < max_probes; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+    if (rc == 1) {
+      run.locked_n = out.bwp_size;
+      run.locked_start = out.bwp_start;
+      return run;
+    }
+    if (rc != 2) continue;
+    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP];
+    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, nullptr, nullptr);
+    uint16_t s = 0, l = 0;
+    nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l);
+    const int t0 = 1 + s, t1 = 1 + s + l;  // truth: N = 216 at CRB 1
+    nr_ul_layout_probe_res_t r = {};
+    r.n = n;
+    r.zn_valid = true;
+    r.ctl_db = -6.f;
+    r.comb1_db = NAN;
+    // per-PRB statistic u_q ~ noise (+ mu on the true allocation); a hypothesis' zn is the normalised sum over its range, so
+    // neighbouring hypotheses share noise and signal exactly as overlapping PRB ranges do
+    std::vector<double> u(276), cu(277, 0.0);
+    for (int q = 0; q < 276; q++) {
+      double z = nd(rng);
+      if (heavy && ud(rng) < 0.1) z *= 3.0;
+      u[q] = z + ((q >= t0 && q < t1) ? mu : 0.0);
+      cu[q + 1] = cu[q] + u[q];
+    }
+    for (int h = 0; h < n; h++) {
+      r.snr_db[h] = np[h] ? -5.f : -99.f;
+      r.set[h] = 1;
+      if (!np[h]) continue;
+      if (np[h] > 16) run.wide++;
+      r.zn[h] = (float)((cu[p0[h] + np[h]] - cu[p0[h]]) / std::sqrt((double)np[h]));
+    }
+    nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
+    run.probes++;
+  }
+  return run;
+}
+}  // namespace
+
+TEST(UlLayoutLock, SprtLocksOnWeakEvidenceAndNeverOnNoise)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  setenv("ISAC_UL_LOCK_SPRT", "1", 1);
+  ASSERT_TRUE(nr_ul_layout_sprt_enabled());
+  // weak but present DM-RS: every vote-threshold rule (6 dB per probe) sees nothing; the accumulated evidence must lock the
+  // true BWP (216 @ CRB 1) and never a neighbour, for several seeds
+  for (unsigned seed = 1; seed <= 6; seed++) {
+    const SprtRun r = UllSprtRun(seed, 0.35, 4000, false);
+    EXPECT_EQ(r.locked_n, 216) << "seed " << seed << " probes " << r.probes;
+    EXPECT_EQ(r.locked_start, 1) << "seed " << seed;
+    EXPECT_LT(r.probes, 3000) << "seed " << seed;
+    EXPECT_GT(r.wide, 0);  // wide grants are probed
+  }
+  // no DM-RS anywhere (mu = 0), heavy-tailed symmetric noise: 150 independent sessions of 1500 probes, none may lock
+  // (bound alpha = 1e-3 per session)
+  int false_locks = 0;
+  for (unsigned seed = 100; seed < 250; seed++) false_locks += UllSprtRun(seed, 0.0, 1500, true).locked_n != 0;
+  EXPECT_EQ(false_locks, 0);
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_SPRT");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}
+
 // ---- UL layout lock: SIB1-first hypothesis and CRC-first locking (ISAC_UL_LOCK_SIB1_FIRST / ISAC_UL_LOCK_CRC_FIRST) ----
 TEST(UlLayoutLock, Sib1PriorCarriesTheUplinkBwp)
 {

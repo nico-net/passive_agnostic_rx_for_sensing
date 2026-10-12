@@ -828,6 +828,155 @@ static float lp_snr(const float *zr, const float *zi, int nr, int nant, int L, i
   return snr;
 }
 
+
+/* ---- ISAC_UL_LOCK_SPRT=1: the same per-PRB DM-RS estimate, for EVERY hypothesis range of any width and for the true AND the
+ * wrong-slot (control) sequence, from per-PRB prefix sums. Z = Y conj(r) is hypothesis independent; for PRB q, row (DM-RS
+ * symbol candidate) r, antenna a and delay t we keep C = |sum_j Z_j e^{j phi_t,j}|^2 and S2 = sum_j |Z_j|^2. A range's energy at
+ * delay t, its noise (S2 - C/6)/5 and its signal (C/36) are then differences of prefix sums, so a probe costs one table build
+ * (3 rows x nant x PRBs x 33 delays) plus O(33 x 12) per hypothesis, instead of O(L x 33 x 12 x 6) per hypothesis and set. */
+typedef struct { double P[2][3][PASSIVE_UL_MAX_ANT][LP_NTAU + 1][276]; } lp_tab_t; /* [v][row][ant][t | S2][prb prefix] */
+static lp_tab_t *g_lp_tab[NR_PUSCH_PASSIVE_MAX_CTX];
+
+static void lp_tab_build(lp_tab_t *T, int v, c16_t *const F[LP_NSYM][PASSIVE_UL_MAX_ANT], int nant, const uint32_t *const *gold, int fco,
+                         int N, int qlo, int nq)
+{
+  static __thread float pc[LP_NTAU][6], ps[LP_NTAU][6];
+  static __thread int pn = 0;
+  if (pn != N) {
+    for (int t = 0; t < LP_NTAU; t++)
+      for (int j = 0; j < 6; j++) {
+        const double ph = 2.0 * M_PI * (2.0 * j) * (double)(-256 + 16 * t) / (double)N;
+        pc[t][j] = (float)cos(ph);
+        ps[t][j] = (float)sin(ph);
+      }
+    pn = N;
+  }
+  for (int r = 0; r < 3; r++)
+    for (int a = 0; a < nant; a++) {
+      double *P0 = T->P[v][r][a][LP_NTAU], *Pt[LP_NTAU];
+      for (int t = 0; t < LP_NTAU; t++) Pt[t] = T->P[v][r][a][t];
+      P0[0] = 0.0;
+      for (int t = 0; t < LP_NTAU; t++) Pt[t][0] = 0.0;
+      for (int q = 0; q < nq; q++) {
+        float zr[6], zi[6], s2 = 0.f;
+        for (int j = 0; j < 6; j++) {
+          const int prb = qlo + q, k = 12 * prb + 2 * j, m = 6 * prb + j;
+          const c16_t y = F[r][a][(fco + k) % N];
+          const float rr = lp_c(gold[r], 2 * m) * (float)M_SQRT1_2, ri = lp_c(gold[r], 2 * m + 1) * (float)M_SQRT1_2;
+          zr[j] = (float)y.r * rr + (float)y.i * ri;
+          zi[j] = (float)y.i * rr - (float)y.r * ri;
+          s2 += zr[j] * zr[j] + zi[j] * zi[j];
+        }
+        P0[q + 1] = P0[q] + s2;
+        for (int t = 0; t < LP_NTAU; t++) {
+          float sr = 0.f, si = 0.f;
+          for (int j = 0; j < 6; j++) {
+            sr += zr[j] * pc[t][j] - zi[j] * ps[t][j];
+            si += zr[j] * ps[t][j] + zi[j] * pc[t][j];
+          }
+          Pt[t][q + 1] = Pt[t][q] + (double)(sr * sr + si * si);
+        }
+      }
+    }
+}
+
+/* Range [q0, q0+L) of table v: SNR estimate (summed over antennas, averaged over the rows of the mask) for each of the nm row
+ * masks (bit r = DM-RS symbol candidate r of {l0, 7, 11}). raw = unbiased (can be < 0), clamped = the legacy estimate. */
+static void lp_tab_range(const lp_tab_t *T, int v, int nant, int q0, int L, const int *masks, int nm, float *raw, float *clamped)
+{
+  double C[3][PASSIVE_UL_MAX_ANT][LP_NTAU], S2[3][PASSIVE_UL_MAX_ANT], E[3][LP_NTAU];
+  for (int r = 0; r < 3; r++) {
+    for (int t = 0; t < LP_NTAU; t++) E[r][t] = 0.0;
+    for (int a = 0; a < nant; a++) {
+      S2[r][a] = T->P[v][r][a][LP_NTAU][q0 + L] - T->P[v][r][a][LP_NTAU][q0];
+      for (int t = 0; t < LP_NTAU; t++) {
+        C[r][a][t] = T->P[v][r][a][t][q0 + L] - T->P[v][r][a][t][q0];
+        E[r][t] += C[r][a][t];
+      }
+    }
+  }
+  for (int m = 0; m < nm; m++) {
+    const int mk = masks[m];
+    int bt = 0, nr = 0;
+    double be = -1.0;
+    for (int t = 0; t < LP_NTAU; t++) {
+      double e = 0.0;
+      for (int r = 0; r < 3; r++) if (mk >> r & 1) e += E[r][t];
+      if (e > be) { be = e; bt = t; }
+    }
+    for (int r = 0; r < 3; r++) nr += mk >> r & 1;
+    double sr_ = 0.0, sc_ = 0.0;
+    for (int a = 0; a < nant; a++) {
+      double ar = 0.0, ac = 0.0;
+      for (int r = 0; r < 3; r++) {
+        if (!(mk >> r & 1)) continue;
+        const double nv = (S2[r][a] - C[r][a][bt] / 6.0) / (double)(L * 5);
+        const double sp = C[r][a][bt] / 36.0 / (double)L - nv / 6.0;
+        if (nv > 0.0) {
+          ar += sp / nv;
+          ac += (sp > 1e-6 * nv ? sp : 1e-6 * nv) / nv;
+        }
+      }
+      sr_ += ar / nr;
+      sc_ += ac / nr;
+    }
+    raw[m] = (float)sr_;
+    clamped[m] = (float)sc_;
+  }
+}
+
+/* all hypotheses; fills res->snr_db / set / zn / zn_valid, returns the best hypothesis (or -1) */
+static int lp_sprt_eval(PHY_VARS_NR_UE *ue, int ctx, int nant, c16_t *const F[LP_NSYM][PASSIVE_UL_MAX_ANT],
+                        const uint32_t *const gold[3], const uint32_t *const gctl[3], int fco, int N, int n,
+                        const uint16_t *prb0, const uint16_t *nprb, nr_ul_layout_probe_res_t *res, int *tab_q0, lp_tab_t **tab)
+{
+  (void)ue;
+  int qlo = 275, qhi = 0;
+  for (int h = 0; h < n; h++) {
+    if (nprb[h] == 0 || prb0[h] + nprb[h] > 275) continue;
+    if (prb0[h] < qlo) qlo = prb0[h];
+    if (prb0[h] + nprb[h] > qhi) qhi = prb0[h] + nprb[h];
+  }
+  if (qhi <= qlo) return -1;
+  if (!g_lp_tab[ctx]) g_lp_tab[ctx] = calloc(1, sizeof(lp_tab_t));
+  lp_tab_t *T = g_lp_tab[ctx];
+  if (!T) return -1;
+  lp_tab_build(T, 0, F, nant, gold, fco, N, qlo, qhi - qlo);
+  lp_tab_build(T, 1, F, nant, gctl, fco, N, qlo, qhi - qlo);
+  static const int set_mask[3] = {1, 5, 7}; /* res->set: 0 = {l0}, 1 = {l0,11}, 2 = {l0,7,11} */
+  static const int ns_of[3] = {1, 2, 3};
+  int best = -1;
+  for (int h = 0; h < n; h++) {
+    res->snr_db[h] = -99.f;
+    res->set[h] = -1;
+    res->zn[h] = 0.f;
+    if (nprb[h] == 0 || prb0[h] + nprb[h] > 275) continue;
+    float rw[2][3], cl[2][3];
+    lp_tab_range(T, 0, nant, prb0[h] - qlo, nprb[h], set_mask, 3, rw[0], cl[0]);
+    lp_tab_range(T, 1, nant, prb0[h] - qlo, nprb[h], set_mask, 3, rw[1], cl[1]);
+    int bs = 0, bsr[2] = {0, 0};
+    for (int st = 1; st < 3; st++) if (cl[0][st] > cl[0][bs]) bs = st;
+    for (int st = 1; st < 3; st++) {
+      if (rw[0][st] > rw[0][bsr[0]]) bsr[0] = st;
+      if (rw[1][st] > rw[1][bsr[1]]) bsr[1] = st;
+    }
+    const float v = cl[0][bs];
+    res->snr_db[h] = 10.f * log10f(v > 1e-9f ? v : 1e-9f);
+    res->set[h] = (int8_t)bs;
+    /* z: difference of the unbiased estimates, divided by its null sigma (exponential |mean|^2 per PRB: var(est) =
+     * nant / (36 L ns)); any scale error only costs power, the sequential test is self-normalised */
+    const double D = (double)rw[0][bsr[0]] - (double)rw[1][bsr[1]];
+    const double ns = 2.0 / (1.0 / ns_of[bsr[0]] + 1.0 / ns_of[bsr[1]]);
+    const double sg = sqrt((double)nant / (18.0 * nprb[h] * ns));
+    res->zn[h] = (float)(D / sg);
+    if (best < 0 || res->snr_db[h] > res->snr_db[best]) best = h;
+  }
+  res->zn_valid = true;
+  *tab_q0 = qlo;
+  *tab = T;
+  return best;
+}
+
 bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, int32_t ta, double fo_hz, int n,
                                    const uint16_t *prb0, const uint16_t *nprb, uint16_t nid, uint8_t l0,
                                    nr_ul_layout_probe_res_t *res)
@@ -867,6 +1016,29 @@ bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, in
   memset(res, 0, sizeof(*res));
   res->n = n < NR_UL_LAYOUT_MAX_HYP ? n : NR_UL_LAYOUT_MAX_HYP;
   int best = -1;
+  if (nr_ul_layout_sprt_enabled()) { /* prefix-sum evaluation of all ranges, any width, true + control sequence */
+    int qlo = 0;
+    lp_tab_t *T = NULL;
+    best = lp_sprt_eval(ue, ctx, nant, g_lp_f[ctx], gold, gctl, fco, N, res->n, prb0, nprb, res, &qlo, &T);
+    res->ctl_db = -99.f;
+    res->comb1_db = NAN;
+    if (best < 0) return true;
+    static const int row_mask[3] = {1, 2, 4}, set_mask[3] = {1, 5, 7};
+    float rw[3], cl[3];
+    { /* DM-RS symbol set at the best hypothesis: as the legacy rule, from the per-symbol SNRs */
+      lp_tab_range(T, 0, nant, prb0[best] - qlo, nprb[best], row_mask, 3, rw, cl);
+      const float sym_db[3] = {10.f * log10f(cl[0] > 1e-9f ? cl[0] : 1e-9f), 10.f * log10f(cl[1] > 1e-9f ? cl[1] : 1e-9f),
+                               10.f * log10f(cl[2] > 1e-9f ? cl[2] : 1e-9f)};
+      const bool has11 = sym_db[2] >= 3.f && sym_db[2] >= sym_db[0] - 6.f;
+      const bool has7 = sym_db[1] >= 3.f && sym_db[1] >= sym_db[0] - 6.f;
+      res->set[best] = (int8_t)(has11 ? (has7 ? 2 : 1) : 0);
+      const int cm[1] = {set_mask[res->set[best]]};
+      lp_tab_range(T, 1, nant, prb0[best] - qlo, nprb[best], cm, 1, rw, cl);
+      const float v = cl[0];
+      res->ctl_db = 10.f * log10f(v > 1e-9f ? v : 1e-9f);
+    }
+    goto comb1;
+  }
   for (int h = 0; h < res->n; h++) {
     res->snr_db[h] = -99.f;
     res->set[h] = -1;
@@ -905,6 +1077,7 @@ bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, in
     const float v = lp_snr(zr, zi, set_n[st], nant, nprb[best], N);
     res->ctl_db = 10.f * log10f(v > 1e-9f ? v : 1e-9f);
   }
+comb1:
   if (res->snr_db[best] >= 8.f) {
     double ec1 = 0.0, ed = 0.0;
     int nc1 = 0, nd = 0;
