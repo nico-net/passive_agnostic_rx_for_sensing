@@ -1801,8 +1801,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         const char *e = getenv("ISAC_L2MAXH_DELTA");
         s_l2d = (e != NULL) ? atoi(e) : 0;
       }
-      if (s_l2d != 0) {
-        *log2_maxh += s_l2d;
+      /* ISAC_L2MAXH_DELTA_NL2 (default 0): extra delta for nl >= 2 only (weak layer of MMSE mode 2 rounds to 0). */
+      static int s_l2d2 = -9999;
+      if (s_l2d2 == -9999) {
+        const char *e2 = getenv("ISAC_L2MAXH_DELTA_NL2");
+        s_l2d2 = (e2 != NULL) ? atoi(e2) : 0;
+      }
+      const int l2dd = s_l2d + (nl >= 2 ? s_l2d2 : 0);
+      if (l2dd != 0) {
+        *log2_maxh += l2dd;
         if (*log2_maxh < 0)
           *log2_maxh = 0;
       }
