@@ -114,3 +114,8 @@ Not fixed on purpose: F1-F8 need a replay corpus per cell or touch areas owned b
 7. F18 per-layer SINR in the PDSCH gate.
 8. F16, F15, F24 conversions to statistical thresholds.
 9. Delete or document-as-oracle F13, F14.
+
+## 8. Backlog status (BLINDFIX-20261012, branch csd/blind-fix)
+
+F1, F3, F5, F6, F7, F8: implemented behind default-off flags with unit tests and offline replay (see BLINDFIX-20261012.md); not yet OTA-validated.
+Remaining unchanged: F2 (wsy), F4, F10 (drv), F15, F16, F18, F22 (afe), F24, F13/F14.
