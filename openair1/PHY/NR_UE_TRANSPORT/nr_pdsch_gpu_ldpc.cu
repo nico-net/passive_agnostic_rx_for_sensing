@@ -488,7 +488,7 @@ static int acquire()
 {
   for (;;) {
     unsigned m = g_busy.load();
-    for (int i = 0; i < CTX; i++)
+    for (int i = 0; i < nr_gpu_ctx_limit(CTX); i++)
       if (!(m >> i & 1u) && g_busy.compare_exchange_strong(m, m | 1u << i))
         return i;
     std::this_thread::yield();
@@ -510,7 +510,7 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
     cudaDeviceGetStreamPriorityRange(&lo, &hi);
     for (int i = 0; i < CTX; i++) {
       Ctx &x = g_ctx[i];
-      if ((!nr_gpu_green_stream(&x.s, hi, true) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
+      if ((!nr_gpu_green_stream(&x.s, hi, true, i) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
           || cudaHostAlloc(&x.dj, sizeof(DJob) * NJ, cudaHostAllocMapped) != cudaSuccess
           || cudaHostAlloc(&x.in, (size_t)NJ * MAXC * ZMAX, cudaHostAllocMapped) != cudaSuccess
           || cudaHostAlloc(&x.snap, (size_t)NJ * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX, cudaHostAllocMapped) != cudaSuccess
