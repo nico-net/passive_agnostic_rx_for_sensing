@@ -27,7 +27,7 @@ typedef struct {
 typedef struct {
   uint64_t slot;            /* latest absolute slot */
   int n_conf;               /* confirmed discovered resources now */
-  int lost;                 /* resources that were confirmed and no longer are (since last step) */
+  int lost;                 /* resources that were confirmed and are unmatched now (level, not edge; debounced by the state machine) */
   bool new_pattern;         /* detector footprint outside the learned baseline and at least as strong as the weakest confirmed */
   uint32_t max_period;      /* slowest confirmed period, slots */
   uint64_t crc_ok, crc_dec; /* cumulative PDSCH CRC counters (0/0 when unavailable) */
@@ -39,6 +39,8 @@ typedef struct {
   int n_conf;
   uint64_t first_conf, last_change;
   uint64_t crc_ok0, crc_dec0, crc_ok_b, crc_dec_b; /* baseline block, current block start */
+  int lost_streak, crc_streak; /* consecutive observations/blocks in violation (statistical debounce) */
+  uint64_t need;            /* slots the set must stay unchanged before STABLE (diagnostic) */
   double p0;
   uint32_t G, div_s;
   const char *reason;
@@ -67,14 +69,20 @@ static inline bool nr_csirs_rl_step(nr_csirs_rl_t *s, const nr_csirs_rl_cfg_t *c
   }
   if (!s->n_conf && o->n_conf) s->first_conf = o->slot;
   if (s->stable) {
-    const char *why = o->lost > 0 ? "confirmed-lost" : o->n_conf != s->n_conf ? "confirmed-changed"
+    /* a loss counts only when seen in 2 consecutive observations (a resource being re-confirmed or widened is transiently unmatched) */
+    s->lost_streak = o->lost > 0 ? s->lost_streak + 1 : 0;
+    const char *why = s->lost_streak >= 2 ? "confirmed-lost" : o->n_conf != s->n_conf ? "confirmed-changed"
                     : o->new_pattern ? "new-pattern" : NULL;
-    /* CRC drop: disjoint blocks of >= 200 decodes vs the baseline rate, 3 sigma one-sided */
+    /* CRC drop: disjoint blocks of >= 200 decodes vs the baseline rate; two-proportion z with +1/+1 pseudo-counts (valid at p0 near 0 or 1),
+     * 3 sigma one-sided, and 2 consecutive violating blocks (a single look at 3 sigma false-alarms repeatedly over a long STABLE) */
     if (!why && s->crc_dec0 >= 200 && o->crc_dec - s->crc_dec_b >= 200) {
-      const double n1 = (double)(o->crc_dec - s->crc_dec_b), p1 = (double)(o->crc_ok - s->crc_ok_b) / n1;
-      const double sd = sqrt(s->p0 * (1 - s->p0) * (1.0 / n1 + 1.0 / (double)s->crc_dec0)) + 1e-9;
-      if ((s->p0 - p1) / sd > 3.0) why = "crc-drop";
-      else { s->crc_ok_b = o->crc_ok; s->crc_dec_b = o->crc_dec; }
+      const double n1 = (double)(o->crc_dec - s->crc_dec_b), n0 = (double)s->crc_dec0;
+      const double k1 = (double)(o->crc_ok - s->crc_ok_b), k0 = s->p0 * n0;
+      const double q1 = (k1 + 1) / (n1 + 2), q0 = (k0 + 1) / (n0 + 2), pp = (k0 + k1 + 2) / (n0 + n1 + 4);
+      const double sd = sqrt(pp * (1 - pp) * (1.0 / n1 + 1.0 / n0));
+      s->crc_streak = (q0 - q1) / sd > 3.0 ? s->crc_streak + 1 : 0;
+      s->crc_ok_b = o->crc_ok; s->crc_dec_b = o->crc_dec;
+      if (s->crc_streak >= 2) why = "crc-drop";
     }
     s->n_conf = o->n_conf;
     if (why) { nr_csirs_rl_to_search(s, o, why, true); return true; }
@@ -82,11 +90,13 @@ static inline bool nr_csirs_rl_step(nr_csirs_rl_t *s, const nr_csirs_rl_cfg_t *c
   }
   if (o->n_conf != s->n_conf) { s->last_change = o->slot; s->crc_ok0 = o->crc_ok; s->crc_dec0 = o->crc_dec; }
   s->n_conf = o->n_conf;
+  s->lost_streak = 0; s->crc_streak = 0;
   if (!o->n_conf || o->lost) { s->last_change = o->slot; return false; }
   uint64_t need = (uint64_t)c->stable_cycles * c->div * c->win;
   const uint64_t spread = 2 * (s->last_change - s->first_conf), occ = 4ull * o->max_period;
   if (spread > need) need = spread;
   if (occ > need) need = occ;
+  s->need = need;
   if (o->slot - s->last_change < need) return false;
   uint32_t G = (uint32_t)((4ull * o->max_period + c->win - 1) / c->win);
   if (G < 1) G = 1;

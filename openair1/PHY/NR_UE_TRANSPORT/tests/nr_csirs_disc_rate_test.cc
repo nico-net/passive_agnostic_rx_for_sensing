@@ -37,12 +37,33 @@ static nr_csirs_rl_t stable_state(const nr_csirs_rl_cfg_t &c, nr_csirs_rl_obs_t 
 
 TEST(CsirsRate, EscalatesOnEvidenceOfChange) {
   auto c = cfg(); nr_csirs_rl_obs_t o;
-  { auto s = stable_state(c, o); ASSERT_TRUE(s.stable); o.slot += 10; o.lost = 1; ASSERT_TRUE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_FALSE(s.stable); EXPECT_TRUE(s.rearm); }
+  { auto s = stable_state(c, o); ASSERT_TRUE(s.stable); o.slot += 10; o.lost = 1;
+    EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_TRUE(s.stable);  // one unmatched observation (widening/re-confirm) is debounced
+    o.slot += 10; ASSERT_TRUE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_FALSE(s.stable); EXPECT_TRUE(s.rearm); EXPECT_STREQ(s.reason, "confirmed-lost"); }
+  { auto s = stable_state(c, o); o.slot += 10; o.lost = 1; nr_csirs_rl_step(&s, &c, &o);
+    o.slot += 10; o.lost = 0; EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o));
+    o.slot += 10; o.lost = 1; EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_TRUE(s.stable); }  // not consecutive
   { auto s = stable_state(c, o); o.slot += 10; o.new_pattern = true; ASSERT_TRUE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_FALSE(s.stable); }
   { auto s = stable_state(c, o); o.slot += 10; o.n_conf = 2; ASSERT_TRUE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_FALSE(s.stable); }
   { auto s = stable_state(c, o); o.slot += 10; o.epoch = true; ASSERT_TRUE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_FALSE(s.stable); }
-  { auto s = stable_state(c, o); o.slot += 10; o.crc_dec += 400; o.crc_ok += 100;  // 0.25 vs 0.5 over 400
+  { auto s = stable_state(c, o); o.slot += 10; o.crc_dec += 400; o.crc_ok += 100;  // 0.25 vs 0.5 over 400: first violating block only counts
+    EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_TRUE(s.stable);
+    o.slot += 10; o.crc_dec += 400; o.crc_ok += 100;  // second consecutive violating block
     ASSERT_TRUE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_FALSE(s.stable); EXPECT_STREQ(s.reason, "crc-drop"); }
+  { auto s = stable_state(c, o); o.slot += 10; o.crc_dec += 400; o.crc_ok += 100; nr_csirs_rl_step(&s, &c, &o);
+    o.slot += 10; o.crc_dec += 400; o.crc_ok += 200; EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o));  // recovered: streak resets
+    o.slot += 10; o.crc_dec += 400; o.crc_ok += 100; EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_TRUE(s.stable); }
   { auto s = stable_state(c, o); o.slot += 10; o.crc_dec += 400; o.crc_ok += 195;  // 0.4875: noise
     EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_TRUE(s.stable); }
+}
+
+// Low-baseline CRC rate (TIM, p0 ~ 0.05) must not trip on a single unlucky block, and a baseline of exactly 0 or 1 must not divide by ~0.
+TEST(CsirsRate, CrcTestIsValidAtExtremeBaselines) {
+  auto c = cfg(); nr_csirs_rl_t s = {}; nr_csirs_rl_obs_t o = {};
+  o.n_conf = 1; o.max_period = 160; nr_csirs_rl_step(&s, &c, &o);
+  o.slot = 100000; o.crc_dec = 1000; o.crc_ok = 1000; nr_csirs_rl_step(&s, &c, &o); ASSERT_TRUE(s.stable);  // baseline p0 = 1
+  o.slot += 10; o.crc_dec += 200; o.crc_ok += 199;  // one failure in 200 is not a drop
+  EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_TRUE(s.stable);
+  o.slot += 10; o.crc_dec += 200; o.crc_ok += 199;
+  EXPECT_FALSE(nr_csirs_rl_step(&s, &c, &o)); EXPECT_TRUE(s.stable);
 }
