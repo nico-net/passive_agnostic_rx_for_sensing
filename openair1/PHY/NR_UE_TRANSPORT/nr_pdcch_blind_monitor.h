@@ -1038,6 +1038,8 @@ bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti
  * Diagnostic only: distinguishes "no accepts" from "accepts that never repeat". */
 int nr_pdcch_blind_rnti_bootstrap_dump(uint32_t now_abs_slot, char *buf, int buflen);
 
+/* ISAC_SLOT_SCALE=1 (default off): scales the staleness window with the numerology mu so it spans ~10 s at any SCS. */
+void nr_pdcch_blind_rnti_bootstrap_set_mu(int mu);
 /* Test-only: clears bootstrap state between gtest cases. Not for RT use. */
 void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void);
 /** Producer-thread-only geometry epoch and fresh-evidence interface. */

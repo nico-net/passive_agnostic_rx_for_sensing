@@ -4,12 +4,21 @@
 #include "common/utils/LOG/log.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define UL_SOLVER_UES 64
 #define UL_SOLVER_BUCKET 4
 #define UL_SOLVER_REFILL_SLOTS 40 /* 50 probes/s at 30 kHz SCS */
+/* ISAC_SLOT_SCALE=1 (default off): 20 ms per probe at any numerology (20 << mu slots; mu=1 gives 40). */
+static _Atomic uint32_t refill_slots = UL_SOLVER_REFILL_SLOTS;
+void nr_pusch_solver_set_mu(int mu)
+{
+  const char *e = getenv("ISAC_SLOT_SCALE");
+  if (e && atoi(e) == 1 && mu >= 0 && mu <= 4)
+    atomic_store_explicit(&refill_slots, 20u << mu, memory_order_relaxed);
+}
 #define UL_SOLVER_CPU_CAP_US 200000 /* burst cap; refill is 0.5 core in signal time */
 
 typedef struct {
@@ -55,6 +64,7 @@ bool nr_pusch_solver_enabled(void)
 
 void nr_pusch_solver_reset(void)
 {
+  atomic_store_explicit(&refill_slots, UL_SOLVER_REFILL_SLOTS, memory_order_relaxed);
   pthread_mutex_lock(&mu);
   memset(ues, 0, sizeof(ues));
   memset(&totals, 0, sizeof(totals));
@@ -237,7 +247,7 @@ int nr_pusch_solver_plan(const nr_ue_ul_ticket_t *ticket,
   if (!u->first_slot) u->first_slot = source_slot ? source_slot : 1;
   ++u->stats.grants; ++totals.grants;
   if (target_slot >= global_refill_slot) {
-    uint64_t refill = (target_slot - global_refill_slot) / UL_SOLVER_REFILL_SLOTS;
+    uint64_t refill = (target_slot - global_refill_slot) / atomic_load_explicit(&refill_slots, memory_order_relaxed);
     if (!global_refill_slot) refill = UL_SOLVER_BUCKET;
     if (refill) {
       global_tokens = global_tokens + refill > UL_SOLVER_BUCKET ? UL_SOLVER_BUCKET : global_tokens + refill;

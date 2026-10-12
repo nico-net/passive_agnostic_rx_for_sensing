@@ -4249,6 +4249,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   const uint64_t t_rt = btim_enabled() ? btim_now() : 0;
+  nr_pdcch_blind_rnti_bootstrap_set_mu((int)ue->frame_parms.numerology_index);
   nr_pdcch_blind_monitor_process_body(ue, proc);
   btim_add(BTIM_RT, t_rt);
 }

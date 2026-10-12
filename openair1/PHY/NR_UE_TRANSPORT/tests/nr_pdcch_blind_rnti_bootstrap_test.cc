@@ -25,6 +25,7 @@
  * no hardware dependency, so it gets a real unit test instead of only a live smoke check.
  */
 #include <gtest/gtest.h>
+#include <cstdlib>
 
 extern "C" {
 #include "nr_pdcch_blind_monitor.h"
@@ -185,6 +186,28 @@ TEST(RntiBootstrap, StaleEntriesLeaveTheSet) {
   nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 11);
   EXPECT_TRUE(nr_pdcch_blind_monitor_rnti_confirmed(12, 0x3333));
   EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 20001, 0x3333));
+}
+
+TEST(RntiBootstrap, SlotScaleKeepsTenSecondsAtAnyNumerology) {
+  // Default (flag unset): mu is ignored, the window stays 20000 slots.
+  unsetenv("ISAC_SLOT_SCALE");
+  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
+  nr_pdcch_blind_rnti_bootstrap_set_mu(3);
+  nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 10);
+  nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 11);
+  EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 20001, 0x3333));
+  // ISAC_SLOT_SCALE=1: 10 s at mu=3 (8000 slots/s) is 80000 slots; mu=1 reproduces the constant.
+  setenv("ISAC_SLOT_SCALE", "1", 1);
+  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
+  nr_pdcch_blind_rnti_bootstrap_set_mu(3);
+  nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 10);
+  nr_pdcch_blind_rnti_bootstrap_record(0x3333, NR_BLIND_RNTI_CLASS_C, 11);
+  EXPECT_TRUE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 20001, 0x3333));
+  EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 80001, 0x3333));
+  nr_pdcch_blind_rnti_bootstrap_set_mu(1);
+  EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 20001, 0x3333));
+  unsetenv("ISAC_SLOT_SCALE");
+  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
 }
 
 TEST_F(RntiBootstrapTest, UssPriorUsesOnlyRarVerifiedIdentities)
