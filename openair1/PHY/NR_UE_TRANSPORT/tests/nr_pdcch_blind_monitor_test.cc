@@ -6178,3 +6178,48 @@ TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
   unsetenv("ISAC_UL_LOCK_CRC_GUARD");
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
+
+// TIMMCS0 (2026-10-11): two DCI 1_1 layouts whose MCS fields sit 2 bits apart both read MCS 0 when the bits before it
+// are zero, with the same allocation and ports, yet read the rv from different bits (layout A reads "MCS LSB, NDI" of
+// layout B). The PDSCH solver's reading dedup must keep them apart (ISAC_PDSCH_READING_RV), or the solved layout's grant
+// is decoded with the other layout's rv.
+TEST(Dci11Reading, LayoutsCollidingOnMcs0DisagreeOnRv) {
+  const uint16_t bwp = 51;
+  auto opts = [](int vrb, int tb2) {
+    nr_pdcch_blind_extract_opts_t o{};
+    o.bwp_indicator_bits = 0; o.vrb_to_prb_bits = vrb; o.prb_bundling_bits = 0; o.rate_matching_bits = 0;
+    o.zp_csirs_bits = 0; o.tb2_bits = tb2; o.harq_pid_bits = 0; o.dai_bits = 0; o.pdsch_to_harq_bits = 0;
+    o.antenna_ports_bits = 4; o.tci_bits = 0; o.srs_request_bits = 0; o.cbg_bits = 0; o.fdra_mode = NR_FDRA_TYPE1;
+    o.tda_count = 1; o.tda_start[0] = 1; o.tda_length[0] = 13; o.tda_mapping[0] = 0; o.dmrs_add_pos = 0; o.dmrs_max_length = 1;
+    return o;
+  };
+  const auto a = opts(0, 2), b = opts(2, 0); // A: MCS right after the RIV; B: 2 bits (VRB+bundling) before the MCS
+  const uint16_t len = nr_pdcch_blind_dci_size_ex(bwp, &a);
+  ASSERT_EQ(len, nr_pdcch_blind_dci_size_ex(bwp, &b));
+  const int riv_bits = 11; // ceil(log2(51 * 52 / 2))
+  nr_pdcch_blind_raw_result_t raw{};
+  raw.rnti = 0x5a32;
+  auto put = [&](int pos, int width, uint32_t v) { // MSB-first field at position pos
+    for (int i = 0; i < width; i++)
+      if ((v >> (width - 1 - i)) & 1) {
+        const int bit = len - 1 - (pos + i);
+        raw.payload.w[bit / 64] |= 1ULL << (bit % 64);
+      }
+  };
+  put(0, 1, 1);                    // DL format identifier
+  put(1, riv_bits, 51 * 15 + 4);   // RIV: 16 PRB from RB 4
+  const int mcs_b = 1 + riv_bits + 2;
+  put(mcs_b, 5, 0);                // layout B: MCS 0
+  put(mcs_b + 5, 1, 1);            // layout B: NDI 1
+  put(mcs_b + 6, 2, 0);            // layout B: rv 0
+  nr_pdcch_blind_result_t ra{}, rb{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_11(&raw, len, bwp, 0, &a, &ra)) << ra.reject_reason;
+  ASSERT_TRUE(nr_pdcch_blind_extract_11(&raw, len, bwp, 0, &b, &rb)) << rb.reject_reason;
+  EXPECT_EQ(ra.mcs, 0); EXPECT_EQ(rb.mcs, 0);
+  EXPECT_EQ(ra.start_rb, rb.start_rb); EXPECT_EQ(ra.num_rb, 16); EXPECT_EQ(ra.dmrs_ports, rb.dmrs_ports);
+  EXPECT_EQ(rb.rv, 0); EXPECT_EQ(rb.ndi, 1);
+  EXPECT_EQ(ra.rv, 1); // reads B's MCS LSB and NDI
+  EXPECT_TRUE(nr_dci11_same_reading(&ra, &rb, false));  // the old dedup merged them
+  EXPECT_FALSE(nr_dci11_same_reading(&ra, &rb, true));  // the fix keeps two readings
+  EXPECT_TRUE(nr_dci11_same_reading(&rb, &rb, true));
+}

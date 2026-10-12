@@ -4626,14 +4626,18 @@ gpu_llr_ready:;
         s_rvr = (e != NULL && atoi(e) != 0) ? 1 : 0;
       }
       if (s_rvr && !ldpc_ok) {
-        static const uint8_t rvs[3] = {2, 3, 1};
+        static const uint8_t rvs[4] = {0, 2, 3, 1}; /* every rv but the DCI's own (rv 0 too: TIMMCS0) */
         const uint8_t rv0 = cw->rv;
-        for (int i = 0; i < 3 && !ldpc_ok; i++) {
+        for (int i = 0; i < 4 && !ldpc_ok; i++) {
+          if (rvs[i] == rv0) continue;
           cw->rv = rvs[i];
           atomic_fetch_add(&g_rv_try[rvs[i]][grant->mcs & 31], 1);
           if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
             ldpc_ok = true;
             atomic_fetch_add(&g_rv_ok[rvs[i]][grant->mcs & 31], 1);
+            if (!t_quiet)
+              LOG_A(PHY, "SENSING: RVRESCUE rnti=0x%04x fs=%d.%d probe=%d mcs=%u nl=%u dci_rv=%u ok_rv=%u ndi=%u tbs=%u\n", grant->rnti,
+                    proc->frame_rx, proc->nr_slot_rx, (int)t_probe_first_seg, grant->mcs, cw->Nl, rv0, rvs[i], grant->ndi, cw->TBS);
           }
         }
         if (!ldpc_ok)

@@ -9168,6 +9168,22 @@ constdiag_done:;
       const int rep = nr_pdsch_solver_rep(out.rnti);
       const bool reopen_layouts = nr_pdsch_solver_reopen_layouts(out.rnti);
       const nr_dci11_resolver_t *R = g_dci11_resolver;
+      { /* SOLVEDLAYOUT (diagnostic, once per RNTI and representative): field offsets (MSB-first) of the solved layout */
+        static uint32_t s_lg[64];
+        static _Atomic int s_nlg;
+        const uint32_t tag = (uint32_t)out.rnti << 16 | (uint32_t)(rep & 0xffff);
+        bool dup = rep < 0;
+        for (int q = 0; q < atomic_load(&s_nlg) && q < 64 && !dup; q++) dup = s_lg[q] == tag;
+        if (!dup && atomic_load(&s_nlg) < 64) {
+          s_lg[atomic_fetch_add(&s_nlg, 1) & 63] = tag;
+          const nr_dci11_offsets_t *of = &R->off[rep];
+          const nr_dci11_layout_t *hy = &R->hyp[rep];
+          LOG_A(PHY, "SENSING: SOLVEDLAYOUT rnti=0x%04x rep=%d len=%u riv=%u tda=%u tda_bits=%u mcs=%u rv=%u ant=%u ant_bits=%u "
+                     "dmrs_init=%u total=%u bwp=%u pre_mcs=%u pre_ant=%u post_ant=%u dmrs_type=%u fdra=%u\n",
+                out.rnti, rep, dlen, of->riv, of->tda, of->tda_bits, of->mcs, of->rv, of->ant_ports, of->ant_ports_bits,
+                of->dmrs_init, of->total, hy->bwp_ind, hy->pre_mcs, hy->pre_ant, hy->post_ant, hy->dmrs_type, hy->fdra_mode);
+        }
+      }
       /* Search only once stage 1 has narrowed the layouts (ISAC_PDSCH_SOLVER_MAX_LIVE, default 512): before the
        * HARQ-sequence test bites, 1500+ live layouts give > 96 readings per DCI and the true one is cut. */
       static int s_max_live = -1;
@@ -9222,15 +9238,14 @@ constdiag_done:;
         nr_pdcch_blind_result_t pr;
         if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb)
           continue;
+        /* ISAC_PDSCH_READING_RV=1 (TIMMCS0, default off): readings also differ by rv/NDI/HARQ pid. Without it a solved
+         * layout's MCS-0 grant took the rv of whichever layout parsed first (rv = NDI on TIM: half the MCS-0 TBs lost). */
+        static int s_rd_rv = -1;
+        if (s_rd_rv < 0) s_rd_rv = getenv("ISAC_PDSCH_READING_RV") && atoi(getenv("ISAC_PDSCH_READING_RV")) ? 1 : 0;
         int g = -1;
-        for (int k = 0; k < nrd && g < 0; k++) {
-          const nr_pdcch_blind_result_t *q = &rparsed[k];
-          if (q->ra_type0 == pr.ra_type0 && q->start_rb == pr.start_rb && q->num_rb == pr.num_rb
-              && q->rbg_bitmap == pr.rbg_bitmap && q->rbg_size == pr.rbg_size && q->n_dmrs_cdm_groups == pr.n_dmrs_cdm_groups
-              && q->dmrs_ports == pr.dmrs_ports && q->dmrs_config_type == pr.dmrs_config_type && q->mcs == pr.mcs
-              && q->nscid == pr.nscid)
+        for (int k = 0; k < nrd && g < 0; k++)
+          if (nr_dci11_same_reading(&rparsed[k], &pr, s_rd_rv))
             g = k;
-        }
         if (g < 0 && nrd < SOLVER_READINGS) {
           g = nrd++;
           rparsed[g] = pr;

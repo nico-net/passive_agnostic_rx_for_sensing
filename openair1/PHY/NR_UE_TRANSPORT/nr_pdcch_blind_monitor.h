@@ -1097,6 +1097,17 @@ void nr_pdcch_blind_lookahead_step(int lane);
  *  lane's own DCI-length sweep gives up (AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) well before that. */
 void nr_pdcch_blind_lookahead_retry(int lane);
 
+/** Two parses of one DCI 1_1 (under different layouts) give the same PDSCH reading. decode_fields adds rv, NDI and HARQ
+ *  pid, which the decode also uses (TIMMCS0, ISAC_PDSCH_READING_RV): layouts whose MCS fields sit at different offsets
+ *  read the same MCS 0 when the surrounding bits are zero, but then read the RV from different bits (e.g. the NDI). */
+static inline bool nr_dci11_same_reading(const nr_pdcch_blind_result_t *a, const nr_pdcch_blind_result_t *b, bool decode_fields)
+{
+  return a->ra_type0 == b->ra_type0 && a->start_rb == b->start_rb && a->num_rb == b->num_rb && a->rbg_bitmap == b->rbg_bitmap
+         && a->rbg_size == b->rbg_size && a->n_dmrs_cdm_groups == b->n_dmrs_cdm_groups && a->dmrs_ports == b->dmrs_ports
+         && a->dmrs_config_type == b->dmrs_config_type && a->mcs == b->mcs && a->nscid == b->nscid
+         && (!decode_fields || (a->rv == b->rv && a->ndi == b->ndi && a->harq_pid == b->harq_pid));
+}
+
 #ifdef __cplusplus
 }
 #endif
