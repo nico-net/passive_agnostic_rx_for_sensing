@@ -3,7 +3,7 @@
  * bounded GPU admission gate. Everything here is decided per body from measured latencies (no per-cell constants).
  *  ISAC_PDSCH_CPU_SMALL=<maxPRB>: grants with <= maxPRB PRB and <= ISAC_PDSCH_CPU_SMALL_NL (default 2) layers are
  *    candidates; a candidate runs on the CPU path when the EWMA of the CPU body time of its size class is below the EWMA of
- *    the GPU body time (which includes the GPU queue wait) of the same class; the losing arm is re-sampled 1 in 32.
+ *    the GPU body time (which includes the GPU queue wait) of the same class; the losing arm is re-sampled 1 in 64; body times are clipped at 8 ms for the estimate.
  *  ISAC_PDSCH_GPU_BATCH=1: at most ISAC_PDSCH_GPU_BATCH_SLOTS (default 3) bodies hold the GPU at once, probes leave one
  *    slot to real grants; a waiter that has waited as long as its CPU estimate (candidates) or 3 ms goes on.
  *    NOT a kernel batcher: no kernel is fused across grants.

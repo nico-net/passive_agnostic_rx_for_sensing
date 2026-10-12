@@ -2,6 +2,7 @@
 #include "nr_pdsch_cpu_route.h"
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <time.h>
 #include <sched.h>
 #include "common/utils/LOG/log.h"
@@ -55,12 +56,12 @@ nr_pdsch_route_t nr_pdsch_route_begin(int nprb, int layers, bool probe)
     cpu_est = nc ? ec : 0;
     bool cpu;
     if (nc < 4 && ng >= 4)
-      cpu = (n % 4) == 0; /* explore the CPU arm */
+      cpu = (n % 8) == 0; /* explore the CPU arm */
     else if (ng < 4)
       cpu = false;        /* GPU arm first */
     else {
       cpu = ec < eg;
-      if ((n % 32) == 0)
+      if ((n % 64) == 0)
         cpu = !cpu;       /* refresh the losing arm */
     }
     if (cpu) {
@@ -105,6 +106,15 @@ nr_pdsch_route_t nr_pdsch_route_begin(int nprb, int layers, bool probe)
           (unsigned long)atomic_load(&g_to_cpu), (unsigned long)atomic_load(&g_waits),
           atomic_load(&g_waits) ? (double)atomic_load(&g_wait_ns) / (double)atomic_load(&g_waits) / 1000.0 : 0.0,
           (unsigned long)atomic_load(&g_wait_cpu), (unsigned long)atomic_load(&g_wait_go));
+  if (n % 4000 == 0 && g_small > 0) {
+    char b[512];
+    int u = 0;
+    for (int k = 0; k < NCLS && u < 440; k++)
+      if (atomic_load(&g_n[0][k]) + atomic_load(&g_n[1][k]))
+        u += snprintf(b + u, sizeof(b) - u, "c%d[gpu %u/%.0fus cpu %u/%.0fus] ", k, (unsigned)atomic_load(&g_n[0][k]),
+                      (double)atomic_load(&g_ew[0][k]) / 1e3, (unsigned)atomic_load(&g_n[1][k]), (double)atomic_load(&g_ew[1][k]) / 1e3);
+    LOG_I(PHY, "SENSING: CPUROUTE classes(log2 PRBxlayers) %s\n", b);
+  }
   return r;
 }
 
@@ -115,7 +125,9 @@ void nr_pdsch_route_end(nr_pdsch_route_t *r)
     atomic_fetch_sub_explicit(&g_inflight, 1, memory_order_release);
   if (r->cls < 0 || g_small <= 0)
     return;
-  const uint64_t d = now_ns() - r->t0;
+  uint64_t d = now_ns() - r->t0;
+  if (d > 8000000ull) /* process-wide stalls (30-300 ms) hit both paths alike: clip so one cannot flip the choice */
+    d = 8000000ull;
   _Atomic uint64_t *e = &g_ew[r->cpu][r->cls];
   const uint32_t k = atomic_fetch_add_explicit(&g_n[r->cpu][r->cls], 1, memory_order_relaxed);
   const uint64_t o = atomic_load_explicit(e, memory_order_relaxed);

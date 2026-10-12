@@ -1,0 +1,8 @@
+base b 4 real n=1390 mean=727.6 p50=425 p90=925 p99=4515 max=130620.2 | probe n=6574 mean=622.1 p99=4025 | drop_stale 1083/6459 | crcRNTIs 28 [] | 
+batch b 4 real n=4440 mean=1665.1 p50=715 p90=2115 p99=8535 max=977809.8 | probe n=4771 mean=1291.7 p99=6035 | drop_stale 577/7686 | crcRNTIs 39 [] | CPUROUTE calls=20000 cpu=0 gate_waits=5025 wait_mean_us=1338.4 wait_to_cpu=0 wait_forced=1126
+cpu b 4 real n=1369 mean=8202.9 p50=835 p90=4505 p99=19995 max=928327.3 | probe n=3825 mean=8287.5 p99=19995 | drop_stale 577/3484 | crcRNTIs 26 [] | CPUROUTE calls=4000 cpu=366 gate_waits=0 wait_mean_us=0.0 wait_to_cpu=0 wait_forced=0
+both b 4 real n=1198 mean=6351.9 p50=845 p90=3265 p99=19995 max=956802.6 | probe n=5369 mean=5213.1 p99=14935 | drop_stale 604/4614 | crcRNTIs 28 [] | CPUROUTE calls=8000 cpu=549 gate_waits=1228 wait_mean_us=1647.0 wait_to_cpu=204 wait_forced=18
+base b 5 real n=1155 mean=1038.8 p50=435 p90=1115 p99=16095 max=57543.5 | probe n=6426 mean=636.1 p99=5145 | drop_stale 1028/6298 | crcRNTIs 23 [] | 
+batch b 5 real n=4928 mean=793.2 p50=435 p90=1035 p99=4095 max=153612.2 | probe n=4478 mean=636.8 p99=4385 | drop_stale 90/7076 | crcRNTIs 38 [] | CPUROUTE calls=20000 cpu=0 gate_waits=3224 wait_mean_us=878.1 wait_to_cpu=0 wait_forced=319
+cpu b 5 real n=4871 mean=824.5 p50=445 p90=1135 p99=4995 max=68223.5 | probe n=6033 mean=630.5 p99=4625 | drop_stale 333/8296 | crcRNTIs 29 [] | CPUROUTE calls=24000 cpu=683 gate_waits=0 wait_mean_us=0.0 wait_to_cpu=0 wait_forced=0
+both b 5 real n=2292 mean=8586.9 p50=845 p90=3185 p99=19995 max=944166.2 | probe n=3167 mean=7718.8 p99=19995 | drop_stale 366/3927 | crcRNTIs 32 [] | CPUROUTE calls=8000 cpu=218 gate_waits=1660 wait_mean_us=1380.3 wait_to_cpu=187 wait_forced=37
