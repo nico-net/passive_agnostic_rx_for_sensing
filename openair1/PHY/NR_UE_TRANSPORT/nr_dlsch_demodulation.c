@@ -54,6 +54,7 @@ __thread nr_irc_cov_t nr_irc_dmrs_cov; /* ISAC_RX_IRC=4, nr_irc_cov.h */
 __thread int nr_pdsch_chest_occ_override = -1; /* T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c */
 __thread int nr_pdsch_ldpc_iters_override = -1; /* T26d ISAC_LDPC_ITERS_AB (set by the PDSCH queue, read by the passive decode) */
 __thread bool nr_pdsch_decode_wide_mrc; /* CRC-validated passive recovery only */
+__thread nr_mmse2_diag_t nr_mmse2_diag;
 __thread int nr_dlsch_eq_override = -1; /* T26d ISAC_RX_EQ_AB: multi-layer equaliser per grant, 0 fixed MMSE, 1 float MMSE, 2 ML (nl 2, Qm<=6) */
 __thread int nr_dlsch_qam_mode_override = -1; /* QAM-FIX: per-decode ISAC_PDSCH_MMSE_MODE (-1 = env), set by the passive decode A/B */
 __thread nr_pdsch_evm_acc_t nr_pdsch_evm_acc; /* ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h */
@@ -862,6 +863,19 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
     const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
     const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
     const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
+    /* LLRZERO ISAC_PDSCH_MMSE2_GAIN=N (default 0 = off): w and z are rounded to int16 in |h|^2 >> shift units, which sit at a few LSB
+     * for the weak layer. A common gain 2^k, k = clamp(N - shift, 0, 12) (one value per grant: shift is per grant), scales z, mag, magb and magr
+     * of ALL layers alike, so only the rounding grid changes, never the layer weighting. */
+    static int s_g2 = -1;
+    if (s_g2 < 0) s_g2 = getenv("ISAC_PDSCH_MMSE2_GAIN") ? atoi(getenv("ISAC_PDSCH_MMSE2_GAIN")) : 0;
+    const int gk = s_g2 > 0 ? (s_g2 - shift < 0 ? 0 : s_g2 - shift > 12 ? 12 : s_g2 - shift) : 0;
+    const double mmse2_gain = (double)(1 << gk);
+    if (nr_mmse2_diag.on) {
+      nr_mmse2_diag.shift = shift;
+      nr_mmse2_diag.nl = nl;
+      nr_mmse2_diag.qm = mod_order;
+      nr_mmse2_diag.gain_k = gk;
+    }
     for (int i = 0; i < length; i++) {
       double complex M[4][9]; /* [G | b | I] */
       const int nc = 2 * nl + 1;
@@ -904,7 +918,8 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
       }
       for (int r = 0; r < nl; r++) {
         const double dinv = singular ? 0.0 : creal(M[r][nl + 1 + r]);
-        const double w = dinv > 1e-12 ? 1.0 / dinv : 0.0;
+        double w = dinv > 1e-12 ? 1.0 / dinv : 0.0;
+        w *= mmse2_gain; /* LLRZERO ISAC_PDSCH_MMSE2_GAIN: per-grant power-of-two common gain, 1.0 = off (exact) */
         const double complex o = w > 0.0 ? M[r][nl] * w : 0.0;
 #define QF_S16(v) ((int16_t)((v) > 32767.0 ? 32767 : (v) < -32768.0 ? -32768 : lround(v)))
         rxdataF_comp[r][i].r = QF_S16(creal(o));
@@ -913,6 +928,17 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
         dl_ch_mag[r][i].r = dl_ch_mag[r][i].i = QF_S16(ma);
         dl_ch_magb[r][i].r = dl_ch_magb[r][i].i = QF_S16(mb);
         dl_ch_magr[r][i].r = dl_ch_magr[r][i].i = QF_S16(mr);
+        if (nr_mmse2_diag.on && r < 4) {
+          nr_mmse2_diag_t *d = &nr_mmse2_diag;
+          d->n[r]++;
+          d->sing[r] += singular;
+          d->w0[r] += (w <= 0.0);
+          d->z0[r] += (rxdataF_comp[r][i].r == 0 && rxdataF_comp[r][i].i == 0);
+          d->mag0[r] += (dl_ch_mag[r][i].r == 0);
+          d->sat[r] += (fabs(creal(o)) > 32767.0 || fabs(cimag(o)) > 32767.0);
+          d->sumw[r] += w;
+          d->sumabsz[r] += fabs((double)rxdataF_comp[r][i].r) + fabs((double)rxdataF_comp[r][i].i);
+        }
 #undef QF_S16
       }
     }
