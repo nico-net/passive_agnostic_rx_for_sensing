@@ -39,7 +39,7 @@ static c16_t *csirs_scratch(int slot, size_t n)
   static __thread struct {
     c16_t *p;
     size_t n;
-  } buf[3];
+  } buf[4];
   if (buf[slot].n < n) {
     free(buf[slot].p);
     buf[slot].p = aligned_alloc(64, ((n * sizeof(c16_t) + 63) / 64) * 64);
@@ -47,6 +47,19 @@ static c16_t *csirs_scratch(int slot, size_t n)
     buf[slot].n = n;
   }
   return buf[slot].p;
+}
+
+/* csirs_ports_fit: true when the resource's port count fits the generated-signal buffers of ue->nr_csi_info (12 by default; 32 with
+ * ISAC_CSIRS_PORTS_GT8=1). A 16/24/32-port row (11-18) written past them overruns the heap in nr_generate_csi_rs. */
+static bool csirs_ports_fit(const nr_csi_info_t *csi_info, const csi_mapping_parms_t *m, const fapi_nr_dl_config_csirs_pdu_rel15_t *pdu)
+{
+  if (m->ports <= csi_info->csi_rs_generated_ports)
+    return true;
+  static __thread int warned;
+  if (!warned++)
+    LOG_W(NR_PHY, "SENSING: CSI-RS row %d has %d ports > %d buffers (ISAC_CSIRS_PORTS_GT8=0); skipped\n", (int)pdu->row, (int)m->ports,
+          csi_info->csi_rs_generated_ports);
+  return false;
 }
 
 /// Max rx antennas the CSI-RS sensing tap will extract for the receive-array AoA path.
@@ -248,7 +261,7 @@ static int nr_get_csi_rs_signal(const PHY_VARS_NR_UE *ue,
   }
 
 
-  *rsrp = rsrp_sum/meas_count;
+  *rsrp = meas_count ? rsrp_sum / meas_count : 0; /* no RB of the right parity in the range */
   *rsrp_dBm = dB_fixed(*rsrp) + 30 - SQ15_SQUARED_NORM_FACTOR_DB
               - ((int)openair0_cfg_g[ue->rf_map.card].rx_gain[0] - (int)openair0_cfg_g[ue->rf_map.card].rx_gain_offset[0])
               - dB_fixed(ue->frame_parms.ofdm_symbol_size);
@@ -273,6 +286,8 @@ uint32_t calc_power_csirs(const uint16_t *x, const fapi_nr_dl_config_csirs_pdu_r
     sum_x2 = sum_x2 + x[rb] * x[rb];
     size++;
   }
+  if (size == 0)
+    return 0;
   return sum_x2 / size - (sum_x / size) * (sum_x / size);
 }
 
@@ -404,8 +419,11 @@ static int nr_csi_rs_channel_estimation(
 
     /// Power noise estimation
     AssertFatal(csirs_config_pdu->nr_of_rbs > 0, " nr_of_rbs needs to be greater than 0\n");
-    uint16_t noise_real[fp->nb_antennas_rx][csi_mapping->ports][csirs_config_pdu->nr_of_rbs];
-    uint16_t noise_imag[fp->nb_antennas_rx][csi_mapping->ports][csirs_config_pdu->nr_of_rbs];
+    /* ants x ports x RBs x 2 x 2 B (140 kB at 4 RX, 32 ports, 273 PRB): per-thread heap scratch, not stack. */
+    const size_t noise_n = (size_t)fp->nb_antennas_rx * csi_mapping->ports * csirs_config_pdu->nr_of_rbs;
+    uint16_t(*noise_real)[csi_mapping->ports][csirs_config_pdu->nr_of_rbs] = (void *)csirs_scratch(3, noise_n);
+    uint16_t(*noise_imag)[csi_mapping->ports][csirs_config_pdu->nr_of_rbs] =
+        (void *)((uint16_t *)noise_real + noise_n);
     for (int rb = csirs_config_pdu->start_rb; rb < stop_rb; rb++) {
       if (csirs_config_pdu->freq_density <= 1 && csirs_config_pdu->freq_density != (rb % 2)) {
         continue;
@@ -1126,6 +1144,8 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                                                             csirs_config_pdu->symb_l0,
                                                             csirs_config_pdu->symb_l1);
   nr_csi_info_t *csi_info = ue->nr_csi_info;
+  if (!csirs_ports_fit(csi_info, &mapping_parms, csirs_config_pdu))
+    return;
   nr_generate_csi_rs(frame_parms,
                      &mapping_parms,
                      AMP,
@@ -1342,15 +1362,8 @@ void nr_ue_csi_rs_sensing_capture_shifted(PHY_VARS_NR_UE *ue,
       get_csi_mapping_parms(csirs_config_pdu->row, csirs_config_pdu->freq_domain, csirs_config_pdu->symb_l0,
                             csirs_config_pdu->symb_l1);
   nr_csi_info_t *csi_info = ue->nr_csi_info;
-  /* ue->nr_csi_info->csi_rs_generated_signal holds NR_MAX_CSI_PORTS buffers: a 16/24/32-port row (rows 11-18) written past it
-   * (heap overrun in nr_generate_csi_rs, TIM replay with row 12). Not estimable here: skip. */
-  if (mapping_parms.ports > NR_MAX_CSI_PORTS) {
-    static __thread int warned;
-    if (!warned++)
-      LOG_W(NR_PHY, "SENSING: csirs_monitor row %d has %d ports > %d; skipped\n", (int)csirs_config_pdu->row, (int)mapping_parms.ports,
-            NR_MAX_CSI_PORTS);
+  if (!csirs_ports_fit(csi_info, &mapping_parms, csirs_config_pdu))
     return;
-  }
 
   int reference_slot = (proc->nr_slot_rx + slot_delta) % frame_parms->slots_per_frame;
   if (reference_slot < 0)
