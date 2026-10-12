@@ -502,6 +502,8 @@ typedef struct {
   int pssWindowFrame; /* -1 searches both capture frames */
   int pssAntennas; /* 0 = all configured branches */
   int pssStride; /* 0 = ordinary four-sample correlation */
+  bool absValid; /* absStart known (single-GSCN initial sync): ISAC_PSS_ACC fold */
+  int64_t absStart; /* absolute sample index of rxdata[*][0] (capture start) */
   c16_t **rxdata;
   int rxdata_sz;
   NR_DL_FRAME_PARMS *fp;
@@ -536,6 +538,11 @@ typedef struct {
   int32_t metric; // SSS detection metric
   int freq_offset; // SSS frequency offset estimate
   int phase; // SSS phase
+  /* ISAC_SSS_MULTI (default off): up to 3 PCIs (same N_ID_2) whose best SSS metric beats the 4th-best N_ID_1 by the
+   * ratio; cand_pci[0] == nid_cell. Two cells on one SSB frequency (2026-10-11: PCI 4 and 508 at 3570.24 MHz). */
+  int ncand;
+  int cand_pci[3];
+  int32_t cand_metric[3];
 } sss_detection_result_t;
 
 // Common SSB search parameters - used by both initial sync and neighbor cell search
@@ -569,6 +576,9 @@ typedef struct {
   bool fo_flag; // frequency offset estimation flag for pss_synchro_nr()
   void *rxdataF; // Pre-allocated rxdataF buffer
   void *pssTime; // Pre-generated PSS time sequences
+  bool pss_decim; /* initial sync only: ISAC_PSS_DECIM decimated float PSS path allowed */
+  bool abs_valid; /* abs_start known: fold PSS profiles over captures (ISAC_PSS_ACC) */
+  int64_t abs_start; /* absolute sample index of rxdata[*][0] */
   // Output parameters
   pss_detection_result_t pss_res;
   sss_detection_result_t sss_res;

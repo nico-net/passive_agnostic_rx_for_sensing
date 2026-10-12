@@ -29,6 +29,7 @@
 
 #include "PHY/NR_REFSIG/sss_nr.h"
 #include "PHY/NR_UE_TRANSPORT/cic_filter_nr.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pss_decim.h"
 
 // #define DBG_PSS_NR
 
@@ -170,6 +171,104 @@ static int cmp_pss_peak(const void *a, const void *b)
 *
 *********************************************************************/
 
+/* ISAC_PSS_DECIM=1 (default off): decimated float PSS search for the initial-sync full search (see nr_pss_decim.h:
+ * ~60x less work than the 4096-tap int16 search and no dot_product() floor-shift bias on weak inputs).
+ * ISAC_PSS_ACC=K (needs ISAC_PSS_DECIM): non-coherent fold of the decimated profile over captures on the absolute 20 ms
+ * grid, acc = acc*(1-1/K) + new; SSS/PBCH CRC still decide on the newest capture. */
+static int pss_env_int(const char *name, int *cache)
+{
+  if (*cache < 0) {
+    const char *e = getenv(name);
+    *cache = e ? atoi(e) : 0;
+  }
+  return *cache;
+}
+static nr_pss_fold_t s_pss_fold; /* initial sync only (single GSCN, sync actor) */
+
+static nr_pss_info_t pss_search_decim(const pss_search_t *p, int D, int pss_index_start, int pss_index_end)
+{
+  static int s_k = -1;
+  const int K = min(max(pss_env_int("ISAC_PSS_ACC", &s_k), 1), 64);
+  const int N = p->ofdm_symbol_size;
+  c16_t(*pssTime)[N] = (c16_t(*)[N])p->pssTime;
+  const int npos = p->rxdata_length / D;
+  const int s0 = p->abs_valid ? (int)((D - p->abs_start % D) % D) : 0; /* decimated grid on absolute multiples of D */
+  const int kc = p->centre_bin;
+  const int Lmax = N / D + 3;
+  nr_cf_t rd[NUMBER_PSS_SEQUENCE][Lmax];
+  int L = 0;
+  for (int s = pss_index_start; s < pss_index_end; s++)
+    L = nr_pss_decim_ref((const int16_t *)pssTime[s], N, D, kc, rd[s]);
+  float *prof = calloc((size_t)NUMBER_PSS_SEQUENCE * npos, sizeof(float));
+  nr_cf_t *xd = malloc(sizeof(nr_cf_t) * (npos + L));
+  AssertFatal(prof && xd, "PSS_DECIM: out of memory\n");
+  for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
+    nr_pss_decimate((const int16_t *)p->rxdata[ar], p->rxdata_length + N, s0, npos + L, D, kc, N, xd);
+    for (int s = pss_index_start; s < pss_index_end; s++)
+      nr_pss_corr_acc(xd, npos, rd[s], L, prof + (size_t)s * npos);
+  }
+  free(xd);
+  const bool fold = p->abs_valid && K > 1;
+  nr_pss_info_t info = {0};
+  int count = 0;
+  for (int s = pss_index_start; s < pss_index_end; s++) {
+    float *pr = prof + (size_t)s * npos;
+    if (fold)
+      nr_pss_fold_update(&s_pss_fold, s, (p->abs_start + s0) / D, pr, npos, 2 * npos, K, kc * 65536 + N);
+    int mbest = 0;
+    double sum = 0;
+    for (int m = 0; m < npos; m++) {
+      sum += pr[m];
+      if (pr[m] > pr[mbest])
+        mbest = m;
+    }
+    const double avg = sum / (npos ? npos : 1), peak = pr[mbest];
+    /* full-rate float refinement around the decimated peak, 4-sample grid as the stock search */
+    int pos = 0;
+    double best = -1;
+    for (int n = max(0, (s0 + mbest * D - 2 * D) & ~3); n <= s0 + mbest * D + 2 * D && n < p->rxdata_length; n += 4) {
+      double c = 0;
+      for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
+        double re, im;
+        nr_pss_cdot((const int16_t *)pssTime[s], (const int16_t *)&p->rxdata[ar][n], N, &re, &im);
+        c += re * re + im * im;
+      }
+      if (c > best) {
+        best = c;
+        pos = n;
+      }
+    }
+    pss_detection_result_t *r = &info.pss_elem_info[count++];
+    *r = (pss_detection_result_t){.nid2 = s,
+                                  .pos = pos,
+                                  .peak = (int)lround(10 * log10(peak + 1e-30)),
+                                  .avg = (int)lround(10 * log10(avg + 1e-30)),
+                                  .success = !((p->target_Nid_cell == -1 && peak < 5 * avg) || pos < p->nb_prefix_samples)};
+    if (p->fo_flag && r->success) { /* same estimator as the stock path, float, summed over the branches */
+      double xr = 0, xi = 0;
+      for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
+        double r1r, r1i, r2r, r2i;
+        nr_pss_cdot((const int16_t *)pssTime[s], (const int16_t *)&p->rxdata[ar][pos], N / 2, &r1r, &r1i);
+        nr_pss_cdot((const int16_t *)(pssTime[s] + N / 2), (const int16_t *)&p->rxdata[ar][pos + N / 2], N / 2, &r2r, &r2i);
+        xr += r1r * r2r + r1i * r2i;
+        xi += r1r * r2i - r1i * r2r;
+      }
+      r->freq_offset = (int)(atan2(xi, xr) / M_PI * p->subcarrier_spacing);
+    }
+  }
+  if (fold)
+    LOG_I(PHY, "SENSING: PSS_ACC K=%d captures=%d abs=%ld\n", K, s_pss_fold.captures, (long)p->abs_start);
+  free(prof);
+  qsort(info.pss_elem_info, NUMBER_PSS_SEQUENCE, sizeof(pss_detection_result_t), cmp_pss_peak);
+  return info;
+}
+
+/* pss_fold_reset_after_sync: a new lock starts a new fold (called by nr_initial_sync on success) */
+void nr_pss_fold_forget(void)
+{
+  nr_pss_fold_reset(&s_pss_fold);
+}
+
 /* pss_search_time_nr: time-domain PSS search: correlates the received capture with the PSS references (one per NID2, or only the target cell's NID2 when target_Nid_cell is set) and returns the best position, NID2, and the correlation peak.
  *   The correlation shift is derived from the peak magnitude of the time-domain reference (not a fixed constant), so it follows the reference generator. Callers: nr_initial_sync.c (cell search, per branch) and nr_ue_measurements.c.
  */
@@ -212,6 +311,12 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
     pss_index_start = 0;
     pss_index_end = max_size;
   }
+
+  static int s_decim = -1;
+  const int D = nr_pss_decim_factor(p->ofdm_symbol_size);
+  if (p->decim && D > 0 && p->window_radius == 0 && p->search_stride <= 4 && pss_env_int("ISAC_PSS_DECIM", &s_decim) > 0
+      && get_softmodem_params()->sl_mode == 0)
+    return pss_search_decim(p, D, pss_index_start, pss_index_end);
 
   int pss_count = 0;
   nr_pss_info_t pss_info = {0};

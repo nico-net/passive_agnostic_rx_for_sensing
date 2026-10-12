@@ -966,6 +966,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/MODULATION/nr_modulation.c
   ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pss_nr.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pss_decim.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/sss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/cic_filter_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
@@ -2623,6 +2624,13 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_passive_cfg_epoch COMMAND ./test_nr_passive_cfg_epoch)
   add_test(NAME test_nr_sib1_cache_hint COMMAND test_nr_pdcch_blind_monitor --gtest_filter=Sib1Cache.*:EpochFeedback.*:BlindPdcchTest.NoisePrntiShortOnly*:BlindPdcchTest.Dci10PRntiShortMessageOnly*)
   set_tests_properties(test_nr_sib1_cache_hint PROPERTIES ENVIRONMENT "ISAC_RECONF=1")
+
+  add_executable(test_nr_pss_decim ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pss_decim_test.cc
+                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pss_decim.c)
+  target_include_directories(test_nr_pss_decim PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pss_decim PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_pss_decim)
+  add_test(NAME test_nr_pss_decim COMMAND ./test_nr_pss_decim)
 
   add_executable(test_nr_initial_sync_budget ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_initial_sync_budget_test.cc
                                               ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c)

@@ -66,6 +66,10 @@ typedef struct {
   int window_center; /* RX recovery only: sample position in this frame */
   int window_radius; /* zero keeps the original full-frame search */
   int search_stride; /* recovery coarse pass; zero retains four-sample search */
+  bool decim; /* ISAC_PSS_DECIM path allowed (initial sync full search only) */
+  int centre_bin; /* signed FFT bin of the PSS centre (from the grid geometry), used with decim */
+  bool abs_valid; /* abs_start valid: ISAC_PSS_ACC fold over captures */
+  int64_t abs_start; /* absolute sample index of rxdata[*][0] */
 } pss_search_t;
 
 typedef struct {
@@ -73,6 +77,7 @@ typedef struct {
 } nr_pss_info_t;
 
 nr_pss_info_t pss_search_time_nr(const pss_search_t *p);
+void nr_pss_fold_forget(void); /* ISAC_PSS_ACC: drop the fold after a lock */
 
 void generate_pss_nr_time(int ofdm_symbol_size,
                           int first_carrier_offset,
