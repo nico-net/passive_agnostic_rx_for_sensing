@@ -354,7 +354,19 @@ static struct { long target; int n; uint16_t rnti[OV_GRANTS]; uint16_t r0[OV_GRA
 static uint32_t g_ov_pairs[NR_UL_LAYOUT_MAX_HYP], g_ov_hit[NR_UL_LAYOUT_MAX_HYP];
 static const float WV_THR[4] = {6.f, 10.f, 15.f, 25.f};
 static int g_wv[4][NR_UL_LAYOUT_MAX_HYP][2]; /* winner votes per threshold {2,3,4,5}: [+ (argmax), - (argmin)] */
-bool nr_ul_layout_sprt_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_SPRT"); }
+bool nr_ul_layout_edge_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_EDGE"); }
+bool nr_ul_layout_coherent_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_COHERENT"); }
+bool nr_ul_layout_sprt_enabled(void)
+{
+  return nr_ul_layout_lock_enabled() && (env_on("ISAC_UL_LOCK_SPRT") || env_on("ISAC_UL_LOCK_EDGE") || env_on("ISAC_UL_LOCK_COHERENT"));
+}
+/* the incoherent zn enters X_h with SPRT=1, or when neither new statistic is selected */
+static bool sprt_base_term(void) { return env_on("ISAC_UL_LOCK_SPRT") || !(env_on("ISAC_UL_LOCK_EDGE") || env_on("ISAC_UL_LOCK_COHERENT")); }
+/* ULTWINS edge test: grants of the last EG_SLOTS target slots with their range under every hypothesis (end exclusive) */
+#define EG_SLOTS 8
+#define EG_GRANTS 24
+static struct { long target; int n; uint16_t rnti[EG_GRANTS]; uint16_t r0[EG_GRANTS][NR_UL_LAYOUT_MAX_HYP], r1[EG_GRANTS][NR_UL_LAYOUT_MAX_HYP]; } g_eg[EG_SLOTS];
+static uint32_t g_edge_used, g_edge_excl;
 bool nr_ul_layout_sib1_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_SIB1_FIRST"); }
 bool nr_ul_layout_crc_guard_enabled(void) { return nr_ul_layout_crc_first_enabled() && env_on("ISAC_UL_LOCK_CRC_GUARD"); }
 bool nr_ul_layout_crc_first_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_CRC_FIRST"); }
@@ -392,6 +404,9 @@ static void reset_locked(void)
   g_acc_target = -1;
   g_sprt_slots = 0;
   memset(&g_ov, 0, sizeof(g_ov));
+  memset(g_eg, 0, sizeof(g_eg));
+  for (int i = 0; i < EG_SLOTS; i++) g_eg[i].target = -1;
+  g_edge_used = g_edge_excl = 0;
   memset(g_wv, 0, sizeof(g_wv));
   memset(g_ov_pairs, 0, sizeof(g_ov_pairs));
   memset(g_ov_hit, 0, sizeof(g_ov_hit));
@@ -817,6 +832,23 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
         uint16_t x = 0, y = 0;
         if (hyp_range(ls, &payload, h, &x, &y) && y) { a[h] = x; b[h] = (uint16_t)(x + y); } else a[h] = b[h] = 0;
       }
+      if (nr_ul_layout_edge_enabled()) {
+        int e = 0;
+        for (int i = 0; i < EG_SLOTS; i++) if (g_eg[i].target == tg) e = i + 1;
+        if (!e) { /* oldest slot out */
+          int o = 0;
+          for (int i = 1; i < EG_SLOTS; i++) if (g_eg[i].target < g_eg[o].target) o = i;
+          g_eg[o].target = tg; g_eg[o].n = 0; e = o + 1;
+        }
+        const int i = e - 1;
+        bool seen = false;
+        for (int j = 0; j < g_eg[i].n; j++) seen |= g_eg[i].rnti[j] == rnti;
+        if (!seen && g_eg[i].n < EG_GRANTS) {
+          const int j = g_eg[i].n++;
+          g_eg[i].rnti[j] = rnti;
+          for (int h = 0; h < g_nhyp; h++) { g_eg[i].r0[j][h] = a[h]; g_eg[i].r1[j][h] = b[h]; }
+        }
+      }
       bool dup = false;
       for (int j = 0; j < g_ov.n; j++) dup |= g_ov.rnti[j] == rnti;
       if (!dup) {
@@ -947,7 +979,7 @@ static void sprt_try_lock_locked(long now)
     cmp[j] = h;
   }
   const uint32_t n = g_hist_n < SPRT_HIST ? g_hist_n : SPRT_HIST;
-  double pair_z = 1e9;
+  double pair_z = 1e9, pair_llr = 1e9;
   for (int c = 0; c < nc; c++) {
     double d = 0, wd = 0;
     for (uint32_t i = 0; i < n; i++) {
@@ -958,6 +990,10 @@ static void sprt_try_lock_locked(long now)
     }
     if (!(d > 0 && d * d >= sprt_bound2(wd, SPRT_PAIR_ALPHA / SPRT_CMP))) return;
     if (d / sqrt(wd + SPRT_RHO) < pair_z) pair_z = d / sqrt(wd + SPRT_RHO);
+    { /* log of the mixture martingale of the pair (a vs c): the log-likelihood ratio of "a's layout" against "c's" in the self-normalised sense */
+      const double llr = d * d / (2.0 * (wd + SPRT_RHO)) + 0.5 * log(SPRT_RHO / (wd + SPRT_RHO));
+      if (llr < pair_llr) pair_llr = llr;
+    }
   }
   g_locked_hyp = a;
   g_lock_slot = now;
@@ -970,11 +1006,11 @@ static void sprt_try_lock_locked(long now)
   const int b = nc ? cmp[0] : -1;
   LOG_A(PHY, "SENSING: ULLAYOUT BWP_LOCK bwp=%u@%u votes=%.0f runner=%u@%u:%.0f rntis=0 others[%s ] ctl_votes=%u"
              " discarded=0 tied=0 probes=%u hyps=%d addpos_votes=%u/%u/%u first_abs=%ld lock_abs=%ld t_conv_ms=%.0f"
-             " confidence=%.2f mode=sprt S=%.1f W=%.1f z=%.2f pair_z=%.2f slots=%u\n",
+             " confidence=%.2f mode=sprt S=%.1f W=%.1f z=%.2f pair_z=%.2f pair_llr=%.2f edge=%d coh=%d edge_used=%u edge_excl=%u slots=%u\n",
         g_hyp[a].n, g_hyp[a].start, g_S[a], b >= 0 ? g_hyp[b].n : 0, b >= 0 ? g_hyp[b].start : 0, b >= 0 ? g_S[b] : 0.0, rest,
         g_ctl_votes, g_probes_fed, g_nhyp, g_addpos[0], g_addpos[1], g_addpos[2], g_first_slot, now,
         10.0 * (double)(now - g_first_slot) / spf, pair_z / (pair_z + 3.0), g_S[a], g_W[a], g_S[a] / sqrt(g_W[a] + SPRT_RHO),
-        pair_z, g_sprt_slots);
+        pair_z, pair_llr, nr_ul_layout_edge_enabled(), nr_ul_layout_coherent_enabled(), g_edge_used, g_edge_excl, g_sprt_slots);
   for (int l = 0; l < g_nlen; l++) lock_length_locked(&g_len[l], now);
 }
 
@@ -996,6 +1032,15 @@ static void sprt_close_slot_locked(void)
   sprt_try_lock_locked(g_acc_target);
 }
 
+/* ISAC_UL_LOCK_CLIP (default SPRT_CLIP): symmetric clipping keeps the null symmetry (the bound holds for any clip) and stops the
+ * heavy tail of strong detections from inflating W of the true layout */
+static double clip_z(double z)
+{
+  static double c = -1.0;
+  if (c < 0.0) { const char *e = getenv("ISAC_UL_LOCK_CLIP"); c = e && atof(e) > 0.0 ? atof(e) : SPRT_CLIP; }
+  return z > c ? c : (z < -c ? -c : z);
+}
+
 static void sprt_feed_locked(const nr_pdcch_blind_ul_result_t *g, int li, long target, const nr_ul_layout_probe_res_t *r)
 {
   if (g_acc_probes > 0 && target != g_acc_target) sprt_close_slot_locked();
@@ -1008,10 +1053,27 @@ static void sprt_feed_locked(const nr_pdcch_blind_ul_result_t *g, int li, long t
     if (r->snr_db[h] <= -90.f) continue;
     if (k < 0 || r->snr_db[h] > r->snr_db[k]) k = h;
     uint16_t a = 0, b = 0;
-    if (!hyp_range(ls, &g->raw_payload, h, &a, &b) || b == 0 || !isfinite(r->zn[h])) continue;
-    double z = r->zn[h];
-    z = z > SPRT_CLIP ? SPRT_CLIP : (z < -SPRT_CLIP ? -SPRT_CLIP : z);
-    g_acc[h] += (float)z; /* weight 1: per-PRB SNR of a power-limited UE falls with L, so sqrt(L) would overweight wide grants */
+    if (!hyp_range(ls, &g->raw_payload, h, &a, &b) || b == 0) continue;
+    double z = 0.0;
+    if (sprt_base_term() && isfinite(r->zn[h])) z += clip_z(r->zn[h]); /* weight 1: per-PRB SNR of a power-limited UE falls with L, so sqrt(L) would overweight wide grants */
+    if (r->zc_valid && isfinite(r->zc[h]) && nr_ul_layout_coherent_enabled()) z += clip_z(r->zc[h]);
+    if (r->ze_valid && nr_ul_layout_edge_enabled()) {
+      /* edge terms: the outside PRB must not be covered by another decoded grant of this slot under THIS hypothesis (its DM-RS would
+       * sit there under the true layout too, and the same PCI scrambling hides whose it is) */
+      int e = -1;
+      for (int i = 0; i < EG_SLOTS; i++) if (g_eg[i].target == target) e = i;
+      for (int side = 0; side < 2; side++) {
+        if (!isfinite(r->ze[h][side])) continue;
+        const int outp = side == 0 ? (int)a - 1 : (int)a + (int)b;
+        bool covered = false;
+        for (int j = 0; e >= 0 && j < g_eg[e].n; j++)
+          covered |= g_eg[e].rnti[j] != g->rnti && outp >= g_eg[e].r0[j][h] && outp < g_eg[e].r1[j][h];
+        if (covered) { g_edge_excl++; continue; }
+        g_edge_used++;
+        z += clip_z(r->ze[h][side]);
+      }
+    }
+    g_acc[h] += (float)z;
   }
   g_acc_probes++;
   { /* winner votes: argmax of zn (+) and argmin (-) are exchangeable under the null */
@@ -1171,6 +1233,7 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
   len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
   /* one DCI per slot (<= K jobs), small MCS only; locked layouts are re-tried only after a run of CRC failures */
   if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0 || g_trial_slot == abs_slot
+      || (g_locked_hyp < 0 && env_on("ISAC_UL_LOCK_NO_TRIAL_UNLOCKED"))
       || (ls->locked && ls->crc_fail_run < RELOCK_FAILS) || fld(&payload, len, ls->mcs_off, 5) > TRIAL_MCS_MAX) {
     pthread_mutex_unlock(&mu);
     return 0;
@@ -1350,7 +1413,7 @@ void nr_ul_layout_stats_dump(void)
       for (; j > 0 && g_S[h] > g_S[top[j - 1]]; j--) top[j] = top[j - 1];
       top[j] = h;
     }
-    q += snprintf(sp, sizeof(sp), " sprt[slots=%u", g_sprt_slots);
+    q += snprintf(sp, sizeof(sp), " sprt[slots=%u edge=%u/%u", g_sprt_slots, g_edge_used, g_edge_excl);
     for (int i = 0; i < nt && q < (int)sizeof(sp) - 60; i++)
       q += snprintf(sp + q, sizeof(sp) - q, " %u@%u:S=%.1f,W=%.0f,z=%.2f", g_hyp[top[i]].n, g_hyp[top[i]].start, g_S[top[i]],
                     g_W[top[i]], g_S[top[i]] / sqrt(g_W[top[i]] + SPRT_RHO));

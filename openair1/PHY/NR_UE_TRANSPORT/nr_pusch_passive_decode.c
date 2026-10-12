@@ -836,19 +836,29 @@ static float lp_snr(const float *zr, const float *zi, int nr, int nant, int L, i
  * (3 rows x nant x PRBs x 33 delays) plus O(33 x 12) per hypothesis, instead of O(L x 33 x 12 x 6) per hypothesis and set. */
 typedef struct { double P[2][3][PASSIVE_UL_MAX_ANT][LP_NTAU + 1][276]; } lp_tab_t; /* [v][row][ant][t | S2][prb prefix] */
 static lp_tab_t *g_lp_tab[NR_PUSCH_PASSIVE_MAX_CTX];
+/* ISAC_UL_LOCK_COHERENT=1 (ULTWINS): complex prefix sums over PRBs of c_q(t) e^{j theta_t q}, i.e. the coherent DM-RS sum over a PRB
+ * range at delay tau_t (theta_t = 2 pi 12 tau_t / N), for the true and the control sequence. Heap, only when the flag is on. */
+typedef struct { double Pr[2][3][PASSIVE_UL_MAX_ANT][LP_NTAU][276], Pi[2][3][PASSIVE_UL_MAX_ANT][LP_NTAU][276]; } lp_ctab_t;
+static lp_ctab_t *g_lp_ctab[NR_PUSCH_PASSIVE_MAX_CTX];
 
-static void lp_tab_build(lp_tab_t *T, int v, c16_t *const F[LP_NSYM][PASSIVE_UL_MAX_ANT], int nant, const uint32_t *const *gold, int fco,
-                         int N, int qlo, int nq)
+static void lp_tab_build(lp_tab_t *T, lp_ctab_t *CT, int v, c16_t *const F[LP_NSYM][PASSIVE_UL_MAX_ANT], int nant, const uint32_t *const *gold,
+                         int fco, int N, int qlo, int nq)
 {
-  static __thread float pc[LP_NTAU][6], ps[LP_NTAU][6];
+  static __thread float pc[LP_NTAU][6], ps[LP_NTAU][6], rc[LP_NTAU][276], rs[LP_NTAU][276];
   static __thread int pn = 0;
   if (pn != N) {
-    for (int t = 0; t < LP_NTAU; t++)
+    for (int t = 0; t < LP_NTAU; t++) {
       for (int j = 0; j < 6; j++) {
         const double ph = 2.0 * M_PI * (2.0 * j) * (double)(-256 + 16 * t) / (double)N;
         pc[t][j] = (float)cos(ph);
         ps[t][j] = (float)sin(ph);
       }
+      for (int q = 0; q < 276; q++) {
+        const double ph = 2.0 * M_PI * (12.0 * q) * (double)(-256 + 16 * t) / (double)N;
+        rc[t][q] = (float)cos(ph);
+        rs[t][q] = (float)sin(ph);
+      }
+    }
     pn = N;
   }
   for (int r = 0; r < 3; r++)
@@ -857,6 +867,8 @@ static void lp_tab_build(lp_tab_t *T, int v, c16_t *const F[LP_NSYM][PASSIVE_UL_
       for (int t = 0; t < LP_NTAU; t++) Pt[t] = T->P[v][r][a][t];
       P0[0] = 0.0;
       for (int t = 0; t < LP_NTAU; t++) Pt[t][0] = 0.0;
+      if (CT)
+        for (int t = 0; t < LP_NTAU; t++) CT->Pr[v][r][a][t][0] = CT->Pi[v][r][a][t][0] = 0.0;
       for (int q = 0; q < nq; q++) {
         float zr[6], zi[6], s2 = 0.f;
         for (int j = 0; j < 6; j++) {
@@ -875,6 +887,10 @@ static void lp_tab_build(lp_tab_t *T, int v, c16_t *const F[LP_NSYM][PASSIVE_UL_
             si += zr[j] * ps[t][j] + zi[j] * pc[t][j];
           }
           Pt[t][q + 1] = Pt[t][q] + (double)(sr * sr + si * si);
+          if (CT) {
+            CT->Pr[v][r][a][t][q + 1] = CT->Pr[v][r][a][t][q] + (double)(sr * rc[t][q] - si * rs[t][q]);
+            CT->Pi[v][r][a][t][q + 1] = CT->Pi[v][r][a][t][q] + (double)(sr * rs[t][q] + si * rc[t][q]);
+          }
         }
       }
     }
@@ -925,6 +941,81 @@ static void lp_tab_range(const lp_tab_t *T, int v, int nant, int q0, int L, cons
   }
 }
 
+
+/* ULTWINS edge test: normalised per-PRB DM-RS excess e_q = mean_{rows in mask, ant} (C_q(t*) / (6 nv) - 1) (mean 0, variance
+ * 1/(nr nant) with no DM-RS), t* = the best delay of the INSIDE range for this sequence. out[0..3] = e at {inside-left, outside-left,
+ * inside-right, outside-right} of the range [q0, q0+L) of table v. Returns false when a noise estimate is not positive. */
+static bool lp_tab_edge(const lp_tab_t *T, int v, int nant, int q0, int L, int mask, double out[4])
+{
+  double E[LP_NTAU];
+  for (int t = 0; t < LP_NTAU; t++) {
+    E[t] = 0.0;
+    for (int r = 0; r < 3; r++)
+      if (mask >> r & 1)
+        for (int a = 0; a < nant; a++) E[t] += T->P[v][r][a][t][q0 + L] - T->P[v][r][a][t][q0];
+  }
+  int bt = 0;
+  for (int t = 1; t < LP_NTAU; t++) if (E[t] > E[bt]) bt = t;
+  const int qs[4] = {q0, q0 - 1, q0 + L - 1, q0 + L};
+  int cnt = 0;
+  for (int i = 0; i < 4; i++) out[i] = 0.0;
+  for (int r = 0; r < 3; r++) {
+    if (!(mask >> r & 1)) continue;
+    for (int a = 0; a < nant; a++) {
+      const double C = T->P[v][r][a][bt][q0 + L] - T->P[v][r][a][bt][q0];
+      const double nv = (T->P[v][r][a][LP_NTAU][q0 + L] - T->P[v][r][a][LP_NTAU][q0] - C / 6.0) / (double)(L * 5);
+      if (!(nv > 0.0)) return false;
+      for (int i = 0; i < 4; i++) {
+        if (qs[i] < 0 || qs[i] > 274) { out[i] = NAN; continue; }
+        out[i] += (T->P[v][r][a][bt][qs[i] + 1] - T->P[v][r][a][bt][qs[i]]) / (6.0 * nv) - 1.0;
+      }
+      cnt++;
+    }
+  }
+  for (int i = 0; i < 4; i++) out[i] /= cnt;
+  return true;
+}
+
+/* ULTWINS coherent test: mean over (rows in mask, ant) of |sum over the range of c_q(t) e^{j theta_t q}|^2 / (6 L nv) - 1 (mean 0,
+ * variance 1/(nr nant) with no DM-RS), maximised over the 33 delays. nv as in lp_tab_range at the incoherent best delay. */
+static bool lp_tab_coh(const lp_tab_t *T, const lp_ctab_t *CT, int v, int nant, int q0, int L, int mask, double *m)
+{
+  double E[LP_NTAU];
+  for (int t = 0; t < LP_NTAU; t++) {
+    E[t] = 0.0;
+    for (int r = 0; r < 3; r++)
+      if (mask >> r & 1)
+        for (int a = 0; a < nant; a++) E[t] += T->P[v][r][a][t][q0 + L] - T->P[v][r][a][t][q0];
+  }
+  int bt = 0;
+  for (int t = 1; t < LP_NTAU; t++) if (E[t] > E[bt]) bt = t;
+  double nvv[3][PASSIVE_UL_MAX_ANT];
+  int cnt = 0;
+  for (int r = 0; r < 3; r++) {
+    if (!(mask >> r & 1)) continue;
+    for (int a = 0; a < nant; a++) {
+      const double C = T->P[v][r][a][bt][q0 + L] - T->P[v][r][a][bt][q0];
+      nvv[r][a] = (T->P[v][r][a][LP_NTAU][q0 + L] - T->P[v][r][a][LP_NTAU][q0] - C / 6.0) / (double)(L * 5);
+      if (!(nvv[r][a] > 0.0)) return false;
+      cnt++;
+    }
+  }
+  double best = -1e30;
+  for (int t = 0; t < LP_NTAU; t++) {
+    double acc = 0.0;
+    for (int r = 0; r < 3; r++) {
+      if (!(mask >> r & 1)) continue;
+      for (int a = 0; a < nant; a++) {
+        const double ar = CT->Pr[v][r][a][t][q0 + L] - CT->Pr[v][r][a][t][q0], ai = CT->Pi[v][r][a][t][q0 + L] - CT->Pi[v][r][a][t][q0];
+        acc += (ar * ar + ai * ai) / (6.0 * L * nvv[r][a]) - 1.0;
+      }
+    }
+    if (acc / cnt > best) best = acc / cnt;
+  }
+  *m = best;
+  return true;
+}
+
 /* all hypotheses; fills res->snr_db / set / zn / zn_valid, returns the best hypothesis (or -1) */
 static int lp_sprt_eval(PHY_VARS_NR_UE *ue, int ctx, int nant, c16_t *const F[LP_NSYM][PASSIVE_UL_MAX_ANT],
                         const uint32_t *const gold[3], const uint32_t *const gctl[3], int fco, int N, int n,
@@ -938,11 +1029,22 @@ static int lp_sprt_eval(PHY_VARS_NR_UE *ue, int ctx, int nant, c16_t *const F[LP
     if (prb0[h] + nprb[h] > qhi) qhi = prb0[h] + nprb[h];
   }
   if (qhi <= qlo) return -1;
+  const bool edge = nr_ul_layout_edge_enabled(), coh = nr_ul_layout_coherent_enabled();
+  if (edge) { /* one PRB outside each end of every range */
+    if (qlo > 0) qlo--;
+    if (qhi < 275) qhi++;
+  }
   if (!g_lp_tab[ctx]) g_lp_tab[ctx] = calloc(1, sizeof(lp_tab_t));
   lp_tab_t *T = g_lp_tab[ctx];
   if (!T) return -1;
-  lp_tab_build(T, 0, F, nant, gold, fco, N, qlo, qhi - qlo);
-  lp_tab_build(T, 1, F, nant, gctl, fco, N, qlo, qhi - qlo);
+  lp_ctab_t *CT = NULL;
+  if (coh) {
+    if (!g_lp_ctab[ctx]) g_lp_ctab[ctx] = calloc(1, sizeof(lp_ctab_t));
+    CT = g_lp_ctab[ctx];
+    if (!CT) return -1;
+  }
+  lp_tab_build(T, CT, 0, F, nant, gold, fco, N, qlo, qhi - qlo);
+  lp_tab_build(T, CT, 1, F, nant, gctl, fco, N, qlo, qhi - qlo);
   static const int set_mask[3] = {1, 5, 7}; /* res->set: 0 = {l0}, 1 = {l0,11}, 2 = {l0,7,11} */
   static const int ns_of[3] = {1, 2, 3};
   int best = -1;
@@ -969,6 +1071,33 @@ static int lp_sprt_eval(PHY_VARS_NR_UE *ue, int ctx, int nant, c16_t *const F[LP
     const double ns = 2.0 / (1.0 / ns_of[bsr[0]] + 1.0 / ns_of[bsr[1]]);
     const double sg = sqrt((double)nant / (18.0 * nprb[h] * ns));
     res->zn[h] = (float)(D / sg);
+    if (edge || coh) {
+      /* DM-RS symbol rows: the set that maximises the SUM of the true and the control estimates (symmetric in the two sequences,
+       * so the true <-> control swap symmetry of the null is kept) */
+      int bm = 0;
+      for (int st = 1; st < 3; st++) if (cl[0][st] + cl[1][st] > cl[0][bm] + cl[1][bm]) bm = st;
+      const int mk = set_mask[bm], nrow = ns_of[bm];
+      const double sc = sqrt((double)(nrow * nant));
+      if (coh) {
+        double mt, mc;
+        if (lp_tab_coh(T, CT, 0, nant, prb0[h] - qlo, nprb[h], mk, &mt) && lp_tab_coh(T, CT, 1, nant, prb0[h] - qlo, nprb[h], mk, &mc)) {
+          res->zc[h] = (float)((mt - mc) * sc / M_SQRT2);
+          res->zc_valid = true;
+        }
+      }
+      if (edge) {
+        double et[4], ec[4];
+        res->ze[h][0] = res->ze[h][1] = NAN;
+        if (lp_tab_edge(T, 0, nant, prb0[h] - qlo, nprb[h], mk, et) && lp_tab_edge(T, 1, nant, prb0[h] - qlo, nprb[h], mk, ec)) {
+          res->ze[h][0] = (float)(((et[0] - et[1]) - (ec[0] - ec[1])) * sc / 2.0); /* left edge: inside - outside, true - control */
+          res->ze[h][1] = (float)(((et[2] - et[3]) - (ec[2] - ec[3])) * sc / 2.0);
+          /* an outside PRB beyond the carrier (or the table) is not a test */
+          if (prb0[h] == 0 || prb0[h] - qlo <= 0) res->ze[h][0] = NAN;
+          if (prb0[h] + nprb[h] >= 275 || prb0[h] + nprb[h] - qlo >= qhi - qlo) res->ze[h][1] = NAN;
+          res->ze_valid = true;
+        }
+      }
+    }
     if (best < 0 || res->snr_db[h] > res->snr_db[best]) best = h;
   }
   res->zn_valid = true;

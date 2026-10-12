@@ -6092,7 +6092,7 @@ struct SprtRun {
 };
 // mu = per-PRB mean of the DM-RS statistic on the true allocation (216 @ CRB 1).
 // heavy = noise drawn from a symmetric heavy-tailed mixture (the exchangeable-null shape is symmetric, not Gaussian).
-SprtRun UllSprtRun(unsigned seed, double mu, int max_probes, bool heavy)
+SprtRun UllSprtRun(unsigned seed, double mu, int max_probes, bool heavy, bool edge = false)
 {
   nr_ul_layout_lock_reset();
   const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
@@ -6128,6 +6128,7 @@ SprtRun UllSprtRun(unsigned seed, double mu, int max_probes, bool heavy)
     nr_ul_layout_probe_res_t r = {};
     r.n = n;
     r.zn_valid = true;
+    r.ze_valid = edge;
     r.ctl_db = -6.f;
     r.comb1_db = NAN;
     // per-PRB statistic u_q ~ noise (+ mu on the true allocation); a hypothesis' zn is the normalised sum over its range, so
@@ -6145,6 +6146,9 @@ SprtRun UllSprtRun(unsigned seed, double mu, int max_probes, bool heavy)
       if (!np[h]) continue;
       if (np[h] > 16) run.wide++;
       r.zn[h] = (float)((cu[p0[h] + np[h]] - cu[p0[h]]) / std::sqrt((double)np[h]));
+      // edge statistic: (inside - outside) of the PRB at each end of the range, normalised by sqrt(2)
+      r.ze[h][0] = p0[h] >= 1 ? (float)((u[p0[h]] - u[p0[h] - 1]) / std::sqrt(2.0)) : NAN;
+      r.ze[h][1] = p0[h] + np[h] < 275 ? (float)((u[p0[h] + np[h] - 1] - u[p0[h] + np[h]]) / std::sqrt(2.0)) : NAN;
     }
     nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
     run.probes++;
@@ -6174,6 +6178,26 @@ TEST(UlLayoutLock, SprtLocksOnWeakEvidenceAndNeverOnNoise)
   EXPECT_EQ(false_locks, 0);
   nr_ul_layout_lock_reset();
   unsetenv("ISAC_UL_LOCK_SPRT");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}
+
+// ULTWINS: the allocation-edge test alone (the range-sum evidence zn is left out when ISAC_UL_LOCK_EDGE=1): the step at the edges of the true
+// layout locks it; 1-PRB twins (216@0, 216@2, 215@x) see a step on neither edge, since both PRBs of an edge sit inside or outside the grant.
+TEST(UlLayoutLock, EdgeTestLocksTheTrueLayoutAndNeverOnNoise)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  setenv("ISAC_UL_LOCK_EDGE", "1", 1);
+  ASSERT_TRUE(nr_ul_layout_edge_enabled());
+  for (unsigned seed = 1; seed <= 6; seed++) {
+    const SprtRun r = UllSprtRun(seed, 0.8, 6000, false, true);
+    EXPECT_EQ(r.locked_n, 216) << "seed " << seed << " probes " << r.probes;
+    EXPECT_EQ(r.locked_start, 1) << "seed " << seed;
+  }
+  int false_locks = 0;
+  for (unsigned seed = 100; seed < 250; seed++) false_locks += UllSprtRun(seed, 0.0, 1500, true, true).locked_n != 0;
+  EXPECT_EQ(false_locks, 0);
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_EDGE");
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 

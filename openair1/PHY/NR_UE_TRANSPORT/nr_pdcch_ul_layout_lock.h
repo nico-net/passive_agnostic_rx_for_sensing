@@ -80,12 +80,24 @@ typedef struct {
    * control DM-RS)) / sigma0 of the same PRB range, linear and unclamped: symmetric about 0 when the range holds no DM-RS. */
   bool zn_valid;
   float zn[NR_UL_LAYOUT_MAX_HYP];
+  /* ISAC_UL_LOCK_EDGE=1 (ULTWINS): ze[h][0/1] = edge statistic of the left / right edge of hypothesis h's range: DM-RS excess of the
+   * PRB just inside minus just outside, true minus control sequence, / its null sigma (NAN = outside PRB beyond the carrier).
+   * ISAC_UL_LOCK_COHERENT=1: zc[h] = coherent DM-RS sum across the range, true minus control, / null sigma. */
+  bool ze_valid, zc_valid;
+  float ze[NR_UL_LAYOUT_MAX_HYP][2];
+  float zc[NR_UL_LAYOUT_MAX_HYP];
 } nr_ul_layout_probe_res_t;
 
 bool nr_ul_layout_lock_enabled(void); /* ISAC_UL_LAYOUT_LOCK=1 */
 /* ISAC_UL_LOCK_SPRT=1 (default off, needs the lock): the BWP lock is a sequential test on the accumulated DM-RS evidence of
  * EVERY probe (any grant width) instead of 6-dB votes. See docs/superpowers/reports/csd/ULLOCKSPEED-20261012.md. */
-bool nr_ul_layout_sprt_enabled(void);
+bool nr_ul_layout_sprt_enabled(void); /* also true when EDGE or COHERENT is on (they use the same sequential machinery) */
+/* ULTWINS (docs/superpowers/reports/csd/ULTWINS-20261012.md), all default off, need the lock: EDGE = allocation-edge test (the evidence is the
+ * DM-RS step at the predicted edges of each grant, outside PRBs covered by another decoded grant of the slot excluded); COHERENT =
+ * coherent DM-RS combining across a range; NO_TRIAL_UNLOCKED = no CRC-first PUSCH trials while the BWP is unlocked. With EDGE or COHERENT
+ * set the incoherent zn evidence is left out unless ISAC_UL_LOCK_SPRT=1 is set as well. */
+bool nr_ul_layout_edge_enabled(void);
+bool nr_ul_layout_coherent_enabled(void);
 /* BLINDFIX F6 (ISAC_UL_LOCK_BWP_ALL=1, default off): every legal (N_BWP, start) of the carrier whose RIV needs `w` bits and for
  * which N(N+1)/2 > maxriv (the largest RIV observed), N descending, start ascending. count = size; at(idx) = the idx-th. */
 uint32_t nr_ul_layout_enum_count(int carrier_rb, int w, uint32_t maxriv);
