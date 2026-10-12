@@ -14,6 +14,7 @@
 #define SOLVER_SEARCH_MAX_RB 48   /* search probes only readings this narrow (cost; the small grants decode best) */
 #define SOLVER_CAND_TRIES 96      /* confirmation probes before an unconfirmed candidate is dropped */
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
+#define HQ_RING 64
 
 typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
 /* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
@@ -65,6 +66,10 @@ typedef struct {
   uint64_t fc_abs;         /*   time of the last accrual (0 = never: cold start gets a full budget) */
   uint32_t cred16, cred24; /* TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF: credited search probes while unsolved, by CRC length */
   uint8_t k16, k24;        /*   consistent CRC passes of the current candidate, by CRC length */
+  nr_dci_bits_t hq_ring[HQ_RING]; /* DCIRV ISAC_DCI11_RV_CONSISTENCY: this RNTI's last DCI 1_1 payloads (oldest overwritten) */
+  uint32_t hq_cnt, rvmis;  /*   payloads seen; RV-rescue notes since the last re-selection */
+  uint64_t hq_abs;         /*   slot of the last payload (duplicate candidates of one DCI) */
+  bool mcs_pos, promoted;  /*   a CRC pass at MCS > 0 happened; the solution has been allowed to seed the cell */
 } solver_rnti_t;
 
 typedef struct {
@@ -135,6 +140,9 @@ static int g_fairshare = -1; /* ISAC_PDSCH_SOLVER_FAIRSHARE, re-read after nr_pd
 static int g_reuse = -1; /* ISAC_PDSCH_SOLVER_REUSE, re-read after nr_pdsch_solver_reset() */
 static int g_prior_crc = -1; /* ISAC_PDSCH_SOLVER_PRIOR_CRC, re-read after nr_pdsch_solver_reset() */
 static int g_signif = -1;    /* TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF, re-read after nr_pdsch_solver_reset() */
+static nr_pdsch_solver_hq_fn g_hq_fn; /* DCIRV */
+static void *g_hq_ctx;
+static int g_rvc = -1;
 static int g_prior_ids = -1; /* TIMSOLVE2 ISAC_PDSCH_SOLVER_PRIOR_IDS, re-read after nr_pdsch_solver_reset() */
 /* cell prior: the first solution, offered first to other RNTIs */
 static bool g_have_prior;
@@ -179,6 +187,7 @@ void nr_pdsch_solver_reset(void)
   g_prior_crc = -1;
   g_signif = -1;
   g_prior_ids = -1;
+  g_rvc = -1;
   for (int i = 0; i < SOLVER_RNTIS; i++) {
     free(g_r[i].cand_bm);
     if (g_r[i].coverage) free(g_r[i].coverage->entries);
@@ -354,6 +363,70 @@ static bool prior_crc_on(void)
   return g_prior_crc == 1;
 }
 
+/* ---- DCIRV: HARQ/RV consistency of a layout's NDI / RV / pid readings (see nr_pdsch_solver.h) ---- */
+#define RVC_P0 0.15   /* assumed P(violation | true layout): missed DCIs, rv sequences other than 0,2,3,1 */
+#define RVC_Q 0.5     /* a wrong layout violates at least about this often (random NDI/RV bits; a one-bit shift: rv = pid MSB) */
+#define RVC_ALPHA 1e-3
+#define RVC_MAX_SCORED 256 /* layouts scored per selection (cost bound) */
+void nr_pdsch_solver_set_hq_fn(nr_pdsch_solver_hq_fn fn, void *ctx)
+{
+  pthread_mutex_lock(&g_mu);
+  g_hq_fn = fn;
+  g_hq_ctx = ctx;
+  pthread_mutex_unlock(&g_mu);
+}
+bool nr_pdsch_solver_rvc_on(void)
+{
+  if (g_rvc < 0) g_rvc = getenv("ISAC_DCI11_RV_CONSISTENCY") && atoi(getenv("ISAC_DCI11_RV_CONSISTENCY")) ? 1 : 0;
+  return g_rvc == 1;
+}
+/* P(X >= k) for X ~ Binomial(n, p) (lower = false) or P(X <= k) (lower = true). */
+static double binom_tail(int n, int k, double p, bool lower)
+{
+  double s = 0;
+  for (int j = lower ? 0 : k; j <= (lower ? k : n); j++)
+    s += exp(lgamma(n + 1.0) - lgamma(j + 1.0) - lgamma(n - j + 1.0) + j * log(p) + (n - j) * log1p(-p));
+  return s > 1 ? 1 : s;
+}
+bool nr_pdsch_solver_hq_refuted(int n, int bad) { return n > 0 && bad > 0 && binom_tail(n, bad, RVC_P0, false) < RVC_ALPHA; }
+bool nr_pdsch_solver_hq_verified(int n, int bad) { return n > 0 && binom_tail(n, bad, RVC_Q, true) < RVC_ALPHA; }
+/* rv_next_ok: retransmission rv (!= 0) follows the last rv of its pid in the order 0,2,3,1 by one step, or two (a missed DCI). */
+static bool rv_next_ok(int last, int rv)
+{
+  static const int pos[4] = {0, 3, 1, 2}; /* rv -> position in 0,2,3,1 */
+  const int d = pos[rv & 3] - pos[last & 3];
+  return d == 1 || d == 2;
+}
+/* hq_score: the layout's readings over the RNTI's payload ring, oldest first. n = grants whose pid was seen before (their NDI
+ * toggle is known), bad = new transmissions with rv != 0 plus retransmissions with rv != 0 that do not follow the pid's last rv. */
+static void hq_score(const solver_rnti_t *r, int layout, int *n, int *bad)
+{
+  uint8_t seen[16] = {0}, lndi[16], lrv[16];
+  const uint32_t cnt = r->hq_cnt < HQ_RING ? r->hq_cnt : HQ_RING, first = r->hq_cnt < HQ_RING ? 0 : r->hq_cnt % HQ_RING;
+  *n = *bad = 0;
+  for (uint32_t i = 0; g_hq_fn && i < cnt; i++) {
+    uint8_t ndi, rv, pid;
+    if (!g_hq_fn(g_hq_ctx, (uint16_t)layout, r->hq_ring[(first + i) % HQ_RING], &ndi, &rv, &pid)) continue;
+    pid &= 15;
+    if (seen[pid]) {
+      (*n)++;
+      *bad += (ndi != lndi[pid]) ? rv != 0 : (rv != 0 && !rv_next_ok(lrv[pid], rv));
+    }
+    seen[pid] = 1;
+    lndi[pid] = ndi;
+    lrv[pid] = rv;
+  }
+}
+static bool bm_has(const uint8_t *bm, int id) { return bm && ((bm[id >> 3] >> (id & 7)) & 1); }
+/* seed_ok: a solution may seed the cell / other RNTIs: a CRC pass at MCS > 0 fixed the MCS offset, or the HARQ readings verify it. */
+static bool seed_ok(const solver_rnti_t *r)
+{
+  if (!nr_pdsch_solver_rvc_on() || !g_hq_fn || r->mcs_pos) return true;
+  int n, bad;
+  hq_score(r, r->rep, &n, &bad);
+  return nr_pdsch_solver_hq_verified(n, bad);
+}
+
 /* promote: makes a solved RNTI's solution the cell prior (if none yet) and its scrambling its CORESET's (if none yet). Under g_mu. */
 static void promote(const solver_rnti_t *r)
 {
@@ -367,6 +440,14 @@ static void promote(const solver_rnti_t *r)
     g_prior_table = r->table;
     memcpy(g_prior_S_by_tda, r->S_by_tda, sizeof(g_prior_S_by_tda));
   }
+}
+
+/* try_promote: promote() once the solution may seed (DCIRV seed_ok; without the flag always). Under g_mu. */
+static void try_promote(solver_rnti_t *r)
+{
+  if (r->promoted || !seed_ok(r)) return;
+  r->promoted = true;
+  promote(r);
 }
 
 /* TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF=1 (default off): an RNTI solves only on statistically significant CRC evidence. A wrong
@@ -1129,7 +1210,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
     const uint32_t min_ok = prior_crc_on() ? 1 : 0;
     if (g_reuse)
       for (int k = 0; k < SOLVER_RNTIS; k++)
-        if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && g_r[k].full_ok >= min_ok && (!best || g_r[k].full_ok > best->full_ok))
+        if (g_r[k].used && g_r[k].solved && g_r[k].rep >= 0 && g_r[k].full_ok >= min_ok && (!nr_pdsch_solver_rvc_on() || g_r[k].promoted) && (!best || g_r[k].full_ok > best->full_ok))
           best = &g_r[k];
     bool ids_done = false;
     if (prior_ids_on() && ctx->own) { /* TIMSOLVE2: proven dims x each own identity in the proven form */
@@ -1137,7 +1218,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
       int ns = 0;
       for (int k = 0; k < SOLVER_RNTIS; k++) { /* CRC-proven solutions, most full CRC passes first, distinct reps */
         const solver_rnti_t *q = &g_r[k];
-        if (!q->used || !q->solved || q->rep < 0 || q->full_ok < 1) continue;
+        if (!q->used || !q->solved || q->rep < 0 || q->full_ok < 1 || (nr_pdsch_solver_rvc_on() && !q->promoted)) continue;
         int pos = ns;
         bool dup = false;
         for (int j = 0; j < ns; j++) dup |= src[j]->rep == q->rep;
@@ -1265,8 +1346,30 @@ static int lowest(const uint8_t *bm)
  *   Fills r->S_by_tda with the S value per TDA index from the evidence; -1 entries are unknown. Returns -1 when none is consistent.
  *   Caller: nr_pdsch_solver_feedback() (candidate confirmation and each new solving pass).
  */
-static int choose_rep(solver_rnti_t *r)
+static bool ev_map(const solver_rnti_t *r, int id, int8_t *m)
 {
+  memset(m, -1, 16);
+  for (int e = 0; e < r->n_ev; e++) {
+    const int t = tda_of(id, r->ev_p[e]);
+    if (m[t] >= 0 && m[t] != r->ev_S[e]) return false;
+    m[t] = (int8_t)r->ev_S[e];
+  }
+  return true;
+}
+/* DCIRV (ISAC_DCI11_RV_CONSISTENCY): with hq, the candidates are scored by their HARQ/RV readings (refuted ones skipped, the
+ * lowest violation rate wins, the current rep wins ties); without hq a solved RNTI keeps its rep while it stays consistent.
+ * *all_refuted: some layout was consistent with the evidence but every one was refuted. */
+static int choose_rep(solver_rnti_t *r, bool hq, bool *all_refuted)
+{
+  const bool rvc = nr_pdsch_solver_rvc_on() && g_hq_fn;
+  int8_t m[16], bm[16];
+  int best = -1, scored = 0, refuted = 0;
+  double best_ratio = 2;
+  if (all_refuted) *all_refuted = false;
+  if (rvc && !hq && r->solved && r->rep >= 0 && bm_has(r->cand_bm, r->rep) && ev_map(r, r->rep, m)) {
+    memcpy(r->S_by_tda, m, sizeof(m));
+    return r->rep;
+  }
   for (int b = 0; b < BM_BYTES; b++) {
     if (!r->cand_bm[b])
       continue;
@@ -1274,21 +1377,28 @@ static int choose_rep(solver_rnti_t *r)
       if (!((r->cand_bm[b] >> k) & 1))
         continue;
       const int id = b * 8 + k;
-      int8_t m[16];
-      memset(m, -1, sizeof(m));
-      bool ok = true;
-      for (int e = 0; e < r->n_ev && ok; e++) {
-        const int t = tda_of(id, r->ev_p[e]);
-        if (m[t] >= 0 && m[t] != r->ev_S[e]) ok = false;
-        else m[t] = (int8_t)r->ev_S[e];
-      }
-      if (ok) {
+      if (!ev_map(r, id, m))
+        continue;
+      if (!(rvc && hq)) {
         memcpy(r->S_by_tda, m, sizeof(m));
         return id;
       }
+      if (scored++ >= RVC_MAX_SCORED) goto done;
+      int n, bad;
+      hq_score(r, id, &n, &bad);
+      if (nr_pdsch_solver_hq_refuted(n, bad)) { refuted++; continue; }
+      const double ratio = (bad + 0.5) / (n + 1.0);
+      if (best < 0 || ratio < best_ratio - 1e-12 || (id == r->rep && ratio <= best_ratio + 1e-12)) {
+        best = id;
+        best_ratio = ratio;
+        memcpy(bm, m, sizeof(m));
+      }
     }
   }
-  return -1;
+done:
+  if (best >= 0) memcpy(r->S_by_tda, bm, sizeof(bm));
+  else if (all_refuted) *all_refuted = refuted > 0;
+  return best;
 }
 /* add_ev: appends one CRC-passed (payload, S) pair to the RNTI's evidence list, dropping the oldest when 16 are stored.
  *   Caller: nr_pdsch_solver_feedback().
@@ -1339,7 +1449,15 @@ static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
 {
   r->solved = true;
   memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
-  r->rep = choose_rep(r);
+  bool refuted = false;
+  r->rep = choose_rep(r, true, &refuted);
+  if (refuted) { /* DCIRV: every layout the CRC passes allow reads inconsistent NDI/RV/pid: keep searching */
+    r->solved = false;
+    r->has_cand = false;
+    g_st.dropped++;
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x solve REFUSED: all candidate layouts violate HARQ/RV rules\n", r->rnti);
+    return;
+  }
   if (r->rep < 0) r->rep = lowest(r->cand_bm);
   r->add_pos = p->add_pos;
   r->scr = p->scr;
@@ -1358,7 +1476,7 @@ static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
                "add_pos=%u table=%d S[tda %d]=%u S[tda %d]=%u scr=%d\n",
           r->rnti, r->rep, kept, r->add_pos, r->table, tda_of(r->rep, r->cand_payload), r->cand_S,
           tda_of(r->rep, p->payload), p->S, (int)r->scr);
-  if (!prior_crc_on()) promote(r); /* T26c: the CORESET's scrambling and the cell prior for the other RNTIs */
+  if (!prior_crc_on()) try_promote(r); /* T26c: the CORESET's scrambling and the cell prior for the other RNTIs */
 }
 
 /* nr_pdsch_solver_feedback: consumes the CRC result of one solver decode (identified by its token): updates statistics, candidates, and solved state.
@@ -1423,6 +1541,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     r->comb_try[ci]++;
     if (crc_ok) r->comb_ok[ci]++;
   }
+  if (crc_ok && p->mcs > 0) r->mcs_pos = true; /* DCIRV: the MCS offset is pinned by a nonzero reading */
   if (p->probe && crc_ok) g_st.probe_ok++;
   if (!p->probe && crc_ok) g_st.full_ok++;
   if (r->used && p->phase == 1 && r->solved) {
@@ -1431,7 +1550,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
       if (crc_ok) {
         r->full_ok++;
         r->cons_fail = 0;
-        if (r->full_ok == 1 && prior_crc_on()) promote(r); /* first CRC-proven full TB: now it may seed the cell */
+        if (r->full_ok == 1 && prior_crc_on()) try_promote(r); /* first CRC-proven full TB: now it may seed the cell */
         if (r->full_ok <= 20 || (r->full_ok % 100) == 0)
           LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x full TB CRC OK #%u of %u full decodes (S=%u table=%u layout %d)\n",
                 r->rnti, r->full_ok, r->full_tr, p->S, p->table, r->rep);
@@ -1441,6 +1560,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
         r->solved = false; r->has_cand = false; g_st.dropped++;
       }
     }
+    if (nr_pdsch_solver_rvc_on() && !r->promoted && (!prior_crc_on() || r->full_ok >= 1)) try_promote(r);
     if (crc_ok && p->learn_rm && r->rm < 0) {
       r->rm = (int8_t)p->rm;
       LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x CSI-RS rate matching %s (CRC-selected per RNTI)\n", r->rnti,
@@ -1463,7 +1583,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
       r->cons_fail = 0;
       add_ev(r, p->payload, p->S);
       const int old_rep = r->rep;
-      const int nr = choose_rep(r);
+      const int nr = choose_rep(r, false, NULL);
       if (nr >= 0) r->rep = nr;
       if (p->learn_S || r->rep != old_rep)
         LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x learnt S=%u (evidence %d) representative layout %d\n", r->rnti, p->S,
@@ -1520,6 +1640,58 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
     }
   }
   p->used = false;
+  pthread_mutex_unlock(&g_mu);
+}
+
+/* hq_reselect: a solved RNTI's layout is re-chosen from the HARQ/RV readings: when refuted, or (force) when another
+ * unrefuted candidate violates less. No candidate left: the solution is dropped and the search reopens. Under g_mu. */
+static void hq_reselect(solver_rnti_t *r, bool force)
+{
+  if (!nr_pdsch_solver_rvc_on() || !g_hq_fn || !r->solved || r->rep < 0 || !r->cand_bm) return;
+  int n, bad;
+  hq_score(r, r->rep, &n, &bad);
+  const bool refuted = nr_pdsch_solver_hq_refuted(n, bad);
+  if (!refuted && !(force && bad > 0)) return;
+  const int old = r->rep;
+  bool all_refuted = false;
+  const int nr = choose_rep(r, true, &all_refuted);
+  if (nr >= 0 && nr != old) {
+    r->rep = nr;
+    if (r->promoted && g_have_prior && g_prior_rep == old) g_prior_rep = nr;
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x HARQ/RV consistency: layout %d -> %d (old: %d violations in %d grants)\n",
+          r->rnti, old, nr, bad, n);
+  } else if (nr < 0 && refuted && all_refuted) {
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x HARQ/RV consistency: layout %d refuted (%d violations in %d grants), "
+               "no alternative: reopening\n", r->rnti, old, bad, n);
+    if (r->promoted) g_have_prior = false;
+    r->solved = r->has_cand = r->promoted = false;
+    g_st.dropped++;
+  }
+}
+void nr_pdsch_solver_note_dci(uint16_t rnti, nr_dci_bits_t payload, uint64_t abs_slot)
+{
+  if (!nr_pdsch_solver_rvc_on()) return;
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, true, NULL);
+  if (r != NULL && (abs_slot == 0 || abs_slot != r->hq_abs)) {
+    r->hq_abs = abs_slot;
+    r->hq_ring[r->hq_cnt++ % HQ_RING] = payload;
+    if (r->solved && (r->hq_cnt % 16) == 0) {
+      hq_reselect(r, false);
+      if (r->solved && !r->promoted && (!prior_crc_on() || r->full_ok >= 1)) try_promote(r);
+    }
+  }
+  pthread_mutex_unlock(&g_mu);
+}
+void nr_pdsch_solver_note_rv_mismatch(uint16_t rnti)
+{
+  if (!nr_pdsch_solver_rvc_on()) return;
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r != NULL && ++r->rvmis >= 3) {
+    r->rvmis = 0;
+    hq_reselect(r, true);
+  }
   pthread_mutex_unlock(&g_mu);
 }
 
