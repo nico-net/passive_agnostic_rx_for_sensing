@@ -969,6 +969,14 @@ bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bi
   out->tb2_bits           = pre_ant_variable;
   out->harq_pid_bits      = 0;
   out->dai_bits           = 0;
+  /* HARQPID: the blob (tb2 + harq 4 + dai + pdsch_to_harq) used to be read as ONE tb2 field, so every grant got harq_pid 0
+   * (HARQ soft buffers of all processes aliased, DCIRV scorer read the right bits but the decode path did not). Read the pid
+   * 4 bits behind the RV (as solver_hq_of does, tb2 assumed absent) and park the rest in dai; the total is unchanged. */
+  if (getenv("ISAC_DCI11_HARQPID") != NULL && pre_ant_variable >= 4) {
+    out->tb2_bits      = 0;
+    out->harq_pid_bits = 4;
+    out->dai_bits      = pre_ant_variable - 4;
+  }
   out->pdsch_to_harq_bits = 0;
   out->antenna_ports_bits = l->ant_ports;
   out->dmrs_config_type = l->dmrs_type;

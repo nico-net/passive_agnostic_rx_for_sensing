@@ -451,6 +451,22 @@ TEST(Dci11Handover, TheConstantTpcAndPucchFieldsAreNotDoubleCounted) {
   EXPECT_TRUE(nr_dci11_layout_apply_roundtrip(&l, 16, 2));
 }
 
+TEST(Dci11Handover, HarqPidIsHandedOverAsFourBitsWhenEnabled) {
+  // HARQPID: without the flag the 4 pid bits ride in tb2_bits and every grant reads pid 0.
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 4; l.post_ant = 4;
+  nr_dci11_field_bits_t f{};
+  ASSERT_TRUE(nr_dci11_layout_to_field_bits(&l, &f));
+  EXPECT_EQ(f.harq_pid_bits, 0);
+  setenv("ISAC_DCI11_HARQPID", "1", 1);
+  ASSERT_TRUE(nr_dci11_layout_to_field_bits(&l, &f));
+  unsetenv("ISAC_DCI11_HARQPID");
+  EXPECT_EQ(f.harq_pid_bits, 4);
+  EXPECT_EQ(f.tb2_bits, 0);
+  EXPECT_EQ(f.dai_bits, 11 - 5 - 4);  // total width unchanged
+  EXPECT_EQ(f.tb2_bits + f.harq_pid_bits + f.dai_bits, 11 - 5);
+}
+
 TEST(Dci11Handover, RefusesALayoutItCannotRepresent) {
   nr_dci11_layout_t l{};
   l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 3; l.ant_ports = 4; l.post_ant = 0;  // below TPC+RI
