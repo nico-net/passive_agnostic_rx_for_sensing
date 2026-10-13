@@ -176,6 +176,22 @@ class T(unittest.TestCase):
             cl = [l for l in r.stdout.splitlines() if l.startswith('CELL ')]; self.assertEqual(len(cl), 4)  # 200 MHz IBW: 508, 4, 403, 415
             for l in cl: self.assertIn('--ue-nb-ant-rx 4', l)
 
+    def test_wideband_default_cli_and_fallback_dwell(self):
+        with tempfile.TemporaryDirectory() as d:
+            json.dump(cells(), open(os.path.join(d, 'c.json'), 'w')); base = [sys.executable, os.path.join(H, 'mpci_auto.py'), 'plan', os.path.join(d, 'c.json'), '--cores', '4-19', '--out', os.path.join(d, 'p.json')]
+            def run(*x): return subprocess.run(base + list(x), capture_output=True, text=True)
+            r = run('--uhd-args', 'type=x4xx,addr=1.2.3.4', '--gain', '30'); self.assertEqual(r.returncode, 0, r.stderr)
+            p = json.load(open(os.path.join(d, 'p.json'))); self.assertEqual((p['rate_hz'], len(p['windows']), p['radio']['wideband']), (245760000, 1, True))
+            self.assertEqual({c['pci'] for c in p['cells']}, {508, 4, 403, 415}); self.assertEqual(sorted(u['pci'] for u in p['unserved']), [675, 923])
+            self.assertIn('--rate 245760000 --freq', p['radio']['pub_cmd']); self.assertIn('--channels 4 --antenna RX1', p['radio']['pub_cmd'])
+            r = run('--uhd-args', 'type=x4xx,addr=1.2.3.4', '--gain', '30', '--wideband'); self.assertEqual(r.returncode, 0, r.stderr)    # alias
+            r = run('--uhd-args', 'type=x4xx,addr=1.2.3.4', '--gain', '30', '--multi-window'); self.assertEqual(r.returncode, 0, r.stderr)
+            p = json.load(open(os.path.join(d, 'p.json'))); self.assertEqual((p['rate_hz'], len(p['windows'])), (122880000, 5)); self.assertFalse(p['radio'].get('wideband'))
+            r = run(); self.assertEqual(r.returncode, 0, r.stderr); self.assertIn('needs --uhd-args', r.stderr); self.assertEqual(len(json.load(open(os.path.join(d, 'p.json')))['windows']), 5)
+            r = run('--uhd-args', 'x', '--gain', '30', '--fallback-dwell'); self.assertNotEqual(r.returncode, 0); self.assertIn('share one LO', r.stderr)
+            r = run('--uhd-args', 'x', '--gain', '30', '--fallback-dwell', '--channels', '2'); self.assertIn('spare channels (2)', r.stderr)
+        with self.assertRaises(SystemExit): self.wb(245.76e6, fallback_dwell=True)
+
     def test_launcher_6_field_still_ok_and_bad_env(self):
         with tempfile.TemporaryDirectory() as d:
             e = dict(os.environ, DRY='1', OUT=d, BUILD='/b')

@@ -4,7 +4,8 @@
   mpci_auto.py launch PLAN.json --out DIR [--pub-cmd CMD] [--base-cfg CFG] [--build DIR]      (DRY=1 env: print only)
   mpci_auto.py pass2 PLAN.json --out DIR [--wait 180]    per cell: sync+MIB+SIB1 in ue.log -> autofront refine + retune_args auto; restart ONLY a cell whose grid changes
   mpci_auto.py watch PLAN.json --out DIR [--period 10] [--lost-s 30] [--max-restarts 5] [--backoff-s 10] [--rescan CAPDIR...]
-  mpci_auto.py plan CELLS.json --cores ... --wideband --rate 245.76e6 --uhd-args ARGS --gain G [--channels 4] [--antenna RX1] [--ibw-hz HZ]
+  mpci_auto.py plan CELLS.json --cores ... --uhd-args ARGS --gain G [--rate 245.76e6] [--channels 4] [--antenna RX1] [--ibw-hz HZ] [--multi-window] [--fallback-dwell --radio-channels 4]
+      DEFAULT whenever --uhd-args is given (--wideband = no-op alias; --rate defaults to 245.76e6, the user-verified X410 rate); --multi-window = M4 fallback plan.
       wideband mode: ONE window on ALL channels (standalone UHD publisher shm_iq_uhd_pub), consumers decimate by rate/cell_rate in 1,2,4,8,16
   mpci_auto.py auto (--cells CELLS.json | --capdirs DIR...) --out DIR --cores 4-19 [plan/launch/watch options]
 Window rule: a cell occupies the interval C +- BW/2. BW = SIB1 carrier width (sib1_nrb, pass-2 data in cells.json) else the pass-1 grid: the smallest
@@ -117,11 +118,15 @@ def pub_env(ring, windows):
 
 FALLBACK = 'M4 multi-window plan (plan without --wideband) for these cells; a dwell window cannot share the radio while the wideband window uses all channels'
 
-def make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz):
+def make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz, fallback_dwell=False, radio_channels=4):
     """ONE window, all channels, one LO. Usable span = the radio's instantaneous bandwidth ibw_hz (default rate * 200/245.76: the X410
     datasheet IBW, 200 MHz at 245.76 MS/s and 400 MHz at 491.52 MS/s; outside it the radio's own filter rolls off); a cell needs [C - BW/2, C + BW/2] inside it. The window covers the most cells
     (plan_window rule), its centre is the middle of the served extent. Cells whose rate does not divide the ring rate by 1,2,4,8,16 are unserved."""
-    if not uhd_args or gain is None: sys.exit('--wideband needs --uhd-args and --gain (no site defaults)')
+    if not uhd_args or gain is None: sys.exit('wideband needs --uhd-args and --gain (no site defaults)')
+    if fallback_dwell:    # shortcut: spare-channel M4 window (cover_windows/assign_channels on channels..radio_channels-1) not implemented, refusal only
+        sys.exit('--fallback-dwell refused: in wideband mode all antennas share one LO, a dwell visit would retune them away from the wideband window; '
+                 + (f'spare channels ({radio_channels - channels}) could host an M4 window but that is not implemented, use --multi-window' if channels < radio_channels
+                    else f'--channels {channels} uses all {radio_channels} radio channels'))
     span = ibw_hz or rate * 200 / 245.76; ok = []; bad = []
     for x in entries:
         x['decim'] = decim_of(rate, x['r'])
@@ -147,9 +152,9 @@ def make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gai
                            pub_cmd=' '.join(shlex.quote(a) for a in pub)), windows=[win], cells=pcells, unserved=un)
 
 def make_plan(cells, cores, max_span_hz=110e6, rate=122.88e6, pub_cores=None, ring='isac_iq', multi=False, channels=4, min_ch=1,
-              dwell_min_ms=40, dwell_max_ms=200, wideband=False, uhd_args=None, gain=None, antenna='RX1', ibw_hz=None):
+              dwell_min_ms=40, dwell_max_ms=200, wideband=False, uhd_args=None, gain=None, antenna='RX1', ibw_hz=None, fallback_dwell=False, radio_channels=4):
     entries = [cell_entry(c) for c in cells]
-    if wideband: return make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz)
+    if wideband: return make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz, fallback_dwell, radio_channels)
     if multi: wins = cover_windows(entries, max_span_hz); unserved = []
     else:
         centre, served, unserved = plan_window(entries, max_span_hz)
@@ -348,19 +353,27 @@ def cmd_watch(plan, out, period=10, rescan_dirs=None, rescan_period=300, iters=N
         if iters is None or n < iters: time.sleep(period)
 
 def mp_args(a):
-    return dict(max_span_hz=a.max_span_hz, rate=a.rate, pub_cores=a.pub_cores, ring=a.ring, multi=not a.single_window, channels=a.channels,
+    if a.multi_window and a.wideband: sys.exit('--wideband and --multi-window are exclusive')
+    wb = bool(a.uhd_args) and not a.multi_window
+    if not a.uhd_args and not a.multi_window: print('hint: wideband (one window, all antennas) is the default architecture and needs --uhd-args; planning M4 multi-window', file=sys.stderr)
+    if a.wideband and not a.uhd_args: sys.exit('--wideband needs --uhd-args')
+    return dict(max_span_hz=a.max_span_hz, rate=a.rate or (245.76e6 if wb else 122.88e6), pub_cores=a.pub_cores, ring=a.ring, multi=not a.single_window, channels=a.channels,
                 min_ch=a.min_ch_per_window, dwell_min_ms=a.dwell_min_ms, dwell_max_ms=a.dwell_max_ms,
-                wideband=a.wideband, uhd_args=a.uhd_args, gain=a.gain, antenna=a.antenna, ibw_hz=a.ibw_hz)
+                wideband=wb, uhd_args=a.uhd_args, gain=a.gain, antenna=a.antenna, ibw_hz=a.ibw_hz,
+                fallback_dwell=a.fallback_dwell, radio_channels=a.radio_channels)
 
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0]); sp = ap.add_subparsers(dest='cmd', required=True)
     def common(p):
-        p.add_argument('--cores'); p.add_argument('--max-span-hz', type=float, default=110e6); p.add_argument('--rate', type=float, default=122.88e6)
+        p.add_argument('--cores'); p.add_argument('--max-span-hz', type=float, default=110e6); p.add_argument('--rate', type=float, default=None, help='default 245.76e6 wideband (user-verified X410 4ch rate), 122.88e6 multi-window')
         p.add_argument('--pub-cores'); p.add_argument('--ring', default='isac_iq')
         p.add_argument('--single-window', action='store_true', help='v1: one window (most cells), the rest unserved')
         p.add_argument('--channels', type=int, default=4, help='radio RX channel count (host inventory)')
         p.add_argument('--min-ch-per-window', type=int, default=1)
-        p.add_argument('--wideband', action='store_true', help='one window on all channels via shm_iq_uhd_pub at --rate (needs --uhd-args, --gain)')
+        p.add_argument('--wideband', action='store_true', help='no-op alias: wideband is the default whenever --uhd-args is given')
+        p.add_argument('--multi-window', action='store_true', help='explicit M4 multi-window plan (fallback architecture)')
+        p.add_argument('--fallback-dwell', action='store_true', help='wideband: ask for dwell visits of unserved cells (refused, see message)')
+        p.add_argument('--radio-channels', type=int, default=4, help='radio RX channel count for --fallback-dwell (default 4)')
         p.add_argument('--uhd-args'); p.add_argument('--gain', type=float); p.add_argument('--antenna', default='RX1')
         p.add_argument('--ibw-hz', type=float, default=None, help='wideband: radio instantaneous bandwidth (default rate*200/245.76, X410 IBW)')
         p.add_argument('--dwell-min-ms', type=int, default=40); p.add_argument('--dwell-max-ms', type=int, default=200)
