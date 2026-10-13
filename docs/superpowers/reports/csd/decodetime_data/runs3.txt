@@ -1,0 +1,6 @@
+b Z 1 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_fbZ1_004021 rc=0 other_recv=1 PRE effload=1.77 load=4.77 4.94 4.98 recv=0 48,208MHz POST load=5.56 5.12 5.04
+b P 9 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_fbP9_004131 rc=0 other_recv=1 PRE effload=1.99 load=4.99 5.02 5.01 recv=0 49,208MHz POST load=5.40 5.10 5.04
+b Z 2 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_fbZ2_004242 rc=0 other_recv=1 PRE effload=1.87 load=4.87 5.00 5.00 recv=0 48,208MHz POST load=5.31 5.09 5.03
+b P 10 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_fbP10_004352 rc=0 other_recv=1 PRE effload=1.87 load=4.87 5.01 5.00 recv=0 48,208MHz POST load=5.33 5.08 5.03
+b Z 3 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_fbZ3_004503 rc=0 other_recv=1 PRE effload=1.82 load=4.82 4.97 4.99 recv=0 49,208MHz POST load=4.89 4.94 4.98
+DONE

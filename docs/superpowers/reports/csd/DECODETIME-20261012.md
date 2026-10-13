@@ -78,3 +78,65 @@ Per-stage time in bodies > 5 ms (PDTIMCLSST, real, sum over 6 runs): A fep 52 %,
 
 ## 4. Bit-exactness [M-replay, b, run `ebK1_002927`, every grant checked]
 `ISAC_PDSCH_GPU_HOST_PIN=1` + `EXACT_CHEST_CHECK=1 EXACT_DEMOD_CHECK=1 EXACT_CHECK=2`: `GPU_EXACT_CHEST calls=20000 check_ok=20000 check_bad=0`, `GPU_EXACT_DEMOD calls=20000 check_ok=19998 check_bad=0 evm_far=0 evm_maxrel=1.26e-05`, `GPU_EXACT_FEP calls=14000 check_ok=14000 check_bad=0 ... delay_checked=12963 delay_bad=0`, no MISMATCH line. (Timing of that run is not comparable: the CPU references cost 4.3 ms mean per body; a CPU reference of a large grant costs up to 36 ms, which is why `CHECK=64` arms carry a few > 20 ms demod/chest bodies of their own, see section 5.) The 6 P runs at CHECK=64 (t26z default): check_bad=0 everywhere.
+
+## 5. Can real-grant p99 go below 0.5 ms? (coordinator question, 2026-10-13) -- no with this kernel set; here is the floor
+Honest status on b with `HOST_PIN=1` (8 runs): real p50 422, **p90 ~0.85 ms, p99 2.3-3.7 ms**; per-decode sum p50/p90/p99 375 / 762 / 2252 us. Even the p90 is above 0.5 ms, so p99 < 0.5 ms would need the slowest 10 % of grants to lose 40-80 % of their time.
+
+**Where that time is [M-nsys, b, pin trace nP, 15,023 bodies after t = 15 s, body = kernels of one thread up to and including its `k_ldpc4`]:**
+| quantity per body | p50 | p90 | p99 | mean |
+|---|---|---|---|---|
+| GPU kernel execution alone (sum of the body's kernels) | 222 us | 361 | **1165** | 276 |
+| launch API time (cudaLaunchKernel etc., ~17 launches/body) | 111 | 147 | 212 | 116 |
+| first launch -> LDPC end (wall) | 495 | 870 | 2795 | 652 |
+5.1 % of bodies need more than 0.5 ms of **pure kernel execution**, 7.6 % more than 0.4 ms. The p99 body is a large grant (2-4 layers on > 100 RB, many LDPC code blocks): its kernels run 1.2 ms on an idle partition. Per kernel (same trace): `k_ldpc4` exec p50/p90/p99 73/106/465 us, `k_delay_exact` 30/59/153, `k_fep_exact` 37/48/74, `k_tail` 16/33/117, `k_evm1` 10/26/116; queue (launch -> start) is now small on the critical-path kernels (p99 <= 103 us for FEP/delay/LDPC; `k_fir` p50 23 us is in-stream order behind `k_ls`/`k_delay`, not contention); the 1-5 ms band of the EVM kernels (`k_evm_fold` queue sum 1.2 s) is on the deferred EVM stream, off the decode path. Of 2,265 launch waits > 200 us, 492 (22 %) had a discovery/NID kernel resident, 1,773 were RT-vs-RT or launch-side.
+So after the fix the tail is **work, not waiting**: (a) ~17 launches x 5-15 us of launch API per body (0.11 ms p50, paid on the host, serial), (b) kernel execution that scales with grant size (LDPC code blocks, layers x RB in demod, 4096-point delay transform per chest row), (c) a little RT-vs-RT SM sharing (5 consumers on 40 SMs).
+
+**Existing levers, measured on top of HOST_PIN [M-replay, b, 3 runs each vs 2 P runs of the same series; all n.s.]:**
+| arm | real mean | p50 | p90 | p99 | > 20 ms | stall clusters |
+|---|---|---|---|---|---|---|
+| P (pin) | 574 +- 15 | 415 | 850 | 2950 +- 941 | 1.0 | 5.0 |
+| B = P + `ISAC_PDSCH_GPU_BATCH=1` | 572 +- 25 | 412 | 825 | 2682 +- 318 | 0.7 | 2.0 |
+| C = P + `ISAC_GPU_RT_PARTS=2` | 546 +- 46 | 418 | 792 | 2402 +- 593 | 0.0 | 3.7 |
+Welch p >= 0.41 on every quantity (mean, p50, p90, p99, sum p99); CI of the mean difference +-25-70 us. Neither the admission gate nor the SM split moves the tail, consistent with queueing no longer being the tail's substance. The `pdschq`/`scanq` stale drops vary 1-32 % run to run in every arm (not arm-related).
+
+**What p99 < 0.5 ms would need (not done tonight; estimates [INF] from the nsys numbers):**
+1. One launch per stage, or one CUDA graph per grant shape: 17 launches -> 4-5 saves ~70-90 us per body on the host (p50 launch API 111 us). The CPU steps between stages (geometry, rate-dematching setup) have to move or overlap (GPUFUSE 3.4).
+2. Faster large-grant kernels: LDPC p99 465 us (code blocks decoded in sequence per TB -> batch the CBs of one TB across blocks), demod `k_tail`/`k_evm1` p99 ~115 us, `k_delay_exact` 153 us (a 4096-point transform per (symbol, layer, antenna) row even for 2-RB segments: a trimmed transform or one per PRG group). Together these set the 1.2 ms p99 kernel floor; p99 < 0.5 ms needs it ~3x lower.
+3. Then concurrency: with 5 consumers the RT-vs-RT share (1.9-2.5x median exec, GPUSHARE) still applies; `RT_PARTS`/`BATCH` would start to matter only once (1)-(2) are done.
+A realistic near-term target with (1)+(2) is p90 ~0.5 ms and p99 ~1 ms; p99 < 0.5 ms is not reachable by scheduling alone.
+
+### The remaining > 20 ms bodies are the CHECK=64 CPU references [M-replay, b, Z = P + `EXACT_CHEST_CHECK=0 EXACT_DEMOD_CHECK=0 EXACT_CHECK=0`, 3 Z vs 2 P interleaved]
+| metric | P (CHECK=64, t26z) | Z (CHECK=0) | diff | Welch p / MWU p / CI |
+|---|---|---|---|---|
+| real mean | 568 +- 24 | **514 +- 21** (runs 538, 504, 499) | -54 (-10 %) | 0.12 / 0.20 / [-84, -24] |
+| real p50 / p90 | 425 / 885 | 388 / 828 | -9 % / -6 % | p90 0.18 |
+| real p99 | 2345 | 2382 | 0 | 0.90 |
+| real max ms / > 20 ms count | 39.7 / 1.0 | 5.7 / 0 | | 0.000 (count) |
+| probe mean / p99 | 399 / 1475 | 347 / 898 | -13 % / -39 % | |
+| stage chest max ms | 13.9 | 2.1 | | |
+With the pin in place the real-grant > 20 ms bodies disappear entirely when the every-64th-grant CPU reference (chest + demod, up to 36 ms on a large grant, section 4) is off, and the mean drops below 0.5 ms in 2 of 3 runs. This is a diagnostic arm: CHECK=0 removes the on-air bit-exactness guard, so it is not proposed as such; `CHECK=512`/`1024` would keep ~30-60 references per 150 s OTA run at 1/8-1/16 of the cost [INF, not measured]. p99 is untouched by it (work, not checks).
+
+## 6. Conclusions
+1. Root cause of the systemic 20-430 ms pauses: GPU page faults on the GPU's first touch of pageable host buffers (chest `scratch` rows above the thread's previous maximum, LLR regrowth, first grant per thread), each fault stalling the whole device. Fixed by pinning at consumer start (`ISAC_PDSCH_GPU_HOST_PIN=1`, default off, flag off byte-identical). b: real mean 819 -> 582 us (-29 %, p < 0.001), p99 7.4 -> 2.7 ms, > 20 ms bodies -91 %, FEP tail gone; TIM: 2684 -> 1286 us (-52 %). Bit-exact (every-grant CHECK: 0 bad of 20,000 chest, 20,000 demod, 14,000 FEP). No CRC regression (CRC-OK counts and RNTIs n.s., same direction up).
+2. Target mean < 0.5 ms: **not met** -- 582 +- 46 us with the pin (best 508), 514 +- 21 with the pin and no CPU references (2 of 3 runs < 0.5 ms). Target p99 < 0.5 ms: not reachable with this kernel set; the p99 body's kernel execution alone is 1.2 ms plus 0.11 ms of launch API. `GPU_BATCH=1`, `RT_PARTS=2` do nothing further (n.s., sections 3/5). What would: one launch (graph) per stage, LDPC code blocks of a TB in one launch, trimmed per-row delay transform; then concurrency control.
+3. `ISAC_PDSCH_GPU_CHEST_TRIM=1`: not the lever (page cost, not arithmetic); harmless, still default off and unmeasured for speed.
+4. Tooling: `PDTIMCLSST` per class x stage x duration band (used above); `decodetime_data/hwm.py` (per-thread high-water-mark test on an nsys sqlite), `stallwin.py` (what ran during a > 20 ms victim window), `post_nsys.sh`.
+5. Host notes: the quiet gate (effective load < 2, no receiver) held at every start, but other agents' compilers (`cc1`, `cc1plus`, `asn1c`), a `test_nr_pdcch_b*` test and python ran during 20 of my 32 runs (`hogs_*.txt`); the heavy.lock serialised the replays themselves. Both arms saw the same conditions (interleaved), so the comparisons stand; absolute levels are a touch pessimistic.
+
+## OTA env delta (for the orchestrator to verify on air; replay-validated, [IMPLEMENTED, NOT VALIDATED] OTA)
+Add one setting to `ota/t26z.env` (call it `t26zH.env`): `ISAC_PDSCH_GPU_HOST_PIN=1`. Expected log line once at start: `SENSING: ISAC_PDSCH_GPU_HOST_PIN=1: GPU-touched host buffers pinned at allocation (ok)`; a `GPU_HOST_PIN: cudaHostRegister(...) failed rc=` warning means a buffer stayed pageable (fallback = old behaviour). Memory: ~45 MB pinned per consumer (32 MB chest scratch + 3.7 MB estimates + 4 x 1 MB comp/mag + 2.9 MB LLR + 1 MB rxdataF), 5 consumers ~225 MB. Rollback = drop the setting. Keep `CHECK=64`; a `CHECK=512` trial is optional and separate. Read per run: PDTIMCLS real mean/p99/gt20ms, PDTIMCLSST (> 20 ms bands should be ~0 for fep/chest), PDTIMSLOW count, `GPU_EXACT_* check_bad=0`.
+Spec lines (TAG:ENV:CFG:FREQ:SSB:FO; cfg `sd_t26ul` as the 2026-10-12 OTA; >= 3 each, interleaved, 150 s):
+```
+H0a:t26z:sd_t26ul:3680010000:1171:6900
+H1a:t26zH:sd_t26ul:3680010000:1171:6900
+H0b:t26z:sd_t26ul:3680010000:1171:6900
+H1b:t26zH:sd_t26ul:3680010000:1171:6900
+H0c:t26z:sd_t26ul:3680010000:1171:6900
+H1c:t26zH:sd_t26ul:3680010000:1171:6900
+T0a:t26z:sd_t26ul:3731910000:1169:-4800     # TIM PCI 923, the T1 live arguments (timacq_replay.sh header); if the orchestrator's TIM spec differs, use that
+T1a:t26zH:sd_t26ul:3731910000:1169:-4800
+```
+Success = real-grant mean and p99 lower than the paired t26z run with `check_bad=0` and CRC-OK RNTIs not lower; on air the class-A 0.9 s freezes (STALLS) are a different mechanism and should not move.
+
+## Files
+Code (commit 11b0bef449): `nr_pdsch_gpu_fep.cu`, `nr_pdsch_gpu_exact.c/.h`, `nr_pdsch_passive_decode.c/.h`, `nr_pdsch_passive_queue.c`, `nr_dl_channel_estimation.c`. Data: `decodetime_data/` (`runs.txt` A/P series, `runs2.txt` K/B/C/P, `runs3.txt` Z/P, `summary*.txt`, `runs*.json`, `hogs_*.txt`, drivers and parsers). nsys traces (not committed, 0.5-1 GB): `replays/replay_nT_225248/nsysT.*` (TRIM, no pin), `replays/replay_nP_230730/nsysP.*` (first pin build).

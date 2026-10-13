@@ -1,0 +1,10 @@
+b K 1 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebK1_002927 rc=0 other_recv=1 PRE effload=1.21 load=4.21 4.82 4.96 recv=0 47,208MHz POST load=6.85 5.40 5.15
+b B 1 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebB1_003122 rc=0 other_recv=1 PRE effload=1.58 load=4.58 5.01 5.03 recv=0 47,208MHz POST load=5.21 5.09 5.05
+b C 1 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebC1_003233 rc=0 other_recv=1 PRE effload=1.79 load=4.79 5.01 5.03 recv=0 48,208MHz POST load=4.85 4.96 5.01
+b P 7 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebP7_003328 rc=0 other_recv=1 PRE effload=1.85 load=4.85 4.96 5.01 recv=0 50,318MHz POST load=5.16 5.01 5.02
+b B 2 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebB2_003434 rc=0 other_recv=1 PRE effload=1.68 load=4.68 4.91 4.99 recv=0 49,208MHz POST load=5.24 4.98 5.01
+b C 2 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebC2_003544 rc=0 other_recv=1 PRE effload=1.74 load=4.74 4.88 4.97 recv=0 48,208MHz POST load=5.21 4.96 4.99
+b P 8 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebP8_003635 rc=0 other_recv=1 PRE effload=2.21 load=5.21 4.96 4.99 recv=0 51,2411MHz POST load=6.03 5.17 5.06
+b B 3 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebB3_003755 rc=0 other_recv=1 PRE effload=1.75 load=4.75 4.94 4.99 recv=0 48,208MHz POST load=5.09 4.99 5.00
+b C 3 dir=/home/nicola/NICOLA/wt/rr-csd-dtm/replays/replay_ebC3_003906 rc=0 other_recv=1 PRE effload=1.63 load=4.63 4.89 4.97 recv=0 48,208MHz POST load=5.47 5.08 5.03
+DONE
