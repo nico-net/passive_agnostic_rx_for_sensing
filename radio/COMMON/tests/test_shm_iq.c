@@ -207,6 +207,26 @@ static int consumer(const char *lib, const char *ring, double rx, double rate, d
   return 0;
 }
 
+/* The NR UE leaves rx_bw at 0 and sets num_rb_dl: the filters must follow the grid (51 PRB x 12 x 30 kHz = 18.36 MHz), not 95 % of the rate. */
+static int test_passband(const char *lib)
+{
+  void *h = dlopen(lib, RTLD_NOW);
+  CHECK(h, "dlopen %s", dlerror());
+  double (*pb)(const openair0_config_t *) = (double (*)(const openair0_config_t *))dlsym(h, "shm_iq_cell_passband");
+  CHECK(pb, "shm_iq_cell_passband");
+  openair0_config_t cfg; memset(&cfg, 0, sizeof(cfg));
+  cfg.sample_rate = 30.72e6; cfg.num_rb_dl = 51;
+  CHECK(fabs(pb(&cfg) - 9.18e6) < 1, "51 PRB grid passband %.0f", pb(&cfg));
+  cfg.rx_bw = 20e6;
+  CHECK(fabs(pb(&cfg) - 10e6) < 1, "explicit rx_bw wins");
+  cfg.rx_bw = 0; cfg.num_rb_dl = 0;
+  CHECK(fabs(pb(&cfg) - 0.5 * 0.95 * 30.72e6) < 1, "no grid info: 95 %% of the rate");
+  cfg.sample_rate = 122.88e6; cfg.num_rb_dl = 273; /* 98.28 MHz occupied, < 95 % of 122.88 */
+  CHECK(fabs(pb(&cfg) - 49.14e6) < 1, "273 PRB grid");
+  printf("passband: 51 PRB 9.18 MHz, explicit rx_bw, fallback, 273 PRB ok\n");
+  return 0;
+}
+
 static int test_fanout_rate(const char *lib, double fs, double offA, double rA, double bwA, double offB, double rB, double bwB)
 {
   const double toneA = CENTER + offA + 1e6, toneB = CENTER + offB - 2e6;
@@ -245,7 +265,7 @@ static int test_fanout_rate(const char *lib, double fs, double offA, double rA, 
 
 static int test_fanout(const char *lib)
 {
-  int f = test_fanout_rate(lib, FS, 30e6, 61.44e6, 40e6, -25e6, 30.72e6, 20e6);
+  int f = test_passband(lib) | test_fanout_rate(lib, FS, 30e6, 61.44e6, 40e6, -25e6, 30.72e6, 20e6);
   /* 245.76 MS/s ring: 80 MHz cell at 122.88 (D=2) and 20 MHz cell at 30.72 (D=8) at different shifts */
   return f | test_fanout_rate(lib, 245.76e6, 60e6, 122.88e6, 80e6, -60e6, 30.72e6, 20e6);
 }

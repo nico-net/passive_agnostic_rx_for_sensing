@@ -38,13 +38,23 @@ static double env_num(const char *name, double def)
   return v && *v ? atof(v) : def;
 }
 
+/* Half-width of the band the cell's filters must pass (Hz). The NR UE leaves cfg->rx_bw at 0 (only the RU/LTE paths set it), so the
+ * old fallback "95 % of the sample rate" designed a 175-tap second stage for a 51-PRB cell at decim 4, too slow for the read thread
+ * (31 overruns in 32 s on the c3610 replay). Use the grid's occupied width num_rb_dl x 12 x 30 kHz instead.
+ * shortcut: assumes 30 kHz SCS (covers any mu <= 1 grid: a 15 kHz grid is only over-covered); pass mu to the device for mu >= 2. */
+double shm_iq_cell_passband(const openair0_config_t *cfg)
+{
+  const double occ = cfg->num_rb_dl > 0 ? cfg->num_rb_dl * 12 * 30e3 : 0, lim = 0.95 * cfg->sample_rate;
+  return 0.5 * (cfg->rx_bw > 0 && cfg->rx_bw < lim ? cfg->rx_bw : occ > 0 && occ < lim ? occ : lim);
+}
+
 static void retune(shm_state *s, openair0_config_t *cfg)
 {
   s->center = shm_iq_ring_center(&s->ring);
   const double shift = cfg->rx_freq[0] - s->center, rate = s->ring.hdr->rate;
   for (unsigned c = 1; c < s->channels; ++c)
     AssertFatal(cfg->rx_freq[c] == cfg->rx_freq[0], "SHMIQ separate channel tuning unsupported\n");
-  const double half = 0.5 * cfg->sample_rate;
+  const double half = shm_iq_cell_passband(cfg);
   if (fabs(shift) + half > 0.5 * rate)
     fprintf(stderr, "SHMIQ_WARN cell=%s band %.3f MHz +- %.3f MHz leaves the ring window %.3f MHz +- %.3f MHz\n", s->tag,
             cfg->rx_freq[0] / 1e6, half / 1e6, s->center / 1e6, 0.5 * rate / 1e6);
@@ -187,7 +197,7 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
               "SHMIQ cell wants %d channels, ring has %u\n", cfg->rx_num_channels, h->channels);
   s->channels = (unsigned)cfg->rx_num_channels;
   /* preserve the cell's channel bandwidth (or 95 % of its sample rate when the application did not say) */
-  const double passband = 0.5 * (cfg->rx_bw > 0 && cfg->rx_bw < 0.95 * cfg->sample_rate ? cfg->rx_bw : 0.95 * cfg->sample_rate);
+  const double passband = shm_iq_cell_passband(cfg);
   const double atten = env_num("ISAC_SHM_IQ_ATTEN_DB", 70);
   for (unsigned c = 0; c < s->channels; ++c)
     AssertFatal(iq_ddc_init(&s->ddc[c], h->rate, s->decim, passband, atten) == 0, "SHMIQ DDC design failed (passband %.0f Hz)\n",
