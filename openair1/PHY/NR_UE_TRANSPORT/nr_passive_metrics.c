@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "nr_passive_metrics.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
+#include "PHY/TOOLS/nr_mpci_sched.h"
 #include <math.h>
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_td_grantwork.h"
@@ -157,6 +158,9 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     m->td_cb0_gpu_skipped = c.gpu_skipped;
   }
   m->pdschq_drop_epoch = pq.dropped_epoch;
+  /* MPCI M3: publish this cell's drop counters to the shared arbiter segment (no-op unless ISAC_MPCI_SCHED). */
+  nr_mpci_publish_drops(nr_mpci_default(0), &(nr_mpci_drops_t){sq.dropped_full, sq.dropped_stale, sq.dropped_epoch,
+                        pq.dropped_full, pq.dropped_stale, pq.dropped_epoch, pq.dropped_narrow});
   nr_pusch_passive_queue_stats_t uq;
   nr_pusch_passive_queue_get_stats(&uq);
   m->puschq_drop_epoch = uq.dropped_epoch;

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_budget.h"
+#include "nr_mpci_sched.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -14,6 +15,9 @@ static unsigned pct=30, deadline=250;
 #define DISC_OWNER (1u << 31)
 static _Atomic unsigned owner;
 static _Atomic int fault;
+static _Atomic int prefer;
+/* Cross-cell arbiter (ISAC_MPCI_SCHED); NULL = off, local policy only. */
+static nr_mpci_t *mpci;
 static _Atomic uint64_t next_us, used_us, yields, wait_max, fallbacks, overruns;
 static _Thread_local uint64_t job_start;
 /* nr_gpu_budget_rt_job_start: records the start time (us) of the real-time job on this thread; read later by nr_gpu_budget_rt_start_us() and rt_begin() for the deadline check.
@@ -55,6 +59,7 @@ static void init(void) {
   pct=setting("ISAC_GPU_DISCOVERY_BUDGET_PCT",30,1,100);
   deadline=setting("ISAC_GPU_RT_DEADLINE_US",250,1,5000);
   start_us=nr_gpu_budget_now_us();
+  if(enabled)mpci=nr_mpci_default(pct);
 }
 /* nr_gpu_budget_enabled: returns 1 when the GPU time budget is enabled (ISAC_GPU_BUDGET=1), else 0; runs init() on first use. Every other entry point checks this and does nothing when disabled. */
 int nr_gpu_budget_enabled(void) {pthread_once(&once,init);return enabled;}
@@ -72,10 +77,11 @@ int nr_gpu_budget_rt_begin(void) {
    * CUDA priority applies at block admission; prevent the NEXT discovery slice
    * until all RT work retires. The absolute RT completion deadline still holds. */
   atomic_fetch_add(&owner,1);
+  nr_mpci_rt_begin(mpci,nr_gpu_budget_now_us());
   return 1;
 }
 /* nr_gpu_budget_rt_end: releases one RT user registered by nr_gpu_budget_rt_begin(). No-op when the budget is disabled. */
-void nr_gpu_budget_rt_end(void) {if(nr_gpu_budget_enabled())atomic_fetch_sub(&owner,1);}
+void nr_gpu_budget_rt_end(void) {if(nr_gpu_budget_enabled()) {atomic_fetch_sub(&owner,1);nr_mpci_rt_end(mpci);}}
 /* nr_gpu_budget_rt_result: records the outcome of one RT GPU call: its wait time updates the maximum wait; a fallback is counted when `fallback` is set. No-op when disabled. */
 void nr_gpu_budget_rt_result(uint64_t us,int fallback) {
   if(!nr_gpu_budget_enabled())return;
@@ -118,6 +124,9 @@ int nr_gpu_budget_discovery_begin(uint64_t now) {
   if(window_used+5000>(uint64_t)pct*10000) {
     atomic_fetch_and(&owner,~DISC_OWNER);atomic_fetch_add(&yields,1);return 0;
   }
+  if(!nr_mpci_discovery_admit(mpci,now,atomic_load(&prefer))) {
+    atomic_fetch_and(&owner,~DISC_OWNER);atomic_fetch_add(&yields,1);return 0;
+  }
   slice_start=now;
   return 1;
 }
@@ -133,6 +142,7 @@ void nr_gpu_budget_discovery_end(uint64_t now,uint64_t us) {
   if(!nr_gpu_budget_enabled())return;
   advance_window(now);window_used+=us;buckets[window_tick%1001]+=us;
   atomic_fetch_add(&used_us,us);
+  nr_mpci_discovery_charge(mpci,now,us);
   /* Pacing prevents catch-up bursts even after RT has held the device idle. */
   uint64_t paced=slice_start+(us*100+pct-1)/pct;
   atomic_store(&next_us,paced>now?paced:now);
@@ -142,7 +152,6 @@ void nr_gpu_budget_discovery_end(uint64_t now,uint64_t us) {
   if(us>5000)atomic_fetch_add(&overruns,1);
   atomic_fetch_and(&owner,~DISC_OWNER);
 }
-static _Atomic int prefer;
 void nr_gpu_budget_discovery_prefer(int on) {atomic_store(&prefer,on);}
 int nr_gpu_budget_discovery_preferred(void) {return atomic_load(&prefer);}
 /* nr_gpu_budget_fault: latches the GPU budget fault: every later discovery_begin returns -1 until the process restarts. No-op when disabled. */

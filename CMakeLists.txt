@@ -1057,7 +1057,7 @@ endif  (${SMBV})
 
 # Core singleton shared with dlopen GPU modules; deliberately no CUDA dependency.
 add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c
-  ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_budget.c)
+  ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_budget.c ${OPENAIR1_DIR}/PHY/TOOLS/nr_mpci_sched.c)
 target_include_directories(nr_gpu_platform PUBLIC ${OPENAIR1_DIR}/PHY/TOOLS)
 target_link_libraries(nr_gpu_platform PRIVATE ${CMAKE_DL_LIBS} pthread)
 set_target_properties(nr_gpu_platform PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -3398,12 +3398,25 @@ endif()
 
 if(ENABLE_TESTS)
   add_executable(test_nr_gpu_budget openair1/PHY/TOOLS/tests/nr_gpu_budget_test.cc
-                 openair1/PHY/TOOLS/nr_gpu_budget.c)
+                 openair1/PHY/TOOLS/nr_gpu_budget.c openair1/PHY/TOOLS/nr_mpci_sched.c)
   target_compile_definitions(test_nr_gpu_budget PRIVATE NR_GPU_BUDGET_TEST)
   target_include_directories(test_nr_gpu_budget PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
   target_link_libraries(test_nr_gpu_budget PRIVATE GTest::gtest_main pthread)
   add_test(NAME test_nr_gpu_budget COMMAND test_nr_gpu_budget)
   add_dependencies(tests test_nr_gpu_budget)
+
+  # MPCI M3 cross-cell arbiter: multi-process test + shm stat tool
+  add_executable(test_nr_mpci_sched openair1/PHY/TOOLS/tests/nr_mpci_sched_test.cc
+                 openair1/PHY/TOOLS/nr_mpci_sched.c openair1/PHY/TOOLS/nr_gpu_budget.c)
+  target_compile_definitions(test_nr_mpci_sched PRIVATE NR_GPU_BUDGET_TEST)
+  target_include_directories(test_nr_mpci_sched PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(test_nr_mpci_sched PRIVATE GTest::gtest_main pthread rt)
+  add_test(NAME test_nr_mpci_sched COMMAND test_nr_mpci_sched)
+  add_dependencies(tests test_nr_mpci_sched)
+  add_executable(mpci_sched_stat tests/passive_rx/mpci/mpci_sched_stat.c openair1/PHY/TOOLS/nr_mpci_sched.c)
+  target_include_directories(mpci_sched_stat PRIVATE ${OPENAIR1_DIR}/PHY/TOOLS)
+  target_link_libraries(mpci_sched_stat PRIVATE pthread rt)
+  add_dependencies(tests mpci_sched_stat)
   add_executable(test_nr_gpu_platform openair1/PHY/TOOLS/tests/nr_gpu_platform_test.cc
                  openair1/PHY/TOOLS/nr_gpu_platform.c)
   target_compile_definitions(test_nr_gpu_platform PRIVATE NR_GPU_PLATFORM_TEST)
