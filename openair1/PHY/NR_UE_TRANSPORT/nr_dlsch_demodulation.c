@@ -26,6 +26,7 @@
 #include <math.h>
 #include "nr_pdsch_evm_acc.h"
 #include "nr_irc_cov.h"
+#include "nr_mmse_exact.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 
@@ -801,6 +802,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
                           uint32_t rx_size_symbol,
                           unsigned char n_rx,
                           unsigned char nl, // number of layer
+                          c16_t rxdataF_ext[][rx_size_symbol], /* mode 3 only: the extracted RX samples */
                           c16_t rxdataF_comp[nl][pdsch_buf_size_max],
                           c16_t dl_ch_mag[][pdsch_buf_size_max],
                           c16_t dl_ch_magb[][pdsch_buf_size_max],
@@ -814,6 +816,95 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
 {
   uint32_t nb_rb_0 = (length + 11) / 12;
   c16_t determ_fin[12 * nb_rb_0] __attribute__((aligned(32)));
+
+  /* TIMRANK34 mode 3 (ISAC_PDSCH_MMSE_EXACT_NL34=1, or ISAC_PDSCH_MMSE_MODE=3): exact unbiased MMSE in double.
+   * Modes 0-2 work on G = sum_a (conj(h) h >> shift) and H^H y >> shift rounded to int16. With shift sized from the strongest
+   * layer, G sits at ~2|h| LSB; at a low receive level (TIM: |h| ~ 20 LSB, chest nvar 15-19 dB) and a 3-4 layer channel
+   * conditioned at 20-24 dB at our antennas, the weak eigen-direction of G is below 1 LSB: the solve returns noise (TIM rank
+   * 3: LLRs in {-1,0,1}, 45 % sign agreement with a float receiver that decodes 29 of 30 of the same MCS-0 grants).
+   * Here G and H^H y come straight from the int16 estimates and samples. Noise variance: the residual in the
+   * nbRx - nl dimensional complement of H (decision-free), per symbol; nbRx == nl uses the chest nvar (calibrated, MMSE3CAL).
+   * Output as mode 2 (z = w x_unbiased, per-layer thresholds w n1/n2/n3) with w = mu/[A^-1]_ll the per-layer
+   * MMSE SINR in G units, i.e. z = x / [A^-1]_ll, A = G + s2 I; times a gain that puts the strongest layer near 2^10 LSB
+   * whatever the receive level (the K38 LLR norm only shifts down). */
+  if (qam_mode == 3) {
+    const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
+    const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
+    const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
+    const double sc = ldexp(1.0, -shift); /* keep mode 2's units: G and b in |h|^2 >> shift */
+    const c16_t(*hx)[rx_size_symbol] = (const c16_t(*)[rx_size_symbol])dl_ch_estimates_ext;
+    /* output gain: the strongest layer's mean G_ll -> 2^10 LSB (w <= G_ll), independent of the receive level and of any
+     * ISAC_L2MAXH_DELTA*; continuous, so it moves with the channel only (no per-symbol power-of-two jumps) */
+    double gd = 0.0;
+    for (int r = 0; r < nl; r++) {
+      double e = 0.0;
+      for (int i = 0; i < length; i++)
+        for (int a = 0; a < n_rx; a++)
+          e += (double)hx[r * n_rx + a][i].r * hx[r * n_rx + a][i].r + (double)hx[r * n_rx + a][i].i * hx[r * n_rx + a][i].i;
+      if (e > gd)
+        gd = e;
+    }
+    gd = length > 0 ? gd * sc / length : 0.0;
+    const double gain = gd > 0.0 ? 1024.0 / gd : 1.0;
+    double s2 = 0.0; /* noise variance per RE in G units */
+    /* nbRx == nl (rank 4 on 4 RX): no noise-only dimension, so s2 = chest nvar x 10^(dB/10). MMSE3CAL measured the residual at
+     * +19.2 dB (TIM tile3, sd 3.0) and +16.1 dB (Vodafone b, sd 4.3) over that nvar; 21 dB errs high, the safe side (an s2 10x
+     * too high still decodes 15 of 25 rank-4 grants in the float model, 10x too low 8 of 25, zero forcing 0). */
+    static double s_nvdb = -999.0;
+    if (s_nvdb < -998.0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NVAR_DB"); s_nvdb = e ? atof(e) : 21.0; }
+    if (n_rx <= nl)
+      s2 = (double)noise_var * sc * pow(10.0, s_nvdb / 10.0);
+    for (int pass = n_rx > nl ? 0 : 1; pass < 2; pass++) {
+      double res = 0.0;
+      for (int i = 0; i < length; i++) {
+        int16_t hre[4][4], him[4][4], yre[4], yim[4];
+        for (int a = 0; a < n_rx; a++) {
+          yre[a] = rxdataF_ext[a][i].r;
+          yim[a] = rxdataF_ext[a][i].i;
+          for (int r = 0; r < nl; r++) {
+            hre[r][a] = hx[r * n_rx + a][i].r;
+            him[r][a] = hx[r * n_rx + a][i].i;
+          }
+        }
+        double xre[4], xim[4], ainv[4], e = 0.0;
+        const int ok = nr_mmse_exact_re(nl, n_rx, hre, him, yre, yim, sc, pass == 0 ? 0.0 : s2, xre, xim, ainv, pass == 0 ? &e : NULL);
+        if (pass == 0) { /* ||y - H x_zf||^2 */
+          res += ok ? e : 0.0;
+          continue;
+        }
+        for (int r = 0; r < nl; r++) {
+          const double ai = ok ? ainv[r] : 0.0;
+          const double w = ai > 1e-12 ? (1.0 - s2 * ai) / ai * gain : 0.0; /* mu / [A^-1]_ll */
+          const double ore = ai > 1e-12 ? xre[r] / ai * gain : 0.0, oim = ai > 1e-12 ? xim[r] / ai * gain : 0.0;
+#define QF_S16(v) ((int16_t)((v) > 32767.0 ? 32767 : (v) < -32768.0 ? -32768 : lround(v)))
+          rxdataF_comp[r][i].r = QF_S16(ore);
+          rxdataF_comp[r][i].i = QF_S16(oim);
+          dl_ch_mag[r][i].r = dl_ch_mag[r][i].i = QF_S16(w * qa / 32768.0);
+          dl_ch_magb[r][i].r = dl_ch_magb[r][i].i = QF_S16(w * qb / 32768.0);
+          dl_ch_magr[r][i].r = dl_ch_magr[r][i].i = QF_S16(w * qr / 32768.0);
+#undef QF_S16
+        }
+      }
+      if (pass == 0) {
+        s2 = length > 0 ? res / ((double)length * (n_rx - nl)) * sc : 0.0;
+        /* ISAC_PDSCH_MMSE_EXACT_CAL=1 (diagnostic): ratio of this residual noise to the chest nvar, which is all a
+         * nbRx == nl grant has (its data have no noise-only dimension) */
+        static int s_cal = -1;
+        static _Atomic unsigned long s_cn;
+        static double s_cs, s_cs2;
+        if (s_cal < 0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_CAL"); s_cal = e ? atoi(e) : 0; }
+        if (s_cal && noise_var > 0 && s2 > 0.0) {
+          const double r = 10.0 * log10(s2 / ((double)noise_var * sc));
+          s_cs += r; s_cs2 += r * r; /* racy across consumers: diagnostic only */
+          const unsigned long n = ++s_cn;
+          if ((n % 2000) == 0)
+            LOG_I(PHY, "SENSING: MMSE3CAL n=%lu nl=%d resid/nvar mean %.2f dB sd %.2f dB\n", n, nl, s_cs / n,
+                  sqrt(fmax(0.0, s_cs2 / n - (s_cs / n) * (s_cs / n))));
+        }
+      }
+    }
+    return;
+  }
 
   ///Allocate H^*H matrix elements and sub elements
   c16_t conjH_H_elements_data[n_rx][nl][nl][12 * nb_rb_0];
@@ -1348,7 +1439,13 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     static int s_qm = -1;
     if (s_qm < 0) s_qm = getenv("ISAC_PDSCH_MMSE_MODE") ? atoi(getenv("ISAC_PDSCH_MMSE_MODE")) : 0;
     qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
-    if (qam_mode < 0 || qam_mode > 2) qam_mode = 0;
+    if (qam_mode < 0 || qam_mode > 3) qam_mode = 0;
+    /* TIMRANK34 ISAC_PDSCH_MMSE_EXACT_NL34=1 (default off): mode 3 (exact unbiased MMSE, see nr_dlsch_mmse) for every Qm at
+     * 3-4 layers; =2 also at 2 layers. CPU only (the GPU demod refuses it). An explicit per-decode override (QAMAB arm) still
+     * wins, so a paired A/B can compare against the stock path. */
+    static int s_ex34 = -1;
+    if (s_ex34 < 0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NL34"); s_ex34 = e ? atoi(e) : 0; }
+    if (s_ex34 && nl >= (s_ex34 >= 2 ? 2 : 3) && nr_dlsch_qam_mode_override < 0) qam_mode = 3;
     /* Measured (QAMFIX.md): at 3-4 layers ZF noise enhancement costs low-SNR QPSK (16 -> 9 of 227 paired) and
      * the fixed-point ZF determinant underflows (kappa 0); keep the stock MMSE there. QAM at any rank and 2-layer
      * QPSK (1046 -> 1079 of 2110 paired) use the selected mode. */
@@ -1357,7 +1454,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
      * and its det(G) ~ (|h|^2 >> shift)^4 depends on the signal level (TIM 3-layer MCS 0 at 10-12 dB: 0/154 OTA). */
     static int s_nl34q = -1;
     if (s_nl34q < 0) { const char *e = getenv("ISAC_PDSCH_MMSE2_NL34_QPSK"); s_nl34q = e ? atoi(e) : 0; }
-    if (nl >= 3 && (qam_mode == 1 || (dlsch->cw_info.qamModOrder == 2 && !(s_nl34q && qam_mode == 2)))) qam_mode = 0;
+    if (nl >= 3 && (qam_mode == 1 || (dlsch->cw_info.qamModOrder == 2 && !(s_nl34q && qam_mode == 2) && qam_mode != 3))) qam_mode = 0;
     if (nr_dlsch_eq_override == 1) qam_mode = 0; /* the ISAC_RX_EQ_AB float arm keeps its own path */
   }
 
@@ -2368,6 +2465,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                     rx_size_symbol,
                     nbRx,
                     nl,
+                    rxdataF_ext,
                     rxdataF_comp[symbol],
                     dl_ch_mag[symbol],
                     dl_ch_magb[symbol],
@@ -2376,14 +2474,14 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                     qamModOrder,
                     *log2_maxh,
                     nb_re_pdsch,
-                    qam_mode == 0 ? nvar : 0, /* modes 1/2: unbiased ZF, no diagonal loading */
+                    (qam_mode == 0 || qam_mode == 3) ? nvar : 0, /* modes 1/2: unbiased ZF, no diagonal loading */
                     qam_mode);
       /* QAM-FIX diagnostic: amplitude ratio of the multi-layer soft output against its own thresholds.
        * For an unbiased equaliser E|Re z| = mag (n1 = mean |x| per dimension of 16/64/256QAM), so
        * kappa ~ 1 at high SNR; a shrunk (biased) output reads kappa < 1. Logged by EVMGRANT. */
       if (nr_pdsch_evm_acc.armed && qamModOrder > 2 && nb_re_pdsch >= 24) {
         for (int l = 0; l < nl; l++) {
-          const c16_t *z = rxdataF_comp[symbol][l], *ma = dl_ch_mag[symbol][qam_mode == 2 ? l : 0];
+          const c16_t *z = rxdataF_comp[symbol][l], *ma = dl_ch_mag[symbol][qam_mode >= 2 ? l : 0];
           double sz = 0.0, sm = 0.0;
           for (uint32_t i = 0; i < nb_re_pdsch; i++) {
             sz += abs(z[i].r) + abs(z[i].i);
@@ -2527,7 +2625,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                      dl_ch_mag[llr_sym],
                      dl_ch_magb[llr_sym],
                      dl_ch_magr[llr_sym],
-                     qam_mode == 2 && nl >= 2,
+                     qam_mode >= 2 && nl >= 2,
                      nbRx,
                      rxdataF_comp[llr_sym],
                      llr_per_symbol,
