@@ -17,7 +17,26 @@ typedef struct {
   pthread_mutex_t mutex;
   double speed;
   double gain[8];
+  /* ISAC_RAW_IQ_DECIM=D (default 1, replay only): serve a recording made at rate D*fs at rate fs (windowed-sinc LPF + decimate),
+   * so a 122.88 MS/s capture can drive -r 162/133/106/51 (61.44/30.72 MS/s). */
+  unsigned decim;
+  float *taps; int ntaps;
+  int16_t *hist[8], *scr[8]; int scr_cap;
 } replay_state;
+
+#define DEC_TAPS 127
+static void decim_init(replay_state *s)
+{
+  s->ntaps = DEC_TAPS; s->taps = malloc(sizeof(float) * DEC_TAPS);
+  double sum = 0; const double fc = 0.45 / s->decim; /* cycles/input sample: passband edge 0.9 of the output Nyquist */
+  for (int i = 0; i < DEC_TAPS; ++i) {
+    double x = i - (DEC_TAPS - 1) / 2.0;
+    double h = (x == 0 ? 2 * fc : sin(2 * M_PI * fc * x) / (M_PI * x)) * (0.42 - 0.5 * cos(2 * M_PI * i / (DEC_TAPS - 1)) + 0.08 * cos(4 * M_PI * i / (DEC_TAPS - 1)));
+    s->taps[i] = (float)h; sum += h;
+  }
+  for (int i = 0; i < DEC_TAPS; ++i) s->taps[i] /= (float)sum;
+  for (unsigned c = 0; c < 8; ++c) s->hist[c] = calloc(2 * DEC_TAPS, sizeof(int16_t));
+}
 
 static uint64_t integer_env(const char *name)
 {
@@ -45,7 +64,7 @@ static void finish(openair0_device_t *d)
 static int tune(openair0_device_t *d, openair0_config_t *cfg)
 {
   replay_state *s = d->priv;
-  AssertFatal(cfg->sample_rate == s->source.rate && cfg->rx_num_channels == s->source.channels,
+  AssertFatal(cfg->sample_rate * s->decim == s->source.rate && cfg->rx_num_channels == s->source.channels,
               "RAW_IQ_VOID requested sample geometry differs from recording\n");
   for (unsigned c = 1; c < s->source.channels; ++c)
     AssertFatal(cfg->rx_freq[c] == cfg->rx_freq[0], "RAW_IQ_UNSUPPORTED separate channel tuning\n");
@@ -77,8 +96,9 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
 {
   replay_state *s = d->priv;
   AssertFatal(n > 0 && c == s->source.channels, "RAW_IQ_VOID invalid read geometry\n");
+  const int D = (int)s->decim, m = n * D;
   pthread_mutex_lock(&s->mutex);
-  if ((uint64_t)n > s->source.samples - s->source.position) {
+  if ((uint64_t)m > s->source.samples - s->source.position) {
     fprintf(stderr, "RAW_IQ_EOF consumed=%" PRIu64 " remaining=%" PRIu64
                     " clipped=%" PRIu64 " no_loop=1 no_padding=1\n",
             s->source.position, s->source.samples - s->source.position, s->source.clipped);
@@ -88,11 +108,33 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
     exit(0);
   }
   uint64_t ts;
-  int got = raw_iq_read(&s->source, b, n, c, &ts);
+  int got;
+  if (D == 1) {
+    got = raw_iq_read(&s->source, b, n, c, &ts);
+  } else {
+    if (m > s->scr_cap) {
+      for (int k = 0; k < 8; ++k) { free(s->scr[k]); s->scr[k] = malloc((size_t)(m + DEC_TAPS) * 4); }
+      s->scr_cap = m;
+    }
+    void *in[8];
+    /* scratch = [DEC_TAPS-1 history samples][m new samples] */
+    for (int k = 0; k < c; ++k) { in[k] = s->scr[k] + 2 * (DEC_TAPS - 1); memcpy(s->scr[k], s->hist[k], 4 * (DEC_TAPS - 1)); }
+    got = raw_iq_read(&s->source, in, m, c, &ts) == m ? n : -1;
+    ts /= D;
+    for (int k = 0; k < c && got == n; ++k) {
+      const int16_t *x = s->scr[k]; int16_t *y = b[k];
+      for (int i = 0; i < n; ++i) {
+        float re = 0, im = 0; const int16_t *p = x + 2 * (i * D);
+        for (int j = 0; j < DEC_TAPS; ++j) { re += s->taps[j] * p[2 * (DEC_TAPS - 1 - j)]; im += s->taps[j] * p[2 * (DEC_TAPS - 1 - j) + 1]; }
+        y[2 * i] = (int16_t)lrintf(fminf(fmaxf(re, -32768.f), 32767.f)); y[2 * i + 1] = (int16_t)lrintf(fminf(fmaxf(im, -32768.f), 32767.f));
+      }
+      memcpy(s->hist[k], x + 2 * m, 4 * (DEC_TAPS - 1));
+    }
+  }
   pthread_mutex_unlock(&s->mutex);
   AssertFatal(got == n, "RAW_IQ_VOID read failure\n");
   *t = ts;
-  double delay = n / s->source.rate / s->speed;
+  double delay = m / s->source.rate / s->speed;
   struct timespec wait = {.tv_sec = (time_t)delay,
                          .tv_nsec = (long)((delay - floor(delay)) * 1e9)};
   while (nanosleep(&wait, &wait) && errno == EINTR) {}
@@ -118,6 +160,9 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   s->speed = speed ? strtod(speed, &end) : 0;
   AssertFatal(speed && end && !*end && isfinite(s->speed) && s->speed > 0 && s->speed <= 1,
               "RAW_IQ_VOID invalid pacing speed\n");
+  { const char *dv = getenv("ISAC_RAW_IQ_DECIM"); s->decim = dv ? (unsigned)atoi(dv) : 1;
+    AssertFatal(s->decim >= 1 && s->decim <= 4 && channels <= 8, "RAW_IQ_VOID invalid ISAC_RAW_IQ_DECIM\n");
+    if (s->decim > 1) decim_init(s); }
   pthread_mutex_init(&s->mutex, NULL);
   d->priv = s; d->openair0_cfg = cfg; d->type = NONE_DEV;
   for (unsigned c = 0; c < channels; ++c) {
