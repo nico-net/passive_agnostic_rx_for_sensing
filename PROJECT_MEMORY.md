@@ -3907,7 +3907,8 @@ CORESETALL-20261012, ULTWINS-20261012 (`docs/superpowers/reports/csd/`). Raw log
   when one hypothesis has >= 6 lit windows and >= 4x the runner-up. It publishes Point A and opens the GPU nID sweep and the dwell path
   as a SIB1 verdict does. Needs `ISAC_KSSB_ALIGN=1` (in t26z). Only nID = PCI is swept; UE-specific nID is not done.
 - `[NOT VALIDATED]` (orchestrator facts) No validated result on any capture. The expected h = 0 on the PCI 421 capture is an
-  expectation from calibration memory `[NOT RUN]`. `pdcch_pci_windows` (same flag) is the direct PDCCH evidence diagnostic.
+  expectation from calibration memory `[NOT RUN]` `[SUPERSEDED by item 21: the sweep did not trigger on the PCI 421 replay]`.
+  `pdcch_pci_windows` (same flag) is the direct PDCCH evidence diagnostic.
 - Superseded: the "not implemented" bullet of item 6 (PCI 403 / PCI 4: no Point A, no nID sweep) is now implemented here, default
   off, not validated.
 
@@ -3920,6 +3921,8 @@ CORESETALL-20261012, ULTWINS-20261012 (`docs/superpowers/reports/csd/`). Raw log
 - File location: the orchestrator names `ota/t26b.env`, which does not exist in this worktree (no `ota/` directory). The proposed file is
   `tests/passive_rx/t26b.env.proposed` (commit `5289bc54d1`). BLINDPIPE section 5 (the per-capture table) is still a TODO template, so
   the numbers in items 11-13 are the orchestrator's summary, not that report's table.
+- `[SUPERSEDED by item 22 for B508a, B508b and B403a]` (their `-C ... -r 217` geometry is replaced by the retune triple; B4a and B675a
+  widths are unknown until a first run). B415a and B923a are unaffected: the 415 and 923 carriers are 217 PRB.
 - OTA spec lines (BLINDPIPE section 7, `[NOT RUN]`): B415a (150 s control), B923a (150 s; C-RNTI accept rate must not drop during
   dwells), B508a/b (>= 300 s, `ISAC_PDCCH_DISC_ENUM=1`), B4a (PCI 4), B403a (NSA), B675a (weak TIM). Read with
   `tests/passive_rx/blindpipe_stats.py`.
@@ -3945,6 +3948,89 @@ CORESETALL-20261012, ULTWINS-20261012 (`docs/superpowers/reports/csd/`). Raw log
 - Reports used: BLINDPIPE-20261013 (partial: section 5 TODO), CORESETALL-20261012 (finding 2 used in item 13; its section 5 OTA spec
   lines are superseded by BLINDPIPE section 7 for the morning run), ULPRIOR-20261012 (item 16).
 - No new OTA run and no receiver run in this add-on; replay numbers are DGX GB10, 0.25x, 4 RX, `ota/t26z.env` baseline.
+
+**18. Receiver N_RB = carrier width, 30 kHz (GRIDCARRIER; `[CODE-READ]`, `[MEASURED, DGX replay]`)**
+
+- Supported 30 kHz sizes are the widths that have a sample rate in `get_samplerate_and_bw`: `-r 51` (30.72 MS/s), `106/133/162` (61.44 MS/s),
+  `189/217/273` (122.88 MS/s). Any other width (e.g. 100, 120) asserts there, so a SIB1 carrier width is mapped to the next supported size.
+  FFT size, first_carrier_offset and CP lengths follow N_RB generically (`set_scs_parameters`); no hard-coded 217 found in the sizing paths grepped
+  (nr_ue / PHY / MAC_UE).
+- `[ORCH]` `[MEASURED, DGX replay]` The receiver runs at each of 51/106/133/162/189/217/273 with no core change.
+- Replay serves only the capture rate (122.88 MS/s). `ISAC_RAW_IQ_DECIM=2|4` (default 1, replay only, `radio/COMMON/raw_iq.c`) low-pass
+  filters (127-tap Blackman sinc) and decimates, so 162/133/106/51 can be replayed from 122.88 MS/s captures. It is slow (about 1/3 real time at
+  0.25x); the 150 s timeout cut some runs before EOF (exit 124). Not done: filter group delay (63 input samples) is not compensated; no unit test
+  (replay-only tool, checked by the replays).
+
+**19. `--ssb` arithmetic verified; retune restart tooling (GRIDCARRIER; `[MEASURED, DGX replay]`, `[CODE-READ]`)**
+
+- Grid start = -C - N_RB*6 subcarriers; `--ssb` = (SSB first subcarrier - grid start). Verified on TIM 923: Point A reported at grid sc 336 and
+  576 for the two 273 grids, equal to the prediction. On 415, CORESET#0 moves by +28 RB = (273-217)/2.
+- New `tests/passive_rx/autofront/retune_restart.sh RUN.LOG [auto|N]`: detects ISAC_ACQ_RETUNE / carrier MISMATCH in a first run's log, calls
+  `tests/passive_rx/survey/retune_args.py RUN.LOG auto` (smallest supported size >= SIB1 carrierBandwidth; grid starts at Point A when that size is
+  supported) and prints `-C <hz> -r <n> --ssb <sc>`. With `PID=<pid>` it SIGINTs the old receiver (never SIGKILL) and waits 60 s. Exit 3 = the
+  geometry already matches; do not restart.
+- Checked on the `ab_P508` log: `auto` -> `-C 3590010000 -r 162 --ssb 193`; explicit 217 -> `-C 3590190000 -r 217 --ssb 517`; 273 ->
+  `-C 3590190000 -r 273 --ssb 853`.
+- Use: run once with a generous 217 grid, run `retune_restart.sh` on that log, relaunch with the printed args, plus `ISAC_CARRIER_FROM_SIB1=1`
+  for any grid wider than the carrier.
+- `[CODE-READ]` At 162 the CPU load drops (FFT 2048, 61.44 MS/s); ring and GPU buffers are sized from N_RB at launch; nothing else changes.
+- `[ORCH]` `rr-orchestration/ota/starttest.sh` now takes `RB=` (default 217). That file lives outside this worktree and was not checked here.
+
+**20. Replay results per width (GRIDCARRIER; `[MEASURED, DGX replay]`, GB10, 0.25x, 4 RX, `t26z.env`, one run per arm, indicative)**
+
+| capture | -r / -C / --ssb | carrier verdict (report) | CORESET bank adds | PDSCHQ crc_ok (final line) |
+|---|---|---|---|---|
+| 415 control (217 PRB) | 217 / 3680010000 / 1171 | CONFIRMED w/o SIB1 info | 4 | 1866/10295 (18.2 %) |
+| 415 | 273 / 3680010000 / 1507 | unchecked (NSA SIB1) | 0 | 220/251 (88 %, CSS0 only) |
+| 415 | 273, FO -4800 | unchecked | 0 | 212/242 (87.6 %) |
+| 415 (sub-carrier grids, decim) | 162 / 133 / 106 / 51 | n/a | 0 | 87.6-88.3 % |
+| TIM 923 (217 PRB, `ISAC_CARRIER_FROM_SIB1=1`) | 217 / 3759990000 / 233 | CONFIRMED (SIB1) | 1 (len 47) | 16/837 (2.0 %) |
+| TIM 923 | 273 / 3759990000 / 569 | MISMATCH (wider, Point A sc 336), contained | 1 (nID 1931, rnti 0x4e32, grid_rb 28) | 18/916 (2.0 %) |
+| TIM 923 | 273 / 3752790000 / 809 (re-centred -7.2 MHz) | Point A sc 576, contained | 1 (grid_rb 48) | 17/800 (2.1 %) |
+
+- `[ORCH]` TIM 923 in a 273 grid with `ISAC_CARRIER_FROM_SIB1=1`: same CORESET verified, PDSCH CRC as at 217. **Open discrepancy:** the report
+  rows for 273 do not list the flag and report `MISMATCH`, not `CONFIRMED`. Reconcile against the logs before claiming the 273 carrier verdict.
+- `[ORCH]` Vodafone 415 at 273: no bank add, because its NSA SIB1 has no servingCellConfigCommon, so the carrier stays `unchecked` (the
+  RS-evidence path assumes Point A = grid start). For such cells use the exact carrier-sized grid (autofront triple, item 19).
+- **The old RB=273 PBCH failure does NOT reproduce** `[MEASURED, DGX replay]`: 415 at `-r 273 --ssb 1507` syncs (PCI 415, MIB k_ssb 14, SIB1
+  CELL), also at FO -4846 and at the default -4800. The 80 "polar decoding wrong" lines are normal search noise (also in the 217 control). The
+  earlier cause (older build, or a mismatched -C / capture centre) is `[HYPOTHESIS]`, unverified.
+- Limits: 162/133/106/51 on 415 test start-up geometry, SSB and CORESET#0 only; full-carrier CORESET discovery and PDSCH are not claimed. No
+  genuinely 162- or 51-PRB capture exists (508, 403); the first one is the OTA in item 22. TIM PDSCH at about 2 % is the known replay level of
+  that capture (3.6-3.8 % in CARRIERGEOM), unchanged by the grid size.
+
+**21. Point-A sweep: did not trigger on the PCI 421 replay (`[ORCH]`, `[MEASURED, DGX replay]`; capture name not given)**
+
+- The carrier was already known from the capture, so `ISAC_POINTA_SWEEP` (item 14) did not run. The item-14 expectation h = 0 on PCI 421 is
+  therefore not tested `[NOT RUN]`.
+- Still `[IMPLEMENTED, NOT VALIDATED]`. Planned OTA test on PCI 4 / Iliad 403 (`[NOT RUN]`).
+
+**22. OTA lines for the carrier-sized grids (supersedes the geometry of item 15 B508a, B508b, B403a; `[NOT RUN]`, `[NOT MEASURED ON AIR]`)**
+
+```
+G508:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg of ab_U508a>:3590010000:193:-4842    # receiver args: -r 162 (centre 3590.01 MHz; grid = carrier 3560.85-3619.17 MHz)
+G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 403 run>:<SSB>:<FO>   # -r 51 if SIB1 carrierBandwidth = 51 (20 MHz)
+```
+
+- 403's width is unknown until its first run: run once at `-r 217`, then `retune_restart.sh run.log` gives the exact triple. Expect
+  `ACQ carrier CONFIRMED from SIB1` with N_RB equal to the SIB1 width.
+- B4a (PCI 4) and B675a: width not stated; use the same retune triple after a first run.
+- Check: 162 PRB x 30 kHz x 12 = 58.32 MHz; 3590.01 +/- 29.16 MHz = 3560.85-3619.17 MHz (matches the grid above).
+
+**23. Superseded in this block (marked in place)**
+
+- Item 14 expectation "h = 0 on the PCI 421 capture" -> item 21 (sweep did not trigger).
+- Item 15 OTA spec lines B508a, B508b, B403a (`-C 3590190000 -r 217 --ssb 517`, and the 403 line) -> item 22. Item 15's B415a and B923a
+  lines stand (217 carriers).
+- Item 6 "remaining grid-width" and "PCI 403 / PCI 4 no Point A" statements stay superseded by items 14 and 21 (no change).
+
+**24. Sources, scope and open points**
+
+- Sources: `docs/superpowers/reports/csd/GRIDCARRIER-20261013.md` (branch `csd/grid-carrier` from `csd/otatest` `db826ff278`) and
+  `BLINDPIPE-20261013.md` (item 15 spec lines); orchestrator facts of 2026-10-13 are `[ORCH]`.
+- Open: the TIM 273 verdict discrepancy in item 20. The `ota/t26b.env` (orchestrator) vs `tests/passive_rx/t26b.env.proposed` (item 15) location
+  question is unchanged.
+- No OTA run, no receiver run and no build in this add-on. Replay numbers are DGX GB10 replays, not OTA numbers.
 
 ---
 
