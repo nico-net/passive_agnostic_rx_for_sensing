@@ -177,6 +177,7 @@ void nr_pdsch_solver_set_tda_fn(nr_pdsch_solver_tda_fn fn, void *ctx)
 /* nr_pdsch_solver_reset: Frees per-RNTI candidate bitmaps and coverage tables under g_mu. Resets the NL/coverage/layout-recover settings;
  *   the other env caches are function-static and are not re-read. Callers: tests/nr_pdsch_solver_test.cc only.
  */
+static int g_comb_snr = -1; /* cached ISAC_RX_MRC_PER_RNTI_SNR (comb_by_snr); reset re-reads it (tests) */
 void nr_pdsch_solver_reset(void)
 {
   pthread_mutex_lock(&g_mu);
@@ -189,6 +190,7 @@ void nr_pdsch_solver_reset(void)
   g_signif = -1;
   g_prior_ids = -1;
   g_rvc = -1;
+  g_comb_snr = -1;
   for (int i = 0; i < SOLVER_RNTIS; i++) {
     free(g_r[i].cand_bm);
     if (g_r[i].coverage) free(g_r[i].coverage->entries);
@@ -560,14 +562,20 @@ static int comb_ci(uint8_t comb);
  *   EMA weight 0.2 for new samples; the first sample initialises it. Ignored for unknown RNTIs.
  *   Caller: nr_pdsch_passive_queue.c (after a full decode, from its EVM).
  */
-void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db, int comb)
+static int comb_by_snr(void);
+void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db, int comb, bool crc_ok)
 {
   pthread_mutex_lock(&g_mu);
   solver_rnti_t *r = slot_of(rnti, false, NULL);
   if (r) {
     r->snr_ema = r->n_snr ? 0.8f * r->snr_ema + 0.2f * snr_db : snr_db;
     r->n_snr++;
-    if (comb >= 1) { /* per receiver (comb_pick, ISAC_RX_MRC_PER_RNTI_SNR) */
+    /* MRCBUG ISAC_RX_MRC_PER_RNTI_SNR=2: only CRC-OK decodes feed the per-receiver EMA. The decision-directed SNR of a FAILED
+     * decode has a modulation-dependent floor (pure noise reads 3.9 / 9.1 / 12.5 dB on QPSK / 16QAM / 64QAM) and the 4-branch
+     * MRC output of a failing grant is noise-like (OTA 2026-10-13: failed comb=3 grants read 1.8-2.5 dB ABOVE the ideal MRC of
+     * their branch SNRs; failed comb=1 grants read at or 5 dB below theirs), so mode 1 handed the MRC receiver +4..+8 dB per
+     * failed grant and picked it where the single branch decoded better (t26h OTA A/B). */
+    if (comb >= 1 && (crc_ok || comb_by_snr() != 2)) { /* per receiver (comb_pick, ISAC_RX_MRC_PER_RNTI_SNR) */
       const int ci = comb_ci((uint8_t)comb);
       r->comb_snr[ci] = r->comb_nsnr[ci] ? 0.8f * r->comb_snr[ci] + 0.2f * snr_db : snr_db;
       if (r->comb_nsnr[ci] < UINT16_MAX) r->comb_nsnr[ci]++;
@@ -714,9 +722,8 @@ static int comb_ab(void) /* ISAC_RX_MRC_PER_RNTI_AB=1: post-solve round robin ov
  *   receiver; otherwise the CRC rule decides. */
 static int comb_by_snr(void)
 {
-  static int en = -1;
-  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI_SNR") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_SNR")) : 0;
-  return en;
+  if (g_comb_snr < 0) g_comb_snr = getenv("ISAC_RX_MRC_PER_RNTI_SNR") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_SNR")) : 0;
+  return g_comb_snr;
 }
 static int comb_ci(uint8_t comb) { return comb == 3 ? 1 : comb == 4 ? 2 : comb >= 5 ? 3 : 0; }
 static uint8_t comb_pick(const solver_rnti_t *r)

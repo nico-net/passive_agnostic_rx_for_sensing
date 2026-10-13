@@ -32,6 +32,18 @@ static inline int nr_mrc_effective_branches(const double *w, int n)
   const int e = (int)ceil(s - 1e-9);
   return e < 1 ? 1 : e;
 }
+/* MRCBUG (ISAC_RX_MRC_SHIFT_SUM): branches' worth of amplitude an UNWEIGHTED MRC over the live mask reaches,
+ * round(sum_live |h_a|^2 / max_live |h_a|^2) in 1..n. Balanced branches -> n (the old count); one dominant branch ->
+ * 1 (the single-branch shift). Same integer arithmetic as nrd_decide() in nr_pdsch_gpu_demod.cuh (bit-exact). */
+static inline int nr_mrc_shift_branches(const int32_t *avg, int live_mask, int n, int32_t avg_max)
+{
+  if (avg_max <= 0) return 1;
+  int64_t s = 0;
+  for (int a = 0; a < n; a++)
+    if (live_mask & (1 << a)) s += avg[a];
+  int e = (int)((s + avg_max / 2) / avg_max);
+  return e < 1 ? 1 : e > n ? n : e;
+}
 /* Common-scale average AFTER channel conjugate multiplication. Widen before
  * summing so opposite phases can cancel before any saturation. Equal receiver
  * noise is assumed; this does not claim optimal weighting for unequal noise. */

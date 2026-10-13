@@ -1,0 +1,20 @@
+# Replays DGX GB10, build_t26, t26b env, SPEED 1, 12 s captures, 1 run/arm. 'base' = flag off, 'fix' = ISAC_RX_MRC_SHIFT_SUM=1; AB = ISAC_RX_MRC_PER_RNTI_AB=1 round robin; genie = ISAC_PDSCH_RM_GENIE=1. The first b_base run used the pre-change binary (no l2=).
+Traceback (most recent call last):
+  File "/tmp/claude-1001/-home-nicola-NICOLA-passive-agnostic-rx-for-sensing/8b5f4a61-d0d8-4c81-a9a6-30286599ce28/scratchpad/cmp.py", line 3, in <module>
+    from evm import *
+ModuleNotFoundError: No module named 'evm'
+
+# pick mode: ISAC_RX_MRC_PER_RNTI_SNR=1 vs 2 (no AB), steady share = comb3 share after an RNTI's 40th decode
+BV_snr1_094324               Nl1= 1036 rntis= 25 steady comb3 share= 87.9% (560) | CRC@snr>=10 0-4:  99.0% (206) | 5-9:  77.9% (95) | 10-16:  33.3% (6) | 17+: --
+BV_snr2_094607               Nl1= 1153 rntis= 23 steady comb3 share= 90.2% (674) | CRC@snr>=10 0-4:  98.6% (213) | 5-9:  66.7% (120) | 10-16:   6.7% (30) | 17+: --
+TIM_snr1_094759              Nl1=  411 rntis=  4 steady comb3 share= 86.6% (329) | CRC@snr>=10 0-4: 100.0% (129) | 5-9:  58.8% (17) | 10-16:  33.3% (192) | 17+:   0.0% (24)
+TIM_snr2_094951              Nl1=  430 rntis=  4 steady comb3 share= 56.5% (308) | CRC@snr>=10 0-4: 100.0% (102) | 5-9:  64.7% (17) | 10-16:  29.9% (204) | 17+:   0.0% (20)
+# OLD_snr1/snr2 and the ISAC_L2MAXH_DELTA=-3 arms were not run: an OTA session started on the host (rr-csd-b X410 run) and killed the replay; no further replays.
+# GPU CHECK: replay_b_fix_chk_092554: GPU_EXACT_DEMOD calls=8000 check_ok=8000 check_bad=0 evm_close=8000 evm_far=0 evm_maxrel=4
+# zabs = mean |Re z|,|Im z| of the int16 equaliser output (LSB), replay_b_cpu_zabs_094147 (CPU demod, AB), Nl=1
+comb 1 Qm2 n=620 p10=68 p50=143 p90=445
+comb 1 Qm4 n=155 p10=73 p50=196 p90=657
+comb 1 Qm6 n=7 p10=123 p50=131 p90=141
+comb 3 Qm2 n=644 p10=33 p50=73 p90=209
+comb 3 Qm4 n=145 p10=32 p50=89 p90=360
+comb 3 Qm6 n=6 p10=44 p50=75 p90=219

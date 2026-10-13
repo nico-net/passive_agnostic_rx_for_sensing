@@ -1,0 +1,32 @@
+# DD-SNR floor (Monte Carlo) and OTA failed-grant SNR vs LS-branch bound
+DD SNR of pure noise: Qm2: 3.9 dB  Qm4: 9.1 dB  Qm6: 12.5 dB  Qm8: 14.4 dB
+Qm2 true->DD: 0->4.6 3->5.4 6->7.0 9->9.4 12->12.2 15->15.1 18->18.1 21->21.0 24->24.0
+Qm4 true->DD: 0->9.6 3->10.1 6->10.8 9->11.6 12->13.0 15->15.2 18->18.1 21->21.0 24->24.0
+Qm6 true->DD: 0->13.3 3->14.2 6->15.2 9->16.2 12->17.1 15->17.8 18->19.1 21->21.2 24->24.0
+Qm2 comb1 CRC-FAIL n=1283 snr p5=-0.5 p25=0.5 p50=1.2
+Qm2 comb3 CRC-FAIL n=2098 snr p5=1.9 p25=3.2 p50=3.8
+Qm4 comb1 CRC-FAIL n=1267 snr p5=2.5 p25=3.6 p50=4.4
+Qm4 comb3 CRC-FAIL n=2229 snr p5=5.8 p25=7.1 p50=7.8
+Qm6 comb1 CRC-FAIL n=278 snr p5=2.7 p25=4.7 p50=8.0
+Qm6 comb3 CRC-FAIL n=376 snr p5=9.2 p25=11.7 p50=14.8
+reported snr minus the LS-branch bound (comb1: best br_snr; comb3: ideal MRC sum), by Qm and CRC; n, mean, p50, p90, share > bound+1 dB
+Qm2 comb1 crc=1 n= 2633 mean= -2.7 p50= -2.1 p90= -0.1 above+1dB= 1.7%
+Qm2 comb1 crc=0 n= 1283 mean= -0.1 p50=  0.3 p90=  1.8 above+1dB=23.6%
+Qm2 comb3 crc=1 n= 4456 mean= -2.0 p50= -1.8 p90= -0.0 above+1dB= 2.3%
+Qm2 comb3 crc=0 n= 2098 mean= -0.1 p50=  0.2 p90=  2.5 above+1dB=34.8%
+Qm4 comb1 crc=1 n=  631 mean= -4.6 p50= -4.4 p90= -1.7 above+1dB= 0.0%
+Qm4 comb1 crc=0 n= 1267 mean= -0.2 p50=  0.2 p90=  1.7 above+1dB=19.6%
+Qm4 comb3 crc=1 n= 1291 mean= -2.2 p50= -2.1 p90= -0.2 above+1dB= 2.4%
+Qm4 comb3 crc=0 n= 2229 mean=  1.8 p50=  2.0 p90=  4.7 above+1dB=66.6%
+Qm6 comb1 crc=1 n=  305 mean= -4.4 p50= -3.9 p90= -1.9 above+1dB= 0.3%
+Qm6 comb1 crc=0 n=  278 mean= -4.8 p50= -5.0 p90= -1.0 above+1dB= 1.4%
+Qm6 comb3 crc=1 n=  553 mean= -1.9 p50= -2.3 p90=  1.1 above+1dB=10.3%
+Qm6 comb3 crc=0 n=  376 mean=  2.5 p50=  2.8 p90=  5.6 above+1dB=77.1%
+
+comb3 failing grants: weakest-branch structure. share of grants where >=2 branches have br_snr < 0 dB, by Qm, CRC
+Qm2 crc=1 n=4456 >=2 branches <0dB: 12%  mean best br 12.7 mean ideal 16.6 mean snr 14.6
+Qm2 crc=0 n=2098 >=2 branches <0dB: 83%  mean best br 0.1 mean ideal 4.4 mean snr 4.3
+Qm4 crc=1 n=1291 >=2 branches <0dB: 0%  mean best br 16.1 mean ideal 20.8 mean snr 18.5
+Qm4 crc=0 n=2229 >=2 branches <0dB: 64%  mean best br 2.2 mean ideal 6.3 mean snr 8.1
+Qm6 crc=1 n=553 >=2 branches <0dB: 0%  mean best br 20.2 mean ideal 24.9 mean snr 23.0
+Qm6 crc=0 n=376 >=2 branches <0dB: 19%  mean best br 7.7 mean ideal 12.0 mean snr 14.5

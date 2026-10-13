@@ -151,6 +151,8 @@ typedef struct {
   float                rho;          ///< mean |cross-branch residual correlation|       ///< mean QAM amplitude consistency (1 = coherent), 0 = n/a ///< EVM after a per-symbol complex scale (what CPE/amplitude tracking would leave)
   float                br_snr_db[4];
   float                layer_snr_db[4]; ///< HIGHMCS: per-layer decision-directed SNR (dB), -99 = n/a (EVMGRANT snr_l=)
+  int8_t               l2maxh;       ///< MRCBUG diag: the fixed-point output shift of this decode (EVMGRANT l2=)
+  float                zabs;         ///< MRCBUG diag: mean |Re z|,|Im z| of the int16 equaliser output in LSB (EVMGRANT zabs=)
   uint8_t              evm_nbrx;
   uint16_t             evm_nsym;
   uint16_t             dmrs_ports;   ///< T26d diag: DM-RS port bitmap the decode used

@@ -4401,6 +4401,22 @@ gpu_llr_ready:;
   nr_dlsch_csi_prb_map = NULL; /* CSI-FULL */
   nr_dlsch_csi_prb_map_n = 0;
   pdtim_add(PDTIM_DEMOD, pdt_dem);
+  out->l2maxh = (int8_t)log2_maxh; /* MRCBUG diag (EVMGRANT l2=) */
+  /* MRCBUG diag (EVMGRANT zabs=): mean |Re z|, |Im z| of the int16 equaliser output in LSB (the stream the LLRs are cut from;
+   * CPU demod, 1 layer, 0 = n/a). Replay b 2026-10-13: median 143-196 (single branch) vs 73-89 (4-branch MRC), p10 32. */
+  out->zabs = 0.f;
+  static int s_fx = -1;
+  if (s_fx < 0) s_fx = getenv("ISAC_PDSCH_EVM_GRANT") ? 1 : 0;
+  if (s_fx && demod_ok && gdem != 0 && !gpu_llr && !gw_ready && cw->Nl == 1) {
+    double zabs = 0.0; uint64_t nz = 0;
+    for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+      const uint32_t n = dl_valid_re[m];
+      const c16_t *z = rxdataF_comp[m][0];
+      for (uint32_t i = 0; i < n; i++) zabs += abs(z[i].r) + abs(z[i].i);
+      nz += 2 * n;
+    }
+    out->zabs = nz ? (float)(zabs / nz) : 0.f;
+  }
   const bool evm_deferred = nr_pdsch_gpu_demod_evm_deferred(); /* DECGPU: the GPU EVM chain overlaps the LDPC stage */
   if (!evm_deferred)
     evm_fill(out, dlsch_config, demod_ok);

@@ -59,7 +59,9 @@ void nr_256qam_llr(const c16_t *rxdataF_comp,
                    uint32_t nb_re);
 int nr_log2_maxh_headroom(uint32_t peak_rb_h2, int contributing);
 unsigned char log2_approx(unsigned int x);
+void nr_64qam_llr(const c16_t *rxdataF_comp, const c16_t *ch_mag, const c16_t *ch_mag2, int16_t *llr, uint32_t nb_re);
 }
+#include "../../NR_UE_TRANSPORT/nr_mrc_weights.h" // nr_mrc_shift_branches (MRCBUG)
 
 /* LOG/CONFIG_LIB need these outside a full softmodem executable; same convention (and same reason)
  * as isac_sync_test.cc. Neither is reachable from the two kernels under test. */
@@ -211,7 +213,102 @@ Result RunCase(Profile profile, double hrms, double spread_db, int use_headroom_
   return out;
 }
 
+/* MRCBUG: one symbol of 64QAM through a 4-branch MRC (nr_channel_compensation, nb_rx 4), exact H, no noise. Branch 0 at
+ * hrms, branches 1-3 `weak_db` below it (inside the 12 dB live mask of mode 3). shift_rule 0 = the production count rule
+ * (log2(4) = 2 bits for four live branches), 1 = nr_mrc_shift_branches() (round(sum|h|^2 / max|h|^2) branches). */
+struct MrcResult {
+  double ber_pct; // LLR sign errors / total
+  double kappa;   // mean(|Re z|,|Im z|) / mean(mag_a): 1 = thresholds match the output
+  int shift;
+};
+MrcResult RunMrcCase(double hrms, double weak_db, int shift_rule)
+{
+  constexpr int kNb = 4;
+  alignas(64) static c16_t rxf[kNb][kBufLen], chf[kNb][kBufLen], maga[kBufLen], magb[kBufLen], magc[kBufLen], rxcomp[kBufLen];
+  alignas(64) static int16_t llr[6 * kBufLen];
+  memset(rxf, 0, sizeof(rxf));
+  memset(chf, 0, sizeof(chf));
+  memset(maga, 0, sizeof(maga));
+  memset(magb, 0, sizeof(magb));
+  memset(magc, 0, sizeof(magc));
+  memset(rxcomp, 0, sizeof(rxcomp));
+  memset(llr, 0, sizeof(llr));
+  const double kR42 = std::sqrt(42.0);
+  Rng rng(20261013u);
+  std::vector<int> lr(kNbRe), li(kNbRe);
+  int64_t sum_h2[kNb] = {0, 0, 0, 0};
+  for (int i = 0; i < kNbRe; i++) {
+    lr[i] = 2 * (int)(rng.next() % 8) - 7; // odd levels -7..7
+    li[i] = 2 * (int)(rng.next() % 8) - 7;
+    const double xr = lr[i] / kR42, xi = li[i] / kR42;
+    for (int a = 0; a < kNb; a++) {
+      const double amp = a == 0 ? hrms : hrms * std::pow(10.0, -weak_db / 20.0);
+      const double ph = 2.0 * M_PI * rng.uni();
+      chf[a][i].r = (int16_t)std::lround(amp * std::cos(ph));
+      chf[a][i].i = (int16_t)std::lround(amp * std::sin(ph));
+      const double hr = chf[a][i].r, hi = chf[a][i].i;
+      sum_h2[a] += (int64_t)(hr * hr + hi * hi);
+      rxf[a][i].r = (int16_t)std::lround(hr * xr - hi * xi);
+      rxf[a][i].i = (int16_t)std::lround(hr * xi + hi * xr);
+    }
+  }
+  int32_t avg[kNb];
+  for (int a = 0; a < kNb; a++)
+    avg[a] = (int32_t)(sum_h2[a] / kNbRe);
+  const int contributing = shift_rule ? nr_mrc_shift_branches(avg, 0xF, kNb, avg[0]) : kNb;
+  MrcResult out{};
+  out.shift = (log2_approx((uint32_t)avg[0]) >> 1) + 1 + log2_approx((uint32_t)contributing); // nr_rx_pdsch(), nl == 1
+  c16_t *rxcomp_p = rxcomp;
+  nr_channel_compensation(kBufLen, kBufLen, kNb, 1, rxf, chf, maga, magb, magc, &rxcomp_p, NULL, 6, 0, (uint32_t)out.shift);
+  nr_64qam_llr(rxcomp, maga, magb, llr, kNbRe);
+  long bad = 0, tot = 0;
+  double sz = 0.0, sm = 0.0;
+  for (int i = 0; i < kNbRe; i++) {
+    sz += std::abs(rxcomp[i].r) + std::abs(rxcomp[i].i);
+    sm += 2.0 * maga[i].r;
+    const int16_t *p = &llr[6 * i];
+    for (int ax = 0; ax < 2; ax++) {
+      const int L = ax ? li[i] : lr[i];
+      const int t[3] = {L, 4 - std::abs(L), 2 - std::abs(4 - std::abs(L))};
+      for (int b = 0; b < 3; b++) {
+        const int16_t v = p[2 * b + ax];
+        if (v == 0 || ((v > 0) != (t[b] > 0)))
+          bad++;
+        tot++;
+      }
+    }
+  }
+  out.ber_pct = 100.0 * (double)bad / (double)tot;
+  out.kappa = sm > 0.0 ? sz / sm : 0.0;
+  return out;
+}
+
 } // namespace
+
+// MRCBUG. Four live branches, one 10 dB above the others: the count rule reserves 2 bits for a sum that is 1.3x, so the
+// 64QAM output and its thresholds land at a few LSB; the per-branch floor of |h|^2 >> shift pulls the thresholds low
+// (kappa > 1, the OTA 2026-10-13 EVMGRANT signature) and the LLR signs go wrong with NO noise. The energy rule (one
+// branch's worth of headroom) is exact at the same level, and the two rules agree on balanced branches.
+TEST(DlschFixedPoint, ImbalancedMrcNeedsTheEnergyShift)
+{
+  // |H| 120 (a 1-dominant-branch MRC grant at the level of a 12-13 dB OTA single-branch decode): 8 % wrong signs, no noise.
+  const MrcResult count = RunMrcCase(120.0, 10.0, 0);
+  const MrcResult energy = RunMrcCase(120.0, 10.0, 1);
+  EXPECT_EQ(energy.shift, count.shift - 2) << "one dominant branch: the energy rule must charge no MRC headroom";
+  EXPECT_GT(count.ber_pct, 1.0) << "count rule at |H| 120, kappa " << count.kappa;
+  EXPECT_DOUBLE_EQ(energy.ber_pct, 0.0) << "energy rule at |H| 120, kappa " << energy.kappa;
+  EXPECT_LT(std::abs(energy.kappa - 1.0), 0.05);
+  EXPECT_GT(RunMrcCase(60.0, 10.0, 0).kappa, 1.3) << "at |H| 60 the floored thresholds read 1.4-1.5x low (OTA kappa 1.2-2.9)";
+  const MrcResult bal_c = RunMrcCase(60.0, 0.0, 0), bal_e = RunMrcCase(60.0, 0.0, 1);
+  EXPECT_EQ(bal_e.shift, bal_c.shift) << "balanced branches: unchanged";
+  EXPECT_DOUBLE_EQ(bal_e.ber_pct, bal_c.ber_pct);
+  for (double h : {30.0, 60.0, 120.0, 240.0, 480.0, 960.0}) {
+    const MrcResult c = RunMrcCase(h, 10.0, 0), e = RunMrcCase(h, 10.0, 1);
+    printf("MRCBUG |H|=%4.0f weak=-10dB count: shift=%d ber=%.3f%% kappa=%.3f | energy: shift=%d ber=%.3f%% kappa=%.3f\n", h,
+           c.shift, c.ber_pct, c.kappa, e.shift, e.ber_pct, e.kappa);
+    EXPECT_LE(e.ber_pct, c.ber_pct + 1e-9) << "hrms=" << h;
+  }
+}
 
 // Control: on a flat channel the production shift is exact. If this ever fails, the kernels or the
 // harness changed, and none of the other cases can be read.

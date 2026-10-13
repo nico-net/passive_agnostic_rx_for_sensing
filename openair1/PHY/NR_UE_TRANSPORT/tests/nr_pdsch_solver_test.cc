@@ -317,11 +317,44 @@ TEST(PdschSolver, ReceiverPickFollowsSnrWhenCrcTies)
     for (int i = 0; i < n; i++) {
       if (k >= 80 && !v[i].probe) { fulls++; picked3 += v[i].comb == 3; }
       nr_pdsch_solver_feedback(v[i].token, true, true); // every grant passes on either receiver (MCS 0)
-      nr_pdsch_solver_note_snr(rnti, v[i].comb == 3 ? 14.0f : 8.0f, v[i].comb);
+      nr_pdsch_solver_note_snr(rnti, v[i].comb == 3 ? 14.0f : 8.0f, v[i].comb, true);
     }
   }
   printf("[solver] SNR rule: receiver 3 (MRC) picked on %d of the last %d full decodes\n", picked3, fulls);
   EXPECT_GE(picked3, fulls * 3 / 4) << "SNR rule: MRC on all but the 1-in-8 explore grants";
+  nr_pdsch_solver_reset();
+}
+
+// MRCBUG. A failed decode's decision-directed SNR sits at a modulation floor (noise reads 9-12 dB on 16/64QAM), so the MRC
+// receiver can post a HIGHER SNR EMA than the single branch while failing every QAM grant. Mode 2 feeds the per-receiver EMA
+// with CRC-OK decodes only: receiver 3 then has no samples, the CRC rule decides, and the single branch (which passes) wins.
+TEST(PdschSolver, ReceiverPickIgnoresTheSnrOfFailedDecodes)
+{
+  ASSERT_EQ(kComb, 0);
+  setenv("ISAC_RX_MRC_PER_RNTI_SNR", "2", 1);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  Cell c;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  std::mt19937 rng(37);
+  const uint16_t rnti = 0x3a5d;
+  ASSERT_GT(RunCell(c, rnti, -1, 400, rng), 0);
+  nr_pdsch_solver_reading_t rd[1] = {{c.truth.data(), (int)c.truth.size(), 16}};
+  int picked3 = 0, fulls = 0;
+  for (int k = 0; k < 160; k++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(rnti, p, 49, 0, 2, rd, 1, 8, v);
+    for (int i = 0; i < n; i++) {
+      if (k >= 80 && !v[i].probe) { fulls++; picked3 += v[i].comb == 3; }
+      const bool ok = v[i].comb != 3; // the MRC receiver fails every grant but reads the 64QAM noise floor, 13 dB
+      nr_pdsch_solver_feedback(v[i].token, ok, true);
+      nr_pdsch_solver_note_snr(rnti, v[i].comb == 3 ? 13.0f : 8.0f, v[i].comb, ok);
+    }
+  }
+  printf("[solver] mode 2: receiver 3 (MRC, failing, 13 dB) picked on %d of the last %d full decodes\n", picked3, fulls);
+  EXPECT_LE(picked3, fulls / 4) << "a failing receiver must not win on its DD-SNR floor";
+  setenv("ISAC_RX_MRC_PER_RNTI_SNR", "1", 1);
   nr_pdsch_solver_reset();
 }
 

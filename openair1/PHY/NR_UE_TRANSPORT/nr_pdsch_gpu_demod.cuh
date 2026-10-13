@@ -265,8 +265,8 @@ NR_DEMOD_HD static inline int nrd_log2_approx(uint32_t x)
 struct nrd_decision {
   int mrc_rx_index, mrc_nb_rx, live_mask, zero_mask, log2_maxh, used_branch_set, used_branch;
 };
-NR_DEMOD_HD static inline void nrd_decide(int nl, int nbRx, int mode, double thr_coef, int l2_delta, const int32_t *avg,
-                                          const int32_t *median /* [nl*nbRx], the median rows when nl > 1 */,
+NR_DEMOD_HD static inline void nrd_decide(int nl, int nbRx, int mode, double thr_coef, int l2_delta, int shift_sum,
+                                          const int32_t *avg, const int32_t *median /* [nl*nbRx], the median rows when nl > 1 */,
                                           struct nrd_decision *d)
 {
   int avgs = 0;
@@ -322,6 +322,14 @@ NR_DEMOD_HD static inline void nrd_decide(int nl, int nbRx, int mode, double thr
           contributing++;
       if (contributing < 1)
         contributing = 1;
+      if (shift_sum && avgs > 0) { /* MRCBUG ISAC_RX_MRC_SHIFT_SUM: nr_mrc_shift_branches() (nr_mrc_weights.h), same arithmetic */
+        long long s = 0;
+        for (int a = 0; a < nbRx; a++)
+          if (d->live_mask & (1 << a))
+            s += avg[a];
+        contributing = (int)((s + avgs / 2) / avgs);
+        contributing = contributing < 1 ? 1 : contributing > nbRx ? nbRx : contributing;
+      }
     }
     d->log2_maxh = (nrd_log2_approx((uint32_t)avgs) >> 1) + 1 + nrd_log2_approx((uint32_t)contributing);
   } else {

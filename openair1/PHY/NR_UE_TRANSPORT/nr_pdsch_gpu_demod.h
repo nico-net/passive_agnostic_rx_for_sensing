@@ -51,6 +51,7 @@ typedef struct {
   double thr_coef; /* pow(10, -ISAC_RX_BRANCH_MIN_DB / 10) */
   int l2_delta;    /* ISAC_L2MAXH_DELTA */
   int align;       /* ISAC_RX_MRC_ALIGN */
+  int shift_sum;   /* ISAC_RX_MRC_SHIFT_SUM (MRCBUG): mode-3 headroom from the combined energy, not the branch count */
   int mag_per_layer;
   int wide_mrc;    /* nr_pdsch_decode_wide_mrc (1-layer QPSK recovery arm) */
   int want_kappa;  /* EVM armed: per-symbol kappa sums */

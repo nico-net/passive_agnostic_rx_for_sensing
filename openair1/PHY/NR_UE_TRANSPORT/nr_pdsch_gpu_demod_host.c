@@ -293,6 +293,7 @@ static int cpu_loop(const nr_pdsch_gpu_demod_call_t *c, int16_t *llr, uint32_t *
 enum { RF_OFF, RF_NL, RF_QM, RF_PTRS, RF_FORCED, RF_ENV, RF_OVERRIDE, RF_MODE, RF_MASK, RF_GEOM, RF_NRE0, RF_CAP, RF_BUSY, RF_N };
 
 static __thread int t_qmode; /* refuse() -> gpu_grant(): the resolved multi-layer qam_mode */
+static int g_shift_sum;      /* refuse() -> gpu_grant(): ISAC_RX_MRC_SHIFT_SUM (MRCBUG) */
 static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coef, int *align, int *l2d)
 {
   static int s_env = -1, s_mode = 0, s_align = 0, s_l2d = 0, s_l2d2 = 0;
@@ -315,6 +316,7 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     s_align = env_int("ISAC_RX_MRC_ALIGN", 0);
     s_l2d = env_int("ISAC_L2MAXH_DELTA", 0);
     s_l2d2 = env_int("ISAC_L2MAXH_DELTA_NL2", 0); /* nl == 2 only, as the CPU path */
+    g_shift_sum = env_int("ISAC_RX_MRC_SHIFT_SUM", 0); /* MRCBUG: the job fill in gpu_grant() reads it */
     s_env = any;
   }
   if (!atomic_load_explicit(&g_on, memory_order_relaxed))
@@ -579,6 +581,7 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j.thr_coef = thr_coef;
   j.l2_delta = l2d;
   j.align = align;
+  j.shift_sum = g_shift_sum;
   j.qam_mode = nl >= 2 ? t_qmode : 0;
   j.nvar = c->nvar;
   j.mag_per_layer = nl >= 2 && j.qam_mode == 2; /* mode 2 only: per-layer thresholds */

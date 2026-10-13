@@ -1754,6 +1754,16 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         if (contributing < 1) {
           contributing = 1;
         }
+        /* MRCBUG ISAC_RX_MRC_SHIFT_SUM=1 (default off): headroom from the combined channel energy sum_live |h_a|^2 / max
+         * |h_a|^2, not from the live-branch COUNT. The 12 dB mask keeps 4 of 4 branches live on 97 % of the OTA MRC grants
+         * while their SNRs sit up to 15-20 dB apart, so the output was shifted for a 4x coherent sum that is really
+         * 1.3-2.5x: 1-2 int16 bits lost against the single-branch receiver on the SAME grant, and the per-branch floor of
+         * |h_a|^2 >> shift biases the QAM thresholds low (EVMGRANT kappa 1.17 mean / 2.4-2.9 at 6-13 dB on QAM MRC grants
+         * vs 1.00-1.04 single branch). The float DD-SNR sees none of it. Balanced branches: unchanged. GPU: nrd_decide(). */
+        static int s_shift_sum = -1;
+        if (s_shift_sum < 0) { const char *e = getenv("ISAC_RX_MRC_SHIFT_SUM"); s_shift_sum = e ? atoi(e) : 0; }
+        if (s_shift_sum)
+          contributing = nr_mrc_shift_branches(avg, t_mrc_live_mask, nbRx, avgs);
       }
       *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(contributing);
       /* ISAC_L2MAXH_HEADROOM=1 (default off): the shift above is derived from the MEAN |H|^2, which

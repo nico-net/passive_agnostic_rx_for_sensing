@@ -181,7 +181,7 @@ __global__ void k_level(__grid_constant__ const JobK jk_, const nrd_c16 *h, Shar
       avg[r] = __ldcg(&sh->avg[r]);
       med[r] = __ldcg(&sh->median[r]);
     }
-    nrd_decide(j.nl, j.nbRx, j.mode, j.thr_coef, j.l2_delta, avg, med, &sh->d);
+    nrd_decide(j.nl, j.nbRx, j.mode, j.thr_coef, j.l2_delta, j.shift_sum, avg, med, &sh->d);
     sh->level_done = 0;
   }
 }
