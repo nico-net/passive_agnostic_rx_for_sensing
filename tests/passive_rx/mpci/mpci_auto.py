@@ -6,6 +6,7 @@
   mpci_auto.py watch PLAN.json --out DIR [--period 10] [--lost-s 30] [--max-restarts 5] [--backoff-s 10] [--rescan CAPDIR...]
   mpci_auto.py plan CELLS.json --cores ... --uhd-args ARGS --gain G [--rate 245.76e6] [--channels 4] [--antenna RX1] [--ibw-hz HZ] [--multi-window] [--fallback-dwell --radio-channels 4]
       DEFAULT whenever --uhd-args is given (--wideband = no-op alias; --rate defaults to 245.76e6, the user-verified X410 rate); --multi-window = M4 fallback plan.
+      --no-chan / --chan-backend gpu|cpu / --chan-cores L: wideband plans add the shared channelizer (shm_iq_chan -> one narrow ring <ring>_<tag> per cell, receivers decim 1) unless --no-chan
       wideband mode: ONE window on ALL channels (standalone UHD publisher shm_iq_uhd_pub), consumers decimate by rate/cell_rate in 1,2,4,8,16
   mpci_auto.py auto (--cells CELLS.json | --capdirs DIR...) --out DIR --cores 4-19 [plan/launch/watch options]
 Window rule: a cell occupies the interval C +- BW/2. BW = SIB1 carrier width (sib1_nrb, pass-2 data in cells.json) else the pass-1 grid: the smallest
@@ -118,7 +119,8 @@ def pub_env(ring, windows):
 
 FALLBACK = 'M4 multi-window plan (plan without --wideband) for these cells; a dwell window cannot share the radio while the wideband window uses all channels'
 
-def make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz, fallback_dwell=False, radio_channels=4):
+def make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz, fallback_dwell=False, radio_channels=4,
+                  chan=False, chan_backend='gpu', chan_cores=None, chan_cells='chan_cells.json'):
     """ONE window, all channels, one LO. Usable span = the radio's instantaneous bandwidth ibw_hz (default rate * 200/245.76: the X410
     datasheet IBW, 200 MHz at 245.76 MS/s and 400 MHz at 491.52 MS/s; outside it the radio's own filter rolls off); a cell needs [C - BW/2, C + BW/2] inside it. The window covers the most cells
     (plan_window rule), its centre is the middle of the served extent. Cells whose rate does not divide the ring rate by 1,2,4,8,16 are unserved."""
@@ -135,26 +137,40 @@ def make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gai
     if not served: sys.exit('no cells to serve')
     cl = expand_cores(cores)
     if len(cl) < len(served): sys.exit(f'{len(cl)} cores for {len(served)} cells')
-    n = len(cl) // len(served); gs = [x['gscn'] for x in served]; keep = ('tag', 'pci', 'gscn', 'C_hz', 'r', 'ssb', 'initial_fo', 'bw_hz', 'pass_', 'env', 'cores', 'idx', 'ring', 'nrx', 'window', 'decim')
+    if chan:
+        if not chan_cores: sys.exit('the channelizer needs --chan-cores (no site defaults; --no-chan = per-cell decimation in each receiver)')
+        if chan_backend not in ('gpu', 'cpu'): sys.exit('--chan-backend gpu|cpu')
+        cc = expand_cores(chan_cores)
+        if set(cc) & (set(cl) | set(expand_cores(pub_cores) if pub_cores else ())): sys.exit(f'--chan-cores {chan_cores} overlap the cell cores {cores} or --pub-cores {pub_cores}')
+    n = len(cl) // len(served); gs = [x['gscn'] for x in served]; keep = ('tag', 'pci', 'gscn', 'C_hz', 'r', 'ssb', 'initial_fo', 'bw_hz', 'pass_', 'env', 'cores', 'idx', 'ring', 'nrx', 'window', 'decim', 'chan_decim')
     pcells = []
     for idx, x in enumerate(sorted(served, key=lambda x: x['lo'])):
         x.update(cores=fmt_cores(cl[idx * n:(idx + 1) * n]), idx=idx, ring=ring, nrx=channels, window=0)
+        if chan: x.update(chan_decim=x['decim'], decim=1, ring=f"{ring}_{x['tag']}")      # the receiver reads the channelizer's narrow ring as is
         if x['n_cells'] > 1 or gs.count(x['gscn']) > 1: x['env'] = dict(ISAC_TARGET_PCI=str(x['pci']), ISAC_SSS_MULTI='2.5')
-        pcells.append({q: x[q] for q in keep})
+        pcells.append({q: x[q] for q in keep if q in x})
     pub = ['shm_iq_uhd_pub', '--args', uhd_args, '--rate', f'{rate:.0f}', '--freq', str(centre), '--gain', str(gain), '--channels', str(channels),
            '--antenna', antenna, '--ring', ring]
     win = dict(ring=ring, centre_hz=centre, channels=list(range(channels)), mode='dedicated', dwell_ms=None, wideband=True, cells=[x['tag'] for x in served],
                span_hz=int(max(x['hi'] for x in served) - min(x['lo'] for x in served)))
     un = [dict(tag=x['tag'], pci=x['pci'], gscn=x['gscn'], C_hz=x['C_hz'], lo_hz=int(x['lo']), hi_hz=int(x['hi']), fallback=FALLBACK,
                reason='decim' if x in bad else 'outside window') for x in out + bad]
+    rd = dict(channels=channels, min_ch_per_window=channels, pub_env={}, wideband=True, ibw_hz=int(span), pub_cmd=' '.join(shlex.quote(a) for a in pub), chan=bool(chan))
+    if chan:
+        # --cells-json reads a dedicated small file (chan_cells_doc), rewritten from the plan before every channelizer start: pass 2 may change centre/rate
+        be = ['--gpu'] if chan_backend == 'gpu' else ['--threads', str(len(cc))]
+        rd.update(chan_backend=chan_backend, chan_cores=chan_cores, chan_cells=chan_cells,
+                  chan_cmd=' '.join(shlex.quote(a) for a in ['shm_iq_chan', '--ring', ring, '--cells-json', chan_cells, '--attach-s', '120'] + be + ['--cores', chan_cores]))
+        if chan_backend == 'cpu': rd['chan_warn'] = 'CPU channelizer is real-time for about ONE cell only (MPCI-CHAN: 4 ch x 245.76 MS/s, 3 threads: 0.98x for 1 cell, 0.66x for 2) [MEASURED, cloud x86 4c]; use --chan-backend gpu'
     return dict(version=2, ring=ring, centre_hz=centre, rate_hz=int(rate), span_hz=int(span), pub_cores=pub_cores, cores=cores,
-                radio=dict(channels=channels, min_ch_per_window=channels, pub_env={}, wideband=True, ibw_hz=int(span),
-                           pub_cmd=' '.join(shlex.quote(a) for a in pub)), windows=[win], cells=pcells, unserved=un)
+                radio=rd, windows=[win], cells=pcells, unserved=un)
 
 def make_plan(cells, cores, max_span_hz=110e6, rate=122.88e6, pub_cores=None, ring='isac_iq', multi=False, channels=4, min_ch=1,
-              dwell_min_ms=40, dwell_max_ms=200, wideband=False, uhd_args=None, gain=None, antenna='RX1', ibw_hz=None, fallback_dwell=False, radio_channels=4):
+              dwell_min_ms=40, dwell_max_ms=200, wideband=False, uhd_args=None, gain=None, antenna='RX1', ibw_hz=None, fallback_dwell=False, radio_channels=4,
+              chan=False, chan_backend='gpu', chan_cores=None, chan_cells='chan_cells.json'):
     entries = [cell_entry(c) for c in cells]
-    if wideband: return make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz, fallback_dwell, radio_channels)
+    if wideband: return make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz, fallback_dwell, radio_channels,
+                                          chan, chan_backend, chan_cores, chan_cells)
     if multi: wins = cover_windows(entries, max_span_hz); unserved = []
     else:
         centre, served, unserved = plan_window(entries, max_span_hz)
@@ -196,8 +212,42 @@ def launcher_env(plan, out, extra=None):
         if plan.get(pk): e.setdefault(k, plan[pk])
     return e
 
+def chan_cells_doc(plan):
+    """the file shm_iq_chan --cells-json reads (load_plan: ring, cells[].tag/C_hz/decim/bw_hz): the CURRENT plan, so pass-2 retunes are included."""
+    return dict(ring=plan['ring'], cells=[dict(tag=c['tag'], C_hz=c['C_hz'], decim=c['chan_decim'], bw_hz=c['bw_hz']) for c in plan['cells']])
+
+def write_chan_cells(plan):
+    json.dump(chan_cells_doc(plan), open(plan['radio']['chan_cells'], 'w'), indent=1)
+
+def chan_env(plan):
+    r = plan['radio']; return dict(CHAN_CMD=r['chan_cmd'], CHAN_RINGS=' '.join(c['ring'] for c in plan['cells']))
+
+def launch_chan(plan, out, run=subprocess.run):
+    """(re)start ONLY the channelizer (launcher CHAN_ONLY=1, pid appended to OUT/pids); True when its output rings exist."""
+    if os.environ.get('DRY') != '1': write_chan_cells(plan)
+    e = launcher_env(plan, out, dict(chan_env(plan), CHAN_ONLY='1', APPEND='1'))
+    r = run(['bash', os.path.join(H, 'mpci_launch.sh'), 'start'], env=e, capture_output=True, text=True)
+    if r.returncode: print(f'channelizer start failed: {r.stderr.strip()}')
+    return r.returncode == 0
+
+def restart_chan(plan, out, wait_s=60):
+    """SIGINT the channelizer (it unlinks its rings), keep its log, start it with the current cell list. Its cells are orphaned by this
+    (their rings are new inodes): the caller restarts them."""
+    if not sigint_wait(pid_of(out, 'chan'), wait_s): print(f'chan: old pid still alive after {wait_s} s SIGINT, not restarting'); return False
+    log = os.path.join(out, 'chan.log')
+    if os.path.exists(log): os.replace(log, f'{log}.{int(time.time())}')
+    return launch_chan(plan, out)
+
+def restart_chan_and_cells(plan, out):
+    """policy for a changed cell list (pass 2) or a dead channelizer: channelizer first, then EVERY cell (all of them read rings it re-created)."""
+    if not restart_chan(plan, out): return False
+    return all([restart_cell(plan, out, c) for c in plan['cells']])
+
 def launch(plan, out, pub_cmd=None, cells=None, append=False, run=subprocess.run):
     cells = cells or plan['cells']; extra = {}
+    if not append and (plan.get('radio') or {}).get('chan_cmd'):
+        if os.environ.get('DRY') != '1': write_chan_cells(plan)
+        extra.update(chan_env(plan))
     if not append and not pub_cmd: pub_cmd = (plan.get('radio') or {}).get('pub_cmd')    # wideband: standalone UHD publisher
     if pub_cmd: extra['PUB_CMD'] = pub_cmd
     if plan.get('pub_cores') and pub_cmd: extra['PUB_CORES'] = plan['pub_cores']
@@ -268,8 +318,11 @@ def pass2_cell(plan, out, c, plan_path=None, cells_json=None):
         print(f"{c['tag']}: refined carrier {d['C_hz']} Hz (grid {d['r']} PRB) leaves window {c.get('ring', '')} centre {win_centre(plan, c)} Hz: NOT restarted, re-plan (mpci_auto.py plan/auto with the refined cells.json)")
     else:
         c.update(C_hz=d['C_hz'], r=d['r'], ssb=d['ssb'], bw_hz=info['sib1_nrb'] * RB_HZ, pass2='retuned')
-        if c.get('decim'): c['decim'] = decim_of(plan['rate_hz'], d['r']); c['env'] = {**c['env'], **d['env']}
-        res = 'restarted' if restart_cell(plan, out, c) else 'done'
+        chan = (plan.get('radio') or {}).get('chan_cmd'); k = 'chan_decim' if chan else 'decim'
+        if c.get(k): c[k] = decim_of(plan['rate_hz'], d['r']); c['env'] = {**c['env'], **d['env']}
+        if chan and not c[k]: c['pass2'] = 'decim_unsupported'; res = 'done'; print(f"{c['tag']}: grid {d['r']} PRB has no channelizer decimation at {plan['rate_hz']} Hz: NOT restarted")
+        elif chan: res = 'restarted' if restart_chan_and_cells(plan, out) else 'done'    # new centre/rate -> new channelizer cell list -> all cells re-attach
+        else: res = 'restarted' if restart_cell(plan, out, c) else 'done'
     if plan_path: save(plan, plan_path)
     return res
 
@@ -295,9 +348,26 @@ def cell_status(out, c):
     except OSError: pass
     return st
 
-def watch_step(plan, out, rt, now, lost_s=30, max_restarts=5, backoff_s=10, restart=restart_cell):
-    """one polling period; rt[tag] = dict(restarts, lost_since, next_ok). Returns status lines."""
+def chan_status(out):
+    try: t = open(os.path.join(out, 'chan.log'), errors='replace').read()
+    except OSError: t = ''
+    st = re.findall(r'SHMIQ_CHAN_STAT .*', t)
+    return {k: t.count('SHMIQ_CHAN_' + k) for k in ('OVERRUN', 'DISCONT', 'PRODUCER_LOST', 'WARN', 'ERR')}, (st[-1] if st else '')
+
+def watch_step(plan, out, rt, now, lost_s=30, max_restarts=5, backoff_s=10, restart=restart_cell, restart_ch=restart_chan):
+    """one polling period; rt[tag] = dict(restarts, lost_since, next_ok); rt['chan'] likewise for the channelizer. Returns status lines."""
     lines = []
+    if (plan.get('radio') or {}).get('chan_cmd'):
+        r = rt.setdefault('chan', dict(restarts=0, next_ok=0)); up = alive(pid_of(out, 'chan')); state = 'UP' if up else 'DEAD'
+        if not up and r['restarts'] >= max_restarts: state += ' GIVEUP'
+        elif not up and now >= r['next_ok']:
+            if restart_ch(plan, out):
+                r['restarts'] += 1; state += ' RESTARTED'
+                for c in plan['cells']: restart(plan, out, c)       # their narrow rings are new inodes
+            r['next_ok'] = now + backoff_s * 2 ** r['restarts']
+        elif not up: state += ' BACKOFF'
+        n, last = chan_status(out)
+        lines.append(f"chan state={state} restarts={r['restarts']} " + ' '.join(f'{k.lower()}={v}' for k, v in n.items()) + (f' | {last}' if last else ''))
     for c in plan['cells']:
         r = rt.setdefault(c['tag'], dict(restarts=0, lost_since=None, next_ok=0)); st = cell_status(out, c)
         up = alive(pid_of(out, c['tag']))
@@ -357,7 +427,8 @@ def mp_args(a):
     wb = bool(a.uhd_args) and not a.multi_window
     if not a.uhd_args and not a.multi_window: print('hint: wideband (one window, all antennas) is the default architecture and needs --uhd-args; planning M4 multi-window', file=sys.stderr)
     if a.wideband and not a.uhd_args: sys.exit('--wideband needs --uhd-args')
-    return dict(max_span_hz=a.max_span_hz, rate=a.rate or (245.76e6 if wb else 122.88e6), pub_cores=a.pub_cores, ring=a.ring, multi=not a.single_window, channels=a.channels,
+    cd = os.path.abspath(os.path.dirname(a.out) if a.cmd == 'plan' else a.out)
+    return dict(chan=wb and not a.no_chan, chan_backend=a.chan_backend, chan_cores=a.chan_cores, chan_cells=os.path.join(cd, 'chan_cells.json'), max_span_hz=a.max_span_hz, rate=a.rate or (245.76e6 if wb else 122.88e6), pub_cores=a.pub_cores, ring=a.ring, multi=not a.single_window, channels=a.channels,
                 min_ch=a.min_ch_per_window, dwell_min_ms=a.dwell_min_ms, dwell_max_ms=a.dwell_max_ms,
                 wideband=wb, uhd_args=a.uhd_args, gain=a.gain, antenna=a.antenna, ibw_hz=a.ibw_hz,
                 fallback_dwell=a.fallback_dwell, radio_channels=a.radio_channels)
@@ -374,6 +445,8 @@ def main(argv):
         p.add_argument('--multi-window', action='store_true', help='explicit M4 multi-window plan (fallback architecture)')
         p.add_argument('--fallback-dwell', action='store_true', help='wideband: ask for dwell visits of unserved cells (refused, see message)')
         p.add_argument('--radio-channels', type=int, default=4, help='radio RX channel count for --fallback-dwell (default 4)')
+        p.add_argument('--no-chan', action='store_true', help='wideband: no shared channelizer, every receiver decimates the wideband ring itself')
+        p.add_argument('--chan-backend', choices=('gpu', 'cpu'), default='gpu'); p.add_argument('--chan-cores', help='channelizer cores (disjoint from --cores/--pub-cores; required unless --no-chan)')
         p.add_argument('--uhd-args'); p.add_argument('--gain', type=float); p.add_argument('--antenna', default='RX1')
         p.add_argument('--ibw-hz', type=float, default=None, help='wideband: radio instantaneous bandwidth (default rate*200/245.76, X410 IBW)')
         p.add_argument('--dwell-min-ms', type=int, default=40); p.add_argument('--dwell-max-ms', type=int, default=200)
@@ -393,6 +466,8 @@ def main(argv):
         for w in plan['windows']: print(f"  window {w['ring']} centre {w['centre_hz']} Hz ch={subset_str(w['channels'])} {w['mode']}" + (f" dwell {w['dwell_ms']} ms" if w['dwell_ms'] else ''))
         for k, v in plan['radio']['pub_env'].items(): print(f'  {k}={v}')
         if plan['radio'].get('pub_cmd'): print('  publisher: ' + plan['radio']['pub_cmd'])
+        if plan['radio'].get('chan_cmd'): print('  channelizer: ' + plan['radio']['chan_cmd']); write_chan_cells(plan)
+        if plan['radio'].get('chan_warn'): print('  WARNING: ' + plan['radio']['chan_warn'])
         for c in plan['cells']: print('  ' + spec(c))
         for u in plan['unserved']: print(f"  unserved {u['tag']} [{u['lo_hz']}, {u['hi_hz']}]" + (f" ({u['reason']}; fallback: {u['fallback']})" if u.get('fallback') else ''))
         return
@@ -401,6 +476,7 @@ def main(argv):
         if not cj:
             subprocess.run(['bash', os.path.join(AF, 'live_chain.sh'), 'discover', a.out] + (a.capdirs or []), check=True); cj = os.path.join(a.out, 'cells.json')
         plan = make_plan(json.load(open(cj)), a.cores, **mp_args(a)); plan['cells_json'] = os.path.abspath(cj); pp = os.path.join(a.out, 'plan.json')
+        if plan['radio'].get('chan_warn'): print('WARNING: ' + plan['radio']['chan_warn'])
     else:
         pp = a.plan; plan = json.load(open(pp))
     for k in ('base_cfg', 'build'):

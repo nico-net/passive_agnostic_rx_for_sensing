@@ -178,7 +178,7 @@ class T(unittest.TestCase):
 
     def test_wideband_default_cli_and_fallback_dwell(self):
         with tempfile.TemporaryDirectory() as d:
-            json.dump(cells(), open(os.path.join(d, 'c.json'), 'w')); base = [sys.executable, os.path.join(H, 'mpci_auto.py'), 'plan', os.path.join(d, 'c.json'), '--cores', '4-19', '--out', os.path.join(d, 'p.json')]
+            json.dump(cells(), open(os.path.join(d, 'c.json'), 'w')); base = [sys.executable, os.path.join(H, 'mpci_auto.py'), 'plan', os.path.join(d, 'c.json'), '--cores', '4-19', '--chan-cores', '20-21', '--out', os.path.join(d, 'p.json')]
             def run(*x): return subprocess.run(base + list(x), capture_output=True, text=True)
             r = run('--uhd-args', 'type=x4xx,addr=1.2.3.4', '--gain', '30'); self.assertEqual(r.returncode, 0, r.stderr)
             p = json.load(open(os.path.join(d, 'p.json'))); self.assertEqual((p['rate_hz'], len(p['windows']), p['radio']['wideband']), (245760000, 1, True))
@@ -245,5 +245,104 @@ class T(unittest.TestCase):
                 self.assertTrue(os.path.exists(os.path.join(d, 'sigint.' + tag)))
             finally:
                 subprocess.run(['bash', SH, 'stop'], env=dict(os.environ, OUT=out), capture_output=True)
+
+    # ---- shared channelizer (shm_iq_chan) in wideband plans
+    def wbc(self, **kw):
+        kw.setdefault('chan_cores', '20-22'); kw.setdefault('chan_backend', 'cpu')
+        return self.wb(245.76e6, chan=True, **kw)
+
+    def test_chan_plan_shape(self):
+        p = self.wbc(chan_cells='/o/chan_cells.json'); r = p['radio']; cmd = r['chan_cmd'].split()
+        self.assertEqual(cmd[:5], ['shm_iq_chan', '--ring', 'isac_iq', '--cells-json', '/o/chan_cells.json'])
+        self.assertEqual(cmd[-4:], ['--threads', '3', '--cores', '20-22']); self.assertIn('real-time for about ONE cell', r['chan_warn'])
+        cc = set(M.expand_cores('20-22')); pool = set(M.expand_cores('4-19'))
+        self.assertFalse(cc & pool or cc & {0, 1}); self.assertEqual(r['chan_cores'], '20-22')
+        for c in p['cells']:
+            self.assertEqual((c['ring'], c['decim'], c['chan_decim'], c['nrx']), (f"isac_iq_{c['tag']}", 1, 2, 4))
+            self.assertIn(f"ISAC_SHM_IQ_NAME=isac_iq_{c['tag']}", M.spec(c)); self.assertIn('UE_NB_ANT_RX=4', M.spec(c))
+        self.assertEqual(p['windows'][0]['ring'], 'isac_iq')                      # the publisher's wideband ring is unchanged
+        g = M.make_plan(cells(), '4-19', pub_cores='0-1', wideband=True, rate=245.76e6, uhd_args='x', gain=30, chan=True, chan_cores='20-21')['radio']
+        self.assertIn('--gpu --cores 20-21', g['chan_cmd']); self.assertNotIn('chan_warn', g)          # default backend gpu
+        with self.assertRaises(SystemExit): self.wb(245.76e6, chan=True)                              # no site default for the chan cores
+        with self.assertRaises(SystemExit): self.wbc(chan_cores='1-2')                                # overlaps --pub-cores 0-1
+        with self.assertRaises(SystemExit): self.wbc(chan_cores='19-20')                              # overlaps the cell cores
+        self.assertNotIn('chan_cmd', self.wb(245.76e6)['radio'])
+
+    def test_chan_cells_file_matches_real_parser(self):
+        p = self.wbc(); b = os.path.join(H, '../../../cmake_targets/ran_build/build/shm_iq_chan')
+        if not os.access(b, os.X_OK): self.skipTest('shm_iq_chan not built')
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, 'cc.json'); p['radio']['chan_cells'] = f; M.write_chan_cells(p)
+            r = subprocess.run([b, '--bench', '0.3', '--nch', '4', '--in-rate', '245.76e6', '--cells-json', f, '--threads', '1'], capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr); self.assertIn('cells=4 ch=4', r.stderr + r.stdout)
+            for c in p['cells']: self.assertRegex(r.stderr, f"SHMIQ_CHAN_TUNE cell={c['tag']} .*cell_centre_hz={c['C_hz']}\\.000 .*decim=2")
+
+    def test_chan_cli_default_and_no_chan(self):
+        with tempfile.TemporaryDirectory() as d:
+            json.dump(cells(), open(os.path.join(d, 'c.json'), 'w')); pj = os.path.join(d, 'p.json')
+            base = [sys.executable, os.path.join(H, 'mpci_auto.py'), 'plan', os.path.join(d, 'c.json'), '--cores', '4-19', '--out', pj, '--uhd-args', 'x', '--gain', '30']
+            r = subprocess.run(base, capture_output=True, text=True); self.assertNotEqual(r.returncode, 0); self.assertIn('--chan-cores', r.stderr)
+            r = subprocess.run(base + ['--chan-cores', '20-21', '--chan-backend', 'cpu'], capture_output=True, text=True); self.assertEqual(r.returncode, 0, r.stderr)
+            p = json.load(open(pj)); self.assertIn('WARNING', r.stdout); self.assertEqual(p['radio']['chan_cells'], os.path.join(d, 'chan_cells.json'))
+            self.assertEqual(json.load(open(os.path.join(d, 'chan_cells.json')))['cells'][0]['decim'], 2)
+            r = subprocess.run(base + ['--no-chan'], capture_output=True, text=True); self.assertEqual(r.returncode, 0, r.stderr)
+            p = json.load(open(pj)); self.assertNotIn('chan_cmd', p['radio']); self.assertEqual({(c['ring'], c['decim']) for c in p['cells']}, {('isac_iq', 2)})
+
+    def test_chan_launch_dry_order(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.wbc(chan_cells=os.path.join(d, 'cc.json')); pp = os.path.join(d, 'plan.json'); M.save(p, pp)
+            r = subprocess.run([sys.executable, os.path.join(H, 'mpci_auto.py'), 'launch', pp, '--out', d], env=dict(os.environ, DRY='1', BUILD='/b'), capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr); L = r.stdout.splitlines()
+            kinds = [l.split()[0] for l in L if l.split()[0] in ('PUB', 'CHAN', 'WAIT', 'CELL')]
+            self.assertEqual(kinds, ['PUB', 'CHAN', 'WAIT'] + ['CELL'] * 4)
+            self.assertIn('shm_iq_chan --ring isac_iq --cells-json', next(l for l in L if l.startswith('CHAN ')))
+            self.assertTrue(all(f"isac_iq_{c['tag']}" in next(l for l in L if l.startswith('WAIT ')) for c in p['cells']))
+            self.assertFalse(os.path.exists(os.path.join(d, 'cc.json')))           # DRY writes nothing
+            for c in p['cells']: self.assertIn(f"ISAC_SHM_IQ_NAME=isac_iq_{c['tag']}", next(l for l in L if l.startswith(f"CELL {c['tag']} ")))
+
+    def test_chan_pass2_restarts_channelizer_with_new_cells(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.wbc(chan_cells=os.path.join(d, 'cc.json')); c = next(x for x in p['cells'] if x['pci'] == 508)
+            os.makedirs(os.path.join(d, c['tag'])); open(os.path.join(d, c['tag'], 'ue.log'), 'w').write(SYNC + MISMATCH)
+            calls = []; o1, o2 = M.restart_chan_and_cells, M.restart_cell
+            M.restart_chan_and_cells = lambda pl, out: calls.append(json.dumps(M.chan_cells_doc(pl))) or True; M.restart_cell = lambda *a, **k: calls.append('cell')
+            try: res = M.pass2_cell(p, d, c)
+            finally: M.restart_chan_and_cells, M.restart_cell = o1, o2
+            self.assertEqual((res, c['r'], c['decim'], c['chan_decim']), ('restarted', 162, 1, 4)); self.assertEqual(len(calls), 1)   # chan restart only; it restarts the cells
+            e = next(x for x in json.loads(calls[0])['cells'] if x['tag'] == c['tag']); self.assertEqual((e['decim'], e['C_hz']), (4, c['C_hz']))
+
+    def test_chan_watch_restart_and_cell_restart_leaves_chan(self):
+        ring = f'mpcit{os.getpid()}'
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            b = os.path.join(d, 'bin'); os.mkdir(b); fake = os.path.join(b, 'nr-uesoftmodem'); fchan = os.path.join(b, 'shm_iq_chan')
+            open(fake, 'w').write('#!/usr/bin/env python3\nimport signal,time,sys\nsignal.signal(signal.SIGINT,lambda *a:sys.exit(0))\ntime.sleep(60)\n')
+            open(fchan, 'w').write('#!/usr/bin/env python3\nimport signal,sys,os\na=sys.argv; ring=a[a.index("--ring")+1]; doc=eval(open(a[a.index("--cells-json")+1]).read())\n'
+                'fs=["/dev/shm/%s_%s"%(ring,c["tag"]) for c in doc["cells"]]\n[open(f,"w").close() for f in fs]\n'
+                'def stop(*x):\n [os.unlink(f) for f in fs if os.path.exists(f)]; sys.exit(0)\nsignal.signal(signal.SIGINT,stop)\n'
+                'sys.stderr.write("SHMIQ_CHAN_READY\\nSHMIQ_CHAN_OVERRUN skipped_in=1 new_pos=2\\n"); sys.stderr.flush()\nsignal.pause()\n')
+            for x in (fake, fchan): os.chmod(x, 0o755)
+            cs = [c for c in cells() if c['pci'] in (508, 4)]; out = os.path.join(d, 'o')
+            p = M.make_plan(cs, '0-1', pub_cores=None, ring=ring, wideband=True, rate=245.76e6, uhd_args='x', gain=30, chan=True, chan_cores='2-3', chan_cells=os.path.join(d, 'cc.json'))
+            p['build'] = b; p['radio']['pub_cmd'] = 'sleep 60'; p['radio']['chan_cmd'] = f"{fchan} --ring {ring} --cells-json {os.path.join(d, 'cc.json')}"
+            rings = [f"/dev/shm/{c['ring']}" for c in p['cells']]
+            try:
+                M.launch(p, out); self.assertTrue(all(os.path.exists(r) for r in rings))              # cells started after the rings existed
+                pids = lambda: {t: M.pid_of(out, t) for t in ['pub', 'chan'] + [c['tag'] for c in p['cells']]}
+                p0 = pids(); self.assertTrue(all(M.alive(v) for v in p0.values()), p0)
+                time.sleep(0.8)
+                M.restart_cell(p, out, p['cells'][0])                                                  # single-cell restart: publisher and channelizer untouched
+                p1 = pids(); self.assertEqual((p1['pub'], p1['chan']), (p0['pub'], p0['chan'])); self.assertTrue(M.alive(p1['chan']) and M.alive(p1['pub']))
+                self.assertNotEqual(p1[p['cells'][0]['tag']], p0[p['cells'][0]['tag']]); self.assertEqual(p1[p['cells'][1]['tag']], p0[p['cells'][1]['tag']])
+                time.sleep(0.8); rt = {}
+                l = M.watch_step(p, out, rt, 1000.0); self.assertTrue(l[0].startswith('chan state=UP') and 'overrun=1' in l[0], l)
+                os.kill(p1['chan'], 9); time.sleep(0.3)                                                # channelizer crash (SIGKILL by the test only)
+                l = M.watch_step(p, out, rt, 1001.0); self.assertIn('RESTARTED', l[0], l); p2 = pids()
+                self.assertNotEqual(p2['chan'], p1['chan']); self.assertTrue(M.alive(p2['chan'])); self.assertEqual(p2['pub'], p0['pub'])
+                for c in p['cells']: self.assertNotEqual(p2[c['tag']], p1[c['tag']]); self.assertTrue(M.alive(p2[c['tag']]))   # orphaned cells re-attached
+                self.assertTrue(os.path.exists(os.path.join(out, 'chan.log.' + next(x for x in os.listdir(out) if x.startswith('chan.log.')).split('.')[-1])))
+            finally:
+                subprocess.run(['bash', SH, 'stop'], env=dict(os.environ, OUT=out), capture_output=True); time.sleep(0.5)
+                for r in rings:
+                    if os.path.exists(r): os.unlink(r)
 
 if __name__ == '__main__': unittest.main()

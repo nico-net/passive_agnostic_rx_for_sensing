@@ -60,6 +60,13 @@ class T(unittest.TestCase):
             self.assertIn("ISAC_SHM_IQ_NAME=ringY K=V", a); self.assertIn("--ue-nb-ant-rx 2", a); self.assertNotIn("UE_NB_ANT_RX", a)
             self.assertNotIn("--ue-nb-ant-rx", b)
 
+    def test_chan_exit_blocks_cells(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, OUT=d, BUILD="/b", CHAN_CMD="false", CHAN_RINGS="mpcit_never_%d" % os.getpid())
+            r = subprocess.run(["bash", SH, "A:1:2:3:-:0"], env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 3, r.stderr); self.assertIn("channelizer exited", r.stderr)
+            self.assertEqual(open(os.path.join(d, "pids")).read().split()[0], "chan")      # no cell was started
+
     def test_rejects_bad_spec(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(dry(d, "bad tag:1:2:3:-:0").returncode, 2)
