@@ -51,6 +51,15 @@ class T(unittest.TestCase):
             s = subprocess.run(["bash", SH, "stop"], env=env, capture_output=True, text=True)
             self.assertEqual(s.stdout.count("SIGINT"), 2)
 
+    def test_per_cell_ring_nant_pub_env(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = dry(d, "A:1:2:3:-:0:ISAC_SHM_IQ_NAME=ringY,UE_NB_ANT_RX=2,K=V", "B:1:2:3:-:1", PUB_CMD="radio", PUB_ENV="ISAC_SHM_IQ_PUB=ringX:0-1,ringY:2 ISAC_SHM_IQ_PUB_FREQ=ringY=1e9")
+            self.assertEqual(r.returncode, 0, r.stderr); L = r.stdout.splitlines()
+            self.assertIn("PUB env ISAC_SHM_IQ_PUB=ringX:0-1,ringY:2 ISAC_SHM_IQ_PUB_FREQ=ringY=1e9 radio", L)
+            a = next(x for x in L if x.startswith("CELL A ")); b = next(x for x in L if x.startswith("CELL B "))
+            self.assertIn("ISAC_SHM_IQ_NAME=ringY K=V", a); self.assertIn("--ue-nb-ant-rx 2", a); self.assertNotIn("UE_NB_ANT_RX", a)
+            self.assertNotIn("--ue-nb-ant-rx", b)
+
     def test_rejects_bad_spec(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(dry(d, "bad tag:1:2:3:-:0").returncode, 2)

@@ -11,8 +11,28 @@ SYNC = ('[PHY] Initial sync successful, PCI: 508\nSENSING: MIB fields sfn=3 k_ss
 
 def cells(): return json.load(open(CELLS))
 
+PUBC = os.path.join(H, '../../../radio/COMMON/shm_iq_pub.c')
+
+def real_parser(d, nch, env):
+    """compile the REAL parse_env/parse_freq_dwell (text-extracted from shm_iq_pub.c, file untouched) and dump what they parse; None if no gcc."""
+    import re, shutil
+    if not shutil.which('gcc'): return None
+    t = open(PUBC).read()
+    td = t[t.index('typedef struct {'):t.index('} pub_ring_t;') + 13]
+    fn = t[t.index('static int ring_by_name'):t.index('void shm_iq_pub_maybe_wrap')]
+    src = ('#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <errno.h>\n#include "shm_iq_ring.h"\n' + td +
+           'static pub_ring_t g_r[SHM_IQ_MAX_CH]; static int g_nr, g_nd; static int g_dwell_idx[SHM_IQ_MAX_CH];\n' + fn +
+           'int main(int c, char **v){ parse_env(getenv("ISAC_SHM_IQ_PUB"), atoi(v[1])); parse_freq_dwell();'
+           ' for(int i=0;i<g_nr;i++){ printf("%s freq=%.0f dwell=%d ch=", g_r[i].name, g_r[i].freq, g_r[i].dwell_ms);'
+           ' for(unsigned k=0;k<g_r[i].nch;k++) printf("%u,", g_r[i].ch[k]); printf("\\n"); } printf("nd=%d\\n", g_nd); return 0; }\n')
+    open(os.path.join(d, 'h.c'), 'w').write(src)
+    p = subprocess.run(['gcc', '-w', '-I', os.path.join(H, '../../../radio/COMMON'), '-o', os.path.join(d, 'h'), os.path.join(d, 'h.c')], capture_output=True, text=True)
+    if p.returncode: return None
+    r = subprocess.run([os.path.join(d, 'h'), str(nch)], env=dict(os.environ, **env), capture_output=True, text=True)
+    return r
+
 class T(unittest.TestCase):
-    def plan(self, cs=None, cores='4-19'): return M.make_plan(cs or cells(), cores, pub_cores='0-1')
+    def plan(self, cs=None, cores='4-19', **kw): return M.make_plan(cs or cells(), cores, pub_cores='0-1', **kw)
 
     def test_plan_default_and_pin(self):
         p = self.plan(); tags = [c['tag'] for c in p['cells']]
@@ -45,6 +65,83 @@ class T(unittest.TestCase):
             for k in ('ISAC_TARGET_PCI=4', 'ISAC_SSS_MULTI=2.5', 'taskset -c 12-19', '-r 217 --ssb 1171', 'ISAC_CELL_INSTANCE=p4_7895'): self.assertIn(k, l)
             self.assertEqual(M.spec(p['cells'][0]).count(':'), 6)
 
+    # ---- M4 multi-window
+    def sub(self, pcis): return [c for c in cells() if c['pci'] in pcis]
+
+    def test_multi_cover_fixture(self):
+        p = self.plan(multi=True, cores='4-19'); w = p['windows']
+        self.assertEqual([x['cells'] for x in w], [['p675_7795'], ['p508_7895', 'p4_7895'], ['p403_7933'], ['p415_7971'], ['p923_8007']])
+        self.assertEqual(p['unserved'], []); self.assertEqual(len(p['cells']), 6)
+        for x in w: self.assertLessEqual(x['span_hz'], 110e6)
+        two = next(c for c in p['cells'] if c['pci'] == 4); self.assertEqual(two['env']['ISAC_TARGET_PCI'], '4')   # co-located still pinned
+        self.assertEqual(next(c for c in p['cells'] if c['pci'] == 403)['env'], {})
+        self.assertEqual(len({c['cores'] for c in p['cells']}), 6)
+
+    def test_multi_dedicated_and_env(self):
+        p = self.plan(self.sub((675, 508, 4, 923)), multi=True)               # 3 windows, 4 channels: 508+4 has most cells -> 2 ch
+        self.assertEqual([x['channels'] for x in p['windows']], [[0], [1, 2], [3]]); self.assertTrue(all(x['mode'] == 'dedicated' for x in p['windows']))
+        e = p['radio']['pub_env']; self.assertEqual(e['ISAC_SHM_IQ_PUB'], 'isac_iq_w0:0,isac_iq_w1:1-2,isac_iq_w2:3'); self.assertNotIn('ISAC_SHM_IQ_DWELL', e)
+        self.assertEqual({c['tag']: c['nrx'] for c in p['cells']}, {'p675_7795': 1, 'p508_7895': 2, 'p4_7895': 2, 'p923_8007': 1})
+        self.assertEqual({c['tag']: c['ring'] for c in p['cells']}['p4_7895'], 'isac_iq_w1')
+        with tempfile.TemporaryDirectory() as d:
+            r = real_parser(d, 4, e)
+            if r is None: self.skipTest('no gcc / header')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            f = {l.split()[0]: l for l in r.stdout.splitlines()}
+            for w in p['windows']:
+                self.assertIn(f"freq={w['centre_hz']} ", f[w['ring']]); self.assertIn('ch=' + ''.join(f'{c},' for c in w['channels']), f[w['ring']])
+
+    def test_multi_dwell_grouping(self):
+        p = self.plan(multi=True); w = p['windows']                          # 5 windows > 4 channels: 3 dedicated (most cells, then lowest), 2 share ch 3
+        self.assertEqual([x['ring'] for x in w if x['mode'] == 'dwell'], ['isac_iq_w3', 'isac_iq_w4'])
+        self.assertEqual({x['channels'][0] for x in w if x['mode'] == 'dedicated'}, {0, 1, 2}); self.assertEqual([x['dwell_ms'] for x in w if x['mode'] == 'dwell'], [40, 40])
+        # proportional dwell: a 2-cell window in the shared group gets twice, clamped to the cap
+        a = M.assign_channels([[1], [1], [1, 2], [1, 2, 3, 4, 5, 6]], 2, 1, 40, 200)
+        self.assertEqual([x['dwell_ms'] for x in a if x['mode'] == 'dwell'], [40, 40, 80]); self.assertEqual(a[3]['mode'], 'dedicated')
+        a = M.assign_channels([[1] * 7, [1], [1]], 1, 1, 40, 200); self.assertEqual([x['dwell_ms'] for x in a], [200, 40, 40])   # cap
+        e = p['radio']['pub_env']
+        self.assertEqual(e['ISAC_SHM_IQ_DWELL'], ','.join(f"{x['ring']}@{x['centre_hz']}:40" for x in w if x['mode'] == 'dwell'))
+        self.assertEqual(e['ISAC_SHM_IQ_PUB'].count('isac_iq_w3:3'), 1); self.assertNotIn('isac_iq_w3=', e['ISAC_SHM_IQ_PUB_FREQ'])
+        with tempfile.TemporaryDirectory() as d:
+            r = real_parser(d, 4, e)
+            if r is None: self.skipTest('no gcc / header')
+            self.assertEqual(r.returncode, 0, r.stderr); self.assertIn('nd=2', r.stdout)
+            self.assertIn('isac_iq_w3 freq=%d dwell=40 ch=3,' % w[3]['centre_hz'], r.stdout)
+
+    def test_min_ch_and_single_window_form(self):
+        p = self.plan(multi=True, channels=4, min_ch=2)                      # D=2: 1 dedicated (508+4, 2 ch), 4 windows share 2 ch
+        self.assertEqual([x['mode'] for x in p['windows']], ['dwell', 'dedicated', 'dwell', 'dwell', 'dwell']); self.assertEqual(p['windows'][1]['channels'], [0, 1])
+        self.assertEqual(p['windows'][0]['channels'], [2, 3])
+        p = self.plan()                                                      # v1 behaviour: one window, rest unserved, plain publisher env
+        self.assertEqual((len(p['windows']), p['radio']['pub_env']), (1, {'ISAC_SHM_IQ_PUB': 'isac_iq'}))
+
+    def test_launch_dry_multi(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.plan(multi=True); pp = os.path.join(d, 'plan.json'); M.save(p, pp)
+            r = subprocess.run([sys.executable, os.path.join(H, 'mpci_auto.py'), 'launch', pp, '--out', d, '--pub-cmd', 'radio -x'],
+                               env=dict(os.environ, DRY='1', BUILD='/b'), capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr); pub = [l for l in r.stdout.splitlines() if l.startswith('PUB ')]
+            self.assertEqual(len(pub), 1)
+            for k, v in p['radio']['pub_env'].items(): self.assertIn(f'{k}={v}', pub[0])
+            for c in p['cells']:
+                l = [x for x in r.stdout.splitlines() if x.startswith(f"CELL {c['tag']} ")][0]
+                self.assertTrue(l.index(f"ISAC_SHM_IQ_NAME={c['ring']}") > l.index('ISAC_SHM_IQ_NAME=isac_iq '), l)   # per-cell value comes last: wins in env
+                self.assertIn(f"--ue-nb-ant-rx {c['nrx']}", l); self.assertNotIn('UE_NB_ANT_RX', l)
+
+    def test_outside_window_reported_multi(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.plan(multi=True); c = next(x for x in p['cells'] if x['pci'] == 508)
+            os.makedirs(os.path.join(d, c['tag'])); open(os.path.join(d, c['tag'], 'ue.log'), 'w').write(SYNC + MISMATCH)
+            p['windows'][c['window']]['centre_hz'] = 3000000000
+            calls = []; orig = M.restart_cell; M.restart_cell = lambda *a, **k: calls.append(1)
+            try: self.assertEqual(M.pass2_cell(p, d, c), 'outside_window')
+            finally: M.restart_cell = orig
+            self.assertEqual(calls, []); self.assertIn('wanted', c)
+        w = p['windows'][0]; w['mode'] = 'dwell'; w['dwell_ms'] = 40
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIn('dwell=40ms switches=0', M.window_status(p, d, w))
+
+
     def test_launcher_6_field_still_ok_and_bad_env(self):
         with tempfile.TemporaryDirectory() as d:
             e = dict(os.environ, DRY='1', OUT=d, BUILD='/b')
@@ -68,7 +165,7 @@ class T(unittest.TestCase):
             finally: M.restart_cell = orig
             self.assertEqual((res, calls, c['r'], c['pass2']), ('restarted', ['p508_7895'], 162, 'retuned'))
             # window check: far-away retune target is not restarted
-            c2 = dict(c, pass2=None); del c2['pass2']; p['centre_hz'] = 3000000000
+            c2 = dict(c, pass2=None); del c2['pass2']; p['centre_hz'] = 3000000000; p['windows'][0]['centre_hz'] = 3000000000   # v2: the cell's window centre decides
             M.restart_cell = lambda *a, **k: calls.append('x'); 
             try: self.assertEqual(M.pass2_cell(p, d, c2), 'outside_window')
             finally: M.restart_cell = orig

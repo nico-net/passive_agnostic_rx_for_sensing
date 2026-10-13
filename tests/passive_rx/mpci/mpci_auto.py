@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """mpci_auto.py : blind multi-cell SUPERVISOR -- cells.json (fastscan) -> one radio window -> N cell receivers (mpci_launch.sh) -> pass 2 -> watch.
-  mpci_auto.py plan CELLS.json --cores 4-19 [--max-span-hz 110e6] [--rate 122.88e6] [--pub-cores 0-1] [--ring isac_iq] [--out plan.json]
+  mpci_auto.py plan CELLS.json --cores 4-19 [--single-window] [--channels 4 --min-ch-per-window 1 --dwell-min-ms 40 --dwell-max-ms 200] [--max-span-hz 110e6] [--rate 122.88e6] [--pub-cores 0-1] [--ring isac_iq] [--out plan.json]
   mpci_auto.py launch PLAN.json --out DIR [--pub-cmd CMD] [--base-cfg CFG] [--build DIR]      (DRY=1 env: print only)
   mpci_auto.py pass2 PLAN.json --out DIR [--wait 180]    per cell: sync+MIB+SIB1 in ue.log -> autofront refine + retune_args auto; restart ONLY a cell whose grid changes
   mpci_auto.py watch PLAN.json --out DIR [--period 10] [--lost-s 30] [--max-restarts 5] [--backoff-s 10] [--rescan CAPDIR...]
@@ -8,7 +8,7 @@
 Window rule: a cell occupies the interval C +- BW/2. BW = SIB1 carrier width (sib1_nrb, pass-2 data in cells.json) else the pass-1 grid: the smallest
 receiver-supported 30 kHz grid whose half width reaches autofront.RB_GRID_SC (the --ssb 1171 first-pass rule puts the grid centre there) = 217 PRB.
 No operator constants: everything is the scanner's output or a receiver rule. The window centre covers the most cells within --max-span-hz; the
-rest are `unserved` (M4 input). plan_window() is a separate function so a later step can call it repeatedly for several windows.
+rest are `unserved` with --single-window. Default = M4: cover_windows() greedy cover of ALL cells, assign_channels() maps windows to radio channel subsets / dwell groups (rules in its docstring), plan.json v2.
 Stop/restart = SIGINT only (X410 claim hygiene), never SIGKILL/pkill. Polling, no daemons.
 shortcut: one window, report-only rescan, 30 kHz grids (supported-grid list copied from retune_args.py), pass-2 interval uses the carrier width not the grid."""
 import sys, os, re, json, time, subprocess, argparse
@@ -56,28 +56,96 @@ def plan_window(entries, max_span_hz):
     centre = int(round((min(x['lo'] for x in served) + max(x['hi'] for x in served)) / 2)) if served else None
     return centre, served, [x for x in entries if id(x) not in ids]
 
-def make_plan(cells, cores, max_span_hz=110e6, rate=122.88e6, pub_cores=None, ring='isac_iq'):
+def cover_windows(entries, max_span_hz):
+    """greedy interval cover (optimal): open a window at the leftmost uncovered lo, take every cell ending within lo+span.
+    A cell wider than the span gets a window of its own (flagged oversize by the caller)."""
+    rest = sorted(entries, key=lambda x: (x['lo'], x['hi'])); out = []
+    while rest:
+        L = rest[0]['lo']; w = [x for x in rest if x['hi'] <= L + max_span_hz] or [rest[0]]
+        out.append(w); rest = [x for x in rest if x not in w]
+    return out
+
+def subset_str(l):
+    """channel list -> publisher syntax (ISAC_SHM_IQ_PUB): 'a-b' for a run, '+' joins runs/singles."""
+    r = []; i = 0
+    while i < len(l):
+        j = i
+        while j + 1 < len(l) and l[j + 1] == l[j] + 1: j += 1
+        r.append(str(l[i]) if i == j else f'{l[i]}-{l[j]}'); i = j + 1
+    return '+'.join(r)
+
+def assign_channels(wins, channels, min_ch, dwell_min_ms, dwell_max_ms):
+    """wins: list of cell lists (cover order). Returns per window dict(ch=[..], mode='dedicated'|'dwell', dwell_ms).
+    Rule: D = channels // min_ch dedicated slots. W <= D: every window dedicated, channels split as evenly as possible, the
+    remainder going one each to the windows with MORE cells (tie: lower frequency) -- more RX per cell where more cells need it.
+    W > D: the D-1 windows with the most cells (tie: lower frequency) get min_ch channels each, all the others time-share the
+    remaining channels (>= min_ch) with dwell = dwell_min_ms * cells in the window, clamped to [min, max]: dwell_min_ms >= 2 SSB
+    periods (2 x 20 ms) so a return always sees an SSB, and the cap bounds the time any window is away."""
+    W = len(wins); D = max(1, channels // min_ch); order = sorted(range(W), key=lambda k: (-len(wins[k]), k)); res = [None] * W
+    if W <= D:
+        n = [channels // W] * W
+        for k in order[:channels % W]: n[k] += 1
+        groups = {k: n[k] for k in range(W)}; shared = []
+    else:
+        groups = {k: min_ch for k in order[:D - 1]}; shared = [k for k in range(W) if k not in groups]
+    nxt = 0; ch = {}
+    for k in sorted(groups): ch[k] = list(range(nxt, nxt + groups[k])); nxt += groups[k]
+    for k in range(W):
+        if k in ch: res[k] = dict(ch=ch[k], mode='dedicated', dwell_ms=None)
+    for k in shared:
+        res[k] = dict(ch=list(range(nxt, channels)), mode='dwell', dwell_ms=int(min(dwell_max_ms, max(dwell_min_ms, dwell_min_ms * len(wins[k])))))
+    return res
+
+def pub_env(ring, windows):
+    """publisher env strings in the exact syntax of radio/COMMON/shm_iq_pub.c (parse_env / parse_freq_dwell)."""
+    if len(windows) == 1 and windows[0]['mode'] == 'dedicated': return {'ISAC_SHM_IQ_PUB': windows[0]['ring']}   # v1 form: one ring, all channels
+    e = {'ISAC_SHM_IQ_PUB': ','.join(f"{w['ring']}:{subset_str(w['channels'])}" for w in windows)}
+    f = [f"{w['ring']}={w['centre_hz']}" for w in windows if w['mode'] == 'dedicated']
+    d = [f"{w['ring']}@{w['centre_hz']}:{w['dwell_ms']}" for w in windows if w['mode'] == 'dwell']
+    if f: e['ISAC_SHM_IQ_PUB_FREQ'] = ','.join(f)
+    if d: e['ISAC_SHM_IQ_DWELL'] = ','.join(d)
+    return e
+
+def make_plan(cells, cores, max_span_hz=110e6, rate=122.88e6, pub_cores=None, ring='isac_iq', multi=False, channels=4, min_ch=1,
+              dwell_min_ms=40, dwell_max_ms=200):
     entries = [cell_entry(c) for c in cells]
-    centre, served, unserved = plan_window(entries, max_span_hz)
-    if not served: sys.exit('no cells to serve')
-    cl = expand_cores(cores)
-    if len(cl) < len(served): sys.exit(f'{len(cl)} cores for {len(served)} cells')
-    n = len(cl) // len(served)
-    gs = [x['gscn'] for x in served]
-    for i, x in enumerate(sorted(served, key=lambda x: x['lo'])):
-        x['cores'] = fmt_cores(cl[i * n:(i + 1) * n]); x['idx'] = i
-        if x['n_cells'] > 1 or gs.count(x['gscn']) > 1: x['env'] = dict(ISAC_TARGET_PCI=str(x['pci']), ISAC_SSS_MULTI='2.5')
-    keep = ('tag', 'pci', 'gscn', 'C_hz', 'r', 'ssb', 'initial_fo', 'bw_hz', 'pass_', 'env', 'cores', 'idx')
-    return dict(ring=ring, centre_hz=centre, rate_hz=int(rate), span_hz=int(max_span_hz), pub_cores=pub_cores, cores=cores,
-                cells=sorted(({k: x[k] for k in keep} for x in served), key=lambda x: x['idx']),
+    if multi: wins = cover_windows(entries, max_span_hz); unserved = []
+    else:
+        centre, served, unserved = plan_window(entries, max_span_hz)
+        wins = [served] if served else []
+    if not wins: sys.exit('no cells to serve')
+    cl = expand_cores(cores); nserved = sum(len(w) for w in wins)
+    if len(cl) < nserved: sys.exit(f'{len(cl)} cores for {nserved} cells')
+    if min_ch < 1 or channels < min_ch: sys.exit(f'--channels {channels} < --min-ch-per-window {min_ch}')
+    n = len(cl) // nserved; asg = assign_channels(wins, channels, min_ch, dwell_min_ms, dwell_max_ms)
+    keep = ('tag', 'pci', 'gscn', 'C_hz', 'r', 'ssb', 'initial_fo', 'bw_hz', 'pass_', 'env', 'cores', 'idx', 'ring', 'nrx', 'window')
+    windows = []; pcells = []; idx = 0
+    for k, (w, a) in enumerate(zip(wins, asg)):
+        rn = ring if len(wins) == 1 else f'{ring}_w{k}'
+        centre = int(round((min(x['lo'] for x in w) + max(x['hi'] for x in w)) / 2))
+        gs = [x['gscn'] for x in w]
+        for x in sorted(w, key=lambda x: x['lo']):
+            x.update(cores=fmt_cores(cl[idx * n:(idx + 1) * n]), idx=idx, ring=rn, nrx=len(a['ch']), window=k); idx += 1
+            if x['n_cells'] > 1 or gs.count(x['gscn']) > 1: x['env'] = dict(ISAC_TARGET_PCI=str(x['pci']), ISAC_SSS_MULTI='2.5')   # co-channel pin: per window
+            pcells.append({q: x[q] for q in keep})
+        windows.append(dict(ring=rn, centre_hz=centre, channels=a['ch'], mode=a['mode'], dwell_ms=a['dwell_ms'], cells=[x['tag'] for x in w],
+                            span_hz=int(max(x['hi'] for x in w) - min(x['lo'] for x in w))))
+    return dict(version=2, ring=ring, centre_hz=windows[0]['centre_hz'], rate_hz=int(rate), span_hz=int(max_span_hz), pub_cores=pub_cores, cores=cores,
+                radio=dict(channels=channels, min_ch_per_window=min_ch, pub_env=pub_env(ring, windows)), windows=windows,
+                cells=sorted(pcells, key=lambda x: x['idx']),
                 unserved=[dict(tag=x['tag'], pci=x['pci'], gscn=x['gscn'], C_hz=x['C_hz'], lo_hz=int(x['lo']), hi_hz=int(x['hi'])) for x in unserved])
 
 def spec(c):
     s = f"{c['tag']}:{c['C_hz']}:{c['r']}:{c['ssb']}:{c['initial_fo'] if c.get('initial_fo') is not None else '-'}:{c['cores']}"
-    return s + (':' + ','.join(f'{k}={v}' for k, v in sorted(c['env'].items())) if c['env'] else '')
+    e = dict(c['env'])
+    if c.get('ring'): e['ISAC_SHM_IQ_NAME'] = c['ring']            # per-cell ring (launcher default is the global RING)
+    if c.get('nrx'): e['UE_NB_ANT_RX'] = str(c['nrx'])             # launcher turns this pseudo-key into --ue-nb-ant-rx
+    return s + (':' + ','.join(f'{k}={v}' for k, v in sorted(e.items())) if e else '')
 
 def launcher_env(plan, out, extra=None):
     e = dict(os.environ, OUT=out, RING=plan['ring']); e.update(extra or {})
+    pe = (plan.get('radio') or {}).get('pub_env')
+    if pe: e['PUB_ENV'] = ' '.join(f'{k}={v}' for k, v in pe.items())
     for k, pk in (('BASE_CFG', 'base_cfg'), ('BUILD', 'build')):
         if plan.get(pk): e.setdefault(k, plan[pk])
     return e
@@ -133,6 +201,10 @@ def decide_retune(log):
     if d['r'] > int(m[4]): d['env']['ISAC_CARRIER_FROM_SIB1'] = '1'      # GRIDCARRIER: grid wider than the carrier
     return d
 
+def win_centre(plan, c):
+    w = plan.get('windows')
+    return w[c['window']]['centre_hz'] if w and c.get('window') is not None else plan['centre_hz']
+
 def pass2_cell(plan, out, c, plan_path=None, cells_json=None):
     """returns 'waiting' | 'done' | 'restarted' | 'outside_window' | 'pci_mismatch'."""
     log = os.path.join(out, c['tag'], 'ue.log')
@@ -144,7 +216,9 @@ def pass2_cell(plan, out, c, plan_path=None, cells_json=None):
         cells = json.load(open(cells_json)); json.dump(A.apply_refine(cells, c['pci'], info), open(cells_json, 'w'), indent=1)
     d = decide_retune(log); c['pass_'] = 2
     if d is None: c['pass2'] = 'keep'; res = 'done'
-    elif abs(d['C_hz'] - plan['centre_hz']) + d['r'] * RB_HZ / 2 > plan['span_hz'] / 2: c['pass2'] = 'outside_window'; c['wanted'] = d; res = 'outside_window'
+    elif abs(d['C_hz'] - win_centre(plan, c)) + d['r'] * RB_HZ / 2 > plan['span_hz'] / 2:
+        c['pass2'] = 'outside_window'; c['wanted'] = d; res = 'outside_window'
+        print(f"{c['tag']}: refined carrier {d['C_hz']} Hz (grid {d['r']} PRB) leaves window {c.get('ring', '')} centre {win_centre(plan, c)} Hz: NOT restarted, re-plan (mpci_auto.py plan/auto with the refined cells.json)")
     else:
         c.update(C_hz=d['C_hz'], r=d['r'], ssb=d['ssb'], bw_hz=info['sib1_nrb'] * RB_HZ, pass2='retuned'); c['env'] = {**c['env'], **d['env']}
         res = 'restarted' if restart_cell(plan, out, c) else 'done'
@@ -190,7 +264,24 @@ def watch_step(plan, out, rt, now, lost_s=30, max_restarts=5, backoff_s=10, rest
         if st['producer_lost']: state += ' PRODUCER_LOST'
         crc = '-' if st['crc'] is None else f"{100 * st['crc']:.1f}%"
         lines.append(f"{c['tag']} pci={c['pci']} state={state} crc={crc} overruns={st['overruns']} restarts={r['restarts']}")
+    for w in plan.get('windows') or []:
+        if len(plan['windows']) < 2 and w['mode'] == 'dedicated': continue
+        lines.append(window_status(plan, out, w)); 
     return lines
+
+def window_status(plan, out, w):
+    """per-window line from logs only: dwell switches seen by the publisher (pub.log) and, per cell, discontinuities (return from away) / overruns."""
+    try: pub = open(os.path.join(out, 'pub.log'), errors='replace').read()
+    except OSError: pub = ''
+    cs = [c for c in plan['cells'] if c.get('window') is not None and plan['windows'][c['window']] is w]
+    dis = 0; ov = 0
+    for c in cs:
+        try: t = open(os.path.join(out, c['tag'], 'ue.log'), errors='replace').read()
+        except OSError: continue
+        dis += t.count('SHMIQ_DISCONT'); ov += t.count('SHMIQ_OVERRUN')
+    last = re.findall(r'SHMIQ_PUB_DWELL from=/(\S+) to=/(\S+)', pub)
+    where = ('' if w['mode'] == 'dedicated' else ' dwell=%dms switches=%d %s' % (w['dwell_ms'], len(last), 'AWAY' if last and last[-1][0] == w['ring'] else 'ON' if last and last[-1][1] == w['ring'] else '?'))
+    return f"window {w['ring']} ch={subset_str(w['channels'])} {w['mode']}{where} returns_seen={dis} overruns={ov} cells={len(cs)}"
 
 def rescan(plan, out, capdirs):
     d = os.path.join(out, 'rescan'); sh = os.path.join(AF, 'live_chain.sh')
@@ -200,7 +291,7 @@ def rescan(plan, out, capdirs):
     have = {(c['pci'], c['gscn']) for c in plan['cells'] + plan['unserved']}
     half = plan['span_hz'] / 2; msgs = []
     for k, e in new.items():
-        if k not in have: msgs.append(f"NEW {e['tag']} " + ('fits the window: rerun plan+launch' if abs(e['C_hz'] - plan['centre_hz']) + e['bw_hz'] / 2 <= half else 'outside window'))
+        if k not in have: msgs.append(f"NEW {e['tag']} " + ('fits the window: rerun plan+launch' if any(abs(e['C_hz'] - w['centre_hz']) + e['bw_hz'] / 2 <= half for w in plan.get('windows') or [dict(centre_hz=plan['centre_hz'])]) else 'outside window'))
     msgs += [f'VANISHED p{p}_{g}' for p, g in sorted(have - set(new))]
     return msgs
 
@@ -213,11 +304,19 @@ def cmd_watch(plan, out, period=10, rescan_dirs=None, rescan_period=300, iters=N
         n += 1
         if iters is None or n < iters: time.sleep(period)
 
+def mp_args(a):
+    return dict(max_span_hz=a.max_span_hz, rate=a.rate, pub_cores=a.pub_cores, ring=a.ring, multi=not a.single_window, channels=a.channels,
+                min_ch=a.min_ch_per_window, dwell_min_ms=a.dwell_min_ms, dwell_max_ms=a.dwell_max_ms)
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0]); sp = ap.add_subparsers(dest='cmd', required=True)
     def common(p):
         p.add_argument('--cores'); p.add_argument('--max-span-hz', type=float, default=110e6); p.add_argument('--rate', type=float, default=122.88e6)
         p.add_argument('--pub-cores'); p.add_argument('--ring', default='isac_iq')
+        p.add_argument('--single-window', action='store_true', help='v1: one window (most cells), the rest unserved')
+        p.add_argument('--channels', type=int, default=4, help='radio RX channel count (host inventory)')
+        p.add_argument('--min-ch-per-window', type=int, default=1)
+        p.add_argument('--dwell-min-ms', type=int, default=40); p.add_argument('--dwell-max-ms', type=int, default=200)
     def lw(p):
         p.add_argument('--out', required=True); p.add_argument('--pub-cmd'); p.add_argument('--base-cfg'); p.add_argument('--build')
         p.add_argument('--period', type=float, default=10); p.add_argument('--lost-s', type=float, default=30)
@@ -229,8 +328,10 @@ def main(argv):
     a = ap.parse_args(argv)
     if a.cmd == 'plan':
         if not a.cores: sys.exit('--cores required (host core list, e.g. 4-19)')
-        plan = make_plan(json.load(open(a.cells)), a.cores, a.max_span_hz, a.rate, a.pub_cores, a.ring); plan['cells_json'] = os.path.abspath(a.cells)
-        save(plan, a.out); print(f"window centre {plan['centre_hz']} Hz: {len(plan['cells'])} served, {len(plan['unserved'])} unserved -> {a.out}")
+        plan = make_plan(json.load(open(a.cells)), a.cores, **mp_args(a)); plan['cells_json'] = os.path.abspath(a.cells)
+        save(plan, a.out); print(f"{len(plan['windows'])} window(s): {len(plan['cells'])} served, {len(plan['unserved'])} unserved -> {a.out}")
+        for w in plan['windows']: print(f"  window {w['ring']} centre {w['centre_hz']} Hz ch={subset_str(w['channels'])} {w['mode']}" + (f" dwell {w['dwell_ms']} ms" if w['dwell_ms'] else ''))
+        for k, v in plan['radio']['pub_env'].items(): print(f'  {k}={v}')
         for c in plan['cells']: print('  ' + spec(c))
         for u in plan['unserved']: print(f"  unserved {u['tag']} [{u['lo_hz']}, {u['hi_hz']}]")
         return
@@ -238,7 +339,7 @@ def main(argv):
         os.makedirs(a.out, exist_ok=True); cj = a.cells
         if not cj:
             subprocess.run(['bash', os.path.join(AF, 'live_chain.sh'), 'discover', a.out] + (a.capdirs or []), check=True); cj = os.path.join(a.out, 'cells.json')
-        plan = make_plan(json.load(open(cj)), a.cores, a.max_span_hz, a.rate, a.pub_cores, a.ring); plan['cells_json'] = os.path.abspath(cj); pp = os.path.join(a.out, 'plan.json')
+        plan = make_plan(json.load(open(cj)), a.cores, **mp_args(a)); plan['cells_json'] = os.path.abspath(cj); pp = os.path.join(a.out, 'plan.json')
     else:
         pp = a.plan; plan = json.load(open(pp))
     for k in ('base_cfg', 'build'):

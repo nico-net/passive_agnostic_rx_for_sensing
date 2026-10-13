@@ -3,6 +3,8 @@
 # usage: [DRY=1] RING=isac_iq OUT=/path BASE_CFG=cell.cfg [BUILD=dir] [PUB_CMD="..."] [PUB_CORES=0-1] \
 #          mpci_launch.sh [start|stop] TAG:C:R:SSB:FO:CORES ...
 #   optional 7th field ENV=K=V,K=V : extra env for that cell only (no ':' ' ' ',' in values), e.g. A:..:4-7:ISAC_TARGET_PCI=4,ISAC_SSS_MULTI=2.5
+#   per-cell ring: put ISAC_SHM_IQ_NAME=<ring> in that field (overrides RING); UE_NB_ANT_RX=<n> there = --ue-nb-ant-rx <n>.
+#   PUB_ENV="K=V K=V" replaces the publisher env (default ISAC_SHM_IQ_PUB=$RING); values contain no spaces.
 #   APPEND=1 keeps OUT/pids (restart of one cell; give BASE_PORT=<base+index> to keep its endpoint port).
 #   C = carrier Hz (-C), R = N_RB (-r), SSB = --ssb, FO = --initial-fo ("-" = omit), CORES = taskset list for that cell.
 #   example (cores are an example only): A:3619200000:106:516:-:4-7  B:3649440000:51:200:-:8-11
@@ -24,8 +26,8 @@ run() { if [ "$DRY" = 1 ]; then echo "$*"; else eval "$*"; fi; }
 [ "$DRY" = 1 ] || { mkdir -p "$OUT"; [ "${APPEND:-0}" = 1 ] || : > "$OUT/pids"; }
 if [ -n "$PUB_CMD" ]; then
   pin=""; [ -n "$PUB_CORES" ] && pin="taskset -c $PUB_CORES "
-  if [ "$DRY" = 1 ]; then echo "PUB env ISAC_SHM_IQ_PUB=$RING ${pin}$PUB_CMD"
-  else ISAC_SHM_IQ_PUB=$RING bash -c "exec ${pin}$PUB_CMD" > "$OUT/pub.log" 2>&1 & echo "pub $!" >> "$OUT/pids"; fi
+  if [ "$DRY" = 1 ]; then echo "PUB env ${PUB_ENV:-ISAC_SHM_IQ_PUB=$RING} ${pin}$PUB_CMD"
+  else env ${PUB_ENV:-ISAC_SHM_IQ_PUB=$RING} bash -c "exec ${pin}$PUB_CMD" > "$OUT/pub.log" 2>&1 & echo "pub $!" >> "$OUT/pids"; fi
 fi
 i=0; declare -A seen
 for spec in "$@"; do
@@ -34,6 +36,8 @@ for spec in "$@"; do
     && [[ -z "${xenv:-}" || "$xenv" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:],:]*(,[A-Za-z_][A-Za-z0-9_]*=[^[:space:],:]*)*$ ]] \
     || { echo "bad cell spec '$spec' (TAG:C:R:SSB:FO:CORES[:K=V,K=V])" >&2; exit 2; }
   [ -z "${seen[$tag]:-}" ] || { echo "duplicate tag $tag" >&2; exit 2; }; seen[$tag]=1
+  nant=""   # pseudo-key UE_NB_ANT_RX=n in the env field -> --ue-nb-ant-rx n (RX channels of this cell = its ring's channel subset)
+  if [[ ",${xenv:-}," =~ ,UE_NB_ANT_RX=([0-9]+), ]]; then nant=${BASH_REMATCH[1]}; xenv=",$xenv,"; xenv=${xenv/,UE_NB_ANT_RX=$nant,/,}; xenv=${xenv#,}; xenv=${xenv%,}; fi
   d=$OUT/$tag; cfg=$d/cell.cfg; port=$((BASE_PORT+i))
   foarg=""; [ "$fo" != "-" ] && foarg="--initial-fo $fo"
   [ "$DRY" = 1 ] || mkdir -p "$d"
@@ -46,7 +50,7 @@ for spec in "$@"; do
     if [ "$DRY" = 1 ]; then echo "CFG $tag $cfg"; else gen > "$cfg"; fi
   fi
   envs="ISAC_CELL_INSTANCE=$tag ISAC_SHM_IQ_CELL=$tag ISAC_SHM_IQ_NAME=$RING ISAC_METRICS_PATH=$d/metrics.jsonl ISAC_UECTX_PATH=$d/uectx.json ISAC_OBS_PATH=$d/obs.bin${xenv:+ ${xenv//,/ }}"
-  cmdline="taskset -c $cores $BUILD/nr-uesoftmodem${BASE_CFG:+ -O $cfg} -C $c -r $r --ssb $ssb${foarg:+ $foarg}"
+  cmdline="taskset -c $cores $BUILD/nr-uesoftmodem${BASE_CFG:+ -O $cfg} -C $c -r $r --ssb $ssb${nant:+ --ue-nb-ant-rx $nant}${foarg:+ $foarg}"
   if [ "$DRY" = 1 ]; then echo "CELL $tag cwd=$d env $envs $cmdline"
   else (cd "$d" && exec env $envs $cmdline) > "$d/ue.log" 2>&1 & echo "$tag $!" >> "$OUT/pids"; fi
   i=$((i+1))
