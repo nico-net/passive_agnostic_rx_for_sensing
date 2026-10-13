@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <malloc.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -393,6 +394,16 @@ void lock_memory_to_ram(void)
   /* ISAC_MLOCK=0 skips mlockall (default 1 = upstream behaviour). 2026-10-08, DGX GB10: with a CUDA context the
    * call keeps the main thread at ~100 % system time for seconds across the radio start (pinning/faulting the
    * unified-memory mappings), and the DPDK stream drops packets during the cell search. */
+  /* OTATAIL: ISAC_MALLOC_NOTRIM=1 (default off): glibc never returns heap memory to the kernel and serves
+   * allocations up to 32 MB from the heap instead of mmap. On GB10 the GPU walks the host page tables (direct
+   * mode), so every munmap/trim in any thread invalidates GPU translations device-wide: a candidate cause of
+   * the on-air chest stalls. */
+  const char *nt = getenv("ISAC_MALLOC_NOTRIM");
+  if (nt && atoi(nt) == 1) {
+    mallopt(M_TRIM_THRESHOLD, -1);
+    mallopt(M_MMAP_THRESHOLD, 32 << 20);
+    LOG_I(UTIL, "SENSING: ISAC_MALLOC_NOTRIM=1: malloc trim off, mmap threshold 32 MB\n");
+  }
   const char *e = getenv("ISAC_MLOCK");
   if (e && atoi(e) == 0) {
     LOG_I(UTIL, "SENSING: mlockall skipped (ISAC_MLOCK=0)\n");

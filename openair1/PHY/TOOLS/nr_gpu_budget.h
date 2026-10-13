@@ -28,6 +28,10 @@ int nr_gpu_budget_discovery_begin(uint64_t now_us);
 uint64_t nr_gpu_budget_discovery_delay_us(uint64_t now_us);
 void nr_gpu_budget_discovery_end(uint64_t now_us, uint64_t gpu_us);
 void nr_gpu_budget_fault(void);
+/* OTATAIL: a discovery user that must not be starved (the nID sweep in ACQUIRE) raises prefer; other discovery
+ * users (CSI-RS) do not start a slice while it is raised. */
+void nr_gpu_budget_discovery_prefer(int on);
+int nr_gpu_budget_discovery_preferred(void);
 typedef struct {
   double gpu_budget_used_pct;
   uint64_t discovery_yields, rt_gpu_wait_max_us, rt_gpu_fallbacks, discovery_overruns;

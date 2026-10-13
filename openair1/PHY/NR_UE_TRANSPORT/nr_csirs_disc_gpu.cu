@@ -2,6 +2,7 @@
 #include "nr_csirs_disc_fp_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "nr_csirs_disc_gpu_budget.cuh"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -115,6 +116,7 @@ static int fold_gpu(void *opaque,int p,uint64_t *sum,uint64_t *sq)
 {
   Fold *f=(Fold *)opaque;uint64_t *ds=nullptr,*dq=nullptr;
   size_t bytes=(size_t)p*f->nr*sizeof(*sum);int ret=-1;
+  CsirsDiscGate gate;
   if(cudaMalloc(&ds,bytes)!=cudaSuccess || cudaMalloc(&dq,bytes)!=cudaSuccess) goto done;
   if(disc_zero(ds,0,bytes)!=cudaSuccess || disc_zero(dq,0,bytes)!=cudaSuccess) goto done;
   fold_kernel<<<(f->nr+127)/128,128,0,disc_stream()>>>(f->x,f->meta,f->nt,f->nr,p,ds,dq);
@@ -132,6 +134,7 @@ static int footprints(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t
   if(max_out>NR_CSIRS_DISC_MAX_FP) max_out=NR_CSIRS_DISC_MAX_FP;
   const int tiles=(r->n_rb+15)/16;
   int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168*tiles};int ret=-1;
+  CsirsDiscGate gate;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
@@ -158,6 +161,7 @@ static int normalize_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_c
   if(!nr_disc_fp_valid(r) || !out) return -1;
   const int tiles=1;
   int16_t *grid=nullptr;uint8_t *excl=nullptr;Fold f={nullptr,nullptr,r->capacity,14*12*r->n_rb+168};int ret=-1;
+  CsirsDiscGate gate;
   size_t gb=(size_t)r->capacity*r->slot_stride*sizeof(int16_t), xb=(size_t)f.nt*f.nr*sizeof(uint32_t);
   /* Explicit-copy baseline accepts ordinary malloc or unified U1 rings. */
   if(cudaMalloc(&grid,gb)!=cudaSuccess || cudaMalloc(&f.meta,r->capacity*sizeof(*f.meta))!=cudaSuccess ||
@@ -283,6 +287,7 @@ static int fft_host(int fft, int transforms, const int16_t *in, int16_t *out)
     if (cudaMalloc(&work,n*sizeof(*work))!=cudaSuccess) return -1;
     capacity=n;
   }
+  CsirsDiscGate gate;
   fft_unpack<<<(n+255)/256,256,0,disc_stream()>>>((const short2 *)in,work,n);
   if (cudaGetLastError()!=cudaSuccess || cufftExecC2C(plan,work,work,CUFFT_FORWARD)!=CUFFT_SUCCESS) {
     disc_wait(); // Quiesce queued work before the caller's CPU fallback.
@@ -450,6 +455,7 @@ static int fep_host(const nr_csirs_disc_fep_cfg_t *c,const nr_csirs_disc_fep_slo
   if(fep_prepare(c->fft,c->n_ant,c->stride)<0) return -1;
   size_t count=(size_t)(n==1?1:NR_CSIRS_DISC_DEFAULT_BATCH)*c->n_ant*14*c->fft;
   nr_csirs_disc_fep_slot_t staged[NR_CSIRS_DISC_DEFAULT_BATCH];
+  CsirsDiscGate gate;
   for(int i=0;i<n;++i) {
     staged[i]=slots[i];staged[i].samples=(int16_t *)(fep_workspace.td.p+(size_t)i*c->n_ant*c->stride);
     if(disc_copy((void *)staged[i].samples,slots[i].samples,c->n_ant*c->stride*sizeof(short2),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
@@ -509,6 +515,7 @@ static int accumulate_host(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_
   bool managed=cudaPointerGetAttributes(&attr,r->grid_base)==cudaSuccess && (attr.type==cudaMemoryTypeManaged || attr.type==cudaMemoryTypeHost);
   cudaGetLastError();
   const int16_t *input=managed?r->grid_base:grid.p;
+  CsirsDiscGate gate;
   if((!managed && disc_copy(grid.p,r->grid_base,gb*sizeof(int16_t),cudaMemcpyHostToDevice)!=cudaSuccess) ||
      disc_copy(meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_zero(x.p,0,xb*sizeof(uint32_t))!=cudaSuccess) return -1;
@@ -597,6 +604,7 @@ static int lattice_host(int rb,int p,uint64_t nt,const uint64_t *counts,const ui
   int tiles=(rb+15)/16,pooled=168*tiles,nr=14*12*rb+pooled;
   size_t count=(size_t)p*14*tiles*6;
   if(!ps.reserve((size_t)p*pooled) || !pq.reserve((size_t)p*pooled) || !dc.reserve(p) || !dm.reserve(count)) return -1;
+  CsirsDiscGate gate;
   if(disc_copy(dc.p,counts,p*sizeof(uint64_t),cudaMemcpyHostToDevice)!=cudaSuccess ||
      disc_zero(dm.p,0,count*sizeof(uint16_t))!=cudaSuccess) return -1;
   lattice_pool<<<(p*pooled+127)/128,128,0,disc_stream()>>>(p,nr,pooled,sum,sq,ps.p,pq.p);

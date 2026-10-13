@@ -138,6 +138,7 @@ static void *worker(void *unused)
    int due=nr_gpu_discovery_due(&duty,duty_clock_us(batch_clock),epoch,
        !geometry_changed && g.result.count>0,!geometry_changed && g.all_verified,unexplained,1000ull*g.acquire_ms,
        1000ull*g.maintain_ms,1000ull*g.recheck_ms);
+   nr_gpu_budget_discovery_prefer(duty.mode==NR_GPU_DISC_ACQUIRE); /* OTATAIL: acquisition goes before CSI-RS discovery */
    if(logged_mode!=duty.mode) {
     static const char *names[]={"ACQUIRE","MAINTAIN","PAUSED"};
     LOG_A(PHY,"SENSING: PDCCH_NID_GPU mode %s -> %s epoch=%u published=%d verified=%d wake=%d\n",
@@ -192,6 +193,7 @@ static void *worker(void *unused)
   uint64_t pass=g.passes;
   pthread_mutex_unlock(&g.mu);
   char records[2048];size_t used=0;records[0]=0;
+  struct timespec pts;clock_gettime(CLOCK_MONOTONIC,&pts); /* OTATAIL: align passes with PDTIMSLOW t= */
   for(int j=0;j<result.count;j++) {
    const nr_pdcch_nid_record_t *r=result.records+j;
    int n=snprintf(records+used,sizeof(records)-used,
@@ -201,19 +203,20 @@ static void *worker(void *unused)
    used+=n;
   }
   if(g.nodrop)
-   LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms (kernels max %.3f ms) dropped_snapshots=%llu dropped_partial=%llu -> %d CORESETs:%s\n",
-         (unsigned long long)pass,result.stage1_ms,result.stage2_ms,result.kernel_max_ms,
+   LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms t=%ld.%03ld (kernels max %.3f ms) dropped_snapshots=%llu dropped_partial=%llu -> %d CORESETs:%s\n",
+         (unsigned long long)pass,result.stage1_ms,result.stage2_ms,(long)pts.tv_sec,pts.tv_nsec/1000000,result.kernel_max_ms,
          (unsigned long long)atomic_load_explicit(&g.dropped_snapshots,memory_order_relaxed),
          (unsigned long long)atomic_load_explicit(&g.dropped_partial,memory_order_relaxed),result.count,records);
   else
-  LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms (kernels max %.3f ms) -> %d CORESETs:%s\n",
-        (unsigned long long)pass,result.stage1_ms,result.stage2_ms,result.kernel_max_ms,result.count,records);
+  LOG_A(PHY,"SENSING: PDCCH_NID_GPU pass %llu: stage1 %.3f ms stage2 %.3f ms t=%ld.%03ld (kernels max %.3f ms) -> %d CORESETs:%s\n",
+        (unsigned long long)pass,result.stage1_ms,result.stage2_ms,(long)pts.tv_sec,pts.tv_nsec/1000000,result.kernel_max_ms,result.count,records);
   continue;
 failed:
   LOG_E(PHY,"SENSING: PDCCH_NID_GPU device failure; capture stopped (no CPU sweep fallback)\n");
   atomic_store_explicit(&g.running,false,memory_order_release);
   break;
  }
+ nr_gpu_budget_discovery_prefer(0);
  return NULL;
 }
 /* nr_pdcch_nid_gpu_start: starts the PDCCH NID GPU discovery: reads the ISAC_PDCCH_NID_GPU_* policy flags, loads the device module and starts the worker thread.

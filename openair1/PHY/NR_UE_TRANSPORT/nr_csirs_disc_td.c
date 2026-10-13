@@ -375,12 +375,13 @@ int nr_csirs_disc_td_drain(nr_csirs_disc_ring_t *ring)
   __atomic_fetch_add(&csirs_disc_fep_us,elapsed,__ATOMIC_RELAXED);
   uint64_t peak=__atomic_load_n(&csirs_disc_fep_max_us,__ATOMIC_RELAXED);
   if(elapsed>peak) __atomic_store_n(&csirs_disc_fep_max_us,elapsed,__ATOMIC_RELAXED);
-  if (done) LOG_I(PHY, "SENSING: CSIRS_DISC FEP slots=%d total_us=%llu fft_pack_us=%llu gpu_chunks=%d cpu_chunks=%d pending=%d feed_drops=%llu td_overflows=%llu confirm_drops=%llu confirm_wait_max_us=%llu\n",
+  struct timespec fts; clock_gettime(CLOCK_MONOTONIC, &fts);
+  if (done) LOG_I(PHY, "SENSING: CSIRS_DISC FEP slots=%d total_us=%llu fft_pack_us=%llu gpu_chunks=%d cpu_chunks=%d pending=%d feed_drops=%llu td_overflows=%llu confirm_drops=%llu confirm_wait_max_us=%llu t=%ld.%03ld\n",
       done, (unsigned long long)(usec()-start), (unsigned long long)(csirs_disc_fft_us-fft_start),
       gpu_chunks, cpu_chunks, nr_csirs_disc_td_pending(),
       (unsigned long long)__atomic_load_n(&csirs_disc_feed_drops,__ATOMIC_RELAXED),
       (unsigned long long)__atomic_load_n(&csirs_disc_td_overflows,__ATOMIC_RELAXED),
       &csirs_disc_confirm_drops ? (unsigned long long)__atomic_load_n(&csirs_disc_confirm_drops,__ATOMIC_RELAXED) : 0ull,
-      &csirs_disc_confirm_wait_max_us ? (unsigned long long)__atomic_load_n(&csirs_disc_confirm_wait_max_us,__ATOMIC_RELAXED) : 0ull);
+      &csirs_disc_confirm_wait_max_us ? (unsigned long long)__atomic_load_n(&csirs_disc_confirm_wait_max_us,__ATOMIC_RELAXED) : 0ull, (long)fts.tv_sec, fts.tv_nsec / 1000000);
   return done;
 }

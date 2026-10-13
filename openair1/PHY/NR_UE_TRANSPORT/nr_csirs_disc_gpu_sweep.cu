@@ -3,6 +3,7 @@
 #include "nr_csirs_disc_evidence_internal.h"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
+#include "nr_csirs_disc_gpu_budget.cuh"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -270,6 +271,7 @@ __global__ void gather(const short2 *grid,size_t stride,const nr_csirs_disc_re_t
 static const short2 *upload_grid(const nr_csirs_disc_ring_t *r)
 {
   if(r->device_grid && r->device_valid) return (const short2 *)r->device_grid;
+  CsirsDiscGate gate;
   if(copy(workspace.grid.p,r->grid_base,(size_t)r->capacity*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return nullptr;
   return workspace.grid.p;
 }
@@ -317,6 +319,7 @@ int run(const nr_csirs_disc_ring_t *r, const nr_csirs_disc_hyp_t *hyps, int nh,
       slots.clear();for(int i:indices) slots.push_back(r->meta[i].slot);
     }
     std::fill(mean.begin(), mean.begin()+nc, 0);
+    CsirsDiscGate gate; /* one budget slice per hypothesis: launches + the wait below */
     if (entry && slots.empty() && entry->count) {
       reduce_scores<<<1,256,0,stream>>>(history,c,h,entry->count,dw.p);
       if (cudaGetLastError()!=cudaSuccess || copy(out+h,dw.p,sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess)
@@ -559,6 +562,7 @@ extern "C" int nr_csirs_disc_gpu_refine_entry(const nr_csirs_disc_ring_t *r,nr_c
     nr_csirs_disc_sweep_map_t map={};
     if(nr_csirs_disc_sweep_map_into(&full,r->n_rb,&map,w.mapping.data(),w.mapping.size())) return -1;
     const short2 *grid=upload_grid(r);if(!grid) return -1;
+    CsirsDiscGate gate;
     if(copy(w.dm.p,map.re,map.n_re*sizeof(*map.re),cudaMemcpyHostToDevice)!=cudaSuccess
        || copy(w.meta.p,r->meta,r->capacity*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     map.re=w.dm.p;auto ring=*r;ring.grid_base=(int16_t *)grid;ring.meta=w.meta.p;
@@ -583,6 +587,7 @@ extern "C" int nr_csirs_disc_gpu_confirm_entry(const nr_csirs_disc_ring_t *r,con
     if(nr_csirs_disc_sweep_map_into(h,r->n_rb,&map,w.mapping.data(),w.mapping.size())) return -1;
     map.re=w.dm.p;
     const short2 *grid=r->device_valid?(const short2 *)r->device_grid:w.grid.p;
+    CsirsDiscGate gate;
     energies<<<1,1,0,workspace.stream>>>(grid,r->n_rb,*h,map,w.energy.p);
     if(cudaGetLastError()!=cudaSuccess || copy(scores,w.energy.p,5*sizeof(double),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
     scores[0]=win.z;return 0;

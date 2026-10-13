@@ -177,6 +177,100 @@ static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
   }
 }
 
+/* OTATAIL: ISAC_GPU_HEARTBEAT=1 (default off). A probe thread times two one-block kernels every 10 ms on a
+ * real-time-partition stream: k_hb over device memory only, then k_hb over 4 KB of pageable host memory (direct
+ * mode, the way the chest kernels read rxdataF). Every 5 s it logs the GPU-time and launch-to-completion maxima and
+ * the probes above 2 ms (GPU_HEARTBEAT); a probe above 5 ms is logged at once (GPU_HEARTBEAT STALL). An on-air
+ * stall is then device-wide (both probes slow), host-memory-path only (host probe slow) or PDSCH-specific
+ * (neither). At start it also writes %smid from the RT stream and from a discovery-partition stream
+ * (GPU_GREEN_VERIFY): with ISAC_GPU_RT_ISOLATE=1 the two SM sets must not overlap. */
+__global__ void k_hb(const int *__restrict__ src, int *dst, int n)
+{
+  int s = 0;
+  if (src) for (int i = threadIdx.x; i < n; i += blockDim.x) s += src[i];
+  if (threadIdx.x == 0) dst[0] = s;
+}
+__global__ void k_smid(unsigned *out)
+{
+  unsigned id;
+  asm("mov.u32 %0, %%smid;" : "=r"(id));
+  for (volatile int i = 0; i < 20000; i++) {} /* stay resident so the blocks spread over the partition */
+  if (threadIdx.x == 0) out[blockIdx.x] = id;
+}
+static std::atomic<bool> g_hb_stop{false};
+static std::thread g_hb_thread;
+static void hb_join(void) { g_hb_stop = true; if (g_hb_thread.joinable()) g_hb_thread.join(); }
+static void hb_loop(cudaStream_t s, cudaEvent_t e0, cudaEvent_t e1, int *dst, const int *host_src)
+{
+  float max_gpu[2] = {0, 0}, max_wall[2] = {0, 0};
+  unsigned over2[2] = {0, 0}, n = 0;
+  auto last = std::chrono::steady_clock::now();
+  while (!g_hb_stop) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    struct timespec ts;
+    for (int k = 0; k < 2; k++) {
+      if (k && !host_src) break;
+      const auto t0 = std::chrono::steady_clock::now();
+      cudaEventRecord(e0, s);
+      k_hb<<<1, 128, 0, s>>>(k ? host_src : nullptr, dst, 1024);
+      cudaEventRecord(e1, s);
+      if (cudaEventSynchronize(e1) != cudaSuccess) return;
+      float gpu = 0;
+      cudaEventElapsedTime(&gpu, e0, e1);
+      const float wall = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      max_gpu[k] = std::max(max_gpu[k], gpu);
+      max_wall[k] = std::max(max_wall[k], wall);
+      if (wall > 2.f) over2[k]++;
+      if (wall > 5.f) {
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        fprintf(stderr, "SENSING: GPU_HEARTBEAT STALL t=%ld.%03ld kind=%s gpu_ms=%.2f wall_ms=%.2f\n", (long)ts.tv_sec,
+                ts.tv_nsec / 1000000, k ? "host" : "dev", gpu, wall);
+      }
+    }
+    n++;
+    if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(5)) {
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      fprintf(stderr, "SENSING: GPU_HEARTBEAT t=%ld.%03ld n=%u dev_max_ms=%.2f/%.2f dev_over2=%u host_max_ms=%.2f/%.2f host_over2=%u (gpu/wall)\n",
+              (long)ts.tv_sec, ts.tv_nsec / 1000000, n, max_gpu[0], max_wall[0], over2[0], max_gpu[1], max_wall[1], over2[1]);
+      max_gpu[0] = max_gpu[1] = max_wall[0] = max_wall[1] = 0;
+      over2[0] = over2[1] = n = 0;
+      last = std::chrono::steady_clock::now();
+    }
+  }
+}
+/* hb_start: creates the probe's stream, events and buffers (before the RX allocation fence), runs the SM check and
+ * starts the thread. Returns a CUDA error only for the probe's own resources. */
+static int hb_start(int greatest)
+{
+  cudaStream_t s = nullptr, sd = nullptr;
+  cudaEvent_t e0, e1;
+  int *dst = nullptr;
+  unsigned *smid = nullptr;
+  if (!nr_gpu_green_stream(&s, greatest, true, 7)) CK(cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, greatest));
+  CK(cudaEventCreate(&e0));
+  CK(cudaEventCreateWithFlags(&e1, cudaEventBlockingSync));
+  CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&dst, 4096));
+  CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&smid, 2 * 1024 * sizeof(unsigned)));
+  unsigned *dsm = (unsigned *)nr_gpu_device_ptr(smid);
+  const bool disc = nr_gpu_green_stream(&sd, 0, false);
+  k_smid<<<1024, 64, 0, s>>>(dsm);
+  if (disc) k_smid<<<1024, 64, 0, sd>>>(dsm + 1024);
+  CK((cudaError_t)nr_gpu_sync(s));
+  if (disc) CK((cudaError_t)nr_gpu_sync(sd));
+  uint64_t mrt = 0, mds = 0;
+  for (int i = 0; i < 1024; i++) {
+    mrt |= 1ull << (smid[i] & 63);
+    if (disc) mds |= 1ull << (smid[1024 + i] & 63);
+  }
+  fprintf(stderr, "SENSING: GPU_GREEN_VERIFY rt_sms=%d disc_sms=%d overlap=%d rt_mask=%016llx disc_mask=%016llx\n",
+          __builtin_popcountll(mrt), __builtin_popcountll(mds), __builtin_popcountll(mrt & mds), (unsigned long long)mrt,
+          (unsigned long long)mds);
+  const int *host_src = g_exact_direct ? (const int *)calloc(1024, sizeof(int)) : nullptr;
+  g_hb_thread = std::thread(hb_loop, s, e0, e1, dst, host_src);
+  atexit(hb_join);
+  return 0;
+}
+
 /* ---------------------------------------------------------------- FEP ---- */
 /* Gather one OFDM symbol per (ant, sym): CP removal with the 1/8-CP early window, ring wrap, FO
  * de-rotation (phase origin = abs_sample, as nr_fo_compensation), int16 -> float. */
@@ -705,6 +799,11 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
   CK(cudaMemsetAsync(g_d_fft_in, 0, (size_t)cfg->nant * ns * N * sizeof(float2), g_stream));
   if (cufftExecC2C(g_plan, (cufftComplex *)g_d_fft_in, (cufftComplex *)g_d_rxF, CUFFT_FORWARD) != CUFFT_SUCCESS) return -1;
   CK((cudaError_t)nr_gpu_sync(g_stream));
+  if (getenv("ISAC_GPU_HEARTBEAT") && atoi(getenv("ISAC_GPU_HEARTBEAT")) == 1) {
+    int least = 0, greatest = 0;
+    CK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+    if (hb_start(greatest)) return -1;
+  }
   return 0;
 }
 

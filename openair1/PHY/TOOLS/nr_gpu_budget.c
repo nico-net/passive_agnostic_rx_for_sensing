@@ -142,6 +142,9 @@ void nr_gpu_budget_discovery_end(uint64_t now,uint64_t us) {
   if(us>5000)atomic_fetch_add(&overruns,1);
   atomic_fetch_and(&owner,~DISC_OWNER);
 }
+static _Atomic int prefer;
+void nr_gpu_budget_discovery_prefer(int on) {atomic_store(&prefer,on);}
+int nr_gpu_budget_discovery_preferred(void) {return atomic_load(&prefer);}
 /* nr_gpu_budget_fault: latches the GPU budget fault: every later discovery_begin returns -1 until the process restarts. No-op when disabled. */
 void nr_gpu_budget_fault(void) {if(nr_gpu_budget_enabled())atomic_store(&fault,1);}
 /* nr_gpu_budget_metrics: fills *out with the discovery share of GPU time since start (percent), yields, maximum RT wait, fallbacks and overruns. */
