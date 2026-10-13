@@ -1,0 +1,6 @@
+pci675:ota/t26w.env:tests/passive_rx/dgx/ue.passive.ota.chestfast.replay.cfg:3426570000:1171:-4849
+pci508:ota/t26w.env:tests/passive_rx/dgx/ue.passive.ota.chestfast.replay.cfg:3570570000:1171:-4761
+pci4:ota/t26w.env:tests/passive_rx/dgx/ue.passive.ota.chestfast.replay.cfg:3570570000:1171:-5297
+pci403:ota/t26w.env:tests/passive_rx/dgx/ue.passive.ota.chestfast.replay.cfg:3625290000:1171:2225
+pci415:ota/t26w.env:tests/passive_rx/dgx/ue.passive.ota.chestfast.replay.cfg:3680010000:1171:-4849
+pci923:ota/t26w.env:tests/passive_rx/dgx/ue.passive.ota.chestfast.replay.cfg:3731910000:1169:-4850

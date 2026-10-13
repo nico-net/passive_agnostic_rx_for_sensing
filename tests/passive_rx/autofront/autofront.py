@@ -3,6 +3,7 @@
   autofront.py discover CAPDIR... [--out cells.json] [--dur 1] [--start 0] [--nch 4] [--top 25] [--tol-ppm 2] [--sss-min 3] [--dmrs-min 3]
   autofront.py args cells.json [--log run.log]      (receiver args per cell; with --log: second-pass refinement of ONE run.log)
   autofront.py triple cells.json PCI [run.log]       ("C ssb fo" for scripts; with run.log = pass 2)
+  autofront.py refine cells.json PCI run.log        (write k_ssb/SIB1 facts of a receiver run into cells.json; specs then use pass 2)
   autofront.py specs cells.json ENVFILE CFGFILE     (OTA window spec list TAG:ENV:CFG:FREQ:SSB:FO)
 Detection = ssb_search2 (multi-channel non-coherent PSS fold, SSS->PCI ratio, PBCH-DMRS i_ssb) + a CFO hypothesis grid derived from the
 SCS and the oscillator tolerance (no per-cell value) + PSS/SSS phase-slope CFO. Offline analysis; the pure functions below are the C/GPU port contract.
@@ -39,6 +40,13 @@ def refine_from_log(text):
         m = re.search(rx, text)
         if m: o[key] = int(m.group(1)) if key not in ('mcc', 'mnc') else m.group(1)
     return o
+
+def apply_refine(cells, pci, info):
+    """pass 2: write the receiver-log facts (k_ssb, SIB1 PRB/offsetToPointA, PLMN) into the cell dict(s) of that PCI; adds tune_pass2."""
+    for c in cells:
+        if c['pci'] == pci and 'k_ssb' in info:
+            c.update({k: info[k] for k in ('k_ssb', 'sib1_nrb', 'offset_to_point_a', 'mcc', 'mnc') if k in info}); c['tune_pass2'] = tune(c, info['k_ssb'])
+    return cells
 
 def spec_line(tag, envf, cfgf, t): return f"{tag}:{envf}:{cfgf}:{t['C_hz']}:{t['ssb']}:{t['initial_fo']}"
 
@@ -102,6 +110,10 @@ def main(a):
     elif cmd == 'triple':                                    # triple cells.json PCI [run.log] -> "C ssb fo" for scripts
         c = next(c for c in json.load(open(a[2])) if c['pci'] == int(a[3]))
         t = tune(c, refine_from_log(open(a[4]).read()).get('k_ssb') if len(a) > 4 else None); print(t['C_hz'], t['ssb'], t['initial_fo'])
+    elif cmd == 'refine':                                    # refine cells.json PCI run.log : pass 2 facts into cells.json (in place)
+        cells = json.load(open(a[2])); info = refine_from_log(open(a[4]).read())
+        if info.get('pci') not in (None, int(a[3])): sys.exit(f"run.log synced PCI {info['pci']}, not {a[3]}")
+        json.dump(apply_refine(cells, int(a[3]), info), open(a[2], 'w'), indent=1); print(info)
     elif cmd == 'specs':
         for c in json.load(open(a[2])): print(spec_line(f"pci{c['pci']}", a[3], a[4], tune(c, c.get('k_ssb'))))
     else: sys.exit(__doc__)
