@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """fastscan.py : fast blind n78/n77 cell scanner (30 kHz SCS), same cells.json as autofront.py discover, ~100x faster.
-  fastscan.py CAPDIR... [--out cells.json] [--start 0] [--m 12] [--nch 4] [--top 12] [--sss-min 2] [--dmrs-min 2.5] [--verify-chunks 50]
+  fastscan.py CAPDIR... [--out cells.json] [--start 0] [--m 12] [--nch 4] [--top 12] [--sss-min 2] [--dmrs-min 2.5] [--verify-chunks 50] [--n2-ex 3.0]
 Stage 1 (detect): M 20 ms chunks x nch channels, one FFT per chunk/channel, every GSCN band cut in the frequency domain at 3.84 MS/s,
   PSS correlation by FFT, |cc|^2 summed over channels, folded modulo k*20 ms (k=1,2,4,8). One CFO hypothesis (0): the 30 kHz PSS symbol
   tolerates +-7 kHz at <= 1 dB loss, so the CFO grid of autofront.py is not needed.
@@ -22,9 +22,11 @@ NB = 128                        # PSS body position in the window (decimated sam
 SYM = NF + CP
 WK = int(os.environ.get('FASTSCAN_WORKERS', '10'))
 
-def keep(rows, sss_min=2.0, dmrs_min=2.5, dmrs_min_multi=2.0):
-    """reliable detections, best per (gscn, pci). Co-located cells (n_cells > 1) already passed the SSS group gap test, so a lower DMRS bar."""
-    ok = [r for r in rows if r['sss_ratio'] >= sss_min and r['dmrs_ratio'] >= (dmrs_min_multi if r.get('n_cells', 1) > 1 else dmrs_min)]
+def keep(rows, sss_min=2.0, dmrs_min=2.5, dmrs_min_multi=2.0, sss_strong=3.0, dmrs_min_strong=2.0):
+    """reliable detections, best per (gscn, pci). Co-located cells (n_cells > 1) already passed the SSS group gap test, so a lower DMRS bar;
+    so does a clear single SSS winner (gap >= sss_strong over 336 hypotheses: the noise gap is 1.0-1.4), e.g. the weak TIM 675 (sss 3.74, dmrs 2.47)."""
+    lo = lambda r: dmrs_min_multi if r.get('n_cells', 1) > 1 else dmrs_min_strong if r['sss_ratio'] >= sss_strong else dmrs_min
+    ok = [r for r in rows if r['sss_ratio'] >= sss_min and r['dmrs_ratio'] >= lo(r)]
     return pick_cells(ok, 0, 0)
 
 def dedupe(cells, gscn_span=3):
@@ -64,10 +66,15 @@ def stage1(cap, c0, m, grid_hz, fold=8):
             P = sf.ifft(X[:, idx[g]][:, None, :] * Tf[None], axis=-1)
             acc[g, c % fold] += (P.real ** 2 + P.imag ** 2).sum(0)
         list(pool.map(one, range(G)))
-    res = []
+    res = []; per_n2 = []
     for g in range(G):
         mm, k, sp, t, n = S.foldmetric(acc[g], m); k, sp = period_k(acc[g], t, n, k, m); res.append((mm, k, sp, t, n))
-    return res, D
+        # best burst per N_ID_2: a cell with another N_ID_2 at the same GSCN (PCI 614 beside 508 + 4) is hidden behind the strongest
+        r3 = []
+        for t2 in range(3):
+            m2, k2, s2, _, n2 = S.foldmetric(acc[g][:, t2:t2 + 1], m); k2, s2 = period_k(acc[g], t2, n2, k2, m); r3.append((m2, k2, s2, t2, n2))
+        per_n2.append(r3)
+    return res, D, per_n2
 
 def window(cap, a, off_hz):
     """(nch, 2048) baseband at 7.68 MS/s: band at off_hz (relative to the capture centre) of raw samples a..a+W."""
@@ -153,26 +160,27 @@ def verify(cap, c0, nchunks, off_hz, n2, k, sp, n32, maxocc=40):
         for r in decode(occ, [None if n is None else NB - 24 + n for n in ns], n2): r['dt_samples'] = ctr - 24; res.append(r)
     return res
 
-def scan(capdir, start=0.0, m=12, nch=4, top=40, vchunks=50, ex_min=1.0, log=None):
+def scan(capdir, start=0.0, m=12, nch=4, top=40, vchunks=50, ex_min=1.0, n2_ex=3.0, log=None):
     cap = S.Cap(capdir, nch); c0 = int(start / 0.02); nchunks = min(vchunks, cap.n // CH - c0); m = min(m, nchunks)
     lim = 61.44 * 0.82; N0 = int(np.ceil((cap.c - lim - 3000) / 1.44)); N1 = int((cap.c + lim - 3000) / 1.44); Ns = np.arange(N0, N1 + 1)
     base = (3000 + Ns * 1.44 - cap.c) * 1e6 - 30e3
-    t0 = time.time(); res, D = stage1(cap, c0, m, base); t1 = time.time()
+    t0 = time.time(); res, D, per_n2 = stage1(cap, c0, m, base); t1 = time.time()
     null = float(np.median([r[0] for r in res])); order = np.argsort([-r[0] for r in res]); out = []
     for g in order[:top]:
         ex = res[g][0] - null
         if ex < ex_min: break
-        mm, k, sp, t, n = res[g]
-        for r2 in verify(cap, c0, nchunks, base[g], t, k, sp, n):
-            if log: print(f'  cand GSCN {7499 + Ns[g]} ex {ex:.2f} k {k} dt {r2["dt_samples"]} -> {(r2["pci"], round(r2["sss_ratio"], 2), round(r2["dmrs_ratio"], 2), round(r2["cfo_hz"]))}', file=log)
-            out.append(dict(gscn=int(7499 + Ns[g]), ssb_mhz=round(3000 + Ns[g] * 1.44, 2), pci=int(r2['pci']), metric_db=round(ex, 2),
-                sss_ratio=round(r2['sss_ratio'], 2), dmrs_ratio=round(r2['dmrs_ratio'], 2), i_ssb=r2['i_ssb'], scs_khz=30, cfo_hz=round(r2['cfo_hz']),
-                n_occ=r2['n_occ'], n_cells=r2['n_cells'], dt_samples_7p68=r2['dt_samples'], capture=os.path.abspath(capdir), capture_centre_mhz=cap.c))
+        cands = [res[g]] + [r for r in per_n2[g] if r[3] != res[g][3] and r[0] - null >= max(ex_min, n2_ex)]   # strongest N_ID_2 first, then the others with their own burst
+        for mm, k, sp, t, n in cands:
+            for r2 in verify(cap, c0, nchunks, base[g], t, k, sp, n):
+                if log: print(f'  cand GSCN {7499 + Ns[g]} n2 {t} ex {mm - null:.2f} k {k} dt {r2["dt_samples"]} -> {(r2["pci"], round(r2["sss_ratio"], 2), round(r2["dmrs_ratio"], 2), round(r2["cfo_hz"]))}', file=log)
+                out.append(dict(gscn=int(7499 + Ns[g]), ssb_mhz=round(3000 + Ns[g] * 1.44, 2), pci=int(r2['pci']), metric_db=round(mm - null, 2),
+                    sss_ratio=round(r2['sss_ratio'], 2), dmrs_ratio=round(r2['dmrs_ratio'], 2), i_ssb=r2['i_ssb'], scs_khz=30, cfo_hz=round(r2['cfo_hz']),
+                    n_occ=r2['n_occ'], n_cells=r2['n_cells'], dt_samples_7p68=r2['dt_samples'], capture=os.path.abspath(capdir), capture_centre_mhz=cap.c))
     if log: print(f'  {capdir}: stage1 {t1 - t0:.1f} s, verify {time.time() - t1:.1f} s', file=log)
     return out
 
 def main(a):
-    kw = dict(start=0.0, m=12, nch=4, top=40, vchunks=50); out = 'cells.json'; sss, dmrs = 2.0, 2.5; dirs = []; i = 1
+    kw = dict(start=0.0, m=12, nch=4, top=40, vchunks=50, n2_ex=3.0); out = 'cells.json'; sss, dmrs = 2.0, 2.5; dirs = []; i = 1
     while i < len(a):
         if a[i].startswith('--'):
             k = a[i][2:].replace('-', '_')

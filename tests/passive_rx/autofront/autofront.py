@@ -4,12 +4,14 @@
   autofront.py args cells.json [--log run.log]      (receiver args per cell; with --log: second-pass refinement of ONE run.log)
   autofront.py triple cells.json PCI [run.log]       ("C ssb fo" for scripts; with run.log = pass 2)
   autofront.py refine cells.json PCI run.log        (write k_ssb/SIB1 facts of a receiver run into cells.json; specs then use pass 2)
-  autofront.py specs cells.json ENVFILE CFGFILE     (OTA window spec list TAG:ENV:CFG:FREQ:SSB:FO)
+  autofront.py specs cells.json ENVFILE CFGFILE     (OTA window spec list TAG:ENV:CFG:FREQ:SSB:FO[:RB])
+  autofront.py geom cells.json PCI                  (cell without SIB1 carrier info, after pass 2: carrier-sized grid from the occupied-bandwidth block, carrier_edges.py)
 Detection = ssb_search2 (multi-channel non-coherent PSS fold, SSS->PCI ratio, PBCH-DMRS i_ssb) + a CFO hypothesis grid derived from the
 SCS and the oscillator tolerance (no per-cell value) + PSS/SSS phase-slope CFO. Offline analysis; the pure functions below are the C/GPU port contract.
 shortcut: 30 kHz SCS raster only (15 kHz NR was not seen at this site), one SSB (strongest) per GSCN, python/CPU."""
 import sys, os, re, json, math
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'survey'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 SCS_HZ = 30e3
 SSB_FIRST = 1171       # first-pass --ssb (k_SSB unknown), CARRIERS.md rule
@@ -114,7 +116,18 @@ def main(a):
         cells = json.load(open(a[2])); info = refine_from_log(open(a[4]).read())
         if info.get('pci') not in (None, int(a[3])): sys.exit(f"run.log synced PCI {info['pci']}, not {a[3]}")
         json.dump(apply_refine(cells, int(a[3]), info), open(a[2], 'w'), indent=1); print(info)
+    elif cmd == 'geom':                                      # geom cells.json PCI : tune_geom into cells.json (in place)
+        import carrier_edges as CE
+        cells = json.load(open(a[2])); c = next(c for c in cells if c['pci'] == int(a[3]))
+        if c.get('k_ssb') is None: sys.exit('run pass 2 first (k_ssb from the MIB)')
+        if 'sib1_nrb' in c and 'offset_to_point_a' in c: sys.exit('SIB1 carries the carrier: use retune_args.py / pass 2')
+        f, p = CE.psd(c['capture']); lo, hi, floor, level = CE.block(f, p, c['ssb_mhz'] * 1e6)
+        c['tune_geom'] = CE.geometry(lo, hi, c['ssb_mhz'] * 1e6, c['k_ssb']); c['tune_geom']['initial_fo'] = int(round(c['cfo_hz']))
+        json.dump(cells, open(a[2], 'w'), indent=1); print(c['tune_geom'])
     elif cmd == 'specs':
-        for c in json.load(open(a[2])): print(spec_line(f"pci{c['pci']}", a[3], a[4], tune(c, c.get('k_ssb'))))
+        for c in json.load(open(a[2])):
+            print(spec_line(f"pci{c['pci']}", a[3], a[4], tune(c, c.get('k_ssb'))))
+            g = c.get('tune_geom')
+            if g: print(spec_line(f"pci{c['pci']}g", a[3], a[4], dict(C_hz=g['C_hz'], ssb=g['ssb'], initial_fo=g['initial_fo'])) + f":{g['size']}")
     else: sys.exit(__doc__)
 if __name__ == '__main__': main(sys.argv)

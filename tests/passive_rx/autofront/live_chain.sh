@@ -5,6 +5,8 @@
 #   live_chain.sh discover OUT CAPDIR...      fastscan.py (~7 s per 1 s x 4 ch capture) -> OUT/cells.json, OUT/triples.txt (PCI, GSCN, pass-1 -C/--ssb/--initial-fo),
 #                                             OUT/specs.txt (OTA window spec lines TAG:ENV:CFG:FREQ:SSB:FO; ENVF/CFGF select env/cfg)
 #   live_chain.sh all OUT CENTER_MHZ...       capture, then discover on OUT/c*
+#   live_chain.sh geom OUT PCI               after pass2, for a cell whose SIB1 has no carrier info (NSA-style 403, none at all: PCI 4): carrier-sized grid from the
+#                                             occupied-bandwidth block of the capture (carrier_edges.py) -> OUT/specs.txt gets a PCI<n>g line with the :RB field. Offline.
 #   live_chain.sh pass2 OUT PCI RUN.LOG [ENVF CFGF]      after the first receiver run of that cell synced+MIB: k_SSB -> --ssb 1164+k_SSB/2, SIB1 PRB/offsetToPointA/PLMN
 #                                             into OUT/cells.json, OUT/specs.txt rewritten with pass-2 triples; retune_args.py line if the log has an
 #                                             'ACQ carrier MISMATCH' (-C/-r/--ssb that put the SIB1 carrier inside an RB-aligned grid).
@@ -30,5 +32,9 @@ pass2)
   python3 -I "$AF/autofront.py" specs "$out/cells.json" "$EF" "$CF" > "$out/specs.txt"
   python3 -I "$AF/autofront.py" args "$out/cells.json" --log "$log"
   python3 -I "$D/tests/passive_rx/survey/retune_args.py" "$log" || true ;;
-*) sed -n '2,13p' "$0"; exit 2 ;;
+geom)
+  out=$2; pci=$3; read -r EF CF < "$out/envcfg.txt" 2>/dev/null || { EF=${ENVF:-ota/t26t.env}; CF=${CFGF:-tests/passive_rx/dgx/ue.passive.ota.chestfast.replay.cfg}; }
+  "$H" python3 -I "$AF/autofront.py" geom "$out/cells.json" "$pci"
+  python3 -I "$AF/autofront.py" specs "$out/cells.json" "$EF" "$CF" > "$out/specs.txt" ;;
+*) sed -n '2,15p' "$0"; exit 2 ;;
 esac
