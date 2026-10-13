@@ -32,3 +32,33 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_shm_iq_uhd_core)
   add_test(NAME test_shm_iq_uhd_core COMMAND test_shm_iq_uhd_core)
 endif()
+
+# MPCI shared channelizer: one process mixes + decimates the wideband ring into one narrow ring per cell (<ring>_<tag>), see shm_iq_chan.c.
+add_executable(shm_iq_chan shm_iq_chan.c shm_iq_ring.c iq_ddc.c)
+set_source_files_properties(iq_ddc.c PROPERTIES COMPILE_OPTIONS "-O3")
+target_link_libraries(shm_iq_chan PRIVATE m dl pthread rt)
+set_target_properties(shm_iq_chan PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+# GPU backend, dlopen'd by shm_iq_chan --gpu from next to the executable. Same CUDA pattern as td_cb0_gpu (ENABLE_LDPC_CUDA, arch list
+# from LDPC_CUDA_ARCH / CMAKE_CUDA_ARCHITECTURES, e.g. 121 on the GB10); the default build never sees nvcc.
+if(ENABLE_LDPC_CUDA)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  include(${PROJECT_SOURCE_DIR}/cmake_targets/nr_gpu_arch.cmake)
+  nr_gpu_architectures("${CMAKE_CUDA_ARCHITECTURES}" SHM_IQ_CHAN_ARCHS)
+  add_library(shm_iq_chan_gpu MODULE shm_iq_chan_gpu.cu)
+  set_target_properties(shm_iq_chan_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" PREFIX "lib"
+                        CUDA_ARCHITECTURES "${SHM_IQ_CHAN_ARCHS}" POSITION_INDEPENDENT_CODE ON CUDA_RUNTIME_LIBRARY Shared)
+  target_include_directories(shm_iq_chan_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(shm_iq_chan_gpu PRIVATE CUDA::cudart m)
+  add_dependencies(shm_iq_chan shm_iq_chan_gpu)
+endif()
+
+if(ENABLE_TESTS)
+  add_executable(test_shm_iq_chan tests/test_shm_iq_chan.c shm_iq_ring.c)
+  target_link_libraries(test_shm_iq_chan PRIVATE m rt)
+  add_dependencies(test_shm_iq_chan shm_iq_chan)
+  add_dependencies(tests test_shm_iq_chan)
+  add_test(NAME test_shm_iq_chan COMMAND test_shm_iq_chan $<TARGET_FILE:shm_iq_chan>)
+  add_test(NAME test_shm_iq_chan_selftest COMMAND shm_iq_chan --selftest --threads 2)
+endif()
