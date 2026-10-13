@@ -110,10 +110,9 @@ void shm_iq_ring_set_away(shm_iq_ring_t *r, uint64_t until_ns)
 
 void shm_iq_ring_return(shm_iq_ring_t *r, double center_hz)
 {
+  /* away clears at the next write, after its fresh heartbeat (consumers read away first); the heartbeat is not
+   * refreshed here: a backward tick at that write (device reload while away) sizes its jump from it */
   shm_iq_ring_new_epoch(r, center_hz);
-  atomic_store(&r->hdr->heartbeat_ns, shm_iq_now_ns());
-  atomic_store(&r->hdr->away, 0);
-  atomic_store(&r->hdr->dwell_until_ns, 0);
 }
 
 void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz)
@@ -166,6 +165,7 @@ void shm_iq_ring_write(shm_iq_ring_t *r, int64_t tick, void *const *bufs, int n,
   }
   atomic_store_explicit(&h->head, head + (uint64_t)n, memory_order_release);
   atomic_store_explicit(&h->heartbeat_ns, shm_iq_now_ns(), memory_order_relaxed);
+  if (atomic_load_explicit(&h->away, memory_order_relaxed)) { atomic_store(&h->away, 0); atomic_store(&h->dwell_until_ns, 0); }
 }
 
 int shm_iq_ring_copy(const shm_iq_ring_t *r, uint64_t pos, int n, unsigned channels, int16_t *const *dst)

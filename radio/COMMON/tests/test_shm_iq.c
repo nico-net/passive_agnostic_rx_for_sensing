@@ -8,8 +8,10 @@
 #include "../shm_iq_ring.h"
 #include <complex.h>
 #include <pthread.h>
+#include <sched.h>
 #include <dlfcn.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -144,6 +146,7 @@ static int test_ring_stress(void)
   static int16_t y[2 * 512];
   int16_t *dst[1] = {y};
   long ok = 0, torn = 0, bad = 0;
+  while (atomic_load(&c.hdr->head) < 1024) sched_yield(); /* on a loaded host the writer may start late */
   for (int it = 0; it < 2000000 && ok < 20000; ++it) {
     const uint64_t head = atomic_load(&c.hdr->head);
     if (head < 1024) continue;
@@ -283,7 +286,8 @@ typedef struct {
   int64_t tick, first_after_set;
   double set_log[64];
   int64_t first_tick_log[64];
-  int pending_first;
+  double set_s[64];   /* wall time each fk_set_freq took */
+  int pending_first, set_sleep_us, ncalls;
 } fake_t;
 static fake_t g_fk;
 static const double BB[4] = {1e6, 2e6, 3e6, 4e6};          /* subset test: channel c carries BB[c] */
@@ -320,8 +324,14 @@ static int fk_read(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
 static int fk_set_freq(openair0_device_t *d, openair0_config_t *cfg)
 {
   (void)d;
+  const uint64_t t0 = shm_iq_now_ns();
+  g_fk.ncalls++;
+  if (g_fk.set_sleep_us) { struct timespec w = {0, g_fk.set_sleep_us * 1000L}; nanosleep(&w, NULL); } /* a blocking LO retune */
   for (int c = 0; c < g_fk.nch; ++c) g_fk.freq[c] = cfg->rx_freq[c];
-  if (g_fk.nset < 64) { g_fk.set_log[g_fk.nset] = cfg->rx_freq[0]; g_fk.nset++; g_fk.pending_first = 1; }
+  if (g_fk.nset < 64) {
+    g_fk.set_s[g_fk.nset] = (double)(shm_iq_now_ns() - t0) * 1e-9;
+    g_fk.set_log[g_fk.nset] = cfg->rx_freq[0]; g_fk.nset++; g_fk.pending_first = 1;
+  }
   return 0;
 }
 
@@ -430,10 +440,11 @@ static int child_dwell(void)
   char spec[128], dw[160];
   snprintf(spec, sizeof(spec), "%s,%s", a, b);
   snprintf(dw, sizeof(dw), "%s@3598e6:40,%s@3680e6:30", a, b);
-  setenv("ISAC_SHM_IQ_PUB", spec, 1); setenv("ISAC_SHM_IQ_DWELL", dw, 1); setenv("ISAC_SHM_IQ_SETTLE_US", "2000", 1);
+  setenv("ISAC_SHM_IQ_PUB", spec, 1); setenv("ISAC_SHM_IQ_DWELL", dw, 1); setenv("ISAC_SHM_IQ_SETTLE_US", "500", 1);
   setenv("ISAC_SHM_IQ_CAPACITY", "262144", 1); unsetenv("ISAC_SHM_IQ_PUB_FREQ");
   openair0_device_t d; openair0_config_t cfg;
   fk_init(&d, &cfg, 1, 1);
+  g_fk.set_sleep_us = 500; /* fake sample time runs slower than wall time: keep retune + settle well inside a dwell */
   shm_iq_pub_maybe_wrap(&d, &cfg);
   CHECK(g_fk.nset == 1 && g_fk.set_log[0] == 3598e6, "initial LO");
   shm_iq_ring_t ra, rb;
@@ -462,8 +473,9 @@ static int child_dwell(void)
   CHECK(atomic_load(&ra.hdr->rf_epoch) >= 1 && atomic_load(&rb.hdr->rf_epoch) >= 1, "epochs bumped a=%llu b=%llu",
         (unsigned long long)atomic_load(&ra.hdr->rf_epoch), (unsigned long long)atomic_load(&rb.hdr->rf_epoch));
   CHECK(atomic_load(&ra.hdr->gaps) >= 1 && atomic_load(&rb.hdr->gaps) >= 1, "forward timestamp jumps");
-  /* settle: the current run of each ring starts >= settle ticks after the first read following the retune that preceded it */
-  const double settle = 2e-3 * FR;
+  /* settle: the current run of each ring starts >= retune + settle ticks after the first read following the retune that
+   * preceded it (the radio streams on while set_freq blocks); slack covers the wrapper's own overhead around set_freq */
+  const double settle = 0.5e-3 * FR, slack = 5e-3 * FR;
   const shm_iq_ring_t *rr[2] = {&ra, &rb};
   for (int q = 0; q < 2; ++q) {
     const shm_iq_hdr_t *h = rr[q]->hdr;
@@ -471,7 +483,8 @@ static int child_dwell(void)
     const int64_t run_tick = atomic_load(&h->tick_offset) + (int64_t)atomic_load(&h->valid_from);
     int ok = 0;
     for (int k = 1; k < g_fk.nset; ++k)
-      if (g_fk.set_log[k] == (q ? 3680e6 : 3598e6) && run_tick >= g_fk.first_tick_log[k] + (int64_t)settle && run_tick < g_fk.first_tick_log[k] + (int64_t)settle + 3072)
+      if (g_fk.set_log[k] == (q ? 3680e6 : 3598e6) && run_tick >= g_fk.first_tick_log[k] + (int64_t)(settle + g_fk.set_s[k] * FR)
+          && run_tick < g_fk.first_tick_log[k] + (int64_t)(settle + g_fk.set_s[k] * FR + slack) + 3072)
         ok = 1;
     CHECK(ok, "ring %d run start tick %lld does not honour settle", q, (long long)run_tick);
   }
@@ -490,6 +503,165 @@ static int child_dwell(void)
   shm_unlink(ra.name); shm_unlink(rb.name);
   printf("dwell scheduler ok retunes=%d gapsA=%llu gapsB=%llu epochA=%llu epochB=%llu\n", g_fk.nset, (unsigned long long)atomic_load(&ra.hdr->gaps),
          (unsigned long long)atomic_load(&rb.hdr->gaps), (unsigned long long)atomic_load(&ra.hdr->rf_epoch), (unsigned long long)atomic_load(&rb.hdr->rf_epoch));
+  return 0;
+}
+
+/* per-ring LO across a UE retune and a device reload: the UE's cfg->rx_freq[] is never rewritten, every window moves by
+ * the UE's delta, and a reload neither resets nor double-applies it */
+static int child_freq_reload(void)
+{
+  char a[48], b[48];
+  snprintf(a, sizeof(a), "isac_iq_fa_%d", (int)getpid()); snprintf(b, sizeof(b), "isac_iq_fb_%d", (int)getpid());
+  char spec[128], fq[160];
+  snprintf(spec, sizeof(spec), "%s:0-1,%s:2+3", a, b); snprintf(fq, sizeof(fq), "%s=3598e6,%s=3680e6", a, b);
+  setenv("ISAC_SHM_IQ_PUB", spec, 1); setenv("ISAC_SHM_IQ_PUB_FREQ", fq, 1); setenv("ISAC_SHM_IQ_CAPACITY", "65536", 1);
+  unsetenv("ISAC_SHM_IQ_DWELL"); unsetenv("ISAC_RX_CHAN_MAP");
+  openair0_device_t d; openair0_config_t cfg;
+  fk_init(&d, &cfg, 4, 0);
+  shm_iq_pub_maybe_wrap(&d, &cfg);
+  shm_iq_ring_t ra, rb;
+  CHECK(shm_iq_ring_attach(&ra, a) == 0 && shm_iq_ring_attach(&rb, b) == 0, "attach");
+  const double fA = 3598e6, fB = 3680e6;
+  for (int c = 0; c < 4; ++c) CHECK(cfg.rx_freq[c] == 3600e6, "UE cfg rx_freq[%d] rewritten to %.0f", c, cfg.rx_freq[c]);
+  CHECK(g_fk.freq[0] == fA && g_fk.freq[1] == fA && g_fk.freq[2] == fB && g_fk.freq[3] == fB, "initial per-ring LO");
+  const double step[2] = {1000, 3000};
+  for (int r = 0; r < 2; ++r) {
+    for (int c = 0; c < 4; ++c) cfg.rx_freq[c] = 3600e6 + step[r]; /* nr_rf_card_config_freq: every channel */
+    d.trx_set_freq_func(&d, &cfg);
+    CHECK(g_fk.freq[0] == fA + step[r] && g_fk.freq[3] == fB + step[r], "round %d LO %.0f %.0f", r, g_fk.freq[0], g_fk.freq[3]);
+    CHECK(shm_iq_ring_center(&ra) == fA + step[r] && shm_iq_ring_center(&rb) == fB + step[r], "round %d centres", r);
+    if (r == 0) { /* nrue_ru_reinit: trx_end + openair0_device_load restore the device hooks, then the wrapper re-wraps */
+      d.trx_read_func = fk_read; d.trx_set_freq_func = fk_set_freq;
+      shm_iq_pub_maybe_wrap(&d, &cfg);
+      CHECK(g_fk.freq[0] == fA + step[0] && g_fk.freq[2] == fB + step[0], "reload keeps the UE delta (%.0f)", g_fk.freq[0]);
+      CHECK(shm_iq_ring_center(&ra) == fA + step[0], "reload centre %.0f", shm_iq_ring_center(&ra));
+    }
+  }
+  shm_unlink(ra.name); shm_unlink(rb.name);
+  printf("per-ring LO across retune + reload ok\n");
+  return 0;
+}
+
+/* UE retunes (CFO) from another thread while the read thread switches dwell windows: the final LO must be the active
+ * window's centre plus the UE delta, and its header centre must say so */
+static openair0_device_t g_rd; static openair0_config_t g_rcfg;
+static void *ue_retuner(void *arg)
+{
+  (void)arg;
+  for (int k = 1; k <= 300; ++k) {
+    for (int c = 0; c < 1; ++c) g_rcfg.rx_freq[c] = 3600e6 + 10 * k;
+    g_rd.trx_set_freq_func(&g_rd, &g_rcfg);
+    struct timespec w = {0, 200000};
+    nanosleep(&w, NULL);
+  }
+  return NULL;
+}
+
+static int child_dwell_race(void)
+{
+  char a[48], b[48], spec[128], dw[160];
+  snprintf(a, sizeof(a), "isac_iq_ra_%d", (int)getpid()); snprintf(b, sizeof(b), "isac_iq_rb_%d", (int)getpid());
+  snprintf(spec, sizeof(spec), "%s,%s", a, b); snprintf(dw, sizeof(dw), "%s@3598e6:3,%s@3680e6:2", a, b);
+  setenv("ISAC_SHM_IQ_PUB", spec, 1); setenv("ISAC_SHM_IQ_DWELL", dw, 1); setenv("ISAC_SHM_IQ_SETTLE_US", "10", 1); /* fake time: 512 ticks per >= 0.5 ms read */
+  setenv("ISAC_SHM_IQ_CAPACITY", "65536", 1); unsetenv("ISAC_SHM_IQ_PUB_FREQ"); unsetenv("ISAC_RX_CHAN_MAP");
+  fk_init(&g_rd, &g_rcfg, 1, 0);
+  shm_iq_pub_maybe_wrap(&g_rd, &g_rcfg);
+  shm_iq_ring_t ra, rb;
+  CHECK(shm_iq_ring_attach(&ra, a) == 0 && shm_iq_ring_attach(&rb, b) == 0, "attach");
+  pthread_t th;
+  pthread_create(&th, NULL, ue_retuner, NULL);
+  static int16_t buf[2 * 512];
+  void *bp[1] = {buf};
+  openair0_timestamp_t t;
+  for (int r = 0; r < 400; ++r) CHECK(g_rd.trx_read_func(&g_rd, &t, bp, 512, 1) == 512, "read");
+  pthread_join(th, NULL);
+  CHECK(g_fk.ncalls > 320, "dwell switches happened (%d set_freq calls)", g_fk.ncalls);
+  for (int r = 0; r < 40; ++r) g_rd.trx_read_func(&g_rd, &t, bp, 512, 1); /* a few more cycles: both windows return once more */
+  const double delta = 3000;
+  CHECK(g_fk.freq[0] == 3598e6 + delta || g_fk.freq[0] == 3680e6 + delta, "final LO %.0f is no window + UE delta", g_fk.freq[0]);
+  CHECK(shm_iq_ring_center(&ra) == 3598e6 + delta && shm_iq_ring_center(&rb) == 3680e6 + delta, "header centres %.0f %.0f",
+        shm_iq_ring_center(&ra), shm_iq_ring_center(&rb));
+  shm_unlink(ra.name); shm_unlink(rb.name);
+  printf("dwell vs UE retune ok set_freq=%d\n", g_fk.ncalls);
+  return 0;
+}
+
+/* a single dwell entry is a static window: the LO must go there, not only the header centre */
+static int child_single_dwell(void)
+{
+  char a[48], dw[96];
+  snprintf(a, sizeof(a), "isac_iq_sd_%d", (int)getpid()); snprintf(dw, sizeof(dw), "%s@3598e6:40", a);
+  setenv("ISAC_SHM_IQ_PUB", a, 1); setenv("ISAC_SHM_IQ_DWELL", dw, 1); setenv("ISAC_SHM_IQ_CAPACITY", "65536", 1);
+  unsetenv("ISAC_SHM_IQ_PUB_FREQ"); unsetenv("ISAC_RX_CHAN_MAP");
+  openair0_device_t d; openair0_config_t cfg;
+  fk_init(&d, &cfg, 1, 0);
+  shm_iq_pub_maybe_wrap(&d, &cfg);
+  shm_iq_ring_t r;
+  CHECK(shm_iq_ring_attach(&r, a) == 0, "attach");
+  CHECK(g_fk.freq[0] == 3598e6 && shm_iq_ring_center(&r) == 3598e6 && !atomic_load(&r.hdr->away), "single dwell LO %.0f centre %.0f",
+        g_fk.freq[0], shm_iq_ring_center(&r));
+  shm_unlink(r.name);
+  printf("single dwell entry ok\n");
+  return 0;
+}
+
+/* configurations the publisher must refuse (abort with SHMIQ_PUB_FAIL) instead of publishing mislabelled windows */
+static int expect_abort(const char *spec, const char *freq, const char *map)
+{
+  fflush(stdout);
+  pid_t c = fork();
+  if (!c) {
+    if (!freopen("/dev/null", "w", stderr)) _exit(5);
+    setenv("ISAC_SHM_IQ_PUB", spec, 1); setenv("ISAC_SHM_IQ_CAPACITY", "65536", 1); unsetenv("ISAC_SHM_IQ_DWELL");
+    if (freq) setenv("ISAC_SHM_IQ_PUB_FREQ", freq, 1); else unsetenv("ISAC_SHM_IQ_PUB_FREQ");
+    if (map) setenv("ISAC_RX_CHAN_MAP", map, 1); else unsetenv("ISAC_RX_CHAN_MAP");
+    openair0_device_t d; openair0_config_t cfg;
+    fk_init(&d, &cfg, 4, 0);
+    shm_iq_pub_maybe_wrap(&d, &cfg);
+    _exit(0);
+  }
+  int st;
+  waitpid(c, &st, 0);
+  CHECK(WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT, "spec '%s' freq '%s' map '%s' accepted", spec, freq ? freq : "-", map ? map : "-");
+  return 0;
+}
+
+static int test_pub_refusals(void)
+{
+  int f = 0;
+  f |= expect_abort("rA:0-1,rB:1-2", "rA=3598e6,rB=3680e6", NULL); /* channel 1 on two LOs */
+  f |= expect_abort("rA:0-1,rB:2-3", "rA=3598e6", "2,3,0,1");      /* LO per UHD channel vs subset per OAI antenna */
+  f |= expect_abort("rA:0-x", NULL, NULL);
+  f |= expect_abort("rA:3-1", NULL, NULL);
+  f |= expect_abort("rA:0-1,rA:2-3", NULL, NULL);                  /* the second create would unlink the first */
+  for (int i = 0; i < 16; ++i) { /* best effort: rings a refused child may have created */
+    char n[32]; snprintf(n, sizeof(n), "/r%c", 'A' + i); shm_unlink(n);
+  }
+  if (!f) printf("publisher refusals ok\n");
+  return f;
+}
+
+/* device reload while a window is away: its first write after the return has a backward tick; the index must jump by
+ * the time it was away (the M1 reload rule), not by 1 sample because the return refreshed the heartbeat */
+static int test_return_after_reload(void)
+{
+  char name[64];
+  snprintf(name, sizeof(name), "isac_iq_rr_%d", (int)getpid());
+  shm_iq_ring_t p;
+  CHECK(shm_iq_ring_create(&p, name, 1, 1 << 16, FR, 3.6e9) == 0, "create");
+  static int16_t x[2 * 4096];
+  void *b[1] = {x};
+  shm_iq_ring_write(&p, 1000000, b, 4096, 1);
+  shm_iq_ring_set_away(&p, shm_iq_now_ns() + 20000000ull);
+  struct timespec w = {0, 20000000};
+  nanosleep(&w, NULL);
+  shm_iq_ring_return(&p, 3.6e9);
+  shm_iq_ring_write(&p, 0, b, 4096, 1); /* new device clock */
+  const uint64_t vf = atomic_load(&p.hdr->valid_from);
+  CHECK(vf >= 4096 + (uint64_t)(0.02 * FR), "return after reload jumps %llu samples (< 20 ms)", (unsigned long long)(vf - 4096));
+  shm_iq_ring_detach(&p);
+  char path[80]; snprintf(path, sizeof(path), "/%s", name); shm_unlink(path);
+  printf("return after reload ok jump=%llu\n", (unsigned long long)(vf - 4096));
   return 0;
 }
 
@@ -563,6 +735,11 @@ int main(int argc, char **argv)
   fail |= in_child(child_plain);
   fail |= in_child(child_subsets);
   fail |= in_child(child_dwell);
+  fail |= in_child(child_freq_reload);
+  fail |= in_child(child_single_dwell);
+  fail |= in_child(child_dwell_race);
+  fail |= test_pub_refusals();
+  fail |= test_return_after_reload();
   if (argc > 1) fail |= test_away_consumer(argv[1], 1);
   if (argc > 1) fail |= test_away_consumer(argv[1], 0);
   if (argc > 1) fail |= test_fanout(argv[1]);

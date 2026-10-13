@@ -63,7 +63,8 @@ void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz);
 double shm_iq_ring_center(const shm_iq_ring_t *r);
 /* Producer (v2 metadata). radio_id may be NULL. */
 void shm_iq_ring_set_meta(shm_iq_ring_t *r, const char *radio_id, unsigned time_source);
-/* Producer: time-shared window leaves (until_ns = expected return, CLOCK_MONOTONIC) / returns (new run + epoch bump). */
+/* Producer: time-shared window leaves (until_ns = expected return, CLOCK_MONOTONIC) / returns (new run + epoch bump;
+ * `away` clears at the next write). */
 void shm_iq_ring_set_away(shm_iq_ring_t *r, uint64_t until_ns);
 void shm_iq_ring_return(shm_iq_ring_t *r, double center_hz);
 

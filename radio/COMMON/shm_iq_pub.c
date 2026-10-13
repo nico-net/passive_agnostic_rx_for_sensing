@@ -13,6 +13,7 @@
 #include "common_lib.h"
 #include "shm_iq_ring.h"
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +31,9 @@ typedef struct {
 static pub_ring_t g_r[SHM_IQ_MAX_CH];
 static int g_nr, g_nd, g_cur; /* rings, dwell-group size, active dwell ring */
 static int g_dwell_idx[SHM_IQ_MAX_CH];
-static double g_chf[SHM_IQ_MAX_CH], g_delta, g_ue0, g_settle_ticks, g_rate;
+static double g_chf[SHM_IQ_MAX_CH], g_delta, g_ue0, g_settle_ticks, g_rate, g_retune_ticks;
+/* the dwell retune runs in the read thread, UE retunes (CFO / carrier) in other threads under the shared radio gate */
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_managed, g_settle_pending;
 static int64_t g_settle_end;
 static uint64_t g_dwell_end;
@@ -45,16 +48,19 @@ static double ring_center(const pub_ring_t *p, const openair0_config_t *cfg)
   return g_chf[p->ch[0]] > 0 ? g_chf[p->ch[0]] + g_delta : cfg->rx_freq[p->ch[0]];
 }
 
-/* device set_freq with the per-channel LO map applied (usrp_set_rx_freq_all already tunes cfg->rx_freq[i] per channel) */
+/* device set_freq with the per-channel LO map applied (usrp_set_rx_freq_all already tunes cfg->rx_freq[i] per channel).
+ * On a copy: cfg->rx_freq[] must stay the UE's own carrier, the reference g_delta is measured against. */
 static int apply_set_freq(openair0_device_t *d, openair0_config_t *cfg)
 {
+  openair0_config_t t = *cfg;
   for (unsigned c = 0; c < SHM_IQ_MAX_CH; ++c)
-    if (g_chf[c] > 0) cfg->rx_freq[c] = g_chf[c] + g_delta;
-  return g_set_freq(d, cfg);
+    if (g_chf[c] > 0) t.rx_freq[c] = g_chf[c] + g_delta;
+  return g_set_freq(d, &t);
 }
 
 static void dwell_switch(openair0_device_t *d)
 {
+  pthread_mutex_lock(&g_lock);
   const uint64_t now = shm_iq_now_ns();
   uint64_t cycle = 0;
   for (int k = 0; k < g_nd; ++k) cycle += (uint64_t)g_r[g_dwell_idx[k]].dwell_ms * 1000000ull;
@@ -66,9 +72,12 @@ static void dwell_switch(openair0_device_t *d)
   for (unsigned k = 0; k < nw->nch; ++k) g_chf[nw->ch[k]] = nw->freq;
   const int ret = apply_set_freq(d, g_cfg);
   g_settle_pending = 1; nw->pending_return = 1; nw->away = 0; /* header flag clears at its first write */
-  g_dwell_end = shm_iq_now_ns() + (uint64_t)nw->dwell_ms * 1000000ull;
+  const uint64_t done = shm_iq_now_ns();
+  g_dwell_end = done + (uint64_t)nw->dwell_ms * 1000000ull;
+  g_retune_ticks = (double)(done - now) * 1e-9 * g_rate; /* the radio kept streaming while the LO moved */
+  pthread_mutex_unlock(&g_lock);
   fprintf(stderr, "SHMIQ_PUB_DWELL from=/%s to=/%s center_hz=%.3f retune_us=%.0f ret=%d\n", old->name, nw->name, nw->freq,
-          (double)(shm_iq_now_ns() - now) * 1e-3, ret);
+          (double)(done - now) * 1e-3, ret);
 }
 
 static int pub_read(openair0_device_t *d, openair0_timestamp_t *t, void **b, int n, int c)
@@ -79,7 +88,8 @@ static int pub_read(openair0_device_t *d, openair0_timestamp_t *t, void **b, int
   const int64_t tick = (int64_t)*t;
   int64_t skip = 0;
   if (g_settle_pending) {
-    g_settle_end = tick + (int64_t)g_settle_ticks;
+    /* the radio time at the retune command is >= this tick: discard the blocking retune plus the LO settle */
+    g_settle_end = tick + (int64_t)(g_retune_ticks + g_settle_ticks);
     g_settle_pending = 0;
   }
   if (g_settle_end > tick) skip = g_settle_end - tick > got ? got : g_settle_end - tick;
@@ -89,15 +99,21 @@ static int pub_read(openair0_device_t *d, openair0_timestamp_t *t, void **b, int
     const int64_t sk = p->dwell_ms ? skip : 0; /* only the window that just returned is settling */
     if (sk >= got) continue;
     void *sub[SHM_IQ_MAX_CH];
-    for (unsigned k = 0; k < p->nch && k < (unsigned)c; ++k) sub[k] = (char *)b[p->ch[k]] + (size_t)sk * 4;
-    if (p->pending_return) { shm_iq_ring_return(&p->ring, ring_center(p, g_cfg)); p->pending_return = 0; }
-    shm_iq_ring_write(&p->ring, tick + sk, sub, got - (int)sk, p->nch < (unsigned)c ? p->nch : (unsigned)c);
+    for (unsigned k = 0; k < p->nch; ++k) sub[k] = p->ch[k] < (unsigned)c ? (char *)b[p->ch[k]] + (size_t)sk * 4 : NULL; /* NULL: zeros */
+    if (p->pending_return) {
+      pthread_mutex_lock(&g_lock); /* centre with the current g_delta, not one a concurrent UE retune is replacing */
+      shm_iq_ring_return(&p->ring, ring_center(p, g_cfg));
+      pthread_mutex_unlock(&g_lock);
+      p->pending_return = 0;
+    }
+    shm_iq_ring_write(&p->ring, tick + sk, sub, got - (int)sk, p->nch);
   }
   return got;
 }
 
 static int pub_set_freq(openair0_device_t *d, openair0_config_t *cfg)
 {
+  pthread_mutex_lock(&g_lock);
   g_cfg = cfg;
   if (g_managed) g_delta = cfg->rx_freq[0] - g_ue0; /* UE-initiated retune (CFO / carrier): same delta on every window */
   const int ret = g_managed ? apply_set_freq(d, cfg) : g_set_freq(d, cfg);
@@ -107,6 +123,7 @@ static int pub_set_freq(openair0_device_t *d, openair0_config_t *cfg)
     shm_iq_ring_new_epoch(&g_r[i].ring, ctr);
     fprintf(stderr, "SHMIQ_PUB_RETUNE center_hz=%.3f epoch=%llu\n", ctr, (unsigned long long)atomic_load(&g_r[i].ring.hdr->rf_epoch));
   }
+  pthread_mutex_unlock(&g_lock);
   return ret;
 }
 
@@ -121,11 +138,12 @@ static void parse_subset(pub_ring_t *p, char *s, int nch)
 {
   char *sp = NULL;
   for (char *tok = strtok_r(s, "+", &sp); tok; tok = strtok_r(NULL, "+", &sp)) {
-    int a = atoi(tok), b = a;
-    char *dash = strchr(tok, '-');
-    if (dash) b = atoi(dash + 1);
-    for (int c = a; c <= b; ++c) {
-      if (c < 0 || c >= nch || p->nch >= SHM_IQ_MAX_CH) { fprintf(stderr, "SHMIQ_PUB_FAIL ring %s channel %d (radio has %d)\n", p->name, c, nch); abort(); }
+    char *e;
+    long a = strtol(tok, &e, 10), b = a;
+    if (e != tok && *e == '-') b = strtol(e + 1, &e, 10);
+    if (e == tok || *e || b < a) { fprintf(stderr, "SHMIQ_PUB_FAIL ring %s: bad channel list '%s'\n", p->name, tok); abort(); }
+    for (long c = a; c <= b; ++c) {
+      if (c < 0 || c >= nch || p->nch >= SHM_IQ_MAX_CH) { fprintf(stderr, "SHMIQ_PUB_FAIL ring %s channel %ld (radio has %d)\n", p->name, c, nch); abort(); }
       p->ch[p->nch++] = (unsigned)c;
     }
   }
@@ -140,6 +158,8 @@ static void parse_env(const char *spec, int nch)
     char *colon = strchr(tok, ':');
     if (colon) *colon = 0;
     snprintf(p->name, sizeof(p->name), "%s", tok);
+    for (int i = 0; i < g_nr; ++i)
+      if (!strcmp(g_r[i].name, p->name)) { fprintf(stderr, "SHMIQ_PUB_FAIL ring %s listed twice\n", p->name); abort(); }
     if (colon) parse_subset(p, colon + 1, nch);
     else for (int c = 0; c < nch; ++c) p->ch[p->nch++] = (unsigned)c;
     g_nr++;
@@ -167,6 +187,7 @@ static void parse_freq_dwell(void)
       if (!co) { fprintf(stderr, "SHMIQ_PUB_FAIL ISAC_SHM_IQ_DWELL entry '%s' is not name@hz:ms\n", tok); abort(); }
       *at = 0; *co = 0;
       pub_ring_t *p = &g_r[ring_by_name(tok)];
+      if (p->dwell_ms) { fprintf(stderr, "SHMIQ_PUB_FAIL ring %s listed twice in ISAC_SHM_IQ_DWELL\n", tok); abort(); }
       p->freq = atof(at + 1); p->dwell_ms = atoi(co + 1);
       if (p->freq <= 0 || p->dwell_ms <= 0) { fprintf(stderr, "SHMIQ_PUB_FAIL bad dwell entry for %s\n", tok); abort(); }
       g_dwell_idx[g_nd++] = (int)(p - g_r);
@@ -179,8 +200,20 @@ static void parse_freq_dwell(void)
         abort();
       }
     }
-    if (g_nd == 1) g_nd = 0; /* nothing to alternate with */
+    if (g_nd == 1) { g_r[g_dwell_idx[0]].dwell_ms = 0; g_nd = 0; } /* nothing to alternate with: a static window at its freq */
   }
+  /* rings sharing a radio channel must agree on its LO, and a dwell channel's LO moves under every ring that has it */
+  for (int i = 0; i < g_nr; ++i)
+    for (int j = i + 1; j < g_nr; ++j) {
+      const pub_ring_t *a = &g_r[i], *b = &g_r[j];
+      int shared = 0;
+      for (unsigned x = 0; x < a->nch; ++x)
+        for (unsigned y = 0; y < b->nch; ++y) shared |= a->ch[x] == b->ch[y];
+      if (shared && ((a->dwell_ms > 0) != (b->dwell_ms > 0) || (!a->dwell_ms && a->freq != b->freq))) {
+        fprintf(stderr, "SHMIQ_PUB_FAIL rings %s and %s share a channel but not its LO\n", a->name, b->name);
+        abort();
+      }
+    }
 }
 
 void shm_iq_pub_maybe_wrap(openair0_device_t *d, openair0_config_t *cfg)
@@ -200,7 +233,13 @@ void shm_iq_pub_maybe_wrap(openair0_device_t *d, openair0_config_t *cfg)
     const char *cv = getenv("ISAC_SHM_IQ_CAPACITY"), *sv = getenv("ISAC_SHM_IQ_SETTLE_US"), *rid = getenv("ISAC_SHM_IQ_RADIO_ID"),
                *tsv = getenv("ISAC_SHM_IQ_TIME_SOURCE");
     uint64_t cap = cv && *cv ? strtoull(cv, NULL, 10) : (1ull << 23);
-    g_settle_ticks = (sv && *sv ? atof(sv) : 1000.0) * 1e-6 * cfg->sample_rate;
+    const double settle_us = sv && *sv ? atof(sv) : 1000.0;
+    g_settle_ticks = settle_us * 1e-6 * cfg->sample_rate;
+    for (int k = 0; k < g_nd; ++k)
+      if (g_r[g_dwell_idx[k]].dwell_ms * 1000.0 <= 2 * settle_us) { /* the settle discard would eat the dwell: never published */
+        fprintf(stderr, "SHMIQ_PUB_FAIL dwell %d ms of %s is not > 2 x ISAC_SHM_IQ_SETTLE_US\n", g_r[g_dwell_idx[k]].dwell_ms, g_r[g_dwell_idx[k]].name);
+        abort();
+      }
     char idbuf[48];
     if (!rid || !*rid) {
       if (cfg->sdr_addrs && *cfg->sdr_addrs) snprintf(idbuf, sizeof(idbuf), "%s", cfg->sdr_addrs);
@@ -228,11 +267,16 @@ void shm_iq_pub_maybe_wrap(openair0_device_t *d, openair0_config_t *cfg)
       g_dwell_end = now + (uint64_t)a->dwell_ms * 1000000ull;
     }
     for (unsigned c = 0; c < SHM_IQ_MAX_CH; ++c) g_managed |= g_chf[c] > 0;
+    const char *map = getenv("ISAC_RX_CHAN_MAP");
+    if (g_managed && map && *map) { /* rx_freq[i] tunes UHD channel i, the subsets name OAI antennas: they would disagree */
+      fprintf(stderr, "SHMIQ_PUB_FAIL per-ring LO (ISAC_SHM_IQ_PUB_FREQ/DWELL) with ISAC_RX_CHAN_MAP: give subsets in UHD order and unset the map\n");
+      abort();
+    }
     g_ue0 = cfg->rx_freq[0];
-  } else {
+  } else { /* device reload: g_ue0/g_delta stay (cfg holds the UE carrier); the new device clock restarts the tick count */
     for (int i = 0; i < g_nr; ++i) if (!g_r[i].away) shm_iq_ring_new_epoch(&g_r[i].ring, ring_center(&g_r[i], cfg));
     if (g_nd) g_dwell_end = shm_iq_now_ns() + (uint64_t)g_r[g_dwell_idx[g_cur]].dwell_ms * 1000000ull;
-    g_ue0 = cfg->rx_freq[0]; g_delta = 0;
+    g_settle_end = INT64_MIN; g_settle_pending = 0;
   }
   g_dev = d;
   g_read = d->trx_read_func; d->trx_read_func = pub_read;

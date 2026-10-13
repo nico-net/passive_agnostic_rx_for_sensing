@@ -85,6 +85,22 @@ tests: `radio/COMMON/tests/test_shm_iq.c` (ctest `test_shm_iq`).
 | Consumer dwell-aware timeout: PRODUCER_LOST is not declared while `away && now < dwell_until_ns + timeout`. | implemented | [OFFLINE VERIFIED, cloud x86 4c: dead producer pid + stale heartbeat: away -> consumer resumes with a forward timestamp jump; control without `away` -> exit 3] |
 | X410 behaviour (per-channel set_rx_freq, LO sharing, settle time, overruns) | not testable here | [NOT RUN] |
 
+Review round (same day) [OFFLINE VERIFIED, cloud x86 4c; ctest test_shm_iq 15/15 runs incl. 5 under 6 busy loops, ASAN/UBSAN + TSAN clean on publisher state]:
+fixed (1) the publisher no longer rewrites the UE's `cfg->rx_freq[]` (set_freq gets a copy): a device reload reset the UE
+delta to a managed LO (next CFO/carrier retune moved every window by f_UE - f_ringA), and a dwell retune racing a UE retune
+could corrupt the delta; (2) dwell retune vs UE retune serialised by a mutex (state + device set_freq); (3) settle discard now
+also covers the measured blocking time of set_freq (samples captured while the LO moved were published); (4) a device reload
+while a window is away now gives that window a timestamp jump of its absence (the return refreshed the heartbeat, so the
+first backward write jumped by 1 sample); `away` clears at the first write after the fresh heartbeat; (5) refused instead of
+mislabelled: overlapping subsets on different LOs or a non-dwell ring on dwell channels, duplicate ring names, malformed
+channel lists, per-ring LO with ISAC_RX_CHAN_MAP, dwell <= 2 x settle; a single DWELL entry is a static window (LO was never
+set); a read with fewer channels than a subset index writes zeros instead of reading past `b[]`. Open: (a) the dwell retune
+blocks the UE read thread for `retune_us` (X410 full LO tune may be ms) -> host overflow risk [NOT RUN]; (b) samples still in
+the host buffer at the retune are counted as post-retune: raise SETTLE_US if the backlog exceeds it; (c) usrp_set_rx_freq_all
+re-issues set_rx_freq on unchanged channels at every dwell/CFO retune (possible NCO phase step on the static windows) [CODE-READ];
+(d) the publisher UE's own loops (AGC gain, CFO retune) act on whatever window it currently sees and move every window;
+(e) a v1 consumer binary refuses v2 rings (`version != 1`): upgrade producer and consumers together.
+
 Uncertainties to resolve on the DGX (UHD docs knowledge, not verified): (a) X410 ZBX has 2 RX/TX ports per daughterboard and
 LOs may be shared between channels of one board (the ZBX has independent RX LOs per channel in UHD 4.x docs, but with the
 RX1 port or LO-sharing/`lo_source` settings two channels may be forced to one LO; set_rx_freq on the second channel may then
