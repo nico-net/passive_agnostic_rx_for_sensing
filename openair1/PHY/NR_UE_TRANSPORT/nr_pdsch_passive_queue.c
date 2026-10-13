@@ -50,6 +50,7 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h" // P99: lag bins, scan lag histogram
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"         // T26b grant solver feedback
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
@@ -2577,6 +2578,7 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   return true;
 }
 
+static _Atomic uint64_t g_age_hist[2][NR_PASSIVE_LAG_BINS]; /* P99: job age at enqueue in slots, [probe] x bin */
 static _Atomic uint64_t g_dropped_probe; /* ISAC_PDSCHQ_PROBE_LAST: probes refused/evicted (also in dropped_full) */
 /* probe_last_enabled: returns ISAC_PDSCHQ_PROBE_LAST (cached): when on, under overload layout probes are evicted before full decodes.
  *   Caller: enqueue_one().
@@ -2670,12 +2672,55 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     g_count--;
     atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
   }
+  {
+    const long age = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - job->absolute_slot;
+    atomic_fetch_add_explicit(&g_age_hist[job->layout_probe != 0][nr_passive_lag_bin(age)], 1, memory_order_relaxed);
+  }
   g_ring[g_head] = *job;
   g_ring_ns[g_head] = enqueue_ns;
   g_head         = (g_head + 1) % g_depth;
   g_count++;
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
   return true;
+}
+
+/* nr_pdsch_passive_queue_backlog_real: full-decode (non-probe) jobs waiting in the ring for a consumer right now; 0 when
+ *   the pool is not running. A waiting job means every consumer is busy. Caller: passive_decode_retry() (ISAC_PDSCH_RETRY_YIELD). */
+int nr_pdsch_passive_queue_backlog_real(void)
+{
+  if (!atomic_load_explicit(&g_running, memory_order_acquire) || g_count == 0) /* racy pre-check: the common case takes no lock */
+    return 0;
+  pthread_mutex_lock(&g_lock);
+  int n = 0;
+  for (int i = 0; i < g_count; i++)
+    n += g_ring[(g_tail + i) % g_depth].layout_probe == 0;
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}
+
+/* nr_pdsch_passive_queue_p99_dump: P99 tail-decomposition lines (only with ISAC_PDTIM_CLASS=1): PDSCH job age at enqueue
+ *   (producer slot - PDSCH slot; real / probe), scan occasion lag at dequeue, ISAC_SCANQ_FRESH picks, ISAC_PDSCH_RETRY_YIELD
+ *   counters. Bins in slots: < 2/4/8/12/16/18/24/32/inf. Caller: nr_pdcch_blind_monitor_rt.c (PDSCHQ summary). */
+void nr_pdsch_passive_queue_p99_dump(void)
+{
+  static int on = -1;
+  if (on < 0)
+    on = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
+  if (!on)
+    return;
+  uint64_t sc[NR_PASSIVE_LAG_BINS], fresh = 0, chains = 0, yields = 0, gated = 0;
+  nr_pdcch_passive_queue_lag_hist(sc, &fresh);
+  nr_pdsch_retry_yield_stats(&chains, &yields, &gated);
+  char a[3][160];
+  for (int k = 0; k < 3; k++) {
+    int u = 0;
+    for (int b = 0; b < NR_PASSIVE_LAG_BINS; b++)
+      u += snprintf(a[k] + u, sizeof(a[k]) - u, "%s%lu", b ? "," : "",
+                    (unsigned long)(k < 2 ? atomic_load_explicit(&g_age_hist[k][b], memory_order_relaxed) : sc[b]));
+  }
+  LOG_I(PHY, "SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[%s] pdsch_enq_probe=[%s] scan_deq=[%s] "
+        "scanq_fresh=%lu retry_chains=%lu retry_yields=%lu retry_gated=%lu\n", a[0], a[1], a[2], (unsigned long)fresh,
+        (unsigned long)chains, (unsigned long)yields, (unsigned long)gated);
 }
 
 /* nr_pdsch_passive_queue_get_stats: copies the queue statistics (latency histograms, drop reasons, queued/decoded/CRC counts, batches, GPU counters) into *out.

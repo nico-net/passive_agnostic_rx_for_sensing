@@ -5652,6 +5652,43 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
  *   Arms: ISAC_PDSCH_TDRA_RETRY, ISAC_PDSCH_CSI_RETRY, ISAC_PDSCH_DMRS_CDM_RETRY, ISAC_PDSCH_WIDE_MRC_RETRY, ISAC_PDSCH_CSI_POPULATION_RETRY.
  *   A recovered decode sets out->config_recovered. Each trial re-demodulates the same samples with quiet mode (t_quiet). Caller: passive_decode_qamab() and nr_pdsch_passive_decode().
  */
+/* ISAC_PDSCH_RETRY_YIELD (P99, default 0 = off = unchanged arm order and count) for the DECODE-FIX recovery chain:
+ *  1: the S=0/1 toggle (arm 2, ~95 % of the Vodafone on-air rescues) runs first, and every later arm is skipped as soon as a
+ *     full decode (non-probe job) waits in the PDSCH queue: the long-shot arms of one failed grant no longer delay the next
+ *     grants into the stale window.
+ *  2: 1 + adaptive arm gating (nr_pdsch_retry_gate.h), the same rule for every arm and cell: after 256 tries an arm (index
+ *     arm + 32 * CSI variant) that rescued fewer than 1 in 50 of them runs on 1 in 16 chains only (on-air TIM: 12 rescues
+ *     in 12097 chains; Vodafone: arm 2 rescues ~28 %, the other arms ~1 %).
+ * When no arm body ran (all gated, or a yield before the first one) the restore decode is skipped: *out and the
+ * thread-local decode view are still those of the plain body. Counters in the P99AGE line. */
+#define RY_ARMS 128
+#include "nr_pdsch_retry_gate.h"
+/* weak: test binaries that link this file without the consumer pool (nr_pdsch_passive_queue.c) must not pull it in */
+int nr_pdsch_passive_queue_backlog_real(void) __attribute__((weak));
+static int ry_backlog(void) { return nr_pdsch_passive_queue_backlog_real ? nr_pdsch_passive_queue_backlog_real() : 0; }
+static _Atomic uint64_t g_ry_chains, g_ry_yields, g_ry_gated, g_ry_try[RY_ARMS], g_ry_ok[RY_ARMS], g_ry_seen[RY_ARMS];
+static int retry_yield_mode(void)
+{
+  static int v = -1;
+  if (v < 0) v = getenv("ISAC_PDSCH_RETRY_YIELD") ? atoi(getenv("ISAC_PDSCH_RETRY_YIELD")) : 0;
+  return v;
+}
+/* ry_arm_worth: mode 2 gate of one arm (see above); counts the gated tries */
+static bool ry_arm_worth(int k)
+{
+  if (nr_retry_gate_pass(atomic_load_explicit(&g_ry_try[k], memory_order_relaxed), atomic_load_explicit(&g_ry_ok[k], memory_order_relaxed),
+                         atomic_fetch_add_explicit(&g_ry_seen[k], 1, memory_order_relaxed)))
+    return true;
+  atomic_fetch_add_explicit(&g_ry_gated, 1, memory_order_relaxed);
+  return false;
+}
+void nr_pdsch_retry_yield_stats(uint64_t *chains, uint64_t *yields, uint64_t *gated)
+{
+  *chains = atomic_load_explicit(&g_ry_chains, memory_order_relaxed);
+  *yields = atomic_load_explicit(&g_ry_yields, memory_order_relaxed);
+  *gated = atomic_load_explicit(&g_ry_gated, memory_order_relaxed);
+}
+
 static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
                                                              const UE_nr_rxtx_proc_t *proc,
                                                              fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -5798,15 +5835,28 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     const double saved_fo_override = nr_slot_fep_fo_override_hz;
     nr_slot_fep_fo_override_hz = t_last_fep_fo; /* same frequency compensation for paired trials */
     t_quiet = true; /* do not teach unrelated parameter sweeps from these trials */
-    bool recovered = false;
+    bool recovered = false, yielded = false;
+    const int ry = retry_yield_mode();
+    int ry_bodies = 0;
+    if (ry) atomic_fetch_add_explicit(&g_ry_chains, 1, memory_order_relaxed);
     /* Bits 0..4 select CSI-RS, S=0/1, CDM groups, wide MRC, and flipped time interpolation (DECODE-RES).
      * Type-1 ports 0/1 occupy CDM group 0; either one or two groups is legal. */
-    for (int cv = 0; cv < n_csi_variants && !recovered; cv++) {
-      for (int arm = 1; arm <= (try_tint ? 31 : 15) && !recovered; arm++) {
+    for (int cv = 0; cv < n_csi_variants && !recovered && !yielded; cv++) {
+      for (int a = 1; a <= (try_tint ? 31 : 15) && !recovered; a++) {
+        const int arm = ry && cv == 0 && a <= 2 ? 3 - a : a; /* RETRY_YIELD: the S toggle (arm 2) first */
         if (cv > 0 && !(arm & 1)) continue;
         if (((arm & 1) && cv == 0 && !try_csi) || ((arm & 2) && !try_start)
             || ((arm & 4) && !try_cdm) || ((arm & 8) && !try_wide) || ((arm & 16) && !try_tint))
           continue;
+        const int ry_k = (arm + 32 * cv) % RY_ARMS;
+        if (ry == 2 && !ry_arm_worth(ry_k))
+          continue;
+        if (ry && !(cv == 0 && arm == 2) && ry_backlog() > 0) {
+          yielded = true; /* a full decode waits for a consumer: stop this grant's long-shot arms */
+          atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
+          break;
+        }
+        ry_bodies++;
         t_tinterp_override = (arm & 16) ? !chest_tinterp_global() : -1;
         *dlsch_config = original;
         if (arm & 1) *dlsch_config = csi_variants[cv];
@@ -5824,6 +5874,10 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
           nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
         }
         recovered = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+        if (ry) {
+          atomic_fetch_add_explicit(&g_ry_try[ry_k], 1, memory_order_relaxed);
+          if (recovered) atomic_fetch_add_explicit(&g_ry_ok[ry_k], 1, memory_order_relaxed);
+        }
         if (rp_on && recovered) {
           if (arm == 2 && cv == 0) nr_retry_pred_hit(grant->rnti);
           else nr_retry_pred_miss(grant->rnti);
@@ -5837,7 +5891,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
           t_decode_tdra_attempt);
     nr_pdsch_decode_wide_mrc = false;
     t_tinterp_override = -1;
-    if (!recovered) {
+    if (!recovered && (!ry || ry_bodies > 0)) {
       /* Restore the public result AND the thread-local decoder/LLR view
        * used by the queue's diagnostics and equivalence checks. */
       *dlsch_config = original;
