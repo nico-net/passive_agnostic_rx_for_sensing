@@ -27,6 +27,7 @@
 #include "nr_pdsch_evm_acc.h"
 #include "nr_irc_cov.h"
 #include "nr_mmse_exact.h"
+#include <time.h>
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 
@@ -828,6 +829,15 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
    * MMSE SINR in G units, i.e. z = x / [A^-1]_ll, A = G + s2 I; times a gain that puts the strongest layer near 2^10 LSB
    * whatever the receive level (the K38 LLR norm only shifts down). */
   if (qam_mode == 3) {
+    /* ISAC_PDSCH_MMSE_EXACT_CAL=1 (diagnostic): MMSE3CAL line -- residual noise vs the chest nvar (what a nbRx == nl grant
+     * has to use instead), and this block's CPU time per call (one call per data symbol) */
+    static int s_cal = -1;
+    static _Atomic unsigned long s_cn, s_tn, s_tns;
+    static double s_cs, s_cs2;
+    if (s_cal < 0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_CAL"); s_cal = e ? atoi(e) : 0; }
+    struct timespec t0;
+    if (s_cal)
+      clock_gettime(CLOCK_MONOTONIC, &t0);
     const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
     const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
     const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
@@ -856,7 +866,8 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
       s2 = (double)noise_var * sc * pow(10.0, s_nvdb / 10.0);
     for (int pass = n_rx > nl ? 0 : 1; pass < 2; pass++) {
       double res = 0.0;
-      for (int i = 0; i < length; i++) {
+      int nres = 0;
+      for (int i = 0; i < length; i += pass == 0 ? 4 : 1) { /* the noise estimate needs no more than every 4th RE */
         int16_t hre[4][4], him[4][4], yre[4], yim[4];
         for (int a = 0; a < n_rx; a++) {
           yre[a] = rxdataF_ext[a][i].r;
@@ -870,6 +881,7 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
         const int ok = nr_mmse_exact_re(nl, n_rx, hre, him, yre, yim, sc, pass == 0 ? 0.0 : s2, xre, xim, ainv, pass == 0 ? &e : NULL);
         if (pass == 0) { /* ||y - H x_zf||^2 */
           res += ok ? e : 0.0;
+          nres += ok;
           continue;
         }
         for (int r = 0; r < nl; r++) {
@@ -886,22 +898,23 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
         }
       }
       if (pass == 0) {
-        s2 = length > 0 ? res / ((double)length * (n_rx - nl)) * sc : 0.0;
-        /* ISAC_PDSCH_MMSE_EXACT_CAL=1 (diagnostic): ratio of this residual noise to the chest nvar, which is all a
-         * nbRx == nl grant has (its data have no noise-only dimension) */
-        static int s_cal = -1;
-        static _Atomic unsigned long s_cn;
-        static double s_cs, s_cs2;
-        if (s_cal < 0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_CAL"); s_cal = e ? atoi(e) : 0; }
+        s2 = nres > 0 ? res / ((double)nres * (n_rx - nl)) * sc : 0.0;
         if (s_cal && noise_var > 0 && s2 > 0.0) {
           const double r = 10.0 * log10(s2 / ((double)noise_var * sc));
           s_cs += r; s_cs2 += r * r; /* racy across consumers: diagnostic only */
           const unsigned long n = ++s_cn;
           if ((n % 2000) == 0)
-            LOG_I(PHY, "SENSING: MMSE3CAL n=%lu nl=%d resid/nvar mean %.2f dB sd %.2f dB\n", n, nl, s_cs / n,
-                  sqrt(fmax(0.0, s_cs2 / n - (s_cs / n) * (s_cs / n))));
+            LOG_I(PHY, "SENSING: MMSE3CAL n=%lu nl=%d resid/nvar mean %.2f dB sd %.2f dB | mode-3 cpu %.1f us per symbol call (%lu calls)\n",
+                  n, nl, s_cs / n, sqrt(fmax(0.0, s_cs2 / n - (s_cs / n) * (s_cs / n))),
+                  s_tn ? 1e-3 * (double)s_tns / (double)s_tn : 0.0, (unsigned long)s_tn);
         }
       }
+    }
+    if (s_cal) {
+      struct timespec t1;
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      s_tns += (unsigned long)((t1.tv_sec - t0.tv_sec) * 1000000000L + (t1.tv_nsec - t0.tv_nsec));
+      s_tn++;
     }
     return;
   }
