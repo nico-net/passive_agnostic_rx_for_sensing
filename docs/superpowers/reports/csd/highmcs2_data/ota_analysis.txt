@@ -1,0 +1,155 @@
+## [MEASURED, OTA logs] residual common CFO (DMRSFO, coh>0.8) and per-branch FO vs branch 0 (BRANCHFO, last EMA)
+ab_M2a_1_100800: n=51 mean=43 Hz mean|cfo|=54 Hz d_vs_br0=[0.0 -26.3 87.5 92.3]
+ab_M2b_1_101615: n=40 mean=-35 Hz mean|cfo|=46 Hz d_vs_br0=[0.0 -5.5 96.8 101.6]
+ab_M2c_1_102429: n=30 mean=-46 Hz mean|cfo|=47 Hz d_vs_br0=[0.0 68.5 99.1 74.1]
+ab_TmA_1_201522: n=93 mean=53 Hz mean|cfo|=77 Hz d_vs_br0=[0.0 4.1 26.4 -2.3]
+ab_TmB_1_202048: n=56 mean=11 Hz mean|cfo|=61 Hz d_vs_br0=[0.0 39.1 -203.3 -206.8]
+
+## [MEASURED, OTA M2a/b/c + S0a/b/c Vodafone] per-symbol complex-gain fit gain (snr_cpe - snr) at DD snr>=20, Nl=1, by grant width
+Qm2 w>=100 n=187 cpe_gain=0.59 dB crc=100%
+Qm2 w32-99 n=212 cpe_gain=1.20 dB crc=96%
+Qm2 w<32 n=1985 cpe_gain=1.97 dB crc=100%
+Qm4 w>=100 n=1327 cpe_gain=1.52 dB crc=100%
+Qm4 w32-99 n=1040 cpe_gain=2.32 dB crc=100%
+Qm4 w<32 n=122 cpe_gain=3.02 dB crc=100%
+Qm6 w>=100 n=1121 cpe_gain=0.56 dB crc=97%
+Qm6 w32-99 n=223 cpe_gain=0.55 dB crc=99%
+Qm6 w<32 n=28 cpe_gain=1.21 dB crc=100%
+Qm8 w>=100 n=22 cpe_gain=0.07 dB crc=0%
+
+## [MEASURED, OTA] QPSK CRC by rank / DM-RS ports / CDM groups without data (TIM TmA/TmB/TmL1/TmL2; Vodafone M2+S0)
+TIM Nl1 ports0x1 cdm1 snr>=10 n=1446 crc=96.9%
+TIM Nl1 ports0x1 cdm1 snr6-10 n=657 crc=85.7%
+TIM Nl1 ports0x1 cdm1 snr<6 n=623 crc=41.9%
+TIM Nl1 ports0x1 cdm2 snr>=10 n=43 crc=74.4%
+TIM Nl1 ports0x1 cdm2 snr6-10 n=44 crc=4.5%
+TIM Nl1 ports0x1 cdm2 snr<6 n=313 crc=0.6%
+TIM Nl1 ports0x2 cdm1 snr<6 n=98 crc=0.0%
+TIM Nl1 ports0x2 cdm2 snr<6 n=396 crc=0.0%
+TIM Nl1 ports0x4 cdm2 snr<6 n=100 crc=0.0%
+TIM Nl1 ports0x8 cdm2 snr<6 n=22 crc=0.0%
+TIM Nl2 ports0x3 cdm1 snr>=10 n=5434 crc=98.6%
+TIM Nl2 ports0x3 cdm1 snr6-10 n=8127 crc=87.4%
+TIM Nl2 ports0x3 cdm1 snr<6 n=12758 crc=40.4%
+TIM Nl2 ports0x3 cdm2 snr>=10 n=94 crc=93.6%
+TIM Nl2 ports0x3 cdm2 snr6-10 n=150 crc=28.7%
+TIM Nl2 ports0x3 cdm2 snr<6 n=1329 crc=1.0%
+TIM Nl2 ports0xc cdm2 snr<6 n=44 crc=0.0%
+TIM Nl3 ports0x7 cdm2 snr>=10 n=154 crc=0.0%
+TIM Nl3 ports0x7 cdm2 snr6-10 n=1143 crc=0.1%
+TIM Nl3 ports0x7 cdm2 snr<6 n=4721 crc=0.1%
+TIM Nl4 ports0xf cdm2 snr<6 n=3984 crc=0.0%
+VOD Nl1 ports0x1 cdm1 snr<6 n=930 crc=0.3%
+VOD Nl1 ports0x1 cdm2 snr>=10 n=10778 crc=97.1%
+VOD Nl1 ports0x1 cdm2 snr6-10 n=3218 crc=88.2%
+VOD Nl1 ports0x1 cdm2 snr<6 n=3858 crc=46.0%
+VOD Nl1 ports0x2 cdm1 snr<6 n=1012 crc=0.0%
+VOD Nl1 ports0x2 cdm2 snr<6 n=131 crc=0.8%
+VOD Nl1 ports0x4 cdm2 snr<6 n=190 crc=1.6%
+VOD Nl2 ports0x3 cdm1 snr6-10 n=34 crc=0.0%
+VOD Nl2 ports0x3 cdm1 snr<6 n=378 crc=0.8%
+VOD Nl2 ports0x3 cdm2 snr>=10 n=16615 crc=97.7%
+VOD Nl2 ports0x3 cdm2 snr6-10 n=19770 crc=93.1%
+VOD Nl2 ports0x3 cdm2 snr<6 n=18351 crc=56.1%
+VOD Nl2 ports0x5 cdm2 snr<6 n=21 crc=4.8%
+VOD Nl2 ports0xc cdm2 snr<6 n=151 crc=20.5%
+VOD Nl3 ports0x7 cdm2 snr>=10 n=78 crc=88.5%
+VOD Nl3 ports0x7 cdm2 snr6-10 n=2525 crc=52.4%
+VOD Nl3 ports0x7 cdm2 snr<6 n=6348 crc=24.9%
+VOD Nl4 ports0xf cdm2 snr<6 n=2917 crc=2.2%
+
+## [MEASURED, OTA Vodafone S0/M0/M1/M2/H0/H1] Nl=1 per-MCS CRC by DD-snr 3-dB bin and receiver (comb)
+(1, 11, 15, '1')  78.2% (87)
+(1, 11, 15, '3')  42.3% (196)
+(1, 11, 18, '1')  94.6% (93)
+(1, 11, 18, '3')  94.3% (262)
+(1, 11, 21, '1') 100.0% (55)
+(1, 11, 21, '3') 100.0% (151)
+(1, 11, 24, '1') 100.0% (9)
+(1, 11, 24, '3') 100.0% (123)
+(1, 11, 27, '3') 100.0% (169)
+(1, 11, 30, '3') 100.0% (8)
+(1, 12, 15, '1')  74.6% (67)
+(1, 12, 15, '3')  25.0% (264)
+(1, 12, 18, '1') 100.0% (77)
+(1, 12, 18, '3')  93.3% (478)
+(1, 12, 21, '1') 100.0% (58)
+(1, 12, 21, '3')  96.7% (91)
+(1, 12, 24, '1') 100.0% (4)
+(1, 12, 24, '3') 100.0% (99)
+(1, 12, 27, '3') 100.0% (214)
+(1, 12, 30, '3') 100.0% (13)
+(1, 13, 15, '1')  70.7% (58)
+(1, 13, 15, '3')  19.7% (233)
+(1, 13, 18, '1') 100.0% (34)
+(1, 13, 18, '3')  84.3% (344)
+(1, 13, 21, '1') 100.0% (53)
+(1, 13, 21, '3')  96.7% (61)
+(1, 13, 24, '1') 100.0% (6)
+(1, 13, 24, '3') 100.0% (48)
+(1, 13, 27, '3') 100.0% (111)
+(1, 13, 30, '3') 100.0% (3)
+(1, 14, 15, '1')  52.4% (21)
+(1, 14, 15, '3')   3.1% (163)
+(1, 14, 18, '1')  72.0% (25)
+(1, 14, 18, '3')  73.7% (281)
+(1, 14, 21, '1')  94.7% (19)
+(1, 14, 21, '3')  97.0% (66)
+(1, 14, 24, '3')  95.0% (20)
+(1, 14, 27, '3') 100.0% (40)
+(1, 14, 30, '3') 100.0% (4)
+(1, 15, 15, '1')  26.3% (19)
+(1, 15, 15, '3')   0.0% (64)
+(1, 15, 18, '1')  73.3% (15)
+(1, 15, 18, '3')  56.1% (173)
+(1, 15, 21, '1') 100.0% (4)
+(1, 15, 21, '3')  98.2% (55)
+(1, 15, 24, '3') 100.0% (22)
+(1, 15, 27, '3') 100.0% (18)
+(1, 16, 15, '1')   6.2% (16)
+(1, 16, 15, '3')   0.0% (51)
+(1, 16, 18, '1')  50.0% (4)
+(1, 16, 18, '3')  40.6% (101)
+(1, 16, 21, '1') 100.0% (5)
+(1, 16, 21, '3')  92.6% (54)
+(1, 16, 24, '3')  92.9% (14)
+(1, 16, 27, '3') 100.0% (19)
+(1, 17, 15, '1')   0.0% (9)
+(1, 17, 15, '3')   0.0% (17)
+(1, 17, 18, '1')   0.0% (3)
+(1, 17, 18, '3')  10.0% (30)
+(1, 17, 21, '3') 100.0% (28)
+(1, 17, 24, '3') 100.0% (5)
+(1, 17, 27, '3') 100.0% (14)
+(1, 18, 15, '1')   0.0% (4)
+(1, 18, 15, '3')   0.0% (26)
+(1, 18, 18, '3')  15.8% (19)
+(1, 18, 21, '3')  60.0% (5)
+(1, 19, 15, '1')   0.0% (5)
+(1, 19, 15, '3')   0.0% (6)
+(1, 19, 18, '3')   0.0% (12)
+(1, 19, 21, '3')  50.0% (6)
+(1, 19, 24, '3') 100.0% (3)
+(1, 20, 18, '3')   0.0% (4)
+(1, 20, 21, '3')   0.0% (9)
+(1, 20, 24, '3')  40.0% (5)
+(1, 21, 21, '3')   0.0% (11)
+(1, 21, 24, '3')  33.3% (6)
+(1, 22, 21, '3')   0.0% (7)
+(1, 23, 18, '3')   0.0% (3)
+(1, 23, 21, '3')   0.0% (3)
+(1, 24, 15, '3')   0.0% (4)
+
+## [MEASURED, OTA Vodafone S0/M0/M1/M2/H0/H1] comb=3 (MRC) grants at DD snr>=19: CRC by Nl x Qm x grant start/width
+Nl1 Qm4 narrow 3172/3179 100%
+Nl1 Qm4 wide 2926/2930 100%
+Nl1 Qm6 narrow 883/921 96%
+Nl1 Qm6 wide 1501/1619 93%
+Nl1 Qm8 narrow 1/8 12%
+Nl1 Qm8 wide 3/43 7%
+Nl2 Qm4 narrow 375/382 98%
+Nl2 Qm4 wide 1194/1202 99%
+Nl2 Qm6 narrow 281/323 87%
+Nl2 Qm6 wide 768/874 88%
+Nl2 Qm8 narrow 1/76 1%
+Nl2 Qm8 wide 0/66 0%
