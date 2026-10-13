@@ -142,7 +142,7 @@ def preamble(r, pci, ssb_sc=1171, gscn=7971, mhz=3680.01, kssb=14, sib1=True, t=
                       "bw=100.000000 MHz" % (ch, mhz))
     # nr_initial_sync.c
     r.L(t + 1.2, "[NR_PHY]   Cell Detected with GSCN: %d, SSB SC offset: %d, SSB Ref: %.6f, PSS Corr peak: 92 dB, PSS Corr Average: 71"
-        % (gscn, ssb_sc, 3679.68e6))
+        % (gscn, ssb_sc, (mhz - 0.33) * 1e6))
     r.L(t + 1.3, "[PHY]   [UE 0] Measured Carrier Frequency offset -4849 Hz")
     r.L(t + 1.3, "[PHY]   Initial sync successful, PCI: %d" % pci)
     r.c["pbch"] += 1

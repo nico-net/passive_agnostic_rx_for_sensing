@@ -61,6 +61,7 @@ Evidence labels follow PROJECT_MEMORY §0.1. Nothing here is a new measurement.
 | ULC.md | csd/ul-c @ 388d39099e | PUSCH timing and DM-RS discovery, behind `ISAC_UL_TIMING_DISC` / `ISAC_UL_DMRS_DISC` (default off); CPU reference only. |
 | ULR2.md | csd/ul-r2 @ 4ba577a1ec | Blind PUSCH grant solver per DL-locked C-RNTI, behind `ISAC_UL_PUSCH_SOLVER` [CODE-READ + IMPLEMENTED]; no live PUSCH CRC. |
 | ULINT.md | csd/ul-int @ dcdc9877db | UL-A/B/C merged onto t26b; records the first-PUSCH replay gate; first nonzero PUSCH TB CRC is the open milestone. |
+| DASHBOARD-20261013.md | csd/dashboard | Read-only, self-explaining receiver dashboard (tests/passive_rx/monitor): pages, data dependencies (log prefixes, JSON keys), gaps, DGX commands; synthetic fixtures + cloud x86 tests only, rfsim/DGX not run. |
 
 ## Not in the .md index
 

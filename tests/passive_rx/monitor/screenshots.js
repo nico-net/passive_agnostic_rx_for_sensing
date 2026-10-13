@@ -3,12 +3,14 @@
 // Uses the pre-installed Chromium (PLAYWRIGHT_BROWSERS_PATH); fails on any page script error.
 const { chromium } = require("playwright");
 const [base, out, run = "primary", prefix = ""] = process.argv.slice(2);
-const pages = ["home", "dl", "ul", "sensing", "cell", "settings", "perf", "spectrum", "history", "logs", "glossary"];
+const pages = (process.env.PAGES || "home,dl,ul,sensing,cell,settings,perf,spectrum,history,logs,glossary").split(",");
+const themes = (process.env.THEMES || "light,dark").split(",");
+const phone = process.env.PHONE !== "0";
 (async () => {
   const browser = await chromium.launch();
   let errors = 0;
-  for (const theme of ["light", "dark"]) {
-    for (const [w, h, tag] of [[1280, 900, ""], [390, 844, "-phone"]]) {
+  for (const theme of themes) {
+    for (const [w, h, tag] of phone ? [[1280, 900, ""], [390, 844, "-phone"]] : [[1280, 900, ""]]) {
       if (tag && theme === "dark") continue;
       const ctx = await browser.newContext({ viewport: { width: w, height: h }, colorScheme: theme });
       const p = await ctx.newPage();

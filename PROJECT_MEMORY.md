@@ -1,5 +1,10 @@
 # PROJECT_MEMORY — Passive Agnostic 5G NR Receiver (OAI-UE based)
 
+> **Update 2026-10-13 (cloud x86 session, `csd/dashboard`, not merged): receiver dashboard.** `tests/passive_rx/monitor/` restored from
+> `c7c6fa8bb3^` and rebuilt as a read-only stdlib dashboard over run.log / ISAC_METRICS / obs.jsonl / sensing export (`monitor.py --run DIR`,
+> `--follow GLOB`; 127.0.0.1). The log prefixes and JSON keys it parses are listed in [DASHBOARD-20261013](docs/superpowers/reports/csd/DASHBOARD-20261013.md) §3:
+> change them with a fixture/test update. `[OFFLINE VERIFIED, cloud x86, 2026-10-13]` 46 unit tests on synthetic fixtures; rfsim and DGX not run.
+>
 > **Update 2026-10-12 (csd/otatest, OTA at DEIB 10-12 and 22 offline reports): see §25, block 2026-10-12.** Recommended OTA env is now t26z (t26s superseded); four operators seen live (PCI 415, 923, 675, 403, 508; PCI 4 co-channel with 508); merge gate still NOT MET.
 >
 > **Update 2026-10-11 (csd/otatest, OTA 10-10/11 and offline reports): see §25, block 2026-10-10/11.** Recommended OTA env was t26s [SUPERSEDED 2026-10-12 by t26z]; the t26j recommendation below is superseded. Merge gate NOT MET (TIM bimodal, decode mean > 0.5 ms).

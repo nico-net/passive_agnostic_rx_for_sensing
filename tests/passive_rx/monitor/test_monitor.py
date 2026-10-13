@@ -332,6 +332,7 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(sorted(s["grants"]), ["4", "508"])
         self.assertIn("plmn", s["cells"]["508"]["facts"])
         self.assertNotIn("plmn", s["cells"]["4"]["facts"])           # PCI 4 has no SIB1
+        self.assertEqual({v["pci"] for v in s["td_conv"].values()}, {4, 508})
         k4, k508 = kpis(s, "4"), kpis(s, "508")
         self.assertNotEqual(k4["by_mcs"]["0-4"]["n"], k508["by_mcs"]["0-4"]["n"])
         self.assertEqual(kpis(s)["by_mcs"], k4["by_mcs"])           # default = the current cell, not a pool
