@@ -147,7 +147,8 @@ full ring may lose a chunk while the producer is inside `recv()`; the effective 
 Reference (user-verified 2026-10-13, clean for 300 s): `sudo /usr/local/lib/uhd/examples/benchmark_rate --args="mgmt_addr=10.79.1.235,addr=192.168.10.2,use_dpdk=1"
 --rx_rate 245.76e6 --rx_channels "0,1,2,3" --rx_otw sc16 --rx_cpu sc16 --duration 300 --priority high --multi_streamer`.
 The publisher defaults match it: `--multi-streamer` (one streamer + one recv thread per channel, all started by the same timed stream
-command) and `--priority high` (`uhd::set_thread_priority_safe(1.0, true)` in each recv thread; warns, does not fail, if not permitted).
+command) and `--priority high` (`uhd::set_thread_priority_safe()` = SCHED_RR at UHD's default 0.5, as benchmark_rate; set in the main
+thread BEFORE `multi_usrp::make()` so UHD/DPDK threads, the coordinator and the recv threads all inherit it; warns, does not fail, if not permitted).
 `--single-streamer` keeps the old one-4-channel-streamer path (`--rx-core C` pins its thread; with multi-streamer `--rx-core` pins the coordinator).
 
     sudo ISAC_UHD_CTRL_CORES=<two cores != rx-cores, != DPDK lcores> \
@@ -170,6 +171,15 @@ Per chunk: the coordinator reserves the ring slots for all channels (`reserve` r
 are overwritten by the next chunk) and the action is OVERFLOW / MISMATCH (a channel timed out, short, or different tick: counter `resyncs`, log
 `SHMIQ_UHD_RESYNC n=.. chK=status/tick/count`) / OTHER: stop + drain ALL streamers and re-arm with one timed START (`SHMIQ_UHD_RESTART`); the
 first chunk's tick jump becomes a ring gap (consumers log one SHMIQ_DISCONT). Ring API unchanged (additive pub_mc_* only).
+All channels timing out (100 ms of silence, `IDLE`) also re-arms. A recv exception becomes OTHER (re-arm) instead of terminating the process.
+
+Real-time risk of the lockstep [CODE-READ, NOT RUN on X410]: overflow tolerance per channel is UHD's per-streamer host buffer, the same as in
+benchmark_rate; the lockstep only adds the barrier round trip (two futex broadcasts + the coordinator's commit/reserve) to the time a channel
+thread is away from recv(), and couples the channels (a stall in any thread stalls all, and any overflow re-arms all, which a gap-free
+array needs anyway). The defect that made this a real risk -- the coordinator ran at normal priority on every chunk's critical path -- is
+fixed. Measure before redesigning: `SHMIQ_UHD_STATS ... gap_max_us=` is the longest time any recv thread spent between two recv() calls in
+the last second (includes stop/drain/re-arm when resyncs grew). If gap_max_us tails approach the UHD buffer depth (not measured on DGX;
+raise `dpdk_num_mbufs` / `num_recv_frames` first), the next step is free-running per-channel threads with a shared commit.
 
 Consumer cell (any number, own process): `ISAC_SHM_IQ_NAME=isac_iq ISAC_SHM_IQ_CELL=c675 ISAC_CELL_INSTANCE=... nr-uesoftmodem` with `device = { name = "shm_iq"; }` (see MPCI-M1/M2).
 Stop with SIGINT (`kill -INT`): the tool issues STREAM_MODE_STOP_CONTINUOUS, drains, releases the device (X410 claim hygiene); never SIGKILL.
@@ -179,10 +189,13 @@ Stop with SIGINT (`kill -INT`): the tool issues STREAM_MODE_STOP_CONTINUOUS, dra
     SHMIQ_UHD_TUNE timed=1 t=0.5 chans=0,1,2,3   (before the SHMIQ_UHD_CH lines)
     SHMIQ_UHD_STREAM streamers=4 max_num_samps=... chunk=65536 priority=high
     SHMIQ_UHD_READY ring=/isac_iq channels=4 rate=245760000 center_hz=... capacity=33554432 bytes=536875008 radio=<serial> time_source=free
-    SHMIQ_UHD_STATS t=10.0 samples=2.4e9 rate_meas=245760000.0 overflows=0 timeouts=0 resyncs=0 ring_head=...   (every 1 s)
+    SHMIQ_UHD_STATS t=10.0 samples=2.4e9 rate_meas=245760000.0 overflows=0 timeouts=0 resyncs=0 ring_head=... gap_max_us=..   (every 1 s)
     SHMIQ_UHD_END samples=... overflows=0 timeouts=0 resyncs=0 inplace=... copied=1       (copied=1 is the first write; more = gaps)
     on overflow: SHMIQ_UHD_OVERFLOW n=<count> + SHMIQ_UHD_RESTART run=<k>   (stop, drain, timed START at now+0.1 s; consumers then
-    log one SHMIQ_DISCONT). 10 errors with no sample in between -> SHMIQ_UHD_FAIL stream dead (rc 3)
+    log one SHMIQ_DISCONT). 20 errors (or 20 all-channel timeouts) with no sample in between -> SHMIQ_UHD_FAIL stream dead (rc 3);
+    the limit is 20 because ~half of X410 DPDK starts hit the out-of-sequence halt (usrp_lib.cpp, MEASURED 2026-10-06, 4 x 122.88 MS/s
+    single streamer; not measured with --multi-streamer). Stop + drain also run on exception paths before the device is released.
+    SHMIQ_UHD_WARN timed tune issued after its command time   (the per-channel tunes took > 0.5 s: channels tuned unaligned)
 
 ### Comparison to run first, then acceptance [NOT RUN]
 1. benchmark_rate with the user's exact command above (300 s): reference, no D/O/L.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-CSSL-1.0
 // Standalone wideband UHD publisher for the multi-cell receiver (MPCI M4 wideband mode): one radio, N channels, one centre frequency
-// (each X410 ZBX channel has its own LO, tuned untimed: no inter-channel phase calibration here), sc16 straight
+// (each X410 ZBX channel has its own LO, tuned by one timed command: no inter-channel phase calibration here), sc16 straight
 // from the UHD streamer into the shm IQ ring (radio/COMMON/shm_iq_ring.h), consumed by one shm_iq receiver process per cell.
 // No OAI softmodem / config / log dependency. No site defaults: every radio parameter is an explicit option.
 //
@@ -89,8 +89,14 @@ static pub_rx_status_t uhd_recv(void *vc, int16_t *const *dst, int n, int64_t *t
 {
   RecvCtx *c = (RecvCtx *)vc;
   std::vector<void *> bufs(dst, dst + c->nch);
-  const size_t k = c->rxs->recv(bufs, (size_t)n, c->md, c->timeout, false);
-  c->timeout = 1.0;
+  size_t k;
+  try { // an exception escaping a recv thread would std::terminate() without releasing the device
+    k = c->rxs->recv(bufs, (size_t)n, c->md, c->timeout, false);
+  } catch (const std::exception &e) {
+    fprintf(stderr, "SHMIQ_UHD_ERR recv: %s\n", e.what());
+    return PUB_RX_OTHER;
+  }
+  c->timeout = 0.1; // 100 ms of silence on a 245 MS/s stream = halted (usrp_lib.cpp uses 0.1 s too); start() sets the first one
   switch (c->md.error_code) {
     case uhd::rx_metadata_t::ERROR_CODE_NONE:
       if (!c->md.has_time_spec) return PUB_RX_OTHER;
@@ -105,7 +111,8 @@ static pub_rx_status_t uhd_recv(void *vc, int16_t *const *dst, int n, int64_t *t
 
 static void set_prio(bool high)
 {
-  if (high && !uhd::set_thread_priority_safe(1.0f, true)) fprintf(stderr, "SHMIQ_UHD_WARN realtime priority not permitted (run as root / CAP_SYS_NICE): continuing at normal priority\n");
+  // UHD default 0.5 (SCHED_RR mid): what benchmark_rate --priority high uses; 1.0 would sit above the kernel's threaded IRQs
+  if (high && !uhd::set_thread_priority_safe()) fprintf(stderr, "SHMIQ_UHD_WARN realtime priority not permitted (run as root / CAP_SYS_NICE): continuing at normal priority\n");
 }
 
 static void pin_self(long core)
@@ -120,6 +127,7 @@ static void pin_self(long core)
 // One recv thread per channel; the main thread is the coordinator. bar: N+1 parties, waited twice per chunk (go / done).
 struct Chunk {
   pthread_barrier_t bar;
+  double gap_max[PUB_MAX_CH] = {}; // longest time a thread spent between two recv() calls (barrier round trip), s
   int16_t *slots[PUB_MAX_CH];
   pub_chres_t res[PUB_MAX_CH];
   int n = 0;
@@ -192,6 +200,9 @@ int main(int argc, char **argv)
   sigaction(SIGINT, &sa, nullptr);
   sigaction(SIGTERM, &sa, nullptr);
 
+  // before make(): UHD/DPDK threads inherit it (as when benchmark_rate elevates first) and the multi-streamer coordinator, which is on
+  // every chunk's critical path (two barrier wakes), runs realtime too
+  set_prio(prio == "high");
   int rc = 0;
   pub_t *pub = nullptr;
   try {
@@ -227,6 +238,7 @@ int main(int argc, char **argv)
       for (size_t u : map) usrp->set_rx_freq(uhd::tune_request_t(freq), u);
       if (timed_tune) {
         usrp->clear_command_time();
+        if (usrp->get_time_now().get_real_secs() > t_cmd) fprintf(stderr, "SHMIQ_UHD_WARN timed tune issued after its command time: channels tuned unaligned\n");
         std::this_thread::sleep_for(std::chrono::milliseconds(700)); // past the command time, before the lo_locked check
       }
       std::string cl;
@@ -290,8 +302,12 @@ int main(int argc, char **argv)
       cmd.stream_now = false;
       cmd.time_spec = usrp->get_time_now() + uhd::time_spec_t(lead);
       const int64_t t0 = pub_tick(cmd.time_spec.to_ticks(mcr), ctxs[0].decim, 0);
-      for (auto &c : ctxs) { c.start_tick = t0; c.rxs->issue_stream_cmd(cmd); }
+      for (auto &c : ctxs) { c.start_tick = t0; c.timeout = lead + 0.5; c.rxs->issue_stream_cmd(cmd); }
     };
+    struct Stop { // stop + drain on every exit path, after the workers are joined (declared before Guard)
+      decltype(stop_drain) &f;
+      ~Stop() { try { f(); } catch (const std::exception &e) { fprintf(stderr, "SHMIQ_UHD_WARN stop: %s\n", e.what()); } }
+    } stopper{stop_drain};
 
     Chunk ck;
     std::vector<std::thread> workers;
@@ -305,24 +321,27 @@ int main(int argc, char **argv)
         workers.emplace_back([&, i]() {
           pin_self(cores.empty() ? -1 : cores[i]);
           set_prio(prio == "high");
-          for (;;) {
+          for (double t_ret = 0;;) {
             pthread_barrier_wait(&ck.bar); // go: slots reserved
             if (ck.quit) return;
+            if (t_ret > 0) ck.gap_max[i] = std::max(ck.gap_max[i], now_s() - t_ret);
             int64_t tick = 0;
             int got = 0;
             ck.res[i].st = uhd_recv(&ctxs[i], &ck.slots[i], ck.n, &tick, &got);
+            t_ret = now_s();
             ck.res[i].tick = tick;
             ck.res[i].got = got;
             pthread_barrier_wait(&ck.bar); // done
           }
         });
-    } else set_prio(prio == "high");
+    }
 
     start(1.5);
     repin_uhd_ctrl();
     const double t_start = now_s();
     double t_first = 0, t_stat = t_start, t_end = duration > 0 ? t_start + duration : 0;
     int bad_run = 0;
+    const int max_bad = 20; // ~half of X410 DPDK starts hit the out-of-sequence halt (usrp_lib.cpp): 2^-20, as ISAC_RX_RECOVER_MAX
     while (!g_stop && !(t_end && now_s() >= t_end)) {
       pub_mc_act_t act;
       int got;
@@ -342,9 +361,9 @@ int main(int argc, char **argv)
         act = st->overflows != ovf ? PUB_MC_OVERFLOW : st->others != oth ? PUB_MC_OTHER : got > 0 ? PUB_MC_OK : PUB_MC_IDLE;
       }
       if (got > 0 && t_first == 0) t_first = now_s();
-      const bool err = act == PUB_MC_OVERFLOW || act == PUB_MC_MISMATCH || act == PUB_MC_OTHER;
+      const bool err = act != PUB_MC_OK; // IDLE too: a continuous stream silent for 100 ms is halted, re-arm it
       bad_run = got > 0 ? 0 : bad_run + err;
-      if (err && bad_run < 10) {
+      if (err && bad_run < max_bad) {
         // MEASURED in usrp_lib.cpp (X410, DPDK): after ERROR_CODE_OVERFLOW (out of sequence) RFNoC halts the stream: re-arm it
         // (all streamers together); the next packet's timestamp jump becomes a ring gap
         if (act == PUB_MC_OVERFLOW) fprintf(stderr, "SHMIQ_UHD_OVERFLOW n=%llu\n", (unsigned long long)st->overflows);
@@ -352,17 +371,18 @@ int main(int argc, char **argv)
         start(0.1);
         fprintf(stderr, "SHMIQ_UHD_RESTART run=%d\n", bad_run);
       }
-      if (st->consecutive_timeouts >= 10 || bad_run >= 10) { fprintf(stderr, "SHMIQ_UHD_FAIL stream dead (timeouts=%d errors=%d)\n", st->consecutive_timeouts, bad_run); rc = 3; break; }
+      if (st->consecutive_timeouts >= max_bad || bad_run >= max_bad) { fprintf(stderr, "SHMIQ_UHD_FAIL stream dead (timeouts=%d errors=%d)\n", st->consecutive_timeouts, bad_run); rc = 3; break; }
       const double t = now_s();
       if (t - t_stat >= 1.0) {
         t_stat = t;
-        fprintf(stderr, "SHMIQ_UHD_STATS t=%.1f samples=%llu rate_meas=%.1f overflows=%llu timeouts=%llu resyncs=%llu ring_head=%llu\n", t - t_start,
+        double gap = 0; // workers are parked at the go barrier: safe to read and reset
+        for (size_t i = 0; i < workers.size(); ++i) { gap = std::max(gap, ck.gap_max[i]); ck.gap_max[i] = 0; }
+        fprintf(stderr, "SHMIQ_UHD_STATS t=%.1f samples=%llu rate_meas=%.1f overflows=%llu timeouts=%llu resyncs=%llu ring_head=%llu gap_max_us=%.0f\n", t - t_start,
                 (unsigned long long)st->samples, t_first > 0 && t > t_first ? (double)st->samples / (t - t_first) : 0.0, (unsigned long long)st->overflows,
-                (unsigned long long)st->timeouts, (unsigned long long)st->resyncs, (unsigned long long)pub_stats(pub)->head);
+                (unsigned long long)st->timeouts, (unsigned long long)st->resyncs, (unsigned long long)pub_stats(pub)->head, gap * 1e6);
       }
     }
-    // clean stop: the X410 claim must be released (never leave the device streaming)
-    stop_drain();
+    // clean stop (Stop guard, also on exceptions): the X410 claim must be released (never leave the device streaming)
     fprintf(stderr, "SHMIQ_UHD_END samples=%llu overflows=%llu timeouts=%llu resyncs=%llu inplace=%llu copied=%llu\n", (unsigned long long)st->samples,
             (unsigned long long)st->overflows, (unsigned long long)st->timeouts, (unsigned long long)st->resyncs, (unsigned long long)st->inplace, (unsigned long long)st->copied);
   } catch (const std::exception &e) {

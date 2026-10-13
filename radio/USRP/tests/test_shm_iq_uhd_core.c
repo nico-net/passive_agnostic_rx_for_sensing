@@ -69,8 +69,17 @@ static void test_multi(void)
   s[1].len = 300;
   mc_chunk(pb, s, 2, 1000, &pd, &a);
   CHECK(pd == 0 && a == PUB_MC_MISMATCH && sp->resyncs == 1 && atomic_load(&c.hdr->head) == head);
-  /* one channel overflows (the other delivered): OVERFLOW, nothing published; restart on a new common tick -> one gap */
+  CHECK(shm_iq_ring_copy(&c, head, 1, 2, dst) == 1); /* the refused, half-written slots are never readable */
+  /* refused chunk, then the streams simply continue (no re-arm): its samples are lost -> one forward gap, exact tick mapping */
   s[1].len = 700;
+  s[1].next = s[0].next;
+  const uint64_t g0 = atomic_load(&r->hdr->gaps);
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd == 700 && a == PUB_MC_OK && atomic_load(&r->hdr->gaps) == g0 + 1);
+  head = atomic_load(&c.hdr->head);
+  CHECK(atomic_load(&c.hdr->tick_offset) + (int64_t)head == s[0].next && shm_iq_ring_copy(&c, head - 400, 400, 2, dst) == 0); /* b0/b1 hold 500 samples */
+  for (int i = 0; i < 400; ++i) CHECK(b0[2 * i] == (int16_t)((s[0].next - 400 + i) & 0x7fff) && b1[2 * i + 1] == 1);
+  /* one channel overflows (the other delivered): OVERFLOW, nothing published; restart on a new common tick -> one gap */
   s[0].st = PUB_RX_OVERFLOW;
   mc_chunk(pb, s, 2, 1000, &pd, &a);
   CHECK(pd == 0 && a == PUB_MC_OVERFLOW && sp->overflows == 1 && atomic_load(&c.hdr->head) == head);
@@ -80,7 +89,7 @@ static void test_multi(void)
   CHECK(pd == 0 && a == PUB_MC_MISMATCH && sp->resyncs == 2);
   s[0].next = s[1].next = 90000; /* common tick after the re-arm */
   mc_chunk(pb, s, 2, 1000, &pd, &a);
-  CHECK(pd > 0 && a == PUB_MC_OK && sp->copied == 2 && atomic_load(&r->hdr->gaps) == 1);
+  CHECK(pd > 0 && a == PUB_MC_OK && sp->copied == 3 && atomic_load(&r->hdr->gaps) == 2);
   head = atomic_load(&c.hdr->head);
   CHECK(atomic_load(&c.hdr->tick_offset) + (int64_t)head == s[0].next);
   /* partial chunk: both channels deliver fewer samples than reserved, equal */
