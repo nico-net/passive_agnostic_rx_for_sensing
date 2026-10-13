@@ -57,6 +57,7 @@
  * assignment being found in nr_radio_config.c).
  */
 
+#include "common/utils/nr_cell_instance.h"
 #include "nr_pdcch_nid_gpu.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
@@ -1344,7 +1345,8 @@ static bool discovered_additional_poll(void)
     return m && nr_pdcch_discovered_enabled() && !s_add_disc.active ? discovered_load_stream(m) : (m && fclose(m), false);
   }
   const char *path = getenv("ISAC_PDCCH_DISCOVERED_FILE");
-  if (!path || !*path) path = "/tmp/coresets_discovered.txt";
+  char path_def[256];
+  if (!path || !*path) { nr_cell_path("/tmp/coresets_discovered.txt", path_def, sizeof(path_def)); path = path_def; }
   struct stat st;
   if (stat(path, &st) || (st.st_ino == s_add_disc.file.st_ino && st.st_size == s_add_disc.file.st_size
       && st.st_mtim.tv_sec == s_add_disc.file.st_mtim.tv_sec
@@ -1622,7 +1624,8 @@ bool nr_pdcch_blind_monitor_discovered_poll(void)
   static time_t s_mtime;
   if ((++s_calls & 1023) != 1)
     return false;
-  const char *path = "/tmp/coresets_discovered.txt";
+  char path[256];
+  nr_cell_path("/tmp/coresets_discovered.txt", path, sizeof(path));
   struct stat st;
   if (nr_pdcch_nid_gpu_enabled() || (stat(path, &st) == 0 && st.st_mtime != s_mtime)) {
     if (!nr_pdcch_nid_gpu_enabled()) s_mtime = st.st_mtime;
@@ -6007,7 +6010,9 @@ static void sib1_cache_path(uint16_t pci, uint32_t hash, char *out, size_t n)
 static void sib1_cache_index_path(uint16_t pci, char *out, size_t n)
 {
   const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
-  snprintf(out, n, "%s/sib1_common_pci%u_last_hash.bin", dir && *dir ? dir : "/tmp/passive_rx", pci);
+  char def[256];
+  nr_cell_path("/tmp/passive_rx", def, sizeof(def));
+  snprintf(out, n, "%s/sib1_common_pci%u_last_hash.bin", dir && *dir ? dir : def, pci);
 }
 static bool sib1_cache_enabled(void)
 {
@@ -6022,7 +6027,13 @@ static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
   const uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
   sib1_cache_path(f->pci, hash, path, sizeof(path));
   FILE *fp = fopen(path, "wb");
-  if (fp == NULL) { mkdir("/tmp/passive_rx", 0777); fp = fopen(path, "wb"); }
+  if (fp == NULL) {
+    char d[256];
+    snprintf(d, sizeof(d), "%s", path);
+    char *sl = strrchr(d, '/');
+    if (sl) { *sl = 0; nr_cell_mkdirs(d); }
+    fp = fopen(path, "wb");
+  }
   if (fp == NULL) return;
   const uint32_t magic = 0x53494231u; /* "SIB1" */
   const bool written = fwrite(&magic, sizeof(magic), 1, fp) == 1 && fwrite(f, sizeof(*f), 1, fp) == 1;

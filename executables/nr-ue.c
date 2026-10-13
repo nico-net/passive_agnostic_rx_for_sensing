@@ -1,3 +1,4 @@
+#include "common/utils/nr_cell_instance.h"
 #include "PHY/NR_UE_TRANSPORT/nr_srs_passive.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
@@ -152,9 +153,12 @@ static void *nrL1_UE_stats_thread(void *param)
   PHY_VARS_NR_UE *ue = (PHY_VARS_NR_UE *) param;
   const int max_len = 16384;
   char output[max_len];
-  char filename[30];
-  snprintf(filename, 29, "nrL1_UE_stats-%d.log", ue->Mod_id);
-  filename[29] = 0;
+  char filename[64];
+  const char *cell = nr_cell_instance();
+  if (cell)
+    snprintf(filename, sizeof(filename), "nrL1_UE_stats-%d.%s.log", ue->Mod_id, cell);
+  else
+    snprintf(filename, sizeof(filename), "nrL1_UE_stats-%d.log", ue->Mod_id);
   FILE *fd = fopen(filename, "w");
   AssertFatal(fd != NULL, "Cannot open %s\n", filename);
 

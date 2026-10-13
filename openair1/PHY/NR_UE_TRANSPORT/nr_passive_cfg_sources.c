@@ -1,3 +1,4 @@
+#include "common/utils/nr_cell_instance.h"
 #include "nr_passive_cfg_sources.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,7 +78,9 @@ bool nr_cfg_sib1_redecode_due(uint64_t abs_slot, uint64_t last_request_slot, uns
 void nr_cfg_sib1_cache_name(char *out, size_t capacity, const char *directory,
                             uint16_t pci, uint32_t semantic_hash, bool reconf)
 {
-  const char *dir = directory && directory[0] ? directory : "/tmp/passive_rx";
+  char def[256];
+  nr_cell_path("/tmp/passive_rx", def, sizeof(def));
+  const char *dir = directory && directory[0] ? directory : def;
   if (reconf)
     snprintf(out, capacity, "%s/sib1_common_pci%u_hash%08x.bin", dir, pci, semantic_hash);
   else

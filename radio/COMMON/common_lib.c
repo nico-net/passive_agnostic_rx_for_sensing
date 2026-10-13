@@ -126,6 +126,7 @@ int openair0_device_load(openair0_device_t *device, openair0_config_t *openair0_
   }
   pthread_mutex_init(&device->reOrder.mutex_store, NULL);
   pthread_mutex_init(&device->reOrder.mutex_write, NULL);
+  shm_iq_pub_maybe_wrap(device, openair0_cfg); /* MPCI M1: no-op unless ISAC_SHM_IQ_PUB is set */
   return rc;
 }
 

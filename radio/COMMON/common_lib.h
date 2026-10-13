@@ -632,6 +632,8 @@ int openair0_write_reorder_common(nrue_ru_write_t nrue_ru_write,
 const char *get_devname(int devtype);
 /*! \brief Initialize openair RF target. It returns 0 if OK */
 int openair0_device_load(openair0_device_t *device, openair0_config_t *openair0_cfg);
+/* MPCI M1 (radio/COMMON/shm_iq_pub.c): publish every read sample to the shm IQ ring when ISAC_SHM_IQ_PUB is set. */
+void shm_iq_pub_maybe_wrap(openair0_device_t *device, openair0_config_t *cfg);
 /*! \brief Initialize transport protocol . It returns 0 if OK */
 int openair0_transport_load(openair0_device_t *device, openair0_config_t *openair0_cfg);
 

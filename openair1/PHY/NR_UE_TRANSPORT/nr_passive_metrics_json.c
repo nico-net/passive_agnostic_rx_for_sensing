@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include "common/utils/nr_cell_instance.h"
 #include "nr_passive_metrics.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -90,8 +91,10 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     ",\"sense_rec_count\":%" PRIu64 ",\"sense_write_count\":%" PRIu64,
     m->sense_rec_us,m->sense_write_us,m->sense_rec_count,m->sense_write_count);
   if (cost_z<0 || (size_t)cost_z>=sizeof(sense_cost)-cost_len) return -1;
+  char cell_json[64] = "";
+  if (nr_cell_instance()) snprintf(cell_json, sizeof(cell_json), ",\"cell\":\"%s\"", nr_cell_instance());
   int w = snprintf(buf, n,
-      "{\"schema\":%d,\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64 ",\"pci\":%d,\"acq_state\":\"%s\","
+      "{\"schema\":%d%s,\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64 ",\"pci\":%d,\"acq_state\":\"%s\","
       "\"acq_transitions\":%" PRIu64 ",\"acq_sync_losses\":%" PRIu64 ",\"acq_pbch_locks\":%" PRIu64 ",\"acq_sib1_decodes\":%" PRIu64 ","
       "\"pdcch_occasions\":%" PRIu64 ",\"pdcch_candidates\":%" PRIu64 ",\"pdcch_accepts\":%" PRIu64 ",\"pdcch_accepts_c\":%" PRIu64 ","
       "\"scanq_queued\":%" PRIu64 ",\"scanq_processed\":%" PRIu64 ",\"scanq_drop_full\":%" PRIu64 ",\"scanq_drop_stale\":%" PRIu64 ",\"scanq_drop_epoch\":%" PRIu64 ",\"scanq_max_lag\":%" PRIu64 ",\"pdcch_inline_drop_epoch\":%" PRIu64 ","
@@ -120,7 +123,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       "\"gpu_budget_used_pct\":%.3f,\"discovery_yields\":%" PRIu64 ",\"rt_gpu_wait_max_us\":%" PRIu64 ",\"rt_gpu_fallbacks\":%" PRIu64 ",\"discovery_overruns\":%" PRIu64 ","
       "\"csirs_time_to_confirm_slots_last\":%" PRIu64 ",\"csirs_time_to_confirm_slots_sum\":%" PRIu64 ","
       "\"csirs_time_to_confirm_resources\":[",
-      NR_PASSIVE_METRICS_SCHEMA, m->t_mono_ns, m->abs_slot, m->pci, st,
+      NR_PASSIVE_METRICS_SCHEMA, cell_json, m->t_mono_ns, m->abs_slot, m->pci, st,
       m->acq_transitions, m->acq_sync_losses, m->acq_pbch_locks, m->acq_sib1_decodes,
       m->pdcch_occasions, m->pdcch_candidates, m->pdcch_accepts, m->pdcch_accepts_c,
       m->scanq_queued, m->scanq_processed, m->scanq_drop_full, m->scanq_drop_stale, m->scanq_drop_epoch, m->scanq_max_lag, m->pdcch_inline_drop_epoch,

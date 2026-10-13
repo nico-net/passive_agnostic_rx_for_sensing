@@ -1,6 +1,7 @@
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
+#include "common/utils/nr_cell_instance.h"
 
 /*!
  * \brief Implements PDCCH physical channel TX/RX procedures (36.211) and DCI encoding/decoding (36.212/36.213). Current LTE
@@ -937,7 +938,9 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
     pthread_mutex_lock(&g_cap_mu);
     /* g_cap_left re-checked under the lock: another scan consumer may have spent the last record (Task A7). */
     if (g_cap_left > 0 && g_cap_fp == NULL) {
-      g_cap_fp = fopen("/tmp/pdcch_fixture.bin", "wb");
+      char cap_path[128];
+      nr_cell_path("/tmp/pdcch_fixture.bin", cap_path, sizeof(cap_path));
+      g_cap_fp = fopen(cap_path, "wb");
     }
     if (g_cap_left > 0 && g_cap_fp != NULL) {
       const int32_t hdr[14] = {0x48434450, 1, (int32_t)proc->frame_rx, (int32_t)proc->nr_slot_rx,

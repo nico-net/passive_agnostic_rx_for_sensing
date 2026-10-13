@@ -16,3 +16,9 @@ set_target_properties(oai_usrpdevif PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_
 add_custom_command(TARGET oai_usrpdevif POST_BUILD
                    COMMAND ${CMAKE_COMMAND} -E create_symlink liboai_usrpdevif.so liboai_device.so
                    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+# MPCI wideband: standalone UHD -> shm IQ ring publisher (no OAI softmodem/config/log dependency)
+add_executable(shm_iq_uhd_pub shm_iq_uhd_pub.cpp shm_iq_uhd_core.c ../COMMON/shm_iq_ring.c)
+target_include_directories(shm_iq_uhd_pub PRIVATE ${UHD_INCLUDE_DIRS} ../COMMON)
+target_link_libraries(shm_iq_uhd_pub PRIVATE ${UHD_LIBRARIES} Boost::thread rt pthread)
+set_target_properties(shm_iq_uhd_pub PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
