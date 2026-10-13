@@ -32,8 +32,17 @@ A fair CRC comparison needs >= 6 cores (or a DGX run): [NOT RUN].
 ## Anomaly (unexplained, 1 of 3 runs on @4bf6394)
 run8 (light pub, full consumer, 270 s): consumer exited ~60 s after pub start with `SHMIQ_PRODUCER_LOST pid=12250 pos=4334102705` and
 `Exiting OAI softmodem: shm IQ producer lost` (shm_iq.c:144) although the publisher was alive and busy to the end (pub CPU 4m25 user).
-Heartbeat was stale > 60 s while the pid existed: the publisher apparently stopped publishing (or stopped updating the heartbeat) after `SHMIQ_PUB_RETUNE epoch=1`
-(last SHMIQ line in pub log). Not reproduced in run6/run9. Evidence: scratchpad run8/{pub,c1}/rx.log.
+~~Heartbeat was stale > 60 s: the publisher stopped publishing after `SHMIQ_PUB_RETUNE epoch=1`~~ -- WRONG, superseded.
+**Root cause (follow-up debug, same day):** consumer-side unsigned wrap in `shm_iq.c read_iq()`: `stale = now() - heartbeat`
+with the clock read BEFORE the heartbeat load; when the publisher stamped a heartbeat newer than that clock read the
+difference wrapped to ~1.8e19 ns (> 60 s rule). The consumer was decoding normally up to the exit (last rnti_seen 10:24:59.748,
+`SHMIQ_END overruns=0 discont=0`), i.e. no real stall [MEASURED, cloud x86 4c, @4bf6394]. Fixed: heartbeat read first, clamp
+at 0. Regression test `test_heartbeat_ahead` in test_shm_iq reproduces the exact exit on the old code and passes on the fix
+[OFFLINE VERIFIED, cloud x86]. Rerun run10_hbfix (180 s): the consumer survives the publisher retune (re-tunes at epoch=1,
+reads=158582, overruns=0, discont=0); its final PRODUCER_LOST comes 2 s after the publisher's scripted stop (pid gone) =
+correct [SIM VERIFIED, cloud x86 4c, rfsim 106 PRB, fixed tree]. One rerun is weak evidence for a 1-in-3 race; the
+deterministic test is the proof. The publisher's shutdown `RU_write` AssertFatal (nr-ue.c:512) is the TX path after the
+SIGINT shutdown gate closes, not the ring (shm_iq_pub wraps only read/set_freq) [CODE-READ].
 
 ## Goal 2 (D=2): skipped
 rfsim gNB 106 PRB at 61.44 MS/s; k_ssb=31 (>=24) and the SSB at `--ssb 516` is 516 PRB-subcarriers-offset in a 106 PRB grid; the 51-PRB window (30.72 MS/s) would have to be

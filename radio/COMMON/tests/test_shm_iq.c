@@ -237,6 +237,44 @@ static int test_fanout(const char *lib)
   return 0;
 }
 
+/* run8 regression: a caught-up consumer that reads a heartbeat newer than its own clock read (producer wrote in between)
+ * must keep waiting, not compute an unsigned-wrapped staleness and exit with SHMIQ_PRODUCER_LOST */
+static int test_heartbeat_ahead(const char *lib)
+{
+  char ring[64];
+  snprintf(ring, sizeof(ring), "isac_iq_hb_%d", (int)getpid());
+  shm_iq_ring_t p;
+  CHECK(shm_iq_ring_create(&p, ring, 1, 1 << 20, 61.44e6, CENTER) == 0, "create");
+  static int16_t x[2 * 30720];
+  void *b[1] = {x};
+  shm_iq_ring_write(&p, 0, b, 30720, 1);
+  atomic_store(&p.hdr->heartbeat_ns, shm_iq_now_ns() + 10000000000ull); /* every consumer poll sees hb > now */
+  fflush(stdout);
+  pid_t c = fork();
+  if (!c) {
+    setenv("ISAC_SHM_IQ_NAME", ring, 1);
+    void *h = dlopen(lib, RTLD_NOW);
+    int (*init)(openair0_device_t *, openair0_config_t *) = h ? dlsym(h, "device_init") : NULL;
+    openair0_device_t dev; memset(&dev, 0, sizeof(dev));
+    openair0_config_t cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.sample_rate = 61.44e6; cfg.rx_bw = 40e6; cfg.rx_num_channels = 1; cfg.rx_freq[0] = CENTER;
+    if (!init || init(&dev, &cfg) || dev.trx_start_func(&dev)) _exit(2);
+    openair0_timestamp_t ts;
+    void *d[1] = {x};
+    _exit(dev.trx_read_func(&dev, &ts, d, 30720, 1) == 30720 ? 0 : 2);
+  }
+  struct timespec w = {0, 200000000};
+  nanosleep(&w, NULL); /* the consumer polls an empty ring meanwhile */
+  shm_iq_ring_write(&p, 30720, b, 30720, 1);
+  int st;
+  waitpid(c, &st, 0);
+  shm_iq_ring_detach(&p);
+  char path[80]; snprintf(path, sizeof(path), "/%s", ring); shm_unlink(path);
+  CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "consumer exited %d with a live producer", WEXITSTATUS(st));
+  printf("heartbeat ahead ok\n");
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   int fail = 0;
@@ -247,6 +285,7 @@ int main(int argc, char **argv)
   fail |= test_ring();
   fail |= test_ring_stress();
   if (argc > 1) fail |= test_fanout(argv[1]);
+  if (argc > 1) fail |= test_heartbeat_ahead(argv[1]);
   printf(fail ? "FAILED\n" : "ALL OK\n");
   return fail;
 }

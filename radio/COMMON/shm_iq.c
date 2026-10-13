@@ -136,7 +136,9 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
       else skip_to(s, head, 1); /* fell behind by more than the ring: jump to the newest data */
       continue;
     }
-    const uint64_t stale = shm_iq_now_ns() - atomic_load(&h->heartbeat_ns);
+    /* the producer may stamp a heartbeat newer than our clock read: clamp, an unsigned wrap would read as ~584 years stale */
+    const uint64_t hb = atomic_load(&h->heartbeat_ns), now = shm_iq_now_ns();
+    const uint64_t stale = now > hb ? now - hb : 0;
     const pid_t pid = atomic_load(&h->producer_pid);
     /* a live producer may be stalled for tens of seconds (RFSTALL device reload, initial sync): keep waiting up to 60 s */
     if (stale > s->timeout_ns && ((kill(pid, 0) != 0 && errno == ESRCH) || stale > 60000000000ull)) {
