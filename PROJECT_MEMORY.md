@@ -3988,8 +3988,9 @@ CORESETALL-20261012, ULTWINS-20261012 (`docs/superpowers/reports/csd/`). Raw log
 | TIM 923 | 273 / 3759990000 / 569 | MISMATCH (wider, Point A sc 336), contained | 1 (nID 1931, rnti 0x4e32, grid_rb 28) | 18/916 (2.0 %) |
 | TIM 923 | 273 / 3752790000 / 809 (re-centred -7.2 MHz) | Point A sc 576, contained | 1 (grid_rb 48) | 17/800 (2.1 %) |
 
-- `[ORCH]` TIM 923 in a 273 grid with `ISAC_CARRIER_FROM_SIB1=1`: same CORESET verified, PDSCH CRC as at 217. **Open discrepancy:** the report
-  rows for 273 do not list the flag and report `MISMATCH`, not `CONFIRMED`. Reconcile against the logs before claiming the 273 carrier verdict.
+- `[ORCH]` TIM 923 in a 273 grid with `ISAC_CARRIER_FROM_SIB1=1`: same CORESET verified, PDSCH CRC as at 217. No discrepancy: `MISMATCH`
+  here means carrier != grid (162/217-PRB carrier inside a 273-PRB grid), which is the expected verdict; the carrier is reported *contained*,
+  and with `ISAC_CARRIER_FROM_SIB1=1` discovery runs carrier-relative. `CONFIRMED` is only emitted when carrier == grid.
 - `[ORCH]` Vodafone 415 at 273: no bank add, because its NSA SIB1 has no servingCellConfigCommon, so the carrier stays `unchecked` (the
   RS-evidence path assumes Point A = grid start). For such cells use the exact carrier-sized grid (autofront triple, item 19).
 - **The old RB=273 PBCH failure does NOT reproduce** `[MEASURED, DGX replay]`: 415 at `-r 273 --ssb 1507` syncs (PCI 415, MIB k_ssb 14, SIB1
