@@ -1,0 +1,40 @@
+[PHY]    Init: N_RB_DL 217, first_carrier_offset 2794, nb_prefix_samples 288,nb_prefix_samples0 352, ofdm_symbol_size 4096
+[PHY]    Set UE_fo_compensation 1, UE_scan_carrier 0, UE_no_timing_correction 0 
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 0
+[PHY]    Initial sync successful, PCI: 4
+[PHY]    Got synch: hw_slot_offset 19, carrier off 13 Hz
+[MAC]    SENSING: MIB fields sfn=940 k_ssb=2 scs_common=1 coreset0=11 ss0=4 dmrs_typeA=1 barred=0 intraFreqResel=0
+[PHY]    SENSING: ACQ carrier SIBLING hypothesis: same SSB frequency and k_ssb=2 as a cell with a decoded SIB1 -> 162 PRB mu=1 offsetToPointA 32 offsetToCarrier 0 (own SIB1 overrides)
+[PHY]    SENSING: ACQ carrier MISMATCH: SIB1 says 162 PRB mu=1 (Point A at grid subcarrier 324, offsetToCarrier 0, carrier end 2268) but PHY started with 217 PRB mu=1, grid end 2604; bw_match=0 mu_match=1 grid_match=0 -- the started sample grid is NOT this cell's carrier; the cell's carrier centre is 3590.010000 MHz, receiver started at 3590.190000 MHz (retune target)
+[PHY]    SENSING: ISAC_ACQ_RETUNE {"reason":"carrier_mismatch","n_rb":162,"mu":1,"centre_hz":3590010000,"started_n_rb":217,"started_centre_hz":3590190000,"bw_match":0,"mu_match":1,"grid_match":0}
+[PHY]    SENSING: DL_TRAFFIC_PROBE on: one DL slot in 16, antenna 0, SCHED_OTHER worker; POINTA_SWEEP=1
+[PHY]    SENSING: PDSCHQ queued=0 decoded=0 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: ACQ state=CORESET_VERIFIED time_in_state=0 transitions=2 regressions=0 in[len=0 coreset=1 ul_bwp=0 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=MISMATCH xoh[assumed=0 unresolved crc_ok=0] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: PDCCH_NID_GPU pass 1: stage1 2120.500 ms stage2 0.008 ms t=9305.729 (kernels max 27.371 ms) -> 0 CORESETs:
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890592054554717 rnti=0xffff sfn=984 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890592484467231 rnti=0x1d sfn=990 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890593566870507 rnti=0xffff sfn=1004 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: PDCCH_NID_GPU pass 2: stage1 2080.608 ms stage2 471.812 ms t=9308.293 (kernels max 9.375 ms) -> 1 CORESETs: nid=33538 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0 ties=6;
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890594507555641 rnti=0xffff sfn=1016 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890595282676159 rnti=0x1d sfn=2 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890595322640353 rnti=0x63 sfn=3 slot=3 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: PDCCH_NID_GPU pass 3: stage1 731.019 ms stage2 511.693 ms t=9310.118 (kernels max 12.122 ms) -> 4 CORESETs: nid=33538 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0 ties=6; nid=26722 sym=0 dur=1 grid_rb=87 groups=16 L=6 R=2 shift=0 ties=48; nid=26722 sym=0 dur=1 grid_rb=93 groups=18 L=6 R=2 shift=0 ties=18; nid=26722 sym=0 dur=1 grid_rb=87 groups=18 L=6 R=3 shift=7 ties=1;
+[PHY]    SENSING: discovered CORESET 1/78 nid=33538 dwell start sym=0 dur=1 grid_rb=27 groups=27 L=0 R=0 shift=0
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890597297929332 rnti=0x1d sfn=28 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890598561223572 rnti=0xffff sfn=44 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: PDSCHQ queued=8 decoded=8 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: ACQ state=CORESET_VERIFIED time_in_state=149 transitions=2 regressions=0 in[len=0 coreset=1 ul_bwp=0 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=MISMATCH xoh[assumed=0 unresolved crc_ok=0] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: PDCCH_NID_GPU pass 4: stage1 575.653 ms stage2 2704.892 ms t=9313.399 (kernels max 17.348 ms) -> 14 CORESETs: nid=33538 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0 ties=6; nid=26722 sym=0 dur=1 grid_rb=87 groups=16 L=6 R=2 shift=0 ties=48; nid=26722 sym=0 dur=1 grid_rb=93 groups=18 L=6 R=2 shift=0 ties=18; nid=26722 sym=0 dur=1 grid_rb=87 groups=18 L=6 R=3 shift=7 ties=1; ni
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890599796614936 rnti=0xffff sfn=60 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890600263290382 rnti=0x1d sfn=66 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: PDCCH_NID_GPU pass 5: stage1 802.432 ms stage2 750.893 ms t=9314.953 (kernels max 22.558 ms) -> 16 CORESETs: nid=33538 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0 ties=6; nid=26722 sym=0 dur=1 grid_rb=87 groups=16 L=6 R=2 shift=0 ties=48; nid=26722 sym=0 dur=1 grid_rb=93 groups=18 L=6 R=2 shift=0 ties=18; nid=26722 sym=0 dur=1 grid_rb=87 groups=18 L=6 R=3 shift=7 ties=1; nid
+[PHY]    SENSING: PDCCH_NID_GPU pass 6: stage1 494.148 ms stage2 339.514 ms t=9315.787 (kernels max 14.601 ms) -> 16 CORESETs: nid=33538 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0 ties=6; nid=26722 sym=0 dur=1 grid_rb=87 groups=16 L=6 R=2 shift=0 ties=48; nid=26722 sym=0 dur=1 grid_rb=93 groups=18 L=6 R=2 shift=0 ties=18; nid=26722 sym=0 dur=1 grid_rb=87 groups=18 L=6 R=3 shift=7 ties=1; nid
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890603076657439 rnti=0x1d sfn=102 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890603115877034 rnti=0x63 sfn=103 slot=3 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: PDCCH_NID_GPU pass 7: stage1 1082.889 ms stage2 1310.358 ms t=9318.181 (kernels max 20.752 ms) -> 16 CORESETs: nid=33538 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0 ties=6; nid=26722 sym=0 dur=1 grid_rb=87 groups=16 L=6 R=2 shift=0 ties=48; nid=26722 sym=0 dur=1 grid_rb=93 groups=18 L=6 R=2 shift=0 ties=18; nid=26722 sym=0 dur=1 grid_rb=87 groups=18 L=6 R=3 shift=7 ties=1; n
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890605124996207 rnti=0x1d sfn=128 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890606400854643 rnti=0xffff sfn=144 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890608143287112 rnti=0x1d sfn=166 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890608200282073 rnti=0x437 sfn=167 slot=7 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: PDCCH_NID_GPU pass 8: stage1 1112.419 ms stage2 3114.258 ms t=9322.408 (kernels max 31.138 ms) -> 16 CORESETs: nid=33538 sym=0 dur=1 grid_rb=33 groups=30 L=0 R=0 shift=0 ties=6; nid=26722 sym=0 dur=1 grid_rb=87 groups=16 L=6 R=2 shift=0 ties=48; nid=26722 sym=0 dur=1 grid_rb=93 groups=18 L=6 R=2 shift=0 ties=18; nid=26722 sym=0 dur=1 grid_rb=87 groups=18 L=6 R=3 shift=7 ties=1; n
+[PHY]    SENSING: PDSCHQ queued=15 decoded=15 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0

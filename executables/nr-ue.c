@@ -1174,6 +1174,7 @@ void *UE_thread(void *arg)
           nr_passive_acq_set_phy_geometry(UE->frame_parms.N_RB_DL, UE->frame_parms.numerology_index,
                                           UE->frame_parms.ssb_start_subcarrier, (double)UE->frame_parms.dl_CarrierFreq);
           nr_passive_acq_note_pbch_locked(); // acquisition-state tracker: MIB applied, frame known
+          nr_passive_acq_try_sibling_carrier((int)mac->ssb_subcarrier_offset); // ISAC_SIB1_SIBLING (default off)
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && nr_cfg_reconf_enabled()) {
             /* The acquired SSB centre is stable across SFN/beam-index changes. Point A is refined on SIB1. */
             const uint64_t ssb_hz = UE->frame_parms.dl_CarrierFreq

@@ -19,6 +19,8 @@
  *      contact@openairinterface.org
  */
 #include <gtest/gtest.h>
+#include <cstdio>
+#include <cstdlib>
 extern "C" {
 #include "nr_passive_acq_state.h"
 #include "common/utils/LOG/log.h"
@@ -179,6 +181,27 @@ TEST_F(AcqState, CarrierCheckReachesTheSnapshotAndNeedsPhyGeometryFirst) {
   EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, 1);
   nr_passive_acq_note_sib1_carrier(106, 1, 24, 0, 12);
   EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, -1);
+}
+TEST_F(AcqState, SiblingCarrierIsAdoptedByAnotherPciOnTheSameSsbAndOverriddenByItsOwnSib1) {
+  setenv("ISAC_SIB1_SIBLING", "1", 1);
+  nr_passive_acq_set_phy_geometry(217, 1, 517, 3500190123.0);      // an SSB frequency no real cell uses: the file key is private to this test
+  remove("/tmp/passive_rx/sib1_sibling_3476640.bin");
+  nr_passive_acq_try_sibling_carrier(2);                             // nothing stored yet
+  EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, 0);
+  nr_passive_acq_note_sib1_carrier(162, 1, 32, 0, 2);                // cell A: its own SIB1 stores the carrier
+  nr_passive_acq_reset();                                            // cell B: same SSB frequency, no SIB1
+  nr_passive_acq_set_phy_geometry(217, 1, 517, 3500190123.0);
+  nr_passive_acq_try_sibling_carrier(4);                             // other k_ssb = other CRB grid: refused
+  EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, 0);
+  nr_passive_acq_try_sibling_carrier(2);
+  auto s = nr_passive_acq_snapshot();
+  EXPECT_EQ(s.carrier_verified, -1) << "162 PRB in a 217 grid is a mismatch verdict, exactly as for the sibling itself";
+  EXPECT_EQ(s.carrier.carrier_n_rb, 162);
+  EXPECT_EQ(s.carrier.point_a_subcarrier, 324);
+  nr_passive_acq_note_sib1_carrier(162, 1, 34, 0, 2);                // cell B's own SIB1 replaces the borrowed one
+  EXPECT_EQ(nr_passive_acq_snapshot().carrier.point_a_subcarrier, 312);
+  unsetenv("ISAC_SIB1_SIBLING");
+  remove("/tmp/passive_rx/sib1_sibling_3476640.bin");
 }
 TEST_F(AcqState, ResetReturnsToSearchingAndClearsCounters) {
   nr_passive_acq_inputs_t in{}; in.pdcch_length_found = true;

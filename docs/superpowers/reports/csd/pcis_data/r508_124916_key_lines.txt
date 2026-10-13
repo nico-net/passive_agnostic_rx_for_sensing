@@ -1,0 +1,40 @@
+[PHY]    Init: N_RB_DL 217, first_carrier_offset 2794, nb_prefix_samples 288,nb_prefix_samples0 352, ofdm_symbol_size 4096
+[PHY]    Set UE_fo_compensation 1, UE_scan_carrier 0, UE_no_timing_correction 0 
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 0
+[PHY]    Initial sync successful, PCI: 508
+[PHY]    Got synch: hw_slot_offset 19, carrier off 369 Hz
+[MAC]    SENSING: MIB fields sfn=940 k_ssb=2 scs_common=1 coreset0=11 ss0=4 dmrs_typeA=1 barred=0 intraFreqResel=0
+[PHY]    SENSING: PDSCHQ queued=0 decoded=0 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: DL_TRAFFIC_PROBE on: one DL slot in 2, antenna 0, SCHED_OTHER worker; POINTA_SWEEP=1
+[PHY]    SENSING: ACQ state=CORESET_VERIFIED time_in_state=0 transitions=2 regressions=0 in[len=0 coreset=1 ul_bwp=0 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=unchecked xoh[assumed=0 unresolved crc_ok=0] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665576170986 rnti=0xffff sfn=948 slot=11 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: ACQ carrier MISMATCH: SIB1 says 162 PRB mu=1 (Point A at grid subcarrier 324, offsetToCarrier 0, carrier end 2268) but PHY started with 217 PRB mu=1, grid end 2604; bw_match=0 mu_match=1 grid_match=0 -- the started sample grid is NOT this cell's carrier; the cell's carrier centre is 3590.010000 MHz, receiver started at 3590.190000 MHz (retune target)
+[PHY]    SENSING: ISAC_ACQ_RETUNE {"reason":"carrier_mismatch","n_rb":162,"mu":1,"centre_hz":3590010000,"started_n_rb":217,"started_centre_hz":3590190000,"bw_match":0,"mu_match":1,"grid_match":0}
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665602731756 rnti=0xffff sfn=948 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665603495634 rnti=0x1d sfn=948 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665604566234 rnti=0xffff sfn=948 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665864602134 rnti=0xffff sfn=952 slot=10 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665867952623 rnti=0xffff sfn=952 slot=11 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665871799019 rnti=0xffff sfn=952 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665874730945 rnti=0xffff sfn=952 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665884785450 rnti=0xffff sfn=952 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888665888046914 rnti=0xffff sfn=952 slot=17 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666141196381 rnti=0xffff sfn=956 slot=10 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666145100153 rnti=0xffff sfn=956 slot=11 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666148083631 rnti=0xffff sfn=956 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666151482696 rnti=0xffff sfn=956 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666161431521 rnti=0xffff sfn=956 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666164701496 rnti=0xffff sfn=956 slot=17 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: PDCCH_NID_GPU pass 1: stage1 241.808 ms stage2 0.001 ms t=7380.497 (kernels max 2.693 ms) -> 0 CORESETs:
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666416574554 rnti=0xffff sfn=960 slot=10 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666416600154 rnti=0xffff sfn=960 slot=10 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666420464022 rnti=0xffff sfn=960 slot=11 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666420514439 rnti=0xffff sfn=960 slot=11 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666423622814 rnti=0xffff sfn=960 slot=12 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666423675390 rnti=0xffff sfn=960 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666693513235 rnti=0xffff sfn=964 slot=10 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666697317534 rnti=0xffff sfn=964 slot=11 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666700300244 rnti=0xffff sfn=964 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666703633501 rnti=0xffff sfn=964 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666713576709 rnti=0xffff sfn=964 slot=16 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791888666716936990 rnti=0xffff sfn=964 slot=17 fmt=1_0 cce=0 al=4
