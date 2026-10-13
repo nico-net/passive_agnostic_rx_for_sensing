@@ -3788,6 +3788,7 @@ source reading `[CODE-READ]`, inference `[INF]`. Replay numbers are not OTA numb
 - Expected on air: `SENSING: ISAC_PDSCH_GPU_HOST_PIN=1: ...` line once at start; PDTIMCLSST > 20 ms bands near 0 for fep/chest; `GPU_EXACT_*
   check_bad=0`; 2-layer CRC at SNR >= 10 dB up; demod mean near 155 us. Rollback = remove the two settings.
 - Env files stay single-line (10-12 section 10).
+  `[SUPERSEDED by item 15]` for the morning OTA: `ota/t26b.env` (t26z stays the rollback baseline).
 
 **4. CSI-RS rate limit (RATEFIX)**
 
@@ -3821,11 +3822,14 @@ source reading `[CODE-READ]`, inference `[INF]`. Replay numbers are not OTA numb
   `test_nr_pdcch_blind_monitor` 262/262. `[MEASURED, DGX replay b and tim, n=2..4]` time-to-bank unchanged (tim 13782-13820 slots; b
   11980-15275 slots, OFF vs ENUM); no regression claimed beyond that.
 - **Cell-fitted assumption found** `[ORCH]`: `ISAC_COREMAP_IDSWEEP_DUR=1` is in the OTA env, so the GPU CORESET sweep tries duration 1 only.
+  `[SUPERSEDED by item 12]` duration 3 in `ota/t26b.env`; cost and control measured.
 - **Starvation found** `[MEASURED, DGX replay tim, OFF arm]`: C-RNTI 0x4e32 is decoded 477 / 641 times per 3000 slots before a dwell
   and 45 / 23 / 10 afterwards. `[ORCH]` TIM C-RNTI decodes go from ~500 to 10-45 per 3000 slots when a dwell is active.
   `[ORCH]` Both (duration sweep and dwell starvation) are being fixed by the CORESET owner agent on `csd/coreset-fable`. The PDCCH rt/decode
   path was not touched by `csd/coreset-all`.
+  `[SUPERSEDED by items 11 and 12]` both fixes exist on `csd/coreset-fable` (BLINDPIPE) and are measured in replay; not on air.
 - Not implemented: cells without servingCellConfigCommon (PCI 403) or without SIB1 (PCI 4). No Point A, so no nID sweep.
+  `[SUPERSEDED by item 14]` blind Point-A sweep implemented (default off), not validated.
 
 **7. UL BWP twin hypotheses (ULTWINS)**
 
@@ -3857,6 +3861,90 @@ source reading `[CODE-READ]`, inference `[INF]`. Replay numbers are not OTA numb
 
 **10. Reports used:** DECODETIME-20261012, NL2SPEED-20261012, LLRZERO-20261012, RATEFIX-20261012, QUIETTIMING-20261012,
 CORESETALL-20261012, ULTWINS-20261012 (`docs/superpowers/reports/csd/`). Raw logs and nsys traces are untracked.
+
+**11. Dwell starvation: root cause and fix (`ISAC_PDCCH_DWELL_OWN_BUDGET=1`, default off; BLINDPIPE section 1)**
+
+- `[MEASURED, replay, paired]` Root cause (TIM, `raw_pci923_tim_12s_tile3`, rr-csd-cal `replay_e923_off1_232315`, t26z +
+  `ISAC_CARRIER_FROM_SIB1`, flag off): while a discovered-CORESET dwell was active, the 64-candidate per-occasion PDCCH budget was split
+  32/32 between the banks and the dwell. The AL ladder fills AL2/AL4/AL8 first and AL1 last, so the banked 36-CCE TIM CORESET went from
+  `ncand=64/64 (AL1=33 AL2=18 AL4=9 AL8=4)` to `ncand=32/32 (AL1=1 AL2=18 AL4=9 AL8=4)` while a dwell ran. TIM's C-RNTI DCIs are
+  AL1/AL2, so one AL1 position in 36 was left to them.
+- `[CODE-READ]` Fix: `dwell_own_budget()` in `nr_pdcch_blind_monitor_rt.c`. With the flag, bank passes keep the full legacy budget
+  (`t_candidate_share = 0`) and the dwell gets `NR_PDCCH_BANK_CANDIDATE_BUDGET` candidates of its own, at all four share sites. The
+  dwell's time cost stays bounded by `ISAC_PDCCH_DED_BUDGET_US` / `_SHARE`. Flag off = the unchanged path. BLINDPIPE names no offline
+  test for this change.
+- `[MEASURED, replay, paired]` TIM tile3 (PCI 923, TIM cell only): inside-dwell C-RNTI accepts 198 -> 385 / 252 per 1000 slots (the two
+  values are as reported; their arm pairing is not stated); PDSCH crc_ok 406 -> 482 / 455; CRC-OK RNTIs 10 -> 11 / 14.
+- `[MEASURED, replay, paired]` Vodafone b (PCI 415, `raw_pci415_12s_b`, separate cell, no regression): accepts 487 -> 482 per 1000
+  slots; 3 bank adds at the same slot; CRC-OK RNTIs 28 / 44 -> 41 / 47 (as reported).
+- Not claimed: replay only (0.25x, 4 RX, GB10). No OTA. TIM and Vodafone numbers are not pooled.
+
+**12. CORESET duration sweep: `ISAC_COREMAP_IDSWEEP_DUR=3` replaces the cell-fitted duration 1 (BLINDPIPE section 4)**
+
+- `[CODE-READ]` t26z pinned `ISAC_COREMAP_IDSWEEP_DUR=1`, so the GPU CORESET sweep tried duration 1 only. That was a cell-fitted
+  assumption: the GPU stage already implements durations 1-3 (default 3 when the GPU is on).
+- `[MEASURED, replay]` (orchestrator facts 2026-10-13) DUR=3 costs about 2-2.5x GPU time per pass, inside the 30 % discovery budget.
+  It finds the same CORESETs on 415 and 923 (controls), with no change in time-to-bank.
+- Superseded: the "cell-fitted assumption" bullet of item 6 is replaced by this item in `ota/t26b.env`.
+
+**13. `ISAC_DL_TRAFFIC_PROBE`: per-cell PDSCH-like occupancy (default off; BLINDPIPE section 2)**
+
+- `[OFFLINE VERIFIED]` `test_nr_dl_traffic_probe` 4/4 (BLINDPIPE section 2). Statistic: (symbol, RB) cells lit above the slot's noise
+  floor (chi-square 1e-4 tail). Masks: SIB1 carrier, SSB band, CORESET#0, and every PDSCH allocation the receiver enqueued. Verdict
+  PRESENT when ungranted PDSCH-like RB-slots >= 8; ABSENT when >= 100 probed slots show none; else UNDECIDED. The `TRAFFIC` line reports
+  per 256 probed slots.
+- `[MEASURED, replay]` (orchestrator facts) On loaded cells PRESENT mostly reflects undecoded grants: TIM ungranted lit 517k vs granted
+  33k. The receiver decodes a small fraction of TIM's PDSCH occupancy. PRESENT is therefore not a "CORESET missing" verdict on a loaded
+  cell `[INF]`.
+- `[CODE-READ]` Limits (BLINDPIPE section 8): antenna 0 only (4-RX MRC would lower the floor ~6 dB); a co-channel cell on the same
+  carrier counts as traffic (PCI 4 on the 508 carrier); without SIB1 the TDD pattern is unknown and UL slots are probed too.
+- Relation to CORESETALL finding 2: a null without active UE traffic proves nothing. This probe is meant to separate "no UE traffic"
+  from "CORESET missed". `[NOT VALIDATED]` on air.
+
+**14. `ISAC_POINTA_SWEEP`: blind CRB-0 for cells without a SIB1 carrier (`[IMPLEMENTED, NOT VALIDATED]`; default off; BLINDPIPE section 3)**
+
+- `[CODE-READ]` Blind search over h = CRB index of grid RB 0 in [0, 275), correlating the nID = PCI PDCCH DM-RS on symbols 0-2. Accept
+  when one hypothesis has >= 6 lit windows and >= 4x the runner-up. It publishes Point A and opens the GPU nID sweep and the dwell path
+  as a SIB1 verdict does. Needs `ISAC_KSSB_ALIGN=1` (in t26z). Only nID = PCI is swept; UE-specific nID is not done.
+- `[NOT VALIDATED]` (orchestrator facts) No validated result on any capture. The expected h = 0 on the PCI 421 capture is an
+  expectation from calibration memory `[NOT RUN]`. `pdcch_pci_windows` (same flag) is the direct PDCCH evidence diagnostic.
+- Superseded: the "not implemented" bullet of item 6 (PCI 403 / PCI 4: no Point A, no nID sweep) is now implemented here, default
+  off, not validated.
+
+**15. Morning OTA env `ota/t26b.env` (`[replay-validated; OTA pending]`, orchestrator 2026-10-13)**
+
+- `[ORCH]` t26b = current t26z (including `ISAC_PDSCH_GPU_HOST_PIN=1`, `ISAC_L2MAXH_DELTA_NL2=-3`) plus
+  `ISAC_CARRIER_FROM_SIB1=1 ISAC_PDCCH_DWELL_OWN_BUDGET=1 ISAC_DL_TRAFFIC_PROBE=16 ISAC_POINTA_SWEEP=1` and
+  `ISAC_COREMAP_IDSWEEP_DUR=3` (replacing `=1`). Single-line env. Rollback: remove the five added settings.
+- Status is `[replay-validated; OTA pending]` `[NOT MEASURED ON AIR]`. Not `[OTA VERIFIED]`.
+- File location: the orchestrator names `ota/t26b.env`, which does not exist in this worktree (no `ota/` directory). The proposed file is
+  `tests/passive_rx/t26b.env.proposed` (commit `5289bc54d1`). BLINDPIPE section 5 (the per-capture table) is still a TODO template, so
+  the numbers in items 11-13 are the orchestrator's summary, not that report's table.
+- OTA spec lines (BLINDPIPE section 7, `[NOT RUN]`): B415a (150 s control), B923a (150 s; C-RNTI accept rate must not drop during
+  dwells), B508a/b (>= 300 s, `ISAC_PDCCH_DISC_ENUM=1`), B4a (PCI 4), B403a (NSA), B675a (weak TIM). Read with
+  `tests/passive_rx/blindpipe_stats.py`.
+
+**16. UL prior search on replay: size follows the fit, start still not resolved (`ISAC_UL_LOCK_PRIOR_SEARCH`, default off; ULPRIOR-20261012)**
+
+- `[OFFLINE VERIFIED]` `UlLayoutLock*` 9/9 (ULPRIOR). The size comes from the RIV-statistics fit; priors seed only the start. Needs
+  `ISAC_UL_LAYOUT_LOCK=1`.
+- `[MEASURED replay, DGX, TIM raw_pci923_tim_12s_tile3]` The provisional size moves to 107 (dedicated BWP) instead of 217, but the start
+  is not resolved. Votes scatter over starts: 107@53:7, 107@54:6, 107@55:4, 107@1:4, 107@5:3 (ULPRIOR table; strongest cluster at
+  start 53-55 `[ORCH]`). Start 0 is only the seed.
+- `[ORCH]` No CRC-expected grants at this site on 2026-10-13, so the demotion path cannot run on this capture set. No CRC correction of
+  the start `[MEASURED replay]`.
+- Decision: default off, not in `ota/t26b.env`. ULPRIOR's advice stands: do not enable on OTA expecting a correct start; it gives a
+  provisional layout with the right size class only.
+
+**17. Supersession index and sources for this block (add-on)**
+
+- Marked in place above: item 3 -> item 15; item 6 "cell-fitted DUR=1" -> item 12; item 6 "dwell starvation being fixed on
+  `csd/coreset-fable`" -> items 11-12; item 6 "not implemented, PCI 403 / PCI 4" -> item 14.
+- Branch: BLINDPIPE was built on `csd/coreset-fable` from `csd/otatest` `db826ff278`; `csd/coreset-fable` is merged into `csd/otatest`
+  at `6ea7faec59` (`git log`). Not merged into `adaptive-rx-UL-DL` (item 8 policy stands).
+- Reports used: BLINDPIPE-20261013 (partial: section 5 TODO), CORESETALL-20261012 (finding 2 used in item 13; its section 5 OTA spec
+  lines are superseded by BLINDPIPE section 7 for the morning run), ULPRIOR-20261012 (item 16).
+- No new OTA run and no receiver run in this add-on; replay numbers are DGX GB10, 0.25x, 4 RX, `ota/t26z.env` baseline.
 
 ---
 
