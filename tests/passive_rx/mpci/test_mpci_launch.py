@@ -60,6 +60,14 @@ class T(unittest.TestCase):
             self.assertIn("ISAC_SHM_IQ_NAME=ringY K=V", a); self.assertIn("--ue-nb-ant-rx 2", a); self.assertNotIn("UE_NB_ANT_RX", a)
             self.assertNotIn("--ue-nb-ant-rx", b)
 
+    def test_cell_args_and_core_lists(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = dry(d, "A:1:2:3:-:0:ISAC_PDSCH_CORES=8+9+12,K=V", CELL_ARGS="--passive-rx --band 78")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            a = next(x for x in r.stdout.splitlines() if x.startswith("CELL A "))
+            self.assertIn("ISAC_PDSCH_CORES=8,9,12 K=V", a)
+            self.assertTrue(a.endswith("--passive-rx --band 78"), a)
+
     def test_chan_exit_blocks_cells(self):
         with tempfile.TemporaryDirectory() as d:
             env = dict(os.environ, OUT=d, BUILD="/b", CHAN_CMD="false", CHAN_RINGS="mpcit_never_%d" % os.getpid())

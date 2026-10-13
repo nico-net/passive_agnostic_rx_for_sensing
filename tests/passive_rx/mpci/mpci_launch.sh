@@ -4,6 +4,10 @@
 #          mpci_launch.sh [start|stop] TAG:C:R:SSB:FO:CORES ...
 #   optional 7th field ENV=K=V,K=V : extra env for that cell only (no ':' ' ' ',' in values), e.g. A:..:4-7:ISAC_TARGET_PCI=4,ISAC_SSS_MULTI=2.5
 #   per-cell ring: put ISAC_SHM_IQ_NAME=<ring> in that field (overrides RING); UE_NB_ANT_RX=<n> there = --ue-nb-ant-rx <n>.
+#   a '+' in a value becomes ',' (core lists: ISAC_PDSCH_CORES=8+9+12 -> 8,9,12; every ISAC_*_CORE(S) pin of a shared OTA env must be
+#   overridden per cell here, or all cells pin their threads onto the same cores whatever CORES says).
+#   CELL_ARGS="--passive-rx --band 78 ..." : receiver arguments appended to every cell command line (the OTA flags: the launcher
+#   itself only sets -O -C -r --ssb [--ue-nb-ant-rx] [--initial-fo]).
 #   PUB_ENV="K=V K=V" replaces the publisher env (default ISAC_SHM_IQ_PUB=$RING); values contain no spaces.
 #   CHAN_CMD="shm_iq_chan ..." [CHAN_RINGS="ring_a ring_b"] [CHAN_WAIT_S=150]: start order publisher -> channelizer -> cells; the cells start only
 #     once /dev/shm/<each CHAN_RINGS entry> exists (exit 3 if the channelizer dies or the wait runs out). CHAN_ONLY=1 (+APPEND=1, no cell specs) starts just the channelizer.
@@ -65,8 +69,9 @@ for spec in "$@"; do
       printf '\ndevice = { name = "shm_iq"; };\nloader = { shm_iq = { shlibpath = "%s"; }; };\n' "$BUILD"; }
     if [ "$DRY" = 1 ]; then echo "CFG $tag $cfg"; else gen > "$cfg"; fi
   fi
-  envs="ISAC_CELL_INSTANCE=$tag ISAC_SHM_IQ_CELL=$tag ISAC_SHM_IQ_NAME=$RING ISAC_METRICS_PATH=$d/metrics.jsonl ISAC_UECTX_PATH=$d/uectx.json ISAC_OBS_PATH=$d/obs.bin${xenv:+ ${xenv//,/ }}"
-  cmdline="taskset -c $cores $BUILD/nr-uesoftmodem${BASE_CFG:+ -O $cfg} -C $c -r $r --ssb $ssb${nant:+ --ue-nb-ant-rx $nant}${foarg:+ $foarg}"
+  xv=${xenv:-}; xv=${xv//,/ }; xv=${xv//+/,}
+  envs="ISAC_CELL_INSTANCE=$tag ISAC_SHM_IQ_CELL=$tag ISAC_SHM_IQ_NAME=$RING ISAC_METRICS_PATH=$d/metrics.jsonl ISAC_UECTX_PATH=$d/uectx.json ISAC_OBS_PATH=$d/obs.bin${xv:+ $xv}"
+  cmdline="taskset -c $cores $BUILD/nr-uesoftmodem${BASE_CFG:+ -O $cfg} -C $c -r $r --ssb $ssb${nant:+ --ue-nb-ant-rx $nant}${foarg:+ $foarg}${CELL_ARGS:+ $CELL_ARGS}"
   if [ "$DRY" = 1 ]; then echo "CELL $tag cwd=$d env $envs $cmdline"
   else (cd "$d" && exec env $envs $cmdline) > "$d/ue.log" 2>&1 & echo "$tag $!" >> "$OUT/pids"; fi
   i=$((i+1))
