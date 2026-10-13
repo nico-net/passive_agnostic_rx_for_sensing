@@ -23,6 +23,7 @@
  * \brief Implementation for nr_pdcch_coreset_map.h -- see that header for the design rationale.
  */
 #include "common/utils/nr_core_plan.h"
+#include "common/utils/nr_cell_instance.h"
 #include "nr_pdcch_nid_gpu.h"
 #include "nr_pdcch_nid_occupancy.h"
 #include <stdatomic.h>
@@ -384,9 +385,10 @@ static void *idsw_worker(void *arg)
     while (!g_idsw.full)
       pthread_cond_wait(&g_idsw.cv, &g_idsw.mu);
     pthread_mutex_unlock(&g_idsw.mu);
-    char path[128];
-    mkdir("/tmp/passive_rx", 0777);
-    snprintf(path, sizeof(path), "/tmp/passive_rx/idsweep_%03u.bin", g_idsw.batches);
+    char dir[128], path[192];
+    nr_cell_path("/tmp/passive_rx", dir, sizeof(dir));
+    nr_cell_mkdirs(dir);
+    snprintf(path, sizeof(path), "%s/idsweep_%03u.bin", dir, g_idsw.batches);
     FILE *f = fopen(path, "wb");
     if (f != NULL) {
       /* "ISW2": adds a `dur` field after `n` (dur=1 is the ordinary single-symbol case in the new

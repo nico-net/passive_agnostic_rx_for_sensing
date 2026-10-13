@@ -1,6 +1,7 @@
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
+#include "common/utils/nr_cell_instance.h"
 
 /*!
  * \brief Implementation of UE procedures from 36.213 LTE specifications
@@ -1897,7 +1898,9 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
         if (pbch_cap && pbch_cap_left > 0) {
           if (!pbch_cap_fp) {
             const char *path = getenv("ISAC_PBCH_CAPTURE_PATH");
-            pbch_cap_fp = fopen(path ? path : "/tmp/pbch_capture.bin", "wb");
+            char cap_def[128];
+            nr_cell_path("/tmp/pbch_capture.bin", cap_def, sizeof(cap_def));
+            pbch_cap_fp = fopen(path ? path : cap_def, "wb");
           }
           if (pbch_cap_fp) {
             struct timespec ts;
