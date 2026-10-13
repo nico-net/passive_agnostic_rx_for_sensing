@@ -441,6 +441,8 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   }
   if ((!gpu && (g_idsw.enabled != 1 || g_idsw.full)) || sps <= 0)
     return -1;
+  { uint64_t co = 0, ct = 0, ce = 0; float nz; nr_pdcch_nid_capture_metrics(&co, &ct, &ce, &nz);
+    if (nr_cell_state_sweep_blocked(abs_slot, co, ct, ce)) return -1; } /* PCIS2: ISAC_CELL_STATE=2, barred/idle cell */
   const nr_passive_acq_snapshot_t snap = nr_passive_acq_snapshot();
   if (snap.carrier_verified == 0 || g_css0_first_rb < 0) /* Point A (SIB1) and CORESET#0 (MIB) first */
     return -1;
