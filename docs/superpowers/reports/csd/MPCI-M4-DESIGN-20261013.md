@@ -143,7 +143,7 @@ full ring may lose a chunk while the producer is inside `recv()`; the effective 
     cd cmake_targets/ran_build/build   # configured with -DOAI_USRP=ON; never while nr-uesoftmodem runs (pgrep -x nr-uesoftmodem)
     ninja shm_iq_uhd_pub shm_iq                # -> build/shm_iq_uhd_pub
 
-### Run (245.76 MS/s x 4, CG_400 image loaded; MCR is left at the image default 491.52 MHz unless --mcr is given)
+### Run (245.76 MS/s x 4, CG_400 image loaded; MCR is the image default 491.52 MHz unless --mcr is given, passed as `master_clock_rate=` device arg like usrp_lib.cpp)
     ISAC_UHD_CTRL_CORES=<two cores != rx-core, != DPDK lcores> \
     ./shm_iq_uhd_pub --args "type=x4xx,addr=192.168.10.2,mgmt_addr=192.168.30.2,use_dpdk=1,dpdk_num_mbufs=65536" \
         --rate 245760000 --freq <centre from the scanner> --gain 38 --channels 4 --antenna RX1 --ring isac_iq \
@@ -159,7 +159,8 @@ Stop with SIGINT (`kill -INT`): the tool issues STREAM_MODE_STOP_CONTINUOUS, dra
     SHMIQ_UHD_READY ring=/isac_iq channels=4 rate=245760000 center_hz=... capacity=33554432 bytes=536875008 radio=<serial> time_source=free
     SHMIQ_UHD_STATS t=10.0 samples=2.4e9 rate_meas=245760000.0 overflows=0 timeouts=0 ring_head=...   (every 1 s)
     SHMIQ_UHD_END samples=... overflows=0 timeouts=0 inplace=... copied=1       (copied=1 is the first write; more = gaps)
-    on overflow: SHMIQ_UHD_OVERFLOW n=<count>   (consumers then log one SHMIQ_DISCONT)
+    on overflow: SHMIQ_UHD_OVERFLOW n=<count> + SHMIQ_UHD_RESTART run=<k>   (stop, drain, timed START at now+0.1 s; consumers then
+    log one SHMIQ_DISCONT). 10 errors with no sample in between -> SHMIQ_UHD_FAIL stream dead (rc 3)
 
 ### Acceptance (10 min) [NOT RUN]
 overflows=0 and timeouts=0 in `SHMIQ_UHD_END`; `copied=1`; `rate_meas` within 1e-4 of the requested rate (cumulative from the first
@@ -178,7 +179,7 @@ UHD multi-link: pass both ports in the device args, e.g. `addr=192.168.10.2,seco
 Rate x 4 B x channels: 3.93 GB/s (4 x 245.76 MS/s), 7.86 GB/s (4 x 491.52). Producer writes it once (UHD copies mbuf -> ring slot; the
 NIC DMA into mbufs is a second write, so ~2 x the rate on the memory bus plus 1 x read of the mbuf) = ~12 GB/s at 245.76 and ~24 GB/s
 at 491.52 for the producer alone. Each consumer reads the full 4-channel ring once (DDC reads the window it needs: still all
-channels): + 3.9 / 7.9 GB/s per cell. With 5 cells: ~40 GB/s at 245.76, ~63 GB/s at 491.52, against the Spark's LPDDR5X (~273 GB/s
+channels): + 3.9 / 7.9 GB/s per cell. With 5 cells: ~31 GB/s at 245.76, ~63 GB/s at 491.52, against the Spark's LPDDR5X (~273 GB/s
 peak, ~200 practical, shared with the GPU): fits at 245.76, need measuring at 491.52. CPU: one core busy-polling in recv (memcpy-bound),
 pin it (`--rx-core`, SCHED_OTHER; no RT priority set by the tool) with the uhd_ctrl cores separate.
 Each ring slot copy is not counted twice: nothing is staged except after a gap.
@@ -187,3 +188,16 @@ Each ring slot copy is not counted twice: nothing is staged except after a gap.
 Not hardware-tested: DPDK lcore layout of this binary (it uses UHD's own thread config, `use_dpdk=1` in the args, run as root with
 hugepages like capture_raw); whether `ISAC_UHD_CTRL_CORES` finds the `uhd_ctrl*` threads before they exist (it is applied right after the stream start command);
 `--time-source pps` uses `set_time_source("external")` + `set_time_next_pps(0)` (untested on the X410 sync cabling).
+
+Review 2026-10-13 [CODE-READ + OFFLINE VERIFIED, cloud x86, ctest test_shm_iq_uhd_core]:
+- Fixed: an OVERFLOW (DPDK out-of-sequence) halts the RFNoC stream on this X410 (usrp_lib.cpp, MEASURED 2026-10-06/08, about half
+  the starts): the tool used to count it and then die after 10 x 1 s timeouts; it now stops, drains and re-arms with a timed START
+  (also on LATE/other errors). The first packet of a restarted X410 stream can repeat the old START timestamp: ticks are clamped to
+  the scheduled START (as usrp_ring_epoch_first_ticks). Ticks are MCR ticks floor-divided by MCR/rate (an odd-MCR-tick start made
+  `to_ticks(rate)` round x.5 either way -> spurious 1-tick gaps; only with a DDC, i.e. rate < MCR). `--mcr` is a device arg (x4xx
+  sets the MCR at init). lo_locked / PPS / ring-create failures throw instead of exit() so the device is released.
+- Risk: CG has no DDC (usrp_lib.cpp, MEASURED 2026-08-02) and usrp_lib uses MCR 491.52 for every CG image, so `--rate 245760000`
+  is expected to abort with `actual rate 491520000`; whether `--mcr 245760000` is accepted on CG_400 is unknown. Check what
+  benchmark_rate actually streamed (its "actual RX rate" line) before relying on 245.76. 4 x 491.52 MS/s x 32 bit = 63 Gb/s.
+- Risk: channels are tuned untimed and each ZBX channel has its own LO: inter-channel phase is not deterministic (irrelevant for
+  per-cell decoding, matters for any multi-antenna sensing).

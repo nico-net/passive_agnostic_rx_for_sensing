@@ -30,6 +30,10 @@ shm_iq_ring_t *pub_ring(pub_t *p);
 /* One recv straight into the ring slots (reserve -> recv -> commit); only a run break (first write, overflow gap) takes the
  * copy path through shm_iq_ring_write(), which turns the timestamp jump into a ring gap. Returns samples published. */
 int pub_step(pub_t *p, pub_recv_fn recv, void *ctx, int want);
+/* Sample-rate tick of a packet from its master-clock tick (decim = MCR / rate, integer; 1 without a DDC). Floor division: a
+ * stream started on an odd MCR tick sits on x.5 sample ticks, and rounding those can flip between packets (spurious 1-tick gaps).
+ * Never earlier than the scheduled START tick: a restarted X410 stream can repeat the previous START timestamp (usrp_ring_recovery.h). */
+int64_t pub_tick(int64_t mcr_ticks, int64_t decim, int64_t start_tick);
 #ifdef __cplusplus
 }
 #endif

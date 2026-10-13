@@ -67,3 +67,9 @@ int pub_step(pub_t *p, pub_recv_fn recv, void *ctx, int want)
   return got;
 }
 
+
+int64_t pub_tick(int64_t mcr_ticks, int64_t decim, int64_t start_tick)
+{
+  const int64_t t = mcr_ticks / decim - (mcr_ticks % decim < 0);
+  return t > start_tick ? t : start_tick;
+}

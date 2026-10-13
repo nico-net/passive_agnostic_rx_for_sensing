@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-CSSL-1.0
-// Standalone wideband UHD publisher for the multi-cell receiver (MPCI M4 wideband mode): one radio, N channels, one LO, sc16 straight
+// Standalone wideband UHD publisher for the multi-cell receiver (MPCI M4 wideband mode): one radio, N channels, one centre frequency
+// (each X410 ZBX channel has its own LO, tuned untimed: no inter-channel phase calibration here), sc16 straight
 // from the UHD streamer into the shm IQ ring (radio/COMMON/shm_iq_ring.h), consumed by one shm_iq receiver process per cell.
 // No OAI softmodem / config / log dependency. No site defaults: every radio parameter is an explicit option.
 //
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <getopt.h>
+#include <stdexcept>
 #include <pthread.h>
 #include <sched.h>
 #include <dirent.h>
@@ -69,7 +71,8 @@ static void repin_uhd_ctrl()
 struct RecvCtx {
   uhd::rx_streamer::sptr rxs;
   size_t nch;
-  double rate, timeout;
+  double mcr, timeout;
+  int64_t decim, start_tick; // sample ticks = MCR ticks / decim; start_tick: scheduled START of the current stream
   uhd::rx_metadata_t md;
 };
 
@@ -82,7 +85,7 @@ static pub_rx_status_t uhd_recv(void *vc, int16_t *const *dst, int n, int64_t *t
   switch (c->md.error_code) {
     case uhd::rx_metadata_t::ERROR_CODE_NONE:
       if (!c->md.has_time_spec) return PUB_RX_OTHER;
-      *tick = c->md.time_spec.to_ticks(c->rate);
+      *tick = pub_tick(c->md.time_spec.to_ticks(c->mcr), c->decim, c->start_tick);
       *got = (int)k;
       return PUB_RX_OK;
     case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW: return PUB_RX_OVERFLOW;
@@ -148,10 +151,12 @@ int main(int argc, char **argv)
   int rc = 0;
   pub_t *pub = nullptr;
   try {
+    // x4xx takes the MCR at device init only (usrp_lib.cpp passes master_clock_rate in the args too)
+    if (mcr > 0) args += ",master_clock_rate=" + std::to_string(mcr);
     auto usrp = uhd::usrp::multi_usrp::make(args);
-    if (mcr > 0) usrp->set_master_clock_rate(mcr);
-    fprintf(stderr, "SHMIQ_UHD_MCR %.0f\n", usrp->get_master_clock_rate());
-    // FPGA CG_400 has no DDC: the rate must equal the MCR (491.52 MS/s) or MCR/2 on 200 MHz images; the check below catches a mismatch.
+    mcr = usrp->get_master_clock_rate();
+    fprintf(stderr, "SHMIQ_UHD_MCR %.0f\n", mcr);
+    // CG images have no DDC (usrp_lib.cpp, MEASURED 2026-08-02): a rate != MCR is coerced back; the check below aborts on it.
     for (size_t u : map) {
       usrp->set_rx_rate(rate, u);
       usrp->set_rx_freq(uhd::tune_request_t(freq), u);
@@ -169,7 +174,7 @@ int main(int argc, char **argv)
         bool locked = false;
         for (int i = 0; i < 40 && !locked; ++i) { locked = usrp->get_rx_sensor("lo_locked", u).to_bool(); if (!locked) std::this_thread::sleep_for(std::chrono::milliseconds(50)); }
         fprintf(stderr, "SHMIQ_UHD_LO ch=%zu locked=%d\n", u, (int)locked);
-        if (!locked) die("lo_locked false");
+        if (!locked) throw std::runtime_error("lo_locked false"); // not die(): exit() would skip the device release
       }
     }
     if (radio_id.empty()) {
@@ -179,7 +184,7 @@ int main(int argc, char **argv)
       usrp->set_time_source("external");
       const auto p0 = usrp->get_time_last_pps();
       const double t0 = now_s();
-      while (usrp->get_time_last_pps() == p0) { if (now_s() - t0 > 3) die("no PPS edge within 3 s"); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+      while (usrp->get_time_last_pps() == p0) { if (now_s() - t0 > 3) throw std::runtime_error("no PPS edge within 3 s"); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
       usrp->set_time_next_pps(uhd::time_spec_t(0.0));
       std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     } else usrp->set_time_now(uhd::time_spec_t(0.0));
@@ -191,28 +196,51 @@ int main(int argc, char **argv)
     fprintf(stderr, "SHMIQ_UHD_STREAM max_num_samps=%zu chunk=%ld\n", rx->get_max_num_samps(), chunk);
 
     pub = pub_open(ring.c_str(), (unsigned)channels, capacity, rate, freq, radio_id.c_str(), tsrc == "pps" ? 2 : 1);
-    if (!pub) die("ring create failed");
+    if (!pub) throw std::runtime_error("ring create failed");
     const pub_stats_t *st = pub_stats(pub);
     fprintf(stderr, "SHMIQ_UHD_READY ring=/%s channels=%ld rate=%.0f center_hz=%.3f capacity=%llu bytes=%llu radio=%s time_source=%s\n", ring.c_str(), channels,
             rate, freq, (unsigned long long)pub_capacity(pub), (unsigned long long)(4096 + (uint64_t)channels * pub_capacity(pub) * 4), radio_id.c_str(), tsrc.c_str());
 
-    uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
-    cmd.stream_now = false;
-    cmd.time_spec = usrp->get_time_now() + uhd::time_spec_t(1.5);
-    rx->issue_stream_cmd(cmd);
+    const double dr = mcr / rate;
+    RecvCtx ctx{rx, (size_t)channels, mcr, 5.0, std::llround(dr), 0, {}};
+    if (std::fabs(dr - (double)ctx.decim) > 1e-9 * dr) throw std::runtime_error("MCR / rate is not an integer");
+    std::vector<std::vector<int16_t>> scratch((size_t)channels, std::vector<int16_t>(65536 * 2));
+    std::vector<void *> sb;
+    for (auto &v : scratch) sb.push_back(v.data());
+    auto stop_drain = [&]() {
+      uhd::stream_cmd_t stop(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+      stop.stream_now = true;
+      rx->issue_stream_cmd(stop);
+      uhd::rx_metadata_t md;
+      for (int i = 0; i < 200; ++i) if (rx->recv(sb, 65536, md, 0.1, false) == 0 && md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) break;
+    };
+    // timed START on all channels (RFNoC rejects stream_now on the 4-channel X410 streamer, usrp_lib.cpp)
+    auto start = [&](double lead) {
+      uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+      cmd.stream_now = false;
+      cmd.time_spec = usrp->get_time_now() + uhd::time_spec_t(lead);
+      ctx.start_tick = pub_tick(cmd.time_spec.to_ticks(mcr), ctx.decim, 0);
+      rx->issue_stream_cmd(cmd);
+    };
+    start(1.5);
     repin_uhd_ctrl();
-
-    RecvCtx ctx{rx, (size_t)channels, rate, 5.0, {}};
     const double t_start = now_s();
     double t_first = 0, t_stat = t_start, t_end = duration > 0 ? t_start + duration : 0;
-    uint64_t ovf_logged = 0;
     int bad_run = 0;
     while (!g_stop && !(t_end && now_s() >= t_end)) {
-      const uint64_t oth = st->others;
+      const uint64_t ovf = st->overflows, oth = st->others;
       const int got = pub_step(pub, uhd_recv, &ctx, (int)chunk);
       if (got > 0 && t_first == 0) t_first = now_s();
-      if (st->overflows != ovf_logged) { ovf_logged = st->overflows; fprintf(stderr, "SHMIQ_UHD_OVERFLOW n=%llu\n", (unsigned long long)ovf_logged); }
-      bad_run = st->others != oth ? bad_run + 1 : got > 0 ? 0 : bad_run;
+      const bool err = st->overflows != ovf || st->others != oth;
+      bad_run = got > 0 ? 0 : bad_run + err;
+      if (err && bad_run < 10) {
+        // MEASURED in usrp_lib.cpp (X410, DPDK): after ERROR_CODE_OVERFLOW (out of sequence) RFNoC halts the stream: re-arm it;
+        // the next packet's timestamp jump becomes a ring gap
+        if (st->overflows != ovf) fprintf(stderr, "SHMIQ_UHD_OVERFLOW n=%llu\n", (unsigned long long)st->overflows);
+        stop_drain();
+        start(0.1);
+        fprintf(stderr, "SHMIQ_UHD_RESTART run=%d\n", bad_run);
+      }
       if (st->consecutive_timeouts >= 10 || bad_run >= 10) { fprintf(stderr, "SHMIQ_UHD_FAIL stream dead (timeouts=%d errors=%d)\n", st->consecutive_timeouts, bad_run); rc = 3; break; }
       const double t = now_s();
       if (t - t_stat >= 1.0) {
@@ -223,12 +251,7 @@ int main(int argc, char **argv)
       }
     }
     // clean stop: the X410 claim must be released (never leave the device streaming)
-    rx->issue_stream_cmd(uhd::stream_cmd_t(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS));
-    std::vector<std::vector<int16_t>> scratch((size_t)channels, std::vector<int16_t>(65536 * 2));
-    std::vector<void *> sb;
-    for (auto &v : scratch) sb.push_back(v.data());
-    uhd::rx_metadata_t md;
-    for (int i = 0; i < 200; ++i) if (rx->recv(sb, 65536, md, 0.1, false) == 0 && md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) break;
+    stop_drain();
     fprintf(stderr, "SHMIQ_UHD_END samples=%llu overflows=%llu timeouts=%llu inplace=%llu copied=%llu\n", (unsigned long long)st->samples,
             (unsigned long long)st->overflows, (unsigned long long)st->timeouts, (unsigned long long)st->inplace, (unsigned long long)st->copied);
     rx.reset();
