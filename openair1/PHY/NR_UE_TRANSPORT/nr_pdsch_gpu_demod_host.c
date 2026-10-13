@@ -323,15 +323,16 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
     return RF_ENV;
   const int nl = c->dlsch->cw_info.Nl, qm = c->dlsch->cw_info.qamModOrder;
   if (nl >= 2) { /* nr_rx_pdsch()'s qam_mode resolution */
-    static int s_qm = -1, s_nl34 = -1;
+    static int s_qm = -1, s_nl34 = -1, s_nl34q = -1;
     if (s_qm < 0) {
       s_qm = env_int("ISAC_PDSCH_MMSE_MODE", 0);
       s_nl34 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_NL34", 0); /* DECGPU: 3 and 4 layers (mode 2, and the stock MMSE) */
+      s_nl34q = env_int("ISAC_PDSCH_MMSE2_NL34_QPSK", 0);     /* HIGHMCS: as nr_rx_pdsch() */
     }
     int qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
     if (qam_mode < 0 || qam_mode > 2)
       qam_mode = 0;
-    if (nl >= 3 && (qam_mode == 1 || qm == 2))
+    if (nl >= 3 && (qam_mode == 1 || (qm == 2 && !(s_nl34q && qam_mode == 2))))
       qam_mode = 0;
     if (nl == 2 ? qam_mode != 2 : (nl > 4 || !s_nl34 || qam_mode == 1))
       return RF_NL;

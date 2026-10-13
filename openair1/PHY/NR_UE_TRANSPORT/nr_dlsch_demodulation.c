@@ -1352,7 +1352,12 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     /* Measured (QAMFIX.md): at 3-4 layers ZF noise enhancement costs low-SNR QPSK (16 -> 9 of 227 paired) and
      * the fixed-point ZF determinant underflows (kappa 0); keep the stock MMSE there. QAM at any rank and 2-layer
      * QPSK (1046 -> 1079 of 2110 paired) use the selected mode. */
-    if (nl >= 3 && (qam_mode == 1 || dlsch->cw_info.qamModOrder == 2)) qam_mode = 0;
+    /* HIGHMCS ISAC_PDSCH_MMSE2_NL34_QPSK=1 (default off): keep the float ZF (mode 2) for QPSK at 3-4 layers too. The stock
+     * fixed-point adjugate path disagrees with the float solution on 16-18 % of the signs at rank 3 (replay b, DECODEDIAG)
+     * and its det(G) ~ (|h|^2 >> shift)^4 depends on the signal level (TIM 3-layer MCS 0 at 10-12 dB: 0/154 OTA). */
+    static int s_nl34q = -1;
+    if (s_nl34q < 0) { const char *e = getenv("ISAC_PDSCH_MMSE2_NL34_QPSK"); s_nl34q = e ? atoi(e) : 0; }
+    if (nl >= 3 && (qam_mode == 1 || (dlsch->cw_info.qamModOrder == 2 && !(s_nl34q && qam_mode == 2)))) qam_mode = 0;
     if (nr_dlsch_eq_override == 1) qam_mode = 0; /* the ISAC_RX_EQ_AB float arm keeps its own path */
   }
 
