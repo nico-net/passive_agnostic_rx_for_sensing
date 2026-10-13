@@ -168,6 +168,32 @@ void shm_iq_ring_write(shm_iq_ring_t *r, int64_t tick, void *const *bufs, int n,
   if (atomic_load_explicit(&h->away, memory_order_relaxed)) { atomic_store(&h->away, 0); atomic_store(&h->dwell_until_ns, 0); }
 }
 
+int shm_iq_ring_reserve(shm_iq_ring_t *r, int want, int16_t **slots)
+{
+  shm_iq_hdr_t *h = r->hdr;
+  const uint64_t head = atomic_load_explicit(&h->head, memory_order_relaxed), i = head & (h->capacity - 1);
+  const uint64_t room = h->capacity - i;
+  const int n = (uint64_t)want < room ? want : (int)room;
+  atomic_store_explicit(&h->reserve, head + (uint64_t)n, memory_order_relaxed);
+  atomic_thread_fence(memory_order_release);
+  for (unsigned c = 0; c < h->channels; ++c) slots[c] = r->data[c] + 2 * i;
+  return n;
+}
+
+int shm_iq_ring_commit(shm_iq_ring_t *r, int64_t tick, int got)
+{
+  shm_iq_hdr_t *h = r->hdr;
+  const uint64_t head = atomic_load_explicit(&h->head, memory_order_relaxed);
+  if (got <= 0) return 0;
+  if (h->base_tick == INT64_MIN || atomic_load(&r->new_run)
+      || tick != atomic_load_explicit(&h->tick_offset, memory_order_relaxed) + (int64_t)head)
+    return -1;
+  atomic_store_explicit(&h->head, head + (uint64_t)got, memory_order_release);
+  atomic_store_explicit(&h->heartbeat_ns, shm_iq_now_ns(), memory_order_relaxed);
+  if (atomic_load_explicit(&h->away, memory_order_relaxed)) { atomic_store(&h->away, 0); atomic_store(&h->dwell_until_ns, 0); }
+  return 0;
+}
+
 int shm_iq_ring_copy(const shm_iq_ring_t *r, uint64_t pos, int n, unsigned channels, int16_t *const *dst)
 {
   shm_iq_hdr_t *h = r->hdr;

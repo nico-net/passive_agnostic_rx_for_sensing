@@ -23,3 +23,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_shm_iq)
   add_test(NAME test_shm_iq COMMAND test_shm_iq $<TARGET_FILE:shm_iq>)
 endif()
+
+# MPCI wideband publisher: UHD-free recv -> ring step (radio/USRP/shm_iq_uhd_core.c), tested with a fake source
+if(ENABLE_TESTS)
+  add_executable(test_shm_iq_uhd_core ../USRP/tests/test_shm_iq_uhd_core.c ../USRP/shm_iq_uhd_core.c shm_iq_ring.c)
+  target_include_directories(test_shm_iq_uhd_core PRIVATE ../USRP .)
+  target_link_libraries(test_shm_iq_uhd_core PRIVATE rt)
+  add_dependencies(tests test_shm_iq_uhd_core)
+  add_test(NAME test_shm_iq_uhd_core COMMAND test_shm_iq_uhd_core)
+endif()

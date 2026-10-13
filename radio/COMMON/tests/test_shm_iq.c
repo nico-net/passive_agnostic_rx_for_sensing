@@ -29,6 +29,7 @@ void exit_function(const char *file, const char *function, const int line, const
 }
 
 static const double FS = 122.88e6;
+static double gen_fs = 122.88e6; /* sample rate gen() synthesises at */
 
 /* amplitude of exp(j 2 pi f n / fs) in x[skip..n) */
 static double tone_amp(const int16_t *x, int n, int skip, double f, double fs)
@@ -43,7 +44,7 @@ static void gen(int16_t *x, int n, uint64_t n0, const double *f, const double *a
   for (int k = 0; k < n; ++k) {
     double re = 0, im = 0;
     for (int t = 0; t < ntones; ++t) {
-      double ph = fmod(2 * M_PI * f[t] / FS * (double)(n0 + (uint64_t)k), 2 * M_PI);
+      double ph = fmod(2 * M_PI * f[t] / gen_fs * (double)(n0 + (uint64_t)k), 2 * M_PI);
       re += a[t] * cos(ph); im += a[t] * sin(ph);
     }
     x[2 * k] = (int16_t)lrint(re); x[2 * k + 1] = (int16_t)lrint(im);
@@ -51,16 +52,17 @@ static void gen(int16_t *x, int n, uint64_t n0, const double *f, const double *a
 }
 
 /* DDC: shift + decimate keeps an in-band tone at unit gain and rejects the tone that would alias onto the band */
-static int test_ddc(int decim, double shift, double passband)
+static int test_ddc(double fs, int decim, double shift, double passband)
 {
+  gen_fs = fs;
   const int chunk = 6144, N = chunk * 11;
-  const double fs_out = FS / decim, f_in = 0.6 * passband, f_alias = (decim > 1 ? fs_out : 0) - 0.5 * passband;
+  const double fs_out = fs / decim, f_in = 0.6 * passband, f_alias = (decim > 1 ? fs_out : 0) - 0.5 * passband;
   const double f[2] = {shift + f_in, shift + f_alias + (decim > 1 ? 0 : 1e30)};
   const double a[2] = {8000, 8000};
   int16_t *x = malloc((size_t)N * 4), *y = malloc((size_t)N * 4);
   gen(x, N, 0, f, a, decim > 1 ? 2 : 1);
   iq_ddc_t d;
-  CHECK(iq_ddc_init(&d, FS, decim, passband, 70) == 0, "init");
+  CHECK(iq_ddc_init(&d, fs, decim, passband, 70) == 0, "init");
   iq_ddc_set_shift(&d, shift);
   int out = 0;
   for (int k = 0; k < N; k += chunk) out += iq_ddc_process(&d, x + 2 * k, chunk, y + 2 * out);
@@ -71,8 +73,8 @@ static int test_ddc(int decim, double shift, double passband)
     /* f_alias - fs_out == -0.5 passband: lands inside the band if not filtered */
     const double leak = tone_amp(y, out, 600, f_alias - fs_out, fs_out) / 8000;
     CHECK(20 * log10(leak + 1e-12) < -60, "decim %d alias leak %.1f dB", decim, 20 * log10(leak + 1e-12));
-    printf("ddc decim=%d taps=%d,%d gain=%.4f dB alias=%.1f dB\n", decim, d.st[0].ntaps, d.st[1].ntaps, 20 * log10(g),
-           20 * log10(leak + 1e-12));
+    printf("ddc fs=%.2f decim=%d taps=%d,%d,%d,%d gain=%.4f dB alias=%.1f dB\n", fs / 1e6, decim, d.st[0].ntaps, d.st[1].ntaps,
+           d.st[2].ntaps, d.st[3].ntaps, 20 * log10(g), 20 * log10(leak + 1e-12));
   } else {
     printf("ddc decim=1 shift=%.0f gain=%.4f dB\n", shift, 20 * log10(g));
   }
@@ -167,7 +169,6 @@ static int test_ring_stress(void)
 
 /* --- end to end: producer process + two consumer processes through libshm_iq.so --- */
 static const double CENTER = 3600e6;
-static const double TONE_A = CENTER + 30e6 + 1e6, TONE_B = CENTER - 25e6 - 2e6; /* cell A at +30 MHz, cell B at -25 MHz */
 
 static int consumer(const char *lib, const char *ring, double rx, double rate, double bw, double own, double other)
 {
@@ -206,21 +207,23 @@ static int consumer(const char *lib, const char *ring, double rx, double rate, d
   return 0;
 }
 
-static int test_fanout(const char *lib)
+static int test_fanout_rate(const char *lib, double fs, double offA, double rA, double bwA, double offB, double rB, double bwB)
 {
+  const double toneA = CENTER + offA + 1e6, toneB = CENTER + offB - 2e6;
+  gen_fs = fs;
   char ring[64];
   snprintf(ring, sizeof(ring), "isac_iq_fan_%d", (int)getpid());
   shm_iq_ring_t p;
-  CHECK(shm_iq_ring_create(&p, ring, 1, 1 << 22, FS, CENTER) == 0, "create");
+  CHECK(shm_iq_ring_create(&p, ring, 1, 1 << 22, fs, CENTER) == 0, "create");
   fflush(stdout);
   pid_t ca = fork();
-  if (!ca) _exit(consumer(lib, ring, CENTER + 30e6, 61.44e6, 40e6, TONE_A, TONE_B));
+  if (!ca) _exit(consumer(lib, ring, CENTER + offA, rA, bwA, toneA, toneB));
   pid_t cb = fork();
-  if (!cb) _exit(consumer(lib, ring, CENTER - 25e6, 30.72e6, 20e6, TONE_B, TONE_A));
+  if (!cb) _exit(consumer(lib, ring, CENTER + offB, rB, bwB, toneB, toneA));
   /* producer: real-time pacing, 0.5 ms chunks, until both consumers are done */
-  const int chunk = 61440;
+  const int chunk = (int)(fs / 2000);
   int16_t *x = malloc((size_t)chunk * 4);
-  const double f[2] = {TONE_A - CENTER, TONE_B - CENTER}, a[2] = {6000, 6000};
+  const double f[2] = {toneA - CENTER, toneB - CENTER}, a[2] = {6000, 6000};
   int done = 0, st, ok = 1;
   uint64_t n0 = 0;
   for (int it = 0; done < 2 && it < 40000; ++it, n0 += chunk) {
@@ -236,8 +239,15 @@ static int test_fanout(const char *lib)
   char path[80]; snprintf(path, sizeof(path), "/%s", ring); shm_unlink(path);
   free(x);
   CHECK(done == 2 && ok, "consumers failed (done=%d)", done);
-  printf("fanout ok\n");
+  printf("fanout ok (ring %.2f MS/s, D=%d and D=%d)\n", fs / 1e6, (int)lrint(fs / rA), (int)lrint(fs / rB));
   return 0;
+}
+
+static int test_fanout(const char *lib)
+{
+  int f = test_fanout_rate(lib, FS, 30e6, 61.44e6, 40e6, -25e6, 30.72e6, 20e6);
+  /* 245.76 MS/s ring: 80 MHz cell at 122.88 (D=2) and 20 MHz cell at 30.72 (D=8) at different shifts */
+  return f | test_fanout_rate(lib, 245.76e6, 60e6, 122.88e6, 80e6, -60e6, 30.72e6, 20e6);
 }
 
 /* run8 regression: a caught-up consumer that reads a heartbeat newer than its own clock read (producer wrote in between)
@@ -725,10 +735,15 @@ static int in_child(int (*fn)(void))
 int main(int argc, char **argv)
 {
   int fail = 0;
-  fail |= test_ddc(1, 17.3e6, 20e6);
-  fail |= test_ddc(2, -11e6, 20e6);   /* 106 PRB class: 40 MHz channel at 61.44 MS/s */
-  fail |= test_ddc(2, 5e6, 30e6);     /* 162 PRB class: 60 MHz channel at 61.44 MS/s */
-  fail |= test_ddc(4, 31e6, 10e6);    /* 51 PRB class: 20 MHz channel at 30.72 MS/s */
+  fail |= test_ddc(FS, 1, 17.3e6, 20e6);
+  fail |= test_ddc(FS, 2, -11e6, 20e6);   /* 106 PRB class: 40 MHz channel at 61.44 MS/s */
+  fail |= test_ddc(FS, 2, 5e6, 30e6);     /* 162 PRB class: 60 MHz channel at 61.44 MS/s */
+  fail |= test_ddc(FS, 4, 31e6, 10e6);    /* 51 PRB class: 20 MHz channel at 30.72 MS/s */
+  fail |= test_ddc(245.76e6, 1, 40e6, 20e6);
+  fail |= test_ddc(245.76e6, 4, -37e6, 20e6);  /* 245.76 -> 61.44, 40 MHz channel */
+  fail |= test_ddc(245.76e6, 8, 53e6, 10e6);   /* 245.76 -> 30.72, 20 MHz channel */
+  fail |= test_ddc(491.52e6, 8, -91e6, 20e6);  /* 491.52 -> 61.44, 40 MHz channel */
+  fail |= test_ddc(491.52e6, 16, 77e6, 10e6);  /* 491.52 -> 30.72, 20 MHz channel */
   fail |= test_ring();
   fail |= test_ring_stress();
   fail |= test_v2_header();

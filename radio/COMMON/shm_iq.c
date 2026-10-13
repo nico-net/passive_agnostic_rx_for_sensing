@@ -180,8 +180,8 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   shm_iq_hdr_t *h = s->ring.hdr;
   const double ratio = h->rate / cfg->sample_rate;
   s->decim = (int)lrint(ratio);
-  AssertFatal(fabs(ratio - s->decim) < 1e-9 && (s->decim == 1 || s->decim == 2 || s->decim == 4),
-              "SHMIQ ring rate %.0f / cell rate %.0f is not 1, 2 or 4\n", h->rate, cfg->sample_rate);
+  AssertFatal(fabs(ratio - s->decim) < 1e-9 && s->decim >= 1 && s->decim <= 16 && !(s->decim & (s->decim - 1)),
+              "SHMIQ ring rate %.0f / cell rate %.0f is not a power of two <= 16\n", h->rate, cfg->sample_rate);
   /* shortcut: a cell takes ring channels 0..N-1; add a channel map when cells need different antenna subsets */
   AssertFatal(cfg->rx_num_channels >= 1 && (unsigned)cfg->rx_num_channels <= h->channels,
               "SHMIQ cell wants %d channels, ring has %u\n", cfg->rx_num_channels, h->channels);

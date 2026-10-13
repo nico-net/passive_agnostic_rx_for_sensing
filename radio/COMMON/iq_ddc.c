@@ -48,9 +48,9 @@ static int stage_init(iq_ddc_stage_t *s, double fp, double atten_db)
 int iq_ddc_init(iq_ddc_t *d, double rate_in, int decim, double passband_hz, double atten_db)
 {
   memset(d, 0, sizeof(*d));
-  if (decim != 1 && decim != 2 && decim != 4) return -1;
+  if (decim < 1 || decim > 16 || (decim & (decim - 1))) return -1;
   d->decim = decim; d->rate_in = rate_in;
-  d->nstages = decim == 4 ? 2 : decim == 2 ? 1 : 0;
+  d->nstages = __builtin_ctz((unsigned)decim);
   double rate = rate_in;
   for (int s = 0; s < d->nstages; ++s, rate /= 2)
     if (stage_init(&d->st[s], passband_hz / rate, atten_db)) { iq_ddc_free(d); return -1; }

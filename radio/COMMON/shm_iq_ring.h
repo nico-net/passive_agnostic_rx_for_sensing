@@ -56,6 +56,12 @@ void shm_iq_ring_detach(shm_iq_ring_t *r);
  * previous write starts a new contiguous run: forward gap: the index advances by the gap; backward (e.g. device reload):
  * the index advances by the wall time since the last write (>= 1), so consumer timestamps (base_tick + index) jump. */
 void shm_iq_ring_write(shm_iq_ring_t *r, int64_t tick, void *const *bufs, int n, unsigned channels);
+/* Producer, zero-copy variant of write(): reserve() raises `reserve` for up to `want` samples at the current head and returns the
+ * per-channel slot pointers plus the contiguous count n <= want (never wraps the ring). The caller fills the slots (e.g. UHD recv),
+ * then commit(tick, got) publishes them. commit returns 0 if the samples were published in place, -1 if `tick` does not continue the
+ * run (first write, gap, backward, new epoch): nothing was published, the caller copies the samples out and uses write(). */
+int shm_iq_ring_reserve(shm_iq_ring_t *r, int want, int16_t **slots);
+int shm_iq_ring_commit(shm_iq_ring_t *r, int64_t tick, int got);
 /* Producer: the radio was retuned or reloaded; the next write starts a new run (no index jump if its tick continues)
  * and rf_epoch is bumped. */
 void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz);

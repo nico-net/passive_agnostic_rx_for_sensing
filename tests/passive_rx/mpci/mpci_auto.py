@@ -4,6 +4,8 @@
   mpci_auto.py launch PLAN.json --out DIR [--pub-cmd CMD] [--base-cfg CFG] [--build DIR]      (DRY=1 env: print only)
   mpci_auto.py pass2 PLAN.json --out DIR [--wait 180]    per cell: sync+MIB+SIB1 in ue.log -> autofront refine + retune_args auto; restart ONLY a cell whose grid changes
   mpci_auto.py watch PLAN.json --out DIR [--period 10] [--lost-s 30] [--max-restarts 5] [--backoff-s 10] [--rescan CAPDIR...]
+  mpci_auto.py plan CELLS.json --cores ... --wideband --rate 245.76e6 --uhd-args ARGS --gain G [--channels 4] [--antenna RX1] [--ibw-hz HZ]
+      wideband mode: ONE window on ALL channels (standalone UHD publisher shm_iq_uhd_pub), consumers decimate by rate/cell_rate in 1,2,4,8,16
   mpci_auto.py auto (--cells CELLS.json | --capdirs DIR...) --out DIR --cores 4-19 [plan/launch/watch options]
 Window rule: a cell occupies the interval C +- BW/2. BW = SIB1 carrier width (sib1_nrb, pass-2 data in cells.json) else the pass-1 grid: the smallest
 receiver-supported 30 kHz grid whose half width reaches autofront.RB_GRID_SC (the --ssb 1171 first-pass rule puts the grid centre there) = 217 PRB.
@@ -11,7 +13,7 @@ No operator constants: everything is the scanner's output or a receiver rule. Th
 rest are `unserved` with --single-window. Default = M4: cover_windows() greedy cover of ALL cells, assign_channels() maps windows to radio channel subsets / dwell groups (rules in its docstring), plan.json v2.
 Stop/restart = SIGINT only (X410 claim hygiene), never SIGKILL/pkill. Polling, no daemons.
 shortcut: one window, report-only rescan, 30 kHz grids (supported-grid list copied from retune_args.py), pass-2 interval uses the carrier width not the grid."""
-import sys, os, re, json, time, subprocess, argparse
+import sys, os, re, json, time, subprocess, argparse, shlex
 H = os.path.dirname(os.path.abspath(__file__)); AF = os.path.join(H, '..', 'autofront'); SURVEY = os.path.join(H, '..', 'survey')
 sys.path.insert(0, AF)
 import autofront as A
@@ -19,6 +21,13 @@ import autofront as A
 SUPPORTED = (51, 106, 133, 162, 189, 217, 273)         # get_samplerate_and_bw(mu=1), same list as survey/retune_args.py
 RB_HZ = 12 * A.SCS_HZ
 R1 = next(r for r in SUPPORTED if r * RB_HZ / 2 >= A.RB_GRID_SC * A.SCS_HZ)   # pass-1 grid (see docstring)
+
+RATE_OF = {51: 30.72e6, 106: 61.44e6, 133: 61.44e6, 162: 61.44e6, 189: 122.88e6, 217: 122.88e6, 273: 122.88e6}   # get_samplerate_and_bw(mu=1), no 3/4 fs
+
+def decim_of(ring_rate, grid):
+    """consumer decimation ring_rate / cell rate of a supported grid; None unless a power of two in 1..16 (iq_ddc)."""
+    d = ring_rate / RATE_OF[grid]
+    return int(round(d)) if abs(d - round(d)) < 1e-9 and 1 <= round(d) <= 16 and not int(round(d)) & (int(round(d)) - 1) else None
 
 def grid_for(nrb): return next((r for r in SUPPORTED if r >= nrb), SUPPORTED[-1])
 
@@ -106,9 +115,41 @@ def pub_env(ring, windows):
     if d: e['ISAC_SHM_IQ_DWELL'] = ','.join(d)
     return e
 
+FALLBACK = 'M4 multi-window plan (plan without --wideband) for these cells; a dwell window cannot share the radio while the wideband window uses all channels'
+
+def make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz):
+    """ONE window, all channels, one LO. Usable span = the radio's instantaneous bandwidth ibw_hz (default rate * 200/245.76: the X410
+    datasheet IBW, 200 MHz at 245.76 MS/s and 400 MHz at 491.52 MS/s; outside it the radio's own filter rolls off); a cell needs [C - BW/2, C + BW/2] inside it. The window covers the most cells
+    (plan_window rule), its centre is the middle of the served extent. Cells whose rate does not divide the ring rate by 1,2,4,8,16 are unserved."""
+    if not uhd_args or gain is None: sys.exit('--wideband needs --uhd-args and --gain (no site defaults)')
+    span = ibw_hz or rate * 200 / 245.76; ok = []; bad = []
+    for x in entries:
+        x['decim'] = decim_of(rate, x['r'])
+        (ok if x['decim'] else bad).append(x)
+    centre, served, out = plan_window(ok, span)
+    if not served: sys.exit('no cells to serve')
+    cl = expand_cores(cores)
+    if len(cl) < len(served): sys.exit(f'{len(cl)} cores for {len(served)} cells')
+    n = len(cl) // len(served); gs = [x['gscn'] for x in served]; keep = ('tag', 'pci', 'gscn', 'C_hz', 'r', 'ssb', 'initial_fo', 'bw_hz', 'pass_', 'env', 'cores', 'idx', 'ring', 'nrx', 'window', 'decim')
+    pcells = []
+    for idx, x in enumerate(sorted(served, key=lambda x: x['lo'])):
+        x.update(cores=fmt_cores(cl[idx * n:(idx + 1) * n]), idx=idx, ring=ring, nrx=channels, window=0)
+        if x['n_cells'] > 1 or gs.count(x['gscn']) > 1: x['env'] = dict(ISAC_TARGET_PCI=str(x['pci']), ISAC_SSS_MULTI='2.5')
+        pcells.append({q: x[q] for q in keep})
+    pub = ['shm_iq_uhd_pub', '--args', uhd_args, '--rate', f'{rate:.0f}', '--freq', str(centre), '--gain', str(gain), '--channels', str(channels),
+           '--antenna', antenna, '--ring', ring]
+    win = dict(ring=ring, centre_hz=centre, channels=list(range(channels)), mode='dedicated', dwell_ms=None, wideband=True, cells=[x['tag'] for x in served],
+               span_hz=int(max(x['hi'] for x in served) - min(x['lo'] for x in served)))
+    un = [dict(tag=x['tag'], pci=x['pci'], gscn=x['gscn'], C_hz=x['C_hz'], lo_hz=int(x['lo']), hi_hz=int(x['hi']), fallback=FALLBACK,
+               reason='decim' if x in bad else 'outside window') for x in out + bad]
+    return dict(version=2, ring=ring, centre_hz=centre, rate_hz=int(rate), span_hz=int(span), pub_cores=pub_cores, cores=cores,
+                radio=dict(channels=channels, min_ch_per_window=channels, pub_env={}, wideband=True, ibw_hz=int(span),
+                           pub_cmd=' '.join(shlex.quote(a) for a in pub)), windows=[win], cells=pcells, unserved=un)
+
 def make_plan(cells, cores, max_span_hz=110e6, rate=122.88e6, pub_cores=None, ring='isac_iq', multi=False, channels=4, min_ch=1,
-              dwell_min_ms=40, dwell_max_ms=200):
+              dwell_min_ms=40, dwell_max_ms=200, wideband=False, uhd_args=None, gain=None, antenna='RX1', ibw_hz=None):
     entries = [cell_entry(c) for c in cells]
+    if wideband: return make_wideband(entries, cores, rate, pub_cores, ring, channels, uhd_args, gain, antenna, ibw_hz)
     if multi: wins = cover_windows(entries, max_span_hz); unserved = []
     else:
         centre, served, unserved = plan_window(entries, max_span_hz)
@@ -152,6 +193,7 @@ def launcher_env(plan, out, extra=None):
 
 def launch(plan, out, pub_cmd=None, cells=None, append=False, run=subprocess.run):
     cells = cells or plan['cells']; extra = {}
+    if not append and not pub_cmd: pub_cmd = (plan.get('radio') or {}).get('pub_cmd')    # wideband: standalone UHD publisher
     if pub_cmd: extra['PUB_CMD'] = pub_cmd
     if plan.get('pub_cores') and pub_cmd: extra['PUB_CORES'] = plan['pub_cores']
     if append: extra.update(APPEND='1', BASE_PORT=str(int(os.environ.get('BASE_PORT', 5556)) + cells[0]['idx']))
@@ -220,7 +262,8 @@ def pass2_cell(plan, out, c, plan_path=None, cells_json=None):
         c['pass2'] = 'outside_window'; c['wanted'] = d; res = 'outside_window'
         print(f"{c['tag']}: refined carrier {d['C_hz']} Hz (grid {d['r']} PRB) leaves window {c.get('ring', '')} centre {win_centre(plan, c)} Hz: NOT restarted, re-plan (mpci_auto.py plan/auto with the refined cells.json)")
     else:
-        c.update(C_hz=d['C_hz'], r=d['r'], ssb=d['ssb'], bw_hz=info['sib1_nrb'] * RB_HZ, pass2='retuned'); c['env'] = {**c['env'], **d['env']}
+        c.update(C_hz=d['C_hz'], r=d['r'], ssb=d['ssb'], bw_hz=info['sib1_nrb'] * RB_HZ, pass2='retuned')
+        if c.get('decim'): c['decim'] = decim_of(plan['rate_hz'], d['r']); c['env'] = {**c['env'], **d['env']}
         res = 'restarted' if restart_cell(plan, out, c) else 'done'
     if plan_path: save(plan, plan_path)
     return res
@@ -306,7 +349,8 @@ def cmd_watch(plan, out, period=10, rescan_dirs=None, rescan_period=300, iters=N
 
 def mp_args(a):
     return dict(max_span_hz=a.max_span_hz, rate=a.rate, pub_cores=a.pub_cores, ring=a.ring, multi=not a.single_window, channels=a.channels,
-                min_ch=a.min_ch_per_window, dwell_min_ms=a.dwell_min_ms, dwell_max_ms=a.dwell_max_ms)
+                min_ch=a.min_ch_per_window, dwell_min_ms=a.dwell_min_ms, dwell_max_ms=a.dwell_max_ms,
+                wideband=a.wideband, uhd_args=a.uhd_args, gain=a.gain, antenna=a.antenna, ibw_hz=a.ibw_hz)
 
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0]); sp = ap.add_subparsers(dest='cmd', required=True)
@@ -316,6 +360,9 @@ def main(argv):
         p.add_argument('--single-window', action='store_true', help='v1: one window (most cells), the rest unserved')
         p.add_argument('--channels', type=int, default=4, help='radio RX channel count (host inventory)')
         p.add_argument('--min-ch-per-window', type=int, default=1)
+        p.add_argument('--wideband', action='store_true', help='one window on all channels via shm_iq_uhd_pub at --rate (needs --uhd-args, --gain)')
+        p.add_argument('--uhd-args'); p.add_argument('--gain', type=float); p.add_argument('--antenna', default='RX1')
+        p.add_argument('--ibw-hz', type=float, default=None, help='wideband: radio instantaneous bandwidth (default rate*200/245.76, X410 IBW)')
         p.add_argument('--dwell-min-ms', type=int, default=40); p.add_argument('--dwell-max-ms', type=int, default=200)
     def lw(p):
         p.add_argument('--out', required=True); p.add_argument('--pub-cmd'); p.add_argument('--base-cfg'); p.add_argument('--build')
@@ -332,8 +379,9 @@ def main(argv):
         save(plan, a.out); print(f"{len(plan['windows'])} window(s): {len(plan['cells'])} served, {len(plan['unserved'])} unserved -> {a.out}")
         for w in plan['windows']: print(f"  window {w['ring']} centre {w['centre_hz']} Hz ch={subset_str(w['channels'])} {w['mode']}" + (f" dwell {w['dwell_ms']} ms" if w['dwell_ms'] else ''))
         for k, v in plan['radio']['pub_env'].items(): print(f'  {k}={v}')
+        if plan['radio'].get('pub_cmd'): print('  publisher: ' + plan['radio']['pub_cmd'])
         for c in plan['cells']: print('  ' + spec(c))
-        for u in plan['unserved']: print(f"  unserved {u['tag']} [{u['lo_hz']}, {u['hi_hz']}]")
+        for u in plan['unserved']: print(f"  unserved {u['tag']} [{u['lo_hz']}, {u['hi_hz']}]" + (f" ({u['reason']}; fallback: {u['fallback']})" if u.get('fallback') else ''))
         return
     if a.cmd == 'auto':
         os.makedirs(a.out, exist_ok=True); cj = a.cells

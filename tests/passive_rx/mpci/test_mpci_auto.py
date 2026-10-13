@@ -142,6 +142,40 @@ class T(unittest.TestCase):
             self.assertIn('dwell=40ms switches=0', M.window_status(p, d, w))
 
 
+    # ---- wideband (one window, all channels, standalone UHD publisher)
+    def wb(self, rate, **kw): return self.plan(wideband=True, rate=rate, uhd_args='type=x4xx,addr=1.2.3.4', gain=30, **kw)
+
+    def test_wideband_245(self):
+        p = self.wb(245.76e6); got = {c['pci'] for c in p['cells']}
+        # 200 MHz X410 IBW at 245.76 MS/s with pass-1 (217 PRB) widths: 923 does not fit with 508/4
+        self.assertEqual(got, {508, 4, 403, 415}); self.assertEqual(sorted(u['pci'] for u in p['unserved']), [675, 923])
+        self.assertIn('M4', p['unserved'][0]['fallback']); self.assertEqual(len(p['windows']), 1)
+        w = p['windows'][0]; self.assertEqual(w['channels'], [0, 1, 2, 3]); self.assertAlmostEqual(w['centre_hz'] / 1e6, 3625.29, delta=2)
+        self.assertLessEqual(w['span_hz'], 200e6); self.assertEqual(p['radio']['ibw_hz'], 200000000)
+        for c in p['cells']: self.assertEqual((c['nrx'], c['decim']), (4, 2))        # 217 PRB pass-1 grid = 122.88 MS/s
+        self.assertEqual(p['radio']['pub_cmd'], f"shm_iq_uhd_pub --args type=x4xx,addr=1.2.3.4 --rate 245760000 --freq {w['centre_hz']} --gain 30 --channels 4 --antenna RX1 --ring isac_iq")
+        pin = {c['pci'] for c in p['cells'] if c['env']}; self.assertEqual(pin, {508, 4})
+
+    def test_wideband_491_all_and_decim(self):
+        p = self.wb(491.52e6); self.assertEqual(len(p['cells']), 6); self.assertEqual(p['unserved'], [])
+        self.assertEqual({c['decim'] for c in p['cells']}, {4})
+        cs = cells()
+        for c in cs: c['k_ssb'] = 0; c['sib1_nrb'] = {508: 162, 4: 162, 403: 51, 415: 51, 923: 106, 675: 273}[c['pci']]
+        d = {c['pci']: c['decim'] for c in self.wb(491.52e6, cs=cs)['cells']}
+        self.assertEqual(d, {508: 8, 4: 8, 403: 16, 415: 16, 923: 8, 675: 4})
+        self.assertEqual(M.decim_of(245.76e6, 51), 8); self.assertIsNone(M.decim_of(184.32e6, 51)); self.assertIsNone(M.decim_of(61.44e6, 217))
+
+    def test_wideband_needs_args_and_launch_dry(self):
+        with self.assertRaises(SystemExit): self.plan(wideband=True, rate=245.76e6)
+        with tempfile.TemporaryDirectory() as d:
+            p = self.wb(245.76e6); pp = os.path.join(d, 'plan.json'); M.save(p, pp)
+            r = subprocess.run([sys.executable, os.path.join(H, 'mpci_auto.py'), 'launch', pp, '--out', d],
+                               env=dict(os.environ, DRY='1', BUILD='/b'), capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr); pub = [l for l in r.stdout.splitlines() if l.startswith('PUB ')]
+            self.assertEqual(len(pub), 1); self.assertIn('taskset -c 0-1 shm_iq_uhd_pub --args type=x4xx,addr=1.2.3.4 --rate 245760000', pub[0])
+            cl = [l for l in r.stdout.splitlines() if l.startswith('CELL ')]; self.assertEqual(len(cl), 4)  # 200 MHz IBW: 508, 4, 403, 415
+            for l in cl: self.assertIn('--ue-nb-ant-rx 4', l)
+
     def test_launcher_6_field_still_ok_and_bad_env(self):
         with tempfile.TemporaryDirectory() as d:
             e = dict(os.environ, DRY='1', OUT=d, BUILD='/b')

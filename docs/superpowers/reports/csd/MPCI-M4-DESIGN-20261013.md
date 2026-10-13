@@ -122,3 +122,68 @@ is applied to UHD channel i: use subsets in UHD order or no map; (c) the NCO-onl
    per-cell outage per return in sample time = (first ring timestamp after return - last before leaving) - from the consumer's
    `SHMIQ_DISCONT skipped_in` and the receiver's reacquisition time (G11 path) to first decoded grant; fraction of time away vs `dwell`.
 4. Metadata: `SHMIQ_READY ... radio=<sdr_addrs or pid> time_source=pps` when the cfg has `time_source=external`/gpsdo; two radios with PPS must report equal-comparable ticks (check `set_time_next_pps`).
+
+## Wideband publisher (2026-10-13; [CODE-READ] + compile only, everything UHD is [NOT RUN])
+
+Primary mode: ONE wideband window (4 antennas, one LO) published by `shm_iq_uhd_pub` (radio/USRP/shm_iq_uhd_pub.cpp), one `shm_iq`
+receiver process per cell on top (each with its own DDC). The per-channel-window/dwell publisher (UE hook) stays the fallback.
+Compile check: [OFFLINE VERIFIED, cloud x86, g++ 13 + libuhd-dev 4.6, standalone compile, links]; non-UHD step
+(`shm_iq_uhd_core.c`: reserve -> recv into ring slots -> commit, gap/copy path, error counters) [OFFLINE VERIFIED, cloud x86,
+ctest `test_shm_iq_uhd_core`, fake recv source: in-place path, first write, overflow gap, ring wrap, tick<->index mapping].
+
+### Zero-copy recv
+`shm_iq_ring_reserve()` raises `reserve` and hands out the slot pointers at `head` (count clipped at the ring end, so a recv never
+wraps; UHD keeps the rest of the packet for the next call). UHD `recv()` writes into them; `shm_iq_ring_commit(tick, got)` publishes
+`head` if the timestamp continues the run. Only the first write and an overflow gap (timestamp jump) take the copy path via
+`shm_iq_ring_write()` (data staged, then written at the new index so consumers see `valid_from`/gap exactly as with the UE hook).
+Safety: consumers already treat anything below `reserve - capacity` as overwritten (seqlock), so a consumer that lags by almost a
+full ring may lose a chunk while the producer is inside `recv()`; the effective lag budget is `capacity - chunk` (default chunk 65536).
+
+### Build (DGX, aarch64)
+    cd cmake_targets/ran_build/build   # configured with -DOAI_USRP=ON; never while nr-uesoftmodem runs (pgrep -x nr-uesoftmodem)
+    ninja shm_iq_uhd_pub shm_iq                # -> build/shm_iq_uhd_pub
+
+### Run (245.76 MS/s x 4, CG_400 image loaded; MCR is left at the image default 491.52 MHz unless --mcr is given)
+    ISAC_UHD_CTRL_CORES=<two cores != rx-core, != DPDK lcores> \
+    ./shm_iq_uhd_pub --args "type=x4xx,addr=192.168.10.2,mgmt_addr=192.168.30.2,use_dpdk=1,dpdk_num_mbufs=65536" \
+        --rate 245760000 --freq <centre from the scanner> --gain 38 --channels 4 --antenna RX1 --ring isac_iq \
+        --rx-core <X925 core> --duration 600
+Device args = the survey's (tests/passive_rx/survey/survey_capture.sh). Check first that `--rate 245760000` is accepted on CG_400
+(the tool aborts with `SHMIQ_UHD_FAIL actual rate ... != requested` otherwise; usrp_lib.cpp notes CG has no DDC, so a rate other than
+the MCR may need `--mcr 245760000` if the image allows it; benchmark_rate at 4 x 245.76 passed, copy its master_clock_rate).
+Consumer cell (any number, own process): `ISAC_SHM_IQ_NAME=isac_iq ISAC_SHM_IQ_CELL=c675 ISAC_CELL_INSTANCE=... nr-uesoftmodem` with `device = { name = "shm_iq"; }` (see MPCI-M1/M2).
+Stop with SIGINT (`kill -INT`): the tool issues STREAM_MODE_STOP_CONTINUOUS, drains, releases the device (X410 claim hygiene); never SIGKILL.
+
+### Expected log lines
+    SHMIQ_UHD_MCR 491520000   SHMIQ_UHD_CH uhd_ch=0 rate=245760000.000 freq=... bw=... ant=RX1   SHMIQ_UHD_LO ch=0 locked=1 (x4)
+    SHMIQ_UHD_READY ring=/isac_iq channels=4 rate=245760000 center_hz=... capacity=33554432 bytes=536875008 radio=<serial> time_source=free
+    SHMIQ_UHD_STATS t=10.0 samples=2.4e9 rate_meas=245760000.0 overflows=0 timeouts=0 ring_head=...   (every 1 s)
+    SHMIQ_UHD_END samples=... overflows=0 timeouts=0 inplace=... copied=1       (copied=1 is the first write; more = gaps)
+    on overflow: SHMIQ_UHD_OVERFLOW n=<count>   (consumers then log one SHMIQ_DISCONT)
+
+### Acceptance (10 min) [NOT RUN]
+overflows=0 and timeouts=0 in `SHMIQ_UHD_END`; `copied=1`; `rate_meas` within 1e-4 of the requested rate (cumulative from the first
+sample); every consumer `SHMIQ_OVERRUN` count 0 and no `SHMIQ_PRODUCER_LOST`; all four `lo_locked` true; RFSTALL-style counters
+(`rx_bytes` vs `rate x t x 16`) agree. Then repeat with 2-3 consumers concurrently and compare overflows.
+
+### 491.52 MS/s step (400 MHz, needs the 2nd QSFP28 cable) [NOT RUN]
+UHD multi-link: pass both ports in the device args, e.g. `addr=192.168.10.2,second_addr=192.168.20.2,mgmt_addr=192.168.30.2,use_dpdk=1`
+(X4xx 100 GbE: `addr` = QSFP port 0, `second_addr` = port 1; UHD round-robins the RX channels over the links; verify with
+`benchmark_rate --args "<same args>" --rx_rate 491.52e6 --rx_subdev ...` first, already the user's procedure). Then
+`--rate 491520000 --channels 4`; raise `--capacity` to 67108864 (2^26 samples = 136 ms; 1 GB) since each consumer now has to sustain
+7.9 GB/s of reads. DPDK needs one lcore per link plus the rx-core and ctrl cores kept distinct: size `ISAC_UHD_CTRL_CORES` and
+`dpdk_corelist` for two links (usrp_lib.cpp found uhd_ctrl at FIFO 97 colliding with a DPDK worker on the same core: half the starts never recycled an mbuf).
+
+### Memory-bandwidth / CPU budget
+Rate x 4 B x channels: 3.93 GB/s (4 x 245.76 MS/s), 7.86 GB/s (4 x 491.52). Producer writes it once (UHD copies mbuf -> ring slot; the
+NIC DMA into mbufs is a second write, so ~2 x the rate on the memory bus plus 1 x read of the mbuf) = ~12 GB/s at 245.76 and ~24 GB/s
+at 491.52 for the producer alone. Each consumer reads the full 4-channel ring once (DDC reads the window it needs: still all
+channels): + 3.9 / 7.9 GB/s per cell. With 5 cells: ~40 GB/s at 245.76, ~63 GB/s at 491.52, against the Spark's LPDDR5X (~273 GB/s
+peak, ~200 practical, shared with the GPU): fits at 245.76, need measuring at 491.52. CPU: one core busy-polling in recv (memcpy-bound),
+pin it (`--rx-core`, SCHED_OTHER; no RT priority set by the tool) with the uhd_ctrl cores separate.
+Each ring slot copy is not counted twice: nothing is staged except after a gap.
+
+### Open points
+Not hardware-tested: DPDK lcore layout of this binary (it uses UHD's own thread config, `use_dpdk=1` in the args, run as root with
+hugepages like capture_raw); whether `ISAC_UHD_CTRL_CORES` finds the `uhd_ctrl*` threads before they exist (it is applied right after the stream start command);
+`--time-source pps` uses `set_time_source("external")` + `set_time_next_pps(0)` (untested on the X410 sync cabling).

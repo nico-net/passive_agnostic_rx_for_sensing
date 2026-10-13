@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
-/* MPCI M1: per-cell digital down-converter: frequency shift (mixer) + decimation by 1, 2 or 4 (cascade of Kaiser
+/* MPCI M1: per-cell digital down-converter: frequency shift (mixer) + decimation by 1, 2, 4, 8 or 16 (cascade of Kaiser
  * halfband stages, polyphase so every inner loop is contiguous). Input/output sc16, internal float. */
 #ifndef IQ_DDC_H
 #define IQ_DDC_H
 #include <stdint.h>
 
-#define IQ_DDC_MAX_STAGES 2
+#define IQ_DDC_MAX_STAGES 4
 #define IQ_DDC_ROT_BLOCK 4096
 
 typedef struct {
@@ -16,7 +16,7 @@ typedef struct {
 } iq_ddc_stage_t;
 
 typedef struct {
-  int decim;           /* 1, 2 or 4 */
+  int decim;           /* 1, 2, 4, 8 or 16 */
   int nstages;
   iq_ddc_stage_t st[IQ_DDC_MAX_STAGES];
   double rate_in, shift_hz, phase; /* mixer: multiply by exp(-j 2 pi shift_hz t) */
