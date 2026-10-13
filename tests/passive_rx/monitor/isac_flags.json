@@ -1,0 +1,2957 @@
+{
+"ISAC_ACQ_CARRIER_FROM_RS": {
+"desc": "nr_passive_acq_note_carrier_from_rs: confirms the carrier grid without SIB1 carrier information, when a CSI-RS sequence has been decoded on the grid: marks the carrier verified ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c:262",
+"how": "code comment"
+},
+"ISAC_ACQ_CFO_MAX_HZ": {
+"desc": "ISAC_TSYNC_RESET=0 ISAC_AUTO_ACQUIRE=0 ISAC_ACQ_CFO_MAX_HZ=60000 ISAC_CSIRS_BLIND=1 ISAC_CSIRS_BLIND_IDSWEEP=1 \\",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:669",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_ACQ_PROBE": {
+"desc": null,
+"src": "openair2/LAYER2/NR_MAC_UE/config_ue.c:2403",
+"how": null
+},
+"ISAC_AGNOSTIC_V2": {
+"desc": "ISAC_AGNOSTIC_V2=1: one switch for the convergence changes built offline on 2026-09-15 while the X410 was unavailable (Thompson allocation, stage-1 hand-over, discovery sampling...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_agnostic_v2.h:12",
+"how": "code comment"
+},
+"ISAC_AL1_COVER": {
+"desc": "AL1 cover lap (ISAC_AL1_COVER=1) FDRA width / RA type 0 PRB sets",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1753",
+"how": "code comment"
+},
+"ISAC_ANCHOR_ENTER": {
+"desc": null,
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1965",
+"how": null
+},
+"ISAC_ANCHOR_SIGN": {
+"desc": null,
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1972",
+"how": null
+},
+"ISAC_ANCHOR_STAY": {
+"desc": null,
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1967",
+"how": null
+},
+"ISAC_AUTO_ACQUIRE": {
+"desc": "Automatic acquisition (ISAC_AUTO_ACQUIRE=1, passive only) adds a coarse CFO search bounded by ISAC_ACQ_CFO_MAX_HZ. With pss_window_frame >= 0 only that frame of the capture is s...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:662",
+"how": "code comment"
+},
+"ISAC_BANDSCAN_FIRST_HZ": {
+"desc": "be exercised mechanically; ISAC_BANDSCAN_FIRST_HZ puts the cell's centre first (test knob).",
+"src": "executables/nr-ue-ru.c:158",
+"how": "code comment"
+},
+"ISAC_BWP_DIAG": {
+"desc": "ISAC_BWP_DIAG=1: every 256 observations, the 4 strongest windows of symbol 0 with their winning reference -- what the tracker is actually seeing, when no CORESET gets declared.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6259",
+"how": "code comment"
+},
+"ISAC_BWP_TRACK": {
+"desc": "Passive DL BWP tracking (nr_passive_bwp.h). ISAC_BWP_TRACK=1, or on under V2. The RT thread registers entries and tracks RNTIs; decode consumers resolve (size, start) from the D...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4358",
+"how": "code comment"
+},
+"ISAC_CARRIER_FROM_SIB1": {
+"desc": "nr_carrier_from_sib1_enabled: ISAC_CARRIER_FROM_SIB1=1 (CARRIERGEOM, default off); read per call (dwell start only).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1166",
+"how": "code comment"
+},
+"ISAC_CFO_TRACK_APPLY": {
+"desc": "ISAC_CFO_TRACK_APPLY=1 is required before it retunes anything. The sign convention between this estimator and nrue_ru_set_freq() is not something to assume -- and today three",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1816",
+"how": "code comment"
+},
+"ISAC_CFO_TRACK_HZ": {
+"desc": "CFO TRIM LOOP (ISAC_CFO_TRACK_HZ = threshold in Hz, 0 = off) ------------------------- ROOT CAUSE it addresses (measured 2026-08-26, 21 runs, zero exceptions): the carrier",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1810",
+"how": "code comment"
+},
+"ISAC_CFO_TRACK_PERIOD": {
+"desc": "ISAC_CFO_TRACK_HZ=800 ISAC_CFO_TRACK_PERIOD=20 ISAC_UL_TA_SWEEP=0:0:0 ISAC_RX_MRC_MODE=0 ISAC_SENSE_COMB=1 \\",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1817",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_CFO_TRACK_SPREAD_HZ": {
+"desc": null,
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1812",
+"how": null
+},
+"ISAC_CHEST_COH": {
+"desc": "ISAC_CHEST_COH=1 (diagnostic, default off): adjacent-subcarrier coherence and RMS of the TRACKING estimate over the REs it actually populated, to compare against the same quantity",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1541",
+"how": "code comment"
+},
+"ISAC_CHEST_DELAY_SHARE": {
+"desc": "ISAC_CHEST_DELAY_SHARE=1 (T26c): within ONE passive decode (nr_dl_chest_delay_epoch, bumped per decode), the delay estimate of the first estimated (antenna, DM-RS symbol) is reu...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:75",
+"how": "code comment"
+},
+"ISAC_CHEST_DFT_APPLY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1121",
+"how": null
+},
+"ISAC_CHEST_DFT_WIN": {
+"desc": "ISAC_CHEST_DFT_WIN=<W samples> (default 0 = off): DFT-domain channel estimate. The FIR smoother below averages ~8 pilots (~480 kHz) and flattens any path beyond ~1 us, so a disp...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:75",
+"how": "code comment"
+},
+"ISAC_CHEST_DIAG": {
+"desc": "ISAC_CHEST_DIAG=1 gives the 12 CHESTDIAG lines without TBPARM's per-TB volume",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3955",
+"how": "code comment"
+},
+"ISAC_CHEST_GPU_DELAY": {
+"desc": "GPU6 ISAC_CHEST_GPU_DELAY=1 (default off; needs ISAC_PDSCH_GPU_EXACT_FEP): nr_passive_est_delay() of all antennas of one (DM-RS symbol, layer) in one bit-exact GPU batch (nr_pds...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1615",
+"how": "code comment"
+},
+"ISAC_CHEST_GPU_DELAY_CHECK": {
+"desc": "ISAC_CHEST_GPU_DELAY_CHECK=N (default 64): every Nth GPU delay is recomputed on the CPU; any difference disables the GPU delay for the rest of the run. The GPU entry point is we...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:1615",
+"how": "code comment"
+},
+"ISAC_CHEST_OCC": {
+"desc": "ISAC_CHEST_OCC=1 (T26d): multi-layer DM-RS estimate with the delay removed BEFORE the FD-OCC despreading. The stock type-1 estimator averages each OCC pair (2 comb REs, 4 subcar...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3301",
+"how": "code comment"
+},
+"ISAC_CHEST_OCC_AB": {
+"desc": "ISAC_CHEST_OCC_AB=1 (T26d): multi-layer post-solve grants alternate stock / OCC-after-delay chest (paired A/B)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1719",
+"how": "code comment"
+},
+"ISAC_CHEST_PDP_DIAG": {
+"desc": "chest_pdp_diag_on: returns ISAC_CHEST_PDP_DIAG (cached, default 1): whether the channel estimator runs its per-call BRDELAY/PDP diagnostic.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:124",
+"how": "code comment"
+},
+"ISAC_CHEST_RAW": {
+"desc": "ISAC_CHEST_RAW=<path> (diagnostic, default off): dump the 240-value frequency-domain estimate AND the 240 source REs it was built from, so the 1024-vs-4096 estimates can be",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1518",
+"how": "code comment"
+},
+"ISAC_CHEST_STAGE_TIMING": {
+"desc": "> - [MEASURED replay, DGX] CHESTFAST: ISAC_CHEST_STAGE_TIMING=1 profiler added",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:63",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_CHEST_TINTERP": {
+"desc": "DECODE-RES: per-decode override of ISAC_CHEST_TINTERP (-1 = use the env flag). Set only by the paired TINT A/B and the ISAC_PDSCH_TINTERP_RETRY arm, which re-demodulate the same...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1056",
+"how": "code comment"
+},
+"ISAC_CIR_TEST": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1121",
+"how": null
+},
+"ISAC_COREMAP_EMITBAR": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:833",
+"how": null
+},
+"ISAC_COREMAP_GT": {
+"desc": "GROUND-TRUTH PROFILE (ISAC_COREMAP_GT=1, default off). See this file's note above: the MEAN correlation per window over many calls, which reveals a CORESET that a thresholded hi...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:664",
+"how": "code comment"
+},
+"ISAC_COREMAP_GT_CSET": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:681",
+"how": null
+},
+"ISAC_COREMAP_IDSWEEP": {
+"desc": "STAGE 1: PDCCH DM-RS scrambling-ID discovery, decode-free, fully blind (ISAC_COREMAP_IDSWEEP=1).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:438",
+"how": "code comment"
+},
+"ISAC_COREMAP_IDSWEEP_DUR": {
+"desc": "multi-symbol snapshot). Opt-in via ISAC_COREMAP_IDSWEEP_DUR=<1..3>, default 1 -- BIT-IDENTICAL to the original single-symbol format at dur=1 (same per-entry size, same file layo...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:239",
+"how": "code comment"
+},
+"ISAC_COREMAP_OCCBAR": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:853",
+"how": null
+},
+"ISAC_COREMAP_ONACCEPT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:128",
+"how": null
+},
+"ISAC_COREMAP_PHASE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:596",
+"how": null
+},
+"ISAC_COREMAP_SUBBAND": {
+"desc": "ISAC_COREMAP_SUBBAND=1 opts in.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:78",
+"how": "code comment"
+},
+"ISAC_COREMAP_Z": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:789",
+"how": null
+},
+"ISAC_CORE_PLAN": {
+"desc": "Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.",
+"src": "executables/nr-uesoftmodem.c:178",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND": {
+"desc": "Writes the shared state under g_csirs_state_lock (cleanup releases it). Enabled by ISAC_CSIRS_BLIND=1 or by discovery. Caller: nr_csirs_blind_rt_slot_fep().",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:729",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_EPRDUMP": {
+"desc": "ISAC_CSIRS_BLIND_EPRDUMP=<path> (diagnostic, rank mode only): every candidate's mean EPR, observation count and best z, so a real CSI-RS can be told from PDSCH DM-RS / PDCCH energy",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:865",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_IDSWEEP": {
+"desc": "scramblingID sweep (ISAC_CSIRS_BLIND_IDSWEEP=1). MEASURED 2026-09-19 on Swisscom PCI 382: the sequence-free EPR finds a TRS pair (row 1, same fd, symbols 4 and 8) at 4-5x the po...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1449",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_PER_SLOT": {
+"desc": "ISAC_CSIRS_BLIND_PER_SLOT=N (default 1): ordinary discovery scores per slot. N > 1 is for slow offline replay of a raw capture, where the real-time budget does not apply: the de...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1001",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_RANK": {
+"desc": "ISAC_CSIRS_BLIND_RANK: keep scoring after a confirmation */ g_st confirmations already logged",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:793",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_RB": {
+"desc": "Loops over the supported rows and densities and every legal l0; a candidate spans the whole grid unless ISAC_CSIRS_BLIND_RB=start:nrb restricts it. ISAC_CSIRS_BLIND_ROWS selects...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c:325",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_ROWS": {
+"desc": "ISAC_CSIRS_BLIND_ROWS=\"1,2,...\" (default: all of kRows): restrict the enumerated rows. Added 2026-10-06 for offline replay, where scoring every candidate every slot is affordabl...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c:276",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_SLOTSWEEP": {
+"desc": "ISAC_CSIRS_BLIND_SLOTSWEEP: sweep the slot index in c_init",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1489",
+"how": "code comment"
+},
+"ISAC_CSIRS_BLIND_WIDE": {
+"desc": "OPT-IN (ISAC_CSIRS_BLIND_WIDE=1, default off): appending and pinning fits changes the order in which the population is searched, and a union of two narrow resources sharing a pe...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1192",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC": {
+"desc": "unchanged manually configured bank. Used only with ISAC_CSIRS_DISC=1.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu:285",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_BACKEND": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_backend.c:224",
+"how": null
+},
+"ISAC_CSIRS_DISC_BATCH": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c:460",
+"how": null
+},
+"ISAC_CSIRS_DISC_BUDGET": {
+"desc": "OTATAIL: ISAC_CSIRS_DISC_BUDGET=1 (default off; off = the unchanged path). Every CSI-RS discovery GPU step (one launch group and its wait) becomes one slice of the shared GPU di...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_budget.cuh:29",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_CONFIRM_MAX": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:946",
+"how": null
+},
+"ISAC_CSIRS_DISC_CORE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c:103",
+"how": null
+},
+"ISAC_CSIRS_DISC_CUMULATIVE": {
+"desc": "> ISAC_CSIRS_DISC_CUMULATIVE=1 retains bounded full-ID vectors over unique row-1",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu_sweep.cu:541",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_CSIRS_DISC_DELTA_MAX": {
+"desc": "delta_limit: returns ISAC_CSIRS_DISC_DELTA_MAX (default 1): the largest slot-delta searched by the sweep, clipped to the slots per frame.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:153",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_DIAG": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:481",
+"how": null
+},
+"ISAC_CSIRS_DISC_DUMP": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:475",
+"how": null
+},
+"ISAC_CSIRS_DISC_DUMP_IN": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_csirs_disc_dump_test.cc:30",
+"how": null
+},
+"ISAC_CSIRS_DISC_FEED_ACQ_DIV": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c:198",
+"how": null
+},
+"ISAC_CSIRS_DISC_FEED_BURST": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c:198",
+"how": null
+},
+"ISAC_CSIRS_DISC_FEED_DIV": {
+"desc": "td_feed_cfg: reads ISAC_CSIRS_DISC_FEED_DIV (default 7) and _FEED_WIN (default 640, min 160) once.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c:49",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_FEED_WIN": {
+"desc": "Duty-cycled ingest for real-time safety: ISAC_CSIRS_DISC_FEED_WIN (default 640 slots) and ISAC_CSIRS_DISC_FEED_DIV (default 7) skip windows; an acquisition burst (ISAC_CSIRS_DIS...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.c:49",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_MANAGED": {
+"desc": "use_managed: returns ISAC_CSIRS_DISC_MANAGED == 1: use CUDA managed memory for unified allocations instead of mapped pinned host memory (diagnostic only).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:225",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_NORM_COALESCE": {
+"desc": "norm_rbfast: ISAC_CSIRS_DISC_NORM_COALESCE=1 (default off, DECTAIL): coalesced thread order of normalize().",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:43",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_RATELIMIT": {
+"desc": "Flag unchanged: ISAC_CSIRS_DISC_RATELIMIT=1 in t26z.env.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:635",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_CSIRS_DISC_RATELIMIT_CYCLES": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:244",
+"how": null
+},
+"ISAC_CSIRS_DISC_RATELIMIT_MISS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:242",
+"how": null
+},
+"ISAC_CSIRS_DISC_RATELIMIT_NOTICE_S": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:241",
+"how": null
+},
+"ISAC_CSIRS_DISC_RATELIMIT_PDET": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:243",
+"how": null
+},
+"ISAC_CSIRS_DISC_RING": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:208",
+"how": null
+},
+"ISAC_CSIRS_DISC_SWEEP_HYPS": {
+"desc": "sweep_limit: returns ISAC_CSIRS_DISC_SWEEP_HYPS (default 32, max NR_CSIRS_DISC_MAX_HYP): the number of hypotheses swept per batch.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:143",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_TD_RING": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_feed.c:480",
+"how": null
+},
+"ISAC_CSIRS_DISC_TRS_PRIORITY": {
+"desc": "> occasions; separate ISAC_CSIRS_DISC_TRS_PRIORITY=1 changes sweep ordering only.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc.c:326",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_CSIRS_DISC_WIN_FLOOR": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gate_internal.h:30",
+"how": null
+},
+"ISAC_CSIRS_DISC_WIN_K": {
+"desc": "nr_csirs_disc_gate_config: reads the admission gate parameters once per batch: ISAC_CSIRS_DISC_WIN_K (12), _WIN_M (4), _WIN_FLOOR (2) and _WIN_Z (fixed threshold, 0 = per-sweep ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gate_internal.h:28",
+"how": "code comment"
+},
+"ISAC_CSIRS_DISC_WIN_M": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gate_internal.h:29",
+"how": null
+},
+"ISAC_CSIRS_DISC_WIN_Z": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gate_internal.h:31",
+"how": null
+},
+"ISAC_CSIRS_FULL": {
+"desc": "CSI-FULL: ISAC_CSIRS_FULL=1 exports per-cell 52-RB TRS sets, which need their extent",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c:466",
+"how": "code comment"
+},
+"ISAC_CSIRS_FULL_AB": {
+"desc": "ISAC_CSIRS_FULL_AB=1 (diagnostic, default off; needs ISAC_CSIRS_FULL=1). Every eligible dedicated full decode in a slot carrying discovered CSI-RS is first decoded under a fixed...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1921",
+"how": "code comment"
+},
+"ISAC_CSIRS_FULL_BLOCK_INFER": {
+"desc": "ISAC_CSIRS_FULL_BLOCK_INFER=1 (default off; a measured network property, not a TS rule). On the PCI-415 carrier every TRS RB block carries all its row-1 TRS resources (both cell...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1816",
+"how": "code comment"
+},
+"ISAC_CSIRS_FULL_BURSTS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c:472",
+"how": null
+},
+"ISAC_CSIRS_FULL_ERASE": {
+"desc": "ISAC_CSIRS_FULL_ERASE=1 (default off): the resources NOT selected for this population (other RB blocks' TRS) become LLR erasures in nr_dlsch_extract_rbs() (their REs carry this ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1892",
+"how": "code comment"
+},
+"ISAC_CSIRS_FULL_TRS_PAIR": {
+"desc": "ISAC_CSIRS_FULL_TRS_PAIR=1 (default off). TS 38.214 5.1.6.1.1: a TRS (NZP-CSI-RS-ResourceSet with trs-Info) is row 1, density 3, and its resources come in pairs in one slot at s...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:1774",
+"how": "code comment"
+},
+"ISAC_CSIRS_PORTS_GT8": {
+"desc": "with ISAC_CSIRS_PORTS_GT8=1, otherwise the capture skips such resources (csi_rx.c).",
+"src": "openair1/PHY/INIT/nr_init_ue.c:251",
+"how": "code comment"
+},
+"ISAC_CSI_DIAG": {
+"desc": "CSIDIAG (ISAC_CSI_DIAG=1): report the CSI-RS measurement so CSI is observably TRACKED by the receiver instead of only being handed to a sensing engine that may not be linked in.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/csi_rx.c:1420",
+"how": "code comment"
+},
+"ISAC_CSS0_ALS": {
+"desc": "ISAC_CSS0_ALS=\"a1:a2:a4:a8\" overrides the four above. The Table 10.1-1 pin is correct for SEARCH SPACE #0, but RAR and Msg4 live in the ra-SearchSpace -- a different common search",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:393",
+"how": "code comment"
+},
+"ISAC_CSS0_EVERY": {
+"desc": "_Atomic: N scan consumers (Task A7)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5453",
+"how": "code comment"
+},
+"ISAC_DCI11_DIAG_FILTER": {
+"desc": "ISAC_DCI11_DIAG_FILTER=\"riv,mcs,ap,ap_bits,fdra_mode\" (DIAGNOSTIC ONLY, NOT BLIND, default off): offer only the live layouts with exactly these offsets -- separates \"layout sear...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1746",
+"how": "code comment"
+},
+"ISAC_DCI11_HARD_REFUTE": {
+"desc": "ISAC_DCI11_HARD_REFUTE=1 / ISAC_DCI11_HARQ_SEQ=1 / ISAC_DCI11_STAGE2=1 arm and narrow it (3035 \u2192 224 live).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:292",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_DCI11_HARQPID": {
+"desc": "4 bits behind the RV (as solver_hq_of does, tb2 assumed absent) and park the rest in dai; the total is unchanged.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:975",
+"how": "code comment"
+},
+"ISAC_DCI11_HARQ_SEQ": {
+"desc": "+ HARQ-sequence evidence: the same payloads, consecutive for one RNTI",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:804",
+"how": "code comment"
+},
+"ISAC_DCI11_OBSERVE_MM": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8955",
+"how": null
+},
+"ISAC_DCI11_PRUNELOG": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2102",
+"how": null
+},
+"ISAC_DCI11_RV_CONSISTENCY": {
+"desc": "DCIRV ISAC_DCI11_RV_CONSISTENCY: this RNTI's last DCI 1_1 payloads (oldest overwritten) */ payloads seen; RV-rescue notes since the last re-selection",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:383",
+"how": "code comment"
+},
+"ISAC_DCI11_S1_OFF": {
+"desc": "Drops are applied in a second pass and never remove the last live layout. ISAC_DCI11_S1_OFF=1 keeps every layout alive (A/B control). Returns the number of live layouts. Callers...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c:773",
+"how": "code comment"
+},
+"ISAC_DCI11_STAGE2": {
+"desc": "DCI 1_1 layout, STAGE 2 (ISAC_DCI11_STAGE2=1, default off). Every layout the stage-1 resolver still holds alive is turned into extract widths (nr_dci11_layout_to_field_bits, whi...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1523",
+"how": "code comment"
+},
+"ISAC_DCI_FIELDS": {
+"desc": "DCIFIELDS (ISAC_DCI_FIELDS=1): dump what we decoded out of an ACCEPTED payload. A high rv!=0 rate on a link without retransmissions is the KNOWN signature of",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:10396",
+"how": "code comment"
+},
+"ISAC_DCI_LEN_MAX": {
+"desc": "140",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2446",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_DCI_LEN_MIN": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2436",
+"how": null
+},
+"ISAC_DCI_RAW_LOG": {
+"desc": "ISAC_DCI_RAW_LOG=1 (diagnostic, default off): every accepted raw DL DCI",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8937",
+"how": "code comment"
+},
+"ISAC_DCI_SWEEP_STRIDE": {
+"desc": "ISAC_DCI_SWEEP_STRIDE: test every Nth dci_length per occasion instead of all 34 (the sweep's stride, see nr_pdcch_dci_length_sweep.h). The budget above counts ROUNDS, so each le...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2524",
+"how": "code comment"
+},
+"ISAC_DCI_WATCH_RNTI": {
+"desc": "2026-09-07 with ISAC_DCI_WATCH_RNTI: 100 % of real C-RNTI decodes rejected there in auto, while the manual conf (which pins 0 via pdcch_blind_monitor_bwp field 3) accepted 29,331.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:5176",
+"how": "code comment"
+},
+"ISAC_DCI_WIDE_PROBE_EVERY": {
+"desc": "1",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c:104",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_DC_FIX": {
+"desc": "DC-SUBCARRIER (LO-leakage) INTERPOLATION (ISAC_DC_FIX=1, default off pending live A/B) -- MEASURED 2026-09-18, office gNB PCI 2, 273 PRB, reproduced IDENTICALLY across two indep...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3268",
+"how": "code comment"
+},
+"ISAC_DELTA_SCAN": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1020",
+"how": null
+},
+"ISAC_DISCOVERY_EVIDENCE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2922",
+"how": null
+},
+"ISAC_DISCOVER_DIAG": {
+"desc": "DISCOVERHIST (ISAC_DISCOVER_DIAG=1): dump the WHOLE per-window hit histogram at the decision point. Added 2026-09-07 because three consecutive live runs converged to three DIFFE...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4593",
+"how": "code comment"
+},
+"ISAC_DISCOVER_DOMINANCE_K": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2633",
+"how": null
+},
+"ISAC_DISCOVER_DOMINANCE_N": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2639",
+"how": null
+},
+"ISAC_DISCOVER_MIN_BG": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2585",
+"how": null
+},
+"ISAC_DISC_NO_RESYNC": {
+"desc": "sudo env ISAC_DISC_NO_RESYNC=1 ISAC_UE_RT_CORE=2 ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \\",
+"src": "executables/nr-ue.c:1811",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_DL_TRAFFIC_PROBE": {
+"desc": "ISAC_DL_TRAFFIC_PROBE: per-cell PDSCH-like occupancy (default off; BLINDPIPE section 2)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c:203",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_DMRS_ANCHOR": {
+"desc": null,
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1962",
+"how": null
+},
+"ISAC_DMRS_FO_APPLY": {
+"desc": "ISAC_DMRS_FO_APPLY=1 applies the CFO as a DIGITAL de-rotation through the same per-branch hook nr_slot_fep_ant already uses -- never a hardware retune. SFO is reported only; cor...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3857",
+"how": "code comment"
+},
+"ISAC_DMRS_SCAN_CORE": {
+"desc": "t26r = t26q + ISAC_PUSCH_CORES=6 ISAC_PUSCH_PRIO=30 ISAC_PDSCH_DMRS_SCAN_ASYNC=1 ISAC_DMRS_SCAN_CORE=2 ISAC_PDTIM_PCT=1 ISAC_UL_LOCK_CRC_GUARD=1 ISAC_PDSCH_GPU_EXACT_DEMOD_NL34=...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:517",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_FORCE_DCI_LEN": {
+"desc": "_Atomic: N scan consumers (Task A7)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6576",
+"how": "code comment"
+},
+"ISAC_FORCE_GLOBAL_SYNC": {
+"desc": "need correction). ISAC_FORCE_GLOBAL_SYNC=1 also runs it on FAILURES, so the forced full-symbol correction inside nr_adjust_synch_ue() actually gets a chance to run and be",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1934",
+"how": "code comment"
+},
+"ISAC_GNB_CORESET_IL": {
+"desc": "TEST HOOK (simulation only, default off): ISAC_GNB_CORESET_IL=\"L:R[:shift]\" makes the dedicated CORESET interleaved (reg-BundleSize L in",
+"src": "openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c:334",
+"how": "code comment"
+},
+"ISAC_GNB_PDCCH_DMRS_ID": {
+"desc": "TEST HOOK (simulation only, default off): ISAC_GNB_PDCCH_DMRS_ID=<0..65535> configures the dedicated CORESET's pdcch-DMRS-ScramblingID, which makes the gNB scramble UE-specific ...",
+"src": "openair2/LAYER2/NR_MAC_gNB/nr_radio_config.c:358",
+"how": "code comment"
+},
+"ISAC_GPU_BENCH_CPU_FEP": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_slot_bench.cc:208",
+"how": null
+},
+"ISAC_GPU_BUDGET": {
+"desc": "init: one-time setup (pthread_once): reads ISAC_GPU_BUDGET (enabled when \"1\"), ISAC_GPU_DISCOVERY_BUDGET_PCT (default 30) and ISAC_GPU_RT_DEADLINE_US (default 250), and records ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_worker_test.cc:28",
+"how": "code comment"
+},
+"ISAC_GPU_DISCOVERY_BUDGET_PCT": {
+"desc": "init: one-time setup (pthread_once): reads ISAC_GPU_BUDGET (enabled when \"1\"), ISAC_GPU_DISCOVERY_BUDGET_PCT (default 30) and ISAC_GPU_RT_DEADLINE_US (default 250), and records ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_stream_benchmark.cc:91",
+"how": "code comment"
+},
+"ISAC_GPU_DISC_SMS": {
+"desc": "ISAC_GPU_DISC_SMS=N background discovery (CSI-RS discovery, PDCCH NID) streams live in a green context on the first N SMs (rounded up by the driver to its co-scheduling granular...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_gpu_green.h:38",
+"how": "code comment"
+},
+"ISAC_GPU_DUMP": {
+"desc": "gpu_dump_record: ISAC_GPU_DUMP=<file>: appends one record per self-checked GPU job to the dump file (slot IQ window, job, CPU and GPU LLRs) for offline comparison.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:348",
+"how": "code comment"
+},
+"ISAC_GPU_HEARTBEAT": {
+"desc": "OTATAIL: ISAC_GPU_HEARTBEAT=1 (default off). A probe thread times two one-block kernels every 10 ms on a real-time-partition stream: k_hb over device memory only, then k_hb over...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:802",
+"how": "code comment"
+},
+"ISAC_GPU_LMEM_PRERESERVE": {
+"desc": "GPUFUSE: ISAC_GPU_LMEM_PRERESERVE=1 (default off). resident::segment needs ~21 KB of local memory per thread: its first launch made the driver grow the device's local-memory res...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_disc_gpu.cu:663",
+"how": "code comment"
+},
+"ISAC_GPU_MEMORY_MODEL": {
+"desc": null,
+"src": "openair1/PHY/TOOLS/nr_gpu_platform.c:159",
+"how": null
+},
+"ISAC_GPU_RT_DEADLINE_US": {
+"desc": "init: one-time setup (pthread_once): reads ISAC_GPU_BUDGET (enabled when \"1\"), ISAC_GPU_DISCOVERY_BUDGET_PCT (default 30) and ISAC_GPU_RT_DEADLINE_US (default 250), and records ...",
+"src": "openair1/PHY/TOOLS/nr_gpu_budget.c:56",
+"how": "code comment"
+},
+"ISAC_GPU_RT_ISOLATE": {
+"desc": "ISAC_GPU_RT_ISOLATE=1 (needs N > 0) real-time streams (PDSCH FEP/chest/demod/LDPC, PDCCH FEP) live in a green context on the remaining SMs, so discovery blocks never share an SM...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_gpu_green.h:38",
+"how": "code comment"
+},
+"ISAC_GPU_RT_PARTS": {
+"desc": "ISAC_GPU_RT_PARTS=P (GPUALLOC, needs RT_ISOLATE; default off) the real-time SMs are split into up to P disjoint green contexts of at least floor(rt_sms / P) SMs (the driver roun...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_gpu_green.h:70",
+"how": "code comment"
+},
+"ISAC_GPU_SELFCHECK": {
+"desc": "ISAC_GPU_SELFCHECK=N: first 32 comparable GPU-fed decodes by default; enforce is opt-in.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2364",
+"how": "code comment"
+},
+"ISAC_GPU_SELFCHECK_ENFORCE": {
+"desc": "K35b makes OBSERVE the default: failures are counted without disabling FEP; ISAC_GPU_SELFCHECK_ENFORCE=1 enables the two-failure disable and one LOG_E",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2365",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_GPU_SHARED_MANAGED": {
+"desc": null,
+"src": "openair1/PHY/TOOLS/nr_gpu_platform.c:160",
+"how": null
+},
+"ISAC_GPU_WORKER_CORE": {
+"desc": "GPU FEP worker (only with GPU FEP) | ISAC_GPU_WORKER_CORE | A725 | A725",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2392",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_HIDDEN_MULTI_CORESET": {
+"desc": null,
+"src": "openair1/SIMULATION/NR_PHY/hidden_waveform.h:89",
+"how": null
+},
+"ISAC_HIDDEN_RECONFIG": {
+"desc": null,
+"src": "openair1/SIMULATION/NR_PHY/hidden_waveform.h:92",
+"how": null
+},
+"ISAC_HIDDEN_SEED": {
+"desc": null,
+"src": "openair1/SIMULATION/NR_PHY/dlsim.c:784",
+"how": null
+},
+"ISAC_HIDDEN_WAVEFORM_DIR": {
+"desc": "Enable only first SSB with index ssb_indx=0",
+"src": "openair1/SIMULATION/NR_PHY/dlsim.c:783",
+"how": "code comment"
+},
+"ISAC_KSSB_ALIGN": {
+"desc": "ISAC_KSSB_ALIGN=1 (default off, WEAKSYNC 2026-10-11): align the receiver RB grid to the cell's CRB grid. CORESET#0, PDCCH",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:625",
+"how": "code comment"
+},
+"ISAC_L2MAXH_DELTA": {
+"desc": "ISAC_L2MAXH_DELTA (signed bits, default 0): the shift above makes Y.H* >> shift ~ |Y|/2, i.e. the equaliser OUTPUT sits at a few LSB whatever the RX gain (measured OTA 2026-09-1...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1816",
+"how": "code comment"
+},
+"ISAC_L2MAXH_DELTA_NL2": {
+"desc": "ISAC_L2MAXH_DELTA_NL2 (default 0): extra delta for nl == 2 only (weak layer of MMSE mode 2 rounds to 0).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1822",
+"how": "code comment"
+},
+"ISAC_L2MAXH_HEADROOM": {
+"desc": "ISAC_L2MAXH_HEADROOM=1 (default off): the shift above is derived from the MEAN |H|^2, which leaves 2-4 bits of the int16 equaliser output unused on a flat channel and is therefore",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1786",
+"how": "code comment"
+},
+"ISAC_L2MAXH_PEAK": {
+"desc": "ISAC_L2MAXH_PEAK=1 (default off): size the shift from the PEAK per-RB channel level over the allocation instead of the MEAN. Measured OTA 2026-09-14 (EQDIAG, 273 PRB, X410 4-ch):",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1701",
+"how": "code comment"
+},
+"ISAC_LANE_ALS": {
+"desc": "ISAC_LANE_ALS: aggregation levels the LOOKAHEAD LANES scan, comma-separated (default \"2\").",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2468",
+"how": "code comment"
+},
+"ISAC_LANE_UNION_LLR": {
+"desc": "would not see in the sub-extent. ISAC_LANE_UNION_LLR=0 restores the per-lane path for an A/B. */ _Atomic: N scan consumers (Task A7)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7926",
+"how": "code comment"
+},
+"ISAC_LDPC_ITERS": {
+"desc": "ISAC_LDPC_ITERS=<n> (cherry-picked from csd/snr-audit 2e63cdb3ee, default off = 8, the init_nr_ue_dlsch() default): the OAI",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1797",
+"how": "code comment"
+},
+"ISAC_LDPC_ITERS_AB": {
+"desc": "ISAC_LDPC_ITERS_AB=<a>,<b> (T26d): post-solve full decodes alternate the LDPC iteration limit (paired A/B)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1728",
+"how": "code comment"
+},
+"ISAC_LLRFILL_ALL": {
+"desc": "llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5043",
+"how": "code comment"
+},
+"ISAC_LLR_NORM": {
+"desc": "already right and keeps the soft information where it was not. ISAC_LLR_NORM=0 disables.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4823",
+"how": "code comment"
+},
+"ISAC_LLR_SCALE": {
+"desc": "the decode's own rule (nr_pdsch_passive_decode.c): ISAC_LLR_SCALE=<target mean |llr|> rescales iff atoi() > 0 (a target of 1 IS a rescale); every value the decode treats as acti...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:44",
+"how": "code comment"
+},
+"ISAC_MALLOC_NOTRIM": {
+"desc": "OTATAIL: ISAC_MALLOC_NOTRIM=1 (default off): glibc never returns heap memory to the kernel and serves allocations up to 32 MB from the heap instead of mmap. On GB10 the GPU walk...",
+"src": "common/utils/system.c:401",
+"how": "code comment"
+},
+"ISAC_MAP_PASS0_ONLY": {
+"desc": "ISAC_MAP_PASS0_ONLY=1: emit ONLY pass 0 -- the PCI residue and shift 0 of every legal (L, R). Pass 1 is the blind crawl over every remaining shift, and it is ~96 % of the 271 ma...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:167",
+"how": "code comment"
+},
+"ISAC_MAX_POS_ACC": {
+"desc": "ISAC_MAX_POS_ACC=<samples> forces a value (use ofdm_symbol_size to test the scaling hypothesis / on air). Model and its checks: tests/timing_loop/acc_limit_model.py -- note its ...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:49",
+"how": "code comment"
+},
+"ISAC_MCS_TABLE_EVID": {
+"desc": "BLINDFIX F7 (ISAC_MCS_TABLE_EVID=1): the table the cell's CRC passes support overrides the config value",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9252",
+"how": "code comment"
+},
+"ISAC_METRICS_PATH": {
+"desc": "Also append every ISAC_METRICS JSON line to this file (\u00a711.13)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:236",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_MLOCK": {
+"desc": "ISAC_MLOCK=0 skips mlockall (default 1 = upstream behaviour). 2026-10-08, DGX GB10: with a CUDA context the call keeps the main thread at ~100 % system time for seconds across t...",
+"src": "common/utils/system.c:407",
+"how": "code comment"
+},
+"ISAC_MMSE2_DIAG": {
+"desc": "LLRZERO ISAC_MMSE2_DIAG=1",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4366",
+"how": "code comment"
+},
+"ISAC_MMSE_DIAG": {
+"desc": "Env: ISAC_PDSCH_MMSE_MODE=2 (unbiased ZF with per-layer scale), ISAC_MMSE_FLOAT=1 (float solver), ISAC_MMSE_DIAG=1 (per-layer EVM log).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1020",
+"how": "code comment"
+},
+"ISAC_MMSE_FLOAT": {
+"desc": "Env: ISAC_PDSCH_MMSE_MODE=2 (unbiased ZF with per-layer scale), ISAC_MMSE_FLOAT=1 (float solver), ISAC_MMSE_DIAG=1 (per-layer EVM log).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:959",
+"how": "code comment"
+},
+"ISAC_NID_SOLVE": {
+"desc": "kept per (N_ID, reference); the leader is logged when it changes. ISAC_NID_SOLVE=0 turns it off (runtime kill switch: the old observer path then carries discovery alone).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:232",
+"how": "code comment"
+},
+"ISAC_OBS_PATH": {
+"desc": "Enable the per-grant observation writer, JSONL appended to this file (\u00a721)",
+"src": "executables/nr-uesoftmodem.c:431",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_OBS_TEST_RING_SLOTS": {
+"desc": "Test hook**: ring slots, 1..2^20 (default 16384)",
+"src": "executables/nr-uesoftmodem.c:433",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_OBS_TEST_WRITER_PAUSE_MS": {
+"desc": "Test hook**: stall the observation writer (overload test)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_obs.c:183",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_OTA_CFG": {
+"desc": "OTA CONFIG DERIVATION PROBE (ISAC_OTA_CFG=1) ------------------------------------- Everything the blind PDCCH monitor is currently TOLD via pdcch_blind_monitor_* is, for the",
+"src": "openair2/LAYER2/NR_MAC_UE/config_ue.c:1820",
+"how": "code comment"
+},
+"ISAC_PASSIVE_REPLAY_CAPTURE": {
+"desc": "Offline replay exits before any radio initialization.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:111",
+"how": "code comment"
+},
+"ISAC_PASSIVE_REPLAY_FAILURES": {
+"desc": "Prefault before RF start, never page in 157 MB at capture time.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:125",
+"how": "code comment"
+},
+"ISAC_PASSIVE_REPLAY_INPUT": {
+"desc": "A CRC win identifies a footprint candidate, not O_ACK/CSI/RRC configuration.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:2063",
+"how": "code comment"
+},
+"ISAC_PASSIVE_REPLAY_UL_CONFIG": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:319",
+"how": null
+},
+"ISAC_PASSIVE_REPLAY_UL_PROBE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c:318",
+"how": null
+},
+"ISAC_PASSIVE_REPLAY_UL_UCI": {
+"desc": "A CRC win identifies a footprint candidate, not O_ACK/CSI/RRC configuration.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:2063",
+"how": "code comment"
+},
+"ISAC_PBCH_CAPTURE": {
+"desc": "RAW CAPTURE (2026-08-04c, capture-only, opt-in ISAC_PBCH_CAPTURE=1, capped at 300 occasions). Dumps pbch_ch_est_sym1/sym3 (channel estimate, pre-decode) and pbch_e_rx (LLRs goin...",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1894",
+"how": "code comment"
+},
+"ISAC_PBCH_CAPTURE_PATH": {
+"desc": null,
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1899",
+"how": null
+},
+"ISAC_PBCH_CFO_SWEEP": {
+"desc": "CFO-CORRECTION SWEEP (2026-08-04e, capture-only diagnostic, opt-in ISAC_PBCH_CFO_SWEEP=1, no behavioural change to the real decode below). SUPERSEDES an earlier version that der...",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1271",
+"how": "code comment"
+},
+"ISAC_PBCH_L2_DELTA": {
+"desc": "ISAC_PBCH_L2_DELTA (signed bits, default 0): the PBCH compensated output tracks |Y|, not the shift, so at a higher RX gain the polar LLR input runs past its expected range (meas...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pbch.c:1683",
+"how": "code comment"
+},
+"ISAC_PBCH_NO_TRACK": {
+"desc": "Escape hatch kept for A/B: ISAC_PBCH_NO_TRACK=1 restores the old cached-MIB behaviour.",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:2174",
+"how": "code comment"
+},
+"ISAC_PBCH_OFFSET_BIAS": {
+"desc": "offset is the whole bug. ISAC_PBCH_OFFSET_BIAS=<samples>, default 0 = unchanged.",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:989",
+"how": "code comment"
+},
+"ISAC_PBCH_REPLAY": {
+"desc": "Runs on this thread while everything is in scope, so no cross-thread plumbing.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:572",
+"how": "code comment"
+},
+"ISAC_PBCH_SHIFT_CLAMP": {
+"desc": "ISAC_PBCH_SHIFT_CLAMP=<samples> (default 0 = off): the PBCH-based timing step is read off a peaky multipath CIR and jumps +/-50 samples per SSB (TSYNC_OBS corr_pos swings +/-200...",
+"src": "executables/nr-ue.c:2005",
+"how": "code comment"
+},
+"ISAC_PDCCH_ANON_DUMP": {
+"desc": "nr_pdcch_anon_dump: diagnostic: appends the equalised candidate symbols of each anonymous configured-nID occasion to ISAC_PDCCH_ANON_DUMP (binary, PAD1 records).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3465",
+"how": "code comment"
+},
+"ISAC_PDCCH_ANON_DUMP_MAX": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3466",
+"how": null
+},
+"ISAC_PDCCH_ANT_MASK": {
+"desc": "ISAC_PDCCH_ANT_MASK=<hex>: force the kept set (A/B tool: 0x3 = branches 0+1, what 2 RX uses).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:206",
+"how": "code comment"
+},
+"ISAC_PDCCH_C0_OCC_DB": {
+"desc": "nr_pdcch_c0_occ_hit: CORESET#0 occupancy test: true when the strongest 6-RB group of CORESET#0 exceeds the tracked noise floor by ISAC_PDCCH_C0_OCC_DB (default 6 dB).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:542",
+"how": "code comment"
+},
+"ISAC_PDCCH_C0_OCC_GATE": {
+"desc": "nr_pdcch_c0_occ_gate_on: returns ISAC_PDCCH_C0_OCC_GATE (cached): on slots outside SS#0, scan CORESET#0 only when its symbols carry energy.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:527",
+"how": "code comment"
+},
+"ISAC_PDCCH_CAPTURE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6064",
+"how": null
+},
+"ISAC_PDCCH_CFGTRACE": {
+"desc": "CFGTRACE (ISAC_PDCCH_CFGTRACE=1): dump every DERIVED PDCCH parameter for each invocation. The blind monitor and the normal MAC-driven path both call this function, so with an at...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:456",
+"how": "code comment"
+},
+"ISAC_PDCCH_CFGTRACE_SLOT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:459",
+"how": null
+},
+"ISAC_PDCCH_CSS_NRNTI0": {
+"desc": "ISAC_PDCCH_CSS_NRNTI0=1: TS 38.211 7.3.2.3 -- a COMMON search space in a CORESET with pdcch-DMRS-ScramblingID scrambles with n_RNTI = 0 and n_ID = that ID. A format 1_0 candidat...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2972",
+"how": "code comment"
+},
+"ISAC_PDCCH_DCIGT": {
+"desc": "DCIGT probe (ISAC_PDCCH_DCIGT=1): a fixed, parseable schema carrying EVERYTHING that can be checked against the gNB's own scheduler log for the same grant",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9488",
+"how": "code comment"
+},
+"ISAC_PDCCH_DED_BUDGET_SHARE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5189",
+"how": null
+},
+"ISAC_PDCCH_DED_BUDGET_US": {
+"desc": "ISAC_PDCCH_DED_BUDGET_US (T26b, 0 = off): once the banked passes of a dedicated-only slot have used the budget, the discovered dwell and the CORESET#0 occupancy pass are skipped...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5181",
+"how": "code comment"
+},
+"ISAC_PDCCH_DED_EVERY_SLOT": {
+"desc": "nr_pdcch_ded_every_slot: returns ISAC_PDCCH_DED_EVERY_SLOT (cached): admit every slot to the dedicated-CORESET passes, not only SS#0 occasions.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:493",
+"how": "code comment"
+},
+"ISAC_PDCCH_DISCOVERED_FILE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1386",
+"how": null
+},
+"ISAC_PDCCH_DISCOVERY_BUDGET_US": {
+"desc": "Parameters: pdcch_blind_monitor_autodiscover, ISAC_COREMAP_IDSWEEP=<batches>, ISAC_COREMAP_*, ISAC_AL1_COVER, ISAC_PDCCH_DISCOVERY_BUDGET_US.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2703",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDCCH_DISCOVERY_REPLAY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3707",
+"how": null
+},
+"ISAC_PDCCH_DISCOVERY_TRACE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2718",
+"how": null
+},
+"ISAC_PDCCH_DISC_COVER": {
+"desc": "nr_pdcch_discovered_cover_enabled: ISAC_PDCCH_DISC_COVER=1 (ACQ-FIX, default off); read per call like nr_pdcch_discovered_enabled(). Callers: the discovered queue (load/snapshot...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1114",
+"how": "code comment"
+},
+"ISAC_PDCCH_DISC_ENUM": {
+"desc": "ISAC_PDCCH_DISC_ENUM=1 (CORESETALL, default off; needs ISAC_PDCCH_DISC_COVER): bounded enumeration of the CORESET geometries TS 38.211 7.3.2 / 38.213 10.1 permit, for every nID ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1226",
+"how": "code comment"
+},
+"ISAC_PDCCH_DISC_ENUM_MAX": {
+"desc": "Entry order, cut at ISAC_PDCCH_DISC_ENUM_MAX (default 24) per nID: A other durations non-interleaved; B bundle 6, R 3/2/6",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1256",
+"how": "code comment"
+},
+"ISAC_PDCCH_DISC_ENUM_NIDS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1256",
+"how": null
+},
+"ISAC_PDCCH_DMRS_GATE": {
+"desc": "tight statistical bound) before defaulting on. ISAC_PDCCH_DMRS_GATE=1 to re-enable for that A/B.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7344",
+"how": "code comment"
+},
+"ISAC_PDCCH_DMRS_RANK": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3601",
+"how": null
+},
+"ISAC_PDCCH_DWELL_ADAPTIVE": {
+"desc": "ISAC_PDCCH_DWELL_ADAPTIVE: hard cap on stepped occasions of one discovered dwell, counted whether or not the prescreen passed",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1524",
+"how": "code comment"
+},
+"ISAC_PDCCH_DWELL_OWN_BUDGET": {
+"desc": "dwell_own_budget: ISAC_PDCCH_DWELL_OWN_BUDGET=1 (BLINDPIPE 2026-10-13, default off). Root cause of the dwell starvation",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:969",
+"how": "code comment"
+},
+"ISAC_PDCCH_DWELL_PRESCREEN": {
+"desc": "ISAC_PDCCH_DWELL_PRESCREEN=1: in the dwell pass only, a candidate counts as \"prescreen-passing\" for ISAC_PDCCH_DWELL_ADAPTIVE only if its equalised soft bits have amplitude-cons...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1032",
+"how": "code comment"
+},
+"ISAC_PDCCH_DWELL_PRESCREEN_Z": {
+"desc": "z = ISAC_PDCCH_DWELL_PRESCREEN_Z (default NR_PDCCH_DWELL_PS_Z_DEFAULT, calibrated in docs/superpowers/reports/csd/ACQNIGHT.md).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1042",
+"how": "code comment"
+},
+"ISAC_PDCCH_EARLY_COMMIT": {
+"desc": "ISAC_PDCCH_EARLY_COMMIT=1 (sa-bed 2026-10-07, default off: not validated on the DGX OTA pipeline); -1 = read the env once; tests set it",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:2419",
+"how": "code comment"
+},
+"ISAC_PDCCH_ENERGY": {
+"desc": "ENERGYPROBE (ISAC_PDCCH_ENERGY=1): strongest candidate of this occasion PER AGGREGATION LEVEL, as a ratio to the measured noise floor. Per-AL because that is the open question on",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7439",
+"how": "code comment"
+},
+"ISAC_PDCCH_EXTENT_BATCH": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1783",
+"how": null
+},
+"ISAC_PDCCH_FEP_CACHE": {
+"desc": "ISAC_PDCCH_FEP_CACHE=1 (T26c): a dedicated-only slot runs several passes (each banked CORESET, the dwell, the CORESET#0 occupancy pass, CSS0) over the SAME OFDM symbol; FFT it o...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6116",
+"how": "code comment"
+},
+"ISAC_PDCCH_FULLCRC": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:4298",
+"how": null
+},
+"ISAC_PDCCH_GATE_CFAR": {
+"desc": "BLINDFIX F3 (ISAC_PDCCH_GATE_CFAR=1, default off): when the operator enabled the adaptive energy gate, replace its 3 x running-median test (which rejected 100 % of a dense CORES...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7469",
+"how": "code comment"
+},
+"ISAC_PDCCH_GATE_CFAR_Z": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7470",
+"how": null
+},
+"ISAC_PDCCH_GPU_CPU_ARITH": {
+"desc": "How it works: Checks nant, N and n_rb_dl <= 275. ISAC_PDCCH_GPU_CPU_ARITH == 1 selects the CPU-arithmetic parity kernel; ISAC_PDCCH_ANT_MASK sets the forced antenna mask. Create...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu:204",
+"how": "code comment"
+},
+"ISAC_PDCCH_GPU_DUMP": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_record.c:18",
+"how": null
+},
+"ISAC_PDCCH_GPU_DUMP_MAX": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_gpu_record.c:19",
+"how": null
+},
+"ISAC_PDCCH_GPU_EXACT_FEP": {
+"desc": "ISAC_PDCCH_GPU_EXACT_FEP: CORESET symbols on the GPU / CPU */ /* wall time incl. lock wait, 64 us buckets",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:160",
+"how": "code comment"
+},
+"ISAC_PDCCH_GPU_FEP": {
+"desc": "dlopen'd libpdcch_gpu.so, loaded only under ISAC_PDCCH_GPU_FEP=1, independently of the PDSCH NR_GPU_FEP switch) -- NOT a second, independently",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:10859",
+"how": "code comment"
+},
+"ISAC_PDCCH_JANON_ALL_CORESETS": {
+"desc": "janon_all_coresets: returns ISAC_PDCCH_JANON_ALL_CORESETS (cached): run the joint anonymous search on every CORESET, not only the configured-nID ones.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3299",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT": {
+"desc": "enabled for this executable before main(); the default-off contract is checked below by reading the env var",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c:33",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON": {
+"desc": "ISAC_PDCCH_JOINT_ANON: unknown-RNTI joint solve on a configured-nID CORESET",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3566",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON_ASYNC": {
+"desc": "JOINT_ANON ASYNC WORKER (ISAC_PDCCH_JOINT_ANON_ASYNC=1, T26b) --------------------------------------------- OTA PCI 415 (2026-10-08, runs i2o1/i2n1): the anonymous joint search ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3013",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON_BUDGET_US": {
+"desc": "joint_anon_budget_us: returns ISAC_PDCCH_JOINT_ANON_BUDGET_US (cached): CPU budget per occasion for the anonymous joint solves; 0 = unbounded.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3542",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON_CORE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3058",
+"how": null
+},
+"ISAC_PDCCH_JOINT_ANON_DISCOVERY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3170",
+"how": null
+},
+"ISAC_PDCCH_JOINT_ANON_LEN_HINT": {
+"desc": "T26c ISAC_PDCCH_JOINT_ANON_LEN_HINT: lengths already locked on this CORESET; 0 = all",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6838",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON_MM": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3518",
+"how": null
+},
+"ISAC_PDCCH_JOINT_ANON_OCC": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3506",
+"how": null
+},
+"ISAC_PDCCH_JOINT_ANON_Q": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3251",
+"how": null
+},
+"ISAC_PDCCH_JOINT_ANON_RATE": {
+"desc": "Rate control: ISAC_PDCCH_JOINT_ANON_RATE (token bucket in signal time, or a stable hash sample). Never blocks: a full queue drops the item and counts it.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3165",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON_STABLE": {
+"desc": "janon_stable_enabled: returns ISAC_PDCCH_JOINT_ANON_STABLE (cached): deterministic sampling of joint-anon occasions (by hash of nID and slot), larger queue and top-K.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3026",
+"how": "code comment"
+},
+"ISAC_PDCCH_JOINT_ANON_TOPK": {
+"desc": "top ISAC_PDCCH_JOINT_ANON_TOPK (default 6) prescreen-passing candidates' soft bits into a bounded queue (ISAC_PDCCH_JOINT_ANON_Q items, default 64; full = dropped and counted); ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3145",
+"how": "code comment"
+},
+"ISAC_PDCCH_KNOWN_PRESCREEN": {
+"desc": "ISAC_PDCCH_KNOWN_PRESCREEN=1 (T26b, default off): on a discovered/banked dedicated CORESET, a candidate whose soft bits fail the QPSK amplitude-consistency screen (nr_pdcch_join...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7504",
+"how": "code comment"
+},
+"ISAC_PDCCH_KNOWN_PRESCREEN_MIN": {
+"desc": "amplitude-consistency score; noise mean 2/pi = 0.637",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7505",
+"how": "code comment"
+},
+"ISAC_PDCCH_LEN_MEMORY": {
+"desc": "ISAC_PDCCH_LEN_MEMORY: use a CRC-locked peer length on this exact CORESET, with a full-range probe every 128 feeds to discover a",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6807",
+"how": "code comment"
+},
+"ISAC_PDCCH_LLRPROBE": {
+"desc": "LLRPROBE (ISAC_PDCCH_LLRPROBE=1): compact signature of the unscrambled soft bits a PDCCH candidate feeds to polar_decoder_int16(), plus the CRC that decoder recovered.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:1178",
+"how": "code comment"
+},
+"ISAC_PDCCH_LLRPROBE_SLOT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:1185",
+"how": null
+},
+"ISAC_PDCCH_LLR_CACHE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6071",
+"how": null
+},
+"ISAC_PDCCH_LLR_CACHE_VERIFY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6099",
+"how": null
+},
+"ISAC_PDCCH_NEON_SCORE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3554",
+"how": null
+},
+"ISAC_PDCCH_NID_BANK": {
+"desc": "nr_pdcch_discovered_enabled: returns true when the discovered-CORESET bank is enabled (ISAC_PDCCH_NID_BANK=1). Callers: the discovered-CORESET entry points in this file and nr_p...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1086",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU": {
+"desc": "> 4000 cap only when its prescreen passed; hard cap 40000), ISAC_PDCCH_NO_FAKE_FOOTPRINT=1, ISAC_PDCCH_NID_GPU_NODROP=1.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:46",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDCCH_NID_GPU_ACQUIRE_MS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:235",
+"how": null
+},
+"ISAC_PDCCH_NID_GPU_BATCH": {
+"desc": "own flag, default on (was ISAC_CSIRS_DISC)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:244",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU_BUDGET_MS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:565",
+"how": null
+},
+"ISAC_PDCCH_NID_GPU_CAPTURE_EVERY": {
+"desc": "on every DL slot (ISAC_PDCCH_NID_GPU_CAPTURE_EVERY=1); default 64-snapshot",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:454",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDCCH_NID_GPU_CORE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:274",
+"how": null
+},
+"ISAC_PDCCH_NID_GPU_DUTY": {
+"desc": "How it works: Waits on g.cv for a batch in state 2 (lowest sequence). With ISAC_PDCCH_NID_GPU_DUTY=1 it runs the ACQUIRE/MAINTAIN/PAUSED duty state machine (nr_gpu_discovery_due...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:233",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU_EVERY": {
+"desc": "own flag, default on (was ISAC_CSIRS_DISC)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:245",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU_INCREMENTAL": {
+"desc": "own flag, default on (was ISAC_CSIRS_DISC)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:243",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU_MAINTAIN_MS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:236",
+"how": null
+},
+"ISAC_PDCCH_NID_GPU_NODROP": {
+"desc": "ISAC_PDCCH_NID_GPU_NODROP: a staging batch was freed; CLOCK_MONOTONIC (initialised in start())",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:237",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU_OCC_DB": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:503",
+"how": null
+},
+"ISAC_PDCCH_NID_GPU_OCC_FLOOR_PCT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:508",
+"how": null
+},
+"ISAC_PDCCH_NID_GPU_OCC_GATE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:501",
+"how": null
+},
+"ISAC_PDCCH_NID_GPU_RECHECK_MS": {
+"desc": "ISAC_CSIRS_DISC_BUDGET=1, ISAC_PDCCH_NID_GPU_RECHECK_MS=10000), L = t26bLn (K + ISAC_MALLOC_NOTRIM=1); otatail_stats per run",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:238",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDCCH_NID_GPU_SYMBOLS": {
+"desc": "ISAC_PDCCH_NID_GPU_SYMBOLS=N rotates the window start over the first N symbols only (default: 3; 0: all). PDCCH CORESETs sit in the first symbols; on PCI 415 (OTA 2026-10-07) th...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c:469",
+"how": "code comment"
+},
+"ISAC_PDCCH_NID_GPU_WINDOW": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.c:246",
+"how": null
+},
+"ISAC_PDCCH_NID_MULTISYMBOL": {
+"desc": "Duration 2/3 multi-symbol evidence (T19): own flag, default on (was ISAC_CSIRS_DISC).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_nid_gpu.cu:571",
+"how": "code comment"
+},
+"ISAC_PDCCH_NO_FAKE_FOOTPRINT": {
+"desc": "nr_pdcch_no_fake_footprint_enabled: ISAC_PDCCH_NO_FAKE_FOOTPRINT=1 (ACQ-ROBUST, default off). Caller: techA_commit_apply().",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1564",
+"how": "code comment"
+},
+"ISAC_PDCCH_NO_MISMATCH_GATE": {
+"desc": "ISAC_PDCCH_NO_MISMATCH_GATE=1 bypasses this gate. It has no config knob (see the note above), and for DIAGNOSIS it must be removable: it is an adaptive EMA, so a genuine decode ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9318",
+"how": "code comment"
+},
+"ISAC_PDCCH_NO_PDSCH_DECODE": {
+"desc": "ISAC_PDCCH_NO_PDSCH_DECODE=1 (diagnosis only, default off): run the whole PDCCH scan -- FEP, LLR, demap, polar decode, every gate, the CFR tap -- but skip ONLY the passive PDSCH",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:10380",
+"how": "code comment"
+},
+"ISAC_PDCCH_NRNTI": {
+"desc": "ISAC_PDCCH_NRNTI=0 forces 0 (regression control only). There is deliberately no way to inject a known C-RNTI: that was a test fixture and it is gone.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1257",
+"how": "code comment"
+},
+"ISAC_PDCCH_PAR_BANKS": {
+"desc": "ISAC_PDCCH_PAR_BANKS=1 (T26d): the banked CORESET passes of ONE dedicated-only slot run on two threads ---------- Each pass is ~250 us FEP+LLR + decode on a big core; with two p...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5030",
+"how": "code comment"
+},
+"ISAC_PDCCH_PAR_CORE": {
+"desc": "slot's SCANTIME is taken. Helper core: ISAC_PDCCH_PAR_CORE (default: the process affinity).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4975",
+"how": "code comment"
+},
+"ISAC_PDCCH_PASS_ADAPT": {
+"desc": "pass_adapt_on: returns ISAC_PDCCH_PASS_ADAPT (cached): adapt the per-pass schedule to the yield of each pass kind. Caller: pass_should_run() and pass_note().",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:957",
+"how": "code comment"
+},
+"ISAC_PDCCH_POINTA_REF": {
+"desc": "nr_pdcch_pointa_ref_enabled: ISAC_PDCCH_POINTA_REF=1 (TIM-ACQ, default off). Read once. Caller: nr_pdcch_crb0_grid_rb().",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:1124",
+"how": "code comment"
+},
+"ISAC_PDCCH_PRESCREEN_DIAG": {
+"desc": "ISAC_PDCCH_PRESCREEN_DIAG=1 (diagnostic): all rejecting gates of the candidate loop are disabled and per-candidate statistics (score, energy/floor, DM-RS correlation) are histog...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1057",
+"how": "code comment"
+},
+"ISAC_PDCCH_RBOFFSET_FIX": {
+"desc": "nr_pdcch_rboffset_fix_enabled: ISAC_PDCCH_RBOFFSET_FIX=1 (default off) selects the TS 38.213 10.1 group positions in nr_pdcch_coreset_group_rbs(). Read once. Caller: nr_pdcch_ex...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c:240",
+"how": "code comment"
+},
+"ISAC_PDCCH_REPLAY_BENCH": {
+"desc": "DISCOVERYLAT is the separate whole-occasion acceptance measurement.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:5359",
+"how": "code comment"
+},
+"ISAC_PDCCH_REPLAY_INPUT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc:5256",
+"how": null
+},
+"ISAC_PDCCH_SCAN_EVERY_SLOT": {
+"desc": "ISAC_PDCCH_SCAN_EVERY_SLOT=1 (offline replay / diagnostic, default off): treat every slot as an occasion. The blind CSI-RS search runs once per occasion, so without this it only...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4821",
+"how": "code comment"
+},
+"ISAC_PDCCH_SCAN_TIMING": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:662",
+"how": null
+},
+"ISAC_PDCCH_SHARED_DMRS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:645",
+"how": null
+},
+"ISAC_PDCCH_SHARED_DMRS_MIN": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:646",
+"how": null
+},
+"ISAC_PDCCH_SHARED_PRESCREEN": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6421",
+"how": null
+},
+"ISAC_PDCCH_SHARED_PRESCREEN_AUDIT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:632",
+"how": null
+},
+"ISAC_PDCCH_SHARED_PRESCREEN_MIN": {
+"desc": "replay (0.66 lost hundreds), so the safe default is fail-open.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:6436",
+"how": "code comment"
+},
+"ISAC_PDCCH_SIM_SPARSE": {
+"desc": "ISAC_PDCCH_SIM_SPARSE=N (test only): in dedicated passes (cfg->discovered_coreset) the received PDCCH OFDM symbol of every slot with abs_slot % N != 0 is replaced by Gaussian no...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1068",
+"how": "code comment"
+},
+"ISAC_PDCCH_TASK_CAP64": {
+"desc": "ISAC_PDCCH_TASK_CAP64=1: the legacy 128-task array truncates a 64-UE ladder after its first few candidates. Grow TLS storage only when the",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:7302",
+"how": "code comment"
+},
+"ISAC_PDCCH_TIMING": {
+"desc": "RT-THREAD COST BREAKDOWN (ISAC_PDCCH_TIMING=1, default OFF) ------------------------------ PASSIVE_RX_ONLY_HANDOVER.md section 14 measures the SYMPTOM of running this tap on the...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:737",
+"how": "code comment"
+},
+"ISAC_PDCCH_ULDCIGT": {
+"desc": "ULDCIGT (ISAC_PDCCH_ULDCIGT=1): the reconciliation instrument, and the reason this commit exists before any extraction does. The 0_1 field WIDTHS on this deployment are not pinned",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8766",
+"how": "code comment"
+},
+"ISAC_PDCCH_USS_CORE": {
+"desc": "> ISAC_SCAN_ANT=1 ISAC_UE_RT_CORE=5 ISAC_PDCCH_USS_CORE=7 ISAC_CSIRS_BLIND=1 ISAC_CSIRS_BLIND_IDSWEEP=1 nr-uesoftmodem",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:250",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDCCH_USS_HASH": {
+"desc": "USS HASH FILTER (ISAC_PDCCH_USS_HASH=1, T26b) --------------------------------------------------------------- TS 38.213 10.1: a C-RNTI's USS candidates in CORESET p, slot n, AL ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:3343",
+"how": "code comment"
+},
+"ISAC_PDCCH_USS_TRACKER": {
+"desc": "tracker_init: one-time setup (pthread_once): reads ISAC_PDCCH_USS_TRACKER (on by default), builds the table of allowed USS hash positions per CORESET size and starts the tracker...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c:309",
+"how": "code comment"
+},
+"ISAC_PDSCHQ_PROBE_LAST": {
+"desc": "ISAC_PDSCHQ_PROBE_LAST: probes refused/evicted (also in dropped_full) */ probe_last_enabled: returns ISAC_PDSCHQ_PROBE_LAST (cached): when on, under overload layout probes are e...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2613",
+"how": "code comment"
+},
+"ISAC_PDSCHQ_REAL_FIRST": {
+"desc": "ISAC_PDSCHQ_REAL_FIRST=1 (GPUSCHED, default off): full decodes before older solver probes, see nr_pdsch_real_first.h.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1228",
+"how": "code comment"
+},
+"ISAC_PDSCHQ_SIGNAL_TIME": {
+"desc": "ISAC_PDSCHQ_SIGNAL_TIME=1 (T26c, REPLAY ONLY): an offline replay runs at a fraction of real time, so the decode pool looks ~1/f times faster than live. After each dequeued group...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1260",
+"how": "code comment"
+},
+"ISAC_PDSCH_ANT_GATE": {
+"desc": "PDSCH BRANCH-QUALITY GATE (ISAC_PDSCH_ANT_GATE=1, default OFF) -------------------------- 2026-09-23, ADDED BUT NOT LIVE-VALIDATED (no hardware available overnight to A/B it). M...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4231",
+"how": "code comment"
+},
+"ISAC_PDSCH_CORES": {
+"desc": "ISAC_PDSCH_CORES=\"6,7,8,9,15,16\" (T26c): explicit, non-contiguous consumer cores (GB10 big cores are 5-9,15-19)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:2482",
+"how": "code comment"
+},
+"ISAC_PDSCH_CPU_SMALL": {
+"desc": "BATCHCPU | ISAC_PDSCH_CPU_SMALL | harmful or neutral (CPU body of 16-64 PRB grant 1.8-3.7 ms vs GPU 0.4-1.0 ms); routes 0.1-3 % to CPU in v2",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.c:26",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDSCH_CPU_SMALL_NL": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.c:28",
+"how": null
+},
+"ISAC_PDSCH_CSI_EXTENT_AB": {
+"desc": "Default path: passive_decode_qamab() -> passive_decode_retry() -> passive_decode_body(). With ISAC_PDSCH_CSI_EXTENT_AB=1 (diagnostic) and a DCI 1_1 C-RNTI grant",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5358",
+"how": "code comment"
+},
+"ISAC_PDSCH_CSI_POPULATION_RETRY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5761",
+"how": null
+},
+"ISAC_PDSCH_CSI_RB_EXTENT": {
+"desc": "LOW-MCS FIX ISAC_PDSCH_CSI_RB_EXTENT=1 (default off = the bitmap above applied to EVERY allocated RB). TS 38.211 7.4.1.5.3: a CSI-RS resource occupies only the RBs of its CSI-Fr...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:248",
+"how": "code comment"
+},
+"ISAC_PDSCH_CSI_RETRY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5749",
+"how": null
+},
+"ISAC_PDSCH_DECODE_DIAG": {
+"desc": "pdcch_occ_diag: WIDE-S0 diagnostic (ISAC_PDSCH_PDCCH_OCC_DIAG=1, default off; needs ISAC_PDSCH_DECODE_DIAG=1 ISAC_PDSCH_EVM_RB=1).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:2096",
+"how": "code comment"
+},
+"ISAC_PDSCH_DMRS_CDM_RETRY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5753",
+"how": null
+},
+"ISAC_PDSCH_DMRS_ID_CONTRAST": {
+"desc": "SOLVERCOVER ISAC_PDSCH_DMRS_ID_CONTRAST=1: cell-wide base rate of every identity, over the distinct voted slots. A slot",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c:271",
+"how": "code comment"
+},
+"ISAC_PDSCH_DMRS_ID_PER_CORESET": {
+"desc": "T26c ISAC_PDSCH_DMRS_ID_PER_CORESET: one blind DM-RS identity estimator per discovered CORESET population",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:608",
+"how": "code comment"
+},
+"ISAC_PDSCH_DMRS_ID_REFRESH": {
+"desc": "coreset_dmrs_refresh: returns ISAC_PDSCH_DMRS_ID_REFRESH (cached per thread, default 0): how often the per-CORESET DM-RS identity is re-estimated.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:596",
+"how": "code comment"
+},
+"ISAC_PDSCH_DMRS_ID_SCAN": {
+"desc": "TIM-PDSCH: ISAC_PDSCH_DMRS_ID_SCAN (nr_pdsch_passive_queue.c runs the scan; here: per-RNTI hypotheses + reading filter)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:122",
+"how": "code comment"
+},
+"ISAC_PDSCH_DMRS_SCAN_ASYNC": {
+"desc": "ISAC_PDSCH_DMRS_SCAN_ASYNC=1 (default off, DECQUEUE): a full scan costs ~65 ms and ran inline on a PDSCH consumer, i.e. one of the",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:447",
+"how": "code comment"
+},
+"ISAC_PDSCH_EVM": {
+"desc": "EQDIAG: post-equalisation EVM (ISAC_PDSCH_EVM=1, default off) -------------------------- PASSIVE_RX_ONLY_HANDOVER.md \u00a713 names this as \"the measurement to take next, and why it ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4500",
+"how": "code comment"
+},
+"ISAC_PDSCH_EVM_GRANT": {
+"desc": "ISAC_PDSCH_EVM_GRANT (T26c): arm the per-grant EVM accumulator for the CPU demod loop below",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4362",
+"how": "code comment"
+},
+"ISAC_PDSCH_EVM_PROBES": {
+"desc": "ISAC_PDSCH_EVM_PROBES=1 (diagnostic): layout probes are measured too",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1885",
+"how": "code comment"
+},
+"ISAC_PDSCH_EVM_RB": {
+"desc": "pdcch_occ_diag: WIDE-S0 diagnostic (ISAC_PDSCH_PDCCH_OCC_DIAG=1, default off; needs ISAC_PDSCH_DECODE_DIAG=1 ISAC_PDSCH_EVM_RB=1).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5110",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU": {
+"desc": "ISAC_PDSCH_GPU=1 (NR_GPU_FEP remains a legacy alias), so a build without CUDA -- or a run without either knob -- is the CPU path exactly as",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.h:95",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_BATCH": {
+"desc": "BATCHCPU | ISAC_PDSCH_GPU_BATCH=1 (admission gate, not batching) | possible tail reduction on b, not significant (n=3); not used | [MEASURED, DGX replay]",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.c:30",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDSCH_GPU_BATCH_ASYNC": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:791",
+"how": null
+},
+"ISAC_PDSCH_GPU_BATCH_SLOTS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.c:31",
+"how": null
+},
+"ISAC_PDSCH_GPU_CHEST_TRIM": {
+"desc": "DECTAIL: ISAC_PDSCH_GPU_CHEST_TRIM=1, k_fir computes only k < 12 nb_rb + 16 and zero-fills the rest",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:1325",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_CSI_DISJOINT": {
+"desc": "How it works: Returns true when there is no rate matching. Otherwise requires ISAC_PDSCH_GPU_CSI_DISJOINT == \"1\", valid CSI-RS rows (1..18) and valid symbol geometry, and that n...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c:63",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_CTX_LIMIT": {
+"desc": "GPUALLOC ISAC_PDSCH_GPU_CTX_LIMIT=N (default off): PDSCH FEP/demod/LDPC pool contexts handed out are limited to the first N (>= 1), so at most N consumers have GPU work in fligh...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_gpu_green.h:117",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_DUMP": {
+"desc": "How it works: Lock-protected. Reads ISAC_PDSCH_GPU_DUMP (path), ISAC_PDSCH_GPU_DUMP_MAX (default 128 records) and ISAC_PDSCH_GPU_DUMP_FULL == 1 (skip layout probes). Skips error...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c:106",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_DUMP_FULL": {
+"desc": "How it works: Lock-protected. Reads ISAC_PDSCH_GPU_DUMP (path), ISAC_PDSCH_GPU_DUMP_MAX (default 128 records) and ISAC_PDSCH_GPU_DUMP_FULL == 1 (skip layout probes). Skips error...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c:109",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_DUMP_MAX": {
+"desc": "How it works: Lock-protected. Reads ISAC_PDSCH_GPU_DUMP (path), ISAC_PDSCH_GPU_DUMP_MAX (default 128 records) and ISAC_PDSCH_GPU_DUMP_FULL == 1 (skip layout probes). Skips error...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c:107",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_CHECK": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:98",
+"how": null
+},
+"ISAC_PDSCH_GPU_EXACT_CHEST": {
+"desc": "GPU-DEMOD stage 2: ISAC_PDSCH_GPU_EXACT_CHEST=1 (default off) ---------------------------------------------- The passive decoder's per-(DM-RS symbol, layer) nr_pdsch_channel_est...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:2017",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_CHEST_CHECK": {
+"desc": "runs the CPU estimator. ISAC_PDSCH_GPU_EXACT_CHEST_CHECK=1 re-runs the CPU estimator on every grant (N: every N-th), compares every estimate row and noise value, and disables th...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:2017",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DEADLINE_US": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:787",
+"how": null
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD": {
+"desc": "GPU-DEMOD host side: ISAC_PDSCH_GPU_EXACT_DEMOD=1 (default off) runs nr_rx_pdsch()'s demodulation of a whole passive PDSCH grant on the GPU (libpdsch_gpu.so, nr_pdsch_gpu_demod....",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:74",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK": {
+"desc": "ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK=1 runs the CPU loop on every grant as well (N > 1: every N-th grant), compares every output (log2_maxh, dl_valid_re, LLRs, rxdataF_comp, mags, b...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:93",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD_EVM": {
+"desc": "1: GPU float, 2: GPU double, 0: CPU copy (exact, slow)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:591",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_DEFER": {
+"desc": "t26r = t26q + ISAC_PUSCH_CORES=6 ISAC_PUSCH_PRIO=30 ISAC_PDSCH_DMRS_SCAN_ASYNC=1 ISAC_DMRS_SCAN_CORE=2 ISAC_PDTIM_PCT=1 ISAC_UL_LOCK_CRC_GUARD=1 ISAC_PDSCH_GPU_EXACT_DEMOD_NL34=...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:88",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34": {
+"desc": "GPUFUSE: ISAC_PDSCH_GPU_EXACT_DEMOD_EVM_NL34=1 (default off): GPU EVM for Nl = 3, 4 too (else the CPU copy)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:594",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD_NL34": {
+"desc": "DECGPU: 3 and 4 layers (mode 2, and the stock MMSE)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:331",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD_PROF": {
+"desc": "ISAC_PDSCH_GPU_EXACT_DEMOD_PROF=1: per-kernel GPU time */ pinned host copy, filled by one DMA at the end",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu:1287",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DEMOD_SHAPES": {
+"desc": "GPUFUSE diagnostic ISAC_PDSCH_GPU_EXACT_DEMOD_SHAPES=1 (default off): per (Nl, Qm, RB class) count, wall and GPU ns",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.c:800",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_DIRECT": {
+"desc": "coherent shared-memory platform (GB10: pageable access through the host page tables).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu:784",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_FEP": {
+"desc": "nr_pdsch_gpu_exact_warmup: one-time setup of the bit-exact GPU FEP: enables it only when ISAC_PDSCH_GPU_EXACT_FEP == 1 and the cell matches.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:68",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_LDPC": {
+"desc": "DECGPU exact LDPC, host side: ISAC_PDSCH_GPU_EXACT_LDPC=1 (default off) decodes a passive PDSCH TB with the GPU port of",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c:44",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_EXACT_LDPC_CHECK": {
+"desc": "ISAC_PDSCH_GPU_EXACT_LDPC_CHECK=N (N >= 1): every N-th TB is also decoded by the CPU, which gives the result used; every code block's success flag and bytes are compared and the...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc_host.c:59",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_HOST_PIN": {
+"desc": "DECODETIME ISAC_PDSCH_GPU_HOST_PIN=1 (default off): the GPU kernels read and write pageable host buffers (chest scratch,",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_exact.c:303",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_LDPC": {
+"desc": "How it works: Initialises the config module if needed. ISAC_PDSCH_GPU_LDPC (non-zero) selects version \"_cuda\" when version is NULL. Loads via load_module_version_shlib, copies t...",
+"src": "openair1/PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface_load.c:34",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_PRIO": {
+"desc": "GPUSCHED ISAC_PDSCH_GPU_PRIO=1 (default off; off = streams and launches exactly as before). Every context of the PDSCH FEP/chest, demodulation and LDPC pools gets a low-priority...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_prio.cuh:21",
+"how": "code comment"
+},
+"ISAC_PDSCH_GPU_STAGE_DUMP": {
+"desc": "How it works: Staging is enabled only when ISAC_PDSCH_GPU_STAGE_DUMP == 1 and ISAC_PDSCH_INLINE_POOL == 1 (read once). A new epoch clears the stage table.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c:27",
+"how": "code comment"
+},
+"ISAC_PDSCH_HARQ_COMBINE": {
+"desc": "harq_combine_on: returns ISAC_PDSCH_HARQ_COMBINE (cached): 1 enables passive HARQ soft combining on its own flag. With it on, a retransmission is LDPC-decoded into the stored so...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:134",
+"how": "code comment"
+},
+"ISAC_PDSCH_INLINE_POOL": {
+"desc": "How it works: Staging is enabled only when ISAC_PDSCH_GPU_STAGE_DUMP == 1 and ISAC_PDSCH_INLINE_POOL == 1 (read once). A new epoch clears the stage table.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1249",
+"how": "code comment"
+},
+"ISAC_PDSCH_K0_PROBE": {
+"desc": "the rest of the slot group. ISAC_PDSCH_K0_PROBE=0 disables it (read once). ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs + up to K slots of waiting each).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1600",
+"how": "code comment"
+},
+"ISAC_PDSCH_LLR_DUMP": {
+"desc": "ISAC_PDSCH_LLR_DUMP=<path> (DIAGNOSTIC, default off; T26): append each dedicated C-RNTI grant's demodulated LLRs for offline scrambling/coding analysis. Record \"PDL1\", int32 rnt...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4681",
+"how": "code comment"
+},
+"ISAC_PDSCH_LLR_DUMP_ALL": {
+"desc": "ISAC_PDSCH_LLR_DUMP_ALL=1: every RNTI class (SI grants validate the offline harness) */ ISAC_PDSCH_LLR_DUMP_FULL=1: exclude partial CB0 probes",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4673",
+"how": "code comment"
+},
+"ISAC_PDSCH_LLR_DUMP_FULL": {
+"desc": "ISAC_PDSCH_LLR_DUMP_FULL=1: exclude partial CB0 probes",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4672",
+"how": "code comment"
+},
+"ISAC_PDSCH_LLR_DUMP_MAX": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4681",
+"how": null
+},
+"ISAC_PDSCH_MMSE2_GAIN": {
+"desc": "LLRZERO ISAC_PDSCH_MMSE2_GAIN=N (default 0 = off): w and z are rounded to int16 in |h|^2 >> shift units, which sit at a few LSB",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:870",
+"how": "code comment"
+},
+"ISAC_PDSCH_MMSE2_NL34_QPSK": {
+"desc": "HIGHMCS ISAC_PDSCH_MMSE2_NL34_QPSK=1 (default off): keep the float ZF (mode 2) for QPSK at 3-4 layers too. The stock fixed-point adjugate path disagrees with the float solution ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1359",
+"how": "code comment"
+},
+"ISAC_PDSCH_MMSE_AB": {
+"desc": "QAM-FIX ISAC_PDSCH_MMSE_AB=<modes> (diagnostic, default off), e.g. \"1,2\": on every full dedicated decode with >= 2 layers and Qm > 2, first decode the SAME samples with each lis...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5440",
+"how": "code comment"
+},
+"ISAC_PDSCH_MMSE_AB_QPSK": {
+"desc": "ISAC_PDSCH_MMSE_AB_QPSK=1: also pair the QPSK grants (regression check)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5452",
+"how": "code comment"
+},
+"ISAC_PDSCH_MMSE_MODE": {
+"desc": "QAM-FIX: per-decode ISAC_PDSCH_MMSE_MODE (-1 = env), set by the passive decode A/B */ ISAC_PDSCH_EVM_GRANT, see nr_pdsch_evm_acc.h",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_record.c:158",
+"how": "code comment"
+},
+"ISAC_PDSCH_OWN_PDCCH_DB": {
+"desc": "finds the PRBs of the allocation whose symbol 0 is worse than symbols 1/3 by more than ISAC_PDSCH_OWN_PDCCH_DB (default 4 dB): these carry the",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5532",
+"how": "code comment"
+},
+"ISAC_PDSCH_OWN_PDCCH_RM": {
+"desc": "DECODE-RES ISAC_PDSCH_OWN_PDCCH_RM: TS 38.214 5.1.4.1 -- the PDSCH is not mapped to the REs of the PDCCH that scheduled it. A grant with S=0",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4373",
+"how": "code comment"
+},
+"ISAC_PDSCH_PDCCH_OCC_DIAG": {
+"desc": "pdcch_occ_diag: WIDE-S0 diagnostic (ISAC_PDSCH_PDCCH_OCC_DIAG=1, default off; needs ISAC_PDSCH_DECODE_DIAG=1 ISAC_PDSCH_EVM_RB=1).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2264",
+"how": "code comment"
+},
+"ISAC_PDSCH_PDCCH_OCC_IDS": {
+"desc": "(subcarriers 1, 5, 9; TS 38.211 7.4.1.3) with the PDCCH DM-RS sequence of each nID in ISAC_PDSCH_PDCCH_OCC_IDS (comma list; the PCI",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2258",
+"how": "code comment"
+},
+"ISAC_PDSCH_PDCCH_RM": {
+"desc": "pdcch_rm_mode: ISAC_PDSCH_PDCCH_RM (WIDE-S0, default 0 = off): 1 = every decode excludes the scheduling PDCCH's REs (grant->pdcch_*) on the",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5609",
+"how": "code comment"
+},
+"ISAC_PDSCH_PROBE_C1": {
+"desc": "replay: probes whose dumped LLRs decode offline at LDPC iteration 1 reported CRC fail. ISAC_PDSCH_PROBE_C1=1 (implied by ISAC_PDSCH_SOLVER=1) records it, same all-zero guard, st...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1950",
+"how": "code comment"
+},
+"ISAC_PDSCH_READING_RV": {
+"desc": "ISAC_PDSCH_READING_RV=1 (TIMMCS0, default off): readings also differ by rv/NDI/HARQ pid. Without it a solved layout's MCS-0 grant took the rv of whichever layout parsed first (r...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9764",
+"how": "code comment"
+},
+"ISAC_PDSCH_REP_FIELDS": {
+"desc": "ISAC_PDSCH_REP_FIELDS=1 (TIMRM, default off): a solved RNTI's grant is decoded with the NDI / rv / HARQ pid its representative layout",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9786",
+"how": "code comment"
+},
+"ISAC_PDSCH_RESET_BENCH": {
+"desc": "Opt-in benchmark of the real shared-bank reset, outside an OTA run.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc:1268",
+"how": "code comment"
+},
+"ISAC_PDSCH_RETRY_NORESTORE": {
+"desc": "ISAC_PDSCH_RETRY_PREDICT=1 / ISAC_PDSCH_RETRY_NORESTORE=1 (default off, DECQUEUE): see nr_pdsch_retry_pred.h; and skip the final re-decode",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5695",
+"how": "code comment"
+},
+"ISAC_PDSCH_RETRY_PREDICT": {
+"desc": "ISAC_PDSCH_RETRY_PREDICT=1 / ISAC_PDSCH_RETRY_NORESTORE=1 (default off, DECQUEUE): see nr_pdsch_retry_pred.h; and skip the final re-decode",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5694",
+"how": "code comment"
+},
+"ISAC_PDSCH_RM_GENIE": {
+"desc": "TIMRM diagnostic (ISAC_PDSCH_RM_GENIE): hand the payload bits to the grant so RMDCI can print them; off = untouched",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_rm_genie.c:25",
+"how": "code comment"
+},
+"ISAC_PDSCH_RM_GENIE_MAX": {
+"desc": "ISAC_PDSCH_RM_GENIE_MAX: RMMAP line budget (default 400; HIGHMCS replays use 20000).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_rm_genie.c:38",
+"how": "code comment"
+},
+"ISAC_PDSCH_SLOT_TIMING": {
+"desc": "DECODETIME: ISAC_PDSCH_GPU_HOST_PIN=1 only",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1246",
+"how": "code comment"
+},
+"ISAC_PDSCH_SNR_GATE": {
+"desc": "Flags: ISAC_PDSCH_SOLVER_PROBE_RATE/BURST/FILL, ISAC_PDSCH_SNR_GATE (+_DB). v == NULL returns the number of probes available now (-1 = unlimited).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1550",
+"how": "code comment"
+},
+"ISAC_PDSCH_SNR_GATE_DB": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1552",
+"how": null
+},
+"ISAC_PDSCH_SOLVER": {
+"desc": "Gated by ISAC_PDSCH_SOLVER (returns 0 when off); logs per-RNTI statistics every 500/1000 grants. Takes g_mu itself. csirs_slot: solved RNTIs with unknown CSI-RS rate matching pr...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:159",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_BACKOFF": {
+"desc": "search_backoff: ISAC_PDSCH_SOLVER_BACKOFF=N: an RNTI with no candidate and at least N probes spent is searched on 1 grant in 8 only.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:881",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_BUDGET": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9812",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_COVERAGE": {
+"desc": "plan_coverage: ISAC_PDSCH_SOLVER_COVERAGE=1 planner: fills the grant's budget with the least-tried physical hypotheses across readings.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:1320",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_DIAG": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9818",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_DMRS_DOMAIN": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9725",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_DMRS_PRIO": {
+"desc": "dmrs_prio_on: TIMSOLVE2 ISAC_PDSCH_SOLVER_DMRS_PRIO=1 (default off), see its use in the solver planning block.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:133",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_FAIR": {
+"desc": "probe_hog: ISAC_PDSCH_SOLVER_FAIR=1 gate: true when this unsolved RNTI already spent more than twice the mean probe count of",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:809",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_FAIRSHARE": {
+"desc": "SOLVERCOVER ISAC_PDSCH_SOLVER_FAIRSHARE: this RNTI's share of the probe rate, in probes */ time of the last accrual (0 = never: cold start gets a full budget)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:356",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_LAYOUT_RECOVER": {
+"desc": "Reads ISAC_PDSCH_SOLVER_LAYOUT_RECOVER (threshold, 0 = off) on first use; sets layouts_reopened and logs the event. Caller: nr_pdcch_blind_monitor_rt.c (layout pruning). Takes g...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:326",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_LEADER": {
+"desc": "T26d ISAC_PDSCH_SOLVER_LEADER=1: until some RNTI of this CORESET solved, only its busiest unsolved RNTI searches -- spreading the probe budget over ~15 RNTIs left whole runs wit...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:825",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_MAX_LIVE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9711",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_NL_PREF": {
+"desc": "nl_pref_gap: returns ISAC_PDSCH_SOLVER_NL_PREF (cached), the grant gap after which the one-layer-QPSK preference is dropped; 0 = off.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:858",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_PREF": {
+"desc": "T26d ISAC_PDSCH_SOLVER_PREF: grants since the last search-preferred grant */ SOLVERCOVER diagnostics (see NR_PDSCH_SOLVER_WHY_*)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:843",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_PREF_MCS": {
+"desc": "MCS <= ISAC_PDSCH_SOLVER_PREF_MCS (default 4) always searches; others are skipped until N grants have passed (pref_gap counter).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:844",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_PRIOR_CRC": {
+"desc": "prior_crc_on: TIMBIMODAL ISAC_PDSCH_SOLVER_PRIOR_CRC=1 (default off): an RNTI's solution seeds the other RNTIs (cell prior,",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:365",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_PRIOR_IDS": {
+"desc": "TIMSOLVE2 ISAC_PDSCH_SOLVER_PRIOR_IDS=1 (default off): reuse the CRC-proven solutions' layout dimensions (reading, S map,",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:510",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_PROBELOG": {
+"desc": "ISAC_PDSCH_SOLVER_PROBELOG=1 logs each credited probe. Called by nr_pdsch_passive_queue.c after each decode. Takes g_mu.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1909",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_PROBE_BURST": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1546",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_PROBE_FILL": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1548",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_PROBE_RATE": {
+"desc": "wall vs 1.6 ms CPU); ISAC_PDSCH_INLINE_POOL=1 + bounded solver probes (ISAC_PDSCH_SOLVER_PROBE_RATE), probe-last",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1544",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PDSCH_SOLVER_REUSE": {
+"desc": "2. the cell prior (another RNTI's solution), first. ISAC_PDSCH_SOLVER_REUSE=1: the CURRENT solution of the best solved RNTI (most full TB CRC passes; layouts refined, S map and ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:1238",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_SCR": {
+"desc": "Enabled only with ISAC_PDSCH_SOLVER_SCR=1; otherwise it just records the CORESET key and the decided flag. Writes the plan context (per-thread or global, see plan_ctx). Caller: ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:610",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_SCR_CLEAN": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9853",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_SCR_CSIRS": {
+"desc": "ISAC_PDSCH_SOLVER_SCR_CSIRS=1 (T26c): scrambling ids of the run-time discovered NZP CSI-RS (a TRS/CSI-RS scramblingID is typically the transmitting cell's PCI -- neighbour-cell ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9879",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_SCR_EXPLICIT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:9982",
+"how": null
+},
+"ISAC_PDSCH_SOLVER_SIGNIF": {
+"desc": "TIMSOLVE2 ISAC_PDSCH_SOLVER_SIGNIF: credited search probes while unsolved, by CRC length */ consistent CRC passes of the current candidate, by CRC length",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:466",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_THREAD_CTX": {
+"desc": "ISAC_PDSCH_SOLVER_THREAD_CTX: per scan consumer */ solver_thread_ctx_enabled: returns ISAC_PDSCH_SOLVER_THREAD_CTX (cached on first call, atomic): 1 = per-thread plan context in...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:121",
+"how": "code comment"
+},
+"ISAC_PDSCH_SOLVER_WHY": {
+"desc": "only ISAC_PDSCH_SOLVER_WHY=1 lets a never-planned RNTI take a table entry (flag off = unchanged)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:553",
+"how": "code comment"
+},
+"ISAC_PDSCH_STATIC_CSI_RETRY": {
+"desc": "grant's S and, when legal, the toggled S; the first CRC pass is kept. Logs STATICCSI.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5492",
+"how": "code comment"
+},
+"ISAC_PDSCH_TBPARM": {
+"desc": "SEGDIAG (ISAC_PDSCH_TBPARM=1): the full rate-matching / segmentation parameter set, on ONE line, so an MCS that fails deterministically can be diffed against one that succeeds w...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1842",
+"how": "code comment"
+},
+"ISAC_PDSCH_TDRA_RETRY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5697",
+"how": null
+},
+"ISAC_PDSCH_TINTERP_RETRY": {
+"desc": "DECODE-RES: also try the flipped channel-estimate time interpolation",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5741",
+"how": "code comment"
+},
+"ISAC_PDSCH_TINT_AB": {
+"desc": "passive_decode_tintab: ISAC_PDSCH_TINT_AB=1 (diagnostic, default off). On every full dedicated DCI 1_1 C-RNTI decode first runs a quiet decode of",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5397",
+"how": "code comment"
+},
+"ISAC_PDSCH_TYPEB": {
+"desc": "below, hooked from nr_pdsch_config_sweep_observe(). ISAC_PDSCH_TYPEB=0 (pdsch_typeb_enabled()) still hard-disables it there, so the env knob keeps its old meaning as a kill switch.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:186",
+"how": "code comment"
+},
+"ISAC_PDSCH_WIDE_MRC_RETRY": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:5757",
+"how": null
+},
+"ISAC_PDTIM_CLASS": {
+"desc": "ISAC_PDTIM_CLASS=1 (GPUSCHED, default off; needs ISAC_PDTIM_PCT): the per-body sum split by class -- real = first body of",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:391",
+"how": "code comment"
+},
+"ISAC_PDTIM_PCT": {
+"desc": "ISAC_PDTIM_PCT=1 (DECGPU, default off; needs ISAC_PDCCH_TIMING): 10-us histograms per stage and of the per-decode sum fep+chest+demod+ldpc, printed as PDTIMPCT p50/p90/p99 next ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:146",
+"how": "code comment"
+},
+"ISAC_PHY_DIAG": {
+"desc": null,
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1056",
+"how": null
+},
+"ISAC_POINTA_SWEEP": {
+"desc": "ISAC_POINTA_SWEEP: blind CRB-0 for cells without a SIB1 carrier ([IMPLEMENTED, NOT VALIDATED]; default off; BLINDPIPE section 3)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.c:204",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PRACH_MARGIN_DB10": {
+"desc": "ISAC_PRACH_MARGIN_DB10 is the PRACH detector's dB\u00d710 floor margin override",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c:118",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_PRG_SWEEP": {
+"desc": "nr_arm_sweep_gated_t. ISAC_PRG_SWEEP=0 disables the sweep entirely (always arm 0, no bookkeeping).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:658",
+"how": "code comment"
+},
+"ISAC_PROBE_ALL": {
+"desc": "ISAC_PROBE_ALL=1: every job is a first-code-block probe, pinned confs included -- isolates the probe mechanics from the layout search.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1454",
+"how": "code comment"
+},
+"ISAC_PROBE_HORIZON": {
+"desc": "_Atomic (N consumers). ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2846",
+"how": "code comment"
+},
+"ISAC_PSS_ACC": {
+"desc": "ISAC_PSS_ACC=K (needs ISAC_PSS_DECIM): non-coherent fold of the decimated profile over captures on the absolute 20 ms grid, acc = acc*(1-1/K) + new; SSS/PBCH CRC still decide on...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/pss_nr.c:192",
+"how": "code comment"
+},
+"ISAC_PSS_DECIM": {
+"desc": "ISAC_PSS_DECIM=1 (default off): decimated float PSS search for the initial-sync full search (see nr_pss_decim.h: ~60x less work than the 4096-tap int16 search and no dot_product...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/pss_nr.c:351",
+"how": "code comment"
+},
+"ISAC_PSS_PEAK_RATIO": {
+"desc": "ISAC_PSS_PEAK_RATIO (default 5 = 7 dB): lowering it passes weaker PSS candidates to SSS and the PBCH CRC24, which decide anyway",
+"src": "openair1/PHY/NR_UE_TRANSPORT/pss_nr.c:216",
+"how": "code comment"
+},
+"ISAC_PTRS_K": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2494",
+"how": null
+},
+"ISAC_PTRS_L": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:2494",
+"how": null
+},
+"ISAC_PUSCH_CORES": {
+"desc": "ISAC_PUSCH_CORES=\"17,18\" / ISAC_PUSCH_PRIO=<0..49> (default off): the UL trial decodes (ISAC_UL_LOCK_CRC_FIRST) ran unpinned at",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:521",
+"how": "code comment"
+},
+"ISAC_PUSCH_DIAG": {
+"desc": "TWO PROBES THAT SEPARATE THE TWO WAYS A DECODE CAN FAIL (ISAC_PUSCH_DIAG=1)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:254",
+"how": "code comment"
+},
+"ISAC_PUSCH_MMSE_MODE": {
+"desc": "ISAC_PUSCH_MMSE_MODE (default 0 = stock): 2 = unbiased 2-layer ZF with per-layer thresholds for the 2-layer QAM path that uses nr_mmse_2layers() (Qm > 6; Qm <= 6 keeps the max-l...",
+"src": "openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c:279",
+"how": "code comment"
+},
+"ISAC_PUSCH_PRIO": {
+"desc": "ISAC_PUSCH_CORES=\"17,18\" / ISAC_PUSCH_PRIO=<0..49> (default off): the UL trial decodes (ISAC_UL_LOCK_CRC_FIRST) ran unpinned at",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:522",
+"how": "code comment"
+},
+"ISAC_PUSCH_TIMING": {
+"desc": "UL RT-THREAD COST BREAKDOWN (ISAC_PUSCH_TIMING=1, default OFF) --------------------------- The downlink has BTIM (nr_pdcch_blind_monitor_rt.c) and it is what turned \"move the PD...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:262",
+"how": "code comment"
+},
+"ISAC_QM_ORACLE": {
+"desc": "Parameters: pdcch_blind_monitor_pdsch, pdcch_blind_monitor_ul_*, ISAC_RX_MRC_MODE, ISAC_CHEST_TINTERP, ISAC_SFO_CORRECT, ISAC_QM_ORACLE (on), ISAC_PDSCH_TYPEB (on), ISAC_PDSCH_K...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:3004",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_RAW_IQ_CENTER": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:156",
+"how": null
+},
+"ISAC_RAW_IQ_CHANNELS": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:151",
+"how": null
+},
+"ISAC_RAW_IQ_DECIM": {
+"desc": "ISAC_RAW_IQ_DECIM=D (default 1, replay only): serve a recording made at rate D*fs at rate fs (windowed-sinc LPF + decimate),",
+"src": "radio/COMMON/raw_iq.c:163",
+"how": "code comment"
+},
+"ISAC_RAW_IQ_DIRECTORY": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:154",
+"how": null
+},
+"ISAC_RAW_IQ_FIRST_TICK": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:155",
+"how": null
+},
+"ISAC_RAW_IQ_GAP2_AT_S": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:187",
+"how": null
+},
+"ISAC_RAW_IQ_GAP2_S": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:187",
+"how": null
+},
+"ISAC_RAW_IQ_GAP_AT_S": {
+"desc": "the recording, seconds skipped). Replay-only; there is no live-radio equivalent.",
+"src": "radio/COMMON/raw_iq.c:181",
+"how": "code comment"
+},
+"ISAC_RAW_IQ_GAP_S": {
+"desc": "ISAC_RAW_IQ_GAP_AT_S / ISAC_RAW_IQ_GAP_S: inject one stream discontinuity (seconds into the recording, seconds skipped). Replay-only; there is no live-radio equivalent.",
+"src": "radio/COMMON/raw_iq.c:181",
+"how": "code comment"
+},
+"ISAC_RAW_IQ_RATE": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:156",
+"how": null
+},
+"ISAC_RAW_IQ_SAMPLES": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:155",
+"how": null
+},
+"ISAC_RAW_IQ_SHIFT": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:152",
+"how": null
+},
+"ISAC_RAW_IQ_SPEED": {
+"desc": null,
+"src": "radio/COMMON/raw_iq.c:159",
+"how": null
+},
+"ISAC_RECONF": {
+"desc": "[MEASURED, DGX rfsim 4 RX, n=2] 1/2 PASS; failed arm was drop_full only",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c:741",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_RECONF_DISCOVERY_DUTY": {
+"desc": "20",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:4694",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_RECONF_GAP_HARD_MS": {
+"desc": "10 ms",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:436",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_RECONF_N_SUSPECT": {
+"desc": "200 occasions",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c:238",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_RECONF_SIB1_MAX_OCCASIONS": {
+"desc": "8",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.c:66",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_RECONF_SI_BUMP_WITHOUT_SIB1": {
+"desc": "1",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:100",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_RECONF_SI_GRACE_MS": {
+"desc": "5000 ms",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:98",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_RF_FAIL_AFTER_READS": {
+"desc": "acceptance test. It uses the same fatal-read path as a driver failure.",
+"src": "executables/nr-ue-ru.c:378",
+"how": "code comment"
+},
+"ISAC_RF_STALL_MAX_REINIT": {
+"desc": "went from active_s=8 (run dies at the stall) to 50-66 s. Set 0 to restore exit-on",
+"src": "executables/nr-ue.c:2331",
+"how": "code comment"
+},
+"ISAC_RF_STALL_WATCHDOG": {
+"desc": null,
+"src": "executables/nr-ue.c:2057",
+"how": null
+},
+"ISAC_RV_RETRY": {
+"desc": "ISAC_RV_RETRY=1 (default off): on a failed TB, re-run ONLY the LDPC stage with rv 2, 3, 1 on the same (already descrambled) LLRs. Tests the hypothesis that some grants are retra...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4863",
+"how": "code comment"
+},
+"ISAC_RX_BEST_BY_SNR": {
+"desc": "ISAC_RX_BEST_BY_SNR=1 (T26d): pick the branch with the best |h|^2 / chest noise, not the highest |h|^2 -- a noisy branch has a large |h|^2 estimate (noise included) and was bein...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1576",
+"how": "code comment"
+},
+"ISAC_RX_BRANCH": {
+"desc": "ISAC_RX_BRANCH=2 prints EVERY transport block, not 1 in 500. A 1-in-500 sample of best cannot distinguish \"branch 0 is always strongest\" from \"branch 0 is strongest one",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1665",
+"how": "code comment"
+},
+"ISAC_RX_BRANCH_FO": {
+"desc": "ISAC_RX_BRANCH_FO=1 additionally APPLIES the estimate (nr_ue_set_branch_fo_hz -> the per-branch de-rotation in nr_slot_fep_ant). Default is measure-and-log ONLY: correcting on t...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:1510",
+"how": "code comment"
+},
+"ISAC_RX_BRANCH_MIN_DB": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1313",
+"how": null
+},
+"ISAC_RX_CHAN_MAP": {
+"desc": "ISAC_RX_CHAN_MAP=\"2,3,0,1\": OAI antenna i takes UHD channel map[i]. A/B tool (2026-09-16): on the X410 the weak daughterboard-A antennas are UHD ch0/ch1 and the strong B ones ch...",
+"src": "radio/USRP/usrp_lib.cpp:2441",
+"how": "code comment"
+},
+"ISAC_RX_EQ_AB": {
+"desc": "ISAC_RX_EQ_AB=1 (T26d): multi-layer post-solve grants (needs ISAC_RX_MRC_PER_RNTI) rotate the equaliser {fixed MMSE, float MMSE, ML} (paired A/B); the search keeps the default",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1711",
+"how": "code comment"
+},
+"ISAC_RX_GAIN_TRIM": {
+"desc": "PER-BRANCH RX GAIN TRIM -- ISAC_RX_GAIN_TRIM=\"d0,d1,d2,d3\", dB ADDED to --ue-rxgain per channel.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_ue_rf_helpers.c:49",
+"how": "code comment"
+},
+"ISAC_RX_IRC": {
+"desc": "ISAC_RX_IRC=4, nr_irc_cov.h */ T26d ISAC_CHEST_OCC_AB, nr_pdsch_passive_decode.c",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1957",
+"how": "code comment"
+},
+"ISAC_RX_IRC_SHRINK": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1958",
+"how": null
+},
+"ISAC_RX_ML_2L": {
+"desc": "ISAC_RX_ML_2L=1 (T26d): joint ML LLRs for 2 layers (Qm <= 6) instead of MMSE; per grant via ISAC_RX_EQ_AB",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1337",
+"how": "code comment"
+},
+"ISAC_RX_MRC_ALIGN": {
+"desc": "ISAC_RX_MRC_ALIGN=1 (T26d): per-symbol phase alignment of the MRC branches. Each branch is equalised against its own DM-RS estimate, but on this rig the branches' phases drift D...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1905",
+"how": "code comment"
+},
+"ISAC_RX_MRC_MODE": {
+"desc": "unconditionally and has no equivalent of the DL path's ISAC_RX_MRC_MODE=0 escape hatch.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:128",
+"how": "code comment"
+},
+"ISAC_RX_MRC_PER_RNTI": {
+"desc": "T26d ISAC_RX_MRC_PER_RNTI: CRC per receiver {1 best branch, 3 MRC, 4 NW-MRC, 5 IRC} */ HIGHMCS ISAC_RX_MRC_PER_RNTI_SNR: post-eq SNR EMA per receiver",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:692",
+"how": "code comment"
+},
+"ISAC_RX_MRC_PER_RNTI_AB": {
+"desc": "comb_ab: returns ISAC_RX_MRC_PER_RNTI_AB (cached): 1 selects a fixed round robin over the receivers instead of exploitation.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:712",
+"how": "code comment"
+},
+"ISAC_RX_MRC_PER_RNTI_SNR": {
+"desc": "HIGHMCS ISAC_RX_MRC_PER_RNTI_SNR: post-eq SNR EMA per receiver */ T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_solver.c:725",
+"how": "code comment"
+},
+"ISAC_RX_MRC_SHIFT_SUM": {
+"desc": "MRCBUG ISAC_RX_MRC_SHIFT_SUM=1 (default off): headroom from the combined channel energy sum_live |h_a|^2 / max |h_a|^2, not from the live-branch COUNT. The 12 dB mask keeps 4 of...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1764",
+"how": "code comment"
+},
+"ISAC_RX_NVAR_FIX": {
+"desc": "nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3573",
+"how": "code comment"
+},
+"ISAC_RX_NVAR_PERBRANCH": {
+"desc": "mode 1/2/3, or for a single-antenna receiver. ISAC_RX_NVAR_PERBRANCH=0 disables it.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3593",
+"how": "code comment"
+},
+"ISAC_RX_QAM_AGC": {
+"desc": "ISAC_RX_QAM_AGC=1 (T26d): amplitude consistency of the QAM soft decisions. nr_channel_compensation() gives z = sum_a h_a* y_a and the QAM thresholds mag = sum_a |h_a|^2 * n1; fo...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:2327",
+"how": "code comment"
+},
+"ISAC_RX_RECOVER": {
+"desc": "usrp_rx_recover: returns true when ISAC_RX_RECOVER=1 (cached): in-place RX recovery is enabled (the producer re-arms the stream after a fault instead of stopping).",
+"src": "executables/nr-ue.c:827",
+"how": "code comment"
+},
+"ISAC_RX_RECOVER_BACKOFF_MAX_MS": {
+"desc": null,
+"src": "radio/USRP/usrp_lib.cpp:1163",
+"how": null
+},
+"ISAC_RX_RECOVER_BACKOFF_MS": {
+"desc": null,
+"src": "radio/USRP/usrp_lib.cpp:1162",
+"how": null
+},
+"ISAC_RX_RECOVER_LEAD_MS": {
+"desc": null,
+"src": "radio/USRP/usrp_lib.cpp:1164",
+"how": null
+},
+"ISAC_RX_RECOVER_MAX": {
+"desc": "usrp_rx_recover_max: returns ISAC_RX_RECOVER_MAX (cached, default 20): consecutive failed re-arms allowed before the RX gives up.",
+"src": "radio/USRP/usrp_lib.cpp:1048",
+"how": "code comment"
+},
+"ISAC_RX_RECOVER_MAX_FAULTS": {
+"desc": "usrp_rx_recover_window_max: returns ISAC_RX_RECOVER_MAX_FAULTS (cached, default 20): faults allowed inside the fault window before the RX gives up.",
+"src": "radio/USRP/usrp_lib.cpp:1056",
+"how": "code comment"
+},
+"ISAC_RX_RECOVER_NOCTRL": {
+"desc": "usrp_rx_recover_noctrl: returns ISAC_RX_RECOVER_NOCTRL (cached, default on): re-arm the stream from a locally computed device time, without a blocking control read.",
+"src": "radio/USRP/usrp_lib.cpp:1075",
+"how": "code comment"
+},
+"ISAC_RX_RECOVER_TEST_COARSE_EPOCH": {
+"desc": "Test-only path to exercise the coarse fallback with a replay gap.",
+"src": "executables/nr-ue.c:282",
+"how": "code comment"
+},
+"ISAC_RX_RECOVER_WINDOW_S": {
+"desc": "usrp_rx_recover_window_s: returns ISAC_RX_RECOVER_WINDOW_S (cached, default 60 s): length of the fault window of the recovery budget.",
+"src": "radio/USRP/usrp_lib.cpp:1064",
+"how": "code comment"
+},
+"ISAC_SCAN_ANT": {
+"desc": "retuned, the stream is the same channels before and after lock. ISAC_SCAN_ANT=N narrows the scan to the N strongest branches (A/B only).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:710",
+"how": "code comment"
+},
+"ISAC_SCAN_CONFIRM": {
+"desc": "ISAC_SCAN_CONFIRM=0 disables.",
+"src": "executables/nr-ue.c:1121",
+"how": "code comment"
+},
+"ISAC_SCAN_SCRATCH_MB": {
+"desc": "Initial-sync scan scratch budget (decides how many GSCNs are scanned per batch)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:752",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_SEGV_BT": {
+"desc": "ISAC_SEGV_BT=1 (T26c, diagnostic): print the faulting thread's backtrace on SIGSEGV/SIGBUS (replay EOF-exit crash hunt; no core is kept on this host). Async-signal-safe enough f...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:10922",
+"how": "code comment"
+},
+"ISAC_SFO_CORRECT": {
+"desc": "RESIDUAL SFO CORRECTION (ISAC_SFO_CORRECT=1, default off) ------------------------------ WHAT IS UNCORRECTED. nr_rx_pdsch() equalises EVERY data symbol against ONE DM-RS symbol's",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:4291",
+"how": "code comment"
+},
+"ISAC_SHIFT_CENSUS": {
+"desc": "ISAC_SHIFT_CENSUS=<frames> (default off): the CUMULATIVE window motion actually applied. The 2026-09-17 offline analysis could not obtain this. Measured from raw SSB IQ at 217 PRB,",
+"src": "executables/nr-ue.c:1703",
+"how": "code comment"
+},
+"ISAC_SHUTDOWN_TIMEOUT_S": {
+"desc": null,
+"src": "common/utils/nr_shutdown.c:210",
+"how": null
+},
+"ISAC_SIB1_CACHE": {
+"desc": "they always were: a hypothesis the TB CRC judges. ISAC_SIB1_CACHE=0 disables; the path is ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:6146",
+"how": "code comment"
+},
+"ISAC_SIB1_CACHE_DIR": {
+"desc": "ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c:6134",
+"how": "code comment"
+},
+"ISAC_SIB1_DIAG": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_decoding.c:245",
+"how": null
+},
+"ISAC_SIM_CANDIDATE_RNTI": {
+"desc": "backward-compatible single value",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:252",
+"how": "code comment"
+},
+"ISAC_SIM_CANDIDATE_RNTIS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:250",
+"how": null
+},
+"ISAC_SI_RV_ANY": {
+"desc": "rv0-only drop rule. ISAC_SI_RV_ANY=1 (default off): SI-RNTI (SIB1) grants are exempt -- SIB1 is repeated with the RV cycle 0,2,3,1 and a passive receiver that sees the rv!=0 occ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1411",
+"how": "code comment"
+},
+"ISAC_SLOT_SCALE": {
+"desc": "ISAC_SLOT_SCALE=1 (default off): the window is ~10 s at ANY numerology (10000 << mu slots; mu=1 gives the constant above).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c:53",
+"how": "code comment"
+},
+"ISAC_SRS_CPU_PCT": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c:265",
+"how": null
+},
+"ISAC_SSB_IQ": {
+"desc": "ISAC_SSB_IQ=<path> (diagnostic, default off): the RAW TIME-DOMAIN samples this FEP call just transformed, so the SSB can be re-processed offline independently of OAI's fixed-poi...",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1006",
+"how": "code comment"
+},
+"ISAC_SSS_MULTI": {
+"desc": "ISAC_SSS_MULTI: every SSS candidate PCI gets its own PBCH CRC; all are reported, the first that decodes in SSS order is kept (strongest verified cell). ISAC_TARGET_PCI pins the ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c:375",
+"how": "code comment"
+},
+"ISAC_SSS_REL_RATIO": {
+"desc": "ISAC_SSS_REL_RATIO=R (default off): also accept when the best Nid1 beats the best OTHER Nid1 by R. The absolute floor is in ADC counts squared, so it rejects any cell received b...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/sss_nr.c:225",
+"how": "code comment"
+},
+"ISAC_ST2_DEBUG_HYP": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_nid_reference.c:773",
+"how": null
+},
+"ISAC_SUBSET_DIAG": {
+"desc": "SUBSETDIAG (ISAC_SUBSET_DIAG=1): the state this decision actually resolved to, printed for EVERY call so a force_mask={0} call and a primary mode-0 call on the same TB can be di...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c:1648",
+"how": "code comment"
+},
+"ISAC_SWEEP_OCCASIONS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2423",
+"how": null
+},
+"ISAC_SWEEP_SIGNIF": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_blind_stats.h:51",
+"how": null
+},
+"ISAC_SYNC_ANT_MASK": {
+"desc": "ISAC_SYNC_ANT_MASK (bitmask, default all): which branches feed the timing peak search. OTA 2026-09-14: branch 2 carries a strong long-delay path (chest nvar 5000x branch 0, SSB ...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:95",
+"how": "code comment"
+},
+"ISAC_TARGET_PCI": {
+"desc": "ISAC_TARGET_PCI=<pci>: pin the initial SSB search to one N_ID_2 (PCI%3), a hard filter in pss_nr.c (pss_index_start=pss_index_end-1=GET_NID2(target)) -- correlates against exactly",
+"src": "executables/nr-ue.c:210",
+"how": "code comment"
+},
+"ISAC_TDD_SKIP": {
+"desc": "ISAC_TDD_SKIP=1: do not scan slots SIB1 says carry no downlink. Unknown pattern -> scan.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:5387",
+"how": "code comment"
+},
+"ISAC_TD_CB0_B": {
+"desc": "> ISAC_TD_FIELDBOOK=2 ON, ISAC_TD_CB0_BACKEND=auto, ISAC_TD_TB_CPU_WHILE_ACQ=1; levers C/P/E OFF (\u00a710.2).",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:51",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_TD_CB0_BACKEND": {
+"desc": "auto = GPU CB0 entry when registered and healthy, CPU backend otherwise / as fallback; cpu; gpu (= auto + one-time warning on fallback)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:38",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_CB0_BUDGET_US": {
+"desc": "ISAC_TD_CB0_BACKEND=auto\\|cpu\\|gpu (auto), ISAC_TD_CB0_B (96 items/grant), ISAC_TD_CB0_BUDGET_US (20000, used when B = 0), ISAC_TD_CB0_CPU_PCT (30 % of online CPUs), ISAC_TD_CB0...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:50",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_TD_CB0_CPU_PCT": {
+"desc": "the bucket barely refills",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:50",
+"how": "code comment"
+},
+"ISAC_TD_CB0_ELIM": {
+"desc": "CB0 elimination channel (engine + runtime wiring; needs GrantWork, else counted no_grantwork)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:1288",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_CB0_GPU_AUTOREG": {
+"desc": "nr_td_cb0_wire_warmup: one-time warm-up of the CB0 wire: enables the GPU backend (unless the backend mode is CPU or ISAC_TD_CB0_GPU_AUTOREG=0) and loads the configuration and th...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:72",
+"how": "code comment"
+},
+"ISAC_TD_CB0_GPU_BACKOFF": {
+"desc": "ISAC_TD_CB0_BACKEND=auto\\|cpu\\|gpu (auto), ISAC_TD_CB0_B (96 items/grant), ISAC_TD_CB0_BUDGET_US (20000, used when B = 0), ISAC_TD_CB0_CPU_PCT (30 % of online CPUs), ISAC_TD_CB0...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_backend.c:107",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_TD_CB0_GPU_ITERS": {
+"desc": "a GPU iteration cap (nr_td_cb0_gpu_iters) is dominance-proven only against the CPU TB decoder",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:47",
+"how": "code comment"
+},
+"ISAC_TD_CB0_RANK_MAX": {
+"desc": "ISAC_TD_CB0_BACKEND=auto\\|cpu\\|gpu (auto), ISAC_TD_CB0_B (96 items/grant), ISAC_TD_CB0_BUDGET_US (20000, used when B = 0), ISAC_TD_CB0_CPU_PCT (30 % of online CPUs), ISAC_TD_CB0...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:40",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_TD_CB0_THREADS": {
+"desc": "ISAC_TD_CB0_BACKEND=auto\\|cpu\\|gpu (auto), ISAC_TD_CB0_B (96 items/grant), ISAC_TD_CB0_BUDGET_US (20000, used when B = 0), ISAC_TD_CB0_CPU_PCT (30 % of online CPUs), ISAC_TD_CB0...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:37",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_TD_CERT_CONFIRMED": {
+"desc": "1 = the BC9 certified flag (levers C/P only) counts only CRC-confirmed DCI occupants. Hard exclusions use confirmed DCIs regardless (K43)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dci_history.c:386",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_DCI_ADJ": {
+"desc": "0 = full kill switch of BC9/BC9d (no DCI history, no TDD / DCI-adjacency exclusions, no certified census)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_dci_history.c:313",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_FIELDBOOK": {
+"desc": "2 = reversible field book (fb2) wired into the runtime; 0 = off (only 0 and 2 exist)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:1855",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_GRANTWORK": {
+"desc": "GrantWork-lite (shared FEP/chest/LLR per grant and signature; prerequisite of CB0 elimination)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:10874",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_GW_CHECK": {
+"desc": "GW_EQUIV (ISAC_TD_GW_CHECK=N, debug, default off): 1 main decode in N that went through GrantWork is decoded twice more, quietly (no HARQ, no feeds, no latches): (b) with the gw...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:6445",
+"how": "code comment"
+},
+"ISAC_TD_GW_PROBE": {
+"desc": "ISAC_TD_GW_PROBE=1 also serves layout probes from it (whole slot instead of the probe horizon). */ _Atomic: N consumers",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c:1675",
+"how": "code comment"
+},
+"ISAC_TD_GW_PROFILE": {
+"desc": "ISAC_TD_GW_PROFILE=1 (default off): after every main decode that went through GrantWork, CB0-decode the same grant under each MCS table (the hypotheses a cold search carries for...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:6570",
+"how": "code comment"
+},
+"ISAC_TD_GW_UNIFIED": {
+"desc": "CUDA build on a host with libcudart: the buffers are unified (managed) memory.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_td_grantwork_test.cc:357",
+"how": "code comment"
+},
+"ISAC_TD_IGNORE_SIB1": {
+"desc": "unset/0",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.c:82",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_K0_ORACLE_LEGACY": {
+"desc": "1 = pre-K39 behaviour: the DM-RS oracle records the hypothesised k0 as observed and hard-prunes the other k0 (A/B only; unsafe, K39)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c:446",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_PROBE_EQUIV_BRANCH": {
+"desc": "Force this RX branch in the harness's single-branch (chest-row) arm; a value \u2265 nb_rx is silently ignored",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:6670",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_PROBE_EQUIV_CHECK": {
+"desc": "Probe \u2261 full harness (F1), samples 1 grant in 50: 1 = re-decode the probe's hypothesis over the whole slot and compare CB0 LLRs/CRC (PROBE_EQUIV, PROBE_EQUIV_CHEST); 2 = also th...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:6638",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TD_TB_CPU_WHILE_ACQ": {
+"desc": "Force the CPU TB decoder while a context acquires (so a CUDA CB0 dominates it, \u00a73.3.1)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c:41",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_TSYNC_AUDIT": {
+"desc": "can be correlated against PDCCH coherence loss. Enabled by ISAC_TSYNC_AUDIT=1.",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1735",
+"how": "code comment"
+},
+"ISAC_TSYNC_CRC_GATE": {
+"desc": "ISAC_TSYNC_CRC_GATE=1 restores the old CRC-gated behaviour for comparison.",
+"src": "openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1946",
+"how": "code comment"
+},
+"ISAC_TSYNC_DUMP": {
+"desc": "ISAC_TSYNC_DUMP=<path> (diagnostic, default off): append the per-branch CIR power of the first 32 SSBs -- header {N, nb_ant, frame, slot} as int32, then nb_ant x N int32 |h|^2 -...",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:120",
+"how": "code comment"
+},
+"ISAC_TSYNC_GLOBAL_REBASE": {
+"desc": "that many samples). Never fires on a healthy lock (peak in window). ISAC_TSYNC_GLOBAL_REBASE=0 disables.",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:252",
+"how": "code comment"
+},
+"ISAC_TSYNC_MEASURE": {
+"desc": "ISAC_TSYNC_MEASURE=1 MEASUREMENT ONLY: log what the loop WOULD do and return 0 without touching max_pos_iir / max_pos_acc or shifting anything.",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:295",
+"how": "code comment"
+},
+"ISAC_TSYNC_MIN_EWIN": {
+"desc": "ISAC_TSYNC_MIN_EWIN=<frac> reject this measurement if the CIR is too diffuse or its peak sits outside the +-CP window. Default 0 = no gate (unchanged).",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:290",
+"how": "code comment"
+},
+"ISAC_TSYNC_REBASE_RATIO": {
+"desc": "ISAC_TSYNC_REBASE_RATIO), SHIFTCENSUS, CFO trim loop CFOTRK (measure always; apply only with",
+"src": "openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:261",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_TSYNC_RESET": {
+"desc": "OPT-IN, DEFAULT OFF (ISAC_TSYNC_RESET=1).",
+"src": "executables/nr-ue.c:1447",
+"how": "code comment"
+},
+"ISAC_UECTX_FIXTURE_PATH": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc:311",
+"how": null
+},
+"ISAC_UECTX_PATH": {
+"desc": "unset",
+"src": "executables/nr-uesoftmodem.c:418",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_UECTX_PERIOD_S": {
+"desc": "5 s",
+"src": "executables/nr-uesoftmodem.c:421",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_UECTX_TEST_WRITER_PAUSE_MS": {
+"desc": "unset",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:510",
+"how": "PROJECT_MEMORY flag table"
+},
+"ISAC_UE_RT_CORE": {
+"desc": "> ISAC_SCAN_ANT=1 ISAC_UE_RT_CORE=5 ISAC_PDCCH_USS_CORE=7 ISAC_CSIRS_BLIND=1 ISAC_CSIRS_BLIND_IDSWEEP=1 nr-uesoftmodem",
+"src": "executables/nr-uesoftmodem.c:202",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_UHD_CTRL_CORES": {
+"desc": "ISAC_UHD_CTRL_CORES=\"a,b,c\": move UHD's control-endpoint threads (uhd_ctrl*) to these cores. MEASURED 2026-10-06 (X410 34B2AF1, DPDK lcores 17-19): the device is created from a ...",
+"src": "executables/nr-uesoftmodem.c:205",
+"how": "code comment"
+},
+"ISAC_UHD_CTRL_THREADS": {
+"desc": null,
+"src": "executables/nr-uesoftmodem.c:213",
+"how": null
+},
+"ISAC_UL_CONFIG_DISC": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c:140",
+"how": null
+},
+"ISAC_UL_DBG_LOG": {
+"desc": "ISAC_UL_DBG_LOG=1 (diagnostic, default off): every admitted UL DCI with its raw payload",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8673",
+"how": "code comment"
+},
+"ISAC_UL_DCI_BANK": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_config_disc.c:83",
+"how": null
+},
+"ISAC_UL_DCI_LOG": {
+"desc": "ISAC_UL_DCI_LOG=1 (default off, cheap enough for OTA): one compact line per admitted UL DCI. fields: abs = source absolute slot, fs = frame.slot of the DCI, fmt 0_1|0_0, k2 (slo...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:8686",
+"how": "code comment"
+},
+"ISAC_UL_DMRS_DISC": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1353",
+"how": null
+},
+"ISAC_UL_FDRA_REFUSE": {
+"desc": "Parameters: pdcch_blind_monitor_pdsch, pdcch_blind_monitor_ul_*, ISAC_RX_MRC_MODE, ISAC_CHEST_TINTERP, ISAC_SFO_CORRECT, ISAC_QM_ORACLE (on), ISAC_PDSCH_TYPEB (on), ISAC_PDSCH_K...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c:225",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_UL_FORCE_OPTS": {
+"desc": "ISAC_UL_FORCE_OPTS=1 (default off, EXPERIMENT): read the CRC-verified payload with exactly the explicitly configured UL layout (pdcch_blind_monitor_ul_* keys) instead of the wid...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:1841",
+"how": "code comment"
+},
+"ISAC_UL_LAYOUT_CONTROL": {
+"desc": "ISAC_UL_LAYOUT_CONTROL=1 (validation only, default off): score every hypothesis with the DM-RS of the wrong slot number, i.e. a receiver that sees no PUSCH at all -- the false-l...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1136",
+"how": "code comment"
+},
+"ISAC_UL_LAYOUT_LOCK": {
+"desc": "UL layout lock, SIB1 BWP first, CRC first (ULCRCFIRST, csd/ul-crc-first) | ISAC_UL_LOCK_SIB1_FIRST=1 ISAC_UL_LOCK_CRC_FIRST=1 ISAC_UL_LOCK_CRC_K=3 (+ ISAC_UL_LAYOUT_LOCK=1) | [O...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:392",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_UL_LAYOUT_LOG": {
+"desc": "ISAC_UL_LAYOUT_LOG=1 (diagnostic, default off): one line per probe, the three best hypotheses",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:1163",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_BWP_ALL": {
+"desc": "ISAC_UL_LOCK_BWP_ALL=1 (F6): after the legacy hypotheses, every (N, start) of the carrier that the RIV field can express",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:493",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_CLIP": {
+"desc": "ISAC_UL_LOCK_CLIP (default SPRT_CLIP): symmetric clipping keeps the null symmetry (the bound holds for any clip) and stops the",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:1071",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_COHERENT": {
+"desc": "winner votes per threshold {2,3,4,5}: [+ (argmax), - (argmin)]",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:371",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_CRC_FIRST": {
+"desc": "CRC-first (ISAC_UL_LOCK_CRC_FIRST=1)",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:385",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_CRC_GUARD": {
+"desc": "ISAC_UL_LOCK_CRC_GUARD=1: may this TB CRC pass lock layout (h,k,t)? Caller holds mu. Decisive: CRC24A (TBS > 3824 bits, TS 38.212 7.2.1) or a multi-segment TB whose CB CRCs all ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:384",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_CRC_K": {
+"desc": "t26q = t26p_ul + ISAC_PDSCH_DMRS_ID_SCAN=16 ISAC_UL_LOCK_SIB1_FIRST=1 ISAC_UL_LOCK_CRC_FIRST=1 ISAC_UL_LOCK_CRC_K=3.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:1256",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_UL_LOCK_EDGE": {
+"desc": "ULTWINS: the allocation-edge test alone (the range-sum evidence zn is left out when ISAC_UL_LOCK_EDGE=1): the step at the edges of the true",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:370",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_MCS_STAT": {
+"desc": "BLINDFIX F5 (ISAC_UL_LOCK_MCS_STAT=1): the offset is accepted on significance, not on scores fitted to PCI 415 traffic.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:105",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_NO_TRIAL_UNLOCKED": {
+"desc": "one DCI per slot (<= K jobs), small MCS only; locked layouts are re-tried only after a run of CRC failures",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:1267",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_PRIOR_DWELL": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:1409",
+"how": null
+},
+"ISAC_UL_LOCK_PRIOR_SEARCH": {
+"desc": "ISAC_UL_LOCK_PRIOR_SEARCH (ULPRIOR): provisional adoption of the top prior-ranked (N, start); see nr_ul_layout_prior_note()",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:1401",
+"how": "code comment"
+},
+"ISAC_UL_LOCK_SIB1_FIRST": {
+"desc": "t26q = t26p_ul + ISAC_PDSCH_DMRS_ID_SCAN=16 ISAC_UL_LOCK_SIB1_FIRST=1 ISAC_UL_LOCK_CRC_FIRST=1 ISAC_UL_LOCK_CRC_K=3.",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:383",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_UL_LOCK_SPRT": {
+"desc": "ISAC_UL_LOCK_SPRT=1 (ULLOCKSPEED) Each probe gives, for every BWP hypothesis h, zn_h = (SNR_est(true DM-RS) - SNR_est(wrong-slot DM-RS)) / sigma0 on the PRB",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:374",
+"how": "code comment"
+},
+"ISAC_UL_PIPELINE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:190",
+"how": null
+},
+"ISAC_UL_PROBE": {
+"desc": "ULPROBE (ISAC_UL_PROBE=1, default OFF): the three Phase-0 questions the UL work is gated on, and none of them can be answered from an existing capture.",
+"src": "executables/nr-ue.c:1647",
+"how": "code comment"
+},
+"ISAC_UL_PUSCH_CHAIN": {
+"desc": "ISAC_UL_PUSCH_SOLVER=1 deliberately IMPLIES the whole UL chain (ISAC_UL_PUSCH_CHAIN=1: DCI bank, config discovery, UE state, DCI 0_1 scan, PUSCH decode): the solver has nothing ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_ul_first_pusch.h:18",
+"how": "code comment"
+},
+"ISAC_UL_PUSCH_SOLVER": {
+"desc": "ISAC_UL_PUSCH_SOLVER=1 deliberately IMPLIES the whole UL chain (ISAC_UL_PUSCH_CHAIN=1: DCI bank, config discovery, UE state, DCI 0_1 scan, PUSCH decode): the solver has nothing ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_ul_first_pusch.h:19",
+"how": "code comment"
+},
+"ISAC_UL_RETRY": {
+"desc": "ISAC_UL_RETRY=1 (default off): UL twin of ISAC_PDSCH_DMRS_CDM_RETRY / ISAC_PDSCH_TDRA_RETRY. The DCI antenna-ports code",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:163",
+"how": "code comment"
+},
+"ISAC_UL_RETRY_MAX_RB": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:182",
+"how": null
+},
+"ISAC_UL_RETRY_SNR_DB": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:172",
+"how": null
+},
+"ISAC_UL_RX_BRANCH": {
+"desc": "than permuting rows. -1 (a real gNB, or ISAC_UL_RX_BRANCH=-1) skips this entirely.",
+"src": "openair1/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c:46",
+"how": "code comment"
+},
+"ISAC_UL_SOLVER_FALLTHROUGH": {
+"desc": "ISAC_UL_SOLVER_FALLTHROUGH=1 (default off): with ISAC_UL_PUSCH_SOLVER=1 every ticketed grant used to be consumed by the solver branch, whose unsolved state only probes one-CB QP...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c:149",
+"how": "code comment"
+},
+"ISAC_UL_SPRT_DUMP": {
+"desc": "diagnostic: zn of three fixed hypotheses and of the best one",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c:1122",
+"how": "code comment"
+},
+"ISAC_UL_TA_SWEEP": {
+"desc": "TIMING-ADVANCE SWEEP (ISAC_UL_TA_SWEEP=\"start:step:count\", default off) ------------------ The applied advance is N_TA_offset, derived from the sample rate. What it CANNOT know ...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:205",
+"how": "code comment"
+},
+"ISAC_UL_TIMING_DIAG": {
+"desc": null,
+"src": "openair1/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c:636",
+"how": null
+},
+"ISAC_UL_TIMING_DISC": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:1351",
+"how": null
+},
+"ISAC_UL_UCI_SAFE": {
+"desc": "ISAC_UL_UCI_SAFE=1 (default off). A TB of <= 3824 bits carries a 16-bit CRC, and this sweep runs up to 2 x cap decodes: at cap 1024 that is a ~3 % false-pass probability per exp...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:165",
+"how": "code comment"
+},
+"ISAC_UL_UE_STATE": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c:555",
+"how": null
+},
+"ISAC_USRP_CATCHUP_X": {
+"desc": null,
+"src": "radio/USRP/usrp_lib.cpp:2227",
+"how": null
+},
+"ISAC_USRP_CHPOW_S": {
+"desc": "PER-ANTENNA POWER (ISAC_USRP_CHPOW_S=N, default 0 = off): every N seconds log each channel's mean power over this read's first ring segment (dBFS, sc16 full scale 32768). One re...",
+"src": "radio/USRP/usrp_lib.cpp:2256",
+"how": "code comment"
+},
+"ISAC_USRP_ISOLATION_CHECK": {
+"desc": "usrp_isolation_check: diagnostic (ISAC_USRP_ISOLATION_CHECK=1): warns when the ring producer or the UHD control cores are not isolated (isolcpus) or tickless (nohz_full).",
+"src": "radio/USRP/usrp_lib.cpp:1441",
+"how": "code comment"
+},
+"ISAC_USRP_NO_TX": {
+"desc": "ISAC_USRP_NO_TX=1: create no TX streamer at all (receive-only / passive). MEASURED 2026-10-06 (X410 34B2AF1, DPDK, 4 x 122.88 MS/s): intermittently the DPDK mbuf pool was exhaus...",
+"src": "radio/USRP/usrp_lib.cpp:3523",
+"how": "code comment"
+},
+"ISAC_USRP_RESTART_MAX": {
+"desc": "usrp_restart_max: returns ISAC_USRP_RESTART_MAX (cached, default 10): how many pre-sync restarts of the RX stream are allowed in the legacy (non-recovery) mode.",
+"src": "radio/USRP/usrp_lib.cpp:1013",
+"how": "code comment"
+},
+"ISAC_USRP_RESTART_UNTIL_SYNC": {
+"desc": null,
+"src": "radio/USRP/usrp_lib.cpp:1104",
+"how": null
+},
+"ISAC_USRP_RING_CORE": {
+"desc": "> ISAC_USRP_RING_CORE (producer thread drains UHD; without it 4 x 122.88 MS/s overflowed after every PBCH lock because",
+"src": "executables/nr-uesoftmodem.c:203",
+"how": "PROJECT_MEMORY mention"
+},
+"ISAC_USRP_RING_MS": {
+"desc": "usrp_ring_ms: returns ISAC_USRP_RING_MS (0..5000, cached): the duration in ms of the decoupled RX ring; 0 disables it. Used to size the ring and to decide whether the producer t...",
+"src": "executables/nr-uesoftmodem.c:203",
+"how": "code comment"
+},
+"ISAC_USRP_RING_PKTS": {
+"desc": "ISAC_USRP_RING_PKTS: packets requested per recv() (default 8). benchmark_rate asks for one packet per call and never exhausted the DPDK mbuf pool, while the 8-packet producer in...",
+"src": "radio/USRP/usrp_lib.cpp:1138",
+"how": "code comment"
+},
+"ISAC_USRP_RING_POLL": {
+"desc": "ISAC_USRP_RING_POLL=1 (default off): once streaming, busy-poll recv() with a zero timeout. The producer owns an isolated core, so spinning is free, whereas the blocking recv() m...",
+"src": "radio/USRP/usrp_lib.cpp:1147",
+"how": "code comment"
+},
+"ISAC_USRP_RING_POLL_TIMEOUT_MS": {
+"desc": "futex wake (syscall + IPI) for most packets. ISAC_USRP_RING_POLL_TIMEOUT_MS (default 100) of continuous silence is still a receive timeout (fault), as with the blocking 0.1 s re...",
+"src": "radio/USRP/usrp_lib.cpp:1148",
+"how": "code comment"
+},
+"ISAC_USRP_RING_PRIO": {
+"desc": "ISAC_USRP_RING_PRIO (default 95): SCHED_FIFO priority of the producer. OAI's actors and ru_start_thread run at FIFO 97 with no CPU pinning; on a core that is not isolated one of...",
+"src": "radio/USRP/usrp_lib.cpp:1127",
+"how": "code comment"
+},
+"ISAC_USRP_RING_TRAFFIC_METRICS": {
+"desc": null,
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics.c:55",
+"how": null
+},
+"ISAC_USRP_RING_ZEROCOPY": {
+"desc": null,
+"src": "radio/USRP/usrp_lib.cpp:2171",
+"how": null
+},
+"ISAC_XANT": {
+"desc": "XANT (ISAC_XANT=1, default off): time-domain cross-correlation of antenna a vs antenna 0 over +/-3000 sample lags, on this slot's samples, once every ~60 s. A peak away from lag...",
+"src": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c:3043",
+"how": "code comment"
+}
+}
