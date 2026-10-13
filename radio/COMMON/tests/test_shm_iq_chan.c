@@ -3,7 +3,8 @@
  * antenna and per cell); the real shm_iq_chan executable (started from a plan.json) writes <ring>_A (decim 4) and <ring>_B (decim 8);
  * the test reads them with shm_iq_ring_copy and checks: own tone at 0 dB on the right antenna, other antennas / other cell < -60 dB,
  * timestamps continuous (no gaps) and equal to (base_tick + ring_pos) / decim after an input discontinuity (a gap in EVERY output
- * ring), a producer retune (rf_epoch + new shifts), and a clean channelizer exit on producer loss.
+ * ring), a producer retune (rf_epoch + new shifts), a 1 s publisher stall (channelizer and its rings' writer stay alive, then a
+ * gap), `away` mirrored with a moved return time, and a clean channelizer exit on producer loss.
  * Usage: test_shm_iq_chan <path to shm_iq_chan> */
 #define _GNU_SOURCE
 #include "../shm_iq_ring.h"
@@ -30,8 +31,8 @@ static const int DEC[2] = {4, 8};
 static const double OFF[2][NCH] = {{-2e6, -3.5e6, -5e6, -6.5e6}, {2e6, -1e6, 4e6, -3e6}}; /* tone offsets from the cell centre, per antenna */
 static const double AMP = 3000;
 
-typedef struct { volatile int cmd, ack, stop; volatile double centre; volatile long jump; } ctl_t;
-enum { CMD_NONE, CMD_JUMP, CMD_RETUNE };
+typedef struct { volatile int cmd, ack, stop; volatile double centre; volatile long jump; volatile uint64_t until; } ctl_t;
+enum { CMD_NONE, CMD_JUMP, CMD_RETUNE, CMD_STALL, CMD_AWAY };
 
 static void pattern(int16_t *p[NCH], double ring_centre)
 {
@@ -65,6 +66,18 @@ static void producer(const char *ring, ctl_t *ctl)
       pattern(pat, ctl->centre);
       shm_iq_ring_new_epoch(&r, ctl->centre);
       ctl->cmd = CMD_NONE; ctl->ack = 1;
+    } else if (ctl->cmd == CMD_STALL) { /* RFSTALL-like: no write for 1 s (> the channelizer's 300 ms timeout), the radio clock moved on */
+      usleep(1000000);
+      tick += 245760;
+      ctl->cmd = CMD_NONE; ctl->ack = 1;
+    } else if (ctl->cmd == CMD_AWAY) { /* time-shared window: away, then the expected return moves 1 s later */
+      const uint64_t u = shm_iq_now_ns() + 2000000000ull;
+      shm_iq_ring_set_away(&r, u);
+      usleep(400000);
+      shm_iq_ring_set_away(&r, u + 1000000000ull);
+      ctl->until = u + 1000000000ull; ctl->ack = 1;
+      while (ctl->cmd == CMD_AWAY && !ctl->stop) usleep(1000);
+      shm_iq_ring_return(&r, ctl->centre);
     }
     for (int a = 0; a < NCH; ++a)
       for (int k = 0; k < B;) {
@@ -205,6 +218,37 @@ int main(int argc, char **argv)
     CHECK(wait_head(rr[c], vf + 140000, 30) == 0, "no data after retune");
     CHECK(check_tones(rr[c], c, vf + 100000, C0 + 10e6, "post-retune") == 0, "tones");
     CHECK(fabs(shm_iq_ring_center(rr[c]) - CELL[c]) < 1e-3, "cell centre changed");
+  }
+  printf("-- publisher stall 1 s\n");
+  {
+    const uint64_t g1[2] = {rA.hdr->gaps, rB.hdr->gaps};
+    ctl->ack = 0; ctl->cmd = CMD_STALL;
+    for (int i = 0; i < 1000 && !ctl->ack; ++i) usleep(5000);
+    CHECK(ctl->ack, "producer did not stall");
+    CHECK(waitpid(cp, NULL, WNOHANG) == 0, "channelizer exited during a 1 s publisher stall");
+    for (int c = 0; c < 2; ++c) {
+      for (int i = 0; i < 2000 && rr[c]->hdr->gaps == g1[c]; ++i) usleep(5000);
+      CHECK(rr[c]->hdr->gaps > g1[c], "cell %d: stall did not become a gap", c);
+      CHECK(wait_head(rr[c], rr[c]->hdr->valid_from + 70000, 30) == 0, "cell %d: no data after the stall", c);
+      CHECK(kill(atomic_load(&rr[c]->hdr->producer_pid), 0) == 0, "cell %d: output writer gone", c);
+    }
+  }
+  printf("-- away, return time moved\n");
+  {
+    ctl->ack = 0; ctl->cmd = CMD_AWAY;
+    for (int i = 0; i < 1000 && !ctl->ack; ++i) usleep(5000);
+    CHECK(ctl->ack, "producer did not go away");
+    usleep(150000); /* away for 550 ms > the 300 ms timeout */
+    CHECK(waitpid(cp, NULL, WNOHANG) == 0, "channelizer exited while the publisher was away");
+    for (int c = 0; c < 2; ++c)
+      CHECK(atomic_load(&rr[c]->hdr->away) && atomic_load(&rr[c]->hdr->dwell_until_ns) == ctl->until, "cell %d: away %u dwell %lu, publisher's %lu", c,
+            (unsigned)rr[c]->hdr->away, (unsigned long)rr[c]->hdr->dwell_until_ns, (unsigned long)ctl->until);
+    const uint64_t h1[2] = {rA.hdr->head, rB.hdr->head};
+    ctl->cmd = CMD_NONE;
+    for (int c = 0; c < 2; ++c) {
+      CHECK(wait_head(rr[c], h1[c] + 70000, 30) == 0, "cell %d: no data after the return", c);
+      CHECK(!atomic_load(&rr[c]->hdr->away), "cell %d: away not cleared", c);
+    }
   }
   printf("-- producer loss\n");
   ctl->stop = 1;

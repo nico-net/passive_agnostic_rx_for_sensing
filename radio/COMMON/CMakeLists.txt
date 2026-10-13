@@ -45,7 +45,7 @@ if(ENABLE_LDPC_CUDA)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
   include(${PROJECT_SOURCE_DIR}/cmake_targets/nr_gpu_arch.cmake)
-  nr_gpu_architectures("${CMAKE_CUDA_ARCHITECTURES}" SHM_IQ_CHAN_ARCHS)
+  nr_gpu_architectures("${LDPC_CUDA_ARCH}" SHM_IQ_CHAN_ARCHS) # LDPC_CUDA_ARCH: the cache list every GPU module follows (openair1/PHY/CODING)
   add_library(shm_iq_chan_gpu MODULE shm_iq_chan_gpu.cu)
   set_target_properties(shm_iq_chan_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" PREFIX "lib"
                         CUDA_ARCHITECTURES "${SHM_IQ_CHAN_ARCHS}" POSITION_INDEPENDENT_CODE ON CUDA_RUNTIME_LIBRARY Shared)

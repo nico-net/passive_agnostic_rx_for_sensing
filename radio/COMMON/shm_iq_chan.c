@@ -38,7 +38,7 @@ typedef struct {
   shm_iq_ring_t out;
   iq_ddc_t ddc[SHM_IQ_MAX_CH];
   int16_t *obuf[SHM_IQ_MAX_CH];
-  int away;
+  uint64_t away_until;    /* dwell_until mirrored into the output ring (0 = not away) */
 } cell_t;
 
 typedef struct {
@@ -91,7 +91,9 @@ static void *worker(void *arg)
     seen = c->gen;
     pthread_mutex_unlock(&c->mu);
     for (;;) {
-      const int j = __atomic_fetch_add(&c->next, 1, __ATOMIC_RELAXED);
+      /* acquire pairs with cpu_run's release store: a worker still draining the previous generation can grab a job of the
+       * next one without passing the mutex, and must then see that block's input and the DDC state other workers left */
+      const int j = __atomic_fetch_add(&c->next, 1, __ATOMIC_ACQUIRE);
       if (j >= c->ncell * c->nch) break;
       run_job(c, j, g_job_n);
       pthread_mutex_lock(&c->mu);
@@ -108,7 +110,8 @@ static void cpu_run(chan_t *c, int n)
     return;
   }
   pthread_mutex_lock(&c->mu);
-  g_job_n = n; c->next = 0; c->pending = c->ncell * c->nch; c->gen++;
+  g_job_n = n; c->pending = c->ncell * c->nch; c->gen++;
+  __atomic_store_n(&c->next, 0, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&c->go);
   while (c->pending) pthread_cond_wait(&c->done, &c->mu);
   pthread_mutex_unlock(&c->mu);
@@ -209,7 +212,7 @@ static int chan_setup(chan_t *c)
       if (!ce->obuf[a]) return -1;
     }
   }
-  if (c->gpu) { if (gpu_load(c) || gpu_start(c)) return -1; }
+  if (c->gpu) { c->threads = 0; if (gpu_load(c) || gpu_start(c)) return -1; } /* no pool: chan_free must not join threads never started */
   else if (c->threads > 0) pool_start(c);
   return 0;
 }
@@ -222,16 +225,18 @@ static void chan_free(chan_t *c)
     for (int a = 0; a < c->nch; ++a) { iq_ddc_free(&c->cell[k].ddc[a]); free(c->cell[k].obuf[a]); }
 }
 
-static void chan_block(chan_t *c, const int16_t *const *in, int n, double *gpu_ms)
+/* returns 0, or -1 on a GPU error (the caller stops cleanly) */
+static int chan_block(chan_t *c, const int16_t *const *in, int n, double *gpu_ms)
 {
   c->in = in;
   if (c->gpu) {
     int16_t *outs[MAXCELL * SHM_IQ_MAX_CH];
     for (int k = 0; k < c->ncell; ++k)
       for (int a = 0; a < c->nch; ++a) outs[k * c->nch + a] = c->cell[k].obuf[a];
-    if (c->g_run(c->gpu_h, in, n, outs)) { fprintf(stderr, "SHMIQ_CHAN_ERR GPU run failed\n"); exit(2); }
+    if (c->g_run(c->gpu_h, in, n, outs)) { fprintf(stderr, "SHMIQ_CHAN_ERR GPU run failed\n"); return -1; }
     if (gpu_ms) *gpu_ms = c->g_ms(c->gpu_h);
   } else cpu_run(c, n);
+  return 0;
 }
 
 /* ---------------------------------------------------------------- plan.json (tolerant scanner, no JSON library in the tree) */
@@ -406,7 +411,7 @@ static int selftest(chan_t *c, int gpu)
   /* CPU backend */
   for (int b = 0; b < NB; ++b) {
     const int16_t *blk[2] = {in[0] + 2 * (size_t)b * N, in[1] + 2 * (size_t)b * N};
-    chan_block(c, blk, N, NULL);
+    if (chan_block(c, blk, N, NULL)) return 1;
     for (int k = 0; k < 2; ++k)
       for (int a = 0; a < 2; ++a) memcpy(res[k][a] + 2 * (size_t)b * N / c->cell[k].decim, c->cell[k].obuf[a], (size_t)N / c->cell[k].decim * 4);
   }
@@ -461,7 +466,7 @@ static int selftest(chan_t *c, int gpu)
     for (int b = 0; b < NB; ++b) {
       const int16_t *blk[2] = {in[0] + 2 * (size_t)b * N, in[1] + 2 * (size_t)b * N};
       double ms;
-      chan_block(&g, blk, N, &ms);
+      if (chan_block(&g, blk, N, &ms)) { printf("SELFTEST gpu run FAIL\n"); return 1; }
       ms_sum += ms; if (ms > ms_max) ms_max = ms;
       for (int k = 0; k < 2; ++k)
         for (int a = 0; a < 2; ++a) memcpy(gres[k][a] + 2 * (size_t)b * N / g.cell[k].decim, g.cell[k].obuf[a], (size_t)N / g.cell[k].decim * 4);
@@ -495,13 +500,13 @@ static int bench(chan_t *c, double secs)
   }
   const int16_t *blk[SHM_IQ_MAX_CH];
   for (int a = 0; a < c->nch; ++a) blk[a] = in[a];
-  chan_block(c, blk, N, NULL);
+  if (chan_block(c, blk, N, NULL)) return 1;
   const double t0 = now_s();
   struct timespec c0;
   clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c0);
   long blocks = 0;
   double gms = 0;
-  while (now_s() - t0 < secs) { double m = 0; chan_block(c, blk, N, &m); gms += m; blocks++; }
+  while (now_s() - t0 < secs) { double m = 0; if (chan_block(c, blk, N, &m)) return 1; gms += m; blocks++; }
   const double el = now_s() - t0;
   struct timespec c1;
   clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &c1);
@@ -560,19 +565,23 @@ static int run_live(chan_t *c, const char *ring, double attach_s, double timeout
       epoch = ep;
       set_shifts(c, shm_iq_ring_center(&in));
       for (int k = 0; k < c->ncell; ++k) shm_iq_ring_new_epoch(&c->cell[k].out, c->cell[k].centre);
+      reset_all(c); /* the new run must not start with old-tuned filter history */
     }
     const int r = shm_iq_ring_copy(&in, pos, c->block, (unsigned)c->nch, raw);
+    /* a retune between the epoch read above and the copy: redo this block with the new shifts (old-tuned samples below the
+     * new valid_from then fail the copy and are skipped as a DISCONT, so no old-tuned block leaks into the new run) */
+    if (r == 0 && atomic_load(&h->rf_epoch) != epoch) continue;
     if (r == 0) {
       const double ts = now_s();
       const uint64_t head = atomic_load(&h->head);
       double ms = 0;
-      chan_block(c, (const int16_t *const *)raw, c->block, &ms);
+      if (chan_block(c, (const int16_t *const *)raw, c->block, &ms)) { rc = 2; break; }
       for (int k = 0; k < c->ncell; ++k) {
         cell_t *ce = &c->cell[k];
         void *bufs[SHM_IQ_MAX_CH];
         for (int a = 0; a < c->nch; ++a) bufs[a] = ce->obuf[a];
         shm_iq_ring_write(&ce->out, (int64_t)(((uint64_t)h->base_tick + pos) / (uint64_t)ce->decim), bufs, c->block / ce->decim, (unsigned)c->nch);
-        ce->away = 0;
+        ce->away_until = 0;
       }
       const double el = now_s() - ts, lag = (double)(head - pos) / c->in_rate * 1e3; /* backlog when the block started, incl. the block itself */
       tproc_sum += el; if (el > tproc_max) tproc_max = el;
@@ -601,9 +610,10 @@ static int run_live(chan_t *c, const char *ring, double attach_s, double timeout
     /* not yet written: producer-lost rule of shm_iq.c */
     const uint64_t hb = atomic_load(&h->heartbeat_ns), now = shm_iq_now_ns(), stale = now > hb ? now - hb : 0;
     const int away = h->version >= 2 && atomic_load(&h->away);
-    if (away) { /* time-shared window elsewhere: tell the cell consumers to extend their timeout too */
+    if (away) { /* time-shared window elsewhere: tell the cell consumers to extend their timeout too (and follow a moved return time) */
+      const uint64_t until = atomic_load(&h->dwell_until_ns);
       for (int k = 0; k < c->ncell; ++k)
-        if (!c->cell[k].away) { shm_iq_ring_set_away(&c->cell[k].out, atomic_load(&h->dwell_until_ns)); c->cell[k].away = 1; }
+        if (c->cell[k].away_until != until) { shm_iq_ring_set_away(&c->cell[k].out, until); c->cell[k].away_until = until; }
     }
     const int away_wait = away && now < atomic_load(&h->dwell_until_ns) + timeout_ns;
     if (!away_wait && stale > timeout_ns && ((kill(atomic_load(&h->producer_pid), 0) != 0 && errno == ESRCH) || stale > 60000000000ull)) {

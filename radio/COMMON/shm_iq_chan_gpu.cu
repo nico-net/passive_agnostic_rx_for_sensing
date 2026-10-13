@@ -173,8 +173,8 @@ extern "C" int chan_gpu_run(void *g_, const int16_t *const *in, int n, int16_t *
     }
   }
   cudaEventRecord(g->e0, g->st);
-  for (int a = 0; a < nch; ++a)
-    cudaMemcpyAsync(g->d_in + (size_t)a * 2 * g->nmax, g->h_in + (size_t)a * 2 * g->nmax, (size_t)n * 4, cudaMemcpyHostToDevice, g->st);
+  // one copy per call, not per channel/cell: at a 0.27 ms block every API call (~2-5 us) counts
+  cudaMemcpy2DAsync(g->d_in, (size_t)g->nmax * 4, g->h_in, (size_t)g->nmax * 4, (size_t)n * 4, (size_t)nch, cudaMemcpyHostToDevice, g->st);
   size_t hoff = 0;
   for (int k = 0; k < g->ncell; ++k) {
     Cell &c = g->cell[(size_t)k];
@@ -187,10 +187,8 @@ extern "C" int chan_gpu_run(void *g_, const int16_t *const *in, int n, int16_t *
       k_hist<<<grid(c.H[s], nch), TPB, 0, g->st>>>(c.xr[s], c.xi[s], c.stride[s], ns, c.H[s]);
     }
     k_out<<<grid(ns, nch), TPB, 0, g->st>>>(c.xr[c.ns], c.xi[c.ns], c.stride[c.ns], ns, c.out);
-    for (int a = 0; a < nch; ++a) {
-      cudaMemcpyAsync((char *)g->h_out + hoff, c.out + (size_t)a * 2 * ns, (size_t)ns * 4, cudaMemcpyDeviceToHost, g->st);
-      hoff += (size_t)ns * 4;
-    }
+    cudaMemcpyAsync((char *)g->h_out + hoff, c.out, (size_t)nch * ns * 4, cudaMemcpyDeviceToHost, g->st); // [nch][ns] contiguous
+    hoff += (size_t)nch * ns * 4;
   }
   cudaEventRecord(g->e1, g->st);
   if (cudaStreamSynchronize(g->st) != cudaSuccess || cudaGetLastError() != cudaSuccess) return -1;
