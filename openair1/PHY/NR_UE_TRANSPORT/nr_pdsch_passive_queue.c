@@ -80,6 +80,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *src,
                              const nr_pdsch_passive_decode_result_t *dec, const c16_t *rxdataF, uint32_t rxF_stride);
 #include "nr_csirs_disc.h"
+#include "nr_dl_traffic_probe.h"
 
 #include <limits.h>
 #include <math.h>
@@ -2543,6 +2544,9 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
     nr_pdsch_passive_queue_flush_locked();
   g_pending[g_n_pending] = *job;
   g_pending_ns[g_n_pending] = nr_csirs_disc_enabled() ? now_ns() : 0;
+  /* BLINDPIPE traffic probe: every decoded PDSCH allocation (grid RBs) explains occupancy in its slot */
+  nr_dltp_note_grant((uint16_t)job->frame_rx, (uint8_t)job->nr_slot_rx, job->dlsch_pdu.BWPStart + job->dlsch_pdu.start_rb,
+                     job->dlsch_pdu.number_rbs, job->dlsch_pdu.start_symbol, job->dlsch_pdu.number_symbols);
   const bool reconf=nr_cfg_reconf_enabled();
   const bool sense=nr_sense_enabled();
   g_pending[g_n_pending].config_epoch = nr_passive_job_epoch_stamp(reconf, nr_cfg_epoch_work_stamp);

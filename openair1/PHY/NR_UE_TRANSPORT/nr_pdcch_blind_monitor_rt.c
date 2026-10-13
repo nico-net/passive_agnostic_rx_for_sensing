@@ -711,6 +711,18 @@ static bool pass_adapt_on(void)
   if (en < 0) en = getenv("ISAC_PDCCH_PASS_ADAPT") && atoi(getenv("ISAC_PDCCH_PASS_ADAPT")) ? 1 : 0;
   return en == 1;
 }
+/* dwell_own_budget: ISAC_PDCCH_DWELL_OWN_BUDGET=1 (BLINDPIPE 2026-10-13, default off). Root cause of the dwell starvation
+ *   [MEASURED, replay raw_pci923_tim_12s_tile3]: with a dwell active the per-occasion candidate budget was split between the
+ *   banks and the dwell (64 -> 32 each) and the ladder fills AL2/AL4/AL8 first, so a banked 36-CCE CORESET fell from
+ *   ncand=64 (AL1=33) to ncand=32 (AL1=1): one AL1 position in 36 per occasion, C-RNTI DCI accepts 332-489 -> 13-39 per
+ *   1000 slots. With the flag the banks keep the full legacy budget (byte-identical to no dwell) and the dwell runs with
+ *   its own full budget; the time cost is bounded by ISAC_PDCCH_DED_BUDGET_US / _SHARE as before. */
+static bool dwell_own_budget(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_PDCCH_DWELL_OWN_BUDGET") && atoi(getenv("ISAC_PDCCH_DWELL_OWN_BUDGET")) ? 1 : 0;
+  return en == 1;
+}
 /* pass_should_run: decides whether pass kind k (bank, dwell, C0USS, CSS0) runs on this opportunity.
  *   Always true unless ISAC_PDCCH_PASS_ADAPT is on and the pass is flagged low-yield, in which case it runs on 1 opportunity in 8 and counts the skip.
  *   Caller: nr_pdcch_blind_monitor_run_occasion() (the dwell, C0USS and CSS0 passes).
@@ -4725,7 +4737,7 @@ static void *par_bank_worker(void *arg)
         if (j.reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED) continue;
         t_bank_index = i;
         t_bank_slot = j.src_abs >= 0 ? (uint64_t)j.src_abs : 0;
-        t_candidate_share = j.additional ? nr_pdcch_discovered_candidate_share(j.shares, i, j.vd) : 0;
+        t_candidate_share = j.additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(j.shares, i, j.vd) : 0;
         nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
         const uint64_t pk0 = btim_now_ns();
         const uint32_t pa0 = t_pass_accepts;
@@ -4888,7 +4900,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
         continue;
       t_bank_index = i;
-      t_candidate_share = additional ? nr_pdcch_discovered_candidate_share(shares_d, i, vd) : 0;
+      t_candidate_share = additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(shares_d, i, vd) : 0;
       nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
       const uint64_t pk0 = btim_now_ns();
       const uint32_t pa0 = t_pass_accepts;
@@ -4921,7 +4933,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       const uint64_t pk0 = btim_now_ns();
       const uint32_t pa0 = t_pass_accepts;
       run_discovered_occasion(ue, proc, serial_candidates, source_absolute_slot, &discovered_cfg, discovered_token,
-                              n == 0 ? NR_PDCCH_BANK_CANDIDATE_BUDGET : nr_pdcch_discovered_candidate_share(shares_d, n, vd));
+                              n == 0 || dwell_own_budget() ? NR_PDCCH_BANK_CANDIDATE_BUDGET : nr_pdcch_discovered_candidate_share(shares_d, n, vd));
       pass_note(PK_DWELL, btim_now_ns() - pk0, t_pass_accepts - pa0);
     }
     if (!over && nr_pdcch_c0_occ_gate_on() && nr_pdcch_c0_occ_hit(ue, (UE_nr_rxtx_proc_t *)proc)) {
@@ -4993,7 +5005,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     if (reconf && nr_pdcch_coreset_bank_state(i) == NR_CORESET_REMOVED)
       continue;
     t_bank_index = i;
-    t_candidate_share = additional ? nr_pdcch_discovered_candidate_share(shares, i, visit) : 0;
+    t_candidate_share = additional && !dwell_own_budget() ? nr_pdcch_discovered_candidate_share(shares, i, visit) : 0;
     nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
   }
@@ -5003,7 +5015,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   nr_pdcch_blind_monitor_cfg_override(NULL);
   if (discovered)
     run_discovered_occasion(ue, proc, serial_candidates, source_absolute_slot, &discovered_cfg,
-                            discovered_token, nr_pdcch_discovered_candidate_share(shares, n, visit));
+                            discovered_token, dwell_own_budget() ? NR_PDCCH_BANK_CANDIDATE_BUDGET : nr_pdcch_discovered_candidate_share(shares, n, visit));
   {
     /* Gate bookkeeping shared by every scan consumer (Task A7): decided under the Phase-2 lock, the
      * pass itself runs after it is released. */

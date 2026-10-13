@@ -36,6 +36,7 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_disc_td.h"
+#include "PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
@@ -2418,6 +2419,10 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
     }
   }
 
+  { /* BLINDPIPE: DL traffic probe / Point-A sweep mailbox (ISAC_DL_TRAFFIC_PROBE), independent of CSI-RS discovery */
+    const long abs_slot_tp = ((long)proc->hfn_rx * 1024 + proc->frame_rx) * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
+    if (abs_slot_tp >= 0) nr_dl_traffic_probe_push(ue, (uint32_t)abs_slot_tp, proc->frame_rx, proc->nr_slot_rx);
+  }
   if (nr_csirs_disc_enabled() && nr_csirs_disc_running()) {
     /* Stamp processed samples, not the RF producer's live counter. */
     const long abs_slot = ((long)proc->hfn_rx * 1024 + proc->frame_rx) * ue->frame_parms.slots_per_frame + proc->nr_slot_rx;
