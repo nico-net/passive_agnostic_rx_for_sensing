@@ -121,7 +121,8 @@ def main(a):
         cells = json.load(open(a[2])); c = next(c for c in cells if c['pci'] == int(a[3]))
         if c.get('k_ssb') is None: sys.exit('run pass 2 first (k_ssb from the MIB)')
         if 'sib1_nrb' in c and 'offset_to_point_a' in c: sys.exit('SIB1 carries the carrier: use retune_args.py / pass 2')
-        f, p = CE.psd(c['capture']); lo, hi, floor, level = CE.block(f, p, c['ssb_mhz'] * 1e6)
+        f, p = CE.psd(c['capture']); lo, hi, rise, fall = CE.block(f, p, c['ssb_mhz'] * 1e6)
+        if lo is None or hi is None: sys.exit('no clear carrier edges (idle / weak carrier): SIB1 (retune_restart.sh) or the Point-A sweep must decide')
         c['tune_geom'] = CE.geometry(lo, hi, c['ssb_mhz'] * 1e6, c['k_ssb']); c['tune_geom']['initial_fo'] = int(round(c['cfo_hz']))
         json.dump(cells, open(a[2], 'w'), indent=1); print(c['tune_geom'])
     elif cmd == 'specs':

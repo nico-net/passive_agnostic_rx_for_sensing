@@ -1,0 +1,40 @@
+[PHY]    Init: N_RB_DL 51, first_carrier_offset 718, nb_prefix_samples 72,nb_prefix_samples0 88, ofdm_symbol_size 1024
+[PHY]    Set UE_fo_compensation 1, UE_scan_carrier 0, UE_no_timing_correction 0 
+[PHY]    Initial sync: pbch not decoded on any branch, ssb index 0
+[PHY]    Initial sync: pbch decoded sucessfully, ssb index 3
+[PHY]    Initial sync successful, PCI: 403
+[PHY]    Got synch: hw_slot_offset 31, carrier off 157 Hz
+[MAC]    SENSING: MIB fields sfn=940 k_ssb=12 scs_common=1 coreset0=0 ss0=4 dmrs_typeA=0 barred=1 intraFreqResel=0
+[PHY]    SENSING: PDSCHQ queued=0 decoded=0 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: DL_TRAFFIC_PROBE on: one DL slot in 2, antenna 0, SCHED_OTHER worker; POINTA_SWEEP=1
+[PHY]    SENSING: ACQ state=CORESET_VERIFIED time_in_state=0 transitions=2 regressions=0 in[len=0 coreset=1 ul_bwp=0 dl_win=0 ul_win[w=0 i=0]] uldisc[gen=1 raw=0 wcls=0 icls=0 wtrials=0 itrials=0 rejected_fb=0] carrier=unchecked xoh[assumed=0 unresolved crc_ok=0] dmrs_id[dl=pending:-1/0 ul=pending:-1/0]
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890684826986626 rnti=0xffff sfn=944 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890684834740099 rnti=0xffff sfn=944 slot=14 fmt=1_0 cce=0 al=4
+[NR_RRC] SENSING: SIB1 has no servingCellConfigCommon (NSA-style SIB1); carrier/TDD/common config not available from SIB1
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890685359895161 rnti=0xffff sfn=948 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890685366536033 rnti=0xffff sfn=948 slot=14 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890685373167864 rnti=0xffff sfn=948 slot=15 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890685891618470 rnti=0xffff sfn=952 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890685898463679 rnti=0xffff sfn=952 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890685905085207 rnti=0xffff sfn=952 slot=14 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890686965097155 rnti=0xffff sfn=960 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890686971837404 rnti=0xffff sfn=960 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890686978570532 rnti=0xffff sfn=960 slot=14 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890687501931434 rnti=0xffff sfn=964 slot=12 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890687508680659 rnti=0xffff sfn=964 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890687515406555 rnti=0xffff sfn=964 slot=14 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890687522165412 rnti=0xffff sfn=964 slot=15 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890688040010300 rnti=0xffff sfn=968 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890688046709972 rnti=0xffff sfn=968 slot=14 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689094843099 rnti=0xffff sfn=976 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689101601124 rnti=0xffff sfn=976 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689108466333 rnti=0xffff sfn=976 slot=14 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689627673856 rnti=0xffff sfn=980 slot=12 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689634263335 rnti=0xffff sfn=980 slot=13 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689640908543 rnti=0xffff sfn=980 slot=14 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689647483158 rnti=0xffff sfn=980 slot=15 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890689654288031 rnti=0xffff sfn=980 slot=16 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890690165517518 rnti=0xffff sfn=984 slot=12 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890690172231255 rnti=0xffff sfn=984 slot=13 fmt=1_0 cce=4 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890690178969663 rnti=0xffff sfn=984 slot=14 fmt=1_0 cce=0 al=4
+[PHY]    SENSING: blind PDCCH rnti_seen utc_ns=1791890691245446895 rnti=0xffff sfn=992 slot=12 fmt=1_0 cce=0 al=4

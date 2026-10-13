@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """fastscan.py : fast blind n78/n77 cell scanner (30 kHz SCS), same cells.json as autofront.py discover, ~100x faster.
-  fastscan.py CAPDIR... [--out cells.json] [--start 0] [--m 12] [--nch 4] [--top 12] [--sss-min 2] [--dmrs-min 2.5] [--verify-chunks 50] [--n2-ex 3.0]
+  fastscan.py CAPDIR... [--out cells.json] [--start 0] [--m 12] [--nch 4] [--top 12] [--sss-min 1.5] [--dmrs-min 2.5] [--verify-chunks 50] [--n2-ex 3.0]
 Stage 1 (detect): M 20 ms chunks x nch channels, one FFT per chunk/channel, every GSCN band cut in the frequency domain at 3.84 MS/s,
   PSS correlation by FFT, |cc|^2 summed over channels, folded modulo k*20 ms (k=1,2,4,8). One CFO hypothesis (0): the 30 kHz PSS symbol
   tolerates +-7 kHz at <= 1 dB loss, so the CFO grid of autofront.py is not needed.
@@ -22,10 +22,11 @@ NB = 128                        # PSS body position in the window (decimated sam
 SYM = NF + CP
 WK = int(os.environ.get('FASTSCAN_WORKERS', '10'))
 
-def keep(rows, sss_min=2.0, dmrs_min=2.5, dmrs_min_multi=2.0, sss_strong=3.0, dmrs_min_strong=2.0):
+def keep(rows, sss_min=1.5, dmrs_min=2.5, dmrs_min_multi=2.0, sss_strong=3.0, dmrs_min_strong=2.0, dmrs_min_weak_sss=2.0):
     """reliable detections, best per (gscn, pci). Co-located cells (n_cells > 1) already passed the SSS group gap test, so a lower DMRS bar;
     so does a clear single SSS winner (gap >= sss_strong over 336 hypotheses: the noise gap is 1.0-1.4), e.g. the weak TIM 675 (sss 3.74, dmrs 2.47)."""
-    lo = lambda r: dmrs_min_multi if r.get('n_cells', 1) > 1 else dmrs_min_strong if r['sss_ratio'] >= sss_strong else dmrs_min
+    lo = lambda r: (dmrs_min_multi if r.get('n_cells', 1) > 1 else dmrs_min_strong if r['sss_ratio'] >= sss_strong
+                    else dmrs_min_weak_sss if r['sss_ratio'] < 2.0 else dmrs_min)
     ok = [r for r in rows if r['sss_ratio'] >= sss_min and r['dmrs_ratio'] >= lo(r)]
     return pick_cells(ok, 0, 0)
 
@@ -101,13 +102,14 @@ def clusters(ccs, thr=10.0, min_frac=0.15):
         out.append((ctr, [max([(r, i) for i, r in l if abs(i - ctr) <= 2], default=(0, None))[1] for l in pk]))
     return out
 
-def pci_group(sc, n2, gap=2.0, jmax=3):
+def pci_group(sc, n2, gap=2.0, jmax=3, gap1=1.5, halves=None):
     """PCIs of the SSS score vector: the smallest group of top scores separated from the rest by amplitude ratio >= gap (1 = one cell;
     2-3 = co-located cells sharing N_ID_2, e.g. 508 + 4: their PSS overlap so best/second alone is ~1.3). -> ([pci...], ratio)"""
     i = np.argsort(-sc); a = np.sqrt(sc[i] / (sc[i[0]] + 1e-30))
     for j in range(1, jmax + 1):
         if a[j - 1] / (a[j] + 1e-30) >= gap: return [3 * int(x) + n2 for x in i[:j]], float(a[j - 1] / (a[j] + 1e-30))
-    return [], float(a[0] / (a[1] + 1e-30))
+    r = float(a[0] / (a[1] + 1e-30))                       # weak winner (PCI 614 beside 508 + 4: 1.7-1.96): one cell only if BOTH independent halves of the occurrences (even / odd) pick the same PCI (noise: 1/336)
+    return ([3 * int(i[0]) + n2], r) if r >= gap1 and halves is not None and halves[0] == halves[1] == int(i[0]) else ([], r)
 
 def dmrs_cfo(occ, dpb, pci):
     """PBCH DMRS of symbols 1..3 (bin = subcarrier - 119; tau = fractional timing grid) -> i_ssb, ratio best/second, CFO (Hz)."""
@@ -131,14 +133,14 @@ def decode(occ, ns, n2):
     """SSS -> PCI(s), DMRS i_ssb and CFO for the occurrences (y, window-index of the PSS body) whose ns entry is not None -> list of dicts."""
     occ = [(y, n) for (y, _), n in zip(occ, ns) if n is not None]
     if len(occ) < 2: return []
-    sss_sc = {dp: np.zeros(336) for dp in (-1, 0, 1)}; pn = np.conj(S.pss(n2))
-    for y, n in occ:
+    sss_sc = {dp: np.zeros(336) for dp in (-1, 0, 1)}; pn = np.conj(S.pss(n2)); par = {dp: [np.zeros(336), np.zeros(336)] for dp in sss_sc}
+    for oi, (y, n) in enumerate(occ):
         for dp in sss_sc:
             q = n + dp
             for yy in y:
                 Hp = S.fsym(yy[q:q + NF]) * pn; Z = S.fsym(yy[q + 2 * SYM:q + 2 * SYM + NF])
-                sss_sc[dp] += np.abs(S.SS[n2] @ np.conj(Z * np.conj(Hp))) ** 2
-    dpb = max(sss_sc, key=lambda d: sss_sc[d].max()); pcis, ratio = pci_group(sss_sc[dpb], n2)
+                v = np.abs(S.SS[n2] @ np.conj(Z * np.conj(Hp))) ** 2; sss_sc[dp] += v; par[dp][oi % 2] += v
+    dpb = max(sss_sc, key=lambda d: sss_sc[d].max()); pcis, ratio = pci_group(sss_sc[dpb], n2, halves=(int(np.argmax(par[dpb][0])), int(np.argmax(par[dpb][1]))))
     out = []
     for pci in pcis:
         ib, dr, cfo = dmrs_cfo(occ, dpb, pci); out.append(dict(pci=pci, sss_ratio=ratio, dmrs_ratio=dr, i_ssb=ib, n_occ=len(occ), cfo_hz=cfo, n_cells=len(pcis)))
@@ -180,7 +182,7 @@ def scan(capdir, start=0.0, m=12, nch=4, top=40, vchunks=50, ex_min=1.0, n2_ex=3
     return out
 
 def main(a):
-    kw = dict(start=0.0, m=12, nch=4, top=40, vchunks=50, n2_ex=3.0); out = 'cells.json'; sss, dmrs = 2.0, 2.5; dirs = []; i = 1
+    kw = dict(start=0.0, m=12, nch=4, top=40, vchunks=50, n2_ex=3.0); out = 'cells.json'; sss, dmrs = 1.5, 2.5; dirs = []; i = 1
     while i < len(a):
         if a[i].startswith('--'):
             k = a[i][2:].replace('-', '_')
