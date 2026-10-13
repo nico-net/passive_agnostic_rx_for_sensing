@@ -1020,6 +1020,18 @@ static __thread int t_tinterp_override = -1;
  * tries a hypothesised contiguous CRB range; consumed in passive_decode_body() through the SSB rate-matching plan (same per-symbol per-PRB
  * exclusion semantics). first_crb/last_crb are common RB indices. */
 static __thread struct { int on; int first_crb, last_crb; uint16_t symbols; uint8_t crb[275]; } t_own_pdcch = {0, 0, 0, 0, {0}};
+/* tinterp_row: hm = ha + t (hb - ha) over n int16 values (re/im interleaved), single precision, round half away from zero
+ *   (lround's rule), saturated. O3 here only: the -O2 build does not vectorise it. Caller: ISAC_CHEST_TINTERP below. */
+static __attribute__((optimize("O3"))) void tinterp_row(const int16_t *restrict ha, const int16_t *restrict hb, int16_t *restrict hm,
+                                                        uint32_t n, float t)
+{
+  for (uint32_t k = 0; k < n; k++) {
+    float v = (float)ha[k] + t * ((float)hb[k] - (float)ha[k]);
+    v = fminf(fmaxf(v + copysignf(0.5f, v), -32768.f), 32767.f); /* branch-free: vectorises */
+    hm[k] = (int16_t)v;
+  }
+}
+
 /* chest_tinterp_global: ISAC_CHEST_TINTERP != 0 (cached). The unflipped state of the time interpolation. */
 static int chest_tinterp_global(void)
 {
@@ -3475,12 +3487,55 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * past the last / before the first) removes both to first order, using estimates we already have.
    * Written into the data symbol's own slot of pdsch_dl_ch_estimates; nr_dlsch_chest_per_symbol makes
    * nr_rx_pdsch read that slot. */
+  /* ISAC_PDSCH_CDM_DIAG=1 (diagnostic, default off, HIGHMCS2): on DM-RS symbols of a type-1 grant, mean |y|^2 on our CDM group's
+   * subcarriers vs the other group's. With 2 CDM groups without data the other group carries no data of this grant: noise
+   * alone reads ~-SNR dB, another UE's DM-RS (MU-MIMO co-scheduling) reads near 0 dB. One CDMDIAG line per full dedicated decode,
+   * joinable to EVMGRANT on rnti + frame.slot. */
+  {
+    static _Atomic int s_cdmd = -1;
+    if (s_cdmd < 0) s_cdmd = getenv("ISAC_PDSCH_CDM_DIAG") && atoi(getenv("ISAC_PDSCH_CDM_DIAG")) ? 1 : 0;
+    if (s_cdmd && !seg_path && !t_quiet && !t_probe_first_seg && grant->rnti_class == 0
+        && dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 && dlsch_config->dlDmrsSymbPos) {
+      const int N = fp->ofdm_symbol_size, nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+      const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
+      const int own = (get_dmrs_port(0, dlsch_config->dmrs_ports) / 2) & 1; /* type 1: port 1000/1001 -> group 0 (even k) */
+      double e[2] = {0.0, 0.0};
+      char sb[14 * 8 + 1], pb[14 * 8 + 1];
+      int su = 0, pu = 0;
+      double etot[14] = {0};
+      for (int m = 0; m < fp->symbols_per_slot && m < 14; m++) {
+        double es[2] = {0.0, 0.0}; /* per symbol, odd vs even subcarriers: a DM-RS symbol with one group used reads << 0 dB */
+        for (int a = 0; a < fp->nb_antennas_rx; a++)
+          for (int k = 0; k < nsc; k++) {
+            const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
+            es[k & 1] += (double)y.r * y.r + (double)y.i * y.i;
+          }
+        su += snprintf(sb + su, sizeof(sb) - su, "%s%.0f", m ? "," : "",
+                       es[own] > 0.0 && es[!own] > 0.0 ? 10.0 * log10(es[!own] / es[own]) : -99.0);
+        if ((dlsch_config->dlDmrsSymbPos >> m) & 1) { e[0] += es[0]; e[1] += es[1]; }
+        etot[m] = es[0] + es[1];
+      }
+      const int d0 = __builtin_ctz(dlsch_config->dlDmrsSymbPos | (1u << 15));
+      for (int m = 0; m < 14; m++) /* total energy per symbol vs the first DM-RS symbol: where the allocation really ends */
+        pu += snprintf(pb + pu, sizeof(pb) - pu, "%s%.0f", m ? "," : "",
+                       d0 < 14 && etot[d0] > 0.0 && etot[m] > 0.0 ? 10.0 * log10(etot[m] / etot[d0]) : -99.0);
+      if (e[own] > 0.0)
+        LOG_I(PHY, "SENSING: CDMDIAG rnti=0x%04x fs=%d.%d nl=%d ports=0x%x cdm=%d mcs=%u rb=%u+%u S=%u L=%u dmrs=0x%x other_vs_own_db=%.1f sym_db=[%s] pow_db=[%s]\n",
+              grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->Nl, dlsch_config->dmrs_ports, dlsch_config->n_dmrs_cdm_groups,
+              grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs, dlsch_config->start_symbol, dlsch_config->number_symbols,
+              dlsch_config->dlDmrsSymbPos, e[!own] > 0.0 ? 10.0 * log10(e[!own] / e[own]) : -99.0, sb, pb);
+    }
+  }
   static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (s_tinterp < 0) {
     const char *e = getenv("ISAC_CHEST_TINTERP");
     s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
   if (t_tinterp_override >= 0 ? t_tinterp_override : s_tinterp) {
+    /* the estimate rows are allocation-relative (nr_dlsch_extract_rbs reads [0, num_rbs*12)): interpolating the whole FFT
+     * width cost 4096 bins x Nl x nbRx x data symbols per decode; same values inside the span, nothing outside is read */
+    const uint32_t tspan_sc = (uint32_t)freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+    const uint32_t tspan = tspan_sc < (uint32_t)fp->ofdm_symbol_size ? tspan_sc : (uint32_t)fp->ofdm_symbol_size;
     int dsym[NR_SYMBOLS_PER_SLOT], nd = 0;
     for (int m = 0; m < NR_SYMBOLS_PER_SLOT; m++) /* every DM-RS symbol of the slot is estimated (K32) */
       if ((dmrs_full >> m) & 1)
@@ -3499,19 +3554,14 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         if (dsym[i] > m) i = 0;
         a = dsym[i]; b = dsym[i + 1];
       }
-      const double t = (b == a) ? 0.0 : (double)(m - a) / (double)(b - a);
+      const float t = (b == a) ? 0.f : (float)(m - a) / (float)(b - a);
       for (int nl = 0; nl < cw->Nl; nl++) {
         for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
           const int r = nl * fp->nb_antennas_rx + aarx;
-          const c16_t *ha = (const c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * a];
-          const c16_t *hb = (const c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * b];
-          c16_t *hm = (c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * m];
-          for (uint32_t k = 0; k < fp->ofdm_symbol_size; k++) {
-            const double re = ha[k].r + t * ((double)hb[k].r - ha[k].r);
-            const double im = ha[k].i + t * ((double)hb[k].i - ha[k].i);
-            hm[k].r = (int16_t)lround(re);
-            hm[k].i = (int16_t)lround(im);
-          }
+          const int16_t *ha = (const int16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * a];
+          const int16_t *hb = (const int16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * b];
+          int16_t *hm = (int16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * m];
+          tinterp_row(ha, hb, hm, 2 * tspan, t);
         }
       }
     }
@@ -5648,6 +5698,74 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
   return st;
 }
 
+/* ---- ISAC_PDSCH_SIGNAL_GEOM_RETRY=1 (default off, HIGHMCS2): the grant's time geometry read from the signal --------------------
+ * TIM PCI 923 schedules some DCI 1_1 PDSCH as S=1 L=5 (2 CDM groups without data, DM-RS on symbol 2 only) under TDRA values the
+ * solver resolved to S=1 L=13 DM-RS {2,11}: per-symbol power drops 22-38 dB after symbol 5 and the 2-CDM-group DM-RS signature
+ * (other CDM group empty) is on symbol 2 only (CDMDIAG). Those grants failed at every SNR. On a CRC-failed full dedicated grant:
+ *  - allocation end: the first symbol after which every symbol up to the assumed end is >= 15 dB below the first DM-RS symbol;
+ *  - DM-RS symbols: with 2 CDM groups and all ports in one group, the symbols whose other-group energy is <= -6 dB under their own;
+ *    otherwise the assumed mask's additional-position count re-applied to the new duration (TS 38.211 table 7.4.1.1.2-3, type A).
+ * The grant is re-decoded once with that geometry and kept only on a full TB CRC (no latch: the TDRA is per DCI, not per RNTI). */
+static int signal_geom_on(void)
+{
+  static _Atomic int s = -1;
+  if (s < 0) s = getenv("ISAC_PDSCH_SIGNAL_GEOM_RETRY") && atoi(getenv("ISAC_PDSCH_SIGNAL_GEOM_RETRY")) ? 1 : 0;
+  return s;
+}
+/* type-A single-symbol DM-RS for duration ld (first symbol of the slot to the last PDSCH symbol), l0 = first DM-RS symbol, `add`
+ * additional positions (dmrs-AdditionalPosition pos0..pos3), TS 38.211 table 7.4.1.1.2-3 */
+static uint16_t dmrs_mask_type_a(int l0, int ld, int add)
+{
+  uint16_t m = (uint16_t)(1u << l0);
+  if (ld < 8 || add == 0) return m;
+  if (ld <= 9) return m | (1u << 7);
+  if (add == 1) return m | (1u << (ld <= 12 ? 9 : 11));
+  if (add == 2 || ld <= 11) return m | (ld <= 12 ? (1u << 6) | (1u << 9) : (1u << 7) | (1u << 11));
+  return m | (1u << 5) | (1u << 8) | (1u << 11);
+}
+/* signal_geom_detect: number_symbols and DM-RS mask the FEP'd slot shows for this grant; false when it shows the assumed geometry or
+ *   cannot tell (non-contiguous PRBs, PRG). Type 1 only. */
+static bool signal_geom_detect(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa,
+                               c16_t rxdataF[][fp->samples_per_slot_wCP], uint8_t *n_sym, uint16_t *mask)
+{
+  const uint16_t assumed = cfg->dlDmrsSymbPos & 0x3FFF;
+  if (cfg->dmrsConfigType != NFAPI_NR_DMRS_TYPE1 || !assumed || fa->prg || fa->num_rbs < 1 || fa->last_rb - fa->first_rb + 1 != fa->num_rbs
+      || !cfg->dmrs_ports || (cfg->dmrs_ports & ~15u))
+    return false;
+  const int N = fp->ofdm_symbol_size, nsc = fa->num_rbs * NR_NB_SC_PER_RB, S = cfg->start_symbol, end = S + cfg->number_symbols;
+  const int sc0 = fp->first_carrier_offset + (cfg->BWPStart + fa->first_rb) * NR_NB_SC_PER_RB, d0 = __builtin_ctz(assumed);
+  const int own = (cfg->dmrs_ports & 3u) ? 0 : 1; /* type 1: ports 1000/1001 on even subcarriers, 1002/1003 on odd */
+  const bool one_group = !((cfg->dmrs_ports & 3u) && (cfg->dmrs_ports & 12u)) && cfg->n_dmrs_cdm_groups == 2;
+  if (end > 14 || d0 < S || d0 >= end) return false;
+  double e[14][2] = {{0}};
+  for (int m = S; m < end; m++)
+    for (int a = 0; a < fp->nb_antennas_rx; a++)
+      for (int k = 0; k < nsc; k++) {
+        const c16_t y = rxdataF[a][m * N + (sc0 + k) % N];
+        e[m][k & 1] += (double)y.r * y.r + (double)y.i * y.i;
+      }
+  const double p0 = e[d0][0] + e[d0][1];
+  if (p0 <= 0.0) return false;
+  int last = end; /* one past the last PDSCH symbol */
+  for (int m = d0 + 1; m < end && last == end; m++) {
+    bool quiet = true;
+    for (int k = m; k < end && quiet; k++) quiet = e[k][0] + e[k][1] <= p0 / 31.6; /* 15 dB */
+    if (quiet) last = m;
+  }
+  uint16_t det = 0;
+  if (one_group) {
+    for (int m = S; m < last; m++)
+      if (e[m][own] > 0.0 && e[m][!own] <= 0.25 * e[m][own]) det |= (uint16_t)(1u << m);
+    if (!(det & (1u << d0))) det = 0;
+  }
+  if (!det) det = dmrs_mask_type_a(d0, last, __builtin_popcount(assumed) - 1);
+  /* full length: a DM-RS-only correction never passed CRC on any capture (b: 26 tries / run, tim 0 / 73): not retried */
+  if (last == end) return false;
+  *n_sym = (uint8_t)(last - S);
+  *mask = det;
+  return true;
+}
+
 /* passive_decode_retry: runs passive_decode_body() and, on a CRC failure, tries the recovery arms (default off): TDRA start symbol, CSI-RS rate matching, DM-RS CDM groups, wide MRC.
  *   Arms: ISAC_PDSCH_TDRA_RETRY, ISAC_PDSCH_CSI_RETRY, ISAC_PDSCH_DMRS_CDM_RETRY, ISAC_PDSCH_WIDE_MRC_RETRY, ISAC_PDSCH_CSI_POPULATION_RETRY.
  *   A recovered decode sets out->config_recovered. Each trial re-demodulates the same samples with quiet mode (t_quiet). Caller: passive_decode_qamab() and nr_pdsch_passive_decode().
@@ -5735,6 +5853,38 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
     nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st);
   }
   if (rp_on && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && grant->dci11 && grant->rnti_class == 0) nr_retry_pred_miss(grant->rnti);
+  if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && signal_geom_on() && grant->dci11 && grant->rnti_class == 0 && !t_probe_first_seg && !t_gw_capture
+      && !t_gw_used && !(t_quiet && !t_qam_ab_alt) && !t_llr_ovr && !nr_agnostic_v2() && !harq_combine_on()) {
+    uint8_t n_sym = 0;
+    uint16_t mask = 0;
+    if (signal_geom_detect(&ue->frame_parms, dlsch_config, freq_alloc, rxdataF, &n_sym, &mask)) {
+      const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
+      const nr_pdsch_passive_decode_result_t out0 = *out;
+      const bool saved_quiet = t_quiet;
+      const double saved_fo_override = nr_slot_fep_fo_override_hz;
+      nr_slot_fep_fo_override_hz = t_last_fep_fo;
+      t_quiet = true;
+      dlsch_config->number_symbols = n_sym;
+      dlsch_config->dlDmrsSymbPos = (original.dlDmrsSymbPos & ~0x3FFFu) | mask;
+      t_decode_tdra_attempt = 6 + 64 * 50;
+      const nr_pdsch_passive_decode_status_t st2 = passive_decode_body(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
+      if (t_gw_owner) { t_gw_owner = false; nr_td_grantwork_abandon(t_gw, t_gw_sig, (int)st2); }
+      if (st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
+        st = st2;
+        out->config_recovered = true;
+      } else { /* the plain decode's result stands (its thread-local LLR view is the retry's, as with ISAC_PDSCH_RETRY_NORESTORE) */
+        *dlsch_config = original;
+        *out = out0;
+      }
+      LOG_I(PHY, "SENSING: SIGGEOM rnti=0x%04x fs=%d.%d nl=%d ports=0x%x cdm=%u mcs=%u S=%u L=%u->%u dmrs=0x%x->0x%x crc=%d\n", grant->rnti,
+            proc->frame_rx, proc->nr_slot_rx, __builtin_popcount(original.dmrs_ports), original.dmrs_ports, original.n_dmrs_cdm_groups,
+            grant->mcs, original.start_symbol, original.number_symbols, n_sym, original.dlDmrsSymbPos & 0x3FFF, mask,
+            st2 == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      nr_slot_fep_fo_override_hz = saved_fo_override;
+      t_quiet = saved_quiet;
+      t_decode_tdra_attempt = 0;
+    }
+  }
   const nr_pdsch_passive_decode_result_t out_plain = *out; /* only read with rn_on */
   const nr_pdsch_passive_decode_status_t st_plain = st;
   /* DECODE-FIX: CRC success for one DCI does not establish the TDRA or
@@ -5832,6 +5982,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
   if (try_start || try_csi || try_cdm || try_wide || try_tint || n_csi_variants > 1) {
     const fapi_nr_dl_config_dlsch_pdu_rel15_t original = *dlsch_config;
     const bool saved_quiet = t_quiet;
+    const int saved_tint = t_tinterp_override; /* a TINT_AB arm's choice must survive its recovery arms */
     const double saved_fo_override = nr_slot_fep_fo_override_hz;
     nr_slot_fep_fo_override_hz = t_last_fep_fo; /* same frequency compensation for paired trials */
     t_quiet = true; /* do not teach unrelated parameter sweeps from these trials */
@@ -5857,7 +6008,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
           break;
         }
         ry_bodies++;
-        t_tinterp_override = (arm & 16) ? !chest_tinterp_global() : -1;
+        t_tinterp_override = (arm & 16) ? !chest_tinterp_global() : saved_tint;
         *dlsch_config = original;
         if (arm & 1) *dlsch_config = csi_variants[cv];
         if (arm & 2) {
@@ -5890,7 +6041,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
           dlsch_config->start_symbol, dlsch_config->number_symbols, dlsch_config->numCsiRsForRateMatching, original.n_dmrs_cdm_groups, dlsch_config->n_dmrs_cdm_groups,
           t_decode_tdra_attempt);
     nr_pdsch_decode_wide_mrc = false;
-    t_tinterp_override = -1;
+    t_tinterp_override = saved_tint;
     if (!recovered && (!ry || ry_bodies > 0)) {
       /* Restore the public result AND the thread-local decoder/LLR view
        * used by the queue's diagnostics and equivalence checks. */
