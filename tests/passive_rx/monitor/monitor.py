@@ -465,6 +465,7 @@ class Host:
     """Receiver process and host health, read from /proc and /sys (cached 2 s, cheap)."""
 
     def __init__(self):
+        self.log = None  # the live run's log: only the receiver writing it (stdout/stderr) is attributed to the run
         self._t = 0.0
         self._v = {}
         self._prev = {}
@@ -475,16 +476,19 @@ class Host:
         if now - self._t < 2.0:
             return self._v
         v = {"rx_pids": [], "rx_cpu_pct": None, "threads": [], "temp_c": None, "mem_avail_gb": None, "monitor_cpu_pct": None}
+        cand = []
         try:
             for p in os.listdir("/proc"):
                 if p.isdigit():
                     try:
                         if open("/proc/%s/comm" % p).read().strip() == "nr-uesoftmodem":
-                            v["rx_pids"].append(int(p))
+                            cand.append((int(p), self._writes_log(p)))
                     except OSError:
                         pass
         except OSError:
             pass
+        # the receiver(s) writing this run's log; a root-owned receiver hides its fds: attribute it only when it is the only one
+        v["rx_pids"] = [p for p, w in cand if w] or ([cand[0][0]] if self.log and len(cand) == 1 and cand[0][1] is None else [])
         hz = os.sysconf("SC_CLK_TCK")
         if v["rx_pids"]:
             pid = v["rx_pids"][0]
@@ -529,6 +533,23 @@ class Host:
         self._self = s1
         self._t, self._v = now, v
         return v
+
+    def _writes_log(self, pid):
+        """True if pid's stdout or stderr is the live run's log (another receiver on the host, e.g. a sibling cell or an
+        unrelated replay, must never lend its CPU, command line or environment to this run). No log: nothing matches.
+        None = fds not readable (root-owned receiver)."""
+        if not self.log:
+            return False
+        want, hidden = os.path.realpath(self.log), False
+        for fd in (1, 2):
+            try:
+                if os.path.realpath(os.readlink("/proc/%s/fd/%d" % (pid, fd))) == want:
+                    return True
+            except PermissionError:
+                hidden = True
+            except OSError:
+                pass
+        return None if hidden else False
 
     @staticmethod
     def _ticks(path):
@@ -684,6 +705,7 @@ class Manager:
                     self._open_primary()
                 if self.primary:
                     self.primary.advance()
+                    self.host.log = self.primary.files.get("log") if self.primary.live else None
                     host = self.host.get()
                     if host["rx_pids"] and self.primary.state.cmdline is None:
                         cfg = Host.proc_config(host["rx_pids"][0])

@@ -391,6 +391,39 @@ class Fixtures(unittest.TestCase):
         monitor.log_lines(r.files["log"], "EVMGRANT", False, 10)
         self.assertEqual(before, {f: os.path.getmtime(os.path.join(d, f)) for f in os.listdir(d)})
 
+    def test_host_attributes_only_the_runs_own_receiver(self):
+        """Another nr-uesoftmodem on the host (sibling cell, unrelated replay) must not lend its pid/cmdline to this run."""
+        import subprocess
+        d = tempfile.mkdtemp(prefix="rxhost_")
+        try:
+            exe = os.path.join(d, "nr-uesoftmodem")
+            shutil.copy("/bin/sleep", exe)
+            mine, other = os.path.join(d, "mine.log"), os.path.join(d, "other.log")
+            with open(other, "w") as fo:
+                p = subprocess.Popen([exe, "30"], stdout=fo, stderr=subprocess.STDOUT)
+            try:
+                time.sleep(0.2)
+                h = monitor.Host()
+                self.assertNotIn(p.pid, h.get()["rx_pids"])            # offline / no log: nothing attributed
+                h.log, h._t = mine, 0.0
+                self.assertNotIn(p.pid, h.get()["rx_pids"])            # writes another log
+                h.log, h._t = other, 0.0
+                self.assertIn(p.pid, h.get()["rx_pids"])               # writes this run's log
+            finally:
+                p.terminate(); p.wait()
+        finally:
+            shutil.rmtree(d)
+
+    def test_p99age_line(self):
+        # nr_pdsch_passive_queue.c nr_pdsch_passive_queue_p99_dump() format string
+        st = feed(["[PHY]    SENSING: P99AGE slots(<2/4/8/12/16/18/24/32/inf) pdsch_enq_real=[5,4,3,2,1,0,0,0,9] "
+                   "pdsch_enq_probe=[1,0,0,0,0,0,0,0,0] scan_deq=[7,0,0,0,0,0,0,0,1] scanq_fresh=3 retry_chains=4 retry_yields=5 retry_gated=6"])
+        pa = st.snapshot()["timing"]["p99age"]
+        self.assertEqual(pa["hist"]["pdsch_enq_real"], [5, 4, 3, 2, 1, 0, 0, 0, 9])
+        self.assertEqual(pa["hist"]["scan_deq"][-1], 1)
+        self.assertEqual(len(pa["bins"]), 9)
+        self.assertEqual((pa["scanq_fresh"], pa["retry_gated"]), (3, 6))
+
     def test_cfr_reader_rejects_bad_framing(self):
         d = tempfile.mkdtemp(prefix="rxcfr_")
         try:
