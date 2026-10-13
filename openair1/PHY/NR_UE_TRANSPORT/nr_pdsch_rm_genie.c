@@ -31,8 +31,17 @@ bool nr_pdsch_rm_genie_on(void)
   return nr_pdsch_rm_genie_level() >= 1;
 }
 
-/* Expected transmitted bits f[0..G) for TB bytes tb (B/8, CRC included), rv. Returns 0 on success. */
-static int expect_bits(const uint8_t *tb, uint32_t B, uint8_t BG, uint8_t Qm, uint8_t rv, uint32_t tbslbrm, uint32_t G, uint8_t *f)
+/* ISAC_PDSCH_RM_GENIE_MAX: RMMAP line budget (default 400; HIGHMCS replays use 20000). */
+static int nlines_cap(void)
+{
+  static int s = -1;
+  if (s < 0) { const char *e = getenv("ISAC_PDSCH_RM_GENIE_MAX"); s = e && atoi(e) > 0 ? atoi(e) : 400; }
+  return s;
+}
+
+/* Expected transmitted bits f[0..G) for TB bytes tb (B/8, CRC included), rv; every code block (38.212 5.2.2, 5.4.2.1:
+ * E_r = Nl Qm floor(G / (Nl Qm C)) for the first C - (G/(Nl Qm)) mod C blocks, ceil for the rest). Returns 0 on success. */
+static int expect_bits(const uint8_t *tb, uint32_t B, uint8_t BG, uint8_t Qm, uint8_t Nl, uint8_t rv, uint32_t tbslbrm, uint32_t G, uint8_t *f)
 {
   if (!g_enc) {
     void *h = dlopen("libldpc.so", RTLD_NOW | RTLD_LOCAL);
@@ -40,17 +49,30 @@ static int expect_bits(const uint8_t *tb, uint32_t B, uint8_t BG, uint8_t Qm, ui
     if (!g_enc) return -1;
   }
   unsigned int C, K, Z, F;
-  if (nr_segmentation(NULL, NULL, B, &C, &K, &Z, &F, BG) < 0 || C != 1) return -1;
+  if (nr_segmentation(NULL, NULL, B, &C, &K, &Z, &F, BG) < 0 || C < 1 || C > 64) return -1;
+  const uint32_t q = Nl * Qm, gq = q ? G / q : 0;
+  if (!q || gq < C) return -1;
   uint8_t *a = calloc(B / 8 + 8, 1);
-  uint8_t *c[1] = {calloc(K / 8 + 64, 1)};
+  uint8_t *c[64];
+  for (unsigned r = 0; r < C; r++) c[r] = calloc(K / 8 + 64, 1);
   memcpy(a, tb, B / 8);
   const int Kb = nr_segmentation(a, c, B, &C, &K, &Z, &F, BG);
   uint8_t *dout = calloc(68 * 384, 1), *e = calloc(G + 64, 1);
   encoder_implemparams_t impp = {.Zc = Z, .Kb = Kb, .BG = BG, .K = K, .gen_code = 0};
-  g_enc(c, dout, &impp);
-  int rc = nr_rate_matching_ldpc(tbslbrm, BG, Z, dout, e, 1, F, K - F - 2 * Z, rv, G);
-  if (rc == 0) nr_interleaving_ldpc(G, Qm, e, f);
-  free(a); free(c[0]); free(dout); free(e);
+  const uint32_t first_ceil = C - gq % C;
+  int rc = 0;
+  uint32_t off = 0;
+  for (unsigned r = 0; r < C && rc == 0; r++) {
+    const uint32_t E = q * (r < first_ceil ? gq / C : (gq + C - 1) / C);
+    uint8_t *cr[1] = {c[r]};
+    memset(dout, 0, 68 * 384);
+    g_enc(cr, dout, &impp);
+    rc = nr_rate_matching_ldpc(tbslbrm, BG, Z, dout, e, C, F, K - F - 2 * Z, rv, E);
+    if (rc == 0) nr_interleaving_ldpc(E, Qm, e, f + off);
+    off += E;
+  }
+  if (rc == 0 && off != G) rc = -1;
+  free(a); for (unsigned r = 0; r < C; r++) free(c[r]); free(dout); free(e);
   return rc;
 }
 
@@ -92,15 +114,15 @@ void nr_pdsch_rm_genie_note(uint16_t rnti, int frame, int slot, uint32_t A, cons
 {
   const uint32_t B = A + (A > 3824 ? 24 : 16);
   uint8_t *f = calloc(G + 64, 1);
-  if (expect_bits(tb, B, BG, Qm, rv, tbslbrm, G, f) == 0 && g_nlines_map < 400) {
+  if (expect_bits(tb, B, BG, Qm, Nl, rv, tbslbrm, G, f) == 0 && g_nlines_map < nlines_cap()) {
     char bk[96]; double tot; char ph[96] = ""; 
     buckets(llr, f, G, bk, sizeof(bk), &tot);
     phases(llr, f, G, (unsigned)Qm * Nl, ph, sizeof(ph));
     pthread_mutex_lock(&g_mu);
     g_nlines_map++;
     pthread_mutex_unlock(&g_mu);
-    LOG_A(PHY, "SENSING: RMMAP rnti=0x%04x fs=%d.%d mcs=%u rv=%u nl=%u A=%u G=%u err_pct=%.1f by_eighth=[%s] by_phase=[%s] zero_pct=%.1f\n", rnti, frame, slot,
-          mcs, rv, Nl, A, G, tot, bk, ph, g_zero_pct);
+    LOG_A(PHY, "SENSING: RMMAP rnti=0x%04x fs=%d.%d mcs=%u rv=%u nl=%u qm=%u A=%u G=%u err_pct=%.2f by_eighth=[%s] by_phase=[%s] zero_pct=%.1f\n", rnti, frame, slot,
+          mcs, rv, Nl, Qm, A, G, tot, bk, ph, g_zero_pct);
   }
   free(f);
   pthread_mutex_lock(&g_mu);
@@ -126,7 +148,7 @@ void nr_pdsch_rm_genie_fail(uint16_t rnti, int frame, int slot, uint32_t A, uint
     if (!(en.used && en.rnti == rnti && en.A == A)) continue;
     ncand++;
     for (int r = 0; r < 4; r++) {
-      if (expect_bits(tbc, en.B, BG, Qm, r, tbslbrm, G, f) != 0) continue;
+      if (expect_bits(tbc, en.B, BG, Qm, Nl, r, tbslbrm, G, f) != 0) continue;
       char bk[96]; double tot;
       buckets(llr, f, G, bk, sizeof(bk), &tot);
       if (100.0 - tot > best) { best = 100.0 - tot; bfr = en.frame; bsl = en.slot; brv = r; memcpy(bbk, bk, sizeof(bk)); bz = g_zero_pct; bph[0] = 0; phases(llr, f, G, (unsigned)Qm * Nl, bph, sizeof(bph)); }
