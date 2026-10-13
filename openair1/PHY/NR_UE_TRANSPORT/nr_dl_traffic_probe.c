@@ -138,7 +138,19 @@ int nr_dltp_grants_for(uint16_t frame, uint8_t slot, nr_dltp_grant_t *out, int c
 void nr_cdisc_step(nr_cdisc_t *c, const nr_cdisc_in_t *in, nr_cdisc_out_t *out)
 {
   const nr_cdisc_state_t old = c->state;
-  out->recover = 0; out->traffic = 0;
+  out->recover = 0; out->traffic = 0; out->reacquire = 0; out->rearm = 0;
+  if (in->bank_count == 0 && in->sync_poor) {
+    /* unusable symbols are not a miss: no grace progress, no recovery budget */
+    if (!c->was_poor) { c->was_poor = 1; c->poor_since_s = in->now_s; c->last_reacquire_s = -1e9; }
+    c->state = NR_CDISC_SYNC_POOR; out->reason = "sync_poor_timing_unstable";
+    if (in->now_s - c->last_reacquire_s >= in->miss_s) { c->last_reacquire_s = in->now_s; c->reacquires++; out->reacquire = 1; }
+    out->changed = c->state != old;
+    return;
+  }
+  if (c->was_poor) { /* sync is back: exclude the poor time from the grace and re-arm the sweep over fresh symbols */
+    const double lost = in->now_s - c->poor_since_s;
+    c->armed_s += lost; c->last_recover_s += lost; c->was_poor = 0; out->rearm = 1;
+  }
   if (in->bank_count > 0) {
     c->state = NR_CDISC_LOCKED; c->recoveries = 0; out->reason = "dedicated_coreset_banked";
   } else if (!in->carrier_ok) {
@@ -162,3 +174,65 @@ void nr_cdisc_step(nr_cdisc_t *c, const nr_cdisc_in_t *in, nr_cdisc_out_t *out)
   }
   out->changed = c->state != old;
 }
+
+/* ---- sync quality (ACQMISS-2) ---- */
+#include <stdatomic.h>
+static int cmp_u(const void *a, const void *b) { unsigned x = *(const unsigned *)a, y = *(const unsigned *)b; return x < y ? -1 : x > y; }
+int nr_syncq_classify(const unsigned *mag, int n, int prev_poor, int *med, int *p90)
+{
+  if (n < NR_SYNCQ_MIN) return -1;
+  unsigned s[NR_SYNCQ_WIN];
+  if (n > NR_SYNCQ_WIN) n = NR_SYNCQ_WIN;
+  memcpy(s, mag, (size_t)n * sizeof(unsigned));
+  qsort(s, (size_t)n, sizeof(unsigned), cmp_u);
+  const int m = (int)s[n / 2], p = (int)s[(int)(n * 0.9)];
+  if (med) *med = m;
+  if (p90) *p90 = p;
+  if (m > NR_SYNCQ_MED_POOR || p > NR_SYNCQ_P90_POOR) return 2;
+  if (prev_poor && (m > NR_SYNCQ_MED_GOOD || p > NR_SYNCQ_P90_GOOD)) return 2;
+  return m > NR_SYNCQ_MED_DEGRADED ? 1 : 0;
+}
+static _Atomic unsigned g_sq_ring[NR_SYNCQ_WIN];
+static _Atomic unsigned g_sq_count, g_sq_poor, g_sq_level, g_sq_reacq, g_sq_clamp;
+static _Atomic int g_sq_med, g_sq_p90;
+int nr_syncq_enabled(void)
+{
+  static int e = -1;
+  if (e < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); e = v ? atoi(v) : 0; if (e < 0 || e > 2) e = 0; }
+  return e != 0;
+}
+void nr_syncq_note(int step)
+{
+  if (!nr_syncq_enabled()) return;
+  const unsigned k = atomic_load_explicit(&g_sq_count, memory_order_relaxed);
+  atomic_store_explicit(&g_sq_ring[k % NR_SYNCQ_WIN], (unsigned)(step < 0 ? -step : step), memory_order_relaxed);
+  atomic_store_explicit(&g_sq_count, k + 1, memory_order_release);
+  unsigned w[NR_SYNCQ_WIN];
+  const int n = k + 1 < NR_SYNCQ_WIN ? (int)(k + 1) : NR_SYNCQ_WIN;
+  for (int i = 0; i < n; ++i) w[i] = atomic_load_explicit(&g_sq_ring[i], memory_order_relaxed);
+  int med = 0, p90 = 0;
+  const int r = nr_syncq_classify(w, n, (int)atomic_load_explicit(&g_sq_poor, memory_order_relaxed), &med, &p90);
+  atomic_store_explicit(&g_sq_med, med, memory_order_relaxed);
+  atomic_store_explicit(&g_sq_p90, p90, memory_order_relaxed);
+  atomic_store_explicit(&g_sq_poor, r == 2, memory_order_relaxed);
+  atomic_store_explicit(&g_sq_level, r < 0 ? 0 : r, memory_order_relaxed);
+}
+int nr_syncq_status(int *med, int *p90)
+{
+  if (med) *med = atomic_load_explicit(&g_sq_med, memory_order_relaxed);
+  if (p90) *p90 = atomic_load_explicit(&g_sq_p90, memory_order_relaxed);
+  if (atomic_load_explicit(&g_sq_count, memory_order_acquire) < NR_SYNCQ_MIN) return -1;
+  return (int)atomic_load_explicit(&g_sq_level, memory_order_relaxed);
+}
+/* ISAC_CORESET_DISC_SYNCQ=1: report + re-acquire + re-arm. =2: additionally pause the nID capture while POOR. MEASURED (replay, injected wander): pausing
+ * HURTS where the sweep still works with poor sync (TIM tile3 banked 1 CORESET with wander and 0 when paused), so 2 is not the recommended value. */
+int nr_syncq_gate_closed(void)
+{
+  static int lvl = -1;
+  if (lvl < 0) { const char *v = getenv("ISAC_CORESET_DISC_SYNCQ"); lvl = v ? atoi(v) : 0; }
+  return lvl == 2 && atomic_load_explicit(&g_sq_poor, memory_order_relaxed);
+}
+void nr_syncq_request_reacquire(void) { atomic_store_explicit(&g_sq_reacq, 1, memory_order_relaxed); atomic_store_explicit(&g_sq_clamp, 1, memory_order_relaxed); }
+int nr_syncq_take_reacquire(void) { return nr_syncq_enabled() && atomic_exchange_explicit(&g_sq_reacq, 0, memory_order_relaxed); }
+int nr_syncq_clamp(void) { return nr_syncq_enabled() && atomic_load_explicit(&g_sq_clamp, memory_order_relaxed) ? NR_SYNCQ_CLAMP : 0; }
+void nr_syncq_clamp_release(void) { atomic_store_explicit(&g_sq_clamp, 0, memory_order_relaxed); }

@@ -22,6 +22,10 @@ typedef struct {
   unsigned decim;
   float *taps; int ntaps;
   int16_t *hist[8], *scr[8]; int scr_cap;
+  /* ISAC_RAW_IQ_WANDER=lo:hi (replay-only test injection, default off): a new random content offset of +-[lo,hi] samples every 10 ms frame
+   * (memoryless, like the SSB timing jumps measured in ab_L1_1_110507); the returned timestamps stay continuous, so the receiver sees a
+   * jittering cell timing, not a stream loss. ISAC_RAW_IQ_WANDER_UNTIL_S=<s> (default 0 = whole run) stops it. */
+  int wander_lo, wander_hi; uint64_t wander_until, wander_frame, wander_ts; int wander_off, wander_on; uint32_t wander_rng;
 } replay_state;
 
 #define DEC_TAPS 127
@@ -110,7 +114,25 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
   uint64_t ts;
   int got;
   if (D == 1) {
+    uint64_t wander_ts = 0;
+    if (s->wander_on) {
+      const uint64_t pos = s->source.position, frame = pos / (uint64_t)(s->source.rate / 100);
+      if (!s->wander_ts) s->wander_ts = s->source.first_tick + pos;
+      if (frame != s->wander_frame) {
+        s->wander_frame = frame;
+        int o = 0;
+        if (!s->wander_until || pos < s->wander_until) {
+          s->wander_rng = s->wander_rng * 1664525u + 1013904223u; const int mag = s->wander_lo + (int)((s->wander_rng >> 8) % (unsigned)(s->wander_hi - s->wander_lo + 1));
+          s->wander_rng = s->wander_rng * 1664525u + 1013904223u; o = (s->wander_rng >> 16) & 1 ? mag : -mag;
+        }
+        int64_t np = (int64_t)pos + (o - s->wander_off);
+        if (np < 0) np = 0;
+        s->source.position = (uint64_t)np; s->wander_off = o;
+      }
+      wander_ts = s->wander_ts; s->wander_ts += (uint64_t)n;
+    }
     got = raw_iq_read(&s->source, b, n, c, &ts);
+    if (s->wander_on) ts = wander_ts;
   } else {
     if (m > s->scr_cap) {
       for (int k = 0; k < 8; ++k) { free(s->scr[k]); s->scr[k] = malloc((size_t)(m + DEC_TAPS) * 4); }
@@ -163,6 +185,12 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   { const char *dv = getenv("ISAC_RAW_IQ_DECIM"); s->decim = dv ? (unsigned)atoi(dv) : 1;
     AssertFatal(s->decim >= 1 && s->decim <= 4 && channels <= 8, "RAW_IQ_VOID invalid ISAC_RAW_IQ_DECIM\n");
     if (s->decim > 1) decim_init(s); }
+  { const char *w = getenv("ISAC_RAW_IQ_WANDER"); int lo, hi;
+    if (w && sscanf(w, "%d:%d", &lo, &hi) == 2 && lo >= 0 && hi >= lo) {
+      s->wander_lo = lo; s->wander_hi = hi; s->wander_on = 1; s->wander_rng = 12345u;
+      const char *u = getenv("ISAC_RAW_IQ_WANDER_UNTIL_S"); s->wander_until = u ? (uint64_t)(atof(u) * s->source.rate) : 0;
+      fprintf(stderr, "RAW_IQ_WANDER armed +-[%d,%d] samples per frame until_s=%s\n", lo, hi, u ? u : "end");
+    } }
   pthread_mutex_init(&s->mutex, NULL);
   d->priv = s; d->openair0_cfg = cfg; d->type = NONE_DEV;
   for (unsigned c = 0; c < channels; ++c) {
