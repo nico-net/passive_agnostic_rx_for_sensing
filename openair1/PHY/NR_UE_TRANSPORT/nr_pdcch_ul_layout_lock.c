@@ -328,8 +328,8 @@ static pending_t g_pend[PENDING_MAX];
 static int g_npend;
 static long g_first_slot = -1, g_lock_slot = -1, g_trial_slot = -1;
 /* ISAC_UL_LOCK_PRIOR_SEARCH (ULPRIOR): provisional adoption of the top prior-ranked (N, start); see nr_ul_layout_prior_note() */
-#define PRIOR_D 4           /* start offsets +-0..PRIOR_D around each prior start are enumerated */
-#define PRIOR_MAXH 96       /* hypotheses the prior enumeration may add */
+#define PRIOR_D 8           /* start offsets +-0..PRIOR_D around each seed are enumerated */
+#define PRIOR_MAXH 120      /* hypotheses the prior enumeration may add */
 #define PRIOR_SEARCH_MAX 16 /* hypotheses tried before the search returns to the top prior and stops */
 static bool g_prov, g_search_done;
 static uint8_t g_dem[NR_UL_LAYOUT_MAX_HYP];
@@ -337,6 +337,7 @@ static uint32_t g_p_exp, g_p_ok, g_p_dec, g_ndem, g_prov_ctr;
 static int g_p_src; /* 0 none, 1 SIB1 start, 2 DL-consistent start, 3 neighbour of a prior start */
 static long g_prov_slot = -1;
 static void append_prior_locked(void);
+static bool prior_vote_move_locked(long now);
 static void lock_length_locked(len_state_t *ls, long now_slot);
 static int pre_for_hyp(const len_state_t *ls, int h);
 
@@ -678,6 +679,7 @@ static void finalize_pending_locked(void)
     else if (b < 0 || g_hyp[h].votes > g_hyp[b].votes) b = h;
   }
   if (a < 0) return;
+  if (g_prov && prior_vote_move_locked(now)) return;
   const uint32_t va = g_hyp[a].votes, vb = b >= 0 ? g_hyp[b].votes : 0;
   if (va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS) {
     if (g_prov) { /* DM-RS votes confirm (or move) the provisional adoption */
@@ -1407,23 +1409,85 @@ static uint32_t prior_dwell(void)
   const char *e = getenv("ISAC_UL_LOCK_PRIOR_DWELL");
   return e && atoi(e) > 0 ? (uint32_t)atoi(e) : 10u;
 }
-/* nearest prior start (distance, 1 = SIB1, 2 = DL); -1 when no prior is known */
-static int prior_dist(int start, int *src)
+/* SIZE = the RIV-statistics fit (never a prior): the fit's own candidate N values (nr_ul_layout_fit_prefix(), the cand_list() sizes whose RIV width
+ * equals the fitted width of a prefix) that read all but 1 % of the CRC-verified DCIs of the bank as a legal (S, L) (S+L <= N, RIV < N(N+1)/2). Shifted-field
+ * prefix readings decode garbage and fall out. Size class = rank of the fit prefix that admits the size (twins 217/216 share a class; the start seeds and then N descending order them). A prior size that is not in
+ * this list (217 initial BWP vs a 107 dedicated BWP) is never adopted. */
+#define PRIOR_NFIT_MAX 24
+static uint16_t g_nfit[PRIOR_NFIT_MAX];
+static uint8_t g_ncls[PRIOR_NFIT_MAX]; /* prefix rank of the fit that admits the size */
+static int g_nnfit;
+static void prior_fit_sizes_locked(void)
 {
-  int best = -1;
-  *src = 0;
-  if (g_cell.sib1_ul_size > 0) { best = abs(start - (int)g_cell.sib1_ul_start); *src = 1; }
-  if (g_cell.dl_bwp_size > 0 && (best < 0 || abs(start - (int)g_cell.dl_bwp_start) < best)) { best = abs(start - (int)g_cell.dl_bwp_start); *src = 2; }
-  return best;
+  uint16_t cn[64];
+  const int nc = cand_list(cn, 64);
+  for (int i = 1; i < nc; i++) /* N descending */
+    for (int j = i; j > 0 && cn[j] > cn[j - 1]; j--) { const uint16_t x = cn[j]; cn[j] = cn[j - 1]; cn[j - 1] = x; }
+  g_nnfit = 0;
+  for (int p = 0; p < NR_UL_LAYOUT_MAX_PRE; p++)
+    for (int l = 0; l < g_nlen; l++) {
+      const len_state_t *ls = &g_len[l];
+      if (!ls->fitted || p >= ls->npre) continue;
+      const int w = ls->pre[p].riv, nb = ls->count < NR_UL_LAYOUT_BANK ? (int)ls->count : NR_UL_LAYOUT_BANK;
+      for (int c = 0; c < nc; c++) {
+        const int n = cn[c];
+        if (nr_ul_layout_riv_bits(n) != w || n > g_cell.carrier_rb) continue;
+        int nbad = 0; /* tolerance 1 %: a CRC-verified DCI of another format/RNTI class can be illegal for the true N (OTA 415b: 216 lost at 0 %) */
+        for (int i = 0; i < nb && nbad <= nb / 100; i++) {
+          uint16_t st, ln;
+          nbad += !nr_ul_layout_riv(fld(&ls->bank[i].p, ls->len, 1 + ls->pre[p].bwp_ind, w), n, &st, &ln);
+        }
+        const bool bad = nbad > nb / 100;
+        bool have = false;
+        for (int q = 0; q < g_nnfit; q++) have |= g_nfit[q] == n;
+        if (!bad && !have && g_nnfit < PRIOR_NFIT_MAX) { g_ncls[g_nnfit] = (uint8_t)p; g_nfit[g_nnfit++] = (uint16_t)n; }
+      }
+    }
 }
-/* ranking key of hypothesis h (smaller is better): size class first (SIB1 size, DL size, any other consistent size: the size is the
- * well-determined part), then start distance to a prior (the START is what is searched), prior order, larger N */
+/* size class of N = its index in the fitted size list; -1 when N is not a fitted size */
+static int prior_size_class(int n)
+{
+  for (int q = 0; q < g_nnfit; q++) if (g_nfit[q] == n) return g_ncls[q];
+  return -1;
+}
+/* start seeds for size n, in rank order: SIB1 start, DL-consistent start (both clamped into [0, carrier-n]), left edge, carrier-centre, right edge */
+static int prior_seeds(int n, int *seed)
+{
+  const int hi = g_cell.carrier_rb - n;
+  int k = 0;
+  if (hi < 0) return 0;
+  seed[k++] = g_cell.sib1_ul_size ? (g_cell.sib1_ul_start < hi ? g_cell.sib1_ul_start : hi) : -1;
+  seed[k++] = g_cell.dl_bwp_size ? (g_cell.dl_bwp_start < hi ? g_cell.dl_bwp_start : hi) : -1;
+  seed[k++] = 0;
+  seed[k++] = hi / 2;
+  seed[k++] = hi;
+  return k;
+}
+/* DM-RS votes of all hypotheses of size n (the votes see the SIZE well, the start only as +-few PRB twins) */
+#define PROV_VOTE_MIN 3
+#define PROV_VOTE_RATIO 2.0f
+static uint32_t prior_size_votes(int n)
+{
+  uint32_t v = 0;
+  for (int h = 0; h < g_nhyp; h++) if (g_hyp[h].n == n) v += g_hyp[h].votes;
+  return v;
+}
+/* rank key (smaller better): sizes whose summed DM-RS votes reach PROV_VOTE_MIN first (most votes first), else the fit's prefix rank;
+ * then start distance to the nearest seed, seed order, prior size, larger N */
 static double prior_key(int h, int *src)
 {
-  const int d = prior_dist(g_hyp[h].start, src);
-  if (d < 0) return 1e18;
-  const int sp = g_cell.sib1_ul_size && g_hyp[h].n == g_cell.sib1_ul_size ? 0 : (g_cell.dl_bwp_size && g_hyp[h].n == g_cell.dl_bwp_size ? 1 : 2);
-  return sp * 1e7 + d * 1e4 + (*src - 1) * 1e3 + (300 - g_hyp[h].n);
+  const int sc = prior_size_class(g_hyp[h].n);
+  int seed[5];
+  const int ns = prior_seeds(g_hyp[h].n, seed);
+  if (sc < 0 || ns == 0) return 1e18;
+  int bd = 1 << 20, bk = 0;
+  for (int k = 0; k < ns; k++)
+    if (seed[k] >= 0 && abs(g_hyp[h].start - seed[k]) < bd) { bd = abs(g_hyp[h].start - seed[k]); bk = k; }
+  *src = bd > 0 ? 3 : (bk == 0 ? 1 : bk == 1 ? 2 : 4);
+  const int tb = g_cell.sib1_ul_size && g_hyp[h].n == g_cell.sib1_ul_size ? 0 : (g_cell.dl_bwp_size && g_hyp[h].n == g_cell.dl_bwp_size ? 1 : 2); /* twins: prior size first */
+  const uint32_t sv = prior_size_votes(g_hyp[h].n);
+  const double cls = sv >= PROV_VOTE_MIN ? 100.0 - (sv > 90 ? 90 : sv) : 100.0 + sc;
+  return cls * 1e8 + bd * 1e5 + bk * 1e4 + tb * 1e3 + (300 - g_hyp[h].n);
 }
 static int prior_best_locked(int *src_out)
 {
@@ -1433,51 +1497,73 @@ static int prior_best_locked(int *src_out)
     if (g_dem[h]) continue;
     bool ok = false;
     for (int l = 0; l < g_nlen && !ok; l++) ok = g_len[l].fitted && pre_for_hyp(&g_len[l], h) >= 0;
-    int src;
+    int src = 0;
     const double k = ok ? prior_key(h, &src) : 1e18;
     if (k < bk) { bk = k; best = h; bs = src; }
   }
-  if (best >= 0 && bk < 1e17) {
-    *src_out = fmod(bk, 1e7) < 1e4 ? bs : 3; /* distance 0 = the prior itself (its source), else a neighbour */
-    return best;
-  }
-  return -1;
+  if (best < 0 || bk >= 1e17) return -1; /* no size from the RIV fit: nothing is adopted */
+  *src_out = bs;
+  return best;
 }
-/* every (N, start) around the prior starts that the fitted RIV fields can express (width, N(N+1)/2 > max RIV observed) */
+/* (fitted size, seed +-d) hypotheses, d <= PRIOR_D for the first fitted size, <= 2 for the others */
 static void append_prior_locked(void)
 {
-  if (!prior_on() || !g_have_cell || (g_cell.sib1_ul_size == 0 && g_cell.dl_bwp_size == 0)) return;
+  if (!prior_on() || !g_have_cell) return;
+  prior_fit_sizes_locked();
   int added = 0;
-  for (int l = 0; l < g_nlen; l++)
-    for (int p = 0; g_len[l].fitted && p < g_len[l].npre; p++) {
-      const len_state_t *ls = &g_len[l];
-      const int w = ls->pre[p].riv;
-      uint32_t maxriv = 0;
-      const int nb = ls->count < NR_UL_LAYOUT_BANK ? (int)ls->count : NR_UL_LAYOUT_BANK;
-      for (int i = 0; i < nb; i++) {
-        const uint32_t r = fld(&ls->bank[i].p, ls->len, 1 + ls->pre[p].bwp_ind, w);
-        if (r > maxriv) maxriv = r;
-      }
-      uint16_t sz[8];
-      int ns = 0;
-      const uint16_t cand[2] = {g_cell.sib1_ul_size, g_cell.dl_bwp_size};
-      for (int c = 0; c < 2; c++) if (cand[c]) sz[ns++] = cand[c];
-      for (int n = g_cell.carrier_rb, k = 0; n >= 1 && k < 3; n--)
-        if (nr_ul_layout_riv_bits(n) == w && (uint64_t)n * (n + 1) / 2 > maxriv) { sz[ns++] = (uint16_t)n; k++; }
-      for (int d = 0; d <= PRIOR_D; d++)
-        for (int pr = 0; pr < 2; pr++)
-          for (int sg = 0; sg < (d ? 2 : 1); sg++) {
-            if (!(pr ? g_cell.dl_bwp_size : g_cell.sib1_ul_size)) continue;
-            const int st = (pr ? g_cell.dl_bwp_start : g_cell.sib1_ul_start) + (sg ? -d : d);
-            for (int i = 0; i < ns; i++) {
-              const int n = sz[i];
-              if (st < 0 || st + n > g_cell.carrier_rb || nr_ul_layout_riv_bits(n) != w || (uint64_t)n * (n + 1) / 2 <= maxriv) continue;
-              bool have = false;
-              for (int h = 0; h < g_nhyp && !have; h++) have = g_hyp[h].n == n && g_hyp[h].start == st;
-              if (!have && g_nhyp < NR_UL_LAYOUT_MAX_HYP && added < PRIOR_MAXH) { g_hyp[g_nhyp++] = (hyp_state_t){.n = (uint16_t)n, .start = (uint16_t)st}; added++; }
-            }
-          }
+  for (int d = 0; d <= PRIOR_D; d++)
+    for (int q = 0; q < g_nnfit; q++) {
+      if (q && d > 2) continue;
+      const int n = g_nfit[q];
+      int seed[5];
+      const int ns = prior_seeds(n, seed);
+      for (int k = 0; k < ns; k++)
+        for (int sg = 0; sg < (d ? 2 : 1); sg++) {
+          if (seed[k] < 0) continue;
+          const int st = seed[k] + (sg ? -d : d);
+          if (st < 0 || st + n > g_cell.carrier_rb) continue;
+          bool have = false;
+          for (int h = 0; h < g_nhyp && !have; h++) have = g_hyp[h].n == n && g_hyp[h].start == st;
+          if (!have && g_nhyp < NR_UL_LAYOUT_MAX_HYP && added < PRIOR_MAXH) { g_hyp[g_nhyp++] = (hyp_state_t){.n = (uint16_t)n, .start = (uint16_t)st}; added++; }
+        }
     }
+}
+/* DM-RS votes move the provisional layout among the fitted sizes and starts. (1) hypothesis level: leader a != current with >= PROV_VOTE_MIN
+ * votes and >= PROV_VOTE_RATIO x the votes of every other hypothesis. (2) size level: the fitted size with the most summed votes (>= 3 and
+ * >= 2x every other size) replaces a different current size; the adopted start is that size's best seed-ranked one. Under the null the votes
+ * are control-like events (rare, spread over hypotheses), so 3 votes at ratio 2 is a lighter bar than the full lock (6, 2x, 2 RNTIs): a move
+ * only changes a provisional guess. */
+static bool prior_vote_move_locked(long now)
+{
+  int a = -1;
+  for (int h = 0; h < g_nhyp; h++)
+    if (g_hyp[h].votes && prior_size_class(g_hyp[h].n) >= 0 && (a < 0 || g_hyp[h].votes > g_hyp[a].votes)) a = h;
+  bool ok = a >= 0 && a != g_locked_hyp && g_hyp[a].votes >= PROV_VOTE_MIN;
+  for (int h = 0; ok && h < g_nhyp; h++)
+    if (h != a && (float)g_hyp[a].votes < PROV_VOTE_RATIO * (float)g_hyp[h].votes) ok = false;
+  if (!ok) { /* size level */
+    int m = 0, ms = 0;
+    uint32_t vm = 0, v2 = 0;
+    for (int h = 0; h < g_nhyp; h++) {
+      const uint32_t v = prior_size_votes(g_hyp[h].n);
+      bool dup = false;
+      for (int q = 0; q < h && !dup; q++) dup = g_hyp[q].n == g_hyp[h].n;
+      if (dup || prior_size_class(g_hyp[h].n) < 0) continue;
+      if (v > vm) { v2 = vm; vm = v; m = g_hyp[h].n; ms = m; } else if (v > v2) v2 = v;
+    }
+    if (m == 0 || m == g_hyp[g_locked_hyp].n || vm < PROV_VOTE_MIN || (float)vm < PROV_VOTE_RATIO * (float)v2) return false;
+    int src = 0;
+    a = prior_best_locked(&src);
+    if (a < 0 || g_hyp[a].n != m || a == g_locked_hyp) return false;
+  }
+  LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_VOTE_MOVE %u@%u -> %u@%u votes=%u (current %u) slot=%ld\n", g_hyp[g_locked_hyp].n,
+        g_hyp[g_locked_hyp].start, g_hyp[a].n, g_hyp[a].start, g_hyp[a].votes, g_hyp[g_locked_hyp].votes, now);
+  g_locked_hyp = a;
+  g_p_exp = g_p_ok = g_p_dec = 0;
+  g_p_src = 3;
+  for (int l = 0; l < g_nlen; l++) { g_len[l].locked = false; g_len[l].crc_fail_run = 0; }
+  for (int l = 0; l < g_nlen; l++) lock_length_locked(&g_len[l], now);
+  return true;
 }
 /* caller holds mu: adopt the best non-demoted hypothesis provisionally (the layout is locked under it at once) */
 static void prior_adopt_locked(long slot)
@@ -1494,9 +1580,9 @@ static void prior_adopt_locked(long slot)
   for (int l = 0; l < g_nlen; l++) { g_len[l].locked = false; g_len[l].crc_fail_run = 0; }
   for (int l = 0; l < g_nlen; l++) lock_length_locked(&g_len[l], slot);
   const int spf = g_cell.slots_per_frame ? g_cell.slots_per_frame : 20;
-  LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_ADOPT bwp=%u@%u src=%s demotions=%u sib1=%u@%u dl=%u@%u hyps=%d slot=%ld t_conv_ms=%.0f\n",
-        g_hyp[h].n, g_hyp[h].start, src == 1 ? "sib1" : src == 2 ? "dl" : "neighbour", g_ndem, g_cell.sib1_ul_start,
-        g_cell.sib1_ul_size, g_cell.dl_bwp_start, g_cell.dl_bwp_size, g_nhyp, slot, 10.0 * (double)(slot - g_first_slot) / spf);
+  LOG_A(PHY, "SENSING: ULLAYOUT PRIOR_ADOPT bwp=%u@%u src=%s demotions=%u sib1=%u@%u dl=%u@%u nfit=%d[%u,%u,%u,%u] hyps=%d slot=%ld t_conv_ms=%.0f\n",
+        g_hyp[h].n, g_hyp[h].start, src == 1 ? "sib1" : src == 2 ? "dl" : src == 4 ? "geometry" : "neighbour", g_ndem, g_cell.sib1_ul_start,
+        g_cell.sib1_ul_size, g_cell.dl_bwp_start, g_cell.dl_bwp_size, g_nnfit, g_nfit[0], g_nnfit > 1 ? g_nfit[1] : 0, g_nnfit > 2 ? g_nfit[2] : 0, g_nnfit > 3 ? g_nfit[3] : 0, g_nhyp, slot, 10.0 * (double)(slot - g_first_slot) / spf);
 }
 static void prior_demote_locked(long slot)
 {
@@ -1630,7 +1716,7 @@ void nr_ul_layout_stats_dump(void)
   char pst[220] = "";
   if (prior_on())
     snprintf(pst, sizeof(pst), " prior[prov=%d src=%s hyp=%u@%u crc_expected_n=%u crc_ok=%u dec=%u demotions=%u done=%d]", g_prov,
-             g_p_src == 1 ? "sib1" : g_p_src == 2 ? "dl" : g_p_src == 3 ? "neighbour" : "-",
+             g_p_src == 1 ? "sib1" : g_p_src == 2 ? "dl" : g_p_src == 4 ? "geometry" : g_p_src == 3 ? "neighbour" : "-",
              g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0, g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_p_exp, g_p_ok,
              g_p_dec, g_ndem, g_search_done);
   LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"

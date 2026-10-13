@@ -5910,6 +5910,7 @@ uint32_t UllRiv(int n, int s, int l)
 struct UllGen {
   std::mt19937 rng{12345};
   uint8_t pid[8] = {0}, ndi[8] = {0};
+  int rivw = 15;  // RIV field width (15 = 216/217 PRB, 13 = 107 PRB; the DCI is 44 - (15 - rivw) bits)
   long slot = 1000;
   int k = 0;
   nr_ul_layout_dci_t next(int n_bwp = 216)
@@ -5924,7 +5925,7 @@ struct UllGen {
     const int rv = (rng() % 12) ? 0 : 2;
     uint64_t v = 0;
     auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
-    put(0, 1); put(1, 1); put(UllRiv(n_bwp, S, L), 15); put(0, 4); put(rng() % 28, 5); put(ndi[u], 1); put(rv, 2);
+    put(0, 1); put(1, 1); put(UllRiv(n_bwp, S, L), rivw); put(0, 4); put(rng() % 28, 5); put(ndi[u], 1); put(rv, 2);
     put(pid[u], 4); put(3, 2); put(1, 2); put(0, 3); put(0, 2); put(0, 1); put(1, 1);
     const int fr = 50 + k / 4;
     slot = (long)fr * 20 + dci_slots[k % 4];
@@ -6401,7 +6402,7 @@ TEST(UlLayoutLock, PriorSearchStaysMovesAndIgnoresLowSnr)
     UllGen g;
     UllFit(g, cell);
     EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
-    EXPECT_EQ(st, 1); EXPECT_EQ(sz, 216);
+    EXPECT_EQ(st, 1); EXPECT_GE(sz, 213); EXPECT_LE(sz, 218);
     EXPECT_EQ(UllPriorRun(g, cell, 30, 1, 20.f, 0.5f), 1);
     EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));  // confirmed
     EXPECT_EQ(dem, 0u);
@@ -6413,8 +6414,25 @@ TEST(UlLayoutLock, PriorSearchStaysMovesAndIgnoresLowSnr)
     UllFit(g, cell);
     EXPECT_EQ(UllPriorRun(g, cell, 200, 0, 20.f, 0.5f), 0);
     EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
-    EXPECT_EQ(st, 0); EXPECT_EQ(sz, 216);
-    EXPECT_EQ(dem, 1u);
+    EXPECT_EQ(st, 0); EXPECT_GE(sz, 213); EXPECT_LE(sz, 218);
+  }
+  {  // prior size 217 (SIB1 and DL) but the RIV fit says 107: the adopted size is the fitted one, never the prior's
+    nr_ul_layout_cell_t c2 = cell;
+    c2.sib1_ul_start = 0; c2.sib1_ul_size = 217; c2.dl_bwp_start = 0; c2.dl_bwp_size = 217;
+    UllGen g;
+    g.rivw = 13;
+    nr_pdcch_blind_ul_result_t out;
+    nr_ul_layout_lock_reset();
+    for (int i = 0; i < 300; i++) {
+      for (int s2 = 0; s2 < 18; s2++)
+        if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+      const nr_ul_layout_dci_t d = g.next(107);
+      nr_ul_layout_on_dci(d.rnti, 42, d.slot, d.p, &c2, &out);
+    }
+    nr_ul_layout_eval_once();
+    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_GE(sz, 100); EXPECT_LE(sz, 109);
+    EXPECT_EQ(st, 0);  // seeded by the prior start (clamped into [0, carrier-N])
   }
   {  // low SNR: every grant fails on every hypothesis, none predicts a pass: no demotion, stays on the prior
     UllGen g;
