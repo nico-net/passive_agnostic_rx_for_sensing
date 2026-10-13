@@ -4149,6 +4149,18 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
 - `[INFERRED]` The replay gain (stale 24 -> 3 %) does NOT carry over on air: stale drops 23-60 %, p99 2.7-7 ms, same as t26b within the huge
   run-to-run spread. Neither K nor L is adopted. The on-air stale/tail problem is still open (decode backlog vs scan queue, not CSI-RS discovery alone).
 
+**30c. Problematic PCIs offline (`docs/superpowers/reports/csd/PCIS-20261013.md`, `csd/pcis`; replays and offline tools only, no OTA run)**
+
+- `[MEASURED, DGX replay c3610 x8]` PCI 508, 4 and 614 have identical MIB (k_ssb 2, coreset0 11) and SSB timing within 10 samples: three sectors of one site on one carrier. PCI 4 and 614 never decode their own SIB1 (interference-limited; 614 0/292 crc), so `carrier=unchecked` and the nID sweep never ran.
+- `[CODE-READ + OFFLINE VERIFIED]` New `ISAC_SIB1_SIBLING=1` (default off): a cell that decodes its SIB1 stores its carrier in `/tmp/passive_rx/sib1_sibling_<SSB kHz>.bin`; a cell on the same absolute SSB frequency with the same k_ssb adopts it as a carrier hypothesis. A different k_ssb is refused.
+- `[MEASURED, DGX replay c3610 x8]` With the flag the sweep now runs for 4 (13 GPU passes) and 614 (92 passes), but finds only noise-class nIDs (33538, 26722; no RNTI recurrence). `[INFERRED]` Unconfirmed: no dedicated CORESET is observable in these captures. Delete `/tmp/passive_rx/sib1_sibling_*.bin` when changing site.
+- `[MEASURED, DGX replay c3610 x8]` PCI 403 (barred, NSA SIB1 has no carrier info): carrier from PSD edges (new `tests/passive_rx/autofront/carrier_edges.py`, `live_chain.sh geom`): Point A 3620.82 MHz, 51 PRB, so `-C 3630000000 -r 51 --ssb 18 --initial-fo 2164`. Carrier confirmed via CRB-indexed CSI-RS; no UE RNTIs.
+- `[MEASURED, DGX replay c3430 x8]` PCI 675: 51-PRB grid `-C 3425010000 -r 51 --ssb 227`, SIB1 CRC 74 %. Cell dark: 0.07 % of DL windows lit, only RNTI 0xffff.
+- `[MEASURED, fastscan]` Per-N_ID_2 bursts and a split-half check for weak SSS winners find 614, 380 (Vodafone, strong) and 272 (Iliad, weak). 272 and 380 not replayed.
+- `[MEASURED]` `live_chain.sh pass2` honours ENVF/CFGF (stored in `OUT/envcfg.txt`).
+- `[MEASURED, occupancy.py]` BLINDPIPE "traffic PRESENT" is not a discriminator: barred 403 shows 72 % lit windows.
+- `[NOT RUN]` OTA specs in report section 7. Run S508 first so its SIB1 writes the sibling file; a connected UE with traffic is needed in the window (no existing log had one).
+
 **31. Nl=2 MCS 5-16 is SNR-limited by the weak layer; per-layer SNR is now logged (`[MEASURED, OTA]`, `[MEASURED, DGX replay tim]`, `[CODE-READ]`)**
 
 - `[MEASURED, OTA, Vodafone S0a/b/c pooled 3 runs]` Nl=2 CRC-OK at SNR >= 10 by bin: MCS 5-9 61 % (10-13 dB) -> 95 % (13-16) -> 99 % (16-19);
