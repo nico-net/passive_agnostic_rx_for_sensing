@@ -62,3 +62,12 @@ if(ENABLE_TESTS)
   add_test(NAME test_shm_iq_chan COMMAND test_shm_iq_chan $<TARGET_FILE:shm_iq_chan>)
   add_test(NAME test_shm_iq_chan_selftest COMMAND shm_iq_chan --selftest --threads 2)
 endif()
+
+# Offline stand-in for shm_iq_uhd_pub: publishes a recorded raw IQ capture into a ring (DGX validation of the fan-out without a radio).
+if(ENABLE_TESTS)
+  add_executable(shm_iq_file_pub ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/shm_iq_file_pub.c shm_iq_ring.c)
+  target_include_directories(shm_iq_file_pub PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(shm_iq_file_pub PRIVATE rt)
+  set_target_properties(shm_iq_file_pub PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_dependencies(tests shm_iq_file_pub)
+endif()
