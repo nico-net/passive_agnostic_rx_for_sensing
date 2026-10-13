@@ -1895,7 +1895,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             dec.br_alpha[0], dec.br_alpha[1], dec.br_alpha[2], dec.br_alpha[3], dec.br_nvar_db[0], dec.br_nvar_db[1],
             dec.br_nvar_db[2], dec.br_nvar_db[3], dec.rho, (int)job.mrc_mode, dec.dmrs_ports, dec.n_cdm, dec.dmrs_add, eq_used, occ_used, it_used, dec_us,
             job.grant.rv, job.grant.ndi, job.grant.harq_pid, (unsigned)dec.cw.TBS);
-      if (dec.evm_pct > 0.f && !job.layout_probe) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)));
+      if (dec.evm_pct > 0.f && !job.layout_probe) nr_pdsch_solver_note_snr(job.rnti, (float)(-20.0 * log10(dec.evm_pct / 100.0)), (int)job.mrc_mode);
     }
     if (job.solver_token) {
       const bool sv_credit = owned || nr_passive_credit_allowed(

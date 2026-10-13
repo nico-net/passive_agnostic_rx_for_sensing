@@ -84,7 +84,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
 /** T26c: absolute slot (signal time) of the grant about to be planned, for the per-RNTI solve-time report. */
 void nr_pdsch_solver_set_now(uint64_t abs_slot);
 /** T26c: post-equalisation SNR (dB) of one full decode of `rnti` (EVMGRANT); kept as a per-RNTI EMA. */
-void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db);
+void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db, int comb); /* comb: the receiver of that decode (EVMGRANT comb=), 0 unknown */
 /** T26c: the RNTI's SNR EMA once >= 3 measurements exist; false otherwise. */
 bool nr_pdsch_solver_snr(uint16_t rnti, float *snr_db);
 /** T26c (ISAC_PDSCH_SOLVER_SCR=1): before planning, the RUN-TIME discovered identities (this DCI's CORESET PDCCH nID
