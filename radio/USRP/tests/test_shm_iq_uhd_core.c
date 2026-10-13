@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* pub_step with a fake recv: in-place path, first-write copy path, overflow gap, ring wrap, error counting, error after a partial
- * write into the slots, uncommitted reserve vs a consumer's copy, pub_tick. */
+ * write into the slots, uncommitted reserve vs a consumer's copy, pub_tick, multi-streamer barrier (pub_mc_*) with per-channel fake sources. */
 #include "shm_iq_uhd_core.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,8 +28,83 @@ static pub_rx_status_t fake_recv(void *ctx, int16_t *const *dst, int n, int64_t 
   return PUB_RX_OK;
 }
 
+/* multi-streamer: one fake source per channel, each fills only its own slot, like one recv thread per channel */
+typedef struct { int64_t next; int len; pub_rx_status_t st; } chsrc_t;
+static void mc_chunk(pub_t *p, chsrc_t *s, int nch, int want, int *pubd, pub_mc_act_t *act)
+{
+  int16_t *slots[SHM_IQ_MAX_CH];
+  pub_chres_t res[SHM_IQ_MAX_CH];
+  const int n = pub_mc_reserve(p, want, slots);
+  for (int c = 0; c < nch; ++c) {
+    res[c].st = s[c].st;
+    res[c].tick = s[c].next;
+    res[c].got = s[c].len < n ? s[c].len : n;
+    if (s[c].st == PUB_RX_OK) {
+      for (int i = 0; i < res[c].got; ++i) { slots[c][2 * i] = (int16_t)((s[c].next + i) & 0x7fff); slots[c][2 * i + 1] = (int16_t)c; }
+      s[c].next += res[c].got;
+    }
+  }
+  *pubd = pub_mc_finish(p, res, slots, act);
+}
+
+static void test_multi(void)
+{
+  char name[64];
+  snprintf(name, sizeof(name), "uhdmc_%d", (int)getpid());
+  pub_t *pb = pub_open(name, 2, 4096, 1e6, 3.5e9, "test", SHM_IQ_TS_FREE);
+  CHECK(pb);
+  shm_iq_ring_t *r = pub_ring(pb), c;
+  const pub_stats_t *sp = pub_stats(pb);
+  chsrc_t s[2] = {{5000, 700, PUB_RX_OK}, {5000, 700, PUB_RX_OK}};
+  int pd;
+  pub_mc_act_t a;
+  for (int k = 0; k < 20; ++k) { mc_chunk(pb, s, 2, 1000, &pd, &a); CHECK(pd > 0 && a == PUB_MC_OK); } /* aligned, wraps 4096 several times */
+  CHECK(sp->copied == 1 && sp->inplace == 19 && sp->resyncs == 0 && atomic_load(&r->hdr->gaps) == 0);
+  CHECK(shm_iq_ring_attach(&c, name) == 0);
+  uint64_t head = atomic_load(&c.hdr->head);
+  int16_t b0[1000], b1[1000], *dst[2] = {b0, b1};
+  CHECK(shm_iq_ring_copy(&c, head - 400, 400, 2, dst) == 0);
+  for (int i = 0; i < 400; ++i) CHECK(b0[2 * i] == (int16_t)((5000 + (int64_t)(head - 400) + i) & 0x7fff) && b1[2 * i + 1] == 1);
+  /* one channel short: nothing published, resync counted */
+  s[1].len = 300;
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd == 0 && a == PUB_MC_MISMATCH && sp->resyncs == 1 && atomic_load(&c.hdr->head) == head);
+  /* one channel overflows (the other delivered): OVERFLOW, nothing published; restart on a new common tick -> one gap */
+  s[1].len = 700;
+  s[0].st = PUB_RX_OVERFLOW;
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd == 0 && a == PUB_MC_OVERFLOW && sp->overflows == 1 && atomic_load(&c.hdr->head) == head);
+  s[0].st = PUB_RX_OK;
+  s[0].next = 90000; s[1].next = 90000 + 64; /* restarted but not on the same tick: still refused */
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd == 0 && a == PUB_MC_MISMATCH && sp->resyncs == 2);
+  s[0].next = s[1].next = 90000; /* common tick after the re-arm */
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd > 0 && a == PUB_MC_OK && sp->copied == 2 && atomic_load(&r->hdr->gaps) == 1);
+  head = atomic_load(&c.hdr->head);
+  CHECK(atomic_load(&c.hdr->tick_offset) + (int64_t)head == s[0].next);
+  /* partial chunk: both channels deliver fewer samples than reserved, equal */
+  s[0].len = s[1].len = 123;
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd == 123 && a == PUB_MC_OK);
+  /* a timeout on one channel only is a mismatch; all channels timing out is idle */
+  s[0].len = s[1].len = 700;
+  s[1].st = PUB_RX_TIMEOUT;
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd == 0 && a == PUB_MC_MISMATCH && sp->consecutive_timeouts == 0);
+  s[0].st = PUB_RX_TIMEOUT;
+  mc_chunk(pb, s, 2, 1000, &pd, &a);
+  CHECK(pd == 0 && a == PUB_MC_IDLE && sp->consecutive_timeouts == 1 && sp->timeouts == 1);
+  shm_iq_ring_detach(&c);
+  pub_close(pb);
+  char path[80];
+  snprintf(path, sizeof(path), "/%s", name);
+  shm_unlink(path);
+}
+
 int main(void)
 {
+  test_multi();
   char name[64];
   snprintf(name, sizeof(name), "uhdcore_%d", (int)getpid());
   shm_iq_ring_t c;

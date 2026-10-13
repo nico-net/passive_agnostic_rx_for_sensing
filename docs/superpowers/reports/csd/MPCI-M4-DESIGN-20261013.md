@@ -143,29 +143,54 @@ full ring may lose a chunk while the producer is inside `recv()`; the effective 
     cd cmake_targets/ran_build/build   # configured with -DOAI_USRP=ON; never while nr-uesoftmodem runs (pgrep -x nr-uesoftmodem)
     ninja shm_iq_uhd_pub shm_iq                # -> build/shm_iq_uhd_pub
 
-### Run (245.76 MS/s x 4, CG_400 image loaded; MCR is the image default 491.52 MHz unless --mcr is given, passed as `master_clock_rate=` device arg like usrp_lib.cpp)
-    ISAC_UHD_CTRL_CORES=<two cores != rx-core, != DPDK lcores> \
-    ./shm_iq_uhd_pub --args "type=x4xx,addr=192.168.10.2,mgmt_addr=192.168.30.2,use_dpdk=1,dpdk_num_mbufs=65536" \
+### Run (4 x 245.76 MS/s, CG_400 image; the user's verified benchmark_rate configuration, no --mcr)
+Reference (user-verified 2026-10-13, clean for 300 s): `sudo /usr/local/lib/uhd/examples/benchmark_rate --args="mgmt_addr=10.79.1.235,addr=192.168.10.2,use_dpdk=1"
+--rx_rate 245.76e6 --rx_channels "0,1,2,3" --rx_otw sc16 --rx_cpu sc16 --duration 300 --priority high --multi_streamer`.
+The publisher defaults match it: `--multi-streamer` (one streamer + one recv thread per channel, all started by the same timed stream
+command) and `--priority high` (`uhd::set_thread_priority_safe(1.0, true)` in each recv thread; warns, does not fail, if not permitted).
+`--single-streamer` keeps the old one-4-channel-streamer path (`--rx-core C` pins its thread; with multi-streamer `--rx-core` pins the coordinator).
+
+    sudo ISAC_UHD_CTRL_CORES=<two cores != rx-cores, != DPDK lcores> \
+    ./shm_iq_uhd_pub --args "mgmt_addr=10.79.1.235,addr=192.168.10.2,use_dpdk=1" \
         --rate 245760000 --freq <centre from the scanner> --gain 38 --channels 4 --antenna RX1 --ring isac_iq \
-        --rx-core <X925 core> --duration 600
-Device args = the survey's (tests/passive_rx/survey/survey_capture.sh). Check first that `--rate 245760000` is accepted on CG_400
-(the tool aborts with `SHMIQ_UHD_FAIL actual rate ... != requested` otherwise; usrp_lib.cpp notes CG has no DDC, so a rate other than
-the MCR may need `--mcr 245760000` if the image allows it; benchmark_rate at 4 x 245.76 passed, copy its master_clock_rate).
+        --rx-cores 8,9,10,11 --duration 300          # one core per channel thread; coordinator = main thread
+`--rx-cores` must have one entry per channel and be disjoint from the DPDK lcores. [NOT RUN: everything UHD]
+
+### Timed tune
+All channels are tuned with ONE timed command: `set_command_time(now + 0.5 s)`, `set_rx_freq` per channel, `clear_command_time()`, then the tool
+waits past the command time and checks `lo_locked` per channel; log `SHMIQ_UHD_TUNE timed=1 t=<command time s> chans=0,1,2,3`
+(`--untimed-tune` falls back to channel-by-channel, `timed=0`). This can make the inter-antenna phase repeatable per tune ONLY IF the X410
+honours the timed tune on every channel; per-channel LO/NCO behaviour on ZBX is UNCERTAIN [NOT RUN, to be checked by repeated
+tunes + a common-source phase measurement]. AoA still needs a one-time phase calibration either way.
+
+### Multi-streamer barrier (shm_iq_uhd_core.c: pub_mc_reserve / pub_mc_finish, UHD-free)
+Per chunk: the coordinator reserves the ring slots for all channels (`reserve` raised BEFORE any thread writes), releases the N recv threads
+(barrier), each thread recv()s its own channel straight into its slot, a second barrier collects (status, tick, count) per channel, and
+`pub_mc_finish` commits only if every channel is OK with the SAME tick and count. Otherwise nothing is published (head unchanged; the half-written slots
+are overwritten by the next chunk) and the action is OVERFLOW / MISMATCH (a channel timed out, short, or different tick: counter `resyncs`, log
+`SHMIQ_UHD_RESYNC n=.. chK=status/tick/count`) / OTHER: stop + drain ALL streamers and re-arm with one timed START (`SHMIQ_UHD_RESTART`); the
+first chunk's tick jump becomes a ring gap (consumers log one SHMIQ_DISCONT). Ring API unchanged (additive pub_mc_* only).
+
 Consumer cell (any number, own process): `ISAC_SHM_IQ_NAME=isac_iq ISAC_SHM_IQ_CELL=c675 ISAC_CELL_INSTANCE=... nr-uesoftmodem` with `device = { name = "shm_iq"; }` (see MPCI-M1/M2).
 Stop with SIGINT (`kill -INT`): the tool issues STREAM_MODE_STOP_CONTINUOUS, drains, releases the device (X410 claim hygiene); never SIGKILL.
 
 ### Expected log lines
     SHMIQ_UHD_MCR 491520000   SHMIQ_UHD_CH uhd_ch=0 rate=245760000.000 freq=... bw=... ant=RX1   SHMIQ_UHD_LO ch=0 locked=1 (x4)
+    SHMIQ_UHD_TUNE timed=1 t=0.5 chans=0,1,2,3   (before the SHMIQ_UHD_CH lines)
+    SHMIQ_UHD_STREAM streamers=4 max_num_samps=... chunk=65536 priority=high
     SHMIQ_UHD_READY ring=/isac_iq channels=4 rate=245760000 center_hz=... capacity=33554432 bytes=536875008 radio=<serial> time_source=free
-    SHMIQ_UHD_STATS t=10.0 samples=2.4e9 rate_meas=245760000.0 overflows=0 timeouts=0 ring_head=...   (every 1 s)
-    SHMIQ_UHD_END samples=... overflows=0 timeouts=0 inplace=... copied=1       (copied=1 is the first write; more = gaps)
+    SHMIQ_UHD_STATS t=10.0 samples=2.4e9 rate_meas=245760000.0 overflows=0 timeouts=0 resyncs=0 ring_head=...   (every 1 s)
+    SHMIQ_UHD_END samples=... overflows=0 timeouts=0 resyncs=0 inplace=... copied=1       (copied=1 is the first write; more = gaps)
     on overflow: SHMIQ_UHD_OVERFLOW n=<count> + SHMIQ_UHD_RESTART run=<k>   (stop, drain, timed START at now+0.1 s; consumers then
     log one SHMIQ_DISCONT). 10 errors with no sample in between -> SHMIQ_UHD_FAIL stream dead (rc 3)
 
-### Acceptance (10 min) [NOT RUN]
-overflows=0 and timeouts=0 in `SHMIQ_UHD_END`; `copied=1`; `rate_meas` within 1e-4 of the requested rate (cumulative from the first
-sample); every consumer `SHMIQ_OVERRUN` count 0 and no `SHMIQ_PRODUCER_LOST`; all four `lo_locked` true; RFSTALL-style counters
-(`rx_bytes` vs `rate x t x 16`) agree. Then repeat with 2-3 consumers concurrently and compare overflows.
+### Comparison to run first, then acceptance [NOT RUN]
+1. benchmark_rate with the user's exact command above (300 s): reference, no D/O/L.
+2. `shm_iq_uhd_pub` with the same args/rate, 0 consumers, `--duration 300`: `overflows=0 timeouts=0 resyncs=0` (same as benchmark_rate).
+3. Same with 1 consumer, then 4 consumers (`shm_iq` receivers, one per cell): same counters, consumers' `SHMIQ_OVERRUN` 0.
+Then 10 min with 4 consumers. Pass: overflows=0, timeouts=0, resyncs=0, `copied=1`, `rate_meas` within 1e-4 of the requested rate, no
+`SHMIQ_PRODUCER_LOST`, all four `lo_locked` true. If step 2 shows overflows where step 1 did not: compare `--single-streamer`, `--priority normal`, chunk size
+(two barrier waits per 65536-sample chunk = ~3.7k/s at 245.76 MS/s; raise `--chunk` to 131072 if the wakeup latency matters).
 
 ### 491.52 MS/s step (400 MHz, needs the 2nd QSFP28 cable) [NOT RUN]
 UHD multi-link: pass both ports in the device args, e.g. `addr=192.168.10.2,second_addr=192.168.20.2,mgmt_addr=192.168.30.2,use_dpdk=1`
@@ -180,8 +205,8 @@ Rate x 4 B x channels: 3.93 GB/s (4 x 245.76 MS/s), 7.86 GB/s (4 x 491.52). Prod
 NIC DMA into mbufs is a second write, so ~2 x the rate on the memory bus plus 1 x read of the mbuf) = ~12 GB/s at 245.76 and ~24 GB/s
 at 491.52 for the producer alone. Each consumer reads the full 4-channel ring once (DDC reads the window it needs: still all
 channels): + 3.9 / 7.9 GB/s per cell. With 5 cells: ~31 GB/s at 245.76, ~63 GB/s at 491.52, against the Spark's LPDDR5X (~273 GB/s
-peak, ~200 practical, shared with the GPU): fits at 245.76, need measuring at 491.52. CPU: one core busy-polling in recv (memcpy-bound),
-pin it (`--rx-core`, SCHED_OTHER; no RT priority set by the tool) with the uhd_ctrl cores separate.
+peak, ~200 practical, shared with the GPU): fits at 245.76, need measuring at 491.52. CPU: one core per channel thread busy-polling in recv in multi-streamer mode (memcpy-bound),
+pin it (`--rx-core`, or `--rx-cores` per channel thread in multi-streamer mode; `--priority high` = SCHED_FIFO via UHD) with the uhd_ctrl cores separate.
 Each ring slot copy is not counted twice: nothing is staged except after a gap.
 
 ### Open points
@@ -196,8 +221,8 @@ Review 2026-10-13 [CODE-READ + OFFLINE VERIFIED, cloud x86, ctest test_shm_iq_uh
   the scheduled START (as usrp_ring_epoch_first_ticks). Ticks are MCR ticks floor-divided by MCR/rate (an odd-MCR-tick start made
   `to_ticks(rate)` round x.5 either way -> spurious 1-tick gaps; only with a DDC, i.e. rate < MCR). `--mcr` is a device arg (x4xx
   sets the MCR at init). lo_locked / PPS / ring-create failures throw instead of exit() so the device is released.
-- Risk: CG has no DDC (usrp_lib.cpp, MEASURED 2026-08-02) and usrp_lib uses MCR 491.52 for every CG image, so `--rate 245760000`
-  is expected to abort with `actual rate 491520000`; whether `--mcr 245760000` is accepted on CG_400 is unknown. Check what
-  benchmark_rate actually streamed (its "actual RX rate" line) before relying on 245.76. 4 x 491.52 MS/s x 32 bit = 63 Gb/s.
+- Superseded by the user's benchmark_rate run (2026-10-13, USER-REPORTED): 4 x 245.76 MS/s runs clean on CG_400 without any master_clock_rate arg;
+  the tool still aborts on `actual rate != requested` if the image coerces it. 4 x 491.52 MS/s x 32 bit = 63 Gb/s.
+- Update 2026-10-13: multi-streamer + timed tune added (see above); antenna phase after a timed tune is unverified.
 - Risk: channels are tuned untimed and each ZBX channel has its own LO: inter-channel phase is not deterministic (irrelevant for
   per-cell decoding, matters for any multi-antenna sensing).
