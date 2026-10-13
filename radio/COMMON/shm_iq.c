@@ -141,7 +141,10 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
     const uint64_t stale = now > hb ? now - hb : 0;
     const pid_t pid = atomic_load(&h->producer_pid);
     /* a live producer may be stalled for tens of seconds (RFSTALL device reload, initial sync): keep waiting up to 60 s */
-    if (stale > s->timeout_ns && ((kill(pid, 0) != 0 && errno == ESRCH) || stale > 60000000000ull)) {
+    /* time-shared window (v2): the producer is tuned elsewhere until dwell_until_ns; only then does the timeout start */
+    const uint64_t du = atomic_load(&h->dwell_until_ns);
+    const int away_wait = h->version >= 2 && atomic_load(&h->away) && now < du + s->timeout_ns;
+    if (!away_wait && stale > s->timeout_ns && ((kill(pid, 0) != 0 && errno == ESRCH) || stale > 60000000000ull)) {
       fprintf(stderr, "SHMIQ_PRODUCER_LOST cell=%s pid=%d pos=%" PRIu64 "\n", s->tag, (int)atomic_load(&h->producer_pid), s->pos);
       exit_function(__FILE__, __FUNCTION__, __LINE__, "shm IQ producer lost", OAI_EXIT_NORMAL);
       exit(1);
@@ -201,7 +204,8 @@ int device_init(openair0_device_t *d, openair0_config_t *cfg)
   d->trx_read_func = read_iq;
   retune(s, cfg);
   fprintf(stderr, "SHMIQ_READY cell=%s ring=/%s channels=%u/%u ring_rate=%.0f decim=%d taps=%d,%d capacity=%" PRIu64
-                  " producer_pid=%d\n", s->tag, name, s->channels, h->channels, h->rate, s->decim, s->ddc[0].st[0].ntaps,
-          s->ddc[0].st[1].ntaps, h->capacity, (int)atomic_load(&h->producer_pid));
+                  " producer_pid=%d radio=%s time_source=%u\n", s->tag, name, s->channels, h->channels, h->rate, s->decim, s->ddc[0].st[0].ntaps,
+          s->ddc[0].st[1].ntaps, h->capacity, (int)atomic_load(&h->producer_pid),
+          h->version >= 2 && h->radio_id[0] ? h->radio_id : "-", h->version >= 2 ? h->time_source : 0u);
   return 0;
 }

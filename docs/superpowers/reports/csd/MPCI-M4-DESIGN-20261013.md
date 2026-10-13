@@ -1,6 +1,6 @@
 # MPCI-M4 2026-10-13 (DESIGN ONLY): multi-radio / multi-window
 
-Status: [PLANNED]. Nothing here is implemented or run. Builds on M1 (shm ring per window), M2 (per-cell instance
+Status: radio side IMPLEMENTED 2026-10-13 (see "Implementation status" at the end); planner/launcher not part of it. Not run on any radio. Builds on M1 (shm ring per window), M2 (per-cell instance
 keying), M3 (cross-cell GPU/CPU arbiter). Site numbers are from FRONTLIVE/GRIDCARRIER (DGX, OTA captures) and only
 used to size the problem [ANALYTICAL].
 
@@ -70,3 +70,39 @@ n78 at the site spans 3560-3772 MHz (508/4 at 3590, 403 at 3625, 675 at 3426, 41
 ## Changes needed (for the implementation task)
 `usrp_lib.cpp` per-channel retune; publisher writing K rings (channel subsets) or one publisher per subset; ring header
 v2 (radio id, time source, dwell_until); consumer dwell-aware timeout; planner script; launcher multi-ring support.
+
+## Implementation status (radio side, 2026-10-13)
+All default OFF; with ISAC_SHM_IQ_PUB unset nothing is wrapped; with a plain `ISAC_SHM_IQ_PUB=name` the M1 single ring is
+written with identical samples (test `plain single ring`). Code: `radio/COMMON/shm_iq_ring.{h,c}`, `shm_iq_pub.c`, `shm_iq.c`;
+tests: `radio/COMMON/tests/test_shm_iq.c` (ctest `test_shm_iq`).
+
+| item | status | label |
+|---|---|---|
+| Header v2 (`SHM_IQ_VERSION 2`): `radio_id` (ISAC_SHM_IQ_RADIO_ID, else cfg `sdr_addrs`, else `pid<N>`), `time_source` (cfg `time_source` internal->free, external/gpsdo->pps; override ISAC_SHM_IQ_TIME_SOURCE=free\|pps), `away`, `dwell_until_ns`. Appended after v1 fields; consumer accepts v1 and v2, refuses v3. SHMIQ_READY gains `radio=` `time_source=`. | implemented | [OFFLINE VERIFIED, cloud x86 4c] |
+| Channel-subset rings: `ISAC_SHM_IQ_PUB=ringA:0-1,ringB:2+3` (`-` range, `+` list); ring channel k = radio channel subset[k]; consumers see only their subset. | implemented | [OFFLINE VERIFIED, cloud x86 4c, fake 4-ch device, distinct tone per channel] |
+| Per-channel LO: `ISAC_SHM_IQ_PUB_FREQ=ringA=3598e6,ringB=3680e6`. The publisher writes the per-channel frequencies into `cfg->rx_freq[ch]` and calls the device `set_freq`. **`usrp_lib.cpp` is unchanged**: `usrp_set_rx_freq_all` already tunes `cfg->rx_freq[i]` per UHD channel (so no cloud-x86 build impact). A UE-initiated retune (CFO, carrier) adds the same delta to every window. | implemented in the publisher; UHD side unchanged | [CODE-READ] for usrp_lib, [OFFLINE VERIFIED] fake-device LO log; [NOT RUN] on X410 |
+| Dwell scheduler: `ISAC_SHM_IQ_DWELL=ringA@3598e6:200,ringB@3680e6:100` (ms; rings must share one channel subset), `ISAC_SHM_IQ_SETTLE_US` (1000). Away ring: `away=1`, `dwell_until_ns` = expected return, nothing written; return = `shm_iq_ring_return` (epoch bump, new run) at the first post-settle write; the settle window (sample time from the first read after the retune) is discarded. Retune happens in the read wrapper between two reads (the device `set_freq` itself is synchronous in UHD, so one read is delayed by the retune). | implemented | [OFFLINE VERIFIED, cloud x86 4c, fake device: alternating LO sequence, away flags, epochs bumped, forward gaps, run start >= settle ticks, ring content only its own tone] |
+| Consumer dwell-aware timeout: PRODUCER_LOST is not declared while `away && now < dwell_until_ns + timeout`. | implemented | [OFFLINE VERIFIED, cloud x86 4c: dead producer pid + stale heartbeat: away -> consumer resumes with a forward timestamp jump; control without `away` -> exit 3] |
+| X410 behaviour (per-channel set_rx_freq, LO sharing, settle time, overruns) | not testable here | [NOT RUN] |
+
+Uncertainties to resolve on the DGX (UHD docs knowledge, not verified): (a) X410 ZBX has 2 RX/TX ports per daughterboard and
+LOs may be shared between channels of one board (the ZBX has independent RX LOs per channel in UHD 4.x docs, but with the
+RX1 port or LO-sharing/`lo_source` settings two channels may be forced to one LO; set_rx_freq on the second channel may then
+retune the first or return the shared frequency); (b) ISAC_RX_CHAN_MAP permutes OAI antenna -> UHD channel while `rx_freq[i]`
+is applied to UHD channel i: use subsets in UHD order or no map; (c) the NCO-only shortcut in `usrp_set_rx_freq_all`
+(< 0.25 x rate) gives a DDC-only retune for small steps and a full LO retune for large ones: settle times differ.
+
+### DGX validation steps (publisher UE on the X410, `nr-uesoftmodem ... -C <window A centre>`)
+1. Per-channel LO, static: `ISAC_SHM_IQ_PUB=wA:0-1,wB:2-3 ISAC_SHM_IQ_PUB_FREQ=wA=<fA>,wB=<fB>` (fA/fB two window centres from
+   the scanner output, >= 100 MHz apart). Expect `SHMIQ_PUB_READY` x2, UHD log `Actual RX frequency` per channel = fA,fA,fB,fB.
+   Check: `usrp->get_rx_freq(i)` for i=0..3; consumers on wA and wB each decode their cell; no `rx ch1 NCO-only retune landed` warnings;
+   RFSTALL/overruns unchanged vs one window (compare the usrp overflow counters).
+2. LO sharing: repeat with the RX1 port/antenna per channel; if tuning ch2 moves ch0/1 (`get_rx_freq` differs from request) the pairs cannot sit on different LOs: then use the
+   time-shared mode or one board per window.
+3. Time-shared: `ISAC_SHM_IQ_PUB=wA,wB ISAC_SHM_IQ_DWELL=wA@<fA>:200,wB@<fB>:100 ISAC_SHM_IQ_SETTLE_US=1000` (one or two channels).
+   Expect `SHMIQ_PUB_DWELL from=/wA to=/wB center_hz=... retune_us=...` every dwell, consumers `SHMIQ_DISCONT` once per return, never `SHMIQ_PRODUCER_LOST`.
+   Measure: `retune_us` (blocking time of set_freq) and the LO settle time (raise SETTLE_US until the first samples of a return
+   are clean: no AGC/gain-step or phase transient in the cell's first slots); overruns/`O` counters and RFSTALL during retunes;
+   per-cell outage per return in sample time = (first ring timestamp after return - last before leaving) - from the consumer's
+   `SHMIQ_DISCONT skipped_in` and the receiver's reacquisition time (G11 path) to first decoded grant; fraction of time away vs `dwell`.
+4. Metadata: `SHMIQ_READY ... radio=<sdr_addrs or pid> time_source=pps` when the cfg has `time_source=external`/gpsdo; two radios with PPS must report equal-comparable ticks (check `set_time_next_pps`).

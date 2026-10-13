@@ -75,7 +75,7 @@ int shm_iq_ring_attach(shm_iq_ring_t *r, const char *name)
   if (p == MAP_FAILED) return -1;
   r->hdr = p; r->map_bytes = (uint64_t)st.st_size;
   const shm_iq_hdr_t *h = r->hdr;
-  if (__atomic_load_n(&h->magic, __ATOMIC_ACQUIRE) != SHM_IQ_MAGIC || h->version != SHM_IQ_VERSION || h->channels < 1 || h->channels > SHM_IQ_MAX_CH
+  if (__atomic_load_n(&h->magic, __ATOMIC_ACQUIRE) != SHM_IQ_MAGIC || h->version < 1 || h->version > SHM_IQ_VERSION || h->channels < 1 || h->channels > SHM_IQ_MAX_CH
       || SHM_IQ_HDR_BYTES + (uint64_t)h->channels * h->capacity * 4 != r->map_bytes) {
     munmap(p, r->map_bytes); memset(r, 0, sizeof(*r)); errno = EAGAIN; return -1;
   }
@@ -94,6 +94,26 @@ double shm_iq_ring_center(const shm_iq_ring_t *r)
   uint64_t bits = atomic_load(&r->hdr->center_bits);
   double c; memcpy(&c, &bits, 8);
   return c;
+}
+
+void shm_iq_ring_set_meta(shm_iq_ring_t *r, const char *radio_id, unsigned time_source)
+{
+  if (radio_id) snprintf(r->hdr->radio_id, sizeof(r->hdr->radio_id), "%s", radio_id);
+  r->hdr->time_source = time_source;
+}
+
+void shm_iq_ring_set_away(shm_iq_ring_t *r, uint64_t until_ns)
+{
+  atomic_store(&r->hdr->dwell_until_ns, until_ns);
+  atomic_store(&r->hdr->away, 1);
+}
+
+void shm_iq_ring_return(shm_iq_ring_t *r, double center_hz)
+{
+  shm_iq_ring_new_epoch(r, center_hz);
+  atomic_store(&r->hdr->heartbeat_ns, shm_iq_now_ns());
+  atomic_store(&r->hdr->away, 0);
+  atomic_store(&r->hdr->dwell_until_ns, 0);
 }
 
 void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz)

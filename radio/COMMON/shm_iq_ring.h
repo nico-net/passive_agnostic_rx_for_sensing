@@ -9,7 +9,10 @@
 #include <stdint.h>
 
 #define SHM_IQ_MAGIC 0x5149484d53434153ULL /* "SACSMHIQ" */
-#define SHM_IQ_VERSION 1u
+#define SHM_IQ_VERSION 2u /* v2 = v1 + radio_id/time_source/away/dwell_until appended; v1 rings (those fields zero) are still accepted */
+#define SHM_IQ_TS_UNKNOWN 0u
+#define SHM_IQ_TS_FREE 1u /* radio clock free-running */
+#define SHM_IQ_TS_PPS 2u  /* radio time aligned to PPS / external reference (comparable across radios) */
 #define SHM_IQ_MAX_CH 8u
 #define SHM_IQ_HDR_BYTES 4096u
 
@@ -28,6 +31,11 @@ typedef struct {
   _Atomic int32_t producer_pid;
   _Atomic uint64_t center_bits;   /* double: RF centre of the ring (Hz), as bits so it can be atomic */
   _Atomic uint64_t gaps;          /* radio discontinuities seen by the producer */
+  /* --- v2 --- */
+  char radio_id[48];              /* which radio produced this window (ISAC_SHM_IQ_RADIO_ID, else sdr address, else pid) */
+  uint32_t time_source;           /* SHM_IQ_TS_* */
+  _Atomic uint32_t away;          /* time-shared window: the radio is tuned elsewhere, nothing is written until dwell_until_ns */
+  _Atomic uint64_t dwell_until_ns;/* CLOCK_MONOTONIC: when the producer expects to be back (consumers extend their timeout) */
 } shm_iq_hdr_t;
 
 typedef struct {
@@ -53,6 +61,11 @@ void shm_iq_ring_write(shm_iq_ring_t *r, int64_t tick, void *const *bufs, int n,
 void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz);
 
 double shm_iq_ring_center(const shm_iq_ring_t *r);
+/* Producer (v2 metadata). radio_id may be NULL. */
+void shm_iq_ring_set_meta(shm_iq_ring_t *r, const char *radio_id, unsigned time_source);
+/* Producer: time-shared window leaves (until_ns = expected return, CLOCK_MONOTONIC) / returns (new run + epoch bump). */
+void shm_iq_ring_set_away(shm_iq_ring_t *r, uint64_t until_ns);
+void shm_iq_ring_return(shm_iq_ring_t *r, double center_hz);
 
 /* Consumer: copy samples [pos, pos+n) of the first `channels` ring channels to dst[c] (sc16, n samples each).
  * Returns 0 on success, 1 if not yet written, -1 if (part of) the range was overwritten or precedes valid_from. */

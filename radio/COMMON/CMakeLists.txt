@@ -16,7 +16,7 @@ target_link_libraries(shm_iq PRIVATE radio_common m pthread rt)
 set_target_properties(shm_iq PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
 if(ENABLE_TESTS)
-  add_executable(test_shm_iq tests/test_shm_iq.c shm_iq_ring.c iq_ddc.c)
+  add_executable(test_shm_iq tests/test_shm_iq.c shm_iq_ring.c shm_iq_pub.c iq_ddc.c)
   set_target_properties(test_shm_iq PROPERTIES ENABLE_EXPORTS ON) # exit_function for the dlopen'd device
   target_link_libraries(test_shm_iq PRIVATE log_headers m dl pthread)
   add_dependencies(test_shm_iq shm_iq)
