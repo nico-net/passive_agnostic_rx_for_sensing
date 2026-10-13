@@ -6,6 +6,7 @@
  * source (read from the disassembly of nr_dlsch_demodulation.c.o); this file is compiled with --fmad=false so nvcc
  * fuses nothing on its own. */
 #include "nr_pdsch_gpu_demod.h"
+#include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_demod.cuh"
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
@@ -1329,7 +1330,9 @@ extern "C" int nr_pdsch_gpu_demod_evm_wait(nr_gpu_demod_job_t *j)
     return -1;
   Ctx &x = g_ctx[j->ctx];
   cudaError_t e;
-  while ((e = cudaStreamQuery(x.s2)) == cudaErrorNotReady) {}
+  uint64_t pt = 0;
+  while ((e = cudaStreamQuery(x.s2)) == cudaErrorNotReady)
+    nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
   if (e != cudaSuccess)
     return -1;
   memcpy(j->evm, x.sh->evm, sizeof(j->evm));
@@ -1434,11 +1437,13 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, x.s);
   }
   cudaError_t e = cudaPeekAtLastError();
+  uint64_t pt = 0;
   while (e == cudaSuccess) {
     e = cudaStreamQuery(x.s);
-    if (e == cudaErrorNotReady)
+    if (e == cudaErrorNotReady) {
       e = cudaSuccess;
-    else
+      nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
+    } else
       break;
   }
   if (e != cudaSuccess) {

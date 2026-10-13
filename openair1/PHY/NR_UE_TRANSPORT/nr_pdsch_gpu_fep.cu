@@ -1,6 +1,7 @@
 /* GPU FEP + DM-RS channel estimation + MMSE + LLR for the passive PDSCH decoder. See the header. */
 #define NR_GPU_FEP_NO_LOADER
 #include "nr_pdsch_gpu_fep.h"
+#include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_chest.h"
 #include <cuda_runtime.h>
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
@@ -166,10 +167,12 @@ static void ctx_release(int i) { g_ctx_busy.fetch_and(~(1u << i)); }
 static int ctx_wait(int c, std::chrono::steady_clock::time_point t0)
 {
   bool late = false;
+  uint64_t pt = 0;
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_ctx_stream[c]);
     if (q == cudaSuccess) return 0;
     if (q != cudaErrorNotReady) return (int)q;
+    nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
     if (!late && std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
       late = true;
       ++g_exact_late;
@@ -1150,10 +1153,12 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
     const size_t off = ((size_t)a * MAX_SYM + lo) * N;
     CK((cudaError_t)nr_gpu_copy_async(g_h_exact + off, g_d_exact + off, (size_t)(hi - lo + 1) * N * sizeof(short2), g_stream));
   }
+  uint64_t pt = 0;
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_stream);
     if (q == cudaSuccess) break;
     if (q != cudaErrorNotReady) CK(q);
+    nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
     if (std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
       g_exact_pending = true;
       ++g_exact_late;

@@ -37,6 +37,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -72,6 +73,32 @@ static _Atomic uint64_t g_dropped_stale = 0;
 static _Atomic uint64_t g_dropped_epoch = 0;
 static _Atomic uint64_t g_max_lag       = 0;
 
+/* P99: lag (producer slot - occasion slot) at dequeue, bins < 2/4/8/12/16/18/24/32/inf slots (nr_pdcch_passive_queue_lag_hist) */
+static _Atomic uint64_t g_lag_hist[NR_PASSIVE_LAG_BINS];
+static _Atomic uint64_t g_fresh_picks = 0;
+int nr_passive_lag_bin(long lag)
+{
+  static const long edge[NR_PASSIVE_LAG_BINS - 1] = {2, 4, 8, 12, 16, 18, 24, 32};
+  int b = 0;
+  while (b < NR_PASSIVE_LAG_BINS - 1 && lag >= edge[b])
+    b++;
+  return b;
+}
+/* ISAC_SCANQ_FRESH=N (P99, default 0 = off = FIFO unchanged): when >= 2 occasions wait and the oldest is already
+ * N or more slots old, serve the NEWEST first. Under a scan backlog FIFO makes every occasion late, so the PDSCH jobs it
+ * creates arrive with little of their 18-slot sample lifetime left (born stale); newest-first keeps most of them fresh
+ * and lets the oldest ones age out (still counted as scanq drop_stale). */
+static int scanq_fresh(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_SCANQ_FRESH");
+    v = e ? atoi(e) : 0;
+    if (v < 0) v = 0;
+  }
+  return v;
+}
+
 static pthread_t g_threads[NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS];
 static int       g_nthreads = 0;
 static PHY_VARS_NR_UE *g_ue = NULL;
@@ -104,8 +131,16 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
       pthread_mutex_unlock(&g_lock);
       break;
     }
-    job    = g_ring[g_tail];
-    g_tail = (g_tail + 1) % g_depth;
+    const int fresh = scanq_fresh();
+    if (fresh && g_count >= 2
+        && atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed) - g_ring[g_tail].absolute_slot >= fresh) {
+      g_head = (g_head + g_depth - 1) % g_depth;
+      job    = g_ring[g_head];
+      atomic_fetch_add_explicit(&g_fresh_picks, 1, memory_order_relaxed);
+    } else {
+      job    = g_ring[g_tail];
+      g_tail = (g_tail + 1) % g_depth;
+    }
     g_count--;
     pthread_mutex_unlock(&g_lock);
 
@@ -126,6 +161,7 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
            && !atomic_compare_exchange_weak_explicit(&g_max_lag, &cur_max, (uint64_t)lag, memory_order_relaxed,
                                                      memory_order_relaxed))
       ;
+    atomic_fetch_add_explicit(&g_lag_hist[nr_passive_lag_bin(lag)], 1, memory_order_relaxed);
     if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       continue;
@@ -239,6 +275,13 @@ int nr_pdcch_passive_queue_backlog(void)
   const int n = g_count;
   pthread_mutex_unlock(&g_lock);
   return n;
+}
+
+void nr_pdcch_passive_queue_lag_hist(uint64_t out[NR_PASSIVE_LAG_BINS], uint64_t *fresh_picks)
+{
+  for (int b = 0; b < NR_PASSIVE_LAG_BINS; b++)
+    out[b] = atomic_load_explicit(&g_lag_hist[b], memory_order_relaxed);
+  *fresh_picks = atomic_load_explicit(&g_fresh_picks, memory_order_relaxed);
 }
 
 void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out)

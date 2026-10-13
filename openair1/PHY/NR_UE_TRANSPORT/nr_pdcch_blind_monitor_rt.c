@@ -10290,6 +10290,7 @@ constdiag_done:;
             (unsigned long)qs.batches_multi, (unsigned long)qs.dropped_narrow);
       char rc[256]; nr_pdsch_passive_queue_rnti_census(rc, sizeof(rc));
       LOG_I(PHY, "SENSING: PDSCHQ per-rnti%s\n", rc);
+      nr_pdsch_passive_queue_p99_dump(); /* P99: ISAC_PDTIM_CLASS=1 only */
     }
     /* Explicit acquisition/discovery state (Gate 4/5 groundwork). Every input is a read of a
      * counter/boolean that ALREADY exists at this point -- no new measurement, no control-flow

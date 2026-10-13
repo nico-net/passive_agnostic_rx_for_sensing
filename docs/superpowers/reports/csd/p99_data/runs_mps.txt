@@ -1,0 +1,18 @@
+bA4 cap=b rc=0 pre[14:41:10 load=4.02 hogs=ps:100,] post=14:41:46 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bA4_144110 extra=
+bP4 cap=b rc=0 pre[14:41:46 load=5.50 hogs=] post=14:42:28 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bP4_144146 extra=ISAC_GPU_POLL_SLEEP_US=200
+bPYF4 cap=b rc=0 pre[14:43:39 load=5.64 hogs=] post=14:44:14 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYF4_144339 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+bPYFC4 cap=b rc=0 pre[14:44:14 load=4.41 hogs=] post=14:44:57 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYFC4_144414 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6 ISAC_PDSCH_GPU_EXACT_CHEST_CHECK=1024 ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK=1024 ISAC_CHEST_GPU_DELAY_CHECK=1024
+tP4 cap=tim rc=0 pre[14:49:32 load=3.75 hogs=] post=14:50:06 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tP4_144932 extra=ISAC_GPU_POLL_SLEEP_US=200
+tPYF4 cap=tim rc=0 pre[14:50:06 load=3.98 hogs=] post=14:50:40 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tPYF4_145006 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+bA5 cap=b rc=0 pre[14:50:40 load=4.30 hogs=ps:100,] post=14:51:14 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bA5_145041 extra=
+bP5 cap=b rc=0 pre[14:51:14 load=3.54 hogs=] post=14:51:52 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bP5_145114 extra=ISAC_GPU_POLL_SLEEP_US=200
+bPYF5 cap=b rc=0 pre[14:55:33 load=3.86 hogs=] post=14:56:08 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYF5_145533 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+bPYFC5 cap=b rc=0 pre[14:56:08 load=3.87 hogs=] post=14:56:43 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYFC5_145608 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6 ISAC_PDSCH_GPU_EXACT_CHEST_CHECK=1024 ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK=1024 ISAC_CHEST_GPU_DELAY_CHECK=1024
+tP5 cap=tim rc=0 pre[14:56:43 load=4.55 hogs=] post=14:57:18 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tP5_145643 extra=ISAC_GPU_POLL_SLEEP_US=200
+tPYF5 cap=tim rc=0 pre[14:57:18 load=5.21 hogs=ps:100,] post=14:57:52 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tPYF5_145718 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+bA6 cap=b rc=0 pre[14:57:52 load=5.04 hogs=] post=14:58:27 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bA6_145752 extra=
+bP6 cap=b rc=0 pre[14:58:27 load=5.19 hogs=] post=14:59:03 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bP6_145827 extra=ISAC_GPU_POLL_SLEEP_US=200
+bPYF6 cap=b rc=0 pre[14:59:03 load=4.95 hogs=docker-compose:63.6,] post=14:59:44 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYF6_145903 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+bPYFC6 cap=b rc=0 pre[15:04:25 load=3.52 hogs=] post=15:05:00 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYFC6_150425 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6 ISAC_PDSCH_GPU_EXACT_CHEST_CHECK=1024 ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK=1024 ISAC_CHEST_GPU_DELAY_CHECK=1024
+tP6 cap=tim rc=0 pre[15:05:00 load=4.04 hogs=ps:100,] post=15:05:35 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tP6_150500 extra=ISAC_GPU_POLL_SLEEP_US=200
+tPYF6 cap=tim rc=0 pre[15:05:35 load=5.00 hogs=] post=15:06:09 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tPYF6_150535 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6

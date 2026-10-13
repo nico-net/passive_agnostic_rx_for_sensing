@@ -191,6 +191,13 @@ int nr_pdsch_passive_coreset_dmrs_id(int key);
 int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3);
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
+/** P99: non-probe jobs waiting for a consumer (0 when not running); ISAC_PDSCH_RETRY_YIELD backlog test. */
+int nr_pdsch_passive_queue_backlog_real(void);
+/** P99: P99AGE summary line (ISAC_PDTIM_CLASS=1 only). */
+void nr_pdsch_passive_queue_p99_dump(void);
+/** P99: ISAC_PDSCH_RETRY_YIELD counters (nr_pdsch_passive_decode.c): recovery chains started, chains cut by a backlog,
+ *  arm tries skipped by the mode-2 rescue-rate gate. */
+void nr_pdsch_retry_yield_stats(uint64_t *chains, uint64_t *yields, uint64_t *gated);
 
 /// DM-RS symbol oracle for the IN-LINE decode path (no consumer running): the same per-symbol
 /// coherence measurement the consumer makes, on the DCI's own slot, fed to the ticket's Technique-D

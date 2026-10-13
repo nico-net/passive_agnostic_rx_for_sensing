@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_budget.h"
+#include "nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -88,9 +89,10 @@ void nr_gpu_budget_rt_result(uint64_t us,int fallback) {
  */
 int nr_gpu_budget_rt_wait(int (*query)(void *),void *job,uint64_t start,
                           uint64_t (*clock_us)(void *),void *clock_arg) {
-  int rc;uint64_t elapsed;
+  int rc;uint64_t elapsed,pt=0;
   do {
     rc=query(job);
+    if(rc==600)nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
     uint64_t now=clock_us?clock_us(clock_arg):nr_gpu_budget_now_us();
     elapsed=now-start;
     if(elapsed>=nr_gpu_rt_deadline_us()) {rc=600;break;}

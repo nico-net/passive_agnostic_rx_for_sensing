@@ -122,6 +122,12 @@ void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out);
 /// Occasions waiting in the ring right now, or -1 when the pool is not running (in-line scan).
 int nr_pdcch_passive_queue_backlog(void);
 
+/// P99: lag histograms in slots, bins < 2/4/8/12/16/18/24/32/inf (nr_passive_lag_bin()).
+#define NR_PASSIVE_LAG_BINS 9
+int nr_passive_lag_bin(long lag);
+/// Scan occasions by lag at dequeue, and the ISAC_SCANQ_FRESH newest-first picks.
+void nr_pdcch_passive_queue_lag_hist(uint64_t out[NR_PASSIVE_LAG_BINS], uint64_t *fresh_picks);
+
 void nr_pdcch_passive_queue_stop(void);
 void *nr_pdcch_passive_queue_epoch_counter(void);
 

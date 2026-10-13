@@ -11,6 +11,7 @@
  * value (with c2v = 0 and llrRes = llr before the first iteration it is llr itself, OAI's llr2CnProcBuf).
  * One launch per batch, one 8-block cluster per code block, cluster barriers between the phases. */
 #include "nr_pdsch_gpu_ldpc.h"
+#include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
@@ -584,8 +585,10 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   cudaError_t e = cudaLaunchKernelEx(&cfg, z4 ? k_ldpc4 : k_ldpc, (const DJob *)ddj, x.llr, x.llrRes, x.c2v, x.unsat, dsnap, dres);
   /* GPUSHARE: poll like the demod/FEP waits. cudaStreamSynchronize under cudaDeviceScheduleBlockingSync (set by
    * nr_gpu_platform) sleeps on the completion interrupt; the TB waited far longer than its kernel. */
+  uint64_t pt = 0;
   if (e == cudaSuccess)
-    while ((e = cudaStreamQuery(x.s)) == cudaErrorNotReady) {}
+    while ((e = cudaStreamQuery(x.s)) == cudaErrorNotReady)
+      nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
   if (e != cudaSuccess) {
     fprintf(stderr, "nr_pdsch_gpu_ldpc_run: %s\n", cudaGetErrorString(e));
     g_busy.fetch_and(~(1u << c));
