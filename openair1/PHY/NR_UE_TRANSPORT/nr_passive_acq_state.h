@@ -128,6 +128,8 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
  *  RB extent) was decoded on the started grid, which proves the grid's RB 0 is Point A. Marks the carrier
  *  verified with the started geometry, only if SIB1 never provided one. `evidence` is logged. */
 void nr_passive_acq_note_carrier_from_rs(const char *evidence);
+/** ISAC_SIB1_SIBLING=1: adopt the carrier of a SIB1-decoded cell on the same absolute SSB frequency and k_ssb (co-sited sector without own SIB1); call after the MIB. */
+void nr_passive_acq_try_sibling_carrier(int k_ssb);
 /** BLINDPIPE: Point-A hypothesis from the blind nID = PCI PDCCH DM-RS sweep (nr_dl_traffic_probe_rt.c); carrier = grid. */
 void nr_passive_acq_note_carrier_hypothesis(int point_a_sc, const char *evidence);
 /* TDD pattern from SIB1 (tdd-UL-DL-ConfigurationCommon). Slots are in the reference-SCS numbering
