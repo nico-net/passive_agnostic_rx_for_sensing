@@ -673,7 +673,7 @@ remain receiver functions.
 
 | Branch | State | Notes |
 |---|---|---|
-| **`adaptive-rx-UL-DL`** | **Current integration branch. HEAD `457c24fac5`.** Pushed to `github`. | Contains: plan Tasks 1–16+18 ("full-running agnosticity", merged at `25a8699a64`), `sdd/validation` (SA discovery-stall fix + Technique D fix), `sdd/integration` (lanes perf, misc, pusch, harq, dmrs2), `cloud/ue-localization` @ `621bdc32a2` (lanes ssb, nsa-mib, csirs + ocudu-dl, bwp harness, cbg test, OCUDU ZMQ harness). |
+| **`adaptive-rx-UL-DL`** | **Current integration branch. HEAD `457c24fac5`.** [SUPERSEDED 2026-10-12: fast-forwarded to `csd/otatest` `b381ffad50`, see 2026-10-13 section 8.] Pushed to `github`. | Contains: plan Tasks 1–16+18 ("full-running agnosticity", merged at `25a8699a64`), `sdd/validation` (SA discovery-stall fix + Technique D fix), `sdd/integration` (lanes perf, misc, pusch, harq, dmrs2), `cloud/ue-localization` @ `621bdc32a2` (lanes ssb, nsa-mib, csirs + ocudu-dl, bwp harness, cbg test, OCUDU ZMQ harness). |
 | `cloud/ue-localization` | Merged into HEAD. | Tip `621bdc32a2` = HEAD code. |
 | `port/multirx-rx-fixes` | **Merged 2026-10-01** (`e5007ed501`). | 8 receiver fixes ported from `feature/multirx-clean-adaptive` after triage (K2), §14.4. |
 | `cloud/dgx-next-steps` | **Merged 2026-10-01** (`54bbf03b91`). | Track A of the DGX next-steps plan, cloud x86 session (§13.2, §14.5/§14.6). |
@@ -3483,12 +3483,14 @@ Target: mean < 0.5 ms per decode. Not met in any replay or OTA run. p50 met in t
 
 ### 2026-10-12 block (`csd/otatest`, worktree `rr-csd-b`; OTA 10-12 (DEIB, DGX GB10), DGX replays, offline reports)
 
+> SUPERSEDED IN PART by the 2026-10-13 block (below this block): items marked `[SUPERSEDED 2026-10-13 ...]` in place.
+
 Sources: the reports under `docs/superpowers/reports/csd/` named per row (suffix 20261012 unless shown), plus orchestrator facts
 of 2026-10-12 (labelled `[ORCH]` where the fact is not in a report). Index: [INDEX](docs/superpowers/reports/csd/INDEX.md).
 Cells are never merged: each PCI, each capture and each OTA window stays separate. Replays are `[MEASURED, DGX replay <capture>]`,
 OTA is `[MEASURED, DGX OTA <date time>]`, unit tests `[OFFLINE VERIFIED]`, source reading `[CODE-READ]`, survey analysis of
 captures `[MEASURED, offline]`. Everything below is default off unless stated. `n=2` or `n=3` runs per arm: indicative only.
-RATEFIX-20261012 is not on this branch and is not used. STALLS-20261012 is on this branch and is used.
+RATEFIX-20261012 is not on this branch and is not used. [SUPERSEDED 2026-10-13 section 4: RATEFIX code and replay exist on `csd/ratelimit-fix`.] STALLS-20261012 is on this branch and is used.
 
 **1. Status and merge gate**
 
@@ -3518,7 +3520,7 @@ RATEFIX-20261012 is not on this branch and is not used. STALLS-20261012 is on th
   `CSIRS_FULL_BLOCK_INFER=2`, `UL_LOCK_BWP_ALL`, `UL_LOCK_MCS_STAT`, `SLOT_SCALE`, `CSIRS_DISC_RATELIMIT`, `NORM_COALESCE`,
   `ISAC_DCI11_HARQPID=1`, `ISAC_PDSCH_REP_FIELDS=1`. Env files are single-line (`[CODE-READ]`, 10-10/11 section 2).
 - **Open, must be checked before relying on t26z:** the reports behind several of these flags do not contain an OTA result for the flag
-  as it is now set. `CSIRS_DISC_RATELIMIT` (CSIRSRATE): unit test only, replay denied, `NOT MEASURED`. The BLINDFIX flags (`SWEEP_SIGNIF`,
+  as it is now set. `CSIRS_DISC_RATELIMIT` (CSIRSRATE): unit test only, replay denied, `NOT MEASURED`. [SUPERSEDED 2026-10-13 section 4: RATEFIX replay, not OTA.] The BLINDFIX flags (`SWEEP_SIGNIF`,
   `PDCCH_GATE_CFAR`, `MCS_TABLE_EVID`, `UL_LOCK_BWP_ALL`, `UL_LOCK_MCS_STAT`, `CSIRS_FULL_BLOCK_INFER=2`): offline replay, n=2, no
   per-flag attribution, and BLINDFIX itself recommends one flag at a time on a cell other than PCI 415. `NORM_COALESCE` (DECTAIL):
   replay within noise, `NOT claimed as a win`. The orchestrator set them as the default; the per-flag attribution is not in the reports.
@@ -3569,7 +3571,7 @@ RATEFIX-20261012 is not on this branch and is not used. STALLS-20261012 is on th
 - **OTA A/B `[MEASURED, DGX OTA 2026-10-12 20:15-20:26, TIM, 2 runs/arm]` (t26zL = t26z + `ISAC_L2MAXH_DELTA_NL2=-3`):** 2-layer
   CRC at SNR >= 10 dB: MCS 5-9 54.0 % vs 30.1 %; MCS 10-16 16.3 % vs 5.5 %. All-Nl MCS 0-4 96.1 % vs 95.4 %. CRC-OK RNTIs 53, 67
   vs 51, 67. **But** demod mean 1096 us vs 155 us, per-decode p50 665-685 vs 325-345 us, p99 15-16 ms vs 4 ms.
-  **Not adopted** until the slowdown is fixed. This OTA result is the first OTA evidence for the CRC gain; the replay gain was small.
+  **Not adopted** until the slowdown is fixed. [SUPERSEDED 2026-10-13 section 2: fixed in replay (nl == 2 only), OTA pending.] This OTA result is the first OTA evidence for the CRC gain; the replay gain was small.
 
 **6. Carrier geometry, dedicated CORESET and WindTre 508**
 
@@ -3614,7 +3616,7 @@ RATEFIX-20261012 is not on this branch and is not used. STALLS-20261012 is on th
 
 **8. Decode time per PDSCH grant (PDTIM), stalls and the OTA stale drops**
 
-Target: mean < 0.5 ms per decode. Not met in any replay or OTA run (best replay arm 679 us, `[MEASURED, DGX replay b, NORM_COALESCE N arm]`).
+Target: mean < 0.5 ms per decode. Not met in any replay or OTA run (best replay arm 679 us, `[MEASURED, DGX replay b, NORM_COALESCE N arm]`). [SUPERSEDED 2026-10-13 section 1: 582 us on b with `ISAC_PDSCH_GPU_HOST_PIN=1` in replay; still not met.]
 
 | report | arm / capture | result | label |
 |---|---|---|---|
@@ -3679,15 +3681,15 @@ Target: mean < 0.5 ms per decode. Not met in any replay or OTA run (best replay 
 
 **11. Open items (not measured, carried forward)**
 
-- Decode mean > 0.5 ms (p50 met): tail from GPU sharing and the scan pool.
+- Decode mean > 0.5 ms (p50 met): tail from GPU sharing and the scan pool. [SUPERSEDED 2026-10-13 section 1: tail = GPU page faults, fixed in replay.]
 - UL lock twin hypotheses 216@0 / 216@1: not separable by DM-RS energy; no OTA lock speed fix.
-- 2-layer NL2 delta slowdown (demod 1096 vs 155 us): fix before adoption.
+- 2-layer NL2 delta slowdown (demod 1096 vs 155 us): fix before adoption. [SUPERSEDED 2026-10-13 section 2: fixed in replay; OTA check pending.]
 - 508 dedicated CORESET not verified (section 6); PCI 4 SIB1 not decoded.
 - PCI 675 10-11 failure cause not established (section 7).
 - t26z default-env flags without OTA attribution (section 3).
 - TIM MCS-0 fix (`ISAC_PDSCH_REP_FIELDS=1`): OTA check pending.
 - OTA stale drops 39-47 % (STALLS): the scan-pool lever did not clear the bar; lag-at-enqueue histogram not built; class A freeze cause open.
-- Merge gate NOT MET.
+- Merge gate NOT MET. (Still NOT MET at 2026-10-13, see 2026-10-13 section 9.)
 
 **12. Superseded by this block.** Old text is kept. Where the text exists in this file it is marked in place (top banner, 2026-10-10/11 block sections 2, 3, 5 and 7). Report-only items are listed here only:
 - "Recommended OTA env: t26s" (2026-10-11 banner, 10-10/11 section 2) -> t26z, section 3.
@@ -3709,6 +3711,152 @@ CSIRSRATE-20261012, DECTAIL-20261012, GPUALLOC-20261012, BATCHCPU-20261012, STAL
 WEAKSYNC-20261012, WEAKLIVE-20261012, AUTOFRONT-20261012, UECORESET-20261012, CARRIERGEOM-20261012, ULLOCKSPEED-20261012,
 CARRIERS2-20261011, NEWCELLS-20261011 (`docs/superpowers/reports/csd/`); RATEFIX-20261012 not present on this branch (skipped).
 Orchestrator facts of 2026-10-12 are marked `[ORCH]`. Raw logs are untracked under `/home/nicola/NICOLA/wt/*/replays` and `ota_runs`.
+
+---
+
+### 2026-10-13 block (`csd/otatest`, worktree `rr-csd-b`; replays and reports only, no new OTA run in this block)
+
+Sources: reports under `docs/superpowers/reports/csd/` named per row (suffix 20261012): DECODETIME, NL2SPEED, LLRZERO, RATEFIX,
+QUIETTIMING, CORESETALL, ULTWINS. Orchestrator facts of 2026-10-13 are labelled `[ORCH]`. Cells are never merged: `b` = Vodafone
+PCI 415 (`raw_pci415_12s_b`), `tim` = TIM PCI 923 (`raw_pci923_tim_12s_tile3`). Replays are `[MEASURED, DGX replay <capture>]` (GB10,
+4 RX, `timacq_replay.sh SPEED=1`, `ota/t26z.env`), nsys runs `[MEASURED, DGX replay + nsys]`, unit tests `[OFFLINE VERIFIED]`,
+source reading `[CODE-READ]`, inference `[INF]`. Replay numbers are not OTA numbers.
+
+**1. Decode stalls: root cause and fix (DECODETIME)**
+
+- `[MEASURED, DGX replay b + nsys, three traces]` Root cause of the 20-430 ms device-wide decode stalls: the GPU's first touch of each
+  new 4 KB page of a pageable host buffer is a GPU page fault (about 12 us per page). Affected buffers: chest `scratch` rows above the
+  thread's previous high-water mark, the grow-only LLR buffer on regrowth, and the first grant of each thread. A fault stalls the whole
+  device (every consumer's in-flight kernels), not only the faulting kernel. Rejected for these traces: cudaMalloc, cuFFT plan and
+  green-context creation (all < 1 s after start), clocks, host locks, SM sharing as the stall source.
+- **Fix: `ISAC_PDSCH_GPU_HOST_PIN=1`** (code default off; flag off = byte-identical path). `cudaHostRegister` of the touched host
+  buffers at consumer start (`nr_pdsch_passive_decode_pin_prewarm()`), so no decode pays the registration. No arithmetic or data-flow
+  change. Code commit `11b0bef449` (branch `csd/decode-time`, as stated by the report). `[ORCH]` set as default in the OTA env (section 3).
+- `[MEASURED, DGX replay b, quiet host, interleaved, 6 A + 6 P runs]` (A = t26z, P = t26z + HOST_PIN):
+
+  | metric | A | P | Welch p |
+  |---|---|---|---|
+  | real-grant mean | 819 +- 55 us | 582 +- 46 us (-29 %) | 0.000 |
+  | real p99 | 7373 +- 1992 us | 2747 +- 810 us | 0.001 |
+  | real > 20 ms bodies / run | 13.2 +- 5.6 | 1.2 +- 0.8 | 0.003 |
+  | real mean excl. > 5 ms bodies | 544 +- 10 | 543 +- 43 | -- |
+
+  The gain is the tail: the mean without > 5 ms bodies does not move. Stall clusters per run 10.7 -> 3.3.
+- `[MEASURED, DGX replay tim, 3 + 3 runs]` real-grant mean 2684 +- 237 -> 1286 +- 124 us (-52 %); p99 19995 (histogram cap) -> 6908 us.
+  Three vs three cannot reach MWU p < 0.10: indicative only.
+- `[MEASURED, DGX replay b, EXACT_CHEST/DEMOD/FEP CHECK=1 every grant, run ebK1_002927]` bit-exact: `GPU_EXACT_CHEST check_bad=0`
+  of 20,000; `GPU_EXACT_DEMOD check_bad=0` of 20,000; `GPU_EXACT_FEP check_bad=0` of 14,000. CRC-OK counts: no regression (n.s.).
+- `[MEASURED, DGX replay b, Z = P with CHECK=0, 3 runs]` real mean 514 +- 21 us (P at CHECK=64: 568 +- 24; Welch p 0.12). This arm
+  removes the on-air bit-exactness guard: diagnostic only, not proposed for air. It shows the CPU reference of every 64th grant
+  causes the remaining > 20 ms bodies.
+- **Target mean < 0.5 ms: NOT MET** with the pin (582 us on b, best run 508 us). **Target p99 < 0.5 ms: not reachable with the current
+  kernel set** `[MEASURED, DGX replay b + nsys, 15,023 bodies]`: 5.1 % of bodies need > 0.5 ms of pure kernel execution; the p99 body
+  runs 1.2 ms of kernels plus 0.11 ms of launch API (about 17 launches per body). Levers not done `[INF]`: one launch or CUDA graph per
+  stage; LDPC code blocks of one TB in one launch; trimmed per-row delay transform. A realistic near-term target is p90 ~0.5 ms and
+  p99 ~1 ms `[INF]`.
+- `[MEASURED, DGX replay b, 3 runs/arm, on top of HOST_PIN]` `ISAC_PDSCH_GPU_BATCH=1` and `ISAC_GPU_RT_PARTS=2`: no change in mean,
+  p50, p90 or p99 (Welch p >= 0.41). Not levers for the tail.
+- Resource cost `[CODE-READ, DECODETIME section 6]`: about 45 MB pinned per consumer, about 225 MB for 5 consumers. A warning
+  `GPU_HOST_PIN: cudaHostRegister(...) failed rc=` means a buffer stayed pageable (fallback to the old behaviour).
+- OTA class A freezes (whole-consumer freeze 0.86-0.92 s, STALLS, 10-12 section 8) are a different mechanism per the report and are
+  not claimed closed by this fix. `[NOT MEASURED ON AIR]`.
+
+**2. ISAC_L2MAXH_DELTA_NL2: cause of the OTA demod slowdown, and the fix (NL2SPEED, LLRZERO)**
+
+- `[MEASURED, DGX OTA 2026-10-12 20:15-20:26, TIM, logs ab_TmL1_1_201805 / ab_TmL2_1_202331]` The 7x demod slowdown (1096 us vs 155 us)
+  was not a per-grant CPU fallback for nl >= 2. The GPU demod CHECK (every 64th grant) mismatched once at Nl 4 (`llr[132] gpu 792 cpu 1142`
+  in L1; `llr[7] gpu 526 cpu 2047` in L2). A mismatch disables the GPU demod for the rest of the run, so demod ran on CPU for the rest
+  of the run (p99 13.3 ms vs 1.3 ms).
+- Cause `[CODE-READ + HYPOTHESIS]`: the delta applied to every nl >= 2, including Nl 3/4 (mode-2 double Gauss-Jordan). An 8x finer shift
+  makes the near-singular 4x4 solve sensitive to pivot ties; the GPU port is not bit-exact there. The mismatching RE was not isolated.
+- **Fix `[IMPLEMENTED, commit on csd/nl2-speed]`:** `ISAC_L2MAXH_DELTA_NL2` applies to nl == 2 only (CPU and GPU). Nl 3/4 are untouched
+  and stay on the bit-exact path. Costs: Nl 3/4 get no delta (never measured to benefit).
+- `[MEASURED, DGX replay tim and b, 2 runs/arm, CHECK=64]` `CHECK mismatch 0` in all arms; demod p50 85 us in all arms (the broken OTA runs:
+  445-455 us). Means are not significant (single start-up outliers 90-610 ms).
+- 2-layer CRC, replay pooled, n small `[MEASURED, DGX replay]`: TIM MCS 5-9 41.6 % -> 60.2 %; Vodafone b MCS 5-9 47.3 % -> 62.2 %; b
+  MCS 10-16 no gain. Direction matches the OTA A/B (54 % vs 30 % at MCS 5-9, 10-12 section 5). Still n small.
+- Root cause of the exact-zero 2-layer LLRs (17-42 % in the MMSE mode-2 path) `[CODE-READ + MEASURED, DGX replay]`: int16 resolution of
+  the weak layer's equaliser output (w 2-3x smaller). Not a GPU artefact (GPU and CPU zero % identical) and not CSI-RS erasure.
+  Singular or w == 0 is < 1 %.
+- Open: full-length OTA re-run to confirm the 155 us demod mean with the nl==2 fix; isolating the Nl 4 mismatching RE; making the GPU
+  Nl 3/4 solve exact under the delta.
+
+**3. Default OTA env (orchestrator, 2026-10-13)**
+
+- `[ORCH]` `ISAC_PDSCH_GPU_HOST_PIN=1` and `ISAC_L2MAXH_DELTA_NL2=-3` (nl == 2 only, per section 2) added to the default OTA env
+  `ota/t26z.env` on 2026-10-13. `[replay-validated; OTA pending]` `[NOT MEASURED ON AIR]`.
+- Expected on air: `SENSING: ISAC_PDSCH_GPU_HOST_PIN=1: ...` line once at start; PDTIMCLSST > 20 ms bands near 0 for fep/chest; `GPU_EXACT_*
+  check_bad=0`; 2-layer CRC at SNR >= 10 dB up; demod mean near 155 us. Rollback = remove the two settings.
+- Env files stay single-line (10-12 section 10).
+
+**4. CSI-RS rate limit (RATEFIX)**
+
+- Code fix on branch `csd/ratelimit-fix` (base `csd/otatest` 51eb8f97ab; built on merged main 5bb8c7b0e4). The report does not state a
+  merge into `csd/otatest`. Changes: `confirmed-lost` needs 2 consecutive unmatched observations; `new-pattern` needs the same new footprint
+  in two consecutive observations; `crc-drop` uses a two-proportion z with +1/+1 pseudo-counts, 3 sigma, 2 consecutive violating blocks;
+  n_conf counts distinct matched resources. Flag unchanged: `ISAC_CSIRS_DISC_RATELIMIT=1` in `t26z.env`.
+- `[OFFLINE VERIFIED]` `test_nr_csirs_disc_rate` 5/5, `test_nr_csirs_disc_td` 3/3 (DGX aarch64).
+- `[MEASURED, DGX replay b and tim, 3 runs/arm, TMO 45 s, one build, flag 0 vs 1]` tim: before the fix the same capture gave
+  `confirmed-lost` 0.5k slots after STABLE and a re-burst; after the fix no `confirmed-lost`, `new-pattern` or `crc-drop` in 12 runs.
+  But only 1 of 3 tim RL1 runs reached STABLE (slot 27440). b never settles in 12 s (the set keeps growing; the criterion is unchanged on
+  purpose). CRC and decode differences overlap between arms: no attributable gain. `[NOT OTA]`.
+
+**5. Quiet-host timing baseline and GPU flags (QUIETTIMING, pre-fix)**
+
+- `[MEASURED, DGX replay b, 6 runs/arm]` A = t26z real-grant mean 849 +- 86 us; B = +`ISAC_PDSCH_GPU_BATCH=1` 830 +- 155; C = +`ISAC_GPU_RT_PARTS=2`
+  835 +- 165 (Welch p 0.79 and 0.85). Neither moves the mean or p99 beyond noise. Pdschq stale drops 17.1 % -> 4.1 % in B (p 0.042) are
+  secondary and not claimed as a win.
+- Stall clusters are host/GPU-wide (28-37 % of clusters hit >= 4 consumers at once). Consistent with the page-fault cause in section 1.
+- Host note `[MEASURED]`: three D-state tasks (`mstflint`, `mlxlink_ext`) keep loadavg at ~3.0 on an idle machine; a load gate must subtract
+  them (effective load = loadavg1 - D-state count).
+
+**6. 508 dedicated CORESET and CORESET sweep (CORESETALL, ORCH)**
+
+- `[MEASURED, OTA logs ab_V508a/b/c, ab_U508a/b, 2026-10-12]` 508 dedicated CORESET still NOT verified in any of five windows. The nID
+  candidates are noise (irreproducible between runs; only 51400 and 63955 recur). No UE-specific traffic in any window (SI-RNTI, RA-RNTI
+  only; no C-RNTI, no TC-RNTI). Consequence: "no dedicated CORESET found" and "no dedicated CORESET traffic" cannot be told apart on
+  these logs. A null result without an active UE proves nothing.
+- Code (default off): `ISAC_PDCCH_DISC_ENUM=1` (with `ISAC_PDCCH_DISC_COVER=1`) enumerates extra dwells over durations 1-3, bundle 2/6,
+  shift 0 and PCI, after the legacy covers. Extras stop as soon as any CORESET is verified. `[OFFLINE VERIFIED]`
+  `test_nr_pdcch_blind_monitor` 262/262. `[MEASURED, DGX replay b and tim, n=2..4]` time-to-bank unchanged (tim 13782-13820 slots; b
+  11980-15275 slots, OFF vs ENUM); no regression claimed beyond that.
+- **Cell-fitted assumption found** `[ORCH]`: `ISAC_COREMAP_IDSWEEP_DUR=1` is in the OTA env, so the GPU CORESET sweep tries duration 1 only.
+- **Starvation found** `[MEASURED, DGX replay tim, OFF arm]`: C-RNTI 0x4e32 is decoded 477 / 641 times per 3000 slots before a dwell
+  and 45 / 23 / 10 afterwards. `[ORCH]` TIM C-RNTI decodes go from ~500 to 10-45 per 3000 slots when a dwell is active.
+  `[ORCH]` Both (duration sweep and dwell starvation) are being fixed by the CORESET owner agent on `csd/coreset-fable`. The PDCCH rt/decode
+  path was not touched by `csd/coreset-all`.
+- Not implemented: cells without servingCellConfigCommon (PCI 403) or without SIB1 (PCI 4). No Point A, so no nID sweep.
+
+**7. UL BWP twin hypotheses (ULTWINS)**
+
+- **NEGATIVE** `[MEASURED replay b, c, tim, one run per cell]`: `ISAC_UL_LOCK_EDGE=1` and `ISAC_UL_LOCK_COHERENT=1` produced no `BWP_LOCK`
+  on any capture (no false locks either). Cause: on the busy cell c, undecoded UEs' DM-RS lie under the hypothesis ranges, so the null
+  "no DM-RS under this range" is false (z 9-11 with no DM-RS detectable). **Do not enable EDGE or COHERENT on OTA.**
+- `ISAC_UL_LOCK_NO_TRIAL_UNLOCKED=1`: works as designed (CRC trials 0 while unlocked, vs 87-585 on b) `[MEASURED replay]`, but its
+  benefit is not shown in replay (speed 0.25 is not overloaded). Default off; not added to the default env by this block.
+
+**8. Branch policy (ORCH)**
+
+- `[ORCH]` `csd/otatest` is the testing branch. `adaptive-rx-UL-DL` was fast-forwarded to `csd/otatest` `b381ffad50` on 2026-10-12 and
+  pushed by the user. `adaptive-rx-UL-DL` is updated only at the end of the work. Do not merge into it before then.
+
+**9. Superseded by this block** (old text kept; marked in place in the 10-12 block and §3.1 where the old text sits)
+
+- 10-12 section 5 "Not adopted until the slowdown is fixed" (NL2 OTA A/B) -> section 2 above: fixed in replay (nl == 2 only), OTA pending.
+- 10-12 section 8 "target mean < 0.5 ms not met in any replay or OTA run (best 679 us)" -> still not met, but 582 us (514 us with CHECK=0) with
+  HOST_PIN in replay (section 1).
+- 10-12 section 11 "decode mean tail from GPU sharing and the scan pool" -> tail = GPU page faults (section 1). Scan-pool attribution for OTA
+  stale drops is unchanged.
+- 10-12 section 11 "2-layer NL2 delta slowdown: fix before adoption" -> fixed in replay (section 2); OTA check pending.
+- 10-12 sections 1, 3 and 12 "CSIRS_DISC_RATELIMIT: unit test only, replay denied, NOT MEASURED" and "RATEFIX not used" -> RATEFIX replay
+  (section 4); still not OTA.
+- 10-12 section 1 merge gate: still NOT MET at 2026-10-13 (decode mean > 0.5 ms; 508 dedicated CORESET unverified; TIM MCS-0 OTA check
+  pending).
+- QUIETTIMING (pre-fix stall framing "host/GPU-wide, cause unknown") -> cause found in section 1.
+- §3.1 branch table row `adaptive-rx-UL-DL` HEAD `457c24fac5` -> fast-forwarded to `csd/otatest` `b381ffad50` on 2026-10-12 (section 8).
+
+**10. Reports used:** DECODETIME-20261012, NL2SPEED-20261012, LLRZERO-20261012, RATEFIX-20261012, QUIETTIMING-20261012,
+CORESETALL-20261012, ULTWINS-20261012 (`docs/superpowers/reports/csd/`). Raw logs and nsys traces are untracked.
 
 ---
 
