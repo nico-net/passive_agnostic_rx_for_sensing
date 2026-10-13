@@ -299,9 +299,10 @@ static void rl_update(const nr_csirs_disc_ring_t *ring, const nr_csirs_disc_fp_t
   }
   if (changed || was != st.stable) {
     if (nr_csirs_disc_td_set_duty) nr_csirs_disc_td_set_duty(st.stable, st.G, st.div_s, st.rearm);
-    LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT %s reason=%s n_conf=%d slot=%llu G=%u div_s=%u p0=%.3f skipped=%llu\n",
+    struct timespec rts; clock_gettime(CLOCK_MONOTONIC, &rts);
+    LOG_I(PHY, "SENSING: CSIRS_DISC RATELIMIT %s reason=%s n_conf=%d slot=%llu G=%u div_s=%u p0=%.3f skipped=%llu t=%ld.%03ld\n",
           st.stable ? "STABLE" : "SEARCH", st.reason, o.n_conf, (unsigned long long)o.slot, st.G, st.div_s, st.p0,
-          &csirs_disc_rl_skipped ? (unsigned long long)csirs_disc_rl_skipped : 0ull);
+          &csirs_disc_rl_skipped ? (unsigned long long)csirs_disc_rl_skipped : 0ull, (long)rts.tv_sec, rts.tv_nsec / 1000000);
     st.rearm = false;
   }
 }
@@ -430,7 +431,8 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
           && (!nr_csirs_blind_rt_discovery_confirmed || !nr_csirs_blind_rt_discovery_confirmed(&all_hyps[i])))
         hyps[n_hyp++]=all_hyps[i];
     }
-  LOG_I(PHY, "SENSING: CSIRS_DISC HYPOTHESES n=%d sweep=%d\n", n_all, n_hyp);
+  struct timespec hts; clock_gettime(CLOCK_MONOTONIC, &hts); /* OTATAIL: align batches with PDTIMSLOW t= */
+  LOG_I(PHY, "SENSING: CSIRS_DISC HYPOTHESES n=%d sweep=%d t=%ld.%03ld\n", n_all, n_hyp, (long)hts.tv_sec, hts.tv_nsec / 1000000);
 
   const uint64_t built = now_us(), cpu_built=cpu_us();
   int n_win = 0;

@@ -277,6 +277,7 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
   while(s.written<r->written) {
     int first=s.written%r->capacity,n=std::min<uint64_t>(100,std::min<uint64_t>(r->capacity-first,r->written-s.written));
     const int16_t *grid=r->device_valid && r->device_grid?r->device_grid+(size_t)first*r->slot_stride:s.grid.p;
+    CsirsDiscGate gate;
     if(!(r->device_valid && r->device_grid) && disc_copy(s.grid.p,r->grid_base+(size_t)first*r->slot_stride,n*r->slot_stride*2,cudaMemcpyHostToDevice)!=cudaSuccess) return -1;
     if(disc_copy(s.meta.p,r->meta+first,n*sizeof(*r->meta),cudaMemcpyHostToDevice)!=cudaSuccess || disc_zero(s.x.p,0,(size_t)n*nr*4)!=cudaSuccess) return -1;
     normalize<<<(n*rb*14+127)/128,128,0,disc_stream()>>>(grid,s.meta.p,r->slot_stride,n,r->n_ant,rb,symbols,s.exclude.p,s.x.p,tiles,norm_rbfast());
@@ -292,6 +293,7 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
     bool clear=true;
     for(int pi=g;pi<13;pi+=4) {
       int p=periods[pi];uint64_t counts[640]={};for(int i=0;i<640;++i) counts[i%p]+=s.counts[i];
+      CsirsDiscGate gate;
       if(disc_copy(s.dc.p,counts,p*8,cudaMemcpyHostToDevice)!=cudaSuccess
          || disc_zero(s.masks.p,0,(size_t)p*14*tiles*6*2)!=cudaSuccess || disc_zero(s.count.p,0,4)!=cudaSuccess) return -1;
       lattice_pool<<<(p*pooled+127)/128,128,0,disc_stream()>>>(p,nr,pooled,s.sum.p,s.sq.p,s.ps.p,s.pq.p);
@@ -302,6 +304,7 @@ static int detect(const nr_csirs_disc_ring_t *r,const nr_csirs_disc_fp_cfg_t *cf
       unsigned count=0;if(disc_copy(&count,s.count.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess || count>GPU_CAND_CAP) return -1;
     }
   }
+  CsirsDiscGate gate;
   finish<<<1,1,0,disc_stream()>>>(s.groups.p,s.sizes.p,s.all.p,s.out.p,s.nout.p,std::min(maxout,128));
   int n=0;if(cudaGetLastError()!=cudaSuccess || disc_copy(&n,s.nout.p,4,cudaMemcpyDeviceToHost)!=cudaSuccess
      || disc_copy(out,s.out.p,n*sizeof(*out),cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
