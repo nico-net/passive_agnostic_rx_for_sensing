@@ -289,6 +289,8 @@ RX = {
                            r" gt5ms=(\d+) gt20ms=(\d+)"),
     "evm": re.compile(r"EVMGRANT rnti=0x([0-9a-f]+) (\d+)\.(\d+) crc=(\d) mcs=(\d+) tbl=(\d+) Qm=(\d+) Nl=(\d+) "
                       r"rb=(\d+)\+(\d+) .*?snr=(-?[\d.]+)"),
+    "p99age": re.compile(r"P99AGE slots\(([^)]*)\) pdsch_enq_real=\[([\d,]*)\] pdsch_enq_probe=\[([\d,]*)\] scan_deq=\[([\d,]*)\] "
+                         r"scanq_fresh=(\d+) retry_chains=(\d+) retry_yields=(\d+) retry_gated=(\d+)"),
     "evm_tail": re.compile(r"dec_us=(\d+).*?tbs=(\d+)"),
     "ul_lock": re.compile(r"ULLAYOUT (?:LOCK|BWP_LOCK) (?:len=(\d+) )?bwp=(\d+)@(\d+)"),
     "ul_crc_lock": re.compile(r"ULLAYOUT_CRC_LOCK( RELOCK)? len=(\d+) bwp=(\d+)@(\d+).*?crc_ok=(\d+) trials=(\d+)"),
@@ -354,6 +356,7 @@ class RunState:
         self.pdtim = {}
         self.pdtimpct = {}
         self.pdtimcls = {}
+        self.p99age = {}
         self.lat_series = deque(maxlen=SERIES_CAP)
         # metrics
         self.metrics_last = None
@@ -677,6 +680,15 @@ class RunState:
             if d:
                 self.pdtim = d
 
+    def _h_p99age(self, rest, t):
+        """P99AGE (nr_pdsch_passive_queue.c, ISAC_PDTIM_CLASS=1): cumulative job-age histograms in slots."""
+        m = RX["p99age"].search(rest)
+        if m:
+            bins = m.group(1).split("/")
+            h = {k: [int(x) for x in v.split(",") if x] for k, v in zip(("pdsch_enq_real", "pdsch_enq_probe", "scan_deq"), m.groups()[1:4])}
+            self.p99age = dict(bins=bins, hist=h, scanq_fresh=int(m.group(5)),
+                               retry_chains=int(m.group(6)), retry_yields=int(m.group(7)), retry_gated=int(m.group(8)), t=t)
+
     def _h_evm(self, rest, t):
         m = RX["evm"].search(rest)
         if not m:
@@ -994,7 +1006,7 @@ class RunState:
                                    "zero_tb": m.get("ldpc_zero_tb")} if m.get("ldpc_ok") is not None else {}),
             "pusch": pusch, "ul": self.ul, "td_conv": self.td_conv, "new_ctx": self.new_ctx,
             "grants": self.grants_view(), "rnti_seen": len(self.rnti_seen),
-            "timing": {"pdtim": self.pdtim, "pdtimpct": self.pdtimpct, "pdtimcls": self.pdtimcls,
+            "timing": {"pdtim": self.pdtim, "pdtimpct": self.pdtimpct, "pdtimcls": self.pdtimcls, "p99age": self.p99age,
                        "series": list(self.lat_series)[-400:]},
             "metrics": m, "metrics_n": self.metrics_n, "series": list(self.series)[-720:], "window": last,
             "sense": dict(self.sense, export={k: m.get(k) for k in ("sense_cfr_drop", "sense_rec_drop", "sense_io_errors",
@@ -1063,7 +1075,7 @@ _SENSING = {
     "CSIRS_BLIND": RunState._h_csirs, "CONFIG_EPOCH": RunState._h_epoch, "blind": RunState._h_blind,
     "PDSCHQ": RunState._h_pdschq, "PUSCHQ": RunState._h_puschq, "LDPCDIAG": RunState._h_ldpc,
     "pusch_passive": RunState._h_pusch, "PDTIM": RunState._h_pdtim, "PDTIMPCT": RunState._h_pdtim,
-    "PDTIMCLS": RunState._h_pdtim, "PDTIMCLSST": RunState._h_pdtim, "EVMGRANT": RunState._h_evm,
+    "PDTIMCLS": RunState._h_pdtim, "PDTIMCLSST": RunState._h_pdtim, "EVMGRANT": RunState._h_evm, "P99AGE": RunState._h_p99age,
     "ULLAYOUT": RunState._h_ul, "ULLAYOUT_CRC_LOCK": RunState._h_ul, "Technique": RunState._h_td,
 }
 _PLAIN = (
