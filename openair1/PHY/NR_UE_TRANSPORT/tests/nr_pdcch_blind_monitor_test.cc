@@ -6000,6 +6000,7 @@ uint32_t UllRiv(int n, int s, int l)
 struct UllGen {
   std::mt19937 rng{12345};
   uint8_t pid[8] = {0}, ndi[8] = {0};
+  int rivw = 15;  // RIV field width (15 = 216/217 PRB, 13 = 107 PRB; the DCI is 44 - (15 - rivw) bits)
   long slot = 1000;
   int k = 0;
   nr_ul_layout_dci_t next(int n_bwp = 216)
@@ -6014,7 +6015,7 @@ struct UllGen {
     const int rv = (rng() % 12) ? 0 : 2;
     uint64_t v = 0;
     auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
-    put(0, 1); put(1, 1); put(UllRiv(n_bwp, S, L), 15); put(0, 4); put(rng() % 28, 5); put(ndi[u], 1); put(rv, 2);
+    put(0, 1); put(1, 1); put(UllRiv(n_bwp, S, L), rivw); put(0, 4); put(rng() % 28, 5); put(ndi[u], 1); put(rv, 2);
     put(pid[u], 4); put(3, 2); put(1, 2); put(0, 3); put(0, 2); put(0, 1); put(1, 1);
     const int fr = 50 + k / 4;
     slot = (long)fr * 20 + dci_slots[k % 4];
@@ -6454,6 +6455,95 @@ TEST(UlLayoutLock, CrcGuardNeedsEvidenceForCrc16AndLocksOnCrc24)
   nr_ul_layout_lock_reset();
   unsetenv("ISAC_UL_LOCK_CRC_FIRST");
   unsetenv("ISAC_UL_LOCK_CRC_GUARD");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+}
+
+namespace {
+// feeds `n` decoded grants (locked layout reads) with the verdict `ok(start)`; returns the start of the last grant
+int UllPriorRun(UllGen &g, const nr_ul_layout_cell_t &cell, int n, int true_start, float snr, float se)
+{
+  int last = -1;
+  nr_pdcch_blind_ul_result_t o;
+  for (int i = 0; i < n; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    if (nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &o) != 1) continue;
+    last = o.bwp_start;
+    nr_ul_layout_prior_note(&o, o.bwp_start == true_start, 800, 1, 1, d.slot, snr, se);
+  }
+  return last;
+}
+}  // namespace
+
+// ULPRIOR: provisional adoption of the top prior-ranked UL BWP start; demoted only by CRC-expected failures.
+TEST(UlLayoutLock, PriorSearchStaysMovesAndIgnoresLowSnr)
+{
+  EXPECT_TRUE(nr_ul_layout_prior_expected(20.f, 1.f));
+  EXPECT_FALSE(nr_ul_layout_prior_expected(-10.f, 2.f));
+  EXPECT_FALSE(nr_ul_layout_prior_expected(0.f, 2.f));  // Shannon(2 bit/RE) = 4.8 dB
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  setenv("ISAC_UL_LOCK_PRIOR_SEARCH", "1", 1);
+  unsetenv("ISAC_UL_LOCK_CRC_FIRST");
+  unsetenv("ISAC_UL_LOCK_CRC_GUARD");
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 216, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216, .dl_bwp_start = 0};
+  uint16_t st = 0, sz = 0;
+  uint32_t ex = 0, okn = 0, dem = 0;
+  {  // prior right (SIB1 start 1): adopted at the fit, confirmed by the CRC pass, never moves afterwards
+    UllGen g;
+    UllFit(g, cell);
+    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_EQ(st, 1); EXPECT_GE(sz, 213); EXPECT_LE(sz, 218);
+    EXPECT_EQ(UllPriorRun(g, cell, 30, 1, 20.f, 0.5f), 1);
+    EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));  // confirmed
+    EXPECT_EQ(dem, 0u);
+    // later CRC-expected failures (a bad stretch) do not move a confirmed lock
+    EXPECT_EQ(UllPriorRun(g, cell, 300, -1, 20.f, 0.5f), 1);
+  }
+  {  // prior wrong (truth 0, SIB1 says 1, the DL-consistent start is 0): the DL prior is the 2nd hypothesis: two demotions, then the right start, confirmed
+    UllGen g;
+    UllFit(g, cell);
+    EXPECT_EQ(UllPriorRun(g, cell, 200, 0, 20.f, 0.5f), 0);
+    EXPECT_FALSE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_EQ(st, 0); EXPECT_GE(sz, 213); EXPECT_LE(sz, 218);
+  }
+  {  // prior size 217 (SIB1 and DL) but the RIV fit says 107: the adopted size is the fitted one, never the prior's
+    nr_ul_layout_cell_t c2 = cell;
+    c2.sib1_ul_start = 0; c2.sib1_ul_size = 217; c2.dl_bwp_start = 0; c2.dl_bwp_size = 217;
+    UllGen g;
+    g.rivw = 13;
+    nr_pdcch_blind_ul_result_t out;
+    nr_ul_layout_lock_reset();
+    for (int i = 0; i < 300; i++) {
+      for (int s2 = 0; s2 < 18; s2++)
+        if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+      const nr_ul_layout_dci_t d = g.next(107);
+      nr_ul_layout_on_dci(d.rnti, 42, d.slot, d.p, &c2, &out);
+    }
+    nr_ul_layout_eval_once();
+    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_GE(sz, 100); EXPECT_LE(sz, 109);
+    EXPECT_EQ(st, 0);  // seeded by the prior start (clamped into [0, carrier-N])
+  }
+  {  // low SNR: every grant fails on every hypothesis, none predicts a pass: no demotion, stays on the prior
+    UllGen g;
+    UllFit(g, cell);
+    EXPECT_EQ(UllPriorRun(g, cell, 800, 0, -5.f, 1.5f), 1);
+    EXPECT_TRUE(nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem));
+    EXPECT_EQ(dem, 0u); EXPECT_EQ(ex, 0u); EXPECT_EQ(st, 1);
+  }
+  {  // nothing ever passes although every grant predicts a pass: bounded, back to the top prior, then stops
+    UllGen g;
+    UllFit(g, cell);
+    UllPriorRun(g, cell, 3000, -1, 20.f, 0.5f);
+    nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem);
+    EXPECT_EQ(dem, 16u);
+    EXPECT_EQ(st, 1);
+    EXPECT_EQ(UllPriorRun(g, cell, 400, -1, 20.f, 0.5f), 1);
+    nr_ul_layout_prior_state(&st, &sz, &ex, &okn, &dem);
+    EXPECT_EQ(dem, 16u);
+  }
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_PRIOR_SEARCH");
   unsetenv("ISAC_UL_LAYOUT_LOCK");
 }
 
