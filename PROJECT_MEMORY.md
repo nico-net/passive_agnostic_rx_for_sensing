@@ -3601,6 +3601,8 @@ RATEFIX-20261012 is not on this branch and is not used. [SUPERSEDED 2026-10-13 s
   raster, CFO grid, two-pass tuning from the MIB). Offline discovery found 415, 923, 675, 508, 403 on the survey and cell captures; CFO of
   the X410 clock is about -4.8 kHz on 4 of 5 cells; 403 returns +2177 Hz (sign alias of -4863 + 7040). Replay: pass 1 and pass 2
   syncs on 415 and 923 (`[MEASURED, DGX replay]`), not live.
+  `[SUPERSEDED by item 25 (2026-10-13)]` runtime: autofront.py needed ~4 min per 1 s capture; discovery is now `fastscan.py` (~7 s).
+  autofront.py stays as the pass-2 hook (`refine`) and as the reference for the cell list above.
 - `[ORCH, MEASURED DGX OTA 2026-10-12]` PCI 675 syncs live with FO -4881 (the auto front-end seed). **This supersedes WEAKLIVE:**
   `[MEASURED, DGX OTA 2026-10-11 ab_X675_1_115134]` 217 "synch Failed" with FO -2400 (SYNC_SCAN 566-576 ms, detected 0). The
   cause of the 10-11 failure is still not established (WEAKLIVE hypotheses 1, 2 and 4 are excluded or partial; the PSS_DECIM log
@@ -4032,6 +4034,41 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
 - Open: the TIM 273 verdict discrepancy in item 20. The `ota/t26b.env` (orchestrator) vs `tests/passive_rx/t26b.env.proposed` (item 15) location
   question is unchanged.
 - No OTA run, no receiver run and no build in this add-on. Replay numbers are DGX GB10 replays, not OTA numbers.
+
+**25. Fast blind cell scanner and live chain (FRONTLIVE-20261013; `[IMPLEMENTED, NOT VALIDATED]` on air; `csd/frontend-live` merged into `csd/otatest` at `6ebe0c9526`, code `e240a78d05`)**
+
+- `[MEASURED, DGX CPU numpy, 6 captures of 1 s x 4 ch in one process]` 42.5 s = 7.1 s per capture including numpy import (stage 1 ~6.3 s, stage 2 0.5-1.0 s). `[ORCH]` ~7 s per capture. Under load from other agents (heavy.lock) the same scan took up to ~15 s `[MEASURED, first version with 24 chunks]`. A 0.3 s capture is as fast. Replaces the ~4 min of autofront.py (item 26).
+- `[MEASURED, DGX]` Method: stage 1 = 12 chunks of 20 ms x 4 ch, PSS correlation by FFT over all GSCNs, one CFO hypothesis (0), folded over the burst period. Stage 2 = top 40 GSCNs verified on raw windows: PSS timing per occurrence, SSS -> PCI with a group test, PBCH DMRS -> i_ssb, CFO from the DMRS phase (unambiguous to +-7007 Hz).
+- `[MEASURED, DGX, 1 s x 4 ch survey captures + 12 s captures]` Six cells found with no hand input, no false cell (c3330 empty; every other candidate has SSS gap 1.0-1.4):
+
+  | PCI | GSCN / MHz | i_ssb | SSS gap | DMRS ratio | CFO Hz | capture |
+  |---|---|---|---|---|---|---|
+  | 675 | 7795 / 3426.24 | 0 | 3.17 | 3.19 | -4849 | survey c3430 |
+  | 508 | 7895 / 3570.24 | 1 | 3.89 | 4.18 | -4761 | survey c3610 (c3550: 2.14 / 2.81 / -4551) |
+  | 4 | 7895 / 3570.24 | 0 | 2.15 | 2.24 | -5297 | survey c3550, co-located with 508 |
+  | 403 | 7933 / 3624.96 | 3 | 4.07 | 4.91 | +2225 | survey c3610 |
+  | 415 | 7971 / 3679.68 | 4 | 4.47 | 3.74 | -4849 | raw_pci415_12s_b |
+  | 923 | 8007 / 3731.52 | 0 | 4.68 | 5.29 | -4850 | raw_pci923_tim_12s_tile3 |
+
+- `[MEASURED, DGX]` Co-located cells (508 + PCI 4 share GSCN 7895): the best and second SSS scores are only 1.3 apart when both are present, so the grouping rule is "smallest group of top scores with an amplitude gap >= 2 to the rest" (SSS gap >= 2; DMRS bar 2.0 for groups, 2.5 for single cells).
+- `[MEASURED, DGX]` A 0.3 s capture (`--verify-chunks 15`) gives the same six cells, CFO within 40 Hz of the 1 s values (403 +2240, PCI 4 -5267).
+- `[INFERRED, MEASURED support]` 403 at +2225 Hz is not the 7040 Hz alias of the old -4863 estimate: DMRS lag pairs give +2205 / +2253 / +2225, and the receiver's DMRS tracker after `--initial-fo +2177` showed residual -22 Hz (`rr-csd-afe` replay `replay_af_403_p2_123441`). The common -4.8 kHz offset is therefore not applied to 403; CFO is derived per cell. The hand seed -2400 also locks 403. Not OTA-checked.
+- `[MEASURED, replay, rr-csd-afe]` Pass 2 from existing receiver logs: 923 k_SSB=10 -> `-C 3731910000 --ssb 1169 --initial-fo -4850` (= hand triple); 415 k_SSB=14 -> `-C 3680010000 --ssb 1171` (= hand triple). `retune_args.py` reports "no mismatch" on those logs (it needs an `ACQ carrier MISMATCH` line).
+- `[IMPLEMENTED]` Live chain `tests/passive_rx/autofront/live_chain.sh` (`capture` / `discover` / `all` / `pass2`; capture is orchestrator-only, heavy.lock). Outputs `OUT/triples.txt` (`-C ... --ssb ... --initial-fo ...` per PCI) and `OUT/specs.txt` (`TAG:ENV:CFG:FREQ:SSB:FO`, feeding the OTA window script). Two cells at one GSCN (508 + 4) share `-C`: one receiver start per frequency; the second PCI is a decode-side issue. Pass 2 (`pass2 OUT PCI RUN.LOG`) recomputes `-C` from the receiver's k_SSB and stores the SIB1 PRB / offsetToPointA / PLMN.
+- `[NOT RUN]` No receiver replay of the new triples, no OTA with them. The CFO values differ by < 100 Hz from the AUTOFRONT triples that locked, except 403, 508 and PCI 4.
+- **Limits (shortcuts):** 30 kHz raster only; one CFO hypothesis (cells > ~10 kHz off are missed); CFO wraps beyond +-7 kHz; per GSCN the strongest PSS timing wins (cells > 3 us apart at one GSCN are not separated; max 3 cells per group); CPU numpy only (GPU port: stage 1 is batched FFTs); pass 1 still needs the receiver SSS floor (`ISAC_SSS_REL_RATIO`, gain), which is unrelated to the scan. PCI 4 has the weakest evidence (c3550 only, not seen in c3610; NEWCELLS decoded it independently from PBCH/PDCCH `[MEASURED earlier]`).
+- `[MEASURED, DGX]` Unexplained: on some cells (508, 923) the lag-1 pairs that involve DMRS symbol 2 (and the PSS->SSS pair) show a pi flip (+14015 Hz error); lag 1->3 does not. The estimator uses only 1->3. Cause not investigated.
+
+**26. Superseded in this block (marked in place)**
+
+- AUTOFRONT runtime (10-12 block, AUTOFRONT bullet): `~4 min per capture` -> ~7 s per capture (item 25). `[SUPERSEDED]`. The AUTOFRONT cell list and CFO values remain as the 2026-10-12 record.
+- Item 22 (G508, G403) and the item-22 note for B4a / B675a are not superseded by item 25: the auto triples are `[NOT RUN]`, so item 22 stays the OTA plan until `triples.txt` is replayed.
+
+**27. Sources, scope and open points (item 25)**
+
+- Sources: `docs/superpowers/reports/csd/FRONTLIVE-20261013.md` (scanner, validation tables, limits); orchestrator facts 2026-10-13 are `[ORCH]`. Files: `tests/passive_rx/autofront/fastscan.py`, `live_chain.sh`, `autofront.py` (pass-2 `refine`), `test_fastscan.py` (6 ok), `test_autofront.py` (5 ok); `tests/passive_rx/survey/survey_capture.sh` has `SAMPLES=` (default 0.3 s); data `docs/superpowers/reports/csd/frontlive_data/`.
+- No OTA, no capture, no receiver run and no build in this item. DGX GB10 CPU numpy only.
+- Open: replay the auto triples (`triples.txt`) on the receiver; OTA with them; 403 CFO (+2225) is `[INFERRED]`; PCI 4 evidence; the pi-flip cause; GPU port of stage 1.
 
 ---
 
