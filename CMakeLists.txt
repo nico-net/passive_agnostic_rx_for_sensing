@@ -2723,6 +2723,7 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_cell_instance)
   add_test(NAME test_nr_cell_instance COMMAND ./test_nr_cell_instance)
   add_test(NAME test_mpci_launch COMMAND python3 -W ignore ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/test_mpci_launch.py)
+  add_test(NAME test_mpci_auto COMMAND python3 -W ignore ${CMAKE_SOURCE_DIR}/tests/passive_rx/mpci/test_mpci_auto.py)
   add_executable(test_nr_csirs_observer ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_observer_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_observer.c
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c)
