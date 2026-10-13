@@ -65,8 +65,30 @@ section 5 measures its cost (stage1/stage2 ms per pass) and whether the 415/923 
 
 ## 5. Replays (fill from tests/passive_rx/blindpipe_replay.sh, blindpipe_stats.py)
 
-TODO table per capture: arm, runs, first bank (slots after sync), bank adds, C-RNTI accepts in/out dwells, PDSCHQ crc_ok/decoded, CRC-OK
-RNTIs, CRC by MCS bucket, NID passes (stage ms, records by dur), TRAFFIC verdict, POINTA result.
+`[MEASURED, DGX replay, 0.25x, 4 RX, ENVFILE t26z.env + ISAC_CARRIER_FROM_SIB1=1, build 1c3c20400d]`. OFF = flag off; FIX3 = ISAC_PDCCH_DWELL_OWN_BUDGET=1
+ISAC_DL_TRAFFIC_PROBE=16 ISAC_POINTA_SWEEP=1 ISAC_COREMAP_IDSWEEP_DUR=3. n=1 unless stated; captures never merged. "in/out" = C-RNTI DCI 1_1
+accepts per 1000 slots inside / outside dwell windows after the first bank add (tests/passive_rx/blindpipe_stats.py).
+
+| capture | arm | first bank (slots after sync) / adds | C-RNTI in / out dwells | PDSCHQ crc_ok / decoded | CRC-OK RNTIs | NID passes, stage1 / stage2 ms, records by dur |
+|---|---|---|---|---|---|---|
+| raw_pci923_tim_12s_tile3 (PCI 923) | OFF | 15050 / 1 | 198 / 382 | 406 / 6990 | 10 of 14 | 93, 258 / 41, dur1 169 |
+| same | FIX3 (2 runs) | 15050 / 1, 15050 / 1 | 385 / 360, 252 / (no out window) | 482 / 10586, 455 / 10327 | 11 of 15, 14 of 15 | 83, 672 / 169; 81, 651 / 171; dur1 353, 384 |
+| rr-csd-cal replay_e923_off1 (reference, build 6abc2baf73, flag off) | OFF | 15050 / 1 | 38 / 383 | 269 / 4477 | 8 of 13 | 91, 267 / 98, dur1 294 |
+| raw_pci415_12s_b (PCI 415) | OFF | 15053 / 3 | 487 / 492 | 1137 / 10462 | 28 of 44 | 99, 338 / 21, dur1 317 |
+| same | FIX3 | 15053 / 3 | 482 / 491 | 2548 / 9774 | 41 of 47 | 82, 729 / 52, dur1 242 |
+| raw_pci415_12s_20261008 (PCI 415) | FIX3 | 4173 / 2 | (426 dwell slots only) / 96 | 387 / 3847 | 5 of 5 | 75, 890 / 17, dur1 111 |
+| raw_pci923_tim_4s_1010_1853 (PCI 923) | FIX3 | 15050 / 1 | - / 369 | 16 / 760 | 4 of 12 | 14, 825 / 75, dur1 42 |
+| raw_pci421_aligned_20261006 (PCI 421, no SIB1, FO 4100) | FIX3 | 9613 / 2 | - | 38 / 347 | 7 of 18 | 10, 1406 / 182, dur1 35 |
+
+Reading: (1) the dwell fix removes the in-dwell collapse on TIM (198 and 38 -> 385 / 252 per 1000 slots; the mechanism line `ncand=32/32 AL1=1`
+appears only with the flag off) with the same time-to-bank; Vodafone's AL mix never starved (487 vs 482) and the flag changes nothing there
+beyond run variance. (2) DUR=3 costs 2-2.6x stage-1 GPU time per pass (fewer passes per 12 s: 83 vs 93, 82 vs 99) and finds the same nIDs
+at dur 1 on every cell; no cell here has a dur > 1 CORESET, so the gain is untested. (3) TRAFFIC on loaded cells: tile3 granted_lit 33k vs
+ungranted_lit 517k, b 78k vs 806k (768 probed slots): PRESENT reflects the many grants the receiver never decodes, so on 508 only ABSENT is a
+clean answer; `pdcch_pci_windows` = 0 on TIM (nID 1931 != PCI, expected). b reports tdd_unknown for every probed slot: the SIB1 TDD pattern
+does not reach `nr_passive_acq_tdd_known()` on 415 (open). (4) Point-A sweep on PCI 421: the existing `ISAC_ACQ_CARRIER_FROM_RS` path
+confirmed the carrier from a CSI-RS before the sweep had 256 probed slots (4 s capture), so the sweep never decided: `[NOT VALIDATED]`;
+the cell banked 2 CORESETs (first at 9613 slots) and 7 CRC-OK RNTIs with the aligned grid and FO 4100 (BLINDFIX's FO 6900 did not acquire).
 
 ## 6. Audit (d): remaining grid assumptions downstream of a verified CORESET on the 508 geometry (162 PRB in a 217 grid) `[CODE-READ]`
 
@@ -84,7 +106,9 @@ No remaining 508-specific constant found in the dwell -> DCI 1_1 layout -> solve
 ## 7. Proposed env `tests/passive_rx/t26b.env.proposed` (single line) and OTA spec lines
 
 t26b = t26z + `ISAC_CARRIER_FROM_SIB1=1 ISAC_PDCCH_DWELL_OWN_BUDGET=1 ISAC_DL_TRAFFIC_PROBE=16 ISAC_POINTA_SWEEP=1` and
-`ISAC_COREMAP_IDSWEEP_DUR=3` (replacing `=1`). TODO: confirm each from section 5 before installing.
+`ISAC_COREMAP_IDSWEEP_DUR=3` (replacing `=1`). Section 5: DWELL_OWN_BUDGET confirmed (TIM n=2, Vodafone no regression); DUR=3 cost
+measured, no bank/time-to-bank change on 415/923/421; the probe and sweep are log-only (the sweep decides only on a cell without any carrier
+verdict), so the set is safe to install; the sweep itself is not yet validated on any capture.
 
 OTA spec lines (TAG:ENV:CFG:FREQ:SSB:FO; env = t26b unless a delta is given; cfg = the cfg of the named earlier run):
 ```
