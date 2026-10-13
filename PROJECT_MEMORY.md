@@ -109,7 +109,7 @@
 >   (`ISAC_CHEST_OCC`), LDPC iterations 8 vs 20 (`ISAC_LDPC_ITERS_AB`), solver preference (`ISAC_PDSCH_SOLVER_PREF=32`).
 > - `[MEASURED replay]` Per-RNTI MRC: `ISAC_RX_MRC_PER_RNTI=3` with `ISAC_RX_MRC_ALIGN=2` raises Nl=1 **QPSK** CRC from 82-87 %
 >   to 86-90 %. 1-layer **16QAM**: mode 1 54-75 % vs mode 3 + ALIGN=2 83-87 % (n 13-23 per arm; T26d interim report to the
->   orchestrator 2026-10-09, not in the T26.md table). The recommended OTA env uses `ISAC_RX_MRC_PER_RNTI=1`.
+>   orchestrator 2026-10-09, not in the T26.md table). The recommended OTA env uses `ISAC_RX_MRC_PER_RNTI=1`. [SUPERSEDED by item 28 (2026-10-13): the per-RNTI pick is the high-MCS root cause; item 29 fix candidate.]
 > - `[MEASURED replay, emulated live rate]` T26c round 2 (`ISAC_PDSCHQ_SIGNAL_TIME=1` replay only, never on air): PDSCH
 >   queue stale 61 % -> 0.5 % with the round-2 flag set. Scan p99 still 2-4 ms there.
 > - `[INFERRED, NOT OTA-VALIDATED; X410 unavailable 2026-10-09]` Recommended OTA env [SUPERSEDED 2026-10-11 by t26s]: T26c base plus the T26D/T26E sets listed in
@@ -3914,7 +3914,7 @@ CORESETALL-20261012, ULTWINS-20261012 (`docs/superpowers/reports/csd/`). Raw log
 - Superseded: the "not implemented" bullet of item 6 (PCI 403 / PCI 4: no Point A, no nID sweep) is now implemented here, default
   off, not validated.
 
-**15. Morning OTA env `ota/t26b.env` (`[replay-validated; OTA pending]`, orchestrator 2026-10-13)**
+**15. Morning OTA env `ota/t26b.env` (`[replay-validated; OTA pending]`, orchestrator 2026-10-13)** `[SUPERSEDED for the next OTA by item 30: t26h; t26b stays the baseline]`
 
 - `[ORCH]` t26b = current t26z (including `ISAC_PDSCH_GPU_HOST_PIN=1`, `ISAC_L2MAXH_DELTA_NL2=-3`) plus
   `ISAC_CARRIER_FROM_SIB1=1 ISAC_PDCCH_DWELL_OWN_BUDGET=1 ISAC_DL_TRAFFIC_PROBE=16 ISAC_POINTA_SWEEP=1` and
@@ -4069,6 +4069,127 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
 - Sources: `docs/superpowers/reports/csd/FRONTLIVE-20261013.md` (scanner, validation tables, limits); orchestrator facts 2026-10-13 are `[ORCH]`. Files: `tests/passive_rx/autofront/fastscan.py`, `live_chain.sh`, `autofront.py` (pass-2 `refine`), `test_fastscan.py` (6 ok), `test_autofront.py` (5 ok); `tests/passive_rx/survey/survey_capture.sh` has `SAMPLES=` (default 0.3 s); data `docs/superpowers/reports/csd/frontlive_data/`.
 - No OTA, no capture, no receiver run and no build in this item. DGX GB10 CPU numpy only.
 - Open: replay the auto triples (`triples.txt`) on the receiver; OTA with them; 403 CFO (+2225) is `[INFERRED]`; PCI 4 evidence; the pi-flip cause; GPU port of stage 1.
+
+**28. High-MCS root cause at Nl=1: the per-RNTI receiver pick decodes about a third of the grants from ONE antenna (HIGHMCS §0, §1, §3; `[OTA VERIFIED]` logs, `[MEASURED, DGX replay]`, `[ORCH]`)**
+
+- `[ORCH]` Mechanism: `ISAC_RX_MRC_PER_RNTI=1` (in t26b) chooses per RNTI between receiver 1 (single best branch by |h|^2) and receiver 3
+  (4-branch MRC, `ISAC_RX_MRC_ALIGN=2`) by Laplace CRC rate (`comb_pick()`, explore 1 in 8). The CRC rate is dominated by MCS-0 grants, which
+  both receivers pass, so the choice is a tie broken toward receiver 1 and drifts with run noise. The unsolved-RNTI receiver is
+  `ISAC_RX_MRC_MODE=1` (single branch).
+- `[ORCH]` Share of grants decoded from one antenna: 10-28 % on Vodafone PCI 415 and up to 68 % on the old capture (`old`). `[MEASURED, DGX replay]`
+  replay steady-state MRC share before the fix (item 29): b 56 %, tim 46 %, old 20 %.
+- `[OTA VERIFIED, X410 34B2AF1, Vodafone PCI 415, logs ab_S0a/S0b/S0c 2026-10-12 20:26-20:42, t26z, 3 runs, 150 s; analysed on DGX GB10]`
+  Within-RNTI paired (RNTIs with >= 10 grants on each receiver), Nl=1, comparing single branch vs MRC:
+
+  | MCS bucket | single branch (mean post-eq SNR) | MRC (mean post-eq SNR) |
+  |---|---|---|
+  | 5-9 | 19 % (6.7 dB) | 65 % (18.2 dB) |
+  | 10-16 | 63 % (16.1 dB) | 94 % (25.3 dB) |
+  | 17+ | 8 % (n 13) | 50 % (n 58) |
+
+  Non-paired Vodafone S0 Nl=1 CRC at SNR >= 10 by receiver: MCS 10-16 75.6 % vs 90.8 %, MCS 17+ 5.3 % vs 37.6 %.
+- `[OTA VERIFIED, X410 34B2AF1, TIM PCI 923, logs ab_TmA/TmB, t26z]` Same effect, smaller: Nl=1 MCS 10-16 paired 11.7 % (11.7 dB) vs 27.9 % (16.7 dB).
+- `[MEASURED, OTA]` With the MRC receiver, Nl=1 MCS 10-16 reaches 100 % at SNR >= 22 dB (n 979 on Vodafone). Single branch sits 4.1 dB
+  (Vodafone) / 2.6 dB (TIM) below the ideal MRC of the four branch SNRs; the ALIGN'd MRC sits 1.3 / 0.9 dB below that.
+- `[CODE-READ]` At Nl >= 2 the branch logic does not engage (`nr_rx_pdsch`: nl == 1 && nbRx == 4 only). The Nl=2 comb difference is a
+  population confound of the bandit, not a receiver effect (HIGHMCS §3).
+- `[ORCH]` Verdict: Nl=1 MCS 5-16 and 17+ are receiver-limited by the pick, not SNR-limited. Nl=1 MCS 0-4 is not limited (95-100 % at SNR >= 10).
+
+**29. Fix candidate `ISAC_RX_MRC_PER_RNTI_SNR=1`: pick the receiver by post-equalisation SNR EMA (default off; `[OFFLINE VERIFIED]` unit test, `[MEASURED, DGX replay]`, `[NOT MEASURED ON AIR]`)**
+
+- Behaviour: a solved RNTI with >= 3 SNR samples per receiver takes the receiver with the higher post-eq SNR EMA (explore 1 in 8; 1 in 32 when
+  the runner-up is >= 3 dB behind); otherwise the CRC rule applies. `nr_pdsch_solver_note_snr()` carries the receiver.
+- `[OFFLINE VERIFIED]` `PdschSolver.ReceiverPickFollowsSnrWhenCrcTies`: 77 of 80 full decodes on the MRC receiver.
+- `[MEASURED, DGX replay, 3 runs/arm, steady-state MRC share (grants after an RNTI's 40th decode)]` b 55.6 -> 71.7 %; tim 45.9 -> 52.1 %;
+  old 20.2 -> 69.5 %. Cells are not pooled.
+- `[MEASURED, DGX replay, 3 runs/arm, CRC-OK at SNR >= 10, not paired]` The per-bucket rates do not show a gain that can be attributed to the pick:
+  b Nl=1 MCS 5-9 84.2 -> 69.9 % and MCS 10-16 17.2 -> 7.4 % (A = t26b, P = A + flag). HIGHMCS §7 calls this a population effect (P solved
+  25-31 RNTIs and decoded 3.7-5.5k grants vs 14-24 and 1.4-1.7k for A), not a receiver effect. The replay cannot pair the pick (HIGHMCS §9).
+  `[ORCH]` "no regression" is the orchestrator's reading; the paired evidence is the OTA in item 30.
+- Commits on `csd/high-mcs`: 548062613a..af4b371c9c, 7ae009ff20 (HIGHMCS §6). The branch is merged into `csd/otatest` at `ccd7aa5518` (git log).
+- `[NOT MEASURED ON AIR]` Per-RNTI decision is now SNR-driven; the OTA A/B in item 30 is the gate (expect comb=3 on >= 85 % of solved-RNTI grants
+  after warm-up, `ota_stats.py` MCS 10-16 Nl=1 toward the comb=3 rate).
+
+**30. OTA env candidates `t26h` and `t26hq` (`[replay-validated; OTA pending]`, `[NOT MEASURED ON AIR]`, `[ORCH]`)**
+
+- `t26h` = t26b + `ISAC_RX_MRC_PER_RNTI_SNR=1`. `t26hq` = t26h + `ISAC_PDSCH_MMSE2_NL34_QPSK=1` (only the TIM rank-3/4 case is expected to change).
+  Rollback = drop the added setting. Env files are single-line.
+- `[NAME COLLISION]` `t26h` was already used for an older env (2026-10-09 block, lines 73 and 112; `docs/superpowers/reports/csd/ACQFIX.md`,
+  `ACQROBUST.md`: `ota/t26h.env`, GPU/acquisition flags). The 2026-10-13 `t26h` is a different env. Do not read older `t26h` results as this one.
+- `[NOT VERIFIED HERE]` The `ota/` directory does not exist in worktree `rr-csd-b`; the env files live outside this worktree and were not checked.
+- Proposed OTA lines (HIGHMCS §8; `[NOT RUN]`, cfg of the 2026-10-12 runs, 150 s, interleaved): H0a/b/c (t26b) vs H1a/b/c (t26h) on Vodafone
+  `3680010000:1171:6900`; T0a/b (t26b), T1a/b (t26h), T2a/b (t26hq) on TIM `3759990000:233:-4800`.
+- Read per run: EVMGRANT `comb=` share, `tools/ota_stats.py` CRC by MCS bucket at SNR >= 10 for Nl=1, `snr_l=` on Nl >= 2, PDTIM sum
+  unchanged, `GPU_EXACT_* check_bad=0`.
+- Not a default change: item 15 still describes t26b as the morning baseline until the OTA A/B runs.
+
+**31. Nl=2 MCS 5-16 is SNR-limited by the weak layer; per-layer SNR is now logged (`[MEASURED, OTA]`, `[MEASURED, DGX replay tim]`, `[CODE-READ]`)**
+
+- `[MEASURED, OTA, Vodafone S0a/b/c pooled 3 runs]` Nl=2 CRC-OK at SNR >= 10 by bin: MCS 5-9 61 % (10-13 dB) -> 95 % (13-16) -> 99 % (16-19);
+  MCS 10-16 18 % -> 26 % -> 44 % -> 95 % (19-22 dB). Nl=2 MCS 17+ is 0-6 % in every bin, including 48 grants at 19-25 dB (weak-layer SINR; no defect found).
+- `[MEASURED, DGX replay tim, n=102]` Mean |layer gap| 2.4 dB; mean `snr` exceeds the weak layer by 0.9 dB. The mean `snr` therefore
+  over-states the weak layer. The new EVMGRANT field `snr_l=a,b,c,d` gives per-layer DD SNR (-99 = n/a), log only.
+- `[ORCH]` `ISAC_L2MAXH_DELTA_NL2=-3` (item 2) is the only 2-layer-specific fix found; not a cure for MCS 17+.
+
+**32. Nl=3/4: Vodafone is SNR-limited; TIM 3-layer MCS 0 is a suspected fixed-point rank-3/4 QPSK equaliser defect (`[HYPOTHESIS, measured support]`)**
+
+- `[OTA VERIFIED, Vodafone PCI 415, 2026-10-12]` 4-layer: 36 of 2077 pass, every grant at `snr` < 9 dB. 3-layer MCS 0-4 at >= 10 dB: 43 of 43 pass.
+- `[OTA VERIFIED, TIM PCI 923, 2026-10-12]` 3-layer MCS 0 (QPSK R 0.12, TBS 1480, the same TBS as Vodafone's) at `snr` 10-12 dB: 0 of 154
+  (comb 1 and 3 alike, both runs). TIM rank-3/4 `snr` is 1-5 dB on most grants; branch `nvar_db` 15-19 vs Vodafone 36-40 (a 20 dB lower level).
+  TIM 3-layer MCS 5-9 0/110 and 10-16 0/174 at `snr` >= 10 (rank 3, ports 0x7, cdm 2).
+- `[MEASURED, DGX replay b, DECODEDIAG]` 16-18 % of the rank-3 fixed-point LLR signs disagree with the float ZF solution (n 8 grants, 0-4 dB);
+  at rank 1-2 the disagreement is 0.0-0.2 %. The stock rank-3/4 QPSK path is the fixed-point adjugate MMSE (det underflow comment in code);
+  mode 2 (float ZF) is gated off for QPSK at rank 3-4 (QAM-FIX). Not reproducible in replay (tile3 has about one rank-3 grant).
+- Fix flag `ISAC_PDSCH_MMSE2_NL34_QPSK=1` (commit `c9833e80a6`): float ZF with per-layer soft scale for QPSK at 3-4 layers; CPU and GPU resolve it
+  identically. `[MEASURED, DGX replay b, ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK=1, one run]` `GPU_EXACT_DEMOD calls=10000 check_ok=10000 check_bad=0`, 0 MISMATCH.
+  `[MEASURED, replay]` Rank-3 QPSK on b is all below 6 dB: 4/20 pass vs 5/45 in the A runs (no signal either way).
+- `[NOT MEASURED ON AIR]` The TIM 3-layer CRC effect exists only on air: spec lines T2a/T2b (item 30). Expected check: TIM Nl=3 MCS 0-4 at
+  snr_l >= 6 dB must leave 0 %. Bit-exactness does not prove the CRC gain.
+
+**33. Decision-directed `snr` overstates the bit-error-implied SNR: applies to every "SNR >= 10 dB" statistic (`[MEASURED, DGX replay b, old, tim, 4 runs]`)**
+
+- Measured sign-BER vs theory at the DD `snr` bin (HIGHMCS §4): Nl=1 QPSK DD 6-8 dB implies 5.8 dB (+1.2 dB optimism); 8-10 implies 7.2 (+1.7);
+  10-12 implies 8.7 (+2.3); 12-14 implies 10.0 (+3.0). Nl=1 16QAM 10-12: +2.2 dB. Nl=1 64QAM 18-20: +2.7 dB.
+  Nl=2 QPSK DD 4-6 dB implies 0.8 dB (+4.0); 8-10 implies 7.1 dB (+1.8).
+- Per-bit error ratios of CRC-OK QAM grants match theory (16QAM 4.85 / 9.25 %, theory 1:2; 64QAM 1.95 / 4.25 / 8.4 %, theory 1:2:4), so the LLR
+  thresholds are right and the whole curve is shifted by 2-3 dB. `[INF]` A wrong decision pulls the EVM down and the error is not Gaussian.
+- `[CODE-READ + MEASURED]` Consequence: the decodable SNR is about 2-3 dB (Nl=1) and 2-6 dB (Nl=2, low SNR) lower than the printed `snr`. Every
+  "SNR >= 10 dB" statistic in this project is optimistic. Not corrected in the estimator (a non-decision-directed EVM would be needed).
+- `[MEASURED]` The optimism is not a receiver loss: at rank 1-2 the fixed-point LLR path agrees with float ZF decisions to 0.0-0.2 %.
+
+**34. LDPC iterations: `ISAC_LDPC_ITERS=16` gains CRC at MCS 5-16 and 17+ but costs decode time; not default (`[MEASURED, DGX replay]`, `[ORCH]`)**
+
+- `[MEASURED, DGX replay, 3 runs/arm, SPEED 1, 12 s captures]` (A = t26b, PI = t26b + LDPC_ITERS=16): tim Nl=2 MCS 5-9 58.0 -> 83.4 %;
+  old Nl=1 MCS 17+ 20.0 -> 68.2 %; b Nl=1 MCS 5-9 84.2 -> 83.0 % (no gain at this cell); b Nl=1 MCS 10-16 17.2 -> 24.1 % (n small).
+  Paired earlier runs ITERS_AB 8 vs 30: +4..+13 points at MCS 5-9. `[ORCH]` +5..+25 points at MCS 5-16 / 17+.
+- Cost `[MEASURED, DGX replay]`: LDPC mean 142-193 -> 227-280 us; sum of PDTIM means +20-25 %, p50 sum +70-80 us. Beyond the few-% budget.
+- `[NOT MEASURED]` 12 iterations (cheaper middle point). The GPU LDPC accepts <= 17; 30 falls back to the CPU decoder.
+- Verdict: not in the default env. Candidate only if the OTA shows the gain and the decode budget allows it.
+
+**35. Process and sources for the 2026-10-13 high-MCS work (`[ORCH]`)**
+
+- Sources: `docs/superpowers/reports/csd/HIGHMCS-20261013.md` (read in full for this item); analysis on DGX GB10 in the rr-csd-hmc worktree
+  (branch `csd/high-mcs` from `csd/otatest` `6ebe0c9526`). Scratch scripts `hmc_*.py` were not committed.
+- `[ORCH]` Model use: Opus was unavailable (weekly limit until 2026-10-15 12:00); Fable was used for decode-time, CORESET and high-MCS work.
+  This memory entry was written by Haiku 5.5 from the report and orchestrator facts; no new run, build or receiver use.
+- `[ORCH]` Cells are never pooled: Vodafone PCI 415 (`raw_pci415_12s_b`, `raw_pci415_12s_20261008` = "old") and TIM PCI 923 (`raw_pci923_tim_12s_tile3` = "tim") are separate claims.
+
+**36. Superseded in this block (marked in place)**
+
+- Item 15 (morning env t26b): t26b stays the baseline and rollback; the next OTA candidate is `t26h` (item 30). `[SUPERSEDED for the next OTA by item 30]`
+- 2026-10-09 block recommendation "The recommended OTA env uses `ISAC_RX_MRC_PER_RNTI=1`" (line 112): `[SUPERSEDED by item 28: the per-RNTI pick is the high-MCS root cause; item 29 fix candidate.]`
+- The `t26h` name of the 2026-10-09 block (line 73) is a different env from item 30 (see item 30 collision note).
+
+**37. Open points (`[NOT RUN]` unless stated)**
+
+- OTA A/B of `t26h` and `t26hq` (item 30): the gate for items 29 and 32.
+- Pick-share and per-bucket CRC on OTA with the SNR-based pick; the replay cannot pair it.
+- `ISAC_RX_MRC_MODE=3` as the search receiver for unsolved RNTIs: not tried (HIGHMCS §9).
+- DD-SNR estimator correction (item 33): not designed.
+- TIM rank-3 CRC with `t26hq`: OTA only.
+- LDPC 12 iterations: not measured (item 34).
+- Vodafone rank 3-4 at < 9 dB: SNR-limited; no receiver fix proposed.
+
 
 ---
 
