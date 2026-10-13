@@ -730,11 +730,14 @@ static uint8_t comb_pick(const solver_rnti_t *r)
   double bp = -1.0;
   bool snr_all = comb_by_snr() != 0;
   for (int k = 0; k < n && snr_all; k++) snr_all = r->comb_nsnr[k] >= 3;
+  double second = -1.0;
   for (int k = 0; k < n; k++) {
     const double p = snr_all ? (double)r->comb_snr[k] : (r->comb_ok[k] + 1.0) / (r->comb_try[k] + 2.0);
-    if (p > bp) { bp = p; best = k; }
+    if (p > bp) { second = bp; bp = p; best = k; } else if (p > second) second = p;
   }
-  if ((r->grants % 8u) == 7u) return comb_k((int)((best + 1 + (r->grants / 8u) % (uint32_t)(n - 1)) % (uint32_t)n)); /* explore */
+  /* explore 1 grant in 8; with the SNR rule and a runner-up >= 3 dB behind, 1 in 32 (the EMA only has to stay current) */
+  const uint32_t every = (snr_all && bp - second >= 3.0) ? 32u : 8u;
+  if ((r->grants % every) == every - 1u) return comb_k((int)((best + 1 + (r->grants / every) % (uint32_t)(n - 1)) % (uint32_t)n));
   return comb_k(best);
 }
 /* emit: appends one decode variant (reading, S, add_pos, table, probe flag, TDA) to out[] and books a pending entry carrying its feedback token.
