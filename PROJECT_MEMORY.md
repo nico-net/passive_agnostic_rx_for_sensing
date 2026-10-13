@@ -4123,6 +4123,17 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
   unchanged, `GPU_EXACT_* check_bad=0`.
 - Not a default change: item 15 still describes t26b as the morning baseline until the OTA A/B runs.
 
+**30a. MRC fix OTA A/B result, 2026-10-13 (`[MEASURED, OTA]`; closes the item 30 open A/B for the MRC fixes, not for `t26hq`)**
+
+- `[MEASURED, DGX OTA 2026-10-13 ~10:00-10:27, Vodafone PCI 415, 150 s, 3x3 interleaved, cfg sd_t26ul]` MRC fix A/B: t26b (M0) vs t26m = +ISAC_RX_MRC_PER_RNTI_SNR=2 (M1) vs t26ms = t26m + ISAC_RX_MRC_SHIFT_SUM=1 (M2). Metric: CRC-OK % all SNR, all Nl, EVMGRANT probe=0 (all-SNR used because the SNR estimate itself changes between arms).
+  - MCS 0-4: M0 66.8 / M1 65.3 / M2 67.9
+  - MCS 5-9: M0 35.3 / M1 57.6 (sd_run 20.7) / M2 44.4 (sd_run 7.6)
+  - MCS 10-16: M0 24.5 / M1 29.3 (sd 13.1) / M2 33.4 (sd 21.0)
+  - all: M0 56.9 / M1 60.0 / M2 58.8
+  - comb=3 share of decodes: M0 ~48 %, M1 ~60 %, M2 ~63 %; GPU_EXACT_DEMOD check_bad=0 everywhere; CRC-OK RNTIs per run M0 79/89/105, M1 63/85/71, M2 85/81/89.
+- `[INFERRED]` No t26h-style collapse; both fixes give a gain at MCS 5-16 (+9 points for M2) with no loss at MCS 0-4. Run-to-run variance is high, so the gain is moderate and still provisional. Candidate for the default env: t26ms (both fixes). Nl=1 high MCS (17+) is still <6 %; the receiver limit remains.
+- `[NOTE]` The `=2` value of M1 differs from the `=1` of the item 29/30 `t26h` candidate; the two are not the same arm.
+
 **31. Nl=2 MCS 5-16 is SNR-limited by the weak layer; per-layer SNR is now logged (`[MEASURED, OTA]`, `[MEASURED, DGX replay tim]`, `[CODE-READ]`)**
 
 - `[MEASURED, OTA, Vodafone S0a/b/c pooled 3 runs]` Nl=2 CRC-OK at SNR >= 10 by bin: MCS 5-9 61 % (10-13 dB) -> 95 % (13-16) -> 99 % (16-19);
