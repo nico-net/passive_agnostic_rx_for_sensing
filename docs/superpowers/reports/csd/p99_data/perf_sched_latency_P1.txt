@@ -1,0 +1,16 @@
+
+ -------------------------------------------------------------------------------------------------------------------------------------------
+  Task                  |   Runtime ms  |  Count   | Avg delay ms    | Max delay ms    | Max delay start           | Max delay end          |
+ -------------------------------------------------------------------------------------------------------------------------------------------
+  kworker/6:2-mm_:633783 |      0.945 ms |       68 | avg:  11.152 ms | max: 210.699 ms | max start: 12076.468547 s | max end: 12076.679246 s
+  pdcchJanon:758812     |  10804.655 ms |    59910 | avg:   0.052 ms | max:  15.580 ms | max start: 12074.728300 s | max end: 12074.743880 s
+  passivePdsch0:758561  |    583.325 ms |    12878 | avg:   0.327 ms | max:  14.064 ms | max start: 12067.382776 s | max end: 12067.396841 s
+  passivePusch0:758585  |   2658.574 ms |     4506 | avg:   0.951 ms | max:  12.784 ms | max start: 12072.684373 s | max end: 12072.697157 s
+  passivePdcch0:(2)     |   8822.553 ms |     7968 | avg:   0.054 ms | max:   9.000 ms | max start: 12067.874781 s | max end: 12067.883781 s
+  gdbus:(7)             |     15.426 ms |      175 | avg:   0.081 ms | max:   8.148 ms | max start: 12076.901637 s | max end: 12076.909785 s
+  kworker/3:0-eve:592232 |      2.761 ms |       93 | avg:   0.381 ms | max:   7.860 ms | max start: 12079.618527 s | max end: 12079.626387 s
+  kworker/4:0-eve:619791 |      1.826 ms |       65 | avg:   0.474 ms | max:   7.278 ms | max start: 12077.629543 s | max end: 12077.636821 s
+  kworker/7:0-mm_:633423 |      0.504 ms |       43 | avg:   0.775 ms | max:   6.647 ms | max start: 12066.615647 s | max end: 12066.622294 s
+  nvidia-modeset/:1699  |     42.099 ms |     2179 | avg:   0.047 ms | max:   6.639 ms | max start: 12081.117802 s | max end: 12081.124441 s
+  kworker/3:1H-kb:559   |      0.295 ms |       10 | avg:   0.547 ms | max:   4.772 ms | max start: 12070.822486 s | max end: 12070.827258 s
+  git:(15)              |     26.021 ms |       50 | avg:   0.150 ms | max:   4.757 ms | max start: 12066.468726 s | max end: 12066.473483 s

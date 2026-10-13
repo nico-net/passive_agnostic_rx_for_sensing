@@ -1,0 +1,13 @@
+# perf sched latency --sort max, air-like replay perfA2 (capture b, flags off), 20 s window from the first PDTIM line, 2026-10-13 14:02
+# (perf data file deleted after reading; rows copied from the tool output)
+  kworker/4:0-eve:619791 |      0.855 ms |       42 | avg:  69.299 ms | max: 950.003 ms | max start: 11699.889074 s | max end: 11700.839078 s
+  kworker/3:0-eve:592232 |      1.551 ms |       45 | avg:  68.662 ms | max: 950.002 ms | max start: 11698.617220 s | max end: 11699.567223 s
+  kworker/8:1-rcu:634756 |      0.463 ms |       40 | avg:  52.056 ms | max: 949.999 ms | max start: 11699.889080 s | max end: 11700.839079 s
+  kworker/9:1-eve:756422 |      2.721 ms |       87 | avg:  25.324 ms | max: 949.057 ms | max start: 11696.632246 s | max end: 11697.581303 s
+  kworker/7:0-eve:633423 |      0.716 ms |       53 | avg:  53.633 ms | max: 940.592 ms | max start: 11701.573166 s | max end: 11702.513758 s
+  git:(90)              |    150.323 ms |      208 | avg:   6.730 ms | max: 530.424 ms | max start: 11701.987865 s | max end: 11702.518290 s
+  pdcp_timer:(2)        |    383.184 ms |    14726 | avg:   0.089 ms | max:  56.636 ms | max start: 11703.157369 s | max end: 11703.214005 s
+  passivePdcch1:756251  |    997.640 ms |     2546 | avg:   0.071 ms | max:   9.207 ms | max start: 11702.853598 s | max end: 11702.862805 s
+  passivePdsch0:(2)     |   3732.027 ms |      973 | avg:   0.206 ms | max:   4.375 ms | max start: 11699.823107 s | max end: 11699.827482 s
+# same run, PDTIMSLOW: 0.63-0.95 s bodies in all five consumers at t=11683.85, 11685.06, 11694.15, 11697.68, 11698.90 (wall == cpu: spinning)
+# /proc/sys/kernel/sched_rt_runtime_us = 950000, sched_rt_period_us = 1000000

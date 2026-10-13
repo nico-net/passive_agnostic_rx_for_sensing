@@ -1,0 +1,24 @@
+bA1 cap=b rc=0 pre[14:17:41 load=3.61 hogs=] post=14:18:17 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bA1_141741 extra=
+bP1 cap=b rc=0 pre[14:18:17 load=4.65 hogs=] post=14:18:52 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bP1_141817 extra=ISAC_GPU_POLL_SLEEP_US=200
+bPY1 cap=b rc=0 pre[14:18:52 load=3.83 hogs=pgrep:100,] post=14:19:35 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPY1_141852 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2
+bPF1 cap=b rc=0 pre[14:19:35 load=3.86 hogs=nr-uesoftmodem:100,] post=14:21:16 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPF1_141935 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_SCANQ_FRESH=6
+bPYF1 cap=b rc=0 pre[14:21:16 load=4.20 hogs=ps:100,] post=14:22:57 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYF1_142116 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+tA1 cap=tim rc=0 pre[14:22:57 load=3.87 hogs=] post=14:23:31 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tA1_142257 extra=
+tP1 cap=tim rc=0 pre[14:23:31 load=4.40 hogs=ps:100,] post=14:24:14 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tP1_142332 extra=ISAC_GPU_POLL_SLEEP_US=200
+tPYF1 cap=tim rc=0 pre[14:24:14 load=3.90 hogs=] post=14:25:52 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tPYF1_142414 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+bA2 cap=b rc=0 pre[14:25:52 load=5.15 hogs=ps:100,] post=14:27:30 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bA2_142552 extra=
+bP2 cap=b rc=0 pre[14:27:30 load=4.44 hogs=] post=14:28:05 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bP2_142730 extra=ISAC_GPU_POLL_SLEEP_US=200
+bPY2 cap=b rc=0 pre[14:28:05 load=4.36 hogs=] post=14:28:41 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPY2_142805 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2
+bPF2 cap=b rc=0 pre[14:28:41 load=3.84 hogs=] post=14:29:16 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPF2_142841 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_SCANQ_FRESH=6
+bPYF2 cap=b rc=0 pre[14:29:16 load=3.27 hogs=pgrep:100,] post=14:30:00 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYF2_142916 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+tA2 cap=tim rc=0 pre[14:30:00 load=3.45 hogs=] post=14:31:39 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tA2_143000 extra=
+tP2 cap=tim rc=0 pre[14:31:39 load=3.91 hogs=] post=14:33:20 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tP2_143139 extra=ISAC_GPU_POLL_SLEEP_US=200
+tPYF2 cap=tim rc=0 pre[14:33:20 load=4.68 hogs=] post=14:33:55 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tPYF2_143320 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+bA3 cap=b rc=0 pre[14:33:55 load=5.03 hogs=ps:100,] post=14:34:38 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bA3_143355 extra=
+bP3 cap=b rc=0 pre[14:34:38 load=5.14 hogs=] post=14:36:19 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bP3_143438 extra=ISAC_GPU_POLL_SLEEP_US=200
+bPY3 cap=b rc=0 pre[14:36:19 load=4.97 hogs=] post=14:36:55 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPY3_143619 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2
+bPF3 cap=b rc=0 pre[14:36:55 load=4.42 hogs=] post=14:37:30 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPF3_143655 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_SCANQ_FRESH=6
+bPYF3 cap=b rc=0 pre[14:37:30 load=3.83 hogs=] post=14:38:06 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_bPYF3_143730 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
+tA3 cap=tim rc=0 pre[14:38:06 load=4.32 hogs=] post=14:38:40 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tA3_143806 extra=
+tP3 cap=tim rc=0 pre[14:38:40 load=5.75 hogs=] post=14:39:15 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tP3_143840 extra=ISAC_GPU_POLL_SLEEP_US=200
+tPYF3 cap=tim rc=0 pre[14:39:15 load=5.55 hogs=] post=14:39:49 dir=/home/nicola/NICOLA/wt/rr-csd-p99/replays/replay_tPYF3_143915 extra=ISAC_GPU_POLL_SLEEP_US=200 ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6
