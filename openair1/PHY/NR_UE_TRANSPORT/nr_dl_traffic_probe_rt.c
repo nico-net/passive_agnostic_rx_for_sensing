@@ -3,6 +3,9 @@
 #include "nr_dl_traffic_probe_rt.h"
 #include "nr_dl_traffic_probe.h"
 #include "nr_pdcch_coreset_map.h"
+#include "nr_pdcch_coreset_bank.h"
+#include "nr_pdcch_nid_gpu.h"
+#include <time.h>
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_passive_acq_state.h"
 #include "nr_csirs_disc_td.h"
@@ -28,7 +31,12 @@
 static struct {
   pthread_mutex_t mu;
   pthread_cond_t cv;
-  int every, sweep;                  /* env, -1 unread */
+  int every, sweep, watch;           /* env, -1 unread; watch = ISAC_CORESET_DISC_WATCH (ACQMISS) */
+  nr_cdisc_t cd;
+  uint32_t cd_probed0;               /* probed slots and nocss0 RB-slots when the sweep was armed */
+  uint64_t cd_rbslots0;
+  double cd_miss_s;
+  int cd_max_recover;
   const NR_DL_FRAME_PARMS *fp;
   bool running;
   uint32_t dl_calls, now_slot;
@@ -50,7 +58,7 @@ static struct {
   nr_dltp_stats_t st;
   uint32_t probed, pa_hits[DLTP_PA_N], pa_sym_hits[3], pa_syms, pci_windows, pci_sym_windows[3];
   bool pa_done;
-} g = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .every = -1, .sweep = -1};
+} g = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .every = -1, .sweep = -1, .watch = -1};
 
 static int env_int(const char *k, int def, int lo, int hi)
 {
@@ -167,6 +175,32 @@ static void *worker(void *arg)
         }
       }
     }
+    if ((g.probed % DLTP_LOG_EVERY) == 0 && g.watch) {
+      /* ACQMISS: "missed it" vs "no traffic". Window = since the carrier verdict (the nID sweep could run). */
+      struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+      const int was_armed = g.cd.armed;
+      nr_cdisc_in_t in = {.now_s = (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec, .carrier_ok = snap.carrier_verified == 1,
+                          .bank_count = nr_pdcch_coreset_bank_count(), .miss_s = g.cd_miss_s, .max_recover = g.cd_max_recover};
+      if (in.carrier_ok && !was_armed) { g.cd_probed0 = g.probed; g.cd_rbslots0 = g.st.pdsch_like_ungranted_nocss0; }
+      in.window_probed = g.probed - g.cd_probed0;
+      in.window_rbslots = g.st.pdsch_like_ungranted_nocss0 - g.cd_rbslots0;
+      nr_cdisc_out_t o;
+      nr_cdisc_step(&g.cd, &in, &o);
+      static const char *names[] = {"SEARCHING", "LOCKED", "NO_TRAFFIC", "MISSED"};
+      uint64_t off = 0, tak = 0, emp = 0; float nf = 0;
+      nr_pdcch_nid_capture_metrics(&off, &tak, &emp, &nf);
+      LOG_A(PHY, "SENSING: CORESET_DISC state=%s reason=%s armed_for_s=%.1f window_probed=%llu window_ungranted_pdsch_like_rbslots=%llu (excl. CORESET#0) bank=%d nid_passes=%llu capture offered/taken/empty=%llu/%llu/%llu recoveries=%d%s\n",
+            names[g.cd.state], o.reason, g.cd.armed ? in.now_s - g.cd.armed_s : 0.0, (unsigned long long)in.window_probed,
+            (unsigned long long)in.window_rbslots, in.bank_count, (unsigned long long)nr_pdcch_nid_gpu_passes(),
+            (unsigned long long)off, (unsigned long long)tak, (unsigned long long)emp, g.cd.recoveries,
+            o.recover ? " -> RECOVER" : "");
+      if (o.recover) {
+        /* widen: forget the stale incremental window, restart ACQUIRE (GPU priority) and capture every symbol (occupancy gate off) */
+        nr_pdcch_nid_gpu_rearm();
+        nr_pdcch_coreset_map_idsweep_gate_bypass(1);
+        LOG_A(PHY, "SENSING: CORESET_DISC RECOVER n=%d action=nid_sweep_rearm+occupancy_gate_off\n", g.cd.recoveries);
+      } else if (g.cd.state == NR_CDISC_LOCKED) nr_pdcch_coreset_map_idsweep_gate_bypass(0);
+    }
     if ((g.probed % DLTP_LOG_EVERY) == 0) {
       char buf[640];
       nr_dltp_verdict(&g.st, buf, sizeof(buf));
@@ -202,6 +236,10 @@ void nr_dl_traffic_probe_push(PHY_VARS_NR_UE *ue, uint32_t abs_slot, uint16_t fr
   if (g.every < 0) {
     g.every = env_int("ISAC_DL_TRAFFIC_PROBE", 0, 0, 100000);
     g.sweep = env_int("ISAC_POINTA_SWEEP", 0, 0, 1);
+    g.watch = env_int("ISAC_CORESET_DISC_WATCH", 0, 0, 1);
+    g.cd_miss_s = env_int("ISAC_CORESET_DISC_MISS_S", 12, 1, 600);
+    g.cd_max_recover = env_int("ISAC_CORESET_DISC_RECOVER_MAX", 3, 0, 100);
+    if (g.watch && !g.every) g.every = 16; /* the watch needs the traffic probe: same cadence as the BLINDPIPE runs */
   }
   if (!g.every) return;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;

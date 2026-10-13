@@ -38,6 +38,7 @@ typedef struct {
   uint64_t ctrl_rbs[3];
   uint64_t cells, cells_lit, cells_granted_lit, cells_ungranted_lit; /* data symbols 3..13 of carrier RBs minus SSB */
   uint64_t pdsch_like, pdsch_like_ungranted;  /* RB-slots */
+  uint64_t pdsch_like_ungranted_nocss0;       /* ACQMISS: the same outside the CORESET#0 RBs (SIB1/SI/paging PDSCH live there and are not registered as grants) */
   uint32_t slots_ungranted_pdsch;
   uint32_t grants_used;
   float floor_mean;                /* last slot's floor (energy units) */
@@ -58,6 +59,32 @@ int nr_dltp_verdict(const nr_dltp_stats_t *st, char *buf, size_t n);
 /* Grant registry (lock-free single writer per call under its own mutex): PDSCH allocations the receiver decoded. */
 void nr_dltp_note_grant(uint16_t frame, uint8_t slot, int rb0, int n_rb, int s, int l);
 int nr_dltp_grants_for(uint16_t frame, uint8_t slot, nr_dltp_grant_t *out, int cap);
+
+/* ACQMISS 2026-10-13 (ISAC_CORESET_DISC_WATCH=1, default off): "missed it" vs "no traffic" for the dedicated CORESET.
+ * Pure state machine fed by the probe worker every TRAFFIC line. Inputs are receiver-side only (bank count, probe verdict,
+ * carrier verdict, time): no gNB information, no cell constant. MISSED = the probe sees PDSCH-like occupancy that no decoded
+ * grant explains (UE traffic exists) while no dedicated CORESET is banked miss_s seconds after the nID sweep could start.
+ * NO_TRAFFIC = enough probed slots and none lit. Recovery is requested at most max_recover times with linear back-off. */
+typedef enum { NR_CDISC_SEARCHING = 0, NR_CDISC_LOCKED, NR_CDISC_NO_TRAFFIC, NR_CDISC_MISSED } nr_cdisc_state_t;
+typedef struct {
+  nr_cdisc_state_t state;
+  int armed;                 /* carrier verdict seen: the sweep can run */
+  double armed_s, last_recover_s;
+  int recoveries;
+} nr_cdisc_t;
+typedef struct {
+  double now_s;
+  int carrier_ok;            /* nr_passive_acq carrier_verified == 1 */
+  int bank_count;            /* dedicated CORESETs banked */
+  uint64_t window_probed, window_rbslots; /* probed slots / ungranted PDSCH-like RB-slots outside CORESET#0 since the sweep was armed */
+  double miss_s;             /* grace after arming before declaring MISSED */
+  int max_recover;
+} nr_cdisc_in_t;
+typedef struct { int changed, recover, traffic; const char *reason; } nr_cdisc_out_t;
+#define NR_CDISC_RBSLOTS_PRESENT 64   /* 8 x the probe's own leakage bound (8) */
+#define NR_CDISC_RATE_PRESENT 0.5     /* RB-slots per probed slot: sustained, not a lone burst (engineering floor, not fitted to a cell) */
+#define NR_CDISC_PROBED_ABSENT 100    /* sampling depth, as nr_dltp_verdict */
+void nr_cdisc_step(nr_cdisc_t *c, const nr_cdisc_in_t *in, nr_cdisc_out_t *out);
 #ifdef __cplusplus
 }
 #endif

@@ -105,3 +105,45 @@ TEST(DlTrafficProbe, GrantRegistryReturnsOnlyTheSlotsGrants) {
   EXPECT_EQ(out[0].rb0, 10); EXPECT_EQ(out[1].rb0, 40);
   EXPECT_EQ(nr_dltp_grants_for(101, 3, out, 8), 0);
 }
+
+TEST(DlTrafficProbe, CoresetDiscStateMissedVsNoTrafficVsLocked) {
+  nr_cdisc_t c = {};
+  nr_cdisc_in_t in = {0.0, 0, 0, 500, 5000, 10.0, 2}; /* 5000 RB-slots over 500 probed slots: 10/slot */
+  nr_cdisc_out_t o;
+  nr_cdisc_step(&c, &in, &o);                       /* no carrier: cannot sweep yet */
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING); EXPECT_STREQ(o.reason, "carrier_pending");
+  in.carrier_ok = 1; in.now_s = 5.0;                /* armed at 5 s */
+  nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING); EXPECT_EQ(o.recover, 0);
+  in.now_s = 14.9; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING);           /* still inside the grace */
+  in.now_s = 15.1; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_MISSED); EXPECT_EQ(o.recover, 1); EXPECT_EQ(o.changed, 1);
+  in.now_s = 20.0; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_MISSED); EXPECT_EQ(o.recover, 0);   /* back-off: next at +2 x miss_s */
+  in.now_s = 35.2; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(o.recover, 1);
+  in.now_s = 80.0; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(o.recover, 0);                          /* max_recover = 2 reached */
+  in.window_rbslots = 3; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_NO_TRAFFIC);          /* 3 RB-slots in 500 probed slots: nothing to miss */
+  in.window_probed = 50; in.window_rbslots = 100; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_MISSED);              /* bursty but 2 RB-slots/slot, >= 64 total */
+  in.window_probed = 5000; in.window_rbslots = 100; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_SEARCHING);           /* 0.02/slot: neither present nor absent */
+  in.window_rbslots = 5000; in.bank_count = 1; nr_cdisc_step(&c, &in, &o);
+  EXPECT_EQ(c.state, NR_CDISC_LOCKED); EXPECT_EQ(c.recoveries, 0);
+}
+
+TEST(DlTrafficProbe, PdschLikeInsideCoreset0IsNotCountedForTheWatch) {
+  nr_dltp_stats_t st = {};
+  Slot s(7, 100.f);
+  s.light(3, 8, 2, 4, 400.f);     /* SIB1-like PDSCH inside CORESET#0 RBs 2..5 (symbols 3..10) */
+  s.light(3, 8, 20, 4, 400.f);    /* UE-like PDSCH outside, RBs 20..23 */
+  const float floor = s.energy();
+  nr_dltp_geom_t g = kGeom;
+  g.css0_rb0 = 2; g.css0_rb1 = 6; g.css0_nsym = 2;
+  nr_dltp_slot(s.e.data(), &g, floor, true, nullptr, 0, &st);
+  EXPECT_EQ(st.pdsch_like_ungranted, 8u);
+  EXPECT_EQ(st.pdsch_like_ungranted_nocss0, 4u);
+}
