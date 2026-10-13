@@ -439,3 +439,79 @@ void nr_passive_acq_reset(void)
   g_snap.state = NR_ACQ_SEARCHING;
   pthread_mutex_unlock(&g_lock);
 }
+
+/* ---- CELL TRAFFIC STATE: see nr_passive_acq_state.h ---- */
+const char *nr_cell_verdict_name(nr_cell_verdict_t v)
+{
+  static const char *const n[] = {"UNKNOWN", "ACTIVE", "BARRED_IDLE", "IDLE"};
+  return (unsigned)v < 4 ? n[v] : "?";
+}
+
+void nr_cell_state_note_rnti(nr_cell_state_t *c, uint16_t rnti)
+{
+  int free_i = -1;
+  for (int i = 0; i < 8; i++) {
+    if (c->cnt[i] && c->rnti[i] == rnti) {
+      if (c->cnt[i] < 255) c->cnt[i]++;
+      if (c->cnt[i] >= 3) c->verdict = NR_CELL_ACTIVE;
+      return;
+    }
+    if (!c->cnt[i] && free_i < 0) free_i = i;
+  }
+  if (free_i < 0) free_i = (int)(rnti & 7); /* shortcut: 8 slots, a colliding RNTI evicts one; recurrence >= 3 of the survivor is all that matters */
+  c->rnti[free_i] = rnti;
+  c->cnt[free_i] = 1;
+}
+
+nr_cell_verdict_t nr_cell_state_update(nr_cell_state_t *c, uint32_t abs_slot, uint32_t window_slots)
+{
+  if (!c->started) { c->started = true; c->t0 = abs_slot; }
+  if (c->verdict == NR_CELL_ACTIVE) return c->verdict;
+  if ((uint32_t)(abs_slot - c->t0) >= window_slots) c->verdict = c->barred ? NR_CELL_BARRED_IDLE : NR_CELL_IDLE;
+  return c->verdict;
+}
+
+static nr_cell_state_t g_cell_state;
+static pthread_mutex_t g_cell_state_mu = PTHREAD_MUTEX_INITIALIZER;
+static int cell_state_level(void)
+{
+  static int l = -1;
+  if (l < 0) { const char *e = getenv("ISAC_CELL_STATE"); l = e ? atoi(e) : 0; }
+  return l;
+}
+void nr_cell_state_note_mib_barred(bool barred)
+{
+  if (!cell_state_level()) return;
+  pthread_mutex_lock(&g_cell_state_mu); g_cell_state.barred = barred; pthread_mutex_unlock(&g_cell_state_mu);
+}
+void nr_cell_state_note_ue_rnti(uint16_t rnti)
+{
+  if (!cell_state_level()) return;
+  pthread_mutex_lock(&g_cell_state_mu); nr_cell_state_note_rnti(&g_cell_state, rnti); pthread_mutex_unlock(&g_cell_state_mu);
+}
+bool nr_cell_state_sweep_blocked(uint32_t abs_slot, uint64_t cap_offered, uint64_t cap_taken, uint64_t cap_empty)
+{
+  const int level = cell_state_level();
+  if (!level) return false;
+  static uint64_t s_sync_losses;
+  static nr_cell_verdict_t s_last = NR_CELL_UNKNOWN;
+  static uint32_t window = 0;
+  if (!window) { const char *e = getenv("ISAC_CELL_STATE_SECS"); const int sec = e ? atoi(e) : 30; window = (uint32_t)(sec > 0 ? sec : 30) * 2000u; }
+  const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
+  pthread_mutex_lock(&g_cell_state_mu);
+  if (a.sync_losses != s_sync_losses) { s_sync_losses = a.sync_losses; const bool b = g_cell_state.barred; memset(&g_cell_state, 0, sizeof g_cell_state); g_cell_state.barred = b; s_last = NR_CELL_UNKNOWN; }
+  const nr_cell_verdict_t v = nr_cell_state_update(&g_cell_state, abs_slot, window);
+  const bool barred = g_cell_state.barred;
+  pthread_mutex_unlock(&g_cell_state_mu);
+  if (v != s_last) {
+    s_last = v;
+    if (v != NR_CELL_UNKNOWN)
+      LOG_A(PHY, "SENSING: CELL_STATE %s barred=%d sib1_decodes=%llu window=%u slots no_recurring_ue_rnti=%d nid_capture offered=%llu taken=%llu skipped_empty=%llu -> %s\n",
+            nr_cell_verdict_name(v), (int)barred, (unsigned long long)a.sib1_decodes, (unsigned)window, v != NR_CELL_ACTIVE,
+            (unsigned long long)cap_offered, (unsigned long long)cap_taken, (unsigned long long)cap_empty,
+            v == NR_CELL_ACTIVE ? "UE traffic observed, nID sweep (re)armed"
+                                : (level >= 2 ? "no UE traffic observed: nID sweep capture stopped until a UE RNTI recurs"
+                                              : "no UE traffic observed (report only; ISAC_CELL_STATE=2 stops the nID sweep)"));
+  }
+  return level >= 2 && (v == NR_CELL_BARRED_IDLE || v == NR_CELL_IDLE);
+}

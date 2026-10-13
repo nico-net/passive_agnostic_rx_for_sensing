@@ -1,0 +1,26 @@
+done 18.933080673217773
+i_ssb 1 PCI 508 dB over median 12.1 tau 0.0
+i_ssb 0 PCI 508 dB over median 9.7 tau 10.0
+i_ssb 0 PCI 4 dB over median 8.6 tau 0.0
+i_ssb 6 PCI 508 dB over median 8.0 tau 0.0
+i_ssb 3 PCI 508 dB over median 8.0 tau 0.0
+i_ssb 2 PCI 508 dB over median 7.5 tau 0.0
+i_ssb 5 PCI 614 dB over median 7.3 tau 5.0
+i_ssb 6 PCI 614 dB over median 7.2 tau 2.0
+i_ssb 6 PCI 4 dB over median 5.7 tau 0.0
+i_ssb 5 PCI 4 dB over median 5.1 tau 0.0
+i_ssb 5 PCI 508 dB over median 4.8 tau 0.0
+i_ssb 3 PCI 614 dB over median 4.7 tau 5.0
+i_ssb 3 PCI 4 dB over median 4.6 tau 0.0
+i_ssb 0 PCI 692 dB over median 4.4 tau -3.0
+i_ssb 1 PCI 220 dB over median 4.3 tau 2.0
+i_ssb 3 PCI 551 dB over median 4.3 tau -3.0
+i_ssb 1 PCI 848 dB over median 4.3 tau -5.0
+i_ssb 1 PCI 60 dB over median 4.2 tau 2.0
+i_ssb 5 PCI 551 dB over median 4.0 tau -3.0
+i_ssb 1 PCI 4 dB over median 4.0 tau 0.0
+i_ssb 1 PCI 276 dB over median 4.0 tau 2.0
+i_ssb 2 PCI 614 dB over median 3.9 tau 5.0
+i_ssb 1 PCI 772 dB over median 3.7 tau -2.0
+i_ssb 1 PCI 12 dB over median 3.7 tau 2.0
+i_ssb 0 PCI 984 dB over median 3.7 tau -3.0

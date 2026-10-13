@@ -1,0 +1,6 @@
+[PHY]    SENSING: PDSCHQ queued=21 decoded=21 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: PDSCHQ queued=23 decoded=23 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: PDSCHQ queued=26 decoded=26 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: PDSCHQ queued=28 decoded=28 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: PDSCHQ queued=30 decoded=30 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0
+[PHY]    SENSING: PDSCHQ queued=33 decoded=33 crc_ok=0 (0.0%) dropped[full=0 stale=0] max_lag_slots=0/20 slot_groups=0/0 multi-grant slots dropped_narrow=0

@@ -130,6 +130,28 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
 void nr_passive_acq_note_carrier_from_rs(const char *evidence);
 /** ISAC_SIB1_SIBLING=1: adopt the carrier of a SIB1-decoded cell on the same absolute SSB frequency and k_ssb (co-sited sector without own SIB1); call after the MIB. */
 void nr_passive_acq_try_sibling_carrier(int k_ssb);
+/* ---- CELL TRAFFIC STATE (PCIS2 2026-10-13, ISAC_CELL_STATE: 0 off (default), 1 report, 2 report + stop the nID sweep capture) ----
+ * A barred cell (PCI 403) or a dark/idle one (PCI 675) never shows a dedicated CORESET; the nID sweep then runs for ever. The state is a pure
+ * struct (one per cell context: multi-PCI keeps one each), fed with: the MIB barred bit, every C/TC-class RNTI accepted by the blind monitor,
+ * and the absolute slot (mu 1: 0.5 ms; replay-speed independent). Verdict after `window_slots` of observation without a recurring UE RNTI
+ * (>= 3 accepts of one RNTI); a recurring RNTI sets ACTIVE at any time (re-arms the sweep). */
+typedef enum { NR_CELL_UNKNOWN = 0, NR_CELL_ACTIVE, NR_CELL_BARRED_IDLE, NR_CELL_IDLE } nr_cell_verdict_t;
+typedef struct {
+  bool barred, started;
+  uint32_t t0;
+  uint16_t rnti[8];
+  uint8_t cnt[8];
+  nr_cell_verdict_t verdict;
+} nr_cell_state_t;
+void nr_cell_state_note_rnti(nr_cell_state_t *c, uint16_t rnti);
+nr_cell_verdict_t nr_cell_state_update(nr_cell_state_t *c, uint32_t abs_slot, uint32_t window_slots);
+const char *nr_cell_verdict_name(nr_cell_verdict_t v);
+/* process-wide instance used by the single-cell receiver; level = ISAC_CELL_STATE */
+void nr_cell_state_note_mib_barred(bool barred);
+void nr_cell_state_note_ue_rnti(uint16_t rnti);
+/* idsweep hook: true when the sweep capture must be skipped this slot (level 2 and a *_IDLE verdict); logs verdict changes at level >= 1 */
+bool nr_cell_state_sweep_blocked(uint32_t abs_slot, uint64_t cap_offered, uint64_t cap_taken, uint64_t cap_empty);
+
 /** BLINDPIPE: Point-A hypothesis from the blind nID = PCI PDCCH DM-RS sweep (nr_dl_traffic_probe_rt.c); carrier = grid. */
 void nr_passive_acq_note_carrier_hypothesis(int point_a_sc, const char *evidence);
 /* TDD pattern from SIB1 (tdd-UL-DL-ConfigurationCommon). Slots are in the reference-SCS numbering
