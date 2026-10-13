@@ -4134,6 +4134,21 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
 - `[INFERRED]` No t26h-style collapse; both fixes give a gain at MCS 5-16 (+9 points for M2) with no loss at MCS 0-4. Run-to-run variance is high, so the gain is moderate and still provisional. Candidate for the default env: t26ms (both fixes). Nl=1 high MCS (17+) is still <6 %; the receiver limit remains.
 - `[NOTE]` The `=2` value of M1 differs from the `=1` of the item 29/30 `t26h` candidate; the two are not the same arm.
 
+**30b. On-air tail A/B (OTATAIL K/L) and the 10:31 host hang, 2026-10-13 (`[MEASURED, OTA]`; negative)**
+
+- `[MEASURED, DGX]` J1 (t26bJ = t26b + PDTIM + `ISAC_GPU_HEARTBEAT=1`, first on-air heartbeat run, ab_J1_1_102955) hung the whole host at
+  10:31:52, ~2 min in: the journal stops with no panic, OOM or Xid. Reboot 10:48. `[INFERRED, not proven]` Suspect = the heartbeat host probe:
+  the GPU reads an UNPINNED calloc buffer every 10 ms (pageable-memory GPU faults, the path HOST_PIN avoids), nr_pdsch_gpu_fep.cu hb_start.
+  Keep `ISAC_GPU_HEARTBEAT` off on air (pin the probe buffer before re-trying).
+- After a reboot: re-add `sudo ip addr add 192.168.30.1/24 dev enP7s7`; /tmp (scratchpad) is wiped, so the OTA window script and cfg now
+  live in rr-orchestration/ota/ (ota_window_gen.sh, sd_t26ul.cfg). The first start after the reboot got 0 samples (RX_START deadline, RFNOC flush timeout).
+- `[MEASURED, DGX OTA 2026-10-13 11:04-11:20, Vodafone PCI 415, 150 s, interleaved, cfg sd_t26ul]` K = t26bKn (t26bK without heartbeat:
+  `ISAC_CSIRS_DISC_BUDGET=1`, `ISAC_PDCCH_NID_GPU_RECHECK_MS=10000`), L = t26bLn (K + `ISAC_MALLOC_NOTRIM=1`); otatail_stats per run
+  (stale % / p99 us / CRC-OK decodes): K2 59.9 / 2735 / 2904, K3 23.6 / 7115 / 14345, L2 46.9 / 5805 / 10734, L3 22.6 / 4675 / 14116;
+  L1 acquired no dedicated CORESET (667 decodes); K1 no samples. Baseline t26b M0a/b/c (same morning): 57.7 / 67.4 / 42.9 % stale, p99 5345-5995.
+- `[INFERRED]` The replay gain (stale 24 -> 3 %) does NOT carry over on air: stale drops 23-60 %, p99 2.7-7 ms, same as t26b within the huge
+  run-to-run spread. Neither K nor L is adopted. The on-air stale/tail problem is still open (decode backlog vs scan queue, not CSI-RS discovery alone).
+
 **31. Nl=2 MCS 5-16 is SNR-limited by the weak layer; per-layer SNR is now logged (`[MEASURED, OTA]`, `[MEASURED, DGX replay tim]`, `[CODE-READ]`)**
 
 - `[MEASURED, OTA, Vodafone S0a/b/c pooled 3 runs]` Nl=2 CRC-OK at SNR >= 10 by bin: MCS 5-9 61 % (10-13 dB) -> 95 % (13-16) -> 99 % (16-19);
