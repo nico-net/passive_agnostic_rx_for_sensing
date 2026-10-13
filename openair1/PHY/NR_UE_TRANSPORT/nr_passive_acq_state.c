@@ -283,6 +283,32 @@ void nr_passive_acq_note_carrier_from_rs(const char *evidence)
   pthread_mutex_unlock(&g_lock);
 }
 
+/* nr_passive_acq_note_carrier_hypothesis: BLINDPIPE (ISAC_POINTA_SWEEP). A cell without SIB1 carrier information whose PDCCH
+ *   DM-RS (nID = PCI) lit up at one Point-A hypothesis: Point A = grid subcarrier point_a_sc (negative: CRB 0 below the
+ *   grid start; positive: inside a grid wider than the carrier), carrier taken as the started grid (its true width is unknown; the DL BWP tracker learns it). Opens the
+ *   nID sweep and the dwell path exactly as a SIB1 verdict does. No-op once a verdict exists. Caller: nr_dl_traffic_probe_rt.c. */
+void nr_passive_acq_note_carrier_hypothesis(int point_a_sc, const char *evidence)
+{
+  pthread_mutex_lock(&g_lock);
+  if (g_snap.carrier_verified != 0 || !g_phy_geom_set) {
+    pthread_mutex_unlock(&g_lock);
+    return;
+  }
+  nr_passive_acq_carrier_verdict_t v = {0};
+  v.bw_match = v.mu_match = v.grid_match = true;
+  v.point_a_subcarrier = point_a_sc;
+  v.carrier_start_subcarrier = 0;
+  v.carrier_end_subcarrier = 12 * g_carrier.phy_n_rb;
+  v.carrier_n_rb = g_carrier.phy_n_rb;
+  v.derived_centre_hz = v.started_centre_hz = g_carrier.phy_dl_carrier_hz;
+  g_snap.carrier_verified = 1;
+  g_snap.carrier = v;
+  LOG_A(PHY, "SENSING: ACQ carrier HYPOTHESIS without SIB1 carrier info: Point A at grid subcarrier %d (CRB 0 = grid RB %d), "
+             "carrier taken as the %d PRB grid (evidence: %s)\n",
+        point_a_sc, point_a_sc / 12, g_carrier.phy_n_rb, evidence ? evidence : "?");
+  pthread_mutex_unlock(&g_lock);
+}
+
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {
   pthread_mutex_lock(&g_lock);
