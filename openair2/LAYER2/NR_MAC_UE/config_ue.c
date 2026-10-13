@@ -732,6 +732,10 @@ static void modlist_coreset(NR_ControlResourceSet_t *source, NR_ControlResourceS
     shiftIndex = target->cce_REG_MappingType.choice.interleaved->shiftIndex;
   if (source->cce_REG_MappingType.present == NR_ControlResourceSet__cce_REG_MappingType_PR_interleaved) {
     target->cce_REG_MappingType.present = NR_ControlResourceSet__cce_REG_MappingType_PR_interleaved;
+    /* A CORESET that was non-interleaved (or new) has no interleaved struct yet: dereferencing it crashed the UE on the first
+     * RRCReconfiguration carrying an interleaved dedicated CORESET. */
+    if (!target->cce_REG_MappingType.choice.interleaved)
+      target->cce_REG_MappingType.choice.interleaved = calloc(1, sizeof(*target->cce_REG_MappingType.choice.interleaved));
     target->cce_REG_MappingType.choice.interleaved->reg_BundleSize = source->cce_REG_MappingType.choice.interleaved->reg_BundleSize;
     target->cce_REG_MappingType.choice.interleaved->interleaverSize =
         source->cce_REG_MappingType.choice.interleaved->interleaverSize;

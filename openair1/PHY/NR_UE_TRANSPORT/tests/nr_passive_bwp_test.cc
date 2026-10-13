@@ -46,7 +46,7 @@ struct Pbwp : ::testing::Test {
   {
     nr_pbwp_mark_seen(t, rnti);
     int idx = -1;
-    for (int i = 0; i < NR_PBWP_NEW_HITS; i++) idx = nr_pbwp_probe_accept(t, rnti, len);
+    for (int i = 0; i < NR_PBWP_NEW_HITS; i++) idx = nr_pbwp_probe_accept(t, rnti, len, (uint32_t)(i + 1));
     return idx;
   }
   /* Drive grants until resolution; returns the grant count, or -1. */
@@ -97,7 +97,7 @@ TEST_F(Pbwp, LengthTracksTheRivAndIndicatorWidths)
 TEST_F(Pbwp, DistinctNoiseRntisCannotRegisterABwp)
 {
   nr_pbwp_init(t, 106, 0, 106, 47, 0);
-  for (int i = 0; i < 100; i++) EXPECT_EQ(nr_pbwp_probe_accept(t, (uint16_t)(0x2000 + 7 * i), 45), -1);
+  for (int i = 0; i < 100; i++) EXPECT_EQ(nr_pbwp_probe_accept(t, (uint16_t)(0x2000 + 7 * i), 45, 0), -1);
   EXPECT_EQ(t->n, 1) << "noise accepts (distinct random RNTIs) must not create BWPs";
 }
 
@@ -165,6 +165,30 @@ TEST_F(Pbwp, AWrongResolutionIsUndoneByTheTbCrc)
   for (int i = 0; i < 32; i++) nr_pbwp_feed_crc(t, idx, false);
   EXPECT_FALSE(nr_pbwp_resolved(t, idx));
   EXPECT_GT(t->e[idx].ng, 0);
+}
+
+TEST_F(Pbwp, ALayoutSearchWithNoPassAtAllRefutesTheGeometryAndItIsNotChosenAgain)
+{
+  nr_pbwp_init(t, 106, 0, 106, 47, 0);
+  const int idx = register_len(0x4601, 45);
+  ASSERT_GE(idx, 1);
+  t->e[idx].start = 3;
+  t->e[idx].size = 51;
+  t->e[idx].ind_bits = 1;
+  for (int i = 0; i < 32; i++) nr_pbwp_feed_crc_search(t, idx, false); /* a search fails by design: 32 means nothing */
+  EXPECT_TRUE(nr_pbwp_resolved(t, idx));
+  for (int i = 32; i < NR_PBWP_SEARCH_REFUTE_TRIES; i++) nr_pbwp_feed_crc_search(t, idx, false);
+  EXPECT_FALSE(nr_pbwp_resolved(t, idx));
+  ASSERT_EQ(t->e[idx].n_excl, 1);
+  EXPECT_EQ(t->e[idx].excl[0].size, 51);
+  EXPECT_EQ(t->e[idx].excl[0].start, 3);
+  /* one pass anywhere spares a hypothesis for good */
+  t->e[idx].start = 4;
+  t->e[idx].size = 51;
+  t->e[idx].crc_try = 0;
+  nr_pbwp_feed_crc_search(t, idx, true);
+  for (int i = 0; i < 2 * NR_PBWP_SEARCH_REFUTE_TRIES; i++) nr_pbwp_feed_crc_search(t, idx, false);
+  EXPECT_TRUE(nr_pbwp_resolved(t, idx));
 }
 
 TEST_F(Pbwp, RrcSwitchIsSeenAsALengthChange)
@@ -288,11 +312,11 @@ TEST_F(Pbwp, RepetitionProvesAnRntiWhenEveryUeLeftTheBaseBwp)
 {
   nr_pbwp_init(t, 106, 0, 106, 47, 0);
   int idx = -1;
-  for (int i = 0; i < NR_PBWP_NEW_HITS; i++) idx = nr_pbwp_probe_accept(t, 0x4601, 45); /* never proven */
+  for (int i = 0; i < NR_PBWP_NEW_HITS; i++) idx = nr_pbwp_probe_accept(t, 0x4601, 45, (uint32_t)(i + 1)); /* never proven */
   EXPECT_EQ(idx, 1);
   EXPECT_TRUE(nr_pbwp_rnti_seen(t, 0x4601));
   nr_pbwp_init(t, 106, 0, 106, 47, 0);
-  for (uint16_t r = 1; r <= 50; r++) EXPECT_EQ(nr_pbwp_probe_accept(t, (uint16_t)(0x1000 + r), 45), -1)
+  for (uint16_t r = 1; r <= 50; r++) EXPECT_EQ(nr_pbwp_probe_accept(t, (uint16_t)(0x1000 + r), 45, 0), -1)
       << "distinct noise RNTIs must not register a BWP";
 }
 
@@ -321,3 +345,18 @@ TEST(PassiveBwp, RivFieldSitsAfterTheIndicator)
 }
 
 } // namespace
+
+
+/* A repeated RNTI whose payload never changes is a degenerate polar fixed point (measured on the sa-bed: the same artifact RNTI at
+ * length 44 in every run), not a UE. It must never register a length; the same RNTI with a varying payload must. */
+TEST_F(Pbwp, InvariantPayloadNeverRegistersALength)
+{
+  nr_pbwp_init(t, 106, 0, 106, 48, 1);
+  const uint16_t len = t->cand_len[0];
+  for (int i = 0; i < 200; i++)
+    EXPECT_EQ(nr_pbwp_probe_accept(t, 0xd93d, len, 0xabcdef01u), -1) << "invariant payload registered at call " << i;
+  int idx = -1;
+  for (int i = 0; i < NR_PBWP_NEW_HITS + 1 && idx < 0; i++)
+    idx = nr_pbwp_probe_accept(t, 0x4f61, len, 0x1000u + (uint32_t)i);
+  EXPECT_GT(idx, 0) << "a varying payload under one RNTI must register";
+}

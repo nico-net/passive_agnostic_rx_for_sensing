@@ -327,6 +327,33 @@ static NR_ControlResourceSet_t *get_coreset_config(int bwp_id,
    * pdcch-DMRS-ScramblingID, which makes the gNB scramble UE-specific DCIs with c_init = (C-RNTI << 16) + n_ID
    * (gNB_scheduler_primitives.c: ScramblingRNTI = rnti) -- the case a passive receiver cannot descramble without the
    * RNTI, used to exercise the joint RNTI solver end to end on rfsim. */
+  /* TEST HOOK (simulation only, default off): ISAC_GNB_CORESET_IL="L:R[:shift]" makes the dedicated CORESET interleaved (reg-BundleSize L in
+   * {2,3,6}, interleaverSize R in {2,3,6}, shiftIndex optional: absent = cell id), to exercise a passive receiver's CCE-to-REG mapping
+   * search on rfsim. N_REG = RBs x duration must be divisible by L*R. */
+  {
+    const char *il = getenv("ISAC_GNB_CORESET_IL");
+    if (il != NULL) {
+      int L = 6, R = 2, shift = -1;
+      sscanf(il, "%d:%d:%d", &L, &R, &shift);
+      coreset->cce_REG_MappingType.present = NR_ControlResourceSet__cce_REG_MappingType_PR_interleaved;
+      coreset->cce_REG_MappingType.choice.interleaved = calloc(1, sizeof(*coreset->cce_REG_MappingType.choice.interleaved));
+      AssertFatal(coreset->cce_REG_MappingType.choice.interleaved != NULL, "out of memory\n");
+      coreset->cce_REG_MappingType.choice.interleaved->reg_BundleSize =
+          L == 6 ? NR_ControlResourceSet__cce_REG_MappingType__interleaved__reg_BundleSize_n6
+                 : (L == 3 ? NR_ControlResourceSet__cce_REG_MappingType__interleaved__reg_BundleSize_n3
+                           : NR_ControlResourceSet__cce_REG_MappingType__interleaved__reg_BundleSize_n2);
+      coreset->cce_REG_MappingType.choice.interleaved->interleaverSize =
+          R == 6 ? NR_ControlResourceSet__cce_REG_MappingType__interleaved__interleaverSize_n6
+                 : (R == 3 ? NR_ControlResourceSet__cce_REG_MappingType__interleaved__interleaverSize_n3
+                           : NR_ControlResourceSet__cce_REG_MappingType__interleaved__interleaverSize_n2);
+      if (shift >= 0) {
+        coreset->cce_REG_MappingType.choice.interleaved->shiftIndex = calloc(1, sizeof(long));
+        *coreset->cce_REG_MappingType.choice.interleaved->shiftIndex = shift;
+      } else {
+        coreset->cce_REG_MappingType.choice.interleaved->shiftIndex = NULL;
+      }
+    }
+  }
   {
     const char *e = getenv("ISAC_GNB_PDCCH_DMRS_ID");
     if (e != NULL) {
@@ -1239,7 +1266,9 @@ static void config_pucch_resset0(const NR_ServingCellConfigCommon_t *scc,
   asn1cSeqAdd(&pucchresset->resourceList.list,pucchid);
   pucchresset->maxPayloadSize = NULL;
 
-  if(uecap) {
+  /* phy_ParametersFRX_Diff is optional: a UE capability without it (the OAI UE's) crashed the gNB on the first BWP switch, the first time a
+   * capability is present when this runs. */
+  if (uecap && uecap->phy_Parameters.phy_ParametersFRX_Diff) {
     long *pucch_F0_2WithoutFH = uecap->phy_Parameters.phy_ParametersFRX_Diff->pucch_F0_2WithoutFH;
     AssertFatal(pucch_F0_2WithoutFH == NULL,"UE does not support PUCCH F0 without frequency hopping. Current configuration is without FH\n");
   }
@@ -1279,7 +1308,9 @@ static void config_pucch_resset1(const NR_ServingCellConfigCommon_t *scc,
   asn1cSeqAdd(&pucchresset->resourceList.list,pucchressetid);
   pucchresset->maxPayloadSize = NULL;
 
-  if(uecap) {
+  /* phy_ParametersFRX_Diff is optional: a UE capability without it (the OAI UE's) crashed the gNB on the first BWP switch, the first time a
+   * capability is present when this runs. */
+  if (uecap && uecap->phy_Parameters.phy_ParametersFRX_Diff) {
     long *pucch_F0_2WithoutFH = uecap->phy_Parameters.phy_ParametersFRX_Diff->pucch_F0_2WithoutFH;
     AssertFatal(pucch_F0_2WithoutFH == NULL,"UE does not support PUCCH F2 without frequency hopping. Current configuration is without FH\n");
   }
