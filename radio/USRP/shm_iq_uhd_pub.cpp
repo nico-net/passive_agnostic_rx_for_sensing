@@ -83,6 +83,7 @@ struct RecvCtx {
   double mcr, timeout;
   int64_t decim, start_tick; // sample ticks = MCR ticks / decim; start_tick: scheduled START of the current stream
   uhd::rx_metadata_t md;
+  int shift; // --rx-shift: usrp_lib's X4x0 rxshift, applied in the recv thread (parallel per channel with --multi-streamer)
 };
 
 static pub_rx_status_t uhd_recv(void *vc, int16_t *const *dst, int n, int64_t *tick, int *got)
@@ -102,6 +103,7 @@ static pub_rx_status_t uhd_recv(void *vc, int16_t *const *dst, int n, int64_t *t
       if (!c->md.has_time_spec) return PUB_RX_OTHER;
       *tick = pub_tick(c->md.time_spec.to_ticks(c->mcr), c->decim, c->start_tick);
       *got = (int)k;
+      for (size_t ch = 0; ch < c->nch; ++ch) pub_rx_shift(dst[ch], (int)k, c->shift);
       return PUB_RX_OK;
     case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW: return PUB_RX_OVERFLOW;
     case uhd::rx_metadata_t::ERROR_CODE_TIMEOUT: return PUB_RX_TIMEOUT;
@@ -141,13 +143,13 @@ int main(int argc, char **argv)
   std::string args, antenna = "RX1", ring = "isac_iq", chan_map, radio_id, tsrc = "free", rx_cores, prio = "high";
   bool multi = true, timed_tune = true;
   double rate = 0, freq = 0, gain = -1, mcr = 0, duration = 0, bw = 0;
-  long channels = 0, spp = 0, rx_core = -1, chunk = 65536;
+  long channels = 0, spp = 0, rx_core = -1, chunk = 65536, rx_shift = 2;
   unsigned long long capacity = 1ull << 25;
   static const option opts[] = {{"args", 1, 0, 'a'}, {"rate", 1, 0, 'r'}, {"freq", 1, 0, 'f'}, {"gain", 1, 0, 'g'}, {"channels", 1, 0, 'n'},
                                 {"antenna", 1, 0, 'A'}, {"ring", 1, 0, 'R'}, {"capacity", 1, 0, 'C'}, {"chan-map", 1, 0, 'm'}, {"spp", 1, 0, 's'},
                                 {"rx-core", 1, 0, 'c'}, {"duration", 1, 0, 'd'}, {"radio-id", 1, 0, 'i'}, {"time-source", 1, 0, 't'},
                                 {"mcr", 1, 0, 'M'}, {"bw", 1, 0, 'b'}, {"chunk", 1, 0, 'k'}, {"multi-streamer", 0, 0, 1000}, {"single-streamer", 0, 0, 1001},
-                                {"priority", 1, 0, 1002}, {"rx-cores", 1, 0, 1003}, {"untimed-tune", 0, 0, 1004}, {0, 0, 0, 0}};
+                                {"priority", 1, 0, 1002}, {"rx-cores", 1, 0, 1003}, {"untimed-tune", 0, 0, 1004}, {"rx-shift", 1, 0, 1005}, {0, 0, 0, 0}};
   for (int o; (o = getopt_long(argc, argv, "", opts, nullptr)) != -1;) {
     switch (o) {
       case 'a': args = optarg; break;
@@ -172,7 +174,8 @@ int main(int argc, char **argv)
       case 1002: prio = optarg; break;
       case 1003: rx_cores = optarg; break;
       case 1004: timed_tune = false; break;
-      default: die("usage: --args S --rate Hz --freq Hz --gain dB --channels N [--antenna] [--ring] [--capacity] [--chan-map] [--spp] [--chunk] [--mcr] [--bw] [--rx-core] [--duration] [--radio-id] [--time-source free|pps] [--multi-streamer|--single-streamer] [--priority high|normal] [--rx-cores a,b,..] [--untimed-tune]");
+      case 1005: rx_shift = atol(optarg); break;
+      default: die("usage: --args S --rate Hz --freq Hz --gain dB --channels N [--antenna] [--ring] [--capacity] [--chan-map] [--spp] [--chunk] [--mcr] [--bw] [--rx-core] [--duration] [--radio-id] [--time-source free|pps] [--multi-streamer|--single-streamer] [--priority high|normal] [--rx-cores a,b,..] [--untimed-tune] [--rx-shift N (default 2 = usrp_lib X4x0)]");
     }
   }
   if (args.empty() || !(rate > 0) || !(freq > 0) || gain < 0 || channels < 1 || channels > 8L) die("--args --rate --freq --gain --channels are required");
@@ -194,6 +197,7 @@ int main(int argc, char **argv)
   if (!cores.empty() && (long)cores.size() != channels) die("--rx-cores length must equal --channels");
   if (!multi && !cores.empty()) die("--rx-cores needs --multi-streamer (use --rx-core)");
   if (prio != "high" && prio != "normal") die("--priority must be high or normal");
+  if (rx_shift < 0 || rx_shift > 15) die("--rx-shift must be 0..15");
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
   sa.sa_handler = on_sig; // no SA_RESTART: a blocking recv returns, the loop sees g_stop
@@ -272,9 +276,10 @@ int main(int argc, char **argv)
       if (multi) sargs.channels = {map[i]};
       else sargs.channels = map;
       if (spp > 0) sargs.args["spp"] = std::to_string(spp);
-      ctxs.push_back(RecvCtx{usrp->get_rx_stream(sargs), multi ? (size_t)1 : (size_t)channels, mcr, 5.0, std::llround(dr), 0, {}});
+      ctxs.push_back(RecvCtx{usrp->get_rx_stream(sargs), multi ? (size_t)1 : (size_t)channels, mcr, 5.0, std::llround(dr), 0, {}, (int)rx_shift});
     }
-    fprintf(stderr, "SHMIQ_UHD_STREAM streamers=%zu max_num_samps=%zu chunk=%ld priority=%s\n", nstr, ctxs[0].rxs->get_max_num_samps(), chunk, prio.c_str());
+    fprintf(stderr, "SHMIQ_UHD_STREAM streamers=%zu max_num_samps=%zu chunk=%ld priority=%s rx_shift=%ld\n", nstr, ctxs[0].rxs->get_max_num_samps(), chunk,
+            prio.c_str(), rx_shift);
 
     pub = pub_open(ring.c_str(), (unsigned)channels, capacity, rate, freq, radio_id.c_str(), tsrc == "pps" ? 2 : 1);
     if (!pub) throw std::runtime_error("ring create failed");

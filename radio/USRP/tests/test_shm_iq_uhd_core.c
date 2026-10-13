@@ -111,8 +111,21 @@ static void test_multi(void)
   shm_unlink(path);
 }
 
+/* usrp_lib X4x0 rxshift: arithmetic >> 2 (floor, = simde_mm256_srai_epi16), applied in place; shift 0 leaves the data alone */
+static void test_rx_shift(void)
+{
+  int16_t x[8] = {7, -7, 4, -4, 32767, -32768, 1, -1}, y[8];
+  for (int i = 0; i < 8; ++i) y[i] = x[i];
+  pub_rx_shift(y, 4, 0);
+  for (int i = 0; i < 8; ++i) CHECK(y[i] == x[i]);
+  pub_rx_shift(y, 4, 2);
+  const int16_t want[8] = {1, -2, 1, -1, 8191, -8192, 0, -1};
+  for (int i = 0; i < 8; ++i) CHECK(y[i] == want[i]);
+}
+
 int main(void)
 {
+  test_rx_shift();
   test_multi();
   char name[64];
   snprintf(name, sizeof(name), "uhdcore_%d", (int)getpid());

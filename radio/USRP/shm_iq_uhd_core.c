@@ -105,3 +105,9 @@ int64_t pub_tick(int64_t mcr_ticks, int64_t decim, int64_t start_tick)
   const int64_t t = mcr_ticks / decim - (mcr_ticks % decim < 0);
   return t > start_tick ? t : start_tick;
 }
+
+void pub_rx_shift(int16_t *x, int n, int shift)
+{
+  if (shift <= 0) return;
+  for (int i = 0; i < 2 * n; ++i) x[i] = (int16_t)(x[i] >> shift); /* arithmetic: floor, = srai */
+}

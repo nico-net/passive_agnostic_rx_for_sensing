@@ -45,6 +45,9 @@ int pub_mc_finish(pub_t *p, const pub_chres_t *res, int16_t *const *slots, pub_m
  * stream started on an odd MCR tick sits on x.5 sample ticks, and rounding those can flip between packets (spurious 1-tick gaps).
  * Never earlier than the scheduled START tick: a restarted X410 stream can repeat the previous START timestamp (usrp_ring_recovery.h). */
 int64_t pub_tick(int64_t mcr_ticks, int64_t decim, int64_t start_tick);
+/* usrp_lib.cpp hands the receiver X4x0/X3x0/N3x0 samples arithmetically shifted right by 2 (rxshift, simde srai_epi16): apply the
+ * same in place to n sc16 samples so ring consumers see the digital level of a single-process receiver. shift 0 = no-op. */
+void pub_rx_shift(int16_t *x, int n, int shift);
 #ifdef __cplusplus
 }
 #endif
