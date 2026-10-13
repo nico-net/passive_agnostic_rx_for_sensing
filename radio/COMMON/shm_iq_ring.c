@@ -57,8 +57,7 @@ int shm_iq_ring_create(shm_iq_ring_t *r, const char *name, unsigned channels, ui
   atomic_store(&h->producer_pid, (int32_t)getpid());
   atomic_store(&h->heartbeat_ns, shm_iq_now_ns());
   map_channels(r);
-  atomic_thread_fence(memory_order_release);
-  h->magic = SHM_IQ_MAGIC; /* last: consumers attach only to a fully initialised header */
+  __atomic_store_n(&h->magic, SHM_IQ_MAGIC, __ATOMIC_RELEASE); /* last: consumers attach only to a fully initialised header */
   return 0;
 }
 
@@ -76,8 +75,7 @@ int shm_iq_ring_attach(shm_iq_ring_t *r, const char *name)
   if (p == MAP_FAILED) return -1;
   r->hdr = p; r->map_bytes = (uint64_t)st.st_size;
   const shm_iq_hdr_t *h = r->hdr;
-  atomic_thread_fence(memory_order_acquire);
-  if (h->magic != SHM_IQ_MAGIC || h->version != SHM_IQ_VERSION || h->channels < 1 || h->channels > SHM_IQ_MAX_CH
+  if (__atomic_load_n(&h->magic, __ATOMIC_ACQUIRE) != SHM_IQ_MAGIC || h->version != SHM_IQ_VERSION || h->channels < 1 || h->channels > SHM_IQ_MAX_CH
       || SHM_IQ_HDR_BYTES + (uint64_t)h->channels * h->capacity * 4 != r->map_bytes) {
     munmap(p, r->map_bytes); memset(r, 0, sizeof(*r)); errno = EAGAIN; return -1;
   }
@@ -103,8 +101,7 @@ void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz)
   shm_iq_hdr_t *h = r->hdr;
   uint64_t bits; memcpy(&bits, &center_hz, 8);
   atomic_store(&h->center_bits, bits);
-  /* INT64_MIN marks "next write starts a new run" without moving the index */
-  atomic_store(&h->tick_offset, INT64_MIN);
+  atomic_store(&r->new_run, 1);
   atomic_fetch_add(&h->rf_epoch, 1);
 }
 
@@ -115,15 +112,21 @@ void shm_iq_ring_write(shm_iq_ring_t *r, int64_t tick, void *const *bufs, int n,
   if (channels > h->channels) channels = h->channels;
   uint64_t head = atomic_load_explicit(&h->head, memory_order_relaxed);
   int64_t off = atomic_load_explicit(&h->tick_offset, memory_order_relaxed);
+  const int new_run = atomic_exchange(&r->new_run, 0);
   if (h->base_tick == INT64_MIN) { h->base_tick = tick; off = tick; atomic_store(&h->tick_offset, off); }
-  if (off == INT64_MIN) { /* after a retune/reload: continue the index, new run */
+  if (tick > off + (int64_t)head) { /* forward gap: keep the tick mapping, skip the index */
+    atomic_fetch_add(&h->gaps, 1);
+    head = (uint64_t)(tick - off);
+    atomic_store(&h->valid_from, head);
+  } else if (tick < off + (int64_t)head) {
+    /* backward (reload / clock reset): skip the index by the wall-clock gap so caught-up consumers see a timestamp jump */
+    atomic_fetch_add(&h->gaps, 1);
+    const double gap = (double)(shm_iq_now_ns() - atomic_load_explicit(&h->heartbeat_ns, memory_order_relaxed)) * 1e-9 * h->rate;
+    head += gap > 1 ? (uint64_t)gap : 1;
     off = tick - (int64_t)head;
     atomic_store(&h->tick_offset, off);
     atomic_store(&h->valid_from, head);
-  } else if (tick != off + (int64_t)head) {
-    atomic_fetch_add(&h->gaps, 1);
-    if (tick > off + (int64_t)head) head = (uint64_t)(tick - off); /* forward gap: keep the tick mapping, skip the index */
-    else { off = tick - (int64_t)head; atomic_store(&h->tick_offset, off); } /* backward: new mapping */
+  } else if (new_run) { /* retune on a continuous clock: lagging consumers drop the old-tuned samples */
     atomic_store(&h->valid_from, head);
   }
   const uint64_t cap = h->capacity, mask = cap - 1;

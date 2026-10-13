@@ -7,6 +7,7 @@
 #include "../iq_ddc.h"
 #include "../shm_iq_ring.h"
 #include <complex.h>
+#include <pthread.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
@@ -99,12 +100,65 @@ static int test_ring(void)
   CHECK(atomic_load(&p.hdr->head) == 7000 && atomic_load(&p.hdr->valid_from) == 6000 && atomic_load(&p.hdr->gaps) == 1, "gap");
   CHECK(shm_iq_ring_copy(&c, 5500, 100, 2, dst) == -1, "pre-gap range must fail");
   shm_iq_ring_new_epoch(&p, 3.6e9);
-  shm_iq_ring_write(&p, 50, src, 1000, 2); /* after a retune the radio clock may restart */
+  shm_iq_ring_write(&p, 8000, src, 1000, 2); /* retune on a continuous clock: new run, no index jump */
   CHECK(atomic_load(&p.hdr->head) == 8000 && atomic_load(&p.hdr->valid_from) == 7000 && shm_iq_ring_center(&c) == 3.6e9, "epoch");
   CHECK(shm_iq_ring_copy(&c, 7000, 1000, 2, dst) == 0 && !memcmp(b[0], a[0], 4000), "post-epoch copy");
+  CHECK(shm_iq_ring_copy(&c, 6500, 600, 2, dst) == -1, "pre-retune range must fail");
+  shm_iq_ring_new_epoch(&p, 3.6e9);
+  shm_iq_ring_write(&p, 50, src, 1000, 2); /* device reload: the radio clock restarts */
+  const uint64_t vf = atomic_load(&p.hdr->valid_from);
+  /* a consumer caught up at 8000 must see its next timestamp jump, otherwise the receiver misses the stream break */
+  CHECK(vf > 8000 && atomic_load(&p.hdr->head) == vf + 1000 && atomic_load(&p.hdr->gaps) == 2, "reload index jump vf=%llu",
+        (unsigned long long)vf);
+  CHECK(shm_iq_ring_copy(&c, 8000, 10, 2, dst) != 0, "pre-reload position must not read new-run data");
+  CHECK(shm_iq_ring_copy(&c, vf, 1000, 2, dst) == 0 && !memcmp(b[0], a[0], 4000), "post-reload copy");
   shm_iq_ring_detach(&c); shm_iq_ring_detach(&p);
   char path[80]; snprintf(path, sizeof(path), "/%s", name); shm_unlink(path);
   printf("ring ok\n");
+  return 0;
+}
+
+/* torn-read detection: a writer races a reader that hugs the overwrite edge; every copy reported valid must be exact */
+static shm_iq_ring_t g_sp;
+static atomic_int g_stop;
+static void *stress_writer(void *arg)
+{
+  (void)arg;
+  static int16_t x[2 * 333];
+  void *b[1] = {x};
+  for (uint64_t t = 0; !atomic_load(&g_stop); t += 333) {
+    for (int k = 0; k < 333; ++k) { x[2 * k] = (int16_t)(t + k); x[2 * k + 1] = (int16_t)((t + k) >> 16); }
+    shm_iq_ring_write(&g_sp, (int64_t)t, b, 333, 1);
+  }
+  return NULL;
+}
+
+static int test_ring_stress(void)
+{
+  char name[64];
+  snprintf(name, sizeof(name), "isac_iq_stress_%d", (int)getpid());
+  shm_iq_ring_t c;
+  CHECK(shm_iq_ring_create(&g_sp, name, 1, 1024, FS, 0) == 0 && shm_iq_ring_attach(&c, name) == 0, "create");
+  pthread_t th;
+  pthread_create(&th, NULL, stress_writer, NULL);
+  static int16_t y[2 * 512];
+  int16_t *dst[1] = {y};
+  long ok = 0, torn = 0, bad = 0;
+  for (int it = 0; it < 2000000 && ok < 20000; ++it) {
+    const uint64_t head = atomic_load(&c.hdr->head);
+    if (head < 1024) continue;
+    const uint64_t pos = head - 1024 + (uint64_t)(it % 200);
+    if (shm_iq_ring_copy(&c, pos, 512, 1, dst) != 0) { torn++; continue; }
+    ok++;
+    for (int k = 0; k < 512; ++k)
+      if (y[2 * k] != (int16_t)(pos + k) || y[2 * k + 1] != (int16_t)((pos + k) >> 16)) { bad++; break; }
+  }
+  atomic_store(&g_stop, 1);
+  pthread_join(th, NULL);
+  shm_iq_ring_detach(&c); shm_iq_ring_detach(&g_sp);
+  char path[80]; snprintf(path, sizeof(path), "/%s", name); shm_unlink(path);
+  printf("ring stress ok=%ld rejected=%ld undetected_torn=%ld\n", ok, torn, bad);
+  CHECK(bad == 0 && ok > 0, "torn copies returned as valid");
   return 0;
 }
 
@@ -191,6 +245,7 @@ int main(int argc, char **argv)
   fail |= test_ddc(2, 5e6, 30e6);     /* 162 PRB class: 60 MHz channel at 61.44 MS/s */
   fail |= test_ddc(4, 31e6, 10e6);    /* 51 PRB class: 20 MHz channel at 30.72 MS/s */
   fail |= test_ring();
+  fail |= test_ring_stress();
   if (argc > 1) fail |= test_fanout(argv[1]);
   printf(fail ? "FAILED\n" : "ALL OK\n");
   return fail;

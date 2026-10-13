@@ -35,6 +35,7 @@ typedef struct {
   int16_t *data[SHM_IQ_MAX_CH];   /* channel c: capacity complex sc16 samples */
   uint64_t map_bytes;
   char name[64];
+  _Atomic int new_run;            /* producer-local: new_epoch() was called, the next write starts a new run */
 } shm_iq_ring_t;
 
 /* Producer: create (or re-create with the new geometry) /dev/shm/<name>. capacity is rounded up to a power of two. */
@@ -44,9 +45,11 @@ int shm_iq_ring_attach(shm_iq_ring_t *r, const char *name);
 void shm_iq_ring_detach(shm_iq_ring_t *r);
 
 /* Producer: append n samples per channel read from the radio at radio tick `tick`. A tick that does not continue the
- * previous write starts a new contiguous run (forward gap: the index advances by the gap; backward: index continues). */
+ * previous write starts a new contiguous run: forward gap: the index advances by the gap; backward (e.g. device reload):
+ * the index advances by the wall time since the last write (>= 1), so consumer timestamps (base_tick + index) jump. */
 void shm_iq_ring_write(shm_iq_ring_t *r, int64_t tick, void *const *bufs, int n, unsigned channels);
-/* Producer: the radio was retuned or reloaded; the next write starts a new run and rf_epoch is bumped. */
+/* Producer: the radio was retuned or reloaded; the next write starts a new run (no index jump if its tick continues)
+ * and rf_epoch is bumped. */
 void shm_iq_ring_new_epoch(shm_iq_ring_t *r, double center_hz);
 
 double shm_iq_ring_center(const shm_iq_ring_t *r);

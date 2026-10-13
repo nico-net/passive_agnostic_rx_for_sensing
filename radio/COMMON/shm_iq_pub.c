@@ -37,6 +37,10 @@ void shm_iq_pub_maybe_wrap(openair0_device_t *d, openair0_config_t *cfg)
 {
   const char *name = getenv("ISAC_SHM_IQ_PUB");
   if (!name || !*name || !d->trx_read_func) return;
+  if (g_dev && g_dev != d) { /* a second RU would interleave its samples into the same ring */
+    fprintf(stderr, "SHMIQ_PUB_SKIP second device not published\n");
+    return;
+  }
   if (g_ring.hdr) { /* device reload (nrue_ru_reinit): same ring, new run */
     shm_iq_ring_new_epoch(&g_ring, cfg->rx_freq[0]);
   } else {

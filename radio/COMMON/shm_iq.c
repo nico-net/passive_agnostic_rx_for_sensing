@@ -10,6 +10,7 @@
 #include "iq_ddc.h"
 #include "shm_iq_ring.h"
 #include <errno.h>
+#include <signal.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -115,6 +116,7 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
   shm_iq_hdr_t *h = s->ring.hdr;
   AssertFatal(n > 0 && c == (int)s->channels, "SHMIQ invalid read geometry\n");
   const int m = n * s->decim;
+  AssertFatal((uint64_t)m <= h->capacity / 2, "SHMIQ read of %d raw samples does not fit the ring (%" PRIu64 ")\n", m, h->capacity);
   if (m > s->raw_cap) {
     for (unsigned k = 0; k < s->channels; ++k) {
       free(s->raw[k]);
@@ -134,7 +136,10 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
       else skip_to(s, head, 1); /* fell behind by more than the ring: jump to the newest data */
       continue;
     }
-    if (shm_iq_now_ns() - atomic_load(&h->heartbeat_ns) > s->timeout_ns) {
+    const uint64_t stale = shm_iq_now_ns() - atomic_load(&h->heartbeat_ns);
+    const pid_t pid = atomic_load(&h->producer_pid);
+    /* a live producer may be stalled for tens of seconds (RFSTALL device reload, initial sync): keep waiting up to 60 s */
+    if (stale > s->timeout_ns && ((kill(pid, 0) != 0 && errno == ESRCH) || stale > 60000000000ull)) {
       fprintf(stderr, "SHMIQ_PRODUCER_LOST cell=%s pid=%d pos=%" PRIu64 "\n", s->tag, (int)atomic_load(&h->producer_pid), s->pos);
       exit_function(__FILE__, __FUNCTION__, __LINE__, "shm IQ producer lost", OAI_EXIT_NORMAL);
       exit(1);
@@ -152,6 +157,8 @@ static int read_iq(openair0_device_t *d, openair0_timestamp_t *t, void **b, int 
 
 int device_init(openair0_device_t *d, openair0_config_t *cfg)
 {
+  /* an inherited ISAC_SHM_IQ_PUB would make openair0_device_load() re-create (unlink) the producer's ring */
+  unsetenv("ISAC_SHM_IQ_PUB");
   shm_state *s = calloc(1, sizeof(*s));
   AssertFatal(s, "SHMIQ allocation\n");
   const char *name = getenv("ISAC_SHM_IQ_NAME") ? getenv("ISAC_SHM_IQ_NAME") : "isac_iq";
