@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Receiver Dashboard</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f4f2; --surface: #fcfcfb; --surface-2: #efeeea; --border: #dddcd6;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #75746f;
+  --accent: #2a78d6; --accent-ink: #1c5cab;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --good: #0ca30c; --warn: #fab219; --serious: #ec835a; --bad: #d03b3b; --idle: #9a9993;
+  --good-bg: #e6f4e6; --warn-bg: #fdf3dc; --bad-bg: #fbe7e7; --idle-bg: #efeeea;
+  --grid: #e7e6e1; --code: #f0efec;
+  --seq0: #f4f8fd; --seq1: #cde2fb; --seq2: #86b6ef; --seq3: #3987e5; --seq4: #1c5cab; --seq5: #0d366b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --surface-2: #242422; --border: #383835;
+    --text: #f0efec; --text-2: #c3c2b7; --muted: #94938b;
+    --accent: #3987e5; --accent-ink: #86b6ef;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --good-bg: #16301a; --warn-bg: #3a2f12; --bad-bg: #3d1b1b; --idle-bg: #2a2a28;
+    --grid: #2c2c2a; --code: #242422;
+    --seq0: #1d2633; --seq1: #184f95; --seq2: #256abf; --seq3: #3987e5; --seq4: #86b6ef; --seq5: #cde2fb;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --surface-2: #242422; --border: #383835;
+  --text: #f0efec; --text-2: #c3c2b7; --muted: #94938b;
+  --accent: #3987e5; --accent-ink: #86b6ef;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --good-bg: #16301a; --warn-bg: #3a2f12; --bad-bg: #3d1b1b; --idle-bg: #2a2a28;
+  --grid: #2c2c2a; --code: #242422;
+  --seq0: #1d2633; --seq1: #184f95; --seq2: #256abf; --seq3: #3987e5; --seq4: #86b6ef; --seq5: #cde2fb;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+a { color: var(--accent-ink); }
+button, select, input { font: inherit; color: inherit; }
+button { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+select, input[type=text], input[type=number], input[type=search] { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+header { position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+header h1 { font-size: 16px; margin: 0; white-space: nowrap; }
+header .grow { flex: 1; }
+.badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 1px 9px; font-size: 12px; border: 1px solid var(--border); background: var(--surface-2); white-space: nowrap; }
+.badge.live { background: var(--good-bg); border-color: var(--good); }
+.badge.off { background: var(--idle-bg); }
+.label { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--text-2); overflow-wrap: anywhere; }
+header .label { max-width: 46ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#banner { display: none; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+#banner.on { display: block; }
+#banner .al { margin: 2px 0; }
+.layout { display: flex; min-height: calc(100vh - 52px); }
+nav { width: 210px; flex: none; background: var(--surface); border-right: 1px solid var(--border); padding: 10px 8px; position: sticky; top: 52px; align-self: flex-start; height: calc(100vh - 52px); overflow: auto; }
+nav a { display: flex; gap: 8px; align-items: center; padding: 7px 10px; border-radius: 6px; text-decoration: none; color: var(--text); }
+nav a.on { background: var(--surface-2); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
+nav a .ico { width: 18px; text-align: center; }
+nav .sep { border-top: 1px solid var(--border); margin: 8px 4px; }
+main { flex: 1; min-width: 0; padding: 16px; }
+.page { display: none; }
+.page.on { display: block; }
+h2 { font-size: 18px; margin: 0 0 4px; }
+h3 { font-size: 15px; margin: 0 0 8px; display: flex; gap: 6px; align-items: center; }
+p.lead { color: var(--text-2); margin: 0 0 14px; max-width: 900px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.grid2 { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; min-width: 0; margin-bottom: 12px; }
+.grid > .card, .grid2 > .card { margin-bottom: 0; }
+.tile { cursor: pointer; border-left: 6px solid var(--idle); }
+.tile.ok { border-left-color: var(--good); } .tile.warn { border-left-color: var(--warn); } .tile.bad { border-left-color: var(--bad); }
+.tile .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tile .val { font-size: 26px; font-weight: 650; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.tile .sent { color: var(--text-2); min-height: 40px; }
+.tile .more { font-size: 12.5px; }
+.st { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.st.ok { background: var(--good-bg); } .st.warn { background: var(--warn-bg); } .st.bad { background: var(--bad-bg); } .st.idle { background: var(--idle-bg); color: var(--text-2); }
+.st .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.st.ok .dot { background: var(--good); } .st.warn .dot { background: var(--warn); } .st.bad .dot { background: var(--bad); } .st.idle .dot { background: var(--idle); }
+.stages { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.stage { flex: 1 1 110px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--surface-2); font-size: 12.5px; }
+.stage.done { background: var(--good-bg); border-color: var(--good); }
+.stage.cur { box-shadow: 0 0 0 2px var(--accent); }
+.stage b { display: block; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { font-weight: 600; color: var(--text-2); font-size: 12.5px; position: sticky; top: 0; background: var(--surface); cursor: default; }
+th.sort { cursor: pointer; }
+td.num, th.num { text-align: right; }
+.tablewrap { overflow: auto; max-height: 520px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; }
+.kv .k { color: var(--text-2); }
+.kpis { display: flex; flex-wrap: wrap; gap: 18px; margin: 4px 0 8px; }
+.kpi .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.kpi .k { font-size: 12px; color: var(--text-2); display: flex; gap: 4px; align-items: center; }
+.empty { border: 1px dashed var(--border); border-radius: 8px; padding: 14px; color: var(--text-2); background: var(--surface-2); }
+.empty b { color: var(--text); }
+.i { display: inline-flex; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--muted); color: var(--text-2); font-size: 10.5px; font-weight: 700; align-items: center; justify-content: center; cursor: help; font-style: normal; flex: none; background: transparent; padding: 0; }
+.i:focus { outline: 2px solid var(--accent); }
+#tip { position: fixed; z-index: 50; max-width: 360px; background: var(--surface); color: var(--text); border: 1px solid var(--border); box-shadow: 0 4px 18px rgba(0,0,0,.18); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; display: none; pointer-events: none; }
+#tip .t { font-weight: 650; margin-bottom: 2px; }
+#tip .r { color: var(--text-2); }
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
+.toolbar .grow { flex: 1; }
+.small { font-size: 12px; color: var(--text-2); }
+.chart { width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart .axis text { fill: var(--text-2); font-size: 11px; }
+.chart .gridl { stroke: var(--grid); }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--text-2); margin: 2px 0; }
+.legend .sw { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+.legend .sw.box { height: 10px; width: 10px; }
+.ev { display: grid; grid-template-columns: 70px 22px 1fr; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--grid); font-size: 13px; }
+.ev .tt { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.ico-ok::before { content: "\2713"; color: var(--good); font-weight: 700; }
+.ico-warn::before { content: "!"; color: #b07900; font-weight: 800; }
+.ico-bad::before { content: "\2715"; color: var(--bad); font-weight: 700; }
+.ico-info::before { content: "\2022"; color: var(--muted); }
+.statebadge { font-size: 12px; white-space: nowrap; }
+.statebadge.confirmed::before { content: "\2713 "; color: var(--good); font-weight: 700; }
+.statebadge.provisional::before { content: "~ "; color: #b07900; font-weight: 700; }
+.statebadge.unknown::before { content: "? "; color: var(--muted); font-weight: 700; }
+.statebadge.removed::before { content: "\2715 "; color: var(--bad); font-weight: 700; }
+pre.log { background: var(--code); border-radius: 8px; padding: 8px; overflow: auto; max-height: 70vh; font-size: 12px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+pre.log .hl { background: var(--warn-bg); }
+pre.log .hb { background: var(--bad-bg); }
+pre.log mark { background: #fde68a; color: #000; }
+#replay { display: none; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2); flex-wrap: wrap; }
+#replay.on { display: flex; }
+#replay input[type=range] { flex: 1; min-width: 160px; }
+.notice { border-left: 4px solid var(--accent); background: var(--surface-2); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+.bar { height: 10px; border-radius: 3px; background: var(--s1); display: inline-block; vertical-align: middle; }
+details summary { cursor: pointer; color: var(--accent-ink); }
+.gl dt { font-weight: 650; margin-top: 10px; }
+.gl dd { margin: 2px 0 0 0; color: var(--text-2); max-width: 900px; }
+.menu-btn { display: none; }
+@media (max-width: 860px) {
+  .layout { display: block; }
+  nav { position: static; width: auto; height: auto; display: none; border-right: none; border-bottom: 1px solid var(--border); }
+  nav.open { display: block; }
+  .menu-btn { display: inline-block; }
+  .grid2 { grid-template-columns: 1fr; }
+  main { padding: 12px 16px; }
+  header h1 { font-size: 14px; }
+}
+@media (forced-colors: active) { .tile { border-left-width: 6px; } }
+</style>
+</head>
+<body>
+<header>
+  <button class="menu-btn" id="menuBtn" aria-label="Open navigation">&#9776;</button>
+  <h1>Passive 5G NR receiver &middot; dashboard</h1>
+  <label class="small">Run <select id="runSel" aria-label="Run"></select></label>
+  <label class="small">Cell <select id="cellSel" aria-label="Cell (PCI and frequency)"></select></label>
+  <span id="liveBadge" class="badge off">-</span>
+  <span class="grow"></span>
+  <span id="labelBadge" class="label" title="Evidence label of this run (PROJECT_MEMORY 0.1)"></span>
+  <button id="themeBtn" title="Switch light / dark theme" aria-label="Switch theme">Theme</button>
+</header>
+<div id="banner" role="alert"></div>
+<div id="replay" aria-label="Replay controls">
+  <b>Replay</b>
+  <button id="rpPlay">&#9654; Play</button>
+  <select id="rpSpeed" aria-label="Replay speed"><option value="1">1x</option><option value="10" selected>10x</option><option value="60">60x</option></select>
+  <input id="rpSlider" type="range" min="0" max="100" step="1" value="0" aria-label="Replay time">
+  <span id="rpTime" class="mono">t = 0 s</span>
+  <button id="rpExit" title="Show the whole run again">Show whole run</button>
+</div>
+<div class="layout">
+<nav id="nav" aria-label="Sections">
+  <a href="#home" data-p="home"><span class="ico">&#8962;</span>Home</a>
+  <a href="#dl" data-p="dl"><span class="ico">&#8595;</span>Downlink (DL)</a>
+  <a href="#ul" data-p="ul"><span class="ico">&#8593;</span>Uplink (UL)</a>
+  <a href="#sensing" data-p="sensing"><span class="ico">&#8776;</span>Sensing export</a>
+  <a href="#cell" data-p="cell"><span class="ico">&#9673;</span>Cell information</a>
+  <a href="#settings" data-p="settings"><span class="ico">&#9881;</span>Settings</a>
+  <div class="sep"></div>
+  <a href="#perf" data-p="perf"><span class="ico">&#9201;</span>Performance &amp; timing</a>
+  <a href="#spectrum" data-p="spectrum"><span class="ico">&#8767;</span>Spectrum &amp; scan</a>
+  <a href="#history" data-p="history"><span class="ico">&#8644;</span>Run history &amp; compare</a>
+  <a href="#logs" data-p="logs"><span class="ico">&#9776;</span>Logs</a>
+  <a href="#glossary" data-p="glossary"><span class="ico">?</span>Glossary</a>
+  <div class="sep"></div>
+  <div class="small" style="padding:0 10px">Read-only view. The dashboard never starts, stops or reconfigures the receiver.</div>
+</nav>
+<main id="main">
+  <section class="page" id="p-home"></section>
+  <section class="page" id="p-dl"></section>
+  <section class="page" id="p-ul"></section>
+  <section class="page" id="p-sensing"></section>
+  <section class="page" id="p-cell"></section>
+  <section class="page" id="p-settings"></section>
+  <section class="page" id="p-perf"></section>
+  <section class="page" id="p-spectrum"></section>
+  <section class="page" id="p-history"></section>
+  <section class="page" id="p-logs"></section>
+  <section class="page" id="p-glossary"></section>
+</main>
+</div>
+<div id="tip" role="tooltip"></div>
+<script>
+"use strict";
+/* ------------------------------------------------------------------ help texts: (i) tooltips + glossary */
+const HELP = {
+  radio: ["Radio", "Whether IQ samples are streaming from the X410 without stalls, and the power per antenna.", "dBFS (power relative to ADC full scale)", "Good: no RF stall, antennas within ~3 dB of each other, well below 0 dBFS.", "run.log RFSTALL, CHPOW (ISAC_USRP_CHPOW_S=N), RFCHAN"],
+  sync: ["Sync position", "How far the blind acquisition chain has got, from cell search to an uplink lock.", "stage", "Good: RNTIs or further, and no LOST event.", "run.log Initial sync / MIB / SIB1 / CORESET / ACQ_STATE lines, ISAC_METRICS acq_*"],
+  dl: ["Downlink CRC-OK", "Share of decoded downlink grants (PDSCH) whose transport block passed CRC.", "%", "Higher is better; >= 80 % green, 50-80 % amber (thresholds in Settings).", "ISAC_METRICS pdschq_crc_ok / pdschq_decoded per 20 s window, else per-grant observations"],
+  ul: ["Uplink", "Uplink layout lock and PUSCH CRC-OK share.", "%", "A lock is needed before PUSCH can be interpreted.", "run.log ULLAYOUT lines, pusch_passive[...], ISAC_METRICS pusch_try/pusch_crc_ok"],
+  decode: ["Decode health", "Time to decode one PDSCH grant and the share of grants dropped because their IQ expired before decoding (stale).", "ms / %", "Target p99 <= 0.5 ms (Settings); stale < 10 %.", "run.log PDTIMCLS / PDTIMPCT / EVMGRANT dec_us; ISAC_METRICS pdschq_drop_stale"],
+  compute: ["Compute", "GPU discovery budget used, receiver CPU, host temperature and free memory.", "% / C / GB", "GPU budget < 95 %, RAM above 16 GB, temperature below 80 C.", "ISAC_METRICS gpu_budget_used_pct; /proc and /sys of this host (live only)"],
+  crc_pct: ["CRC-OK %", "Transport blocks whose 24-bit CRC passed, divided by blocks decoded.", "%", "Depends on SNR and MCS; low-MCS grants should be near 100 %.", "per-grant observations (obs.jsonl) or EVMGRANT lines"],
+  grants_s: ["Grants per second", "PDSCH grants the receiver decoded per second (recent 20 s window).", "1/s", "Follows cell load; 0 means no RNTI is solved yet.", "ISAC_METRICS pdschq_decoded deltas"],
+  tput: ["Throughput estimate", "Sum of transport-block sizes with CRC OK per second: what the receiver actually recovered, not the cell's capacity.", "bit/s", "-", "TBS x CRC-OK / time, per-grant source"],
+  mcs_bucket: ["CRC-OK by MCS bucket", "Grants grouped by modulation-and-coding scheme index: 0-4 (robust QPSK), 5-9, 10-16 (16QAM), 17-27 (64QAM and up).", "%", "Expect falling success with MCS; a low 0-4 bucket points at sync/identity problems, not SNR.", "per-grant source"],
+  layers: ["CRC-OK by layers (Nl)", "Grants grouped by the number of spatial layers (MIMO rank) 1-4.", "%", "Multi-layer grants are harder (per-layer SNR).", "per-grant source"],
+  latency: ["Decode latency", "Wall time of one PDSCH decode (FEP + channel estimation + demodulation + LDPC).", "ms", "Target: p99 below the Settings target (0.5 ms).", "PDTIMCLS real (best), PDTIMPCT sum, or EVMGRANT dec_us"],
+  stale: ["Stale drops", "Grants whose IQ samples expired in the ring before a worker decoded them.", "% of queued", "< 10 % (Settings). High values = decode backlog.", "ISAC_METRICS pdschq_drop_stale / pdschq_queued"],
+  drop_full: ["Full drops", "Jobs evicted because the queue was full (scan queue = PDCCH scanning, PDSCH queue = data decoding).", "% of queued", "Scan queue <= 2.5 % (4-RX gate).", "ISAC_METRICS scanq_drop_full, pdschq_drop_full"],
+  pdcch: ["PDCCH monitoring", "Occasions = slots the control channel was searched; candidates = blind decode attempts; accepted DCIs = candidates passing CRC and all false-positive gates.", "count", "Occasions must grow steadily; flat = no slots reach the monitor.", "blind PDCCH monitor summary line, ISAC_METRICS pdcch_*"],
+  rnti_table: ["Per-RNTI table", "One row per user identity (RNTI) the receiver recovered from control messages.", "-", "-", "per-grant source"],
+  retry: ["Recovery / retry share", "Share of decode bodies that were retries or solver probes rather than first real decodes.", "%", "Low is better; probes are part of blind interpretation.", "PDTIMCLS real/retry/probe counts"],
+  ul_lock: ["UL layout lock", "The receiver must learn the uplink bandwidth part (size and start) before it can place PUSCH; it does that from DCI 0_1 statistics and confirms with PUSCH CRC.", "-", "LOCKED is best; PROVISIONAL = size known, start not CRC-confirmed.", "run.log ULLAYOUT LOCK / BWP_LOCK / CRC_LOCK / PRIOR_* / STATS"],
+  pusch: ["PUSCH CRC-OK", "Uplink transport blocks whose CRC passed out of attempts.", "%", "Needs UL lock and enough UL path gain.", "pusch_passive[...] line, ISAC_METRICS pusch_try/pusch_crc_ok"],
+  sense: ["Sensing export", "Raw records the receiver publishes for an external sensing application: per-slot reference-signal records and channel snapshots (CFR). No sensing algorithm runs in the receiver.", "records/s", "Drops and I/O errors should be 0.", "records_path (schema 2 JSONL), cfr_path (NRCF v1), ISAC_METRICS sense_*"],
+  cfr: ["Channel frequency response (CFR)", "Estimated channel per subcarrier and antenna from one reference signal occurrence. Magnitude in dB, phase in radians.", "dB / rad", "Smooth curves; deep notches = frequency-selective fading.", "cfr_path NRCF v1 frames (strided to 256 points)"],
+  evidence: ["Evidence state", "confirmed = proven by a CRC or a decoded field; provisional = inferred, may change; unknown = not learned yet.", "-", "-", "parser of this dashboard"],
+  gpu: ["GPU budget", "Share of the GPU time budget used by background discovery (CSI-RS, PDCCH nID).", "%", "< 95 %.", "ISAC_METRICS gpu_budget_used_pct"],
+  chpow: ["Per-antenna power", "Mean received power per X410 channel.", "dBFS", "All antennas similar; near the noise floor = antenna or cable fault.", "SENSING: CHPOW (ISAC_USRP_CHPOW_S=N)"],
+  scanlag: ["Scan lag", "Largest delay in slots between a PDCCH occasion and its processing (scan queue), and between a grant and its decode (PDSCH queue).", "slots", "Must stay well below one frame (20 slots at 30 kHz).", "ISAC_METRICS scanq_max_lag, pdschq_max_lag"],
+};
+const GLOSSARY = [
+  ["PCI (physical cell identity)", "Number 0-1007 that identifies a cell on air; found from the PSS/SSS sync signals."],
+  ["SSB (synchronisation signal block)", "Periodic block with PSS, SSS and PBCH that a receiver uses to find a cell and its timing."],
+  ["GSCN", "Index of the frequency raster on which SSBs may be placed; the blind scan searches over it."],
+  ["MIB / PBCH", "Master information block carried by the broadcast channel: frame number, CORESET#0 and SS#0 indices, k_SSB."],
+  ["SIB1", "System information block 1: operator code (PLMN), cell identity, carrier geometry and TDD pattern. Some cells broadcast it without the carrier part."],
+  ["PLMN (MCC-MNC)", "Mobile country code and network code: identifies the operator."],
+  ["CORESET", "Control resource set: the time-frequency region where control messages (PDCCH) are sent. CORESET#0 comes from the MIB; dedicated CORESETs are discovered blindly."],
+  ["Search space (SS)", "Rules for where and at which aggregation levels (AL) the control messages may be placed in a CORESET."],
+  ["PDCCH / DCI", "Downlink control channel carrying downlink control information: the grants telling a phone where its data is."],
+  ["RNTI", "Radio network temporary identifier: the identity a grant is addressed to (C-RNTI = one user, SI-RNTI = system information, RA-RNTI = random access)."],
+  ["PDSCH / PUSCH", "Downlink / uplink shared channel: the user data that a grant schedules."],
+  ["MCS", "Modulation and coding scheme index: higher = more bits per symbol, needs more SNR."],
+  ["Layers (Nl, rank)", "Number of parallel MIMO streams in one grant (1-4)."],
+  ["CRC", "Checksum of a transport block; CRC OK means the block was decoded correctly."],
+  ["HARQ / RV", "Hybrid retransmission: a failed block is resent with another redundancy version (RV)."],
+  ["TBS", "Transport block size in bits."],
+  ["Stale drop", "A queued decode whose IQ samples were overwritten in the ring before a worker got to it."],
+  ["Full drop", "A queued job evicted because the queue was full."],
+  ["CFR", "Channel frequency response: complex channel per subcarrier and antenna, exported for sensing."],
+  ["CSI-RS / TRS", "Channel-state reference signals; the tracking reference signal (TRS) is a periodic CSI-RS found by blind search."],
+  ["DM-RS", "Demodulation reference signal inside PDCCH/PDSCH/PUSCH, used for channel estimation; its scrambling id is learned blindly."],
+  ["BWP", "Bandwidth part: the subset of the carrier a phone uses (size @ start, in resource blocks)."],
+  ["TDD pattern", "Which slots carry downlink or uplink in time-division duplex."],
+  ["Technique D", "The receiver's blind solver that finds how to interpret a user's grants (time allocation, DM-RS, MCS table) by trying hypotheses until the transport-block CRC passes."],
+  ["Evidence labels", "Every number carries where it came from (OTA, replay, rfsim, synthetic). Results of different hosts, cells, bandwidths or commits are never merged."],
+  ["dBFS", "Power relative to the converter's full scale; 0 dBFS = clipping."],
+];
+const PAGES = ["home", "dl", "ul", "sensing", "cell", "settings", "perf", "spectrum", "history", "logs", "glossary"];
+
+/* ------------------------------------------------------------------ settings (per viewer, localStorage) */
+const DEF = { refresh: 2, latUnit: "ms", theme: "auto", tiles: { radio: true, sync: true, dl: true, ul: true, decode: true, compute: true },
+              thr: { p99_target_us: 500, stale_pct: 10, drop_full_pct: 2.5, crc_warn_pct: 80, crc_bad_pct: 50, gpu_budget_pct: 95, silent_s: 60, ram_floor_gb: 16, temp_c: 80 } };
+let S = JSON.parse(JSON.stringify(DEF));
+try { const s = JSON.parse(localStorage.getItem("rxdash") || "{}"); S = Object.assign(S, s); S.thr = Object.assign({}, DEF.thr, s.thr || {}); S.tiles = Object.assign({}, DEF.tiles, s.tiles || {}); } catch (e) {}
+function save() { try { localStorage.setItem("rxdash", JSON.stringify(S)); } catch (e) {} }
+function applyTheme() { if (S.theme === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", S.theme); }
+applyTheme();
+
+/* ------------------------------------------------------------------ helpers */
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const isNum = (v) => typeof v === "number" && isFinite(v);
+const fmt = (v, d = 1, u = "") => isNum(v) ? v.toFixed(d) + (u ? " " + u : "") : "n/a";
+const fint = (v) => isNum(v) ? Math.round(v).toLocaleString("en-US") : "n/a";
+const pct = (a, b) => (isNum(a) && b) ? 100 * a / b : null;
+const fus = (us) => !isNum(us) ? "n/a" : (S.latUnit === "us" ? Math.round(us) + " µs" : (us / 1000).toFixed(us < 10000 ? 2 : 1) + " ms");
+const fbps = (b) => !isNum(b) ? "n/a" : b >= 1e6 ? (b / 1e6).toFixed(2) + " Mbit/s" : (b / 1e3).toFixed(1) + " kbit/s";
+const ft = (t) => isNum(t) ? (t >= 3600 ? (t / 3600).toFixed(2) + " h" : t >= 60 ? Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0") : t.toFixed(1) + " s") : "t=?";
+const info = (k) => HELP[k] ? `<button class="i" data-help="${k}" aria-label="What is ${esc(HELP[k][0])}?">i</button>` : "";
+const lvlText = { ok: "OK", warn: "Check", bad: "Problem", idle: "No data" };
+const stBadge = (lvl, txt) => `<span class="st ${lvl}"><span class="dot"></span>${esc(txt || lvlText[lvl])}</span>`;
+const empty = (title, why) => `<div class="empty"><b>${esc(title)}</b><br>${why}</div>`;
+const kpi = (k, v, help) => `<div class="kpi"><div class="v">${v}</div><div class="k">${esc(k)} ${help ? info(help) : ""}</div></div>`;
+const SER = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* tooltips: hover, focus and tap */
+const tip = $("#tip");
+function showTip(el) {
+  const h = HELP[el.dataset.help]; if (!h) return;
+  tip.innerHTML = `<div class="t">${esc(h[0])}</div><div>${esc(h[1])}</div><div class="r"><b>Unit:</b> ${esc(h[2])} &middot; <b>Good/bad:</b> ${esc(h[3])}</div><div class="r"><b>Source:</b> ${esc(h[4])}</div>`;
+  tip.style.display = "block";
+  const r = el.getBoundingClientRect(), w = Math.min(360, innerWidth - 16);
+  tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left - 10)) + "px";
+  tip.style.top = (r.bottom + 8 + 160 > innerHeight ? Math.max(8, r.top - 150) : r.bottom + 6) + "px";
+}
+document.addEventListener("mouseover", (e) => { const b = e.target.closest(".i"); if (b) showTip(b); });
+document.addEventListener("mouseout", (e) => { if (e.target.closest(".i")) tip.style.display = "none"; });
+document.addEventListener("focusin", (e) => { const b = e.target.closest(".i"); if (b) showTip(b); });
+document.addEventListener("focusout", () => { tip.style.display = "none"; });
+document.addEventListener("click", (e) => { const b = e.target.closest(".i"); if (b) { e.stopPropagation(); showTip(b); } else tip.style.display = "none"; });
+
+/* ------------------------------------------------------------------ charts (inline SVG, one y axis each) */
+let chartSeq = 0;
+const CHARTS = {};
+function lineChart(o) {
+  // o: {title, series:[{name, color, pts:[[x,y],...]}], ylab, xlab, ymin, ymax, refs:[{y,label}], fmtY, fmtX, height}
+  const id = "c" + (++chartSeq);
+  const W = 640, H = o.height || 200, L = 46, R = 12, T = 10, B = 28;
+  const all = o.series.flatMap((s) => s.pts.filter((p) => isNum(p[0]) && isNum(p[1])));
+  if (!all.length) return empty(o.emptyTitle || "No data yet", o.emptyWhy || "This chart fills when the source starts producing values.");
+  let x0 = Math.min(...all.map((p) => p[0])), x1 = Math.max(...all.map((p) => p[0]));
+  if (x1 === x0) { x1 = x0 + 1; }
+  let y0 = o.ymin != null ? o.ymin : Math.min(0, ...all.map((p) => p[1])), y1 = o.ymax != null ? o.ymax : Math.max(...all.map((p) => p[1]), ...(o.refs || []).map((r) => r.y));
+  if (y1 <= y0) y1 = y0 + 1;
+  const X = (x) => L + (x - x0) / (x1 - x0) * (W - L - R), Y = (y) => T + (1 - (Math.min(Math.max(y, y0), y1) - y0) / (y1 - y0)) * (H - T - B);
+  const fy = o.fmtY || ((v) => +v.toFixed(Math.abs(y1 - y0) < 5 ? 2 : 0));
+  const fx = o.fmtX || ft;
+  let g = "";
+  for (let i = 0; i <= 4; i++) { const v = y0 + (y1 - y0) * i / 4; g += `<line class="gridl" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${esc(fy(v))}</text>`; }
+  for (let i = 0; i <= 4; i++) { const v = x0 + (x1 - x0) * i / 4; g += `<text x="${X(v)}" y="${H - 8}" text-anchor="middle">${esc(fx(v))}</text>`; }
+  let refs = "";
+  for (const r of o.refs || []) refs += `<line x1="${L}" x2="${W - R}" y1="${Y(r.y)}" y2="${Y(r.y)}" stroke="var(--bad)" stroke-dasharray="4 4" stroke-width="1.2"/><text x="${W - R}" y="${Y(r.y) - 4}" text-anchor="end" fill="var(--text-2)" font-size="11">${esc(r.label)}</text>`;
+  let paths = "";
+  o.series.forEach((s, i) => {
+    const pts = s.pts.filter((p) => isNum(p[0]) && isNum(p[1]));
+    if (!pts.length) return;
+    const d = pts.map((p, j) => (j ? "L" : "M") + X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
+    paths += `<path d="${d}" fill="none" stroke="var(${s.color || SER[i % 8]})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    if (pts.length < 40) paths += pts.map((p) => `<circle cx="${X(p[0])}" cy="${Y(p[1])}" r="3" fill="var(${s.color || SER[i % 8]})" stroke="var(--surface)" stroke-width="1.5"/>`).join("");
+  });
+  CHARTS[id] = { o, X, Y, x0, x1, L, R, W, H, T, B, fy, fx };
+  const legend = o.series.length > 1 ? `<div class="legend">${o.series.map((s, i) => `<span><span class="sw" style="background:var(${s.color || SER[i % 8]})"></span>${esc(s.name)}</span>`).join("")}</div>` : "";
+  return `<div class="chart" data-chart="${id}">${legend}<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.title || "chart")}"><g class="axis">${g}</g>${refs}${paths}<line class="xh" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-width="1" style="display:none"/><rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="hit"/></svg><div class="small">${esc(o.ylab || "")}${o.xlab ? " vs " + esc(o.xlab) : ""} <button class="pngbtn" data-png="${id}" title="Download this chart as PNG">PNG</button></div></div>`;
+}
+function barChart(o) {
+  // o: {title, cats:[...], vals:[...], notes:[...], ymax, unit, color}
+  const id = "c" + (++chartSeq);
+  if (!o.vals.some(isNum)) return empty(o.emptyTitle || "No data yet", o.emptyWhy || "");
+  const W = 640, H = o.height || 190, L = 40, R = 8, T = 16, B = 34;
+  const y1 = o.ymax || Math.max(1, ...o.vals.filter(isNum));
+  const n = o.cats.length, bw = (W - L - R) / n;
+  let g = "";
+  for (let i = 0; i <= 4; i++) { const v = y1 * i / 4, y = T + (1 - i / 4) * (H - T - B); g += `<line class="gridl" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${+v.toFixed(y1 < 5 ? 1 : 0)}</text>`; }
+  let bars = "";
+  o.cats.forEach((c, i) => {
+    const v = o.vals[i], x = L + i * bw + Math.max(1, bw * 0.15), w = Math.max(2, bw * 0.7 - 2);
+    if (isNum(v)) {
+      const h = (Math.min(v, y1) / y1) * (H - T - B), y = H - B - h;
+      bars += `<path d="M${x},${H - B} V${y + Math.min(4, h)} q0,-4 4,-4 H${x + w - 4} q4,0 4,4 V${H - B} Z" fill="var(${o.colors ? o.colors[i] : (o.color || "--s1")})"><title>${esc(c)}: ${esc(o.fmt ? o.fmt(v) : v)}${o.notes && o.notes[i] ? " (" + esc(o.notes[i]) + ")" : ""}</title></path>`;
+      if (n <= 16) bars += `<text x="${x + w / 2}" y="${y - 3}" text-anchor="middle" font-size="11" fill="var(--text-2)">${esc(o.fmt ? o.fmt(v) : v)}</text>`;
+    }
+    if (n <= 16 || i % Math.ceil(n / 16) === 0) bars += `<text x="${x + w / 2}" y="${H - B + 14}" text-anchor="middle" font-size="11" fill="var(--text-2)">${esc(c)}</text>`;
+    if (o.notes && o.notes[i] && n <= 8) bars += `<text x="${x + w / 2}" y="${H - B + 27}" text-anchor="middle" font-size="10.5" fill="var(--muted)">${esc(o.notes[i])}</text>`;
+  });
+  CHARTS[id] = { o };
+  return `<div class="chart" data-chart="${id}"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.title || "bar chart")}"><g class="axis">${g}</g>${bars}</svg><div class="small">${esc(o.ylab || "")} <button class="pngbtn" data-png="${id}" title="Download this chart as PNG">PNG</button></div></div>`;
+}
+/* crosshair + tooltip on line charts */
+document.addEventListener("mousemove", (e) => {
+  const svg = e.target.closest(".chart svg"); if (!svg) return;
+  const id = svg.parentNode.dataset.chart, c = CHARTS[id]; if (!c || !c.X) return;
+  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  if (p.x < c.L || p.x > c.W - c.R) return;
+  const xv = c.x0 + (p.x - c.L) / (c.W - c.L - c.R) * (c.x1 - c.x0);
+  const xh = svg.querySelector(".xh"); xh.style.display = ""; xh.setAttribute("x1", p.x); xh.setAttribute("x2", p.x);
+  const rows = c.o.series.map((s) => { let best = null; for (const q of s.pts) if (isNum(q[1]) && (best == null || Math.abs(q[0] - xv) < Math.abs(best[0] - xv))) best = q; return best ? `<div>${esc(s.name)}: <b>${esc(c.fy(best[1]))}</b>${c.o.unit ? " " + esc(c.o.unit) : ""}</div>` : ""; }).join("");
+  tip.innerHTML = `<div class="t">${esc(c.fx(xv))}</div>${rows}`; tip.style.display = "block";
+  tip.style.left = Math.min(innerWidth - 200, e.clientX + 14) + "px"; tip.style.top = (e.clientY + 14) + "px";
+});
+document.addEventListener("mouseleave", () => {}, true);
+document.addEventListener("mouseout", (e) => { const svg = e.target.closest && e.target.closest(".chart svg"); if (svg && !svg.contains(e.relatedTarget)) { tip.style.display = "none"; const xh = svg.querySelector(".xh"); if (xh) xh.style.display = "none"; } });
+/* PNG export of a chart */
+document.addEventListener("click", (e) => {
+  const b = e.target.closest(".pngbtn"); if (!b) return;
+  const svg = document.querySelector(`[data-chart="${b.dataset.png}"] svg`); if (!svg) return;
+  const clone = svg.cloneNode(true);
+  const vb = svg.viewBox.baseVal, scale = 2;
+  clone.setAttribute("width", vb.width * scale); clone.setAttribute("height", vb.height * scale);
+  let s = new XMLSerializer().serializeToString(clone);
+  s = s.replace(/var\((--[\w-]+)\)/g, (m, v) => css(v) || "#888");
+  s = s.replace("<svg", `<svg style="font: 11px sans-serif; background:${css("--surface")}"`);
+  const img = new Image();
+  img.onload = () => { const cv = document.createElement("canvas"); cv.width = vb.width * scale; cv.height = vb.height * scale; const x = cv.getContext("2d"); x.fillStyle = css("--surface"); x.fillRect(0, 0, cv.width, cv.height); x.drawImage(img, 0, 0); cv.toBlob((bl) => download(bl, "chart.png")); };
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(s);
+});
+function download(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+
+/* tables with CSV/JSON export + sort */
+const TABLES = {};
+let tabSeq = 0;
+function table(cols, rows, o = {}) {
+  // cols: [{k, t, num, f, help}] rows: [{...}]
+  if (!rows.length) return empty(o.emptyTitle || "Nothing yet", o.emptyWhy || "");
+  const id = "t" + (++tabSeq);
+  TABLES[id] = { cols, rows, name: o.name || "table" };
+  const head = cols.map((c, i) => `<th class="${c.num ? "num " : ""}sort" data-t="${id}" data-c="${i}" scope="col">${esc(c.t)} ${c.help ? info(c.help) : ""}</th>`).join("");
+  const body = rows.map((r) => "<tr>" + cols.map((c) => `<td class="${c.num ? "num" : ""}">${c.html ? c.html(r) : esc(c.f ? c.f(r[c.k], r) : (r[c.k] == null ? "" : r[c.k]))}</td>`).join("") + "</tr>").join("");
+  return `<div class="toolbar"><span class="small">${rows.length} row(s)</span><span class="grow"></span><button data-csv="${id}">CSV</button><button data-jsonx="${id}">JSON</button></div><div class="tablewrap"><table id="${id}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+document.addEventListener("click", (e) => {
+  const c = e.target.closest("[data-csv]"), j = e.target.closest("[data-jsonx]"), th = e.target.closest("th.sort");
+  if (c) { const t = TABLES[c.dataset.csv]; const lines = [t.cols.map((x) => x.t).join(",")].concat(t.rows.map((r) => t.cols.map((x) => { let v = r[x.k]; if (v && typeof v === "object") v = JSON.stringify(v); v = v == null ? "" : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(","))); download(new Blob([lines.join("\n") + "\n"], { type: "text/csv" }), t.name + ".csv"); }
+  if (j) { const t = TABLES[j.dataset.jsonx]; download(new Blob([JSON.stringify(t.rows, null, 1)], { type: "application/json" }), t.name + ".json"); }
+  if (th && !e.target.closest(".i")) {
+    const t = TABLES[th.dataset.t], col = t.cols[+th.dataset.c]; const dir = th.dataset.dir === "a" ? -1 : 1; th.dataset.dir = dir === 1 ? "a" : "d";
+    const v = (r) => { const x = r[col.k]; return typeof x === "number" ? x : x == null ? -Infinity : String(x); };
+    t.rows.sort((a, b) => (v(a) > v(b) ? 1 : v(a) < v(b) ? -1 : 0) * dir);
+    const tb = document.querySelector("#" + th.dataset.t + " tbody");
+    tb.innerHTML = t.rows.map((r) => "<tr>" + t.cols.map((cc) => `<td class="${cc.num ? "num" : ""}">${cc.html ? cc.html(r) : esc(cc.f ? cc.f(r[cc.k], r) : (r[cc.k] == null ? "" : r[cc.k]))}</td>`).join("") + "</tr>").join("");
+  }
+});
+
+/* ------------------------------------------------------------------ state + polling */
+let META = null, ST = null, RUNS = [], page = "home", runId = "primary", cellKey = "", replayT = null, playing = false, alertLog = [], lastAlertIds = new Set();
+async function getJSON(u) { const r = await fetch(u, { cache: "no-store" }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText); return r.json(); }
+async function loadRuns() {
+  try { META = await getJSON("/api/runs"); RUNS = META.runs; } catch (e) { RUNS = []; }
+  const sel = $("#runSel");
+  sel.innerHTML = RUNS.length ? RUNS.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}${r.live ? " (live)" : ""}</option>`).join("") : `<option value="primary">no run</option>`;
+  if (!RUNS.find((r) => r.id === runId) && RUNS.length) runId = RUNS[0].id;
+  sel.value = runId;
+}
+function qs() { const p = new URLSearchParams({ run: runId, thr: JSON.stringify(S.thr) }); if (cellKey) p.set("cell", cellKey); if (replayT != null) p.set("t", replayT.toFixed(1)); return p.toString(); }
+let timer = null, busy = false;
+async function poll() {
+  clearTimeout(timer);
+  if (!busy) {
+    busy = true;
+    try { ST = await getJSON("/api/state?" + qs()); render(); }
+    catch (e) { $("#p-" + page).innerHTML = empty("No data", esc(e.message) + "<br>Start the monitor with <code>--run DIR</code>, <code>--log/--metrics/--obs</code> or <code>--follow GLOB</code>, or pick a run from <code>--runs-root</code>."); }
+    busy = false;
+  }
+  const live = ST && ST.meta.live;
+  timer = setTimeout(poll, replayT != null && playing ? 1000 : (live ? S.refresh * 1000 : 15000));
+}
+function render() {
+  const m = ST.meta;
+  $("#liveBadge").className = "badge " + (m.live ? "live" : "off");
+  $("#liveBadge").innerHTML = m.live ? (ST.host.proc_alive ? "&#9679; live, receiver running" : "&#9679; live file, no receiver process") : (m.replay_t != null ? "&#9654; replay" : "&#9632; finished run");
+  $("#labelBadge").textContent = m.label || "";
+  const cs = $("#cellSel");
+  const opts = (m.cells || []).map((k) => `<option value="${esc(k)}">${esc(ST.snap.cells[k] ? ST.snap.cells[k].label : k)}</option>`).join("");
+  if (cs.dataset.opts !== opts) { cs.innerHTML = opts || `<option value="">no cell yet</option>`; cs.dataset.opts = opts; }
+  cs.value = m.cell || "";
+  $("#replay").classList.toggle("on", !m.live);
+  if (!m.live && m.duration) { const sl = $("#rpSlider"); sl.max = Math.ceil(m.duration); if (replayT != null) sl.value = replayT; }
+  $("#rpTime").textContent = replayT != null ? `t = ${ft(replayT)} of ${ft(m.duration)}` : `whole run (${ft(m.duration)})`;
+  renderBanner();
+  chartSeq = 0; tabSeq = 0;
+  for (const k in CHARTS) delete CHARTS[k];
+  for (const k in TABLES) delete TABLES[k];
+  const f = RENDER[page]; if (f) { const y = scrollY; f($("#p-" + page)); scrollTo(0, y); }
+}
+function renderBanner() {
+  const a = ST.alerts, now = new Date().toLocaleTimeString();
+  const ids = new Set(a.map((x) => x.id));
+  for (const x of a) if (!lastAlertIds.has(x.id)) alertLog.unshift({ at: now, sev: x.sev, text: x.text, kind: "raised" });
+  for (const id of lastAlertIds) if (!ids.has(id)) alertLog.unshift({ at: now, sev: "ok", text: id + " cleared", kind: "cleared" });
+  alertLog = alertLog.slice(0, 100); lastAlertIds = ids;
+  const b = $("#banner");
+  b.classList.toggle("on", a.length > 0);
+  b.style.background = a.some((x) => x.sev === "bad") ? "var(--bad-bg)" : "var(--warn-bg)";
+  b.innerHTML = a.map((x) => `<div class="al"><span class="ico-${x.sev}"></span> <b>${x.sev === "bad" ? "Problem" : "Check"}:</b> ${esc(x.text)}</div>`).join("");
+}
+
+/* ------------------------------------------------------------------ pages */
+const RENDER = {};
+const sn = () => ST.snap;
+function grantsOf(key, dir) { const g = sn().grants[key || ST.meta.cell] || {}; return { src: g.src, d: g[dir] }; }
+function series(key) { return sn().series.map((w) => [w.t, w[key]]); }
+
+RENDER.home = (el) => {
+  const tiles = ST.tiles.filter((t) => S.tiles[t.id] !== false);
+  const sy = sn().sync;
+  let h = `<h2>Home</h2><p class="lead">What the radio sees, what is decoded, how well, and why not. Click a tile for the page that explains it. Colours always come with an icon and a word.</p>`;
+  h += `<div class="grid">` + tiles.map((t) => `<div class="card tile ${t.level}" data-go="${t.page}" tabindex="0" role="link" aria-label="${esc(t.title)}: ${esc(t.sentence)}">
+      <div class="top"><b>${esc(t.title)} ${info(t.id)}</b>${stBadge(t.level)}</div>
+      <div class="val">${esc(t.value)}</div><div class="sent">${esc(t.sentence)}</div><div class="more"><a href="#${t.page}">Explain &rarr;</a></div></div>`).join("") + `</div>`;
+  h += `<div class="card" style="margin-top:12px"><h3>Where the receiver is (sync chain) ${info("sync")}</h3><div class="stages">` +
+    sy.stages.map((s, i) => `<div class="stage ${s.done ? "done" : ""} ${i === sy.current ? "cur" : ""}" title="${esc(s.help)}"><b>${s.done ? "&#10003; " : ""}${esc(s.name)}</b>${s.done ? (isNum(s.t) ? "at " + ft(s.t) : "reached (early)") : "not yet"}</div>`).join("") +
+    `</div><div class="small">Acquisition state reported by the receiver: <b>${esc(sy.acq_state || "n/a")}</b>; sync losses: ${sy.sync_losses}; path: ${esc((sy.acq_path || []).join(" → ") || "n/a")}</div></div>`;
+  const w = sn().series;
+  h += `<div class="grid2"><div class="card"><h3>DL CRC-OK over time ${info("dl")}</h3>${lineChart({ title: "DL CRC-OK %", series: [{ name: "CRC-OK %", pts: series("crc_pct") }], ymin: 0, ymax: 100, ylab: "% per 20 s window", unit: "%", emptyTitle: "No time series yet", emptyWhy: "Needs ISAC_METRICS=1 (one snapshot every 20 s); two snapshots make the first point." })}</div>
+    <div class="card"><h3>Decoded grants per second ${info("grants_s")}</h3>${lineChart({ title: "decoded/s", series: [{ name: "decoded/s", pts: series("decoded_per_s") }], ylab: "PDSCH decodes per second", unit: "/s", emptyTitle: "No time series yet", emptyWhy: "Needs ISAC_METRICS=1." })}</div></div>`;
+  const ev = sn().events.slice().reverse();
+  h += `<div class="grid2"><div class="card"><h3>Event timeline</h3><div class="toolbar"><label class="small"><input type="checkbox" id="evImp" ${S.evImp ? "checked" : ""}> important only</label></div><div style="max-height:360px;overflow:auto">` +
+    (ev.filter((e) => !S.evImp || e.sev !== "info").slice(0, 200).map((e) => `<div class="ev"><span class="tt" title="${e.t == null ? "logged before the first metrics snapshot: the log has no clock there" : ""}">${e.t == null ? "start" : esc(ft(e.t))}</span><span class="ico-${e.sev === "good" ? "ok" : e.sev}" aria-label="${esc(e.sev)}"></span><span>${esc(e.text)}</span></div>`).join("") || empty("No events yet", "Sync, cell reconfiguration, new RNTIs, CSI-RS confirmations and stalls appear here.")) +
+    (sn().events_dropped ? `<div class="small">${sn().events_dropped} older events not kept.</div>` : "") + `</div></div>
+    <div class="card"><h3>Alert log (this browser session)</h3>${alertLog.length ? alertLog.slice(0, 50).map((a) => `<div class="ev"><span class="tt">${esc(a.at)}</span><span class="ico-${a.sev}"></span><span>${esc(a.text)}</span></div>`).join("") : empty("No alerts", "Thresholds are set in Settings: p99 target, stale %, GPU budget, silence, RAM, temperature.")}
+    <div class="toolbar" style="margin-top:8px"><a href="/api/summary.md?${qs()}"><button>&#8595; Run summary (markdown)</button></a><span class="small">with the evidence label of this run</span></div></div></div>`;
+  el.innerHTML = h;
+  const cb = $("#evImp"); if (cb) cb.onchange = () => { S.evImp = cb.checked; save(); render(); };
+};
+document.addEventListener("click", (e) => { const t = e.target.closest("[data-go]"); if (t && !e.target.closest("a,.i")) go(t.dataset.go); });
+document.addEventListener("keydown", (e) => { const t = e.target.closest && e.target.closest("[data-go]"); if (t && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); go(t.dataset.go); } });
+
+RENDER.dl = (el) => {
+  const s = sn(), key = ST.meta.cell, { src, d } = grantsOf(key, "DL"), pd = s.pdcch || {}, q = s.pdschq || {}, sq = s.scanq || {}, w = s.window || {};
+  let h = `<h2>Downlink (DL)</h2><p class="lead">Control channel (PDCCH) first, then the data grants (PDSCH) it schedules. Per-grant numbers come from <b>${esc(src || "no per-grant source yet")}</b>.</p>`;
+  h += `<div class="card"><h3>Control channel (PDCCH) ${info("pdcch")}</h3>`;
+  if (pd.occasions == null) h += empty("No PDCCH monitoring yet", "The blind monitor starts after the MIB is decoded; its summary line or ISAC_METRICS fills this card.");
+  else {
+    h += `<div class="kpis">${kpi("Occasions searched", fint(pd.occasions))}${kpi("Candidates tried", fint(pd.candidates))}${kpi("Accepted DCIs", fint(pd.accepts))}${pd.accepts_c != null ? kpi("C-RNTI accepts", fint(pd.accepts_c)) : ""}${kpi("DCIs per second", fmt(w.dci_per_s, 1))}${kpi("Occasions per second", fmt(w.pdcch_occ_per_s, 0))}</div>`;
+    if (pd.dci10) h += `<div class="small">DCI 1_0 accepts by identity: C ${fint(pd.dci10.C)}, TC ${fint(pd.dci10.TC)}, SI ${fint(pd.dci10.SI)}, RA ${fint(pd.dci10.RA)}, P ${fint(pd.dci10.P)}; DCI 0_1 (UL) accepts ${fint((pd.dci01 || {}).accepts)}, rejects ${fint((pd.dci01 || {}).rejects)}.${pd.held ? ` Held back by noise gates: energy ${fint(pd.held.energy)}, persistence ${fint(pd.held.persist)}, SNR ${fint(pd.held.snr)}, mismatch ${fint(pd.held.mismatch)}.` : ""} <span class="label">source: ${esc(pd.src || "")}</span></div>`;
+    const c = s.cells[key] || {};
+    const rows = [];
+    if (c.facts && c.facts.coreset0) rows.push({ what: "CORESET#0 (common)", detail: c.facts.coreset0.value, how: c.facts.coreset0.how, state: "confirmed" });
+    for (const [k, v] of Object.entries(c.coresets || {})) rows.push({ what: "Dedicated CORESET #" + k, detail: `RB ${v.rb_offset} +${v.span_rb}, symbol ${v.symbol}, DCI length ${v.dci_len}`, how: v.how, state: v.state });
+    for (const [k, v] of Object.entries(c.search_spaces || {})) rows.push({ what: "Search space " + k, detail: `AL {${v.al}}, ${v.confirmed} confirmed`, how: v.how, state: v.state });
+    for (const [k, v] of Object.entries(c.scrambling || {})) rows.push({ what: "Scrambling id " + k, detail: "n_id " + v.n_id, how: v.how, state: v.state });
+    h += `<h3 style="margin-top:10px">Per CORESET / search space ${info("evidence")}</h3>` + table([{ k: "what", t: "Region" }, { k: "detail", t: "Details" }, { k: "how", t: "How obtained" }, { k: "state", t: "Evidence", html: (r) => `<span class="statebadge ${r.state}">${esc(r.state)}</span>` }], rows, { name: "pdcch_regions", emptyTitle: "No CORESET known yet", emptyWhy: "CORESET#0 comes from the MIB; dedicated CORESETs from blind discovery." });
+  }
+  h += `</div>`;
+  if (!d) { h += `<div class="card"><h3>Data grants (PDSCH)</h3>${empty("No PDSCH yet: waiting for an RNTI to be solved", "The receiver must recover user identities (RNTIs) from control messages and solve how to read their grants (Technique D). Per-grant data needs ISAC_OBS_PATH (obs.jsonl) or EVMGRANT lines.")}</div>`; el.innerHTML = h; return; }
+  h += `<div class="card"><h3>Data grants (PDSCH)</h3><div class="kpis">${kpi("Grants", fint(d.grants))}${kpi("CRC-OK", fmt(d.crc_pct, 1, "%"), "crc_pct")}${kpi("Grants per second (recent)", fmt(d.grants_per_s_recent, 1), "grants_s")}${kpi("Throughput recovered (recent)", fbps(d.tput_bps_recent), "tput")}${kpi("RNTIs", fint(d.rnti_count))}${kpi("Converged RNTIs (solver)", fint(Object.keys(s.td_conv).length))}</div></div>`;
+  const B = Object.keys(d.by_mcs);
+  h += `<div class="grid2"><div class="card"><h3>CRC-OK by MCS bucket ${info("mcs_bucket")}</h3>${barChart({ title: "CRC-OK by MCS", cats: B, vals: B.map((b) => d.by_mcs[b].pct), notes: B.map((b) => "n=" + d.by_mcs[b].n), ymax: 100, fmt: (v) => v.toFixed(0) + "%", ylab: "% CRC-OK; n = grants in the bucket" })}</div>
+    <div class="card"><h3>CRC-OK by layers ${info("layers")}</h3>${barChart({ title: "CRC-OK by layers", cats: Object.keys(d.by_nl).map((k) => "Nl " + k), vals: Object.values(d.by_nl).map((v) => v.pct), notes: Object.values(d.by_nl).map((v) => "n=" + v.n), ymax: 100, fmt: (v) => v.toFixed(0) + "%", color: "--s3", ylab: "% CRC-OK per number of layers" })}</div></div>`;
+  h += `<div class="grid2"><div class="card"><h3>MCS histogram</h3>${barChart({ title: "MCS histogram", cats: d.mcs_hist.map((_, i) => String(i)), vals: d.mcs_hist, ylab: "grants per MCS index (0-31)", color: "--s7" })}</div>
+    <div class="card"><h3>Modulation and MCS table</h3><div class="kv">${Object.entries(d.modulation).map(([k, v]) => `<span class="k">${esc(k)}</span><span>${fint(v)} grants (${fmt(pct(v, d.grants), 1)} %)</span>`).join("") || "<span class=k>modulation</span><span>n/a</span>"}<span class="k">MCS table (CRC-OK)</span><span>${esc(Object.entries(d.mcs_tables).map(([k, v]) => "table " + k + ": " + v).join(", ") || "n/a")}</span></div></div></div>`;
+  h += `<div class="card"><h3>Per-RNTI ${info("rnti_table")}</h3>` + table([
+    { k: "rnti", t: "RNTI" }, { k: "grants", t: "Grants", num: true, f: fint }, { k: "crc_pct", t: "CRC-OK %", num: true, f: (v) => fmt(v, 1), help: "crc_pct" },
+    { k: "mcs_buckets", t: "MCS 0-4 / 5-9 / 10-16 / 17-27", html: (r) => esc(Object.values(r.mcs_buckets).join(" / ")) },
+    { k: "layers", t: "Layers (Nl:n)", html: (r) => esc(Object.entries(r.layers).map(([a, b]) => a + ":" + b).join(" ")) },
+    { k: "prb_mean", t: "PRB mean", num: true, f: (v) => fmt(v, 1) }, { k: "modulation", t: "Modulation" },
+    { k: "snr_db", t: "SNR dB (DD)", num: true, f: (v) => fmt(v, 1) }, { k: "tput_kbps", t: "Throughput kbit/s", num: true, f: (v) => fmt(v, 1), help: "tput" },
+    { k: "last_t", t: "Last seen", num: true, f: ft }], d.rntis, { name: "dl_per_rnti" }) +
+    `<div class="small">SNR is the decision-directed estimate: it over-states the decodable SNR by about 2-3 dB (PROJECT_MEMORY 2026-10-13 item 33). ${d.rnti_other.grants ? fint(d.rnti_other.grants) + " grants of RNTIs beyond the table cap are counted in the totals only." : ""}</div></div>`;
+  const lat = ST.latency, tl = s.timing.series;
+  h += `<div class="grid2"><div class="card"><h3>Decode latency ${info("latency")}</h3><div class="kpis">${kpi("p50", fus(lat.p50))}${kpi("p90", fus(lat.p90))}${kpi("p99", fus(lat.p99))}${kpi("max", fus(lat.max))}${kpi("n", fint(lat.n))}</div><div class="label">source: ${esc(lat.src)}</div>` +
+    lineChart({ title: "decode latency", series: [{ name: "p50", pts: tl.map((x) => [x.t, x.p50 / 1000]) }, { name: "p99", pts: tl.map((x) => [x.t, x.p99 / 1000]), color: "--s2" }], refs: [{ y: S.thr.p99_target_us / 1000, label: "target " + (S.thr.p99_target_us / 1000) + " ms" }], ylab: "ms (cumulative percentiles at each report)", unit: "ms", fmtY: (v) => v.toFixed(2), emptyTitle: "No latency series", emptyWhy: "Needs ISAC_PDCCH_TIMING (PDTIMPCT/PDTIMCLS lines)." }) +
+    `</div><div class="card"><h3>Decode time histogram (recent grants)</h3>${barChart({ title: "dec_us histogram", cats: d.dec_us.bounds.map((b) => "≤" + (b >= 1000 ? b / 1000 + "ms" : b + "µs")).concat([">" + d.dec_us.bounds[d.dec_us.bounds.length - 1] / 1000 + "ms"]), vals: d.dec_us.hist, color: "--s2", ylab: "grants per decode-time bin (EVMGRANT dec_us)", emptyTitle: "No per-grant decode times", emptyWhy: "EVMGRANT lines carry dec_us; obs.jsonl does not." })}</div></div>`;
+  const reasons = q.reasons || {};
+  h += `<div class="grid2"><div class="card"><h3>Drops and their reason ${info("stale")}</h3>` + table([{ k: "queue", t: "Queue" }, { k: "queued", t: "Queued", num: true, f: fint }, { k: "full", t: "Full drops", num: true, f: fint, help: "drop_full" }, { k: "fullp", t: "Full %", num: true, f: (v) => fmt(v, 2) }, { k: "stale", t: "Stale drops", num: true, f: fint, help: "stale" }, { k: "stalep", t: "Stale %", num: true, f: (v) => fmt(v, 2) }, { k: "lag", t: "Max lag (slots)", num: true, f: fint, help: "scanlag" }], [
+      { queue: "Scan queue (PDCCH scanning)", queued: sq.queued, full: sq.drop_full, fullp: pct(sq.drop_full, sq.queued), stale: sq.drop_stale, stalep: pct(sq.drop_stale, sq.queued), lag: sq.max_lag },
+      { queue: "PDSCH queue (data decoding)", queued: q.queued, full: q.drop_full, fullp: pct(q.drop_full, q.queued), stale: q.drop_stale, stalep: pct(q.drop_stale, q.queued), lag: q.max_lag }].filter((r) => r.queued != null), { name: "drops", emptyWhy: "Queue counters come from ISAC_METRICS or the PDSCHQ / summary lines." }) +
+    (Object.keys(reasons).length ? `<div class="small">PDSCH drop reasons: ${Object.entries(reasons).map(([k, v]) => esc(k.replace(/_/g, " ")) + " " + fint(v)).join(", ")}</div>` : `<div class="small">Per-reason PDSCH counters appear when the T21 schedule metrics are on.</div>`) +
+    lineChart({ title: "drops over time", series: [{ name: "PDSCH stale %", pts: series("stale_pct"), color: "--s2" }, { name: "scan-queue full %", pts: series("drop_full_pct"), color: "--s1" }], refs: [{ y: S.thr.stale_pct, label: "stale threshold" }], ymin: 0, ylab: "% of queued jobs per 20 s window", unit: "%", emptyTitle: "No drop series", emptyWhy: "Needs ISAC_METRICS=1." }) + `</div>`;
+  const cls = s.timing.pdtimcls, nn = (cls.real ? cls.real.n : 0) + (cls.retry ? cls.retry.n : 0) + (cls.probe ? cls.probe.n : 0);
+  h += `<div class="card"><h3>Recovery / retry share ${info("retry")}</h3>${nn ? `<div class="kpis">${kpi("First real decodes", fmt(pct(cls.real && cls.real.n, nn), 1, "%"))}${kpi("Retries", fmt(pct(cls.retry && cls.retry.n, nn), 1, "%"))}${kpi("Solver probes", fmt(pct(cls.probe && cls.probe.n, nn), 1, "%"))}</div>` : empty("No decode classes", "Needs ISAC_PDTIM_CLASS=1 (PDTIMCLS line).")}
+    ${Object.keys(s.pdschq_rnti).length ? `<div class="small">Receiver's own per-RNTI census (PDSCHQ per-rnti, RNTIs with &ge; 50 decodes): ${Object.entries(s.pdschq_rnti).map(([r, v]) => "0x" + esc(r) + " " + v.ok + "/" + v.decoded).join(", ")}</div>` : ""}</div></div>`;
+  el.innerHTML = h;
+};
+
+RENDER.ul = (el) => {
+  const s = sn(), key = ST.meta.cell, { src, d } = grantsOf(key, "UL"), p = s.pusch || {}, ul = s.ul;
+  const lvl = ul.state === "LOCKED" ? "ok" : ul.state ? "warn" : "idle";
+  let h = `<h2>Uplink (UL)</h2><p class="lead">The receiver first learns the uplink layout (bandwidth part) from UL grants, then decodes PUSCH. When UL is not locked the reason is spelled out below.</p>`;
+  h += `<div class="card"><h3>Layout lock ${info("ul_lock")} ${stBadge(lvl, ul.state || "not locked")}</h3><p>${esc(ST.ul_reason)}</p>`;
+  if (ul.stats) h += `<div class="small">Latest lock statistics: state ${esc(ul.stats.state)}, best ${esc(ul.stats.bwp)}, ${fint(ul.stats.votes)} votes, ${fint(ul.stats.hyps)} hypotheses, probes booked/fed ${fint(ul.stats.probes_booked)}/${fint(ul.stats.probes_fed)}.</div>`;
+  if (ul.dci01_len) h += `<div class="small">UL DCI 0_1 length locked at ${ul.dci01_len} bits.</div>`;
+  if (ul.line) h += `<div class="label">evidence line: ${esc(ul.line)}</div>`;
+  h += `</div>`;
+  h += `<div class="card"><h3>PUSCH ${info("pusch")}</h3>${p.try != null ? `<div class="kpis">${kpi("Attempts", fint(p.try))}${kpi("CRC-OK", fint(p.crc_ok))}${kpi("CRC-OK %", fmt(pct(p.crc_ok, p.try), 1, "%"))}${p.uci_trials != null ? kpi("UCI trials / rescued", fint(p.uci_trials) + " / " + fint(p.uci_rescued)) : ""}</div><div class="label">source: ${esc(p.src || "")}</div>` + lineChart({ title: "PUSCH CRC-OK", series: [{ name: "PUSCH CRC-OK %", pts: series("pusch_crc_pct"), color: "--s3" }], ymin: 0, ymax: 100, ylab: "% per 20 s window", unit: "%", emptyTitle: "No PUSCH series", emptyWhy: "Needs ISAC_METRICS=1 and PUSCH attempts." }) : empty("No PUSCH attempts yet", esc(ST.ul_reason))}</div>`;
+  h += `<div class="card"><h3>Per-RNTI UL grants</h3>${d ? `<div class="small">source: ${esc(src)}</div>` + table([{ k: "rnti", t: "RNTI" }, { k: "grants", t: "Grants", num: true, f: fint }, { k: "crc_pct", t: "CRC-OK %", num: true, f: (v) => fmt(v, 1) }, { k: "mcs_buckets", t: "MCS 0-4 / 5-9 / 10-16 / 17-27", html: (r) => esc(Object.values(r.mcs_buckets).join(" / ")) }, { k: "prb_mean", t: "PRB mean", num: true, f: (v) => fmt(v, 1) }, { k: "modulation", t: "Modulation" }, { k: "last_t", t: "Last seen", num: true, f: ft }], d.rntis, { name: "ul_per_rnti" }) : empty("No UL grants observed", "UL grants appear in obs.jsonl (dir UL) once DCI 0_1 is interpreted.")}</div>`;
+  const bs = s.sense.by_source || {}, ex = s.sense.export || {};
+  h += `<div class="card"><h3>PRACH and SRS activity</h3>${(bs.prach || bs.srs || ex.prach_drops != null) ? `<div class="kv"><span class="k">PRACH records</span><span>${fint(bs.prach || 0)}</span><span class="k">SRS records</span><span>${fint(bs.srs || 0)}</span><span class="k">PRACH drops / skipped</span><span>${fint(ex.prach_drops)} / ${fint(ex.prach_skipped)}</span><span class="k">SRS jobs dropped</span><span>${fint(ex.srs_jobs_dropped)}</span></div>` : empty("No PRACH/SRS activity exported", "PRACH needs the SIB1 RACH configuration; both come through the sensing export (records_path).")}</div>`;
+  el.innerHTML = h;
+};
+
+let cfrSrc = "", cfrAnt = null, cfrMode = "mag";
+RENDER.sensing = (el) => {
+  const s = sn(), se = s.sense, cf = s.cfr, ex = se.export || {};
+  let h = `<h2>Sensing export</h2><div class="notice"><b>Raw export, no sensing algorithm runs in the receiver.</b> This page shows what the receiver publishes for an external sensing application: per-slot reference-signal records and channel snapshots (CFR). ${info("sense")}</div>`;
+  const span = (se.last_t && se.first_t) ? (se.last_t - se.first_t) / 1e9 : null;
+  h += `<div class="card"><h3>Records</h3>${se.records ? `<div class="kpis">${kpi("Records", fint(se.records))}${kpi("Record rate", span ? fmt(se.records / span, 1, "/s") : "n/a")}${kpi("CFR frames", fint(cf.frames))}${kpi("CFR frame-id gaps", fint(cf.gaps))}${kpi("Bad records", fint(se.bad))}</div>` : empty("No sensing records read", "Set the receiver's records_path / cfr_path (sense_api config) and pass --records/--cfr, or keep the files in the run directory.")}
+    <div class="grid2"><div>${table([{ k: "k", t: "Record type" }, { k: "n", t: "Count", num: true, f: fint }], Object.entries(se.by_type).map(([k, n]) => ({ k, n })), { name: "records_by_type", emptyTitle: "No records" })}</div>
+    <div>${table([{ k: "k", t: "Source (rs records)" }, { k: "n", t: "Records", num: true, f: fint }, { k: "c", t: "CFR frames", num: true, f: fint }], Array.from(new Set(Object.keys(se.by_source).concat(Object.keys(cf.by_source)))).map((k) => ({ k, n: se.by_source[k] || 0, c: cf.by_source[k] || 0 })), { name: "by_source", emptyTitle: "No per-source counts" })}</div></div></div>`;
+  h += `<div class="card"><h3>Export health</h3><div class="kv">${[["CFR drops (all sources)", "sense_cfr_drop"], ["Record drops", "sense_rec_drop"], ["I/O errors", "sense_io_errors"], ["CFR with no sink", "sense_cfr_no_sink"], ["Records written", "sense_rec_count"]].map(([t, k]) => `<span class="k">${t}</span><span>${ex[k] == null ? "n/a (ISAC_METRICS)" : (ex[k] && k !== "sense_rec_count" ? `<span class="ico-warn"></span> ${fint(ex[k])}` : fint(ex[k]))}</span>`).join("")}</div>${se.session ? `<div class="small" style="margin-top:6px">Session: ${esc(JSON.stringify(se.session))}</div>` : ""}</div>`;
+  const srcs = Object.keys(cf.last);
+  if (!srcs.includes(cfrSrc)) cfrSrc = srcs[0] || "";
+  const f = cf.last[cfrSrc];
+  h += `<div class="card"><h3>CFR snapshot viewer ${info("cfr")}</h3>`;
+  if (!f) h += empty("No CFR frames", "CFR frames come from cfr_path (NRCF v1). In replay mode CFR is not shown (frames carry slots, not run time).");
+  else {
+    if (cfrAnt == null || cfrAnt.length !== f.n_ant) cfrAnt = Array(f.n_ant).fill(true);
+    h += `<div class="toolbar"><label>Source <select id="cfrSrc">${srcs.map((k) => `<option ${k === cfrSrc ? "selected" : ""}>${esc(k)}</option>`).join("")}</select></label>
+      <label>Show <select id="cfrMode"><option value="mag" ${cfrMode === "mag" ? "selected" : ""}>magnitude (dB)</option><option value="ph" ${cfrMode === "ph" ? "selected" : ""}>phase (rad)</option></select></label>
+      ${cfrAnt.map((on, a) => `<label class="small"><input type="checkbox" data-ant="${a}" ${on ? "checked" : ""}> antenna ${a}</label>`).join("")}
+      <span class="small">frame ${f.frame_id}, slot ${f.abs_slot}, ${f.n_re} RE (${f.k.length} shown), noise var ${fmt(f.noise_var, 3)}</span></div>`;
+    h += lineChart({ title: "CFR", series: f[cfrMode].map((row, a) => ({ name: "antenna " + a, color: SER[a], pts: cfrAnt[a] ? row.map((v, i) => [f.k[i], v]) : [] })), ylab: cfrMode === "mag" ? "magnitude (dB)" : "phase (rad)", xlab: "absolute subcarrier (CRB0 / Point A)", fmtX: (v) => String(Math.round(v)), fmtY: (v) => v.toFixed(1), ymin: cfrMode === "ph" ? -3.2 : undefined, ymax: cfrMode === "ph" ? 3.2 : undefined, unit: cfrMode === "mag" ? "dB" : "rad" });
+    const heat = (cf.heat[cfrSrc] || []).filter((r) => r.length);
+    h += `<h3 style="margin-top:10px">Magnitude over time (mean of antennas), newest at the bottom</h3>` + (heat.length > 1 ? `<canvas id="heat" width="640" height="${Math.min(260, 6 * heat.length + 20)}" style="width:100%;max-width:900px;image-rendering:pixelated" role="img" aria-label="CFR magnitude heat map"></canvas><div class="legend"><span>low</span>${[0, 1, 2, 3, 4, 5].map((i) => `<span class="sw box" style="background:var(--seq${i})"></span>`).join("")}<span>high (dB, per-map scale)</span></div>` : empty("Not enough frames", "The heat map needs at least two frames of this source."));
+  }
+  h += `</div>`;
+  const res = (s.csirs_metrics || {}).csirs_time_to_confirm_resources || [];
+  const cell = s.cells[ST.meta.cell] || {};
+  h += `<div class="card"><h3>CSI-RS resources confirmed</h3>` + table([{ k: "row", t: "Row" }, { k: "ports", t: "Ports", num: true }, { k: "density", t: "Density", num: true }, { k: "period", t: "Period (slots)", num: true }, { k: "offset", t: "Offset", num: true }, { k: "symb_l0", t: "First symbol", num: true }, { k: "zp", t: "Zero-power", f: (v) => v ? "yes" : "no" }, { k: "slots", t: "Slots to confirm", num: true, f: fint }], res, { name: "csirs_resources", emptyTitle: "No CSI-RS resource in the metrics", emptyWhy: "ISAC_METRICS csirs_time_to_confirm_resources lists the confirmed resources (CSI-RS discovery on)." }) +
+    (Object.keys(cell.csirs || {}).length ? `<div class="small">Log confirmations: ${Object.entries(cell.csirs).map(([k, v]) => "#" + k + " " + esc(v.resource) + " after " + v.after_slots + " slots").join("; ")}</div>` : "") +
+    `<div class="small">Candidates ${fint((s.csirs_metrics || {}).csirs_candidates)}, confirmed ${fint((s.csirs_metrics || {}).csirs_confirmed)}, revoked ${fint((s.csirs_metrics || {}).csirs_revoked)}.</div></div>`;
+  el.innerHTML = h;
+  const cs = $("#cfrSrc"); if (cs) cs.onchange = () => { cfrSrc = cs.value; render(); };
+  const cm = $("#cfrMode"); if (cm) cm.onchange = () => { cfrMode = cm.value; render(); };
+  el.querySelectorAll("[data-ant]").forEach((x) => x.onchange = () => { cfrAnt[+x.dataset.ant] = x.checked; render(); });
+  const cv = $("#heat");
+  if (cv) {
+    const heat = (cf.heat[cfrSrc] || []).filter((r) => r.length), ctx = cv.getContext("2d");
+    const vals = heat.flat().filter(isNum), lo = Math.min(...vals), hi = Math.max(...vals);
+    const ramp = [0, 1, 2, 3, 4, 5].map((i) => css("--seq" + i));
+    const rw = cv.width / Math.max(...heat.map((r) => r.length)), rh = (cv.height - 0) / heat.length;
+    heat.forEach((row, y) => row.forEach((v, x) => { ctx.fillStyle = ramp[Math.min(5, Math.floor((v - lo) / Math.max(1e-9, hi - lo) * 5.999))]; ctx.fillRect(x * rw, y * rh, Math.ceil(rw), Math.ceil(rh)); }));
+  }
+};
+
+RENDER.cell = (el) => {
+  const s = sn(), keys = ST.meta.cells || [];
+  let h = `<h2>Cell information</h2><p class="lead">Everything the receiver learned about the cell <b>blindly</b> (no gNB input), with how each item was obtained and how sure it is ${info("evidence")}. <span class="statebadge confirmed">confirmed</span> &nbsp; <span class="statebadge provisional">provisional</span> &nbsp; <span class="statebadge unknown">unknown</span></p>`;
+  if (!keys.length) { el.innerHTML = h + empty("No cell yet", "A cell appears after the first <code>Initial sync successful, PCI</code> line."); return; }
+  if (keys.length > 1) h += `<div class="notice">${keys.length} cells seen in this run: ${keys.map((k) => `<a href="#cell" data-cell="${esc(k)}">${esc(s.cells[k].label)}</a>`).join(", ")}. Numbers of different cells are never merged; pick one with the Cell selector.</div>`;
+  h += `<div class="card"><h3>${esc((s.cells[ST.meta.cell] || {}).label || ST.meta.cell)}</h3>` + table([{ k: "item", t: "Item" }, { k: "value", t: "Value", f: (v) => v == null ? "—" : v }, { k: "how", t: "How obtained" }, { k: "state", t: "Evidence", html: (r) => `<span class="statebadge ${r.state}">${esc(r.state)}</span>` }], ST.cell_rows, { name: "cell_" + ST.meta.cell }) + `</div>`;
+  const tdc = Object.entries(s.td_conv);
+  h += `<div class="card"><h3>Solved PDSCH interpretations (Technique D)</h3>` + table([{ k: "rnti", t: "RNTI" }, { k: "tda", t: "TDA row", num: true }, { k: "S", t: "Start symbol", num: true }, { k: "L", t: "Length", num: true }, { k: "dmrs_mask", t: "DM-RS mask" }, { k: "mcs_table", t: "MCS table", num: true }, { k: "t", t: "Converged at", num: true, f: ft }], tdc.map(([r, v]) => Object.assign({ rnti: r }, v)), { name: "td_converged", emptyTitle: "No RNTI converged yet", emptyWhy: "Technique D converges per RNTI when a hypothesis passes the transport-block CRC." }) + `</div>`;
+  el.innerHTML = h;
+};
+document.addEventListener("click", (e) => { const a = e.target.closest("[data-cell]"); if (a) { e.preventDefault(); cellKey = a.dataset.cell; poll(); } });
+
+RENDER.perf = (el) => {
+  const s = sn(), tm = s.timing, m = s.metrics || {}, host = ST.host || {};
+  let h = `<h2>Performance &amp; timing</h2><p class="lead">Where decode time goes, how far behind the queues are, and what the host is doing.</p>`;
+  const st = Object.entries(tm.pdtim);
+  h += `<div class="card"><h3>Decode stage split ${info("latency")}</h3>` + table([{ k: "stage", t: "Stage" }, { k: "n", t: "Calls", num: true, f: fint }, { k: "mean", t: "Mean (wall)", num: true, f: fus }, { k: "cpu", t: "Mean (CPU)", num: true, f: fus }, { k: "p50", t: "p50", num: true, f: fus }, { k: "p90", t: "p90", num: true, f: fus }, { k: "p99", t: "p99", num: true, f: fus }, { k: "max", t: "Max", num: true, f: fus }],
+    (st.length ? st.map(([k, v]) => Object.assign({ stage: { fep: "FEP (FFT front end)", chest: "Channel estimation", demod: "Demodulation", ldpc: "LDPC decoding", alloc: "Allocation" }[k] || k }, v, tm.pdtimpct[k] || {})) : Object.entries(tm.pdtimpct).map(([k, v]) => Object.assign({ stage: k }, v))), { name: "decode_stages", emptyTitle: "No stage timing", emptyWhy: "Needs ISAC_PDCCH_TIMING=1 (PDTIM and PDTIMPCT lines every 200 decodes)." }) + `</div>`;
+  const cls = Object.entries(tm.pdtimcls);
+  h += `<div class="card"><h3>Decode classes (real / retry / probe) ${info("retry")}</h3>` + table([{ k: "c", t: "Class" }, { k: "n", t: "Bodies", num: true, f: fint }, { k: "mean", t: "Mean", num: true, f: fus }, { k: "p50", t: "p50", num: true, f: fus }, { k: "p99", t: "p99", num: true, f: fus }, { k: "max", t: "Max", num: true, f: fus }, { k: "gt5ms", t: "> 5 ms", num: true, f: fint }, { k: "gt20ms", t: "> 20 ms", num: true, f: fint }], cls.map(([c, v]) => Object.assign({ c }, v)), { name: "decode_classes", emptyTitle: "No class split", emptyWhy: "Needs ISAC_PDTIM_CLASS=1." }) + `</div>`;
+  const sq = s.scanq || {}, q = s.pdschq || {};
+  h += `<div class="grid2"><div class="card"><h3>Queues and lag ${info("scanlag")}</h3><div class="kv"><span class="k">Scan queue max lag</span><span>${fint(sq.max_lag)} slots</span><span class="k">PDSCH queue max lag</span><span>${fint(q.max_lag)} slots</span><span class="k">PDSCH queued / decoded</span><span>${fint(q.queued)} / ${fint(q.decoded)}</span><span class="k">Scan queued / processed</span><span>${fint(sq.queued)} / ${fint(sq.processed)}</span><span class="k">Job age at decode (P99AGE)</span><span>not in this receiver tree (no P99AGE line); the latency histogram below is the closest export</span></div>` +
+    (q.latency ? `<h3 style="margin-top:10px">Queue stage latency (pdschq_latency)</h3>` + table([{ k: "stage", t: "Stage" }, { k: "p50", t: "p50 ≤", num: true, f: fus }, { k: "p90", t: "p90 ≤", num: true, f: fus }, { k: "p99", t: "p99 ≤", num: true, f: fus }, { k: "n", t: "n", num: true, f: fint }], Object.entries(q.latency).map(([k, v]) => { const n = v.reduce((a, b) => a + b, 0); const B = [100, 250, 500, 1000, 2000, 4000, 8000, 16000]; const P = (qq) => { let c = 0; for (let i = 0; i < v.length; i++) { c += v[i]; if (c >= qq * n) return i < B.length ? B[i] : Infinity; } return null; }; return { stage: k.replace(/_/g, " "), p50: P(.5), p90: P(.9), p99: P(.99), n }; }), { name: "queue_latency" }) : "") + `</div>`;
+  h += `<div class="card"><h3>GPU ${info("gpu")}</h3><div class="kv">${[["GPU discovery budget used", "gpu_budget_used_pct", (v) => fmt(v, 1, "%")], ["RT GPU wait max", "rt_gpu_wait_max_us", fus], ["RT GPU fallbacks", "rt_gpu_fallbacks", fint], ["Discovery overruns", "discovery_overruns", fint], ["GPU FEP self-check failures", "gpu_fep_selfcheck_fail", fint], ["GPU FEP disabled", "gpu_fep_disabled", fint], ["LDPC TBs on CPU / CUDA", null, () => fint(m.ldpc_tb_cpu) + " / " + fint(m.ldpc_tb_cuda)], ["LDPC CUDA breaker trips", "ldpc_cuda_breaker_trips", fint], ["LDPC CUDA fallbacks", "ldpc_cuda_fallbacks", fint]].map(([t, k, f]) => `<span class="k">${t}</span><span>${k && m[k] == null ? "n/a" : f(k ? m[k] : null)}</span>`).join("")}</div>` +
+    lineChart({ title: "GPU budget", series: [{ name: "GPU budget %", pts: series("gpu_budget_pct"), color: "--s7" }], refs: [{ y: S.thr.gpu_budget_pct, label: "threshold" }], ymin: 0, ymax: 100, ylab: "% per metrics snapshot", unit: "%", emptyTitle: "No GPU series", emptyWhy: "Needs ISAC_METRICS." }) + `</div></div>`;
+  h += `<div class="card"><h3>Host (live only)</h3>${ST.meta.live ? `<div class="kpis">${kpi("Receiver CPU", fmt(host.rx_cpu_pct, 0, "%"))}${kpi("Temperature (max zone)", fmt(host.temp_c, 0, "°C"))}${kpi("Free RAM", fmt(host.mem_avail_gb, 1, "GB"))}${kpi("Dashboard CPU", fmt(host.monitor_cpu_pct, 1, "%"))}</div>` +
+    table([{ k: "name", t: "Receiver thread" }, { k: "tid", t: "TID", num: true }, { k: "cpu_pct", t: "CPU %", num: true, f: (v) => fmt(v, 1) }], host.threads || [], { name: "threads", emptyTitle: "No receiver process", emptyWhy: "Per-thread CPU is read from /proc/&lt;pid&gt;/task when nr-uesoftmodem runs on this host." }) : empty("Offline run", "CPU, threads, temperature and RAM are read from this host while a receiver runs.")}</div>`;
+  el.innerHTML = h;
+};
+
+let SCAN = null;
+RENDER.spectrum = (el) => {
+  const s = sn(), r = s.radio;
+  let h = `<h2>Spectrum &amp; scan</h2><p class="lead">Cells found by the blind scanner and the power on each antenna.</p>`;
+  h += `<div class="card"><h3>Cells found by the blind scanner</h3>${SCAN ? table([{ k: "pci", t: "PCI", num: true }, { k: "ssb_mhz", t: "SSB MHz", num: true, f: (v) => fmt(v, 2) }, { k: "gscn", t: "GSCN", num: true }, { k: "metric_db", t: "SSB metric dB", num: true, f: (v) => fmt(v, 1) }, { k: "sss_ratio", t: "SSS ratio", num: true, f: (v) => fmt(v, 2) }, { k: "dmrs_ratio", t: "PBCH DM-RS ratio", num: true, f: (v) => fmt(v, 2) }, { k: "cfo_hz", t: "CFO Hz", num: true, f: fint }, { k: "sib1", t: "SIB1 (this run)", html: (c) => { const cc = s.cells[String(c.pci)]; return cc && cc.facts.plmn ? '<span class="statebadge confirmed">decoded ' + esc(cc.facts.plmn.value) + "</span>" : cc ? '<span class="statebadge provisional">synced, not decoded</span>' : '<span class="statebadge unknown">not visited</span>'; } }, { k: "file", t: "Source file" }], SCAN.cells, { name: "scan_cells", emptyTitle: "No scanner output", emptyWhy: "Pass --scan OUT/cells.json (tests/passive_rx/autofront/live_chain.sh discover) or keep cells.json in the run directory." }) : "loading…"}</div>`;
+  const ch = Object.entries(r.chpow).sort();
+  h += `<div class="grid2"><div class="card"><h3>Per-antenna power ${info("chpow")}</h3>${ch.length ? barChart({ title: "per-antenna power", cats: ch.map(([k]) => k), vals: ch.map(([, v]) => v + 100), fmt: (v) => (v - 100).toFixed(1) + " dBFS", ylab: "dBFS (bar height = dBFS + 100)", colors: ch.map((_, i) => SER[i]) }) : empty("No per-antenna power", "Start the receiver with ISAC_USRP_CHPOW_S=5 to log CHPOW every 5 s.")}</div>
+    <div class="card"><h3>Antenna power over time</h3>${lineChart({ title: "CHPOW", series: ch.map(([k], i) => ({ name: k, color: SER[i], pts: r.chpow_series.map((p) => [p.t, p[k]]) })), ylab: "dBFS", unit: "dBFS", ymin: undefined, emptyTitle: "No power series", emptyWhy: "Needs CHPOW lines." })}</div></div>`;
+  h += `<div class="card"><h3>Radio channels (X410)</h3>${table([{ k: "ch", t: "Channel" }, { k: "port", t: "Port" }, { k: "gain_db", t: "Gain dB", num: true }, { k: "freq_mhz", t: "Tuned MHz", num: true, f: (v) => fmt(v, 3) }, { k: "rate_msps", t: "Rate MS/s", num: true }], Object.entries(r.rfchan).map(([ch, v]) => Object.assign({ ch }, v)), { name: "rfchan", emptyTitle: "No RFCHAN lines", emptyWhy: "RFCHAN lines are printed by the USRP driver at start (not in rfsim)." })}
+    <div class="small">RF stalls: ${r.rfstall_n}${r.rfstall.length ? " — last: " + esc(r.rfstall[r.rfstall.length - 1].text) : ""}. PBCH census: ${r.rfcensus ? `${r.rfcensus.pbch_ok} OK / ${r.rfcensus.pbch_fail} failed of ${r.rfcensus.ssb_slots} SSB slots` : "n/a"}.</div></div>`;
+  el.innerHTML = h;
+  if (!SCAN) getJSON("/api/scan").then((x) => { SCAN = x; if (page === "spectrum") render(); }).catch(() => { SCAN = { cells: [] }; });
+};
+
+let CMP = null, cmpSel = new Set();
+RENDER.history = (el) => {
+  let h = `<h2>Run history &amp; compare</h2><p class="lead">Pick two or more runs to see the same KPIs side by side. Each column keeps its own evidence label; runs of different hosts, cells or bandwidths are shown together but never merged.</p>`;
+  const hist = RUNS.filter((r) => r.id !== "primary");
+  h += `<div class="card"><h3>Runs</h3>${hist.length || RUNS.length ? `<div class="tablewrap"><table><thead><tr><th>Compare</th><th>Run</th><th>Modified</th><th>Label</th><th></th></tr></thead><tbody>${RUNS.map((r) => `<tr><td><input type="checkbox" data-cmp="${esc(r.id)}" ${cmpSel.has(r.id) ? "checked" : ""} aria-label="compare ${esc(r.name)}"></td><td>${esc(r.name)}${r.id === "primary" ? " (primary run)" : ""}</td><td>${r.mtime ? new Date(r.mtime * 1000).toLocaleString() : ""}</td><td class="label">${esc(r.label || "")}</td><td><button data-open="${esc(r.id)}">Open</button></td></tr>`).join("")}</tbody></table></div>
+    <div class="toolbar"><button class="primary" id="cmpGo" ${cmpSel.size < 2 ? "disabled" : ""}>Compare ${cmpSel.size} run(s)</button><span class="small">pick at least two</span></div>` : empty("No run directories", "Start the monitor with --runs-root '~/NICOLA/ota_runs/*' (repeatable).")}</div>`;
+  if (CMP) {
+    const B = META.mcs_buckets, runs = CMP.runs;
+    const row = (t, f) => `<tr><th scope="row">${t}</th>${runs.map((r) => `<td class="num">${f(r.kpis, r)}</td>`).join("")}</tr>`;
+    h += `<div class="card"><h3>Side by side</h3><div class="tablewrap" style="max-height:none"><table><thead><tr><th></th>${runs.map((r) => `<th class="num">${esc(r.name)}<div class="label">${esc(r.label)}</div></th>`).join("")}</tr></thead><tbody>` +
+      row("Cell (PCI)", (k) => esc(k.pci)) + row("Furthest stage", (k) => esc(k.stage)) + row("Duration", (k, r) => ft(r.duration)) + row("DL grants (n)", (k) => fint(k.dl_grants)) + row("DL CRC-OK %", (k) => fmt(k.dl_crc_pct, 1)) +
+      B.map((b) => row("CRC-OK MCS " + b, (k) => k.by_mcs[b] ? `${fmt(k.by_mcs[b].pct, 1)} % <span class="small">(n=${fint(k.by_mcs[b].n)})</span>` : "n/a")).join("") +
+      row("PDSCH stale %", (k) => fmt(k.stale_pct, 1)) + row("Decode p50", (k) => fus(k.p50_us)) + row("Decode p99", (k) => fus(k.p99_us)) + row("Latency source", (k) => `<span class="small">${esc(k.lat_src)}</span>`) + row("PUSCH CRC-OK %", (k) => fmt(k.pusch_crc_pct, 1)) + row("RNTIs", (k) => fint(k.rntis)) + row("Sync losses", (k) => fint(k.sync_losses)) + row("RF stalls", (k) => fint(k.rfstall)) +
+      `</tbody></table></div><div class="toolbar"><button id="cmpJson">JSON</button></div></div>`;
+    const ser = runs.slice(0, 8);
+    h += `<div class="card"><h3>CRC-OK by MCS bucket per run</h3><div class="legend">${ser.map((r, i) => `<span><span class="sw box" style="background:var(${SER[i]})"></span>${esc(r.name)}</span>`).join("")}</div>` +
+      barChart({ title: "CRC by MCS per run", cats: B.flatMap((b) => ser.map((r, i) => b + (i === 0 ? "" : "​".repeat(i)))), vals: B.flatMap((b) => ser.map((r) => r.kpis.by_mcs[b] ? r.kpis.by_mcs[b].pct : null)), colors: B.flatMap(() => ser.map((_, i) => SER[i])), notes: B.flatMap((b) => ser.map((r) => r.kpis.by_mcs[b] ? "n=" + r.kpis.by_mcs[b].n : "")), ymax: 100, fmt: (v) => v.toFixed(0) + "%", ylab: "% CRC-OK per MCS bucket, one bar per run (colour = run, see legend)" }) + `</div>`;
+  }
+  el.innerHTML = h;
+  el.querySelectorAll("[data-cmp]").forEach((c) => c.onchange = () => { c.checked ? cmpSel.add(c.dataset.cmp) : cmpSel.delete(c.dataset.cmp); render(); });
+  el.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => { runId = b.dataset.open; $("#runSel").value = runId; cellKey = ""; replayT = null; go("home"); poll(); });
+  const g = $("#cmpGo"); if (g) g.onclick = async () => { g.disabled = true; g.textContent = "Loading (parsing runs)…"; CMP = await getJSON("/api/compare?runs=" + encodeURIComponent([...cmpSel].join(","))); render(); };
+  const j = $("#cmpJson"); if (j) j.onclick = () => download(new Blob([JSON.stringify(CMP, null, 1)], { type: "application/json" }), "compare.json");
+};
+
+let LOGQ = { q: "", key: true, n: 400 }, LOG = null;
+RENDER.logs = (el) => {
+  let h = `<h2>Logs</h2><p class="lead">The receiver log, filtered. Key lines (sync, MIB/SIB1, CORESET, CSI-RS, convergence, UL lock, stalls) are highlighted.</p>
+    <div class="card"><div class="toolbar"><input type="search" id="logQ" placeholder="search (regular expression)" value="${esc(LOGQ.q)}" style="flex:1;min-width:180px" aria-label="Search the log">
+    <label class="small"><input type="checkbox" id="logKey" ${LOGQ.key ? "checked" : ""}> key lines only</label>
+    <select id="logN" aria-label="Lines">${[200, 400, 1000, 3000].map((n) => `<option ${n === LOGQ.n ? "selected" : ""}>${n}</option>`).join("")}</select>
+    <button class="primary" id="logGo">Search</button><a href="/api/log/download?run=${encodeURIComponent(runId)}"><button>&#8595; Download log</button></a></div>
+    <div class="small" id="logNote">${LOG ? esc(LOG.note) + " · " + LOG.lines.length + " line(s)" : ""}</div><pre class="log" id="logPre">${LOG ? hlLog(LOG.lines) : "Press Search."}</pre></div>`;
+  el.innerHTML = h;
+  const run = async () => { LOGQ = { q: $("#logQ").value, key: $("#logKey").checked, n: +$("#logN").value }; $("#logNote").textContent = "searching…"; LOG = await getJSON(`/api/log?run=${encodeURIComponent(runId)}&q=${encodeURIComponent(LOGQ.q)}&key=${LOGQ.key ? 1 : 0}&n=${LOGQ.n}`); render(); };
+  $("#logGo").onclick = run; $("#logQ").onkeydown = (e) => { if (e.key === "Enter") run(); };
+  if (!LOG) run();
+};
+function hlLog(lines) {
+  const key = META ? new RegExp(META.key_re) : null; let q = null; try { q = LOGQ.q ? new RegExp(LOGQ.q, "gi") : null; } catch (e) {}
+  return lines.map((l) => { let s = esc(l); if (q) s = s.replace(q, (m) => `<mark>${m}</mark>`); const bad = /RFSTALL|-> LOST|MISMATCH|ERROR/.test(l); return (bad || (key && key.test(l))) ? `<span class="${bad ? "hb" : "hl"}">${s}</span>` : s; }).join("\n");
+}
+
+RENDER.glossary = (el) => {
+  el.innerHTML = `<h2>Glossary</h2><p class="lead">The terms used on this dashboard, in plain language.</p><div class="card"><dl class="gl">${GLOSSARY.map(([t, d]) => `<dt>${esc(t)}</dt><dd>${esc(d)}</dd>`).join("")}</dl></div>
+    <div class="card"><h3>Metric help (same text as the (i) buttons)</h3><dl class="gl">${Object.values(HELP).map((h) => `<dt>${esc(h[0])}</dt><dd>${esc(h[1])} <i>Unit:</i> ${esc(h[2])}. <i>Good/bad:</i> ${esc(h[3])} <i>Source:</i> ${esc(h[4])}.</dd>`).join("")}</dl></div>`;
+};
+
+RENDER.settings = (el) => {
+  const c = ST.config, t = S.thr;
+  const thrRows = [["p99_target_us", "Decode p99 target", "µs"], ["stale_pct", "Stale drops threshold", "%"], ["drop_full_pct", "Scan-queue full drops threshold", "%"], ["crc_warn_pct", "DL CRC-OK amber below", "%"], ["crc_bad_pct", "DL CRC-OK red below", "%"], ["gpu_budget_pct", "GPU budget exhausted at", "%"], ["silent_s", "Receiver silent after", "s"], ["ram_floor_gb", "Free RAM floor", "GB"], ["temp_c", "Temperature limit", "°C"]];
+  let h = `<h2>Settings</h2><p class="lead">Dashboard preferences are stored in this browser only. The receiver configuration below is <b>read-only</b>: the dashboard never starts or stops the radio and never changes receiver flags.</p>
+    <div class="grid2"><div class="card"><h3>Display</h3><div class="kv">
+      <span class="k">Refresh every</span><span><select id="setRefresh">${[1, 2, 5, 10].map((v) => `<option ${v === S.refresh ? "selected" : ""} value="${v}">${v} s</option>`).join("")}</select></span>
+      <span class="k">Latency unit</span><span><select id="setUnit"><option value="ms" ${S.latUnit === "ms" ? "selected" : ""}>ms</option><option value="us" ${S.latUnit === "us" ? "selected" : ""}>µs</option></select></span>
+      <span class="k">Theme</span><span><select id="setTheme">${["auto", "light", "dark"].map((v) => `<option ${v === S.theme ? "selected" : ""}>${v}</option>`).join("")}</select></span>
+      <span class="k">Tiles on Home</span><span>${Object.keys(DEF.tiles).map((k) => `<label class="small" style="margin-right:8px"><input type="checkbox" data-tile="${k}" ${S.tiles[k] !== false ? "checked" : ""}> ${k}</label>`).join("")}</span></div></div>
+    <div class="card"><h3>Alert thresholds</h3><div class="kv">${thrRows.map(([k, lab, u]) => `<span class="k">${lab}</span><span><input type="number" step="any" data-thr="${k}" value="${t[k]}" style="width:110px"> ${u}</span>`).join("")}</div><div class="toolbar"><button id="setReset">Reset to defaults</button></div></div></div>`;
+  h += `<div class="card"><h3>Receiver configuration of this run (read-only)</h3>`;
+  if (!c.cmdline || !c.cmdline.length) h += empty("Command line not available", "Taken from the log's CMDLINE line, cmd.txt in the run directory, or /proc of a running receiver.");
+  else {
+    h += `<div class="kv">${Object.entries(c.key_args).map(([k, v]) => `<span class="k mono">${esc(k)}</span><span class="mono">${esc(v)}</span>`).join("")}</div><details style="margin-top:6px"><summary>Full command line</summary><pre class="log">${esc(c.cmdline.join(" "))}</pre></details>`;
+  }
+  h += `<div style="margin-top:8px"><b>Config file:</b> <span class="mono">${esc(c.cfg_path || "n/a")}</span>${c.cfg_text ? `<details><summary>Show file</summary><pre class="log">${esc(c.cfg_text)}</pre></details>` : c.cfg_path ? ` <span class="small">(not readable from here)</span>` : ""}</div></div>`;
+  h += `<div class="card"><h3>ISAC_* environment, grouped by area</h3>`;
+  if (!c.env_groups || !Object.keys(c.env_groups).length) h += empty("Environment not available", "Keep env.txt (or the single-line .env file) in the run directory; for a live receiver /proc/&lt;pid&gt;/environ is used when readable (root-owned receivers usually are not).");
+  else {
+    h += `<div class="small">Source: ${esc(c.env_source || "")}. Descriptions are extracted automatically from the code comments and PROJECT_MEMORY (gen_flags.py); "unknown" = no description found.</div>`;
+    for (const [area, rows] of Object.entries(c.env_groups)) h += `<h3 style="margin-top:10px">${esc(area)}</h3>` + table([{ k: "name", t: "Flag", html: (r) => `<span class="mono">${esc(r.name)}</span>` }, { k: "value", t: "Value", html: (r) => `<span class="mono">${esc(r.value)}</span>` }, { k: "desc", t: "What it does", html: (r) => r.desc ? esc(r.desc) : `<span class="statebadge unknown">unknown${r.known ? "" : " (not read by this code tree)"}</span>` }], rows, { name: "env_" + area });
+  }
+  h += `</div>`;
+  el.innerHTML = h;
+  $("#setRefresh").onchange = (e) => { S.refresh = +e.target.value; save(); };
+  $("#setUnit").onchange = (e) => { S.latUnit = e.target.value; save(); render(); };
+  $("#setTheme").onchange = (e) => { S.theme = e.target.value; save(); applyTheme(); render(); };
+  el.querySelectorAll("[data-tile]").forEach((x) => x.onchange = () => { S.tiles[x.dataset.tile] = x.checked; save(); });
+  el.querySelectorAll("[data-thr]").forEach((x) => x.onchange = () => { const v = parseFloat(x.value); if (isFinite(v)) { S.thr[x.dataset.thr] = v; save(); poll(); } });
+  $("#setReset").onclick = () => { S.thr = Object.assign({}, DEF.thr); save(); poll(); };
+};
+
+/* ------------------------------------------------------------------ navigation, replay, boot */
+function go(p) {
+  if (!PAGES.includes(p)) p = "home";
+  page = p;
+  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("on", a.dataset.p === p));
+  document.querySelectorAll(".page").forEach((s) => s.classList.toggle("on", s.id === "p-" + p));
+  if (location.hash !== "#" + p) history.replaceState(null, "", "#" + p);
+  $("#nav").classList.remove("open");
+  if (ST) render();
+}
+window.addEventListener("hashchange", () => go(location.hash.slice(1)));
+$("#menuBtn").onclick = () => $("#nav").classList.toggle("open");
+$("#themeBtn").onclick = () => { const dark = document.documentElement.getAttribute("data-theme") === "dark" || (S.theme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches); S.theme = dark ? "light" : "dark"; save(); applyTheme(); if (ST) render(); };
+$("#runSel").onchange = (e) => { runId = e.target.value; cellKey = ""; replayT = null; playing = false; LOG = null; CMP = null; poll(); };
+$("#cellSel").onchange = (e) => { cellKey = e.target.value; poll(); };
+$("#rpSlider").oninput = (e) => { replayT = +e.target.value; $("#rpTime").textContent = "t = " + ft(replayT); };
+$("#rpSlider").onchange = () => poll();
+$("#rpPlay").onclick = () => { playing = !playing; if (playing && replayT == null) replayT = 0; $("#rpPlay").innerHTML = playing ? "&#10073;&#10073; Pause" : "&#9654; Play"; poll(); };
+$("#rpExit").onclick = () => { replayT = null; playing = false; $("#rpPlay").innerHTML = "&#9654; Play"; poll(); };
+setInterval(() => { if (playing && replayT != null && ST) { replayT = Math.min((ST.meta.duration || 0), replayT + +$("#rpSpeed").value); if (replayT >= (ST.meta.duration || 0)) { playing = false; $("#rpPlay").innerHTML = "&#9654; Play"; } } }, 1000);
+(async () => { await loadRuns(); go(location.hash.slice(1) || "home"); poll(); setInterval(loadRuns, 60000); })();
+</script>
+</body>
+</html>
