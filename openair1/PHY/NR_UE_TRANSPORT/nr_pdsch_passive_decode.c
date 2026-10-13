@@ -438,6 +438,8 @@ static void evm_fill(nr_pdsch_passive_decode_result_t *out, const fapi_nr_dl_con
       out->dmrs_add = (uint8_t)__builtin_popcount(dlsch_config->dlDmrsSymbPos);
       for (int a = 0; a < ea->nbrx && a < 4; a++)
         out->br_snr_db[a] = (ea->sig[a] > 0.0 && ea->res[a] > 0.0) ? (float)(10.0 * log10(ea->sig[a] / ea->res[a])) : -99.f;
+      for (int l = 0; l < 4; l++)
+        out->layer_snr_db[l] = ea->err_layer[l] > 0.0 ? (float)(10.0 * log10(ea->ref_layer[l] / ea->err_layer[l])) : -99.f;
     }
   }
 }

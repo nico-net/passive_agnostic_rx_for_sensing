@@ -57,6 +57,7 @@ typedef struct {
   uint32_t n_probe;        /* T26c: probes planned while unsolved (search backoff) */
   uint32_t alt_hash;       /* T26c: g_alt_hash seen at the last plan */
   uint32_t comb_try[4], comb_ok[4]; /* T26d ISAC_RX_MRC_PER_RNTI: CRC per receiver {1 best branch, 3 MRC, 4 NW-MRC, 5 IRC} */
+  float comb_snr[4]; uint16_t comb_nsnr[4]; /* HIGHMCS ISAC_RX_MRC_PER_RNTI_SNR: post-eq SNR EMA per receiver */
   float snr_ema;           /* T26c: post-equalisation SNR (dB) EMA of this RNTI's full decodes, NAN-free: n_snr = 0 unknown */
   uint32_t n_snr;
   uint32_t pref_gap;       /* T26d ISAC_PDSCH_SOLVER_PREF: grants since the last search-preferred grant */
@@ -554,17 +555,23 @@ void nr_pdsch_solver_note_skip(uint16_t rnti, int why)
   pthread_mutex_unlock(&g_mu);
 }
 
+static int comb_ci(uint8_t comb);
 /* nr_pdsch_solver_note_snr: feeds one post-equalisation SNR sample (dB) of a full decode into the RNTI's exponential moving average.
  *   EMA weight 0.2 for new samples; the first sample initialises it. Ignored for unknown RNTIs.
  *   Caller: nr_pdsch_passive_queue.c (after a full decode, from its EVM).
  */
-void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db)
+void nr_pdsch_solver_note_snr(uint16_t rnti, float snr_db, int comb)
 {
   pthread_mutex_lock(&g_mu);
   solver_rnti_t *r = slot_of(rnti, false, NULL);
   if (r) {
     r->snr_ema = r->n_snr ? 0.8f * r->snr_ema + 0.2f * snr_db : snr_db;
     r->n_snr++;
+    if (comb >= 1) { /* per receiver (comb_pick, ISAC_RX_MRC_PER_RNTI_SNR) */
+      const int ci = comb_ci((uint8_t)comb);
+      r->comb_snr[ci] = r->comb_nsnr[ci] ? 0.8f * r->comb_snr[ci] + 0.2f * snr_db : snr_db;
+      if (r->comb_nsnr[ci] < UINT16_MAX) r->comb_nsnr[ci]++;
+    }
   }
   pthread_mutex_unlock(&g_mu);
 }
@@ -701,6 +708,17 @@ static int comb_ab(void) /* ISAC_RX_MRC_PER_RNTI_AB=1: post-solve round robin ov
  *   Solved RNTIs: best receiver by Laplace-smoothed CRC rate, exploring another one on 1 grant in 8 (or round robin with _AB).
  *   Uses r->comb_try/comb_ok counters filled by nr_pdsch_solver_feedback(). Caller: nr_pdsch_solver_plan_slot().
  */
+/* comb_by_snr: ISAC_RX_MRC_PER_RNTI_SNR=1 (HIGHMCS, default off): choose the receiver by its post-equalisation SNR EMA instead
+ *   of its CRC rate. The CRC rate is dominated by the RNTI's low-MCS grants, where every receiver passes alike, so it cannot
+ *   tell a 4-branch MRC from a single branch; the SNR can (OTA 2026-10-12: MRC +4 dB, 2x CRC at MCS >= 10). Needs 3 samples per
+ *   receiver; otherwise the CRC rule decides. */
+static int comb_by_snr(void)
+{
+  static int en = -1;
+  if (en < 0) en = getenv("ISAC_RX_MRC_PER_RNTI_SNR") ? atoi(getenv("ISAC_RX_MRC_PER_RNTI_SNR")) : 0;
+  return en;
+}
+static int comb_ci(uint8_t comb) { return comb == 3 ? 1 : comb == 4 ? 2 : comb >= 5 ? 3 : 0; }
 static uint8_t comb_pick(const solver_rnti_t *r)
 {
   if (!comb_on()) return 0;
@@ -710,11 +728,16 @@ static uint8_t comb_pick(const solver_rnti_t *r)
   if (comb_ab()) return comb_k((int)(r->grants % (uint32_t)n));
   int best = 0;
   double bp = -1.0;
+  bool snr_all = comb_by_snr() != 0;
+  for (int k = 0; k < n && snr_all; k++) snr_all = r->comb_nsnr[k] >= 3;
+  double second = -1.0;
   for (int k = 0; k < n; k++) {
-    const double p = (r->comb_ok[k] + 1.0) / (r->comb_try[k] + 2.0);
-    if (p > bp) { bp = p; best = k; }
+    const double p = snr_all ? (double)r->comb_snr[k] : (r->comb_ok[k] + 1.0) / (r->comb_try[k] + 2.0);
+    if (p > bp) { second = bp; bp = p; best = k; } else if (p > second) second = p;
   }
-  if ((r->grants % 8u) == 7u) return comb_k((int)((best + 1 + (r->grants / 8u) % (uint32_t)(n - 1)) % (uint32_t)n)); /* explore */
+  /* explore 1 grant in 8; with the SNR rule and a runner-up >= 3 dB behind, 1 in 32 (the EMA only has to stay current) */
+  const uint32_t every = (snr_all && bp - second >= 3.0) ? 32u : 8u;
+  if ((r->grants % every) == every - 1u) return comb_k((int)((best + 1 + (r->grants / every) % (uint32_t)(n - 1)) % (uint32_t)n));
   return comb_k(best);
 }
 /* emit: appends one decode variant (reading, S, add_pos, table, probe flag, TDA) to out[] and books a pending entry carrying its feedback token.
@@ -1466,6 +1489,8 @@ static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
   r->solved_abs = p->abs;
   memset(r->comb_try, 0, sizeof(r->comb_try)); /* receiver choice from post-solve decodes only (pre-solve probes */
   memset(r->comb_ok, 0, sizeof(r->comb_ok));   /*  fail for every receiver and biased the choice) */
+  memset(r->comb_snr, 0, sizeof(r->comb_snr));
+  memset(r->comb_nsnr, 0, sizeof(r->comb_nsnr));
   if (signif_on())
     LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by %u CRC16 + %u CRC24 passes, P(chance)=%.1e over %u+%u probes: layout %d "
                "(%d consistent) add_pos=%u table=%d S[tda %d]=%u scr=%d\n",
@@ -1537,7 +1562,7 @@ void nr_pdsch_solver_feedback(uint32_t token, bool crc_ok, bool credit)
   if (r->used && p->phase == 0 && p->probe && !r->solved) /* the Bonferroni count of ISAC_PDSCH_SOLVER_SIGNIF */
     p->crc24 ? r->cred24++ : r->cred16++;
   if (p->comb >= 1 && (!r->solved || !p->probe)) {
-    const int ci = p->comb == 3 ? 1 : p->comb == 4 ? 2 : p->comb >= 5 ? 3 : 0;
+    const int ci = comb_ci(p->comb);
     r->comb_try[ci]++;
     if (crc_ok) r->comb_ok[ci]++;
   }
