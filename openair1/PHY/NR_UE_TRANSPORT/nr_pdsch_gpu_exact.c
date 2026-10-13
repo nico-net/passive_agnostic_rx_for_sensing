@@ -290,3 +290,49 @@ nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void)
 {
   return atomic_load_explicit(&g_on, memory_order_relaxed) ? g_chest_fn : NULL;
 }
+
+/* DECODETIME ISAC_PDSCH_GPU_HOST_PIN=1 (default off): the GPU kernels read and write pageable host buffers (chest scratch,
+ * LLRs, estimates, equaliser outputs) through the GB10's unified memory; the GPU's first touch of every new 4 KB page is a
+ * GPU page fault that stalls the whole device (~12 us each: a 1744-row chest scratch grew by 14 MB = 40 ms, hitting every
+ * consumer at once). Pinning (cudaHostRegister) maps the buffer once, at allocation. Flag off: no call into the module. */
+static int (*g_pin_fn)(void *, size_t);
+static int (*g_unpin_fn)(void *);
+static pthread_once_t g_pin_once = PTHREAD_ONCE_INIT;
+static void pin_init(void)
+{
+  const char *e = getenv("ISAC_PDSCH_GPU_HOST_PIN");
+  if (!e || atoi(e) != 1)
+    return;
+  void *h = dlopen("libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!h)
+    h = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  g_pin_fn = h ? (int (*)(void *, size_t))dlsym(h, "nr_pdsch_gpu_exact_pin") : NULL;
+  g_unpin_fn = h ? (int (*)(void *))dlsym(h, "nr_pdsch_gpu_exact_unpin") : NULL;
+  if (!g_pin_fn || !g_unpin_fn)
+    g_pin_fn = NULL;
+  LOG_A(PHY, "SENSING: ISAC_PDSCH_GPU_HOST_PIN=1: GPU-touched host buffers pinned at allocation (%s)\n", g_pin_fn ? "ok" : "module unavailable, off");
+}
+int nr_pdsch_gpu_host_pin(void *p, size_t bytes)
+{
+  pthread_once(&g_pin_once, pin_init);
+  if (!g_pin_fn || !p || !bytes)
+    return -1;
+  const int rc = g_pin_fn(p, bytes);
+  if (rc) {
+    static _Atomic int logged;
+    if (!atomic_fetch_or(&logged, 1))
+      LOG_W(PHY, "SENSING: GPU_HOST_PIN: cudaHostRegister(%zu bytes) failed rc=%d (buffer left pageable)\n", bytes, rc);
+    return -1;
+  }
+  return 0;
+}
+int nr_pdsch_gpu_host_pin_enabled(void)
+{
+  pthread_once(&g_pin_once, pin_init);
+  return g_pin_fn != NULL;
+}
+void nr_pdsch_gpu_host_unpin(void *p)
+{
+  if (g_pin_fn && p)
+    g_unpin_fn(p);
+}

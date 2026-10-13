@@ -1,0 +1,5 @@
+  hog:cc1plus,ps,
+  hog:cc1plus,
+  hog:cc1plus,
+  hog:test_nr_pdcch_b,
+  hog:ninja,

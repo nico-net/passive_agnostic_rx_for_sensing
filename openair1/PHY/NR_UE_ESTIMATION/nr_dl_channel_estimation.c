@@ -1964,6 +1964,7 @@ void nr_pdsch_ptrs_processing(int nbRx,
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void) __attribute__((weak));
+int nr_pdsch_gpu_host_pin(void *p, size_t bytes) __attribute__((weak)); /* DECODETIME, nr_pdsch_gpu_exact.c */
 static _Atomic int g_gch_on = -1;
 static int g_gch_check;
 static _Atomic uint64_t g_gch_calls, g_gch_ok, g_gch_bad, g_gch_ns, g_gch_refused;
@@ -1971,6 +1972,29 @@ static _Atomic uint64_t g_gch_calls, g_gch_ok, g_gch_bad, g_gch_ns, g_gch_refuse
 /* segs != NULL: the passive decoder's PRG/VRB segmented path. Each segment is estimated on its own (as the CPU
  * loop does, chest_alloc = that segment) into a scratch row, then the data-ordered row is assembled exactly as
  * nr_pdsch_passive_decode.c does (zeroed row, segment s at data_index * 12), and nvar is the width-weighted mean. */
+/* DECODETIME: the GPU chest's per-thread host buffers; k_ls reads pil, k_fir writes scratch. With ISAC_PDSCH_GPU_HOST_PIN=1
+ * they are pinned at allocation (the GPU's first touch of each new page of scratch was a device-wide fault: 1744 rows = 40 ms). */
+static __thread c16_t (*pil)[3280];
+static __thread c16_t *scratch; /* segmented rows */
+static bool gch_bufs(bool with_scratch)
+{
+  if (!pil) {
+    if (!(pil = aligned_alloc(64, sizeof(c16_t) * 3280 * 16)))
+      return false;
+    if (nr_pdsch_gpu_host_pin)
+      nr_pdsch_gpu_host_pin(pil, sizeof(c16_t) * 3280 * 16);
+  }
+  if (with_scratch && !scratch) {
+    if (!(scratch = aligned_alloc(64, sizeof(c16_t) * 4096 * NR_GPU_CHEST_MAX_ROWS)))
+      return false;
+    if (nr_pdsch_gpu_host_pin)
+      nr_pdsch_gpu_host_pin(scratch, sizeof(c16_t) * 4096 * NR_GPU_CHEST_MAX_ROWS);
+  }
+  return true;
+}
+/* nr_pdsch_gpu_chest_pin_prewarm: allocate (and pin) both buffers at consumer start; caller nr_pdsch_passive_decode_pin_prewarm. */
+void nr_pdsch_gpu_chest_pin_prewarm(void) { gch_bufs(true); }
+
 int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
                              const UE_nr_rxtx_proc_t *proc,
                              const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
@@ -2055,11 +2079,7 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue,
   }
   if (max_end * (config_type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4) > 3280)
     return -1;
-  static __thread c16_t (*pil)[3280];
-  static __thread c16_t *scratch; /* segmented rows */
-  if (!pil && !(pil = aligned_alloc(64, sizeof(c16_t) * 3280 * 16)))
-    return -1;
-  if (segs && !scratch && !(scratch = aligned_alloc(64, sizeof(c16_t) * 4096 * NR_GPU_CHEST_MAX_ROWS)))
+  if (!gch_bufs(segs != NULL))
     return -1;
   static __thread nr_gpu_chest_job_t job;
   nr_gpu_chest_job_t *j = &job;

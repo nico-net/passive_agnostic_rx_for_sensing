@@ -26,4 +26,10 @@ int nr_pdcch_gpu_exact_fep_symbol(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *f
  * {est_delay, delay_max_pos, delay_max_val} of the candidate. 0, or -1 (CPU). */
 int nr_pdsch_gpu_exact_delay_rows(const c16_t *const *rows, int n, int *out);
 void nr_pdsch_gpu_exact_delay_note(int gpu_rows, int checked, int bad);
+/* DECODETIME ISAC_PDSCH_GPU_HOST_PIN=1 (default off): pin a pageable host buffer the GPU kernels touch (cudaHostRegister), so
+ * the GPU never page-faults on its first touch of it. 0 = pinned; -1 = flag off / module unavailable / failed (buffer stays
+ * pageable). Unpin before freeing a pinned buffer. */
+int nr_pdsch_gpu_host_pin(void *p, size_t bytes);
+int nr_pdsch_gpu_host_pin_enabled(void); /* 1 = flag on and module loaded */
+void nr_pdsch_gpu_host_unpin(void *p);
 #endif

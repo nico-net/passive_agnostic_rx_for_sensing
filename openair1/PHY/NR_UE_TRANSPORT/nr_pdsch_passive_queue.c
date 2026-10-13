@@ -1240,6 +1240,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
   const long slots_per_frame = fp->slots_per_frame;
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d started\n", idx);
+  nr_pdsch_passive_decode_pin_prewarm(ue); /* DECODETIME: ISAC_PDSCH_GPU_HOST_PIN=1 only */
   const char *slot_timing_env = getenv("ISAC_PDSCH_SLOT_TIMING");
   const bool slot_timing = slot_timing_env && atoi(slot_timing_env) != 0;
   {
@@ -2397,6 +2398,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     const size_t rxF_bytes = (size_t)ue->frame_parms.nb_antennas_rx * rxdataF_sz * sizeof(c16_t);
     g_rxdataF_gw = false;
     g_rxdataF[i] = (c16_t *)malloc16_clear(rxF_bytes);
+    nr_pdsch_gpu_host_pin(g_rxdataF[i], rxF_bytes); /* DECODETIME (ISAC_PDSCH_GPU_HOST_PIN=1 only): the exact GPU FEP writes it */
     if (g_gpu) {
       g_consumer_gpu_llr[i] = calloc(GPU_LLR_CAP, sizeof(int16_t));
       g_consumer_gpu_rxF[i] = calloc((size_t)ue->frame_parms.symbols_per_slot * ue->frame_parms.ofdm_symbol_size * 2, sizeof(int16_t));

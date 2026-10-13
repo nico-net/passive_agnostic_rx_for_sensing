@@ -1,0 +1,233 @@
+## per-run table (b = Vodafone raw_pci415_12s_b, tim = raw_pci923_tim_12s_tile3)
+cap arm rep | real n mean p50 p90 p99 max gt5 gt20 | retry mean p99 | probe mean p99 | sum p50/p90/p99 | q/dec/stale/full | scanq_stale | crcOK real, #RNTI | slow>20ms logged, events | effload temp finished
+b K 1 | 4049 4299.2 3265 7405 19995 43519.7 717 52 | 3324.3 13665 | 2268.4 14475 | 2915/5465/15715 | 8389/7625/721/0 | 252 | 1748,26 | 82,43 | 1.21 47,208MHz True
+b B 1 | 4744 597.8 425 915 2785 44195.7 29 1 | 547.2 2355 | 383.7 1545 | 385/815/2275 | 6587/6475/73/0 | 13 | 2027,31 | 2,2 | 1.58 47,208MHz True
+b C 1 | 462 501.5 405 695 1845 5732.5 1 0 | 446.1 1595 | 453.9 1355 | 345/535/1395 | 6790/4608/2178/0 | 1940 | 314,9 | 4,4 | 1.79 48,208MHz True
+b P 7 | 1672 563.2 405 805 3615 15102.1 12 0 | 486.6 3105 | 427.4 1375 | 355/595/2315 | 8009/6200/1786/0 | 985 | 964,21 | 5,5 | 1.85 50,318MHz True
+b B 2 | 1220 548.0 395 705 2325 37956.4 5 1 | 422.9 1505 | 381.4 1305 | 335/515/1495 | 6806/5350/1443/0 | 827 | 668,17 | 5,4 | 1.68 49,208MHz True
+b C 2 | 2633 593.6 435 875 3025 16686.6 18 0 | 575.8 3575 | 484.7 1975 | 385/755/2765 | 6977/5833/1107/0 | 447 | 1154,24 | 7,5 | 1.74 48,208MHz True
+b P 8 | 3500 583.7 425 895 2285 47965.4 12 2 | 509.1 2085 | 451.6 1525 | 385/745/2015 | 7667/7120/489/0 | 224 | 1586,30 | 7,5 | 2.21 51,2411MHz True
+b B 3 | 2761 569.4 415 855 2935 19625.4 13 0 | 503.0 2075 | 364.5 1335 | 365/705/2015 | 7278/6037/1198/0 | 549 | 1215,26 | 0,0 | 1.75 48,208MHz True
+b C 3 | 4070 541.7 415 805 2335 12824.1 7 0 | 497.7 1905 | 456.5 1875 | 375/725/1985 | 7583/7234/302/0 | 61 | 1768,29 | 2,2 | 1.63 48,208MHz True
+
+## mean +- sd across runs, per arm
+### b  (n runs: P=2, B=3, C=3)
+metric | P | B | C
+real mean us | 573.5 +- 14.5 | 571.7 +- 25.0 | 545.6 +- 46.2
+real p50 | 415.0 +- 14.1 | 411.7 +- 15.3 | 418.3 +- 15.3
+real p90 | 850.0 +- 63.6 | 825.0 +- 108.2 | 791.7 +- 90.7
+real p99 | 2950.0 +- 940.5 | 2681.7 +- 317.9 | 2401.7 +- 592.8
+real gt5ms share % | 0.5 +- 0.3 | 0.5 +- 0.1 | 0.4 +- 0.3
+real gt20ms count | 1.0 +- 1.4 | 0.7 +- 0.6 | 0.0 +- 0.0
+real max ms | 31.5 +- 23.2 | 33.9 +- 12.8 | 11.7 +- 5.6
+retry mean | 497.9 +- 15.9 | 491.0 +- 63.0 | 506.5 +- 65.3
+retry p99 | 2595.0 +- 721.2 | 1978.3 +- 433.2 | 2358.3 +- 1065.0
+probe mean | 439.5 +- 17.1 | 376.5 +- 10.5 | 465.0 +- 17.1
+probe p99 | 1450.0 +- 106.1 | 1395.0 +- 130.8 | 1735.0 +- 332.9
+real n | 2586.0 +- 1292.6 | 2908.3 +- 1766.6 | 2388.3 +- 1816.4
+sum p50 | 370.0 +- 21.2 | 361.7 +- 25.2 | 368.3 +- 20.8
+sum p90 | 670.0 +- 106.1 | 678.3 +- 151.8 | 671.7 +- 119.3
+sum p99 | 2165.0 +- 212.1 | 1928.3 +- 397.2 | 2048.3 +- 687.2
+stage fep mean | 69.5 +- 8.3 | 68.7 +- 11.8 | 67.9 +- 14.1
+stage chest mean | 116.4 +- 0.5 | 111.7 +- 5.2 | 114.2 +- 6.6
+stage alloc mean | 1.2 +- 0.1 | 1.3 +- 0.1 | 1.3 +- 0.1
+stage demod mean | 146.0 +- 11.0 | 132.1 +- 20.9 | 163.6 +- 15.6
+stage ldpc mean | 154.8 +- 11.5 | 157.8 +- 27.5 | 155.6 +- 24.9
+stage fep sd | 105.8 +- 6.4 | 73.6 +- 17.0 | 85.7 +- 56.5
+stage chest sd | 413.6 +- 58.3 | 370.4 +- 253.0 | 231.9 +- 88.9
+stage alloc sd | 1.4 +- 0.4 | 1.1 +- 0.3 | 1.2 +- 0.5
+stage demod sd | 1041.1 +- 227.0 | 757.5 +- 621.1 | 2182.9 +- 723.7
+stage ldpc sd | 154.2 +- 8.7 | 184.4 +- 19.4 | 406.9 +- 499.1
+stage fep max ms | 6.1 +- 2.3 | 3.4 +- 1.0 | 3.5 +- 3.1
+stage chest max ms | 35.3 +- 16.3 | 22.4 +- 13.0 | 14.2 +- 9.4
+stage alloc max ms | 0.1 +- 0.1 | 0.0 +- 0.0 | 0.1 +- 0.1
+stage demod max ms | 70.0 +- 14.8 | 81.3 +- 103.2 | 181.7 +- 46.1
+stage ldpc max ms | 2.7 +- 0.1 | 6.1 +- 2.8 | 40.4 +- 64.5
+stage fep p50 | 75.0 +- 0.0 | 75.0 +- 0.0 | 75.0 +- 0.0
+stage fep p90 | 105.0 +- 0.0 | 105.0 +- 0.0 | 108.3 +- 5.8
+stage fep p99 | 185.0 +- 42.4 | 188.3 +- 68.1 | 191.7 +- 50.3
+stage chest p50 | 85.0 +- 0.0 | 75.0 +- 0.0 | 81.7 +- 5.8
+stage chest p90 | 145.0 +- 0.0 | 138.3 +- 5.8 | 148.3 +- 5.8
+stage chest p99 | 665.0 +- 42.4 | 595.0 +- 78.1 | 691.7 +- 160.4
+stage demod p50 | 90.0 +- 7.1 | 88.3 +- 5.8 | 91.7 +- 5.8
+stage demod p90 | 150.0 +- 21.2 | 141.7 +- 25.2 | 145.0 +- 17.3
+stage demod p99 | 1015.0 +- 14.1 | 908.3 +- 205.5 | 1025.0 +- 355.1
+stage ldpc p50 | 115.0 +- 0.0 | 115.0 +- 0.0 | 115.0 +- 0.0
+stage ldpc p90 | 230.0 +- 49.5 | 258.3 +- 95.0 | 231.7 +- 57.7
+stage ldpc p99 | 725.0 +- 113.1 | 801.7 +- 310.7 | 728.3 +- 246.6
+real mean excl >5ms bodies | 524.8 +- 28.2 | 515.5 +- 32.7 | 520.7 +- 24.6
+real mean excl >20ms bodies | 561.9 +- 1.8 | 557.0 +- 36.8 | 545.6 +- 46.2
+all-body mean (real+retry+probe) | 486.7 +- 31.3 | 470.2 +- 58.8 | 501.3 +- 47.9
+pdschq drop_stale % | 14.3 +- 11.3 | 12.9 +- 10.5 | 17.3 +- 14.1
+pdschq drop_full | 0.0 +- 0.0 | 0.0 +- 0.0 | 0.0 +- 0.0
+pdschq queued | 7838.0 +- 241.8 | 6890.3 +- 353.1 | 7116.7 +- 414.5
+pdschq decoded | 6660.0 +- 650.5 | 5954.0 +- 567.1 | 5891.7 +- 1314.0
+scanq drop_stale | 604.5 +- 538.1 | 463.0 +- 413.8 | 816.0 +- 992.4
+CRC-OK real count | 1275.0 +- 439.8 | 1303.3 +- 683.8 | 1078.7 +- 729.9
+CRC-OK RNTIs | 25.5 +- 6.4 | 24.7 +- 7.1 | 20.7 +- 10.4
+stall events (>20ms, logged) | 5.0 +- 0.0 | 2.0 +- 2.0 | 3.7 +- 1.5
+slow bodies logged | 6.0 +- 1.4 | 2.3 +- 2.5 | 4.3 +- 2.5
+longest stall ms | 70.5 +- 15.0 | 79.9 +- 106.2 | 182.2 +- 46.0
+### tim  (n runs: P=0, B=0, C=0)
+metric | P | B | C
+real mean us | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real p50 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real p90 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real gt5ms share % | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real gt20ms count | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real max ms | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+retry mean | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+retry p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+probe mean | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+probe p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real n | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+sum p50 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+sum p90 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+sum p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage fep mean | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage chest mean | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage alloc mean | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage demod mean | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage ldpc mean | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage fep sd | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage chest sd | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage alloc sd | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage demod sd | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage ldpc sd | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage fep max ms | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage chest max ms | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage alloc max ms | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage demod max ms | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage ldpc max ms | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage fep p50 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage fep p90 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage fep p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage chest p50 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage chest p90 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage chest p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage demod p50 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage demod p90 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage demod p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage ldpc p50 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage ldpc p90 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stage ldpc p99 | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real mean excl >5ms bodies | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+real mean excl >20ms bodies | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+all-body mean (real+retry+probe) | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+pdschq drop_stale % | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+pdschq drop_full | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+pdschq queued | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+pdschq decoded | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+scanq drop_stale | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+CRC-OK real count | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+CRC-OK RNTIs | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+stall events (>20ms, logged) | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+slow bodies logged | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+longest stall ms | nan +- 0.0 | nan +- 0.0 | nan +- 0.0
+
+## significance on b (P vs B), n = 2 vs 3
+real mean us: P 573.5 vs B 571.7  diff=-1.7 (-0%)  Welch p=0.929  MWU p=1.000  bootstrap95% CI of diff [-28.6, 25.1]
+real p50: P 415.0 vs B 411.7  diff=-3.3 (-1%)  Welch p=0.822  MWU p=1.000  bootstrap95% CI of diff [-23.3, 16.7]
+real p90: P 850.0 vs B 825.0  diff=-25.0 (-3%)  Welch p=0.767  MWU p=1.000  bootstrap95% CI of diff [-145.0, 90.0]
+real p99: P 2950.0 vs B 2681.7  diff=-268.3 (-9%)  Welch p=0.757  MWU p=1.000  bootstrap95% CI of diff [-1136.7, 600.0]
+real max ms: P 31.5 vs B 33.9  diff=2.4 (+8%)  Welch p=0.911  MWU p=1.000  bootstrap95% CI of diff [-22.2, 27.0]
+real gt5ms share %: P 0.5 vs B 0.5  diff=-0.0 (-6%)  Welch p=0.891  MWU p=1.000  bootstrap95% CI of diff [-0.3, 0.2]
+real gt20ms count: P 1.0 vs B 0.7  diff=-0.3 (-33%)  Welch p=0.797  MWU p=1.000  bootstrap95% CI of diff [-1.7, 1.0]
+sum p99: P 2165.0 vs B 1928.3  diff=-236.7 (-11%)  Welch p=0.452  MWU p=0.554  bootstrap95% CI of diff [-670.0, 173.3]
+all-body mean (real+retry+probe): P 486.7 vs B 470.2  diff=-16.4 (-3%)  Welch p=0.712  MWU p=1.000  bootstrap95% CI of diff [-77.7, 44.8]
+real mean excl >20ms bodies: P 561.9 vs B 557.0  diff=-5.0 (-1%)  Welch p=0.837  MWU p=0.800  bootstrap95% CI of diff [-46.4, 24.0]
+probe mean: P 439.5 vs B 376.5  diff=-63.0 (-14%)  Welch p=0.071  MWU p=0.200  bootstrap95% CI of diff [-81.5, -44.5]
+retry mean: P 497.9 vs B 491.0  diff=-6.8 (-1%)  Welch p=0.872  MWU p=1.000  bootstrap95% CI of diff [-75.0, 49.4]
+stage chest mean: P 116.4 vs B 111.7  diff=-4.7 (-4%)  Welch p=0.253  MWU p=0.200  bootstrap95% CI of diff [-10.5, -0.7]
+stage demod mean: P 146.0 vs B 132.1  diff=-13.9 (-10%)  Welch p=0.404  MWU p=0.554  bootstrap95% CI of diff [-35.6, 7.8]
+stage fep mean: P 69.5 vs B 68.7  diff=-0.8 (-1%)  Welch p=0.936  MWU p=1.000  bootstrap95% CI of diff [-14.5, 12.9]
+stage chest max ms: P 35.3 vs B 22.4  diff=-12.9 (-37%)  Welch p=0.455  MWU p=0.400  bootstrap95% CI of diff [-32.8, 7.1]
+stage demod max ms: P 70.0 vs B 81.3  diff=11.3 (+16%)  Welch p=0.869  MWU p=0.800  bootstrap95% CI of diff [-60.3, 130.2]
+pdschq drop_stale %: P 14.3 vs B 12.9  diff=-1.4 (-10%)  Welch p=0.900  MWU p=0.800  bootstrap95% CI of diff [-16.1, 13.2]
+scanq drop_stale: P 604.5 vs B 463.0  diff=-141.5 (-23%)  Welch p=0.785  MWU p=0.800  bootstrap95% CI of diff [-793.3, 510.3]
+CRC-OK real count: P 1275.0 vs B 1303.3  diff=28.3 (+2%)  Welch p=0.959  MWU p=1.000  bootstrap95% CI of diff [-735.7, 792.3]
+CRC-OK RNTIs: P 25.5 vs B 24.7  diff=-0.8 (-3%)  Welch p=0.901  MWU p=1.000  bootstrap95% CI of diff [-10.0, 8.3]
+stall events (>20ms, logged): P 5.0 vs B 2.0  diff=-3.0 (-60%)  Welch p=0.122  MWU p=0.139  bootstrap95% CI of diff [-5.0, -1.0]
+longest stall ms: P 70.5 vs B 79.9  diff=9.4 (+13%)  Welch p=0.893  MWU p=0.800  bootstrap95% CI of diff [-70.5, 129.9]
+
+## significance on b (P vs C), n = 2 vs 3
+real mean us: P 573.5 vs C 545.6  diff=-27.9 (-5%)  Welch p=0.413  MWU p=0.800  bootstrap95% CI of diff [-72.0, 20.1]
+real p50: P 415.0 vs C 418.3  diff=3.3 (+1%)  Welch p=0.822  MWU p=1.000  bootstrap95% CI of diff [-16.7, 23.3]
+real p90: P 850.0 vs C 791.7  diff=-58.3 (-7%)  Welch p=0.462  MWU p=0.554  bootstrap95% CI of diff [-163.3, 46.7]
+real p99: P 2950.0 vs C 2401.7  diff=-548.3 (-19%)  Welch p=0.558  MWU p=0.800  bootstrap95% CI of diff [-1606.7, 510.0]
+real max ms: P 31.5 vs C 11.7  diff=-19.8 (-63%)  Welch p=0.436  MWU p=0.400  bootstrap95% CI of diff [-39.9, 0.3]
+real gt5ms share %: P 0.5 vs C 0.4  diff=-0.2 (-33%)  Welch p=0.548  MWU p=0.400  bootstrap95% CI of diff [-0.5, 0.2]
+real gt20ms count: P 1.0 vs C 0.0  diff=-1.0 (-100%)  Welch p=0.500  MWU p=0.414  bootstrap95% CI of diff [-2.0, 0.0]
+sum p99: P 2165.0 vs C 2048.3  diff=-116.7 (-5%)  Welch p=0.804  MWU p=0.800  bootstrap95% CI of diff [-770.0, 600.0]
+all-body mean (real+retry+probe): P 486.7 vs C 501.3  diff=14.6 (+3%)  Welch p=0.708  MWU p=1.000  bootstrap95% CI of diff [-39.3, 68.6]
+real mean excl >20ms bodies: P 561.9 vs C 545.6  diff=-16.3 (-3%)  Welch p=0.603  MWU p=0.800  bootstrap95% CI of diff [-60.4, 31.7]
+probe mean: P 439.5 vs C 465.0  diff=25.5 (+6%)  Welch p=0.229  MWU p=0.200  bootstrap95% CI of diff [3.2, 47.9]
+retry mean: P 497.9 vs C 506.5  diff=8.7 (+2%)  Welch p=0.843  MWU p=1.000  bootstrap95% CI of diff [-51.7, 77.9]
+stage chest mean: P 116.4 vs C 114.2  diff=-2.2 (-2%)  Welch p=0.618  MWU p=0.800  bootstrap95% CI of diff [-6.4, 5.4]
+stage demod mean: P 146.0 vs C 163.6  diff=17.6 (+12%)  Welch p=0.240  MWU p=0.400  bootstrap95% CI of diff [-0.5, 35.7]
+stage fep mean: P 69.5 vs C 67.9  diff=-1.6 (-2%)  Welch p=0.887  MWU p=1.000  bootstrap95% CI of diff [-17.7, 13.1]
+stage chest max ms: P 35.3 vs C 14.2  diff=-21.1 (-60%)  Welch p=0.284  MWU p=0.400  bootstrap95% CI of diff [-38.9, -3.3]
+stage demod max ms: P 70.0 vs C 181.7  diff=111.7 (+159%)  Welch p=0.040  MWU p=0.200  bootstrap95% CI of diff [69.6, 161.0]
+pdschq drop_stale %: P 14.3 vs C 17.3  diff=3.0 (+21%)  Welch p=0.813  MWU p=1.000  bootstrap95% CI of diff [-14.4, 20.3]
+scanq drop_stale: P 604.5 vs C 816.0  diff=211.5 (+35%)  Welch p=0.779  MWU p=1.000  bootstrap95% CI of diff [-795.3, 1335.5]
+CRC-OK real count: P 1275.0 vs C 1078.7  diff=-196.3 (-15%)  Welch p=0.733  MWU p=1.000  bootstrap95% CI of diff [-992.0, 599.3]
+CRC-OK RNTIs: P 25.5 vs C 20.7  diff=-4.8 (-19%)  Welch p=0.566  MWU p=0.800  bootstrap95% CI of diff [-16.5, 6.3]
+stall events (>20ms, logged): P 5.0 vs C 3.7  diff=-1.3 (-27%)  Welch p=0.270  MWU p=0.333  bootstrap95% CI of diff [-3.0, 0.0]
+longest stall ms: P 70.5 vs C 182.2  diff=111.7 (+159%)  Welch p=0.040  MWU p=0.200  bootstrap95% CI of diff [69.8, 160.9]
+
+## significance on tim (P vs B), n = 0 vs 0
+
+## significance on tim (P vs C), n = 0 vs 0
+
+## decomposition: share of total decode (body) time by body duration, per class (PDTIMCLS), mean over runs
+b P real: <1ms 0.72 | 1-5ms 0.19 | 5-20ms 0.07 | >20ms 0.02   (per-run >20ms share range 0.00-0.04)
+b P retry: <1ms 0.79 | 1-5ms 0.16 | 5-20ms 0.05 | >20ms 0.00   (per-run >20ms share range 0.00-0.00)
+b P probe: <1ms 0.79 | 1-5ms 0.07 | 5-20ms 0.03 | >20ms 0.11   (per-run >20ms share range 0.07-0.15)
+b B real: <1ms 0.71 | 1-5ms 0.18 | 5-20ms 0.08 | >20ms 0.03   (per-run >20ms share range 0.00-0.06)
+b B retry: <1ms 0.79 | 1-5ms 0.15 | 5-20ms 0.05 | >20ms 0.02   (per-run >20ms share range 0.00-0.03)
+b B probe: <1ms 0.88 | 1-5ms 0.09 | 5-20ms 0.02 | >20ms 0.01   (per-run >20ms share range 0.00-0.04)
+b C real: <1ms 0.77 | 1-5ms 0.18 | 5-20ms 0.05 | >20ms 0.00   (per-run >20ms share range 0.00-0.00)
+b C retry: <1ms 0.79 | 1-5ms 0.14 | 5-20ms 0.05 | >20ms 0.02   (per-run >20ms share range 0.00-0.06)
+b C probe: <1ms 0.75 | 1-5ms 0.08 | 5-20ms 0.02 | >20ms 0.15   (per-run >20ms share range 0.13-0.17)
+
+## PDTIMCLSST: per class x stage, ms of stage wall time in bodies <1 / 1-5 / 5-20 / >20 ms (sum over runs), per arm
+b P real: fep 475/63/20/0 (>5ms share 0.04) | chest 523/166/76/72 (>5ms share 0.18) | demod 520/163/69/0 (>5ms share 0.09) | ldpc 633/172/20/1 (>5ms share 0.03)
+b P probe: fep 378/37/11/1 (>5ms share 0.03) | chest 1078/156/71/26 (>5ms share 0.07) | demod 1017/123/40/485 (>5ms share 0.32) | ldpc 1282/44/26/3 (>5ms share 0.02)
+b B real: fep 791/92/19/0 (>5ms share 0.02) | chest 856/266/107/37 (>5ms share 0.11) | demod 856/273/233/45 (>5ms share 0.20) | ldpc 1082/356/46/0 (>5ms share 0.03)
+b B probe: fep 518/27/0/0 (>5ms share 0.00) | chest 1458/218/40/90 (>5ms share 0.07) | demod 1307/174/36/3 (>5ms share 0.03) | ldpc 1683/49/2/1 (>5ms share 0.00)
+b C real: fep 663/63/20/0 (>5ms share 0.03) | chest 725/217/87/0 (>5ms share 0.08) | demod 727/207/75/0 (>5ms share 0.07) | ldpc 932/242/28/0 (>5ms share 0.02)
+b C probe: fep 581/32/11/1 (>5ms share 0.02) | chest 1551/295/23/25 (>5ms share 0.03) | demod 1420/189/59/930 (>5ms share 0.38) | ldpc 1771/72/8/116 (>5ms share 0.06)
+
+## >20 ms bodies by stage (PDTIMSLOW, first 200/run, sum of stage wall us over logged slow bodies; share of that sum), per arm
+b P: fep 1 ms (0%), chest 98 ms (17%), demod 485 ms (82%), ldpc 4 ms (1%); dominant-stage counts {'fep': 0, 'chest': 3, 'demod': 9, 'ldpc': 0}
+b B: fep 1 ms (0%), chest 127 ms (31%), demod 275 ms (67%), ldpc 8 ms (2%); dominant-stage counts {'fep': 0, 'chest': 4, 'demod': 3, 'ldpc': 0}
+b C: fep 2 ms (0%), chest 26 ms (2%), demod 1197 ms (89%), ldpc 117 ms (9%); dominant-stage counts {'fep': 0, 'chest': 1, 'demod': 11, 'ldpc': 1}
+tim P: fep 0 ms (0%), chest 0 ms (0%), demod 0 ms (0%), ldpc 0 ms (0%); dominant-stage counts {'fep': 0, 'chest': 0, 'demod': 0, 'ldpc': 0}
+tim B: fep 0 ms (0%), chest 0 ms (0%), demod 0 ms (0%), ldpc 0 ms (0%); dominant-stage counts {'fep': 0, 'chest': 0, 'demod': 0, 'ldpc': 0}
+tim C: fep 0 ms (0%), chest 0 ms (0%), demod 0 ms (0%), ldpc 0 ms (0%); dominant-stage counts {'fep': 0, 'chest': 0, 'demod': 0, 'ldpc': 0}
+
+## per-stage mean vs p50 (tail excess), per arm
+b P fep: mean 69 us, p50 75, p90 105, p99 185  => tail excess (mean-p50) -6 us = -8% of mean
+b P chest: mean 116 us, p50 85, p90 145, p99 665  => tail excess (mean-p50) 31 us = 27% of mean
+b P demod: mean 146 us, p50 90, p90 150, p99 1015  => tail excess (mean-p50) 56 us = 38% of mean
+b P ldpc: mean 155 us, p50 115, p90 230, p99 725  => tail excess (mean-p50) 40 us = 26% of mean
+b B fep: mean 69 us, p50 75, p90 105, p99 188  => tail excess (mean-p50) -6 us = -9% of mean
+b B chest: mean 112 us, p50 75, p90 138, p99 595  => tail excess (mean-p50) 37 us = 33% of mean
+b B demod: mean 132 us, p50 88, p90 142, p99 908  => tail excess (mean-p50) 44 us = 33% of mean
+b B ldpc: mean 158 us, p50 115, p90 258, p99 802  => tail excess (mean-p50) 43 us = 27% of mean
+b C fep: mean 68 us, p50 75, p90 108, p99 192  => tail excess (mean-p50) -7 us = -10% of mean
+b C chest: mean 114 us, p50 82, p90 148, p99 692  => tail excess (mean-p50) 33 us = 29% of mean
+b C demod: mean 164 us, p50 92, p90 145, p99 1025  => tail excess (mean-p50) 72 us = 44% of mean
+b C ldpc: mean 156 us, p50 115, p90 232, p99 728  => tail excess (mean-p50) 41 us = 26% of mean
+
+## stall events (>20 ms body clusters; t mod 10000 s, #bodies, max us), per run
+b K 1: [(301.574, 1, 38673), (306.576, 1, 25120), (307.57, 1, 27333), (307.739, 2, 27942), (308.503, 1, 29015), (308.753, 2, 28442), (308.924, 3, 45250), (309.484, 3, 39118), (309.716, 1, 32613), (309.924, 1, 31552), (310.016, 5, 35355), (310.299, 2, 29731), (310.476, 3, 35230), (311.434, 1, 25644), (316.644, 1, 35929), (317.478, 1, 25597), (317.641, 1, 29287), (317.705, 1, 35856), (317.835, 1, 22412), (320.725, 1, 23275), (321.413, 4, 34395), (321.742, 1, 38738), (321.982, 6, 36253), (322.131, 2, 28282), (322.396, 3, 39881), (322.498, 4, 27234), (322.662, 3, 29071), (323.112, 3, 30318), (323.217, 2, 43519), (323.311, 2, 27908), (323.424, 4, 30730), (324.867, 1, 21140), (325.038, 3, 27486), (325.772, 1, 24838), (326.513, 1, 20181), (326.809, 1, 24798), (327.076, 2, 23379), (328.098, 1, 22112), (328.989, 1, 38906), (329.733, 1, 20526), (329.784, 1, 22953), (329.914, 1, 29096), (332.685, 1, 20222)]
+b B 1: [(437.57, 1, 44195), (446.0, 1, 200384)]
+b C 1: [(490.675, 1, 28996), (492.292, 1, 65762), (510.152, 1, 75859), (515.734, 1, 231401)]
+b P 7: [(544.877, 1, 24045), (549.714, 1, 24243), (553.952, 1, 40407), (554.782, 1, 46107), (569.149, 1, 59884)]
+b B 2: [(603.536, 1, 37956), (629.847, 1, 39322), (631.221, 1, 33551), (637.645, 2, 32874)]
+b C 2: [(689.654, 2, 127168), (694.624, 1, 140275), (695.475, 1, 103087), (698.332, 1, 24477), (702.319, 2, 56409)]
+b P 8: [(734.137, 1, 47965), (737.401, 3, 81047), (738.14, 1, 56393), (747.875, 1, 25615), (748.141, 1, 20708)]
+b B 3: []
+b C 3: [(880.105, 1, 138330), (881.382, 1, 174821)]
