@@ -737,7 +737,7 @@ class RunState:
             r = "0x" + m[1]
             first = r not in self.td_conv
             self.td_conv[r] = {"tda": int(m[2]), "S": int(m[3]), "L": int(m[4]), "dmrs_mask": m[5], "mcs_table": int(m[6]),
-                               "t": t}
+                               "t": t, "pci": self.cur_pci}
             self._stage(6, t)
             if first:
                 self._event(t, "dl_conv", "DL interpretation converged for RNTI %s (TDA %s, S=%s L=%s)" % (r, m[2], m[3], m[4]),
@@ -1004,7 +1004,7 @@ class RunState:
                     "last": self.cfr["last"], "heat": {k: list(v) for k, v in self.cfr["heat"].items()}},
             "csirs_metrics": {k: m.get(k) for k in ("csirs_candidates", "csirs_confirmed", "csirs_revoked", "zp_exported",
                                                     "zp_revoked", "csirs_time_to_confirm_resources")},
-            "events": list(self.events), "events_dropped": self.events_dropped,
+            "events": sorted(self.events, key=lambda e: -1.0 if e["t"] is None else e["t"]), "events_dropped": self.events_dropped,
             "config": {"cmdline": self.cmdline, "cfg_path": self.cfg_path, "env": self.env},
         }
 
@@ -1016,6 +1016,8 @@ def window(a, b, t):
         return out
     ta, tb = _num(a.get("t_mono_ns")), _num(b.get("t_mono_ns"))
     dt = (tb - ta) / 1e9 if ta is not None and tb is not None and tb > ta else None
+    if dt is not None and dt < 2.0:
+        return out          # a snapshot right after the previous one (e.g. at shutdown): too short for a rate
 
     def d(k):
         x, y = _num(a.get(k)), _num(b.get(k))
@@ -1144,7 +1146,7 @@ def cell_rows(snap, key):
     if g and g.get("mcs_tables"):
         rows.append({"item": "MCS table (CRC-OK grants)", "value": ", ".join("table %s: %s" % kv for kv in g["mcs_tables"].items()),
                      "how": "solver / Technique D (CRC verified)", "state": "confirmed"})
-    tables = {v["mcs_table"] for v in snap["td_conv"].values()}
+    tables = {v["mcs_table"] for v in snap["td_conv"].values() if str(v.get("pci")) == key}
     if tables:
         rows.append({"item": "MCS table (converged RNTIs)", "value": ", ".join(map(str, sorted(tables))),
                      "how": "Technique D convergence (TB CRC)", "state": "confirmed"})
@@ -1159,6 +1161,9 @@ def ul_reason(snap):
     ul, pd = snap["ul"], snap["pdcch"]
     if ul.get("state") == "LOCKED":
         return "UL layout locked: %s, via %s." % (ul["bwp"], ul["how"])
+    if ul.get("state") == "PROVISIONAL" and (snap["pusch"].get("crc_ok") or 0) > 0:
+        return ("UL layout provisional by its statistics (%s), but %s PUSCH grants passed CRC with the layout in use."
+                % (ul["bwp"], snap["pusch"]["crc_ok"]))
     if ul.get("state") == "PROVISIONAL":
         return "UL layout provisional: %s (%s). The BWP start is not CRC-confirmed yet." % (ul["bwp"], ul["how"])
     dci01 = ((pd.get("dci01") or {}).get("accepts")) or 0
