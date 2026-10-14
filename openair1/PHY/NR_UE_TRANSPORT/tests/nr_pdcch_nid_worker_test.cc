@@ -165,6 +165,14 @@ int main(int argc,char **argv) {
   int n=-1;
   for(int t=0;t<2000 && n<0;t++){wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);}
   CHECK(n==1 && records[0].nid==12009);
+  if(incremental) { /* ACQMISS recovery: rearm forgets the published records and keeps the worker alive */
+   int before=uploaded();
+   nr_pdcch_nid_gpu_rearm();
+   CHECK(nr_pdcch_nid_gpu_records(records,16,&generation)==0);
+   CHECK(push_batch(true));
+   for(int t=0;t<2000 && uploaded()<=before;t++)wait_ms(1);
+   CHECK(uploaded()>before && errors()==0 && nr_pdcch_nid_gpu_running());
+  }
  }
  nr_pdcch_nid_gpu_stop();CHECK(!nr_pdcch_nid_gpu_running());dlclose(lib);
  puts(device?"PASS synthetic GPU push -> worker -> records":"PASS host transport: off identity, wrap, cadence, single SCHED_OTHER core, overflow, shutdown");return 0;

@@ -78,7 +78,10 @@ void nr_dltp_slot(const float *e, const nr_dltp_geom_t *g, float floor_mean, boo
     }
     if (best >= NR_DLTP_PDSCH_RUN) {
       st->pdsch_like++;
-      if (!granted_rb(grants, n_grants, r)) { st->pdsch_like_ungranted++; pdsch_un = true; }
+      if (!granted_rb(grants, n_grants, r)) {
+        st->pdsch_like_ungranted++; pdsch_un = true;
+        if (!(g->css0_rb1 > g->css0_rb0 && r >= g->css0_rb0 && r < g->css0_rb1)) st->pdsch_like_ungranted_nocss0++;
+      }
     }
   }
   for (int s = 0; s < 3; ++s) st->ctrl_slots[s] += ctrl_hit[s];
@@ -129,4 +132,33 @@ int nr_dltp_grants_for(uint16_t frame, uint8_t slot, nr_dltp_grant_t *out, int c
     if (g_grants[i].frame == frame && g_grants[i].slot == slot) out[n++] = g_grants[i];
   pthread_mutex_unlock(&g_gmu);
   return n;
+}
+
+/* nr_cdisc_step: one evaluation of the CORESET_DISC state (see header). recover is set when the caller should re-arm the sweep. */
+void nr_cdisc_step(nr_cdisc_t *c, const nr_cdisc_in_t *in, nr_cdisc_out_t *out)
+{
+  const nr_cdisc_state_t old = c->state;
+  out->recover = 0; out->traffic = 0;
+  if (in->bank_count > 0) {
+    c->state = NR_CDISC_LOCKED; c->recoveries = 0; out->reason = "dedicated_coreset_banked";
+  } else if (!in->carrier_ok) {
+    c->state = NR_CDISC_SEARCHING; c->armed = 0; out->reason = "carrier_pending";
+  } else {
+    if (!c->armed) { c->armed = 1; c->armed_s = in->now_s; c->last_recover_s = in->now_s; }
+    const double since = in->now_s - c->armed_s;
+    const double rate = in->window_probed ? (double)in->window_rbslots / (double)in->window_probed : 0.0;
+    out->traffic = in->window_rbslots >= NR_CDISC_RBSLOTS_PRESENT && rate >= NR_CDISC_RATE_PRESENT ? 1
+                 : in->window_probed >= NR_CDISC_PROBED_ABSENT && in->window_rbslots < 8 ? -1 : 0;
+    if (out->traffic < 0) { c->state = NR_CDISC_NO_TRAFFIC; out->reason = "probe_absent_no_unexplained_pdsch"; }
+    else if (out->traffic == 0) { c->state = NR_CDISC_SEARCHING; out->reason = "traffic_undecided"; }
+    else if (since < in->miss_s) { c->state = NR_CDISC_SEARCHING; out->reason = "traffic_present_within_grace"; }
+    else {
+      c->state = NR_CDISC_MISSED; out->reason = "traffic_present_no_dedicated_coreset";
+      /* linear back-off: the k-th recovery waits (k+1) x miss_s after the previous one */
+      if (c->recoveries < in->max_recover && in->now_s - c->last_recover_s >= (c->recoveries + 1) * in->miss_s) {
+        c->recoveries++; c->last_recover_s = in->now_s; out->recover = 1;
+      }
+    }
+  }
+  out->changed = c->state != old;
 }

@@ -9085,8 +9085,10 @@ constdiag_done:;
           cand_task[ti].ul_scan ? "0_x" : (out.dci_format == NR_BLIND_DCI_FORMAT_1_0 ? "1_0" : "1_1"), cand_task[ti].cce,
           (int)cand_task[ti].L);
     /* Tie this accept to whichever CORESET windows are currently lit -- see COREMAPLT. */
-    if (out.rnti_class == NR_BLIND_RNTI_CLASS_C || out.rnti_class == NR_BLIND_RNTI_CLASS_TC)
+    if (out.rnti_class == NR_BLIND_RNTI_CLASS_C || out.rnti_class == NR_BLIND_RNTI_CLASS_TC) {
       nr_pdcch_blind_monitor_note_rnti_for_windows(out.rnti);
+      nr_cell_state_note_ue_rnti((uint16_t)out.rnti); /* PCIS2 */
+    }
     /* BC9: DL DCI history at ACCEPT time, before every grant drop below (a dropped grant still occupies its PDSCH slot). */
     if (out.rnti_class == NR_BLIND_RNTI_CLASS_C)
       bc9_dci_accept(&out, cand_task[ti].dl_auto ? cand_task[ti].dl_layout_configuration : g_pdsch_configuration, abs_slot, fp);

@@ -21,6 +21,7 @@
 #include "NR_MAC_UE/mac_proto.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "common/utils/nr/nr_common.h"
 #include "openair2/NR_UE_PHY_INTERFACE/NR_Packet_Drop.h"
@@ -216,6 +217,8 @@ void nr_ue_decode_mib(NR_UE_MAC_INST_t *mac, int cc_id)
             mac->mib->cellBarred == NR_MIB__cellBarred_barred, (int)mac->mib->intraFreqReselection);
     s_mib_logged = true;
   }
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    nr_cell_state_note_mib_barred(mac->mib->cellBarred == NR_MIB__cellBarred_barred); /* PCIS2: ISAC_CELL_STATE */
   mac->ssb_subcarrier_offset = ssb_subcarrier_offset;
   mac->dmrs_TypeA_Position = mac->mib->dmrs_TypeA_Position;
   /* Measured cell fact: publish it to the blind PDCCH monitor on every MIB, not only via the CSS0

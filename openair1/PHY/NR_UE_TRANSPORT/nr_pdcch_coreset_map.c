@@ -418,6 +418,8 @@ static void *idsw_worker(void *arg)
 /* Capture metrics have one producer; readers use relaxed atomic snapshots. */
 static _Atomic uint64_t nid_capture_offered, nid_capture_taken, nid_capture_skipped_empty;
 static _Atomic float nid_capture_noise;
+static _Atomic int nid_gate_bypass; /* ACQMISS recovery: capture every offered symbol (occupancy gate off) */
+void nr_pdcch_coreset_map_idsweep_gate_bypass(int on) { atomic_store_explicit(&nid_gate_bypass, on, memory_order_relaxed); }
 /* nr_pdcch_nid_capture_metrics: returns the NID capture counters: slots offered to the capture, captures taken, captures skipped as empty, and the latest noise level of the occupancy gate. Reads atomics. Caller: nr_passive_metrics.c (metrics emission). */
 void nr_pdcch_nid_capture_metrics(uint64_t *offered, uint64_t *taken, uint64_t *empty, float *noise)
 {
@@ -441,6 +443,8 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
   }
   if ((!gpu && (g_idsw.enabled != 1 || g_idsw.full)) || sps <= 0)
     return -1;
+  { uint64_t co = 0, ct = 0, ce = 0; float nz; nr_pdcch_nid_capture_metrics(&co, &ct, &ce, &nz);
+    if (nr_cell_state_sweep_blocked(abs_slot, co, ct, ce)) return -1; } /* PCIS2: ISAC_CELL_STATE=2, barred/idle cell */
   const nr_passive_acq_snapshot_t snap = nr_passive_acq_snapshot();
   if (snap.carrier_verified == 0 || g_css0_first_rb < 0) /* Point A (SIB1) and CORESET#0 (MIB) first */
     return -1;
@@ -515,7 +519,7 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
       memset(&occupancy, 0, sizeof(occupancy)); previous = cfg; previous_sync_losses = snap.sync_losses;
     }
     atomic_fetch_add_explicit(&nid_capture_offered, 1, memory_order_relaxed);
-    bool take = !occ_enabled || nr_nid_occupancy_take(&occupancy, rxF_sym, fft, fco, nsc, pa,
+    bool take = !occ_enabled || atomic_load_explicit(&nid_gate_bypass, memory_order_relaxed) || nr_nid_occupancy_take(&occupancy, rxF_sym, fft, fco, nsc, pa,
                                                      cfg.css0_crb, cfg.css0_nrb, sym, ratio, floor_pct);
     if (sym >= 0 && sym < 14)
       atomic_store_explicit(&nid_capture_noise, occupancy.noise[sym], memory_order_relaxed);
