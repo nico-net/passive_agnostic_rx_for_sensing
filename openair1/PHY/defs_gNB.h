@@ -246,6 +246,8 @@ typedef struct {
   uint32_t ulsch_noise_power[8];
   /// total noise over antennas
   uint32_t ulsch_noise_power_tot;
+  /// passive RX: per-antenna DMRS SNR (dB) from |H|^2 vs LS-vs-smoothed residual, NAN when not measured
+  float ul_dmrs_snr_db;
   /// \brief llr values.
   /// - first index: ? [0..1179743] (hard coded)
   int16_t *llr;

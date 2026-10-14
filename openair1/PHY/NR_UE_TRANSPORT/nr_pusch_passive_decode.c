@@ -2223,6 +2223,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->est_delay     = pvp->delay.est_delay;
   if (pvp->ulsch_noise_power_tot > 0) {
     out->snr_db = 10.0f * log10f((float)pvp->ulsch_power_tot / (float)pvp->ulsch_noise_power_tot);
+  } else if (isfinite(pvp->ul_dmrs_snr_db)) {
+    out->snr_db = pvp->ul_dmrs_snr_db; /* blind receiver: no n0_subband_power, use the DMRS-based estimate */
   }
 
   /* `rc` is the LDPC coding INTERFACE return, not the CRC verdict -- nr_ulsch_decoding() returns
