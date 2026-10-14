@@ -24,6 +24,7 @@
 #include "nr_crc_evidence.h"
 #include "common/utils/LOG/log.h"
 #include <string.h>
+#include <stdlib.h>
 #include <math.h>
 
 static int refuse(nr_hyp_sweep_state_t *st, int error)
@@ -70,6 +71,73 @@ int nr_hyp_sweep_init(nr_hyp_sweep_state_t *st, const nr_hyp_t *raw, int n,
     st->class_of_raw[i] = cls;
   }
   return st->n_classes;
+}
+int nr_hyp_sweep_init_keyed(nr_hyp_sweep_state_t *st, const nr_hyp_t *raw, int n,
+                           nr_hyp_constraint_fn constraint, void *cc, nr_hyp_key_fn key,
+                           const void *const *samples, int ns, void *ec)
+{
+  if (!key || !ns) /* no merging at all: exactly the plain init */
+    return nr_hyp_sweep_init(st, raw, n, constraint, cc, NULL, samples, ns, ec);
+  if (!st) return refuse(st, NR_HYP_SWEEP_INVALID);
+  memset(st, 0, sizeof(*st));
+  st->winner = -1;
+  memset(st->class_of_raw, -1, sizeof(st->class_of_raw));
+  if (n > NR_HYP_SWEEP_MAX_RAW) return refuse(st, NR_HYP_SWEEP_RAW_OVERFLOW);
+  if (n < 0 || (n && !raw) || ns < 0 || !samples)
+    return refuse(st, NR_HYP_SWEEP_INVALID);
+  for (int s = 0; s < ns; ++s)
+    if (!samples[s]) return refuse(st, NR_HYP_SWEEP_INVALID);
+  /* A class matches raw[i] iff its representative and raw[i] are comparable on every sample with equal keys; equality of
+   * key vectors is transitive, so at most one class can match and a hash of the vector finds it. */
+  enum { HCAP = 2 * NR_HYP_SWEEP_MAX_CLASSES };
+  const int vmax = ns * (NR_HYP_KEY_MAX + 1);
+  uint8_t *vec = malloc((size_t)vmax * NR_HYP_SWEEP_MAX_CLASSES); /* key vector of each comparable class */
+  int *vlen = malloc(sizeof(int) * NR_HYP_SWEEP_MAX_CLASSES);
+  int16_t *tab = malloc(sizeof(int16_t) * HCAP);
+  if (!vec || !vlen || !tab) {
+    free(vec); free(vlen); free(tab);
+    return refuse(st, NR_HYP_SWEEP_INVALID);
+  }
+  memset(tab, -1, sizeof(int16_t) * HCAP);
+  uint8_t cur[ns * (NR_HYP_KEY_MAX + 1)];
+  int rc = 0;
+  for (int i = 0; i < n; ++i) {
+    if (raw[i].len <= 0 || raw[i].len > NR_HYP_BYTES) { rc = NR_HYP_SWEEP_INVALID; break; }
+    if (constraint && !constraint(&raw[i], cc)) continue;
+    int len = 0;
+    bool comparable = true;
+    for (int s = 0; s < ns && comparable; ++s) {
+      const int k = key(&raw[i], samples[s], ec, &cur[len + 1]);
+      comparable = k >= 0 && k <= NR_HYP_KEY_MAX;
+      if (comparable) { cur[len] = (uint8_t)k; len += 1 + k; }
+    }
+    int cls = -1, pos = -1;
+    if (comparable) {
+      uint64_t h = 1469598103934665603ull;
+      for (int b = 0; b < len; ++b) h = (h ^ cur[b]) * 1099511628211ull;
+      pos = (int)(h & (HCAP - 1));
+      while (tab[pos] >= 0) {
+        const int c = tab[pos];
+        if (vlen[c] == len && !memcmp(&vec[(size_t)c * vmax], cur, (size_t)len)) { cls = c; break; }
+        pos = (pos + 1) & (HCAP - 1);
+      }
+    }
+    if (cls < 0) {
+      if (st->n_classes == NR_HYP_SWEEP_MAX_CLASSES) { rc = NR_HYP_SWEEP_CLASS_OVERFLOW; break; }
+      cls = st->n_classes++;
+      st->order[cls] = cls;
+      st->classes[cls].hyp = raw[i];
+      if (comparable) {
+        memcpy(&vec[(size_t)cls * vmax], cur, (size_t)len);
+        vlen[cls] = len;
+        tab[pos] = (int16_t)cls;
+      }
+    }
+    st->classes[cls].members++;
+    st->class_of_raw[i] = cls;
+  }
+  free(vec); free(vlen); free(tab);
+  return rc ? refuse(st, rc) : st->n_classes;
 }
 /* Allocate probes using an anytime Hoeffding confidence bound. A union bound
  * over both tails, all classes and n>=1 uses delta/[K*(n+1)*(n+2)].

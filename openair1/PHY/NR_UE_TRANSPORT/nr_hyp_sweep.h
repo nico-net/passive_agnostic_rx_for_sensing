@@ -60,6 +60,15 @@ typedef bool (*nr_hyp_plausible_fn)(const nr_hyp_t *, const void *, void *);
 int nr_hyp_sweep_init(nr_hyp_sweep_state_t *, const nr_hyp_t *, int,
                      nr_hyp_constraint_fn, void *, nr_hyp_equivalent_fn,
                      const void *const *, int, void *);
+/* SCANCOST: equivalence key of a hypothesis on one sample. Writes at most NR_HYP_KEY_MAX bytes and returns their count,
+ * or -1 when the hypothesis cannot be compared on that sample. */
+#define NR_HYP_KEY_MAX 64
+typedef int (*nr_hyp_key_fn)(const nr_hyp_t *, const void *, void *, uint8_t *);
+/* nr_hyp_sweep_init() for an equivalence of the form eq(a,b,s) == (key(a,s) >= 0 && key(b,s) >= 0 && equal key bytes):
+ * the same classes in the same order, with n x ns key computations instead of up to n x classes x ns eq calls. */
+int nr_hyp_sweep_init_keyed(nr_hyp_sweep_state_t *, const nr_hyp_t *, int,
+                           nr_hyp_constraint_fn, void *, nr_hyp_key_fn,
+                           const void *const *, int, void *);
 int nr_hyp_sweep_next(nr_hyp_sweep_state_t *, const void *, nr_hyp_plausible_fn, void *, nr_hyp_t *);
 int nr_hyp_sweep_feed(nr_hyp_sweep_state_t *, int, bool);
 int nr_hyp_sweep_winner(const nr_hyp_sweep_state_t *);
