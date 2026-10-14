@@ -194,7 +194,9 @@ static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
 static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
 static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20[PDTIM_NCLS]; /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
-static __thread uint64_t t_dec_body_ns, t_dec_stage_ns; /* FATTAILS DECSLOW: this call's body wall and fep+chest+demod+ldpc wall */
+static int retry_budget_us(void);            /* FATTAILS, below */
+static uint64_t dec_now_ns(void);
+static __thread uint64_t t_dec_body_ns, t_dec_stage_ns, t_dec_t0_ns; /* FATTAILS DECSLOW: this call's body wall and fep+chest+demod+ldpc wall */
 /* FATTAILS DECSLOW: the last nr_pdsch_passive_decode() call's bodies, their wall time and their stage time (ns) */
 void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns)
 {
@@ -5452,6 +5454,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 {
   t_pdtim_body = 0; /* ISAC_PDTIM_CLASS: the next body is this call's first (real), later ones are retries */
   t_dec_body_ns = t_dec_stage_ns = 0;
+  if (retry_budget_us())
+    t_dec_t0_ns = dec_now_ns();
   /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
   if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) /* ISAC_CSIRS_FULL_AB diagnostic */
     nr_csirs_full_ab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
@@ -5873,6 +5877,26 @@ static bool signal_geom_detect(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_con
 int nr_pdsch_passive_queue_backlog_real(void) __attribute__((weak));
 static int ry_backlog(void) { return nr_pdsch_passive_queue_backlog_real ? nr_pdsch_passive_queue_backlog_real() : 0; }
 static _Atomic uint64_t g_ry_chains, g_ry_yields, g_ry_gated, g_ry_try[RY_ARMS], g_ry_ok[RY_ARMS], g_ry_seen[RY_ARMS];
+/* FATTAILS ISAC_PDSCH_RETRY_BUDGET_US=N (default 0 = off; umbrella ISAC_FATTAILS=1 -> 1000): with RETRY_YIELD, the arms after
+ * the S toggle are skipped once this decode call has run N us (counted as yields): a failed grant's long-shot arms no longer
+ * hold its consumer for several bodies. */
+static uint64_t dec_now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+static int retry_budget_us(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_PDSCH_RETRY_BUDGET_US"), *u = getenv("ISAC_FATTAILS");
+    v = e ? atoi(e) : (u && atoi(u) ? 1000 : 0);
+    if (v < 0)
+      v = 0;
+  }
+  return v;
+}
 static int retry_yield_mode(void)
 {
   static int v = -1;
@@ -6090,7 +6114,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_retry(PHY_VARS_NR_UE *ue,
         const int ry_k = (arm + 32 * cv) % RY_ARMS;
         if (ry == 2 && !ry_arm_worth(ry_k))
           continue;
-        if (ry && !(cv == 0 && arm == 2) && ry_backlog() > 0) {
+        if (ry && !(cv == 0 && arm == 2)
+            && (ry_backlog() > 0 || (retry_budget_us() && dec_now_ns() - t_dec_t0_ns > (uint64_t)retry_budget_us() * 1000ull))) {
           yielded = true; /* a full decode waits for a consumer: stop this grant's long-shot arms */
           atomic_fetch_add_explicit(&g_ry_yields, 1, memory_order_relaxed);
           break;
