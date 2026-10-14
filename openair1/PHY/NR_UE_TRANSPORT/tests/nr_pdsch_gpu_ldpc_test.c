@@ -12,11 +12,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/CODING/nrLDPC_decoder/nrLDPC_types.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.h"
 #include "common/utils/LOG/log.h"
 
+/* argv[2] == "ul": the same comparison through the UL pool (nr_pusch_gpu_ldpc_*, ISAC_UL_GPU_LDPC), which has a duty cap and a
+ * context limit: a refused call (-1 busy, -2 over cap) is retried. */
+static nr_gpu_ldpc_run_fn g_urun;
+static int ul_retry_run(nr_gpu_ldpc_job_t *jobs, int n)
+{
+  int r = -1;
+  for (int i = 0; i < 2000 && (r == -1 || r == -2); i++) {
+    r = g_urun(jobs, n);
+    if (r == -1 || r == -2)
+      usleep(1000);
+  }
+  return r;
+}
 typedef int32_t (*ldpc_dec_fn)(t_nrLDPC_dec_params *, int8_t *, uint8_t *, t_nrLDPC_time_stats *, decode_abort_t *);
 static int never(uint8_t *b, uint32_t n, uint8_t t) { (void)b; (void)n; (void)t; return 0; }
 
@@ -40,9 +54,15 @@ int main(int argc, char **argv)
   void *h = dlopen("./libldpc.so", RTLD_NOW | RTLD_LOCAL);
   void *g = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   ldpc_dec_fn cpu = h ? (ldpc_dec_fn)dlsym(h, "LDPCdecoder") : NULL;
+  const int ul = argc > 2 && !strcmp(argv[2], "ul");
   nr_gpu_ldpc_init_fn ginit = g ? (nr_gpu_ldpc_init_fn)dlsym(g, "nr_pdsch_gpu_ldpc_init") : NULL;
-  nr_gpu_ldpc_run_fn grun = g ? (nr_gpu_ldpc_run_fn)dlsym(g, "nr_pdsch_gpu_ldpc_run") : NULL;
-  if (!cpu || !ginit || !grun || ginit() != 0) {
+  nr_gpu_ldpc_ul_init_fn uinit = g ? (nr_gpu_ldpc_ul_init_fn)dlsym(g, "nr_pusch_gpu_ldpc_init") : NULL;
+  nr_gpu_ldpc_run_fn grun = g ? (nr_gpu_ldpc_run_fn)dlsym(g, ul ? "nr_pusch_gpu_ldpc_run" : "nr_pdsch_gpu_ldpc_run") : NULL;
+  if (ul) {
+    g_urun = grun;
+    grun = ul_retry_run;
+  }
+  if (!cpu || !grun || (ul ? (!uinit || uinit(100, 1000000) != 0) : (!ginit || ginit() != 0))) {
     printf("LDPC_GPU_TEST setup failed (%s)\n", dlerror());
     return 2;
   }
@@ -172,6 +192,6 @@ int main(int argc, char **argv)
       printf("LDPC_GPU_BENCH BG1 Z384 R13 %s cbs=%d nsnap=%d gpu mean %.0f us min %.0f us, cpu %.0f us\n", hop ? "hopeless" : "decodable", nj,
              jobs[0].nsnap, sum / 50, best, (b.tv_sec - a.tv_sec) * 1e6 + (b.tv_nsec - a.tv_nsec) / 1e3);
     }
-  printf("LDPC_GPU_TEST mismatches=%ld\n", n_bad + n_stop_bad);
+  printf("LDPC_GPU_TEST%s mismatches=%ld\n", ul ? " (UL pool)" : "", n_bad + n_stop_bad);
   return n_bad + n_stop_bad ? 1 : 0;
 }

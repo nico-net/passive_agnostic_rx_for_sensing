@@ -37,6 +37,12 @@ typedef int (*nr_gpu_ldpc_init_fn)(void);
  * jobs must stay valid until return (the module copies inputs and outputs through pinned memory). 0 = done. */
 typedef int (*nr_gpu_ldpc_run_fn)(nr_gpu_ldpc_job_t *jobs, int n);
 
+/* ULLDPC (ISAC_UL_GPU_LDPC): the same kernel in a pool of its own for the passive PUSCH decode (nr_pdsch_gpu_ldpc.cu).
+ * init(pct, deadline_us): duty cap percent of each 100 ms and per-call deadline. run: 0 decoded; < 0 nothing valid, the caller
+ * runs the CPU decoder (-1 busy, -2 over cap / RT in flight, -3 off or error, -4 deadline). */
+typedef int (*nr_gpu_ldpc_ul_init_fn)(int pct, int deadline_us);
+typedef void (*nr_gpu_ldpc_ul_stats_fn)(uint64_t *o); /* calls cbs gpu_us max_us busy over_cap rt_defer late deadline err reclaimed part */
+
 #ifdef __cplusplus
 }
 #endif
