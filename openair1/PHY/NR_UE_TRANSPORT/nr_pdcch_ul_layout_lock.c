@@ -349,7 +349,7 @@ static uint64_t g_gen = 1;
 static hyp_state_t g_hyp[NR_UL_LAYOUT_MAX_HYP];
 static int g_nhyp;
 static int g_locked_hyp = -1;
-static uint32_t g_addpos[3], g_ctl_votes, g_discarded, g_tied, g_votes_total, g_probes_fed, g_probes_booked;
+static uint32_t g_probes_skipped, g_addpos[3], g_ctl_votes, g_discarded, g_tied, g_votes_total, g_probes_fed, g_probes_booked;
 static pending_t g_pend[PENDING_MAX];
 static int g_npend;
 static long g_first_slot = -1, g_lock_slot = -1, g_trial_slot = -1;
@@ -431,7 +431,7 @@ static void reset_locked(void)
   g_nhyp = 0;
   g_locked_hyp = -1;
   memset(g_addpos, 0, sizeof(g_addpos));
-  g_ctl_votes = g_discarded = g_tied = g_votes_total = g_probes_fed = g_probes_booked = 0;
+  g_ctl_votes = g_discarded = g_tied = g_votes_total = g_probes_fed = g_probes_booked = g_probes_skipped = 0;
   g_npend = 0;
   g_first_slot = g_lock_slot = g_trial_slot = -1;
   g_prov = g_search_done = false;
@@ -642,6 +642,45 @@ static void lock_length_locked(len_state_t *ls, long now_slot)
         10.0 * (double)(now_slot - ls->first_slot) / spf);
 }
 
+
+/* ISAC_UL_LOCK_LLR=1 (default off): log-odds lock rule on the vote tally instead of "leader >= 6 votes and >= 2x the runner-up".
+ * Each vote is worth W = ln 3 (a vote for h is 3x likelier when h is true than the look-alike leakage of a neighbour hypothesis, measured
+ * 0.2-0.5 in OTA data); the DL BWP / SIB1 UL BWP carry a prior of one vote-equivalent (prior[h] = 1) that shifts the margin but never
+ * locks by itself (the leader still needs min votes of its own). Lock when the leader beats EVERY other hypothesis by LLR_MARGIN. */
+#define LLR_W 1.0986f   /* ln 3 */
+#define LLR_MARGIN 4.3f
+#define LLR_MIN_VOTES_PRIOR 4
+bool nr_ul_layout_llr_decide(const uint32_t *votes, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead)
+{
+  int a = -1;
+  for (int h = 0; h < n; h++) if (votes[h] && (a < 0 || votes[h] > votes[a])) a = h;
+  if (a < 0 || nrnti[a] < LOCK_RNTIS) return false;
+  if (votes[a] < (prior[a] ? LLR_MIN_VOTES_PRIOR : LOCK_MIN)) return false;
+  const float sa = LLR_W * (float)(votes[a] + prior[a]);
+  for (int h = 0; h < n; h++)
+    if (h != a && (sa - LLR_W * (float)(votes[h] + prior[h]) < LLR_MARGIN
+                   || (float)(votes[a] + prior[a]) < 1.5f * (float)(votes[h] + prior[h]))) /* 62:45 look-alikes (OTA Vy1) never lock */
+      return false;
+  if (lead) *lead = a;
+  return true;
+}
+static bool llr_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_LOCK_LLR"); }
+/* prior of hypothesis h: it is the solved DL BWP or the SIB1 initial UL BWP */
+static uint8_t llr_prior(int h)
+{
+  const hyp_state_t *H = &g_hyp[h];
+  return (g_cell.dl_bwp_size && H->n == g_cell.dl_bwp_size && H->start == g_cell.dl_bwp_start)
+         || (g_cell.sib1_ul_size && H->n == g_cell.sib1_ul_size && H->start == g_cell.sib1_ul_start);
+}
+static bool llr_lock_ok(int *lead)
+{
+  uint32_t v[NR_UL_LAYOUT_MAX_HYP];
+  uint8_t pr[NR_UL_LAYOUT_MAX_HYP], nr[NR_UL_LAYOUT_MAX_HYP];
+  for (int h = 0; h < g_nhyp; h++) { v[h] = g_hyp[h].votes; pr[h] = llr_prior(h); nr[h] = g_hyp[h].nrnti; }
+  return nr_ul_layout_llr_decide(v, pr, nr, g_nhyp, lead);
+}
+bool nr_ul_layout_searching(void) { return nr_ul_layout_lock_enabled() && g_have_cell && g_locked_hyp < 0; }
+
 /* caller holds mu */
 static void finalize_pending_locked(void)
 {
@@ -706,8 +745,12 @@ static void finalize_pending_locked(void)
   }
   if (a < 0) return;
   if (g_prov && prior_vote_move_locked(now)) return;
-  const uint32_t va = g_hyp[a].votes, vb = b >= 0 ? g_hyp[b].votes : 0;
-  if (va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS) {
+  uint32_t va = g_hyp[a].votes, vb = b >= 0 ? g_hyp[b].votes : 0;
+  int la = a;
+  const bool llr = llr_enabled();
+  if (llr ? llr_lock_ok(&la)
+          : (va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS)) {
+    if (llr && la != a) { a = la; b = -1; for (int h = 0; h < g_nhyp; h++) if (h != a && (b < 0 || g_hyp[h].votes > g_hyp[b].votes)) b = h; }
     if (g_prov) { /* DM-RS votes confirm (or move) the provisional adoption */
       g_prov = false;
       if (g_locked_hyp != a) for (int l = 0; l < g_nlen; l++) g_len[l].locked = false;
@@ -859,6 +902,29 @@ static void *eval_thread(void *arg)
   return NULL;
 }
 
+/* ISAC_UL_LOCK_LLR: a probe is worth booking only if the current contenders (prior hypotheses and the two vote leaders) predict
+ * different PRBs for this grant; otherwise it is tied for them and votes for nobody. Fewer than two contenders: always book. */
+static bool llr_probe_discriminates(const len_state_t *ls, const nr_dci_bits_t *payload)
+{
+  int c[4], nc = 0, l1 = -1, l2 = -1;
+  for (int h = 0; h < g_nhyp; h++) {
+    if (!g_hyp[h].votes) continue;
+    if (l1 < 0 || g_hyp[h].votes > g_hyp[l1].votes) { l2 = l1; l1 = h; }
+    else if (l2 < 0 || g_hyp[h].votes > g_hyp[l2].votes) l2 = h;
+  }
+  if (l1 >= 0) c[nc++] = l1;
+  if (l2 >= 0) c[nc++] = l2;
+  for (int h = 0; h < g_nhyp && nc < 4; h++) if (llr_prior(h) && h != l1 && h != l2) c[nc++] = h;
+  if (nc < 2) return true;
+  uint16_t a0 = 0, b0 = 0;
+  if (!hyp_range(ls, payload, c[0], &a0, &b0)) return true;
+  for (int i = 1; i < nc; i++) {
+    uint16_t a = 0, b = 0;
+    if (!hyp_range(ls, payload, c[i], &a, &b) || a != a0 || b != b0) return true;
+  }
+  return false;
+}
+
 int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
                         const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out)
 {
@@ -952,6 +1018,10 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
     for (int h = 0; h < g_nhyp; h++) {
       uint16_t a, b;
       if (hyp_range(ls, &payload, h, &a, &b) && b <= cap_rb && a + b <= 275) { if (!testable) { r0 = a; nr = b; } testable++; }
+    }
+    if (k2 && testable && llr_enabled() && !llr_probe_discriminates(ls, &payload)) {
+      g_probes_skipped++; /* degenerate for the current contenders: it could only be tied, and the worker is starved */
+      testable = 0;
     }
     if (k2 && testable) {
       memset(out, 0, sizeof(*out));
@@ -1771,10 +1841,10 @@ void nr_ul_layout_stats_dump(void)
              g_p_src == 1 ? "sib1" : g_p_src == 2 ? "dl" : g_p_src == 4 ? "geometry" : g_p_src == 3 ? "neighbour" : "-",
              g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0, g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_p_exp, g_p_ok,
              g_p_dec, g_ndem, g_search_done);
-  LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
+  LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u skipped=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
              " tally[%s ]%s%s%s%s%s\n",
         g_locked_hyp >= 0 ? (g_prov ? "PROVISIONAL " : "LOCKED ") : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
-        g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_votes_total, g_ctl_votes,
+        g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_probes_skipped, g_votes_total, g_ctl_votes,
         g_discarded, g_tied, g_nhyp, v, w ? ls : "", sp, ovs, wvs, pst);
   pthread_mutex_unlock(&mu);
 }
