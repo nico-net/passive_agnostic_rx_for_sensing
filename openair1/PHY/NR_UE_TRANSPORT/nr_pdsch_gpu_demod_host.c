@@ -332,6 +332,11 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
       s_nl34q = env_int("ISAC_PDSCH_MMSE2_NL34_QPSK", 0);     /* HIGHMCS: as nr_rx_pdsch() */
     }
     int qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
+    static int s_ex34 = -1; /* TIMRANK34: mode 3 (exact double MMSE) is CPU-only, as nr_rx_pdsch() resolves it */
+    if (s_ex34 < 0)
+      s_ex34 = env_int("ISAC_PDSCH_MMSE_EXACT_NL34", 0);
+    if (qam_mode == 3 || (s_ex34 && nl >= (s_ex34 >= 2 ? 2 : 3) && nr_dlsch_qam_mode_override < 0))
+      return RF_NL;
     if (qam_mode < 0 || qam_mode > 2)
       qam_mode = 0;
     if (nl >= 3 && (qam_mode == 1 || (qm == 2 && !(s_nl34q && qam_mode == 2))))

@@ -3549,6 +3549,50 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
               dlsch_config->dlDmrsSymbPos, e[!own] > 0.0 ? 10.0 * log10(e[!own] / e[own]) : -99.0, sb, pb);
     }
   }
+  /* ISAC_PDSCH_RAW_DUMP=<path> (diagnostic, default off, TIMRANK34): append the FEP'd allocation span (all 14 symbols x nbRx,
+   * c16) of each full dedicated decode with Nl >= ISAC_PDSCH_RAW_DUMP_MINNL (default 3), once per rnti+slot, for offline
+   * DM-RS port / OCC / scrambling hypothesis tests. Record: "PRW1", int32 h[32], c16 [nbRx][14][nsc]. */
+  {
+    static _Atomic int s_rd = -1;
+    static FILE *s_rf;
+    static int s_rleft, s_rminnl;
+    static uint32_t s_rlast;
+    static pthread_mutex_t s_rmu = PTHREAD_MUTEX_INITIALIZER;
+    if (s_rd < 0) {
+      const char *p = getenv("ISAC_PDSCH_RAW_DUMP"), *mx = getenv("ISAC_PDSCH_RAW_DUMP_MAX"), *mn = getenv("ISAC_PDSCH_RAW_DUMP_MINNL");
+      s_rleft = mx ? atoi(mx) : 3000;
+      s_rminnl = mn ? atoi(mn) : 3;
+      s_rf = (p && *p) ? fopen(p, "wb") : NULL;
+      s_rd = s_rf ? 1 : 0;
+    }
+    if (s_rd && !t_quiet && !t_probe_first_seg && grant->rnti_class == 0 && cw->Nl >= s_rminnl) {
+      const uint32_t key = ((uint32_t)grant->rnti << 16) ^ ((uint32_t)proc->frame_rx << 5) ^ (uint32_t)proc->nr_slot_rx;
+      pthread_mutex_lock(&s_rmu);
+      if (s_rleft > 0 && key != s_rlast) {
+        s_rlast = key;
+        --s_rleft;
+        const int N = fp->ofdm_symbol_size, nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+        const int sc0 = fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
+        const int32_t h[32] = {grant->rnti, proc->frame_rx, proc->nr_slot_rx, cw->Nl, dlsch_config->dmrs_ports,
+                               dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType, dlsch_config->dlDmrsSymbPos,
+                               dlsch_config->start_symbol, dlsch_config->number_symbols, freq_alloc->first_rb, freq_alloc->num_rbs,
+                               dlsch_config->BWPStart, grant->mcs, grant->mcs_table, dlsch_config->nscid,
+                               dlsch_config->dlDmrsScramblingId, dlsch_config->dlDataScramblingId, grant->dci_len,
+                               (int32_t)(grant->dci_w[0] & 0xffffffffu), (int32_t)(grant->dci_w[0] >> 32),
+                               (int32_t)(grant->dci_w[1] & 0xffffffffu), (int32_t)(grant->dci_w[1] >> 32), N,
+                               fp->first_carrier_offset, fp->nb_antennas_rx, freq_alloc->prg, freq_alloc->n_prb_list, sc0, grant->rv,
+                               grant->harq_pid, grant->ndi};
+        fwrite("PRW1", 1, 4, s_rf);
+        fwrite(h, sizeof(h), 1, s_rf);
+        for (int a = 0; a < fp->nb_antennas_rx; a++)
+          for (int m = 0; m < 14; m++)
+            for (int k = 0; k < nsc; k++)
+              fwrite(&rxdataF[a][m * N + (sc0 + k) % N], sizeof(c16_t), 1, s_rf);
+        fflush(s_rf);
+      }
+      pthread_mutex_unlock(&s_rmu);
+    }
+  }
   static _Atomic int s_tinterp = -1; /* _Atomic: lazily resolved by every passivePdsch consumer (TSAN) */
   if (s_tinterp < 0) {
     const char *e = getenv("ISAC_CHEST_TINTERP");
