@@ -4323,7 +4323,7 @@ Sources: `git show <branch>:docs/superpowers/reports/csd/<X>-20261014.md` (scanc
 **4. csd/small (merged, 535a1d1b08 = merge of csd/acq3; ACQMISS-20261013 follow-up).**
 - `ISAC_CORESET_DISC_SYNCQ` (needs `ISAC_CORESET_DISC_WATCH=1`, off): `=1` = GOOD/DEGRADED/POOR metric from PBCH timing steps, `SYNC_POOR` state, REACQUIRE_SYNC (tracker reset, +-16-sample clamp), re-arm. `=2` also pauses nID capture while POOR.
 - `[MEASURED, DGX replay 0.25x, 4 RX, t26b.env, n = 1 per cell]`, +-60..150 injection: T no flag 1 bank / 8 RNTIs, `=2` 0 banks (harmful, not recommended). V no flag 0 banks, `=2` 0 banks.
-- `=1` safety: the level-1 injection arms and the equivalence arms (flags on, no injection) are `[NOT RUN]` (report section D, heavy.lock blocked). "Safe" is `[CODE-READ]` only.
+- `=1` safety (csd/small agent, after ACQMISS): `[MEASURED, DGX replay 0.25x, 4 RX, n=1 per capture]` flags off vs the old csd/otatest binary on 6 captures (b, c8, v3s, c421, tile3, tim4): same sync/PCI/final ACQ state, CORESET banks and RNTIs within +-1 (no direction), CRC counts as noisy as old-vs-old. SYNCQ=1 and =2: no false SYNC_POOR (sync_q=GOOD on b, c8, tile3; no sync_q line on the short captures). Wander injection ISAC_RAW_IQ_WANDER=60:150: SYNCQ=1 flags POOR without harm; SYNCQ=2 pauses and loses the CORESET on tile3 (harmful). The ACQMISS section D "NOT RUN" predates these replays. Recovery benefit on a real OTA miss: not shown.
 - **Retracted** (ACQMISS section A, `[MEASURED, OTA log]`): the L1 miss was not caused by time-sync wander (TIMEMUT/TSYNC_OBS cover only ~100 PBCH steps, ~2 s). Open: carrier verdict at 29 s, sweep ~3 s/pass, capture 3 % of offered; GPU starvation by CSI-RS discovery is `[HYPOTHESIS]`, untested.
 - `ISAC_USRP_START_TIMEOUT_MS` (5000 = unchanged; 2200 in t26e): producer faults before the consumer's 3 s give-up, so `ISAC_RX_RECOVER` can re-issue a timed START `[CODE-READ]`. First-start-after-reboot: 38 identical RFSTALL in 798 DPDK starts `[MEASURED, OTA logs]`; cold-X410 effect `[NOT VALIDATED]`.
 - Env `rr-orchestration/ota/t26e.env` (named new default by csd/small). Corrected: it is NOT just t26bPQ + the timeout. Token diff: +`ISAC_USRP_START_TIMEOUT_MS=2200`; one duplicate `ISAC_PDSCH_GPU=0` dropped (no effect); `ISAC_PDCCH_JOINT_ANON_RATE=0.1` dropped (later `=1` remains; effective value depends on parse order, not verified).
@@ -4374,7 +4374,7 @@ Sources: `git show <branch>:docs/superpowers/reports/csd/<X>-20261014.md` (scanc
 - UL CRC-OK still 0 (BWP lock, RIV, low UL SNR, median -8.3 dB).
 - Scan follow-up `csd/scan2` (992212ea33, `ISAC_SCANCOST=2`, off) running.
 - Planned agents: UL LDPC on GPU; UL stalls; BWP lock.
-- Open: SYNCQ=1 equivalence and injection arms not run; t26e vs t26bPQ equivalence not checked; ulsnr scale approximate.
+- Open: SYNCQ=1 replay-validated n=1 only, OTA benefit not shown; t26e vs t26bPQ equivalence not checked; ulsnr scale approximate.
 
 ---
 
