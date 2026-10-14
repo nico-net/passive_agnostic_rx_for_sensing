@@ -4287,6 +4287,97 @@ TIM: U0 (t26bC) PDSCH stale 29-40 %, U2 (t26bPQ) 1.0 %; S4U 2.0-2.5 %; p99 3.8-1
 
 ---
 
+### 2026-10-14 (evening) block (`csd/otatest`, worktree `rr-csd-b`; branch reports, DGX GB10 replays and offline tests, no OTA run in this block)
+
+Sources: `git show <branch>:docs/superpowers/reports/csd/<X>-20261014.md` (scancost, mmse3gpu, uldci, ulq, ulfep, fattails, ulbwp); csd/ulsnr and csd/small have no report (commit messages; `ACQMISS-20261013.md` on csd/small); host item from `rr-orchestration/logs/RESET-INVESTIGATION-20261014.md`. "Merged" = in csd/otatest; otherwise branch only. Cells never merged: V = Vodafone PCI 415 (`raw_pci415_12s_b`, 3680.01 MHz), T = TIM PCI 923 (`raw_pci923_tim_12s_tile3`, 3759.99 MHz, SSB offset 233). `[MEASURED, DGX replay ...]` is an air-like replay (`p99_replay.sh`), not OTA.
+
+| source | merged | flag(s), default | verdict |
+|---|---|---|---|
+| csd/scancost | yes (c23cc9e213) | `ISAC_SCANCOST=1`, off | scan loss and occasion tail cut in replay; 0.5 ms NOT MET |
+| csd/mmse3gpu | yes | `ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3=1`, off | GPU mode 3 bit-exact; 0.5 ms NOT MET |
+| csd/ulsnr | yes (91e5e777bf) | none (fix) | UL snr_db now computed (was always 0.0) |
+| csd/small | yes (535a1d1b08) | `ISAC_CORESET_DISC_SYNCQ=1/2`, `ISAC_USRP_START_TIMEOUT_MS` (5000) | sync gate; `=2` harmful on T |
+| csd/uldci | no (9abb1e4450) | `ISAC_UL_FIT_READ=1`, `ISAC_UL_PREFIX_ENT=1`, off | UL DCI 0_1 fields right after the fit; UL CRC still 0 |
+| csd/ulq | no (d3db97de2e) | `ISAC_UL_PRIO_QUEUE`, `SNAP_POOL`, `HARQ_COMBINE`, ... off | real-grant loss down in replay; UL CRC still 0 |
+| csd/ulfep | no (583e66fbe8) | `ISAC_UL_GPU_FEP=1`, off | UL FEP p50 2.5x lower; p99 not improved |
+| csd/fattails | no (5f9c1aab5b) | `ISAC_FATTAILS=1` (umbrella), off | tails cut in replay; 0.5 ms NOT MET |
+| csd/ulbwp | no (d4bf750870) | `ISAC_UL_LOCK_LLR=1`, `ISAC_PUSCH_SEARCH_PRIO`, off | no gain |
+
+**1. csd/scancost (merged; `ISAC_SCANCOST=1`, off).** Four bit-exact cuts in the blind PDCCH scan (solver key index, `ISAC_DCI11_HARQPID` read once, DM-RS Gold cache, keyed UL-discovery classes). `[MEASURED, DGX replay b, perf]`: half of scan CPU was not PDCCH decode (16 % linear key search, 13 % getenv per layout parse, 7 % Gold regeneration). Batch B, n = 3 per arm, SPEED=1, R = reference, N = flag on:
+- V: scan loss 4.7 +- 4.6 -> 0.1 +- 0.1 %; occasion p99 5873 -> 3401 us; occasion max 209 ms -> 11.9 ms; pass 549 -> 357 us; PDSCH crc_ok 1161 -> 1597 (n = 3, not tested for significance).
+- T: scan loss 2.2 +- 1.2 -> 0.0 %; occasion p99 5633 -> 3300 us; max 53 ms -> 13.6 ms; pass 707 -> 414 us; crc_ok 270 -> 321.
+- Same DCIs: Jaccard N-R 0.57 (V) / 0.90 (T) vs R-R 0.40 / 0.88 (receiver not DCI-deterministic).
+- Not met: scan p99 < 0.5 ms per occasion (p99 ~3.3 ms, 2-3 passes per occasion). Largest left: UL length sweep under `ul_length_lock` (60-120 us/pass). On air `[NOT MEASURED]`.
+- Risks: change 2 makes `ISAC_DCI11_HARQPID` sticky; change 4 needs any new `decode_equivalent()` field in `equivalent_key()` (static assert covers size only). Replay load about half of air load.
+
+**2. csd/mmse3gpu (merged; `ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3=1`, off).** Mode 3 (3-4 layers) was CPU-only (`refuse()` returned RF_NL) `[CODE-READ]`. GPU port: FP64 per-RE Cholesky from the CPU source (`nr_mmse_exact.h`).
+- `[OFFLINE VERIFIED, DGX GB10, MmseExact.GpuMode3BitExact]`: 0 of 1,078,272 int16 outputs differ.
+- `[MEASURED, DGX replay tim, CHECK=1]` calls 12000, check_ok 12000, check_bad 0; `[MEASURED, DGX replay b, CHECK=1]` 22000 calls, check_ok 21999, check_bad 0.
+- Demod (`[MEASURED, DGX replay]`): T mean 1364-1607 -> 199-263 us, p99 3315-3745 -> 2365-2435 us (CHECK=64), 705 us (CHECK=0); V p99 5285-5525 -> 1015-1075 us (CHECK=64), 415 us (CHECK=0).
+- Rank 3/4 CRC: same range as CPU mode 3 (large run-to-run spread; no gain claimed). 0.5 ms decode p99 NOT MET: real-grant p99 2.4-3.1 ms (chest and LDPC p99 ~0.9-1.4 ms each).
+- Risks: `[HYPOTHESIS]` the CPU mode-3 path changed (no FMA contraction, ~1 ulp) and is NOT flag-gated; CHECK=64 keeps a CPU reference on ~1.6 % of grants and sets demod p99. Next OTA arm t26mtg (t26mtx + flag, CHECK=64 kept); default-on only after one OTA with check_bad=0.
+- Its `test_nr_passive_acq_state` failure is attributed in the report to the csd/otatest base; see the host item (cause found).
+
+**3. csd/ulsnr (merged, 91e5e777bf; no report).** UL snr_db was 0.0 because the passive path never runs `gNB_I0_measurements`. Now computed from the DMRS LS-vs-smoothed residual, smoother gain 1/8: `[MEASURED, DGX replay raw_pci415_12s_b]` median -8.3 dB. Scale approximate (not calibrated to a gNB). `UL_PUSCH_CRC snr_db` values from earlier binaries are invalid.
+
+**4. csd/small (merged, 535a1d1b08 = merge of csd/acq3; ACQMISS-20261013 follow-up).**
+- `ISAC_CORESET_DISC_SYNCQ` (needs `ISAC_CORESET_DISC_WATCH=1`, off): `=1` = GOOD/DEGRADED/POOR metric from PBCH timing steps, `SYNC_POOR` state, REACQUIRE_SYNC (tracker reset, +-16-sample clamp), re-arm. `=2` also pauses nID capture while POOR.
+- `[MEASURED, DGX replay 0.25x, 4 RX, t26b.env, n = 1 per cell]`, +-60..150 injection: T no flag 1 bank / 8 RNTIs, `=2` 0 banks (harmful, not recommended). V no flag 0 banks, `=2` 0 banks.
+- `=1` safety: the level-1 injection arms and the equivalence arms (flags on, no injection) are `[NOT RUN]` (report section D, heavy.lock blocked). "Safe" is `[CODE-READ]` only.
+- **Retracted** (ACQMISS section A, `[MEASURED, OTA log]`): the L1 miss was not caused by time-sync wander (TIMEMUT/TSYNC_OBS cover only ~100 PBCH steps, ~2 s). Open: carrier verdict at 29 s, sweep ~3 s/pass, capture 3 % of offered; GPU starvation by CSI-RS discovery is `[HYPOTHESIS]`, untested.
+- `ISAC_USRP_START_TIMEOUT_MS` (5000 = unchanged; 2200 in t26e): producer faults before the consumer's 3 s give-up, so `ISAC_RX_RECOVER` can re-issue a timed START `[CODE-READ]`. First-start-after-reboot: 38 identical RFSTALL in 798 DPDK starts `[MEASURED, OTA logs]`; cold-X410 effect `[NOT VALIDATED]`.
+- Env `rr-orchestration/ota/t26e.env` (named new default by csd/small). Corrected: it is NOT just t26bPQ + the timeout. Token diff: +`ISAC_USRP_START_TIMEOUT_MS=2200`; one duplicate `ISAC_PDSCH_GPU=0` dropped (no effect); `ISAC_PDCCH_JOINT_ANON_RATE=0.1` dropped (later `=1` remains; effective value depends on parse order, not verified).
+
+**5. csd/uldci (not merged; `ISAC_UL_FIT_READ=1` needs `ISAC_UL_LAYOUT_LOCK=1`, `ISAC_UL_PREFIX_ENT=1`; both off).** Root cause `[MEASURED, DGX replay b]`: on V the default DCI 0_1 reading is one bit early (constant BWP bit), so only 904 of 3370 lines (26.8 %) carried the true MCS/NDI/RV/pid; prefix ranking kept a one-bit-short RIV window that seeded a false 107@2 lock on T.
+- ULDCI lines = true payload: V 26.8 % -> 85.3 % (2750/3225), retx NDI-match candidates 61.7 % -> 85.4 %; T 84.8 % -> 92.3 %; T false 107@2 lock (6 votes) gone (hypotheses 192 -> 61; 27 in the ULQ resume run).
+- Pre-fit window (~260 DCIs per length) still uses the sweeps. UL PUSCH CRC OK 0 before and after on both captures.
+- Risks: FIT_READ grants carry a provisional RIV (booked jobs wrong until the lock); PREFIX_ENT could prefer a wrong wider RIV in a high-entropy-TDRA cell (not seen in 8 OTA cells/days reviewed).
+
+**6. csd/ulq (not merged; UL queue flags, all off).** `ISAC_UL_PRIO_QUEUE`, `ISAC_UL_SNAP_POOL`, `ISAC_PUSCH_CONSUMERS`, `ISAC_UL_QUEUE_DEPTH`, `ISAC_UL_SPARE_RESCUE`, `ISAC_UL_HARQ_COMBINE`, `ISAC_UL_SOLVER_FALLTHROUGH=2`.
+- Load `[MEASURED, DGX OTA, X410 34B2AF1, 2026-10-14, binary 08db255521]`, 47 runs: V median 296 UL DCIs/s (50-503), T 165/s (116-319). Full-decode cpu p50 for >= 107 PRB: V 1.4 ms (p90 10.7), T 1.7 ms (p90 11.1).
+- Replay `[MEASURED, DGX replay tim]`: real-grant loss ~50-75 % (ref) -> ~5-10 % (Q arms, cores 0,1); per-grant p50 7.2-9.2 ms on little cores, 3.1 ms on cores 8,9.
+- HARQ keying fix (only real-grant jobs arm the combiner): `retx_try` 0 -> 26/29 (cores 8,9) and 8 (cores 0,1); `retx_ok` 0. `[IMPLEMENTED, NOT VALIDATED]`.
+- DL p99 on T (quiet host, n = 2-3): UL off 5585/5705/10595 us; ref 6105/5235/3945; cores 0,1 4785/5385/4745; cores 8,9 6435/9835. No UL effect resolvable. UL CRC OK 0 in all arms but one (1).
+- Replays after 17:00 excluded (other user's stack on the host).
+- Risks: little cores 0,1 cannot carry V peak (~500/s x 8 ms, about 4 little cores); cores 8,9 shared with PDSCH unproven for DL p99. Never core 6.
+
+**7. csd/ulfep (not merged, on csd/ulq; `ISAC_UL_GPU_FEP=1`, off, needs SNAP_POOL).** GPU FEP for passive PUSCH grant FEP and timing-search candidates; 30 % duty cap, CPU fallback counted.
+- `[OFFLINE VERIFIED]` 0 of 576 rows differ (amplitudes up to +-3000); known limit above +-4000 (CPU saturates in butterflies the kernel does not reproduce). `[MEASURED, DGX replay]` CHECK=1: 5611 rows, bad 0.
+- UL per-grant cpu p50 (`[MEASURED, DGX replay]`, n = 3): T off 8.8/7.6/9.0 ms -> on 7.1/2.9/3.4 ms; V off 4.0/5.5/2.7 ms -> on 1.3/1.5/1.6 ms.
+- p99 NOT improved: T off 53.6/33.8/49.0 ms -> on 68.0/26.8 ms (one arm 1 stall); V off 777/768/365 ms -> on 258/369/361 ms. GPU call tail: 35-84 calls per run > 2 ms, max 53-233 ms, cause not isolated.
+- DL PDSCH p99 (same runs): T off 5005/3285/6315 vs on 4515/4625/5285 us; V off 3645/2565/2835 vs on 3095/3445/2985 us (one on-run max 206 ms, unexplained). No DL degradation resolvable. UL LDPC still CPU.
+
+**8. csd/fattails (not merged, from c23cc9e213; umbrella `ISAC_FATTAILS=1`, off).** Async GPU checks (`ISAC_GPU_CHECK_ASYNC=1`), `ISAC_GPU_PIN_ALL=1`, `ISAC_GPU_COPY_FENCE=1`, `ISAC_PDSCH_DMRS_ID_ASYNC=1`, `ISAC_PDSCH_RETRY_BUDGET_US` (1000); core-6 plan `ISAC_PUSCH_CORES=0 ISAC_PUSCH_PRIO=0`.
+- Sources `[MEASURED, DGX replay]`: kworker starvation on core 6 (max wait 916 and 543 ms); GPU page migration (388 of 398 calls on inline-check buffers); copy-engine blocking behind CSI-RS `refine_kernel` (384-400 ms); DM-RS id estimator ~65 % of PDSCH consumer CPU on T.
+- Whole decode call incl. retries (`[MEASURED, DGX replay, 3 runs/arm pooled, binary 0d34417919]`; O = t26e + SCANCOST, F = O + core plan, G = F + RETRY_NORESTORE/PREDICT):
+
+| cell | O p50 / p99 / max (us) | F | G | CRC-OK O / F / G |
+|---|---|---|---|---|
+| V all | 1545 / 19968 / 743745 | 1529 / 8165 / 208634 | 1136 / 5192 / 27387 | 5956/13246, 6092/13288, 6089/13694 |
+| T all | 1133 / 48223 / 995001 | 1222 / 7582 / 15015 | 1051 / 6906 / 14655 | 1120/2080, 1131/2525, 1194/2236 |
+
+- Residual: one 208 ms outlier (F, V) and one 916 ms LDPC wait in an earlier T run. Tail reduced, not removed. Checks `check_bad=0` (V demod 3799 / chest 4742; T demod 4744 / chest 4658).
+- Cost: UL decode mean 9.0 -> 20-29 ms on core 0 (core-6 plan). Sub-0.5 ms whole-call p99 NOT MET (body p50 0.34-0.47 ms, whole call p50 1.0-1.5 ms). Replay only, `[NOT MEASURED ON AIR]`.
+
+**9. csd/ulbwp (not merged; no gain).** `[MEASURED, DGX OTA logs]`: V true layout 217@0 is top-voted in every run with > 100 votes; locks fail on thin evidence; 216@1/216@0 look-alikes lock on 6 votes.
+- LLR rule `[MEASURED, DGX replay b, SPEED 0.25]`: base lock 216@1 at 8.3 s, LLR+prio 8.6 s and 8.4 s (all 216@1); b2 no lock in either. TIM not replayed.
+- Tally replay `[INFERENCE]` over 83 V runs: LLR drops 11 of 58 old locks, keeps 47, adds 4 new 217@0 locks.
+- UL core arms (V, 240 s) `[MEASURED, DGX OTA]`: UA1 core 6 prio 30 -> 217@0 at 140 s; UB2 core 0 -> 216@0 at 23 s (6:2); UC1 core 6 prio 60 -> 178@39 at 48 s (6:2). Earlier locks are wrong: the decision rule, not starvation, is the problem. 216@1 look-alike (UB1 52:26) not fixed.
+
+**10. Host (`RESET-INVESTIGATION-20261014.md`, additional items).**
+- A root-run receiver created `/tmp/passive_rx` 0755 after the reboot; non-root writes failed and `test_nr_passive_acq_state` broke. Fixed: sticky 01777 on creation in `652a99a265` (fix(acq)) and `c3ceb2f472` (CORESET map and blind monitor stores), both in csd/otatest.
+- Shared host: another user's docker OAI stack. Their UE matches `pgrep -x nr-uesoftmodem`; check ours with `pgrep -af nr-uesoftmodem | grep /home/nicola/`. Their root CUDA MPS daemon hangs CUDA programs: use `CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps`.
+
+**Pending after this block.**
+- OTA window prepared: `rr-orchestration/ota/specs_next_t26e.txt`, 37 runs (t26e; t26eC scancost; t26eG GPU rank 3/4; t26eS sync gate; t26eU/t26eU8 UL queue; t26eUG UL GPU FEP; t26eF/t26eFG fat tails). Not run yet.
+- Sub-slot (500 us) decode not met: DL whole-call p50 1.0-1.5 ms; UL not met.
+- UL CRC-OK still 0 (BWP lock, RIV, low UL SNR, median -8.3 dB).
+- Scan follow-up `csd/scan2` (992212ea33, `ISAC_SCANCOST=2`, off) running.
+- Planned agents: UL LDPC on GPU; UL stalls; BWP lock.
+- Open: SYNCQ=1 equivalence and injection arms not run; t26e vs t26bPQ equivalence not checked; ulsnr scale approximate.
+
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
