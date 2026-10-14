@@ -115,11 +115,12 @@ static int           g_gnb_nant;
 #define PASSIVE_UL_SNAPSHOT_MARGIN 8192
 typedef struct {
   c16_t *iq[PASSIVE_UL_MAX_ANT];
-  uint32_t origin, length;
+  c16_t *own[PASSIVE_UL_MAX_ANT]; /* this context's private buffers; iq points at a shared ULQ snapshot while attached */
+  uint32_t origin, length, cap;
   bool valid;
 } passive_ul_snapshot_t;
 static passive_ul_snapshot_t g_snapshot[NR_PUSCH_PASSIVE_MAX_CTX];
-static bool g_pipeline_ready;
+static bool g_pipeline_ready[NR_PUSCH_PASSIVE_MAX_CTX];
 #define PASSIVE_UL_CFR_CAP (273 * NR_NB_SC_PER_RB)
 #define PASSIVE_UL_UCI_CAP (8 * ((3 * 8 * 6144) + 12))
 typedef struct {
@@ -140,6 +141,89 @@ void nr_pusch_passive_counters(uint64_t *try_, uint64_t *crc_ok)
  * a DL one that happens to share the same number. See nr_harq_init_tx.h. */
 static nr_harq_init_tx_table_t g_ul_harq_init;
 static pthread_mutex_t g_ul_harq_init_lock = PTHREAD_MUTEX_INITIALIZER;
+/* ---- UL HARQ SOFT COMBINING (ISAC_UL_HARQ_COMBINE=1, default off; ULQ) ---------------------------
+ * The UL twin of the DL harqc cache (nr_pdsch_passive_decode.c): without it every rv != 0 PUSCH was
+ * refused ("no HARQ history") and the chain mode never even booked it, although 10-30 % of the UL
+ * grants of a loaded cell are retransmissions. A CRC-failed first transmission leaves its rate-
+ * dematched soft buffer (harq_process->d, C segments at the decoder's 68*384 stride) in a small
+ * shared cache keyed by (rnti, harq pid); a later grant of the same process with the same NDI, the
+ * same TBS and rv != 0 is decoded INTO a copy of it (harq_to_be_cleared = false, so the rate
+ * de-matcher adds the new LLRs). Only the first decode call of a queue job may combine or store
+ * (nr_pusch_passive_harq_arm), so retries and solver variants never add the same LLRs twice. A busy
+ * entry is skipped, never waited on. LRU over 64 entries; a TB of more than ISAC_UL_HARQ_MAX_SEG
+ * (default 8) segments is not stored (memory bound 64 x 8 x 52 kB). */
+#define UL_HARQC_N 64
+#define UL_HARQC_STRIDE (68u * 384u)
+typedef struct {
+  _Atomic int busy;
+  bool used, soft_valid;
+  uint16_t rnti;
+  uint8_t pid, ndi, ncomb;
+  uint32_t tbs, C, cap_seg;
+  uint64_t last;
+  int16_t *d;
+} ul_harqc_t;
+static ul_harqc_t g_ul_harqc[UL_HARQC_N];
+static pthread_mutex_t g_ul_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_ul_harqc_clock;
+static _Atomic uint64_t g_hq_stored, g_hq_retx_try, g_hq_retx_ok, g_hq_rv_refused, g_hq_busy;
+static __thread bool t_hq_armed;
+static int ul_harq_combine_on(void)
+{
+  static _Atomic int on = -1;
+  if (on < 0) {
+    const char *v = getenv("ISAC_UL_HARQ_COMBINE");
+    on = (v && !strcmp(v, "1")) ? 1 : 0;
+  }
+  return on;
+}
+bool nr_pusch_passive_harq_combine_enabled(void) { return ul_harq_combine_on() == 1; }
+void nr_pusch_passive_harq_arm(bool on) { t_hq_armed = on; }
+static unsigned ul_harq_max_seg(void)
+{
+  static _Atomic int m = -1;
+  if (m < 0) {
+    const char *v = getenv("ISAC_UL_HARQ_MAX_SEG");
+    m = v ? atoi(v) : 8;
+  }
+  return (unsigned)m;
+}
+/* True when (rnti, pid) holds a soft buffer of an undecoded TB with this NDI: an rv != 0 grant is worth its FEP. */
+static bool ul_harqc_peek(uint16_t rnti, uint8_t pid, uint8_t ndi)
+{
+  bool v = false;
+  pthread_mutex_lock(&g_ul_harqc_lock);
+  for (int i = 0; i < UL_HARQC_N && !v; i++) {
+    const ul_harqc_t *e = &g_ul_harqc[i];
+    v = e->used && e->rnti == rnti && e->pid == pid && e->soft_valid && e->ndi == ndi;
+  }
+  pthread_mutex_unlock(&g_ul_harqc_lock);
+  return v;
+}
+static ul_harqc_t *ul_harqc_acquire(uint16_t rnti, uint8_t pid)
+{
+  pthread_mutex_lock(&g_ul_harqc_lock);
+  ul_harqc_t *hit = NULL, *lru = NULL;
+  for (int i = 0; i < UL_HARQC_N; i++) {
+    ul_harqc_t *e = &g_ul_harqc[i];
+    if (e->used && e->rnti == rnti && e->pid == pid) { hit = e; break; }
+    if (atomic_load(&e->busy)) continue;
+    if (lru == NULL || !e->used || (lru->used && e->last < lru->last)) lru = e;
+  }
+  ul_harqc_t *e = hit ? hit : lru;
+  int expect = 0;
+  if (e == NULL || !atomic_compare_exchange_strong(&e->busy, &expect, 1)) {
+    pthread_mutex_unlock(&g_ul_harqc_lock);
+    atomic_fetch_add_explicit(&g_hq_busy, 1, memory_order_relaxed);
+    return NULL;
+  }
+  if (!hit) {
+    e->used = true; e->rnti = rnti; e->pid = pid; e->soft_valid = false; e->tbs = 0; e->ncomb = 0;
+  }
+  e->last = ++g_ul_harqc_clock;
+  pthread_mutex_unlock(&g_ul_harqc_lock);
+  return e;
+}
 /* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
  * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
  * unchanged. Accumulated on EVERY attempted grant, CRC-OK or not (review fix round 1, finding 2) --
@@ -529,37 +613,47 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
   return true;
 }
 
-bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue)
+bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx)
 {
-  if (!ue || !passive_gnb_prepare(ue, 0)) return false;
+  if (!ue || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || !passive_gnb_prepare(ue, ctx)) return false;
   /* The solver can try DFT-s-OFDM tables. The normal gNB init generates
    * these low-PAPR pilots before RX; this private context bypasses that init. */
   const char *solver=getenv("ISAC_UL_PUSCH_SOLVER");
-  if (solver && !strcmp(solver,"1")) generate_lowpapr_typ1_refsig_sequences(SHRT_MAX);
-  passive_ul_snapshot_t *s = &g_snapshot[0];
-  if (g_pipeline_ready) return true;
-  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  const uint32_t len = fp->samples_per_subframe + PASSIVE_UL_SNAPSHOT_MARGIN;
-  if (len >= fp->samples_per_frame) return false;
+  if (ctx == 0 && solver && !strcmp(solver,"1")) generate_lowpapr_typ1_refsig_sequences(SHRT_MAX);
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  if (g_pipeline_ready[ctx]) return true;
+  const uint32_t len = nr_pusch_passive_snapshot_len(&ue->frame_parms);
+  if (!len) return false;
   for (int a = 0; a < g_gnb_nant; a++) {
-    if (!s->iq[a]) s->iq[a] = malloc16_clear((size_t)len * sizeof(c16_t));
-    if (!s->iq[a]) return false;
+    if (!s->own[a]) s->own[a] = malloc16_clear((size_t)len * sizeof(c16_t));
+    if (!s->own[a]) return false;
+    s->iq[a] = s->own[a];
   }
-  passive_ul_scratch_t *w=&g_scratch[0];
+  passive_ul_scratch_t *w=&g_scratch[ctx];
   if(!w->h) w->h=malloc16_clear(sizeof(float)*2*PASSIVE_UL_MAX_ANT*PASSIVE_UL_CFR_CAP);
   if(!w->k) w->k=malloc16_clear(sizeof(uint32_t)*PASSIVE_UL_CFR_CAP);
   if(!w->l) w->l=malloc16_clear(sizeof(uint32_t)*PASSIVE_UL_CFR_CAP);
   if(!w->uci) w->uci=malloc16_clear(sizeof(int16_t)*PASSIVE_UL_UCI_CAP);
   if(!w->h || !w->k || !w->l || !w->uci) return false;
-  s->length = len;
-  g_pipeline_ready = true;
+  s->length = s->cap = len;
+  g_pipeline_ready[ctx] = true;
   return true;
 }
 
-bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, uint64_t absolute_slot)
+uint32_t nr_pusch_passive_snapshot_len(const NR_DL_FRAME_PARMS *fp)
 {
-  if (!ue || ctx != 0 || !g_snapshot[ctx].iq[0]) return false;
-  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  const uint32_t len = fp->samples_per_subframe + PASSIVE_UL_SNAPSHOT_MARGIN;
+  return len < fp->samples_per_frame ? len : 0;
+}
+
+int nr_pusch_passive_snapshot_nant(void)
+{
+  return g_gnb_nant;
+}
+
+bool nr_pusch_passive_snapshot_copy(PHY_VARS_NR_UE *ue, uint8_t slot, uint64_t absolute_slot, c16_t *const *dst,
+                                    uint32_t cap, uint32_t *origin_out, uint32_t *len_out)
+{
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const long producer = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire);
   if (!nr_pusch_queue_snapshot_fresh(producer, (long)absolute_slot, fp->slots_per_frame)) return false;
@@ -569,25 +663,49 @@ bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, 
    * slot may already be under RF write; a negative advance beyond this window
    * is rejected by passive_snapshot_fep instead of reading partial IQ. */
   const uint32_t len = get_samples_per_slot(slot, fp) + PASSIVE_UL_SNAPSHOT_MARGIN;
-  if (len > s->length) return false;
+  if (len > cap) return false;
   for (int a = 0; a < g_gnb_nant; a++) {
     const c16_t *src = (const c16_t *)ue->common_vars.rxdata[a];
-    if (!src) return false;
+    if (!src || !dst[a]) return false;
     const uint32_t first = len < fp->samples_per_frame - origin ? len : fp->samples_per_frame - origin;
-    memcpy(s->iq[a], src + origin, (size_t)first * sizeof(c16_t));
-    if (first < len) memcpy(s->iq[a] + first, src, (size_t)(len - first) * sizeof(c16_t));
+    memcpy(dst[a], src + origin, (size_t)first * sizeof(c16_t));
+    if (first < len) memcpy(dst[a] + first, src, (size_t)(len - first) * sizeof(c16_t));
   }
   if (!nr_pusch_queue_snapshot_fresh(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire),
                                      (long)absolute_slot, fp->slots_per_frame)) return false;
+  *origin_out = origin;
+  *len_out = len;
+  return true;
+}
+
+bool nr_pusch_passive_decode_capture(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, uint64_t absolute_slot)
+{
+  if (!ue || ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX || !g_snapshot[ctx].own[0]) return false;
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  for (int a = 0; a < PASSIVE_UL_MAX_ANT; a++) s->iq[a] = s->own[a];
+  uint32_t origin, len;
+  if (!nr_pusch_passive_snapshot_copy(ue, slot, absolute_slot, s->own, s->cap, &origin, &len)) return false;
   s->origin = origin;
   s->length = len;
   s->valid = true;
   return true;
 }
 
+void nr_pusch_passive_decode_attach(int ctx, c16_t *const *iq, uint32_t origin, uint32_t length)
+{
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  for (int a = 0; a < g_gnb_nant && a < PASSIVE_UL_MAX_ANT; a++) s->iq[a] = iq[a];
+  s->origin = origin;
+  s->length = length;
+  s->valid = true;
+}
+
 void nr_pusch_passive_decode_capture_release(int ctx)
 {
-  if (ctx >= 0 && ctx < NR_PUSCH_PASSIVE_MAX_CTX) g_snapshot[ctx].valid = false;
+  if (ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX) return;
+  passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  s->valid = false;
+  for (int a = 0; a < PASSIVE_UL_MAX_ANT; a++) s->iq[a] = s->own[a];
 }
 
 void nr_pusch_passive_decode_free(void)
@@ -1389,16 +1507,19 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     out->reject_reason = "multi-layer PUSCH";
     return false;
   }
-  if (g->rv != 0) {
+  if (g->rv != 0 && !(ul_harq_combine_on() && t_hq_armed && !t_solver_probe && !cfr_only &&
+                      ul_harqc_peek(g->rnti, g->harq_pid, g->ndi))) {
     /* No HARQ history: a passive receiver has no earlier redundancy version to combine with, so an
      * rv != 0 transmission carries only incremental parity and cannot be decoded standalone. The
-     * DM-RS-based CFR path is unaffected -- it needs only the allocation. */
+     * DM-RS-based CFR path is unaffected -- it needs only the allocation. With ISAC_UL_HARQ_COMBINE
+     * the stored soft buffer of the first transmission is that history (see ul_harqc_t). */
+    if (ul_harq_combine_on()) atomic_fetch_add_explicit(&g_hq_rv_refused, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "rv != 0 with no HARQ history to combine";
     return false;
   }
-  if (nr_pusch_passive_pipeline_enabled() && (ctx!=0 || !g_pipeline_ready)) {
+  if (nr_pusch_passive_pipeline_enabled() && (ctx<0 || ctx>=NR_PUSCH_PASSIVE_MAX_CTX || !g_pipeline_ready[ctx])) {
     out->reject_reason = "UL pipeline resources not prewarmed";
     return false;
   }
@@ -2055,12 +2176,28 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
 
   int ulsch_id = 0;
+  /* UL HARQ soft combining: first decode call of an armed job only (see ul_harqc_t). */
+  ul_harqc_t *hqe = NULL;
+  bool hq_retx = false;
+  if (ul_harq_combine_on() && t_hq_armed && !t_solver_probe) {
+    t_hq_armed = false;
+    hqe = ul_harqc_acquire(g->rnti, g->harq_pid);
+    if (hqe) {
+      hq_retx = g->rv != 0 && hqe->soft_valid && hqe->ndi == g->ndi && hqe->tbs == tbs && hqe->d &&
+                hqe->C <= hqe->cap_seg;
+      if (hq_retx) {
+        memcpy(ulsch->harq_process->d, hqe->d, (size_t)hqe->C * UL_HARQC_STRIDE * sizeof(int16_t));
+        ulsch->harq_process->harq_to_be_cleared = false;
+        atomic_fetch_add_explicit(&g_hq_retx_try, 1, memory_order_relaxed);
+      }
+    }
+  }
   int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
 
   /* Expensive, bounded OFFLINE diagnostic, never enabled by full_auto alone.
    * Preserve descrambled LLRs and remove actual interleaved UCI positions.
    * A CRC win identifies a footprint candidate, not O_ACK/CSI/RRC configuration. */
-  if (getenv("ISAC_PASSIVE_REPLAY_INPUT") && getenv("ISAC_PASSIVE_REPLAY_UL_UCI")
+  if (getenv("ISAC_PASSIVE_REPLAY_INPUT") && getenv("ISAC_PASSIVE_REPLAY_UL_UCI") && !hq_retx
       && rc==0 && hp_crc_failed(ulsch) && g->nrOfLayers==1) {
     const uint32_t full_bits=out->G;
     int16_t *original=g_snapshot[ctx].valid ?
@@ -2118,7 +2255,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * prevents the correct width from passing. The existing per-identity rate
    * limiter bounds exploration; cache entries still require a verified TB CRC. */
   if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0
-      && g->nrOfLayers == 1 && out->G > 0) {
+      && g->nrOfLayers == 1 && out->G > 0 && !hq_retx) {
     const uint32_t full_bits = out->G;
     int16_t *original = g_snapshot[ctx].valid ?
       (full_bits<=PASSIVE_UL_UCI_CAP ? g_scratch[ctx].uci : NULL) :
@@ -2126,6 +2263,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (original == NULL) {
       out->status = NR_PUSCH_PASSIVE_ERROR;
       out->reject_reason = "UCI recovery scratch allocation failed";
+      if (hqe) atomic_store(&hqe->busy, 0);
       return false;
     }
     memcpy(original, pvp->llr, (size_t)full_bits * sizeof(*original));
@@ -2156,7 +2294,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 
     /* 2. Otherwise explore, rate-limited, within a bounded RE budget. */
     bool explore_win = false;
-    if (!rescued && nr_passive_uci_learn_should_explore(g->rnti, (unsigned)ucfg->ul_uci_explore_every)) {
+    if (!rescued && nr_passive_uci_learn_should_explore(g->rnti, (unsigned)ucfg->ul_uci_explore_every) &&
+        nr_pusch_passive_rescue_allowed()) {
       unsigned cap = (unsigned)ucfg->ul_uci_search;
       /* ISAC_UL_UCI_SAFE=1 (default off). A TB of <= 3824 bits carries a 16-bit CRC, and this sweep runs up to
        * 2 x cap decodes: at cap 1024 that is a ~3 % false-pass probability per exploring grant (measured: 1-2 CRC passes
@@ -2198,6 +2337,31 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
     }
     if(!g_snapshot[ctx].valid) free(original);
+  }
+
+  if (hqe) {
+    /* Keep the soft bits only while the TB is undecoded; an epoch change invalidates them. */
+    const bool tb_ok = rc == 0 && !hp_crc_failed(ulsch);
+    const uint32_t C = ulsch->harq_process->C;
+    if (hq_retx && tb_ok) atomic_fetch_add_explicit(&g_hq_retx_ok, 1, memory_order_relaxed);
+    hqe->soft_valid = false;
+    if (!tb_ok && rc == 0 && C > 0 && C <= ul_harq_max_seg() && nr_cfg_epoch_work_current()) {
+      if (hqe->cap_seg < C) {
+        free(hqe->d);
+        hqe->d = (int16_t *)malloc16((size_t)C * UL_HARQC_STRIDE * sizeof(int16_t));
+        hqe->cap_seg = hqe->d ? C : 0;
+      }
+      if (hqe->d) {
+        memcpy(hqe->d, ulsch->harq_process->d, (size_t)C * UL_HARQC_STRIDE * sizeof(int16_t));
+        hqe->soft_valid = true;
+        hqe->ndi = g->ndi;
+        hqe->tbs = tbs;
+        hqe->C = C;
+        hqe->ncomb = hq_retx ? (uint8_t)(hqe->ncomb + 1) : 0;
+        if (!hq_retx) atomic_fetch_add_explicit(&g_hq_stored, 1, memory_order_relaxed);
+      }
+    }
+    atomic_store(&hqe->busy, 0);
   }
 
   if (utim) {
@@ -2513,6 +2677,11 @@ void nr_pusch_passive_stats_dump(void)
         (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
+  if (ul_harq_combine_on())
+    LOG_I(PHY, "SENSING: UL_HARQ stored=%lu retx_try=%lu retx_ok=%lu rv_refused=%lu busy=%lu rx_ant=%d\n",
+          (unsigned long)atomic_load(&g_hq_stored), (unsigned long)atomic_load(&g_hq_retx_try),
+          (unsigned long)atomic_load(&g_hq_retx_ok), (unsigned long)atomic_load(&g_hq_rv_refused),
+          (unsigned long)atomic_load(&g_hq_busy), g_gnb_nant);
   if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {
     char rep[512];
     unsigned u = 0;

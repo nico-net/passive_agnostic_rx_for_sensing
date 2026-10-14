@@ -450,6 +450,34 @@ TEST(UlPipelineAdmission, FullEvictsOldestAcrossWrapAndEpochStaleReject) {
   EXPECT_FALSE(nr_passive_job_epoch_old(false,stamp,ul_current_epoch));
   ul_test_epoch=3;
 }
+TEST(UlqPriority, RealGrantsFirstProbesOnlyOnSpareCapacity) {
+  nr_pusch_queue_cursor_t real{4,0,0,0}, probe{2,0,0,0};
+  int ev=-2;
+  EXPECT_EQ(nr_pusch_queue_pick(&real,&probe),-1);
+  EXPECT_EQ(nr_pusch_queue_pick(&real,nullptr),-1);
+  nr_pusch_queue_push(&probe,&ev);
+  nr_pusch_queue_push(&probe,&ev);
+  EXPECT_EQ(nr_pusch_queue_pick(&real,&probe),1);        // only probes: spare capacity
+  nr_pusch_queue_push(&probe,&ev); EXPECT_EQ(ev,0);      // a full probe ring evicts a probe ...
+  EXPECT_EQ(real.count,0);                               // ... never a real grant
+  nr_pusch_queue_push(&real,&ev);
+  EXPECT_EQ(nr_pusch_queue_pick(&real,&probe),0);        // a waiting real grant always goes first
+  nr_pusch_queue_pop(&real);
+  EXPECT_EQ(nr_pusch_queue_pick(&real,&probe),1);
+}
+
+TEST(UlqPriority, SnapshotPoolAndCpuBudget) {
+  int refs[3]={1,0,2};
+  EXPECT_EQ(nr_pusch_snap_free(refs,3),1);
+  refs[1]=1;
+  EXPECT_EQ(nr_pusch_snap_free(refs,3),-1);              // every buffer held: no capture, legacy path
+  EXPECT_EQ(nr_pusch_snap_free(refs,0),-1);
+  EXPECT_EQ(nr_pusch_budget_idle_ns(30,100,50),0);       // 30 % used, budget 50 %
+  EXPECT_EQ(nr_pusch_budget_idle_ns(80,100,50),60);      // 80 ns of CPU needs 160 ns wall at 50 %
+  EXPECT_EQ(nr_pusch_budget_idle_ns(80,100,0),0);        // no budget
+  EXPECT_EQ(nr_pusch_budget_idle_ns(80,100,100),0);
+}
+
 TEST(UlGrantBook, KeepsThreeUesInOneSlotAndAcceptsLateDci) {
   nr_passive_ul_book_t book{};
   nr_pdcch_blind_ul_result_t grant{};
