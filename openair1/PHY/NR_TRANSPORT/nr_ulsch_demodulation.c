@@ -829,6 +829,26 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
   if (dmrs_symb_idx > 0)
     nvar /= (dmrs_symb_idx * total_layers);
 
+  /* passive RX, metrics only: DMRS SNR = (mean |H|^2 - nvar) / nvar over the DMRS symbols, before any
+   * averaging; does not feed the equaliser or any decode decision. */
+  float dmrs_snr_db = NAN;
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && dmrs_symb_idx > 0) {
+    const int nsc = rel15_ul_ref->rb_size * NR_NB_SC_PER_RB;
+    const int nsp = rel15_ul_ref->param_v4.numSpatialStreamIndices;
+    double acc = 0;
+    int cnt = 0;
+    for (int symbol = rel15_ul_ref->start_symbol_index; symbol < end_symbol; symbol++) {
+      if (!((rel15_ul_ref->ul_dmrs_symb_pos >> symbol) & 1)) continue;
+      for (int nl = 0; nl < total_layers; nl++)
+        for (int a = 0; a < nsp; a++) {
+          const c16_t *h = (const c16_t *)&joint_pv->ul_ch_estimates[nl * nsp + a][symbol * frame_parms->ofdm_symbol_size];
+          for (int k = 0; k < nsc; k++) acc += c16amp2(h[k]);
+          cnt += nsc;
+        }
+    }
+    if (cnt > 0) dmrs_snr_db = nr_ulsch_dmrs_snr_db(acc / cnt, (double)nvar);
+  }
+
   // averaging time domain channel estimates
   // Change to joint processing
   const uint8_t num_sp_streams = rel15_ul_ref->param_v4.numSpatialStreamIndices;
@@ -1179,6 +1199,7 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
     // Copy power measurements per UE
     pv->ulsch_power_tot = 0;
     pv->ulsch_noise_power_tot = 0;
+    pv->ul_dmrs_snr_db = dmrs_snr_db;
     for (int aarx = 0; aarx < num_sp_streams; aarx++) {
       pv->ulsch_power[aarx] = joint_pv->ulsch_power[aarx];
       pv->ulsch_noise_power[aarx] = joint_pv->ulsch_noise_power[aarx];

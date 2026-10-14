@@ -9,6 +9,7 @@
  * byte for byte against a second stock call on the same input.
  */
 #include <gtest/gtest.h>
+#include "../nr_ulsch_passive_branch.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -149,4 +150,12 @@ TEST(PuschMmse2, FlagOffPathIsTheUnchangedDeterministicStockFunction)
   nr_mmse_2layers(ca, kBuf, kBuf, kRx, kL, a.maga, a.magb, a.magc, a.chf, kRb, 8, kShift, 0, kRe, 1000);
   nr_mmse_2layers(cb, kBuf, kBuf, kRx, kL, b.maga, b.magb, b.magc, b.chf, kRb, 8, kShift, 0, kRe, 1000);
   EXPECT_EQ(0, memcmp(&a, &b, sizeof(a)));
+}
+
+/* DMRS SNR formula: |H|=1000 (1e6 per RE), noise 1e4 per RE => signal 1e6-1e4, SNR = 10 log10(99) */
+TEST(UlDmrsSnr, KnownNoise) {
+  EXPECT_NEAR(19.956f, nr_ulsch_dmrs_snr_db(1e6, 1e4), 1e-2);
+  EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(1e6, 0)));
+  EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(0, 5)));
+  EXPECT_LT(nr_ulsch_dmrs_snr_db(1e3, 1e4), -29.f); /* noise >= signal clamps, never NaN/inf */
 }
