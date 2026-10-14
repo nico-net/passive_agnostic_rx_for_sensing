@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
+#endif
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "common/utils/nr_core_plan.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
@@ -90,6 +93,8 @@ void nr_pdsch_gpu_record_cpu(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *s
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sched.h>
+#include <sys/resource.h> /* FATTAILS DECSLOW: getrusage(RUSAGE_THREAD) */
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/system.h" // threadCreate
@@ -1732,9 +1737,41 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                          ? ((atomic_fetch_add(&s_in, 1) & 1u) ? s_ib : s_ia) : -1;
     }
     const int it_used = nr_pdsch_ldpc_iters_override;
+    /* FATTAILS DECSLOW (with ISAC_PDTIM_CLASS=1): a full decode call above 20 ms says where its wall time went --
+     * thread CPU, voluntary (blocking: mutex, GPU poll sleep) / involuntary (preempted) switches, page faults, cores */
+    void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns);
+    static int s_decslow = -1;
+    if (s_decslow < 0)
+      s_decslow = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
+    struct rusage ds_ru0 = {0};
+    struct timespec ds_c0 = {0};
+    const int ds_cpu0 = s_decslow ? sched_getcpu() : -1;
+    if (s_decslow) {
+      getrusage(RUSAGE_THREAD, &ds_ru0);
+      clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ds_c0);
+    }
     const uint64_t dec_t0 = now_ns();
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+    if (s_decslow && now_ns() - dec_t0 > 20000000ull) {
+      static _Atomic int s_left = 300;
+      struct rusage ru1;
+      struct timespec c1;
+      getrusage(RUSAGE_THREAD, &ru1);
+      clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      unsigned ds_bodies = 0;
+      uint64_t ds_body = 0, ds_stage = 0;
+      nr_pdsch_passive_decode_slow_stats(&ds_bodies, &ds_body, &ds_stage);
+      if (atomic_fetch_sub(&s_left, 1) > 0)
+        LOG_I(PHY, "SENSING: DECSLOW t=%ld.%03ld rnti=0x%04x mcs=%u Nl=%u rb=%u+%u probe=%d st=%d wall_us=%lu bodies=%u body_us=%lu stage_us=%lu "
+                   "cpu_us=%ld vcsw=%ld ivcsw=%ld minflt=%ld majflt=%ld core=%d->%d\n",
+              (long)ts.tv_sec, ts.tv_nsec / 1000000, job.rnti, job.grant.mcs, (unsigned)__builtin_popcount(job.dlsch_pdu.dmrs_ports),
+              job.freq_alloc.first_rb, job.freq_alloc.num_rbs, (int)job.layout_probe, (int)st_raw, (unsigned long)((now_ns() - dec_t0) / 1000),
+              ds_bodies, (unsigned long)(ds_body / 1000), (unsigned long)(ds_stage / 1000), (long)((c1.tv_sec - ds_c0.tv_sec) * 1000000L + (c1.tv_nsec - ds_c0.tv_nsec) / 1000), ru1.ru_nvcsw - ds_ru0.ru_nvcsw,
+              ru1.ru_nivcsw - ds_ru0.ru_nivcsw, ru1.ru_minflt - ds_ru0.ru_minflt, ru1.ru_majflt - ds_ru0.ru_majflt, ds_cpu0, sched_getcpu());
+    }
     { /* GPUSCHED ISAC_PDSCH_GPU_PRIO=1: back to real-time streams; a demod context still held for a deferred EVM of a
        * decode that returned before its LDPC stage is freed now, not at this thread's next grant (8-context pool, 5+ consumers) */
       static _Atomic int s_prio = -1;

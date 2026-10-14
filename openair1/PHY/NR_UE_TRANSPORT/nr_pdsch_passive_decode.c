@@ -194,6 +194,14 @@ static _Atomic uint32_t g_cls_hist[PDTIM_NCLS][PDTIM_HB];
 static _Atomic uint64_t g_cls_ns[PDTIM_NCLS], g_cls_max[PDTIM_NCLS], g_cls_gt5[PDTIM_NCLS], g_cls_gt20[PDTIM_NCLS];
 static _Atomic uint64_t g_cls_ns1[PDTIM_NCLS], g_cls_ns5[PDTIM_NCLS], g_cls_ns20[PDTIM_NCLS]; /* DECTAIL: time spent in bodies > 1 / 5 / 20 ms */
 static __thread unsigned t_pdtim_body; /* bodies of the current nr_pdsch_passive_decode() call (passive_decode_body) */
+static __thread uint64_t t_dec_body_ns, t_dec_stage_ns; /* FATTAILS DECSLOW: this call's body wall and fep+chest+demod+ldpc wall */
+/* FATTAILS DECSLOW: the last nr_pdsch_passive_decode() call's bodies, their wall time and their stage time (ns) */
+void nr_pdsch_passive_decode_slow_stats(unsigned *bodies, uint64_t *body_ns, uint64_t *stage_ns)
+{
+  *bodies = t_pdtim_body;
+  *body_ns = t_dec_body_ns;
+  *stage_ns = t_dec_stage_ns;
+}
 static __thread uint32_t t_pdtim_stage_us[PDTIM_N], t_pdtim_stage_cpu_us[PDTIM_N]; /* this body's stage wall / thread-CPU times (PDTIMSLOW) */
 static _Atomic int g_pdtim_slow_left = 200;
 /* DECODETIME: per class x stage, the stage wall time (us) held by bodies of duration band <1 / 1-5 / 5-20 / >20 ms (PDTIMCLSST) */
@@ -400,6 +408,7 @@ static void pdtim_report(void)
       g_pdtim_cls = getenv("ISAC_PDTIM_CLASS") && atoi(getenv("ISAC_PDTIM_CLASS")) ? 1 : 0;
     if (g_pdtim_cls)
       pdtim_cls_note(t_pdtim_sum);
+    t_dec_stage_ns += t_pdtim_sum;
     t_pdtim_sum = t_pdtim_sum_n = 0;
   }
   if ((g_pdtim_calls % 200) != 0) {
@@ -5442,6 +5451,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          nr_pdsch_passive_decode_result_t *out)
 {
   t_pdtim_body = 0; /* ISAC_PDTIM_CLASS: the next body is this call's first (real), later ones are retries */
+  t_dec_body_ns = t_dec_stage_ns = 0;
   /* CSI-FULL hook (ISAC_CSIRS_FULL=1): this grant's own cell CSI-RS set for its PDSCH slot (nr_csirs_blind_rt.c) */
   if (!t_probe_first_seg && !t_quiet && grant->dci11 && grant->rnti_class == 0) /* ISAC_CSIRS_FULL_AB diagnostic */
     nr_csirs_full_ab(ue, proc, dlsch_config, freq_alloc, grant, rxdataF);
@@ -5762,9 +5772,17 @@ static nr_pdsch_passive_decode_status_t passive_decode_body(PHY_VARS_NR_UE *ue,
                                                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                             nr_pdsch_passive_decode_result_t *out)
 {
+  struct timespec tb;
+  if (g_pdtim_on > 0)
+    clock_gettime(CLOCK_MONOTONIC, &tb);
+  const uint64_t tb0 = g_pdtim_on > 0 ? (uint64_t)tb.tv_sec * 1000000000ull + (uint64_t)tb.tv_nsec : 0;
   nr_pdsch_route_t rt = nr_pdsch_route_begin((int)freq_alloc->num_rbs, __builtin_popcount(dlsch_config->dmrs_ports), t_probe_first_seg);
   const nr_pdsch_passive_decode_status_t st = passive_decode_body_gated(ue, proc, dlsch_config, freq_alloc, grant, rxdataF, out);
   nr_pdsch_route_end(&rt);
+  if (tb0) {
+    clock_gettime(CLOCK_MONOTONIC, &tb);
+    t_dec_body_ns += (uint64_t)tb.tv_sec * 1000000000ull + (uint64_t)tb.tv_nsec - tb0;
+  }
   return st;
 }
 

@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* FATTAILS: pthread_attr_setaffinity_np, pthread_setname_np */
+#endif
 /* GPU-DEMOD host side: ISAC_PDSCH_GPU_EXACT_DEMOD=1 (default off) runs nr_rx_pdsch()'s demodulation of a whole passive
  * PDSCH grant on the GPU (libpdsch_gpu.so, nr_pdsch_gpu_demod.cu), bit for bit.
  *   - Geometry: nr_dlsch_extract_geometry() runs the real nr_dlsch_extract_rbs() on index-coded inputs, so every
@@ -26,6 +29,13 @@
 #include <string.h>
 #include <time.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
+#include "PHY/NR_UE_TRANSPORT/nr_passive_tpool.h"
+#include "PHY/TOOLS/nr_gpu_bgq.h" /* FATTAILS */
+#include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 uint32_t nr_dlsch_extract_geometry(const NR_DL_FRAME_PARMS *fp, int chest_time, c16_t *rx_idx, uint32_t est_sz, int32_t *est_idx,
                                    uint32_t ext_sz, c16_t *out_y, int32_t *out_h, unsigned char symbol,
@@ -33,6 +43,9 @@ uint32_t nr_dlsch_extract_geometry(const NR_DL_FRAME_PARMS *fp, int chest_time, 
 extern __thread int nr_dlsch_forced_branch, nr_dlsch_forced_mask, nr_dlsch_mrc_mode_override, nr_dlsch_irc_override,
     nr_dlsch_eq_override, nr_dlsch_qam_mode_override, nr_dlsch_used_branch, nr_dlsch_chest_per_symbol;
 extern __thread bool nr_pdsch_decode_wide_mrc;
+extern __thread uint32_t nr_dl_chest_nvar_ant[];
+extern __thread int nr_dlsch_csi_extent_override;
+extern __thread bool nr_dl_chest_cpu_ref; /* FATTAILS: nr_dl_channel_estimation.c */
 
 static nr_gpu_demod_init_fn g_init;
 static nr_gpu_demod_run_fn g_run;
@@ -711,6 +724,322 @@ static int compare(const nr_pdsch_gpu_demod_call_t *c, const chk_tls_t *k, const
   return 1;
 }
 
+/* ---- FATTAILS ISAC_GPU_CHECK_ASYNC=1 (default off): the bit-exact self-checks of the GPU demod and the GPU chest
+ * (ISAC_PDSCH_GPU_EXACT_DEMOD_CHECK / ISAC_PDSCH_GPU_EXACT_CHEST_CHECK > 0) leave the decode thread. A checked grant keeps
+ * the GPU results; its inputs, its GPU outputs and the thread-local decode state are copied into a job that one
+ * SCHED_OTHER nice-19 worker (cores ISAC_GPU_CHECK_CORES, default the little cores 0-4,10-14) recomputes on the CPU and
+ * compares exactly as the inline check does (same counters, same MISMATCH line, the GPU path is disabled on the first
+ * difference). Cadence: every ISAC_GPU_CHECK_ASYNC_EVERY-th grant (default 256) of each check. The hand-off never waits:
+ * a full queue (ISAC_GPU_CHECK_ASYNC_QUEUE, default 2 incl. the job in progress) drops the check and counts it.
+ * [OTA 2026-10-14 T2a] the inline CPU references were the >20 ms bodies: chest CPU 26-36 ms, demod CPU 5-70 ms. */
+static nr_bgq_t g_bgq;
+static pthread_once_t g_bg_once = PTHREAD_ONCE_INIT;
+static int g_bg_every;
+static _Atomic uint64_t g_bg_ns, g_bg_ns_max, g_bg_n;
+
+static void *bg_main(void *a)
+{
+  (void)a;
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  pthread_setname_np(pthread_self(), "gpuCheckBg");
+  nr_passive_tpool_inline = true; /* never push the CPU reference's tasks to the RT thread pool */
+  nr_dl_chest_cpu_ref = true;     /* the reference estimator stays on the CPU (no GPU delay pre-pass) */
+  for (;;)
+    nr_bgq_run_one(&g_bgq);
+  return NULL;
+}
+
+static void bg_start(void)
+{
+  nr_bgq_init(&g_bgq, (unsigned)env_int("ISAC_GPU_CHECK_ASYNC_QUEUE", 2));
+  cpu_set_t cs;
+  CPU_ZERO(&cs);
+  const char *e = getenv("ISAC_GPU_CHECK_CORES");
+  char buf[128], list[128];
+  snprintf(buf, sizeof(buf), "%s", e && *e ? e : "0-4,10-14");
+  snprintf(list, sizeof(list), "%s", buf);
+  char *sv = NULL;
+  for (char *t = strtok_r(buf, ",", &sv); t; t = strtok_r(NULL, ",", &sv)) {
+    int a = -1, b = -1;
+    if (sscanf(t, "%d-%d", &a, &b) != 2)
+      b = a = atoi(t);
+    for (int k = a; k >= 0 && k <= b && k < CPU_SETSIZE; k++)
+      CPU_SET(k, &cs);
+  }
+  pthread_attr_t at;
+  pthread_attr_init(&at);
+  pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED); /* the creator is an RT consumer: do not inherit FIFO */
+  pthread_attr_setschedpolicy(&at, SCHED_OTHER);
+  struct sched_param sp = {.sched_priority = 0};
+  pthread_attr_setschedparam(&at, &sp);
+  if (CPU_COUNT(&cs))
+    pthread_attr_setaffinity_np(&at, sizeof(cs), &cs);
+  pthread_t th;
+  const int rc = pthread_create(&th, &at, bg_main, NULL);
+  pthread_attr_destroy(&at);
+  if (rc == 0)
+    pthread_detach(th);
+  else
+    g_bg_every = 0; /* no worker: inline checks as before */
+  LOG_A(PHY, "SENSING: GPU_CHECK_ASYNC worker %s: every %d-th grant, queue %u, cores %s\n", rc ? "FAILED (inline checks)" : "started",
+        g_bg_every, g_bgq.cap, list);
+}
+
+static void bg_resolve(void)
+{
+  const int on = env_int("ISAC_GPU_CHECK_ASYNC", 0) == 1;
+  const int every = on ? env_int("ISAC_GPU_CHECK_ASYNC_EVERY", 256) : 0;
+  g_bg_every = every > 0 ? every : 0;
+  if (g_bg_every)
+    bg_start();
+}
+
+/* 0: off (inline checks as configured); N > 0: checks run every N-th grant on the background worker */
+int nr_gpu_check_async_every(void)
+{
+  pthread_once(&g_bg_once, bg_resolve);
+  return g_bg_every;
+}
+
+int nr_gpu_check_async_room(void)
+{
+  return nr_bgq_room(&g_bgq);
+}
+
+int nr_gpu_check_async_submit(nr_bgq_fn fn, void *job)
+{
+  return nr_bgq_push(&g_bgq, fn, job);
+}
+
+void nr_gpu_check_async_drop(void)
+{
+  __atomic_fetch_add(&g_bgq.dropped, 1, __ATOMIC_RELAXED);
+}
+
+void nr_gpu_check_async_note(uint64_t ns)
+{
+  const uint64_t n = atomic_fetch_add(&g_bg_n, 1) + 1;
+  atomic_fetch_add(&g_bg_ns, ns);
+  uint64_t mx = atomic_load(&g_bg_ns_max);
+  while (ns > mx && !atomic_compare_exchange_weak(&g_bg_ns_max, &mx, ns)) {}
+  if (n == 1 || n == 10 || n % 100 == 0)
+    LOG_A(PHY, "SENSING: GPU_CHECK_ASYNC done=%lu queued=%lu dropped=%lu worker mean=%.0f us max=%.0f us\n", (unsigned long)n,
+          (unsigned long)__atomic_load_n(&g_bgq.queued, __ATOMIC_RELAXED), (unsigned long)__atomic_load_n(&g_bgq.dropped, __ATOMIC_RELAXED), atomic_load(&g_bg_ns) / 1e3 / n,
+          atomic_load(&g_bg_ns_max) / 1e3);
+}
+
+/* One checked grant: everything nr_rx_pdsch() reads, copied off the decode thread's buffers, plus the GPU's outputs. */
+typedef struct {
+  nr_pdsch_gpu_demod_call_t c; /* pointers re-targeted into this job */
+  NR_UE_DLSCH_t dlsch;
+  NR_DL_UE_HARQ_t harq;
+  fapi_nr_dl_config_dlsch_pdu_rel15_t cfg;
+  freq_alloc_bitmap_t fa;
+  UE_nr_rxtx_proc_t proc;
+  nr_ssb_rm_mask_t ssb;
+  pdsch_scope_req_t scope;
+  int mrc_ovr, qam_ovr, irc_ovr, eq_ovr, fbranch, fmask, per_sym, csi_ext, used0, used_g, erase_n, prb_n;
+  bool wide;
+  uint32_t nvar_ant[8];
+  nr_pdsch_evm_acc_t acc0, acc_g;
+  nr_mmse2_diag_t m2d;
+  fapi_nr_dl_config_csirs_pdu_rel15_t erase[NFAPI_MAX_NUM_CSI_RATEMATCH];
+  uint16_t prb_map[NR_SSB_RM_MAX_RB];
+  uint32_t dvr_in[NR_SYMBOLS_PER_SLOT], dvr_g[NR_SYMBOLS_PER_SLOT];
+  int32_t l2_g;
+  uint32_t n_llr;
+  c16_t ptrs_phase[NR_GPU_DEMOD_MAX_RX][NR_SYMBOLS_PER_SLOT];
+  int32_t ptrs_re[NR_GPU_DEMOD_MAX_RX][NR_SYMBOLS_PER_SLOT];
+  int32_t *est;
+  c16_t *rx, *cm[4]; /* compact GPU comp/mag/magb/magr rows: (m, l) in order, dvr_g[m] entries each */
+  int16_t *llr_g;
+} bg_demod_t;
+
+static void bg_demod_free(bg_demod_t *j)
+{
+  free(j->est);
+  free(j->rx);
+  free(j->llr_g);
+  free(j->cm[0]);
+  free(j);
+}
+
+static void bg_demod_run(void *arg)
+{
+  bg_demod_t *j = arg;
+  const uint64_t t0 = now_ns();
+  nr_pdsch_gpu_demod_call_t *c = &j->c;
+  const int nl = j->dlsch.cw_info.Nl, qm = j->dlsch.cw_info.qamModOrder;
+  const int last = j->cfg.start_symbol + j->cfg.number_symbols - 1;
+  static __thread chk_tls_t cpu, gpu; /* full-layout CPU outputs and the expanded GPU outputs */
+  const size_t bn = (size_t)NR_SYMBOLS_PER_SLOT * NR_MAX_NB_LAYERS * c->buf;
+  chk_tls_t *ks[2] = {&cpu, &gpu};
+  for (int s = 0; s < 2; s++) {
+    chk_tls_t *k = ks[s];
+    if (k->buf_n < bn) {
+      free(k->comp); free(k->mag); free(k->magb); free(k->magr);
+      k->comp = calloc(bn, sizeof(c16_t)); k->mag = calloc(bn, sizeof(c16_t));
+      k->magb = calloc(bn, sizeof(c16_t)); k->magr = calloc(bn, sizeof(c16_t));
+      k->buf_n = (k->comp && k->mag && k->magb && k->magr) ? bn : 0;
+    }
+    if (k->llr_cap < c->llr_cap) {
+      free(k->llr);
+      k->llr = calloc(c->llr_cap, sizeof(int16_t));
+      k->llr_cap = k->llr ? c->llr_cap : 0;
+    }
+  }
+  if (cpu.buf_n && gpu.buf_n && cpu.llr_cap && gpu.llr_cap) {
+    /* the decode thread's per-grant state, as nr_rx_pdsch() read it there */
+    nr_dlsch_mrc_mode_override = j->mrc_ovr;
+    nr_dlsch_qam_mode_override = j->qam_ovr;
+    nr_dlsch_irc_override = j->irc_ovr;
+    nr_dlsch_eq_override = j->eq_ovr;
+    nr_dlsch_forced_branch = j->fbranch;
+    nr_dlsch_forced_mask = j->fmask;
+    nr_dlsch_chest_per_symbol = j->per_sym;
+    nr_dlsch_csi_extent_override = j->csi_ext;
+    nr_pdsch_decode_wide_mrc = j->wide;
+    memcpy(nr_dl_chest_nvar_ant, j->nvar_ant, sizeof(j->nvar_ant));
+    nr_dlsch_csi_erase_n = j->erase_n;
+    memcpy(nr_dlsch_csi_erase, j->erase, sizeof(j->erase[0]) * (size_t)j->erase_n);
+    nr_dlsch_csi_prb_map = j->prb_n ? j->prb_map : NULL;
+    nr_dlsch_csi_prb_map_n = j->prb_n;
+    nr_mmse2_diag = j->m2d;
+    nr_pdsch_evm_acc = j->acc0;
+    nr_dlsch_used_branch = j->used0;
+    uint32_t dvr_c[NR_SYMBOLS_PER_SLOT];
+    memcpy(dvr_c, j->dvr_in, sizeof(dvr_c));
+    int32_t l2_c = 0;
+    if (cpu_loop(c, cpu.llr, dvr_c, &l2_c, cpu.comp, cpu.mag, cpu.magb, cpu.magr) == 0) {
+      const nr_pdsch_evm_acc_t acc_c = nr_pdsch_evm_acc;
+      const int used_c = nr_dlsch_used_branch;
+      memcpy(gpu.llr, j->llr_g, sizeof(int16_t) * j->n_llr); /* the GPU's compact outputs in the CPU layout */
+      size_t o = 0;
+      c16_t *gk[4] = {gpu.comp, gpu.mag, gpu.magb, gpu.magr};
+      for (int m = j->cfg.start_symbol; m <= last; m++)
+        for (int l = 0; l < nl; l++) {
+          const size_t row = ((size_t)m * NR_MAX_NB_LAYERS + l) * c->buf;
+          for (int q = 0; q < 4; q++)
+            if (q == 0 || qm > 2 * q)
+              memcpy(gk[q] + row, j->cm[q] + o, sizeof(c16_t) * j->dvr_g[m]);
+          o += j->dvr_g[m];
+        }
+      nr_pdsch_gpu_demod_call_t cc = *c; /* compare() reads the CPU side through the call */
+      cc.llr = cpu.llr;
+      cc.dl_valid_re = dvr_c;
+      cc.log2_maxh = &l2_c;
+      cc.comp = cpu.comp;
+      cc.mag = cpu.mag;
+      cc.magb = cpu.magb;
+      cc.magr = cpu.magr;
+      char why[256] = "";
+      if (compare(&cc, &gpu, j->dvr_g, j->l2_g, j->used_g, &j->acc_g, used_c, &acc_c, why, sizeof(why))) {
+        atomic_fetch_add_explicit(&g_chk_ok, 1, memory_order_relaxed);
+      } else {
+        atomic_fetch_add_explicit(&g_chk_bad, 1, memory_order_relaxed);
+        atomic_store(&g_on, 0);
+        LOG_E(PHY, "SENSING: GPU_EXACT_DEMOD MISMATCH (async) rnti 0x%x rb %d+%d sym %d+%d Qm %d Nl %d: %s -- GPU demodulation disabled\n",
+              j->dlsch.rnti, j->fa.first_rb, j->fa.num_rbs, j->cfg.start_symbol, j->cfg.number_symbols, qm, nl, why);
+      }
+    }
+  }
+  bg_demod_free(j);
+  nr_gpu_check_async_note(now_ns() - t0);
+}
+
+/* Decode thread: the GPU outputs of grant c are final; copy what the worker needs. Never blocks; drops when busy. */
+static void bg_demod_submit(const nr_pdsch_gpu_demod_call_t *c, const uint32_t *dvr_in, int used0, const nr_pdsch_evm_acc_t *acc0)
+{
+  if (!nr_gpu_check_async_room()) {
+    nr_gpu_check_async_drop();
+    return;
+  }
+  const NR_DL_FRAME_PARMS *fp = &c->ue->frame_parms;
+  const int nl = c->dlsch->cw_info.Nl, qm = c->dlsch->cw_info.qamModOrder, nb = fp->nb_antennas_rx;
+  const int last = c->cfg->start_symbol + c->cfg->number_symbols - 1;
+  bg_demod_t *j = calloc(1, sizeof(*j));
+  if (!j)
+    return;
+  j->dlsch = *c->dlsch;
+  j->harq = *c->harq;
+  j->cfg = *c->cfg;
+  j->fa = *c->freq_alloc;
+  j->proc = *c->proc;
+  j->ssb = *c->ssb_rm;
+  j->mrc_ovr = nr_dlsch_mrc_mode_override;
+  j->qam_ovr = nr_dlsch_qam_mode_override;
+  j->irc_ovr = nr_dlsch_irc_override;
+  j->eq_ovr = nr_dlsch_eq_override;
+  j->fbranch = nr_dlsch_forced_branch;
+  j->fmask = nr_dlsch_forced_mask;
+  j->per_sym = nr_dlsch_chest_per_symbol;
+  j->csi_ext = nr_dlsch_csi_extent_override;
+  j->wide = nr_pdsch_decode_wide_mrc;
+  memcpy(j->nvar_ant, nr_dl_chest_nvar_ant, sizeof(j->nvar_ant));
+  j->erase_n = nr_dlsch_csi_erase_n > NFAPI_MAX_NUM_CSI_RATEMATCH ? NFAPI_MAX_NUM_CSI_RATEMATCH : nr_dlsch_csi_erase_n;
+  memcpy(j->erase, nr_dlsch_csi_erase, sizeof(j->erase[0]) * (size_t)j->erase_n);
+  if (nr_dlsch_csi_prb_map && nr_dlsch_csi_prb_map_n > 0) {
+    j->prb_n = nr_dlsch_csi_prb_map_n > NR_SSB_RM_MAX_RB ? NR_SSB_RM_MAX_RB : nr_dlsch_csi_prb_map_n;
+    memcpy(j->prb_map, nr_dlsch_csi_prb_map, sizeof(uint16_t) * (size_t)j->prb_n);
+  }
+  j->m2d = nr_mmse2_diag;
+  j->acc0 = *acc0;
+  j->acc_g = nr_pdsch_evm_acc;
+  j->used0 = used0;
+  j->used_g = nr_dlsch_used_branch;
+  memcpy(j->dvr_in, dvr_in, sizeof(j->dvr_in));
+  memcpy(j->dvr_g, c->dl_valid_re, sizeof(j->dvr_g));
+  j->l2_g = *c->log2_maxh;
+  memcpy(j->ptrs_phase, c->ptrs_phase, sizeof(c16_t) * (size_t)nb * NR_SYMBOLS_PER_SLOT);
+  memcpy(j->ptrs_re, c->ptrs_re, sizeof(int32_t) * (size_t)nb * NR_SYMBOLS_PER_SLOT);
+  const size_t est_n = (size_t)nl * nb * c->est_size, rx_n = (size_t)nb * fp->samples_per_slot_wCP;
+  uint32_t tot = 0;
+  size_t ncm = 0;
+  for (int m = c->cfg->start_symbol; m <= last; m++) {
+    tot += c->dl_valid_re[m] * (uint32_t)qm * (uint32_t)nl;
+    ncm += (size_t)c->dl_valid_re[m] * nl;
+  }
+  j->n_llr = tot < c->llr_cap ? tot : c->llr_cap;
+  j->est = malloc(sizeof(int32_t) * est_n);
+  j->rx = malloc(sizeof(c16_t) * rx_n);
+  j->llr_g = malloc(sizeof(int16_t) * (j->n_llr + 1));
+  j->cm[0] = malloc(sizeof(c16_t) * (4 * ncm + 1));
+  if (!j->est || !j->rx || !j->llr_g || !j->cm[0]) {
+    bg_demod_free(j);
+    return;
+  }
+  for (int q = 1; q < 4; q++)
+    j->cm[q] = j->cm[0] + (size_t)q * ncm;
+  memcpy(j->est, c->est, sizeof(int32_t) * est_n);
+  memcpy(j->rx, c->rxdataF, sizeof(c16_t) * rx_n);
+  memcpy(j->llr_g, c->llr, sizeof(int16_t) * j->n_llr);
+  const c16_t *src[4] = {c->comp, c->mag, c->magb, c->magr};
+  size_t o = 0;
+  for (int m = c->cfg->start_symbol; m <= last; m++)
+    for (int l = 0; l < nl; l++) {
+      const size_t row = ((size_t)m * NR_MAX_NB_LAYERS + l) * c->buf;
+      for (int q = 0; q < 4; q++)
+        if (q == 0 || qm > 2 * q)
+          memcpy(j->cm[q] + o, src[q] + row, sizeof(c16_t) * c->dl_valid_re[m]);
+      o += c->dl_valid_re[m];
+    }
+  j->c = *c;
+  j->c.proc = &j->proc;
+  j->c.dlsch = &j->dlsch;
+  j->c.freq_alloc = &j->fa;
+  j->c.cfg = &j->cfg;
+  j->c.harq = &j->harq;
+  j->c.est = j->est;
+  j->c.rxdataF = j->rx;
+  j->c.ptrs_phase = &j->ptrs_phase[0][0];
+  j->c.ptrs_re = &j->ptrs_re[0][0];
+  j->c.scope = &j->scope;
+  j->c.ssb_rm = &j->ssb;
+  j->c.rho = NULL;
+  if (nr_gpu_check_async_submit(bg_demod_run, j) != 0)
+    bg_demod_free(j);
+}
+
 int nr_pdsch_gpu_demod_evm_deferred(void)
 {
   return t_def && t_def->pending;
@@ -747,9 +1076,19 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
   const uint64_t t0 = now_ns();
   uint64_t gns = 0;
   const uint64_t n = atomic_fetch_add_explicit(&g_calls, 1, memory_order_relaxed) + 1;
-  const int check = g_check == 1 || (g_check > 1 && n % (uint64_t)g_check == 0);
+  const int bg = g_check > 0 ? nr_gpu_check_async_every() : 0; /* FATTAILS: the check runs off this thread */
+  const int check = !bg && (g_check == 1 || (g_check > 1 && n % (uint64_t)g_check == 0));
+  const int bg_check = bg && n % (uint64_t)bg == 0;
   if (!check) {
-    t_defer_ok = g_defer;
+    uint32_t dvr_in[NR_SYMBOLS_PER_SLOT];
+    nr_pdsch_evm_acc_t acc0;
+    int used0 = 0;
+    if (bg_check) { /* the worker replays the CPU loop from this state; the EVM of a checked grant is not deferred */
+      memcpy(dvr_in, c->dl_valid_re, sizeof(dvr_in));
+      acc0 = nr_pdsch_evm_acc;
+      used0 = nr_dlsch_used_branch;
+    }
+    t_defer_ok = g_defer && !bg_check;
     const int r = gpu_grant(c, mode, thr_coef, align, l2d, c->llr, c->llr_cap, c->dl_valid_re, c->log2_maxh, c->comp, c->mag, c->magb,
                             c->magr, &gns);
     t_defer_ok = 0;
@@ -758,6 +1097,8 @@ int nr_pdsch_gpu_demod_grant(const nr_pdsch_gpu_demod_call_t *c)
       atomic_fetch_sub_explicit(&g_calls, 1, memory_order_relaxed);
       return -1; /* nothing was written that the CPU loop does not overwrite: it writes every output again */
     }
+    if (bg_check)
+      bg_demod_submit(c, dvr_in, used0, &acc0);
   } else {
     static __thread chk_tls_t k;
     const size_t bn = (size_t)NR_SYMBOLS_PER_SLOT * NR_MAX_NB_LAYERS * c->buf;
