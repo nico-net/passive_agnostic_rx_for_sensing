@@ -4231,6 +4231,62 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
 
 ---
 
+### 2026-10-14 block (`csd/otatest`, worktree `rr-csd-b`; OTA 2026-10-14 09:08-12:09 at DEIB, DGX GB10, binary `08db255521`)
+
+Sources: `rr-orchestration/ota/RESULTS-20261014.md` (tables in `ota/ana_20261014.jsonl`) and `rr-orchestration/logs/RESET-INVESTIGATION-20261014.md`.
+OTA labels: `[MEASURED, DGX OTA, X410 34B2AF1, 2026-10-14 ...]`, cfg `sd_t26ul` (S4 = `sd_t26ul_s4`, 4 scan consumers, cores 5..8), 150 s runs
+(U arms 240 s), high daytime load. n = 1-3 per arm: indicative only. Cells never merged: V = Vodafone PCI 415 (3680.01 MHz), T = TIM PCI 233
+(3759.99 MHz; 10-12/10-13 blocks say PCI 923 for TIM: NOT reconciled, to check), M508a = PCI 517 (3590.19 MHz).
+
+**1. Tails, Vodafone (n=3 per arm; scan loss = stale + full)**
+
+| arm | env | real p50 / p99 (us) | max (ms) | PDSCH stale % | PDSCH crc_ok | scan loss % |
+|---|---|---|---|---|---|---|
+| T0 | t26bC | 405-495 / 5485-7455 | 145-432 | 55-75 | 3764-9127 | 8-31 (all stale) |
+| T1 | +GPU_POLL_SLEEP_US=200 | 355-425 / 4155-7585 | 69-632 | 44-80 | 5052-12169 | 6-24 |
+| T2 | +ISAC_PDSCH_RETRY_YIELD=2 ISAC_SCANQ_FRESH=6 | 365-425 / 4025-7925 | 70-613 | 6.6-10.7 | 11926-17673 | 16-30 (5 stale + 11-25 full) |
+| S4 | T2 + 4 scan threads | 405-535 / 3855-6995 | 233-598 | 8.6-13.2 | 12174-13993 | 12-22 |
+
+TIM: U0 (t26bC) PDSCH stale 29-40 %, U2 (t26bPQ) 1.0 %; S4U 2.0-2.5 %; p99 3.8-10.3 ms in every arm.
+
+- T2 flags validated, positive: PDSCH stale 55-80 % -> 7-11 %, decoded x2.5, CRC-OK ~x2.
+- p99 stays 4-8 ms, max 70-630 ms in every arm: per-grant compute (body p99 3.5-5.6 ms; LDPC p99 1.6-2.9 ms, demod 1-2 ms), not queueing. 0.5 ms target not met.
+- SCANQ_FRESH turns scan stale drops into full drops; total scan loss unchanged (16-30 %).
+- S4 (4 scan threads): scan loss 12-22 % (small gain), scan p50 2097 us, p99 up to 16.8 ms, no DL CRC gain. **Not adopted.**
+
+**2. Rank 3/4 exact MMSE (`ISAC_PDSCH_MMSE_EXACT_NL34=1`, t26mtx vs t26mtd)**
+
+- TIM mtd: Nl3 CRC 1/2520, 0/3409; Nl4 0/1885, 0/2135; demod p99 1415, 1015 us. TIM mtx: Nl3 5/2116, 18/5864; Nl4 3/1689, 24/2175; demod p99 10255, 16025 us.
+- VF mtd: Nl3 22/1274, Nl4 2/297; demod p99 2085 us. VF mtx: Nl3 49/2169, Nl4 47/365; demod p99 8345 us.
+- Clear CRC gain on both operators (n = 1-2 per arm), but CPU mode 3 adds demod p99 8-16 ms. **Not default-on until the GPU port.**
+
+**3. High MCS (t26ms / t26mt CHEST_TINTERP / t26mtd SIGNAL_GEOM_RETRY)**
+
+- MCS 17-27 CRC 0-6 % in every arm; P1b and Q2a collapsed (scan loss 50 %, DL crc_ok 107). **Inconclusive** at this load.
+
+**4. UL (46 runs)**
+
+- PUSCH CRC-OK 0-3 per run, even when the layout locked. `UL_PUSCH_CRC` snr_db always 0.0: fixed on `csd/ulsnr`, not in this binary.
+- BWP lock inconsistent (VF 217@0 / 216@1 / 216@0 / 178@39; TIM 107@5 / 178@39 / 216@0): false locks likely; `csd/ulbwp` LLR rule pending.
+- UL core arms: no CRC-OK in any arm. Analysis by the `csd/ulbwp` agent pending.
+
+**5. Cold start and CORESET watcher**
+
+- Cold start (S415b, `t26bS.env`: `ISAC_USRP_START_TIMEOUT_MS=2200`, `ISAC_CORESET_DISC_WATCH=1`): timed USRP_RING restart, sync PCI 415. **Validated twice** (09:08 and 10:56 after reboot).
+- CORESET_DISC never MISSED, no RFSTALL in 46 runs; M508a not silent (28 SEARCHING re-arms, 55 LOCKED).
+
+**6. Host hard resets**
+
+- Hard resets 2026-10-13 10:31:52 and 2026-10-14 10:31:54 (during Q1b); no pstore dump. Report: `rr-orchestration/logs/RESET-INVESTIGATION-20261014.md`.
+- journald `SyncIntervalSec=1s` and panic-on-wedge sysctls applied ~12:00 on 2026-10-14. Not yet tested by a reset.
+
+**7. Pending (`[NOT MEASURED]`)**
+
+- GPU port of MMSE mode 3 (gate for rank 3/4 default-on). Per-grant compute p99 (LDPC, demod). UL SNR fix and BWP lock validation on air.
+- Scan loss 16-30 %. High-MCS re-test at lower load. Host sysctls over the next OTA windows. TIM PCI 233 vs 923 check.
+
+---
+
 ## 26. Working rules for any agent on this project (carried over from the old setup)
 
 - Evidence labels (§0.1) in every status statement; retract wrong claims explicitly; never quote inherited numbers.
