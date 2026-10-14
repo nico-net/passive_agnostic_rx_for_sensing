@@ -8,6 +8,7 @@ int nr_ue_rx_synced_g = 0;
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cfg_sources.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_dl_traffic_probe.h" // ACQMISS-2 sync-quality metric
 #include "PHY/NR_UE_TRANSPORT/nr_passive_metrics.h" // ISAC_METRICS pci
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include <dlfcn.h>
@@ -2009,6 +2010,12 @@ void *UE_thread(void *arg)
       if (s_clamp > 0) {
         if (ret > s_clamp) ret = s_clamp;
         if (ret < -s_clamp) ret = -s_clamp;
+      }
+      if (nr_syncq_enabled()) { /* ACQMISS-2 (default off): sync-quality input, and the SYNC_POOR recovery (tracker reset + step clamp) */
+        nr_syncq_note(ret);
+        if (nr_syncq_take_reacquire()) UE->max_pos_acc = 0;
+        const int dyn = nr_syncq_clamp();
+        if (dyn > 0) { if (ret > dyn) ret = dyn; if (ret < -dyn) ret = -dyn; }
       }
       const int b = shiftForNextFrame;
       shiftForNextFrame = ret;

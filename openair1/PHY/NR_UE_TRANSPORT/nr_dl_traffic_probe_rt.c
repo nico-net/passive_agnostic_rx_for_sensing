@@ -182,18 +182,24 @@ static void *worker(void *arg)
       nr_cdisc_in_t in = {.now_s = (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec, .carrier_ok = snap.carrier_verified == 1,
                           .bank_count = nr_pdcch_coreset_bank_count(), .miss_s = g.cd_miss_s, .max_recover = g.cd_max_recover};
       if (in.carrier_ok && !was_armed) { g.cd_probed0 = g.probed; g.cd_rbslots0 = g.st.pdsch_like_ungranted_nocss0; }
+      int sq_med = 0, sq_p90 = 0;
+      const int sq = nr_syncq_enabled() ? nr_syncq_status(&sq_med, &sq_p90) : -1;
+      in.sync_poor = sq == 2;
       in.window_probed = g.probed - g.cd_probed0;
       in.window_rbslots = g.st.pdsch_like_ungranted_nocss0 - g.cd_rbslots0;
       nr_cdisc_out_t o;
       nr_cdisc_step(&g.cd, &in, &o);
-      static const char *names[] = {"SEARCHING", "LOCKED", "NO_TRAFFIC", "MISSED"};
+      static const char *names[] = {"SEARCHING", "LOCKED", "NO_TRAFFIC", "MISSED", "SYNC_POOR"};
       uint64_t off = 0, tak = 0, emp = 0; float nf = 0;
       nr_pdcch_nid_capture_metrics(&off, &tak, &emp, &nf);
-      LOG_A(PHY, "SENSING: CORESET_DISC state=%s reason=%s armed_for_s=%.1f window_probed=%llu window_ungranted_pdsch_like_rbslots=%llu (excl. CORESET#0) bank=%d nid_passes=%llu capture offered/taken/empty=%llu/%llu/%llu recoveries=%d%s\n",
+      LOG_A(PHY, "SENSING: CORESET_DISC state=%s reason=%s armed_for_s=%.1f window_probed=%llu window_ungranted_pdsch_like_rbslots=%llu (excl. CORESET#0) bank=%d nid_passes=%llu capture offered/taken/empty=%llu/%llu/%llu recoveries=%d%s sync_q=%s sync_step_med=%d sync_step_p90=%d reacquires=%d\n",
             names[g.cd.state], o.reason, g.cd.armed ? in.now_s - g.cd.armed_s : 0.0, (unsigned long long)in.window_probed,
             (unsigned long long)in.window_rbslots, in.bank_count, (unsigned long long)nr_pdcch_nid_gpu_passes(),
             (unsigned long long)off, (unsigned long long)tak, (unsigned long long)emp, g.cd.recoveries,
-            o.recover ? " -> RECOVER" : "");
+            o.recover ? " -> RECOVER" : o.reacquire ? " -> REACQUIRE_SYNC" : o.rearm ? " -> REARM" : "",
+            sq < 0 ? "OFF" : sq == 2 ? "POOR" : sq == 1 ? "DEGRADED" : "GOOD", sq_med, sq_p90, g.cd.reacquires);
+      if (o.reacquire) nr_syncq_request_reacquire();
+      if (o.rearm) { nr_syncq_clamp_release(); nr_pdcch_nid_gpu_rearm(); }
       if (o.recover) {
         /* widen: forget the stale incremental window, restart ACQUIRE (GPU priority) and capture every symbol (occupancy gate off) */
         nr_pdcch_nid_gpu_rearm();
