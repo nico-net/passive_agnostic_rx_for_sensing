@@ -1,11 +1,15 @@
 /* TIM-PDSCH: blind per-UE PDSCH DM-RS identity scan (nr_pdsch_dmrs_scan.h). */
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <vector>
 extern "C" {
 #include "nr_pdsch_dmrs_scan.h"
 #include "nr_scancost.h"
+#include "nr_tdd_learn.h"
+#include "nr_blind_stats.h"
+#include "nr_pdcch_scan_score.h"
 }
 
 namespace {
@@ -209,4 +213,165 @@ TEST(PdschDmrsScan, ContrastRanksTheUesOwnIdentityAboveCellWideOnes)
   EXPECT_EQ(ids[0], 415);
   unsetenv("ISAC_PDSCH_DMRS_ID_CONTRAST");
   nr_dmrs_scan_reset();
+}
+
+/* ---- SCAN2 ---------------------------------------------------------------------------------------------------- */
+namespace {
+/* One frame of a synthetic TDD cell: slot s carries a PDCCH with probability rate[s] per pass. */
+struct Cell {
+  int spf;
+  std::vector<double> rate;
+};
+/* runs `frames` frames x `kinds` passes per slot, returns how many passes were skipped in slots whose rate >= floor */
+int run_cell(nr_tdd_learn_t &t, const Cell &c, int frames, int kinds, double floor, std::mt19937 &rng, int *skipped_total = nullptr)
+{
+  std::uniform_real_distribution<double> u(0, 1);
+  int bad = 0, sk = 0;
+  for (int f = 0; f < frames; f++)
+    for (int s = 0; s < c.spf; s++)
+      for (int k = 0; k < kinds; k++) {
+        if (nr_tdd_learn_skip(&t, c.spf, s)) {
+          sk++;
+          if (c.rate[s] >= floor) bad++;
+          continue;
+        }
+        if (u(rng) < c.rate[s]) nr_tdd_learn_evidence(&t, c.spf, s);
+      }
+  if (skipped_total) *skipped_total = sk;
+  return bad;
+}
+Cell ddddddsuu(double dl, double s_rate)
+{
+  Cell c{20, std::vector<double>(20, 0.0)};
+  for (int s = 0; s < 20; s++) c.rate[s] = (s % 10) < 7 ? dl : ((s % 10) == 7 ? s_rate : 0.0);
+  return c;
+}
+}  // namespace
+
+TEST(ScanCost2, TddLearnSkipsOnlyUlSlotsAndKeepsSpecial)
+{
+  std::mt19937 rng(1);
+  nr_tdd_learn_t t;
+  memset(&t, 0, sizeof(t));
+  const Cell c = ddddddsuu(0.15, 0.0005); /* special slot: rare DCIs, as measured on the SIB1-less cell */
+  int sk = 0;
+  EXPECT_EQ(run_cell(t, c, 4000, 3, 0.0001, rng, &sk), 0); /* no slot carrying any PDCCH is skipped */
+  for (int s = 0; s < 20; s++) {
+    const bool ul = (s % 10) >= 8;
+    EXPECT_EQ(__atomic_load_n(&t.skip[s], __ATOMIC_RELAXED), ul ? 1 : 0) << "slot " << s;
+  }
+  EXPECT_GT(sk, 0);
+}
+
+TEST(ScanCost2, TddLearnKeepsFirstSlotAfterPlainDl)
+{
+  /* DDDDDDDDUU without a special slot: slot 8 follows a plain DL slot, so it is kept scanned (it may be flexible) */
+  std::mt19937 rng(2);
+  nr_tdd_learn_t t;
+  memset(&t, 0, sizeof(t));
+  Cell c{20, std::vector<double>(20, 0.0)};
+  for (int s = 0; s < 20; s++) c.rate[s] = (s % 10) < 8 ? 0.15 : 0.0;
+  EXPECT_EQ(run_cell(t, c, 4000, 3, 0.0001, rng), 0);
+  EXPECT_EQ(t.skip[8], 0);
+  EXPECT_EQ(t.skip[9], 1);
+  EXPECT_EQ(t.skip[18], 0);
+  EXPECT_EQ(t.skip[19], 1);
+}
+
+TEST(ScanCost2, TddLearnIdleFddAndImplausibleSkipNothing)
+{
+  std::mt19937 rng(3);
+  { /* idle cell: nothing strong */
+    nr_tdd_learn_t t; memset(&t, 0, sizeof(t));
+    Cell c{20, std::vector<double>(20, 0.0)};
+    int sk = 0;
+    run_cell(t, c, 3000, 3, 2.0, rng, &sk);
+    EXPECT_EQ(sk, 0);
+  }
+  { /* FDD: every slot carries */
+    nr_tdd_learn_t t; memset(&t, 0, sizeof(t));
+    Cell c{20, std::vector<double>(20, 0.1)};
+    int sk = 0;
+    run_cell(t, c, 3000, 3, 2.0, rng, &sk);
+    EXPECT_EQ(sk, 0);
+  }
+  { /* only 2 of 20 slots active: not a frame we can judge */
+    nr_tdd_learn_t t; memset(&t, 0, sizeof(t));
+    Cell c{20, std::vector<double>(20, 0.0)};
+    c.rate[0] = c.rate[1] = 0.3;
+    int sk = 0;
+    run_cell(t, c, 3000, 3, 2.0, rng, &sk);
+    EXPECT_EQ(sk, 0);
+  }
+}
+
+TEST(ScanCost2, TddLearnUnskipsWhenTrafficAppearsAndPatternChanges)
+{
+  std::mt19937 rng(4);
+  nr_tdd_learn_t t;
+  memset(&t, 0, sizeof(t));
+  Cell c = ddddddsuu(0.15, 0.0005);
+  EXPECT_EQ(run_cell(t, c, 3000, 3, 0.0001, rng), 0);
+  ASSERT_EQ(t.skip[9], 1);
+  /* the cell is reconfigured: slot 9 now carries PDCCH. The verification passes find it within a few hundred frames. */
+  c.rate[9] = c.rate[19] = 0.15;
+  int frames = 0;
+  while (t.skip[9] && frames < 3000) { run_cell(t, c, 1, 3, 2.0, rng); frames++; }
+  EXPECT_EQ(t.skip[9], 0);
+  EXPECT_LT(frames, 400);
+  EXPECT_GT(t.n_unskip, 0u);
+}
+
+TEST(ScanCost2, TddLearnRandomPatternsNeverSkipCarryingSlots)
+{
+  /* property: over random patterns (any period / split) a slot with a true PDCCH rate of at least a quarter of the weakest
+   * active slot's is never skipped, whatever the pass mix per slot. */
+  for (int seed = 0; seed < 40; seed++) {
+    std::mt19937 rng(100 + seed);
+    const int spf = (seed % 3 == 0) ? 20 : (seed % 3 == 1 ? 10 : 40);
+    Cell c{spf, std::vector<double>(spf, 0.0)};
+    const int period = std::vector<int>{5, 10, 20, 8}[seed % 4], nul = 1 + (int)(rng() % 3);
+    const double dl = 0.04 + 0.2 * (rng() % 100) / 100.0;
+    for (int s = 0; s < spf; s++) {
+      const int p = s % period;
+      c.rate[s] = p < period - nul ? dl * (0.5 + (rng() % 100) / 100.0) : 0.0;
+    }
+    nr_tdd_learn_t t; memset(&t, 0, sizeof(t));
+    double minrate = 1;
+    for (double r : c.rate) if (r > 0 && r < minrate) minrate = r;
+    EXPECT_EQ(run_cell(t, c, 3000, 2, minrate / 4, rng), 0) << "seed " << seed;
+  }
+}
+
+TEST(ScanCost2, EmptyCandidateScreenSeparatesNoiseFromQpsk)
+{
+  std::mt19937 rng(7);
+  std::normal_distribution<double> g(0, 1);
+  int noise_pass = 0, sig_miss[2] = {0, 0}, n = 2000;
+  for (int i = 0; i < n; i++)
+    for (int L : {1, 4, 16}) {
+      const int E = L * 108;
+      std::vector<int16_t> v(E);
+      for (auto &x : v) x = (int16_t)(1000 * g(rng));
+      noise_pass += nr_pdcch_scan_score_scalar(v.data(), E) >= nbs_cfar_score_min(E, 2.33);
+    }
+  EXPECT_LT(noise_pass, 3 * n * 0.02); /* false alarm 1e-2 per candidate nominal */
+  /* QPSK at Es/N0 = 3 dB and 0 dB (per real dimension sigma^2 = 1/(2 snr)), the regime where the polar decoder still works at AL4+ */
+  const double snr_db[2] = {3.0, 0.0};
+  for (int k = 0; k < 2; k++)
+    for (int i = 0; i < n; i++) {
+      const int L = 4, E = L * 108;
+      const double sig = std::sqrt(0.5 / std::pow(10.0, snr_db[k] / 10));
+      std::vector<int16_t> v(E);
+      for (auto &x : v) x = (int16_t)(1000 * ((rng() & 1 ? 1 : -1) * M_SQRT1_2 + sig * g(rng)));
+      sig_miss[k] += nr_pdcch_scan_score_scalar(v.data(), E) < nbs_cfar_score_min(E, 2.33);
+    }
+  EXPECT_EQ(sig_miss[0], 0);
+  EXPECT_LT(sig_miss[1], n * 8 / 10); /* documented limit: at 0 dB Es/N0 the screen has only ~40-60 % power; the replay audit counts real misses */
+}
+
+TEST(ScanCost2, FlagSemantics)
+{
+  /* the umbrella is read once per process: only check the accessor is consistent and pure */
+  EXPECT_EQ(nr_scan2_on(NR_SCAN2_UL), nr_scan2_on(NR_SCAN2_UL));
 }
