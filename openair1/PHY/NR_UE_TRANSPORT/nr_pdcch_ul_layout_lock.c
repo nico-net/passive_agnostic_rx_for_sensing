@@ -632,7 +632,9 @@ bool nr_ul_layout_llr_decide(const uint32_t *votes, const uint8_t *prior, const 
   if (votes[a] < (prior[a] ? LLR_MIN_VOTES_PRIOR : LOCK_MIN)) return false;
   const float sa = LLR_W * (float)(votes[a] + prior[a]);
   for (int h = 0; h < n; h++)
-    if (h != a && sa - LLR_W * (float)(votes[h] + prior[h]) < LLR_MARGIN) return false;
+    if (h != a && (sa - LLR_W * (float)(votes[h] + prior[h]) < LLR_MARGIN
+                   || (float)(votes[a] + prior[a]) < 1.5f * (float)(votes[h] + prior[h]))) /* 62:45 look-alikes (OTA Vy1) never lock */
+      return false;
   if (lead) *lead = a;
   return true;
 }

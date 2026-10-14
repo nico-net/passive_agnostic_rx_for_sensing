@@ -6317,6 +6317,7 @@ TEST(UlLayoutLock, LlrRuleOnSyntheticTallies)
   EXPECT_FALSE(run({4, 1, 1}, 0, 1));                /* one RNTI */
   EXPECT_FALSE(run({6, 4, 0}, -1));                  /* near tie (old rule: no lock either) */
   EXPECT_TRUE(run({9, 4, 0}, -1));      /* 9:4 without prior locks */
+  EXPECT_FALSE(run({0, 62, 45}, -1));                /* large look-alike pair (62:45): the margin is met but the ratio is not */
   EXPECT_FALSE(run({1, 8, 5}, 0));                   /* runner-up too close even with the prior against */
 }
 
