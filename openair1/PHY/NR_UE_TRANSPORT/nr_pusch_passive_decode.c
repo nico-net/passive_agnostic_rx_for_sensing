@@ -19,6 +19,7 @@
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the DL decoder
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
+#include "nr_pusch_gpu_fep.h" // ISAC_UL_GPU_FEP: GPU port of the UL FEP below (default off)
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
 #include "nr_pusch_passive_decode.h"
@@ -121,6 +122,18 @@ typedef struct {
 } passive_ul_snapshot_t;
 static passive_ul_snapshot_t g_snapshot[NR_PUSCH_PASSIVE_MAX_CTX];
 static bool g_pipeline_ready[NR_PUSCH_PASSIVE_MAX_CTX];
+
+/* ULFEP globals (helpers further down, next to passive_snapshot_fep) */
+#define ULG_MAX_CAND 40
+static const nr_pusch_gpu_fep_api_t *g_ulg;
+static _Atomic bool g_ulg_on;
+static int g_ulg_nant, g_ulg_check = 16;
+static c16_t *g_ulg_scr[NR_PUSCH_PASSIVE_MAX_CTX]; /* ULG_MAX_CAND x nant x N: timing-search candidates */
+static _Atomic uint64_t g_ulg_seq, g_ulg_chk, g_ulg_bad, g_ulg_cpu_bounds, g_ulg_cpu_rej;
+/* FFTs asked of the FEP, by caller: grant symbols, timing-search candidates, delay-refinement re-run (each x nant) */
+static _Atomic uint64_t g_fep_req[3];
+
+static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant);
 #define PASSIVE_UL_CFR_CAP (273 * NR_NB_SC_PER_RB)
 #define PASSIVE_UL_UCI_CAP (8 * ((3 * 8 * 6144) + 12))
 typedef struct {
@@ -646,6 +659,12 @@ bool nr_pusch_passive_decode_prewarminit(PHY_VARS_NR_UE *ue, int ctx)
   if(!w->uci) w->uci=malloc16_clear(sizeof(int16_t)*PASSIVE_UL_UCI_CAP);
   if(!w->h || !w->k || !w->l || !w->uci) return false;
   s->length = s->cap = len;
+  if (ctx == 0 && !g_ulg) ulg_warmup(&g_gnb[0]->frame_parms, g_gnb_nant);
+  if (g_ulg && !g_ulg_scr[ctx]) {
+    /* written here (malloc16_clear), so the GPU never first-touches an unwritten page */
+    g_ulg_scr[ctx] = malloc16_clear((size_t)ULG_MAX_CAND * g_gnb_nant * ue->frame_parms.ofdm_symbol_size * sizeof(c16_t));
+    if (!g_ulg_scr[ctx]) return false;
+  }
   g_pipeline_ready[ctx] = true;
   return true;
 }
@@ -869,6 +888,125 @@ static bool passive_snapshot_fep(const NR_DL_FRAME_PARMS *fp, int ctx, int ant, 
     dft(get_dft(fp->ofdm_symbol_size), (int16_t *)rot, (int16_t *)dst, 1);
   }
   return true;
+}
+
+/* ---- ULFEP: ISAC_UL_GPU_FEP=1 (default off). The FEP of a snapshot-backed grant (the UL window, the bare DFT, the
+ * OAI RX symbol rotation) runs on the GPU as one batched launch, bit for bit what passive_snapshot_fep() +
+ * apply_nr_rotation_symbol_RX() write (nr_pusch_gpu_fep.cuh). Only without a CFO de-rotation (fo_hz == 0) and with a
+ * valid snapshot; every other case, a busy/over-budget GPU and any error run the unchanged CPU code, counted in
+ * UL_GPU_FEP. ISAC_UL_GPU_FEP_CHECK=n (default 16, 0 = off): every n-th GPU call one (item, antenna) row is recomputed on
+ * the CPU and compared; a mismatch switches the GPU path off for good and the call is redone on the CPU. */
+static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
+{
+  const char *e = getenv("ISAC_UL_GPU_FEP_CHECK");
+  if (e) g_ulg_check = atoi(e);
+  const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
+  if (!api || fp->ofdm_symbol_size != 4096 || nant < 1 || nant > PASSIVE_UL_MAX_ANT) return;
+  const char *p = getenv("ISAC_UL_GPU_FEP_PCT");
+  if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, p ? atoi(p) : 20) != 0) {
+    LOG_W(PHY, "SENSING: UL_GPU_FEP requested but unavailable -- CPU FEP\n");
+    return;
+  }
+  g_ulg_nant = nant;
+  g_ulg = api;
+  atomic_store(&g_ulg_on, true);
+}
+
+static inline bool ulg_usable(int ctx, int nant, double fo_hz, const NR_DL_FRAME_PARMS *fp)
+{
+  return g_ulg && atomic_load_explicit(&g_ulg_on, memory_order_relaxed) && g_snapshot[ctx].valid && fo_hz == 0.0
+         && nant == g_ulg_nant && fp->ofdm_symbol_size == 4096;
+}
+
+/* One window of every antenna -> item. false = outside the bounded snapshot (the CPU path reports it). */
+static bool ulg_item(const NR_DL_FRAME_PARMS *fp, int ctx, int nant, unsigned char slot, unsigned char sym, int offset,
+                     c16_t *const *dst, bool rotate, nr_pusch_gpu_fep_item_t *it)
+{
+  const passive_ul_snapshot_t *s = &g_snapshot[ctx];
+  const uint32_t off = passive_ul_fep_offset(fp, slot, sym, offset);
+  const uint32_t rel = (off + fp->samples_per_frame - s->origin) % fp->samples_per_frame;
+  if (!s->valid || rel + fp->ofdm_symbol_size > s->length) return false;
+  memset(it, 0, sizeof(*it));
+  for (int a = 0; a < nant; a++) {
+    it->src[a] = (const int16_t *)(s->iq[a] + rel);
+    it->dst[a] = (int16_t *)dst[a];
+  }
+  if (rotate) {
+    const c16_t r = fp->symbol_rotation[link_type_ul][sym + (slot % fp->slots_per_subframe) * fp->symbols_per_slot];
+    it->rot[0] = r.r;
+    it->rot[1] = r.i;
+  }
+  it->rotate = rotate;
+  return true;
+}
+
+/* Launch the batch; every ulg_check-th call verifies one row against the CPU FEP. true = rows written and verified. */
+static bool ulg_run(const NR_DL_FRAME_PARMS *fp, int ctx, int nant, unsigned char slot, const nr_pusch_gpu_fep_item_t *it,
+                    const unsigned char *sym, const int *offset, int n, int nb_rb)
+{
+  if (g_ulg->run(it, n, nb_rb, fp->first_carrier_offset) != 0) {
+    atomic_fetch_add_explicit(&g_ulg_cpu_rej, 1, memory_order_relaxed);
+    return false;
+  }
+  const uint64_t q = atomic_fetch_add_explicit(&g_ulg_seq, 1, memory_order_relaxed);
+  if (g_ulg_check > 0 && q % (uint64_t)g_ulg_check == 0) {
+    const int i = (int)((q / (uint64_t)g_ulg_check) % (uint64_t)n), a = (int)((q / (uint64_t)g_ulg_check / 7) % (uint64_t)nant);
+    c16_t ref[fp->ofdm_symbol_size] __attribute__((aligned(32)));
+    passive_snapshot_fep(fp, ctx, a, ref, sym[i], slot, offset[i], 0.0);
+    if (it[i].rotate)
+      apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe, fp->timeshift_symbol_rotation,
+                                  fp->first_carrier_offset, ref, fp->symbol_rotation[link_type_ul], nb_rb, slot, sym[i]);
+    atomic_fetch_add_explicit(&g_ulg_chk, 1, memory_order_relaxed);
+    if (memcmp(ref, it[i].dst[a], sizeof(ref)) != 0) {
+      atomic_fetch_add_explicit(&g_ulg_bad, 1, memory_order_relaxed);
+      atomic_store(&g_ulg_on, false);
+      LOG_E(PHY, "SENSING: UL_GPU_FEP MISMATCH slot=%d sym=%d ant=%d off=%d -- GPU path off, CPU FEP\n", slot, sym[i], a,
+            offset[i]);
+      return false;
+    }
+  }
+  return true;
+}
+
+/* The grant's symbols [s0, s1) of all antennas into the gNB grid rows at slot_off. */
+static bool ulg_fep_symbols(PHY_VARS_gNB *gnb, int ctx, int nant, unsigned char slot, int slot_off, int s0, int s1, int offset)
+{
+  const NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
+  const int n = s1 - s0;
+  if (n < 1 || n > 14) return false;
+  nr_pusch_gpu_fep_item_t it[14];
+  unsigned char sym[14];
+  int off[14];
+  for (int i = 0; i < n; i++) {
+    c16_t *dst[PASSIVE_UL_MAX_ANT];
+    for (int a = 0; a < nant; a++) dst[a] = &gnb->common_vars.rxdataF[a][slot_off + (s0 + i) * fp->ofdm_symbol_size];
+    sym[i] = (unsigned char)(s0 + i);
+    off[i] = offset;
+    if (!ulg_item(fp, ctx, nant, slot, sym[i], offset, dst, true, &it[i])) {
+      atomic_fetch_add_explicit(&g_ulg_cpu_bounds, 1, memory_order_relaxed);
+      return false;
+    }
+  }
+  return ulg_run(fp, ctx, nant, slot, it, sym, off, n, fp->N_RB_UL);
+}
+
+/* One symbol at n timing advances into g_ulg_scr[ctx] (candidate c, antenna a at (c * nant + a) * N). */
+static bool ulg_fep_candidates(PHY_VARS_gNB *gnb, int ctx, int nant, unsigned char slot, int sym, const int *adv, int n)
+{
+  const NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
+  if (n < 1 || n > ULG_MAX_CAND || !g_ulg_scr[ctx]) return false;
+  nr_pusch_gpu_fep_item_t it[ULG_MAX_CAND];
+  unsigned char syms[ULG_MAX_CAND];
+  for (int c = 0; c < n; c++) {
+    c16_t *dst[PASSIVE_UL_MAX_ANT];
+    for (int a = 0; a < nant; a++) dst[a] = g_ulg_scr[ctx] + ((size_t)c * nant + a) * fp->ofdm_symbol_size;
+    syms[c] = (unsigned char)sym;
+    if (!ulg_item(fp, ctx, nant, slot, syms[c], adv[c], dst, true, &it[c])) {
+      atomic_fetch_add_explicit(&g_ulg_cpu_bounds, 1, memory_order_relaxed);
+      return false;
+    }
+  }
+  return ulg_run(fp, ctx, nant, slot, it, syms, adv, n, fp->N_RB_UL);
 }
 
 /* ---- UL-LAYOUT probe (ISAC_UL_LAYOUT_LOCK=1). For one booked DCI 0_1 it correlates the CP-OFDM DM-RS (port 0,
@@ -1245,9 +1383,23 @@ bool nr_pusch_passive_layout_probe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, in
   if (nant > PASSIVE_UL_MAX_ANT) nant = PASSIVE_UL_MAX_ANT;
   const int syms[LP_NSYM] = {l0, 7, 11, l0 + 1, 12};
   for (int s = 0; s < LP_NSYM; s++)
+    for (int a = 0; a < nant; a++)
+      if (!g_lp_f[ctx][s][a] && !(g_lp_f[ctx][s][a] = malloc16_clear(sizeof(c16_t) * N))) return false;
+  bool lp_gpu = false;
+  if (ulg_usable(ctx, nant, fo_hz, fp)) { /* the 5 probe symbols x nant in one launch (bare DFT, no rotation) */
+    nr_pusch_gpu_fep_item_t it[LP_NSYM];
+    unsigned char us[LP_NSYM];
+    int uo[LP_NSYM];
+    bool inb = true;
+    for (int s = 0; s < LP_NSYM && inb; s++) {
+      us[s] = (unsigned char)syms[s];
+      uo[s] = ta;
+      inb = ulg_item(fp, ctx, nant, slot, us[s], ta, g_lp_f[ctx][s], false, &it[s]);
+    }
+    lp_gpu = inb && ulg_run(fp, ctx, nant, slot, it, us, uo, LP_NSYM, fp->N_RB_UL);
+  }
+  for (int s = 0; s < LP_NSYM && !lp_gpu; s++)
     for (int a = 0; a < nant; a++) {
-      if (!g_lp_f[ctx][s][a]) g_lp_f[ctx][s][a] = malloc16_clear(sizeof(c16_t) * N);
-      if (!g_lp_f[ctx][s][a]) return false;
       if (g_snapshot[ctx].valid) {
         if (!passive_snapshot_fep(fp, ctx, a, g_lp_f[ctx][s][a], (unsigned char)syms[s], slot, ta, fo_hz)) return false;
       } else {
@@ -1632,11 +1784,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                     slot, (sym_));                                                \
     }                                                                                              \
   } while (0)
-#define PASSIVE_UL_FEP(off_)                                                                       \
+#define PASSIVE_UL_FEP(off_, kind_)                                                                \
   do {                                                                                             \
     const int s0_ = g->start_symbol;                                                               \
-    const int s1_ = g->start_symbol + g->num_symbols;                                              \
-    for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) PASSIVE_UL_FEP_SYMBOL((off_), sym_);   \
+    const int s1_ = g->start_symbol + g->num_symbols < sps ? g->start_symbol + g->num_symbols : sps; \
+    atomic_fetch_add_explicit(&g_fep_req[kind_], (uint64_t)(s1_ > s0_ ? s1_ - s0_ : 0) * nant, memory_order_relaxed); \
+    if (!(ulg_usable(ctx, nant, fo_hz, fp) &&                                                      \
+          ulg_fep_symbols(gnb, ctx, nant, (unsigned char)slot, slot_off, s0_, s1_, (off_))))       \
+      for (int sym_ = s0_; sym_ < s1_; sym_++) PASSIVE_UL_FEP_SYMBOL((off_), sym_);                \
   } while (0)
 
   if ((timing_disc || dmrs_disc) && !gapped && !fdra_unresolved && !g->transform_precoding &&
@@ -1695,10 +1850,25 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           const int center = phase ? best_advance : seed;
           const int span = phase ? coarse_step : radius;
           const int step = phase ? 16 : coarse_step;
-          for (int delta = -span; delta <= span; delta += step) {
+          int cand[ULG_MAX_CAND], ncand = 0;
+          for (int delta = -span; delta <= span && ncand < ULG_MAX_CAND; delta += step) {
             const int advance = center + delta;
             if (advance - ta_offset_samples < -2048 || advance - ta_offset_samples > 2048) continue;
-            PASSIVE_UL_FEP_SYMBOL(advance, first_sym);
+            cand[ncand++] = advance;
+          }
+          /* all candidates of the phase in one GPU launch when possible (scores read the scratch rows instead of the grid) */
+          const bool cand_gpu = ulg_usable(ctx, nant, fo_hz, fp) &&
+              ulg_fep_candidates(gnb, ctx, nant, (unsigned char)slot, first_sym, cand, ncand);
+          atomic_fetch_add_explicit(&g_fep_req[1], (uint64_t)ncand * nant, memory_order_relaxed);
+          for (int ci = 0; ci < ncand; ci++) {
+            const int advance = cand[ci];
+            if (cand_gpu) {
+              for (int a = 0; a < nant; ++a)
+                grid.rx[a] = (const c16_t *)((uintptr_t)(g_ulg_scr[ctx] + ((size_t)ci * nant + a) * symsz)
+                                             - (uintptr_t)first_sym * symsz * sizeof(c16_t));
+            } else {
+              PASSIVE_UL_FEP_SYMBOL(advance, first_sym);
+            }
             const uint16_t mask = 1u << first_sym;
             for (int i = 0; i < nprior; ++i) {
               int pairs = 0;
@@ -1707,6 +1877,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
               if (score > best_score) { best_score=score; best_pairs=pairs; best_advance=advance; }
             }
           }
+          if (cand_gpu)
+            for (int a = 0; a < nant; ++a) grid.rx[a] = &gnb->common_vars.rxdataF[a][slot_off];
         }
         double fa;
         if (best_score >= 0.35 && nr_pusch_ul_disc_accept(best_score, best_pairs, &fa)) {
@@ -1721,7 +1893,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         }
       }
     }
-    PASSIVE_UL_FEP(ul_sample_offset);
+    PASSIVE_UL_FEP(ul_sample_offset, 0);
     if (dmrs_disc) {
       const nr_pusch_ul_disc_result_t result = nr_pusch_ul_disc_search(&grid, g->rnti, type_a,
           prior, nprior, g->dmrs_config_type, g->nscid, g->antenna_ports_field);
@@ -1734,7 +1906,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       }
     }
   } else {
-    PASSIVE_UL_FEP(ul_sample_offset);
+    PASSIVE_UL_FEP(ul_sample_offset, 0);
   }
   out->dmrs_id = g->ul_dmrs_scrambling_id;
   out->data_id = g->data_scrambling_id;
@@ -1890,7 +2062,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (d != 0 && (d > PASSIVE_UL_DELAY_TOL || d < -PASSIVE_UL_DELAY_TOL)) {
       atomic_fetch_add_explicit(&g_ta_refined, 1, memory_order_relaxed);
       out->ta_applied_samples = nr_sense_ul_ta_refined(ul_sample_offset, d);
-      PASSIVE_UL_FEP(out->ta_applied_samples);
+      PASSIVE_UL_FEP(out->ta_applied_samples, 2);
   if (abs_slot && !g_snapshot[ctx].valid && !nr_passive_samples_valid(
       atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),
       (long)abs_slot,fp->slots_per_frame)) {
@@ -2707,6 +2879,22 @@ void nr_pusch_passive_stats_dump(void)
           (unsigned long)atomic_load(&g_hq_why_none), (unsigned long)atomic_load(&g_hq_why_empty),
           (unsigned long)atomic_load(&g_hq_why_ndi), (unsigned long)atomic_load(&g_hq_why_tbs),
           (unsigned long)atomic_load(&g_hq_busy), g_gnb_nant);
+  if (atomic_load_explicit(&g_fep_req[0], memory_order_relaxed) + atomic_load_explicit(&g_fep_req[1], memory_order_relaxed) > 0) {
+    /* FFTs requested of the UL FEP (per antenna-symbol): grant symbols / timing-search candidates / delay re-run */
+    LOG_I(PHY, "SENSING: UL_FEP_REQ grant=%lu search=%lu refine=%lu\n", (unsigned long)atomic_load(&g_fep_req[0]),
+          (unsigned long)atomic_load(&g_fep_req[1]), (unsigned long)atomic_load(&g_fep_req[2]));
+  }
+  if (g_ulg) {
+    uint64_t o[10];
+    g_ulg->stats(o);
+    LOG_I(PHY, "SENSING: UL_GPU_FEP on=%d calls=%lu items=%lu gpu_ms=%lu mean_us=%.0f max_us=%lu busy=%lu over_cap=%lu rt_defer=%lu "
+               "late=%lu err=%lu part=%lu | cpu_bounds=%lu cpu_rej=%lu check=%lu bad=%lu\n",
+          (int)atomic_load(&g_ulg_on), (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] / 1000),
+          o[0] ? (double)o[2] / (double)o[0] : 0.0, (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
+          (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9],
+          (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
+          (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad));
+  }
   if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {
     char rep[512];
     unsigned u = 0;

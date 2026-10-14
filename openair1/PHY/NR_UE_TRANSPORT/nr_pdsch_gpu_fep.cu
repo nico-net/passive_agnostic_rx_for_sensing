@@ -1351,3 +1351,6 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
   }
   return 0;
 }
+
+/* ULFEP: GPU front end of the passive PUSCH decoder (own file, own streams; see the header comment) */
+#include "nr_pusch_gpu_fep.cuh"

@@ -77,6 +77,8 @@ int nr_gpu_budget_rt_begin(void) {
 }
 /* nr_gpu_budget_rt_end: releases one RT user registered by nr_gpu_budget_rt_begin(). No-op when the budget is disabled. */
 void nr_gpu_budget_rt_end(void) {if(nr_gpu_budget_enabled())atomic_fetch_sub(&owner,1);}
+/* nr_gpu_budget_rt_active: number of RT GPU users in flight (0 when the budget is off). Read-only; best-effort GPU users (ISAC_UL_GPU_FEP) defer to the CPU while it is non-zero and they have no SM partition of their own. */
+int nr_gpu_budget_rt_active(void) {return nr_gpu_budget_enabled()?(int)(atomic_load(&owner)&~DISC_OWNER):0;}
 /* nr_gpu_budget_rt_result: records the outcome of one RT GPU call: its wait time updates the maximum wait; a fallback is counted when `fallback` is set. No-op when disabled. */
 void nr_gpu_budget_rt_result(uint64_t us,int fallback) {
   if(!nr_gpu_budget_enabled())return;
