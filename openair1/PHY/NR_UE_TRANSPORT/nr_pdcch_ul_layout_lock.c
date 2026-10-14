@@ -117,6 +117,12 @@ int nr_ul_layout_fit_mcs(const nr_ul_layout_dci_t *b, int n, uint16_t len, float
   return bo;
 }
 
+static float bit_entropy(float p)
+{
+  return (p <= 0.f || p >= 1.f) ? 0.f : -(p * log2f(p) + (1.f - p) * log2f(1.f - p));
+}
+#define NR_UL_PREFIX_ENT_MARGIN 0.5f
+
 static void p1_stats(const nr_ul_layout_dci_t *b, int n, uint16_t len, float *p1)
 {
   for (int i = 0; i < len; i++) p1[i] = 0.f;
@@ -150,11 +156,31 @@ int nr_ul_layout_fit_prefix(const nr_ul_layout_dci_t *b, int n, uint16_t len, in
         const uint64_t lim = (uint64_t)nmax * (nmax + 1) / 2;
         for (int k = 0; k < n; k++) valid += fld(&b[k].p, len, 1 + bw, w) < lim;
         if ((float)valid < 0.98f * n) continue;
-        if (cnt < cap)
+        if (cnt < cap) {
+          /* entropy (bits) of the TDRA + hopping bits this split leaves: a TDRA / hopping field is near-constant, a RIV LSB
+           * is uniform, so the split that absorbed a RIV LSB into TDRA (riv one bit too short) carries ~1 bit more */
+          float ent = 0.f;
+          for (int i = 1 + bw + w; i < mcs_off; i++) ent += bit_entropy(p1[i]);
           out[cnt++] = (nr_ul_layout_prefix_t){.bwp_ind = (uint8_t)bw, .riv = (uint8_t)w,
                                                .tda = (uint8_t)(rest > 4 ? 4 : rest),
-                                               .fh = (uint8_t)(rest > 4 ? rest - 4 : 0), .n_max = nmax};
+                                               .fh = (uint8_t)(rest > 4 ? rest - 4 : 0), .n_max = nmax, .ent = ent};
+        }
       }
+  /* ISAC_UL_PREFIX_ENT=1 (ULDCI-20261014, default off): rank the splits by that entropy and drop those more than
+   * NR_UL_PREFIX_ENT_MARGIN bits above the best. Measured on TIM PCI 923 / Vodafone PCI 415 (replay + OTA 10-14): the
+   * order used to be RIV width ascending, so {riv=14, tda=4} (N <= 162: 107@x, 162@x, 178@39 locks) beat the true
+   * {riv=15, tda=3}; those false widths also seeded the BWP hypotheses that win the thin-evidence votes. */
+  if (cnt > 1 && env_on("ISAC_UL_PREFIX_ENT")) {
+    for (int i = 1; i < cnt; i++)
+      for (int j = i; j > 0 && (out[j].ent < out[j - 1].ent - 0.05f
+                                || (out[j].ent <= out[j - 1].ent + 0.05f && out[j].riv > out[j - 1].riv)); j--) {
+        /* equal entropy: the wider RIV (a leading RIV MSB that is 0 in a short bank is not a constant BWP indicator bit) */
+        const nr_ul_layout_prefix_t x = out[j]; out[j] = out[j - 1]; out[j - 1] = x;
+      }
+    int keep = 1;
+    while (keep < cnt && out[keep].ent <= out[0].ent + NR_UL_PREFIX_ENT_MARGIN) keep++;
+    return keep;
+  }
   /* Every surviving split stays a hypothesis (the DM-RS stage tells their RIV widths apart). Order: no frequency
    * hopping first (a constant-0 hopping bit is indistinguishable from a TDRA bit), stable otherwise. The first one
    * fixes the TDRA position used for k2. */
@@ -797,6 +823,32 @@ void nr_ul_layout_eval_once(void)
 }
 
 static void ul_layout_start_thread(void);
+bool nr_ul_layout_fit_read_enabled(void) { return nr_ul_layout_lock_enabled() && env_on("ISAC_UL_FIT_READ"); }
+
+/* ISAC_UL_FIT_READ (ULDCI-20261014): the bank fit (MCS block, prefix, tail) is known ~1 s after the first DCIs and does
+ * not depend on the BWP lock, but the fields of every grant of an UNLOCKED length were read by the width sweeps, whose
+ * default has no BWP indicator: on a cell that sends one (Vodafone 415, replay b: 2466 of 3370 grants) MCS/NDI/RV/HARQ
+ * were read one bit early, so the fields of one HARQ process jumped. This reads such a grant with the fitted layout; the
+ * RIV/TDRA stay provisional (BWP = widest candidate of the prefix at the SIB1 start when it matches, else at PRB 0). */
+bool nr_ul_layout_read_fitted(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, nr_pdcch_blind_ul_result_t *out)
+{
+  if (!nr_ul_layout_fit_read_enabled() || !out || !len) return false;
+  nr_pdcch_blind_ul_opts_t o;
+  pthread_mutex_lock(&mu);
+  const len_state_t *ls = NULL;
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len && g_len[l].fitted && !g_len[l].locked) ls = &g_len[l];
+  if (!ls || ls->npre < 1 || ls->ntail < 1) { pthread_mutex_unlock(&mu); return false; }
+  const nr_ul_layout_prefix_t *p0 = &ls->pre[0];
+  const uint16_t start = (g_cell.sib1_ul_size == p0->n_max && g_cell.sib1_ul_start + p0->n_max <= g_cell.carrier_rb)
+                             ? g_cell.sib1_ul_start : 0;
+  nr_ul_layout_build_opts(p0, &ls->tail[ls->chosen_tail >= 0 && ls->chosen_tail < ls->ntail ? ls->chosen_tail : 0], start,
+                          p0->n_max, ls->k2row, 1, g_cell.pci, g_cell.mu, g_cell.typeA_pos, &o);
+  pthread_mutex_unlock(&mu);
+  if (!nr_pdcch_blind_extract_01(payload, len, rnti, &o, out)) return false;
+  out->hyp_generation = 1; /* explicit-layout sentinel (as ISAC_UL_FORCE_OPTS): admitted by the chain, no width-class ticket */
+  return true;
+}
+
 static void *eval_thread(void *arg)
 {
   (void)arg;
