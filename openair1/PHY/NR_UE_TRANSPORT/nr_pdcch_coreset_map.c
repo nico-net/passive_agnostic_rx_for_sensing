@@ -387,7 +387,7 @@ static void *idsw_worker(void *arg)
       pthread_cond_wait(&g_idsw.cv, &g_idsw.mu);
     pthread_mutex_unlock(&g_idsw.mu);
     char path[128];
-    mkdir("/tmp/passive_rx", 0777);
+    if (mkdir("/tmp/passive_rx", 0777) == 0) chmod("/tmp/passive_rx", 01777); // shared with user-run tests (receiver runs as root)
     snprintf(path, sizeof(path), "/tmp/passive_rx/idsweep_%03u.bin", g_idsw.batches);
     FILE *f = fopen(path, "wb");
     if (f != NULL) {

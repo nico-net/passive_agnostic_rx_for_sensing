@@ -6022,7 +6022,7 @@ static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
   const uint32_t hash = atomic_load_explicit(&sib1_semantic_hash, memory_order_acquire);
   sib1_cache_path(f->pci, hash, path, sizeof(path));
   FILE *fp = fopen(path, "wb");
-  if (fp == NULL) { mkdir("/tmp/passive_rx", 0777); fp = fopen(path, "wb"); }
+  if (fp == NULL) { if (mkdir("/tmp/passive_rx", 0777) == 0) chmod("/tmp/passive_rx", 01777); fp = fopen(path, "wb"); }
   if (fp == NULL) return;
   const uint32_t magic = 0x53494231u; /* "SIB1" */
   const bool written = fwrite(&magic, sizeof(magic), 1, fp) == 1 && fwrite(f, sizeof(*f), 1, fp) == 1;
