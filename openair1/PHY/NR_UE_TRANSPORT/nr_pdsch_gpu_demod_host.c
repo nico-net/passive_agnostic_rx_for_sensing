@@ -747,21 +747,32 @@ static pthread_once_t g_bg_once = PTHREAD_ONCE_INIT;
 static int g_bg_every;
 static _Atomic uint64_t g_bg_ns, g_bg_ns_max, g_bg_n;
 
+typedef struct {
+  nr_bgq_t *q;
+  char name[16];
+} bg_arg_t;
 static void *bg_main(void *a)
 {
-  (void)a;
+  bg_arg_t *arg = a;
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
-  pthread_setname_np(pthread_self(), "gpuCheckBg");
+  pthread_setname_np(pthread_self(), arg->name);
   nr_passive_tpool_inline = true; /* never push the CPU reference's tasks to the RT thread pool */
   nr_dl_chest_cpu_ref = true;     /* the reference estimator stays on the CPU (no GPU delay pre-pass) */
   for (;;)
-    nr_bgq_run_one(&g_bgq);
+    nr_bgq_run_one(arg->q);
   return NULL;
 }
 
-static void bg_start(void)
+/* One SCHED_OTHER nice-19 worker draining q, on the cores ISAC_GPU_CHECK_CORES (default the little cores 0-4,10-14).
+ * 0 = started. Also used by nr_pdsch_passive_queue.c (FATTAILS ISAC_PDSCH_DMRS_ID_ASYNC). */
+int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
 {
-  nr_bgq_init(&g_bgq, (unsigned)env_int("ISAC_GPU_CHECK_ASYNC_QUEUE", 2));
+  nr_bgq_init(q, cap);
+  bg_arg_t *arg = calloc(1, sizeof(*arg));
+  if (!arg)
+    return -1;
+  arg->q = q;
+  snprintf(arg->name, sizeof(arg->name), "%s", name);
   cpu_set_t cs;
   CPU_ZERO(&cs);
   const char *e = getenv("ISAC_GPU_CHECK_CORES");
@@ -785,14 +796,21 @@ static void bg_start(void)
   if (CPU_COUNT(&cs))
     pthread_attr_setaffinity_np(&at, sizeof(cs), &cs);
   pthread_t th;
-  const int rc = pthread_create(&th, &at, bg_main, NULL);
+  const int rc = pthread_create(&th, &at, bg_main, arg);
   pthread_attr_destroy(&at);
   if (rc == 0)
     pthread_detach(th);
   else
+    free(arg);
+  LOG_A(PHY, "SENSING: background worker %s %s: queue %u, cores %s, SCHED_OTHER nice 19\n", name, rc ? "FAILED" : "started", q->cap, list);
+  return rc ? -1 : 0;
+}
+
+static void bg_start(void)
+{
+  if (nr_bgq_start(&g_bgq, (unsigned)env_int("ISAC_GPU_CHECK_ASYNC_QUEUE", 2), "gpuCheckBg") != 0)
     g_bg_every = 0; /* no worker: inline checks as before */
-  LOG_A(PHY, "SENSING: GPU_CHECK_ASYNC worker %s: every %d-th grant, queue %u, cores %s\n", rc ? "FAILED (inline checks)" : "started",
-        g_bg_every, g_bgq.cap, list);
+  LOG_A(PHY, "SENSING: GPU_CHECK_ASYNC every %d-th grant\n", g_bg_every);
 }
 
 static void bg_resolve(void)

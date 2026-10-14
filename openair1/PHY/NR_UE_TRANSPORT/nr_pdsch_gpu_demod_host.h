@@ -65,6 +65,7 @@ static inline int nr_fattails_on(const char *name)
 }
 int nr_fattails_pin_all(void); /* ISAC_GPU_PIN_ALL (umbrella): pin and pre-populate every GPU-read host buffer */
 int nr_gpu_check_async_every(void);
+int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name); /* one SCHED_OTHER nice-19 worker draining q */
 int nr_gpu_check_async_room(void);
 int nr_gpu_check_async_submit(nr_bgq_fn fn, void *job);
 void nr_gpu_check_async_drop(void);
