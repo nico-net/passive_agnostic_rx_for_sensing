@@ -65,26 +65,55 @@ int nr_dltp_grants_for(uint16_t frame, uint8_t slot, nr_dltp_grant_t *out, int c
  * carrier verdict, time): no gNB information, no cell constant. MISSED = the probe sees PDSCH-like occupancy that no decoded
  * grant explains (UE traffic exists) while no dedicated CORESET is banked miss_s seconds after the nID sweep could start.
  * NO_TRAFFIC = enough probed slots and none lit. Recovery is requested at most max_recover times with linear back-off. */
-typedef enum { NR_CDISC_SEARCHING = 0, NR_CDISC_LOCKED, NR_CDISC_NO_TRAFFIC, NR_CDISC_MISSED } nr_cdisc_state_t;
+typedef enum { NR_CDISC_SEARCHING = 0, NR_CDISC_LOCKED, NR_CDISC_NO_TRAFFIC, NR_CDISC_MISSED, NR_CDISC_SYNC_POOR } nr_cdisc_state_t;
 typedef struct {
   nr_cdisc_state_t state;
   int armed;                 /* carrier verdict seen: the sweep can run */
-  double armed_s, last_recover_s;
-  int recoveries;
+  double armed_s, last_recover_s, poor_since_s, last_reacquire_s;
+  int recoveries, was_poor, reacquires;
 } nr_cdisc_t;
 typedef struct {
   double now_s;
   int carrier_ok;            /* nr_passive_acq carrier_verified == 1 */
   int bank_count;            /* dedicated CORESETs banked */
   uint64_t window_probed, window_rbslots; /* probed slots / ungranted PDSCH-like RB-slots outside CORESET#0 since the sweep was armed */
+  int sync_poor;             /* ISAC_CORESET_DISC_SYNCQ: nr_syncq_status() == POOR */
   double miss_s;             /* grace after arming before declaring MISSED */
   int max_recover;
 } nr_cdisc_in_t;
-typedef struct { int changed, recover, traffic; const char *reason; } nr_cdisc_out_t;
+typedef struct { int changed, recover, traffic, reacquire, rearm; const char *reason; } nr_cdisc_out_t;
 #define NR_CDISC_RBSLOTS_PRESENT 64   /* 8 x the probe's own leakage bound (8) */
 #define NR_CDISC_RATE_PRESENT 0.5     /* RB-slots per probed slot: sustained, not a lone burst (engineering floor, not fitted to a cell) */
 #define NR_CDISC_PROBED_ABSENT 100    /* sampling depth, as nr_dltp_verdict */
 void nr_cdisc_step(nr_cdisc_t *c, const nr_cdisc_in_t *in, nr_cdisc_out_t *out);
+
+/* ACQMISS-2 sync-quality metric (ISAC_CORESET_DISC_SYNCQ=1, default off). Input: the magnitude in samples of every PBCH-based timing step
+ * (nr-ue.c, one per SSB period). Window = last NR_SYNCQ_WIN steps; needs NR_SYNCQ_MIN to decide. Three levels:
+ *   GOOD (0), DEGRADED (1: logged only), POOR (2: SYNC_POOR state, nID capture paused, sync re-acquired).
+ * Thresholds, from the OTA run population (636 runs with >= 40 PBCH steps, first ~90 steps of each, all cells) and the replay injection:
+ * healthy steady state is median 1 / p90 2 samples; the worst 32-step window of a run has median p50 1, p90 1, p99 21.6 and
+ * p90-of-window p95 8, p99 54. DEGRADED above median 8 (measured: an injected +-20..60 sample per-frame wander gives median 11 and the
+ * receiver still banks its CORESETs, so no action there); POOR above median 20 (~p99 of the population; an injected +-60..150 wander gives
+ * median 25-29 and the carrier verdict never arrives) or p90 64. Release hysteresis: median <= 10 and p90 <= 32. No cell constant. */
+#define NR_SYNCQ_WIN 32
+#define NR_SYNCQ_MIN 16
+#define NR_SYNCQ_MED_DEGRADED 8
+#define NR_SYNCQ_MED_POOR 20
+#define NR_SYNCQ_P90_POOR 64
+#define NR_SYNCQ_MED_GOOD 10
+#define NR_SYNCQ_P90_GOOD 32
+#define NR_SYNCQ_CLAMP 16   /* dynamic PBCH step clamp while recovering: above the 6 samples/frame true drift, below the +-50 jumps */
+/* Pure: classify a window. prev_poor gives the POOR-release hysteresis. Returns 2 POOR, 1 DEGRADED, 0 GOOD, -1 unknown (n < NR_SYNCQ_MIN). */
+int nr_syncq_classify(const unsigned *mag, int n, int prev_poor, int *med, int *p90);
+/* Runtime (single writer = the UE thread, readers lock-free). All no-ops unless ISAC_CORESET_DISC_SYNCQ=1. */
+int nr_syncq_enabled(void);
+void nr_syncq_note(int step);
+int nr_syncq_status(int *med, int *p90);       /* 2 POOR, 1 DEGRADED, 0 GOOD, -1 unknown */
+int nr_syncq_gate_closed(void);                /* 1 while POOR: the nID capture must not spend symbols */
+void nr_syncq_request_reacquire(void);         /* from the CORESET_DISC machine */
+int nr_syncq_take_reacquire(void);             /* nr-ue.c: consume once; resets max_pos_acc and engages the dynamic clamp */
+int nr_syncq_clamp(void);                      /* 0 or NR_SYNCQ_CLAMP */
+void nr_syncq_clamp_release(void);
 #ifdef __cplusplus
 }
 #endif

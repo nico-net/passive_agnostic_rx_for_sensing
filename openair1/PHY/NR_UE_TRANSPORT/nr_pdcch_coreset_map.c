@@ -24,6 +24,8 @@
  */
 #include "common/utils/nr_core_plan.h"
 #include "nr_pdcch_nid_gpu.h"
+/* weak: test targets compile this file without nr_dl_traffic_probe.c */
+extern int nr_syncq_gate_closed(void) __attribute__((weak));
 #include "nr_pdcch_nid_occupancy.h"
 #include <stdatomic.h>
 #include <math.h>
@@ -447,6 +449,8 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
     if (nr_cell_state_sweep_blocked(abs_slot, co, ct, ce)) return -1; } /* PCIS2: ISAC_CELL_STATE=2, barred/idle cell */
   const nr_passive_acq_snapshot_t snap = nr_passive_acq_snapshot();
   if (snap.carrier_verified == 0 || g_css0_first_rb < 0) /* Point A (SIB1) and CORESET#0 (MIB) first */
+    return -1;
+  if (nr_syncq_gate_closed && nr_syncq_gate_closed()) /* ACQMISS-2: unusable symbols (timing unstable) are not worth GPU time */
     return -1;
   if (!nr_passive_acq_tdd_slot_has_downlink(abs_slot))
     return -1;
