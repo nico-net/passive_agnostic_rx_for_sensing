@@ -5,6 +5,7 @@
 #include <vector>
 extern "C" {
 #include "nr_pdsch_dmrs_scan.h"
+#include "nr_scancost.h"
 }
 
 namespace {
@@ -88,6 +89,40 @@ TEST(PdschDmrsScan, FindsTwoUesAboveTheOldRange)
   EXPECT_GT(nr_dmrs_scan_prb_score(rx.data(), NANT, N, FCO, SLOT, SYM, 14, 1677, 0, crb.data(), (int)crb.size()), 0.9f);
   EXPECT_LT(nr_dmrs_scan_prb_score(rx.data(), NANT, N, FCO, SLOT, SYM, 14, 272, 0, crb.data(), (int)crb.size()), 0.4f);
   EXPECT_LT(nr_dmrs_scan_prb_score(rx.data(), NANT, N, FCO, SLOT, SYM, 14, 1677, 0, wrong.data(), (int)wrong.size()), 0.4f);
+  /* SCANCOST: one full-width Gold sequence per (id, nSCID) scores exactly like the per-call one */
+  std::vector<uint8_t> gold(12 * 275);
+  for (int nid : {1677, 272})
+    for (int ns : {0, 1}) {
+      nr_dmrs_scan_prb_gold(SLOT, SYM, 14, nid, ns, (int)gold.size(), gold.data());
+      for (auto *l : {&crb, &wrong})
+        EXPECT_EQ(nr_dmrs_scan_prb_score_gold(rx.data(), NANT, N, FCO, gold.data(), l->data(), (int)l->size()),
+                  nr_dmrs_scan_prb_score(rx.data(), NANT, N, FCO, SLOT, SYM, 14, nid, ns, l->data(), (int)l->size()));
+    }
+}
+
+/* SCANCOST: the hashed offset-key index returns what the solver's linear first-match search returned */
+TEST(ScanCost, KeyHashMatchesLinearSearch)
+{
+  std::mt19937_64 rng(5);
+  for (int round = 0; round < 50; round++) {
+    uint64_t keys[256];
+    int nk = 0;
+    nr_keyhash_t h;
+    nr_keyhash_init(&h);
+    std::vector<uint64_t> pool(round % 2 ? 40 : 600);
+    for (auto &k : pool) k = rng() >> (round % 3 ? 0 : 50); /* some rounds: small keys, many collisions in the low bits */
+    for (int i = 0; i < 3000; i++) {
+      const uint64_t key = pool[rng() % pool.size()];
+      int lin = -1, pos = 0;
+      for (int q = 0; q < nk && lin < 0; q++)
+        if (keys[q] == key) lin = q;
+      ASSERT_EQ(nr_keyhash_find(&h, keys, key, &pos), lin);
+      if (lin < 0 && nk < 256) {
+        keys[nk] = key;
+        nr_keyhash_put(&h, pos, nk++);
+      }
+    }
+  }
 }
 
 TEST(PdschDmrsScan, NscidOneAndNoiseOnly)
