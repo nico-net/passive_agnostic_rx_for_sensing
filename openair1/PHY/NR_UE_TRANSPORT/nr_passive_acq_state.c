@@ -339,7 +339,8 @@ static void sibling_save(int n_rb, int mu, int off_a, int off_c, int k_ssb)
   char path[160];
   if (!sibling_on() || !sibling_path(path, sizeof(path))) return;
   const sib_file_t f = {0x53425831u, n_rb, mu, off_a, off_c, k_ssb};
-  mkdir("/tmp/passive_rx", 0777);
+  if (mkdir("/tmp/passive_rx", 0777) == 0)
+    chmod("/tmp/passive_rx", 01777); // the receiver runs as root (umask 022); users' tests and tools share this store
   FILE *fp = fopen(path, "wb");
   if (!fp) return;
   fwrite(&f, sizeof(f), 1, fp);
