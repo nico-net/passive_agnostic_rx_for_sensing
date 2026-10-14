@@ -323,7 +323,7 @@ static uint64_t g_gen = 1;
 static hyp_state_t g_hyp[NR_UL_LAYOUT_MAX_HYP];
 static int g_nhyp;
 static int g_locked_hyp = -1;
-static uint32_t g_addpos[3], g_ctl_votes, g_discarded, g_tied, g_votes_total, g_probes_fed, g_probes_booked;
+static uint32_t g_probes_skipped, g_addpos[3], g_ctl_votes, g_discarded, g_tied, g_votes_total, g_probes_fed, g_probes_booked;
 static pending_t g_pend[PENDING_MAX];
 static int g_npend;
 static long g_first_slot = -1, g_lock_slot = -1, g_trial_slot = -1;
@@ -405,7 +405,7 @@ static void reset_locked(void)
   g_nhyp = 0;
   g_locked_hyp = -1;
   memset(g_addpos, 0, sizeof(g_addpos));
-  g_ctl_votes = g_discarded = g_tied = g_votes_total = g_probes_fed = g_probes_booked = 0;
+  g_ctl_votes = g_discarded = g_tied = g_votes_total = g_probes_fed = g_probes_booked = g_probes_skipped = 0;
   g_npend = 0;
   g_first_slot = g_lock_slot = g_trial_slot = -1;
   g_prov = g_search_done = false;
@@ -850,7 +850,6 @@ static void *eval_thread(void *arg)
 
 /* ISAC_UL_LOCK_LLR: a probe is worth booking only if the current contenders (prior hypotheses and the two vote leaders) predict
  * different PRBs for this grant; otherwise it is tied for them and votes for nobody. Fewer than two contenders: always book. */
-static uint32_t g_probes_skipped;
 static bool llr_probe_discriminates(const len_state_t *ls, const nr_dci_bits_t *payload)
 {
   int c[4], nc = 0, l1 = -1, l2 = -1;
@@ -1788,10 +1787,10 @@ void nr_ul_layout_stats_dump(void)
              g_p_src == 1 ? "sib1" : g_p_src == 2 ? "dl" : g_p_src == 4 ? "geometry" : g_p_src == 3 ? "neighbour" : "-",
              g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0, g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_p_exp, g_p_ok,
              g_p_dec, g_ndem, g_search_done);
-  LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
+  LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u skipped=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
              " tally[%s ]%s%s%s%s%s\n",
         g_locked_hyp >= 0 ? (g_prov ? "PROVISIONAL " : "LOCKED ") : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
-        g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_votes_total, g_ctl_votes,
+        g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_probes_skipped, g_votes_total, g_ctl_votes,
         g_discarded, g_tied, g_nhyp, v, w ? ls : "", sp, ovs, wvs, pst);
   pthread_mutex_unlock(&mu);
 }
