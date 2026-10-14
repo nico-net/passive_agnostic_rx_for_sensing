@@ -83,6 +83,9 @@ static int chest_delay_share(void)
  * disables the GPU delay for the rest of the run. The GPU entry point is weak: absent -> CPU. */
 int nr_pdsch_gpu_exact_delay_rows(const c16_t *const *rows, int n, int *out) __attribute__((weak));
 void nr_pdsch_gpu_exact_delay_note(int gpu_rows, int checked, int bad) __attribute__((weak));
+int nr_pdsch_gpu_host_pin(void *p, size_t bytes) __attribute__((weak)); /* DECODETIME, nr_pdsch_gpu_exact.c */
+int nr_fattails_pin_all(void) __attribute__((weak));                     /* FATTAILS, nr_pdsch_gpu_demod_host.c */
+static int chest_pin_all(void) { return nr_pdsch_gpu_host_pin && nr_fattails_pin_all && nr_fattails_pin_all(); }
 static __thread int t_gpu_delay_pending;
 static __thread delay_t t_gpu_delay_val;
 static _Atomic int g_chest_gpu_delay = -1;
@@ -1622,8 +1625,13 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
       && fp->ofdm_symbol_size == 4096 && fp->nb_antennas_rx <= NR_DL_CHEST_MAX_ANT && !nr_dl_chest_diag_request
       && !chest_delay_share() && !getenv("ISAC_CHEST_DFT_WIN")) {
     static __thread c16_t *ls_rows;
-    if (!ls_rows)
+    if (!ls_rows) {
       ls_rows = aligned_alloc(64, sizeof(c16_t) * 4096 * NR_DL_CHEST_MAX_ANT);
+      if (ls_rows && chest_pin_all()) { /* FATTAILS ISAC_GPU_PIN_ALL: the GPU reads it in place (see gch_bufs) */
+        memset(ls_rows, 0, sizeof(c16_t) * 4096 * NR_DL_CHEST_MAX_ANT);
+        nr_pdsch_gpu_host_pin(ls_rows, sizeof(c16_t) * 4096 * NR_DL_CHEST_MAX_ANT);
+      }
+    }
     const c16_t *rows[NR_DL_CHEST_MAX_ANT];
     int ants[NR_DL_CHEST_MAX_ANT], n = 0, out[3 * NR_DL_CHEST_MAX_ANT];
     for (int aarx = 0; ls_rows && aarx < fp->nb_antennas_rx; aarx++) {
@@ -1966,7 +1974,6 @@ void nr_pdsch_ptrs_processing(int nbRx,
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_cpu_route.h" /* BATCHCPU */
 nr_gpu_chest_fn nr_pdsch_gpu_exact_chest_entry(void) __attribute__((weak));
-int nr_pdsch_gpu_host_pin(void *p, size_t bytes) __attribute__((weak)); /* DECODETIME, nr_pdsch_gpu_exact.c */
 static _Atomic int g_gch_on = -1;
 static int g_gch_check;
 static _Atomic uint64_t g_gch_calls, g_gch_ok, g_gch_bad, g_gch_ns, g_gch_refused;

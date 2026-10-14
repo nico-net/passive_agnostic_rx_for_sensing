@@ -46,6 +46,7 @@ extern __thread bool nr_pdsch_decode_wide_mrc;
 extern __thread uint32_t nr_dl_chest_nvar_ant[];
 extern __thread int nr_dlsch_csi_extent_override;
 extern __thread bool nr_dl_chest_cpu_ref; /* FATTAILS: nr_dl_channel_estimation.c */
+int nr_pdsch_gpu_host_pin(void *p, size_t bytes); /* nr_pdsch_gpu_exact.c (ISAC_PDSCH_GPU_HOST_PIN=1; else a no-op) */
 
 static nr_gpu_demod_init_fn g_init;
 static nr_gpu_demod_run_fn g_run;
@@ -405,6 +406,15 @@ static geo_tls_t *geo_tls(const NR_DL_FRAME_PARMS *fp, uint32_t est_size)
     g.geo_h = malloc(sizeof(int32_t) * NR_GPU_DEMOD_NSYM * NR_GPU_DEMOD_MAX_EXT);
     if (!g.rx_idx || !g.geo_y || !g.geo_h)
       return NULL;
+    if (nr_fattails_pin_all()) {
+      /* FATTAILS: the GPU reads geo_y / geo_h in place. Rows the extractor never wrote were first touched by the GPU and
+       * migrated page by page (uvm_migrate_pageable -> lru_add_drain_all, which waits for every core's kworker: up to
+       * ~0.9 s behind the RT scan core, a device-wide stall). Populate them on the CPU and pin them. */
+      memset(g.geo_y, 0, sizeof(c16_t) * NR_GPU_DEMOD_NSYM * NR_GPU_DEMOD_MAX_EXT);
+      memset(g.geo_h, 0, sizeof(int32_t) * NR_GPU_DEMOD_NSYM * NR_GPU_DEMOD_MAX_EXT);
+      nr_pdsch_gpu_host_pin(g.geo_y, sizeof(c16_t) * NR_GPU_DEMOD_NSYM * NR_GPU_DEMOD_MAX_EXT);
+      nr_pdsch_gpu_host_pin(g.geo_h, sizeof(int32_t) * NR_GPU_DEMOD_NSYM * NR_GPU_DEMOD_MAX_EXT);
+    }
     for (uint32_t s = 0; s < fp->samples_per_slot_wCP; s++)
       g.rx_idx[s] = (c16_t){(int16_t)(s % N), 1};
   }
@@ -787,7 +797,7 @@ static void bg_start(void)
 
 static void bg_resolve(void)
 {
-  const int on = env_int("ISAC_GPU_CHECK_ASYNC", 0) == 1;
+  const int on = nr_fattails_on("ISAC_GPU_CHECK_ASYNC") == 1;
   const int every = on ? env_int("ISAC_GPU_CHECK_ASYNC_EVERY", 256) : 0;
   g_bg_every = every > 0 ? every : 0;
   if (g_bg_every)
@@ -826,6 +836,14 @@ void nr_gpu_check_async_note(uint64_t ns)
     LOG_A(PHY, "SENSING: GPU_CHECK_ASYNC done=%lu queued=%lu dropped=%lu worker mean=%.0f us max=%.0f us\n", (unsigned long)n,
           (unsigned long)__atomic_load_n(&g_bgq.queued, __ATOMIC_RELAXED), (unsigned long)__atomic_load_n(&g_bgq.dropped, __ATOMIC_RELAXED), atomic_load(&g_bg_ns) / 1e3 / n,
           atomic_load(&g_bg_ns_max) / 1e3);
+}
+
+int nr_fattails_pin_all(void)
+{
+  static int on = -1;
+  if (on < 0)
+    on = nr_fattails_on("ISAC_GPU_PIN_ALL") == 1;
+  return on;
 }
 
 /* One checked grant: everything nr_rx_pdsch() reads, copied off the decode thread's buffers, plus the GPU's outputs. */
