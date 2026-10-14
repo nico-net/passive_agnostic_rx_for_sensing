@@ -93,6 +93,11 @@ static bool seen_order_enabled;
 static int explicit_max;
 static unsigned wide_probe_every = 1;
 static _Atomic uint64_t wide_probes;
+static _Atomic uint64_t learn_restricted, learn_full;
+uint64_t nr_pdcch_dci_length_learn_rounds(bool restricted)
+{
+  return atomic_load_explicit(restricted ? &learn_restricted : &learn_full, memory_order_relaxed);
+}
 static void length_env_init(void)
 {
   const char *e = getenv("ISAC_RECONF");
@@ -524,6 +529,16 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   uint32_t feed_serial = ++state->feed_serial;
   if (feed_serial == 0)
     feed_serial = ++state->feed_serial;
+  bool restricted = false;
+  if (state->learned_n > 0 && state->learned_every > 1 && !prefer && !probe) {
+    if (state->resume_len)
+      restricted = state->restricted_lap; /* finish the suspended lap in the mode it started in */
+    else if (state->rot_phase == 0)
+      restricted = state->restricted_lap = (++state->lap_count % state->learned_every) != 0;
+    /* rot_phase != 0: mid-way through a full lap (restricted laps never advance the phase) */
+  }
+  if (restricted) stride = 1; /* learned lengths can sit at any index of the order */
+  atomic_fetch_add_explicit(restricted ? &learn_restricted : &learn_full, 1, memory_order_relaxed);
   /* Freeze the order for a complete rotation and any budget suspensions. New cell
    * hints take effect next round, so a concurrent lock cannot skip/repeat a length. */
   if (!state->resume_len && state->rot_phase == 0) {
@@ -549,6 +564,11 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
     const bool probing = index < 0;
     const int len = probing ? probe : (prefer ? prefer : state->order[index]);
     if (len < min_len || (!probing && len > max_len)) continue;
+    if (restricted && !probing) {
+      bool learned = false;
+      for (int q = 0; q < state->learned_n; ++q) learned |= state->learned_len[q] == len;
+      if (!learned) continue;
+    }
     if (len == state->tertiary_excluded_len || (state->secondary_excluded_len
         && (len == state->excluded_len || len == state->secondary_excluded_len))) continue;
     const int initial_trial=(state->resume_len==len) ? state->resume_trial : 0;
@@ -587,7 +607,9 @@ int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* sta
   state->resume_len=state->resume_trial=0;
   /* One ROUND -- every length visited once -- is what the caller's give-up cap counts, so the
    * per-length trial budget is identical at any stride; rotation redistributes it in time. */
-  if (prefer) {
+  if (restricted) {
+    /* no round progress: the lap this belongs to is not a full one */
+  } else if (prefer) {
     state->preferred_rounds++;
     state->rot_phase = 0;
     state->occasions_fed++; // one length is the whole round when a prior is seeded

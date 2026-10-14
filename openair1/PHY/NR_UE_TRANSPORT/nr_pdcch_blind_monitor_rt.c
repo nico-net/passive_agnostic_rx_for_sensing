@@ -2384,6 +2384,12 @@ static struct {
   _Atomic uint64_t ul_audit_hit_scr_in, ul_decodes, ul_trials_screened, ul_trials_audit, ul_audit_miss, ul_cand_screened, ul_cand_total, ul_sweeps;
   _Atomic uint64_t ulssh_gated, ulssh_audit_tasks, ulssh_audit_hits, ulssh_viol;
 } g_scan2;
+/* ANONLEN shared state: DL length sweep cost census (always counted, relaxed atomics) and the ISAC_ANONLEN effects */
+static struct {
+  _Atomic uint64_t calls[5], polar[5], hits[5], skipped[5], prescreen[5], audit_trials, audit_miss, cand_total, cand_skipped;
+  _Atomic uint64_t restricted_rounds, full_rounds, feeds[5];
+  _Atomic uint32_t hit_len[NR_DCI_MAX_PAYLOAD + 1];
+} g_anonlen;
 static _Atomic unsigned long g_acc_slot[2][20], g_occ_slot[20]; // ACCSLOT census, see the accept path
 /* [0]=deferred enqueue, [1]=normal enqueue, indexed by nr_blind_rnti_class_t. */
 static _Atomic unsigned long g_enq_class[2][NR_BLIND_RNTI_CLASS_COUNT]; // migrated from NRSniffer: rejected by the adaptive mismatched-bits gate
@@ -2741,6 +2747,9 @@ typedef struct {
   uint16_t bootstrap_alias;
   int lane, rb_offset, span_rb, bundle, interleaver, shift;
   bool joint_anon; /* ISAC_PDCCH_JOINT_ANON: unknown-RNTI joint solve on a configured-nID CORESET */
+  uint8_t cat; /* ANONLEN stats: 0 anonymous, 1 per-RNTI first lock, 2 scout, 3 second length, 4 lookahead lane */
+  const uint8_t *skip; /* ISAC_ANONLEN: per-candidate empty-CCE flag (not decoded, still a failed trial); NULL = off */
+  bool audit; /* decode the skipped candidates too and count the misses */
 } nr_pdcch_autodiscover_sweep_ctx_t;
 
 /* nr_pdcch_css_nrnti0_enabled: returns ISAC_PDCCH_CSS_NRNTI0 != 0 (cached): accept format 1_0 DCIs in a common search space descrambled with n_RNTI = 0.
@@ -3993,8 +4002,38 @@ static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, 
  *   Order: batched GPU result if cached, then CPU polar decode with n_RNTI (or the bootstrap alias), then the joint anonymous solve when enabled and within budget.
  *   Only CRC-valid DCIs with the DL format bit set are accepted. Evidence is logged with discovery_evidence(). Caller: nr_pdcch_dci_length_sweep_feed_budget() via run_occasion_one().
  */
+static bool nr_pdcch_autodiscover_length_scorer_inner(int dci_length, int trial_idx, uint16_t *rnti_out,
+                                                      uint32_t *payload_hash_out, void *user_ctx);
 static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, uint16_t *rnti_out,
                                                 uint32_t *payload_hash_out, void *user_ctx)
+{
+  const nr_pdcch_autodiscover_sweep_ctx_t *ctx = (const nr_pdcch_autodiscover_sweep_ctx_t *)user_ctx;
+  if (ctx == NULL || ctx->n_cand <= 0)
+    return false;
+  const int cat = ctx->cat < 5 ? ctx->cat : 0;
+  const int ci = trial_idx % ctx->n_cand;
+  atomic_fetch_add_explicit(&g_anonlen.calls[cat], 1, memory_order_relaxed);
+  if (ctx->skip && ctx->skip[ci] && !ctx->audit) { /* empty CCE: counted as a failed trial, not decoded */
+    atomic_fetch_add_explicit(&g_anonlen.skipped[cat], 1, memory_order_relaxed);
+    return false;
+  }
+  if (ctx->skip && ctx->audit)
+    atomic_fetch_add_explicit(&g_anonlen.audit_trials, 1, memory_order_relaxed);
+  const bool ok = nr_pdcch_autodiscover_length_scorer_inner(dci_length, trial_idx, rnti_out, payload_hash_out, user_ctx);
+  if (ok) {
+    atomic_fetch_add_explicit(&g_anonlen.hits[cat], 1, memory_order_relaxed);
+    if (dci_length >= 0 && dci_length <= NR_DCI_MAX_PAYLOAD)
+      atomic_fetch_add_explicit(&g_anonlen.hit_len[dci_length], 1, memory_order_relaxed);
+    if (ctx->skip && ctx->audit && ctx->skip[ci]) {
+      const uint64_t n = atomic_fetch_add_explicit(&g_anonlen.audit_miss, 1, memory_order_relaxed) + 1;
+      LOG_A(PHY, "SENSING: ANONLEN_AUDIT_MISS #%llu len=%d rnti=0x%04x cand=%d AL=%u CCE=%u (a screened-out candidate decoded)\n",
+            (unsigned long long)n, dci_length, *rnti_out, ci, ctx->cand[ci].L, ctx->cand[ci].cce);
+    }
+  }
+  return ok;
+}
+static bool nr_pdcch_autodiscover_length_scorer_inner(int dci_length, int trial_idx, uint16_t *rnti_out,
+                                                      uint32_t *payload_hash_out, void *user_ctx)
 {
   const nr_pdcch_autodiscover_sweep_ctx_t *ctx = (const nr_pdcch_autodiscover_sweep_ctx_t *)user_ctx;
   if (ctx == NULL || ctx->n_cand <= 0) {
@@ -4066,11 +4105,14 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
   const nr_pdcch_autodiscover_cand_t *c = &ctx->cand[cand_idx];
   /* JOINT_ANON: with a full-coverage ladder most candidates are empty CCEs; neither the polar decode nor the
    * solver can pass on them, so one cheap amplitude-consistency screen (the solver's own) skips both. */
-  if (ctx->joint_anon && !nr_pdcch_joint_prescreen((const int16_t *)c->e_rx, c->L * 108))
+  if (ctx->joint_anon && !ctx->skip && !nr_pdcch_joint_prescreen((const int16_t *)c->e_rx, c->L * 108)) {
+    atomic_fetch_add_explicit(&g_anonlen.prescreen[ctx->cat < 5 ? ctx->cat : 0], 1, memory_order_relaxed);
     return false;
+  }
   // Same unscramble step nr_pdcch_blind_cand_worker_body() below uses on the identical cursor
   // (t->e_rx from the same pdcch_e_rx[]/e_rx_cand_idx walk), just with `dci_length` substituted
   // for the hypothesis under test instead of the (as yet unknown) real one.
+  atomic_fetch_add_explicit(&g_anonlen.polar[ctx->cat < 5 ? ctx->cat : 0], 1, memory_order_relaxed);
   int16_t tmp_e[16 * 108];
   nr_pdcch_blind_raw_result_t out;
   nr_pdcch_unscrambling((c16_t *)c->e_rx, ctx->scrambling_rnti, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id,
@@ -6646,6 +6688,31 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
                              (int)sweep_ctx.rb_offset, n_rb, disc_cand, disc_n_cand);
         sweep_ctx.n_known = (uint8_t)n_known_dl;
         memcpy(sweep_ctx.known_rnti, dl_known, (size_t)n_known_dl * sizeof(dl_known[0]));
+        sweep_ctx.cat = dl_scout ? 2 : dl_second ? 3 : dlc ? 1 : 0;
+        atomic_fetch_add_explicit(&g_anonlen.feeds[sweep_ctx.cat], 1, memory_order_relaxed);
+        uint8_t anonlen_skip[64] = {0};
+        if (nr_anonlen_on(NR_ANONLEN_SCREEN) && disc_n_cand <= 64) {
+          /* ISAC_ANONLEN: the empty-CCE screen once per candidate instead of once per (candidate, length). With
+           * joint_anon it is the prescreen the scorer applied anyway (same decision); otherwise the SCAN2 UL screen
+           * (z = ISAC_ANONLEN_Z, default 2.33). A screened trial still counts as a failed decode. */
+          static double s_az = -1.0;
+          if (s_az < 0) { const char *e = getenv("ISAC_ANONLEN_Z"); s_az = e && atof(e) > 0 ? atof(e) : 2.33; }
+          static int s_aud = -1;
+          if (s_aud < 0) { const char *e = getenv("ISAC_ANONLEN_AUDIT_EVERY"); s_aud = e ? atoi(e) : 64; }
+          int ns = 0;
+          for (int i = 0; i < disc_n_cand; ++i) {
+            const int E = disc_cand[i].L * 108;
+            anonlen_skip[i] = sweep_ctx.joint_anon
+                ? !nr_pdcch_joint_prescreen((const int16_t *)disc_cand[i].e_rx, E)
+                : joint_anon_score((const int16_t *)disc_cand[i].e_rx, E) < nbs_cfar_score_min(E, s_az);
+            ns += anonlen_skip[i];
+          }
+          sweep_ctx.skip = anonlen_skip;
+          sweep_ctx.audit = !sweep_ctx.joint_anon && s_aud > 0
+                            && ((((uint32_t)abs_slot * 0x9E3779B1u) >> 20) % (uint32_t)s_aud) == 0;
+          atomic_fetch_add_explicit(&g_anonlen.cand_total, disc_n_cand, memory_order_relaxed);
+          atomic_fetch_add_explicit(&g_anonlen.cand_skipped, ns, memory_order_relaxed);
+        }
         if (dl_second && dlc->hint_secondary) dl_state->preferred_len = dlc->hint_secondary;
         /* ISAC_PDCCH_LEN_MEMORY: use a CRC-locked peer length on this exact
          * CORESET, with a full-range probe every 128 feeds to discover a
@@ -6672,6 +6739,34 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
             : (dl_second ? dlc->found[1] : 0);
         dl_state->tertiary_excluded_len = dl_second ? dci10_length : 0;
         dl_state->stride = dci_sweep_stride();
+        dl_state->learned_n = 0;
+        if (nr_anonlen_on(NR_ANONLEN_LEARN) && !dl_scout && !dl_second && dl_bank) {
+          /* ISAC_ANONLEN: lengths already locked (CRC-valid, distinct-payload evidence) for >= ISAC_ANONLEN_MIN_RNTI RNTIs
+           * of this CORESET are swept alone, one round in ISAC_ANONLEN_EVERY is a full lap. Any RNTI of the bank in
+           * SUSPECT (reconfiguration suspected) switches this off until it is resolved. */
+          static int s_min = -1, s_every = -1;
+          if (s_min < 0) { const char *e = getenv("ISAC_ANONLEN_MIN_RNTI"); s_min = e && atoi(e) > 0 ? atoi(e) : 2; }
+          if (s_every < 0) { const char *e = getenv("ISAC_ANONLEN_EVERY"); s_every = e && atoi(e) > 1 ? atoi(e) : 16; }
+          int lens[8], cnt[8], nl = 0;
+          bool suspect = false;
+          for (int i = 0; i < NR_PDCCH_LENGTH_CONTEXTS; ++i) {
+            const nr_pdcch_dci_length_context_t *u = &dl_bank->ue[i];
+            if (!u->rnti) continue;
+            suspect |= u->len_state == NR_LEN_SUSPECT;
+            for (int j = 0; j < 2; ++j) {
+              const int f = u->found[j];
+              if (f <= 0 || f == dci10_length) continue;
+              int q = 0;
+              while (q < nl && lens[q] != f) ++q;
+              if (q == nl) { if (nl == 8) continue; lens[nl] = f; cnt[nl++] = 0; }
+              ++cnt[q];
+            }
+          }
+          if (!suspect)
+            for (int q = 0; q < nl && dl_state->learned_n < 4; ++q)
+              if (cnt[q] >= s_min) dl_state->learned_len[dl_state->learned_n++] = lens[q];
+          dl_state->learned_every = (uint32_t)s_every;
+        }
         if (dlc && dl_state->preferred_len == 0 && cfg->dci_length_override >= dci_len_min()
             && cfg->dci_length_override <= dci_len_max())
           dl_state->preferred_len = cfg->dci_length_override;
@@ -8050,6 +8145,7 @@ constdiag_done:;
         g_lane_disc_n[lane] = disc_n;
         g_lane_sweep_ctx[lane] = (nr_pdcch_autodiscover_sweep_ctx_t){
             .cand                = g_lane_disc_cand[lane],
+            .cat                 = 4,
             .n_cand              = disc_n,
             .bwp_size            = (uint16_t)cfg->bwp_size,
             .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
@@ -10464,6 +10560,17 @@ constdiag_done:;
 #undef S2
   }
   if (sum_due) {
+#define AL(f_, i_) (unsigned long long)atomic_load_explicit(&g_anonlen.f_[i_], memory_order_relaxed)
+    LOG_A(PHY, "SENSING: ANONLEN calls[anon=%llu rnti=%llu scout=%llu second=%llu lane=%llu] polar[%llu %llu %llu %llu %llu] hits[%llu %llu %llu %llu %llu] "
+               "skipped[%llu %llu %llu %llu %llu] prescreen[%llu %llu %llu %llu %llu] feeds[%llu %llu %llu %llu %llu] cand=%llu screened=%llu "
+               "audit_trials=%llu audit_miss=%llu rounds[restricted=%llu full=%llu]\n",
+          AL(calls,0), AL(calls,1), AL(calls,2), AL(calls,3), AL(calls,4), AL(polar,0), AL(polar,1), AL(polar,2), AL(polar,3), AL(polar,4),
+          AL(hits,0), AL(hits,1), AL(hits,2), AL(hits,3), AL(hits,4), AL(skipped,0), AL(skipped,1), AL(skipped,2), AL(skipped,3), AL(skipped,4),
+          AL(prescreen,0), AL(prescreen,1), AL(prescreen,2), AL(prescreen,3), AL(prescreen,4), AL(feeds,0), AL(feeds,1), AL(feeds,2), AL(feeds,3), AL(feeds,4),
+          (unsigned long long)atomic_load(&g_anonlen.cand_total), (unsigned long long)atomic_load(&g_anonlen.cand_skipped),
+          (unsigned long long)atomic_load(&g_anonlen.audit_trials), (unsigned long long)atomic_load(&g_anonlen.audit_miss),
+          (unsigned long long)nr_pdcch_dci_length_learn_rounds(true), (unsigned long long)nr_pdcch_dci_length_learn_rounds(false));
+#undef AL
     /* scanq is all-zero when the scan runs in-line, which is what distinguishes "deferral off" from
      * "deferral on and keeping up" in a log without needing a second line. */
     nr_pdcch_passive_queue_stats_t scanq;

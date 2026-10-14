@@ -35,6 +35,23 @@ static inline bool nr_scan2_on(int id)
   return on[id];
 }
 
+/* ANONLEN (2026-10-14): third tier, default off. ISAC_SCANCOST=3 or ISAC_ANONLEN=1 enables both; each has its own flag
+ * (ISAC_ANONLEN_SCREEN: empty-CCE screen of the DL length sweep, ISAC_ANONLEN_LEARN: sweep only the learned lengths);
+ * a flag set to 0 wins over the umbrella. ISAC_SCANCOST=3 includes the SCANCOST=1/2 cuts. */
+enum { NR_ANONLEN_SCREEN = 0, NR_ANONLEN_LEARN = 1, NR_ANONLEN_N = 2 };
+static inline bool nr_anonlen_on(int id)
+{
+  static const char *const names[NR_ANONLEN_N] = {"ISAC_ANONLEN_SCREEN", "ISAC_ANONLEN_LEARN"};
+  static int on[NR_ANONLEN_N] = {-1, -1};
+  if (on[id] < 0) {
+    const char *e = getenv(names[id]);
+    const char *a = getenv("ISAC_ANONLEN");
+    const char *u = getenv("ISAC_SCANCOST");
+    on[id] = e ? atoi(e) != 0 : ((a && atoi(a) != 0) || (u && atoi(u) >= 3));
+  }
+  return on[id];
+}
+
 /* Open-addressing index over an append-only key array (keys[0..n-1], n <= NR_KEYHASH_CAP / 2): the same answer as a
  * linear "first q with keys[q] == key" search, in O(1). Used by the PDSCH solver's layout offset-key grouping. */
 #define NR_KEYHASH_CAP 512
