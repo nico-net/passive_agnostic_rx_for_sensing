@@ -8,6 +8,7 @@
 #include "nr_pdsch_gpu_demod.h"
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_demod.cuh"
+#include "nr_mmse_exact.h" /* MMSE3GPU: mode 3, the CPU's own source */
 #include <cuda_runtime.h>
 #include "nr_gpu_green.h"
 #include "nr_pdsch_gpu_prio.cuh"
@@ -34,6 +35,7 @@ struct Shared { /* mapped: written by the GPU, read by the host after the stream
   int ref[NSYM];
   long long kap_sz[NSYM][4], kap_sm[NSYM][4];
   unsigned level_done; /* GPUFUSE: k_level blocks finished (the last one runs the decision) */
+  double m3_s2[NSYM], m3_gain[NSYM]; /* MMSE3GPU: mode-3 noise variance and output gain per symbol (k_mmse3_prep) */
   nr_gpu_evm_sym_t evm[NSYM];
 };
 struct Ctx {
@@ -656,6 +658,102 @@ template <int NL> __device__ __forceinline__ void re_mmse0n(const nr_gpu_demod_j
   }
 }
 
+/* ---- MMSE3GPU: nr_dlsch_mmse() mode 3 (exact double MMSE, ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3=1) ------------------------------
+ * Per-RE arithmetic: nr_mmse_exact.h, the same functions the CPU runs (no FMA on either side). Per-symbol scalars
+ * (k_mmse3_prep, one block per symbol): the strongest layer's sum |h|^2 is an integer sum (exact in int64 and in the CPU's
+ * double), and the ZF residual of every 4th RE is summed by one thread in RE order, as the CPU loop does: bit-exact. */
+__device__ __forceinline__ void m3_load(const nr_gpu_demod_job_t &j, const nrd_c16 *y, const nrd_c16 *h, int m, uint32_t i, int nl,
+                                        int16_t (&hre)[4][4], int16_t (&him)[4][4], int16_t (&yre)[4], int16_t (&yim)[4])
+{
+  for (int a = 0; a < j.nbRx; a++) {
+    const nrd_c16 v = y[((size_t)m * NR_GPU_DEMOD_MAX_RX + a) * EXT + i];
+    yre[a] = v.r;
+    yim[a] = v.i;
+    for (int r = 0; r < nl; r++) {
+      const nrd_c16 g = h[((size_t)m * 16 + r * j.nbRx + a) * EXT + i];
+      hre[r][a] = g.r;
+      him[r][a] = g.i;
+    }
+  }
+}
+constexpr int M3_NRES = EXT / 4 + 1;
+__global__ void k_mmse3_prep(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
+{
+  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  __shared__ double rs[M3_NRES];
+  __shared__ unsigned char okf[M3_NRES];
+  __shared__ long long red[32][4];
+  const int m = blockIdx.x, t = threadIdx.x, nl = j.nl, nb = j.nbRx;
+  if (!(j.sym_mask >> m & 1))
+    return;
+  const int nre = j.nre[m];
+  const double sc = ldexp(1.0, -sh->d.log2_maxh);
+  long long e[4] = {0, 0, 0, 0};
+  for (int i = t; i < nre; i += blockDim.x)
+    for (int r = 0; r < nl; r++)
+      for (int a = 0; a < nb; a++) {
+        const nrd_c16 v = h[((size_t)m * 16 + r * nb + a) * EXT + i];
+        e[r] += (long long)v.r * v.r + (long long)v.i * v.i;
+      }
+  for (int r = 0; r < 4; r++)
+    for (int off = 16; off > 0; off >>= 1)
+      e[r] += __shfl_down_sync(0xffffffffu, e[r], off);
+  if ((t & 31) == 0)
+    for (int r = 0; r < 4; r++)
+      red[t >> 5][r] = e[r];
+  const int nk = nb > nl ? (nre + 3) / 4 : 0;
+  for (int k = t; k < nk; k += blockDim.x) {
+    int16_t hre[4][4], him[4][4], yre[4], yim[4];
+    m3_load(j, y, h, m, (uint32_t)(4 * k), nl, hre, him, yre, yim);
+    double xre[4], xim[4], ainv[4], r = 0.0;
+    okf[k] = (unsigned char)nr_mmse_exact_re(nl, nb, hre, him, yre, yim, sc, 0.0, xre, xim, ainv, &r);
+    rs[k] = okf[k] ? r : 0.0;
+  }
+  __syncthreads();
+  if (t == 0) {
+    double gd = 0.0;
+    for (int r = 0; r < nl; r++) {
+      long long s = 0;
+      for (int w = 0; w < (int)(blockDim.x >> 5); w++)
+        s += red[w][r];
+      if ((double)s > gd)
+        gd = (double)s;
+    }
+    double s2 = 0.0;
+    if (nb <= nl) {
+      s2 = (double)j.nvar * sc * j.m3_nvfac;
+    } else {
+      double res = 0.0;
+      int nres = 0;
+      for (int k = 0; k < nk; k++) {
+        res += rs[k];
+        nres += okf[k];
+      }
+      s2 = nres > 0 ? res / ((double)nres * (nb - nl)) * sc : 0.0;
+    }
+    sh->m3_s2[m] = s2;
+    sh->m3_gain[m] = nr_mmse3_gain(gd, nre, sc);
+  }
+}
+template <int NL> __device__ __forceinline__ void re_mmse3(const nr_gpu_demod_job_t &j, const nrd_c16 *y, const nrd_c16 *h, const Shared *sh, int m, uint32_t i)
+{
+  if (i >= j.nre[m])
+    return;
+  const int16_t qa = j.qm == 4 ? NRD_QAM16_n1 : j.qm == 6 ? NRD_QAM64_n1 : j.qm == 8 ? NRD_QAM256_n1 : 0;
+  const int16_t qb = j.qm == 6 ? NRD_QAM64_n2 : j.qm == 8 ? NRD_QAM256_n2 : 0;
+  const int16_t qr = j.qm == 8 ? NRD_QAM256_n3 : 0;
+  int16_t hre[4][4], him[4][4], yre[4], yim[4], z[4][2], mg[4][3];
+  m3_load(j, y, h, m, i, NL, hre, him, yre, yim);
+  nr_mmse3_re(NL, j.nbRx, hre, him, yre, yim, ldexp(1.0, -sh->d.log2_maxh), sh->m3_s2[m], sh->m3_gain[m], qa, qb, qr, z, mg);
+  for (int r = 0; r < NL; r++) {
+    const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i;
+    ((nrd_c16 *)j.comp)[row] = nrd_c16{z[r][0], z[r][1]};
+    ((nrd_c16 *)j.mag)[row] = nrd_c16{mg[r][0], mg[r][0]};
+    ((nrd_c16 *)j.magb)[row] = nrd_c16{mg[r][1], mg[r][1]};
+    ((nrd_c16 *)j.magr)[row] = nrd_c16{mg[r][2], mg[r][2]};
+  }
+}
+
 /* ---- ISAC_PDSCH_EVM_GRANT on the GPU (nr_rx_pdsch()'s EVM block, Nl <= 2; Nl <= 4 with EVM_NL34): one block per symbol. Per-RE terms
  * follow the CPU formulas (the 1-layer solve x = b / G is the CPU's exact IEEE division); the sums are block
  * reductions, so the accumulator agrees with the CPU's sequential sums to rounding, not bit for bit. The decoder's
@@ -1186,7 +1284,7 @@ __device__ __forceinline__ void re_llr(const nr_gpu_demod_job_t &j, int m, uint3
 
 /* ---- GPUFUSE: compensation, multi-layer MMSE, kappa sums and LLRs of one RE in one launch (they are per-RE
  * independent; the thread that compensates RE i also equalises it and writes its LLRs). MM: 0 none (Nl = 1),
- * 1 QAM-FIX Nl = 2, 2/3 QAM-FIX Nl = 3/4, 4/5 stock MMSE Nl = 3/4. The kappa sums are integers, so block sums plus
+ * 1 QAM-FIX Nl = 2, 2/3 QAM-FIX Nl = 3/4, 4/5 stock MMSE Nl = 3/4, 6/7/8 MMSE3GPU mode 3 Nl = 2/3/4. The kappa sums are integers, so block sums plus
  * atomics give the same totals as the former ordered reduction (zeroed per symbol in k_mask_pw). */
 template <int MM> __global__ void k_tail(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
 {
@@ -1207,6 +1305,12 @@ template <int MM> __global__ void k_tail(__grid_constant__ const JobK jk_, const
     re_mmse0n<3>(j, h, sh, m, i);
   else if (MM == 5)
     re_mmse0n<4>(j, h, sh, m, i);
+  else if (MM == 6)
+    re_mmse3<2>(j, y, h, sh, m, i);
+  else if (MM == 7)
+    re_mmse3<3>(j, y, h, sh, m, i);
+  else if (MM == 8)
+    re_mmse3<4>(j, y, h, sh, m, i);
   if (j.want_kappa && j.qm > 2) { /* block-uniform condition */
     long long v[8];
     for (int l = 0; l < 4; l++) {
@@ -1312,6 +1416,8 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   cudaFuncAttributes fa;
   if (cudaFuncGetAttributes(&fa, k_tail<2>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<3>) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_tail<4>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<5>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_tail<6>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<7>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_tail<8>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_mmse3_prep) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_evm1<float, 4>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_evm1<double, 4>) != cudaSuccess)
     return -1;
   g_ok = 1;
@@ -1404,7 +1510,15 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   if (g_prof) cudaEventRecord(x.ev[5], x.s);
   { /* GPUFUSE: compensation + MMSE + kappa + LLRs, one launch */
     const dim3 g(gx, NSYM);
-    if (jj.nl == 2)
+    if (jj.qam_mode == 3 && jj.nl >= 2) /* MMSE3GPU: per-symbol s2 and gain, then the per-RE solve */
+      k_mmse3_prep<<<NSYM, 256, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
+    if (jj.qam_mode == 3 && jj.nl == 2)
+      k_tail<6><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
+    else if (jj.qam_mode == 3 && jj.nl == 3)
+      k_tail<7><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
+    else if (jj.qam_mode == 3 && jj.nl == 4)
+      k_tail<8><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
+    else if (jj.nl == 2)
       k_tail<1><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
     else if (jj.nl == 3 && jj.qam_mode == 2)
       k_tail<2><<<g, 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);

@@ -332,17 +332,24 @@ static int refuse(const nr_pdsch_gpu_demod_call_t *c, int *mode, double *thr_coe
       s_nl34q = env_int("ISAC_PDSCH_MMSE2_NL34_QPSK", 0);     /* HIGHMCS: as nr_rx_pdsch() */
     }
     int qam_mode = nr_dlsch_qam_mode_override >= 0 ? nr_dlsch_qam_mode_override : s_qm;
-    static int s_ex34 = -1; /* TIMRANK34: mode 3 (exact double MMSE) is CPU-only, as nr_rx_pdsch() resolves it */
-    if (s_ex34 < 0)
+    static int s_ex34 = -1, s_m3 = -1; /* TIMRANK34: mode 3 (exact double MMSE), resolved as nr_rx_pdsch() does */
+    if (s_ex34 < 0) {
       s_ex34 = env_int("ISAC_PDSCH_MMSE_EXACT_NL34", 0);
-    if (qam_mode == 3 || (s_ex34 && nl >= (s_ex34 >= 2 ? 2 : 3) && nr_dlsch_qam_mode_override < 0))
-      return RF_NL;
-    if (qam_mode < 0 || qam_mode > 2)
+      s_m3 = env_int("ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3", 0); /* MMSE3GPU: mode 3 on the GPU (default off: CPU) */
+    }
+    if (qam_mode < 0 || qam_mode > 3)
       qam_mode = 0;
-    if (nl >= 3 && (qam_mode == 1 || (qm == 2 && !(s_nl34q && qam_mode == 2))))
-      qam_mode = 0;
-    if (nl == 2 ? qam_mode != 2 : (nl > 4 || !s_nl34 || qam_mode == 1))
-      return RF_NL;
+    if (s_ex34 && nl >= (s_ex34 >= 2 ? 2 : 3) && nr_dlsch_qam_mode_override < 0)
+      qam_mode = 3;
+    if (qam_mode == 3) {
+      if (s_m3 != 1 || nl > 4)
+        return RF_NL;
+    } else {
+      if (nl >= 3 && (qam_mode == 1 || (qm == 2 && !(s_nl34q && qam_mode == 2))))
+        qam_mode = 0;
+      if (nl == 2 ? qam_mode != 2 : (nl > 4 || !s_nl34 || qam_mode == 1))
+        return RF_NL;
+    }
     t_qmode = qam_mode;
   }
   if (qm != 2 && qm != 4 && qm != 6 && qm != 8)
@@ -589,7 +596,15 @@ static int gpu_grant(const nr_pdsch_gpu_demod_call_t *c, int mode, double thr_co
   j.shift_sum = g_shift_sum;
   j.qam_mode = nl >= 2 ? t_qmode : 0;
   j.nvar = c->nvar;
-  j.mag_per_layer = nl >= 2 && j.qam_mode == 2; /* mode 2 only: per-layer thresholds */
+  if (j.qam_mode == 3) { /* nr_dlsch_mmse() mode 3's s2 factor, same env and libm */
+    static double s_nvfac = -1.0;
+    if (s_nvfac < 0.0) {
+      const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NVAR_DB");
+      s_nvfac = pow(10.0, (e ? atof(e) : 21.0) / 10.0);
+    }
+    j.m3_nvfac = s_nvfac;
+  }
+  j.mag_per_layer = nl >= 2 && j.qam_mode >= 2; /* modes 2 and 3: per-layer thresholds */
   j.wide_mrc = nr_pdsch_decode_wide_mrc;
   j.want_kappa = nr_pdsch_evm_acc.armed;
   if (g_gpu_evm < 0)
