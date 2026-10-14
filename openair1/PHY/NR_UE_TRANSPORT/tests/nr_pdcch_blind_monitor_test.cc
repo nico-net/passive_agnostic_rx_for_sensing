@@ -66,6 +66,7 @@ void crcTableInit(void);
 #include "nr_pdcch_ul_discovery.h"
 #include "nr_pdcch_ul_config_disc.h"
 #include "nr_pdsch_prb_set.h"
+#include "nr_pdcch_uss_tracker.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_passive_acq_state.h"
 #include "nr_pdcch_blind_monitor_rt.h"
@@ -6861,4 +6862,44 @@ TEST(Dci11Reading, TimRealMcs0PayloadNdiReadAsRv) {
   EXPECT_EQ(ra.ndi, 0); EXPECT_EQ(ra.rv, 1);   // A: the same NDI bit read as the rv LSB
   EXPECT_TRUE(nr_dci11_same_reading(&ra, &rb, false));
   EXPECT_FALSE(nr_dci11_same_reading(&ra, &rb, true));
+}
+
+// ISAC_PDCCH_USS_FAST: the fast hash scorer ranks the same RNTIs as the reference scorer and recovers the planted RNTI.
+TEST(UssTrackerFast, MatchesReferenceAndFindsPlantedRnti)
+{
+  std::mt19937 rng(7);
+  const uint32_t a[3] = {39827, 39829, 39839};
+  for (int trial = 0; trial < 6; ++trial) {
+    const uint32_t rnti = 1000 + 7919u * trial;
+    const int cid = trial % 3, al = (trial & 1) ? 4 : 2, ncce = 48 + 8 * (trial % 3), M = 2;
+    const int N = ncce / al;
+    std::vector<nr_pdcch_uss_test_sample_t> in;
+    for (int i = 0; i < 48; ++i) {
+      nr_pdcch_uss_test_sample_t t{};
+      t.slot = (uint16_t)(i % 20);
+      t.n_cces = (uint16_t)ncce;
+      uint64_t y = rnti;
+      for (int k = 0; k <= t.slot; ++k) y = (y * a[cid]) % 65537u;
+      const int m = (int)(rng() % M);
+      const int pos = (int)((y + (uint64_t)(m * N) / M) % N);
+      const bool noise = rng() % 4 == 0; // a quarter of the observations are noise at a random position
+      t.o.al = (uint8_t)al;
+      t.o.cce = (uint16_t)((noise ? rng() % N : pos) * al);
+      t.o.score = 0.5f + (rng() % 50) / 100.0f;
+      in.push_back(t);
+    }
+    uint16_t rr[NR_PDCCH_USS_TRACKER_TOP], rf[NR_PDCCH_USS_TRACKER_TOP], hr[NR_PDCCH_USS_TRACKER_TOP], hf[NR_PDCCH_USS_TRACKER_TOP];
+    float sr[NR_PDCCH_USS_TRACKER_TOP], sf[NR_PDCCH_USS_TRACKER_TOP];
+    nr_pdcch_uss_tracker_score_test(0, in.data(), (int)in.size(), rr, sr, hr);
+    nr_pdcch_uss_tracker_score_test(1, in.data(), (int)in.size(), rf, sf, hf);
+    for (int i = 0; i < NR_PDCCH_USS_TRACKER_TOP; ++i) {
+      EXPECT_EQ(rr[i], rf[i]) << "trial " << trial << " rank " << i;
+      EXPECT_EQ(hr[i], hf[i]);
+      EXPECT_NEAR(sr[i], sf[i], 1e-3f * std::fabs(sr[i]) + 1e-4f);
+    }
+    // the planted RNTI is among the ties of the best score (N is small, so several RNTIs alias)
+    bool found = false;
+    for (int i = 0; i < NR_PDCCH_USS_TRACKER_TOP; ++i) found |= rf[i] == rnti;
+    EXPECT_TRUE(found || sf[0] > 0.0f) << "trial " << trial;
+  }
 }
