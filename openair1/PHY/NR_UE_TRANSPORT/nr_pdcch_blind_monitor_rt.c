@@ -8199,9 +8199,16 @@ constdiag_done:;
                                                  NR_UL_LAYOUT_MAX_TRIALS);
           for (int q = 0; q < nt && nr_cfg_epoch_work_current(); q++) nr_pusch_grant_book_add(&ull_t[q], source_absolute_slot);
         }
+        nr_pdcch_blind_ul_result_t ull_fit;
         if (ull == 1) {
           cand_task[ti].ok = true;
           discovered = ull_g;
+        } else if (ull != 1 && nr_ul_layout_fit_read_enabled()
+                   && nr_ul_layout_read_fitted(cand_task[ti].rnti_min, cand_task[ti].dci_length,
+                                               cand_task[ti].ul_out.raw_payload, &ull_fit)) {
+          /* ISAC_UL_FIT_READ=1 (ULDCI-20261014): fitted, BWP not locked yet: the fitted layout reads the fields */
+          cand_task[ti].ok = true;
+          discovered = ull_fit;
         } else if (nr_pdcch_ul_config_disc_enabled() && ul_opts.bwp_size == 0) {
           nr_pdcch_blind_ul_opts_t confirmed;
           nr_pdcch_ul_config_prior_t prior = {.dl_bwp_start=cfg->bwp_start,

@@ -53,6 +53,7 @@ typedef struct {
 typedef struct {
   uint8_t bwp_ind, riv, tda, fh; /* widths after the 1-bit identifier (no carrier / UL-SUL indicator) */
   uint16_t n_max;                /* largest candidate N_BWP with this RIV width */
+  float ent;                     /* bits of entropy of the TDRA + FH region this split leaves (ISAC_UL_PREFIX_ENT ranking) */
 } nr_ul_layout_prefix_t;
 
 typedef struct {
@@ -112,6 +113,10 @@ void nr_ul_layout_note_pdcch_slot(long abs_slot);
  *   0: banked only. */
 int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_t payload,
                         const nr_ul_layout_cell_t *cell, nr_pdcch_blind_ul_result_t *out);
+/* ISAC_UL_FIT_READ=1 (default off, needs the lock): read a grant of a FITTED but not yet locked length with the fitted layout
+ * (BWP-independent fields exact, RIV provisional). false = no fit / not enabled / not a plausible grant. */
+bool nr_ul_layout_fit_read_enabled(void);
+bool nr_ul_layout_read_fitted(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, nr_pdcch_blind_ul_result_t *out);
 static inline bool nr_ul_layout_is_probe(const nr_pdcch_blind_ul_result_t *g)
 {
   return g && (g->hyp_generation & NR_UL_LAYOUT_TAG) && (g->hyp_generation & NR_UL_LAYOUT_PROBE);

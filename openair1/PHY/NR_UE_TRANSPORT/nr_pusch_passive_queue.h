@@ -108,6 +108,8 @@ typedef struct {
   nr_ue_ul_ticket_t ul_ticket;
   nr_ue_ul_update_t ul_update;
   bool ul_ticket_valid;
+  /// ULQ shared-snapshot index (ISAC_UL_SNAP_POOL), owned by the queue: set at admission, never by the producer.
+  int16_t snap_idx;
 } nr_pusch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in
@@ -149,6 +151,12 @@ void nr_pusch_passive_queue_note_unready(void);
 bool nr_pusch_passive_queue_enqueue(const nr_pusch_passive_job_t *job);
 
 void nr_pusch_passive_queue_get_stats(nr_pusch_passive_queue_stats_t *out);
+/// ULQ: real (non-probe) grants waiting in the queue; 0 when the priority queue is off.
+int nr_pusch_passive_queue_real_pending(void);
+/// ULQ: true when optional rescue decodes (UCI explore, UL_RETRY) may run now (ISAC_UL_SPARE_RESCUE).
+bool nr_pusch_passive_rescue_allowed(void);
+/// ULQ census line (PUSCHQ2), printed by the UL summary.
+void nr_pusch_passive_queue_ulq_dump(void);
 
 /// Stop and join the consumers.
 void nr_pusch_passive_queue_stop(void);

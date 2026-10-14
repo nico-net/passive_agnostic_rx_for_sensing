@@ -59,7 +59,7 @@ void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_ab
     }
     /* The first no-HARQ-history decoder rejects RV != 0 before FEP. Keep
      * those grants out of the bounded IQ queue while U3 rotates hypotheses. */
-    if (g->rv != 0) {
+    if (g->rv != 0 && !nr_pusch_passive_harq_combine_enabled()) { /* ULQ: retransmissions combine when enabled */
       atomic_fetch_add_explicit(&g_chain_skip_rv,1,memory_order_relaxed);
       return;
     }
@@ -320,6 +320,7 @@ void nr_pusch_grant_book_stats_dump(void)
             (unsigned long)q.queued, (unsigned long)q.decoded, (unsigned long)q.crc_ok,
             (unsigned long)q.dropped_full, (unsigned long)q.dropped_stale,
             (unsigned long)q.max_lag_slots, NR_PUSCH_PASSIVE_QUEUE_MARGIN_SLOTS);
+    nr_pusch_passive_queue_ulq_dump();
   }
   if (nr_pusch_passive_ul_ue_state_enabled())
     LOG_I(PHY,"SENSING: UL_UE_IDS dropped=%lu\n",(unsigned long)nr_pusch_passive_ul_ids_dropped());

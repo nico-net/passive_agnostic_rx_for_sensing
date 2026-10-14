@@ -6091,6 +6091,93 @@ TEST(UlLayoutLock, BitStatisticsFitThePci415Layout)
   EXPECT_EQ(nr_ul_layout_infer_k2(occ, hist, 20), 2);
 }
 
+// ---- ULDCI-20261014: TIM-shaped layout (id | BWP ind 1 | RIV 15 | TDRA 3 | MCS ..., 44 bits, central block at 20). Without the
+// entropy ranking the split {riv 14, tda 4} (N <= 162) comes first; with it the true {riv 15, tda 3} is the only survivor, and a
+// fitted but not locked length is read with it (ISAC_UL_FIT_READ) so MCS/NDI/RV/HARQ of one process are coherent.
+namespace {
+struct UlTruth { uint8_t mcs, ndi, rv, pid, tda; };
+struct UllTimGen {
+  std::mt19937 rng{777};
+  uint8_t pid[8] = {0}, ndi[8] = {0};
+  int k = 0;
+  nr_ul_layout_dci_t next(UlTruth *t)
+  {
+    static const int dci_slots[4] = {6, 7, 16, 17};
+    const int u = (int)(rng() % 8);
+    pid[u] = (uint8_t)((pid[u] + 1 + rng() % 3) % 16);
+    ndi[u] ^= 1;
+    const int L = (rng() % 10) ? 3 : 1 + (int)(rng() % 120);
+    const int S = (int)(rng() % (216 - L + 1));
+    const uint8_t rv = (rng() % 12) ? 0 : 2, tda = (rng() % 4) ? 1 : 5, mcs = (uint8_t)(rng() % 28);
+    uint64_t v = 0;
+    auto put = [&](uint32_t x, int w) { v = (v << w) | (x & ((1u << w) - 1u)); };
+    put(0, 1); put(1, 1); put(UllRiv(216, S, L), 15); put(tda, 3); put(mcs, 5); put(ndi[u], 1); put(rv, 2);
+    put(pid[u], 4); put(3, 2); put(1, 2); put(0, 3); put(0, 2); put(0, 1); put(0, 1); put(1, 1);
+    *t = {mcs, ndi[u], rv, pid[u], tda};
+    nr_ul_layout_dci_t d;
+    d.rnti = (uint16_t)(0x4000 + u);
+    d.slot = (long)(50 + k / 4) * 20 + dci_slots[k % 4];
+    k++;
+    d.p = nr_dci_bits_from_u64(v);
+    return d;
+  }
+};
+}  // namespace
+
+TEST(UlLayoutFit, EntropyRankedPrefixAndFitReadAreCoherent)
+{
+  unsetenv("ISAC_UL_PREFIX_ENT");
+  unsetenv("ISAC_UL_FIT_READ");
+  UllTimGen g;
+  std::vector<nr_ul_layout_dci_t> b;
+  UlTruth t;
+  for (int i = 0; i < 400; i++) b.push_back(g.next(&t));
+  float sc = 0, sec = 0;
+  const int mo = nr_ul_layout_fit_mcs(b.data(), (int)b.size(), 44, &sc, &sec);
+  ASSERT_EQ(mo, 20);
+  const uint16_t cand[] = {217, 216, 162, 107, 273};
+  nr_ul_layout_prefix_t pre[6];
+  int np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
+  ASSERT_GE(np, 2);
+  EXPECT_EQ(pre[0].riv, 14);  // the old order: width ascending, a RIV LSB parked in TDRA
+  setenv("ISAC_UL_PREFIX_ENT", "1", 1);
+  np = nr_ul_layout_fit_prefix(b.data(), (int)b.size(), 44, mo, cand, 5, pre, 6);
+  ASSERT_EQ(np, 1);
+  EXPECT_EQ(pre[0].bwp_ind, 1);
+  EXPECT_EQ(pre[0].riv, 15);
+  EXPECT_EQ(pre[0].tda, 3);
+  EXPECT_EQ(pre[0].n_max, 217);
+
+  // module: fitted, BWP not locked -> fields exact
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 923, .mu = 1, .typeA_pos = 0,
+                                    .slots_per_frame = 20};
+  nr_ul_layout_lock_reset();
+  nr_pdcch_blind_ul_result_t out;
+  UllTimGen g2;
+  EXPECT_FALSE(nr_ul_layout_read_fitted(0x4000, 44, nr_dci_bits_from_u64(0), &out));  // flag off
+  setenv("ISAC_UL_FIT_READ", "1", 1);
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g2.next(&t);
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+  int ok = 0, n = 0;
+  for (int i = 0; i < 200; i++) {
+    const nr_ul_layout_dci_t d = g2.next(&t);
+    if (!nr_ul_layout_read_fitted(d.rnti, 44, d.p, &out)) continue;
+    n++;
+    ok += out.mcs == t.mcs && out.ndi == t.ndi && out.rv == t.rv && out.harq_pid == t.pid;
+  }
+  EXPECT_GT(n, 150);
+  EXPECT_EQ(ok, n);
+  unsetenv("ISAC_UL_PREFIX_ENT");
+  unsetenv("ISAC_UL_FIT_READ");
+  nr_ul_layout_lock_reset();
+}
+
 TEST(UlLayoutLock, DmrsVotesLockTheBwpWithoutAnyCrcAndNoiseDoesNot)
 {
   setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
