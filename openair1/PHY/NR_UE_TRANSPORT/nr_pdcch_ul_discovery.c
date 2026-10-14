@@ -1,3 +1,4 @@
+#include "nr_scancost.h"
 #include "nr_passive_cfg_epoch.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -185,6 +186,22 @@ static bool equivalent(const nr_hyp_t *a, const nr_hyp_t *b, const void *sample,
   if (!extract(a,sample,ctx,&ga) || !extract(b,sample,ctx,&gb)) return false;
   return decode_equivalent(&ga,&gb);
 }
+/* SCANCOST: equivalent() as a key -- exactly the fields decode_equivalent() compares, -1 when extract() fails. */
+static int equivalent_key(const nr_hyp_t *h, const void *sample, void *ctx, uint8_t *k)
+{
+  nr_pdcch_blind_ul_result_t g;
+  if (!extract(h,sample,ctx,&g)) return -1;
+  int n=0;
+#define K_(f) do { memcpy(k+n,&g.f,sizeof(g.f)); n+=sizeof(g.f); } while(0)
+  K_(start_rb); K_(num_rb); K_(bwp_start); K_(bwp_size); K_(tda_index); K_(start_symbol); K_(num_symbols);
+  K_(mapping_type); K_(k2); K_(mcs); K_(mcs_table); K_(nrOfLayers); K_(ul_dmrs_symb_pos); K_(dmrs_config_type);
+  K_(n_dmrs_cdm_groups); K_(dmrs_ports); K_(nscid); K_(transform_precoding); K_(frequency_hopping);
+  K_(data_scrambling_id); K_(ul_dmrs_scrambling_id); K_(rv); K_(ulsch_indicator); K_(carrier_indicator);
+  K_(ul_sul_indicator);
+#undef K_
+  return n;
+}
+_Static_assert(2*8+17 <= NR_HYP_KEY_MAX, "UL equivalence key exceeds NR_HYP_KEY_MAX");
 /* Initial merging requires equal decoded grants. Refinement instead needs
  * a contradictory observation: two extraction failures do not distinguish
  * layouts, and a representative can never split away from itself. */
@@ -283,9 +300,14 @@ static bool init_search(search_t *s, apply_ctx_t *ctx)
       : nr_pdcch_ul_field_sweep_generate(&ctx->opts,ctx->owner->target_length,s->raw,NR_HYP_SWEEP_MAX_RAW);
   const void *observations[UL_DISCOVERY_SAMPLES];
   for (int i=0;i<ctx->owner->nsamples;++i) observations[i]=&ctx->owner->samples[i];
-  int classes=s->n_raw>0 ? nr_hyp_sweep_init(&s->engine,s->raw,s->n_raw,supported,ctx,
-                                           ctx->interpretation?NULL:equivalent,observations,
-                                           ctx->owner->nsamples,ctx) : s->n_raw;
+  /* ISAC_SCANCOST: same classes from per-hypothesis keys (the pairwise init took ~200 ms under the Phase-2 lock) */
+  int classes=s->n_raw<=0 ? s->n_raw
+      : nr_scancost_on() && !ctx->interpretation
+      ? nr_hyp_sweep_init_keyed(&s->engine,s->raw,s->n_raw,supported,ctx,equivalent_key,observations,
+                                ctx->owner->nsamples,ctx)
+      : nr_hyp_sweep_init(&s->engine,s->raw,s->n_raw,supported,ctx,
+                          ctx->interpretation?NULL:equivalent,observations,
+                          ctx->owner->nsamples,ctx);
   if (classes<=0) {
     LOG_E(PHY,"UL discovery %s refused: raw=%d classes/error=%d; configuration unresolved\n",
           ctx->interpretation?"interpretation":"width",s->n_raw,classes);

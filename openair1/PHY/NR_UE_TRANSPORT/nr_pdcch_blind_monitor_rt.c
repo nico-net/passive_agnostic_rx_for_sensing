@@ -112,6 +112,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_joint_live.h"
 #include "nr_pdsch_solver.h"
 #include "nr_pdsch_dmrs_scan.h"
+#include "nr_scancost.h"
 #include "nr_pdsch_prb_set.h" /* nr_ra_type0_prbs */
 /* TIM-PDSCH: ISAC_PDSCH_DMRS_ID_SCAN (nr_pdsch_passive_queue.c runs the scan; here: per-RNTI hypotheses + reading filter) */
 static bool nr_pdsch_dmrs_scan_on(void)
@@ -165,6 +166,13 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
   for (int a = 0; a < nant; a++) rx[a] = (const int16_t *)&buf[(size_t)a * fp->samples_per_slot_wCP + (size_t)sym * fp->ofdm_symbol_size];
   float sc[128];
   int kept = 0;
+  /* ISAC_SCANCOST: Gold bits once per (identity, nSCID) of this slot instead of once per reading x identity (the bit-serial
+   * generator was ~7 % of the scan CPU, under the Phase-2 lock); scores are identical (the sequence is prefix-stable). */
+  enum { GOLD_IDS = 8, GOLD_BITS = 12 * 275 };
+  static __thread uint8_t (*gold)[2][GOLD_BITS]; /* heap, not static TLS (TLS budget) */
+  bool gold_ok[GOLD_IDS][2] = {{false}};
+  if (nr_scancost_on() && gold == NULL) gold = malloc(sizeof(*gold) * GOLD_IDS);
+  const bool gfast = gold != NULL;
   for (int k = 0; k < nrd && k < 128; k++) {
     uint16_t crb[275];
     int n = 0;
@@ -178,8 +186,17 @@ static int dmrs_scan_filter_readings(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t
       if (cfg->bwp_start + crb[q] < fp->N_RB_DL) crb[m++] = (uint16_t)(cfg->bwp_start + crb[q]);
     sc[k] = 0.f;
     for (int i = 0; i < n_ids && m > 0; i++) {
-      const float v = nr_dmrs_scan_prb_score(rx, nant, fp->ofdm_symbol_size, fp->first_carrier_offset, proc->nr_slot_rx, sym,
-                                             fp->symbols_per_slot, ids[i], rp[k].nscid, crb, m);
+      float v;
+      if (gfast && i < GOLD_IDS && ids[i] >= 0 && ids[i] <= 65535) {
+        const int ns = rp[k].nscid & 1;
+        if (!gold_ok[i][ns]) {
+          nr_dmrs_scan_prb_gold(proc->nr_slot_rx, sym, fp->symbols_per_slot, ids[i], ns, GOLD_BITS, gold[i][ns]);
+          gold_ok[i][ns] = true;
+        }
+        v = nr_dmrs_scan_prb_score_gold(rx, nant, fp->ofdm_symbol_size, fp->first_carrier_offset, gold[i][ns], crb, m);
+      } else
+        v = nr_dmrs_scan_prb_score(rx, nant, fp->ofdm_symbol_size, fp->first_carrier_offset, proc->nr_slot_rx, sym,
+                                   fp->symbols_per_slot, ids[i], rp[k].nscid, crb, m);
       if (v > sc[k]) sc[k] = v;
     }
     kept += sc[k] >= 0.5f;
@@ -2407,11 +2424,13 @@ static _Atomic unsigned long g_enq_class[2][NR_BLIND_RNTI_CLASS_COUNT]; // migra
                           * array slots; the consumer never touches index 12. */
 #define BTIM_DLSWEEP 13  /* DL dci_length autodiscover sweep: 34 lengths x every candidate, Polar+CRC each */
 #define BTIM_ULSWEEP 14  /* UL per-RNTI dci_length sweep, same shape, under ul_length_lock */
-#define BTIM_N       15
+#define BTIM_P2WAIT  15  /* SCANCOST: wait for the Phase-2 lock at the start of post (inside post) */
+#define BTIM_ULWAIT  16  /* SCANCOST: wait for ul_length_lock at the start of ulsweep (inside ulsweep) */
+#define BTIM_N       17
 static const char *const kBtimName[BTIM_N] = {"fep_llr", "demap", "prepass", "decode",
                                               "chest",   "pdsch", "submit",  "TOTAL",
                                               "pre",     "pbwp",  "csirs",   "post", "rt",
-                                              "dlsweep", "ulsweep"};
+                                              "dlsweep", "ulsweep", "p2wait", "ulwait"};
 static _Atomic uint64_t g_btim_ns[BTIM_N]  = {0};
 static _Atomic uint64_t g_btim_n[BTIM_N]   = {0};
 static _Atomic uint64_t g_btim_max[BTIM_N] = {0};
@@ -6702,6 +6721,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   int n_ul_ready = 0;
   const uint64_t btim_t_ulsw = btim_on ? btim_now() : 0;
   pthread_mutex_lock(&ul_length_lock);
+  btim_add(BTIM_ULWAIT, btim_t_ulsw);
   const uint64_t geom = length_coreset_key(cfg);
   uint64_t evicted_geom = 0;
   nr_pdcch_dci_length_bank_t *ul_bank =
@@ -8053,7 +8073,9 @@ constdiag_done:;
    * across consumers: see the comment at g_phase2_mu in nr_pdcch_blind_phase2.c. No return between
    * here and the end of this function, where the scope guard releases the lock. */
   if (!phase2.held) {
+    const uint64_t btim_t_p2 = btim_on ? btim_now() : 0;
     nr_pdcch_blind_phase2_lock();
+    btim_add(BTIM_P2WAIT, btim_t_p2);
     phase2.held = true;
   }
   int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
@@ -9292,6 +9314,11 @@ constdiag_done:;
       enum { KEYS = 256 };
       uint64_t kkey[KEYS];
       int kgrp[KEYS], nk = 0;
+      /* ISAC_SCANCOST: hashed key lookup (same groups as the linear search; that search was 16 % of the scan CPU, under the
+       * Phase-2 lock) */
+      const bool kfast = nr_scancost_on();
+      nr_keyhash_t khash;
+      if (kfast) nr_keyhash_init(&khash);
       for (int i = 0; i < nh; i++) {
         s_gid[i] = 0xff;
         if (!R->alive[i] && i != rep
@@ -9311,14 +9338,21 @@ constdiag_done:;
         const uint64_t key = (uint64_t)of->riv | (uint64_t)of->mcs << 8 | (uint64_t)of->ant_ports << 16
                              | (uint64_t)of->ant_ports_bits << 24 | (uint64_t)of->fdra_mode << 28 | (uint64_t)of->n_rbg << 32
                              | (uint64_t)R->hyp[i].dmrs_type << 40 | (uint64_t)of->tda << 44 | (uint64_t)of->tda_bits << 52;
-        int kk = -1;
-        for (int q = 0; q < nk && kk < 0; q++)
-          if (kkey[q] == key) kk = q;
+        int kk = -1, kpos = 0;
+        if (kfast)
+          kk = nr_keyhash_find(&khash, kkey, key, &kpos);
+        else
+          for (int q = 0; q < nk && kk < 0; q++)
+            if (kkey[q] == key) kk = q;
         if (kk >= 0) {
           if (kgrp[kk] >= 0) { s_gid[i] = (uint8_t)kgrp[kk]; rcount[kgrp[kk]]++; }
           continue;
         }
-        if (nk < KEYS) { kkey[nk] = key; kgrp[nk] = -1; kk = nk++; }
+        if (nk < KEYS) {
+          kkey[nk] = key; kgrp[nk] = -1;
+          if (kfast) nr_keyhash_put(&khash, kpos, nk);
+          kk = nk++;
+        }
         nr_pdcch_blind_result_t pr;
         if (!dci11_layout_parse(R, i, rw, dlen, cfg, &pr) || pr.vrb_to_prb)
           continue;
@@ -10358,7 +10392,7 @@ constdiag_done:;
     }
 
     if (btim_on && sum_due) {
-      char rep[1300];
+      char rep[1700];
       int u = 0;
       for (int k = 0; k < BTIM_N && u < (int)sizeof(rep) - 90; k++) {
         u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus max=%.1fus tot=%.2fs] ",
