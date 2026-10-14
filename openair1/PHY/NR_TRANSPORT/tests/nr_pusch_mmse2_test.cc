@@ -152,10 +152,10 @@ TEST(PuschMmse2, FlagOffPathIsTheUnchangedDeterministicStockFunction)
   EXPECT_EQ(0, memcmp(&a, &b, sizeof(a)));
 }
 
-/* DMRS SNR formula: |H|=1000 (1e6 per RE), noise 1e4 per RE => signal 1e6-1e4, SNR = 10 log10(99) */
+/* |H|^2 = 1e6, LS noise sigma^2 = 1e4, smoother gain g = 1/8: sig2 = 1e6 + 1250, resid2 = 8750 => SNR = 20 dB */
 TEST(UlDmrsSnr, KnownNoise) {
-  EXPECT_NEAR(19.956f, nr_ulsch_dmrs_snr_db(1e6, 1e4), 1e-2);
+  EXPECT_NEAR(20.0f, nr_ulsch_dmrs_snr_db(1e6 + 1250, 8750), 1e-3);
   EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(1e6, 0)));
   EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(0, 5)));
-  EXPECT_LT(nr_ulsch_dmrs_snr_db(1e3, 1e4), -29.f); /* noise >= signal clamps, never NaN/inf */
+  EXPECT_NEAR(-30.0f, nr_ulsch_dmrs_snr_db(1.0, 1e4), 1e-3); /* signal below the noise floor clamps, never NaN/inf */
 }

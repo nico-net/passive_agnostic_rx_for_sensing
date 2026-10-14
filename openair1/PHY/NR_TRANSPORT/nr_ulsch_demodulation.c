@@ -829,7 +829,7 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
   if (dmrs_symb_idx > 0)
     nvar /= (dmrs_symb_idx * total_layers);
 
-  /* passive RX, metrics only: DMRS SNR = (mean |H|^2 - nvar) / nvar over the DMRS symbols, before any
+  /* passive RX, metrics only: DMRS SNR from mean smoothed |H|^2 and the nvar residual (nr_ulsch_dmrs_snr_db), before any
    * averaging; does not feed the equaliser or any decode decision. */
   float dmrs_snr_db = NAN;
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && dmrs_symb_idx > 0) {

@@ -64,7 +64,7 @@
  * (***) UL only: after an FDRA candidate sweep that ends in CRC_FAIL, start_rb/nb_rb is the LAST candidate tried,
  *       not necessarily the signalled allocation (a CRC pass records the winning candidate).
  * (**) null for UL ZERO_TB: all-zero TB, the CRC passes by construction, so it is not a verified decode.
- * [NOTE] UL snr_db after decode = per-antenna DMRS SNR ((mean|H|^2 - nvar)/nvar, nvar = LS-vs-smoothed residual);
+ * [NOTE] UL snr_db after decode = per-antenna DMRS SNR (smoothing-corrected, nr_ulsch_dmrs_snr_db);
  *        with the sensing CFR export on and no estimate it stays the CFR mean power in dB (not an SNR).
  * Evidence: schema [IMPLEMENTED, NOT VALIDATED] until A3 Step 9 (rfsim) passes ([SIM VERIFIED]); no OTA.
  * Schema 2 grant serialization is additive and lives in nr_sense_grant_to_json
