@@ -4235,8 +4235,8 @@ G403:t26z+ISAC_CARRIER_FROM_SIB1=1:<cfg>:<C from retune_restart.sh on the first 
 
 Sources: `rr-orchestration/ota/RESULTS-20261014.md` (tables in `ota/ana_20261014.jsonl`) and `rr-orchestration/logs/RESET-INVESTIGATION-20261014.md`.
 OTA labels: `[MEASURED, DGX OTA, X410 34B2AF1, 2026-10-14 ...]`, cfg `sd_t26ul` (S4 = `sd_t26ul_s4`, 4 scan consumers, cores 5..8), 150 s runs
-(U arms 240 s), high daytime load. n = 1-3 per arm: indicative only. Cells never merged: V = Vodafone PCI 415 (3680.01 MHz), T = TIM PCI 233
-(3759.99 MHz; 10-12/10-13 blocks say PCI 923 for TIM: NOT reconciled, to check), M508a = PCI 517 (3590.19 MHz).
+(U arms 240 s), high daytime load. n = 1-3 per arm: indicative only. Cells never merged: V = Vodafone PCI 415 (3680.01 MHz), T = TIM PCI 923
+(3759.99 MHz, SSB offset 233), M508a = PCI 517 (3590.19 MHz).
 
 **1. Tails, Vodafone (n=3 per arm; scan loss = stale + full)**
 
@@ -4283,7 +4283,7 @@ TIM: U0 (t26bC) PDSCH stale 29-40 %, U2 (t26bPQ) 1.0 %; S4U 2.0-2.5 %; p99 3.8-1
 **7. Pending (`[NOT MEASURED]`)**
 
 - GPU port of MMSE mode 3 (gate for rank 3/4 default-on). Per-grant compute p99 (LDPC, demod). UL SNR fix and BWP lock validation on air.
-- Scan loss 16-30 %. High-MCS re-test at lower load. Host sysctls over the next OTA windows. TIM PCI 233 vs 923 check.
+- Scan loss 16-30 %. High-MCS re-test at lower load. Host sysctls over the next OTA windows.
 
 ---
 
