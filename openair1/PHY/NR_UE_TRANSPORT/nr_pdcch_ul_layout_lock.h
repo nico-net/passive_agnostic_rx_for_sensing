@@ -103,6 +103,13 @@ bool nr_ul_layout_coherent_enabled(void);
  * which N(N+1)/2 > maxriv (the largest RIV observed), N descending, start ascending. count = size; at(idx) = the idx-th. */
 uint32_t nr_ul_layout_enum_count(int carrier_rb, int w, uint32_t maxriv);
 bool nr_ul_layout_enum_at(int carrier_rb, int w, uint32_t maxriv, uint32_t idx, uint16_t *n, uint16_t *start);
+/* ISAC_UL_LOCK_LLR=1 (default off, needs the lock): log-odds lock rule. votes/prior(0|1)/nrnti per BWP hypothesis; true and *lead = the
+ * leader when it beats every other hypothesis by the margin (see nr_pdcch_ul_layout_lock.c). The prior (solved DL BWP, SIB1 UL BWP) shifts
+ * the margin by one vote and lowers the leader's own minimum from 6 to 4 votes; it can never lock without votes. Also makes the probe booking
+ * skip grants that do not discriminate the current contenders. */
+bool nr_ul_layout_llr_decide(const uint32_t *votes, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead);
+/* lock enabled, cell known and no BWP locked yet: the layout search phase (used for ISAC_PUSCH_SEARCH_PRIO) */
+bool nr_ul_layout_searching(void);
 void nr_ul_layout_lock_reset(void);
 /* Any accepted PDCCH (DL or UL format) in this slot: the slot has DL symbols, so no full-slot PUSCH lands there. */
 void nr_ul_layout_note_pdcch_slot(long abs_slot);

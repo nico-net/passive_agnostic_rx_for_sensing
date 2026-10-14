@@ -6293,6 +6293,33 @@ TEST(UlLayoutLock, EdgeTestLocksTheTrueLayoutAndNeverOnNoise)
 }
 
 // ---- UL layout lock: SIB1-first hypothesis and CRC-first locking (ISAC_UL_LOCK_SIB1_FIRST / ISAC_UL_LOCK_CRC_FIRST) ----
+/* ISAC_UL_LOCK_LLR decision rule on synthetic tallies (hypothesis 0 = DL BWP, carries the prior). ULBWP-20261014. */
+TEST(UlLayoutLock, LlrRuleOnSyntheticTallies)
+{
+  auto run = [](std::vector<uint32_t> v, int prior_h, uint8_t nr = 3, int *lead = nullptr) {
+    std::vector<uint8_t> pr(v.size(), 0), n(v.size(), nr);
+    if (prior_h >= 0) pr[prior_h] = 1;
+    int l = -1;
+    bool ok = nr_ul_layout_llr_decide(v.data(), pr.data(), n.data(), (int)v.size(), &l);
+    if (lead) *lead = l;
+    return ok;
+  };
+  int lead = -1;
+  EXPECT_TRUE(run({4, 1, 1, 1, 1, 1}, 0, 3, &lead)); /* T0a: 4 informative for the DL BWP vs <= 1 */
+  EXPECT_EQ(lead, 0);
+  EXPECT_FALSE(run({2, 6, 0}, 0));                   /* 216@1-style fluke 6:2 against the DL BWP (2 votes) */
+  EXPECT_TRUE(run({0, 6, 2}, 0));                    /* 6 vs 2 elsewhere, the DL BWP has none: locks */
+  EXPECT_FALSE(run({2, 6, 2}, 0));
+  EXPECT_FALSE(run({4, 1, 1}, -1));                  /* same 4:1 without prior: not enough (needs 6) */
+  EXPECT_TRUE(run({0, 6, 1}, 0));                    /* 6:1 against a prior with no votes still locks: prior cannot force */
+  EXPECT_FALSE(run({3, 0, 0}, 0));                   /* prior never locks on 3 votes */
+  EXPECT_FALSE(run({0, 0, 0}, 0));                   /* no votes: prior alone locks nothing */
+  EXPECT_FALSE(run({4, 1, 1}, 0, 1));                /* one RNTI */
+  EXPECT_FALSE(run({6, 4, 0}, -1));                  /* near tie (old rule: no lock either) */
+  EXPECT_TRUE(run({9, 4, 0}, -1));      /* 9:4 without prior locks */
+  EXPECT_FALSE(run({1, 8, 5}, 0));                   /* runner-up too close even with the prior against */
+}
+
 TEST(UlLayoutLock, Sib1PriorCarriesTheUplinkBwp)
 {
   nr_pdcch_sib1_prior_t p = {};

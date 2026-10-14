@@ -36,6 +36,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci01_fdra_feedback
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -230,6 +231,26 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     }
     job = g_ring[nr_pusch_queue_pop(&g_cursor)];
     pthread_mutex_unlock(&g_lock);
+
+    /* ISAC_PUSCH_SEARCH_PRIO=<1..96> (default off): FIFO priority of this consumer while the UL BWP layout is still being searched
+     * (PDCCH scan shares its core at 50; the search is starved otherwise, ULBWP-20261014), restored to the base priority after the lock. */
+    {
+      static __thread int boosted = 0, base_prio = -1;
+      static int sp = -1;
+      if (sp < 0) sp = getenv("ISAC_PUSCH_SEARCH_PRIO") ? atoi(getenv("ISAC_PUSCH_SEARCH_PRIO")) : 0;
+      if (sp > 0) {
+        const int want = nr_ul_layout_searching();
+        if (want != boosted) {
+          struct sched_param sparam;
+          int pol;
+          if (base_prio < 0 && pthread_getschedparam(pthread_self(), &pol, &sparam) == 0) base_prio = sparam.sched_priority;
+          sparam.sched_priority = want ? sp : (base_prio > 0 ? base_prio : 1);
+          if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sparam) != 0)
+            LOG_W(PHY, "SENSING: ISAC_PUSCH_SEARCH_PRIO: cannot set priority %d\n", sparam.sched_priority);
+          boosted = want;
+        }
+      }
+    }
 
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
