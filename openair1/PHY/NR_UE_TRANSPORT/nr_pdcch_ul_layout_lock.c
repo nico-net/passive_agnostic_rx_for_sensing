@@ -327,7 +327,9 @@ typedef struct {
   uint32_t ev_susp, ev_dec, ev_lock; /* CRC guard stats: suppressed passes, decisive passes, evidence locks */
 } len_state_t;
 
-typedef struct { uint16_t n, start; uint32_t votes; uint16_t rntis[8]; uint8_t nrnti; } hyp_state_t;
+typedef struct { uint16_t n, start; uint32_t votes; uint16_t rntis[8]; uint8_t nrnti; uint32_t det; } hyp_state_t;
+/* ISAC_UL_LOCK_SIGN: g_only[a][b] = probes where hypothesis a detected a DM-RS (>= VOTE_DB) and b (which had PRBs) did not */
+static uint16_t g_only[NR_UL_LAYOUT_MAX_HYP][NR_UL_LAYOUT_MAX_HYP];
 typedef struct {
   long target;
   uint16_t rnti;
@@ -428,6 +430,7 @@ static void reset_locked(void)
   g_nlen = 0;
   memset(g_occ, 0, sizeof(g_occ));
   memset(g_hyp, 0, sizeof(g_hyp));
+  memset(g_only, 0, sizeof(g_only));
   g_nhyp = 0;
   g_locked_hyp = -1;
   memset(g_addpos, 0, sizeof(g_addpos));
@@ -679,6 +682,78 @@ static bool llr_lock_ok(int *lead)
   for (int h = 0; h < g_nhyp; h++) { v[h] = g_hyp[h].votes; pr[h] = llr_prior(h); nr[h] = g_hyp[h].nrnti; }
   return nr_ul_layout_llr_decide(v, pr, nr, g_nhyp, lead);
 }
+
+/* ISAC_UL_LOCK_SIGN=1 (default off): pairwise sign test on DM-RS detections instead of winner-take-all votes.
+ * A probe (one UL grant, scored under every hypothesis) is a DETECTION for every hypothesis whose DM-RS SNR is >= VOTE_DB, not only
+ * the argmax. For a pair (a, b) only the probes where exactly one of them detects are informative:
+ *   a-only = a detects, b (which has PRBs for this grant) does not;  b-only = the reverse.
+ * Why: a look-alike (216@1 next to the true 217@0) reads the PRBs next to the true grant. A neighbouring UE's DM-RS, scrambled with
+ * the same PCI, can make it detect (and, being stronger, win the argmax and take the vote), but b-only needs the TRUE UE's own
+ * DM-RS to be absent, which it is not: so b-only stays near 0 for a look-alike while a-only grows with every grant the true UE sends.
+ * Under "indistinguishable" the discordant probes split 50/50, so a leads when P(X >= A | n = A + B, 1/2) <= SIGN_ALPHA against EVERY
+ * rival that was ever detected. The prior (DL BWP / SIB1 UL BWP) counts one discordant probe for the hypothesis that carries it; a
+ * leader without it needs SIGN_MIN_ONLY, with it SIGN_MIN_ONLY - 1. A rival that is never discordant but equally detected (a twin
+ * for every grant seen) cannot be split by evidence and blocks the lock unless only the leader carries the prior. */
+#define SIGN_ALPHA 0.02
+#define SIGN_MIN_ONLY 6
+#define SIGN_DMAX 6      /* a probe with more detecting hypotheses than this is wide-band energy, not a grant */
+bool nr_ul_layout_sign_decide(const uint16_t *only, int stride, const uint32_t *det, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead)
+{
+  int best = -1;
+  double best_p = 2.0;
+  for (int a = 0; a < n; a++) {
+    if (det[a] < (uint32_t)(SIGN_MIN_ONLY - 1) || nrnti[a] < LOCK_RNTIS) continue;
+    double worst = 0.0; /* the weakest pairwise p-value of a against its rivals */
+    bool ok = true;
+    for (int h = 0; h < n && ok; h++) {
+      if (h == a || det[h] == 0) continue;
+      const uint32_t A = (uint32_t)only[(size_t)a * stride + h] + prior[a], B = (uint32_t)only[(size_t)h * stride + a] + prior[h];
+      if (A < (uint32_t)(SIGN_MIN_ONLY - (prior[a] ? 1 : 0)) || A <= B) { ok = false; break; }
+      const double pv = nbs_binom_sf(A, A + B, 0.5);
+      if (pv > SIGN_ALPHA) { ok = false; break; }
+      if (pv > worst) worst = pv;
+    }
+    if (ok && worst < best_p) { best = a; best_p = worst; }
+  }
+  if (best < 0) return false;
+  if (lead) *lead = best;
+  return true;
+}
+/* ISAC_UL_LOCK_SIGN=1 decides the lock; =2 is SHADOW mode: the tally is kept and logged, the old rule still decides (a would-lock line
+ * is logged once), so every A/B arm can carry the table without changing what it does. */
+static int sign_mode(void)
+{
+  const char *e = getenv("ISAC_UL_LOCK_SIGN"); /* read per call like env_on(): finalize runs once per probe batch, not per sample */
+  return e ? atoi(e) : 0;
+}
+static bool sign_enabled(void) { return nr_ul_layout_lock_enabled() && sign_mode() > 0; }
+static bool sign_decides(void) { return nr_ul_layout_lock_enabled() && sign_mode() == 1; }
+static bool sign_lock_ok(int *lead)
+{
+  uint32_t d[NR_UL_LAYOUT_MAX_HYP];
+  uint8_t pr[NR_UL_LAYOUT_MAX_HYP], nr[NR_UL_LAYOUT_MAX_HYP];
+  for (int h = 0; h < g_nhyp; h++) { d[h] = g_hyp[h].det; pr[h] = llr_prior(h); nr[h] = g_hyp[h].nrnti; }
+  return nr_ul_layout_sign_decide(&g_only[0][0], NR_UL_LAYOUT_MAX_HYP, d, pr, nr, g_nhyp, lead);
+}
+/* caller holds mu: book the detections of one probe */
+static void sign_book_locked(const pending_t *p)
+{
+  int D[SIGN_DMAX + 1], nd = 0;
+  for (int h = 0; h < p->n; h++)
+    if (p->snr[h] >= VOTE_DB) { if (nd == SIGN_DMAX) return; D[nd++] = h; }
+  if (nd == 0 || p->ctl >= VOTE_DB) return;
+  for (int i = 0; i < nd; i++) {
+    hyp_state_t *H = &g_hyp[D[i]];
+    H->det++;
+    bool seen = false;
+    for (int r = 0; r < H->nrnti; r++) seen |= H->rntis[r] == p->rnti;
+    if (!seen && H->nrnti < 8) H->rntis[H->nrnti++] = p->rnti;
+    for (int g = 0; g < p->n; g++) {
+      if (p->snr[g] <= -90.f || p->snr[g] >= VOTE_DB) continue;
+      if (g_only[D[i]][g] < 65535) g_only[D[i]][g]++;
+    }
+  }
+}
 bool nr_ul_layout_searching(void) { return nr_ul_layout_lock_enabled() && g_have_cell && g_locked_hyp < 0; }
 
 /* caller holds mu */
@@ -695,6 +770,7 @@ static void finalize_pending_locked(void)
     if (k < 0) continue;
     len_state_t *ls = &g_len[p->li];
     if (p->ctl >= VOTE_DB) { g_ctl_votes++; ls->gctl++; }
+    if (sign_enabled()) sign_book_locked(p);
     if (p->snr[k] < VOTE_DB) continue;
     ls->gold++;
     /* Degenerate mapping: another hypothesis predicts exactly the same PRBs for this grant (for an L-PRB grant
@@ -747,8 +823,17 @@ static void finalize_pending_locked(void)
   if (g_prov && prior_vote_move_locked(now)) return;
   uint32_t va = g_hyp[a].votes, vb = b >= 0 ? g_hyp[b].votes : 0;
   int la = a;
-  const bool llr = llr_enabled();
-  if (llr ? llr_lock_ok(&la)
+  const bool llr = llr_enabled() || sign_decides();
+  if (sign_enabled() && !sign_decides() && g_locked_hyp < 0) { /* shadow */
+    static bool said;
+    int sl = -1;
+    if (!said && sign_lock_ok(&sl)) {
+      said = true;
+      LOG_A(PHY, "SENSING: ULLAYOUT SIGN_SHADOW would lock %u@%u det=%u (votes %u) at slot %ld\n", g_hyp[sl].n, g_hyp[sl].start, g_hyp[sl].det,
+            g_hyp[sl].votes, now);
+    }
+  }
+  if (sign_decides() ? sign_lock_ok(&la) : llr ? llr_lock_ok(&la)
           : (va >= LOCK_MIN && (float)va >= LOCK_RATIO * (float)vb && g_hyp[a].nrnti >= LOCK_RNTIS)) {
     if (llr && la != a) { a = la; b = -1; for (int h = 0; h < g_nhyp; h++) if (h != a && (b < 0 || g_hyp[h].votes > g_hyp[b].votes)) b = h; }
     if (g_prov) { /* DM-RS votes confirm (or move) the provisional adoption */
@@ -1835,6 +1920,22 @@ void nr_ul_layout_stats_dump(void)
                     g_W[top[i]], g_S[top[i]] / sqrt(g_W[top[i]] + SPRT_RHO));
     snprintf(sp + q, sizeof(sp) - q, " ]");
   }
+  char sgn[400] = "";
+  if (sign_enabled()) { /* top-4 hypotheses by detections; "x>y" = a-only(row, leader) / b-only(leader, row) discordant probes */
+    int top[4] = {-1, -1, -1, -1}, q = 0;
+    for (int h = 0; h < g_nhyp; h++) {
+      if (!g_hyp[h].det) continue;
+      int j = 3;
+      if (top[3] >= 0 && g_hyp[h].det <= g_hyp[top[3]].det) continue;
+      for (; j > 0 && (top[j - 1] < 0 || g_hyp[h].det > g_hyp[top[j - 1]].det); j--) top[j] = top[j - 1];
+      top[j] = h;
+    }
+    q += snprintf(sgn, sizeof(sgn), " signt[");
+    for (int i = 0; i < 4 && top[i] >= 0 && q < (int)sizeof(sgn) - 70; i++)
+      q += snprintf(sgn + q, sizeof(sgn) - q, " %u@%u:det=%u,rntis=%u,vs_lead=%u>%u", g_hyp[top[i]].n, g_hyp[top[i]].start, g_hyp[top[i]].det,
+                    g_hyp[top[i]].nrnti, i ? g_only[top[i]][top[0]] : 0, i ? g_only[top[0]][top[i]] : 0);
+    snprintf(sgn + q, sizeof(sgn) - q, " ]");
+  }
   char pst[220] = "";
   if (prior_on())
     snprintf(pst, sizeof(pst), " prior[prov=%d src=%s hyp=%u@%u crc_expected_n=%u crc_ok=%u dec=%u demotions=%u done=%d]", g_prov,
@@ -1842,9 +1943,9 @@ void nr_ul_layout_stats_dump(void)
              g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0, g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_p_exp, g_p_ok,
              g_p_dec, g_ndem, g_search_done);
   LOG_A(PHY, "SENSING: ULLAYOUT STATS bwp=%s%u@%u probes[booked=%u fed=%u skipped=%u] votes=%u ctl_votes=%u discarded=%u tied=%u hyps=%d"
-             " tally[%s ]%s%s%s%s%s\n",
+             " tally[%s ]%s%s%s%s%s%s\n",
         g_locked_hyp >= 0 ? (g_prov ? "PROVISIONAL " : "LOCKED ") : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
         g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_probes_skipped, g_votes_total, g_ctl_votes,
-        g_discarded, g_tied, g_nhyp, v, w ? ls : "", sp, ovs, wvs, pst);
+        g_discarded, g_tied, g_nhyp, v, w ? ls : "", sp, ovs, wvs, pst, sgn);
   pthread_mutex_unlock(&mu);
 }

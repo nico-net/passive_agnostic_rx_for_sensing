@@ -19,6 +19,7 @@
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the DL decoder
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
+#include "nr_pdsch_gpu_ldpc_host.h" // ISAC_UL_GPU_LDPC: GPU LDPC for the PUSCH TBs (default off)
 #include "nr_pusch_gpu_fep.h" // ISAC_UL_GPU_FEP: GPU port of the UL FEP below (default off)
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
@@ -129,7 +130,7 @@ static const nr_pusch_gpu_fep_api_t *g_ulg;
 static _Atomic bool g_ulg_on;
 static int g_ulg_nant, g_ulg_check = 16;
 static c16_t *g_ulg_scr[NR_PUSCH_PASSIVE_MAX_CTX]; /* ULG_MAX_CAND x nant x N: timing-search candidates */
-static _Atomic uint64_t g_ulg_seq, g_ulg_chk, g_ulg_bad, g_ulg_cpu_bounds, g_ulg_cpu_rej;
+static _Atomic uint64_t g_ulg_seq, g_ulg_chk, g_ulg_bad, g_ulg_cpu_bounds, g_ulg_cpu_rej, g_ulg_wait_ns; /* wait_ns: wall time inside the GPU FEP call (UTIM) */
 /* FFTs asked of the FEP, by caller: grant symbols, timing-search candidates, delay-refinement re-run (each x nant) */
 static _Atomic uint64_t g_fep_req[3];
 
@@ -264,7 +265,28 @@ static _Atomic uint64_t g_seg_fail, g_zero_tb;
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
 #define PASSIVE_UL_DELAY_TOL 6
 static _Atomic uint64_t g_ta_refined;
-static _Atomic uint64_t g_uci_trials, g_uci_rescued, g_uci_unconfirmed;
+static _Atomic uint64_t g_uci_trials, g_uci_rescued, g_uci_unconfirmed, g_uci_cut, g_uci_skip_restore;
+/* ULLDPC: ISAC_UL_UCI_BUDGET=N (default 0 = unbounded, the old behaviour) bounds the UCI reservation search of ONE decode call to N LDPC
+ * trials (4-51 per call OTA); ISAC_UL_UCI_BUDGET_US=T bounds it to T us of wall time. A cut search keeps the learned footprints
+ * (tried first) and the smallest swept ones; a call that ran no trial skips the restoring re-decode. */
+static unsigned uci_budget_n(void)
+{
+  static int v = -1;
+  if (v < 0) { const char *e = getenv("ISAC_UL_UCI_BUDGET"); v = e ? atoi(e) : 0; if (v < 0) v = 0; }
+  return (unsigned)v;
+}
+static uint64_t uci_budget_us(void)
+{
+  static int v = -1;
+  if (v < 0) { const char *e = getenv("ISAC_UL_UCI_BUDGET_US"); v = e ? atoi(e) : 0; if (v < 0) v = 0; }
+  return (uint64_t)v;
+}
+static uint64_t uci_clock_us(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000 + (uint64_t)t.tv_nsec / 1000;
+}
 static bool ul_uci_safe(void)
 {
   static int on = -1;
@@ -569,6 +591,8 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
    * receiver its own small pool instead, which also keeps the decode off the UE's RT pool: this
    * tree has already measured blind PDSCH decoding on the receive thread costing PBCH lock. */
   gnb->nrLDPC_coding_interface     = ue->nrLDPC_coding_interface;
+  /* ULLDPC: the gnb copy of the interface (not the UE's) decodes through the UL GPU pool when ISAC_UL_GPU_LDPC=1 */
+  gnb->nrLDPC_coding_interface.nrLDPC_coding_decoder = nr_pusch_gpu_ldpc_wrap(ue->nrLDPC_coding_interface.nrLDPC_coding_decoder);
   /* ZERO worker threads, so pushTpool() runs every task INLINE (its own documented fallback).
    *
    * A 2-thread pool deadlocked the PHY receive thread on the first live grant: threadCreate gives
@@ -944,7 +968,10 @@ static bool ulg_item(const NR_DL_FRAME_PARMS *fp, int ctx, int nant, unsigned ch
 static bool ulg_run(const NR_DL_FRAME_PARMS *fp, int ctx, int nant, unsigned char slot, const nr_pusch_gpu_fep_item_t *it,
                     const unsigned char *sym, const int *offset, int n, int nb_rb)
 {
-  if (g_ulg->run(it, n, nb_rb, fp->first_carrier_offset) != 0) {
+  const uint64_t w0 = utim_now();
+  const int rrc = g_ulg->run(it, n, nb_rb, fp->first_carrier_offset);
+  atomic_fetch_add_explicit(&g_ulg_wait_ns, utim_now() - w0, memory_order_relaxed);
+  if (rrc != 0) {
     atomic_fetch_add_explicit(&g_ulg_cpu_rej, 1, memory_order_relaxed);
     return false;
   }
@@ -2464,8 +2491,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     /* try(): one demux + one LDPC attempt at a candidate footprint. */
     bool rescued = false;
     uint32_t won_bits = 0; unsigned won_re = 0; int won_csi = 0;
+    unsigned uci_dec = 0;
+    const unsigned uci_bn = uci_budget_n();
+    const uint64_t uci_bus = uci_budget_us(), uci_t0 = uci_bus ? uci_clock_us() : 0;
+    bool uci_cut = false;
     #define UCI_ATTEMPT(RE, CSI)                                                                   \
-      do {                                                                                         \
+      if ((uci_bn && uci_dec >= uci_bn) || (uci_bus && uci_clock_us() - uci_t0 >= uci_bus)) {      \
+        uci_cut = true;                                                                             \
+      } else do {                                                                                  \
         const uint32_t db = nr_passive_uci_probe_demux(original, full_bits, pvp->llr,               \
             g->num_rb, g->start_symbol, g->num_symbols, g->ul_dmrs_symb_pos,                        \
             nb_dmrs_re_per_rb, pdu.qam_mod_order, (RE), (CSI));                                     \
@@ -2473,6 +2506,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           atomic_fetch_add_explicit(&g_uci_trials, 1, memory_order_relaxed);                        \
           ulsch->unav_res = (RE);                                                                   \
           ulsch->harq_process->harq_to_be_cleared = true;                                           \
+          uci_dec++;                                                                                \
           rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);                               \
           if (rc == 0 && !hp_crc_failed(ulsch)) {                                                   \
             rescued = true; won_bits = db; won_re = (RE); won_csi = (CSI);                          \
@@ -2506,6 +2540,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       explore_win = rescued;
     }
     #undef UCI_ATTEMPT
+    if (uci_cut) atomic_fetch_add_explicit(&g_uci_cut, 1, memory_order_relaxed);
     if (rescued && explore_win && ul_uci_safe()) {
       if (nr_cfg_epoch_work_current()) nr_passive_uci_learn_record(g->rnti, (uint16_t)won_re, won_csi != 0);
       atomic_fetch_add_explicit(&g_uci_unconfirmed, 1, memory_order_relaxed);
@@ -2526,8 +2561,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       /* Restore the untouched stream and re-run, so a failed search leaves no trace in the result. */
       memcpy(pvp->llr, original, (size_t)full_bits * sizeof(*original));
       ulsch->unav_res = 0;
-      ulsch->harq_process->harq_to_be_cleared = true;
-      rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+      if ((uci_bn || uci_bus) && uci_dec == 0) { /* no trial ran: the first decode's state is the restored one */
+        atomic_fetch_add_explicit(&g_uci_skip_restore, 1, memory_order_relaxed);
+      } else {
+        ulsch->harq_process->harq_to_be_cleared = true;
+        rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+      }
     }
     if(!g_snapshot[ctx].valid) free(original);
   }
@@ -2858,7 +2897,7 @@ void nr_pusch_passive_stats_dump(void)
   pthread_mutex_unlock(&g_ul_harq_init_lock);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
-        "ta_refined=%lu uci[trials=%lu rescued=%lu unconfirmed=%lu] "
+        "ta_refined=%lu uci[trials=%lu rescued=%lu unconfirmed=%lu cut=%lu skip_restore=%lu] "
         "health=%.1f%% unsup=%lu setup_fail=%lu] init_tx[hit=%lu evict=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
@@ -2866,6 +2905,8 @@ void nr_pusch_passive_stats_dump(void)
         (unsigned long)atomic_load_explicit(&g_uci_trials, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_uci_rescued, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_uci_unconfirmed, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_uci_cut, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_uci_skip_restore, memory_order_relaxed),
         (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
@@ -2895,6 +2936,11 @@ void nr_pusch_passive_stats_dump(void)
           (unsigned long)atomic_load(&g_ulg_cpu_bounds), (unsigned long)atomic_load(&g_ulg_cpu_rej),
           (unsigned long)atomic_load(&g_ulg_chk), (unsigned long)atomic_load(&g_ulg_bad));
   }
+  if (nr_pusch_gpu_ldpc_enabled()) {
+    char rep[640];
+    nr_pusch_gpu_ldpc_report(rep, sizeof(rep));
+    LOG_I(PHY, "SENSING: UL_GPU_LDPC %s\n", rep);
+  }
   if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {
     char rep[512];
     unsigned u = 0;
@@ -2904,7 +2950,7 @@ void nr_pusch_passive_stats_dump(void)
                               g_utim_n[k] ? (double)g_utim_ns[k] / (double)g_utim_n[k] / 1000.0 : 0.0,
                               (double)g_utim_max[k] / 1000.0, (double)g_utim_ns[k] / 1e9);
     }
-    LOG_I(PHY, "SENSING: UTIM %s\n", rep);
+    LOG_I(PHY, "SENSING: UTIM %s fep_gpu_call_tot=%.2fs\n", rep, (double)atomic_load(&g_ulg_wait_ns) / 1e9);
     LOG_I(PHY,
           "SENSING: UTIM grant_total_us_hist <50=%lu <100=%lu <200=%lu <400=%lu <800=%lu <1600=%lu "
           "<3200=%lu >=3200=%lu over_slot=%lu/%lu\n",

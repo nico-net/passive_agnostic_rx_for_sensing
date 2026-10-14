@@ -108,6 +108,8 @@ bool nr_ul_layout_enum_at(int carrier_rb, int w, uint32_t maxriv, uint32_t idx, 
  * leader when it beats every other hypothesis by the margin (see nr_pdcch_ul_layout_lock.c). The prior (solved DL BWP, SIB1 UL BWP) shifts
  * the margin by one vote and lowers the leader's own minimum from 6 to 4 votes; it can never lock without votes. Also makes the probe booking
  * skip grants that do not discriminate the current contenders. */
+/* ISAC_UL_LOCK_SIGN: only[a * stride + b] = probes where a detected and b did not; det[] = detections per hypothesis. */
+bool nr_ul_layout_sign_decide(const uint16_t *only, int stride, const uint32_t *det, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead);
 bool nr_ul_layout_llr_decide(const uint32_t *votes, const uint8_t *prior, const uint8_t *nrnti, int n, int *lead);
 /* lock enabled, cell known and no BWP locked yet: the layout search phase (used for ISAC_PUSCH_SEARCH_PRIO) */
 bool nr_ul_layout_searching(void);

@@ -17,6 +17,7 @@
  *   - everything (tables, streams, item tables, first launch) is created in warm-up, before the RX allocation fence. */
 #include <unistd.h>
 #include <time.h>
+#include "nr_pusch_gpu_diag.h"
 
 namespace ulfep {
 struct Item {
@@ -60,11 +61,12 @@ __global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep(const Item *__rest
 
 struct State {
   bool ok = false, part = false;
-  int nant = 0;
+  int nant = 0, kind = 0;
   uint16_t *d_perm = nullptr;
   short *d_tw1024 = nullptr, *d_tw4096 = nullptr;
   short2 *d_ts = nullptr;
   cudaStream_t st[NCTX] = {};
+  cudaEvent_t ev0[NCTX] = {}, ev1[NCTX] = {}; /* ISAC_UL_STALL_DIAG only */
   Item *h_items[NCTX] = {}, *d_items[NCTX] = {};
   std::atomic<unsigned> busy{0};
   unsigned pct = 20;
@@ -133,8 +135,10 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct)
   if (posix_memalign((void **)&buf, 4096, row * 2)) return -1;
   memset(buf, 0, row * 2);
   for (int c = 0; c < NCTX; c++) {
-    if (!nr_gpu_green_stream(&U.st[c], 0, false)) UCK(cudaStreamCreateWithPriority(&U.st[c], cudaStreamNonBlocking, least));
-    else U.part = true;
+    const int kind = nr_pusch_gpu_ul_stream(&U.st[c], greatest, least, c);
+    if (!kind) UCK(cudaStreamCreateWithPriority(&U.st[c], cudaStreamNonBlocking, least));
+    else { U.part = true; U.kind = kind; }
+    if (uldiag::on()) { UCK(cudaEventCreate(&U.ev0[c])); UCK(cudaEventCreate(&U.ev1[c])); }
     UCK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&U.h_items[c], MAX_ITEMS * sizeof(Item)));
     memset(U.h_items[c], 0, MAX_ITEMS * sizeof(Item));
     U.d_items[c] = (Item *)nr_gpu_device_ptr(U.h_items[c]);
@@ -149,7 +153,7 @@ static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct)
   free(buf);
   U.ok = true;
   fprintf(stderr, "SENSING: UL_GPU_FEP ready: %d RX, N=%d, %s stream, cap %u%% of each 100 ms\n", nant, N,
-          U.part ? "discovery-partition" : "lowest-priority", U.pct);
+          U.kind == 2 ? "real-time-partition" : U.part ? "discovery-partition" : "lowest-priority", U.pct);
   return 0;
 }
 
@@ -188,9 +192,14 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
     U.busy.fetch_and(~(1u << c));
     return -2;
   }
+  const bool dg = uldiag::on();
+  const uldiag::Snap r0 = dg ? uldiag::snap() : uldiag::Snap();
   memcpy(U.h_items[c], items, (size_t)n * sizeof(Item));
+  if (dg) cudaEventRecord(U.ev0[c], U.st[c]);
   k_ul_fep<<<dim3(n, U.nant), nr_exact::THREADS, 0, U.st[c]>>>(U.d_items[c], U.d_perm, U.d_tw1024, U.d_tw4096, U.d_ts, nb_rb, fco);
   cudaError_t e = cudaPeekAtLastError();
+  if (dg) cudaEventRecord(U.ev1[c], U.st[c]);
+  const uint64_t t_launched = now_us();
   while (e == cudaSuccess) { /* the kernel writes the caller's rows, so a late kernel is waited for, never abandoned */
     e = cudaStreamQuery(U.st[c]);
     if (e == cudaErrorNotReady) {
@@ -203,6 +212,11 @@ extern "C" int nr_pusch_gpu_fep_run(const void *items, int n, int nb_rb, int fco
       break;
   }
   const uint64_t dt = now_us() - t0;
+  if (dg && e == cudaSuccess) {
+    float ms = 0.f;
+    if (cudaEventElapsedTime(&ms, U.ev0[c], U.ev1[c]) != cudaSuccess) ms = 0.f;
+    uldiag::report("fep", dt, t_launched - t0, 1000.0 * ms, n, r0, uldiag::snap());
+  }
   U.busy.fetch_and(~(1u << c));
   if (e != cudaSuccess) {
     U.ok = false; /* the caller's CPU FEP takes over for good */

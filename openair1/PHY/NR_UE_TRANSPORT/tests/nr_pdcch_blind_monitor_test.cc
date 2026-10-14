@@ -6408,6 +6408,125 @@ TEST(UlLayoutLock, LlrRuleOnSyntheticTallies)
   EXPECT_FALSE(run({1, 8, 5}, 0));                   /* runner-up too close even with the prior against */
 }
 
+
+/* ISAC_UL_LOCK_SIGN: pairwise sign test on per-hypothesis detections (a-only vs b-only probes). h0 = the true 217@0, h1 = the 216@1
+ * look-alike, h2 = 216@0. */
+TEST(UlLayoutLock, SignRuleOnSyntheticTallies)
+{
+  struct Case {
+    std::vector<uint32_t> det;
+    std::vector<std::vector<int>> only; /* only[a][b] */
+    int prior_h;
+    uint8_t nrnti;
+  };
+  auto run = [](const Case &c, int *lead = nullptr) {
+    const int n = (int)c.det.size();
+    std::vector<uint16_t> m((size_t)n * n, 0);
+    for (int a = 0; a < n; a++)
+      for (int b = 0; b < n; b++) m[(size_t)a * n + b] = (uint16_t)c.only[a][b];
+    std::vector<uint8_t> pr(n, 0), nr(n, c.nrnti);
+    if (c.prior_h >= 0) pr[c.prior_h] = 1;
+    int l = -1;
+    const bool ok = nr_ul_layout_sign_decide(m.data(), n, c.det.data(), pr.data(), nr.data(), n, &l);
+    if (lead) *lead = l;
+    return ok;
+  };
+  int lead = -1;
+  /* the truth is detected in 40 probes; its look-alike in 25 (neighbours' DM-RS) but never when the truth is silent */
+  EXPECT_TRUE(run({{40, 25, 3}, {{0, 15, 37}, {0, 0, 22}, {0, 0, 0}}, -1, 3}, &lead));
+  EXPECT_EQ(lead, 0);
+  /* winner-take-all would hand the look-alike the vote (it detects more often with a stronger neighbour): 30 vs 22 detections,
+   * but only the truth has probes the other lacks */
+  EXPECT_TRUE(run({{22, 30, 2}, {{0, 11, 20}, {2, 0, 28}, {0, 0, 0}}, -1, 3}, &lead));
+  EXPECT_EQ(lead, 0);
+  /* a coin flip between two hypotheses is not a decision */
+  EXPECT_FALSE(run({{20, 19, 0}, {{0, 6, 20}, {5, 0, 19}, {0, 0, 0}}, -1, 3}));
+  /* 6:0 locks (p = 1/64); 5:0 does not without the prior; with the prior 5 + 1 = 6:0 does */
+  EXPECT_TRUE(run({{6, 3, 0}, {{0, 6, 6}, {0, 0, 3}, {0, 0, 0}}, -1, 3}));
+  EXPECT_FALSE(run({{5, 3, 0}, {{0, 5, 5}, {0, 0, 3}, {0, 0, 0}}, -1, 3}));
+  EXPECT_TRUE(run({{5, 3, 0}, {{0, 5, 5}, {0, 0, 3}, {0, 0, 0}}, 0, 3}));
+  /* 4 + prior = 5:0 -> p = 1/32 > alpha: the prior alone never locks */
+  EXPECT_FALSE(run({{4, 2, 0}, {{0, 4, 4}, {0, 0, 2}, {0, 0, 0}}, 0, 3}));
+  /* one RNTI only */
+  EXPECT_FALSE(run({{40, 25, 3}, {{0, 15, 37}, {0, 0, 22}, {0, 0, 0}}, -1, 1}));
+  /* a twin that is detected as often and never discordant cannot be told apart: no lock, and a prior cannot break it */
+  EXPECT_FALSE(run({{20, 20, 0}, {{0, 0, 20}, {0, 0, 20}, {0, 0, 0}}, -1, 3}));
+  EXPECT_FALSE(run({{20, 20, 0}, {{0, 0, 20}, {0, 0, 20}, {0, 0, 0}}, 0, 3}));
+  /* large tally, mild contamination (the truth is silent in 3 probes where the look-alike fires): 60 vs 3 still locks */
+  EXPECT_TRUE(run({{80, 40, 0}, {{0, 60, 80}, {3, 0, 40}, {0, 0, 0}}, -1, 3}, &lead));
+  EXPECT_EQ(lead, 0);
+}
+
+/* ISAC_UL_LOCK_SIGN end to end: the truth (216@1 of the generator) is sent by a UE that DM-RS detection sees in 80 % of the probes; in
+ * 70 % of the probes another UE sits right behind it and its stronger DM-RS (15 dB) lands on the PRBs the shifted look-alike
+ * hypothesis reads. The sign test must lock the truth, never the look-alike. */
+static bool SignWorld(const char *mode, uint16_t *bwp_n, uint16_t *bwp_s)
+{
+  setenv("ISAC_UL_LAYOUT_LOCK", "1", 1);
+  if (mode) setenv("ISAC_UL_LOCK_SIGN", mode, 1); else unsetenv("ISAC_UL_LOCK_SIGN");
+  nr_ul_layout_lock_reset();
+  const nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0, .slots_per_frame = 20};
+  UllGen g;
+  nr_pdcch_blind_ul_result_t out;
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g.next();
+    nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+  }
+  nr_ul_layout_eval_once();
+  std::mt19937 rng(99);
+  bool locked = false;
+  for (int i = 0; i < 6000 && !locked; i++) {
+    const nr_ul_layout_dci_t d = g.next();
+    const int rc = nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out);
+    if (rc == 1) { locked = true; break; }
+    if (rc == 0) continue;
+    uint16_t p0[NR_UL_LAYOUT_MAX_HYP], np[NR_UL_LAYOUT_MAX_HYP];
+    const int n = nr_ul_layout_probe_plan(&out, p0, np, NR_UL_LAYOUT_MAX_HYP, nullptr, nullptr);
+    uint16_t s = 0, l = 0;
+    if (!nr_ul_layout_riv((uint32_t)nr_dci_bits_field(&d.p, 44, 2, 15), 216, &s, &l)) continue;
+    const int ts = 1 + s, te = 1 + s + l;  // the truth's PRBs [ts, te)
+    const bool truth_seen = rng() % 10 < 8, neighbour = rng() % 10 < 7;
+    nr_ul_layout_probe_res_t r = {};
+    r.n = n;
+    for (int h = 0; h < n; h++) {
+      r.set[h] = 1;
+      r.snr_db[h] = -5.f;
+      if (!np[h]) continue;
+      if (p0[h] == ts && np[h] == l) { if (truth_seen) r.snr_db[h] = 12.f; }
+      else if (neighbour && p0[h] >= te && p0[h] < te + l && p0[h] + np[h] <= te + 2 * l) r.snr_db[h] = 15.f;
+    }
+    r.ctl_db = -6.f;
+    r.comb1_db = -0.5f;
+    nr_ul_layout_probe_feed(&out, d.slot + 2, &r);
+  }
+  bool ok = false;
+  if (locked) {
+    const nr_ul_layout_dci_t d = g.next();
+    if (nr_ul_layout_on_dci(d.rnti, 44, d.slot, d.p, &cell, &out) == 1) {
+      *bwp_n = out.bwp_size;
+      *bwp_s = out.bwp_start;
+      ok = true;
+    }
+  }
+  nr_ul_layout_lock_reset();
+  unsetenv("ISAC_UL_LOCK_SIGN");
+  unsetenv("ISAC_UL_LAYOUT_LOCK");
+  return ok;
+}
+
+TEST(UlLayoutLock, SignRuleLocksTheTruthNextToAnAdjacentLookAlike)
+{
+  uint16_t n = 0, s = 0;
+  ASSERT_TRUE(SignWorld("1", &n, &s));
+  EXPECT_EQ(n, 216);
+  EXPECT_EQ(s, 1);
+  uint16_t on = 0, os = 0;
+  const bool old_locks = SignWorld(nullptr, &on, &os);  // winner-take-all in the same world: informative, not asserted
+  printf("[ SIGN-WORLD ] old rule locked=%d bwp=%u@%u; sign rule bwp=%u@%u\n", (int)old_locks, on, os, n, s);
+}
+
 TEST(UlLayoutLock, Sib1PriorCarriesTheUplinkBwp)
 {
   nr_pdcch_sib1_prior_t p = {};
