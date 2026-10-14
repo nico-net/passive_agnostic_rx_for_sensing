@@ -16,6 +16,10 @@
 #include "assertions.h"
 
 #include <pthread.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <sys/prctl.h>
 #include <string.h>
 #include <linux/prctl.h>
 #include "common/config/config_userapi.h"
@@ -119,6 +123,106 @@ static const char *const log_level_highlight_start[] =
 
 static const char *const log_level_highlight_end[] =
     {LOG_RESET, LOG_RESET, LOG_RESET, LOG_RESET, LOG_RESET, LOG_RESET}; /*!< \brief Optional end-format strings for highlighting */
+/* ISAC_LOG_ASYNC=1 (default off): the scan consumers log under their Phase-2 / UL-length locks, and a blocking write(2) to a
+ * redirected stdout (dirty-page throttling, a busy disk) there stalled a pass, and through the lock the other consumer, for
+ * 70-430 ms (SLOWPASS backtraces, SCAN2 report). With the flag the record is copied into a 16 MiB ring and a writer thread does
+ * the write(2); a full ring drops the record (counted, announced) instead of blocking. Order is kept; the ring is drained at exit. */
+#define LOG_ASYNC_RING (16u << 20)
+static struct {
+  char *buf;
+  size_t head, tail, used; /* head: next write; tail: next read */
+  uint64_t dropped;
+  pthread_mutex_t m;
+  pthread_cond_t cv;
+  pthread_once_t once;
+  int on;
+  bool done;
+} g_la = {.m = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .once = PTHREAD_ONCE_INIT};
+typedef struct { uint32_t len; int32_t fd; } la_hdr_t;
+static void la_ring_copy_out(char *dst, size_t n)
+{
+  const size_t first = n < LOG_ASYNC_RING - g_la.tail ? n : LOG_ASYNC_RING - g_la.tail;
+  memcpy(dst, g_la.buf + g_la.tail, first);
+  memcpy(dst + first, g_la.buf, n - first);
+  g_la.tail = (g_la.tail + n) % LOG_ASYNC_RING;
+  g_la.used -= n;
+}
+static void *la_writer(void *arg)
+{
+  (void)arg;
+  prctl(PR_SET_NAME, "logAsync");
+  static char rec[sizeof(la_hdr_t) + 65536];
+  pthread_mutex_lock(&g_la.m);
+  for (;;) {
+    while (g_la.used == 0 && !g_la.done) pthread_cond_wait(&g_la.cv, &g_la.m);
+    if (g_la.used == 0 && g_la.done) break;
+    la_hdr_t h;
+    la_ring_copy_out((char *)&h, sizeof(h));
+    la_ring_copy_out(rec, h.len);
+    pthread_mutex_unlock(&g_la.m);
+    size_t off = 0;
+    while (off < h.len) {
+      const ssize_t w = write(h.fd, rec + off, h.len - off);
+      if (w <= 0) break;
+      off += (size_t)w;
+    }
+    pthread_mutex_lock(&g_la.m);
+  }
+  pthread_mutex_unlock(&g_la.m);
+  return NULL;
+}
+static pthread_t g_la_th;
+static void la_drain(void)
+{
+  pthread_mutex_lock(&g_la.m);
+  g_la.done = true;
+  pthread_cond_signal(&g_la.cv);
+  pthread_mutex_unlock(&g_la.m);
+  pthread_join(g_la_th, NULL);
+  if (g_la.dropped) {
+    char m[96];
+    const int n = snprintf(m, sizeof(m), "{LOG} ISAC_LOG_ASYNC dropped %llu records (ring full)\n", (unsigned long long)g_la.dropped);
+    if (n > 0 && write(2, m, (size_t)n)) {}
+  }
+}
+static void la_init(void)
+{
+  const char *e = getenv("ISAC_LOG_ASYNC");
+  if (!e || atoi(e) == 0) return;
+  g_la.buf = malloc(LOG_ASYNC_RING);
+  if (!g_la.buf) return;
+  memset(g_la.buf, 0, LOG_ASYNC_RING); /* fault the pages in now, not under a scan lock */
+  if (pthread_create(&g_la_th, NULL, la_writer, NULL) != 0) return;
+  atexit(la_drain);
+  g_la.on = 1;
+}
+/* true = queued (or dropped); false = async off, caller writes synchronously */
+static bool la_submit(int fd, const char *data, size_t len)
+{
+  pthread_once(&g_la.once, la_init);
+  if (!g_la.on) return false;
+  const size_t need = sizeof(la_hdr_t) + len;
+  pthread_mutex_lock(&g_la.m);
+  if (g_la.done || need > LOG_ASYNC_RING - g_la.used) {
+    g_la.dropped++;
+  } else {
+    const la_hdr_t h = {.len = (uint32_t)len, .fd = fd};
+    const char *src[2] = {(const char *)&h, data};
+    const size_t sz[2] = {sizeof(h), len};
+    for (int k = 0; k < 2; k++) {
+      const size_t first = sz[k] < LOG_ASYNC_RING - g_la.head ? sz[k] : LOG_ASYNC_RING - g_la.head;
+      memcpy(g_la.buf + g_la.head, src[k], first);
+      memcpy(g_la.buf, src[k] + first, sz[k] - first);
+      g_la.head = (g_la.head + sz[k]) % LOG_ASYNC_RING;
+    }
+    const bool was_empty = g_la.used == 0;
+    g_la.used += need;
+    if (was_empty) pthread_cond_signal(&g_la.cv);
+  }
+  pthread_mutex_unlock(&g_la.m);
+  return true;
+}
+
 static void log_output_memory(log_component_t *c, const char *file, const char *func, int line, int comp, int level, const char* format,va_list args);
 
 int write_file_matlab(const char *fname,
@@ -944,7 +1048,7 @@ static void log_output_memory(log_component_t *c, const char *file, const char *
       }
   }else{
     AssertFatal(len >= 0 && len <= sizeof(log_buffer), "Bad len %d\n", len);
-    if (write(fileno(c->stream), log_buffer, len)) {};
+    if (!la_submit(fileno(c->stream), log_buffer, (size_t)len) && write(fileno(c->stream), log_buffer, len)) {};
   }
 }
 

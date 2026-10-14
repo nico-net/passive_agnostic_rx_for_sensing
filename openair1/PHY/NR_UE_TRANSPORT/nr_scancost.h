@@ -19,6 +19,22 @@ static inline bool nr_scancost_on(void)
   return on;
 }
 
+/* SCAN2 (2026-10-14): the second tier, default off. ISAC_SCANCOST=2 enables all three; each also has its own flag
+ * (ISAC_SCAN2_UL, ISAC_SCAN2_ULSSH, ISAC_SCAN2_TDD); a flag set to 0 wins over the umbrella. The SCANCOST=1 cuts stay on
+ * nr_scancost_on() (any non-zero value, so =2 includes them). */
+enum { NR_SCAN2_UL = 0, NR_SCAN2_ULSSH = 1, NR_SCAN2_TDD = 2, NR_SCAN2_N = 3 };
+static inline bool nr_scan2_on(int id)
+{
+  static const char *const names[NR_SCAN2_N] = {"ISAC_SCAN2_UL", "ISAC_SCAN2_ULSSH", "ISAC_SCAN2_TDD"};
+  static int on[NR_SCAN2_N] = {-1, -1, -1};
+  if (on[id] < 0) {
+    const char *e = getenv(names[id]);
+    const char *u = getenv("ISAC_SCANCOST");
+    on[id] = e ? atoi(e) != 0 : (u && atoi(u) >= 2);
+  }
+  return on[id];
+}
+
 /* Open-addressing index over an append-only key array (keys[0..n-1], n <= NR_KEYHASH_CAP / 2): the same answer as a
  * linear "first q with keys[q] == key" search, in O(1). Used by the PDSCH solver's layout offset-key grouping. */
 #define NR_KEYHASH_CAP 512
