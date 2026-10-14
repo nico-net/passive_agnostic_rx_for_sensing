@@ -5,6 +5,8 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h"
+#include "PHY/TOOLS/nr_gpu_bgq.h"
+#include <stdlib.h>
 
 /* Every argument the passive decoder's symbol loop hands nr_rx_pdsch(), plus the loop's own controls. */
 typedef struct {
@@ -49,4 +51,23 @@ int nr_pdsch_gpu_chest_grant(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, 
                              uint32_t pdsch_est_size,
                              int32_t dl_ch_estimates[][pdsch_est_size], int rxdataFsize, c16_t rxdataF[][rxdataFsize], int diag,
                              uint32_t nvar_out[14][4], uint32_t nvar_ant_out[14][4][8]);
+/* FATTAILS ISAC_GPU_CHECK_ASYNC=1 (nr_pdsch_gpu_demod_host.c): one low-priority worker for the GPU self-checks.
+ * every(): 0 = off (inline checks as configured), N = check every N-th grant on the worker (ISAC_GPU_CHECK_ASYNC_EVERY,
+ * default 256). submit(): 0 = queued (the worker runs fn(job), fn frees job), -1 = dropped (counted; caller frees).
+ * note(): a finished check's worker time (GPU_CHECK_ASYNC line). */
+/* FATTAILS umbrella: a FATTAILS flag is its own env value when set, else ISAC_FATTAILS (default 0 = off) */
+static inline int nr_fattails_on(const char *name)
+{
+  const char *e = getenv(name);
+  if (!e)
+    e = getenv("ISAC_FATTAILS");
+  return e ? atoi(e) : 0;
+}
+int nr_fattails_pin_all(void); /* ISAC_GPU_PIN_ALL (umbrella): pin and pre-populate every GPU-read host buffer */
+int nr_gpu_check_async_every(void);
+int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name); /* one SCHED_OTHER nice-19 worker draining q */
+int nr_gpu_check_async_room(void);
+int nr_gpu_check_async_submit(nr_bgq_fn fn, void *job);
+void nr_gpu_check_async_drop(void);
+void nr_gpu_check_async_note(uint64_t ns);
 #endif
