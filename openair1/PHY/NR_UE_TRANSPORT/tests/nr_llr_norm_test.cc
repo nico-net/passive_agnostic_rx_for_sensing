@@ -199,3 +199,176 @@ TEST(MmseExact, ResidualAndUnbiasedScale)
     EXPECT_NEAR(xre[l] / mu, l == 0 ? 0.7 : -0.7, 1e-9);
   }
 }
+
+/* MMSE3GPU: synthetic 3- and 4-layer symbols, QPSK through a 4 RX channel at |h| ~ 20-120 LSB with known complex noise
+ * variance 2 sigma^2 per RX. Mode 3 (nr_mmse3_symbol, the CPU path) must estimate s2 ~ 2 sigma^2 / 2^shift from the
+ * residual (nl < nrx), decode the signs, and give positive per-layer thresholds. */
+namespace {
+struct M3Sym {
+  int nl, nrx, len;
+  std::vector<int16_t> y, h; /* rows of 2 * len int16: y[a], h[r * nrx + a] */
+  std::vector<int> sr, si;   /* QPSK signs [r * len + i] */
+};
+M3Sym m3_make(int nl, int nrx, int len, double sigma, uint32_t seed)
+{
+  std::mt19937 rng(seed);
+  std::normal_distribution<double> g(0.0, 1.0);
+  M3Sym s{nl, nrx, len, std::vector<int16_t>(2 * nrx * len), std::vector<int16_t>(2 * nl * nrx * len), std::vector<int>(nl * len),
+          std::vector<int>(nl * len)};
+  const double lvl[4] = {120.0, 90.0, 40.0, 20.0};
+  double base[4][4][2];
+  for (int r = 0; r < nl; r++)
+    for (int a = 0; a < nrx; a++) { base[r][a][0] = g(rng); base[r][a][1] = g(rng); }
+  for (int i = 0; i < len; i++) {
+    for (int r = 0; r < nl; r++) {
+      s.sr[r * len + i] = (rng() & 1) ? 1 : -1;
+      s.si[r * len + i] = (rng() & 1) ? 1 : -1;
+    }
+    const double ph = 0.02 * i; /* slow frequency rotation */
+    for (int a = 0; a < nrx; a++) {
+      double ar = 0.0, ai = 0.0;
+      for (int r = 0; r < nl; r++) {
+        const double c = std::cos(ph * (r + 1)), sn = std::sin(ph * (r + 1));
+        const double hr = lvl[r] / 1.41 * (base[r][a][0] * c - base[r][a][1] * sn), hi = lvl[r] / 1.41 * (base[r][a][0] * sn + base[r][a][1] * c);
+        const int16_t qr = (int16_t)lround(hr), qi = (int16_t)lround(hi);
+        s.h[(r * nrx + a) * 2 * len + 2 * i] = qr;
+        s.h[(r * nrx + a) * 2 * len + 2 * i + 1] = qi;
+        const double xr = 0.7071 * s.sr[r * len + i], xi = 0.7071 * s.si[r * len + i];
+        ar += qr * xr - qi * xi;
+        ai += qr * xi + qi * xr;
+      }
+      s.y[a * 2 * len + 2 * i] = (int16_t)lround(ar + sigma * g(rng));
+      s.y[a * 2 * len + 2 * i + 1] = (int16_t)lround(ai + sigma * g(rng));
+    }
+  }
+  return s;
+}
+double m3_run(const M3Sym &s, int shift, uint32_t nvar, double nvfac, int16_t qa, int16_t qb, int16_t qr, std::vector<int16_t> &z,
+              std::vector<int16_t> &mg)
+{
+  z.assign(2 * s.nl * s.len, 0);
+  mg.assign(3 * 2 * s.nl * s.len, 0);
+  const int16_t *yr[4], *hr[16];
+  int16_t *zr[4], *m0[4], *m1[4], *m2[4];
+  for (int a = 0; a < s.nrx; a++) yr[a] = &s.y[a * 2 * s.len];
+  for (int r = 0; r < s.nl * s.nrx; r++) hr[r] = &s.h[r * 2 * s.len];
+  for (int r = 0; r < s.nl; r++) {
+    zr[r] = &z[r * 2 * s.len];
+    m0[r] = &mg[(0 * s.nl + r) * 2 * s.len];
+    m1[r] = &mg[(1 * s.nl + r) * 2 * s.len];
+    m2[r] = &mg[(2 * s.nl + r) * 2 * s.len];
+  }
+  return nr_mmse3_symbol(s.nl, s.nrx, s.len, yr, hr, shift, nvar, nvfac, qa, qb, qr, zr, m0, m1, m2);
+}
+} // namespace
+
+TEST(MmseExact, Mode3SymbolKnownNoise)
+{
+  for (int nl = 3; nl <= 4; nl++) {
+    const double sigma = 4.0;
+    const M3Sym s = m3_make(nl, 4, 600, sigma, 11 + nl);
+    std::vector<int16_t> z, mg;
+    const int shift = 6;
+    const uint32_t nvar = 1; /* chest nvar, ~21 dB under the data noise (MMSE3CAL), so s2 ~ 4x 2 sigma^2 at nrx == nl */
+    const double s2 = m3_run(s, shift, nvar, std::pow(10.0, 2.1), 20724, 0, 0, z, mg);
+    const double want = 2.0 * sigma * sigma / (1 << shift);
+    if (nl == 3) /* residual estimate over the one free dimension */
+      EXPECT_NEAR(s2 / want, 1.0, 0.15) << "s2 " << s2 << " want " << want;
+    else /* nrx == nl: nvar x 10^2.1 */
+      EXPECT_NEAR(s2, (double)nvar / (1 << shift) * std::pow(10.0, 2.1), 1e-9);
+    int bad = 0, n = 0, magpos = 0;
+    for (int r = 0; r < nl; r++)
+      for (int i = 0; i < s.len; i++) {
+        bad += (z[r * 2 * s.len + 2 * i] > 0) != (s.sr[r * s.len + i] > 0);
+        bad += (z[r * 2 * s.len + 2 * i + 1] > 0) != (s.si[r * s.len + i] > 0);
+        magpos += mg[r * 2 * s.len + 2 * i] > 0;
+        n += 2;
+      }
+    std::printf("MmseExact mode 3 nl=%d: s2 %.4f (2 sigma^2 / 2^shift %.4f), sign errors %d of %d, mag > 0 on %d of %d\n", nl, s2, want,
+                bad, n, magpos, n / 2);
+    EXPECT_LT(bad, nl == 3 ? n / 100 : n / 10); /* square 4x4 Rayleigh with a 20-LSB layer: ~5 % (weak layer), not a bug */
+    EXPECT_EQ(magpos, n / 2);
+  }
+}
+
+/* MMSE3GPU: the GPU mode 3 (libpdsch_gpu.so, ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3) against nr_mmse3_symbol, bit for bit, on a
+ * synthetic 13-symbol grant per (Nl, Qm). Skipped without the module or a device (the module is built next to this test). */
+#include <dlfcn.h>
+#include "nr_pdsch_gpu_demod.h"
+TEST(MmseExact, GpuMode3BitExact)
+{
+  if (!dlopen("./libnr_gpu_platform.so", RTLD_NOW | RTLD_GLOBAL)) /* the module's nr_gpu_* imports (the softmodem links it) */
+    GTEST_SKIP() << "no ./libnr_gpu_platform.so: " << dlerror();
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
+  if (!dl)
+    GTEST_SKIP() << "no ./libpdsch_gpu.so: " << dlerror();
+  auto init = (nr_gpu_demod_init_fn)dlsym(dl, "nr_pdsch_gpu_demod_init");
+  auto run = (nr_gpu_demod_run_fn)dlsym(dl, "nr_pdsch_gpu_demod_run");
+  auto rel = (nr_gpu_demod_release_fn)dlsym(dl, "nr_pdsch_gpu_demod_release");
+  ASSERT_TRUE(init && run && rel);
+  if (init(4) != 0)
+    GTEST_SKIP() << "nr_pdsch_gpu_demod_init failed (no CUDA device?)";
+  const int N = 512, nrx = 4, len = 288, ext = (len + 15) & ~15, buf = ext, first = 1, nsym = 13;
+  long tot_bad = 0, tot = 0;
+  for (int nl = 2; nl <= 4; nl++)
+    for (int qm = 2; qm <= 8; qm += 2) {
+      std::vector<int16_t> rx(2 * nrx * 14 * N), est(2 * nl * nrx * 14 * N), gy(2 * 14 * ext), gh(2 * 14 * ext);
+      std::vector<M3Sym> sy;
+      for (int m = first; m < first + nsym; m++) {
+        sy.push_back(m3_make(nl, nrx, len, 3.0 + m % 4, 100 * nl + 10 * qm + m));
+        const M3Sym &s = sy.back();
+        for (int i = 0; i < len; i++) {
+          for (int a = 0; a < nrx; a++)
+            for (int c = 0; c < 2; c++)
+              rx[2 * ((size_t)a * 14 * N + m * N + i) + c] = s.y[a * 2 * len + 2 * i + c];
+          for (int r = 0; r < nl * nrx; r++)
+            for (int c = 0; c < 2; c++)
+              est[2 * ((size_t)r * 14 * N + m * N + i) + c] = s.h[r * 2 * len + 2 * i + c];
+          gy[2 * (m * ext + i)] = (int16_t)i;
+          gy[2 * (m * ext + i) + 1] = 1;
+          gh[2 * (m * ext + i)] = (int16_t)i;
+          gh[2 * (m * ext + i) + 1] = (int16_t)(m + 1);
+        }
+      }
+      const size_t bn = (size_t)2 * 14 * NR_GPU_DEMOD_MAX_NL * buf;
+      std::vector<int16_t> comp(bn), mag(bn), magb(bn), magr(bn), llr((size_t)nsym * len * qm * nl);
+      nr_gpu_demod_job_t j = {};
+      j.nbRx = nrx; j.nl = nl; j.qm = qm; j.N = N;
+      j.start_symbol = first; j.nb_symbols = nsym; j.first_symbol = first;
+      j.rx_stride = 14 * N; j.est_stride = 14 * N; j.buf = buf; j.ext = ext;
+      uint32_t off = 0;
+      for (int m = first; m < first + nsym; m++) {
+        j.sym_mask |= (uint16_t)(1u << m);
+        j.nre[m] = len;
+        j.llr_off[m] = off;
+        off += len * qm * nl;
+      }
+      j.rxdataF = rx.data(); j.est = est.data(); j.geo_y = gy.data(); j.geo_h = gh.data();
+      j.comp = comp.data(); j.mag = mag.data(); j.magb = magb.data(); j.magr = magr.data(); j.llr = llr.data();
+      j.thr_coef = std::pow(10.0, -1.2);
+      j.qam_mode = 3; j.mag_per_layer = 1; j.nvar = 40; j.m3_nvfac = std::pow(10.0, 2.1);
+      ASSERT_EQ(run(&j), 0);
+      rel(j.ctx);
+      long bad = 0;
+      for (int m = first; m < first + nsym; m++) {
+        const int16_t qa = qm == 4 ? 20724 : qm == 6 ? 20225 : qm == 8 ? 20106 : 0, qb = qm == 6 ? 10112 : qm == 8 ? 10053 : 0,
+                      qr = qm == 8 ? 5026 : 0; /* QAM16_n1 ... QAM256_n3 */
+        std::vector<int16_t> z, mg;
+        m3_run(sy[m - first], j.log2_maxh, j.nvar, j.m3_nvfac, qa, qb, qr, z, mg);
+        for (int r = 0; r < nl; r++)
+          for (int i = 0; i < 2 * len; i++) {
+            const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * buf * 2 + i;
+            bad += comp[row] != z[r * 2 * len + i];
+            bad += mag[row] != mg[(0 * nl + r) * 2 * len + i];
+            bad += magb[row] != mg[(1 * nl + r) * 2 * len + i];
+            bad += magr[row] != mg[(2 * nl + r) * 2 * len + i];
+            tot += 4;
+          }
+      }
+      if (bad)
+        std::printf("GPU mode 3 nl=%d qm=%d shift %d: %ld mismatching int16 outputs\n", nl, qm, j.log2_maxh, bad);
+      tot_bad += bad;
+    }
+  std::printf("GPU mode 3 vs CPU nr_mmse3_symbol: %ld of %ld int16 outputs differ\n", tot_bad, tot);
+  EXPECT_EQ(tot_bad, 0);
+}

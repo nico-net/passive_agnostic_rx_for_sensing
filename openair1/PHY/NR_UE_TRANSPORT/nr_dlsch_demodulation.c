@@ -841,74 +841,36 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
     const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
     const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
     const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
-    const double sc = ldexp(1.0, -shift); /* keep mode 2's units: G and b in |h|^2 >> shift */
-    const c16_t(*hx)[rx_size_symbol] = (const c16_t(*)[rx_size_symbol])dl_ch_estimates_ext;
     /* output gain: the strongest layer's mean G_ll -> 2^10 LSB (w <= G_ll), independent of the receive level and of any
-     * ISAC_L2MAXH_DELTA*; continuous, so it moves with the channel only (no per-symbol power-of-two jumps) */
-    double gd = 0.0;
-    for (int r = 0; r < nl; r++) {
-      double e = 0.0;
-      for (int i = 0; i < length; i++)
-        for (int a = 0; a < n_rx; a++)
-          e += (double)hx[r * n_rx + a][i].r * hx[r * n_rx + a][i].r + (double)hx[r * n_rx + a][i].i * hx[r * n_rx + a][i].i;
-      if (e > gd)
-        gd = e;
-    }
-    gd = length > 0 ? gd * sc / length : 0.0;
-    const double gain = gd > 0.0 ? 1024.0 / gd : 1.0;
-    double s2 = 0.0; /* noise variance per RE in G units */
-    /* nbRx == nl (rank 4 on 4 RX): no noise-only dimension, so s2 = chest nvar x 10^(dB/10). MMSE3CAL measured the residual at
+     * ISAC_L2MAXH_DELTA*; continuous, so it moves with the channel only (no per-symbol power-of-two jumps).
+     * nbRx == nl (rank 4 on 4 RX): no noise-only dimension, so s2 = chest nvar x 10^(dB/10). MMSE3CAL measured the residual at
      * +19.2 dB (TIM tile3, sd 3.0) and +16.1 dB (Vodafone b, sd 4.3) over that nvar; 21 dB errs high, the safe side (an s2 10x
-     * too high still decodes 15 of 25 rank-4 grants in the float model, 10x too low 8 of 25, zero forcing 0). */
+     * too high still decodes 15 of 25 rank-4 grants in the float model, 10x too low 8 of 25, zero forcing 0).
+     * MMSE3GPU: the whole symbol is nr_mmse3_symbol() (nr_mmse_exact.h), which the GPU reproduces bit for bit. */
     static double s_nvdb = -999.0;
     if (s_nvdb < -998.0) { const char *e = getenv("ISAC_PDSCH_MMSE_EXACT_NVAR_DB"); s_nvdb = e ? atof(e) : 21.0; }
-    if (n_rx <= nl)
-      s2 = (double)noise_var * sc * pow(10.0, s_nvdb / 10.0);
-    for (int pass = n_rx > nl ? 0 : 1; pass < 2; pass++) {
-      double res = 0.0;
-      int nres = 0;
-      for (int i = 0; i < length; i += pass == 0 ? 4 : 1) { /* the noise estimate needs no more than every 4th RE */
-        int16_t hre[4][4], him[4][4], yre[4], yim[4];
-        for (int a = 0; a < n_rx; a++) {
-          yre[a] = rxdataF_ext[a][i].r;
-          yim[a] = rxdataF_ext[a][i].i;
-          for (int r = 0; r < nl; r++) {
-            hre[r][a] = hx[r * n_rx + a][i].r;
-            him[r][a] = hx[r * n_rx + a][i].i;
-          }
-        }
-        double xre[4], xim[4], ainv[4], e = 0.0;
-        const int ok = nr_mmse_exact_re(nl, n_rx, hre, him, yre, yim, sc, pass == 0 ? 0.0 : s2, xre, xim, ainv, pass == 0 ? &e : NULL);
-        if (pass == 0) { /* ||y - H x_zf||^2 */
-          res += ok ? e : 0.0;
-          nres += ok;
-          continue;
-        }
-        for (int r = 0; r < nl; r++) {
-          const double ai = ok ? ainv[r] : 0.0;
-          const double w = ai > 1e-12 ? (1.0 - s2 * ai) / ai * gain : 0.0; /* mu / [A^-1]_ll */
-          const double ore = ai > 1e-12 ? xre[r] / ai * gain : 0.0, oim = ai > 1e-12 ? xim[r] / ai * gain : 0.0;
-#define QF_S16(v) ((int16_t)((v) > 32767.0 ? 32767 : (v) < -32768.0 ? -32768 : lround(v)))
-          rxdataF_comp[r][i].r = QF_S16(ore);
-          rxdataF_comp[r][i].i = QF_S16(oim);
-          dl_ch_mag[r][i].r = dl_ch_mag[r][i].i = QF_S16(w * qa / 32768.0);
-          dl_ch_magb[r][i].r = dl_ch_magb[r][i].i = QF_S16(w * qb / 32768.0);
-          dl_ch_magr[r][i].r = dl_ch_magr[r][i].i = QF_S16(w * qr / 32768.0);
-#undef QF_S16
-        }
-      }
-      if (pass == 0) {
-        s2 = nres > 0 ? res / ((double)nres * (n_rx - nl)) * sc : 0.0;
-        if (s_cal && noise_var > 0 && s2 > 0.0) {
-          const double r = 10.0 * log10(s2 / ((double)noise_var * sc));
-          s_cs += r; s_cs2 += r * r; /* racy across consumers: diagnostic only */
-          const unsigned long n = ++s_cn;
-          if ((n % 2000) == 0)
-            LOG_I(PHY, "SENSING: MMSE3CAL n=%lu nl=%d resid/nvar mean %.2f dB sd %.2f dB | mode-3 cpu %.1f us per symbol call (%lu calls)\n",
-                  n, nl, s_cs / n, sqrt(fmax(0.0, s_cs2 / n - (s_cs / n) * (s_cs / n))),
-                  s_tn ? 1e-3 * (double)s_tns / (double)s_tn : 0.0, (unsigned long)s_tn);
-        }
-      }
+    const int16_t *yr[4], *hr[16];
+    int16_t *zr[4], *mr[4], *mbr[4], *mrr[4];
+    for (int a = 0; a < n_rx; a++)
+      yr[a] = (const int16_t *)rxdataF_ext[a];
+    for (int r = 0; r < nl * n_rx; r++)
+      hr[r] = (const int16_t *)dl_ch_estimates_ext[r];
+    for (int r = 0; r < nl; r++) {
+      zr[r] = (int16_t *)rxdataF_comp[r];
+      mr[r] = (int16_t *)dl_ch_mag[r];
+      mbr[r] = (int16_t *)dl_ch_magb[r];
+      mrr[r] = (int16_t *)dl_ch_magr[r];
+    }
+    const double s2 = nr_mmse3_symbol(nl, n_rx, length, yr, hr, shift, noise_var, pow(10.0, s_nvdb / 10.0), qa, qb, qr, zr, mr, mbr, mrr);
+    const double sc = ldexp(1.0, -shift);
+    if (s_cal && n_rx > nl && noise_var > 0 && s2 > 0.0) {
+      const double r = 10.0 * log10(s2 / ((double)noise_var * sc));
+      s_cs += r; s_cs2 += r * r; /* racy across consumers: diagnostic only */
+      const unsigned long n = ++s_cn;
+      if ((n % 2000) == 0)
+        LOG_I(PHY, "SENSING: MMSE3CAL n=%lu nl=%d resid/nvar mean %.2f dB sd %.2f dB | mode-3 cpu %.1f us per symbol call (%lu calls)\n",
+              n, nl, s_cs / n, sqrt(fmax(0.0, s_cs2 / n - (s_cs / n) * (s_cs / n))),
+              s_tn ? 1e-3 * (double)s_tns / (double)s_tn : 0.0, (unsigned long)s_tn);
     }
     if (s_cal) {
       struct timespec t1;
