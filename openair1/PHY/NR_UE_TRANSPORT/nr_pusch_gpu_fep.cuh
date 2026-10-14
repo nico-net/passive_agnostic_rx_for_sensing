@@ -11,7 +11,7 @@
  * Isolation from the DL pipeline (nothing here touches the PDSCH streams, contexts, buffers or budget scopes):
  *   - own streams: on the discovery SM partition when ISAC_GPU_DISC_SMS / ISAC_GPU_RT_ISOLATE give one, so PDSCH keeps its
  *     SMs; otherwise lowest priority, and a call is refused while any RT GPU user is in flight (nr_gpu_budget_rt_active);
- *   - duty cap: at most ISAC_UL_GPU_FEP_PCT (default 20) percent of every 100 ms window may be spent in UL launches; over
+ *   - duty cap: at most ISAC_UL_GPU_FEP_PCT (default 30) percent of every 100 ms window may be spent in UL launches; over
  *     the cap, or all contexts busy, the call returns an error and the caller runs the CPU FEP (counted);
  *   - no spin: the wait polls cudaStreamQuery, spins 60 us, then nanosleeps 25 us per poll;
  *   - everything (tables, streams, item tables, first launch) is created in warm-up, before the RX allocation fence. */
@@ -91,7 +91,7 @@ static uint64_t now_us()
   } while (0)
 
 /* Warm-up (before the RX allocation fence). 0 = ready, -1 = unavailable (callers keep the CPU FEP). */
-extern "C" int nr_pusch_gpu_fep_init(int nant, int N, int ncp, int offset_div, int pct)
+static int ul_init_impl(int nant, int N, int ncp, int offset_div, int pct)
 {
   using namespace ulfep;
   if (U.ok) return U.nant == nant ? 0 : -1;
@@ -151,6 +151,18 @@ extern "C" int nr_pusch_gpu_fep_init(int nant, int N, int ncp, int offset_div, i
   fprintf(stderr, "SENSING: UL_GPU_FEP ready: %d RX, N=%d, %s stream, cap %u%% of each 100 ms\n", nant, N,
           U.part ? "discovery-partition" : "lowest-priority", U.pct);
   return 0;
+}
+
+/* The PDSCH init of this module seals its allocation fence (nr_dl_gpu_sealed) when it finishes; the UL front end is
+ * created later (UL monitor start-up), still before the platform-wide RX seal (nr_gpu_allocation_guard), so it lifts the
+ * module fence for the duration of its own init only. */
+extern "C" int nr_pusch_gpu_fep_init(int nant, int N, int ncp, int offset_div, int pct)
+{
+  const bool was = nr_dl_gpu_sealed;
+  nr_dl_gpu_sealed = false;
+  const int rc = ul_init_impl(nant, N, ncp, offset_div, pct);
+  nr_dl_gpu_sealed = was;
+  return rc;
 }
 
 /* One batch (<= MAX_ITEMS items x nant antennas). 0 = rows written; -1 all contexts busy; -2 over the duty cap / RT in

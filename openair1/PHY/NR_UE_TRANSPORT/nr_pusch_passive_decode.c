@@ -903,7 +903,7 @@ static void ulg_warmup(const NR_DL_FRAME_PARMS *fp, int nant)
   const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
   if (!api || fp->ofdm_symbol_size != 4096 || nant < 1 || nant > PASSIVE_UL_MAX_ANT) return;
   const char *p = getenv("ISAC_UL_GPU_FEP_PCT");
-  if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, p ? atoi(p) : 20) != 0) {
+  if (api->init(nant, fp->ofdm_symbol_size, fp->nb_prefix_samples, (int)fp->ofdm_offset_divisor, p ? atoi(p) : 30) != 0) {
     LOG_W(PHY, "SENSING: UL_GPU_FEP requested but unavailable -- CPU FEP\n");
     return;
   }

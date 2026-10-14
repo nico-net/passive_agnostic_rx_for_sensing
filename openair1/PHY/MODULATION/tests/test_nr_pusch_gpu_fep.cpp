@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <chrono>
 #include <random>
 #include <vector>
 extern "C" {
@@ -94,6 +96,35 @@ TEST(UlGpuFep, BitExactVsCpu)
   uint64_t st[10];
   api->stats(st);
   EXPECT_GT(st[0], 0u);
+}
+
+// Latency of one batch (ULFEP_BENCH=1 to run): n items x 4 antennas, host-memory in/out, as the decoder calls it.
+TEST(UlGpuFep, Bench)
+{
+  if (!getenv("ULFEP_BENCH")) GTEST_SKIP() << "ULFEP_BENCH not set";
+  ASSERT_EQ(0, load_dftslib());
+  setenv("ISAC_UL_GPU_FEP", "1", 1);
+  const nr_pusch_gpu_fep_api_t *api = nr_pusch_gpu_fep_load();
+  ASSERT_TRUE(api);
+  ASSERT_EQ(0, api->init(4, 4096, 288, 8, 100));
+  std::vector<std::vector<c16_t>> iq(4, std::vector<c16_t>(69632, c16_t{100, -50}));
+  std::vector<std::vector<c16_t>> out(4 * 40, std::vector<c16_t>(4096, c16_t{1, 1}));
+  for (int n : {1, 5, 14, 33}) {
+    std::vector<nr_pusch_gpu_fep_item_t> it(n);
+    for (int i = 0; i < n; i++) {
+      memset(&it[i], 0, sizeof(it[i]));
+      for (int a = 0; a < 4; a++) { it[i].src[a] = (const int16_t *)&iq[a][i * 300]; it[i].dst[a] = (int16_t *)out[i * 4 + a].data(); }
+      it[i].rotate = 1; it[i].rot[0] = 20000; it[i].rot[1] = 3000;
+    }
+    std::vector<double> t;
+    for (int r = 0; r < 300; r++) {
+      const auto t0 = std::chrono::steady_clock::now();
+      ASSERT_EQ(0, api->run(it.data(), n, 217, 4096 - 217 * 6));
+      t.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+    }
+    std::sort(t.begin(), t.end());
+    printf("ULFEP_BENCH items=%d (x4 ant) p50=%.0f us p99=%.0f us max=%.0f us\n", n, t[150], t[297], t.back());
+  }
 }
 
 int main(int argc, char **argv)
