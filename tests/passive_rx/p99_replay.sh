@@ -35,7 +35,7 @@ R=$ROOT/replays/replay_${name}_$(date +%H%M%S); mkdir -p "$R"; echo "$R" > "$ROO
 cd "$R"
 echo "CAPSET=${CAPSET:-b} CAP=$CAP ENVFILE=${ENVFILE:-$O/ota/t26bKn.env} CFG=${CFG:-$O/ota/sd_t26ul.cfg} extra: $*" > args.txt
 # inside heavy.lock: refuse (exit 99, file rx_busy) if any other receiver runs, so timing is never taken next to one
-HEAVY_CPUS=${HEAVY_CPUS:-0-16} exec "$O/heavy.sh" bash -c 'pgrep -x nr-uesoftmodem >/dev/null && { echo busy > "$0/rx_busy"; exit 99; }
+HEAVY_CPUS=${HEAVY_CPUS:-0-16} exec "$O/heavy.sh" bash -c 'pgrep -a -x nr-uesoftmodem | grep -q /home/nicola/ && { echo busy > "$0/rx_busy"; exit 99; }
   exec "$@"' "$R" sudo -n timeout --signal=INT -k 120 ${TMO:-90} env \
   ISAC_MLOCK=0 ISAC_RAW_IQ_DIRECTORY="$CAP" ISAC_RAW_IQ_SAMPLES="$CAP_SAMPLES" ISAC_RAW_IQ_FIRST_TICK="$CAP_TICK" \
   ISAC_RAW_IQ_CHANNELS=4 ISAC_RAW_IQ_RATE=122880000 ISAC_RAW_IQ_CENTER="$CAPC" ISAC_RAW_IQ_SPEED=1 ISAC_RAW_IQ_SHIFT=2 \

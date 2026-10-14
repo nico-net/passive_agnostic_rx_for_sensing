@@ -160,6 +160,8 @@ typedef struct {
   uint16_t rnti;
   uint8_t pid, ndi, ncomb;
   uint32_t tbs, C, cap_seg;
+  uint32_t code_rate; /* of the stored first transmission: a reserved-MCS retransmission reuses it */
+  uint8_t bg;
   uint64_t last;
   int16_t *d;
 } ul_harqc_t;
@@ -167,6 +169,9 @@ static ul_harqc_t g_ul_harqc[UL_HARQC_N];
 static pthread_mutex_t g_ul_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_ul_harqc_clock;
 static _Atomic uint64_t g_hq_stored, g_hq_retx_try, g_hq_retx_ok, g_hq_rv_refused, g_hq_busy;
+/* why an rv != 0 grant found nothing to combine: no entry for (rnti,pid) / entry already decoded or never stored /
+ * NDI toggled / TBS of the retransmission differs from the stored one */
+static _Atomic uint64_t g_hq_why_none, g_hq_why_empty, g_hq_why_ndi, g_hq_why_tbs;
 static __thread bool t_hq_armed;
 static int ul_harq_combine_on(void)
 {
@@ -189,16 +194,21 @@ static unsigned ul_harq_max_seg(void)
   return (unsigned)m;
 }
 /* True when (rnti, pid) holds a soft buffer of an undecoded TB with this NDI: an rv != 0 grant is worth its FEP. */
-static bool ul_harqc_peek(uint16_t rnti, uint8_t pid, uint8_t ndi)
+static bool ul_harqc_peek(uint16_t rnti, uint8_t pid, uint8_t ndi, uint32_t *tbs, uint32_t *cr, uint8_t *bg)
 {
-  bool v = false;
+  int why = 0; /* 0 none, 1 empty, 2 ndi, 3 ok */
   pthread_mutex_lock(&g_ul_harqc_lock);
-  for (int i = 0; i < UL_HARQC_N && !v; i++) {
+  for (int i = 0; i < UL_HARQC_N; i++) {
     const ul_harqc_t *e = &g_ul_harqc[i];
-    v = e->used && e->rnti == rnti && e->pid == pid && e->soft_valid && e->ndi == ndi;
+    if (!e->used || e->rnti != rnti || e->pid != pid) continue;
+    why = !e->soft_valid ? 1 : e->ndi != ndi ? 2 : 3;
+    if (why == 3 && tbs) { *tbs = e->tbs; *cr = e->code_rate; *bg = e->bg; }
+    break;
   }
   pthread_mutex_unlock(&g_ul_harqc_lock);
-  return v;
+  if (why < 3) atomic_fetch_add_explicit(why == 0 ? &g_hq_why_none : why == 1 ? &g_hq_why_empty : &g_hq_why_ndi, 1,
+                                         memory_order_relaxed);
+  return why == 3;
 }
 static ul_harqc_t *ul_harqc_acquire(uint16_t rnti, uint8_t pid)
 {
@@ -1508,7 +1518,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     return false;
   }
   if (g->rv != 0 && !(ul_harq_combine_on() && t_hq_armed && !t_solver_probe && !cfr_only &&
-                      ul_harqc_peek(g->rnti, g->harq_pid, g->ndi))) {
+                      ul_harqc_peek(g->rnti, g->harq_pid, g->ndi, NULL, NULL, NULL))) {
     /* No HARQ history: a passive receiver has no earlier redundancy version to combine with, so an
      * rv != 0 transmission carries only incremental parity and cannot be decoded standalone. The
      * DM-RS-based CFR path is unaffected -- it needs only the allocation. With ISAC_UL_HARQ_COMBINE
@@ -1789,6 +1799,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     pthread_mutex_lock(&g_ul_harq_init_lock);
     have_ul_init_tx = nr_harq_init_tx_lookup(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, &ul_init_tx);
     pthread_mutex_unlock(&g_ul_harq_init_lock);
+    /* ULQ: a reserved-MCS retransmission of a TB that never decoded has no init_tx record (that is written on
+     * CRC OK only) -- the stored HARQ soft buffer carries the same TB parameters. */
+    if (!have_ul_init_tx && ul_harq_combine_on() && t_hq_armed && !t_solver_probe) {
+      uint32_t stbs = 0, scr = 0; uint8_t sbg = 0;
+      if (ul_harqc_peek(g->rnti, g->harq_pid, g->ndi, &stbs, &scr, &sbg) && stbs && scr && sbg) {
+        have_ul_init_tx = true;
+        ul_init_tx.tbs = stbs; ul_init_tx.code_rate = scr; ul_init_tx.bg = sbg; ul_init_tx.nl = g->nrOfLayers;
+      }
+    }
     if (!have_ul_init_tx) {
       out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
       out->reject_reason = "reserved UL MCS with no known initial transmission on this HARQ process";
@@ -2185,6 +2204,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (hqe) {
       hq_retx = g->rv != 0 && hqe->soft_valid && hqe->ndi == g->ndi && hqe->tbs == tbs && hqe->d &&
                 hqe->C <= hqe->cap_seg;
+      if (g->rv != 0 && hqe->soft_valid && hqe->ndi == g->ndi && hqe->tbs != tbs)
+        atomic_fetch_add_explicit(&g_hq_why_tbs, 1, memory_order_relaxed);
       if (hq_retx) {
         memcpy(ulsch->harq_process->d, hqe->d, (size_t)hqe->C * UL_HARQC_STRIDE * sizeof(int16_t));
         ulsch->harq_process->harq_to_be_cleared = false;
@@ -2356,6 +2377,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         hqe->soft_valid = true;
         hqe->ndi = g->ndi;
         hqe->tbs = tbs;
+        hqe->code_rate = (uint32_t)pdu.target_code_rate;
+        hqe->bg = (uint8_t)pdu.maintenance_parms_v3.ldpcBaseGraph;
         hqe->C = C;
         hqe->ncomb = hq_retx ? (uint8_t)(hqe->ncomb + 1) : 0;
         if (!hq_retx) atomic_fetch_add_explicit(&g_hq_stored, 1, memory_order_relaxed);
@@ -2678,9 +2701,11 @@ void nr_pusch_passive_stats_dump(void)
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
   if (ul_harq_combine_on())
-    LOG_I(PHY, "SENSING: UL_HARQ stored=%lu retx_try=%lu retx_ok=%lu rv_refused=%lu busy=%lu rx_ant=%d\n",
+    LOG_I(PHY, "SENSING: UL_HARQ stored=%lu retx_try=%lu retx_ok=%lu rv_refused=%lu[none=%lu empty=%lu ndi=%lu] tbs_mismatch=%lu busy=%lu rx_ant=%d\n",
           (unsigned long)atomic_load(&g_hq_stored), (unsigned long)atomic_load(&g_hq_retx_try),
           (unsigned long)atomic_load(&g_hq_retx_ok), (unsigned long)atomic_load(&g_hq_rv_refused),
+          (unsigned long)atomic_load(&g_hq_why_none), (unsigned long)atomic_load(&g_hq_why_empty),
+          (unsigned long)atomic_load(&g_hq_why_ndi), (unsigned long)atomic_load(&g_hq_why_tbs),
           (unsigned long)atomic_load(&g_hq_busy), g_gnb_nant);
   if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {
     char rep[512];

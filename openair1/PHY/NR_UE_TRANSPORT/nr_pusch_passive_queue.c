@@ -89,6 +89,7 @@ static _Atomic uint64_t g_q_real, g_q_probe, g_dec_probe, g_full_probe, g_snap_o
     g_snap_used, g_rescue_skipped, g_budget_sleep_us;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool ulq_is_probe(const nr_pdcch_blind_ul_result_t *g);
 static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 
@@ -309,7 +310,8 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     }
 
     const bool pipeline = nr_pusch_passive_pipeline_enabled();
-    nr_pusch_passive_harq_arm(!nr_ul_layout_is_probe(&job.grant)); /* first decode of this job may combine */
+    /* first decode of a real-grant job may combine/store; probes and CRC-first trials (hypothesis reads) never do */
+    nr_pusch_passive_harq_arm(!ulq_is_probe(&job.grant));
     struct timespec grant_cpu_start={0},grant_cpu_end={0};
     if (nr_ul_chain_on()) clock_gettime(CLOCK_THREAD_CPUTIME_ID,&grant_cpu_start);
     if (held >= 0) {
