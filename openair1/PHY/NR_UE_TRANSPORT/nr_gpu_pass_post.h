@@ -22,6 +22,7 @@ typedef struct {
 } nr_gpu_chest_post_par_t;
 enum { NR_GPU_POST_FO_VALID = 1, NR_GPU_POST_SFO_MEASURED = 2, NR_GPU_POST_FO_REJECTED = 4 };
 typedef struct { /* float build (the product one) */
+  uint32_t nvar_valid; /* 0 when n_dmrs_sym * nl == 0: nvar is NOT written (the CPU keeps its previous value) and the caller must keep its own */
   uint32_t nvar;  /* what nr_rx_pdsch()/the demod job takes: exact (integer math) */
   uint32_t flags; /* NR_GPU_POST_* */
   float cfo_hz, sfo_ppm, sfo_dk, coh_gate, coherence;
@@ -32,6 +33,7 @@ typedef struct { /* float build (the product one) */
 /* FP64 build: everything is bit-equal to the CPU except cfo_hz / sfo_ppm, which go through atan2(): CUDA's double atan2 (2 ulp) differs from glibc's in
  * the last bits on about a quarter of the inputs. The sums above are exact, so a host that needs the CPU's bits runs the last scalar lines on them. */
 typedef struct {
+  uint32_t nvar_valid;
   uint32_t nvar;
   uint32_t flags;
   double cfo_hz, sfo_ppm, sfo_dk, coh_gate, coherence;
@@ -54,7 +56,7 @@ typedef int (*nr_gpu_pass_rdm_fn)(const int16_t *llr, const nr_gpu_rdm_seg_t *se
 /* ---- k_crc: check_crc() per code block and, for nseg > 1, over the reassembled TB (what passive_ldpc_decode_core checks). Block i of
  * `bits` is bytes [off, off + ceil(n_bits / 8)); n_bits includes the CRC; type 0 = CRC24A, 1 = CRC24B, 2 = CRC16 (coding_defs.h). The TB
  * is the concatenation of pay_bytes of each segment (K/8 - F/8 - 3), its CRC over lenWithCrc(1, tbs) bits. seg_ok[i] / tb_ok are 0/1;
- * for nseg == 1 tb_ok = seg_ok[0]. The all-zero guards stay with the caller. */
+ * for nseg == 1 tb_ok = seg_ok[0]. tb_ok = 0 when nseg < 1, segs[0].pay_bytes == 0 or the segments hold fewer bytes than the TB needs. The all-zero guards stay with the caller. */
 typedef struct {
   uint32_t off, n_bits, pay_bytes;
   uint32_t type;

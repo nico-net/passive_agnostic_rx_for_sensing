@@ -531,6 +531,7 @@ TEST(GpuPassPost, ChestPostMatchesCpu) {
     dof.down(&of, sizeof of); do64.down(&o64, sizeof o64);
     n_sfo += (ref.flags & NR_GPU_POST_SFO_MEASURED) != 0; n_rej += (ref.flags & NR_GPU_POST_FO_REJECTED) != 0;
     /* integer part: exact in both builds */
+    ASSERT_EQ(1u, of.nvar_valid); ASSERT_EQ(1u, o64.nvar_valid);
     ASSERT_EQ(ref.nvar, of.nvar) << seed; ASSERT_EQ(ref.nvar, o64.nvar) << seed;
     ASSERT_EQ(ref.flags, of.flags) << seed; ASSERT_EQ(ref.flags, o64.flags) << seed;
     ASSERT_EQ(ref.kn0, of.kn0); ASSERT_EQ(ref.kn1, of.kn1); ASSERT_EQ(ref.kn0, o64.kn0); ASSERT_EQ(ref.kn1, o64.kn1);
@@ -600,4 +601,35 @@ TEST(GpuPassPost, LaunchersAreGraphCapturable) {
   EXPECT_EQ(of.nvar, z64.nvar);
   EXPECT_GT(of.nvar, 0u);
   cudaGraphExecDestroy(ge); cudaGraphDestroy(g); cudaStreamDestroy(st);
+}
+
+/* I1/I2 of the review: no DM-RS rows leaves nvar untouched and says so; a TB without reassembly information is refused without dividing */
+TEST(GpuPassPost, DegenerateInputs) {
+  if (!have_gpu()) GTEST_SKIP();
+  PostSyms &S = PostSyms::get();
+  ASSERT_TRUE(S.chest && S.crc);
+  Dev<uint32_t> drows; uint32_t rows[4] = {1, 2, 3, 4}; drows.up(rows, sizeof rows);
+  nr_gpu_chest_post_par_t p = {};
+  p.nvar_rows = drows.p; p.nrx = 4; p.nl = 1; p.n_dmrs_sym = 0; p.number_symbols = 12; p.branch = -1;
+  nr_gpu_chest_post_out_t o; memset(&o, 0x5a, sizeof o); o.nvar = 0xdeadbeef; o.nvar_valid = 7;
+  Dev<nr_gpu_chest_post_out_t> dof; dof.up(&o, sizeof o);
+  ASSERT_EQ(0, S.chest(&p, dof.p, nullptr));
+  dof.down(&o, sizeof o);
+  EXPECT_EQ(0u, o.nvar_valid);
+  EXPECT_EQ(0xdeadbeefu, o.nvar);
+  crcTableInit();
+  CrcCase c = CrcCase::random(11, false);
+  while (c.C < 2) c = CrcCase::random(c.tbs + 12, false);
+  Dev<uint8_t> dbits, dok; Dev<nr_gpu_crc_seg_t> dsegs;
+  auto segs = c.segs; segs[0].pay_bytes = 0;
+  dbits.up(c.bits.data(), c.bits.size()); dsegs.up(segs.data(), segs.size() * sizeof(segs[0]));
+  dok.up(std::vector<uint8_t>(c.C + 1, 7).data(), c.C + 1);
+  ASSERT_EQ(0, S.crc(dbits.p, dsegs.p, (int)c.C, c.tbs, dok.p, dok.p + c.C, nullptr));
+  std::vector<uint8_t> ok(c.C + 1); dok.down(ok.data(), c.C + 1);
+  EXPECT_EQ(0, (int)ok[c.C]);
+  for (uint32_t r = 0; r < c.C; r++) EXPECT_EQ(c.cpu_seg_ok(r), (int)ok[r]);
+  dok.up(std::vector<uint8_t>(c.C + 1, 7).data(), c.C + 1);
+  ASSERT_EQ(0, S.crc(dbits.p, dsegs.p, 0, c.tbs, dok.p, dok.p + c.C, nullptr)); /* nseg == 0 */
+  dok.down(ok.data(), c.C + 1);
+  EXPECT_EQ(0, (int)ok[c.C]);
 }

@@ -83,6 +83,10 @@ __global__ void k_crc(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nse
   if (tb) {
     n = tbs + (tbs > 3824u ? 24u : 16u);
     type = tbs > 3824u ? 0u : 2u;
+    if (segs[0].pay_bytes == 0 || (uint64_t)nseg * segs[0].pay_bytes < (n + 7) / 8) { /* no reassembly possible: no division, no read past the segments */
+      if (threadIdx.x == 0) *tb_ok = 0;
+      return;
+    }
   } else {
     n = segs[blockIdx.x].n_bits;
     type = segs[blockIdx.x].type;
@@ -128,6 +132,7 @@ __global__ void k_crc(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nse
   }
 }
 /* nseg == 1: the TB is the code block */
+__global__ void k_zero(uint8_t *p) { *p = 0; }
 __global__ void k_crc_tb1(const uint8_t *seg_ok, uint8_t *tb_ok) { *tb_ok = *seg_ok; }
 
 /* ----------------------------------------------------- rate dematching (nr_rate_matching.c + prep_segment) ----------------------------------------------------- */
@@ -210,6 +215,11 @@ template <class O> __device__ void nvar_part(const nr_gpu_chest_post_par_t &p, O
 {
   if (threadIdx.x)
     return;
+  if (p.n_dmrs_sym * p.nl <= 0) {
+    out->nvar_valid = 0; /* nothing estimated: nvar untouched */
+    return;
+  }
+  out->nvar_valid = 1;
   uint32_t nvar = 0, nvar_ant[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   const int nk = p.n_dmrs_sym * p.nl;
   for (int k = 0; k < nk; k++) {
@@ -272,7 +282,7 @@ template <class R> __device__ void fo_part(const nr_gpu_chest_post_par_t &p, typ
   const int N = p.N;
   const short2 *h0 = (const short2 *)p.h0, *h1 = (const short2 *)p.h1;
   __shared__ int kmn, kmx;
-  __shared__ long long sm[8][4];
+  __shared__ long long sm[8];
   __shared__ float smf[8];
   __shared__ long long tot[2][4]; /* re, im, ksum, kn */
   __shared__ R magsum[2];
@@ -312,7 +322,7 @@ template <class R> __device__ void fo_part(const nr_gpu_chest_post_par_t &p, typ
   }
   for (int h = 0; h < 2; h++) {
     for (int c = 0; c < 4; c++) {
-      const long long t = red_ll(acc[h][c], sm[0]);
+      const long long t = red_ll(acc[h][c], sm);
       if (threadIdx.x == 0)
         tot[h][c] = t;
     }
@@ -444,8 +454,10 @@ extern "C" int nr_gpu_pass_launch_rdm(const int16_t *llr, const nr_gpu_rdm_seg_t
 }
 extern "C" int nr_gpu_pass_launch_crc(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nseg, uint32_t tbs, uint8_t *seg_ok, uint8_t *tb_ok, void *stream)
 {
-  if (nseg < 1)
-    return 0;
+  if (nseg < 1) {
+    gpupass::k_zero<<<1, 1, 0, (cudaStream_t)stream>>>(tb_ok);
+    return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
+  }
   gpupass::k_crc<<<nseg + (nseg > 1), 256, 0, (cudaStream_t)stream>>>(bits, segs, nseg, tbs, seg_ok, tb_ok);
   if (nseg == 1)
     gpupass::k_crc_tb1<<<1, 1, 0, (cudaStream_t)stream>>>(seg_ok, tb_ok);
