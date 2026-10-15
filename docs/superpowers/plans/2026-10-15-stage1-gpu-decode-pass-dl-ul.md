@@ -329,6 +329,23 @@ TEST(GpuPassDl, NoAllocAfterFence) { /* set the fence, call try on a warm class 
 - [ ] **Step 4: Run** → PASS; full `ctest -j4` → only the known ARM failures (`test_nr_pusch_ra0_qam64/qam256`, `test_nr_td_grantwork`, `dft_test`, `test_nr_modulation`).
 - [ ] **Step 5: Commit** `git add openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass.h openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_pass_test.cc openair1/PHY/CODING/CMakeLists.txt CMakeLists.txt && git commit -m "feat(gpupass): one captured CUDA graph per DL shape class, one host wait per pass (ISAC_GPU_PASS, default off)"`
 
+### Task 4b: Segmented (PRG / VRB-bundle) channel estimation inside the pass
+
+(Added 2026-10-15 by controller ruling after Task 4: the replay gate census shows `seg=6203 probe=915 share=89 gw=88` of ~9300 grants — the segmented chest path (`nr_pdsch_gpu_chest_grant()` segmented call at nr_pdsch_passive_decode.c ~3195, per-PRG / VRB-bundle segments) keeps two thirds of the grants off the pass, so the per-pass target cannot be met on air without it.)
+
+**Files:**
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu` (shape class gains `nseg_class` ∈ {1, 2, 4, 8, 16}: the chest node runs one `nr_pdsch_gpu_chest_dev` row set per segment, `k_chest_post` per segment writes per-segment nvar/delay into the device out struct, the demod reads the per-segment estimates exactly as the old segmented path lays them out in `dl_ch_estimates`)
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh/.h` (k_chest_post: segment index + per-segment outputs; combined nvar exactly as the CPU segmented path combines them)
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c` (host builder: segment geometry from the same inputs the segmented old path uses)
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c` (gate: `seg` no longer refuses when the segment count fits a warmed class; counted otherwise)
+- Test: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_pass_test.cc`
+
+- [ ] **Step 1: Failing test** `GpuPassDl.SegmentedGraphEqualsStagePath`: fixtures with 2, 4 and 8 PRG segments (precoding granularity 2 and 4 PRB, VRB-to-PRB interleaved and not), rank 1-4: TB bytes, CRC verdict, per-segment nvar/delay and LLR hash equal the old segmented stage path (Task 2 functions called per segment as the old path does).
+- [ ] **Step 2: Run** → FAIL (class not supported / gate refuses).
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** → PASS; full ctest; replay smoke `CAPSET=b` and `CAPSET=tim` with `ISAC_GPU_PASS=1`: gate census `seg` near 0, shadow (ok and fail) 0 bad, check_bad 0.
+- [ ] **Step 5: Commit** `git add openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.h openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c openair1/PHY/NR_UE_TRANSPORT/tests/nr_gpu_pass_test.cc && git commit -m "feat(gpupass): segmented PRG/VRB chest inside the DL pass"`
+
 ### Task 5: FP32 demod for the RTX 4070 (no FP64 in hot kernels)
 
 **Files:**
