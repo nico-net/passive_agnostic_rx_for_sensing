@@ -59,6 +59,8 @@ typedef struct nr_gpu_demod_job_s {
   int want_evm;    /* EVM armed: GPU EVM partial sums (else the host runs its CPU copy of the EVM block) */
   int evm_erase;   /* nr_dlsch_csi_erase_n > 0 */
   int evm_fp64;    /* GPU EVM per-RE math in double (else float; sums always double) */
+  float m3_nvfac_f; /* demod_fp32: (float)m3_nvfac, set by the launch entry points (no double reaches the float kernels) */
+  int demod_fp32;  /* GPUPASS Task 5: the float instantiation of the align / multi-layer MMSE kernels (graph pass on an RTX 4070; not bit-exact, 0 = the bit-exact double one) */
   int qam_mode;    /* nl >= 2: nr_rx_pdsch()'s resolved ISAC_PDSCH_MMSE_MODE, 2 (float ZF) or 0 (stock fixed-point MMSE, nl >= 3),
                       3 (exact double MMSE, ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3=1) */
   uint32_t nvar;   /* nr_rx_pdsch()'s nvar (stock MMSE diagonal loading nvar >> 3) */

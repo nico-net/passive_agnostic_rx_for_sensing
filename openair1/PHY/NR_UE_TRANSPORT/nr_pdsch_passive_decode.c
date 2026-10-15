@@ -2388,6 +2388,17 @@ static void gp_thread_prewarm(void)
   memset(t_gpp, 0, sizeof(*t_gpp));
   nr_gpu_pass_dl_prewarm(t_gpp); /* the job and the LLR copy buffer */
 }
+/* Task 5: FP32 pass vs old path: the LLRs are compared by sign (a pair disagrees when the signs are strictly opposite; counted over the positions where either is
+ * nonzero). The policy of the FP32 shadow checks: > 0.1 % sign disagreement disables the pass; a CRC-verdict difference alone is tolerated and counted (fp32_flip). */
+static bool gp_sign_bad(const int16_t *a, const int16_t *b, uint32_t n)
+{
+  uint64_t bad = 0, tot = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    tot += a[i] != 0 || b[i] != 0;
+    bad += (a[i] > 0 && b[i] < 0) || (a[i] < 0 && b[i] > 0);
+  }
+  return bad * 1000 > tot;
+}
 static uint64_t gp_llr_hash(const int16_t *p, uint32_t n)
 {
   uint64_t h = 1469598103934665603ull;
@@ -5281,7 +5292,10 @@ gpu_llr_ready:;
       nr_gpu_pass_note(NR_GPU_PASS_EV_OLD_FIRST);
     bool ldpc_ok = gp_ok ? gp_tb : passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
     if (gp_fcmp && !gp_ok) { /* shadow of a CRC-failing pass: the old first body's verdicts and its post-normalisation LLRs (what the retry arms get) */
-      if (ldpc_ok || t_seg_ok_last != t_gp_fok || gp_llr_hash(llr, G) != t_gp_fhash) {
+      const bool f32 = nr_gpu_pass_fp32_on();
+      if (f32 && (ldpc_ok || t_seg_ok_last != t_gp_fok))
+        nr_gpu_pass_note(NR_GPU_PASS_EV_FP32_FLIP); /* FP32: the verdict may flip on a marginal TB; the signs decide below */
+      if (f32 ? gp_sign_bad(t_gpp->llr, llr, G) : (ldpc_ok || t_seg_ok_last != t_gp_fok || gp_llr_hash(llr, G) != t_gp_fhash)) {
         nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_FAIL_BAD);
         LOG_E(PHY, "SENSING: GPUPASS MISMATCH (CRC-fail shadow) rnti 0x%x nl %u mcs %u rb %d+%d tbs %u: pass blocks ok %u, old %u (old crc %d), llr hash %s\n", grant->rnti, cw->Nl,
               grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs, cw->TBS, t_gp_fok, t_seg_ok_last, (int)ldpc_ok, gp_llr_hash(llr, G) == t_gp_fhash ? "equal" : "DIFFERENT");
@@ -5754,7 +5768,9 @@ gpu_llr_ready:;
       LOG_A(PHY, "SENSING: PDSCH UNSUP@3234 n=%lu\n", n_); }
   if (gp_cmp) { /* shadow check: the old path decoded a grant the pass took; the verdict and the bytes must agree */
     const bool old_ok = out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-    if (!old_ok || memcmp(out->tb, t_gp_shadow, cw->TBS / 8) != 0) {
+    if (nr_gpu_pass_fp32_on() && !old_ok)
+      nr_gpu_pass_note(NR_GPU_PASS_EV_FP32_FLIP); /* FP32: a marginal TB the float demod got and the old path did not; tolerated, counted */
+    else if (!old_ok || memcmp(out->tb, t_gp_shadow, cw->TBS / 8) != 0) {
       nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_BAD);
       LOG_E(PHY, "SENSING: GPUPASS MISMATCH rnti 0x%x nl %u mcs %u rb %d+%d tbs %u: pass CRC ok, old path %s\n", grant->rnti, cw->Nl, grant->mcs,
             freq_alloc->first_rb, freq_alloc->num_rbs, cw->TBS, old_ok ? "CRC ok but other bytes" : "no CRC ok");

@@ -31,6 +31,7 @@
 #define NR_GPU_PASS_MAX_CB 32  /* code blocks per pass = NR_GPU_LDPC_MAX_JOBS */
 #define NR_GPU_PASS_MAX_DMRS 4 /* DM-RS symbols of a grant */
 #define NR_GPU_PASS_MAX_NL 4
+#define NR_GPU_PASS_FP32_DEMOD 2 /* nr_gpu_pass_shape_t.fp32 bit: FP32 demod instantiation */
 #define NR_GPU_PASS_MAX_SEG 16 /* segments of a segmented grant (the largest segment-count class) */
 
 #ifdef __cplusplus
@@ -38,7 +39,8 @@ extern "C" {
 #endif
 
 /* nrb_class: 6,12,24,48,96,136,217,273 (the smallest class >= the grant's PRBs); ncb_class: 1,2,4,8,16,32 (smallest >= C); nsym, qm: informational (they do not change the
- * graph); ndmrs: DM-RS symbols of the grant (1..4); fp32: 1 = the float EVM chain (the product build), 0 = the FP64 EVM chain (the chest post is always the float build). */
+ * graph); ndmrs: DM-RS symbols of the grant (1..4); fp32: bit 0 = 1 the float EVM chain (the product build), 0 the FP64 EVM chain (the chest post is always the float build);
+ * bit 1 (NR_GPU_PASS_FP32_DEMOD) = the float instantiation of the demod kernels (Task 5, RTX 4070; not bit-exact), else the bit-exact double one. */
 typedef struct {
   uint16_t nrb_class, nsym, nl, qm, ndmrs, ncb_class;
   uint8_t fp32;
@@ -134,6 +136,7 @@ typedef struct {
   int qm_sym;
   uint32_t qm_n;
   int16_t *llr_out; /* optional caller buffer [G]: receives the final (descrambled, normalised) LLRs when the TB fails its CRC, so that the caller's retry arms can re-decode them */
+  int llr_out_all;  /* 1 = llr_out is filled on CRC success too (tests, FP32 sign checks) */
 } nr_gpu_pass_job_t;
 
 /* the per-segment inputs of a segmented job as nr_pdsch_gpu_chest_grant's rows take them: pilot RB (prb_start + the BWP start unless the reference point is CRB 0) and first LS

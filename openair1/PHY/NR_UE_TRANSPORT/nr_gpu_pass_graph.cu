@@ -175,7 +175,7 @@ struct Key {
   uint8_t nseg; /* 0 = a contiguous grant (the estimate rows go straight into the estimate buffer); 1, 2, 4, 8, 16 = segmented grant of up to that many segments (scratch rows + compose) */
   uint64_t pack() const
   {
-    return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)fp32 << 22 | (uint64_t)evm << 23 | (uint64_t)qmode << 24 |
+    return (uint64_t)nrb | (uint64_t)nl << 9 | (uint64_t)ndmrs << 12 | (uint64_t)ncb << 15 | (uint64_t)(fp32 & 1) << 22 | (uint64_t)(fp32 >> 1) << 32 | (uint64_t)evm << 23 | (uint64_t)qmode << 24 |
            (uint64_t)align << 28 | (uint64_t)(nseg ? 1 + __builtin_ctz((unsigned)nseg) : 0) << 29;
   }
 };
@@ -269,7 +269,8 @@ static void synth_job(const Key &k, nr_gpu_pass_job_t *j, std::vector<int16_t> &
   d.qam_mode = k.nl >= 2 ? k.qmode : 0;
   d.m3_nvfac = pow(10.0, 2.1);
   d.want_evm = k.evm;
-  d.evm_fp64 = !k.fp32;
+  d.evm_fp64 = !(k.fp32 & 1);
+  d.demod_fp32 = (k.fp32 >> 1) & 1;
   geo.assign((size_t)2 * NSYM * ext * 2, 0); /* geo_y then geo_h: c16 [14][ext] */
   for (int m = 0; m < NSYM; m++)
     for (int i = 0; i < ext; i++) {
@@ -559,6 +560,20 @@ static int alloc_inst(int id)
   return 0;
 }
 
+/* Task 5: the FP32 demod instantiation is used when ISAC_GPU_PASS_FP32=1, or (unset) on sm_89 (RTX 4070: FP64 at 1/64 rate); ISAC_GPU_PASS_FP32=0 forces the bit-exact double one */
+static int g_fp32_default()
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_GPU_PASS_FP32");
+    cudaDeviceProp p;
+    int dev = 0;
+    v = e && *e ? atoi(e) == 1 : (cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess && p.major == 8 && p.minor == 9);
+  }
+  return v;
+}
+extern "C" int nr_gpu_pass_fp32_default(void) { return g_fp32_default(); }
+
 /* default warm set (max_classes): nrb 24/48/96/217 x nl 1..4, 2 DM-RS symbols, a typical padded block count, float */
 static Key default_class(int i)
 {
@@ -566,7 +581,7 @@ static Key default_class(int i)
   const int n = nrb[i / 4], l = i % 4 + 1;
   int c = n * l / 12;
   if (c < 1) c = 1;
-  return Key{(uint16_t)nr_gpu_pass_nrb_class(n), (uint16_t)l, 2, (uint16_t)nr_gpu_pass_ncb_class(c > 32 ? 32 : c), 1, 0, (uint8_t)(l >= 2 ? 3 : 0), 0, 0};
+  return Key{(uint16_t)nr_gpu_pass_nrb_class(n), (uint16_t)l, 2, (uint16_t)nr_gpu_pass_ncb_class(c > 32 ? 32 : c), (uint8_t)(1 | (g_fp32_default() ? NR_GPU_PASS_FP32_DEMOD : 0)), 0, (uint8_t)(l >= 2 ? 3 : 0), 0, 0};
 }
 } // namespace nrpass
 
@@ -652,7 +667,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   const nr_gpu_demod_job_t &d = j->dj;
   const uint32_t ext = d.ext;
   if (!key_ok(k) || (int)k.nl != j->nl || (int)k.ndmrs != j->ndmrs || j->nbRx != g_cfg.nbRx || (int)j->nrb > (int)k.nrb || j->C < 1 || j->C > k.ncb ||
-      (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && k.fp32 == (uint8_t)d.evm_fp64) ||
+      (j->Z & 3) || (j->K & 7) || (j->K >> 3) > (uint32_t)KBMAX || j->G > LLR_CAP || j->G == 0 || ext > (uint32_t)EXTMAX || (d.want_evm && (k.fp32 & 1) == (uint8_t)d.evm_fp64) || ((k.fp32 >> 1) != (uint8_t)(d.demod_fp32 != 0)) ||
       j->nseg < 0 || j->nseg > (int)k.nseg || (j->nseg == 0) != (k.nseg == 0) || !seg_ok(j) ||
       j->it_max < 1 || j->it_max > NSNAP + 1 || !j->scr || !j->geo_y || !j->geo_h || !j->symbol_rot || !j->rxdata[0]) {
     ++g_fb_unsup;
@@ -734,7 +749,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     const uint32_t *q = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)) + (size_t)(j->ndmrs * j->nl - 1) * g_cfg.nbRx;
     for (int a = 0; a < 4; a++) r->nvar_ant[a] = k.nseg > 1 ? rb.post.nvar_ant[a] : (a < g_cfg.nbRx ? q[a] : 0); /* segmented: the width-weighted mean the post kernel computed */
   }
-  if (!r->need_cpu && !r->tb_ok && j->llr_out)
+  if (!r->need_cpu && (!r->tb_ok || j->llr_out_all) && j->llr_out)
     memcpy(j->llr_out, I.llr.host, (size_t)j->G * 2); /* the first body's LLRs for the caller's retry arms */
   r->qm_valid = 0;
   if (r->qm_row && nr_gpu_model() == NR_GPU_MODEL_DIRECT && j->qm_sym >= 0 && j->qm_sym < NSYM && j->qm_n > 0 && j->qm_n <= (uint32_t)N) {

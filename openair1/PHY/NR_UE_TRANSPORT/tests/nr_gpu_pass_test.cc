@@ -997,6 +997,59 @@ TEST(GpuPassPost, DegenerateInputs) {
 }
 
 
+/* ===================================================== Task 5: FP32 demod (RTX 4070) ===================================================== */
+/* The float instantiation of the align / multi-layer MMSE kernels is not bit-exact with the double one by design. Acceptance on the fixture sweep (the 64 warm shapes,
+ * qam_mode 3 = the exact MMSE for Nl >= 2): LLR sign agreement >= 99.9 %, CRC-OK count within 1 % (+1). The sweep length is NR_GPU_FP32_SEEDS (default 4 on a shared host; 400 for
+ * the full sweep), the SNR of seed s is 4 + 5 s mod 20 dB. NoDoubleInFp32Kernels is the ctest script tests/check_no_fp64_sass.sh. */
+TEST(GpuPassFp32, SignAgreementAndCrc) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try && m.pass_warm);
+  ASSERT_TRUE(pass_ready(m));
+  size_t fr0 = 0, fr1 = 0, tot = 0;
+  cudaMemGetInfo(&fr0, &tot);
+  for (auto sh : GpuPassFixture::warm_shapes()) { // the FP32 twin of every default class (pass_warm skips the ones already cached)
+    sh.fp32 |= NR_GPU_PASS_FP32_DEMOD;
+    ASSERT_EQ(0, m.pass_warm(&sh, sh.nl >= 2 ? 3 : 0, 0, 0)) << "nrb " << sh.nrb_class << " nl " << sh.nl;
+  }
+  cudaMemGetInfo(&fr1, &tot);
+  printf("GpuPassFp32: 16 FP32 classes (NI instances each) added %.1f MB of device memory\n", ((double)fr0 - (double)fr1) / 1048576.0);
+  const char *se = getenv("NR_GPU_FP32_SEEDS");
+  const int seeds = se ? atoi(se) : 4;
+  int crc64 = 0, crc32 = 0, n = 0, diff = 0;
+  size_t same = 0, total = 0;
+  double worst = 1.0;
+  for (int seed = 0; seed < seeds; seed++) {
+    GpuPassFixture::noise_db = 4 + (seed * 5) % 20;
+    for (auto shape : GpuPassFixture::warm_shapes()) {
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 100 + seed);
+      if (!fx.tb_ok_built) continue;
+      fx.bind();
+      auto a = fx.run_pass(m, 0), b = fx.run_pass(m, 1);
+      ASSERT_EQ(0, a.rc) << "nrb " << shape.nrb_class << " nl " << shape.nl << " qm " << shape.qm;
+      ASSERT_EQ(0, b.rc) << "FP32 class not warm or refused, nrb " << shape.nrb_class << " nl " << shape.nl << " qm " << shape.qm;
+      n++;
+      crc64 += a.tb_ok;
+      crc32 += b.tb_ok;
+      size_t s0 = same, t0 = total;
+      GpuPassFixture::count_sign_agreement(a, b, &same, &total);
+      if (total > t0) worst = std::min(worst, (double)(same - s0) / (double)(total - t0));
+      if (shape.nl >= 2 && a.llr != b.llr) diff++;
+    }
+  }
+  GpuPassFixture::noise_db = 20.0;
+  printf("GpuPassFp32.SignAgreementAndCrc: %d grants, CRC ok fp64 %d fp32 %d, sign agreement %.7f (%zu of %zu LLRs opposite; worst grant %.5f), %d multi-layer grants with different LLRs\n", n, crc64, crc32,
+         total ? (double)same / (double)total : 0.0, total - same, total, worst, diff);
+  ASSERT_GT(total, 0u);
+  EXPECT_GE((double)same / (double)total, 0.999);
+  EXPECT_NEAR(crc32, crc64, 0.01 * crc64 + 1);
+  EXPECT_GT(diff, 0) << "the float kernels never ran: the FP32 class is not selected";
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);

@@ -28,129 +28,28 @@
 #define NR_MMSE_HD static inline
 #endif
 
-NR_MMSE_FN int nr_mmse_exact_re(int nl, int nrx, const int16_t hre[4][4], const int16_t him[4][4], const int16_t yre[4],
-                                   const int16_t yim[4], double sc, double s2, double xre[4], double xim[4], double ainv[4],
-                                   double *out_res)
-{
-  double ar[4][4], ai[4][4], br[4], bi[4]; /* lower triangle of A (i >= j), b */
-  for (int i = 0; i < nl; i++) {
-    for (int j = 0; j <= i; j++) { /* A[i][j] = sum_a conj(h_i) h_j */
-      double gr = 0.0, gi = 0.0;
-      for (int a = 0; a < nrx; a++) {
-        gr += (double)hre[i][a] * hre[j][a] + (double)him[i][a] * him[j][a];
-        gi += (double)hre[i][a] * him[j][a] - (double)him[i][a] * hre[j][a];
-      }
-      ar[i][j] = gr * sc + (i == j ? s2 : 0.0);
-      ai[i][j] = gi * sc;
-    }
-    double ur = 0.0, ui = 0.0; /* conj(h_i) y */
-    for (int a = 0; a < nrx; a++) {
-      ur += (double)hre[i][a] * yre[a] + (double)him[i][a] * yim[a];
-      ui += (double)hre[i][a] * yim[a] - (double)him[i][a] * yre[a];
-    }
-    br[i] = ur * sc;
-    bi[i] = ui * sc;
-  }
-  /* Cholesky: L[i][j] (i > j), real diagonal d[j] */
-  double d[4], lr[4][4], li[4][4];
-  for (int j = 0; j < nl; j++) {
-    double s = ar[j][j];
-    for (int k = 0; k < j; k++)
-      s -= lr[j][k] * lr[j][k] + li[j][k] * li[j][k];
-    if (!(s > 1e-12 * (ar[j][j] > 1.0 ? ar[j][j] : 1.0)))
-      return 0;
-    d[j] = sqrt(s);
-    for (int i = j + 1; i < nl; i++) { /* (A[i][j] - sum_k L[i][k] conj(L[j][k])) / d_j */
-      double tr = ar[i][j], ti = ai[i][j];
-      for (int k = 0; k < j; k++) {
-        tr -= lr[i][k] * lr[j][k] + li[i][k] * li[j][k];
-        ti -= li[i][k] * lr[j][k] - lr[i][k] * li[j][k];
-      }
-      lr[i][j] = tr / d[j];
-      li[i][j] = ti / d[j];
-    }
-  }
-  /* L u = b */
-  double ur[4], ui[4], uu = 0.0;
-  for (int i = 0; i < nl; i++) {
-    double tr = br[i], ti = bi[i];
-    for (int k = 0; k < i; k++) {
-      tr -= lr[i][k] * ur[k] - li[i][k] * ui[k];
-      ti -= lr[i][k] * ui[k] + li[i][k] * ur[k];
-    }
-    ur[i] = tr / d[i];
-    ui[i] = ti / d[i];
-    uu += ur[i] * ur[i] + ui[i] * ui[i];
-  }
-  /* L^H x = u */
-  for (int i = nl - 1; i >= 0; i--) {
-    double tr = ur[i], ti = ui[i];
-    for (int k = i + 1; k < nl; k++) { /* conj(L[k][i]) x_k */
-      tr -= lr[k][i] * xre[k] + li[k][i] * xim[k];
-      ti -= lr[k][i] * xim[k] - li[k][i] * xre[k];
-    }
-    xre[i] = tr / d[i];
-    xim[i] = ti / d[i];
-  }
-  /* M = L^-1 (lower): [A^-1]_ll = sum_{k >= l} |M[k][l]|^2 */
-  for (int l = 0; l < nl; l++) {
-    double mr[4], mi[4];
-    mr[l] = 1.0 / d[l];
-    mi[l] = 0.0;
-    double n = mr[l] * mr[l];
-    for (int i = l + 1; i < nl; i++) {
-      double tr = 0.0, ti = 0.0;
-      for (int k = l; k < i; k++) {
-        tr += lr[i][k] * mr[k] - li[i][k] * mi[k];
-        ti += lr[i][k] * mi[k] + li[i][k] * mr[k];
-      }
-      mr[i] = -tr / d[i];
-      mi[i] = -ti / d[i];
-      n += mr[i] * mr[i] + mi[i] * mi[i];
-    }
-    ainv[l] = n;
-  }
-  if (out_res) {
-    double yy = 0.0;
-    for (int a = 0; a < nrx; a++)
-      yy += (double)yre[a] * yre[a] + (double)yim[a] * yim[a];
-    const double e = yy - uu / sc;
-    *out_res = e > 0.0 ? e : 0.0;
-  }
-  return 1;
-}
-
-NR_MMSE_HD int16_t nr_mmse3_s16(double v)
-{
-  return (int16_t)(v > 32767.0 ? 32767 : v < -32768.0 ? -32768 : lround(v));
-}
-
-/* MMSE3GPU: mode-3 output gain from the strongest layer's energy sum_{i,a} |h|^2 over the symbol's length REs: its mean
- * G_ll (2^-shift units, sc) lands at 2^10 LSB */
-NR_MMSE_FN double nr_mmse3_gain(double emax, int length, double sc)
-{
-  const double gd = length > 0 ? emax * sc / length : 0.0;
-  return gd > 0.0 ? 1024.0 / gd : 1.0;
-}
-
-/* MMSE3GPU: mode-3 output of one RE: z_l = x_l / [A^-1]_ll * gain and the per-layer thresholds w_l q / 32768,
- * w_l = (1 - s2 [A^-1]_ll) / [A^-1]_ll * gain (mu / [A^-1]_ll); a singular A or a vanishing [A^-1]_ll gives 0.
- * z[l] = {re, im}, mag[l] = {qa, qb, qr} thresholds. */
-NR_MMSE_FN void nr_mmse3_re(int nl, int nrx, const int16_t hre[4][4], const int16_t him[4][4], const int16_t yre[4], const int16_t yim[4],
-                            double sc, double s2, double gain, int16_t qa, int16_t qb, int16_t qr, int16_t z[4][2], int16_t mag[4][3])
-{
-  double xre[4], xim[4], ainv[4];
-  const int ok = nr_mmse_exact_re(nl, nrx, hre, him, yre, yim, sc, s2, xre, xim, ainv, 0);
-  for (int r = 0; r < nl; r++) {
-    const double ai = ok ? ainv[r] : 0.0;
-    const double w = ai > 1e-12 ? (1.0 - s2 * ai) / ai * gain : 0.0;
-    z[r][0] = nr_mmse3_s16(ai > 1e-12 ? xre[r] / ai * gain : 0.0);
-    z[r][1] = nr_mmse3_s16(ai > 1e-12 ? xim[r] / ai * gain : 0.0);
-    mag[r][0] = nr_mmse3_s16(w * qa / 32768.0);
-    mag[r][1] = nr_mmse3_s16(w * qb / 32768.0);
-    mag[r][2] = nr_mmse3_s16(w * qr / 32768.0);
-  }
-}
+#define NR_MMSE_NM(x) x
+#define NR_MMSE_R double
+#define NR_MMSE_SQRT sqrt
+#define NR_MMSE_LROUND lround
+#include "nr_mmse_exact_body.h"
+#undef NR_MMSE_NM
+#undef NR_MMSE_R
+#undef NR_MMSE_SQRT
+#undef NR_MMSE_LROUND
+/* Task 5 (GPU pass FP32 demod): the float instantiation, nr_mmse_exact_re_f / nr_mmse3_s16_f / nr_mmse3_gain_f / nr_mmse3_re_f. Not bit-exact
+ * with the double one by design; compiled only where asked (the CUDA file) so that the CPU build is untouched. */
+#if defined(__CUDACC__) || defined(NR_MMSE_WITH_FLOAT)
+#define NR_MMSE_NM(x) x##_f
+#define NR_MMSE_R float
+#define NR_MMSE_SQRT sqrtf
+#define NR_MMSE_LROUND lroundf
+#include "nr_mmse_exact_body.h"
+#undef NR_MMSE_NM
+#undef NR_MMSE_R
+#undef NR_MMSE_SQRT
+#undef NR_MMSE_LROUND
+#endif
 
 /* MMSE3GPU: nr_dlsch_mmse() mode 3 for one data symbol of length REs (CPU; the GPU splits the same steps into k_mmse3_prep
  * and re_mmse3). Rows are interleaved c16 (re, im): y[a], h[r * nrx + a], and the outputs comp/mag/magb/magr[r]. Noise

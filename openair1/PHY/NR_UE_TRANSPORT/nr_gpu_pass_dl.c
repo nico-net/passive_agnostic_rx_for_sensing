@@ -31,12 +31,13 @@ static struct {
   nr_gpu_pass_dl_try_fn try_;
   nr_gpu_pass_stats_fn stats;
   _Atomic int on;
-  int nbrx, check;
+  int nbrx, check, fp32; /* fp32: Task 5, the graphs run the FP32 demod (ISAC_GPU_PASS_FP32 / sm_89) */
   _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
   _Atomic uint64_t segn[5]; /* segmented grants that reached the pass, by segment-count class 1, 2, 4, 8, 16 */
 } G;
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
+int nr_gpu_pass_fp32_on(void) { return G.fp32; }
 
 void nr_gpu_pass_note(int ev)
 {
@@ -100,13 +101,13 @@ static void census(void)
     buf[0] = 0;
   LOG_A(PHY,
         "SENSING: %s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu seg=%lu] seg_grants[1=%lu 2=%lu 4=%lu 8=%lu 16=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
-        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu]\n",
+        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu fp32_flip=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu]\n",
         buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.fb[FB_SEG],
         (unsigned long)G.segn[0], (unsigned long)G.segn[1], (unsigned long)G.segn[2], (unsigned long)G.segn[3], (unsigned long)G.segn[4], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
         (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
-        (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
+        (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.ev[NR_GPU_PASS_EV_FP32_FLIP], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
         (unsigned long)G.gate[2], (unsigned long)G.gate[3], (unsigned long)G.gate[4], (unsigned long)G.gate[5], (unsigned long)G.gate[6], (unsigned long)G.gate[7],
         (unsigned long)G.gate[8], (unsigned long)G.gate[9], (unsigned long)G.gate[10]);
 }
@@ -170,6 +171,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   nr_gpu_demod_init_fn dinit = h ? (nr_gpu_demod_init_fn)dlsym(h, "nr_pdsch_gpu_demod_init") : NULL;
   nr_gpu_ldpc_init_fn linit = h ? (nr_gpu_ldpc_init_fn)dlsym(h, "nr_pdsch_gpu_ldpc_init") : NULL;
   G.try_ = h ? (nr_gpu_pass_dl_try_fn)dlsym(h, "nr_gpu_pass_dl_try") : NULL;
+  { int (*fp32f)(void) = h ? (int (*)(void))dlsym(h, "nr_gpu_pass_fp32_default") : NULL; G.fp32 = fp32f ? fp32f() : 0; } /* before initf: the default classes read the same */
   G.stats = h ? (nr_gpu_pass_stats_fn)dlsym(h, "nr_gpu_pass_stats") : NULL;
   if (!cfgf || !initf || !warmf || !dinit || !linit || !G.try_ || dinit(fp->nb_antennas_rx) != 0 || linit() != 0) {
     LOG_W(PHY, "SENSING: GPUPASS requested but libpdsch_gpu.so has no usable graph pass: off\n");
@@ -227,7 +229,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
           if (ncb / 2 >= cmax)
             break;
           for (int v = 0; v < nvar && made < budget; v++) {
-            const nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, 1};
+            const nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0))};
             if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
               made++;
             else
@@ -272,7 +274,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
             if (ncb / 2 >= cmax)
               break;
             for (int v = 0; v < nvar && smade < sbudget; v++) {
-              nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, 1, (uint16_t)ns};
+              nr_gpu_pass_shape_t sh = {(uint16_t)nr_gpu_pass_nrb_class(nrbs[ni]), 13, (uint16_t)nl, 6, (uint16_t)nd[di], (uint16_t)ncb, (uint8_t)(1 | (G.fp32 ? NR_GPU_PASS_FP32_DEMOD : 0)), (uint16_t)ns};
               if (warmf(&sh, variants[v][0], variants[v][1], evm) == 0)
                 smade++;
               else
@@ -284,8 +286,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   const char *ch = getenv("ISAC_GPU_PASS_CHECK");
   G.check = ch ? atoi(ch) : 64;
   atomic_store(&G.on, made > 0);
-  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model\n",
-        made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE");
+  LOG_A(PHY, "SENSING: GPUPASS %s: %d shape classes (+ %d segmented) x %d instances captured (EVM branch %d, %d failed), shadow check every %d passes, %s memory model, demod %s\n",
+        made > 0 ? "enabled" : "NOT enabled", made, smade, NR_GPU_PASS_RING, evm, failed, G.check, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE", G.fp32 ? "FP32 (sign/CRC shadow checks)" : "FP64 (bit-exact)");
   if (G.stats) {
     char buf[512];
     G.stats(buf, sizeof(buf));
@@ -359,6 +361,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
                                     .rxdataF = (c16_t *)in->rxdataF, .scope = &scope, .ssb_rm = in->ssb_rm};
   if (nr_pdsch_gpu_demod_pass_job(&call, &j->dj, &j->geo_y, &j->geo_h) != 0)
     return fb(FB_DEMOD);
+  j->dj.demod_fp32 = G.fp32; /* the old GPU demod stays double; only the graph pass runs the float kernels */
   if (nr_pdsch_evm_acc.armed && !j->dj.want_evm) /* the EVM would need the CPU copy of the equaliser output */
     return fb(FB_DEMOD);
   if (nseg > 0) /* the virtual allocation's index map composed with the old path's RE gather (nr_gpu_pass.h); this thread's maps, rebuilt for every grant */
@@ -419,7 +422,7 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->dt_d = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot * (double)(j->dmrs_sym[ndmrs - 1] - j->dmrs_sym[0]);
   j->df_d = (double)fp->subcarrier_spacing;
   j->shape = (nr_gpu_pass_shape_t){(uint16_t)nrbc, (uint16_t)in->dlsch_config->number_symbols, (uint16_t)cw->Nl, (uint16_t)cw->qamModOrder, (uint16_t)ndmrs,
-                                   (uint16_t)ncb, (uint8_t)!j->dj.evm_fp64, (uint16_t)nsegc};
+                                   (uint16_t)ncb, (uint8_t)((j->dj.evm_fp64 ? 0 : 1) | (j->dj.demod_fp32 ? NR_GPU_PASS_FP32_DEMOD : 0)), (uint16_t)nsegc};
   /* ---- the pass */
   memset(&out->r, 0, sizeof(out->r));
   out->r.tb = in->tb;

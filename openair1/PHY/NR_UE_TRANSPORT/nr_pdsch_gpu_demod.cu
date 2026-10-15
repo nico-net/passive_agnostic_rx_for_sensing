@@ -38,6 +38,7 @@ struct Shared { /* mapped: written by the GPU, read by the host after the stream
   long long kap_sz[NSYM][4], kap_sm[NSYM][4];
   unsigned level_done; /* GPUFUSE: k_level blocks finished (the last one runs the decision) */
   double m3_s2[NSYM], m3_gain[NSYM]; /* MMSE3GPU: mode-3 noise variance and output gain per symbol (k_mmse3_prep) */
+  float m3_s2f[NSYM], m3_gainf[NSYM]; /* the same for the FP32 instantiation (GPU pass on sm_89) */
   nr_gpu_evm_sym_t evm[NSYM];
 };
 struct Ctx {
@@ -246,14 +247,36 @@ __global__ void k_mask_pw(__grid_constant__ const JobK jk_, nrd_c16 *h, Shared *
   }
 }
 
+/* ---- Task 5: precision R = double (the bit-exact path) | float (GPU pass on an RTX 4070, FP64 at 1/64 rate; not bit-exact, ISAC_GPU_PASS_FP32).
+ * The double instantiations are the original code, operation for operation (the file is built with --fmad=false, so plain a*b+c is not fused). ---- */
+template <typename R> struct cxr {
+  R r, i;
+};
+typedef cxr<double> dcx;
+__device__ __forceinline__ double fmaR(double a, double b, double c) { return __fma_rn(a, b, c); }
+__device__ __forceinline__ float fmaR(float a, float b, float c) { return __fmaf_rn(a, b, c); }
+__device__ __forceinline__ double divR(double a, double b) { return __ddiv_rn(a, b); }
+__device__ __forceinline__ float divR(float a, float b) { return __fdiv_rn(a, b); }
+__device__ __forceinline__ double sqrtR(double a) { return __dsqrt_rn(a); }
+__device__ __forceinline__ float sqrtR(float a) { return __fsqrt_rn(a); }
+__device__ __forceinline__ double absR(double a) { return fabs(a); }
+__device__ __forceinline__ float absR(float a) { return fabsf(a); }
+__device__ __forceinline__ double ldexpR(double, int e) { return ldexp(1.0, e); }
+__device__ __forceinline__ float ldexpR(float, int e) { return ldexpf(1.0f, e); }
+/* round to the nearest integer, ties away from zero (the CPU's lround) */
+__device__ __forceinline__ double nanR(double) { return nan(""); }
+__device__ __forceinline__ float nanR(float) { return nanf(""); }
+__device__ __forceinline__ long long roundR(double v) { return llround(v); }
+__device__ __forceinline__ long long roundR(float v) { return (long long)llroundf(v); }
+
 /* ---- ISAC_RX_MRC_ALIGN: per (symbol, chunk, branch) one thread forms the chunk's cross-correlation sequentially in RE
  * order with GCC's FMA pattern (exactly the CPU's sums) and the rotation (cos, sin), then the block rotates the chunk's
  * REs. GPUFUSE: one launch (was k_align_terms / k_align_cs / k_align_rot, same arithmetic); ALC chunks per block. ---- */
 constexpr int ALC = 2;
-__global__ void k_align(__grid_constant__ const JobK jk_, const nrd_c16 *y, nrd_c16 *h, const Shared *sh)
+template <typename R = double> __global__ void k_align(__grid_constant__ const JobK jk_, const nrd_c16 *y, nrd_c16 *h, const Shared *sh)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
-  __shared__ double2 s_cs[ALC][4];
+  __shared__ cxr<R> s_cs[ALC][4];
   const int m = blockIdx.y, t = threadIdx.x;
   if (!(j.sym_mask >> m & 1))
     return;
@@ -268,24 +291,30 @@ __global__ void k_align(__grid_constant__ const JobK jk_, const nrd_c16 *y, nrd_
     return;
   if (t < ALC * 4) {
     const int w = t & 3, c = blockIdx.x * ALC + (t >> 2), a = d.mrc_rx_index + w;
-    double2 out = make_double2(nan(""), 0.0); /* nan = leave this chunk alone */
+    cxr<R> out = {nanR(R()), (R)0}; /* nan = leave this chunk alone */
     const uint32_t c0 = (uint32_t)c * chunk;
     if (c < MAXCH && w < d.mrc_nb_rx && a != ref && sh->pw[m][a] > 0 && c0 < nre) {
       const uint32_t c1 = c0 + chunk < nre ? c0 + chunk : nre;
       const nrd_c16 *hr_row = h + ((size_t)m * 16 + ref) * EXT, *yr_row = y + ((size_t)m * NR_GPU_DEMOD_MAX_RX + ref) * EXT;
       const nrd_c16 *ha_row = h + ((size_t)m * 16 + a) * EXT, *ya_row = y + ((size_t)m * NR_GPU_DEMOD_MAX_RX + a) * EXT;
-      double cr = 0.0, ci = 0.0;
+      R cr = 0, ci = 0;
       for (uint32_t i = c0; i < c1; i++) { /* the CPU's sequential fadd, RE order */
         const nrd_c16 hr = hr_row[i], yr = yr_row[i], ha = ha_row[i], ya = ya_row[i];
-        /* products of int16 are exact in double, and so are these sums (|.| < 2^31) */
-        const double urr = (double)hr.r * yr.r + (double)hr.i * yr.i, uri = (double)hr.r * yr.i - (double)hr.i * yr.r;
-        const double uar = (double)ha.r * ya.r + (double)ha.i * ya.i, uai = (double)ha.r * ya.i - (double)ha.i * ya.r;
-        cr = __dadd_rn(cr, __fma_rn(uar, urr, __dmul_rn(uai, uri)));  /* fmadd d, uar, urr, (uai*uri) */
-        ci = __dadd_rn(ci, __fma_rn(uai, urr, -__dmul_rn(uar, uri))); /* fnmsub d, uai, urr, (uar*uri) */
+        /* products of int16 are exact in double, and so are these sums (|.| < 2^31); in float they are rounded */
+        const R urr = (R)hr.r * yr.r + (R)hr.i * yr.i, uri = (R)hr.r * yr.i - (R)hr.i * yr.r;
+        const R uar = (R)ha.r * ya.r + (R)ha.i * ya.i, uai = (R)ha.r * ya.i - (R)ha.i * ya.r;
+        cr = cr + fmaR(uar, urr, uai * uri);  /* fmadd d, uar, urr, (uai*uri) */
+        ci = ci + fmaR(uai, urr, -(uar * uri)); /* fnmsub d, uai, urr, (uar*uri) */
       }
-      const double mag = __dsqrt_rn(__fma_rn(cr, cr, __dmul_rn(ci, ci))); /* fmul ci*ci; fmadd cr,cr; fsqrt */
-      if (mag > 0.0)
-        out = make_double2(__ddiv_rn(cr, mag), __ddiv_rn(ci, mag));
+      /* fmul ci*ci; fmadd cr,cr; fsqrt. float: scaled by the larger component first (cr, ci reach 2^60 and more: the squares would overflow) */
+      R sc = (R)1;
+      if constexpr (std::is_same<R, float>::value) {
+        sc = absR(cr) > absR(ci) ? absR(cr) : absR(ci);
+        if (sc > (R)0) { cr = divR(cr, sc); ci = divR(ci, sc); }
+      }
+      const R mag = sqrtR(fmaR(cr, cr, ci * ci));
+      if (mag > (R)0)
+        out = cxr<R>{divR(cr, mag), divR(ci, mag)};
     }
     s_cs[t >> 2][w] = out;
   }
@@ -295,14 +324,14 @@ __global__ void k_align(__grid_constant__ const JobK jk_, const nrd_c16 *y, nrd_
   for (uint32_t i = i0 + t; i < i1; i += blockDim.x) {
     const int cl = one ? 0 : (int)(i / chunk) - (int)blockIdx.x * ALC;
     for (int w = 0; w < d.mrc_nb_rx && w < 4; w++) {
-      const double2 q = s_cs[cl][w];
-      if (isnan(q.x))
+      const cxr<R> q = s_cs[cl][w];
+      if (isnan(q.r))
         continue;
       nrd_c16 *row = h + ((size_t)m * 16 + d.mrc_rx_index + w) * EXT;
       const nrd_c16 v = row[i];
-      const double hr2 = __fma_rn((double)v.r, q.x, -__dmul_rn((double)v.i, q.y)); /* fnmsub d, h.r, c, (h.i*sn) */
-      const double hi2 = __fma_rn((double)v.r, q.y, __dmul_rn((double)v.i, q.x));  /* fmadd d, h.r, sn, (h.i*c) */
-      row[i] = nrd_c16{(int16_t)llround(hr2), (int16_t)llround(hi2)};          /* lround, then (int16_t) wraps */
+      const R hr2 = fmaR((R)v.r, q.r, -((R)v.i * q.i)); /* fnmsub d, h.r, c, (h.i*sn) */
+      const R hi2 = fmaR((R)v.r, q.i, (R)v.i * q.r);  /* fmadd d, h.r, sn, (h.i*c) */
+      row[i] = nrd_c16{(int16_t)roundR(hr2), (int16_t)roundR(hi2)};          /* lround, then (int16_t) wraps */
     }
   }
 }
@@ -341,14 +370,11 @@ __device__ __forceinline__ void re_comp(const nr_gpu_demod_job_t &j, const nrd_c
  * Complex products follow GCC's lowering (re = fma(L.r, R.r, -(L.i R.i)), im = fma(L.r, R.i, (L.i R.r)));
  * division is libgcc 13's __divdc3 (ported from its aarch64 object code); cabs of integer components is the
  * correctly rounded sqrt of the exact sum (glibc's cabs agrees on 2e7 random integer pairs), else hypot. */
-struct dcx {
-  double r, i;
-};
-__device__ __forceinline__ dcx cmul(dcx L, dcx R)
+template <typename R> __device__ __forceinline__ cxr<R> cmul(cxr<R> L, cxr<R> Q)
 {
-  return dcx{__fma_rn(L.r, R.r, -__dmul_rn(L.i, R.i)), __fma_rn(L.r, R.i, __dmul_rn(L.i, R.r))};
+  return cxr<R>{fmaR(L.r, Q.r, -(L.i * Q.i)), fmaR(L.r, Q.i, L.i * Q.r)};
 }
-__device__ __forceinline__ double cabs_c(dcx x)
+__device__ __forceinline__ double cabs_c(cxr<double> x)
 {
   const double lim = 67108864.0; /* 2^26: the squares and their sum are exact */
   if (x.r == trunc(x.r) && x.i == trunc(x.i) && fabs(x.r) < lim && fabs(x.i) < lim)
@@ -360,7 +386,9 @@ __device__ __forceinline__ double cabs_c(dcx x)
   const double t1 = __dadd_rn(ay, ay), t2 = __dadd_rn(ax, -ay);
   return t1 >= ax ? __dsqrt_rn(__fma_rn(t1, ax, __dmul_rn(t2, t2))) : __dsqrt_rn(__fma_rn(ax, ax, __dmul_rn(ay, ay)));
 }
-__device__ dcx divdc3(double a, double b, double c, double d)
+/* float: the pivots of the RTX 4070 path (hypotf: no overflow whatever the magnitudes) */
+__device__ __forceinline__ float cabs_c(cxr<float> x) { return hypotf(x.r, x.i); }
+__device__ cxr<double> divdc3(double a, double b, double c, double d)
 {
   const double RBIG = __longlong_as_double(0x7fdfffffffffffffLL), RMIN2 = __longlong_as_double(0x3cb0000000000000LL);
   const double RMIN = __longlong_as_double(0x0010000000000000LL), RMAX2 = __longlong_as_double(0x7c9fffffffffffffLL);
@@ -397,13 +425,23 @@ __device__ dcx divdc3(double a, double b, double c, double d)
       y = __ddiv_rn(__fma_rn(-__ddiv_rn(a, c), d, b), denom);
     }
   }
-  return dcx{x, y};
+  return cxr<double>{x, y};
 }
-__device__ __forceinline__ int16_t qf_s16(double v)
+/* float: Smith's algorithm without libgcc's range scaling (the entries are int16-scale sums, far from over- and underflow) */
+__device__ cxr<float> divdc3(float a, float b, float c, float d)
 {
-  return (int16_t)(v > 32767.0 ? 32767 : v < -32768.0 ? -32768 : (long long)llround(v));
+  if (fabsf(c) < fabsf(d)) {
+    const float ratio = c / d, denom = __fmaf_rn(c, ratio, d);
+    return cxr<float>{__fdiv_rn(__fmaf_rn(a, ratio, b), denom), __fdiv_rn(__fmaf_rn(b, ratio, -a), denom)};
+  }
+  const float ratio = d / c, denom = __fmaf_rn(d, ratio, c);
+  return cxr<float>{__fdiv_rn(__fmaf_rn(b, ratio, a), denom), __fdiv_rn(__fmaf_rn(-a, ratio, b), denom)};
 }
-__device__ __forceinline__ void re_mmse2(const nr_gpu_demod_job_t &j, const nrd_c16 *h, const Shared *sh, int m, uint32_t i)
+template <typename R> __device__ __forceinline__ int16_t qf_s16(R v)
+{
+  return (int16_t)(v > (R)32767.0 ? 32767 : v < (R)-32768.0 ? -32768 : roundR(v));
+}
+template <typename R> __device__ __forceinline__ void re_mmse2(const nr_gpu_demod_job_t &j, const nrd_c16 *h, const Shared *sh, int m, uint32_t i)
 {
   const int shift = sh->d.log2_maxh, nb = j.nbRx;
   const int16_t qa = j.qm == 4 ? NRD_QAM16_n1 : j.qm == 6 ? NRD_QAM64_n1 : j.qm == 8 ? NRD_QAM256_n1 : 0;
@@ -411,7 +449,7 @@ __device__ __forceinline__ void re_mmse2(const nr_gpu_demod_job_t &j, const nrd_
   const int16_t qr = j.qm == 8 ? NRD_QAM256_n3 : 0;
   const uint32_t nre = j.nre[m];
   if (i < nre) {
-    dcx M[2][5];
+    cxr<R> M[2][5];
 #pragma unroll
     for (int r = 0; r < 2; r++) {
 #pragma unroll
@@ -422,53 +460,53 @@ __device__ __forceinline__ void re_mmse2(const nr_gpu_demod_job_t &j, const nrd_
           const nrd_c16 p = nrd_cpx_mult_conj(hr, hc, shift);
           g = a == 0 ? p : nrd_c16{nrd_adds(g.r, p.r), nrd_adds(g.i, p.i)};
         }
-        M[r][c] = dcx{(double)g.r, (double)g.i};
-        M[r][3 + c] = dcx{r == c ? 1.0 : 0.0, 0.0};
+        M[r][c] = cxr<R>{(R)g.r, (R)g.i};
+        M[r][3 + c] = cxr<R>{(R)(r == c ? 1 : 0), (R)0};
       }
       const nrd_c16 b = ((const nrd_c16 *)j.comp)[((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i];
-      M[r][2] = dcx{(double)b.r, (double)b.i};
+      M[r][2] = cxr<R>{(R)b.r, (R)b.i};
     }
     /* the CPU's Gauss-Jordan for nl = 2, unrolled with static indices (no local-memory spills): k = 0 pivots between
      * the two rows, k = 1 has a single candidate; same operations, same order */
     bool singular = false;
     {
       const bool sw = cabs_c(M[1][0]) > cabs_c(M[0][0]);
-      if (cabs_c(sw ? M[1][0] : M[0][0]) < 1e-9)
+      if (cabs_c(sw ? M[1][0] : M[0][0]) < (R)1e-9)
         singular = true;
       if (!singular) {
         if (sw) {
 #pragma unroll
           for (int c = 0; c < 5; c++) {
-            const dcx t = M[0][c];
+            const cxr<R> t = M[0][c];
             M[0][c] = M[1][c];
             M[1][c] = t;
           }
         }
-        const dcx inv = divdc3(1.0, 0.0, M[0][0].r, M[0][0].i);
+        const cxr<R> inv = divdc3((R)1, (R)0, M[0][0].r, M[0][0].i);
 #pragma unroll
         for (int c = 0; c < 5; c++)
           M[0][c] = cmul(M[0][c], inv);
-        const dcx f = M[1][0];
-        if (!(f.r == 0.0 && f.i == 0.0)) {
+        const cxr<R> f = M[1][0];
+        if (!(f.r == (R)0 && f.i == (R)0)) {
 #pragma unroll
           for (int c = 0; c < 5; c++) {
-            const dcx t = cmul(M[0][c], f);
-            M[1][c] = dcx{__dsub_rn(M[1][c].r, t.r), __dsub_rn(M[1][c].i, t.i)};
+            const cxr<R> t = cmul(M[0][c], f);
+            M[1][c] = cxr<R>{M[1][c].r - t.r, M[1][c].i - t.i};
           }
         }
-        if (cabs_c(M[1][1]) < 1e-9)
+        if (cabs_c(M[1][1]) < (R)1e-9)
           singular = true;
         if (!singular) {
-          const dcx inv1 = divdc3(1.0, 0.0, M[1][1].r, M[1][1].i);
+          const cxr<R> inv1 = divdc3((R)1, (R)0, M[1][1].r, M[1][1].i);
 #pragma unroll
           for (int c = 0; c < 5; c++)
             M[1][c] = cmul(M[1][c], inv1);
-          const dcx f1 = M[0][1];
-          if (!(f1.r == 0.0 && f1.i == 0.0)) {
+          const cxr<R> f1 = M[0][1];
+          if (!(f1.r == (R)0 && f1.i == (R)0)) {
 #pragma unroll
             for (int c = 0; c < 5; c++) {
-              const dcx t = cmul(M[1][c], f1);
-              M[0][c] = dcx{__dsub_rn(M[0][c].r, t.r), __dsub_rn(M[0][c].i, t.i)};
+              const cxr<R> t = cmul(M[1][c], f1);
+              M[0][c] = cxr<R>{M[0][c].r - t.r, M[0][c].i - t.i};
             }
           }
         }
@@ -476,14 +514,14 @@ __device__ __forceinline__ void re_mmse2(const nr_gpu_demod_job_t &j, const nrd_
     }
 #pragma unroll
     for (int r = 0; r < 2; r++) {
-      const double dinv = singular ? 0.0 : M[r][3 + r].r;
-      const double w = dinv > 1e-12 ? __ddiv_rn(1.0, dinv) : 0.0;
-      const double orr = w > 0.0 ? __dmul_rn(M[r][2].r, w) : 0.0, oi = w > 0.0 ? __dmul_rn(M[r][2].i, w) : 0.0;
+      const R dinv = singular ? (R)0 : M[r][3 + r].r;
+      const R w = dinv > (R)1e-12 ? divR((R)1, dinv) : (R)0;
+      const R orr = w > (R)0 ? M[r][2].r * w : (R)0, oi = w > (R)0 ? M[r][2].i * w : (R)0;
       const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i;
-      ((nrd_c16 *)j.comp)[row] = nrd_c16{qf_s16(orr), qf_s16(oi)};
-      const int16_t ma = qf_s16(__dmul_rn(__dmul_rn(w, (double)qa), 1.0 / 32768.0)); /* == / 32768.0 exactly */
-      const int16_t mb = qf_s16(__dmul_rn(__dmul_rn(w, (double)qb), 1.0 / 32768.0));
-      const int16_t mr = qf_s16(__dmul_rn(__dmul_rn(w, (double)qr), 1.0 / 32768.0));
+      ((nrd_c16 *)j.comp)[row] = nrd_c16{qf_s16<R>(orr), qf_s16<R>(oi)};
+      const int16_t ma = qf_s16<R>((w * (R)qa) * (R)(1.0 / 32768.0)); /* == / 32768.0 exactly */
+      const int16_t mb = qf_s16<R>((w * (R)qb) * (R)(1.0 / 32768.0));
+      const int16_t mr = qf_s16<R>((w * (R)qr) * (R)(1.0 / 32768.0));
       ((nrd_c16 *)j.mag)[row] = nrd_c16{ma, ma};
       ((nrd_c16 *)j.magb)[row] = nrd_c16{mb, mb};
       ((nrd_c16 *)j.magr)[row] = nrd_c16{mr, mr};
@@ -495,7 +533,7 @@ __device__ __forceinline__ void re_mmse2(const nr_gpu_demod_job_t &j, const nrd_
 /* ---- DECGPU: nr_dlsch_mmse() for Nl = 3, 4 (ISAC_PDSCH_GPU_EXACT_DEMOD_NL34=1). One thread per RE. --------------- */
 /* QAM-FIX mode 2: the generic Gauss-Jordan of the CPU source with the operation order of the Nl = 2 kernel above
  * (same compiled loop): pivot by cabs, complex scaling cmul(M[k][c], inv), elimination M[r][c] - cmul(M[k][c], f). */
-template <int NL> __device__ __forceinline__ void re_mmse2n(const nr_gpu_demod_job_t &j, const nrd_c16 *h, const Shared *sh, int m, uint32_t i)
+template <int NL, typename R> __device__ __forceinline__ void re_mmse2n(const nr_gpu_demod_job_t &j, const nrd_c16 *h, const Shared *sh, int m, uint32_t i)
 {
   constexpr int NC = 2 * NL + 1;
   const int shift = sh->d.log2_maxh, nb = j.nbRx;
@@ -504,7 +542,7 @@ template <int NL> __device__ __forceinline__ void re_mmse2n(const nr_gpu_demod_j
   const int16_t qr = j.qm == 8 ? NRD_QAM256_n3 : 0;
   const uint32_t nre = j.nre[m];
   if (i < nre) {
-    dcx M[NL][NC];
+    cxr<R> M[NL][NC];
     for (int r = 0; r < NL; r++) {
       for (int c = 0; c < NL; c++) {
         nrd_c16 g = {0, 0};
@@ -513,11 +551,11 @@ template <int NL> __device__ __forceinline__ void re_mmse2n(const nr_gpu_demod_j
           const nrd_c16 p = nrd_cpx_mult_conj(hr, hc, shift);
           g = a == 0 ? p : nrd_c16{nrd_adds(g.r, p.r), nrd_adds(g.i, p.i)};
         }
-        M[r][c] = dcx{(double)g.r, (double)g.i};
-        M[r][NL + 1 + c] = dcx{r == c ? 1.0 : 0.0, 0.0};
+        M[r][c] = cxr<R>{(R)g.r, (R)g.i};
+        M[r][NL + 1 + c] = cxr<R>{(R)(r == c ? 1 : 0), (R)0};
       }
       const nrd_c16 b = ((const nrd_c16 *)j.comp)[((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i];
-      M[r][NL] = dcx{(double)b.r, (double)b.i};
+      M[r][NL] = cxr<R>{(R)b.r, (R)b.i};
     }
     bool singular = false;
     for (int k = 0; k < NL && !singular; k++) {
@@ -525,40 +563,40 @@ template <int NL> __device__ __forceinline__ void re_mmse2n(const nr_gpu_demod_j
       for (int r = k + 1; r < NL; r++)
         if (cabs_c(M[r][k]) > cabs_c(M[piv][k]))
           piv = r;
-      if (cabs_c(M[piv][k]) < 1e-9) {
+      if (cabs_c(M[piv][k]) < (R)1e-9) {
         singular = true;
         break;
       }
       if (piv != k)
         for (int c = 0; c < NC; c++) {
-          const dcx t = M[k][c];
+          const cxr<R> t = M[k][c];
           M[k][c] = M[piv][c];
           M[piv][c] = t;
         }
-      const dcx inv = divdc3(1.0, 0.0, M[k][k].r, M[k][k].i);
+      const cxr<R> inv = divdc3((R)1, (R)0, M[k][k].r, M[k][k].i);
       for (int c = 0; c < NC; c++)
         M[k][c] = cmul(M[k][c], inv);
       for (int r = 0; r < NL; r++) {
         if (r == k)
           continue;
-        const dcx f = M[r][k];
-        if (f.r == 0.0 && f.i == 0.0)
+        const cxr<R> f = M[r][k];
+        if (f.r == (R)0 && f.i == (R)0)
           continue;
         for (int c = 0; c < NC; c++) {
-          const dcx t = cmul(M[k][c], f);
-          M[r][c] = dcx{__dsub_rn(M[r][c].r, t.r), __dsub_rn(M[r][c].i, t.i)};
+          const cxr<R> t = cmul(M[k][c], f);
+          M[r][c] = cxr<R>{M[r][c].r - t.r, M[r][c].i - t.i};
         }
       }
     }
     for (int r = 0; r < NL; r++) {
-      const double dinv = singular ? 0.0 : M[r][NL + 1 + r].r;
-      const double w = dinv > 1e-12 ? __ddiv_rn(1.0, dinv) : 0.0;
-      const double orr = w > 0.0 ? __dmul_rn(M[r][NL].r, w) : 0.0, oi = w > 0.0 ? __dmul_rn(M[r][NL].i, w) : 0.0;
+      const R dinv = singular ? (R)0 : M[r][NL + 1 + r].r;
+      const R w = dinv > (R)1e-12 ? divR((R)1, dinv) : (R)0;
+      const R orr = w > (R)0 ? M[r][NL].r * w : (R)0, oi = w > (R)0 ? M[r][NL].i * w : (R)0;
       const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i;
-      ((nrd_c16 *)j.comp)[row] = nrd_c16{qf_s16(orr), qf_s16(oi)};
-      const int16_t ma = qf_s16(__dmul_rn(__dmul_rn(w, (double)qa), 1.0 / 32768.0));
-      const int16_t mb = qf_s16(__dmul_rn(__dmul_rn(w, (double)qb), 1.0 / 32768.0));
-      const int16_t mr = qf_s16(__dmul_rn(__dmul_rn(w, (double)qr), 1.0 / 32768.0));
+      ((nrd_c16 *)j.comp)[row] = nrd_c16{qf_s16<R>(orr), qf_s16<R>(oi)};
+      const int16_t ma = qf_s16<R>((w * (R)qa) * (R)(1.0 / 32768.0));
+      const int16_t mb = qf_s16<R>((w * (R)qb) * (R)(1.0 / 32768.0));
+      const int16_t mr = qf_s16<R>((w * (R)qr) * (R)(1.0 / 32768.0));
       ((nrd_c16 *)j.mag)[row] = nrd_c16{ma, ma};
       ((nrd_c16 *)j.magb)[row] = nrd_c16{mb, mb};
       ((nrd_c16 *)j.magr)[row] = nrd_c16{mr, mr};
@@ -683,18 +721,61 @@ __device__ __forceinline__ void m3_load(const nr_gpu_demod_job_t &j, const nrd_c
     }
   }
 }
+/* the mode-3 solve in the precision of the instantiation (nr_mmse_exact.h: double = the CPU's function, float = Task 5) */
+__device__ __forceinline__ int m3_exact(int nl, int nb, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4],
+                                        double sc, double s2, double *xre, double *xim, double *ainv, double *r)
+{
+  return nr_mmse_exact_re(nl, nb, hre, him, yre, yim, sc, s2, xre, xim, ainv, r);
+}
+__device__ __forceinline__ int m3_exact(int nl, int nb, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4],
+                                        float sc, float s2, float *xre, float *xim, float *ainv, float *r)
+{
+  return nr_mmse_exact_re_f(nl, nb, hre, him, yre, yim, sc, s2, xre, xim, ainv, r);
+}
+__device__ __forceinline__ double m3_gain_of(double e, int n, double sc) { return nr_mmse3_gain(e, n, sc); }
+__device__ __forceinline__ float m3_gain_of(float e, int n, float sc) { return nr_mmse3_gain_f(e, n, sc); }
+__device__ __forceinline__ void m3_re(int nl, int nb, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4], double sc, double s2,
+                                      double gain, int16_t qa, int16_t qb, int16_t qr, int16_t (&z)[4][2], int16_t (&mg)[4][3])
+{
+  nr_mmse3_re(nl, nb, hre, him, yre, yim, sc, s2, gain, qa, qb, qr, z, mg);
+}
+__device__ __forceinline__ void m3_re(int nl, int nb, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4], float sc, float s2,
+                                      float gain, int16_t qa, int16_t qb, int16_t qr, int16_t (&z)[4][2], int16_t (&mg)[4][3])
+{
+  nr_mmse3_re_f(nl, nb, hre, him, yre, yim, sc, s2, gain, qa, qb, qr, z, mg);
+}
+template <typename R> __device__ __forceinline__ R m3_nvfac_of(const nr_gpu_demod_job_t &j)
+{
+  if constexpr (std::is_same<R, double>::value) return j.m3_nvfac;
+  else return j.m3_nvfac_f;
+}
+template <typename R> __device__ __forceinline__ void m3_put(Shared *sh, int m, R s2, R gain)
+{
+  if constexpr (std::is_same<R, double>::value) { sh->m3_s2[m] = s2; sh->m3_gain[m] = gain; }
+  else { sh->m3_s2f[m] = s2; sh->m3_gainf[m] = gain; }
+}
+template <typename R> __device__ __forceinline__ R m3_s2_of(const Shared *sh, int m)
+{
+  if constexpr (std::is_same<R, double>::value) return sh->m3_s2[m];
+  else return sh->m3_s2f[m];
+}
+template <typename R> __device__ __forceinline__ R m3_gain_at(const Shared *sh, int m)
+{
+  if constexpr (std::is_same<R, double>::value) return sh->m3_gain[m];
+  else return sh->m3_gainf[m];
+}
 constexpr int M3_NRES = EXT / 4 + 1;
-__global__ void k_mmse3_prep(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
+template <typename R = double> __global__ void k_mmse3_prep(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
-  __shared__ double rs[M3_NRES];
+  __shared__ R rs[M3_NRES];
   __shared__ unsigned char okf[M3_NRES];
   __shared__ long long red[32][4];
   const int m = blockIdx.x, t = threadIdx.x, nl = j.nl, nb = j.nbRx;
   if (!(j.sym_mask >> m & 1))
     return;
   const int nre = j.nre[m];
-  const double sc = ldexp(1.0, -sh->d.log2_maxh);
+  const R sc = ldexpR(R(), -sh->d.log2_maxh);
   long long e[4] = {0, 0, 0, 0};
   for (int i = t; i < nre; i += blockDim.x)
     for (int r = 0; r < nl; r++)
@@ -712,37 +793,36 @@ __global__ void k_mmse3_prep(__grid_constant__ const JobK jk_, const nrd_c16 *y,
   for (int k = t; k < nk; k += blockDim.x) {
     int16_t hre[4][4], him[4][4], yre[4], yim[4];
     m3_load(j, y, h, m, (uint32_t)(4 * k), nl, hre, him, yre, yim);
-    double xre[4], xim[4], ainv[4], r = 0.0;
-    okf[k] = (unsigned char)nr_mmse_exact_re(nl, nb, hre, him, yre, yim, sc, 0.0, xre, xim, ainv, &r);
-    rs[k] = okf[k] ? r : 0.0;
+    R xre[4], xim[4], ainv[4], r = 0;
+    okf[k] = (unsigned char)m3_exact(nl, nb, hre, him, yre, yim, sc, (R)0, xre, xim, ainv, &r);
+    rs[k] = okf[k] ? r : (R)0;
   }
   __syncthreads();
   if (t == 0) {
-    double gd = 0.0;
+    R gd = 0;
     for (int r = 0; r < nl; r++) {
       long long s = 0;
       for (int w = 0; w < (int)(blockDim.x >> 5); w++)
         s += red[w][r];
-      if ((double)s > gd)
-        gd = (double)s;
+      if ((R)s > gd)
+        gd = (R)s;
     }
-    double s2 = 0.0;
+    R s2 = 0;
     if (nb <= nl) {
-      s2 = (double)NRD_NVAR(j) * sc * j.m3_nvfac;
+      s2 = (R)NRD_NVAR(j) * sc * m3_nvfac_of<R>(j);
     } else {
-      double res = 0.0;
+      R res = 0;
       int nres = 0;
       for (int k = 0; k < nk; k++) {
         res += rs[k];
         nres += okf[k];
       }
-      s2 = nres > 0 ? res / ((double)nres * (nb - nl)) * sc : 0.0;
+      s2 = nres > 0 ? res / ((R)nres * (nb - nl)) * sc : (R)0;
     }
-    sh->m3_s2[m] = s2;
-    sh->m3_gain[m] = nr_mmse3_gain(gd, nre, sc);
+    m3_put<R>(sh, m, s2, m3_gain_of(gd, nre, sc));
   }
 }
-template <int NL> __device__ __forceinline__ void re_mmse3(const nr_gpu_demod_job_t &j, const nrd_c16 *y, const nrd_c16 *h, const Shared *sh, int m, uint32_t i)
+template <int NL, typename R> __device__ __forceinline__ void re_mmse3(const nr_gpu_demod_job_t &j, const nrd_c16 *y, const nrd_c16 *h, const Shared *sh, int m, uint32_t i)
 {
   if (i >= j.nre[m])
     return;
@@ -751,7 +831,7 @@ template <int NL> __device__ __forceinline__ void re_mmse3(const nr_gpu_demod_jo
   const int16_t qr = j.qm == 8 ? NRD_QAM256_n3 : 0;
   int16_t hre[4][4], him[4][4], yre[4], yim[4], z[4][2], mg[4][3];
   m3_load(j, y, h, m, i, NL, hre, him, yre, yim);
-  nr_mmse3_re(NL, j.nbRx, hre, him, yre, yim, ldexp(1.0, -sh->d.log2_maxh), sh->m3_s2[m], sh->m3_gain[m], qa, qb, qr, z, mg);
+  m3_re(NL, j.nbRx, hre, him, yre, yim, ldexpR(R(), -sh->d.log2_maxh), m3_s2_of<R>(sh, m), m3_gain_at<R>(sh, m), qa, qb, qr, z, mg);
   for (int r = 0; r < NL; r++) {
     const size_t row = ((size_t)m * NR_GPU_DEMOD_MAX_NL + r) * j.buf + i;
     ((nrd_c16 *)j.comp)[row] = nrd_c16{z[r][0], z[r][1]};
@@ -1293,7 +1373,7 @@ __device__ __forceinline__ void re_llr(const nr_gpu_demod_job_t &j, int m, uint3
  * independent; the thread that compensates RE i also equalises it and writes its LLRs). MM: 0 none (Nl = 1),
  * 1 QAM-FIX Nl = 2, 2/3 QAM-FIX Nl = 3/4, 4/5 stock MMSE Nl = 3/4, 6/7/8 MMSE3GPU mode 3 Nl = 2/3/4. The kappa sums are integers, so block sums plus
  * atomics give the same totals as the former ordered reduction (zeroed per symbol in k_mask_pw). */
-template <int MM> __global__ void k_tail(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
+template <int MM, typename R = double> __global__ void k_tail(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ long long red[8][8];
@@ -1303,21 +1383,21 @@ template <int MM> __global__ void k_tail(__grid_constant__ const JobK jk_, const
   const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x, nre = j.nre[m];
   re_comp(j, y, h, sh, m, i);
   if (MM == 1)
-    re_mmse2(j, h, sh, m, i);
+    re_mmse2<R>(j, h, sh, m, i);
   else if (MM == 2)
-    re_mmse2n<3>(j, h, sh, m, i);
+    re_mmse2n<3, R>(j, h, sh, m, i);
   else if (MM == 3)
-    re_mmse2n<4>(j, h, sh, m, i);
+    re_mmse2n<4, R>(j, h, sh, m, i);
   else if (MM == 4)
     re_mmse0n<3>(j, h, sh, m, i);
   else if (MM == 5)
     re_mmse0n<4>(j, h, sh, m, i);
   else if (MM == 6)
-    re_mmse3<2>(j, y, h, sh, m, i);
+    re_mmse3<2, R>(j, y, h, sh, m, i);
   else if (MM == 7)
-    re_mmse3<3>(j, y, h, sh, m, i);
+    re_mmse3<3, R>(j, y, h, sh, m, i);
   else if (MM == 8)
-    re_mmse3<4>(j, y, h, sh, m, i);
+    re_mmse3<4, R>(j, y, h, sh, m, i);
   if (j.want_kappa && j.qm > 2) { /* block-uniform condition */
     long long v[8];
     for (int l = 0; l < 4; l++) {
@@ -1406,7 +1486,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   j.ext = 16;
   k_gather<<<dim3(1, NSYM), 32, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h);
   k_mask_pw<<<NSYM, 256, 0, g_ctx[0].s>>>(K(j), g_ctx[0].h, g_ctx[0].dsh);
-  k_align<<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
+  k_align<double><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_tail<0><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_tail<1><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_level<<<1, 256, 0, g_ctx[0].s>>>(K(j), g_ctx[0].h, g_ctx[0].dsh);
@@ -1427,7 +1507,11 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   if (cudaFuncGetAttributes(&fa, k_tail<2>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<3>) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_tail<4>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<5>) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_tail<6>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<7>) != cudaSuccess
-      || cudaFuncGetAttributes(&fa, k_tail<8>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_mmse3_prep) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_tail<8>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_mmse3_prep<double>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_align<float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_mmse3_prep<float>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_tail<1, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<2, float>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_tail<3, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<6, float>) != cudaSuccess
+      || cudaFuncGetAttributes(&fa, k_tail<7, float>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_tail<8, float>) != cudaSuccess
       || cudaFuncGetAttributes(&fa, k_evm1<float, 4>) != cudaSuccess || cudaFuncGetAttributes(&fa, k_evm1<double, 4>) != cudaSuccess)
     return -1;
   g_ok = 1;
@@ -1438,26 +1522,41 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
 static void launch_tail(const nr_gpu_demod_job_t &jj, Ctx &x, cudaStream_t s, int gx)
 {
   const dim3 g(gx, NSYM);
-  if (jj.qam_mode == 3 && jj.nl >= 2) /* MMSE3GPU: per-symbol s2 and gain, then the per-RE solve */
-    k_mmse3_prep<<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
-  if (jj.qam_mode == 3 && jj.nl == 2)
-    k_tail<6><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
-  else if (jj.qam_mode == 3 && jj.nl == 3)
-    k_tail<7><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
-  else if (jj.qam_mode == 3 && jj.nl == 4)
-    k_tail<8><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
-  else if (jj.nl == 2)
-    k_tail<1><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
-  else if (jj.nl == 3 && jj.qam_mode == 2)
-    k_tail<2><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
-  else if (jj.nl == 4 && jj.qam_mode == 2)
-    k_tail<3><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
-  else if (jj.nl == 3)
+  const bool f = jj.demod_fp32 != 0; /* Task 5: the float instantiation of the kernels that have one (the others are integer-only) */
+  if (jj.qam_mode == 3 && jj.nl >= 2) { /* MMSE3GPU: per-symbol s2 and gain, then the per-RE solve */
+    if (f) k_mmse3_prep<float><<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    else k_mmse3_prep<double><<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  }
+  if (jj.qam_mode == 3 && jj.nl == 2) {
+    if (f) k_tail<6, float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    else k_tail<6><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  } else if (jj.qam_mode == 3 && jj.nl == 3) {
+    if (f) k_tail<7, float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    else k_tail<7><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  } else if (jj.qam_mode == 3 && jj.nl == 4) {
+    if (f) k_tail<8, float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    else k_tail<8><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  } else if (jj.nl == 2) {
+    if (f) k_tail<1, float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    else k_tail<1><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  } else if (jj.nl == 3 && jj.qam_mode == 2) {
+    if (f) k_tail<2, float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    else k_tail<2><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  } else if (jj.nl == 4 && jj.qam_mode == 2) {
+    if (f) k_tail<3, float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    else k_tail<3><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  } else if (jj.nl == 3)
     k_tail<4><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   else if (jj.nl == 4)
     k_tail<5><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   else
     k_tail<0><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+}
+static void launch_align(const nr_gpu_demod_job_t &jj, Ctx &x, cudaStream_t s)
+{
+  const dim3 g((MAXCH + ALC - 1) / ALC, NSYM);
+  if (jj.demod_fp32) k_align<float><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  else k_align<double><<<g, 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
 }
 
 extern "C" void nr_pdsch_gpu_demod_release(int c)
@@ -1506,7 +1605,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
   k_mask_pw<<<NSYM, 256, 0, x.s>>>(K(jj), x.h, x.dsh);
   if (g_prof) cudaEventRecord(x.ev[3], x.s);
   if (jj.nl == 1 && jj.align)
-    k_align<<<dim3((MAXCH + ALC - 1) / ALC, NSYM), 128, 0, x.s>>>(K(jj), x.y, x.h, x.dsh);
+    launch_align(jj, x, x.s);
   if (g_prof) cudaEventRecord(x.ev[4], x.s);
   if (jj.want_evm) {
     cudaStream_t es = g_prof ? x.s : x.s2;
@@ -1631,12 +1730,13 @@ extern "C" int nr_pdsch_gpu_demod_dev(const nr_gpu_demod_job_t *j, nr_gpu_buf_t 
   const cudaStream_t s = (cudaStream_t)stream;
   nr_gpu_demod_job_t jj = *j;
   jj.llr = (int16_t *)llr_dev->dev;
+  jj.m3_nvfac_f = (float)jj.m3_nvfac;
   const int gx = (int)((jj.ext + 127) / 128);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
   k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
-    k_align<<<dim3((MAXCH + ALC - 1) / ALC, NSYM), 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    launch_align(jj, x, s);
   launch_tail(jj, x, s, gx);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
@@ -1652,6 +1752,7 @@ extern "C" int nr_pdsch_gpu_demod_pass_set(int inst, const nr_gpu_demod_job_t *j
 {
   if (!pass_ok(inst, j)) return -1;
   memcpy(g_jb[inst].host, j, sizeof(JobK));
+  ((nr_gpu_demod_job_t *)g_jb[inst].host)->m3_nvfac_f = (float)j->m3_nvfac;
   ((nr_gpu_demod_job_t *)g_jb[inst].host)->jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
   return 0;
 }
@@ -1665,6 +1766,7 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
   nr_gpu_demod_job_t jj = *jcap;
   jj.llr = (int16_t *)llr_dev->dev;
   jj.nvar_dev = nvar_dev;
+  jj.m3_nvfac_f = (float)jj.m3_nvfac;
   jj.jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
   if (nr_gpu_buf_h2d_async(&g_jb[inst], 0, sizeof(JobK), s) != 0) return -1;
   const int gx = (int)((jj.ext + 127) / 128);
@@ -1672,7 +1774,7 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
   k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
   k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.h, x.dsh);
   if (jj.nl == 1 && jj.align)
-    k_align<<<dim3((MAXCH + ALC - 1) / ALC, NSYM), 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+    launch_align(jj, x, s);
   if (jj.want_evm) { /* the EVM chain on its own branch, as in nr_pdsch_gpu_demod_run */
     cudaEventRecord(x.fork, s);
     cudaStreamWaitEvent(es, x.fork, 0);

@@ -100,6 +100,7 @@ struct GpuPassModule {
 class GpuPassFixture {
  public:
   typedef std::complex<double> cd;
+  static inline double noise_db = 20.0; /* SNR of small_grant()/from_shape() fixtures built from now on */
   static constexpr int N = 4096, NCP = 288, NCP0 = 352, NSYM = 14, NRB = 273, FCO = N - NRB * 6, NANT = 4;
   static constexpr int SLOT = NCP0 + N + (NSYM - 1) * (N + NCP);
   int nrb, nl, qm, start_rb = 10;
@@ -203,7 +204,7 @@ class GpuPassFixture {
     }
     f.ring_len = 3 * SLOT;
     f.ring_offset = f.ring_len - 1000; /* the slot wraps around the ring end */
-    const double noise_sd = std::pow(10, -20.0 / 20) / std::sqrt(2.0); /* 20 dB */
+    const double noise_sd = std::pow(10, -noise_db / 20) / std::sqrt(2.0); /* 20 dB unless a test sets noise_db (Task 5 SNR sweep) */
     for (int a = 0; a < NANT; a++) {
       for (auto &y : Y[a]) y += cd(G(rng), G(rng)) * noise_sd;
       std::vector<double> td(2 * (SLOT + 64), 0.0);
@@ -711,6 +712,39 @@ class GpuPassFixture {
     return f;
   }
   bool tb_ok_built = false;
+  /* Task 5: one pass of this fixture's job through the graph (module m, pass_ready) in the FP64 (fp32 = 0) or FP32 (fp32 = 1) demod class; the final LLRs are kept
+   * whatever the CRC verdict. The class must have been warmed with the same bit (shape.fp32 bit 1). */
+  struct PassRes {
+    int rc = -1;
+    bool tb_ok = false, need_cpu = false;
+    std::vector<int16_t> llr;
+  };
+  PassRes run_pass(GpuPassModule &m, int fp32)
+  {
+    PassRes p;
+    job->shape.fp32 = (uint8_t)((shape.fp32 & 1) | (fp32 ? NR_GPU_PASS_FP32_DEMOD : 0));
+    job->dj.demod_fp32 = fp32;
+    job->llr_out_all = 1;
+    std::fill(llr_pass.begin(), llr_pass.end(), (int16_t)0);
+    std::vector<uint8_t> tb(tb_info_bytes() + 64, 0);
+    nr_gpu_pass_result_t r{};
+    r.tb = tb.data();
+    p.rc = m.pass_try(job, &r);
+    p.tb_ok = p.rc == 0 && r.tb_ok;
+    p.need_cpu = p.rc == 0 && r.need_cpu;
+    p.llr.assign(llr_pass.begin(), llr_pass.begin() + job->G);
+    return p;
+  }
+  size_t tb_info_bytes() const { return (size_t)tb.A / 8; }
+  /* sign agreement of two LLR vectors: a position agrees unless the signs are strictly opposite; it counts when either is nonzero */
+  static void count_sign_agreement(const PassRes &a, const PassRes &b, size_t *same, size_t *total)
+  {
+    for (size_t i = 0; i < a.llr.size() && i < b.llr.size(); i++) {
+      if (!a.llr[i] && !b.llr[i]) continue;
+      ++*total;
+      *same += !((a.llr[i] > 0 && b.llr[i] < 0) || (a.llr[i] < 0 && b.llr[i] > 0));
+    }
+  }
   /* (re)builds the job from this object's own vectors: call after the fixture has settled at its final address */
   void bind()
   {

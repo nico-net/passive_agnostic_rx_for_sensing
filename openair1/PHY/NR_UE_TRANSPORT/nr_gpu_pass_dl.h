@@ -47,6 +47,7 @@ typedef struct {
 
 /* 1 = ISAC_GPU_PASS=1 and the module is up (set by nr_gpu_pass_warmup) */
 int nr_gpu_pass_active(void);
+int nr_gpu_pass_fp32_on(void); /* Task 5: the graphs run the FP32 demod; the shadow checks then compare LLR signs and CRC verdicts, not hashes */
 /* before the RX fence, after nr_pdsch_gpu_exact_warmup returned 1 */
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue);
 /* 0 = the pass ran (out filled; the TB may still have failed CRC or need the CPU decoder: out->r.tb_ok / need_cpu), 1 = not handled (counted), the old path decodes */
@@ -54,7 +55,8 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
 /* body-side events for the census */
 enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / CPU: the old path decodes */, NR_GPU_PASS_EV_ZERO_TB, NR_GPU_PASS_EV_LIFETIME, NR_GPU_PASS_EV_SHADOW,
        NR_GPU_PASS_EV_SHADOW_BAD, NR_GPU_PASS_EV_CONT_FAIL /* CRC fail of the pass continued into the retry arms, no old first body */,
-       NR_GPU_PASS_EV_OLD_FIRST /* old first body executed although a pass was attempted */, NR_GPU_PASS_EV_SHADOW_FAIL, NR_GPU_PASS_EV_SHADOW_FAIL_BAD, NR_GPU_PASS_EV_N };
+       NR_GPU_PASS_EV_OLD_FIRST /* old first body executed although a pass was attempted */, NR_GPU_PASS_EV_SHADOW_FAIL, NR_GPU_PASS_EV_SHADOW_FAIL_BAD,
+       NR_GPU_PASS_EV_FP32_FLIP /* FP32 pass: a shadow where pass and old path disagree on the CRC verdict only (tolerated, counted) */, NR_GPU_PASS_EV_N };
 /* gates of passive_decode_body_core that keep a grant off the pass (the first one that refuses, counted) */
 enum { NR_GPU_PASS_GATE_SEG /* more segments than the largest class (16) */, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
        NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_N };
