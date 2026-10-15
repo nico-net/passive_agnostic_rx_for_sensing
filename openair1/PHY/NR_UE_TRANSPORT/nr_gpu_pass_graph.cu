@@ -38,6 +38,7 @@ extern "C" {
 int nr_pdsch_gpu_fep_stage_at(const nr_gpu_fep_job_t *j, int slot);
 int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF, int slot, void *stream);
 int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, int slot);
+int nr_pdsch_gpu_pass_ls_rows(void);
 int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream);
 int nr_pdsch_gpu_demod_pass_set(int inst, const nr_gpu_demod_job_t *j);
 int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *jcap, nr_gpu_buf_t *llr_dev, const uint32_t *nvar_dev, void *stream, void *stream2);
@@ -206,7 +207,7 @@ static nr_gpu_pass_cfg_t g_cfg = {};
 static bool g_cfg_set = false;
 static std::atomic<int> g_ready{0}, g_dead{0};
 static std::atomic<unsigned> g_busy{0};
-static std::atomic<uint64_t> g_seg_launches{0}, g_seg_classes{0}, g_used_mb{0}; /* g_used_mb: GPU memory in use by the device after the last pre-fence build */
+static std::atomic<uint64_t> g_seg_launches{0}, g_seg_classes{0}, g_used_mb{0}, g_base_mb{0}, g_fb_unseen_seg{0}; /* g_used_mb: GPU memory in use by the device after the last pre-fence build */
 static std::atomic<uint64_t> g_launches{0}, g_hits{0}, g_fb_unseen{0}, g_fb_busy{0}, g_fb_unsup{0}, g_fb_err{0}, g_need_cpu{0}, g_tb_fail{0}, g_allocs{0}, g_fb_ldpckey{0};
 static std::atomic<uint64_t> g_wait_hist[32]; /* host wait, 2^i us buckets */
 constexpr uint32_t RING_LEN = 80000;
@@ -473,7 +474,7 @@ static bool key_ok(const Key &k)
 {
   return g_cfg_set && nr_gpu_pass_nrb_class(k.nrb) == k.nrb && nr_gpu_pass_ncb_class(k.ncb) == k.ncb && k.nl >= 1 && k.nl <= 4 && k.nl <= g_cfg.nbRx &&
          k.ndmrs >= 1 && k.ndmrs <= NR_GPU_PASS_MAX_DMRS && k.qmode <= 3 && (k.nseg == 0 || nr_gpu_pass_nseg_class(k.nseg) == k.nseg) &&
-         (int)k.ndmrs * k.nl * g_cfg.nbRx * (k.nseg ? k.nseg : 1) <= SEG_ROWS;
+         (int)k.ndmrs * k.nl * g_cfg.nbRx * (k.nseg ? k.nseg : 1) <= std::min(SEG_ROWS, nr_pdsch_gpu_pass_ls_rows());
 }
 
 /* capture + instantiate + one replay (pre-fence) of a class on every instance. Under g_mu. */
@@ -521,7 +522,7 @@ static int build(const Key &k)
   if (k.nseg) ++g_seg_classes;
   {
     size_t fr = 0, tot_b = 0; /* build() runs before the fence only (guard_alloc) */
-    if (cudaMemGetInfo(&fr, &tot_b) == cudaSuccess) g_used_mb = (tot_b - fr) >> 20;
+    if (cudaMemGetInfo(&fr, &tot_b) == cudaSuccess) g_used_mb = ((tot_b - fr) >> 20) - g_base_mb; /* delta from the start of the warm-up (the device is shared) */
   }
   return 0;
 }
@@ -585,6 +586,7 @@ extern "C" int nr_gpu_pass_init(int max_classes)
 {
   std::lock_guard<std::mutex> lk(g_mu);
   if (g_ready) return 0;
+  { size_t fr = 0, tb = 0; if (cudaMemGetInfo(&fr, &tb) == cudaSuccess) g_base_mb = (tb - fr) >> 20; }
   if (!g_cfg_set || !guard_alloc()) return -1;
   for (int a = 0; a < 4; a++)
     if (nr_gpu_buf_alloc(&g_ring[a], (size_t)RING_LEN * 4)) return -1;
@@ -616,7 +618,7 @@ extern "C" void nr_gpu_pass_counters(uint64_t o[16])
 {
   memset(o, 0, 16 * sizeof(uint64_t));
   o[0] = g_launches; o[1] = g_hits; o[2] = g_fb_unseen; o[3] = g_fb_busy; o[4] = g_fb_unsup; o[5] = g_fb_err; o[6] = g_need_cpu; o[7] = g_tb_fail;
-  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey; o[12] = g_seg_launches; o[13] = g_seg_classes;
+  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey; o[12] = g_seg_launches; o[13] = g_seg_classes; o[14] = g_fb_unseen_seg;
 }
 
 extern "C" void nr_gpu_pass_stats(char *buf, int n)
@@ -630,8 +632,8 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
     acc += g_wait_hist[i];
     if (acc * 2 >= tot && tot) { p50 = i; break; }
   }
-  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_used_mb=%lu",
-           (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5] + o[11]), (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[4],
+  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu (seg %lu) busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu (seg %lu) seg_launches=%lu instances=%lu wait_us_p50<=%d gpu_delta_mb=%lu",
+           (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5] + o[11]), (unsigned long)o[2], (unsigned long)o[14], (unsigned long)o[3], (unsigned long)o[4],
            (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[13], (unsigned long)o[12], (unsigned long)o[8],
            tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load());
 }
@@ -663,6 +665,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     if (f != g_cache.end()) e = &f->second;
   }
   if (!e) {
+    if (k.nseg) ++g_fb_unseen_seg;
     if (g_fb_unseen++ < 40 && getenv("ISAC_GPU_PASS_LOG_UNSEEN"))
       fprintf(stderr, "GPUPASS unseen class: nrb %u (grant %d) nl %u ndmrs %u ncb %u (C %u) evm %u qmode %u align %u fp32 %u nseg %u (grant %d)\n", k.nrb, j->nrb, k.nl, k.ndmrs, k.ncb, j->C, k.evm, k.qmode,
               k.align, k.fp32, k.nseg, j->nseg);

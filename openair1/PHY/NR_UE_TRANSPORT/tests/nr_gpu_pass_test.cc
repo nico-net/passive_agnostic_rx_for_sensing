@@ -145,7 +145,7 @@ static std::vector<GpuPassFixture::SegDef> seg_layout(int n, int start, int prg,
   }
   return sg;
 }
-struct SegCase { const char *name; int nl, qm, n, start, prg, interleave, bwp; };
+struct SegCase { const char *name; int nl, qm, n, start, prg, interleave, bwp; int bwp_start = 0, ref_point = 0; };
 static uint64_t hash64(const void *p, size_t n) { uint64_t h = 1469598103934665603ull; for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 1099511628211ull; return h; }
 /* The segmented graph pass equals the old segmented path for the same grant (Task 2 stages as the passive body runs them for a segmented grant: the chest per segment into scratch
  * rows, each estimate parked at its data offset, the width-weighted nvar, the demod against the gathered virtual allocation, then the CPU steps): TB bytes, CRC verdict, nvar and the
@@ -167,8 +167,10 @@ TEST(GpuPassDl, SegmentedGraphEqualsStagePath) {
       {"interleaved L2 8 segs rank2", 2, 6, 16, 0, 0, 2, 40}, // VRB bundles of 2 scattered over a 40 PRB BWP
       {"interleaved L4 + prg2 rank1", 1, 4, 12, 4, 2, 4, 48},
       {"interleaved L4 rank4", 4, 2, 16, 0, 0, 4, 64},
-      {"one segment, prg set rank1", 1, 4, 3, 5, 8, 0, 0},   // nseg 1 on the contiguous class with segmented inputs
+      {"one segment, prg set rank1", 1, 4, 3, 5, 8, 0, 0},   // nseg 1: segmented class 1 (scratch row + compose)
       {"two segments, nseg class 2 rank2", 2, 4, 13, 3, 8, 0, 0}, // 3..7 | 8..15
+      {"BWPStart 12, refPoint 0, prg4 rank2", 2, 4, 12, 1, 4, 0, 0, 12, 0},
+      {"BWPStart 20, refPoint 1 interleaved rank1", 1, 4, 12, 0, 0, 2, 32, 20, 1},
   };
   int n = 0, hit_cls[5] = {0, 0, 0, 0, 0}, decoded = 0;
   for (const SegCase &c : cases) {
@@ -177,7 +179,7 @@ TEST(GpuPassDl, SegmentedGraphEqualsStagePath) {
     ASSERT_GT(nsegc, 0) << c.name;
     for (int corrupt : {-1, 0}) { // 0: every coded bit of every block corrupted w.p. 0.3 -> a CRC failure whose LLRs the retry arms get
       nr_gpu_pass_shape_t sh = {(uint16_t)c.n, 13, (uint16_t)c.nl, (uint16_t)c.qm, 2, 1, 1, (uint16_t)nsegc};
-      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 17 + n, corrupt, &sd);
+      GpuPassFixture fx = GpuPassFixture::from_shape(sh, 17 + n, corrupt, &sd, c.bwp_start, c.ref_point);
       ASSERT_TRUE(fx.tb_ok_built) << c.name;
       fx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(fx.tb.C);
       fx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(c.n);
@@ -216,20 +218,11 @@ TEST(GpuPassDl, SegmentedGraphEqualsStagePath) {
     }
   }
   printf("GpuPassDl.SegmentedGraphEqualsStagePath: %d grants (classes 1/2/4/8/16: %d/%d/%d/%d/%d), decoded %d\n", n, hit_cls[0], hit_cls[1], hit_cls[2], hit_cls[3], hit_cls[4], decoded);
-  EXPECT_GE(decoded, 6) << "the clean grants should decode (rank 4 excepted)";
+  EXPECT_GE(decoded, 7) << "the clean grants should decode (rank 4 excepted)";
   for (int i = 0; i < 5; i++) EXPECT_GT(hit_cls[i], 0) << "segment-count class " << (1 << i) << " not exercised";
   uint64_t o[16];
   m.pass_counters(o);
   EXPECT_GE(o[12], (uint64_t)1) << "segmented launches counted";
-  { /* the class NoAllocAfterFence launches after the fence */
-    const auto sd = seg_layout(16, 0, 4, 0, 0);
-    nr_gpu_pass_shape_t ssh = {16, 13, 2, 4, 2, 1, 1, (uint16_t)nr_gpu_pass_nseg_class((int)sd.size())};
-    GpuPassFixture sfx = GpuPassFixture::from_shape(ssh, 22, -1, &sd);
-    sfx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(sfx.tb.C);
-    sfx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(16);
-    nr_gpu_pass_shape_t sw = sfx.shape;
-    EXPECT_EQ(0, m.pass_warm(&sw, 3, 0, 0));
-  }
 }
 /* CRC failure and the stop rule: the coded bits of the code blocks from CB 1 on are corrupted, so CB 0 decodes and the rest cannot. The graph and the stage path agree
  * on every verdict (the first-passing-snapshot rule, the abort of the later blocks, the zero-syndrome CPU hand-over) and on the bytes they leave. */
@@ -1064,11 +1057,14 @@ TEST(GpuPassFence, NoAllocAfterFence) {
   sfx.shape.ncb_class = (uint16_t)nr_gpu_pass_ncb_class(sfx.tb.C);
   sfx.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(16);
   sfx.bind();
-  { /* the class was warmed by SegmentedGraphEqualsStagePath (the fence may already be up); alone this part is skipped */
+  /* warm the class before the fence; when another test already raised it the class was warmed by SegmentedGraphEqualsStagePath, else the segmented part is skipped */
+  nr_gpu_pass_shape_t sw = sfx.shape;
+  bool have_seg = m.pass_warm(&sw, 3, 0, 0) == 0;
+  if (!have_seg) {
     nr_gpu_pass_result_t pr{};
     std::vector<uint8_t> ptb(sfx.tb.A / 8 + 64);
     pr.tb = ptb.data();
-    if (m.pass_try(sfx.job, &pr) != 0) GTEST_SKIP() << "segmented class not warmed (run with SegmentedGraphEqualsStagePath)";
+    have_seg = m.pass_try(sfx.job, &pr) == 0;
   }
   std::vector<uint8_t> stb(sfx.tb.A / 8 + 64);
   nr_gpu_pass_result_t sr{};
@@ -1081,7 +1077,7 @@ TEST(GpuPassFence, NoAllocAfterFence) {
   for (int i = 0; i < 1000; i++) {
     ASSERT_EQ(0, m.pass_try(fx.job, &r)) << "launch " << i;
     ASSERT_TRUE(r.tb_ok) << "launch " << i;
-    if (i % 5 == 0) {
+    if (have_seg && i % 5 == 0) {
       ASSERT_EQ(0, m.pass_try(sfx.job, &sr)) << "segmented launch " << i;
       ASSERT_TRUE(sr.tb_ok) << "segmented launch " << i;
     }
@@ -1094,8 +1090,8 @@ TEST(GpuPassFence, NoAllocAfterFence) {
   EXPECT_EQ(pa0, pa1) << "the platform allocated on the pass path";
   EXPECT_EQ(pd0, pd1);
   EXPECT_EQ(o0[10], o1[10]) << "the module allocated (captured) on the pass path";
-  EXPECT_EQ(o0[1] + 1200, o1[1]);
-  EXPECT_EQ(o0[12] + 200, o1[12]) << "segmented launches";
+  EXPECT_EQ(o0[1] + 1000 + (have_seg ? 200 : 0), o1[1]);
+  EXPECT_EQ(o0[12] + (have_seg ? 200 : 0), o1[12]) << "segmented launches";
   EXPECT_EQ(0, memcmp(tb.data(), fx.tb.payload.data(), fx.tb.A / 8));
-  EXPECT_EQ(0, memcmp(stb.data(), sfx.tb.payload.data(), sfx.tb.A / 8));
+  if (have_seg) EXPECT_EQ(0, memcmp(stb.data(), sfx.tb.payload.data(), sfx.tb.A / 8));
 }

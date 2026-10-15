@@ -236,11 +236,11 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
         }
       }
   /* segmented (PRG / VRB-bundle) classes: segment-count classes 1, 2, 4, 8, 16 on top of the contiguous ones. Own budget
-   * (ISAC_GPU_PASS_SEG_CLASSES, default 1100): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
+   * (ISAC_GPU_PASS_SEG_CLASSES, default 1400): the passes with the widest grants are warmed first; a segmented grant of an unwarmed class stays on the old path (unseen). */
   const char *se = getenv("ISAC_GPU_PASS_SEG_CLASSES");
-  const int sbudget = se ? atoi(se) : 1100;
+  const int sbudget = se ? atoi(se) : 1400;
   int smade = 0;
-  static const int segc[] = {1, 2, 4, 8, 16};
+  static const int segc[] = {1, 2, 4, 8, 16}, segnl[] = {1, 2, 3, 4};
   if (G.stats) {
     char buf[512];
     G.stats(buf, sizeof(buf));
@@ -250,7 +250,7 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     for (int di = 0; di < nnd; di++)
       for (int ni = 0; ni < 8 && smade < sbudget; ni++)
         for (int sc = 0; sc < 5 && smade < sbudget; sc++) {
-          const int nl = nls[li], ns = segc[sc];
+          const int nl = segnl[li], ns = segc[sc];
           if (nl > fp->nb_antennas_rx || ns > nrbs[ni] || nd[di] * nl * fp->nb_antennas_rx * ns > 512)
             continue;
           int variants[2][2], nvar = 0;
@@ -337,18 +337,8 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->nrb = nrb;
   j->k0 = k0;
   if (nseg > 0) {
-    const int bwp = in->dlsch_config->BWPStart;
-    int tot = 0;
-    j->nseg = nseg;
     j->seg_pil_nrb = pil_nrb;
-    for (int s = 0; s < nseg; s++) {
-      const nr_prb_seg_t *g = &in->seg[s];
-      j->seg[s].n_prb = g->n_prb;
-      j->seg[s].data_index = g->data_index;
-      j->seg[s].pil_rb = g->prb_start + (in->dlsch_config->refPoint ? 0 : bwp);
-      j->seg[s].k0 = (int)((uint16_t)(fp->first_carrier_offset + (bwp + g->prb_start) * 12) % fp->ofdm_symbol_size); /* as nr_pdsch_gpu_chest_grant's rows */
-      tot += g->n_prb;
-    }
+    const int tot = nr_gpu_pass_seg_fill(j, in->seg, nseg, in->dlsch_config->BWPStart, in->dlsch_config->refPoint, fp->first_carrier_offset, fp->ofdm_symbol_size);
     if (tot != nrb || tot != in->freq_alloc->num_rbs)
       return fb(FB_SEG);
   }

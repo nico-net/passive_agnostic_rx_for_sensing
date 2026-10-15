@@ -136,6 +136,22 @@ typedef struct {
   int16_t *llr_out; /* optional caller buffer [G]: receives the final (descrambled, normalised) LLRs when the TB fails its CRC, so that the caller's retry arms can re-decode them */
 } nr_gpu_pass_job_t;
 
+/* the per-segment inputs of a segmented job as nr_pdsch_gpu_chest_grant's rows take them: pilot RB (prb_start + the BWP start unless the reference point is CRB 0) and first LS
+ * subcarrier ((first_carrier_offset + (BWPStart + prb_start) * 12) as an unsigned short, % N). Returns the PRBs in total. */
+static inline int nr_gpu_pass_seg_fill(nr_gpu_pass_job_t *j, const nr_prb_seg_t *seg, int nseg, int bwp_start, int ref_point, int first_carrier_offset, int N)
+{
+  int tot = 0;
+  j->nseg = nseg;
+  for (int s = 0; s < nseg; s++) {
+    j->seg[s].n_prb = seg[s].n_prb;
+    j->seg[s].data_index = seg[s].data_index;
+    j->seg[s].pil_rb = seg[s].prb_start + (ref_point ? 0 : bwp_start);
+    j->seg[s].k0 = (int)((uint16_t)(first_carrier_offset + (bwp_start + seg[s].prb_start) * 12) % N);
+    tot += seg[s].n_prb;
+  }
+  return tot;
+}
+
 typedef struct {
   uint8_t tb_ok;
   uint8_t seg_ok[NR_GPU_PASS_MAX_CB];

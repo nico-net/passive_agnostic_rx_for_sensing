@@ -108,6 +108,7 @@ class GpuPassFixture {
   struct SegDef { int prb_start, n_prb, data_index; };
   std::vector<SegDef> segs;
   int pilspan = 0;
+  int bwp = 0, refpt = 0; /* BWPStart and the reference point of a segmented grant: segments are BWP relative, pilots are indexed by prb_start + (refpt ? 0 : bwp) */
   int dm_sym[2] = {2, 11};
   std::vector<int16_t> ring[NANT], rot, pilot[2][4]; /* pilot[dmrs][layer]: c16 pairs of this grant, 6 per RB (type 1) */
   uint32_t ring_len = 0, ring_offset = 0;
@@ -120,7 +121,7 @@ class GpuPassFixture {
   int ldpc_rc = 0, ldpc_nsnap = 0;
 
   /* tx: the coded, scrambled bit stream of the grant in LLR order (symbol, RE, layer, bit); null = random bits */
-  static GpuPassFixture small_grant(int nrb, int nl, int qm, int seed, const std::vector<uint8_t> *tx = nullptr, const std::vector<SegDef> *sd = nullptr)
+  static GpuPassFixture small_grant(int nrb, int nl, int qm, int seed, const std::vector<uint8_t> *tx = nullptr, const std::vector<SegDef> *sd = nullptr, int bwp_start = 0, int ref_point = 0)
   {
     size_t txk = 0;
     GpuPassFixture f;
@@ -129,8 +130,10 @@ class GpuPassFixture {
     if (sd) {
       f.segs = *sd;
       f.start_rb = 0;
+      f.bwp = bwp_start;
+      f.refpt = ref_point;
       f.pilspan = 0;
-      for (const SegDef &g : f.segs) f.pilspan = std::max(f.pilspan, g.prb_start + g.n_prb);
+      for (const SegDef &g : f.segs) f.pilspan = std::max(f.pilspan, g.prb_start + g.n_prb + (ref_point ? 0 : bwp_start));
     }
     auto prb_of = [&f](int rb) { /* absolute PRB of the rb-th data PRB */
       for (const SegDef &g : f.segs)
@@ -163,7 +166,7 @@ class GpuPassFixture {
             const cd r((1 - 2 * bi) / std::sqrt(2.0), (1 - 2 * bq) / std::sqrt(2.0));
             for (int l = 0; l < nl; l++) {
               const int delta = (l >> 1) & 1, wf = (l & 1) && kp ? -1 : 1;
-              const int pr = prb_of(rb), pi = sd ? pr : rb; /* absolute PRB; the pilot row index (segmented: absolute, else grant relative) */
+              const int pr = f.bwp + prb_of(rb), pi = sd ? prb_of(rb) + (f.refpt ? 0 : f.bwp) : rb; /* absolute PRB; the pilot row index (segmented: absolute, else grant relative) */
               const int k = 12 * pr + 4 * n + 2 * kp + delta;
               const cd p = std::conj(r) * (double)wf * 23170.0; /* chest LS multiplies rx by this and >> 15 */
               f.pilot[d][l][2 * (6 * pi + 2 * n + kp)] = (int16_t)std::lround(p.real());
@@ -175,7 +178,7 @@ class GpuPassFixture {
     }
     for (int s : f.data_syms)
       for (int i = 0; i < 12 * nrb; i++) {
-        const int k = 12 * prb_of(i / 12) + i % 12;
+        const int k = 12 * (f.bwp + prb_of(i / 12)) + i % 12;
         for (int l = 0; l < nl; l++) {
           int ci = 0, cq = 0;
           for (int b = 0; b < qm; b++) {
@@ -307,9 +310,9 @@ class GpuPassFixture {
                 row.nb_rb = f.nrb;
               } else { /* nr_pdsch_gpu_chest_grant's segmented rows: scratch rows, composed on the host */
                 const SegDef &g = f.segs[(size_t)sg];
-                row.pil = (const int16_t *)pil.dev + (size_t)(d * f.nl + l) * 12 * f.pilspan * 2 + 12 * (size_t)g.prb_start;
+                row.pil = (const int16_t *)pil.dev + (size_t)(d * f.nl + l) * 12 * f.pilspan * 2 + 12 * (size_t)(g.prb_start + (f.refpt ? 0 : f.bwp));
                 row.out = (int16_t *)sc.dev + 2 * (size_t)r * N;
-                row.k0 = (FCO + 12 * g.prb_start) % N;
+                row.k0 = (FCO + 12 * (f.bwp + g.prb_start)) % N;
                 row.nb_rb = g.n_prb;
               }
             }
@@ -317,7 +320,7 @@ class GpuPassFixture {
       int16_t *gy = (int16_t *)geo.host, *gh = gy + 2 * NSYM * ext;
       for (int sy : f.data_syms)
         for (int i = 0; i < len; i++) {
-          gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * f.start_rb + i) % N); /* rxdataF index; estimates are indexed from the grant's first RE (segmented: the virtual allocation at PRB 0) */
+          gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * (f.start_rb + f.bwp) + i) % N); /* rxdataF index; estimates are indexed from the grant's first RE (segmented: the virtual allocation at PRB 0) */
           gy[2 * (sy * ext + i) + 1] = 1;
           gh[2 * (sy * ext + i)] = (int16_t)i;
           gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 ? f.dm_sym[0] : f.dm_sym[1]) + 1);
@@ -689,7 +692,7 @@ class GpuPassFixture {
   }
   /* shape.nrb_class is the grant's PRB count here (24/48/96/217 are classes themselves) */
   /* corrupt_from_cb >= 0: the coded bits of code blocks >= corrupt_from_cb are flipped with probability 0.3 (those blocks cannot decode) */
-  static GpuPassFixture from_shape(const nr_gpu_pass_shape_t &sh, int seed, int corrupt_from_cb = -1, const std::vector<SegDef> *sd = nullptr)
+  static GpuPassFixture from_shape(const nr_gpu_pass_shape_t &sh, int seed, int corrupt_from_cb = -1, const std::vector<SegDef> *sd = nullptr, int bwp_start = 0, int ref_point = 0)
   {
     TbInfo t;
     std::vector<uint8_t> bits;
@@ -700,7 +703,7 @@ class GpuPassFixture {
       const uint32_t from = (uint32_t)corrupt_from_cb < t.first_rE2 ? (uint32_t)corrupt_from_cb * t.E : t.first_rE2 * t.E + ((uint32_t)corrupt_from_cb - t.first_rE2) * t.E2;
       for (uint32_t i = from; i < t.G; i++) if (U(rng) < 0.3) bits[i] ^= 1;
     }
-    GpuPassFixture f = small_grant(sh.nrb_class, sh.nl, sh.qm, seed, ok ? &bits : nullptr, sd);
+    GpuPassFixture f = small_grant(sh.nrb_class, sh.nl, sh.qm, seed, ok ? &bits : nullptr, sd, bwp_start, ref_point);
     f.tb = t;
     f.tb_ok_built = ok;
     f.shape = sh;
@@ -729,10 +732,11 @@ class GpuPassFixture {
     j.nrb = nrb; j.k0 = (FCO + 12 * start_rb) % N;
     j.shape.nrb_class = (uint16_t)nr_gpu_pass_nrb_class(nrb);
     if (!segs.empty()) {
-      j.nseg = (int)segs.size();
+      std::vector<nr_prb_seg_t> sg0;
+      for (const SegDef &g : segs) sg0.push_back({(uint16_t)g.prb_start, (uint16_t)g.n_prb, (uint16_t)g.data_index});
+      nr_gpu_pass_seg_fill(&j, sg0.data(), (int)sg0.size(), bwp, refpt, FCO, N); /* the dl.c fill */
       j.seg_pil_nrb = pilspan;
       j.shape.nseg_class = (uint16_t)nr_gpu_pass_nseg_class(j.nseg);
-      for (int s = 0; s < j.nseg; s++) j.seg[s] = {(uint16_t)segs[(size_t)s].n_prb, (uint16_t)segs[(size_t)s].data_index, segs[(size_t)s].prb_start, (FCO + 12 * segs[(size_t)s].prb_start) % N};
     }
     j.number_symbols = 13; j.nvfix = 0; j.branch = -1; j.fo_first = 0; j.fo_last = 1;
     j.dt_d = (1.0e-3 / 2) / 14 * (dm_sym[1] - dm_sym[0]); j.df_d = 30000.0;
@@ -755,7 +759,7 @@ class GpuPassFixture {
       d.llr_off[sy] = off;
       off += len * qm * nl;
       for (int i = 0; i < len; i++) {
-        gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * start_rb + i) % N);
+        gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * (start_rb + bwp) + i) % N);
         gy[2 * (sy * ext + i) + 1] = 1;
         gh[2 * (sy * ext + i)] = (int16_t)i;
         gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 ? dm_sym[0] : dm_sym[1]) + 1);
@@ -765,7 +769,7 @@ class GpuPassFixture {
       std::vector<nr_prb_seg_t> sg;
       for (const SegDef &g : segs) sg.push_back({(uint16_t)g.prb_start, (uint16_t)g.n_prb, (uint16_t)g.data_index});
       geo_real.assign(geo_buf.begin(), geo_buf.end());
-      if (nr_gpu_pass_seg_remap_geo(geo_real.data(), ext, d.sym_mask, d.nre, N, FCO % N, sg.data(), (int)sg.size()) != 0) fprintf(stderr, "fixture: seg remap failed\n");
+      if (nr_gpu_pass_seg_remap_geo(geo_real.data(), ext, d.sym_mask, d.nre, N, (FCO + 12 * bwp) % N, sg.data(), (int)sg.size()) != 0) fprintf(stderr, "fixture: seg remap failed\n");
       gy = geo_real.data();
       gh = gy + 2 * NSYM * ext;
     }
@@ -842,7 +846,7 @@ class GpuPassFixture {
         for (int sym = 0; sym < NSYM; sym++)
           for (const SegDef &g : segs)
             for (int i = 0; i < g.n_prb * 12; i++)
-              vr[(size_t)(a * NSYM + sym) * N + (FCO + g.data_index * 12 + i) % N] = rr[(size_t)(a * NSYM + sym) * N + (FCO + g.prb_start * 12 + i) % N];
+              vr[(size_t)(a * NSYM + sym) * N + (FCO + bwp * 12 + g.data_index * 12 + i) % N] = rr[(size_t)(a * NSYM + sym) * N + (FCO + bwp * 12 + g.prb_start * 12 + i) % N];
       nr_gpu_buf_h2d_async(&P.est, 0, P.est.bytes, st);
       nr_gpu_buf_h2d_async(&P.vrx, 0, P.vrx.bytes, st);
       if (cudaStreamSynchronize(st)) return -1;

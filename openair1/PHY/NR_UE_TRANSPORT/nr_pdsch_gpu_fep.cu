@@ -138,7 +138,7 @@ static std::atomic<unsigned> g_ctx_busy{0};
 static const int PASS_RING = NR_GPU_PASS_RING;
 static const int PASS_SLOTS = NR_GPU_PASS_RING + 1; /* [0, RING): graph-pass instances; [RING]: the test-only round-robin _stage helpers (never a live instance's slot) */
 static short2 *g_pass_h[PASS_SLOTS], *g_pass_d[PASS_SLOTS], *g_pass_ls[PASS_SLOTS];
-static const int PASS_LS_ROWS = 512; /* LS rows per slot: a graph pass needs nd x nl x nrx x segments rows (nr_gpu_pass_graph.cu SEG_ROWS): 2 x 4 x 4 x 16 or 3 x 4 x 4 x 8 */
+static int PASS_LS_ROWS = 256; /* 512 when ISAC_GPU_PASS=1 (set at init, before the allocation below); LS rows per slot: a graph pass needs nd x nl x nrx x segments rows (nr_gpu_pass_graph.cu SEG_ROWS): 2 x 4 x 4 x 16 or 3 x 4 x 4 x 8 */
 static uint32_t *g_pass_par[PASS_SLOTS];              /* per slot staging block read by the kernel (nr_exact::ExactIO::par layout) */
 static nr_gpu_chest_row_t *g_pass_rh[PASS_SLOTS], *g_pass_rd[PASS_SLOTS]; /* chest rows: pinned staging, device copy */
 static cudaEvent_t g_pass_fev[PASS_SLOTS], g_pass_cev[PASS_SLOTS];        /* recorded when a pass is done with the slot */
@@ -805,6 +805,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       }
       g_ctx_prio = nr_pdsch_gpu_prio_on();
       const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
+      { const char *e = getenv("ISAC_GPU_PASS"); PASS_LS_ROWS = (e && atoi(e) == 1) ? 512 : 256; }
       for (int k = 0; k < PASS_SLOTS; k++) {
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_h[k], ring));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_d[k], ring));
@@ -1538,6 +1539,9 @@ extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu
   if (cudaPeekAtLastError() != cudaSuccess) return -1;
   return pass_slot_done(g_pass_cev[slot], s) == cudaSuccess ? 0 : -1;
 }
+
+/* GPUPASS: LS rows per pass the chest can take (the graph classes are limited to it) */
+extern "C" int nr_pdsch_gpu_pass_ls_rows(void) { return PASS_LS_ROWS; }
 
 /* ULFEP: GPU front end of the passive PUSCH decoder (own file, own streams; see the header comment) */
 #include "nr_pusch_gpu_fep.cuh"
