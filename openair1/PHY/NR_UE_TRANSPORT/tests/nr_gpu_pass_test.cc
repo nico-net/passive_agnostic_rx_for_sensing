@@ -62,6 +62,36 @@ static void dl_stages_case(int nrb, int nl, int qm, int seed, double max_ber) {
          (double)err / llr_direct.size(), rc0, fx.ldpc_nsnap, nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE");
   EXPECT_LT((double)err / llr_direct.size(), max_ber) << "chain does not demodulate the synthetic slot: " << err << " bit errors";
 }
+/* GB10 only: the Stage-1 bit-exact reference is today's GPU exact path. Same fixture inputs through the OLD entry points (own waits,
+ * host buffers) and through the four _dev functions on the DIRECT model. */
+static void dev_vs_old_case(int nrb, int nl, int qm, int seed) {
+  GpuPassFixture fx = GpuPassFixture::small_grant(nrb, nl, qm, seed);
+  std::vector<int16_t> llr_old, llr_dev;
+  setenv("ISAC_GPU_FORCE_DISCRETE", "0", 1);
+  ASSERT_EQ(0, fx.run_stages(&llr_old, true));
+  const auto rxF0 = fx.rxF_head; const auto chest0 = fx.chest_out; const auto snap0 = fx.snap; const int rc0 = fx.ldpc_rc, ns0 = fx.ldpc_nsnap;
+  ASSERT_EQ(0, fx.run_stages(&llr_dev, false));
+  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  EXPECT_EQ(rxF0, fx.rxF_head) << "rxdataF: old vs _dev";
+  EXPECT_EQ(chest0, fx.chest_out) << "chest delay/nvar: old vs _dev";
+  ASSERT_EQ(llr_old.size(), llr_dev.size());
+  EXPECT_EQ(0, memcmp(llr_old.data(), llr_dev.data(), llr_old.size() * 2)) << "LLRs: old vs _dev";
+  EXPECT_EQ(rc0, fx.ldpc_rc);
+  EXPECT_EQ(ns0, fx.ldpc_nsnap);
+  EXPECT_EQ(snap0, fx.snap) << "LDPC snapshots/syn0: old vs _dev";
+}
+TEST(GpuPassStages, DevEqualsOldEntryPoints) {
+  if (!have_gpu()) GTEST_SKIP();
+  bool ok = false, lib = false;
+  GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  unsetenv("ISAC_GPU_FORCE_DISCRETE"); /* GpuMem.RoundTrip leaves it at 1 */
+  if (nr_gpu_model() != NR_GPU_MODEL_DIRECT) GTEST_SKIP() << "old entry points need the DIRECT model (GB10)";
+  dev_vs_old_case(24, 2, 4, 7);
+  dev_vs_old_case(12, 1, 6, 9);
+  dev_vs_old_case(24, 4, 2, 5);
+}
 TEST(GpuPassStages, DlStagesSameBitsBothModels) {
   if (!have_gpu()) GTEST_SKIP();
   bool ok = false, lib = false;

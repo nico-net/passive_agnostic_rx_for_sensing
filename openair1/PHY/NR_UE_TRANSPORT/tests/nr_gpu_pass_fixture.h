@@ -30,6 +30,12 @@ struct GpuPassModule {
   nr_gpu_chest_dev_fn chest = nullptr;
   nr_gpu_demod_dev_fn demod = nullptr;
   nr_gpu_ldpc_dev_fn ldpc = nullptr;
+  /* the pre-GPUPASS entry points, with their own waits (DIRECT model only) */
+  int (*fep_old)(const int16_t *const *, uint32_t, uint32_t, double, const int16_t *, uint16_t, int16_t *, size_t) = nullptr;
+  int (*chest_old)(nr_gpu_chest_job_t *) = nullptr;
+  int (*demod_old)(nr_gpu_demod_job_t *) = nullptr;
+  void (*demod_rel)(int) = nullptr;
+  int (*ldpc_old)(nr_gpu_ldpc_job_t *, int) = nullptr;
   /* loads ./libpdsch_gpu.so and inits FEP (N = 4096, 4 RX), demod and LDPC once; false = no module or no device */
   static GpuPassModule &get(bool *ok, bool *have_lib = nullptr)
   {
@@ -47,8 +53,13 @@ struct GpuPassModule {
         m.chest = (nr_gpu_chest_dev_fn)dlsym(m.dl, "nr_pdsch_gpu_chest_dev");
         m.demod = (nr_gpu_demod_dev_fn)dlsym(m.dl, "nr_pdsch_gpu_demod_dev");
         m.ldpc = (nr_gpu_ldpc_dev_fn)dlsym(m.dl, "nr_pdsch_gpu_ldpc_dev");
+        m.fep_old = (decltype(m.fep_old))dlsym(m.dl, "nr_pdsch_gpu_exact_fep");
+        m.chest_old = (decltype(m.chest_old))dlsym(m.dl, "nr_pdsch_gpu_exact_chest");
+        m.demod_old = (decltype(m.demod_old))dlsym(m.dl, "nr_pdsch_gpu_demod_run");
+        m.demod_rel = (decltype(m.demod_rel))dlsym(m.dl, "nr_pdsch_gpu_demod_release");
+        m.ldpc_old = (decltype(m.ldpc_old))dlsym(m.dl, "nr_pdsch_gpu_ldpc_run");
         if (!m.fep) fprintf(stderr, "libpdsch_gpu.so has no nr_pdsch_gpu_fep_dev\n");
-        good = api && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api()->init(&cfg) == 0 && dinit(4) == 0;
+        good = api && m.fep_old && m.chest_old && m.demod_old && m.demod_rel && m.ldpc_old && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api()->init(&cfg) == 0 && dinit(4) == 0;
         if (good) linit(); /* may refuse (CC < 9): the LDPC stage then reports it */
       }
     }
@@ -169,7 +180,7 @@ class GpuPassFixture {
 
   /* 0 = all four stages ran (LDPC may have reported -2 on CC < 9: ldpc_rc); the int16 LLRs of the grant in nr_rx_pdsch order (symbol,
    * RE, layer, bit; positive = bit 0) go to *llr. Buffers use the model nr_gpu_model() gives now. */
-  int run_stages(std::vector<int16_t> *llr)
+  int run_stages(std::vector<int16_t> *llr, bool old_path = false)
   {
     bool ok = false;
     GpuPassModule &m = GpuPassModule::get(&ok);
@@ -190,7 +201,9 @@ class GpuPassFixture {
       std::vector<const int16_t *> rp(NANT);
       for (int a = 0; a < NANT; a++) rp[a] = ring[a].data();
       nr_gpu_fep_job_t fj = {rp.data(), ring_len, ring_offset, rot.data(), 0x3fff};
-      if (m.fep(&fj, &rxF, s)) goto out;
+      if (old_path ? m.fep_old(rp.data(), ring_len, ring_offset, 0.0, rot.data(), 0x3fff, (int16_t *)rxF.host, (size_t)NSYM * N)
+                   : m.fep(&fj, &rxF, s))
+        goto out;
       /* chest: rows (DM-RS symbol, layer, antenna); pilots live in a device-visible buffer too */
       std::vector<nr_gpu_chest_job_t> keep(1);
       nr_gpu_chest_job_t &cj = keep[0];
@@ -230,14 +243,20 @@ class GpuPassFixture {
           }
         }
       nr_gpu_buf_h2d_async(&pil, 0, pil.bytes, s);
-      rc = m.chest(&cj, nrows, &est, &nvar, s);
+      rc = old_path ? m.chest_old(&cj) : m.chest(&cj, nrows, &est, &nvar, s);
       if (rc) { nr_gpu_buf_free(&pil); nr_gpu_buf_free(&dt); rc = -1; goto out; }
       nr_gpu_buf_d2h_async(&nvar, 0, 4 * (size_t)NR_GPU_CHEST_MAX_ROWS * 4, s);
       nr_gpu_buf_d2h_async(&rxF, 0, rxsz, s);
       if (cudaStreamSynchronize(s)) { nr_gpu_buf_free(&pil); nr_gpu_buf_free(&dt); rc = -1; goto out; }
       nr_gpu_buf_free(&pil);
       nr_gpu_buf_free(&dt);
-      const int *cout = (const int *)nvar.host;
+      std::vector<int> old_cout;
+      if (old_path) { /* the old entry returns delay[][3] and nvar[] in the job */
+        old_cout.assign(4 * NR_GPU_CHEST_MAX_ROWS, 0);
+        memcpy(old_cout.data(), cj.delay, 3 * nrows * sizeof(int));
+        memcpy(old_cout.data() + 3 * NR_GPU_CHEST_MAX_ROWS, cj.nvar, nrows * sizeof(int));
+      }
+      const int *cout = old_path ? old_cout.data() : (const int *)nvar.host;
       chest_out.assign(cout, cout + 3 * nrows); /* delay triples, then nvar per row, then the mean */
       uint32_t nv = 0;
       for (int q = 0; q < nrows; q++) {
@@ -283,7 +302,12 @@ class GpuPassFixture {
       dj.comp = sc; dj.mag = sc + bn; dj.magb = sc + 2 * bn; dj.magr = sc + 3 * bn;
       dj.thr_coef = std::pow(10.0, -1.2);
       dj.qam_mode = nl >= 2 ? 3 : 0; dj.mag_per_layer = 1; dj.nvar = (uint32_t)chest_out.back(); dj.m3_nvfac = std::pow(10.0, 2.1);
-      if (m.demod(&dj, &llrb, s)) goto out;
+      if (old_path) {
+        dj.llr = (int16_t *)llrb.host;
+        if (m.demod_old(&dj)) goto out;
+        m.demod_rel(dj.ctx);
+      } else if (m.demod(&dj, &llrb, s))
+        goto out;
       nr_gpu_buf_d2h_async(&llrb, 0, llrb.bytes, s);
       if (cudaStreamSynchronize(s)) goto out;
       llr->assign((int16_t *)llrb.host, (int16_t *)llrb.host + (size_t)nsym * len * qm * nl);
@@ -293,14 +317,28 @@ class GpuPassFixture {
       int8_t *in = (int8_t *)lin.host;
       for (size_t i = 0; i < (size_t)52 * 64; i++) in[i] = (int8_t)std::max(-127, std::min(127, (int)(*llr)[i % llr->size()] / 16));
       nr_gpu_buf_h2d_async(&lin, 0, (size_t)52 * 64, s);
+      if (old_path) {
+        lj.llr = in;
+        std::vector<nr_gpu_ldpc_job_t> hold(1, lj); /* the job holds 17 KB of snapshots */
+        ldpc_rc = m.ldpc_old(hold.data(), 1);
+        if (ldpc_rc == 0) {
+          ldpc_nsnap = hold[0].nsnap;
+          snap.clear();
+          for (int q = 0; q < ldpc_nsnap; q++) snap.insert(snap.end(), hold[0].snap[q], hold[0].snap[q] + (lj.K >> 3));
+          snap.push_back((uint8_t)hold[0].syn0);
+        }
+      } else {
       ldpc_rc = m.ldpc(&lj, 1, &lin, &bits, s);
       if (ldpc_rc == 0) {
         nr_gpu_buf_d2h_async(&bits, 0, bits.bytes, s);
         if (cudaStreamSynchronize(s)) goto out;
         const int *res = (const int *)((char *)bits.host + NR_GPU_LDPC_DEV_RES_OFF);
         ldpc_nsnap = res[0];
-        snap.assign((uint8_t *)bits.host, (uint8_t *)bits.host + (size_t)NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX);
+        snap.clear(); /* only the K/8 bytes of each written snapshot are defined, as the old entry copies them */
+        for (int q = 0; q < ldpc_nsnap; q++)
+          snap.insert(snap.end(), (uint8_t *)bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX, (uint8_t *)bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX + (lj.K >> 3));
         snap.push_back((uint8_t)res[1]);
+      }
       }
       rc = 0;
     }
