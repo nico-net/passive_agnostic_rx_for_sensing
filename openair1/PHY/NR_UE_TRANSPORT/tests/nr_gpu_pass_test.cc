@@ -1134,6 +1134,407 @@ TEST(GpuPassFp32, ShadowGateLogic) {
     EXPECT_EQ(1, nr_fp32_gate_note(&e, 0)) << "1 flip in 64 = 1.56 %";
   }
 }
+/* ===================================================== Task 7: the PUSCH (UL) pass ===================================================== */
+extern "C" {
+#include "nr_gpu_pass_ul.h"
+#include "nr_gpu_pass_ul_ref.h"
+int load_dftslib(void);
+}
+/* The UL slot of the fixture: its IQ ring as the linear snapshot of the passive UL decoder (PRE samples of margin in front), the FFT windows at a timing advance `ta`
+ * (nr_symbol_fep_ul: the window starts early by the cyclic prefix fraction and by the advance), and the job description nr_gpu_pass_ul_run takes. */
+struct UlSlot {
+  static constexpr int PRE = 1024, N = GpuPassFixture::N, NS = GpuPassFixture::NSYM;
+  std::vector<int16_t> lin[4], rxF;
+  size_t rx_stride = (size_t)NS * N + 512; /* c16 between two antennas of the caller's rxdataF */
+  nr_gpu_pass_ul_in_t in = {};
+  nr_gpu_pass_ul_out_t out = {};
+  std::vector<uint8_t> tb;
+  std::vector<int16_t> llr;
+  int ta = 0;
+  void build(const GpuPassFixture &fx, int ta_, int keep, int passive, int ctx)
+  {
+    ta = ta_;
+    const int total = PRE + GpuPassFixture::SLOT + 2048;
+    for (int a = 0; a < 4; a++) {
+      lin[a].assign((size_t)2 * total, 0);
+      for (int n = -PRE; n < GpuPassFixture::SLOT + 2048 - PRE; n++) {
+        const size_t p = ((size_t)fx.ring_offset + (size_t)(n + (int)fx.ring_len)) % fx.ring_len;
+        lin[a][2 * (size_t)(PRE + n)] = fx.ring[a][2 * p];
+        lin[a][2 * (size_t)(PRE + n) + 1] = fx.ring[a][2 * p + 1];
+      }
+    }
+    rxF.assign((size_t)2 * 4 * rx_stride, 0x5a5a);
+    tb.assign((size_t)fx.tb.A / 8 + 64, 0xcc);
+    llr.assign((size_t)fx.tb.G + 64, 0x1111);
+    memset(&in, 0, sizeof(in));
+    memset(&out, 0, sizeof(out));
+    in.rnti = (uint16_t)fx.tb.rnti; in.slot = 0; in.start_symbol = 1; in.num_symbols = 13; in.num_rb = fx.nrb; in.bwp_start = 0; in.rb_start = fx.start_rb;
+    in.ul_dmrs_symb_pos = (1u << fx.dm_sym[0]) | (1u << fx.dm_sym[1]);
+    in.dmrs_config_type = 0; in.n_dmrs_cdm_groups_no_data = 2; in.nscid = 0; in.dmrs_scrambling_id = 0; in.dmrs_ports = 1;
+    in.qam_mod_order = fx.qm; in.nr_of_layers = 1; in.rv = 0; in.bg = fx.tb.BG; in.tbs_bits = (uint32_t)fx.tb.A; in.tbslbrm = 0; in.data_scrambling_id = (int)fx.tb.nid;
+    in.max_ldpc_iterations = 8;
+    in.N = N; in.symbols_per_slot = NS; in.n_rb_ul = 273; in.first_carrier_offset = GpuPassFixture::FCO; in.ncp_normal = 1; in.nb_rx = 4;
+    in.passive = passive; in.keep = keep; in.timing_keep = keep;
+    const int early = GpuPassFixture::NCP / 8;
+    for (int m = 0; m < NS; m++) {
+      const int start = m == 0 ? 0 : GpuPassFixture::NCP0 + N + (m - 1) * (N + GpuPassFixture::NCP), ncp = m == 0 ? GpuPassFixture::NCP0 : GpuPassFixture::NCP;
+      in.win[m] = PRE + start + ncp - early - ta;
+    }
+    for (int a = 0; a < 4; a++) {
+      in.iq[a] = lin[a].data();
+      in.rx[a] = rxF.data() + 2 * (size_t)a * rx_stride;
+    }
+    in.pil_override[0] = fx.pilot[0][0].data();
+    in.pil_override[1] = fx.pilot[1][0].data();
+    in.iq_len = (uint32_t)total;
+    in.symbol_rot = fx.rot.data();
+    in.ctx = ctx;
+    in.tb = tb.data();
+    in.llr_out = llr.data();
+    in.llr_out_all = 1;
+    in.want_est = 1;
+  }
+};
+
+static const int16_t *ul_delay_table()
+{
+  static std::vector<int16_t> dt;
+  if (dt.empty()) {
+    dt.assign((size_t)(2 * 20 + 1) * 4096 * 2, 0);
+    for (int d = -20; d <= 20; d++)
+      for (int i = 0; i < 4096; i++) {
+        const double ph = 2.0 * M_PI * i * d / 4096;
+        dt[2 * ((size_t)(20 + d) * 4096 + i)] = (int16_t)std::lround(256 * std::cos(ph));
+        dt[2 * ((size_t)(20 + d) * 4096 + i) + 1] = (int16_t)std::lround(256 * std::sin(ph));
+      }
+  }
+  return dt.data();
+}
+
+/* the module up for the PUSCH pass: instances, the host builder's table of classes (one), then classes on demand */
+static bool ul_ready(GpuPassModule &m)
+{
+  static int state = 0;
+  if (state) return state > 0;
+  state = -1;
+  setenv("ISAC_UL_GPU_PASS", "1", 1);
+  setenv("ISAC_UL_GPU_PASS_CLASSES", "1", 1);
+  if (!pass_ready(m) || !m.pass_warm) return false;
+  if (load_dftslib() != 0) return false;
+  if (nr_gpu_pass_ul_warm(m.dl, 4, 0) < 1) return false;
+  for (int c = 0; c < 8; c++) nr_gpu_pass_ul_prewarm(c);
+  state = 1;
+  return true;
+}
+static void ul_warm_class(GpuPassModule &m, int nrb, int nd, int C)
+{
+  static std::map<uint64_t, int> done;
+  const int cls = nr_gpu_pass_nrb_class(nrb), ncb = nr_gpu_pass_ncb_class(C);
+  const uint64_t key = (uint64_t)cls << 20 | (uint64_t)nd << 10 | (uint64_t)ncb;
+  if (done.count(key)) return;
+  const nr_gpu_pass_shape_t sh = {(uint16_t)cls, 13, 1, 2, (uint16_t)nd, (uint16_t)ncb, 0, 0, 1};
+  done[key] = m.pass_warm(&sh, 0, 0, 0);
+  ASSERT_EQ(0, done[key]) << "warm UL class nrb " << cls << " nd " << nd << " ncb " << ncb;
+}
+
+/* the CPU reference of the whole slot: FEP (the exact FEP stage at the same window), the ported chest, the real equaliser, the descrambling and the CPU decode tail */
+struct UlRef {
+  std::vector<int16_t> rxF;   /* [4][14][N] c16 */
+  std::vector<int16_t> est;   /* [4][14][N] c16 */
+  std::vector<int16_t> llr;   /* descrambled */
+  int delay[2][4][3] = {};
+  uint64_t acc[2][4] = {};
+  int log2_maxh = 0, avg[4] = {};
+  nr_gpu_pass_result_t res = {};
+  std::vector<uint8_t> tb;
+  bool ok = false;
+};
+static UlRef ul_reference(GpuPassModule &m, GpuPassFixture &fx, int ta, int keep)
+{
+  UlRef r;
+  using Pass = GpuPassFixture::Pass;
+  Pass P;
+  if (!P.setup(m, fx, -1) || !P.load(fx)) return r;
+  P.fj.ring_offset = (uint32_t)(((long)fx.ring_offset + (long)fx.ring_len - ta) % (long)fx.ring_len);
+  int fs = 0, cs = 0;
+  if (P.stage(&fs, &cs) || m.fep(&P.fj, &P.rxF, fs, P.s)) return r;
+  nr_gpu_buf_d2h_async(&P.rxF, 0, P.rxsz, P.s);
+  if (cudaStreamSynchronize(P.s)) return r;
+  const int N = 4096;
+  r.rxF.assign((int16_t *)P.rxF.host, (int16_t *)P.rxF.host + 2 * (size_t)4 * 14 * N);
+  r.est.assign((size_t)2 * 4 * 14 * N, 0);
+  const int k0 = (GpuPassFixture::FCO + 12 * fx.start_rb) % N;
+  for (int k = 0; k < 2; k++)
+    for (int a = 0; a < 4; a++) {
+      uint64_t noise = 0;
+      nr_gpu_pass_ul_ref_chest((const c16_t *)&r.rxF[2 * ((size_t)a * 14 + fx.dm_sym[k]) * N], (const c16_t *)fx.pilot[k][0].data(), k0, fx.nrb, 0, (const c16_t *)ul_delay_table(), N, 20,
+                               (c16_t *)&r.est[2 * ((size_t)a * 14 + fx.dm_sym[k]) * N], r.delay[k][a], &noise);
+      r.acc[k][a] = noise;
+    }
+  std::vector<int16_t> llr((size_t)fx.tb.G + 64, 0);
+  const uint32_t mask = (1u << fx.dm_sym[0]) | (1u << fx.dm_sym[1]);
+  const int n = nr_gpu_pass_ul_ref_eq(4, fx.nrb, fx.qm, keep, 0, 1, 13, mask, 2, k0, (const c16_t *)r.rxF.data(), (const c16_t *)r.est.data(), llr.data(), &r.log2_maxh, r.avg);
+  if (n != (int)fx.tb.G) return r;
+  for (uint32_t i = 0; i < fx.tb.G; i++)
+    if (fx.tb.scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
+  llr.resize(fx.tb.G);
+  r.llr = llr;
+  r.tb.assign((size_t)fx.tb.A / 8 + 64, 0);
+  r.res.tb = r.tb.data();
+  std::vector<int16_t> l2 = llr;
+  if (fx.decode_llr(m, P, P.s, l2, &r.res) != 0) return r;
+  r.ok = true;
+  return r;
+}
+
+/* negative control: with g_ul_neg the reference is deliberately perturbed (a different timing advance / receive branch) and the mismatches are counted instead of failing the test */
+static bool g_ul_neg = false;
+static int g_ul_neg_count = 0, g_ul_ref_ta_delta = 0, g_ul_ref_keep_flip = 0;
+static int ul_case(GpuPassModule &m, int nrb, int qm, int seed, int ta, int keep, double noise_db, const char *what)
+{
+  GpuPassFixture::noise_db = noise_db;
+  const nr_gpu_pass_shape_t sh = {(uint16_t)nrb, 13, 1, (uint16_t)qm, 2, 1, 1};
+  GpuPassFixture fx = GpuPassFixture::from_shape(sh, seed);
+  GpuPassFixture::noise_db = 20.0;
+  if (!fx.tb_ok_built) return 2; /* no TB for the shape */
+  ul_warm_class(m, nrb, 2, fx.tb.C);
+  if (::testing::Test::HasFatalFailure()) return -1;
+  UlSlot sl;
+  sl.build(fx, ta, keep, keep >= 0 ? 1 : 0, 0);
+  const int rc = nr_gpu_pass_ul_run(&sl.in, &sl.out);
+  EXPECT_EQ(0, rc) << what;
+  if (rc != 0) return -1;
+  UlRef ref = ul_reference(m, fx, ta + g_ul_ref_ta_delta, g_ul_ref_keep_flip ? (keep < 0 ? 0 : -1) : keep);
+  EXPECT_TRUE(ref.ok) << what << ": no CPU reference";
+  if (!ref.ok) return -1;
+  int bad = 0;
+  auto chk = [&](bool c, const char *w) {
+    if (c) return;
+    bad++;
+    if (g_ul_neg) g_ul_neg_count++;
+    else ADD_FAILURE() << what << ": " << w;
+  };
+  /* the transformed symbols of the grant, then the chest, the scale and the LLRs, bit for bit */
+  for (int a = 0; a < 4; a++)
+    for (int s = 1; s < 14; s++)
+      chk(!memcmp(&sl.rxF[2 * (size_t)a * sl.rx_stride + 2 * (size_t)s * 4096], &ref.rxF[2 * ((size_t)a * 14 + s) * 4096], 4096 * 4), "rxdataF of the pass differs from the exact FEP");
+  const nr_gpu_pass_result_t &r = sl.out.r;
+  for (int k = 0; k < 2; k++)
+    for (int a = 0; a < 4; a++) {
+      const int row = k * 4 + a;
+      chk(r.ul_delay[row][0] == ref.delay[k][a][0] && r.ul_delay[row][1] == ref.delay[k][a][1] && r.ul_delay[row][2] == ref.delay[k][a][2], "delay triple");
+      chk(r.ul_acc[row] == ref.acc[k][a], "noise sum");
+      chk(!memcmp(sl.out.est + (size_t)row * 4096 * 2, &ref.est[2 * ((size_t)a * 14 + fx.dm_sym[k]) * 4096], 12 * fx.nrb * 4), "chest estimate");
+    }
+  chk(sl.out.log2_maxh == ref.log2_maxh, "log2_maxh");
+  for (int a = 0; a < 4; a++) chk(r.ul_avg[a] == ref.avg[a], "channel level");
+  chk(!memcmp(sl.llr.data(), ref.llr.data(), (size_t)fx.tb.G * 2), "LLRs differ from the CPU equaliser");
+  chk(r.need_cpu == ref.res.need_cpu, "need_cpu");
+  chk(r.tb_ok == ref.res.tb_ok, "TB verdict");
+  chk(!memcmp(r.seg_ok, ref.res.seg_ok, fx.tb.C), "segment verdicts");
+  if (r.tb_ok && ref.res.tb_ok) {
+    chk(!memcmp(sl.tb.data(), ref.tb.data(), (size_t)fx.tb.A / 8), "TB bytes");
+    chk(!memcmp(sl.tb.data(), fx.tb.payload.data(), (size_t)fx.tb.A / 8), "TB differs from the transmitted one");
+  }
+  /* the fold of the old path's noise: nvar = mean over the DM-RS symbols of the per-symbol mean */
+  uint32_t nv = 0;
+  for (int k = 0; k < 2; k++) {
+    uint64_t t = 0;
+    for (int a = 0; a < 4; a++) t += ref.acc[k][a];
+    nv += (uint32_t)(t / (uint64_t)(4 * 12 * fx.nrb));
+  }
+  chk(sl.out.nvar == nv / 2, "nvar fold");
+  return bad ? -1 : (ref.res.tb_ok ? 1 : 0);
+}
+
+TEST(GpuPassUl, MatchesCpuDecode) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try && m.pass_warm) << "libpdsch_gpu.so has no PUSCH pass";
+  ASSERT_TRUE(ul_ready(m)) << "UL pass setup failed";
+  static const int nrbs[] = {6, 12, 24, 48, 50, 96, 106, 136, 217};
+  static const int qms[] = {2, 4, 6, 8};
+  static const int tas[] = {0, 3, -4, 9, 0, 5};
+  int n = 0, dec_ok = 0, dec_fail = 0, skipped = 0;
+  const int cases = getenv("NR_GPU_UL_CASES") ? atoi(getenv("NR_GPU_UL_CASES")) : 200;
+  for (int seed = 0; seed < cases; seed++) {
+    const int nrb = nrbs[seed % 9], qm = qms[(seed / 3) % 4], ta = tas[seed % 6], keep = (seed % 5 == 0) ? 0 : -1;
+    const double snr = (seed % 7 == 6) ? 4.0 : 20.0; /* some low-SNR slots: the CRC verdicts must agree there too */
+    char what[160];
+    snprintf(what, sizeof(what), "seed %d nrb %d qm %d ta %d keep %d snr %.0f", seed, nrb, qm, ta, keep, snr);
+    const int r = ul_case(m, nrb, qm, seed, ta, keep, snr, what);
+    if (r == 2) { skipped++; continue; }
+    ASSERT_GE(r, 0) << what;
+    n++;
+    dec_ok += r == 1;
+    dec_fail += r == 0;
+    if (HasFailure()) break;
+  }
+  printf("GpuPassUl.MatchesCpuDecode: %d slots compared bit for bit (decoded %d, CRC fail on both paths %d, %d shapes without a TB), %s memory model\n", n, dec_ok, dec_fail, skipped,
+         nr_gpu_model() == NR_GPU_MODEL_DIRECT ? "DIRECT" : "DISCRETE");
+  EXPECT_GE(n, cases * 2 / 3);
+  EXPECT_GE(dec_ok, n / 2);
+}
+
+/* the comparison is not vacuous: a reference with another timing advance, or another receive branch, is flagged on every slot */
+TEST(GpuPassUl, ReferenceDetectsMismatch) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(ul_ready(m));
+  g_ul_neg = true;
+  for (int mode = 0; mode < 2; mode++) {
+    g_ul_ref_ta_delta = mode == 0 ? 2 : 0;
+    g_ul_ref_keep_flip = mode == 1;
+    for (int seed = 100; seed < 106; seed++) {
+      g_ul_neg_count = 0;
+      const int r = ul_case(m, 48, 4, seed, 3, -1, 20.0, "negative control");
+      EXPECT_NE(2, r);
+      EXPECT_GT(g_ul_neg_count, 0) << "mode " << mode << " seed " << seed << ": a perturbed reference went unnoticed";
+    }
+  }
+  g_ul_neg = false;
+  g_ul_ref_ta_delta = 0;
+  g_ul_ref_keep_flip = 0;
+}
+
+TEST(GpuPassUl, TransformPrecodingFallsBack) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(ul_ready(m));
+  const nr_gpu_pass_shape_t sh = {24, 13, 1, 2, 2, 1, 1};
+  GpuPassFixture fx = GpuPassFixture::from_shape(sh, 5);
+  ASSERT_TRUE(fx.tb_ok_built);
+  ul_warm_class(m, 24, 2, fx.tb.C);
+  ASSERT_FALSE(HasFatalFailure());
+  UlSlot sl;
+  sl.build(fx, 0, -1, 0, 0);
+  uint64_t o0[16], o1[16];
+  m.pass_counters(o0);
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
+  auto ulc = (void (*)(uint64_t *))dlsym(dl, "nr_gpu_pass_ul_counters");
+  ASSERT_TRUE(ulc);
+  uint64_t u0[16], u1[16];
+  ulc(u0);
+  sl.in.transform_precoding = 1;
+  EXPECT_EQ(1, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "DFT-s-OFDM must stay on the old path";
+  sl.in.transform_precoding = 0;
+  sl.in.frequency_hopping = 1;
+  EXPECT_EQ(1, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "frequency hopping must stay on the old path";
+  sl.in.frequency_hopping = 0;
+  sl.in.rv = 2;
+  EXPECT_EQ(1, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "a redundancy version other than 0 needs HARQ combining";
+  sl.in.rv = 0;
+  sl.in.dmrs_config_type = 1;
+  EXPECT_EQ(1, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "DM-RS type 2 is not in the pass";
+  sl.in.dmrs_config_type = 0;
+  ulc(u1);
+  EXPECT_EQ(u0[0], u1[0]) << "no graph may have been launched for a refused grant";
+  EXPECT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "the same slot with the refusals removed takes the pass";
+  EXPECT_TRUE(sl.out.r.tb_ok);
+  ulc(u1);
+  EXPECT_EQ(u0[0] + 1, u1[0]);
+  (void)o1;
+}
+
+TEST(GpuPassUl, CacheMissUsesOldPath) {
+  uint64_t h0, m0, s0, p0, h1, m1, s1, p1;
+  ul_hyp_cache_clear();
+  nr_gpu_pass_ul_cache_counts(&h0, &m0, &s0, &p0);
+  ul_hyp_t h = {};
+  EXPECT_EQ(0, ul_hyp_cache_get(0x4242, &h)) << "unknown RNTI";
+  EXPECT_EQ(0, nr_gpu_pass_ul_hyp_lookup(0x4242, 7, 1000, &h)) << "unknown RNTI: the old path decodes";
+  nr_gpu_pass_ul_cache_counts(&h1, &m1, &s1, &p1);
+  EXPECT_EQ(m0 + 1, m1) << "ul_cache_miss";
+  EXPECT_EQ(h0, h1);
+  h.ta = 123; h.dmrs_id = 321; h.have_dmrs = 1; h.epoch = 7; h.abs_slot = 1000;
+  ul_hyp_cache_put(0x4242, &h);
+  ul_hyp_t g = {};
+  EXPECT_EQ(1, ul_hyp_cache_get(0x4242, &g));
+  EXPECT_EQ(123, g.ta);
+  EXPECT_EQ(321, g.dmrs_id);
+  EXPECT_EQ(1, nr_gpu_pass_ul_hyp_lookup(0x4242, 7, 1010, &g)) << "a locked grant of a known RNTI takes the pass";
+  EXPECT_EQ(0, nr_gpu_pass_ul_hyp_lookup(0x4242, 8, 1010, &g)) << "another configuration epoch: stale";
+  EXPECT_EQ(0, nr_gpu_pass_ul_hyp_lookup(0x4242, 7, 1000 + 5000, &g)) << "older than the maximum age: stale";
+  EXPECT_EQ(0, nr_gpu_pass_ul_hyp_lookup(0x4243, 7, 1010, &g)) << "another RNTI";
+  nr_gpu_pass_ul_cache_counts(&h1, &m1, &s1, &p1);
+  EXPECT_EQ(h0 + 1, h1);
+  EXPECT_EQ(m0 + 2, m1);
+  EXPECT_EQ(s0 + 2, s1);
+  EXPECT_EQ(p0 + 1, p1);
+  /* the entry is replaced in place, a different RNTI gets its own, 64 entries then evict the least recently written */
+  h.ta = 5;
+  ul_hyp_cache_put(0x4242, &h);
+  EXPECT_EQ(1, ul_hyp_cache_get(0x4242, &g));
+  EXPECT_EQ(5, g.ta);
+  for (int r = 1; r <= 70; r++) { h.ta = r; ul_hyp_cache_put((uint16_t)(0x5000 + r), &h); }
+  EXPECT_EQ(0, ul_hyp_cache_get(0x4242, &g)) << "the oldest entry was evicted";
+  EXPECT_EQ(1, ul_hyp_cache_get(0x5000 + 70, &g));
+  EXPECT_EQ(70, g.ta);
+  ul_hyp_cache_drop(0x5000 + 70);
+  EXPECT_EQ(0, ul_hyp_cache_get(0x5000 + 70, &g));
+  ul_hyp_cache_clear();
+  EXPECT_EQ(0, ul_hyp_cache_get(0x5000 + 69, &g));
+}
+
+TEST(GpuPassUl, UnseenClassAndConcurrency) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(ul_ready(m));
+  /* a shape the warm-up never built (ndmrs 4 at 6 PRB): the host builder hands the grant back */
+  const nr_gpu_pass_shape_t sh = {12, 13, 1, 2, 2, 1, 1};
+  GpuPassFixture fx = GpuPassFixture::from_shape(sh, 9);
+  ASSERT_TRUE(fx.tb_ok_built);
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
+  auto ulc = (void (*)(uint64_t *))dlsym(dl, "nr_gpu_pass_ul_counters");
+  ASSERT_TRUE(ulc);
+  UlSlot sl;
+  sl.build(fx, 0, -1, 0, 0);
+  uint64_t u0[16], u1[16];
+  ulc(u0);
+  nr_gpu_pass_ul_in_t in2 = sl.in;
+  in2.ul_dmrs_symb_pos = (1u << 2) | (1u << 5) | (1u << 8) | (1u << 11); /* four DM-RS symbols: ndmrs 4, never warmed */
+  nr_gpu_pass_ul_out_t out2;
+  EXPECT_EQ(1, nr_gpu_pass_ul_run(&in2, &out2));
+  ulc(u1);
+  EXPECT_EQ(u0[2] + 1, u1[2]) << "unseen class counted by the module";
+  /* eight threads, each its own decode context, same slot: every pass decodes the same TB */
+  ul_warm_class(m, 12, 2, fx.tb.C);
+  ASSERT_FALSE(HasFatalFailure());
+  std::atomic<int> good{0}, fail{0};
+  std::vector<std::thread> th;
+  for (int t = 0; t < 8; t++)
+    th.emplace_back([&, t]() {
+      UlSlot s;
+      s.build(fx, 0, -1, 0, t);
+      for (int i = 0; i < 6; i++) {
+        s.tb.assign(s.tb.size(), 0xcc);
+        const int rc = nr_gpu_pass_ul_run(&s.in, &s.out);
+        if (rc == 1) continue; /* all four instances busy: the old path would decode it */
+        if (rc == 0 && s.out.r.tb_ok && !memcmp(s.tb.data(), fx.tb.payload.data(), fx.tb.A / 8)) good++;
+        else fail++;
+      }
+    });
+  for (auto &t : th) t.join();
+  EXPECT_EQ(0, fail.load());
+  EXPECT_GT(good.load(), 8);
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
@@ -1231,4 +1632,49 @@ TEST(GpuPassFence, NoAllocAfterFence) {
   EXPECT_EQ(o0[12] + (have_seg ? 200 : 0), o1[12]) << "segmented launches";
   EXPECT_EQ(0, memcmp(tb.data(), fx.tb.payload.data(), fx.tb.A / 8));
   if (have_seg) EXPECT_EQ(0, memcmp(stb.data(), sfx.tb.payload.data(), sfx.tb.A / 8));
+}
+
+/* The PUSCH pass behind the fence: a warm class launches 500 times, nothing is allocated by the platform, the module or the host builder (its Gold-sequence cache is warm from one earlier pass). */
+TEST(GpuPassFence, UlNoAllocAfterFence) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(ul_ready(m));
+  const nr_gpu_pass_shape_t sh = {48, 13, 1, 2, 2, 1, 1};
+  GpuPassFixture fx = GpuPassFixture::from_shape(sh, 31);
+  ASSERT_TRUE(fx.tb_ok_built);
+  ul_warm_class(m, 48, 2, fx.tb.C);
+  ASSERT_FALSE(HasFatalFailure());
+  UlSlot sl;
+  sl.build(fx, 0, -1, 0, 0);
+  ASSERT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out)); /* warms the Gold cache of the host builder */
+  ASSERT_TRUE(sl.out.r.tb_ok);
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
+  auto ulc = (void (*)(uint64_t *))dlsym(dl, "nr_gpu_pass_ul_counters");
+  ASSERT_TRUE(ulc);
+  nr_gpu_rx_started(); /* the fence */
+  uint64_t pa0, pd0, pa1, pd1, u0[16], u1[16], o0[16], o1[16];
+  nr_gpu_memory_stats(&pa0, &pd0);
+  m.pass_counters(o0);
+  ulc(u0);
+  const size_t heap0 = mallinfo2().uordblks, arenas0 = mallinfo2().arena + mallinfo2().hblkhd;
+  for (int i = 0; i < 500; i++) {
+    sl.tb.assign(sl.tb.size(), 0xcc);
+    ASSERT_EQ(0, nr_gpu_pass_ul_run(&sl.in, &sl.out)) << "launch " << i;
+    ASSERT_TRUE(sl.out.r.tb_ok) << "launch " << i;
+  }
+  nr_gpu_memory_stats(&pa1, &pd1);
+  m.pass_counters(o1);
+  ulc(u1);
+  EXPECT_EQ(heap0, (size_t)mallinfo2().uordblks) << "the UL pass path allocated host memory";
+  EXPECT_EQ(arenas0, (size_t)(mallinfo2().arena + mallinfo2().hblkhd));
+  EXPECT_EQ(pa0, pa1) << "the platform allocated on the pass path";
+  EXPECT_EQ(pd0, pd1);
+  EXPECT_EQ(o0[10], o1[10]) << "the module captured a graph on the pass path";
+  EXPECT_EQ(u0[0] + 500, u1[0]);
+  EXPECT_EQ(u0[1] + 500, u1[1]);
+  EXPECT_EQ(0, memcmp(sl.tb.data(), fx.tb.payload.data(), fx.tb.A / 8));
 }

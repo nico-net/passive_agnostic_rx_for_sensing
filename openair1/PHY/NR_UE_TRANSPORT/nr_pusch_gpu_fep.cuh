@@ -28,15 +28,15 @@ struct Item {
 };
 static const int MAX_ITEMS = 64, NCTX = 4;
 
-__global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep(const Item *__restrict__ items, const uint16_t *__restrict__ perm,
-                                                              const short *__restrict__ tw1024, const short *__restrict__ tw4096,
-                                                              const short2 *__restrict__ ts, int nb_rb, int fco)
+/* the body of one (item, antenna) block; src == null (a pass item that is not used) leaves the block without effect */
+__device__ __forceinline__ void ul_fep_blk(const Item &it, int ant, const uint16_t *__restrict__ perm, const short *__restrict__ tw1024,
+                                           const short *__restrict__ tw4096, const short2 *__restrict__ ts, int nb_rb, int fco)
 {
   using namespace nr_exact;
   __shared__ short2 s[N];
-  const Item it = items[blockIdx.x];
-  const int ant = blockIdx.y, t = threadIdx.x;
+  const int t = threadIdx.x;
   const short2 *in = it.src[ant];
+  if (!in) return; /* uniform over the block */
   for (int n = t; n < N; n += THREADS) s[n] = in[__ldg(&perm[n])];
   __syncthreads();
   fft4096<false>(s, t, tw1024, tw4096);
@@ -57,6 +57,19 @@ __global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep(const Item *__rest
     }
     o[k] = v;
   }
+}
+
+__global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep(const Item *__restrict__ items, const uint16_t *__restrict__ perm,
+                                                              const short *__restrict__ tw1024, const short *__restrict__ tw4096,
+                                                              const short2 *__restrict__ ts, int nb_rb, int fco)
+{
+  ul_fep_blk(items[blockIdx.x], blockIdx.y, perm, tw1024, tw4096, ts, nb_rb, fco);
+}
+/* GPUPASS Task 7: the same block for the graph pass: the rotation geometry (nb_rb, fco) is read from device memory when the kernel runs, and an item with src[0] == null is skipped */
+__global__ void __launch_bounds__(nr_exact::THREADS) k_ul_fep_p(const Item *__restrict__ items, const int *__restrict__ par, const uint16_t *__restrict__ perm,
+                                                                const short *__restrict__ tw1024, const short *__restrict__ tw4096, const short2 *__restrict__ ts)
+{
+  ul_fep_blk(items[blockIdx.x], blockIdx.y, perm, tw1024, tw4096, ts, par[0], par[1]);
 }
 
 struct State {
@@ -240,4 +253,14 @@ extern "C" void nr_pusch_gpu_fep_stats(uint64_t *o)
   using namespace ulfep;
   o[0] = U.calls; o[1] = U.items; o[2] = U.gpu_us; o[3] = U.max_us; o[4] = U.n_busy; o[5] = U.n_budget; o[6] = U.n_rt;
   o[7] = U.n_late; o[8] = U.n_err; o[9] = U.part;
+}
+
+/* GPUPASS Task 7: launch-only FEP of the PUSCH pass (graph-capturable). items_dev: 14 ulfep::Item (nr_pusch_gpu_fep_item_t) readable by the kernel, par_dev: {nb_rb, fco}
+ * (apply_nr_rotation_symbol_RX geometry); both are rewritten by the host between replays. Uses the tables of the exact PDSCH FEP (the same bits as this file's own,
+ * ISAC_UL_GPU_FEP is not needed). 0 or -1. */
+extern "C" int nr_gpu_pass_ul_fep_dev(const void *items_dev, const int *par_dev, int nant, void *stream)
+{
+  if (g_init_state != 1 || !g_exact_ok || !g_d_perm || !items_dev || !par_dev || nant < 1 || nant > 4) return -1;
+  ulfep::k_ul_fep_p<<<dim3(14, nant), nr_exact::THREADS, 0, (cudaStream_t)stream>>>((const ulfep::Item *)items_dev, par_dev, g_d_perm, g_d_tw1024, g_d_tw4096, g_d_ts);
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }

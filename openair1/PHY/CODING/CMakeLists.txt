@@ -137,7 +137,11 @@ if(ENABLE_LDPC_CUDA)
   add_executable(test_nr_gpu_pass ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_test.cc)
   # the CPU references of the Task 3 kernels: OAI check_crc/crc24x and the RX rate matching, linked as the real functions
   target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
-  target_link_libraries(test_nr_gpu_pass PRIVATE GTest::gtest_main nr_gpu_platform CUDA::cudart thread-pool LOG minimal_lib crc_byte UTIL ${CMAKE_DL_LIBS} pthread m)
+  # Task 7 (PUSCH pass): the host builder and its hypothesis cache, the CPU reference of the chest / equaliser (real nr_channel_* / nr_compute_llr / nr_passive_est_delay) and the DFT library loader
+  target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_ul.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_ul_ref.c ${OPENAIR1_DIR}/PHY/TOOLS/dfts_load.c ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_link_libraries(test_nr_gpu_pass PRIVATE GTest::gtest_main nr_gpu_platform CUDA::cudart thread-pool LOG minimal_lib crc_byte UTIL PHY_NR PHY_NR_COMMON shlib_loader ${CMAKE_DL_LIBS} pthread m)
+  add_dependencies(test_nr_gpu_pass dfts)
   # ./libldpc.so (the OAI LDPC encoder of the pass fixture) resolves these from the executable, as in test_nr_pdsch_gpu_ldpc
   foreach(sym check_crc crc24a crc24b crc16 crcTableInit completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
     target_link_options(test_nr_gpu_pass PRIVATE "LINKER:--undefined=${sym}")
@@ -150,7 +154,7 @@ if(ENABLE_LDPC_CUDA)
   set_tests_properties(test_nr_gpu_pass PROPERTIES ENVIRONMENT "CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
   add_dependencies(test_nr_gpu_pass ldpc)
   # the graph pass under the DISCRETE memory model (device buffers, explicit copies): its own process, the instances are allocated once per process
-  add_test(NAME test_nr_gpu_pass_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.*:GpuPassFence.NoAllocAfterFence WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_test(NAME test_nr_gpu_pass_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.*:GpuPassUl.*:GpuPassFence.NoAllocAfterFence:GpuPassFence.UlNoAllocAfterFence WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_pass_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
   # GPUPASS Task 5: no FP64 instruction in the SASS of the float demod kernels (cuobjdump; exit 77 = skipped)
   add_test(NAME test_nr_gpu_fp32_sass COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/check_no_fp64_sass.sh ${CMAKE_BINARY_DIR}/libpdsch_gpu.so)

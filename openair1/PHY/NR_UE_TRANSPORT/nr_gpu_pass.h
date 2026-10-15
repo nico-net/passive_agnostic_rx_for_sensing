@@ -46,6 +46,7 @@ typedef struct {
   uint8_t fp32;
   uint16_t nseg_class; /* Task 4b: 0 = a contiguous grant. 1, 2, 4, 8, 16 = a segmented grant (PRG / VRB bundles) of up to that many segments: the chest runs one row set per segment into
                         * scratch rows and a compose kernel lays them out in data order (the estimate layout the demod reads); the smallest class >= the segments of the grant. */
+  uint8_t ul;          /* Task 7: 1 = a PUSCH pass class (nl = 1, CP-OFDM, DM-RS type 1; nrb_class, ndmrs and ncb_class are its whole structure) */
 } nr_gpu_pass_shape_t;
 
 static inline int nr_gpu_pass_nrb_class(int nrb)
@@ -95,6 +96,38 @@ static inline int nr_gpu_pass_seg_remap_geo(int16_t *geo_y, int ext, uint16_t sy
   return 0;
 }
 
+
+/* ---- Task 7: the PUSCH (UL) pass. One captured graph per class (nrb_class, ndmrs, ncb_class) and instance, the same four instances as the DL pass:
+ *   k_ul_fep (the PUSCH symbols of every antenna, from the UL snapshot, with the cached timing advance) -> chest (k_ul_ls, the GPU6 delay transform, the 16-tap FIR) ->
+ *   k_ul_level + k_ul_decide (the fixed-point scale of nr_rx_pusch_group_internal) -> k_ul_eq (extraction + nr_channel_compensation) -> k_ul_llr (nr_compute_llr + the
+ *   unscrambling) -> k_rdm -> LDPC -> k_crc -> k_pick -> k_crc. Every step is integer arithmetic, so the pass is bit-exact with nr_rx_pusch_group_tp + nr_ulsch_decoding
+ *   whatever ISAC_GPU_PASS_FP32 says (the FP32 instantiation only exists for the DL demod's MMSE).
+ * Scope (anything else returns 1 from nr_gpu_pass_ul_try, counted, and the old path decodes): one layer (the passive UL receiver refuses more upstream), CP-OFDM, DM-RS type 1,
+ * contiguous PRBs, normal CP, no PTRS, no frequency hopping, no HARQ combining (rv 0 of a fresh process), a TB of at most NR_GPU_PASS_MAX_CB code blocks, N = 4096. */
+#define NR_GPU_PASS_UL_NSYM 14
+typedef struct {
+  int on;                       /* 1 = an UL job */
+  /* ---- front end: the FFT window of symbol m of antenna a starts at iq[a] + win[m] (c16); win[m] < 0 = the symbol is not transformed */
+  const int16_t *iq[4];
+  uint32_t iq_len;              /* c16 readable from iq[a] (DISCRETE copies the span of the windows) */
+  int32_t win[NR_GPU_PASS_UL_NSYM];
+  int16_t rot[NR_GPU_PASS_UL_NSYM][2]; /* fp->symbol_rotation[link_type_ul][symbol + (slot % slots_per_subframe) * symbols_per_slot] */
+  int rot_nb_rb, rot_fco;       /* apply_nr_rotation_symbol_RX(fp->N_RB_UL, fp->first_carrier_offset) of the old FEP */
+  int16_t *rx[4];               /* the caller's rxdataF row of symbol 0 of the slot per antenna (c16, OAI layout): DIRECT = written in place by the pass; DISCRETE = filled after it; NULL = pass-private */
+  /* ---- grant */
+  int nrb, k0;                  /* PRBs, first subcarrier ((first_carrier_offset + (bwp_start + rb_start) * 12) % N) */
+  int ndmrs, dmrs_sym[NR_GPU_PASS_MAX_DMRS];
+  const int16_t *pil[NR_GPU_PASS_MAX_DMRS]; /* c16 pilots 6 * nrb (nr_pusch_dmrs_rx, the conjugate of the transmitted DM-RS) */
+  int delta;                    /* get_delta(port) */
+  int keep;                     /* the receive branch the passive UL equaliser uses (nr_ulsch_passive_keep_branch), -1 = all */
+  uint16_t nre[NR_GPU_PASS_UL_NSYM];   /* data REs per symbol (get_nb_re_pusch; 0 = the symbol is not in the grant or carries no data) */
+  uint8_t is_dmrs[NR_GPU_PASS_UL_NSYM];
+  int8_t est_sym[NR_GPU_PASS_UL_NSYM]; /* the DM-RS symbol whose estimate the symbol uses */
+  uint32_t llr_off[NR_GPU_PASS_UL_NSYM];
+  int meas_sym;                 /* first symbol with data REs (the channel level is measured on it) */
+  int16_t *est_out;             /* optional caller buffer [ndmrs * nbRx][4096] c16 (row = dmrs_index * nbRx + antenna): the chest estimates (the CFR / diagnostic consumers of ul_ch_estimates) */
+} nr_gpu_pass_ul_t;
+
 /* Everything the body computes from the DCI before the first kernel. Host buffers are read during nr_gpu_pass_dl_try only. */
 typedef struct {
   nr_gpu_pass_shape_t shape;
@@ -137,6 +170,7 @@ typedef struct {
   uint32_t qm_n;
   int16_t *llr_out; /* optional caller buffer [G]: receives the final (descrambled, normalised) LLRs when the TB fails its CRC, so that the caller's retry arms can re-decode them */
   int llr_out_all;  /* 1 = llr_out is filled on CRC success too (tests, FP32 sign checks) */
+  nr_gpu_pass_ul_t ul; /* Task 7: the PUSCH inputs of nr_gpu_pass_ul_try (ul.on); the TB fields above (A, C, K, Z, F, E, E2, first_rE2, tbslbrm, BG, R, R2, rv, Qm, it_max, G, scr, shape, llr_out) are shared */
 } nr_gpu_pass_job_t;
 
 /* the per-segment inputs of a segmented job as nr_pdsch_gpu_chest_grant's rows take them: pilot RB (prb_start + the BWP start unless the reference point is CRB 0) and first LS
@@ -173,6 +207,14 @@ typedef struct {
   int16_t *qm_row;               /* optional caller buffer [4096] c16: job.qm_n equalised layer-0 samples of symbol job.qm_sym (DIRECT model only: qm_valid) */
   uint8_t qm_valid;
   uint32_t nvar_ant[4];          /* the chest's per-antenna noise of the last DM-RS symbol and layer (what nr_dl_chest_nvar_ant holds after the old chest) */
+  /* ---- Task 7 (UL pass): row = dmrs_index * nbRx + antenna */
+  int32_t ul_log2_maxh;          /* the fixed-point scale of the equaliser */
+  int32_t ul_avg[4];             /* channel level of the measurement symbol per antenna (kept branches only) */
+  int32_t ul_delay[16][3];       /* nr_passive_est_delay candidate of every chest row: est_delay, delay_max_pos, delay_max_val */
+  uint64_t ul_acc[16];           /* noise sum of every chest row: sum |LS - H|^2 over 12 * nrb */
+  uint64_t ul_hsum[16];          /* sum |H|^2 over 12 * nrb of every chest row */
+  uint32_t ul_nrows;
+  uint8_t ul_tb_crc;             /* TB-level CRC24A of a multi-block TB (hp_crc_failed's second condition) */
 } nr_gpu_pass_result_t;
 
 /* Process-wide configuration, before nr_gpu_pass_init: the bit-exact chest reads the receiver's delay table (a fixed pointer, baked into the graphs). */
@@ -194,11 +236,16 @@ typedef int (*nr_gpu_pass_dl_try_fn)(const nr_gpu_pass_job_t *j, nr_gpu_pass_res
 typedef void (*nr_gpu_pass_stats_fn)(char *buf, int n);
 /* counters: launches, graph hits, fallbacks[unseen, busy, unsupported, error], need_cpu, tb_fail, instances, classes */
 typedef void (*nr_gpu_pass_counters_fn)(uint64_t o[16]);
+/* UL: launches, graph hits, fallbacks[unseen, busy, unsupported, error, ldpc key], tb_fail, need_cpu, host wait p50 / p99 <= (us, power-of-two bucket), classes */
+void nr_gpu_pass_ul_counters(uint64_t o[16]);
 
 int nr_gpu_pass_config(const nr_gpu_pass_cfg_t *cfg);
 int nr_gpu_pass_init(int max_classes);
 int nr_gpu_pass_warm(const nr_gpu_pass_shape_t *shape, int qmode, int align, int evm);
 int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r);
+/* Task 7: the same for a PUSCH grant (j->ul.on); 0 = done (r filled: tb_ok, tb, seg_ok, the UL outputs), 1 = not handled (class not cached, no free instance, outside the scope), < 0 = error */
+int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r);
+typedef int (*nr_gpu_pass_ul_try_fn)(const nr_gpu_pass_job_t *j, nr_gpu_pass_result_t *r);
 void nr_gpu_pass_stats(char *buf, int n);
 void nr_gpu_pass_counters(uint64_t o[16]);
 

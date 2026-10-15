@@ -1352,6 +1352,7 @@ struct Par { /* the job without its rows (kernel argument size) */
   const int16_t *delay_table;
   int16_t filt[4][16];
   int trim; /* DECTAIL: ISAC_PDSCH_GPU_CHEST_TRIM=1, k_fir computes only k < 12 nb_rb + 16 and zero-fills the rest */
+  unsigned long long *acc; /* GPUPASS Task 7 (type 3): the noise sum of every row, exact (nvar = acc / 12 nb_rb loses the remainder the UL aggregation needs); null = not written */
 };
 __device__ __forceinline__ short2 mulshift(short2 a, short2 b, int s) /* c16mulShift (int arithmetic, wraps) */
 {
@@ -1427,10 +1428,15 @@ __global__ void k_fir(const Par j, const nr_gpu_chest_row_t *rows, const short2 
       red[threadIdx.x] += red[threadIdx.x + s];
     __syncthreads();
   }
-  if (threadIdx.x == 0)
+  if (threadIdx.x == 0) {
     nvar[blockIdx.x] = idx > 0 ? (unsigned)(red[0] / (unsigned long long)idx) : 0u;
+    if (j.acc) j.acc[blockIdx.x] = red[0];
+  }
 }
 } // namespace nrch
+#define NR_GPU_PASS_UL_CHEST
+#include "nr_gpu_pass_ul.cuh"
+#undef NR_GPU_PASS_UL_CHEST
 
 extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
 {
@@ -1458,6 +1464,7 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
     if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
     par.trim = trim;
   }
+  par.acc = nullptr;
   nrch::k_ls<<<j->n_rows, 256, 0, g_ctx_stream[c]>>>(par, rows, g_ctx_ls[c]);
   {
     nr_exact::DelayIO io = {};
@@ -1529,7 +1536,10 @@ extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu
     if (trim < 0) trim = getenv("ISAC_PDSCH_GPU_CHEST_TRIM") && atoi(getenv("ISAC_PDSCH_GPU_CHEST_TRIM")) == 1;
     par.trim = trim;
   }
-  nrch::k_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);
+  /* type 3 (GPUPASS Task 7, the PUSCH pass): the UL least-squares step, and the exact noise sum of every row at u64 [512 + row] of the nvar area */
+  par.acc = j->type == 3 ? (unsigned long long *)(dout + 3 * NR_GPU_CHEST_MAX_ROWS) + 512 : nullptr;
+  if (j->type == 3) nrch::k_ul_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);
+  else nrch::k_ls<<<n, 256, 0, s>>>(par, rows, g_pass_ls[slot]);
   {
     nr_exact::DelayIO io = {};
     io.base = g_pass_ls[slot];

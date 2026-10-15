@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* GPUPASS Task 4, host side of the DL graph pass: see nr_gpu_pass_dl.h and nr_gpu_pass.h. */
 #include "nr_gpu_pass_dl.h"
+#include "nr_gpu_pass_ul.h"
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_gpu_demod.h"
@@ -166,14 +167,16 @@ static int env_list(const char *name, const char *dflt, int *v, int max)
 
 void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
 {
-  const char *e = getenv("ISAC_GPU_PASS");
-  if (!e || atoi(e) != 1 || !ue)
+  const char *e = getenv("ISAC_GPU_PASS"), *eu = getenv("ISAC_UL_GPU_PASS");
+  const int dl_on = e && atoi(e) == 1, ul_on = eu && atoi(eu) == 1; /* ISAC_UL_GPU_PASS: the PUSCH pass (Task 7), independent of the DL one */
+  if ((!dl_on && !ul_on) || !ue)
     return;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  const char *bad = incompatible_env();
+  const char *bad = dl_on ? incompatible_env() : NULL;
   if (bad) {
     LOG_W(PHY, "SENSING: GPUPASS requested but %s is set (a host path the pass does not reproduce): off\n", bad);
-    return;
+    if (!ul_on)
+      return;
   }
   if (fp->ofdm_symbol_size != 4096 || fp->symbols_per_slot != 14 || fp->nb_antennas_rx < 1 || fp->nb_antennas_rx > 4) {
     LOG_W(PHY, "SENSING: GPUPASS needs N = 4096, 14 symbols, <= 4 RX: off\n");
@@ -209,6 +212,10 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
   }
   if (cfgf(&c) != 0 || initf(0) != 0) {
     LOG_W(PHY, "SENSING: GPUPASS: nr_gpu_pass_config/init failed: off\n");
+    return;
+  }
+  if (!dl_on || bad) { /* the PUSCH pass alone */
+    nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
     return;
   }
   /* the class list: PRB classes x layers x the code block counts that can occur x DM-RS symbol counts, in the order of expected use, up to ISAC_GPU_PASS_CLASSES */
@@ -310,6 +317,8 @@ void nr_gpu_pass_warmup(PHY_VARS_NR_UE *ue)
     G.stats(buf, sizeof(buf));
     LOG_A(PHY, "SENSING: %s\n", buf);
   }
+  if (ul_on)
+    nr_gpu_pass_ul_warm(h, fp->nb_antennas_rx, G.fp32);
 }
 
 int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)

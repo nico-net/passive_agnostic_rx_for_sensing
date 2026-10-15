@@ -902,6 +902,15 @@ class GpuPassFixture {
       const int k = nr_llr_norm_shift(llr.data(), nr_llr_norm_span(G, (uint32_t)tb.C));
       if (k > 0) for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
     }
+    return decode_llr(m, P, st, llr, s);
+  }
+
+  /* the OAI rate dematching, the GPU LDPC (Task 2 stage path) and the OAI stop rule + CRC on the final LLRs of a grant (descrambled, normalised as the caller wants);
+   * s receives seg_ok / need_cpu / the TB / tb_ok. P: a Pass whose lin / bits buffers are used. */
+  int decode_llr(GpuPassModule &m, Pass &P, cudaStream_t st, std::vector<int16_t> &llr, nr_gpu_pass_result_t *s)
+  {
+    const uint32_t G = tb.G;
+    (void)G;
     llr_ref = llr; /* what the retry arms of the old path re-decode */
     /* the OAI rate dematching and the pack of prep_segment (nr_pdsch_gpu_ldpc_host.c) */
     const int C = tb.C, Z = tb.Z, K = tb.K, F = tb.F, Kc = tb.BG == 2 ? 52 : 68;

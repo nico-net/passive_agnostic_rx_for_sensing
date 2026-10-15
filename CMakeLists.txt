@@ -990,6 +990,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci_history.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_gpu_pass_dl.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_grantwork.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_wire.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_td_cb0_adapter.c
