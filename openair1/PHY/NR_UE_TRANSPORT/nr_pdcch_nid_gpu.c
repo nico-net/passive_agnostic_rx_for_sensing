@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #define _GNU_SOURCE
 #include "nr_pdcch_nid_gpu.h"
+#include "nr_dmrs_nid_solve.h"
 #include "PHY/TOOLS/nr_gpu_budget.h"
 #include "common/utils/LOG/log.h"
 #include <dlfcn.h>
@@ -384,6 +385,10 @@ int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *g
 {
  if(!nr_pdcch_nid_gpu_enabled() || !out || capacity<1 || !generation || pthread_mutex_trylock(&g.mu))return -1;
  int n=-1;
+ /* ISAC_DMRS_NID_SOLVE=2: until the sweep has published anything, offer the solver's leader once as a hint (own generation value). */
+ if(g.generation==0 && g.result.count==0 && *generation!=UINT64_MAX-1 && nr_dmrs_nid_live_hint(out)) {
+  *generation=UINT64_MAX-1;pthread_mutex_unlock(&g.mu);return 1;
+ }
  if(*generation!=g.generation) {
   n=g.result.count<capacity?g.result.count:capacity;
   memcpy(out,g.result.records,n*sizeof(*out));*generation=g.generation;

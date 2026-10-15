@@ -14,6 +14,8 @@ extern "C" {
 #define NR_PDCCH_NID_KERNEL_KINDS 13
 typedef struct { int16_t r, i; } nr_pdcch_nid_iq_t;
 typedef struct { int nid, sym, dur, grid_rb, groups, L, R, shift, ties; } nr_pdcch_nid_record_t;
+/* ISAC_DMRS_NID_SOLVE=2: the DM-RS solver's leader as a one-record hint (nr_dmrs_nid_solve_live.c); false when none. */
+bool nr_dmrs_nid_live_hint(nr_pdcch_nid_record_t *r);
 typedef struct {
  int count;
  nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];
