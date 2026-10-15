@@ -24,7 +24,7 @@ base+=(LD_LIBRARY_PATH=$BIN:/usr/local/lib)
 echo "$(date -Is) FREQ=$FREQ RATE=$RATE DUR=$DUR CHAN_CELLS=${CHAN_CELLS:-} cells: $*" > cmd.txt
 # 1. publisher (root: DPDK). rx_shift 2 = usrp_lib X4x0 level.
 sudo env ISAC_UHD_CTRL_CORES=15 $BIN/shm_iq_uhd_pub --args "$UHD_ARGS" --rate $RATE --freq $FREQ --gain $GAIN --channels 4 --antenna RX1 \
-  --ring $RING --duration $((DUR + 120)) > pub.log 2>&1 &
+  --ring $RING --capacity ${CAPACITY:-33554432} --duration $((DUR + 120)) ${PUB_EXTRA:-} > pub.log 2>&1 &
 PUBPID=""; for k in $(seq 1 60); do PUBPID=$(pgrep -x shm_iq_uhd_pub | head -1); grep -q SHMIQ_UHD_READY pub.log 2>/dev/null && break; grep -q SHMIQ_UHD_FAIL pub.log 2>/dev/null && break; sleep 1; done
 stop_all() { for p in $(cat cell.pids 2>/dev/null); do kill -INT $p 2>/dev/null; done; [ -n "${CHPID:-}" ] && kill -INT $CHPID 2>/dev/null
   sleep 5; [ -n "$PUBPID" ] && sudo kill -INT $PUBPID 2>/dev/null
