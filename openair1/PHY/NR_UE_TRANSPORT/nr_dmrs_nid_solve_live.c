@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* Live observer for nr_dmrs_nid_solve (see the header). Adapted from commit 571bd335d4, reference = Point A (the same pilot grid the GPU NID sweep
  * uses: subcarrier pa + 12 c + 1 + 4 q, sequence index m = 3 c + q). Observe only: it votes per N_ID and logs; nothing consumes the result.
- * Env: ISAC_DMRS_NID_SOLVE=1 observe | 2 observe + hint (default off), _EVERY=N (offer 1 symbol in N, default 32), _CORE=C (pin the worker, default unpinned),
+ * Env: ISAC_DMRS_NID_SOLVE=1 observe | 2 observe + leader hint | 3 primary (top-2 hint, GPU sweep on demand, see nr_pdcch_nid_gpu.c) (default off), _EVERY=N (offer 1 symbol in N, default 32), _CORE=C (pin the worker, default unpinned),
  * _OPT=0 disables the cost cuts (energy gate on windows, fast solver, 1-in-4 once the leader is stable; default on). */
 #define _GNU_SOURCE
 #include "nr_dmrs_nid_solve.h"
@@ -41,7 +41,7 @@ static int enabled(void)
   int x = atomic_load_explicit(&v, memory_order_relaxed);
   if (x < 0) {
     const char *e = getenv("ISAC_DMRS_NID_SOLVE"), *ev = getenv("ISAC_DMRS_NID_SOLVE_EVERY");
-    x = (e != NULL && (atoi(e) == 1 || atoi(e) == 2));
+    x = (e != NULL && (atoi(e) >= 1 && atoi(e) <= 3));
     g_mode = e != NULL ? atoi(e) : 0;
     if (getenv("ISAC_DMRS_NID_SOLVE_OPT") != NULL) g_opt = atoi(getenv("ISAC_DMRS_NID_SOLVE_OPT")) != 0;
     if (ev != NULL && atoi(ev) >= 1) g_every = atoi(ev);
@@ -153,6 +153,14 @@ static void solve(const job_t *j)
   atomic_fetch_add_explicit(&g_ns_win, cpu_ns() - t1, memory_order_relaxed);
 }
 
+static void hint_record(const vote_t *v, nr_pdcch_nid_record_t *r)
+{
+  int s0 = __builtin_ctz(v->symmask), s1 = s0;
+  while (s1 + 1 < 16 && (v->symmask >> (s1 + 1) & 1)) s1++;
+  r->nid = v->nid; r->sym = s0; r->dur = s1 - s0 + 1 > 3 ? 3 : s1 - s0 + 1;
+  r->grid_rb = atomic_load(&g_pa_rb) + v->lo_c; r->groups = (v->hi_c - v->lo_c) / 6; r->L = 0; r->R = 0; r->shift = 0; r->ties = 0;
+}
+
 /* ISAC_DMRS_NID_SOLVE=2: the leader as a one-record CORESET hint for the discovered-CORESET bank (non-interleaved, extent from its window
  * votes, symbols from where it solved). The GPU sweep's own records replace it as soon as they publish. */
 bool nr_dmrs_nid_live_hint(nr_pdcch_nid_record_t *r)
@@ -161,15 +169,30 @@ bool nr_dmrs_nid_live_hint(nr_pdcch_nid_record_t *r)
   if (g_mode != 2 || !atomic_load(&g_pa_ok)) return false;
   pthread_mutex_lock(&g_vq);
   if (g_leader >= 0 && g_votes[g_leader].votes >= 8 && g_votes[g_leader].hi_c > g_votes[g_leader].lo_c) {
-    const vote_t *v = &g_votes[g_leader];
-    int s0 = __builtin_ctz(v->symmask), s1 = s0;
-    while (s1 + 1 < 16 && (v->symmask >> (s1 + 1) & 1)) s1++;
-    r->nid = v->nid; r->sym = s0; r->dur = s1 - s0 + 1 > 3 ? 3 : s1 - s0 + 1;
-    r->grid_rb = atomic_load(&g_pa_rb) + v->lo_c; r->groups = (v->hi_c - v->lo_c) / 6; r->L = 0; r->R = 0; r->shift = 0; r->ties = 0;
+    hint_record(&g_votes[g_leader], r);
     ok = true;
   }
   pthread_mutex_unlock(&g_vq);
   return ok;
+}
+
+/* ISAC_DMRS_NID_SOLVE=3: up to cap (<= 2) records, the top-2 ids with >= 8 votes (a DCI-less id cannot block the real one); *sig identifies the
+ * id set (changes only when an id enters or leaves), so the consumer reloads on a new set only. Returns the count. */
+int nr_dmrs_nid_live_hints(nr_pdcch_nid_record_t *r, int cap, uint64_t *sig)
+{
+  if (g_mode != 3 || !atomic_load(&g_pa_ok) || cap < 1) return 0;
+  uint32_t votes[64];
+  int top[2], n = 0;
+  pthread_mutex_lock(&g_vq);
+  for (int i = 0; i < 64; i++) votes[i] = g_votes[i].hi_c > g_votes[i].lo_c ? g_votes[i].votes : 0;
+  const int c = nr_dmrs_nid_top2(votes, 64, 8, top);
+  *sig = 1;
+  for (int i = 0; i < c && n < cap; i++, n++) {
+    hint_record(&g_votes[top[i]], &r[n]);
+    *sig = *sig * 65537u + (uint64_t)g_votes[top[i]].nid + 1;
+  }
+  pthread_mutex_unlock(&g_vq);
+  return n;
 }
 
 static void *worker(void *arg)

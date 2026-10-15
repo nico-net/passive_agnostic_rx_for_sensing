@@ -71,6 +71,32 @@ uint32_t nr_dmrs_nid_cinit(int nid, int slot, int symbol, int symbols_per_slot, 
 struct nr_pdcch_nid_record_s;
 void nr_dmrs_nid_live_offer(const void *rx_c16, int fft, int fco, int nsc, int pa, int slot, int sym);
 
+/** ISAC_DMRS_NID_SOLVE=3 (solver primary). Pure helpers, unit tested.
+ *  top2: the (at most 2) ids with >= minv votes, most votes first. A DCI-less id with many votes takes one slot, never both. */
+static inline int nr_dmrs_nid_top2(const uint32_t *votes, int n, uint32_t minv, int out[2])
+{
+  int c = 0;
+  for (int r = 0; r < 2; r++) {
+    int best = -1;
+    for (int i = 0; i < n; i++)
+      if (votes[i] >= minv && (c == 0 || i != out[0]) && (best < 0 || votes[i] > votes[best])) best = i;
+    if (best < 0) break;
+    out[c++] = best;
+  }
+  return c;
+}
+/** On-demand sweep trigger: 1 when the GPU nID sweep must run now. published = a solver hint or a sweep record exists; verified = a CRC-valid
+ *  DCI confirmed it; wake = unexplained PDCCH occupancy edge (always runs). No result: held for grace_us, then every call (fallback).
+ *  Unverified result: every maintain_us. Verified: every recheck_us (slow re-verify). Times in us; last_run 0 = never ran. */
+static inline int nr_dmrs_nid_sweep_demand(int published, int verified, int wake, uint64_t now, uint64_t first, uint64_t last_run, uint64_t grace,
+                                           uint64_t maintain, uint64_t recheck)
+{
+  if (wake) return 1;
+  if (!published) return now - first >= grace;
+  if (last_run == 0) return !verified;
+  return now - last_run >= (verified ? recheck : maintain);
+}
+
 #ifdef __cplusplus
 }
 #endif

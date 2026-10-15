@@ -260,3 +260,38 @@ TEST(NidSolve, FastModeGivesTheSameBestNidAndIsCheaper)
   EXPECT_LE(full_only, total / 100);
   EXPECT_LE(t_fast, t_full);
 }
+
+// Solver-primary helpers (ISAC_DMRS_NID_SOLVE=3).
+TEST(NidPrimary, Top2KeepsTheRealIdBesideADciLessLeader)
+{
+  uint32_t v[4] = {250 /* DCI-less id, e.g. 9020 */, 12 /* real id */, 7, 40};
+  int out[2];
+  EXPECT_EQ(nr_dmrs_nid_top2(v, 4, 8, out), 2);
+  EXPECT_EQ(out[0], 0);
+  EXPECT_EQ(out[1], 3);  // the runner-up with >= 8 votes is kept, the leader does not block it
+  v[3] = 7;
+  EXPECT_EQ(nr_dmrs_nid_top2(v, 4, 8, out), 2);
+  EXPECT_EQ(out[1], 1);
+  v[1] = 7;
+  EXPECT_EQ(nr_dmrs_nid_top2(v, 4, 8, out), 1);  // below 8 votes: not offered
+  v[0] = 3;
+  EXPECT_EQ(nr_dmrs_nid_top2(v, 4, 8, out), 0);
+}
+
+TEST(NidPrimary, SweepRunsOnlyOnDemand)
+{
+  const uint64_t G = 1500000, M = 500000, R = 10000000;
+  // no result: held during the grace, then the fallback sweep runs
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(0, 0, 0, 1000000, 0, 0, G, M, R), 0);
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(0, 0, 0, 1500000, 0, 0, G, M, R), 1);
+  // solver result, not yet verified: one sweep to cross-check, then every maintain period
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 0, 0, 2000000, 0, 0, G, M, R), 1);
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 0, 0, 2100000, 0, 2000000, G, M, R), 0);
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 0, 0, 2500000, 0, 2000000, G, M, R), 1);
+  // verified: no sweep until the slow re-verify
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 1, 0, 2000000, 0, 0, G, M, R), 0);
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 1, 0, 9000000, 0, 2000000, G, M, R), 0);
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 1, 0, 12000000, 0, 2000000, G, M, R), 1);
+  // unexplained occupancy wakes it even when verified
+  EXPECT_EQ(nr_dmrs_nid_sweep_demand(1, 1, 1, 3000000, 0, 2000000, G, M, R), 1);
+}

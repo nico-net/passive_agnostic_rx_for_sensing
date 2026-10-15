@@ -1600,13 +1600,15 @@ static void nid_budget_feedback(void)
   nr_pdcch_nid_record_t records[NR_PDCCH_NID_MAX_RECORDS];uint64_t generation=0;
   int n=nr_pdcch_nid_gpu_snapshot(records,NR_PDCCH_NID_MAX_RECORDS,&generation);
   if(n<0)return;
-  bool verified=n>0;
-  for(int i=0;i<n && verified;++i) {
+  bool verified=n>0,any=false;
+  for(int i=0;i<n;++i) {
     const nr_pdcch_nid_record_t *r=records+i;
-    verified=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid)
+    const bool ok=nr_pdcch_coreset_bank_verified_footprint(r->grid_rb,r->groups,r->dur,r->sym,r->L,r->R,r->shift,r->nid)
         || (nr_pdcch_discovered_cover_enabled()
             && nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups));
+    verified&=ok;any|=ok;
   }
+  if(generation>>63)verified=any; /* solver hint set: one CRC-confirmed id is enough, a DCI-less id must not keep the sweep running */
   nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
 }
 
