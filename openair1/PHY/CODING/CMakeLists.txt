@@ -122,6 +122,8 @@ if(ENABLE_LDPC_CUDA)
   add_dependencies(test_nr_pdsch_gpu_ldpc pdsch_gpu ldpc)
   add_dependencies(tests test_nr_pdsch_gpu_ldpc)
   add_test(NAME test_nr_pdsch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  # non-cluster kernels (sm_89 path) forced on this device: same CPU-reference comparison
+  add_test(NAME test_nr_pdsch_gpu_ldpc_nc COMMAND ./test_nr_pdsch_gpu_ldpc 2 nc WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # ULLDPC: the same comparison through the UL pool of libpdsch_gpu.so
   add_test(NAME test_nr_pusch_gpu_ldpc COMMAND ./test_nr_pdsch_gpu_ldpc 2 ul WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   # GPUSHARE: green-context SM partition helper (nr_gpu_green.h); exit 77 = skipped (no device / no green contexts)

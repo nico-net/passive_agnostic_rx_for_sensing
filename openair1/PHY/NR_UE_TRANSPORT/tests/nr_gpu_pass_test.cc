@@ -57,7 +57,7 @@ static void dl_stages_case(int nrb, int nl, int qm, int seed, double max_ber) {
   EXPECT_EQ(0, memcmp(llr_direct.data(), llr_discrete.data(), llr_direct.size() * 2)) << "demod LLRs differ between the models";
   EXPECT_EQ(rc0, fx.ldpc_rc);
   if (rc0 == 0) EXPECT_EQ(snap0, fx.snap) << "LDPC snapshots differ between the models";
-  else EXPECT_EQ(-2, rc0) << "LDPC may only refuse with -2 (CC < 9)";
+  else ADD_FAILURE() << "LDPC refused (rc " << rc0 << "): below CC 9 the non-cluster kernels run, nothing may refuse";
   size_t err = 0;
   for (size_t i = 0; i < llr_direct.size(); i++) err += (llr_direct[i] < 0) != (fx.tx_bits[i] != 0);
   printf("nrb=%d nl=%d qm=%d: %zu LLRs, BER vs tx %.4f, LDPC rc %d nsnap %d, parity checked (model 1: %s)\n", nrb, nl, qm, llr_direct.size(),

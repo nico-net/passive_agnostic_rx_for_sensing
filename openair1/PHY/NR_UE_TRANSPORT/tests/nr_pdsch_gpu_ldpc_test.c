@@ -55,6 +55,9 @@ int main(int argc, char **argv)
   void *g = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_LOCAL);
   ldpc_dec_fn cpu = h ? (ldpc_dec_fn)dlsym(h, "LDPCdecoder") : NULL;
   const int ul = argc > 2 && !strcmp(argv[2], "ul");
+  const int nc = argc > 2 && !strcmp(argv[2], "nc"); /* non-cluster kernels (what sm_89 runs), forced on this device; the CPU reference decides */
+  if (nc)
+    setenv("ISAC_GPU_LDPC_NOCLUSTER", "1", 1);
   nr_gpu_ldpc_init_fn ginit = g ? (nr_gpu_ldpc_init_fn)dlsym(g, "nr_pdsch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_ul_init_fn uinit = g ? (nr_gpu_ldpc_ul_init_fn)dlsym(g, "nr_pusch_gpu_ldpc_init") : NULL;
   nr_gpu_ldpc_run_fn grun = g ? (nr_gpu_ldpc_run_fn)dlsym(g, ul ? "nr_pusch_gpu_ldpc_run" : "nr_pdsch_gpu_ldpc_run") : NULL;
@@ -65,6 +68,14 @@ int main(int argc, char **argv)
   if (!cpu || !grun || (ul ? (!uinit || uinit(100, 1000000) != 0) : (!ginit || ginit() != 0))) {
     printf("LDPC_GPU_TEST setup failed (%s)\n", dlerror());
     return 2;
+  }
+  if (nc) {
+    nr_gpu_ldpc_stats_fn st = (nr_gpu_ldpc_stats_fn)dlsym(g, "nr_pdsch_gpu_ldpc_stats");
+    uint64_t o[3] = {0};
+    if (!st || (st(o), o[0] != 2)) {
+      printf("LDPC_GPU_TEST nc: the non-cluster kernels are not selected (family %lu)\n", (unsigned long)o[0]);
+      return 2;
+    }
   }
   const int reps = argc > 1 ? atoi(argv[1]) : 3;
   srand48(12345);

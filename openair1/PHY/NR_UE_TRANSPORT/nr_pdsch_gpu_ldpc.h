@@ -41,7 +41,9 @@ typedef struct {
 #define NR_GPU_LDPC_DEV_RES_OFF ((size_t)NR_GPU_LDPC_MAX_JOBS * NR_GPU_LDPC_MAX_SNAP * NR_GPU_LDPC_KB_MAX)
 #define NR_GPU_LDPC_DEV_BITS_BYTES (NR_GPU_LDPC_DEV_RES_OFF + 2 * NR_GPU_LDPC_MAX_JOBS * sizeof(int))
 
-/* GPUPASS launch-only decode of n code blocks from device LLRs into device snapshots; -2 below CC 9. Enqueue only. */
+/* GPUPASS launch-only decode of n code blocks from device LLRs into device snapshots; 0 or -1. Below CC 9 (or ISAC_GPU_LDPC_NOCLUSTER=1) the non-cluster kernels run. Enqueue only. */
+/* o[0] kernel family (0 undecided, 1 cluster, 2 non-cluster, 3 refused), o[1] refusals, o[2] dev graph misses */
+typedef void (*nr_gpu_ldpc_stats_fn)(uint64_t *o);
 typedef int (*nr_gpu_ldpc_dev_fn)(const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream);
 
 typedef int (*nr_gpu_ldpc_init_fn)(void);
