@@ -105,8 +105,11 @@ void nr_gpu_pass_ul_note(int ev);
 enum { NR_GPU_PASS_UL_EV_OK, NR_GPU_PASS_UL_EV_FAIL /* pass said CRC fail: the old tail decoded its LLRs */, NR_GPU_PASS_UL_EV_REFINE /* |delay| above the tolerance: the old path redid the grant */,
        NR_GPU_PASS_UL_EV_SHADOW, NR_GPU_PASS_UL_EV_SHADOW_BAD, NR_GPU_PASS_UL_EV_SHADOW_LLR_DIFF /* LLRs not bit-equal (signs agree within the policy) */,
        NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF /* delay / scale / DM-RS SNR differ */, NR_GPU_PASS_UL_EV_NEED_CPU /* zero syndrome with a failing CRC: old path from scratch */,
-       NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_OK /* est diff on a CRC-OK shadow (disables) */, NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL /* est diff on a CRC-fail shadow (counted) */, NR_GPU_PASS_UL_EV_N };
+       NR_GPU_PASS_UL_EV_EST_OK_DISABLING /* CRC-OK shadow, est_delay or log2_maxh differ (disables) */, NR_GPU_PASS_UL_EV_EST_OK_SNR_ONLY /* CRC-OK shadow, only snr_db differs */,
+       NR_GPU_PASS_UL_EV_EST_OK_STATE3 /* CRC-OK shadow where the pass could not tell (need_cpu): the old path's values are used */, NR_GPU_PASS_UL_EV_SNR_BIG /* CRC-OK shadow, |snr pass - snr cpu| > 1 dB */, NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL /* est diff on a CRC-fail shadow (counted) */, NR_GPU_PASS_UL_EV_N };
 /* 1 = the pass result may be used; 0 = old path from scratch (need_cpu: the pass left no LLRs; counted). A shadowed pass is always compared, never used. */
+/* rate gate on CRC-OK shadows (nr_fp32_gate: >= 64 shadows, snr_big above 1 %): 1 = tripped and the pass was disabled */
+int nr_gpu_pass_ul_snr_note(int big);
 int nr_gpu_pass_ul_accept(const nr_gpu_pass_ul_out_t *o, int shadow);
 /* atomically: fail_streak++ of the RNTI's entry; the entry is dropped when it reaches max. A concurrent CRC-OK refresh is never rolled back. */
 void ul_hyp_cache_note_fail(uint16_t rnti, int max);

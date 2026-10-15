@@ -2620,7 +2620,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       const bool est_same = uout.est_delay == pvp->delay.est_delay && uout.log2_maxh == pvp->log2_maxh;
       if (!est_same || !snr_same) {
         nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF);
-        nr_gpu_pass_ul_note(cpu_ok ? NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_OK : NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL);
+        if (!cpu_ok) nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL);
+        else if (ul_shadow_state == 3) nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_EST_OK_STATE3); /* state 3: the pass had no verdict and the old path's values are used (ul_pass=0), so this never disables */
+        else nr_gpu_pass_ul_note(est_same ? NR_GPU_PASS_UL_EV_EST_OK_SNR_ONLY : NR_GPU_PASS_UL_EV_EST_OK_DISABLING);
+      }
+      if (cpu_ok && ul_shadow_state != 3 && IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+        /* snr gate: > 1 dB apart (NaN == NaN is the same) on more than 1 % of the CRC-OK shadows, after 64 of them, switches the pass off */
+        const int big = (isnan(sa) != isnan(sb)) || (!isnan(sa) && fabsf(sa - sb) > 1.0f);
+        nr_gpu_pass_ul_snr_note(big);
       }
       /* the chain is integer and claimed bit-exact: on a decoding grant any LLR, delay or scale difference switches the pass off; the noise tolerance is for CRC-fail grants */
       if (cpu_ok && ul_shadow_state != 3 && (ul_llr_inexact || !est_same)) bad = 1;

@@ -1721,3 +1721,18 @@ TEST(GpuPassFence, UlNoAllocAfterFence) {
   EXPECT_EQ(u0[1] + 500, u1[1]);
   EXPECT_EQ(0, memcmp(sl.tb.data(), fx.tb.payload.data(), fx.tb.A / 8));
 }
+
+/* last: tripping the gate switches the pass off process-wide */
+/* the CRC-OK snr gate (the FP32 rate gate on snr_big): nothing before 64 shadows, 1 % keeps the pass, above 1 % trips */
+TEST(GpuPassZUlSnrGate, Arithmetic) {
+  EXPECT_FALSE(nr_fp32_gate_bad(63, 63));
+  EXPECT_TRUE(nr_fp32_gate_bad(64, 64));
+  EXPECT_FALSE(nr_fp32_gate_bad(100, 1));
+  EXPECT_TRUE(nr_fp32_gate_bad(101, 2));
+  int trip = 0;
+  for (int i = 0; i < 99; i++) trip |= nr_gpu_pass_ul_snr_note(0);
+  EXPECT_EQ(0, trip);
+  EXPECT_EQ(0, nr_gpu_pass_ul_snr_note(1)) << "1 big in 100 keeps the pass";
+  EXPECT_EQ(1, nr_gpu_pass_ul_snr_note(1)) << "2 big in 101 trips";
+}
+
