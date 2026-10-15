@@ -783,10 +783,8 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
     }
     /* Direct mode: the kernel reads the receiver's host IQ ring and writes its rxdataF in place. Only on a
      * coherent shared-memory platform (GB10: pageable access through the host page tables). */
-    const nr_gpu_caps_t *caps = nr_gpu_platform_probe();
     const char *d = getenv("ISAC_PDSCH_GPU_EXACT_DIRECT");
-    g_exact_direct = caps && caps->model == NR_GPU_SHARED && caps->pageable_memory_access && caps->host_page_tables
-                     && !(d && atoi(d) == 0);
+    g_exact_direct = nr_gpu_platform_shared_direct() && !(d && atoi(d) == 0);
     if (const char *e = getenv("ISAC_PDSCH_GPU_EXACT_DEADLINE_US"))
       g_exact_deadline_us = std::max(50.0, atof(e));
     g_exact_ok = true;

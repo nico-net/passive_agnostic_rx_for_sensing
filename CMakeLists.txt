@@ -1057,7 +1057,7 @@ endif  (${SMBV})
 
 # Core singleton shared with dlopen GPU modules; deliberately no CUDA dependency.
 add_library(nr_gpu_platform SHARED ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_platform.c
-  ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_budget.c)
+  ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_budget.c ${OPENAIR1_DIR}/PHY/TOOLS/nr_gpu_mem.c)
 target_include_directories(nr_gpu_platform PUBLIC ${OPENAIR1_DIR}/PHY/TOOLS)
 target_link_libraries(nr_gpu_platform PRIVATE ${CMAKE_DL_LIBS} pthread)
 set_target_properties(nr_gpu_platform PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

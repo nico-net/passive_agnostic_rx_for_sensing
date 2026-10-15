@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef enum { NR_GPU_NONE, NR_GPU_SHARED, NR_GPU_DISCRETE } nr_gpu_model_t;
+typedef enum { NR_GPU_NONE, NR_GPU_SHARED, NR_GPU_DISCRETE } nr_gpu_platform_model_t;
 typedef enum { NR_GPU_DEVICE, NR_GPU_STAGING, NR_GPU_SHARED_RW } nr_gpu_kind_t;
 typedef enum { NR_GPU_ALLOC_UNAVAILABLE, NR_GPU_ALLOC_DEVICE, NR_GPU_ALLOC_MAPPED, NR_GPU_ALLOC_MANAGED } nr_gpu_storage_t;
 typedef struct {
@@ -16,11 +16,11 @@ typedef struct {
   int concurrent_managed_access, host_native_atomic_supported, unified_addressing;
   size_t total_memory, free_memory;
   char name[256];
-  nr_gpu_model_t model;
+  nr_gpu_platform_model_t model;
 } nr_gpu_caps_t;
 /* Pure policy functions also used by the mocked-capability tests. Invalid overrides fail closed. */
-nr_gpu_model_t nr_gpu_choose_model(const nr_gpu_caps_t *, const char *override);
-nr_gpu_storage_t nr_gpu_storage(nr_gpu_model_t, nr_gpu_kind_t, int managed_opt_in);
+nr_gpu_platform_model_t nr_gpu_choose_model(const nr_gpu_caps_t *, const char *override);
+nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t, nr_gpu_kind_t, int managed_opt_in);
 int nr_gpu_arch_compatible(int major, int minor, const char *built_archs);
 /* One process-wide instance, shared by the core and dlopen modules. No CUDA link dependency.
  * Probe is idempotent; call before module warm-up. The first GPU module may probe earlier.
@@ -28,6 +28,8 @@ int nr_gpu_arch_compatible(int major, int minor, const char *built_archs);
 void nr_gpu_set_logger(void (*logger)(int warning, const char *message));
 const nr_gpu_caps_t *nr_gpu_platform_probe(void);
 int nr_gpu_platform_ready(void);
+/* 1 iff model SHARED with pageable access through the host page tables (direct host access to GPU-visible memory). */
+int nr_gpu_platform_shared_direct(void);
 int nr_gpu_module_check(const char *module, const char *built_archs);
 /* Irreversible RX fence. Serialize with in-flight allocations; denial returns NULL/nonzero.
  * Free/unregister also denied after sealing: buffers remain resident until process exit. */

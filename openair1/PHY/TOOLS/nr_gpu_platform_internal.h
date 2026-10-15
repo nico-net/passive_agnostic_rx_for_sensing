@@ -22,6 +22,7 @@ typedef struct {
   int (*set_flags)(unsigned);
   int (*get_last_error)(void);
 } nr_gpu_runtime_t;
+const nr_gpu_runtime_t *nr_gpu_platform_runtime(void);
 #ifdef NR_GPU_PLATFORM_TEST
 #ifdef __cplusplus
 extern "C" {

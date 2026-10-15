@@ -51,7 +51,7 @@ void nr_gpu_set_logger(void (*fn)(int, const char *))
 /* nr_gpu_choose_model: selects the memory model from the probed capabilities and an override string ("auto", "shared" or "discrete"; unknown values give NONE).
  *   Auto chooses SHARED for integrated devices or devices with pageable memory access and host page tables, else DISCRETE. Returns NR_GPU_NONE when the device is unavailable.
  */
-nr_gpu_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c, const char *override)
+nr_gpu_platform_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c, const char *override)
 {
   if (!c || !c->available) return NR_GPU_NONE;
   if (!override || !strcmp(override, "auto"))
@@ -63,7 +63,7 @@ nr_gpu_model_t nr_gpu_choose_model(const nr_gpu_caps_t *c, const char *override)
 /* nr_gpu_storage: maps a buffer kind (device, staging or shared read-write) to the allocation type for the model: device memory, mapped host memory, or managed memory when use_managed is set.
  *   Only the SHARED model allocates; any other model returns NR_GPU_ALLOC_UNAVAILABLE. Used by nr_gpu_alloc().
  */
-nr_gpu_storage_t nr_gpu_storage(nr_gpu_model_t model, nr_gpu_kind_t kind, int use_managed)
+nr_gpu_storage_t nr_gpu_storage(nr_gpu_platform_model_t model, nr_gpu_kind_t kind, int use_managed)
 {
   if (model != NR_GPU_SHARED) return NR_GPU_ALLOC_UNAVAILABLE;
   switch (kind) {
@@ -72,6 +72,17 @@ nr_gpu_storage_t nr_gpu_storage(nr_gpu_model_t model, nr_gpu_kind_t kind, int us
     case NR_GPU_SHARED_RW: return use_managed ? NR_GPU_ALLOC_MANAGED : NR_GPU_ALLOC_MAPPED;
   }
   return NR_GPU_ALLOC_UNAVAILABLE;
+}
+/* nr_gpu_platform_shared_direct: probes (idempotent) and returns 1 iff the model is SHARED with pageable memory access through the host page tables. */
+int nr_gpu_platform_shared_direct(void)
+{
+  const nr_gpu_caps_t *c = nr_gpu_platform_probe();
+  return c && c->model == NR_GPU_SHARED && c->pageable_memory_access && c->host_page_tables;
+}
+/* nr_gpu_platform_runtime: the resolved CUDA runtime entry points (valid after a successful probe, else NULL); used by nr_gpu_mem.c. */
+const nr_gpu_runtime_t *nr_gpu_platform_runtime(void)
+{
+  return nr_gpu_platform_probe() && rt.malloc_host ? &rt : NULL;
 }
 /* nr_gpu_arch_compatible: true when a CUDA module built for the architecture list archs (for example "80,89-virtual") can run on the device with compute capability major.minor.
  *   A real (cubin) entry must match the major version and not exceed the device; a virtual (PTX) entry is forward compatible. Pure function. Caller: nr_gpu_module_check().
