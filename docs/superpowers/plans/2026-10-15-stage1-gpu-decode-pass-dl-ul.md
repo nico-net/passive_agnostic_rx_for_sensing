@@ -233,6 +233,22 @@ git add openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu openair1/PHY/NR_UE_TRAN
 git commit -m "feat(gpupass): launch-only device-buffer entry points for DL FEP/chest/demod/LDPC (shared + discrete)"
 ```
 
+### Task 2b: Non-cluster LDPC kernel for sm_89 (RTX 4070)
+
+(Added 2026-10-15 by controller ruling: `k_ldpc` and `k_ldpc4` in `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu` (~136, ~311) use thread-block clusters (`cg::this_cluster`, `cudaLaunchAttributeClusterDimension` ~590/~712), which need sm_90+; Task 1's fix round only guards them and falls back to CPU LDPC on CC < 9.0.)
+
+**Files:**
+- Modify: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu` (new kernels `k_ldpc_nc` / `k_ldpc4_nc`: the same layered min-sum schedule, iteration cap and early-stop rule as `k_ldpc`/`k_ldpc4`, with the cluster's distributed shared memory replaced by global memory per code block; selected when the device compute capability major < 9)
+- Test: `openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_ldpc_test.c` (existing `test_nr_pdsch_gpu_ldpc` / `test_nr_pusch_gpu_ldpc`)
+
+**Interfaces:** no API change: `nr_pdsch_gpu_ldpc_run()` (ldpc.cu:556) and `nr_pusch_gpu_ldpc_run()` (ldpc.cu:844) pick `_nc` kernels on CC < 9.0; env `ISAC_GPU_LDPC_NOCLUSTER=1` forces them on GB10 for testing.
+
+- [ ] **Step 1: Failing test** — add a mode to `nr_pdsch_gpu_ldpc_test.c` that sets `ISAC_GPU_LDPC_NOCLUSTER=1` and requires the same hard decisions and CRC verdicts as the CPU decoder (the test's existing reference) on all its cases (BG1/BG2, Z sizes, rv 0..3), and the same iteration counts as the cluster kernel. Register `add_test(NAME test_nr_pdsch_gpu_ldpc_nc COMMAND test_nr_pdsch_gpu_ldpc 2 nc)` in `openair1/PHY/CODING/CMakeLists.txt` next to lines 115-126.
+- [ ] **Step 2: Run** `ctest -R test_nr_pdsch_gpu_ldpc_nc` → FAIL (mode unknown / kernel missing).
+- [ ] **Step 3: Implement** `k_ldpc_nc`/`k_ldpc4_nc` and the selection.
+- [ ] **Step 4: Run** → PASS on GB10 with the forced flag; existing `test_nr_pdsch_gpu_ldpc` / `test_nr_pusch_gpu_ldpc` still PASS; report kernel time cluster vs non-cluster on GB10 (1000 random CBs timed with cudaEvents).
+- [ ] **Step 5: Commit** `git add openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_gpu_ldpc_test.c openair1/PHY/CODING/CMakeLists.txt && git commit -m "feat(gpupass): non-cluster LDPC kernels for sm_89 (RTX 4070)"`
+
 ### Task 3: Device kernels for the host steps between stages
 
 **Files:**
