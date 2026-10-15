@@ -1542,6 +1542,42 @@ TEST(GpuPassUl, UnseenClassAndConcurrency) {
   EXPECT_GT(good.load(), 8);
 }
 
+/* need_cpu (zero syndrome with a failing CRC): the pass left no LLRs, so the call site must take the old path from scratch; a shadowed pass is only compared */
+TEST(GpuPassUl, NeedCpuMeansOldPath) {
+  nr_gpu_pass_ul_out_t o = {};
+  o.r.need_cpu = 1;
+  EXPECT_EQ(0, nr_gpu_pass_ul_accept(&o, 0)) << "need_cpu must not be used";
+  EXPECT_EQ(1, nr_gpu_pass_ul_accept(&o, 1)) << "a shadowed pass is compared, not used";
+  o.r.need_cpu = 0;
+  EXPECT_EQ(1, nr_gpu_pass_ul_accept(&o, 0));
+}
+/* the fail streak is one atomic step: three fails drop the entry, a refresh in between restarts it */
+TEST(GpuPassUl, FailStreakIsAtomic) {
+  ul_hyp_cache_clear();
+  ul_hyp_t h = {};
+  h.ta = 7; h.epoch = 1;
+  ul_hyp_cache_put(0x77, &h);
+  ul_hyp_cache_note_fail(0x77, 3);
+  ul_hyp_cache_note_fail(0x77, 3);
+  ul_hyp_t g;
+  ASSERT_EQ(1, ul_hyp_cache_get(0x77, &g));
+  EXPECT_EQ(2, g.fail_streak);
+  ul_hyp_cache_put(0x77, &h); /* a CRC-OK refresh */
+  ul_hyp_cache_note_fail(0x77, 3);
+  ASSERT_EQ(1, ul_hyp_cache_get(0x77, &g));
+  EXPECT_EQ(1, g.fail_streak);
+  ul_hyp_cache_note_fail(0x77, 3);
+  ul_hyp_cache_note_fail(0x77, 3);
+  EXPECT_EQ(0, ul_hyp_cache_get(0x77, &g)) << "dropped at three";
+  ul_hyp_cache_note_fail(0x99, 3); /* unknown RNTI: nothing */
+  std::vector<std::thread> th;
+  ul_hyp_cache_put(0x78, &h);
+  for (int t = 0; t < 4; t++) th.emplace_back([]() { for (int i = 0; i < 1000; i++) ul_hyp_cache_note_fail(0x78, 1 << 30); });
+  for (auto &t : th) t.join();
+  ASSERT_EQ(1, ul_hyp_cache_get(0x78, &g));
+  EXPECT_EQ(4000 & 255, g.fail_streak) << "no lost increments (uint8 streak wraps)";
+}
+
 /* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
  * allocated or built on the launch path. */
 extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);

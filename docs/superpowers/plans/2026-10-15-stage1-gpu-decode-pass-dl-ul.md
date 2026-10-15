@@ -410,6 +410,8 @@ TEST(Recovery, FirstArmIsTdraToggle) { /* arm order produced by nr_pdsch_recover
 
 ### Task 7: UL pass on the GPU (chest + equalizer + LLR + rate-dematch + LDPC + CRC)
 
+**Accepted deviations (review round 1):** Nl=1 only, because nr_pusch_passive_decode.c rejects nrOfLayers != 1 upstream (there is no multi-layer CPU path to match); no FP32 instantiation, because the whole UL chain (LS, delay, FIR, level, compensation, LLR, rate dematching, LDPC) is integer and bit-exact. need_cpu sends the grant to the old path from scratch.
+
 **Files:**
 - Create: `openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.cuh` (kernels `k_ul_ls`, `k_ul_eq` (MMSE/ZF for Nl 1-2, reuse `k_tail` templates where the math is identical, CP-OFDM only; transform precoding → fall back), `k_ul_llr`), `nr_gpu_pass_ul.c` (host job builder)
 - Modify: `nr_gpu_pass_graph.cu` (UL graph class: k_ul_fep → k_ul_ls → k_ul_eq → k_ul_llr → k_rdm → UL LDPC kernel (ldpc.cu:844 `ul_exec` kernel) → k_crc)

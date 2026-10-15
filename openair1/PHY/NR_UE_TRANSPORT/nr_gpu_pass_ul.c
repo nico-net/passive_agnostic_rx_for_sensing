@@ -79,6 +79,27 @@ void ul_hyp_cache_drop(uint16_t rnti)
   pthread_mutex_unlock(&g_hyp_lock);
 }
 
+void ul_hyp_cache_note_fail(uint16_t rnti, int max)
+{
+  pthread_mutex_lock(&g_hyp_lock);
+  for (int i = 0; i < UL_HYP_N; i++)
+    if (g_hyp[i].used && g_hyp[i].rnti == rnti) {
+      if (++g_hyp[i].h.fail_streak >= max)
+        g_hyp[i].used = 0;
+      break;
+    }
+  pthread_mutex_unlock(&g_hyp_lock);
+}
+
+int nr_gpu_pass_ul_accept(const nr_gpu_pass_ul_out_t *o, int shadow)
+{
+  if (o->r.need_cpu && !shadow) {
+    nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_NEED_CPU);
+    return 0;
+  }
+  return 1;
+}
+
 void ul_hyp_cache_clear(void)
 {
   pthread_mutex_lock(&g_hyp_lock);
@@ -213,14 +234,15 @@ void nr_gpu_pass_ul_census(void)
   }
   LOG_A(PHY,
         "SENSING: GPUPASS_UL on=%d runs=%lu launches=%lu graph_hits=%lu module_fb[unseen=%lu busy=%lu unsup=%lu err=%lu ldpc_key=%lu] tb_fail=%lu need_cpu=%lu wait_us_p50<=%lu p99<=%lu classes=%lu | host_fb[off=%lu "
-        "tp=%lu hop=%lu ptrs=%lu scope=%lu rv=%lu cell=%lu tbparam=%lu dmrs=%lu module=%lu nomem=%lu] cache[hit=%lu miss=%lu stale=%lu put=%lu] ok=%lu fail=%lu refine=%lu shadow=%lu shadow_bad=%lu llr_inexact=%lu est_diff=%lu\n",
+        "tp=%lu hop=%lu ptrs=%lu scope=%lu rv=%lu cell=%lu tbparam=%lu dmrs=%lu module=%lu nomem=%lu] cache[hit=%lu miss=%lu stale=%lu put=%lu] ok=%lu fail=%lu refine=%lu shadow=%lu shadow_bad=%lu llr_inexact=%lu est_diff=%lu (ok %lu fail %lu) need_cpu_old=%lu\n",
         atomic_load(&U.on), (unsigned long)U.runs, (unsigned long)o[0], (unsigned long)o[1], (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[4], (unsigned long)o[5],
         (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[8], (unsigned long)o[9], (unsigned long)o[10], (unsigned long)o[11], (unsigned long)U.fb[FB_OFF],
         (unsigned long)U.fb[FB_TP], (unsigned long)U.fb[FB_HOP], (unsigned long)U.fb[FB_PTRS], (unsigned long)U.fb[FB_SCOPE], (unsigned long)U.fb[FB_RV], (unsigned long)U.fb[FB_CELL],
         (unsigned long)U.fb[FB_TBPARAM], (unsigned long)U.fb[FB_DMRS], (unsigned long)U.fb[FB_MODULE], (unsigned long)U.fb[FB_NOMEM], (unsigned long)g_hyp_hit,
         (unsigned long)g_hyp_miss, (unsigned long)g_hyp_stale, (unsigned long)g_hyp_put, (unsigned long)U.ev[NR_GPU_PASS_UL_EV_OK], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_FAIL],
         (unsigned long)U.ev[NR_GPU_PASS_UL_EV_REFINE], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_BAD], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_LLR_DIFF],
-        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF]);
+        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_OK], (unsigned long)U.ev[NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL],
+        (unsigned long)U.ev[NR_GPU_PASS_UL_EV_NEED_CPU]);
 }
 
 static int fb(int why)

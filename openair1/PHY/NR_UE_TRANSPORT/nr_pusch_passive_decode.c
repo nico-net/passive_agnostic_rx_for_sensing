@@ -1896,6 +1896,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           const int d_ = uout.est_delay;
           if (d_ != 0 && (d_ > PASSIVE_UL_DELAY_TOL || d_ < -PASSIVE_UL_DELAY_TOL)) {
             nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_REFINE); /* the old path re-places the FFT window */
+          } else if (!nr_gpu_pass_ul_accept(&uout, ul_shadow)) {
+            /* need_cpu: the pass left no LLRs; the old path decodes from scratch */
           } else {
             ul_pass = uout.r.tb_ok ? 1 : 2;
             if (ul_shadow) {
@@ -2204,7 +2206,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     /* what nr_rx_pusch_group_tp leaves behind for the code below (GPUPASS Task 7): the delay, the DM-RS SNR, the scale, the estimates */
     pvp->delay.est_delay = uout.est_delay;
     pvp->delay.delay_max_val = uout.est_delay_max_val;
-    pvp->ulsch_power_tot = 0;
+    pvp->ulsch_power_tot = 0; /* n0_subband_power is only written by the gNB measurement code, never in passive mode: the old path also ends with noise power 0, so snr_db comes from the DM-RS */
     pvp->ulsch_noise_power_tot = 0;
     pvp->ul_dmrs_snr_db = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? uout.dmrs_snr_db : NAN;
     pvp->log2_maxh = uout.log2_maxh;
@@ -2501,7 +2503,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           ns_ += (a_[i_] > 0 && b_[i_] < 0) || (a_[i_] < 0 && b_[i_] > 0);
         }
       ul_llr_inexact = nd_ != 0;
-      ul_llr_bad = (uint64_t)ns_ * 1000 > out->G;
+      ul_llr_bad = (uint64_t)ns_ * 1000 > out->G; /* CRC-fail (noise) shadows only; a CRC-OK shadow must be bit-exact (below) */
     }
   }
 
@@ -2615,8 +2617,13 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       /* what the rest of the decoder reads from the estimator: the delay, the scale, the DM-RS SNR (NaN == NaN); counted, not a reason to switch the pass off */
       const float sa = uout.dmrs_snr_db, sb = pvp->ul_dmrs_snr_db;
       const bool snr_same = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? ((isnan(sa) && isnan(sb)) || sa == sb) : true;
-      if (uout.est_delay != pvp->delay.est_delay || uout.log2_maxh != pvp->log2_maxh || !snr_same)
+      const bool est_same = uout.est_delay == pvp->delay.est_delay && uout.log2_maxh == pvp->log2_maxh;
+      if (!est_same || !snr_same) {
         nr_gpu_pass_ul_note(NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF);
+        nr_gpu_pass_ul_note(cpu_ok ? NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_OK : NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL);
+      }
+      /* the chain is integer and claimed bit-exact: on a decoding grant any LLR, delay or scale difference switches the pass off; the noise tolerance is for CRC-fail grants */
+      if (cpu_ok && ul_shadow_state != 3 && (ul_llr_inexact || !est_same)) bad = 1;
     }
     if (ul_shadow_state != 3) {
       bad |= cpu_ok != (ul_shadow_state == 1);
@@ -2864,11 +2871,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (!t_solver_probe && !fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
     if (ul_pass == 2) {
       /* the hypothesis of the cache failed this grant: after three in a row the entry is dropped and the old path searches again */
-      ul_hyp_t h_;
-      if (ul_hyp_cache_get(g->rnti, &h_)) {
-        if (++h_.fail_streak >= 3) ul_hyp_cache_drop(g->rnti);
-        else ul_hyp_cache_put(g->rnti, &h_);
-      }
+      ul_hyp_cache_note_fail(g->rnti, 3);
     } else if (ul_pass_env && ul_seed_on() && !t_solver_probe && !cfr_only && !gapped && !fdra_unresolved && !g->transform_precoding && nr_cfg_epoch_work_current()) {
       /* ISAC_UL_GPU_PASS_SEED=1 (validation only): a grant that did not decode seeds the cache as well, so that the pass (and its shadow check) runs on captures where no UL TB ever decodes */
       ul_hyp_store(g, nr_sense_ul_ta_refined(out->ta_applied_samples, pvp->delay.est_delay), nr_cfg_epoch_dedicated_current(), (int64_t)abs_slot, 0);

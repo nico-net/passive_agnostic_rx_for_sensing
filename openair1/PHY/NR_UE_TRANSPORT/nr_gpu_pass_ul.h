@@ -104,7 +104,12 @@ int nr_gpu_pass_ul_shadow_due(void);
 void nr_gpu_pass_ul_note(int ev);
 enum { NR_GPU_PASS_UL_EV_OK, NR_GPU_PASS_UL_EV_FAIL /* pass said CRC fail: the old tail decoded its LLRs */, NR_GPU_PASS_UL_EV_REFINE /* |delay| above the tolerance: the old path redid the grant */,
        NR_GPU_PASS_UL_EV_SHADOW, NR_GPU_PASS_UL_EV_SHADOW_BAD, NR_GPU_PASS_UL_EV_SHADOW_LLR_DIFF /* LLRs not bit-equal (signs agree within the policy) */,
-       NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF /* delay / scale / DM-RS SNR differ */, NR_GPU_PASS_UL_EV_N };
+       NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF /* delay / scale / DM-RS SNR differ */, NR_GPU_PASS_UL_EV_NEED_CPU /* zero syndrome with a failing CRC: old path from scratch */,
+       NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_OK /* est diff on a CRC-OK shadow (disables) */, NR_GPU_PASS_UL_EV_SHADOW_EST_DIFF_FAIL /* est diff on a CRC-fail shadow (counted) */, NR_GPU_PASS_UL_EV_N };
+/* 1 = the pass result may be used; 0 = old path from scratch (need_cpu: the pass left no LLRs; counted). A shadowed pass is always compared, never used. */
+int nr_gpu_pass_ul_accept(const nr_gpu_pass_ul_out_t *o, int shadow);
+/* atomically: fail_streak++ of the RNTI's entry; the entry is dropped when it reaches max. A concurrent CRC-OK refresh is never rolled back. */
+void ul_hyp_cache_note_fail(uint16_t rnti, int max);
 void nr_gpu_pass_ul_census(void);
 /* per-grant wall time of the whole decode call, by what carried it: 0 old path, 1 pass (TB decoded), 2 pass (CRC failed, old tail), 3 shadowed (both paths ran). Kept for the census percentiles. */
 void nr_gpu_pass_ul_grant_us(int kind, uint32_t us);
