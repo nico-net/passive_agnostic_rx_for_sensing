@@ -73,8 +73,10 @@ struct CrcMsg { /* the bytes of one message: one code block, or the TB reassembl
 
 /* check_crc(bytes, n, type): one block per message, the byte range split over the threads, the partial CRCs shifted into place by multiplying
  * with x^(8 * bytes behind) and XOR-ed (CRC is linear and starts at 0), then the same residual-bit step and compare as crc24a/crc24b/crc16. */
-__global__ void k_crc(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nseg, uint32_t tbs, uint8_t *seg_ok, uint8_t *tb_ok)
+__global__ void k_crc(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nseg, uint32_t tbs, const uint32_t *tbs_p, uint8_t *seg_ok, uint8_t *tb_ok)
 {
+  if (tbs_p)
+    tbs = *tbs_p; /* graph replay: the TB size is read when the kernel runs */
   const bool tb = (int)blockIdx.x == nseg;
   if (tb && nseg <= 1)
     return;
@@ -413,8 +415,9 @@ template <class R> __device__ void fo_part(const nr_gpu_chest_post_par_t &p, typ
   }
 }
 
-template <class R> __global__ void k_chest_post(nr_gpu_chest_post_par_t p, typename PostOut<R>::T *out)
+template <class R> __global__ void k_chest_post(nr_gpu_chest_post_par_t p0, const nr_gpu_chest_post_par_t *pp, typename PostOut<R>::T *out)
 {
+  const nr_gpu_chest_post_par_t &p = pp ? *pp : p0; /* pp: parameters read when the kernel runs (graph replay) */
   if (blockIdx.x == 1) {
     nvar_part(p, out);
     return;
@@ -437,12 +440,12 @@ template <class R> __global__ void k_chest_post(nr_gpu_chest_post_par_t p, typen
 
 extern "C" int nr_gpu_pass_launch_chest_post(const nr_gpu_chest_post_par_t *p, nr_gpu_chest_post_out_t *out_dev, void *stream)
 {
-  gpupass::k_chest_post<float><<<2, 256, 0, (cudaStream_t)stream>>>(*p, out_dev);
+  gpupass::k_chest_post<float><<<2, 256, 0, (cudaStream_t)stream>>>(*p, nullptr, out_dev);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
 extern "C" int nr_gpu_pass_launch_chest_post_f64(const nr_gpu_chest_post_par_t *p, nr_gpu_chest_post_out64_t *out_dev, void *stream)
 {
-  gpupass::k_chest_post<double><<<2, 256, 0, (cudaStream_t)stream>>>(*p, out_dev);
+  gpupass::k_chest_post<double><<<2, 256, 0, (cudaStream_t)stream>>>(*p, nullptr, out_dev);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
 extern "C" int nr_gpu_pass_launch_rdm(const int16_t *llr, const nr_gpu_rdm_seg_t *segs, int nseg, int8_t *ldpc_in, void *stream)
@@ -458,7 +461,27 @@ extern "C" int nr_gpu_pass_launch_crc(const uint8_t *bits, const nr_gpu_crc_seg_
     gpupass::k_zero<<<1, 1, 0, (cudaStream_t)stream>>>(tb_ok);
     return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
   }
-  gpupass::k_crc<<<nseg + (nseg > 1), 256, 0, (cudaStream_t)stream>>>(bits, segs, nseg, tbs, seg_ok, tb_ok);
+  gpupass::k_crc<<<nseg + (nseg > 1), 256, 0, (cudaStream_t)stream>>>(bits, segs, nseg, tbs, nullptr, seg_ok, tb_ok);
+  if (nseg == 1)
+    gpupass::k_crc_tb1<<<1, 1, 0, (cudaStream_t)stream>>>(seg_ok, tb_ok);
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
+}
+
+/* GPUPASS graph variants: the parameters live in device-accessible memory and are read when the kernel runs, so a captured graph is replayed with new
+ * contents (the arguments stay the same). chest post: `par_dev` (float build). crc: `tbs_dev` is the TB size, `nseg` is the graph's (padded) count. */
+extern "C" int nr_gpu_pass_launch_chest_post_p(const nr_gpu_chest_post_par_t *par_dev, nr_gpu_chest_post_out_t *out_dev, void *stream)
+{
+  nr_gpu_chest_post_par_t dummy = {};
+  gpupass::k_chest_post<float><<<2, 256, 0, (cudaStream_t)stream>>>(dummy, par_dev, out_dev);
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
+}
+extern "C" int nr_gpu_pass_launch_crc_p(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nseg, const uint32_t *tbs_dev, uint8_t *seg_ok, uint8_t *tb_ok, void *stream)
+{
+  if (nseg < 1) {
+    gpupass::k_zero<<<1, 1, 0, (cudaStream_t)stream>>>(tb_ok);
+    return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
+  }
+  gpupass::k_crc<<<nseg + (nseg > 1), 256, 0, (cudaStream_t)stream>>>(bits, segs, nseg, 0, tbs_dev, seg_ok, tb_ok);
   if (nseg == 1)
     gpupass::k_crc_tb1<<<1, 1, 0, (cudaStream_t)stream>>>(seg_ok, tb_ok);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;

@@ -46,6 +46,11 @@ typedef struct {
 typedef void (*nr_gpu_ldpc_stats_fn)(uint64_t *o);
 typedef int (*nr_gpu_ldpc_dev_fn)(const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream);
 
+/* graph-pass variants: instance inst (0 <= inst < NR_GPU_PASS_RING) has its own context and DJob array. _pass_set (host) writes the jobs of the next replay, _pass_dev
+ * validates the same jobs, enqueues the sentinel memset and the kernel (n and the Z-multiple-of-4 kernel choice are baked into a captured graph). */
+typedef int (*nr_gpu_ldpc_pass_set_fn)(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev);
+typedef int (*nr_gpu_ldpc_pass_dev_fn)(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream);
+
 typedef int (*nr_gpu_ldpc_init_fn)(void);
 /* Decodes n <= NR_GPU_LDPC_MAX_JOBS code blocks (any mix of BG / Z / R) in one launch (one thread-block cluster each), synchronously.
  * jobs must stay valid until return (the module copies inputs and outputs through pinned memory). 0 = done. */

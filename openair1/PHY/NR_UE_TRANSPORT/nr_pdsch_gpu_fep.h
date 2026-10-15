@@ -60,6 +60,8 @@ typedef struct {
   uint32_t ring_len, ring_offset;
   const int16_t *symbol_rot;    ///< symbols_per_slot OAI c16 {r,i}
   uint16_t sym_mask;            ///< symbols to transform
+  int16_t *out;                 ///< nr_pdsch_gpu_fep_stage_at, DIRECT only: write this rxdataF (OAI layout, c16) instead of the buffer given to _dev; NULL = no redirect
+  uint32_t out_stride;          ///< c16 between two antennas of `out`
 } nr_gpu_fep_job_t;
 /* GPUPASS contract (graph-capturable): call nr_pdsch_gpu_fep_stage on the HOST first (waits until the slot's previous pass has finished
  * reading it, then copies the IQ window -- DISCRETE only -- and the per-slot origin/rotation into pinned staging; returns the slot,
@@ -69,6 +71,8 @@ typedef struct {
 #define NR_GPU_PASS_RING 4
 typedef int (*nr_gpu_fep_stage_fn)(const nr_gpu_fep_job_t *j, int *slot_out);
 typedef int (*nr_gpu_fep_dev_fn)(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF_dev, int slot, void *stream);
+/* stage into a slot chosen by the caller (the rx pointers, ring length, origin and rotation are read from the slot when the kernel runs) */
+typedef int (*nr_gpu_fep_stage_at_fn)(const nr_gpu_fep_job_t *j, int slot);
 
 typedef struct {
   int (*init)(const nr_gpu_fep_cfg_t *cfg);

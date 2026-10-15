@@ -6,6 +6,7 @@
  * source (read from the disassembly of nr_dlsch_demodulation.c.o); this file is compiled with --fmad=false so nvcc
  * fuses nothing on its own. */
 #include "nr_pdsch_gpu_demod.h"
+#include "nr_pdsch_gpu_fep.h" // NR_GPU_PASS_RING
 #include "../TOOLS/nr_gpu_poll.h" // P99: ISAC_GPU_POLL_SLEEP_US
 #include "nr_pdsch_gpu_demod.cuh"
 #include "PHY/TOOLS/nr_gpu_mem.h"
@@ -52,13 +53,18 @@ struct Ctx {
   Shared *dsh; /* device copy the kernels use (host-pinned memory is uncached for the GPU) */
   cudaStream_t s_rt, s2_rt, s_lo, s2_lo; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority stream pairs */
 };
-static Ctx g_ctx[CTX + 1]; /* [CTX]: the GPUPASS context (nr_pdsch_gpu_demod_dev), never handed out by acquire() */
+constexpr int PASS_INST = NR_GPU_PASS_RING;
+static Ctx g_ctx[CTX + PASS_INST]; /* [CTX]: the GPUPASS context of nr_pdsch_gpu_demod_dev, [CTX + i]: that of graph-pass instance i; never handed out by acquire() */
+static nr_gpu_buf_t g_jb[PASS_INST]; /* per instance: the job block the graph's kernels read (jref) */
 /* The kernels' job parameter: the job up to evm[] (outputs only, never read by a kernel). The whole job exceeds the
  * 32 KB kernel parameter space; __grid_constant__ lets the kernels address it in place as a nr_gpu_demod_job_t. */
 struct JobK {
   unsigned char b[offsetof(nr_gpu_demod_job_t, evm)];
 };
 static inline const JobK &K(const nr_gpu_demod_job_t &j) { return *reinterpret_cast<const JobK *>(&j); }
+/* the job a kernel works on: its by-value copy, or (graph replay) the job block jref points to */
+#define NRD_JOB(jk) (reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk))->jref ? *reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk))->jref : *reinterpret_cast<const nr_gpu_demod_job_t *>(&(jk)))
+#define NRD_NVAR(j) ((j).nvar_dev ? *(j).nvar_dev : (j).nvar)
 static std::atomic<unsigned> g_busy{0};
 static int g_ok, g_prof, g_prio;
 static std::atomic<unsigned long long> g_prof_ns[13], g_prof_n;
@@ -94,7 +100,7 @@ static int acquire()
 /* ---- gather: nr_dlsch_extract_rbs() with the CPU-made index map ------------------------------------------- */
 __global__ void k_gather(__grid_constant__ const JobK jk_, nrd_c16 *y, nrd_c16 *h)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   const int m = blockIdx.y;
   if (!(j.sym_mask >> m & 1))
     return;
@@ -124,7 +130,7 @@ __global__ void k_gather(__grid_constant__ const JobK jk_, nrd_c16 *y, nrd_c16 *
 /* ---- channel level of the first data symbol, median (nl > 1), branch decision, output shift ---------------- */
 __global__ void k_level(__grid_constant__ const JobK jk_, const nrd_c16 *h, Shared *sh)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ uint32_t lane[256][4];
   __shared__ long long mx[256], mn[256];
   const int f = j.first_symbol, t = threadIdx.x;
@@ -193,7 +199,7 @@ __global__ void k_level(__grid_constant__ const JobK jk_, const nrd_c16 *h, Shar
 /* ---- mode-3 branch silencing (every symbol), then the per-symbol branch powers and reference of the alignment */
 __global__ void k_mask_pw(__grid_constant__ const JobK jk_, nrd_c16 *h, Shared *sh)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ long long red[256];
   const int m = blockIdx.x, t = threadIdx.x;
   if (!(j.sym_mask >> m & 1))
@@ -246,7 +252,7 @@ __global__ void k_mask_pw(__grid_constant__ const JobK jk_, nrd_c16 *h, Shared *
 constexpr int ALC = 2;
 __global__ void k_align(__grid_constant__ const JobK jk_, const nrd_c16 *y, nrd_c16 *h, const Shared *sh)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ double2 s_cs[ALC][4];
   const int m = blockIdx.y, t = threadIdx.x;
   if (!(j.sym_mask >> m & 1))
@@ -617,10 +623,10 @@ template <int NL> __device__ __forceinline__ void re_mmse0n(const nr_gpu_demod_j
         }
         A[c][r] = g;
       }
-    if (j.nvar != 0)
+    if (NRD_NVAR(j) != 0)
 #pragma unroll
       for (int p = 0; p < NL; p++) { /* add_epi32 of nvar >> 3 on the (re | im << 16) word */
-        const uint32_t w = ((uint32_t)(uint16_t)A[p][p].r | (uint32_t)(uint16_t)A[p][p].i << 16) + (j.nvar >> 3);
+        const uint32_t w = ((uint32_t)(uint16_t)A[p][p].r | (uint32_t)(uint16_t)A[p][p].i << 16) + (NRD_NVAR(j) >> 3);
         A[p][p] = nrd_c16{(int16_t)(uint16_t)(w & 0xffff), (int16_t)(uint16_t)(w >> 16)};
       }
     constexpr unsigned FULL = (1u << NL) - 1;
@@ -680,7 +686,7 @@ __device__ __forceinline__ void m3_load(const nr_gpu_demod_job_t &j, const nrd_c
 constexpr int M3_NRES = EXT / 4 + 1;
 __global__ void k_mmse3_prep(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ double rs[M3_NRES];
   __shared__ unsigned char okf[M3_NRES];
   __shared__ long long red[32][4];
@@ -722,7 +728,7 @@ __global__ void k_mmse3_prep(__grid_constant__ const JobK jk_, const nrd_c16 *y,
     }
     double s2 = 0.0;
     if (nb <= nl) {
-      s2 = (double)j.nvar * sc * j.m3_nvfac;
+      s2 = (double)NRD_NVAR(j) * sc * j.m3_nvfac;
     } else {
       double res = 0.0;
       int nres = 0;
@@ -874,7 +880,7 @@ template <typename T> __device__ __forceinline__ cxT<T> cmulT(cxT<T> a, cxT<T> b
 template <typename T, int NLM> /* NLM: largest Nl of the launch (2 keeps the Nl <= 2 register footprint) */
 __global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, double2 *xs, const Shared *sh, double *part, int erase)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ double shd[8 * 5];
   const int m = blockIdx.y, t = threadIdx.x;
   EvmCtx c;
@@ -997,7 +1003,7 @@ __global__ void k_evm1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const
 /* fold the block partials of slots [o, o+n) per symbol into sum[m][0..n) (block order) */
 __global__ void k_evm_fold(__grid_constant__ const JobK jk_, const double *part, int o, int n, double *sum)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   const int m = blockIdx.x, k = threadIdx.x;
   if (k >= n || !(j.sym_mask >> m & 1))
     return;
@@ -1012,7 +1018,7 @@ template <typename T>
 __global__ void k_evm2(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, const double2 *xs, double2 *sd, Shared *sh,
                        double *part, const double *sum)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ double shd[8 * EVM_NP2];
   __shared__ float colf[8 * EVM_NP2];
   __shared__ float s_e[4][EVM_CH];  /* e2 / ideal per (layer, RE of the block), -1 = no term */
@@ -1137,7 +1143,7 @@ template <typename T>
 __global__ void k_evm3(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, const double2 *xs, const double2 *sd,
                        const Shared *sh, double *part, const double *sum)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ double shd[8 * 20];
   __shared__ float colf[8 * 20];
   __shared__ double s_ar[4][2];
@@ -1223,7 +1229,7 @@ __global__ void k_evm_zero(Shared *sh)
 /* export the symbol's sums for the host fold */
 __global__ void k_evm_out(__grid_constant__ const JobK jk_, Shared *sh, const double *sum)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   const int m = blockIdx.x;
   nr_gpu_evm_sym_t *E = &sh->evm[m];
   EvmCtx c;
@@ -1289,7 +1295,7 @@ __device__ __forceinline__ void re_llr(const nr_gpu_demod_job_t &j, int m, uint3
  * atomics give the same totals as the former ordered reduction (zeroed per symbol in k_mask_pw). */
 template <int MM> __global__ void k_tail(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh)
 {
-  const nr_gpu_demod_job_t &j = *reinterpret_cast<const nr_gpu_demod_job_t *>(&jk_);
+  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ long long red[8][8];
   const int m = blockIdx.y;
   if (!(j.sym_mask >> m & 1))
@@ -1357,7 +1363,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   int lo = 0, hi = 0;
   if (cudaDeviceGetStreamPriorityRange(&lo, &hi) != cudaSuccess)
     return -1;
-  for (int c = 0; c < CTX + 1; c++) {
+  for (int c = 0; c < CTX + PASS_INST; c++) {
     Ctx &x = g_ctx[c];
     if ((!nr_gpu_green_stream(&x.s, hi, true, c) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaMalloc((void **)&x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
@@ -1389,6 +1395,9 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     if (nr_pdsch_gpu_prio_on() && (!nr_pdsch_gpu_low_stream(&x.s_lo, lo, hi) || !nr_pdsch_gpu_low_stream(&x.s2_lo, lo, hi)))
       return -1;
   }
+  for (int i = 0; i < PASS_INST; i++)
+    if (nr_gpu_buf_alloc(&g_jb[i], sizeof(JobK)) != 0)
+      return -1;
   g_prio = nr_pdsch_gpu_prio_on();
   g_prof = getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF") && atoi(getenv("ISAC_PDSCH_GPU_EXACT_DEMOD_PROF")) == 1;
   /* first launches before the RX fence (module load, kernel images) */
@@ -1630,4 +1639,87 @@ extern "C" int nr_pdsch_gpu_demod_dev(const nr_gpu_demod_job_t *j, nr_gpu_buf_t 
     k_align<<<dim3((MAXCH + ALC - 1) / ALC, NSYM), 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
   launch_tail(jj, x, s, gx);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
+}
+
+/* ---------------------------------------------------------------- GPUPASS graph instances ---------------------------------------------------------------- */
+static bool pass_ok(int inst, const nr_gpu_demod_job_t *j)
+{
+  return g_ok && inst >= 0 && inst < PASS_INST && j && g_jb[inst].dev && j->nbRx <= NR_GPU_DEMOD_MAX_RX && j->nl <= NR_GPU_DEMOD_MAX_NL
+         && j->ext <= (uint32_t)EXT && j->nl * j->nbRx <= 16;
+}
+/* host: writes the job of the next replay into the instance's job block (the kernels read it through jref when they run) */
+extern "C" int nr_pdsch_gpu_demod_pass_set(int inst, const nr_gpu_demod_job_t *j)
+{
+  if (!pass_ok(inst, j)) return -1;
+  memcpy(g_jb[inst].host, j, sizeof(JobK));
+  ((nr_gpu_demod_job_t *)g_jb[inst].host)->jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
+  return 0;
+}
+/* launch-only demod of instance `inst` (see nr_pdsch_gpu_demod.h): the kernels read the job block; `jcap` fixes what the graph structure depends on
+ * (nl, nbRx, ext as the grid bound, qam_mode, align, want_evm, evm_fp64). stream2 is the EVM branch (forked from and joined to `stream`). */
+extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *jcap, nr_gpu_buf_t *llr_dev, const uint32_t *nvar_dev, void *stream, void *stream2)
+{
+  if (!pass_ok(inst, jcap) || !llr_dev || !llr_dev->dev || !nvar_dev || !stream || (jcap->want_evm && !stream2)) return -1;
+  Ctx &x = g_ctx[CTX + inst];
+  const cudaStream_t s = (cudaStream_t)stream, es = (cudaStream_t)stream2;
+  nr_gpu_demod_job_t jj = *jcap;
+  jj.llr = (int16_t *)llr_dev->dev;
+  jj.nvar_dev = nvar_dev;
+  jj.jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
+  if (nr_gpu_buf_h2d_async(&g_jb[inst], 0, sizeof(JobK), s) != 0) return -1;
+  const int gx = (int)((jj.ext + 127) / 128);
+  k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
+  k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
+  k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.h, x.dsh);
+  if (jj.nl == 1 && jj.align)
+    k_align<<<dim3((MAXCH + ALC - 1) / ALC, NSYM), 128, 0, s>>>(K(jj), x.y, x.h, x.dsh);
+  if (jj.want_evm) { /* the EVM chain on its own branch, as in nr_pdsch_gpu_demod_run */
+    cudaEventRecord(x.fork, s);
+    cudaStreamWaitEvent(es, x.fork, 0);
+    k_evm_zero<<<NSYM, 288, 0, es>>>(x.dsh);
+    if (jj.evm_fp64) {
+      if (jj.nl > 2)
+        k_evm1<double, 4><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.dsh, x.part, jj.evm_erase);
+      else
+        k_evm1<double, 2><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.dsh, x.part, jj.evm_erase);
+      k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P1, 5, x.sum);
+      k_evm2<double><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
+      k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P2, EVM_NP2 + 24, x.sum);
+      k_evm3<double><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
+    } else {
+      if (jj.nl > 2)
+        k_evm1<float, 4><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.dsh, x.part, jj.evm_erase);
+      else
+        k_evm1<float, 2><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.dsh, x.part, jj.evm_erase);
+      k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P1, 5, x.sum);
+      k_evm2<float><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
+      k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P2, EVM_NP2 + 24, x.sum);
+      k_evm3<float><<<dim3(EVM_NCH, NSYM), 256, 0, es>>>(K(jj), x.y, x.h, x.xs, x.sd, x.dsh, x.part, x.sum);
+    }
+    k_evm_fold<<<NSYM, 64, 0, es>>>(K(jj), x.part, EVM_P3, 20, x.sum);
+    k_evm_out<<<NSYM, 32, 0, es>>>(K(jj), x.dsh, x.sum);
+    cudaEventRecord(x.join, es);
+  }
+  launch_tail(jj, x, s, gx);
+  if (jj.want_evm)
+    cudaStreamWaitEvent(s, x.join, 0);
+  cudaMemcpyAsync(x.sh, x.dsh, sizeof(Shared), cudaMemcpyDeviceToHost, s);
+  return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
+}
+/* host, after the pass: the decisions, kappa sums and EVM sums the pass left in the instance's pinned block */
+extern "C" void nr_pdsch_gpu_demod_pass_out(int inst, nr_gpu_demod_job_t *j)
+{
+  if (!g_ok || inst < 0 || inst >= PASS_INST || !j) return;
+  Ctx &x = g_ctx[CTX + inst];
+  const nrd_decision d = x.sh->d;
+  j->log2_maxh = d.log2_maxh;
+  j->used_branch_set = d.used_branch_set;
+  j->used_branch = d.used_branch;
+  j->mrc_rx_index = d.mrc_rx_index;
+  j->mrc_nb_rx = d.mrc_nb_rx;
+  memcpy(j->kappa_sz, x.sh->kap_sz, sizeof(j->kappa_sz));
+  memcpy(j->kappa_sm, x.sh->kap_sm, sizeof(j->kappa_sm));
+  if (j->want_evm)
+    memcpy(j->evm, x.sh->evm, sizeof(j->evm));
+  j->evm_pending = 0;
 }

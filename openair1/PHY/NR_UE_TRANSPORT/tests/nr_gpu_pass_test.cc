@@ -14,6 +14,10 @@ extern "C" {
 #include <dlfcn.h>
 #include <cmath>
 #include <algorithm>
+#include <atomic>
+#include <thread>
+#include <memory>
+#include <string>
 static bool have_gpu() { return nr_gpu_model() >= 0 && getenv("NR_GPU_TEST_SKIP") == nullptr; }
 
 TEST(GpuMem, RoundTripBothModels) {
@@ -40,6 +44,256 @@ TEST(GpuMem, AllocIsFirstTouched) {
   ASSERT_EQ(0, nr_gpu_buf_alloc(&b, 1 << 20));
   for (size_t i = 0; i < (1u << 20); i += 4096) ASSERT_EQ(0, ((unsigned char *)b.host)[i]);
   nr_gpu_buf_free(&b);
+}
+
+/* ===================================================== Task 4: the shape-class graph pass ===================================================== */
+/* The graphs are captured per instance under the memory model of the process (ctest runs this suite once as is and once with NR_GPU_PASS_DISCRETE=1). */
+static void pass_model()
+{
+  if (getenv("NR_GPU_PASS_DISCRETE")) setenv("ISAC_GPU_FORCE_DISCRETE", "1", 1);
+  else unsetenv("ISAC_GPU_FORCE_DISCRETE");
+}
+static bool pass_ready(GpuPassModule &m)
+{
+  if (m.pass_state) return m.pass_state > 0;
+  m.pass_state = -1;
+  if (!m.pass_config || !m.pass_init || !m.pass_try) return false;
+  static nr_gpu_buf_t dt; /* the OAI delay table, as Pass::setup builds it; persistent: the graphs bake its address */
+  if (nr_gpu_buf_alloc(&dt, (size_t)(2 * 20 + 1) * 4096 * 4)) return false;
+  for (int d = -20; d <= 20; d++)
+    for (int i = 0; i < 4096; i++) {
+      const double ph = 2.0 * M_PI * i * d / 4096;
+      ((int16_t *)dt.host)[2 * ((size_t)(20 + d) * 4096 + i)] = (int16_t)std::lround(256 * std::cos(ph));
+      ((int16_t *)dt.host)[2 * ((size_t)(20 + d) * 4096 + i) + 1] = (int16_t)std::lround(256 * std::sin(ph));
+    }
+  nr_gpu_buf_h2d_async(&dt, 0, dt.bytes, nullptr);
+  cudaDeviceSynchronize();
+  nr_gpu_pass_cfg_t c = {4, 273, (const int16_t *)dt.dev, 4096, 20};
+  if (m.pass_config(&c) != 0 || m.pass_init(16) != 0) return false;
+  m.pass_state = 1;
+  return true;
+}
+struct PassBufs { std::vector<uint8_t> g, s; };
+TEST(GpuPassDl, GraphEqualsStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m)) << "nr_gpu_pass_config/init failed";
+  int n_ok = 0, n_fail = 0, n = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) { // 24/48/96/217 PRB x Nl 1..4 x Qm 2..8
+    GpuPassFixture fx = GpuPassFixture::from_shape(shape, 11);
+    ASSERT_TRUE(fx.tb_ok_built) << "no TB for nrb " << shape.nrb_class << " nl " << shape.nl << " qm " << shape.qm;
+    fx.bind();
+    std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0x55);
+    nr_gpu_pass_result_t g{}, s{};
+    g.tb = gb.data(); s.tb = sb.data();
+    ASSERT_EQ(0, m.pass_try(fx.job, &g)) << "nrb " << shape.nrb_class << " nl " << shape.nl << " qm " << shape.qm;
+    ASSERT_EQ(0, fx.run_stage_path(&s)); // Task 2 path + CPU CRC
+    n++;
+    const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " qm " + std::to_string(shape.qm) + " A " + std::to_string(fx.tb.A) +
+                             " C " + std::to_string(fx.tb.C) + " BG " + std::to_string(fx.tb.BG);
+    EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+    EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+    EXPECT_EQ(s.nvar, g.nvar) << "chest post nvar vs the CPU normalisation, " << what;
+    EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+    EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+    if (g.tb_ok) {
+      EXPECT_EQ(0, memcmp(g.tb, fx.tb.payload.data(), fx.tb.A / 8)) << "decoded TB differs from the transmitted one, " << what;
+      n_ok++;
+    } else n_fail++;
+    /* the exact FEP of the caller's rxdataF (DIRECT: written in place; DISCRETE: copied back) equals the stage path's */
+    for (int a = 0; a < 4; a++)
+      for (int sy = 0; sy < 14; sy++)
+        ASSERT_EQ(0, memcmp(&fx.rxF_out[2 * ((size_t)a * GpuPassFixture::RXSTRIDE + (size_t)sy * 4096)], &fx.rxF_ref[2 * ((size_t)a * 14 * 4096 + (size_t)sy * 4096)], 4096 * 4))
+            << "rxdataF of the pass, ant " << a << " sym " << sy << ", " << what;
+  }
+  printf("GpuPassDl.GraphEqualsStagePath: %d shapes, decoded %d, CRC fail on both paths %d\n", n, n_ok, n_fail);
+  EXPECT_GE(n_ok, n / 2) << "the synthetic channel should decode most shapes (rank 4 and 256QAM excepted)";
+  char buf[512];
+  m.pass_stats(buf, sizeof(buf));
+  printf("%s\n", buf);
+  uint64_t o[16];
+  m.pass_counters(o);
+  EXPECT_EQ((uint64_t)n, o[1]) << "every shape was a graph hit";
+  EXPECT_EQ(0u, o[2] + o[3] + o[4] + o[5]) << "no fallback";
+}
+/* CRC failure and the stop rule: the coded bits of the code blocks from CB 1 on are corrupted, so CB 0 decodes and the rest cannot. The graph and the stage path agree
+ * on every verdict (the first-passing-snapshot rule, the abort of the later blocks, the zero-syndrome CPU hand-over) and on the bytes they leave. */
+TEST(GpuPassDl, CrcFailAgreesWithStagePath) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  int n = 0, partial = 0, cpu = 0;
+  for (auto shape : GpuPassFixture::warm_shapes()) {
+    if (shape.qm != 4 || shape.nl > 2) continue;
+    GpuPassFixture fx = GpuPassFixture::from_shape(shape, 31, /*corrupt_from_cb=*/1);
+    ASSERT_TRUE(fx.tb_ok_built);
+    if (fx.tb.C < 2) continue; // needs a block to corrupt
+    fx.bind();
+    std::vector<uint8_t> gb(fx.tb.A / 8 + 64, 0xAA), sb(fx.tb.A / 8 + 64, 0xAA);
+    nr_gpu_pass_result_t g{}, s{};
+    g.tb = gb.data(); s.tb = sb.data();
+    ASSERT_EQ(0, m.pass_try(fx.job, &g));
+    ASSERT_EQ(0, fx.run_stage_path(&s));
+    const std::string what = "nrb " + std::to_string(shape.nrb_class) + " nl " + std::to_string(shape.nl) + " C " + std::to_string(fx.tb.C);
+    n++;
+    EXPECT_EQ(s.tb_ok, g.tb_ok) << what;
+    EXPECT_EQ(0, g.tb_ok) << "a corrupted TB must not pass, " << what;
+    EXPECT_EQ(s.need_cpu, g.need_cpu) << what;
+    EXPECT_EQ(0, memcmp(s.seg_ok, g.seg_ok, sizeof(s.seg_ok))) << what;
+    if (!g.need_cpu) EXPECT_EQ(0, memcmp(s.tb, g.tb, g.tbs / 8)) << what;
+    partial += g.seg_ok[0] && !g.seg_ok[1];
+    cpu += g.need_cpu;
+  }
+  printf("GpuPassDl.CrcFailAgreesWithStagePath: %d shapes, CB0 ok and CB1 failed in %d, CPU hand-over in %d\n", n, partial, cpu);
+  EXPECT_GE(n, 4);
+}
+/* Concurrency model: 4 instances; 8 threads each running their own grant 40 times. Every launch either decodes the TB it was given or is refused with 1 (counted busy); no
+ * launch may return another thread's bytes (the instances' buffers, staging slots and contexts are private). */
+/* Every instance, one at a time (the others held busy), decodes the TB of every warm shape: the sequential test above only ever runs on instance 0. */
+TEST(GpuPassDl, EveryInstanceDecodesEveryShape) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try && m.pass_hold) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  for (int inst = 0; inst < NR_GPU_PASS_RING; inst++) {
+    m.pass_hold(0xfu & ~(1u << inst), 1);
+    int n = 0, bad = 0;
+    for (auto shape : GpuPassFixture::warm_shapes()) {
+      GpuPassFixture fx = GpuPassFixture::from_shape(shape, 11);
+      ASSERT_TRUE(fx.tb_ok_built);
+      fx.bind();
+      std::vector<uint8_t> tb(fx.tb.A / 8 + 64);
+      nr_gpu_pass_result_t r{};
+      r.tb = tb.data();
+      const int rc = m.pass_try(fx.job, &r);
+      n++;
+      if (rc != 0 || !r.tb_ok || memcmp(tb.data(), fx.tb.payload.data(), fx.tb.A / 8)) {
+        if (bad++ < 3) fprintf(stderr, "instance %d: rc %d tb_ok %d need_cpu %d seg_ok0 %d: nrb %d nl %d qm %d C %d\n", inst, rc, r.tb_ok, r.need_cpu, r.seg_ok[0], shape.nrb_class, shape.nl, shape.qm, fx.tb.C);
+      }
+    }
+    m.pass_hold(0xfu, 0);
+    EXPECT_EQ(0, bad) << "instance " << inst << ": " << bad << " of " << n << " shapes failed";
+  }
+}
+TEST(GpuPassDl, ConcurrentPassesUseOwnInstances) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  const auto shapes = GpuPassFixture::warm_shapes();
+  constexpr int NT = 8, NIT = 40;
+  std::vector<GpuPassFixture> fx;
+  for (int t = 0; t < NT; t++) { // a grant of this shape that decodes when run alone (the channel is random, a few seeds do not at 256QAM)
+    for (int seed = 100 + t;; seed += 17) {
+      GpuPassFixture f = GpuPassFixture::from_shape(shapes[(t * 5) % shapes.size()], seed);
+      ASSERT_TRUE(f.tb_ok_built);
+      f.bind();
+      std::vector<uint8_t> tb(f.tb.A / 8 + 64);
+      nr_gpu_pass_result_t r{};
+      r.tb = tb.data();
+      ASSERT_EQ(0, m.pass_try(f.job, &r));
+      if (r.tb_ok) { fx.push_back(std::move(f)); break; }
+      ASSERT_LT(seed, 100 + t + 17 * 20);
+    }
+  }
+  for (auto &f : fx) f.bind();
+  uint64_t o0[16], o1[16];
+  m.pass_counters(o0);
+  std::atomic<int> done{0}, busy{0}, bad{0};
+  std::vector<std::thread> th;
+  for (int t = 0; t < NT; t++)
+    th.emplace_back([&, t] {
+      GpuPassFixture &f = fx[t];
+      std::vector<uint8_t> tb(f.tb.A / 8 + 64);
+      for (int i = 0; i < NIT; i++) {
+        nr_gpu_pass_result_t r{};
+        r.tb = tb.data();
+        const int rc = m.pass_try(f.job, &r);
+        if (rc == 1) { busy++; continue; }
+        if (rc != 0 || !r.tb_ok || memcmp(tb.data(), f.tb.payload.data(), f.tb.A / 8)) {
+          if (bad++ < 3) fprintf(stderr, "thread %d it %d inst %d: rc %d tb_ok %d need_cpu %d seg_ok %d%d%d%d nvar %u gpu_us %u shape nrb %d nl %d C %d\n", t, i, r.instance, rc, r.tb_ok, r.need_cpu, r.seg_ok[0], r.seg_ok[1], r.seg_ok[2], r.seg_ok[3], r.nvar, r.gpu_us, f.shape.nrb_class, f.shape.nl, f.tb.C);
+        }
+        else done++;
+      }
+    });
+  for (auto &x : th) x.join();
+  m.pass_counters(o1);
+  printf("GpuPassDl.ConcurrentPassesUseOwnInstances: %d decoded, %d refused busy (counter %lu)\n", done.load(), busy.load(), (unsigned long)(o1[3] - o0[3]));
+  EXPECT_EQ(0, bad.load()) << "a launch returned wrong bytes or failed";
+  EXPECT_EQ(NT * NIT, done.load() + busy.load());
+  EXPECT_GT(done.load(), 0);
+  EXPECT_EQ((uint64_t)busy.load(), o1[3] - o0[3]);
+}
+TEST(GpuPassDl, UnseenShapeFallsBack) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  GpuPassFixture fx = GpuPassFixture::from_shape({/*nrb*/ 273, 14, 4, 8, 3, 32, 0}, 3); // not warmed
+  fx.bind();
+  std::vector<uint8_t> tb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t r{};
+  r.tb = tb.data();
+  uint64_t o0[16], o1[16];
+  m.pass_counters(o0);
+  EXPECT_EQ(1, m.pass_try(fx.job, &r));
+  m.pass_counters(o1);
+  EXPECT_EQ(o0[0], o1[0]) << "nothing launched";
+  EXPECT_EQ(o0[2] + o0[4] + 1, o1[2] + o1[4]) << "counted as a fallback";
+}
+/* An EVM-carrying class: warmed explicitly, the pass returns the same TB as the class without the EVM branch and fills the EVM sums of the data symbols. */
+TEST(GpuPassDl, EvmBranchGraph) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try && m.pass_warm) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  const nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[4 * 4 * 1 + 4 * 1 + 1]; // nrb 48, nl 2, qm 4
+  ASSERT_EQ(0, m.pass_warm(&sh, 3, 0, /*evm=*/1));
+  GpuPassFixture fx = GpuPassFixture::from_shape(sh, 5);
+  ASSERT_TRUE(fx.tb_ok_built);
+  fx.bind();
+  std::vector<uint8_t> t0(fx.tb.A / 8 + 64), t1(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t r0{}, r1{};
+  r0.tb = t0.data(); r1.tb = t1.data();
+  ASSERT_EQ(0, m.pass_try(fx.job, &r0));
+  std::unique_ptr<nr_gpu_demod_job_t> dout(new nr_gpu_demod_job_t());
+  r1.demod_out = dout.get();
+  fx.job->dj.want_evm = 1;
+  fx.job->dj.want_kappa = 1;
+  fx.job->dj.evm_fp64 = 0;
+  ASSERT_EQ(0, m.pass_try(fx.job, &r1));
+  EXPECT_EQ(r0.tb_ok, r1.tb_ok);
+  EXPECT_EQ(0, memcmp(t0.data(), t1.data(), fx.tb.A / 8));
+  EXPECT_EQ(r0.nvar, r1.nvar);
+  int valid = 0;
+  for (int sy : fx.data_syms) valid += dout->evm[sy].valid != 0;
+  EXPECT_EQ((int)fx.data_syms.size(), valid) << "the EVM chain of the graph produced no sums";
 }
 
 /* Stage parity of the launch-only DL entry points: the same slot through FEP -> chest -> demod -> LDPC on one stream, once with the
@@ -167,40 +421,6 @@ TEST(GpuPassStages, DevCapturableAndReplayable) {
   unsetenv("ISAC_GPU_FORCE_DISCRETE");
 }
 
-/* Runs last: raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
- * allocated or built on the launch path. */
-extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
-TEST(GpuPassStages, LdpcDevNoAllocOnMiss) {
-  if (!have_gpu()) GTEST_SKIP();
-  bool ok = false, lib = false;
-  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
-  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
-  ASSERT_TRUE(ok);
-  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
-  auto misses = (unsigned (*)(void))dlsym(dl, "nr_pdsch_gpu_ldpc_dev_misses");
-  auto stats = (void (*)(uint64_t *, uint64_t *))dlsym(dl, "nr_dl_gpu_memory_stats");
-  ASSERT_TRUE(misses && stats);
-  unsetenv("ISAC_GPU_FORCE_DISCRETE");
-  nr_gpu_buf_t lin = {}, bits = {};
-  ASSERT_EQ(0, nr_gpu_buf_alloc(&lin, NR_GPU_LDPC_DEV_IN_BYTES));
-  ASSERT_EQ(0, nr_gpu_buf_alloc(&bits, NR_GPU_LDPC_DEV_BITS_BYTES));
-  nr_gpu_rx_started(); /* the fence */
-  uint64_t a0, d0, a1, d1;
-  stats(&a0, &d0);
-  const unsigned m0 = misses();
-  nr_gpu_ldpc_job_t bad = {};
-  bad.BG = 2; bad.R = 7; bad.Z = 64; bad.K = 640; bad.it_max = 8; /* R = 7 is no code rate of BG2: never built */
-  EXPECT_EQ(-1, m.ldpc(&bad, 1, &lin, &bits, nullptr));
-  EXPECT_EQ(m0 + 1, misses());
-  nr_gpu_ldpc_job_t good = bad;
-  good.R = 15;
-  EXPECT_EQ(0, m.ldpc(&good, 1, &lin, &bits, nullptr)); /* a prepared key still launches behind the fence */
-  cudaDeviceSynchronize();
-  stats(&a1, &d1);
-  EXPECT_EQ(a0, a1) << "the launch path allocated";
-  EXPECT_EQ(d0, d1) << "an allocation was attempted behind the fence";
-  EXPECT_EQ(m0 + 1, misses());
-}
 
 /* ---- Task 3: the host steps between the stages as kernels, each against the CPU function it replaces (OAI crc_byte.c, nr_rate_matching.c) ---- */
 extern "C" {
@@ -632,4 +852,74 @@ TEST(GpuPassPost, DegenerateInputs) {
   ASSERT_EQ(0, S.crc(dbits.p, dsegs.p, 0, c.tbs, dok.p, dok.p + c.C, nullptr)); /* nseg == 0 */
   dok.down(ok.data(), c.C + 1);
   EXPECT_EQ(0, (int)ok[c.C]);
+}
+
+
+/* Suite GpuPassFence is defined last and so runs last (gtest runs suites in the order of their first test): it raises the allocation fence of the platform. A (BG, Z, R) the init did not build is refused and counted, nothing is
+ * allocated or built on the launch path. */
+extern "C" void nr_dl_gpu_memory_stats(uint64_t *, uint64_t *);
+TEST(GpuPassFence, LdpcDevNoAllocOnMiss) {
+  if (!have_gpu()) GTEST_SKIP();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  void *dl = dlopen("./libpdsch_gpu.so", RTLD_NOW | RTLD_NOLOAD);
+  auto misses = (unsigned (*)(void))dlsym(dl, "nr_pdsch_gpu_ldpc_dev_misses");
+  auto stats = (void (*)(uint64_t *, uint64_t *))dlsym(dl, "nr_dl_gpu_memory_stats");
+  ASSERT_TRUE(misses && stats);
+  unsetenv("ISAC_GPU_FORCE_DISCRETE");
+  nr_gpu_buf_t lin = {}, bits = {};
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&lin, NR_GPU_LDPC_DEV_IN_BYTES));
+  ASSERT_EQ(0, nr_gpu_buf_alloc(&bits, NR_GPU_LDPC_DEV_BITS_BYTES));
+  nr_gpu_rx_started(); /* the fence */
+  uint64_t a0, d0, a1, d1;
+  stats(&a0, &d0);
+  const unsigned m0 = misses();
+  nr_gpu_ldpc_job_t bad = {};
+  bad.BG = 2; bad.R = 7; bad.Z = 64; bad.K = 640; bad.it_max = 8; /* R = 7 is no code rate of BG2: never built */
+  EXPECT_EQ(-1, m.ldpc(&bad, 1, &lin, &bits, nullptr));
+  EXPECT_EQ(m0 + 1, misses());
+  nr_gpu_ldpc_job_t good = bad;
+  good.R = 15;
+  EXPECT_EQ(0, m.ldpc(&good, 1, &lin, &bits, nullptr)); /* a prepared key still launches behind the fence */
+  cudaDeviceSynchronize();
+  stats(&a1, &d1);
+  EXPECT_EQ(a0, a1) << "the launch path allocated";
+  EXPECT_EQ(d0, d1) << "an allocation was attempted behind the fence";
+  EXPECT_EQ(m0 + 1, misses());
+}
+
+/* After the fence: the pass launches a warm class 1000 times, graph hits grow, nothing is allocated by the platform or by the module. */
+TEST(GpuPassFence, NoAllocAfterFence) {
+  if (!have_gpu()) GTEST_SKIP();
+  pass_model();
+  bool ok = false, lib = false;
+  GpuPassModule &m = GpuPassModule::get(&ok, &lib);
+  if (!lib) GTEST_SKIP() << "no ./libpdsch_gpu.so";
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(m.pass_try) << "libpdsch_gpu.so has no nr_gpu_pass_dl_try";
+  ASSERT_TRUE(pass_ready(m));
+  const nr_gpu_pass_shape_t sh = GpuPassFixture::warm_shapes()[4 * 4 * 1 + 4 * 0 + 0]; // nrb 48, nl 1, qm 2
+  GpuPassFixture fx = GpuPassFixture::from_shape(sh, 21);
+  ASSERT_TRUE(fx.tb_ok_built);
+  fx.bind();
+  std::vector<uint8_t> tb(fx.tb.A / 8 + 64);
+  nr_gpu_pass_result_t r{};
+  r.tb = tb.data();
+  nr_gpu_rx_started(); /* the fence */
+  uint64_t pa0, pd0, pa1, pd1, o0[16], o1[16];
+  nr_gpu_memory_stats(&pa0, &pd0);
+  m.pass_counters(o0);
+  for (int i = 0; i < 1000; i++) {
+    ASSERT_EQ(0, m.pass_try(fx.job, &r)) << "launch " << i;
+    ASSERT_TRUE(r.tb_ok) << "launch " << i;
+  }
+  nr_gpu_memory_stats(&pa1, &pd1);
+  m.pass_counters(o1);
+  EXPECT_EQ(pa0, pa1) << "the platform allocated on the pass path";
+  EXPECT_EQ(pd0, pd1);
+  EXPECT_EQ(o0[10], o1[10]) << "the module allocated (captured) on the pass path";
+  EXPECT_EQ(o0[1] + 1000, o1[1]);
+  EXPECT_EQ(0, memcmp(tb.data(), fx.tb.payload.data(), fx.tb.A / 8));
 }

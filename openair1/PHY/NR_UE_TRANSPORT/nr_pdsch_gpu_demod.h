@@ -33,7 +33,7 @@ typedef struct {
   uint16_t n_rb[276];
 } nr_gpu_evm_sym_t;
 
-typedef struct {
+typedef struct nr_gpu_demod_job_s {
   /* grant shape */
   int nbRx, nl, qm, N;
   int start_symbol, nb_symbols, first_symbol; /* first_symbol: the symbol nr_rx_pdsch() gets first_symbol_flag on */
@@ -63,6 +63,9 @@ typedef struct {
                       3 (exact double MMSE, ISAC_PDSCH_GPU_EXACT_DEMOD_MMSE3=1) */
   uint32_t nvar;   /* nr_rx_pdsch()'s nvar (stock MMSE diagonal loading nvar >> 3) */
   double m3_nvfac; /* mode 3, nbRx <= nl: s2 = nvar x m3_nvfac (pow(10, ISAC_PDSCH_MMSE_EXACT_NVAR_DB / 10), host libm as the CPU) */
+  const uint32_t *nvar_dev;               /* GPUPASS: non-null = nvar is read from here when the kernels run (the chest post's output), `nvar` above is ignored */
+  const struct nr_gpu_demod_job_s *jref;  /* GPUPASS: non-null = the kernels read the job from here instead of their by-value copy (graph replay: the job is rewritten
+                                           * between replays; the by-value copy is that of the capture). Device-accessible, at least offsetof(evm) bytes. */
   int evm_defer;   /* DECGPU: return once the LLRs are done; the EVM chain completes later (nr_gpu_demod_evm_wait_fn) */
   int evm_pending; /* out: 1 = the EVM partial sums are not in evm[] yet, the context stays held until the wait */
   /* outputs */
@@ -84,6 +87,13 @@ typedef void (*nr_gpu_demod_release_fn)(int ctx);
 /* GPUPASS launch-only variant (nr_pdsch_gpu_demod.cu): enqueues the demod of one grant on `stream`, LLRs into llr_dev; no wait, no
  * host-side results, no EVM. 0 or -1. */
 typedef int (*nr_gpu_demod_dev_fn)(const nr_gpu_demod_job_t *job, nr_gpu_buf_t *llr_dev, void *stream);
+/* Graph-pass variants (nr_gpu_pass_graph.cu): each pass instance (0 <= inst < NR_GPU_PASS_RING) owns a context, its job block and its decision block. _inst_dev enqueues
+ * the demod of instance `inst` reading the job from the instance's job block (jb: nr_gpu_demod_pass_job_block), including the EVM chain on a forked branch when the
+ * block's job wants it, and ends with the D2H of the decision/EVM block. _pass_set writes a job into the block (host only). _pass_out copies the decisions and
+ * the EVM sums of the instance's last pass into `job` (valid after the pass finished). */
+typedef int (*nr_gpu_demod_pass_dev_fn)(int inst, const nr_gpu_demod_job_t *job_capture, nr_gpu_buf_t *llr_dev, const uint32_t *nvar_dev, void *stream, void *stream2);
+typedef int (*nr_gpu_demod_pass_set_fn)(int inst, const nr_gpu_demod_job_t *job);
+typedef void (*nr_gpu_demod_pass_out_fn)(int inst, nr_gpu_demod_job_t *job);
 /* evm_pending jobs: waits for the context's EVM chain and fills job->evm (the context stays held). 0 = ok. */
 typedef int (*nr_gpu_demod_evm_wait_fn)(nr_gpu_demod_job_t *job);
 

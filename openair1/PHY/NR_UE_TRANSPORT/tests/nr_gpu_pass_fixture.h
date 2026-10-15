@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <vector>
 extern "C" {
@@ -23,6 +24,13 @@ extern "C" {
 #include "nr_pdsch_gpu_demod.h"
 #include "nr_pdsch_gpu_ldpc.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h" /* the passive estimator's own UL filters */
+#include "nr_gpu_pass.h"
+#include "nr_llr_norm.h"
+extern "C" {
+#include "common/utils/LOG/log.h"
+#include "PHY/CODING/coding_defs.h"
+#include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.h"
+}
 
 struct GpuPassModule {
   void *dl = nullptr;
@@ -38,6 +46,15 @@ struct GpuPassModule {
   int (*demod_old)(nr_gpu_demod_job_t *) = nullptr;
   void (*demod_rel)(int) = nullptr;
   int (*ldpc_old)(nr_gpu_ldpc_job_t *, int) = nullptr;
+  /* Task 4: the graph pass */
+  nr_gpu_pass_config_fn pass_config = nullptr;
+  nr_gpu_pass_init_fn pass_init = nullptr;
+  nr_gpu_pass_warm_fn pass_warm = nullptr;
+  nr_gpu_pass_dl_try_fn pass_try = nullptr;
+  nr_gpu_pass_stats_fn pass_stats = nullptr;
+  nr_gpu_pass_counters_fn pass_counters = nullptr;
+  void (*pass_hold)(unsigned, int) = nullptr;
+  int pass_state = 0; /* 0 not tried, 1 ready, -1 failed */
   /* loads ./libpdsch_gpu.so and inits FEP (N = 4096, 4 RX), demod and LDPC once; false = no module or no device */
   static GpuPassModule &get(bool *ok, bool *have_lib = nullptr)
   {
@@ -62,6 +79,13 @@ struct GpuPassModule {
         m.demod_old = (decltype(m.demod_old))dlsym(m.dl, "nr_pdsch_gpu_demod_run");
         m.demod_rel = (decltype(m.demod_rel))dlsym(m.dl, "nr_pdsch_gpu_demod_release");
         m.ldpc_old = (decltype(m.ldpc_old))dlsym(m.dl, "nr_pdsch_gpu_ldpc_run");
+        m.pass_config = (nr_gpu_pass_config_fn)dlsym(m.dl, "nr_gpu_pass_config");
+        m.pass_init = (nr_gpu_pass_init_fn)dlsym(m.dl, "nr_gpu_pass_init");
+        m.pass_warm = (nr_gpu_pass_warm_fn)dlsym(m.dl, "nr_gpu_pass_warm");
+        m.pass_try = (nr_gpu_pass_dl_try_fn)dlsym(m.dl, "nr_gpu_pass_dl_try");
+        m.pass_stats = (nr_gpu_pass_stats_fn)dlsym(m.dl, "nr_gpu_pass_stats");
+        m.pass_counters = (nr_gpu_pass_counters_fn)dlsym(m.dl, "nr_gpu_pass_counters");
+        m.pass_hold = (void (*)(unsigned, int))dlsym(m.dl, "nr_gpu_pass_test_hold");
         if (!m.fep) fprintf(stderr, "libpdsch_gpu.so has no nr_pdsch_gpu_fep_dev\n");
         good = api && m.fep_stage && m.chest_stage && m.fep_old && m.chest_old && m.demod_old && m.demod_rel && m.ldpc_old && dinit && linit && m.fep && m.chest && m.demod && m.ldpc && api()->init(&cfg) == 0 && dinit(4) == 0;
         if (good) linit(); /* may refuse (CC < 9): the LDPC stage then reports it */
@@ -90,8 +114,10 @@ class GpuPassFixture {
   std::vector<uint8_t> snap;          /* LDPC snapshot bytes of block 0 */
   int ldpc_rc = 0, ldpc_nsnap = 0;
 
-  static GpuPassFixture small_grant(int nrb, int nl, int qm, int seed)
+  /* tx: the coded, scrambled bit stream of the grant in LLR order (symbol, RE, layer, bit); null = random bits */
+  static GpuPassFixture small_grant(int nrb, int nl, int qm, int seed, const std::vector<uint8_t> *tx = nullptr)
   {
+    size_t txk = 0;
     GpuPassFixture f;
     f.nrb = nrb; f.nl = nl; f.qm = qm;
     std::mt19937 rng(seed);
@@ -135,7 +161,7 @@ class GpuPassFixture {
         for (int l = 0; l < nl; l++) {
           int ci = 0, cq = 0;
           for (int b = 0; b < qm; b++) {
-            const int bit = (int)(rng() & 1);
+            const int bit = tx ? (*tx)[txk++ % tx->size()] : (int)(rng() & 1);
             f.tx_bits.push_back((uint8_t)bit);
             if (b & 1) cq |= bit << (b / 2); else ci |= bit << (b / 2);
           }
@@ -307,13 +333,13 @@ class GpuPassFixture {
              && !cudaMemset(nvar.dev, 0, nvar.bytes) && !cudaMemset(llrb.dev, 0, llrb.bytes) && !cudaMemset(bits.dev, 0, bits.bytes);
     }
     int stage(int *fs, int *cs) { return m->fep_stage(&fj, fs) || m->chest_stage(&cjv[0], nrows, cs); }
-    /* the launch-only part, exactly what a graph captures (LDPC rc is returned through *ldpc_rc: -2 below CC 9 is not an error) */
+    /* the launch-only part, exactly what a graph captures (the LDPC rc is returned through *ldpc_rc; below CC 9 the non-cluster kernels run, so 0 is the only success) */
     int enqueue_dev(int fs, int cs, cudaStream_t st, int *ldpc_rc)
     {
       const int e1 = m->fep(&fj, &rxF, fs, st), e2 = m->chest(&cjv[0], nrows, &est, &nvar, cs, st), e3 = m->demod(&dj, &llrb, st);
       if (e1 || e2 || e3) { fprintf(stderr, "enqueue_dev: fep %d chest %d demod %d (slots %d %d) last=%s\n", e1, e2, e3, fs, cs, cudaGetErrorString(cudaPeekAtLastError())); return -1; }
       *ldpc_rc = m->ldpc(&lj, 1, &lin, &bits, st);
-      return *ldpc_rc == 0 || *ldpc_rc == -2 ? 0 : -1;
+      return *ldpc_rc == 0 ? 0 : -1;
     }
     /* D2H of every output (on s) and a snapshot of it */
     bool fetch(Out *o, int ldpc_rc)
@@ -340,7 +366,7 @@ class GpuPassFixture {
     }
   };
 
-  /* 0 = all four stages ran (LDPC may have reported -2 on CC < 9: ldpc_rc); the int16 LLRs of the grant in nr_rx_pdsch order (symbol,
+  /* 0 = all four stages ran (ldpc_rc is the LDPC stage's own result); the int16 LLRs of the grant in nr_rx_pdsch order (symbol,
    * RE, layer, bit; positive = bit 0) go to *llr. Buffers use the model nr_gpu_model() gives now. old_path: the pre-GPUPASS entry points
    * with their own waits (DIRECT only). The nvar of the demod job is the chest mean (host sync between the stages), the LDPC input is the
    * LLR stream hard-limited to int8. */
@@ -419,6 +445,394 @@ class GpuPassFixture {
           snap.insert(snap.end(), (uint8_t *)P.bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX, (uint8_t *)P.bits.host + (size_t)q * NR_GPU_LDPC_KB_MAX + (lj.K >> 3));
         snap.push_back((uint8_t)res[1]);
       }
+    }
+    return 0;
+  }
+
+  /* ====================================================== Task 4: whole-pass fixtures ======================================================
+   * from_shape(): a synthetic grant of a shape class carrying a REAL transport block (CRC, segmentation, OAI LDPC encoder from ./libldpc.so, rate matching,
+   * interleaving, scrambling), so the decode succeeds and the TB bytes can be compared. run_stage_path(): the same slot through the Task 2 stages
+   * (exact FEP, chest, demod, the GPU LDPC) with the steps between them on the CPU (nvar, descrambling, K38 norm shift, the real OAI rate dematching,
+   * the OAI stop rule and CRC) = today's exact path. job: the input of nr_gpu_pass_dl_try. */
+  struct TbInfo {
+    int A = 0, BG = 2, C = 1, K = 0, Z = 0, F = 0, Kb = 0, rv = 0;
+    uint32_t G = 0, E = 0, E2 = 0, first_rE2 = 1;
+    uint8_t R = 0, R2 = 0;
+    std::vector<uint8_t> payload; /* A / 8 bytes */
+    std::vector<uint32_t> scr;    /* gold words */
+    std::vector<std::vector<uint8_t>> cblk; /* the code blocks that were encoded (debug) */
+    uint32_t rnti = 0x1234, nid = 0x2a5;
+  };
+  TbInfo tb;
+  std::vector<int16_t> rxF_out;           /* the caller's rxdataF of the pass (job.rxdataF) */
+  static constexpr uint32_t RXSTRIDE = NSYM * N + 1024;
+  nr_gpu_pass_job_t *job = nullptr;       /* heap: large; rebuilt by bind() */
+  nr_gpu_pass_shape_t shape = {};
+  std::shared_ptr<nr_gpu_pass_job_t> job_sp;
+
+  static std::vector<uint32_t> gold_words(uint32_t cinit, int words)
+  {
+    /* 38.211 5.2.1: c(n) = x1(n + 1600) ^ x2(n + 1600); x1 = 1, x2 = cinit (LSB first) */
+    uint32_t x1 = 1, x2 = cinit & 0x7fffffffu;
+    auto step = [&]() {
+      const uint32_t b1 = (x1 ^ (x1 >> 3)) & 1u, b2 = (x2 ^ (x2 >> 1) ^ (x2 >> 2) ^ (x2 >> 3)) & 1u;
+      const uint32_t out = (x1 ^ x2) & 1u;
+      x1 = (x1 >> 1) | (b1 << 30);
+      x2 = (x2 >> 1) | (b2 << 30);
+      return out;
+    };
+    for (int i = 0; i < 1600; i++) step();
+    std::vector<uint32_t> w((size_t)words, 0);
+    for (int i = 0; i < words * 32; i++) w[i >> 5] |= step() << (i & 31);
+    return w;
+  }
+  static int get_E(uint32_t G, int C, int Qm, int Nl, int r)
+  {
+    if (r <= C - (int)((G / (Nl * Qm)) % C) - 1) return Nl * Qm * (G / (Nl * Qm * C));
+    return Nl * Qm * (G / (Nl * Qm * C) + 1);
+  }
+  static int get_R(int rv, int E, int BG, int Z, int *llrLen, int round)
+  {
+    static const int k0[2][4] = {{0, 17, 33, 56}, {0, 13, 25, 43}};
+    const int Ncb = BG == 1 ? 66 * Z : 50 * Z;
+    int info = k0[BG - 1][rv] * Z + E;
+    if (round == 0) *llrLen = info;
+    if (info > Ncb) info = Ncb;
+    if (info > *llrLen) *llrLen = info;
+    const int sys = BG == 1 ? 22 * Z : 10 * Z;
+    const float r = (float)sys / (info + 2 * Z);
+    if (BG == 2) return r < 0.3333 ? 15 : r < 0.6667 ? 13 : 23;
+    return r < 0.6667 ? 13 : r < 0.8889 ? 23 : 89;
+  }
+  /* nr_segmentation() of PHY/CODING/nr_segmentation.c (38.212 5.2.2), without its LOG calls (the test has no log system): C, K, Z, F, Kb of a B-bit TB with CRC;
+   * with `in`/`out`, also the code block bytes (CRC24B added for C > 1, filler zeros). */
+  static int segment(const uint8_t *in, uint8_t **out, unsigned B, unsigned *C, unsigned *K, unsigned *Zout, unsigned *F, int BG)
+  {
+    const unsigned Kcb = BG == 1 ? 8448 : 3840;
+    unsigned L, Bprime;
+    if (B <= Kcb) { L = 0; *C = 1; Bprime = B; }
+    else {
+      L = 24;
+      *C = B / (Kcb - L);
+      if ((Kcb - L) * (*C) < B) *C = *C + 1;
+      Bprime = B + (*C) * L;
+    }
+    const unsigned Kprime = Bprime / (*C);
+    unsigned Kb = BG == 1 ? 22 : B > 640 ? 10 : B > 560 ? 9 : B > 192 ? 8 : 6;
+    unsigned Z = Kprime % Kb ? Kprime / Kb + 1 : Kprime / Kb, k;
+    if (Z <= 2) k = 2;
+    else if (Z <= 16) k = Z;
+    else if (Z <= 32) { k = (Z >> 1) << 1; if (k < Z) k += 2; }
+    else if (Z <= 64) { k = (Z >> 2) << 2; if (k < Z) k += 4; }
+    else if (Z <= 128) { k = (Z >> 3) << 3; if (k < Z) k += 8; }
+    else if (Z <= 256) { k = (Z >> 4) << 4; if (k < Z) k += 16; }
+    else if (Z <= 384) { k = (Z >> 5) << 5; if (k < Z) k += 32; }
+    else return -1;
+    *Zout = k;
+    *K = k * (BG == 1 ? 22 : 10);
+    *F = *K - Kprime;
+    if (in && out) {
+      unsigned s = 0;
+      for (unsigned r = 0; r < *C; r++) {
+        memcpy(out[r], in + s, (Kprime - L) >> 3);
+        s += (Kprime - L) >> 3;
+        if (*C > 1) {
+          const uint32_t crc = crc24b(out[r], Kprime - L) >> 8;
+          out[r][(Kprime - L) >> 3] = ((const uint8_t *)&crc)[2];
+          out[r][1 + ((Kprime - L) >> 3)] = ((const uint8_t *)&crc)[1];
+          out[r][2 + ((Kprime - L) >> 3)] = ((const uint8_t *)&crc)[0];
+        }
+        for (unsigned q = Kprime >> 3; *F > 0 && q < (*K) >> 3; q++) out[r][q] = 0;
+      }
+    }
+    return (int)Kb;
+  }
+  /* TB parameters of a grant (G from its geometry) at a target code rate with at most 8 code blocks (one encoder macro group) */
+  static bool tb_params(TbInfo *t, int nrb, int nl, int qm, int seed)
+  {
+    t->G = (uint32_t)nrb * 132u * qm * nl;
+    const double Rt = qm <= 4 ? 0.30 : 0.25;
+    int A = ((int)(t->G * Rt)) & ~7;
+    for (;; A = (int)(A * 0.8) & ~7) {
+      if (A < 64) return false;
+      const double R = (A + 24.0) / t->G;
+      t->BG = (A <= 292 || (A <= 3824 && R <= 0.67) || R <= 0.25) ? 2 : 1;
+      unsigned C, K, Z, F;
+      const int B = lenWithCrc(1, A);
+      if (segment(nullptr, nullptr, (unsigned)B, &C, &K, &Z, &F, t->BG) < 0) return false;
+      if (C <= 8) {
+        if (A > 3824) { /* 38.214 5.1.3.2: TBS + 24 is a multiple of 8 C, so that every code block is a whole number of bytes */
+          const int A2 = (int)((A + 24 + 8 * C - 1) / (8 * C)) * (int)(8 * C) - 24;
+          if (A2 != A) { A = A2; unsigned C2; if (segment(nullptr, nullptr, (unsigned)lenWithCrc(1, A), &C2, &K, &Z, &F, t->BG) < 0 || C2 != C) { A = (int)(A * 0.9) & ~7; continue; } }
+        }
+        t->A = A; t->C = (int)C; t->K = (int)K; t->Z = (int)Z; t->F = (int)F;
+        break;
+      }
+    }
+    std::mt19937 rng(seed * 7919 + 13);
+    t->payload.resize(t->A / 8);
+    for (auto &b : t->payload) b = (uint8_t)rng();
+    t->payload[0] |= 1; /* never an all-zero TB */
+    t->E = (uint32_t)get_E(t->G, t->C, qm, nl, 0);
+    t->E2 = t->E;
+    t->first_rE2 = (uint32_t)t->C;
+    int ll = 0;
+    t->R = (uint8_t)get_R(t->rv, (int)t->E, t->BG, t->Z, &ll, 0);
+    t->R2 = t->R;
+    for (int r = 1; r < t->C; r++) {
+      const int Er = get_E(t->G, t->C, qm, nl, r);
+      if ((uint32_t)Er != t->E) {
+        t->E2 = (uint32_t)Er;
+        t->R2 = (uint8_t)get_R(t->rv, Er, t->BG, t->Z, &ll, 0);
+        t->first_rE2 = (uint32_t)r;
+        break;
+      }
+    }
+    t->scr = gold_words(((uint32_t)t->rnti << 15) + t->nid, (int)((t->G + 31) / 32) + 1);
+    return true;
+  }
+  struct LdpcEnc { /* encoder_implemparams_t of nrLDPC_defs.h (LP64 layout) */
+    unsigned n_segments, first_seg;
+    unsigned char gen_code;
+    void *tinput, *tinput_memcpy, *tprep, *tparity, *toutput, *tconcat;
+    uint32_t K, Kb, Zc, F;
+    uint8_t BG;
+    unsigned char *output;
+    void *ans;
+  };
+  /* the coded, scrambled bits of the TB in LLR order; false = no encoder available */
+  static bool encode_tb(TbInfo *t, int qm, int nl, std::vector<uint8_t> *bits)
+  {
+    static void *lib = (logInit(), crcTableInit(), dlopen("./libldpc.so", RTLD_NOW | RTLD_GLOBAL));
+    static auto enc = lib ? (int (*)(uint8_t **, uint8_t *, LdpcEnc *))dlsym(lib, "LDPCencoder") : nullptr;
+    if (!enc) { fprintf(stderr, "fixture: no LDPCencoder in ./libldpc.so: %s\n", dlerror()); return false; }
+    const int A = t->A, B = lenWithCrc(1, A), C = t->C, K = t->K, Z = t->Z, F = t->F;
+    std::vector<uint8_t> b((size_t)B / 8 + 16, 0);
+    memcpy(b.data(), t->payload.data(), (size_t)A / 8);
+    if (A > 3824) {
+      const uint32_t crc = crc24a(b.data(), A) >> 8;
+      b[A / 8] = ((uint8_t *)&crc)[2]; b[A / 8 + 1] = ((uint8_t *)&crc)[1]; b[A / 8 + 2] = ((uint8_t *)&crc)[0];
+    } else {
+      const uint32_t crc = crc16(b.data(), A) >> 16;
+      b[A / 8] = ((uint8_t *)&crc)[1]; b[A / 8 + 1] = ((uint8_t *)&crc)[0];
+    }
+    if (!check_crc(b.data(), B, crcType(1, A))) { fprintf(stderr, "fixture: TB CRC convention\n"); return false; }
+    std::vector<std::vector<uint8_t>> cs((size_t)C, std::vector<uint8_t>((size_t)K / 8 + 64, 0));
+    std::vector<uint8_t *> cp((size_t)C);
+    for (int r = 0; r < C; r++) cp[(size_t)r] = cs[(size_t)r].data();
+    unsigned c_, k_, z_, f_;
+    t->cblk = cs;
+    t->Kb = segment(b.data(), cp.data(), (unsigned)B, &c_, &k_, &z_, &f_, t->BG);
+    t->cblk = cs;
+    alignas(64) static uint8_t d[68 * 384];
+    memset(d, 0, sizeof(d));
+    LdpcEnc impp = {};
+    impp.n_segments = (unsigned)C; impp.first_seg = 0; impp.K = (uint32_t)K; impp.Kb = (uint32_t)t->Kb; impp.Zc = (uint32_t)Z; impp.F = (uint32_t)F; impp.BG = (uint8_t)t->BG;
+    enc(cp.data(), d, &impp);
+    const uint32_t Emax = std::max(t->E, t->E2);
+    std::vector<uint8_t> e(Emax + 64, 0), f((t->E + 127) & ~63u, 0), f2((t->E2 + 127) & ~63u, 0);
+    nr_rate_matching_ldpc(0, (uint8_t)t->BG, (uint16_t)Z, d, e.data(), (uint8_t)C, (uint32_t)F, (uint32_t)(K - F - 2 * Z), (uint8_t)t->rv, Emax);
+    nr_interleaving_ldpc(t->E, (uint8_t)qm, e.data(), f.data());
+    if (t->E2 != t->E) nr_interleaving_ldpc(t->E2, (uint8_t)qm, e.data(), f2.data());
+    bits->clear();
+    for (int r = 0; r < C; r++) {
+      const bool first = (uint32_t)r < t->first_rE2;
+      const std::vector<uint8_t> &src = first ? f : f2;
+      for (uint32_t i = 0; i < (first ? t->E : t->E2); i++) bits->push_back((src[i] >> r) & 1u);
+    }
+    (void)nl;
+    if (bits->size() != t->G) { fprintf(stderr, "fixture: coded bits %zu != G %u\n", bits->size(), t->G); return false; }
+    for (uint32_t i = 0; i < t->G; i++) (*bits)[i] ^= (t->scr[i >> 5] >> (i & 31)) & 1u;
+    return true;
+  }
+  /* shape classes the default warm set covers (nr_gpu_pass_init(16)): 4 PRB classes x layers 1..4 x Qm 2..8 */
+  static std::vector<nr_gpu_pass_shape_t> warm_shapes()
+  {
+    std::vector<nr_gpu_pass_shape_t> v;
+    for (int nrb : {24, 48, 96, 217})
+      for (int nl = 1; nl <= 4; nl++)
+        for (int qm : {2, 4, 6, 8}) {
+          int c = nrb * nl / 12;
+          if (c < 1) c = 1;
+          v.push_back({(uint16_t)nrb, 13, (uint16_t)nl, (uint16_t)qm, 2, (uint16_t)nr_gpu_pass_ncb_class(c > 32 ? 32 : c), 1});
+        }
+    return v;
+  }
+  /* shape.nrb_class is the grant's PRB count here (24/48/96/217 are classes themselves) */
+  /* corrupt_from_cb >= 0: the coded bits of code blocks >= corrupt_from_cb are flipped with probability 0.3 (those blocks cannot decode) */
+  static GpuPassFixture from_shape(const nr_gpu_pass_shape_t &sh, int seed, int corrupt_from_cb = -1)
+  {
+    TbInfo t;
+    std::vector<uint8_t> bits;
+    const bool ok = tb_params(&t, sh.nrb_class, sh.nl, sh.qm, seed) && encode_tb(&t, sh.qm, sh.nl, &bits);
+    if (ok && corrupt_from_cb >= 0) {
+      std::mt19937 rng(seed + 99);
+      std::uniform_real_distribution<double> U(0, 1);
+      const uint32_t from = (uint32_t)corrupt_from_cb < t.first_rE2 ? (uint32_t)corrupt_from_cb * t.E : t.first_rE2 * t.E + ((uint32_t)corrupt_from_cb - t.first_rE2) * t.E2;
+      for (uint32_t i = from; i < t.G; i++) if (U(rng) < 0.3) bits[i] ^= 1;
+    }
+    GpuPassFixture f = small_grant(sh.nrb_class, sh.nl, sh.qm, seed, ok ? &bits : nullptr);
+    f.tb = t;
+    f.tb_ok_built = ok;
+    f.shape = sh;
+    f.bind();
+    return f;
+  }
+  bool tb_ok_built = false;
+  /* (re)builds the job from this object's own vectors: call after the fixture has settled at its final address */
+  void bind()
+  {
+    job_sp = std::make_shared<nr_gpu_pass_job_t>();
+    job = job_sp.get();
+    nr_gpu_pass_job_t &j = *job;
+    memset(&j, 0, sizeof(j));
+    j.shape = shape;
+    for (int a = 0; a < NANT; a++) j.rxdata[a] = ring[a].data();
+    j.ring_len = ring_len; j.ring_offset = ring_offset; j.symbol_rot = rot.data();
+    rxF_out.assign((size_t)2 * NANT * RXSTRIDE, 0);
+    j.rxdataF = rxF_out.data(); j.rx_stride = RXSTRIDE; j.copy_mask = 0x3fff;
+    j.nbRx = NANT; j.nl = nl; j.ndmrs = 2;
+    j.dmrs_sym[0] = dm_sym[0]; j.dmrs_sym[1] = dm_sym[1];
+    for (int l = 0; l < nl; l++) {
+      j.delta[l] = (l >> 1) & 1;
+      for (int d = 0; d < 2; d++) j.pil[d][l] = pilot[d][l].data();
+    }
+    j.nrb = nrb; j.k0 = (FCO + 12 * start_rb) % N;
+    j.number_symbols = 13; j.nvfix = 0; j.branch = -1; j.fo_first = 0; j.fo_last = 1;
+    j.dt_d = (1.0e-3 / 2) / 14 * (dm_sym[1] - dm_sym[0]); j.df_d = 30000.0;
+    j.G = tb.G; j.scr = tb.scr.data(); j.norm = tb.G >= 64; j.norm_span = nr_llr_norm_span(tb.G, (uint32_t)tb.C);
+    j.A = (uint32_t)tb.A; j.C = (uint32_t)tb.C; j.K = (uint32_t)tb.K; j.Z = (uint32_t)tb.Z; j.F = (uint32_t)tb.F;
+    j.E = tb.E; j.E2 = tb.E2; j.first_rE2 = tb.first_rE2; j.tbslbrm = 0;
+    j.BG = (uint8_t)tb.BG; j.R = tb.R; j.R2 = tb.R2; j.rv = (uint8_t)tb.rv; j.Qm = (uint8_t)qm; j.it_max = 8;
+    /* the demod geometry: a Pass fixes it (the fixture's contiguous allocation, nearest DM-RS estimate) */
+    geo_buf.assign((size_t)4 * NSYM * ((12 * nrb + 15) & ~15), 0);
+    nr_gpu_demod_job_t &d = j.dj;
+    const int ext = (12 * nrb + 15) & ~15, len = 12 * nrb;
+    d.nbRx = NANT; d.nl = nl; d.qm = qm; d.N = N;
+    d.start_symbol = data_syms.front(); d.nb_symbols = 13; d.first_symbol = data_syms.front();
+    d.rx_stride = NSYM * N; d.est_stride = NSYM * N; d.buf = ext; d.ext = ext;
+    uint32_t off = 0;
+    int16_t *gy = geo_buf.data(), *gh = gy + 2 * NSYM * ext;
+    for (int sy : data_syms) {
+      d.sym_mask |= (uint16_t)(1u << sy);
+      d.nre[sy] = (uint16_t)len;
+      d.llr_off[sy] = off;
+      off += len * qm * nl;
+      for (int i = 0; i < len; i++) {
+        gy[2 * (sy * ext + i)] = (int16_t)((FCO + 12 * start_rb + i) % N);
+        gy[2 * (sy * ext + i) + 1] = 1;
+        gh[2 * (sy * ext + i)] = (int16_t)i;
+        gh[2 * (sy * ext + i) + 1] = (int16_t)((sy < 7 ? dm_sym[0] : dm_sym[1]) + 1);
+      }
+    }
+    d.thr_coef = std::pow(10.0, -1.2);
+    d.qam_mode = nl >= 2 ? 3 : 0; d.mag_per_layer = 1; d.m3_nvfac = std::pow(10.0, 2.1); /* as Pass::setup */
+    j.geo_y = gy; j.geo_h = gh;
+  }
+  std::vector<int16_t> geo_buf, rxF_ref; /* rxF_ref: the exact FEP of the stage path, [ant][14][N] c16 */
+  /* the Task 2 stage path with the CPU steps between the stages = the exact path of today; fills s (tb must hold the TB bytes) */
+  int run_stage_path(nr_gpu_pass_result_t *s)
+  {
+    bool ok = false;
+    GpuPassModule &m = GpuPassModule::get(&ok);
+    if (!ok) return -1;
+    Pass P;
+    if (!P.setup(m, *this, -1) || !P.load(*this)) return -1;
+    cudaStream_t st = P.s;
+    int fs = 0, cs = 0;
+    if (P.stage(&fs, &cs) || m.fep(&P.fj, &P.rxF, fs, st) || m.chest(&P.cjv[0], P.nrows, &P.est, &P.nvar, cs, st)) return -1;
+    nr_gpu_buf_d2h_async(&P.nvar, 0, P.nvar.bytes, st);
+    nr_gpu_buf_d2h_async(&P.rxF, 0, P.rxsz, st);
+    if (cudaStreamSynchronize(st)) return -1;
+    rxF_ref.assign((int16_t *)P.rxF.host, (int16_t *)P.rxF.host + 2 * (size_t)NANT * NSYM * N);
+    /* nr_pdsch_gpu_chest_grant's nvar, then the body's normalisation (number_symbols x Nl x nbRx, no per-branch) */
+    const int *q = (const int *)P.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS;
+    uint32_t nvar = 0;
+    for (int k = 0; k < 2 * nl; k++) {
+      uint64_t acc = 0; int cnt = 0;
+      for (int a = 0; a < NANT; a++) if (q[k * NANT + a] > 0) { acc += (uint32_t)q[k * NANT + a]; cnt++; }
+      nvar += cnt ? (uint32_t)(acc / cnt) : 0u;
+    }
+    nvar /= (uint32_t)(13 * nl * NANT);
+    s->nvar = nvar;
+    P.dj.nvar = nvar;
+    if (m.demod(&P.dj, &P.llrb, st)) return -1;
+    nr_gpu_buf_d2h_async(&P.llrb, 0, P.llrb.bytes, st);
+    if (cudaStreamSynchronize(st)) return -1;
+    const uint32_t G = tb.G;
+    std::vector<int16_t> llr((int16_t *)P.llrb.host, (int16_t *)P.llrb.host + G);
+    if (getenv("GP_DEBUG")) {
+      size_t err = 0;
+      for (uint32_t i = 0; i < G; i++) err += (llr[i] < 0) != (tx_bits[i] != 0);
+      fprintf(stderr, "GP_DEBUG raw BER %.5f (%zu / %u) nvar %u C %d E %u E2 %u firstE2 %u R %d R2 %d K %d Z %d F %d\n", (double)err / G, err, G, nvar, tb.C, tb.E, tb.E2, tb.first_rE2, tb.R, tb.R2, tb.K, tb.Z, tb.F);
+    }
+    for (uint32_t i = 0; i < G; i++) if (tb.scr[i >> 5] >> (i & 31) & 1u) llr[i] = (int16_t)(-llr[i]);
+    if (G >= 64) {
+      const int k = nr_llr_norm_shift(llr.data(), nr_llr_norm_span(G, (uint32_t)tb.C));
+      if (k > 0) for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
+    }
+    /* the OAI rate dematching and the pack of prep_segment (nr_pdsch_gpu_ldpc_host.c) */
+    const int C = tb.C, Z = tb.Z, K = tb.K, F = tb.F, Kc = tb.BG == 2 ? 52 : 68;
+    const int Kprime = lenWithCrc(C, tb.A), ctype = crcType(C, tb.A);
+    std::vector<nr_gpu_ldpc_job_t> jobs((size_t)C);
+    std::vector<int16_t> e(std::max(tb.E, tb.E2) + 16), d((size_t)Kc * Z + 16), zv((size_t)68 * 384 + 16);
+    for (int r = 0; r < C; r++) {
+      const bool first = (uint32_t)r < tb.first_rE2;
+      const uint32_t E = first ? tb.E : tb.E2;
+      const uint32_t off = first ? (uint32_t)r * tb.E : tb.first_rE2 * tb.E + ((uint32_t)r - tb.first_rE2) * tb.E2;
+      std::fill(d.begin(), d.end(), 0);
+      nr_deinterleaving_ldpc(E, (uint8_t)qm, e.data(), llr.data() + off);
+      if (nr_rate_matching_ldpc_rx(0, (uint8_t)tb.BG, (uint16_t)Z, d.data(), e.data(), (uint8_t)C, (uint8_t)tb.rv, 1, E, (uint32_t)F, (uint32_t)(K - F - 2 * Z)) == -1) return -1;
+      std::fill(zv.begin(), zv.end(), 0);
+      memset(zv.data() + Kprime, 127, (size_t)F * 2);
+      memcpy(zv.data() + 2 * Z, d.data(), (size_t)(Kprime - 2 * Z) * 2);
+      memcpy(zv.data() + K, d.data() + (K - 2 * Z), (size_t)(Kc * Z - K) * 2);
+      int8_t *l = (int8_t *)P.lin.host + (size_t)r * NR_GPU_LDPC_DEV_IN_STRIDE;
+      for (int i = 0; i < Kc * Z; i++) { const int v = zv[(size_t)i]; l[i] = (int8_t)(v > 127 ? 127 : v < -128 ? -128 : v); }
+      jobs[(size_t)r] = {};
+      jobs[(size_t)r].BG = (uint8_t)tb.BG; jobs[(size_t)r].R = first ? tb.R : tb.R2; jobs[(size_t)r].Z = (uint16_t)Z; jobs[(size_t)r].K = (uint16_t)K; jobs[(size_t)r].it_max = 8;
+    }
+    nr_gpu_buf_h2d_async(&P.lin, 0, (size_t)(C - 1) * NR_GPU_LDPC_DEV_IN_STRIDE + (size_t)Kc * Z, st);
+    if (m.ldpc(jobs.data(), C, &P.lin, &P.bits, st)) return -1;
+    nr_gpu_buf_d2h_async(&P.bits, 0, P.bits.bytes, st);
+    if (cudaStreamSynchronize(st)) return -1;
+    const int *res = (const int *)((char *)P.bits.host + NR_GPU_LDPC_DEV_RES_OFF);
+    const int KB = K >> 3;
+    if (getenv("GP_DEBUG"))
+      for (int r = 0; r < C; r++) {
+        int diff = -1;
+        if (res[2 * r] > 0) {
+          diff = 0;
+          const uint8_t *sn = (uint8_t *)P.bits.host + ((size_t)r * NR_GPU_LDPC_MAX_SNAP) * NR_GPU_LDPC_KB_MAX;
+          for (int q2 = 0; q2 < K / 8; q2++) diff += __builtin_popcount((unsigned)(sn[q2] ^ tb.cblk[(size_t)r][(size_t)q2]));
+        }
+        fprintf(stderr, "GP_DEBUG cb %d nsnap %d syn0 %d first-snapshot bit diff vs encoded block %d (Kprime %d)\n", r, res[2 * r], res[2 * r + 1], diff, Kprime);
+      }
+    std::vector<uint8_t> c((size_t)C * KB, 0);
+    bool aborted = false, all = true;
+    s->need_cpu = 0;
+    memset(s->seg_ok, 0, sizeof(s->seg_ok));
+    for (int r = 0; r < C; r++) {
+      int hit = -1;
+      if (!aborted)
+        for (int q2 = 0; q2 < res[2 * r] && hit < 0; q2++)
+          if (check_crc((uint8_t *)P.bits.host + ((size_t)r * NR_GPU_LDPC_MAX_SNAP + q2) * NR_GPU_LDPC_KB_MAX, Kprime, ctype)) hit = q2;
+      if (hit >= 0) {
+        memcpy(c.data() + (size_t)r * KB, (uint8_t *)P.bits.host + ((size_t)r * NR_GPU_LDPC_MAX_SNAP + hit) * NR_GPU_LDPC_KB_MAX, KB);
+        s->seg_ok[r] = 1;
+        continue;
+      }
+      if (!aborted && res[2 * r + 1]) { s->need_cpu = 1; }
+      all = false;
+      aborted = true;
+    }
+    s->tbs = (uint32_t)tb.A;
+    s->tb_ok = 0;
+    if (!s->need_cpu) {
+      const int seg_bytes = KB - (F >> 3) - (C > 1 ? 3 : 0);
+      uint32_t off = 0;
+      for (int r = 0; r < C; r++, off += seg_bytes) memcpy(s->tb + off, c.data() + (size_t)r * KB, seg_bytes);
+      s->tb_ok = all && (C == 1 || check_crc(s->tb, lenWithCrc(1, tb.A), crcType(1, tb.A)));
     }
     return 0;
   }

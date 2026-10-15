@@ -70,6 +70,9 @@ int nr_gpu_pass_launch_chest_post(const nr_gpu_chest_post_par_t *p, nr_gpu_chest
 int nr_gpu_pass_launch_chest_post_f64(const nr_gpu_chest_post_par_t *p, nr_gpu_chest_post_out64_t *out_dev, void *stream);
 int nr_gpu_pass_launch_rdm(const int16_t *llr, const nr_gpu_rdm_seg_t *segs, int nseg, int8_t *ldpc_in, void *stream);
 int nr_gpu_pass_launch_crc(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nseg, uint32_t tbs, uint8_t *seg_ok, uint8_t *tb_ok, void *stream);
+/* graph variants (Task 4): parameters / TB size read from device-accessible memory when the kernel runs */
+int nr_gpu_pass_launch_chest_post_p(const nr_gpu_chest_post_par_t *par_dev, nr_gpu_chest_post_out_t *out_dev, void *stream);
+int nr_gpu_pass_launch_crc_p(const uint8_t *bits, const nr_gpu_crc_seg_t *segs, int nseg, const uint32_t *tbs_dev, uint8_t *seg_ok, uint8_t *tb_ok, void *stream);
 #ifdef __cplusplus
 }
 #endif

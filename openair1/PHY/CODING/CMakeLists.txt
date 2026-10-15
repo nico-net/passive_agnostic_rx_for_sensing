@@ -104,7 +104,8 @@ if(ENABLE_LDPC_CUDA)
   # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
   add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu
               ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu
-              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu)
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_ldpc.cu
+              ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_gpu_pass_graph.cu)
   # GPU-DEMOD: no automatic FMA contraction; the kernels spell out the CPU's (GCC's) fused operations themselves
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_demod.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
   set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -136,13 +137,21 @@ if(ENABLE_LDPC_CUDA)
   add_executable(test_nr_gpu_pass ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_gpu_pass_test.cc)
   # the CPU references of the Task 3 kernels: OAI check_crc/crc24x and the RX rate matching, linked as the real functions
   target_sources(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c)
-  target_link_libraries(test_nr_gpu_pass PRIVATE GTest::gtest_main nr_gpu_platform CUDA::cudart LOG minimal_lib crc_byte UTIL ${CMAKE_DL_LIBS} pthread m)
+  target_link_libraries(test_nr_gpu_pass PRIVATE GTest::gtest_main nr_gpu_platform CUDA::cudart thread-pool LOG minimal_lib crc_byte UTIL ${CMAKE_DL_LIBS} pthread m)
+  # ./libldpc.so (the OAI LDPC encoder of the pass fixture) resolves these from the executable, as in test_nr_pdsch_gpu_ldpc
+  foreach(sym check_crc crc24a crc24b crc16 crcTableInit completed_many_task_ans cpu_meas_enabled exit_function g_log logRecord_mt init_task_ans join_task_ans pushTpool T_active T_cache T_freelist_head T_stdout)
+    target_link_options(test_nr_gpu_pass PRIVATE "LINKER:--undefined=${sym}")
+  endforeach()
   set_target_properties(test_nr_gpu_pass PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(tests test_nr_gpu_pass)
   target_include_directories(test_nr_gpu_pass PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT ${OPENAIR1_DIR} ${OPENAIR_DIR} ${CUDAToolkit_INCLUDE_DIRS})
   add_dependencies(test_nr_gpu_pass pdsch_gpu)
   add_test(NAME test_nr_gpu_pass COMMAND test_nr_gpu_pass WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
   set_tests_properties(test_nr_gpu_pass PROPERTIES ENVIRONMENT "CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
+  add_dependencies(test_nr_gpu_pass ldpc)
+  # the graph pass under the DISCRETE memory model (device buffers, explicit copies): its own process, the instances are allocated once per process
+  add_test(NAME test_nr_gpu_pass_discrete COMMAND test_nr_gpu_pass --gtest_filter=GpuPassDl.*:GpuPassFence.NoAllocAfterFence WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+  set_tests_properties(test_nr_gpu_pass_discrete PROPERTIES ENVIRONMENT "NR_GPU_PASS_DISCRETE=1;CUDA_MPS_PIPE_DIRECTORY=/tmp/nicola_nomps;CUDA_MPS_LOG_DIRECTORY=/tmp/nicola_nomps" SKIP_RETURN_CODE 77)
   add_executable(nr_pdsch_gpu_fep_test ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc)
   target_include_directories(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
   target_link_libraries(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_DL_LIBS})
