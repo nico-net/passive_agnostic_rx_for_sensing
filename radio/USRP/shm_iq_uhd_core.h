@@ -48,6 +48,14 @@ int64_t pub_tick(int64_t mcr_ticks, int64_t decim, int64_t start_tick);
 /* usrp_lib.cpp hands the receiver X4x0/X3x0/N3x0 samples arithmetically shifted right by 2 (rxshift, simde srai_epi16): apply the
  * same in place to n sc16 samples so ring consumers see the digital level of a single-process receiver. shift 0 = no-op. */
 void pub_rx_shift(int16_t *x, int n, int shift);
+/* X410 34B2AF1 stamps every RX packet with the stream START time (usrp_lib USRP_TS_FROZEN, 2026-10-06). Per stream: the first
+ * packet after a (re)start fixes `first`; a later packet stamped BEFORE the expected `next` (the start stamp, or the slowly
+ * decreasing stamps seen on air 2026-10-15) switches the stream to frozen mode for good, and from then on ticks come from the
+ * sample count (loss is still reported by UHD error codes and handled by the restart). A forward jump stays a gap.
+ * reset_run() at every (re)start. Returns the tick to publish for these `got` samples. */
+typedef struct { int64_t first, next; int frozen; } pub_tick_track_t;
+void pub_tick_reset_run(pub_tick_track_t *t);
+int64_t pub_tick_track(pub_tick_track_t *t, int64_t tick, int got);
 #ifdef __cplusplus
 }
 #endif

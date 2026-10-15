@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "shm_iq_uhd_core.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -41,6 +42,9 @@ static int publish(pub_t *p, int16_t *const *slots, int64_t tick, int got)
   const unsigned nch = ring->hdr->channels;
   if (shm_iq_ring_commit(ring, tick, got) == 0) st->inplace++;
   else {
+    if (st->copied > 0 && st->copied <= 10) /* the first write is expected; log the first run breaks after it */
+      fprintf(stderr, "SHMIQ_UHD_GAP n=%llu tick=%lld expected=%lld got=%d\n", (unsigned long long)st->copied, (long long)tick,
+              (long long)(atomic_load(&ring->hdr->tick_offset) + (int64_t)atomic_load(&ring->hdr->head)), got);
     void *bufs[SHM_IQ_MAX_CH];
     if (got > p->stage_n) {
       for (unsigned c = 0; c < nch; ++c) {
@@ -110,4 +114,15 @@ void pub_rx_shift(int16_t *x, int n, int shift)
 {
   if (shift <= 0) return;
   for (int i = 0; i < 2 * n; ++i) x[i] = (int16_t)(x[i] >> shift); /* arithmetic: floor, = srai */
+}
+
+void pub_tick_reset_run(pub_tick_track_t *t) { t->first = t->next = -1; }
+
+int64_t pub_tick_track(pub_tick_track_t *t, int64_t tick, int got)
+{
+  if (t->next < 0) t->first = tick;                                       /* first packet of a run */
+  else if (tick < t->next && !t->frozen) t->frozen = 1; /* stamp behind the samples already received: start-time/stale stamps */
+  if (t->frozen && t->next >= 0) tick = t->next;
+  t->next = tick + got;
+  return tick;
 }

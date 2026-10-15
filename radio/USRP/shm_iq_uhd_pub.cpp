@@ -83,6 +83,7 @@ struct RecvCtx {
   double mcr, timeout;
   int64_t decim, start_tick; // sample ticks = MCR ticks / decim; start_tick: scheduled START of the current stream
   uhd::rx_metadata_t md;
+  pub_tick_track_t tt; // frozen-timestamp handling (X410 34B2AF1)
   int shift; // --rx-shift: usrp_lib's X4x0 rxshift, applied in the recv thread (parallel per channel with --multi-streamer)
 };
 
@@ -101,7 +102,12 @@ static pub_rx_status_t uhd_recv(void *vc, int16_t *const *dst, int n, int64_t *t
   switch (c->md.error_code) {
     case uhd::rx_metadata_t::ERROR_CODE_NONE:
       if (!c->md.has_time_spec) return PUB_RX_OTHER;
-      *tick = pub_tick(c->md.time_spec.to_ticks(c->mcr), c->decim, c->start_tick);
+      {
+        const int was_frozen = c->tt.frozen;
+        *tick = pub_tick_track(&c->tt, pub_tick(c->md.time_spec.to_ticks(c->mcr), c->decim, c->start_tick), (int)k);
+        if (c->tt.frozen && !was_frozen)
+          fprintf(stderr, "SHMIQ_UHD_TS_FROZEN every RX packet carries the stream start time: ticks from the sample count\n");
+      }
       *got = (int)k;
       for (size_t ch = 0; ch < c->nch; ++ch) pub_rx_shift(dst[ch], (int)k, c->shift);
       return PUB_RX_OK;
@@ -276,7 +282,7 @@ int main(int argc, char **argv)
       if (multi) sargs.channels = {map[i]};
       else sargs.channels = map;
       if (spp > 0) sargs.args["spp"] = std::to_string(spp);
-      ctxs.push_back(RecvCtx{usrp->get_rx_stream(sargs), multi ? (size_t)1 : (size_t)channels, mcr, 5.0, std::llround(dr), 0, {}, (int)rx_shift});
+      ctxs.push_back(RecvCtx{usrp->get_rx_stream(sargs), multi ? (size_t)1 : (size_t)channels, mcr, 5.0, std::llround(dr), 0, {}, {-1, -1, 0}, (int)rx_shift});
     }
     fprintf(stderr, "SHMIQ_UHD_STREAM streamers=%zu max_num_samps=%zu chunk=%ld priority=%s rx_shift=%ld\n", nstr, ctxs[0].rxs->get_max_num_samps(), chunk,
             prio.c_str(), rx_shift);
@@ -307,7 +313,7 @@ int main(int argc, char **argv)
       cmd.stream_now = false;
       cmd.time_spec = usrp->get_time_now() + uhd::time_spec_t(lead);
       const int64_t t0 = pub_tick(cmd.time_spec.to_ticks(mcr), ctxs[0].decim, 0);
-      for (auto &c : ctxs) { c.start_tick = t0; c.timeout = lead + 0.5; c.rxs->issue_stream_cmd(cmd); }
+      for (auto &c : ctxs) { c.start_tick = t0; c.timeout = lead + 0.5; pub_tick_reset_run(&c.tt); c.rxs->issue_stream_cmd(cmd); }
     };
     struct Stop { // stop + drain on every exit path, after the workers are joined (declared before Guard)
       decltype(stop_drain) &f;

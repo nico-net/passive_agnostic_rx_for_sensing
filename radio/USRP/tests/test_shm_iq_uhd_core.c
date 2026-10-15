@@ -123,9 +123,27 @@ static void test_rx_shift(void)
   for (int i = 0; i < 8; ++i) CHECK(y[i] == want[i]);
 }
 
+/* frozen timestamps: every packet stamped with the start tick -> ticks from the sample count; a normal stream is untouched */
+static void test_tick_track(void)
+{
+  pub_tick_track_t t = {-1, -1, 0};
+  pub_tick_reset_run(&t);
+  CHECK(pub_tick_track(&t, 1000, 100) == 1000 && pub_tick_track(&t, 1100, 100) == 1100 && !t.frozen);
+  CHECK(pub_tick_track(&t, 1300, 100) == 1300 && !t.frozen); /* a real gap stays a gap */
+  pub_tick_reset_run(&t);
+  CHECK(pub_tick_track(&t, 5000, 50) == 5000);
+  CHECK(pub_tick_track(&t, 5000, 50) == 5050 && t.frozen);
+  CHECK(pub_tick_track(&t, 5000, 70) == 5100 && pub_tick_track(&t, 5000, 10) == 5170);
+  pub_tick_track_t u = {-1, -1, 0};                         /* on-air pattern 2026-10-15: stamp 68 ticks EARLIER each chunk */
+  CHECK(pub_tick_track(&u, 342286654, 65536) == 342286654 && pub_tick_track(&u, 342286586, 65536) == 342352190 && u.frozen);
+  pub_tick_reset_run(&t);                                   /* restart: first packet of the new run is taken as is */
+  CHECK(pub_tick_track(&t, 9000, 10) == 9000 && pub_tick_track(&t, 9000, 10) == 9010);
+}
+
 int main(void)
 {
   test_rx_shift();
+  test_tick_track();
   test_multi();
   char name[64];
   snprintf(name, sizeof(name), "uhdcore_%d", (int)getpid());
