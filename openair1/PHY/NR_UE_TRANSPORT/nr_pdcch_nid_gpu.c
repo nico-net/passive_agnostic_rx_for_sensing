@@ -40,8 +40,8 @@ static struct {
  unsigned acquire_ms, maintain_ms, recheck_ms;
  bool stop;
  /* ISAC_DMRS_NID_SOLVE=3 (solver primary): the sweep runs on demand only (nr_dmrs_nid_sweep_demand); hints are the solver's top-2 ids. */
- bool primary, hint_verified;
- uint64_t hint_sig, first_us, last_run_us, grace_us, reverify_us;
+ bool primary, prim_verified;
+ uint64_t primary_maintain_us, hint_sig, first_us, last_run_us, grace_us, reverify_us;
  unsigned burst;
  uint64_t runs, skipped; /* sweep GPU passes run / batches not uploaded (primary) */
  double kernel_ms;
@@ -145,13 +145,14 @@ static void *worker(void *unused)
    nr_pdcch_nid_record_t h[2];uint64_t sig;
    const int hn=nr_dmrs_nid_live_hints(h,2,&sig);
    const bool resp=!geometry_changed && g.result.count>0;
-   const int published=resp || hn>0,verified=resp?g.all_verified:(hn>0 && g.hint_verified);
+   const int published=resp || hn>0,verified=g.prim_verified;
    const uint64_t now=duty_clock_us(batch_clock)+1;
    if(!g.first_us)g.first_us=now;
    nr_gpu_budget_discovery_prefer(!published);
+   if(published && !g.last_run_us)g.last_run_us=now; /* the cross-check sweep waits one maintain period for the hint to be CRC-confirmed */
    int due=g.burst>0;
    if(due)g.burst--;
-   else if(nr_dmrs_nid_sweep_demand(published,verified,unexplained,now,g.first_us,g.last_run_us,g.grace_us,1000ull*g.maintain_ms,g.reverify_us)) {
+   else if(nr_dmrs_nid_sweep_demand(published,verified,unexplained,now,g.first_us,g.last_run_us,g.grace_us,g.primary_maintain_us,g.reverify_us)) {
     due=1;g.burst=g.window>1?g.window-1:0;g.last_run_us=now;
     LOG_A(PHY,"SENSING: DMRS_NID_SOLVE sweep on demand: solver_ids=%d resp=%d verified=%d wake=%d\n",hn,resp,verified,unexplained);
    }
@@ -194,6 +195,8 @@ static void *worker(void *unused)
   if(rc==0) {
    g.runs++;
    for(int k=0;k<NR_PDCCH_NID_KERNEL_KINDS;k++)g.kernel_ms+=result.kernel_total_ms[k];
+   if((g.runs&7)==1)LOG_A(PHY,"SENSING: PDCCH_NID_GPU cumulative: sweep_runs=%llu kernel_ms=%.3f skipped_batches=%llu primary=%d\n",
+     (unsigned long long)g.runs,g.kernel_ms,(unsigned long long)g.skipped,g.primary);
   }
   if(rc>0) {
    if(rc==2) LOG_W(PHY,"SENSING: PDCCH_NID_GPU pass budget exhausted; previous records retained\n");
@@ -262,7 +265,8 @@ int nr_pdcch_nid_gpu_start(int max_rb)
  {const char *sv=getenv("ISAC_DMRS_NID_SOLVE");g.primary=sv && !strcmp(sv,"3");}
  if(g.primary) {
   g.duty_enabled=true; /* feedback and wake edges are needed */
-  g.grace_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_GRACE_MS",1500,0,60000);
+  g.grace_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_GRACE_MS",4000,0,60000);
+  g.primary_maintain_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_MAINTAIN_MS",2000,1,600000);
   g.reverify_us=1000ull*env_int("ISAC_DMRS_NID_SOLVE_RECHECK_MS",10000,1,600000);
  }
  g.acquire_ms=env_int("ISAC_PDCCH_NID_GPU_ACQUIRE_MS",5000,1,60000);
@@ -411,10 +415,28 @@ void nr_pdcch_nid_gpu_rearm(void)
  pthread_mutex_unlock(&g.mu);
 }
 /* nr_pdcch_nid_gpu_passes: completed sweep passes (0 when the lock is contended). Caller: ACQMISS state line. */
+bool nr_pdcch_nid_gpu_primary(void) {return g.primary;}
 uint64_t nr_pdcch_nid_gpu_passes(void)
 {
  if(pthread_mutex_trylock(&g.mu))return 0;
  uint64_t n=g.passes;pthread_mutex_unlock(&g.mu);return n;
+}
+/* ISAC_DMRS_NID_SOLVE=3: the solver's top-2 ids first (unless the sweep already has a record for that id), then the sweep's records. *gen carries bit 63
+ * whenever a hint takes part (feedback uses it) and changes with the hint set and with the sweep generation. Caller holds g.mu. */
+static int merged(nr_pdcch_nid_record_t *out,int cap,uint64_t *gen,uint64_t *sig)
+{
+ nr_pdcch_nid_record_t h[2];
+ const int hn=nr_dmrs_nid_live_hints(h,2,sig);
+ int n=0;
+ for(int i=0;i<hn && n<cap;i++) {
+  bool dup=false;
+  for(int j=0;j<g.result.count;j++)dup|=g.result.records[j].nid==h[i].nid;
+  if(!dup)out[n++]=h[i];
+ }
+ for(int j=0;j<g.result.count && n<cap;j++)out[n++]=g.result.records[j];
+ *gen=hn>0?NR_PDCCH_NID_HINT_GEN((*sig)*1000003u+g.generation):g.generation;
+ if(hn==0)*sig=0;
+ return n;
 }
 int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *generation)
 {
@@ -424,18 +446,17 @@ int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *g
  if(g.generation==0 && g.result.count==0 && *generation!=UINT64_MAX-1 && nr_dmrs_nid_live_hint(out)) {
   *generation=UINT64_MAX-1;pthread_mutex_unlock(&g.mu);return 1;
  }
- if(g.primary && g.result.count==0) {
-  nr_pdcch_nid_record_t h[2];uint64_t sig;
-  const int hn=nr_dmrs_nid_live_hints(h,2,&sig);
-  if(hn>0) {
-   const uint64_t gen=NR_PDCCH_NID_HINT_GEN(sig);
-   if(*generation==gen) {pthread_mutex_unlock(&g.mu);return -1;}
-   n=hn<capacity?hn:capacity;memcpy(out,h,n*sizeof(*out));*generation=gen;
-   g.hint_sig=sig;g.hint_verified=false;
+ if(g.primary) {
+  uint64_t gen,sig;const int m=merged(out,capacity,&gen,&sig);
+  if(*generation==gen) {pthread_mutex_unlock(&g.mu);return -1;}
+  *generation=gen;
+  if(sig!=g.hint_sig) {
+   g.hint_sig=sig;
    struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
-   LOG_A(PHY,"SENSING: DMRS_NID_SOLVE hint served n=%d nid0=%d nid1=%d t=%ld.%03ld\n",n,h[0].nid,hn>1?h[1].nid:-1,(long)t.tv_sec,t.tv_nsec/1000000);
-   pthread_mutex_unlock(&g.mu);return n;
+   LOG_A(PHY,"SENSING: DMRS_NID_SOLVE hint served n=%d nid0=%d nid1=%d t=%ld.%03ld\n",m,m>0?out[0].nid:-1,m>1?out[1].nid:-1,(long)t.tv_sec,t.tv_nsec/1000000);
   }
+  g.prim_verified=false;
+  pthread_mutex_unlock(&g.mu);return m;
  }
  if(*generation!=g.generation) {
   n=g.result.count<capacity?g.result.count:capacity;
@@ -447,13 +468,9 @@ int nr_pdcch_nid_gpu_records(nr_pdcch_nid_record_t *out,int capacity,uint64_t *g
 int nr_pdcch_nid_gpu_snapshot(nr_pdcch_nid_record_t *out,int cap,uint64_t *generation)
 {
  if(!out || cap<1 || !generation || pthread_mutex_trylock(&g.mu))return -1;
- if(g.primary && g.result.count==0) {
-  nr_pdcch_nid_record_t h[2];uint64_t sig;
-  const int hn=nr_dmrs_nid_live_hints(h,2,&sig);
-  if(hn>0) {
-   const int m=hn<cap?hn:cap;memcpy(out,h,m*sizeof(*out));*generation=NR_PDCCH_NID_HINT_GEN(sig);
-   pthread_mutex_unlock(&g.mu);return m;
-  }
+ if(g.primary) {
+  uint64_t sig;const int m=merged(out,cap,generation,&sig);
+  pthread_mutex_unlock(&g.mu);return m;
  }
  int n=g.result.count<cap?g.result.count:cap;
  memcpy(out,g.result.records,n*sizeof(*out));*generation=g.generation;
@@ -476,7 +493,7 @@ void nr_pdcch_nid_gpu_feedback(uint32_t epoch,uint64_t generation,bool verified,
   if(g.producer>=0)g.n=0;
  }
  if(generation==g.generation)g.all_verified=verified;
- else if(g.primary && (generation>>63))g.hint_verified=verified; /* any hinted id confirmed by a CRC-valid DCI */
+ if(g.primary && (generation==g.generation || (generation>>63)))g.prim_verified=verified; /* any listed id confirmed by a CRC-valid DCI */
  if(unexplained) {
   uint64_t now=g.nodrop?slot_clock_us():nr_gpu_budget_now_us();
   // The monitor reports a level on each occupied occasion. Reopen once per

@@ -1608,7 +1608,7 @@ static void nid_budget_feedback(void)
             && nr_pdcch_discovered_cover_banked(r->nid,r->sym,r->dur,r->grid_rb,r->groups));
     verified&=ok;any|=ok;
   }
-  if(generation>>63)verified=any; /* solver hint set: one CRC-confirmed id is enough, a DCI-less id must not keep the sweep running */
+  if((generation>>63) || nr_pdcch_nid_gpu_primary())verified=any; /* solver hint set: one CRC-confirmed id is enough, a DCI-less id must not keep the sweep running */
   nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
 }
 
