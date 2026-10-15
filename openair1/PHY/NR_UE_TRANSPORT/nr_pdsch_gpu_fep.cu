@@ -1503,3 +1503,6 @@ extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu
 
 /* ULFEP: GPU front end of the passive PUSCH decoder (own file, own streams; see the header comment) */
 #include "nr_pusch_gpu_fep.cuh"
+
+/* GPUPASS: device kernels for the host steps between the stages (chest post, rate dematching, CRC) */
+#include "nr_gpu_pass_post.cuh"
