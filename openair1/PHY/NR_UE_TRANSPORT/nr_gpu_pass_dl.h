@@ -52,7 +52,15 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
 /* body-side events for the census */
 enum { NR_GPU_PASS_EV_COMMIT, NR_GPU_PASS_EV_RETRY_OLD /* pass said CRC fail / CPU: the old path decodes */, NR_GPU_PASS_EV_ZERO_TB, NR_GPU_PASS_EV_LIFETIME, NR_GPU_PASS_EV_SHADOW,
        NR_GPU_PASS_EV_SHADOW_BAD, NR_GPU_PASS_EV_CONT_FAIL /* CRC fail of the pass continued into the retry arms, no old first body */,
-       NR_GPU_PASS_EV_OLD_FIRST /* old first body executed although a pass was attempted */, NR_GPU_PASS_EV_N };
+       NR_GPU_PASS_EV_OLD_FIRST /* old first body executed although a pass was attempted */, NR_GPU_PASS_EV_SHADOW_FAIL, NR_GPU_PASS_EV_SHADOW_FAIL_BAD, NR_GPU_PASS_EV_N };
+/* gates of passive_decode_body_core that keep a grant off the pass (the first one that refuses, counted) */
+enum { NR_GPU_PASS_GATE_SEG, NR_GPU_PASS_GATE_PROBE, NR_GPU_PASS_GATE_SHARE, NR_GPU_PASS_GATE_GW, NR_GPU_PASS_GATE_PTRS, NR_GPU_PASS_GATE_TINTERP, NR_GPU_PASS_GATE_HARQ,
+       NR_GPU_PASS_GATE_LDPC_OFF, NR_GPU_PASS_GATE_CHEST_ONLY, NR_GPU_PASS_GATE_OCC, NR_GPU_PASS_GATE_NOMEM, NR_GPU_PASS_GATE_N };
+void nr_gpu_pass_gate(int gate);
+/* every ISAC_GPU_PASS_CHECK-th CRC-failing pass: also run the old first body and compare */
+int nr_gpu_pass_shadow_due_fail(void);
+/* consumer start, before the RX fence: the per-thread job and LLR copy buffers, allocated and prefaulted */
+void nr_gpu_pass_dl_prewarm(nr_gpu_pass_dl_out_t *out);
 void nr_gpu_pass_note(int ev);
 /* shadow check cadence: 1 = this pass is also decoded by the old path and the verdicts compared (ISAC_GPU_PASS_CHECK=N, default 64, 0 = off) */
 int nr_gpu_pass_shadow_due(void);

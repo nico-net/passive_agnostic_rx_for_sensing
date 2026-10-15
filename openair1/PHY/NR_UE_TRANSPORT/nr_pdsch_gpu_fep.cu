@@ -136,11 +136,12 @@ static std::atomic<unsigned> g_ctx_busy{0};
 /* GPUPASS (launch-only _dev entry points): 4-slot IQ window ring for the DISCRETE model (pinned host + device, allocated before
  * the RX fence) and the chest LS scratch of the single pass in flight. */
 static const int PASS_RING = NR_GPU_PASS_RING;
-static short2 *g_pass_h[PASS_RING], *g_pass_d[PASS_RING], *g_pass_ls[PASS_RING];
+static const int PASS_SLOTS = NR_GPU_PASS_RING + 1; /* [0, RING): graph-pass instances; [RING]: the test-only round-robin _stage helpers (never a live instance's slot) */
+static short2 *g_pass_h[PASS_SLOTS], *g_pass_d[PASS_SLOTS], *g_pass_ls[PASS_SLOTS];
 static const int PASS_LS_ROWS = 256; /* LS rows per slot: a graph pass needs at most 4 DM-RS symbols x 4 layers x 4 antennas */
-static uint32_t *g_pass_par[PASS_RING];              /* per slot staging block read by the kernel (nr_exact::ExactIO::par layout) */
-static nr_gpu_chest_row_t *g_pass_rh[PASS_RING], *g_pass_rd[PASS_RING]; /* chest rows: pinned staging, device copy */
-static cudaEvent_t g_pass_fev[PASS_RING], g_pass_cev[PASS_RING];        /* recorded when a pass is done with the slot */
+static uint32_t *g_pass_par[PASS_SLOTS];              /* per slot staging block read by the kernel (nr_exact::ExactIO::par layout) */
+static nr_gpu_chest_row_t *g_pass_rh[PASS_SLOTS], *g_pass_rd[PASS_SLOTS]; /* chest rows: pinned staging, device copy */
+static cudaEvent_t g_pass_fev[PASS_SLOTS], g_pass_cev[PASS_SLOTS];        /* recorded when a pass is done with the slot */
 static std::atomic<unsigned> g_pass_next{0}, g_pass_cnext{0};
 /* the done-events are recorded with cudaEventRecordExternal: inside a stream capture that makes a real event-record node of the graph, so
  * cudaEventQuery on the event stays legal after the capture (a plain captured record would turn it into a capture-only event) */
@@ -804,7 +805,7 @@ static int allocate_init(const nr_gpu_fep_cfg_t *cfg)
       }
       g_ctx_prio = nr_pdsch_gpu_prio_on();
       const size_t ring = (size_t)cfg->nant * (g_samples_per_slot + N) * sizeof(short2);
-      for (int k = 0; k < PASS_RING; k++) {
+      for (int k = 0; k < PASS_SLOTS; k++) {
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_h[k], ring));
         CK(nr_gpu_allocate(NR_GPU_DEVICE, (void **)&g_pass_d[k], ring));
         CK(nr_gpu_allocate(NR_GPU_STAGING, (void **)&g_pass_par[k], nr_exact::PAR_WORDS * sizeof(uint32_t)));
@@ -1248,7 +1249,7 @@ static int fep_stage_impl(const nr_gpu_fep_job_t *j, int k)
 extern "C" int nr_pdsch_gpu_fep_stage(const nr_gpu_fep_job_t *j, int *slot_out)
 {
   if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !j->symbol_rot || !slot_out || !j->ring_len) return -1;
-  const int k = (int)(g_pass_next.fetch_add(1) % PASS_RING);
+  const int k = PASS_RING; /* the helper's own slot: one test pass in flight, no sharing with live instances */
   fep_stage_impl(j, k);
   *slot_out = k;
   return 0;
@@ -1256,7 +1257,7 @@ extern "C" int nr_pdsch_gpu_fep_stage(const nr_gpu_fep_job_t *j, int *slot_out)
 /* the same for a slot chosen by the caller (a graph instance owns its slot: the graph is captured per slot index) */
 extern "C" int nr_pdsch_gpu_fep_stage_at(const nr_gpu_fep_job_t *j, int slot)
 {
-  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !j->symbol_rot || !j->ring_len || slot < 0 || slot >= PASS_RING
+  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !j->symbol_rot || !j->ring_len || slot < 0 || slot >= PASS_SLOTS
       || (j->out && nr_gpu_model() == NR_GPU_MODEL_DISCRETE))
     return -1;
   return fep_stage_impl(j, slot);
@@ -1268,7 +1269,7 @@ extern "C" int nr_pdsch_gpu_fep_stage_at(const nr_gpu_fep_job_t *j, int slot)
  * ring slot, the kernel reads that. 0 or -1. */
 extern "C" int nr_pdsch_gpu_fep_dev(const nr_gpu_fep_job_t *j, nr_gpu_buf_t *rxF, int slot, void *stream)
 {
-  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !rxF || !rxF->dev || slot < 0 || slot >= PASS_RING
+  if (g_init_state != 1 || !g_exact_ok || !j || !j->rxdata || !rxF || !rxF->dev || slot < 0 || slot >= PASS_SLOTS
       || rxF->model != nr_gpu_model())
     return -1;
   const int N = g_cfg.ofdm_symbol_size, ns = g_cfg.symbols_per_slot, nant = g_cfg.nant;
@@ -1482,7 +1483,7 @@ extern "C" int nr_pdsch_gpu_exact_chest(nr_gpu_chest_job_t *j)
 extern "C" int nr_pdsch_gpu_chest_stage(const nr_gpu_chest_job_t *j, int n, int *slot_out)
 {
   if (g_init_state != 1 || !g_exact_ok || !j || !slot_out || n < 1 || n > j->n_rows || n > NR_GPU_CHEST_MAX_ROWS) return -1;
-  const int k = (int)(g_pass_cnext.fetch_add(1) % PASS_RING);
+  const int k = PASS_RING;
   pass_slot_wait(g_pass_cev[k]);
   memcpy(g_pass_rh[k], j->rows, (size_t)n * sizeof(nr_gpu_chest_row_t));
   *slot_out = k;
@@ -1491,7 +1492,7 @@ extern "C" int nr_pdsch_gpu_chest_stage(const nr_gpu_chest_job_t *j, int n, int 
 /* the same for a slot chosen by the caller (a graph instance owns its slot) */
 extern "C" int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, int slot)
 {
-  if (g_init_state != 1 || !g_exact_ok || !j || n < 1 || n > j->n_rows || n > PASS_LS_ROWS || slot < 0 || slot >= PASS_RING) return -1;
+  if (g_init_state != 1 || !g_exact_ok || !j || n < 1 || n > j->n_rows || n > PASS_LS_ROWS || slot < 0 || slot >= PASS_SLOTS) return -1;
   pass_slot_wait(g_pass_cev[slot]);
   memcpy(g_pass_rh[slot], j->rows, (size_t)n * sizeof(nr_gpu_chest_row_t));
   return 0;
@@ -1503,7 +1504,7 @@ extern "C" int nr_pdsch_gpu_chest_stage_at(const nr_gpu_chest_job_t *j, int n, i
 extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
 {
   if (g_init_state != 1 || !g_exact_ok || !j || !est_dev || !est_dev->dev || !nvar_dev || !nvar_dev->dev || nvar_dev->bytes < NR_GPU_CHEST_DEV_BYTES
-      || n < 1 || n > j->n_rows || n > PASS_LS_ROWS || j->N != 4096 || slot < 0 || slot >= PASS_RING)
+      || n < 1 || n > j->n_rows || n > PASS_LS_ROWS || j->N != 4096 || slot < 0 || slot >= PASS_SLOTS)
     return -1;
   for (int r = 0; r < n; r++) {
     const char *o = (const char *)j->rows[r].out;

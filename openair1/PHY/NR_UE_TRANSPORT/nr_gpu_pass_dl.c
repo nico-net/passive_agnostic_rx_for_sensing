@@ -26,12 +26,13 @@ int nr_get_E(uint32_t G, uint8_t C, uint8_t Qm, uint8_t Nl, uint8_t r);
 /* where a pass was not taken (counted; the first few are logged) */
 enum { FB_OFF, FB_CELL, FB_FO, FB_CHEST, FB_DEMOD, FB_TBPARAM, FB_MODULE, FB_N };
 static const char *const fb_name[FB_N] = {"off", "cell", "fo", "chest", "demod", "tbparam", "module"};
+static __thread nr_gpu_pass_job_t *jobp_tls;
 static struct {
   nr_gpu_pass_dl_try_fn try_;
   nr_gpu_pass_stats_fn stats;
   _Atomic int on;
   int nbrx, check;
-  _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], runs, shadow_n;
+  _Atomic uint64_t fb[FB_N], ev[NR_GPU_PASS_EV_N], gate[NR_GPU_PASS_GATE_N], runs, shadow_n, shadow_fn;
 } G;
 
 int nr_gpu_pass_active(void) { return atomic_load_explicit(&G.on, memory_order_relaxed); }
@@ -46,6 +47,39 @@ void nr_gpu_pass_disable(const char *why)
 {
   if (atomic_exchange(&G.on, 0))
     LOG_E(PHY, "SENSING: GPUPASS DISABLED: %s -- the old path decodes from now on\n", why);
+}
+
+void nr_gpu_pass_gate(int g)
+{
+  if (g >= 0 && g < NR_GPU_PASS_GATE_N)
+    atomic_fetch_add_explicit(&G.gate[g], 1, memory_order_relaxed);
+}
+
+int nr_gpu_pass_shadow_due_fail(void)
+{
+  if (G.check <= 0)
+    return 0;
+  return (atomic_fetch_add_explicit(&G.shadow_fn, 1, memory_order_relaxed) + 1) % (uint64_t)G.check == 0;
+}
+
+void nr_gpu_pass_dl_prewarm(nr_gpu_pass_dl_out_t *out)
+{
+  /* the job (heap, ~50 KB) and the LLR copy buffer (3 MB), touched now so that no page fault or allocation happens on the pass path */
+  static __thread int done;
+  if (done)
+    return;
+  nr_gpu_pass_job_t *jp = (nr_gpu_pass_job_t *)aligned_alloc(64, (sizeof(*jp) + 63) & ~(size_t)63);
+  int16_t *l = (int16_t *)malloc(1500000 * sizeof(int16_t));
+  if (!jp || !l) {
+    free(jp);
+    free(l);
+    return;
+  }
+  memset(jp, 0, sizeof(*jp));
+  memset(l, 0, 1500000 * sizeof(int16_t));
+  out->llr = l;
+  jobp_tls = jp;
+  done = 1;
 }
 
 int nr_gpu_pass_shadow_due(void)
@@ -65,12 +99,14 @@ static void census(void)
     buf[0] = 0;
   LOG_A(PHY,
         "SENSING: %s | host: fallback[off=%lu cell=%lu fo=%lu chest=%lu demod=%lu tbparam=%lu module=%lu] commit=%lu retry_old=%lu zero_tb=%lu lifetime=%lu "
-        "shadow=%lu shadow_bad=%lu cont_fail=%lu old_first=%lu\n",
+        "shadow=%lu shadow_bad=%lu shadow_fail=%lu shadow_fail_bad=%lu cont_fail=%lu old_first=%lu gate[seg=%lu probe=%lu share=%lu gw=%lu ptrs=%lu tinterp=%lu harq=%lu ldpc_off=%lu chest_only=%lu occ=%lu nomem=%lu]\n",
         buf, (unsigned long)G.fb[FB_OFF], (unsigned long)G.fb[FB_CELL], (unsigned long)G.fb[FB_FO], (unsigned long)G.fb[FB_CHEST],
         (unsigned long)G.fb[FB_DEMOD], (unsigned long)G.fb[FB_TBPARAM], (unsigned long)G.fb[FB_MODULE], (unsigned long)G.ev[NR_GPU_PASS_EV_COMMIT],
         (unsigned long)G.ev[NR_GPU_PASS_EV_RETRY_OLD], (unsigned long)G.ev[NR_GPU_PASS_EV_ZERO_TB], (unsigned long)G.ev[NR_GPU_PASS_EV_LIFETIME],
-        (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL],
-        (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST]);
+        (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_BAD], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_SHADOW_FAIL_BAD],
+        (unsigned long)G.ev[NR_GPU_PASS_EV_CONT_FAIL], (unsigned long)G.ev[NR_GPU_PASS_EV_OLD_FIRST], (unsigned long)G.gate[0], (unsigned long)G.gate[1],
+        (unsigned long)G.gate[2], (unsigned long)G.gate[3], (unsigned long)G.gate[4], (unsigned long)G.gate[5], (unsigned long)G.gate[6], (unsigned long)G.gate[7],
+        (unsigned long)G.gate[8], (unsigned long)G.gate[9], (unsigned long)G.gate[10]);
 }
 
 static int fb(int why)
@@ -226,10 +262,9 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
     fo = nr_ue_get_branch_fo_hz(a) != 0.0;
   if (fo || nr_pdsch_route_cpu())
     return fb(FB_FO);
-  static __thread nr_gpu_pass_job_t *jobp = NULL; /* heap: large */
-  if (!jobp && !(jobp = (nr_gpu_pass_job_t *)aligned_alloc(64, (sizeof(*jobp) + 63) & ~(size_t)63)))
+  nr_gpu_pass_job_t *j = jobp_tls; /* allocated by nr_gpu_pass_dl_prewarm at consumer start */
+  if (!j || !out->llr)
     return fb(FB_MODULE);
-  nr_gpu_pass_job_t *j = jobp;
   memset(j, 0, offsetof(nr_gpu_pass_job_t, dj));
   /* ---- channel estimate inputs */
   int ndmrs = 0, k0 = 0, nrb = 0;
@@ -329,8 +364,6 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   j->qm_sym = qm_sym;
   j->qm_n = qm_n > 4096 ? 4096 : qm_n;
   out->r.qm_row = out->qm_row;
-  if (!out->llr && !(out->llr = (int16_t *)malloc(1500000 * sizeof(int16_t))))
-    return fb(FB_MODULE);
   j->llr_out = out->llr;
   atomic_fetch_add_explicit(&G.runs, 1, memory_order_relaxed);
   const int rc = G.try_(j, &out->r);

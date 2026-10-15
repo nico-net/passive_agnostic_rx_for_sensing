@@ -14,6 +14,7 @@ extern "C" {
 #include <dlfcn.h>
 #include <cmath>
 #include <algorithm>
+#include <malloc.h>
 #include <atomic>
 #include <thread>
 #include <memory>
@@ -950,12 +951,16 @@ TEST(GpuPassFence, NoAllocAfterFence) {
   uint64_t pa0, pd0, pa1, pd1, o0[16], o1[16];
   nr_gpu_memory_stats(&pa0, &pd0);
   m.pass_counters(o0);
+  const size_t heap0 = mallinfo2().uordblks, arenas0 = mallinfo2().arena + mallinfo2().hblkhd;
   for (int i = 0; i < 1000; i++) {
     ASSERT_EQ(0, m.pass_try(fx.job, &r)) << "launch " << i;
     ASSERT_TRUE(r.tb_ok) << "launch " << i;
   }
   nr_gpu_memory_stats(&pa1, &pd1);
   m.pass_counters(o1);
+  /* host side: no malloc on the pass path (the per-consumer buffers of the body are allocated at consumer start; the module's pass path owns none) */
+  EXPECT_EQ(heap0, (size_t)mallinfo2().uordblks) << "the pass path allocated host memory";
+  EXPECT_EQ(arenas0, (size_t)(mallinfo2().arena + mallinfo2().hblkhd));
   EXPECT_EQ(pa0, pa1) << "the platform allocated on the pass path";
   EXPECT_EQ(pd0, pd1);
   EXPECT_EQ(o0[10], o1[10]) << "the module allocated (captured) on the pass path";

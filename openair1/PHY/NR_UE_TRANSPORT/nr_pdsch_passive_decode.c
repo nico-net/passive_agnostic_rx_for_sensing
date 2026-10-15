@@ -52,6 +52,8 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdsch_retry_pred.h"
 #include "nr_pdsch_gpu_ldpc_host.h"
 #include "nr_gpu_pass_dl.h" // GPUPASS Task 4
+#include "PHY/TOOLS/nr_gpu_platform.h"
+static void gp_thread_prewarm(void);
 #include "nr_pdsch_cpu_route.h" /* BATCHCPU */
 #include <stdarg.h> // rep_append (CHESTDIAG)
 #include <stdio.h>  // vsnprintf
@@ -267,6 +269,7 @@ static int16_t *llr_prepare(const NR_DL_FRAME_PARMS *fp, uint32_t need)
  * buffers before its first grant (flag off: no-op, buffers appear lazily as before). Caller: the PDSCH queue consumer. */
 void nr_pdsch_passive_decode_pin_prewarm(PHY_VARS_NR_UE *ue)
 {
+  gp_thread_prewarm(); /* GPUPASS: ISAC_GPU_PASS=1 only */
   if (!nr_pdsch_gpu_host_pin_enabled())
     return;
   decode_bufs_prepare(&ue->frame_parms);
@@ -2353,6 +2356,35 @@ static void pdcch_occ_diag(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, co
  *   Other flags read here: ISAC_PTRS_K, ISAC_XANT, ISAC_DC_FIX, ISAC_RX_NVAR_FIX, ISAC_RX_ML_2L, ISAC_PDSCH_EVM, ISAC_PDSCH_LLR_DUMP, ISAC_LLR_SCALE, ISAC_RV_RETRY.
  *   Writes the result to *out and its status (CRC_OK / CRC_FAIL / UNSUPPORTED). Caller: passive_decode_retry() only.
  */
+/* GPUPASS: per-consumer host buffers, allocated and prefaulted at consumer start (before the RX fence), never on the pass path */
+static __thread nr_gpu_pass_dl_out_t *t_gpp = NULL; /* ~150 KB */
+static __thread uint8_t *t_gp_shadow = NULL;        /* the TB of a shadow-checked pass: sized to the largest TB up front */
+#define GP_SHADOW_CAP (262144u + 8u)
+static __thread uint64_t t_gp_fhash = 0;           /* shadow of a CRC-failing pass: hash of its final LLRs and its count of decoded blocks */
+static __thread uint32_t t_gp_fok = 0;
+static void gp_thread_prewarm(void)
+{
+  if (!nr_gpu_pass_active() || t_gpp)
+    return;
+  t_gp_shadow = (uint8_t *)malloc(GP_SHADOW_CAP);
+  t_gpp = (nr_gpu_pass_dl_out_t *)aligned_alloc(64, (sizeof(nr_gpu_pass_dl_out_t) + 63) & ~(size_t)63);
+  if (!t_gp_shadow || !t_gpp) {
+    free(t_gp_shadow); free(t_gpp);
+    t_gp_shadow = NULL; t_gpp = NULL;
+    return;
+  }
+  memset(t_gp_shadow, 0, GP_SHADOW_CAP);
+  memset(t_gpp, 0, sizeof(*t_gpp));
+  nr_gpu_pass_dl_prewarm(t_gpp); /* the job and the LLR copy buffer */
+}
+static uint64_t gp_llr_hash(const int16_t *p, uint32_t n)
+{
+  uint64_t h = 1469598103934665603ull;
+  for (uint32_t i = 0; i < n; i++)
+    h = (h ^ (uint16_t)p[i]) * 1099511628211ull;
+  return h;
+}
+
 /* ---- GPUPASS (Task 4): state shared with the graph pass's commit ------------------------------------------------------------------------------------------
  * The DM-RS FO/SFO tracker and the per-branch FO estimator keep their EMA state at file scope so that a decode the graph pass took (its chest-post kernel hands
  * the exact sums over) updates the same state as the host loops of the old path. */
@@ -3070,17 +3102,28 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * old path would have done is then committed below (labels gpu_llr_ready / gp_llr_done) from the pass's results. A CRC failure, a block the GPU decoder could
    * not settle, an unseen shape class, a busy pass instance or any gate that is not met leaves gp_ok false and the old path decodes from scratch, so a
    * failing grant costs the pass on top of the old path. Every ISAC_GPU_PASS_CHECK-th taken grant (default 64) is decoded by the old path too and compared. */
-  bool gp_ok = false, gp_cmp = false, gp_tb = false, gp_tried = false;
-  static __thread nr_gpu_pass_dl_out_t *t_gpp = NULL; /* heap: 115 KB, not a TLS array */
-  static __thread uint8_t *t_gp_shadow = NULL;
-  static __thread size_t t_gp_shadow_cap = 0;
-  if (nr_gpu_pass_active() && !seg_path && !t_probe_first_seg && probe_last_sym < 0 && !t_gw_used && !t_gw_capture && t_llr_ovr == NULL && !t_share.on
-      && !t_probe_no_horizon && !t_chest_bypass && !t_tb_force_cpu && !t_cap_req && !(dlsch_config->pduBitmap & 0x1) && ptrs_unav == 0
-      && ue->chest_time != 1 && t_tinterp_override <= 0 && !gp_hq_arms(grant->rnti) && nr_pdsch_gpu_ldpc_enabled()
-      && nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) < 0) {
+  bool gp_ok = false, gp_cmp = false, gp_tb = false, gp_tried = false, gp_fcmp = false;
+  int gp_gate = -1; /* the first gate that keeps this grant off the pass (counted: nr_gpu_pass_dl.h NR_GPU_PASS_GATE_*) */
+  if (nr_gpu_pass_active()) {
     extern __thread int nr_pdsch_chest_occ_override;
+    gp_gate = seg_path ? NR_GPU_PASS_GATE_SEG
+            : (t_probe_first_seg || probe_last_sym >= 0 || t_probe_no_horizon) ? NR_GPU_PASS_GATE_PROBE
+            : (t_share.on || t_chest_bypass) ? NR_GPU_PASS_GATE_SHARE
+            : (t_gw_used || t_gw_capture || t_llr_ovr != NULL || t_cap_req || t_tb_force_cpu) ? NR_GPU_PASS_GATE_GW
+            : ((dlsch_config->pduBitmap & 0x1) || ptrs_unav != 0) ? NR_GPU_PASS_GATE_PTRS
+            : (ue->chest_time == 1 || t_tinterp_override > 0) ? NR_GPU_PASS_GATE_TINTERP
+            : gp_hq_arms(grant->rnti) ? NR_GPU_PASS_GATE_HARQ
+            : !nr_pdsch_gpu_ldpc_enabled() ? NR_GPU_PASS_GATE_LDPC_OFF
+            : nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) >= 0 ? NR_GPU_PASS_GATE_CHEST_ONLY
+            : nr_pdsch_chest_occ_override > 0 ? NR_GPU_PASS_GATE_OCC
+            : (!t_gpp && !nr_gpu_allocations_allowed()) ? NR_GPU_PASS_GATE_NOMEM /* a thread that was not prewarmed before the fence */
+            : -1;
+    if (gp_gate >= 0)
+      nr_gpu_pass_gate(gp_gate);
+  }
+  if (nr_gpu_pass_active() && gp_gate < 0) {
     static const nr_ssb_rm_mask_t gp_no_ssb = {0};
-    if (nr_pdsch_chest_occ_override <= 0) {
+    {
       const nr_gpu_pass_dl_in_t gin = {.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .cw = cw,
                                        .ssb_rm = ssb_unav ? &ssb.dem : &gp_no_ssb, .rxdataF = &rxdataF[0][0], .rx_stride = fp->samples_per_slot_wCP,
                                        .rnti = grant->rnti, .G = G, .tbslbrm = dlsch_config->tbslbrm,
@@ -3091,8 +3134,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                        .branch = gp_perbranch() ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1, .norm = gp_norm_on(),
                                        .it_max = gp_iters(), .chest_diag = chest_pdp_diag_on(), .fep_fo = fep_fo, .tb = g_harq.b};
       if (!t_gpp)
-        if ((t_gpp = (nr_gpu_pass_dl_out_t *)aligned_alloc(64, (sizeof(nr_gpu_pass_dl_out_t) + 63) & ~(size_t)63)))
-          memset(t_gpp, 0, sizeof(*t_gpp));
+        gp_thread_prewarm(); /* only before the RX fence; afterwards the gate above has refused */
       memset(&nr_pdsch_evm_acc, 0, sizeof(nr_pdsch_evm_acc)); /* the demod job reads whether the EVM is armed; the block below re-arms it for the old path */
       nr_pdsch_evm_acc.armed = gp_evm_armed(probe_last_sym);
       gp_tried = true;
@@ -3102,8 +3144,17 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         } else if (!t_gpp->r.tb_ok) {
           /* CRC failure: the pass IS the old first body (bit-identical). Its LLRs are on the host (t_gpp->llr) and the bookkeeping of a failed first decode is
            * committed at gp_llr_done; the retry arms of the old path (RV, LBRM n_L, ...) then run on them, exactly as after a failed first body. */
-          gp_ok = true;
-          nr_gpu_pass_note(NR_GPU_PASS_EV_CONT_FAIL);
+          if (nr_gpu_pass_shadow_due_fail()) { /* sampled: the old path decodes this first body too; its verdicts and LLR hash are compared with the pass's */
+            gp_fcmp = true;
+            t_gp_fhash = gp_llr_hash(t_gpp->llr, G);
+            t_gp_fok = 0;
+            for (int r = 0; r < t_gpp->C; r++)
+              t_gp_fok += t_gpp->r.seg_ok[r] != 0;
+            nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_FAIL);
+          } else {
+            gp_ok = true;
+            nr_gpu_pass_note(NR_GPU_PASS_EV_CONT_FAIL);
+          }
         } else {
           const uint32_t sz = cw->TBS / 8;
           bool zero = g_harq.b[sz] == 0 && g_harq.b[sz + 1] == 0;
@@ -3112,12 +3163,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
           if (zero) { /* the all-zero TB with a zero CRC is the known false pass: the old path counts and refuses it */
             nr_gpu_pass_note(NR_GPU_PASS_EV_ZERO_TB);
           } else if (nr_gpu_pass_shadow_due()) { /* the old path decodes this one too; the verdicts are compared at the end */
-            if (t_gp_shadow_cap < (size_t)sz + 8) {
-              free(t_gp_shadow);
-              t_gp_shadow = (uint8_t *)malloc((size_t)sz + 8);
-              t_gp_shadow_cap = t_gp_shadow ? (size_t)sz + 8 : 0;
-            }
-            if (t_gp_shadow) {
+            if (t_gp_shadow && sz + 8 <= GP_SHADOW_CAP) {
               memcpy(t_gp_shadow, g_harq.b, sz);
               gp_cmp = true;
             }
@@ -5222,6 +5268,14 @@ gpu_llr_ready:;
     if (gp_tried && !gp_ok)
       nr_gpu_pass_note(NR_GPU_PASS_EV_OLD_FIRST);
     bool ldpc_ok = gp_ok ? gp_tb : passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
+    if (gp_fcmp && !gp_ok) { /* shadow of a CRC-failing pass: the old first body's verdicts and its post-normalisation LLRs (what the retry arms get) */
+      if (ldpc_ok || t_seg_ok_last != t_gp_fok || gp_llr_hash(llr, G) != t_gp_fhash) {
+        nr_gpu_pass_note(NR_GPU_PASS_EV_SHADOW_FAIL_BAD);
+        LOG_E(PHY, "SENSING: GPUPASS MISMATCH (CRC-fail shadow) rnti 0x%x nl %u mcs %u rb %d+%d tbs %u: pass blocks ok %u, old %u (old crc %d), llr hash %s\n", grant->rnti, cw->Nl,
+              grant->mcs, freq_alloc->first_rb, freq_alloc->num_rbs, cw->TBS, t_gp_fok, t_seg_ok_last, (int)ldpc_ok, gp_llr_hash(llr, G) == t_gp_fhash ? "equal" : "DIFFERENT");
+        nr_gpu_pass_disable("pass and old first body disagree on a CRC failure");
+      }
+    }
     t_hq.armed = 0; t_hq.si = false;
     /* A probe's outcome is code block 0's CRC, and every hypothesis sweep below (PT-RS density,
      * the PDSCH config feedback in the queue, the layout search) must see it: with ldpc_ok false
@@ -5561,7 +5615,7 @@ gpu_llr_ready:;
       atomic_fetch_add(&g_shape_Z[sk], (uint64_t)t_seg_Z);
       atomic_fetch_add(&g_nsym[sk][(dlsch_config->number_symbols <= 9) ? 0 : 1], 1);
     }
-    {
+    if (!gp_ok) { /* a pass-taken grant has no host LLR statistics: not counted, so the means are not diluted with zeros */
       const int k = ldpc_ok ? 1 : 0;
       atomic_fetch_add(&g_llr_n[k], llr_n);
       atomic_fetch_add(&g_llr_absum[k], llr_absum);

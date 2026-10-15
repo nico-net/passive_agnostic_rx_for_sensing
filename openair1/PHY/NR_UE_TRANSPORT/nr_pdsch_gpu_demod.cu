@@ -54,7 +54,7 @@ struct Ctx {
   cudaStream_t s_rt, s2_rt, s_lo, s2_lo; /* GPUSCHED ISAC_PDSCH_GPU_PRIO: real-time and low-priority stream pairs */
 };
 constexpr int PASS_INST = NR_GPU_PASS_RING;
-static Ctx g_ctx[CTX + PASS_INST]; /* [CTX]: the GPUPASS context of nr_pdsch_gpu_demod_dev, [CTX + i]: that of graph-pass instance i; never handed out by acquire() */
+static Ctx g_ctx[CTX + PASS_INST + 1]; /* [CTX + PASS_INST]: the test-only nr_pdsch_gpu_demod_dev context, [CTX + i]: that of graph-pass instance i; never handed out by acquire() */
 static nr_gpu_buf_t g_jb[PASS_INST]; /* per instance: the job block the graph's kernels read (jref) */
 /* The kernels' job parameter: the job up to evm[] (outputs only, never read by a kernel). The whole job exceeds the
  * 32 KB kernel parameter space; __grid_constant__ lets the kernels address it in place as a nr_gpu_demod_job_t. */
@@ -1363,7 +1363,7 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
   int lo = 0, hi = 0;
   if (cudaDeviceGetStreamPriorityRange(&lo, &hi) != cudaSuccess)
     return -1;
-  for (int c = 0; c < CTX + PASS_INST; c++) {
+  for (int c = 0; c < CTX + PASS_INST + 1; c++) {
     Ctx &x = g_ctx[c];
     if ((!nr_gpu_green_stream(&x.s, hi, true, c) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
         || cudaMalloc((void **)&x.y, sizeof(nrd_c16) * NSYM * NR_GPU_DEMOD_MAX_RX * EXT) != cudaSuccess
@@ -1627,7 +1627,7 @@ extern "C" int nr_pdsch_gpu_demod_dev(const nr_gpu_demod_job_t *j, nr_gpu_buf_t 
   if (!g_ok || !j || !llr_dev || !llr_dev->dev || j->want_evm || j->nbRx > NR_GPU_DEMOD_MAX_RX || j->nl > NR_GPU_DEMOD_MAX_NL
       || j->ext > (uint32_t)EXT || j->nl * j->nbRx > 16)
     return -1;
-  Ctx &x = g_ctx[CTX];
+  Ctx &x = g_ctx[CTX + PASS_INST];
   const cudaStream_t s = (cudaStream_t)stream;
   nr_gpu_demod_job_t jj = *j;
   jj.llr = (int16_t *)llr_dev->dev;

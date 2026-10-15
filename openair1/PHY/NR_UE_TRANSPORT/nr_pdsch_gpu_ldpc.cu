@@ -62,7 +62,7 @@ struct Ctx {
   int8_t *llr, *llrRes, *c2v; /* device [NJ][MAXC*ZMAX], [NJ][MAXC*ZMAX], [NJ][MAXE*ZMAX] */
   int *unsat;          /* device [NJ][NIT] */
 };
-static Ctx g_ctx[CTX + NR_GPU_PASS_RING]; /* [CTX + i]: the GPUPASS context of graph-pass instance i (nr_pdsch_gpu_ldpc_dev: instance 0), never handed out by acquire() */
+static Ctx g_ctx[CTX + NR_GPU_PASS_RING + 1]; /* [CTX + i]: the GPUPASS context of graph-pass instance i (nr_pdsch_gpu_ldpc_dev: the extra context [CTX + RING]), never handed out by acquire() */
 static std::atomic<unsigned> g_busy{0};
 static int g_ok, g_prio;
 static std::mutex g_gm;
@@ -619,7 +619,7 @@ extern "C" int nr_pdsch_gpu_ldpc_init(void)
       return;
     int lo = 0, hi = 0;
     cudaDeviceGetStreamPriorityRange(&lo, &hi);
-    for (int i = 0; i < CTX + NR_GPU_PASS_RING; i++) {
+    for (int i = 0; i < CTX + NR_GPU_PASS_RING + 1; i++) {
       Ctx &x = g_ctx[i];
       if ((!nr_gpu_green_stream(&x.s, hi, true, i) && cudaStreamCreateWithPriority(&x.s, cudaStreamNonBlocking, hi) != cudaSuccess)
           || cudaHostAlloc(&x.dj, sizeof(DJob) * NJ, cudaHostAllocMapped) != cudaSuccess
@@ -713,7 +713,7 @@ extern "C" unsigned nr_pdsch_gpu_ldpc_dev_misses(void) { return g_dev_miss.load(
 /* host: validates the jobs and writes them into the instance's DJob array (graph replay: the kernel reads it when it runs). 0 or -1. */
 static int pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, bool *z4)
 {
-  if (!g_ok || inst < 0 || inst >= NR_GPU_PASS_RING || !jobs || n < 1 || n > NJ || !llr_dev || !llr_dev->dev || llr_dev->bytes < (size_t)n * NR_GPU_LDPC_DEV_IN_STRIDE)
+  if (!g_ok || inst < 0 || inst > NR_GPU_PASS_RING || !jobs || n < 1 || n > NJ || !llr_dev || !llr_dev->dev || llr_dev->bytes < (size_t)n * NR_GPU_LDPC_DEV_IN_STRIDE)
     return -1;
   const Graph *gr[NJ];
   for (int k = 0; k < n; k++) {
@@ -734,7 +734,7 @@ static int pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu
 }
 extern "C" int nr_pdsch_gpu_ldpc_pass_set(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev)
 {
-  return pass_set(inst, jobs, n, llr_dev, nullptr);
+  return inst >= NR_GPU_PASS_RING ? -1 : pass_set(inst, jobs, n, llr_dev, nullptr);
 }
 static int dev_impl(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)
 {
@@ -752,12 +752,12 @@ static int dev_impl(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu
 }
 extern "C" int nr_pdsch_gpu_ldpc_dev(const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)
 {
-  return dev_impl(0, jobs, n, llr_dev, bits_dev, stream);
+  return dev_impl(NR_GPU_PASS_RING, jobs, n, llr_dev, bits_dev, stream); /* its own context: never an instance's */
 }
 /* graph pass of instance `inst`: the same, with the instance's own context; the DJob array is rewritten by nr_pdsch_gpu_ldpc_pass_set before a replay */
 extern "C" int nr_pdsch_gpu_ldpc_pass_dev(int inst, const nr_gpu_ldpc_job_t *jobs, int n, const nr_gpu_buf_t *llr_dev, nr_gpu_buf_t *bits_dev, void *stream)
 {
-  return dev_impl(inst, jobs, n, llr_dev, bits_dev, stream);
+  return inst >= NR_GPU_PASS_RING ? -1 : dev_impl(inst, jobs, n, llr_dev, bits_dev, stream);
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------

@@ -184,7 +184,7 @@ static nr_gpu_pass_cfg_t g_cfg = {};
 static bool g_cfg_set = false;
 static std::atomic<int> g_ready{0}, g_dead{0};
 static std::atomic<unsigned> g_busy{0};
-static std::atomic<uint64_t> g_launches{0}, g_hits{0}, g_fb_unseen{0}, g_fb_busy{0}, g_fb_unsup{0}, g_fb_err{0}, g_need_cpu{0}, g_tb_fail{0}, g_allocs{0};
+static std::atomic<uint64_t> g_launches{0}, g_hits{0}, g_fb_unseen{0}, g_fb_busy{0}, g_fb_unsup{0}, g_fb_err{0}, g_need_cpu{0}, g_tb_fail{0}, g_allocs{0}, g_fb_ldpckey{0};
 static std::atomic<uint64_t> g_wait_hist[32]; /* host wait, 2^i us buckets */
 constexpr uint32_t RING_LEN = 80000;
 static int16_t g_zero_pil[6 * 273 * 2];
@@ -355,7 +355,7 @@ static int prepare(Inst &I, const nr_gpu_pass_job_t *j)
     nr_gpu_ldpc_job_t &l = I.lj[s];
     l.BG = j->BG; l.R = q < j->first_rE2 ? j->R : j->R2; l.Z = (uint16_t)j->Z; l.K = (uint16_t)j->K; l.it_max = j->it_max; l.llr = nullptr;
   }
-  if (nr_pdsch_gpu_ldpc_pass_set(I.id, I.lj, ncb, &I.lin) != 0) return -1;
+  if (nr_pdsch_gpu_ldpc_pass_set(I.id, I.lj, ncb, &I.lin) != 0) return -2; /* an LDPC (BG, Z, R) the init did not build */
   return 0;
 }
 
@@ -544,7 +544,7 @@ extern "C" void nr_gpu_pass_counters(uint64_t o[16])
 {
   memset(o, 0, 16 * sizeof(uint64_t));
   o[0] = g_launches; o[1] = g_hits; o[2] = g_fb_unseen; o[3] = g_fb_busy; o[4] = g_fb_unsup; o[5] = g_fb_err; o[6] = g_need_cpu; o[7] = g_tb_fail;
-  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs;
+  o[8] = NI; o[9] = g_cache.size(); o[10] = g_allocs; o[11] = g_fb_ldpckey;
 }
 
 extern "C" void nr_gpu_pass_stats(char *buf, int n)
@@ -558,9 +558,9 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
     acc += g_wait_hist[i];
     if (acc * 2 >= tot && tot) { p50 = i; break; }
   }
-  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu busy=%lu unsup=%lu err=%lu) need_cpu=%lu tb_fail=%lu classes=%lu instances=%lu wait_us_p50<=%d",
-           (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5]), (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[4],
-           (unsigned long)o[5], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[8], tot ? 1 << p50 : 0);
+  snprintf(buf, n, "GPUPASS launches=%lu graph_hits=%lu fallback=%lu (unseen=%lu busy=%lu unsup=%lu err=%lu ldpc_key=%lu) need_cpu=%lu tb_fail=%lu classes=%lu instances=%lu wait_us_p50<=%d",
+           (unsigned long)o[0], (unsigned long)o[1], (unsigned long)(o[2] + o[3] + o[4] + o[5] + o[11]), (unsigned long)o[2], (unsigned long)o[3], (unsigned long)o[4],
+           (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[8], tot ? 1 << p50 : 0);
 }
 
 /* test hook: marks the instances of `mask` busy (1) or frees them (0) so that a test can run on one chosen instance */
@@ -606,7 +606,8 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   struct Rel { int id; ~Rel() { g_busy.fetch_and(~(1u << id)); } } rel{id};
   NrGpuRtScope rt;
   if (!rt.admitted) { ++g_fb_unsup; return 1; }
-  if (prepare(I, j) != 0) { ++g_fb_err; return 1; }
+  const int pr = prepare(I, j);
+  if (pr != 0) { ++(pr == -2 ? g_fb_ldpckey : g_fb_err); return 1; }
   const auto t0 = std::chrono::steady_clock::now();
   if (cudaGraphLaunch(e->exec[id], I.s) != cudaSuccess || cudaEventRecord(I.done, I.s) != cudaSuccess) {
     ++g_fb_err;
@@ -629,7 +630,9 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->gpu_us = (uint32_t)us;
   r->instance = (int8_t)id;
   r->need_cpu = rb.need_cpu || rb.err;
-  r->nvar = rb.post.nvar_valid ? rb.post.nvar : 0;
+  /* the nvar the demod actually used. nvar_valid is 0 only when no DM-RS estimate exists (never for an accepted job); then the device value is the instance's last one
+   * (0 after init: the result block is zero-initialised), deterministic per instance */
+  r->nvar = rb.post.nvar;
   r->post = rb.post;
   r->tb_ok = 0;
   for (uint32_t s = 0; s < j->C; s++) r->seg_ok[s] = rb.seg_ok[s];
