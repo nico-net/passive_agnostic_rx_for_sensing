@@ -231,6 +231,7 @@ int nr_pdsch_recovery_start(int depth, const char *cores)
   }
   if (depth < 1) depth = 1;
   if (depth > RQ_MAX) depth = RQ_MAX;
+  free(g_q); free(g_free); free(g_slots); /* left over from a previous run */
   g_q = calloc((size_t)depth, sizeof(entry_t));
   g_free = calloc((size_t)depth, sizeof(int));
   g_slots = aligned_alloc(64, (size_t)depth * g_slot_bytes);
@@ -285,8 +286,7 @@ void nr_pdsch_recovery_stop(void)
     if (g_fb_fn) g_fb_fn(e.job, &e.k, NR_RECOV_FB_FAIL);
     if (g_done_fn) g_done_fn(e.job);
   }
-  free(g_q); free(g_free); free(g_slots);
-  g_q = NULL; g_free = NULL; g_slots = NULL; g_run = false;
+  g_run = false; /* the arrays stay allocated (freed by the next start): a slot still held by a caller can be released safely */
   pthread_mutex_unlock(&g_mu);
 }
 void *nr_pdsch_recovery_acquire(void)
@@ -304,6 +304,7 @@ void *nr_pdsch_recovery_acquire(void)
 void nr_pdsch_recovery_release(void *slot)
 {
   pthread_mutex_lock(&g_mu);
+  if (!g_free) { pthread_mutex_unlock(&g_mu); return; }
   g_free[g_nfree++] = (int)(((char *)slot - g_slots) / (ptrdiff_t)g_slot_bytes);
   pthread_mutex_unlock(&g_mu);
 }

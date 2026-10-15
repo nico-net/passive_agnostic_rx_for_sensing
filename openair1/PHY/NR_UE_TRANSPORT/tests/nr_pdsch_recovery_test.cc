@@ -186,6 +186,22 @@ TEST_F(Recovery, StopDeliversPendingFailures)
   EXPECT_EQ(3, g_done.load());
 }
 
+TEST_F(Recovery, StopWhileSlotsAreHeldIsSafe)
+{
+  nr_pdsch_recovery_start(4, "0");
+  void *a = nr_pdsch_recovery_acquire(), *b = nr_pdsch_recovery_acquire();
+  ASSERT_NE(nullptr, a);
+  ASSERT_NE(nullptr, b);
+  nr_pdsch_recovery_stop(); /* a consumer is still between acquire and submit */
+  EXPECT_EQ(nullptr, nr_pdsch_recovery_acquire());
+  nr_recov_key_t k{0x4640, 1, 0, 8000, 2};
+  EXPECT_EQ(1, nr_pdsch_recovery_submit(&k, a)); /* refused, no crash */
+  nr_pdsch_recovery_release(a);
+  nr_pdsch_recovery_release(b);
+  nr_pdsch_recovery_start(4, "0"); /* and the module restarts cleanly */
+  EXPECT_NE(nullptr, nr_pdsch_recovery_acquire());
+}
+
 TEST(RecoveryOrder, FirstArmIsTdraToggle)
 {
   int o[31];

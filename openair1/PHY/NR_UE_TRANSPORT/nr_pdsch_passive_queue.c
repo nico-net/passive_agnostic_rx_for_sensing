@@ -2798,6 +2798,8 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     for (int i = 0; i < n_consumers; ++i)
       for (int a = 0; a < ue->frame_parms.nb_antennas_rx; ++a) {
         g_owned_iq[i][a] = malloc16_clear(2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t));
+        if (g_owned_iq[i][a] && nr_pdsch_recovery_enabled()) /* RECOVERY_ASYNC swaps these with the pinned snapshot holders: keep the two sets alike */
+          nr_pdsch_gpu_host_pin(g_owned_iq[i][a], 2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t));
         if (!g_owned_iq[i][a]) {
           for (int j = 0; j < n_consumers; ++j) {
             for (int b = 0; b < ue->frame_parms.nb_antennas_rx; ++b) {
@@ -2850,17 +2852,21 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     if (g_rsnap_n < 1) g_rsnap_n = 1;
     if (g_rsnap_n > RECOV_SNAP_MAX) g_rsnap_n = RECOV_SNAP_MAX;
     bool ok = true;
+    int n_pinned = 0;
     for (int i = 0; i < g_rsnap_n && ok; i++)
       for (int a = 0; a < ue->frame_parms.nb_antennas_rx; a++) {
-        g_rsnap[i].iq[a] = malloc16_clear(2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t));
+        const size_t bytes = 2u * (size_t)ue->frame_parms.samples_per_frame * sizeof(c16_t);
+        g_rsnap[i].iq[a] = malloc16_clear(bytes); /* first-touched here (before the RX fence), like the consumers' owned buffers */
         ok = ok && g_rsnap[i].iq[a];
+        if (g_rsnap[i].iq[a] && nr_pdsch_gpu_host_pin_enabled() && nr_pdsch_gpu_host_pin(g_rsnap[i].iq[a], bytes) == 0) n_pinned++;
       }
     g_rsnap_nfree = 0;
     for (int i = 0; i < g_rsnap_n; i++) g_rsnap_free[g_rsnap_nfree++] = i;
     nr_pdsch_recovery_set_job_bytes(sizeof(recov_wjob_t));
     nr_pdsch_recovery_set_hooks(recov_run, NULL, recov_feedback, recov_done);
     g_recov_ok = ok && nr_pdsch_recovery_start(0, NULL) == 0;
-    LOG_A(PHY, "SENSING: RECOV worker %s (ISAC_PDSCH_RECOVERY_ASYNC, %d snapshot holders)\n", g_recov_ok ? "started" : "FAILED to start", g_rsnap_n);
+    LOG_A(PHY, "SENSING: RECOV worker %s (ISAC_PDSCH_RECOVERY_ASYNC, %d snapshot holders, %d/%d buffers host-pinned, pin %s)\n", g_recov_ok ? "started" : "FAILED to start",
+          g_rsnap_n, n_pinned, g_rsnap_n * ue->frame_parms.nb_antennas_rx, nr_pdsch_gpu_host_pin_enabled() ? "on" : "off");
   } else if (nr_pdsch_recovery_enabled()) {
     LOG_W(PHY, "SENSING: ISAC_PDSCH_RECOVERY_ASYNC needs the owned IQ (ISAC_CSIRS_DISC=1): recovery stays inline\n");
   }
@@ -3173,15 +3179,6 @@ void nr_pdsch_passive_queue_stop(void)
     return;
   }
   g_recov_ok = false; /* consumers defer nothing from here on */
-  if (nr_pdsch_recovery_enabled()) {
-    char rs[200];
-    nr_pdsch_recovery_stop();
-    nr_pdsch_recovery_stats(rs, sizeof rs);
-    uint64_t fb[3];
-    nr_pdsch_passive_queue_recov_fb_stats(fb);
-    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu nosnap=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2],
-            (unsigned long)atomic_load(&g_recov_nosnap));
-  }
   atomic_store_explicit(&g_stop, 1, memory_order_release);
   pthread_mutex_lock(&g_lock);
   pthread_cond_broadcast(&g_cv);
@@ -3194,13 +3191,23 @@ void nr_pdsch_passive_queue_stop(void)
       free(g_rxdataF[i]);
     g_rxdataF[i] = NULL;
     for (int a = 0; a < g_ue->frame_parms.nb_antennas_rx; ++a) {
-      free(g_owned_iq[i][a]); g_owned_iq[i][a] = NULL;
+      nr_pdsch_gpu_host_unpin(g_owned_iq[i][a]); free(g_owned_iq[i][a]); g_owned_iq[i][a] = NULL;
     }
     free(g_consumer_gpu_llr[i]); g_consumer_gpu_llr[i] = NULL;
     free(g_consumer_gpu_rxF[i]); g_consumer_gpu_rxF[i] = NULL;
   }
-  for (int i = 0; i < g_rsnap_n; i++) /* after the consumers are joined: they swap buffers with these */
-    for (int a = 0; a < NB_ANTENNAS_RX; a++) { free(g_rsnap[i].iq[a]); g_rsnap[i].iq[a] = NULL; }
+  /* Only now (consumers joined: none holds an acquired slot or swaps buffers any more) stop the worker, which drains its queue, and free the pool. */
+  if (nr_pdsch_recovery_enabled()) {
+    char rs[200];
+    nr_pdsch_recovery_stop();
+    nr_pdsch_recovery_stats(rs, sizeof rs);
+    uint64_t fb[3];
+    nr_pdsch_passive_queue_recov_fb_stats(fb);
+    LOG_A(PHY, "SENSING: %s fb_ok=%lu fb_fail=%lu fb_nocredit=%lu nosnap=%lu\n", rs, (unsigned long)fb[0], (unsigned long)fb[1], (unsigned long)fb[2],
+            (unsigned long)atomic_load(&g_recov_nosnap));
+  }
+  for (int i = 0; i < g_rsnap_n; i++)
+    for (int a = 0; a < NB_ANTENNAS_RX; a++) { nr_pdsch_gpu_host_unpin(g_rsnap[i].iq[a]); free(g_rsnap[i].iq[a]); g_rsnap[i].iq[a] = NULL; }
   g_rsnap_n = 0;
   if (atomic_exchange(&g_gpu_worker_running, 0)) {
     pthread_mutex_lock(&g_gpu_wq_lock);
