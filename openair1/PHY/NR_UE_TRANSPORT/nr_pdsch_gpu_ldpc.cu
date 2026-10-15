@@ -136,6 +136,9 @@ __device__ __forceinline__ unsigned cn_item(const Graph &G, int Z, int z, int e0
 __global__ void __launch_bounds__(THREADS) k_ldpc(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
                                                   uint8_t *g_snap, int *g_out)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+  __trap(); /* thread-block clusters need sm_90+; host refuses the GPU LDPC path below sm_90 */
+#else
   cg::cluster_group cl = cg::this_cluster();
   __shared__ Graph G;
   const int c = blockIdx.x / CLB, b = (int)cl.block_rank(), t = threadIdx.x;
@@ -219,6 +222,7 @@ __global__ void __launch_bounds__(THREADS) k_ldpc(const DJob *jobs, int8_t *g_ll
     }
     cl.sync();
   }
+#endif
 }
 
 /* ---- 4 lifting indices per thread (Z % 4 == 0): the same per-byte arithmetic with the SIMD-in-word intrinsics --------
@@ -308,6 +312,9 @@ template <int D> __device__ __forceinline__ void bn_sum4(const Graph &G, int Z, 
 __global__ void __launch_bounds__(THREADS) k_ldpc4(const DJob *jobs, int8_t *g_llr, int8_t *g_res, int8_t *g_c2v, int *g_unsat,
                                                    uint8_t *g_snap, int *g_out)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+  __trap(); /* thread-block clusters need sm_90+; host refuses the GPU LDPC path below sm_90 */
+#else
   cg::cluster_group cl = cg::this_cluster();
   __shared__ Graph G;
   const int c = blockIdx.x / CLB, b = (int)cl.block_rank(), t = threadIdx.x;
@@ -394,6 +401,7 @@ __global__ void __launch_bounds__(THREADS) k_ldpc4(const DJob *jobs, int8_t *g_l
     }
     cl.sync();
   }
+#endif
 }
 
 static int ils_of(int Z)
@@ -511,6 +519,15 @@ static bool warm_common()
       for (int a : {2, 3, 5, 7, 9, 11, 13, 15})
         for (int Z = a; Z <= ZMAX; Z *= 2)
           graph(BG, Z, R); /* nullptr for the (BG, R) pairs that do not exist: nothing cached */
+  int dev = 0, major = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess)
+    return false;
+  if (major < 9) {
+    static std::atomic<int> refused;
+    if (!refused.fetch_add(1))
+      fprintf(stderr, "SENSING: GPU LDPC needs sm_90 clusters; using CPU LDPC\n");
+    return false;
+  }
   cudaFuncAttributes fa;
   if (cudaFuncGetAttributes(&fa, k_ldpc) != cudaSuccess || cudaFuncGetAttributes(&fa, k_ldpc4) != cudaSuccess)
     return false;
